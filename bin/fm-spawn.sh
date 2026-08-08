@@ -39,9 +39,13 @@
 #   metadata as overlap=,
 #   overlap_refs=, and overlap_ack=. Code emits the candidate set and NEVER
 #   decides equivalence, which is firstmate's judgment. A source that cannot be
-#   read yields overlap=unavailable, never overlap=none, and a pull request
-#   listing whose forge-reported open total exceeds FM_SPAWN_OVERLAP_PR_LIMIT
-#   (default 600) counts as unreadable the same way. config/spawn-overlap
+#   read yields overlap=unavailable, never overlap=none. The pull request
+#   window (FM_SPAWN_OVERLAP_PR_LIMIT, default 600) is only the initial size:
+#   the shared reader re-lists once to cover a forge-reported total above it,
+#   and a listing still short of that total - or a total above
+#   FM_PR_LIST_CEILING (default 5000) - counts as unreadable the same way. A
+#   brief that cannot be read or names no task statement is a gap in the
+#   SUBJECT and surfaces as unavailable too. config/spawn-overlap
 #   selects advisory (the default: printed and recorded, never refused),
 #   enforce (--overlap-ack must name every surfaced ref), or off; any other
 #   value refuses. --overlap-ack <ref>[,<ref>...] is that acknowledgement and is
@@ -1865,13 +1869,27 @@ if [ "$KIND" != secondmate ]; then
     echo "overlap=off (config/spawn-overlap); nothing compared this task's subject against work already open" >&2
   else
     # The subject is the task id plus the first line of the brief's task
-    # statement - the same words the worker is being sent to act on.
-    OVERLAP_SUBJECT="$ID $(awk '/^# Task[[:space:]]*$/ {intask = 1; next} intask && NF {print; exit}' "$BRIEF" 2>/dev/null | cut -c 1-300)"
+    # statement - the same words the worker is being sent to act on. A brief
+    # that passes the existence check but cannot be read, or that carries no
+    # task statement, must not quietly shrink the subject to the bare id and
+    # let an id-only comparison report none: the gap is surfaced as an
+    # unavailable row like every other unreadable source.
+    OVERLAP_SUBJECT="$ID"
+    OVERLAP_SUBJECT_GAP=
+    if OVERLAP_TASK_LINE=$(awk '/^# Task[[:space:]]*$/ {intask = 1; next} intask && NF {print; exit}' "$BRIEF") \
+       && [ -n "$OVERLAP_TASK_LINE" ]; then
+      OVERLAP_SUBJECT="$ID ${OVERLAP_TASK_LINE:0:300}"
+    else
+      OVERLAP_SUBJECT_GAP="the brief at $BRIEF could not be read or names no task statement, so only the task id was compared"
+    fi
     # Strongest evidence first, so the reader meets the likeliest duplicate at
     # the top rather than somewhere down a list. The sort is on the matcher's
     # score column, which is dropped again immediately: it orders the set and
     # never bounds it, so nothing is hidden from the reader or the gate.
-    OVERLAP_ROWS=$(overlap_candidates "$ID" "$PROJ_ABS" \
+    OVERLAP_ROWS=$({
+        [ -z "$OVERLAP_SUBJECT_GAP" ] || printf 'unavailable\tsubject\t%s\t\n' "$OVERLAP_SUBJECT_GAP"
+        overlap_candidates "$ID" "$PROJ_ABS"
+      } \
       | overlap_match "$OVERLAP_SUBJECT" "${FM_SPAWN_OVERLAP_MIN_TOKENS:-2}" "${FM_SPAWN_OVERLAP_MIN_PERCENT:-50}" \
       | LC_ALL=C sort -t"$(printf '\t')" -k1,1nr -k2,2 -k3,3 \
       | cut -f2-)

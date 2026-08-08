@@ -30,8 +30,14 @@ UNRELATED_TASK=posix-launcher-platform-surface
 # --- fixtures ---------------------------------------------------------------
 
 # A gh-axi whose `pr list` prints the TOON block the real one prints, or fails
-# the way an unreachable or unauthenticated forge fails. FM_FAKE_GH_FAIL
-# selects the outage.
+# the way an unreachable or unauthenticated forge fails. It honours --limit and
+# keeps its count header truthful the way the real tool does: "count: N of M
+# total" when the listing is bounded below the open total, a bare "count: N"
+# when it is complete. FM_FAKE_GH_FAIL selects the outage, FM_FAKE_GH_TOTAL
+# sets the reported open total (default 2), FM_FAKE_GH_ROWS starves the forge
+# so it never delivers more than that many rows however large the window, and
+# FM_FAKE_GH_CALLS appends each call's limit to a file so a test can count the
+# listings behind one answer.
 make_fake_gh() {
   local fakebin=$1
   cat > "$fakebin/gh-axi" <<'SH'
@@ -42,14 +48,34 @@ if [ "${1:-}" = pr ] && [ "${2:-}" = list ]; then
     echo "error: could not reach github.com: dial tcp: lookup github.com: no such host" >&2
     exit 1
   fi
-  cat <<'TOON'
-count: 2 of 523 total
-pull_requests[2]{number,title,state,author,draft,review}:
-  1614,"fix(bin): refuse merges without verified green checks",open,someone,no,none
-  1885,"Make filed work reach the captain by name, not just the record",open,other,no,none
-help[1]:
-  Run `gh-axi pr view <number>` to view details
-TOON
+  limit=30
+  prev=
+  for a in "$@"; do
+    [ "$prev" = --limit ] && limit=$a
+    prev=$a
+  done
+  [ -z "${FM_FAKE_GH_CALLS:-}" ] || echo "$limit" >> "$FM_FAKE_GH_CALLS"
+  total=${FM_FAKE_GH_TOTAL:-2}
+  avail=${FM_FAKE_GH_ROWS:-$total}
+  n=$avail
+  [ "$limit" -lt "$n" ] && n=$limit
+  if [ "$n" -lt "$total" ]; then
+    echo "count: $n of $total total"
+  else
+    echo "count: $n"
+  fi
+  echo "pull_requests[$n]{number,title,state,author,draft,review}:"
+  i=1
+  while [ "$i" -le "$n" ]; do
+    case $i in
+      1) echo '  1614,"fix(bin): refuse merges without verified green checks",open,someone,no,none' ;;
+      2) echo '  1885,"Make filed work reach the captain by name, not just the record",open,other,no,none' ;;
+      *) echo "  $((1885 + i)),\"unrelated filler request $i\",open,other,no,none" ;;
+    esac
+    i=$((i + 1))
+  done
+  echo 'help[1]:'
+  echo '  Run `gh-axi pr view <number>` to view details'
   exit 0
 fi
 exit 0
@@ -207,11 +233,13 @@ test_truncated_pr_listing_is_unavailable_not_none() {
   rec=$(make_case pr-window "$UNRELATED_TASK")
   read_case_record "$rec"
 
-  # The fake gh-axi's count header reports 523 open in total, so a two-row
-  # window is a bounded look at a larger open set. The unrelated task is
-  # deliberate: with a window covering the whole total this same fixture
-  # reports overlap=none, so the only thing under test is the truncation.
-  out=$(FM_SPAWN_OVERLAP_PR_LIMIT=2 run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$UNRELATED_TASK" "$PROJ_DIR")
+  # A starved forge: it reports 523 open in total but never delivers more than
+  # two rows, so even the self-sized re-list comes back short of the total.
+  # The unrelated task is deliberate: with a forge that delivers its whole
+  # total this same fixture reports overlap=none, so the only thing under test
+  # is the shortfall.
+  out=$(FM_FAKE_GH_TOTAL=523 FM_FAKE_GH_ROWS=2 FM_SPAWN_OVERLAP_PR_LIMIT=2 \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$UNRELATED_TASK" "$PROJ_DIR")
   status=$?
   expect_code 0 "$status" "advisory mode must not refuse on a truncated listing"
   assert_contains "$out" "overlap=unavailable" "a truncated pull request listing was not reported as unavailable"
@@ -223,6 +251,34 @@ test_truncated_pr_listing_is_unavailable_not_none() {
   assert_grep "overlap=unavailable" "$meta" "the spawn record does not preserve the incomplete set"
   assert_no_grep "overlap=none" "$meta" "the spawn record downgraded a truncated listing to a pass"
   pass "a pull request listing smaller than the forge's open total yields overlap=unavailable and never overlap=none"
+}
+
+test_unreadable_brief_is_unavailable_not_none() {
+  local rec out status meta
+  rec=$(make_case unreadable-brief "$NEW_TASK")
+  read_case_record "$rec"
+  if [ "$(id -u)" = 0 ]; then
+    pass "skipped: running as root ignores the unreadable-brief permission bits"
+    return 0
+  fi
+  # The brief passes the existence check but cannot be read, so the subject
+  # would silently shrink to the bare task id. A degraded subject must surface
+  # as a gap, never as a clean overlap=none computed from id tokens alone.
+  chmod 000 "$HOME_DIR/data/$NEW_TASK/brief.md"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$NEW_TASK" "$PROJ_DIR")
+  status=$?
+  chmod 644 "$HOME_DIR/data/$NEW_TASK/brief.md"
+  expect_code 0 "$status" "advisory mode must not refuse on an unreadable brief"
+  assert_contains "$out" "overlap=unavailable" "an unreadable brief was not surfaced as a gap in the subject"
+  assert_not_contains "$out" "overlap=none" "a subject degraded to the bare id must never read as a checked-and-empty set"
+  assert_contains "$out" "unavailable,subject," "the degraded subject was not named as the unavailable source"
+  assert_contains "$out" "$NEW_TASK/brief.md" "the reason did not name the brief that could not be read"
+
+  meta="$HOME_DIR/state/$NEW_TASK.meta"
+  assert_grep "overlap=unavailable" "$meta" "the spawn record does not preserve the degraded subject"
+  assert_no_grep "overlap=none" "$meta" "the spawn record downgraded a degraded subject to a pass"
+  pass "a brief that exists but cannot be read yields overlap=unavailable and never overlap=none"
 }
 
 test_missing_forge_cli_is_unavailable_not_none() {
@@ -474,19 +530,66 @@ test_forge_reader_separates_no_rows_from_no_answer() {
   assert_contains "$out" "err=" "an unreachable forge reported no reason"
   assert_not_contains "$out" "1614" "a failed listing must yield no rows at all"
 
-  # A window smaller than the forge's reported open total must fail the call,
-  # naming both, and yield no rows: a truncated listing is not the open set.
-  out=$(PATH="$fakebin:$PATH" bash -c '. "$1/bin/fm-pr-lib.sh"; fm_pr_open_request_titles "$2" 2; echo "rc=$?"; echo "err=$FM_PR_LIST_ERROR"' _ "$ROOT" "$dir/repo")
-  assert_contains "$out" "rc=1" "a truncated listing returned success"
-  assert_contains "$out" "523" "the truncation reason did not name the forge's open total"
-  assert_not_contains "$out" "1614" "a truncated listing must yield no rows at all"
-  pass "the shared forge reader separates 'no open requests' from 'no answer' and from 'a bounded window'"
+  # A listing that accounts for less than the forge's reported open total must
+  # fail the call even when the total sits inside the window: "count: 2 of 523
+  # total" in a 600-row window is a shortfall, not the open set.
+  out=$(PATH="$fakebin:$PATH" FM_FAKE_GH_TOTAL=523 FM_FAKE_GH_ROWS=2 bash -c '. "$1/bin/fm-pr-lib.sh"; fm_pr_open_request_titles "$2" 600; echo "rc=$?"; echo "err=$FM_PR_LIST_ERROR"' _ "$ROOT" "$dir/repo")
+  assert_contains "$out" "rc=1" "a listing short of the reported open total returned success"
+  assert_contains "$out" "523" "the shortfall reason did not name the forge's open total"
+  assert_not_contains "$out" "1614" "a short listing must yield no rows at all"
+  pass "the shared forge reader separates 'no open requests' from 'no answer' and from 'a listing short of the open total'"
+}
+
+test_forge_reader_window_self_sizes() {
+  local dir fakebin calls out status
+  dir="$TMP_ROOT/forge-window"
+  fakebin=$(make_fakebin "$dir/fake")
+  mkdir -p "$dir/repo"
+  calls="$dir/calls"
+
+  # A total within the window is answered by one listing.
+  : > "$calls"
+  out=$(PATH="$fakebin:$PATH" FM_FAKE_GH_CALLS="$calls" bash -c '. "$1/bin/fm-pr-lib.sh"; fm_pr_open_request_titles "$2" 600' _ "$ROOT" "$dir/repo")
+  status=$?
+  expect_code 0 "$status" "a total within the window must pass"
+  assert_contains "$out" "1614" "a within-window listing dropped its rows"
+  [ "$(grep -c . "$calls")" -eq 1 ] || fail "a total within the window must be answered by one listing, saw limits: $(tr '\n' ' ' < "$calls")"
+
+  # A total above the window re-lists exactly once with a window covering it,
+  # and the complete second listing passes with every row.
+  : > "$calls"
+  out=$(PATH="$fakebin:$PATH" FM_FAKE_GH_CALLS="$calls" bash -c '. "$1/bin/fm-pr-lib.sh"; fm_pr_open_request_titles "$2" 1' _ "$ROOT" "$dir/repo")
+  status=$?
+  expect_code 0 "$status" "a total above the window must self-size and pass"
+  assert_contains "$out" "1614" "the re-listed window dropped the first row"
+  assert_contains "$out" "1885" "the re-listed window did not cover the whole open total"
+  [ "$(grep -c . "$calls")" -eq 2 ] || fail "a total above the window must be answered by exactly two listings, saw limits: $(tr '\n' ' ' < "$calls")"
+
+  # A re-list that still comes up short fails, naming the total and what was
+  # listed, and never loops beyond its one re-list.
+  : > "$calls"
+  out=$(PATH="$fakebin:$PATH" FM_FAKE_GH_CALLS="$calls" FM_FAKE_GH_TOTAL=523 FM_FAKE_GH_ROWS=2 bash -c '. "$1/bin/fm-pr-lib.sh"; fm_pr_open_request_titles "$2" 2; echo "rc=$?"; echo "err=$FM_PR_LIST_ERROR"' _ "$ROOT" "$dir/repo")
+  assert_contains "$out" "rc=1" "a starved re-list returned success"
+  assert_contains "$out" "523" "the shortfall reason did not name the forge's open total"
+  assert_not_contains "$out" "1614" "a short listing must yield no rows at all"
+  [ "$(grep -c . "$calls")" -eq 2 ] || fail "the re-list must run exactly once, saw limits: $(tr '\n' ' ' < "$calls")"
+
+  # A reported total above the ceiling fails with the reason instead of
+  # re-listing at all.
+  : > "$calls"
+  out=$(PATH="$fakebin:$PATH" FM_FAKE_GH_CALLS="$calls" FM_PR_LIST_CEILING=300 FM_FAKE_GH_TOTAL=400 FM_FAKE_GH_ROWS=2 bash -c '. "$1/bin/fm-pr-lib.sh"; fm_pr_open_request_titles "$2" 2; echo "rc=$?"; echo "err=$FM_PR_LIST_ERROR"' _ "$ROOT" "$dir/repo")
+  assert_contains "$out" "rc=1" "a total above the ceiling returned success"
+  assert_contains "$out" "400" "the ceiling reason did not name the reported total"
+  assert_contains "$out" "FM_PR_LIST_CEILING" "the ceiling reason did not name the knob that raises it"
+  [ "$(grep -c . "$calls")" -eq 1 ] || fail "a total above the ceiling must never be re-listed, saw limits: $(tr '\n' ' ' < "$calls")"
+  pass "the forge reader self-sizes its window once, bounded by the ceiling, and fails a listing still short of the total"
 }
 
 test_replay_surfaces_the_recorded_duplicate
 test_unrelated_task_surfaces_no_overlap
 test_forge_outage_is_unavailable_not_none
 test_truncated_pr_listing_is_unavailable_not_none
+test_unreadable_brief_is_unavailable_not_none
 test_missing_forge_cli_is_unavailable_not_none
 test_enforce_requires_acknowledgement_and_records_it
 test_enforce_refuses_an_incomplete_set_without_acknowledgement
@@ -499,5 +602,6 @@ test_a_branch_merely_ending_with_the_task_id_stays_visible
 test_a_long_subject_keeps_short_branches_and_drops_coincidences
 test_strongest_evidence_is_listed_first
 test_forge_reader_separates_no_rows_from_no_answer
+test_forge_reader_window_self_sizes
 
 echo "# all fm-spawn-overlap tests passed"
