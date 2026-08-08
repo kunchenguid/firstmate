@@ -20,7 +20,8 @@
 #   fm-decision-hold.sh id <origin-id> <decision-key>
 #   fm-decision-hold.sh hold <origin-id> <decision-key> \
 #     --title <title> --reason <reason> [--repo <repo>]
-#   fm-decision-hold.sh complete <origin-id> (--none | <decision-key>...)
+#   fm-decision-hold.sh complete <origin-id> \
+#     (--none | <decision-key>... | --existing <task-id> [--existing <task-id>]...)
 #   fm-decision-hold.sh verify <origin-id>
 #   fm-decision-hold.sh resolve <origin-id> <decision-key> \
 #     --decision-file <path> --routed-to <task-id> [--routed-to <task-id>...]
@@ -30,6 +31,13 @@
 # no unresolved captain decision. Later review passes may add keys; a live task's
 # metadata inventory is unioned idempotently. A post-teardown visual review can
 # complete against the surviving report and holds without recreating task state.
+# `--existing <task-id>` explicitly reuses an unresolved structured Captain's
+# Call item already present in the active backlog, may repeat, and may accompany
+# current-origin decision keys. Existing references require live origin metadata
+# so `decision_refs=` can durably attest their exact identities. Completion
+# validates every reference before writing the attestation and never creates,
+# closes, or mutates a referenced task. `--none` cannot accompany keys or
+# existing references.
 # `verify` is read-only and is called by scout teardown so teardown cannot erase a
 # source before this gate has succeeded.
 #
@@ -170,6 +178,31 @@ verify_hold_active() {  # <hold-id>
   [ "$hold_kind" = captain ] || fail "backlog item $id is not held for the captain"
 }
 
+verify_existing_captain_call() {  # <task-id>
+  local id=$1 show state blocked blocked_by held kind hold_kind
+  show=$(task_show "$id") \
+    || fail "existing Captain's Call task $id does not exist in the active backlog $FM_HOME/data/backlog.md"
+  state=$(show_field "$show" state)
+  blocked=$(show_field "$show" blocked)
+  blocked_by=$(show_field "$show" blocked_by)
+  held=$(show_field "$show" held)
+  kind=$(show_field "$show" kind)
+  hold_kind=$(show_field "$show" hold_kind)
+  [ "$state" != "done" ] || fail "existing Captain's Call task $id is already completed"
+  case "$hold_kind" in
+    parked) fail "existing reference $id is ordinary parked work, not a Captain's Call item" ;;
+    external) fail "existing reference $id is an external hold, not a Captain's Call item" ;;
+  esac
+  [ "$kind" = captain ] || fail "existing reference $id is not kind captain (kind=$kind)"
+  [ "$held" = yes ] || fail "existing captain item $id is not actively held"
+  [ "$hold_kind" = captain ] \
+    || fail "existing captain item $id is not held for the captain (hold_kind=$hold_kind)"
+  [ "$state" = queued ] \
+    || fail "existing captain item $id is not queued Captain's Call work (state=$state)"
+  [ "$blocked" = no ] \
+    || fail "existing captain item $id is blocked by $blocked_by and is not an actionable Captain's Call item"
+}
+
 verify_hold_resolved() {  # <hold-id>
   local id=$1 show state kind body
   show=$(task_show "$id") || return 1
@@ -275,7 +308,8 @@ command_hold() {
 }
 
 command_complete() {
-  local origin=${1:-} meta previous='' supplied='' keys='' key status_file open raw_open key_seen=0 has_meta=0
+  local origin=${1:-} meta previous='' previous_refs='' supplied='' supplied_refs=''
+  local keys='' refs='' new_refs='' key ref status_file open raw_open key_seen=0 has_meta=0 none_seen=0 detail=''
   [ "$#" -ge 2 ] || { usage >&2; exit 2; }
   validate_slug origin-id "$origin"
   shift
@@ -283,26 +317,59 @@ command_complete() {
   [ -f "$meta" ] && has_meta=1
   require_tasks_axi
   origin_exists_here "$origin" || fail "origin $origin is not owned by the active home $FM_HOME"
-  if [ "$#" -eq 1 ] && [ "$1" = --none ]; then
-    supplied=''
-  else
-    while [ "$#" -gt 0 ]; do
-      [ "$1" != --none ] || fail "--none cannot be combined with decision keys"
-      validate_slug decision-key "$1"
-      supplied="${supplied}${supplied:+ }$1"
-      shift
-    done
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --none)
+        [ "$none_seen" = 0 ] || fail "--none cannot be repeated"
+        none_seen=1
+        ;;
+      --existing)
+        shift
+        [ "$#" -gt 0 ] || fail "--existing requires a task identity"
+        case "$1" in
+          --none|--existing) fail "--existing requires a task identity before $1" ;;
+        esac
+        validate_slug existing-task-id "$1"
+        supplied_refs="${supplied_refs}${supplied_refs:+ }$1"
+        ;;
+      *)
+        validate_slug decision-key "$1"
+        supplied="${supplied}${supplied:+ }$1"
+        ;;
+    esac
+    shift
+  done
+  if [ "$none_seen" = 1 ] && { [ -n "$supplied" ] || [ -n "$supplied_refs" ]; }; then
+    fail "--none cannot be combined with decision keys or existing references"
+  fi
+  if [ -n "$supplied_refs" ] && [ "$has_meta" != 1 ]; then
+    fail "--existing requires live origin metadata so the reviewing origin can be durably attested: $meta"
   fi
   if [ "$has_meta" = 1 ]; then
     previous=$(meta_value "$meta" decision_keys)
+    previous_refs=$(meta_value "$meta" decision_refs)
   fi
   keys=$(sorted_key_union "$previous" "$supplied")
+  refs=$(sorted_key_union "$previous_refs" "$supplied_refs")
+  new_refs=$(sorted_key_union '' "$supplied_refs")
   if [ -n "$keys" ]; then
     while IFS= read -r key; do
       [ -n "$key" ] || continue
       verify_hold_durable "$(hold_id "$origin" "$key")"
     done <<EOF
 $(printf '%s\n' "$keys" | tr ',' '\n')
+EOF
+  fi
+  if [ -n "$refs" ]; then
+    while IFS= read -r ref; do
+      [ -n "$ref" ] || continue
+      if list_has_key "$new_refs" "$ref"; then
+        verify_existing_captain_call "$ref"
+      else
+        verify_hold_durable "$ref"
+      fi
+    done <<EOF
+$(printf '%s\n' "$refs" | tr ',' '\n')
 EOF
   fi
 
@@ -318,8 +385,12 @@ $open
 EOF
 
   if [ "$has_meta" = 1 ]; then
-    if [ "$(meta_value "$meta" decisions_reviewed)" != 1 ] || [ "$previous" != "$keys" ]; then
+    if [ "$(meta_value "$meta" decisions_reviewed)" != 1 ] \
+      || [ "$previous" != "$keys" ] || [ "$previous_refs" != "$refs" ]; then
       printf 'decisions_reviewed=1\ndecision_keys=%s\n' "$keys" >> "$meta"
+      if [ -n "$refs" ] || [ -n "$previous_refs" ]; then
+        printf 'decision_refs=%s\n' "$refs" >> "$meta"
+      fi
     fi
 
     # Transfer any still-open status decision to its durable backlog owner so the
@@ -334,11 +405,13 @@ $raw_open
 EOF
   fi
   : "$key_seen"
-  printf 'complete: %s decision inventory reviewed%s\n' "$origin" "${keys:+ ($keys)}"
+  detail=$keys
+  [ -z "$refs" ] || detail="${detail}${detail:+; }existing=$refs"
+  printf 'complete: %s decision inventory reviewed%s\n' "$origin" "${detail:+ ($detail)}"
 }
 
 command_verify() {
-  local origin=${1:-} meta reviewed keys key open
+  local origin=${1:-} meta reviewed keys refs key ref open
   [ "$#" -eq 1 ] || { usage >&2; exit 2; }
   validate_slug origin-id "$origin"
   meta="$STATE/$origin.meta"
@@ -347,12 +420,21 @@ command_verify() {
   reviewed=$(meta_value "$meta" decisions_reviewed)
   [ "$reviewed" = 1 ] || fail "origin $origin has no completed unresolved-decision inventory"
   keys=$(meta_value "$meta" decision_keys)
+  refs=$(meta_value "$meta" decision_refs)
   if [ -n "$keys" ]; then
     while IFS= read -r key; do
       [ -n "$key" ] || continue
       verify_hold_durable "$(hold_id "$origin" "$key")"
     done <<EOF
 $(printf '%s\n' "$keys" | tr ',' '\n')
+EOF
+  fi
+  if [ -n "$refs" ]; then
+    while IFS= read -r ref; do
+      [ -n "$ref" ] || continue
+      verify_hold_durable "$ref"
+    done <<EOF
+$(printf '%s\n' "$refs" | tr ',' '\n')
 EOF
   fi
   open=$(origin_open_decisions "$origin")

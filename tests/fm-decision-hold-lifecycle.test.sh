@@ -276,6 +276,184 @@ EOF
   pass "captain holds are idempotent, distinct, teardown-safe, Bearings-visible, and durably routed before close"
 }
 
+test_existing_captain_call_references_attest_without_mutation() {
+  local home origin formal legacy dependent backlog_before backlog_after
+  local formal_before formal_after legacy_before legacy_after meta_after_first meta_after_retry
+  home=$(make_home existing-captain-call-references)
+  origin=sample-followup-review
+  mkdir -p "$home/data/$origin"
+  tasks_in "$home" add "$origin" "Review earlier captain decisions" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create existing-reference origin"
+  write_origin_meta "$home" "$origin"
+  printf 'done: report and visual review complete\n' > "$home/state/$origin.status"
+  printf '# Follow-up review\n\nTwo earlier captain decisions remain unresolved.\n' > "$home/data/$origin/report.md"
+
+  tasks_in "$home" add sample-earlier-review "Earlier formal review" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create formal hold origin"
+  formal=$(run_decisions "$home" hold sample-earlier-review route \
+    --title "Choose the earlier sample route" --reason "captain earlier route pending" --repo sample) \
+    || fail "could not create formal earlier captain hold"
+  legacy='legacy-sample-captain-call'
+  tasks_in "$home" add "$legacy" "Choose the legacy sample route" --kind captain --repo sample \
+    --body "Legacy structured Captain's Call body." >/dev/null \
+    || fail "could not create legacy structured captain item"
+  tasks_in "$home" hold "$legacy" --reason "captain legacy route pending" --kind captain >/dev/null \
+    || fail "could not activate legacy structured captain item"
+  dependent=sample-existing-reference-dependent
+  tasks_in "$home" add "$dependent" "Use the earlier captain decision" --kind ship --repo sample \
+    --blocked-by "$formal" >/dev/null \
+    || fail "could not create existing-reference dependent"
+
+  printf 'manual\n' > "$home/config/backlog-backend"
+  backlog_before=$(shasum -a 256 "$home/data/backlog.md" | awk '{print $1}')
+  formal_before=$(tasks_in "$home" show "$formal" --full)
+  legacy_before=$(tasks_in "$home" show "$legacy" --full)
+  run_decisions "$home" complete "$origin" --existing "$formal" --existing "$legacy" >/dev/null \
+    || fail "could not attest formal and legacy existing captain references"
+  backlog_after=$(shasum -a 256 "$home/data/backlog.md" | awk '{print $1}')
+  formal_after=$(tasks_in "$home" show "$formal" --full)
+  legacy_after=$(tasks_in "$home" show "$legacy" --full)
+  [ "$backlog_before" = "$backlog_after" ] \
+    || fail "existing-reference completion mutated the authoritative backlog"
+  [ "$formal_before" = "$formal_after" ] \
+    || fail "existing-reference completion mutated the formal captain hold"
+  [ "$legacy_before" = "$legacy_after" ] \
+    || fail "existing-reference completion mutated the legacy captain hold"
+  assert_grep "decisions_reviewed=1" "$home/state/$origin.meta" \
+    "existing-reference completion attestation missing"
+  assert_grep "decision_keys=" "$home/state/$origin.meta" \
+    "existing-reference completion changed the current-origin key contract"
+  assert_grep "decision_refs=$legacy,$formal" "$home/state/$origin.meta" \
+    "existing-reference identities were not recorded deterministically"
+  [ "$(grep -cE "^- \[ \] $formal -" "$home/data/backlog.md")" = 1 ] \
+    || fail "existing-reference completion duplicated the formal captain hold"
+  [ "$(grep -cE "^- \[ \] $legacy -" "$home/data/backlog.md")" = 1 ] \
+    || fail "existing-reference completion duplicated the legacy captain hold"
+
+  meta_after_first=$(shasum -a 256 "$home/state/$origin.meta" | awk '{print $1}')
+  run_decisions "$home" complete "$origin" --existing "$legacy" --existing "$formal" --existing "$formal" >/dev/null \
+    || fail "idempotent existing-reference retry failed"
+  meta_after_retry=$(shasum -a 256 "$home/state/$origin.meta" | awk '{print $1}')
+  [ "$meta_after_first" = "$meta_after_retry" ] \
+    || fail "idempotent existing-reference retry appended a duplicate attestation"
+  run_decisions "$home" verify "$origin" >/dev/null \
+    || fail "verify rejected the existing-reference completion attestation"
+  run_teardown "$home" "$origin" >/dev/null 2> "$home/existing-reference-teardown.err" \
+    || fail "teardown rejected existing-reference completion: $(cat "$home/existing-reference-teardown.err")"
+  formal_after=$(tasks_in "$home" show "$formal" --full)
+  legacy_after=$(tasks_in "$home" show "$legacy" --full)
+  [ "$formal_before" = "$formal_after" ] \
+    || fail "teardown after existing-reference verification mutated the formal captain hold"
+  [ "$legacy_before" = "$legacy_after" ] \
+    || fail "teardown after existing-reference verification mutated the legacy captain hold"
+  pass "existing formal and legacy Captain's Call references attest idempotently without backlog mutation"
+}
+
+test_existing_captain_call_reference_rejections_fail_closed() {
+  local home origin valid done_ref noncaptain parked external blocker blocked_ref backlog_before backlog_after
+  home=$(make_home invalid-existing-captain-call-references)
+  origin=sample-invalid-reference-review
+  mkdir -p "$home/data/$origin"
+  tasks_in "$home" add "$origin" "Review invalid existing references" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create invalid-reference origin"
+  write_origin_meta "$home" "$origin"
+  printf 'done: report complete\n' > "$home/state/$origin.status"
+  printf '# Invalid reference review\n\nOnly synthetic rejection controls.\n' > "$home/data/$origin/report.md"
+
+  tasks_in "$home" add sample-valid-earlier "Valid earlier origin" --kind scout --repo sample --start >/dev/null
+  valid=$(run_decisions "$home" hold sample-valid-earlier route \
+    --title "Choose a valid earlier route" --reason "captain valid route pending" --repo sample)
+  done_ref=sample-done-captain-call
+  tasks_in "$home" add "$done_ref" "Completed captain call" --kind captain --repo sample >/dev/null
+  tasks_in "$home" hold "$done_ref" --reason "captain completed choice" --kind captain >/dev/null
+  tasks_in "$home" "done" "$done_ref" >/dev/null
+  noncaptain=sample-ordinary-queued-work
+  tasks_in "$home" add "$noncaptain" "Ordinary queued work" --kind ship --repo sample >/dev/null
+  parked=sample-ordinary-parked-work
+  tasks_in "$home" add "$parked" "Ordinary parked work" --kind ship --repo sample --start >/dev/null
+  tasks_in "$home" hold "$parked" --reason "ordinary work parked" --kind parked >/dev/null
+  external=sample-external-hold
+  tasks_in "$home" add "$external" "External hold" --kind scout --repo sample >/dev/null
+  tasks_in "$home" hold "$external" --reason "upstream release pending" --kind external >/dev/null
+  blocker=sample-captain-call-prerequisite
+  tasks_in "$home" add "$blocker" "Captain call prerequisite" --kind ship --repo sample >/dev/null
+  blocked_ref=sample-blocked-captain-call
+  tasks_in "$home" add "$blocked_ref" "Blocked captain call" --kind captain --repo sample >/dev/null
+  tasks_in "$home" hold "$blocked_ref" --reason "captain blocked choice pending" --kind captain >/dev/null
+  tasks_in "$home" block "$blocked_ref" --by "$blocker" >/dev/null
+
+  backlog_before=$(shasum -a 256 "$home/data/backlog.md" | awk '{print $1}')
+  if run_decisions "$home" complete "$origin" --existing sample-missing-captain-call \
+    > "$home/missing.out" 2> "$home/missing.err"; then
+    fail "completion accepted a missing existing reference"
+  fi
+  assert_grep "does not exist in the active backlog" "$home/missing.err" \
+    "missing existing reference did not produce actionable output"
+  if run_decisions "$home" complete "$origin" --existing 'malformed/reference' \
+    > "$home/malformed.out" 2> "$home/malformed.err"; then
+    fail "completion accepted a malformed existing reference"
+  fi
+  assert_grep "existing-task-id must be a non-empty privacy-safe slug" "$home/malformed.err" \
+    "malformed existing reference did not produce actionable output"
+  if run_decisions "$home" complete "$origin" --existing "$done_ref" \
+    > "$home/done.out" 2> "$home/done.err"; then
+    fail "completion accepted a completed existing reference"
+  fi
+  assert_grep "is already completed" "$home/done.err" \
+    "completed existing reference did not produce actionable output"
+  if run_decisions "$home" complete "$origin" --existing "$noncaptain" \
+    > "$home/noncaptain.out" 2> "$home/noncaptain.err"; then
+    fail "completion accepted unrelated non-captain work"
+  fi
+  assert_grep "is not kind captain" "$home/noncaptain.err" \
+    "non-captain existing reference did not produce actionable output"
+  if run_decisions "$home" complete "$origin" --existing "$parked" \
+    > "$home/parked.out" 2> "$home/parked.err"; then
+    fail "completion accepted ordinary parked work"
+  fi
+  assert_grep "is ordinary parked work" "$home/parked.err" \
+    "parked existing reference did not produce actionable output"
+  if run_decisions "$home" complete "$origin" --existing "$external" \
+    > "$home/external.out" 2> "$home/external.err"; then
+    fail "completion accepted an external hold"
+  fi
+  assert_grep "is an external hold" "$home/external.err" \
+    "external-hold existing reference did not produce actionable output"
+  if run_decisions "$home" complete "$origin" --existing "$blocked_ref" \
+    > "$home/blocked.out" 2> "$home/blocked.err"; then
+    fail "completion accepted a blocked captain item outside Captain's Call"
+  fi
+  assert_grep "is blocked by $blocker" "$home/blocked.err" \
+    "blocked captain item did not produce actionable output"
+  if run_decisions "$home" complete "$origin" --existing "$valid" --existing "$external" \
+    > "$home/mixed.out" 2> "$home/mixed.err"; then
+    fail "completion accepted mixed valid and invalid existing references"
+  fi
+  assert_grep "is an external hold" "$home/mixed.err" \
+    "mixed existing references did not identify the invalid member"
+  if run_decisions "$home" complete "$origin" --none --existing "$valid" \
+    > "$home/none-mixed.out" 2> "$home/none-mixed.err"; then
+    fail "completion combined --none with an existing reference"
+  fi
+  assert_grep "--none cannot be combined" "$home/none-mixed.err" \
+    "mixed --none and existing reference did not produce actionable output"
+  if run_decisions "$home" complete "$origin" --existing \
+    > "$home/missing-value.out" 2> "$home/missing-value.err"; then
+    fail "completion accepted --existing without a task identity"
+  fi
+  assert_grep "--existing requires a task identity" "$home/missing-value.err" \
+    "missing --existing value did not produce actionable output"
+
+  assert_no_grep "decisions_reviewed=1" "$home/state/$origin.meta" \
+    "a rejected existing-reference set recorded completion"
+  backlog_after=$(shasum -a 256 "$home/data/backlog.md" | awk '{print $1}')
+  [ "$backlog_before" = "$backlog_after" ] \
+    || fail "rejected existing references created or mutated backlog work"
+  run_decisions "$home" verify "$origin" > "$home/unattested-verify.out" 2> "$home/unattested-verify.err" \
+    && fail "verify accepted an origin after every existing-reference completion was rejected"
+  pass "missing, malformed, done, unrelated, parked, external, blocked, and mixed existing references fail closed"
+}
+
 test_scout_teardown_always_requires_inventory_verification() {
   local home id
   home=$(make_home unconditional-teardown)
@@ -554,6 +732,8 @@ test_uninventoried_report_decision_refuses_completion
 
 test_scout_teardown_always_requires_inventory_verification
 test_structured_holds_survive_teardown_and_route_resolution
+test_existing_captain_call_references_attest_without_mutation
+test_existing_captain_call_reference_rejections_fail_closed
 test_origin_slug_validation_precedes_path_construction
 test_visual_review_uses_shared_completion_owner
 test_none_inventory_and_resolved_prose_do_not_create_holds

@@ -14,6 +14,12 @@ It creates a kind `captain` backlog item when absent and invokes `tasks-axi hold
 It rejects an identity collision, a changed title, and attempts to reopen an already resolved identity.
 
 The `complete` subcommand unions the reviewed keys into `decision_keys=` and appends `decisions_reviewed=1` while originating task metadata is live.
+A repeated `--existing <task-id>` option lets the reviewing origin attest an active structured Captain's Call item that already exists under a formal earlier identity or an arbitrary legacy structured identity.
+It validates every explicit identity from the active authoritative backlog before writing and unions exact identities into `decision_refs=` so retries are deterministic and idempotent.
+An existing reference must be queued, unblocked, actively held, kind `captain`, and hold-kind `captain`.
+Missing, malformed, completed, non-captain, ordinary parked, external-hold, blocked, and mixed invalid reference sets fail before attestation.
+Existing-reference completion never invokes a backlog mutation, so each referenced task keeps its identity, title, body, dependencies, and open state and no duplicate task is created.
+The `config/backlog-backend=manual` setting retains the contract owned by `docs/configuration.md`; explicit reference validation reads the manually maintained structured backlog through compatible tasks-axi without mutating it.
 A post-teardown visual review can complete against the surviving report and durable holds without recreating volatile task metadata.
 It accepts `--none` as an explicit semantic inventory result, not as inferred absence.
 It verifies every listed identity against tasks-axi before recording completion.
@@ -21,6 +27,7 @@ For an open keyed status decision, it appends a `captain-held [key=<key>]: ...` 
 `bin/fm-classify-lib.sh` recognizes that transfer as closing the live status copy without claiming that the captain has answered it.
 
 Scout teardown calls the script's read-only `verify` subcommand after checking for the report and before removing any source state.
+Verification checks both deterministic current-origin keys and exact existing task references against their durable structured state.
 The `--force` path remains the explicit captain-approved discard escape hatch.
 
 The `resolve` subcommand requires a decision file and at least one existing dependent task whose structured `blocked-by` edge points to the hold.
@@ -43,11 +50,13 @@ The projection remains read-only and does not inspect historical prose.
 Verification date: 2026-07-14.
 Additional quoted `blocked_by` regression verification date: 2026-07-17.
 Plural blocker-readiness and mixed-home projection verification date: 2026-07-22.
+Existing Captain's Call reference verification date: 2026-08-08.
 
 The focused end-to-end regression uses only synthetic `sample` identities and decision text.
 It begins with a completed investigation and visual review whose genuine unresolved choice exists only in the report.
 The initial Bearings snapshot correctly has no open decision, and the new teardown gate refuses to erase the source.
 A later regression covers tasks-axi's quoted multi-entry `blocked_by` output so `resolve` matches the first, middle, and last ids and rejects a genuinely absent id.
+The existing-reference regression covers a formal earlier hold, an arbitrary legacy structured identity, multiple references, manual-backend validation, idempotent retry, byte-identical referenced rows, verification, teardown gating, and fail-closed invalid reference sets.
 
 The final verification commands and their exact summarized outputs follow.
 
@@ -56,6 +65,8 @@ $ bash tests/fm-decision-hold-lifecycle.test.sh
 ok - report-only unresolved decision is reproduced and completion refuses before loss
 ok - non-forced scout teardown always requires durable inventory verification
 ok - captain holds are idempotent, distinct, teardown-safe, Bearings-visible, and durably routed before close
+ok - existing formal and legacy Captain's Call references attest idempotently without backlog mutation
+ok - missing, malformed, done, unrelated, parked, external, blocked, and mixed existing references fail closed
 ok - completion and verification validate origins before constructing paths
 ok - ended visual review follows the same decision-hold completion owner
 ok - resolved findings and decision-like prose do not create false holds
