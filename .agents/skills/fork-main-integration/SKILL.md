@@ -11,8 +11,9 @@ metadata:
 # fork-main-integration
 
 Load this procedure only when the Firstmate code repository itself uses permanent fork-main integration.
-[`docs/fork-main.md`](../../../docs/fork-main.md) is the operator-current owner.
+[`docs/fork-main.md`](../../../docs/fork-main.md) is the operator-current owner of the mechanics, the manifest schema, and the health criteria.
 The script headers own exact mechanics and arguments.
+This file keeps what binds you at the point of action - the prohibitions, the order of operations, and the judgements no report can make for you - and points at that owner for everything descriptive.
 
 ## Safety boundaries
 
@@ -60,7 +61,7 @@ Use a falsifiable statement such as "Upstream ships equivalent endpoint identity
 A pending divergence whose PR closes without merge must not remain pending.
 Choose one of two outcomes in the next validated fork integration:
 
-- Reclassify it through `bin/fm-fork-topic.sh disposition --id <id> --class rejected-but-retained --pr-disposition rejected --repo <isolated-worktree>` because current evidence still justifies the behavior.
+- Reclassify it to `rejected-but-retained` through `bin/fm-fork-topic.sh disposition` because current evidence still justifies the behavior.
 - Discard it because its retirement condition is true or the evidence no longer supports carrying it.
 
 Upstream rejection does not automatically remove useful running behavior.
@@ -87,31 +88,19 @@ Report the named requirement to the captain and, once they confirm, complete the
 9. Require fork CI green and captain merge approval.
 10. Use the regular merge method, then run `/updatefirstmate`.
 
-A repeated rerere result does not answer whether the divergence remains valuable.
-It only supplies the previously accepted file resolution.
-The unmerged index is the barrier that keeps the relevance decision explicit.
+A replayed rerere result supplies only the previously accepted file resolution, never the answer to whether the divergence is still worth carrying; the unmerged index is the barrier that keeps that decision explicit, so never let a replay stand in for it.
 
 ## Health and relevance
 
 Use `bin/fm-fork-status.sh` for the local answer and add `--refresh` only when live remote and PR evidence is needed.
-Git facts outrank the manifest.
-The manifest owns carried intent, while `git cherry` says only which commits are not upstream.
-A raw discrepancy is an informational signal, not automatically a carried divergence or a failed report.
-Pipeline correction commits descending from a prepared integration are integration-path artifacts, and manifest-only disposition commits are governance artifacts.
-Run health against the actual post-pipeline head so those classifications are proved where publication will occur.
+Run health against the actual post-pipeline head, because helper-prepared health cannot classify commits that validation added later.
+Its own errors, signals, and exit status are the machine verdict, and [`docs/fork-main.md`](../../../docs/fork-main.md) states how it classifies raw `git cherry` facts and what makes it unhealthy.
 
-Do not describe the fork as healthy when:
+Never describe the fork as healthy when that report is not.
+The one judgement the report cannot make is yours: a pending unit that is aging without action is not a healthy fork, however clean the machine verdict.
 
-- retained divergence units or active canonical patches trend up;
-- any superseded unit remains;
-- a pending unit is aging without action;
-- a canonical topic has more than one non-equivalent aggregate patch;
-- a manifest unit or accepted-upstream proof is structurally invalid;
-- declared paths miss changed files; or
-- a recorded upstream PR disposition differs from live evidence.
-
-`git range-diff` is a human review surface, not machine state.
-Run the command printed by the health report for every unit touched by the latest upstream merge.
+Run the `git range-diff --remerge-diff` command the report prints for every unit the latest upstream merge touched.
+It is a human review surface, not machine state.
 
 ## Discard
 
@@ -121,10 +110,8 @@ Prepare discard only from an isolated branch at fetched fork main:
 bin/fm-fork-topic.sh discard --id <id> --repo <isolated-worktree>
 ```
 
-The helper selects that topic's integration merges only and reverts them newest to oldest.
 Any product-file conflict reopens re-justification and leaves a receipt-bound merge or revert operation.
 Resolve the decision and files, write the complete `firstmate.fork-rejustify.v1` decision outside the candidate, then run `bin/fm-fork-topic.sh continue --decisions <file> --repo <isolated-worktree>`.
-The helper binds the branch and merge or revert head, completes queued reverts, updates the manifest in the completed operation, and validates candidate health.
 Validate the actual post-pipeline candidate through the private fork registration and require captain approval for its fork-main PR.
 Never reset or rewrite fork main to remove a divergence.
 
