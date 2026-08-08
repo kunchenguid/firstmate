@@ -109,238 +109,131 @@ All are harness-scoped rather than a global pattern union, and none is a recorde
 
 ## Durable implementation capacity and attempt lifecycle design
 
-This section specifies the approved target architecture for durable fleet refill and full attempt-to-terminal lifecycle management, and it does not describe behavior that is implemented today.
-The design extends the existing worker, Decision OS bead, Git, forge, and cleanup owners instead of adding an independent scheduler or task tracker.
-The Decision OS terminal-lifecycle design in `docs/superpowers/plans/2026-08-05-two-writer-delivery-capacity.md` Tasks 7.1 through 7.6 remains the upstream project-specific lifecycle authority, and this section defines how Firstmate composes with it rather than competing with it.
+This section specifies the approved target architecture for durable fleet refill and full attempt-to-terminal lifecycle management, and it does not describe behavior implemented today.
+It composes the existing worker, Decision OS bead, Git, forge, and cleanup owners instead of adding a scheduler, tracker, daemon, dashboard, wrapper, or second terminal policy.
+Decision OS's `docs/superpowers/plans/2026-08-05-two-writer-delivery-capacity.md` Tasks 7.1 through 7.6 remain the project-specific lifecycle authority.
 
-### Design objective and friction budget
+### Objective and authority
 
-The normal operator and worker path must remain dispatch once, work once, reconcile once, and refill automatically.
-Ordinary delivery must not gain a manual approval, duplicate tracker update, mandatory ceremony, wrapper, daemon, dashboard, or control plane.
-A new mechanism is allowed only when an existing primitive cannot satisfy a named invariant in this section, and the implementation must record that unmet invariant in its review rationale.
-The smallest expected shared change set is the existing fleet-refill command, a factored canonical state parser only if the existing parser cannot be reused directly, the spawn success boundary, one durable attempt-record owner, one ordered terminal owner, the existing startup and heartbeat recovery paths, and focused behavior tests.
-The private fleet sentinel may change only enough to consume the public projection and retain its local cadence, Decision OS candidate query, logging, and notification policy.
-Existing commands must remain backward compatible where practical, with structured modes added beside human output instead of replacing established invocation shapes.
-The hot path must publish measured per-worker and whole-projection latency under representative fleet size and timeout conditions before automatic refill is enabled.
-The accepted latency budget must keep normal interactive reconciliation responsive and keep periodic observation comfortably below its cadence, while every exceeded bound produces explicit uncertainty rather than fabricated availability.
-The implementation plan must name every superseded manifest read, output-path probe, duplicated counter, compatibility shim, and migration-only branch, together with the verification milestone that permits its deletion.
-The final cutover is incomplete until that deletion plan has removed obsolete live arithmetic, while historical audit evidence may remain read-only under an explicit retention owner.
+The normal path remains one attended dispatch or refill invocation, one worker effort, one reconciliation, and automatic refill without another operator step.
+New machinery is allowed only when an existing primitive cannot satisfy a named invariant, and the implementation review must identify that invariant and the deletion fate of every superseded mechanism.
+Existing command shapes remain compatible where practical, and the hot path must publish representative latency measurements before automatic refill is enabled.
 
-### Authority boundaries
+The Decision OS beads graph is authoritative for implementation identity, priority, readiness, dependencies, claims, ownership, and closure.
+Firstmate owns immutable physical attempts, home and provider ownership, isolated-copy allocation, endpoint coordination, capacity projection, terminal orchestration, and refill execution.
+`bin/fm-crew-state.sh` remains the only semantic worker-state parser, including validation attribution to compatible branch and code identity.
+Git, the forge, the registered Decision OS main steward, and the existing cleanup owner remain authoritative for their branch, delivery, tracker, and physical-cleanup facts.
+Firstmate caches may carry source identity and revision evidence, but they never override those authorities.
+Every Decision OS attempt binds immutably to one bead ID and re-verifies the live bead before claim, allocation, refill selection, terminal reconciliation, and closure.
+Any missing, stale, multiply claimed, or contradictory authoritative fact preserves ownership and requires reconciliation rather than dispatch or closure.
 
-The Decision OS beads graph is authoritative for implementation identity, priority, readiness, dependencies, claims and ownership, and closure.
-A Firstmate record may cache or project a bead fact for bounded observation, but it must retain source identity and revision evidence and must never override the live graph.
-Every Decision OS delivery attempt must bind immutably to one bead ID before provider allocation and must verify that live bead before dispatch, refill selection, terminal reconciliation, and closure.
-A missing, stale, malformed, multiply claimed, or contradictory bead observation requires reconciliation and cannot authorize launch, refill, or closure.
-Firstmate owns immutable delivery-attempt identity, home and provider ownership, isolated-copy allocation, endpoint observation, semantic worker-state composition, terminal orchestration, capacity projection, and refill execution.
-The canonical worker-state owner remains `bin/fm-crew-state.sh`, including attribution of active validation to the exact branch and compatible code identity.
-The implementation must reuse or factor that canonical parser rather than create a second worker state machine in the refill command, snapshot command, sentinel, or terminal owner.
-Git owns branch, base, head, cleanliness, ancestry, reachability, and ref facts.
-The forge owns pull-request identity, source and target identity, exact merge outcome, and available merge-head evidence.
-The Decision OS main steward remains the only writer of Decision OS tracker mutations and Closure-Receipts under the Task 7.4 receipt adapter.
-The existing cleanup safety primitives remain authoritative for endpoint shutdown, process proof, isolated-copy identity, dirty-state refusal, stale-lock handling, and provider return.
-The historical attempt ledger is audit-only and must never be consulted as live capacity truth.
+### Attempt envelope and effect receipts
 
-### Immutable attempt identity and records
+An attempt is one physical delivery effort and is distinct from both its bead and a Firstmate queue item.
+Its immutable envelope contains `{task_source, task_key/bead_id, home_id, attempt_id, generation}`.
+Once allocated, the envelope also freezes the provider-copy identity and delivery contract needed to identify the owned copy, initial branch, base, target, and delivery mode.
+A stale generation cannot mutate the current attempt, and existing lock and atomic-publication patterns must give concurrent allocation one winner.
 
-An attempt is one physical effort to deliver one authoritative implementation item, and it is distinct from both the bead and a Firstmate queue item.
-The minimum immutable identity is the task source, authoritative task key, home identity, attempt ID, and generation.
-A Decision OS attempt must include its bead ID as the authoritative task key and must never be rebound to another bead.
-The attempt must also preserve the provider-copy identity, initial branch, base commit, intended target branch, and delivery mode once those facts are allocated.
-Mutable phase and obligation observations may advance under the attempt generation, but a stale generation must never overwrite the current attempt.
-The durable record must use the existing low-level locking and atomic-publication patterns so concurrent allocation has one winner and replay converges.
-Pending claim, allocation, launch, tracker, landing, preservation, cleanup, branch-fate, queue, and retirement obligations must remain distinct fields rather than being collapsed into a generic status.
-The record must persist only immutable identity and the minimum receipts required to recover or replay an obligation safely.
-Rendered output, transient process activity, and copied mutable tracker state must not be added merely for convenience.
+The durable body is a small generation-bound map of effect receipts and named obligations derived from missing receipts.
+It may retain the authoritative claim receipt, launch-success receipt, exact landing or preservation evidence used for disposition, tracker request and receipt, cleanup and branch-fate receipt, and retirement receipt.
+It must not mirror live bead state, semantic worker state, endpoint liveness, Git refs, cleanliness, ancestry, or forge status.
+Reconciliation re-reads those facts from their owners, and it persists a read observation only when that evidence is bound into an irreversible request or receipt.
+The historical successful-launch ledger is audit-only and never participates in current capacity.
+A ledger row is appended once by attempt ID only after runtime launch and required instruction-delivery confirmation succeed.
+A failed or partial batch writes success rows only for individually successful launches, while recovery of a crash before ledger publication relies on the attempt envelope rather than the ledger.
 
-A Decision OS attempt begins with the claim-before-allocation handshake from the upstream Task 7.4 design.
-Firstmate must persist the attempt and an exact `claim_pending` request before allocating a provider copy or launching an endpoint.
-The registered Decision OS main steward must verify the live bead, expected prior state and source revision, current authority, and intended bound agent before producing the authoritative claim receipt.
-Only a matching current-generation receipt and matching live bead ownership may advance the attempt to `claim_observed` and permit allocation.
-A missing, refused, stale, or mismatched receipt leaves the attempt reserved with no provider copy or endpoint and cannot be satisfied retroactively by terminal reconciliation.
+### Shared capacity projection
 
-A launch is successful only after the runtime-specific launch and required instruction-delivery confirmation have succeeded.
-Spawn metadata published before that boundary is recovery evidence, not proof of successful launch.
-The audit ledger must append a successful-launch receipt only after that boundary and must use the attempt ID as its idempotency key.
-A partial or failed batch must write success rows only for attempts whose individual launch boundary succeeded.
-A crash after endpoint launch but before audit publication must be recovered from the durable attempt record, and capacity correctness must not depend on repairing the audit row first.
+One reusable capacity and attempt projection function is the only classifier of implementation rows and aggregate capacity.
+It calls `bin/fm-crew-state.sh` for semantic worker state and combines that result with the attempt envelope and effect receipts without defining another worker state machine.
+`bin/fm-fleet-refill.sh --count-json` exposes the lean home-local `fm-fleet-capacity.v1` object for the hot path.
+`bin/fm-fleet-snapshot.sh` embeds that exact object or calls the same function and must not independently classify attempts or recount capacity.
+Human refill output and the private fleet sentinel consume the same object, and the sentinel retains only cadence, authoritative candidate query, logging, and notification policy.
+Legacy manifests, output paths, output modification times, raw metadata counts, worker text, and private shadow fields never become fallback arithmetic.
 
-### One versioned capacity projection
+The object contains schema, generated time, home identity, completeness and timeout verdicts, deterministic rows sorted by immutable attempt identity, aggregate counts, ambiguity, named obligations, reconciliation need, and refill safety.
+Diagnostic observation identifiers and timing details may be optional, but consumers cannot depend on them for capacity decisions.
+Each row reports attempt identity and generation, kind, semantic classification and source, productive and reserved verdicts, ambiguity reasons, missing effect receipts, and whether reconciliation is required.
+The aggregate reports `productive_count`, `reserved_ownership_count`, `ambiguous_count`, `reconciliation_required`, `observation_complete`, and `refill_safe`, and every aggregate is exactly derivable from the emitted rows.
+Scouts and persistent second mates are excluded from implementation capacity, and a second mate's children belong only to that second mate home's projection.
 
-`bin/fm-fleet-refill.sh --count-json` is the sole public home-local implementation-capacity projection.
-Human refill output and the private fleet sentinel must consume the same in-process or emitted projection rather than recomputing arithmetic.
-The legacy output-path and frozen-manifest model must not participate in current capacity after cutover.
-The projection must be produced from a sorted snapshot of current home-local attempt and worker identities and must tolerate a record disappearing or changing during observation without corrupting arithmetic.
-The projection must exclude every scout and persistent second mate from implementation capacity, including a second mate's children because those children belong to that second mate's home-local projection.
+Active implementation and attributed active validation are productive and reserved.
+Configuring, blocked, waiting, merge-waiting, completed, failed, dead, and ambiguous attempts remain reserved while any delivery obligation is outstanding.
+Only an atomically retired attempt contributes neither productive nor reserved capacity.
+A completion notification, stale queue entry, cached bead view, missing endpoint, absent output, or audit row never decrements capacity directly.
 
-The JSON document must identify schema `fm-fleet-capacity.v1` and carry an observation ID, observation start and completion times, home identity, completeness verdict, and timeout verdict.
-Its `workers` array must carry deterministic per-worker rows sorted by immutable attempt identity, with no ordering dependency on filesystem enumeration or read completion.
-Each implementation row must include attempt identity, task source and key, kind, generation, semantic worker classification and source, attempt phase, productive verdict, reserved-ownership verdict, ambiguity reasons, pending obligations, and whether terminal reconciliation is required.
-A row may include cached bead identity and revision evidence, but the projection must label that evidence as observed or cached and cannot use a stale cache to authorize refill.
-The aggregate must report `productive_count`, `reserved_ownership_count`, `ambiguous_count`, `reconciliation_required`, `observation_complete`, and `refill_safe`.
-The aggregate may report target and safe ceiling when policy inputs are supplied, but it must not hide raw counts behind one battery scalar.
-Every count must be derivable exactly from the emitted rows under the same schema version.
-A schema mismatch must stop automatic refill and preserve ownership.
+Each worker read has a bounded timeout, and the whole projection has a separate bounded total timeout.
+A timeout, malformed result, torn read, unsupported observation, disappearing record, or unavailable authority yields an ambiguous row or incomplete observation rather than idle, terminal, zero work, or a free slot.
+Parallel reads are allowed only after deterministic output, bounded buffering, backend concurrency, and total timeout behavior are verified.
+A schema mismatch or incomplete unsafe observation makes both automatic consumers alert-only while preserving ownership.
 
-Productive work means an implementation attempt positively observed in active implementation or attributed active validation.
-Productive work is always reserved ownership.
-Reserved ownership means an attempt still owns any delivery obligation, whether or not it is currently productive.
-Configuring and launching attempts remain reserved until launch success or exact launch-failure reconciliation.
-Actionable validation waits, external waits, and explicit blockers remain reserved while their attempt ownership is intact.
-Merge-waiting, completed, failed, endpoint-dead, and ambiguous attempts remain reserved until the ordered terminal owner reconciles every outstanding obligation.
-A fully reconciled and retired attempt contributes neither productive nor reserved capacity.
-A historical audit-ledger row contributes neither productive nor reserved capacity.
-A completion notification, stale Firstmate queue entry, cached bead projection, dead endpoint, missing copy, or absent output file must never decrement capacity directly.
+### Claim, admission, and refill
 
-Each worker-state read must have a bounded timeout, and each projection must have a separate bounded total timeout.
-A timeout, malformed result, torn read, unsupported runtime result, or unavailable authoritative observation must produce an ambiguous row or incomplete observation.
-Uncertainty must never be converted into idle, terminal, zero active work, or a free slot.
-The projection may parallelize independent reads only after backend concurrency safety, deterministic output, bounded buffering, and total-time behavior are verified for every supported runtime.
+Claim-before-provider-allocation remains mandatory, but one ordinary top-level attended dispatch or refill invocation completes the handshake.
+That invocation creates the immutable attempt and exact claim request, synchronously calls the already-registered Decision OS main-steward adapter, verifies its receipt and the live bead, and continues into provider allocation and launch.
+The underlying operation may return `claim_pending` for crash recovery or genuine steward unavailability, but that is an exception rather than a second normal operator command.
+A conclusively refused claim with no provider copy, endpoint, or other physical obligation is automatically reconciled and retired as a failed pre-allocation attempt after the live bead and absence of resources are verified.
+A missing, stale, mismatched, contradictory, or otherwise uncertain claim receipt remains reserved until reconciled.
+Replay from `claim_pending` must never double-claim or allocate before a valid receipt.
 
-The private fleet sentinel must execute this same public JSON interface and parse only versioned fields.
-It must not retain fallback arithmetic over manifests, output modification times, metadata counts, worker text, or private shadow fields.
-The sentinel may include the observation ID and counts in its logs and notifications, but its local log cannot become capacity authority.
-If the projection is incomplete, ambiguous, version-incompatible, or unavailable, the sentinel must return to alert-only behavior and must not report zero capacity.
+Refill acts only when a complete projection reports productive work below target and total reserved ownership below the configured safe ceiling.
+It queries the live beads graph for work that is open, ready, unclaimed, dependency-safe, and high enough priority, then re-verifies those facts while creating the claim request.
+Firstmate applies the accepted Decision OS admission contract by checking provisional planned paths, known exclusive seams, shared mutable state, and semantic dependencies against current attempts.
+It serializes only when that bounded admission evidence identifies a concrete conflict, while complete actual diffs remain the authoritative pre-land overlap check.
+No `.beadscope`, declaration registry, write-set enforcer, or claim inferred from planned paths is introduced.
+Concurrent refill invocations serialize through existing home and attempt locks and re-read bead ownership after winning the lock.
 
-### Refill decision
+### Ordered terminal composition
 
-Refill evaluates only after the current projection is complete enough to set `refill_safe=true` and after any terminal action in the same flow has reached its persisted retirement boundary.
-Refill is eligible when productive work is below the configured target and total reserved ownership is below the configured safe ceiling.
-The separation between productive target and reserved ceiling permits useful refill without pretending merge waits or pending terminal work have disappeared.
-The safe ceiling is a policy input rather than a fact inferred from worker count.
+`bin/fm-terminal.sh` is the sole Firstmate attempt-to-terminal orchestrator, but it owns no branch, provider-copy, or runtime cleanup implementation of its own.
+The existing teardown owner must be factored into one structured attempt-bound cleanup operation that reuses current safety and provider logic.
+That operation accepts an already classified `landed`, `preserved_unlanded`, or `unknown` disposition without redefining product landing.
+It returns durable per-effect receipts for endpoint stop, preservation ref, branch fate, provider return, and runtime-record retirement, and it records rather than suppresses branch-disposition failure.
+`bin/fm-teardown.sh` remains the ordinary compatibility wrapper over that same operation, so terminal orchestration and direct cleanup cannot drift into parallel policies.
 
-Candidate selection must query the live authoritative beads graph at decision time.
-A candidate must be open, ready, unclaimed, dependency-safe, and high enough priority under the graph's canonical ordering.
-The candidate's live identity, claim state, readiness, dependencies, and revision must be verified again when its immutable attempt and claim request are created.
-Firstmate must separately prove that the candidate's expected write set and serialization requirements are safe against every active or reserved attempt.
-Bead readiness does not imply write-set safety, and Firstmate write-set safety does not override bead ownership or dependencies.
-If either authority cannot prove its part, the candidate is not dispatched.
+Under the exact attempt lock, terminal reconciliation performs this order.
 
-The normal fast path performs one projection, selects only the deficit permitted by target and safe ceiling, creates each attempt through claim-before-allocation, launches each accepted attempt once, and publishes a fresh projection after successful launches or reconciled failures.
-A failed launch remains reserved until its exact pending provider, endpoint, branch, and tracker obligations are reconciled.
-Concurrent refill runs must serialize on existing home and attempt locks, re-read authoritative candidate ownership after winning the lock, and converge without duplicate dispatch.
+1. It verifies the immutable attempt, generation, home, bead binding, live bead, and owned provider identity.
+2. It re-reads worker, endpoint, Git, forge, and bead facts and classifies the exact delivery as `landed`, `preserved_unlanded`, or `unknown`.
+3. It obtains any required authority and binds only the evidence needed for a disposition or irreversible effect into the matching receipt request.
+4. For truthful `landed` delivery only, it requests the Decision OS main steward to verify or append the one operative Closure-Receipt before canonical bead closure and then verifies the current-generation tracker receipt.
+5. For `preserved_unlanded`, it preserves or releases the physical copy only according to the authoritative bead transition and exact recovery-ref evidence, and it never reports product success.
+6. For `unknown`, missing authority, dirty or later work, live processes, identity mismatch, insufficient quiet, or conflicting receipts, it preserves the attempt and resources for reconciliation.
+7. When lawful, it invokes the one structured cleanup operation and verifies its endpoint, preservation, branch-fate, provider-return, and runtime-retirement receipts.
+8. Still under the attempt lock, it atomically publishes the terminal audit receipt and marks or removes the live attempt as retired.
+9. After releasing the lock, it obtains a fresh shared capacity projection and permits refill only from that canonical observation.
 
-### Drift and contradiction handling
+`landed` means exact content is in the authorized target or joined through an authorized local-only merge with exact proof.
+`preserved_unlanded` means exact content is durably recoverable but is not product-delivered, so a pushed branch, remote-only ref, or closed-unmerged pull request is preservation rather than landing.
+A squash merge is landed only when existing Git and forge proof establishes content equivalence.
+Audit publication records history but is never capacity truth, and only the atomic live-attempt retirement changes later capacity.
+A duplicate completion, merge event, startup recovery, heartbeat recovery, cleanup retry, or refill race converges on the same receipts and sees either pre-retirement ownership or a post-retirement deficit, never an intermediate free slot.
 
-Drift is any disagreement among the live bead, Firstmate queue record, durable attempt, semantic worker observation, provider copy, Git branch or head, forge result, tracker receipt, or cleanup receipt.
-Drift must set `reconciliation_required=true`, and material identity or ownership drift must set `refill_safe=false`.
-The reconciler must retain every independently trustworthy fact and identify which authority owns the disputed transition.
-It must never resolve disagreement by dispatching another attempt, copying cached tracker state into the bead, marking the bead complete, deleting an isolated copy, deleting a branch, or converting the row to zero capacity.
-A stale Firstmate queue item may be corrected only after the corresponding attempt and authoritative bead disposition are proved.
-An active attempt absent from the queue remains reserved and must be restored or reconciled rather than ignored.
-A bead closed while an attempt remains active requires terminal reconciliation and cannot justify destructive cleanup by itself.
-A bead open after proven product landing remains open until the Decision OS receipt path truthfully closes it.
-Multiple attempts or claims for one bead require ownership reconciliation before any one of them may launch, close, retire, or trigger refill.
+Pending obligations are exposed and retried idempotently through existing session-start, heartbeat, and fleet-snapshot paths without a new daemon or operator loop.
+Ordinary fully evidenced delivery reconciles without another operator action, while ambiguity, destructive disposition, missing authority, or unavailable evidence may stop with ownership preserved and the exact reconciliation need named.
 
-### Ordered terminal owner
+### Migration, rollback, and verification
 
-`bin/fm-terminal.sh` is the sole Firstmate attempt-to-terminal orchestrator and composes the upstream Decision OS Tasks 7.4 through 7.6 design with existing Firstmate safety primitives.
-It must not select new work, maintain a second cleanup policy, or mutate the Decision OS tracker directly.
-It must acquire the exact attempt lock and replay from persisted observations and receipts so a crash after any step converges without repeating a completed mutation.
-Only full retirement removes reserved ownership, and refill runs only after a new projection observes that retirement.
+Migration first reconciles repository ownership because the operating Firstmate `main` currently diverges from upstream and owns `bin/fm-fleet-refill.sh` while the reviewed upstream line does not.
+Maintainers must preserve both histories, select and review the canonical integration base, and reconcile that script before runtime implementation begins.
+Migration then introduces the read-only shared projection, runs shadow counting with measured latency, and reconciles stale records individually from live bead, worker, Git, forge, copy, and queue facts.
+After parity is explained, it introduces immutable envelopes and receipts for new attempts, the synchronous claim path, the shared cleanup operation, and ordered terminal orchestration.
+Both consumers switch to the shared object only after fixture and live parity, automatic refill starts only after safety tests pass, and obsolete output, manifest, duplicated counter, and compatibility reads are removed under the implementation's explicit deletion plan.
+Rollback disables automatic dispatch and returns both consumers to alert-only behavior while preserving attempts, beads, branches, refs, copies, and receipts.
+Rollback never restores legacy liveness arithmetic or converts missing evidence into zero capacity, and forward recovery resumes from persisted effect receipts.
 
-The terminal owner must perform these ordered responsibilities for the exact attempt.
+Regression tests exercise owner boundaries rather than a full runtime-by-provider Cartesian product.
+The canonical semantic parser is covered once per supported worker runtime, provider ownership and structured cleanup are covered once per provider, and focused runtime-provider integration pairs are added only where composition has distinct behavior or a discovered defect.
+Capacity fixtures cover implementation, validation, merge wait, terminal states, ambiguity, timeout, stale and disappearing records, scouts, second mates, and schema failure.
+Launch fixtures cover one-invocation claim through launch, conclusive refused-claim retirement, uncertain `claim_pending` replay, partial launch failures, stale generations, duplicate claims, provider collisions, and success-only audit publication.
+Delivery and tracker fixtures cover open, merged, closed-unmerged, squash, dirty, later-head, remote-only, unknown, missing or conflicting Closure-Receipts, steward and publication failures, and replay after every irreversible effect.
+Cleanup fixtures cover each provider, exact recovery refs, live process and quiet refusal, cleanup crashes, structured per-effect receipts, branch-disposition failure, and compatibility-wrapper identity.
+Composition fixtures prove byte-equivalent capacity rows and aggregates across refill, fleet snapshot, human output, and the private sentinel for one source object.
+They also prove retirement-before-projection, no decrement at completion or merge alone, deterministic concurrent terminal and refill behavior, stale-record retirement, and no duplicate dispatch.
 
-1. It must verify immutable attempt identity, generation, home, authoritative task key, and bound Decision OS bead.
-2. It must verify the live bead and record any disagreement with the cached Firstmate queue or claim evidence.
-3. It must observe and persist the exact runtime endpoint, provider copy claim, initial branch, base, current branch, current head, target, delivery mode, and relevant local and remote refs.
-4. It must observe and persist the exact forge repository, pull request, source, target, head, and open, merged, closed-unmerged, or unknown result when a forge applies.
-5. It must classify product disposition as `landed`, `preserved_unlanded`, or `unknown` from exact evidence.
-6. It must obtain any required disposition authority without inferring approval from a completion event, tracker state, or remote preservation.
-7. It must run existing teardown eligibility checks and preserve dirty, later, mismatched, live, or uncertain content.
-8. It must persist the exact Decision OS tracker-mutation request, including expected bead state and revision, landing evidence, authority, and required Closure-Receipt evidence.
-9. It must wait while the registered Decision OS main steward verifies or appends the one operative valid Closure-Receipt before canonical bead closure and publishes the tracker-only mutation through the authoritative path.
-10. It must observe and verify the matching current-generation tracker receipt, post-mutation bead state, tracker revision, publication result, and canonical bead closure.
-11. It must prove the exact copy has no live worker process, is clean, has the required landing or preservation disposition, and has satisfied the configured nonzero quiet interval.
-12. It must create and verify an exact durable recovery ref before removing any local branch or copy that contains preserved unlanded content.
-13. It must invoke the existing provider-specific safe isolated-copy cleanup for only the exact claimed copy and record the provider return receipt.
-14. It must record the fate of every local and remote delivery branch as retained, deleted, unavailable, or preserved by exact ref, without treating branch deletion failure as success.
-15. It must remove runtime ownership records only after endpoint, copy, ref, tracker, and branch obligations are complete or explicitly preserved under authorized disposition.
-16. It must reconcile the Firstmate queue outcome from the authoritative bead and exact delivery disposition without creating parallel mutable task truth.
-17. It must publish the post-retirement capacity projection and permit refill only from that projection's safe verdict.
-18. It must retire the live attempt record from capacity while preserving the minimum immutable attempt and terminal receipts in audit history.
-
-`landed` means the exact delivered content is in the authorized target branch or was joined through an authorized local-only merge with exact before and after commits.
-`preserved_unlanded` means exact content is durably recoverable by a recorded ref or equivalent provider receipt but is not product-delivered.
-A pushed branch, remote-only ref, or closed-unmerged pull request can prove `preserved_unlanded` but never proves `landed` by itself.
-A squash merge proves `landed` only when the forge and Git evidence establish exact content equivalence under the existing landing-proof owner.
-`unknown` preserves the attempt, copy, refs, bead state, and reserved ownership until authoritative evidence becomes available.
-Data safety may permit authorized physical-copy return after `preserved_unlanded` is durably proved, but it must not produce successful bead closure or a successful Firstmate queue outcome.
-
-A crash after forge observation, receipt request, tracker comment, bead close, tracker commit, publication, preservation, copy return, branch disposition, queue reconciliation, or retirement must resume from the matching persisted boundary.
-A duplicate completion event, merge notification, periodic refill, startup recovery, or heartbeat recovery must converge on the same attempt and must not repeat a tracker mutation, cleanup, branch deletion, queue completion, or launch.
-A completion and refill race may observe either pre-retirement reserved ownership or the post-retirement deficit, but it must never observe an intermediate free slot.
-
-### Recovery without new control machinery
-
-Pending attempt and terminal obligations must be exposed through the existing session-start, heartbeat, and fleet-snapshot paths from the upstream Task 7.6 design.
-Those existing attended paths may retry idempotent observation and reconciliation, but no new daemon, scheduler, dashboard, or mandatory operator loop is authorized.
-An ordinary fully evidenced attempt should reconcile without additional operator input.
-Ambiguous identity, contradictory authority, destructive disposition, missing required approval, or unavailable authoritative evidence may stop for reconciliation.
-A stopped case must preserve ownership and name the exact authority or evidence needed to continue.
-
-### Migration and rollback
-
-Migration must first reconcile repository ownership because the Firstmate operating `main` currently diverges from upstream and privately owns `bin/fm-fleet-refill.sh` while the reviewed upstream line does not.
-The refill and lifecycle implementation must not begin on competing histories or overwrite the private script.
-The maintainer must first identify the canonical integration base, preserve both histories, reconcile the script through a reviewed non-destructive branch integration, and verify the resulting owner before runtime changes begin.
-
-After ownership convergence, migration proceeds in this order.
-
-1. Introduce the read-only versioned JSON projection without changing either consumer's decisions.
-2. Run the new projection in shadow mode beside the legacy count and record parity, latency, timeout, and per-row classifications without allowing shadow output to dispatch or clean.
-3. Reconcile stale Firstmate records individually by proving endpoint, provider copy, branch, head, dirty or unlanded content, forge, bead, queue, and tracker obligations rather than deleting by age.
-4. Introduce immutable attempts, claim-before-allocation receipts, and success-only audit publication for new launches while retaining compatibility reads needed for old attempts.
-5. Introduce the ordered terminal owner and route new terminal events through it while legacy records remain explicitly reserved until reconciled.
-6. Exercise startup and heartbeat recovery for pending claim, launch, tracker, preservation, cleanup, and retirement boundaries.
-7. Switch normal refill and the private sentinel to the same JSON projection only after row and aggregate parity is explained and every divergence has a disposition.
-8. Enable automatic refill only after duplicate-ownership, timeout, terminal, and concurrency tests pass and the reserved ceiling policy is configured.
-9. Remove output-path, frozen-manifest, private-sentinel arithmetic, and migration compatibility reads only after both consumers have passed parity and rollback drills.
-10. Retain the historical attempt ledger as audit-only evidence or archive it under a named retention owner without restoring it as capacity truth.
-
-Rollback must disable automatic dispatch and return both consumers to alert-only behavior while preserving attempts, ledger rows, task records, beads, branches, refs, isolated copies, forge receipts, tracker receipts, and terminal obligations.
-Rollback must never restore output modification time, frozen manifests, raw metadata count, or missing-data-as-zero behavior.
-A projection schema mismatch, exceeded timeout, incomplete observation, ambiguous row, or terminal error must remain visible and reserved during rollback.
-Forward recovery resumes from persisted attempt and terminal receipts rather than synthesizing a clean state.
-
-### Behavioral regression matrix
-
-The regression suite must exercise public commands and durable receipts rather than assert implementation-source text.
-Every supported worker runtime and session backend combination that can host implementation work must prove active implementation, attributed validation, idle, dead, malformed, unavailable, and bounded-timeout projection behavior, with unsupported axes explicitly recorded rather than silently skipped.
-Pi, pi-signed, Claude, Codex, OpenCode, Grok, Kimi, and Muse worker paths must be covered where each is supported, and tmux, Herdr, Zellij, Orca, and cmux provider behavior must be covered where each combination applies.
-
-The capacity cases must cover active implementation, active validation, actionable validation waits, merge waits, completed workers, failed workers, dead endpoints, ambiguous state, stale metadata, disappearing records, scouts, persistent second mates, cross-home children, total timeout, malformed structured output, and schema mismatch.
-Every uncertain case must remain reserved or make refill unsafe, and no uncertain fixture may yield fabricated zero active work.
-Two independent consumers given the same projection fixture must produce identical row classifications and aggregate decisions without duplicate arithmetic.
-
-The launch cases must cover failure before attempt allocation, after allocation but before claim receipt, after claim but before provider allocation, after provider allocation, after metadata publication, before endpoint launch, after endpoint launch but before instruction confirmation, and after launch success but before audit publication.
-They must cover partial batch launch failure, replay after each boundary, concurrent same-home launch, cross-home duplicate bead claim, provider-wide copy collision, stale generation, and duplicate audit publication.
-Only successfully launched attempts may receive one audit row, while every partial ownership obligation remains reserved.
-
-The delivery cases must cover open pull requests, merge waits, closed-unmerged pull requests, exact-head merges, squash merges, later commits after the reviewed or merged head, unknown forge state, local-only merges, remote-only refs, missing remote refs, and forge identity mismatch.
-They must prove the distinction between `landed`, `preserved_unlanded`, and `unknown` and must never treat remote preservation as product delivery.
-
-The tracker cases must cover live bead verification before dispatch, refill, terminal reconciliation, and closure.
-They must cover missing, malformed, stale, duplicate, and conflicting Decision OS Closure-Receipts, stale expected bead state or revision, claim refusal, unavailable steward, tracker write conflict, publication failure, and replay after comment, close, commit, publication, and receipt persistence.
-No case may silently close a bead or mirror mutable bead truth into the Firstmate queue.
-
-The cleanup cases must cover dirty copies, untracked files, live worker processes, insufficient quiet time, stale locks with live holders, provably abandoned locks, provider-copy identity mismatch, cleanup crashes, exact recovery-ref creation, remote-only preservation, branch deletion failure, already-returned copies, and retry after partial cleanup.
-Every refusing signal must preserve content and exact ownership evidence.
-
-The composition cases must cover duplicate completion and merge events, stale Firstmate queue entries, startup replay, heartbeat replay, terminal and periodic refill races, two concurrent refill runs, and a candidate becoming claimed or dependency-blocked between projection and dispatch.
-They must prove that working to checks-green does not decrement reserved capacity, merge without bead closure does not decrement it, bead closure without safe copy and branch disposition does not decrement it, and only full retirement creates a refill deficit.
-They must also prove that stale terminal records stop suppressing refill after successful exact retirement and that no race creates a duplicate attempt.
-
-### Acceptance criteria
-
-The design is implemented only when one public projection deterministically explains every row and aggregate, both consumers use it, and no obsolete arithmetic remains live.
-The normal path must require no new operator action and must meet its measured latency budget under the configured target and safe ceiling.
-Every Decision OS attempt must remain immutably bead-bound and replay safely from claim through audit retirement.
-The ordered terminal owner must preserve data independently from proving product landing and must close the canonical bead only through the authoritative Closure-Receipt path.
-Automatic refill must occur only from a complete safe projection and a live authoritative ready-and-unclaimed bead query plus an independent Firstmate serialization-safety proof.
-Migration and rollback drills must demonstrate that uncertainty yields alert-only preserved ownership, never fabricated zero capacity.
-The regression matrix must pass across every supported applicable worker runtime and provider, with explicit evidence for excluded combinations.
-The final review must verify that no duplicate state machine, tracker, capacity counter, terminal owner, daemon, scheduler, wrapper, or control plane was introduced and that every superseded mechanism has an explicit deletion result.
+The implementation is accepted only when one shared projection explains every capacity decision, one ordinary invocation claims and launches, one structured cleanup operation serves both callers, and beads remain authoritative through closure.
+The normal path adds no operator step, meets its measured latency budget, and preserves uncertainty rather than fabricating capacity.
+The branch diff and implementation plan must show no duplicate parser, tracker, phase machine, cleanup policy, counter, daemon, scheduler, wrapper layer, or control plane and must account for deletion of superseded machinery.
 
 ## Runtime session backends
 
