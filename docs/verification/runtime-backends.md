@@ -723,6 +723,8 @@ Idle cursor composer, plain capture:
 → Add a follow-up
 ```
 
+Plain capture supplies visible shape but no de-emphasis evidence, so the adapter keeps matching text `pending`.
+
 Idle cursor composer, ANSI capture (`cat -v`):
 
 ```

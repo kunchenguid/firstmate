@@ -68,7 +68,7 @@ fm_harness_process_matches() {  # <comm> <args> [argv0]
     case "$base" in *claude*) FM_HARNESS_IS_CLAUDE=1 ;; esac
     return 0
   fi
-  if name=$(fm_harness_path_name "$comm") || name=$(fm_harness_path_name "$argv0") || name=$(fm_harness_path_name "$args"); then
+  if name=$(fm_harness_path_name "$comm") || name=$(fm_harness_path_name "$argv0"); then
     case "$name" in claude) FM_HARNESS_IS_CLAUDE=1 ;; esac
     return 0
   fi
