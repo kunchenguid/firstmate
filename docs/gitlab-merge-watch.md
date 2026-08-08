@@ -197,4 +197,4 @@ Merging a GitLab merge request stays a deliberate manual step until merge parity
 
 A GitLab task records no `pr_head=`.
 `gh` exposes the head commit as a selectable field, while plain `glab` exposes it only inside its JSON output, which would need a JSON processor firstmate does not require.
-Both consumers already treat it as optional: `bin/fm-teardown.sh` reads the head from the forge at teardown rather than from metadata and falls back to its provider-agnostic content check, and `bin/fm-review-diff.sh` resolves the head from the remote when none is recorded.
+Both consumers tolerate the omission: `bin/fm-teardown.sh` falls back to its provider-agnostic content check, and `bin/fm-review-diff.sh` falls back to the local branch with a warning.
