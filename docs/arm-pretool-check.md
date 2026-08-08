@@ -23,6 +23,7 @@ It tokenizes the bytes and classifies lexical execution positions only.
 `bin/fm-arm-pretool-check.sh` supports these entry forms:
 
 - Stdin JSON at `.tool_input.command` for Claude and Codex.
+- Native camelCase JSON at `.toolArgs.command` through `bin/fm-copilot-hook.sh` for GitHub Copilot CLI.
 - Stdin JSON at `.toolInput.command` for Grok.
 - `--command <exact string>` for OpenCode, Pi, and pi-signed.
 - `--background` as a compatibility-only field that never changes the decision.
@@ -150,6 +151,7 @@ Prose may improve without changing adapter behavior.
 - Default deny mode also writes `{"decision":"deny","reason":"[code] reason"}` to stdout for Grok.
 - `--claude` suppresses stdout completely because Claude ignores a PreToolUse deny when stdout is nonempty.
 - Codex blocks on exit 2 and displays stderr.
+- GitHub Copilot CLI blocks on exit 2 after its adapter passes the exact command through `--command`.
 - OpenCode throws only when the checker exits 2.
 - Pi and pi-signed return `{block: true}` only when the checker exits 2.
 
@@ -158,6 +160,7 @@ Prose may improve without changing adapter behavior.
 | Harness | Exact command field | Adapter behavior on checker exit 2 |
 | --- | --- | --- |
 | Codex | `.tool_input.command` | The `.codex/hooks.json` command forwards the complete stdin payload and Codex blocks on exit 2. |
+| GitHub Copilot CLI | `.toolArgs.command` | `.github/hooks/firstmate.json` invokes `bin/fm-copilot-hook.sh`, which passes the exact command through `--command --claude`; Copilot blocks on exit 2. |
 | Claude | `.tool_input.command` | `.claude/settings.json` forwards stdin with `--claude`, leaving stdout empty and returning the stderr deny object. |
 | Grok | `.toolInput.command` | `.grok/hooks/fm-primary-pretool-check.json` forwards stdin and Grok consumes the stdout `decision=deny` object. |
 | OpenCode | `output.args.command` | `.opencode/plugins/fm-primary-pretool-check.js` passes one `--command` argument and throws only for exit 2. |

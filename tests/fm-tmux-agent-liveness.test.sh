@@ -47,24 +47,26 @@ chmod +x "$LAB/shim/tmux"
 PATH="$LAB/shim:$PATH"
 export PATH
 
-# Stand-in "harness" binaries. These are SYMLINKS to a real long-running system
-# binary, never copies: a copied platform binary fails code-signing validation
-# and is killed on macOS arm64. The symlink name is what the kernel records as
-# the executable identity, which is exactly the signal under test.
-ln -s "$SLEEP_BIN" "$LAB/bin/claude-link"
-ln -s "$SLEEP_BIN" "$LAB/bin/pi"
-ln -s "$SLEEP_BIN" "$LAB/bin/notaharness"
+# Stand-in "harness" binaries are bash symlinks that keep the named parent alive
+# while a sleep child runs.
+# This preserves the executable identity without relying on multicall coreutils
+# dispatch, where a sleep symlink named after a harness can select the wrong
+# applet from argv[0].
+ln -s /bin/bash "$LAB/bin/claude-link"
+ln -s /bin/bash "$LAB/bin/copilot"
+ln -s /bin/bash "$LAB/bin/pi"
+ln -s /bin/bash "$LAB/bin/notaharness"
 # muse's installed binary is muse-bin-<version>: the launcher execs it, so the
 # version is the LIVE process name and it changes on every auto-update. Unlike
 # Claude Code's version-named binary there is no `muse` path component to fall
 # back on (~/.local/bin/muse-bin-<version>), so the executable name is the ONLY
 # signal, and `muse` alone is a common English fragment that must not widen into
 # a substring match. The last two names are the decoys that would be misread.
-ln -s "$SLEEP_BIN" "$LAB/bin/muse-bin-0.1.0-R708.1"
-ln -s "$SLEEP_BIN" "$LAB/bin/musescore"
-ln -s "$SLEEP_BIN" "$LAB/bin/amuse"
-ln -s "$SLEEP_BIN" "$LAB/bin/muse-binary"
-ln -s "$SLEEP_BIN" "$LAB/bin/muse-bind"
+ln -s /bin/bash "$LAB/bin/muse-bin-0.1.0-R708.1"
+ln -s /bin/bash "$LAB/bin/musescore"
+ln -s /bin/bash "$LAB/bin/amuse"
+ln -s /bin/bash "$LAB/bin/muse-binary"
+ln -s /bin/bash "$LAB/bin/muse-bind"
 
 # A launcher whose own process identity is a bare shell, running the harness as
 # a child in the same foreground process group - the shape the real Pi Launcher
@@ -72,7 +74,7 @@ ln -s "$SLEEP_BIN" "$LAB/bin/muse-bind"
 # false `dead`.
 cat > "$LAB/bin/agent-launcher" <<SH
 #!/bin/sh
-"$LAB/bin/pi" 900 &
+"$LAB/bin/pi" -c '"$SLEEP_BIN" 900 & wait' &
 wait
 SH
 chmod +x "$LAB/bin/agent-launcher"
@@ -150,23 +152,28 @@ assert_sources_disagree() {  # <target> <label>
 # tmux and ps, while Linux can expose the symlink name through both, so the
 # version-string case below owns the cross-platform divergence assertion.
 
-new_window agent "$LAB/bin/claude-link" 900
+new_window agent "$LAB/bin/claude-link" -c "\"$SLEEP_BIN\" 900 & wait"
 wait_for_state "$SESSION:agent" alive \
   || fail "a running harness-named foreground process must classify alive"
 pass "tmux liveness: a harness-named foreground process classifies alive"
+
+new_window copilot "$LAB/bin/copilot" -c "\"$SLEEP_BIN\" 900 & wait"
+wait_for_state "$SESSION:copilot" alive \
+  || fail "a running Copilot CLI foreground process must classify alive"
+pass "tmux liveness: a Copilot CLI foreground process classifies alive"
 
 # --- muse's version-suffixed binary name ------------------------------------
 # A muse crewmate pane misclassified here reads as a dead endpoint, so a healthy
 # worker would be torn down or relaunched. The decoys below are what keep the
 # fix from being a substring match that claims unrelated programs.
 
-new_window muse "$LAB/bin/muse-bin-0.1.0-R708.1" 900
+new_window muse "$LAB/bin/muse-bin-0.1.0-R708.1" -c "\"$SLEEP_BIN\" 900 & wait"
 wait_for_state "$SESSION:muse" alive \
   || fail "muse's version-suffixed binary name must classify alive"
 pass "tmux liveness: muse's version-suffixed muse-bin-<version> classifies alive"
 
 for decoy in musescore amuse muse-binary muse-bind; do
-  new_window "decoy-$decoy" "$LAB/bin/$decoy" 900
+  new_window "decoy-$decoy" "$LAB/bin/$decoy" -c "\"$SLEEP_BIN\" 900 & wait"
   wait_for_state "$SESSION:decoy-$decoy" ambiguous \
     || fail "'$decoy' merely contains 'muse' and must not classify as a live agent pane"
 done
@@ -200,7 +207,7 @@ fi
 
 # --- neither source names a harness: no invented agent ----------------------
 
-new_window unknown bash -c "exec -a 2.1.220 '$LAB/bin/notaharness' 900"
+new_window unknown bash -c "exec -a 2.1.220 '$LAB/bin/notaharness' -c '\"$SLEEP_BIN\" 900 & wait'"
 wait_for_state "$SESSION:unknown" ambiguous \
   || fail "a foreground process no name source attributes must stay ambiguous"
 pass "tmux liveness: a process neither name source attributes stays ambiguous rather than inventing an agent"

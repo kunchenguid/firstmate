@@ -68,6 +68,8 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 GRACE=${FM_GUARD_GRACE:-300}
 WATCH="$SCRIPT_DIR/fm-watch.sh"
 CLAUDE_MODE=0
+STOP_HOOK_ACTIVE_OVERRIDE=
+SESSION_ID_OVERRIDE=
 SYNC_WAIT_MS=${FM_CLAUDE_AUTOARM_SYNC_WAIT_MS:-800}
 EPOCH_FRESH=${FM_CLAUDE_AUTOARM_EPOCH_FRESH:-15}
 BLOCK_BUDGET=${FM_CLAUDE_TURNEND_BLOCK_BUDGET:-3}
@@ -75,10 +77,26 @@ case "$SYNC_WAIT_MS" in ''|*[!0-9]*) SYNC_WAIT_MS=800 ;; esac
 case "$EPOCH_FRESH" in ''|*[!0-9]*|0) EPOCH_FRESH=15 ;; esac
 case "$BLOCK_BUDGET" in ''|*[!0-9]*|0) BLOCK_BUDGET=3 ;; esac
 
-for arg in "$@"; do
-  case "$arg" in
-    --claude) CLAUDE_MODE=1 ;;
-    *) echo "usage: $(basename "$0") [--claude]" >&2; exit 2 ;;
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --claude)
+      CLAUDE_MODE=1
+      shift
+      ;;
+    --stop-active)
+      [ "$#" -gt 1 ] || { echo "usage: $(basename "$0") [--claude] [--stop-active true|false --session-id <id>]" >&2; exit 2; }
+      STOP_HOOK_ACTIVE_OVERRIDE=$2
+      shift 2
+      ;;
+    --session-id)
+      [ "$#" -gt 1 ] || { echo "usage: $(basename "$0") [--claude] [--stop-active true|false --session-id <id>]" >&2; exit 2; }
+      SESSION_ID_OVERRIDE=$2
+      shift 2
+      ;;
+    *)
+      echo "usage: $(basename "$0") [--claude] [--stop-active true|false --session-id <id>]" >&2
+      exit 2
+      ;;
   esac
 done
 
@@ -89,23 +107,29 @@ done
 
 # Read the whole turn-end hook payload once; never block on unreadable/absent
 # stdin.
-PAYLOAD=$(cat 2>/dev/null || true)
-[ -n "$PAYLOAD" ] || exit 0
+if [ -n "$STOP_HOOK_ACTIVE_OVERRIDE" ]; then
+  case "$STOP_HOOK_ACTIVE_OVERRIDE" in true|false) ;; *) exit 0 ;; esac
+  STOP_HOOK_ACTIVE=$STOP_HOOK_ACTIVE_OVERRIDE
+  PAYLOAD='{}'
+else
+  PAYLOAD=$(cat 2>/dev/null || true)
+  [ -n "$PAYLOAD" ] || exit 0
 
-# jq is the repo's established JSON dependency (bin/fm-x-poll.sh uses the same
-# "missing jq -> silent no-op" degrade). Without it we cannot safely read the
-# loop-guard field, so we must never block - fail open, not noisy.
-command -v jq >/dev/null 2>&1 || exit 0
+  # jq is the repo's established JSON dependency (bin/fm-x-poll.sh uses the same
+  # "missing jq -> silent no-op" degrade). Without it we cannot safely read the
+  # loop-guard field, so we must never block - fail open, not noisy.
+  command -v jq >/dev/null 2>&1 || exit 0
 
-STOP_HOOK_ACTIVE=$(printf '%s' "$PAYLOAD" | jq -r '
-  if type != "object" then error("payload")
-  elif has("stopHookActive") then
-    if ((.stopHookActive | type) == "boolean") then .stopHookActive else error("stopHookActive") end
-  elif has("stop_hook_active") then
-    if ((.stop_hook_active | type) == "boolean") then .stop_hook_active else error("stop_hook_active") end
-  else false
-  end
-' 2>/dev/null) || exit 0
+  STOP_HOOK_ACTIVE=$(printf '%s' "$PAYLOAD" | jq -r '
+    if type != "object" then error("payload")
+    elif has("stopHookActive") then
+      if ((.stopHookActive | type) == "boolean") then .stopHookActive else error("stopHookActive") end
+    elif has("stop_hook_active") then
+      if ((.stop_hook_active | type) == "boolean") then .stop_hook_active else error("stop_hook_active") end
+    else false
+    end
+  ' 2>/dev/null) || exit 0
+fi
 if [ "$CLAUDE_MODE" -eq 0 ] && [ "$STOP_HOOK_ACTIVE" = "true" ]; then
   exit 0
 fi
@@ -133,7 +157,11 @@ BUDGET_LOCK="$STATE/.turnend-claude-blocks.lock"
 OWNER_LOCK="$STATE/.claude-autoarm.lock"
 FAILURE_NOTICE="$STATE/.claude-autoarm-failure-notified"
 FAILURE_ALARM="$STATE/.claude-autoarm-failure-alarmed"
-SESSION_ID=$(printf '%s' "$PAYLOAD" | jq -r '.session_id // "unknown"' 2>/dev/null || printf 'unknown')
+if [ -n "$SESSION_ID_OVERRIDE" ]; then
+  SESSION_ID=$SESSION_ID_OVERRIDE
+else
+  SESSION_ID=$(printf '%s' "$PAYLOAD" | jq -r '.session_id // "unknown"' 2>/dev/null || printf 'unknown')
+fi
 budget_reset() {
   [ "$CLAUDE_MODE" -eq 1 ] || return 0
   fm_lock_try_acquire "$BUDGET_LOCK" || return 0

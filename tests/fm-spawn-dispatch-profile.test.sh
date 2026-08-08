@@ -415,6 +415,28 @@ test_codex_omits_invalid_max_effort() {
   pass "codex omits unsupported max effort instead of passing a bad config value"
 }
 
+test_copilot_threads_model_effort_and_worker_hook() {
+  local rec id out status launch hook
+  id=profile-copilot-z4b
+  rec=$(make_spawn_case profile-copilot copilot "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --model gpt-5.6-sol --effort xhigh)
+  status=$?
+  expect_code 0 "$status" "copilot spawn with profile flags should succeed"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" copilot gpt-5.6-sol xhigh
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "copilot --yolo --autopilot --model 'gpt-5.6-sol' --effort 'xhigh' -i" \
+    "copilot launch did not thread autonomy, model, effort, and initial instructions"
+  hook="$WT_DIR/.github/hooks/fm-busy-state.json"
+  assert_present "$hook" "copilot spawn did not install its worker lifecycle hook"
+  python3 -m json.tool "$hook" >/dev/null || fail "copilot worker lifecycle hook is invalid JSON"
+  assert_grep "state=busy source=fm-spawn" "$HOME_DIR/state/$id.busy-state" \
+    "copilot spawn did not seed semantic busy state"
+  pass "copilot receives profile flags and a semantic worker lifecycle hook"
+}
+
 test_grok_threads_model_and_reasoning_effort() {
   local rec id out status launch
   id=profile-grok-z5
@@ -686,6 +708,7 @@ test_active_dispatch_profile_allows_raw_launch_command
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
 test_codex_omits_invalid_max_effort
+test_copilot_threads_model_effort_and_worker_hook
 test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort
 test_grok_omits_invalid_xhigh_reasoning_effort

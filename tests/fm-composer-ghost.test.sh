@@ -501,9 +501,9 @@ test_all_tmux_harness_composers_share_classification() {
   dir="$TMP_ROOT/all-harness-composers"; mkdir -p "$dir"
   fb=$(make_fake_tmux "$dir")
   capture="$dir/styled.txt"
-  for harness in claude codex opencode pi pi-signed grok; do
+  for harness in claude codex copilot opencode pi pi-signed grok; do
     case "$harness" in
-      claude) printf '╭────────────╮\n│ ❯ \033[2mtry\033[0m      │\n╰────────────╯\n' > "$capture" ;;
+      claude|copilot) printf '╭────────────╮\n│ ❯ \033[2mtry\033[0m      │\n╰────────────╯\n' > "$capture" ;;
       codex) printf '╭────────────╮\n│ › \033[2mtip\033[0m      │\n╰────────────╯\n' > "$capture" ;;
       opencode) printf '╭────────────╮\n│ >          │\n╰────────────╯\n' > "$capture" ;;
       pi|pi-signed) printf '╭────────────╮\n│            │\n╰────────────╯\n' > "$capture" ;;
@@ -514,7 +514,7 @@ test_all_tmux_harness_composers_share_classification() {
     [ "$out" = empty ] \
       || fail "$harness aligned idle composer should be empty, got '$out'"
     case "$harness" in
-      claude|grok) printf '╭────────────╮\n│ ❯ fix      │\n╰────────────╯\n' > "$capture" ;;
+      claude|copilot|grok) printf '╭────────────╮\n│ ❯ fix      │\n╰────────────╯\n' > "$capture" ;;
       codex) printf '╭────────────╮\n│ › fix      │\n╰────────────╯\n' > "$capture" ;;
       opencode|pi|pi-signed) printf '╭────────────╮\n│ > fix      │\n╰────────────╯\n' > "$capture" ;;
     esac

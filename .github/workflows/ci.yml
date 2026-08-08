@@ -281,6 +281,51 @@ jobs:
             ${{ runner.temp }}/fm-herdr/default-server.log
           if-no-files-found: warn
 
+  # Native-Windows discovery lane for the experimental Zellij backend.
+  # Firstmate's control plane and every task pane run under Git Bash while
+  # Zellij itself is the native Windows binary.
+  tests-zellij-windows:
+    name: Zellij backend (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Require Git Bash tools
+        run: |
+          set -eu
+          command -v bash >/dev/null || { echo "::error::bash is required"; exit 1; }
+          command -v jq >/dev/null || { echo "::error::jq is required"; exit 1; }
+          command -v unzip >/dev/null || { echo "::error::unzip is required"; exit 1; }
+          jq --version
+      - name: Install pinned Zellij
+        run: |
+          set -eu
+          bin_dir="$(cygpath -u "$RUNNER_TEMP")/bin"
+          bin/fm-install-zellij.sh "$bin_dir"
+          cygpath -w "$bin_dir" >> "$GITHUB_PATH"
+      - name: Configure Git Bash task panes
+        run: |
+          set -eu
+          config_dir="$(cygpath -u "$RUNNER_TEMP")/zellij-config"
+          mkdir -p "$config_dir"
+          printf 'default_shell "C:/Program Files/Git/bin/bash.exe"\n' > "$config_dir/config.kdl"
+          printf 'ZELLIJ_CONFIG_DIR=%s\n' "$(cygpath -w "$config_dir")" >> "$GITHUB_ENV"
+          printf 'SHELL=C:/Program Files/Git/bin/bash.exe\n' >> "$GITHUB_ENV"
+      - name: Run native-Windows Zellij smoke test
+        run: |
+          set -eu
+          zellij --version
+          output=$(bash tests/fm-backend-zellij-smoke.test.sh)
+          printf '%s\n' "$output"
+          case "$output" in
+            *"skip:"*) echo "::error::required Windows Zellij smoke test skipped"; exit 1 ;;
+          esac
+
   # Aggregate per-lane timing into one summary artifact for critical-path review.
   tests-timing-aggregate:
     name: Behavior timing aggregate

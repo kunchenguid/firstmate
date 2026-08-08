@@ -7,7 +7,7 @@ Firstmate ships two session-open tiers, and the tier is a property of the harnes
 
 | Tier | What the adapter does | Used by |
 | --- | --- | --- |
-| Run | Executes `bin/fm-session-start.sh` in the hook and lets its ordered digest land in model context before the first turn. | Claude, `codex exec`, Pi / pi-signed |
+| Run | Executes `bin/fm-session-start.sh` in the hook and lets its ordered digest land in model context before the first turn. | Claude, GitHub Copilot CLI, `codex exec`, Pi / pi-signed |
 | Nudge | Asks the agent to run the digest through the native adapter or the tracked session-start instruction. | Grok, OpenCode, Codex interactive TUI, and run-tier sources routed to the nudge |
 
 The run tier exists because the nudge can only ask.
@@ -57,7 +57,7 @@ The Guard Predicates section of [`turnend-guard.md`](turnend-guard.md#guard-pred
 The nudge payload starts with U+2063 and the stable `FIRSTMATE_OP: ` label, carries the current `session-start` protocol kind, and retains exactly ``Run `bin/fm-session-start.sh` now, exactly once, before executing any other instructions.`` as its body.
 The Ahoy skill owns the rule that this marked operational input is never a captain-authored session boundary, including its narrow legacy compatibility cases, and its own step 0 helm check is the fallback that protects a nudge-tier harness whose first command is a skill.
 
-Before printing, the nudge wrapper reads `state/.lock` and walks at most eight parents from its own pid in its own separate, hard-coded loop, independent of `bin/fm-lock.sh`'s ancestry walk (`fm_harness_ancestry_pid()` in `bin/fm-session-lock-lib.sh`, which now walks up to sixteen parents and can extend past a claude-named match to a still-more-ancestral one) and of Pi's `lockOwnership()`.
+Before printing, the nudge wrapper reads `state/.lock` and walks at most sixteen parents from its own pid in its own separate, hard-coded loop, independent of `bin/fm-lock.sh`'s ancestry walk (`fm_harness_ancestry_pid()` in `bin/fm-session-lock-lib.sh`, which uses the same bound and can extend past a claude-named match to a still-more-ancestral one) and of Pi's `lockOwnership()`.
 If the lock names a live pid in that ancestry, session start already ran in this harness session and the wrapper stays silent.
 Every path in both wrappers exits 0, including malformed state and adapter errors, because a Claude SessionStart exit 2 blocks session initialization.
 A lock another session holds and a truncated digest therefore surface as digest text, while broken GitHub auth surfaces through the deferred network result inline or as a wake; none becomes a refusal to open the session.
@@ -67,6 +67,7 @@ A lock another session holds and a truncated digest therefore surface as digest 
 | Harness | Tier | Tracked transport | Current compatibility |
 | --- | --- | --- | --- |
 | Claude | Run | `.claude/settings.json` registers one unmatched `SessionStart` hook, invoked through `CLAUDE_PROJECT_DIR` with a 180s timeout; the wrapper reads `source` from the hook payload. | Native stdout context injection is supported. |
+| GitHub Copilot CLI | Run | `.github/hooks/firstmate.json` registers `sessionStart`; `bin/fm-copilot-hook.sh` passes the native payload to the run wrapper and returns its digest as `additionalContext`. | Native command-hook context injection is supported for new and resumed sessions. |
 | Codex exec | Run | `.codex/hooks.json` anchors to the hook process working directory, verifies a Firstmate-shaped hook-bearing root, and pipes the hook payload into the wrapper with a 180s timeout. | Native stdout context injection is supported under `codex exec`. |
 | Codex interactive TUI | Nudge | The tracked `AGENTS.md` session-start instruction and Ahoy step-zero fallback remain visible when the project hook does not fire. | Codex 0.146.0 does not fire the tracked project `SessionStart` hook in its interactive TUI. Firstmate ships no global hook and does not depend on one. |
 | Pi / pi-signed | Run | `.pi/extensions/fm-primary-turnend-guard.ts` maps `session_start` reasons `startup`, `new`, `resume`, and `fork` onto wrapper sources, handles `session_compact` as the compaction equivalent, and injects the output with `pi.sendMessage`. | The custom message reaches model context without racing an initial positional prompt. Pi's `reload` reason is deliberately unmapped, as it always was. |

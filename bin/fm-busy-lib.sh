@@ -182,6 +182,7 @@ fm_busy_sources_for_harness() {  # <harness>
       fm_busy_codex_semantic_source || { printf ''; return 0; }
       adapter='codex-hook codex-appserver'
       ;;
+    copilot*) adapter=copilot-hook ;;
     opencode*) adapter=opencode-plugin ;;
     pi|pi-signed) adapter=pi-ext ;;
     kimi*)

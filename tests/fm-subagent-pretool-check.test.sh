@@ -32,14 +32,14 @@ PRESERVED_TOOLS='Bash Edit Read Write Skill ToolSearch WebFetch WebSearch Notebo
 
 # Session-local todo-list tools. They match a delegation stem but create no
 # runnable work, so the guard's plan-only exclusion must allow them.
-PLAN_ONLY_TOOLS='TaskCreate TaskUpdate'
+PLAN_ONLY_TOOLS='TaskCreate TaskUpdate task_complete'
 
 # Names the plan-only exclusion must NOT release. Five of them contain a
 # plan-only name as a substring and would be let through by a substring rather
 # than exact-name match; bare Task is what a shortened entry of "task" would
 # release. Together they make the exact-name contract testable instead of
 # assumed.
-PLAN_ONLY_NEAR_MISSES='TaskCreateAgent TaskCreateWorktree TaskUpdateAgent RemoteTaskCreate Task TaskCreator'
+PLAN_ONLY_NEAR_MISSES='TaskCreateAgent TaskCreateWorktree TaskUpdateAgent TaskCompleteAgent RemoteTaskCreate Task TaskCreator'
 
 run_tool() {
   local tool=$1 rc=0
@@ -112,16 +112,16 @@ test_guard_allows_ordinary_and_observe_only_tools() {
   pass "the guard leaves ordinary tools and observe-or-stop operations alone"
 }
 
-test_guard_allows_session_local_todo_tools() {
+test_guard_allows_session_local_task_bookkeeping() {
   # These write, so they are not observe-or-stop, but what they write is the
-  # harness's session-local todo list: no executor, no agent, no worktree, no
-  # schedule, nothing that outlives the session. Denying them stops the primary
-  # tracking its own plan and grants no delegation power in exchange.
+  # harness's session-local task bookkeeping: no executor, no agent, no
+  # worktree, no schedule, nothing that outlives the session. Denying them stops
+  # the primary tracking or completing its work and grants no delegation power.
   local tool
   for tool in $PLAN_ONLY_TOOLS; do
-    expect_allow "session-local todo tool" "$tool"
+    expect_allow "session-local task bookkeeping tool" "$tool"
   done
-  pass "the guard leaves the session-local todo list alone"
+  pass "the guard leaves session-local task bookkeeping alone"
 }
 
 test_plan_only_exclusion_is_exact_name() {
@@ -131,7 +131,7 @@ test_plan_only_exclusion_is_exact_name() {
   for tool in $PLAN_ONLY_NEAR_MISSES; do
     expect_deny "plan-only near miss" "$tool"
   done
-  pass "the plan-only exclusion releases exactly two names and nothing that merely contains them"
+  pass "the plan-only exclusion releases exactly three names and nothing that merely contains them"
 }
 
 test_guard_never_classifies_mcp_tools() {
@@ -279,7 +279,7 @@ test_missing_jq_stdin_transport_fails_open() {
 test_guard_denies_every_currently_known_delegation_tool
 test_guard_denies_hypothetical_future_tools
 test_guard_allows_ordinary_and_observe_only_tools
-test_guard_allows_session_local_todo_tools
+test_guard_allows_session_local_task_bookkeeping
 test_plan_only_exclusion_is_exact_name
 test_guard_never_classifies_mcp_tools
 test_deny_message_defers_to_intake_classification

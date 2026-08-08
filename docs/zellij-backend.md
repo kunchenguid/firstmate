@@ -14,6 +14,10 @@ Prerequisites:
 - `jq` for JSON responses.
 - The universal harness and toolchain requirements in [`configuration.md`](configuration.md#toolchain).
 
+The native-Windows experiment uses Git Bash for Firstmate and native Windows builds of Zellij, Git, and the worker CLI.
+Configure Zellij's `default_shell` as `C:/Program Files/Git/bin/bash.exe` so every task pane runs the Bash commands that Firstmate sends.
+PowerShell and `cmd.exe` task panes are not supported by the current adapter.
+
 Select it with local `config/backend` containing `zellij`, `FM_BACKEND=zellij` for one launch, or an explicit request to Firstmate.
 It is never auto-detected.
 A spawn stops before creating a session or acquiring a worktree when Zellij or `jq` is missing or Zellij is below 0.44.
@@ -90,6 +94,7 @@ Real test cleanup uses only an isolated non-`firstmate` session and the guard in
 ## Active limits
 
 - Zellij is experimental and explicit-only.
+- Native Windows is limited to the Git Bash configuration above and the backend smoke path; full Firstmate lifecycle support is not yet claimed.
 - All homes share one session and tab bar; scoped titles prevent cross-home identity collisions but do not create per-home visual containers.
 - There is no native busy or push-event signal, so supervision uses capture/hash polling for screen changes and each harness adapter's semantic lifecycle for worker state.
   Grok alone retains its isolated rendered-tail fallback.
@@ -104,7 +109,9 @@ Real test cleanup uses only an isolated non-`firstmate` session and the guard in
 ```sh
 tests/fm-backend-zellij.test.sh
 tests/fm-backend-zellij-smoke.test.sh
+bin/fm-install-zellij.sh <destination-directory>
 ```
 
 The real smoke test uses a unique session and guarded deletion.
+CI runs that smoke test against the pinned native Windows Zellij build under Git Bash.
 [`verification/runtime-backends.md`](verification/runtime-backends.md#zellij) records the active CLI matrix and lifecycle evidence.

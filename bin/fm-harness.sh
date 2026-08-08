@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Detect the agent harness this process tree runs on.
-# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|muse|unknown
+# Usage: fm-harness.sh                  print own harness: claude|codex|copilot|opencode|pi|pi-signed|grok|kimi|muse|unknown
 #        fm-harness.sh crew             print the effective CREWMATE harness
 #                                        (config/crew-harness; "default" resolves to own)
 #        fm-harness.sh secondmate       print the harness the PRIMARY uses to launch
@@ -30,8 +30,8 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 detect_own() {
   # Layer 1: environment markers for verified harnesses.
   # Keep marker detection before ancestry detection as an explicit precedence rule.
-  # Only claude, pi, and grok set verified markers of their own; codex, opencode,
-  # kimi, and muse are markerless, so a foreign marker retained in a terminal
+  # Only claude, pi, and grok set verified markers of their own; codex, copilot,
+  # opencode, kimi, and muse are markerless, so a foreign marker retained in a terminal
   # multiplexer's stored environment can silently misidentify one of them before
   # ancestry is consulted. This is a precedence hazard, not evidence that
   # CLAUDECODE inheritance into a kimi child was observed; it was not observed.
@@ -59,11 +59,15 @@ detect_own() {
   # multiplexer's stored environment, which is the precedence hazard above.
   # Layer 2: walk the parent chain and match the command name.
   local pid=$$ comm args
-  for _ in 1 2 3 4 5 6 7 8; do
+  # Copilot CLI's repository-hook executor adds more process layers than its
+  # ordinary shell tool path, so keep this depth aligned with session-lock
+  # ancestry rather than detecting the same live session differently in hooks.
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
     case "$(basename -- "$comm")" in
       *claude*) echo claude; return ;;
       *codex*) echo codex; return ;;
+      copilot) echo copilot; return ;;
       *opencode*) echo opencode; return ;;
       *grok*) echo grok; return ;;
       kimi) echo kimi; return ;;
@@ -81,10 +85,17 @@ detect_own() {
         case "$args" in
           *claude*) echo claude; return ;;
           *codex*) echo codex; return ;;
+          *copilot*) echo copilot; return ;;
           *opencode*) echo opencode; return ;;
           *grok*) echo grok; return ;;
           *" pi "*|*/pi) echo pi; return ;;
         esac ;;
+      *)
+        args=$(ps -o args= -p "$pid" 2>/dev/null)
+        case "${args%% *}" in
+          */copilot|copilot) echo copilot; return ;;
+        esac
+        ;;
     esac
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
     if [ -z "$pid" ] || [ "$pid" -le 1 ]; then

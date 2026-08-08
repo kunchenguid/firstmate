@@ -160,6 +160,20 @@ test_grok_command_sources_effective_config() {
   pass "grok rendered command sources the effective x-mode config"
 }
 
+test_copilot_uses_async_bash_notifications() {
+  local out ordinary repair
+  out=$("$RENDER" --harness copilot)
+  assert_contains "$out" "primary harness: copilot" "copilot heading missing"
+  assert_contains "$out" "Mode: GitHub Copilot CLI background notification." "copilot protocol missing"
+  assert_contains "$out" "standalone asynchronous Bash tool call" "copilot async ownership missing"
+  assert_not_contains "$out" "foreground checkpoint" "copilot must not use Codex foreground checkpoints"
+  ordinary=$(printf '%s\n' "$out" | grep -F -- '- Ordinary wake:')
+  assert_contains "$ordinary" "asynchronous Bash" "copilot ordinary wake lost async re-arm"
+  repair=$("$RENDER" --harness copilot --repair-line)
+  assert_contains "$repair" "standalone asynchronous Bash call" "copilot repair line lost async ownership"
+  pass "copilot supervision uses native asynchronous Bash completion notifications"
+}
+
 test_pi_snippet_uses_effective_extension_path() {
   local home out turnend watch
   home="$TMP_ROOT/pi-home"
@@ -184,4 +198,5 @@ test_cross_harness_ordinary_continuation_and_repair_matrix
 test_pi_signed_preserves_identity_with_pi_supervision_protocol
 test_grok_is_background_notify
 test_grok_command_sources_effective_config
+test_copilot_uses_async_bash_notifications
 test_pi_snippet_uses_effective_extension_path

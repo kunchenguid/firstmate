@@ -55,11 +55,11 @@ Three exclusions keep the shape test from producing false positives.
   These observe or stop work that already exists rather than creating it, and denying them at this layer could strand already-running work with no way to inspect or end it.
   A Claude primary's optional local deny list may still remove them from the schema.
   The shipped guard stays narrower on purpose so it can never be the reason a runaway task cannot be stopped.
-- `PLAN_ONLY_TOOLS`: the exact names `taskcreate` and `taskupdate` are allowed.
-  These write, which is why they are a separate list rather than more entries in the observe-or-stop one, but what they write is the harness's session-local todo list.
-  That list has no executor: it spawns no agent, allocates no worktree, registers no schedule, and starts nothing that could outlive the session or escape a firstmate guard.
+- `PLAN_ONLY_TOOLS`: the exact normalized names `taskcreate`, `taskupdate`, and `taskcomplete` are allowed.
+  These write, which is why they are a separate list rather than more entries in the observe-or-stop one, but what they write is only harness/session task bookkeeping.
+  That bookkeeping has no executor: it spawns no agent, allocates no worktree, registers no schedule, and starts nothing that could outlive the session or escape a firstmate guard.
   So it is not the "work, agent, schedule, or isolated workspace that firstmate would not know about" the guard exists to stop, and the stem match on `task` is a false positive rather than a policy.
-  The cost of the false positive was concrete: the primary could not track its own plan, and the deny text told it to run `bin/fm-brief.sh` and `bin/fm-spawn.sh` to create a todo entry.
+  The cost of the false positive was concrete: the primary could not track or complete its own work, and the deny text told it to dispatch unrelated work instead.
 
 Both exclusion lists match the whole normalized name, never a substring, so neither can widen by accident: `TaskCreateAgent` and `RemoteTaskCreate` stay denied.
 Folding the two lists together would be the drift risk, because the observe-or-stop rationale is not true of a tool that writes.
@@ -110,8 +110,8 @@ It is not tracked for two reasons.
 The width of the list remains a captain-owned decision, because denying some of these changes how the captain works with the primary session.
 Keep it as one flat local array that is reviewable at a glance and narrowable in one line.
 In particular `TaskOutput`, `TaskStop`, `TaskGet`, `TaskList`, and `CronList` only observe or stop work that already exists, yet the recommended local deny list still removes all five by default.
-The hook deliberately allows those five, so the shipped guard can never strand a runaway task with no way to inspect or end it, and it allows `TaskCreate` and `TaskUpdate` too, so it can never be the reason the primary cannot track its own plan.
-The two session-local todo tools are no longer recommended for local denial at all, because they write only the harness's session-local todo list, which has no executor and spawns nothing, so removing them from the schema removes no delegation power.
+The hook deliberately allows those five, so the shipped guard can never strand a runaway task with no way to inspect or end it, and it allows `TaskCreate`, `TaskUpdate`, and Copilot's `task_complete` too, so it can never be the reason the primary cannot track or complete its own work.
+These session-local bookkeeping tools are not recommended for local denial because they have no executor and spawn nothing, so removing them from the schema removes no delegation power.
 Denying them there would instead reproduce at a stronger layer the exact false positive the shipped guard now avoids, leaving anyone who adopts this list verbatim unable to let a primary track its own plan.
 Narrowing the list further, including the five observe-or-stop names, is the captain's call, and this local list is the only layer that can remove a todo tool from the primary's schema.
 
@@ -181,6 +181,7 @@ Applicability turns on one question: does the harness expose built-in delegation
 | Harness | Delegation surface | Status |
 | --- | --- | --- |
 | Claude | 16 known tools, listed above | Scoped guard wired and live-verified; untracked local deny list verified and recommended. |
+| GitHub Copilot CLI | Built-in `task` plus custom-agent tools | Scoped guard wired through the repository-wide `preToolUse` hook; the adapter passes every native `toolName` to the shape classifier. |
 | Codex | none | Not applicable, verified empirically below. Codex 0.144.1 exposes no subagent, sub-task, or delegated-agent tool, so there is nothing to remove or intercept. `.codex/hooks.json` is unchanged. |
 | Grok | present, exact tokens unconfirmed | Not wired pending live verification. See below. |
 | OpenCode | present, exact tokens unconfirmed | Not wired pending live verification. See below. |
@@ -377,5 +378,5 @@ Without an independent Relay need, unaccounted primary work therefore reads as i
 
 The durable fix for that class is to make the guards treat "the primary is doing project-shaped work with zero `state/*.meta` files" as a suspicious state rather than an idle one.
 That would catch this class on any harness, including work created through `Bash`.
-This change fences only the Claude tool surface.
+The shipped hook now fences the Claude and GitHub Copilot CLI tool surfaces.
 That is a separate change to `bin/fm-supervision-lib.sh` and `bin/fm-turnend-guard.sh` and is out of scope here.

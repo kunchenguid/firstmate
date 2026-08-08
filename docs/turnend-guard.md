@@ -45,6 +45,8 @@ If `jq` is missing or hook stdin is empty, the guard exits 0 because it cannot s
 
 - Claude registers two `Stop` hooks in `.claude/settings.json`, both anchored through `CLAUDE_PROJECT_DIR`: `bin/fm-turnend-guard.sh --claude`, and `bin/fm-claude-stop-autoarm.sh` with `asyncRewake: true` and `timeout: 28800`.
 - Codex registers a `Stop` hook in `.codex/hooks.json`, anchors the executable to the hook process working directory, verifies a Firstmate-shaped hook-bearing root, and passes the original payload to the shared guard.
+- GitHub Copilot CLI registers `agentStop` in `.github/hooks/firstmate.json`.
+  `bin/fm-copilot-hook.sh` translates the native camelCase payload into the shared guard's explicit loop fields and converts an exit-2 refusal into Copilot's native block response.
 - OpenCode listens for `session.idle` in `.opencode/plugins/fm-primary-turnend-guard.js`, lets the watcher coordinator act first, and calls `client.session.promptAsync` once when the guard returns 2.
 - Pi listens for `agent_settled` in `.pi/extensions/fm-primary-turnend-guard.ts`, runs once per logical agent run, and calls `pi.sendUserMessage(..., { deliverAs: "followUp" })` once when the guard returns 2.
 - Grok registers a `Stop` hook in `.grok/hooks/fm-primary-turnend-guard.json` and delegates capability selection to `bin/fm-turnend-guard-grok.sh`.
@@ -56,6 +58,7 @@ If `jq` is missing or hook stdin is empty, the guard exits 0 because it cannot s
   `tests/fm-turnend-guard.test.sh` pins that inventory so neither the guarded set nor the exception can change silently.
 
 Claude and Codex can block a Stop directly with exit status 2 and stderr.
+GitHub Copilot CLI blocks through the native decision object returned by its adapter.
 Both payloads carry `stop_hook_active`.
 In the default Codex mode, a true value lets the second stop finish after one forced continuation.
 

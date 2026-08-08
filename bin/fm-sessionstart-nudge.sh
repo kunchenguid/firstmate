@@ -28,7 +28,7 @@ lock_is_in_ancestry() {
     ''|*[!0-9]*|1) return 1 ;;
   esac
   kill -0 "$lock_pid" 2>/dev/null || return 1
-  for _ in 1 2 3 4 5 6 7 8; do
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
     [ "$pid" = "$lock_pid" ] && return 0
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
     [ -n "$pid" ] && [ "$pid" -gt 1 ] || return 1

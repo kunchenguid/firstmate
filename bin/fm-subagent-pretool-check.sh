@@ -66,17 +66,17 @@ DELEGATION_STEMS='agent subagent task workflow cron schedul worktree delegate sp
 OBSERVE_ONLY_TOOLS='taskoutput taskstop taskget tasklist cronlist bashoutput killshell'
 
 # Exact lowercase tool names that match a stem above but create no RUNNABLE
-# work. These write only the harness's session-local todo list, which has no
+# work. These update only harness/session task bookkeeping, which has no
 # executor: it spawns no agent, allocates no worktree, registers no schedule,
 # and starts nothing that could outlive the session or escape a firstmate
-# guard. Denying them stops the primary tracking its own plan while granting no
-# delegation power, and the deny text would tell it to run bin/fm-brief.sh for a
-# todo entry, so the stem match here is a false positive rather than a policy.
+# guard. Denying them stops the primary tracking or completing its own work
+# while granting no delegation power, so the stem match here is a false
+# positive rather than a policy.
 # This is a separate list from OBSERVE_ONLY_TOOLS on purpose: these tools WRITE,
 # so folding them into a list documented as observe-or-stop would make that
 # contract untrue. Both lists are exact-name, never substring, so neither can
 # widen by accident.
-PLAN_ONLY_TOOLS='taskcreate taskupdate'
+PLAN_ONLY_TOOLS='taskcreate taskupdate taskcomplete'
 
 TOOL=""
 TOOL_SET=0
