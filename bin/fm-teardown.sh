@@ -1890,7 +1890,22 @@ collect_descendant_task_locks() {
   local home=$1 sub_state child_meta child_id child_kind child_wt child_home task_set_lock
   local -a child_ids
   sub_state="$home/state"
-  [ -d "$sub_state" ] || return 0
+  if [ -L "$sub_state" ]; then
+    echo "REFUSED: secondmate home $home has a symbolic-link state path at $sub_state; forced teardown changed nothing" >&2
+    return 1
+  fi
+  if [ -e "$sub_state" ] && [ ! -d "$sub_state" ]; then
+    echo "REFUSED: secondmate home $home has a non-directory state path at $sub_state; forced teardown changed nothing" >&2
+    return 1
+  fi
+  if ! mkdir -p -- "$sub_state"; then
+    echo "REFUSED: secondmate home $home state directory could not be established at $sub_state; forced teardown changed nothing" >&2
+    return 1
+  fi
+  if [ -L "$sub_state" ] || [ ! -d "$sub_state" ]; then
+    echo "REFUSED: secondmate home $home state path is not a safe directory at $sub_state; forced teardown changed nothing" >&2
+    return 1
+  fi
   # Freeze this home's task SET before reading it. Everything below locks the
   # tasks that exist right now, but the later cleanup re-enumerates, so without
   # this a fresh spawn could publish a record into the gap and be mutated

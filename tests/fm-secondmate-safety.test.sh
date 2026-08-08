@@ -2080,9 +2080,9 @@ SH
   pass "secondmate force teardown preserves child worktree after unproven lock refusal"
 }
 
-test_secondmate_force_teardown_allows_operational_dir_symlinks_inside_home() {
+test_secondmate_force_teardown_allows_non_state_operational_dir_symlinks_inside_home() {
   local opdir home subhome target fakebin err log
-  for opdir in data state config projects; do
+  for opdir in data config projects; do
     home="$TMP_ROOT/symlink-inside-teardown-home-$opdir"
     subhome="$TMP_ROOT/symlink-inside-teardown-subhome-$opdir"
     target="$subhome/internal-$opdir"
@@ -2112,7 +2112,7 @@ EOF
     [ ! -e "$home/state/domain.meta" ] || fail "force teardown did not clear parent meta for inside $opdir symlink"
     grep -F 'kill-window -t =firstmate:=fm-domain' "$log" >/dev/null || fail "force teardown did not kill parent window for inside $opdir symlink"
   done
-  pass "force teardown allows operational directory symlinks inside the subhome"
+  pass "force teardown allows non-state operational directory symlinks inside the subhome"
 }
 
 test_secondmate_force_teardown_refuses_operational_dir_symlink_outside_home() {
@@ -2415,6 +2415,107 @@ hold_task_set_lock() {  # <state-dir> -> echoes "<holder-pid> <lock-path>"
     return 1
   }
   printf '%s %s\n' "$holder" "$lock"
+}
+
+seed_empty_task_set_home() {  # <tag> -> echoes "<home>|<subhome>"
+  local tag=$1 home subhome
+  home="$TMP_ROOT/$tag-home"
+  subhome="$TMP_ROOT/$tag-subhome"
+  mkdir -p "$home/state" "$home/data" "$subhome/data"
+  printf '%s\n' domain > "$subhome/.fm-secondmate-home"
+  cat > "$home/state/domain.meta" <<EOF
+window=firstmate:fm-domain
+worktree=$subhome
+project=$subhome
+harness=echo
+kind=secondmate
+mode=secondmate
+yolo=off
+home=$subhome
+projects=alpha
+EOF
+  printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
+  printf '%s|%s\n' "$home" "$subhome"
+}
+
+test_force_teardown_refuses_non_directory_descendant_state() {
+  local home subhome fakebin err log rec
+  rec=$(seed_empty_task_set_home taskset-state-file)
+  IFS='|' read -r home subhome <<EOF
+$rec
+EOF
+  printf '%s\n' 'not a state directory' > "$subhome/state"
+  err="$TMP_ROOT/taskset-state-file.err"
+  fakebin=$(make_fake_tmux "$TMP_ROOT/taskset-state-file-fake")
+  log="$TMP_ROOT/taskset-state-file-fake/tmux.log"
+  if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" \
+    FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/taskset-state-file-fake/pane.txt" \
+    "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err"; then
+    fail "forced teardown accepted a non-directory descendant state path"
+  fi
+  [ -d "$subhome" ] || fail "state-path refusal removed the descendant home"
+  [ -f "$subhome/state" ] || fail "state-path refusal changed the non-directory state path"
+  [ -e "$home/state/domain.meta" ] || fail "state-path refusal removed parent metadata"
+  grep -F 'kill-window' "$log" >/dev/null && fail "state-path refusal killed a window"
+  grep -F "$(basename "$subhome")" "$err" >/dev/null || fail "state-path refusal did not name the descendant home: $(cat "$err")"
+  grep -F 'not a directory' "$err" >/dev/null || fail "state-path refusal did not explain the concrete problem: $(cat "$err")"
+  pass "forced teardown refuses a non-directory descendant state path"
+}
+
+test_force_teardown_locks_descendant_with_absent_state() {
+  local home subhome fakebin err log rec claim_root ready release lock pid i=0
+  rec=$(seed_empty_task_set_home taskset-state-absent)
+  IFS='|' read -r home subhome <<EOF
+$rec
+EOF
+  claim_root="$TMP_ROOT/taskset-state-absent-xdg/firstmate/procevent-claims"
+  ready="$TMP_ROOT/taskset-state-absent.ready"
+  release="$TMP_ROOT/taskset-state-absent.release"
+  mkdir -p "$claim_root" "$subhome/bin"
+  printf '%s\n' "$subhome" > "$claim_root/held.claim"
+  cat > "$subhome/bin/fm-procevent.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = sweep-home ] && [ "${2:-}" = --preflight ]; then
+  : > "$FM_TASK_SET_TEST_READY"
+  while [ ! -e "$FM_TASK_SET_TEST_RELEASE" ]; do sleep 0.05; done
+  exit 1
+fi
+exit 1
+SH
+  chmod +x "$subhome/bin/fm-procevent.sh"
+  err="$TMP_ROOT/taskset-state-absent.err"
+  fakebin=$(make_fake_tmux "$TMP_ROOT/taskset-state-absent-fake")
+  log="$TMP_ROOT/taskset-state-absent-fake/tmux.log"
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" \
+    FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/taskset-state-absent-fake/pane.txt" \
+    XDG_STATE_HOME="$TMP_ROOT/taskset-state-absent-xdg" \
+    FM_TASK_SET_TEST_READY="$ready" FM_TASK_SET_TEST_RELEASE="$release" \
+    "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err" &
+  pid=$!
+  while [ ! -e "$ready" ] && kill -0 "$pid" 2>/dev/null && [ "$i" -lt 200 ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -e "$ready" ] || {
+    : > "$release"
+    wait "$pid" 2>/dev/null || true
+    fail "forced teardown did not reach the post-lock preflight: $(cat "$err")"
+  }
+  lock=$( . "$ROOT/bin/fm-wake-lib.sh"; fm_task_set_lock_path "$subhome/state" ) \
+    || fail "could not resolve the established descendant task-set lock"
+  [ -d "$subhome/state" ] || fail "forced teardown did not establish the absent state directory"
+  [ -e "$lock" ] || fail "forced teardown did not own the descendant task-set lock during preflight"
+  kill -0 "$pid" 2>/dev/null || fail "forced teardown exited before task-set ownership was observed"
+  : > "$release"
+  if wait "$pid"; then
+    fail "forced teardown ignored the staged process-event preflight refusal"
+  fi
+  [ -d "$subhome" ] || fail "post-lock refusal removed the descendant home"
+  [ -e "$home/state/domain.meta" ] || fail "post-lock refusal removed parent metadata"
+  [ ! -e "$lock" ] || fail "refused teardown left the descendant task-set lock behind"
+  grep -F 'kill-window' "$log" >/dev/null && fail "post-lock refusal killed a window"
+  pass "forced teardown locks a descendant whose state directory was absent"
 }
 
 test_force_teardown_refuses_while_a_task_is_being_published() {
@@ -2879,11 +2980,13 @@ test_secondmate_teardown_removes_plain_clone_home_without_treehouse_return
 test_secondmate_force_teardown_discards_child_work
 test_secondmate_force_teardown_refuses_child_quarantine_symlink
 test_secondmate_force_teardown_preserves_child_on_unproven_lock
-test_secondmate_force_teardown_allows_operational_dir_symlinks_inside_home
+test_secondmate_force_teardown_allows_non_state_operational_dir_symlinks_inside_home
 test_secondmate_force_teardown_refuses_operational_dir_symlink_outside_home
 test_secondmate_teardown_refuses_registered_nested_home
 test_secondmate_teardown_refuses_child_registry_nested_home
 test_secondmate_force_teardown_prevalidates_before_child_cleanup
+test_force_teardown_refuses_non_directory_descendant_state
+test_force_teardown_locks_descendant_with_absent_state
 test_force_teardown_refuses_while_a_task_is_being_published
 test_fresh_spawn_refuses_while_a_forced_teardown_owns_the_task_set
 test_fresh_remote_secondmate_spawn_refuses_while_task_set_is_owned
