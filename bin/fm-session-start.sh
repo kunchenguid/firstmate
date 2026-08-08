@@ -30,12 +30,13 @@
 #                       mutating step runs.
 #   2. bootstrap      - home-local stale Herdr projection cleanup runs only
 #                       when this session actually holds the lock. Detect-only
-#                       diagnostics always run. Bootstrap's six MUTATING sweeps
-#                       (legacy PR-check migration, secondmate convergence,
-#                       secondmate liveness, pending remote handoff retry,
-#                       X-mode artifact writes, fleet sync) also run only when
-#                       locked; the four network sweeps run in the deferred
-#                       stage rather than this synchronous bootstrap section.
+#                       diagnostics always run. Bootstrap's seven MUTATING
+#                       sweeps (legacy PR-check migration, task-identity axis
+#                       backfill, secondmate convergence, secondmate liveness,
+#                       pending remote handoff retry, X-mode artifact writes,
+#                       fleet sync) also run only when locked; the four network
+#                       ones among them run in the deferred stage rather than
+#                       this synchronous bootstrap section.
 #   3. wake-drain     - mutates the durable wake queue, so it also only runs
 #                       when locked.
 #   4. supervision-instructions - the one emitted operating block for the

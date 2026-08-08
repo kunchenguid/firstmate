@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Behavior tests for the explicit per-task delivery contract (AGENTS.md section 7)
-# across bin/fm-spawn.sh, bin/fm-promote.sh, and bin/fm-project-mode.sh.
+# across bin/fm-spawn.sh, bin/fm-reflag.sh, and bin/fm-project-mode.sh.
 #
 # A ship task's delivery mode and yolo posture are firstmate's decision at intake,
-# so the tools refuse to guess: the spawn and a scout promotion require both flags,
+# so the tools refuse to guess: the spawn and a scout reflag require both flags,
 # validate them against a closed set, and the spawn additionally refuses to launch
 # when the brief it is about to hand the worker records a different mode. Scout
 # spawns carry no delivery posture at all. The registry keeps only the captain's
@@ -18,7 +18,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
-PROMOTE="$ROOT/bin/fm-promote.sh"
+REFLAG="$ROOT/bin/fm-reflag.sh"
 PROJECT_MODE="$ROOT/bin/fm-project-mode.sh"
 TMP_ROOT=$(fm_test_tmproot fm-task-delivery)
 
@@ -198,44 +198,44 @@ EOF
   pass "fm-spawn: a scout spawn resolves no delivery posture from the registry"
 }
 
-# Promotion is where a scout's ship contract is finally decided, so it requires the
-# same explicit values and writes them into the task's durable record.
-test_promote_requires_and_records_the_delivery_contract() {
+# Reflagging is where a scout's ship contract is finally decided, so it requires
+# the same explicit values and writes them into the task's durable record.
+test_reflag_requires_and_records_the_delivery_contract() {
   local home meta out status
-  home="$TMP_ROOT/promote/home"
+  home="$TMP_ROOT/reflag/home"
   mkdir -p "$home/state"
-  meta="$home/state/promote-d1.meta"
+  meta="$home/state/reflag-d1.meta"
 
   write_scout_meta() {
-    printf 'window=fm-promote-d1\nkind=scout\nworktree=/tmp/wt\n' > "$meta"
+    printf 'window=fm-reflag-d1\nkind=scout\nworktree=/tmp/wt\n' > "$meta"
   }
 
   write_scout_meta
-  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" promote-d1 2>&1)
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$REFLAG" reflag-d1 2>&1)
   status=$?
-  [ "$status" -ne 0 ] || fail "promotion without --mode should exit non-zero"
-  assert_contains "$out" "promotion requires --mode" "promote refusal did not name the missing mode"
-  assert_grep 'kind=scout' "$meta" "refused promotion still changed the task record"
+  [ "$status" -ne 0 ] || fail "reflagging without --mode should exit non-zero"
+  assert_contains "$out" "reflagging requires --mode" "the reflag refusal did not name the missing mode"
+  assert_grep 'kind=scout' "$meta" "a refused reflag still changed the task record"
 
-  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" promote-d1 --mode direct-PR 2>&1)
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$REFLAG" reflag-d1 --mode direct-PR 2>&1)
   status=$?
-  [ "$status" -ne 0 ] || fail "promotion without --yolo should exit non-zero"
-  assert_contains "$out" "promotion requires --yolo" "promote refusal did not name the missing approval posture"
+  [ "$status" -ne 0 ] || fail "reflagging without --yolo should exit non-zero"
+  assert_contains "$out" "reflagging requires --yolo" "the reflag refusal did not name the missing approval posture"
 
-  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" promote-d1 --mode no-mistakes-prod-only --yolo off 2>&1)
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$REFLAG" reflag-d1 --mode no-mistakes-prod-only --yolo off 2>&1)
   status=$?
-  [ "$status" -ne 0 ] || fail "promotion on a conditional policy should exit non-zero"
-  assert_contains "$out" "classify this task's surface" "promote did not refuse the conditional policy as a task mode"
+  [ "$status" -ne 0 ] || fail "reflagging on a conditional policy should exit non-zero"
+  assert_contains "$out" "classify this task's surface" "reflag did not refuse the conditional policy as a task mode"
 
-  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" promote-d1 --mode direct-PR --yolo on 2>&1)
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$REFLAG" reflag-d1 --mode direct-PR --yolo on 2>&1)
   status=$?
-  expect_code 0 "$status" "a promotion carrying both flags should succeed"
-  assert_grep 'kind=ship' "$meta" "promotion did not restore ship teardown protection"
-  assert_grep 'mode=direct-PR' "$meta" "promotion did not record the decided delivery mode"
-  assert_grep 'yolo=on' "$meta" "promotion did not record the decided approval posture"
-  assert_contains "$out" "ship instructions for mode=direct-PR" "promotion hint did not carry the decided mode"
-  [ "$(grep -c '^mode=' "$meta")" = 1 ] || fail "promotion left more than one mode= line in the task record"
-  pass "fm-promote: promotion requires the delivery contract and records it exactly once"
+  expect_code 0 "$status" "a reflag carrying both flags should succeed"
+  assert_grep 'kind=ship' "$meta" "reflagging did not restore ship teardown protection"
+  assert_grep 'mode=direct-PR' "$meta" "reflagging did not record the decided delivery mode"
+  assert_grep 'yolo=on' "$meta" "reflagging did not record the decided approval posture"
+  assert_contains "$out" "ship instructions for mode=direct-PR" "the reflag hint did not carry the decided mode"
+  [ "$(grep -c '^mode=' "$meta")" = 1 ] || fail "reflagging left more than one mode= line in the task record"
+  pass "fm-reflag: the scout-to-ship move requires the delivery contract and records it exactly once"
 }
 
 # The registry parser survives for the mechanical consumers only. It accepts the
@@ -277,6 +277,6 @@ test_scout_and_secondmate_refuse_delivery_flags
 test_spawn_refuses_a_brief_mode_mismatch
 test_spawn_notices_a_rigor_downgrade_against_the_registry
 test_scout_records_no_delivery_posture
-test_promote_requires_and_records_the_delivery_contract
+test_reflag_requires_and_records_the_delivery_contract
 test_project_mode_maps_the_conditional_policy
 echo "# all fm-task-delivery tests passed"

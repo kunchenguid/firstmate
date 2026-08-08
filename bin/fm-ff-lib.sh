@@ -27,6 +27,8 @@
 SUB_HOME_MARKER="${SUB_HOME_MARKER:-.fm-secondmate-home}"
 # shellcheck source=bin/fm-secondmate-registry-lib.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-secondmate-registry-lib.sh"
+# shellcheck source=bin/fm-task-axis-lib.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-task-axis-lib.sh"
 
 # --- helpers ---------------------------------------------------------------
 
@@ -236,13 +238,16 @@ dirty_status() {
 # List this home's LIVE secondmate direct reports from state/<id>.meta records.
 # The meta file is the liveness signal; data/secondmates.md is only the fallback
 # for durable fields such as home= when an older/incomplete meta lacks them.
+# Membership is the ROLE axis and nothing else: a record predating the axis split
+# derives its role from the deprecated kind= alias, so this filter sees old and
+# new records alike (bin/fm-task-axis-lib.sh).
 # Output is pipe-delimited: id|home|window|meta-file.
 live_secondmate_meta_records() {
   local state=$1 registry=${2:-} meta id home window
   [ -d "$state" ] || return 0
   for meta in "$state"/*.meta; do
     [ -f "$meta" ] || continue
-    grep -q '^kind=secondmate$' "$meta" 2>/dev/null || continue
+    [ "$(fm_task_role "$meta")" = secondmate ] || continue
     id=$(basename "$meta" .meta)
     home=$(grep '^home=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
     if [ -z "$home" ] && [ -n "$registry" ]; then

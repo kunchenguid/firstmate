@@ -44,8 +44,11 @@
 #   task     one terminal line per task, written by bin/fm-teardown.sh
 #            immediately before the task metadata is deleted - the last moment
 #            the harness/model/effort join exists. Fields: task, harness,
-#            model, effort, mode, kind, project, backend, outcome, route,
-#            escalated, findings, pr.
+#            model, effort, mode, role, deliverable, project, backend, outcome,
+#            route, escalated, findings, pr. role and deliverable are the task
+#            identity axes; a record written before that split carries the
+#            retired single kind field instead and is never rewritten, because
+#            this ledger is append-only evidence.
 #
 # THE COORDINATOR NAMES THE COST, NOT THE SEQUENCE. `outcome <token>` with no
 # sequence resolves the most recent wake record no outcome record joins, and
@@ -108,7 +111,8 @@
 #       after are resolved from the matching wake record when --task is absent.
 #   fm-wake-ledger.sh task <id> [--outcome landed|failed|abandoned]
 #                     [--harness H] [--model M] [--effort E] [--mode M]
-#                     [--kind K] [--project P] [--backend B] [--pr URL]
+#                     [--role R] [--deliverable D] [--project P]
+#                     [--backend B] [--pr URL]
 #                     [--route R] [--escalated yes|no] [--findings N]
 #       Append one terminal task record. Absent facts record as unknown rather
 #       than being guessed. Called by teardown, which supplies them from the
@@ -496,7 +500,8 @@ cmd_outcome() {
 
 cmd_task() {
   local id='' outcome=landed route=unknown escalated=unknown findings=unknown
-  local harness=unknown model=unknown effort=unknown mode=unknown kind=unknown
+  local harness=unknown model=unknown effort=unknown mode=unknown
+  local role=unknown deliverable=unknown
   local project=unknown backend=unknown pr='' now
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -505,7 +510,8 @@ cmd_task() {
       --model) [ "$#" -ge 2 ] || die "--model needs a value"; model=$2; shift 2 ;;
       --effort) [ "$#" -ge 2 ] || die "--effort needs a value"; effort=$2; shift 2 ;;
       --mode) [ "$#" -ge 2 ] || die "--mode needs a value"; mode=$2; shift 2 ;;
-      --kind) [ "$#" -ge 2 ] || die "--kind needs a value"; kind=$2; shift 2 ;;
+      --role) [ "$#" -ge 2 ] || die "--role needs a value"; role=$2; shift 2 ;;
+      --deliverable) [ "$#" -ge 2 ] || die "--deliverable needs a value"; deliverable=$2; shift 2 ;;
       --project) [ "$#" -ge 2 ] || die "--project needs a value"; project=$2; shift 2 ;;
       --backend) [ "$#" -ge 2 ] || die "--backend needs a value"; backend=$2; shift 2 ;;
       --pr) [ "$#" -ge 2 ] || die "--pr needs a value"; pr=$2; shift 2 ;;
@@ -543,7 +549,8 @@ cmd_task() {
     "model=$(ledger_sanitize "${model:-unknown}" "$LEDGER_KEY_MAX")" \
     "effort=$(ledger_sanitize "${effort:-unknown}" "$LEDGER_SHORT_MAX")" \
     "mode=$(ledger_sanitize "${mode:-unknown}" "$LEDGER_SHORT_MAX")" \
-    "kind=$(ledger_sanitize "${kind:-unknown}" "$LEDGER_SHORT_MAX")" \
+    "role=$(ledger_sanitize "${role:-unknown}" "$LEDGER_SHORT_MAX")" \
+    "deliverable=$(ledger_sanitize "${deliverable:-unknown}" "$LEDGER_SHORT_MAX")" \
     "project=$(ledger_sanitize "${project:-unknown}" "$LEDGER_SHORT_MAX")" \
     "backend=$(ledger_sanitize "${backend:-unknown}" "$LEDGER_SHORT_MAX")" \
     "outcome=$outcome" \

@@ -433,8 +433,8 @@ EOF
   printf '%s' "$out" | jq -e --arg home "$home" '
     (.tasks | length) == 0
       and .scout_reports == [
-        {id:"reported-scout",path:($home + "/data/reported-scout/report.md"),kind:"scout"},
-        {id:"untracked-scout",path:($home + "/data/untracked-scout/report.md"),kind:"scout"}
+        {id:"reported-scout",path:($home + "/data/reported-scout/report.md"),deliverable:"scout"},
+        {id:"untracked-scout",path:($home + "/data/untracked-scout/report.md"),deliverable:"scout"}
       ]
   ' >/dev/null || fail "durable scout reports should remain visible after meta teardown"
   pass "snapshot includes durable scout reports after teardown"

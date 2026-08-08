@@ -64,6 +64,9 @@ decision_hold_cleanup() {
   fi
 }
 trap decision_hold_cleanup EXIT
+# shellcheck source=bin/fm-task-axis-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-task-axis-lib.sh"
 
 usage() {
   awk '
@@ -154,13 +157,14 @@ meta_value() {  # <meta> <key>
 }
 
 origin_open_decisions() {  # <origin-id>
-  local origin=$1 meta="$STATE/$1.meta" status_file="$STATE/$1.status" open kind last verb
+  local origin=$1 meta="$STATE/$1.meta" status_file="$STATE/$1.status" open last verb
   open=$(status_open_decisions "$status_file")
   [ -n "$open" ] || return 0
   [ -f "$meta" ] || { printf '%s' "$open"; return 0; }
-  kind=$(meta_value "$meta" kind)
-  [ -n "$kind" ] || kind=ship
-  if [ "$kind" != secondmate ]; then
+  # A secondmate is persistent, so its terminal-looking events never close a
+  # decision the way a task's do. That is the ROLE axis alone
+  # (bin/fm-task-axis-lib.sh); what the work produces is irrelevant here.
+  if [ "$(fm_task_role "$meta")" != secondmate ]; then
     last=$(last_status_line "$status_file")
     verb=$(status_line_verb "$last")
     case "$verb" in
