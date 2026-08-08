@@ -308,7 +308,8 @@ A home that records nothing keeps its existing dispatch behavior and creates no 
 When no tier remains, the work is deferred into the backlog instead of dispatched.
 
 Moving an in-flight task is licensed by the script's `handoff-check` command, which composes the recorded endpoint's own state with `bin/fm-crew-state.sh`'s current-code-matched run state; an active or parked validation run keeps its single-worker ownership and refuses the move.
-A licensed move relaunches the same task id through `bin/fm-spawn.sh --resume-worktree`, which enters the isolated copy that task already owns instead of allocating a second one and restores the previous record if the relaunch fails.
+A licensed move relaunches the same task id through `bin/fm-spawn.sh --resume-worktree`, which enters the isolated copy that task already owns instead of allocating a second one.
+Its shared abort transaction restores the previous record only after confirming the replacement endpoint is gone; otherwise it retains that identity when possible and blocks another launch until reconciliation.
 Repeated attempts are capped so a failing handoff stops and reports its concrete blocker rather than looping.
 
 ### Switching the primary Firstmate to another provider

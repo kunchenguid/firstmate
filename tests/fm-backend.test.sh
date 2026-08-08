@@ -818,6 +818,11 @@ case "\${1:-}" in
     for a in "\$@"; do case "\$a" in *pane_current_path*) printf '%s\\n' "$wt"; exit 0 ;; esac; done
     printf 'firstmate\\n'; exit 0 ;;
   list-windows) exit 0 ;;
+  new-window)
+    [ -z "\${FM_TMUX_AFTER_NEW_WINDOW_MKDIR:-}" ] \
+      || mkdir -p -- "\$FM_TMUX_AFTER_NEW_WINDOW_MKDIR"
+    exit 0
+    ;;
 esac
 exit 0
 SH
@@ -1119,11 +1124,14 @@ test_spawn_refuses_when_task_record_cannot_be_published() {
   # A directory where the record belongs is the portable way to make the write
   # fail for a real filesystem reason on every platform, without depending on
   # permission semantics that differ for a privileged test runner.
-  mkdir -p "$state/$id.meta" "$config"
+  # The fake creates it after endpoint creation so the existing-record preflight
+  # remains valid and the test reaches the publication boundary it owns.
+  mkdir -p "$state" "$config"
 
   out=$(PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" \
     FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
+    FM_TMUX_AFTER_NEW_WINDOW_MKDIR="$state/$id.meta" \
     FM_TMUX_LOG="$TMP_ROOT/metafail.log" \
     "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --mode no-mistakes --yolo off --backend tmux 2>&1)
   status=$?

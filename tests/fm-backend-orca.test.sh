@@ -33,6 +33,9 @@ if [ -f "$RESP/$n.exit" ]; then
   exit "$(cat "$RESP/$n.exit")"
 fi
 [ -f "$RESP/$n.out" ] && cat "$RESP/$n.out"
+if [ "${FM_ORCA_AFTER_CALL_MKDIR_N:-}" = "$n" ]; then
+  mkdir -p "${FM_ORCA_AFTER_CALL_MKDIR_PATH:?}"
+fi
 exit 0
 SH
   chmod +x "$fb/orca"
@@ -673,7 +676,7 @@ test_spawn_releases_orca_resources_when_metadata_write_fails() {
   state="$TMP_ROOT/meta-fail-state"
   config="$TMP_ROOT/meta-fail-config"
   fm_git_worktree "$proj" "$wt" "fm/$id"
-  mkdir -p "$data/$id" "$state/$id.meta" "$config"
+  mkdir -p "$data/$id" "$state" "$config"
   printf 'brief\n' > "$data/$id/brief.md"
   orca_case meta-fail
   printf '1\n' > "$RESP/1.exit"
@@ -681,6 +684,7 @@ test_spawn_releases_orca_resources_when_metadata_write_fails() {
   printf '{"ok":true,"result":{"worktree":{"id":"wt-meta-fail","path":"%s"}}}\n' "$wt" > "$RESP/3.out"
   printf '{"ok":true,"result":{"terminal":{"handle":"term-meta-fail"}}}\n' > "$RESP/4.out"
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ORCA_AFTER_CALL_MKDIR_N=4 FM_ORCA_AFTER_CALL_MKDIR_PATH="$state/$id.meta" \
     FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
     "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --mode no-mistakes --yolo off --backend orca 2>&1 )
@@ -708,7 +712,7 @@ test_spawn_preserves_orca_recovery_record_when_metadata_destination_is_invalid()
   state="$TMP_ROOT/recovery-state"
   config="$TMP_ROOT/recovery-config"
   fm_git_worktree "$proj" "$wt" "fm/$id"
-  mkdir -p "$data/$id" "$state/$id.meta" "$config"
+  mkdir -p "$data/$id" "$state" "$config"
   printf 'brief\n' > "$data/$id/brief.md"
   orca_case recovery-record
   printf '1\n' > "$RESP/1.exit"
@@ -717,6 +721,7 @@ test_spawn_preserves_orca_recovery_record_when_metadata_destination_is_invalid()
   printf '{"ok":true,"result":{"terminal":{"handle":"term-recovery"}}}\n' > "$RESP/4.out"
   printf '1\n' > "$RESP/6.exit"
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ORCA_AFTER_CALL_MKDIR_N=4 FM_ORCA_AFTER_CALL_MKDIR_PATH="$state/$id.meta" \
     FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
     "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --mode no-mistakes --yolo off --backend orca 2>&1 )

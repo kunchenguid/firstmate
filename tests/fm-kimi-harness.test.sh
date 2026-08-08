@@ -58,8 +58,22 @@ case "$*" in
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
-  list-windows) exit 0 ;;
-  has-session|new-session|new-window|kill-window) exit 0 ;;
+  list-windows)
+    [ -z "${FM_FAKE_ENDPOINT_FILE:-}" ] || [ ! -f "$FM_FAKE_ENDPOINT_FILE" ] || cat "$FM_FAKE_ENDPOINT_FILE"
+    exit 0
+    ;;
+  has-session|new-session) exit 0 ;;
+  new-window)
+    [ -z "${FM_FAKE_ENDPOINT_FILE:-}" ] || printf 'fm-%s\n' "$FM_FAKE_TASK_ID" > "$FM_FAKE_ENDPOINT_FILE"
+    printf '@1\n'
+    exit 0
+    ;;
+  kill-window)
+    if [ "${FM_FAKE_KEEP_ENDPOINT:-no}" != yes ] && [ -n "${FM_FAKE_ENDPOINT_FILE:-}" ]; then
+      rm -f "$FM_FAKE_ENDPOINT_FILE"
+    fi
+    exit 0
+    ;;
   send-keys)
     prev=
     literal=
@@ -165,6 +179,9 @@ run_spawn() {
     FM_FAKE_KIMI_SWALLOW_FIRST="${FM_FAKE_KIMI_SWALLOW_FIRST:-no}" \
     FM_FAKE_TMUX_CALL_LOG="$case_dir/tmux-calls.log" \
     FM_FAKE_BRIEF_REAL="$(cd "$home/data/$id" && pwd -P)/brief.md" \
+    FM_FAKE_ENDPOINT_FILE="$case_dir/endpoint" \
+    FM_FAKE_KEEP_ENDPOINT="${FM_FAKE_KEEP_ENDPOINT:-no}" \
+    FM_FAKE_TASK_ID="$id" \
     FM_KIMI_READY_POLLS=2 FM_KIMI_DELIVERY_POLLS=2 FM_KIMI_POLL_INTERVAL=0 \
     PATH="$fakebin:$BASE_PATH" \
     "$SPAWN" "$id" "$proj" --harness kimi --mode no-mistakes --yolo off "$@" 2>&1
@@ -499,6 +516,39 @@ test_kimi_unconfirmed_delivery_fails_loudly() {
   pass "fm-spawn: kimi treats a silent pointer drop as a failed spawn"
 }
 
+test_kimi_unconfirmed_delivery_retains_replacement_record_while_endpoint_may_live() {
+  local id rec out rc
+  id=kimi-live-drop-z2
+  rec=$(make_spawn_case live-drop "$id")
+  read_spawn_record "$rec"
+  fm_write_meta "$HOME_DIR/state/$id.meta" \
+    "window=firstmate:fm-$id" \
+    "endpoint_task_id=$id" \
+    "worktree=$WT_DIR" \
+    "project=$PROJ_DIR" \
+    'harness=codex' \
+    'kind=ship' \
+    'mode=no-mistakes' \
+    'yolo=off'
+
+  rc=0
+  out=$(FM_FAKE_KIMI_DELIVERY=no FM_FAKE_KEEP_ENDPOINT=yes run_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" \
+    --resume-worktree "$WT_DIR") || rc=$?
+  [ "$rc" -ne 0 ] || fail "an unconfirmed kimi delivery with a retained endpoint should fail"
+  assert_contains "$out" "kimi brief pointer delivery was not confirmed" \
+    "unconfirmed kimi delivery lacked its delivery diagnostic"
+  assert_contains "$out" "retained its new task record and retry fence" \
+    "unconfirmed kimi cleanup did not report the retained replacement identity"
+  assert_grep 'harness=kimi' "$HOME_DIR/state/$id.meta" \
+    "unconfirmed kimi cleanup restored the old harness record"
+  assert_grep 'harness=codex' "$HOME_DIR/state/.resume-$id.meta.bak" \
+    "unconfirmed kimi cleanup lost the previous authoritative record"
+  assert_present "$HOME_DIR/state/.spawn-$id.abort" \
+    "unconfirmed kimi cleanup released the retry fence while the endpoint may live"
+  pass "fm-spawn: unconfirmed Kimi delivery retains the replacement record while its endpoint may live"
+}
+
 test_kimi_readiness_gate_precedes_pointer() {
   local id rec out rc
   id=kimi-not-ready-z3
@@ -679,6 +729,7 @@ test_kimi_teardown_removes_pointer_and_registry_token
 test_kimi_falls_back_to_expanded_home_binary
 test_kimi_missing_binary_refuses_before_pane_creation
 test_kimi_unconfirmed_delivery_fails_loudly
+test_kimi_unconfirmed_delivery_retains_replacement_record_while_endpoint_may_live
 test_kimi_readiness_gate_precedes_pointer
 test_kimi_detection_uses_ancestry_after_markers
 test_kimi_session_lock_identity
