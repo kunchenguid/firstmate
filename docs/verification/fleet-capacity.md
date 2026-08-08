@@ -143,7 +143,7 @@ The latency follow-up blocks the private `config/refill-auto` enablement.
 
 ## Acceptance
 
-Task 13 safety-gate evidence, 2026-08-08, integration base `454b10d`, branch HEAD `3eac13a`.
+Task 13 safety-gate evidence, 2026-08-08, integration base `454b10d`, branch HEAD `fb230a0` with the fixture reconciliation `9cb53bb`.
 Commands run:
 
 ```sh
@@ -162,9 +162,7 @@ Results:
 - `tests/fm-refill-admission.test.sh`: 6 ok, all passed.
 - `tests/fm-refill-sentinel.test.sh`: 3 ok, all passed (safe sentinel silent, alert sentinel notifies, never recounts).
 - `tests/fm-fleet-snapshot-view.test.sh`: 16 ok, all passed, including the new byte-parity embed test (`snapshot capacity embed is byte-identical to the frozen observation`).
-- `tests/fm-fleet-refill.test.sh`: 16 ok, then `not ok - quarantine did not report unknown capacity (missing: 'capacity=unknown')`.
-  The three fleet-depth-quarantine tests (`test_quarantine_reports_unknown_capacity_and_never_dispatches`, `test_quarantine_ignores_legacy_manifest_and_output_mtimes`, `test_quarantined_verdict_is_unchanged_in_shadow_mode`) assert the pre-cutover `capacity=unknown` verdict, which the Task 13 cutover is mandated to remove: the plain run now prints `fleet-refill: productive=0 reserved=0 refill_safe=true alert_only=false reconciliation=false; open_beads=...; serialization_debt=...` plus `fleet-ok: capacity derived from the shared projection; automatic refill remains gated (config/refill-auto or FM_REFILL_AUTO=1)`, and shadow mode records the same derived summary.
-  These quarantine-era assertions are the plan gap the controller must resolve (update or retire them) before the safety gate is fully green.
+- `tests/fm-fleet-refill.test.sh`: 22 ok, all passed, after `9cb53bb` adapted the three quarantine-era fixtures to the cut-over verdict (`test_cutover_verdict_derives_from_shared_projection`, `test_cutover_ignores_legacy_manifest_and_output_mtimes`, `test_cutover_still_propagates_serialization_debt`, `test_cutover_verdict_is_unchanged_in_shadow_mode`): they now assert the shared-projection-derived summary (`productive=`/`refill_safe=` present) and keep the stronger negatives (`DISPATCH-NEEDED`, `active=`, `battery=` absent). The pre-adaptation `not ok` recorded below is resolved by that commit; the safety gate is fully green.
 - `bin/fm-lint.sh` on the changed files: clean (ShellCheck 0.11.0 pinned), exit 0; `bash -n` clean on all three changed scripts.
 - `bin/fm-doc-audience-check.sh`: `fm-doc-audience-check: ok surfaces=67 local_links=214`, exit 0.
 
