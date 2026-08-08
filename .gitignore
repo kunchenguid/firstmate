@@ -10,3 +10,4 @@ __pycache__/
 *.pyc
 .env
 config/
+.gstack/
