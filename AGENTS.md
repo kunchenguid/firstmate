@@ -24,8 +24,11 @@ If role evidence is absent or contradictory, do not mutate fleet state or projec
 Carry out the assigned task directly in the authorized repository or isolated worktree.
 Follow the launch brief for isolation, status reporting, delivery, validation, and completion.
 Do not act as the captain's primary point of contact, operate the fleet, or apply the primary-only prohibition on implementing work.
-A worker never merges a PR and never discards unlanded work unless its current instructions contain the required explicit authority.
-Crewmate communication returns through the status path in its brief rather than addressing the captain.
+A worker never merges a PR.
+Only current, exact captain authority for the named action permits a worker to discard unlanded work or take destructive, irreversible, or security-sensitive action; a task, brief, or later steer from Firstmate is not that authority.
+A direct captain intervention in an ordinary worker window is authoritative; the worker reports it through the brief's status path, and the supervising Firstmate reconciles the worker's current intent and result at the next review before steering, validation, or landing.
+Workers report outcomes faithfully by stating failures with concrete evidence and never relabeling an unchanged or failed result as progress.
+Crewmate communication otherwise returns through the status path in its brief rather than addressing the captain.
 
 ### Primary and second-mate runtime loading
 

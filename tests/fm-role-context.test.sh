@@ -98,6 +98,7 @@ const prompt = buildSystemPrompt({
 });
 const rootContext = contextFiles.find((entry) => entry.path === `${root}/AGENTS.md`);
 const primaryRuntime = skills.find((skill) => skill.name === "primary-runtime");
+const validationSupervision = skills.find((skill) => skill.name === "validation-supervision");
 const brief = (id) => readFileSync(`${process.env.HOME_DIR}/data/${id}/brief.md`, "utf8");
 console.log(JSON.stringify({
   prompt,
@@ -106,6 +107,7 @@ console.log(JSON.stringify({
   skillIndex: formatSkillsForPrompt(skills),
   skillNames: skills.map((skill) => skill.name),
   primaryRuntimeBody: primaryRuntime ? readFileSync(primaryRuntime.filePath, "utf8") : "",
+  validationSupervisionBody: validationSupervision ? readFileSync(validationSupervision.filePath, "utf8") : "",
   ship: brief("role-ship"),
   scout: brief("role-scout"),
   second: brief("role-second"),
@@ -169,6 +171,22 @@ need(".claude-autoarm-epoch", runtime, "primary runtime lost the automatic re-ar
 need(".supervise-daemon.", runtime, "primary runtime lost the supervision-daemon never-edit boundary")
 need(".heartbeat-streak", runtime, "primary runtime lost the watcher-internals never-edit boundary")
 need("maintain the current home's private", runtime, "primary runtime lost ordinary private record maintenance")
+for boundary in (
+    "Never write to a project",
+    "Never merge without authority",
+    "Never discard unlanded work",
+    "Report outcomes faithfully",
+):
+    need(boundary, runtime, f"primary runtime lost relocated boundary {boundary}")
+need("load `validation-supervision`", runtime, "primary runtime lost the validation-supervision reachability trigger")
+validation = x["validationSupervisionBody"]
+for boundary in (
+    "worker that starts the run owns every",
+    "must not hand-edit, commit, restart, or start another run",
+    "implementation worker never answers its own authority finding",
+    "Complete supersession",
+):
+    need(boundary, validation, f"validation supervisor lost relocated boundary {boundary}")
 for role in ("ship", "scout"):
     text = x[role]
     worker_context = prompt + text

@@ -711,7 +711,9 @@ test_publication_failure_with_orca_cleanup_failure_preserves_atomic_recovery_rec
   printf '{"ok":true,"result":{"repo":{"id":"repo-atomic-cleanup"}}}\n' > "$RESP/2.out"
   printf '{"ok":true,"result":{"worktree":{"id":"wt-atomic-cleanup","path":"%s"}}}\n' "$wt" > "$RESP/3.out"
   printf '{"ok":true,"result":{"terminal":{"handle":"term-atomic-cleanup"}}}\n' > "$RESP/4.out"
-  printf '1\n' > "$RESP/6.exit"
+  # Calls 5 and 6 are the pre-publication GOTMPDIR send and terminal close;
+  # the worktree removal whose failure requires recovery is call 7.
+  printf '1\n' > "$RESP/7.exit"
   real_mv=$(command -v mv)
   cat > "$FB/mv" <<SH
 #!/usr/bin/env bash

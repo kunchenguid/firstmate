@@ -15,16 +15,17 @@ Character counts measure generated model instructions rather than only tracked f
 
 | Generated surface | Before | After | Saving |
 | --- | ---: | ---: | ---: |
-| Root repository instruction context | 62,128 | 8,416 | 53,712 (86.5%) |
+| Root repository instruction context | 62,128 | 8,969 | 53,159 (85.6%) |
 | Skill index | 11,395 | 9,048 | 2,347 (20.6%) |
-| Universal Pi system prompt | 75,418 | 19,359 | 56,059 (74.3%) |
-| Primary after startup instruction and primary-runtime load | 75,540 | 46,153 | 29,387 (38.9%) |
-| Ship worker system prompt plus generated brief | 81,656 | 26,073 | 55,583 (68.1%) |
-| Scout worker system prompt plus generated brief | 78,948 | 23,354 | 55,594 (70.4%) |
-| Second mate after generated charter and primary-runtime load | 80,912 | 51,984 | 28,928 (35.8%) |
+| Universal Pi system prompt | 75,418 | 19,912 | 55,506 (73.6%) |
+| Primary after startup instruction and primary-runtime load | 75,540 | 46,706 | 28,834 (38.2%) |
+| Ship worker system prompt plus generated brief | 81,656 | 26,626 | 55,030 (67.4%) |
+| Scout worker system prompt plus generated brief | 78,948 | 23,907 | 55,041 (69.7%) |
+| Second mate after generated charter and primary-runtime load | 80,912 | 52,537 | 28,375 (35.1%) |
 
 The after skill index contains 21 repository-owned skills, including `primary-runtime` and `validation-supervision`, against 19 before.
-The two runtime-load rows include the 1,672 characters a review round added to `primary-runtime` for the absent-file semantics and the coordination-internals never-edit boundary; the universal, ship, and scout surfaces are unaffected because none of them loads the runtime.
+The two runtime-load rows include the 1,672 characters a review round added to `primary-runtime` for the absent-file semantics and the coordination-internals never-edit boundary.
+The universal context also retains the compact worker authority, captain-intervention, and faithful-reporting floor that every ordinary worker must receive without loading the forbidden primary contract.
 The generated root context remains below its 12,000-character regression budget, and the universal Pi system prompt remains below its 40,000-character regression budget.
 
 Current deterministic command:
@@ -37,7 +38,7 @@ Observed output on Pi 0.83.0:
 
 ```text
 ok - role-aware startup wrapper orders the runtime owner before primary mutation
-ok - generated role contexts: root=8416 system=20532 skills=21 ship=6863 scout=4140 second=6165
+ok - generated role contexts: root=8969 system=20605 skills=21 ship=7007 scout=4307 second=6397
 ```
 
 The startup-ordering assertion runs first because it needs no harness, so a runner without Pi's loader still proves it and skips only the generated-context half.
@@ -82,7 +83,7 @@ Neither standalone Grok nor Kimi was installed in the 2026-08-03 measurement env
 
 | Role or harness | Deterministic delivery |
 | --- | --- |
-| Ordinary ship or scout on every worker harness | The generated launch brief explicitly selects ordinary-worker precedence, requires direct work, and excludes adopting the primary runtime contract or operating the fleet, while still allowing an authorized edit to an instruction file the task assigns. |
+| Ordinary ship or scout on every worker harness | The generated launch brief explicitly selects ordinary-worker precedence, requires direct work, and excludes adopting the primary runtime contract or operating the fleet, while the universal context names the exact captain-only authority floor for discard and destructive, irreversible, or security-sensitive action, direct-captain-intervention reconciliation, faithful outcome reporting, and authorized instruction-file edits. |
 | Persistent second mate | The generated charter loads `primary-runtime` before session start and preserves charter scope, persistence, idle behavior, and marked return channel. |
 | Second-mate restart | The root marker selects the second-mate role, the native wrapper recognizes marked linked homes, and tracked update nudges require rereading both the root gateway and `primary-runtime`. |
 | Claude primary | Root fallback is always present, and native SessionStart delivery covers startup, resume, and clear. |
