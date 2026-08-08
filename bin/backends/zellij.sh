@@ -281,6 +281,41 @@ fm_backend_zellij_pane_exists() {  # <session> <pane_id>
     | jq -e --argjson p "$pane_id" '[.[]? | select(.id == $p and .is_plugin == false)] | length > 0' >/dev/null 2>&1
 }
 
+# fm_backend_zellij_endpoint_confirmed_gone: the zellij half of the fleet-wide
+# confirmed-absence contract (bin/fm-backend.sh's
+# fm_backend_endpoint_confirmed_gone). fm_backend_zellij_pane_exists above
+# cannot serve it: a closed pane and a CLI that could not answer are the same
+# non-zero exit there, which is right for a liveness read and wrong as proof
+# that a pane was removed. Proof here must come from a read that SUCCEEDED and
+# does not name the endpoint; anything else refuses.
+#
+# Two independent proofs, either one sufficient:
+#   - `list-sessions` exited 0, so it printed the live session list, and this
+#     target's session is not on it: the session and every pane it held are
+#     gone. A non-zero exit proves nothing and is ignored, since the CLI also
+#     fails when no session exists at all and when zellij itself is unusable.
+#   - the session's own `action list-panes --json` answered with parseable
+#     JSON that does not contain the exact pane id. jq's `-e` separates that
+#     definitive `false` (exit 1) from an unparseable or absent answer (jq
+#     1.7's exit 5 / 4), so only the definitive answer is read as absence.
+fm_backend_zellij_endpoint_confirmed_gone() {  # <target>
+  local sessions panes status
+  fm_backend_zellij_parse_target "$1" || return 1
+  case "$FM_BACKEND_ZELLIJ_PANE" in ''|*[!0-9]*) return 1 ;; esac
+  if sessions=$(zellij list-sessions --short --no-formatting 2>/dev/null); then
+    printf '%s\n' "$sessions" | grep -qxF "$FM_BACKEND_ZELLIJ_SESSION" || return 0
+  fi
+  panes=$(fm_backend_zellij_cli "$FM_BACKEND_ZELLIJ_SESSION" action list-panes --json 2>/dev/null) || return 1
+  if printf '%s' "$panes" \
+    | jq -e --argjson p "$FM_BACKEND_ZELLIJ_PANE" '[.[]? | select(.id == $p and .is_plugin == false)] | length > 0' >/dev/null 2>&1; then
+    return 1
+  else
+    status=$?
+    [ "$status" -eq 1 ] && return 0
+    return 1
+  fi
+}
+
 # fm_backend_zellij_tab_matches_label: does <tab_id> in <session> carry the
 # tab name firstmate expects for the caller-facing task label <label>?
 # Checks the home-scoped, tagged title first (fm_backend_zellij_scoped_title

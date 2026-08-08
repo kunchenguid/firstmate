@@ -403,6 +403,48 @@ fm_backend_cmux_surface_exists() {  # <workspace_id> <surface_id>
     | jq -e --arg s "$sfid" '[.panes[]? | select(.surface_ids // [] | index($s))] | length > 0' >/dev/null 2>&1
 }
 
+# fm_backend_cmux_endpoint_confirmed_gone: the cmux half of the fleet-wide
+# confirmed-absence contract (bin/fm-backend.sh's
+# fm_backend_endpoint_confirmed_gone). fm_backend_cmux_surface_exists above
+# cannot serve it: an unreachable or unauthorized socket fails exactly like a
+# closed surface, which is right for a liveness read and wrong as proof of
+# removal. Proof here needs a socket that demonstrably answered.
+#
+#   1. `ping` must answer PONG (fm_backend_cmux_ping_state ok). Every other
+#      classification - denied, unauth, down, error - means this caller cannot
+#      see the app's state at all, so it can prove nothing about it.
+#   2. `workspace list` must answer with parseable JSON. fm_backend_cmux_kill
+#      removes the task's WHOLE workspace, so a workspace id the socket no
+#      longer lists is the ordinary proof that the endpoint is gone.
+#   3. If the workspace survived, its own `list-panes` must answer and omit the
+#      exact surface.
+# jq's `-e` separates a definitive `false` (exit 1) from an unparseable or
+# absent answer (jq 1.7's exit 5 / 4), so a truncated reply never reads as
+# absence.
+fm_backend_cmux_endpoint_confirmed_gone() {  # <target>
+  local wss panes status
+  fm_backend_cmux_parse_target "$1" || return 1
+  [ "$(fm_backend_cmux_ping_state)" = ok ] || return 1
+  wss=$(fm_backend_cmux_cli workspace list --json --id-format uuids 2>/dev/null) || return 1
+  if printf '%s' "$wss" \
+    | jq -e --arg id "$FM_BACKEND_CMUX_WORKSPACE" '[.workspaces[]? | select(.id == $id)] | length > 0' >/dev/null 2>&1; then
+    :
+  else
+    status=$?
+    [ "$status" -eq 1 ] && return 0
+    return 1
+  fi
+  panes=$(fm_backend_cmux_cli list-panes --workspace "$FM_BACKEND_CMUX_WORKSPACE" --json --id-format uuids 2>/dev/null) || return 1
+  if printf '%s' "$panes" \
+    | jq -e --arg s "$FM_BACKEND_CMUX_SURFACE" '[.panes[]? | select(.surface_ids // [] | index($s))] | length > 0' >/dev/null 2>&1; then
+    return 1
+  else
+    status=$?
+    [ "$status" -eq 1 ] && return 0
+    return 1
+  fi
+}
+
 # fm_backend_cmux_target_ready: parse the target and verify it is live via
 # fm_backend_cmux_surface_exists (never read-screen - see that function's
 # header for the fresh-surface pitfall this avoids). When the caller knows

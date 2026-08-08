@@ -1044,9 +1044,72 @@ test_secondmate_spawn_refuses_cmux_backend() {
   pass "fm-spawn.sh: refuses backend=cmux for --secondmate spawns (mirrors Orca's refusal; no secondmate launch design exists yet)"
 }
 
+# --- endpoint_confirmed_gone: proof of removal, never an unanswered read -----
+#
+# fm_backend_cmux_endpoint_confirmed_gone answers a stricter question than
+# fm_backend_cmux_surface_exists: not "is the surface there" but "did cmux tell
+# me it is not". An unreachable or unauthorized socket fails exactly like a
+# closed surface, so a caller about to record a close as successful - or to
+# drop the only record naming an endpoint - would otherwise read a socket that
+# never answered as proof. These cases reach the same "not present" outcome
+# once through an answer and once through a failure; only the answer counts.
+cmux_confirmed_gone() {  # <dir> <target> [ping-reply]
+  local dir=$1 target=$2 ping=${3:-PONG} fb rc=0
+  fb=$(make_cmux_fakebin "$dir")
+  PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    FM_CMUX_FAKE_PING="$ping" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_endpoint_confirmed_gone "$1"' \
+    "$ROOT" "$target" || rc=$?
+  printf '%s' "$rc"
+}
+
+test_endpoint_confirmed_gone_needs_an_answer_not_a_failure() {
+  local dir rc ws="aaaaaaaa-0000-0000-0000-000000000000" sf="bbbbbbbb-0000-0000-0000-000000000000"
+  dir="$TMP_ROOT/cmux-gone-present"; mkdir -p "$dir/responses"
+  cmux_workspace_list_response "$dir" 1 "$ws" "fm-task"
+  cmux_panes_response "$dir" 2 "$sf"
+  rc=$(cmux_confirmed_gone "$dir" "$ws:$sf")
+  expect_code 1 "$rc" "a surface cmux still lists must not be reported gone"
+
+  dir="$TMP_ROOT/cmux-gone-surface"; mkdir -p "$dir/responses"
+  cmux_workspace_list_response "$dir" 1 "$ws" "fm-task"
+  cmux_panes_empty_response "$dir" 2
+  rc=$(cmux_confirmed_gone "$dir" "$ws:$sf")
+  expect_code 0 "$rc" "a successful pane listing that omits the surface is proof it is gone"
+
+  dir="$TMP_ROOT/cmux-gone-workspace"; mkdir -p "$dir/responses"
+  cmux_workspace_list_response "$dir" 1 "ffffffff-0000-0000-0000-000000000000" "other"
+  rc=$(cmux_confirmed_gone "$dir" "$ws:$sf")
+  expect_code 0 "$rc" "a workspace the socket no longer lists takes its surfaces with it"
+
+  dir="$TMP_ROOT/cmux-gone-cli-fails"; mkdir -p "$dir/responses"
+  printf '1\n' > "$dir/responses/1.exit"
+  rc=$(cmux_confirmed_gone "$dir" "$ws:$sf")
+  expect_code 1 "$rc" "a failed workspace list must not be read as a removed endpoint"
+
+  dir="$TMP_ROOT/cmux-gone-garbage"; mkdir -p "$dir/responses"
+  printf 'not json at all\n' > "$dir/responses/1.out"
+  rc=$(cmux_confirmed_gone "$dir" "$ws:$sf")
+  expect_code 1 "$rc" "an unparseable workspace list must not be read as a removed endpoint"
+  pass "fm_backend_cmux_endpoint_confirmed_gone: only a listing that answered and omits the endpoint is proof"
+}
+
+test_endpoint_confirmed_gone_refuses_an_unreachable_socket() {
+  local dir rc ws="aaaaaaaa-0000-0000-0000-000000000000" sf="bbbbbbbb-0000-0000-0000-000000000000"
+  dir="$TMP_ROOT/cmux-gone-socket-down"; mkdir -p "$dir/responses"
+  cmux_panes_empty_response "$dir" 1
+  rc=$(cmux_confirmed_gone "$dir" "$ws:$sf" "Socket not found")
+  expect_code 1 "$rc" "a socket that cannot be reached proves nothing about the endpoint"
+  assert_not_contains "$(cat "$dir/log")" $'\x1f''workspace'$'\x1f''list' \
+    "confirmed_gone queried workspaces through a socket that had not answered ping"
+  pass "fm_backend_cmux_endpoint_confirmed_gone: an unreachable socket refuses instead of proving absence"
+}
+
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-backend.sh"
 
+test_endpoint_confirmed_gone_needs_an_answer_not_a_failure
+test_endpoint_confirmed_gone_refuses_an_unreachable_socket
 test_version_check_accepts_current_version
 test_version_check_accepts_newer_version
 test_version_check_refuses_old_version

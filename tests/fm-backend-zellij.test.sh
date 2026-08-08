@@ -1062,9 +1062,61 @@ test_scripts_reject_fm_target_label_mismatch() {
   pass "fm-send: fm-id zellij targets reject pane ids whose tab label no longer matches"
 }
 
+# fm_backend_zellij_endpoint_confirmed_gone answers a stricter question than
+# fm_backend_zellij_pane_exists: not "is the pane there" but "did zellij tell
+# me it is not". A caller that is about to record a close as successful, or to
+# drop the only record naming a pane, must not read a CLI that could not answer
+# as proof the pane was removed. These cases drive the two apart on purpose:
+# the same "not present" outcome is reached once through an answer and once
+# through a failure, and only the answer counts.
+zellij_confirmed_gone() {  # <dir> <target> [session-list]
+  local dir=$1 target=$2 list=${3:-firstmate} fb rc=0
+  fb=$(make_zellij_fakebin "$dir")
+  PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST="$list" \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_endpoint_confirmed_gone "$1"' \
+    "$ROOT" "$target" || rc=$?
+  printf '%s' "$rc"
+}
+
+test_endpoint_confirmed_gone_needs_an_answer_not_a_failure() {
+  local dir rc
+  dir="$TMP_ROOT/confirmed-gone-present"; mkdir -p "$dir/responses"
+  zellij_pane_response "$dir" 1 7 3
+  rc=$(zellij_confirmed_gone "$dir" firstmate:7)
+  expect_code 1 "$rc" "a pane zellij still lists must not be reported gone"
+
+  dir="$TMP_ROOT/confirmed-gone-absent"; mkdir -p "$dir/responses"
+  zellij_pane_response "$dir" 1 9 3
+  rc=$(zellij_confirmed_gone "$dir" firstmate:7)
+  expect_code 0 "$rc" "a successful listing that omits the pane is proof it is gone"
+
+  dir="$TMP_ROOT/confirmed-gone-cli-fails"; mkdir -p "$dir/responses"
+  printf '1\n' > "$dir/responses/1.exit"
+  rc=$(zellij_confirmed_gone "$dir" firstmate:7)
+  expect_code 1 "$rc" "a failed list-panes call must not be read as a removed pane"
+
+  dir="$TMP_ROOT/confirmed-gone-garbage"; mkdir -p "$dir/responses"
+  printf 'not json at all\n' > "$dir/responses/1.out"
+  rc=$(zellij_confirmed_gone "$dir" firstmate:7)
+  expect_code 1 "$rc" "an unparseable list-panes reply must not be read as a removed pane"
+  pass "fm_backend_zellij_endpoint_confirmed_gone: only a successful listing that omits the pane is proof"
+}
+
+test_endpoint_confirmed_gone_accepts_a_vanished_session() {
+  local dir rc
+  dir="$TMP_ROOT/confirmed-gone-session"; mkdir -p "$dir/responses"
+  printf '1\n' > "$dir/responses/1.exit"
+  rc=$(zellij_confirmed_gone "$dir" firstmate:7 "other-session")
+  expect_code 0 "$rc" "a session missing from a successful session listing takes its panes with it"
+  pass "fm_backend_zellij_endpoint_confirmed_gone: a vanished session proves its panes are gone"
+}
+
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-backend.sh"
 
+test_endpoint_confirmed_gone_needs_an_answer_not_a_failure
+test_endpoint_confirmed_gone_accepts_a_vanished_session
 test_version_check_accepts_current_version
 test_version_check_accepts_newer_version
 test_version_check_refuses_old_version

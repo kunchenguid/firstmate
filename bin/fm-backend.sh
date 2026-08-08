@@ -875,6 +875,36 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
   esac
 }
 
+# fm_backend_endpoint_confirmed_gone: 0 only when <backend> answered that the
+# EXACT recorded endpoint is no longer there. This is the opposite question to
+# fm_backend_target_exists above, and it is deliberately not that function
+# negated: a probe that could not reach the runtime fails there too, so
+# "exists returned false" covers both "the endpoint was removed" and "nobody
+# could tell me". A caller that is about to declare a close successful, or to
+# erase the only record naming an endpoint, needs the first answer alone.
+#
+# Every adapter here reads a structured runtime answer and refuses on anything
+# it cannot parse: herdr's pane presence state, tmux's session inventory,
+# zellij's session and pane listings, and cmux's socket ping plus workspace and
+# pane listings. Orca is deliberately absent: it has no verified
+# terminal-not-found response shape, and no caller needs one, because the
+# failed-spawn path unwinds an Orca terminal and worktree under the spawn's
+# EXIT trap and publishes a complete recovery record naming both when the
+# worktree removal fails (bin/fm-spawn.sh). Any backend with no confirmation
+# primitive refuses, so an unproven absence is never read as proof.
+fm_backend_endpoint_confirmed_gone() {  # <backend> <target>
+  local backend=$1
+  shift
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    tmux) fm_backend_tmux_endpoint_confirmed_gone "$@" ;;
+    herdr) fm_backend_herdr_endpoint_confirmed_gone "$@" ;;
+    zellij) fm_backend_zellij_endpoint_confirmed_gone "$@" ;;
+    cmux) fm_backend_cmux_endpoint_confirmed_gone "$@" ;;
+    *) return 1 ;;
+  esac
+}
+
 # fm_backend_agent_state: the single recovery-grade agent/endpoint state
 # contract. It is deliberately richer than fm_backend_target_exists's cheap
 # pane-presence read and prints exactly one of:
