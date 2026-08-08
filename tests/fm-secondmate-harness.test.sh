@@ -583,6 +583,7 @@ make_launch_capturing_tmux() {
 set -u
 case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+  *"#{pane_tty}"*) printf '%s\n' "${FM_FAKE_PANE_TTY:-/dev/pts/99}"; exit 0 ;;
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
@@ -604,6 +605,41 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+query=$*
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+args=${FM_FAKE_CURSOR_AGENT_ARGS:-/opt/cursor-agent}
+comm=${FM_FAKE_CURSOR_COMM:-${args%% *}}
+case "$query" in
+  *"ppid="*) exit 1 ;;
+  *"-t "*) printf '%s %s\n' "${FM_FAKE_CURSOR_AGENT_PID:-4242}" "$args"; exit 0 ;;
+  *"comm="*) printf '%s\n' "$comm"; exit 0 ;;
+  *"-p "*) printf '%s\n' "$args"; exit 0 ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/ps"
+  cat > "$fakebin/pgrep" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$*" in
+  *"index.js worker-server"*)
+    [ -n "${FM_FAKE_CURSOR_WORKER_PID:-}" ] || exit 1
+    printf '%s\n' "$FM_FAKE_CURSOR_WORKER_PID"
+    exit 0 ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/pgrep"
   printf '%s\n' "$fakebin"
 }
 
@@ -880,7 +916,7 @@ SH
 # the captured launch in a clean pane-like shell (env -i, no FM_* inherited)
 # and assert the child cursor-agent's environment.
 test_spawn_cursor_secondmate_env_reaches_agent() {
-  local w sm launchlog launch envdump fakebin out status
+  local w sm launchlog launch envdump fakebin worker_pid out status
   w="$TMP_ROOT/spawn-cursor-env"
   sm="$w/sm"
   launchlog="$w/launch.log"
@@ -897,7 +933,16 @@ exit 0
 SH
   chmod +x "$fakebin/cursor-agent"
 
-  out=$(spawn_secondmate_capture "$w" sm "$sm" "$launchlog" 2>&1); status=$?
+  ( exec sleep 300 ) &
+  worker_pid=$!
+  disown
+  sleep 0.3
+  kill -0 "$worker_pid" 2>/dev/null || fail "cursor secondmate worker stand-in did not start"
+  out=$(FM_FAKE_CURSOR_AGENT_ARGS="$fakebin/cursor-agent --force --trust brief" \
+    FM_FAKE_CURSOR_AGENT_PID=4242 FM_FAKE_CURSOR_WORKER_PID="$worker_pid" \
+    spawn_secondmate_capture "$w" sm "$sm" "$launchlog" 2>&1)
+  status=$?
+  kill -KILL "$worker_pid" 2>/dev/null || true
   expect_code 0 "$status" "cursor secondmate spawn should succeed"$'\n'"$out"
 
   launch=$(cat "$launchlog")
