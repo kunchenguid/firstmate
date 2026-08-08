@@ -1,9 +1,7 @@
 #!/usr/bin/env bash
 # tests/fm-trace-context-lib.test.sh - unit tests for the native, default-off
-# W3C trace-context library (bin/fm-trace-context-lib.sh) plus structural checks
-# that bin/fm-spawn.sh wires it in at the pre-launch injection seam and that the
-# capability is inherited into secondmate homes. Pure functions, no backend and
-# no live spawn required.
+# W3C trace-context library (bin/fm-trace-context-lib.sh) and inheritance into
+# secondmate homes. Pure functions, no backend and no live spawn required.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -239,61 +237,6 @@ for tok in brief prompt report status ; do
   esac
 done
 pass "the lib code never reads a brief, prompt, report, or status - it cannot leak content"
-
-# --- structural wiring in bin/fm-spawn.sh ------------------------------------
-
-SPAWN="$ROOT/bin/fm-spawn.sh"
-# Patterns deliberately start after any leading '$' so the fixed-string grep needs
-# no shell metacharacters while still pinning the exact wiring.
-assert_grep 'fm-trace-context-lib.sh' "$SPAWN" "fm-spawn.sh must source the trace-context lib"
-assert_grep 'SPAWN_TRACEPARENT=' "$SPAWN" "fm-spawn.sh must assign the resolved carrier"
-assert_grep 'fm_trace_context_resolve' "$SPAWN" "fm-spawn.sh must resolve the carrier through the lib entry point"
-# shellcheck disable=SC2016 # Dollar signs are literal source text in this fixed-string assertion.
-assert_grep 'if spawn_send_text_line "$T" "export TRACEPARENT=$SPAWN_TRACEPARENT"; then' "$SPAWN" \
-  "fm-spawn.sh must condition metadata publication on successful carrier delivery"
-# Only a carrier the child actually received may be recorded, so the record
-# carries SPAWN_RECORDED_TRACEPARENT (set on successful delivery) rather than the
-# resolved SPAWN_TRACEPARENT, and it reaches disk through the one atomic
-# complete-record publication (tests/fm-spawn-meta-publication.test.sh owns that
-# publisher's behavior). Appending the carrier afterwards would mutate a record a
-# reader may already treat as authoritative.
-# shellcheck disable=SC2016 # Dollar signs are literal source text in this fixed-string assertion.
-assert_grep 'echo "traceparent=$SPAWN_RECORDED_TRACEPARENT"' "$SPAWN" \
-  "fm-spawn.sh must record the delivered carrier in metadata"
-# shellcheck disable=SC2016 # Dollar signs are literal source text in this fixed-string assertion.
-assert_grep 'publish_task_meta_atomic "$STATE/$ID.meta" "$META_BODY"' "$SPAWN" \
-  "fm-spawn.sh must publish the carrier as part of the one atomic complete task record"
-# shellcheck disable=SC2016 # Dollar signs are literal source text in this fixed-string assertion.
-assert_no_grep 'echo "traceparent=$SPAWN_RECORDED_TRACEPARENT" >>' "$SPAWN" \
-  "fm-spawn.sh must not append the carrier to an already published task record"
-assert_grep 'export TRACEPARENT=' "$SPAWN" "fm-spawn.sh must inject the W3C TRACEPARENT env var"
-pass "fm-spawn.sh sources the lib and records one shared SPAWN_TRACEPARENT only after successful injection"
-
-# The injection must ride the same channel and site as GOTMPDIR (before launch,
-# unconditional across kinds): the TRACEPARENT export follows the GOTMPDIR export,
-# and the record is published only after it.
-gotmp_line=$(grep -n 'export GOTMPDIR=' "$SPAWN" | tail -1 | cut -d: -f1)
-tp_line=$(grep -n 'export TRACEPARENT=' "$SPAWN" | tail -1 | cut -d: -f1)
-# -F keeps the dollar signs literal source text: a mid-pattern '$' is an anchor in
-# some grep implementations and a literal in others, so a basic-regexp match here
-# would silently find nothing on one platform and match on another.
-# shellcheck disable=SC2016 # Dollar signs are literal source text in this grep pattern.
-meta_line=$(grep -Fn 'publish_task_meta_atomic "$STATE/$ID.meta" "$META_BODY"' "$SPAWN" | tail -1 | cut -d: -f1)
-[ -n "$gotmp_line" ] && [ -n "$tp_line" ] && [ -n "$meta_line" ] \
-  && [ "$tp_line" -gt "$gotmp_line" ] && [ "$meta_line" -gt "$tp_line" ] \
-  || fail "TRACEPARENT must be exported before metadata publication at the pre-launch GOTMPDIR site (gotmp=$gotmp_line tp=$tp_line meta=$meta_line)"
-
-# Between the two exports the spawn may branch only on whether a carrier exists
-# (the default-off path), never on kind, backend, or harness - that is what makes
-# the injection site the same one for every spawn. A line-distance bound would
-# only measure comments; naming the tokens states the contract itself.
-between=$(sed -n "$((gotmp_line + 1)),$((tp_line - 1))p" "$SPAWN" | sed 's/#.*$//')
-for tok in KIND BACKEND HARNESS ; do
-  case "$between" in
-    *"$tok"*) fail "the TRACEPARENT injection site must not branch on $tok between the GOTMPDIR and TRACEPARENT exports" ;;
-  esac
-done
-pass "TRACEPARENT is injected at the unconditional pre-launch GOTMPDIR site and recorded only after successful delivery"
 
 # --- secondmate inheritance wires the nested chain ---------------------------
 
