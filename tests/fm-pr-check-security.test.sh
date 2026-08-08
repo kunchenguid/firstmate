@@ -3021,7 +3021,7 @@ owner/repo
   done
   out=$(FM_TEST_FORGEJO_MERGED=true run_poll "$dir")
   [ "$out" = merged ] || fail "Forgejo poll did not emit exactly one merged line"
-  printf '%s\n' 'touch "$FM_TEST_ADJACENT_LIB_MARKER"' > "$state/fm-pr-lib.sh"
+  printf '%s\n' "touch \"\$FM_TEST_ADJACENT_LIB_MARKER\"" > "$state/fm-pr-lib.sh"
   out=$(FM_TEST_FORGEJO_MERGED=true FM_TEST_ADJACENT_LIB_MARKER="$dir/adjacent-lib-ran" run_poll "$dir")
   [ "$out" = merged ] || fail "Forgejo poll did not use its trusted library"
   [ ! -e "$dir/adjacent-lib-ran" ] || fail "Forgejo poll sourced a library from writable state"
