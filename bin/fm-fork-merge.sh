@@ -121,17 +121,6 @@ write_json_atomic() { # <dest>, stdin
   return 1
 }
 
-index_without_paths_hash() { # <newline-delimited-path-file>
-  local paths_file=$1 path
-  local -a pathspecs
-  pathspecs=(--stage -z -- .)
-  while IFS= read -r path || [ -n "$path" ]; do
-    [ -n "$path" ] || continue
-    pathspecs+=(":(top,exclude,literal)$path")
-  done < "$paths_file"
-  git -C "$REPO" ls-files "${pathspecs[@]}" | git hash-object --stdin
-}
-
 accepted_records() { # one JSON retirement record per unit accepted upstream
   # Once this merge lands, upstream becomes an ancestor of fork main and
   # `git cherry`'s <head>..<upstream> equivalence search space is empty, so the
@@ -268,7 +257,7 @@ cmd_prepare() {
     affected_json=$(jq -Rsc 'split("\n") | map(select(length > 0)) | unique' "$TMP/affected")
     conflict_json=$(jq -Rsc 'split("\n") | map(select(length > 0)) | unique' "$conflicts")
     touched_json=$(jq -Rsc 'split("\n") | map(select(length > 0)) | unique' "$TMP/touched")
-    clean_index_hash=$(index_without_paths_hash "$conflicts")
+    clean_index_hash=$(fm_fork_index_without_paths_hash "$REPO" "$conflicts")
     jq -n --arg schema firstmate.fork-rejustify-receipt.v1 --arg branch "$(git -C "$REPO" symbolic-ref --short HEAD)" \
       --arg fork "$local_head" --arg before "$upstream_before" --arg after "$upstream_after" --arg clean_index_hash "$clean_index_hash" \
       --argjson affected "$affected_json" --argjson conflicts "$conflict_json" --argjson touched "$touched_json" \
@@ -311,7 +300,7 @@ cmd_continue() {
   TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-fork-continue.XXXXXX") || die "cannot create temporary state"
   trap 'rm -rf "$TMP"' EXIT
   jq -r '.conflicts[]' "$RECEIPT" > "$TMP/conflicts"
-  [ "$(index_without_paths_hash "$TMP/conflicts")" = "$(jq -r .clean_index_hash "$RECEIPT")" ] \
+  [ "$(fm_fork_index_without_paths_hash "$REPO" "$TMP/conflicts")" = "$(jq -r .clean_index_hash "$RECEIPT")" ] \
     || die "non-conflict index entries changed after the merge stopped"
   jq -r '.touched[]' "$RECEIPT" > "$TMP/touched"
   jq -r '.decisions[] | select(.action == "remove" and .id != "__unowned__") | .id' "$DECISIONS" | sort -u > "$TMP/remove"

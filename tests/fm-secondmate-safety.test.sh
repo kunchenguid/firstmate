@@ -443,6 +443,60 @@ test_home_seed_refuses_missing_filled_charter() {
   pass "home seeding refuses direct seed without filled charter text"
 }
 
+test_home_seed_restores_existing_git_topology_after_post_inherit_failure() {
+  local parent source target upstream fork branch err before after
+  parent="$TMP_ROOT/git-topology-rollback-parent"
+  source="$TMP_ROOT/git-topology-rollback-source"
+  target="$TMP_ROOT/git-topology-rollback-target"
+  upstream="$TMP_ROOT/remotes/git-topology-upstream.git"
+  fork="$TMP_ROOT/remotes/git-topology-fork.git"
+  err="$TMP_ROOT/git-topology-rollback.err"
+  mkdir -p "$parent/data" "$parent/state" "$parent/projects" "$(dirname "$upstream")"
+  git clone --quiet "$ROOT" "$source"
+  branch=$(git -C "$source" symbolic-ref --short HEAD)
+  git clone --quiet --bare "$source" "$upstream"
+  git clone --quiet --bare "$source" "$fork"
+  git -C "$upstream" symbolic-ref HEAD "refs/heads/$branch"
+  git -C "$fork" symbolic-ref HEAD "refs/heads/$branch"
+  git -C "$source" remote set-url origin "$fork"
+  git -C "$source" remote add upstream "$upstream"
+  git -C "$source" fetch -q origin
+  git -C "$source" fetch -q upstream
+  git -C "$source" remote set-head origin "$branch"
+  git -C "$source" remote set-head upstream "$branch"
+  git -C "$source" config "branch.$branch.remote" origin
+  git -C "$source" config "branch.$branch.merge" "refs/heads/$branch"
+  git -C "$source" config rerere.enabled true
+  git -C "$source" config rerere.autoupdate false
+
+  git clone --quiet "$source" "$target"
+  git -C "$target" config rerere.enabled false
+  git -C "$target" config --unset-all rerere.autoupdate >/dev/null 2>&1 || true
+  git -C "$target" remote add legacy "$upstream"
+  git -C "$target" config branch."$branch".description 'pre-seed topology sentinel'
+  before=$(
+    printf '%s\n' 'CONFIG'
+    git -C "$target" config --local --list
+    printf '%s\n' 'REMOTE_REFS'
+    git -C "$target" for-each-ref --format='%(refname)%09%(objectname)%09%(symref)' refs/remotes
+  )
+
+  if FM_ROOT_OVERRIDE="$source" FM_HOME="$parent" \
+    "$ROOT/bin/fm-home-seed.sh" design "$target" --no-projects >/dev/null 2>"$err"; then
+    fail "seed succeeded without the required filled charter after topology inheritance"
+  fi
+  grep -F 'no filled secondmate charter brief' "$err" >/dev/null \
+    || fail "post-inheritance seed failure did not reach the charter validation fixture"
+  after=$(
+    printf '%s\n' 'CONFIG'
+    git -C "$target" config --local --list
+    printf '%s\n' 'REMOTE_REFS'
+    git -C "$target" for-each-ref --format='%(refname)%09%(objectname)%09%(symref)' refs/remotes
+  )
+  [ "$after" = "$before" ] || fail "failed seed did not restore the existing home's complete Git topology"
+  pass "home seeding restores an existing home's Git topology after a post-inheritance failure"
+}
+
 test_home_seed_refuses_placeholder_charter() {
   local home subhome err
   home="$TMP_ROOT/placeholder-charter-home"
@@ -2675,6 +2729,7 @@ test_home_seed_warns_when_acquired_home_return_fails
 test_home_seed_does_not_return_unsafe_acquired_home
 test_home_seed_rolls_back_failed_clone
 test_home_seed_refuses_missing_filled_charter
+test_home_seed_restores_existing_git_topology_after_post_inherit_failure
 test_home_seed_refuses_placeholder_charter
 test_home_seed_refuses_empty_charter_fields
 test_home_seed_no_projects_end_to_end

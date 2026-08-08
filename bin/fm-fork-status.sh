@@ -5,19 +5,22 @@
 #   fm-fork-status.sh [--repo <path>] [--fork-ref <ref>] [--upstream-ref <ref>] [--refresh] [--json] [--facts-only]
 #   fm-fork-status.sh --check-upstream [--repo <path>] [--refresh]
 #
-# The factual patch set comes from `git cherry upstream/<default>
-# origin/<default>`. The tracked fork-divergences.json manifest supplies only
-# Git's missing intent: one named topic, class, pull-request disposition,
-# falsifiable retirement condition, path ownership, and integration merges. Its
-# retired_upstream records add the one fact Git can no longer recompute after an
-# integration merge, and every one of them is re-proved here against reachable
-# objects before its patch leaves the carried set.
-# Manifest disagreement is an unhealthy result, never silently repaired.
+# `git cherry upstream/<default> origin/<default>` supplies one fact only: which
+# commits have no equivalent upstream patch. The tracked fork-divergences.json
+# manifest supplies meaning: the canonical topic patches the fork intends to
+# carry, their class, pull-request disposition, retirement condition, paths, and
+# integration merges. A raw non-upstream commit outside those topics is a visible
+# signal, not automatically a carried divergence or a health failure. Descendant
+# validation fixes and manifest-only governance commits are attributed as
+# integration artifacts. retired_upstream records add the one equivalence fact
+# Git can no longer recompute after an integration merge, and every one of them
+# is re-proved here before its patch leaves the factual non-upstream count.
 #
 # --refresh fetches origin and upstream and verifies recorded GitHub PR
 # dispositions with gh-axi. Without it, the report is deterministic over local
-# refs and recorded dispositions. --check-upstream is the cheap self-update and
-# startup probe: it reports whether upstream is already an ancestor of the fork
+# refs and recorded dispositions. gh-axi's current API serializer is parsed as
+# one complete, untruncated scalar envelope rather than compared as raw stdout.
+# --check-upstream is the cheap self-update and startup probe: it reports whether upstream is already an ancestor of the fork
 # and never merges or writes a file. --facts-only keeps rising divergence count
 # visible but makes the exit status depend only on Git/manifest consistency and
 # superseded debt; candidate preparation uses it when adding or retiring an
@@ -153,14 +156,20 @@ fi
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-fork-status.XXXXXX") || die "cannot create temporary state"
 trap 'rm -rf "$TMP"' EXIT
 ERRORS="$TMP/errors"
+SIGNALS="$TMP/signals"
 OWNED="$TMP/owned"
+ARTIFACTS="$TMP/artifacts"
+KNOWN_INTEGRATIONS="$TMP/known-integrations"
 CHERRY="$TMP/cherry"
 RETIRED="$TMP/retired"
 ACCEPTED="$TMP/accepted"
 PROVED="$TMP/proved"
 EXCLUDED="$TMP/excluded"
 : > "$ERRORS"
+: > "$SIGNALS"
 : > "$OWNED"
+: > "$ARTIFACTS"
+: > "$KNOWN_INTEGRATIONS"
 : > "$RETIRED"
 : > "$ACCEPTED"
 : > "$PROVED"
@@ -198,6 +207,7 @@ while IFS= read -r line || [ -n "$line" ]; do
   actual_patch=$(git -C "$REPO" diff "$revert_sha^" "$revert_sha" -- . ":(top,exclude,literal)$MANIFEST_REL" | git patch-id --stable | awk 'NR == 1 { print $1 }')
   [ -n "$expected_patch" ] && [ "$actual_patch" = "$expected_patch" ] || continue
   printf '%s\n' "$revert_sha" >> "$RETIRED"
+  printf '%s\n' "$reverted_merge" >> "$KNOWN_INTEGRATIONS"
   topic_base=$(git -C "$REPO" merge-base "$UPSTREAM_REF" "$second_parent" 2>/dev/null || true)
   [ -n "$topic_base" ] || continue
   git -C "$REPO" rev-list --no-merges "$topic_base..$second_parent" >> "$RETIRED"
@@ -209,6 +219,10 @@ mv "$TMP/retired-plus" "$RETIRED"
 
 add_error() {
   printf '%s\n' "$*" >> "$ERRORS"
+}
+
+add_signal() {
+  printf '%s\n' "$*" >> "$SIGNALS"
 }
 
 # Upstream acceptance is the documented retirement path, but it stops being
@@ -253,30 +267,10 @@ done < <(jq -r '.retired_upstream // [] | .[] | [.id,.fork_patch,.upstream_patch
 sort -u "$ACCEPTED" -o "$ACCEPTED"
 cat "$RETIRED" "$ACCEPTED" | sort -u > "$EXCLUDED"
 
-# Resolve every factual non-equivalent patch to exactly one canonical topic.
-while IFS= read -r line || [ -n "$line" ]; do
-  [ "${line%% *}" = + ] || continue
-  rest=${line#? }
-  sha=${rest%% *}
-  grep -Fxq "$sha" "$EXCLUDED" && continue
-  owners=
-  while IFS=$'\t' read -r id topic; do
-    [ -n "$id" ] || continue
-    ref=$(fm_fork_topic_ref "$REPO" "$topic" || true)
-    [ -n "$ref" ] || continue
-    if git -C "$REPO" merge-base --is-ancestor "$sha" "$ref" 2>/dev/null; then
-      owners="${owners}${owners:+ }$id"
-    fi
-  done < <(jq -r '.divergences[] | [.id,.topic] | @tsv' "$MANIFEST")
-  case "$owners" in
-    '') add_error "unowned non-equivalent patch $sha" ;;
-    *' '*) add_error "non-equivalent patch $sha has multiple manifest owners: $owners" ;;
-    *) printf '%s\t%s\n' "$sha" "$owners" >> "$OWNED" ;;
-  esac
-done < "$CHERRY"
-
-# Validate every manifest unit against refs, patch ownership, a reachable
-# branch-level integration merge, and declared path coverage.
+# The manifest is the ownership model. `git cherry` still supplies the factual
+# set that is not upstream, but it does not decide what those commits mean.
+# Resolve each declared unit from its canonical topic first, then classify any
+# remaining fork-head commits as visible signals or integration-path artifacts.
 while IFS=$'\t' read -r id class topic; do
   [ -n "$id" ] || continue
   ref=$(fm_fork_topic_ref "$REPO" "$topic" || true)
@@ -284,13 +278,18 @@ while IFS=$'\t' read -r id class topic; do
     add_error "manifest unit $id is missing canonical topic $topic"
     continue
   fi
-  owned_count=$(awk -F '\t' -v id="$id" '$2 == id { n++ } END { print n+0 }' "$OWNED")
+  topic_cherry="$TMP/topic-$id.cherry"
+  git -C "$REPO" cherry "$UPSTREAM_REF" "$ref" > "$topic_cherry" \
+    || { add_error "manifest unit $id could not be compared with $UPSTREAM_REF"; continue; }
+  owned_count=$(awk '$1 == "+" { n++ } END { print n+0 }' "$topic_cherry")
   if [ "$owned_count" -eq 0 ] && [ "$class" != superseded ]; then
-    add_error "manifest unit $id owns no non-equivalent patch; reclassify or remove it"
+    add_signal "manifest unit $id has no canonical patch outside $UPSTREAM_REF; review whether upstream accepted it"
+  elif [ "$owned_count" -gt 1 ]; then
+    add_error "manifest unit $id has $owned_count canonical non-equivalent commits; one aggregate patch is required"
+  else
+    awk -v id="$id" '$1 == "+" { print $2 "\t" id }' "$topic_cherry" >> "$OWNED"
   fi
-  if [ "$owned_count" -gt 1 ]; then
-    add_error "manifest unit $id has $owned_count non-equivalent commits; git cherry cannot prove an aggregate upstream squash equivalent"
-  fi
+
   integration_found=0
   while IFS= read -r merge; do
     parent_line=$(git -C "$REPO" rev-list --parents -n 1 "$merge")
@@ -299,11 +298,10 @@ while IFS=$'\t' read -r id class topic; do
     set -- $parent_line
     [ "$#" -eq 3 ] || continue
     second_parent=$3
-    # An integration merge's second parent belongs to this topic's patch side,
-    # not merely to upstream history that the topic also contains.
     if git -C "$REPO" merge-base --is-ancestor "$second_parent" "$ref" 2>/dev/null \
         && ! git -C "$REPO" merge-base --is-ancestor "$second_parent" "$UPSTREAM_REF" 2>/dev/null; then
       integration_found=1
+      printf '%s\n' "$merge" >> "$KNOWN_INTEGRATIONS"
       break
     fi
   done < <(git -C "$REPO" rev-list --first-parent --merges "$ORIGIN_REF")
@@ -322,6 +320,60 @@ while IFS=$'\t' read -r id class topic; do
   done < "$OWNED"
 done < <(jq -r '.divergences[] | [.id,.class,.topic] | @tsv' "$MANIFEST")
 
+while IFS=$'\t' read -r sha owners; do
+  [ -n "$sha" ] || continue
+  count=$(printf '%s\n' "$owners" | awk -F ',' '{ print NF }')
+  [ "$count" -le 1 ] || add_error "canonical patch $sha has multiple manifest owners: $owners"
+done < <(awk -F '\t' '{ owner[$1] = owner[$1] sep[$1] $2; sep[$1] = "," } END { for (sha in owner) print sha "\t" owner[sha] }' "$OWNED")
+
+# An upstream-sync merge has no active topic second parent, so derive its anchor
+# from the manifest's exact before/after parents. Pipeline fixes descending from
+# either this anchor or an active topic integration are attributable to the
+# integration path without becoming carried divergences.
+while IFS=$'\t' read -r fork_before upstream_after; do
+  [ -n "$fork_before" ] || continue
+  while IFS= read -r merge; do
+    parent_line=$(git -C "$REPO" rev-list --parents -n 1 "$merge")
+    # shellcheck disable=SC2086
+    set -- $parent_line
+    if [ "$#" -eq 3 ] && [ "$2" = "$fork_before" ] && [ "$3" = "$upstream_after" ]; then
+      printf '%s\n' "$merge" >> "$KNOWN_INTEGRATIONS"
+      break
+    fi
+  done < <(git -C "$REPO" rev-list --merges "$ORIGIN_REF")
+done < <(jq -r '.upstream_syncs[] | [.fork_before,.upstream_after] | @tsv' "$MANIFEST")
+sort -u "$KNOWN_INTEGRATIONS" -o "$KNOWN_INTEGRATIONS"
+
+while IFS= read -r line || [ -n "$line" ]; do
+  [ "${line%% *}" = + ] || continue
+  rest=${line#? }
+  sha=${rest%% *}
+  grep -Fxq "$sha" "$EXCLUDED" && continue
+  awk -F '\t' -v sha="$sha" '$1 == sha { found=1 } END { exit !found }' "$OWNED" && continue
+  artifact_kind=unattributed
+  artifact_anchor=
+  while IFS= read -r anchor; do
+    [ -n "$anchor" ] || continue
+    if git -C "$REPO" merge-base --is-ancestor "$anchor" "$sha" 2>/dev/null; then
+      artifact_kind=integration-path
+      artifact_anchor=$anchor
+      break
+    fi
+  done < "$KNOWN_INTEGRATIONS"
+  changed=$(git -C "$REPO" diff-tree --no-commit-id --name-only -r "$sha")
+  if [ -n "$changed" ] && [ "$changed" = "$MANIFEST_REL" ]; then
+    artifact_kind=manifest-governance
+  fi
+  printf '%s\t%s\t%s\n' "$sha" "$artifact_kind" "$artifact_anchor" >> "$ARTIFACTS"
+  if [ "$artifact_kind" = integration-path ]; then
+    add_signal "non-upstream commit $sha is an integration-path artifact after $artifact_anchor, not a carried divergence"
+  elif [ "$artifact_kind" = manifest-governance ]; then
+    add_signal "non-upstream commit $sha is a manifest-governance artifact, not a carried divergence"
+  else
+    add_signal "non-upstream commit $sha is not represented by a canonical manifest topic"
+  fi
+done < "$CHERRY"
+
 # Optional live PR disposition check. It is evidence only and never updates the
 # tracked manifest behind the operator's back.
 if [ "$REFRESH" -eq 1 ]; then
@@ -329,9 +381,13 @@ if [ "$REFRESH" -eq 1 ]; then
     [ -n "$url" ] || continue
     path=${url#https://github.com/}
     owner=${path%%/*}; path=${path#*/}; repo_name=${path%%/*}; number=${url##*/}
-    live=$(gh-axi api "/repos/$owner/$repo_name/pulls/$number" \
+    live_output=$(gh-axi api "/repos/$owner/$repo_name/pulls/$number" \
       --jq 'if .merged_at != null then "merged" elif .state == "open" then "open" else "closed" end' 2>/dev/null || true)
-    [ -n "$live" ] || { add_error "manifest unit $id pull request disposition could not be refreshed"; continue; }
+    live=$(printf '%s\n' "$live_output" | fm_fork_gh_axi_scalar || true)
+    case "$live" in
+      open|closed|merged) ;;
+      *) add_error "manifest unit $id pull request disposition could not be refreshed from gh-axi's scalar API envelope"; continue ;;
+    esac
     if [ "$recorded" = rejected ]; then
       [ "$live" = closed ] || add_error "manifest unit $id records rejected but live pull request is $live"
     elif [ "$recorded" != "$live" ]; then
@@ -343,9 +399,11 @@ fi
 raw_plus_total=$(awk '$1 == "+" { n++ } END { print n+0 }' "$CHERRY")
 retired_patch_count=$(awk 'NF { n++ } END { print n+0 }' "$RETIRED")
 accepted_patch_count=$(awk 'NF { n++ } END { print n+0 }' "$ACCEPTED")
-raw_plus=$((raw_plus_total - retired_patch_count - accepted_patch_count))
-active_ids=$(awk -F '\t' '{ print $2 }' "$OWNED" | sort -u)
-active_count=$(printf '%s\n' "$active_ids" | awk 'NF { n++ } END { print n+0 }')
+not_upstream_total=$((raw_plus_total - retired_patch_count - accepted_patch_count))
+carried_patch_count=$(awk 'NF { n++ } END { print n+0 }' "$OWNED")
+active_count=$(jq '[.divergences[] | select(.class != "superseded")] | length' "$MANIFEST")
+artifact_count=$(awk 'NF { n++ } END { print n+0 }' "$ARTIFACTS")
+signal_count=$(awk 'NF { n++ } END { print n+0 }' "$SIGNALS")
 pending_count=$(jq '[.divergences[] | select(.class == "pending")] | length' "$MANIFEST")
 rejected_count=$(jq '[.divergences[] | select(.class == "rejected-but-retained")] | length' "$MANIFEST")
 private_count=$(jq '[.divergences[] | select(.class == "private")] | length' "$MANIFEST")
@@ -374,18 +432,23 @@ if [ -n "$last_sync" ]; then
   if git -C "$REPO" rev-parse --verify --quiet "$fork_before^{commit}" >/dev/null \
       && git -C "$REPO" rev-parse --verify --quiet "$upstream_before^{commit}" >/dev/null; then
     git -C "$REPO" cherry "$upstream_before" "$fork_before" | awk '$1 == "+" { print $2 }' > "$TMP/baseline-plus"
-    baseline_count=$(awk 'NF { n++ } END { print n+0 }' "$TMP/baseline-plus")
-    # A patch upstream had already accepted at that baseline was not part of the
-    # carried set then either. Leaving it in the baseline would report a falling
-    # count on every later report for a retirement that happened once.
+    baseline_count=0
+    while IFS=$'\t' read -r carried_sha _; do
+      [ -n "$carried_sha" ] || continue
+      grep -Fxq "$carried_sha" "$TMP/baseline-plus" && baseline_count=$((baseline_count + 1))
+    done < "$OWNED"
+    # A retired record can describe a unit that was still carried at this
+    # baseline. Count it only when upstream had not accepted the proved patch at
+    # that point; integration-path artifacts never enter either side.
     while IFS=$'\t' read -r proved_fork proved_upstream; do
       [ -n "$proved_fork" ] || continue
       grep -Fxq "$proved_fork" "$TMP/baseline-plus" || continue
-      git -C "$REPO" merge-base --is-ancestor "$proved_upstream" "$upstream_before" 2>/dev/null || continue
-      baseline_count=$((baseline_count - 1))
+      if ! git -C "$REPO" merge-base --is-ancestor "$proved_upstream" "$upstream_before" 2>/dev/null; then
+        baseline_count=$((baseline_count + 1))
+      fi
     done < "$PROVED"
-    if [ "$raw_plus" -lt "$baseline_count" ]; then trend=down
-    elif [ "$raw_plus" -gt "$baseline_count" ]; then trend=up
+    if [ "$carried_patch_count" -lt "$baseline_count" ]; then trend=down
+    elif [ "$carried_patch_count" -gt "$baseline_count" ]; then trend=up
     else trend=unchanged
     fi
   fi
@@ -393,18 +456,19 @@ fi
 
 last_touched=$(jq -r '.upstream_syncs | last // empty | .touched // [] | join(",")' "$MANIFEST")
 last_touched_count=$(jq '.upstream_syncs | last // {touched:[]} | .touched | length' "$MANIFEST")
-error_count=$(awk 'NF { n++ } END { print n+0 }' "$ERRORS")
 local_main=$(git -C "$REPO" rev-parse --verify --quiet "refs/heads/$origin_branch^{commit}" 2>/dev/null || true)
 if [ -z "$FORK_REF" ] && [ -n "$local_main" ] && [ "$local_main" != "$origin_sha" ]; then
   add_error "local $origin_branch does not match $ORIGIN_REF"
-  error_count=$((error_count + 1))
 fi
+error_count=$(awk 'NF { n++ } END { print n+0 }' "$ERRORS")
 
 accepted_record_count=$(jq '.retired_upstream // [] | length' "$MANIFEST")
 proved_forks_json=$(awk -F '\t' '{ print $1 }' "$PROVED" | jq -Rsc 'split("\n") | map(select(length > 0))')
 
 if [ "$JSON" -eq 1 ]; then
   errors_json=$(jq -Rsc 'split("\n") | map(select(length > 0))' "$ERRORS")
+  signals_json=$(jq -Rsc 'split("\n") | map(select(length > 0))' "$SIGNALS")
+  artifacts_json=$(jq -Rn '[inputs | split("\t") | {commit:.[0],kind:.[1],anchor:(if .[2] == "" then null else .[2] end)}]' < "$ARTIFACTS")
   touched_json=$(jq '.upstream_syncs | last // {touched:[]} | .touched' "$MANIFEST")
   accepted_json=$(jq -c --argjson proved "$proved_forks_json" \
     '(.retired_upstream // []) | map(.fork_patch as $f | . + {proved: (($proved | index($f)) != null)})' "$MANIFEST")
@@ -414,15 +478,16 @@ if [ "$JSON" -eq 1 ]; then
     --arg upstream "$UPSTREAM_REF" --arg upstream_sha "$upstream_sha" \
     --arg trend "$trend" --arg oldest_pending "${oldest_id:-}" \
     --arg oldest_pending_date "${oldest_date:-}" --argjson oldest_pending_age "$oldest_age_json" \
-    --argjson active "$active_count" --argjson patches "$raw_plus" --argjson retired_patches "$retired_patch_count" \
+    --argjson active "$active_count" --argjson patches "$carried_patch_count" --argjson not_upstream "$not_upstream_total" \
+    --argjson artifacts "$artifacts_json" --argjson retired_patches "$retired_patch_count" \
     --argjson accepted_patches "$accepted_patch_count" --argjson accepted "$accepted_json" \
     --argjson pending "$pending_count" --argjson rejected "$rejected_count" \
     --argjson private "$private_count" --argjson superseded "$superseded_count" \
-    --argjson touched "$touched_json" --argjson errors "$errors_json" \
-    '{schema:$schema, refs:{fork:$origin,fork_sha:$origin_sha,upstream:$upstream,upstream_sha:$upstream_sha}, retained:{units:$active,patches:$patches,retired_history_patches:$retired_patches,accepted_upstream_patches:$accepted_patches,trend:$trend,classes:{pending:$pending,"rejected-but-retained":$rejected,private:$private,superseded:$superseded}}, oldest_pending:{id:$oldest_pending,date:$oldest_pending_date,age_days:$oldest_pending_age}, last_upstream_merge:{touched:$touched}, accepted_upstream:$accepted, errors:$errors, healthy:($errors|length == 0 and $superseded == 0 and $trend != "up")}'
+    --argjson touched "$touched_json" --argjson signals "$signals_json" --argjson errors "$errors_json" \
+    '{schema:$schema, refs:{fork:$origin,fork_sha:$origin_sha,upstream:$upstream,upstream_sha:$upstream_sha}, retained:{units:$active,patches:$patches,not_upstream_commits:$not_upstream,integration_artifacts:$artifacts,retired_history_patches:$retired_patches,accepted_upstream_patches:$accepted_patches,trend:$trend,classes:{pending:$pending,"rejected-but-retained":$rejected,private:$private,superseded:$superseded}}, oldest_pending:{id:$oldest_pending,date:$oldest_pending_date,age_days:$oldest_pending_age}, last_upstream_merge:{touched:$touched}, accepted_upstream:$accepted, signals:$signals, errors:$errors, healthy:($errors|length == 0 and $superseded == 0 and $trend != "up")}'
 else
-  printf 'Fork divergence health: retained=%s patches=%s retired-history-patches=%s accepted-upstream-patches=%s trend=%s superseded=%s errors=%s\n' \
-    "$active_count" "$raw_plus" "$retired_patch_count" "$accepted_patch_count" "$trend" "$superseded_count" "$error_count"
+  printf 'Fork divergence health: retained=%s patches=%s not-upstream=%s integration-artifacts=%s retired-history-patches=%s accepted-upstream-patches=%s trend=%s superseded=%s signals=%s errors=%s\n' \
+    "$active_count" "$carried_patch_count" "$not_upstream_total" "$artifact_count" "$retired_patch_count" "$accepted_patch_count" "$trend" "$superseded_count" "$signal_count" "$error_count"
   printf 'Refs: fork=%s@%s upstream=%s@%s\n' "$ORIGIN_REF" "${origin_sha%%????????????????????????????????}" "$UPSTREAM_REF" "${upstream_sha%%????????????????????????????????}"
   printf 'Classes: pending=%s rejected-but-retained=%s private=%s superseded=%s\n' \
     "$pending_count" "$rejected_count" "$private_count" "$superseded_count"
@@ -456,8 +521,12 @@ else
     printf 'Relevance review: git -C %s range-diff --remerge-diff %s..%s %s..%s\n' \
       "$REPO" "$upstream_before" "$fork_before" "$upstream_after" "$ORIGIN_REF"
   fi
+  if [ "$signal_count" -gt 0 ]; then
+    printf 'Manifest/Git signals (informational):\n'
+    sed 's/^/  - /' "$SIGNALS"
+  fi
   if [ "$error_count" -gt 0 ]; then
-    printf 'Manifest/Git mismatches:\n'
+    printf 'Health errors:\n'
     sed 's/^/  - /' "$ERRORS"
   fi
 fi

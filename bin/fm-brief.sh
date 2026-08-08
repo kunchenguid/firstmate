@@ -43,8 +43,10 @@
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
 # --start-ref makes the new branch begin at one explicit local ref instead of the
 # detached worktree HEAD. Firstmate fork-divergence topics use upstream/main so
-# an upstream PR never inherits unrelated fork-main divergences. The ref accepts
-# only Git ref-name characters and must already exist when the worker branches.
+# an upstream PR never inherits unrelated fork-main divergences. That exact
+# start ref also adds the worker-owned fork safety contract and skill load to the
+# generated brief, which fm-spawn delivers as its typed launch input. The ref
+# accepts only Git ref-name characters and must already exist when the worker branches.
 # --mode and --start-ref are refused on scout and secondmate scaffolds: a scout's deliverable is a
 # report rather than a merge, and a charter is not a delivery contract.
 # There is no --yolo flag here. The worker never owns approval decisions, so yolo is
@@ -437,6 +439,19 @@ DOD=${DOD%$'\n'}
 BRANCH_START=
 [ "$START_REF_SET" -eq 0 ] || BRANCH_START=" $START_REF"
 
+FORK_WORKER_SECTION=
+if [ "$START_REF" = upstream/main ]; then
+  IFS= read -r -d '' FORK_WORKER_SECTION <<EOF || true
+# Fork divergence safety - WORKER CONTRACT
+Before changing Git history or using a remote, read and follow \`$FM_ROOT/.agents/skills/fork-main-integration/SKILL.md\`.
+The ordinary no-mistakes registration for this topic must continue to target official upstream; the isolated fork-target registration is only for a later fork-main integration candidate.
+Never force-push or rewrite a published topic or pull-request branch.
+Do not routinely merge official upstream or fork main into this topic.
+Merge one of them only for a concrete API dependency, a real merge conflict, or an upstream maintainer request.
+EOF
+  FORK_WORKER_SECTION=${FORK_WORKER_SECTION%$'\n'}
+fi
+
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 
@@ -445,7 +460,9 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 
 $HERDR_SECTION
 
-# Setup
+$FORK_WORKER_SECTION
+${FORK_WORKER_SECTION:+
+}# Setup
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
 
 **Verify isolation before anything else.** Run \`pwd -P\` and \`git rev-parse --show-toplevel\`; both must resolve to the disposable task worktree you were launched in, such as a treehouse pool path or an Orca-managed worktree, not the primary checkout firstmate operates from.

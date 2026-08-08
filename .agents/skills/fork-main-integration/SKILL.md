@@ -37,6 +37,7 @@ The script headers own exact mechanics and arguments.
 ## New divergence intake
 
 1. Scaffold the Firstmate ship brief with `--start-ref upstream/main` so unrelated fork divergences cannot enter the upstream pull request.
+   That generated brief loads this procedure for the worker and directly carries the no-rewrite, no-routine-merge, and official-upstream validation rules through the typed launch input.
 2. Run the ordinary no-mistakes path against the official-upstream registration.
 3. Preserve the upstream pull request as the delivery and review artifact.
 4. Before fork integration, ensure the canonical `fm/divergence/<id>` topic contains one aggregate non-merge patch commit relative to upstream.
@@ -45,7 +46,8 @@ The script headers own exact mechanics and arguments.
    Create a fresh one-commit canonical divergence topic and retain the original head as the manifest-linked delivery artifact.
 6. Create an isolated candidate from fetched fork main in the private integration clone.
 7. Run `bin/fm-fork-topic.sh integrate` with a concrete retirement condition and complete path list.
-8. Drive no-mistakes from that integration clone, open the fork-main PR, and require fork CI green.
+   On exit 3, settle the retain decision, resolve and stage the product conflict, and run receipt-bound `bin/fm-fork-topic.sh continue` with the complete decision file.
+8. Drive no-mistakes from that integration clone, run health against the post-pipeline head, open the fork-main PR, and require fork CI green.
 9. Tell the captain the full fork PR URL and concise local outcome.
 10. Merge only after the captain says so, using the regular merge method so the inner topic merge remains reachable.
 11. Run `/updatefirstmate` after landing so safe homes fast-forward from validated fork main.
@@ -58,7 +60,7 @@ Use a falsifiable statement such as "Upstream ships equivalent endpoint identity
 A pending divergence whose PR closes without merge must not remain pending.
 Choose one of two outcomes in the next validated fork integration:
 
-- Reclassify it to `rejected-but-retained` because current evidence still justifies the behavior.
+- Reclassify it through `bin/fm-fork-topic.sh disposition --id <id> --class rejected-but-retained --pr-disposition rejected --repo <isolated-worktree>` because current evidence still justifies the behavior.
 - Discard it because its retirement condition is true or the evidence no longer supports carrying it.
 
 Upstream rejection does not automatically remove useful running behavior.
@@ -93,14 +95,18 @@ The unmerged index is the barrier that keeps the relevance decision explicit.
 
 Use `bin/fm-fork-status.sh` for the local answer and add `--refresh` only when live remote and PR evidence is needed.
 Git facts outrank the manifest.
+The manifest owns carried intent, while `git cherry` says only which commits are not upstream.
+A raw discrepancy is an informational signal, not automatically a carried divergence or a failed report.
+Pipeline correction commits descending from a prepared integration are integration-path artifacts, and manifest-only disposition commits are governance artifacts.
+Run health against the actual post-pipeline head so those classifications are proved where publication will occur.
+
 Do not describe the fork as healthy when:
 
-- retained divergence units or active patches trend up;
+- retained divergence units or active canonical patches trend up;
 - any superseded unit remains;
 - a pending unit is aging without action;
-- a patch lacks exactly one manifest owner;
-- a topic has more than one non-equivalent aggregate patch;
-- a manifest unit no longer owns a patch;
+- a canonical topic has more than one non-equivalent aggregate patch;
+- a manifest unit or accepted-upstream proof is structurally invalid;
 - declared paths miss changed files; or
 - a recorded upstream PR disposition differs from live evidence.
 
@@ -116,8 +122,10 @@ bin/fm-fork-topic.sh discard --id <id> --repo <isolated-worktree>
 ```
 
 The helper selects that topic's integration merges only and reverts them newest to oldest.
-Any product-file conflict reopens re-justification.
-Validate the candidate through the private fork registration and require captain approval for its fork-main PR.
+Any product-file conflict reopens re-justification and leaves a receipt-bound merge or revert operation.
+Resolve the decision and files, write the complete `firstmate.fork-rejustify.v1` decision outside the candidate, then run `bin/fm-fork-topic.sh continue --decisions <file> --repo <isolated-worktree>`.
+The helper binds the branch and merge or revert head, completes queued reverts, updates the manifest in the completed operation, and validates candidate health.
+Validate the actual post-pipeline candidate through the private fork registration and require captain approval for its fork-main PR.
 Never reset or rewrite fork main to remove a divergence.
 
 Git remembers a reverted merge as unwanted ancestry.
