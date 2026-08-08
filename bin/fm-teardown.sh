@@ -30,7 +30,10 @@
 # A remote landing counts only after its advertised default branch is corroborated
 # by an exact fresh fetch and that fetched commit contains HEAD. An unavailable,
 # malformed, or changed remote is inconclusive and therefore never authorizes
-# teardown.
+# teardown. Candidates include every configured fetch and push URL, plus the optional
+# FM_TEARDOWN_LANDED_REMOTE URL or remote name. FM_TEARDOWN_LANDED_REMOTE_TIMEOUT
+# bounds each proof command in seconds and defaults to 10 when it is unset, blank,
+# zero, or not a whole number.
 # Scout tasks (kind=scout in meta) carve out of that check: their worktree is
 # declared scratch and the report at data/<task-id>/report.md is the work
 # product. Teardown proceeds only once the report exists and the shared
