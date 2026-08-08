@@ -523,13 +523,18 @@ while [ "$#" -gt 0 ]; do
       ;;
   esac
 done
-if [ -n "$dir" ] && [ "${args[2]:-}" = status ] && [ "${args[3]:-}" = --porcelain ]; then
+if [ -n "$dir" ] && [ "${args[2]:-}" = status ]; then
+  case "${args[3]:-}" in
+    --porcelain|--porcelain=v1) ;;
+    *) exec "$real" "${args[@]}" ;;
+  esac
   lock=$("$real" -C "$dir" rev-parse --git-path index.lock 2>/dev/null || true)
   case "$lock" in
     /*|'') ;;
     *) lock="$dir/$lock" ;;
   esac
   if [ -n "$lock" ] && [ -e "$lock" ]; then
+    [ -z "${FM_FAKE_GIT_STATUS_FAILURE_MARKER:-}" ] || : > "$FM_FAKE_GIT_STATUS_FAILURE_MARKER"
     echo "fatal: Unable to create '$lock': File exists." >&2
     exit 128
   fi
@@ -1059,7 +1064,7 @@ test_gh_error_and_content_absent_refuses() {
 }
 
 test_stale_index_lock_cleared_and_teardown_succeeds() {
-  local case_dir rc lock
+  local case_dir rc lock status_failure_marker
   case_dir=$(make_case stale-index-lock)
   write_meta "$case_dir" no-mistakes ship
   wt_commit "$case_dir" "shippable work"
@@ -1071,12 +1076,14 @@ test_stale_index_lock_cleared_and_teardown_succeeds() {
   add_git_status_lock_failure "$case_dir"
 
   lock=$(git_index_lock_path "$case_dir/wt")
+  status_failure_marker="$case_dir/status-failure"
   mkdir -p "$(dirname "$lock")"
   : > "$lock"
   touch -t 200001010000 "$lock"
 
   set +e
   FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS=0 FM_STALE_WORKTREE_LOCK_AGE_SECS=1 \
+    FM_FAKE_GIT_STATUS_FAILURE_MARKER="$status_failure_marker" \
     run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
@@ -1085,6 +1092,8 @@ test_stale_index_lock_cleared_and_teardown_succeeds() {
   assert_grep "removed provably-stale git lock" "$case_dir/stderr" \
     "stale-index-lock: teardown did not report clearing the stale lock"
   assert_absent "$lock" "stale-index-lock: stale lock file should have been removed"
+  assert_present "$status_failure_marker" \
+    "stale-index-lock: fixture did not inject the porcelain-v1 status failure"
   pass "provably-stale worktree index.lock (old, no live holder) is cleared and teardown succeeds"
 }
 
