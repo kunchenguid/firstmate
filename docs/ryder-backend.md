@@ -58,7 +58,7 @@ herdr, zellij, and cmux each record component ids so cleanup can cross-check tha
 The pty's agent is a **login shell**, not the harness, exactly as on tmux: Firstmate's shared spawn steps run `treehouse get` in the endpoint and then launch the harness inside the resulting worktree.
 The harness name is still declared to the host as session metadata so the session is identifiable, but it is caller-declared and is never used as a liveness signal - that stays with kernel-read foreground process identity.
 
-Sessions are created with a documented set of inherited harness markers removed (`CLAUDE_CODE_CHILD_SESSION`, `CLAUDECODE`, `GROK_AGENT`).
+Sessions are created with a documented set of inherited harness markers removed (`CLAUDE_CODE_CHILD_SESSION`, `CLAUDECODE`, `PI_CODING_AGENT`, `FM_PI_HARNESS`, `GROK_AGENT`).
 The host deliberately strips only the markers it owns and documents harness-specific markers as the caller's policy.
 Firstmate normally spawns a worker from inside an agent session, so without this every worker inherits its parent's child-process markers; the first of those was observed live to make Claude Code silently disable transcript saving in an unrelated agent.
 
@@ -70,12 +70,14 @@ The six-state vocabulary in `bin/fm-backend.sh` maps onto the host's own primiti
 | --- | --- |
 | `no_such_session` or `session_dead` | `missing` |
 | any other CLI failure | `unreadable` |
+| a reply whose `alive` cannot be read as a boolean | `unreadable` |
 | `alive: false` | `dead` |
 | a verified harness in the foreground process group | `alive` |
 | only shells in the foreground | `dead` |
 | anything else in the foreground | `ambiguous` |
 
 `alive` is specifically about the agent, so `alive: false` is an exact answer rather than an inference: the host still answers during its post-exit linger window and reports the agent gone.
+Because it is an exact answer, only an explicitly parsed boolean `false` counts as one: a call that succeeds but returns an unparseable body, an empty body, or a body carrying no `alive` at all stays `unreadable`, since `dead` licenses recovery and recovery means a duplicate agent on a live worktree.
 
 **`ambiguous` is retained, correcting the design sketch.**
 The sketch expected it to be droppable because the tmux adapter needs it only to reconcile two disagreeing process-name sources, and that disagreement genuinely is gone here - `fg_argv0` is read from the process's vnode and cannot be rewritten, so there is one authority.
@@ -154,6 +156,12 @@ Against codex, an update-available interstitial was on screen at submit time and
 - **Pull-only.**
   The host sees every pty byte the instant it arrives and could push state transitions natively, which would let the watcher drop its poll loop for Ryder tasks entirely.
   That is a deliberate second pass: `fm_backend_has_push` is false, so the poll loop remains the backstop exactly as designed, and adding push later needs no call-site changes.
+- **No muse glyph in the bare-composer vocabulary.**
+  The bare shape recognizes Claude's `❯` and codex's `›` only, so a muse crewmate's bare `⟩` composer matches nothing.
+  `composer_state` therefore returns `unknown` for it, and `send_text_submit` returns `unknown` rather than the proof-carrying `empty`: the submit is simply not confirmed, and is never silently treated as delivered.
+  The glyph is deliberately omitted because muse could not be verified against a real session on this backend, and every entry in a safety-critical classifier here carries live evidence.
+  The shared owner [`bin/fm-composer-lib.sh`](../bin/fm-composer-lib.sh) already lists `⟩`, so adding it here would be a vocabulary claim this backend has not earned; upstream's herdr adapter omits it from `FM_BACKEND_HERDR_BARE_PROMPT_RE` for the same practical reason.
+  Closing this belongs with verified muse evidence across the adapters, not with this change.
 - **No `--secondmate` spawns**, mirroring Orca and cmux.
   Secondmate launch semantics are not designed or verified for this backend, so a `--secondmate` spawn on `backend=ryder` refuses.
 - **Socket path length.**

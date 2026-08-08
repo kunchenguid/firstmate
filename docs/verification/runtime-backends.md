@@ -743,7 +743,7 @@ Current active CLI findings:
 | Capture | `snapshot <id> --lines N --json` `.text` | Whole viewport including trailing blank rows, plus up to N scrollback lines - a `tmux capture-pane -p -S -N` drop-in, untrimmed. |
 | Cursor offset | `snapshot --lines 10` on a scrolled session | 50 lines of text with the cursor genuinely on the last one, while `cursor_line` read 39; the text index is `scrollback + cursor_line`. |
 | Literal send | `write <id> --literal <text>` | Left text unsubmitted; its command output was absent until Enter. |
-| Keys | `key <id> Enter|Escape|C-c` | All shared key operations worked; an unknown name is a typed usage error, not a silent no-op. |
+| Keys | `key <id> Enter\|Escape\|C-c` | All shared key operations worked; an unknown name is a typed usage error, not a silent no-op. |
 | Liveness | `state <id> --json` | `alive:false` while the host lingers, `no_such_session`/`session_dead` once gone, kernel-read `fg_argv0` for foreground identity. |
 | Read-only probe | `state <id>` as the existence check | Session count unchanged across every probe; connecting starts nothing. |
 | Socket limit | `create` under a 90-byte `RYDER_HOME` | Refused up front with `usage`: `socket path is 123 bytes, over the 100-byte unix socket limit`. |
@@ -763,7 +763,7 @@ Real-harness evidence, all under the same host:
 | grok 0.2.118 | bordered composer with a dark-truecolor border | `empty` | `pending` |
 
 The ANSI style channel is load-bearing for those idle verdicts.
-An idle codex composer is plain text `> Write tests for @filename`, which a plain-text classifier reads as unsubmitted input; the styled row is `\x1b[0;1m>\x1b[0m \x1b[0;2mWrite tests for @filename\x1b[0m`, and dropping the dim run leaves a bare prompt.
+An idle codex composer is plain text `› Write tests for @filename`, which a plain-text classifier reads as unsubmitted input; the styled row is `\x1b[0;1m›\x1b[0m \x1b[0;2mWrite tests for @filename\x1b[0m`, and dropping the dim run leaves a bare prompt.
 End to end against Claude Code, `send_text_submit` returned the proof-carrying `empty` and the agent answered; against codex an update interstitial classified `pending`, the Enter retry loop drove through it, and the verdict then became `empty`.
 
 `busy_state` reports `busy` only when a process that is neither a harness nor a shell owns the pty, and never reports `idle`.
