@@ -21,6 +21,8 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/wake-helpers.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-classify-lib.sh"
+# shellcheck source=bin/fm-attempt-lib.sh
+. "$ROOT/bin/fm-attempt-lib.sh"
 
 WATCH="$ROOT/bin/fm-watch.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
@@ -1710,6 +1712,67 @@ test_heartbeat_backstop_surfaces_unsurfaced_status() {
   pass "heartbeat backstop fail-safe surfaces a captain-relevant status the per-wake path missed"
 }
 
+# --- heartbeat: a reconciliation-required attempt surfaces one bounded wake ------
+# Task 14: the watcher's heartbeat fleet-scan is extended so an attempt whose
+# shared projection row carries reconciliation_required (a non-working task that
+# cannot reach terminal on its own) surfaces ONE bounded wake through the
+# existing heartbeat path - no new wake type. Deduped against a
+# .hb-surfaced-attempt-<id> marker keyed on the row's missing-receipt signature,
+# so an unchanged projection never re-fires.
+
+test_heartbeat_backstop_surfaces_reconciliation_attempt() {
+  local dir state fakebin out drain_out aid pid
+  dir=$(make_case heartbeat-attempt-recon); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"
+  # A ship task bound to a delivery attempt that reached its intended landing
+  # but whose post-landing obligations are still pending; the fake crew-state
+  # answers done so the projection row is a clean reconciliation verdict.
+  aid=$(FM_STATE_OVERRIDE="$state" fm_attempt_alloc pi recon-task holu) || fail "attempt alloc"
+  FM_STATE_OVERRIDE="$state" fm_attempt_effect_observe "$aid" 1 claim '{"bead":"recon-task","status":"claimed"}' || fail "claim"
+  FM_STATE_OVERRIDE="$state" fm_attempt_freeze_allocation "$aid" 1 '{"provider":"tmux","copy":"wt-recon"}' \
+    '{"mode":"direct-PR","base":"main","target":"origin/main"}' || fail "freeze"
+  FM_STATE_OVERRIDE="$state" fm_attempt_effect_observe "$aid" 1 launch '{"endpoint":"w-recon"}' || fail "launch"
+  FM_STATE_OVERRIDE="$state" fm_attempt_effect_observe "$aid" 1 landing '{"disposition":"landed","pr":"https://example.test/pr/12"}' \
+    || fail "landing"
+  FM_STATE_OVERRIDE="$state" fm_attempt_effect_pending "$aid" 1 tracker \
+    '{"status":"pending","reason":"tracker close not yet confirmed"}' || fail "pending tracker"
+  printf 'kind=ship\nmode=direct-PR\nattempt=%s\n' "$aid" > "$state/recon-task.meta"
+  # The capacity projection reads the crew state through its JSON contract; the
+  # case fake answers done so the row is a clean reconciliation verdict.
+  cat > "$fakebin/fm-crew-state.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --json ]; then
+  printf '%s\n' '{"schema":"fm-crew-state.v1","id":"recon-task","state":"done","source":"run-step","detail":"checks green"}'
+  exit 0
+fi
+printf '%s\n' 'state: done · source: run-step · checks green'
+SH
+  chmod +x "$fakebin/fm-crew-state.sh"
+
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "heartbeat did not surface the reconciliation-required attempt"
+  grep -Fx "heartbeat" "$out" >/dev/null || fail "attempt reconciliation did not exit with a heartbeat wake"
+  [ -s "$state/.hb-surfaced-attempt-$aid" ] \
+    || fail "attempt-reconciliation wake did not record the surfaced marker"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the attempt-reconciliation heartbeat failed"
+  grep "$(printf '\theartbeat\t')" "$drain_out" >/dev/null || fail "attempt-reconciliation heartbeat was not queued"
+
+  # Bounded: an unchanged projection must not re-fire; the next heartbeat is
+  # absorbed against the surfaced marker.
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "an unchanged reconciliation-required attempt re-fired the heartbeat: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || { reap "$pid"; fail "an unchanged attempt re-fired a wake reason: $(cat "$out")"; }
+  reap "$pid"
+  pass "heartbeat backstop surfaces a reconciliation-required attempt once, then stays bounded"
+}
+
 # --- beacon stays fresh while absorbing -------------------------------------
 
 test_beacon_stays_fresh_while_absorbing() {
@@ -1842,6 +1905,7 @@ test_procevent_surface_crash_boundaries
 test_procevent_marker_failure_exits_and_replays
 test_heartbeat_no_change_absorbed
 test_heartbeat_backstop_surfaces_unsurfaced_status
+test_heartbeat_backstop_surfaces_reconciliation_attempt
 test_beacon_stays_fresh_while_absorbing
 test_afk_present_reverts_watcher_to_one_shot
 test_afk_paused_changed_pane_hands_off_plain_stale

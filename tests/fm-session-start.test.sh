@@ -35,6 +35,8 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # shellcheck source=tests/wake-helpers.sh
 . "$(dirname "${BASH_SOURCE[0]}")/wake-helpers.sh"
+# shellcheck source=bin/fm-attempt-lib.sh
+. "$ROOT/bin/fm-attempt-lib.sh"
 
 SESSION_START="$ROOT/bin/fm-session-start.sh"
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
@@ -1139,6 +1141,58 @@ EOF
   pass "orphan status logs are printed once with bounded tails"
 }
 
+# --- delivery-attempt state in the fleet-state digest (Task 14) -------------
+
+test_attempt_state_line_in_fleet_digest() {
+  local rec root home fakebin out aid
+  rec=$(new_world attempt-digest)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  make_fake_tmux "$fakebin" "fm-sess:live"
+
+  # A delivery attempt that reached its intended landing but whose post-landing
+  # obligations (tracker close, cleanup) are still pending: the digest's
+  # fleet-state section must name the attempt id, generation, missing observed
+  # effects, reconciliation need, and the intended-exit hint - all derived from
+  # the attempt record's receipt set, never the status log.
+  aid=$(FM_STATE_OVERRIDE="$home/state" fm_attempt_alloc pi attempt-task holu) || fail "attempt alloc"
+  FM_STATE_OVERRIDE="$home/state" fm_attempt_effect_observe "$aid" 1 claim '{"bead":"attempt-task","status":"claimed"}' || fail "claim"
+  FM_STATE_OVERRIDE="$home/state" fm_attempt_freeze_allocation "$aid" 1 '{"provider":"tmux","copy":"wt-attempt"}' \
+    '{"mode":"direct-PR","base":"main","target":"origin/main"}' || fail "freeze"
+  FM_STATE_OVERRIDE="$home/state" fm_attempt_effect_observe "$aid" 1 launch '{"endpoint":"w-attempt"}' || fail "launch"
+  FM_STATE_OVERRIDE="$home/state" fm_attempt_effect_observe "$aid" 1 landing '{"disposition":"landed","pr":"https://example.test/pr/9"}' \
+    || fail "landing"
+  FM_STATE_OVERRIDE="$home/state" fm_attempt_effect_pending "$aid" 1 tracker \
+    '{"status":"pending","reason":"tracker close not yet confirmed"}' || fail "pending tracker"
+  printf 'window=fm-sess:live\nkind=ship\nattempt=%s\n' "$aid" > "$home/state/attempt-task.meta"
+  printf 'working: implementing\n' > "$home/state/attempt-task.status"
+
+  # The shared capacity row reads the crew state through the JSON contract; a
+  # fake answers done so the row is a clean reconciliation verdict.
+  cat > "$fakebin/fm-crew-state.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --json ]; then
+  printf '%s\n' '{"schema":"fm-crew-state.v1","id":"attempt-task","state":"done","source":"run-step","detail":"checks green"}'
+  exit 0
+fi
+printf '%s\n' 'state: done · source: run-step · checks green'
+SH
+  chmod +x "$fakebin/fm-crew-state.sh"
+
+  out=$(FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "$aid" "fleet-state digest did not name the attempt id"
+  assert_contains "$out" "generation=1" "fleet-state digest did not name the attempt generation"
+  assert_contains "$out" "missing=tracker,cleanup.endpoint,cleanup.branch,cleanup.provider,cleanup.runtime" \
+    "fleet-state digest did not name the missing observed effects"
+  assert_contains "$out" "reconciliation=yes" "fleet-state digest did not name the reconciliation need"
+  assert_contains "$out" "intended exit at landing" \
+    "fleet-state digest did not derive the intended-exit hint from the receipt set"
+  pass "fleet-state digest exposes the attempt id, generation, obligations, reconciliation, and exit hint"
+}
+
 # --- session-start secondmate recovery boundary -----------------------------
 
 test_session_start_relaunches_missing_pi_secondmate() {
@@ -2201,6 +2255,7 @@ test_session_start_relaunches_herdr_husk_secondmate
 test_status_tail_bounding
 test_status_tail_line_cap
 test_orphan_status_logs_are_printed
+test_attempt_state_line_in_fleet_digest
 test_endpoint_liveness_tmux
 test_endpoint_liveness_herdr
 test_composition_invokes_real_scripts

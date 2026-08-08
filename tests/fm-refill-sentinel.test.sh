@@ -94,6 +94,49 @@ test_sentinel_never_counts() {
   pass "sentinel never classifies or recounts; it only consumes the object"
 }
 
+# --- config/refill-sentinel cadence schema (Task 14) ------------------------
+# A gitignored home-local file (one per home) whose first non-comment,
+# non-empty line is a positive integer giving the sentinel cadence in seconds
+# (comments start with '#'; default 600 when absent or invalid). The sentinel
+# reports the active cadence in its log line and verbose output so the wiring
+# is verifiable; it never schedules itself.
+CADENCE_CONFIG="$TMP_ROOT/cadence-config"
+mkdir -p "$CADENCE_CONFIG"
+
+test_sentinel_honors_cadence_config() {
+  local out
+  printf '# home cadence override\n120\n' > "$CADENCE_CONFIG/refill-sentinel"
+  out=$(FM_CAPACITY_OBSERVATION_FILE="$TMP_ROOT/safe.json" FM_CONFIG_OVERRIDE="$CADENCE_CONFIG" \
+    FM_REFILL_SENTINEL_VERBOSE=1 "$ROOT/bin/fm-refill-sentinel.sh" 2>&1)
+  assert_contains "$out" "cadence=120" "sentinel did not report the config-file cadence"
+  pass "config/refill-sentinel cadence is honored and reported"
+}
+
+test_sentinel_invalid_cadence_falls_back_to_default() {
+  local out
+  printf '# only a comment, no value\n' > "$CADENCE_CONFIG/refill-sentinel"
+  out=$(FM_CAPACITY_OBSERVATION_FILE="$TMP_ROOT/safe.json" FM_CONFIG_OVERRIDE="$CADENCE_CONFIG" \
+    FM_REFILL_SENTINEL_VERBOSE=1 "$ROOT/bin/fm-refill-sentinel.sh" 2>&1)
+  assert_contains "$out" "cadence=600" "a comment-only cadence file did not fall back to 600"
+  printf 'not-a-number\n' > "$CADENCE_CONFIG/refill-sentinel"
+  out=$(FM_CAPACITY_OBSERVATION_FILE="$TMP_ROOT/safe.json" FM_CONFIG_OVERRIDE="$CADENCE_CONFIG" \
+    FM_REFILL_SENTINEL_VERBOSE=1 "$ROOT/bin/fm-refill-sentinel.sh" 2>&1)
+  assert_contains "$out" "cadence=600" "an invalid cadence value did not fall back to 600"
+  pass "an absent, comment-only, or invalid cadence value falls back to the 600 default"
+}
+
+test_sentinel_env_cadence_overrides_config() {
+  local out
+  printf '120\n' > "$CADENCE_CONFIG/refill-sentinel"
+  out=$(FM_CAPACITY_OBSERVATION_FILE="$TMP_ROOT/safe.json" FM_CONFIG_OVERRIDE="$CADENCE_CONFIG" \
+    FM_REFILL_SENTINEL_CADENCE_SECS=300 FM_REFILL_SENTINEL_VERBOSE=1 "$ROOT/bin/fm-refill-sentinel.sh" 2>&1)
+  assert_contains "$out" "cadence=300" "FM_REFILL_SENTINEL_CADENCE_SECS did not override the config file"
+  pass "FM_REFILL_SENTINEL_CADENCE_SECS still overrides the config file"
+}
+
 test_sentinel_is_silent_when_refill_is_safe
 test_sentinel_notifies_on_reconciliation_or_alert
 test_sentinel_never_counts
+test_sentinel_honors_cadence_config
+test_sentinel_invalid_cadence_falls_back_to_default
+test_sentinel_env_cadence_overrides_config

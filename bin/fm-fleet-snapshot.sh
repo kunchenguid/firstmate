@@ -29,6 +29,9 @@
 #     state, source, detail, and raw line separately.
 #     paths.status_log.last_event is historical wake-event data only, never
 #     current state.
+#     attempt is present ({id,generation,obligations,reconciliation}) when the
+#     meta binds a delivery-attempt record, else null; it is coordination
+#     state exposed from the single attempt record, never the status log.
 #     hints.open_decisions is the keyed open-decision set returned by
 #     fm-classify-lib.sh's authoritative status_open_decisions fold and reconciled
 #     against current_state; hints.pending_decision and hints.blocked_event are
@@ -257,6 +260,22 @@ first_pr_url_in_file() {  # <file>
   grep -Eo 'https?://[^[:space:])"]+/pull/[0-9]+' "$1" 2>/dev/null | head -1
 }
 
+# snapshot_attempt_reconciliation <crew-state-word> <attempt-id>: true when the
+# attempt is not yet retired and the crew state is done/failed/unknown -
+# exactly the shared capacity-row reconciliation semantics - so the tasks[]
+# attempt view agrees with the embedded capacity rows.
+snapshot_attempt_reconciliation() {  # <state> <attempt-id>
+  local state=$1 attempt=$2
+  if fm_attempt_is_retired "$attempt" 2>/dev/null; then
+    printf 'false'
+    return 0
+  fi
+  case "$state" in
+    done|failed|unknown) printf 'true' ;;
+    *) printf 'false' ;;
+  esac
+}
+
 backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
   local backlog=${1:-$BACKLOG}
   if [ ! -f "$backlog" ]; then
@@ -413,6 +432,7 @@ task_json_lines() {
   local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
   local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
   local open_decisions_tsv open_decisions_json
+  local attempt_id attempt_json
 
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
@@ -455,6 +475,23 @@ task_json_lines() {
     last_event_raw=$(printf '%s' "$event_json" | jq -r '.last_event.raw // ""')
     current_state=$(printf '%s' "$current_json" | jq -r '.state // ""')
     current_source=$(printf '%s' "$current_json" | jq -r '.source // ""')
+
+    # Task 14: per-task delivery-attempt exposure. When the meta binds an
+    # attempt record, surface its id, generation, obligations (missing observed
+    # effects), and reconciliation need derived from the attempt record plus
+    # this task's crew state using the shared capacity-row semantics
+    # (not-retired AND done/failed/unknown crew state). The record is
+    # coordination state only; the snapshot never reclassifies.
+    attempt_id=$(meta_value "$meta" attempt)
+    attempt_json=null
+    if [ -n "$attempt_id" ] && [ -f "$(attempt_path "$attempt_id")" ]; then
+      attempt_json=$(jq -n \
+        --arg id "$attempt_id" \
+        --argjson generation "$(fm_attempt_generation "$attempt_id" 2>/dev/null || printf 0)" \
+        --arg obligations "$(fm_attempt_obligations "$attempt_id" 2>/dev/null || true)" \
+        --argjson reconciliation "$(snapshot_attempt_reconciliation "$current_state" "$attempt_id")" \
+        '{id:$id,generation:$generation,obligations:($obligations | split(" ") | map(select(. != ""))),reconciliation:$reconciliation}')
+    fi
 
     # Durable keyed open-decision set: fold the WHOLE status stream
     # (fm-classify-lib.sh's status_open_decisions) so a later unrelated event can
@@ -561,6 +598,7 @@ task_json_lines() {
       --argjson worktree_path "$worktree_json" \
       --argjson home_path "$home_json" \
       --argjson endpoint_exists "$endpoint_exists" \
+      --argjson attempt "$attempt_json" \
       --argjson open_decisions "$open_decisions_json" \
       --argjson pending_decision "$(bool_json "$pending_decision")" \
       --argjson blocked_event "$(bool_json "$blocked_event")" \
@@ -588,6 +626,7 @@ task_json_lines() {
                   elif $agent_alive == "alive" or $agent_alive == "dead" then $agent_alive
                   else "unknown" end),
           observed_at:$observed_at,freshness:"fresh"},
+        attempt:$attempt,
         pr:{url:($pr | if . == "" then null else . end),source:$pr_source},
         hints:{
           pending_decision:$pending_decision,

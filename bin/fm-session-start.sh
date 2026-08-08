@@ -289,6 +289,12 @@ PRIMARY_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
 . "$SCRIPT_DIR/fm-trace-context-lib.sh"
 # shellcheck source=bin/fm-line-cap-lib.sh
 . "$SCRIPT_DIR/fm-line-cap-lib.sh"
+# Task 14: the fleet-state digest's per-attempt lines consume the one shared
+# capacity row (fm_capacity_row) so "reconciliation need" and "missing observed
+# effects" match the projection exactly. The library is read-only; the digest
+# never classifies attempts itself.
+# shellcheck source=bin/fm-capacity-lib.sh
+. "$SCRIPT_DIR/fm-capacity-lib.sh"
 
 # One tasks-axi compatibility verdict per session start. The probe costs three
 # tasks-axi subprocesses and this digest needs the same answer twice - here for
@@ -671,6 +677,63 @@ EOF
 # --- 6. fleet-state digest ---------------------------------------------
 # Before CONTEXT: see this file's ORDERING note. Live fleet identity is what a
 # truncated tail must never take.
+
+# print_attempt_line <attempt-id> <task-id>: one bounded fleet-state digest
+# line exposing a delivery attempt: id, generation, missing observed effects
+# (obligations), reconciliation need, and an intended-exit-versus-crash hint
+# derived from the attempt record's receipt set - never the status log. The
+# row is the one shared capacity classification (fm_capacity_row), so the
+# reconciliation verdict and missing effects match the projection exactly.
+print_attempt_line() {  # <attempt-id> <task-id>
+  local attempt=$1 id=$2 row gen missing reconciliation hint
+  row=$(FM_STATE_OVERRIDE="$STATE" fm_capacity_row "attempt:$attempt" 2>/dev/null || true)
+  gen=$(printf '%s' "$row" | jq -r '.generation // empty' 2>/dev/null || true)
+  missing=$(printf '%s' "$row" | jq -r '(.missing_receipts // []) | join(",")' 2>/dev/null || true)
+  reconciliation=$(printf '%s' "$row" | jq -r '.reconciliation_required // empty' 2>/dev/null || true)
+  case "$reconciliation" in
+    true) reconciliation=yes ;;
+    false) reconciliation=no ;;
+  esac
+  hint=$(attempt_exit_hint "$attempt")
+  if [ -z "$row" ]; then
+    # The shared row is unavailable (e.g. the meta is not kind=ship): fall back
+    # to the attempt record itself so the digest still names what it can.
+    if [ -f "$(attempt_path "$attempt")" ]; then
+      gen=$(fm_attempt_generation "$attempt" 2>/dev/null || printf '?')
+      missing=$(fm_attempt_obligations "$attempt" 2>/dev/null || true)
+      missing=${missing// /,}
+      printf 'attempt: %s generation=%s missing=%s reconciliation=unknown hint=%s\n' \
+        "$attempt" "$gen" "${missing:-none}" "$hint"
+    else
+      printf 'attempt: %s record-missing\n' "$attempt"
+    fi
+    return 0
+  fi
+  printf 'attempt: %s generation=%s missing=%s reconciliation=%s hint=%s\n' \
+    "$attempt" "${gen:-?}" "${missing:-none}" "${reconciliation:-unknown}" "$hint"
+}
+
+# attempt_exit_hint <attempt-id>: an intended-exit-versus-crash hint derived
+# only from the attempt record's receipt set (never the status log): whether
+# the attempt reached a terminal landing (an intended exit with post-landing
+# obligations) or stopped earlier (crashed before allocation or launch, a
+# refused claim, or never started).
+attempt_exit_hint() {  # <attempt-id>
+  local attempt=$1 path
+  path="$(attempt_path "$attempt")"
+  [ -f "$path" ] || { printf 'record-missing'; return 0; }
+  jq -r '
+    def observed($n): ([.receipts[$n][]? | select(.state == "observed")] | length) > 0;
+    if observed("retirement") then "retired"
+    elif (([.receipts.claim[]? | select(.state == "observed")][0].evidence.status // "") == "refused") then "claim refused before allocation"
+    elif observed("landing") then
+      "intended exit at landing (" + ([.receipts.landing[]? | select(.state == "observed")][0].evidence.disposition // "observed") + "); post-landing obligations pending"
+    elif observed("launch") then "launched but no landing receipt (crashed mid-delivery?)"
+    elif observed("provider") then "allocation frozen but never launched (crashed before launch?)"
+    elif observed("claim") then "claim observed but allocation never froze (crashed before allocation?)"
+    else "never started" end' "$path" 2>/dev/null || printf 'unknown'
+}
+
 stage fleet-state
 section "FLEET STATE"
 print_backlog_compact "$DATA/backlog.md" "data/backlog.md"
@@ -695,6 +758,15 @@ for meta in "$STATE"/*.meta; do
     fi
   else
     printf 'endpoint: unknown (no window recorded)\n'
+  fi
+
+  # Task 14: one bounded digest line per task whose meta binds a delivery
+  # attempt, naming the attempt id, generation, missing observed effects
+  # (obligations), reconciliation need, and an intended-exit-versus-crash hint
+  # derived from the attempt record's receipt set - never the status log.
+  attempt=$(fm_meta_get "$meta" attempt)
+  if [ -n "$attempt" ]; then
+    print_attempt_line "$attempt" "$id"
   fi
 
   status="$STATE/$id.status"

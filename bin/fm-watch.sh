@@ -52,7 +52,8 @@
 #                          invalid pending retirements were preserved without
 #                          running a check or removing poll artifacts
 #   heartbeat              fleet-scan backstop found an unsurfaced captain-relevant
-#                          status, unless afk is active
+#                          status, or an attempt the shared capacity projection
+#                          marks reconciliation-required, unless afk is active
 # For normal supervision, resume the session-start primary-harness protocol
 # after each printed reason. Direct duplicate invocations of this script still
 # no-op through the watcher singleton lock.
@@ -82,6 +83,11 @@ mkdir -p "$STATE"
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$SCRIPT_DIR/fm-busy-lib.sh"
+# Task 14: the heartbeat fleet-scan consumes the one shared capacity
+# projection (fm_capacity_project) so an attempt row's reconciliation verdict
+# matches every other consumer exactly; the watcher never classifies attempts.
+# shellcheck source=bin/fm-capacity-lib.sh
+. "$SCRIPT_DIR/fm-capacity-lib.sh"
 
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
@@ -609,7 +615,9 @@ mark_all_captain_relevant_surfaced() {
 # captain-relevant signal/stale already marks itself surfaced when it wakes
 # firstmate, this normally finds nothing and the heartbeat is absorbed; it
 # surfaces only a captain-relevant status the per-wake path absorbed by mistake -
-# the fail-safe backstop.
+# the fail-safe backstop. heartbeat_scan_finds_attempt_reconciliation is the
+# sibling Task 14 scan over the shared capacity projection (an attempt row the
+# projection marks reconciliation-required).
 heartbeat_scan_finds_actionable() {
   local f task last surfaced
   while IFS=$(printf '\t') read -r f task last; do
@@ -619,6 +627,57 @@ heartbeat_scan_finds_actionable() {
     return 0
   done < <(scan_captain_relevant_statuses "$STATE")
   return 1
+}
+
+# --- Task 14: attempt-reconciliation heartbeat scan -------------------------
+# The shared capacity projection (fm-fleet-capacity.v1) is the single
+# classifier: it marks an attempt row `reconciliation_required` when a
+# non-working task cannot reach terminal on its own (done/failed/unknown crew
+# state with outstanding obligations, or not yet retired). The watcher
+# surfaces one bounded heartbeat wake per changed projection state through the
+# existing heartbeat path (no new wake type), deduped against a
+# .hb-surfaced-attempt-<id> marker keyed on the row's missing-receipt
+# signature, so an unchanged projection never re-fires. The projection is
+# bounded (FM_CAPACITY_TOTAL_TIMEOUT_SECS) and only runs when attempt records
+# exist; with none, no row can require attempt reconciliation.
+
+_fm_watch_attempt_projection() {  # -> fm-fleet-capacity.v1 JSON on stdout
+  FM_STATE_OVERRIDE="$STATE" FM_HOME="$FM_HOME" fm_capacity_project 2>/dev/null || true
+}
+
+# "<attempt-id>\t<missing-receipts-signature>" per reconciliation-required
+# attempt row in the shared projection.
+_fm_watch_reconciliation_rows() {
+  _fm_watch_attempt_projection \
+    | jq -r '.rows[] | select(.reconciliation_required == true and .attempt_id != null)
+             | [.attempt_id, ([.missing_receipts[]] | join(","))] | @tsv' 2>/dev/null || true
+}
+
+# 0 when any reconciliation-required attempt row has not been surfaced for its
+# current missing-receipt signature. Pure detect, no side effects: the caller
+# enqueues first, then marks surfaced.
+heartbeat_scan_finds_attempt_reconciliation() {
+  local attempt sig surfaced
+  # Only run the bounded projection when an attempt record actually exists;
+  # with none, no row can require attempt reconciliation.
+  find "$STATE/attempts" -maxdepth 1 -name '*.json' -print -quit 2>/dev/null | grep -q . || return 1
+  while IFS=$(printf '\t') read -r attempt sig; do
+    [ -n "$attempt" ] || continue
+    surfaced=$(cat "$STATE/.hb-surfaced-attempt-$attempt" 2>/dev/null || true)
+    [ "$surfaced" = "$sig" ] && continue
+    return 0
+  done < <(_fm_watch_reconciliation_rows)
+  return 1
+}
+
+# Mark every current reconciliation-required attempt row as surfaced so the
+# next heartbeat does not re-fire it (called after the wake is enqueued).
+mark_attempt_reconciliation_surfaced() {
+  local attempt sig
+  while IFS=$(printf '\t') read -r attempt sig; do
+    [ -n "$attempt" ] || continue
+    printf '%s' "$sig" > "$STATE/.hb-surfaced-attempt-$attempt"
+  done < <(_fm_watch_reconciliation_rows)
 }
 
 # event_wait_or_sleep: the terminal wait of each supervision cycle. For a home
@@ -1105,13 +1164,15 @@ EOF
       fm_wake_append heartbeat heartbeat heartbeat || exit 1
       touch "$STATE/.last-heartbeat"
       wake "heartbeat"
-    elif heartbeat_scan_finds_actionable; then
-      # Backstop: a captain-relevant status the per-wake path absorbed by mistake.
-      # Enqueue first, then mark every captain-relevant status surfaced so the next
+    elif heartbeat_scan_finds_actionable || heartbeat_scan_finds_attempt_reconciliation; then
+      # Backstop: a captain-relevant status the per-wake path absorbed by
+      # mistake, or an attempt the shared capacity projection marks
+      # reconciliation-required. Enqueue first, then mark surfaced so the next
       # heartbeat does not re-fire them (enqueue-before-suppress preserved).
       fm_wake_append heartbeat heartbeat heartbeat || exit 1
       touch "$STATE/.last-heartbeat"
       mark_all_captain_relevant_surfaced
+      mark_attempt_reconciliation_surfaced
       wake "heartbeat"
     else
       touch "$STATE/.last-heartbeat"

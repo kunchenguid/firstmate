@@ -5,6 +5,8 @@ set -u
 # shellcheck source=tests/lib.sh
 # shellcheck disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=bin/fm-attempt-lib.sh
+. "$ROOT/bin/fm-attempt-lib.sh"
 
 SNAPSHOT="$ROOT/bin/fm-fleet-snapshot.sh"
 VIEW="$ROOT/bin/fm-fleet-view.sh"
@@ -223,6 +225,42 @@ test_fixture_snapshot_json() {
     | .state == "done" and .pr_url == "https://github.com/kunchenguid/firstmate/pull/7"
   ' >/dev/null || fail "done backlog PR row missing"
   pass "fixture snapshot covers task rows, backlog rows, pointers, and stable ordering"
+}
+
+# --- per-task delivery-attempt exposure (Task 14) ---------------------------
+
+test_attempt_state_exposure_fields() {
+  local home fakebin out aid
+  home=$(make_home attempt-exposure)
+  # A delivery attempt that reached its intended landing but whose post-landing
+  # obligations are still pending: the tasks[] row must expose the attempt id,
+  # generation, obligations (missing observed effects), and reconciliation need
+  # from the attempt record when present - and null when absent.
+  aid=$(FM_STATE_OVERRIDE="$home/state" fm_attempt_alloc pi attempt-ship holu) || fail "attempt alloc"
+  FM_STATE_OVERRIDE="$home/state" fm_attempt_effect_observe "$aid" 1 claim '{"bead":"attempt-ship","status":"claimed"}' || fail "claim"
+  FM_STATE_OVERRIDE="$home/state" fm_attempt_freeze_allocation "$aid" 1 '{"provider":"tmux","copy":"wt-attempt"}' \
+    '{"mode":"direct-PR","base":"main","target":"origin/main"}' || fail "freeze"
+  FM_STATE_OVERRIDE="$home/state" fm_attempt_effect_observe "$aid" 1 launch '{"endpoint":"w-attempt"}' || fail "launch"
+  FM_STATE_OVERRIDE="$home/state" fm_attempt_effect_observe "$aid" 1 landing '{"disposition":"landed","pr":"https://example.test/pr/11"}' \
+    || fail "landing"
+  FM_STATE_OVERRIDE="$home/state" fm_attempt_effect_pending "$aid" 1 tracker \
+    '{"status":"pending","reason":"tracker close not yet confirmed"}' || fail "pending tracker"
+  fm_write_meta "$home/state/attempt-ship.meta" "kind=ship" "mode=direct-PR" "attempt=$aid"
+  fm_write_meta "$home/state/plain-ship.meta" "kind=ship" "mode=direct-PR"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e --arg aid "$aid" '
+    .tasks[] | select(.id == "attempt-ship")
+    | .attempt.id == $aid
+      and .attempt.generation == 1
+      and (.attempt.obligations | index("tracker")) != null
+      and (.attempt.obligations | index("cleanup.endpoint")) != null
+      and .attempt.reconciliation == true
+  ' >/dev/null || fail "attempt exposure fields wrong: $out"
+  printf '%s' "$out" | jq -e '
+    .tasks[] | select(.id == "plain-ship") | .attempt == null
+  ' >/dev/null || fail "a task without an attempt record must expose attempt null: $out"
+  pass "tasks[] expose attempt id, generation, obligations, and reconciliation; absent attempts are null"
 }
 
 # R1 owner contract: main_inventory discloses orphan in-flight and unstructured
@@ -809,6 +847,7 @@ test_parked_scout_decision_stays_pending() {
 
 test_empty_fleet_json
 test_fixture_snapshot_json
+test_attempt_state_exposure_fields
 test_main_inventory_orphan_and_unstructured_disclosure
 test_normalized_roles_and_plural_blocker_readiness
 test_event_hints_follow_reconciled_current_state

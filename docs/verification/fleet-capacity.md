@@ -204,6 +204,74 @@ The plan's exact removal steps (Task 13 Step 7):
 
 Evidence firstmate must produce: crontab entry removed and verified 0 matches; `data/fleet-depth-check.sh` deleted; cadence switched to `bin/fm-refill-sentinel.sh`; `state/fleet-manifest.jsonl` left inert; verification output.
 As of 2026-08-08 the private sentinel is still present at `/home/holu/fmate/firstmate/data/fleet-depth-check.sh` (verified), `config/refill-auto` is absent, and the real home's git status is clean - none of the private operations were touched by the tracked work.
+The cadence switch itself now has an owner schema: see `## Refill sentinel cadence` below, whose pending-operations note names the one private file operation (create `config/refill-sentinel`) that step 3 of this section needs.
+
+## Refill sentinel cadence
+
+Task 14 (Decision OS 7.6 leaf) defines the cadence schema for the shared fleet sentinel (`bin/fm-refill-sentinel.sh`).
+
+Schema: `config/refill-sentinel` is a gitignored home-local file (one per home; the primary home's is not inherited into secondmate homes). Its first non-comment, non-empty line is a positive integer giving the sentinel cadence in seconds. Comments start with `#`. Example content:
+
+```sh
+600
+```
+
+Resolution precedence in `bin/fm-refill-sentinel.sh` (one resolver, `fm_refill_sentinel_cadence`):
+
+1. `FM_REFILL_SENTINEL_CADENCE_SECS` (env) when set and a positive integer.
+2. `$FM_CONFIG_OVERRIDE/refill-sentinel` (fallback `$FM_HOME/config/refill-sentinel`) when present and its first non-comment, non-empty line is a positive integer.
+3. `600` (the default) when the file is absent, comment-only, or invalid.
+
+The sentinel reports the ACTIVE cadence so the wiring is verifiable: every log line under `FM_REFILL_SENTINEL_LOG` (default `state/refill-sentinel.log`) carries `cadence=<seconds>`, and the `FM_REFILL_SENTINEL_VERBOSE=1` consumed-aggregate note prints `cadence=<seconds>` too. The sentinel never schedules itself: it is invoked by its callers at that cadence (the away-mode daemon heartbeat fleet review and the attended refill path), and it owns only cadence resolution, the candidate query, logging, and notification policy.
+
+Verify the wiring (frozen observation, temp config):
+
+```sh
+tmp=$(mktemp -d); mkdir -p "$tmp/config"; printf '120\n' > "$tmp/config/refill-sentinel"
+FM_CONFIG_OVERRIDE="$tmp/config" FM_CAPACITY_OBSERVATION_FILE=<frozen-capacity.json> \
+  FM_REFILL_SENTINEL_VERBOSE=1 bin/fm-refill-sentinel.sh 2>&1 | grep 'cadence=120'
+```
+
+Wiring contract for the away-mode daemon (`bin/fm-supervise-daemon.sh`; Task 14 scope note): the daemon's heartbeat fleet review is `housekeeping()` step (3), the catch-all status scan gated on `state/.subsuper-last-scan` against `FM_HEARTBEAT_SCAN_SECS`. The sentinel invocation lands as a sibling housekeeping step: gate a `state/.subsuper-last-refill-sentinel` marker against the effective cadence resolved exactly as above, invoke `bin/fm-refill-sentinel.sh` with the home's env (`FM_HOME`/`FM_STATE_OVERRIDE`/`FM_CONFIG_OVERRIDE`), feed a printed `REFILL-ALERT:` line into the daemon's normal escalation digest (`escalate_add`) so it reaches firstmate, and touch the marker. The sentinel is unavailable-safe: a missing script, missing jq, or nonzero sentinel exit is ignored and the daemon loop continues unchanged. This integration is documented here rather than implemented because `bin/fm-supervise-daemon.sh` is outside Task 14's file scope; the daemon was not restructured.
+
+Idempotent obligation retry (Task 14 step 3): pending effects live inside the single attempt record (`state/attempts/<id>.json`, receipt `state:"pending"`), never in a separate obligation file. Claim retry lands in the existing dispatch/refill replay owners - `bin/fm-spawn.sh`'s claim_pending resume (`FM_TRACKER_CLAIM=1`; replay never re-claims or allocates) and `fm_refill_claim_and_launch`'s identical-request replay - triggered by the surfaced startup digest or heartbeat signal. Tracker/cleanup retry lands in the ordered terminal transaction (`bin/fm-terminal.sh` re-runs the tracker observation; a still-unconfirmed tracker is re-written as a pending receipt) and the structured cleanup replay. All replays are idempotent against the write-once receipt set; no new loop is built.
+
+Pending private operation (not performed by the tracked work; scope boundary): create the real home's cadence file.
+
+```sh
+printf '600\n' > /home/holu/fmate/firstmate/config/refill-sentinel
+```
+
+The exact real-home path is the one this doc's latency measurements use; the file content is the documented single cadence line. This is the only private operation Task 14 needs; the tracked side only ever READS a temp/fixture config via `FM_CONFIG_OVERRIDE` in tests. After creation, verify the wiring with the sentinel's verbose/log cadence report as above.
+
+## Task 14 acceptance
+
+Task 14 safety-gate evidence, 2026-08-08, integration base `454b10d`, branch `fm/fm-fleet-refill-implementation-r1` (parent commit `b50fdce`).
+Commands run:
+
+```sh
+bash tests/fm-session-start.test.sh
+bash tests/fm-watch-triage.test.sh
+bash tests/fm-fleet-snapshot-view.test.sh
+bash tests/fm-refill-sentinel.test.sh
+bash tests/fm-capacity.test.sh
+bash tests/fm-attempt.test.sh
+bin/fm-lint.sh bin/fm-session-start.sh bin/fm-watch.sh bin/fm-fleet-snapshot.sh bin/fm-refill-sentinel.sh tests/fm-session-start.test.sh tests/fm-watch-triage.test.sh tests/fm-fleet-snapshot-view.test.sh tests/fm-refill-sentinel.test.sh
+bin/fm-doc-audience-check.sh
+```
+
+Results:
+
+- `tests/fm-session-start.test.sh`: 44 ok, all passed, including the new fleet-state attempt line (`fleet-state digest exposes the attempt id, generation, obligations, reconciliation, and exit hint`).
+- `tests/fm-watch-triage.test.sh`: 47 ok, all passed, including the new bounded heartbeat surface (`heartbeat backstop surfaces a reconciliation-required attempt once, then stays bounded`).
+- `tests/fm-fleet-snapshot-view.test.sh`: 17 ok, all passed, including the new per-task attempt exposure (`tasks[] expose attempt id, generation, obligations, and reconciliation; absent attempts are null`).
+- `tests/fm-refill-sentinel.test.sh`: 6 ok, all passed, including the three cadence-config tests (config honored, invalid/comment-only falls back to 600, env still overrides).
+- `tests/fm-capacity.test.sh`: 14 ok, all passed.
+- `tests/fm-attempt.test.sh`: 11 ok, all passed.
+- `bin/fm-lint.sh` on the changed files: clean (ShellCheck 0.11.0 pinned), exit 0; `bash -n` clean on all four changed scripts.
+- `bin/fm-doc-audience-check.sh`: clean, exit 0.
+
+Automatic refill stays disabled: nothing in the tracked side creates `config/refill-auto`, and the cadence file in the real home remains the one pending private operation above.
 
 ## Decision OS contract
 
