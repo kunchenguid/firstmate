@@ -1947,6 +1947,28 @@ surface_skill_drafts() {
   fi
 }
 
+surface_active_project_hygiene() {
+  local recorded=$1 repeat=$2 projects project checkout key failed=0
+  projects=$(mktemp "$STATE_ROOT/.active-projects.XXXXXX") || return 1
+  if ! active_project_paths > "$projects"; then
+    rm -f "$projects"
+    return 1
+  fi
+  : > "$recorded" || { rm -f "$projects"; return 1; }
+  while IFS= read -r project; do
+    [ -n "$project" ] || continue
+    checkout=$(exact_git_root "$project" 2>/dev/null) || continue
+    key=$(checkout_key "$checkout") || continue
+    if surface_skill_drafts "$checkout" "$key" "$repeat"; then
+      printf '%s\n' "$checkout" >> "$recorded" || failed=1
+    else
+      failed=1
+    fi
+  done < "$projects"
+  rm -f "$projects" || failed=1
+  [ "$failed" -eq 0 ]
+}
+
 prepare_hygiene_discovery() {
   local seed_file=$1 hygiene_file=$2 treehouse_paths treehouse_state pool worktree canonical failed=0
   cp "$seed_file" "$hygiene_file" || return 1
@@ -2504,7 +2526,7 @@ inspect_local_checkout() {
 }
 
 run_once() {
-  local force=0 verbose=0 session=0 scheduled=0 prune=0 arg lock discovery identities hygiene checkout key tip_file last_file alert_file
+  local force=0 verbose=0 session=0 scheduled=0 prune=0 arg lock discovery identities hygiene early_hygiene checkout key tip_file last_file alert_file
   local prior_tip previous_coverage retry_unhealthy now last due probe_ok output_file output line reinspected identity_output
   local state_persisted hygiene_failed=0 coverage_failed=0 status=0
   local coverage=healthy
@@ -2535,48 +2557,58 @@ run_once() {
     return 0
   fi
   trap 'fm_lock_release "$STATE_ROOT/.run-lock"' EXIT
+  early_hygiene=$(mktemp "$STATE_ROOT/.early-hygiene.XXXXXX") || {
+    record_run_result unhealthy "$scheduled" || true
+    return 1
+  }
+  if [ "$force" -eq 1 ] || [ "$verbose" -eq 1 ]; then
+    surface_active_project_hygiene "$early_hygiene" 1 || hygiene_failed=1
+  else
+    surface_active_project_hygiene "$early_hygiene" 0 || hygiene_failed=1
+  fi
   discovery=$(mktemp "$STATE_ROOT/.discover.XXXXXX") || {
+    rm -f "$early_hygiene"
     record_run_result unhealthy "$scheduled" || true
     return 1
   }
   identities=$(mktemp "$STATE_ROOT/.external-identities.XXXXXX") || {
-    rm -f "$discovery"
+    rm -f "$early_hygiene" "$discovery"
     record_run_result unhealthy "$scheduled" || true
     return 1
   }
   manifest_create "$identities" || {
-    rm -f "$discovery" "$identities"
+    rm -f "$early_hygiene" "$discovery" "$identities"
     record_run_result unhealthy "$scheduled" || true
     return 1
   }
   hygiene=$(mktemp "$STATE_ROOT/.hygiene-discover.XXXXXX") || {
-    rm -f "$discovery" "$identities"
+    rm -f "$early_hygiene" "$discovery" "$identities"
     record_run_result unhealthy "$scheduled" || true
     return 1
   }
   DISCOVERY_IDENTITIES_FILE=$identities
   if ! discover > "$discovery"; then
-    rm -f "$discovery" "$identities" "$hygiene"
+    rm -f "$early_hygiene" "$discovery" "$identities" "$hygiene"
     record_run_result unhealthy "$scheduled" || true
     return 1
   fi
   if ! validate_external_identity_history "$identities"; then
-    rm -f "$discovery" "$identities" "$hygiene"
+    rm -f "$early_hygiene" "$discovery" "$identities" "$hygiene"
     record_run_result unhealthy "$scheduled" || true
     return 1
   fi
   if ! atomic_copy "$identities" "$STATE_ROOT/external-identities"; then
-    rm -f "$discovery" "$identities" "$hygiene"
+    rm -f "$early_hygiene" "$discovery" "$identities" "$hygiene"
     record_run_result unhealthy "$scheduled" || true
     return 1
   fi
   if ! rm -f "$identities"; then
-    rm -f "$discovery" "$hygiene" || true
+    rm -f "$early_hygiene" "$discovery" "$hygiene" || true
     record_run_result unhealthy "$scheduled" || true
     return 1
   fi
   prepare_hygiene_discovery "$discovery" "$hygiene" || {
-    rm -f "$discovery" "$hygiene"
+    rm -f "$early_hygiene" "$discovery" "$hygiene"
     record_run_result unhealthy "$scheduled" || true
     return 1
   }
@@ -2588,6 +2620,9 @@ run_once() {
       record_reinspection_failure "$checkout" || status=1
       coverage_failed=1
       status=1
+      continue
+    fi
+    if grep -Fxq -- "$checkout" "$early_hygiene"; then
       continue
     fi
     key=$(checkout_key "$checkout") || {
@@ -2748,7 +2783,7 @@ EOF
     esac
   done < "$discovery"
 
-  if ! rm -f "$discovery" "$hygiene"; then
+  if ! rm -f "$early_hygiene" "$discovery" "$hygiene"; then
     coverage_failed=1
     status=1
   fi

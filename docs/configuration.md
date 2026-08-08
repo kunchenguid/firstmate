@@ -106,13 +106,19 @@ Reusing the same planner and runner as CI restores local-CI parity without dupli
 `config/crosscheck-reviewer.json` selects the local independent identity for the PR merge-gate reviewer.
 It is gitignored and is not inferred from the author account or ambient Codex configuration.
 The current schema has one nonempty `reviewers` array, whose entries require exactly `harness`, `model`, `effort`, and `account_home`.
-The accepted policy profiles are Codex `gpt-5.6-sol` at `xhigh` effort and Claude `claude-opus-5` at `xhigh` effort.
+The accepted policy profiles are Codex `gpt-5.6-sol` at `xhigh` effort, Claude `claude-opus-5` at `xhigh` effort, and Pi `gpt-5.6-sol` at `xhigh` effort.
 Every `account_home` must be an existing absolute directory.
-Crosscheck resolves each configured account home and selects the first entry whose account home and model both differ from the routed author identity recorded in task metadata.
-Codex binds both `CODEX_HOME` and `HOME` to that path.
-Claude creates a disposable private `HOME` whose `.claude` resolves to that path, binds both `CLAUDE_CONFIG_DIR` and `CLAUDE_SECURESTORAGE_CONFIG_DIR` to it, and verifies the exact OAuth-file or scoped-Keychain credential source before launch.
+Crosscheck resolves each configured account home and keeps every entry whose account home and model both differ from the routed author identity recorded in task metadata, then runs them in configured order, advancing to the next only when a reviewer could not reach its provider.
+List more than one entry per provider so a single unavailable account cannot block the gate.
+Codex binds both `CODEX_HOME` and `HOME` to that path and sets `project_doc_max_bytes=0` so reviewed-repository `AGENTS.md` files cannot supply reviewer instructions.
+Claude creates a disposable private `HOME` whose `.claude` resolves to that path, binds both `CLAUDE_CONFIG_DIR` and `CLAUDE_SECURESTORAGE_CONFIG_DIR` to it, maps the current user's Keychain directory into that private `HOME` on macOS so the account's scoped credential is reachable at all, verifies the exact scoped-Keychain or OAuth-file credential source before launch, and uses `--safe-mode` so reviewed-repository `CLAUDE.md` files cannot supply reviewer instructions.
+Pi creates a disposable private `HOME` whose `.pi/agent` resolves to that path, binds `PI_CODING_AGENT_DIR` to it, requires an `openai-codex` OAuth credential in its `auth.json` before launch, resolves an npm-installed Pi entrypoint with its sibling Node runtime before reviewer `PATH` can substitute another interpreter, and uses `--no-context-files` so reviewed-repository context files cannot supply reviewer instructions.
 The verdict and its Bash-created receipt must report the executing selector and private `HOME`, so a configured label cannot establish separation from a different executing account.
-For an author task marked `account_routing_emergency_bypass=1`, a different supported provider proves both account namespace and model separation, while a same-provider reviewer fails closed without `account_home` proof.
+Codex and Pi authenticate against the same upstream OpenAI accounts, so one account often exists behind several `account_home` directories and two distinct paths can execute as one account.
+When the author and the reviewer are both OpenAI-backed, selection therefore compares the executing OpenAI account recorded in each credential rather than the configured path, and the bound credential proves it again before launch.
+Pi adds an independent client and a reviewer separate from a Claude author by construction; it does not add capacity, because an OpenAI account at its usage limit is equally unavailable through Codex and through Pi.
+A lane recording no `account_home` is supported rather than exceptional: a different supported provider proves both account namespace and model separation, while a same-provider reviewer fails closed without `account_home` proof.
+Account routing is off by design for harnesses outside Codex and Claude, so this is the normal shape of a Pi lane rather than a misconfiguration.
 An absent or invalid file is an unavailable reviewer and therefore blocks crosscheck and merge.
 See [`crosscheck.md`](crosscheck.md) for the example file, reviewer capture control, evidence rules, and operator flow.
 

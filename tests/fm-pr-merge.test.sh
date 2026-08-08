@@ -312,7 +312,7 @@ test_changed_head_blocks_before_merge() {
   rc=$?
   set -e
   expect_code 1 "$rc" "changed head"
-  assert_grep 'no crosscheck attempt exists for the live head, base, and PR claims' "$case_dir/err" \
+  assert_grep 'no crosscheck attempt exists for the live head and PR claims' "$case_dir/err" \
     "changed head did not invalidate the old verdict"
   assert_no_grep 'api PUT' "$case_dir/gh-axi.log" \
     "changed head reached the merge API"

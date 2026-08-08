@@ -75,6 +75,20 @@ FILE_TEST_RUNNERS = TEST_RUNNERS - {"direct", "jest", "pytest", "rspec", "vitest
 # approved runner is handed a plain file, so a selector there is a reviewer
 # mistake the gate must name rather than silently drop.
 NODE_ID_RUNNERS = {"pytest"}
+# How an approved runner NAME becomes an argv prefix, when the name alone does
+# not identify a working invocation. Order is load-bearing: uv comes first
+# because inside a uv project a bare `pytest` can exist on PATH and resolve
+# against a different environment than the repository uses, so finding it first
+# would run the named test under an interpreter the project never selected.
+# `python3 -m pytest` follows because it reaches a pytest installed into the
+# interpreter itself, and the bare binary is the last resort.
+RUNNER_INVOCATIONS: dict[str, tuple[tuple[str, ...], ...]] = {
+    "pytest": (
+        ("uv", "run", "pytest"),
+        ("python3", "-m", "pytest"),
+        ("pytest",),
+    ),
+}
 # sandbox-exec reports a failed execvp of its target with EX_OSERR and this
 # marker. The target never ran, so its exit status says nothing about the test.
 SANDBOX_EXEC_FAILURE_EXIT = 71
@@ -202,6 +216,73 @@ def prepare_claude_execution_home(
         )
 
     credential_file = account_home / ".credentials.json"
+    # The Keychain directory is bound whenever the platform has one, never only
+    # when `.credentials.json` happens to be absent.
+    #
+    # The two credential sources are not alternatives in practice. A real
+    # account directory routinely holds both a scoped Keychain item and a
+    # leftover `.credentials.json`, and the Keychain item is the live one that
+    # Claude refreshes. Because the reviewer runs under a private HOME, an
+    # unbound Keychain directory is simply not reachable from inside it, so
+    # Claude fell back to the stale file and died before its first request with
+    # "Failed to authenticate: OAuth session expired and could not be refreshed"
+    # -- one turn, zero tokens, no API time. Every Claude reviewer in this fleet
+    # took that branch, which is why the Anthropic half of the gate produced no
+    # verdicts at all while each account worked perfectly outside the gate.
+    keychain_identity: tuple[str, str] | None = None
+    if sys.platform == "darwin":
+        account_name, passwd_home = current_passwd_identity()
+        keychains = passwd_home / "Library" / "Keychains"
+        if keychains.is_dir():
+            try:
+                library = execution_home / "Library"
+                library.mkdir(mode=0o700)
+                (library / "Keychains").symlink_to(
+                    keychains, target_is_directory=True
+                )
+            except OSError as exc:
+                tool_fail(
+                    "Claude execution-HOME preparation could not bind the current "
+                    f"user's Keychain directory: {exc}"
+                )
+            service = claude_scoped_keychain_service(account_home)
+            security = Path("/usr/bin/security")
+            if not security.is_file() or not os.access(security, os.X_OK):
+                tool_fail(
+                    "Claude executing-account credential inspection found no "
+                    "runnable /usr/bin/security"
+                )
+            environment = os.environ.copy()
+            environment.update(
+                {
+                    "HOME": str(execution_home.resolve()),
+                    "CLAUDE_CONFIG_DIR": str(account_home),
+                    "CLAUDE_SECURESTORAGE_CONFIG_DIR": str(account_home),
+                }
+            )
+            inspected = run_command(
+                [
+                    str(security),
+                    "find-generic-password",
+                    "-a",
+                    account_name,
+                    "-s",
+                    service,
+                ],
+                cwd=execution_home,
+                env=environment,
+                timeout=10,
+                description="Claude scoped Keychain credential inspection",
+            )
+            if inspected.returncode == 0:
+                keychain_identity = ("scoped-keychain", f"{service}:{account_name}")
+
+    # The scoped Keychain item wins when it exists, because that is the
+    # credential the launched reviewer will actually execute as; recording the
+    # stale file beside it would name a credential nothing used.
+    if keychain_identity is not None:
+        return execution_home, *keychain_identity
+
     if credential_file.exists() or credential_file.is_symlink():
         try:
             metadata = credential_file.lstat()
@@ -217,65 +298,28 @@ def prepare_claude_execution_home(
             )
         return execution_home, "oauth-file", str(credential_file)
 
-    if sys.platform != "darwin":
-        tool_fail(
-            "Claude executing-account credential inspection found neither an OAuth "
-            f"file at {credential_file} nor a supported scoped Keychain"
-        )
+    tool_fail(
+        "Claude executing-account credential inspection found neither a scoped "
+        f"Keychain item nor an OAuth file at {credential_file} for config home "
+        f"{account_home}"
+    )
 
-    account_name, passwd_home = current_passwd_identity()
-    keychains = passwd_home / "Library" / "Keychains"
-    if not keychains.is_dir():
-        tool_fail(
-            "Claude executing-account credential inspection found no macOS Keychain "
-            f"directory at {keychains}"
-        )
+
+def prepare_pi_execution_home(protocol_dir: Path, account_home: Path) -> Path:
+    account_home = account_home.resolve()
+    execution_home = protocol_dir / "pi-home"
     try:
-        library = execution_home / "Library"
-        library.mkdir(mode=0o700)
-        (library / "Keychains").symlink_to(keychains, target_is_directory=True)
+        agent_parent = execution_home / ".pi"
+        agent_parent.mkdir(parents=True, mode=0o700)
+        (agent_parent / "agent").symlink_to(
+            account_home, target_is_directory=True
+        )
     except OSError as exc:
         tool_fail(
-            "Claude execution-HOME preparation could not bind the current user's "
-            f"Keychain directory: {exc}"
+            "Pi execution-HOME preparation failed while binding "
+            f"{execution_home} to reviewer account {account_home}: {exc}"
         )
-
-    service = claude_scoped_keychain_service(account_home)
-    security = Path("/usr/bin/security")
-    if not security.is_file() or not os.access(security, os.X_OK):
-        tool_fail(
-            "Claude executing-account credential inspection found no runnable "
-            "/usr/bin/security"
-        )
-    environment = os.environ.copy()
-    environment.update(
-        {
-            "HOME": str(execution_home.resolve()),
-            "CLAUDE_CONFIG_DIR": str(account_home),
-            "CLAUDE_SECURESTORAGE_CONFIG_DIR": str(account_home),
-        }
-    )
-    inspected = run_command(
-        [
-            str(security),
-            "find-generic-password",
-            "-a",
-            account_name,
-            "-s",
-            service,
-        ],
-        cwd=execution_home,
-        env=environment,
-        timeout=10,
-        description="Claude scoped Keychain credential inspection",
-    )
-    if inspected.returncode != 0:
-        tool_fail(
-            "Claude executing-account credential inspection found no scoped "
-            f"Keychain item service={service!r} account={account_name!r} for "
-            f"config home {account_home}"
-        )
-    return execution_home, "scoped-keychain", f"{service}:{account_name}"
+    return execution_home
 
 
 def inspect_codex_credential(account_home: Path) -> tuple[str, str]:
@@ -316,6 +360,163 @@ def inspect_codex_credential(account_home: Path) -> tuple[str, str]:
             f"Codex executing-account credential is unusable at {credential_file}"
         )
     return "codex-auth-file", str(credential_file)
+
+
+def inspect_pi_credential(account_home: Path) -> tuple[str, str]:
+    credential_file = account_home.resolve() / "auth.json"
+    try:
+        metadata = credential_file.lstat()
+    except OSError as exc:
+        tool_fail(
+            "Pi executing-account credential inspection failed at "
+            f"{credential_file}: {exc}"
+        )
+    if not stat.S_ISREG(metadata.st_mode) or credential_file.is_symlink():
+        tool_fail(
+            "Pi executing-account credential inspection requires a regular "
+            f"non-symlink file at {credential_file}"
+        )
+    try:
+        credentials = read_json(
+            credential_file,
+            "Pi executing-account credential",
+            maximum_bytes=1024 * 1024,
+            maximum_items=256,
+        )
+    except CrosscheckError as exc:
+        tool_fail(str(exc))
+    credential = (
+        credentials.get("openai-codex")
+        if isinstance(credentials, dict)
+        else None
+    )
+    if not (
+        isinstance(credential, dict)
+        and credential.get("type") == "oauth"
+        and all(
+            isinstance(credential.get(name), str)
+            and bool(credential[name].strip())
+            for name in ("access", "refresh", "accountId")
+        )
+        and isinstance(credential.get("expires"), (int, float))
+        and not isinstance(credential.get("expires"), bool)
+    ):
+        tool_fail(
+            "Pi executing-account credential is unusable for openai-codex at "
+            f"{credential_file}"
+        )
+    return "pi-openai-codex-oauth-file", str(credential_file)
+
+
+# The upstream account namespace each harness authenticates against. Codex and
+# Pi are two clients onto one OpenAI namespace, so a different harness is not
+# by itself a different account namespace. A harness absent from this mapping
+# has no known namespace and can never establish separation.
+HARNESS_PROVIDERS = {"codex": "openai", "pi": "openai", "claude": "anthropic"}
+
+
+def model_identity(model: str) -> str:
+    """Return the model a task ran on, without its provider-slot prefix.
+
+    Pi records its model as `<provider-slot>/<model>`, for example
+    `openai-codex-2/gpt-5.6-sol`. Compared as a raw string that reads as a
+    different model from a Codex reviewer's plain `gpt-5.6-sol`, which would
+    let the identical model review its own author's work. The slot names which
+    credential the harness selected, not which model answered, so separation
+    must be judged on the model itself.
+    """
+
+    return model.rsplit("/", 1)[-1].strip()
+
+OPENAI_BACKED_HARNESSES = {
+    harness for harness, provider in HARNESS_PROVIDERS.items() if provider == "openai"
+}
+
+
+def openai_account_identity(harness: str, account_home: Path) -> str | None:
+    """Return the upstream OpenAI account one account home executes as.
+
+    Codex and Pi both authenticate against OpenAI accounts, and one account
+    is routinely present in several directories at once: a Codex home and a
+    Pi auth slot can carry the same credential, and two Codex homes can be
+    copies of one account. Directory inequality therefore cannot establish
+    account separation between OpenAI-backed identities, so the independence
+    gate compares this executing identity instead. Returns None when the
+    identity is not readable, which callers must treat as unproven rather
+    than as separate.
+    """
+
+    if harness not in OPENAI_BACKED_HARNESSES:
+        return None
+    credential_file = account_home / "auth.json"
+    try:
+        credentials = read_bounded_json(
+            credential_file,
+            maximum_bytes=1024 * 1024,
+            maximum_items=256,
+            maximum_string_bytes=1024 * 1024,
+        )
+    except BoundedIOError:
+        return None
+    if not isinstance(credentials, dict):
+        return None
+    if harness == "pi":
+        entry = credentials.get("openai-codex")
+        identity = entry.get("accountId") if isinstance(entry, dict) else None
+    else:
+        tokens = credentials.get("tokens")
+        identity = tokens.get("account_id") if isinstance(tokens, dict) else None
+    if isinstance(identity, str) and identity.strip():
+        return identity.strip()
+    return None
+
+
+def anthropic_account_identity(account_home: Path) -> str | None:
+    """Return the upstream Anthropic account one Claude config home executes as.
+
+    A Claude config home names its account in `.claude.json` under
+    `oauthAccount.accountUuid`. A home that carries no such record - notably a
+    bare `~/.claude` that borrows whatever credential the environment supplies
+    - has no identity of its own, so it cannot establish separation from
+    anything. Returns None when the identity is not readable, which callers
+    must treat as unproven rather than as separate.
+    """
+
+    configuration_file = account_home / ".claude.json"
+    try:
+        configuration = read_bounded_json(
+            configuration_file,
+            maximum_bytes=8 * 1024 * 1024,
+            maximum_items=65_536,
+            maximum_string_bytes=1024 * 1024,
+        )
+    except BoundedIOError:
+        return None
+    if not isinstance(configuration, dict):
+        return None
+    account = configuration.get("oauthAccount")
+    identity = account.get("accountUuid") if isinstance(account, dict) else None
+    if isinstance(identity, str) and identity.strip():
+        return identity.strip()
+    return None
+
+
+def account_identity(harness: str, account_home: Path) -> str | None:
+    """Return the upstream account one account home executes as, by provider.
+
+    Every provider needs this because directory inequality never establishes
+    account separation: one upstream account routinely sits behind several
+    directories, and a home that borrows an ambient credential has no identity
+    at all. Resolution is keyed on the provider rather than the harness so a
+    future client on an existing provider cannot reopen that hole.
+    """
+
+    provider = HARNESS_PROVIDERS.get(harness)
+    if provider == "openai":
+        return openai_account_identity(harness, account_home)
+    if provider == "anthropic":
+        return anthropic_account_identity(account_home)
+    return None
 
 
 def require(condition: bool, message: str) -> None:
@@ -842,8 +1043,18 @@ def execute_reproduction(
         f"{label}.expected_exit must be an integer from 0 to 255",
     )
     output_contains = require_string(value.get("output_contains"), f"{label}.output_contains")
+    # A NON-login shell. `-lc` sourced the operator's shell profile, and on
+    # macOS that runs path_helper, which rebuilds PATH with /usr/bin ahead of
+    # everything else. A bare `python3` in a reviewer's reproduction therefore
+    # resolved to Xcode's Python 3.9 even when the gate itself was running on
+    # 3.14, so any reproduction touching a repository that requires 3.10+ died
+    # on an unrelated ImportError and voided the entire review as `unreviewed`.
+    # Evidence execution must also not depend on whatever the operator happens
+    # to have in their profile: the gate re-executes reviewer evidence with no
+    # network and none of the reviewer's credentials, and ambient shell state
+    # belongs in that same exclusion.
     result = run_sandboxed(
-        ["/bin/bash", "-lc", command],
+        ["/bin/bash", "-c", command],
         cwd=review_dir,
         profile_path=(
             review_dir
@@ -899,22 +1110,137 @@ def validate_test_invocation(value: Any, label: str) -> dict[str, Any]:
     return {"runner": runner, "arguments": validated_arguments}
 
 
-def resolve_runner(runner: str, label: str) -> str:
-    """Resolve an approved runner to the absolute executable that will run.
+def uv_project_for(checkout: Path, test_path: str) -> Path | None:
+    """Return the uv project governing a named test, relative to the checkout.
+
+    `uv run` resolves its project by searching upward from the working
+    directory, and proofs run at the checkout root. In this fleet the uv project
+    is routinely a service directory inside a monorepo, so a root-only check
+    would never fire and the uv rung would be dead exactly where it is needed.
+    Searching upward from the named test finds the project that actually governs
+    it, which is then passed to `uv run --project` so the environment is chosen
+    without moving the working directory the test path is relative to.
+
+    Returns `None` when no project governs the test, which keeps `uv run` from
+    answering out of an environment the repository never declared.
+    """
+
+    checkout = checkout.resolve()
+    try:
+        directory = (checkout / test_path).resolve().parent
+    except (OSError, ValueError):
+        return None
+    if not directory.is_relative_to(checkout):
+        return None
+    while True:
+        if (directory / "uv.lock").is_file() or (directory / "pyproject.toml").is_file():
+            return directory
+        if directory == checkout:
+            return None
+        directory = directory.parent
+
+
+def runner_probe_timeout() -> int:
+    """Bound the per-candidate runner identification probe.
+
+    `uv run` may resolve or build a project environment on its first call, so
+    the probe needs more than a trivial budget; it is still bounded so an
+    unusable candidate cannot stall the proof instead of being skipped.
+    """
+
+    raw = environment_value("FM_CROSSCHECK_RUNNER_PROBE_SECONDS", "180")
+    try:
+        value = int(raw)
+    except ValueError:
+        tool_fail("FM_CROSSCHECK_RUNNER_PROBE_SECONDS must be an integer")
+    if not 5 <= value <= 900:
+        tool_fail("FM_CROSSCHECK_RUNNER_PROBE_SECONDS must be between 5 and 900")
+    return value
+
+
+def resolve_runner(runner: str, label: str, cwd: Path, test_path: str) -> list[str]:
+    """Resolve an approved runner name to the argv prefix that will run it.
 
     Resolving before launch is what lets the gate tell "the runner is absent"
     apart from "the test failed". It also closes the gap between the name the
     reviewer asked for and the binary the sandbox would have found on PATH.
+
+    A runner NAME is not an invocation. Every Python repository in this fleet is
+    uv-managed, where a bare `pytest` is routinely absent from PATH while
+    `uv run pytest` is the invocation that works; and `python3 -m pytest` cannot
+    be expressed in the structured vocabulary at all, because `python3` is a
+    file runner whose command line puts the test path before its arguments.
+    Resolving the name through a ladder keeps the declared name - and with it
+    pytest's `path::selector` node-id support, which a new runner name would
+    have silently lost - while letting the gate reach the interpreter the
+    repository actually uses.
     """
 
-    resolved = shutil.which(runner)
-    require(
-        resolved is not None,
-        f"{label} cannot execute its named test: the {runner} runner is not "
-        "installed on PATH for the proof checkout, so the gate never ran the "
-        "test and must not report a test outcome",
+    candidates = RUNNER_INVOCATIONS.get(runner, ((runner,),))
+    inspected: list[str] = []
+    for position, candidate in enumerate(candidates):
+        if candidate[0] == "uv":
+            project = uv_project_for(cwd, test_file_path(test_path, label))
+            if project is None:
+                inspected.append(
+                    f"{' '.join(candidate)} (no uv project governs {test_path})"
+                )
+                continue
+            if project != cwd.resolve():
+                candidate = (
+                    candidate[0],
+                    "run",
+                    "--project",
+                    str(project.relative_to(cwd.resolve())),
+                    *candidate[2:],
+                )
+        resolved = shutil.which(candidate[0])
+        if resolved is None:
+            inspected.append(f"{' '.join(candidate)} (not on PATH)")
+            continue
+        argv = [str(resolved), *candidate[1:]]
+        if position == len(candidates) - 1:
+            # The last rung is the plain runner name, and it is accepted on
+            # presence exactly as it was before this ladder existed. Probing it
+            # could only ever turn a setup that used to work into a refusal --
+            # a runner is not obliged to implement `--version` -- and there is
+            # nothing left to disambiguate it against.
+            return argv
+        # An earlier rung is a guess about the environment, so presence on PATH
+        # is not enough: `uv run pytest` answers from a fabricated environment
+        # outside a project, and `python3 -m pytest` is only real when that
+        # interpreter actually has pytest. Ask each to identify itself first.
+        try:
+            probe = run_command(
+                [*argv, "--version"],
+                cwd=cwd,
+                timeout=runner_probe_timeout(),
+                description=f"{label} {runner} runner probe",
+            )
+        except CrosscheckError as exc:
+            inspected.append(f"{' '.join(candidate)} (probe failed: {exc})")
+            continue
+        if probe.returncode == 0:
+            return argv
+        detail = (probe.stderr or probe.stdout).strip().splitlines()
+        inspected.append(
+            f"{' '.join(candidate)} (exited {probe.returncode}: "
+            f"{detail[0][:120] if detail else 'no diagnostic'})"
+        )
+    if len(candidates) == 1:
+        # A single-invocation runner has one failure mode, and naming it plainly
+        # is more useful than reciting a one-entry ladder.
+        fail(
+            f"{label} cannot execute its named test: the {runner} runner is not "
+            "installed on PATH for the proof checkout, so the gate never ran "
+            "the test and must not report a test outcome"
+        )
+    fail(
+        f"{label} cannot execute its named test: no usable {runner} invocation "
+        f"is installed on PATH for the proof checkout, so the gate never ran "
+        f"the test and must not report a test outcome. Inspected "
+        f"{'; '.join(inspected)}"
     )
-    return str(resolved)
 
 
 def test_arguments(
@@ -927,10 +1253,10 @@ def test_arguments(
             f"tracked named test is not executable: {test_path}",
         )
         return [str(executable), *invocation["arguments"]]
-    runner = resolve_runner(invocation["runner"], label)
+    runner = resolve_runner(invocation["runner"], label, checkout, test_path)
     if invocation["runner"] in FILE_TEST_RUNNERS:
-        return [runner, test_path, *invocation["arguments"]]
-    return [runner, *invocation["arguments"], test_path]
+        return [*runner, test_path, *invocation["arguments"]]
+    return [*runner, *invocation["arguments"], test_path]
 
 
 def require_test_execution(
@@ -1362,6 +1688,7 @@ def validate_ledger(value: Any, task_id: str, url: str) -> dict[str, Any]:
             "at",
             "head_sha",
             "base_sha",
+            "base_branch_sha",
             "claims_sha256",
             "reviewer",
             "state",
@@ -1418,6 +1745,15 @@ def validate_ledger(value: Any, task_id: str, url: str) -> dict[str, Any]:
                 reviewer.get("credential_identifier"),
                 f"{label}.reviewer.credential_identifier",
             )
+            if reviewer.get("harness") == "pi":
+                turn_count = require_string(
+                    reviewer.get("reviewer_turn_count"),
+                    f"{label}.reviewer.reviewer_turn_count",
+                )
+                require(
+                    turn_count.isdigit() and int(turn_count) > 0,
+                    f"{label}.reviewer.reviewer_turn_count must be positive",
+                )
             execution_proof = reviewer.get("execution_proof")
             require(
                 isinstance(execution_proof, dict),
@@ -1524,7 +1860,19 @@ def load_ledger(path: Path, task_id: str, url: str) -> dict[str, Any]:
     )
 
 
-def reviewer_config(home: Path, meta: dict[str, str]) -> dict[str, str]:
+def reviewer_candidates(home: Path, meta: dict[str, str]) -> list[dict[str, str]]:
+    """Return every independent reviewer for this author, in configured order.
+
+    Selection screens the whole roster instead of stopping at the first match.
+    A single pick made the gate only as available as one account: a reviewer at
+    its usage limit, or one whose provider refused the launch, refused the merge
+    for the whole fleet even though other proven-independent accounts were
+    configured and idle. Every entry returned here has already passed the same
+    model and account separation screen, so failing over between them cannot
+    weaken independence, and `run_reviewer` still re-proves separation against
+    the credential it actually binds.
+    """
+
     config_path = Path(
         environment_value(
             "FM_CROSSCHECK_REVIEWER_CONFIG",
@@ -1547,24 +1895,38 @@ def reviewer_config(home: Path, meta: dict[str, str]) -> dict[str, str]:
     allowed_profiles = {
         ("codex", "gpt-5.6-sol", "xhigh"),
         ("claude", "claude-opus-5", "xhigh"),
+        ("pi", "gpt-5.6-sol", "xhigh"),
     }
+    allowed_profiles_message = " or ".join(
+        f"{harness} {model} {effort}"
+        for harness, model, effort in sorted(allowed_profiles)
+    )
     author_home_value = meta.get("account_home")
-    author_is_unrouted = meta.get("account_routing_emergency_bypass") == "1"
+    # A lane with no account_home is an ordinary, supported author identity, not
+    # an emergency. Account routing is off by design for any harness outside
+    # claude and codex, so a pi lane structurally cannot record an account_home;
+    # demanding one, or an `account_routing_emergency_bypass=1` marker in its
+    # place, made every pi-launched lane permanently unmergeable through this
+    # gate. A bypass that has to be set on the majority of lanes is not a gate.
+    #
+    # What the identity check is actually for is proving the reviewer is not the
+    # author. For an account-bearing lane that is proved on the executing
+    # account. For an account-less lane the equivalent fact is the provider
+    # namespace: an Anthropic account cannot be an OpenAI account, and the two
+    # model namespaces are disjoint, so a cross-provider reviewer establishes
+    # both account and model separation structurally rather than by comparison.
+    # A same-provider reviewer for such a lane stays refused below, because
+    # there is nothing left to prove separation with.
     require(
-        author_home_value is not None or author_is_unrouted,
-        "author identity inspection found neither account_home nor "
-        "account_routing_emergency_bypass=1 in task metadata",
+        author_home_value is not None or meta["harness"] in HARNESS_PROVIDERS,
+        "author identity inspection found no account_home and no known provider "
+        f"namespace for harness={meta['harness']!r}, so no reviewer can be "
+        "proved independent of this author",
     )
     author_home = Path(author_home_value) if author_home_value is not None else None
     if author_home is not None:
         require(author_home.is_absolute(), "author account_home must be absolute")
         author_home = author_home.resolve()
-    else:
-        require(
-            meta["harness"] in {"codex", "claude"},
-            "author identity inspection cannot establish a provider account "
-            f"namespace for unrouted harness={meta['harness']!r}",
-        )
     validated: list[dict[str, str]] = []
     for index, reviewer in enumerate(reviewers):
         label = f"reviewer configuration.reviewers[{index}]"
@@ -1580,7 +1942,7 @@ def reviewer_config(home: Path, meta: dict[str, str]) -> dict[str, str]:
         )
         require(
             (harness, model, effort) in allowed_profiles,
-            f"{label} must be codex gpt-5.6-sol xhigh or claude claude-opus-5 xhigh",
+            f"{label} must be {allowed_profiles_message}",
         )
         require(
             account_home.is_absolute() and account_home.is_dir(),
@@ -1594,19 +1956,69 @@ def reviewer_config(home: Path, meta: dict[str, str]) -> dict[str, str]:
                 "account_home": str(account_home.resolve()),
             }
         )
+    author_identity = (
+        account_identity(meta["harness"], author_home)
+        if author_home is not None
+        else None
+    )
+    author_provider_for_pairs = HARNESS_PROVIDERS.get(meta["harness"])
+    author_model = model_identity(meta["model"])
+    independent: list[dict[str, str]] = []
     for reviewer in validated:
-        model_is_separate = reviewer["model"] != meta["model"]
+        model_is_separate = model_identity(reviewer["model"]) != author_model
         if author_home is not None:
             account_is_separate = Path(reviewer["account_home"]) != author_home
+            if account_is_separate and (
+                author_provider_for_pairs is not None
+                and author_provider_for_pairs
+                == HARNESS_PROVIDERS.get(reviewer["harness"])
+            ):
+                # Two distinct directories can still execute as one upstream
+                # account, so a same-provider pair must prove separation on the
+                # executing credential rather than on the path. This is the
+                # selection screen; run_reviewer repeats it against the
+                # credential it actually binds, which is authoritative.
+                reviewer_identity = account_identity(
+                    reviewer["harness"], Path(reviewer["account_home"])
+                )
+                if author_identity is None or reviewer_identity is None:
+                    # An unresolvable identity on either side is never
+                    # separation: a home that names no account cannot be shown
+                    # distinct from the author's, and path inequality is
+                    # exactly the proof this branch exists to replace.
+                    account_is_separate = False
+                else:
+                    account_is_separate = author_identity != reviewer_identity
         else:
-            account_is_separate = reviewer["harness"] != meta["harness"]
+            # Without an author account_home the only separation available is
+            # the provider namespace, and a different harness is not one: a Pi
+            # reviewer reaches the same OpenAI accounts a Codex author uses. An
+            # unmapped harness on either side proves nothing and stays refused.
+            author_provider = HARNESS_PROVIDERS.get(meta["harness"])
+            reviewer_provider = HARNESS_PROVIDERS.get(reviewer["harness"])
+            account_is_separate = (
+                author_provider is not None
+                and reviewer_provider is not None
+                and author_provider != reviewer_provider
+            )
         if model_is_separate and account_is_separate:
-            return reviewer
+            if author_identity is not None and author_provider_for_pairs == (
+                HARNESS_PROVIDERS.get(reviewer["harness"])
+            ):
+                # Carried so the executing credential, not the configured
+                # path, has the final word on account separation.
+                reviewer["author_account_identity"] = author_identity
+            independent.append(reviewer)
+    if independent:
+        return independent
     if author_home is not None:
         fail(
             "independence inspection found no configured reviewer with both a "
-            "different model and a different account_home from the author "
-            f"(model={meta['model']!r}, account_home={str(author_home)!r})"
+            "different model and a proven-separate account from the author "
+            f"(model={meta['model']!r}, account_home={str(author_home)!r}); "
+            "a same-provider reviewer must also resolve a different executing "
+            "account than the author, because two directories can carry one "
+            "upstream account and a home that names no account proves nothing"
         )
     fail(
         "independence inspection found no configured reviewer with both a "
@@ -1902,17 +2314,235 @@ def reviewer_max_capture() -> int:
     return value
 
 
-def reviewer_binary(name: str, default: str, label: str) -> str:
+def reviewer_binary_path(name: str, default: str, label: str) -> Path:
     command = environment_value(name, default)
     if "/" in command:
-        available = Path(command).is_file() and os.access(command, os.X_OK)
+        candidate = Path(command)
     else:
-        available = shutil.which(command) is not None
-    if not available:
+        # A bare name resolves through PATH only. Falling back to the name as a
+        # relative path would let the repository under review supply the
+        # reviewer binary from the gate's working directory.
+        resolved = shutil.which(command)
+        if resolved is None:
+            tool_fail(
+                f"{label} executable inspection found no runnable {name}={command!r}"
+            )
+        candidate = Path(resolved)
+    if not candidate.is_file() or not os.access(candidate, os.X_OK):
         tool_fail(
             f"{label} executable inspection found no runnable {name}={command!r}"
         )
-    return command
+    return candidate
+
+
+def reviewer_binary(name: str, default: str, label: str) -> str:
+    return str(reviewer_binary_path(name, default, label).resolve())
+
+
+def env_shebang_node_arguments(shebang: str) -> list[str] | None:
+    """Return Node flags when a shebang resolves `node` through `env`.
+
+    Matching the one literal `#!/usr/bin/env node` was too narrow: npm CLIs
+    also ship `#!/usr/bin/env -S node --flag`, and every unmatched env form
+    fell through to executing the script directly, which let the kernel
+    resolve `node` from the reviewer environment's PATH - exactly what pinning
+    exists to prevent, and silently. Returns None when the interpreter is not
+    reached through `env` (an absolute path carries no PATH risk), and fails
+    loudly when an `env` shebang cannot be read confidently.
+    """
+
+    if not shebang.startswith("#!"):
+        return None
+    tokens = shebang[2:].strip().split()
+    if not tokens or os.path.basename(tokens[0]) != "env":
+        return None
+    rest = tokens[1:]
+    while rest and (rest[0] in {"-S", "--split-string"} or "=" in rest[0]):
+        rest = rest[1:]
+    if not rest:
+        tool_fail(
+            f"Pi reviewer shebang names no interpreter after env: {shebang!r}"
+        )
+    if os.path.basename(rest[0]) != "node":
+        return None
+    return rest[1:]
+
+
+def pi_reviewer_command() -> list[str]:
+    """Resolve Pi and its env-selected Node runtime before reviewer launch."""
+
+    entrypoint = reviewer_binary_path("FM_CROSSCHECK_PI_BIN", "pi", "Pi reviewer")
+    resolved_entrypoint = entrypoint.resolve()
+    try:
+        with resolved_entrypoint.open("rb") as handle:
+            shebang = handle.readline(256).decode("utf-8", errors="replace").strip()
+    except OSError as exc:
+        tool_fail(f"Pi reviewer executable inspection failed at {entrypoint}: {exc}")
+
+    node_arguments = env_shebang_node_arguments(shebang)
+    if node_arguments is not None:
+        sibling_node = entrypoint.parent / "node"
+        node_default = str(sibling_node) if sibling_node.is_file() else "node"
+        node = reviewer_binary(
+            "FM_CROSSCHECK_PI_NODE_BIN", node_default, "Pi Node runtime"
+        )
+        return [node, *node_arguments, str(resolved_entrypoint)]
+    return [str(resolved_entrypoint)]
+
+
+def claude_envelope_report(stdout: str, stderr: str) -> tuple[str, bool]:
+    """Explain a Claude reviewer failure and say whether the model was reached.
+
+    Claude reports its own failures inside the result envelope, and the reason
+    lives in `result` -- past the point where a raw 500-character excerpt of the
+    envelope stops. Truncating the envelope produced the fleet's least
+    actionable banner: a wall of zeroed usage counters with the sentence that
+    explains them cut off. This reads the fields that carry the explanation.
+
+    The boolean reports whether any model work happened. An envelope with no API
+    duration, no token usage, and no per-model usage means the request never
+    reached the provider, which is an account, credential, quota, or launch
+    fault rather than anything learned about the code under review.
+    """
+
+    stderr_tail = stderr.strip()[-500:]
+    try:
+        envelope = json.loads(stdout)
+    except (json.JSONDecodeError, ValueError):
+        excerpt = stdout.strip()[:500] or "no stdout"
+        detail = f"reviewer emitted no decodable result envelope: {excerpt}"
+        if stderr_tail:
+            detail += f"; stderr: {stderr_tail}"
+        return detail, False
+    if not isinstance(envelope, dict):
+        return "reviewer result envelope was not an object", False
+
+    usage = envelope.get("usage")
+    usage = usage if isinstance(usage, dict) else {}
+    token_fields = (
+        "input_tokens",
+        "output_tokens",
+        "cache_creation_input_tokens",
+        "cache_read_input_tokens",
+    )
+    tokens = sum(
+        value
+        for field in token_fields
+        if isinstance(value := usage.get(field), int)
+        and not isinstance(value, bool)
+    )
+    api_ms = envelope.get("duration_api_ms")
+    api_ms = api_ms if isinstance(api_ms, (int, float)) else 0
+    model_usage = envelope.get("modelUsage")
+    reached_model = bool(api_ms) or tokens > 0 or bool(model_usage)
+
+    parts = []
+    for field in (
+        "subtype",
+        "terminal_reason",
+        "stop_reason",
+        "num_turns",
+        "api_error_status",
+    ):
+        if envelope.get(field) not in (None, ""):
+            parts.append(f"{field}={envelope[field]!r}")
+    denials = envelope.get("permission_denials")
+    if isinstance(denials, list) and denials:
+        parts.append(f"permission_denials={json.dumps(denials)[:300]}")
+    reason = envelope.get("result")
+    if isinstance(reason, str) and reason.strip():
+        parts.append(f"reported reason: {reason.strip()[:600]}")
+    elif isinstance(envelope.get("error"), str) and envelope["error"].strip():
+        parts.append(f"reported error: {envelope['error'].strip()[:600]}")
+    else:
+        parts.append("the envelope carried no reason text")
+    if not reached_model:
+        parts.append(
+            "no model work occurred (no API duration, tokens, or model usage), "
+            "so the reviewer account never reached the provider"
+        )
+    if stderr_tail:
+        parts.append(f"stderr: {stderr_tail}")
+    return "; ".join(parts), reached_model
+
+
+def pi_review_result(output: str) -> tuple[dict[str, Any], int]:
+    turn_count = 0
+    agent_ended = False
+    final_text: str | None = None
+    final_stop_reason: str | None = None
+    final_error: str | None = None
+    for line_number, line in enumerate(output.splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            event = json.loads(line)
+        except (json.JSONDecodeError, ValueError, RecursionError) as exc:
+            # Not only JSONDecodeError: an integer literal past CPython's
+            # conversion limit raises plain ValueError and deep nesting raises
+            # RecursionError. Letting either escape would skip the tool-failure
+            # run and leave a prior clear verdict standing at this head, which
+            # is precisely the hostile-JSON defense the 3.11 floor preserves.
+            tool_fail(
+                "Pi reviewer returned malformed JSON events at line "
+                f"{line_number}: {exc}"
+            )
+        if not isinstance(event, dict):
+            tool_fail(
+                f"Pi reviewer returned a non-object event at line {line_number}"
+            )
+        event_type = event.get("type")
+        if event_type == "turn_end":
+            if agent_ended:
+                tool_fail("Pi reviewer emitted a turn after agent completion")
+            turn_count += 1
+            final_text = None
+            final_stop_reason = None
+            final_error = None
+            message = event.get("message")
+            if isinstance(message, dict) and message.get("role") == "assistant":
+                stop_reason = message.get("stopReason")
+                if isinstance(stop_reason, str):
+                    final_stop_reason = stop_reason
+                error_message = message.get("errorMessage")
+                if isinstance(error_message, str) and error_message.strip():
+                    final_error = error_message.strip()
+                content = message.get("content")
+                if isinstance(content, str):
+                    final_text = content
+                elif isinstance(content, list):
+                    text_parts = [
+                        part["text"]
+                        for part in content
+                        if isinstance(part, dict)
+                        and part.get("type") == "text"
+                        and isinstance(part.get("text"), str)
+                    ]
+                    if text_parts:
+                        final_text = "".join(text_parts)
+        elif event_type == "agent_end":
+            if agent_ended:
+                tool_fail("Pi reviewer emitted duplicate agent completion")
+            agent_ended = True
+    if turn_count == 0:
+        tool_fail("Pi reviewer completed without executing a turn")
+    if not agent_ended:
+        tool_fail("Pi reviewer stopped before agent completion")
+    if final_stop_reason != "stop":
+        tool_fail(
+            "Pi reviewer final assistant turn did not stop successfully: "
+            f"stopReason={final_stop_reason!r}"
+            + (f": {final_error[:500]}" if final_error else "")
+        )
+    if final_text is None or not final_text.strip():
+        tool_fail("Pi reviewer completed without a verdict artifact")
+    try:
+        verdict = json.loads(final_text)
+    except (json.JSONDecodeError, ValueError, RecursionError) as exc:
+        tool_fail(f"Pi reviewer returned a malformed verdict artifact: {exc}")
+    if not isinstance(verdict, dict):
+        tool_fail("Pi reviewer verdict artifact must be an object")
+    return verdict, turn_count
 
 
 def run_reviewer(
@@ -1920,7 +2550,13 @@ def run_reviewer(
     snapshot_value: dict[str, Any],
     ledger: dict[str, Any],
     config: dict[str, str],
+    author_account_identity: str,
 ) -> Any:
+    pi_command = (
+        pi_reviewer_command()
+        if config["harness"] == "pi"
+        else None
+    )
     protocol_dir = review_dir / ".crosscheck"
     protocol_dir.mkdir(mode=0o700)
     environment = os.environ.copy()
@@ -1933,6 +2569,11 @@ def run_reviewer(
         "CODEX_REVOKE_TOKEN",
         "CLAUDE_CONFIG_DIR",
         "CLAUDE_SECURESTORAGE_CONFIG_DIR",
+        "PI_CODING_AGENT_DIR",
+        "PI_CODING_AGENT_SESSION_DIR",
+        "PI_PROVIDER",
+        "PI_MODEL",
+        "PI_REASONING_LEVEL",
     ):
         environment.pop(provider_variable, None)
     account_home = Path(config["account_home"])
@@ -1942,15 +2583,40 @@ def run_reviewer(
             prepare_claude_execution_home(protocol_dir, account_home)
         )
         config["account_selector"] = "CLAUDE_SECURESTORAGE_CONFIG_DIR"
-    else:
+    elif config["harness"] == "codex":
         execution_home = account_home
         credential_source, credential_identifier = inspect_codex_credential(
             account_home
         )
         config["account_selector"] = "CODEX_HOME"
+    else:
+        execution_home = prepare_pi_execution_home(protocol_dir, account_home)
+        credential_source, credential_identifier = inspect_pi_credential(
+            account_home
+        )
+        config["account_selector"] = "PI_CODING_AGENT_DIR"
     config["execution_home"] = str(execution_home.resolve())
     config["credential_source"] = credential_source
     config["credential_identifier"] = credential_identifier
+    if author_account_identity:
+        # The credential preflights above have already accepted this account
+        # home, so this is the authoritative separation proof: it reads the
+        # identity of the credential actually bound for execution rather than
+        # trusting the configured directory to name a distinct account.
+        executing_account = account_identity(config["harness"], account_home)
+        if executing_account is None:
+            tool_fail(
+                "executing-account separation is unprovable: reviewer "
+                f"{config['harness']} credential at {credential_identifier} "
+                "exposes no account identity to compare against the author's"
+            )
+        if executing_account == author_account_identity:
+            tool_fail(
+                "executing-account separation failed: reviewer "
+                f"{config['harness']} account home {account_home} executes as "
+                "the same upstream account as the author, so this reviewer is "
+                "not independent despite a different configured path"
+            )
     schema_path = protocol_dir / "review-schema.json"
     schema_value = review_output_schema(
         config["executing_account_home"], config["execution_home"]
@@ -1971,6 +2637,8 @@ def run_reviewer(
             "workspace-write",
             "--ephemeral",
             "--strict-config",
+            "-c",
+            "project_doc_max_bytes=0",
             "--model",
             config["model"],
             "-c",
@@ -1994,18 +2662,94 @@ def run_reviewer(
             description="Codex reviewer",
             maximum_output_bytes=reviewer_max_capture(),
         )
-        detail = (result.stderr or result.stdout).strip()
-        require(
-            result.returncode == 0,
-            f"reviewer exited {result.returncode} without an earned verdict: "
-            f"{detail[:500] or 'no diagnostic'}",
-        )
+        if result.returncode != 0:
+            stderr_tail = result.stderr.strip()[-700:]
+            stdout_tail = result.stdout.strip()[-500:]
+            detail = "; ".join(
+                part
+                for part in (
+                    f"stderr: {stderr_tail}" if stderr_tail else "",
+                    f"stdout: {stdout_tail}" if stdout_tail else "",
+                )
+                if part
+            ) or "no diagnostic"
+            message = (
+                f"Codex reviewer at {config['account_home']} exited "
+                f"{result.returncode} without an earned verdict: {detail}"
+            )
+            # Codex always writes its result artifact when a review completes,
+            # so a nonzero exit with no artifact means the account never
+            # produced one -- a launch, credential, or quota fault. Classifying
+            # that as a tool failure keeps the ledger honest and lets the run
+            # fail over to another independent account instead of refusing the
+            # merge on behalf of an account that never spoke.
+            if output_path.exists() and output_path.stat().st_size:
+                fail(message)
+            tool_fail(message)
         return read_json(
             output_path,
             "reviewer verdict artifact",
             maximum_bytes=MAX_CAPTURE,
             maximum_items=4096,
         )
+
+    if config["harness"] == "pi":
+        require(pi_command is not None, "Pi reviewer command was not resolved")
+        environment["PI_CODING_AGENT_DIR"] = config["account_home"]
+        environment["PI_CODING_AGENT_SESSION_DIR"] = str(
+            protocol_dir / "pi-sessions"
+        )
+        sandbox_path = protocol_dir / "pi-sandbox.sb"
+        pi_prompt = (
+            prompt
+            + "\nReturn only one JSON object matching this exact JSON Schema as "
+            "the final assistant text:\n"
+            + json.dumps(schema_value, separators=(",", ":"))
+        )
+        arguments = [
+            *pi_command,
+            "--mode",
+            "json",
+            "--provider",
+            "openai-codex",
+            "--model",
+            config["model"],
+            "--thinking",
+            config["effort"],
+            "--tools",
+            "read,bash,grep,find,ls",
+            "--no-session",
+            "--no-extensions",
+            "--no-skills",
+            "--no-prompt-templates",
+            "--no-themes",
+            "--no-context-files",
+            "--no-approve",
+            pi_prompt,
+        ]
+        try:
+            result = run_sandboxed(
+                arguments,
+                cwd=review_dir,
+                profile_path=sandbox_path,
+                allow_network=True,
+                additional_writable_roots=(Path(config["account_home"]),),
+                env=environment,
+                timeout=reviewer_timeout(),
+                description="Pi reviewer",
+                maximum_output_bytes=reviewer_max_capture(),
+            )
+        except CrosscheckError as exc:
+            tool_fail(f"Pi reviewer launch failed: {exc}")
+        detail = (result.stderr or result.stdout).strip()
+        if result.returncode != 0:
+            tool_fail(
+                f"Pi reviewer exited {result.returncode} without an earned verdict: "
+                f"{detail[:500] or 'no diagnostic'}"
+            )
+        verdict, turn_count = pi_review_result(result.stdout)
+        config["reviewer_turn_count"] = str(turn_count)
+        return verdict
 
     claude = reviewer_binary(
         "FM_CROSSCHECK_CLAUDE_BIN", "claude", "Claude reviewer"
@@ -2019,6 +2763,7 @@ def run_reviewer(
     arguments = [
         claude,
         "-p",
+        "--safe-mode",
         "--model",
         config["model"],
         "--effort",
@@ -2046,21 +2791,46 @@ def run_reviewer(
         description="Claude reviewer",
         maximum_output_bytes=reviewer_max_capture(),
     )
-    detail = (result.stderr or result.stdout).strip()
-    require(
-        result.returncode == 0 and bool(result.stdout.strip()),
-        f"reviewer exited {result.returncode} without a verdict artifact: "
-        f"{detail[:500] or 'no diagnostic'}",
-    )
+    if result.returncode != 0 or not result.stdout.strip():
+        detail, reached_model = claude_envelope_report(result.stdout, result.stderr)
+        message = (
+            f"Claude reviewer at {config['account_home']} exited "
+            f"{result.returncode} without a verdict artifact: {detail}"
+        )
+        # A reviewer that never reached the provider taught the gate nothing
+        # about the code. Recording that as `unreviewed` also manufactures a
+        # suspicion, which reads in the ledger like the reviewer raised a
+        # concern; it is a tool failure so the banner is honest and the run can
+        # fail over to another independent account.
+        if reached_model:
+            fail(message)
+        tool_fail(message)
     try:
         envelope = json.loads(result.stdout)
     except json.JSONDecodeError as exc:
         fail(f"reviewer returned a malformed result envelope: {exc.msg}")
     require(isinstance(envelope, dict), "reviewer result envelope must be an object")
-    require(envelope.get("is_error") is False, "reviewer result envelope reports an error")
-    require(envelope.get("subtype") == "success", "reviewer result did not complete successfully")
-    require(envelope.get("terminal_reason") == "completed", "reviewer stopped before completion")
-    require(isinstance(envelope.get("structured_output"), dict), "reviewer stopped without structured output")
+    if envelope.get("is_error") is not False:
+        detail, reached_model = claude_envelope_report(result.stdout, result.stderr)
+        message = (
+            f"Claude reviewer at {config['account_home']} reported an error "
+            f"envelope: {detail}"
+        )
+        if reached_model:
+            fail(message)
+        tool_fail(message)
+    for field, expected, label in (
+        ("subtype", "success", "reviewer result did not complete successfully"),
+        ("terminal_reason", "completed", "reviewer stopped before completion"),
+    ):
+        if envelope.get(field) != expected:
+            detail, _ = claude_envelope_report(result.stdout, result.stderr)
+            fail(f"{label}: {detail}")
+    require(
+        isinstance(envelope.get("structured_output"), dict),
+        "reviewer stopped without structured output: "
+        f"{claude_envelope_report(result.stdout, result.stderr)[0]}",
+    )
     return envelope["structured_output"]
 
 
@@ -2356,6 +3126,9 @@ def apply_review(
         "at": now,
         "head_sha": snapshot_value["head_sha"],
         "base_sha": snapshot_value["base_sha"],
+        "base_branch_sha": snapshot_value.get(
+            "base_branch_sha", snapshot_value["base_sha"]
+        ),
         "claims_sha256": snapshot_value["claims_sha256"],
         "reviewer": {
             **config,
@@ -2388,6 +3161,9 @@ def append_failed_run(
         "at": utc_now(),
         "head_sha": snapshot_value["head_sha"],
         "base_sha": snapshot_value["base_sha"],
+        "base_branch_sha": snapshot_value.get(
+            "base_branch_sha", snapshot_value["base_sha"]
+        ),
         "claims_sha256": snapshot_value["claims_sha256"],
         "reviewer": config,
         "state": state,
@@ -2500,16 +3276,28 @@ def render_unloadable_ledger_report(
 
 
 def prepare_review_checkout(
-    destination: Path, snapshot_value: dict[str, Any]
+    destination: Path, snapshot_value: dict[str, Any], source: Path | None = None
 ) -> str:
+    """Build one disposable exact-head checkout and return its reviewed base.
+
+    `source` reuses an existing review checkout as the fetch source instead of
+    the network. Every reviewer attempt gets its own pristine checkout, and on a
+    large repository the remote fetch, not the review, dominates that setup; a
+    failover that re-fetched from GitHub each time would spend more wall time on
+    transfers than on reviewing. The reused source is still only a carrier: the
+    fetched head is re-checked against the live API head SHA and the merge base
+    is recomputed, so nothing is taken on trust from the earlier attempt.
+    """
+
     head_sha = snapshot_value["head_sha"]
-    base_sha = snapshot_value["base_sha"]
     pull_ref = f"refs/pull/{snapshot_value['number']}/head"
     base_ref = f"refs/heads/{snapshot_value['base_ref']}"
     fetched_ref = "refs/remotes/crosscheck/pr-head"
     fetched_base_ref = "refs/remotes/crosscheck/base"
     default_remote = f"https://github.com/{snapshot_value['base_repo']}.git"
     remote = environment_value("FM_CROSSCHECK_FETCH_REMOTE", default_remote)
+    if source is not None:
+        remote = str(source)
 
     initialized = run_command(
         ["git", "init", "--quiet", str(destination)],
@@ -2550,9 +3338,6 @@ def prepare_review_checkout(
         f"remote={remote!r} ref={pull_ref!r}, which resolved to {fetched_head}, "
         f"but the live GitHub snapshot names {head_sha}",
     )
-    # Fetch the base ref so the snapshot's exact base commit is available.
-    # The mutable branch tip may advance between the API snapshot and this fetch.
-    git(destination, "cat-file", "-e", f"{base_sha}^{{commit}}")
     git(destination, "checkout", "--quiet", "--detach", head_sha)
     require(
         git(destination, "rev-parse", "HEAD") == head_sha,
@@ -2562,7 +3347,33 @@ def prepare_review_checkout(
         not git(destination, "status", "--porcelain", "--untracked-files=all"),
         "fresh exact-head review checkout is dirty",
     )
-    return git(destination, "merge-base", base_sha, head_sha)
+    # The reviewed base is the merge base of the PR head and the live base
+    # branch, never the API's base.sha. GitHub reports base.sha as the base
+    # branch tip observed at snapshot time, so on a busy default branch it is
+    # usually NOT an ancestor of the head and it changes under the gate between
+    # `run` and `verify`. Requiring it to be the merge base made every
+    # un-rebased PR unreviewable and made an otherwise valid ledger stop
+    # matching the moment the default branch moved.
+    #
+    # The merge base is the convergent quantity: it is what the PR's diff is
+    # actually taken against, and the default branch advancing cannot change it
+    # unless the branch absorbs commits that are already ancestors of this head
+    # -- in which case the remaining diff is a subset of what was reviewed, so
+    # the review stays sound. A rebase or any new commit changes head_sha, which
+    # invalidates the ledger match on its own.
+    base_tip = git(destination, "rev-parse", f"{fetched_base_ref}^{{commit}}")
+    # Republish both fetched refs under the names a fetch expects, so this
+    # checkout can serve as the local source for a later reviewer attempt.
+    git(destination, "update-ref", pull_ref, head_sha)
+    git(destination, "update-ref", base_ref, base_tip)
+    merge_base = git(destination, "merge-base", base_tip, head_sha)
+    require(
+        SHA_RE.fullmatch(merge_base) is not None,
+        "PR base resolution failed: "
+        f"merge-base of base branch {snapshot_value['base_ref']!r} at {base_tip} "
+        f"and head {head_sha} did not resolve to a commit",
+    )
+    return merge_base
 
 
 def assert_review_checkout_intact(review_dir: Path, head_sha: str) -> None:
@@ -2643,37 +3454,102 @@ def run_crosscheck(root: Path, home: Path, task_id: str, url: str) -> int:
             pass
         tool_fail(reason)
     config: dict[str, str] | None = None
+    author_account_identity = ""
 
     try:
         try:
-            config = reviewer_config(home, meta)
+            candidates = reviewer_candidates(home, meta)
         except CrosscheckError as exc:
             tool_fail(f"reviewer preflight failed: {exc}")
         with tempfile.TemporaryDirectory(prefix=f".{task_id}.crosscheck.", dir=state) as temporary:
             temp_root = Path(temporary)
             write_neutral_runner_config(temp_root)
-            review_dir = temp_root / "review"
-            try:
-                merge_base = prepare_review_checkout(review_dir, snapshot_value)
-                require(
-                    merge_base == snapshot_value["base_sha"],
-                    "PR base resolution failed: the live base is not the "
-                    "review checkout's merge base",
+            # A reviewer whose account cannot produce a verdict is an
+            # environment fault, not a verdict about the code, so the gate
+            # advances to the next independently-screened reviewer instead of
+            # refusing the merge. Only a completed reviewer's own conclusion
+            # (blocking, or an invalid verdict artifact) ends the run. Each
+            # abandoned reviewer is recorded, so the audit trail names every
+            # account that was tried and why it was left.
+            #
+            # Every attempt gets its own pristine exact-head checkout rather
+            # than a cleaned-up reused one: a later reviewer must never inherit
+            # an earlier reviewer's helpers, receipts, or scratch state, and a
+            # fresh checkout proves that without a destructive reset step.
+            run = None
+            reviewed_base = ""
+            fetched_source: Path | None = None
+            for position, candidate in enumerate(candidates):
+                config = candidate
+                # Detached before anything can fail: the author's account id is
+                # proof material for the launch check, not part of the reviewer
+                # identity the ledger records for a failed run.
+                author_account_identity = config.pop("author_account_identity", "")
+                remaining = len(candidates) - position - 1
+                review_dir = temp_root / f"review-{position}"
+                try:
+                    snapshot_value["base_branch_sha"] = snapshot_value.get(
+                        "base_branch_sha", snapshot_value["base_sha"]
+                    )
+                    # The reviewed base becomes the merge base for every
+                    # downstream consumer -- prompt, execution proof, ledger,
+                    # and verify -- so one stable value is used end to end.
+                    resolved_base = prepare_review_checkout(
+                        review_dir, snapshot_value, fetched_source
+                    )
+                    fetched_source = review_dir
+                    if reviewed_base:
+                        require(
+                            resolved_base == reviewed_base,
+                            "PR base resolution failed: the reviewed merge base "
+                            f"moved from {reviewed_base} to {resolved_base} "
+                            "between reviewer attempts",
+                        )
+                    reviewed_base = resolved_base
+                    snapshot_value["base_sha"] = reviewed_base
+                except CrosscheckError as exc:
+                    tool_fail(f"review checkout preflight failed: {exc}")
+                try:
+                    raw_review = run_reviewer(
+                        review_dir,
+                        snapshot_value,
+                        ledger,
+                        config,
+                        author_account_identity,
+                    )
+                except CrosscheckToolError as exc:
+                    if not remaining:
+                        raise
+                    run = append_failed_run(
+                        ledger,
+                        snapshot_value,
+                        f"{exc} (reviewer {position + 1} of {len(candidates)}; "
+                        f"{remaining} independent reviewer(s) remaining)",
+                        config,
+                        "tool-failure",
+                    )
+                    write_ledger(ledger_path, ledger)
+                    atomic_write(report_path, render_report(ledger, run), mode=0o644)
+                    print(
+                        f"crosscheck: reviewer {config['harness']} at "
+                        f"{config['account_home']} could not return a verdict "
+                        f"({exc}); trying the next independent reviewer",
+                        file=sys.stderr,
+                    )
+                    continue
+                assert_review_checkout_intact(review_dir, snapshot_value["head_sha"])
+                review = validate_review_shape(
+                    raw_review,
+                    snapshot_value,
+                    review_dir,
+                    config,
                 )
-            except CrosscheckError as exc:
-                tool_fail(f"review checkout preflight failed: {exc}")
-            raw_review = run_reviewer(review_dir, snapshot_value, ledger, config)
-            assert_review_checkout_intact(review_dir, snapshot_value["head_sha"])
-            review = validate_review_shape(
-                raw_review,
-                snapshot_value,
-                review_dir,
-                config,
-            )
-            ledger, run = apply_review(
-                ledger, review, review_dir, temp_root, snapshot_value, config
-            )
-            assert_review_checkout_intact(review_dir, snapshot_value["head_sha"])
+                ledger, run = apply_review(
+                    ledger, review, review_dir, temp_root, snapshot_value, config
+                )
+                assert_review_checkout_intact(review_dir, snapshot_value["head_sha"])
+                break
+            require(run is not None, "no configured reviewer was attempted")
     except CrosscheckToolError as exc:
         run = append_failed_run(
             ledger, snapshot_value, str(exc), config, "tool-failure"
@@ -2717,16 +3593,23 @@ def verified_crosscheck_head(root: Path, home: Path, task_id: str, url: str) -> 
         blocking_fail(
             "durable finding ledger still has active blockers: " + ", ".join(active)
         )
+    # Matched on head and claims, never on GitHub's live base.sha. base.sha is
+    # the base branch tip observed at snapshot time, so it changes every time
+    # the default branch moves and a run recorded minutes earlier stopped
+    # matching for a reason that has nothing to do with this PR. The reviewed
+    # base is the merge base the run itself recorded, and it cannot change
+    # without changing head_sha except by absorbing commits already in this
+    # head -- so the head pin carries the guarantee, and the recorded base is
+    # what the execution proof below is checked against.
     matching = [
         run
         for run in ledger["runs"]
         if run["head_sha"] == snapshot_value["head_sha"]
-        and run["base_sha"] == snapshot_value["base_sha"]
         and run["claims_sha256"] == snapshot_value["claims_sha256"]
     ]
     require(
         matching,
-        "no crosscheck attempt exists for the live head, base, and PR claims",
+        "no crosscheck attempt exists for the live head and PR claims",
     )
     latest = matching[-1]
     if latest["state"] == "tool-failure":
@@ -2760,7 +3643,7 @@ def verified_crosscheck_head(root: Path, home: Path, task_id: str, url: str) -> 
         isinstance(execution_proof, dict)
         and execution_proof.get("expected_exit") == 0
         and execution_proof.get("actual_exit") == 0
-        and snapshot_value["base_sha"] in str(execution_proof.get("command", ""))
+        and latest["base_sha"] in str(execution_proof.get("command", ""))
         and snapshot_value["head_sha"] in str(execution_proof.get("command", ""))
         and isinstance(execution_proof.get("reviewer_receipt"), dict)
         and bool(execution_proof["reviewer_receipt"].get("sha256")),
@@ -2837,6 +3720,28 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def assert_supported_interpreter() -> None:
+    """Refuse to gate a merge under a weakened hostile-JSON guarantee.
+
+    The bounded-read layer rejects hostile integers by relying on CPython's
+    integer/string conversion limit, which first exists in 3.11. On an older
+    interpreter that rejection silently stops happening while every banner
+    this tool prints still reads the same, so the floor is enforced here as
+    well as in the shell entrypoint: a direct `python3 fm-crosscheck.py` must
+    not be a way to review without it.
+    """
+
+    minimum = (3, 11)
+    if sys.version_info[:2] < minimum:
+        running = ".".join(str(part) for part in sys.version_info[:3])
+        required = ".".join(str(part) for part in minimum)
+        tool_fail(
+            f"interpreter inspection found Python {running}, but the gate "
+            f"requires {required} or newer because its hostile-JSON defense "
+            "does not exist on older interpreters"
+        )
+
+
 def main() -> int:
     args = build_parser().parse_args()
     if ID_RE.fullmatch(args.task_id) is None:
@@ -2844,6 +3749,11 @@ def main() -> int:
             f"CROSSCHECK TOOL-FAILURE: task id validation rejected {args.task_id!r}",
             file=sys.stderr,
         )
+        return 1
+    try:
+        assert_supported_interpreter()
+    except CrosscheckToolError as exc:
+        print(f"CROSSCHECK TOOL-FAILURE: {exc}", file=sys.stderr)
         return 1
     root = Path(
         environment_value(
