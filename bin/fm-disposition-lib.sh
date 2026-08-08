@@ -36,6 +36,9 @@ fm_disposition_live() {  # <attempt_id> -> landed | preserved_unlanded | unknown
     merged=$(gh pr view "$pr" --json state,headRefOid,baseRefOid 2>/dev/null \
       | jq -r 'if .state == "MERGED" then "landed" else "preserved_unlanded" end' 2>/dev/null \
       || echo unknown)
+    # gh failing with EMPTY stdout makes jq exit 0 with no output, so the
+    # || echo unknown never fires; resolve the empty read to unknown too.
+    [ -n "$merged" ] || merged=unknown
     [ "$merged" = unknown ] && { echo unknown; return 0; }
     echo "$merged"
     return 0

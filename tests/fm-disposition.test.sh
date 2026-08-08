@@ -19,17 +19,27 @@ export FM_REFILL_PROJECT="$PROJECT"
 # shellcheck source=bin/fm-disposition-lib.sh
 . "$ROOT/bin/fm-disposition-lib.sh"
 
-fake_gh() {  # <merged|unmerged|unknown>; emits the gh pr view --json shape
+fake_gh() {  # <merged|unmerged|unknown|empty>; emits the gh pr view --json shape
   local body
   case "$1" in
     merged) body='{"state":"MERGED","headRefOid":"abc123","baseRefOid":"old"}' ;;
     unmerged) body='{"state":"CLOSED","headRefOid":"abc123","baseRefOid":"old"}' ;;
     unknown) body='not json' ;;
+    empty) body='' ;;
   esac
-  cat > "$FAKEBIN/gh" <<SH
+  if [ -n "$body" ]; then
+    cat > "$FAKEBIN/gh" <<SH
 #!/usr/bin/env bash
 printf '%s\\n' '$body'
 SH
+  else
+    # gh failing with EMPTY stdout: exit 0, print nothing (jq then succeeds
+    # on empty input and emits no output, the regression this guards against)
+    cat > "$FAKEBIN/gh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  fi
   chmod +x "$FAKEBIN/gh"
 }
 
@@ -74,6 +84,18 @@ test_unknown_owners_yield_unknown() {
   pass "missing or unreadable owner evidence yields unknown, never a guess"
 }
 
+test_empty_forge_output_yields_unknown() {
+  local aid out
+  aid=$(fm_attempt_alloc pi dos-e holu)
+  fm_attempt_freeze_allocation "$aid" 1 '{"provider":"tmux","copy":"wt-e"}' \
+    '{"mode":"direct-PR","base":"main","target":"origin/main"}' || fail "freeze"
+  journal_forge_observation "$aid" open
+  fake_gh empty
+  out=$(PATH="$FAKEBIN:$PATH" fm_disposition_live "$aid")
+  [ "$out" = unknown ] || fail "empty forge output should be unknown, not empty: '$out'"
+  pass "empty forge output resolves to unknown, never an empty guess"
+}
+
 test_claim_authority_never_authorizes_closure() {
   local out
   out=$(FM_STATE_OVERRIDE="$STATE" fm_authority_for close dos-c 2>&1 || true)
@@ -94,5 +116,6 @@ test_authority_is_per_transition() {
 test_live_merge_proof_is_forge_authority_not_bead_closure
 test_bead_closed_alone_never_retires_preserved_unlanded
 test_unknown_owners_yield_unknown
+test_empty_forge_output_yields_unknown
 test_claim_authority_never_authorizes_closure
 test_authority_is_per_transition
