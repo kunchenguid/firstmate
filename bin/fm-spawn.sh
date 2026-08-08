@@ -87,11 +87,15 @@
 #   Every local and remote task record is staged beside its final path, read back,
 #   compared with the complete intended body, and renamed into place once.
 #   Compose, write, verification, rename, and destination-directory failures
-#   publish no normal record and remove the staging file. A local endpoint is
-#   discarded when disappearance can be verified. A remote endpoint remains
-#   bound by its complete remote-host record for reconciliation. If failed Orca
-#   cleanup leaves a worktree, the same publisher writes one complete record
-#   marked spawn_state=failed and cleanup_required=orca-worktree.
+#   publish no normal record and remove the staging file. Republication never
+#   unlinks the earlier record first, so a relaunch whose publication fails
+#   leaves that record intact and readable at the final path, where every reader
+#   still counts it as this task; both failure messages report it rather than
+#   claiming no record exists. A local endpoint is discarded when disappearance
+#   can be verified. A remote endpoint remains bound by its complete remote-host
+#   record for reconciliation. If failed Orca cleanup leaves a worktree, the same
+#   publisher writes one complete record marked spawn_state=failed and
+#   cleanup_required=orca-worktree.
 #   With no harness arg, a crewmate/scout spawn resolves the CREW harness only when
 #   config/crew-dispatch.json is absent. When that file exists, crewmate/scout
 #   spawns require an explicit harness so firstmate cannot silently skip dispatch
