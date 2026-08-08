@@ -263,7 +263,8 @@ METAS="$TMP/metas.tsv"
 : > "$METAS"
 for meta in "$STATE"/*.meta; do
   [ -f "$meta" ] || continue
-  id=$(basename "$meta" .meta)
+  id=${meta##*/}
+  id=${id%.meta}
   [ -z "$ONLY_ID" ] || [ "$id" = "$ONLY_ID" ] || continue
   worktree=$(meta_value "$meta" worktree)
   harness=$(meta_value "$meta" harness)

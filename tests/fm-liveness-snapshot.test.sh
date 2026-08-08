@@ -224,6 +224,90 @@ SH
   pass "producer without a readable process table is explicitly unverified"
 }
 
+install_real_process_shims() {  # <dir> <empty-fleet|missing-cwd>
+  local dir=$1 shape=$2
+  cat > "$dir/bin/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  '-Ao pid=,time=,comm=') printf '11 00:00:01.00 claude\n' ;;
+  'eww -Ao pid=,command=')
+    case "${E_REAL_PROCESS_SHAPE:?}" in
+      empty-fleet) printf '11 ordinary-process\n' ;;
+      missing-cwd) printf '11 claude FM_WORKER_TOKEN=11111111111111111111111111111111\n' ;;
+    esac
+    ;;
+  *) exit 2 ;;
+esac
+SH
+  cat > "$dir/bin/lsof" <<'SH'
+#!/usr/bin/env bash
+case "${E_REAL_PROCESS_SHAPE:?}" in
+  empty-fleet) printf 'p11\nn%s\n' "${E_WT:?}" ;;
+  missing-cwd) printf 'p11\n' ;;
+esac
+SH
+  chmod +x "$dir/bin/ps" "$dir/bin/lsof"
+}
+
+run_real_process_case() {  # <dir> <empty-fleet|missing-cwd>
+  local dir=$1 shape=$2
+  PATH="$dir/bin:$PATH" E_REAL_PROCESS_SHAPE="$shape" \
+    FM_HOME="$dir/home" FM_LIVENESS_INTERVAL_MS=100 FM_LIVENESS_NOW=2026-08-03T12:00:00Z \
+    FM_LIVENESS_ENDPOINT_BIN="$dir/bin/endpoint" FM_LIVENESS_CAPTURE_BIN="$dir/bin/capture" \
+    E_DIR="$dir" E_WT="$dir/wt" "$LIVENESS" --json
+}
+
+test_real_empty_fleet_producer_witness_and_verdict() {
+  local dir producer json
+  dir=$(make_case real-empty-fleet claude); install_evidence "$dir"; install_real_process_shims "$dir" empty-fleet
+  producer=$(PATH="$dir/bin:$PATH" E_REAL_PROCESS_SHAPE=empty-fleet E_WT="$dir/wt" \
+    "$ROOT/bin/fm-liveness-process-snapshot.sh")
+  printf '%s\n' "$producer" | grep -Fqx $'__FM_LIVENESS_OBSERVER__\tprocess-table-visible' \
+    || fail "real empty-fleet producer omitted its process-table witness: $producer"
+  printf '%s\n' "$producer" | grep -F 'FM_WORKER_TOKEN=' >/dev/null \
+    && fail "real empty-fleet producer fixture unexpectedly carried a worker token: $producer"
+  json=$(run_real_process_case "$dir" empty-fleet)
+  printf '%s' "$json" | jq -e '
+    .process_samples.sample_1_readable == true
+    and .process_samples.sample_2_readable == true
+    and .records[0].worker.presence == "verified_absent"
+    and .records[0].evidence.grade == "task_bound_process"
+  ' >/dev/null || fail "real zero-token producer did not preserve verified absence: $json"
+  pass "real zero-token producer emits the observer witness and proves verified absence"
+}
+
+test_real_process_snapshot_without_resolved_cwd_is_unverified() {
+  local dir json
+  dir=$(make_case real-missing-cwd claude); install_evidence "$dir"; install_real_process_shims "$dir" missing-cwd
+  json=$(run_real_process_case "$dir" missing-cwd)
+  printf '%s' "$json" | jq -e '
+    .process_samples.sample_1_readable == false
+    and .process_samples.sample_2_readable == false
+    and .records[0].worker.presence == "unverified"
+    and .records[0].evidence.grade == "unverified"
+  ' >/dev/null || fail "producer with pid-only lsof evidence was trusted as verified absence: $json"
+  pass "producer without resolved CWD rows is explicitly unverified"
+}
+
+test_liveness_meta_id_does_not_need_basename() {
+  local dir minimal_path tool tool_path json
+  dir=$(make_case liveness-no-basename claude); install_evidence "$dir"
+  minimal_path="$dir/minimal-path"
+  mkdir -p "$minimal_path"
+  for tool in awk bash cat cksum cp cut date dirname grep jq mktemp mv perl rm shasum sleep tail; do
+    tool_path=$(command -v "$tool" 2>/dev/null || true)
+    [ -n "$tool_path" ] || continue
+    ln -s "$tool_path" "$minimal_path/$tool"
+  done
+  json=$(PATH="$minimal_path" FM_HOME="$dir/home" FM_LIVENESS_INTERVAL_MS=100 \
+    FM_LIVENESS_NOW=2026-08-03T12:00:00Z FM_LIVENESS_ENDPOINT_BIN="$dir/bin/endpoint" \
+    FM_LIVENESS_CAPTURE_BIN="$dir/bin/capture" FM_LIVENESS_PROCESS_SNAPSHOT_BIN="$dir/bin/process" \
+    E_DIR="$dir" E_WT="$dir/wt" "$LIVENESS" --json)
+  printf '%s' "$json" | jq -e '.records[0].id == "task"' >/dev/null \
+    || fail "liveness metadata id depended on basename outside the declared tool surface: $json"
+  pass "liveness metadata ids do not require basename"
+}
+
 test_cwd_binding_and_shell_amplifier_refusals() {
   local dir json
   dir=$(make_case wrong-cwd claude); install_evidence "$dir"
@@ -805,6 +889,9 @@ test_harness_relative_cpu_rows
 test_process_observation_distinguishes_blind_from_absent
 test_max_cpu_launcher_and_two_sample_delta
 test_real_process_snapshot_without_process_table_is_unverified
+test_real_empty_fleet_producer_witness_and_verdict
+test_real_process_snapshot_without_resolved_cwd_is_unverified
+test_liveness_meta_id_does_not_need_basename
 test_cwd_binding_and_shell_amplifier_refusals
 test_between_sample_exit_is_absent_for_every_harness
 test_endpoint_three_way_and_output_activity

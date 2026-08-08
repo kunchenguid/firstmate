@@ -49,6 +49,7 @@ awk '
   /^p[0-9]+$/ { pid=substr($0,2); next }
   /^n/ && pid != "" { print pid "\t" substr($0,2) }
 ' "$TMP/lsof.raw" > "$TMP/cwd.tsv"
+[ -s "$TMP/cwd.tsv" ] || exit 1
 awk -F '\t' '
   NR==FNR { cwd[$1]=$2; next }
   ($1 in cwd) { print $1 "\t" $2 "\t" $3 "\t" cwd[$1] }
