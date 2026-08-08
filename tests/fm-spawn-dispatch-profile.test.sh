@@ -25,7 +25,11 @@ esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
-  has-session|new-session|new-window|kill-window) exit 0 ;;
+  has-session|kill-window) exit 0 ;;
+  new-session|new-window)
+    [ -z "${FM_FAKE_ENDPOINT_LOG:-}" ] || printf '%s\n' "$1" >> "$FM_FAKE_ENDPOINT_LOG"
+    exit 0
+    ;;
   send-keys)
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
       prev=
@@ -85,6 +89,7 @@ run_spawn() {
   local home=$1 wt=$2 fakebin=$3 launchlog=$4
   shift 4
   : > "$launchlog"
+  : > "$launchlog.endpoint"
   # CLAUDE_CONFIG_DIR is forwarded onto claude launches by fm-spawn, so pin it
   # explicitly (empty by default) instead of leaking the invoking shell's value,
   # which would make launch assertions depend on the developer's environment.
@@ -96,7 +101,8 @@ run_spawn() {
     HOME="${FM_TEST_HOME-$home/user-home}" \
     NM_HOME="${FM_TEST_NM_HOME-$home/no-mistakes-home}" \
     CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
-    FM_FAKE_LAUNCH_LOG="$launchlog" GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
+    FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_ENDPOINT_LOG="$launchlog.endpoint" \
+    GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
     "$SPAWN" "$@" 2>&1
 }
 
@@ -606,6 +612,50 @@ test_codex_no_mistakes_root_resolution_fails_closed() {
   pass "Codex no-mistakes spawn fails closed before endpoint publication when its root is unresolved"
 }
 
+test_codex_no_mistakes_root_rejects_broad_or_overlapping_paths() {
+  local rec base_id labels candidates i id out status
+  base_id=profile-codex-roots-refused-z3h
+  rec=$(make_spawn_case profile-codex-roots-refused codex \
+    "$base_id-root" "$base_id-home" "$base_id-firstmate" "$base_id-data" "$base_id-project")
+  read_case_record "$rec"
+  labels=(root home firstmate data project)
+  candidates=(/ "$HOME_DIR/user-home" "$HOME_DIR" "$HOME_DIR/data" "$PROJ_DIR")
+
+  for i in "${!labels[@]}"; do
+    id="$base_id-${labels[$i]}"
+    out=$(FM_TEST_NM_HOME="${candidates[$i]}" \
+      run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+    status=$?
+    expect_code 1 "$status" "Codex no-mistakes spawn with ${labels[$i]} as its root should fail"
+    assert_contains "$out" "refusing broad or overlapping no-mistakes root" \
+      "Codex no-mistakes refusal did not name the unsafe root boundary"
+    assert_absent "$HOME_DIR/state/$id.meta" \
+      "Codex no-mistakes unsafe-root refusal wrote task metadata"
+    [ ! -s "$LAUNCH_LOG.endpoint" ] || fail "Codex no-mistakes unsafe-root refusal created an endpoint"
+    [ ! -s "$LAUNCH_LOG" ] || fail "Codex no-mistakes unsafe-root refusal typed a launch command"
+  done
+  pass "Codex no-mistakes spawn rejects broad and protected overlapping roots"
+}
+
+test_raw_codex_no_mistakes_launch_fails_closed() {
+  local rec id out status
+  id=profile-raw-codex-no-mistakes-z3i
+  rec=$(make_spawn_case profile-raw-codex-no-mistakes claude "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "codex --profile isolated")
+  status=$?
+  expect_code 1 "$status" "raw Codex no-mistakes launch should fail"
+  assert_contains "$out" "raw Codex launch commands cannot satisfy the no-mistakes writable-root contract" \
+    "raw Codex no-mistakes refusal did not name the unsupported access contract"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "raw Codex no-mistakes refusal wrote task metadata"
+  [ ! -s "$LAUNCH_LOG.endpoint" ] || fail "raw Codex no-mistakes refusal created an endpoint"
+  [ ! -s "$LAUNCH_LOG" ] || fail "raw Codex no-mistakes refusal typed a launch command"
+  pass "raw Codex no-mistakes launch fails before endpoint creation"
+}
+
 test_codex_omits_invalid_max_effort() {
   local rec id out status launch
   id=profile-codex-max-z4
@@ -907,6 +957,8 @@ test_codex_writable_roots_are_physical_and_shell_quoted
 test_codex_no_mistakes_root_is_physical_and_shell_quoted
 test_codex_no_mistakes_root_uses_home_default_when_nm_home_is_empty
 test_codex_no_mistakes_root_resolution_fails_closed
+test_codex_no_mistakes_root_rejects_broad_or_overlapping_paths
+test_raw_codex_no_mistakes_launch_fails_closed
 test_codex_omits_invalid_max_effort
 test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort

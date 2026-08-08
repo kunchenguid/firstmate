@@ -1118,8 +1118,10 @@ launch_template() {
   esac
 }
 
+RAW_LAUNCH=0
 case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
+    RAW_LAUNCH=1
     LAUNCH=$ARG3
     HARNESS=""
     for word in $LAUNCH; do
@@ -1153,6 +1155,11 @@ case "$ARG3" in
     LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: unknown harness '$HARNESS'; pass a raw launch command to use an unverified adapter" >&2; exit 1; }
     ;;
 esac
+
+if [ "$RAW_LAUNCH" -eq 1 ] && [ "$HARNESS" = codex ] && [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
+  echo "error: raw Codex launch commands cannot satisfy the no-mistakes writable-root contract; select the verified codex harness instead" >&2
+  exit 1
+fi
 
 case "$HARNESS" in
   pi|pi-signed) LAUNCH="FM_PI_HARNESS=$HARNESS $LAUNCH" ;;
@@ -1396,15 +1403,7 @@ effort_flag_for_harness() {
   esac
 }
 
-# no-mistakes selects NM_HOME when non-empty and otherwise uses
-# $HOME/.no-mistakes, with its Unix socket directly under that root. Resolve
-# and freeze the physical directory before endpoint creation, then forward the
-# same value into the worker because long-lived session backends need not share
-# firstmate's current environment. No other mode, kind, or harness receives it.
 CODEX_NO_MISTAKES_ROOT=
-if [ "$HARNESS" = codex ] && [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
-  CODEX_NO_MISTAKES_ROOT=$(resolve_no_mistakes_root) || exit 1
-fi
 
 case "$LAUNCH" in
   *__MUSEBIN__*)
@@ -1466,6 +1465,51 @@ path_is_ancestor_of() {
     "$ancestor"/*) return 0 ;;
   esac
   return 1
+}
+
+paths_overlap() {
+  local left=$1 right=$2
+  [ "$left" = "$right" ] || path_is_ancestor_of "$left" "$right" || path_is_ancestor_of "$right" "$left"
+}
+
+validate_no_mistakes_root() {
+  local root=$1 project=$2 home_real fm_home_real fm_root_real name path real
+  [ "$root" != / ] || {
+    echo "error: refusing broad or overlapping no-mistakes root: filesystem root" >&2
+    return 1
+  }
+  home_real=$(CDPATH='' cd -- "${HOME:-}" 2>/dev/null && pwd -P) || home_real=
+  if [ -n "$home_real" ] && { [ "$root" = "$home_real" ] || path_is_ancestor_of "$root" "$home_real"; }; then
+    echo "error: refusing broad or overlapping no-mistakes root: user home" >&2
+    return 1
+  fi
+  fm_home_real=$(CDPATH='' cd -- "$FM_HOME" 2>/dev/null && pwd -P) || fm_home_real=
+  if [ -n "$fm_home_real" ] && { [ "$root" = "$fm_home_real" ] || path_is_ancestor_of "$root" "$fm_home_real"; }; then
+    echo "error: refusing broad or overlapping no-mistakes root: active Firstmate home" >&2
+    return 1
+  fi
+  fm_root_real=$(CDPATH='' cd -- "$FM_ROOT" 2>/dev/null && pwd -P) || fm_root_real=
+  if [ -n "$fm_root_real" ] && paths_overlap "$root" "$fm_root_real"; then
+    echo "error: refusing broad or overlapping no-mistakes root: Firstmate repository" >&2
+    return 1
+  fi
+  for name in data state config projects; do
+    case "$name" in
+      data) path=$DATA ;;
+      state) path=$STATE ;;
+      config) path=$CONFIG ;;
+      projects) path=$PROJECTS ;;
+    esac
+    real=$(CDPATH='' cd -- "$path" 2>/dev/null && pwd -P) || continue
+    if paths_overlap "$root" "$real"; then
+      echo "error: refusing broad or overlapping no-mistakes root: Firstmate $name directory" >&2
+      return 1
+    fi
+  done
+  if paths_overlap "$root" "$project"; then
+    echo "error: refusing broad or overlapping no-mistakes root: primary project directory" >&2
+    return 1
+  fi
 }
 
 validate_firstmate_home_for_spawn() {
@@ -1673,6 +1717,16 @@ BRIEF_REAL="$BRIEF_DIR_REAL/$(basename "$BRIEF")"
 # once here so every downstream comparison uses the same physical form
 # (docs/herdr-backend.md "Known gaps").
 PROJ_ABS_REAL=$(cd "$PROJ_ABS" 2>/dev/null && pwd -P) || PROJ_ABS_REAL="$PROJ_ABS"
+
+# no-mistakes selects NM_HOME when non-empty and otherwise uses
+# $HOME/.no-mistakes, with its Unix socket directly under that root. Resolve
+# and freeze the physical directory before endpoint creation, then forward the
+# same value into the worker because long-lived session backends need not share
+# firstmate's current environment. No other mode, kind, or harness receives it.
+if [ "$HARNESS" = codex ] && [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
+  CODEX_NO_MISTAKES_ROOT=$(resolve_no_mistakes_root) || exit 1
+  validate_no_mistakes_root "$CODEX_NO_MISTAKES_ROOT" "$PROJ_ABS_REAL" || exit 1
+fi
 
 real_path_or_raw() {  # <path>
   local path=$1 real
