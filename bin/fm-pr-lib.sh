@@ -143,7 +143,7 @@ fm_pr_forgejo_host_valid() {
 }
 
 fm_pr_forgejo_project_source() {
-  local project=${1-} host=${2-} path=${3-} remote key url remote_host source effective effective_host lib_dir
+  local project=${1-} host=${2-} path=${3-} git_context=${4:-${1-}} remote key url remote_host source effective effective_host lib_dir
   fm_pr_forgejo_host_valid "$host" || return 1
   [ -z "$path" ] || fm_pr_forgejo_path_valid "$path" || return 1
   [ -d "$project" ] && git -C "$project" rev-parse --git-dir >/dev/null 2>&1 || return 1
@@ -158,7 +158,7 @@ fm_pr_forgejo_project_source() {
         [ "$remote_host" = "$host" ] || continue
         if [ -n "$path" ]; then
           source=$(fm_project_origin_with_path "$url" "$path.git") || continue
-          effective=$(git -C "$project" ls-remote --get-url "$source" 2>/dev/null) || continue
+          effective=$(git -C "$git_context" ls-remote --get-url "$source" 2>/dev/null) || continue
           effective_host=$(fm_project_origin_host "$effective") || continue
           [ "$effective_host" = "$remote_host" ] || continue
           printf '%s' "$source"

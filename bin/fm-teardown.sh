@@ -793,7 +793,7 @@ ensure_commit_object() {
   local target=$1 commit=$2 n source=origin
   git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null && return 0
   if fm_pr_url_parse "$target" && [ "$FM_PR_PROVIDER" = forgejo ]; then
-    source=$(fm_pr_forgejo_project_source "$PROJ" "$FM_PR_HOST" "$FM_PR_PATH") || return 1
+    source=$(fm_pr_forgejo_project_source "$PROJ" "$FM_PR_HOST" "$FM_PR_PATH" "$WT") || return 1
     n=$FM_PR_NUMBER
   else
     n=$(pr_number_from_target "$target") || return 1

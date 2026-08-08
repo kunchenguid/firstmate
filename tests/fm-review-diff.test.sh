@@ -204,6 +204,40 @@ test_forgejo_pr_meta_uses_canonical_repository() {
   pass "fm-review-diff preserves registered scp transport for canonical Forgejo pull heads"
 }
 
+test_forgejo_worktree_rewrite_never_fetches() {
+  local case_dir out git_ssh source
+  case_dir=$(make_case forgejo-worktree-rewrite)
+  stale_and_pr_commits "$case_dir"
+  git -C "$case_dir/project" remote add forgejo git@forgejo.example:fork/repo.git
+  git -C "$case_dir/wt" push -q origin "pr-head-tmp:refs/pull/9/head"
+  git -C "$case_dir/project" config extensions.worktreeConfig true
+  git -C "$case_dir/wt" config --worktree \
+    url.ssh://attacker.example/.insteadOf git@forgejo.example:
+  source=git@forgejo.example:owner/repo.git
+  [ "$(git -C "$case_dir/project" ls-remote --get-url "$source")" = "$source" ] \
+    || fail "forgejo-worktree-rewrite: project context unexpectedly rewrote the source"
+  [ "$(git -C "$case_dir/wt" ls-remote --get-url "$source")" = \
+    ssh://attacker.example/owner/repo.git ] \
+    || fail "forgejo-worktree-rewrite: worktree context did not expose the hostile rewrite"
+  git_ssh=$(fm_fake_git_ssh "$case_dir")
+  : > "$case_dir/git-ssh.log"
+  write_task_meta "$case_dir" "pr=https://forgejo.example/owner/repo/pulls/9"
+
+  out=$(FM_TEST_REAL_GIT="$(command -v git)" FM_TEST_GIT_REPOSITORY="$case_dir/origin.git" \
+    FM_TEST_GIT_SSH_LOG="$case_dir/git-ssh.log" GIT_SSH_COMMAND="$git_ssh" GIT_SSH_VARIANT=ssh \
+    run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+
+  assert_contains "$out" '+stale-local' \
+    "forgejo-worktree-rewrite: review should retain the local branch"
+  assert_not_contains "$out" '+pr-fixed' \
+    "forgejo-worktree-rewrite: review fetched through a cross-host rewrite"
+  [ ! -s "$case_dir/git-ssh.log" ] \
+    || fail "forgejo-worktree-rewrite: review reached the rewritten SSH transport"
+  assert_contains "$(cat "$case_dir/stderr")" 'warning: PR head unavailable' \
+    "forgejo-worktree-rewrite: review did not report the unavailable head"
+  pass "fm-review-diff rejects worktree-scoped cross-host Git rewrites before fetch"
+}
+
 test_forgejo_unregistered_host_never_fetches() {
   local case_dir out
   case_dir=$(make_case forgejo-unregistered-host)
@@ -295,6 +329,7 @@ test_pr_meta_fetches_pull_head_without_recorded_sha
 test_numeric_pr_meta_fetches_origin_pull_head
 test_forgejo_pr_meta_fetches_pull_head
 test_forgejo_pr_meta_uses_canonical_repository
+test_forgejo_worktree_rewrite_never_fetches
 test_forgejo_unregistered_host_never_fetches
 test_noncanonical_pr_targets_are_rejected
 test_stale_recorded_pr_head_loses_to_fetched_pull_head

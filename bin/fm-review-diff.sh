@@ -98,7 +98,7 @@ resolve_pr_head() {
     case "$FM_PR_PROVIDER" in
       github) ;;
       forgejo)
-        source=$(fm_pr_forgejo_project_source "$PROJ" "$FM_PR_HOST" "$FM_PR_PATH") || return 1
+        source=$(fm_pr_forgejo_project_source "$PROJ" "$FM_PR_HOST" "$FM_PR_PATH" "$WT") || return 1
         ;;
       *) return 1 ;;
     esac
