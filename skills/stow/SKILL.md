@@ -60,16 +60,16 @@ Everything files to a local destination by default; an external system such as a
 
 6. **Read the destination before writing: inspect-then-update, never blind-append.**
    Before writing any finding, read the destination file's current contents in full.
-   Then ask, for each finding: which existing entry does it supersede; can it be a one-sentence rewrite of an existing entry instead of a new one; and should a stale entry now be deleted or replaced in the same pass?
+   Then ask, for each finding: which existing entry does it supersede; can it be a one-sentence rewrite of an existing entry instead of a new one; and should a stale entry now be refreshed, archived, or replaced in a way that preserves its fact in the same pass?
    Stamp each entry you write with a tier and date per the tier contract below.
    For an existing `TODO`/`BACKLOG`/`NOTES` item, inspect the full item, classify the change as new, duplicate, superseding, or obsolete, then write a considered replacement body rather than appending to it.
    File each undone next step with what it is waiting on, when it is genuinely blocked on something.
 
 7. **Curate every memory file this pass has open, not only the one a finding routes to.**
    Evaluate each dated entry against its tier clock per the tier contract below, refreshing what current evidence re-validates and archiving what stays stale.
-   Prune what is no longer current: completed chronology, stale versions and paths, transient task state, resolved alternatives, old metrics, superseded claims, duplicates, and report-sized procedures that belong in a report or doc.
+   Archive what is no longer current, including completed chronology, stale versions and paths, transient task state, resolved alternatives, old metrics, and report-sized procedures; merge or remove only superseded claims and duplicates whose facts are preserved elsewhere.
    Prefer one concise current rule, or a pointer to the authoritative source, over duplicate prose.
-   The counterweight: never remove a unique current fact unless it is preserved elsewhere by a stronger owner - and archiving with its marker and reason counts as preservation.
+   Never plainly remove a unique current fact: every such exit must archive it with provenance in the recoverable cold tier or relocate it to a live on-demand owner or a consolidation merge that preserves the fact.
    This is an accuracy discipline, not a length target - a stale entry misleads the next session; a current one earns its place.
    A `.stow-notes.md` note has exactly five exits: promotion into a shared, tracked file the user approves; folding into a discovered user-level memory file; archiving to the local, never-loaded archive file; a user-approved move into an on-demand-loaded home (a skill or scoped instruction file), executed through the user's own change process rather than by this skill; or deletion of a duplicate already preserved by a stronger owner - do not invent another.
 
@@ -114,11 +114,13 @@ Rules:
 - Decay is evaluated only when this skill runs; nothing happens between passes, so an infrequently stowed project experiences the clocks at its stow interval.
 - Stale never means deleted: a stale entry moves, with its marker and a one-line reason, to a `.stow-archive.md` beside the file it came from - the current directory for `.stow-notes.md` and project files - never loaded by any session, and kept out of git the same way as `.stow-notes.md` when it lands in a git worktree.
   Recovery is search plus copy back.
-- Pre-existing unmarked entries are the file's default tier with unknown age, and unknown age is not guilt: the first pass stamps what it can confirm; otherwise it adds `<!-- legacy-grace: pending -->` without a `reinforced:` date to persist one grace cycle without treating presence as reinforcement.
+- Pre-existing unmarked entries are the file's default tier with unknown age, and unknown age is not guilt: an unmarked entry in a default-pinned file is simply pinned and exempt from the aging clock, legacy grace cycle, and archive-by-age, though consolidation still applies.
+- In a file whose default tier carries a clock, the first pass stamps each unmarked entry it can confirm; otherwise it adds `<!-- legacy-grace: pending -->` without a `reinforced:` date to persist one grace cycle without treating presence as reinforcement.
   On the next pass, current evidence replaces that marker with the normal tier marker; without such evidence, archive the entry with a `legacy-unvalidated` note.
-  The same persisted transition applies to an entry a hand edit later leaves unmarked.
+  The same persisted transition applies to an entry a hand edit later leaves unmarked in a file whose default tier carries a clock.
 - When an always-loaded memory file has grown past what every session should pay for, this skill may propose - never execute - moving a durable entry that matters only in a nameable situation into an on-demand-loaded home, such as a skill or scoped instruction file the user's agent loads only when that situation arises.
   The user approves each move, the new home is created through the user's own change process rather than by this skill, and the entry leaves the memory file only once the new home exists.
+  No unique current fact is ever plainly removed during this flow; before the on-demand home is live, its only exit from the loaded file is archival with provenance in the recoverable cold tier.
 
 ## What this skill does not do
 

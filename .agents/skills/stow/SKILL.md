@@ -39,7 +39,7 @@ Marking rules:
 - During legacy migration only, `legacy-grace: pending` may appear in the trailing marker without a `reinforced:` date; it records that the entry has consumed its grace cycle and is not reinforcement.
 - Each memory file's header carries a one-line legend stating that file's default tier, the marker spelling (including the migration-only grace state while one exists), and the current clocks, so the scheme is self-describing to any reader.
 - The clocks are policy owned by this skill text and echoed by the legends, deliberately not configuration.
-- A missing or hand-dropped marker is never an error: it means the file's default tier, aged per the unmarked-entry migration rule below.
+- A missing or hand-dropped marker is never an error: it means the file's default tier; an unmarked entry in a default-pinned file is simply pinned, while an unmarked entry in a file whose default tier carries a clock follows the migration rule below.
 
 Decay advances only when a pass runs, so a home stowed less often than a clock experiences that clock at its stow interval.
 
@@ -71,14 +71,14 @@ Every `/stow` invocation performs this complete pass, even when the session cont
    `pinned` is exempt from this step entirely.
 6. Consolidate every editable memory file as needed, not only the file apparently related to a new finding.
    Prefer one concise current rule or authoritative pointer over duplicate prose.
-   Remove, merge, or route completed incident and release chronology, stale versions and paths, transient task state, resolved alternatives, old metrics, superseded claims, duplicates, and report-sized procedures.
-   Do not remove a unique current fact unless it is preserved directly elsewhere through a stronger existing owner; archiving with provenance is preservation, so retiring an entry to the cold tier never violates this.
+   Archive completed incident and release chronology, stale versions and paths, transient task state, resolved alternatives, old metrics, and report-sized procedures; merge or remove only superseded claims and duplicates whose facts are preserved elsewhere.
+   Never plainly remove a unique current fact: every such exit must archive it with provenance in the recoverable cold tier or relocate it to a live JIT owner or a consolidation merge that preserves the fact.
 7. When the total is still over budget after decay and consolidation, relieve it in this order: archive everything already stale, which needs no further judgment; consolidate tighter; run the over-budget offload sweep below and file its proposals, whose relief lands at migration cadence rather than inside this pass; then archive `aging` entries oldest-`reinforced`-first until within budget.
    `pinned` is never touched by budget pressure.
 8. Run `bin/fm-startup-memory-budget.sh report` again after the complete pass.
    Finish at or below the effective budget unless a concrete inability remains.
    A secondmate must explicitly report `primary-owned-shared-file-alone-exceeds-budget` when the inherited shared file alone exceeds its allowance, because local curation cannot resolve it.
-   Any other unresolved excess must identify the fact that cannot safely be removed or routed and why.
+   Any other unresolved excess must identify the fact that cannot safely be archived or routed and why.
 
 A net increase is allowed only for a genuinely new current fact with no stronger owner.
 Before allowing it, consolidate enough lower-priority material to remain within budget.
@@ -146,7 +146,7 @@ A local skill exists only in this home, so offloading an entry out of `data/capt
 4. Remove only once live.
    The memory entry leaves its always-injected file only after the destination is live: the local skill exists with its exclude line in place, or the project change has landed.
    Until then the entry stays, so knowledge is never in limbo between owners.
-   When the home is still over budget after approval, the pass may archive the entry immediately with provenance `offloading to <destination> via <task id>`, recoverable if the migration fails.
+   When the home is still over budget after approval, this remove-only-once-live rule relaxes solely into immediate archival with provenance `offloading to <destination> via <task id>` in the recoverable cold tier, never into plain removal, so the archive remains the source if migration fails.
    Leave no pointer behind by default, and at most one line only when the destination's discoverability is genuinely doubtful.
 
 ## Knowledge sweep and routing
@@ -179,11 +179,11 @@ A local skill exists only in this home, so offloading an entry out of `data/capt
 Legacy entries carry no markers; an unmarked entry is its file's default tier with unknown age, and unknown age is not guilt.
 The first pass after adoption performs a one-time revalidation sweep instead of blanket restamping:
 
-- In `data/captain.md` and `data/captain-shared.md`, a confirmed entry matching the default `pinned` needs no marker at all; mark only genuine deviations.
+- In `data/captain.md` and `data/captain-shared.md`, every unmarked entry is simply default-pinned and remains exempt from the aging clock, legacy grace cycle, and archive-by-age; consolidation still applies, and only genuine tier deviations receive markers.
 - In `data/learnings.md`, stamp each entry the pass can confirm current with `reinforced:` today, plus a `tier:` where it deviates from the `aging` default.
-- On the first pass that cannot confirm an unmarked entry, add `<!-- legacy-grace: pending -->` as its trailing marker without a `reinforced:` date; this persists that it has consumed exactly one grace cycle without pretending it was reinforced.
+- On the first pass that cannot confirm an unmarked entry in `data/learnings.md`, add `<!-- legacy-grace: pending -->` as its trailing marker without a `reinforced:` date; this persists that it has consumed exactly one grace cycle without pretending it was reinforced.
 - On the next pass, replace that marker with the normal tier marker if current evidence confirms the entry; otherwise archive it with provenance `legacy-unvalidated`.
-- The grace period is one full stow cycle, not a time window, and the same persisted transition applies to entries a hand edit later leaves unmarked.
+- The grace period is one full stow cycle, not a time window, and the same persisted transition applies when a hand edit later leaves an entry unmarked in `data/learnings.md`.
 
 ## Completion receipt
 
