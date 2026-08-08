@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Opt-in live guard for the RUN-tier session-open adapters (Claude, Codex exec, Pi).
+# Opt-in live guard for the RUN-tier session-open adapters (Claude, Codex, Pi).
 #
 # Three facts in this area come from the vendor, not from Firstmate, so a stub
 # can only confirm the assumption already written into the stub:
@@ -256,7 +256,7 @@ probe_context_reset() {  # <harness> <version> <lab> <clear-command> <launch-arg
   # costs nothing. harness-adapters owns trust handling outside tests.
   n=0
   while [ "$n" -lt 60 ] && ! grep -q . "$record" 2>/dev/null; do
-    if capture "$session" | grep -qiE 'trust (this|the|parent)?[[:space:]]*(folder|project)'; then
+    if capture "$session" | grep -qiE 'trust (this|the|parent|the contents of this)?[[:space:]]*(folder|project|directory)'; then
       tmux -L "$SOCKET" send-keys -t "$session" Enter
       sleep 5
     fi
@@ -340,9 +340,10 @@ for harness in claude codex pi; do
       ;;
     codex)
       probe_process_opens codex "$version" "$lab" resume \
-        codex exec --dangerously-bypass-hook-trust --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check \
-        -- codex exec resume --last --dangerously-bypass-hook-trust --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check
-      note "codex $version: codex exec run-tier evidence refreshed; the interactive TUI is a documented nudge-tier surface because tracked project hooks do not fire there"
+        codex exec --enable hooks --dangerously-bypass-hook-trust --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check \
+        -- codex exec resume --last --enable hooks --dangerously-bypass-hook-trust --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check
+      probe_context_reset codex "$version" "$lab" /clear \
+        codex --enable hooks --dangerously-bypass-hook-trust --dangerously-bypass-approvals-and-sandbox
       ;;
     pi)
       probe_process_opens pi "$version" "$lab" startup \

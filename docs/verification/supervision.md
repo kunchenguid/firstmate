@@ -58,14 +58,33 @@ The third is recorded below.
 | Harness | Version verified | Cold open | Context reset | Context-preserving reopen |
 | --- | --- | --- | --- | --- |
 | Claude | 2.1.222 (Claude Code) | `source=startup`, token quoted back in both `-p` and the TUI | `/clear` reports `source=clear` and `/compact` reports `source=compact`; both re-injected a fresh token that the model quoted back | `claude --continue` reports `source=resume` |
-| Codex | codex-cli 0.146.0 | `source=startup` under `codex exec`, token quoted back | Not reachable from a tracked project registration; see the limit below | `codex exec resume --last` reports `source=resume` |
+| Codex | codex-cli 0.146.0 | `source=startup` under `codex exec` and the interactive TUI, token quoted back | `/clear` reports `source=clear` and re-injects a fresh token in the interactive TUI | `codex exec resume --last` reports `source=resume` |
 | Pi | 0.82.0 | `source=startup`, token quoted back in both `-p` and the TUI | `/new` raises `session_start` reason `new`, which the extension maps to `clear`; `/compact` raises `session_compact`, and both freshly injected source-stamped tokens were quoted back | `pi -c` reports reason `startup`, not `resume` |
 
 Two harness-specific consequences are load-bearing rather than incidental.
 
-Codex's interactive TUI fired no project `SessionStart` hook at all in the same lab where `codex exec` fired it reliably, which matches the earlier 2026-07-28 finding for 0.145.0.
-Codex's run tier is therefore verified only for `codex exec`.
-The interactive TUI remains on the tracked nudge floor through `AGENTS.md` and the Ahoy fallback; Firstmate ships no global hook and does not depend on one.
+Codex's interactive TUI is a run-tier surface when the hooks feature was enabled before process start and both trust gates are satisfied.
+The prior interactive negative did not pin that feature precondition and is superseded by the fresh-process evidence below.
+
+### Codex feature, trust, and interactive hook delivery
+
+The Codex-specific trust and activation matrix was measured on 2026-08-08 with codex-cli 0.146.0 in a throwaway Git repository, isolated `CODEX_HOME`, and a local mock model provider, so it used no live Firstmate state and needed no copied credential.
+The first fresh launch displayed the directory-trust prompt explaining that trust enables project-local config, hooks, and exec policies.
+Accepting it wrote only the project's `trust_level = "trusted"` record.
+Codex then displayed a separate hook review for three new or changed hooks and warned that hooks can run outside the sandbox.
+Accepting `Trust all` wrote three independent `hooks.state` entries keyed by hook source/event/index with one `trusted_hash` per exact command definition.
+
+The same process then ran the pending `SessionStart` before its first model request, displayed `SessionStart hook (completed)`, injected the recorder's `LAB_SESSION_START_CONTEXT`, and invoked `Stop` after the model replied.
+The captured Stop payload carried `hook_event_name=Stop`, the fixture cwd, the assistant's last message, a turn id, and `stop_hook_active=false`.
+This proves project trust and per-hook review are separate durable gates, and that accepting review can activate hooks in a process that started with the feature enabled.
+
+The interactive context-reset path was then exercised in that isolated process with `/clear`.
+The command created a new thread without immediately invoking the hook; the first submitted post-clear turn displayed `SessionStart hook (completed)`, supplied `source=clear`, and sent the recorder's exact `LAB_SESSION_START_CONTEXT:clear` stdout in the next mock model request.
+The startup control used the same recorder and supplied `source=startup`, so stale startup context could not satisfy the clear assertion.
+
+The installed Codex source and the disabled-at-launch counterfactual establish a different boundary for the feature flag.
+Hook trust state can reload in one process, but derived feature gates are session-static, so changing `features.hooks` from false to true after launch does not activate hooks until a genuinely new Codex process starts.
+Changed command hashes still require review again after that restart.
 
 Pi compaction was verified on 2026-08-05 with Pi 0.82.0 in the same throwaway lab after setting `.pi/settings.json` `compaction.keepRecentTokens` to 200 and completing one substantial assistant-prose turn before issuing `/compact`.
 Pi reported `Compacted from 7,697 tokens`, the recorder observed `session_compact`, and the model quoted the freshly injected `source=compact` token back.
@@ -164,8 +183,8 @@ codex exec --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-
 ```
 
 The daemon refused with `managed standalone Codex install not found`, and an interactive TUI worker neither starts nor attaches to the app-server control socket, so no client can observe its turns.
-In this 2026-07-28 Codex 0.145.0 semantic-busy probe, Firstmate-written lifecycle project hooks under `<worktree>/.codex/hooks.json` fired for neither an interactive pane whose directory trust was granted nor `codex exec`, in both cases with `--dangerously-bypass-hook-trust`, while an untracked global probe fired in the same runs; Firstmate does not ship, install, recommend, or depend on that global path.
-Codex also exposes no `StopFailure` hook, so an API-error turn end would need separate coverage even after hook discovery works.
+The project-hook negative from the 2026-07-28 probe is superseded by the fresh enabled-process evidence above and cannot support a claim that the interactive TUI omits project hooks.
+Codex remains `unknown codex-unverified` for crewmate busy state because Firstmate's tracked primary hooks do not publish a task-worker turn lifecycle, an interactive pane does not expose its app-server lifecycle to an external observer, and Codex exposes no `StopFailure` hook for an API-error turn end.
 The app-server protocol schema does define the required lifecycle (`turn/started`, plus a `turn/completed` status of `completed`, `interrupted`, `failed`, or `inProgress`), so the gate is a reachability problem rather than a protocol gap.
 
 Deterministic entry points:

@@ -211,9 +211,15 @@ That scope matters because, unlike `/`, a leading `$` commonly starts ordinary t
 An explicit `session:window` target has no meta, so its harness is unknown and treated as non-codex (the safe fast-path default).
 This is why the validation trigger (`$no-mistakes`) to a codex crew now lands on the first Enter instead of biting the popup.
 
-Directory trust dialog on first run per repo root: "Do you trust the contents of this directory?"
+Directory trust dialog on first run per project path: "Do you trust the contents of this directory?"
 Accept with Enter.
-The decision persists for the repo, so later worktrees of the same project skip it.
+The decision persists for that path; a fresh linked-worktree path can require its own directory trust.
+
+Codex hook activation has three independent gates: the `hooks` feature must be enabled when the process starts, the project path must be trusted so its `.codex` layer loads, and every non-managed command hook's current hash must be reviewed and trusted through `/hooks`.
+Directory trust and hook review are separate durable records, and a changed hook hash requires review again.
+When the process started with hooks enabled, accepting the hook review activates those definitions in the same process; a `SessionStart` awaiting startup review runs before the first model request.
+Changing `features.hooks` from false to true cannot activate hooks in an already-running process because Codex keeps derived feature gates session-static; restart that Codex process, then complete any pending directory and hook review.
+`--dangerously-bypass-hook-trust` bypasses persisted per-hook review for a vetted automation run, but it does not replace enabling the feature.
 
 Resume after exit with `codex resume <session-id>`.
 The session id is printed on quit.
