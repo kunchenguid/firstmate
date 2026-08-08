@@ -664,7 +664,11 @@ heartbeat_scan_finds_attempt_reconciliation() {
   while IFS=$(printf '\t') read -r attempt sig; do
     [ -n "$attempt" ] || continue
     surfaced=$(cat "$STATE/.hb-surfaced-attempt-$attempt" 2>/dev/null || true)
-    [ "$surfaced" = "$sig" ] && continue
+    # A missing marker is NOT a surfaced empty signature: a row whose signature
+    # is empty (crew-read timeout, refused claim, or the atomic pre-retire
+    # instant) must still fire once, so the marker must EXIST and its content
+    # must equal the signature before the row counts as already surfaced.
+    [ -f "$STATE/.hb-surfaced-attempt-$attempt" ] && [ "$surfaced" = "$sig" ] && continue
     return 0
   done < <(_fm_watch_reconciliation_rows)
   return 1

@@ -1773,6 +1773,57 @@ SH
   pass "heartbeat backstop surfaces a reconciliation-required attempt once, then stays bounded"
 }
 
+# A reconciliation-required row whose missing-receipt signature is EMPTY (a
+# crew-read timeout row, a refused-claim row, or the atomic pre-retire instant)
+# must still fire exactly once: the dedup guard must require the
+# .hb-surfaced-attempt-<id> marker to EXIST with matching content, never treat
+# a missing marker as an already-surfaced empty signature.
+test_heartbeat_empty_signature_reconciliation_fires_once() {
+  local dir state fakebin out drain_out aid pid
+  dir=$(make_case heartbeat-attempt-recon-empty-sig); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"
+  # A ship task bound to an attempt whose crew state cannot be read: the
+  # projection emits a worker_read_timeout row with reconciliation_required and
+  # an EMPTY missing_receipts list, so the surfaced-marker signature is empty.
+  aid=$(FM_STATE_OVERRIDE="$state" fm_attempt_alloc pi recon-timeout holu) || fail "attempt alloc"
+  printf 'kind=ship\nmode=direct-PR\nattempt=%s\n' "$aid" > "$state/recon-timeout.meta"
+  # The capacity projection reads the crew state through its JSON contract; the
+  # case fake answers with an invalid payload so the row is the crew-read
+  # timeout verdict (unknown + reconciliation_required + no missing receipts).
+  cat > "$fakebin/fm-crew-state.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --json ]; then
+  printf '%s\n' 'not-json'
+  exit 0
+fi
+printf '%s\n' 'state: unknown · source: none · worker read timed out'
+SH
+  chmod +x "$fakebin/fm-crew-state.sh"
+
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "heartbeat did not surface the empty-signature reconciliation attempt"
+  grep -Fx "heartbeat" "$out" >/dev/null || fail "empty-signature reconciliation did not exit with a heartbeat wake"
+  [ -e "$state/.hb-surfaced-attempt-$aid" ] \
+    || fail "empty-signature reconciliation wake did not record the surfaced marker"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the empty-signature heartbeat failed"
+  grep "$(printf '\theartbeat\t')" "$drain_out" >/dev/null || fail "empty-signature heartbeat was not queued"
+
+  # Bounded: with the (empty) marker recorded, an unchanged projection must not
+  # re-fire; the next heartbeat is absorbed.
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "an unchanged empty-signature reconciliation row re-fired the heartbeat: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || { reap "$pid"; fail "an unchanged empty-signature row re-fired a wake reason: $(cat "$out")"; }
+  reap "$pid"
+  pass "heartbeat fires exactly once for an empty-signature reconciliation row, then stays bounded"
+}
+
 # --- beacon stays fresh while absorbing -------------------------------------
 
 test_beacon_stays_fresh_while_absorbing() {
@@ -1906,6 +1957,7 @@ test_procevent_marker_failure_exits_and_replays
 test_heartbeat_no_change_absorbed
 test_heartbeat_backstop_surfaces_unsurfaced_status
 test_heartbeat_backstop_surfaces_reconciliation_attempt
+test_heartbeat_empty_signature_reconciliation_fires_once
 test_beacon_stays_fresh_while_absorbing
 test_afk_present_reverts_watcher_to_one_shot
 test_afk_paused_changed_pane_hands_off_plain_stale
