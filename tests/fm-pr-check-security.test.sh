@@ -65,6 +65,11 @@ SH
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
 case " $* " in
+  *reviewDecision*)
+    printf '%s\t%s\t%s\n' "${FM_TEST_GH_STATE:-OPEN}" \
+      "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}" \
+      "${FM_TEST_GH_REVIEW:-}"
+    ;;
   *" headRefOid "*) printf '%s\n' "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}" ;;
   *" state "*)
     [ "${FM_TEST_GH_FAIL:-0}" = 0 ] || exit 1

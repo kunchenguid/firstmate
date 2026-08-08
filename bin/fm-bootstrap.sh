@@ -12,6 +12,7 @@
 #                 "CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>",
 #                 "FLEET_SYNC: <repo>: skipped|recovered|STUCK: <detail>",
 #                 "PR_CHECK_MIGRATION: <private remediation>",
+#                 "LATENT_RECOVERY: quarantined <task-id>",
 #                 "TANGLE: <remediation>",
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
 #                 "NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>",
@@ -79,9 +80,10 @@
 #          refresh relays any completed fm-fleet-sync.sh output before the
 #          aggregate timeout skip line with timeout and elapsed seconds.
 #          Set FM_FLEET_PRUNE=0 to skip branch pruning during that refresh.
-#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the six MUTATING sweeps
-#          (PR-check migration, secondmate_sync, secondmate_liveness_sweep,
-#          secondmate_handoff_resume, x_mode_setup, fleet_sync) while still
+#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the seven MUTATING sweeps
+#          (PR-check migration, latent transaction recovery, secondmate_sync,
+#          secondmate_liveness_sweep, secondmate_handoff_resume, x_mode_setup,
+#          fleet_sync) while still
 #          printing every read-only detect line
 #          above; the TANGLE line switches to advisory-only wording with no
 #          checkout command. Used by
@@ -1110,13 +1112,30 @@ if [ "${1:-}" = "install" ]; then
   exit 0
 fi
 
-# This is the first mutating sweep at a locked session boundary. It pauses an
-# identity-matched watcher, holds its lock, and neutralizes legacy PR checks
-# before any tool detection or later bootstrap mutation can leave old artifacts
-# runnable. Detect-only sessions never touch state, and the deferred network pass
-# never repeats it: the local pass that ran first already closed that window.
+# These are the first mutating sweeps at a locked session boundary. The first
+# pauses an identity-matched watcher, holds its lock, and neutralizes legacy PR
+# checks before any tool detection or later bootstrap mutation can leave old
+# artifacts runnable. Detect-only sessions never touch state, and the deferred
+# network pass never repeats them: the local pass that ran first already closed
+# that window.
+# Latent transaction recovery runs here, on the LOCAL pass, and not in the
+# deferred network stage. fm-latent.sh's `recover-all` reconciles an interrupted
+# hibernation transaction against local refs and the local manifest only - it
+# makes no external-network call - so deferring it would buy no startup latency
+# while leaving a half-applied transaction unreconciled underneath the
+# fleet-state digest that reports that task's endpoint. The hibernation ENTER
+# path is the network half of this lifecycle, and it deliberately lives nowhere
+# in session start: bin/fm-pr-check.sh drives it when a PR is registered and
+# bin/fm-watch.sh drives it from the supervision poll, both off the blocking
+# path. The loop below only probes for a transaction journal so an ordinary home
+# with no interrupted hibernation pays nothing.
 if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ] && local_phase; then
   "$SCRIPT_DIR/fm-pr-check-migrate.sh" || true
+  for latent_transaction in "$DATA"/*/latent/transaction; do
+    [ -e "$latent_transaction" ] || [ -L "$latent_transaction" ] || continue
+    "$SCRIPT_DIR/fm-latent.sh" recover-all || true
+    break
+  done
   startup_memory_budget_setup
 fi
 

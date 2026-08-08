@@ -1563,7 +1563,7 @@ SH
     FM_FAKE_HERDR_SESSION_LIST_GARBAGE="$([ "$mode" = unresolvable-lock ] && printf 1 || printf 0)" \
     PATH="$case_dir/fakebin:$PATH" \
     "$teardown_bin" task-x1 --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
-  [ "$rc" -ne 0 ] || fail "herdr-preflight-$mode: teardown continued without its required preflight"
+  [ "$rc" -ne 0 ] || fail "herdr-preflight-$mode: teardown continued without its required preflight (rc=0); a fatal abort must not be reported as success"
   assert_grep "nothing was changed" "$case_dir/stderr" \
     "herdr-preflight-$mode: the retryable pre-return refusal was not explained visibly"
   [ -d "$case_dir/wt" ] || fail "herdr-preflight-$mode: refusal removed the isolated copy"

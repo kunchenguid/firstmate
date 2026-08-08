@@ -277,6 +277,22 @@ fm_send_resolve_target() {  # <raw-target>
 }
 
 RAW_TARGET=$1
+LATENT_SELECTOR_ID=$RAW_TARGET
+case "$LATENT_SELECTOR_ID" in fm-*) LATENT_SELECTOR_ID=${LATENT_SELECTOR_ID#fm-} ;; esac
+case "$LATENT_SELECTOR_ID" in
+  ''|*[!A-Za-z0-9._-]*) ;;
+  *)
+    LATENT_SELECTOR_META="$STATE/$LATENT_SELECTOR_ID.meta"
+    if [ -f "$LATENT_SELECTOR_META" ] && [ ! -L "$LATENT_SELECTOR_META" ]; then
+      case "$(fm_meta_get "$LATENT_SELECTOR_META" tier)" in
+        latent|attention)
+          echo "error: task '$LATENT_SELECTOR_ID' is hibernating; run bin/fm-latent.sh resume $LATENT_SELECTOR_ID before sending an ordinary steer" >&2
+          exit 1
+          ;;
+      esac
+    fi
+    ;;
+esac
 fm_send_resolve_target "$RAW_TARGET" || exit 1
 T=$RESOLVED_TARGET
 shift

@@ -86,6 +86,8 @@ If doctor reports an environment, authentication, or daemon problem, resolve tha
 
 Project removal is destructive.
 First obtain the captain's explicit removal decision, then inspect the current digest and authoritative repositories for in-flight or queued work, registered secondmate clones, linked worktrees, dirty files, unpushed commits, and any other unlanded work.
+Run `bin/fm-latent.sh project-removal-check <project-dir>` as part of that preflight.
+It refuses both protected latent manifests and recovery refs, because deleting the clone would delete the object database that makes those commits recoverable.
 If any dependency or unlanded work exists, stop and report it before changing anything.
 Never issue a raw removal command from Firstmate.
 Once that preflight confirms none of the above and the captain's approval is concrete, AGENTS.md hard rule 1's captain-approved project operation exception authorizes firstmate to remove the clone directly and update its registry entry to match.

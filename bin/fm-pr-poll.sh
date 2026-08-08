@@ -1,21 +1,30 @@
 #!/usr/bin/env bash
 # Static watcher program for a validated PR/MR poll sidecar.
-# It emits exactly one merged line for a merged PR or MR and stays silent
-# otherwise, including on every error, so a failed lookup can never be read as
-# a merge. The provider-tagged identity is data in the sidecar and is never
-# interpolated into this source: these bytes are identical for every task.
-# Each provider is read through its own standard CLI, gh for GitHub and glab
-# for GitLab, so an upstream checkout needs no extra tooling to follow either.
+# It emits an exact transition token and stays silent on every lookup or parse
+# error.  GitHub validated calls can additionally carry the recorded head OID;
+# that enables closed-unmerged, force-push, and changes-requested transitions.
+# GitLab remains merge-only because its current CLI path supplies no exact head.
+# Task data is never interpolated into these byte-static source bytes.
 set -u
 LC_ALL=C
 export LC_ALL
 
-if [ "$#" -eq 6 ] && [ "$1" = --validated ]; then
+expected_head=
+if [ "$#" -eq 8 ] && [ "$1" = --validated ]; then
   provider=$2
   url=$3
   host=$4
   path=$5
   number=$6
+  expected_head=$7
+  expected_review=$8
+elif [ "$#" -eq 6 ] && [ "$1" = --validated ]; then
+  provider=$2
+  url=$3
+  host=$4
+  path=$5
+  number=$6
+  expected_review=
 elif [ "$#" -eq 0 ]; then
   case "$0" in
     *.check.sh) data=${0%.check.sh}.pr-poll ;;
@@ -33,6 +42,7 @@ elif [ "$#" -eq 0 ]; then
     exit 0
   fi
   exec 3<&-
+  expected_review=
 else
   exit 0
 fi
@@ -44,10 +54,13 @@ esac
 case "$number" in
   *[!0-9]*) exit 0 ;;
 esac
+case "$expected_head" in
+  '') ;;
+  *[!0-9a-f]*) exit 0 ;;
+  *) [ "${#expected_head}" -eq 40 ] || [ "${#expected_head}" -eq 64 ] || exit 0 ;;
+esac
+[ -z "$expected_review" ] || [ "$expected_review" = CHANGES_REQUESTED ] || exit 0
 
-# Every component is revalidated here rather than trusted from the sidecar, and
-# the stored URL must then be exactly reconstructible from those components, so
-# a doctored sidecar cannot redirect this poll at another host or project.
 case "$provider" in
   github)
     [ "$host" = github.com ] || exit 0
@@ -62,8 +75,29 @@ case "$provider" in
       .|..|*[!A-Za-z0-9._-]*) exit 0 ;;
     esac
     [ "$url" = "https://github.com/$owner/$repo/pull/$number" ] || exit 0
-    state=$(gh pr view "$url" --json state -q .state 2>/dev/null) || exit 0
-    [ "$state" = MERGED ] && printf '%s\n' merged
+    raw=$(gh pr view "$url" --json state,headRefOid,reviewDecision \
+      -q '.state + "\t" + .headRefOid + "\t" + (.reviewDecision // "")' 2>/dev/null) || exit 0
+    state=${raw%%$'\t'*}
+    rest=${raw#*$'\t'}
+    [ "$rest" != "$raw" ] || exit 0
+    head=${rest%%$'\t'*}
+    review=${rest#*$'\t'}
+    [ "$review" != "$rest" ] || review=
+    case "$head" in
+      *[!0-9a-f]*) exit 0 ;;
+      *) [ "${#head}" -eq 40 ] || [ "${#head}" -eq 64 ] || exit 0 ;;
+    esac
+    case "$state" in
+      MERGED) printf '%s\n' merged ;;
+      CLOSED) [ -z "$expected_head" ] || printf '%s\n' closed-unmerged ;;
+      OPEN)
+        if [ -n "$expected_head" ] && [ "$head" != "$expected_head" ]; then
+          printf 'head-changed:%s\n' "$head"
+        elif [ -n "$expected_head" ] && [ "$review" = CHANGES_REQUESTED ] && [ "$expected_review" != CHANGES_REQUESTED ]; then
+          printf 'changes-requested:%s\n' "$head"
+        fi
+        ;;
+    esac
     ;;
   gitlab)
     [ "${#host}" -ge 1 ] && [ "${#host}" -le 253 ] || exit 0
@@ -75,8 +109,6 @@ case "$provider" in
     case "$path" in
       /*|*/|*//*) exit 0 ;;
     esac
-    # A GitLab project sits under at least one group at no fixed depth, and
-    # GitLab reserves the "-" segment as its route separator.
     rest=$path
     segments=0
     while [ -n "$rest" ]; do
@@ -93,14 +125,6 @@ case "$provider" in
     done
     [ "$segments" -ge 2 ] || exit 0
     [ "$url" = "https://$host/$path/-/merge_requests/$number" ] || exit 0
-    # glab resolves the instance from the project URL passed to -R, so the host
-    # comes from the validated record rather than glab's configured default.
-    # It cannot take a merge request URL the way gh does: that form shells out
-    # to git for the current repository, and the watcher runs in no repository.
-    # The state is read from glab's own field output rather than its JSON,
-    # because plain glab has no field selector and firstmate does not require a
-    # JSON processor; only an exact "merged" wakes, so a changed format or an
-    # unreadable merge request stays silent instead of reporting a merge.
     raw=$(glab mr view "$number" -R "https://$host/$path" 2>/dev/null) || exit 0
     state=$(printf '%s\n' "$raw" | sed -n 's/^state:[[:space:]]*//p' | head -1) || exit 0
     [ "$state" = merged ] && printf '%s\n' merged

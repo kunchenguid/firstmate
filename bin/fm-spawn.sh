@@ -231,6 +231,9 @@ BACKEND_ARG=
 MODE=
 YOLO=
 TRACEPARENT_ARG=
+RESUME_REF=
+RESUME_BRANCH=
+BRIEF_OVERRIDE=
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
@@ -238,6 +241,9 @@ BACKEND_SET=0
 MODE_SET=0
 YOLO_SET=0
 TRACEPARENT_SET=0
+RESUME_REF_SET=0
+RESUME_BRANCH_SET=0
+BRIEF_OVERRIDE_SET=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -253,6 +259,9 @@ for a in "$@"; do
       mode) MODE=$a; MODE_SET=1 ;;
       yolo) YOLO=$a; YOLO_SET=1 ;;
       traceparent) TRACEPARENT_ARG=$a; TRACEPARENT_SET=1 ;;
+      resume-ref) RESUME_REF=$a; RESUME_REF_SET=1 ;;
+      resume-branch) RESUME_BRANCH=$a; RESUME_BRANCH_SET=1 ;;
+      brief-override) BRIEF_OVERRIDE=$a; BRIEF_OVERRIDE_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -275,6 +284,12 @@ for a in "$@"; do
     --yolo=*) YOLO=${a#--yolo=}; YOLO_SET=1 ;;
     --traceparent) want_value=traceparent ;;
     --traceparent=*) TRACEPARENT_ARG=${a#--traceparent=}; TRACEPARENT_SET=1 ;;
+    --resume-ref) want_value=resume-ref ;;
+    --resume-ref=*) RESUME_REF=${a#--resume-ref=}; RESUME_REF_SET=1 ;;
+    --resume-branch) want_value=resume-branch ;;
+    --resume-branch=*) RESUME_BRANCH=${a#--resume-branch=}; RESUME_BRANCH_SET=1 ;;
+    --brief-override) want_value=brief-override ;;
+    --brief-override=*) BRIEF_OVERRIDE=${a#--brief-override=}; BRIEF_OVERRIDE_SET=1 ;;
     *) POS+=("$a") ;;
   esac
 done
@@ -286,6 +301,17 @@ done
 [ "$MODE_SET" -eq 0 ] || [ -n "$MODE" ] || { echo "error: --mode requires a non-empty value" >&2; exit 1; }
 [ "$YOLO_SET" -eq 0 ] || [ -n "$YOLO" ] || { echo "error: --yolo requires a non-empty value" >&2; exit 1; }
 [ "$TRACEPARENT_SET" -eq 0 ] || [ -n "$TRACEPARENT_ARG" ] || { echo "error: --traceparent requires a non-empty value" >&2; exit 1; }
+[ "$RESUME_REF_SET" -eq 0 ] || [ -n "$RESUME_REF" ] || { echo "error: --resume-ref requires a non-empty value" >&2; exit 1; }
+[ "$RESUME_BRANCH_SET" -eq 0 ] || [ -n "$RESUME_BRANCH" ] || { echo "error: --resume-branch requires a non-empty value" >&2; exit 1; }
+[ "$BRIEF_OVERRIDE_SET" -eq 0 ] || [ -n "$BRIEF_OVERRIDE" ] || { echo "error: --brief-override requires a non-empty value" >&2; exit 1; }
+if [ "$RESUME_REF_SET" -ne "$RESUME_BRANCH_SET" ] || [ "$RESUME_REF_SET" -ne "$BRIEF_OVERRIDE_SET" ]; then
+  echo "error: --resume-ref, --resume-branch, and --brief-override must be supplied together" >&2
+  exit 1
+fi
+if [ "$RESUME_REF_SET" -eq 1 ] && [ "$KIND" != ship ]; then
+  echo "error: latent resume options apply only to ordinary ship tasks" >&2
+  exit 1
+fi
 # A parent-delivered carrier replaces this home's own resolution, so it is
 # refused unless it is a secondmate spawn carrying a strictly valid W3C value.
 # Nothing else may reach the pane's TRACEPARENT export.
@@ -628,6 +654,8 @@ HERDR_PRESENTATION_ORDER_LOCK=
 HERDR_PRESENTATION_ORDER_LOCK_HELD=0
 SPAWN_TASK_LOCK=
 SPAWN_TASK_LOCK_HELD=0
+SPAWN_LIFECYCLE_LOCK=
+SPAWN_LIFECYCLE_LOCK_HELD=0
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
 
@@ -699,6 +727,10 @@ spawn_abort_cleanup() {
   if [ "$SPAWN_TASK_LOCK_HELD" = 1 ]; then
     SPAWN_TASK_LOCK_HELD=0
     fm_lock_release "$SPAWN_TASK_LOCK" || true
+  fi
+  if [ "$SPAWN_LIFECYCLE_LOCK_HELD" = 1 ]; then
+    SPAWN_LIFECYCLE_LOCK_HELD=0
+    fm_lock_release "$SPAWN_LIFECYCLE_LOCK" || true
   fi
   if [ "$CONFIG_INHERIT_LOCK_HELD" = 1 ]; then
     CONFIG_INHERIT_LOCK_HELD=0
@@ -783,6 +815,12 @@ if ! fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
   exit 1
 fi
 SPAWN_TASK_LOCK_HELD=1
+SPAWN_LIFECYCLE_LOCK="$STATE/.latent-$ID.lock"
+if ! fm_lock_try_acquire "$SPAWN_LIFECYCLE_LOCK"; then
+  echo "error: task $ID is already in a hibernation, resume, or cleanup transaction" >&2
+  exit 1
+fi
+SPAWN_LIFECYCLE_LOCK_HELD=1
 PROJ=
 ARG3=
 FIRSTMATE_HOME=
@@ -1327,6 +1365,18 @@ else
   WT=""
   BRIEF="$DATA/$ID/brief.md"
 fi
+if [ "$BRIEF_OVERRIDE_SET" -eq 1 ]; then
+  EXPECTED_RESUME_BRIEF="$DATA/$ID/latent/resume-brief.md"
+  if [ "$BRIEF_OVERRIDE" != "$EXPECTED_RESUME_BRIEF" ] || [ ! -f "$BRIEF_OVERRIDE" ] || [ -L "$BRIEF_OVERRIDE" ]; then
+    echo "error: latent resume brief must be the regular task-owned file $EXPECTED_RESUME_BRIEF" >&2
+    exit 1
+  fi
+  case "$RESUME_REF" in refs/firstmate/latent-resume/"$ID".*) ;; *) echo "error: latent resume ref is outside this task's namespace" >&2; exit 1 ;; esac
+  git check-ref-format "$RESUME_REF" >/dev/null 2>&1 || { echo "error: latent resume ref is malformed" >&2; exit 1; }
+  git check-ref-format "refs/heads/$RESUME_BRANCH" >/dev/null 2>&1 || { echo "error: latent resume branch is malformed" >&2; exit 1; }
+  git -C "$PROJ_ABS" rev-parse --verify "$RESUME_REF^{commit}" >/dev/null 2>&1 || { echo "error: latent resume ref is unavailable in the project repository" >&2; exit 1; }
+  BRIEF=$BRIEF_OVERRIDE
+fi
 [ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
 
 delivery_rigor_rank() {  # <mode> -> 3 (most rigor) .. 1 (least); 0 = not a task mode
@@ -1866,6 +1916,48 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   fi
 
   validate_spawn_worktree "treehouse get" "$T"
+fi
+
+if [ "$RESUME_REF_SET" -eq 1 ]; then
+  RESUME_OID=$(git -C "$PROJ_ABS" rev-parse --verify "$RESUME_REF^{commit}" 2>/dev/null) || {
+    echo "error: latent resume ref disappeared before branch reconstruction" >&2
+    exit 1
+  }
+  if git -C "$PROJ_ABS" worktree list --porcelain \
+      | grep -Fxq "branch refs/heads/$RESUME_BRANCH"; then
+    echo "error: latent resume branch is unexpectedly checked out in another worktree" >&2
+    exit 1
+  fi
+  RESUME_OLD_BRANCH=$(git -C "$PROJ_ABS" rev-parse --verify "refs/heads/$RESUME_BRANCH^{commit}" 2>/dev/null || true)
+  if [ -n "$RESUME_OLD_BRANCH" ]; then
+    RESUME_SAVED_REF="refs/firstmate/latent/$ID"
+    RESUME_SAVED_OID=$(git -C "$PROJ_ABS" rev-parse --verify "$RESUME_SAVED_REF^{commit}" 2>/dev/null) || {
+      echo "error: saved latent generation is unavailable while moving the task branch" >&2
+      exit 1
+    }
+    git -C "$PROJ_ABS" merge-base --is-ancestor "$RESUME_OLD_BRANCH" "$RESUME_SAVED_OID" 2>/dev/null || {
+      echo "error: local task branch contains history outside the saved latent generation" >&2
+      exit 1
+    }
+    git -C "$PROJ_ABS" update-ref "refs/heads/$RESUME_BRANCH" "$RESUME_OID" "$RESUME_OLD_BRANCH" || {
+      echo "error: latent resume branch changed concurrently" >&2
+      exit 1
+    }
+  else
+    RESUME_ZERO_OID=$(printf '%*s' "${#RESUME_OID}" '' | tr ' ' 0)
+    git -C "$PROJ_ABS" update-ref "refs/heads/$RESUME_BRANCH" "$RESUME_OID" "$RESUME_ZERO_OID" || {
+      echo "error: latent resume branch appeared concurrently" >&2
+      exit 1
+    }
+  fi
+  git -C "$WT" checkout --quiet "$RESUME_BRANCH" || {
+    echo "error: reconstructed latent branch could not be checked out" >&2
+    exit 1
+  }
+  [ "$(git -C "$WT" rev-parse --verify HEAD)" = "$RESUME_OID" ] || {
+    echo "error: reconstructed latent branch head does not match the authenticated pull request head" >&2
+    exit 1
+  }
 fi
 
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't

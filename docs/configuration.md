@@ -24,6 +24,15 @@ Wake, watcher, away-mode, and Relay-specific state mechanics remain with their n
 `AGENTS.md` retains the run-once and read-once operator rules, lock-refusal safety, installation consent, and direct-report recovery boundaries because those facts apply at every session start.
 Ordinary dead-direct-report recovery is owned by `stuck-crewmate-recovery`, while persistent-secondmate recovery is owned by `secondmate-provisioning`.
 
+## Latent finished workers (config/latent-workers)
+
+An absent `config/latent-workers` file or the exact value `on` enables automatic eligibility attempts when a finished worker reports its PR-ready result.
+The exact value `off` disables automatic attempts for that home, while `bin/fm-latent.sh enter <task-id>` remains available as an explicit operation.
+An unreadable or unrecognized value disables automatic attempts rather than guessing.
+This local gitignored preference is per home and is not inherited into secondmate homes.
+Eligibility itself is not configurable: GitHub-only exact PR identity, protected-ref ancestry, cleanliness, decision and obligation absence, inactive validation, endpoint termination, and post-termination rechecks always apply.
+`docs/architecture.md` owns the state-machine and recovery rationale, and `bin/fm-latent.sh`'s header owns commands and private record mechanics.
+
 ## Pi Calm preference (config/calm)
 
 The Pi Calm extension stores the captain's home-local presentation choice in gitignored `config/calm` under the effective Firstmate home, resolved from `FM_HOME`, then `FM_ROOT_OVERRIDE`, then the tracked code root derived from the extension path, or under `FM_CONFIG_OVERRIDE` when that test and specialized-setup override is present.

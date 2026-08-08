@@ -698,6 +698,56 @@ event_wait_or_sleep() {
   esac
 }
 
+latent_auto_enabled() {
+  local preference file="$FM_HOME/config/latent-workers"
+  if [ -f "$file" ] && [ ! -L "$file" ]; then
+    preference=$(tr -d '[:space:]' < "$file" 2>/dev/null || true)
+  else
+    preference=
+  fi
+  case "$preference" in off) return 1 ;; ''|on) return 0 ;; *) return 1 ;; esac
+}
+
+latent_try_signal_files() {  # <status-or-turn-end-path>...
+  local file id meta ready head
+  latent_auto_enabled || return 0
+  [ ! -e "$STATE/.afk" ] || return 0
+  for file in "$@"; do
+    case "$file" in "$STATE"/*.status) ;; *) continue ;; esac
+    id=$(basename "$file" .status)
+    meta="$STATE/$id.meta"
+    [ -f "$meta" ] && [ ! -L "$meta" ] || continue
+    ready=$(fm_meta_get "$meta" pr_ready_head)
+    head=$(fm_meta_get "$meta" pr_head)
+    [ -n "$ready" ] && [ "$ready" = "$head" ] || continue
+    if "$SCRIPT_DIR/fm-latent.sh" enter "$id" >/dev/null 2>&1; then
+      triage_log "entered latent after terminal PR-ready signal: $id"
+    else
+      triage_log "latent entry remained active after an eligibility refusal: $id"
+    fi
+  done
+}
+
+pr_transition_marker_matches() {  # <task-id> <registration-hash> <token>
+  local marker="$STATE/.pr-transition-$1" first second _extra
+  [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+  exec 4< "$marker" || return 1
+  IFS= read -r first <&4 || { exec 4<&-; return 1; }
+  IFS= read -r second <&4 || { exec 4<&-; return 1; }
+  if IFS= read -r _extra <&4; then exec 4<&-; return 1; fi
+  exec 4<&-
+  [ "$first" = "$2" ] && [ "$second" = "$3" ]
+}
+
+pr_transition_marker_write() {  # <task-id> <registration-hash> <token>
+  local marker="$STATE/.pr-transition-$1" tmp
+  tmp=$(mktemp "$STATE/.fm-pr-transition.XXXXXX") || return 1
+  if ! printf '%s\n%s\n' "$2" "$3" > "$tmp" || ! chmod 0600 "$tmp" || ! mv -f -- "$tmp" "$marker"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+}
+
 # --- Main entry: the runtime below runs only when this file is executed as a
 # script. When sourced (unit tests loading the functions above), return here
 # before acquiring the singleton lock or entering the blocking loop.
@@ -825,7 +875,8 @@ while :; do
           path=$FM_PR_POLL_SNAPSHOT_PATH
           number=$FM_PR_POLL_SNAPSHOT_NUMBER
           run_check_capture "$SCRIPT_DIR/fm-pr-poll.sh" --validated \
-            "$provider" "$url" "$host" "$path" "$number" || exit 1
+            "$provider" "$url" "$host" "$path" "$number" \
+            "$FM_PR_POLL_SNAPSHOT_HEAD" "$FM_PR_POLL_SNAPSHOT_REVIEW" || exit 1
           out=$FM_CHECK_RESULT
         elif fm_custom_check_snapshot_prepare "$STATE" "$id"; then
           custom_snapshot=$FM_CUSTOM_CHECK_SNAPSHOT
@@ -839,6 +890,27 @@ while :; do
         fi
       fi
       if [ -n "$out" ]; then
+        if [ "$is_pr_poll" -eq 1 ]; then
+          case "$out" in
+            merged|closed-unmerged) ;;
+            changes-requested:*|head-changed:*)
+              transition_oid=${out#*:}
+              if ! fm_pr_head_valid "$transition_oid"; then
+                rejected_checks="$rejected_checks $c"
+                continue
+              fi
+              ;;
+            *) rejected_checks="$rejected_checks $c"; continue ;;
+          esac
+          if pr_transition_marker_matches "$id" "$FM_PR_POLL_SNAPSHOT_REG_HASH" "$out"; then
+            continue
+          fi
+          pr_transition_marker_write "$id" "$FM_PR_POLL_SNAPSHOT_REG_HASH" "$out" || exit 1
+          if "$SCRIPT_DIR/fm-latent.sh" verify "$id" >/dev/null 2>&1; then
+            "$SCRIPT_DIR/fm-latent.sh" transition "$id" "$out" >/dev/null 2>&1 \
+              || triage_log "latent PR transition could not update attention state for $id"
+          fi
+        fi
         reason="check: $c: $out"
         fm_wake_append check "$c" "$reason" || exit 1
         if [ "$is_pr_poll" -eq 1 ] && [ "$out" = merged ]; then
@@ -851,6 +923,8 @@ while :; do
         fi
         touch "$STATE/.last-check"
         wake "$reason"
+      elif [ "$is_pr_poll" -eq 1 ]; then
+        rm -f -- "$STATE/.pr-transition-$id"
       fi
     done
     if [ -n "$rejected_checks" ]; then
@@ -878,6 +952,10 @@ while :; do
     done <<EOF
 $pending
 EOF
+    # A terminal PR-ready signal may be sealed without a model turn.  Eligibility
+    # remains entirely inside fm-latent.sh; every refusal leaves the worker active.
+    # shellcheck disable=SC2086
+    latent_try_signal_files $files
     reason="signal:$files"
     # Triage: a signal is ACTIONABLE when any of these holds (cheapest first):
     #   - the away-mode daemon owns triage (afk) and wants every wake;

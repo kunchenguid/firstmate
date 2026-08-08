@@ -403,7 +403,7 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
 task_json_lines() {
   local meta id kind harness mode yolo project worktree home projects backend target status_log report_path
   local remote_host remote_root remote_state remote_rc remote_home_present
-  local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
+  local pr pr_head tier latent_manifest latent_integrity pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
   local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
   local open_decisions_tsv open_decisions_json
 
@@ -433,6 +433,19 @@ task_json_lines() {
     status_log="$STATE/$id.status"
     report_path="$DATA/$id/report.md"
     pr=$(meta_value "$meta" pr)
+    pr_head=$(meta_value "$meta" pr_head)
+    tier=$(meta_value "$meta" tier)
+    latent_manifest=$(meta_value "$meta" latent_manifest)
+    latent_integrity=not_applicable
+    case "$tier" in
+      latent|attention)
+        if FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-latent.sh" verify "$id" >/dev/null 2>&1; then
+          latent_integrity=valid
+        else
+          latent_integrity=invalid
+        fi
+        ;;
+    esac
     pr_source=meta
     if [ -z "$pr" ]; then
       pr_from_status=$(first_pr_url_in_file "$status_log" || true)
@@ -543,6 +556,10 @@ task_json_lines() {
       --arg remote_host "$remote_host" \
       --arg remote_root "$remote_root" \
       --arg pr "$pr" \
+      --arg pr_head "$pr_head" \
+      --arg tier "$tier" \
+      --arg latent_manifest "$latent_manifest" \
+      --arg latent_integrity "$latent_integrity" \
       --arg pr_source "$pr_source" \
       --arg agent_alive "$agent_alive" \
       --arg observed_at "$SNAPSHOT_NOW" \
@@ -581,7 +598,8 @@ task_json_lines() {
                   elif $agent_alive == "alive" or $agent_alive == "dead" then $agent_alive
                   else "unknown" end),
           observed_at:$observed_at,freshness:"fresh"},
-        pr:{url:($pr | if . == "" then null else . end),source:$pr_source},
+        pr:{url:($pr | if . == "" then null else . end),head_oid:($pr_head | if . == "" then null else . end),source:$pr_source},
+        lifecycle:{tier:($tier | if . == "" then "active" else . end),latent_manifest:($latent_manifest | if . == "" then null else . end),integrity:$latent_integrity},
         hints:{
           pending_decision:$pending_decision,
           blocked_event:$blocked_event,

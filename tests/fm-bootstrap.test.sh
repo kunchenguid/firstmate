@@ -928,6 +928,48 @@ SH
   pass "bootstrap: FM_BOOTSTRAP_NETWORK partitions one run into local and network halves"
 }
 
+# Latent transaction recovery is the one mutating sweep whose placement is easy
+# to get wrong, because the hibernation lifecycle it belongs to is otherwise
+# network-driven. `recover-all` itself is purely local - it reconciles an
+# interrupted hibernation against local refs and the local manifest - so it must
+# run on the LOCAL half, where the fleet-state digest that reports that task's
+# endpoint can still see its result. Wiring it to the network half instead
+# leaves it installed but invisible to the digest, and dropping it entirely
+# leaves the whole hibernation lifecycle inert. Both regressions are silent
+# without this test, so it pins the sweep to the local half and asserts the
+# network half does NOT repeat it.
+test_latent_recovery_sweep_runs_on_the_local_half() {
+  local case_dir fakebin skip_out only_out detect_out
+  case_dir="$TMP_ROOT/latent-phase"
+  mkdir -p "$case_dir/home/config" "$case_dir/home/state"
+  mkdir -p "$case_dir/home/data/fm-latent-phase-probe/latent"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  # A transaction journal that cannot reconcile is the cheapest observable proof
+  # that the sweep actually ran: fm-latent.sh reports it as quarantined.
+  printf 'phase\tstarted\n' \
+    > "$case_dir/home/data/fm-latent-phase-probe/latent/transaction"
+
+  skip_out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_BOOTSTRAP_NETWORK=skip "$ROOT/bin/fm-bootstrap.sh" 2>&1)
+  assert_contains "$skip_out" "LATENT_RECOVERY: quarantined fm-latent-phase-probe" \
+    "the local half did not run latent transaction recovery"
+
+  only_out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_BOOTSTRAP_NETWORK=only "$ROOT/bin/fm-bootstrap.sh" 2>&1)
+  assert_not_contains "$only_out" "LATENT_RECOVERY" \
+    "the deferred network half repeated latent transaction recovery"
+
+  # A lock-refused read-only session must not mutate anything, including a
+  # half-applied hibernation transaction owned by the session holding the lock.
+  detect_out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_BOOTSTRAP_DETECT_ONLY=1 "$ROOT/bin/fm-bootstrap.sh" 2>&1)
+  assert_not_contains "$detect_out" "LATENT_RECOVERY" \
+    "a detect-only session ran latent transaction recovery"
+
+  pass "bootstrap: latent transaction recovery runs on the local half only"
+}
+
 test_network_sweeps_recheck_lock_ownership() {
   local case_dir fakebin fake_root marker out
   case_dir="$TMP_ROOT/network-lock-handoff"
@@ -1169,6 +1211,7 @@ test_fleet_sync_timeout_is_computed_before_launch
 test_routine_bootstrap_confirmations_are_silent
 test_routine_bootstrap_contract_runs_under_system_bash
 test_network_phase_partitions_the_run
+test_latent_recovery_sweep_runs_on_the_local_half
 test_network_sweeps_recheck_lock_ownership
 test_network_phases_record_per_step_elapsed_times
 test_tasks_axi_verdict_handoff_is_consumed_once

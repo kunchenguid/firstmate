@@ -150,13 +150,14 @@ Setup guides for tmux (the default) and every other supported backend (herdr, ze
      ▼            ▼               ▼
   treehouse worktree, Orca worktree, or isolated secondmate home
      │
-     ├─ ship: project mode ► PR/local merge ► teardown
+     ├─ ship: project mode ► PR wait (eligible workers hibernate slot-free) ► merge ► teardown
      │
      └─ scout: report at data/<id>/report.md ► decision inventory ► relay findings ► teardown
 ```
 
 You chat with the first mate.
 It routes each request to a crewmate in its own session endpoint and git worktree, supervises the fleet with a zero-token event-driven watcher, and brings you finished PRs, approved local merges, or investigation reports.
+An eligible worker waiting only on an open GitHub PR can hibernate without completing the task: Firstmate pins the exact PR commit locally, releases the worker and Treehouse slot, keeps monitoring the PR, and reconstructs a fresh worker if review requires changes.
 Optional secondmates extend this to persistent local or whole-home remote second mates, dispatch profiles let you steer which harness handles which task, and opt-in Relay lets the same fleet answer public mentions.
 `codex-app` is not a runtime backend yet; [docs/codex-app-backend.md](docs/codex-app-backend.md) owns the Codex App boundary.
 

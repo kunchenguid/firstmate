@@ -94,12 +94,14 @@ STATE_DEVICE=$(fm_pr_file_device "$STATE") || exit 1
 META_TMP=$(mktemp "$STATE/.fm-pr-meta.XXXXXX") || exit 1
 while IFS= read -r line || [ -n "$line" ]; do
   case "$line" in
-    pr=*|pr_head=*) ;;
+    pr=*|pr_head=*|pr_ready_head=*) ;;
     *) printf '%s\n' "$line" >> "$META_TMP" || exit 1 ;;
   esac
 done < "$META"
 printf 'pr=%s\n' "$URL" >> "$META_TMP" || exit 1
-[ -z "$PR_HEAD" ] || printf 'pr_head=%s\n' "$PR_HEAD" >> "$META_TMP" || exit 1
+if [ -n "$PR_HEAD" ]; then
+  printf 'pr_head=%s\npr_ready_head=%s\n' "$PR_HEAD" "$PR_HEAD" >> "$META_TMP" || exit 1
+fi
 chmod 0600 "$META_TMP" || exit 1
 fm_pr_private_file_valid "$META_TMP" 600 "$STATE_DEVICE" || exit 1
 fm_pr_metadata_identity_parse "$META_TMP" || exit 1
@@ -119,4 +121,16 @@ fm_pr_poll_publish_prepared || {
   echo "error: could not publish PR poll" >&2
   exit 1
 }
+
+# A successful GitHub ready registration is the durable entry trigger.
+# The hibernation command still owns every eligibility proof and leaves the
+# worker active on any refusal.  A local off preference suppresses only this
+# automatic attempt, never the explicit command.
+LATENT_PREFERENCE=
+if [ -f "$FM_HOME/config/latent-workers" ] && [ ! -L "$FM_HOME/config/latent-workers" ]; then
+  LATENT_PREFERENCE=$(tr -d '[:space:]' < "$FM_HOME/config/latent-workers" 2>/dev/null || true)
+fi
+if [ -n "$PR_HEAD" ] && { [ -z "$LATENT_PREFERENCE" ] || [ "$LATENT_PREFERENCE" = on ]; }; then
+  "$SCRIPT_DIR/fm-latent.sh" enter "$ID" >/dev/null 2>&1 || true
+fi
 printf 'armed: state/%s.check.sh\n' "$ID"

@@ -148,6 +148,8 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-lock-lib.sh
 . "$SCRIPT_DIR/fm-lock-lib.sh"
+# shellcheck source=bin/fm-task-safety-lib.sh
+. "$SCRIPT_DIR/fm-task-safety-lib.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
@@ -175,6 +177,42 @@ FM_LOCK_LOG_PREFIX=teardown
 
 META="$STATE/$ID.meta"
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
+TEARDOWN_LIFECYCLE_LOCK="$STATE/.latent-$ID.lock"
+TEARDOWN_BACKEND_LOCK=
+fm_lock_try_acquire "$TEARDOWN_LIFECYCLE_LOCK" || {
+  echo "REFUSED: task $ID is already in a hibernation, resume, spawn, or cleanup transaction." >&2
+  exit 1
+}
+TEARDOWN_REACHED_END=0
+# Set the moment teardown commits to changing this task, so the abort message
+# above can never claim "nothing was changed" once something might have been.
+# Deliberately set EARLY: an over-eager flag only makes the message MORE
+# conservative, while a late one would let it overclaim.
+TEARDOWN_ENTERED_DESTRUCTIVE_PHASE=0
+# Releasing the locks is this trap's job; reporting a truthful exit status is the
+# other half of it. Under `set -e` a FATAL abort - sourcing a missing file, such
+# as a backend adapter fm-backend.sh loads lazily - reaches an EXIT trap with $?
+# already 0, and installing any EXIT trap therefore turns that failure into a
+# reported success. No handler-side rescue of $? works, because the status is
+# gone before the handler runs; the only thing the handler can still see is that
+# the script never reached a completion point. So every legitimate termination
+# sets TEARDOWN_REACHED_END first, and a $?=0 arrival without it is an abort.
+# Ordinary refusals are unaffected: they carry their own non-zero $? through.
+teardown_lifecycle_lock_release() {
+  local rc=$?
+  [ -z "$TEARDOWN_BACKEND_LOCK" ] || fm_lock_release "$TEARDOWN_BACKEND_LOCK" || true
+  fm_lock_release "$TEARDOWN_LIFECYCLE_LOCK" || true
+  if [ "$rc" -eq 0 ] && [ "$TEARDOWN_REACHED_END" -ne 1 ]; then
+    if [ "$TEARDOWN_ENTERED_DESTRUCTIVE_PHASE" -eq 1 ]; then
+      echo "error: teardown aborted after it began changing this task; state may be incomplete - inspect the task before retrying." >&2
+    else
+      echo "error: teardown aborted before completing; nothing was changed - inspect the task before retrying." >&2
+    fi
+    exit 1
+  fi
+  return "$rc"
+}
+trap teardown_lifecycle_lock_release EXIT
 
 REMOTE_HANDOFF_DIR_PRESENT=0
 REMOTE_HANDOFF_DIR_REAL=
@@ -375,18 +413,96 @@ remote_secondmate_teardown_locked() {
 }
 
 if remote_secondmate_teardown_locked; then
+  TEARDOWN_REACHED_END=1
   exit 0
 else
   remote_teardown_rc=$?
 fi
 [ "$remote_teardown_rc" -eq 3 ] || exit "$remote_teardown_rc"
 
+# A sealed latent task has no endpoint or worktree target by design.  It may
+# enter this finalization path only through the same teardown command as every
+# other task, after local manifest/ref integrity and the forge's exact merged
+# head prove that the saved generation landed.  Closed-unmerged and
+# force-pushed-away generations retain their recovery ref.
+LATENT_TIER=$(fm_meta_get "$META" tier)
+case "$LATENT_TIER" in
+  latent|attention)
+    "$SCRIPT_DIR/fm-latent.sh" verify "$ID" >/dev/null \
+      || { echo "REFUSED: latent recovery integrity failed for $ID; preserving every record." >&2; exit 1; }
+    LATENT_MANIFEST="$DATA/$ID/latent/manifest"
+    LATENT_PROJECT=$(grep '^project=' "$LATENT_MANIFEST" | cut -d= -f2-)
+    LATENT_PR=$(grep '^pr_url=' "$LATENT_MANIFEST" | cut -d= -f2-)
+    LATENT_SAVED=$(grep '^pr_head=' "$LATENT_MANIFEST" | cut -d= -f2-)
+    LATENT_REF=$(grep '^recovery_ref=' "$LATENT_MANIFEST" | cut -d= -f2-)
+    fm_pr_head_valid "$LATENT_SAVED" \
+      || { echo "REFUSED: latent saved commit is invalid; preserving every record." >&2; exit 1; }
+    LATENT_VIEW=$(cd "$LATENT_PROJECT" && gh pr view "$LATENT_PR" --json state,headRefOid \
+      -q '.state + "\t" + .headRefOid' 2>/dev/null) \
+      || { echo "REFUSED: merged pull request identity cannot be read; preserving every record." >&2; exit 1; }
+    LATENT_PR_STATE=${LATENT_VIEW%%$'\t'*}
+    LATENT_MERGED_HEAD=${LATENT_VIEW#*$'\t'}
+    if [ "$LATENT_PR_STATE" != MERGED ] || ! fm_pr_head_valid "$LATENT_MERGED_HEAD"; then
+      echo "REFUSED: pull request is not exactly merged; preserving the latent task." >&2
+      exit 1
+    fi
+    if ! git -C "$LATENT_PROJECT" cat-file -e "$LATENT_MERGED_HEAD^{commit}" 2>/dev/null; then
+      LATENT_NUMBER=${LATENT_PR##*/}
+      git -C "$LATENT_PROJECT" fetch --quiet origin "refs/pull/$LATENT_NUMBER/head" \
+        || { echo "REFUSED: merged pull request commit cannot be fetched; preserving the latent task." >&2; exit 1; }
+    fi
+    git -C "$LATENT_PROJECT" merge-base --is-ancestor "$LATENT_SAVED" "$LATENT_MERGED_HEAD" 2>/dev/null \
+      || { echo "REFUSED: the protected latent generation is not contained in the merged pull request head; preserving it." >&2; exit 1; }
+    [ "$(git -C "$LATENT_PROJECT" rev-parse --verify "$LATENT_REF^{commit}" 2>/dev/null)" = "$LATENT_SAVED" ] \
+      || { echo "REFUSED: latent recovery ref changed before finalization; preserving every record." >&2; exit 1; }
+
+    for LATENT_ARTIFACT in "$STATE/$ID.check.sh" "$STATE/$ID.pr-poll" \
+      "$STATE/$ID.pr-poll-registration" "$STATE/$ID.pr-poll-retirement"; do
+      if [ -L "$LATENT_ARTIFACT" ] || { [ -e "$LATENT_ARTIFACT" ] && [ ! -f "$LATENT_ARTIFACT" ]; }; then
+        echo "REFUSED: latent PR artifact $LATENT_ARTIFACT is unsafe; preserving every record." >&2
+        exit 1
+      fi
+    done
+    if [ -e "$STATE/$ID.pr-poll-retirement" ] || [ -L "$STATE/$ID.pr-poll-retirement" ]; then
+      fm_pr_poll_retirement_recover_one "$STATE" "$ID" "$SCRIPT_DIR/fm-pr-poll.sh" \
+        || { echo "REFUSED: pending PR poll retirement is invalid; preserving every record." >&2; exit 1; }
+    elif [ -e "$STATE/$ID.check.sh" ] || [ -L "$STATE/$ID.check.sh" ] \
+      || [ -e "$STATE/$ID.pr-poll" ] || [ -L "$STATE/$ID.pr-poll" ] \
+      || [ -e "$STATE/$ID.pr-poll-registration" ] || [ -L "$STATE/$ID.pr-poll-registration" ]; then
+      fm_pr_poll_artifacts_valid "$STATE" "$ID" "$SCRIPT_DIR/fm-pr-poll.sh" \
+        || { echo "REFUSED: retained PR poll artifacts are invalid; preserving every record." >&2; exit 1; }
+      rm -f -- "$STATE/$ID.check.sh" "$STATE/$ID.pr-poll" "$STATE/$ID.pr-poll-registration"
+    fi
+    git -C "$LATENT_PROJECT" update-ref -d "$LATENT_REF" "$LATENT_SAVED" \
+      || { echo "REFUSED: latent recovery ref changed during finalization; preserving task records." >&2; exit 1; }
+    rm -rf -- "$DATA/$ID/latent"
+    LATENT_TASKTMP=$(fm_meta_get "$META" tasktmp)
+    [ -z "$LATENT_TASKTMP" ] || rm -rf -- "$LATENT_TASKTMP"
+    rm -f -- "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
+      "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" \
+      "$STATE/$ID.kimi-turnend-token" "$STATE/$ID.muse-session" \
+      "$STATE/$ID.muse-session-current" "$STATE/.$ID.open-decisions-cursor" \
+      "$STATE/.$ID.busy" "$STATE/$ID.busy-gen" "$STATE/.pr-transition-$ID"
+    "$FM_ROOT/bin/fm-fleet-sync.sh" "$LATENT_PROJECT" || true
+    echo "teardown $ID complete (latent merged task)"
+    echo "Backlog: $ID just finished from $LATENT_PR. Record it Done, then re-scan queued work whose blockers and date gates cleared."
+    TEARDOWN_REACHED_END=1
+    exit 0
+    ;;
+esac
+
 # This is the first cleanup authorization check. It is metadata-only and must
 # complete before fm-guard, a backend command, file removal, branch deletion,
 # worktree return, registry change, or process termination can run.
-fm_backend_validate_task_endpoint "$META" "$ID" || exit 1
+fm_task_safety_validate_endpoint "$META" "$ID" || exit 1
 BACKEND=$FM_BACKEND_VALIDATED_BACKEND
 T=$FM_BACKEND_VALIDATED_TARGET
+TEARDOWN_BACKEND_KEY=$(printf '%s' "$BACKEND:$T" | tr -c 'A-Za-z0-9._-' '_')
+TEARDOWN_BACKEND_LOCK="$STATE/.backend-$TEARDOWN_BACKEND_KEY.lock"
+fm_lock_try_acquire "$TEARDOWN_BACKEND_LOCK" || {
+  echo "REFUSED: the recorded backend endpoint is already in a lifecycle transaction." >&2
+  exit 1
+}
 WT=$(fm_meta_get "$META" worktree)
 PROJ=$(fm_meta_get "$META" project)
 T_ORCA=
@@ -916,14 +1032,11 @@ inspectable_git_worktree() {
 }
 
 canonical_existing_dir() {
-  local target=$1
-  [ -n "$target" ] || return 1
-  [ -d "$target" ] || return 1
-  ( cd "$target" && pwd -P )
+  fm_task_safety_canonical_existing_dir "$1"
 }
 
 retry_wait_secs_is_valid() {
-  [[ "$1" =~ ^([0-9]+([.][0-9]*)?|[.][0-9]+)$ ]]
+  fm_task_safety_retry_wait_valid "$1"
 }
 
 STALE_WORKTREE_LOCK_AGE_SECS=${FM_STALE_WORKTREE_LOCK_AGE_SECS:-30}
@@ -945,24 +1058,13 @@ TEARDOWN_PROCEVENT_RESTORE_FAILED=4
 # True when treehouse/git stderr shows the transient index.lock "File exists" race.
 # Other return failures must not enter the retry path.
 treehouse_return_is_index_lock_error() {
-  local text=$1
-  printf '%s\n' "$text" | grep -Eq "Unable to create ['\"].*index\\.lock['\"]: File exists"
+  fm_task_safety_treehouse_index_lock_error "$1"
 }
 
 # Absolute path to the git index lock for a worktree/repo dir, or empty when it
 # cannot be resolved (dir missing or not a git worktree at all).
 worktree_git_lock_path() {
-  local dir=$1 lock abs_dir
-  [ -n "$dir" ] && [ -d "$dir" ] || return 1
-  lock=$(git -C "$dir" rev-parse --git-path index.lock 2>/dev/null) || return 1
-  [ -n "$lock" ] || return 1
-  case "$lock" in
-    /*) printf '%s\n' "$lock" ;;
-    *)
-      abs_dir=$(canonical_existing_dir "$dir") || return 1
-      printf '%s/%s\n' "$abs_dir" "$lock"
-      ;;
-  esac
+  fm_task_safety_worktree_git_lock_path "$1"
 }
 
 # The lock-staleness proof (lsof holder check, mtime age, fail-safe defaults)
@@ -1080,14 +1182,14 @@ teardown_treehouse_return() {
 }
 
 validate_worktree_teardown_safety() {
-  local dirty_raw dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch
+  local dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch
   [ -d "$WT" ] || return 0
   [ "$FORCE" != "--force" ] || return 0
   case "$KIND" in
     secondmate|scout) return 0 ;;
   esac
 
-  if ! dirty_raw=$(git -C "$WT" status --porcelain 2>/dev/null); then
+  if ! dirty=$(fm_task_safety_dirty_first "$WT" 2>/dev/null); then
     if worktree_safety_blocked_by_lock "uncommitted changes"; then
       return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
     fi
@@ -1095,7 +1197,6 @@ validate_worktree_teardown_safety() {
     echo "Restore the git index state, or get the captain's explicit OK to discard, then --force." >&2
     return 1
   fi
-  dirty=$(printf '%s\n' "$dirty_raw" | grep -vE '^\?\? (\.claude/|\.fm-(grok|kimi)-turnend$)' | head -1 || true)
 
   if ! unpushed_raw=$(git -C "$WT" log --oneline HEAD --not --remotes -- 2>/dev/null); then
     if worktree_safety_blocked_by_lock "commits not on a remote"; then
@@ -1236,34 +1337,7 @@ conclude_task_no_mistakes_run() {  # <worktree>
 # documents as slow). Never $$ (this script's own pid). Empty output when
 # nothing matches; failure means the scan could not establish a safe result.
 pids_with_cwd_under() {  # <dir>
-  local dir=$1 out pid path line
-  [ -n "$dir" ] && [ -d "$dir" ] || return 0
-  dir=$(cd "$dir" && pwd -P) || return 1
-  out=$(lsof -a -d cwd -Fpn 2>/dev/null) || return 1
-  [ -n "$out" ] || return 0
-  pid=
-  while IFS= read -r line; do
-    case "$line" in
-      p*)
-        pid=${line#p}
-        case "$pid" in ''|*[!0-9]*) return 1 ;; esac
-        ;;
-      fcwd) [ -n "$pid" ] || return 1 ;;
-      n*)
-        [ -n "$pid" ] || return 1
-        path=${line#n}
-        case "$path" in
-          "$dir"|"$dir"/*)
-            [ -n "$pid" ] && [ "$pid" != "$$" ] && printf '%s\n' "$pid"
-            ;;
-        esac
-        ;;
-      '') ;;
-      *) return 1 ;;
-    esac
-  done <<EOF
-$out
-EOF
+  fm_task_safety_pids_with_cwd_under "$1"
 }
 
 task_process_identity() {  # <pid>
@@ -2137,6 +2211,7 @@ if [ "$KIND" = secondmate ]; then
 fi
 
 if [ "$KIND" = secondmate ] && [ "$FORCE" = "--force" ]; then
+  TEARDOWN_ENTERED_DESTRUCTIVE_PHASE=1
   cleanup_firstmate_home_children "$HOME_PATH" || exit $?
 fi
 
@@ -2232,6 +2307,8 @@ if [ "$BACKEND" = herdr ]; then
   TEARDOWN_HERDR_SESSION=$FM_BACKEND_HERDR_SESSION
   TEARDOWN_HERDR_PANE=$FM_BACKEND_HERDR_PANE
 fi
+# Every preflight has passed; from here teardown may change the task.
+TEARDOWN_ENTERED_DESTRUCTIVE_PHASE=1
 
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
@@ -2373,3 +2450,4 @@ if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only 
 fi
 echo "teardown $ID complete (window $T, worktree $WT)"
 backlog_refresh_reminder
+TEARDOWN_REACHED_END=1

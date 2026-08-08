@@ -229,6 +229,22 @@ The helper requires a full `https://github.com/<owner>/<repo>/pull/<n>` URL, inv
 Teardown is fail-closed for ship worktrees: dirty worktrees refuse, and committed work must be landed before the worktree is returned.
 [`bin/fm-teardown.sh`](../bin/fm-teardown.sh)'s header owns the landed-work proofs, PR-discovery fallback, and stale-lock recovery procedure.
 
+## Finished PR workers can hibernate without becoming finished tasks
+
+[`bin/fm-latent.sh`](../bin/fm-latent.sh) owns the latent manifest, transaction journal, `refs/firstmate/latent/<task-id>` recovery namespace, entry proof, restart recovery, rehydration, and merge-finalization handoff.
+A successful GitHub ready registration records `pr_ready_head=` equal to `pr_head=` as the durable entry trigger, so a later status append cannot silently cancel eligibility.
+A GitHub PR task enters `latent` only after that ready identity, its canonical poll, and the authenticated open head agree, the exact PR object is fetched and pinned, local `HEAD` is equal to or an ancestor of that object, the shared cleanliness check passes, no keyed decision or registered obligation remains, no validation run is active or parked, and the recorded endpoint is terminated under task and endpoint locks.
+The same Git, decision, obligation, metadata, and ref checks run again after termination before a plain identity-checked Treehouse return, and metadata becomes endpoint-free only after that return succeeds.
+Any false or unknown predicate leaves the task active, while an interrupted transaction either rolls back before return, completes the metadata commit after a confirmed return, or reports `quarantined` when identities no longer agree.
+`latent` therefore means zero worker process and zero Treehouse slot but not task completion: the metadata, status history, brief, PR poll, manifest, and protected commit remain.
+The authenticated PR poll uses its existing watcher path to surface merge, closed-unmerged, exact head change, and changes-requested transitions, and the latter three retain the recovery ref until rehydration or an explicit abandonment decision.
+Rehydration creates a fresh worker and reconstructs context from Git, the original instructions, the PR, review feedback, and durable history rather than claiming to restore model conversation or a live validation prompt.
+Neither `paused:` nor watcher pause markers participate in the tier predicate.
+A declared pause is only the last status verb, so any later append, including benign `resolved:` bookkeeping from another writer, cancels pause classification and may resume bare stale notifications.
+The sealed manifest, protected ref, and endpoint-free metadata are the steady-state predicate instead.
+Only [`bin/fm-teardown.sh`](../bin/fm-teardown.sh) finalizes a latent task, and it still requires an exact merged head containing the saved generation before deleting the ref and durable task records.
+The protected ref survives slot reuse and remote branch deletion or force-push, but it is not an off-host backup: deleting or corrupting the project clone can still destroy its object database, so project removal preflight refuses latent manifests or refs.
+
 ## Optional Relay
 
 Relay is opt-in presence for the shared `@myfirstmate` bot on both public surfaces it supports, X and Discord.

@@ -68,6 +68,8 @@ FM_PR_POLL_SNAPSHOT_URL=
 FM_PR_POLL_SNAPSHOT_HOST=
 FM_PR_POLL_SNAPSHOT_PATH=
 FM_PR_POLL_SNAPSHOT_NUMBER=
+FM_PR_POLL_SNAPSHOT_HEAD=
+FM_PR_POLL_SNAPSHOT_REVIEW=
 FM_PR_POLL_SNAPSHOT_DATA_HASH=
 FM_PR_POLL_SNAPSHOT_TEMPLATE_HASH=
 FM_PR_POLL_SNAPSHOT_DATA_IDENTITY=
@@ -309,9 +311,9 @@ fm_pr_metadata_identity_parse() {
         fi
         seen_pr=1
         ;;
-      pr_head=*)
+      pr_head=*|pr_ready_head=*)
         if [ "$seen_pr" -eq 1 ]; then
-          value=${line#pr_head=}
+          value=${line#*=}
           fm_pr_head_valid "$value" || post_pr_invalid=1
         fi
         ;;
@@ -619,9 +621,27 @@ fm_pr_poll_artifacts_valid() {
 }
 
 fm_pr_poll_snapshot_capture() {
-  local state=$1 id=$2 template=$3 registration
+  local state=$1 id=$2 template=$3 registration meta head_count head
   fm_pr_poll_artifacts_valid "$state" "$id" "$template" || return 1
   registration="$state/$id.pr-poll-registration"
+  meta="$state/$id.meta"
+  # shellcheck disable=SC2034 # Output globals are consumed by fm-watch.sh.
+  FM_PR_POLL_SNAPSHOT_HEAD=
+  # shellcheck disable=SC2034 # Output globals are consumed by fm-watch.sh.
+  FM_PR_POLL_SNAPSHOT_REVIEW=
+  if [ "$FM_PR_DATA_PROVIDER" = github ]; then
+    head_count=$(grep -c '^pr_head=' "$meta" 2>/dev/null || true)
+    case "$head_count" in
+      0) ;;
+      1)
+        head=$(grep '^pr_head=' "$meta" | cut -d= -f2-)
+        fm_pr_head_valid "$head" || return 1
+        # shellcheck disable=SC2034 # Output global is consumed by fm-watch.sh.
+        FM_PR_POLL_SNAPSHOT_HEAD=$head
+        ;;
+      *) return 1 ;;
+    esac
+  fi
   FM_PR_POLL_SNAPSHOT_REG_HASH=$(fm_pr_sha256 "$registration") || return 1
   FM_PR_POLL_SNAPSHOT_REG_IDENTITY=$(fm_pr_file_identity "$registration") || return 1
   FM_PR_POLL_SNAPSHOT_ID=$id

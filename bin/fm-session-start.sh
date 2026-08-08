@@ -19,7 +19,7 @@
 # standalone with unchanged default behavior - other flows (fm-bootstrap.sh
 # install <tools> after consent, /updatefirstmate, the afk daemon, existing
 # tests) still call them directly. The one seam this script needed -
-# bootstrap running its detect-only diagnostics without its six mutating
+# bootstrap running its detect-only diagnostics without its seven mutating
 # sweeps - is an opt-in FM_BOOTSTRAP_DETECT_ONLY=1 flag on fm-bootstrap.sh
 # itself (default unset/0 = unchanged behavior), not a fork.
 #
@@ -30,12 +30,19 @@
 #                       mutating step runs.
 #   2. bootstrap      - home-local stale Herdr projection cleanup runs only
 #                       when this session actually holds the lock. Detect-only
-#                       diagnostics always run. Bootstrap's six MUTATING sweeps
-#                       (legacy PR-check migration, secondmate convergence,
-#                       secondmate liveness, pending remote handoff retry,
-#                       X-mode artifact writes, fleet sync) also run only when
-#                       locked; the four network sweeps run in the deferred
-#                       stage rather than this synchronous bootstrap section.
+#                       diagnostics always run. Bootstrap's seven MUTATING
+#                       sweeps (legacy PR-check migration, latent transaction
+#                       recovery, secondmate convergence, secondmate liveness,
+#                       pending remote handoff retry, X-mode artifact writes,
+#                       fleet sync) also run only when locked; the four network
+#                       sweeps run in the deferred stage rather than this
+#                       synchronous bootstrap section. Latent transaction
+#                       recovery stays on this local pass on purpose: it
+#                       reconciles an interrupted hibernation against local
+#                       refs only and makes no external-network call, so
+#                       deferring it would buy nothing and would leave a
+#                       half-applied transaction unreconciled while the digest
+#                       below reports that task's endpoint.
 #   3. wake-drain     - mutates the durable wake queue, so it also only runs
 #                       when locked.
 #   4. supervision-instructions - the one emitted operating block for the
@@ -115,7 +122,7 @@
 # and all of which are safe to compute without verified lock ownership.
 # It deliberately skips the network-only GitHub-auth probe because a read-only
 # session has no dispatch, spawn, steer, or merge action for that verdict to gate.
-# Only projection cleanup, the six bootstrap mutating sweeps, and the
+# Only projection cleanup, the seven bootstrap mutating sweeps, and the
 # wake-queue drain are skipped.
 # The context and fleet-state digests
 # below are always read-only, so they run unconditionally in both modes.
@@ -186,9 +193,10 @@
 #   --reemit  This process ALREADY took the helm at its own startup and has
 #             only lost its context (a /clear or a compaction). Skip the
 #             mutating sweeps that startup already reconciled - the stale Herdr
-#             projection cleanup and bootstrap's six mutating sweeps (fleet
+#             projection cleanup and bootstrap's seven mutating sweeps (fleet
 #             sync, secondmate convergence and liveness, PR-check migration,
-#             pending remote handoff retry, X-mode artifact writes) - and
+#             latent transaction recovery, pending remote handoff retry,
+#             X-mode artifact writes) - and
 #             re-emit the rest. The wake-queue drain is NOT skipped: queued
 #             records are this turn's work queue, they arrived after startup,
 #             and a session that owns the lock is exactly the session that must
@@ -694,7 +702,14 @@ for meta in "$STATE"/*.meta; do
       printf 'endpoint: dead (backend=%s window=%s)\n' "$backend" "$window"
     fi
   else
-    printf 'endpoint: unknown (no window recorded)\n'
+    tier=$(fm_meta_get "$meta" tier)
+    case "$tier" in
+      latent|attention)
+        current=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-crew-state.sh" "$id" 2>/dev/null || true)
+        printf 'endpoint: released (%s)\n' "${current:-state: quarantined · source: latent-manifest}"
+        ;;
+      *) printf 'endpoint: unknown (no window recorded)\n' ;;
+    esac
   fi
 
   status="$STATE/$id.status"

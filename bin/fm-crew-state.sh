@@ -16,7 +16,7 @@
 # fixed mapping logic, no heuristics and no LLM. Output is one stable, parseable,
 # token-tight line firstmate can read every heartbeat:
 #
-#   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|none> · <detail>
+#   state: <working|parked|done|blocked|paused|failed|latent|attention|quarantined|unknown> · source: <run-step|pane|status-log|latent-manifest|none> · <detail>
 #
 # Logic, in order:
 #   1. Resolve worktree + backend target + kind from state/<id>.meta.
@@ -101,7 +101,19 @@ meta_value() {  # <key>
 WT=$(meta_value worktree)
 KIND=$(meta_value kind)
 HARNESS=$(meta_value harness)
+TIER=$(meta_value tier)
 [ -n "$KIND" ] || KIND=ship
+
+case "$TIER" in
+  latent|attention)
+    if LATENT_STATE=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-latent.sh" verify "$ID" 2>/dev/null); then
+      case "$LATENT_STATE" in
+        latent|attention) emit "$LATENT_STATE" latent-manifest "exact PR commit is protected" ;;
+      esac
+    fi
+    emit quarantined latent-manifest "latent recovery integrity failed"
+    ;;
+esac
 
 # A torn-down (or never-created) worktree has no current state to read.
 if [ -z "$WT" ] || [ ! -d "$WT" ]; then
