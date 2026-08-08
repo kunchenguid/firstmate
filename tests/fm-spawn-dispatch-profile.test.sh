@@ -48,8 +48,21 @@ SH
   cat > "$fakebin/no-mistakes" <<'SH'
 #!/usr/bin/env bash
 set -u
-[ "${1:-}" = daemon ] && [ "${2:-}" = status ] || exit 2
-[ -f "${NM_HOME:-}/.fm-test-no-mistakes-home" ]
+if [ "$#" -eq 2 ] && [ "$1" = daemon ] && [ "$2" = status ]; then
+  if [ -f "${NM_HOME:-}/.fm-test-no-mistakes-daemon-running" ]; then
+    printf 'daemon running\n'
+  else
+    printf 'daemon not running\n'
+  fi
+  exit 0
+fi
+if [ "$#" -eq 1 ] && [ "$1" = axi ]; then
+  [ "${NO_MISTAKES_TELEMETRY:-}" = off ] || exit 3
+  [ "${NO_MISTAKES_NO_UPDATE_CHECK:-}" = 1 ] || exit 3
+  [ -f "${NM_HOME:-}/.fm-test-no-mistakes-daemon-running" ]
+  exit
+fi
+exit 2
 SH
   chmod +x "$fakebin/tmux" "$fakebin/no-mistakes"
   fm_fake_exit0 "$fakebin" treehouse pi-signed
@@ -67,8 +80,8 @@ make_spawn_case() {
   fakebin=$(make_spawn_fakebin "$case_dir/fake")
   mkdir -p "$home/data" "$home/projects" "$home/state" "$home/config" \
     "$home/no-mistakes-home" "$home/user-home/.no-mistakes"
-  touch "$home/no-mistakes-home/.fm-test-no-mistakes-home" \
-    "$home/user-home/.no-mistakes/.fm-test-no-mistakes-home"
+  touch "$home/no-mistakes-home/.fm-test-no-mistakes-daemon-running" \
+    "$home/user-home/.no-mistakes/.fm-test-no-mistakes-daemon-running"
   printf '%s\n' "$harness" > "$home/config/crew-harness"
   fm_git_worktree "$proj" "$wt" "wt-$name"
   touch "$home/state/.last-watcher-beat"
@@ -559,7 +572,7 @@ test_codex_no_mistakes_root_is_physical_and_shell_quoted() {
   fakebin=$(make_spawn_fakebin "$case_dir/fake")
   mkdir -p "$home_real/data/$id" "$home_real/projects" "$home_real/state" \
     "$home_real/config" "$home_real/user-home" "$no_mistakes_real"
-  touch "$no_mistakes_real/.fm-test-no-mistakes-home"
+  touch "$no_mistakes_real/.fm-test-no-mistakes-daemon-running"
   printf '%s\n' codex > "$home_real/config/crew-harness"
   printf 'brief for %s\n' "$id" > "$home_real/data/$id/brief.md"
   touch "$home_real/state/.last-watcher-beat"
@@ -650,12 +663,14 @@ test_codex_no_mistakes_root_rejects_unverified_homes() {
   local rec base_id labels candidates i id out status
   base_id=profile-codex-roots-unverified-z3j
   rec=$(make_spawn_case profile-codex-roots-unverified codex \
-    "$base_id-credentials" "$base_id-repository")
+    "$base_id-stopped-daemon" "$base_id-credentials" "$base_id-repository")
   read_case_record "$rec"
-  mkdir -p "$HOME_DIR/user-home/.ssh" "$CASE_DIR/unrelated-repository"
+  mkdir -p "$CASE_DIR/stopped-no-mistakes-home" \
+    "$HOME_DIR/user-home/.ssh" "$CASE_DIR/unrelated-repository"
   git -C "$CASE_DIR/unrelated-repository" init -q
-  labels=(credentials repository)
-  candidates=("$HOME_DIR/user-home/.ssh" "$CASE_DIR/unrelated-repository")
+  labels=(stopped-daemon credentials repository)
+  candidates=("$CASE_DIR/stopped-no-mistakes-home" \
+    "$HOME_DIR/user-home/.ssh" "$CASE_DIR/unrelated-repository")
 
   for i in "${!labels[@]}"; do
     id="$base_id-${labels[$i]}"
@@ -670,7 +685,7 @@ test_codex_no_mistakes_root_rejects_unverified_homes() {
     [ ! -s "$LAUNCH_LOG.endpoint" ] || fail "Codex no-mistakes unverified-root refusal created an endpoint"
     [ ! -s "$LAUNCH_LOG" ] || fail "Codex no-mistakes unverified-root refusal typed a launch command"
   done
-  pass "Codex no-mistakes spawn rejects credential and unrelated repository roots without runtime identity"
+  pass "Codex no-mistakes spawn rejects stopped, credential, and repository roots without a socket connection"
 }
 
 test_raw_no_mistakes_launches_fail_closed() {

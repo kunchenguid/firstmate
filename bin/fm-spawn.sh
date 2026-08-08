@@ -1507,8 +1507,8 @@ validate_no_mistakes_root() {
     echo "error: refusing broad or overlapping no-mistakes root: primary project directory" >&2
     return 1
   fi
-  if ! env NM_HOME="$root" NO_MISTAKES_NO_UPDATE_CHECK=1 \
-    no-mistakes daemon status >/dev/null 2>&1; then
+  if ! (cd "$project" && env NM_HOME="$root" NO_MISTAKES_TELEMETRY=off \
+    NO_MISTAKES_NO_UPDATE_CHECK=1 no-mistakes axi >/dev/null 2>&1); then
     echo "error: selected root cannot be verified as an active no-mistakes home: $root" >&2
     return 1
   fi
