@@ -2411,6 +2411,11 @@ test_recorded_cursor_worker_server_is_reaped_for_secondmate() {
   [ -n "$starttime" ] || fail "cursor-worker-server-secondmate-reap: cannot read starttime"
   printf '%s %s\n' "$pid" "starttime=$starttime" \
     > "$case_dir/state/task-x1.worker-server"
+
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "cursor-worker-server-secondmate-reap: secondmate teardown should succeed"
   if kill -0 "$pid" 2>/dev/null; then
     kill -KILL "$pid" 2>/dev/null || true
     fail "cursor-worker-server-secondmate-reap: recorded cursor worker-server survived secondmate teardown"
