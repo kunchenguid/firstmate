@@ -180,6 +180,8 @@ SH
     'MainThread|/opt/agent/versions/current/agent --force'
     'MainThread|/usr/bin/node /srv/cursor-agent/app.js'
     'MainThread|/usr/bin/node /tmp/cursor-agent --foo'
+    'MainThread|/usr/bin/node /tmp/claude --foo'
+    'MainThread|/usr/bin/node /tmp/codex --foo'
     'node|/usr/bin/node /tmp/cursor-agent --foo'
     'MainThread|/usr/bin/node /srv/agent/app.js'
     'MainThread|MainThread'
@@ -207,6 +209,45 @@ SH
     fi
   done
   pass "session-lock: Cursor ancestry accepts proven Cursor identity and rejects unrelated agents"
+}
+
+test_claude_node_worker_keeps_contiguous_ancestry() {
+  local dir fakebin got
+  dir="$TMP_ROOT/claude-node-worker"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field" in
+  110:comm=) printf '%s\n' node ;;
+  110:args=) printf '%s\n' '/usr/bin/node /opt/claude/versions/2.1.220/worker.js' ;;
+  110:ppid=) printf '%s\n' 120 ;;
+  120:comm=) printf '%s\n' claude ;;
+  120:args=) printf '%s\n' claude ;;
+  120:ppid=) printf '%s\n' 1 ;;
+  *:comm=) printf '%s\n' bash ;;
+  *:args=) printf '%s\n' 'bash /opt/claude/hooks/stop.sh' ;;
+  *:ppid=) printf '%s\n' 110 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  printf '120\n' > "$dir/state/.lock"
+  got=$(lib_eval "$fakebin" 'fm_harness_ancestry_pid') \
+    || fail "Claude Node worker ancestry did not reach outer session"
+  [ "$got" = 120 ] \
+    || fail "Claude Node worker ancestry resolved '$got', expected outer session pid 120"
+  lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
+    || fail "Claude Node worker ancestry did not recognize outer session lock owner"
+  pass "session-lock: Claude Node worker ancestry remains contiguous through outer session"
 }
 
 test_harness_beyond_a_gap_never_owns_the_lock() {
@@ -433,6 +474,7 @@ test_e2e_daemon_parented_version_named_session_keeps_its_lock() {
 test_version_named_session_is_identified_on_both_platforms
 test_ordinary_paths_are_never_harness_processes
 test_mainthread_cursor_session_is_identified
+test_claude_node_worker_keeps_contiguous_ancestry
 test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live
 test_e2e_version_named_session_claims_the_home
