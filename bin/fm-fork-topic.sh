@@ -98,8 +98,8 @@ REPO=$(cd "$REPO" 2>/dev/null && pwd -P) || die "repository path is unavailable"
 git -C "$REPO" rev-parse --is-inside-work-tree >/dev/null 2>&1 || die "not a Git worktree"
 MANIFEST=${FM_FORK_MANIFEST_OVERRIDE:-$REPO/fork-divergences.json}
 MANIFEST_REL=${MANIFEST#"$REPO"/}
-RECEIPT=$(git -C "$REPO" rev-parse --git-path fm-fork-topic-rejustify.json)
-MANIFEST_BACKUP=$(git -C "$REPO" rev-parse --git-path fm-fork-topic-manifest.json)
+RECEIPT=$(git -C "$REPO" rev-parse --path-format=absolute --git-path fm-fork-topic-rejustify.json)
+MANIFEST_BACKUP=$(git -C "$REPO" rev-parse --path-format=absolute --git-path fm-fork-topic-manifest.json)
 
 require_topology() {
   local branch primary
@@ -331,6 +331,16 @@ continue_manifest_only_reverts() { # <base-head> <baseline>; returns 3 on produc
     rm -f "$conflicts"
     rc=0
     GIT_EDITOR=true git -C "$REPO" revert --continue >/dev/null || rc=$?
+    # Restoring the manifest can leave the resolved inverse with no net change.
+    # Git then refuses to commit it, keeps REVERT_HEAD, and reports no new
+    # conflict, so the sequencer only advances through its documented --skip.
+    if [ "$rc" -ne 0 ] && git -C "$REPO" rev-parse --verify --quiet REVERT_HEAD >/dev/null \
+        && [ -z "$(git -C "$REPO" diff --name-only --diff-filter=U)" ]; then
+      git -C "$REPO" diff-index --quiet --cached HEAD -- \
+        || die "discard revert continuation failed with a staged result"
+      rc=0
+      GIT_EDITOR=true git -C "$REPO" revert --skip >/dev/null || rc=$?
+    fi
     if [ "$rc" -ne 0 ] && ! git -C "$REPO" rev-parse --verify --quiet REVERT_HEAD >/dev/null; then
       die "discard revert continuation failed without a conflict"
     fi

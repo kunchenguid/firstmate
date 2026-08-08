@@ -460,8 +460,8 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 
 $HERDR_SECTION
 
-$FORK_WORKER_SECTION
-${FORK_WORKER_SECTION:+
+${FORK_WORKER_SECTION:+$FORK_WORKER_SECTION
+
 }# Setup
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
 

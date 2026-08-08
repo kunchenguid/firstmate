@@ -69,8 +69,8 @@ done
 REPO=$(cd "$REPO" 2>/dev/null && pwd -P) || die "repository path is unavailable"
 git -C "$REPO" rev-parse --is-inside-work-tree >/dev/null 2>&1 || die "not a Git worktree: $REPO"
 MANIFEST=${FM_FORK_MANIFEST_OVERRIDE:-$REPO/fork-divergences.json}
-RECEIPT=$(git -C "$REPO" rev-parse --git-path fm-fork-rejustify.json)
-SYNC_RECEIPT=$(git -C "$REPO" rev-parse --git-path fm-fork-last-sync.json)
+RECEIPT=$(git -C "$REPO" rev-parse --path-format=absolute --git-path fm-fork-rejustify.json)
+SYNC_RECEIPT=$(git -C "$REPO" rev-parse --path-format=absolute --git-path fm-fork-last-sync.json)
 
 ids_for_paths() { # [include-unowned], paths on stdin, unique ids on stdout
   local include_unowned=${1:-no} path id spec matched

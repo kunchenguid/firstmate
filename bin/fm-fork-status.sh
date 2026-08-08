@@ -282,12 +282,14 @@ while IFS=$'\t' read -r id class topic; do
   git -C "$REPO" cherry "$UPSTREAM_REF" "$ref" > "$topic_cherry" \
     || { add_error "manifest unit $id could not be compared with $UPSTREAM_REF"; continue; }
   owned_count=$(awk '$1 == "+" { n++ } END { print n+0 }' "$topic_cherry")
+  unit_owned=
   if [ "$owned_count" -eq 0 ] && [ "$class" != superseded ]; then
     add_signal "manifest unit $id has no canonical patch outside $UPSTREAM_REF; review whether upstream accepted it"
   elif [ "$owned_count" -gt 1 ]; then
     add_error "manifest unit $id has $owned_count canonical non-equivalent commits; one aggregate patch is required"
   else
     awk -v id="$id" '$1 == "+" { print $2 "\t" id }' "$topic_cherry" >> "$OWNED"
+    unit_owned=$(awk '$1 == "+" { print $2 }' "$topic_cherry")
   fi
 
   integration_found=0
@@ -307,17 +309,25 @@ while IFS=$'\t' read -r id class topic; do
   done < <(git -C "$REPO" rev-list --first-parent --merges "$ORIGIN_REF")
   [ "$integration_found" -eq 1 ] || add_error "manifest unit $id has no reachable branch-level integration merge for $topic"
 
-  while IFS=$'\t' read -r patch_sha owner; do
-    [ "$owner" = "$id" ] || continue
-    while IFS= read -r changed_path; do
-      [ -n "$changed_path" ] || continue
-      covered=0
-      while IFS= read -r spec; do
-        if fm_fork_path_covered "$spec" "$changed_path"; then covered=1; break; fi
-      done < <(jq -r --arg id "$id" '.divergences[] | select(.id == $id) | .paths[]' "$MANIFEST")
-      [ "$covered" -eq 1 ] || add_error "manifest unit $id does not cover changed path $changed_path"
-    done < <(git -C "$REPO" diff-tree --no-commit-id --name-only -r "$patch_sha")
-  done < "$OWNED"
+  if [ -n "$unit_owned" ]; then
+    # The validated schema guarantees at least one declared path per unit, so
+    # read them once here instead of once per changed path.
+    unit_paths=()
+    while IFS= read -r spec; do
+      [ -n "$spec" ] || continue
+      unit_paths+=("$spec")
+    done < <(jq -r --arg id "$id" '.divergences[] | select(.id == $id) | .paths[]' "$MANIFEST")
+    while IFS= read -r patch_sha; do
+      while IFS= read -r changed_path; do
+        [ -n "$changed_path" ] || continue
+        covered=0
+        for spec in "${unit_paths[@]}"; do
+          if fm_fork_path_covered "$spec" "$changed_path"; then covered=1; break; fi
+        done
+        [ "$covered" -eq 1 ] || add_error "manifest unit $id does not cover changed path $changed_path"
+      done < <(git -C "$REPO" diff-tree --no-commit-id --name-only -r "$patch_sha")
+    done < <(printf '%s\n' "$unit_owned")
+  fi
 done < <(jq -r '.divergences[] | [.id,.class,.topic] | @tsv' "$MANIFEST")
 
 while IFS=$'\t' read -r sha owners; do

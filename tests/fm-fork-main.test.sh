@@ -25,6 +25,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$ROOT/bin/fm-timeout-lib.sh"
 
 fm_git_identity fmtest fmtest@example.invalid
 TMP_ROOT=$(fm_test_tmproot fm-fork-main)
@@ -37,6 +39,11 @@ UPDATE="$ROOT/bin/fm-update.sh"
 REMOTE_PROVISION="$ROOT/bin/fm-remote-home-provision.sh"
 
 b64() { printf '%s' "$1" | base64 | tr -d '\n'; }
+
+# Blank lines immediately above the brief's `# Setup` heading.
+blank_lines_before_setup() { # <brief>
+  awk '/^# Setup$/ { print n; exit } /^$/ { n++; next } { n = 0 }' "$1"
+}
 
 new_world() { # <name>
   local name=$1 w
@@ -330,9 +337,15 @@ EOF
 # Firstmate divergence topics branch from upstream explicitly, while malformed
 # refs and use on scouts are refused.
 test_brief_supports_explicit_upstream_start_ref() {
-  local home brief out rc encoded delivered
+  local home brief plain out rc encoded delivered
   home="$TMP_ROOT/brief-home"
   mkdir -p "$home/data"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" plain-topic firstmate --mode no-mistakes >/dev/null \
+    || fail "ordinary ship brief failed"
+  plain="$home/data/plain-topic/brief.md"
+  assert_no_grep 'fork-main-integration' "$plain" "ordinary ship brief carried the fork worker contract"
+  [ "$(blank_lines_before_setup "$plain")" = 1 ] \
+    || fail "the optional fork section changed the ordinary brief's spacing before # Setup"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" fork-topic firstmate --mode no-mistakes --start-ref upstream/main >/dev/null \
     || fail "ship brief refused upstream start ref"
   brief="$home/data/fork-topic/brief.md"
@@ -345,6 +358,8 @@ test_brief_supports_explicit_upstream_start_ref() {
     "generated fork brief did not deliver the routine-merge prohibition"
   assert_grep 'ordinary no-mistakes registration for this topic must continue to target official upstream' "$brief" \
     "generated fork brief did not deliver the upstream-target validation rule"
+  [ "$(blank_lines_before_setup "$brief")" = 1 ] \
+    || fail "the fork worker contract is not separated from # Setup by one blank line"
   encoded=$("$ROOT/bin/fm-operational-input.sh" encode launch-brief < "$brief") \
     || fail "fork brief did not enter the executable launch-input path"
   delivered=$(printf '%s' "$encoded" | "$ROOT/bin/fm-operational-input.sh" body) \
@@ -465,6 +480,52 @@ test_health_uses_git_cherry_equivalence_and_exposes_drift() {
   assert_contains "$out" "not represented by a canonical manifest topic" "manifest discrepancy signal did not name the factual commit"
   assert_contains "$out" "signals=" "health summary did not separate signals from errors"
   pass "fork health: Git non-equivalence stays factual while the manifest owns carried intent"
+}
+
+# A unit's declared paths are checked against every path its canonical patch
+# actually changes, and a directory prefix covers the paths beneath it.
+test_health_requires_declared_paths_to_cover_the_canonical_patch() {
+  local w repo out rc tmp
+  w=$(new_world health-paths)
+  repo="$w/admin"
+  git clone -q "$w/fork.git" "$repo"
+  configure_fork_clone "$repo" "$w"
+  git -C "$repo" switch -qC fm/divergence/probe upstream/main
+  printf 'enabled\n' > "$repo/feature.txt"
+  mkdir -p "$repo/nested"
+  printf 'extra\n' > "$repo/nested/extra.txt"
+  git -C "$repo" add feature.txt nested/extra.txt
+  git -C "$repo" commit -qm 'topic probe'
+  git -C "$repo" push -q origin fm/divergence/probe
+  git -C "$repo" switch -qC main origin/main
+  git -C "$repo" merge --no-ff --no-commit fm/divergence/probe >/dev/null
+  tmp="$w/manifest.probe"
+  jq '.divergences += [{id:"probe",summary:"Carries probe behavior.",class:"pending",topic:"fm/divergence/probe",introduced:"2026-08-08",upstream_pr:{url:"https://github.com/example/firstmate/pull/1",disposition:"open"},retire_when:"Upstream ships equivalent probe behavior.",paths:["feature.txt"]}]' \
+    "$repo/fork-divergences.json" > "$tmp" || fail "could not build manifest fixture"
+  mv "$tmp" "$repo/fork-divergences.json"
+  git -C "$repo" add fork-divergences.json
+  git -C "$repo" commit -qm 'merge divergence probe'
+  git -C "$repo" push -q origin main
+
+  set +e
+  out=$("$STATUS" --repo "$repo" 2>&1); rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "health accepted a canonical patch touching an undeclared path: $out"
+  assert_contains "$out" "does not cover changed path nested/extra.txt" \
+    "health did not name the undeclared changed path"
+  assert_not_contains "$out" "does not cover changed path feature.txt" \
+    "health reported an explicitly declared path as uncovered"
+
+  tmp="$w/manifest.probe.declared"
+  jq '(.divergences[] | select(.id == "probe") | .paths) = ["feature.txt","nested/"]' \
+    "$repo/fork-divergences.json" > "$tmp" || fail "could not widen the declared paths"
+  mv "$tmp" "$repo/fork-divergences.json"
+  git -C "$repo" add fork-divergences.json
+  git -C "$repo" commit -qm 'Declare the nested probe path'
+  git -C "$repo" push -q origin main
+  out=$("$STATUS" --repo "$repo" 2>&1) || fail "health refused a fully declared canonical patch: $out"
+  assert_contains "$out" "errors=0" "a directory prefix did not cover the paths beneath it"
+  pass "fork health: declared paths must cover every path the canonical patch changes"
 }
 
 # The manifest defines carried intent. A no-mistakes fix commit on top of a
@@ -686,6 +747,55 @@ JSON
     || fail "discard continuation made intermediate revert or manifest commits"
   assert_contains "$out" 'errors=0' "continued discard did not validate its completed candidate"
   pass "fork topics: discard conflicts finish the queued revert through a receipt-bound continuation"
+}
+
+# Resolving a discard conflict back to the current content is a legitimate
+# remove decision when a later commit already superseded the carried behavior.
+# The inverse then has no net change, so Git refuses to commit it and keeps
+# REVERT_HEAD without reporting a new conflict. The continuation must retire
+# that sequencer item instead of re-entering the same resolution forever.
+test_topic_discard_continuation_finishes_an_empty_resolved_revert() {
+  local w candidate out rc receipt decisions before head
+  w=$(new_world topic-discard-empty)
+  add_topic_and_merge "$w" alpha shared.txt alpha
+  git -C "$w/admin" switch -q main
+  printf 'alpha after pipeline\n' > "$w/admin/shared.txt"
+  git -C "$w/admin" add shared.txt
+  git -C "$w/admin" commit -qm 'Pipeline follow-up on alpha'
+  git -C "$w/admin" push -q origin main
+
+  candidate=$(new_candidate "$w" discard-alpha-empty)
+  before=$(git -C "$candidate" rev-parse HEAD)
+  set +e
+  out=$(FM_ROOT_OVERRIDE="$ROOT" "$TOPIC" discard --repo "$candidate" --id alpha 2>&1); rc=$?
+  set -e
+  [ "$rc" -eq 3 ] || fail "topic discard conflict returned $rc instead of 3: $out"
+  receipt=$(git -C "$candidate" rev-parse --path-format=absolute --git-path fm-fork-topic-rejustify.json)
+  assert_present "$receipt" "topic discard conflict did not publish a receipt"
+  git -C "$candidate" checkout HEAD -- shared.txt
+  git -C "$candidate" add shared.txt
+  decisions="$w/discard-decisions.json"
+  cat > "$decisions" <<'JSON'
+{"schema":"firstmate.fork-rejustify.v1","decisions":[{"id":"alpha","action":"remove","reason":"The pipeline follow-up already superseded the carried behavior entirely."}]}
+JSON
+  set +e
+  out=$(export FM_ROOT_OVERRIDE="$ROOT"; fm_run_timed 120 "$TOPIC" continue --repo "$candidate" --decisions "$decisions" 2>&1); rc=$?
+  set -e
+  [ "$rc" -ne 124 ] || fail "an empty resolved revert made the discard continuation loop forever"
+  [ "$rc" -eq 0 ] || fail "discard continuation refused an empty resolved revert: $out"
+  assert_absent "$receipt" "successful topic discard continuation left its receipt"
+  [ -z "$(git -C "$candidate" rev-parse --verify --quiet REVERT_HEAD 2>/dev/null || true)" ] \
+    || fail "the empty resolved revert left the revert sequencer active"
+  [ "$(cat "$candidate/shared.txt")" = 'alpha after pipeline' ] \
+    || fail "the empty resolved revert changed the superseding product content"
+  jq -e '.divergences == []' "$candidate/fork-divergences.json" >/dev/null \
+    || fail "continued discard did not atomically remove the manifest unit"
+  head=$(git -C "$candidate" rev-parse HEAD)
+  [ "$(git -C "$candidate" rev-parse "$head^")" = "$before" ] \
+    || fail "the empty resolved revert made intermediate revert or manifest commits"
+  [ -z "$(git -C "$candidate" status --porcelain)" ] \
+    || fail "the empty resolved revert left the candidate worktree dirty"
+  pass "fork topics: a discard whose resolved inverse is empty still completes atomically"
 }
 
 # A clean upstream merge is committed only in an isolated candidate, records its
@@ -988,11 +1098,13 @@ test_brief_supports_explicit_upstream_start_ref
 test_self_update_stays_fast_forward_only
 test_topic_waits_for_validated_upstream
 test_health_uses_git_cherry_equivalence_and_exposes_drift
+test_health_requires_declared_paths_to_cover_the_canonical_patch
 test_health_attributes_pipeline_fixes_and_supports_disposition_transition
 test_refresh_parses_current_gh_axi_scalar_envelope
 test_topics_are_independently_revertible_units
 test_topic_integration_conflict_has_receipt_bound_continuation
 test_topic_discard_conflict_has_receipt_bound_continuation
+test_topic_discard_continuation_finishes_an_empty_resolved_revert
 test_clean_upstream_merge_is_isolated_and_validated_as_candidate
 test_conflict_requires_rejustification_and_rerere_stays_reviewable
 test_upstream_acceptance_retires_a_divergence_with_evidence
