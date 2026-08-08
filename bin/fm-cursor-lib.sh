@@ -148,20 +148,23 @@ fm_cursor_resolve_binary() {
   return 1
 }
 
-# True when the full argument string $1 carries structural Cursor evidence.
-# Used by every process-scanning caller, so it never executes anything.
-#
-# Cursor's Node bundle runs with kernel comm MainThread and an argument string
-# whose argv0 still names the versioned cursor-agent install path, which is the
-# first and cheapest signal. Structural evidence comes only from argv0: a later
-# argument path/token named cursor-agent must never classify an unrelated
-# process as Cursor. When argv0 carries no cursor-agent token, it is resolved
-# on disk instead, which is what proves a legacy `agent` alias without trusting
-# its name.
-fm_cursor_args_are_cursor() {  # <args>
-  local args=$1 argv0
-  [ -n "$args" ] || return 1
-  argv0=${args%% *}
+# Read argv[0] without flattening it into a whitespace-delimited command line.
+fm_cursor_argv0_for_pid() {  # <pid> [comm-fallback]
+  local pid=$1 fallback=${2:-} proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc} argv0=
+  if [ -r "$proc_root/$pid/cmdline" ]; then
+    IFS= read -r -d '' argv0 < "$proc_root/$pid/cmdline" || true
+    [ -n "$argv0" ] && { printf '%s\n' "$argv0"; return 0; }
+  fi
+  if [ -z "$fallback" ]; then
+    fallback=$(LC_ALL=C ps -p "$pid" -o comm= 2>/dev/null || true)
+  fi
+  [ -n "$fallback" ] || return 1
+  printf '%s\n' "$fallback"
+}
+
+fm_cursor_argv0_is_cursor() {  # <argv0>
+  local argv0=$1
+  [ -n "$argv0" ] || return 1
   case "$argv0" in
     ''|MainThread) return 1 ;;
     cursor-agent) return 0 ;;
@@ -169,27 +172,28 @@ fm_cursor_args_are_cursor() {  # <args>
   fm_cursor_path_is_cursor "$argv0"
 }
 
-# True when the process described by command name $1 and full argument string
-# $2 is Cursor. The single owner of Cursor process identity for the ancestry
-# walk (bin/fm-session-lock-lib.sh), harness detection (bin/fm-harness.sh),
-# pane liveness (bin/backends/tmux.sh), and worker-server discovery
-# (bin/fm-spawn.sh).
+# True when the process described by command name $1 and structured argv0 $3 is
+# Cursor. The single owner of Cursor process identity for the ancestry walk
+# (bin/fm-session-lock-lib.sh), harness detection (bin/fm-harness.sh), pane
+# liveness (bin/backends/tmux.sh), and worker-server discovery (bin/fm-spawn.sh).
 #
 # Accepted: an exact cursor-agent command name; a MainThread or bare
-# interpreter whose arguments carry Cursor's install path; a legacy `agent`
-# whose argv[0] resolves into Cursor's install tree.
+# interpreter whose structured argv[0] carries Cursor's install path; a legacy
+# `agent` whose argv[0] resolves into Cursor's install tree.
 #
 # Rejected: a bare MainThread with no Cursor evidence; any executable whose
 # basename merely happens to be `agent`; any path with an `agent/` directory
 # component that is running something else.
-fm_cursor_process_matches() {  # <comm> <args>
-  local comm=$1 args=${2:-} base
+fm_cursor_process_matches() {  # <comm> <args> [argv0]
+  local comm=$1 argv0=${3:-} base
+  [ -n "$comm" ] || [ -n "$argv0" ] || return 1
+  argv0=${argv0:-$comm}
   base=$(basename -- "$comm")
   base=${base#-}
   case "$base" in
     cursor-agent) return 0 ;;
     agent|MainThread|node|node-*|node[0-9]*|python|python[0-9]*|python[0-9].[0-9]*)
-      fm_cursor_args_are_cursor "$args" && return 0
+      fm_cursor_argv0_is_cursor "$argv0" && return 0
       # A legacy alias may also be reported by its own path in comm.
       fm_cursor_path_is_cursor "$comm" && return 0
       return 1

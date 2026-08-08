@@ -57,19 +57,18 @@ fm_harness_path_name() {  # <path>
 #      is identified by its install path on macOS and by argv[0] on Linux.
 #   3. a bare interpreter (node, python) running a harness script path.
 FM_HARNESS_IS_CLAUDE=0
-fm_harness_process_matches() {  # <comm> <args>
-  local comm=$1 args=$2 base argv0 name
+fm_harness_process_matches() {  # <comm> <args> [argv0]
+  local comm=$1 args=$2 base argv0=${3:-$comm} name
   FM_HARNESS_IS_CLAUDE=0
   # Cursor first, under its own narrowed identity rule (bin/fm-cursor-lib.sh):
   # neither list above can carry its generic `agent` alias safely.
-  fm_cursor_process_matches "$comm" "$args" && return 0
+  fm_cursor_process_matches "$comm" "$args" "$argv0" && return 0
   base=$(basename -- "$comm")
   if printf '%s' "$base" | grep -qE "$FM_HARNESS_RE"; then
     case "$base" in *claude*) FM_HARNESS_IS_CLAUDE=1 ;; esac
     return 0
   fi
-  argv0=${args%% *}
-  if name=$(fm_harness_path_name "$comm") || name=$(fm_harness_path_name "$argv0"); then
+  if name=$(fm_harness_path_name "$comm") || name=$(fm_harness_path_name "$argv0") || name=$(fm_harness_path_name "$args"); then
     case "$name" in claude) FM_HARNESS_IS_CLAUDE=1 ;; esac
     return 0
   fi
@@ -104,11 +103,12 @@ fm_harness_process_matches() {  # <comm> <args>
 # session cannot be read off the ancestry at all, so the whole contiguous run is
 # reported and the callers below decide what they need from it.
 fm_harness_ancestry_pids() {
-  local pid=$$ comm args extending=0 printed=0
+  local pid=$$ comm args argv0 extending=0 printed=0
   for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
     args=$(ps -o args= -p "$pid" 2>/dev/null)
-    if fm_harness_process_matches "$comm" "$args"; then
+    argv0=$(fm_cursor_argv0_for_pid "$pid" "$comm" || true)
+    if fm_harness_process_matches "$comm" "$args" "$argv0"; then
       printf '%s\n' "$pid"
       printed=1
       [ "$FM_HARNESS_IS_CLAUDE" -eq 1 ] || break
@@ -142,11 +142,12 @@ EOF
 
 # True if $1 is a live process that looks like a verified harness.
 fm_harness_pid_alive() {
-  local pid=$1 comm args
+  local pid=$1 comm args argv0
   kill -0 "$pid" 2>/dev/null || return 1
   comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
   args=$(ps -o args= -p "$pid" 2>/dev/null)
-  fm_harness_process_matches "$comm" "$args"
+  argv0=$(fm_cursor_argv0_for_pid "$pid" "$comm" || true)
+  fm_harness_process_matches "$comm" "$args" "$argv0"
 }
 
 # True when state dir $1 holds a session lock whose pid is ANY harness ancestor

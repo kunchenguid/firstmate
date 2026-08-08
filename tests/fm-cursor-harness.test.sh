@@ -56,9 +56,22 @@ SH
 cat > "$fakebin/ps" <<'SH'
 #!/usr/bin/env bash
 set -u
+query=$*
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
 args=${FM_FAKE_CURSOR_AGENT_ARGS:-"/opt/cursor-agent --force --trust brief"}
 comm=${FM_FAKE_CURSOR_COMM:-${args%% *}}
-case "$*" in
+if [ "$field" = comm= ] && [ -n "${FM_FAKE_CURSOR_PROC_ROOT:-}" ] && [ -n "${FM_FAKE_CURSOR_ARGV0:-}" ]; then
+  mkdir -p "$FM_FAKE_CURSOR_PROC_ROOT/$pid"
+  printf '%s\0' "$FM_FAKE_CURSOR_ARGV0" > "$FM_FAKE_CURSOR_PROC_ROOT/$pid/cmdline"
+fi
+case "$query" in
   *"lstart="*)
     printf 'Mon Jan  1 00:00:00 2001\n'
     exit 0 ;;
@@ -156,8 +169,10 @@ test_cursor_env_marker_wins_over_claudecode() {
 }
 
 test_mainthread_only_matches_narrowed_cursor_identity() {
-  local fakebin out
+  local fakebin out proc_root
   fakebin=$(make_cursor_fakebin "$TMP_ROOT/mainthread-detection")
+  proc_root="$TMP_ROOT/mainthread-detection/proc"
+  mkdir -p "$proc_root"
   out=$(CURSOR_AGENT= CLAUDECODE= PI_CODING_AGENT= FM_PI_HARNESS= GROK_AGENT= \
     FM_FAKE_CURSOR_COMM=MainThread \
     FM_FAKE_CURSOR_AGENT_ARGS='/usr/bin/node /tmp/claude --foo' \
@@ -173,6 +188,8 @@ test_mainthread_only_matches_narrowed_cursor_identity() {
   out=$(CURSOR_AGENT= CLAUDECODE= PI_CODING_AGENT= FM_PI_HARNESS= GROK_AGENT= \
     FM_FAKE_CURSOR_COMM=MainThread \
     FM_FAKE_CURSOR_AGENT_ARGS='/opt/cursor-agent/versions/current/cursor-agent --force' \
+    FM_PROC_ROOT_OVERRIDE="$proc_root" FM_FAKE_CURSOR_PROC_ROOT="$proc_root" \
+    FM_FAKE_CURSOR_ARGV0='/opt/cursor-agent/versions/current/cursor-agent' \
     PATH="$fakebin:$PATH" "$HARNESS" 2>/dev/null)
   [ "$out" = cursor ] \
     || fail "verified Cursor MainThread detected as '$out'"

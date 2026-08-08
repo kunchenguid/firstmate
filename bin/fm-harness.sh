@@ -71,16 +71,17 @@ detect_own() {
   # without verifying it reaches children AND that it cannot survive in a
   # multiplexer's stored environment, which is the precedence hazard above.
   # Layer 2: walk the parent chain and match the command name.
-  local pid=$$ comm args
+  local pid=$$ comm args argv0
   for _ in 1 2 3 4 5 6 7 8; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
     args=$(ps -o args= -p "$pid" 2>/dev/null)
+    argv0=$(fm_cursor_argv0_for_pid "$pid" "$comm" || true)
     # Cursor identity is narrowed and owned by bin/fm-cursor-lib.sh: an exact
     # cursor-agent name, or Cursor's own install path behind MainThread, a bare
     # interpreter, or the legacy `agent` alias. An unrelated executable named
     # agent, or a path that merely has an agent/ directory component, is not
     # Cursor and must fall through to the checks below.
-    if fm_cursor_process_matches "$comm" "$args"; then echo cursor; return; fi
+    if fm_cursor_process_matches "$comm" "$args" "$argv0"; then echo cursor; return; fi
     case "$(basename -- "$comm")" in
       *claude*) echo claude; return ;;
       *codex*) echo codex; return ;;
