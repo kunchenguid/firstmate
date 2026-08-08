@@ -2106,15 +2106,18 @@ kimi_capture() {
 
 # cursor_worker_server_record: after a cursor-agent launch, find the CLI's
 # background `node .../index.js worker-server` child and record its pid plus a
-# process identity in state/<id>.meta so teardown can reap it by pid even
-# after it detaches (reparents to init) and its cwd leaves the task worktree
-# (an observed worker-server cleanup gap, 2026-08-05).
+# process identity atomically in state/<id>.worker-server so teardown can reap
+# it by pid even after it detaches (reparents to init) and its cwd leaves the
+# task worktree (an observed worker-server cleanup gap, 2026-08-05).
 #
 # Discovery: the worker-server is a direct child of the cursor-agent process
 # running in this task's pane, so it is found from the pane's own process tree
 # (tmux: ps -t <pane-tty>; herdr: pane process-info foreground pids). The
 # bounded poll runs immediately after Enter, before the worker-server can
-# detach. No match is not fatal: teardown falls back to its cwd-based reaper.
+# detach. Ownership evidence is MANDATORY: if the worker-server cannot be
+# found and recorded atomically within the bounded poll, spawn fails and
+# rolls back the endpoint rather than proceeding with untracked state.
+# The record file is written via temp+mv so it is never partially visible.
 # Never matched by a generic worker-server cmdline scan - the install dir and
 # cmdline are shared across homes and tasks.
 # True when the process whose full argument string is $1 is the Cursor CLI
@@ -2130,7 +2133,11 @@ cursor_process_matches() {  # <args> <cursor-binary> <argv0>
   local args=$1 binary=$2 argv0=${3:-}
   [ -n "$args" ] || return 1
   [ -n "$argv0" ] || return 1
-  fm_cursor_process_matches "$argv0" "$args" "$argv0" || return 1
+  # Structural match first; probe-based alias as fallback (mirrors the
+  # resolver's own fallback chain in fm_cursor_resolve_binary).
+  if ! fm_cursor_process_matches "$argv0" "$args" "$argv0"; then
+    fm_cursor_probe_is_cursor "$argv0" || return 1
+  fi
   [ "$(fm_cursor_canonical_path "$argv0")" = "$(fm_cursor_canonical_path "$binary")" ]
 }
 
@@ -2167,14 +2174,13 @@ cursor_worker_server_find() {  # <backend> <target> <cursor-binary> -> pid on st
 # The recorded identity is produced by the SAME parse teardown re-checks
 # (fm_process_identity, bin/fm-process-identity-lib.sh), so a comm containing
 # spaces cannot make the two disagree and silently defeat the recycled-pid check.
-cursor_worker_server_record() {  # <backend> <target> <meta>
-  local backend=$1 target=$2 meta=$3 agent_pid worker_pid identity binary=${CURSOR_BIN:-cursor-agent} argv0 i
+cursor_worker_server_record() {  # <backend> <target> -> 0 when recorded atomically, 1 when evidence missing
+  local backend=$1 target=$2 agent_pid worker_pid identity binary=${CURSOR_BIN:-cursor-agent} argv0 i ws_file tmp
+  ws_file="$STATE/$ID.worker-server"
   for i in 1 2 3 4 5; do
     agent_pid=
     while IFS= read -r pid; do
       [ -n "$pid" ] || continue
-      # The selected Cursor process names the selected binary; the
-      # worker-server's cmdline does not, even though its parent does.
       argv0=$(fm_cursor_argv0_for_pid "$pid" || true)
       if cursor_process_matches "$(LC_ALL=C ps -p "$pid" -o args= 2>/dev/null)" "$binary" "$argv0"; then
         agent_pid=$pid
@@ -2187,15 +2193,20 @@ EOF
     worker_pid=$(pgrep -P "$agent_pid" -f 'index.js worker-server' 2>/dev/null | head -1 || true)
     [ -n "$worker_pid" ] || { sleep 0.3; continue; }
     identity=$(fm_process_identity "$worker_pid" 2>/dev/null || true)
-    [ -n "$identity" ] || return 0
-    {
-      echo "cursor_worker_server=$worker_pid"
-      echo "cursor_worker_server_start=$identity"
-    } >> "$meta"
+    [ -n "$identity" ] || continue
+    # Write atomically via temp+mv so teardown never sees a partial record.
+    tmp="$ws_file.tmp.$$"
+    if printf '%s %s\n' "$worker_pid" "$identity" > "$tmp" 2>/dev/null; then
+      mv -f -- "$tmp" "$ws_file" 2>/dev/null || { rm -f -- "$tmp" 2>/dev/null || true; continue; }
+    else
+      rm -f -- "$tmp" 2>/dev/null || true
+      continue
+    fi
     echo "cursor worker-server recorded for $ID: pid=$worker_pid start=$identity" >&2
     return 0
   done
-  return 0
+  echo "cursor worker-server could not be discovered for $ID after bounded poll; refusing to proceed with untracked task" >&2
+  return 1
 }
 
 kimi_capture_has_empty_composer() {  # <plain-pane-capture>
@@ -2835,9 +2846,17 @@ if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
 fi
 spawn_send_key "$T" Enter
 if [ "$HARNESS" = cursor ]; then
-  # Record the CLI's background worker-server so teardown can reap it by pid
-  # even after it detaches from the pane (see cursor_worker_server_record).
-  cursor_worker_server_record "$BACKEND" "$T" "$STATE/$ID.meta"
+  # Establish worker-server ownership evidence before the task is considered
+  # live. cursor_worker_server_record writes a state/<id>.worker-server file
+  # atomically (temp+mv). Failure here rolls back the endpoint and the task
+  # so no untracked worker-server can survive teardown.
+  if ! cursor_worker_server_record "$BACKEND" "$T"; then
+    echo "failed: cursor worker-server ownership could not be established; rolling back endpoint and task state" >> "$STATE/$ID.status"
+    echo "error: cursor worker-server ownership could not be established; the task will not be left in an untracked state" >&2
+    fm_backend_kill "$BACKEND" "$T" 2>/dev/null || true
+    rm -f "$STATE/$ID.worker-server" 2>/dev/null || true
+    exit 1
+  fi
 fi
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then

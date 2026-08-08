@@ -136,6 +136,8 @@ run_spawn() {
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
     CLAUDE_CONFIG_DIR='' \
+    FM_FAKE_CURSOR_AGENT_ARGS="$fakebin/cursor-agent --force --trust brief" \
+    FM_FAKE_CURSOR_AGENT_PID=4242 FM_FAKE_CURSOR_WORKER_PID=$$ \
     FM_FAKE_LAUNCH_LOG="$launchlog" GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
     "$SPAWN" "$@" 2>&1
 }
@@ -285,6 +287,8 @@ test_cursor_resolver_falls_back_to_proven_agent_alias() {
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
+    FM_FAKE_CURSOR_AGENT_ARGS="$FAKEBIN_DIR/agent --force --trust brief" \
+    FM_FAKE_CURSOR_AGENT_PID=4242 FM_FAKE_CURSOR_WORKER_PID=$$ \
     FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" PATH="$FAKEBIN_DIR:/usr/bin:/bin:/usr/sbin:/sbin" \
     "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1)
   status=$?
@@ -313,6 +317,8 @@ test_cursor_resolver_accepts_symlinked_agent_alias() {
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
+    FM_FAKE_CURSOR_AGENT_ARGS="$FAKEBIN_DIR/agent --force --trust brief" \
+    FM_FAKE_CURSOR_AGENT_PID=4242 FM_FAKE_CURSOR_WORKER_PID=$$ \
     FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" PATH="$FAKEBIN_DIR:/usr/bin:/bin:/usr/sbin:/sbin" \
     "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1)
   status=$?
@@ -372,6 +378,8 @@ test_cursor_resolver_unix_home_fallback() {
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
+    FM_FAKE_CURSOR_AGENT_ARGS="$fallback_bin/cursor-agent --force --trust brief" \
+    FM_FAKE_CURSOR_AGENT_PID=4242 FM_FAKE_CURSOR_WORKER_PID=$$ \
     FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" PATH="$FAKEBIN_DIR:/usr/bin:/bin:/usr/sbin:/sbin" \
     "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1)
   status=$?
@@ -533,12 +541,14 @@ test_cursor_worker_server_recorded_at_spawn() {
     "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1)
   status=$?
   expect_code 0 "$status" "cursor spawn with a worker-server child should succeed"
-  assert_grep "cursor_worker_server=$worker_pid" "$HOME_DIR/state/$id.meta" \
-    "cursor spawn did not record the worker-server pid in meta"
-  assert_grep "cursor_worker_server_start=" "$HOME_DIR/state/$id.meta" \
+  assert_grep "$worker_pid " "$HOME_DIR/state/$id.worker-server" \
+    "cursor spawn did not record the worker-server pid in the atomic record"
+  assert_grep "starttime=" "$HOME_DIR/state/$id.worker-server" \
     "cursor spawn did not record the worker-server starttime identity"
+  [ "$(wc -l < "$HOME_DIR/state/$id.worker-server")" -eq 1 ] \
+    || fail "cursor spawn worker-server record must be exactly one line"
   kill -KILL "$worker_pid" 2>/dev/null || true
-  pass "cursor spawn records the worker-server pid and starttime identity in meta"
+  pass "cursor spawn records the worker-server pid and starttime identity atomically"
 }
 
 test_cursor_worker_server_alias_uses_portable_identity() {
@@ -567,21 +577,24 @@ test_cursor_worker_server_alias_uses_portable_identity() {
     "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1)
   status=$?
   expect_code 0 "$status" "cursor alias spawn without /proc should succeed"
-  assert_grep "cursor_worker_server=$worker_pid" "$HOME_DIR/state/$id.meta" \
+  assert_grep "$worker_pid " "$HOME_DIR/state/$id.worker-server" \
     "cursor alias spawn did not record the worker-server pid"
-  assert_grep 'cursor_worker_server_start=lstart=' "$HOME_DIR/state/$id.meta" \
+  assert_grep 'lstart=' "$HOME_DIR/state/$id.worker-server" \
     "cursor alias spawn did not record the portable lstart identity"
+  [ "$(wc -l < "$HOME_DIR/state/$id.worker-server")" -eq 1 ] \
+    || fail "cursor alias spawn worker-server record must be exactly one line"
   kill -KILL "$worker_pid" 2>/dev/null || true
   pass "cursor worker-server discovery handles agent alias and portable identity"
 }
 
-test_cursor_worker_server_absent_record_is_omitted() {
+test_cursor_worker_server_absent_record_refuses_spawn() {
   local rec id out status
   id=cursor-worker-none-z9
   rec=$(make_cursor_case cursor-worker-none "$id")
   read_case_record "$rec"
-  # No worker-server child: the fake pgrep exits 1, so no record is written and
-  # the spawn still succeeds (teardown falls back to its cwd-based reaper).
+  # No worker-server child: the fake pgrep exits 1. The bounded poll
+  # exhausts and cursor_worker_server_record returns 1. Spawn must fail
+  # rather than proceed with an untracked task.
   out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
@@ -591,11 +604,106 @@ test_cursor_worker_server_absent_record_is_omitted() {
     FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1)
   status=$?
-  expect_code 0 "$status" "cursor spawn without a worker-server child should succeed"
-  if grep -q '^cursor_worker_server=' "$HOME_DIR/state/$id.meta" 2>/dev/null; then
-    fail "cursor spawn without a worker-server child must not write a worker-server record"
+  expect_code 1 "$status" "cursor spawn without a worker-server child must refuse"
+  if [ -f "$HOME_DIR/state/$id.worker-server" ]; then
+    fail "cursor spawn without a worker-server child must not produce a partial record"
   fi
-  pass "cursor spawn without a worker-server child records nothing and still succeeds"
+  pass "cursor spawn without a worker-server child refuses and rolls back"
+}
+
+test_cursor_worker_server_discovery_timeout_causes_rollback() {
+  # A worker-server that never appears within the bounded poll must cause
+  # spawn to refuse and roll back the endpoint - no meta, no leaked pane.
+  local rec id out status
+  id=cursor-worker-timeout-ze
+  rec=$(make_cursor_case cursor-worker-timeout-rollback "$id")
+  read_case_record "$rec"
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
+    FM_FAKE_CURSOR_AGENT_ARGS="$FAKEBIN_DIR/cursor-agent --force --trust brief" \
+    FM_FAKE_CURSOR_AGENT_PID=4242 FM_FAKE_CURSOR_WORKER_PID='' \
+    FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" PATH="$FAKEBIN_DIR:$PATH" \
+    "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  expect_code 1 "$status" "cursor spawn with discovery timeout must refuse"
+  # The rollback must not leave a worker-server record or meta behind.
+  [ ! -f "$HOME_DIR/state/$id.worker-server" ] \
+    || fail "discovery timeout rollback must not leave a worker-server record"
+  pass "cursor spawn discovery timeout causes refusal and endpoint rollback"
+}
+
+test_cursor_worker_server_atomic_record_no_partial_write() {
+  # The worker-server record is written atomically via temp+mv. After a
+  # successful spawn the record file must exist with exactly one line
+  # containing pid and identity, never a partial line.
+  local rec id out status worker_pid line_count
+  id=cursor-worker-atomic-zf
+  rec=$(make_cursor_case cursor-worker-atomic "$id")
+  read_case_record "$rec"
+  ( exec sleep 300 ) &
+  worker_pid=$!
+  disown
+  sleep 0.3
+  kill -0 "$worker_pid" 2>/dev/null || fail "$id: worker stand-in did not start"
+
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
+    FM_FAKE_CURSOR_AGENT_ARGS="$FAKEBIN_DIR/cursor-agent --force --trust brief" \
+    FM_FAKE_CURSOR_AGENT_PID=4242 FM_FAKE_CURSOR_WORKER_PID=$worker_pid \
+    FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" PATH="$FAKEBIN_DIR:$PATH" \
+    "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  expect_code 0 "$status" "cursor spawn with worker-server must succeed"
+  [ -f "$HOME_DIR/state/$id.worker-server" ] \
+    || fail "cursor spawn must produce an atomic worker-server record"
+  line_count=$(wc -l < "$HOME_DIR/state/$id.worker-server" 2>/dev/null || echo 0)
+  [ "$line_count" -eq 1 ] \
+    || fail "cursor spawn worker-server record must be exactly one line, got $line_count"
+  # The line must contain <pid> <identity> - two space-separated fields.
+  read -r recorded_pid recorded_identity < "$HOME_DIR/state/$id.worker-server"
+  [ "$recorded_pid" = "$worker_pid" ] \
+    || fail "recorded pid $recorded_pid != worker pid $worker_pid"
+  [ -n "$recorded_identity" ] \
+    || fail "recorded identity must be non-empty"
+  kill -KILL "$worker_pid" 2>/dev/null || true
+  pass "cursor worker-server record is atomic: one line, pid+identity, no partial write"
+}
+
+test_cursor_worker_server_reaped_after_cwd_no_longer_belongs_to_task() {
+  # The recorded worker-server is reaped by pid+identity even after it has
+  # left the task worktree's cwd. The cwd-based reaper cannot see it; the
+  # dedicated record must carry the reap.
+  local rec id out status worker_pid ws_file pid_from_record identity_from_record
+  id=cursor-ws-detached-zg
+  rec=$(make_cursor_case cursor-worker-reap "$id")
+  read_case_record "$rec"
+  ( exec sleep 300 ) &
+  worker_pid=$!
+  disown
+  sleep 0.3
+  kill -0 "$worker_pid" 2>/dev/null || fail "$id: worker stand-in did not start"
+
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
+    FM_FAKE_CURSOR_AGENT_ARGS="$FAKEBIN_DIR/cursor-agent --force --trust brief" \
+    FM_FAKE_CURSOR_AGENT_PID=4242 FM_FAKE_CURSOR_WORKER_PID=$worker_pid \
+    FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" PATH="$FAKEBIN_DIR:$PATH" \
+    "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  expect_code 0 "$status" "cursor spawn with worker-server must succeed"
+  ws_file="$HOME_DIR/state/$id.worker-server"
+  [ -f "$ws_file" ] || fail "worker-server record must exist after successful spawn"
+  read -r pid_from_record identity_from_record < "$ws_file"
+  [ "$pid_from_record" = "$worker_pid" ] || fail "recorded pid mismatch: $pid_from_record != $worker_pid"
+  # The worker still runs; teardown should reap it by the recorded identity.
+  kill -KILL "$worker_pid" 2>/dev/null || true
+  pass "recorded detached worker is identified for reap after cwd no longer belongs to task"
 }
 
 # make_spaced_comm_proc <root> <pid> <starttime>
@@ -689,9 +797,9 @@ test_cursor_worker_server_reaped_after_spaced_comm_record() {
     "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1)
   status=$?
   expect_code 0 "$status" "cursor spawn with a spaced-comm worker-server should succeed"$'\n'"$out"
-  recorded=$(grep '^cursor_worker_server_start=' "$HOME_DIR/state/$id.meta" | tail -1)
-  [ "$recorded" = "cursor_worker_server_start=starttime=5551212" ] \
-    || fail "spawn recorded '$recorded', expected the spaced-comm starttime 5551212"
+  recorded=$(cat "$HOME_DIR/state/$id.worker-server" 2>/dev/null)
+  [ "${recorded#* }" = "starttime=5551212" ] \
+    || fail "spawn recorded '$recorded', expected space-separated record whose identity is starttime=5551212"
   kill -KILL "$worker_pid" 2>/dev/null || true
   pass "spawn records the spaced-comm starttime teardown later re-checks"
 }
@@ -752,7 +860,10 @@ test_non_cursor_launch_unsets_cursor_agent
 test_muse_launch_unsets_cursor_agent
 test_cursor_worker_server_recorded_at_spawn
 test_cursor_worker_server_alias_uses_portable_identity
-test_cursor_worker_server_absent_record_is_omitted
+test_cursor_worker_server_absent_record_refuses_spawn
+test_cursor_worker_server_discovery_timeout_causes_rollback
+test_cursor_worker_server_atomic_record_no_partial_write
+test_cursor_worker_server_reaped_after_cwd_no_longer_belongs_to_task
 test_worker_server_identity_survives_spaced_comm
 test_process_identity_portable_lstart_fallback
 test_cursor_worker_server_reaped_after_spaced_comm_record
