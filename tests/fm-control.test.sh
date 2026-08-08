@@ -707,17 +707,26 @@ test_muse_interrupt_confirms_adapter_acknowledgement() {
 }
 
 test_agent_that_does_not_stop_fails_closed() {
-  local dir out rc
+  local dir out rc gen
   dir=$(new_case stubborn)
   add_task "$dir" t1 claude
   alive_as "$dir" claude
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$dir/home/state" t1)
+  printf 'busy_gen=%s\n' "$gen" >> "$dir/home/state/t1.meta"
   out=$(env FM_FAKE_NEVER_DIES=1 PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" \
     FM_FAKE_DIR="$dir/fake" FM_CONTROL_POLL=0.01 FM_CONTROL_EXIT_WAIT=0.05 \
     "$CONTROL" t1 exit 2>&1); rc=$?
   expect_code 1 "$rc" "an agent that ignores its exit command should fail closed"
   assert_contains "$out" "did not stop" "the failure should say the agent did not stop"
-  assert_contains "$out" "nothing was changed" "the failure should say nothing was changed"
-  pass "fm-control exit: an agent that ignores its exit command fails closed instead of claiming success"
+  assert_contains "$out" "exit-delivered t1 interrupt=delivered verified=agent-alive cancel=unconfirmed exit-command=delivered agent-state=alive exit=unconfirmed" \
+    "the failure should distinguish delivered lifecycle input from the unconfirmed exit"
+  assert_not_contains "$out" "nothing was changed" \
+    "the failure must not deny the lifecycle input that was delivered"
+  [ "$(keys_sent "$dir")" = Escape ] \
+    || fail "a stubborn busy agent should receive its interrupt sequence"
+  [ "$(literals "$dir")" = /exit ] \
+    || fail "a stubborn busy agent should receive its exit command"
+  pass "fm-control exit: a stubborn agent reports delivered input and an unconfirmed exit"
 }
 
 test_grok_interrupt_without_acknowledgement_reports_unconfirmed() {

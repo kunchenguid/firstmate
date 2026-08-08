@@ -37,7 +37,9 @@
 #              of this verb. With no explicit axis, a secondmate re-resolves its
 #              durable config/secondmate-harness pin (harness plus its optional
 #              model and effort tokens) exactly as any other respawn does, while
-#              a ship or scout keeps the harness already recorded for it.
+#              a ship or scout keeps the exact adapter already recorded for it.
+#              A prefixed raw-command basename cannot reconstruct its launch
+#              command, so relaunch requires an explicit --harness for it.
 #              --note is required for a ship or scout, whose replacement
 #              inherits the local copy but none of the conversation; a
 #              secondmate reconciles its own home's records at startup, so its
@@ -414,7 +416,7 @@ do_interrupt() {
 # do_exit: stop the running agent, preserving endpoint and worktree. Prints
 # `already-stopped` or `stopped`.
 do_exit() {
-  local state cmd verdict
+  local state cmd verdict interrupt_result=not-needed
   require_state_verified_backend exit
   state=$(agent_state)
   case "$state" in
@@ -428,7 +430,7 @@ do_exit() {
   esac
   # A busy agent is interrupted first before the exit command is submitted.
   case "$(busy_verdict)" in
-    busy*) do_interrupt >/dev/null ;;
+    busy*) interrupt_result="delivered verified=$(do_interrupt)" ;;
   esac
   cmd=$(fm_control_exit_command "$HARNESS")
   # The submit verdict is NOT the postcondition here: a successful exit command
@@ -442,7 +444,7 @@ do_exit() {
   [ "$verdict" != send-failed ] \
     || die "the exit command could not be sent to task $ID on $BACKEND"
   state=$(wait_agent_state "$EXIT_WAIT" dead) || {
-    die "task $ID's agent was still '$state' ${EXIT_WAIT}s after its exit command; the agent did not stop and nothing was changed"
+    die "exit-delivered $ID interrupt=$interrupt_result exit-command=delivered agent-state=$state exit=unconfirmed; the agent did not stop within ${EXIT_WAIT}s"
   }
   # The incarnation is over: retire its busy wiring so no stale record or
   # orphaned generation survives the agent that produced it.
@@ -574,6 +576,10 @@ resolve_relaunch_profile() {
   PRIOR_EFFORT=$(fm_meta_get "$META" effort)
   [ -n "$PRIOR_MODEL" ] || PRIOR_MODEL=default
   [ -n "$PRIOR_EFFORT" ] || PRIOR_EFFORT=default
+  if [ "$HARNESS_SET" = 0 ] \
+     && [ "$PRIOR_RECORDED_HARNESS" != "$PRIOR_HARNESS" ]; then
+    die "task $ID records harness '$PRIOR_RECORDED_HARNESS', whose original launch command cannot be reconstructed from its recorded basename; relaunching without --harness would substitute the canonical adapter '$PRIOR_HARNESS' for the command actually running. Pass an explicit --harness to choose the replacement runtime deliberately"
+  fi
   CONFIG_HARNESS=
   CONFIG_MODEL=
   CONFIG_EFFORT=

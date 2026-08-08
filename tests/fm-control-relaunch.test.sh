@@ -474,6 +474,37 @@ test_harness_switch_resolves_a_prefixed_recorded_harness() {
   pass "fm-control relaunch: a prefixed recorded harness can switch adapters transactionally"
 }
 
+test_prefixed_recorded_harness_requires_explicit_replacement() {
+  local dir out rc meta brief
+  dir=$(new_case prefixrefuse rl34)
+  add_ship_task "$dir" rl34 grok-2
+  printf 'grok-2' > "$dir/fake/command"
+  meta="$dir/home/state/rl34.meta"
+  brief="$dir/home/data/rl34/brief.md"
+  cp "$meta" "$dir/meta.before"
+  cp "$brief" "$dir/brief.before"
+
+  out=$(run_control "$dir" rl34 relaunch --note "continue safely"); rc=$?
+  expect_code 1 "$rc" "implicit relaunch from a prefixed command should refuse"
+  assert_contains "$out" "original launch command cannot be reconstructed from its recorded basename" \
+    "the refusal should name the missing launch identity"
+  assert_contains "$out" "would substitute the canonical adapter 'grok'" \
+    "the refusal should name the unsafe substitution"
+  assert_contains "$out" "Pass an explicit --harness" \
+    "the refusal should name the deliberate replacement path"
+  cmp -s "$meta" "$dir/meta.before" \
+    || fail "a refused prefixed relaunch must leave metadata byte-identical"
+  cmp -s "$brief" "$dir/brief.before" \
+    || fail "a refused prefixed relaunch must leave instructions byte-identical"
+  [ "$(cat "$dir/fake/command")" = grok-2 ] \
+    || fail "a refused prefixed relaunch must leave the original agent alive"
+  [ -z "$(cat "$dir/fake/literal")" ] && [ -z "$(cat "$dir/fake/keys")" ] \
+    || fail "a refused prefixed relaunch must deliver no lifecycle input"
+  [ ! -e "$dir/home/state/rl34.control-relaunch" ] \
+    || fail "a refused prefixed relaunch must not create a durable journal"
+  pass "fm-control relaunch: a prefixed command requires an explicit replacement harness"
+}
+
 test_same_harness_relaunch_keeps_the_profile_axes() {
   local dir out rc
   dir=$(new_case keepprofile rl6)
@@ -1277,6 +1308,7 @@ test_relaunch_requires_a_note_for_a_ship_task
 test_harness_switch_moves_the_record_and_clears_prior_wiring
 test_harness_switch_does_not_carry_the_old_profile_axes
 test_harness_switch_resolves_a_prefixed_recorded_harness
+test_prefixed_recorded_harness_requires_explicit_replacement
 test_same_harness_relaunch_keeps_the_profile_axes
 test_explicit_model_wins_over_the_recorded_one
 test_relaunch_onto_an_unverified_harness_is_refused
