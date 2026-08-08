@@ -69,6 +69,8 @@ Two harness-specific consequences are load-bearing rather than incidental.
 
 Codex's interactive TUI is a run-tier surface when the hooks feature was enabled before process start and both trust gates are satisfied.
 The prior interactive negative did not pin that feature precondition and is superseded by the fresh-process evidence below.
+Pi is the second: its compaction is only observable once two preconditions are met, and it reports a context-preserving reopen as `startup` rather than `resume`.
+Each consequence is recorded under its own heading below.
 
 ### Codex feature, trust, and interactive hook delivery
 
@@ -95,12 +97,15 @@ What it must never do is persist a throwaway decision, so its assertion is scope
 It supplies the throwaway lab's directory trust as the per-process override `-c 'projects={"<lab>"={trust_level="trusted"}}'`, which suppresses the trust prompt without writing a record; the dotted-path form `-c projects."<lab>".trust_level="trusted"` does not reach the trust lookup and leaves the prompt up.
 Per-hook review is bypassed for the invocation with `--dangerously-bypass-hook-trust`, and the guard refuses to answer any trust dialog that still appears rather than pressing Enter.
 It then asserts `config.toml` is byte-identical before and after, and a difference fails the run and keeps a pre-run copy for inspection rather than restoring anything, because the guard cannot tell its own write from a concurrent Codex session's legitimate one.
+That comparison runs from the guard's cleanup on every exit path, so a probe that fails partway through - the case where a bypassed gate is most likely to have started writing - still reports the verdict, and both the pre-run copy and the comparison live outside the throwaway lab that cleanup deletes.
 
 The installed Codex source and the disabled-at-launch counterfactual establish a different boundary for the feature flag.
 Hook trust state can reload in one process, but derived feature gates are session-static, so changing `features.hooks` from false to true after launch does not activate hooks until a genuinely new Codex process starts.
 Changed command hashes still require review again after that restart.
 
-Pi compaction was verified on 2026-08-05 with Pi 0.82.0 in the same throwaway lab after setting `.pi/settings.json` `compaction.keepRecentTokens` to 200 and completing one substantial assistant-prose turn before issuing `/compact`.
+### Pi compaction preconditions and resume vocabulary
+
+Pi compaction was verified on 2026-08-05 with Pi 0.82.0 in the throwaway Firstmate-shaped lab behind the table above, after setting `.pi/settings.json` `compaction.keepRecentTokens` to 200 and completing one substantial assistant-prose turn before issuing `/compact`.
 Pi reported `Compacted from 7,697 tokens`, the recorder observed `session_compact`, and the model quoted the freshly injected `source=compact` token back.
 Both preconditions are load-bearing: the stock 20,000-token keep window exceeds a small lab session, and `AgentSession.compact()` aborts an in-flight turn before measuring compactable history, which otherwise discards that turn and reports `Nothing to compact (session too small)`.
 Tool output alone does not grow compactable context; the completed assistant prose does.

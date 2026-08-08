@@ -60,8 +60,9 @@ fi
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 unset NO_MISTAKES_GATE
 
+report_not_ok() { printf 'not ok - %s\n' "$1" >&2; }
 fail() {
-  printf 'not ok - %s\n' "$1" >&2
+  report_not_ok "$1"
   exit 1
 }
 pass() { printf 'ok - %s\n' "$1"; }
@@ -78,8 +79,15 @@ CHECKED=0
 ABSENT=
 
 cleanup() {
+  EXIT_STATUS=$?
+  trap - EXIT INT TERM
   tmux -L "$SOCKET" kill-server >/dev/null 2>&1 || true
+  # Every exit path lands here, including the immediate exit inside `fail`, so
+  # the live-config verdict is reported on a failing probe too - and while the
+  # pre-run copy still exists, since the lab goes away on the next line.
+  if ! codex_config_verify && [ "$EXIT_STATUS" -eq 0 ]; then EXIT_STATUS=1; fi
   rm -rf "$LAB"
+  exit "$EXIT_STATUS"
 }
 trap cleanup EXIT INT TERM
 
@@ -130,7 +138,17 @@ TRUST_UI='do you trust|trust (this|the|parent) |trust the contents of this|trust
 # granting trust, a `/model` change, a feature toggle, first-run creation). It
 # cannot tell such a write apart from its own, so it keeps a pre-run copy for
 # comparison and never restores it, nor tells anyone to restore it wholesale.
+#
+# Both the pre-run copy and the comparison live OUTSIDE the lab, and the
+# comparison runs from cleanup, because the failure paths are exactly the ones
+# that need it: every `fail` inside a probe exits at once, and a check wired
+# only into the success path would be skipped precisely when a probe died
+# because a gate it was supposed to bypass started writing again.
 CODEX_CONFIG="${CODEX_HOME:-$HOME/.codex}/config.toml"
+CODEX_CONFIG_BEFORE="${TMPDIR:-/tmp}/fm-sessionstart-hook-live-e2e.codex-config.$$.toml"
+CODEX_CONFIG_LAB=
+CODEX_CONFIG_PHASE=
+CODEX_CONFIG_VERDICT=
 
 codex_trust_override() {  # <lab> -> echoes the per-process trust override
   printf 'projects={"%s"={trust_level="trusted"}}' "$1"
@@ -140,17 +158,38 @@ codex_config_snapshot() {  # <dest>
   if [ -f "$CODEX_CONFIG" ]; then cp "$CODEX_CONFIG" "$1"; else : > "$1"; fi
 }
 
-codex_config_assert_unchanged() {  # <snapshot> <lab> <what>
-  local snapshot=$1 lab=$2 what=$3 now="$LAB/codex-config.now" rescue
+codex_config_arm() {  # <lab> <what>: take the pre-run copy the verdict compares against
+  CODEX_CONFIG_LAB=$1
+  CODEX_CONFIG_PHASE=$2
+  CODEX_CONFIG_VERDICT=
+  codex_config_snapshot "$CODEX_CONFIG_BEFORE"
+}
+
+# Reports and RETURNS rather than exiting, so it can neither be skipped by an
+# earlier failure nor turn a failing run into a passing one; the caller decides
+# the exit status. Idempotent and cheap to call twice: it reads config.toml
+# once, caches the verdict, and repeats it silently afterwards.
+codex_config_verify() {  # -> 0 unchanged (or never armed), 1 changed
+  local now
+  [ -n "$CODEX_CONFIG_LAB" ] || return 0
+  [ -z "$CODEX_CONFIG_VERDICT" ] || return "$CODEX_CONFIG_VERDICT"
+  now="${TMPDIR:-/tmp}/fm-sessionstart-hook-live-e2e.codex-config-now.$$.toml"
   codex_config_snapshot "$now"
-  cmp -s "$snapshot" "$now" && return 0
-  rescue="${TMPDIR:-/tmp}/fm-sessionstart-hook-live-e2e.codex-config.$$.toml"
-  cp "$snapshot" "$rescue" 2>/dev/null || true
-  diff "$snapshot" "$now" >&2 || true
-  if grep -Fq "$lab" "$now" 2>/dev/null; then
-    fail "codex: $what persisted the throwaway lab path '$lab' into $CODEX_CONFIG, which the per-process trust override and --dangerously-bypass-hook-trust are supposed to make impossible; remove the entries naming that path by hand, reading the pre-run copy kept at $rescue as the reference, and do not copy that file back wholesale, because anything else in the diff above may be a concurrent Codex session's legitimate write"
+  if cmp -s "$CODEX_CONFIG_BEFORE" "$now"; then
+    CODEX_CONFIG_VERDICT=0
+    rm -f "$now" "$CODEX_CONFIG_BEFORE"
+    pass "codex: the live Codex config gained no throwaway directory trust or hook state"
+    return 0
   fi
-  fail "codex: $what saw $CODEX_CONFIG change with no lab path in it, so this guard cannot attribute the change and will not guess; the pre-run copy is kept at $rescue, and the diff above is for inspection only - do not restore it blindly, because a concurrent Codex session writes this file for its own reasons"
+  CODEX_CONFIG_VERDICT=1
+  diff "$CODEX_CONFIG_BEFORE" "$now" >&2 || true
+  if grep -Fq "$CODEX_CONFIG_LAB" "$now" 2>/dev/null; then
+    report_not_ok "codex: $CODEX_CONFIG_PHASE persisted the throwaway lab path '$CODEX_CONFIG_LAB' into $CODEX_CONFIG, which the per-process trust override and --dangerously-bypass-hook-trust are supposed to make impossible; remove the entries naming that path by hand, reading the pre-run copy kept at $CODEX_CONFIG_BEFORE as the reference, and do not copy that file back wholesale, because anything else in the diff above may be a concurrent Codex session's legitimate write"
+  else
+    report_not_ok "codex: $CODEX_CONFIG_PHASE saw $CODEX_CONFIG change with no lab path in it, so this guard cannot attribute the change and will not guess; the pre-run copy is kept at $CODEX_CONFIG_BEFORE, and the diff above is for inspection only - do not restore it blindly, because a concurrent Codex session writes this file for its own reasons"
+  fi
+  rm -f "$now"
+  return 1
 }
 
 # --- lab ---------------------------------------------------------------------
@@ -426,16 +465,18 @@ for harness in claude codex pi; do
         claude --permission-mode bypassPermissions
       ;;
     codex)
-      codex_config_snapshot "$LAB/codex-config.before"
       trust_override=$(codex_trust_override "$lab")
+      codex_config_arm "$lab" "the headless probes"
       probe_process_opens codex "$version" "$lab" resume \
         codex exec -c "$trust_override" --enable hooks --dangerously-bypass-hook-trust --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check \
         -- codex exec resume --last -c "$trust_override" --enable hooks --dangerously-bypass-hook-trust --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check
-      codex_config_assert_unchanged "$LAB/codex-config.before" "$lab" "the headless probes"
+      CODEX_CONFIG_PHASE="the interactive probe"
       probe_context_reset codex "$version" "$lab" /clear \
         codex -c "$trust_override" --enable hooks --dangerously-bypass-hook-trust --dangerously-bypass-approvals-and-sandbox
-      codex_config_assert_unchanged "$LAB/codex-config.before" "$lab" "the interactive probe"
-      pass "codex $version: the live Codex config gained no throwaway directory trust or hook state"
+      # Report the verdict here too, so a live-config change stops the run
+      # before the next harness spends model turns; cleanup then repeats this
+      # cached verdict instead of re-reading anything.
+      codex_config_verify || exit 1
       ;;
     pi)
       probe_process_opens pi "$version" "$lab" startup \

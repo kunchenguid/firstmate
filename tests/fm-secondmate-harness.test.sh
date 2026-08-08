@@ -834,7 +834,10 @@ test_spawn_explicit_harness_uses_explicit_profile_axes() {
 
 test_spawned_secondmate_uses_its_harness_supervision_model() {
   local harness expected w sm launchlog launch fakebin out
-  for harness in codex claude; do
+  # opencode stands in for the default `*)` branch: with codex and claude both
+  # on watcher-optional models, it is the only harness here that still demands a
+  # live watcher process, so it is what keeps the persistent branch covered.
+  for harness in codex claude opencode; do
     w="$TMP_ROOT/spawn-supervision-model-$harness"
     sm="$w/sm"
     launchlog="$w/launch.log"
@@ -858,16 +861,23 @@ SH
     case "$harness" in
       codex) expected=checkpoint ;;
       claude) expected=autoarm ;;
+      opencode) expected=persistent ;;
     esac
-    # Both models stay silent on a fresh beacon with no watcher, so the
-    # behavior check alone cannot tell them apart; pin the delivered model too.
+    # The watcher-optional models stay silent on a fresh beacon with no watcher,
+    # so the behavior check alone cannot tell them apart; pin the delivered
+    # model too.
     assert_contains "$launch" "FM_SUPERVISION_MODEL=$expected " \
       "$harness secondmate launch must pin FM_SUPERVISION_MODEL=$expected, not the primary's model"
     out=$(PATH="$fakebin:$BASE_PATH" CLAUDECODE=1 bash -c "$launch" 2>&1)
-    [ -z "$out" ] \
-      || fail "$harness secondmate with a fresh beacon should be healthy under $expected supervision, got: $out"
+    if [ "$expected" = persistent ]; then
+      assert_contains "$out" 'WATCHER DOWN - SUPERVISION IS OFF' \
+        "$harness secondmate must still alarm on a fresh beacon with no live watcher, not inherit a watcher-optional model"
+    else
+      [ -z "$out" ] \
+        || fail "$harness secondmate with a fresh beacon should be healthy under $expected supervision, got: $out"
+    fi
   done
-  pass "C9 spawn: secondmate launch pins auto-arm or checkpoint supervision to its own harness"
+  pass "C9 spawn: secondmate launch pins auto-arm, checkpoint, or persistent supervision to its own harness"
 }
 
 # The harness fallback chain (secondmate-harness -> crew-harness -> own) still
