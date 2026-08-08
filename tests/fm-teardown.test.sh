@@ -561,6 +561,28 @@ SH
   chmod +x "$case_dir/fakebin/git"
 }
 
+add_git_default_branch_switch_after_fetch() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/git" <<'SH'
+#!/usr/bin/env bash
+real=${REAL_GIT_FOR_TEST:?}
+"$real" "$@"
+rc=$?
+[ "$rc" -eq 0 ] || exit "$rc"
+is_fetch=0
+is_landing_remote=0
+for arg in "$@"; do
+  [ "$arg" = fetch ] && is_fetch=1
+  [ "$arg" = "${FM_TEST_SWITCH_REMOTE_AFTER_FETCH:-}" ] && is_landing_remote=1
+done
+if [ "$is_fetch" = 1 ] && [ "$is_landing_remote" = 1 ]; then
+  "$real" -C "$FM_TEST_SWITCH_REMOTE_AFTER_FETCH" symbolic-ref HEAD refs/heads/other || exit $?
+fi
+exit "$rc"
+SH
+  chmod +x "$case_dir/fakebin/git"
+}
+
 # Run teardown with PATH mocking. Args: case_dir [extra args...]
 run_teardown() {
   local case_dir=$1; shift
@@ -775,6 +797,32 @@ test_unreachable_foreign_override_refuses() {
   expect_code 1 "$rc" "foreign-unreachable: teardown should refuse without remote evidence"
   grep -q REFUSED "$case_dir/stderr" || fail "foreign-unreachable: no REFUSED line in stderr"
   pass "teardown refuses an unreachable foreign landing remote (fail-safe)"
+}
+
+test_foreign_default_change_during_verification_refuses() {
+  local case_dir foreign base main_before main_after default_ref rc
+  case_dir=$(make_case foreign-default-change)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "foreign landing"
+  foreign=$(land_head_on_foreign_default "$case_dir" 1)
+  base=$(git -C "$case_dir/wt" rev-parse HEAD^)
+  git -C "$foreign" update-ref refs/heads/other "$base"
+  main_before=$(git -C "$foreign" rev-parse refs/heads/main)
+  add_git_default_branch_switch_after_fetch "$case_dir"
+
+  set +e
+  FM_TEST_SWITCH_REMOTE_AFTER_FETCH="$foreign" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  main_after=$(git -C "$foreign" rev-parse refs/heads/main)
+  default_ref=$(git -C "$foreign" symbolic-ref HEAD)
+  expect_code 1 "$rc" "foreign-default-change: teardown should refuse when the remote default branch changes during verification"
+  expect_code "$main_before" "$main_after" "foreign-default-change: main changed while simulating only a default-branch switch"
+  expect_code refs/heads/other "$default_ref" "foreign-default-change: test did not switch the remote default branch"
+  grep -q REFUSED "$case_dir/stderr" || fail "foreign-default-change: no REFUSED line in stderr"
+  pass "teardown refuses a remote default branch change during verification"
 }
 
 test_squash_merged_branch_deleted_allows() {
@@ -2593,6 +2641,7 @@ test_no_mistakes_origin_remote_allows
 test_foreign_configured_remote_default_allows
 test_foreign_override_remote_default_allows
 test_unreachable_foreign_override_refuses
+test_foreign_default_change_during_verification_refuses
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
 test_teardown_missing_busy_sidecar_completes

@@ -850,7 +850,7 @@ landing_remote_candidates() {
 # test. A ref-name-only answer, stale tracking ref, failed fetch, or remote change
 # between observations is insufficient evidence and fails closed.
 head_is_landed_on_verified_remote() {  # <remote-url-or-name>
-  local remote=$1 advertised default_ref confirmed fetched current
+  local remote=$1 advertised default_ref confirmed fetched post_fetch post_fetch_ref post_fetch_head current
   [ -n "$remote" ] || return 1
   advertised=$(git -C "$WT" ls-remote --symref "$remote" HEAD 2>/dev/null) || return 1
   default_ref=$(printf '%s\n' "$advertised" | awk '$1 == "ref:" && $3 == "HEAD" { print $2; exit }')
@@ -862,6 +862,13 @@ head_is_landed_on_verified_remote() {  # <remote-url-or-name>
   [ -n "$confirmed" ] || return 1
   [ "$advertised" = "$confirmed" ] || return 1
   git -C "$WT" fetch --no-tags --quiet "$remote" "$default_ref" >/dev/null 2>&1 || return 1
+  post_fetch=$(git -C "$WT" ls-remote --symref "$remote" HEAD 2>/dev/null) || return 1
+  post_fetch_ref=$(printf '%s\n' "$post_fetch" | awk '$1 == "ref:" && $3 == "HEAD" { print $2; exit }')
+  case "$post_fetch_ref" in refs/heads/?*) ;; *) return 1 ;; esac
+  post_fetch_head=$(printf '%s\n' "$post_fetch" | awk '$2 == "HEAD" && $1 != "ref:" { print $1; exit }')
+  case "$post_fetch_head" in ''|*[!0-9a-fA-F]*) return 1 ;; esac
+  [ "$post_fetch_ref" = "$default_ref" ] || return 1
+  [ "$post_fetch_head" = "$advertised" ] || return 1
   fetched=$(git -C "$WT" rev-parse --verify 'FETCH_HEAD^{commit}' 2>/dev/null) || return 1
   [ "$fetched" = "$confirmed" ] || return 1
   current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
