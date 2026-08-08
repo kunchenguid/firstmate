@@ -173,8 +173,55 @@ test_br_show_array_shape_is_handled() {
   pass "br show array shape is pinned in the live guard and the adapter fails closed on non-arrays"
 }
 
+test_held_lock_composition_uses_lock_held_persistence() {
+  # production composition pin: the terminal holds the non-reentrant attempt
+  # lock across the steward step, so the REAL adapter must persist its tracker
+  # receipt through the lock-held mode. With FM_ATTEMPT_LOCK_HELD=1 the close
+  # succeeds under the held lock; without the flag the public observe wrapper
+  # reacquires and refuses, leaving the tracker pending - proving the flag is
+  # what makes the held composition work.
+  local aid rc out req
+  # the push-conflict test leaves the shared fixture genuinely diverged (remote
+  # gained a commit local lacks and vice versa); reset to origin/main so this
+  # close reaches the receipt-persist step instead of the ff-only refresh
+  git -C "$PROJECT" reset --hard origin/main >/dev/null
+  aid=$(fm_attempt_alloc pi dos-h holu) || fail "alloc"
+  fm_attempt_lock_acquire "$aid" || fail "lock acquire"
+  # a failed assertion must not wedge the suite: release the held lock and run
+  # lib.sh's registered cleanup on the way out
+  trap 'fm_attempt_lock_release "$aid" 2>/dev/null || true; fm_test_cleanup' EXIT
+  req="$TMP_ROOT/held-close.json"
+  cat > "$req" <<JSON
+{"attempt_id":"$aid","generation":1,"bead_id":"dos-h","transition":"close","expected_state":"open","expected_source_hash":"$(sha256sum "$PROJECT/.beads/issues.jsonl" | cut -d' ' -f1)","evidence":"landed pr https://github.com/kunchenguid/firstmate/pull/3","authority":"captain:merge","agent":"pi-primary","repo":"$PROJECT"}
+JSON
+  : > "$ORDER"
+  out=$(PATH="$FAKEBIN:$PATH" ORDER_FILE="$ORDER" \
+    ISSUES_FILE="$PROJECT/.beads/issues.jsonl" PROJECT_DIR="$PROJECT" FAKE_ATTEMPT="$aid" \
+    FM_ATTEMPT_LOCK_HELD=1 STORAGE_EXIT=0 "$ROOT/bin/fm-br-receipt.sh" "$req" 2>&1); rc=$?
+  expect_code 0 "$rc" "held-lock close with FM_ATTEMPT_LOCK_HELD=1 should succeed"
+  jq -e '[.receipts.tracker[]? | select(.state == "observed")] | length >= 1' "$STATE/attempts/$aid.json" >/dev/null \
+    || fail "held-lock close did not observe the tracker receipt in the attempt record"
+  # same close call WITHOUT the flag refuses under the held lock: the public
+  # observe wrapper reacquires the non-reentrant lock and cannot proceed. The
+  # request is regenerated with the post-close source hash so the run reaches
+  # the receipt-persist step instead of tripping the earlier source-hash check.
+  cat > "$req" <<JSON
+{"attempt_id":"$aid","generation":1,"bead_id":"dos-h","transition":"close","expected_state":"open","expected_source_hash":"$(sha256sum "$PROJECT/.beads/issues.jsonl" | cut -d' ' -f1)","evidence":"landed pr https://github.com/kunchenguid/firstmate/pull/3","authority":"captain:merge","agent":"pi-primary","repo":"$PROJECT"}
+JSON
+  : > "$ORDER"
+  out=$(PATH="$FAKEBIN:$PATH" ORDER_FILE="$ORDER" \
+    ISSUES_FILE="$PROJECT/.beads/issues.jsonl" PROJECT_DIR="$PROJECT" FAKE_ATTEMPT="$aid" \
+    STORAGE_EXIT=0 "$ROOT/bin/fm-br-receipt.sh" "$req" 2>&1); rc=$?
+  expect_code 1 "$rc" "held-lock close without the flag should refuse"
+  assert_contains "$out" "tracker_pending" "refusal did not leave the tracker pending"
+  fm_attempt_lock_release "$aid"
+  trap 'fm_test_cleanup' EXIT
+  pass "the terminal's held lock composes with the real steward only under FM_ATTEMPT_LOCK_HELD=1"
+}
+
 test_claim_refusal_keeps_attempt_without_copy
 test_closure_receipt_precedes_close_and_list_is_used
 test_only_beads_issues_jsonl_is_committed
 test_push_conflict_records_durable_pending
 test_br_show_array_shape_is_handled
+test_held_lock_composition_uses_lock_held_persistence

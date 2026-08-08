@@ -6,6 +6,14 @@
 # script. Written against the installed br 0.2.19 and br_worktree_storage.py
 # command contracts. Never infers or enlarges authority.
 #
+# FM_ATTEMPT_LOCK_HELD=1 switches receipt persistence to the lock-held
+# primitives (fm_attempt_effect_observe_held / _pending_held): the terminal
+# holds the non-reentrant attempt lock across the steward step, so the public
+# observe/pending wrappers (which reacquire) would refuse. The caller must
+# actually hold the lock; the flag is the contract that it does. Absent the
+# flag, the public wrappers remain the default: the spawn handshake calls the
+# steward without holding the attempt lock.
+#
 # Usage: fm-br-receipt.sh <request-json-file>
 set -u
 FM_HOME="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
@@ -33,9 +41,29 @@ run_storage() {  # <args...>
   (cd "$repo" && PYTHONPATH=src .venv/bin/python "$repo/scripts/br_worktree_storage.py" "$@")
 }
 
+# Lock-held persistence: when FM_ATTEMPT_LOCK_HELD=1 the caller (the terminal)
+# already holds the non-reentrant attempt lock, so these use the _held
+# primitives that never reacquire; otherwise the public wrappers (acquire
+# once, call, release) stay the default.
+observe_tracker_receipt() {  # <attempt> <generation> <evidence-json>
+  if [ "${FM_ATTEMPT_LOCK_HELD:-0}" = 1 ]; then
+    fm_attempt_effect_observe_held "$1" "$2" tracker "$3"
+  else
+    fm_attempt_effect_observe "$1" "$2" tracker "$3"
+  fi
+}
+
+record_tracker_pending() {  # <attempt> <generation> <reason-json>
+  if [ "${FM_ATTEMPT_LOCK_HELD:-0}" = 1 ]; then
+    fm_attempt_effect_pending_held "$1" "$2" tracker "$3"
+  else
+    fm_attempt_effect_pending "$1" "$2" tracker "$3"
+  fi
+}
+
 fail_tracker() {  # <reason>; records a durable pending obligation and refuses
   echo "tracker_pending: $*" >&2
-  fm_attempt_effect_pending "$attempt" "$gen" tracker \
+  record_tracker_pending "$attempt" "$gen" \
     "$(jq -n --arg reason "$*" --arg transition "$transition" \
       '{status:"pending",reason:$reason,transition:$transition,authority:"'"$authority"'"}')" \
     || echo "tracker: failed to record pending obligation for $attempt" >&2
@@ -112,6 +140,6 @@ git push origin main >/dev/null 2>&1 || fail_tracker "push failed (pending oblig
 recv=$(jq -n --arg bead "$bead" --arg post "$post_state" --arg commit "$(git rev-parse HEAD)" \
   --arg source_hash "$actual_hash" --arg post_hash "$post_hash" --arg authority "$authority" \
   '{bead:$bead,status:$post,commit:$commit,source_hash:$source_hash,post_hash:$post_hash,authority:$authority,agent:"'"$agent"'"}')
-fm_attempt_effect_observe "$attempt" "$gen" tracker "$recv" || fail_tracker "receipt persist failed"
+observe_tracker_receipt "$attempt" "$gen" "$recv" || fail_tracker "receipt persist failed"
 rm -f "$STATE_DIR/.tracker-pause"
 echo "tracker_receipt: $attempt $transition $bead $post_state $(git rev-parse HEAD)"

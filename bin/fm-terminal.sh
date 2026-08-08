@@ -163,7 +163,9 @@ if [ "$disp" = landed ]; then
     '{attempt_id:$attempt_id,generation:$generation,bead_id:$bead_id,transition:$transition,expected_state:"open",expected_source_hash:$hash,evidence:"terminal",authority:$authority,agent:$agent,repo:$repo}')
   mkdir -p "$STATE_DIR/attempts/requests"
   echo "$req" > "$STATE_DIR/attempts/requests/$attempt.close.json"
-  "${FM_BR_RECEIPT_BIN:-$SCRIPT_DIR/fm-br-receipt.sh}" \
+  # the terminal holds the attempt lock across this step, so the steward
+  # persists its receipt through the lock-held mode (FM_ATTEMPT_LOCK_HELD=1)
+  FM_ATTEMPT_LOCK_HELD=1 "${FM_BR_RECEIPT_BIN:-$SCRIPT_DIR/fm-br-receipt.sh}" \
     "$STATE_DIR/attempts/requests/$attempt.close.json" \
     || { echo "terminal: tracker receipt pending for $attempt" >&2; exit 1; }
   jq -e --arg gen "$gen" \
