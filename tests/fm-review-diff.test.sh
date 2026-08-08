@@ -155,16 +155,17 @@ test_numeric_pr_meta_fetches_origin_pull_head() {
 }
 
 test_forgejo_pr_meta_fetches_pull_head() {
-  local case_dir out
+  local case_dir out git_ssh
   case_dir=$(make_case forgejo-pr-fetch)
   stale_and_pr_commits "$case_dir"
-  authorize_forgejo_host "$case_dir"
+  git -C "$case_dir/project" remote add forgejo git@forgejo.example:fork/repo.git
   git -C "$case_dir/wt" push -q origin "pr-head-tmp:refs/pull/9/head"
-  git -C "$case_dir/wt" config \
-    url."$case_dir/origin.git".insteadOf https://forgejo.example/owner/repo.git
+  git_ssh=$(fm_fake_git_ssh "$case_dir")
   write_task_meta "$case_dir" "pr=https://forgejo.example/owner/repo/pulls/9"
 
-  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+  out=$(FM_TEST_REAL_GIT="$(command -v git)" FM_TEST_GIT_REPOSITORY="$case_dir/origin.git" \
+    GIT_SSH_COMMAND="$git_ssh" GIT_SSH_VARIANT=ssh \
+    run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
 
   assert_contains "$out" '+pr-fixed' "forgejo-pr-fetch: diff should use fetched pull head"
   assert_not_contains "$out" 'stale-local' "forgejo-pr-fetch: diff must not use the stale local branch"
@@ -174,7 +175,7 @@ test_forgejo_pr_meta_fetches_pull_head() {
 }
 
 test_forgejo_pr_meta_uses_canonical_repository() {
-  local case_dir out
+  local case_dir out git_ssh
   case_dir=$(make_case forgejo-canonical-repository)
   stale_and_pr_commits "$case_dir"
   git -C "$case_dir/project" remote add forgejo git@forgejo.example:fork/repo.git
@@ -187,11 +188,12 @@ test_forgejo_pr_meta_uses_canonical_repository() {
   git -C "$case_dir/wt" push -q "$case_dir/canonical.git" \
     "canonical-head-tmp:refs/pull/9/head"
   git -C "$case_dir/wt" checkout -q fm/task-x1
-  git -C "$case_dir/wt" config \
-    url."$case_dir/canonical.git".insteadOf git@forgejo.example:owner/repo.git
+  git_ssh=$(fm_fake_git_ssh "$case_dir")
   write_task_meta "$case_dir" "pr=https://forgejo.example/owner/repo/pulls/9"
 
-  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+  out=$(FM_TEST_REAL_GIT="$(command -v git)" FM_TEST_GIT_REPOSITORY="$case_dir/canonical.git" \
+    GIT_SSH_COMMAND="$git_ssh" GIT_SSH_VARIANT=ssh \
+    run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
 
   assert_contains "$out" '+canonical-pr' \
     "forgejo-canonical-repository: diff should use the URL repository pull head"

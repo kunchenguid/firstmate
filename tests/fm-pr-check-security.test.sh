@@ -2974,6 +2974,18 @@ ssh://git@forgejo.example:2222/fork/repo.git|ssh://git@forgejo.example:2222/owne
 git://forgejo.example/fork/repo.git|git://forgejo.example/owner/repo.git
 git@forgejo.example:fork/repo.git|git@forgejo.example:owner/repo.git
 EOF
+  git -C "$dir/project" remote set-url origin git@forgejo.example:fork/repo.git
+  git -C "$dir/project" config \
+    url.ssh://git@forgejo.example:2222/.insteadOf git@forgejo.example:
+  fm_pr_forgejo_project_source "$dir/project" forgejo.example owner/repo >/dev/null \
+    || fail "Forgejo source resolution rejected a same-host Git URL rewrite"
+  git -C "$dir/project" config --unset-all \
+    url.ssh://git@forgejo.example:2222/.insteadOf
+  git -C "$dir/project" config \
+    url.ssh://attacker.example/.insteadOf git@forgejo.example:
+  ! fm_pr_forgejo_project_source "$dir/project" forgejo.example owner/repo >/dev/null \
+    || fail "Forgejo source resolution accepted a cross-host Git URL rewrite"
+  git -C "$dir/project" config --unset-all url.ssh://attacker.example/.insteadOf
   git -C "$dir/project" remote set-url origin "file://$dir/project"
   git -C "$dir/project" remote set-url --add --push origin \
     git@forgejo.example:fork/repo.git

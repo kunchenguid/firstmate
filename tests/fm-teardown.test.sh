@@ -784,7 +784,7 @@ test_forgejo_squash_merged_branch_deleted_allows() {
 }
 
 test_forgejo_missing_head_fetches_canonical_repo() {
-  local case_dir rc pr_head
+  local case_dir rc pr_head git_ssh
   case_dir=$(make_case forgejo-canonical-head-fetch)
   write_meta "$case_dir" no-mistakes ship
   git -C "$case_dir/project" remote add forgejo \
@@ -804,16 +804,16 @@ test_forgejo_missing_head_fetches_canonical_repo() {
   ! git -C "$case_dir/wt" cat-file -e "$pr_head^{commit}" 2>/dev/null \
     || fail "forgejo-canonical-head-fetch: canonical head was already local"
 
-  git -C "$case_dir/wt" config \
-    url."$case_dir/canonical.git".insteadOf \
-    ssh://git@forgejo.example:2222/owner/repo.git
+  git_ssh=$(fm_fake_git_ssh "$case_dir")
   printf '%s\n' \
     'pr=https://forgejo.example/owner/repo/pulls/7' \
     "pr_head=$pr_head" >> "$case_dir/state/task-x1.meta"
   add_forgejo_pr_merged_for_head "$case_dir" "$pr_head"
 
   set +e
-  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  FM_TEST_REAL_GIT="$REAL_GIT_FOR_TEST" FM_TEST_GIT_REPOSITORY="$case_dir/canonical.git" \
+    GIT_SSH_COMMAND="$git_ssh" GIT_SSH_VARIANT=ssh \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
 
