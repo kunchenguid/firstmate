@@ -55,10 +55,14 @@ The first two were measured on 2026-08-05 against a throwaway Firstmate-shaped l
 Each open printed a source-stamped token, and the model was asked to quote that token back, so producing hook stdout could never be mistaken for delivering it.
 The third is recorded below.
 
+Codex's interactive rows are the one exception to that quote-back method, and are marked as such in the table.
+They were measured against a local mock model provider that cannot quote anything, so what was observed instead is the recorder's exact stdout inside the outgoing model request body.
+That is a direct observation of delivery rather than an inference from a reply, but it is a different measurement and is not interchangeable with the quote-back evidence.
+
 | Harness | Version verified | Cold open | Context reset | Context-preserving reopen |
 | --- | --- | --- | --- | --- |
 | Claude | 2.1.222 (Claude Code) | `source=startup`, token quoted back in both `-p` and the TUI | `/clear` reports `source=clear` and `/compact` reports `source=compact`; both re-injected a fresh token that the model quoted back | `claude --continue` reports `source=resume` |
-| Codex | codex-cli 0.146.0 | `source=startup` under `codex exec` and the interactive TUI, token quoted back | `/clear` reports `source=clear` and re-injects a fresh token in the interactive TUI | `codex exec resume --last` reports `source=resume` |
+| Codex | codex-cli 0.146.0 | `source=startup` under both `codex exec` and the interactive TUI; `codex exec` quoted the token back, while the TUI evidence is the recorder's stdout observed in the next mock-provider request body | `/clear` reports `source=clear` in the interactive TUI, and its freshly injected `source=clear` stdout was observed in the next mock-provider request body rather than quoted back | `codex exec resume --last` reports `source=resume` |
 | Pi | 0.82.0 | `source=startup`, token quoted back in both `-p` and the TUI | `/new` raises `session_start` reason `new`, which the extension maps to `clear`; `/compact` raises `session_compact`, and both freshly injected source-stamped tokens were quoted back | `pi -c` reports reason `startup`, not `resume` |
 
 Two harness-specific consequences are load-bearing rather than incidental.
@@ -81,6 +85,10 @@ This proves project trust and per-hook review are separate durable gates, and th
 The interactive context-reset path was then exercised in that isolated process with `/clear`.
 The command created a new thread without immediately invoking the hook; the first submitted post-clear turn displayed `SessionStart hook (completed)`, supplied `source=clear`, and sent the recorder's exact `LAB_SESSION_START_CONTEXT:clear` stdout in the next mock model request.
 The startup control used the same recorder and supplied `source=startup`, so stale startup context could not satisfy the clear assertion.
+
+The tracked guard `tests/fm-sessionstart-hook-live-e2e.test.sh` reproduces the same interactive path on the operator's live `CODEX_HOME`, because only that home is authenticated, and it must still leave that home untouched.
+It supplies the throwaway lab's directory trust as the per-process override `-c 'projects={"<lab>"={trust_level="trusted"}}'`, which suppresses the trust prompt without writing a record; the dotted-path form `-c projects."<lab>".trust_level="trusted"` does not reach the trust lookup and leaves the prompt up.
+Per-hook review is bypassed for the invocation with `--dangerously-bypass-hook-trust`, the guard refuses to answer any trust dialog that still appears rather than pressing Enter, and it asserts `$CODEX_HOME/config.toml` is byte-identical before and after.
 
 The installed Codex source and the disabled-at-launch counterfactual establish a different boundary for the feature flag.
 Hook trust state can reload in one process, but derived feature gates are session-static, so changing `features.hooks` from false to true after launch does not activate hooks until a genuinely new Codex process starts.

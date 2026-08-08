@@ -386,7 +386,8 @@ esac
 SH
   chmod +x "$fakebin/ps"
   touch "$(case_home "$dir")/state/.last-watcher-beat"
-  out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+  out=$(env -u FM_SUPERVISION_MODEL \
+    -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
     PATH="$fakebin:$PATH" \
     FM_ROOT_OVERRIDE="$(case_root "$dir")" \
     FM_HOME="$(case_home "$dir")" \

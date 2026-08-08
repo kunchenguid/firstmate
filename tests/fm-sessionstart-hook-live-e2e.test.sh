@@ -26,6 +26,17 @@
 # The token index advances on every open, so a stale earlier token can never
 # satisfy a later assertion and no case can go quietly vacuous.
 #
+# Every harness here runs against the operator's own authenticated model
+# surface, because that is the only surface a live guard can prove anything on.
+# It therefore reads the live harness homes and never copies a credential out of
+# one. Codex is the one harness that would otherwise WRITE to its live home:
+# directory trust and per-hook review are both persisted into
+# $CODEX_HOME/config.toml, and a throwaway lab path is a new project and a new
+# hook source every run. So the Codex probes supply the lab's trust as a
+# per-process `-c` override that is never persisted, bypass hook review for the
+# invocation only, refuse to answer any trust prompt that still appears, and
+# assert the live config is byte-identical before and after.
+#
 # Run it after every harness upgrade and before trusting refreshed evidence in
 # docs/verification/supervision.md:
 #
@@ -83,8 +94,50 @@ send_line() {  # <session> <text>
   tmux -L "$SOCKET" send-keys -t "$1" Enter
 }
 
+shell_quote() {  # <word...> -> echoes a shell-safe command line
+  local out= word
+  for word in "$@"; do
+    out="$out${out:+ }$(printf '%q' "$word")"
+  done
+  printf '%s' "$out"
+}
+
 ASK='Reply with exactly the FMHOOKTOKEN value from your session-start context and nothing else.'
 LIVE_NONCE=$(od -An -N12 -tx1 /dev/urandom | tr -d ' \n')
+
+# Any dialog that, if answered, would persist a lab decision into a live harness
+# home. Deliberately narrow enough not to match Codex's `--dangerously-bypass-
+# hook-trust` banner, which mentions running "without review".
+TRUST_UI='do you trust|trust (this|the|parent) |trust the contents of this|trust (this|the)?[[:space:]]*(folder|project|directory)|trust all|(new or changed|allow these) hooks'
+
+# --- live Codex config protection ---------------------------------------------
+#
+# Codex persists BOTH gates - directory trust and per-hook review - into
+# $CODEX_HOME/config.toml, and the lab is a brand-new path every run. Trust is
+# supplied instead as an in-memory `-c` override; the inline-table form is
+# required, because the dotted-path form does not reach the trust lookup.
+CODEX_CONFIG="${CODEX_HOME:-$HOME/.codex}/config.toml"
+
+codex_trust_override() {  # <lab> -> echoes the per-process trust override
+  printf 'projects={"%s"={trust_level="trusted"}}' "$1"
+}
+
+codex_config_snapshot() {  # <dest>
+  if [ -f "$CODEX_CONFIG" ]; then cp "$CODEX_CONFIG" "$1"; else : > "$1"; fi
+}
+
+codex_config_assert_unchanged() {  # <snapshot> <lab> <what>
+  local snapshot=$1 lab=$2 what=$3 now="$LAB/codex-config.now" rescue
+  codex_config_snapshot "$now"
+  cmp -s "$snapshot" "$now" && return 0
+  rescue="${TMPDIR:-/tmp}/fm-sessionstart-hook-live-e2e.codex-config.$$.toml"
+  cp "$snapshot" "$rescue" 2>/dev/null || true
+  diff "$snapshot" "$now" >&2 || true
+  if grep -Fq "$lab" "$now" 2>/dev/null; then
+    fail "codex: $what wrote the throwaway lab path into $CODEX_CONFIG; restore it from $rescue"
+  fi
+  fail "codex: $what modified $CODEX_CONFIG, which this guard must leave untouched; restore it from $rescue"
+}
 
 # --- lab ---------------------------------------------------------------------
 #
@@ -246,7 +299,7 @@ probe_context_reset() {  # <harness> <version> <lab> <clear-command> <launch-arg
   tmux -L "$SOCKET" new-session -d -s "$session" -c "$lab" -x 200 -y 50 \
     -e FM_LIVE_RECORD="$record" -e FM_ROOT_OVERRIDE="$lab" -e FM_HOME="$lab" \
     -e FM_LIVE_NONCE="$LIVE_NONCE" \
-    "$*" \
+    "$(shell_quote "$@")" \
     || fail "$harness $version: could not start an interactive lab session"
 
   # Every run-tier TUI asks whether it trusts a folder it has not seen, and the
@@ -254,9 +307,20 @@ probe_context_reset() {  # <harness> <version> <lab> <clear-command> <launch-arg
   # selection IS the trusting one, so a bare Enter clears it; the loop keeps
   # waiting for the recorded open either way, so a harness that stops prompting
   # costs nothing. harness-adapters owns trust handling outside tests.
+  #
+  # Codex is the exception and fails closed: answering ANY of its trust dialogs
+  # writes a durable record for a throwaway path into the operator's live
+  # config, so the launch argv is supposed to make every gate unreachable. A
+  # prompt appearing at all means that argv stopped working, and pressing Enter
+  # would quietly mutate the live home this guard promises not to touch.
   n=0
   while [ "$n" -lt 60 ] && ! grep -q . "$record" 2>/dev/null; do
-    if capture "$session" | grep -qiE 'trust (this|the|parent|the contents of this)?[[:space:]]*(folder|project|directory)'; then
+    if capture "$session" | grep -qiE "$TRUST_UI"; then
+      if [ "$harness" = codex ]; then
+        capture "$session" >&2
+        tmux -L "$SOCKET" kill-session -t "$session" >/dev/null 2>&1 || true
+        fail "codex $version: a directory or hook trust prompt appeared despite the per-process trust override and --dangerously-bypass-hook-trust; this guard will not answer it, because that would persist throwaway state into $CODEX_CONFIG"
+      fi
       tmux -L "$SOCKET" send-keys -t "$session" Enter
       sleep 5
     fi
@@ -348,11 +412,16 @@ for harness in claude codex pi; do
         claude --permission-mode bypassPermissions
       ;;
     codex)
+      codex_config_snapshot "$LAB/codex-config.before"
+      trust_override=$(codex_trust_override "$lab")
       probe_process_opens codex "$version" "$lab" resume \
-        codex exec --enable hooks --dangerously-bypass-hook-trust --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check \
-        -- codex exec resume --last --enable hooks --dangerously-bypass-hook-trust --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check
+        codex exec -c "$trust_override" --enable hooks --dangerously-bypass-hook-trust --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check \
+        -- codex exec resume --last -c "$trust_override" --enable hooks --dangerously-bypass-hook-trust --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check
+      codex_config_assert_unchanged "$LAB/codex-config.before" "$lab" "the headless probes"
       probe_context_reset codex "$version" "$lab" /clear \
-        codex --enable hooks --dangerously-bypass-hook-trust --dangerously-bypass-approvals-and-sandbox
+        codex -c "$trust_override" --enable hooks --dangerously-bypass-hook-trust --dangerously-bypass-approvals-and-sandbox
+      codex_config_assert_unchanged "$LAB/codex-config.before" "$lab" "the interactive probe"
+      pass "codex $version: the live Codex config gained no throwaway directory trust or hook state"
       ;;
     pi)
       probe_process_opens pi "$version" "$lab" startup \
