@@ -10,11 +10,11 @@
 # healthy, prints a loud, clearly delimited banner so the agent cannot skim past
 # it in the tool output of whatever it was doing - the one channel every harness
 # has. Supervision health is MODEL-AWARE (fm_watcher_supervision_verdict in
-# bin/fm-wake-lib.sh): under the Claude Stop auto-arm model the watcher runs only
-# between turns, so mid-turn a fresh beacon with no live watcher is healthy and
-# only a stale beacon (beyond FM_GUARD_GRACE) is a genuine lapse; under every
-# persistent-watcher harness a live identity-matched watcher with a fresh beacon
-# is required. The banner names the true failing condition (a missing live
+# bin/fm-wake-lib.sh): under the Claude or Cursor stop-hook auto-arm model the
+# watcher runs only between turns, so mid-turn a fresh beacon with no live
+# watcher is healthy; only a stale beacon (beyond FM_GUARD_GRACE) is a genuine lapse.
+# Under every persistent-watcher harness a live identity-matched watcher with a
+# fresh beacon is required. The banner names the true failing condition (a missing live
 # watcher process vs a genuinely stale beacon). The full banner is emitted once
 # per distinct down-episode in this FM_HOME (keyed to the failing condition, not
 # the beacon mtime, which a healthy between-turns watcher advances every poll);

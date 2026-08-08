@@ -137,19 +137,19 @@
 #     `node .../index.js worker-server` child detaches from the pane and can
 #     leave the worktree's cwd, so the cwd-based reaper cannot see it (observed
 #     2026-08-05: one worker-server survived teardown reparented to init, self-
-#     exited ~6 minutes later). fm-spawn records its pid and starttime in
-#     state/<id>.meta at launch; reap_cursor_worker_server TERMs then KILLs the
-#     recorded pid only when its starttime identity still matches (a recycled
+#     exited ~6 minutes later). fm-spawn records its pid and process-start
+#     identity in state/<id>.meta at launch; reap_cursor_worker_server TERMs then
+#     KILLs the recorded pid only when that identity still matches (a recycled
 #     pid is never touched), then removes the record. A missing record falls
 #     back to the cwd-based reaper unchanged. Never matched by a generic
 #     worker-server cmdline or the cursor install dir: both are shared across
 #     homes and tasks.
-#     The recorded-pid path is lsof-independent (it needs only /proc starttime
-#     plus kill). The cwd-based Fix 2 reaper above still requires lsof for the
-#     generic leaked-descendant scan; without lsof it falls back to the tmux
-#     process-group reaper, which cannot see a detached worker-server - so a
-#     cursor primary/crew host should install lsof for full leaked-process
-#     coverage (see docs/configuration.md Toolchain).
+#     The recorded-pid path is lsof-independent (it uses /proc starttime or
+#     portable ps lstart plus kill). The cwd-based Fix 2 reaper above still
+#     requires lsof for the generic leaked-descendant scan; without lsof it
+#     falls back to the tmux process-group reaper, which cannot see a detached
+#     worker-server - so a cursor primary/crew host should install lsof for full
+#     leaked-process coverage (see docs/configuration.md Toolchain).
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

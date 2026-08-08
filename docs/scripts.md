@@ -36,7 +36,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-ensure-agents-md.sh` | Ensure a project's real `AGENTS.md`, its `CLAUDE.md` symlink, and the canonical self-governance section |
 | `fm-guard.sh`            | Warn on primary-checkout tangles, pending queued wakes, and unhealthy supervision    |
 | `fm-primary-scope-lib.sh` | Shared marker-or-plain-checkout primary-home predicate for tracked hooks             |
-| `fm-session-lock-lib.sh` | Shared session-lock harness identity (ancestry walk and holder liveness) for fm-lock.sh and the Claude Stop auto-arm |
+| `fm-session-lock-lib.sh` | Shared session-lock harness identity, including narrowed Cursor ancestry, for lock ownership and liveness consumers |
 | `fm-cursor-lib.sh`       | Single owner of Cursor executable resolution and legacy-alias proof, and Cursor process identity |
 | `fm-process-identity-lib.sh` | Shared spawn/teardown process-reuse identity (`starttime=` / `lstart=`) |
 | `fm-claude-stop-autoarm.sh` | Claude Stop `asyncRewake` hook owning tokenless watcher continuity with single-flight exit-2 rewake (docs/watcher-continuity.md) |

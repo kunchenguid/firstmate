@@ -178,7 +178,8 @@ ok - fm-teardown: dedicated-socket invalid cleanup preserves target/control and 
 The dedicated tmux cell removed ambient tmux variables, required a socket-bound wrapper, kept one target and one independent control window, and proved the wrapper was not called for invalid metadata or a direct empty target.
 Valid cleanup removed only the exact task-bound target and left the control window live.
 The metadata-only validation covers tmux, Herdr, Zellij, Orca, and cmux before backend dispatch.
-Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, Muse, and Cursor share that backend cleanup boundary; their harness-specific hook files, tokens, and session-log sidecars are cleaned only after it, so no harness needs a separate endpoint parser. Cursor's detached worker-server is additionally reaped only from its recorded pid and starttime identity, never from a shared command-line or install path.
+Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, Muse, and Cursor share that backend cleanup boundary; their harness-specific hook files, tokens, and session-log sidecars are cleaned only after it, so no harness needs a separate endpoint parser.
+Cursor's detached worker-server is additionally reaped only from its recorded pid and process-start identity, never from a shared command-line or install path.
 `tests/fm-cursor-harness.test.sh` and `tests/fm-teardown.test.sh` cover Cursor worker-server recording, portable identity fallback, recycled-pid refusal, secondmate retirement, missing-record cwd fallback, and other-home isolation.
 
 ## Herdr
