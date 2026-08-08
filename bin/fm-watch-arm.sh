@@ -503,9 +503,6 @@ owned_child_finished() {
   fi
 
   cycle_log_append "$rc" "$signal" "$reason_type" none
-  if [ "$rc" -ne 0 ] && ! grep -q '^watcher: FAILED' "$child_out" 2>/dev/null; then
-    echo "watcher: FAILED - watcher cycle exited $rc without an actionable reason"
-  fi
   rm -f "$child_out" 2>/dev/null || true
   child=
   child_out=
