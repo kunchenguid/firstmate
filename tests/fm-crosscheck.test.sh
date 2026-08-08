@@ -38,11 +38,25 @@ make_case() {
   printf '#!/usr/bin/env bash\n. tests/helper.sh\n' > "$repo/tests/support.test.sh"
   printf '#!/usr/bin/env bash\ngrep -qx fixed app.txt\n' > "$repo/shared-test.sh"
   ln -s ../shared-test.sh "$repo/tests/symlink.test.sh"
+  printf '#!/usr/bin/env bash\n# def test_app_is_fixed()\ngrep -qx fixed app.txt\n' \
+    > "$repo/tests/nodeid.test.sh"
+  # Passes whatever the mutation does, so it can never itself prove causality.
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$repo/tests/vacuous.test.sh"
+  # Reaches its assertion only through a helper found on PATH, so the proof
+  # environment losing PATH is a real break rather than a hypothetical one.
+  printf '#!/usr/bin/env bash\nfm-test-helper\n' > "$repo/tests/pathdep.test.sh"
+  mkdir -p "$repo/real-tests"
+  printf '#!/usr/bin/env bash\ngrep -qx fixed app.txt\n' > "$repo/real-tests/linked.test.sh"
+  ln -s ../real-tests "$repo/tests/linked"
   chmod +x "$repo/tests/regression.test.sh" "$repo/tests/stateful.test.sh" \
-    "$repo/tests/readable-state.test.sh" "$repo/tests/support.test.sh"
+    "$repo/tests/readable-state.test.sh" "$repo/tests/support.test.sh" \
+    "$repo/tests/nodeid.test.sh" "$repo/tests/vacuous.test.sh" \
+    "$repo/tests/pathdep.test.sh" "$repo/real-tests/linked.test.sh"
   git -C "$repo" add app.txt other.txt shared-test.sh tests/regression.test.sh \
     tests/helper.sh tests/readable-state.test.sh tests/stateful.test.sh \
-    tests/support.test.sh tests/symlink.test.sh
+    tests/support.test.sh tests/symlink.test.sh tests/nodeid.test.sh \
+    tests/vacuous.test.sh tests/pathdep.test.sh real-tests/linked.test.sh \
+    tests/linked
   git -C "$repo" commit -qm base
   base=$(git -C "$repo" rev-parse HEAD)
   git -C "$repo" checkout -qb feature
@@ -67,7 +81,93 @@ EOF
   install_codex_fake "$case_dir"
   install_claude_fake "$case_dir"
   install_sandbox_fake "$case_dir"
+  install_pytest_fake "$case_dir"
+  install_path_helper "$case_dir"
   printf '%s\t%s\t%s\n' "$case_dir" "$base" "$head"
+}
+
+# The one thing tests/pathdep.test.sh needs from PATH. Its verdict still tracks
+# the mutated implementation, so the proof is sound while PATH survives.
+install_path_helper() {
+  local case_dir=$1
+  mkdir -p "$case_dir/pathbin"
+  printf '#!/usr/bin/env bash\ngrep -qx fixed app.txt\n' \
+    > "$case_dir/pathbin/fm-test-helper"
+  chmod +x "$case_dir/pathbin/fm-test-helper"
+}
+
+# A node-id runner standing in for pytest. It reproduces the three outcomes the
+# gate must tell apart: the named test ran and passed (0), ran and failed (1),
+# and never ran because the selector resolved to nothing (4 usage / 5 collected).
+# Like pytest it accepts more than one positional target, collects them all, and
+# fails the run when any one of them fails - which is what lets a second target
+# supplied through test_invocation.arguments decide the verdict.
+install_pytest_fake() {
+  local case_dir=$1
+  mkdir -p "$case_dir/pathbin"
+  cat > "$case_dir/pathbin/pytest" <<'SH'
+#!/usr/bin/env bash
+targets=()
+for argument in "$@"; do
+  case "$argument" in
+    -*) ;;
+    *) targets+=("$argument") ;;
+  esac
+done
+[ "${#targets[@]}" -gt 0 ] || exit 4
+# pytest's locate_config walks every parent to the filesystem root and stops at
+# the first config it finds, whose addopts then join the command line.
+config_addopts=""
+config_dir=$PWD
+while :; do
+  if [ -f "$config_dir/pytest.ini" ]; then
+    echo "configfile: $config_dir/pytest.ini"
+    config_addopts=$(sed -n 's/^addopts *= *//p' "$config_dir/pytest.ini")
+    break
+  fi
+  [ "$config_dir" = / ] && break
+  config_dir=$(dirname "$config_dir")
+done
+for selector in "${targets[@]}"; do
+  file=${selector%%::*}
+  [ -f "$file" ] || { echo "ERROR: file or directory not found: $file"; exit 4; }
+  case "$selector" in
+    *::*)
+      name=${selector#*::}
+      if ! grep -q "def $name(" "$file"; then
+        echo "no tests ran"
+        exit 5
+      fi
+      ;;
+  esac
+done
+# A mutation that breaks collection reports a non-execution status, never a
+# test failure. The gate must not read that as "the test caught the mutation".
+# The switch lives beside this script rather than in the environment, because
+# the gate now builds the proof environment from an allowlist and no test-only
+# variable reaches here.
+collection_exit=$(dirname "$0")/collection-exit
+if [ -f "$collection_exit" ] && grep -qx broken app.txt; then
+  echo "no tests ran"
+  # Measured on pytest 9.1.1: --continue-on-collection-errors records the
+  # collection error and reports it as an ordinary failure instead, which
+  # carries no classification and so reads as a caught regression. pytest
+  # appends PYTEST_ADDOPTS and the located config's addopts to the command
+  # line, so both land here too.
+  for argument in "$@" ${PYTEST_ADDOPTS:-} $config_addopts; do
+    [ "$argument" = --continue-on-collection-errors ] || continue
+    echo "ERROR collecting"
+    exit 1
+  done
+  exit "$(cat "$collection_exit")"
+fi
+status=0
+for selector in "${targets[@]}"; do
+  bash "${selector%%::*}" || status=1
+done
+exit "$status"
+SH
+  chmod +x "$case_dir/pathbin/pytest"
 }
 
 install_gh_axi_fake() {
@@ -374,9 +474,18 @@ elif scenario in {
     "stateful-forgery",
     "support-forgery",
     "symlink-forgery",
+    "unclassified-runner",
+    "positional-target",
+    "path-dependent",
 }:
     patch = protocol / "mutations" / "revert.patch"
-    if scenario in {"verified-fixed", "forged-command"}:
+    if scenario in {
+        "verified-fixed",
+        "forged-command",
+        "unclassified-runner",
+        "positional-target",
+        "path-dependent",
+    }:
         patch.parent.mkdir(parents=True, exist_ok=True)
         patch.write_text("""diff --git a/app.txt b/app.txt
 --- a/app.txt
@@ -428,10 +537,24 @@ elif scenario in {
         "stateful-forgery": "tests/stateful.test.sh",
         "support-forgery": "tests/support.test.sh",
         "symlink-forgery": "tests/symlink.test.sh",
+        "positional-target": "tests/vacuous.test.sh",
+        "path-dependent": "tests/pathdep.test.sh",
     }.get(scenario, "tests/regression.test.sh")
+    # Only a runner whose non-execution the gate has measured can certify a
+    # fix, so every scenario that must reach mutation causality names one.
+    # The pytest double runs a plain `bash <file>` fixture unchanged.
     mutation_proof = {
         "test_path": test_path,
-        "test_invocation": {"runner": "bash", "arguments": []},
+        "test_invocation": {
+            "runner": "bash" if scenario == "unclassified-runner" else "pytest",
+            # A second target whose result, unlike the vacuous named test's,
+            # does depend on the mutated implementation.
+            "arguments": (
+                ["tests/regression.test.sh"]
+                if scenario == "positional-target"
+                else []
+            ),
+        },
         "mutation_patch_path": ".crosscheck/mutations/revert.patch",
     }
     if scenario == "forged-command":
@@ -448,6 +571,49 @@ elif scenario in {
         "mutation_proof": mutation_proof,
         "equivalent_to": None,
     }]
+elif scenario in {
+    "node-id-proof",
+    "node-id-unmatched",
+    "node-id-mutated-nonexecution",
+    "absent-runner",
+    "linked-directory-test",
+    "flag-argument",
+}:
+    patch = protocol / "mutations" / "revert.patch"
+    patch.parent.mkdir(parents=True, exist_ok=True)
+    patch.write_text("""diff --git a/app.txt b/app.txt
+--- a/app.txt
++++ b/app.txt
+@@ -1 +1 @@
+-fixed
++broken
+""")
+    selector = {
+        "node-id-unmatched": "tests/nodeid.test.sh::test_never_defined",
+        "linked-directory-test": "tests/linked/linked.test.sh",
+        "absent-runner": "tests/nodeid.test.sh",
+    }.get(scenario, "tests/nodeid.test.sh::test_app_is_fixed")
+    base["finding_updates"] = [{
+        "id": "cc-aaaaaaaaaaaa",
+        "status": "verified-fixed",
+        "note": "A node-id selector names the regression test that pins the fix.",
+        "reproduction": None,
+        "mutation_proof": {
+            "test_path": selector,
+            "test_invocation": {
+                "runner": "vitest" if scenario == "absent-runner" else "pytest",
+                # A flag that turns a mutation the runner could not collect
+                # into an ordinary failing test, which reads as a catch.
+                "arguments": (
+                    ["--continue-on-collection-errors"]
+                    if scenario == "flag-argument"
+                    else []
+                ),
+            },
+            "mutation_patch_path": ".crosscheck/mutations/revert.patch",
+        },
+        "equivalent_to": None,
+    }]
 elif scenario == "escaped-reproduction":
     base["new_findings"] = [{
         "title": "Escaped evidence",
@@ -459,6 +625,54 @@ elif scenario == "escaped-reproduction":
             "command": "bash .crosscheck/reproductions/../../tests/regression.test.sh",
             "expected_exit": 0,
             "output_contains": "UNREACHABLE-MARKER",
+        },
+    }]
+elif scenario == "reviewer-env-dependent-execution":
+    # The reviewer's own run has its provider account environment; the gate's
+    # independent re-run does not. A helper that requires it exits nonzero
+    # there without ever reproducing anything.
+    execution.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -eu\n"
+        "base=$1\n"
+        "head=$2\n"
+        "receipt=$3\n"
+        "account=$CODEX_HOME\n"
+        "git diff \"$base\" \"$head\" -- app.txt >/dev/null\n"
+        "printf 'CROSSCHECK-REVIEW-EXECUTED base=%s head=%s HOME=%s account=%s\\n' "
+        "\"$base\" \"$head\" \"$HOME\" \"$account\" | tee \"$receipt\"\n"
+    )
+    os.chmod(execution, 0o755)
+    subprocess.run(
+        [
+            "bash",
+            ".crosscheck/reproductions/review-execution.sh",
+            base_sha,
+            head,
+            ".crosscheck/reproductions/review-execution.receipt",
+        ],
+        cwd=workdir,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+elif scenario == "unfound-reproduction-command":
+    reproduction = protocol / "reproductions" / "missing-tool.sh"
+    reproduction.parent.mkdir(parents=True, exist_ok=True)
+    reproduction.write_text(
+        "#!/usr/bin/env bash\nexec fm-definitely-not-installed-xyz\n"
+    )
+    os.chmod(reproduction, 0o755)
+    base["new_findings"] = [{
+        "title": "Evidence needing absent tooling",
+        "severity": "blocking",
+        "description": "The helper invokes a tool the review checkout does not carry.",
+        "citations": [{"path": "app.txt", "line": 1}],
+        "reproduction": {
+            "test_path": ".crosscheck/reproductions/missing-tool.sh",
+            "command": "bash .crosscheck/reproductions/missing-tool.sh",
+            "expected_exit": 7,
+            "output_contains": "REPRODUCED-BUG",
         },
     }]
 elif scenario == "noisy-reproduction":
@@ -514,6 +728,28 @@ elif scenario == "reading-only-suspicion":
     execution.unlink()
     receipt.unlink(missing_ok=True)
 
+if scenario == "bulky-unauthorized-scratch":
+    # Unauthorized scratch is a refusal either way. It must be refused by NAME,
+    # not by the integrity inspection running out of output budget.
+    for index in range(12000):
+        (workdir / f"scratch-{index:06d}.txt").write_text("x")
+
+if scenario == "tampered-checkout":
+    # Collapsing untracked evidence into one status entry must not hide a
+    # reviewer that edited tracked code or wrote outside .crosscheck/.
+    (workdir / "app.txt").write_text("tampered\n")
+    (workdir / "tests" / "sneaky.sh").write_text("#!/usr/bin/env bash\n")
+
+if scenario == "bulky-evidence":
+    # A reviewer that substantiates a finding writes real evidence. Listing it
+    # file by file used to exceed the gate's bounded-output limit and refuse the
+    # review for doing its job.
+    bulk = protocol / "bulk"
+    bulk.mkdir(parents=True, exist_ok=True)
+    filler = "e" * 200
+    for index in range(1200):
+        (bulk / f"evidence-{index:05d}-{filler}").write_text("x")
+
 if scenario == "oversized-artifact":
     base["summary"] = "A" * 210000
 
@@ -546,6 +782,7 @@ run_case() {
   FM_TEST_AMBIENT_HOME="$HOME" \
   FM_TEST_BASE="$base" \
   FM_TEST_HEAD="$head" \
+  PATH="$case_dir/pathbin:$PATH" \
     python3 "$CROSSCHECK_PY" "$command" task-x1 "$PR_URL" "$@"
 }
 
@@ -570,6 +807,49 @@ seed_open_ledger() {
       "status": "open",
       "note": "Seeded reproduced blocker.",
       "proof": null
+    }]
+  }],
+  "runs": []
+}
+JSON
+}
+
+# A ledger recorded before mutation proofs had to be argument-free. It must
+# still load - the durable findings in it are not disposable - while the proof
+# itself no longer certifies anything.
+seed_argument_proof_ledger() {
+  local case_dir=$1 head=$2
+  mkdir -p "$case_dir/data/task-x1"
+  cat > "$case_dir/data/task-x1/crosscheck-ledger.json" <<JSON
+{
+  "schema": "firstmate.crosscheck-ledger.v2",
+  "task_id": "task-x1",
+  "pull_request": "https://github.com/ruby-dlee/firstmate/pull/72",
+  "findings": [{
+    "id": "cc-aaaaaaaaaaaa",
+    "lifecycle": "verified-fixed",
+    "title": "Prior blocker",
+    "severity": "blocking",
+    "description": "A durable reproduced blocker.",
+    "citations": [{"path": "app.txt", "line": 1}],
+    "history": [{
+      "at": "2026-08-02T00:00:00Z",
+      "head_sha": "$head",
+      "status": "verified-fixed",
+      "note": "Proof recorded before runner arguments were refused.",
+      "proof": {
+        "test_path": "tests/vacuous.test.sh",
+        "test_invocation": {
+          "runner": "pytest",
+          "arguments": ["tests/regression.test.sh"]
+        },
+        "mutation_patch_sha256": "$(printf 'a%.0s' $(seq 64))",
+        "mutated_files": ["app.txt"],
+        "baseline_exit": 0,
+        "mutated_exit": 1,
+        "baseline_output": "",
+        "mutated_output": ""
+      }
     }]
   }],
   "runs": []
@@ -1038,6 +1318,491 @@ assert proof["mutated_files"] == ["app.txt"]
 ' "$case_dir/data/task-x1/crosscheck-ledger.json" \
     || fail "mutation proof execution was not durably recorded"
   pass "verified-fixed requires a passing named test that fails after implementation mutation"
+}
+
+test_node_id_selector_clears_a_passing_named_test() {
+  local record case_dir base head
+  record=$(make_case node-id-proof)
+  IFS=$'\t' read -r case_dir base head <<< "$record"
+  seed_open_ledger "$case_dir" "$head"
+  run_case "$case_dir" "$base" "$head" node-id-proof run \
+    > "$case_dir/out" 2> "$case_dir/err" \
+    || fail "node-id mutation proof did not clear: $(cat "$case_dir/err")"
+  python3 -c '
+import json, sys
+value = json.load(open(sys.argv[1]))
+finding = value["findings"][0]
+proof = finding["history"][-1]["proof"]
+assert finding["lifecycle"] == "verified-fixed", finding["lifecycle"]
+assert proof["test_path"] == "tests/nodeid.test.sh::test_app_is_fixed", proof["test_path"]
+assert proof["baseline_exit"] == 0
+assert proof["mutated_exit"] != 0
+' "$case_dir/data/task-x1/crosscheck-ledger.json" \
+    || fail "node-id proof was not durably recorded with its full selector"
+  pass "a runner node id names a test the gate can execute and clear"
+}
+
+test_absent_runner_is_never_a_test_outcome() {
+  local record case_dir base head rc
+  record=$(make_case absent-runner)
+  IFS=$'\t' read -r case_dir base head <<< "$record"
+  seed_open_ledger "$case_dir" "$head"
+  set +e
+  run_case "$case_dir" "$base" "$head" absent-runner run \
+    > "$case_dir/out" 2> "$case_dir/err"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "absent named runner"
+  assert_grep 'is not installed on PATH' "$case_dir/err" \
+    "an uninstalled runner was not named as the reason no test ran"
+  if grep -q 'does not pass before mutation' "$case_dir/err"; then
+    fail "an uninstalled runner was misreported as a failing test"
+  fi
+  pass "an uninstalled runner is named, never reported as a failing test"
+}
+
+# A mutated run that never reached the test exits nonzero exactly like one that
+# caught the regression. Only a runner whose non-execution status the gate has
+# measured can tell those apart, so any other runner must be refused by name
+# rather than certified on an exit status the gate would have to guess at.
+test_unclassified_runner_cannot_clear_a_finding() {
+  local record case_dir base head rc
+  record=$(make_case unclassified-runner)
+  IFS=$'\t' read -r case_dir base head <<< "$record"
+  seed_open_ledger "$case_dir" "$head"
+  set +e
+  run_case "$case_dir" "$base" "$head" unclassified-runner run \
+    > "$case_dir/out" 2> "$case_dir/err"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "mutation proof on an unclassified runner"
+  assert_grep 'bash' "$case_dir/err" \
+    "the refusal did not name the runner whose non-execution is unclassified"
+  assert_grep 'no measured non-execution signal' "$case_dir/err" \
+    "the refusal did not say why that runner cannot certify a fix"
+  assert_grep 'classify: pytest' "$case_dir/err" \
+    "the refusal did not name the runners the gate can classify"
+  python3 -c '
+import json, sys
+value = json.load(open(sys.argv[1]))
+assert value["findings"][0]["lifecycle"] == "open", value["findings"][0]["lifecycle"]
+' "$case_dir/data/task-x1/crosscheck-ledger.json" \
+    || fail "an unclassified runner cleared a finding"
+  pass "a runner with no measured non-execution signal cannot certify a fix"
+}
+
+# The classified non-execution signal is a property of the runner's DEFAULT exit
+# semantics. --continue-on-collection-errors changes them: a mutation the runner
+# could not collect stops reporting the no-tests-collected status and reports an
+# ordinary failure instead, which carries no classification and so reads as a
+# caught regression. Before arguments were refused, that cleared the finding.
+test_flag_argument_cannot_rewrite_the_non_execution_signal() {
+  local record case_dir base head rc
+  record=$(make_case flag-argument)
+  IFS=$'\t' read -r case_dir base head <<< "$record"
+  seed_open_ledger "$case_dir" "$head"
+  printf '5\n' > "$case_dir/pathbin/collection-exit"
+  set +e
+  run_case "$case_dir" "$base" "$head" flag-argument run \
+    > "$case_dir/out" 2> "$case_dir/err"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "mutation proof carrying a runner flag"
+  assert_grep "must be empty for a mutation proof, but names '--continue-on-collection-errors'" \
+    "$case_dir/err" "the refusal did not name the rejected flag"
+  python3 -c '
+import json, sys
+value = json.load(open(sys.argv[1]))
+assert value["findings"][0]["lifecycle"] == "open", value["findings"][0]["lifecycle"]
+' "$case_dir/data/task-x1/crosscheck-ledger.json" \
+    || fail "a flag that rewrote the non-execution signal cleared a finding"
+  pass "a runner flag cannot rewrite the exit semantics the gate classifies"
+}
+
+# The gate validates exactly one target: test_path, which it checks is tracked,
+# refuses when it traverses a symlink, and protects from the mutation patch. A
+# positional argument adds a second target that gets none of those checks, so
+# the mutated run can fail on that file while the named test - here deliberately
+# vacuous - proves nothing. Before this was refused, that cleared the finding.
+test_positional_argument_cannot_supply_a_second_target() {
+  local record case_dir base head rc
+  record=$(make_case positional-target)
+  IFS=$'\t' read -r case_dir base head <<< "$record"
+  seed_open_ledger "$case_dir" "$head"
+  set +e
+  run_case "$case_dir" "$base" "$head" positional-target run \
+    > "$case_dir/out" 2> "$case_dir/err"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "mutation proof carrying a positional second target"
+  assert_grep "must be empty for a mutation proof, but names 'tests/regression.test.sh'" \
+    "$case_dir/err" "the refusal did not name the rejected positional argument"
+  python3 -c '
+import json, sys
+value = json.load(open(sys.argv[1]))
+assert value["findings"][0]["lifecycle"] == "open", value["findings"][0]["lifecycle"]
+' "$case_dir/data/task-x1/crosscheck-ledger.json" \
+    || fail "a vacuous named test cleared a finding through a second target"
+  pass "a positional argument cannot smuggle in a second, unvalidated test target"
+}
+
+test_unmatched_selector_is_never_a_failing_test() {
+  local record case_dir base head rc
+  record=$(make_case node-id-unmatched)
+  IFS=$'\t' read -r case_dir base head <<< "$record"
+  seed_open_ledger "$case_dir" "$head"
+  set +e
+  run_case "$case_dir" "$base" "$head" node-id-unmatched run \
+    > "$case_dir/out" 2> "$case_dir/err"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "selector matching no test"
+  assert_grep 'never ran its named test' "$case_dir/err" \
+    "a selector that matched no test was not reported as a non-execution"
+  if grep -q 'does not pass before mutation' "$case_dir/err"; then
+    fail "a test that never ran was misreported as a failing test"
+  fi
+  pass "a selector that matches no test is a non-execution, not a failure"
+}
+
+test_mutated_non_execution_cannot_clear_a_finding() {
+  local record case_dir base head rc
+  record=$(make_case node-id-mutated-nonexecution)
+  IFS=$'\t' read -r case_dir base head <<< "$record"
+  seed_open_ledger "$case_dir" "$head"
+  printf '5\n' > "$case_dir/pathbin/collection-exit"
+  set +e
+  run_case "$case_dir" "$base" "$head" node-id-mutated-nonexecution run \
+    > "$case_dir/out" 2> "$case_dir/err"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "mutated run that never executed the test"
+  assert_grep 'never ran its named test' "$case_dir/err" \
+    "a mutated run that never executed the test was not named as a non-execution"
+  python3 -c '
+import json, sys
+value = json.load(open(sys.argv[1]))
+assert value["findings"][0]["lifecycle"] == "open", value["findings"][0]["lifecycle"]
+' "$case_dir/data/task-x1/crosscheck-ledger.json" \
+    || fail "a mutation that only broke collection cleared the finding"
+  pass "a mutated run that never executed the test cannot clear a finding"
+}
+
+# The same bypass again through a third channel needing no reviewer: pytest
+# walks every parent to the filesystem root for a config, so an operator
+# pytest.ini above the gate's temporary root sets addopts for every proof on
+# the machine. The gate ends that walk with a neutral file in the root it owns.
+# The second half asserts the deliberately accepted surface is still intact:
+# the reviewed repository's own config sits closer to the named test and must
+# still win, which is proved here rather than assumed.
+test_ancestor_runner_config_cannot_rewrite_the_non_execution_signal() {
+  local record case_dir base head rc
+  record=$(make_case ancestor-runner-config)
+  IFS=$'\t' read -r case_dir base head <<< "$record"
+  seed_open_ledger "$case_dir" "$head"
+  printf '2\n' > "$case_dir/pathbin/collection-exit"
+  # Above the gate's temporary root, which it creates inside the state dir.
+  printf '[pytest]\naddopts = --continue-on-collection-errors\n' \
+    > "$case_dir/state/pytest.ini"
+  set +e
+  run_case "$case_dir" "$base" "$head" verified-fixed run \
+    > "$case_dir/out" 2> "$case_dir/err"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "operator runner config above the proof checkout"
+  assert_grep 'never ran its named test' "$case_dir/err" \
+    "an ancestor runner config still rewrote the classified exit semantics"
+  python3 -c '
+import json, sys
+value = json.load(open(sys.argv[1]))
+assert value["findings"][0]["lifecycle"] == "open", value["findings"][0]["lifecycle"]
+' "$case_dir/data/task-x1/crosscheck-ledger.json" \
+    || fail "an ancestor runner config cleared a finding"
+
+  record=$(make_case repository-runner-config)
+  IFS=$'\t' read -r case_dir base head <<< "$record"
+  printf '[pytest]\n' > "$case_dir/repo/pytest.ini"
+  git -C "$case_dir/repo" add pytest.ini
+  git -C "$case_dir/repo" commit -qm "repository runner config"
+  head=$(git -C "$case_dir/repo" rev-parse HEAD)
+  git -C "$case_dir/repo" update-ref refs/pull/72/head "$head"
+  seed_open_ledger "$case_dir" "$head"
+  printf '[pytest]\naddopts = --continue-on-collection-errors\n' \
+    > "$case_dir/state/pytest.ini"
+  run_case "$case_dir" "$base" "$head" verified-fixed run \
+    > "$case_dir/out" 2> "$case_dir/err" \
+    || fail "the repository's own runner config broke a sound proof: $(cat "$case_dir/err")"
+  python3 -c '
+import json, sys
+value = json.load(open(sys.argv[1]))
+proof = value["findings"][0]["history"][-1]["proof"]
+assert value["findings"][0]["lifecycle"] == "verified-fixed"
+configs = [
+    line.split(": ", 1)[1]
+    for line in proof["baseline_output"].splitlines()
+    if line.startswith("configfile: ")
+]
+assert configs, proof["baseline_output"]
+assert "/proof-" in configs[0], configs
+' "$case_dir/data/task-x1/crosscheck-ledger.json" \
+    || fail "the repository's own runner config did not take precedence"
+  pass "runner config above the gate's checkouts is inert; the repository's own still wins"
+}
+
+# The same bypass the argument rule closed, reached without any reviewer: pytest
+# appends PYTEST_ADDOPTS to its command line, so an operator with
+# --continue-on-collection-errors exported turns every mutation that broke
+# collection into an ordinary failure. The proof runs must therefore carry an
+# environment the gate builds, not the one it was launched with.
+test_ambient_addopts_cannot_rewrite_the_non_execution_signal() {
+  local record case_dir base head rc
+  record=$(make_case ambient-addopts)
+  IFS=$'\t' read -r case_dir base head <<< "$record"
+  seed_open_ledger "$case_dir" "$head"
+  printf '2\n' > "$case_dir/pathbin/collection-exit"
+  set +e
+  PYTEST_ADDOPTS=--continue-on-collection-errors \
+    run_case "$case_dir" "$base" "$head" verified-fixed run \
+    > "$case_dir/out" 2> "$case_dir/err"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "ambient PYTEST_ADDOPTS during a mutation proof"
+  assert_grep 'never ran its named test' "$case_dir/err" \
+    "an exported runner option still rewrote the classified exit semantics"
+  python3 -c '
+import json, sys
+value = json.load(open(sys.argv[1]))
+assert value["findings"][0]["lifecycle"] == "open", value["findings"][0]["lifecycle"]
+' "$case_dir/data/task-x1/crosscheck-ledger.json" \
+    || fail "an exported runner option cleared a finding"
+  pass "an exported runner option cannot reach the gate's own proof runs"
+}
+
+# The allowlist is only worth having if omitting something fails loudly, so
+# prove it by execution rather than assertion. The same scenario runs twice: the
+# named test reaches its assertion through a helper on PATH, so with the real
+# allowlist it clears, and with PATH deleted from that constant in a real copy
+# of the gate the BASELINE refuses and carries the shell's own diagnostic. A
+# missing variable can therefore never degrade into a mutation outcome.
+test_incomplete_proof_environment_fails_loudly() {
+  local record case_dir base head rc
+  record=$(make_case path-dependent-proof)
+  IFS=$'\t' read -r case_dir base head <<< "$record"
+  seed_open_ledger "$case_dir" "$head"
+  run_case "$case_dir" "$base" "$head" path-dependent run \
+    > "$case_dir/out" 2> "$case_dir/err" \
+    || fail "the PATH-dependent proof did not clear: $(cat "$case_dir/err")"
+
+  record=$(make_case narrow-proof-env)
+  IFS=$'\t' read -r case_dir base head <<< "$record"
+  seed_open_ledger "$case_dir" "$head"
+  mkdir -p "$case_dir/narrowed"
+  cp "$ROOT/bin/fm_bounded_io.py" "$case_dir/narrowed/"
+  sed '/^    "PATH",/d' "$CROSSCHECK_PY" > "$case_dir/narrowed/fm-crosscheck.py"
+  if grep -q '^    "PATH",' "$case_dir/narrowed/fm-crosscheck.py"; then
+    fail "the narrowed copy still allowlists PATH"
+  fi
+  local CROSSCHECK_PY="$case_dir/narrowed/fm-crosscheck.py"
+  set +e
+  run_case "$case_dir" "$base" "$head" path-dependent run \
+    > "$case_dir/out" 2> "$case_dir/err"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "proof environment missing a variable the runner needs"
+  assert_grep 'does not pass before mutation' "$case_dir/err" \
+    "a proof environment missing PATH did not refuse at the baseline run"
+  assert_grep 'fm-test-helper' "$case_dir/err" \
+    "the refusal did not carry the diagnostic naming what could not be found"
+  assert_no_grep 'still passes after mutation' "$case_dir/err" \
+    "a broken proof environment was read as a mutation outcome"
+  python3 -c '
+import json, sys
+value = json.load(open(sys.argv[1]))
+assert value["findings"][0]["lifecycle"] == "open", value["findings"][0]["lifecycle"]
+' "$case_dir/data/task-x1/crosscheck-ledger.json" \
+    || fail "a proof that never ran cleared a finding"
+  pass "an allowlist missing something the runner needs refuses at the baseline"
+}
+
+# `Path.stat(follow_symlinks=...)` is Python 3.10+. `fm-crosscheck.sh` execs
+# whichever `python3` is first on PATH, so that form turns an older interpreter
+# into an uncaught TypeError deep inside evidence capture instead of a gate
+# verdict. `os.stat(path, follow_symlinks=...)` is the portable idiom the rest
+# of bin/ already uses.
+test_evidence_capture_runs_on_older_interpreters() {
+  local offenders older probe
+  # Scoped to the two evidence-path modules, where every such receiver is a
+  # pathlib.Path. os.DirEntry.stat(follow_symlinks=...) elsewhere in bin/ is a
+  # different API and is valid on every Python 3.
+  offenders=$(grep -nE '\.stat\(follow_symlinks=' \
+    "$ROOT/bin/fm-crosscheck.py" "$ROOT/bin/fm_bounded_io.py" || true)
+  if [ -n "$offenders" ]; then
+    fail "Path.stat(follow_symlinks=) is Python 3.10+ only: $offenders"
+  fi
+  older=""
+  for probe in python3.9 /usr/bin/python3 python3.8; do
+    command -v "$probe" > /dev/null 2>&1 || continue
+    if "$probe" -c 'import sys; raise SystemExit(0 if sys.version_info < (3, 10) else 1)'; then
+      older=$probe
+      break
+    fi
+  done
+  if [ -z "$older" ]; then
+    echo "SKIP: no pre-3.10 interpreter available for the portability probe"
+    pass "evidence capture avoids interpreter-version-only APIs"
+    return
+  fi
+  printf '{"ok":1}\n' > "$TMP_ROOT/portability.json"
+  "$older" - "$ROOT/bin" "$TMP_ROOT/portability.json" <<'PY' \
+    || fail "evidence capture is unusable on $("$older" --version 2>&1)"
+import importlib.util
+import sys
+from pathlib import Path
+
+bindir = Path(sys.argv[1])
+sys.path.insert(0, str(bindir))
+from fm_bounded_io import read_bounded_json
+
+assert read_bounded_json(Path(sys.argv[2]), maximum_bytes=4096) == {"ok": 1}
+
+spec = importlib.util.spec_from_file_location("xc", bindir / "fm-crosscheck.py")
+crosscheck = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(crosscheck)
+
+review = Path(sys.argv[2]).parent / "portability-review"
+(review / ".crosscheck" / "mutations").mkdir(parents=True, exist_ok=True)
+patch = review / ".crosscheck" / "mutations" / "revert.patch"
+patch.write_text("diff --git a/app.txt b/app.txt\n")
+resolved = crosscheck.safe_artifact(
+    review, ".crosscheck/mutations/revert.patch", ".crosscheck/mutations/"
+)
+assert resolved.name == "revert.patch", resolved
+PY
+  pass "evidence capture avoids interpreter-version-only APIs"
+}
+
+# The gate re-runs reviewer evidence without the reviewer's provider account
+# environment. That is deliberate, but the refusal must name the environment
+# difference and show the command's own output instead of reporting a bare
+# unexpected exit that reads as a substantive verdict about the code.
+test_reviewer_env_dependent_evidence_names_the_difference() {
+  local record case_dir base head rc
+  record=$(make_case reviewer-env-dependent)
+  IFS=$'\t' read -r case_dir base head <<< "$record"
+  seed_open_ledger "$case_dir" "$head"
+  set +e
+  run_case "$case_dir" "$base" "$head" reviewer-env-dependent-execution run \
+    > "$case_dir/out" 2> "$case_dir/err"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "reviewer evidence depending on reviewer-only environment"
+  assert_grep 'none of the reviewer' "$case_dir/err" \
+    "the refusal did not name the independent re-execution environment"
+  assert_grep 'CODEX_HOME' "$case_dir/err" \
+    "the refusal did not surface the command output that explains the exit"
+  pass "evidence that needs reviewer-only environment is diagnosable, not a bare exit"
+}
+
+test_unfound_evidence_command_is_a_non_execution() {
+  local record case_dir base head rc
+  record=$(make_case unfound-reproduction)
+  IFS=$'\t' read -r case_dir base head <<< "$record"
+  set +e
+  run_case "$case_dir" "$base" "$head" unfound-reproduction-command run \
+    > "$case_dir/out" 2> "$case_dir/err"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "evidence command that does not exist"
+  assert_grep 'never ran' "$case_dir/err" \
+    "an unfound evidence command was not reported as a non-execution"
+  pass "an evidence command that was never found is a non-execution"
+}
+
+# The gate's own integrity check reads `git status` through the bounded-output
+# limit. Listing evidence file by file meant a review that substantiated
+# anything could exceed that limit and be refused, while a review that found
+# nothing completed - the gate could block but never clear.
+test_bulky_reviewer_evidence_still_completes() {
+  local record case_dir base head
+  record=$(make_case bulky-evidence)
+  IFS=$'\t' read -r case_dir base head <<< "$record"
+  run_case "$case_dir" "$base" "$head" bulky-evidence run \
+    > "$case_dir/out" 2> "$case_dir/err" \
+    || fail "substantial reviewer evidence blocked the review: $(cat "$case_dir/err")"
+  assert_grep 'crosscheck clear' "$case_dir/out" \
+    "a clean review carrying substantial evidence did not clear"
+  pass "a review carrying substantial evidence still reaches a verdict"
+}
+
+test_bulky_unauthorized_scratch_is_named_not_truncated() {
+  local record case_dir base head rc
+  record=$(make_case bulky-unauthorized)
+  IFS=$'\t' read -r case_dir base head <<< "$record"
+  set +e
+  run_case "$case_dir" "$base" "$head" bulky-unauthorized-scratch run \
+    > "$case_dir/out" 2> "$case_dir/err"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "heavy unauthorized scratch in the review checkout"
+  assert_grep 'changed tracked or unauthorized path' "$case_dir/err" \
+    "heavy unauthorized scratch was not named as an unauthorized path"
+  if grep -q 'aggregate output limit' "$case_dir/err"; then
+    fail "the integrity inspection ran out of output budget instead of naming the path"
+  fi
+  pass "heavy unauthorized scratch is refused by name, not by output truncation"
+}
+
+test_tampered_review_checkout_is_still_detected() {
+  local record case_dir base head rc
+  record=$(make_case tampered-checkout)
+  IFS=$'\t' read -r case_dir base head <<< "$record"
+  set +e
+  run_case "$case_dir" "$base" "$head" tampered-checkout run \
+    > "$case_dir/out" 2> "$case_dir/err"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "reviewer that edited the review checkout"
+  assert_grep 'changed tracked or unauthorized path' "$case_dir/err" \
+    "a reviewer that edited tracked code was not detected"
+  pass "a reviewer that edits tracked code or writes outside .crosscheck stays refused"
+}
+
+test_symlinked_directory_named_test_is_rejected() {
+  local record case_dir base head rc
+  record=$(make_case linked-directory-test)
+  IFS=$'\t' read -r case_dir base head <<< "$record"
+  seed_open_ledger "$case_dir" "$head"
+  set +e
+  run_case "$case_dir" "$base" "$head" linked-directory-test run \
+    > "$case_dir/out" 2> "$case_dir/err"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "named test behind a symlinked directory"
+  assert_grep 'symlink' "$case_dir/err" \
+    "a named test reached through an in-repository symlink was accepted"
+  pass "a named test behind an in-repository symlink stays rejected"
+}
+
+# The symlink check used to compare against a purely lexical absolute path, so a
+# home reached through any symlinked ancestor - a macOS /tmp or /var path, say -
+# could never clear a finding no matter how sound the change was.
+test_symlinked_home_ancestor_still_clears() {
+  local record case_dir base head
+  record=$(make_case symlinked-home)
+  IFS=$'\t' read -r case_dir base head <<< "$record"
+  seed_open_ledger "$case_dir" "$head"
+  ln -s state "$case_dir/state-link"
+  FM_TEST_STATE_OVERRIDE="$case_dir/state-link" \
+    run_case "$case_dir" "$base" "$head" verified-fixed run \
+    > "$case_dir/out" 2> "$case_dir/err" \
+    || fail "a symlinked home ancestor blocked a sound clearance: $(cat "$case_dir/err")"
+  python3 -c '
+import json, sys
+value = json.load(open(sys.argv[1]))
+assert value["findings"][0]["lifecycle"] == "verified-fixed"
+' "$case_dir/data/task-x1/crosscheck-ledger.json" \
+    || fail "the clearance was not durably recorded"
+  pass "a home reached through a symlinked ancestor can still clear a finding"
 }
 
 test_forged_git_diff_mutation_command_is_rejected() {
@@ -1665,6 +2430,34 @@ assert value["runs"][-1]["active_blockers"] == ["cc-aaaaaaaaaaaa"]
   pass "mutation proof remains durable but cannot clear a different head"
 }
 
+# A recorded proof that would not be accepted today must degrade the FINDING,
+# never the file. Failing ledger load instead would wedge the task: the gate
+# stops before it can record a run, so nothing on disk explains the stop and
+# every later run fails identically until someone hand-edits the ledger.
+test_recorded_argument_proof_loads_but_no_longer_clears() {
+  local record case_dir base head rc
+  record=$(make_case legacy-argument-proof)
+  IFS=$'\t' read -r case_dir base head <<< "$record"
+  seed_argument_proof_ledger "$case_dir" "$head"
+  set +e
+  run_case "$case_dir" "$base" "$head" clear run \
+    > "$case_dir/out" 2> "$case_dir/err"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "recorded proof whose invocation carried arguments"
+  assert_no_grep 'finding-ledger preflight failed' "$case_dir/err" \
+    "a ledger holding an argument-bearing proof failed to load"
+  python3 -c '
+import json, sys
+value = json.load(open(sys.argv[1]))
+assert value["runs"], "the run was not recorded"
+assert value["runs"][-1]["active_blockers"] == ["cc-aaaaaaaaaaaa"], value["runs"][-1]
+assert value["findings"][0]["lifecycle"] == "verified-fixed"
+' "$case_dir/data/task-x1/crosscheck-ledger.json" \
+    || fail "the argument-bearing proof still cleared its finding"
+  pass "a recorded argument-bearing proof loads but no longer certifies its finding"
+}
+
 test_equivalent_finding_reopens_when_direct_proof_regresses() {
   python3 - "$CROSSCHECK_PY" <<'PY' || fail "equivalent finding did not fail closed after target regression"
 import importlib.util
@@ -1679,7 +2472,11 @@ head = "a" * 40
 verified = {
     "id": "cc-aaaaaaaaaaaa",
     "lifecycle": "verified-fixed",
-    "history": [{"status": "verified-fixed", "head_sha": head}],
+    "history": [{
+        "status": "verified-fixed",
+        "head_sha": head,
+        "proof": {"test_invocation": {"runner": "pytest", "arguments": []}},
+    }],
 }
 equivalent = {
     "id": "cc-bbbbbbbbbbbb",
@@ -1724,6 +2521,15 @@ JSON
   grep -q '"findings":null' "$case_dir/data/task-x1/crosscheck-ledger.json" \
     || fail "null ledger was rewritten or normalized"
   assert_absent "$case_dir/codex.log" "reviewer ran against a malformed ledger"
+  # This stop cannot record a run: appending to a ledger that failed to parse
+  # would risk destroying the durable findings it still holds. The readable
+  # report must therefore carry the cause, or nothing on disk explains why
+  # every later run stops the same way.
+  assert_grep 'TOOL-FAILURE' "$case_dir/data/task-x1/crosscheck.md" \
+    "the report did not record the stop"
+  assert_grep 'finding-ledger preflight failed' \
+    "$case_dir/data/task-x1/crosscheck.md" \
+    "the report did not name the cause of the stop"
   pass "null findings ledger fails closed and is never normalized to empty"
 }
 
@@ -1934,6 +2740,26 @@ if [ -n "${FM_TEST_CASE:-}" ]; then
     test_real_claude_sandbox_executes_exact_sha_git_diff|\
     test_symlinked_named_test_cannot_hide_test_mutation|\
     test_evidence_batch_item_limit_precedes_execution|\
+    test_node_id_selector_clears_a_passing_named_test|\
+    test_absent_runner_is_never_a_test_outcome|\
+    test_unclassified_runner_cannot_clear_a_finding|\
+    test_positional_argument_cannot_supply_a_second_target|\
+    test_flag_argument_cannot_rewrite_the_non_execution_signal|\
+    test_recorded_argument_proof_loads_but_no_longer_clears|\
+    test_null_ledger_fails_without_normalization|\
+    test_unmatched_selector_is_never_a_failing_test|\
+    test_mutated_non_execution_cannot_clear_a_finding|\
+    test_ambient_addopts_cannot_rewrite_the_non_execution_signal|\
+    test_ancestor_runner_config_cannot_rewrite_the_non_execution_signal|\
+    test_incomplete_proof_environment_fails_loudly|\
+    test_symlinked_directory_named_test_is_rejected|\
+    test_symlinked_home_ancestor_still_clears|\
+    test_reviewer_env_dependent_evidence_names_the_difference|\
+    test_unfound_evidence_command_is_a_non_execution|\
+    test_bulky_reviewer_evidence_still_completes|\
+    test_tampered_review_checkout_is_still_detected|\
+    test_bulky_unauthorized_scratch_is_named_not_truncated|\
+    test_evidence_capture_runs_on_older_interpreters|\
     test_evidence_batch_has_aggregate_deadline)
       "$FM_TEST_CASE"
       exit 0
@@ -1970,6 +2796,24 @@ test_missing_author_identity_is_a_named_tool_failure
 test_new_finding_requires_executed_reproduction
 test_silence_never_closes_prior_finding
 test_verified_fix_executes_mutation_proof
+test_node_id_selector_clears_a_passing_named_test
+test_absent_runner_is_never_a_test_outcome
+test_unclassified_runner_cannot_clear_a_finding
+test_positional_argument_cannot_supply_a_second_target
+test_flag_argument_cannot_rewrite_the_non_execution_signal
+test_unmatched_selector_is_never_a_failing_test
+test_mutated_non_execution_cannot_clear_a_finding
+test_ambient_addopts_cannot_rewrite_the_non_execution_signal
+test_ancestor_runner_config_cannot_rewrite_the_non_execution_signal
+test_incomplete_proof_environment_fails_loudly
+test_symlinked_directory_named_test_is_rejected
+test_symlinked_home_ancestor_still_clears
+test_reviewer_env_dependent_evidence_names_the_difference
+test_unfound_evidence_command_is_a_non_execution
+test_bulky_reviewer_evidence_still_completes
+test_tampered_review_checkout_is_still_detected
+test_bulky_unauthorized_scratch_is_named_not_truncated
+test_evidence_capture_runs_on_older_interpreters
 test_forged_git_diff_mutation_command_is_rejected
 test_stateful_test_cannot_fabricate_mutation_causality
 test_baseline_readable_state_is_destroyed_before_mutation
@@ -1987,6 +2831,7 @@ test_ordinary_output_paths_remain_bounded
 test_prompt_uses_only_bounded_ledger_projection
 test_nonexistent_mutation_proof_is_unreviewed
 test_mutation_proof_does_not_float_to_a_new_head
+test_recorded_argument_proof_loads_but_no_longer_clears
 test_equivalent_finding_reopens_when_direct_proof_regresses
 test_null_ledger_fails_without_normalization
 test_claims_lookup_error_never_reaches_reviewer

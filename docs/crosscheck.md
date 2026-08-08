@@ -100,16 +100,58 @@ Every verdict artifact must also carry one verdict-level reproduction whose comm
 The reviewer must create and run that helper with its own command tool, and the helper must leave a receipt naming both SHAs, `HOME`, and the provider account selector.
 Crosscheck inspects that receipt before independently re-executing the helper, then stores the receipt digest and bounded content with the verdict.
 A missing or failed verdict-level reproduction is a `tool-failure`, so a reading-only concern from a reviewer with a dead command tool can never become a blocking code verdict.
+The gate's re-execution is deliberately independent: it re-runs the helper itself in the review checkout with no network and none of the reviewer's provider credentials or account environment.
+Reviewer helpers must therefore be self-contained and must not require reviewer-only variables to be set, even though the receipt they write records `HOME` and the provider account selector.
+That asymmetry is the trap this contract exists to name: a helper that reads those variables unguarded under `set -u` succeeds for the reviewer and fails for the gate.
+Every evidence-execution refusal carries the command's own bounded output, because a bare unexpected exit reads as a substantive verdict about the code when it is often a failure to execute at all.
+The post-review integrity check reads `git status --porcelain --untracked-files=normal`, not `--untracked-files=all`.
+`normal` collapses the wholly untracked `.crosscheck/` tree into one status entry, so the check costs a fixed amount however much evidence the reviewer wrote.
+With `all` the check's output scaled with the evidence, and a reviewer that substantiated a finding could exceed the bounded-output limit and have its whole review refused as `unreviewed` - the gate could block but never clear.
+Detection is unchanged either way: a modified tracked file, an untracked file inside a tracked directory, and an unauthorized new directory are each still reported individually and still refused.
+Authorized evidence therefore cannot reach the limit at all, and every shape that still can - loose untracked files, untracked files inside tracked directories, stray directories - is already an unauthorized state that the check refuses anyway.
+That inspection carries its own larger budget so such a state is refused by name rather than as a bare output-limit error; overflow past it still refuses, and can never become a pass.
 
 A `verified-fixed` update must name a tracked test and provide an implementation-only patch under `.crosscheck/mutations/`.
 It supplies an approved test runner plus a structured argument array, never a free-form shell command.
+That array must be empty for a mutation proof, and any entry is refused by name.
+The classified non-execution signal is a property of the runner's default exit semantics, and a supplied flag can change them: measured on pytest 9.1.1, a mutation raising during import of the named test's module exits 2 on its own but 1 under `--continue-on-collection-errors`, and 1 carries no classification, so the gate would certify a fix on a test that was never collected.
+A positional argument separately adds a second target, and `test_path` is the only target the gate validates as tracked, symlink-free, and unreachable by the mutation patch, so the verdict could come from a file the gate never validated.
+Requiring no arguments closes both without an enumeration of runner flags that would go stale.
+Reviewer-supplied argv is only half of it: both proof runs also execute under an environment the gate constructs from `PROOF_ENVIRONMENT_ALLOWLIST` rather than the one it was launched with, because pytest appends `PYTEST_ADDOPTS` to the command line, so an operator with `--continue-on-collection-errors` exported would reproduce the same bypass on every proof with no reviewer involved.
+That list is an allowlist because it fails closed - a variable that is needed but missing breaks the baseline run, which must exit 0, so the proof is refused where it can be seen, while an unlisted variable on a denylist would sail through silently.
+The constructed environment is applied to the mutation-proof runs and not to reproduction re-execution: a proof's exit status is what decides clear versus not clear, whereas ambient interference with a reproduction can only push it toward refusal, and reproduction commands run through a login shell that re-imports operator profile state regardless.
+Configuration files are the third channel into the same semantics: pytest's `locate_config` walks every parent of its target to the filesystem root and stops at the first `pytest.ini`, `tox.ini`, `setup.cfg`, or `pyproject.toml` it finds, so an operator config above the gate's temporary root would set `addopts` for every proof on the machine.
+Crosscheck writes a neutral empty `[pytest]` `pytest.ini` into that temporary root before anything runs, ending the walk inside a directory the gate owns and neutralising every ini setting from above rather than only `addopts`.
+The proof checkouts and the review checkout are both children of that root, so the one file covers reproduction re-execution as well; the boundary is the root the gate owns, not any child of it.
+This is not free: for a repository carrying no pytest config of its own, rootdir becomes the gate's temporary root instead of the checkout, which widens conftest discovery by that one empty gate-owned directory.
+The reviewed repository's own config still takes precedence, because it sits closer to the named test, and that surface stays deliberately accepted.
+The same rule is not applied when replaying a recorded proof, so a ledger written before it still loads; instead a recorded proof whose invocation carried arguments no longer certifies its finding, which reverts to blocking and can be re-proved in band by a fresh review.
 Crosscheck creates one clean checkout at the exact reviewed head, confirms the named test passes, destroys the entire checkout, recreates the same path from the exact head, applies the patch, and requires the same test to fail.
 Destroying all readable baseline state before the mutated run prevents a test from manufacturing causality through a predictable sibling checkout.
 Proof sandboxes also omit shared POSIX IPC and give each run private writable temporary and cache state, while shared host temporary directories remain outside the write policy.
 The named test must be a canonical tracked regular file; symlinks are rejected so a patch cannot mutate the executed target through an unchanged alias.
+Symlink rejection is anchored at the resolved review checkout, so a symlink inside the repository is still refused while a symlinked ancestor above the firstmate home is not mistaken for one.
+`test_path` may also be a `path::selector` node id for a runner that accepts one; every path-shaped check reads the part before `::` while the runner receives the full selector.
 The gate positions the tracked test path itself as the interpreter script or test-framework target; generic command launchers are not approved runners.
+A run that never reached the named test is not a test result in either direction.
+The gate resolves the named runner to an absolute executable before launching, and treats an absent runner, a failed sandbox exec, and a runner-reported non-execution (pytest's usage and no-tests-collected statuses, for instance) as named non-executions.
+That matters in both directions: such a status must not condemn a baseline run, and must not vindicate a mutated one, because a mutation that merely broke collection would otherwise read as a caught regression.
+Because that reading is only safe where the non-execution signal has actually been measured, a mutation proof may name only a runner the gate classifies - `pytest` today - and any other runner is refused by name rather than certified on a status the gate would have to guess at.
+The proof checkout is a fresh clone carrying tracked files only, so a runner that lives solely in an untracked virtualenv is absent there.
 The patch may modify only non-test implementation paths already cited by the durable finding.
 It cannot modify the named test, conventional test trees, fixtures, or Crosscheck evidence support.
+
+### Known limitation: the mutated exit status is an inference, not proof
+
+Read the four guards above together and the shape of the real problem is visible.
+The gate concludes "the named test detected the regression" from one fact: the mutated run exited non-zero.
+That status is not a property of the test alone. It is influenced by reviewer-supplied argv, by the ambient environment, by repository and ancestor configuration, and by the runner's own version, and each of those four channels was closed only after it was found - a positional second target, a collection-error flag, `PYTEST_ADDOPTS`, and an ancestor ini file.
+An installed runner plugin is a known and accepted fifth door.
+Closing channels one at a time is unbounded work with no completion criterion, so the list above should be read as hardening, not as a proof of soundness.
+
+The planned replacement is POSITIVE PROOF OF EXECUTION: requiring the mutated run to demonstrate that the named test actually ran, rather than inferring it from an exit code.
+The leading candidate is a control test - a second tracked test the mutation should not affect, required to PASS while the named test fails - because it needs no per-runner knowledge and no enumeration of the ways a status can be rewritten.
+Until that lands, the exit-status inference remains this gate's weakest link, and the four closed channels do not make it sound.
 
 ## Refusal and liveness
 
@@ -129,6 +171,7 @@ Claude's Bash engine otherwise creates workspace scratch under shared `/tmp/clau
 Crosscheck sets the supported `CLAUDE_CODE_TMPDIR` to a private directory inside the disposable checkout, keeping that scratch under the existing checkout write boundary instead of widening the sandbox to shared `/tmp`.
 It does not grant write access to the author worktree or the wider filesystem.
 An unavailable reviewer binary, sandbox, author-identity proof, executing-account binding, verdict-level execution proof, or exact remote PR head records a `tool-failure` attempt when the live head is already known, and otherwise emits the same tool-failure class without fabricating a ledger run.
+A ledger that cannot be read is the one stop that cannot record itself: appending a run to a file that failed to parse would risk destroying the durable findings it still holds, so the ledger is left exactly as it is and only the readable `crosscheck.md` report is rewritten, naming the parse failure so the cause is on disk rather than only in the exit status of a run nobody kept.
 A nonzero reviewer exit, timeout, missing artifact, empty artifact, malformed artifact, or wrong-head artifact records an `unreviewed` attempt and exits nonzero.
 An unresolved suspicion comes from a completed reviewer and records a `blocking` attempt instead of being conflated with an invalid review artifact.
 This includes provider refusals that surface only as a stopped or silent agent.
@@ -136,7 +179,7 @@ Reviewer stdout plus stderr use a separate 16 MiB capture ceiling because a full
 `FM_CROSSCHECK_REVIEWER_MAX_CAPTURE_BYTES` can override that ceiling between 200,000 bytes and 64 MiB, and an invalid value fails closed before reviewer launch.
 This remains a hard bound rather than truncation: Claude returns its structured verdict in the captured JSON envelope, while Codex must still provide its separate authoritative result artifact.
 Crossing the reviewer ceiling terminates the owned process tree and records a loud `unreviewed` attempt, and captured output alone never substitutes for a valid verdict.
-Evidence and every other ordinary command retain the 200,000-byte aggregate stdout-plus-stderr ceiling.
+Evidence and every other ordinary command retain the 200,000-byte aggregate stdout-plus-stderr ceiling, except the post-review checkout integrity inspection described above, which carries its own 4 MiB budget.
 The final wait and identity-pinned descendant cleanup remain inside the same absolute deadline.
 Structured verdict artifacts are stable regular files bounded by the ordinary 200,000-byte ceiling before JSON decoding.
 The durable ledger is bounded separately and fails closed when absent, symlinked, malformed, non-finite, or oversized.
@@ -181,6 +224,9 @@ Ordinary CI prints a named skip for this network- and credential-dependent guard
 The retained live runtime proof is the change receipt for this patch; the opt-in test is the repeatable regression guard for future environments.
 Its `test_forged_git_diff_mutation_command_is_rejected` case is the named regression that fails if a free-form `git diff --quiet # tests/regression.test.sh` can replace real mutation verification.
 Its `test_baseline_readable_state_is_destroyed_before_mutation` and `test_mutation_is_bound_to_cited_non_test_implementation` cases cover the two mutation-causality bypasses found in the final review round.
+Its `test_mutated_non_execution_cannot_clear_a_finding` case covers the third bypass of that class: a mutation that only broke test collection exits nonzero and previously read as a caught regression, so the gate could certify a fix on a test that never ran.
+Its `test_evidence_capture_runs_on_older_interpreters` case exists because `fm-crosscheck.sh` execs whichever `python3` is first on `PATH`, which is not always the version CI pins.
+A newer-only API on the evidence path therefore surfaces as an uncaught `TypeError` inside evidence capture rather than a gate verdict; the [`firstmate-coding-guidelines`](../.agents/skills/firstmate-coding-guidelines/SKILL.md) skill owns which `stat` form `bin/*.py` must use.
 `tests/fm-github-pr.test.sh` includes named cases for fieldless-array grammar, complete timeout-child cleanup, and refusal of the former public merge subcommand.
 The focused PR-check cases in `tests/fm-teardown-suite.sh` and the merge cases in `tests/fm-pr-merge.test.sh` also use observed-shape GitHub fakes.
 Those deterministic suites validate parsing, lifecycle, failure handling, and atomic request construction; they do not claim to exercise live provider availability.

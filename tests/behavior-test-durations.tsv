@@ -3,6 +3,10 @@
 # Baseline durations recorded from https://github.com/ruby-dlee/firstmate/actions/runs/30648119449 on 2026-07-31.
 # Split-wrapper durations refreshed from https://github.com/ruby-dlee/firstmate/actions/runs/30681093133 on 2026-08-01 UTC.
 # Teardown wrapper starting weights split the 642448 ms whole-suite measurement from https://github.com/ruby-dlee/firstmate/actions/runs/30681622585.
+# tests/fm-crosscheck.test.sh was remeasured on 2026-08-07 after that suite grew from 40 to 60 cases, replacing its recorded 75707 ms.
+# Method: serial bracketed local runs at pipeline head c02248ab timed the subject at 178788 ms and 181014 ms around reference tests/fm-checkout-refresh.test.sh at 907786 ms against its recorded 475500 ms.
+# Subject drift between the two bracketing runs was 1.2 percent, which is the evidence that the derived ratio is trustworthy rather than merely plausible.
+# Scaling by the derived factor 1.909 into the GitHub Actions units this file uses gives the recorded 94232 ms; raw local numbers were deliberately not written because the measuring machine averaged load 23-29 and would have been incomparable with the other 97 rows.
 55000	tests/bridge-cutover-python.test.sh
 71100	tests/fm-account-directory.test.sh
 423936	tests/fm-account-routing-a.test.sh
@@ -42,7 +46,7 @@
 263	tests/fm-composer-ghost.test.sh
 30	tests/fm-composer-lib.test.sh
 10055	tests/fm-crew-state.test.sh
-75707	tests/fm-crosscheck.test.sh
+94232	tests/fm-crosscheck.test.sh
 13991	tests/fm-daemon.test.sh
 340	tests/fm-decision-pretool-check.test.sh
 685	tests/fm-dispatch-select.test.sh

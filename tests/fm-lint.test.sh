@@ -22,7 +22,13 @@ CI="$ROOT/.github/workflows/ci.yml"
 NM="$ROOT/.no-mistakes.yaml"
 INSTALLER="$ROOT/bin/fm-install-shellcheck.sh"
 # The authoritative file set the one owner must run.
-CANON='shellcheck --norc bin/*.sh bin/backends/*.sh tests/*.sh'
+# The canonical set is these globs, spelled in the owner and nowhere else. The
+# assertion deliberately does not pin how they are invoked: the owner lints in
+# batches, so the globs are collected into an array rather than passed to a
+# single exec. Pinning the old one-line form would guard the implementation
+# instead of the invariant, and would have to be rewritten by any future change
+# to batching without protecting anything more.
+CANON='bin/*.sh bin/backends/*.sh tests/*.sh'
 # The pinned version, read from the single source (the one owner itself).
 REQUIRED=$("$LINT" --required-version)
 
@@ -45,7 +51,11 @@ test_owner_defines_canonical_set() {
   # that would hide findings CI fails on.
   assert_no_grep '--severity' "$LINT" "fm-lint.sh must not lower severity below the CI default"
   assert_no_grep '--exclude' "$LINT" "fm-lint.sh must not blanket-exclude checks CI enforces"
-  [ "$(grep -Fc 'exec shellcheck --norc' "$LINT")" -eq 2 ] || fail "both lint modes must ignore ambient ShellCheck configuration"
+  # Both lint modes must pass --norc so an ambient .shellcheckrc cannot weaken
+  # what CI enforces. Only --norc is pinned here, not `exec`: the canonical mode
+  # lints in batches and so invokes ShellCheck inside a loop rather than execing
+  # once. Requiring `exec` would guard the call shape instead of the property.
+  [ "$(grep -Fc 'shellcheck --norc' "$LINT")" -eq 2 ] || fail "both lint modes must ignore ambient ShellCheck configuration"
   pass "fm-lint.sh is the sole authoritative definition at CI-default severity"
 }
 

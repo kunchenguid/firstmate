@@ -1139,7 +1139,7 @@ def read_bounded_json(
     byte_limit = positive_integer(maximum_bytes, "maximum artifact bytes")
     string_limit = byte_limit if maximum_string_bytes is None else maximum_string_bytes
     try:
-        before = path.stat(follow_symlinks=False)
+        before = os.stat(path, follow_symlinks=False)
     except OSError as exc:
         fail(f"bounded JSON artifact is unavailable at {path}: {exc}")
     if not stat.S_ISREG(before.st_mode):
