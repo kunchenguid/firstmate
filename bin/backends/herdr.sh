@@ -2701,9 +2701,6 @@ FM_BACKEND_HERDR_IDLE_RE=${FM_BACKEND_HERDR_IDLE_RE:-'^Type a message\.\.\.$'}
 # An alternation's branches are matched as whole literal byte sequences and
 # stay correct regardless of locale.
 FM_BACKEND_HERDR_BARE_PROMPT_RE=${FM_BACKEND_HERDR_BARE_PROMPT_RE:-'^(❯|›)'}
-# Cursor-only structural bare-prompt regex: same global glyphs plus Cursor's →.
-# Used only when FM_COMPOSER_HARNESS=cursor; bordered detection is unchanged.
-FM_BACKEND_HERDR_BARE_PROMPT_CURSOR_RE=${FM_BACKEND_HERDR_BARE_PROMPT_CURSOR_RE:-'^(❯|›|→)'}
 # Pi allows a multi-line composer between its horizontal separators. Bound the
 # structural candidate so two unrelated transcript rules with an arbitrarily
 # large region between them can never be promoted into a composer.
@@ -2778,8 +2775,10 @@ fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
   pane=$FM_BACKEND_HERDR_PANE
   # Bare → is Cursor's prompt glyph only. Admit it structurally when the
   # composer harness is cursor; never infer Cursor from idle regex alone.
+  # Build the prompt regex from the shared glyph table so Cursor's glyph is
+  # defined once (fm-composer-lib.sh), not duplicated here.
   bare_prompt_re=$FM_BACKEND_HERDR_BARE_PROMPT_RE
-  [ "${FM_COMPOSER_HARNESS:-}" = cursor ] && bare_prompt_re=$FM_BACKEND_HERDR_BARE_PROMPT_CURSOR_RE
+  [ "${FM_COMPOSER_HARNESS:-}" = cursor ] && bare_prompt_re="${bare_prompt_re%)\$}→)\$"
   cap=$(fm_backend_herdr_capture_ansi "$target" "$FM_BACKEND_HERDR_COMPOSER_LINES" 2>/dev/null \
     || fm_backend_herdr_capture "$target" "$FM_BACKEND_HERDR_COMPOSER_LINES") || { printf 'unknown'; return 0; }
   # Structural scan: locate the bottom-most composer row and remember its RAW
@@ -2878,7 +2877,7 @@ EOF
   fi
   # Delegate the empty/pending/unknown decision to the shared owner. The bare
   # shape only ever starts with an AGENT glyph (FM_BACKEND_HERDR_BARE_PROMPT_RE
-  # is '^(❯|›)'; Cursor also admits `→` via FM_BACKEND_HERDR_BARE_PROMPT_CURSOR_RE),
+  # is '^(❯|›)'; Cursor also admits `→` via the dynamic expansion above),
   # so a bare shell prompt never reaches here - it stays 'unknown'
   # via the no-composer-row path above, exactly as before.
   # The plain (ANSI-stripped, border-stripped, trimmed) form of the winning row
