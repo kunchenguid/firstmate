@@ -174,7 +174,7 @@ A process-event source performs a non-destructive, cursor-anchored delta read, f
 The channel carries the mate's status and decision model: an uncorrelated progress line and a newly raised `needs-decision` travel the same path as a correlated answer, and reach the parent's open-decision fold identically.
 Correlation is a per-line property that settles a pending request; it is never a gate on the stream, so a missing correlation token cannot stop or wedge the relay or hold the cursor back.
 The adapter rejects malformed UTF-8 before any payload line reaches the primary status channel.
-Transport normalization rewrites NUL, every other C0 control except tab and newline, and DEL to `?`, while printable ASCII and valid UTF-8 pass through unchanged.
+Transport normalization rewrites NUL, every other C0 control except tab and newline, and DEL to `?`; within a content-bearing line, printable ASCII, tabs, and all non-ASCII bytes from the validated UTF-8 payload pass through unchanged.
 If the confined remote reader permanently refuses a referenced document, the mate's line is mirrored with its original pointer and the adapter appends one keyed escalation naming the gap instead of stalling the stream.
 An SSH exit status of 255 while fetching a referenced document leaves the delta uncommitted for the process-event runner's normal retry because remote completion is unknown.
 The process-event runner applies each captured delta through this adapter as soon as it is captured, so a mirrored reply reaches the primary status channel without depending on the wake handler running the adapter itself.

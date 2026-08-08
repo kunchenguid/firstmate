@@ -281,12 +281,12 @@ validate_utf8_payload() { # <source>
   ' < "$1"
 }
 
-# The one adaptation a machine boundary forces on valid UTF-8 bytes: NUL and
-# every other C0 control except tab and newline, plus DEL, become '?'. Printable
-# ASCII and valid UTF-8 pass through untouched, so ordinary notes mirror exactly
-# as a local secondmate would have written them. Newlines remain framing rather
-# than payload bytes, and blank separators are not carried into the parent status
-# stream.
+# The one adaptation a machine boundary forces on a valid UTF-8 payload: NUL and
+# every other C0 control except tab and newline, plus DEL, become '?'. Within a
+# content-bearing line, printable ASCII, tabs, and all non-ASCII bytes pass
+# through untouched, so ordinary notes mirror exactly as a local secondmate
+# would have written them. Newlines remain framing rather than payload bytes,
+# and blank separators are not carried into the parent status stream.
 normalize_payload() { # <source> <destination>
   LC_ALL=C tr '\000-\010\013-\037\177' '?' < "$1" > "$2"
 }
