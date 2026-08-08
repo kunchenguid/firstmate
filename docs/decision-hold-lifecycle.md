@@ -20,10 +20,19 @@ It verifies every listed identity against tasks-axi before recording completion.
 For an open keyed status decision, it appends a `captain-held [key=<key>]: ...` transfer event only after the matching backlog hold is durable.
 `bin/fm-classify-lib.sh` recognizes that transfer as closing the live status copy without claiming that the captain has answered it.
 
+The `retract` subcommand takes one key back out of the recorded union when a later review pass establishes that it duplicates a question already inventoried under a different key.
+It exists because `complete` unions keys idempotently while the durability lookup reads the live backlog and done archive: removing a duplicate hold with `tasks-axi rm`, which is the correct de-duplication action, previously left the key recorded and absent from both durability sources, so `verify` and `complete` refused permanently and scout teardown could never clean the source up.
+The required `--superseded-by` key must already be in the same origin's inventory and must itself satisfy the shared durability lookup, and a state-changing retraction requires the removed key to still belong to that inventory, so the question stays gated under one surviving identity and a retraction can never empty the union.
+Retraction removes the duplicate identity from the live backlog when it is still there, which keeps `tasks-axi rm`'s own refusal to delete an id that active work still blocks on in force, and it refuses a recorded captain decision in an interrupted live resolution as well as a durably resolved decision in either the backlog or the archive.
+An already absent inventory key takes an idempotent no-op path without inspecting or removing the retracted live task, changing metadata, or appending a status transfer.
+An unreadable archive is deliberately asymmetric: it blocks the surviving key, because the gate must not rely on an identity it could not check, but it does not block the retracted one, because an archive that cannot be read is not evidence that the removed duplicate was resolved, and refusing there would leave the strand in place.
+For an open keyed status decision it appends the same `captain-held [key=<key>]: ...` transfer event `complete` uses, so `bin/fm-classify-lib.sh` closes the live status copy without claiming the captain answered.
+The gate itself is unchanged: `verify` and the shared durability lookup are the same code before and after, and only the inventory the agent asserts is editable.
+
 Scout teardown calls the script's read-only `verify` subcommand after checking for the report and before removing any source state.
 The `--force` path remains the explicit captain-approved discard escape hatch.
 
-Both subcommands share one durability lookup, which reads the live backlog first and falls back to `data/done-archive.md` only when the identity is absent there.
+The completion, verification, and retraction subcommands share one durability lookup, which reads the live backlog first and falls back to `data/done-archive.md` only when the identity is absent there.
 That secondary read exists because tasks-axi Done retention prunes older resolved records out of the live backlog, which previously made a correctly filed and correctly resolved decision indistinguishable from one that was never filed.
 The fallback is read-only, never restores a record into the backlog, and satisfies the gate only for an archived record that is marked done, is kind `captain`, and still carries the durable resolution record.
 An identity absent from both sources, an archived record that is not resolved, and a missing, unreadable, or malformed archive all keep the same refusal.
@@ -51,6 +60,7 @@ Verification date: 2026-07-14.
 Additional quoted `blocked_by` regression verification date: 2026-07-17.
 Plural blocker-readiness and mixed-home projection verification date: 2026-07-22.
 Archived resolved decision lookup verification date: 2026-08-05.
+Duplicate decision key retraction verification date: 2026-08-08.
 
 The focused end-to-end regression uses only synthetic `sample` identities and decision text.
 It begins with a completed investigation and visual review whose genuine unresolved choice exists only in the report.
@@ -124,4 +134,48 @@ ok - resolve matches first/middle/last in quoted blocked_by and rejects a genuin
 
 $ bin/fm-lint.sh
 fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
+```
+
+### Duplicate decision key retraction
+
+Verification date: 2026-08-08, against tasks-axi 0.2.4 and ShellCheck 0.11.0.
+
+The added case uses only synthetic `sample` identities.
+It files three keys, two of which are the same route question under different slugs, completes the inventory, and removes the duplicate with `tasks-axi rm` exactly as an operator de-duplicates a hold.
+It first asserts the strand itself: `verify` refuses naming the removed identity, a `complete` retry refuses, and non-forced scout teardown refuses while preserving the investigation's records.
+`tasks-axi rm` was confirmed to succeed against an actively held item, so the removal that causes the strand needs no unusual state.
+While the strand is still live the case asserts every anchor-validation refusal: a missing `--superseded-by`, a key superseding itself, a superseding key outside the reviewed inventory, and a superseding key that is in the inventory but is no longer durable.
+That last refusal is what stops a removed identity from being used to justify dropping a decision that is still genuinely held, and the surviving hold is asserted to remain in the backlog after it.
+The case then retracts the duplicate, asserts the reduced union, and asserts the live status fold no longer holds the retracted key open.
+It asserts an identical retry is idempotent and that the retry reports that the key is already outside the inventory without mutating the backlog or status state.
+It also asserts that a never-inventoried live hold and a mistyped absent key take that same pure no-op path without mutating backlog, status, or metadata state.
+It then interrupts `resolve` after the captain decision is recorded and dependents are unblocked but before the final Done transition, and asserts that retraction refuses while preserving the queued hold and its resolution record.
+Finally, it asserts that a durably resolved decision is not retractable either while it is in the live backlog or after `tasks-axi prune --keep 0 --state done` archives it.
+It closes on the acceptance criterion: teardown now succeeds, and the second distinct captain decision is still in the backlog afterwards.
+
+The case fails against the pre-change script at `not ok - retracting a duplicate key failed`, after every strand assertion above has already held, which is what proves the reproduction is not vacuous.
+
+The suites covering the surfaces this change touches were also run and pass: `tests/fm-brief.test.sh`, `tests/fm-fleet-snapshot-view.test.sh`, `tests/fm-bearings-snapshot.test.sh`, `tests/fm-wake-drain-open-decisions.test.sh`, `tests/fm-wake-drain-open-decisions-cursor.test.sh`, `tests/fm-documentation-audiences.test.sh`, `tests/fm-test-run.test.sh`, and `tests/fm-test-isolation-proof.test.sh`.
+`tests/fm-teardown.test.sh` reports one failure, `herdr-preflight-missing-adapter`, which is pre-existing and environment-dependent rather than caused by this change: stashing both changed files reproduces the identical single failure, one before and one after.
+
+```text
+$ bash tests/fm-decision-hold-lifecycle.test.sh
+ok - report-only unresolved decision is reproduced and completion refuses before loss
+ok - non-forced scout teardown always requires durable inventory verification
+ok - an archived resolved captain decision satisfies the completion gate
+ok - only a genuinely resolved archived captain decision satisfies the gate
+ok - captain holds are idempotent, distinct, teardown-safe, Bearings-visible, and durably routed before close
+ok - completion and verification validate origins before constructing paths
+ok - ended visual review follows the same decision-hold completion owner
+ok - resolved findings and decision-like prose do not create false holds
+ok - terminal single-owner stale status decisions do not block empty inventory
+ok - main-home and secondmate-home captain holds remain correctly routed
+ok - resolve matches first/middle/last in quoted blocked_by and rejects a genuinely absent id
+ok - a de-duplicated decision key is retractable and no longer strands teardown
+
+$ bin/fm-lint.sh
+fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
+
+$ bin/fm-doc-audience-check.sh
+fm-doc-audience-check: ok surfaces=70 local_links=217
 ```

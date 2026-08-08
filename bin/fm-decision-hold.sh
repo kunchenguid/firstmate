@@ -22,6 +22,7 @@
 #     --title <title> --reason <reason> [--repo <repo>]
 #   fm-decision-hold.sh complete <origin-id> (--none | <decision-key>...)
 #   fm-decision-hold.sh verify <origin-id>
+#   fm-decision-hold.sh retract <origin-id> <decision-key> --superseded-by <decision-key>
 #   fm-decision-hold.sh resolve <origin-id> <decision-key> \
 #     --decision-file <path> --routed-to <task-id> [--routed-to <task-id>...]
 #
@@ -41,6 +42,25 @@
 # both sources, an archived record that is not resolved, and a missing, unreadable,
 # or malformed archive all keep today's refusal, and the refusal now names what it
 # actually found rather than reporting every case as absence.
+#
+# `retract` is the supported way to take a decision key back out of the recorded
+# inventory when a later review pass establishes that it duplicates a decision
+# already inventoried under a different key. Removing the duplicate backlog item
+# with `tasks-axi rm` alone leaves the key in the recorded union and absent from
+# both durability sources, which makes `verify` and `complete` refuse forever and
+# strands scout teardown. `--superseded-by` is required and names the surviving
+# key, which must already be in this origin's inventory and must itself pass the
+# same durability check. That anchor is what keeps the gate intact: the question
+# stays gated, only its duplicate identity goes away, and the union can never be
+# emptied by a retraction. A key that is no longer in the recorded inventory takes
+# a no-op path that does not inspect or mutate the retracted identity. Otherwise
+# the retracted identity is removed from the backlog when it is still there, so
+# `tasks-axi rm`'s own refusal to delete an id that active work still blocks on
+# continues to apply. A decision that already carries a recorded captain answer
+# is never retractable, whether it is durably resolved or still queued because
+# `resolve` was interrupted after writing that answer. Deleting it would lose both
+# the answer and the retry identity. Retraction is idempotent, so an interrupted
+# run is repaired by running the same command again.
 #
 # `resolve` requires every --routed-to task to exist and to be blocked by the hold.
 # It writes the captain decision and routed identities into the hold body, clears
@@ -446,6 +466,80 @@ EOF
   printf 'verified: %s unresolved-decision inventory\n' "$origin"
 }
 
+command_retract() {
+  local origin=${1:-} key=${2:-} surviving='' meta reviewed previous keys id surviving_id show kind body archived raw_open open_key
+  [ "$#" -ge 2 ] || { usage >&2; exit 2; }
+  shift 2
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --superseded-by) shift; surviving=${1:-} ;;
+      *) usage >&2; exit 2 ;;
+    esac
+    shift
+  done
+  validate_slug origin-id "$origin"
+  validate_slug decision-key "$key"
+  [ -n "$surviving" ] || fail "--superseded-by is required: retraction must name the surviving decision key"
+  validate_slug superseded-by "$surviving"
+  [ "$surviving" != "$key" ] || fail "decision key $key cannot supersede itself"
+  meta="$STATE/$origin.meta"
+  [ -f "$meta" ] || fail "origin metadata is absent: $meta"
+  require_tasks_axi
+  origin_exists_here "$origin" || fail "origin $origin is not owned by the active home $FM_HOME"
+  reviewed=$(meta_value "$meta" decisions_reviewed)
+  [ "$reviewed" = 1 ] || fail "origin $origin has no completed unresolved-decision inventory"
+  previous=$(meta_value "$meta" decision_keys)
+  id=$(hold_id "$origin" "$key")
+  surviving_id=$(hold_id "$origin" "$surviving")
+
+  # The surviving key is the whole safety anchor: the retracted question must stay
+  # gated under an identity this origin already inventoried and that is still
+  # actively held or durably resolved. Check it before anything is removed.
+  list_has_key "$previous" "$surviving" \
+    || fail "superseding decision key $surviving is outside the reviewed inventory for $origin"
+  verify_hold_durable "$surviving_id"
+  if ! list_has_key "$previous" "$key"; then
+    printf 'retracted: %s was already outside the reviewed inventory for %s\n' "$id" "$origin"
+    return 0
+  fi
+
+  if show=$(task_show "$id"); then
+    kind=$(show_field "$show" kind)
+    [ "$kind" = captain ] || fail "backlog identity $id is not kind captain"
+    body=$(show_field "$show" body)
+    case "$body" in
+      *"Resolution recorded by fm-decision-hold."*"Routed work:"*)
+        fail "captain decision $id has a recorded captain decision that must not be deleted"
+        ;;
+    esac
+    ! verify_hold_resolved "$id" \
+      || fail "captain decision $id is durably resolved and does not need retraction"
+    tasks_axi rm "$id" >/dev/null || fail "could not remove duplicate captain hold $id"
+  else
+    archived=$(archive_hold_status "$id")
+    [ "$archived" != resolved ] \
+      || fail "captain decision $id is durably resolved in $ARCHIVE and does not need retraction"
+  fi
+
+  # Close the live status copy for the retracted key the same way `complete`
+  # transfers one to its durable owner. The raw fold is deliberate: a terminal
+  # origin suppresses origin_open_decisions, and the line must still be written.
+  raw_open=$(status_open_decisions "$STATE/$origin.status")
+  while IFS=$'\t' read -r open_key _verb _summary; do
+    [ -n "$open_key" ] || continue
+    [ "$open_key" = "$key" ] || continue
+    printf 'captain-held [key=%s]: superseded by %s\n' "$key" "$surviving_id" >> "$STATE/$origin.status"
+  done <<EOF
+$raw_open
+EOF
+
+  keys=$(printf '%s\n' "$previous" | tr ',' '\n' | sed '/^$/d' | grep -vxF "$key" \
+    | LC_ALL=C sort -u | paste -sd, -)
+  [ -n "$keys" ] || fail "retracting $key would empty the inventory for $origin"
+  printf 'decisions_reviewed=1\ndecision_keys=%s\n' "$keys" >> "$meta"
+  printf 'retracted: %s superseded by %s\n' "$id" "$surviving_id"
+}
+
 command_resolve() {
   local origin=${1:-} key=${2:-} decision_file='' id='' decision='' decision_digest='' body='' routed='' routed_csv='' dep show blocked state hold_show hold_body archived_record resolution_recorded=0
   [ "$#" -ge 2 ] || { usage >&2; exit 2; }
@@ -549,6 +643,7 @@ case "${1:-}" in
   hold) shift; command_hold "$@" ;;
   complete) shift; command_complete "$@" ;;
   verify) shift; command_verify "$@" ;;
+  retract) shift; command_retract "$@" ;;
   resolve) shift; command_resolve "$@" ;;
   -h|--help) usage ;;
   *) usage >&2; exit 2 ;;
