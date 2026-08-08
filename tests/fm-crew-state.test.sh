@@ -1309,6 +1309,54 @@ test_missing_run_head_falls_back_to_current_state() {
   pass "missing run head falls back instead of matching by branch"
 }
 
+# --- structured contract (--json) ------------------------------------------
+# `--json` emits one fm-crew-state.v1 object carrying the exact same
+# state/source/detail values the display line would carry, then exits 0; the
+# one-line contract stays the default output. The fixture follows the suite
+# convention (a real repo worktree, a fakebin with no run anywhere and an idle
+# pane, plus a status-log line) so the derived state is deterministic.
+test_structured_json_contract() {
+  reset_fakes
+  local d; d=$(new_case structured-json)
+  make_repo_on_branch "$d/wt" fm/feat-structured
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-structured.meta" "window=fm:fm-feat-structured" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: implementing the structured contract\n' > "$d/state/feat-structured.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-structured
+  local STATE="$d/state" ID="feat-structured"
+  PATH="$d/fakebin:$PATH"
+  local out
+  out=$(FM_STATE_OVERRIDE="$STATE" "$ROOT/bin/fm-crew-state.sh" --json "$ID" 2>/dev/null)
+  echo "$out" | jq -e '.schema == "fm-crew-state.v1" and (.state | type == "string") and (.source | type == "string")' >/dev/null \
+    || fail "structured contract malformed: $out"
+  echo "$out" | jq -e '.id == "'"$ID"'"' >/dev/null || fail "id missing"
+  pass "fm-crew-state --json emits the structured contract"
+}
+
+test_structured_contract_matches_display_line() {
+  reset_fakes
+  local d; d=$(new_case structured-json-match)
+  make_repo_on_branch "$d/wt" fm/feat-structured-match
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-structured-match.meta" "window=fm:fm-feat-structured-match" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: implementing the structured contract\n' > "$d/state/feat-structured-match.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-structured-match
+  local STATE="$d/state" ID="feat-structured-match"
+  PATH="$d/fakebin:$PATH"
+  local line out
+  line=$(FM_STATE_OVERRIDE="$STATE" "$ROOT/bin/fm-crew-state.sh" "$ID" 2>/dev/null | head -1)
+  out=$(FM_STATE_OVERRIDE="$STATE" "$ROOT/bin/fm-crew-state.sh" --json "$ID" 2>/dev/null)
+  local s; s=$(echo "$out" | jq -r '.state')
+  case "$line" in
+    "state: $s"*) pass "structured state matches the display line" ;;
+    *) fail "structured state $s disagrees with display line: $line" ;;
+  esac
+}
+
 test_active_run_is_authoritative
 test_stale_needs_decision_superseded
 test_stale_blocked_superseded
@@ -1358,5 +1406,7 @@ test_historical_same_branch_rewritten_head_not_current
 test_active_run_descendant_fix_head_remains_current
 test_local_advanced_past_run_head_invalidates
 test_missing_run_head_falls_back_to_current_state
+test_structured_json_contract
+test_structured_contract_matches_display_line
 
 echo "all fm-crew-state tests passed"

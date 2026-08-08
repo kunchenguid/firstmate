@@ -67,6 +67,15 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
 
+# Structured contract mode: `--json` emits one fm-crew-state.v1 object with
+# the exact state/source/detail values the display line would carry, then exits
+# 0. The one-line contract remains the default output; this script stays the
+# only semantic worker-state parser.
+if [ "${1:-}" = --json ]; then
+  FM_CREW_STATE_JSON=1
+  shift
+fi
+
 ID=${1:-}
 [ -n "$ID" ] || { echo "usage: fm-crew-state.sh <id>" >&2; exit 2; }
 
@@ -82,10 +91,17 @@ FM_CREW_STATE_RUNS_LIMIT=${FM_CREW_STATE_RUNS_LIMIT:-200}
 case "$FM_CREW_STATE_RUNS_LIMIT" in ''|*[!0-9]*) FM_CREW_STATE_RUNS_LIMIT=200 ;; esac
 SEP=' · '
 
-# Emit the one canonical line and exit 0. Detail is optional.
+# Emit the one canonical line (or, with FM_CREW_STATE_JSON=1, the structured
+# contract) and exit 0. Detail is optional.
 emit() {  # <state> <source> [detail]
   local line="state: $1${SEP}source: $2"
   [ -n "${3:-}" ] && line="$line${SEP}$3"
+  if [ "${FM_CREW_STATE_JSON:-0}" = 1 ]; then
+    jq -n --arg schema fm-crew-state.v1 --arg id "$ID" \
+      --arg state "$1" --arg source "$2" --arg detail "${3:-}" --arg line "$line" \
+      '{schema:$schema,id:$id,state:$state,source:$source,detail:$detail,raw:$line}'
+    exit 0
+  fi
   printf '%s\n' "$line"
   exit 0
 }
