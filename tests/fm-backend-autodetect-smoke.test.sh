@@ -39,7 +39,6 @@ assert_contains_local() {  # <haystack> <needle> <msg>
 
 command -v herdr >/dev/null 2>&1 || { echo "skip: herdr not found"; exit 0; }
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the herdr adapter)"; exit 0; }
-command -v treehouse >/dev/null 2>&1 || { echo "skip: treehouse not found (required by fm-spawn.sh)"; exit 0; }
 
 export FM_GATE_REFUSE_BYPASS=1
 
@@ -66,10 +65,8 @@ HERDR_LAB_SESSION=$("$HERDR_LAB_HELPER" name fm-autodetect-smoke-concurrency-h3)
 }
 export HERDR_SESSION="$HERDR_LAB_SESSION"
 ID="autodetectsmoke1"
-WT=
 cleanup_all() {
   local cleanup_status=0
-  [ -n "$WT" ] && command -v treehouse >/dev/null 2>&1 && treehouse return --force "$WT" >/dev/null 2>&1
   "$HERDR_LAB_HELPER" teardown "$HERDR_LAB_SESSION" || cleanup_status=$?
   rm -rf "$TMP_ROOT"
   return "$cleanup_status"
@@ -98,6 +95,41 @@ git -C "$PROJ" init -q
 printf '# scratch\n' > "$PROJ/README.md"
 git -C "$PROJ" add README.md
 git -C "$PROJ" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial
+# fm_proj_template_dir_at (bin/fm-proj-lib.sh) requires exactly one 00-* template
+# under the project dir before fm-spawn.sh ever invokes the proj binary.
+mkdir -p "$PROJ/00-main"
+
+# Herdr is the real tool under test; the worktree provider is faked, because the
+# real proj needs a reflink-capable PROJ_ROOT that a scratch TMPDIR cannot supply.
+# The fake keeps proj's own contract (bin/fm-proj-lib.sh): `new` prints the
+# created worktree path and only that path to stdout, and `rm` has no stdout at
+# all - and it hands out a genuine linked git worktree, so fm-spawn.sh's
+# isolation assertion and fm-teardown.sh's safety checks see real state.
+FAKEBIN="$TMP_ROOT/fakebin"
+mkdir -p "$FAKEBIN"
+cat > "$FAKEBIN/proj" <<'SH'
+#!/usr/bin/env bash
+set -u
+src=${FM_FAKE_PROJ_PROJECT:-}
+case "${1:-}" in
+  new)
+    tree="$src/${2:-}"
+    git -C "$src" worktree add -q -b "fm/${2:-}" "$tree" >&2 || exit 1
+    printf '%s\n' "$tree"
+    exit 0
+    ;;
+  rm)
+    args=(worktree remove)
+    [ "${3:-}" = --force ] && args+=(--force)
+    git -C "$src" "${args[@]}" "$src/${2##*/}" >&2 || exit 1
+    exit 0
+    ;;
+esac
+exit 0
+SH
+chmod +x "$FAKEBIN/proj"
+export PATH="$FAKEBIN:$PATH"
+export FM_FAKE_PROJ_PROJECT="$PROJ"
 
 # --- spawn with NO explicit backend config; HERDR_ENV=1 is the only marker --
 
@@ -163,8 +195,8 @@ status=$?
 if "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" pane get "$PANE" >/dev/null 2>&1; then
   fail "fm-teardown.sh did not close the auto-detected herdr pane"
 fi
-WT=
-pass "real herdr: teardown completes the auto-detected spawn/teardown cycle (meta cleared, pane closed)"
+[ ! -d "$WT" ] || fail "fm-teardown.sh did not remove the task worktree $WT"
+pass "real herdr: teardown completes the auto-detected spawn/teardown cycle (meta cleared, worktree removed, pane closed)"
 
 if ! cleanup_all; then
   trap - EXIT
