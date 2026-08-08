@@ -2462,6 +2462,32 @@ EOF
   pass "forced teardown refuses a non-directory descendant state path"
 }
 
+test_force_teardown_refuses_symlinked_descendant_state() {
+  local home subhome fakebin err log rec
+  rec=$(seed_empty_task_set_home taskset-state-symlink)
+  IFS='|' read -r home subhome <<EOF
+$rec
+EOF
+  mkdir -p "$subhome/state-target"
+  ln -s state-target "$subhome/state"
+  err="$TMP_ROOT/taskset-state-symlink.err"
+  fakebin=$(make_fake_tmux "$TMP_ROOT/taskset-state-symlink-fake")
+  log="$TMP_ROOT/taskset-state-symlink-fake/tmux.log"
+  if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" \
+    FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/taskset-state-symlink-fake/pane.txt" \
+    "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err"; then
+    fail "forced teardown accepted a symlinked descendant state path"
+  fi
+  [ -d "$subhome" ] || fail "symlinked state-path refusal removed the descendant home"
+  [ -L "$subhome/state" ] || fail "symlinked state-path refusal changed the state symlink"
+  [ -d "$subhome/state-target" ] || fail "symlinked state-path refusal changed the state target"
+  [ -e "$home/state/domain.meta" ] || fail "symlinked state-path refusal removed parent metadata"
+  grep -F 'kill-window' "$log" >/dev/null && fail "symlinked state-path refusal killed a window"
+  grep -F "$(basename "$subhome")" "$err" >/dev/null || fail "symlinked state-path refusal did not name the descendant home: $(cat "$err")"
+  grep -F 'symbolic-link state path' "$err" >/dev/null || fail "symlinked state-path refusal did not explain the concrete problem: $(cat "$err")"
+  pass "forced teardown refuses a symlinked descendant state path"
+}
+
 test_force_teardown_locks_descendant_with_absent_state() {
   local home subhome fakebin err log rec claim_root ready release lock pid i=0
   rec=$(seed_empty_task_set_home taskset-state-absent)
@@ -2986,6 +3012,7 @@ test_secondmate_teardown_refuses_registered_nested_home
 test_secondmate_teardown_refuses_child_registry_nested_home
 test_secondmate_force_teardown_prevalidates_before_child_cleanup
 test_force_teardown_refuses_non_directory_descendant_state
+test_force_teardown_refuses_symlinked_descendant_state
 test_force_teardown_locks_descendant_with_absent_state
 test_force_teardown_refuses_while_a_task_is_being_published
 test_fresh_spawn_refuses_while_a_forced_teardown_owns_the_task_set
