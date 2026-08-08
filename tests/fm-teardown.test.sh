@@ -932,7 +932,7 @@ test_dirty_worktree_refuses() {
 
   expect_code 1 "$rc" "dirty-wt: teardown should refuse a dirty worktree even when the committed work has landed"
   grep -q REFUSED "$case_dir/stderr" || fail "dirty-wt: no REFUSED line in stderr"
-  grep -q "uncommitted changes" "$case_dir/stderr" || fail "dirty-wt: refusal did not cite uncommitted changes"
+  grep -q "tracked changes that return would discard" "$case_dir/stderr" || fail "dirty-wt: refusal did not cite tracked changes"
   pass "dirty worktree is refused even when its committed work has landed (dirty always wins)"
 }
 
@@ -1187,8 +1187,8 @@ test_stale_index_lock_cleanup_rechecks_dirty_worktree() {
   expect_code 1 "$rc" "stale-lock-dirty-recheck: teardown should refuse dirty work after clearing the stale lock"
   assert_grep "removed provably-stale git lock" "$case_dir/stderr" \
     "stale-lock-dirty-recheck: teardown did not report clearing the stale lock"
-  assert_grep "uncommitted changes present" "$case_dir/stderr" \
-    "stale-lock-dirty-recheck: teardown did not re-run the dirty check"
+  assert_grep "tracked changes that return would discard" "$case_dir/stderr" \
+    "stale-lock-dirty-recheck: teardown did not re-run the tracked-change check"
   assert_absent "$lock" "stale-lock-dirty-recheck: stale lock file should have been removed"
   [ -f "$case_dir/state/task-x1.meta" ] || fail "stale-lock-dirty-recheck: teardown completed despite dirty work"
   pass "stale lock cleanup rechecks and refuses dirty worktree before return"
