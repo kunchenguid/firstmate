@@ -254,6 +254,30 @@ test_harness_family_resolution() {
   pass "fm-control-lib: a recorded harness resolves to its verified adapter without guessing"
 }
 
+test_prefixed_recorded_harness_reaches_each_control_verb() {
+  local dir out rc
+  dir=$(new_case prefixed-interrupt)
+  add_task "$dir" t1 grok-2
+  alive_as "$dir" grok-2
+  out=$(run_control "$dir" t1 interrupt); rc=$?
+  expect_code 0 "$rc" "interrupt should resolve a prefixed recorded harness"$'\n'"$out"
+  [ "$(keys_sent "$dir")" = C-c ] \
+    || fail "a grok-prefixed task should receive grok's interrupt key"
+  assert_contains "$out" "harness=grok" \
+    "interrupt should report the verified adapter that supplied its mechanics"
+
+  dir=$(new_case prefixed-exit)
+  add_task "$dir" t1 grok-2
+  alive_as "$dir" grok-2
+  out=$(run_control "$dir" t1 exit); rc=$?
+  expect_code 0 "$rc" "exit should resolve a prefixed recorded harness"$'\n'"$out"
+  [ "$(literals "$dir")" = /exit ] \
+    || fail "a grok-prefixed task should receive grok's exit command"
+  assert_contains "$out" "stopped t1 harness=grok" \
+    "exit should report the verified adapter that supplied its mechanics"
+  pass "fm-control: prefixed recorded harnesses reach interrupt and exit mechanics"
+}
+
 test_opencode_interrupts_twice_and_others_once() {
   # The one adapter that differs, asserted through the delivered keys rather
   # than the table, so a regression in either shows up here.
@@ -763,6 +787,7 @@ test_interrupt_sends_each_harness_verified_key
 test_opencode_interrupts_twice_and_others_once
 test_unverified_harness_is_refused
 test_harness_family_resolution
+test_prefixed_recorded_harness_reaches_each_control_verb
 test_backend_key_capability_matrix
 test_harness_kind_capability
 test_orca_refuses_an_escape_harness_interrupt

@@ -386,6 +386,33 @@ test_harness_switch_does_not_carry_the_old_profile_axes() {
   pass "fm-control relaunch: a harness switch resets model and effort unless they are named too"
 }
 
+test_harness_switch_resolves_a_prefixed_recorded_harness() {
+  local dir out rc auth
+  dir=$(new_case prefixcontrol rl32)
+  add_ship_task "$dir" rl32 grok-2
+  printf 'grok-2' > "$dir/fake/command"
+  mkdir -p "$dir/grokhome/hooks/fm-turn-end.d"
+  printf 'fm.abcdefabcdef\n' > "$dir/home/state/rl32.grok-turnend-token"
+  auth="$dir/grokhome/hooks/fm-turn-end.d/fm.abcdefabcdef"
+  printf '%s\n' "$dir/home/state/rl32.turn-ended" > "$auth"
+  printf 'token=fm.abcdefabcdef\n' > "$dir/wt/.fm-grok-turnend"
+
+  out=$(run_control "$dir" rl32 relaunch --harness claude --note "switching runtime"); rc=$?
+  expect_code 0 "$rc" "relaunch should resolve a prefixed recorded harness"$'\n'"$out"
+  [ "$(sed -n '1p' "$dir/fake/literal")" = /exit ] \
+    || fail "relaunch should stop a grok-prefixed task with grok's exit command"
+  [ "$(meta_field "$dir" rl32 harness)" = claude ] \
+    || fail "relaunch should publish the explicitly selected replacement harness"
+  [ "$(journal_field "$dir" rl32 from_harness)" = grok-2 ] \
+    || fail "relaunch should retain the recorded harness basename in its provenance"
+  assert_contains "$out" "harness=claude from=grok-2" \
+    "relaunch should report the recorded-to-selected harness transition"
+  [ ! -e "$auth" ] && [ ! -e "$dir/home/state/rl32.grok-turnend-token" ] \
+    && [ ! -e "$dir/wt/.fm-grok-turnend" ] \
+    || fail "relaunch should retire wiring owned by the prefixed prior harness"
+  pass "fm-control relaunch: a prefixed recorded harness can switch adapters transactionally"
+}
+
 test_same_harness_relaunch_keeps_the_profile_axes() {
   local dir out rc
   dir=$(new_case keepprofile rl6)
@@ -1187,6 +1214,7 @@ test_relaunch_appends_the_progress_note_to_the_instructions
 test_relaunch_requires_a_note_for_a_ship_task
 test_harness_switch_moves_the_record_and_clears_prior_wiring
 test_harness_switch_does_not_carry_the_old_profile_axes
+test_harness_switch_resolves_a_prefixed_recorded_harness
 test_same_harness_relaunch_keeps_the_profile_axes
 test_explicit_model_wins_over_the_recorded_one
 test_relaunch_onto_an_unverified_harness_is_refused
