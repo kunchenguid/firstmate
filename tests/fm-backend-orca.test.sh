@@ -695,6 +695,57 @@ test_spawn_releases_orca_resources_when_metadata_write_fails() {
   pass "fm-spawn.sh --backend orca: releases terminal and worktree on later aborts"
 }
 
+test_publication_failure_with_orca_cleanup_failure_preserves_atomic_recovery_record() {
+  local proj wt data state config id out status real_mv
+  id="orcaatomiccleanupz1"
+  proj="$TMP_ROOT/atomic-cleanup-project"
+  wt="$TMP_ROOT/atomic-cleanup-wt"
+  data="$TMP_ROOT/atomic-cleanup-data"
+  state="$TMP_ROOT/atomic-cleanup-state"
+  config="$TMP_ROOT/atomic-cleanup-config"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  mkdir -p "$data/$id" "$state" "$config"
+  printf 'brief\n' > "$data/$id/brief.md"
+  orca_case atomic-cleanup
+  printf '1\n' > "$RESP/1.exit"
+  printf '{"ok":true,"result":{"repo":{"id":"repo-atomic-cleanup"}}}\n' > "$RESP/2.out"
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-atomic-cleanup","path":"%s"}}}\n' "$wt" > "$RESP/3.out"
+  printf '{"ok":true,"result":{"terminal":{"handle":"term-atomic-cleanup"}}}\n' > "$RESP/4.out"
+  printf '1\n' > "$RESP/6.exit"
+  real_mv=$(command -v mv)
+  cat > "$FB/mv" <<SH
+#!/usr/bin/env bash
+set -u
+last=\${!#}
+if [ "\$last" = "$state/$id.meta" ] && [ ! -f "$state/publication-failed-once" ]; then
+  : > "$state/publication-failed-once"
+  exit 1
+fi
+exec "$real_mv" "\$@"
+SH
+  chmod +x "$FB/mv"
+
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --mode no-mistakes --yolo off --backend orca 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "Orca spawn should fail when publication and worktree cleanup fail"
+  assert_present "$state/$id.meta" "surviving Orca resources need a recovery record"
+  assert_grep "endpoint_task_id=$id" "$state/$id.meta" "recovery metadata lost its exact task binding"
+  assert_grep "backend=orca" "$state/$id.meta" "recovery metadata lost the backend"
+  assert_grep "orca_worktree_id=wt-atomic-cleanup" "$state/$id.meta" "recovery metadata lost the surviving worktree"
+  assert_grep "spawn_state=failed" "$state/$id.meta" "recovery metadata does not identify the failed spawn"
+  assert_grep "cleanup_required=orca-worktree" "$state/$id.meta" "recovery metadata does not identify the required cleanup"
+  assert_contains "$out" "recovery record was preserved" \
+    "the operator message did not acknowledge the record written by cleanup"
+  assert_not_contains "$out" "no task record was written" \
+    "the operator message denied the recovery record that exists"
+  [ -z "$(find "$state" -name '*.meta.tmp.*' -print)" ] \
+    || fail "Orca recovery left staged metadata debris"
+  pass "publication plus Orca cleanup failure preserves one complete recovery record and reports it"
+}
+
 test_peek_send_and_crew_state_route_through_orca_meta() {
   local wt state id out neutral
   id="orcaiopathz2"
@@ -1309,6 +1360,7 @@ test_spawn_refuses_orca_nonisolated_worktree
 test_spawn_removes_orca_worktree_when_terminal_create_fails
 test_spawn_preserves_orca_metadata_when_abort_cleanup_fails
 test_spawn_releases_orca_resources_when_metadata_write_fails
+test_publication_failure_with_orca_cleanup_failure_preserves_atomic_recovery_record
 test_peek_send_and_crew_state_route_through_orca_meta
 test_peek_and_crew_state_fail_closed_on_orca_error_json
 test_target_exists_rejects_orca_error_json

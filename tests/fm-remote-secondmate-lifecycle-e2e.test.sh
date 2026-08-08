@@ -705,6 +705,69 @@ launches_after_inherit=0
 [ "$launches_before_inherit" -eq "$launches_after_inherit" ] \
   || fail "remote spawn reached launch after ambiguous partial inheritance"
 assert_absent "$PARENT/state/ios.meta" "failed remote inheritance published launch metadata"
+
+# A remote endpoint is created before the parent publishes its host-qualified
+# record. Exercise both incomplete staging and rename failure at that exact
+# boundary. The endpoint's remote-host record remains the reconciliation source,
+# while the parent must publish neither a partial nor an unverified record.
+PARTIAL_PUBLISH_FAKE="$TMP_ROOT/partial-publish-fake"
+RENAME_PUBLISH_FAKE="$TMP_ROOT/rename-publish-fake"
+mkdir -p "$PARTIAL_PUBLISH_FAKE" "$RENAME_PUBLISH_FAKE"
+REAL_CAT=$(command -v cat)
+REAL_MV=$(command -v mv)
+cat > "$PARTIAL_PUBLISH_FAKE/cat" <<SH
+#!/usr/bin/env bash
+set -u
+case "\${1:-}" in
+  "\${FM_FAKE_META_TARGET:-}.tmp."*)
+    "$REAL_CAT" "\$1" | head -c 8
+    exit 0
+    ;;
+esac
+exec "$REAL_CAT" "\$@"
+SH
+cat > "$RENAME_PUBLISH_FAKE/mv" <<SH
+#!/usr/bin/env bash
+set -u
+last=\${!#}
+if [ "\$last" = "\${FM_FAKE_META_TARGET:-}" ]; then
+  exit 1
+fi
+exec "$REAL_MV" "\$@"
+SH
+chmod +x "$PARTIAL_PUBLISH_FAKE/cat" "$RENAME_PUBLISH_FAKE/mv"
+
+set +e
+FM_FAKE_META_TARGET="$PARENT/state/ios.meta" PATH="$PARTIAL_PUBLISH_FAKE:$PATH" \
+  remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate \
+  > "$TMP_ROOT/spawn-parent-meta-partial.out" 2>&1
+parent_partial_rc=$?
+set -e
+[ "$parent_partial_rc" -ne 0 ] || fail "remote spawn published metadata whose staged bytes verified as partial"
+assert_absent "$PARENT/state/ios.meta" "partial remote parent metadata reached the final path"
+[ -z "$(find "$PARENT/state" -name 'ios.meta.tmp.*' -print)" ] \
+  || fail "partial remote parent publication left staging debris"
+assert_grep 'exact endpoint remains recorded on remote host' "$TMP_ROOT/spawn-parent-meta-partial.out" \
+  "partial publication did not explain where the launched endpoint remains recoverable"
+assert_grep 'endpoint_task_id=ios' "$REMOTE_HOME/state/parent-route/ios.meta" \
+  "partial parent publication lost the remote host's exact task binding"
+assert_grep 'herdr_session=fm-remote' "$REMOTE_HOME/state/parent-route/ios.meta" \
+  "partial parent publication lost the remote host's exact session binding"
+
+set +e
+FM_FAKE_META_TARGET="$PARENT/state/ios.meta" PATH="$RENAME_PUBLISH_FAKE:$PATH" \
+  remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate \
+  > "$TMP_ROOT/spawn-parent-meta-rename.out" 2>&1
+parent_rename_rc=$?
+set -e
+[ "$parent_rename_rc" -ne 0 ] || fail "remote spawn reported success after its parent metadata rename failed"
+assert_absent "$PARENT/state/ios.meta" "rename-failed remote parent metadata reached the final path"
+[ -z "$(find "$PARENT/state" -name 'ios.meta.tmp.*' -print)" ] \
+  || fail "rename-failed remote parent publication left staging debris"
+assert_grep 'exact endpoint remains recorded on remote host' "$TMP_ROOT/spawn-parent-meta-rename.out" \
+  "rename failure did not explain where the launched endpoint remains recoverable"
+pass "remote parent publication rejects incomplete bytes and failed renames without losing endpoint identity"
+
 out=$(remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate)
 assert_contains "$out" 'remote=remote-mac backend=herdr' "remote spawn did not report separate host and backend dimensions"
 assert_grep 'remote_host=remote-mac' "$PARENT/state/ios.meta" "parent metadata omitted the remote host"

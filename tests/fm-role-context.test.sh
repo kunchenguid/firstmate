@@ -171,11 +171,18 @@ need(".heartbeat-streak", runtime, "primary runtime lost the watcher-internals n
 need("maintain the current home's private", runtime, "primary runtime lost ordinary private record maintenance")
 for role in ("ship", "scout"):
     text = x[role]
+    worker_context = prompt + text
     need("establishes the ordinary worker role", text, f"{role} brief lost worker role")
     need("do not adopt the Firstmate primary runtime contract", text, f"{role} brief lost primary exclusion")
     need("Reading or editing any file your task assigns you", text, f"{role} brief lost the authorized-edit allowance")
     need("delegate this task", text, f"{role} brief lost direct-work boundary")
-    reject("captain's only point of contact", prompt + text, f"{role} initial context gained primary identity")
+    need("current, exact captain authority", worker_context, f"{role} context lost the captain-only authority floor")
+    for boundary in ("discard unlanded work", "destructive", "irreversible", "security-sensitive"):
+        need(boundary, worker_context, f"{role} context lost the {boundary} boundary")
+    need("direct captain intervention", worker_context, f"{role} context lost captain-intervention authority")
+    need("reconcile", worker_context, f"{role} context lost captain-intervention reconciliation")
+    need("report outcomes faithfully", worker_context, f"{role} context lost faithful outcome reporting")
+    reject("captain's only point of contact", worker_context, f"{role} initial context gained primary identity")
 second = x["second"]
 need("primary-runtime/SKILL.md", second, "second-mate charter lost primary runtime load")
 need("marked return channel", second, "second-mate charter lost return-channel authority")

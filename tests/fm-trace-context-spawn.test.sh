@@ -46,11 +46,15 @@ case "${1:-}" in
         esac
       done
     fi
-    if [ "${FM_FAKE_TRACE_METADATA_APPEND_FAIL:-0}" = 1 ]; then
+    if [ -n "${FM_FAKE_TRACE_META_OBSERVE:-}" ]; then
       for a in "$@"; do
         case "$a" in
           "export TRACEPARENT="*)
-            chmod a-w "$FM_FAKE_META_PATH"
+            if [ -e "$FM_FAKE_META_PATH" ]; then
+              printf 'present\n' >> "$FM_FAKE_TRACE_META_OBSERVE"
+            else
+              printf 'absent\n' >> "$FM_FAKE_TRACE_META_OBSERVE"
+            fi
             ;;
         esac
       done
@@ -116,7 +120,7 @@ run_spawn() {
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
     FM_FAKE_TRACEPARENT_SEND_FAIL="${FM_FAKE_TRACEPARENT_SEND_FAIL:-0}" \
     FM_FAKE_TRACEPARENT_SEND_UNSAFE="${FM_FAKE_TRACEPARENT_SEND_UNSAFE:-0}" \
-    FM_FAKE_TRACE_METADATA_APPEND_FAIL="${FM_FAKE_TRACE_METADATA_APPEND_FAIL:-0}" \
+    FM_FAKE_TRACE_META_OBSERVE="${FM_FAKE_TRACE_META_OBSERVE:-}" \
     FM_FAKE_META_PATH="$home/state/$1.meta" \
     FM_FAKE_LAUNCH_LOG="$launchlog" PATH="$fakebin:$PATH" \
     "$SPAWN" "$@" --mode no-mistakes --yolo off 2>&1
@@ -321,25 +325,26 @@ test_unsafe_delivery_refuses_to_append_launch() {
   pass "uncleared TRACEPARENT input stops before the launch command is appended"
 }
 
-test_failed_metadata_append_unsets_carrier_and_still_launches() {
-  local rec out status meta
-  rec=$(make_spawn_case tc-metadata-failure)
+test_trace_delivery_precedes_single_complete_metadata_publication() {
+  local rec out status meta observed
+  rec=$(make_spawn_case tc-prepublish-trace)
   read_case_record "$rec"
   : > "$HOME_DIR/config/trace-context"
   start_trace_session "$HOME_DIR"
+  observed="$TMP_ROOT/tc-prepublish-trace.meta-observed"
 
-  out=$(FM_FAKE_TRACE_METADATA_APPEND_FAIL=1 \
+  out=$(FM_FAKE_TRACE_META_OBSERVE="$observed" \
     run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$CASE_ID" "$PROJ_DIR")
   status=$?
-  expect_code 0 "$status" "failed traceparent metadata append must not abort spawn"
-  assert_contains "$out" "spawned $CASE_ID" "spawn should report success after failed metadata append"
+  expect_code 0 "$status" "enabled trace-context spawn should publish after delivery resolves"
+  assert_contains "$out" "spawned $CASE_ID" "trace-context spawn did not report success"
   meta="$HOME_DIR/state/$CASE_ID.meta"
 
-  ! grep -q '^traceparent=' "$meta" \
-    || fail "failed metadata append must not leave a traceparent= claim in meta"
-  grep -q '^unset TRACEPARENT; .*claude' "$LAUNCH_LOG" \
-    || fail "failed metadata append must unset TRACEPARENT in the launch command"
-  pass "failed traceparent metadata append removes the carrier from the launched task"
+  [ "$(cat "$observed")" = absent ] \
+    || fail "the final metadata path was visible while TRACEPARENT delivery was still resolving"
+  fm_trace_context_valid "$(meta_traceparent "$meta")" \
+    || fail "the single final metadata record omitted the confirmed carrier"
+  pass "TRACEPARENT delivery resolves before one complete metadata record becomes visible"
 }
 
 test_duplicate_secondmate_spawn_does_not_converge_trace_context() {
@@ -564,7 +569,7 @@ test_enabled_records_and_injects_identical_carrier_before_launch
 test_disabled_writes_and_injects_neither
 test_failed_delivery_omits_metadata_and_still_launches
 test_unsafe_delivery_refuses_to_append_launch
-test_failed_metadata_append_unsets_carrier_and_still_launches
+test_trace_delivery_precedes_single_complete_metadata_publication
 test_duplicate_secondmate_spawn_does_not_converge_trace_context
 test_relaunch_reuses_recorded_carrier
 test_session_start_freezes_env_override_and_ignores_later_edits
