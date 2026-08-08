@@ -476,45 +476,59 @@ if adapter_env "$CONFIG_CASE/home" "$ADAPTER" arm "$CONFIG_CASE/files/malformed.
 fi
 pass "Forge config parsing rejects malformed, missing, empty, oversized, and non-loopback activation values"
 
-# Race same-inode byte replacement against the adapter's two verified reads.
-# Some calls may begin entirely between writes and accept one complete config;
-# at least one must observe and reject the active swap, and no partial read may
-# escape as a registration containing secret bytes.
+# Deterministically hold same-inode byte replacement open across the adapter's
+# verified reads: the background writer truncates the config and blocks until
+# this loop has run and scored its own arm() attempt against that exact
+# in-flight window, so every iteration is guaranteed to observe the active
+# swap rather than racing a fixed wall-clock window against it.
 SWAP_HOME="$CONFIG_CASE/swap-home"
 new_home "$SWAP_HOME"
 SWAP_CONFIG="$CONFIG_CASE/files/swap.toml"
+SWAP_GO="$CONFIG_CASE/files/swap.go"
+SWAP_ACK="$CONFIG_CASE/files/swap.ack"
+SWAP_ITER=8
 python3 "$HELPER" config "$SWAP_CONFIG" 3819
-python3 - "$SWAP_CONFIG" <<'PY' &
+rm -f "$SWAP_GO" "$SWAP_ACK"
+python3 - "$SWAP_CONFIG" "$SWAP_GO" "$SWAP_ACK" "$SWAP_ITER" <<'PY' &
 import hashlib, os, sys, time
-path = sys.argv[1]
+path, go_flag, ack_flag = sys.argv[1:4]
+count = int(sys.argv[4])
 token = hashlib.sha256(b"deterministic-private-forge-test-capability").hexdigest()
 base = '[bridge]\nlisten = "127.0.0.1:{}"\ntoken = "{}"\n'
 values = [(base.format(3819, token) + "#" + "a" * 64000).encode(),
           (base.format(3820, token) + "#" + "b" * 64000).encode()]
-end = time.monotonic() + 2.0
-index = 0
-while time.monotonic() < end:
-    raw = values[index % 2]
+for index in range(count):
     with open(path, "r+b", buffering=0) as output:
         output.truncate(0)
-        output.write(raw[:len(raw)//2])
-        time.sleep(0.0005)
-        output.write(raw[len(raw)//2:])
-        output.truncate(len(raw))
+        with open(go_flag, "w") as marker:
+            marker.write(str(index))
+        deadline = time.monotonic() + 10.0
+        while not os.path.exists(ack_flag):
+            if time.monotonic() > deadline:
+                raise SystemExit("foreground never acknowledged the swap window")
+            time.sleep(0.001)
+        os.remove(ack_flag)
+        os.remove(go_flag)
+        output.write(values[index % 2])
     os.chmod(path, 0o600)
-    index += 1
 PY
 swap_pid=$!
 swap_refused=0
-for _ in $(seq 1 20); do
+for _ in $(seq 1 "$SWAP_ITER"); do
+  deadline=$((SECONDS + 10))
+  while [ ! -e "$SWAP_GO" ]; do
+    [ "$SECONDS" -lt "$deadline" ] || fail "background swap writer never signalled its transition window"
+    sleep 0.001
+  done
   rm -rf "$SWAP_HOME/state"
   mkdir "$SWAP_HOME/state"
   if ! adapter_env "$SWAP_HOME" "$ADAPTER" arm "$SWAP_CONFIG" >/dev/null 2>&1; then
     swap_refused=$((swap_refused + 1))
   fi
+  : > "$SWAP_ACK"
 done
 wait "$swap_pid"
-[ "$swap_refused" -gt 0 ] || fail "active config byte swaps were never detected"
+[ "$swap_refused" -eq "$SWAP_ITER" ] || fail "active config byte swaps were not detected on every held-open attempt"
 python3 "$HELPER" assert-no-token "$SWAP_CONFIG" "$SWAP_HOME"
 pass "verified config reads detect active byte swaps without disclosing the token"
 
