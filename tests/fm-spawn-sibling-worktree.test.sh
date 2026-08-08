@@ -90,10 +90,19 @@ case "${1:-} ${2:-}" in
   "status "*) printf '{"ok":true,"result":{"runtime":{"reachable":true,"state":"ready"}}}\n' ;;
   "repo show"*) printf '{"ok":true,"result":{"repo":{"id":"repo-1"}}}\n' ;;
   "worktree create"*)
-    printf '{"ok":true,"result":{"worktree":{"id":"wt-1","path":"%s"}}}\n' "${FM_FAKE_ORCA_WT_PATH:-}"
+    if [ -n "${FM_FAKE_ORCA_CREATE_TERMINAL:-}" ]; then
+      printf '{"ok":true,"result":{"worktree":{"id":"wt-1","path":"%s"},"terminal":{"handle":"%s"}}}\n' \
+        "${FM_FAKE_ORCA_WT_PATH:-}" "$FM_FAKE_ORCA_CREATE_TERMINAL"
+    else
+      printf '{"ok":true,"result":{"worktree":{"id":"wt-1","path":"%s"}}}\n' "${FM_FAKE_ORCA_WT_PATH:-}"
+    fi
     ;;
   "worktree rm"*)
     rm -rf "${FM_FAKE_ORCA_WT_PATH:?orca worktree rm without a path}"
+    printf '{"ok":true,"result":{}}\n'
+    ;;
+  "terminal close"*)
+    [ -z "${FM_FAKE_ORCA_TERMINAL_FILE:-}" ] || rm -f "$FM_FAKE_ORCA_TERMINAL_FILE"
     printf '{"ok":true,"result":{}}\n'
     ;;
   "terminal create"*) printf '{"ok":true,"result":{"terminal":{"handle":"term-1"}}}\n' ;;
@@ -119,6 +128,8 @@ make_case() {
   FAKE_WINDOWS=''
   FAKE_LIST_FAIL=''
   FAKE_PANE_COMMAND=zsh
+  FAKE_ORCA_CREATE_TERMINAL=''
+  FAKE_ORCA_TERMINAL_FILE=''
   FAKEBIN_DIR=$(make_sibling_fakebin "$case_dir/fake")
   mkdir -p "$HOME_DIR/data" "$HOME_DIR/projects" "$HOME_DIR/state" "$HOME_DIR/config"
   printf 'codex\n' > "$HOME_DIR/config/crew-harness"
@@ -188,6 +199,8 @@ run_spawn() {
     FM_FAKE_TMUX_LOG="$LOG_FILE" \
     FM_FAKE_ORCA_WT_PATH="$WT_DIR" \
     FM_FAKE_ORCA_LOG="$ORCA_LOG" \
+    FM_FAKE_ORCA_CREATE_TERMINAL="${FAKE_ORCA_CREATE_TERMINAL:-}" \
+    FM_FAKE_ORCA_TERMINAL_FILE="${FAKE_ORCA_TERMINAL_FILE:-}" \
     PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off "$@" 2>&1
 }
@@ -366,6 +379,33 @@ test_orca_refusal_keeps_the_siblings_worktree() {
   pass "an orca refusal leaves the live sibling's worktree in place"
 }
 
+# The worktree is not the only thing the abort trap destroys. Orca returns a
+# terminal handle alongside the worktree it hands back, and
+# parse_orca_worktree_result stores it before the guard runs, so on a refusal
+# that handle can be the live sibling's own terminal - closing it is the same
+# destruction the worktree case guards against, reached by the other statement
+# in the same block. The fake's `terminal close` really removes the sentinel, so
+# this cannot pass on an absent log line.
+test_orca_refusal_keeps_the_siblings_terminal() {
+  local id=sibling-orca-term-a9 out status
+  make_case sibling-orca-term
+  write_sibling sibling-orca-term-worker "$WT_DIR"
+  FAKE_WINDOWS='fm-sibling-orca-term-worker'
+  FAKE_PANE_COMMAND=claude
+  FAKE_ORCA_CREATE_TERMINAL=term-sibling
+  FAKE_ORCA_TERMINAL_FILE="$CASE_DIR/sibling-terminal-alive"
+  : > "$FAKE_ORCA_TERMINAL_FILE"
+  out=$(run_spawn "$id" --backend orca)
+  status=$?
+  [ "$status" -ne 0 ] || fail "orca spawn succeeded onto a live sibling's worktree"
+  assert_contains "$out" "sibling-orca-term-worker" "the refusal did not name the offending task"
+  [ -f "$FAKE_ORCA_TERMINAL_FILE" ] || fail "the orca refusal closed the live sibling's terminal"
+  [ -d "$WT_DIR" ] || fail "the orca refusal removed the live sibling's worktree"
+  assert_no_grep 'terminal close' "$ORCA_LOG" \
+    "the orca refusal asked orca to close the live sibling's terminal"
+  pass "an orca refusal leaves the live sibling's terminal open"
+}
+
 test_clean_spawn_still_succeeds
 test_live_sibling_refuses
 test_dead_sibling_still_spawns
@@ -374,5 +414,6 @@ test_unreadable_sibling_refuses
 test_endpointless_sibling_refuses_with_a_diagnostic
 test_differently_spelled_path_is_caught
 test_orca_refusal_keeps_the_siblings_worktree
+test_orca_refusal_keeps_the_siblings_terminal
 
 echo "# all fm-spawn-sibling-worktree tests passed"

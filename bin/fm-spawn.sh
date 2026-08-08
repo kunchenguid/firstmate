@@ -621,7 +621,9 @@ if [ "$BACKEND" = orca ]; then
   fm_backend_orca_runtime_check || exit 1
 fi
 ORCA_ABORT_CLEANUP=0
-ORCA_ABORT_KEEP_WORKTREE=0
+# Set when this abort is a live-sibling refusal, meaning the orca resources this
+# spawn is holding may belong to that sibling rather than to this spawn.
+ORCA_ABORT_SIBLING_OWNED=0
 ORCA_WORKTREE_ID=
 ORCA_TERMINAL=
 HERDR_PROJECTION_ABORT_CLEANUP=0
@@ -674,28 +676,38 @@ spawn_abort_cleanup() {
   fi
   if [ "$ORCA_ABORT_CLEANUP" = 1 ]; then
     ORCA_ABORT_CLEANUP=0
-    if [ -n "${ORCA_TERMINAL:-}" ]; then
-      fm_backend_kill orca "$ORCA_TERMINAL" 2>/dev/null || true
-    fi
-    if [ -n "${ORCA_WORKTREE_ID:-}" ] && [ "$ORCA_ABORT_KEEP_WORKTREE" != 1 ]; then
-      if ! fm_backend_remove_worktree orca "$ORCA_WORKTREE_ID" 2>/dev/null; then
-        mkdir -p "$STATE" 2>/dev/null || true
-        if [ -d "$STATE" ]; then
-          {
-            echo "window=$W"
-            echo "worktree=${WT:-}"
-            echo "project=$PROJ_ABS"
-            echo "harness=$HARNESS"
-            echo "kind=$KIND"
-            [ -z "${MODE:-}" ] || echo "mode=$MODE"
-            [ -z "${YOLO:-}" ] || echo "yolo=$YOLO"
-            echo "tasktmp=${TASK_TMP:-}"
-            echo "model=${MODEL:-default}"
-            echo "effort=${EFFORT:-default}"
-            echo "backend=orca"
-            echo "orca_worktree_id=$ORCA_WORKTREE_ID"
-            [ -z "${ORCA_TERMINAL:-}" ] || echo "terminal=$ORCA_TERMINAL"
-          } > "$STATE/$ID.meta" 2>/dev/null || true
+    # This abort must destroy nothing a live sibling owns, so one condition
+    # gates the whole block rather than each resource separately. Both are at
+    # risk: fm_backend_orca_worktree_create returns a worktree-terminal-handle
+    # alongside the worktree, and parse_orca_worktree_result stores it in
+    # ORCA_TERMINAL before this guard runs, so on a sibling refusal that handle
+    # can be the sibling's own terminal exactly as the path can be its worktree.
+    # Gating the block, not the two statements, means a third resource added
+    # here later is covered without rediscovering this.
+    if [ "$ORCA_ABORT_SIBLING_OWNED" != 1 ]; then
+      if [ -n "${ORCA_TERMINAL:-}" ]; then
+        fm_backend_kill orca "$ORCA_TERMINAL" 2>/dev/null || true
+      fi
+      if [ -n "${ORCA_WORKTREE_ID:-}" ]; then
+        if ! fm_backend_remove_worktree orca "$ORCA_WORKTREE_ID" 2>/dev/null; then
+          mkdir -p "$STATE" 2>/dev/null || true
+          if [ -d "$STATE" ]; then
+            {
+              echo "window=$W"
+              echo "worktree=${WT:-}"
+              echo "project=$PROJ_ABS"
+              echo "harness=$HARNESS"
+              echo "kind=$KIND"
+              [ -z "${MODE:-}" ] || echo "mode=$MODE"
+              [ -z "${YOLO:-}" ] || echo "yolo=$YOLO"
+              echo "tasktmp=${TASK_TMP:-}"
+              echo "model=${MODEL:-default}"
+              echo "effort=${EFFORT:-default}"
+              echo "backend=orca"
+              echo "orca_worktree_id=$ORCA_WORKTREE_ID"
+              [ -z "${ORCA_TERMINAL:-}" ] || echo "terminal=$ORCA_TERMINAL"
+            } > "$STATE/$ID.meta" 2>/dev/null || true
+          fi
         fi
       fi
     fi
@@ -1435,8 +1447,8 @@ real_path_or_raw() {  # <path>
 #
 # The refusal exits through the same path as the primary-checkout isolation
 # error above, which already leaves this spawn's own task endpoint behind:
-# spawn_abort_cleanup unwinds herdr projections and orca worktrees (except the
-# sibling-owned one this refusal names, see ORCA_ABORT_KEEP_WORKTREE) but never
+# spawn_abort_cleanup unwinds herdr projections and orca resources (except on a
+# sibling refusal, see ORCA_ABORT_SIBLING_OWNED) but never
 # a tmux window, so `firstmate:fm-<id>` survives and a bare retry then fails with
 # `window ... already exists`. That orphan is pre-existing behaviour shared by
 # both refusals rather than something this guard introduces, and cleaning it up
@@ -1477,14 +1489,14 @@ validate_worktree_free_of_live_sibling() {  # <source> <inspect-target> <worktre
     esac
     # Name the endpoint this refused spawn leaves behind, in the terms of the
     # backend that created it, so the retry sequence needs no source reading.
-    # An orca refusal names no removal step: spawn_abort_cleanup kills whatever
-    # terminal orca had already returned, and ORCA_ABORT_KEEP_WORKTREE holds it
-    # back from removing the worktree, because the path orca handed over is the
-    # one this refusal just proved a live sibling records. That suppression also
-    # keeps the cleanup's removal-failure fallback from writing $STATE/$ID.meta,
-    # so an orca refusal leaves no record of its own either.
+    # An orca refusal names no removal step: ORCA_ABORT_SIBLING_OWNED stops
+    # spawn_abort_cleanup destroying anything, because both the worktree and the
+    # terminal orca handed over can belong to the sibling this refusal just
+    # named. That suppression also keeps the cleanup's removal-failure fallback
+    # from writing $STATE/$ID.meta, so an orca refusal leaves no record of its
+    # own either.
     case "$BACKEND" in
-      orca) leftover=""; ORCA_ABORT_KEEP_WORKTREE=1 ;;
+      orca) leftover=""; ORCA_ABORT_SIBLING_OWNED=1 ;;
       tmux) leftover="remove this spawn's leftover task window with tmux kill-window -t '$inspect_target'; then " ;;
       *) leftover="remove this spawn's leftover $BACKEND task endpoint '$inspect_target'; then " ;;
     esac
