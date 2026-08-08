@@ -223,6 +223,14 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-trace-context-lib.sh"
 # shellcheck source=bin/fm-remote-readiness-lib.sh
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
+# Task 6 claim-before-allocation handshake: the write-once attempt envelope
+# (bin/fm-attempt-lib.sh) is sourced once, guarded so no lib double-sources it.
+# FM_HOME and the state dir are already resolved above, so attempt records land
+# in the same state directory this script publishes to.
+if [ -z "${FM_ATTEMPT_LIB_SOURCED:-}" ]; then
+  # shellcheck source=bin/fm-attempt-lib.sh
+  . "$SCRIPT_DIR/fm-attempt-lib.sh"
+fi
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -1369,6 +1377,130 @@ if [ "$KIND" = ship ]; then
   fi
 fi
 
+# Task 6 claim-before-allocation split handshake (fm-tracker-claim design).
+# One ordinary attended dispatch completes the whole handshake here, before
+# any workspace allocation or endpoint creation: allocate the immutable
+# attempt, persist the exact claim request, and invoke the attended Decision
+# OS main-steward adapter (FM_BR_RECEIPT_BIN, default bin/fm-br-receipt.sh)
+# synchronously. A refused or unobserved claim leaves no workspace and no
+# endpoint; replay from claim_pending never re-claims and never allocates
+# before a valid receipt. Sets ATTEMPT_ID on success and returns 0; prints
+# claim_pending and returns nonzero otherwise.
+spawn_claim_before_allocation() {  # <task_key> <home_id>
+  local task_key=$1 home_id=$2
+  local attempts_dir resume_attempt f aid tk gen req repo source_hash rc
+  local authority authority_file auth
+  attempts_dir="$STATE/attempts"
+  # RESUME path first: a prior spawn already requested a claim for this task
+  # key (its request file exists). Re-claiming is never allowed: an OBSERVED
+  # tracker receipt may release allocation with the same attempt; anything
+  # else stays claim_pending, reserved until reconciled, and allocates
+  # nothing.
+  resume_attempt=
+  if [ -d "$attempts_dir" ]; then
+    for f in "$attempts_dir"/*.json; do
+      [ -e "$f" ] || continue
+      aid=$(basename "$f" .json)
+      [ -f "$attempts_dir/$aid.request.claim.json" ] || continue
+      tk=$(jq -r '.envelope.task_key // ""' "$f" 2>/dev/null || true)
+      [ "$tk" = "$task_key" ] || continue
+      resume_attempt=$aid
+      break
+    done
+  fi
+  if [ -n "$resume_attempt" ]; then
+    if jq -e '[.receipts.tracker[]? | select(.state == "observed")] | length > 0' \
+        "$attempts_dir/$resume_attempt.json" >/dev/null 2>&1; then
+      ATTEMPT_ID=$resume_attempt
+      return 0
+    fi
+    echo "claim_pending: $resume_attempt (reconcile before allocation)" >&2
+    return 1
+  fi
+  # FRESH claim: allocate the immutable attempt and persist the exact request
+  # before any allocation.
+  ATTEMPT_ID=$(fm_attempt_alloc pi "$task_key" "$home_id") || {
+    echo "error: attempt allocation failed for $task_key; refusing to allocate a workspace without the claim" >&2
+    return 1
+  }
+  gen=$(fm_attempt_generation "$ATTEMPT_ID") || {
+    echo "error: cannot resolve generation for $ATTEMPT_ID; refusing to allocate without the claim" >&2
+    return 1
+  }
+  repo="${FM_REFILL_PROJECT:-/home/holu/decision-os}"
+  source_hash=$(cd "$repo" 2>/dev/null && sha256sum .beads/issues.jsonl 2>/dev/null | cut -d' ' -f1) || {
+    echo "error: cannot resolve the Decision OS source hash at $repo/.beads/issues.jsonl; refusing to allocate without the claim" >&2
+    return 1
+  }
+  [ -n "$source_hash" ] || {
+    echo "error: empty Decision OS source hash at $repo/.beads/issues.jsonl; refusing to allocate without the claim" >&2
+    return 1
+  }
+  # Current-session authority for the claim: the same authority-current.json
+  # contract fm_authority_for reads (bin/fm-disposition-lib.sh), else the
+  # captain-granted dispatch string.
+  authority="captain:dispatch"
+  authority_file="${FM_AUTHORITY_FILE:-$STATE/authority-current.json}"
+  if [ -f "$authority_file" ] && jq -e '.transition == "claim"' "$authority_file" >/dev/null 2>&1; then
+    auth=$(jq -r '.authority // empty' "$authority_file" 2>/dev/null || true)
+    [ -n "$auth" ] && authority=$auth
+  fi
+  req="$attempts_dir/$ATTEMPT_ID.request.claim.json"
+  jq -n \
+    --arg attempt_id "$ATTEMPT_ID" \
+    --argjson generation "$gen" \
+    --arg bead_id "$task_key" \
+    --arg transition claim \
+    --arg expected_state open \
+    --arg expected_source_hash "$source_hash" \
+    --arg evidence intake \
+    --arg authority "$authority" \
+    --arg agent "$HARNESS" \
+    --arg repo "$repo" \
+    '{attempt_id:$attempt_id,generation:$generation,bead_id:$bead_id,transition:$transition,expected_state:$expected_state,expected_source_hash:$expected_source_hash,evidence:$evidence,authority:$authority,agent:$agent,repo:$repo}' \
+    > "$req.tmp.$$" || {
+    echo "error: cannot write the claim request for $ATTEMPT_ID; refusing to allocate without the claim" >&2
+    return 1
+  }
+  mv -f "$req.tmp.$$" "$req" || {
+    echo "error: cannot publish the claim request for $ATTEMPT_ID; refusing to allocate without the claim" >&2
+    return 1
+  }
+  # Attended steward: one synchronous invocation. Success persists the
+  # authoritative tracker receipt; refusal or steward unavailability leaves
+  # the attempt pending with the failure recorded in the attempt record and
+  # refuses this spawn without allocating anything.
+  if ! "$FM_BR_RECEIPT_BIN" "$req"; then
+    rc=$?
+    fm_attempt_effect_pending "$ATTEMPT_ID" "$gen" tracker \
+      "$(jq -n --arg reason "claim steward refused or unavailable (exit $rc)" \
+            --arg transition claim --arg authority "$authority" \
+            '{status:"pending",reason:$reason,transition:$transition,authority:$authority}')" \
+      >/dev/null 2>&1 || true
+    echo "claim_pending: $ATTEMPT_ID (reconcile before allocation)" >&2
+    return 1
+  fi
+  return 0
+}
+
+# The claim-before-allocation handshake is engaged by the attended dispatch
+# path (FM_TRACKER_CLAIM=1). It is additive: without it every existing spawn
+# invocation is byte-identical; with it the ship spawn claims its bead before
+# any workspace or endpoint exists. A missing, stale, mismatched, or otherwise
+# uncertain claim receipt remains reserved until reconciled, so any handshake
+# failure refuses the spawn loudly rather than proceeding without the claim.
+FM_BR_RECEIPT_BIN="${FM_BR_RECEIPT_BIN:-$FM_ROOT/bin/fm-br-receipt.sh}"
+if [ "$KIND" = ship ] && [ "${FM_TRACKER_CLAIM:-0}" = 1 ]; then
+  if ! spawn_claim_before_allocation "$ID" "$FM_HOME"; then
+    exit 1
+  fi
+  # Fill the scaffolded attempt placeholder with the resolved attempt identity
+  # so the worker's instructions carry the exact attempt id.
+  if [ -f "$BRIEF" ] && grep -q '<attempt_id>' "$BRIEF" 2>/dev/null; then
+    sed -i "s/<attempt_id>/$ATTEMPT_ID/g" "$BRIEF" || echo "warning: could not fill the attempt id placeholder in $BRIEF" >&2
+  fi
+fi
+
 BRIEF_DIR_REAL=$(cd "$(dirname "$BRIEF")" && pwd -P)
 BRIEF_REAL="$BRIEF_DIR_REAL/$(basename "$BRIEF")"
 
@@ -2320,6 +2452,10 @@ META_WINDOW=$T
     echo "home=$PROJ_ABS"
     echo "projects=$SECONDMATE_PROJECTS"
   fi
+  # Task 6: the resolved attempt identity is recorded on the meta by the
+  # script's existing meta writer after the claim receipt is observed; absent
+  # for every spawn that did not run the claim handshake.
+  [ -z "${ATTEMPT_ID:-}" ] || echo "attempt=$ATTEMPT_ID"
 } > "$STATE/$ID.meta"
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
@@ -2430,3 +2566,14 @@ fi
 SPAWN_DELIVERY=
 [ -z "$MODE" ] || SPAWN_DELIVERY=" mode=$MODE yolo=$YOLO"
 echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY window=$META_WINDOW worktree=$WT"
+
+# Task 6 audit-only launch ledger: one row per attempt, published only after
+# allocation, launch, and instruction delivery all succeeded. Recovery of a
+# crash before this publication relies on the attempt envelope, never this
+# ledger, which is never capacity or ownership truth.
+if [ -n "${ATTEMPT_ID:-}" ]; then
+  LEDGER="$STATE/launch-ledger.jsonl"
+  if ! grep -Fq -- "\"attempt_id\":\"$ATTEMPT_ID\"" "$LEDGER" 2>/dev/null; then
+    printf '%s\n' "{\"attempt_id\":\"$ATTEMPT_ID\",\"launched_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"endpoint\":\"$META_WINDOW\"}" >> "$LEDGER"
+  fi
+fi

@@ -141,7 +141,135 @@ test_already_settled_pane_costs_one_confirm_sleep() {
   pass "an already-settled pane confirms via the existing inter-poll sleep, not an extra full cycle"
 }
 
+# --- Task 6 claim-before-allocation split handshake -------------------------
+#
+# The ship spawn's claim handshake (bin/fm-spawn.sh, engaged by
+# FM_TRACKER_CLAIM=1) must complete before ANY workspace allocation or endpoint
+# creation: the spawn allocates the immutable attempt, persists the exact claim
+# request, and invokes the attended Decision OS main-steward adapter
+# (FM_BR_RECEIPT_BIN) synchronously. A refused or unobserved claim leaves no
+# workspace, no endpoint, and no meta; replay from claim_pending must never
+# double-claim and never allocate before a valid receipt.
+
+# make_claim_steward <dir> writes the fake attended Decision OS steward that
+# FM_BR_RECEIPT_BIN resolves to. It appends one `claim <request-file>` line per
+# invocation to $ORDER_FILE, honors FM_STEWARD_EXIT=1 (refused claim) and
+# FM_CRASH_AFTER_CLAIM=1 (claim line written, then crash before the receipt),
+# and otherwise simulates a SUCCESSFUL claim by observing the tracker effect
+# receipt on the attempt record.
+make_claim_steward() {
+  local dir=$1 fakebin steward
+  fakebin=$(fm_fakebin "$dir")
+  steward="$fakebin/fm-br-receipt.sh"
+  cat > "$steward" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf 'claim %s\n' "${1:-}" >> "${ORDER_FILE:?ORDER_FILE unset}"
+[ "${FM_STEWARD_EXIT:-0}" != 1 ] || exit 1
+[ "${FM_CRASH_AFTER_CLAIM:-0}" != 1 ] || exit 42
+. "${FM_ATTEMPT_LIB:?FM_ATTEMPT_LIB unset}"
+req=${1:?request file}
+aid=$(jq -r '.attempt_id' "$req")
+gen=$(jq -r '.generation' "$req")
+bead=$(jq -r '.bead_id' "$req")
+fm_attempt_effect_observe "$aid" "$gen" tracker "{\"bead\":\"$bead\",\"status\":\"claimed\"}" || exit 1
+exit 0
+SH
+  chmod +x "$steward"
+  printf '%s\n' "$steward"
+}
+
+# make_claim_case <name> <id> builds a fixture home, a project whose
+# .beads/issues.jsonl is the claim source-hash target, a real worktree of the
+# project (so a pre-handshake spawn settles fast instead of hanging the poll
+# loop), and the fake steward. Echoes a pipe record.
+make_claim_case() {
+  local name=$1 id=$2 case_dir home proj wt countfile fakebin steward order
+  case_dir="$TMP_ROOT/$name"
+  home="$case_dir/home"
+  proj="$case_dir/project"
+  wt="$case_dir/wt"
+  countfile="$case_dir/pane-call-count"
+  order="$case_dir/order.log"
+  steward=$(make_claim_steward "$case_dir")
+  fakebin=$(make_settle_fakebin "$case_dir/fake")
+  mkdir -p "$home/data" "$home/projects" "$home/state" "$home/config"
+  printf 'codex\n' > "$home/config/crew-harness"
+  fm_git_worktree "$proj" "$wt" "wt-claim-$name"
+  mkdir -p "$proj/.beads"
+  printf '%s\n' '{"id":"fixture","status":"open"}' > "$proj/.beads/issues.jsonl"
+  mkdir -p "$home/data/$id"
+  printf 'brief for %s\nDelivery contract: mode=no-mistakes\n' "$id" > "$home/data/$id/brief.md"
+  touch "$home/state/.last-watcher-beat"
+  printf '%s\n' "$case_dir|$home|$proj|$wt|$steward|$order|$fakebin|$countfile"
+}
+
+read_claim_record() {
+  IFS='|' read -r _ CLAIM_HOME CLAIM_PROJ CLAIM_WT CLAIM_STEWARD CLAIM_ORDER CLAIM_FAKEBIN CLAIM_COUNTFILE <<EOF
+$1
+EOF
+}
+
+# run_claim_spawn <id> [VAR=value ...]: the extra arguments are additional
+# spawn-environment assignments (e.g. FM_STEWARD_EXIT=1) applied before the
+# base fixture environment.
+run_claim_spawn() {
+  local id=$1
+  shift
+  env "$@" \
+    FM_ROOT_OVERRIDE='' FM_HOME="$CLAIM_HOME" \
+    FM_STATE_OVERRIDE="$CLAIM_HOME/state" FM_DATA_OVERRIDE="$CLAIM_HOME/data" \
+    FM_PROJECTS_OVERRIDE="$CLAIM_HOME/projects" FM_CONFIG_OVERRIDE="$CLAIM_HOME/config" \
+    FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" FM_TRACKER_CLAIM=1 \
+    FM_BR_RECEIPT_BIN="$CLAIM_STEWARD" ORDER_FILE="$CLAIM_ORDER" \
+    FM_REFILL_PROJECT="$CLAIM_PROJ" FM_ATTEMPT_LIB="$ROOT/bin/fm-attempt-lib.sh" \
+    FM_FAKE_PANE_PATH="$CLAIM_WT" FM_FAKE_PANE_STALE_READS=0 \
+    FM_FAKE_PANE_COUNTFILE="$CLAIM_COUNTFILE" \
+    PATH="$CLAIM_FAKEBIN:$PATH" \
+    "$SPAWN" "$id" "$CLAIM_PROJ" --mode no-mistakes --yolo off 2>&1
+}
+
+# A refused claim must leave no workspace, no endpoint, and no meta: the spawn
+# returns before allocation, and the refusal is visible as claim_pending.
+test_no_workspace_or_endpoint_before_claim_observed() {
+  local rec out rc
+  rec=$(make_claim_case claim-refused test-task)
+  read_claim_record "$rec"
+  out=$(run_claim_spawn test-task FM_STEWARD_EXIT=1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "refused claim must refuse the spawn"
+  assert_contains "$out" "claim_pending" "spawn did not report claim_pending"
+  [ ! -d "$TMP_ROOT/worktrees/test-task" ] || fail "workspace created before claim receipt"
+  [ ! -e "$CLAIM_HOME/state/test-task.meta" ] || fail "meta written before claim receipt"
+  pass "no workspace or endpoint exists before claim_observed"
+}
+
+# Across a crash after the claim line and a replay, the ORDER file records
+# exactly one claim invocation: replay from claim_pending never double-claims
+# and never allocates before a valid receipt.
+test_replay_after_receipt_does_not_double_claim() {
+  local rec out n rc
+  rec=$(make_claim_case claim-replay test-task)
+  read_claim_record "$rec"
+  : > "$CLAIM_ORDER"
+  out=$(run_claim_spawn test-task FM_CRASH_AFTER_CLAIM=1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "crash run must refuse the spawn"
+  n=$(grep -c '^claim ' "$CLAIM_ORDER" 2>/dev/null || echo 0)
+  [ "$n" = 1 ] || fail "crash run claimed $n times, expected exactly 1"
+  out=$(run_claim_spawn test-task)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "replay without a receipt must refuse the spawn"
+  assert_contains "$out" "claim_pending" "replay did not report claim_pending"
+  n=$(grep -c '^claim ' "$CLAIM_ORDER" 2>/dev/null || echo 0)
+  [ "$n" = 1 ] || fail "double claim on replay: $n"
+  [ ! -e "$CLAIM_HOME/state/test-task.meta" ] || fail "replay allocated before a valid receipt"
+  pass "replay after the receipt never double-claims"
+}
+
 test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_sleep
+test_no_workspace_or_endpoint_before_claim_observed
+test_replay_after_receipt_does_not_double_claim
 
 echo "# all fm-spawn-worktree-settle tests passed"

@@ -399,6 +399,22 @@ test_ship_status_contributes_refill_evidence() {
   pass "fm-brief.sh: ship status contributes completion, write-set, and serialization evidence to proactive refill"
 }
 
+test_ship_brief_carries_attempt_and_claim_requirement() {
+  local home id brief
+  home="$TMP_ROOT/attempt-wiring-home"
+  mkdir -p "$home/data"
+  id="brief-attempt-wiring-c4"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" fixture --mode no-mistakes >/dev/null 2>&1 \
+    || fail "ship brief scaffold exited non-zero"
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "ship brief was not scaffolded"
+  assert_grep "attempt_id" "$brief" "brief lacks attempt id"
+  assert_grep "claim-before-allocation" "$brief" "brief lacks the claim requirement"
+  assert_grep "no workspace or endpoint exists before the authoritative Decision OS claim receipt is observed" "$brief" \
+    "brief lost the claim-before-allocation contract wording"
+  pass "fm-brief.sh: ship briefs carry the attempt id and the claim-before-allocation requirement"
+}
+
 test_herdr_lab_contract_is_explicit_and_complete() {
   local home id brief
   home="$TMP_ROOT/herdr-lab-home"
@@ -750,6 +766,7 @@ test_no_mistakes_dod_wording
 test_ship_project_memory_wording
 test_bead_pr_title_rule_is_conditional_for_ship_briefs
 test_ship_status_contributes_refill_evidence
+test_ship_brief_carries_attempt_and_claim_requirement
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
 test_herdr_lab_omission_is_loud_for_ship_and_scout
