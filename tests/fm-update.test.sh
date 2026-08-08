@@ -58,8 +58,9 @@ new_world() {
   printf '%s\n' "$w"
 }
 
-# Add a secondmate home as a DETACHED worktree of the firstmate repo (matching
-# how treehouse leases a secondmate home), plus its state meta. Args: world id.
+# Add a secondmate home as a DETACHED worktree of the firstmate repo (the shape
+# treehouse leases produced, back when treehouse was the worktree provider),
+# plus its state meta. Args: world id.
 add_sm() {
   local w=$1 id=$2
   git -C "$w/main" worktree add -q --detach "$w/$id" main

@@ -12,18 +12,15 @@ set -u
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-trace-context-spawn)
 
-# Fake tmux: answers the pane-path query and logs every literal `send-keys -l`
-# argument (the GOTMPDIR export, the TRACEPARENT export, and the launch command)
-# one per line, in send order, so ordering is observable.
+# Fake tmux: logs every literal `send-keys -l` argument (the GOTMPDIR export,
+# the TRACEPARENT export, and the launch command) one per line, in send order,
+# so ordering is observable.
 make_spawn_fakebin() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
-case "$*" in
-  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
-esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows)
@@ -78,8 +75,26 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse
+  # `proj new` prints the created worktree's path, and only that path, to
+  # stdout; the test pre-creates that worktree and passes it in as
+  # FM_FAKE_PROJ_NEW_PATH.
+  cat > "$fakebin/proj" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  new) printf '%s\n' "${FM_FAKE_PROJ_NEW_PATH:-}"; exit 0 ;;
+  rm) exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/proj"
   printf '%s\n' "$fakebin"
+}
+
+# fm_proj_template_dir_at (bin/fm-proj-lib.sh) requires exactly one 00-*
+# template under the project dir before the fake proj binary is ever invoked.
+add_proj_template() {  # <project> <branch>
+  git -C "$1" worktree add --quiet -b "$2" "$1/00-main"
 }
 
 make_spawn_case() {
@@ -95,6 +110,7 @@ make_spawn_case() {
   printf '%s\n' "$$" > "$home/state/.lock"
   printf '%s off\n' "$$" > "$home/state/.trace-context-effective"
   fm_git_worktree "$proj" "$wt" "wt-$name"
+  add_proj_template "$proj" "tpl-$name"
   touch "$home/state/.last-watcher-beat"
   id=$name-z1
   mkdir -p "$home/data/$id"
@@ -113,7 +129,7 @@ run_spawn() {
     FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
-    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PROJ_NEW_PATH="$wt" TMUX="fake,1,0" \
     FM_FAKE_TRACEPARENT_SEND_FAIL="${FM_FAKE_TRACEPARENT_SEND_FAIL:-0}" \
     FM_FAKE_TRACEPARENT_SEND_UNSAFE="${FM_FAKE_TRACEPARENT_SEND_UNSAFE:-0}" \
     FM_FAKE_TRACE_METADATA_APPEND_FAIL="${FM_FAKE_TRACE_METADATA_APPEND_FAIL:-0}" \
@@ -131,7 +147,7 @@ run_spawn_tc() {
     FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
-    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PROJ_NEW_PATH="$wt" TMUX="fake,1,0" \
     FM_FAKE_LAUNCH_LOG="$launchlog" PATH="$fakebin:$PATH" \
     "$SPAWN" "$@" --mode no-mistakes --yolo off 2>&1
 }
@@ -214,6 +230,7 @@ run_two_level() {
   wproj="$base/wproj"
   wwt="$base/wwt"
   fm_git_worktree "$wproj" "$wwt" "wt-$name"
+  add_proj_template "$wproj" "tpl-w-$name"
   mkdir -p "$sm/state" "$sm/projects" "$sm/data/$worker_id"
   printf 'worker brief\n' > "$sm/data/$worker_id/brief.md"
   touch "$sm/state/.last-watcher-beat"
@@ -225,7 +242,7 @@ run_two_level() {
     FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$sm" \
     FM_STATE_OVERRIDE="$sm/state" FM_DATA_OVERRIDE="$sm/data" \
     FM_PROJECTS_OVERRIDE="$sm/projects" FM_CONFIG_OVERRIDE="$sm/config" \
-    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wwt" TMUX="fake,1,0" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PROJ_NEW_PATH="$wwt" TMUX="fake,1,0" \
     FM_FAKE_LAUNCH_LOG="$wlog" PATH="$wfake:$PATH" \
     "$SPAWN" "$worker_id" "$wproj" --mode no-mistakes --yolo off >/dev/null 2>&1 || true
 
@@ -496,7 +513,9 @@ test_two_routed_tasks_through_one_secondmate_root_distinct_traces() {
   proj_a="$base/proj-a"; wt_a="$base/wt-a"
   proj_b="$base/proj-b"; wt_b="$base/wt-b"
   fm_git_worktree "$proj_a" "$wt_a" wt-routed-a
+  add_proj_template "$proj_a" tpl-routed-a
   fm_git_worktree "$proj_b" "$wt_b" wt-routed-b
+  add_proj_template "$proj_b" tpl-routed-b
   mkdir -p "$sm/data/$id_a" "$sm/data/$id_b"
   printf 'brief a\n' > "$sm/data/$id_a/brief.md"
   printf 'brief b\n' > "$sm/data/$id_b/brief.md"
