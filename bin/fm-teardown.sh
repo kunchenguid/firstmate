@@ -138,12 +138,13 @@
 #     leave the worktree's cwd, so the cwd-based reaper cannot see it (observed
 #     2026-08-05: one worker-server survived teardown reparented to init, self-
 #     exited ~6 minutes later). fm-spawn records its pid and process-start
-#     identity in state/<id>.meta at launch; reap_cursor_worker_server TERMs then
-#     KILLs the recorded pid only when that identity still matches (a recycled
-#     pid is never touched), then removes the record. A missing record falls
-#     back to the cwd-based reaper unchanged. Never matched by a generic
-#     worker-server cmdline or the cursor install dir: both are shared across
-#     homes and tasks.
+#     identity atomically in state/<id>.worker-server at launch;
+#     reap_cursor_worker_server TERMs then KILLs the recorded pid only when
+#     that identity still matches (a recycled pid is never touched), then
+#     removes the record. A missing record means ownership was never
+#     established; teardown treats that as nothing to reap. Never matched by a
+#     generic worker-server cmdline or the cursor install dir: both are shared
+#     across homes and tasks.
 #     The recorded-pid path is lsof-independent (it uses /proc starttime or
 #     portable ps lstart plus kill). The cwd-based Fix 2 reaper above still
 #     requires lsof for the generic leaked-descendant scan; without lsof it
@@ -1407,52 +1408,39 @@ reap_task_backend_process_group() {  # <label>
 }
 
 # Reap the cursor worker-server recorded at spawn time (see
-# cursor_worker_server_record in bin/fm-spawn.sh). Cursor's background
-# `node .../index.js worker-server` child detaches from the pane (reparents to
-# init) and can leave the task worktree's cwd, so the cwd-based reaper below
-# cannot see it - an observed worker-server cleanup gap
-# (2026-08-05). The record carries the pid plus its process identity, using
-# Linux starttime or a portable `ps lstart` value, so a recycled pid is never
-# killed. A missing record falls through to the cwd-based reaper unchanged.
-# Never matches a generic worker-server cmdline or the cursor install dir: both
-# are shared across homes and tasks.
-reap_cursor_worker_server() {  # <meta>
-  local meta=$1 pid starttime identity current
-  pid=$(grep '^cursor_worker_server=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
-  case "$pid" in ''|*[!0-9]*) pid= ;; esac
-  [ -n "$pid" ] || return 0
-  starttime=$(grep '^cursor_worker_server_start=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
-  case "$starttime" in
-    ''|*[!0-9]*)
-      case "$starttime" in starttime=*|lstart=*) identity=$starttime ;; *) return 0 ;; esac
-      ;;
-    *) identity="starttime=$starttime" ;;
-  esac
+# atomically in state/<id>.worker-server by cursor_worker_server_record in
+# bin/fm-spawn.sh). Cursor's background `node .../index.js worker-server`
+# child detaches from the pane (reparents to init) and can leave the task
+# worktree's cwd, so the cwd-based reaper below cannot see it - an observed
+# worker-server cleanup gap (2026-08-05). The record carries the pid plus
+# its process identity (Linux starttime or portable `ps lstart`), so a
+# recycled pid is never killed. The record file is either fully present
+# (atomic temp+mv write) or absent; a missing file means ownership was never
+# established and the task should not have been spawned - teardown treats
+# that as nothing to reap. Never matches a generic worker-server cmdline or
+# the cursor install dir: both are shared across homes and tasks.
+reap_cursor_worker_server() {  # <state_dir> <id>
+  local state_dir=$1 id=$2 ws_file pid identity current
+  ws_file="$state_dir/$id.worker-server"
+  [ -f "$ws_file" ] || return 0
+  read -r pid identity < "$ws_file" 2>/dev/null || { rm -f "$ws_file" 2>/dev/null || true; return 0; }
+  case "$pid" in ''|*[!0-9]*) rm -f "$ws_file" 2>/dev/null || true; return 0 ;; esac
+  [ -n "$identity" ] || { rm -f "$ws_file" 2>/dev/null || true; return 0; }
   if ! current=$(fm_process_identity "$pid") \
      || [ "$current" != "$identity" ]; then
     # The pid was recycled or is gone; nothing to reap. Remove the stale
     # record so a later teardown does not re-consult it.
-    remove_cursor_worker_server_record "$meta"
+    rm -f "$ws_file" 2>/dev/null || true
     return 0
   fi
-  echo "teardown: reaping recorded cursor worker-server for $ID: $pid" >&2
+  echo "teardown: reaping recorded cursor worker-server for $id: $pid" >&2
   kill -TERM "$pid" 2>/dev/null || true
   sleep 1
   if fm_process_identity_matches "$pid" "$identity"; then
-    echo "teardown: force-killing recorded cursor worker-server for $ID: $pid" >&2
+    echo "teardown: force-killing recorded cursor worker-server for $id: $pid" >&2
     kill -KILL "$pid" 2>/dev/null || true
   fi
-  remove_cursor_worker_server_record "$meta"
-}
-
-remove_cursor_worker_server_record() {  # <meta>
-  local meta=$1 tmp
-  tmp="$meta.tmp.$$"
-  if grep -vE '^cursor_worker_server(=|_start=)' "$meta" > "$tmp" 2>/dev/null; then
-    mv -f -- "$tmp" "$meta"
-  else
-    rm -f -- "$tmp"
-  fi
+  rm -f "$ws_file" 2>/dev/null || true
 }
 
 # Reap every process rooted (by cwd) under this task's own worktree or tasktmp
@@ -2260,7 +2248,7 @@ cleanup_firstmate_home_children() {
         fm_backend_kill "$child_backend" "$child_t" "$(meta_value "$child_meta" zellij_tab_id)" "fm-$child_id" 2>/dev/null || true
       fi
     fi
-    reap_cursor_worker_server "$child_meta"
+    reap_cursor_worker_server "$sub_state" "$child_id"
     if [ "$child_kind" = secondmate ]; then
       child_home=$(meta_value "$child_meta" home)
       [ -n "$child_home" ] || child_home=$child_wt
@@ -2427,7 +2415,7 @@ fi
 # not by task-worktree cleanup.
 if [ "$KIND" != secondmate ]; then
   conclude_task_no_mistakes_run "$WT"
-  reap_cursor_worker_server "$META"
+  reap_cursor_worker_server "$STATE" "$ID"
   reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
 fi
 
@@ -2570,7 +2558,7 @@ if [ "$BACKEND" = herdr ]; then
 fi
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
-  reap_cursor_worker_server "$META"
+  reap_cursor_worker_server "$STATE" "$ID"
   remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID" || exit $?
   remove_secondmate_registry_entry "$ID"
 fi

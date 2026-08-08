@@ -1795,8 +1795,8 @@ test_forced_secondmate_child_cursor_worker_server_is_reaped() {
   kill -0 "$pid" 2>/dev/null || fail "cursor-worker-server-child-reap: setup sleeper did not start"
   starttime=$(awk '{print $22}' "/proc/$pid/stat" 2>/dev/null)
   [ -n "$starttime" ] || fail "cursor-worker-server-child-reap: cannot read starttime"
-  printf 'cursor_worker_server=%s\ncursor_worker_server_start=%s\n' "$pid" "$starttime" \
-    >> "$home/state/child-herdr.meta"
+  printf '%s %s\n' "$pid" "starttime=$starttime" \
+    > "$home/state/child-herdr.worker-server"
 
   rc=0
   FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" \
@@ -2308,8 +2308,8 @@ test_recorded_cursor_worker_server_is_reaped() {
   kill -0 "$pid" 2>/dev/null || fail "cursor-worker-server-reap: setup sleeper did not start"
   starttime=$(awk '{print $22}' "/proc/$pid/stat" 2>/dev/null)
   [ -n "$starttime" ] || fail "cursor-worker-server-reap: cannot read starttime"
-  printf 'cursor_worker_server=%s\ncursor_worker_server_start=%s\n' "$pid" "$starttime" \
-    >> "$case_dir/state/task-x1.meta"
+  printf '%s %s\n' "$pid" "starttime=$starttime" \
+    > "$case_dir/state/task-x1.worker-server"
 
   rc=0
   run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
@@ -2321,7 +2321,7 @@ test_recorded_cursor_worker_server_is_reaped() {
   fi
   assert_grep "reaping recorded cursor worker-server" "$case_dir/stderr" \
     "cursor-worker-server-reap: teardown did not report reaping the recorded worker-server"
-  if grep -q '^cursor_worker_server=' "$case_dir/state/task-x1.meta" 2>/dev/null; then
+  if [ -f "$case_dir/state/task-x1.worker-server" ]; then
     fail "cursor-worker-server-reap: the worker-server record survived teardown"
   fi
   pass "a cursor worker-server recorded at spawn is reaped by pid at teardown, cwd-independent"
@@ -2338,8 +2338,8 @@ test_recorded_cursor_worker_server_lstart_identity_is_reaped() {
   sleep 0.3
   kill -0 "$pid" 2>/dev/null || fail "cursor-worker-server-lstart-reap: setup sleeper did not start"
   identity='lstart=Mon Jan  1 00:00:00 2001'
-  printf 'cursor_worker_server=%s\ncursor_worker_server_start=%s\n' "$pid" "$identity" \
-    >> "$case_dir/state/task-x1.meta"
+  printf '%s %s\n' "$pid" "$identity" \
+    > "$case_dir/state/task-x1.worker-server"
   cat > "$case_dir/fakebin/ps" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = -p ] && [ "${2:-}" = "${FM_FAKE_CURSOR_WORKER_PID:-}" ] \
@@ -2375,8 +2375,8 @@ test_recorded_cursor_worker_server_recycled_pid_not_killed() {
   # no longer matches the recorded one). The reaper must leave the current
   # process alone.
   victim="$$"; starttime=1
-  printf 'cursor_worker_server=%s\ncursor_worker_server_start=%s\n' "$victim" "$starttime" \
-    >> "$case_dir/state/task-x1.meta"
+  printf '%s %s\n' "$victim" "starttime=$starttime" \
+    > "$case_dir/state/task-x1.worker-server"
 
   rc=0
   run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
@@ -2384,7 +2384,7 @@ test_recorded_cursor_worker_server_recycled_pid_not_killed() {
   expect_code 0 "$rc" "cursor-worker-server-recycled: teardown should succeed"
   kill -0 "$victim" 2>/dev/null \
     || fail "cursor-worker-server-recycled: a recycled-pid record killed the current process"
-  if grep -q '^cursor_worker_server=' "$case_dir/state/task-x1.meta" 2>/dev/null; then
+  if [ -f "$case_dir/state/task-x1.worker-server" ]; then
     fail "cursor-worker-server-recycled: the stale worker-server record was not removed"
   fi
   pass "a worker-server record whose starttime no longer matches is never killed, and the stale record is removed"
@@ -2409,13 +2409,8 @@ test_recorded_cursor_worker_server_is_reaped_for_secondmate() {
   kill -0 "$pid" 2>/dev/null || fail "cursor-worker-server-secondmate-reap: setup sleeper did not start"
   starttime=$(awk '{print $22}' "/proc/$pid/stat" 2>/dev/null)
   [ -n "$starttime" ] || fail "cursor-worker-server-secondmate-reap: cannot read starttime"
-  printf 'cursor_worker_server=%s\ncursor_worker_server_start=%s\n' "$pid" "$starttime" \
-    >> "$case_dir/state/task-x1.meta"
-
-  rc=0
-  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
-
-  expect_code 0 "$rc" "cursor-worker-server-secondmate-reap: secondmate teardown should succeed"
+  printf '%s %s\n' "$pid" "starttime=$starttime" \
+    > "$case_dir/state/task-x1.worker-server"
   if kill -0 "$pid" 2>/dev/null; then
     kill -KILL "$pid" 2>/dev/null || true
     fail "cursor-worker-server-secondmate-reap: recorded cursor worker-server survived secondmate teardown"
@@ -2470,8 +2465,8 @@ test_cursor_worker_server_record_never_touches_other_home_daemon() {
   sleep 0.3
   kill -0 "$pid" 2>/dev/null || fail "cursor-worker-server-other-home: setup sleeper did not start"
   kill -0 "$other_pid" 2>/dev/null || fail "cursor-worker-server-other-home: second sleeper did not start"
-  printf 'cursor_worker_server=%s\ncursor_worker_server_start=%s\n' "$pid" "$(awk '{print $22}' "/proc/$pid/stat" 2>/dev/null)" \
-    >> "$case_dir/state/task-x1.meta"
+  printf '%s %s\n' "$pid" "starttime=$(awk '{print $22}' "/proc/$pid/stat" 2>/dev/null)" \
+    > "$case_dir/state/task-x1.worker-server"
 
   rc=0
   run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
