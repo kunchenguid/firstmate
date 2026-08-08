@@ -1,0 +1,4 @@
+interface:
+  display_name: "Safe Higgsfield Generate"
+  short_description: "Approved image and video generation"
+  default_prompt: "Use $higgsfield-generate to plan one image generation and stop before any upload or paid run until I approve."
