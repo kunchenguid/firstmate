@@ -31,10 +31,10 @@
 # benefits, and the herdr adapter routes through the same owner (task
 # afk-herdr-false-pending), so the two backends cannot drift.
 #
-# Busy-queued Enter (opencode 1.18.4 and cursor-agent, on the tmux backend
-# only for now): when the agent is mid-turn, the harness accepts Enter as a
-# "send when the turn ends" keystroke but does NOT clear the composer until
-# then, so the composer keeps showing the typed text the whole time. The plain
+# Busy-queued Enter (opencode 1.18.4 and cursor-agent): when the agent is
+# mid-turn, the harness accepts Enter as a "send when the turn ends" keystroke
+# but does NOT clear the composer until then, so the composer keeps showing the
+# typed text the whole time. The plain
 # "empty iff composer cleared" acknowledgement above false-positives on a
 # swallowed Enter for every steer sent to a busy pane, and `fm-send` exits
 # non-zero on a normal captain instruction. The submit core now falls back to
@@ -379,10 +379,10 @@ fm_pane_is_busy() {  # <target> [harness]
 # swallowed Enter leaves our text in the composer and retyping would duplicate
 # it. Echoes the final proof-carrying verdict on stdout so callers can require
 # exact `empty` before treating submission as confirmed.
-# Busy-queued Enter (opencode 1.18.4): the harness accepts Enter while mid-turn
-# and queues it for after the current turn, but keeps the typed text visible in
-# the composer. Once the Enter-retry budget is spent and a structurally proven
-# composer still reads "pending", the submit core falls back to
+# Busy-queued Enter (opencode 1.18.4 and cursor-agent): the harness accepts Enter
+# while mid-turn and queues it for after the current turn, but keeps the typed
+# text visible in the composer. Once the Enter-retry budget is spent and a
+# structurally proven composer still reads "pending", the submit core falls back to
 # `fm_pane_is_busy` (with the target harness's verified footer signature when the
 # caller supplies one): a busy pane means the Enter was accepted and queued (report
 # `empty` so the caller does not re-send), while an idle pane keeps `pending` as

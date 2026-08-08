@@ -29,6 +29,8 @@
 # loop that never stays up only burns CPU and grows its log without bound. A
 # child that stays up for FM_REMOTE_JOB_SUPERVISOR_HEALTHY_SECONDS clears that
 # count. fm-on's ensure path restarts a worker that gave up.
+# A TERM after teardown already removed the job-state root still stops any
+# in-memory active command group before the serving child exits.
 set -u
 
 # A non-numeric override falls back to the default rather than crashing the

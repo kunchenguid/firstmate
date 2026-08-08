@@ -30,10 +30,10 @@ clear_interrupt_marker() {
 # lapsed supervision chain then surfaces on a plain drain-and-handle turn, not
 # only when a guarded supervision script (fm-peek/fm-send/...) happens to run.
 # Reuse fm-guard.sh's model-aware alarm and FM_GUARD_GRACE instead of duplicating
-# its supervision verdict. Under Claude's between-turns auto-arm model, a normal
-# fire leaves a recent beacon well inside grace and stays silent mid-turn. Under
-# persistent-watcher models, the guard also requires the live identity-matched
-# watcher. Call after the queue is emptied so guard never re-prints its own
+# its supervision verdict. Under Claude's or Cursor's between-turns auto-arm
+# model, a normal fire leaves a recent beacon well inside grace and stays silent
+# mid-turn. Under persistent-watcher models, the guard also requires the live
+# identity-matched watcher. Call after the queue is emptied so guard never re-prints its own
 # queued-wakes notice for the records this run just drained, and never let a
 # guard hiccup change the drain's exit status.
 assert_watcher_liveness() {
