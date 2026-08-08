@@ -311,32 +311,42 @@ for combo in \
 done
 pass "every harness, backend, and spawn kind reuses one recorded carrier verbatim and otherwise roots its own fresh trace"
 
-# --- no prompt / task-prose reads (executable, not a source scan) -------------
-# The carrier must be a fresh random root, never derived from the task's own
-# prose. A derived value would be STABLE across calls on the same record, so
-# resolving the same prose-laden metadata twice and getting two distinct roots
-# is what rules derivation out - and neither root may carry the prose bytes.
+# --- no prompt / task-prose influence (executable, not a source scan) --------
+# Resolve two records that differ only in task prose through the public entry
+# point while its entropy source returns identical bytes. Byte-identical output
+# proves that prose cannot alter even a field such as the sampling decision.
 
-PROSE_SENTINEL=leakcanary7f3
 PROSE_DIR="$WORK/prose"
 mkdir -p "$PROSE_DIR"
 PROSE_META="$PROSE_DIR/task.meta"
-printf 'kind=ship\nbrief=%s\nprompt=%s\nreport=%s\nstatus=%s\n' \
-  "$PROSE_SENTINEL" "$PROSE_SENTINEL" "$PROSE_SENTINEL" "$PROSE_SENTINEL" > "$PROSE_META"
-for prose_file in brief.md prompt.md report.md status.md ; do
-  printf 'secret %s\n' "$PROSE_SENTINEL" > "$PROSE_DIR/$prose_file"
-done
-prose_a=$(FM_TRACE_CONTEXT=on fm_trace_context_resolve "$CFG_ON" "$PROSE_META")
-prose_b=$(FM_TRACE_CONTEXT=on fm_trace_context_resolve "$CFG_ON" "$PROSE_META")
-if ! fm_trace_context_valid "$prose_a" || ! fm_trace_context_valid "$prose_b" ; then
-  fail "resolving beside task prose must still yield valid carriers (a='$prose_a' b='$prose_b')"
-fi
-case "$prose_a$prose_b" in
-  *"$PROSE_SENTINEL"*) fail "a carrier leaked task prose into its value (a='$prose_a' b='$prose_b')" ;;
-esac
-[ "${prose_a:3:32}" != "${prose_b:3:32}" ] \
-  || fail "two resolves of one prose-laden record returned the same trace id, so the carrier is derived from content rather than freshly minted"
-pass "a carrier resolved beside a brief, prompt, report, and status is a fresh random root that carries none of their bytes"
+
+resolve_with_fixed_entropy() {  # <meta-file>
+  local meta=$1
+  (
+    # shellcheck disable=SC2329 # Invoked through fm_trace_context_resolve's dynamically scoped entropy seam.
+    fm_trace_context_hex() {
+      case "$1" in
+        16) printf '11111111111111111111111111111111' ;;
+        8) printf '2222222222222222' ;;
+        *) return 1 ;;
+      esac
+    }
+    FM_TRACE_CONTEXT=on fm_trace_context_resolve "$CFG_ON" "$meta"
+  )
+}
+
+printf 'kind=ship\nbrief=prose-alpha\nprompt=prompt-alpha\nreport=report-alpha\nstatus=status-alpha\n' > "$PROSE_META"
+prose_a=$(resolve_with_fixed_entropy "$PROSE_META")
+printf 'kind=ship\nbrief=prose-beta\nprompt=prompt-beta\nreport=report-beta\nstatus=status-beta\n' > "$PROSE_META"
+prose_b=$(resolve_with_fixed_entropy "$PROSE_META")
+expected_prose_carrier='00-11111111111111111111111111111111-2222222222222222-01'
+[ "$prose_a" = "$expected_prose_carrier" ] \
+  || fail "the first prose record changed the fixed-entropy carrier (expected='$expected_prose_carrier' got='$prose_a')"
+[ "$prose_b" = "$expected_prose_carrier" ] \
+  || fail "the second prose record changed the fixed-entropy carrier (expected='$expected_prose_carrier' got='$prose_b')"
+[ "$prose_a" = "$prose_b" ] \
+  || fail "task prose influenced a traceparent field (a='$prose_a' b='$prose_b')"
+pass "brief, prompt, report, and status prose cannot influence any field of a fixed-entropy carrier"
 
 # --- secondmate inheritance wires the nested chain ---------------------------
 

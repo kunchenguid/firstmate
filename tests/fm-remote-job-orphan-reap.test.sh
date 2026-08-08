@@ -118,19 +118,8 @@ pass "the Linux start path puts the whole worker tree in its own process group"
 # is the serving child, not the supervisor. The supervisor respawns, so the tree
 # survives a teardown that looks complete.
 rm -rf "$CASE1/remote-jobs"
-# Stop that recorded pid the way every production stop path does: TERM, wait,
-# then escalate to KILL - the shape fm_remote_job_stop_worker_tree uses for both
-# the reaper and fm-on's ensure path. A bare TERM is not enough once this
-# teardown has removed the state root. The worker refuses to shut down when it
-# cannot write its ownership quarantine marker, and while its own stale-job
-# sweep recreates the state root (fm_remote_job_reap_stale calls
-# fm_remote_job_prepare_state every cycle), nothing recreates the worker.lock
-# directory that marker lives in. A TERM landing after that recreation is
-# swallowed - the worker re-arms its handler and keeps serving with a heartbeat
-# that now succeeds again - which made this step race the worker's poll cycle.
 kill -TERM "$SERVE" 2>/dev/null || true
-wait_gone "$SERVE" 5 || kill -KILL "$SERVE" 2>/dev/null || true
-wait_gone "$SERVE" 10 || fail "the recorded serving child could not be stopped"
+wait_gone "$SERVE" 10 || fail "the serving child ignored TERM"
 alive "$WORKER" || fail "the fixture supervisor did not survive a lone child kill, so this case no longer covers the leak"
 wait_child "$WORKER" 15 || fail "the supervisor did not respawn after its recorded child pid was killed"
 pass "removing the state root and killing the recorded worker pid leaves the tree running at ppid 1"
