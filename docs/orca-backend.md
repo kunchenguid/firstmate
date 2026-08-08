@@ -47,6 +47,8 @@ worktree=<absolute Orca worktree path>
 
 Spawn registers the repository, creates an independent worktree, reuses only the verified `result.terminal.handle` returned by Orca or creates a terminal explicitly, installs harness hooks, records metadata, and launches the selected harness.
 Exact command flags and response parsing are owned by `bin/backends/orca.sh` and script help.
+If task-record publication fails after Orca creates resources, the spawn refuses success and abort cleanup closes the terminal and releases the worktree.
+If worktree release also fails while the canonical metadata path is unusable, Firstmate preserves the cleanup identity in `state/<id>.meta.recovery.<suffix>` and prints that recovery record's exact path for reconciliation.
 
 `fm-peek.sh` reads with `orca terminal read`.
 `fm-send.sh` types and verifies composer clearance, follows `oldestCursor` when Orca returns a limited page, and retries Enter without retyping when a slash popup first fills an argument placeholder.

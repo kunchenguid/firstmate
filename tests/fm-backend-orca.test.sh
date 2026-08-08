@@ -686,13 +686,50 @@ test_spawn_releases_orca_resources_when_metadata_write_fails() {
     "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --mode no-mistakes --yolo off --backend orca 2>&1 )
   status=$?
   [ "$status" -ne 0 ] || fail "Orca spawn should fail when metadata cannot be written"
-  assert_contains "$out" "Is a directory" "spawn should fail at metadata publication"
+  # The exit code alone cannot distinguish a checked refusal from bash's own
+  # errexit, which only fires on this shape from 5.1 onwards; requiring the
+  # diagnostic keeps the case meaningful on every supported shell.
+  assert_contains "$out" "could not publish the task record for $id" \
+    "spawn should refuse the unpublishable record explicitly, not rely on shell errexit"
   assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''close'$'\x1f''--terminal'$'\x1f''term-meta-fail'$'\x1f''--json' \
     "Orca spawn should close the recorded terminal when a later abort occurs"
   assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm'$'\x1f''--worktree'$'\x1f''id:wt-meta-fail'$'\x1f''--force'$'\x1f''--json' \
     "Orca spawn should remove the recorded worktree when a later abort occurs"
   [ ! -f "$state/$id.meta" ] || fail "metadata-write abort should not publish a regular metadata file"
   pass "fm-spawn.sh --backend orca: releases terminal and worktree on later aborts"
+}
+
+test_spawn_preserves_orca_recovery_record_when_metadata_destination_is_invalid() {
+  local proj wt data state config id out status recovery
+  id="orcarecoveryz4"
+  proj="$TMP_ROOT/recovery-project"
+  wt="$TMP_ROOT/recovery-wt"
+  data="$TMP_ROOT/recovery-data"
+  state="$TMP_ROOT/recovery-state"
+  config="$TMP_ROOT/recovery-config"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  mkdir -p "$data/$id" "$state/$id.meta" "$config"
+  printf 'brief\n' > "$data/$id/brief.md"
+  orca_case recovery-record
+  printf '1\n' > "$RESP/1.exit"
+  printf '{"ok":true,"result":{"repo":{"id":"repo-recovery"}}}\n' > "$RESP/2.out"
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-recovery","path":"%s"}}}\n' "$wt" > "$RESP/3.out"
+  printf '{"ok":true,"result":{"terminal":{"handle":"term-recovery"}}}\n' > "$RESP/4.out"
+  printf '1\n' > "$RESP/6.exit"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --mode no-mistakes --yolo off --backend orca 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "Orca spawn should fail when metadata publication and worktree cleanup fail"
+  recovery=$(find "$state" -maxdepth 1 -type f -name "$id.meta.recovery.*" -print)
+  assert_present "$recovery" "failed Orca cleanup should preserve a discoverable recovery record"
+  assert_contains "$out" "recovery metadata for $id is preserved at $recovery" \
+    "failed Orca cleanup should name its recovery record"
+  assert_grep "backend=orca" "$recovery" "recovery metadata missing backend=orca"
+  assert_grep "orca_worktree_id=wt-recovery" "$recovery" "recovery metadata missing Orca worktree id"
+  assert_grep "terminal=term-recovery" "$recovery" "recovery metadata missing Orca terminal handle"
+  pass "fm-spawn.sh --backend orca: preserves discoverable recovery metadata when canonical publication fails"
 }
 
 test_peek_send_and_crew_state_route_through_orca_meta() {
@@ -1309,6 +1346,7 @@ test_spawn_refuses_orca_nonisolated_worktree
 test_spawn_removes_orca_worktree_when_terminal_create_fails
 test_spawn_preserves_orca_metadata_when_abort_cleanup_fails
 test_spawn_releases_orca_resources_when_metadata_write_fails
+test_spawn_preserves_orca_recovery_record_when_metadata_destination_is_invalid
 test_peek_send_and_crew_state_route_through_orca_meta
 test_peek_and_crew_state_fail_closed_on_orca_error_json
 test_target_exists_rejects_orca_error_json

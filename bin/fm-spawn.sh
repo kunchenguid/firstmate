@@ -386,7 +386,7 @@ else
 fi
 
 spawn_remote_secondmate() {
-  local id=$1 remote host root home harness positional model effort backend out rc meta tmp
+  local id=$1 remote host root home harness positional model effort backend out rc meta tmp record
   local remote_backend remote_target remote_harness remote_herdr_session registry_lock remote_lock remote_generation
   local remote_traceparent remote_recorded_traceparent
   local -a launch_args
@@ -612,29 +612,43 @@ spawn_remote_secondmate() {
   # reports it here so the parent does not deny the agent's actual identity.
   remote_recorded_traceparent=$(printf '%s\n' "$out" | sed -n 's/^traceparent=//p' | tail -1)
   fm_trace_context_valid "$remote_recorded_traceparent" || remote_recorded_traceparent=
-  tmp="$meta.tmp.$$"
-  {
-    echo "window=remote:$id"
-    echo "endpoint_task_id=$id"
-    echo "worktree=$home"
-    echo "project=$root"
-    echo "harness=$harness"
-    echo "kind=secondmate"
-    echo "mode=secondmate"
-    echo "yolo=off"
-    echo "tasktmp="
-    echo "model=${model#-}"
-    echo "effort=${effort#-}"
-    echo "home=$home"
-    echo "projects=$(secondmate_registry_field "$DATA/secondmates.md" "$id" projects)"
-    echo "remote_host=$host"
-    echo "remote_root=$root"
-    echo "remote_backend=$remote_backend"
-    echo "remote_herdr_session=$remote_herdr_session"
-    echo "remote_target=$remote_target"
-    [ -z "$remote_recorded_traceparent" ] || echo "traceparent=$remote_recorded_traceparent"
-  } > "$tmp"
-  mv -f -- "$tmp" "$meta"
+  record="window=remote:$id"$'\n'
+  record="${record}endpoint_task_id=$id"$'\n'
+  record="${record}worktree=$home"$'\n'
+  record="${record}project=$root"$'\n'
+  record="${record}harness=$harness"$'\n'
+  record="${record}kind=secondmate"$'\n'
+  record="${record}mode=secondmate"$'\n'
+  record="${record}yolo=off"$'\n'
+  record="${record}tasktmp="$'\n'
+  record="${record}model=${model#-}"$'\n'
+  record="${record}effort=${effort#-}"$'\n'
+  record="${record}home=$home"$'\n'
+  record="${record}projects=$(secondmate_registry_field "$DATA/secondmates.md" "$id" projects)"$'\n'
+  record="${record}remote_host=$host"$'\n'
+  record="${record}remote_root=$root"$'\n'
+  record="${record}remote_backend=$remote_backend"$'\n'
+  record="${record}remote_herdr_session=$remote_herdr_session"$'\n'
+  record="${record}remote_target=$remote_target"$'\n'
+  [ -z "$remote_recorded_traceparent" ] \
+    || record="${record}traceparent=$remote_recorded_traceparent"$'\n'
+  tmp=$(mktemp "$STATE/.${id}.meta.XXXXXX") || {
+    fm_lock_release "$remote_lock" || true
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    echo "error: could not write the record for remote secondmate $id; preserving the remote route for reconciliation" >&2
+    return 1
+  }
+  if ! printf '%s' "$record" > "$tmp" \
+    || { { [ -e "$meta" ] || [ -L "$meta" ]; } && { [ ! -f "$meta" ] || [ -L "$meta" ]; }; } \
+    || ! mv -f -- "$tmp" "$meta"; then
+    rm -f -- "$tmp"
+    fm_lock_release "$remote_lock" || true
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    echo "error: could not write the record for remote secondmate $id; preserving the remote route for reconciliation" >&2
+    return 1
+  fi
   fm_lock_release "$remote_lock" || true
   fm_lock_release "$registry_lock" || true
   fm_lock_release "$SPAWN_TASK_LOCK" || true
@@ -705,6 +719,8 @@ HERDR_PRESENTATION_ORDER_LOCK=
 HERDR_PRESENTATION_ORDER_LOCK_HELD=0
 SPAWN_TASK_LOCK=
 SPAWN_TASK_LOCK_HELD=0
+META_TMP=
+SPAWN_RECORD_PATH=
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
 SPAWN_REGISTRY_LOCK=
@@ -729,8 +745,43 @@ parse_orca_worktree_result() {
   fi
 }
 
+spawn_record_publish() {  # <record> <destination> [recovery-prefix]
+  local record=$1 destination=$2 recovery_prefix=${3:-} parent suffix recovery
+  parent=${destination%/*}
+  META_TMP=$(mktemp "$parent/.${destination##*/}.XXXXXX") || return 1
+  if ! printf '%s' "$record" > "$META_TMP"; then
+    rm -f -- "$META_TMP" || true
+    META_TMP=
+    return 1
+  fi
+  if { { [ ! -e "$destination" ] && [ ! -L "$destination" ]; } \
+      || { [ -f "$destination" ] && [ ! -L "$destination" ]; }; } \
+    && mv -f -- "$META_TMP" "$destination"; then
+    META_TMP=
+    SPAWN_RECORD_PATH=$destination
+    return 0
+  fi
+  if [ -n "$recovery_prefix" ]; then
+    suffix=${META_TMP##*.}
+    recovery="$recovery_prefix.$suffix"
+    if [ ! -e "$recovery" ] && [ ! -L "$recovery" ] \
+      && mv -f -- "$META_TMP" "$recovery"; then
+      META_TMP=
+      SPAWN_RECORD_PATH=$recovery
+      return 0
+    fi
+  fi
+  rm -f -- "$META_TMP" || true
+  META_TMP=
+  return 1
+}
+
 spawn_abort_cleanup() {
-  local status=$? restart_backup restart_endpoint_state
+  local status=$? restart_backup restart_endpoint_state record
+  if [ -n "$META_TMP" ]; then
+    rm -f -- "$META_TMP" || true
+    META_TMP=
+  fi
   if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ] \
      && [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" != 1 ]; then
     if ! spawn_herdr_presentation_order_lock_acquire "${HERDR_PROJECTION_ABORT_SESSION:-}"; then
@@ -758,21 +809,27 @@ spawn_abort_cleanup() {
       if ! fm_backend_remove_worktree orca "$ORCA_WORKTREE_ID" 2>/dev/null; then
         mkdir -p "$STATE" 2>/dev/null || true
         if [ -d "$STATE" ]; then
-          {
-            echo "window=$W"
-            echo "worktree=${WT:-}"
-            echo "project=$PROJ_ABS"
-            echo "harness=$HARNESS"
-            echo "kind=$KIND"
-            [ -z "${MODE:-}" ] || echo "mode=$MODE"
-            [ -z "${YOLO:-}" ] || echo "yolo=$YOLO"
-            echo "tasktmp=${TASK_TMP:-}"
-            echo "model=${MODEL:-default}"
-            echo "effort=${EFFORT:-default}"
-            echo "backend=orca"
-            echo "orca_worktree_id=$ORCA_WORKTREE_ID"
-            [ -z "${ORCA_TERMINAL:-}" ] || echo "terminal=$ORCA_TERMINAL"
-          } > "$STATE/$ID.meta" 2>/dev/null || true
+          record="window=$W"$'\n'
+          record="${record}worktree=${WT:-}"$'\n'
+          record="${record}project=$PROJ_ABS"$'\n'
+          record="${record}harness=$HARNESS"$'\n'
+          record="${record}kind=$KIND"$'\n'
+          [ -z "${MODE:-}" ] || record="${record}mode=$MODE"$'\n'
+          [ -z "${YOLO:-}" ] || record="${record}yolo=$YOLO"$'\n'
+          record="${record}tasktmp=${TASK_TMP:-}"$'\n'
+          record="${record}model=${MODEL:-default}"$'\n'
+          record="${record}effort=${EFFORT:-default}"$'\n'
+          record="${record}backend=orca"$'\n'
+          record="${record}orca_worktree_id=$ORCA_WORKTREE_ID"$'\n'
+          [ -z "${ORCA_TERMINAL:-}" ] || record="${record}terminal=$ORCA_TERMINAL"$'\n'
+          SPAWN_RECORD_PATH=
+          if spawn_record_publish "$record" "$STATE/$ID.meta" "$STATE/$ID.meta.recovery"; then
+            if [ "$SPAWN_RECORD_PATH" != "$STATE/$ID.meta" ]; then
+              echo "warning: Orca cleanup failed; recovery metadata for $ID is preserved at $SPAWN_RECORD_PATH" >&2
+            fi
+          else
+            echo "warning: Orca cleanup failed and recovery metadata for $ID could not be published" >&2
+          fi
         fi
       fi
     fi
@@ -2277,51 +2334,54 @@ fi
 
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
-{
-  echo "window=$META_WINDOW"
-  echo "endpoint_task_id=$ID"
-  echo "worktree=$WT"
-  echo "project=$PROJ_ABS"
-  echo "harness=$HARNESS"
-  echo "kind=$KIND"
-  [ -z "$MODE" ] || echo "mode=$MODE"
-  [ -z "$YOLO" ] || echo "yolo=$YOLO"
-  echo "tasktmp=$TASK_TMP"
-  echo "model=${MODEL:-default}"
-  echo "effort=${EFFORT:-default}"
-  # Off by default; written only when on, so an ordinary spawn's meta stays
-  # byte-identical (absent remote_control= means off, same convention as backend=).
-  [ "$REMOTE_CONTROL" -eq 0 ] || echo "remote_control=1"
-  [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
-  # Default-off writes no traceparent= line (meta stays byte-identical).
-  # backend= is written only for a non-default (non-tmux) backend, so the
-  # default path's meta stays byte-identical (absent backend= means tmux;
-  # data/fm-backend-design-d7's P1 compatibility contract).
-  [ "$BACKEND" = tmux ] || echo "backend=$BACKEND"
-  if [ "$BACKEND" = herdr ]; then
-    echo "herdr_session=$HERDR_SES"
-    echo "herdr_workspace_id=$HERDR_WORKSPACE_ID"
-    echo "herdr_tab_id=$HERDR_TAB_ID"
-    echo "herdr_pane_id=$HERDR_PANE_ID"
-  fi
-  if [ "$BACKEND" = zellij ]; then
-    echo "zellij_session=$ZELLIJ_SES"
-    echo "zellij_tab_id=$ZELLIJ_TAB_ID"
-    echo "zellij_pane_id=$ZELLIJ_PANE_ID"
-  fi
-  if [ "$BACKEND" = orca ]; then
-    echo "orca_worktree_id=$ORCA_WORKTREE_ID"
-    echo "terminal=$ORCA_TERMINAL"
-  fi
-  if [ "$BACKEND" = cmux ]; then
-    echo "cmux_workspace_id=$CMUX_WORKSPACE_ID"
-    echo "cmux_surface_id=$CMUX_SURFACE_ID"
-  fi
-  if [ "$KIND" = secondmate ]; then
-    echo "home=$PROJ_ABS"
-    echo "projects=$SECONDMATE_PROJECTS"
-  fi
-} > "$STATE/$ID.meta"
+META_RECORD="window=$META_WINDOW"$'\n'
+META_RECORD="${META_RECORD}endpoint_task_id=$ID"$'\n'
+META_RECORD="${META_RECORD}worktree=$WT"$'\n'
+META_RECORD="${META_RECORD}project=$PROJ_ABS"$'\n'
+META_RECORD="${META_RECORD}harness=$HARNESS"$'\n'
+META_RECORD="${META_RECORD}kind=$KIND"$'\n'
+[ -z "$MODE" ] || META_RECORD="${META_RECORD}mode=$MODE"$'\n'
+[ -z "$YOLO" ] || META_RECORD="${META_RECORD}yolo=$YOLO"$'\n'
+META_RECORD="${META_RECORD}tasktmp=$TASK_TMP"$'\n'
+META_RECORD="${META_RECORD}model=${MODEL:-default}"$'\n'
+META_RECORD="${META_RECORD}effort=${EFFORT:-default}"$'\n'
+# Off by default; written only when on, so an ordinary spawn's meta stays
+# byte-identical (absent remote_control= means off, same convention as backend=).
+[ "$REMOTE_CONTROL" -eq 0 ] || META_RECORD="${META_RECORD}remote_control=1"$'\n'
+[ -z "${BUSY_GEN:-}" ] || META_RECORD="${META_RECORD}busy_gen=$BUSY_GEN"$'\n'
+# Default-off writes no traceparent= line (meta stays byte-identical).
+# backend= is written only for a non-default (non-tmux) backend, so the
+# default path's meta stays byte-identical (absent backend= means tmux;
+# data/fm-backend-design-d7's P1 compatibility contract).
+[ "$BACKEND" = tmux ] || META_RECORD="${META_RECORD}backend=$BACKEND"$'\n'
+if [ "$BACKEND" = herdr ]; then
+  META_RECORD="${META_RECORD}herdr_session=$HERDR_SES"$'\n'
+  META_RECORD="${META_RECORD}herdr_workspace_id=$HERDR_WORKSPACE_ID"$'\n'
+  META_RECORD="${META_RECORD}herdr_tab_id=$HERDR_TAB_ID"$'\n'
+  META_RECORD="${META_RECORD}herdr_pane_id=$HERDR_PANE_ID"$'\n'
+fi
+if [ "$BACKEND" = zellij ]; then
+  META_RECORD="${META_RECORD}zellij_session=$ZELLIJ_SES"$'\n'
+  META_RECORD="${META_RECORD}zellij_tab_id=$ZELLIJ_TAB_ID"$'\n'
+  META_RECORD="${META_RECORD}zellij_pane_id=$ZELLIJ_PANE_ID"$'\n'
+fi
+if [ "$BACKEND" = orca ]; then
+  META_RECORD="${META_RECORD}orca_worktree_id=$ORCA_WORKTREE_ID"$'\n'
+  META_RECORD="${META_RECORD}terminal=$ORCA_TERMINAL"$'\n'
+fi
+if [ "$BACKEND" = cmux ]; then
+  META_RECORD="${META_RECORD}cmux_workspace_id=$CMUX_WORKSPACE_ID"$'\n'
+  META_RECORD="${META_RECORD}cmux_surface_id=$CMUX_SURFACE_ID"$'\n'
+fi
+if [ "$KIND" = secondmate ]; then
+  META_RECORD="${META_RECORD}home=$PROJ_ABS"$'\n'
+  META_RECORD="${META_RECORD}projects=$SECONDMATE_PROJECTS"$'\n'
+fi
+if ! spawn_record_publish "$META_RECORD" "$STATE/$ID.meta"; then
+  [ -z "$META_TMP" ] || { rm -f -- "$META_TMP" || true; META_TMP=; }
+  echo "error: could not publish the task record for $ID; refusing to report a spawn firstmate cannot supervise" >&2
+  exit 1
+fi
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
 sq_brief=$(shell_quote "$BRIEF")

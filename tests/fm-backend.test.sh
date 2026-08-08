@@ -130,7 +130,7 @@ resolve_permissive_tmux_kill_ref() {
 # build_old_bin echoes a directory whose bin/ subdir holds the PRE-REFACTOR
 # fm-send.sh, fm-peek.sh, fm-watch.sh, fm-spawn.sh, fm-teardown.sh, and any
 # changed source-library dependency (all extracted from BASE_REF), plus copies
-# of every OTHER sibling script those five entrypoints source, so those copies are exactly
+# of every OTHER sibling script in bin/, so those copies are exactly
 # what BASE_REF would have used too. Copies keep BASH_SOURCE-based sibling
 # resolution inside the synthetic tree on both macOS and Linux; symlinks make
 # that resolution shell/platform-dependent. FM_ROOT_OVERRIDE pointed at this dir's
@@ -141,29 +141,45 @@ resolve_permissive_tmux_kill_ref() {
 # hence the dispatcher is a copied sibling, while the tmux adapter is extracted
 # from BASE_REF so conformance tests retain the exact historical behavior even
 # when this branch changes tmux dispatch semantics.
-OLD_BIN_UNCHANGED_SIBLINGS="fm-gate-refuse-lib.sh fm-guard.sh fm-lock-lib.sh fm-tasks-axi-lib.sh fm-pr-lib.sh fm-tangle-lib.sh fm-tmux-lib.sh fm-composer-lib.sh fm-wake-lib.sh fm-classify-lib.sh fm-supervision-lib.sh fm-ff-lib.sh fm-config-inherit-lib.sh fm-project-mode.sh fm-harness.sh fm-crew-state.sh fm-nm-run-lib.sh fm-decision-hold.sh fm-backend.sh fm-operational-input.sh fm-public-followup-lib.sh fm-secondmate-registry-lib.sh fm-secondmate-parent-lib.sh fm-x-lib.sh"
-# A pull-request merge may add a new main-only dependency that the branch's older baseline does not have yet.
-OLD_BIN_OPTIONAL_SIBLINGS="fm-pending-reply-lib.sh"
+#
+# The sibling set is derived from the working tree instead of enumerated here.
+# A hand-maintained list rots silently the moment any of those scripts takes on
+# a new dependency: bin/backends/tmux.sh started sourcing bin/fm-session-lock-lib.sh
+# without the list following, so every fixture built from a baseline at or after
+# that change died while sourcing the dispatcher, and the conformance cases
+# reported it as an old-vs-new exit-code divergence in fm-send.sh - a fixture
+# defect wearing a product regression's clothes.
 OLD_BIN_REFACTORED="fm-send.sh fm-peek.sh fm-watch.sh fm-spawn.sh fm-teardown.sh fm-marker-lib.sh"
 
 build_old_bin() {  # <name> -> echoes root dir (root/bin/<script> is the entry point)
-  local name=$1 root bin f
+  local name=$1 root bin f probe
   root="$TMP_ROOT/$name"
   bin="$root/bin"
   mkdir -p "$bin"
-  for f in $OLD_BIN_UNCHANGED_SIBLINGS; do
-    cp "$ROOT/bin/$f" "$bin/$f"
-  done
-  for f in $OLD_BIN_OPTIONAL_SIBLINGS; do
-    [ -f "$ROOT/bin/$f" ] || continue
-    cp "$ROOT/bin/$f" "$bin/$f"
-  done
+  cp "$ROOT"/bin/*.sh "$bin/"
   cp -R "$ROOT/bin/backends" "$bin/backends"
   git -C "$ROOT" show "$BASE_REF:bin/backends/tmux.sh" > "$bin/backends/tmux.sh"
   for f in $OLD_BIN_REFACTORED; do
     git -C "$ROOT" show "$BASE_REF:bin/$f" > "$bin/$f"
     chmod +x "$bin/$f"
   done
+  # An assembled tree that cannot resolve one of its own dependencies dies at
+  # source time, long before the behavior under test, and every conformance
+  # case built on it then reports a meaningless exit-code difference. Prove the
+  # tree loads first, and name the unresolved file instead. Two probes, because
+  # the two load stages fail independently: an entrypoint sources its shared
+  # libraries and the dispatcher before it looks at arguments, so a no-argument
+  # run covers those, while each backend ADAPTER is sourced lazily by
+  # fm_backend_source and is only reached once a backend resolves - which is
+  # exactly where the omitted dependency hid.
+  probe=$(FM_ROOT_OVERRIDE="$root" FM_HOME="$root" "$bin/fm-send.sh" 2>&1 || true)
+  probe=$probe$'\n'$(FM_ROOT_OVERRIDE="$root" bash -c '
+    . "$1/bin/fm-backend.sh"
+    for b in $FM_BACKEND_KNOWN; do fm_backend_source "$b" || exit 1; done' _ "$root" 2>&1 || true)
+  case "$probe" in
+    *"No such file or directory"*)
+      fail "old-bin fixture '$name' cannot resolve a dependency of its BASE_REF entrypoints:"$'\n'"$probe" ;;
+  esac
   printf '%s\n' "$root"
 }
 
@@ -1080,6 +1096,48 @@ test_spawn_default_backend_writes_no_meta_field() {
   pass "fm-spawn.sh: an explicit --backend tmux resolves silently and writes no backend= (missing means tmux)"
 }
 
+# A spawn that cannot publish its durable record must refuse, on every shell
+# firstmate supports. The publication is a compound command with a redirection,
+# and `set -e` only aborts on that shape from bash 5.1 onwards
+# (docs/verification/runtime-backends.md "Shell portability"), so before the
+# explicit check in fm-spawn.sh this reported success on stock macOS Bash 3.2
+# and left a launched agent with no record to supervise or tear down.
+# The assertion is deliberately on fm-spawn.sh's own diagnostic, not just on a
+# non-zero exit: an unchecked publication still exits non-zero on bash 5.1+, so
+# an exit-code-only case would pass identically with and without the fix on the
+# lanes CI actually runs, and would never catch the reintroduction.
+# tmux is the reference backend, and this is the single publication point every
+# backend reaches, so pinning it here covers herdr, zellij, orca and cmux too.
+test_spawn_refuses_when_task_record_cannot_be_published() {
+  local proj wt data id state config out status fb
+  proj="$TMP_ROOT/metafail-project"; wt="$TMP_ROOT/metafail-wt"; data="$TMP_ROOT/metafail-data"
+  id="metafailz6"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  fb=$(make_spawn_fakebin "$TMP_ROOT/metafail-fake" "$wt")
+  mkdir -p "$data/$id"; printf 'brief\n' > "$data/$id/brief.md"
+  state="$TMP_ROOT/metafail-state"; config="$TMP_ROOT/metafail-config"
+  # A directory where the record belongs is the portable way to make the write
+  # fail for a real filesystem reason on every platform, without depending on
+  # permission semantics that differ for a privileged test runner.
+  mkdir -p "$state/$id.meta" "$config"
+
+  out=$(PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
+    FM_TMUX_LOG="$TMP_ROOT/metafail.log" \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --mode no-mistakes --yolo off --backend tmux 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "fm-spawn.sh must refuse when the task record cannot be published"$'\n'"$out"
+  assert_contains "$out" "could not publish the task record for $id" \
+    "fm-spawn.sh did not name the unpublishable task record; the publication is failing open"
+  case "$out" in
+    *"spawned $id"*) fail "fm-spawn.sh reported a spawn it could not record"$'\n'"$out" ;;
+  esac
+  [ ! -f "$state/$id.meta" ] || fail "a refused spawn must not leave a regular task record behind"
+  rm -rf "/tmp/fm-$id"
+  pass "fm-spawn.sh: refuses a spawn whose task record cannot be published, on every supported shell"
+}
+
 test_spawn_explicit_backend_flag_beats_autodetect_herdr_env() {
   local proj wt data id state config out fb
   proj="$TMP_ROOT/explicit-backend-project"; wt="$TMP_ROOT/explicit-backend-wt"; data="$TMP_ROOT/explicit-backend-data"
@@ -1159,5 +1217,6 @@ test_spawn_refuses_unknown_backend_flag
 test_spawn_refuses_codex_app_backend_flag
 test_spawn_refuses_unknown_fm_backend_env
 test_spawn_default_backend_writes_no_meta_field
+test_spawn_refuses_when_task_record_cannot_be_published
 test_spawn_explicit_backend_flag_beats_autodetect_herdr_env
 test_spawn_autodetect_nesting_resolves_tmux_silently

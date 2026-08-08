@@ -259,7 +259,7 @@ fm_backend_herdr_projection_journal_path() {  # <state-dir> <task-id>
 # A hard-link publication in the same state directory gives create-if-absent
 # semantics, so concurrent attempts cannot overwrite each other's token.
 fm_backend_herdr_projection_journal_create() {  # <state-dir> <task-id>
-  local state=$1 id=$2 journal token tmp
+  local state=$1 id=$2 journal token tmp record
   case "$id" in
     ''|.*|*[!A-Za-z0-9._-]*)
       echo "error: invalid task id for herdr presentation journal" >&2
@@ -278,14 +278,10 @@ fm_backend_herdr_projection_journal_create() {  # <state-dir> <task-id>
   }
   tmp=$(mktemp "$state/.${id}.herdr-presentation.XXXXXX") || return 1
   chmod 0600 "$tmp" || { rm -f "$tmp"; return 1; }
-  if ! {
-    printf 'version=1\n'
-    printf 'task_id=%s\n' "$id"
-    printf 'projection_id=%s\n' "$token"
-  } > "$tmp"; then
-    rm -f "$tmp"
-    return 1
-  fi
+  record='version=1'$'\n'
+  record="${record}task_id=$id"$'\n'
+  record="${record}projection_id=$token"$'\n'
+  printf '%s' "$record" > "$tmp" || { rm -f "$tmp"; return 1; }
   if ! ln "$tmp" "$journal" 2>/dev/null; then
     rm -f "$tmp"
     echo "error: herdr presentation journal appeared concurrently for $id; refusing projected create" >&2
@@ -381,27 +377,23 @@ fm_backend_herdr_projection_home_identity() {  # <home>
 
 fm_backend_herdr_projection_journal_write_v2() {  # <journal> <task-id> <token> <home> <session> <workspace> <tab> <pane> <parent-workspace> <parent-label> <workspace-label> <task-label>
   local journal=$1 id=$2 token=$3 home=$4 session=$5 workspace=$6 tab=$7 pane=$8
-  local parent_workspace=$9 parent_label=${10} workspace_label=${11} task_label=${12} state tmp
+  local parent_workspace=$9 parent_label=${10} workspace_label=${11} task_label=${12} state tmp record
   state=$(dirname "$journal")
   tmp=$(mktemp "$state/.${id}.herdr-presentation.bind.XXXXXX") || return 1
   chmod 0600 "$tmp" || { rm -f "$tmp"; return 1; }
-  if ! {
-    printf 'version=2\n'
-    printf 'task_id=%s\n' "$id"
-    printf 'projection_id=%s\n' "$token"
-    printf 'home=%s\n' "$home"
-    printf 'session=%s\n' "$session"
-    printf 'workspace_id=%s\n' "$workspace"
-    printf 'tab_id=%s\n' "$tab"
-    printf 'pane_id=%s\n' "$pane"
-    printf 'parent_workspace_id=%s\n' "$parent_workspace"
-    printf 'parent_label=%s\n' "$parent_label"
-    printf 'workspace_label=%s\n' "$workspace_label"
-    printf 'task_label=%s\n' "$task_label"
-  } > "$tmp"; then
-    rm -f "$tmp"
-    return 1
-  fi
+  record='version=2'$'\n'
+  record="${record}task_id=$id"$'\n'
+  record="${record}projection_id=$token"$'\n'
+  record="${record}home=$home"$'\n'
+  record="${record}session=$session"$'\n'
+  record="${record}workspace_id=$workspace"$'\n'
+  record="${record}tab_id=$tab"$'\n'
+  record="${record}pane_id=$pane"$'\n'
+  record="${record}parent_workspace_id=$parent_workspace"$'\n'
+  record="${record}parent_label=$parent_label"$'\n'
+  record="${record}workspace_label=$workspace_label"$'\n'
+  record="${record}task_label=$task_label"$'\n'
+  printf '%s' "$record" > "$tmp" || { rm -f "$tmp"; return 1; }
   [ -f "$journal" ] && [ ! -L "$journal" ] || { rm -f "$tmp"; return 1; }
   mv -f "$tmp" "$journal"
 }

@@ -65,9 +65,13 @@ For harness-specific interrupts or exits, load `harness-adapters`.
 
 ## Recovery
 
+[`docs/orca-backend.md`](../../../docs/orca-backend.md#current-lifecycle-and-safety) owns when a failed spawn preserves a named `state/<id>.meta.recovery.<suffix>` record.
+When the spawn warning names one, read that exact file as cleanup evidence rather than active routing metadata, because ordinary helpers do not discover the recovery suffix.
+Retain it until the exact recorded terminal and worktree identities are positively reconciled.
+
 For a messy Orca-backed task:
 
-1. Read `state/<id>.meta` and the relevant status tail first.
+1. Read the canonical `state/<id>.meta`, or the exact recovery record named by the spawn warning, and the relevant status tail first.
 2. Confirm the task is actually Orca-backed before using Orca-specific assumptions.
 3. Use the recorded `terminal=`, `orca_worktree_id=`, and `worktree=` as the task identity.
 4. Prefer firstmate helpers for peek, send, state, and teardown.
