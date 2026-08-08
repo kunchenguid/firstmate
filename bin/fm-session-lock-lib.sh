@@ -58,7 +58,8 @@ fm_harness_path_name() {  # <path>
 #   3. a bare interpreter (node, python) running a harness script path.
 FM_HARNESS_IS_CLAUDE=0
 fm_harness_process_matches() {  # <comm> <args> [argv0]
-  local comm=$1 args=$2 base argv0=${3:-$comm} name
+  local comm=$1 args=$2 base name
+  local argv0=${3:-$comm}
   FM_HARNESS_IS_CLAUDE=0
   # Cursor first, under its own narrowed identity rule (bin/fm-cursor-lib.sh):
   # neither list above can carry its generic `agent` alias safely.

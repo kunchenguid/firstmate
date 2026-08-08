@@ -80,6 +80,7 @@ build_remote_root() {
 
 # start_worker <remote-root> <account-home> <state-root>: start the worker
 # through the shared library start path and echo the supervisor pid.
+# shellcheck disable=SC2030,SC2031 # These exports intentionally stay inside command substitutions.
 start_worker() {
   local root=$1 account_home=$2 state_root=$3 pid
   pid=$(
@@ -127,6 +128,7 @@ TERM_WORKER=$(start_worker "$CASE_TERM/remote-root" "$CASE_TERM/account" "$CASE_
 track "$TERM_WORKER"
 wait_child "$TERM_WORKER" 10 || fail "the TERM teardown fixture never started its serving child"
 TERM_SERVE=$(pgrep -P "$TERM_WORKER" | head -n 1)
+# shellcheck disable=SC2030,SC2031 # These exports intentionally stay inside this command substitution.
 TERM_JOB_ID=$(
   export FM_REMOTE_JOB_STATE_ROOT="$CASE_TERM/remote-jobs"
   export FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux
