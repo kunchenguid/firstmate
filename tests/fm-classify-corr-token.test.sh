@@ -210,6 +210,46 @@ test_prose_and_malformed_tokens_never_become_transitions() {
   pass "prose, malformed, wrong-length and unknown name=value tokens stay non-transitions"
 }
 
+test_token_first_word_never_impersonates_a_transition() {
+  local dir state out view
+  dir=$(make_case token-first)
+  state="$dir/state"
+  out="$dir/drain.out"
+
+  printf 'corr=%s needs-decision [key=token-first-needs]: prose\n' "$CORR" \
+    > "$state/token-first-needs.status"
+  printf 'corr=%s blocked [key=token-first-blocked]: prose\n' "$CORR" \
+    > "$state/token-first-blocked.status"
+
+  printf 'needs-decision [key=stays-open-resolved]: a real captain decision\n' \
+    > "$state/token-first-resolved.status"
+  printf 'corr=%s resolved [key=stays-open-resolved]: prose\n' "$CORR" \
+    >> "$state/token-first-resolved.status"
+
+  printf 'blocked [key=stays-open-held]: a real captain blocker\n' \
+    > "$state/token-first-held.status"
+  printf 'corr=%s captain-held [key=stays-open-held]: prose\n' "$CORR" \
+    >> "$state/token-first-held.status"
+
+  view=$(drain_open "$state" "$out")
+  case "$view" in
+    *'token-first-needs '*) fail "a token-first needs-decision opened a decision: $view" ;;
+  esac
+  case "$view" in
+    *'token-first-blocked '*) fail "a token-first blocked opened a decision: $view" ;;
+  esac
+  case "$view" in
+    *'token-first-resolved'*'[key=stays-open-resolved]'*'a real captain decision'*) : ;;
+    *) fail "a token-first resolved closed a real decision: $view" ;;
+  esac
+  case "$view" in
+    *'token-first-held'*'[key=stays-open-held]'*'a real captain blocker'*) : ;;
+    *) fail "a token-first captain-held closed a real blocker: $view" ;;
+  esac
+
+  pass "a token-first line cannot impersonate any opening or closing verb"
+}
+
 # --- every other status_line_verb consumer ----------------------------------
 
 test_captain_relevance_and_pause_are_unchanged_without_a_token() {
@@ -450,6 +490,7 @@ test_tokened_opener_opens_and_tokened_closer_closes
 test_token_is_read_through_in_every_position_it_is_written_in
 test_untokened_pair_is_unchanged
 test_prose_and_malformed_tokens_never_become_transitions
+test_token_first_word_never_impersonates_a_transition
 test_captain_relevance_and_pause_are_unchanged_without_a_token
 test_consumer_verdicts_read_through_the_token
 test_pending_reply_escalation_matching_is_unaffected

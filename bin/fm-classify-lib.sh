@@ -220,6 +220,9 @@ status_is_paused_or_captain_held() {  # <status-line>
 # read as the bare verb, in BOTH directions: a verb parse that keeps the token
 # glued on matches no arm of _fm_decision_fold_line, so the opener never opens
 # and the closer never closes, and a captain decision goes silently missing.
+# Recognition starts only AFTER the retained leading verb: a token-first line
+# keeps that token, so its following word cannot impersonate a transition and
+# close a decision the captain is owed.
 #
 # The token grammar is OWNED by bin/fm-pending-reply-lib.sh
 # (fm_pending_reply_corr_token, FM_PENDING_REPLY_CORR_RE). That library sources
@@ -268,14 +271,18 @@ status_line_verb() {  # <status-line> -> leading verb word
     *corr=*) ;;
     *) printf '%s' "$v"; return 0 ;;
   esac
-  # Walk whole words, dropping only recognised tokens. Anything unrecognised is
-  # kept, so a multi-word prose prefix stays multi-word and matches no verb.
+  # Retain the first word, then drop only recognised tokens from the remaining
+  # whole words. Anything unrecognised stays, so prose still matches no verb.
+  word=${v%%[[:space:]]*}
+  out=$word
+  v=${v#"$word"}
+  v=${v#"${v%%[![:space:]]*}"}
   while [ -n "$v" ]; do
     word=${v%%[[:space:]]*}
     v=${v#"$word"}
     v=${v#"${v%%[![:space:]]*}"}
     _fm_classify_is_corr_token "$word" && continue
-    if [ -n "$out" ]; then out="$out $word"; else out=$word; fi
+    out="$out $word"
   done
   printf '%s' "$out"
 }
