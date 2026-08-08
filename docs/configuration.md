@@ -439,7 +439,7 @@ See [verification/public-followup.md](verification/public-followup.md) for the c
 ## Process-to-event sources (state/procevent)
 
 A long-polling external process is registered as a *source* through its adapter, whose header and `--help` own the commands and flags.
-`bin/fm-procevent.sh` owns the generic contract; `bin/fm-procevent-lavish.sh` is the first adapter and wraps only the currently published `lavish-axi poll` interface.
+`bin/fm-procevent.sh` owns the generic contract, while the concrete adapters own only their source identity, validation, cursor, and handling semantics.
 
 This section is the single owner of the runner's operating contract.
 Registration writes one private record under `state/procevent/`, and a completed result plus its immutable adapter identity are captured under `state/procevent-inbox/` before it is published.
@@ -463,6 +463,13 @@ Leaving that to a handler means it can silently not happen, so immediately after
 That call runs strictly after terminal retirement, because a handling adapter re-arms its own next source and retiring afterwards would drop that fresh registration and leave the source silently dead.
 Failed publication skips the call, and exit 0 means the adapter fully applied and acknowledged the result; failed publication, a missing command, an error, or any other exit is not a capture failure but leaves the result unacknowledged and therefore still eligible for re-announcement, so a handler receives it exactly as before and an adapter with no such command needs no change.
 The remote-secondmate reply adapter implements it, so a captured reply reaches its local status mirror and settles its correlated pending-reply expectation without any handler step; the published wake still reaches firstmate, and handling that wake through the adapter again is idempotent.
+
+The owner-private Forge adapter binds one explicit secure Forge config to the fixed source `forge-firstmate-private-v1`.
+It accepts only a current-user-owned, single-linked regular config at mode `0600`, reads only `bridge.listen` and `bridge.token`, requires a loopback socket, and keeps the token inside the direct HTTP polling child rather than in registration, cursor, result, event, log, or command-line state.
+It ignores proxy, redirect, ambient-credential, and alternate-origin surfaces and validates the complete bounded versioned response before output reaches the generic runner.
+Validated `no_work` and `no_change` responses remain internal, while one validated `records` page ends its exact registration generation and retains the Forge `event_id` and `revision` values for downstream deduplication.
+The adapter cursor advances only when a handler explicitly re-arms from that captured page, before acknowledging it, so a child failure before capture retries the prior cursor and a cursor reset safely replays the changed snapshot.
+The adapter never applies a record, mutates the backlog, routes or starts work, injects context, approves a proposal, answers a decision, or turns Forge bytes into authority.
 
 Ownership is machine-wide per canonical source, because separate homes can share one underlying source store.
 Claims live under `$XDG_STATE_HOME/firstmate/procevent-claims` (override with `FM_PROCEVENT_CLAIM_ROOT`).

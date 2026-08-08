@@ -5,7 +5,8 @@ Audience: maintainer verification.
 This record holds reusable version-scoped evidence for the runner's active guarantees.
 `docs/configuration.md` owns the operating contract, each script's header and `--help` own its mechanics, and `.agents/skills/process-event-sources/SKILL.md` owns the handling procedure.
 
-Verified on 2026-07-31 on macOS (Darwin 25.5.0) with `lavish-axi` 0.1.45 installed.
+The generic runner and Lavish interface were verified on 2026-07-31 on macOS (Darwin 25.5.0) with `lavish-axi` 0.1.45 installed.
+The private Forge adapter was verified on 2026-08-07 on macOS (Darwin 25.5.0) with Python 3.14.4 and only deterministic synthetic loopback fixtures.
 
 ## The published Lavish poll interface the adapter wraps
 
@@ -52,6 +53,33 @@ So the last useful response of an ended review is a `feedback` response, and eve
 That is why the adapter's terminal verdict covers a `feedback` response carrying `session_ended`, not only `status: ended` and a missing session: without it, one human `Send & End` leaves the source armed and each later cycle captures another empty ended result.
 `session_ended` is a session-level field emitted beside `status` in the response's leading `session:` block, which is why the adapter reads it there and ignores identical text appearing in prompt payloads.
 
+## Private Forge adapter verification
+
+The focused executable test used no live Forge config, token, state, listener, communication body, proxy, or external network:
+
+```text
+$ tests/fm-procevent-forge-firstmate.test.sh
+ok - Forge config reads reject mode, type, link, and parent-confinement drift
+ok - Forge config parsing rejects malformed, missing, empty, oversized, and non-loopback activation values
+ok - verified config reads detect active byte swaps without disclosing the token
+ok - empty results stay internal and one bounded records page reaches one terminal generation
+ok - replay before handled acknowledgement preserves one cursor-safe next registration
+ok - multipage rearm and cursor reset preserve replay-safe event identity and revision
+ok - token bytes never enter argv, results, registration, events, state, logs, or command output
+ok - complete envelope, schema, kind, identity, provenance, freshness, bounds, and unknown fields are validated
+ok - auth, redirects, header bounds, body bounds, truncation, and no-cache failures publish nothing
+ok - a child failure before capture leaves the unchanged cursor safe to retry
+ok - the adapter is independent of every primary harness and runtime backend axis
+
+all Forge Firstmate process-event adapter tests passed
+```
+
+The fixture server binds only an ephemeral IPv4 loopback socket and records only the request target, an authentication-match verdict, and the absence or presence of ambient credential headers.
+Its capability value is generated deterministically at runtime and an executable non-disclosure check scans every produced artifact except the private input config itself.
+The process list, registration, cursor state, captured pages, normalized wakes, server log, and command output contain no token bytes.
+Malformed JSON, oversized and truncated bodies, oversized headers, missing or incorrect no-cache headers, authentication errors, and redirects all end without a capture or wake.
+Proxy variables and a synthetic netrc remain inert because the adapter opens the configured numeric loopback socket directly.
+
 ## The loss limitation this runner cannot close
 
 The published poll clears feedback destructively before returning it.
@@ -81,6 +109,10 @@ Exercised by `tests/fm-procevent.test.sh` against a fake blocking source whose c
 | proactive-delivery crash and drain boundaries | dotted and underscored source ids at the same sequence receive distinct markers; a concurrent drain cannot consume between queue revalidation and marker commit; failed output, failed marker commit, and a crash before marker commit leave replay available, while successful output still ends the actionable cycle and a crash after marker commit suppresses a duplicate |
 | adapter-owned terminal verdict | two fixture adapters - one that ends on any result, one with no terminal knowledge - decide the outcome alone: the first has its registration and claim retired automatically after one capture and is never restarted, the second stays armed |
 | adapter-owned application of a captured result | a remote-secondmate reply captured through the real relay in an isolated home reaches that secondmate's local status mirror, settles its correlated pending-reply expectation, re-arms the next cursor-anchored source, and is acknowledged, with no handler step; for an already-escalated request, that same path closes the exact decision so the open-decision fold clears and remains clear; a capture whose adapter application fails because local storage for a referenced remote document is obstructed is left unacknowledged and untouched, and the handler's own `handle` still applies it in full after storage recovers |
+| Forge config and token confinement | mode, type, final and parent symlink refusal, single-link enforcement, bounded double reads, and active byte-swap detection precede TOML parsing; the same private-file inspection requires current-user ownership, only the loopback listen address and bounded token are consumed, and a generated token is absent from every child argv and produced artifact |
+| Forge transport confinement | the client reaches the synthetic listener with hostile proxy variables and ambient netrc material present, sends no Authorization or Cookie header, follows no redirect, and publishes nothing for authentication, framing, size, cache-header, content-type, or JSON failure |
+| Forge response validation | exact envelope and nested record fields, result enum, interface and record schemas, event kinds, deterministic identities and revisions, source accounting, pagination, freshness, provenance, bounds, ordering, and unknown-field rejection are exercised through the adapter executable |
+| Forge cursor lifecycle | `no_work` and `no_change` produce no capture, one records page retires one registration generation, re-arm advances only from that validated captured result, a replay before handled acknowledgement does not replace the next registration, pagination preserves its nonzero offset, and reset replay retains unchanged event identities |
 | terminal retirement preserves the result | the retired source's captured output, its announced event, its handled acknowledgement, and later explicit `retire` all still behave normally |
 | registration-generation retirement | an old terminal runner preserves a concurrently replaced registration and releases ownership so the replacement runs independently; injected registration-removal failure retains a terminal claim, performs no second poll, and completes idempotently once removal recovers |
 | one `Send & End`, one result | an armed Lavish source driven against a stand-in for the published poll, which delivers the final `session_ended` feedback once and empty ended sessions afterward, polls exactly once, captures exactly one result, publishes one distinct event, and retires itself |
@@ -139,8 +171,11 @@ Without this launcher, reconcile would silently fail to start a runner on macOS 
 ## Scope
 
 The runner is domain-neutral and creates no endpoint, task metadata, or backlog item, so the supported primary harnesses and runtime backends are unaffected except through the `check` wake they already consume.
-Lavish is the first adapter; adding another requires only a new `bin/fm-procevent-<adapter>.sh`, whose `terminal` command is optional and defaults to keeping the source armed.
+Lavish, remote reply, and owner-private Forge remain thin adapters behind the same boundary.
+Adding another adapter requires only a new `bin/fm-procevent-<adapter>.sh`, whose `terminal` command is optional and defaults to keeping the source armed.
 Its `autohandle` command is optional in the same way and defaults to leaving the captured result unacknowledged, so it keeps being announced to a handler exactly as before.
+The Forge adapter reads no primary-harness or runtime-backend surface, and its focused test confirms that its only outward notification is the shared normalized process-event wake.
+Every supported primary harness and runtime backend is therefore unaffected by construction rather than by a skipped compatibility assumption.
 
 Proactive delivery is inside that same boundary.
 The watcher reports a queued process-event result through the one shared actionable-exit path (`wake` in `bin/fm-push-transition-lib.sh`) that every existing signal, stale, and check wake already uses, so it reads no pane, queries no backend, and names no harness.
