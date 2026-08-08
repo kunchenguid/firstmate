@@ -23,14 +23,14 @@ printf ' <%s>' "$@" >> "${FM_RUNTIME_LOG:?}"
 printf '\n' >> "${FM_RUNTIME_LOG:?}"
 exit 0
 SH
-  cat > "$TMP_ROOT/$dir/fakebin/treehouse" <<'SH'
+  cat > "$TMP_ROOT/$dir/fakebin/proj" <<'SH'
 #!/usr/bin/env bash
-printf 'treehouse' >> "${FM_RUNTIME_LOG:?}"
+printf 'proj' >> "${FM_RUNTIME_LOG:?}"
 printf ' <%s>' "$@" >> "${FM_RUNTIME_LOG:?}"
 printf '\n' >> "${FM_RUNTIME_LOG:?}"
 exit 0
 SH
-  chmod +x "$TMP_ROOT/$dir/fakebin/tmux" "$TMP_ROOT/$dir/fakebin/treehouse"
+  chmod +x "$TMP_ROOT/$dir/fakebin/tmux" "$TMP_ROOT/$dir/fakebin/proj"
   printf '%s\n' "$TMP_ROOT/$dir"
 }
 

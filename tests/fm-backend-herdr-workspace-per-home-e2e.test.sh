@@ -49,7 +49,6 @@ assert_not_contains_local() {  # <haystack> <needle> <msg>
 
 command -v herdr >/dev/null 2>&1 || { echo "skip: herdr not found"; exit 0; }
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the herdr adapter)"; exit 0; }
-command -v treehouse >/dev/null 2>&1 || { echo "skip: treehouse not found (required by fm-spawn.sh)"; exit 0; }
 
 # shellcheck source=tests/herdr-test-safety.sh
 . "$ROOT/tests/herdr-test-safety.sh"
@@ -68,10 +67,7 @@ herdr_forget_inherited_pane
 TMP_ROOT=$(mktemp -d "$(cd "${TMPDIR:-/tmp}" && pwd -P)/fm-herdr-e2e.XXXXXX")
 SESSION="fm-lab-herdr-e2e-$$"
 export HERDR_SESSION="$SESSION"
-WT1=; WT2=
 cleanup_all() {
-  [ -n "$WT1" ] && command -v treehouse >/dev/null 2>&1 && treehouse return --force "$WT1" >/dev/null 2>&1
-  [ -n "$WT2" ] && command -v treehouse >/dev/null 2>&1 && treehouse return --force "$WT2" >/dev/null 2>&1
   herdr_safe_stop_and_delete "$SESSION"
   rm -rf "$TMP_ROOT"
 }
@@ -99,17 +95,60 @@ printf 'e2esm1\n' > "$SM_HOME/.fm-secondmate-home"
 printf 'trivial e2e secondmate charter: nothing to do.\n' > "$SM_HOME/data/charter.md"
 printf 'trivial e2e secondmate-owned crewmate brief: nothing to do.\n' > "$SM_HOME/data/cm2/brief.md"
 
-make_scratch_project() {  # <dir>
-  local dir=$1
-  mkdir -p "$dir"
-  git -C "$dir" init -q
-  printf '# scratch\n' > "$dir/README.md"
-  git -C "$dir" add README.md
-  git -C "$dir" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial
+# A proj-shaped scratch project: $PROJ_ROOT/projects/<name>/ holding the single
+# 00-* template worktree fm_proj_template_dir_at requires. Echoes the template
+# path, which is what firstmate hands fm-spawn.sh as the project.
+make_scratch_project() {  # <name> -> echoes the template dir
+  local dir="$PROJ_ROOT/projects/$1"
+  mkdir -p "$dir/.repo"
+  git -C "$dir/.repo" init -q
+  printf '# scratch\n' > "$dir/.repo/README.md"
+  git -C "$dir/.repo" add README.md
+  git -C "$dir/.repo" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial
+  git -C "$dir/.repo" worktree add -q "$dir/00-main" -b main-template >/dev/null 2>&1
+  printf '%s\n' "$dir/00-main"
 }
 
-PROJ1="$TMP_ROOT/scratch-project-1"; make_scratch_project "$PROJ1"
-PROJ2="$TMP_ROOT/scratch-project-2"; make_scratch_project "$PROJ2"
+# Real proj needs a reflink-capable PROJ_ROOT, which a scratch fixture cannot
+# provide, so this stands in for the CLI at its documented contract
+# (bin/fm-proj-lib.sh): `new` runs with cwd set to the project directory,
+# creates a sibling worktree of the 00-* template, and prints only that path to
+# stdout; `rm <project>/<worktree>` resolves under $PROJ_ROOT/projects and has
+# no stdout at all.
+make_fake_proj() {  # <bindir>
+  local bindir=$1
+  mkdir -p "$bindir"
+  cat > "$bindir/proj" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  new)
+    name=${2:-}
+    [ -n "$name" ] || exit 1
+    git -C "$PWD/00-main" worktree add -q "$PWD/$name" -b "fm/$name" >&2 || exit 1
+    printf '%s\n' "$PWD/$name"
+    exit 0
+    ;;
+  rm)
+    spec=${2:-}
+    wt="${PROJ_ROOT:?}/projects/${spec%%/*}/${spec#*/}"
+    [ -d "$wt" ] || { echo "worktree $wt does not exist" >&2; exit 1; }
+    shift 2
+    git -C "$wt" worktree remove "$@" . >&2 || exit 1
+    exit 0
+    ;;
+esac
+exit 1
+SH
+  chmod +x "$bindir/proj"
+}
+
+export PROJ_ROOT="$TMP_ROOT/work"
+FAKEBIN="$TMP_ROOT/fakebin"; make_fake_proj "$FAKEBIN"
+PATH="$FAKEBIN:$PATH"; export PATH
+
+PROJ1=$(make_scratch_project scratch-project-1)
+PROJ2=$(make_scratch_project scratch-project-2)
 
 # --- 1. primary-shaped home: a crewmate spawns into the "firstmate" space ---
 
@@ -123,7 +162,6 @@ rc=$?
 CM1_META="$PRIMARY_HOME/state/cm1.meta"
 [ -f "$CM1_META" ] || fail "no meta written for cm1"
 assert_contains_local "$(cat "$CM1_META")" "backend=herdr" "cm1 meta missing backend=herdr"
-WT1=$(grep '^worktree=' "$CM1_META" | cut -d= -f2-)
 CM1_PANE=$(grep '^herdr_pane_id=' "$CM1_META" | cut -d= -f2-)
 [ -n "$CM1_PANE" ] || fail "cm1 meta missing herdr_pane_id"
 pass "real herdr E2E: a primary-shaped home spawns a crewmate on the herdr backend"
@@ -178,7 +216,6 @@ rc=$?
 CM2_META="$SM_HOME/state/cm2.meta"
 [ -f "$CM2_META" ] || fail "no meta written for cm2 (recorded in the SECONDMATE's own state dir - it did its own spawning)"
 assert_contains_local "$(cat "$CM2_META")" "backend=herdr" "cm2 meta missing backend=herdr"
-WT2=$(grep '^worktree=' "$CM2_META" | cut -d= -f2-)
 CM2_PANE=$(grep '^herdr_pane_id=' "$CM2_META" | cut -d= -f2-)
 [ -n "$CM2_PANE" ] || fail "cm2 meta missing herdr_pane_id"
 pass "real herdr E2E: a crewmate spawns successfully FROM a secondmate-shaped home's own fm-spawn.sh process"
@@ -224,7 +261,6 @@ fi
 if ! herdr pane get "$CM2_PANE" --session "$SESSION" >/dev/null 2>&1; then
   fail "tearing down cm1 must not have closed cm2's pane (wrong tab closed)"
 fi
-WT1=
 pass "real herdr E2E: tearing down cm1 closes only its own tab - the secondmate's and cm2's tabs survive untouched"
 
 TD2_OUT="$TMP_ROOT/td2.out"
@@ -240,7 +276,6 @@ fi
 if ! herdr pane get "$SM_PANE" --session "$SESSION" >/dev/null 2>&1; then
   fail "tearing down cm2 must not have closed the secondmate's OWN pane (wrong tab closed)"
 fi
-WT2=
 pass "real herdr E2E: tearing down cm2 closes only its own tab - the secondmate's own tab (same workspace) survives untouched"
 
 fm_backend_herdr_kill "$SESSION:$SM_PANE"

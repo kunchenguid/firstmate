@@ -684,8 +684,8 @@ test_current_path_probes_with_marker() {
   local dir fb out
   # Verified real-cmux pitfall (docs/cmux-backend.md finding #2): the surface's
   # cwd is frozen at creation time (the top-level shell's cwd), never following
-  # a foreground subshell (e.g. treehouse get) - so current_path actively
-  # prints a marked cwd line and reads only that marker from the capture.
+  # a foreground subshell's own cd - so current_path actively prints a marked
+  # cwd line and reads only that marker from the capture.
   dir="$TMP_ROOT/cwd"; mkdir -p "$dir/responses"
   # 1: list-panes (current_path's own target_ready)
   # 2: list-panes (target_ready, called by send_text_line->send_literal)
@@ -698,11 +698,11 @@ test_current_path_probes_with_marker() {
   cmux_panes_response "$dir" 2 "bbbbbbbb-1111-1111-1111-111111111111"
   cmux_panes_response "$dir" 4 "bbbbbbbb-1111-1111-1111-111111111111"
   cmux_panes_response "$dir" 6 "bbbbbbbb-1111-1111-1111-111111111111"
-  cmux_read_screen_response "$dir" 7 $'/tmp/proj\n❯ printf marker\n__FM_CMUX_CWD_BEGIN__\n/home/fixture/.treehouse/fake-worktree\n__FM_CMUX_CWD_END__\n/home/fixture/.treehouse/fake-worktree ❯'
+  cmux_read_screen_response "$dir" 7 $'/tmp/proj\n❯ printf marker\n__FM_CMUX_CWD_BEGIN__\n/home/fixture/work/projects/scratch-e2e-project/fake-worktree\n__FM_CMUX_CWD_END__\n/home/fixture/work/projects/scratch-e2e-project/fake-worktree ❯'
   fb=$(make_cmux_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
     bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_current_path "aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111"' "$ROOT" )
-  [ "$out" = "/home/fixture/.treehouse/fake-worktree" ] || fail "current_path should read only the marked cwd line, got '$out'"
+  [ "$out" = "/home/fixture/work/projects/scratch-e2e-project/fake-worktree" ] || fail "current_path should read only the marked cwd line, got '$out'"
   assert_contains "$(cat "$dir/log")" "__FM_CMUX_CWD_BEGIN__" "current_path did not send the cwd begin marker"
   assert_contains "$(cat "$dir/log")" "pwd;" "current_path did not send the pwd probe"
   assert_contains "$(cat "$dir/log")" $'\x1f''send-key'$'\x1f''--workspace'$'\x1f''aaaaaaaa-0000-0000-0000-000000000000'$'\x1f''--surface'$'\x1f''bbbbbbbb-1111-1111-1111-111111111111'$'\x1f''enter' \
