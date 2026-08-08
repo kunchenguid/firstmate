@@ -96,6 +96,11 @@
 #   record for reconciliation. If failed Orca cleanup leaves a worktree, the same
 #   publisher writes one complete record marked spawn_state=failed and
 #   cleanup_required=orca-worktree.
+#   The two deliveries that run between endpoint creation and publication - the
+#   task temporary-directory environment, and a trace carrier whose partial input
+#   the backend could not clear - refuse to launch and unwind through that same
+#   endpoint discard, because no task record would name the endpoint they leave
+#   behind.
 #   With no harness arg, a crewmate/scout spawn resolves the CREW harness only when
 #   config/crew-dispatch.json is absent. When that file exists, crewmate/scout
 #   spawns require an explicit harness so firstmate cannot silently skip dispatch
