@@ -187,8 +187,7 @@ Establish model support and provider family from that harness's own authoritativ
 Missing model-level quota, a missing authentication source, unmeasurable headroom, or unmodeled authentication is disclosed uncertainty that keeps a candidate eligible, never a credential or login escalation.
 Only concrete contradictory evidence blocks a candidate, such as an authoritative catalog proving the model unsupported or proof that the credential selected for that surface is unusable; never infer a credential store, provider family, or quota mapping from a harness, model, or source name, and never launch another harness's CLI to judge a candidate.
 Preserve malformed profile configuration as an actionable error rather than selecting around it.
-Choose the task-appropriate model and effort from the accepted work and dispatch evidence; never lower either solely to conserve tokens or quota.
-When every candidate is tight, preserve the captain's strongest-reasoning class rather than silently downgrading it solely to conserve quota; stop and report the tight choice if that class cannot proceed.
+When every candidate is tight, preserve the captain's strongest-reasoning class and the task-appropriate effort rather than silently downgrading either solely to conserve tokens or quota; stop and report the tight choice if that class cannot proceed.
 Break genuine evidence ties without array-order or harness bias.
 `quota-axi` owns how model or product windows relate to bounding account windows and remains data-only.
 Load `quota-array-dispatch` before choosing among a matched profile array; that skill is the single owner of the completion-aware selection procedure.
@@ -262,7 +261,7 @@ Do not build wrappers, control planes, policy layers, custom verifiers, or autom
 
 Save tokens by eliminating duplicated work, irrelevant raw context, and repeated evidence collection, never by weakening accepted scope, necessary reasoning, evidence, validation, or safety.
 Preserve direct user requirements, authoritative source material, and durable decisions, and perform necessary targeted rereads; never substitute a lossy summary when the exact source is required to act safely or correctly.
-Before commissioning an investigation, consult existing reports and established evidence, and do not repeat one already answered unless the captain explicitly requested that deliverable or new evidence could materially change the outcome.
+Before commissioning an investigation, consult existing reports and established evidence.
 Classify the deliverable:
 
 - **Ship** is the default and produces a project change through the selected delivery mode; once implementation is authorized, dispatch a ship and keep any remaining bounded research inside it unless unresolved uncertainty could materially change whether or what to build.
@@ -301,7 +300,7 @@ Supervise all live work under section 8.
 
 The selected delivery path owns its own rigor; token savings never skip, narrow, or replace its required final tests, documentation, review, no-mistakes gates, PR checks, or CI.
 When no-mistakes is selected, no-mistakes alone owns review, fixes, tests, documentation, push, PR, and CI; otherwise follow the faster path without adding an independent reviewer.
-Never commission an optional duplicate reviewer, hold work outside no-mistakes for a manual clean verdict, stack serial manual reviews, or infer authority for one from security, architecture, or risk alone.
+Never hold work outside no-mistakes for a manual clean verdict, stack serial manual reviews, or infer authority for one from security, architecture, or risk alone.
 A separate review or audit is allowed only when the captain explicitly requests that deliverable or the authorized task is a knowledge-only review; one named question remains scoped to that question.
 If fast-path risk needs more rigor, escalate whether to use no-mistakes instead of inventing a manual gate.
 The path's worker, automated gates, and captain approval remain authoritative:
