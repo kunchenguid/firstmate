@@ -1,6 +1,6 @@
 # GitLab merge request watch verification
 
-Empirical record for the merge watch on GitLab, alongside the existing GitHub watch.
+Empirical record for the merge watch on GitLab, alongside the existing GitHub and Forgejo watches.
 Every command below was run on 2026-07-21 and its output is reproduced exactly.
 
 ## Versions
@@ -28,7 +28,7 @@ That is deliberate: the host-agnostic property is a property of the stored recor
 GitLab runs mostly on self-hosted instances, so a merge request can live under any host.
 A GitLab project also sits under at least one group at no fixed depth, so no owner-and-repository pair can address one the way it can on GitHub.
 The stored record therefore carries `provider`, `url`, `host`, `path`, and `number`, and every consumer rebuilds the URL from those parts and refuses any record that does not reconstruct the stored URL exactly.
-`tests/fm-pr-check-security.test.sh` asserts that neither `bin/fm-pr-lib.sh` nor `bin/fm-pr-poll.sh` contains the string `gitlab.com` at all.
+`tests/fm-pr-check-security.test.sh` exercises canonical and hostile provider-tagged records through the executable polling boundary, including host and project swaps.
 
 ## How plain glab is invoked, and why
 
@@ -192,8 +192,8 @@ No armed watch is lost by upgrading.
 
 ## What this change does not cover
 
-`bin/fm-pr-merge.sh` still addresses GitHub only, by owner and repository.
-It refuses a GitLab merge request URL rather than sending it to the wrong forge, so merging a merge request stays a deliberate manual step until merge parity lands separately.
+`bin/fm-pr-merge.sh` supports GitHub and Forgejo pull requests and explicitly refuses GitLab merge request URLs.
+Merging a GitLab merge request stays a deliberate manual step until merge parity lands separately.
 
 A GitLab task records no `pr_head=`.
 `gh` exposes the head commit as a selectable field, while plain `glab` exposes it only inside its JSON output, which would need a JSON processor firstmate does not require.

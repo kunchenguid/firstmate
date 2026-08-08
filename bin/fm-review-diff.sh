@@ -98,8 +98,7 @@ resolve_pr_head() {
     case "$FM_PR_PROVIDER" in
       github) ;;
       forgejo)
-        fm_pr_forgejo_project_authorized "$PROJ" "$FM_PR_HOST" || return 1
-        source="https://$FM_PR_HOST/$FM_PR_PATH.git"
+        source=$(fm_pr_forgejo_project_source "$PROJ" "$FM_PR_HOST" "$FM_PR_PATH") || return 1
         ;;
       *) return 1 ;;
     esac

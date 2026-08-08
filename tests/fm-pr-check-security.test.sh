@@ -2957,18 +2957,22 @@ EOF
 }
 
 test_forgejo_project_remote_forms() {
-  local dir url
+  local dir url expected source
   dir=$(make_case forgejo-project-remote-forms)
-  while IFS= read -r url; do
+  while IFS='|' read -r url expected; do
     git -C "$dir/project" remote set-url origin "$url"
     fm_pr_forgejo_project_authorized "$dir/project" forgejo.example \
       || fail "Forgejo authorization rejected registered remote form: $url"
+    source=$(fm_pr_forgejo_project_source "$dir/project" forgejo.example owner/repo) \
+      || fail "Forgejo source resolution rejected registered remote form: $url"
+    [ "$source" = "$expected" ] \
+      || fail "Forgejo source resolution changed registered remote transport: $url"
   done <<'EOF'
-https://user:token@forgejo.example:8443/fork/repo.git
-http://forgejo.example:3000/fork/repo.git
-ssh://git@forgejo.example:2222/fork/repo.git
-git://forgejo.example/fork/repo.git
-git@forgejo.example:fork/repo.git
+https://user:token@forgejo.example:8443/fork/repo.git|https://user:token@forgejo.example:8443/owner/repo.git
+http://forgejo.example:3000/fork/repo.git|http://forgejo.example:3000/owner/repo.git
+ssh://git@forgejo.example:2222/fork/repo.git|ssh://git@forgejo.example:2222/owner/repo.git
+git://forgejo.example/fork/repo.git|git://forgejo.example/owner/repo.git
+git@forgejo.example:fork/repo.git|git@forgejo.example:owner/repo.git
 EOF
   git -C "$dir/project" remote set-url origin "file://$dir/project"
   git -C "$dir/project" remote set-url --add --push origin \
@@ -2977,7 +2981,7 @@ EOF
     || fail "Forgejo authorization ignored a registered push URL"
   ! fm_pr_forgejo_project_authorized "$dir/project" arbitrary.example \
     || fail "Forgejo authorization accepted an absent remote host"
-  pass "Forgejo authorization accepts every supported remote form by host"
+  pass "Forgejo authorization preserves every supported remote connection form"
 }
 
 test_forgejo_merge_watch() {

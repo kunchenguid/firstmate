@@ -77,7 +77,7 @@ run_review_diff() {
 
 authorize_forgejo_host() {
   local case_dir=$1 host=${2:-forgejo.example}
-  git -C "$case_dir/project" remote add forgejo "git@$host:fork/repo.git"
+  git -C "$case_dir/project" remote add forgejo "https://$host/fork/repo.git"
 }
 
 test_pr_meta_uses_pr_head_not_stale_local() {
@@ -177,7 +177,7 @@ test_forgejo_pr_meta_uses_canonical_repository() {
   local case_dir out
   case_dir=$(make_case forgejo-canonical-repository)
   stale_and_pr_commits "$case_dir"
-  authorize_forgejo_host "$case_dir"
+  git -C "$case_dir/project" remote add forgejo git@forgejo.example:fork/repo.git
   git -C "$case_dir/wt" push -q origin "pr-head-tmp:refs/pull/9/head"
   git clone -q --bare "$case_dir/origin.git" "$case_dir/canonical.git"
   git -C "$case_dir/wt" checkout -q -b canonical-head-tmp main
@@ -188,7 +188,7 @@ test_forgejo_pr_meta_uses_canonical_repository() {
     "canonical-head-tmp:refs/pull/9/head"
   git -C "$case_dir/wt" checkout -q fm/task-x1
   git -C "$case_dir/wt" config \
-    url."$case_dir/canonical.git".insteadOf https://forgejo.example/owner/repo.git
+    url."$case_dir/canonical.git".insteadOf git@forgejo.example:owner/repo.git
   write_task_meta "$case_dir" "pr=https://forgejo.example/owner/repo/pulls/9"
 
   out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
@@ -199,7 +199,7 @@ test_forgejo_pr_meta_uses_canonical_repository() {
     "forgejo-canonical-repository: diff must not use origin's same-number pull"
   assert_not_contains "$(cat "$case_dir/stderr")" 'warning: PR head unavailable' \
     "forgejo-canonical-repository: canonical repository pull fetch should succeed"
-  pass "fm-review-diff resolves Forgejo pull heads from their canonical repository"
+  pass "fm-review-diff preserves registered scp transport for canonical Forgejo pull heads"
 }
 
 test_forgejo_unregistered_host_never_fetches() {

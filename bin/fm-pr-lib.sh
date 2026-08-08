@@ -142,9 +142,10 @@ fm_pr_forgejo_host_valid() {
   [[ ! "$host" =~ ^(0x[0-9a-f]+|[0-9]+)(\.(0x[0-9a-f]+|[0-9]+))*$ ]]
 }
 
-fm_pr_forgejo_project_authorized() {
-  local project=${1-} host=${2-} remote key url remote_host lib_dir
+fm_pr_forgejo_project_source() {
+  local project=${1-} host=${2-} path=${3-} remote key url remote_host lib_dir
   fm_pr_forgejo_host_valid "$host" || return 1
+  [ -z "$path" ] || fm_pr_forgejo_path_valid "$path" || return 1
   [ -d "$project" ] && git -C "$project" rev-parse --git-dir >/dev/null 2>&1 || return 1
   lib_dir=$(CDPATH='' cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd) || return 1
   # shellcheck source=bin/fm-project-origin-lib.sh
@@ -154,11 +155,21 @@ fm_pr_forgejo_project_authorized() {
     for key in url pushurl; do
       while IFS= read -r url; do
         remote_host=$(fm_project_origin_host "$url") || continue
-        [ "$remote_host" = "$host" ] && return 0
+        [ "$remote_host" = "$host" ] || continue
+        if [ -n "$path" ]; then
+          fm_project_origin_with_path "$url" "$path.git" || continue
+        else
+          printf '%s' "$url"
+        fi
+        return 0
       done < <(git -C "$project" config --get-all "remote.$remote.$key" 2>/dev/null || true)
     done
   done < <(git -C "$project" remote 2>/dev/null || true)
   return 1
+}
+
+fm_pr_forgejo_project_authorized() {
+  fm_pr_forgejo_project_source "${1-}" "${2-}" >/dev/null
 }
 
 fm_pr_forgejo_path_valid() {

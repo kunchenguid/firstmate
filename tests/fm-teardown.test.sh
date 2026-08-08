@@ -303,7 +303,7 @@ SH
 
 authorize_forgejo_host() {
   local case_dir=$1 host=${2:-forgejo.example}
-  git -C "$case_dir/project" remote add forgejo "git@$host:fork/repo.git"
+  git -C "$case_dir/project" remote add forgejo "https://$host/fork/repo.git"
 }
 
 append_pr_meta_for_current_head() {
@@ -787,7 +787,8 @@ test_forgejo_missing_head_fetches_canonical_repo() {
   local case_dir rc pr_head
   case_dir=$(make_case forgejo-canonical-head-fetch)
   write_meta "$case_dir" no-mistakes ship
-  authorize_forgejo_host "$case_dir"
+  git -C "$case_dir/project" remote add forgejo \
+    ssh://git@forgejo.example:2222/fork/repo.git
   wt_commit_file "$case_dir" feature.txt hello "add Forgejo feature"
 
   git -C "$case_dir/wt" push -q origin "main:refs/pull/7/head"
@@ -804,7 +805,8 @@ test_forgejo_missing_head_fetches_canonical_repo() {
     || fail "forgejo-canonical-head-fetch: canonical head was already local"
 
   git -C "$case_dir/wt" config \
-    url."$case_dir/canonical.git".insteadOf https://forgejo.example/owner/repo.git
+    url."$case_dir/canonical.git".insteadOf \
+    ssh://git@forgejo.example:2222/owner/repo.git
   printf '%s\n' \
     'pr=https://forgejo.example/owner/repo/pulls/7' \
     "pr_head=$pr_head" >> "$case_dir/state/task-x1.meta"
@@ -819,7 +821,7 @@ test_forgejo_missing_head_fetches_canonical_repo() {
     "forgejo-canonical-head-fetch: teardown should fetch the canonical Forgejo head"
   ! grep -q REFUSED "$case_dir/stderr" \
     || fail "forgejo-canonical-head-fetch: teardown printed a REFUSED line"
-  pass "Forgejo teardown fetches missing proof heads from canonical repository identity"
+  pass "Forgejo teardown preserves registered SSH transport for missing proof heads"
 }
 
 test_forgejo_malformed_merged_head_refuses() {

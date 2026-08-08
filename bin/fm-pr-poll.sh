@@ -79,39 +79,6 @@ case "$provider" in
     [ "$state" = MERGED ] && printf '%s\n' merged
     ;;
   forgejo)
-    [ "${#host}" -ge 1 ] && [ "${#host}" -le 253 ] || exit 0
-    case "$host" in
-      github.com|*.github.com|gitlab.com|*.gitlab.com) exit 0 ;;
-    esac
-    case "$host" in
-      .*|*.|*..*|*[!a-z0-9.-]*) exit 0 ;;
-    esac
-    [[ ! "$host" =~ ^(0x[0-9a-f]+|[0-9]+)(\.(0x[0-9a-f]+|[0-9]+))*$ ]] || exit 0
-    rest=$host
-    while [ -n "$rest" ]; do
-      case "$rest" in
-        *.*) segment=${rest%%.*}; rest=${rest#*.} ;;
-        *) segment=$rest; rest= ;;
-      esac
-      [ "${#segment}" -le 63 ] || exit 0
-      case "$segment" in
-        -*|*-) exit 0 ;;
-      esac
-    done
-    owner=${path%%/*}
-    repo=${path#*/}
-    [ "$owner" != "$path" ] && [ -n "$owner" ] && [ -n "$repo" ] || exit 0
-    case "$repo" in
-      */*) exit 0 ;;
-    esac
-    [ "${#owner}" -le 100 ] && [ "${#repo}" -le 100 ] || exit 0
-    case "$owner" in
-      .|..|*[!A-Za-z0-9._-]*) exit 0 ;;
-    esac
-    case "$repo" in
-      .|..|*[!A-Za-z0-9._-]*) exit 0 ;;
-    esac
-    [ "$url" = "https://$host/$owner/$repo/pulls/$number" ] || exit 0
     poll_dir=$(CDPATH='' cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd) || exit 0
     if [ -n "${FM_ROOT_OVERRIDE:-}" ] && [ -f "$FM_ROOT_OVERRIDE/bin/fm-pr-lib.sh" ]; then
       pr_lib="$FM_ROOT_OVERRIDE/bin/fm-pr-lib.sh"
@@ -125,8 +92,12 @@ case "$provider" in
     [ -f "$pr_lib" ] || exit 0
     # shellcheck source=bin/fm-pr-lib.sh
     . "$pr_lib"
+    fm_pr_url_parse "$url" || exit 0
+    [ "$FM_PR_PROVIDER" = "$provider" ] && [ "$FM_PR_URL" = "$url" ] \
+      && [ "$FM_PR_HOST" = "$host" ] && [ "$FM_PR_PATH" = "$path" ] \
+      && [ "$FM_PR_NUMBER" = "$number" ] || exit 0
     fm_pr_forgejo_project_authorized "$project" "$host" || exit 0
-    raw=$(forgejo-axi pr merged --base-url "https://$host" --repo "$owner/$repo" "$number" 2>/dev/null) || exit 0
+    raw=$(forgejo-axi pr merged --base-url "https://$FM_PR_HOST" --repo "$FM_PR_PATH" "$FM_PR_NUMBER" 2>/dev/null) || exit 0
     state=$(printf '%s\n' "$raw" | sed -n 's/^[[:space:]]*merged:[[:space:]]*//p' | head -1) || exit 0
     [ "$state" = true ] && printf '%s\n' merged
     ;;
@@ -143,20 +114,20 @@ case "$provider" in
     # A GitLab project sits under at least one group at no fixed depth, and
     # GitLab reserves the "-" segment as its route separator.
     rest=$path
-    segments=0
+    segment_count=0
     while [ -n "$rest" ]; do
       case "$rest" in
         */*) segment=${rest%%/*}; rest=${rest#*/} ;;
         *) segment=$rest; rest= ;;
       esac
-      segments=$((segments + 1))
-      [ "$segments" -le 20 ] || exit 0
+      segment_count=$((segment_count + 1))
+      [ "$segment_count" -le 20 ] || exit 0
       [ "${#segment}" -ge 1 ] && [ "${#segment}" -le 255 ] || exit 0
       case "$segment" in
         .|..|-*|*.git|*.atom|*[!A-Za-z0-9._-]*) exit 0 ;;
       esac
     done
-    [ "$segments" -ge 2 ] || exit 0
+    [ "$segment_count" -ge 2 ] || exit 0
     [ "$url" = "https://$host/$path/-/merge_requests/$number" ] || exit 0
     # glab resolves the instance from the project URL passed to -R, so the host
     # comes from the validated record rather than glab's configured default.
