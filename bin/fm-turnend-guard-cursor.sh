@@ -67,8 +67,6 @@ ROOT=${ROOT%/}
 
 STATE=${FM_STATE_OVERRIDE:-${FM_HOME:-$ROOT}/state}
 
-WAKE_QUEUE_FILE="${FM_WAKE_QUEUE:-$STATE/.wake-queue}"
-
 # --- session identity derivation (Cursor-specific) ---------------------------
 
 cursor_parent_identity() {

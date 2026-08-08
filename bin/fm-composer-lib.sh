@@ -62,13 +62,11 @@
 # Cursor rendering change updates exactly one definition.
 # Cursor's prompt glyph (bare → is the agent composer, but unscoped it is a
 # common decoration; bounded by fm_composer_cursor_arrow_ok below).
+# shellcheck disable=SC2034
 FM_COMPOSER_CURSOR_PROMPT_GLYPH='→'
 # Cursor's fully de-emphasised idle placeholder: after ghost stripping, only
 # this regex match proves the composer is agent-empty for Cursor.
 FM_COMPOSER_CURSOR_IDLE_RE_DEFAULT='^Add a follow-up$'
-# Cursor and opencode are the only harnesses with verified Enter-while-busy
-# queuing; the submit path converts a proven-pending to empty on busy.
-FM_COMPOSER_CURSOR_QUEUED_SUBMIT=1
 # --- end per-harness constants -----------------------------------------------
 
 # fm_composer_strip_ansi: drop every CSI escape sequence, leaving plain text.

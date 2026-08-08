@@ -677,7 +677,7 @@ test_cursor_worker_server_reaped_after_cwd_no_longer_belongs_to_task() {
   # The recorded worker-server is reaped by pid+identity even after it has
   # left the task worktree's cwd. The cwd-based reaper cannot see it; the
   # dedicated record must carry the reap.
-  local rec id out status worker_pid ws_file pid_from_record identity_from_record
+  local rec id out status worker_pid ws_file pid_from_record
   id=cursor-ws-detached-zg
   rec=$(make_cursor_case cursor-worker-reap "$id")
   read_case_record "$rec"
@@ -699,7 +699,7 @@ test_cursor_worker_server_reaped_after_cwd_no_longer_belongs_to_task() {
   expect_code 0 "$status" "cursor spawn with worker-server must succeed"
   ws_file="$HOME_DIR/state/$id.worker-server"
   [ -f "$ws_file" ] || fail "worker-server record must exist after successful spawn"
-  read -r pid_from_record identity_from_record < "$ws_file"
+  read -r pid_from_record _ < "$ws_file"
   [ "$pid_from_record" = "$worker_pid" ] || fail "recorded pid mismatch: $pid_from_record != $worker_pid"
   # The worker still runs; teardown should reap it by the recorded identity.
   kill -KILL "$worker_pid" 2>/dev/null || true
