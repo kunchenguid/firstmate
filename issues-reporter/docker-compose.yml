@@ -1,0 +1,31 @@
+services:
+  issues:
+    build: .
+    container_name: issues-reporter
+    ports:
+      - "8787:8000"
+    environment:
+      - GATUS_URL=http://gatus-gatus-1:8080
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+      - PRAYER_BOT_REPO=${PRAYER_BOT_REPO:-lakshaysethi2/discord-prayer-bot}
+      - HAWKINS_RADIO_REPO=${HAWKINS_RADIO_REPO:-lakshaysethi2/discord-radio}
+      - DOCDOCGO_REPO=${DOCDOCGO_REPO:-}
+      - DATA_FILE=/data/reports.json
+    volumes:
+      - issues-data:/data
+    restart: unless-stopped
+    networks:
+      - default
+      - gatus_default
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health',timeout=3).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+networks:
+  gatus_default:
+    external: true
+
+volumes:
+  issues-data:
