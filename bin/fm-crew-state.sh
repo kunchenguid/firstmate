@@ -549,7 +549,7 @@ if [ "$KIND" != secondmate ]; then
   case "${BUSY_VERDICT%% *}" in
     busy) emit working pane "harness busy (${BUSY_VERDICT#* })" ;;
     idle) ;;
-    *) emit unknown pane "harness state unavailable ($BUSY_VERDICT)" ;;
+    *) emit unknown none "harness state unavailable ($BUSY_VERDICT)" ;;
   esac
 fi
 

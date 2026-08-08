@@ -609,6 +609,211 @@ EOF
   pass "snapshot parses tasks-axi rows and respects operational overrides"
 }
 
+# A fake no-mistakes that serves one canned `axi status` payload, so a case can
+# put a task on a real run step and read the lifecycle stage the snapshot derives
+# from it. Only the surface fm-crew-state.sh actually consults is served.
+make_run_fakebin() {  # <dir>
+  local fb
+  fb=$(fm_fakebin "$1")
+  cat > "$fb/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}${2:-}" in
+  axistatus) printf '%s\n' "${FM_FAKE_AXI_STATUS:-}" ;;
+  axilogs) printf '%s\n' "${FM_FAKE_CI_LOGS:-}" ;;
+esac
+exit 0
+SH
+  cat > "$fb/tmux" <<'SH'
+#!/usr/bin/env bash
+exit "${FM_FAKE_TMUX_RC:-0}"
+SH
+  chmod +x "$fb/no-mistakes" "$fb/tmux"
+  printf '%s\n' "$fb"
+}
+
+# One task on a branch whose worktree HEAD matches the run head, which is what
+# fm-crew-state.sh requires before it will attribute a run to that task.
+stage_of() {  # <home> <id> -> echoes the derived stage as compact JSON
+  local home=$1 id=$2 fakebin
+  fakebin=$(make_run_fakebin "$home")
+  PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json \
+    | jq -c --arg id "$id" '.tasks[] | select(.id == $id) | .current_state.stage'
+}
+
+current_state_of() {  # <home> <id> -> echoes current state as compact JSON
+  local home=$1 id=$2 fakebin
+  fakebin=$(make_run_fakebin "$home")
+  PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json \
+    | jq -c --arg id "$id" '.tasks[] | select(.id == $id) | .current_state'
+}
+
+# The five-rung ladder is the board's honest substitute for a completion
+# percentage, so every rung it can claim is pinned to the live state that earns
+# it. A stage that drifted up a rung would overstate progress on every card at
+# once, and the ladder is only worth drawing while each rung means one thing.
+test_lifecycle_stage_is_derived_from_live_state() {
+  local home wt head stage current
+  home=$(make_home stage-ladder)
+  printf '## In flight\n\n## Queued\n\n## Done\n' > "$home/data/backlog.md"
+  wt="$home/projects/stage-wt"
+  fm_git_worktree "$home/projects/stage-repo" "$wt" fm/stage
+  head=$(git -C "$wt" rev-parse HEAD)
+  fm_write_meta "$home/state/stage-task.meta" \
+    "window=firstmate:fm-stage-task" \
+    "worktree=$wt" \
+    "project=alpha" \
+    "harness=claude" \
+    "model=claude-opus-5" \
+    "kind=ship" \
+    "mode=no-mistakes"
+
+  # A run attributed and validating sits mid-ladder.
+  export FM_FAKE_AXI_STATUS FM_FAKE_CI_LOGS FM_FAKE_TMUX_RC
+  FM_FAKE_TMUX_RC=0
+  FM_FAKE_AXI_STATUS="run:
+  id: \"01RUN\"
+  branch: fm/stage
+  status: running
+  head: \"$head\"
+  pr: \"\"
+  findings: none"
+  FM_FAKE_CI_LOGS=""
+  stage=$(stage_of "$home" stage-task)
+  printf '%s' "$stage" | jq -e '.ordinal == 3 and .of == 5 and .motion == "live"' >/dev/null \
+    || fail "a validating run must sit at rung 3 of 5 and read as moving: $stage"
+
+  # The same run in CI has travelled one rung further, and no further.
+  FM_FAKE_AXI_STATUS="run:
+  id: \"01RUN\"
+  branch: fm/stage
+  status: ci
+  head: \"$head\"
+  pr: \"https://github.com/example/alpha/pull/3\"
+  findings: none"
+  stage=$(stage_of "$home" stage-task)
+  printf '%s' "$stage" | jq -e '.ordinal == 4 and .motion == "live"' >/dev/null \
+    || fail "a run in CI must sit at rung 4 of 5: $stage"
+
+  # Green checks awaiting review or merge have reached Ready but are not Done.
+  FM_FAKE_CI_LOGS="all CI checks passed - still monitoring until merged or closed"
+  stage=$(stage_of "$home" stage-task)
+  printf '%s' "$stage" | jq -e '.ordinal == 5 and .label == "Checks green" and .motion == "ready"' >/dev/null \
+    || fail "green checks awaiting the captain must be ready rather than done: $stage"
+
+  # Parked at a gate keeps the rung it reached but stops reading as moving, so a
+  # card cannot show a decision that is waiting on the captain as progress.
+  FM_FAKE_AXI_STATUS="run:
+  id: \"01RUN\"
+  branch: fm/stage
+  status: awaiting_approval
+  awaiting_agent: parked 2m10s
+  head: \"$head\"
+  pr: \"\"
+  findings[1]{id,severity,file,line,action,description}:
+    r1,error,b.go,,ask-user,changes product behavior
+gate: review"
+  stage=$(stage_of "$home" stage-task)
+  printf '%s' "$stage" | jq -e '.ordinal == 3 and .motion == "waiting"' >/dev/null \
+    || fail "a run parked at a gate must hold its rung and stop reading as moving: $stage"
+
+  # A terminal run tops the ladder.
+  FM_FAKE_AXI_STATUS="run:
+  id: \"01RUN\"
+  branch: fm/stage
+  status: completed
+  outcome: passed
+  head: \"$head\"
+  pr: \"https://github.com/example/alpha/pull/3\"
+  findings: none"
+  FM_FAKE_CI_LOGS=""
+  stage=$(stage_of "$home" stage-task)
+  printf '%s' "$stage" | jq -e '.ordinal == 5 and .motion == "done"' >/dev/null \
+    || fail "a passed run must top the ladder: $stage"
+
+  # Present metadata plus a present endpoint, with no observed activity or
+  # current-state source, proves only the weaker Setup claim and no later rung.
+  FM_FAKE_AXI_STATUS=""
+  current=$(current_state_of "$home" stage-task)
+  printf '%s' "$current" | jq -e '.source == "none" and .stage.ordinal == 1 and .stage.label == "Setup: endpoint present" and .stage.motion == "quiet"' >/dev/null \
+    || fail "registered work with a present endpoint and no observed activity must sit at Setup: $current"
+
+  FM_FAKE_AXI_STATUS="run:
+  id: \"01RUN\"
+  branch: fm/stage
+  status: completed
+  outcome: unrecognised
+  head: \"$head\"
+  pr: \"\"
+  findings: none"
+  current=$(current_state_of "$home" stage-task)
+  printf '%s' "$current" | jq -e '.state == "unknown" and .source == "run-step" and .stage.ordinal == 0 and .stage.label == "Stage unconfirmed"' >/dev/null \
+    || fail "an unknown run-step state must not be relabelled as Setup: $current"
+
+  # An absent or unreadable endpoint cannot prove Setup from metadata alone.
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_TMUX_RC=1
+  stage=$(stage_of "$home" stage-task)
+  printf '%s' "$stage" | jq -e '.ordinal == 0 and .motion == "unknown"' >/dev/null \
+    || fail "a task without a verifiably live endpoint must claim no rung at all: $stage"
+  unset FM_FAKE_TMUX_RC
+  pass "the lifecycle stage is derived from live state, one rung per proven step"
+}
+
+test_setup_stage_uses_existing_secondmate_liveness() {
+  local home fakebin out
+  home=$(make_home secondmate-setup)
+  mkdir -p "$home/alive-home" "$home/dead-home"
+  fm_write_meta "$home/state/alive-setup.meta" \
+    "window=firstmate:fm-alive-setup" "worktree=$home/alive-home" \
+    "project=$home/alive-home" "home=$home/alive-home" "harness=codex" \
+    "kind=secondmate" "mode=secondmate"
+  fm_write_meta "$home/state/dead-secondmate.meta" \
+    "window=firstmate:fm-dead-secondmate" "worktree=$home/dead-home" \
+    "project=$home/dead-home" "home=$home/dead-home" "harness=codex" \
+    "kind=secondmate" "mode=secondmate"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    (.tasks[] | select(.id == "alive-setup")
+      | .endpoint.exists == true and .endpoint.agent_alive == "alive"
+        and .current_state.source == "none"
+        and .current_state.stage.ordinal == 1
+        and .current_state.stage.label == "Setup: endpoint present"
+        and .current_state.stage.motion == "quiet")
+    and (.tasks[] | select(.id == "dead-secondmate")
+      | .endpoint.exists == true and .endpoint.agent_alive == "dead"
+        and .current_state.stage.ordinal == 0
+        and .current_state.stage.label == "Stage unconfirmed")
+  ' >/dev/null || fail "secondmate Setup must require its existing agent-liveness evidence: $out"
+  pass "secondmate Setup uses its existing agent-liveness evidence"
+}
+
+# The model is what the captain reads to know which worker is on a task, and it
+# is recorded nowhere but the task metadata.
+test_recorded_model_reaches_the_task_row() {
+  local home fakebin out
+  home=$(make_home task-model)
+  printf '## In flight\n\n## Queued\n\n## Done\n' > "$home/data/backlog.md"
+  mkdir -p "$home/projects/model-wt" "$home/projects/nomodel-wt"
+  fm_write_meta "$home/state/model-task.meta" \
+    "window=firstmate:fm-model-task" \
+    "worktree=$home/projects/model-wt" \
+    "project=alpha" "harness=codex" "model=openai-codex/gpt-5.6-terra" "kind=ship"
+  fm_write_meta "$home/state/nomodel-task.meta" \
+    "window=firstmate:fm-nomodel-task" \
+    "worktree=$home/projects/nomodel-wt" \
+    "project=alpha" "harness=claude" "kind=ship"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    (.tasks[] | select(.id == "model-task")
+      | .model == "openai-codex/gpt-5.6-terra" and .harness == "codex")
+    and (.tasks[] | select(.id == "nomodel-task") | .model == "")
+  ' >/dev/null || fail "a recorded model must reach its task row verbatim: $out"
+  pass "the recorded model reaches the task row, and an unrecorded one stays empty"
+}
+
 test_view_renders_snapshot() {
   local home fakebin view
   home=$(make_home view)
@@ -840,5 +1045,8 @@ test_completed_scout_report_is_pointer_not_pending
 test_parked_scout_decision_stays_pending
 test_scout_reports_include_teardown_reports
 test_backlog_tasks_axi_forms_and_overrides
+test_lifecycle_stage_is_derived_from_live_state
+test_setup_stage_uses_existing_secondmate_liveness
+test_recorded_model_reaches_the_task_row
 test_view_renders_snapshot
 test_view_renders_dead_secondmate_agent_status

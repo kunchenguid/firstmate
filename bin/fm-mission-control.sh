@@ -19,6 +19,21 @@
 # belongs to firstmate, so each project card states only what live state can
 # prove: what is under way, what waits on the captain, and when it last changed.
 #
+# A card lists its in-progress work item by item - what each one is, how far it
+# has travelled, and the model doing it - because a bare count tells the captain
+# something is happening without telling them what. "How far" is the snapshot's
+# derived lifecycle stage, drawn as five discrete rungs and always labelled with
+# the stage name, so it reads as "this has reached Validating" and never as a
+# fraction of the work done. The stage itself is never re-derived here; the
+# snapshot owns it, as it owns every other piece of fleet state on this page.
+# Setup uses the neutral slate quiet tone because endpoint presence does not prove
+# movement; observed work alone uses the green live tone.
+# The first six items stay open at a glance and every additional received item
+# remains available in the same expandable shelf idiom as Deferred. Rows omitted
+# upstream remain disclosed separately and are never presented as shelf contents.
+# Only the Deferred shelf persists its open state; project overflow shelves do not
+# read or write that preference.
+#
 # A captain decision the captain has consciously set aside leaves "Awaiting your
 # decision" and its count, and appears in the quiet, closed-by-default Deferred
 # shelf below it. Deferring is not a board action; see "Deferring a decision"
@@ -344,6 +359,71 @@ def repo_of:
   elif (.project // "") != "" then (.project | short_repo)
   else "" end;
 
+def cap_word: (.[0:1] | ascii_upcase) + .[1:];
+
+# A recorded model id is a dispatch identifier, not a name the captain reads, so
+# it is reduced to the shortest thing that still names the model. The rules are
+# general rather than a table of known models, because a table goes stale the
+# day a new model ships:
+#   - a provider or namespace prefix is dropped, since the card has room for the
+#     model and not for who serves it (openai-codex/gpt-5.6-terra);
+#   - a tagged local model keeps its exact tag, which is how it is addressed and
+#     the only form its operator would recognise (ollama/qwen3.6:35b-fm);
+#   - otherwise a vendor token and a trailing release stamp are dropped, a split
+#     version is rejoined, and the remaining words are capitalised, so
+#     claude-opus-5 reads Opus 5 and claude-haiku-4-5-20251001 reads Haiku 4.5.
+# Nothing is invented: a model the rules do not recognise keeps its recorded
+# words, so an unfamiliar model stays identifiable rather than being guessed at.
+def readable_model($raw):
+  (($raw // "") | tostring | gsub("^\\s+|\\s+$"; "")) as $m |
+  if $m == "" then null
+  else
+    (if ($m | test("/")) then ($m | split("/") | last) else $m end) as $base |
+    if ($base | test(":")) then $base
+    elif ($base | test("-") | not) then ($base | cap_word)
+    else
+      ($base | split("-") | map(select(length > 0))) as $split |
+      (if ($split | length) > 1 and ($split | last | test("^[0-9]{6,}$"))
+       then $split[0:-1] else $split end) as $undated |
+      (if ($undated | length) > 1
+          and (["claude","anthropic","openai","google","meta","mistral","xai","moonshot","ollama","deepseek"]
+               | index($undated[0] | ascii_downcase)) != null
+       then $undated[1:] else $undated end) as $parts |
+      # A bare number following a number is one version that the separator split
+      # in two, so haiku-4-5 reads 4.5 rather than as two unrelated words.
+      ($parts | reduce .[] as $p ([];
+         if (length > 0) and (.[-1] | test("^[0-9]+(\\.[0-9]+)*$")) and ($p | test("^[0-9]+$"))
+         then .[0:-1] + [.[-1] + "." + $p]
+         else . + [$p] end)) as $joined |
+      ($joined | map(
+         (ascii_downcase) as $d |
+         if test("^[0-9]") then {t: ., acr: false}
+         elif $d == "gpt" or $d == "glm" then {t: ascii_upcase, acr: true}
+         else {t: cap_word, acr: false} end)) as $words |
+      # An acronym keeps its version attached (GPT-5.6); everything else reads as
+      # separate words (Opus 5).
+      ($words | reduce .[] as $w ({s: "", acr: false};
+         {s: (if .s == "" then $w.t elif .acr then .s + "-" + $w.t else .s + " " + $w.t end),
+          acr: $w.acr}) | .s)
+    end
+  end;
+
+# The most in-progress items one card keeps open before moving additional
+# received rows into an expandable shelf. No row the board receives is hidden.
+6 as $items_per_card |
+
+# One in-progress item as the card renders it: what it is, how far along the
+# delivery ladder live state can prove it is, and which model is doing it. The
+# stage is taken from the derived lifecycle position in the snapshot and never
+# re-derived here, so the ladder keeps exactly one owner.
+def work_item($t):
+  {
+    id: ($t.id // ""),
+    title: (($t.title // $t.id // "") | tostring),
+    model: readable_model($t.model),
+    stage: ($t.stage // null)
+  };
+
 # ------------------------------------------------------------------ icons ---
 # Monochrome line glyphs only. Each is a literal fragment with no interpolation,
 # so none of them can carry fleet prose into the page.
@@ -611,7 +691,8 @@ def yolo_for($repo): ($registry_by_name[$repo // ""].yolo // false);
     yolo: $p.yolo,
     registered: true,
     active: ($live | length),
-    active_title: (($live | first | .backlog.title) // ($live | first | .id) // ""),
+    items: ($live | map(work_item({id: .id, title: (.backlog.title // .id),
+                                   model: .model, stage: .current_state.stage}))),
     prs: ($live | map(select((.pr.url // "") != "")) | length),
     queued: ($rows | map(select(.state == "queued")) | length),
     in_flight: ($rows | map(select(.state == "in_flight")) | length),
@@ -635,7 +716,8 @@ def yolo_for($repo): ($registry_by_name[$repo // ""].yolo // false);
     yolo: false,
     registered: false,
     active: ($live | length),
-    active_title: (($live | first | .backlog.title) // ($live | first | .id) // ""),
+    items: ($live | map(work_item({id: .id, title: (.backlog.title // .id),
+                                   model: .model, stage: .current_state.stage}))),
     prs: ($live | map(select((.pr.url // "") != "")) | length),
     queued: ($rows | map(select(.state == "queued")) | length),
     in_flight: ($rows | map(select(.state == "in_flight")) | length),
@@ -659,6 +741,11 @@ def yolo_for($repo): ($registry_by_name[$repo // ""].yolo // false);
     children: $children_total,
     children_shown: $children_shown,
     children_omitted: ($children_total - $children_shown),
+    # The title, model, and stage on a routed task are additive in the secondmate
+    # home summary, so a home running an older firstmate reports the task with
+    # those absent. work_item leaves each one unrecorded rather than empty, and
+    # the row says so instead of showing a blank where a fact should be.
+    items: (($sm.active_children // []) | map(work_item(.))),
     holds: ($health.card_held_total // 0),
     holds_shown: ($health.blocked_shown // 0),
     hold_reason: (($health.blocked_holds | first | .reason) // ""),
@@ -686,6 +773,94 @@ def updated_line($key):
   ($updated[$key].label // "") as $label |
   "<div class=\"proj-updated\">" + icon_clock + "Updated "
   + (if $label == "" then none_mark else (@html "\($label)") end);
+
+# One in-progress item: its name, its position on the delivery ladder, and the
+# model doing it.
+#
+# The ladder is drawn as five discrete rungs rather than a smooth fill because
+# discrete rungs are exactly what live state can prove. There is no per-file or
+# percentage signal behind any of this, and a segmented bar promises none: it
+# says "this has reached Validating", not "this is 65% done". The stage label
+# beside it carries the meaning and the rungs are only the glance, so the bar is
+# never the sole claim. Colour states how the item is MOVING, which is a
+# different question from how far it has come: an item stopped at rung four is
+# still stopped.
+# A stage on a routed task crosses a home boundary - for a remote second mate,
+# a host boundary - and the summary validator type-checks the surfaces it carries
+# rather than the fields inside each row. So every number here is bounded before
+# it is drawn, and an unrecognised motion falls back to unknown rather than
+# reaching the page as a class with no colour rule behind it. The failure that
+# would cause is the exact one this ladder exists to prevent: rungs rendering
+# unfilled while the label beside them still claims a rung was reached.
+def work_row:
+  . as $w |
+  ($w.stage // null) as $st |
+  ((if $st == null then 5 else ($st.of // 5) end)
+   | if type != "number" then 5 else (floor | if . < 1 then 1 elif . > 5 then 5 else . end) end) as $of |
+  ((if $st == null then 0 else ($st.ordinal // 0) end)
+   | if type != "number" then 0 else (floor | if . < 0 then 0 elif . > $of then $of else . end) end) as $ord |
+  (if $st == null then "Stage unavailable"
+   else (($st.label // "Stage unconfirmed") | if type == "string" and . != "" then . else "Stage unconfirmed" end) end) as $label |
+  ((if $st == null then "unknown" else ($st.motion // "unknown") end)
+   | if IN("quiet", "live", "ready", "waiting", "stopped", "done", "unknown") then . else "unknown" end) as $motion |
+  (if $ord > 0 then "Stage \($ord) of \($of): \($label)" else $label end) as $bar_label |
+  "<div class=\"wi\">"
+  + "<div class=\"wi-head\">"
+  + (@html "<span class=\"wi-what\">\(if ($w.title // "") == "" then $w.id else $w.title end)</span>")
+  + (if ($w.model // null) == null
+     then "<span class=\"wi-model none\">model not recorded</span>"
+     else (@html "<span class=\"wi-model\">\($w.model)</span>") end)
+  + "</div><div class=\"wi-run\">"
+  + (@html "<span class=\"wi-bar m-\($motion)\" role=\"img\" aria-label=\"\($bar_label)\">")
+  + ([range(1; $of + 1) | if . <= $ord then "<i class=\"on\"></i>" else "<i></i>" end] | add // "")
+  + "</span>"
+  + (@html "<span class=\"wi-stage m-\($motion)\">\($label)</span>")
+  + "</div></div>";
+
+# The list a card shows beneath its count. The first rows stay visible and every
+# additional row received by the board remains available in an expandable shelf.
+# A second mate home can bound its own reported children before this board sees
+# them, so any difference from the authoritative total is disclosed as upstream
+# omission rather than being mixed into the received-row shelf count.
+def work_list($items; $total):
+  ($items // []) as $all |
+  # The total reaching this list belongs to another producer, so it is proven to
+  # be a number before anything is counted against it.
+  (($total // 0) | if type == "number" then floor else 0 end) as $claimed |
+  ([$claimed, ($all | length)] | max) as $count |
+  ($all[0:$items_per_card]) as $visible |
+  ($all[$items_per_card:]) as $shelved |
+  if ($all | length) == 0 then ""
+  else
+    "<div class=\"wi-list\">"
+    + (($visible | map(work_row) | add) // "")
+    + (if ($shelved | length) > 0 then
+         "<details class=\"shelf\"><summary>"
+         + "<svg class=\"chev\" viewBox=\"0 0 24 24\"><polyline points=\"9 6 15 12 9 18\"/></svg>"
+         + "<span class=\"stitle\">More in progress</span>"
+         + (@html "<span class=\"scount\">\($shelved | length) more</span>")
+         + "</summary><div class=\"shelf-body\"><div class=\"shelf-note\"><div class=\"wi-list\">"
+         + (($shelved | map(work_row) | add) // "")
+         + "</div></div></div></details>"
+       else "" end)
+    + (if $count > ($all | length)
+       then (@html "<p class=\"wi-more\">\($count - ($all | length)) more active tasks were not included in this snapshot.</p>")
+       else "" end)
+    + "</div>"
+  end;
+
+# The placeholder dash stands in for a meta line the card had nothing to put in.
+# Above an item list there is nothing left for it to stand in for - the list
+# already says what is happening - and a lone dash trailing a rich list reads as
+# a stray mark rather than as "nothing waiting", so the slot is dropped instead
+# of being filled with one. A card with no items keeps the dash it always had.
+def meta_block($line; $items):
+  if $line == "" and (($items // []) | length) > 0 then ""
+  else
+    "<div class=\"proj-meta\">"
+    + (if $line == "" then none_mark else (@html "\($line)") end)
+    + "</div>"
+  end;
 
 def need_row:
   . as $w |
@@ -804,8 +979,7 @@ def project_card:
    elif $tone == "unknown" then "Unconfirmed"
    else "Idle" end) as $pill |
   (if ($backlog_present | not) and ($p.active == 0) then "Live counts are unavailable while the backlog cannot be read."
-   elif $p.active == 1 and ($p.active_title // "") != "" then "Under way: \($p.active_title)"
-   elif $p.active > 0 then "\($p.active) tasks under way"
+   elif $p.active > 0 then "\($p.active) \(plural($p.active; "task"; "tasks")) under way"
    elif $p.in_flight > 0 then "\($p.in_flight) \(plural($p.in_flight; "task"; "tasks")) in flight, none running"
    elif $p.queued > 0 then "\($p.queued) queued, nothing under way"
    else "Nothing in flight." end) as $state_line |
@@ -822,9 +996,8 @@ def project_card:
   + (if $p.registered then "" else "<span class=\"sub-role\">&middot; unregistered</span>" end)
   + (@html "</span><span class=\"pill \(if $tone == "attn" then "attn" elif $tone == "live" then "live" elif $tone == "unknown" then "unknown" else "idle" end)\">\($pill)</span></div>
      <div class=\"proj-state\">\($state_line)</div>")
-  + "<div class=\"proj-meta\">"
-  + (if $meta_line == "" then none_mark else (@html "\($meta_line)") end)
-  + "</div>"
+  + work_list($p.items; $p.active)
+  + meta_block($meta_line; $p.items)
   + updated_line($p.key)
   + (if ($p.mode // "") == "" then ""
      else (@html "<span class=\"posture\">\($p.mode)\(if $p.yolo then " +yolo" else "" end)</span>") end)
@@ -862,9 +1035,8 @@ def secondmate_card:
   + (@html "</span><span class=\"proj-name\">\($s.name)<span class=\"sub-role\">&middot; second mate</span></span>
      <span class=\"pill \(if $tone == "attn" then "attn" elif $tone == "live" then "live" elif $tone == "unknown" then "unknown" else "idle" end)\">\($pill)</span></div>
      <div class=\"proj-state\">\($state_line)</div>")
-  + "<div class=\"proj-meta\">"
-  + (if $meta_line == "" then none_mark else (@html "\($meta_line)") end)
-  + "</div>"
+  + work_list($s.items; $s.children)
+  + meta_block($meta_line; $s.items)
   + updated_line($s.key)
   + "</div></div>";
 
@@ -1140,6 +1312,41 @@ a.need:hover{background:#fbfcfe;}
 .proj-updated svg{width:12px;height:12px;flex:none;color:var(--faint);}
 .posture{font-family:var(--mono);font-size:10.5px;color:var(--faint);margin-left:auto;overflow-wrap:anywhere;}
 
+/* ---- in-progress items on a card ----
+   Five discrete rungs, not a smooth fill: the board has no percentage signal, so
+   a segmented ladder is the honest shape for one. Filled rungs say how far the
+   item has come and their colour says whether it is still moving, which are two
+   different facts and are allowed to disagree - a stopped item keeps the rungs
+   it earned and turns red. The stage label beside the rungs always carries the
+   meaning, so the bar is never read alone. */
+.wi-list{display:flex;flex-direction:column;gap:11px;margin:2px 0 1px;}
+.wi{display:flex;flex-direction:column;gap:6px;padding-top:10px;border-top:1px dashed var(--line);}
+.wi:first-child{padding-top:0;border-top:none;}
+.wi-head{display:flex;align-items:baseline;gap:9px;flex-wrap:wrap;}
+.wi-what{flex:1 1 auto;font-size:13px;color:var(--ink);overflow-wrap:anywhere;}
+/* margin-left:auto rather than order in the flow, so the model stays a trailing
+   tag on the title even at the narrow width where it wraps onto its own line
+   and would otherwise read as a label on the ladder below it. */
+.wi-model{flex:none;margin-left:auto;font-family:var(--mono);font-size:10.5px;color:var(--slate);
+  background:var(--slate-soft);border-radius:6px;padding:2px 7px;overflow-wrap:anywhere;}
+.wi-model.none{background:none;color:var(--faint);padding:2px 0;}
+.wi-run{display:flex;align-items:center;gap:10px;flex-wrap:wrap;}
+.wi-bar{display:flex;gap:3px;flex:0 0 92px;}
+.wi-bar i{flex:1 1 0;height:5px;border-radius:2px;background:#e3e7ee;}
+.wi-bar.m-quiet i{background:var(--slate-soft);}
+.wi-bar.m-quiet i.on{background:var(--slate);}
+.wi-bar.m-live i.on,.wi-bar.m-done i.on{background:var(--green);}
+.wi-bar.m-ready i.on,.wi-bar.m-waiting i.on{background:var(--amber);}
+.wi-bar.m-stopped i.on{background:var(--red);}
+/* Nothing is proven about an unconfirmed stage, so no rung is filled and the
+   empty ladder is hatched rather than left looking like honest zero progress. */
+.wi-bar.m-unknown i{background:repeating-linear-gradient(90deg,#c9d0da 0 2px,transparent 2px 5px);}
+.wi-stage{flex:1 1 auto;font-size:11.5px;color:var(--muted);overflow-wrap:anywhere;}
+.wi-stage.m-quiet{color:var(--slate);}
+.wi-stage.m-ready,.wi-stage.m-waiting{color:var(--amber);}
+.wi-stage.m-stopped{color:var(--red);}
+.wi-more{margin:0;font-size:11.5px;color:var(--faint);}
+
 /* ---- shipped ---- */
 .shipped{background:var(--panel);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow);overflow:hidden;}
 .ship{display:flex;align-items:center;gap:14px;padding:12px 22px;border-top:1px solid var(--line);font-size:14px;}
@@ -1302,7 +1509,7 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
      + (($waiting_prs | map(need_item) | add) // "") + "</div>" end)
 + ask_block
 + (if $deferred_count == 0 then ""
-   else "<details class=\"shelf\"><summary>"
+   else "<details class=\"shelf\" id=\"deferred-shelf\"><summary>"
      + "<svg class=\"chev\" viewBox=\"0 0 24 24\"><polyline points=\"9 6 15 12 9 18\"/></svg>"
      + "<span class=\"stitle\">Deferred</span>"
      + (@html "<span class=\"scount\">\($deferred_count) set aside</span>")
@@ -1455,7 +1662,7 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
      decisions must not be undone by the next self-reload. It is remembered the
      same way, so it stays shut for a captain who never opens it and stays open
      for one who does, until they close it again. */
-  var shelf = document.querySelector(\"details.shelf\");
+  var shelf = document.getElementById(\"deferred-shelf\");
   if (shelf) {
     try {
       if (window.localStorage.getItem(\"fm-mission-control-deferred\") === \"open\") { shelf.open = true; }

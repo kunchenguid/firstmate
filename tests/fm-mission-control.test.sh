@@ -72,7 +72,7 @@ make_clone() {  # <home> <name> <commit-epoch>
 # the board's own "today", one live ship task, a recorded PR, and a real clone
 # for one of the two registered projects.
 write_fixture() {  # <home>
-  local home=$1
+  local home=$1 fixture_gen
   mkdir -p "$home/projects/alpha-worktree"
   make_clone "$home" alpha "$TODAY_0905"
   cat > "$home/data/projects.md" <<'EOF'
@@ -96,29 +96,361 @@ EOF
     "worktree=$home/projects/alpha-worktree" \
     "project=alpha" \
     "harness=claude" \
+    "model=claude-opus-5" \
     "kind=ship" \
     "mode=direct-PR" \
     "yolo=on" \
     "pr=https://github.com/example/alpha/pull/9"
   printf 'working: intake form wired up\n' > "$home/state/ship-task.status"
+  # A task that is actually working proves it through its own semantic busy-state
+  # record (bin/fm-busy-lib.sh), which is what the current-state read consults;
+  # rendered pane text is not a state source. Without this the task reads
+  # unknown, and the live fixture would never exercise a real ladder rung.
+  fixture_gen=$("$ROOT/bin/fm-busy-event.sh" arm "$home/state" ship-task)
+  "$ROOT/bin/fm-busy-event.sh" apply "$home/state" ship-task busy --gen "$fixture_gen" \
+    --source claude-hook --event user-prompt-submit
 }
 
 # A minimal but schema-shaped snapshot, so a case can drive fields no local
 # fixture produces (another home's decisions, hostile prose, path-form repos).
-snapshot_json() {  # <records-json> <secondmate-records-json>
-  jq -n --argjson records "$1" --argjson sm "$2" '{
+snapshot_json() {  # <records-json> <secondmate-records-json> [<tasks-json>]
+  jq -n --argjson records "$1" --argjson sm "$2" --argjson tasks "${3:-[]}" '{
     schema: "fm-fleet-snapshot.v1",
     generated: "2026-01-04T00:00:00Z",
     fm_home: "/fixture/home",
     roots: {state: "/fixture/home/state", data: "/fixture/home/data",
             projects: "/fixture/home/projects"},
     backlog: {path: "/fixture/home/data/backlog.md", present: true, records: $records},
-    tasks: [],
+    tasks: $tasks,
     secondmate_current: {registry: {
       present: false, available: true, complete: true,
       input_truncated: false, records_truncated: false, records: []
     }, records: $sm}
   }'
+}
+
+# One live task exactly as the snapshot reports it. The stage is given as the
+# derived object the snapshot attaches, because that is what the board consumes;
+# bin/fm-fleet-snapshot.sh owns deriving it from live state and tests/fm-fleet-
+# snapshot-view.test.sh pins that half.
+live_task() {  # <id> <title> <repo> <model> <ordinal> <label> <motion>
+  jq -n --arg id "$1" --arg title "$2" --arg repo "$3" --arg model "$4" \
+        --argjson ordinal "$5" --arg label "$6" --arg motion "$7" '{
+    id: $id, kind: "ship", harness: "claude", model: $model,
+    project: $repo, backend: "tmux",
+    current_state: {state: "working", source: "pane", detail: "", raw: "",
+      stage: {ordinal: $ordinal, of: 5, label: $label, motion: $motion}},
+    endpoint: {target: ("firstmate:fm-" + $id), exists: true},
+    pr: {url: null, source: "absent"},
+    hints: {pending_decision: false, blocked_event: false, open_decisions: []},
+    backlog: {id: $id, title: $title, repo: $repo, state: "in_flight",
+              kind: "ship", structured: true}
+  }'
+}
+
+in_flight_record() {  # <id> <title> <repo>
+  jq -n --arg id "$1" --arg title "$2" --arg repo "$3" '{
+    id: $id, title: $title, raw: $title, repo: $repo, state: "in_flight",
+    kind: "ship", structured: true, captain_actionable: false,
+    captain_deferred: false, unresolved_blocker_ids: [], completion: {date: null}}'
+}
+
+# A count tells the captain something is happening without telling them what, so
+# each in-progress item names itself and carries the two facts the count hides:
+# how far it has travelled and which model is on it.
+test_in_progress_items_are_listed_with_stage_and_model() {
+  local snap board
+  snap=$TMP_ROOT/items.json
+  board=$TMP_ROOT/items.html
+  snapshot_json "[$(in_flight_record early 'Rebuild the intake form' alpha),
+                  $(in_flight_record mid 'Fix search ranking' alpha),
+                  $(in_flight_record late 'Migrate the billing webhooks' alpha)]" '[]' \
+    "[$(live_task early 'Rebuild the intake form' alpha claude-opus-5 2 Building live),
+      $(live_task mid 'Fix search ranking' alpha claude-sonnet-5 3 Validating live),
+      $(live_task late 'Migrate the billing webhooks' alpha claude-opus-5 4 'Checks running' live)]" \
+    > "$snap"
+
+  "$BOARD" --snapshot "$snap" --no-quota --out "$board" >/dev/null \
+    || fail "a board with in-progress items must render"
+
+  assert_grep 'Rebuild the intake form' "$board" "an in-progress item must be named, not just counted"
+  assert_grep 'Fix search ranking' "$board" "every in-progress item must be named"
+  assert_grep 'Migrate the billing webhooks' "$board" "every in-progress item must be named"
+  assert_grep '3 tasks under way' "$board" "the count above the list must survive"
+
+  # The rung a bar fills and the rung its label claims are two renderings of one
+  # fact. They are asserted together because a bar that drifted from its label is
+  # exactly the silent overstatement the ladder exists to avoid.
+  assert_grep 'aria-label="Stage 2 of 5: Building"' "$board" \
+    "a bar must state its position in words for anyone who cannot see it"
+  assert_grep '<i class="on"></i><i class="on"></i><i></i><i></i><i></i>' "$board" \
+    "rung 2 of 5 must fill exactly two rungs"
+  assert_grep '<i class="on"></i><i class="on"></i><i class="on"></i><i></i><i></i>' "$board" \
+    "rung 3 of 5 must fill exactly three rungs"
+  assert_grep '<i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><i></i>' "$board" \
+    "rung 4 of 5 must fill exactly four rungs"
+  assert_grep '>Building</span>' "$board" "the stage must be named beside its bar"
+  assert_grep '>Checks running</span>' "$board" "the stage must be named beside its bar"
+
+  assert_grep '>Opus 5</span>' "$board" "the model on an item must be shown readably"
+  assert_grep '>Sonnet 5</span>' "$board" "the model on an item must be shown readably"
+
+  # The whole point of a stage ladder is that it is not a completion estimate.
+  assert_no_grep '% complete' "$board" "a stage must never be dressed up as a percentage"
+  assert_no_grep 'ETA' "$board" "a stage must never be dressed up as an ETA"
+  pass "each in-progress item is listed with its stage and its model"
+}
+
+# Colour says whether an item is MOVING, which is a different question from how
+# far it has come. An item stopped at rung four is still stopped, and a board
+# that painted it as live progress would be actively misleading.
+test_stalled_items_do_not_read_as_progress() {
+  local snap board
+  snap=$TMP_ROOT/motion.json
+  board=$TMP_ROOT/motion.html
+  snapshot_json "[$(in_flight_record held 'Replace the session cookie' alpha),
+                  $(in_flight_record stuck 'Speed up the import job' alpha)]" '[]' \
+    "[$(live_task held 'Replace the session cookie' alpha claude-opus-5 3 'Waiting on a decision' waiting),
+      $(live_task stuck 'Speed up the import job' alpha claude-opus-5 2 Blocked stopped)]" \
+    > "$snap"
+
+  "$BOARD" --snapshot "$snap" --no-quota --out "$board" >/dev/null \
+    || fail "a board with stalled items must render"
+  assert_grep 'class="wi-bar m-waiting"' "$board" \
+    "an item waiting on the captain must be toned apart from one that is moving"
+  assert_grep 'class="wi-bar m-stopped"' "$board" \
+    "a blocked item must be toned apart from one that is moving"
+  assert_grep 'class="wi-stage m-stopped">Blocked</span>' "$board" \
+    "a blocked item must say so in words, not only in colour"
+  assert_grep 'aria-label="Stage 3 of 5: Waiting on a decision"' "$board" \
+    "a stalled item must keep the rung it reached rather than falling back to zero"
+  pass "a stalled item keeps its rung but never reads as progress"
+}
+
+test_setup_uses_neutral_tone() {
+  local snap board
+  snap=$TMP_ROOT/setup-tone.json
+  board=$TMP_ROOT/setup-tone.html
+  snapshot_json "[$(in_flight_record setup 'Start the worker endpoint' alpha)]" '[]' \
+    "[$(live_task setup 'Start the worker endpoint' alpha claude-opus-5 1 'Setup: endpoint present' quiet)]" \
+    > "$snap"
+
+  "$BOARD" --snapshot "$snap" --no-quota --out "$board" >/dev/null \
+    || fail "a Setup item must render"
+  assert_grep 'class="wi-bar m-quiet" role="img" aria-label="Stage 1 of 5: Setup: endpoint present"' "$board" \
+    "Setup must use its bounded neutral motion"
+  assert_grep 'class="wi-stage m-quiet">Setup: endpoint present</span>' "$board" \
+    "the Setup label must use the same neutral tone as its ladder"
+  assert_grep '.wi-bar.m-quiet i.on{background:var(--slate);}' "$board" \
+    "the Setup ladder must use the board's slate tone"
+  assert_no_grep 'class="wi-bar m-live"' "$board" \
+    "Setup must not claim observed live movement"
+  pass "Setup uses one neutral slate tone"
+}
+
+# Ready has reached the top rung but still awaits the captain, while Done is
+# terminal. Position alone cannot distinguish them, so their tones must.
+test_ready_and_done_use_distinct_tones() {
+  local snap board
+  snap=$TMP_ROOT/ready-done.json
+  board=$TMP_ROOT/ready-done.html
+  snapshot_json "[$(in_flight_record ready 'Review the green PR' alpha),
+                  $(in_flight_record 'done' 'Merged delivery' alpha)]" '[]' \
+    "[$(live_task ready 'Review the green PR' alpha claude-opus-5 5 'Checks green' ready),
+      $(live_task 'done' 'Merged delivery' alpha claude-opus-5 5 Done 'done')]" \
+    > "$snap"
+
+  "$BOARD" --snapshot "$snap" --no-quota --out "$board" >/dev/null \
+    || fail "ready and done stages must render"
+  assert_grep 'class="wi-bar m-ready" role="img" aria-label="Stage 5 of 5: Checks green"' "$board" \
+    "green checks awaiting the captain must use the ready tone"
+  assert_grep 'class="wi-stage m-ready">Checks green</span>' "$board" \
+    "the ready label must use the same bounded tone as its ladder"
+  assert_grep 'class="wi-bar m-done" role="img" aria-label="Stage 5 of 5: Done"' "$board" \
+    "terminal work must retain the done tone"
+  pass "ready work is toned apart from completed work"
+}
+
+# A model id is a dispatch identifier. The captain reads a name.
+test_model_ids_are_shown_as_readable_names() {
+  local snap board
+  snap=$TMP_ROOT/models.json
+  board=$TMP_ROOT/models.html
+  snapshot_json "[$(in_flight_record m1 'Vendor prefixed' alpha),
+                  $(in_flight_record m2 'Namespaced provider' alpha),
+                  $(in_flight_record m3 'Tagged local model' alpha),
+                  $(in_flight_record m4 'Dated release' alpha),
+                  $(in_flight_record m5 'Single word' alpha)]" '[]' \
+    "[$(live_task m1 'Vendor prefixed' alpha claude-opus-5 2 Building live),
+      $(live_task m2 'Namespaced provider' alpha openai-codex/gpt-5.6-terra 2 Building live),
+      $(live_task m3 'Tagged local model' alpha ollama/qwen3.6:35b-fm 2 Building live),
+      $(live_task m4 'Dated release' alpha claude-haiku-4-5-20251001 2 Building live),
+      $(live_task m5 'Single word' alpha sonnet 2 Building live)]" \
+    > "$snap"
+
+  "$BOARD" --snapshot "$snap" --no-quota --out "$board" >/dev/null \
+    || fail "a board with varied model ids must render"
+  assert_grep '>Opus 5</span>' "$board" "a vendor prefix must be dropped from the name"
+  assert_grep '>GPT-5.6 Terra</span>' "$board" \
+    "a namespaced provider must be dropped and the model read as a name"
+  assert_grep '>qwen3.6:35b-fm</span>' "$board" \
+    "a tagged local model must keep the exact tag it is addressed by"
+  assert_grep '>Haiku 4.5</span>' "$board" \
+    "a release stamp must be dropped and a split version rejoined"
+  assert_grep '>Sonnet</span>' "$board" "a single-word model must still read as a name"
+  assert_no_grep 'claude-opus-5' "$board" "a raw dispatch id must not reach the card"
+  assert_no_grep '20251001' "$board" "a release stamp must not reach the card"
+  pass "recorded model ids are shown as names the captain reads"
+}
+
+# An older secondmate home reports a routed task without the title, model, or
+# stage this board wants. Absent is not the same as empty, and a blank where a
+# fact belongs reads as a fact.
+test_unrecorded_item_facts_are_disclosed_rather_than_blanked() {
+  local snap board
+  snap=$TMP_ROOT/unrecorded.json
+  board=$TMP_ROOT/unrecorded.html
+  snapshot_json '[]' '[{
+    "id": "docsmate", "registered": true, "provenance": {"selected": "structured-home"},
+    "current": {"state": "active_child_work", "reason": ""},
+    "active_children": [
+      {"id": "docs-legacy", "kind": "ship", "state": "working", "source": "pane"},
+      {"id": "docs-new", "kind": "ship", "state": "working", "source": "run-step",
+       "title": "Refresh the operator guide", "model": "claude-opus-5",
+       "stage": {"ordinal": 3, "of": 5, "label": "Validating", "motion": "live"}}
+    ],
+    "decisions_open": [], "holds": [], "queued": [],
+    "counts": {"active_children": 2, "decisions_open": 0, "holds": 0, "queued": 0},
+    "omitted": []
+  }]' > "$snap"
+
+  "$BOARD" --snapshot "$snap" --no-quota --out "$board" >/dev/null \
+    || fail "a secondmate reporting partial item facts must render"
+  assert_grep 'Refresh the operator guide' "$board" "a routed task must be named on the card"
+  assert_grep '>Opus 5</span>' "$board" "a routed task must show the model running it"
+  assert_grep 'aria-label="Stage 3 of 5: Validating"' "$board" \
+    "a routed task must carry its stage onto the card"
+  assert_grep 'docs-legacy' "$board" \
+    "a task reported without a title must fall back to its id rather than vanish"
+  assert_grep 'model not recorded' "$board" \
+    "an unrecorded model must be stated, never shown as a blank"
+  assert_grep 'Stage unavailable' "$board" \
+    "an unreported stage must be stated, never drawn as an honest-looking empty bar"
+  assert_grep 'class="wi-bar m-unknown"' "$board" \
+    "an unreported stage must not fill a rung it cannot prove"
+  pass "an item fact the fleet did not record is disclosed rather than blanked"
+}
+
+# A stage on a routed task crosses a home boundary, and for a remote second mate
+# a host boundary, so its numbers are another producer's. An out-of-range rung, a
+# huge scale, or a motion this board has no rule for must not be drawn as given:
+# the failure mode is a bar and its own label disagreeing, which is precisely
+# what the ladder exists to prevent.
+test_out_of_range_stage_values_are_bounded_before_they_are_drawn() {
+  local snap board
+  snap=$TMP_ROOT/hostile-stage.json
+  board=$TMP_ROOT/hostile-stage.html
+  snapshot_json '[]' '[{
+    "id": "oddmate", "registered": true, "provenance": {"selected": "structured-home"},
+    "current": {"state": "active_child_work", "reason": ""},
+    "active_children": [
+      {"id": "huge", "kind": "ship", "state": "working", "source": "pane",
+       "title": "Scale far beyond the ladder", "model": "claude-opus-5",
+       "stage": {"ordinal": 99, "of": 5000, "label": "Validating", "motion": "live"}},
+      {"id": "unknown-motion", "kind": "ship", "state": "working", "source": "pane",
+       "title": "Motion this board has no rule for", "model": "claude-opus-5",
+       "stage": {"ordinal": 3, "of": 5, "label": "Validating", "motion": "sideways"}}
+    ],
+    "decisions_open": [], "holds": [], "queued": [],
+    "counts": {"active_children": 2, "decisions_open": 0, "holds": 0, "queued": 0},
+    "omitted": []
+  }]' > "$snap"
+
+  "$BOARD" --snapshot "$snap" --no-quota --out "$board" >/dev/null \
+    || fail "an out-of-range stage must render rather than break the board"
+  assert_no_grep 'Stage 99 of 5000' "$board" \
+    "a rung and a scale from another home must be bounded before they are claimed"
+  assert_grep 'aria-label="Stage 5 of 5: Validating"' "$board" \
+    "an over-range rung must be clamped to the top of the ladder it is drawn on"
+  # Five rungs drawn and five filled: the bar and its label still agree.
+  assert_grep '<i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i>' "$board" \
+    "a clamped rung must fill exactly the rungs its label claims"
+  assert_no_grep 'm-sideways' "$board" \
+    "a motion with no rule behind it must never reach the page as a class"
+  assert_grep 'class="wi-bar m-unknown"' "$board" \
+    "an unrecognised motion must fall back to the tone that claims nothing"
+  pass "stage values from another home are bounded before the ladder is drawn"
+}
+
+# A card keeps its common case open at a glance but must retain every received
+# row. Overflow therefore belongs in the board's expandable shelf idiom.
+test_long_item_list_keeps_every_item_in_an_expandable_shelf() {
+  local snap board records tasks i bar_count model_count
+  snap=$TMP_ROOT/many.json
+  board=$TMP_ROOT/many.html
+  records=""
+  tasks=""
+  for i in 1 2 3 4 5 6 7 8; do
+    [ -z "$records" ] || { records="$records,"; tasks="$tasks,"; }
+    records="$records$(in_flight_record "t$i" "Task number $i" alpha)"
+    tasks="$tasks$(live_task "t$i" "Task number $i" alpha claude-opus-5 2 Building live)"
+  done
+  snapshot_json "[$records]" '[]' "[$tasks]" > "$snap"
+
+  "$BOARD" --snapshot "$snap" --no-quota --out "$board" >/dev/null \
+    || fail "a card with many in-progress items must render"
+  assert_grep '8 tasks under way' "$board" "the full count must never be capped"
+  assert_grep 'Task number 6' "$board" "the open item list must reach the shelf boundary"
+  assert_grep '<details class="shelf"><summary>' "$board" \
+    "overflow must reuse the board's expandable shelf"
+  assert_no_grep '<details class="shelf" id="deferred-shelf">' "$board" \
+    "a project overflow shelf must not identify itself as Deferred"
+  assert_grep '<span class="stitle">More in progress</span><span class="scount">2 more</span>' "$board" \
+    "the shelf summary must state how many received rows it contains"
+  assert_grep 'Task number 7' "$board" "the first shelved item must remain in the page"
+  assert_grep 'Task number 8' "$board" "every received item must remain in the page"
+  bar_count=$(grep -o 'aria-label="Stage 2 of 5: Building"' "$board" | wc -l | tr -d ' ')
+  [ "$bar_count" = 8 ] || fail "every received item must retain its stage ladder, got $bar_count"
+  model_count=$(grep -o '<span class="wi-model">Opus 5</span>' "$board" | wc -l | tr -d ' ')
+  [ "$model_count" = 8 ] || fail "every received item must retain its model label, got $model_count"
+  assert_no_grep 'not listed here' "$board" "received rows must never be described as unlisted"
+  pass "a long item list keeps every received row in an expandable shelf"
+}
+
+# A second mate home can bound its children before the board sees them. Those
+# unavailable rows are distinct from received rows placed in the local shelf.
+test_upstream_omissions_stay_distinct_from_shelved_items() {
+  local snap board children i
+  snap=$TMP_ROOT/stacked.json
+  board=$TMP_ROOT/stacked.html
+  children=""
+  for i in 1 2 3 4 5 6 7 8; do
+    [ -z "$children" ] || children="$children,"
+    children="$children{\"id\": \"c$i\", \"kind\": \"ship\", \"state\": \"working\",
+      \"source\": \"pane\", \"title\": \"Routed task $i\", \"model\": \"claude-opus-5\",
+      \"stage\": {\"ordinal\": 2, \"of\": 5, \"label\": \"Building\", \"motion\": \"live\"}}"
+  done
+  # The home reports 20 active children and hands over only 8 of them.
+  snapshot_json '[]' "[{
+    \"id\": \"busymate\", \"registered\": true, \"provenance\": {\"selected\": \"structured-home\"},
+    \"current\": {\"state\": \"active_child_work\", \"reason\": \"\"},
+    \"active_children\": [$children],
+    \"decisions_open\": [], \"holds\": [], \"queued\": [],
+    \"counts\": {\"active_children\": 20, \"decisions_open\": 0, \"holds\": 0, \"queued\": 0},
+    \"omitted\": [{\"surface\": \"active_children\", \"count\": 12}]
+  }]" > "$snap"
+
+  "$BOARD" --snapshot "$snap" --no-quota --out "$board" >/dev/null \
+    || fail "a card whose home already bounded its children must render"
+  assert_grep '<span class="stitle">More in progress</span><span class="scount">2 more</span>' "$board" \
+    "the shelf must count only the received rows it contains"
+  assert_grep 'Routed task 8' "$board" \
+    "every child row received from the second mate must remain available"
+  assert_grep '12 more active tasks were not included in this snapshot.' "$board" \
+    "the upstream omission must be disclosed without mixing it into the shelf count"
+  assert_grep '20 active tasks (8 shown)' "$board" \
+    "the home bound must stay separately disclosed on the card"
+  pass "upstream omissions stay distinct from received rows in the shelf"
 }
 
 test_renders_live_fixture_home() {
@@ -138,8 +470,20 @@ test_renders_live_fixture_home() {
   assert_grep 'Two rollout windows both cost money' "$board" "the captain-held reason must be shown"
   assert_grep 'https://github.com/example/alpha/pull/9' "$board" "a recorded PR must be surfaced as a call"
 
-  assert_grep 'Under way: Rebuild the alpha intake form' "$board" \
+  # End to end from the task metadata through the snapshot to the card. Every
+  # other item case injects a stage object, so this is the only place that proves
+  # the board reads the stage at the path the snapshot writes it: a field-name
+  # drift between the two would quietly degrade every card to "Stage unavailable"
+  # while leaving the injected cases green.
+  assert_grep '1 task under way' "$board" "the live count must survive on the card"
+  assert_grep 'Rebuild the alpha intake form' "$board" \
     "the live task must name itself on its project card"
+  assert_grep '>Opus 5</span>' "$board" \
+    "the model recorded for the live task must reach its card as a name"
+  assert_grep 'aria-label="Stage 2 of 5: Building"' "$board" \
+    "a task working before validation must reach its card at the rung it earned"
+  assert_no_grep 'Stage unavailable' "$board" \
+    "a stage the snapshot derived must never read as unavailable on the card"
   assert_grep '1 decision and 1 PR await you' "$board" \
     "a project card must total the calls waiting on the captain"
   assert_grep 'class="proj-name">alpha' "$board" "each registered project must get a card"
@@ -385,7 +729,8 @@ EOF
   # Present once, in the shelf, with the reason that identifies it.
   [ "$(grep -c 'Approve the Pushcut Pro subscription' "$board")" = 1 ] \
     || fail "a deferred decision must appear exactly once, in the shelf"
-  assert_grep 'class="shelf"' "$board" "a deferred decision must render a deferred shelf"
+  assert_grep 'class="shelf" id="deferred-shelf"' "$board" \
+    "a deferred decision must render the uniquely identified deferred shelf"
   assert_grep '1 set aside' "$board" "the shelf must say how many decisions are set aside"
   assert_grep 'class="defer"' "$board" "the deferred decision must render as a deferred row"
   assert_grep 'The subscription renews yearly' "$board" \
@@ -480,6 +825,10 @@ test_navigation_tabs_group_the_board() {
   # An opened shelf snapping shut mid-read is the same reset the tabs avoid.
   assert_grep 'localStorage.setItem("fm-mission-control-deferred"' "$board" \
     "an opened deferred shelf must survive the board's own reload"
+  assert_grep 'document.getElementById("deferred-shelf")' "$board" \
+    "deferred persistence must target only the deferred shelf"
+  assert_no_grep 'document.querySelector("details.shelf")' "$board" \
+    "project overflow shelves must not share deferred persistence"
   assert_no_grep 'src="http' "$board" "the tabs must not depend on a network asset"
   pass "the board groups its sections behind keyboard-reachable navigation tabs"
 }
@@ -863,8 +1212,12 @@ test_live_work_outside_the_registry_stays_visible() {
   # project was never registered.
   assert_grep '<div class="n">1</div><div class="l">In progress</div>' "$board" \
     "work under way must be counted"
-  assert_grep 'Under way: Rework the gamma importer' "$board" \
+  assert_grep 'Rework the gamma importer' "$board" \
     "work on an unregistered project must still name itself"
+  # This row also arrives with no model and no stage, which is what a task row
+  # from an older producer looks like: it stays listed, and says what it lacks.
+  assert_grep 'Stage unavailable' "$board" \
+    "a task row carrying no stage must be listed with the gap stated"
   assert_grep 'unregistered' "$board" "an unregistered project card must say so"
   pass "live work outside the registry is shown rather than silently dropped"
 }
@@ -1000,10 +1353,11 @@ controls_snapshot() {
          {"id": "t9", "key": "api-shape", "verb": "needs-decision", "summary": "Which API shape",
           "reason": null, "source": "status"}],
        "holds": [], "queued": [], "counts": {}, "omitted": []}]' \
-  | jq '.tasks = [{id: "t1", kind: "ship", project: "alpha",
+  | jq '.tasks = [{id: "t1", kind: "ship", project: "alpha", model: "claude-opus-5",
         backlog: {title: "Wire the intake form", repo: "alpha"},
         pr: {url: "https://github.com/example/alpha/pull/9"},
-        current_state: {state: "working"}}]'
+        current_state: {state: "working",
+          stage: {ordinal: 4, of: 5, label: "Checks running", motion: "live"}}}]'
 }
 
 # The reply layer must never appear unless it was asked for, because the same
@@ -1074,6 +1428,14 @@ test_controls_match_what_each_row_can_actually_resolve() {
 
   assert_grep 'data-intent="ask"' "$board" "the board must offer one composer for a new ask"
 
+  # The item rows are read-only display and carry no control of their own, so the
+  # reply layer must be unchanged by their presence: this snapshot renders a full
+  # item row on the alpha card, and every control assertion above still holds.
+  assert_grep 'aria-label="Stage 4 of 5: Checks running"' "$board" \
+    "an item row must still render with the reply layer on"
+  assert_grep '>Opus 5</span>' "$board" \
+    "an item row must still name its model with the reply layer on"
+
   # Every control that can hold the refresh has to say so. The composer is
   # always open, so text left in it holds the board with no form to close.
   holds=$(grep -o 'class="rc-hold"' "$board" | wc -l | tr -d ' ')
@@ -1142,6 +1504,15 @@ test_control_targets_are_escaped() {
   pass "fleet prose stays escaped where a control carries it"
 }
 
+test_in_progress_items_are_listed_with_stage_and_model
+test_stalled_items_do_not_read_as_progress
+test_setup_uses_neutral_tone
+test_ready_and_done_use_distinct_tones
+test_model_ids_are_shown_as_readable_names
+test_unrecorded_item_facts_are_disclosed_rather_than_blanked
+test_out_of_range_stage_values_are_bounded_before_they_are_drawn
+test_long_item_list_keeps_every_item_in_an_expandable_shelf
+test_upstream_omissions_stay_distinct_from_shelved_items
 test_renders_live_fixture_home
 test_project_last_change_comes_from_the_clone
 test_yesterday_uses_local_calendar_arithmetic

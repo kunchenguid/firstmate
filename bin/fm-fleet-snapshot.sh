@@ -26,8 +26,20 @@
 #     blocked, and it is excluded from the secondmate holds projection for that
 #     reason.
 #   tasks[]: one row per state/<id>.meta, sorted by id.
+#     harness and model are the recorded worker runtime and model, verbatim from
+#     state/<id>.meta; either is "" when that task recorded none.
 #     current_state is parsed from bin/fm-crew-state.sh <id> and preserves
 #     state, source, detail, and raw line separately.
+#     current_state.stage is the derived lifecycle position: {ordinal,of,label,
+#     motion} on a fixed five-rung Setup/Building/Validating/Checks/Ready scale,
+#     with motion one of quiet, live, ready, waiting, stopped, done, or unknown.
+#     Setup claims only present metadata, a present recorded endpoint, and no observed
+#     current-state source or activity; secondmates additionally require their
+#     already-populated agent liveness to be alive. Ready is checks-green work
+#     awaiting the captain and is distinct from terminal Done. A rung is a
+#     position live state can prove and carries NO completion estimate; ordinal 0
+#     means the stage is unconfirmed. Renderers show this rather than deriving a
+#     stage from current_state.detail prose themselves.
 #     paths.status_log.last_event is historical wake-event data only, never
 #     current state.
 #     hints.open_decisions is the keyed open-decision set returned by
@@ -52,6 +64,10 @@
 #     Each structured-home record carries active_children, decisions_open, holds,
 #     queued, landed, endpoints, counts, and omitted. Actionable captain holds
 #     appear in decisions_open; blocked captain holds remain queued with metadata.
+#     An active_children row carries title, model, harness, and stage alongside
+#     its id and doing detail. Those four are additive within the summary schema,
+#     so a home running an older firstmate omits them and a reader must treat an
+#     absent one as unrecorded rather than as an empty value.
 #   secondmate_landed: {records[],truncated[],unreadable[],partial[]} - the
 #     compatibility landed-work roll-up derived from secondmate_current. Readable
 #     structured homes with an unknown current classification are partial, not
@@ -201,8 +217,8 @@ last_nonempty_line() {  # <file>
   grep -v '^[[:space:]]*$' "$1" 2>/dev/null | tail -1
 }
 
-crew_state_json() {  # <id>
-  local id=$1 raw rest state source detail sep
+crew_state_json() {  # <id> <setup-proven-json>
+  local id=$1 setup_proven=$2 raw rest state source detail sep parsed=0
   raw=$(
     FM_ROOT_OVERRIDE="$FM_ROOT" \
       FM_HOME="$FM_HOME" \
@@ -219,6 +235,7 @@ crew_state_json() {  # <id>
   detail=
   case "$raw" in
     state:\ *"$sep"source:\ *)
+      parsed=1
       rest=${raw#state: }
       state=${rest%%"$sep"source: *}
       rest=${rest#*"$sep"source: }
@@ -229,7 +246,47 @@ crew_state_json() {  # <id>
       ;;
   esac
   jq -n --arg raw "$raw" --arg state "$state" --arg source "$source" --arg detail "$detail" \
-    '{state:$state,source:$source,detail:$detail,raw:$raw}'
+    --argjson parsed "$(bool_json "$parsed")" --argjson setup_proven "$setup_proven" '
+    # How far this task has travelled along the delivery ladder, as an ordinal on
+    # a fixed five-rung scale plus how it is currently moving. It is derived here,
+    # beside the state/source/detail parse it already shares an owner with, so a
+    # renderer shows a stage without ever re-deriving one from this prose.
+    #
+    # The scale is deliberately coarse and carries NO completion estimate: a rung
+    # is a lifecycle position that live state can prove, never a fraction of the
+    # work done. Setup is registered work with a present recorded endpoint but no
+    # observed activity source yet, Building is a worker active before validation,
+    # Validating is an attributed run, Checks is that run in CI, and Ready is
+    # checks green while awaiting review or merge.
+    #
+    # Reconciled state fixes every rung after Setup and how the task is moving.
+    # Metadata iteration, endpoint liveness, and the absence of both semantic
+    # activity and status-event records admit Setup only while reconciled state
+    # remains unknown. `detail` only ever REFINES within those bounds, and every
+    # refinement falls back to a LOWER rung when fm-crew-state.sh rewords itself,
+    # so wording drift can lose precision but can never overstate progress.
+    (if $source == "run-step" then 3
+     elif $source == "pane" or $source == "status-log" then 2
+     else 1 end) as $reached |
+    (if $state == "working" then
+       if $source == "run-step" then
+         (if ($detail | test("^ci running")) then {ordinal: 4, label: "Checks running"}
+          else {ordinal: 3, label: "Validating"} end) + {motion: "live"}
+       elif $source == "pane" or $source == "status-log" then
+         {ordinal: 2, label: "Building", motion: "live"}
+       else {ordinal: 0, label: "Stage unconfirmed", motion: "unknown"} end
+     elif $state == "done" then
+       (if ($detail | test("checks green")) then {ordinal: 5, label: "Checks green", motion: "ready"}
+        else {ordinal: 5, label: "Done", motion: "done"} end)
+     elif $state == "parked" then {ordinal: $reached, label: "Waiting on a decision", motion: "waiting"}
+     elif $state == "paused" then {ordinal: $reached, label: "Paused", motion: "waiting"}
+     elif $state == "blocked" then {ordinal: $reached, label: "Blocked", motion: "stopped"}
+     elif $state == "failed" then {ordinal: $reached, label: "Failed", motion: "stopped"}
+     elif $parsed and $state == "unknown" and $source == "none" and $setup_proven then
+       {ordinal: 1, label: "Setup: endpoint present", motion: "quiet"}
+     else {ordinal: 0, label: "Stage unconfirmed", motion: "unknown"} end) as $stage |
+    {state: $state, source: $source, detail: $detail, raw: $raw,
+     stage: ($stage + {of: 5})}'
 }
 
 status_event_json() {  # <status-log>
@@ -413,9 +470,9 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
 }
 
 task_json_lines() {
-  local meta id kind harness mode yolo project worktree home projects backend target status_log report_path
+  local meta id kind harness model mode yolo project worktree home projects backend target status_log report_path
   local remote_host remote_root remote_state remote_rc remote_home_present
-  local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
+  local pr pr_source event_json current_json endpoint_exists agent_alive setup_proven activity_observed meta_json status_json report_json worktree_json home_json
   local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
   local open_decisions_tsv open_decisions_json
 
@@ -425,6 +482,7 @@ task_json_lines() {
     kind=$(meta_value "$meta" kind)
     [ -n "$kind" ] || kind=ship
     harness=$(meta_value "$meta" harness)
+    model=$(meta_value "$meta" model)
     mode=$(meta_value "$meta" mode)
     yolo=$(meta_value "$meta" yolo)
     project=$(meta_value "$meta" project)
@@ -454,43 +512,6 @@ task_json_lines() {
     if [ -z "$pr" ]; then
       pr_source=absent
     fi
-
-    current_json=$(crew_state_json "$id")
-    event_json=$(status_event_json "$status_log")
-    last_event_raw=$(printf '%s' "$event_json" | jq -r '.last_event.raw // ""')
-    current_state=$(printf '%s' "$current_json" | jq -r '.state // ""')
-    current_source=$(printf '%s' "$current_json" | jq -r '.source // ""')
-
-    # Durable keyed open-decision set: fold the WHOLE status stream
-    # (fm-classify-lib.sh's status_open_decisions) so a later unrelated event can
-    # never mask a still-open captain decision. The set is derived purely from the
-    # keyed fold - never from report bodies or decision-like prose - and then
-    # reconciled against the crew LIFECYCLE, which only clears a stale decision the
-    # crew has provably moved past. Two lifecycle signals clear it, neither of which
-    # reads any report content:
-    #   - a live activity read (run-step or busy pane) that is working/done, so a
-    #     crew that resumed past a gate is not still reported as parked; and
-    #   - a TERMINAL done/failed state on a single-owner task (scout or ship), whose
-    #     deliverable is its report or PR, so a COMPLETED scout surfaces only as a
-    #     report POINTER, never as a reopened pending decision.
-    # Secondmates are excluded from lifecycle clearing: they are persistent and
-    # multiplex many concerns onto one stream, so activity on one concern must
-    # never clear another concern's keyed decision. A parked/blocked state, or a
-    # non-authoritative status-log/none read on a still-live task, keeps the fold's
-    # open decision surfacing.
-    open_decisions_tsv=$(status_open_decisions "$status_log")
-    if [ "$kind" != secondmate ] && \
-       { { { [ "$current_source" = run-step ] || [ "$current_source" = pane ]; } \
-           && [ "$current_state" != parked ] && [ "$current_state" != blocked ]; } \
-         || { [ "$current_state" = "done" ] || [ "$current_state" = "failed" ]; }; }; then
-      open_decisions_tsv=""
-    fi
-    open_decisions_json=$(printf '%s' "$open_decisions_tsv" | jq -R -s '
-      [ splits("\n") | select(length > 0)
-        | (capture("^(?<key>[^\t]*)\t(?<verb>[^\t]*)\t(?<summary>.*)$")?)
-        | select(. != null) ]')
-    pending_decision=$(printf '%s' "$open_decisions_json" | jq 'if any(.[]; .verb == "needs-decision") then 1 else 0 end')
-    blocked_event=$(printf '%s' "$open_decisions_json" | jq 'if any(.[]; .verb == "blocked") then 1 else 0 end')
 
     endpoint_exists=null
     agent_alive=not_checked
@@ -527,6 +548,51 @@ task_json_lines() {
       fi
     fi
 
+    activity_observed=false
+    if [ -s "$STATE/$id.busy-state" ] || last_nonempty_line "$status_log" >/dev/null 2>&1; then
+      activity_observed=true
+    fi
+    setup_proven=false
+    if [ "$endpoint_exists" = true ] && { [ "$kind" != secondmate ] || [ "$agent_alive" = alive ]; }; then
+      [ "$activity_observed" = true ] || setup_proven=true
+    fi
+    current_json=$(crew_state_json "$id" "$setup_proven")
+    event_json=$(status_event_json "$status_log")
+    last_event_raw=$(printf '%s' "$event_json" | jq -r '.last_event.raw // ""')
+    current_state=$(printf '%s' "$current_json" | jq -r '.state // ""')
+    current_source=$(printf '%s' "$current_json" | jq -r '.source // ""')
+
+    # Durable keyed open-decision set: fold the WHOLE status stream
+    # (fm-classify-lib.sh's status_open_decisions) so a later unrelated event can
+    # never mask a still-open captain decision. The set is derived purely from the
+    # keyed fold - never from report bodies or decision-like prose - and then
+    # reconciled against the crew LIFECYCLE, which only clears a stale decision the
+    # crew has provably moved past. Two lifecycle signals clear it, neither of which
+    # reads any report content:
+    #   - a live activity read (run-step or busy pane) that is working/done, so a
+    #     crew that resumed past a gate is not still reported as parked; and
+    #   - a TERMINAL done/failed state on a single-owner task (scout or ship), whose
+    #     deliverable is its report or PR, so a COMPLETED scout surfaces only as a
+    #     report POINTER, never as a reopened pending decision.
+    # Secondmates are excluded from lifecycle clearing: they are persistent and
+    # multiplex many concerns onto one stream, so activity on one concern must
+    # never clear another concern's keyed decision. A parked/blocked state, or a
+    # non-authoritative status-log/none read on a still-live task, keeps the fold's
+    # open decision surfacing.
+    open_decisions_tsv=$(status_open_decisions "$status_log")
+    if [ "$kind" != secondmate ] && \
+       { { { [ "$current_source" = run-step ] || [ "$current_source" = pane ]; } \
+           && [ "$current_state" != parked ] && [ "$current_state" != blocked ]; } \
+         || { [ "$current_state" = "done" ] || [ "$current_state" = "failed" ]; }; }; then
+      open_decisions_tsv=""
+    fi
+    open_decisions_json=$(printf '%s' "$open_decisions_tsv" | jq -R -s '
+      [ splits("\n") | select(length > 0)
+        | (capture("^(?<key>[^\t]*)\t(?<verb>[^\t]*)\t(?<summary>.*)$")?)
+        | select(. != null) ]')
+    pending_decision=$(printf '%s' "$open_decisions_json" | jq 'if any(.[]; .verb == "needs-decision") then 1 else 0 end')
+    blocked_event=$(printf '%s' "$open_decisions_json" | jq 'if any(.[]; .verb == "blocked") then 1 else 0 end')
+
     [ -f "$report_path" ] && report_present=1 || report_present=0
     meta_json=$(path_present_json "$meta")
     status_json=$event_json
@@ -544,6 +610,7 @@ task_json_lines() {
       --arg id "$id" \
       --arg kind "$kind" \
       --arg harness "$harness" \
+      --arg model "$model" \
       --arg mode "$mode" \
       --arg yolo "$yolo" \
       --arg project "$project" \
@@ -574,6 +641,7 @@ task_json_lines() {
         id:$id,
         kind:$kind,
         harness:($harness // ""),
+        model:($model // ""),
         mode:($mode // ""),
         yolo:($yolo // ""),
         project:($project // ""),
@@ -715,6 +783,10 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
          | $tasks[]
          | select(.id == $work.id and .current_state.state == "working")
          | {id,kind,state:.current_state.state,source:.current_state.source,
+            title:(($work.title // .id) | trunc(90)),
+            model:((.model // "") | trunc(60)),
+            harness:((.harness // "") | trunc(40)),
+            stage:(.current_state.stage // null),
             doing:((.current_state.detail // "") | trunc(120))} ]) as $active_all
     | ($captain_holds_all
        + ([ $tasks[] as $t | ($t.hints.open_decisions // [])[]

@@ -16,6 +16,14 @@ By default it shows nothing else: no reply controls, no review surface, no netwo
 The board never shows a completion percentage or an estimated finish time.
 Progress judgement is firstmate's, derived from evidence a renderer cannot see, so inventing a number here would be a guess presented as a measurement.
 Each project card instead states only what live state can prove: what is under way, what waits on the captain, and when the project last changed.
+"What is under way" is listed item by item, because a count says something is happening without saying what.
+Each item shows its backlog title or falls back to its task id, presents its recorded worker model as a readable label, and shows how far it has travelled as a five-rung ladder - Setup, Building, Validating, Checks, Ready - always labelled with the stage it has reached.
+A rung is a lifecycle position the fleet can prove, never a fraction of the work done, and the colour of the filled rungs says whether the item is still moving, so an item stopped at rung four keeps the rungs it earned and still reads as stopped.
+Setup is labelled `Setup: endpoint present` only when task metadata and recorded endpoint presence are available but no current-state source or activity has been observed yet.
+For ordinary work this is an endpoint-presence claim, not proof that a live worker is running; second mates use their already-available agent-liveness result as an additional requirement.
+Every Setup rung uses the neutral slate `quiet` tone because even verified endpoint liveness does not prove movement.
+Ready keeps the top rung but uses the board's amber needs-you tone because green checks awaiting review or merge are not completed work.
+The stage itself is derived by the snapshot rather than by the board; see `bin/fm-fleet-snapshot.sh` for the `current_state.stage` contract.
 
 ## Sections
 
@@ -32,7 +40,10 @@ Each project card instead states only what live state can prove: what is under w
 - **The stat strip** counts what is awaiting the captain, what is under way, what landed today, and how many project cards the board is showing.
 - **Projects** shows one card per registered project, plus a card for each second mate and for any unregistered project that has work under way.
   A task the captain can see running is never invisible just because its project was never registered.
-  Each card carries a status pill, a one-line live state, the calls waiting on the captain, and when the project last changed.
+  Each card carries a status pill, a one-line live state, a row per in-progress item, the calls waiting on the captain, and when the project last changed.
+  A card long enough to stop being readable keeps the first six items visible and puts every additional received item in an expandable shelf with its name, stage, and model intact.
+  Rows omitted by an upstream second mate bound stay separately disclosed as unavailable rather than being mixed into that shelf.
+  A model the fleet never recorded is labelled `model not recorded`; a stage omitted by a second mate home running an older firstmate is labelled `Stage unavailable` and drawn as an unfilled hatched ladder rather than as a proven zero stage.
   If the backlog is unavailable, a card whose calm state cannot be proved says `Unconfirmed` rather than `Idle`.
 - **Shipped today** lists the backlog items that landed on the board's own current date, with their PR or report links.
   Done records without a completion date are excluded from the list and disclosed in the stat tile instead of being silently counted as today.
@@ -58,6 +69,7 @@ A browser that refuses storage - a private context, or a restricted `file://` or
 
 The Deferred shelf is held to the same bar, because a shelf that snapped shut every 25 seconds would be the same jarring reset in a smaller place.
 It is closed for a captain who never opens it, stays open for one who does, and stays closed again once they close it.
+Project overflow shelves do not share or persist the Deferred shelf preference.
 
 ## Replying from the board
 
@@ -134,13 +146,13 @@ The generator does not serve it; how the file is exposed is decided outside it.
 
 ## Verification
 
-`tests/fm-mission-control.test.sh` renders the board end to end from a fixture home and from captured snapshot payloads, covering present and absent sources, cross-home captain decisions, escaping of hostile prose, project folding, work outside the registry, blocked work, unmeasurable allowance windows, self-reload, the tab structure, and the deferred shelf.
+`tests/fm-mission-control.test.sh` renders the board end to end from a fixture home and from captured snapshot payloads, covering present and absent sources, cross-home captain decisions, escaping of hostile prose, project folding, work outside the registry, per-item stage and model rendering, bounded cross-home stage values, item overflow, blocked work, unmeasurable allowance windows, self-reload, the tab structure, and the deferred shelf.
 The deferred cases pin the awaiting count and the section count to literal numbers rather than to the absence of a title, because dropping a decision from the list while still counting it and counting it while still listing it fail separately.
 It also pins a fixed current time and commits its fixture clones at explicit epochs, so the last-change wording, its three degrade-to-dash paths, and the promise that no clone is written to are all checked against times the test chose.
 
 The reply layer is covered in the same suite: that the default board is unchanged by its existence, that each row offers only the controls it can resolve, that a control reaches nothing but the Lavish bridge, that it stays hidden until that bridge is proved present, and that fleet prose stays escaped inside the attributes a control carries.
 `tests/fm-procevent-mission-control.test.sh` pins the request normalizer against bytes captured from a real send through a real browser, and drives every fail-closed path - a forged envelope, an out-of-vocabulary intent, a truncated capture, a defer carrying reason text - to a refusal rather than a plausible request.
 
-`tests/fm-fleet-snapshot-view.test.sh` pins the deferred classification itself: a parked hold on work that is not a captain decision is ordinary held work, a captain decision that still has an unresolved blocker stays blocked rather than deferred, and a deferred decision never reaches the secondmate home summary's holds.
+`tests/fm-fleet-snapshot-view.test.sh` pins lifecycle-stage derivation and its conservative fallbacks, secondmate Setup liveness, and the deferred classification itself: a parked hold on work that is not a captain decision is ordinary held work, a captain decision that still has an unresolved blocker stays blocked rather than deferred, and a deferred decision never reaches the secondmate home summary's holds.
 
 That a tab survives the board's own reload cannot be shown by a shell test, so it is checked in a real browser and the before and after boards are captured in [`docs/evidence/mission-control/`](evidence/mission-control/).
