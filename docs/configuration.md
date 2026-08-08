@@ -309,6 +309,102 @@ If no dispatch rule fits, firstmate uses the dispatch profile `default` when pre
 Because the spawn backstop is gated by file presence, any fallback path after a missing match, validation error, or missing `jq` still passes a resolved harness explicitly until the file is fixed or removed.
 Secondmate homes inherit this file from the primary, so a secondmate's own crewmates apply the same dispatch profile behavior.
 
+## Worktree provisioning (config/worktree-provision)
+
+A git worktree carries only tracked files, and Treehouse v2.0.0 exposes no setup hook, so a freshly leased task worktree arrives with the project's source and none of the gitignored machinery that runs it - no virtual environment, no installed packages.
+A lane launched into that state cannot run the project's own tests, formatters, or browser checks, so it validates on another agent's evidence or on none.
+`bin/fm-spawn.sh` therefore provisions each acquired ship/scout worktree after its identity, cleanliness, and freshness proof and before any endpoint exists.
+`bin/fm-provision-lib.sh`'s header owns the full contract: detection, install commands, fingerprint, readiness probes, bounds, and tunables.
+This section records the operator-facing behavior only.
+
+Detection is driven by what the worktree declares, never by a project name.
+A directory holding `uv.lock` provisions with `uv sync --frozen`; one holding `requirements.txt` gets a `uv venv` virtual environment plus its `requirements.txt` and any conventional `requirements-dev.txt` / `requirements-test.txt` companions; `package-lock.json` runs `npm ci`; `pnpm-lock.yaml` runs `pnpm install --frozen-lockfile`.
+Python always goes through uv, never pip or venv directly.
+A directory whose `pyproject.toml` declares a project - a `[project]`, `[build-system]`, or `[tool.poetry]` table - with neither of those two Python manifests is enumerated and reported as a capability gap rather than installed from a guess; a uv workspace member is excused, because its root's `uv sync --all-packages` already installs it, and a `pyproject.toml` holding only tool configuration (`[tool.ruff]`, `[tool.black]`, `[tool.pytest.ini_options]`) declares nothing to provision and is a clean no-op.
+A pip component's fingerprint covers the requirements files it reaches through `-r` / `-c` includes as well as the ones named directly, so editing an included file is a cache miss rather than a false hit.
+`FM_PROVISION_SCAN_DEPTH` bounds what is classified and installed, and the traversal descends exactly one level further so the first component past that bound is reported as a capability gap rather than dropped in silence - a component that never appears on any surface reads as one that does not exist.
+A manifest more than one level past the bound is not enumerated at all; the tunable is the knob for reaching it.
+The traversal runs under the same wall-clock bound as every other one here and prunes the heavy directories a previous lease can leave in a pooled worktree (`node_modules`, `.venv`, `.tox`, `Pods`, `.gradle`, `.turbo`, `coverage`, `.pytest_cache`, build output), so scan cost cannot be driven by whatever the last lane wrote.
+For JS, the package manager comes from what the project declares - package.json's corepack `packageManager` field - and only falls back to the lockfile when the project declares nothing; a lockfile's filename is convention, not evidence, and a directory carrying two committed lockfiles would otherwise be resolved by firstmate's opinion rather than by what the project actually installs with.
+A JS component whose manager cannot be determined that way is left unprovisioned and reported rather than installed with a guessed installer.
+A uv workspace has exactly one `uv.lock` and one `.venv` at its root, so it is detected once at that root and synced with `--all-packages`; a plain sync there would install only the root package and leave a member's checks unrunnable.
+An ambient `UV_PROJECT_ENVIRONMENT` pointing anywhere but `.venv` refuses the spawn, because the readiness probe could not then prove the environment it just installed.
+A worktree declaring nothing recognized provisions nothing and spawns exactly as before.
+No interpreter or runtime version is hardcoded: uv resolves the interpreter from the project's own `.python-version` or `requires-python`, and a Node runtime is pinned only when the project declares one unambiguously through `.nvmrc` or a single-major `engines.node`.
+When a Node pin is declared, the highest matching runtime under `$NVM_DIR`, `$FNM_DIR`, `$VOLTA_HOME`, or `~/.asdf` is used for the install, so the lane validates on the same runtime its native modules were built against.
+What is prepended to the crewmate's `PATH` is a firstmate-owned directory holding exactly `node`, `npm`, `npx`, and `corepack`, never the version manager's own bin directory: that directory also holds every globally npm-installed CLI for that Node version, so leading with it would silently repoint `claude`, `codex`, `opencode`, `pi`, or `grok` at whichever copy happens to sit under the pinned runtime.
+Resolution order for every command other than the Node toolchain is therefore exactly the host's own.
+That directory is shared by every spawn in the home that pins the same runtime, and a launched lane keeps it on its `PATH` for the lane's whole life, so it is only ever created, never rewritten.
+The name is claimed with a single `mkdir`, which is atomic and fails when the name is already taken, so there is no window between deciding a name is free and taking it; a spawn that loses that race validates and reuses the winner's directory untouched.
+A concurrent spawn can therefore never unlink a running lane's `node`.
+A directory that exists but does not validate - a binary removed from underneath it, a half-deleted state directory - is stepped over rather than repaired in place: the next generation suffix is used, so a lane still holding the stale one keeps what it has while new spawns get a good prefix instead of refusing forever.
+
+Provisioning is cached per worktree, per component, in the home's `state/provision-cache/`, never inside the worktree.
+A cache hit requires both a fingerprint match over that component's manifests, installer version, and runtime identity, and a live readiness probe of the installed environment.
+The installer's own configuration counts as a manifest: `.npmrc` for npm and pnpm, `uv.toml` for uv and pip.
+Both change what the installer produces without any lockfile changing, so a registry switch or a `node-linker` change is a cache miss rather than a confidently wrong hit against a tree built under the superseded configuration.
+Directory existence alone is never accepted: a pool slot keeps its ignored directories across leases, but a previous agent may have deleted or broken them.
+The probe proves an installed environment from what the installer left behind, including a local editable requirement (`-e .`) which is verified against the PEP 610 `direct_url.json` and the `.pth` an editable install writes; a requirement whose identity still cannot be established that cheaply - a VCS or URL editable, an archive, a bare local path - is a cache miss that says so on stderr rather than a hit.
+What the lane writes into `node_modules` during ordinary work - the `.cache` directory webpack, vite, eslint, and babel all create - is not a change to the installed environment, so it does not invalidate the cache; a declared package directory that changes underneath it still does.
+A spawn into an already-provisioned, unchanged worktree therefore pays probe cost only, not install cost.
+The provisioned directories are added to the repository's git exclude file when the project does not already ignore them, so provisioning cannot dirty a checkout that the freshness proof and teardown both require to be clean.
+
+Besides success there are exactly two outcomes, and which one applies never depends on where in the flow it happened, only on what kind of thing it is.
+
+A **capability gap** is work this provisioner was never able to do here.
+It is named on stderr, named again in `state/<id>.provision.log`, recorded in the spawn's `provision=` metadata, and launches the lane with that component unprovisioned - what was not provisioned is reported as loudly as what was.
+Refusing a gap would be strictly worse than the behavior provisioning replaced, which launched every lane unprovisioned, and would brick the spawn on the very monorepos this feature exists to serve.
+The complete set of capability gaps is:
+
+- More provisionable components than `FM_PROVISION_MAX_COMPONENTS`. The components within the budget are still provisioned; the rest are reported as `skipped:over-budget`, never dropped silently. Which ones land past the budget is decided by need before order: the spawn passes the task's own brief in, components whose directory that brief names are provisioned first, and detection order only breaks the remaining tie.
+- A component whose manifest lies deeper below the worktree root than `FM_PROVISION_SCAN_DEPTH`, reported as `skipped:below-scan-depth`. It is named without being classified or installed, so a monorepo's deeply nested service is a gap the lane can read rather than a component no surface mentions.
+- A Python component whose `pyproject.toml` declares a project while carrying neither a `uv.lock` nor a `requirements.txt`, reported as `skipped:no-python-lockfile`. Choosing an installer for a lockless project is a design decision firstmate has not made, and installing from a guess is not one provisioning gets to make on the project's behalf; a uv workspace member is not reported, since its root's sync installs it, and neither is a `pyproject.toml` that only configures tools.
+- A dependency scan that does not finish within its bound, recorded as `unavailable:scan-too-large`. No component was enumerated, so none can be named, and the lane's report says exactly that rather than carrying a header that would read like a worktree needing nothing.
+- A recognized-but-unsupported package manager (`yarn`, `bun`).
+- A JS component whose package manager is neither named by package.json's `packageManager` field nor implied by a single lockfile - including a directory carrying two lockfiles while declaring nothing.
+- A declared Node major that cannot be found under `$NVM_DIR`, `$FNM_DIR`, `$VOLTA_HOME`, or `~/.asdf`, components declaring conflicting Node majors, or a `node` that does not run. The worktree's Python components are still provisioned.
+- A missing installer (`uv`, `npm`, `pnpm`).
+- A pinned-Node toolchain directory that cannot be established under the provisioning cache, reported as `skipped:node-prefix-unavailable`. A stale one is stepped over rather than rewritten, so this can only mean the cache itself is unwritable.
+- A pip component whose `-r` / `-c` include graph reaches more requirements files than the library traverses. No fingerprint over the traversed prefix could cover what the component installs, and a fingerprint that cannot be stood behind would become a false cache hit, so the component is reported as `skipped:unresolved-manifests`.
+- A host with no bounded-execution mechanism (`timeout`, `gtimeout`, or `perl`), or without `python3`. Neither one can be worked around, so nothing is attempted and the whole worktree is recorded as `unavailable:`. That verdict is reached before any component is classified, because classification itself reads the project's own `package.json` through `python3` under a bound; the components are still enumerated afterwards, without running anything, so the lane's report names each one it is not getting rather than only the host verdict.
+
+A **failure** is an attempt that was made and did not complete.
+It refuses the spawn, names its cause, and prints the opt-out, because a lane launched onto a half-built environment is worse than no lane.
+The complete set of refusal causes is:
+
+- A tunable (`FM_PROVISION_SCAN_DEPTH`, `FM_PROVISION_MAX_COMPONENTS`, `FM_PROVISION_INSTALL_TIMEOUT`, `FM_PROVISION_PROBE_TIMEOUT`) that is not a positive integer, including an explicitly empty or zero override.
+- A worktree path that is not a directory, or a dependency scan that fails to traverse it. A scan that succeeds and finds nothing is a clean no-op, not a refusal.
+- A `UV_PROJECT_ENVIRONMENT` that would place a component's environment somewhere other than its own `.venv`, where it could not be proven.
+- A component that declares no ignored install directory to protect, or an install directory the project does not already ignore. Provisioning refuses rather than hiding it: for a linked worktree the only exclusion git honours lives in the main clone's `info/exclude`, so writing one would make the path invisible to `git status` in the primary checkout repo-wide, and installing into a path git can see leaves the leased worktree dirty, fails its returnable check on abort, and strands the workspace lease. The fix is one line in the project's own `.gitignore`. If refusing turns out to block real work often, the alternative is `extensions.worktreeConfig` plus a per-worktree `core.excludesFile`, which was verified to work and isolate correctly but displaces the operator's global excludes inside the worktree.
+- A project that does not ignore `.fm-provisioning.md` gets no in-worktree provisioning report, with a warning naming the fix. That is a skipped diagnostic, not a refusal.
+- A provisioning cache directory or log that cannot be written.
+- A previous lease's `.fm-provisioning.md` that cannot be removed from the worktree. A report that cannot be written is only a missing diagnostic; one left over from another task is a wrong one.
+- Declared manifests that cannot be read for a component, including a requirements include that cannot be opened, or a manifest that exists but yields no digest. The digest of nothing is a well-formed digest, so accepting one would give the component a stable fingerprint that does not depend on that file's content at all.
+- An install that exceeds its bound, exits non-zero, or is terminated by a signal.
+- An installed environment that is still not usable afterwards: no working interpreter at `.venv/bin/python`, an interpreter that does not report the runtime recorded for it, or a readiness probe that cannot capture the environment's state.
+- A fingerprint that cannot be recorded.
+
+`bin/fm-provision-lib.sh` routes every non-success outcome through one of two functions - `fm_provision_gap` or `fm_provision_fail` - so a capability limit added later cannot become a spawn refusal by accident.
+
+A **note** is neither outcome, and is the one thing a component that WAS provisioned can also carry.
+A non-zero `uv pip check` is the only one: it verifies that installed dependency metadata is mutually consistent, which is not the same thing as usable, and a project pinning through uv's `[tool.uv] override-dependencies` or `constraint-dependencies` installs a version some package's own metadata calls incompatible on purpose.
+Refusing there would block every spawn into an environment that installs, runs, and validates fine, so it is announced on stderr, written to the provisioning log, recorded as `<manager>:<dir>=installed+inconsistent-dependency-metadata` or `<manager>:<dir>=cached+inconsistent-dependency-metadata` - the check runs before the cache-phase split, so a cache hit carries it too - and carried into the lane's own report, while the component still counts as provisioned.
+A check that could not be run at all - an expired bound, a host that cannot bound anything, an undeterminable child status, a command that could not be executed - is never reported as one that found something: it records `unverified-dependency-metadata` instead, which says only that whether the metadata is self-consistent is unknown.
+The proofs kept as refusals are the ones that mean unusable: an interpreter that is missing, not executable, does not run, or does not report the runtime recorded for it.
+
+Installer output lands in `state/<id>.provision.log`, which is removed with the rest of the task's state on teardown and on a spawn abort; a refusal prints the tail of that log to stderr, since the rollback deletes the file.
+Those surfaces all live in the firstmate home, where the crewmate cannot read them, so provisioning also writes `.fm-provisioning.md` at the root of the leased worktree naming every component and what happened to it.
+That file is registered with the repository's git exclude file before it is written, so it cannot dirty the checkout; if that registration is impossible the report is skipped with a warning rather than written, and a report that cannot be filed never refuses a spawn.
+Because it is excluded, nothing else removes it, and a pool slot outlives the lease that used it: every spawn deletes whatever occupies that path before it decides anything - including a spawn that opts out, which is exactly the lease that would otherwise inherit a stale report - and the path is unlinked rather than truncated, so a symlink left there is replaced instead of followed.
+The outcome is recorded as `provision=` in `state/<id>.meta`: `none` for a worktree that declares nothing, `off` for an opt-out, `unavailable:<reason>` for a host gap, or a comma-separated list of `<manager>:<dir>=installed|cached|skipped:<reason>`, where a provisioned component that carries a note reads `installed+<note>` or `cached+<note>`.
+Every install and probe is wall-clock bounded; a host with no `timeout`, `gtimeout`, or `perl` runs nothing at all and the lane launches unprovisioned, rather than risking an unbounded install wedging a spawn.
+
+The local, gitignored `config/worktree-provision` file is the home-level switch: absent or `on` provisions, `off` disables it.
+Any other content refuses the spawn rather than silently disabling the gate.
+`--no-provision` is the per-spawn opt-out.
+Provisioning currently covers genuinely new ship and scout spawns - the point at which a worktree is acquired.
+Secondmate homes, Orca's legacy recovery path, and the account recovery paths reuse an existing worktree and are not provisioned; a recovery into a worktree whose environment was destroyed still needs manual repair.
+
 ## Checkout refresh
 
 `bin/fm-checkout-refresh.sh` keeps worktree seed checkouts current independently of Firstmate's own PR lifecycle.
@@ -555,6 +651,10 @@ FM_ACCOUNT_CONTINUATION_FINGERPRINT_BYTES=268435456  # maximum repository conten
 FM_ACCOUNT_CONTINUATION_ENUMERATION_BYTES=33554432  # maximum bytes used to enumerate repository identity inputs
 FM_ACCOUNT_CONTINUATION_FINGERPRINT_SECONDS=30  # seconds allowed to verify the continuation repository identity
 FM_DISPATCH_AGENT_FLEET_TIMEOUT=120  # optional positive seconds per live-proof pool summary; unset uses FM_ACCOUNT_SELECTION_TIMEOUT, an explicit legacy FM_ACCOUNT_CONTROL_TIMEOUT, then 120
+FM_PROVISION_SCAN_DEPTH=4        # worktree provisioning: how deep below the worktree root a manifest is still classified and installed, with the traversal descending exactly one level further so the first component past the bound is reported as a capability gap; must be a positive integer, and an empty or zero override refuses the spawn rather than falling back to this default
+FM_PROVISION_MAX_COMPONENTS=8    # worktree provisioning: provision at most this many components per spawn, reporting the rest as a recorded capability gap; must be a positive integer, and an empty or zero override refuses the spawn rather than falling back to this default
+FM_PROVISION_INSTALL_TIMEOUT=600 # worktree provisioning: seconds allowed per component install; must be a positive integer, and an empty or zero override refuses the spawn rather than removing the bound
+FM_PROVISION_PROBE_TIMEOUT=60    # worktree provisioning: seconds allowed per readiness probe; must be a positive integer, and an empty or zero override refuses the spawn rather than removing the bound
 FM_REPORT_STACK_ROOT=  # machine-global completion-report store override; unset uses $XDG_DATA_HOME/firstmate/report-stack or ~/.local/share/firstmate/report-stack
 FM_REPORT_RETENTION_INTERVAL=  # optional shared cadence: owner/policy default 300s, opportunistic watcher default 86400s; constrained by docs/report-stack.md
 FM_REPORT_RETENTION_OWNER_FRESH_SECS=660  # fresh successful-owner heartbeat window before watchers use their opportunistic fallback

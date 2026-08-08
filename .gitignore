@@ -12,3 +12,4 @@ __pycache__/
 *.pyc
 .env
 /config/
+.fm-provisioning.md

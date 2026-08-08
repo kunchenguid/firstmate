@@ -85,6 +85,7 @@
 28460	tests/fm-spawn-backlog.test.sh
 2094	tests/fm-spawn-batch.test.sh
 42452	tests/fm-spawn-dispatch-profile.test.sh
+20000	tests/fm-spawn-provision.test.sh
 42	tests/fm-stow-contract.test.sh
 500	tests/fm-supervision-events.test.sh
 95	tests/fm-supervision-instructions.test.sh
