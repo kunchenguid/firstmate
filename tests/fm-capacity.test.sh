@@ -171,8 +171,9 @@ test_disappearing_record_is_ambiguous() {
   write_meta "gone-1" ship direct-PR
   fake_crew_state '{"schema":"fm-crew-state.v1","id":"gone-1","state":"working","source":"run-step","detail":"busy"}'
   # FM_CAPACITY_TEST_DISAPPEAR simulates a torn read: the record vanishes
-  # between listing and row read
-  out=$(FM_CAPACITY_TEST_DISAPPEAR=gone-1 fm_capacity_project)
+  # between listing and row read. The hook is serial-path-only, so this test
+  # forces sequential collection regardless of the bounded-parallel default.
+  out=$(FM_CAPACITY_PARALLEL=1 FM_CAPACITY_TEST_DISAPPEAR=gone-1 fm_capacity_project)
   echo "$out" | jq -e --arg id gone-1 \
     '[.rows[] | select(.task_key == $id) | .ambiguity_reasons | index("record_disappeared") != null] | any' >/dev/null \
     || fail "disappearing record not ambiguous"
@@ -192,6 +193,8 @@ test_malformed_structured_output_is_ambiguous() {
   out=$(fm_capacity_project)
   echo "$out" | jq -e '.aggregate.alert_only == true' >/dev/null || fail "malformed output not alert-only"
   echo "$out" | jq -e '.aggregate.refill_safe == false' >/dev/null || fail "malformed output looked refill-safe"
+  echo "$out" | jq -e '[.rows[] | select(.task_key == "bad-1")][0].attempt_id == null' >/dev/null \
+    || fail "timeout row carries a non-null attempt_id (string 'null' shape bug)"
   pass "malformed structured worker output yields ambiguity, never idle or zero work"
 }
 
@@ -222,12 +225,15 @@ test_aggregates_are_exactly_derivable_from_rows() {
 
 test_parallel_reads_are_byte_identical() {
   fresh_state
+  # the bounded-parallel DEFAULT (>1, pinned) must produce byte-identical
+  # output to a forced-sequential projection of the same state
   local a b
   write_meta "p1" ship direct-PR
   write_meta "p2" ship direct-PR
   fake_crew_state '{"schema":"fm-crew-state.v1","id":"p1","state":"working","source":"run-step","detail":"busy"}'
-  a=$(fm_capacity_project | jq -cS .)
-  b=$(FM_CAPACITY_PARALLEL=4 fm_capacity_project | jq -cS .)
+  [ "${FM_CAPACITY_PARALLEL:-4}" -gt 1 ] || fail "bounded-parallel default is not >1"
+  a=$(FM_CAPACITY_PARALLEL=1 fm_capacity_project | jq -cS .)
+  b=$(fm_capacity_project | jq -cS .)
   [ "$a" = "$b" ] || fail "parallel projection differs from sequential"
   pass "bounded parallel reads produce byte-identical output to sequential reads"
 }

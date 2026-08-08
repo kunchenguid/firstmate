@@ -115,7 +115,7 @@ The frozen real-fleet object held 10 rows with aggregate `productive_count=0 res
 
 ## Latency (final)
 
-Measured 2026-08-08 against integration base `454b10d`, branch HEAD `3eac13a`.
+Measured 2026-08-08 against integration base `454b10d`, branch HEAD `3eac13a` (sequential), then corrected by the captain-approved bounded-parallel default at branch HEAD `f5c7`-era (see the correction below).
 `/usr/bin/time` (GNU time) is not installed on this host, so the measurement used the bash `time` keyword with `TIMEFORMAT='count-json wall=%R s'`, the same output shape as Task 3.
 
 Worktree empty-fleet baseline:
@@ -131,15 +131,36 @@ Exact output:
 count-json wall=0.067 s
 ```
 
-Real-fleet-size read-only measurement (`FM_STATE_OVERRIDE=/home/holu/fmate/firstmate/state`; 15 meta records, 10 projected rows):
+Real-fleet-size read-only measurement (`FM_STATE_OVERRIDE=/home/holu/fmate/firstmate/state`; 15 meta records, 10 projected rows), sequential:
 
 ```text
 count-json wall=3.284 s
 ```
 
-The real-fleet run exceeds the 2000 ms budget with the default per-read timeout (2 s) at the current fleet size (Task 3 measured ~7.9 s against the same state; the fleet state has since shrunk).
-Per the plan's Task 13 rule, the budget does not hold, so automatic refill is NOT enabled, `FM_CAPACITY_PARALLEL` and `FM_CAPACITY_READ_TIMEOUT_SECS` defaults are NOT changed in this commit (that would be a behavior change beyond the cutover), and a follow-up is open to tune the per-row timeout or enable bounded parallelism (the total deadline already bounds the projection).
-The latency follow-up blocks the private `config/refill-auto` enablement.
+## Bounded-parallel latency correction (captain-approved)
+
+The sequential real-fleet run exceeded the 2000 ms budget (dead legacy endpoints eat the per-read timeout), so per the captain's decision the latency follow-up used bounded PARALLEL reads rather than shortening the per-endpoint timeout: the per-row timeout semantics for slow-but-live workers are unchanged (`FM_CAPACITY_READ_TIMEOUT_SECS=2`), rows are still sorted deterministically by attempt/task identity, and the whole collection still runs under `FM_CAPACITY_TOTAL_TIMEOUT_SECS`. `FM_CAPACITY_PARALLEL` defaults to 4 (the smallest measured value clearing the budget).
+
+Measured 2026-08-08 (read-only, real home), sequential vs parallel:
+
+```text
+FM_CAPACITY_PARALLEL=1  count-json wall=3.248 s
+FM_CAPACITY_PARALLEL=2  count-json wall=2.168 s
+FM_CAPACITY_PARALLEL=4  count-json wall=1.495 s
+FM_CAPACITY_PARALLEL=8  count-json wall=0.984 s
+```
+
+At the new default (4), the real-home wall time is consistently under the budget:
+
+```text
+run1 wall=0.832 s
+run2 wall=0.853 s
+run3 wall=0.755 s
+```
+
+Regression coverage shipped with the default: `test_parallel_reads_are_byte_identical` pins that the default (>1) produces byte-identical output to a forced-sequential projection of the same state; the existing `test_total_deadline_marks_unfinished_rows_ambiguous` pins that the total deadline still holds under the parallel default; `test_disappearing_record_is_ambiguous` forces sequential collection because its torn-read hook is serial-path-only. A data-shape bug found during the real-home read (the ambiguous-row `attempt_id` was the string `"null"` instead of JSON `null`) was fixed with a regression assertion.
+
+Automatic refill stays disabled until this evidence passes; `config/refill-auto` is not created.
 
 ## Acceptance
 

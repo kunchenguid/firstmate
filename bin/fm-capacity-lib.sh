@@ -23,7 +23,15 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 FM_CAPACITY_READ_TIMEOUT_SECS="${FM_CAPACITY_READ_TIMEOUT_SECS:-2}"
 FM_CAPACITY_TOTAL_TIMEOUT_SECS="${FM_CAPACITY_TOTAL_TIMEOUT_SECS:-10}"
-FM_CAPACITY_PARALLEL="${FM_CAPACITY_PARALLEL:-1}"
+# Bounded parallel reads, default 4 (measured 2026-08-08: real-home
+# count-json wall 3.25s sequential -> 1.5s at 4, consistently under the
+# 2000ms budget; Task 2's gate proved byte-identical parallel output and the
+# tmux backend smoke). The per-row timeout (FM_CAPACITY_READ_TIMEOUT_SECS)
+# still bounds every single read, so slow-but-live workers keep their full
+# timeout; only the collection phase is parallelized, and rows are sorted
+# deterministically (sort_by attempt/task identity) so output ordering is
+# unchanged. The whole collection still runs under FM_CAPACITY_TOTAL_TIMEOUT_SECS.
+FM_CAPACITY_PARALLEL="${FM_CAPACITY_PARALLEL:-4}"
 FM_CREW_STATE_BIN="${FM_CREW_STATE_BIN:-$SCRIPT_DIR/fm-crew-state.sh}"
 # Observation timestamp, frozen once at source time: every projection from one
 # sourced library carries identical metadata, so parallel and sequential
@@ -114,8 +122,8 @@ fm_capacity_row() {  # <entity> where entity is attempt:<id> or meta:<id> -> row
   [ -n "$attempt" ] || attempt=$(sed -n 's/^attempt=//p' "$meta" | head -1)
   crew=$(fm_capacity_crew_state "$id")
   if [ -z "$crew" ] || ! echo "$crew" | jq -e '.schema == "fm-crew-state.v1"' >/dev/null 2>&1; then
-    jq -n --arg attempt "${attempt:-null}" --arg id "$id" \
-      '{attempt_id:$attempt,task_key:$id,generation:null,kind:"ship",classification:"unknown",source:"none",productive:false,reserved:true,ambiguity_reasons:["worker_read_timeout"],missing_receipts:[],reconciliation_required:true}'
+    jq -n --arg attempt "$attempt" --arg id "$id" \
+      '{attempt_id:($attempt | if . == "" then null else . end),task_key:$id,generation:null,kind:"ship",classification:"unknown",source:"none",productive:false,reserved:true,ambiguity_reasons:["worker_read_timeout"],missing_receipts:[],reconciliation_required:true}'
     return 0
   fi
   state=$(echo "$crew" | jq -r '.state')
