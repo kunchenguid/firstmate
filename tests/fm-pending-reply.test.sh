@@ -784,6 +784,47 @@ test_fm_send_delivery_only_action_resolves_on_delivery() {
   pass "delivery-only secondmate action resolves on delivery and never false-escalates"
 }
 
+test_updatefirstmate_nudge_is_delivery_only() {
+  local skill
+  skill="$ROOT/.agents/skills/updatefirstmate/SKILL.md"
+  grep -Fq "bin/fm-send.sh <id> --delivery-only 'firstmate was updated" "$skill" \
+    || fail "/updatefirstmate re-read nudge must be delivery-only"
+  pass "/updatefirstmate re-read nudge is delivery-only"
+}
+
+test_delivery_only_partial_commit_reconciles_before_marker_retirement() {
+  local home state corr rec marker
+  home=$(setup_parent delivery-only-partial)
+  state="$home/state"
+  export FM_PENDING_REPLY_NOW=9200
+  corr=$(fm_pending_reply_create "$home" "$state" hibit "re-read instructions" 0)
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  fm_pending_reply_prepare_delivery "$state" "$corr" \
+    || fail "delivery-only partial fixture should prepare delivery"
+  fm_pending_reply_write_delivery_confirmation "$state" "$corr" confirmed 9200 \
+    || fail "delivery-only partial fixture should confirm delivery"
+  fm_pending_reply_set "$rec" delivered_epoch 9200 \
+    || fail "delivery-only partial fixture should persist interrupted delivery"
+  marker=$(fm_pending_reply_delivery_confirmation_path "$state" "$corr")
+
+  fm_pending_reply_reconcile_delivery "$state" "$corr" \
+    || fail "delivery-only partial commit should reconcile"
+  [ "$(phase_of "$state" "$corr")" = resolved ] \
+    || fail "reconciliation left delivered delivery-only record open"
+  [ "$(fm_pending_reply_get "$rec" resolved_via)" = delivery ] \
+    || fail "reconciliation lost delivery-only resolution provenance"
+  [ "$(fm_pending_reply_get "$rec" resolved_epoch)" = 9200 ] \
+    || fail "reconciliation did not preserve the confirmed delivery epoch"
+  [ ! -e "$marker" ] || fail "reconciliation retained a repaired confirmation marker"
+
+  fm_pending_reply_mark_turn_completed "$state" "$corr" request
+  fm_pending_reply_tick_one "$state" "$corr" idle "$home/hibit"
+  : > "$state/hibit.status"
+  assert_no_grep "pending-reply-missed" "$state/hibit.status" \
+    "repaired delivery-only record falsely escalated"
+  pass "delivery-only partial commit repairs before marker retirement"
+}
+
 test_operator_resolve_closes_stuck_records() {
   local home state corr rec key open output rc phase pending_corr pending_rec
   home=$(setup_parent operator-resolve)
@@ -1145,6 +1186,8 @@ test_wrong_home_detected_not_acknowledged
 test_unmarked_captain_input_creates_no_expectation
 test_fm_send_marked_secondmate_creates_pending_and_embeds_corr
 test_fm_send_delivery_only_action_resolves_on_delivery
+test_updatefirstmate_nudge_is_delivery_only
+test_delivery_only_partial_commit_reconciles_before_marker_retirement
 test_operator_resolve_closes_stuck_records
 test_document_pointer_resolves
 test_helper_report_resolves

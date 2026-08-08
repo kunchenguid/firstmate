@@ -531,8 +531,8 @@ else
       exit 1
       ;;
   esac
-  # Delivery confirmed. Mark the pending expectation delivered without resolving
-  # it: only a correlated parent report acknowledges the request.
+  # Delivery confirmed. Commit delivery-only records as resolved; ordinary
+  # requests remain open until a correlated parent report acknowledges them.
   if [ -n "$PENDING_REPLY_CORR" ]; then
     if fm_pending_reply_confirm_delivery "$STATE" "$PENDING_REPLY_CORR"; then
       :

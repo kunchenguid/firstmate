@@ -212,6 +212,33 @@ fm_pending_reply_set() {  # <record-path> <key> <value>
   mv -f "$tmp" "$rec"
 }
 
+fm_pending_reply_set_fields() {  # <record-path> <key> <value>...
+  local rec=$1 dir base tmp line keep i
+  local -a fields
+  shift
+  fields=("$@")
+  [ "${#fields[@]}" -gt 0 ] && [ $(( ${#fields[@]} % 2 )) -eq 0 ] || return 2
+  [ -f "$rec" ] || return 1
+  dir=$(dirname "$rec")
+  base=$(basename "$rec")
+  tmp="$dir/.${base}.tmp.$$"
+  : > "$tmp" || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    keep=1
+    for ((i = 0; i < ${#fields[@]}; i += 2)); do
+      if [ "${line%%=*}" = "${fields[$i]}" ]; then
+        keep=0
+        break
+      fi
+    done
+    [ "$keep" = 0 ] || printf '%s\n' "$line" >> "$tmp" || return 1
+  done < "$rec"
+  for ((i = 0; i < ${#fields[@]}; i += 2)); do
+    printf '%s=%s\n' "${fields[$i]}" "${fields[$((i + 1))]}" >> "$tmp" || return 1
+  done
+  mv -f "$tmp" "$rec"
+}
+
 # Embed or replace a correlation token after the from-firstmate marker.
 # Idempotent for the same corr; replaces a different leading corr token.
 # Result is assigned to <result-var>.
@@ -305,6 +332,19 @@ EOF
 # Mark delivery success for an existing record. A delivery-only action resolves
 # here; reply-expected requests remain open for their correlated report.
 fm_pending_reply_mark_delivered() {  # <state-dir> <corr_id> [confirmed-epoch]
+  local state=$1 corr=$2 lock rc=0
+  local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
+  STATE=$state
+  lock="$state/.pending-reply-$corr.lock"
+  # shellcheck source=bin/fm-wake-lib.sh
+  . "$_FM_PENDING_REPLY_LIB_DIR/fm-wake-lib.sh"
+  fm_lock_acquire_wait "$lock" || return 1
+  _fm_pending_reply_mark_delivered_locked "$@" || rc=$?
+  fm_lock_release "$lock"
+  return "$rc"
+}
+
+_fm_pending_reply_mark_delivered_locked() {  # <state-dir> <corr_id> [confirmed-epoch]
   local state=$1 corr=$2 confirmed_epoch=${3-} rec phase delivered now reply_expected
   rec=$(fm_pending_reply_path "$state" "$corr")
   [ -f "$rec" ] || return 1
@@ -314,20 +354,27 @@ fm_pending_reply_mark_delivered() {  # <state-dir> <corr_id> [confirmed-epoch]
     *) return 1 ;;
   esac
   delivered=$(fm_pending_reply_get "$rec" delivered_epoch)
-  if [ -z "$delivered" ]; then
-    now=${confirmed_epoch:-$(fm_pending_reply_now)}
-    fm_pending_reply_set "$rec" delivered_epoch "$now" || return 1
-  fi
-  if [ "$phase" = delivery_unknown ]; then
-    fm_pending_reply_set "$rec" phase awaiting_report || return 1
-  fi
+  now=${confirmed_epoch:-$(fm_pending_reply_now)}
+  [ -n "$delivered" ] || delivered=$now
   reply_expected=$(fm_pending_reply_get "$rec" reply_expected)
   [ -n "$reply_expected" ] || reply_expected=1
-  if [ "$reply_expected" = 0 ] && [ "$(fm_pending_reply_get "$rec" phase)" != resolved ]; then
-    now=${confirmed_epoch:-$(fm_pending_reply_now)}
-    fm_pending_reply_set "$rec" resolved_epoch "$now" || return 1
-    fm_pending_reply_set "$rec" resolved_via delivery || return 1
-    fm_pending_reply_set "$rec" phase resolved || return 1
+  if [ "$reply_expected" = 0 ]; then
+    if [ "$phase" = resolved ]; then
+      [ -n "$(fm_pending_reply_get "$rec" delivered_epoch)" ] || \
+        fm_pending_reply_set "$rec" delivered_epoch "$delivered" || return 1
+      return 0
+    fi
+    fm_pending_reply_set_fields "$rec" \
+      delivered_epoch "$delivered" \
+      resolved_epoch "$now" \
+      resolved_via delivery \
+      phase resolved || return 1
+    return 0
+  fi
+  if [ "$phase" = delivery_unknown ]; then
+    fm_pending_reply_set_fields "$rec" delivered_epoch "$delivered" phase awaiting_report || return 1
+  elif [ -z "$(fm_pending_reply_get "$rec" delivered_epoch)" ]; then
+    fm_pending_reply_set "$rec" delivered_epoch "$delivered" || return 1
   fi
   return 0
 }
@@ -389,13 +436,31 @@ fm_pending_reply_mark_delivery_unknown() {  # <state-dir> <corr_id>
 }
 
 fm_pending_reply_reconcile_delivery() {  # <state-dir> <corr_id>
+  local state=$1 corr=$2 lock rc=0
+  local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
+  STATE=$state
+  lock="$state/.pending-reply-$corr.lock"
+  # shellcheck source=bin/fm-wake-lib.sh
+  . "$_FM_PENDING_REPLY_LIB_DIR/fm-wake-lib.sh"
+  fm_lock_acquire_wait "$lock" || return 1
+  _fm_pending_reply_reconcile_delivery_locked "$@" || rc=$?
+  fm_lock_release "$lock"
+  return "$rc"
+}
+
+_fm_pending_reply_reconcile_delivery_locked() {  # <state-dir> <corr_id>
   local state=$1 corr=$2 rec delivered marker entry delivery_state value epoch
-  local grace now age phase
+  local grace now age phase reply_expected
   rec=$(fm_pending_reply_path "$state" "$corr")
   [ -f "$rec" ] || return 1
   marker=$(fm_pending_reply_delivery_confirmation_path "$state" "$corr")
   delivered=$(fm_pending_reply_get "$rec" delivered_epoch)
   if [ -n "$delivered" ]; then
+    reply_expected=$(fm_pending_reply_get "$rec" reply_expected)
+    [ -n "$reply_expected" ] || reply_expected=1
+    if [ "$reply_expected" = 0 ] && [ "$(fm_pending_reply_get "$rec" phase)" != resolved ]; then
+      _fm_pending_reply_mark_delivered_locked "$state" "$corr" "$delivered" || return 1
+    fi
     rm -f "$marker" 2>/dev/null || true
     return 0
   fi
@@ -407,7 +472,7 @@ fm_pending_reply_reconcile_delivery() {  # <state-dir> <corr_id>
     confirmed)
       epoch=$value
       case "$epoch" in ''|*[!0-9]*) return 1 ;; esac
-      fm_pending_reply_mark_delivered "$state" "$corr" "$epoch" || return 1
+      _fm_pending_reply_mark_delivered_locked "$state" "$corr" "$epoch" || return 1
       rm -f "$marker" 2>/dev/null || true
       return 0
       ;;
@@ -565,7 +630,7 @@ _fm_pending_reply_try_resolve_locked() {  # <state-dir> <corr_id> [status-file-o
   now=$(fm_pending_reply_now)
   fm_pending_reply_set "$rec" phase resolved || return 1
   if [ -z "$delivered" ]; then
-    fm_pending_reply_mark_delivered "$state" "$corr" "$now" || return 1
+    _fm_pending_reply_mark_delivered_locked "$state" "$corr" "$now" || return 1
     rm -f "$marker" 2>/dev/null || true
   fi
   fm_pending_reply_set "$rec" resolved_epoch "$now" || return 1
@@ -609,10 +674,11 @@ _fm_pending_reply_resolve_manual_locked() {  # <state-dir> <corr_id> [reason]
   reason=$(fm_pending_reply_summarize "$reason")
   [ -n "$reason" ] || reason='closed by operator'
   now=$(fm_pending_reply_now)
-  fm_pending_reply_set "$rec" resolved_epoch "$now" || return 1
-  fm_pending_reply_set "$rec" resolved_via operator || return 1
-  fm_pending_reply_set "$rec" resolved_note "$reason" || return 1
-  fm_pending_reply_set "$rec" phase resolved || return 1
+  fm_pending_reply_set_fields "$rec" \
+    resolved_epoch "$now" \
+    resolved_via operator \
+    resolved_note "$reason" \
+    phase resolved || return 1
   marker=$(fm_pending_reply_delivery_confirmation_path "$state" "$corr")
   rm -f "$marker" 2>/dev/null || true
   _fm_pending_reply_close_escalation_locked "$state" "$corr" || return 1
@@ -1030,7 +1096,7 @@ _fm_pending_reply_maybe_escalate_locked() {  # <state-dir> <corr_id>
   [ -f "$rec" ] || return 1
   phase=$(fm_pending_reply_get "$rec" phase)
   if [ "$phase" = delivery_unknown ]; then
-    fm_pending_reply_reconcile_delivery "$state" "$corr" || true
+    _fm_pending_reply_reconcile_delivery_locked "$state" "$corr" || true
     phase=$(fm_pending_reply_get "$rec" phase)
     [ "$phase" = delivery_unknown ] || return 0
   fi
