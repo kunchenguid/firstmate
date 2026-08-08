@@ -939,6 +939,7 @@ SH
   sleep 0.3
   kill -0 "$worker_pid" 2>/dev/null || fail "cursor secondmate worker stand-in did not start"
   out=$(FM_FAKE_CURSOR_AGENT_ARGS="$fakebin/cursor-agent --force --trust brief" \
+    FM_PROC_ROOT_OVERRIDE="$w/no-proc" FM_FAKE_CURSOR_PROC_ROOT="$w/no-proc" \
     FM_FAKE_CURSOR_AGENT_PID=4242 FM_FAKE_CURSOR_WORKER_PID="$worker_pid" \
     spawn_secondmate_capture "$w" sm "$sm" "$launchlog" 2>&1)
   status=$?
