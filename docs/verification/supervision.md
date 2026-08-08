@@ -243,6 +243,7 @@ Current entry points:
 ```sh
 tests/fm-turnend-guard.test.sh
 tests/fm-cursor-harness.test.sh
+tests/fm-session-lock-ancestry.test.sh
 tests/fm-session-start.test.sh
 tests/fm-composer-lib.test.sh
 tests/fm-composer-ghost.test.sh
