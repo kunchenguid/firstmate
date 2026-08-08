@@ -285,6 +285,10 @@
       "audience": "maintainer-architecture"
     },
     {
+      "path": "docs/superpowers/plans/2026-08-08-fleet-refill-terminal-lifecycle.md",
+      "audience": "maintainer-architecture"
+    },
+    {
       "path": "docs/supervision-protocols/claude.md",
       "audience": "agent-runtime"
     },
