@@ -48,6 +48,10 @@ worktree=<absolute Orca worktree path>
 Spawn registers the repository, creates an independent worktree, reuses only the verified `result.terminal.handle` returned by Orca or creates a terminal explicitly, installs harness hooks, records metadata, and launches the selected harness.
 Exact command flags and response parsing are owned by `bin/backends/orca.sh` and script help.
 
+A spawn that fails after Orca created the worktree closes any terminal it had created and releases that worktree on its way out.
+If that release itself fails, Firstmate publishes one complete task record carrying `spawn_state=failed` and `cleanup_required=orca-worktree` alongside the usual `orca_worktree_id=` and `terminal=` fields, so the surviving worktree stays named by a record an operator can find rather than disappearing with the failed spawn.
+Those two fields appear only on that failure record; a normal task record never carries them.
+
 `fm-peek.sh` reads with `orca terminal read`.
 `fm-send.sh` types and verifies composer clearance, follows `oldestCursor` when Orca returns a limited page, and retries Enter without retyping when a slash popup first fills an argument placeholder.
 A bare shell row is `unknown`, not an empty agent composer.

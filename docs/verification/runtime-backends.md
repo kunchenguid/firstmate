@@ -596,6 +596,7 @@ tests/fm-bootstrap.test.sh
 ```
 
 The fake-Orca suite covers readiness, registration, create response parsing, metadata routing, popup-safe submit, and path-matched release refusal.
+It also covers the failed-spawn recovery record: when metadata publication and Orca worktree removal both fail, one complete record marked `spawn_state=failed` and `cleanup_required=orca-worktree` survives and the reported diagnostic names it rather than claiming no record was written.
 
 ## cmux
 
