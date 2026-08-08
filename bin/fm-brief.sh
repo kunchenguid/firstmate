@@ -6,7 +6,7 @@
 # description, acceptance criteria, and context, and may adjust other sections
 # when the task genuinely deviates (e.g. working an existing external PR instead
 # of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--start-ref <ref>] [--herdr-lab]
 #        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
@@ -41,7 +41,11 @@
 # to launch a ship task whose explicit --mode disagrees, so an adjusted brief and the
 # recorded task metadata cannot drift apart.
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
-# --mode is refused on scout and secondmate scaffolds: a scout's deliverable is a
+# --start-ref makes the new branch begin at one explicit local ref instead of the
+# detached worktree HEAD. Firstmate fork-divergence topics use upstream/main so
+# an upstream PR never inherits unrelated fork-main divergences. The ref accepts
+# only Git ref-name characters and must already exist when the worker branches.
+# --mode and --start-ref are refused on scout and secondmate scaffolds: a scout's deliverable is a
 # report rather than a merge, and a charter is not a delivery contract.
 # There is no --yolo flag here. The worker never owns approval decisions, so yolo is
 # a spawn-time and firstmate-side input only (AGENTS.md section 7).
@@ -106,6 +110,8 @@ HERDR_LAB=0
 NO_PROJECTS=0
 MODE=
 MODE_SET=0
+START_REF=
+START_REF_SET=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -115,6 +121,7 @@ for a in "$@"; do
     esac
     case "$want_value" in
       mode) MODE=$a; MODE_SET=1 ;;
+      start-ref) START_REF=$a; START_REF_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -127,6 +134,8 @@ for a in "$@"; do
     --no-projects) NO_PROJECTS=1 ;;
     --mode) want_value=mode ;;
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
+    --start-ref) want_value=start-ref ;;
+    --start-ref=*) START_REF=${a#--start-ref=}; START_REF_SET=1 ;;
     # yolo never reaches the worker: it is firstmate's approval authority, not a
     # brief input. Refuse it loudly so it is never silently dropped here and then
     # believed to have been recorded.
@@ -153,6 +162,22 @@ if [ "$KIND" = ship ]; then
 elif [ "$MODE_SET" -eq 1 ]; then
   echo "error: --mode applies only to ship briefs; a scout delivers a report and a secondmate charter is not a delivery contract" >&2
   exit 1
+fi
+if [ "$KIND" != ship ] && [ "$START_REF_SET" -eq 1 ]; then
+  echo "error: --start-ref applies only to ship briefs" >&2
+  exit 1
+fi
+if [ "$START_REF_SET" -eq 1 ]; then
+  case "$START_REF" in
+    ''|-*|/*|*/|*..*|*[!A-Za-z0-9._/-]*)
+      echo "error: --start-ref is not a safe Git ref name: '$START_REF'" >&2
+      exit 1
+      ;;
+  esac
+  if ! git check-ref-format --branch "$START_REF" >/dev/null 2>&1; then
+    echo "error: --start-ref is not a valid Git ref name: '$START_REF'" >&2
+    exit 1
+  fi
 fi
 ID=${POS[0]}
 
@@ -409,6 +434,9 @@ esac
 # briefs stay byte-identical to the historical Bash 5 output.
 DOD=${DOD%$'\n'}
 
+BRANCH_START=
+[ "$START_REF_SET" -eq 0 ] || BRANCH_START=" $START_REF"
+
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 
@@ -424,7 +452,7 @@ You are in a disposable git worktree of $REPO, at a detached HEAD on a clean def
 The path check is authoritative: \`git rev-parse --git-dir\` and \`git rev-parse --git-common-dir\` can help inspect the repo, but they do not prove you are outside the primary checkout.
 If the top-level path is the primary checkout or not the worktree you were launched in, STOP - do not branch or commit here - append \`blocked: launched in primary checkout, not an isolated worktree\` to the status file and stop.
 
-1. First action: create your branch: \`git checkout -b fm/$ID\`$SETUP2
+1. First action: create your branch: \`git checkout -b fm/$ID$BRANCH_START\`$SETUP2
 
 # Rules
 $RULE1

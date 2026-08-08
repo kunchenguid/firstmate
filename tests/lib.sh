@@ -34,6 +34,13 @@ FM_TEST_LIB_SOURCED=1
 # strips this to verify real refusal.
 export FM_GATE_REFUSE_BYPASS=1
 
+# Host commit.gpgsign must never make a fixture depend on a personal signing key.
+# Use Git's process-local config environment rather than mutating user config.
+FM_TEST_GIT_CONFIG_INDEX=${GIT_CONFIG_COUNT:-0}
+eval "export GIT_CONFIG_KEY_$FM_TEST_GIT_CONFIG_INDEX=commit.gpgsign"
+eval "export GIT_CONFIG_VALUE_$FM_TEST_GIT_CONFIG_INDEX=false"
+export GIT_CONFIG_COUNT=$((FM_TEST_GIT_CONFIG_INDEX + 1))
+
 # Resolve the repo root from this library's own location. Consumed by sourcing
 # test files, not by this library, so it reads as "unused" here.
 # shellcheck disable=SC2034
@@ -190,7 +197,8 @@ SH
 # --- deterministic git identity and fixtures --------------------------------
 
 # fm_git_identity [name] [email]: export a fixed author/committer identity so
-# fixture commits never depend on the host git config.
+# fixture commits never depend on host identity. The library-wide process-local
+# Git config above independently disables host commit signing for every fixture.
 fm_git_identity() {
   export GIT_AUTHOR_NAME=${1:-fmtest} GIT_AUTHOR_EMAIL=${2:-fmtest@example.invalid}
   export GIT_COMMITTER_NAME=$GIT_AUTHOR_NAME GIT_COMMITTER_EMAIL=$GIT_AUTHOR_EMAIL

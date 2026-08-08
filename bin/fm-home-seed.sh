@@ -870,6 +870,11 @@ seed_home() {
     home=$(ensure_home "$id" "$requested_abs")
   fi
   SEED_HOME="$home"
+  # A leased worktree already shares the primary's Git config. A new standalone
+  # clone initially points origin at the local source path, so the provisioning
+  # owner converges it to the primary's validated fork/upstream topology here.
+  # Existing unrelated remotes are refused by the helper rather than overwritten.
+  "$SCRIPT_DIR/fm-fork-remotes.sh" inherit "$FM_ROOT" "$home" >/dev/null || return 1
   validate_registry_home_text "$home" || return 1
   validate_home_assignment "$id" "$home"
   validate_operational_dirs "$home" || return 1

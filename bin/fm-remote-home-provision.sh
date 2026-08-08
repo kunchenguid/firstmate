@@ -8,7 +8,10 @@
 # base64 parent SSH alias, and one base64 project record per line. Each project
 # record's origin is the URL the parent resolved and named, so this host clones
 # from it and re-validates it through bin/fm-project-origin-lib.sh instead of
-# trusting the sender. The remote code root is cloned into an absent home,
+# trusting the sender. Optional paired Firstmate fork/upstream fields carry the
+# already validated primary topology; their guarded apply prints its reverse
+# before converging this remote code root, and the new home inherits it. A
+# partial pair is refused. The remote code root is cloned into an absent home,
 # project origins are cloned on this host, the project registry and charter are
 # published, the durable .fm-secondmate-parent record names this home's route to its parent as
 # "remote" - read by bin/fm-teardown.sh's cleanup gate so a delegated public
@@ -102,6 +105,8 @@ CHARTER_B64=$(manifest_value "$TMP/manifest" charter_b64 || true)
 # field) still provisions; the durable parent record below simply omits the
 # host in that case rather than refusing the whole seed.
 PARENT_HOST_B64=$(manifest_value "$TMP/manifest" parent_host_b64 || true)
+FIRSTMATE_FORK_B64=$(manifest_value "$TMP/manifest" firstmate_fork_b64 || true)
+FIRSTMATE_UPSTREAM_B64=$(manifest_value "$TMP/manifest" firstmate_upstream_b64 || true)
 COUNT=$(manifest_value "$TMP/manifest" project_count || true)
 base64_decode_to "$ID_B64" "$TMP/id" || die "manifest id is not valid base64"
 base64_decode_to "$CHARTER_B64" "$TMP/charter" || die "manifest charter is not valid base64"
@@ -109,6 +114,18 @@ PARENT_HOST=
 if [ -n "$PARENT_HOST_B64" ]; then
   base64_decode_to "$PARENT_HOST_B64" "$TMP/parent-host" || die "manifest parent host is not valid base64"
   PARENT_HOST=$(cat "$TMP/parent-host")
+fi
+FIRSTMATE_FORK=
+FIRSTMATE_UPSTREAM=
+if [ -n "$FIRSTMATE_FORK_B64$FIRSTMATE_UPSTREAM_B64" ]; then
+  [ -n "$FIRSTMATE_FORK_B64" ] && [ -n "$FIRSTMATE_UPSTREAM_B64" ] \
+    || die "manifest carries a partial Firstmate fork topology"
+  base64_decode_to "$FIRSTMATE_FORK_B64" "$TMP/firstmate-fork" \
+    || die "manifest Firstmate fork is not valid base64"
+  base64_decode_to "$FIRSTMATE_UPSTREAM_B64" "$TMP/firstmate-upstream" \
+    || die "manifest Firstmate upstream is not valid base64"
+  FIRSTMATE_FORK=$(cat "$TMP/firstmate-fork")
+  FIRSTMATE_UPSTREAM=$(cat "$TMP/firstmate-upstream")
 fi
 ID=$(cat "$TMP/id")
 safe_id "$ID" || die "manifest carries an unsafe secondmate id"
@@ -145,6 +162,11 @@ PROVISION_LOCK="$STATE/.remote-home-provision-$HOME_LOCK_KEY.lock"
 fm_lock_acquire_wait "$PROVISION_LOCK"
 PROVISION_LOCK_HELD=1
 
+if [ -n "$FIRSTMATE_UPSTREAM" ]; then
+  "$SCRIPT_DIR/fm-fork-remotes.sh" apply "$FIRSTMATE_FORK" "$FIRSTMATE_UPSTREAM" --confirm --no-registration "$FM_ROOT" \
+    || die "could not establish the primary-approved fork topology in the remote code root"
+fi
+
 if [ -e "$FM_HOME" ] || [ -L "$FM_HOME" ]; then
   [ -d "$FM_HOME" ] && [ ! -L "$FM_HOME" ] || die "remote home exists but is not a safe directory"
   [ -f "$FM_HOME/AGENTS.md" ] && [ ! -L "$FM_HOME/AGENTS.md" ] \
@@ -175,6 +197,11 @@ if [ -e "$FM_HOME" ] || [ -L "$FM_HOME" ]; then
 else
   CREATED_HOME=1
   git clone --quiet -- "$FM_ROOT" "$FM_HOME" || die "could not clone the remote Firstmate home"
+  # The host-local clone initially names the code-root path as origin. Converge
+  # a newly provisioned standalone home to the code root's fork/upstream remote
+  # topology; a classic single-origin root remains unchanged.
+  "$SCRIPT_DIR/fm-fork-remotes.sh" inherit "$FM_ROOT" "$FM_HOME" >/dev/null \
+    || die "could not inherit the remote code root's fork topology"
 fi
 for operational_dir in data state config projects; do
   operational_path="$FM_HOME/$operational_dir"

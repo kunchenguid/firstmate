@@ -18,6 +18,7 @@
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
 #                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed after <cause>: <reason>",
 #                 "SECONDMATE_HANDOFF: secondmate <id>: pending delivery: <n> item(s)",
+#                 "UPSTREAM_SYNC: required ...|check failed: ...",
 #                 "FMX: X mode on ..." or "FMX: X mode off ...".
 #          When a RUNNING local secondmate worktree is fast-forwarded to
 #          firstmate's own current default-branch commit, that update is a
@@ -67,6 +68,9 @@
 #          guesses at malformed or unsafe existing files, and secondmate homes
 #          await the primary-authoritative inherited value instead of creating
 #          their own.
+#          A validated fork-main primary checks official upstream at most once
+#          per successful 24-hour interval during the deferred network phase;
+#          only a required integration or failed check is actionable output.
 #          X mode is OPTIONAL and inert unless FM_HOME/.env has a non-empty
 #          FMX_PAIRING_TOKEN. When opted in, bootstrap requires curl+jq, writes
 #          the relay poll shim and 30s cadence config, and prints an FMX line.
@@ -79,9 +83,10 @@
 #          refresh relays any completed fm-fleet-sync.sh output before the
 #          aggregate timeout skip line with timeout and elapsed seconds.
 #          Set FM_FLEET_PRUNE=0 to skip branch pruning during that refresh.
-#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the six MUTATING sweeps
-#          (PR-check migration, secondmate_sync, secondmate_liveness_sweep,
-#          secondmate_handoff_resume, x_mode_setup, fleet_sync) while still
+#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the seven MUTATING sweeps
+#          (PR-check migration, fork_upstream_check, secondmate_sync,
+#          secondmate_liveness_sweep, secondmate_handoff_resume, x_mode_setup,
+#          fleet_sync) while still
 #          printing every read-only detect line
 #          above; the TANGLE line switches to advisory-only wording with no
 #          checkout command. Used by
@@ -231,6 +236,41 @@ fleet_sync_relay_all_output() {
     [ -n "$line" ] || continue
     echo "FLEET_SYNC: $line"
   done < "$tmp"
+}
+
+fork_upstream_check() {
+  local out marker now previous tmp
+  [ -x "$FM_ROOT/bin/fm-fork-status.sh" ] || return 0
+  [ ! -f "$FM_HOME/.fm-secondmate-home" ] || return 0
+  git -C "$FM_ROOT" remote get-url upstream >/dev/null 2>&1 || return 0
+  marker="$STATE/.fork-upstream-check"
+  now=$(date +%s)
+  if [ -e "$marker" ] || [ -L "$marker" ]; then
+    if [ ! -f "$marker" ] || [ -L "$marker" ]; then
+      echo "UPSTREAM_SYNC: check failed: unsafe daily-check marker $marker"
+      return 0
+    fi
+    previous=$(cat "$marker" 2>/dev/null || true)
+    case "$previous" in
+      ''|*[!0-9]*) ;;
+      *)
+        if [ "$previous" -le "$now" ] && [ $((now - previous)) -lt 86400 ]; then return 0; fi
+        ;;
+    esac
+  fi
+  if out=$("$FM_ROOT/bin/fm-fork-status.sh" --repo "$FM_ROOT" --check-upstream --refresh 2>&1); then
+    tmp="$marker.tmp.$$"
+    if printf '%s\n' "$now" > "$tmp" && mv -f "$tmp" "$marker"; then
+      case "$out" in
+        'upstream-integration: required '*) echo "UPSTREAM_SYNC: ${out#upstream-integration: }" ;;
+      esac
+    else
+      rm -f "$tmp" 2>/dev/null || true
+      echo "UPSTREAM_SYNC: check failed: could not publish daily-check marker"
+    fi
+  else
+    echo "UPSTREAM_SYNC: check failed: ${out%%$'\n'*}"
+  fi
 }
 
 fleet_sync() {
@@ -1206,6 +1246,11 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   # secondmate_sync consumes SECONDMATE_RESPAWNED_IDS from the liveness sweep, so
   # those two always run together in the same phase.
   if network_phase; then
+    if network_sweep_authorized 'fork upstream check'; then
+      __fm_timing_stamp=$(fm_timing_now_ms)
+      fork_upstream_check
+      fm_timing_record phase fork-upstream "$__fm_timing_stamp"
+    fi
     if network_sweep_authorized 'dead-secondmate relaunch'; then
       __fm_timing_stamp=$(fm_timing_now_ms)
       secondmate_liveness_sweep

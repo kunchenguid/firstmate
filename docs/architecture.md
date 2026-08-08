@@ -302,7 +302,12 @@ The refresh also prunes local branches whose remote is gone and that no worktree
 For a remote route, the configured code root updates from its own origin on that host before the persistent home fast-forwards to the code-root commit.
 The update is fast-forward only: dirty, diverged, offline, and off-default targets are reported and left untouched.
 Local homes share the guarded fast-forward helper, while remote updates delegate the same safety decision to the configured host through the generic transport.
-The mechanics are owned by the `/updatefirstmate` skill and firstmate's operating manual in [`AGENTS.md`](../AGENTS.md) (self-update).
+
+A permanent fork-main home keeps that same consumer path instead of weakening it into an in-place merge.
+Its `origin` is already validated fork main, while official `upstream` integration is prepared in an isolated candidate, reviewed with Git's patch-workflow primitives, validated through a separate fork-target no-mistakes registration, and merged only through a captain-approved fork pull request.
+The operating home and every secondmate then consume that result through the ordinary fast-forward path.
+[`fork-main.md`](fork-main.md) owns the operator-current topology, divergence manifest, health, merge, and discard behavior.
+The mechanics are owned by the `/updatefirstmate` and `fork-main-integration` skills and firstmate's operating manual in [`AGENTS.md`](../AGENTS.md) (self-update).
 
 ## Restart-proof
 

@@ -131,6 +131,10 @@ The primary validates every resolved origin before transport, and the receiving 
 The project's registered delivery mode still comes from this machine's `data/projects.md`, so an unregistered or `local-only` project is refused rather than provisioned.
 
 The seed records `host:`, `root:`, and `home:` in `data/secondmates.md`, gates the host on readiness, sends a bounded manifest, and lets the remote host clone its own Firstmate home and project origins.
+When the primary has the validated personal-fork `origin` plus official `upstream` topology, the manifest carries both Firstmate code URLs and the receiving host establishes the same remotes, main tracking branch, and reviewable rerere settings before attaching the persistent home.
+A partial or contradictory primary topology is refused before transport.
+The remote code root remains a fast-forward consumer of the fork and never prepares official-upstream integrations.
+See [`fork-main.md`](fork-main.md) for the topology owner.
 In the primary home, its durable registration effects are limited to that route and the charter brief under `data/<id>`; launch records are created only when the secondmate is launched.
 Readiness starts with a read-only check; when that check reports a gap, it runs `--fix` and then a second read-only check whose verdict decides, so the operator never has to run the repair by hand and a repair is never trusted on its own word.
 A host that stays red prints the doctor's remaining gaps and their operator steps, restores the registry, and creates nothing on the remote host.
@@ -210,6 +214,7 @@ The primary records that remote nudge before delivery and retries it during lock
 Local secondmates retain their generation-specific local pointer contract; remote transfers do not copy those primary-local instruction paths.
 
 `/updatefirstmate` updates each remote code root from its own origin, then guardedly fast-forwards the persistent remote home to that code-root commit.
+For permanent fork-main fleets, that origin is the personal fork and the main primary alone owns the separately validated official-upstream merge.
 Dirty, diverged, unavailable, or otherwise unsafe targets are reported and left untouched.
 
 Retire a remote second mate with the normal guarded command:

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Self-update a running firstmate and its secondmates to the latest origin.
+# Self-update a running firstmate and its secondmates to validated fork origin.
 #
 # Mechanical half of the /updatefirstmate skill. Fast-forwards the running
 # firstmate repo's default branch from origin, then fast-forwards every
@@ -8,7 +8,10 @@
 # fast-forward the persistent home to that root. FAST-FORWARD ONLY, exactly like
 # fm-fleet-sync.sh: never force, never create a merge commit, never stash;
 # advance a target only when it is a clean fast-forward, otherwise skip and
-# report. A tracked-files fast-forward never touches the gitignored operational
+# report. In fork-main topology, origin is the personal fork and upstream is the
+# official repository. This script still never merges: after updating from the
+# already-validated fork it reports whether upstream needs a separate isolated,
+# validated integration candidate. A tracked-files fast-forward never touches the gitignored operational
 # dirs (data/, state/, config/, projects/, .no-mistakes/), so a secondmate's
 # in-flight work is never disrupted. Worktrees of this repo share one object
 # store, so a single fetch refreshes them all; standalone-clone homes are
@@ -54,6 +57,18 @@ reread_firstmate="no"
 ff_target "$FM_ROOT" "firstmate" origin no no
 if [ "$FF_STATUS" = "updated" ] && [ -n "$FF_INSTR" ]; then
   reread_firstmate="yes"
+fi
+
+# A real upstream merge must be validated before it becomes fork main. Keep the
+# live-home updater fast-forward-only and surface the separate integration need.
+# The probe is inert for classic single-origin homes.
+upstream_out=
+if [ "${FM_SKIP_FORK_UPSTREAM_CHECK:-0}" != 1 ]; then
+  if upstream_out=$("$SCRIPT_DIR/fm-fork-status.sh" --repo "$FM_ROOT" --check-upstream --refresh 2>&1); then
+    printf '%s\n' "$upstream_out"
+  else
+    echo "upstream-integration: failed: $(first_line "$upstream_out")"
+  fi
 fi
 
 # --- secondmates -----------------------------------------------------------
