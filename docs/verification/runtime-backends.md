@@ -204,7 +204,7 @@ Bounded output from the successful run:
 ok - codex-cli 0.146.0 live E2E proved narrow Codex worker writable roots
 ```
 
-The 2026-08-05 static extension adds no-mistakes ship inclusion, direct-PR and local-only exclusion, non-Codex exclusion, preserved existing roots, the `NM_HOME` and default `HOME/.no-mistakes` selection contract, and unresolved-root refusal.
+The 2026-08-07 static extension adds no-mistakes ship inclusion, direct-PR and local-only exclusion, non-Codex exclusion, preserved existing roots, the `NM_HOME` and default `HOME/.no-mistakes` selection contract, unresolved-root refusal, and workspace-write network access only for the no-mistakes Codex ship.
 
 The no-mistakes socket control ran on 2026-08-05 with no-mistakes v1.41.2 and codex-cli 0.146.0 in a Firstmate Codex worker whose effective sandbox was workspace-write and whose launch lacked the no-mistakes root.
 The installed matching v1.41.2 module source established that `NM_HOME` selects the root when non-empty, otherwise `HOME/.no-mistakes` does, and the Unix socket is `<root>/socket`.
@@ -220,10 +220,12 @@ no-mistakes daemon status
 connect to daemon socket: dial ipc: dial unix <home>/.no-mistakes/socket: connect: operation not permitted
 ```
 
-The refreshed opt-in guard keeps telemetry and update checks disabled, suppresses the AXI home payload, requires the control's exact socket denial, and then requires the same read-only AXI home command to connect after the selected no-mistakes root is added.
+The refreshed opt-in guard keeps telemetry and update checks disabled, suppresses the AXI home payload, requires the control's exact socket denial, and then requires the same read-only AXI home command to connect after the selected no-mistakes root and workspace-write network access are added.
 It never invokes `no-mistakes axi run` or another pipeline-starting command.
 
 Its additional bounded success marker is:
+
+The credentialed guard produced this marker on 2026-08-07 with no-mistakes v1.41.2 and codex-cli 0.146.0 after the workspace-write network correction.
 
 ```text
 ok - codex-cli 0.146.0 live E2E proved narrow Codex worker writable roots and read-only no-mistakes socket access

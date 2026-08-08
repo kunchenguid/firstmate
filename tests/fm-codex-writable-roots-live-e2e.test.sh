@@ -62,14 +62,13 @@ git -C "$PROJECT" worktree add -q --detach "$WORKTREE"
 cat > "$WORKTREE/control.sh" <<SH
 #!/usr/bin/env bash
 socket_out=; socket_status=0
-socket_out=\$(NO_MISTAKES_TELEMETRY=off \
-  NO_MISTAKES_NO_UPDATE_CHECK=1 no-mistakes axi 2>&1) || socket_status=\$?
+socket_out=\$(python3 -c 'import socket; s=socket.socket(socket.AF_UNIX); s.connect("$NO_MISTAKES_ROOT/socket"); s.close()' 2>&1) || socket_status=\$?
 if [ "\$socket_status" -eq 0 ]; then
   echo CONTROL_SOCKET_UNEXPECTED_CONNECT
   exit 90
 fi
 case "\$socket_out" in
-  *'connect: operation not permitted'*) ;;
+  *'Operation not permitted'*) ;;
   *) echo CONTROL_SOCKET_WRONG_ERROR; exit 90 ;;
 esac
 if printf 'unexpected\n' >> '$STATE/proof.status'; then
@@ -93,14 +92,15 @@ chmod +x "$WORKTREE/control.sh"
 ) > "$CONTROL_TRANSCRIPT" 2>&1 || fail "Codex control turn failed: $(tail -20 "$CONTROL_TRANSCRIPT")"
 
 grep -F 'CONTROL_DENIED' "$CONTROL_TRANSCRIPT" >/dev/null \
-  || fail "control without additional roots did not prove the parent-home write denial"
+  || fail "control without additional roots did not prove the parent-home write denial: $(tail -20 "$CONTROL_TRANSCRIPT")"
 [ ! -e "$STATE/proof.status" ] || fail "control unexpectedly wrote the parent-home status file"
 
 cat > "$WORKTREE/probe.sh" <<SH
 #!/usr/bin/env bash
 set -eu
-if ! NO_MISTAKES_TELEMETRY=off \
-  NO_MISTAKES_NO_UPDATE_CHECK=1 no-mistakes axi >/dev/null 2>&1; then
+python3 -c 'import socket; s=socket.socket(socket.AF_UNIX); s.connect("$NO_MISTAKES_ROOT/socket"); s.close()'
+if ! (cd '$ROOT' && NO_MISTAKES_TELEMETRY=off \
+  NO_MISTAKES_NO_UPDATE_CHECK=1 no-mistakes axi >/dev/null 2>&1); then
   echo NO_MISTAKES_SOCKET_CONNECT_FAILED
   exit 93
 fi
@@ -127,6 +127,7 @@ chmod +x "$WORKTREE/probe.sh"
     --add-dir "$PROJECT/.git" \
     --add-dir "$REPORT" \
     --add-dir "$NO_MISTAKES_ROOT" \
+    -c 'sandbox_workspace_write.network_access=true' \
     --skip-git-repo-check \
     -c 'approval_policy="never"' \
     -c 'model_reasoning_effort="low"' \

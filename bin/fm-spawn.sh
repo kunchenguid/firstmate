@@ -1252,7 +1252,9 @@ codex_writable_root_flags() {  # <kind> <worktree> <state-dir> <report-dir> [<no
     printf -- '--add-dir %s ' "$(shell_quote "$report_dir")"
   fi
   if [ -n "$no_mistakes_root" ]; then
-    printf -- '--add-dir %s ' "$(shell_quote "$no_mistakes_root")"
+    printf -- '--add-dir %s -c %s ' \
+      "$(shell_quote "$no_mistakes_root")" \
+      "$(shell_quote 'sandbox_workspace_write.network_access=true')"
   fi
 }
 

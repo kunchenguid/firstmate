@@ -423,6 +423,8 @@ test_codex_no_mistakes_ship_receives_gate_state_and_git_writable_roots() {
     "Codex ship launch omitted the state or linked-worktree Git metadata root"
   assert_contains "$launch" "--add-dir '$no_mistakes_real'" \
     "Codex no-mistakes ship launch omitted the selected no-mistakes root"
+  assert_contains "$launch" "-c 'sandbox_workspace_write.network_access=true'" \
+    "Codex no-mistakes ship launch omitted workspace-write network access"
   assert_contains "$launch" "NM_HOME='$no_mistakes_real' codex" \
     "Codex no-mistakes ship launch did not freeze the same selected root for the worker"
   assert_not_contains "$launch" "--add-dir '$data_real'" \
@@ -455,6 +457,8 @@ test_codex_non_gate_ship_modes_exclude_no_mistakes_root() {
       "Codex $mode ship unexpectedly received the no-mistakes root"
     assert_not_contains "$launch" "NM_HOME=" \
       "Codex $mode ship unexpectedly received the no-mistakes environment"
+    assert_not_contains "$launch" "sandbox_workspace_write.network_access=true" \
+      "Codex $mode ship unexpectedly received workspace-write network access"
   done
   pass "Codex direct-PR and local-only ships preserve existing roots without gate access"
 }
@@ -483,6 +487,8 @@ test_codex_scout_receives_task_local_report_root_without_no_mistakes_root() {
     "Codex scout launch unexpectedly received the no-mistakes root"
   assert_not_contains "$launch" "NM_HOME=" \
     "Codex scout launch unexpectedly received the no-mistakes environment"
+  assert_not_contains "$launch" "sandbox_workspace_write.network_access=true" \
+    "Codex scout launch unexpectedly received workspace-write network access"
   pass "Codex scout keeps its report root without sibling data or gate access"
 }
 
@@ -554,6 +560,8 @@ test_codex_no_mistakes_root_is_physical_and_shell_quoted() {
   no_mistakes_real=$(CDPATH='' cd -- "$no_mistakes_real" && pwd -P)
   assert_contains "$launch" "--add-dir '$no_mistakes_real'" \
     "Codex no-mistakes root was not physically resolved and shell quoted"
+  assert_contains "$launch" "-c 'sandbox_workspace_write.network_access=true'" \
+    "Codex no-mistakes launch omitted workspace-write network access"
   assert_contains "$launch" "NM_HOME='$no_mistakes_real' codex" \
     "Codex no-mistakes environment did not use the physical shell-quoted root"
   assert_not_contains "$launch" "$no_mistakes_link" \
@@ -875,6 +883,8 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
     "Codex secondmate launch must not receive parent-home worker writable roots"
   assert_not_contains "$launch" "NM_HOME=" \
     "Codex secondmate launch must not receive the parent no-mistakes environment"
+  assert_not_contains "$launch" "sandbox_workspace_write.network_access=true" \
+    "Codex secondmate launch must not receive parent no-mistakes network access"
   pass "active crew-dispatch profile does not block secondmate launches"
 }
 
