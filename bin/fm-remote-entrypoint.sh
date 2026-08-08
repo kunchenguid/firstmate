@@ -22,7 +22,10 @@
 set -eu
 
 PROTOCOL=1
-DOCTOR_SHA256=7bb13d9fad8455978bf109d4681a3aa3cb170565c8a74be4ec7b520427db14c2
+# Pinned to `sha256sum bin/fm-remote-doctor.sh`; update this alongside any
+# change to that file's bytes, or the git-unavailable trust fallback below
+# breaks silently.
+DOCTOR_SHA256=7962400cb09c934992af41393b4f0f656bcc324f15d2651e3f62f134c7078fe3
 REAL_SOURCE=$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "${BASH_SOURCE[0]}" 2>/dev/null) ||
   REAL_SOURCE=$(realpath "${BASH_SOURCE[0]}" 2>/dev/null) ||
   REAL_SOURCE=${BASH_SOURCE[0]}
