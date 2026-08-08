@@ -1887,10 +1887,25 @@ preflight_firstmate_home_process_event_tree() {
 }
 
 collect_descendant_task_locks() {
-  local home=$1 sub_state child_meta child_id child_kind child_wt child_home
+  local home=$1 sub_state child_meta child_id child_kind child_wt child_home task_set_lock
   local -a child_ids
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
+  # Freeze this home's task SET before reading it. Everything below locks the
+  # tasks that exist right now, but the later cleanup re-enumerates, so without
+  # this a fresh spawn could publish a record into the gap and be mutated
+  # without ever having been lifecycle-locked (bin/fm-wake-lib.sh's
+  # fm_task_set_lock_path owns why). Taken per home, parent before child, and
+  # held until this teardown exits.
+  task_set_lock=$(fm_task_set_lock_path "$sub_state") || {
+    echo "REFUSED: secondmate home $home has an invalid task-set lock path; forced teardown changed nothing" >&2
+    return 1
+  }
+  if ! fm_lock_try_acquire "$task_set_lock"; then
+    echo "REFUSED: secondmate home $home is publishing a task right now (task-set lock is held); forced teardown changed nothing" >&2
+    return 1
+  fi
+  DESCENDANT_LOCK_PATHS+=("$task_set_lock")
   child_ids=()
   for child_meta in "$sub_state"/*.meta; do
     [ -e "$child_meta" ] || continue
@@ -1924,9 +1939,13 @@ preflight_descendant_task_locks() {
   DESCENDANT_TASK_KINDS=()
   DESCENDANT_TASK_HOMES=()
   collect_descendant_task_locks "$home" || return 1
-  # Tasks are acquired in parent-before-child preorder, sorted by id within
-  # each home. Each control lock precedes its matching metadata lock, and no
-  # child lock holder reaches back for a parent lock, so acquisition cannot cycle.
+  # Acquisition order, which every other holder of these locks must match so
+  # they cannot cycle: each home's task-set lock first (parent home before child
+  # home, during collection above), then per-task locks in that same
+  # parent-before-child preorder, sorted by id within each home, each control
+  # lock before its matching metadata lock. No child lock holder ever reaches
+  # back for a parent lock. bin/fm-spawn.sh takes the same task-set lock before
+  # its own per-task locks when it publishes a fresh record.
   for ((i=0; i < ${#DESCENDANT_TASK_IDS[@]}; i++)); do
     state=${DESCENDANT_TASK_STATES[$i]}
     task_id=${DESCENDANT_TASK_IDS[$i]}
