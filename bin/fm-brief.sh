@@ -41,6 +41,10 @@
 # to launch a ship task whose explicit --mode disagrees, so an adjusted brief and the
 # recorded task metadata cannot drift apart.
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
+# Ship briefs also carry a worker-owned iteration rule: while the change is still the
+# worker's to edit, related fixes are grouped behind the smallest focused checks that
+# establish the changed behavior. That ordering ends when this mode's required final
+# checks begin and never narrows the definition of done it generates.
 # --mode is refused on scout and secondmate scaffolds: a scout's deliverable is a
 # report rather than a merge, and a charter is not a delivery contract.
 # There is no --yolo flag here. The worker never owns approval decisions, so yolo is
