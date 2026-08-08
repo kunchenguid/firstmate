@@ -70,9 +70,9 @@ BEAT="$STATE/.last-watcher-beat"
 # Durable evidence that a hook-owned arm was torn down while supervising. On a
 # Cursor primary the stop hook is the sole wake-notification path, so a killed
 # park must surface at the next stop instead of stranding the durable queue;
-# bin/fm-turnend-guard-cursor.sh reads this and bin/fm-wake-drain.sh clears it
+# The hook-owned arm adapters read this and bin/fm-wake-drain.sh clears it
 # (single owner). Written best-effort from the signal traps only.
-INTERRUPT_MARKER="$STATE/.cursor-hook-interrupted"
+INTERRUPT_MARKER="$STATE/.hook-arm-interrupted"
 # "Fresh" reuses the guard's threshold so there is one definition of liveness.
 GRACE=${FM_GUARD_GRACE:-300}
 # How long to wait for a freshly forked watcher to acquire the lock and beat.
