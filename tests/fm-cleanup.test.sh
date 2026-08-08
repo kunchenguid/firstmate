@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Public-interface tests for the structured attempt-bound cleanup operation:
 # preflight-all-refusals-before-effects, per-effect receipts, branch-fate
-# failure recording, wrapper identity, and nested-lock refusal.
+# failure recording, wrapper identity, nested-lock refusal, and idempotent
+# replay after a fully completed cleanup.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -107,8 +108,34 @@ test_nested_lock_acquire_refuses() {
   pass "the cleanup path never reacquires a held attempt lock"
 }
 
+test_replay_after_complete_cleanup_is_a_noop() {
+  # A fully cleaned attempt (all cleanup.* receipts observed, owned copy already
+  # returned by the provider) must replay as a no-op success BEFORE preflight,
+  # whose owned-copy identity check would otherwise refuse on the missing dir.
+  local aid gen out rc
+  aid=$(setup_cleanup_attempt)
+  gen=$(fm_attempt_generation "$aid") || fail "generation"
+  fm_attempt_effect_observe "$aid" "$gen" landing '{"disposition":"preserved_unlanded"}' || fail "landing"
+  fm_attempt_effect_observe "$aid" "$gen" cleanup.endpoint '{"endpoint":"w-g","gone":true}' || fail "endpoint"
+  fm_attempt_effect_observe "$aid" "$gen" cleanup.preservation \
+    "{\"ref\":\"refs/fm-preserve/$aid\",\"head\":\"deadbeef\"}" || fail "preservation"
+  fm_attempt_effect_observe "$aid" "$gen" cleanup.branch '{"fate":"deleted"}' || fail "branch"
+  fm_attempt_effect_observe "$aid" "$gen" cleanup.provider \
+    "{\"provider\":\"tmux\",\"returned\":true,\"copy\":\"$TMP_ROOT/wt-g\"}" || fail "provider"
+  fm_attempt_effect_observe "$aid" "$gen" cleanup.runtime '{"records_removed":true}' || fail "runtime"
+  [ -d "$TMP_ROOT/wt-g" ] || fail "fixture must replay with the owned copy already returned (dir absent)"
+  out=$(env PATH="$CLEANUP_PATH" FM_TERMINAL_QUIET_SECS=0 \
+    "$ROOT/bin/fm-cleanup-lib.sh" --run "$aid" preserved_unlanded 2>&1)
+  rc=$?
+  [ "$rc" = 0 ] || fail "replay refused with exit $rc: $out"
+  assert_contains "$out" "already complete" "replay did not converge as already complete"
+  assert_not_contains "$out" "refused" "replay refused despite the complete effect set"
+  pass "a fully cleaned attempt replays as a no-op success before any preflight refusal"
+}
+
 test_cleanup_refuses_live_processes_and_immature_quiet
 test_preflight_runs_before_any_effect
 test_cleanup_records_branch_disposition_failure
 test_teardown_wrapper_identity
 test_nested_lock_acquire_refuses
+test_replay_after_complete_cleanup_is_a_noop

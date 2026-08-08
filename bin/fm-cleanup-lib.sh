@@ -375,7 +375,11 @@ remove_task_state_files() {
 # that never reacquire (fm_cleanup_attempt acquires once, runs
 # fm_cleanup_attempt_held, and releases). It accepts an already-classified
 # disposition - landed | preserved_unlanded; unknown refuses destructive
-# cleanup. Every non-mutating refusal check runs before ANY effect:
+# cleanup. Idempotent replay (fm_cleanup_effects_present) runs FIRST: an
+# attempt whose full effect set is already observed is a no-op success, so a
+# duplicate completion, startup recovery, or cleanup retry converges on the
+# same receipts even after the provider return removed the owned copy. Only
+# then do the non-mutating refusal checks run, before ANY effect:
 #   fm_cleanup_preflight (unknown disposition, owned-copy identity match,
 #   live processes with cwd under the copy, dirty worktree, immature
 #   terminal-quiet interval).
@@ -383,10 +387,8 @@ remove_task_state_files() {
 # (fm_backend_stop_receipt), cleanup.preservation (preserved_unlanded only),
 # cleanup.branch (branch disposition, failure recorded never suppressed),
 # cleanup.provider (teardown_treehouse_return), cleanup.runtime (the exact
-# volatile state-file removals fm-teardown.sh performs). Idempotent replay is
-# fm_cleanup_effects_present: an attempt whose full effect set is already
-# observed is a no-op success, and the write-once primitives refuse any
-# contradictory second observation.
+# volatile state-file removals fm-teardown.sh performs). The write-once
+# primitives refuse any contradictory second observation.
 
 # Task id whose state meta references the attempt, resolved by scanning the
 # state dir (the attempt record itself has no back-pointer to its task).
@@ -593,13 +595,16 @@ cleanup_runtime_records() {  # <task_id>
 fm_cleanup_attempt_held() {  # <attempt_id> <disposition>; caller holds the attempt lock
   local attempt=$1 disposition=$2 gen copy backend task_id state_dir project cd_dir
   gen=$(fm_attempt_generation_held "$attempt") || return 1
-  fm_cleanup_preflight "$attempt" "$disposition" || return 1
-  state_dir="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
-  task_id=$(cleanup_task_id_for_attempt "$attempt" || true)
+  # Idempotent replay before any preflight refusal: a fully cleaned attempt is a
+  # no-op success even when the owned copy is already gone (the provider return
+  # removes it), so cleanup retries converge on the same receipts.
   if fm_cleanup_effects_present "$attempt" "$disposition"; then
     echo "cleanup: $attempt already complete (disposition $disposition)"
     return 0
   fi
+  fm_cleanup_preflight "$attempt" "$disposition" || return 1
+  state_dir="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+  task_id=$(cleanup_task_id_for_attempt "$attempt" || true)
   copy=$(fm_attempt_load "$attempt" | jq -r '.provider.copy // ""')
   backend=$(fm_attempt_load "$attempt" | jq -r '.provider.provider // ""')
   # 1. endpoint stop evidence (bin/fm-backend.sh's durable stop receipt)
