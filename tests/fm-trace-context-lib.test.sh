@@ -263,6 +263,7 @@ pass "no resolve path invokes sleep or an external timeout, and every path retur
 
 HOSTILE_CFG="$WORK/cfg-hostile"
 mkdir -p "$HOSTILE_CFG"
+# shellcheck disable=SC2016 # The $(...) is the hostile payload itself: it must reach the file unexpanded.
 printf 'command: touch %s/pwned-provider\nsleep: 30\nprovider: $(touch %s/pwned-subst)\n' \
   "$WORK" "$WORK" > "$HOSTILE_CFG/trace-context"
 hostile=$(FM_TRACE_CONTEXT='' fm_trace_context_resolve "$HOSTILE_CFG" "$NOMETA"); hostile_rc=$?
@@ -327,8 +328,9 @@ for prose_file in brief.md prompt.md report.md status.md ; do
 done
 prose_a=$(FM_TRACE_CONTEXT=on fm_trace_context_resolve "$CFG_ON" "$PROSE_META")
 prose_b=$(FM_TRACE_CONTEXT=on fm_trace_context_resolve "$CFG_ON" "$PROSE_META")
-fm_trace_context_valid "$prose_a" && fm_trace_context_valid "$prose_b" \
-  || fail "resolving beside task prose must still yield valid carriers (a='$prose_a' b='$prose_b')"
+if ! fm_trace_context_valid "$prose_a" || ! fm_trace_context_valid "$prose_b" ; then
+  fail "resolving beside task prose must still yield valid carriers (a='$prose_a' b='$prose_b')"
+fi
 case "$prose_a$prose_b" in
   *"$PROSE_SENTINEL"*) fail "a carrier leaked task prose into its value (a='$prose_a' b='$prose_b')" ;;
 esac
