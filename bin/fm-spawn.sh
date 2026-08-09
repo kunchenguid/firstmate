@@ -1308,19 +1308,22 @@ FM_SPAWN_REMOTE_BLOCKED=4
 # unknown key. Only treehouse-get spawns fetch; an orca spawn owns its worktree and
 # a secondmate is not spawned here (mirrors the treehouse-get guard below).
 spawn_remote_preflight_or_block() {
-  local url host rc
+  local url target host rc
   url=$(git -C "$PROJ_ABS" remote get-url origin 2>/dev/null) || return 0
   [ -n "$url" ] || return 0
-  host=$(fm_remote_ssh_host "$url") || return 0
+  # Probe the [user@]host git itself would connect to, not a bare host: dropping
+  # the `git@` connects as this process's own login, a different SSH identity.
+  target=$(fm_remote_ssh_target "$url") || return 0
+  host=${target##*@}
   rc=0
-  fm_remote_preflight_ssh "$host" || rc=$?
+  fm_remote_preflight_ssh "$target" || rc=$?
   case "$rc" in
     10)
-      echo "error: cannot spawn task $ID: the SSH host key for '$host' (project origin $url) is not trusted, so the first 'git fetch' would stop at an interactive host-authenticity prompt inside the crew terminal and wedge the spawn with no recoverable endpoint. Refusing to create a terminal or auto-accept the key. Verify the host fingerprint out of band and add it (run 'ssh $host' once to accept it, or append a verified key to known_hosts), then re-dispatch." >&2
+      echo "error: cannot spawn task $ID: the SSH host key for '$host' (project origin $url) is not trusted, so the first 'git fetch' would stop at an interactive host-authenticity prompt inside the crew terminal and wedge the spawn with no recoverable endpoint. Refusing to create a terminal or auto-accept the key. Verify the host fingerprint out of band and add it (run 'ssh $target' once to accept it, or append a verified key to known_hosts), then re-dispatch." >&2
       exit "$FM_SPAWN_REMOTE_BLOCKED"
       ;;
     11)
-      echo "error: cannot spawn task $ID: SSH authentication to '$host' (project origin $url) was refused (Permission denied), so 'git fetch' would fail. Refusing to create a terminal. Provision the SSH credential/key for '$host', then re-dispatch." >&2
+      echo "error: cannot spawn task $ID: SSH authentication as '$target' (project origin $url) was refused (Permission denied), so 'git fetch' would fail. Refusing to create a terminal. Provision the SSH credential/key for '$target', then re-dispatch." >&2
       exit "$FM_SPAWN_REMOTE_BLOCKED"
       ;;
   esac
