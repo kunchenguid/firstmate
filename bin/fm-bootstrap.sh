@@ -1038,8 +1038,16 @@ crew_dispatch_validate() {
     elif [(.rules // [])[]? | profiles(.use?)[]? | select((.harness? | type) != "string" or (.harness | length) == 0)] | length > 0 then "each use profile needs harness"
     elif malformed_optional_fields([(.rules // [])[]? | profiles(.use?)[]?]) then "use profile model and effort must be non-empty strings when present"
     elif [(.rules // [])[]? | select(has("select") and ((.select? | type) != "string" or (.select | length) == 0))] | length > 0 then "select must be a non-empty string"
-    elif [(.rules // [])[]? | .select? // empty | select(. != "quota-balanced")] | length > 0 then
-      "unknown select: " + ([ (.rules // [])[]? | .select? // empty | select(. != "quota-balanced") ] | unique | join(", "))
+    elif [(.rules // [])[]? | .select? // empty | select(. != "quota-balanced" and . != "policy-service")] | length > 0 then
+      "unknown select: " + ([ (.rules // [])[]? | .select? // empty | select(. != "quota-balanced" and . != "policy-service") ] | unique | join(", "))
+    elif [(.rules // [])[]? | select(.select? == "policy-service") | select((.policy? | type) != "string" or (.policy | length) == 0)] | length > 0 then
+      "policy-service rules need non-empty policy"
+    elif [(.rules // [])[]? | select(.select? == "policy-service") | select((.use | type) != "array")] | length > 0 then
+      "policy-service rules require an array use"
+    elif has("default_select") and ((.default_select | type) != "string" or (.default_select | length) == 0) then "default_select must be a non-empty string"
+    elif (.default_select? != null and .default_select != "quota-balanced" and .default_select != "policy-service") then "unknown default_select: " + (.default_select | tostring)
+    elif .default_select? == "policy-service" and ((.default_policy? | type) != "string" or (.default_policy | length) == 0) then "default policy-service needs non-empty default_policy"
+    elif .default_select? == "policy-service" and ((.default? | type) != "array") then "default policy-service requires an array default"
     elif has("default") and ((.default | type) != "object" and (.default | type) != "array") then "default must be a profile object or non-empty profile array"
     elif has("default") and ((.default | type) == "array" and (.default | length) == 0) then "default needs at least one profile"
     elif has("default") and ([profiles(.default)[]? | select(type != "object")] | length) > 0 then "each default profile must be an object"
@@ -1069,14 +1077,16 @@ crew_dispatch_validate() {
          elif ($p.effort? != null) then "/default"
          else "" end)
       + (if ($p.effort? != null) then "/" + ($p.effort | tostring) else "" end);
-    def profile_set($value; $selector):
+    def profile_set($value; $selector; $policy):
       if ($value | type) == "array" then
-        (($selector // "quota-balanced") + "[" + ([$value[] | profile(.)] | join(", ")) + "]")
+        (($selector // "quota-balanced")
+         + (if $selector == "policy-service" then ":" + ($policy // "?") else "" end)
+         + "[" + ([$value[] | profile(.)] | join(", ")) + "]")
       else profile($value)
       end;
     (["BOOTSTRAP_INFO: crew dispatch active config/crew-dispatch.json"]
-      + [(.rules // [])[]? | "BOOTSTRAP_INFO: crew dispatch rule: " + (.when | tostring) + " -> " + profile_set(.use; .select?)]
-      + (if has("default") then ["BOOTSTRAP_INFO: crew dispatch default: " + profile_set(.default; null)] else [] end))
+      + [(.rules // [])[]? | "BOOTSTRAP_INFO: crew dispatch rule: " + (.when | tostring) + " -> " + profile_set(.use; .select?; .policy?)]
+      + (if has("default") then ["BOOTSTRAP_INFO: crew dispatch default: " + profile_set(.default; .default_select?; .default_policy?)] else [] end))
     | .[]
   ' "$file"
   fi
