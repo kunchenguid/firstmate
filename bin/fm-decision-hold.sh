@@ -184,7 +184,7 @@ unresolved_blocker_ids() {
     esac
     if blocker_show=$(task_show "$blocker"); then
       blocker_state=$(show_field "$blocker_show" state)
-      [ "$blocker_state" = done ] && continue
+      [ "$blocker_state" = "done" ] && continue
     fi
     if ! list_has_key "$unresolved" "$blocker"; then
       unresolved="${unresolved}${unresolved:+,}$blocker"
