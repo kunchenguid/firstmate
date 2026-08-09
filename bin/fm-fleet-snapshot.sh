@@ -21,8 +21,14 @@
 #     captain_actionable fields. Repeated blocker tokens remain ordered; a blocker
 #     resolves only when its structured record is Done, and missing ids stay open.
 #   tasks[]: one row per state/<id>.meta, sorted by id.
-#     current_state is parsed from bin/fm-crew-state.sh <id> and preserves
-#     state, source, detail, and raw line separately.
+#     current_state is bin/fm-crew-state.sh --json's typed answer, projected to
+#     {state,source,detail,precedence_applied,busy_signal,run_step,
+#     terminal_error,evidence_age_secs}. precedence_applied names the rule that
+#     selected the answer, and evidence_age_secs how old the winning evidence
+#     was; both are null when the reader did not measure them. The reader's
+#     busy_seq and run_id are deliberately NOT projected: they are cross-read
+#     correlation handles for a caller polling one crew, and a snapshot is a
+#     single observation.
 #     paths.status_log.last_event is historical wake-event data only, never
 #     current state.
 #     hints.open_decisions is the keyed open-decision set returned by
@@ -250,35 +256,43 @@ last_nonempty_line() {  # <file>
   grep -v '^[[:space:]]*$' "$1" 2>/dev/null | tail -1
 }
 
+# The crew's current state as typed fields. CFVC-05 retires the old shape of
+# this function, which re-derived `state`, `source`, and `detail` by splitting
+# the reader's human prose line on its middle-dot separators. The reader emits
+# those fields directly now, so the snapshot passes them through instead of
+# reconstructing them, and gains the freshness and precedence fields that the
+# prose line never carried.
 crew_state_json() {  # <id>
-  local id=$1 raw rest state source detail sep
-  raw=$(
+  local id=$1 out projected
+  out=$(
     FM_ROOT_OVERRIDE="$FM_ROOT" \
       FM_HOME="$FM_HOME" \
       FM_STATE_OVERRIDE="$STATE" \
       FM_DATA_OVERRIDE="$DATA" \
       FM_PROJECTS_OVERRIDE="$PROJECTS" \
       FM_CONFIG_OVERRIDE="$CONFIG" \
-      "$SCRIPT_DIR/fm-crew-state.sh" "$id" 2>/dev/null || true
+      "$FM_CREW_STATE_BIN" --json "$id" 2>/dev/null || true
   )
-  raw=$(printf '%s\n' "$raw" | head -1)
-  sep=' · '
-  state=unknown
-  source=none
-  detail=
-  case "$raw" in
-    state:\ *"$sep"source:\ *)
-      rest=${raw#state: }
-      state=${rest%%"$sep"source: *}
-      rest=${rest#*"$sep"source: }
-      case "$rest" in
-        *"$sep"*) source=${rest%%"$sep"*}; detail=${rest#*"$sep"} ;;
-        *) source=$rest ;;
-      esac
-      ;;
-  esac
-  jq -n --arg raw "$raw" --arg state "$state" --arg source "$source" --arg detail "$detail" \
-    '{state:$state,source:$source,detail:$detail,raw:$raw}'
+  out=$(printf '%s\n' "$out" | head -1)
+  # One jq per task, not two. The guard is explicit rather than inferred from
+  # what the projection happens to reject: `type == "object"` admits exactly the
+  # shape this reader promises, and everything else - unparseable output, a bare
+  # scalar, an array, and the JSON literal `null`, which jq's null-indexing rule
+  # would otherwise project into an all-null object - raises and falls through
+  # to the unknown record below. Absence of a usable answer must never surface
+  # as a state. The empty guard stays because jq exits 0 on empty input.
+  if [ -n "$out" ] && projected=$(printf '%s' "$out" \
+    | jq 'if type == "object" then {state,source,detail,precedence_applied,busy_signal,
+                                    run_step,terminal_error,evidence_age_secs}
+          else error("crew-state answer is not a JSON object") end' 2>/dev/null); then
+    printf '%s' "$projected"
+    return
+  fi
+  # A reader that could not answer at all is reported as unknown rather than
+  # allowed to emit malformed JSON into the snapshot.
+  jq -n '{state:"unknown",source:"none",detail:"crew-state reader produced no usable answer",
+          precedence_applied:null,busy_signal:null,run_step:null,
+          terminal_error:null,evidence_age_secs:null}'
 }
 
 status_event_json() {  # <status-log>
@@ -528,14 +542,18 @@ task_json_lines() {
     #     report POINTER, never as a reopened pending decision.
     # Secondmates are excluded from lifecycle clearing: they are persistent and
     # multiplex many concerns onto one stream, so activity on one concern must
-    # never clear another concern's keyed decision. A parked/blocked state, or a
-    # non-authoritative status-log/none read on a still-live task, keeps the fold's
-    # open decision surfacing.
+    # never clear another concern's keyed decision.
+    #
+    # Which verdicts clear is NOT decided here. crew_state_clears_open_decision
+    # (fm-classify-lib.sh) owns that rule beside FM_CREW_STATE_VOCABULARY, the
+    # single owner of the verdict set, and handles every member explicitly - a
+    # verdict it does not recognize returns 2 and keeps the decision, so a
+    # verdict added later cannot fall into the clearing branch by omission the
+    # way the negative-condition chain this replaces let interrupted, stale, and
+    # idle do.
     open_decisions_tsv=$(status_open_decisions "$status_log")
-    if [ "$role" != secondmate ] && \
-       { { { [ "$current_source" = run-step ] || [ "$current_source" = pane ]; } \
-           && [ "$current_state" != parked ] && [ "$current_state" != blocked ]; } \
-         || { [ "$current_state" = "done" ] || [ "$current_state" = "failed" ]; }; }; then
+    if [ "$role" != secondmate ] \
+      && crew_state_clears_open_decision "$current_state" "$current_source"; then
       open_decisions_tsv=""
     fi
     open_decisions_json=$(printf '%s' "$open_decisions_tsv" | jq -R -s '
@@ -753,7 +771,7 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
             report_path:((.report_path // null) | if . == null then null else trunc(500) end),
             local_note:((.local_note // null) | if . == null then null else trunc(120) end),completion} ]
        | sort_by([(.completion.date // ""), .id]) | reverse) as $landed_all
-    | ([ $tasks[] | select(.current_state.state == "unknown") ]) as $unknown_children
+    | ([ $tasks[] | select(.current_state.state == "unknown" or .current_state.state == "stale") ]) as $unknown_children
     | ([ $owned_in_flight[]
          | select(.requires_child_metadata)
          | select(.id as $id | [$tasks[].id] | index($id) | not) ]) as $orphan_in_flight
