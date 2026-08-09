@@ -39,6 +39,11 @@
 #   (p) fm-pr-check when local HEAD lags                        -> record remote PR head
 #   (q) no-mistakes + NO pr= recorded, PR discovered by branch  -> ALLOW  (yolo/no-CI merge)
 #
+# Also covers the durable attempt count (bin/fm-attempt.sh), which outlives the
+# metadata under --force and only under --force:
+#   (a1) ordinary release (work landed)                        -> count retired
+#   (a2) forced release (work discarded)                       -> count kept, still binds
+#
 # Also covers backlog teardown-lock-race: a git index.lock left in the worktree by a
 # killed crew process (bin/fm-teardown.sh's teardown_treehouse_return).
 #   (r) provably-stale index.lock (old mtime, no live holder) -> lock removed, ALLOW
@@ -2002,6 +2007,54 @@ test_herdr_projection_teardown_surfaces_restore_failure_without_blocking_cleanup
   pass "herdr projection teardown surfaces failed focus restoration without turning confirmed cleanup into a hard failure"
 }
 
+# The task's durable attempt count outlives its metadata under --force and only
+# under --force. An ordinary release is reachable only once the work landed, so
+# the count retires with the task; a forced release DISCARDED the work, which
+# makes a re-dispatch of that id a genuine retry that must keep counting.
+test_ordinary_teardown_retires_the_attempt_record() {
+  local case_dir
+  case_dir=$(make_case attempt-retire)
+  write_meta "$case_dir" local-only ship
+  printf 'attempt=1\nattempt_budget=2\n' > "$case_dir/state/task-x1.attempt"
+  wt_commit "$case_dir" "fix the thing"
+  add_fork_with_pushed_branch "$case_dir"
+
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "attempt-retire: teardown should succeed"
+
+  assert_absent "$case_dir/state/task-x1.attempt" \
+    "attempt-retire: a landed release must retire the count, or a reused id inherits a spent budget"
+  pass "an ordinary teardown retires the task's attempt count"
+}
+
+test_forced_teardown_keeps_the_attempt_record_and_the_count_survives() {
+  local case_dir out
+  case_dir=$(make_case attempt-force)
+  write_meta "$case_dir" local-only ship
+  printf 'attempt=1\nattempt_budget=2\n' > "$case_dir/state/task-x1.attempt"
+  wt_commit "$case_dir" "unpushed work"
+
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "attempt-force: forced teardown should succeed"
+
+  assert_present "$case_dir/state/task-x1.attempt" \
+    "attempt-force: discarding the work must not clear the count, or discarding between attempts makes the budget unbounded"
+  [ ! -f "$case_dir/state/task-x1.meta" ] || fail "attempt-force: the metadata should be gone"
+
+  # The metadata is gone - this is the state a restart leaves behind - and the
+  # count still binds: the second failure is attempt 2, and the third is refused.
+  out=$(FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+    "$ROOT/bin/fm-attempt.sh" open task-x1 2>&1)
+  assert_contains "$out" "attempt=2 attempt_budget=2" \
+    "attempt-force: the retry after a discarded attempt must be attempt 2"
+  out=$(FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+    "$ROOT/bin/fm-attempt.sh" open task-x1 2>&1) && \
+    fail "attempt-force: a third attempt must be refused"$'\n'"$out"
+  assert_contains "$out" "budget_exhausted" \
+    "attempt-force: the exhausted budget must name its terminal state"
+  pass "a forced teardown keeps the attempt count, so a double failure still increments across the release"
+}
+
 # --- Fix 1: conclude/abort the task's own parked no-mistakes run before the
 # worker is removed, and Fix 2: reap leaked descendant processes rooted under
 # the task's own worktree/tasktmp - both exercised through the real teardown
@@ -2632,6 +2685,8 @@ test_transient_index_lock_clears_after_first_attempt_and_retry_succeeds
 test_persistent_index_lock_exhausts_retries_and_refuses_loudly
 test_empty_retry_wait_uses_default_without_aborting
 test_fractional_legacy_retry_wait_refuses_without_arithmetic_error
+test_ordinary_teardown_retires_the_attempt_record
+test_forced_teardown_keeps_the_attempt_record_and_the_count_survives
 test_parked_own_run_is_aborted_before_teardown
 test_parked_own_run_refuses_when_abort_is_unconfirmed
 test_mismatched_run_after_abort_refuses_unconfirmed

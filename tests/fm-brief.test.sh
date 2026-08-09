@@ -710,6 +710,31 @@ test_scout_and_secondmate_scaffold() {
   pass "fm-brief: scout and secondmate code paths still scaffold well-formed briefs"
 }
 
+# The worker no longer arbitrates its own retry budget: the count and the bound
+# live in bin/fm-attempt.sh, and the prose that made "twice" the worker's call is
+# gone from every generated brief. The rule list must stay contiguous afterwards,
+# because the briefs cross-reference their own rules by number.
+test_no_brief_makes_the_worker_its_own_retry_arbiter() {
+  local home id brief rules
+  home="$TMP_ROOT/retry-arbiter-home"
+  write_registry "$home"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" retry-ship no-registry-proj --mode no-mistakes >/dev/null 2>&1
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" retry-scout firstmate --scout >/dev/null 2>&1
+  for id in retry-ship retry-scout; do
+    brief="$home/data/$id/brief.md"
+    assert_no_grep "same obstacle twice" "$brief" \
+      "$id: the worker is still told to arbitrate its own retry budget"
+    # Contiguous 1..N, so the numbered cross-references in the brief still resolve.
+    rules=$(sed -n '/^# Rules$/,/^$/p' "$brief" | sed -n 's/^\([0-9]\+\)\..*/\1/p' | tr '\n' ' ')
+    [ "$rules" = "1 2 3 4 5 6 " ] \
+      || fail "$id: the rule list must stay contiguous 1..6, got '$rules'"
+  done
+  assert_grep "escalate to firstmate (rule 5) and stop" "$home/data/retry-ship/brief.md" \
+    "the ask-user cross-reference must point at the renumbered escalation rule"
+  pass "fm-brief.sh: no brief makes the worker the arbiter of its own retry budget"
+}
+
 test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
@@ -730,3 +755,4 @@ test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
+test_no_brief_makes_the_worker_its_own_retry_arbiter

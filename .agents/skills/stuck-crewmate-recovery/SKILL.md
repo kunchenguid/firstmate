@@ -48,4 +48,7 @@ Escalate in order:
    Genuine wedging means looping, unresponsive, repeating the same obstacle, or truly dead.
    A low context reading is not wedging; modern harnesses auto-compact and keep going.
    The worktree and commits persist, so relaunch is cheap.
-5. If a second relaunch fails too, write `failed` to the backlog and tell the captain the plain failure, preserved work, and consequence using `AGENTS.md` section 9; do not mention metadata, harness, window, or worktree unless the path itself is needed for action.
+5. Whether to relaunch again is arithmetic, not a judgment: read the task's durable attempt count with `bin/fm-attempt.sh show <id>`.
+   A relaunch through `bin/fm-spawn.sh` spends one attempt and refuses outright once the count reaches the budget, recording the `budget_exhausted` terminal state; an in-pane restart that never goes through the spawn is not counted, so read the count rather than assuming the restarts you remember are all of them.
+   When the budget is spent, write `failed` to the backlog and tell the captain the plain failure, preserved work, and consequence using `AGENTS.md` section 9; do not mention metadata, harness, window, or worktree unless the path itself is needed for action.
+   Another attempt beyond that budget is a deliberate act with a stated reason, made by raising it with `--attempt-budget <n>`, which is recorded.

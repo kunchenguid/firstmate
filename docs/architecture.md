@@ -231,6 +231,12 @@ For target project repos shipped through their own no-mistakes pipeline, commits
 The firstmate repo itself is the exception: its `.no-mistakes/` directory is local state, stays gitignored, and is rejected by CI if tracked.
 PR-based task merges go through `bin/fm-pr-merge.sh`, which records `pr=` and any available `pr_head=` through `bin/fm-pr-check.sh` before calling `gh-axi pr merge`.
 The helper requires a full `https://github.com/<owner>/<repo>/pull/<n>` URL, invokes `gh-axi pr merge <n> --repo <owner>/<repo>`, defaults to `--squash`, preserves explicit merge-method flags, and rejects malformed URLs or repo override flags before recording merge state; a well-formed GitLab merge request URL (see [docs/gitlab-merge-watch.md](gitlab-merge-watch.md)) is refused too, explicitly, rather than sent to the wrong forge.
+Whether a task may be attempted again is arithmetic over a durable count rather than a judgment made inside the worker that is failing.
+[`bin/fm-attempt.sh`](../bin/fm-attempt.sh) owns `state/<task-id>.attempt` and its header owns the record format, the migration rule, and the refusal; every ship or scout spawn checks the budget before it creates anything and commits the increment when it publishes task metadata, so an attempt that never reached a launch costs nothing and a launched one is always counted.
+Exhaustion is a named stop rather than a silent one: the spawn refuses, records the unified `budget_exhausted` terminal state, and declares the failure on the task's own status log, which is both the wake surface and the input the terminal-outcome derivation reads.
+The count outlives the task metadata deliberately - an ordinary teardown retires it because that release is only reachable once the work landed, while a `--force` release keeps it because discarded work makes a re-dispatch of that id a genuine retry.
+Secondmate relaunches are exempt, since their relaunch is unattended liveness recovery rather than a retry.
+
 Teardown is fail-closed for ship worktrees: dirty worktrees refuse, and committed work must be landed before the worktree is returned.
 [`bin/fm-teardown.sh`](../bin/fm-teardown.sh)'s header owns the landed-work proofs, PR-discovery fallback, and stale-lock recovery procedure.
 
