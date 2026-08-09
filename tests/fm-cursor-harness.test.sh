@@ -87,6 +87,11 @@ case "${1:-}" in
         if [ "$prev" = "-l" ]; then
           printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG"
           case "$a" in *cursor-agent*--force*--trust*) : > "${FM_FAKE_CURSOR_LAUNCH_TYPED:-/dev/null}" ;; esac
+          case "$a" in
+            *cursor-agent*--force*--trust*)
+              [ -z "${FM_FAKE_LITERAL_SEND_FAIL:-}" ] || exit 1
+              ;;
+          esac
         fi
         prev=$a
       done
@@ -120,6 +125,18 @@ if [ "$field" = comm= ] && [ -n "${FM_FAKE_CURSOR_PROC_ROOT:-}" ] && [ -n "${FM_
   printf '%s\0' "$FM_FAKE_CURSOR_ARGV0" > "$FM_FAKE_CURSOR_PROC_ROOT/$pid/cmdline"
 fi
 case "$query" in
+  *"-e -o pid="*)
+    if [ -n "${FM_FAKE_CURSOR_TOKEN_PID:-}" ] \
+       && kill -0 "$FM_FAKE_CURSOR_TOKEN_PID" 2>/dev/null; then
+      count=0
+      [ ! -f "${FM_FAKE_CURSOR_TOKEN_SCAN_COUNT:-}" ] \
+        || count=$(cat "$FM_FAKE_CURSOR_TOKEN_SCAN_COUNT")
+      count=$((count + 1))
+      printf '%s\n' "$count" > "${FM_FAKE_CURSOR_TOKEN_SCAN_COUNT:?}"
+      [ "$count" -lt "${FM_FAKE_CURSOR_TOKEN_AFTER_SCAN:-1}" ] \
+        || printf '%s\n' "$FM_FAKE_CURSOR_TOKEN_PID"
+    fi
+    exit 0 ;;
   *"eww"*)
     token=${CURSOR_WORKER_LAUNCH_TOKEN:-missing}
     printf '%s FM_CURSOR_LAUNCH_TOKEN=%s\n' "$args" "$token"
@@ -744,6 +761,26 @@ test_cursor_relaunch_reaps_prior_worker_before_recording_replacement() {
   assert_grep "$old_pid " "$HOME_DIR/state/$id.worker-server" \
     "cursor relaunch removed ownership record before endpoint cwd validation"
 
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
+    FM_FAKE_CURSOR_AGENT_ARGS="$FAKEBIN_DIR/cursor-agent --force --trust brief" \
+    FM_PROC_ROOT_OVERRIDE="$CASE_DIR/no-proc" FM_FAKE_LITERAL_SEND_FAIL=1 \
+    FM_FAKE_CURSOR_AGENT_PID=4242 FM_FAKE_CURSOR_AGENT_AFTER_ENTER=1 \
+    FM_FAKE_CURSOR_ENTER_STARTED="$CASE_DIR/enter-started" \
+    FM_FAKE_CURSOR_WORKER_PID=$new_pid \
+    FM_FAKE_WINDOW_STATE_FILE="$CASE_DIR/windows.state" \
+    FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" PATH="$FAKEBIN_DIR:$PATH" \
+    "$SPAWN" "$id" --relaunch 2>&1)
+  status=$?
+  expect_code 1 "$status" "cursor relaunch with failed launch delivery must refuse"$'\n'"$out"
+  if kill -0 "$old_pid" 2>/dev/null; then
+    fail "cursor relaunch failed to reap prior worker before launch delivery"$'\n'"$out"
+  fi
+  assert_grep "$old_pid " "$HOME_DIR/state/$id.worker-server" \
+    "failed cursor launch delivery discarded confirmed-dead ownership evidence"
+
   rm -f "$FAKEBIN_DIR/lsof"
   rm -f "$CASE_DIR/enter-started" "$CASE_DIR/launch-typed"
   out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
@@ -879,12 +916,15 @@ test_cursor_detached_worker_is_recorded_from_task_root() {
 test_cursor_worker_server_discovery_timeout_causes_rollback() {
   # A worker-server that never appears within the bounded poll must cause
   # spawn to refuse and roll back the endpoint - no meta, no leaked pane.
-  local rec id out status
+  local rec id out status token_pid
   id=cursor-worker-timeout-ze
   rec=$(make_cursor_case cursor-worker-timeout-rollback "$id")
   read_case_record "$rec"
   : > "$CASE_DIR/windows.state"
   : > "$CASE_DIR/treehouse.log"
+  ( exec sleep 300 ) &
+  token_pid=$!
+  disown
   out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
@@ -892,12 +932,18 @@ test_cursor_worker_server_discovery_timeout_causes_rollback() {
     FM_FAKE_CURSOR_AGENT_ARGS="$FAKEBIN_DIR/cursor-agent --force --trust brief" \
     FM_PROC_ROOT_OVERRIDE="$CASE_DIR/no-proc" FM_FAKE_CURSOR_PROC_ROOT="$CASE_DIR/no-proc" \
     FM_FAKE_CURSOR_AGENT_PID=4242 FM_FAKE_CURSOR_WORKER_PID='' \
+    FM_FAKE_CURSOR_TOKEN_PID=$token_pid FM_FAKE_CURSOR_TOKEN_AFTER_SCAN=2 \
+    FM_FAKE_CURSOR_TOKEN_SCAN_COUNT="$CASE_DIR/token-scans" \
     FM_FAKE_WINDOW_STATE_FILE="$CASE_DIR/windows.state" \
     FM_FAKE_TREEHOUSE_LOG="$CASE_DIR/treehouse.log" \
     FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1)
   status=$?
   expect_code 1 "$status" "cursor spawn with discovery timeout must refuse"
+  if kill -0 "$token_pid" 2>/dev/null; then
+    kill -KILL "$token_pid" 2>/dev/null || true
+    fail "rollback left delayed launch-token process alive"
+  fi
   # No guessed worker-server record may be created.
   [ ! -f "$HOME_DIR/state/$id.worker-server" ] \
     || fail "discovery timeout rollback must not leave a worker-server record"

@@ -242,14 +242,14 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 # shellcheck source=bin/fm-process-identity-lib.sh
 . "$SCRIPT_DIR/fm-process-identity-lib.sh"
 
-cursor_worker_server_reap_record() {  # <record> <id>
-  local ws_file=$1 id=$2 pid identity current signal i
+cursor_worker_server_reap_record() {  # <record> <id> [keep-record]
+  local ws_file=$1 id=$2 keep_record=${3:-0} pid identity current signal i
   [ -f "$ws_file" ] || return 0
   read -r pid identity < "$ws_file" 2>/dev/null || return 1
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
   [ -n "$identity" ] || return 1
   if ! kill -0 "$pid" 2>/dev/null; then
-    rm -f "$ws_file"
+    [ "$keep_record" -eq 1 ] || rm -f "$ws_file"
     return 0
   fi
   current=$(fm_process_identity "$pid") || {
@@ -257,7 +257,7 @@ cursor_worker_server_reap_record() {  # <record> <id>
     return 1
   }
   if [ "$current" != "$identity" ]; then
-    rm -f "$ws_file"
+    [ "$keep_record" -eq 1 ] || rm -f "$ws_file"
     return 0
   fi
   for signal in TERM KILL; do
@@ -282,7 +282,7 @@ cursor_worker_server_reap_record() {  # <record> <id>
       return 1
     }
   fi
-  rm -f "$ws_file"
+  [ "$keep_record" -eq 1 ] || rm -f "$ws_file"
 }
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
@@ -2156,15 +2156,11 @@ cursor_worker_server_has_launch_token() {  # <pid> <token>
 }
 
 cursor_worker_server_reap_launch_token() {
-  local pid identity ws_file tmp pids status matched
+  local pid identity ws_file reap_file tmp pids matched clear_scans=0 i
   ws_file="$STATE/$ID.worker-server"
-  while :; do
-    if pids=$(pgrep -f 'index.js worker-server' 2>/dev/null); then
-      status=0
-    else
-      status=$?
-    fi
-    case "$status" in 0|1) ;; *) return 1 ;; esac
+  reap_file="$STATE/.$ID.rollback-worker-server.$$"
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    pids=$(LC_ALL=C ps -e -o pid= 2>/dev/null) || return 1
     matched=
     while IFS= read -r pid; do
       [ -n "$pid" ] || continue
@@ -2174,13 +2170,23 @@ cursor_worker_server_reap_launch_token() {
     done <<EOF
 $pids
 EOF
-    [ -n "$matched" ] || return 0
-    identity=$(fm_process_identity "$matched") || return 1
-    tmp="$ws_file.tmp.$$"
-    printf '%s %s\n' "$matched" "$identity" > "$tmp" || return 1
-    mv -f -- "$tmp" "$ws_file" || { rm -f -- "$tmp"; return 1; }
-    cursor_worker_server_reap_record "$ws_file" "$ID" || return 1
+    if [ -z "$matched" ]; then
+      clear_scans=$((clear_scans + 1))
+      [ "$clear_scans" -lt 3 ] || { rm -f "$reap_file"; return 0; }
+    else
+      clear_scans=0
+      identity=$(fm_process_identity "$matched") || return 1
+      tmp="$reap_file.tmp"
+      printf '%s %s\n' "$matched" "$identity" > "$tmp" || return 1
+      mv -f -- "$tmp" "$reap_file" || { rm -f -- "$tmp"; return 1; }
+      if ! cursor_worker_server_reap_record "$reap_file" "$ID"; then
+        mv -f -- "$reap_file" "$ws_file" 2>/dev/null || true
+        return 1
+      fi
+    fi
+    sleep 0.1
   done
+  return 1
 }
 
 # The recorded identity is produced by the SAME parse teardown re-checks
@@ -2258,7 +2264,8 @@ spawn_rollback_task_state() {  # <detail>
     HERDR_PROJECTION_ABORT_CLEANUP=1
   fi
 
-  if [ "$HARNESS" = cursor ] && [ ! -f "$STATE/$ID.worker-server" ]; then
+  if [ "$HARNESS" = cursor ] \
+     && { [ "$RELAUNCH" -eq 1 ] || [ ! -f "$STATE/$ID.worker-server" ]; }; then
     if ! cursor_worker_server_reap_launch_token; then
       echo "failed: $detail; worker-server absence is unproven - task records retained and marked rollback-needed for cleanup retry" >> "$STATE/$ID.status" 2>/dev/null || true
       echo "error: $detail; worker-server absence is unproven; task records retained for cleanup retry" >&2
@@ -2266,9 +2273,8 @@ spawn_rollback_task_state() {  # <detail>
     fi
   fi
 
-  # A relaunch failure keeps the pre-existing task records and worktree: the
-  # task predates this invocation and its work must stay visible to recovery.
-  # Only the stale worker-server record (if any) is removed.
+  # A relaunch failure keeps the pre-existing task records, worktree, and
+  # ownership evidence so its work stays visible and retryable.
   if [ "$RELAUNCH" -ne 1 ]; then
     # 2. Owned worktree cleanup, CONFIRMED by the return command itself. The
     #    authoritative .meta is never deleted before this succeeds: it is the
@@ -2286,7 +2292,9 @@ spawn_rollback_task_state() {  # <detail>
     rm -f "$STATE/$ID.meta" "$STATE/$ID.status" "$STATE/$ID.turn-ended" 2>/dev/null || true
     rm -rf "$TASK_TMP" 2>/dev/null || true
   fi
-  rm -f "$STATE/$ID.worker-server" 2>/dev/null || true
+  if [ "$RELAUNCH" -ne 1 ]; then
+    rm -f "$STATE/$ID.worker-server" 2>/dev/null || true
+  fi
 }
 
 kimi_capture_has_empty_composer() {  # <plain-pane-capture>
@@ -2923,7 +2931,7 @@ if [ -n "$SPAWN_TRACEPARENT" ]; then
 fi
 sleep 0.3
 if [ "$RELAUNCH" -eq 1 ] && [ "$RELAUNCH_PRIOR_HARNESS" = cursor ]; then
-  cursor_worker_server_reap_record "$STATE/$ID.worker-server" "$ID" || exit 1
+  cursor_worker_server_reap_record "$STATE/$ID.worker-server" "$ID" 1 || exit 1
 fi
 spawn_send_literal "$T" "$LAUNCH"
 sleep 0.3
@@ -2949,6 +2957,10 @@ if [ "$HARNESS" = cursor ]; then
   CURSOR_WORKER_RECORDER_PID=
 else
   spawn_send_key "$T" Enter
+fi
+if [ "$RELAUNCH" -eq 1 ] && [ "$RELAUNCH_PRIOR_HARNESS" = cursor ] \
+   && [ "$HARNESS" != cursor ]; then
+  rm -f "$STATE/$ID.worker-server"
 fi
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then
