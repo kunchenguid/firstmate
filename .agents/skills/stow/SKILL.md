@@ -39,6 +39,8 @@ Marking rules:
 - `pinned` entries carry `<!-- tier: pinned -->` with no date because no clock applies; `aging` and `perishable` entries carry `<!-- tier: <tier> | reinforced: YYYY-MM-DD -->`.
 - During legacy migration only, `legacy-grace: pending` may appear in the trailing marker without a `reinforced:` date; it records that the entry has consumed its grace cycle and is not reinforcement.
 - Each memory file's header carries a one-line legend stating that file's default tier, the marker spelling (including the migration-only grace state while one exists), and the current clocks, so the scheme is self-describing to any reader.
+- Inspect every existing file's header legend on every pass, independently of whether any entry needs migration: add or correct it in an editable file; for a read-only `data/captain-shared.md`, leave the file byte-identical but route a missing or outdated legend to the primary owner.
+  The required receipt action for that file is `routed`, not `unchanged`; name the missing or outdated legend as an unresolved ownership exception and do not declare the session reset-safe.
 - The clocks are policy owned by this skill text and echoed by the legends, deliberately not configuration.
 - A pre-existing missing or hand-dropped marker is never grounds for destructive treatment: it means the file's default tier; an unmarked entry in a default-pinned file is simply pinned, while an unmarked entry in a file whose default tier carries a clock follows the migration rule below.
 
