@@ -107,7 +107,8 @@ Rules:
 - Unless a file's own legend says otherwise, a user-level memory file defaults to `pinned`, while a project memory file and `.stow-notes.md` default to `aging`.
 - An entry carries `tier:` only when it deviates from its file's default, and `pinned` entries need no date.
 - During legacy migration only, `legacy-grace: pending` may appear in the trailing marker without a `reinforced:` date; it records that the entry has consumed its grace cycle and is not reinforcement.
-- When first writing a marked entry into a file, add a one-line header legend stating that file's default tier, the marker spelling (including the migration-only grace state while one exists), and the current clocks, so the scheme explains itself to any later reader or tool.
+- Every governed memory file this skill curates must carry a one-line header legend stating that file's default tier, the marker spelling (including the migration-only grace state while one exists), and the current clocks, so the scheme explains itself to any later reader or tool.
+  During one-time migration, add the legend even to a default-pinned file that contains only unmarked entries.
 - Refresh a `reinforced:` date only on real evidence from the current session: the fact was used, confirmed, or re-derived.
   Mere presence in the file is not evidence, and re-reading memory is never reinforcement.
 - Re-confirm a stale `perishable` entry against its named condition: still open means refresh the date, while resolved, expired, or no longer checkable means archive it now.

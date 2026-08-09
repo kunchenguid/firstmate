@@ -125,9 +125,11 @@ Every test must hold for a candidate:
 ### Destinations
 
 **Hard rule: the stow process never creates or writes a firstmate-repo-tracked skill.**
-**Every skill stow's offload produces is user-owned and local, excluded through `.git/info/exclude`; contributing a lesson to the shared tracked template is a separate deliberate captain action, never automatic.**
+**Every skill stow's offload produces for a Firstmate home is user-owned and local, excluded through `.git/info/exclude`; contributing a lesson to the shared tracked template is a separate deliberate captain action, never automatic.**
+Approved project-level destinations are not produced by stow: they ship normally through that project's own registered delivery path.
 
 - A user-owned local skill: a directory under `.agents/skills/<freeform-name>/` whose path is appended to this home clone's local `.git/info/exclude`, never to a `.gitignore`.
+  Before approval and again before migration, validate that the chosen freeform destination is absent from the git index and collides with no existing file or directory, and reject the destination if either check fails.
   The name is freeform with no user-vs-firstmate naming convention, the skill stays per-home and untracked, and the harness still lists and JIT-loads it because skill discovery scans the filesystem and ignores git status (verified in `docs/verification/stow-memory.md`).
   Its precise, condition-stated description line is its entire trigger; it gets no `AGENTS.md` declaration because `AGENTS.md` is shared tracked material.
   Because this destination is local and untracked, it is also the JIT home for private conditional knowledge that no committed surface may hold.
@@ -148,7 +150,7 @@ A local skill exists only in this home, so offloading an entry out of `data/capt
 2. Approve.
    The captain approves per candidate in plain chat, and firstmate records the approval in the held item's body.
 3. Migrate, outside this pass.
-   An approved local skill is created through firstmate's normal direct maintenance of private local material: write the `SKILL.md` with its precise description trigger, append the directory path to `.git/info/exclude`, and confirm the skill appears in a fresh session's skill index.
+   An approved local skill is created through firstmate's normal direct maintenance of private local material only after re-validating that its destination is absent from the git index and collides with no existing content: write the `SKILL.md` with its precise description trigger, append the directory path to `.git/info/exclude`, and confirm the skill appears in a fresh session's skill index.
    An approved project destination ships as a normal task through that project's registered delivery mode.
    The migration's source of truth is the entry as quoted in the proposal, or its archive line when budget pressure already retired it.
 4. Remove only once live.
@@ -240,5 +242,6 @@ The session is reset-safe only when every home is within its own budget with no 
 
 The stow pass itself must never store, create, or edit a skill as a destination for any finding.
 The exclusion binds the pass as a writer: proposing an offload and letting the migration step execute a captain-approved candidate later is not the pass storing a skill.
-Every skill that migration produces is user-owned and local under the destinations hard rule, and changing firstmate's tracked `.agents/skills/` or public `skills/` remains a deliberately scoped Firstmate repository task through its pipeline, never a stow product.
+Every Firstmate-home skill that migration produces is user-owned and local under the destinations hard rule, while an approved project-level destination is produced and shipped through that project's registered delivery path, never by stow.
+Changing firstmate's tracked `.agents/skills/` or public `skills/` remains a deliberately scoped Firstmate repository task through its pipeline, never a stow product.
 Outside a captain-approved offload, generalizable knowledge still routes to shared tracked material through its pipeline and fleet-local knowledge to `data/`.
