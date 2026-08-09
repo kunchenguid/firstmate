@@ -1420,58 +1420,31 @@ reap_task_backend_process_group() {  # <label>
 # that as nothing to reap. Never matches a generic worker-server cmdline or
 # the cursor install dir: both are shared across homes and tasks.
 reap_cursor_worker_server() {  # <state_dir> <id>
-  local state_dir=$1 id=$2 ws_file pid identity current i
+  # Thin teardown-side wrapper over the one shared termination primitive
+  # (fm_process_record_terminate, bin/fm-process-identity-lib.sh): caller policy
+  # is malformed-record=remove (an unreapable record must not block teardown),
+  # verbose lifecycle lines, and teardown-side refusal diagnostics. The
+  # primitive preserves the record on every refusal (round-5
+  # preserve-on-unconfirmed contract).
+  local state_dir=$1 id=$2 ws_file
   ws_file="$state_dir/$id.worker-server"
   [ -f "$ws_file" ] || return 0
-  read -r pid identity < "$ws_file" 2>/dev/null || { rm -f "$ws_file" 2>/dev/null || true; return 0; }
-  case "$pid" in ''|*[!0-9]*) rm -f "$ws_file" 2>/dev/null || true; return 0 ;; esac
-  [ -n "$identity" ] || { rm -f "$ws_file" 2>/dev/null || true; return 0; }
-  if ! kill -0 "$pid" 2>/dev/null; then
-    rm -f "$ws_file" 2>/dev/null || true
-    return 0
-  fi
-  if ! current=$(fm_process_identity "$pid"); then
-    echo "REFUSED: recorded cursor worker-server for $id still exists at $pid but its identity cannot be read; preserving $ws_file for retry." >&2
+  if ! fm_process_record_terminate "$ws_file" "$id" --malformed=remove --verbose; then
+    read -r pid _ < "$ws_file" 2>/dev/null || true
+    case "$FM_PROCESS_RECORD_TERMINATE_REASON" in
+      identity-unreadable)
+        echo "REFUSED: recorded cursor worker-server for $id still exists at ${pid:-unknown} but its identity cannot be read; preserving $ws_file for retry." >&2
+        ;;
+      survived)
+        echo "REFUSED: recorded cursor worker-server for $id still matches ${pid:-unknown} after TERM and KILL; preserving $ws_file for retry." >&2
+        ;;
+      malformed)
+        echo "REFUSED: recorded cursor worker-server record $ws_file for $id is malformed; preserving it for retry." >&2
+        ;;
+    esac
     return 1
   fi
-  if [ "$current" != "$identity" ]; then
-    rm -f "$ws_file" 2>/dev/null || true
-    return 0
-  fi
-  echo "teardown: reaping recorded cursor worker-server for $id: $pid" >&2
-  kill -TERM "$pid" 2>/dev/null || true
-  sleep 1
-  if ! kill -0 "$pid" 2>/dev/null; then
-    rm -f "$ws_file" 2>/dev/null || true
-    return 0
-  fi
-  if ! current=$(fm_process_identity "$pid"); then
-    echo "REFUSED: recorded cursor worker-server for $id still exists at $pid after TERM but its identity cannot be read; preserving $ws_file for retry." >&2
-    return 1
-  fi
-  if [ "$current" != "$identity" ]; then
-    rm -f "$ws_file" 2>/dev/null || true
-    return 0
-  fi
-  echo "teardown: force-killing recorded cursor worker-server for $id: $pid" >&2
-  kill -KILL "$pid" 2>/dev/null || true
-  for i in 1 2 3 4 5 6 7 8 9 10; do
-    kill -0 "$pid" 2>/dev/null || break
-    current=$(fm_process_identity "$pid" 2>/dev/null) || current=
-    [ -z "$current" ] || [ "$current" = "$identity" ] || break
-    sleep 0.1
-  done
-  if kill -0 "$pid" 2>/dev/null; then
-    if ! current=$(fm_process_identity "$pid"); then
-      echo "REFUSED: recorded cursor worker-server for $id still exists at $pid after TERM and KILL but its identity cannot be read; preserving $ws_file for retry." >&2
-      return 1
-    fi
-    if [ "$current" = "$identity" ]; then
-      echo "REFUSED: recorded cursor worker-server for $id still matches $pid after TERM and KILL; preserving $ws_file for retry." >&2
-      return 1
-    fi
-  fi
-  rm -f "$ws_file" 2>/dev/null || true
+  return 0
 }
 
 # Reap every process rooted (by cwd) under this task's own worktree or tasktmp
