@@ -21,6 +21,11 @@
     "on_unavailable": [
       "fail_closed"
     ],
+    "verifier_level": [
+      "l1",
+      "l2",
+      "judgment"
+    ],
     "terminal_kind": [
       "success",
       "neutral",
@@ -110,6 +115,8 @@
     "verification": {
       "required": {
         "verifier": "slug",
+        "verifier_command": "string",
+        "verifier_level": "enum:verifier_level",
         "required_evidence": "string[]",
         "on_unavailable": "enum:on_unavailable"
       },
@@ -214,24 +221,30 @@
     }
   },
   "required_terminal_states": [
-    "no_delta",
-    "delta_emitted",
-    "confirmed_work_found",
     "needs_ruling",
-    "blocked_by_evidence_integrity",
     "budget_exhausted",
     "verification_failed"
+  ],
+  "required_terminal_kinds": [
+    "success",
+    "neutral",
+    "failure",
+    "refusal"
   ],
   "invariants": [
     "schema_version_matches: loopspec_schema_version must equal this file's loopspec_schema_version",
     "id_matches_filename: id must equal the spec filename without its .json suffix",
     "trigger_registered: trigger.id must appear in triggers.json",
-    "required_terminals_present: terminal_states must define every name in required_terminal_states",
+    "required_terminals_present: terminal_states must define every name in required_terminal_states - the universal safety stops only, never one domain's vocabulary, so a second spec is authorable",
+    "required_terminal_kinds_present: terminal_states must cover every kind in required_terminal_kinds, so every loop declares how it succeeds, how it no-ops, how it fails and how it refuses",
     "no_progress_terminal_defined: no_progress.terminal must name a declared terminal state",
     "escalation_terminals_defined: every escalation.on entry must name a declared terminal state",
     "unique_selection: no two specs may share (trigger.id, selection.scope, selection.priority)",
     "enabled_requires_implemented_trigger: status=enabled requires the trigger's execution_path_implemented, verified and enabled axes to all be true in triggers.json",
     "enabled_requires_available_skills: status=enabled requires every authority.permitted_skills entry to resolve to an installed skill",
-    "captain_required_cannot_self_enable: status=enabled is refused for authority.class=captain-required"
+    "captain_required_cannot_self_enable: status=enabled is refused for authority.class=captain-required",
+    "verifier_command_declared: verification.verifier_command must name the executable that produces this loop's verdict; a verifier that is only named is not bound",
+    "enabled_requires_executable_verifier: status=enabled requires verification.verifier_command to resolve inside the repository root and be executable, because a named-but-unreachable verifier looks bound and verifies nothing",
+    "success_requires_a_verifier_run: a success terminal requires a recorded verifier run bound to this spec id, spec version, event key and iteration; an asserted verdict is never sufficient and NO_VERIFIER_RAN is never success"
   ]
 }

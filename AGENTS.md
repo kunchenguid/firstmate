@@ -109,7 +109,7 @@ state/               volatile runtime signals; gitignored
   .pr-check-migration.log  private per-task outcomes distinguishing rebuilt or canonically registered replacement polls, quarantined unarmed polls, and incomplete migrations
   .pr-check-migration-scan-v1  private marker proving the non-executing scan disabled every unsafe legacy check; .pr-check-migration-v1 separately records completed private repairs
   x-watch.check.sh   generated X-mode relay poll shim; present only when opted in (section 14)
-  loopspec/          persistent per-loop iteration state written only by bin/fm-loopspec.sh; never hand-edited (section 13)
+  loopspec/          persistent per-loop iteration state written only by bin/fm-loopspec.sh, plus the executions.log record of what actually ran written only by bin/fm-loop-actuate.sh; never hand-edited (section 13)
   pending-replies/   parent-owned secondmate pending-reply records (correlation id, delivery vs reply, recovery, escalation); fm-pending-reply-lib.sh
   procevent/         registered process-to-event sources, one private record per canonical source id; written only by bin/fm-procevent.sh, and their presence alone keeps supervision required (section 13)
   procevent-inbox/   private captured results and their durable handled-acknowledgement markers; source output lives here and never in an event line
@@ -531,8 +531,8 @@ These skills are not captain-invocable; load them only at their precise triggers
 - `decision-hold-lifecycle` - load before treating an investigation or visual review as complete, before ending a visual review that exposed a decision, when recording or routing the captain's answer, and before closing a hold on the strength of a ruling document.
 - `process-event-sources` - load before arming a long-polling source, and on any `procevent <adapter> <source-id> <sequence>` check wake.
   Never run a registered source's blocking command yourself in a conversational turn.
-- `loopspec` - load before authoring or changing a LoopSpec, before selecting one for an event, before driving an iteration to a terminal state, and before describing any loop's status to the captain.
-  A LoopSpec is temporal recurrence only; never build a private loop runner, and never report a loop as live without production evidence that it ran.
+- `loopspec` - load before authoring or changing a LoopSpec, before selecting one for an event, before actuating or driving an iteration to a terminal state, and before describing any loop's status to the captain.
+  A LoopSpec is temporal recurrence only; never build a private loop runner, never report a loop as live without production evidence that it ran, and never supply a verifier verdict yourself, because a success terminal requires a run of the spec's own bound verifier.
 - `fmx-respond` - load on an `x-mention <request_id>` `check:` wake to handle the mention, on an `x-mode-error ...` `check:` wake to report the X-mode configuration blocker, on a `public-followup ...` `check:` wake or a startup-surfaced public commitment, and on any milestone or terminal wake for an X-mode-linked task before posting its completion follow-up; relevant only when X mode is on.
 - `firstmate-codexapp` - load before coordinating a visible Codex Desktop thread, evaluating a Codex App backend request, or reconciling Codex Desktop host-tool smoke evidence for Firstmate work.
 - `firstmate-coding-guidelines` - load before changing firstmate's shared, tracked material, as defined by section 1's list, whether editing directly or briefing a crewmate for a firstmate-repo task.
