@@ -1735,9 +1735,12 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && { [ -e "$STATE/$ID.meta
   # not make safe recovery erase its durable state.
   RECOVERY_META_EXTENSIONS=$(while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
-      window=*|endpoint_task_id=*|worktree=*|project=*|harness=*|kind=*|mode=*|yolo=*) ;;
-      tasktmp=*|model=*|effort=*|busy_gen=*|traceparent=*|backend=*) ;;
-      herdr_*=*|zellij_*=*|orca_worktree_id=*|terminal=*|cmux_*=*|home=*|projects=*) ;;
+      window=*|endpoint_task_id=*|worktree=*|project=*) ;;
+      harness=*|kind=*|mode=*|yolo=*) ;;
+      tasktmp=*|model=*|effort=*|busy_gen=*) ;;
+      traceparent=*|backend=*|herdr_*=*|zellij_*=*) ;;
+      orca_worktree_id=*|terminal=*|cmux_*=*|home=*) ;;
+      projects=*) ;;
       *) printf '%s\n' "$line" ;;
     esac
   done < "$EXISTING_META")
