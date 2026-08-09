@@ -93,8 +93,22 @@ write_spec() {
     || fail "could not build fixture spec $id"
 }
 
-# An enabled spec needs an installed skill; stow ships in this repo.
-READY='.status = "enabled" | .trigger.id = "fixture-ready" | .authority.permitted_skills = ["stow"]'
+# An enabled spec needs an installed skill; stow ships in this repo. It also
+# needs a verifier that actually resolves and runs, because an enabled spec may
+# no longer name a verifier nothing can execute.
+READY='.status = "enabled" | .trigger.id = "fixture-ready" | .authority.permitted_skills = ["stow"]
+       | .verification.verifier_command = "tests/loopspec-verifier-fixture.sh"
+       | .verification.verifier_level = "l1"'
+
+# ls_verify <registry> <state> <spec> <event-key> <rc> [evidence-lines]
+# Put the machinery in front of a verifier with a known outcome.
+ls_verify() {
+  local reg=$1 st=$2 spec=$3 key=$4 rc=$5 lines=${6:-3}
+  OUT=$(FM_ROOT_OVERRIDE="$ROOT" FM_LOOPSPEC_DIR="$reg" FM_STATE_OVERRIDE="$st" \
+        FIXTURE_VERIFIER_RC="$rc" FIXTURE_VERIFIER_EVIDENCE="$lines" \
+        "$LS" verify "$spec" --event-key "$key" 2>&1)
+  CODE=$?
+}
 
 # --- the validator can fail, then the shipped registry passes ----------------
 
@@ -486,65 +500,129 @@ test_capacity_stop_blocks_a_new_iteration_but_not_in_flight_work() {
 # --- verification can never be assumed --------------------------------------
 
 test_an_unavailable_verifier_can_never_become_a_pass() {
-  local reg st required
+  local reg st
   read -r reg st < <(new_case verifier)
   write_spec "$reg" loop "$READY"
-  required=$(jq -r '.verification.required_evidence | length' "$reg/loop.json")
 
   ls_run "$reg" "$st" claim loop --event-key v1 --spec-version 1 --headroom 90
   expect_code 0 "$CODE" "claim refused: $OUT"
 
-  ls_run "$reg" "$st" finish loop --event-key v1 --terminal delta_emitted --verifier-result unavailable
+  # Before anything else: asserting a verdict is not a verdict. This is the hole
+  # that let a spec naming a verifier which did not exist reach a success
+  # terminal, so it is the first thing proved closed.
+  ls_run "$reg" "$st" finish loop --event-key v1 --terminal delta_emitted --verifier-result pass
+  expect_code 1 "$CODE" "a caller-asserted pass reached a success terminal with no verifier run"
+  assert_contains "$OUT" "refuse_verifier_not_run" "a success terminal was reached without a verifier run"
+  assert_contains "$OUT" "NO_VERIFIER_RAN" "the refusal did not name NO_VERIFIER_RAN"
+
+  # A verifier that cannot run at all is unavailable, and unavailable is never a
+  # pass no matter what the caller says.
+  ls_verify "$reg" "$st" loop v1 77
+  expect_code 1 "$CODE" "an undefined verifier status was treated as a pass"
+  assert_contains "$OUT" "verdict=unavailable" "an undefined status was not recorded as unavailable"
+
+  ls_run "$reg" "$st" finish loop --event-key v1 --terminal delta_emitted --verifier-result pass
   expect_code 1 "$CODE" "an unavailable verifier produced a success terminal"
   assert_contains "$OUT" "refuse_verifier_unavailable" "an unavailable verifier did not refuse"
 
-  ls_run "$reg" "$st" finish loop --event-key v1 --terminal delta_emitted --verifier-result fail
-  expect_code 1 "$CODE" "a rejecting verifier produced a success terminal"
-  assert_contains "$OUT" "refuse_verification_mismatch" "a rejecting verifier did not refuse"
+  ls_verify "$reg" "$st" loop v1 1
+  expect_code 1 "$CODE" "a rejecting verifier reported success"
+  assert_contains "$OUT" "verdict=fail" "a rejecting verifier was not recorded as a fail"
 
   ls_run "$reg" "$st" finish loop --event-key v1 --terminal delta_emitted --verifier-result pass
-  expect_code 1 "$CODE" "a success terminal was reached with no evidence"
-  assert_contains "$OUT" "refuse_evidence_missing" "missing evidence did not refuse"
+  expect_code 1 "$CODE" "a rejecting verifier produced a success terminal"
+  assert_contains "$OUT" "refuse_verification_mismatch" "a rejecting verifier did not refuse"
 
   ls_run "$reg" "$st" finish loop --event-key v1 --terminal not_a_terminal --verifier-result pass
   expect_code 1 "$CODE" "an undeclared terminal was accepted"
   assert_contains "$OUT" "refuse_unknown_terminal" "an undeclared terminal did not refuse"
 
-  # The only route out of an unavailable verifier is the failure terminal.
+  # The only route out of an unavailable verifier is the failure terminal, and a
+  # failure terminal deliberately needs no run: a loop must always be able to
+  # record that it failed, including when the verifier is what broke.
   ls_run "$reg" "$st" finish loop --event-key v1 --terminal verification_failed --verifier-result unavailable
   expect_code 0 "$CODE" "an unavailable verifier could not reach its failure terminal: $OUT"
   assert_contains "$OUT" "kind=failure" "verification_failed was not recorded as a failure"
 
-  pass "an unavailable or rejecting verifier can only reach a failure terminal, never a pass"
+  pass "a verdict must be produced by the bound verifier, and an unavailable or rejecting one can only reach a failure terminal"
+}
+
+test_a_stale_verdict_cannot_carry_a_later_iteration() {
+  local reg st
+  read -r reg st < <(new_case stale-verdict)
+  write_spec "$reg" loop "$READY"
+
+  # Iteration 1 genuinely passes.
+  ls_run "$reg" "$st" claim loop --event-key s1 --spec-version 1 --headroom 90
+  expect_code 0 "$CODE" "claim refused: $OUT"
+  ls_verify "$reg" "$st" loop s1 0 9
+  expect_code 0 "$CODE" "the fixture verifier did not pass: $OUT"
+  ls_run "$reg" "$st" finish loop --event-key s1 --terminal delta_emitted --verifier-result pass
+  expect_code 0 "$CODE" "a verified success was refused: $OUT"
+
+  # Iteration 2 runs no verifier. The recorded pass belongs to a different event
+  # and a different iteration, so it must not be reusable.
+  ls_run "$reg" "$st" claim loop --event-key s2 --spec-version 1 --headroom 90
+  expect_code 0 "$CODE" "claim refused: $OUT"
+  ls_run "$reg" "$st" finish loop --event-key s2 --terminal delta_emitted --verifier-result pass
+  expect_code 1 "$CODE" "a verdict from an earlier iteration carried a later one"
+  assert_contains "$OUT" "refuse_verifier_not_run" "a stale verdict was not refused"
+
+  pass "a recorded verdict is bound to its own event key and iteration and cannot carry another"
+}
+
+test_an_enabled_spec_cannot_name_an_unreachable_verifier() {
+  local reg st
+  read -r reg st < <(new_case unreachable-verifier)
+
+  # The negative control: this is exactly the shape that used to validate, claim
+  # and reach a success terminal.
+  write_spec "$reg" loop "$READY | .verification.verifier_command = \"bin/there-is-no-such-verifier.sh\""
+  ls_run "$reg" "$st" validate
+  expect_code 1 "$CODE" "an enabled spec naming a verifier that does not exist was accepted"
+  assert_contains "$OUT" "refuse_invalid_spec" "an unreachable verifier did not refuse"
+  assert_contains "$OUT" "verifier command does not exist" "the refusal did not name the missing verifier"
+
+  # A path that escapes the repository root is refused as a path, not resolved.
+  write_spec "$reg" loop "$READY | .verification.verifier_command = \"../../../bin/sh\""
+  ls_run "$reg" "$st" validate
+  expect_code 1 "$CODE" "a verifier path escaping the repository root was accepted"
+  assert_contains "$OUT" "must not traverse out of the repository root" "an escaping path was not refused"
+
+  # A spec that is not enabled may still name a verifier it has not built yet.
+  write_spec "$reg" loop "$READY | .status = \"ready_not_active\" | .verification.verifier_command = \"bin/not-built-yet.sh\""
+  ls_run "$reg" "$st" validate
+  expect_code 0 "$CODE" "a spec that is not enabled was blocked by an unbuilt verifier: $OUT"
+
+  pass "an enabled spec must name a verifier that resolves inside the repository and can run"
 }
 
 test_a_success_terminal_requires_its_declared_evidence() {
-  local reg st required i
-  local -a args=()
+  local reg st required short
   read -r reg st < <(new_case evidence)
   write_spec "$reg" loop "$READY"
   required=$(jq -r '.verification.required_evidence | length' "$reg/loop.json")
+  short=$((required - 1))
 
   ls_run "$reg" "$st" claim loop --event-key e1 --spec-version 1 --headroom 90
   expect_code 0 "$CODE" "claim refused: $OUT"
 
-  # One short of the declared requirement must still refuse.
-  args=()
-  i=1
-  while [ "$i" -lt "$required" ]; do
-    args+=(--evidence "item-$i")
-    i=$((i + 1))
-  done
-  ls_run "$reg" "$st" finish loop --event-key e1 --terminal delta_emitted --verifier-result pass "${args[@]}"
+  # A verifier that passes but observed less than the spec declares is still
+  # short of evidence. The count now comes from what the verifier actually
+  # produced, not from what the caller was willing to assert.
+  ls_verify "$reg" "$st" loop e1 0 "$short"
+  expect_code 0 "$CODE" "the fixture verifier did not pass: $OUT"
+  ls_run "$reg" "$st" finish loop --event-key e1 --terminal delta_emitted --verifier-result pass
   expect_code 1 "$CODE" "a success terminal accepted fewer evidence items than declared"
   assert_contains "$OUT" "refuse_evidence_missing" "short evidence did not refuse"
 
-  args+=(--evidence "item-$required")
-  ls_run "$reg" "$st" finish loop --event-key e1 --terminal delta_emitted --verifier-result pass "${args[@]}"
+  # The caller may supplement the verifier's evidence, but only on top of a run
+  # that actually happened.
+  ls_run "$reg" "$st" finish loop --event-key e1 --terminal delta_emitted --verifier-result pass --evidence "caller-supplied"
   expect_code 0 "$CODE" "complete evidence was still refused: $OUT"
   assert_contains "$OUT" "terminal=delta_emitted" "the success terminal was not recorded"
 
-  pass "a success terminal is reachable only with the full evidence the spec declares"
+  pass "a success terminal is reachable only with the full evidence the spec declares, counted from the verifier run"
 }
 
 test_untruthful_state_refuses_rather_than_guessing() {
@@ -617,13 +695,47 @@ test_shipped_registry_is_valid_and_inert() {
   assert_contains "$OUT" "approved-work-reconciliation" "the shipped instance is missing"
   assert_contains "$OUT" "status=ready_not_active" "the shipped instance is not ready_not_active"
 
+  # The inert spec stays inert. Activating one loop must not quietly activate
+  # another that still has an unimplemented trigger and an uninstalled skill.
   ls_run "$ROOT/loopspecs" "$TMP_ROOT/shipped-state" select --trigger required-artifact-changes
-  expect_code 1 "$CODE" "the shipped instance was selectable while not active"
+  expect_code 1 "$CODE" "the inert shipped instance was selectable while not active"
   assert_contains "$OUT" "refuse_not_enabled" "the inert shipped instance did not refuse"
 
   assert_absent "$TMP_ROOT/shipped-state/loopspec" "reading the shipped registry created loop state"
 
-  pass "the shipped instance validates, reports ready_not_active, and refuses to be selected"
+  pass "the inert shipped instance validates, reports ready_not_active, and still refuses to be selected"
+}
+
+test_the_production_loop_is_bound_and_stops_before_the_merge() {
+  local spec successes
+  spec="$ROOT/loopspecs/fork-landing.json"
+  [ -f "$spec" ] || fail "the production loop is missing"
+
+  ls_run "$ROOT/loopspecs" "$TMP_ROOT/prod-state" list
+  assert_contains "$OUT" "fork-landing	version=1	status=enabled" "the production loop is not enabled"
+
+  # Enabled means the validator has already proved the verifier resolves and can
+  # run, so this asserts the property the whole activation turns on.
+  ls_run "$ROOT/loopspecs" "$TMP_ROOT/prod-state" validate
+  expect_code 0 "$CODE" "the production loop does not validate: $OUT"
+  [ -x "$ROOT/$(jq -r '.verification.verifier_command' "$spec")" ] \
+    || fail "the production loop names a verifier that is not executable"
+
+  # Exactly one success terminal, so the lawful transition after a pass is
+  # determined by code rather than by a choice something has to make.
+  successes=$(jq -r '[.terminal_states[] | select(.kind == "success")] | length' "$spec")
+  [ "$successes" -eq 1 ] || fail "the production loop declares $successes success terminals, so its pass transition is not determined"
+
+  # THE BOUNDARY. The commission is explicit that merge authority may not be the
+  # proof case, so merging must be forbidden by the spec, not merely absent.
+  jq -e '[.authority.forbidden_actions[] | select(test("merge"))] | length > 0' "$spec" >/dev/null \
+    || fail "the production loop does not forbid merging"
+  jq -e '[.terminal_states[] | select(.name | test("merg"))] | length == 0' "$spec" >/dev/null \
+    || fail "the production loop declares a merged terminal state"
+  jq -e '[.authority.permitted_actions[] | select(test("merge"))] | length == 0' "$spec" >/dev/null \
+    || fail "the production loop permits a merge action"
+
+  pass "the production loop is enabled, verifier-bound, deterministic on a pass, and forbidden from merging"
 }
 
 test_shipped_instance_references_rather_than_duplicates_its_skill() {
@@ -659,9 +771,12 @@ test_trigger_register_reports_one_of_sixteen() {
   assert_contains "$OUT" "LOOPSPEC_TRIGGERS total=16" "the register does not hold exactly sixteen triggers"
   assert_contains "$OUT" "specified=16" "not every trigger is specified"
   assert_contains "$OUT" "detector_implemented=1" "the register no longer reports exactly one implemented detector"
-  assert_contains "$OUT" "execution_path_implemented=0" "a trigger claims an implemented execution path"
-  assert_contains "$OUT" "verified=0" "a trigger claims to be verified"
-  assert_contains "$OUT" "enabled=0" "a trigger claims to be enabled"
+  # These were 0/0/0 while nothing had ever been actuated. They are 1/1/1 because
+  # exactly one trigger now has an implemented, verified and enabled execution
+  # path, and no more than one: activation has to be counted, not asserted.
+  assert_contains "$OUT" "execution_path_implemented=1" "the count of implemented execution paths changed"
+  assert_contains "$OUT" "verified=1" "the count of verified triggers changed"
+  assert_contains "$OUT" "enabled=1" "the count of enabled triggers changed"
   assert_contains "$OUT" "outside_the_sixteen=1" "the PR-merged detector is no longer held outside the sixteen"
 
   # The one implemented detector is the merge-conflict poll, and nothing else.
@@ -671,7 +786,7 @@ test_trigger_register_reports_one_of_sixteen() {
   [ "$(printf '%s\n' "$OUT" | grep -c "detector=implemented")" -eq 1 ] \
     || fail "more than one trigger reports an implemented detector"
 
-  pass "the register reports one implemented detector of sixteen, none verified, none enabled"
+  pass "the register reports one implemented detector and exactly one verified, enabled execution path of sixteen"
 }
 
 test_validator_is_not_vacuous
@@ -694,6 +809,9 @@ test_a_success_terminal_requires_its_declared_evidence
 test_untruthful_state_refuses_rather_than_guessing
 test_unwritable_state_refuses_rather_than_running_unrecorded
 test_finishing_without_an_open_iteration_refuses
+test_a_stale_verdict_cannot_carry_a_later_iteration
+test_an_enabled_spec_cannot_name_an_unreachable_verifier
 test_shipped_registry_is_valid_and_inert
+test_the_production_loop_is_bound_and_stops_before_the_merge
 test_shipped_instance_references_rather_than_duplicates_its_skill
 test_trigger_register_reports_one_of_sixteen
