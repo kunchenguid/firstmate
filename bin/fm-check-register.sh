@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # Bind an intentional custom watcher check to its current bytes.
 # Usage: fm-check-register.sh <id>
+#
+# A hand-written state/<id>.check.sh must be an ordinary single-link mode-0700
+# file that prints one line only when firstmate should wake, prints nothing
+# otherwise, and finishes before FM_CHECK_TIMEOUT. The watcher refuses to run
+# any check whose current bytes this script has not bound.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

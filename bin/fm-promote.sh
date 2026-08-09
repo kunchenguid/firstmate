@@ -5,7 +5,9 @@
 # again. After promoting, send the crewmate its ship instructions via fm-send.sh
 # (inventory scratch state, reset to a clean default-branch base, carry over only
 # intended fix changes, create branch fm/<task-id>, implement, then report done
-# according to this task's delivery mode).
+# according to this task's delivery mode). Those instructions must leave the
+# scout's scratch commits and debug edits behind, and must turn a bug the scout
+# reproduced into the regression test that ships with the fix.
 # A scout records no delivery posture, so promotion is where this task's delivery
 # contract is decided: --mode and --yolo are REQUIRED and written into the meta
 # alongside the kind= flip. Firstmate resolves both at promotion time, having just

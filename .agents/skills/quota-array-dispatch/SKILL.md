@@ -12,7 +12,7 @@ metadata:
 # quota-array-dispatch
 
 This skill is the single owner of the completion-aware profile-array selection procedure.
-`AGENTS.md` section 4 owns the always-loaded intake boundary, load trigger, malformed-config refusal, every-candidate accounting, and strongest-reasoning/tie safety rules.
+`AGENTS.md` section 4 owns the always-loaded intake boundary, the load trigger, and the malformed-config refusal; this skill owns every-candidate accounting, what blocks a candidate as against what is only disclosed uncertainty, the strongest-reasoning-class floor, and tie handling.
 `harness-adapters` owns harness verification, model/provider discovery, and effort fallback.
 `quota-axi` remains data-only, reports whatever granularity the vendor supplies, and never recommends, selects, ranks, or infers a route.
 Do not add a daemon, opaque composite score, routing wrapper, hard-coded model-specific policy, or producer-side route recommendation.
@@ -109,5 +109,6 @@ Never use headroom, runway, pace, or reserve to silently replace that reasoning 
    Report duplicate concrete profiles as a configuration error.
 
 Account for every candidate visibly before selecting or escalating, naming its catalog evidence, provider relation, applicable quota and authentication facts, remaining uncertainty, fit and reasoning class, effective headroom, usable runway, likely-completion reasoning, and later pace or reserve evidence when used.
+Never omit a candidate, guess, fall back silently to another profile, or call a result quota-informed without that accounting.
 A blocked credential report must name `harness`, `model`, authentication surface, and concrete failure evidence; never emit a bare `Grok unauthenticated` statement.
 Never conclude with an unexplained "best quota" label.
