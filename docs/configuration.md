@@ -138,6 +138,22 @@ A Secondmate on a remote route is covered the same way: the primary resolves and
 The presence flag is session-scoped enablement, so it transfers at launch and is left unchanged by live convergence into a running home.
 See [`trace-context.md`](trace-context.md) for carrier semantics, supported routes, the manual fleet-restart requirement, the session boundary, and safety limits; `bin/fm-trace-context-lib.sh`'s header owns the exact mechanics, and [`verification/trace-context.md`](verification/trace-context.md) records repeatable evidence.
 
+## Platform decision-surface seam (config/decision-surface-platform)
+
+`bin/fm-decision-surface.sh` composes the fleet's own landed deterministic owners and stands alone with no configuration.
+A deterministic platform can publish a richer projection of the same surface - `why_not_now`, allowed and forbidden transitions, path health, authority, and whether reasoning is required - through its own AXI launcher.
+The optional local, gitignored `config/decision-surface-platform` points at that launcher so the seam can be probed.
+
+The file holds one value: the path to the platform's AXI launcher executable, on the first non-empty, non-comment line.
+It is a path and never a command line, because the arguments belong to `fm-decision-surface.sh`; a private config file must not become a shell-execution seam.
+A path containing spaces needs no quoting and no escaping.
+`FM_DECISION_SURFACE_PLATFORM` overrides the file with a single path.
+
+An absent file means the seam is unconfigured, which is the shipped default and changes no behavior.
+`fm-decision-surface.sh platform-seam` prints the seam contract; adding `--probe-platform` runs the launcher's read-only fleet query and reports what it measured rather than what was assumed.
+The seam reports `wiring: not-wired` until the platform projection resolves this home's fleet task ids: a reachable launcher that names none of this fleet's work is projecting other identities, so consuming it as fleet truth would be the same silent contradiction the surface exists to prevent.
+[`verification/decision-surface.md`](verification/decision-surface.md) records the dated probe evidence and the command that refreshes it.
+
 ## Gate defaults (.no-mistakes.yaml)
 
 The tracked `.no-mistakes.yaml` keeps test evidence outside the repo and pins `commands.lint` to `bin/fm-lint.sh` so local lint matches CI.
