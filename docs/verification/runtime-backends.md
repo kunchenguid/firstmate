@@ -57,7 +57,7 @@ Pi and pi-signed 0.82.0 were reverified on 2026-07-27 through real isolated `fm-
 The earlier record that every harness is observed under its own `#{pane_current_command}` no longer holds and has been replaced by the per-harness evidence below.
 In this macOS run that reading reflected a rewritable process title rather than stable executable identity, so it is now one of two independent name sources rather than the sole basis of a verdict.
 
-The seven primary-capable adapters were relaunched on 2026-08-03 with tmux 3.6a on macOS 26.5.2 arm64, each on a private socket in an isolated lab.
+The seven primary-capable adapters verified at that point were relaunched on 2026-08-03 with tmux 3.6a on macOS 26.5.2 arm64, each on a private socket in an isolated lab.
 
 ```sh
 tmux -L "$socket" new-window -d -t "$session:" -n "$harness" -c "$wt" -- "$bin"
@@ -84,6 +84,8 @@ That is the evidence for treating any single process name as a surface under ven
 The crewmate-only Muse Code 0.1.0-R708.1 adapter was verified separately on 2026-08-05 against tmux on macOS arm64.
 Its installed `muse-bin-0.1.0-R708.1` foreground identity classified `alive`, while `musescore`, `amuse`, `muse-binary`, and `muse-bind` remained ambiguous in the portable regression.
 [`muse.md`](muse.md#process-identity) owns the artifact identity and launcher evidence for that verification.
+
+OMP carries no harness name in either process-name source, so its foreground attribution rests on the Bun script argument recorded in [OMP primary session identity](#omp-primary-session-identity) above; the drift guard's per-harness relaunch loop now includes `omp`.
 
 Bounded observed output:
 
@@ -200,7 +202,7 @@ ok - fm-teardown: dedicated-socket invalid cleanup preserves target/control and 
 The dedicated tmux cell removed ambient tmux variables, required a socket-bound wrapper, kept one target and one independent control window, and proved the wrapper was not called for invalid metadata or a direct empty target.
 Valid cleanup removed only the exact task-bound target and left the control window live.
 The metadata-only validation covers tmux, Herdr, Zellij, Orca, and cmux before backend dispatch.
-Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, and Muse share that backend cleanup boundary; their harness-specific hook files, tokens, and session-log sidecars are cleaned only after it, so no harness needs a separate endpoint parser.
+Claude, Codex, OpenCode, Pi, pi-signed, OMP, Grok, Kimi, and Muse share that backend cleanup boundary; their harness-specific hook files, tokens, and session-log sidecars are cleaned only after it, so no harness needs a separate endpoint parser.
 
 ## Herdr
 

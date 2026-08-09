@@ -94,9 +94,9 @@
 # The LOCK/BOOTSTRAP/WAKE-QUEUE safety preamble keeps its order: it establishes
 # mutation authority and this turn's work queue before anything else is read.
 #
-# On a Pi primary, the supervision-block step also checks whether Pi's two
-# tracked primary extensions are loaded and prints a PI_WATCH_EXTENSION
-# reminder line when one is missing.
+# On a Pi or OMP primary, the supervision-block step also checks whether that
+# harness's two tracked primary extensions are loaded and prints a
+# PI_WATCH_EXTENSION or OMP_WATCH_EXTENSION reminder line when one is missing.
 #
 # Why lock first: the old documented order (bootstrap, THEN lock) let a
 # SECOND concurrent session run bootstrap's mutating sweeps - converging
