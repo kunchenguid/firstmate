@@ -50,6 +50,8 @@ test_focused_validation_preflight_in_ship_briefs() {
       "$mode brief leaks a literal unexpanded FM_ROOT test-run path"
     assert_grep "tests/<family>.test.sh" "$brief" "$mode brief lost the direct test-script map"
     assert_grep "isolated and proven" "$brief" "$mode brief lost the stop rule"
+    assert_grep "work outside that boundary still climbs to the full review" "$brief" \
+      "$mode brief lost the outside-the-boundary full-review rule"
     assert_grep "$ROOT/.agents/skills/focused-validation/SKILL.md" "$brief" \
       "$mode brief lost the focused-validation skill pointer"
   done
@@ -58,8 +60,8 @@ test_focused_validation_preflight_in_ship_briefs() {
     "no-mistakes DOD lost the preflight-before-pipeline rule"
   assert_grep "it is the review for this fast path" "$home/data/fv-directpr/brief.md" \
     "direct-PR DOD lost the focused-validation-as-review rule"
-  assert_grep "product-facing, mixed, or uncertain" "$home/data/fv-directpr/brief.md" \
-    "direct-PR DOD lost the internal-only escalation boundary"
+  assert_grep "outside the internal-only boundary defined in" "$home/data/fv-directpr/brief.md" \
+    "direct-PR DOD lost the internal-only escalation boundary pointer"
   assert_grep "before appending \`done: ready in branch\`" "$home/data/fv-localonly/brief.md" \
     "local-only DOD lost the preflight-before-ready rule"
 
