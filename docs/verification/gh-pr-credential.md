@@ -3,7 +3,7 @@
 Repeatable evidence for the `gh` shim that routes pull-request mutations through `bin/fm-gh.sh` and recovers exact-head workflow verdicts through `bin/fm-gh-ci-fallback.sh`.
 Current behavior and rationale are owned by [`../no-mistakes-pr-credential.md`](../no-mistakes-pr-credential.md), the configuration schema by [`../configuration.md`](../configuration.md) ("Pull-request credential"), and the upstream ask by [`../proposals/nm-pr-step-interception.md`](../proposals/nm-pr-step-interception.md); this page records evidence only.
 
-Date: 2026-08-07.
+Date: 2026-08-09.
 Comparison base: `fork/main` at `ae95570`.
 Shell: GNU bash 5.3.9 (macOS 26.5).
 `gh` 2.92.0.
@@ -59,8 +59,9 @@ Nothing placed inside a task worktree is on the `PATH` that resolves `gh` for th
 
 ## Routing behavior
 
-`tests/fm-gh-shim.test.sh` (18 behavioral cases) drives the shim and wrapper with a fake `gh` that records its argv and both GitHub token variables, plus a fake credential runner, touching no network and no real `gh`.
-It covers the exact argument vector the no-mistakes PR step builds (`pr create --head <ref> --base <base> --repo <slug> --title <title> --body-file -`) reaching the real `gh` unmodified with the configured credential injected; `pr list`, `pr view`, and `api` passing through without spending that credential; an unconfigured home preserving both ambient token variables; hostile ambient tokens being removed before the configured prefix injects the only token that reaches `gh`; the first non-comment, whitespace-trimmed prefix line winning; indented comments being skipped; a credential that re-resolves `gh` from `PATH` routing at most once rather than recursing; and the installer creating, verifying precedence for, refusing both foreign files and foreign symlinks without changing them, and removing only a link it owns.
+`tests/fm-gh-shim.test.sh` (20 behavioral cases) drives the shim and wrapper with a fake `gh` that records its argv and both GitHub token variables, plus a fake credential runner, touching no network and no real `gh`.
+It covers a credential-routed `pr create` without `--repo` deriving and injecting its checkout's fork `origin`, a caller-supplied `--repo` reaching the real `gh` unchanged, and a credential-routed `pr edit` without either a repository flag or resolvable origin refusing before real `gh` can guess a parent repository.
+It also covers `pr list`, `pr view`, and `api` passing through without spending that credential; an unconfigured home preserving both ambient token variables; hostile ambient tokens being removed before the configured prefix injects the only token that reaches `gh`; the first non-comment, whitespace-trimmed prefix line winning; indented comments being skipped; a credential that re-resolves `gh` from `PATH` routing at most once rather than recursing; and the installer creating, verifying precedence for, refusing both foreign files and foreign symlinks without changing them, and removing only a link it owns.
 `tests/fm-pr-merge.test.sh` drives protected GitHub merge capture through the public merge interface both without the shim and with a symlink to this repository's shim prefixed on `PATH`, and proves both paths preserve the single GraphQL request and exact SHA-conditioned merge mutation.
 
 Seven CI cases reproduce the check-runs authorization boundary and exercise the fallback through the shim's public `gh` interface.
@@ -79,7 +80,9 @@ The wrapper now expands the prefix as `${PREFIX[@]+"${PREFIX[@]}"}`, and both wr
 
 ```console
 $ bash tests/fm-gh-shim.test.sh
-ok - gh pr create routes through fm-gh.sh and reaches the real gh with the configured credential
+ok - gh pr create without --repo injects its checkout origin into the credential route
+ok - a caller-supplied --repo always wins over the checkout origin
+ok - credential-routed pr edit without --repo refuses when origin is unavailable
 ok - a check-runs 403 reaches a green exact-head workflow verdict without the privileged token
 ok - a check-runs 403 reaches a red exact-head workflow verdict
 ok - zero exact-head workflow runs remain explicitly pending

@@ -3,8 +3,7 @@
 # exact-head workflow-runs CI fallback, and fm-gh.sh's credential-prefix contract.
 #
 # The routed invocation under test is the exact argument vector the no-mistakes PR
-# step builds for GitHub: `pr create --head <ref> --base <base> --repo <slug> --title
-# <title> --body-file -`. Nothing here touches the real gh, the real daemon, or any
+# step builds for GitHub. Nothing here touches the real gh, the real daemon, or any
 # network: a fake gh records how it was called, and a fake credential runner stands in
 # for whatever the home configures. CI cases feed raw workflow-run pages through the
 # same jq expression the helper gives gh, so they exercise the public command contract
@@ -50,6 +49,13 @@ make_home() {
   local home=$1 line=$2
   mkdir -p "$home/config"
   printf '%s\n' "$line" > "$home/config/gh-credential"
+}
+
+# make_git_checkout <dir> [origin]: make an empty checkout, optionally with origin.
+make_git_checkout() {
+  local dir=$1 origin=${2:-}
+  git init -q "$dir"
+  [ -z "$origin" ] || git -C "$dir" remote add origin "$origin"
 }
 
 # make_fake_cred <dir>: a credential runner that injects a known token then execs the
@@ -426,35 +432,87 @@ EOF
   pass "unsupported gh pr checks shapes exec the real gh directly"
 }
 
-test_pr_create_routes_through_wrapper() {
-  local case_dir real_dir shim_dir home
+test_pr_create_without_repo_injects_origin_target() {
+  local case_dir real_dir shim_dir home checkout out
   case_dir="$TMP_ROOT/route"
   real_dir="$case_dir/real"
   shim_dir="$case_dir/shim"
   home="$case_dir/home"
+  checkout="$case_dir/checkout"
   make_fake_gh "$real_dir"
   make_fake_cred "$case_dir/tools"
   make_home "$home" "$case_dir/tools/fakecred pr-capable-token --"
+  make_git_checkout "$checkout" "git@github.com:fork-owner/fork-repo.git"
   mkdir -p "$shim_dir"
   ln -sf "$SHIM" "$shim_dir/gh"
 
   local out
   out=$(
-    FAKE_GH_LOG="$case_dir/gh.calls" \
-      FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
-      PATH="$shim_dir:$real_dir:$PATH" \
-      gh pr create --head feature --base main --repo o/r --title T --body-file - \
+    cd "$checkout" || exit 1
+    FAKE_GH_LOG="$case_dir/gh.calls" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+      PATH="$shim_dir:$real_dir:$PATH" gh pr create --head feature --base main --title T \
       < /dev/null 2>&1
   )
 
   assert_contains "$out" "https://github.com/o/r/pull/1" \
     "routed pr create did not return the real gh's output"
-  assert_grep 'argv:pr create --head feature --base main --repo o/r --title T --body-file -' \
+  assert_grep 'argv:pr create --head feature --base main --title T --repo fork-owner/fork-repo' \
     "$case_dir/gh.calls" \
-    "routed pr create did not reach the real gh with an unmodified argument vector"
+    "routed pr create did not receive the fork origin as an explicit --repo target"
   assert_grep 'token:pr-capable-token' "$case_dir/gh.calls" \
     "routed pr create did not receive the credential injected by config/gh-credential"
-  pass "gh pr create routes through fm-gh.sh and reaches the real gh with the configured credential"
+  pass "gh pr create without --repo injects its checkout origin into the credential route"
+}
+
+test_pr_create_with_repo_preserves_caller_target() {
+  local case_dir real_dir shim_dir home checkout out
+  case_dir="$TMP_ROOT/caller-repo"
+  real_dir="$case_dir/real"
+  shim_dir="$case_dir/shim"
+  home="$case_dir/home"
+  checkout="$case_dir/checkout"
+  make_fake_gh "$real_dir"
+  make_fake_cred "$case_dir/tools"
+  make_home "$home" "$case_dir/tools/fakecred pr-capable-token --"
+  make_git_checkout "$checkout"
+  mkdir -p "$shim_dir"
+  ln -sf "$SHIM" "$shim_dir/gh"
+
+  out=$(cd "$checkout" && FAKE_GH_LOG="$case_dir/gh.calls" FM_HOME="$home" \
+    FM_ROOT_OVERRIDE="$ROOT" PATH="$shim_dir:$real_dir:$PATH" \
+    gh pr create --head feature --base main --repo caller-owner/caller-repo --title T < /dev/null 2>&1)
+
+  assert_grep 'argv:pr create --head feature --base main --repo caller-owner/caller-repo --title T' \
+    "$case_dir/gh.calls" \
+    "a caller-supplied --repo did not reach real gh unchanged"
+  pass "a caller-supplied --repo always wins over the checkout origin"
+}
+
+test_pr_edit_without_origin_refuses_before_credential_route() {
+  local case_dir real_dir shim_dir home checkout out status
+  case_dir="$TMP_ROOT/no-origin"
+  real_dir="$case_dir/real"
+  shim_dir="$case_dir/shim"
+  home="$case_dir/home"
+  checkout="$case_dir/checkout"
+  make_fake_gh "$real_dir"
+  make_fake_cred "$case_dir/tools"
+  make_home "$home" "$case_dir/tools/fakecred pr-capable-token --"
+  make_git_checkout "$checkout"
+  mkdir -p "$shim_dir"
+  ln -sf "$SHIM" "$shim_dir/gh"
+
+  status=0
+  out=$(cd "$checkout" && FAKE_GH_LOG="$case_dir/gh.calls" FM_HOME="$home" \
+    FM_ROOT_OVERRIDE="$ROOT" PATH="$shim_dir:$real_dir:$PATH" \
+    gh pr edit 7 --title T < /dev/null 2>&1) || status=$?
+
+  expect_code 1 "$status" "credential-routed pr edit with no origin"
+  assert_contains "$out" "refusing credential-routed gh pr edit without --repo" \
+    "a no-origin credential route did not fail loudly"
+  assert_absent "$case_dir/gh.calls" \
+    "a no-origin credential route delegated to real gh and let it guess the repository"
+  pass "credential-routed pr edit without --repo refuses when origin is unavailable"
 }
 
 test_non_pr_invocations_pass_through_untouched() {
@@ -751,7 +809,9 @@ test_installer_refuses_to_replace_a_foreign_symlink() {
   pass "the installer refuses a foreign gh symlink and leaves it intact"
 }
 
-test_pr_create_routes_through_wrapper
+test_pr_create_without_repo_injects_origin_target
+test_pr_create_with_repo_preserves_caller_target
+test_pr_edit_without_origin_refuses_before_credential_route
 test_ci_403_falls_back_to_exact_head_green_without_privileged_token
 test_ci_403_falls_back_to_exact_head_red
 test_ci_zero_exact_head_runs_stays_pending

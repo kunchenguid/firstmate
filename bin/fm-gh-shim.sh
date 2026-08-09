@@ -14,6 +14,9 @@
 # fine-grained token is forbidden from and the pipeline's PR step makes both:
 #   gh pr create ...
 #   gh pr edit ...
+# When either omits --repo/-R, the shim derives owner/name from the working
+# checkout's origin remote and appends --repo; an unresolved origin refuses the
+# mutation so gh cannot infer a fork's parent repository.
 # The CI monitor's exact `gh pr checks ... --json name,state,bucket,completedAt[,link]`
 # vectors first try the real gh with the ambient narrow token. Only the known HTTP
 # GraphQL personal-token denial for statusCheckRollup reaches fm-gh-ci-fallback.sh, which uses
@@ -93,7 +96,46 @@ REAL_GH=$(find_real_gh) || {
   exit 127
 }
 
+has_explicit_repo() {
+  local arg
+  for arg in "$@"; do
+    case "$arg" in
+      --repo | -R | --repo=* | -R?*) return 0 ;;
+    esac
+  done
+  return 1
+}
+
+# origin_repo_slug: print the GitHub owner/name from the current checkout's origin.
+# The credential route must never leave repository selection to gh: in a fork,
+# gh otherwise prefers the parent repository and can create an upstream PR.
+origin_repo_slug() {
+  local origin path
+  origin=$(git remote get-url origin 2> /dev/null) || return 1
+  [ -n "$origin" ] || return 1
+
+  case "$origin" in
+    *://*)
+      path=${origin#*://}
+      path=${path#*/}
+      ;;
+    *@*:*) path=${origin#*:} ;;
+    *) return 1 ;;
+  esac
+  path=${path%/}
+  path=${path%.git}
+  [[ "$path" =~ ^[^/[:space:]]+/[^/[:space:]]+$ ]] || return 1
+  printf '%s\n' "$path"
+}
+
 if [ "$ROUTE" = credential ]; then
+  if ! has_explicit_repo "$@"; then
+    REPO=$(origin_repo_slug) || {
+      echo "fm-gh-shim: refusing credential-routed gh pr ${2:-<unknown>} without --repo: cannot resolve owner/name from origin" >&2
+      exit 1
+    }
+    set -- "$@" --repo "$REPO"
+  fi
   export FM_GH_SHIM_ACTIVE=1
   exec "${FM_GH_SHIM_WRAPPER:-$SHIM_SRC_DIR/fm-gh.sh}" "$REAL_GH" "$@"
 fi
