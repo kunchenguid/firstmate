@@ -22,7 +22,7 @@
 #   --check  Check and report only; do not prompt.
 #
 # Test seams:
-#   FM_DEPS_INTERACTIVE=1|0 overrides terminal detection.
+#   FM_DEPS_INTERACTIVE=1|0 overrides terminal detection when source-only.
 #   FM_ROOT_OVERRIDE points at an isolated Firstmate fixture.
 #   FM_DEPS_HERDR_MANIFEST_URL and FM_DEPS_NODE_INDEX_URL override release data.
 #   FM_DEPS_NVM_DIR points at an isolated NVM fixture.
@@ -38,6 +38,9 @@ AVAILABLE=0
 HERDR_MANIFEST_URL=${FM_DEPS_HERDR_MANIFEST_URL:-https://herdr.dev/latest.json}
 NODE_INDEX_URL=${FM_DEPS_NODE_INDEX_URL:-https://nodejs.org/dist/index.json}
 
+# shellcheck source=bin/fm-secondmate-nudge-lib.sh
+. "$SCRIPT_DIR/fm-secondmate-nudge-lib.sh"
+
 usage() {
   echo "usage: fm-deps.sh [--check]" >&2
 }
@@ -51,10 +54,12 @@ esac
 [ "$#" -le 1 ] || { usage; exit 1; }
 
 is_interactive() {
-  case "${FM_DEPS_INTERACTIVE:-}" in
-    1) return 0 ;;
-    0) return 1 ;;
-  esac
+  if [ "${FM_DEPS_SOURCE_ONLY:-0}" = 1 ]; then
+    case "${FM_DEPS_INTERACTIVE:-}" in
+      1) return 0 ;;
+      0) return 1 ;;
+    esac
+  fi
   [ -t 0 ] && [ -t 1 ]
 }
 
@@ -143,36 +148,81 @@ prompt_yes() {
 }
 
 process_active() {
-  command -v pgrep >/dev/null 2>&1 || return 1
+  local status
+  command -v pgrep >/dev/null 2>&1 || return 2
   pgrep -x "$1" >/dev/null 2>&1
+  status=$?
+  case "$status" in
+    0|1) return "$status" ;;
+    *) return 2 ;;
+  esac
+}
+
+quiet_process_blocker() {
+  local process_name=$1 active_message=$2 status
+  process_active "$process_name"
+  status=$?
+  case "$status" in
+    0) printf '%s' "$active_message"; return 0 ;;
+    1) return 1 ;;
+    *) printf 'Cannot confirm quiet window because pgrep failed for %s' "$process_name"; return 2 ;;
+  esac
 }
 
 quiet_window_blocker() {
+  local out status
   case "$1" in
     codex)
-      process_active codex && { printf 'Codex process is active; close Codex and rerun'; return 0; }
+      quiet_process_blocker codex 'Codex process is active; close Codex and rerun'
+      return $?
       ;;
     herdr)
-      if command -v herdr >/dev/null 2>&1 \
-        && herdr session list --json 2>/dev/null | grep -Eq '"running"[[:space:]]*:[[:space:]]*true'; then
+      if ! command -v herdr >/dev/null 2>&1; then
+        printf 'Cannot confirm quiet window because Herdr inspection is unavailable'
+        return 2
+      fi
+      out=$(herdr session list --json 2>/dev/null)
+      status=$?
+      if [ "$status" -ne 0 ] || [ -z "$out" ] \
+        || ! printf '%s\n' "$out" | jq -e . >/dev/null 2>&1; then
+        printf 'Cannot confirm quiet window because Herdr session inspection failed'
+        return 2
+      fi
+      if printf '%s\n' "$out" | grep -Eq '"running"[[:space:]]*:[[:space:]]*true'; then
         printf 'Herdr session is running; finish/stop Herdr-backed work and rerun'
         return 0
       fi
+      return 1
       ;;
     opencode)
-      process_active opencode && { printf 'OpenCode process is active; close it and rerun'; return 0; }
+      quiet_process_blocker opencode 'OpenCode process is active; close it and rerun'
+      return $?
       ;;
     tmux)
-      if command -v tmux >/dev/null 2>&1 && tmux list-sessions >/dev/null 2>&1; then
+      if ! command -v tmux >/dev/null 2>&1; then
+        printf 'Cannot confirm quiet window because tmux inspection is unavailable'
+        return 2
+      fi
+      out=$(LC_ALL=C tmux list-sessions 2>&1)
+      status=$?
+      if [ "$status" -eq 0 ]; then
         printf 'tmux session is running; finish tmux-backed work and rerun'
         return 0
       fi
+      if [ "$status" -eq 1 ] && printf '%s\n' "$out" \
+        | grep -Eq '^(no server running on|failed to connect to server: No such file or directory)'; then
+        return 1
+      fi
+      printf 'Cannot confirm quiet window because tmux session inspection failed'
+      return 2
       ;;
     node)
-      process_active node && { printf 'Node process is active; stop shared Node workloads and rerun'; return 0; }
+      quiet_process_blocker node 'Node process is active; stop shared Node workloads and rerun'
+      return $?
       ;;
   esac
-  return 1
+  printf 'Cannot confirm quiet window for unknown dependency %s' "$1"
+  return 2
 }
 
 run_apt_upgrade() {
@@ -196,8 +246,68 @@ load_nvm() {
   command -v nvm >/dev/null 2>&1
 }
 
+nvm_manages_active_node() {
+  local nvm_dir nvm_real node_path node_real relative
+  nvm_dir=${FM_DEPS_NVM_DIR:-${NVM_DIR:-$HOME/.nvm}}
+  [ -s "$nvm_dir/nvm.sh" ] || return 1
+  node_path=$(type -P node) || return 1
+  nvm_real=$(readlink -f -- "$nvm_dir") || return 1
+  node_real=$(readlink -f -- "$node_path") || return 1
+  case "$node_real" in
+    "$nvm_real"/versions/node/*/bin/node) ;;
+    *) return 1 ;;
+  esac
+  relative=${node_real#"$nvm_real"/versions/node/}
+  [ "${relative#*/}" = bin/node ]
+}
+
+handle_firstmate_update_actions() {
+  local update_out=$1 reread_line nudge_line reread targets selector
+  reread_line=$(printf '%s\n' "$update_out" | grep '^reread-firstmate: ' | tail -n 1)
+  nudge_line=$(printf '%s\n' "$update_out" | grep '^nudge-secondmates:' | tail -n 1)
+  if [ -z "$reread_line" ] || [ -z "$nudge_line" ]; then
+    printf 'Firstmate updater did not return its required caller actions\n' >&2
+    return 1
+  fi
+  reread=${reread_line#reread-firstmate: }
+  case "$reread" in
+    yes)
+      printf 'REREAD_REQUIRED: %s/AGENTS.md changed; re-read it before further work\n' "$FM_ROOT"
+      ;;
+    no) ;;
+    *) printf 'Firstmate updater returned an invalid reread action\n' >&2; return 1 ;;
+  esac
+  targets=${nudge_line#nudge-secondmates:}
+  targets=${targets# }
+  [ -n "$targets" ] || {
+    printf 'Firstmate updater returned an invalid secondmate nudge action\n' >&2
+    return 1
+  }
+  [ "$targets" != none ] || return 0
+  for selector in $targets; do
+    case "${selector#fm-}" in
+      ''|*[!A-Za-z0-9._-]*)
+        printf 'Firstmate updater returned an invalid secondmate selector: %s\n' "$selector" >&2
+        return 1
+        ;;
+    esac
+    case "$selector" in
+      fm-*) ;;
+      *)
+        printf 'Firstmate updater returned an invalid secondmate selector: %s\n' "$selector" >&2
+        return 1
+        ;;
+    esac
+    if ! FM_HOME="${FM_HOME:-$FM_ROOT}" FM_ROOT_OVERRIDE="$FM_ROOT" \
+      "$FM_ROOT/bin/fm-send.sh" "$selector" "$FM_SECOND_MATE_NUDGE_MESSAGE"; then
+      printf 'Firstmate post-update nudge failed for %s\n' "$selector" >&2
+      return 1
+    fi
+  done
+}
+
 run_upgrade() {
-  local id=$1 installed=${2:-} latest=${3:-} before after
+  local id=$1 installed=${2:-} latest=${3:-} before after update_out
   case "$id" in
     codex) codex update ;;
     github-cli) run_apt_upgrade gh ;;
@@ -219,16 +329,21 @@ run_upgrade() {
     github-actions) return 1 ;;
     firstmate)
       before=$(git -C "$FM_ROOT" rev-parse HEAD 2>/dev/null) || return 1
-      "$FM_ROOT/bin/fm-update.sh" || return 1
+      if ! update_out=$("$FM_ROOT/bin/fm-update.sh" 2>&1); then
+        printf '%s\n' "$update_out"
+        return 1
+      fi
+      printf '%s\n' "$update_out"
       after=$(git -C "$FM_ROOT" rev-parse HEAD 2>/dev/null) || return 1
-      [ "$after" != "$before" ]
+      [ "$after" != "$before" ] || return 1
+      handle_firstmate_update_actions "$update_out"
       ;;
     *) return 1 ;;
   esac
 }
 
 offer_update() {
-  local id=$1 label=$2 installed=$3 latest=$4 class=$5 blocker=""
+  local id=$1 label=$2 installed=$3 latest=$4 class=$5 blocker="" blocker_status
   if ! version_is_older "$installed" "$latest"; then
     printf 'OK: %s %s\n' "$label" "$installed"
     return 0
@@ -238,12 +353,27 @@ offer_update() {
   [ "$class" = quiet ] && printf ' [quiet window]'
   printf '\n'
 
-  if [ "$class" = quiet ] && blocker=$(quiet_window_blocker "$id"); then
-    printf 'DEFER: %s - %s\n' "$label" "$blocker"
-    DEFERRED=$((DEFERRED + 1))
-    return 0
+  if [ "$class" = quiet ]; then
+    blocker=$(quiet_window_blocker "$id")
+    blocker_status=$?
+    if [ "$blocker_status" -ne 1 ]; then
+      [ -n "$blocker" ] || blocker='quiet-window inspection failed'
+      printf 'DEFER: %s - %s\n' "$label" "$blocker"
+      DEFERRED=$((DEFERRED + 1))
+      return 0
+    fi
   fi
   if prompt_yes "$label"; then
+    if [ "$class" = quiet ]; then
+      blocker=$(quiet_window_blocker "$id")
+      blocker_status=$?
+      if [ "$blocker_status" -ne 1 ]; then
+        [ -n "$blocker" ] || blocker='quiet-window inspection failed'
+        printf 'DEFER: %s - %s\n' "$label" "$blocker"
+        DEFERRED=$((DEFERRED + 1))
+        return 0
+      fi
+    fi
     if run_upgrade "$id" "$installed" "$latest"; then
       printf 'UPGRADED: %s\n' "$label"
       UPDATES=$((UPDATES + 1))
@@ -316,13 +446,12 @@ check_herdr() {
 }
 
 check_node() {
-  local installed latest nvm_dir
+  local installed latest
   if ! installed=$(command_version node) || [ -z "$installed" ]; then
     printf 'MISSING: Node (install with NVM)\n'
     return 0
   fi
-  nvm_dir=${FM_DEPS_NVM_DIR:-${NVM_DIR:-$HOME/.nvm}}
-  if [ ! -s "$nvm_dir/nvm.sh" ]; then
+  if ! nvm_manages_active_node; then
     printf 'MANUAL: Node %s is not NVM-managed; update it with its owning package manager\n' "$installed"
     return 0
   fi
@@ -375,7 +504,7 @@ check_github_actions() {
     | sort -u | tr '\n' ' ' | sed 's/[[:space:]]*$//')
   if [ -z "$pins" ]; then
     printf 'OK: actions/checkout has no workflow call sites\n'
-  elif printf '%s\n' "$pins" | grep -q "actions/checkout@v$major"; then
+  elif [ "$pins" = "actions/checkout@v$major" ]; then
     printf 'OK: actions/checkout %s (latest stable %s)\n' "$pins" "$latest"
   else
     printf 'REPO_UPDATE: %s -> actions/checkout@v%s (latest %s); create a normal repository PR\n' "$pins" "$major" "$latest"
