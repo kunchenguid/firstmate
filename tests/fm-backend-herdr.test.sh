@@ -765,89 +765,116 @@ test_display_name_pure_helper_shapes() {
       scout-*) ;;
       *) echo "bad prefix: $long" >&2; exit 1 ;;
     esac
-    # Grammar: ^[a-z][a-z0-9_-]{0,31}$
-    case "$long" in
-      [a-z]|[a-z][a-z0-9_-]*) ;;
-      *) echo "grammar fail: $long" >&2; exit 1 ;;
-    esac
+    # Grammar: ^[a-z][a-z0-9_-]{0,31}$ (rejection form - a trailing bare * in a
+    # glob matches ANY character, so it cannot express the repeat).
+    for candidate in "$long" \
+      "$(fm_backend_herdr_display_name 'Terse/OSS Phase01!' scout)" \
+      "$(fm_backend_herdr_display_name '///' ship)" \
+      "$(fm_backend_herdr_display_name '' scout)" \
+      "$(fm_backend_herdr_display_name '9lead' ship)"; do
+      case "$candidate" in
+        [a-z]*[!a-z0-9_-]*|[!a-z]*|"") echo "grammar fail: $candidate" >&2; exit 1 ;;
+      esac
+      [ "${#candidate}" -le 32 ] || { echo "too long: $candidate" >&2; exit 1; }
+    done
   ) || fail "fm_backend_herdr_display_name pure helper failed an edge case"
   pass "fm_backend_herdr_display_name: scout/ship prefixes, strip, sanitize, truncate to 32"
 }
 
-test_task_label_candidates_include_display_names() {
-  (
-    . "$ROOT/bin/backends/herdr.sh"
-    out=$(fm_backend_herdr_task_label_candidates fm-terse-oss-phase01)
-    printf '%s\n' "$out" | grep -Fxq 'fm-terse-oss-phase01' || exit 1
-    printf '%s\n' "$out" | grep -Fxq 'scout-terse-oss-phase01' || exit 1
-    printf '%s\n' "$out" | grep -Fxq 'ship-terse-oss-phase01' || exit 1
-  ) || fail "fm_backend_herdr_task_label_candidates missing expected labels"
-  pass "fm_backend_herdr_task_label_candidates: fm- plus scout- and ship- display forms"
-}
-
-test_create_task_closes_and_replaces_renamed_display_husk() {
-  # After a successful spawn the tab may have been renamed from fm-<id> to
-  # scout-<slug>. Re-spawn must still find that husk by display name.
+test_create_task_refuses_colliding_display_name_tab() {
+  # Two distinct task ids can collapse to ONE display name (lowercase, sanitize,
+  # truncate at 32). Tabs therefore keep their exact fm-<id> label for life, and
+  # husk/dup matching stays exact: phase-two's spawn must NOT see phase-one's
+  # tab, whose display name would have collided.
   local dir log resp fb out tab pane
-  dir="$TMP_ROOT/husk-display-name"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
-  printf '{"result":{"tabs":[{"tab_id":"w1:t2","label":"scout-terse-oss-phase01","workspace_id":"w1"}]}}\n' > "$resp/1.out"
-  printf '{"result":{"panes":[{"pane_id":"w1:p2","tab_id":"w1:t2"}]}}\n' > "$resp/2.out"
-  printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/3.out"
-  printf '{"error":{"code":"agent_not_found","message":"agent target w1:p2 not found"}}\n' > "$resp/4.out"
-  printf '{"result":{"tab":{"tab_id":"w1:t3"},"root_pane":{"pane_id":"w1:p3"}}}\n' > "$resp/5.out"
-  printf '{"result":{"tabs":[{"tab_id":"w1:t3","label":"fm-terse-oss-phase01","workspace_id":"w1"}]}}\n' > "$resp/7.out"
+  dir="$TMP_ROOT/husk-display-collision"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # Live (non-husk) tab for a DIFFERENT task whose scout display name is
+  # byte-identical to this spawn's: scout-alpha-service-refactor-pha.
+  printf '{"result":{"tabs":[{"tab_id":"w1:t2","label":"fm-alpha-service-refactor-phase-one","workspace_id":"w1"}]}}\n' > "$resp/1.out"
+  printf '{"result":{"tab":{"tab_id":"w1:t3"},"root_pane":{"pane_id":"w1:p3"}}}\n' > "$resp/2.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-terse-oss-phase01 /tmp/proj' "$ROOT" ) \
-    || fail "create_task should close-and-replace a display-renamed husk"
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-alpha-service-refactor-phase-two /tmp/proj' "$ROOT" ) \
+    || fail "create_task must not refuse a spawn whose display name collides with another live task"
   read -r tab pane <<EOF
 $out
 EOF
   if [ "$tab" != "w1:t3" ] || [ "$pane" != "w1:p3" ]; then
-    fail "create_task should echo the NEW tab/pane ids, got '$out'"
+    fail "create_task should echo the new tab/pane ids, got '$out'"
   fi
-  assert_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''close'$'\x1f''w1:t2' \
-    "create_task did not close the display-renamed husk tab"
-  assert_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''create' \
-    "create_task did not create a replacement for the display-renamed husk"
-  pass "fm_backend_herdr_create_task: replaces a husk whose tab was renamed to scout-<slug>"
+  assert_not_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''close' \
+    "create_task must never close another task's tab on a display-name collision"
+  pass "fm_backend_herdr_create_task: display-name collisions never match another task's tab"
 }
 
-test_list_live_includes_display_name_labels() {
+test_list_live_emits_only_reversible_fm_labels() {
   local dir log resp fb out home
   dir="$TMP_ROOT/list-live-display"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   home="$TMP_ROOT/list-live-display-home"; mkdir -p "$home"
   printf '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate"}]}}\n' > "$resp/1.out"
-  printf '{"result":{"tabs":[{"tab_id":"w1:t1","label":"scout-terse-phase01"},{"tab_id":"w1:t2","label":"1"},{"tab_id":"w1:t3","label":"ship-memberos-auth"}]}}\n' > "$resp/2.out"
+  printf '{"result":{"tabs":[{"tab_id":"w1:t1","label":"fm-terse-phase01"},{"tab_id":"w1:t2","label":"1"},{"tab_id":"w1:t3","label":"scout-hand-made"}]}}\n' > "$resp/2.out"
   printf '{"result":{"panes":[{"pane_id":"w1:p1","tab_id":"w1:t1"},{"pane_id":"w1:p2","tab_id":"w1:t2"},{"pane_id":"w1:p3","tab_id":"w1:t3"}]}}\n' > "$resp/3.out"
   printf '{"result":{"panes":[{"pane_id":"w1:p1","tab_id":"w1:t1"},{"pane_id":"w1:p2","tab_id":"w1:t2"},{"pane_id":"w1:p3","tab_id":"w1:t3"}]}}\n' > "$resp/4.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HOME="$home" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_list_live fmtest' "$ROOT" )
-  assert_contains "$out" $'fmtest:w1:p1\tscout-terse-phase01' "list_live missed scout- display label"
-  assert_contains "$out" $'fmtest:w1:p3\tship-memberos-auth' "list_live missed ship- display label"
+  assert_contains "$out" $'fmtest:w1:p1\tfm-terse-phase01' "list_live missed the fm-<id> task tab"
   assert_not_contains "$out" $'w1:p2' "list_live must not treat seed tab '1' as a task"
-  pass "fm_backend_herdr_list_live: includes scout-/ship- display labels, not seed tab 1"
+  assert_not_contains "$out" $'w1:p3' "list_live must not treat a human scout-* tab as a firstmate task"
+  pass "fm_backend_herdr_list_live: only exact fm-<id> tabs, never seed tab 1 or human scout-/ship- tabs"
 }
 
-test_apply_display_name_renames_agent_and_tab() {
+test_apply_display_name_renames_agent_only() {
   local dir log resp fb
   dir="$TMP_ROOT/apply-display"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   # apply polls pane_agent_state: pane get + agent get until live, then renames.
   printf '{"result":{"pane":{"pane_id":"w1:p9"}}}\n' > "$resp/1.out"
   printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/2.out"
-  # 3: agent rename (empty success)
-  # 4: tab rename (empty success)
+  # 3: agent rename (empty success); no tab rename call should ever be made.
   fb=$(make_herdr_fakebin "$dir")
   PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     FM_BACKEND_HERDR_DISPLAY_NAME_POLLS=2 FM_BACKEND_HERDR_DISPLAY_NAME_SLEEP=0 \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_apply_display_name fmtest w1:p9 w1:t9 scout-terse-phase01' "$ROOT" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_apply_display_name fmtest w1:p9 scout-terse-phase01' "$ROOT" \
     || fail "apply_display_name should return 0"
   assert_contains "$(cat "$log")" $'\x1f''agent'$'\x1f''rename'$'\x1f''w1:p9'$'\x1f''scout-terse-phase01' \
     "apply_display_name did not agent-rename"
-  assert_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''rename'$'\x1f''w1:t9'$'\x1f''scout-terse-phase01' \
-    "apply_display_name did not tab-rename"
-  pass "fm_backend_herdr_apply_display_name: renames agent and tab after agent is live"
+  assert_not_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''rename' \
+    "apply_display_name must never rename a tab away from its fm-<id> label"
+  pass "fm_backend_herdr_apply_display_name: renames the agent only, never the tab"
+}
+
+test_apply_display_name_rejects_invalid_grammar() {
+  local dir log resp fb err
+  dir="$TMP_ROOT/apply-display-grammar"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  fb=$(make_herdr_fakebin "$dir")
+  err=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_BACKEND_HERDR_DISPLAY_NAME_POLLS=2 FM_BACKEND_HERDR_DISPLAY_NAME_SLEEP=0 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_apply_display_name fmtest w1:p9 "a/b c"' "$ROOT" 2>&1 ) \
+    || fail "apply_display_name must return 0 when the name is rejected"
+  assert_contains "$err" "is invalid" "expected an invalid-name warning for 'a/b c'"
+  assert_not_contains "$(cat "$log")" $'\x1f''agent'$'\x1f''rename' \
+    "apply_display_name must not send a name violating herdr's grammar"
+  pass "fm_backend_herdr_apply_display_name: rejects names with characters outside [a-z0-9_-]"
+}
+
+test_apply_display_name_gives_up_early_on_dead_pane() {
+  # A structurally gone pane will never register an agent, so the poll loop must
+  # stop at the first dead sample instead of burning the whole budget.
+  local dir log resp fb err calls
+  dir="$TMP_ROOT/apply-display-dead"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"error":{"code":"pane_not_found","message":"gone"}}\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  err=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_BACKEND_HERDR_DISPLAY_NAME_POLLS=8 FM_BACKEND_HERDR_DISPLAY_NAME_SLEEP=0 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_apply_display_name fmtest w1:p9 scout-x' "$ROOT" 2>&1 ) \
+    || fail "apply_display_name must return 0 when the pane is dead"
+  assert_contains "$err" "not registered in time" "expected the skip warning for a dead pane"
+  calls=$(grep -c $'\x1f''pane'$'\x1f''get' "$log" 2>/dev/null || true)
+  if [ "${calls:-0}" -ne 1 ]; then
+    fail "apply_display_name should stop after the first dead sample, made ${calls:-0} pane-get polls"
+  fi
+  assert_not_contains "$(cat "$log")" $'\x1f''agent'$'\x1f''rename' "must not rename a dead pane"
+  pass "fm_backend_herdr_apply_display_name: breaks out of the poll loop on a dead pane"
 }
 
 test_apply_display_name_skips_when_agent_never_registers() {
@@ -860,32 +887,11 @@ test_apply_display_name_skips_when_agent_never_registers() {
   fb=$(make_herdr_fakebin "$dir")
   err=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     FM_BACKEND_HERDR_DISPLAY_NAME_POLLS=2 FM_BACKEND_HERDR_DISPLAY_NAME_SLEEP=0 \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_apply_display_name fmtest w1:p9 w1:t9 scout-x' "$ROOT" 2>&1 ) \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_apply_display_name fmtest w1:p9 scout-x' "$ROOT" 2>&1 ) \
     || fail "apply_display_name must return 0 even when rename is skipped"
   assert_contains "$err" "not registered in time" "expected skip warning when agent never appears"
   assert_not_contains "$(cat "$log")" $'\x1f''agent'$'\x1f''rename' "must not rename without a live agent"
   pass "fm_backend_herdr_apply_display_name: skips rename without failing when agent never registers"
-}
-
-test_apply_display_name_skips_tab_rename_when_projected() {
-  local dir log resp fb
-  dir="$TMP_ROOT/apply-display-projected"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
-  # presentation-projected spawns pass an empty tab id (fm-spawn.sh clears
-  # HERDR_RENAME_TAB_ID when HERDR_PROJECTED=1) so the task's real tab, which
-  # belongs to the presentation host, is never touched.
-  printf '{"result":{"pane":{"pane_id":"w1:p9"}}}\n' > "$resp/1.out"
-  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/2.out"
-  # 3: agent rename (empty success); no tab rename call should be made.
-  fb=$(make_herdr_fakebin "$dir")
-  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    FM_BACKEND_HERDR_DISPLAY_NAME_POLLS=2 FM_BACKEND_HERDR_DISPLAY_NAME_SLEEP=0 \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_apply_display_name fmtest w1:p9 "" scout-terse-phase01' "$ROOT" \
-    || fail "apply_display_name should return 0 for a projected (empty-tab-id) task"
-  assert_contains "$(cat "$log")" $'\x1f''agent'$'\x1f''rename'$'\x1f''w1:p9'$'\x1f''scout-terse-phase01' \
-    "apply_display_name did not agent-rename when tab id is empty"
-  assert_not_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''rename' \
-    "apply_display_name must not tab-rename a presentation-projected (empty tab id) task"
-  pass "fm_backend_herdr_apply_display_name: skips tab rename but still agent-renames when tab id is empty (projected)"
 }
 
 test_create_task_husk_replacement_creates_before_closing() {
@@ -4453,12 +4459,12 @@ test_projection_recovery_is_read_only_and_refuses_live_duplicate_risk
 test_workspace_find_matches_only_this_homes_own_label
 test_list_live_scoped_to_this_homes_workspace_only
 test_display_name_pure_helper_shapes
-test_task_label_candidates_include_display_names
-test_create_task_closes_and_replaces_renamed_display_husk
-test_list_live_includes_display_name_labels
-test_apply_display_name_renames_agent_and_tab
+test_create_task_refuses_colliding_display_name_tab
+test_list_live_emits_only_reversible_fm_labels
+test_apply_display_name_renames_agent_only
+test_apply_display_name_rejects_invalid_grammar
+test_apply_display_name_gives_up_early_on_dead_pane
 test_apply_display_name_skips_when_agent_never_registers
-test_apply_display_name_skips_tab_rename_when_projected
 test_parse_target
 test_normalize_key
 test_capture_calls_pane_read

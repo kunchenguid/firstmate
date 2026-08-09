@@ -2476,7 +2476,7 @@ fi
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id herdr_display_name zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -2505,11 +2505,13 @@ preserve_relaunch_meta() {
     echo "herdr_workspace_id=$HERDR_WORKSPACE_ID"
     echo "herdr_tab_id=$HERDR_TAB_ID"
     echo "herdr_pane_id=$HERDR_PANE_ID"
-    # Human-readable agents-sidebar / tab display name (not ownership authority).
+    # Human-readable agents-sidebar display name (not ownership authority).
     # Computed for ship/scout only; secondmates keep the default Herdr names.
     if [ "$KIND" != secondmate ]; then
       HERDR_DISPLAY_NAME=$(fm_backend_herdr_display_name "$ID" "$KIND")
-      [ -n "$HERDR_DISPLAY_NAME" ] && echo "herdr_display_name=$HERDR_DISPLAY_NAME"
+      if [ -n "$HERDR_DISPLAY_NAME" ]; then
+        echo "herdr_display_name=$HERDR_DISPLAY_NAME"
+      fi
     fi
   fi
   if [ "$BACKEND" = zellij ]; then
@@ -2648,17 +2650,15 @@ if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   spawn_herdr_presentation_order_lock_release
 fi
 spawn_send_key "$T" Enter
-# Best-effort Herdr agents-sidebar (and tab) rename after the harness has been
-# launched. Wait until the pane registers an agent; rename failures never fail
-# the spawn. Secondmates are out of scope. Ownership stays on recorded pane/tab
-# ids in meta (docs/herdr-backend.md).
+# Best-effort Herdr agents-sidebar rename after the harness has been launched.
+# Wait until the pane registers an agent; rename failures never fail the spawn.
+# Secondmates are out of scope. The TAB is never renamed - its fm-<id> create
+# label is the identity husk reclaim and list_live match on, and display names
+# are lossy. Ownership stays on recorded pane/tab ids in meta
+# (docs/herdr-backend.md).
 if [ "$BACKEND" = herdr ] && [ "$KIND" != secondmate ] && [ -n "${HERDR_DISPLAY_NAME:-}" ]; then
-  HERDR_RENAME_TAB_ID=$HERDR_TAB_ID
-  if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
-    HERDR_RENAME_TAB_ID=
-  fi
   fm_backend_herdr_apply_display_name \
-    "$HERDR_SES" "$HERDR_PANE_ID" "$HERDR_RENAME_TAB_ID" "$HERDR_DISPLAY_NAME" || true
+    "$HERDR_SES" "$HERDR_PANE_ID" "$HERDR_DISPLAY_NAME" || true
 fi
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then

@@ -52,10 +52,9 @@
 #
 # Authoritative task recovery/orphan discovery (ids may not deterministically match live state
 # after a server restart in a differently-configured session; see the
-# verification doc) uses LABEL matching (fm-<id> create labels and post-spawn
-# scout-/ship- display names), never trusts a stored pane id blindly:
-# fm_backend_herdr_list_live. The presentation journal is deliberately excluded
-# from that path.
+# verification doc) uses LABEL matching (fm-<id> tab labels), never trusts a
+# stored pane id blindly: fm_backend_herdr_list_live. The presentation journal
+# is deliberately excluded from that path.
 #
 # Requires: herdr (CLI + socket), jq (JSON parsing). Bootstrap detects these
 # through fm_backend_required_tools only when herdr is the resolved backend;
@@ -689,7 +688,8 @@ fm_backend_herdr_display_name() {  # <task-id> <kind>
     done
   fi
   case "$out" in
-    [a-z]|[a-z][a-z0-9_-]*) ;;
+    [a-z]*[!a-z0-9_-]*) out=$prefix ;;
+    [a-z]*) ;;
     *) out=$prefix ;;
   esac
   if [ "${#out}" -gt 32 ] || [ -z "$out" ]; then
@@ -698,48 +698,33 @@ fm_backend_herdr_display_name() {  # <task-id> <kind>
   printf '%s' "$out"
 }
 
-# fm_backend_herdr_task_label_candidates: labels that may identify a prior
-# instance of the same task tab for husk close-and-replace. Always includes
-# the create label fm-<id> plus both role display names (scout- and ship-)
-# derived from that id, so a post-spawn tab rename does not strand husks.
-# Accepts either a bare task id or an fm-<id> create label. Prints one label
-# per line; pure aside from the display-name helper.
-fm_backend_herdr_task_label_candidates() {  # <task-id-or-fm-label>
-  local raw=$1 id scout_name ship_name
-  id=$raw
-  case "$id" in
-    fm-*) id=${id#fm-} ;;
-  esac
-  [ -n "$id" ] || return 0
-  scout_name=$(fm_backend_herdr_display_name "$id" scout)
-  ship_name=$(fm_backend_herdr_display_name "$id" ship)
-  printf 'fm-%s\n' "$id"
-  printf '%s\n' "$scout_name"
-  [ "$ship_name" = "$scout_name" ] || printf '%s\n' "$ship_name"
-}
-
 # fm_backend_herdr_apply_display_name: best-effort wait until <pane> reports a
-# registered agent, then rename the agent and tab to <name>.
+# registered agent, then rename that AGENT (the agents-sidebar entry) to <name>.
+# Tabs are deliberately never renamed: the tab label fm-<id> is the injective
+# identity husk reclaim and fm_backend_herdr_list_live match on, and display
+# names are lossy (lowercased, sanitized, truncated to 32) so two distinct task
+# ids can share one. Renaming a tab to a display name would let one task's
+# reclaim match another task's tab.
 # Failures warn on stderr and never fail the spawn (exit 0 always).
-# Does not touch the primary seed tab labeled "1" (callers never pass it).
 # Polls/sleep are overridable for tests via FM_BACKEND_HERDR_DISPLAY_NAME_POLLS
 # and FM_BACKEND_HERDR_DISPLAY_NAME_SLEEP.
-fm_backend_herdr_apply_display_name() {  # <session> <pane_id> <tab_id> <name>
-  local session=$1 pane=$2 tab=$3 name=$4 state i
+fm_backend_herdr_apply_display_name() {  # <session> <pane_id> <name>
+  local session=$1 pane=$2 name=$3 state i
   local polls=${FM_BACKEND_HERDR_DISPLAY_NAME_POLLS:-20}
   local sleep_s=${FM_BACKEND_HERDR_DISPLAY_NAME_SLEEP:-0.25}
+  # Reject anything outside ^[a-z][a-z0-9_-]{0,31}$. A trailing bare * in a glob
+  # matches ANY characters, so the grammar is enforced as a rejection pattern
+  # (an invalid char anywhere) plus a first-character check, not as a repeat.
   case "$name" in
-    [a-z]|[a-z][a-z0-9_-]*)
-      if [ "${#name}" -gt 32 ]; then
-        echo "warning: herdr display name '$name' exceeds 32 chars; skipping rename" >&2
-        return 0
-      fi
-      ;;
-    *)
+    [a-z]*[!a-z0-9_-]*|[!a-z]*|"")
       echo "warning: herdr display name '$name' is invalid; skipping rename" >&2
       return 0
       ;;
   esac
+  if [ "${#name}" -gt 32 ]; then
+    echo "warning: herdr display name '$name' exceeds 32 chars; skipping rename" >&2
+    return 0
+  fi
   [ -n "$session" ] && [ -n "$pane" ] || {
     echo "warning: herdr display rename missing session or pane; skipping" >&2
     return 0
@@ -747,8 +732,13 @@ fm_backend_herdr_apply_display_name() {  # <session> <pane_id> <tab_id> <name>
   state=no-agent
   for ((i = 0; i < polls; i++)); do
     state=$(fm_backend_herdr_pane_agent_state "$session" "$pane")
-    [ "$state" = live ] && break
-    sleep "$sleep_s"
+    # dead is structural and terminal: no agent will ever register there.
+    if [ "$state" = live ] || [ "$state" = dead ]; then
+      break
+    fi
+    if [ "$((i + 1))" -lt "$polls" ]; then
+      sleep "$sleep_s"
+    fi
   done
   if [ "$state" != live ]; then
     echo "warning: herdr agent not registered in time to rename to $name; leaving default names" >&2
@@ -756,11 +746,6 @@ fm_backend_herdr_apply_display_name() {  # <session> <pane_id> <tab_id> <name>
   fi
   if ! fm_backend_herdr_cli "$session" agent rename "$pane" "$name" >/dev/null 2>&1; then
     echo "warning: herdr agent rename to $name failed" >&2
-  fi
-  if [ -n "$tab" ] && [ "$tab" != 1 ]; then
-    if ! fm_backend_herdr_cli "$session" tab rename "$tab" "$name" >/dev/null 2>&1; then
-      echo "warning: herdr tab rename to $name failed" >&2
-    fi
   fi
   return 0
 }
@@ -2116,17 +2101,14 @@ fm_backend_herdr_agent_alive() {  # <target>
 # case. Echoes "<tab_id> <pane_id>" on success.
 fm_backend_herdr_create_task() {  # <container> <label> <cwd> <seeded_default_tab_id>
   local container=$1 label=$2 cwd=$3 seeded_tab_id=${4:-} session wsid list dup_tabs dup dup_pane dup_tab_ids out tab_id pane_id remaining_dup_tabs
-  local want_json
   session=${container%%:*}
   wsid=${container#*:}
   list=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 1
-  # Husk/dup match uses the create label (fm-<id>) plus post-spawn display
-  # names (scout-/ship-) so a renamed tab is still found on re-spawn.
-  want_json=$(fm_backend_herdr_task_label_candidates "$label" | jq -R . | jq -s -c .) || {
-    echo "error: could not build herdr tab label candidates for '$label'" >&2
-    return 1
-  }
-  dup_tabs=$(printf '%s' "$list" | jq -r --argjson want "$want_json" 'if (.result.tabs | type) == "array" then .result.tabs[] | select(.label as $l | ($want | index($l)) != null) | .tab_id else error("missing result.tabs") end' 2>/dev/null) || {
+  # Husk/dup match is exact equality on the create label fm-<id>. Tabs are never
+  # renamed post-spawn (only the agent is - see fm_backend_herdr_apply_display_name),
+  # so this label stays an injective task identity and can never match a
+  # different task's tab.
+  dup_tabs=$(printf '%s' "$list" | jq -r --arg want "$label" 'if (.result.tabs | type) == "array" then .result.tabs[] | select(.label == $want) | .tab_id else error("missing result.tabs") end' 2>/dev/null) || {
     echo "error: could not parse herdr tab list output for workspace $wsid (session $session)" >&2
     return 1
   }
@@ -2167,8 +2149,8 @@ EOF
       echo "error: could not parse herdr tab list output for workspace $wsid (session $session)" >&2
       return 1
     fi
-    remaining_dup_tabs=$(printf '%s' "$list" | jq -r --argjson want "$want_json" --arg replacement "$tab_id" \
-      '.result.tabs[]? | select((.label as $l | ($want | index($l)) != null) and .tab_id != $replacement) | .tab_id' 2>/dev/null)
+    remaining_dup_tabs=$(printf '%s' "$list" | jq -r --arg want "$label" --arg replacement "$tab_id" \
+      '.result.tabs[]? | select(.label == $want and .tab_id != $replacement) | .tab_id' 2>/dev/null)
     remaining_dup_tabs=${remaining_dup_tabs//$'\n'/ }
     if [ -n "$remaining_dup_tabs" ]; then
       echo "error: failed to remove preexisting herdr tab(s) $remaining_dup_tabs for label '$label' in workspace $wsid (session $session)" >&2
@@ -3351,15 +3333,16 @@ EOF
 }
 
 # fm_backend_herdr_list_live: recovery/orphan discovery. Lists every tab whose
-# label looks like a firstmate task window in <session>'s, THIS HOME'S OWN
-# workspace (fm_backend_herdr_workspace_label - never another home's), by
-# LABEL - never by trusting a stored pane id, since ids are not guaranteed
-# stable across every server lifecycle (see herdr-verification-p2.md
-# "ID stability"). Matches create labels (fm-<id>) and post-spawn human
-# display names (scout-<slug>, ship-<slug>). A caller running as a given home
-# (e.g. a secondmate recovering its own in-flight work) naturally scopes to
-# that home's own workspace because FM_HOME already names it - no glue needed,
-# unlike the primary-spawns-a-secondmate path in fm-spawn.sh. Read-only: a
+# label looks like a firstmate task window (fm-<id>) in <session>'s, THIS
+# HOME'S OWN workspace (fm_backend_herdr_workspace_label - never another
+# home's), by LABEL - never by trusting a stored pane id, since ids are not
+# guaranteed stable across every server lifecycle (see herdr-verification-p2.md
+# "ID stability"). Tabs keep their fm-<id> create label for life (only the
+# agent is renamed post-spawn), so the emitted label stays exactly reversible
+# to a task id. A caller running as a given home (e.g. a secondmate
+# recovering its own in-flight work) naturally scopes to that home's own
+# workspace because FM_HOME already names it - no glue needed, unlike the
+# primary-spawns-a-secondmate path in fm-spawn.sh. Read-only: a
 # session/workspace that does not exist yet simply lists nothing. One
 # "<session>:<pane_id>\t<label>" line per live task tab.
 fm_backend_herdr_list_live() {  # <session>
@@ -3372,7 +3355,7 @@ fm_backend_herdr_list_live() {  # <session>
     pane_id=$(fm_backend_herdr_pane_for_tab "$session" "$wsid" "$tab_id") || continue
     [ -n "$pane_id" ] || continue
     printf '%s:%s\t%s\n' "$session" "$pane_id" "$label"
-  done < <(printf '%s' "$tabs" | jq -r '.result.tabs[]? | select((.label | type) == "string" and (.label | test("^(fm|scout|ship)-"))) | "\(.tab_id)\t\(.label)"' 2>/dev/null)
+  done < <(printf '%s' "$tabs" | jq -r '.result.tabs[]? | select((.label | type) == "string" and (.label | startswith("fm-"))) | "\(.tab_id)\t\(.label)"' 2>/dev/null)
 }
 
 # --- native event push: pane.agent_status_changed subscriber -----------------
