@@ -39,6 +39,7 @@ LOCK_DIR=
 LOCK_HELD=0
 STAGE=
 STAGE_MOVED=0
+SOURCE_SNAPSHOT=
 CONTROL_DIR=
 CONTROL_STAGE=
 CONTROL_STAGE_MOVED=0
@@ -60,6 +61,9 @@ die() {
 }
 
 cleanup() {
+  if [ -n "$SOURCE_SNAPSHOT" ] && [ -d "$SOURCE_SNAPSHOT" ]; then
+    rm -rf -- "$SOURCE_SNAPSHOT"
+  fi
   if [ -n "$STAGE" ] && [ -d "$STAGE" ] && [ "$STAGE_MOVED" -eq 0 ]; then
     rm -rf -- "$STAGE"
   fi
@@ -93,6 +97,10 @@ git_status_at() {
   local repo=$1
   shift
   git -c "safe.directory=$repo" -c core.filemode=false -C "$repo" "$@"
+}
+
+source_status_output() {
+  GIT_OPTIONAL_LOCKS=0 git_at "$SOURCE" status --porcelain=v1 --untracked-files=all
 }
 
 lowercase() {
@@ -168,7 +176,7 @@ default_branch() {
 }
 
 check_source() {
-  local root branch
+  local root branch status
   require_command git
   require_command python3
   root=$(git_at "$SOURCE" rev-parse --show-toplevel 2>/dev/null) \
@@ -181,7 +189,10 @@ check_source() {
     || die "cannot determine source default branch from origin/HEAD, main, or master"
   [ "$branch" = "$DEFAULT_BRANCH" ] \
     || die "source branch '$branch' is not the default branch '$DEFAULT_BRANCH'"
-  [ -z "$(GIT_OPTIONAL_LOCKS=0 git_at "$SOURCE" status --porcelain=v1 --untracked-files=all)" ] \
+  if ! status=$(source_status_output); then
+    die "cannot inspect source working tree"
+  fi
+  [ -z "$status" ] \
     || die "source working tree is dirty; refusing to publish"
   SOURCE_COMMIT=$(git_at "$SOURCE" rev-parse --verify HEAD 2>/dev/null) \
     || die "cannot resolve source HEAD"
@@ -242,13 +253,20 @@ check_existing_destination() {
 
 build_stage() {
   local clone_head
+  SOURCE_SNAPSHOT=$(mktemp -d "$DEST_PARENT/.shadow-source-snapshot.XXXXXX") \
+    || die "cannot create the source snapshot beside destination"
+  rmdir -- "$SOURCE_SNAPSHOT"
+  python3 "$SCRIPT_DIR/fm-shadow.py" copy --source "$SOURCE" --stage "$SOURCE_SNAPSHOT" \
+    || die "cannot capture the source snapshot"
+  source_snapshot_is_stable \
+    || die "source changed while the source snapshot was being captured; no destination update was made"
   STAGE=$(mktemp -d "$DEST_PARENT/.shadow-stage.XXXXXX") \
     || die "cannot create staging directory beside destination"
   rmdir -- "$STAGE"
   CONTROL_STAGE=$(mktemp -d "$DEST_PARENT/.shadow-control-stage.XXXXXX") \
     || die "cannot create replica control staging directory"
-  python3 "$SCRIPT_DIR/fm-shadow.py" copy --source "$SOURCE" --stage "$STAGE" \
-    || die "cannot mirror source into the temporary replica"
+  python3 "$SCRIPT_DIR/fm-shadow.py" copy --source "$SOURCE_SNAPSHOT" --stage "$STAGE" \
+    || die "cannot build the temporary replica from the source snapshot"
   clone_head=$(git_at "$STAGE" rev-parse --verify HEAD 2>/dev/null) \
     || die "staged replica has no commit"
   [ "$clone_head" = "$SOURCE_COMMIT" ] \
@@ -272,16 +290,26 @@ EOF
     || die "cannot write the replica manifest"
 }
 
-recheck_source() {
-  local branch commit
+source_snapshot_is_stable() {
+  local branch commit status
   branch=$(git_at "$SOURCE" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
   commit=$(git_at "$SOURCE" rev-parse --verify HEAD 2>/dev/null || true)
-  [ "$branch" = "$DEFAULT_BRANCH" ] && [ "$commit" = "$SOURCE_COMMIT" ] \
+  [ "$branch" = "$DEFAULT_BRANCH" ] && [ "$commit" = "$SOURCE_COMMIT" ] || return 1
+  if ! status=$(source_status_output); then
+    return 1
+  fi
+  [ -z "$status" ] || return 1
+  python3 "$SCRIPT_DIR/fm-shadow.py" compare --source "$SOURCE" --replica "$SOURCE_SNAPSHOT" \
+    >/dev/null 2>&1 || return 1
+  if [ -n "$STAGE" ]; then
+    python3 "$SCRIPT_DIR/fm-shadow.py" compare --source "$SOURCE_SNAPSHOT" --replica "$STAGE" \
+      >/dev/null 2>&1 || return 1
+  fi
+}
+
+recheck_source() {
+  source_snapshot_is_stable \
     || die "source changed while the replica was being built; no destination update was made"
-  [ -z "$(GIT_OPTIONAL_LOCKS=0 git_at "$SOURCE" status --porcelain=v1 --untracked-files=all)" ] \
-    || die "source became dirty while the replica was being built; no destination update was made"
-  python3 "$SCRIPT_DIR/fm-shadow.py" compare --source "$SOURCE" --replica "$STAGE" \
-    || die "source tree changed while the replica was being built; no destination update was made"
 }
 
 same_output() {
@@ -291,14 +319,16 @@ same_output() {
 }
 
 source_matches_replica() {
-  local branch commit replica_commit
+  local branch commit replica_commit status
   branch=$(git_at "$SOURCE" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
   commit=$(git_at "$SOURCE" rev-parse --verify HEAD 2>/dev/null || true)
   replica_commit=$(git_at "$DEST" rev-parse --verify HEAD 2>/dev/null || true)
   [ "$branch" = "$DEFAULT_BRANCH" ] && [ "$commit" = "$replica_commit" ] \
     || return 1
-  [ -z "$(GIT_OPTIONAL_LOCKS=0 git_at "$SOURCE" status --porcelain=v1 --untracked-files=all)" ] \
-    || return 1
+  if ! status=$(source_status_output); then
+    return 1
+  fi
+  [ -z "$status" ] || return 1
   python3 "$SCRIPT_DIR/fm-shadow.py" compare --source "$SOURCE" --replica "$DEST" \
     >/dev/null 2>&1
 }
@@ -449,9 +479,12 @@ begin_transaction() {
 }
 
 swap_replica() {
-  recheck_source
   check_existing_destination
   begin_transaction
+  if ! source_snapshot_is_stable; then
+    clear_transaction
+    die "source changed before shadow installation; no destination update was made"
+  fi
   if [ "$(transaction_field destination-present)" -eq 1 ]; then
     mv -- "$DEST" "$TRANSACTION_DIR/old-destination" \
       || { recover_transaction; die "cannot move the validated destination into the shadow transaction"; }
@@ -524,8 +557,8 @@ check_existing_destination
 build_stage
 recheck_source
 if [ -d "$DEST" ] && same_output; then
-  recheck_source
   check_existing_destination
+  recheck_source
   printf 'already current: %s at %s\n' "$SOURCE_COMMIT" "$DEST"
   exit 0
 fi

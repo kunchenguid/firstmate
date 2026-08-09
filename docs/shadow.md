@@ -24,6 +24,10 @@ The first run accepts a missing destination or an empty directory.
 
 The command creates an atomic lock at the destination parent's .shadow.lock.
 
+The command also creates a source-side lock at the source parent's .shadow-source-lock.<source-name>.
+
+Both locks are persistent markers, and the source-side lock coordinates shadow executions while the source snapshot is the sealed source tree for that run.
+
 An existing lock is treated as active and is never removed automatically.
 
 The source must be the root of a Git worktree on the default branch with a clean tracked and untracked tree.
@@ -38,7 +42,9 @@ Git's ownership trust is granted only per invocation for the exact absolute sour
 
 The destination status check also disables Git filemode comparison only for that invocation because 9p can normalize modes; the manifest still detects content, type, size, and hash changes.
 
-Each run stages the complete output beside the destination, validates its content, and swaps it into place only after the source is rechecked.
+Each run captures a complete source snapshot, stages the output beside the destination from that snapshot, validates its content, and swaps it into place only after the source is rechecked.
+
+The source is checked again at the transaction boundary and after installation, and any detected source change aborts the run and restores the prior validated destination.
 
 The staging copier uses 9p-compatible content and symbolic-link operations and does not request POSIX metadata updates from the destination filesystem.
 
@@ -70,7 +76,9 @@ It never uses a forced Git operation, a stash, a hard reset, a partial destinati
 
 If staging or the final atomic installation fails, the previous validated destination remains the recovery point.
 
-Investigate and clear a stale .shadow.lock only after verifying that no fm-shadow.sh process is running.
+Inspect the owner file in a stale .shadow.lock or .shadow-source-lock.<source-name> only after verifying that no fm-shadow.sh process is running.
+
+Remove only the exact stale lock directory for that source and destination after confirming that its recorded process is no longer active.
 
 Do not repair the destination by hand and retry after an integrity refusal unless the manual change is intentionally removed through the separate operating procedure that owns the Windows output.
 
