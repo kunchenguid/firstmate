@@ -63,13 +63,29 @@ case "${1:-}" in
     if [ -n "${FM_FAKE_WINDOW_STATE_FILE:-}" ]; then
       : > "$FM_FAKE_WINDOW_STATE_FILE" 2>/dev/null || true
     fi
+    [ -z "${FM_FAKE_PENDING_INPUT:-}" ] || rm -f "$FM_FAKE_PENDING_INPUT"
+    [ -z "${FM_FAKE_CURSOR_ENTER_STARTED:-}" ] || rm -f "$FM_FAKE_CURSOR_ENTER_STARTED"
     exit 0 ;;
   send-keys)
+    case " $* " in
+      *" C-u "*)
+        [ "${FM_FAKE_SWITCH_SEND_FAIL:-}" != literal-clear ] || exit 1
+        [ -z "${FM_FAKE_PENDING_INPUT:-}" ] || rm -f "$FM_FAKE_PENDING_INPUT"
+        ;;
+    esac
     case " $* " in
       *" Enter "*)
         if [ "${FM_FAKE_SWITCH_SEND_FAIL:-}" = enter ] \
            && [ -e "${FM_FAKE_SWITCH_LAUNCH_TYPED:-}" ]; then
           exit 1
+        fi
+        if [ "${FM_FAKE_CURSOR_SEND_FAIL:-}" = enter ] \
+           && [ -e "${FM_FAKE_CURSOR_LAUNCH_TYPED:-}" ]; then
+          exit 1
+        fi
+        if [ -n "${FM_FAKE_CURSOR_ENTER_STARTED:-}" ] \
+           && [ -e "${FM_FAKE_CURSOR_LAUNCH_TYPED:-}" ]; then
+          : > "$FM_FAKE_CURSOR_ENTER_STARTED"
         fi
         if [ -n "${FM_FAKE_CURSOR_RECORD_FILE:-}" ] \
            && [ -e "${FM_FAKE_CURSOR_LAUNCH_TYPED:-}" ]; then
@@ -94,9 +110,18 @@ case "${1:-}" in
           case "$a" in
             *claude*--dangerously-skip-permissions*)
               [ -z "${FM_FAKE_SWITCH_LAUNCH_TYPED:-}" ] || : > "$FM_FAKE_SWITCH_LAUNCH_TYPED"
-              [ "${FM_FAKE_SWITCH_SEND_FAIL:-}" != literal ] || exit 1
+              case "${FM_FAKE_SWITCH_SEND_FAIL:-}" in
+                literal|literal-clear)
+                  [ -z "${FM_FAKE_PENDING_INPUT:-}" ] || : > "$FM_FAKE_PENDING_INPUT"
+                  exit 1
+                  ;;
+              esac
               ;;
           esac
+          if [ -n "${FM_FAKE_PENDING_INPUT:-}" ] && [ -e "$FM_FAKE_PENDING_INPUT" ] \
+             && [ -z "${FM_FAKE_SWITCH_SEND_FAIL:-}" ]; then
+            exit 1
+          fi
           case "$a" in
             *cursor-agent*--force*--trust*)
               [ -z "${FM_FAKE_LITERAL_SEND_FAIL:-}" ] || exit 1
@@ -797,8 +822,45 @@ test_cursor_relaunch_reaps_prior_worker_before_recording_replacement() {
   fi
   assert_grep "$old_pid " "$HOME_DIR/state/$id.worker-server" \
     "failed cursor launch delivery discarded confirmed-dead ownership evidence"
+  assert_grep "fm-$id" "$CASE_DIR/windows.state" \
+    "failed cursor launch delivery removed relaunch endpoint"
 
-  printf 'fm-%s\n' "$id" > "$CASE_DIR/windows.state"
+  rm -f "$CASE_DIR/launch-typed"
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
+    FM_FAKE_CURSOR_AGENT_ARGS="$FAKEBIN_DIR/cursor-agent --force --trust brief" \
+    FM_PROC_ROOT_OVERRIDE="$CASE_DIR/no-proc" FM_FAKE_CURSOR_AGENT_AFTER_ENTER=1 \
+    FM_FAKE_CURSOR_ENTER_STARTED="$CASE_DIR/enter-started" \
+    FM_FAKE_CURSOR_WORKER_PID='' FM_FAKE_CURSOR_LAUNCH_TYPED="$CASE_DIR/launch-typed" \
+    FM_FAKE_CURSOR_SEND_FAIL=enter FM_FAKE_WINDOW_STATE_FILE="$CASE_DIR/windows.state" \
+    FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" PATH="$FAKEBIN_DIR:$PATH" \
+    "$SPAWN" "$id" --relaunch 2>&1)
+  status=$?
+  expect_code 1 "$status" "cursor relaunch with failed Enter delivery must refuse"$'\n'"$out"
+  assert_grep "fm-$id" "$CASE_DIR/windows.state" \
+    "failed cursor Enter delivery removed relaunch endpoint"
+  assert_grep "$old_pid " "$HOME_DIR/state/$id.worker-server" \
+    "failed cursor Enter delivery discarded confirmed-dead ownership evidence"
+
+  rm -f "$CASE_DIR/enter-started" "$CASE_DIR/launch-typed"
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
+    FM_FAKE_CURSOR_AGENT_ARGS="$FAKEBIN_DIR/cursor-agent --force --trust brief" \
+    FM_PROC_ROOT_OVERRIDE="$CASE_DIR/no-proc" FM_FAKE_CURSOR_AGENT_AFTER_ENTER=1 \
+    FM_FAKE_CURSOR_WORKER_PID='' FM_FAKE_WINDOW_STATE_FILE="$CASE_DIR/windows.state" \
+    FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" PATH="$FAKEBIN_DIR:$PATH" \
+    "$SPAWN" "$id" --relaunch 2>&1)
+  status=$?
+  expect_code 1 "$status" "cursor relaunch with discovery timeout must refuse"$'\n'"$out"
+  assert_grep "fm-$id" "$CASE_DIR/windows.state" \
+    "cursor relaunch discovery timeout removed relaunch endpoint"
+  assert_grep "$old_pid " "$HOME_DIR/state/$id.worker-server" \
+    "cursor relaunch discovery timeout discarded confirmed-dead ownership evidence"
+
   rm -f "$FAKEBIN_DIR/lsof"
   rm -f "$CASE_DIR/enter-started" "$CASE_DIR/launch-typed"
   out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
@@ -829,7 +891,7 @@ test_cursor_relaunch_reaps_prior_worker_before_recording_replacement() {
 
 test_cursor_switch_relaunch_send_failures_preserve_ownership() {
   local failure rec id out status old_parent old_pid
-  for failure in literal enter; do
+  for failure in literal enter literal-clear; do
     id="cursor-switch-$failure-zm"
     rec=$(make_cursor_case "cursor-switch-$failure" "$id")
     read_case_record "$rec"
@@ -862,6 +924,7 @@ test_cursor_switch_relaunch_send_failures_preserve_ownership() {
       FM_FAKE_CURSOR_AGENT_PID=4242 FM_FAKE_CURSOR_WORKER_PID=$old_pid \
       FM_FAKE_SWITCH_SEND_FAIL="$failure" \
       FM_FAKE_SWITCH_LAUNCH_TYPED="$CASE_DIR/switch-launch-typed" \
+      FM_FAKE_PENDING_INPUT="$CASE_DIR/pending-input" \
       FM_FAKE_WINDOW_STATE_FILE="$CASE_DIR/windows.state" \
       FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" PATH="$FAKEBIN_DIR:$PATH" \
       "$SPAWN" "$id" --relaunch --harness claude 2>&1)
@@ -874,6 +937,8 @@ test_cursor_switch_relaunch_send_failures_preserve_ownership() {
       "cursor-to-claude $failure send failure discarded ownership evidence"
     [ -f "$HOME_DIR/state/$id.meta" ] \
       || fail "cursor-to-claude $failure send failure removed relaunch metadata"
+    [ ! -e "$CASE_DIR/pending-input" ] \
+      || fail "cursor-to-claude $failure send failure left stale endpoint input"
     assert_grep "fm-$id" "$CASE_DIR/windows.state" \
       "cursor-to-claude $failure send failure removed relaunch endpoint"
 
