@@ -832,8 +832,30 @@ test_spawn_explicit_harness_uses_explicit_profile_axes() {
   pass "C8 spawn: an explicit --harness still honors explicit model/effort flags"
 }
 
+install_harness_identity_probe() {  # <fakebin> <harness>
+  local fakebin=$1 harness=$2
+  cp "$(command -v bash)" "$fakebin/$harness-runtime"
+  cat > "$fakebin/$harness" <<'SH'
+#!/usr/bin/env bash
+set -u
+exec "$FM_FAKE_HARNESS_RUNTIME" -c '
+  detected=$($FM_FAKE_HARNESS_PROBE)
+  {
+    printf "detected=%s\n" "$detected"
+    printf "CLAUDECODE=%s\n" "${CLAUDECODE:-}"
+    printf "PI_CODING_AGENT=%s\n" "${PI_CODING_AGENT:-}"
+    printf "FM_PI_HARNESS=%s\n" "${FM_PI_HARNESS:-}"
+    printf "GROK_AGENT=%s\n" "${GROK_AGENT:-}"
+    printf "CLAUDE_CONFIG_DIR=%s\n" "${CLAUDE_CONFIG_DIR:-}"
+    "$FM_FAKE_SUPERVISION_PROBE"
+  } > "$FM_FAKE_HARNESS_RESULT"
+'
+SH
+  chmod +x "$fakebin/$harness"
+}
+
 test_spawned_secondmate_uses_its_harness_supervision_model() {
-  local harness expected w sm launchlog launch fakebin out
+  local harness expected w sm launchlog launch fakebin out result clean_result runtime
   for harness in codex claude; do
     w="$TMP_ROOT/spawn-supervision-model-$harness"
     sm="$w/sm"
@@ -841,7 +863,7 @@ test_spawned_secondmate_uses_its_harness_supervision_model() {
     mkdir -p "$w/home/config"
     printf '%s\n' "$harness" > "$w/home/config/secondmate-harness"
     make_seeded_home "$sm" sm
-    spawn_secondmate_capture "$w" sm "$sm" "$launchlog" >/dev/null 2>&1
+    spawn_secondmate_capture "$w" sm "$sm" "$launchlog" --harness "$harness" >/dev/null 2>&1
     fm_write_meta "$sm/state/task.meta" "window=firstmate:fm-task" "kind=ship"
     touch "$sm/state/.last-watcher-beat"
     fakebin="$w/tmux-sm/fakebin"
@@ -867,8 +889,62 @@ SH
           || fail "Claude secondmate with a fresh beacon should use auto-arm supervision, got: $out"
         ;;
     esac
+
+    install_harness_identity_probe "$fakebin" "$harness"
+    runtime="$fakebin/$harness-runtime"
+    if [ "$harness" = codex ]; then
+      # Hold the generated launch tuple constant and remove only the inherited
+      # identity markers. An ancestry-selected Codex result here proves the
+      # executable fixture itself is valid and rules out ancestry as the cause.
+      clean_result="$w/$harness-clean.result"
+      env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+        FM_FAKE_HARNESS_RUNTIME="$runtime" \
+        FM_FAKE_HARNESS_PROBE="$ROOT/bin/fm-harness.sh" \
+        FM_FAKE_SUPERVISION_PROBE="$ROOT/bin/fm-supervision-instructions.sh" \
+        FM_FAKE_HARNESS_RESULT="$clean_result" \
+        PATH="$fakebin:$BASE_PATH" CLAUDE_CONFIG_DIR="$w/claude-config" \
+        bash -c "$launch"
+      assert_grep 'detected=codex' "$clean_result" \
+        "clean-environment Codex launch did not detect its executable ancestry: $(cat "$clean_result")"
+      assert_grep 'primary harness: codex' "$clean_result" \
+        "clean-environment Codex launch did not render its bounded protocol"
+    fi
+    result="$w/$harness-marked.result"
+    FM_FAKE_HARNESS_RUNTIME="$runtime" \
+      FM_FAKE_HARNESS_PROBE="$ROOT/bin/fm-harness.sh" \
+      FM_FAKE_SUPERVISION_PROBE="$ROOT/bin/fm-supervision-instructions.sh" \
+      FM_FAKE_HARNESS_RESULT="$result" \
+      PATH="$fakebin:$BASE_PATH" CLAUDECODE=1 PI_CODING_AGENT=true \
+      FM_PI_HARNESS=pi-signed GROK_AGENT=1 CLAUDE_CONFIG_DIR="$w/claude-config" \
+      bash -c "$launch"
+    assert_grep "detected=$harness" "$result" \
+      "$harness child selected the wrong harness under inherited primary markers"
+    assert_grep "primary harness: $harness" "$result" \
+      "$harness child rendered the wrong primary supervision protocol"
+    case "$harness" in
+      codex)
+        assert_grep 'foreground watcher checkpoint' "$result" \
+          "Codex child did not render its bounded checkpoint protocol"
+        for expected in CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT; do
+          [ "$(grep "^$expected=" "$result")" = "$expected=" ] \
+            || fail "Codex child retained conflicting harness marker $expected"
+        done
+        ;;
+      claude)
+        assert_grep 'CLAUDECODE=1' "$result" \
+          "matching Claude launch discarded its legitimate identity marker"
+        assert_grep "CLAUDE_CONFIG_DIR=$w/claude-config" "$result" \
+          "matching Claude launch discarded its selected config store"
+        assert_grep 'Stop-owned auto-arm' "$result" \
+          "Claude child did not render its Stop-owned protocol"
+        for expected in PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT; do
+          [ "$(grep "^$expected=" "$result")" = "$expected=" ] \
+            || fail "Claude child retained conflicting harness marker $expected"
+        done
+        ;;
+    esac
   done
-  pass "C9 spawn: secondmate launch pins supervision to its own harness"
+  pass "C9 spawn: secondmate launch pins supervision and child identity to its own harness"
 }
 
 # The harness fallback chain (secondmate-harness -> crew-harness -> own) still
