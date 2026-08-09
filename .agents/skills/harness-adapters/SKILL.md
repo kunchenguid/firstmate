@@ -27,6 +27,9 @@ Inheritance also copies the literal `config/crew-dispatch.json` file, so secondm
 
 Each adapter splits into mechanics and knowledge.
 The per-task mechanics, including launch command, autonomy flag, and any enabled crewmate turn-end hook, live in `bin/fm-spawn.sh`.
+Agent lifecycle mechanics - which key interrupts a turn, how many times it must be sent, whether the composer needs clearing afterwards, which command exits the agent, and which task kinds the adapter can run - are owned by the executable control plane in `bin/fm-control-lib.sh` and delivered by `bin/fm-control.sh <task-id> interrupt|exit|relaunch`.
+Never hand-type an interrupt key or exit command through `fm-send`: a routing-marked lifecycle command becomes chat the agent reasons about instead of executing, which is the defect the control plane exists to remove ([`docs/agent-control.md`](../../../docs/agent-control.md)).
+The per-adapter `Exit command` and `Interrupt` rows below remain the verification record for those values; the executable owner is what firstmate actually runs, so a newly verified adapter is not reachable by the control plane until its rows land in that owner.
 The primary-session "no turn ends blind" guard contract and harness hook installation paths live in `docs/turnend-guard.md`.
 The primary-session watcher wake protocols are rendered from `docs/supervision-protocols/` by `bin/fm-supervision-instructions.sh`.
 The supervision knowledge lives here: busy state, exit command, interrupt, dialogs, resume behavior, skill invocation, and quirks.
@@ -170,7 +173,7 @@ The shared symptom is a healthy-looking pane with no work in progress, so each a
 
 | Fact | Value |
 |---|---|
-| Busy state | Owned lifecycle hooks: `UserPromptSubmit` opens a turn, `Stop`, `StopFailure`, and `SessionEnd` close it. Claude fires no hook for a manual interrupt, so a firstmate-initiated interrupt must record the clear itself. |
+| Busy state | Owned lifecycle hooks: `UserPromptSubmit` opens a turn, while `Stop`, `StopFailure`, and `SessionEnd` close it; because Claude fires no hook for a manual interrupt, `bin/fm-control.sh interrupt` reports only delivered keys and the verified endpoint or live agent, publishes no idle event, makes no cancellation claim, and leaves adapter-observed state unchanged, so a mid-turn worker typically remains busy via `claude-hook`. |
 | Exit command | `/exit` |
 | Interrupt | single Escape |
 | Skill invocation | `/<skill>` (e.g. `/no-mistakes`) |
@@ -201,7 +204,7 @@ Claude Code's primary watcher protocol is Stop-owned: the auto-arm hook fires on
 | Fact | Value |
 |---|---|
 | Busy state | Unknown until a semantic source is live-verified: the app-server turn lifecycle is unreachable for a pane worker, and project lifecycle hooks did not fire for a firstmate-launched worker. |
-| Exit command | `/quit` (slash popup needs about 1 second between text and Enter; `fm-send` handles it) |
+| Exit command | `/quit` (slash popup needs about 1 second between text and Enter; the shared submit path used by `fm-control` handles it) |
 | Interrupt | single Escape |
 | Skill invocation | `$<skill>` (e.g. `$no-mistakes`); `/<skill>` is claude-only and codex rejects it as "Unrecognized command" |
 
@@ -233,7 +236,7 @@ The checkpoint is deliberately foreground and bounded so Codex regains control r
 |---|---|
 | Busy state | The Firstmate-owned plugin's semantic `session.status`: `busy` and `retry` are active, `idle` is inactive, latched to the worker's own session. |
 | Exit command | `/exit` |
-| Interrupt | double Escape; known flaky while a long shell command runs, so a wedged pane may need `/exit` and relaunch |
+| Interrupt | double Escape; known flaky while a long shell command runs, so use `bin/fm-control.sh <task-id> relaunch` for a wedged pane |
 
 No trust dialog.
 Opencode can auto-upgrade itself in the background and the running TUI can exit mid-task, observed live from 1.15.7 to 1.17.3.
@@ -406,7 +409,7 @@ Muse Code is a CREWMATE and SCOUT adapter only.
 | Models | `--model <model>`; the only provider is `meta`. |
 | Busy state | Its own durable session event log, folded on demand by `bin/fm-busy-lib.sh`. There is no hook or plugin writer, so nothing is armed and no busy record is ever seeded. |
 | Exit command | `/exit` (the popup shows `/exit  Quit when idle`); one Enter submits it, and the pane prints `To continue this session, run muse resume <session-uuid>`. |
-| Interrupt | Single Escape. It closes the run with `terminal: cancelled` AND restores the interrupted prompt into the composer as real bright text, so `fm-send.sh` follows Escape with `C-u` to clear it. |
+| Interrupt | Single Escape, which closes the run with `terminal: cancelled` AND restores the interrupted prompt into the composer as real bright text, so `fm-control` follows Escape with `C-u` to clear it; `fm-send`'s legacy key path reads the same composer-clear table. |
 | Skill invocation | `/<skill>`, the claude/grok form. |
 | Autonomy | `--yolo`, which disables approval, disables the sandbox, and trusts the workspace for the run. |
 | Trust dialog | `Do you trust this workspace?` with `1 Trust and continue` preselected, accepted by Enter. `--yolo` suppresses it entirely, which is what firstmate relies on because every task gets a fresh worktree path. |
