@@ -620,6 +620,7 @@ done
 args=${FM_FAKE_CURSOR_AGENT_ARGS:-/opt/cursor-agent}
 comm=${FM_FAKE_CURSOR_COMM:-${args%% *}}
 case "$query" in
+  *"-e -o pid="*) exit 0 ;;
   *"eww"*)
     printf '%s FM_CURSOR_LAUNCH_TOKEN=%s\n' "$args" "${CURSOR_WORKER_LAUNCH_TOKEN:-missing}"
     exit 0 ;;
