@@ -3095,6 +3095,103 @@ test_composer_state_omp_separator_idle_is_empty() {
   pass "fm_backend_herdr_composer_state: a native idle OMP separator composer reads empty"
 }
 
+# --- OMP's stale idle agent registration after /exit ------------------------
+#
+# OMP 17.2.12 leaves its Herdr agent registration at `idle` once /exit has
+# returned the pane to the task's nested worktree shell, so the registration
+# alone cannot distinguish a working OMP worker from a husk. The verdict these
+# cases pin is load-bearing in both directions: `no-agent` maps to `dead` and
+# licenses close-and-replace on a live worktree, while a missed husk leaves a
+# reclaimable tab stranded forever.
+
+# omp_agent_state_verdict <dir> <agent> <status> <process-info-json> [ps-rows]:
+# drive fm_backend_herdr_pane_agent_state over a canned presence read, agent
+# registration, and pane process-info, backed by a fake operating-system
+# process table. ps-rows is the `-axo pid=,ppid=` table (default: pid 4242 as a
+# lone child of init); every pid in it answers `-o comm=` as a login zsh except
+# 5150, the Bun runtime a live OMP worker keeps in its pane.
+omp_agent_state_verdict() {  # <dir> <agent> <status> <process-info> [ps-rows]
+  local dir=$1 agent=$2 status=$3 info=$4 rows=${5:-'1 0
+4242 1'} log resp fb
+  mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s\n' '{"result":{"pane":{"pane_id":"w1:p1","tab_id":"w1:t1","workspace_id":"w1"}}}' > "$resp/1.out"
+  printf '{"result":{"agent":{"agent":"%s","agent_status":"%s"}}}\n' "$agent" "$status" > "$resp/2.out"
+  printf '%s\n' "$info" > "$resp/3.out"
+  printf '%s\n' "$rows" > "$dir/ps-rows"
+  cat > "$dir/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$*" in
+  "-axo pid=,ppid=") cat "${FM_FAKE_PS_ROWS:?}" ;;
+  *"-o comm=")
+    pid=
+    while [ "$#" -gt 0 ]; do
+      case "$1" in -p) pid=$2; shift 2 ;; *) shift ;; esac
+    done
+    grep -q "^$pid " "${FM_FAKE_PS_ROWS:?}" || exit 1
+    case "$pid" in
+      5150) printf 'bun\n' ;;
+      *) printf -- '-zsh\n' ;;
+    esac
+    ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$dir/ps"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_PS_BIN="$dir/ps" \
+    FM_FAKE_PS_ROWS="$dir/ps-rows" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pane_agent_state lab w1:p1' "$ROOT"
+}
+
+omp_lone_shell_process_info() {  # <pid>
+  printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p1","shell_pid":%s,"foreground_process_group_id":%s,"foreground_processes":[{"pid":%s,"name":"zsh","argv0":"zsh"}]}}}' "$1" "$1" "$1"
+}
+
+test_omp_idle_registration_over_a_lone_shell_is_no_agent() {
+  local out
+  out=$(omp_agent_state_verdict "$TMP_ROOT/omp-husk-idle" omp idle "$(omp_lone_shell_process_info 4242)")
+  [ "$out" = no-agent ] \
+    || fail "an OMP registration left idle over the bare worktree shell must be a reclaimable husk, got '$out'"
+  out=$(omp_agent_state_verdict "$TMP_ROOT/omp-husk-done" omp done "$(omp_lone_shell_process_info 4242)")
+  [ "$out" = no-agent ] \
+    || fail "the same stale OMP registration reported done must also be a husk, got '$out'"
+  pass "herdr agent state: a stale OMP registration over the bare worktree shell classifies no-agent"
+}
+
+test_omp_idle_registration_over_a_running_bun_stays_live() {
+  local out info
+  info='{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p1","shell_pid":4242,"foreground_process_group_id":5150,"foreground_processes":[{"pid":5150,"name":"bun","argv0":"bun"}]}}}'
+  out=$(omp_agent_state_verdict "$TMP_ROOT/omp-live-bun" omp idle "$info" '1 0
+4242 1
+5150 4242')
+  [ "$out" = live ] \
+    || fail "an OMP worker between turns is still running Bun in its pane and must stay live, got '$out'"
+  pass "herdr agent state: an idle OMP registration backed by a running Bun process stays live"
+}
+
+# The shape a husk read must never claim: the pane's foreground process looks
+# like the shell, but the operating system still shows a child under it, so the
+# agent has not actually exited.
+test_omp_idle_registration_over_a_shell_with_a_child_stays_live() {
+  local out
+  out=$(omp_agent_state_verdict "$TMP_ROOT/omp-live-child" omp idle "$(omp_lone_shell_process_info 4242)" '1 0
+4242 1
+5150 4242')
+  [ "$out" = live ] \
+    || fail "a pane shell that still has a child process must not be declared agent-free, got '$out'"
+  pass "herdr agent state: a pane shell with a surviving child stays live rather than reclaimable"
+}
+
+test_omp_husk_proof_does_not_widen_to_other_adapters() {
+  local out
+  out=$(omp_agent_state_verdict "$TMP_ROOT/omp-scope-claude" claude idle "$(omp_lone_shell_process_info 4242)")
+  [ "$out" = live ] \
+    || fail "the OMP-only stale-registration proof widened to another adapter, got '$out'"
+  pass "herdr agent state: the OMP stale-registration proof is scoped to the OMP adapter alone"
+}
+
 test_composer_state_pi_separator_real_text_is_pending() {
   local dir log resp fb out
   dir="$TMP_ROOT/composer-pi-separated-pending"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -4334,6 +4431,10 @@ test_composer_state_unknown_on_capture_failure
 test_composer_state_unknown_when_no_composer_row_found
 test_composer_state_pi_separator_idle_is_empty
 test_composer_state_omp_separator_idle_is_empty
+test_omp_idle_registration_over_a_lone_shell_is_no_agent
+test_omp_idle_registration_over_a_running_bun_stays_live
+test_omp_idle_registration_over_a_shell_with_a_child_stays_live
+test_omp_husk_proof_does_not_widen_to_other_adapters
 test_composer_state_pi_separator_real_text_is_pending
 test_composer_state_pi_incomplete_separator_below_stale_generic_is_unknown
 test_composer_state_pi_separator_requires_safe_native_identity

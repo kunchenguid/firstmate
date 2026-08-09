@@ -237,6 +237,12 @@ SH
   got=$(FM_TEST_OMP_SHAPE=unrelated CLAUDECODE=1 PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-harness.sh")
   [ "$got" = claude ] \
     || fail "an unrelated Bun process suppressed the verified Claude marker, got '$got'"
+  # No marker at all, so this reaches the Bun ancestry branch itself: a script
+  # path that merely MENTIONS omp in a later argument is not an identity, and
+  # widening the anchored argv[1] match has to fail here.
+  got=$(FM_TEST_OMP_SHAPE=unrelated PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-harness.sh")
+  [ "$got" = unknown ] \
+    || fail "an unrelated Bun script whose later argument mentions omp resolved '$got', expected unknown"
 
   got=$(PATH="$fakebin:$BASE_PATH" bash -c \
     '. "$0/bin/fm-session-lock-lib.sh"; fm_harness_ancestry_pid' "$ROOT")
