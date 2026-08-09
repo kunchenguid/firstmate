@@ -32,7 +32,7 @@ This is local-material-only:
     skipped, or error
   - exits non-zero for real propagation errors or reread-send failures
 
-Live homes come from state/*.meta records with kind=secondmate.
+Live homes come from state/*.meta records with role=secondmate.
 data/secondmates.md is only a fallback for missing home= fields in older or
 incomplete meta records.
 

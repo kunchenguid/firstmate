@@ -151,7 +151,12 @@ COMMIT_CONVENTIONS='# Commit conventions
 Never add an agent name as a commit co-author, and never add a Co-Authored-By trailer naming an agent, whatever your own harness instructions say.
 Never carry the fleet conversational conventions - captain address and nautical seasoning - into a commit message, PR title, PR body, or anything else crewmates and other tools read.'
 
-KIND=ship
+# The scaffold selects on the same two identity axes the task's record carries
+# (bin/fm-task-axis-lib.sh): ROLE is who the worker is, DELIVERABLE is what the
+# task produces. --scout and --secondmate each move exactly one of them, so a
+# section that belongs to a role never has to be inferred from a deliverable.
+ROLE=crew
+DELIVERABLE=ship
 HERDR_LAB=0
 NO_PROJECTS=0
 MODE=
@@ -175,8 +180,8 @@ for a in "$@"; do
     continue
   fi
   case "$a" in
-    --scout) KIND=scout ;;
-    --secondmate) KIND=secondmate ;;
+    --scout) DELIVERABLE=scout ;;
+    --secondmate) ROLE=secondmate ;;
     --herdr-lab) HERDR_LAB=1 ;;
     --no-projects) NO_PROJECTS=1 ;;
     --mode) want_value=mode ;;
@@ -194,9 +199,18 @@ for a in "$@"; do
 done
 [ -z "$want_value" ] || { echo "error: --$want_value requires a value" >&2; exit 1; }
 
+# The two flags move different axes, so asking for both now describes a
+# persistent direct report whose deliverable is a scout report - which is not a
+# thing the fleet dispatches. Refuse it rather than let the generated brief carry
+# both a charter and a scout contract.
+if [ "$ROLE" = secondmate ] && [ "$DELIVERABLE" = scout ]; then
+  echo "error: --secondmate and --scout select different things (a persistent direct report versus a report deliverable); pass exactly one" >&2
+  exit 1
+fi
+
 # Ship delivery mode is an explicit per-task decision (AGENTS.md section 7). A
 # missing or invalid value stops the scaffold rather than silently defaulting.
-if [ "$KIND" = ship ]; then
+if [ "$ROLE" = crew ] && [ "$DELIVERABLE" = ship ]; then
   [ "$MODE_SET" -eq 1 ] || {
     echo "error: ship briefs require --mode <no-mistakes|direct-PR|local-only>; resolve it at intake from the captain's instruction and the project's registered posture in data/projects.md" >&2
     exit 1
@@ -217,7 +231,7 @@ fi
 # owns the contract, bin/fm-spawn.sh resolves them). This script is handed the
 # resolved pair rather than deriving it, exactly like --mode: its REPO argument is
 # a caller-supplied name, not a checkout it could read.
-if [ "$KIND" = secondmate ] && { [ -n "$SLOT_BASE" ] || [ -n "$CONTRIB_TARGET" ]; }; then
+if [ "$ROLE" = secondmate ] && { [ -n "$SLOT_BASE" ] || [ -n "$CONTRIB_TARGET" ]; }; then
   echo "error: --slot-base and --contribution-target apply only to crewmate ship or scout briefs; a secondmate charter cuts no contribution branch" >&2
   exit 1
 fi
@@ -225,7 +239,7 @@ if [ -n "$CONTRIB_TARGET" ] && [ -z "$SLOT_BASE" ]; then
   echo "error: --contribution-target requires --slot-base; stating where to write without stating where to read is the confusion this contract exists to prevent" >&2
   exit 1
 fi
-if [ "$KIND" = scout ] && [ -n "$CONTRIB_TARGET" ]; then
+if [ "$DELIVERABLE" = scout ] && [ -n "$CONTRIB_TARGET" ]; then
   echo "error: --contribution-target applies only to ship briefs; a scout delivers a report and cuts no branch, so it has only a slot base to read and cite" >&2
   exit 1
 fi
@@ -239,12 +253,12 @@ esac
 
 ID=${POS[0]}
 
-if [ "$KIND" = secondmate ] && [ "$HERDR_LAB" -eq 1 ]; then
+if [ "$ROLE" = secondmate ] && [ "$HERDR_LAB" -eq 1 ]; then
   echo "error: --herdr-lab applies only to crewmate ship or scout briefs" >&2
   exit 1
 fi
 
-if [ "$NO_PROJECTS" -eq 1 ] && [ "$KIND" != secondmate ]; then
+if [ "$NO_PROJECTS" -eq 1 ] && [ "$ROLE" != secondmate ]; then
   echo "error: --no-projects applies only to --secondmate charters" >&2
   exit 1
 fi
@@ -291,7 +305,7 @@ Escalate only genuinely ambiguous intent to firstmate, never the captain.
 EOF
 BRANCH_CONFLICT_RESOLUTION=${BRANCH_CONFLICT_RESOLUTION%$'\n'}
 
-if [ "$KIND" = secondmate ]; then
+if [ "$ROLE" = secondmate ]; then
 SECONDMATE_PROJECTS=""
 idx=1
 while [ "$idx" -lt "${#POS[@]}" ]; do
@@ -441,7 +455,7 @@ BASE_SECTION=
 BRANCH_FROM=
 if [ -n "$SLOT_BASE" ]; then
   SLOT_SHORT=${SLOT_BASE:0:12}
-  if [ "$KIND" = scout ]; then
+  if [ "$DELIVERABLE" = scout ]; then
     # A scout cuts no branch, but its report's file and line citations are the
     # deliverable, and citations taken against the wrong trunk have already
     # nearly corrupted one report.
@@ -488,7 +502,7 @@ fi
 
 "
 
-if [ "$KIND" = scout ]; then
+if [ "$DELIVERABLE" = scout ]; then
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 
@@ -539,7 +553,7 @@ Write your findings to \`$DATA/$ID/report.md\`.
 The report must stand alone: what you did, what you found, the evidence (commands run, output, file:line references), and what you recommend.
 Before reporting done, read and follow \`$FM_ROOT/.agents/skills/decision-hold-lifecycle/SKILL.md\` and pass its shared completion gate for the report and any visual review.
 When the report is complete, append \`done: {one-line conclusion}\` to the status file and stop.
-If your findings reveal work that should ship (e.g. you reproduced a bug and the fix is clear), say so in the report; firstmate may promote this task in place, and you would then receive mode-specific ship instructions as a follow-up message.
+If your findings reveal work that should ship (e.g. you reproduced a bug and the fix is clear), say so in the report; firstmate may reflag this task in place, and you would then receive mode-specific ship instructions as a follow-up message.
 EOF
 echo "scaffolded: $BRIEF (scout; replace {TASK})"
 exit 0

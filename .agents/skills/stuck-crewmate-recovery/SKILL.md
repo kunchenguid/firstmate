@@ -20,8 +20,8 @@ The target window's harness is recorded as `harness=` in `state/<id>.meta`.
 
 ## Session-start reconciliation for a dead ordinary direct report
 
-This procedure covers ordinary `kind=ship` and `kind=scout` direct reports.
-Load `secondmate-provisioning` instead for `kind=secondmate` recovery.
+This procedure covers ordinary `role=crew` direct reports, whatever they deliver.
+Load `secondmate-provisioning` instead for `role=secondmate` recovery.
 
 Treat the digest's endpoint result as a presence signal, not proof that the task's work or validation run is gone.
 Read the targeted current state with `bin/fm-crew-state.sh <id>` before deciding to relaunch.
