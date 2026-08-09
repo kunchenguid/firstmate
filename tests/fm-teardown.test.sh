@@ -1326,6 +1326,37 @@ test_teardown_missing_busy_sidecar_completes() {
   pass "teardown completes when an exact busy-state sidecar is already absent"
 }
 
+# An armed artifact wake is per-task state, so teardown must retire it with the
+# rest: a surviving check would keep sweeping for a consumer that no longer
+# exists, and a surviving trust binding would outlive the bytes it names.
+test_teardown_retires_an_armed_artifact_wake() {
+  local case_dir rc
+  case_dir=$(make_case await-artifact-cleanup)
+  write_meta "$case_dir" local-only ship
+  mkdir -p "$case_dir/artifacts"
+  FM_STATE_OVERRIDE="$case_dir/state" FM_HOME="$case_dir" \
+    "$ROOT/bin/fm-await-artifact.sh" task-x1 "$case_dir/artifacts/report.md" >/dev/null \
+    || fail "await-artifact-cleanup: arming the artifact wake failed"
+  printf 'produced\n' > "$case_dir/artifacts/report.md"
+  bash "$case_dir/state/task-x1.check.sh" >/dev/null
+  assert_present "$case_dir/state/.task-x1.await-artifact" \
+    "await-artifact-cleanup: the sweep did not record its observation"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "await-artifact-cleanup: teardown should succeed ($(cat "$case_dir/stderr"))"
+  assert_absent "$case_dir/state/task-x1.check.sh" \
+    "await-artifact-cleanup: teardown left the armed check behind"
+  assert_absent "$case_dir/state/task-x1.check-trust" \
+    "await-artifact-cleanup: teardown left the check's trust binding behind"
+  assert_absent "$case_dir/state/.task-x1.await-artifact" \
+    "await-artifact-cleanup: teardown left the artifact wake's record behind"
+  pass "teardown retires an armed artifact wake with the task's other state"
+}
+
 test_herdr_teardown_clears_escalation_marker() {
   local case_dir marker
   case_dir=$(make_case herdr-marker-cleanup)
@@ -2600,6 +2631,7 @@ test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
 test_teardown_missing_busy_sidecar_completes
+test_teardown_retires_an_armed_artifact_wake
 test_herdr_teardown_clears_escalation_marker
 test_herdr_flat_teardown_refuses_orphaning_records_then_retry_completes
 test_herdr_flat_teardown_refuses_records_on_unparseable_presence

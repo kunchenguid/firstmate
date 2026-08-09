@@ -690,6 +690,90 @@ test_scout_and_secondmate_load_decision_hold_policy() {
   pass "fm-brief.sh: investigation and visual-review completions load the shared decision policy"
 }
 
+test_dependency_stanza_makes_the_consumer_pull_the_artifact() {
+  local home brief out rc kind
+  home="$TMP_ROOT/depends-home"
+  mkdir -p "$home/data"
+
+  for kind in ship scout; do
+    case "$kind" in
+      ship) FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "dep-$kind" alpha --mode no-mistakes \
+        --depends-on /abs/one/report.md --depends-on=/abs/two/notes.md >/dev/null 2>&1 ;;
+      scout) FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "dep-$kind" alpha --scout \
+        --depends-on /abs/one/report.md --depends-on=/abs/two/notes.md >/dev/null 2>&1 ;;
+    esac
+    brief="$home/data/dep-$kind/brief.md"
+    assert_grep "# Dependency" "$brief" "$kind brief did not render the dependency stanza"
+    assert_grep "- /abs/one/report.md" "$brief" "$kind brief lost the first dependency path"
+    assert_grep "- /abs/two/notes.md" "$brief" "$kind brief lost the second dependency path"
+    assert_grep "Read it yourself" "$brief" \
+      "$kind dependency stanza must tell the worker to read the artifact itself"
+    # shellcheck disable=SC2016 # Literal backticks and braces must remain unexpanded.
+    assert_grep 'append `paused: waiting on {path}`' "$brief" \
+      "$kind dependency stanza must route an absent artifact to the existing pause machinery"
+    assert_grep "do not try to reach the producing worker" "$brief" \
+      "$kind dependency stanza must not imply a peer channel"
+  done
+
+  # The pause verb is configurable, so the stanza must follow it like every
+  # other generated status instruction.
+  FM_HOME="$home" FM_CLASSIFY_PAUSED_VERB=awaiting "$ROOT/bin/fm-brief.sh" dep-verb alpha \
+    --mode no-mistakes --depends-on /abs/one/report.md >/dev/null 2>&1
+  # shellcheck disable=SC2016 # Literal backticks and braces must remain unexpanded.
+  assert_grep 'append `awaiting: waiting on {path}`' "$home/data/dep-verb/brief.md" \
+    "dependency stanza ignored the configured pause verb"
+
+  # A brief with no dependency renders no stanza at all.
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" dep-none alpha --mode no-mistakes >/dev/null 2>&1
+  assert_no_grep "# Dependency" "$home/data/dep-none/brief.md" \
+    "a brief without --depends-on rendered a dependency stanza"
+
+  set +e
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" dep-rel alpha --mode no-mistakes \
+    --depends-on relative/report.md 2>&1); rc=$?
+  set -e
+  expect_code 1 "$rc" "a relative dependency path must be refused"
+  assert_contains "$out" "requires an absolute path" "relative dependency error must say why"
+  assert_absent "$home/data/dep-rel/brief.md" "a refused dependency still scaffolded a brief"
+
+  set +e
+  out=$(FM_SECONDMATE_CHARTER=x FM_HOME="$home" "$ROOT/bin/fm-brief.sh" dep-sm --secondmate alpha \
+    --depends-on /abs/one/report.md 2>&1); rc=$?
+  set -e
+  expect_code 1 "$rc" "--depends-on must be refused on a secondmate charter"
+  assert_contains "$out" "applies only to crewmate ship or scout briefs" \
+    "secondmate dependency refusal must say why"
+  pass "fm-brief.sh: the dependency stanza has the consumer read the artifact itself"
+}
+
+test_scout_reports_incrementally_with_a_one_way_finality_marker() {
+  local home brief
+  home="$TMP_ROOT/finality-home"
+  mkdir -p "$home/data"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" final-scout alpha --scout >/dev/null 2>&1 \
+    || fail "scout scaffold exited non-zero"
+  brief="$home/data/final-scout/brief.md"
+  assert_grep "Write it incrementally" "$brief" \
+    "scout brief must ask for an incremental report"
+  # shellcheck disable=SC2016 # Literal backticks and braces must remain unexpanded.
+  assert_grep '`<!-- final: {section-slug} -->`' "$brief" \
+    "scout brief must name the machine-greppable finality sentinel"
+  assert_grep "one-way sentinel" "$brief" \
+    "scout brief must state that the marker is one-way"
+  assert_grep "the section is frozen" "$brief" \
+    "scout brief must state what a marked section promises"
+  assert_grep "do not silently rewrite it" "$brief" \
+    "scout brief must forbid revising a marked section in place"
+  assert_grep "Unmarked prose is still in flight" "$brief" \
+    "scout brief must say unmarked prose is not for consumers"
+
+  # The convention is a scout-report contract, not a ship one.
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" final-ship alpha --mode no-mistakes >/dev/null 2>&1
+  assert_no_grep "one-way sentinel" "$home/data/final-ship/brief.md" \
+    "the finality convention leaked into a ship brief"
+  pass "fm-brief.sh: scouts write incrementally and mark finished sections one-way final"
+}
+
 # Scout and secondmate paths still scaffold well-formed briefs.
 test_scout_and_secondmate_scaffold() {
   local brief
@@ -729,4 +813,6 @@ test_secondmate_marked_request_reporting_contract
 test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
+test_dependency_stanza_makes_the_consumer_pull_the_artifact
+test_scout_reports_incrementally_with_a_one_way_finality_marker
 test_scout_and_secondmate_scaffold

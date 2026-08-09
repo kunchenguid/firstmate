@@ -6,8 +6,8 @@
 # description, acceptance criteria, and context, and may adjust other sections
 # when the task genuinely deviates (e.g. working an existing external PR instead
 # of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--herdr-lab]
-#        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--herdr-lab] [--depends-on <absolute-path>]...
+#        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab] [--depends-on <absolute-path>]...
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
@@ -22,6 +22,14 @@
 #   omitting both still fails loudly so an accidental omission is never silent.
 #   Set FM_SECONDMATE_CHARTER='<charter>' to fill the charter text.
 #   Set FM_SECONDMATE_SCOPE='<scope>' to write a routing scope distinct from the charter text.
+#   --depends-on <absolute-path> is repeatable and adds the consumer-pull
+#   dependency stanza to a crewmate ship or scout brief: the worker reads the
+#   named artifact itself when it reaches the dependency instead of waiting to be
+#   told it is ready, and pauses if the file is absent so the existing pause
+#   machinery surfaces the wait. It is refused on a secondmate charter, which is
+#   a standing domain rather than a task with a dependency. Firstmate arms the
+#   backstop separately with bin/fm-await-artifact.sh; the brief stanza is the
+#   primary path and the wake is the backstop.
 #   --herdr-lab is mandatory when the task will issue Herdr lifecycle commands.
 #   It adds the hard isolation contract backed by bin/fm-herdr-lab.sh.
 #   The flag must be explicit because {TASK} is filled after scaffolding and the
@@ -106,6 +114,7 @@ HERDR_LAB=0
 NO_PROJECTS=0
 MODE=
 MODE_SET=0
+DEPENDS=()
 POS=()
 want_value=
 for a in "$@"; do
@@ -115,6 +124,7 @@ for a in "$@"; do
     esac
     case "$want_value" in
       mode) MODE=$a; MODE_SET=1 ;;
+      depends-on) DEPENDS+=("$a") ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -127,6 +137,8 @@ for a in "$@"; do
     --no-projects) NO_PROJECTS=1 ;;
     --mode) want_value=mode ;;
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
+    --depends-on) want_value=depends-on ;;
+    --depends-on=*) DEPENDS+=("${a#--depends-on=}") ;;
     # yolo never reaches the worker: it is firstmate's approval authority, not a
     # brief input. Refuse it loudly so it is never silently dropped here and then
     # believed to have been recorded.
@@ -164,6 +176,21 @@ fi
 if [ "$NO_PROJECTS" -eq 1 ] && [ "$KIND" != secondmate ]; then
   echo "error: --no-projects applies only to --secondmate charters" >&2
   exit 1
+fi
+
+if [ "${#DEPENDS[@]}" -gt 0 ]; then
+  if [ "$KIND" = secondmate ]; then
+    echo "error: --depends-on applies only to crewmate ship or scout briefs; a secondmate charter is a standing domain, not a task with a dependency" >&2
+    exit 1
+  fi
+  # The stanza's whole point is that the worker can read the artifact without
+  # resolving anything, so a path it would have to interpret is refused here.
+  for dep in "${DEPENDS[@]}"; do
+    case "$dep" in
+      /*) ;;
+      *) echo "error: --depends-on requires an absolute path (got '$dep')" >&2; exit 1 ;;
+    esac
+  done
 fi
 
 BRIEF="$DATA/$ID/brief.md"
@@ -298,13 +325,32 @@ EOF
 HERDR_SECTION=${HERDR_SECTION%$'\n'}
 fi
 
+# Consumer-pull dependency stanza. Empty by default, so a brief without
+# --depends-on keeps exactly the blank line it has always had between the task
+# text and the Herdr declaration.
+DEPENDS_SECTION=
+if [ "${#DEPENDS[@]}" -gt 0 ]; then
+DEPENDS_LIST=$(printf -- '- %s\n' "${DEPENDS[@]}")
+IFS= read -r -d '' DEPENDS_SECTION <<EOF || true
+
+# Dependency
+This task depends on an artifact another worker is producing.
+Read it yourself: do not wait to be told it is ready, and do not try to reach the producing worker.
+When you reach the point that needs it, read:
+$DEPENDS_LIST
+If a listed file does not exist yet, append \`$PAUSED_VERB: waiting on {path}\` to the status file and stop; firstmate wakes you when it lands.
+Do the same if it exists but is clearly still being written.
+If a file marks completed sections with a one-way \`<!-- final: {section} -->\` sentinel, build only on marked sections; unmarked prose is still in flight.
+EOF
+fi
+
 if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 
 # Task
 {TASK}
-
+$DEPENDS_SECTION
 $HERDR_SECTION
 
 # Setup
@@ -339,6 +385,11 @@ The report is the only thing that survives, so anything worth keeping must be in
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
 The report must stand alone: what you did, what you found, the evidence (commands run, output, file:line references), and what you recommend.
+Write it incrementally as you confirm findings rather than dumping it at the end, so whatever exists when you stop is still usable.
+Mark each completed section with a one-way sentinel on its own line: \`<!-- final: {section-slug} -->\`.
+That marker is a promise that the section is frozen, not a progress note: another worker may start building on a marked section the moment it lands, so mark a section only when it is genuinely settled.
+If a marked section later turns out to be wrong, do not silently rewrite it - append a corrective section, mark that one final, and state which earlier section it supersedes.
+Unmarked prose is still in flight and no one will build on it.
 Before reporting done, read and follow \`$FM_ROOT/.agents/skills/decision-hold-lifecycle/SKILL.md\` and pass its shared completion gate for the report and any visual review.
 When the report is complete, append \`done: {one-line conclusion}\` to the status file and stop.
 If your findings reveal work that should ship (e.g. you reproduced a bug and the fix is clear), say so in the report; firstmate may promote this task in place, and you would then receive mode-specific ship instructions as a follow-up message.
@@ -414,7 +465,7 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 
 # Task
 {TASK}
-
+$DEPENDS_SECTION
 $HERDR_SECTION
 
 # Setup

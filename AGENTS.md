@@ -96,6 +96,7 @@ state/               volatile runtime signals; gitignored
   <id>.herdr-presentation  quarantinable attempt and restart-binding journal for Herdr's optional visual projection; never task or endpoint authority; see docs/herdr-backend.md "Presentation spaces"
   <id>.check.sh      authenticated slow poll; the watcher dispatches validated PR data and the byte-identified Relay shim through trusted repository scripts, runs registered custom checks from hash-validated private snapshots, and rejects every other state check without execution
   <id>.check-trust   private content binding created by fm-check-register.sh for an intentional custom check
+  .<id>.await-artifact  private one-sweep stability and fired record for an artifact-ready wake armed by fm-await-artifact.sh; removed by teardown, safe to delete (re-arms the wait)
   <id>.pr-poll       private validated data sidecar for the byte-static PR merge poll
   <id>.pr-poll-registration  private transactional provenance record binding the task, canonical metadata identity, sidecar, and static poll publication
   <id>.pr-poll-retirement  private identity-bound crash-recovery receipt for one exact validated merged result; removed after its poll artifacts retire
@@ -293,6 +294,7 @@ When a steer answers an open keyed decision or blocker, pass `fm-send`'s `--reso
 Drive a worker's lifecycle through `bin/fm-control.sh <task-id> interrupt|exit|relaunch`, which owns the per-runtime mechanics, verifies each action, and never tears down or discards anything ([`docs/agent-control.md`](docs/agent-control.md)).
 A secondmate's routed reply returns through status or a document pointer, not by firstmate peeking into its chat.
 For the parent-owned correlation, recovery, and escalation contract on marked secondmate requests, see `bin/fm-pending-reply-lib.sh`.
+When a task waits on another task's artifact, name that artifact's absolute path in the consumer's brief through `bin/fm-brief.sh`'s `--depends-on` stanza so the consumer reads it itself, and arm `bin/fm-await-artifact.sh` so a waiting worker is never silently forgotten; neither gives workers a channel to each other, because the wake still comes to firstmate and only firstmate steers.
 Supervise all live work under section 8.
 
 ### Selected delivery path and approval authority
