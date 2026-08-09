@@ -279,17 +279,21 @@ This section is the single owner of the canonical schema and its per-field seman
 
 ```json
 {
+  "_floors": {
+    "<floor name>": "<free-form note about what this capability floor means>"
+  },
   "rules": [
     {
       "when": "<natural-language condition describing a kind of task>",
       "use": [
         { "harness": "<adapter>", "model": "<optional model>", "effort": "<low|medium|high|xhigh|max, optional>" }
       ],
+      "floor": "<optional capability floor this route resolves against>",
       "why": "<optional rationale that helps firstmate choose>"
     }
   ],
   "default": [
-    { "harness": "<adapter>", "model": "<optional model>", "effort": "<optional effort>" }
+    { "harness": "<adapter>", "model": "<optional model>", "effort": "<optional effort>", "floor": "<optional floor>" }
   ]
 }
 ```
@@ -301,6 +305,11 @@ Profile `model` and `effort` fields and rule `why` are optional.
 An omitted model or effort means the selected harness uses its own default for that axis.
 Every profile array is an implicit quota-aware choice resolved through `quota-array-dispatch`.
 If no dispatch rule fits, firstmate resolves `default` through the same object-or-array path before falling back to `config/crew-harness`.
+The optional top-level `_floors` object declares this home's capability floor vocabulary: each key names a floor, and each value is a free-form note the shell scripts never read.
+The optional `floor` field names the capability floor a route resolves against, and it is accepted on a rule, on any `use` profile, and on `default` in either its object or its array form.
+[`bin/fm-reasoning-lib.sh`](../bin/fm-reasoning-lib.sh) reads the vocabulary as the union of the `_floors` keys and every `floor` value the file defines, and `fm-spawn.sh` refuses a `--capability-floor` outside it rather than recording a capability band this config never granted.
+A dispatch that names no floor inherits the default route's floor, which for an array-form `default` is the first floor its profiles define.
+A home whose config defines no floor at all records `capability_floor=unconfigured`, and a config that exists but cannot be read fails closed as unverifiable so that a recorded floor is never checked against nothing.
 If a selected profile carries an effort value the chosen harness does not accept, `fm-spawn.sh` records the requested `effort=` in task meta for traceability but omits the launch flag, and bootstrap reports the invalid harness/effort pair as a `CREW_DISPATCH` diagnostic when it is visible in the file.
 See [`docs/examples/crew-dispatch.json`](examples/crew-dispatch.json) for a starting point to copy into local `config/crew-dispatch.json`.
 When the file exists, bootstrap validates it with `jq`.

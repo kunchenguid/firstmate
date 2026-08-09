@@ -73,6 +73,9 @@ $1
 EOF
 }
 
+# Every dispatch has to record why an agent turn was necessary
+# (bin/fm-reasoning-lib.sh), and these cases are about the pooled base rather
+# than that justification, so they all carry the same reason code.
 run_spawn() {
   local id=$1
   shift
@@ -81,7 +84,7 @@ run_spawn() {
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" FM_FAKE_PANE_PATH="$POOL_DIR" \
     PATH="$FAKEBIN_DIR:$PATH" \
-    "$SPAWN" "$id" "$PROJECT_DIR" "$@" 2>&1
+    "$SPAWN" "$id" "$PROJECT_DIR" --reason-code NL_RULE_CLASSIFICATION "$@" 2>&1
 }
 
 test_stale_pool_base_refreshes_before_branching() {
