@@ -101,13 +101,34 @@ fm_worker_declaration_present() {
 }
 
 fm_worker_identity_is_complete() {
-  local effective_home
+  local effective_home owner var value expected
   case "${FM_AGENT_ROLE:-}" in
     crewmate) ;;
     secondmate)
       effective_home=${FM_HOME:-${FM_ROOT_OVERRIDE:-${FM_ROOT:-}}}
       [ -n "$effective_home" ] || return 1
       [ "$effective_home" = "$FM_AGENT_OWNER_HOME" ] || return 1
+      owner=$FM_AGENT_OWNER_HOME
+      for var in $FM_WORKER_ISOLATION_HOME_VARS; do
+        case "$var" in
+          FM_HOME|FM_ROOT|FM_ROOT_OVERRIDE) expected=$owner ;;
+          FM_STATE_OVERRIDE) expected=$owner/state ;;
+          FM_DATA_OVERRIDE) expected=$owner/data ;;
+          FM_PROJECTS_OVERRIDE) expected=$owner/projects ;;
+          FM_CONFIG_OVERRIDE) expected=$owner/config ;;
+          *) continue ;;
+        esac
+        case "$var" in
+          FM_HOME) value=${FM_HOME:-} ;;
+          FM_ROOT) value=${FM_ROOT:-} ;;
+          FM_ROOT_OVERRIDE) value=${FM_ROOT_OVERRIDE:-} ;;
+          FM_STATE_OVERRIDE) value=${FM_STATE_OVERRIDE:-} ;;
+          FM_DATA_OVERRIDE) value=${FM_DATA_OVERRIDE:-} ;;
+          FM_PROJECTS_OVERRIDE) value=${FM_PROJECTS_OVERRIDE:-} ;;
+          FM_CONFIG_OVERRIDE) value=${FM_CONFIG_OVERRIDE:-} ;;
+        esac
+        [ -z "$value" ] || [ "$value" = "$expected" ] || return 1
+      done
       ;;
     *) return 1 ;;
   esac

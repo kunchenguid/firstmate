@@ -80,6 +80,17 @@ for meta in "$STATE"/*.meta; do
     expected_home=$(fm_agent_canonical_dir "$expected_declared") || expected_home=$expected_declared
   fi
 
+  owner_conflict=$(fm_agent_task_owner_conflict "$id" "$PID_INDEX" "$expected_home" || true)
+  if [ -n "$owner_conflict" ]; then
+    if [ "$owner_conflict" = '<missing>' ]; then
+      echo "ISOLATION: task $id has a live process with incomplete owner-home proof; stop it before it acts on this home's records"
+    else
+      echo "ISOLATION: task $id has a live process declaring foreign owner home $owner_conflict; stop it before it acts on this home's records"
+    fi
+    sweep_status=1
+    continue
+  fi
+
   record=$(fm_agent_cwd_verdict "$id" "$backend" "$target" "$PID_INDEX" "$expected_home")
   source=$(fm_agent_verdict_field "$record" source)
   if [ "$source" != proc ]; then

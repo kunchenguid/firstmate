@@ -135,6 +135,12 @@ test_incomplete_worker_identity_refuses_primary_operations() {
     "$ROOT/bin/fm-worker-isolation-lib.sh" 2>&1)
   status=$?
   expect_code 1 "$status" "a secondmate with an inherited primary root must be refused"
+  out=$(FM_AGENT_ROLE=secondmate FM_AGENT_TASK=dom-b2 FM_AGENT_OWNER_HOME=/homes/dom \
+    FM_HOME=/homes/dom FM_STATE_OVERRIDE=/primary/state \
+    bash -c '. "$1"; fm_worker_refuse_primary_operation operation' _ \
+    "$ROOT/bin/fm-worker-isolation-lib.sh" 2>&1)
+  status=$?
+  expect_code 1 "$status" "a secondmate with a foreign state override must be refused"
   pass "incomplete worker identities fail closed at the shared guard"
 }
 
@@ -344,7 +350,7 @@ test_worker_cannot_take_the_session_owner_record() {
     "$LOCK" status 2>&1)
   status=$?
   expect_code 0 "$status" "lock status must remain read-only for a declared task worker"
-  assert_contains "$out" "lock: held" "lock status lost its read-only holder report"
+  assert_contains "$out" "lock: stale" "lock status lost its read-only stale-lock report"
   pass "a declared task worker is refused lock acquisition but can inspect status"
 }
 
@@ -989,6 +995,25 @@ test_sweep_does_not_block_a_record_whose_endpoint_is_gone() {
   pass "an unproven record whose endpoint is gone is a quiet fact, not a fleet-wide block"
 }
 
+test_sweep_reports_a_foreign_process_even_when_its_endpoint_is_gone() {
+  local world out id path status
+  require_procfs || { pass "skip: this host has no readable procfs for the foreign-owner sweep"; return 0; }
+  world=$(make_sweep_home sweep-foreign-stale-endpoint)
+  id="task-f3d-$RUN_TAG"
+  fm_write_meta "$world/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "worktree=$world/wt" "project=$world/project" \
+    "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
+  mkdir -p "$world/other-home"
+  start_declared_agent "$world/wt" "$id" "$world/other-home" >/dev/null
+  path=$(sweep_live_tmux "$world" fm-someone-else)
+  out=$(run_sweep "$world" "$path")
+  status=$?
+  expect_code 1 "$status" "a foreign process must block even when the recorded endpoint is gone"
+  assert_contains "$out" "ISOLATION: task $id has a live process declaring foreign owner home" \
+    "the sweep silently accepted a foreign process after the endpoint disappeared"
+  pass "the sweep reports foreign-owner processes independently of endpoint state"
+}
+
 test_sweep_still_blocks_when_the_endpoint_cannot_be_read() {
   local world out status fakebin
   world=$(make_sweep_home sweep-unreadable-endpoint)
@@ -1097,6 +1122,7 @@ test_sweep_reports_a_worktree_that_collapsed_onto_the_primary_checkout
 test_sweep_is_silent_for_a_correctly_isolated_worker
 test_sweep_fails_closed_without_process_evidence
 test_sweep_does_not_block_a_record_whose_endpoint_is_gone
+test_sweep_reports_a_foreign_process_even_when_its_endpoint_is_gone
 test_sweep_still_blocks_when_the_endpoint_cannot_be_read
 test_sweep_reports_an_agent_declared_for_another_home
 test_sweep_is_silent_for_a_healthy_secondmate

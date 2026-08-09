@@ -398,8 +398,9 @@ test_exclude_family() {
 }
 
 test_ci_and_docs_call_the_owner() {
-  local ci_json status
+  local ci_json config_json status
   ci_json=$(python3 "$ROOT/tests/workflow-contract.py" "$CI")
+  config_json=$(python3 "$ROOT/tests/workflow-contract.py" "$ROOT/.no-mistakes.yaml")
   CI_JSON="$ci_json" python3 - <<'PY'
 import json
 import os
@@ -420,9 +421,23 @@ assert "bin/fm-install-treehouse.sh" in herdr
 assert "bin/fm-herdr-ci-cleanup.sh" in herdr
 assert all(job.get("continue-on-error") is not True for job in ci["jobs"].values())
 assert all("max-attempts" not in job.get("strategy", {}) for job in ci["jobs"].values())
+assert all(
+    step.get("continue-on-error") is not True
+    for job in ci["jobs"].values()
+    for step in job.get("steps", [])
+)
 PY
   status=$?
   expect_code 0 "$status" "CI semantic assertions must pass"
+  CONFIG_JSON="$config_json" python3 - <<'PY'
+import json
+import os
+
+config = json.loads(os.environ["CONFIG_JSON"])
+assert config["commands"]["test"] == "bash bin/fm-run-behavior-tests.sh"
+PY
+  status=$?
+  expect_code 0 "$status" "the gate must delegate tests to the canonical runner"
   pass "semantic CI and gate configuration use the one-owner runner"
 }
 

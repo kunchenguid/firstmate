@@ -271,30 +271,7 @@ fm_slot_endpoint_occupant_tasks() {
 }
 
 fm_slot_process_occupant_tasks() {
-  local wt=$1 wt_real index task pid start home role cwd cwd_real
-  local found=1 uncertain=0
-  wt_real=$(fm_agent_canonical_dir "$wt") || return 2
-  [ -d /proc ] || return 2
-  index=$(fm_agent_task_pid_index 2>/dev/null || true)
-  [ -n "$index" ] || return 2
-  while IFS=$'\t' read -r task pid start home role; do
-    [ -n "$task" ] || continue
-    [ -n "$start" ] || { uncertain=1; continue; }
-    fm_agent_pid_start_matches "$pid" "$start" || continue
-    cwd=$(fm_agent_proc_cwd "$pid" 2>/dev/null || true)
-    [ -n "$cwd" ] || { uncertain=1; continue; }
-    cwd_real=$(fm_agent_canonical_dir "$cwd" 2>/dev/null || true)
-    [ -n "$cwd_real" ] || { uncertain=1; continue; }
-    if fm_agent_path_within "$wt_real" "$cwd_real"; then
-      printf '%s\n' "$task"
-      found=0
-    fi
-  done <<EOF
-$index
-EOF
-  [ "$found" -eq 0 ] && return 0
-  [ "$uncertain" -eq 1 ] && return 2
-  return 1
+  fm_agent_worktree_process_census "$1"
 }
 
 # fm_slot_join_ids <newline-separated>: comma-joined single line.

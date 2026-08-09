@@ -178,6 +178,17 @@ test_entrypoints_refuse() {
 }
 
 test_tracked_contracts() {
+  local config_json status
+  config_json=$(python3 "$ROOT/tests/workflow-contract.py" "$ROOT/.no-mistakes.yaml")
+  CONFIG_JSON="$config_json" python3 - <<'PY'
+import json
+import os
+
+config = json.loads(os.environ["CONFIG_JSON"])
+assert config["disable_project_settings"] is True
+PY
+  status=$?
+  expect_code 0 "$status" "the gate configuration must disable project settings"
   out=$(run_helper "$NORMAL_CWD" set); rc=$?
   expect_code 3 "$rc" "the live refusal consumer must reject the gate marker"
   assert_contains "$out" 'NO_MISTAKES_GATE set' "the live refusal consumer lost its marker error"

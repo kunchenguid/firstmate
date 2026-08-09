@@ -173,6 +173,52 @@ fm_agent_task_pid_index() {
   return "$found"
 }
 
+fm_agent_task_owner_conflict() {
+  local id=$1 index=$2 expected_home=$3 task pid start indexed_home
+  [ -n "$id" ] && [ -n "$index" ] && [ -n "$expected_home" ] || return 1
+  while IFS=$'\t' read -r task pid start indexed_home _; do
+    [ "$task" = "$id" ] || continue
+    fm_agent_pid_is_numeric "$pid" || continue
+    fm_agent_pid_start_matches "$pid" "$start" || continue
+    [ -n "$indexed_home" ] || { printf '%s' '<missing>'; return 0; }
+    if ! fm_agent_paths_same "$indexed_home" "$expected_home"; then
+      printf '%s' "$indexed_home"
+      return 0
+    fi
+  done <<EOF
+$index
+EOF
+  return 1
+}
+
+fm_agent_worktree_process_census() {
+  local wt=$1 wt_real entry pid cwd cwd_real task proc_uid current_uid
+  local found=1 uncertain=0
+  wt_real=$(fm_agent_canonical_dir "$wt") || return 2
+  [ -d /proc ] || return 2
+  current_uid=$(id -u 2>/dev/null) || return 2
+  for entry in /proc/[0-9]*; do
+    [ -d "$entry" ] || continue
+    pid=${entry#/proc/}
+    proc_uid=$(stat -c '%u' "$entry" 2>/dev/null || true)
+    [ "$proc_uid" = "$current_uid" ] || continue
+    cwd=$(fm_agent_proc_cwd "$pid" 2>/dev/null || true)
+    if [ -z "$cwd" ]; then
+      [ -d "$entry" ] && uncertain=1
+      continue
+    fi
+    cwd_real=$(fm_agent_canonical_dir "$cwd" 2>/dev/null || true)
+    [ -n "$cwd_real" ] || { uncertain=1; continue; }
+    fm_agent_path_within "$wt_real" "$cwd_real" || continue
+    task=$(fm_agent_proc_env "$pid" FM_AGENT_TASK 2>/dev/null || true)
+    printf '%s\n' "${task:-unidentified-process-$pid}"
+    found=0
+  done
+  [ "$found" -eq 0 ] && return 0
+  [ "$uncertain" -eq 1 ] && return 2
+  return 1
+}
+
 # fm_agent_pids_for_task <task-id> [pid-index]: every live process whose
 # environment declares this task, newline separated. Only the launch command
 # itself carries the marker, so the set is the agent plus its descendants.

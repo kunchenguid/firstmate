@@ -90,6 +90,25 @@ wait "$SELF_PID" 2>/dev/null || true
 fm_agent_proc_cwd() {
   _fm_real_agent_proc_cwd "$1"
 }
+(
+  cd "$WORKTREE" || exit 1
+  exec env -u FM_AGENT_TASK -u FM_AGENT_OWNER_HOME -u FM_AGENT_ROLE sleep 300
+) >/dev/null 2>&1 &
+LEGACY_PID=$!
+BG_PIDS+=("$LEGACY_PID")
+for _ in $(seq 1 50); do
+  [ "$(readlink "/proc/$LEGACY_PID/cwd" 2>/dev/null || true)" = "$WORKTREE" ] && break
+  sleep 0.02
+done
+verdict=$(fm_slot_disposal_verdict "$HOME_DIR/state" task-a "$WORKTREE" \
+  "$HOME_DIR" "$HOME_DIR" crewmate closed herdr lab:pane-a)
+case "$verdict" in
+  "retain: declared worker process for task(s) unidentified-process-"*) ;;
+  *) fail "an undeclared process did not retain a closed endpoint lease: $verdict" ;;
+esac
+pass "an undeclared process retains a closed endpoint lease"
+kill "$LEGACY_PID" 2>/dev/null || true
+wait "$LEGACY_PID" 2>/dev/null || true
 OTHER_HOME="$TMP_ROOT/other-home"
 mkdir -p "$OTHER_HOME"
 (
@@ -112,10 +131,11 @@ esac
 pass "a reparented worker retains a closed endpoint lease"
 kill "$REParent_PID" 2>/dev/null || true
 wait "$REParent_PID" 2>/dev/null || true
+fm_agent_worktree_process_census() { return 1; }
 verdict=$(fm_slot_disposal_verdict "$HOME_DIR/state" task-a "$WORKTREE" \
   "$HOME_DIR" "$HOME_DIR" crewmate closed herdr lab:pane-a)
-[ "$verdict" = "retain: authoritative slot-occupant evidence is unavailable" ] \
-  || fail "a closed endpoint with no declared worker did not retain unknown occupancy: $verdict"
-pass "a closed endpoint retains the lease when global occupancy is unknown"
+[ "$verdict" = dispose ] \
+  || fail "a complete empty occupancy census did not dispose the closed endpoint: $verdict"
+pass "a closed endpoint disposes after a complete empty occupancy census"
 
 echo "# all fm-slot-occupant-proof tests passed"

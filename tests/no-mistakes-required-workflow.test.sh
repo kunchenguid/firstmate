@@ -131,8 +131,18 @@ assert workflow["run-name"] == "PR #${{ github.event.pull_request.number }} body
 job = workflow["jobs"]["check"]
 assert job["name"] == "PR must be raised via no-mistakes"
 assert set(event) == {"pull_request"}
-assert all(step.get("uses") != "actions/checkout" for step in job["steps"])
-assert all("secrets." not in value for value in job.get("if", "").split())
+def contains_secret(value):
+    if isinstance(value, dict):
+        return any(contains_secret(child) for child in value.values())
+    if isinstance(value, list):
+        return any(contains_secret(child) for child in value)
+    return isinstance(value, str) and "secrets." in value
+assert all(
+    not isinstance(step.get("uses"), str)
+    or step["uses"].split("@", 1)[0] != "actions/checkout"
+    for step in job["steps"]
+)
+assert all(not contains_secret(step.get(field, {})) for step in job["steps"] for field in ("run", "env", "with"))
 condition = job["if"]
 assert "github-actions[bot]" in condition and "dependabot[bot]" in condition
 assert "release-please[bot]" not in condition
