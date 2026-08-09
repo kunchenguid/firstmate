@@ -1388,7 +1388,7 @@ case "\${1:-} \${2:-}" in
     esac
     ;;
   "pane list")
-    printf '%s\n' '{"result":{"panes":[{"pane_id":"wG:pQ","tab_id":"wG:tQ"}]}}'
+    printf '%s\n' '{"result":{"panes":[{"pane_id":"wG:pQ","tab_id":"wG:tQ"},{"pane_id":"wG:pOld","tab_id":"wG:tQ"}]}}'
     ;;
   "status --json")
     printf '%s\n' '{"server":{"running":true}}'
@@ -1401,18 +1401,32 @@ case "\${1:-} \${2:-}" in
     fi
     ;;
   "pane close")
-    : > "\${FM_FAKE_HERDR_CLOSED:?}"
+    case "\$*" in
+      *"wG:pOld"*) : > "\${FM_FAKE_HERDR_CLEANUP_CLOSED:?}" ;;
+      *) : > "\${FM_FAKE_HERDR_CLOSED:?}" ;;
+    esac
     ;;
   "pane get")
     if [ "\${FM_FAKE_HERDR_PANE_GET_GARBAGE:-0}" = 1 ]; then
       printf '%s\n' 'not-json'
       exit 0
     fi
-    if [ -e "\${FM_FAKE_HERDR_CLOSED:?}" ]; then
-      printf '%s\n' '{"error":{"code":"pane_not_found"}}' >&2
-      exit 1
-    fi
-    printf '%s\n' '{"result":{"pane":{"pane_id":"wG:pQ","tab_id":"wG:tQ","workspace_id":"wG"}}}'
+    case "\$*" in
+      *"wG:pOld"*)
+        if [ -e "\${FM_FAKE_HERDR_CLEANUP_CLOSED:-/nonexistent}" ]; then
+          printf '%s\n' '{"error":{"code":"pane_not_found"}}' >&2
+          exit 1
+        fi
+        printf '%s\n' '{"result":{"pane":{"pane_id":"wG:pOld","tab_id":"wG:tQ","workspace_id":"wG"}}}'
+        ;;
+      *)
+        if [ -e "\${FM_FAKE_HERDR_CLOSED:?}" ]; then
+          printf '%s\n' '{"error":{"code":"pane_not_found"}}' >&2
+          exit 1
+        fi
+        printf '%s\n' '{"result":{"pane":{"pane_id":"wG:pQ","tab_id":"wG:tQ","workspace_id":"wG"}}}'
+        ;;
+    esac
     ;;
   "agent get")
     printf '%s\n' '{"error":{"code":"agent_not_found"}}' >&2
@@ -1496,6 +1510,29 @@ SH
   grep -q "teardown task-x1 complete" "$case_dir/stdout2" \
     || fail "herdr-orphan-refusal: the successful retry did not report completion"
   pass "herdr flat teardown refuses before returning the isolated copy under lock contention and the retry completes cleanly"
+}
+
+test_herdr_teardown_consumes_pending_cleanup_endpoint() {
+  local case_dir log closed cleanup_closed rc
+  case_dir=$(make_case herdr-pending-cleanup)
+  write_meta "$case_dir" local-only ship
+  configure_flat_herdr_teardown_case "$case_dir"
+  printf '%s\n' 'herdr_cleanup_endpoint=default:wG:pOld' >> "$case_dir/state/task-x1.meta"
+  log="$case_dir/herdr.log"; : > "$log"
+  closed="$case_dir/closed"
+  cleanup_closed="$case_dir/cleanup-closed"
+
+  rc=0
+  FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" \
+    FM_FAKE_HERDR_CLEANUP_CLOSED="$cleanup_closed" \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "herdr-pending-cleanup: teardown should close both owned panes"
+  assert_present "$closed" "herdr-pending-cleanup: teardown left current pane live"
+  assert_present "$cleanup_closed" "herdr-pending-cleanup: teardown left pending old pane live"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "herdr-pending-cleanup: teardown retained metadata after confirmed cleanup"
+  pass "herdr teardown consumes pending old endpoint before deleting task records"
 }
 
 test_herdr_flat_teardown_refuses_records_on_unparseable_presence() {
@@ -2903,6 +2940,7 @@ test_local_only_force_overrides_unpushed
 test_teardown_missing_busy_sidecar_completes
 test_herdr_teardown_clears_escalation_marker
 test_herdr_flat_teardown_refuses_orphaning_records_then_retry_completes
+test_herdr_teardown_consumes_pending_cleanup_endpoint
 test_herdr_flat_teardown_refuses_records_on_unparseable_presence
 test_herdr_flat_teardown_preflight_refuses_before_changes
 test_forced_secondmate_herdr_child_preflight_refuses_before_changes
