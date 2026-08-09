@@ -25,6 +25,7 @@ Decision OS plan `docs/superpowers/plans/2026-08-05-two-writer-delivery-capacity
 - The fleet-depth diagnosis added one more correction, folded into this revision: the active private cron sentinel (`*/20` -> `/home/holu/fmate/firstmate/data/fleet-depth-check.sh`, which reads `state/fleet-manifest.jsonl` and the `/tmp/pi-subagents-1000/...` output paths and appends wake records) is quarantined to alert-only in Task 3, removed with its crontab entry after the Task 13 cutover proof, and verified gone in Task 15 with home-aware `rg -uu` plus crontab inspection.
 - The plan now contains exactly 16 tasks (Task 0 through Task 15); Task 5 is split into Tasks 5 and 6, and Task 8 is split into Tasks 8 and 9.
 - Per instruction, no further fresh-eyes run is started and no runtime code is implemented by this revision.
+- Execution status (2026-08-09): all 95 execution checkboxes are ticked against the recorded acceptance evidence at branch head `d670a84`. The task-to-commit mapping, per-task test and lint runs, and the exhaustive current-head file map are recorded in `docs/verification/fleet-capacity.md` (## Final acceptance); the later no-mistakes review, test-fix, and documentation commits are part of that record.
 
 ### Repository ownership facts (Task 0 input)
 
@@ -103,7 +104,7 @@ F3 correction. The canonical integration base is produced and reviewed here, bef
 
 **Context:** local `main` and `origin/main` diverged at `2cf0283b`. Local `main` owns `bin/fm-fleet-refill.sh` and the accepted design; upstream owns five other commits. Both histories are preserved and reconciled onto one reviewed base.
 
-- [ ] **Step 1: Verify both histories and the script ownership**
+- [x] **Step 1: Verify both histories and the script ownership**
 
 Run:
 
@@ -117,7 +118,7 @@ git cat-file -e origin/main:bin/fm-fleet-refill.sh && echo "origin has it" || ec
 
 Expected: merge-base `2cf0283b811e81a821cddf5b7f74e1f7de8e2881`; local-only list contains `acaaf2e`, `94d4caa`, `4c3ed17`, `38b4eb6`; origin-only list contains `833a9a2`, `be32879`, `167ff42`, `60eb534`, `06b33aa`; `origin does not have it`.
 
-- [ ] **Step 2: Create the reviewed canonical integration branch**
+- [x] **Step 2: Create the reviewed canonical integration branch**
 
 In a dedicated worktree of the firstmate repo:
 
@@ -136,7 +137,7 @@ content. fm-fleet-refill.sh is preserved from the local side."
 
 Resolve any conflict by keeping local content for local-only features and upstream content for upstream-only features; never drop a commit from either side.
 
-- [ ] **Step 3: Prove the reconciled base is green and owns the script**
+- [x] **Step 3: Prove the reconciled base is green and owns the script**
 
 Run:
 
@@ -152,11 +153,11 @@ bin/fm-doc-audience-check.sh
 
 Expected: `refill preserved`, `merge recorded`, `local main contained`, `origin main contained`, full suite green, lint clean, doc-audience clean.
 
-- [ ] **Step 4: Review the integration branch before Task 1**
+- [x] **Step 4: Review the integration branch before Task 1**
 
 Submit the integration branch through the canonical `review.sh` pass and require a clean verdict before Task 1 proceeds. The review must confirm both histories are preserved and the refill script is reconciled.
 
-- [ ] **Step 5: Record the base and commit the decision record**
+- [x] **Step 5: Record the base and commit the decision record**
 
 Record the reviewed integration base SHA in the implementation PR description and in `docs/verification/fleet-capacity.md` (created in Task 3) under `## Integration base`. No code change on the plan branch; the plan branch stays a clean fast-forward onto local `main`.
 
@@ -171,7 +172,7 @@ F1 correction plus the decision-os Task 7.1 leaf. There is no mutable phase; lif
 - Create: `bin/fm-attempt-lib.sh`
 - Create: `tests/fm-attempt.test.sh`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `tests/fm-attempt.test.sh`:
 
@@ -345,12 +346,12 @@ test_lock_held_primitives_never_reacquire
 test_observation_journal_is_append_only
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `bash tests/fm-attempt.test.sh`
 Expected: FAIL with `fm_attempt_alloc: command not found`.
 
-- [ ] **Step 3: Write the minimal implementation**
+- [x] **Step 3: Write the minimal implementation**
 
 Create `bin/fm-attempt-lib.sh`:
 
@@ -668,17 +669,17 @@ fm_attempt_landing_disposition() {  # prints landed | preserved_unlanded | unkno
 
 Note: the `fm_attempt_effect_observe_held` contradiction check compares the stored observed evidence to the incoming evidence as raw JSON strings. The implementer must normalize both sides through `jq -cS` before comparison so semantically identical evidence (key order differences) counts as replay equality; the `test_effect_observe_is_write_once` fixture pins the normalized comparison.
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 Run: `bash tests/fm-attempt.test.sh`
 Expected: eleven `ok -` lines, no failures.
 
-- [ ] **Step 5: Verify shellcheck**
+- [x] **Step 5: Verify shellcheck**
 
 Run: `shellcheck bin/fm-attempt-lib.sh`
 Expected: clean.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add bin/fm-attempt-lib.sh tests/fm-attempt.test.sh
@@ -698,7 +699,7 @@ F4 correction. The capacity classifier consumes a structured contract, never rep
 - Create: `tests/fm-capacity.test.sh`
 - Extend: `tests/fm-crew-state.test.sh`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Extend `tests/fm-crew-state.test.sh`:
 
@@ -952,12 +953,12 @@ test_aggregates_are_exactly_derivable_from_rows
 test_parallel_reads_are_byte_identical
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `bash tests/fm-crew-state.test.sh; bash tests/fm-capacity.test.sh`
 Expected: FAIL on the new tests (`--json` unrecognized, `fm_capacity_project: command not found`).
 
-- [ ] **Step 3: Add `--json` to `bin/fm-crew-state.sh`**
+- [x] **Step 3: Add `--json` to `bin/fm-crew-state.sh`**
 
 Modify `bin/fm-crew-state.sh` so that when the first argument is `--json`, the emit function prints one structured object:
 
@@ -978,7 +979,7 @@ emit() {  # <state> <source> [detail]
 
 and at the top of the script set `FM_CREW_STATE_JSON=1` when `$1` is `--json` and shift. The one-line contract stays the default output; `bin/fm-crew-state.sh` remains the only semantic worker-state parser. The `SEP` separator and the exact state vocabulary are owned by this script alone.
 
-- [ ] **Step 4: Write the minimal `bin/fm-capacity-lib.sh`**
+- [x] **Step 4: Write the minimal `bin/fm-capacity-lib.sh`**
 
 ```bash
 #!/usr/bin/env bash
@@ -1223,21 +1224,21 @@ fm_capacity_project() {  # -> fm-fleet-capacity.v1 JSON on stdout
 
 Notes pinned for the implementer: `env VAR=value timeout --kill-after=1 "$secs" command args` is the valid ordering (environment assignments before the executable). `FM_CAPACITY_TOTAL_TIMEOUT_SECS` is enforced by the outer `timeout` around the collection phase; the deterministic post-pass marks every unfinished meta ambiguous. Parallelism (`FM_CAPACITY_PARALLEL > 1`) is enabled only after `test_parallel_reads_are_byte_identical` and the backend-concurrency proof in Step 5 pass; until then it stays 1. The latency budget is achievable at target fleet size because a real `fm-crew-state.sh --json` read is sub-150ms; with `FM_CAPACITY_READ_TIMEOUT_SECS=2` and a 12-row fleet the sequential phase stays far below the 2000 ms budget, and the total deadline of 10s bounds the worst case.
 
-- [ ] **Step 5: Prove bounded concurrency before enabling parallelism**
+- [x] **Step 5: Prove bounded concurrency before enabling parallelism**
 
 Run `test_parallel_reads_are_byte_identical` with `FM_CAPACITY_PARALLEL=4` against a 12-row fixture; then run the same fixture against the real tmux backend (`bash tests/fm-backend-tmux-smoke.test.sh`) and confirm the projection output is unchanged. Only after both pass may `FM_CAPACITY_PARALLEL` default above 1.
 
-- [ ] **Step 6: Run the tests to verify they pass**
+- [x] **Step 6: Run the tests to verify they pass**
 
 Run: `bash tests/fm-crew-state.test.sh; bash tests/fm-capacity.test.sh`
 Expected: all green (structured contract tests plus the twelve capacity fixtures).
 
-- [ ] **Step 7: Verify the projection is read-only**
+- [x] **Step 7: Verify the projection is read-only**
 
 Run `bash tests/fm-capacity.test.sh` again with `git status --short` before and after.
 Expected: no state change beyond the test temp root.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add bin/fm-crew-state.sh bin/fm-capacity-lib.sh
@@ -1257,7 +1258,7 @@ F3 and F8 corrections. Consumer decisions stay on legacy behavior; the new objec
 - Extend: `tests/fm-fleet-refill.test.sh`
 - Create: `docs/verification/fleet-capacity.md` (shadow + latency + integration-base sections)
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append to `tests/fm-fleet-refill.test.sh`:
 
@@ -1309,12 +1310,12 @@ test_frozen_observation_parity
 
 The new tests need `write_meta_fixture` and a file-scope `clean_probe` (hoist the existing per-test fixture to file scope in the same edit), plus `FM_REFILL_SHADOW` support from Step 2.
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `bash tests/fm-fleet-refill.test.sh`
 Expected: FAIL on the new tests (`--count-json` unrecognized, shadow file absent).
 
-- [ ] **Step 3: Add `--count-json` and `--shadow` to `bin/fm-fleet-refill.sh` without touching the legacy verdict**
+- [x] **Step 3: Add `--count-json` and `--shadow` to `bin/fm-fleet-refill.sh` without touching the legacy verdict**
 
 Add to the top of the existing legacy script (which keeps its manifest/mtime arithmetic verbatim through this task):
 
@@ -1335,7 +1336,7 @@ fi
 
 The human verdict and dispatch decision remain the legacy arithmetic until Task 13; the shadow object is recorded alongside for parity and latency measurement only. The snapshot is NOT modified in this task.
 
-- [ ] **Step 4: Quarantine the private cron sentinel to alert-only**
+- [x] **Step 4: Quarantine the private cron sentinel to alert-only**
 
 The active private cron sentinel (`*/20 * * * * /home/holu/fmate/firstmate/data/fleet-depth-check.sh`, which reads `state/fleet-manifest.jsonl` and `/tmp/pi-subagents-1000/.../tasks/<id>.output` and appends wake records through `fm_wake_append`) stays alive through the shadow stage but is quarantined to alert-only: its capacity arithmetic is never authoritative, no dispatch decision depends on it, and the shadow object is measured independently of it. Concretely:
 
@@ -1346,7 +1347,7 @@ The active private cron sentinel (`*/20 * * * * /home/holu/fmate/firstmate/data/
 
 Do not repoint the crontab at anything and do not create a wrapper for the old sentinel.
 
-- [ ] **Step 5: Measure hot-path latency (shadow) and record it**
+- [x] **Step 5: Measure hot-path latency (shadow) and record it**
 
 Run on the real home with the fleet at rest:
 
@@ -1356,12 +1357,12 @@ Run on the real home with the fleet at rest:
 
 Expected: wall time below 2000 ms with the default timeouts at the current fleet size. Record the date, the integration-base SHA from Task 0, the command, and the exact output in `docs/verification/fleet-capacity.md` under `## Latency (shadow)`, in the maintainer-verification format used by `docs/verification/runtime-backends.md`. Also record the Task 0 integration-base SHA under `## Integration base`.
 
-- [ ] **Step 6: Run the tests to verify they pass**
+- [x] **Step 6: Run the tests to verify they pass**
 
 Run: `bash tests/fm-fleet-refill.test.sh`
 Expected: all green, including the legacy refill tests (serialization-debt propagation and the legacy verdict).
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add bin/fm-fleet-refill.sh tests/fm-fleet-refill.test.sh docs/verification/fleet-capacity.md
@@ -1381,7 +1382,7 @@ F6 correction. One disposition reader re-reads all named owners with explicit un
 - Create: `bin/fm-attempt-migrate.sh`
 - Create: `tests/fm-attempt-migrate.test.sh`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `tests/fm-disposition.test.sh`:
 
@@ -1522,12 +1523,12 @@ test_closed_unmerged_is_preserved_even_when_bead_closed() {
 }
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `bash tests/fm-disposition.test.sh; bash tests/fm-attempt-migrate.test.sh`
 Expected: FAIL with the libs and script missing.
 
-- [ ] **Step 3: Implement `bin/fm-disposition-lib.sh`**
+- [x] **Step 3: Implement `bin/fm-disposition-lib.sh`**
 
 ```bash
 #!/usr/bin/env bash
@@ -1583,7 +1584,7 @@ fm_disposition_live() {  # <attempt_id> -> landed | preserved_unlanded | unknown
 
 The exact `gh-axi pr view` JSON shape and `br show --json` array fields are pinned in Task 5's contract step and recorded in the test fixtures; any field that does not exist in the installed version yields unknown, never a guess.
 
-- [ ] **Step 4: Implement `bin/fm-attempt-migrate.sh`**
+- [x] **Step 4: Implement `bin/fm-attempt-migrate.sh`**
 
 ```bash
 #!/usr/bin/env bash
@@ -1629,12 +1630,12 @@ migrate_one() {  # <task-id>
 for id in "$@"; do migrate_one "$id"; done
 ```
 
-- [ ] **Step 5: Verify**
+- [x] **Step 5: Verify**
 
 Run: `bash tests/fm-disposition.test.sh; bash tests/fm-attempt-migrate.test.sh; bash tests/fm-attempt.test.sh; bash tests/fm-capacity.test.sh`
 Expected: all green. Also record the exact installed `gh-axi pr view --json` and `br show --json` field names in the fixtures during implementation (Task 5 Step 4 pins them).
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add bin/fm-disposition-lib.sh tests/fm-disposition.test.sh
@@ -1654,7 +1655,7 @@ F5 correction plus decision-os Task 7.4. Written against the installed `br` 0.2.
 - Create: `tests/fm-br-receipt.test.sh`
 - Create: `tests/live-decision-os-contract.test.sh` (live guard, env-gated)
 
-- [ ] **Step 1: Pin the installed command contracts**
+- [x] **Step 1: Pin the installed command contracts**
 
 Run against the registered clone:
 
@@ -1668,7 +1669,7 @@ printf '%s\n' "$br_worktree_storage_help"
 
 Record in the test fixtures: `br comments add|list` (no `show`); `br show --json` returns an array; `preflight --repo <path> --status-out <path> --br-bin <path>`; `verify-session --repo <path> [--agent]`; `claim <issue_id> --repo <path> --agent <name> --br-bin <path>`.
 
-- [ ] **Step 2: Write the failing tests**
+- [x] **Step 2: Write the failing tests**
 
 Create `tests/fm-br-receipt.test.sh` with the fake clone fixture and these assertions:
 
@@ -1888,12 +1889,12 @@ test_br_comments_has_list_not_show
 test_preflight_requires_full_args
 ```
 
-- [ ] **Step 3: Run to verify failure**
+- [x] **Step 3: Run to verify failure**
 
 Run: `bash tests/fm-br-receipt.test.sh`
 Expected: FAIL with `fm-br-receipt.sh: No such file`.
 
-- [ ] **Step 4: Implement `bin/fm-br-receipt.sh`**
+- [x] **Step 4: Implement `bin/fm-br-receipt.sh`**
 
 ```bash
 #!/usr/bin/env bash
@@ -2015,11 +2016,11 @@ echo "tracker_receipt: $attempt $transition $bead $post_state $(git rev-parse HE
 
 The pathspec-only invariant is enforced on both staged and unstaged sets; the commit uses an explicit pathspec so an unrelated already-staged path can never land. Every failure path records a durable pending obligation inside the single attempt record before releasing the pause; replay resumes from that record. No raw `br --claim` is ever executed (Task 7.4 boundary).
 
-- [ ] **Step 5: Verify**
+- [x] **Step 5: Verify**
 
 Run: `bash tests/fm-br-receipt.test.sh; bash tests/live-decision-os-contract.test.sh` (the live guard self-skips without `FM_LIVE_DECISION_OS=1`; run it once with the env set against the real clone and record the result in `docs/verification/fleet-capacity.md` under `## Decision OS contract`).
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add bin/fm-br-receipt.sh tests/fm-br-receipt.test.sh tests/live-decision-os-contract.test.sh
@@ -2039,7 +2040,7 @@ F5 correction (second half of the old Task 5) plus the F8 brief-wiring item.
 - Extend: `tests/fm-spawn-worktree-settle.test.sh`
 - Extend: `tests/fm-brief.test.sh`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Extend `tests/fm-spawn-worktree-settle.test.sh`:
 
@@ -2084,12 +2085,12 @@ test_ship_brief_carries_attempt_and_claim_requirement() {
 
 (The exact `fm-brief.sh` invocation shape is taken from `bin/fm-brief.sh --help` during implementation.)
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `bash tests/fm-spawn-worktree-settle.test.sh; bash tests/fm-brief.test.sh`
 Expected: FAIL on the new tests.
 
-- [ ] **Step 3: Wire the split handshake into `bin/fm-spawn.sh`**
+- [x] **Step 3: Wire the split handshake into `bin/fm-spawn.sh`**
 
 Modify `bin/fm-spawn.sh` intake, before any workspace allocation and before any endpoint creation (the anchor is the existing intake block before the `treehouse get` region):
 
@@ -2099,16 +2100,16 @@ Modify `bin/fm-spawn.sh` intake, before any workspace allocation and before any 
 4. Write `attempt=<attempt_id>` into `state/<id>.meta`.
 5. After the provider allocation and launch complete and instruction-delivery confirmation succeeds, append one ledger row `{attempt_id, launched_at, endpoint}` to `state/launch-ledger.jsonl`, guarded so a row for that attempt id is appended at most once; recovery of a crash before ledger publication relies on the attempt envelope, never the ledger.
 
-- [ ] **Step 4: Wire `bin/fm-brief.sh`**
+- [x] **Step 4: Wire `bin/fm-brief.sh`**
 
 Modify the ship-brief scaffold so the generated brief includes the attempt id placeholder and the claim-before-allocation requirement line (the exact scaffold location is `bin/fm-brief.sh`'s ship template). The line reads: `This task runs through claim-before-allocation: no workspace or endpoint exists before the authoritative Decision OS claim receipt is observed (attempt <attempt_id>).`
 
-- [ ] **Step 5: Verify**
+- [x] **Step 5: Verify**
 
 Run: `bash tests/fm-spawn-worktree-settle.test.sh; bash tests/fm-brief.test.sh; bash tests/fm-br-receipt.test.sh; bash tests/fm-attempt.test.sh`
 Expected: all green.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add bin/fm-spawn.sh bin/fm-brief.sh
@@ -2129,7 +2130,7 @@ F7 correction plus decision-os Task 7.2. The lease identity binds both home and 
 - Modify: `bin/fm-backend.sh`
 - Extend: `tests/fm-spawn-worktree-settle.test.sh`, `tests/fm-secondmate-safety.test.sh`, `tests/fm-backend-orca.test.sh`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Add the shared claim fixture to `tests/fm-spawn-worktree-settle.test.sh` before the new tests:
 
@@ -2203,12 +2204,12 @@ test_replay_releases_only_the_exact_owning_attempt() {
 
 Extend `tests/fm-backend-orca.test.sh` with the same shapes against the Orca worktree claim surface, and `tests/fm-secondmate-safety.test.sh` for the secondmate lease.
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `bash tests/fm-spawn-worktree-settle.test.sh; bash tests/fm-secondmate-safety.test.sh; bash tests/fm-backend-orca.test.sh`
 Expected: FAIL on the new tests.
 
-- [ ] **Step 3: Implement attempt-bound ownership**
+- [x] **Step 3: Implement attempt-bound ownership**
 
 In `bin/fm-spawn.sh` after the claim receipt is observed:
 
@@ -2220,12 +2221,12 @@ In `bin/fm-home-seed.sh`, bind the secondmate lease through the same `home:attem
 
 In `bin/fm-backend.sh`, add `fm_backend_stop_receipt <backend> <id>` returning the durable endpoint-stop evidence JSON (window/tab/pane identity plus confirmed-gone verdict) that cleanup records as the `cleanup.endpoint` effect.
 
-- [ ] **Step 4: Verify**
+- [x] **Step 4: Verify**
 
 Run: `bash tests/fm-spawn-worktree-settle.test.sh; bash tests/fm-secondmate-safety.test.sh; bash tests/fm-backend-orca.test.sh; bash tests/fm-teardown.test.sh; bash tests/fm-attempt.test.sh`
 Expected: all green.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add bin/fm-spawn.sh bin/fm-home-seed.sh bin/fm-backend.sh
@@ -2245,7 +2246,7 @@ F8 correction (first third of the old Task 8). Extraction only: no new semantics
 - Modify: `bin/fm-teardown.sh` (source the lib, keep behavior)
 - Extend: `tests/fm-teardown.test.sh` (extraction identity)
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Extend `tests/fm-teardown.test.sh`:
 
@@ -2263,21 +2264,21 @@ test_extraction_is_behavior_identical() {
 
 The fixture helper runs `bin/fm-teardown.sh <id> --force` against a prepared task and captures stdout plus exit code.
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `bash tests/fm-teardown.test.sh`
 Expected: the new identity test fails only if behavior differs; before extraction it passes vacuously, so mark this step as the pin that must stay green through Task 9.
 
-- [ ] **Step 3: Extract into `bin/fm-cleanup-lib.sh` with identical behavior**
+- [x] **Step 3: Extract into `bin/fm-cleanup-lib.sh` with identical behavior**
 
 Move the existing functions from `bin/fm-teardown.sh` into `bin/fm-cleanup-lib.sh` verbatim: `teardown_treehouse_return` (line 996), `work_is_landed`/`pr_number_from_branch` (lines 824/699), `retire_busy_state` (line 606), `remove_pr_poll_artifacts` (line 677), the provider-specific quiet and herdr endpoint-confirmed-gone checks, the orca worktree path match, and the final state-file removal block. `bin/fm-teardown.sh` sources the library and keeps its exact main flow. No new semantics, no receipts, no disposition parameter, no lock changes in this task.
 
-- [ ] **Step 4: Verify**
+- [x] **Step 4: Verify**
 
 Run: `bash tests/fm-teardown.test.sh; bash tests/fm-teardown-endpoint-safety.test.sh; bash tests/fm-secondmate-safety.test.sh`
 Expected: all green with no behavioral change.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add bin/fm-cleanup-lib.sh bin/fm-teardown.sh tests/fm-teardown.test.sh
@@ -2297,7 +2298,7 @@ F8 correction (second and third thirds of the old Task 8) plus F2's lock-held cl
 - Modify: `bin/fm-teardown.sh` (compatibility wrapper)
 - Extend: `tests/fm-teardown.test.sh`, `tests/fm-teardown-endpoint-safety.test.sh`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `tests/fm-cleanup.test.sh`:
 
@@ -2396,12 +2397,12 @@ test_teardown_wrapper_identity
 test_nested_lock_acquire_refuses
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `bash tests/fm-cleanup.test.sh`
 Expected: FAIL with `fm-cleanup-lib.sh --run` unrecognized.
 
-- [ ] **Step 3: Add the structured operation to `bin/fm-cleanup-lib.sh`**
+- [x] **Step 3: Add the structured operation to `bin/fm-cleanup-lib.sh`**
 
 ```bash
 #!/usr/bin/env bash
@@ -2506,16 +2507,16 @@ fi
 
 `branch_fate_json`, `provider_return`, `retire_runtime_records`, `pids_with_cwd_under`, and `copy_quiet_age` are the functions extracted in Task 8, now driven under the attempt lock. `branch_fate_json` honors `FM_BRANCH_DELETE_FAIL=1` (records `{"failed":true}` without touching a real ref).
 
-- [ ] **Step 4: Convert `bin/fm-teardown.sh` into the compatibility wrapper**
+- [x] **Step 4: Convert `bin/fm-teardown.sh` into the compatibility wrapper**
 
 Replace the teardown main flow so it resolves the task to an attempt, classifies the disposition through `fm_disposition_live` (Task 4), and calls `fm_cleanup_attempt "$attempt" "$disposition"`; `--force` resolves to a `preserved_unlanded`-with-discard disposition exactly as today. The CLI stays `fm-teardown.sh <task-id> [--force]` and the wrapper adds no second cleanup policy. The header's landed-work proofs, PR-discovery fallback, and stale-lock recovery procedure remain authoritative.
 
-- [ ] **Step 5: Verify**
+- [x] **Step 5: Verify**
 
 Run: `bash tests/fm-cleanup.test.sh; bash tests/fm-teardown.test.sh; bash tests/fm-teardown-endpoint-safety.test.sh; bash tests/fm-secondmate-safety.test.sh; bash tests/fm-attempt.test.sh`
 Expected: all green, including the pre-existing teardown suites.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add bin/fm-cleanup-lib.sh bin/fm-teardown.sh
@@ -2534,7 +2535,7 @@ F7 correction plus decision-os Task 7.3. PR check/merge/poll/local-merge write p
 - Modify: `bin/fm-pr-lib.sh`, `bin/fm-pr-check.sh`, `bin/fm-pr-merge.sh`, `bin/fm-pr-poll.sh`, `bin/fm-merge-local.sh`
 - Extend: `tests/fm-pr-check-security.test.sh`, `tests/fm-pr-merge.test.sh`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Extend `tests/fm-pr-check-security.test.sh` with a shared attempt fixture:
 
@@ -2606,21 +2607,21 @@ test_unknown_forge_never_guesses() {
 
 Extend `tests/fm-pr-merge.test.sh` for squash-merge landing proof and local-only merge proof.
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `bash tests/fm-pr-check-security.test.sh; bash tests/fm-pr-merge.test.sh`
 Expected: FAIL on the new tests.
 
-- [ ] **Step 3: Implement observation-first landing semantics**
+- [x] **Step 3: Implement observation-first landing semantics**
 
 For each of `fm-pr-check.sh`, `fm-pr-merge.sh`, `fm-pr-poll.sh`, and `fm-merge-local.sh`: after the authoritative observation, when the task meta carries `attempt=`, append the provisional observation through `fm_attempt_observe "$attempt" "$gen" forge '<evidence>'` where evidence contains `{provider, repo, source, target, head, state, before_sha, after_sha}` with every field populated or explicitly null, never inferred. The final immutable `landing` receipt is written only by the disposition step (Task 11's `fm_disposition_live` consumer) through `fm_attempt_effect_observe`, bound to the disposition; a squash merge is `landed` only when existing Git and forge proof establishes content equivalence (reuse `patch_id_for_commit`/`unpushed_patches_are_in_pr_head` from the extracted teardown logic, never duplicate). `bin/fm-pr-lib.sh` owns the observation evidence schema; `pr=`/`pr_head=` meta fields stay as today.
 
-- [ ] **Step 4: Verify**
+- [x] **Step 4: Verify**
 
 Run: `bash tests/fm-pr-check-security.test.sh; bash tests/fm-pr-merge.test.sh; bash tests/fm-attempt.test.sh`
 Expected: all green.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add bin/fm-pr-lib.sh bin/fm-pr-check.sh bin/fm-pr-merge.sh bin/fm-pr-poll.sh bin/fm-merge-local.sh
@@ -2639,7 +2640,7 @@ F2, F6, and F7 corrections plus decision-os Task 7.5. One outer non-reentrant at
 - Create: `bin/fm-terminal.sh`
 - Create: `tests/fm-terminal.test.sh`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `tests/fm-terminal.test.sh`. The shared fixture helper builds a fully landed attempt:
 
@@ -2763,12 +2764,12 @@ test_preland_actual_diff_conflict_refuses_landing() {
 }
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `bash tests/fm-terminal.test.sh`
 Expected: FAIL with `fm-terminal.sh: No such file`.
 
-- [ ] **Step 3: Implement `bin/fm-terminal.sh`**
+- [x] **Step 3: Implement `bin/fm-terminal.sh`**
 
 ```bash
 #!/usr/bin/env bash
@@ -2870,12 +2871,12 @@ echo "$cap" | jq -r '.aggregate | "post-terminal capacity: productive=\(.product
 
 `fm_review_diff_recheck` wraps the existing `bin/fm-review-diff.sh` authority (refresh the authoritative base, compare the exact head against current attempts' actual diffs) and returns 0 only when no concrete overlap exists; the `FM_REVIEW_DIFF_CONFLICT=1` test hook forces a conflict. The Task 7.5 required order is preserved inside steps 2-8: observe forge/tracker/branch/endpoint/copy claim, persist the observation, obtain disposition authority, run teardown eligibility checks, persist the exact tracker-mutation request, wait while the attended steward executes it, observe and verify the authoritative tracker receipt, record the exact copy's no-live-process/clean/landed/nonzero-quiet evidence, clean or release that exact copy only when all four signals pass, retire the exact proven delivery ref, and remove runtime ownership only after all obligations are complete. `fm-terminal.sh` never mutates the tracker directly; a pending tracker receipt, quiet interval, or obligation blocks copy/ref/runtime release, and replay resumes at the persisted request/receipt boundary. A duplicate completion, merge event, startup recovery, heartbeat recovery, cleanup retry, or refill race converges on the same receipts and sees either pre-retirement ownership or a post-retirement deficit, never an intermediate free slot. `semantic_equiv` in the tests compares receipt names, states, and evidence with timestamps and attempt ids stripped.
 
-- [ ] **Step 4: Verify**
+- [x] **Step 4: Verify**
 
 Run: `bash tests/fm-terminal.test.sh; bash tests/fm-cleanup.test.sh; bash tests/fm-teardown.test.sh; bash tests/fm-teardown-endpoint-safety.test.sh; bash tests/fm-disposition.test.sh`
 Expected: all green.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add bin/fm-terminal.sh tests/fm-terminal.test.sh
@@ -2894,7 +2895,7 @@ F1/F7 admission semantics. Refill acts only on a complete projection; provisiona
 - Create: `tests/fm-refill-admission.test.sh`
 - Extend: `tests/fm-capacity.test.sh` (retirement-before-projection and no-decrement-at-completion fixtures)
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `tests/fm-refill-admission.test.sh`:
 
@@ -2966,12 +2967,12 @@ test_actual_diffs_remain_authoritative_pre_land() {
 }
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `bash tests/fm-refill-admission.test.sh`
 Expected: FAIL with `--refill` unrecognized.
 
-- [ ] **Step 3: Implement the refill action in `bin/fm-fleet-refill.sh`**
+- [x] **Step 3: Implement the refill action in `bin/fm-fleet-refill.sh`**
 
 ```bash
 if [ "${1:-}" = "--refill" ]; then
@@ -3003,12 +3004,12 @@ fi
 
 The automatic-refill gate: automatic action requires `config/refill-auto` in the home (gitignored) or `FM_REFILL_AUTO=1`; otherwise `--refill` is attended-only and the human path prints the verdict plus next-wave commands without launching. Automatic refill stays disabled through Task 13.
 
-- [ ] **Step 4: Verify**
+- [x] **Step 4: Verify**
 
 Run: `bash tests/fm-refill-admission.test.sh; bash tests/fm-capacity.test.sh; bash tests/fm-fleet-refill.test.sh`
 Expected: all green.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add bin/fm-fleet-refill.sh tests/fm-refill-admission.test.sh tests/fm-capacity.test.sh
@@ -3031,7 +3032,7 @@ F3 and F8 corrections plus the fleet-depth diagnosis. Both consumers switch to t
 - Modify: `docs/documentation-audiences.json` (classify `docs/verification/fleet-capacity.md` as `maintainer-verification`)
 - Extend: `tests/fm-capacity.test.sh` (composition fixtures), `tests/fm-fleet-snapshot-view.test.sh` (byte parity)
 
-- [ ] **Step 1: Write the failing composition and sentinel tests**
+- [x] **Step 1: Write the failing composition and sentinel tests**
 
 Append to `tests/fm-capacity.test.sh`:
 
@@ -3114,12 +3115,12 @@ test_sentinel_never_counts
 
 The `safe.json`/`alert.json` fixtures are written from the Task 2 projection fixtures.
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `bash tests/fm-capacity.test.sh; bash tests/fm-refill-sentinel.test.sh`
 Expected: FAIL (no snapshot `capacity` key, sentinel script missing).
 
-- [ ] **Step 3: Cut the consumers over**
+- [x] **Step 3: Cut the consumers over**
 
 In `bin/fm-fleet-refill.sh`: replace the legacy verdict arithmetic with the shared-object derivation (the exact jq from Task 2's aggregate) and delete the legacy counting reads in this same commit (the deletion is now co-located with cutover, per F3's "Task 15 deletion strictly after that cutover proof" - the proof is this task's parity gate, so the legacy reads leave here).
 
@@ -3167,7 +3168,7 @@ exit 1
 
 Cadence policy lives home-local in `config/refill-sentinel` (gitignored); notification policy is the single `REFILL-ALERT:` line surfaced through the existing watcher/daemon digest path.
 
-- [ ] **Step 4: Run live parity and record it**
+- [x] **Step 4: Run live parity and record it**
 
 ```bash
 frozen=/tmp/fm-capacity-frozen.json
@@ -3178,7 +3179,7 @@ diff <(jq -S '.rows,.aggregate' "$frozen") <(jq -S '.rows,.aggregate' /tmp/fm-ca
 
 Expected: `LIVE-PARITY-OK`; the rows and aggregate (not the `generated` timestamp) compare byte-identically from one frozen observation. Record the exact command and output in `docs/verification/fleet-capacity.md` under `## Live parity`.
 
-- [ ] **Step 5: Prove the final latency budget**
+- [x] **Step 5: Prove the final latency budget**
 
 ```bash
 /usr/bin/time -f 'count-json wall=%e s' bin/fm-fleet-refill.sh --count-json >/dev/null
@@ -3186,7 +3187,7 @@ Expected: `LIVE-PARITY-OK`; the rows and aggregate (not the `generated` timestam
 
 Expected: wall below 2000 ms at the target fleet size. Record it under `## Latency (final)` with the integration-base SHA, date, fleet size, and exact output. If the budget does not hold, stop, do not enable automatic refill, and open a follow-up to tune the per-row timeout or enable bounded parallelism (Task 2 Step 5 verified).
 
-- [ ] **Step 6: Enable automatic refill only after the safety gate**
+- [x] **Step 6: Enable automatic refill only after the safety gate**
 
 ```bash
 bin/fm-test-run.sh --all
@@ -3196,7 +3197,7 @@ bin/fm-doc-audience-check.sh
 
 Expected: every test green, lint clean, doc-audience clean. Only then create `config/refill-auto` in the home (gitignored) or set `FM_REFILL_AUTO=1`; the automatic path is the same `--refill` flow under the Task 12 gate. Record the acceptance evidence in `docs/verification/fleet-capacity.md` under `## Acceptance`.
 
-- [ ] **Step 7: Remove the private cron sentinel and switch cadence to the shared sentinel**
+- [x] **Step 7: Remove the private cron sentinel and switch cadence to the shared sentinel**
 
 Only after the parity, latency, and safety-gate proofs above (the cutover proof) do the following:
 
@@ -3206,7 +3207,7 @@ Only after the parity, latency, and safety-gate proofs above (the cutover proof)
 4. Keep historical `state/fleet-manifest.jsonl` and any next-wave staging state inert unless a separately safe owner (a later accepted design) takes them over: the file is not deleted, not read, and not written by any new mechanism.
 5. Record the removal, the new cadence wiring, and the verification in `docs/verification/fleet-capacity.md` under `## Cron sentinel removal`.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add bin/fm-fleet-refill.sh bin/fm-fleet-snapshot.sh bin/fm-refill-sentinel.sh
@@ -3228,16 +3229,16 @@ Decision OS Task 7.6 leaf. Attempt state is exposed through the existing startup
 - Modify: `bin/fm-fleet-snapshot.sh` (attempt-state exposure only; the capacity embed is Task 13)
 - Extend: `tests/fm-session-start.test.sh`, `tests/fm-watch-triage.test.sh`, `tests/fm-fleet-snapshot-view.test.sh`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Extend `tests/fm-session-start.test.sh` with a fixture home containing an attempt with a pending tracker effect, and assert the digest's fleet-state section names the attempt id, generation, missing observed effects, and reconciliation need. Extend `tests/fm-watch-triage.test.sh` with a heartbeat-path fixture that surfaces a `reconciliation_required` attempt through the existing fleet-scan (no new wake type). Extend `tests/fm-fleet-snapshot-view.test.sh` with per-task attempt-state exposure fields (receipt-set summary, obligations, reconciliation).
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `bash tests/fm-session-start.test.sh; bash tests/fm-watch-triage.test.sh; bash tests/fm-fleet-snapshot-view.test.sh`
 Expected: FAIL on the new assertions.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 In `bin/fm-session-start.sh` fleet-state section: for each `state/<id>.meta` carrying `attempt=`, emit a bounded line with the attempt id, generation, missing observed effects, reconciliation need, and intended-exit-versus-crash hint derived from the attempt record's receipt set (never the status log). This is an additional digest line per task; the existing status tails stay.
 
@@ -3247,12 +3248,12 @@ In `bin/fm-fleet-snapshot.sh`: each `tasks[]` row adds `attempt:` fields (id, ge
 
 Pending obligations are exposed and retried idempotently through these existing session-start, heartbeat, and fleet-snapshot paths: a pending effect state inside the attempt record (`state:"pending"`) is retried by the same paths that own the wait (startup network stage for claim, heartbeat for tracker/cleanup), never by a new loop and never from a separate obligation file.
 
-- [ ] **Step 4: Verify**
+- [x] **Step 4: Verify**
 
 Run: `bash tests/fm-session-start.test.sh; bash tests/fm-watch-triage.test.sh; bash tests/fm-fleet-snapshot-view.test.sh; bash tests/fm-attempt.test.sh; bash tests/fm-capacity.test.sh`
 Expected: all green.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add bin/fm-session-start.sh bin/fm-watch.sh bin/fm-fleet-snapshot.sh
@@ -3272,7 +3273,7 @@ F8 corrections: deletion happens only after the Task 13 cutover proof; forbidden
 - Modify: `docs/verification/fleet-capacity.md` (final acceptance evidence)
 - Extend: `tests/fm-fleet-refill.test.sh` (no-fallback, rollback), `tests/fm-refill-admission.test.sh`, `tests/fm-refill-sentinel.test.sh`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append to `tests/fm-fleet-refill.test.sh`:
 
@@ -3318,18 +3319,18 @@ test_rollback_never_restores_legacy_arithmetic() {
 }
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `bash tests/fm-fleet-refill.test.sh`
 Expected: FAIL while the legacy constants still exist in the runtime script.
 
-- [ ] **Step 3: Delete the obsolete machinery and implement the rollback flip**
+- [x] **Step 3: Delete the obsolete machinery and implement the rollback flip**
 
 From `bin/fm-fleet-refill.sh` (cut over in Task 13): remove the `TASKS_DIR`/`MANIFEST` variables, the mtime loop, `ACTIVE_WINDOW_MIN`, `QUEUE_WINDOW_MIN`, `MIN_BATTERY`, `MIN_OPEN`, the `br list --status open --json` open-count block, the old sentinel freshness-window references in the header, and the legacy `active=`/`battery=` verdict line. Keep the serialization-debt probe (a safety gate, not capacity arithmetic). The `state/fleet-manifest.jsonl` file itself is left untouched in the home and simply stops being read; no unknown or unlanded work is deleted.
 
 Rollback flip in `bin/fm-fleet-refill.sh` and `bin/fm-refill-sentinel.sh`: when `config/refill-auto` is absent and `FM_REFILL_AUTO` is not `1`, the scripts print the verdict and alert lines but never dispatch or launch (`--refill` exits 0 with `fleet-ok: alert-only` after the same summary). All attempts, beads, branches, refs, copies, and receipts are preserved; forward recovery resumes from the persisted effect receipts because re-enabling the gate re-runs the same idempotent paths (claim replay, obligation retry, terminal reconciliation). The projection continues to report ambiguity and reconciliation exactly as before; missing evidence never becomes zero capacity.
 
-- [ ] **Step 4: Run the full acceptance gate**
+- [x] **Step 4: Run the full acceptance gate**
 
 ```bash
 bin/fm-test-run.sh --all
@@ -3339,7 +3340,7 @@ bin/fm-doc-audience-check.sh
 
 Expected: every test green, lint clean, doc-audience clean (this plan as `maintainer-architecture` and `docs/verification/fleet-capacity.md` as `maintainer-verification`).
 
-- [ ] **Step 5: Verify no duplicate machinery and an exhaustive file map**
+- [x] **Step 5: Verify no duplicate machinery and an exhaustive file map**
 
 Forbidden-symbol check scoped to runtime code; the deliberate negative fixture in `tests/fm-fleet-refill.test.sh` is excluded by scope, not by grep filtering:
 
@@ -3368,7 +3369,7 @@ crontab -l 2>/dev/null | grep "firstmate/data/" && echo "OTHER-CRON-FIRSTMATE-EN
 
 Expected: `NO-MANIFEST-CONSUMER`, `NO-OUTPUT-PATH-REFERENCE`, `NO-SENTINEL-REFERENCE`, `CRON-SENTINEL-GONE`, and either `NO-OTHER-CRON` or the named unrelated entries (for example `openmodel-price-check.sh`) that the diagnosis separately confirms are safe. The `docs/superpowers/plans/` exclusion keeps this plan's own prose (which documents the legacy paths) from counting as a consumer; the negative test fixture in `tests/fm-fleet-refill.test.sh` is outside the scanned home paths and is already covered by the `bin/`-scoped forbidden-symbol check.
 
-- [ ] **Step 6: Final self-review against every accepted design requirement**
+- [x] **Step 6: Final self-review against every accepted design requirement**
 
 Walk `docs/architecture.md` section "Durable implementation capacity and attempt lifecycle design" and the review's bounded correction list, and confirm each maps to a task:
 
@@ -3391,7 +3392,7 @@ Walk `docs/architecture.md` section "Durable implementation capacity and attempt
 - Representative latency measurement, fixture parity, provider/runtime coverage, crash/replay tests around every irreversible effect, concurrency tests, migration, rollback to alert-only, exact verification commands: Tasks 2, 3, 5, 7, 9, 10, 11, 12, 13, 14, 15.
 - Sixteen tasks (Task 0 through Task 15), each on a green baseline with a small commit: Task 15 verifies the count.
 
-- [ ] **Step 7: Fix any material finding and commit**
+- [x] **Step 7: Fix any material finding and commit**
 
 If this self-review or the implementation finds a material design correction, fix the design owner `docs/architecture.md` in one follow-up commit and re-run Step 4. Otherwise record the acceptance evidence in `docs/verification/fleet-capacity.md` under `## Acceptance` (date, integration-base SHA, commands, output) and commit:
 
