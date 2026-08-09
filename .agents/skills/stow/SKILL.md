@@ -16,11 +16,11 @@ This skill writes only through the existing Firstmate ownership and write bounda
 
 ## Memory tiers and entry markers
 
-Every entry in the three memory files may carry one trailing HTML-comment marker holding a tier and a last-reinforced date:
+Every newly written entry in the three memory files carries one trailing HTML-comment marker holding its tier and, when a clock applies, its last-reinforced date:
 
 ```markdown
 - Never merge a red PR; destructive, irreversible, and security-sensitive choices stay with the captain. <!-- tier: pinned -->
-- Treehouse pool slots share one repo, so workers must create their task branch before editing. <!-- reinforced: 2026-08-03 -->
+- Treehouse pool slots share one repo, so workers must create their task branch before editing. <!-- tier: aging | reinforced: 2026-08-03 -->
 - While state/.afk exists, the away-daemon owns triage (until the afk-wake fix lands; tracked: afk-pi-wake-bypass-r1). <!-- tier: perishable | reinforced: 2026-07-20 -->
 ```
 
@@ -35,12 +35,12 @@ The tier names say what the pass does with an entry:
 Marking rules:
 
 - Tier defaults are file-scoped: entries in `data/captain.md` and `data/captain-shared.md` default to `pinned` because preferences and authority boundaries do not age, and entries in `data/learnings.md` default to `aging` because operational facts must re-prove themselves.
-- An entry carries `tier:` only when it deviates from its file's default.
-- `pinned` entries carry no date because no clock applies; `aging` and `perishable` entries always carry `reinforced: YYYY-MM-DD`.
+- Every newly written or rewritten entry explicitly carries `tier:`, including when its tier matches the file default; file defaults exist to interpret pre-existing unmarked entries during migration, not to omit markers from new work.
+- `pinned` entries carry `<!-- tier: pinned -->` with no date because no clock applies; `aging` and `perishable` entries carry `<!-- tier: <tier> | reinforced: YYYY-MM-DD -->`.
 - During legacy migration only, `legacy-grace: pending` may appear in the trailing marker without a `reinforced:` date; it records that the entry has consumed its grace cycle and is not reinforcement.
 - Each memory file's header carries a one-line legend stating that file's default tier, the marker spelling (including the migration-only grace state while one exists), and the current clocks, so the scheme is self-describing to any reader.
 - The clocks are policy owned by this skill text and echoed by the legends, deliberately not configuration.
-- A missing or hand-dropped marker is never an error: it means the file's default tier; an unmarked entry in a default-pinned file is simply pinned, while an unmarked entry in a file whose default tier carries a clock follows the migration rule below.
+- A pre-existing missing or hand-dropped marker is never grounds for destructive treatment: it means the file's default tier; an unmarked entry in a default-pinned file is simply pinned, while an unmarked entry in a file whose default tier carries a clock follows the migration rule below.
 
 Decay advances only when a pass runs, so a home stowed less often than a clock experiences that clock at its stow interval.
 

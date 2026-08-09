@@ -87,11 +87,11 @@ Everything files to a local destination by default; an external system such as a
 
 ## Tiered, decaying entries
 
-Every entry this skill writes into a memory file may carry one trailing HTML-comment marker holding a tier and a last-reinforced date:
+Every entry this skill writes into a memory file carries one trailing HTML-comment marker holding its tier and, when a clock applies, its last-reinforced date:
 
 ```markdown
 - Prefer concise progress updates during implementation work. <!-- tier: pinned -->
-- The staging deploy needs the VPN profile active or the smoke test hangs. <!-- reinforced: 2026-08-03 -->
+- The staging deploy needs the VPN profile active or the smoke test hangs. <!-- tier: aging | reinforced: 2026-08-03 -->
 - CI is red on the flaky auth test until the pinned runner image updates (tracked in TODO). <!-- tier: perishable | reinforced: 2026-07-20 -->
 ```
 
@@ -105,7 +105,8 @@ The tier names say what this skill does with an entry:
 Rules:
 
 - Unless a file's own legend says otherwise, a user-level memory file defaults to `pinned`, while a project memory file and `.stow-notes.md` default to `aging`.
-- An entry carries `tier:` only when it deviates from its file's default, and `pinned` entries need no date.
+- Every newly written or rewritten entry explicitly carries `tier:`, including when its tier matches the file default; defaults interpret pre-existing unmarked entries during migration rather than permitting new unmarked entries.
+- A `pinned` entry carries `<!-- tier: pinned -->` with no date, while an `aging` or `perishable` entry carries `<!-- tier: <tier> | reinforced: YYYY-MM-DD -->`.
 - During legacy migration only, `legacy-grace: pending` may appear in the trailing marker without a `reinforced:` date; it records that the entry has consumed its grace cycle and is not reinforcement.
 - Every governed memory file this skill curates must carry a one-line header legend stating that file's default tier, the marker spelling (including the migration-only grace state while one exists), and the current clocks, so the scheme explains itself to any later reader or tool.
   During one-time migration, add the legend even to a default-pinned file that contains only unmarked entries.
