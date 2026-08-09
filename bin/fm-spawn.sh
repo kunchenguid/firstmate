@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
-#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> --reason-code <CODE> [--capability-floor <FLOOR>] [--tooling-gap-item <backlog-id>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
+#        fm-spawn.sh <task-id> <project-dir> --scout --reason-code <CODE> [--capability-floor <FLOOR>] [--tooling-gap-item <backlog-id>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
@@ -51,6 +51,26 @@
 #   REFUSES a mismatch, exactly like the delivery contract above. A slot holding
 #   uncommitted work, or sitting on a task branch, is left untouched and launched
 #   as-is with a notice. Refused on --secondmate, which syncs its whole home.
+#   --reason-code <CODE> answers "why was an agent turn necessary here" for this
+#   dispatch, in the closed vocabulary owned by bin/fm-reasoning-lib.sh. REQUIRED
+#   for every ship and scout spawn and refused on --secondmate, which provisions a
+#   standing home rather than dispatching a task. An out-of-enum value is refused
+#   rather than recorded, because a free-text reason cannot be counted. The record
+#   is written, not enforced: no dispatch is blocked for reasoning too little.
+#   TOOLING_GAP is the one code that is NOT a reasoning code. It names a turn taken
+#   only because a deterministic reader is broken or absent, is never counted as
+#   justified reasoning, and REQUIRES --tooling-gap-item <backlog-id> naming an item
+#   that is currently open in this home's data/backlog.md - otherwise the code would
+#   launder every unfixed tool into a permanent "necessary agent turn".
+#   --capability-floor <FLOOR> records the routing floor this dispatch was resolved
+#   against, verbatim from config/crew-dispatch.json; an undefined floor is refused
+#   and an omitted one falls back to that file's default route floor. A home with no
+#   dispatch profiles records "unconfigured" and refuses an explicit floor.
+#   The spawn additionally derives reasoning_required from the reason code and
+#   escalation_policy from kind plus the delivery contract, so neither can be
+#   declared into disagreement with the record it summarizes. All of it lands in
+#   state/<id>.meta; absent fields on an older meta read as unknown, never as
+#   justified reasoning.
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
 #   --model <name> and --effort <low|medium|high|xhigh|max> are concrete profile
@@ -276,6 +296,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-trace-context-lib.sh"
 # shellcheck source=bin/fm-remote-readiness-lib.sh
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
+# shellcheck source=bin/fm-reasoning-lib.sh
+. "$SCRIPT_DIR/fm-reasoning-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -293,6 +315,12 @@ YOLO=
 TRACEPARENT_ARG=
 SLOT_BASE_ARG=
 CONTRIB_ARG=
+REASON_CODE=
+CAPABILITY_FLOOR=
+TOOLING_GAP_ITEM=
+REASON_CODE_SET=0
+CAPABILITY_FLOOR_SET=0
+TOOLING_GAP_ITEM_SET=0
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
@@ -320,6 +348,9 @@ for a in "$@"; do
       traceparent) TRACEPARENT_ARG=$a; TRACEPARENT_SET=1 ;;
       slot-base) SLOT_BASE_ARG=$a; SLOT_BASE_SET=1 ;;
       contribution-target) CONTRIB_ARG=$a; CONTRIB_SET=1 ;;
+      reason-code) REASON_CODE=$a; REASON_CODE_SET=1 ;;
+      capability-floor) CAPABILITY_FLOOR=$a; CAPABILITY_FLOOR_SET=1 ;;
+      tooling-gap-item) TOOLING_GAP_ITEM=$a; TOOLING_GAP_ITEM_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -347,6 +378,12 @@ for a in "$@"; do
     --slot-base=*) SLOT_BASE_ARG=${a#--slot-base=}; SLOT_BASE_SET=1 ;;
     --contribution-target) want_value=contribution-target ;;
     --contribution-target=*) CONTRIB_ARG=${a#--contribution-target=}; CONTRIB_SET=1 ;;
+    --reason-code) want_value='reason-code' ;;
+    --reason-code=*) REASON_CODE=${a#--reason-code=}; REASON_CODE_SET=1 ;;
+    --capability-floor) want_value='capability-floor' ;;
+    --capability-floor=*) CAPABILITY_FLOOR=${a#--capability-floor=}; CAPABILITY_FLOOR_SET=1 ;;
+    --tooling-gap-item) want_value='tooling-gap-item' ;;
+    --tooling-gap-item=*) TOOLING_GAP_ITEM=${a#--tooling-gap-item=}; TOOLING_GAP_ITEM_SET=1 ;;
     *) POS+=("$a") ;;
   esac
 done
@@ -358,6 +395,18 @@ done
 [ "$MODE_SET" -eq 0 ] || [ -n "$MODE" ] || { echo "error: --mode requires a non-empty value" >&2; exit 1; }
 [ "$YOLO_SET" -eq 0 ] || [ -n "$YOLO" ] || { echo "error: --yolo requires a non-empty value" >&2; exit 1; }
 [ "$TRACEPARENT_SET" -eq 0 ] || [ -n "$TRACEPARENT_ARG" ] || { echo "error: --traceparent requires a non-empty value" >&2; exit 1; }
+[ "$REASON_CODE_SET" -eq 0 ] || [ -n "$REASON_CODE" ] || { echo "error: --reason-code requires a non-empty value" >&2; exit 1; }
+[ "$CAPABILITY_FLOOR_SET" -eq 0 ] || [ -n "$CAPABILITY_FLOOR" ] || { echo "error: --capability-floor requires a non-empty value" >&2; exit 1; }
+[ "$TOOLING_GAP_ITEM_SET" -eq 0 ] || [ -n "$TOOLING_GAP_ITEM" ] || { echo "error: --tooling-gap-item requires a non-empty value" >&2; exit 1; }
+# Each justification value becomes one line of state/<id>.meta, so a value that
+# is not one line is refused here, before anything downstream can read a forged
+# key line as authority (bin/fm-reasoning-lib.sh).
+for justification_flag in "reason-code=$REASON_CODE" "capability-floor=$CAPABILITY_FLOOR" "tooling-gap-item=$TOOLING_GAP_ITEM"; do
+  fm_justification_value_recordable "${justification_flag#*=}" || {
+    echo "error: $FM_REASON_TOKEN_VALUE_MALFORMED: --${justification_flag%%=*} must be a single line without control characters; each justification field is one line of state/<id>.meta and a newline would forge further key lines in it" >&2
+    exit 1
+  }
+done
 # A parent-delivered carrier replaces this home's own resolution, so it is
 # refused unless it is a secondmate spawn carrying a strictly valid W3C value.
 # Nothing else may reach the pane's TRACEPARENT export.
@@ -421,6 +470,90 @@ else
       echo "error: --yolo applies only to ship spawns; a scout delivers a report and a secondmate records its own fixed posture" >&2
       exit 1
     }
+  fi
+fi
+
+# Agent-justification record (bin/fm-reasoning-lib.sh). This spawn is the last
+# gate before an agent turn exists, so it is where the record has to be made:
+# why was an agent necessary here, in a vocabulary closed enough to count.
+#
+# Scoped to TASK dispatches. A --secondmate spawn provisions a standing home
+# rather than dispatching a task - AGENTS.md section 10 keeps a secondmate out
+# of the backlog for the same reason - and the enum was derived from task
+# invocations, so demanding one of its codes for a provisioning action would
+# manufacture exactly the rubber-stamp answer the enum exists to prevent. Its
+# meta carries none of these fields, and an absent field reads as unknown.
+if [ "$KIND" = secondmate ]; then
+  [ "$REASON_CODE_SET" -eq 0 ] || {
+    echo "error: $FM_REASON_TOKEN_REFUSED: --reason-code applies to ship and scout dispatches; a --secondmate spawn provisions a standing home rather than dispatching a task" >&2
+    exit 1
+  }
+  [ "$CAPABILITY_FLOOR_SET" -eq 0 ] || {
+    echo "error: $FM_REASON_TOKEN_REFUSED: --capability-floor applies to ship and scout dispatches; a --secondmate spawn matches no dispatch rule" >&2
+    exit 1
+  }
+  [ "$TOOLING_GAP_ITEM_SET" -eq 0 ] || {
+    echo "error: $FM_REASON_TOKEN_GAP_ITEM_REFUSED: --tooling-gap-item applies only to a --reason-code $FM_REASON_CODE_TOOLING_GAP dispatch" >&2
+    exit 1
+  }
+else
+  [ "$REASON_CODE_SET" -eq 1 ] || {
+    echo "error: $FM_REASON_TOKEN_REQUIRED: every dispatch records why an agent turn was necessary; pass --reason-code <$(fm_reason_codes_oneline)>. Use $FM_REASON_CODE_TOOLING_GAP when the turn is only needed because a deterministic reader is broken or absent - it is not a reasoning code and files repair work instead." >&2
+    exit 1
+  }
+  fm_reason_code_known "$REASON_CODE" || {
+    echo "error: $FM_REASON_TOKEN_UNKNOWN: '$REASON_CODE' is not a reason code; the vocabulary is closed because free-text reasons cannot be counted. One of: $(fm_reason_codes_oneline)" >&2
+    exit 1
+  }
+
+  # TOOLING_GAP's certification. A broken reader is not legitimate reasoning
+  # demand, so the turn it forced is only recordable alongside OPEN repair work
+  # for the reader itself. Without this the code launders every unfixed tool
+  # into a permanent, uncounted category of "necessary" agent turns.
+  if [ "$REASON_CODE" = "$FM_REASON_CODE_TOOLING_GAP" ]; then
+    [ "$TOOLING_GAP_ITEM_SET" -eq 1 ] || {
+      echo "error: $FM_REASON_TOKEN_GAP_ITEM_REQUIRED: --reason-code $FM_REASON_CODE_TOOLING_GAP requires --tooling-gap-item <backlog-id> naming the OPEN work item that repairs the broken reader; file the repair first, then dispatch" >&2
+      exit 1
+    }
+    fm_backlog_item_open "$DATA" "$TOOLING_GAP_ITEM" || {
+      echo "error: $FM_REASON_TOKEN_GAP_ITEM_UNFILED: no open work item '$TOOLING_GAP_ITEM' in $DATA/backlog.md; a $FM_REASON_CODE_TOOLING_GAP dispatch is only recordable once the reader's repair is actually filed and still open" >&2
+      exit 1
+    }
+  else
+    [ "$TOOLING_GAP_ITEM_SET" -eq 0 ] || {
+      echo "error: $FM_REASON_TOKEN_GAP_ITEM_REFUSED: --tooling-gap-item applies only to a --reason-code $FM_REASON_CODE_TOOLING_GAP dispatch (got --reason-code $REASON_CODE)" >&2
+      exit 1
+    }
+  fi
+
+  # The floor is recorded verbatim from this home's own dispatch profiles, so
+  # the record cannot claim a capability band the routing config never defines.
+  if FLOOR_VOCAB=$(fm_capability_floor_vocabulary "$CONFIG"); then
+    if [ "$CAPABILITY_FLOOR_SET" -eq 0 ]; then
+      CAPABILITY_FLOOR=$(fm_capability_floor_default "$CONFIG" || true)
+      [ -n "$CAPABILITY_FLOOR" ] || CAPABILITY_FLOOR=$FM_CAPABILITY_FLOOR_UNCONFIGURED
+    fi
+    if [ "$CAPABILITY_FLOOR" != "$FM_CAPABILITY_FLOOR_UNCONFIGURED" ] \
+      && ! printf '%s\n' "$FLOOR_VOCAB" | grep -qxF -- "$CAPABILITY_FLOOR"; then
+      echo "error: $FM_REASON_TOKEN_FLOOR_UNKNOWN: '$CAPABILITY_FLOOR' is not a floor defined by $CONFIG/crew-dispatch.json. Defined: $(printf '%s\n' "$FLOOR_VOCAB" | tr '\n' ' ' | sed 's/ $//')" >&2
+      exit 1
+    fi
+  else
+    case $? in
+      2)
+        echo "error: $FM_REASON_TOKEN_FLOOR_UNVERIFIABLE: $CONFIG/crew-dispatch.json exists but its floors cannot be read (missing jq or malformed JSON), so a recorded floor cannot be checked against its source" >&2
+        exit 1
+        ;;
+      *)
+        # No dispatch config in this home: there is no floor vocabulary to
+        # match, so an explicit floor is refused rather than recorded unchecked.
+        [ "$CAPABILITY_FLOOR_SET" -eq 0 ] || {
+          echo "error: $FM_REASON_TOKEN_FLOOR_UNKNOWN: --capability-floor needs $CONFIG/crew-dispatch.json to define the floor vocabulary; this home configures no dispatch profiles" >&2
+          exit 1
+        }
+        CAPABILITY_FLOOR=$FM_CAPABILITY_FLOOR_UNCONFIGURED
+        ;;
+    esac
   fi
 fi
 
@@ -912,6 +1045,9 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   if [ "$KIND" = ship ] && [ "$CONTRIB_SET" -eq 1 ]; then
     shared_args+=(--contribution-target "$CONTRIB_ARG")
   fi
+  [ "$REASON_CODE_SET" -eq 0 ] || shared_args+=(--reason-code "$REASON_CODE")
+  [ "$CAPABILITY_FLOOR_SET" -eq 0 ] || shared_args+=(--capability-floor "$CAPABILITY_FLOOR")
+  [ "$TOOLING_GAP_ITEM_SET" -eq 0 ] || shared_args+=(--tooling-gap-item "$TOOLING_GAP_ITEM")
   for pair in "${POS[@]}"; do
     case "$pair" in
       *=*) : ;;
@@ -2505,6 +2641,16 @@ elif [ "$KIND" = scout ]; then
   YOLO=
 fi
 
+# Both remaining justification fields are DERIVED from state this spawn already
+# validated, never declared by the caller, so the record cannot disagree with
+# the contract it summarizes (bin/fm-reasoning-lib.sh).
+REASONING_REQUIRED=
+ESCALATION_POLICY=
+if [ "$KIND" != secondmate ]; then
+  REASONING_REQUIRED=$(fm_reasoning_required_for "$REASON_CODE")
+  ESCALATION_POLICY=$(fm_escalation_policy_for "$KIND" "$MODE" "$YOLO")
+fi
+
 # Resolve the optional default-off W3C trace context (bin/fm-trace-context-lib.sh,
 # docs/configuration.md): the one carrier both recorded in meta and injected into
 # the pane, so an observer reads exactly what the child receives. Empty only when
@@ -2578,6 +2724,13 @@ preserve_relaunch_meta() {
   [ -z "$SLOT_BASE" ] || echo "slot_base=$SLOT_BASE"
   [ -z "$BASE_STATE" ] || echo "contribution_target=${CONTRIB_TARGET:-unresolved}"
   [ -z "$BASE_STATE" ] || echo "base_state=$BASE_STATE"
+  # Agent-justification record. Written for every task dispatch; a --secondmate
+  # spawn provisions a home rather than dispatching a task and carries none.
+  [ -z "$REASONING_REQUIRED" ] || echo "reasoning_required=$REASONING_REQUIRED"
+  [ -z "$REASON_CODE" ] || echo "reason_code=$REASON_CODE"
+  [ -z "$CAPABILITY_FLOOR" ] || echo "capability_floor=$CAPABILITY_FLOOR"
+  [ -z "$ESCALATION_POLICY" ] || echo "escalation_policy=$ESCALATION_POLICY"
+  [ -z "$TOOLING_GAP_ITEM" ] || echo "tooling_gap_item=$TOOLING_GAP_ITEM"
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
