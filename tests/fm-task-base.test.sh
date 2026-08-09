@@ -323,7 +323,7 @@ test_spawn_records_both_references_and_places_the_slot_at_the_fleet_trunk() {
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" FM_FAKE_PANE_PATH="$wt" \
     PATH="$fakebin:$PATH" \
-    "$SPAWN" "$id" "$repo" --mode no-mistakes --yolo off 2>&1); status=$?
+    "$SPAWN" "$id" "$repo" --mode no-mistakes --yolo off --reason-code NL_RULE_CLASSIFICATION 2>&1); status=$?
   expect_code 0 "$status" "e2e: spawn should succeed (got: $out)"
 
   assert_grep "slot_base=$slot" "$home/state/$id.meta" \
@@ -366,7 +366,7 @@ test_scout_gets_a_read_base_and_no_contribution_target() {
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" FM_FAKE_PANE_PATH="$wt" \
     PATH="$fakebin:$PATH" \
-    "$SPAWN" "$id" "$repo" --scout 2>&1); status=$?
+    "$SPAWN" "$id" "$repo" --scout --reason-code NL_RULE_CLASSIFICATION 2>&1); status=$?
   expect_code 0 "$status" "scout: spawn should succeed (got: $out)"
   assert_grep "slot_base=$slot" "$home/state/$id.meta" \
     "scout: metadata must record the commit the report cites against"
@@ -381,7 +381,7 @@ test_scout_gets_a_read_base_and_no_contribution_target() {
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" PATH="$fakebin:$PATH" \
-    "$SPAWN" scout-refuse-d4 "$repo" --scout --contribution-target "$slot" 2>&1); status=$?
+    "$SPAWN" scout-refuse-d4 "$repo" --scout --contribution-target "$slot" --reason-code NL_RULE_CLASSIFICATION 2>&1); status=$?
   [ "$status" -ne 0 ] || fail "scout: a contribution target must be refused on a scout"
   assert_contains "$out" "applies only to ship spawns" "scout: the refusal must say why"
   pass "fm-spawn: a scout records a read base with no contribution target and still lands on the fleet trunk"
@@ -405,7 +405,7 @@ test_spawn_refuses_a_brief_that_names_a_different_pair() {
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" PATH="$fakebin:$PATH" \
-    "$SPAWN" "$id" "$repo" --mode no-mistakes --yolo off 2>&1); status=$?
+    "$SPAWN" "$id" "$repo" --mode no-mistakes --yolo off --reason-code NL_RULE_CLASSIFICATION 2>&1); status=$?
   [ "$status" -ne 0 ] || fail "mismatch: spawn should refuse a brief naming a different pair"
   assert_contains "$out" "base mismatch for $id" "mismatch: the refusal must name the drift"
   assert_absent "$home/state/$id.meta" "mismatch: a refused spawn wrote task metadata"
@@ -432,7 +432,7 @@ test_local_only_spawn_uses_the_local_trunk_as_its_contribution_target() {
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" FM_FAKE_PANE_PATH="$wt" \
     PATH="$fakebin:$PATH" \
-    "$SPAWN" "$id" "$repo" --mode local-only --yolo off 2>&1); status=$?
+    "$SPAWN" "$id" "$repo" --mode local-only --yolo off --reason-code NL_RULE_CLASSIFICATION 2>&1); status=$?
   expect_code 0 "$status" "local-only: spawn should succeed (got: $out)"
   assert_grep "contribution_target=$slot" "$home/state/$id.meta" \
     "local-only: contribution target must be the local trunk"
@@ -460,7 +460,7 @@ test_ship_without_a_required_base_contract_is_refused() {
   out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
     FM_DATA_OVERRIDE="$home/data" FM_PROJECTS_OVERRIDE="$home/projects" \
     FM_CONFIG_OVERRIDE="$home/config" FM_SPAWN_NO_GUARD=1 PATH="$fakebin:$PATH" \
-    "$SPAWN" "$id" "$repo" --mode no-mistakes --yolo off 2>&1); status=$?
+    "$SPAWN" "$id" "$repo" --mode no-mistakes --yolo off --reason-code NL_RULE_CLASSIFICATION 2>&1); status=$?
   [ "$status" -ne 0 ] || fail "missing-contract: a distinct-base ship brief without a contract must be refused"
   assert_contains "$out" "$id brief records no base contract line" \
     "missing-contract: the refusal must name the task and missing contract"
@@ -480,7 +480,7 @@ test_ship_without_a_required_base_contract_is_refused() {
     FM_DATA_OVERRIDE="$home/data" FM_PROJECTS_OVERRIDE="$home/projects" \
     FM_CONFIG_OVERRIDE="$home/config" FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
     FM_FAKE_PANE_PATH="$wt" PATH="$fakebin:$PATH" \
-    "$SPAWN" "$id" "$repo" --mode no-mistakes --yolo off 2>&1); status=$?
+    "$SPAWN" "$id" "$repo" --mode no-mistakes --yolo off --reason-code NL_RULE_CLASSIFICATION 2>&1); status=$?
   expect_code 0 "$status" "missing-contract: a matching contract must still pass (got: $out)"
   pass "fm-spawn: a distinct-base ship requires a matching base contract before launch"
 }
@@ -502,7 +502,7 @@ test_scout_refuses_a_mismatched_base_contract() {
   out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
     FM_DATA_OVERRIDE="$home/data" FM_PROJECTS_OVERRIDE="$home/projects" \
     FM_CONFIG_OVERRIDE="$home/config" FM_SPAWN_NO_GUARD=1 PATH="$fakebin:$PATH" \
-    "$SPAWN" "$id" "$repo" --scout 2>&1); status=$?
+    "$SPAWN" "$id" "$repo" --scout --reason-code NL_RULE_CLASSIFICATION 2>&1); status=$?
   [ "$status" -ne 0 ] || fail "scout-mismatch: a false citation base must be refused"
   assert_contains "$out" "base mismatch for $id" \
     "scout-mismatch: the refusal must name the false base claim"
@@ -531,7 +531,7 @@ test_batch_forwards_explicit_base_overrides() {
     FM_DATA_OVERRIDE="$home/data" FM_PROJECTS_OVERRIDE="$home/projects" \
     FM_CONFIG_OVERRIDE="$home/config" FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
     FM_FAKE_PANE_PATH="$wt" PATH="$fakebin:$PATH" \
-    "$SPAWN" "$id=$repo" --mode no-mistakes --yolo off \
+    "$SPAWN" "$id=$repo" --mode no-mistakes --yolo off --reason-code NL_RULE_CLASSIFICATION \
     --slot-base "$slot" --contribution-target "$contrib" 2>&1); status=$?
   expect_code 0 "$status" "batch-overrides: forwarded overrides must pass (got: $out)"
   assert_grep "slot_base=$slot" "$home/state/$id.meta" \

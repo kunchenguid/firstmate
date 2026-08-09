@@ -1,13 +1,20 @@
 {
+  "_floors": {
+    "F-FAST": "Narrow mechanical work: the cheapest profile that can still finish the edit.",
+    "F-GEN": "Ordinary implementation and investigation work with a normal amount of ambiguity.",
+    "F-DEEP": "Work that needs many moving parts held at once, or that is risky to get wrong."
+  },
   "rules": [
     {
       "when": "The task depends on fresh news, current events, live public facts, or recent market and product changes.",
       "use": { "harness": "grok" },
+      "floor": "F-GEN",
       "why": "Grok is the preferred dispatch when current web-connected context is central to the work."
     },
     {
       "when": "The task is a trivial mechanical edit such as a rote rename, formatting sweep, targeted typo fix, or simple file gathering.",
       "use": { "harness": "claude", "model": "haiku", "effort": "low" },
+      "floor": "F-FAST",
       "why": "Use the cheapest fast profile when the task is narrow and low ambiguity."
     },
     {
@@ -16,12 +23,13 @@
         { "harness": "claude", "model": "claude-sonnet-5", "effort": "high" },
         { "harness": "codex", "model": "gpt-5.5", "effort": "high" }
       ],
+      "floor": "F-DEEP",
       "why": "Use a strong coding profile for big, ambiguous work; resolve the alternatives through quota-array-dispatch."
     }
   ],
   "default": [
-    { "harness": "codex", "model": "gpt-5.5", "effort": "medium" },
-    { "harness": "pi", "model": "anthropic/claude-sonnet-5", "effort": "medium" }
+    { "harness": "codex", "model": "gpt-5.5", "effort": "medium", "floor": "F-GEN" },
+    { "harness": "pi", "model": "anthropic/claude-sonnet-5", "effort": "medium", "floor": "F-GEN" }
   ],
   "_scheduling": {
     "_note": "Optional. Delete this whole block to leave fleet admission control inert.",

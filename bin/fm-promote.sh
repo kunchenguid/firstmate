@@ -12,6 +12,8 @@
 # read the scout's report (AGENTS.md section 7); data/projects.md holds the
 # captain's standing posture as context, and this script never looks it up.
 # no-mistakes-prod-only is a registry policy rather than a task mode and is refused.
+# Promotion also recomputes the derived escalation_policy the spawn recorded, so a
+# promoted task never keeps a scout's report-only posture (bin/fm-reasoning-lib.sh).
 # Usage: fm-promote.sh <task-id> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off>
 set -eu
 
@@ -19,6 +21,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+# shellcheck source=bin/fm-reasoning-lib.sh
+. "$SCRIPT_DIR/fm-reasoning-lib.sh"
 
 MODE=
 YOLO=
@@ -74,12 +78,20 @@ META="$STATE/$ID.meta"
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
 grep -qx 'kind=scout' "$META" || { echo "error: task $ID is not a scout task (kind=scout not in meta)" >&2; exit 1; }
 
+# escalation_policy is DERIVED from kind plus the delivery contract, so a
+# promotion that changes the contract has to recompute it or the meta keeps the
+# scout's report-only posture on a task that can now reach a merge gate. The
+# reason code is left as recorded: the same agent continues, and why its turn
+# was necessary did not change (bin/fm-reasoning-lib.sh).
+ESCALATION_POLICY=$(fm_escalation_policy_for ship "$MODE" "$YOLO")
+
 TMP="$META.tmp"
-grep -v -e '^kind=' -e '^mode=' -e '^yolo=' "$META" > "$TMP"
+grep -v -e '^kind=' -e '^mode=' -e '^yolo=' -e '^escalation_policy=' "$META" > "$TMP"
 {
   echo "kind=ship"
   echo "mode=$MODE"
   echo "yolo=$YOLO"
+  echo "escalation_policy=$ESCALATION_POLICY"
 } >> "$TMP"
 mv "$TMP" "$META"
 
