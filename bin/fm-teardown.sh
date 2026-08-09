@@ -1000,17 +1000,6 @@ backlog_refresh_reminder() {
   fi
 }
 
-# Successful cleanup is admission control's primary release trigger: capacity is
-# freed when a worker actually goes away, not when a task reports done. This adds
-# one deterministic re-examination step to the existing backlog re-scan seam and
-# stays silent for every home that has not configured an admission policy.
-admission_release_reminder() {
-  local state
-  [ "$ROLE" = secondmate ] && return 0
-  state=$(fm_admission_state "$(fm_admission_config_file "$CONFIG")")
-  [ "$state" = active ] || return 0
-  printf '%s\n' "Admission: $ID released its worker. Run bin/fm-admission.sh to recompute the fleet band before releasing any load-held request, then admit at most one at a time, re-evaluating between each."
-}
 
 
 path_is_ancestor_of() {
@@ -2677,4 +2666,4 @@ fi
 echo "teardown $ID complete (window $T, worktree $WT)"
 report_pending_landing
 backlog_refresh_reminder
-admission_release_reminder
+fm_admission_release_reminder "$CONFIG" "$ID" "$ROLE"
