@@ -10,6 +10,11 @@ metadata:
 
 Give the captain a concise session-only recap without gathering fresh state.
 
+0. Before anything else, check whether this session has already taken the helm: a `SESSION START` digest for this home must be visible in the session history.
+   If it is not, run `bin/fm-session-start.sh` once and read its digest before producing any recap.
+   Run-tier harness surfaces run it automatically at session open, so this step is normally already satisfied and costs one glance; it is the safety net for surfaces that cannot run it on a hook, and for any path where a skill would otherwise act first.
+   Taking the helm always precedes this skill's own logic, and the digest it produces is operational input, never a captain message or a recap event.
+
 1. Inspect only conversation or session history already visible to the current first mate.
 2. Find the most recent real captain-authored message before the current `/ahoy` invocation.
    A captain boundary is an ordinary user-role message unless it matches one of the narrow operational exclusions below.
@@ -32,7 +37,7 @@ Give the captain a concise session-only recap without gathering fresh state.
    A later unrelated captain message establishes a recap boundary but does not close an earlier decision.
    Treat a decision as closed only when a later visible response substantively resolves it, chooses an option, declines it, grants or denies the requested approval, or otherwise directly addresses that decision.
    Include every visibly supported open decision once, and deduplicate by the decision's substance when the ordinary interval recap already represents it or its wording differs.
-6. The normal recap branch is session-history-only.
+6. The normal recap branch is session-history-only, apart from the step 0 helm check.
    Do not call Bearings, shell commands, fleet snapshots, status readers, GitHub or browser APIs, tools, or file reads or writes.
    Create no report, persist nothing, and do not guess current live state beyond the last visible event.
 7. If no ordinary events occurred after the previous captain message but an older visibly open decision exists, report that decision instead of claiming nothing happened.

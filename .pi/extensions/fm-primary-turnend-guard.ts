@@ -4,7 +4,10 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { encodeFirstmateOperationalInput } from "./lib/fm-operational-input.ts";
+import {
+  classifyFirstmateCurrentOperationalText,
+  encodeFirstmateOperationalInput,
+} from "./lib/fm-operational-input.ts";
 
 let guardFollowupActive = false;
 
@@ -55,10 +58,68 @@ function markLoaded(): void {
   writeFileSync(marker, `${extensionVersion}\n${process.pid}\n`);
 }
 
-function runSessionstartNudge(): string {
-  const result = spawnSync(`${root}/bin/fm-sessionstart-nudge.sh`, [], { encoding: "utf8" });
-  if (result.status !== 0) return "";
-  return result.stdout.trim();
+// Pi's session_start reasons are startup | reload | new | resume | fork, and a
+// separate session_compact event fires after a compaction. "new" is Pi's /clear
+// (a fresh session in the SAME process, so the fleet lock is still ours), while
+// reload, resume, and fork all keep prior context. bin/fm-sessionstart-run.sh
+// owns what each source means; this maps Pi's vocabulary onto its --source
+// names and injects whatever it prints.
+const sessionstartDeliveryBytes = 512 * 1024;
+const sessionstartTruncatedMarker =
+  "\n\nPI SESSION-START DELIVERY TRUNCATED - the digest exceeded 512 KiB. " +
+  "Treat omitted context as unread and inspect the named files directly before acting on it.";
+
+function runSessionstartHook(source: string): Promise<string> {
+  return new Promise((resolveResult) => {
+    const child = spawn(`${root}/bin/fm-sessionstart-run.sh`, ["--source", source], {
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    const chunks: Buffer[] = [];
+    let retainedBytes = 0;
+    let truncated = false;
+    child.stdout.on("data", (chunk: Buffer) => {
+      if (retainedBytes >= sessionstartDeliveryBytes) {
+        truncated = true;
+        return;
+      }
+      const remaining = sessionstartDeliveryBytes - retainedBytes;
+      const retained = chunk.length <= remaining ? chunk : chunk.subarray(0, remaining);
+      chunks.push(retained);
+      retainedBytes += retained.length;
+      if (retained.length !== chunk.length) truncated = true;
+    });
+    child.on("error", () => resolveResult(""));
+    child.on("close", (code) => {
+      if (code !== 0) {
+        resolveResult("");
+        return;
+      }
+      const raw = Buffer.concat(chunks).toString("utf8").trim();
+      resolveResult(truncated ? `${raw}${sessionstartTruncatedMarker}` : raw);
+    });
+  });
+}
+
+async function injectSessionstart(pi: ExtensionAPI, source: string): Promise<void> {
+  const raw = await runSessionstartHook(source);
+  if (!raw) return;
+  try {
+    // Pi is the only adapter that injects a MESSAGE rather than hook stdout, so
+    // whatever it injects must carry operational provenance or the Ahoy skill
+    // would have to guess whether it was captain-authored. The wrapper already
+    // returns an encoded nudge on a context-preserving open, so only an
+    // unencoded digest needs the marker added here.
+    const content = classifyFirstmateCurrentOperationalText(raw)
+      ? raw
+      : encodeFirstmateOperationalInput("session-start", raw);
+    pi.sendMessage({
+      customType: "firstmate-sessionstart-nudge",
+      content,
+      display: false,
+      details: { kind: "session-start" },
+    });
+  } catch {
+  }
 }
 
 function runGuard(): Promise<{ code: number; stderr: string }> {
@@ -106,20 +167,18 @@ function runCdCheck(command: string): Promise<{ code: number; stderr: string }> 
 }
 
 export default function (pi: ExtensionAPI) {
-  pi.on?.("session_start", (event) => {
+  pi.on?.("session_start", async (event) => {
     const reason = String((event as { reason?: unknown }).reason ?? "");
-    const nudge = ["startup", "new", "resume"].includes(reason) ? runSessionstartNudge() : "";
+    const source = { startup: "startup", new: "clear", resume: "resume", fork: "fork" }[reason];
     markLoaded();
-    if (!nudge) return;
-    try {
-      pi.sendMessage({
-        customType: "firstmate-sessionstart-nudge",
-        content: nudge,
-        display: false,
-        details: { kind: "session-start" },
-      });
-    } catch {
-    }
+    if (!source) return;
+    await injectSessionstart(pi, source);
+  });
+
+  // Pi's compaction equivalent. The digest is what a compacted session has just
+  // lost, so re-emitting it here is the point rather than a side effect.
+  pi.on?.("session_compact", async () => {
+    await injectSessionstart(pi, "compact");
   });
 
   pi.on("tool_call", async (event) => {

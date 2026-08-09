@@ -4,7 +4,8 @@ description: >-
   Agent-only procedure for registered process-to-event sources and their wakes.
   Use before arming a long-polling source firstmate owns, and on any
   `procevent <adapter> <source-id> <sequence>` check wake.
-  Owns the arming commands, the durable result read, the handled
+  Owns the arming commands, the durable result read, which wakes must be
+  routed to their adapter instead of acknowledged generically, the handled
   acknowledgement contract, the one-owner rule, the precise durability
   boundary, and the Lavish adapter's loss limitation.
 user-invocable: false
@@ -28,7 +29,11 @@ For a Lavish review artifact:
 bin/fm-procevent-lavish.sh arm <artifact.html>
 ```
 
-`bin/fm-procevent.sh --help` and `bin/fm-procevent-lavish.sh --help` own the exact commands and flags.
+A configured remote secondmate reply source is armed and handled through `bin/fm-procevent-remote-reply.sh`.
+Its header owns exact commands, while the adapter owns cursor continuity, validated deduplicated status ingest, path-confined document fetch, acknowledgement, and re-arming after a good delta.
+A continuity break is escalated once and stays unarmed until an operator deliberately rebases it.
+
+`bin/fm-procevent.sh --help`, `bin/fm-procevent-lavish.sh --help`, and `bin/fm-procevent-remote-reply.sh --help` own the exact commands and flags.
 
 Two rules the commands cannot enforce for you:
 
@@ -39,6 +44,15 @@ Two rules the commands cannot enforce for you:
 
 `procevent <adapter> <source-id> <sequence>`
 : The named durable result is waiting at `state/procevent-inbox/<source-id>.<sequence>.result`. Read that exact result; separate wakes identify later results independently.
+: **When the adapter owns applying the result, run the adapter, not the generic acknowledgement below.** The `<adapter>` field of the wake decides this, and `remote-reply` is such an adapter: a captured delta is applied only by
+  ```sh
+  bin/fm-procevent-remote-reply.sh handle <secondmate-id> <sequence> <result-file>
+  ```
+  Here `<secondmate-id>` is the `<source-id>` with its `remote-reply-` prefix removed.
+  The runner normally applies the result on capture, but this call is the required idempotent confirmation when the wake remains unacknowledged.
+  Never acknowledge a `remote-reply` wake through the generic command, because only the adapter ingests the delta, acknowledges it, and re-arms its source.
+  Use the generic path below only after fully handling a result whose adapter has no applying command.
+  [`docs/configuration.md`](../../../docs/configuration.md#process-to-event-sources-stateprocevent) owns the automatic-application contract and its failure boundary.
 : A captured result with no durable handled acknowledgement stays eligible for bounded re-announcement on the existing wake queue - across any number of drains and firstmate restarts, not only the crash window right after capture - until it is explicitly acknowledged. Once you have fully handled a result, durably record it:
   ```sh
   bin/fm-procevent.sh handled <source-id> <sequence>
@@ -54,7 +68,8 @@ Two rules the commands cannot enforce for you:
 Supported by tests:
 
 - output that reached the runner is stored atomically at mode `0600` **before** any event referencing it is published;
-- proactive delivery and adapter-owned terminal retirement follow the operating contract in [`docs/configuration.md`](../../../docs/configuration.md);
+- the remote-reply adapter reads its append-only source non-destructively from an offset plus prefix hash, so a pre-capture retry can derive the same bytes again, while source truncation or replacement is detected rather than silently rebased;
+- proactive delivery, adapter-owned terminal retirement, and adapter-owned automatic application follow the operating contract in [`docs/configuration.md`](../../../docs/configuration.md);
 - a durably captured result with no handled acknowledgement remains eligible for bounded re-announcement across any number of drains and restarts, and repeat wakes retain the same source and sequence for deduplication;
 - the handled acknowledgement is generation-keyed to the exact source and sequence, private, path-safe, durable, and idempotent, and is the only thing that stops re-announcement;
 - one identity-matched owner per canonical source, across homes that share one underlying source store;
@@ -67,7 +82,8 @@ Supported by tests:
 
 The currently published `lavish-axi poll` destructively clears feedback before returning it.
 A result lost after that clearing and before the runner reads the process output is unrecoverable, and no firstmate wrapper can close that source-side window.
-Say this plainly wherever the behavior is described.
+The remote-reply adapter removes that particular pre-capture window by never consuming its source, but it cannot recover bytes truly lost from the remote log itself.
+Say these boundaries plainly wherever the behavior is described.
 
 ## Talking to the captain about it
 

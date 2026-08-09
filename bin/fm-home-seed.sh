@@ -16,8 +16,8 @@
 #       refuses a home with project clones or project-registry entries, so it
 #       never converts populated homes in place. The charter brief
 #       is copied to data/charter.md, newly cloned no-mistakes projects are
-#       initialized, an ignored .fm-secondmate-home identity marker is written, and
-#       data/secondmates.md is updated.
+#       initialized, an ignored .fm-secondmate-parent binding is published before
+#       the .fm-secondmate-home identity marker, and data/secondmates.md is updated.
 #       Seeding is transactional: on validation, clone, init, or registry failure,
 #       generated briefs, new homes, new project clones, and registry edits are
 #       rolled back. Treehouse-acquired homes are returned only when the rollback
@@ -37,56 +37,22 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
+STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 REG="$DATA/secondmates.md"
 SUB_HOME_MARKER=".fm-secondmate-home"
+SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 # shellcheck source=bin/fm-secondmate-registry-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
+# shellcheck source=bin/fm-secondmate-parent-lib.sh
+. "$SCRIPT_DIR/fm-secondmate-parent-lib.sh"
+# shellcheck source=bin/fm-secondmate-charter-lib.sh
+. "$SCRIPT_DIR/fm-secondmate-charter-lib.sh"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 
 usage() {
   echo "usage: fm-home-seed.sh <id> <home|-> {<project>...|--no-projects}" >&2
   echo "       fm-home-seed.sh validate" >&2
-}
-
-normalize_registry_text() {
-  awk '
-    {
-      gsub(/[;()]/, " ")
-      gsub(/[[:space:]]+/, " ")
-      sub(/^ /, "")
-      sub(/ $/, "")
-      if ($0 != "") {
-        out = out (out == "" ? "" : " ") $0
-      }
-    }
-    END { print out }
-  '
-}
-
-brief_section_text() {
-  local brief=$1 heading=$2
-  awk -v heading="# $heading" '
-    $0 == heading { in_section=1; next }
-    in_section && /^# / { exit }
-    in_section { print }
-  ' "$brief"
-}
-
-registry_summary_for_brief() {
-  local brief=$1
-  if [ -n "${FM_SECONDMATE_CHARTER:-}" ]; then
-    printf '%s\n' "$FM_SECONDMATE_CHARTER" | normalize_registry_text
-  else
-    brief_section_text "$brief" "Charter" | normalize_registry_text
-  fi
-}
-
-registry_scope_for_brief() {
-  local brief=$1
-  if [ -n "${FM_SECONDMATE_SCOPE:-}" ]; then
-    printf '%s\n' "$FM_SECONDMATE_SCOPE" | normalize_registry_text
-  else
-    brief_section_text "$brief" "Routing scope" | normalize_registry_text
-  fi
 }
 
 validate_registry_home_text() {
@@ -321,13 +287,17 @@ validate_operational_dirs() {
 validate_seed_leaf_files() {
   local home=$1 label path abs_home abs_path
   abs_home=$(resolved_path "$home")
-  for label in "data/projects.md" "data/charter.md" "$SUB_HOME_MARKER"; do
+  for label in "data/projects.md" "data/charter.md" "$SUB_HOME_MARKER" "$SUB_HOME_PARENT_MARKER"; do
     path="$home/$label"
     if [ -L "$path" ]; then
       echo "error: secondmate leaf file must not be a symlink: $path" >&2
       return 1
     fi
     [ -e "$path" ] || continue
+    if [ ! -f "$path" ]; then
+      echo "error: secondmate leaf file must be a regular file: $path" >&2
+      return 1
+    fi
     abs_path=$(resolved_path "$path")
     case "$abs_path" in
       "$abs_home"/*) ;;
@@ -337,6 +307,21 @@ validate_seed_leaf_files() {
         ;;
     esac
   done
+}
+
+validate_existing_parent_binding() {
+  local home=$1 record recorded_parent requested_parent
+  record="$home/$SUB_HOME_PARENT_MARKER"
+  [ -f "$record" ] && [ ! -L "$record" ] || return 0
+  fm_secondmate_parent_record_parse "$record" || return 0
+  [ "$FM_SECONDMATE_PARENT_ROUTE" = local ] || return 0
+
+  recorded_parent=$(resolved_path "$FM_SECONDMATE_PARENT_HOME")
+  requested_parent=$(resolved_path "$FM_HOME")
+  [ "$recorded_parent" = "$requested_parent" ] && return 0
+  printf 'error: secondmate home is bound to parent %s, not requested parent %s\n' \
+    "$recorded_parent" "$requested_parent" >&2
+  return 1
 }
 
 validate_project_destination() {
@@ -517,6 +502,20 @@ EOF
 
 SEED_ROLLBACK_ACTIVE=0
 SEED_COMMITTED=0
+SEED_REGISTRY_LOCK=
+SEED_REGISTRY_LOCK_HELD=0
+
+seed_registry_lock_release() {
+  if [ "$SEED_REGISTRY_LOCK_HELD" -eq 1 ]; then
+    fm_lock_release "$SEED_REGISTRY_LOCK"
+    SEED_REGISTRY_LOCK_HELD=0
+  fi
+}
+
+seed_exit_cleanup() {
+  seed_rollback
+  seed_registry_lock_release
+}
 SEED_HOME=
 SEED_HOME_ACQUIRED=0
 SEED_HOME_CREATED=0
@@ -530,6 +529,7 @@ SEED_PARENT_BRIEF_DIR_CREATED=0
 SEED_SUB_REG_EXISTED=0
 SEED_CHARTER_EXISTED=0
 SEED_MARKER_EXISTED=0
+SEED_PARENT_MARKER_EXISTED=0
 
 restore_seed_file() {
   local existed=$1 backup=$2 path=$3
@@ -649,6 +649,7 @@ seed_rollback() {
       fi
       if [ -n "${SEED_BACKUP_DIR:-}" ] && [ "${SEED_HOME_BACKED_UP:-0}" = 1 ]; then
         restore_seed_file "$SEED_MARKER_EXISTED" "$SEED_BACKUP_DIR/marker" "$SEED_HOME/$SUB_HOME_MARKER"
+        restore_seed_file "$SEED_PARENT_MARKER_EXISTED" "$SEED_BACKUP_DIR/parent-marker" "$SEED_HOME/$SUB_HOME_PARENT_MARKER"
         restore_seed_file "$SEED_CHARTER_EXISTED" "$SEED_BACKUP_DIR/charter.md" "$SEED_HOME/data/charter.md"
         restore_seed_file "$SEED_SUB_REG_EXISTED" "$SEED_BACKUP_DIR/sub-projects.md" "$SEED_HOME/data/projects.md"
       fi
@@ -822,6 +823,12 @@ seed_home() {
     [ $# -gt 0 ] || { echo "error: secondmate needs at least one project, or --no-projects for a project-less home" >&2; return 1; }
   fi
 
+  mkdir -p "$STATE" || return 1
+  SEED_REGISTRY_LOCK=$(secondmate_registry_lock_path "$STATE")
+  fm_lock_acquire_wait "$SEED_REGISTRY_LOCK" || return 1
+  SEED_REGISTRY_LOCK_HELD=1
+  trap seed_exit_cleanup EXIT
+
   validate_registry
   for project in "$@"; do
     validate_seed_project "$project"
@@ -844,7 +851,6 @@ seed_home() {
   SEED_SUB_REG_EXISTED=0
   SEED_CHARTER_EXISTED=0
   SEED_MARKER_EXISTED=0
-  trap seed_rollback EXIT
   if [ -f "$REG" ]; then
     SEED_PARENT_REG_EXISTED=1
     cp "$REG" "$SEED_BACKUP_DIR/parent-secondmates.md"
@@ -868,6 +874,7 @@ seed_home() {
   validate_home_assignment "$id" "$home"
   validate_operational_dirs "$home" || return 1
   validate_seed_leaf_files "$home" || return 1
+  validate_existing_parent_binding "$home" || return 1
   if [ "$no_projects" -eq 1 ]; then
     refuse_populated_projectless_home "$home" || return 1
     if [ -f "$SEED_PARENT_BRIEF" ]; then
@@ -886,6 +893,10 @@ seed_home() {
   if [ -f "$home/$SUB_HOME_MARKER" ]; then
     SEED_MARKER_EXISTED=1
     cp "$home/$SUB_HOME_MARKER" "$SEED_BACKUP_DIR/marker"
+  fi
+  if [ -f "$home/$SUB_HOME_PARENT_MARKER" ]; then
+    SEED_PARENT_MARKER_EXISTED=1
+    cp "$home/$SUB_HOME_PARENT_MARKER" "$SEED_BACKUP_DIR/parent-marker"
   fi
   SEED_HOME_BACKED_UP=1
 
@@ -935,10 +946,23 @@ seed_home() {
   cp "$SEED_PARENT_BRIEF" "$home/data/charter.md"
 
   projects_csv=$(join_projects "$@")
-  printf '%s\n' "$id" > "$home/$SUB_HOME_MARKER"
+  # Durable record of this home's route to its parent, written once here next
+  # to the identity marker: the cleanup check in fm-teardown.sh reads it so a
+  # restart that drops the launch-time FM_PUBLIC_FOLLOWUP_PRIMARY_HOME prefix
+  # can still resolve the real parent instead of silently treating its relay
+  # as inactive.
+  {
+    printf 'schema=fm-secondmate-parent.v1\n'
+    printf 'route=local\n'
+    printf 'parent_home=%s\n' "$(resolved_path "$FM_HOME")"
+  } > "$home/$SUB_HOME_PARENT_MARKER.tmp.$$"
+  mv -f -- "$home/$SUB_HOME_PARENT_MARKER.tmp.$$" "$home/$SUB_HOME_PARENT_MARKER"
+  printf '%s\n' "$id" > "$home/$SUB_HOME_MARKER.tmp.$$"
+  mv -f -- "$home/$SUB_HOME_MARKER.tmp.$$" "$home/$SUB_HOME_MARKER"
   write_registry "$id" "$home" "$projects_csv" "$SEED_PARENT_BRIEF"
   validate_registry
   SEED_COMMITTED=1
+  seed_registry_lock_release
   trap - EXIT
   rm -rf -- "$SEED_BACKUP_DIR"
   printf 'home=%s\n' "$home"

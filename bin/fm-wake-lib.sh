@@ -78,8 +78,10 @@ fm_path_age() {
   echo $(( $(date +%s) - m ))
 }
 
+FM_WATCHER_MATCHED_IDENTITY=
 fm_watcher_lock_matches_pid() {
   local state=$1 watch_path=$2 pid=$3 home=${4:-$FM_HOME} lockdir lock_home lock_path lock_identity current_identity
+  FM_WATCHER_MATCHED_IDENTITY=
   lockdir="$state/.watch.lock"
   lock_home=$(cat "$lockdir/fm-home" 2>/dev/null || true)
   lock_path=$(cat "$lockdir/watcher-path" 2>/dev/null || true)
@@ -88,22 +90,104 @@ fm_watcher_lock_matches_pid() {
   [ "$lock_path" = "$watch_path" ] || return 1
   [ -n "$lock_identity" ] || return 1
   current_identity=$(fm_pid_identity "$pid") || return 1
-  [ "$current_identity" = "$lock_identity" ]
+  [ "$current_identity" = "$lock_identity" ] || return 1
+  FM_WATCHER_MATCHED_IDENTITY=$lock_identity
 }
 
 FM_WATCHER_HEALTHY_PID=
+FM_WATCHER_HEALTHY_IDENTITY=
 fm_watcher_healthy() {
-  local state=$1 watch_path=$2 grace=${3:-${FM_GUARD_GRACE:-300}} home=${4:-$FM_HOME} lockdir beat pid age
+  local state=$1 watch_path=$2 grace=${3:-${FM_GUARD_GRACE:-300}} home=${4:-$FM_HOME} lockdir beat pid identity age
   FM_WATCHER_HEALTHY_PID=
+  FM_WATCHER_HEALTHY_IDENTITY=
   lockdir="$state/.watch.lock"
   beat="$state/.last-watcher-beat"
   pid=$(cat "$lockdir/pid" 2>/dev/null || true)
   fm_pid_alive "$pid" || return 1
   fm_watcher_lock_matches_pid "$state" "$watch_path" "$pid" "$home" || return 1
+  identity=$FM_WATCHER_MATCHED_IDENTITY
   age=$(fm_path_age "$beat")
   [ "$age" -lt "$grace" ] || return 1
   # shellcheck disable=SC2034 # Read by callers after fm_watcher_healthy returns.
   FM_WATCHER_HEALTHY_PID=$pid
+  # shellcheck disable=SC2034 # Read by callers after fm_watcher_healthy returns.
+  FM_WATCHER_HEALTHY_IDENTITY=$identity
+  return 0
+}
+
+# fm_watcher_healthy above is the PID-STRICT primitive: true only when a live,
+# identity-matched watcher PROCESS holds this home's lock with a fresh beacon. The
+# arm layer (bin/fm-watch-arm.sh, bin/fm-claude-stop-autoarm.sh) needs exactly
+# that - it decides whether to start, attach to, or replace a real watcher
+# process, so a leftover beacon must never satisfy it. bin/fm-turnend-guard.sh
+# also keeps this strict check because it fires at the turn boundary where the
+# auto-arm brings a fresh watcher up. The pull warning (bin/fm-guard.sh) fires
+# mid-turn, where the auto-arm model runs no watcher at all, so it wants a
+# different, model-aware question:
+
+# fm_supervision_model
+# Print the supervision model of this home's PRIMARY harness:
+#   autoarm     Claude Stop-hook auto-arm: the watcher is armed at each turn end
+#               and exits on its wake, so it runs only BETWEEN turns. Mid-turn a
+#               fresh beacon with no live watcher process is the healthy state.
+#   persistent  every other harness (codex foreground checkpoint, opencode/pi/grok
+#               background arm, tmux, unknown): the watcher runs as a tracked live
+#               process, so a live identity-matched pid is the real liveness signal.
+# FM_SUPERVISION_MODEL overrides detection (tests, and callers that already know
+# the harness). Otherwise bin/fm-harness.sh is the single detection owner, so this
+# stays consistent with the harness-specific repair line the guards already emit.
+fm_supervision_model() {
+  local harness
+  case "${FM_SUPERVISION_MODEL:-}" in
+    autoarm|persistent) printf '%s\n' "$FM_SUPERVISION_MODEL"; return 0 ;;
+  esac
+  harness=$("$FM_WAKE_LIB_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
+  case "$harness" in
+    claude) printf 'autoarm\n' ;;
+    *) printf 'persistent\n' ;;
+  esac
+}
+
+# fm_watcher_supervision_verdict <state> <watch-path> [grace] [home]
+# Model-aware "is supervision healthy right now" verdict for the pull warning
+# guard (bin/fm-guard.sh), NOT the arm layer or the turn-end guard. Sets:
+#   FM_WATCHER_VERDICT_OK      true when supervision is healthy for this model
+#   FM_WATCHER_VERDICT_REASON  when not ok, the true failing condition:
+#                              no-watcher   - a live watcher process is the real
+#                                             signal for this model but none holds
+#                                             the lock (the beacon is still fresh)
+#                              stale-beacon - the beacon is stale beyond grace or
+#                                             absent (a genuine supervision lapse)
+# autoarm: a fresh beacon within grace is healthy even with no live watcher,
+# because the watcher only runs between turns; only a stale beacon is a lapse.
+# persistent: require a live identity-matched watcher with a fresh beacon
+# (fm_watcher_healthy); a fresh leftover beacon with no live watcher is still down.
+# shellcheck disable=SC2034 # Read by callers after the function returns.
+FM_WATCHER_VERDICT_OK=false
+# shellcheck disable=SC2034 # Read by callers after the function returns.
+FM_WATCHER_VERDICT_REASON=stale-beacon
+fm_watcher_supervision_verdict() {
+  local state=$1 watch=$2 grace=${3:-${FM_GUARD_GRACE:-300}} home=${4:-$FM_HOME}
+  local beat age fresh=false
+  FM_WATCHER_VERDICT_OK=false
+  FM_WATCHER_VERDICT_REASON=stale-beacon
+  beat="$state/.last-watcher-beat"
+  age=$(fm_path_age "$beat")
+  case "$age" in
+    ''|*[!0-9]*) ;;
+    *) [ "$age" -lt "$grace" ] && fresh=true ;;
+  esac
+  if [ "$(fm_supervision_model)" = autoarm ]; then
+    [ "$fresh" = true ] && FM_WATCHER_VERDICT_OK=true
+    return 0
+  fi
+  if fm_watcher_healthy "$state" "$watch" "$grace" "$home"; then
+    # shellcheck disable=SC2034 # Read by callers after the function returns.
+    FM_WATCHER_VERDICT_OK=true
+  elif [ "$fresh" = true ]; then
+    # shellcheck disable=SC2034 # Read by callers after the function returns.
+    FM_WATCHER_VERDICT_REASON=no-watcher
+  fi
   return 0
 }
 
@@ -113,8 +197,27 @@ fm_lock_clean_known_files() {
     "$lockdir/pid" \
     "$lockdir/fm-home" \
     "$lockdir/pid-identity" \
+    "$lockdir/role" \
     "$lockdir/watcher-path" \
     2>/dev/null || true
+}
+
+fm_lock_set_role() {
+  local lockdir=$1 role=$2 current pid back
+  case "$role" in
+    autoarm|terminal-check) : ;;
+    *) return 1 ;;
+  esac
+  current=${BASHPID:-$$}
+  pid=$(cat "$lockdir/pid" 2>/dev/null || true)
+  [ "$pid" = "$current" ] || return 1
+  printf '%s\n' "$role" > "$lockdir/role" 2>/dev/null || return 1
+  back=$(cat "$lockdir/role" 2>/dev/null || true)
+  [ "$back" = "$role" ]
+}
+
+fm_lock_role() {
+  cat "$1/role" 2>/dev/null
 }
 
 fm_lock_abs_path() {
@@ -373,6 +476,79 @@ fm_lock_release() {
   [ "$pid" = "$current" ] || return 0
   fm_lock_clean_known_files "$lockdir"
   rmdir "$lockdir" 2>/dev/null || true
+}
+
+fm_meta_lock_path() {
+  local meta=$1 dir base id
+  dir=${meta%/*}
+  base=${meta##*/}
+  [ "$dir" != "$meta" ] || dir=.
+  case "$base" in
+    *.meta) id=${base%.meta} ;;
+    *) return 1 ;;
+  esac
+  case "$id" in
+    ''|*[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+  printf '%s/.meta-%s.lock\n' "$dir" "$id"
+}
+
+# fm_task_set_lock_path: the per-home lock guarding WHICH tasks exist in a home,
+# as opposed to fm_meta_lock_path, which guards one task's record.
+#
+# A per-task lock cannot protect a task that does not exist yet. Forced
+# secondmate teardown enumerates a home's task set, locks what it found, and
+# then re-enumerates while removing; a fresh spawn publishing a record inside
+# that window is invisible to the first enumeration and visible to the second,
+# so it gets destructively processed while never lifecycle-locked (reproduced
+# with real agents: a record published 0.249s after teardown began was removed
+# and its worktree returned to the pool, with both commands reporting success).
+# Holding this lock from enumeration through cleanup makes the two operations
+# serialize: either the spawn publishes first and the teardown's preflight
+# covers it, or the teardown owns the set and the spawn refuses. Both directions
+# fail closed.
+fm_task_set_lock_path() {  # <state-dir>
+  local state=$1
+  [ -n "$state" ] || return 1
+  case "$state" in *[$'\n\r\t']*) return 1 ;; esac
+  printf '%s/.task-set.lock\n' "$state"
+}
+
+fm_failure_episode_reset() {
+  local state=$1 mode=${2:-acquire} lock current pid acquired=0 path
+  lock="$state/.turnend-claude-blocks.lock"
+  case "$mode" in
+    acquire)
+      fm_lock_try_acquire "$lock" || return 1
+      acquired=1
+      ;;
+    held)
+      current=${BASHPID:-$$}
+      pid=$(cat "$lock/pid" 2>/dev/null || true)
+      [ "$pid" = "$current" ] || return 1
+      ;;
+    *) return 1 ;;
+  esac
+  for path in \
+    "$state/.turnend-claude-blocks" \
+    "$state/.claude-autoarm-failure-notified" \
+    "$state/.claude-autoarm-failure-alarmed"
+  do
+    if [ -d "$path" ] && [ ! -L "$path" ]; then
+      [ "$acquired" -eq 0 ] || fm_lock_release "$lock"
+      return 1
+    fi
+  done
+  if ! rm -f \
+    "$state/.turnend-claude-blocks" \
+    "$state/.claude-autoarm-failure-notified" \
+    "$state/.claude-autoarm-failure-alarmed" \
+    2>/dev/null; then
+    [ "$acquired" -eq 0 ] || fm_lock_release "$lock"
+    return 1
+  fi
+  [ "$acquired" -eq 0 ] || fm_lock_release "$lock"
+  return 0
 }
 
 fm_wake_clean_field() {
