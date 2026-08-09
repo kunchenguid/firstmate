@@ -272,7 +272,9 @@ On a `no-mistakes-prod-only` project, classify the task's surface: internal-only
 An unregistered project or absent registry resolves to `no-mistakes` with yolo off, and the registration gap goes to the captain.
 Record the resulting mode, yolo, and the one-line reason for any deviation in the backlog item note.
 
-Treat file or subsystem overlap as a risk signal rather than an automatic reason to wait, and dispatch isolated work immediately with no concurrency cap when each change can be independently implemented and validated and the selected delivery path can reconcile ordinary rebases or conflicts.
+Treat file or subsystem overlap as a risk signal rather than an automatic reason to wait, and dispatch isolated work immediately when each change can be independently implemented and validated and the selected delivery path can reconcile ordinary rebases or conflicts.
+Default to a bounded batch of roughly three to four concurrently supervised direct reports, even when more isolated work is ready, and exceed it only on an explicit captain request for maximum parallelism because supervision overhead grows faster than the wall-clock time saved.
+This cap counts only crewmates and scouts with a live `state/<id>.meta` in this home's wake-drain loop; persistent secondmates do not count, and work routed into a secondmate's own home is that secondmate's concurrency concern.
 Serialize only for a true semantic dependency, shared mutable external state, incompatible concurrent migration, or another concrete condition that makes independent progress or reconciliation unsafe; same-file editing alone is insufficient, and genuine blockers remain durable.
 Write the task-specific brief under section 11 before spawning.
 
@@ -375,6 +377,7 @@ At the start of every wake-handling turn, drain the durable wake queue before pe
 Session start is the only exception because its one-shot digest already drained while locked or deliberately left the queue untouched in lock-refused read-only mode.
 Treat any `OPEN DECISIONS` section from the drain as actionable reconciliation input even when no wake record was queued.
 A status line is a wake event, not current state; use `bin/fm-crew-state.sh` when current state matters, especially before re-escalating an old decision, blocker, or pause.
+Before reading a full pane capture, CI log, or status dump during wake handling, prefer the narrowest read that answers the question: a targeted `grep` or `tail`, or structured state from `bin/fm-crew-state.sh` or `no-mistakes axi status`, and escalate to full output only when that read is inconclusive.
 A declared `paused:` event means a bounded external wait expected to clear on its own, while `blocked:` means firstmate action is needed.
 
 Handle actionable wakes as follows:
