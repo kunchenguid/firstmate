@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Behavior tests for bin/fm-worktree-guard.sh - the pre-allocation pool guard.
+# Behavior tests for bin/fm-worktree-guard.sh - the pre-allocation pool guard
+# and slot chooser.
 #
 # The defect (upstream kunchenguid/firstmate#1441): `treehouse status` reports a
 # pool slot "available" when it has no lease, no live process, and a clean
@@ -33,6 +34,12 @@
 # reads from bin/fm-landed-lib.sh: which refs may count as a landing target, and
 # that containment of CONTENT - not reachability of a commit - is what proves a
 # slot is safe to hand out.
+#
+# Cases (s1) through (s4) pin the allocation and attribution defects measured on
+# 2026-08-04 and 2026-08-07: `treehouse get` hands out the first available slot
+# and takes no slot argument, so one parked slot blockaded pools whose later
+# slots were empty, and a live worker was reported gone because the one pid its
+# slot recorded no longer matched.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -251,6 +258,17 @@ run_guard_plain() {  # <proj> <table> [state-dir]
   install_fake_treehouse_plain "$fakebin" "$table"
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="${state:-$(dirname "$proj")/state}" \
     "$GUARD" check "$proj" 2>&1
+}
+
+# Run the guard's `select` for <proj> with a canned pool, returning the slot it
+# chose on stdout. stderr is kept separate here, unlike run_guard, because the
+# chosen slot IS the stdout contract.
+run_select() {  # <proj> <json> [state-dir]
+  local proj=$1 json=$2 state=${3:-} fakebin
+  fakebin=$(fm_fakebin "$(dirname "$proj")")
+  install_fake_treehouse "$fakebin" "$json"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="${state:-$(dirname "$proj")/state}" \
+    "$GUARD" select "$proj" 2>/dev/null
 }
 
 # A real live process to own a slot. Its output is detached because this is
@@ -595,14 +613,24 @@ for i in 1 2 3; do
   git -C "$danger" add "real-$i.txt"
   git -C "$danger" commit -qm "genuinely unlanded $i"
 done
+# The unlanded slot is skipped rather than refused while its locally-landed
+# neighbour can be allocated instead, so the true positive only has to be
+# separated from the false ones - never turned into a pool-wide blockade.
 out=$(run_guard "$proj" "$(slot_json 1 available "$landed" 2 available "$danger")") \
-  && fail "(o5) guard accepted a pool containing a genuinely unlanded slot"
+  || fail "(o5) guard refused a pool that still offered a locally-landed slot: $out"
+[ -z "$out" ] || fail "(o5) guard was not silent when an allocatable slot existed: $out"
+chose=$(run_select "$proj" "$(slot_json 1 available "$landed" 2 available "$danger")")
+[ "$chose" = "$(printf '1\t%s' "$landed")" ] \
+  || fail "(o5) guard did not steer allocation to the locally-landed slot (chose '$chose')"
+
+# With only the unlanded slot left, the same pool refuses with the same
+# per-slot evidence, measured against the local trunk rather than the stale
+# remote-tracking ref.
+out=$(run_guard "$proj" "$(slot_json 2 available "$danger")") \
+  && fail "(o5) guard accepted a pool whose only slot was genuinely unlanded"
 assert_contains "$out" "slot 2: $danger" "(o5) names the true-positive slot"
 assert_contains "$out" "branch fm/platform-unlanded with 3 commits not on heads/v1.2-recovery" \
   "(o5) reports the true positive against the local trunk, not the stale remote"
-case "$out" in
-  *"slot 1: $landed"*) fail "(o5) the locally-landed neighbour was refused alongside the true positive" ;;
-esac
 pass "(o5) one pool separates a genuinely unlanded slot from its locally-landed neighbours"
 
 # --- (o4) an origin that cannot be read is not a landing target --------------
@@ -800,5 +828,147 @@ out=$(run_guard "$proj" "$(slot_json 1 available "$slot")") \
 assert_contains "$out" "HEAD cannot be compared against heads/main" "(r3) reports the comparison as unverifiable"
 assert_contains "$out" "still holds live work" "(r3) refuses rather than assuming safe"
 pass "(r3) a slot whose comparison conflicts refuses as unverifiable, not as a counted diff"
+
+# --- (s1) allocation prefers a genuinely clean slot -------------------------
+#
+# Measured 2026-08-07: a pool held eight parked slots and five empty ones, and
+# every spawn was refused because `treehouse get` hands out the first available
+# slot and takes no slot argument. The parked slots must be SKIPPED, not reset
+# and not turned into a refusal, while the empty one is named for the caller to
+# enter by name.
+
+proj=$(make_pool prefer-clean 3)
+parked=$(slot_path "$proj" 1)
+landed_branch=$(slot_path "$proj" 2)
+clean=$(slot_path "$proj" 3)
+give_unlanded_branch "$parked" fm/parked-work 2
+# Empty (its content is already on main) but still sitting on a task branch.
+# `treehouse enter` does not reset a slot, so a worker steered here would start
+# on that branch; only a detached or default-branch slot may be selected.
+git -C "$landed_branch" checkout -q -b fm/already-landed main
+git -C "$landed_branch" commit -q --allow-empty -m "landed elsewhere"
+pool_json=$(slot_json 1 available "$parked" 2 available "$landed_branch" 3 available "$clean")
+out=$(run_guard "$proj" "$pool_json") \
+  || fail "(s1) guard refused a pool that offered a genuinely clean slot: $out"
+[ -z "$out" ] || fail "(s1) guard was not silent when a clean slot existed: $out"
+chose=$(run_select "$proj" "$pool_json")
+[ "$chose" = "$(printf '3\t%s' "$clean")" ] \
+  || fail "(s1) guard did not select the clean slot (chose '$chose')"
+[ "$(git -C "$parked" symbolic-ref --short HEAD)" = fm/parked-work ] \
+  || fail "(s1) the skipped slot was moved off its branch"
+[ -z "$(git -C "$parked" status --porcelain)" ] || fail "(s1) the skipped slot was dirtied"
+[ "$(git -C "$landed_branch" symbolic-ref --short HEAD)" = fm/already-landed ] \
+  || fail "(s1) the landed-branch slot was moved off its branch"
+[ -z "$(run_select "$proj" '[]')" ] \
+  || fail "(s1) select named a slot in an empty pool instead of leaving it to treehouse get"
+pass "(s1) an occupied slot is skipped, and only a detached or default-branch empty slot is selected"
+
+# --- (s2) with nothing clean to steer to, the refusal is unchanged -----------
+#
+# The caller then falls back to `treehouse get`, which hands out the first
+# available slot whatever it holds, so every slot must be reported.
+
+proj=$(make_pool all-occupied 2)
+first=$(slot_path "$proj" 1)
+second=$(slot_path "$proj" 2)
+give_unlanded_branch "$first" fm/first-work 1
+give_unlanded_branch "$second" fm/second-work 2
+pool_json=$(slot_json 1 available "$first" 2 available "$second")
+out=$(run_guard "$proj" "$pool_json") && fail "(s2) guard accepted a pool whose every slot was occupied"
+assert_contains "$out" "still holds live work" "(s2) refusal headline"
+assert_contains "$out" "slot 1: $first" "(s2) names the first slot"
+assert_contains "$out" "branch fm/first-work with 1 commit not on heads/main" "(s2) first slot's evidence"
+assert_contains "$out" "slot 2: $second" "(s2) names the second slot"
+assert_contains "$out" "branch fm/second-work with 2 commits not on heads/main" "(s2) second slot's evidence"
+[ "$(printf '%s\n' "$out" | grep -c 'refusing to spawn')" = 1 ] \
+  || fail "(s2) the refusal headline was repeated per slot: $out"
+run_select "$proj" "$pool_json" >/dev/null 2>&1 && fail "(s2) select accepted an entirely occupied pool"
+[ -z "$(run_select "$proj" "$pool_json" 2>/dev/null)" ] || fail "(s2) select named a slot it had refused"
+pass "(s2) an entirely occupied pool still refuses, naming every slot and its evidence"
+
+# --- (s3) a live worker is never an orphan on the strength of a stale pid ----
+#
+# Measured 2026-08-04: a slot whose worker was live and driving a validation
+# pipeline was reported as "its worker is gone (recorded process identity no
+# longer matches)". The recorded pid is one process sampled when the slot was
+# accepted, and it stops matching for reasons that say nothing about the task.
+# Each independent binding is checked on its own, so the live verdict survives
+# losing either one.
+
+if [ ! -r /proc/self/environ ]; then
+  pass "(s3) skipped: this platform exposes no readable /proc/<pid>/environ"
+else
+  proj=$(make_pool live-under-stale-pid 1)
+  slot=$(slot_path "$proj" 1)
+  give_unlanded_branch "$slot" fm/pipeline-work 2
+  state="$(dirname "$proj")/state"
+  mkdir -p "$state"
+  stale_pid=$(live_pid)
+  stale_identity="linux-starttime=1 cmdline-hex=6e6f742d7468652d73616d6500"
+  pane="w-fmguard-$$:p1"
+  tasktmp="/tmp/fm-live-task-$$"
+  pool_json=$(slot_json 1 available "$slot")
+
+  # Negative control first: the same stale recording, with nothing running that
+  # is bound to the task, must still read as gone. Without this the live cases
+  # below could pass without their bindings doing any work.
+  fm_write_meta "$state/live-task.meta" "worktree=$slot" \
+    "worktree_owner_pid=$stale_pid" "worktree_owner_identity=$stale_identity" \
+    "herdr_pane_id=$pane" "tasktmp=$tasktmp"
+  out=$(run_guard "$proj" "$pool_json" "$state") && fail "(s3) guard accepted a slot holding unlanded work"
+  assert_contains "$out" "its worker is gone" "(s3) control: nothing bound to the task reads gone"
+
+  # (s3a) the herdr pane binding alone carries the live verdict.
+  env_pid=$(HERDR_PANE_ID="$pane" nohup sleep 300 >/dev/null 2>&1 & echo $!)
+  FAKE_PIDS+=("$env_pid")
+  fm_test_reap "$env_pid"
+  out=$(run_guard "$proj" "$pool_json" "$state") && fail "(s3a) guard accepted a slot owned by a live worker"
+  assert_contains "$out" "task live-task is still working here" "(s3a) a live pane is the owner, not an orphan"
+  assert_not_contains "$out" "its worker is gone" "(s3a) a live pane must never be reported as gone"
+  kill "$env_pid" 2>/dev/null
+  wait "$env_pid" 2>/dev/null
+
+  # (s3b) losing the pane binding entirely - a task on a backend that records no
+  # pane id - still resolves live from the per-task temp root fm-spawn exports.
+  fm_write_meta "$state/live-task.meta" "worktree=$slot" \
+    "worktree_owner_pid=$stale_pid" "worktree_owner_identity=$stale_identity" \
+    "tasktmp=$tasktmp"
+  out=$(run_guard "$proj" "$pool_json" "$state") && fail "(s3b) guard accepted a slot holding unlanded work"
+  assert_contains "$out" "its worker is gone" "(s3b) control: no bound process reads gone"
+  env_pid=$(GOTMPDIR="$tasktmp/gotmp" nohup sleep 300 >/dev/null 2>&1 & echo $!)
+  FAKE_PIDS+=("$env_pid")
+  fm_test_reap "$env_pid"
+  out=$(run_guard "$proj" "$pool_json" "$state") && fail "(s3b) guard accepted a slot owned by a live worker"
+  assert_contains "$out" "task live-task is still working here" "(s3b) the second binding carries the verdict alone"
+  assert_not_contains "$out" "its worker is gone" "(s3b) a live worker must never be reported as gone"
+  kill "$env_pid" 2>/dev/null
+  wait "$env_pid" 2>/dev/null
+
+  # (s3c) another task's binding is not this task's worker.
+  env_pid=$(GOTMPDIR="$tasktmp-other/gotmp" nohup sleep 300 >/dev/null 2>&1 & echo $!)
+  FAKE_PIDS+=("$env_pid")
+  fm_test_reap "$env_pid"
+  out=$(run_guard "$proj" "$pool_json" "$state") && fail "(s3c) guard accepted a slot holding unlanded work"
+  assert_contains "$out" "its worker is gone" "(s3c) a near-miss binding must not read alive"
+  kill "$env_pid" 2>/dev/null
+  wait "$env_pid" 2>/dev/null
+  pass "(s3) a live worker's slot reads owned, not orphaned, under a stale recorded pid"
+fi
+
+# --- (s4) operator authority is only consulted where it still matters --------
+
+proj=$(make_pool authority-with-clean 2)
+authorized_slot=$(slot_path "$proj" 1)
+spare=$(slot_path "$proj" 2)
+give_unlanded_branch "$authorized_slot" fm/authorized-work
+fakebin=$(fm_fakebin "$(dirname "$proj")")
+install_fake_treehouse "$fakebin" "$(slot_json 1 available "$authorized_slot" 2 available "$spare")"
+out=$(PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$(dirname "$proj")/state" \
+  FM_WORKTREE_RECLAIM_OK="$authorized_slot" "$GUARD" select "$proj" 2>&1)
+[ "$out" = "$(printf '2\t%s' "$spare")" ] \
+  || fail "(s4) an authorized slot was reclaimed although a clean slot existed (got '$out')"
+[ "$(git -C "$authorized_slot" symbolic-ref --short HEAD)" = fm/authorized-work ] \
+  || fail "(s4) the authorized slot was disturbed even though it was not needed"
+pass "(s4) explicit authority is not spent on a slot the allocation can simply skip"
 
 printf '\nall fm-worktree-guard tests passed\n'

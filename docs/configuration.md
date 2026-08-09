@@ -60,9 +60,10 @@ The file format is unchanged in both modes; tasks-axi and manual edits produce t
 For spawn-capable adapters, the runtime session-provider backend controls where task windows/endpoints are created, captured, sent to, watched, and killed.
 `tmux` is the verified reference backend (see [`docs/tmux-backend.md`](tmux-backend.md)); `herdr`, `zellij`, `orca`, and `cmux` are experimental spawn backends (see [`docs/herdr-backend.md`](herdr-backend.md), [`docs/zellij-backend.md`](zellij-backend.md), [`docs/orca-backend.md`](orca-backend.md), and [`docs/cmux-backend.md`](cmux-backend.md)).
 Treehouse remains the worktree provider for tmux, herdr, zellij, and cmux, since herdr, zellij, and cmux are session providers only; Orca provides both the task worktree and terminal endpoint.
-Every Treehouse-backed crewmate or scout spawn inspects Treehouse's pool status before allocation and refuses an available pool slot that still holds work.
+Every Treehouse-backed crewmate or scout spawn inspects Treehouse's pool status before allocation, and allocates only a pool slot that is demonstrably empty.
 It prefers `treehouse status --json`, which needs `jq`; on Treehouse builds older than v2.1.0, which have no `--json` flag, it reads the human-readable table instead and needs no `jq`.
-The guard is refusal-only, runs before `treehouse get`, and leaves release decisions to `fm-teardown.sh`; [`verification/worktree-allocation.md`](verification/worktree-allocation.md) owns the empirical Treehouse behavior behind that boundary.
+A slot that still holds work is skipped, by entering the chosen empty slot by name; the spawn is refused only when no available slot is empty, because `treehouse get` would then hand out one of them.
+The guard never releases, resets, or cleans a slot, and leaves release decisions to `fm-teardown.sh`; [`verification/worktree-allocation.md`](verification/worktree-allocation.md) owns the empirical Treehouse behavior behind that boundary.
 New spawns choose the backend in this order: an explicit `--backend` flag that current authority for that exact task alone has authorized (a present captain instruction or the task's own accepted brief; never later-task precedent by analogy), then `FM_BACKEND`, then the first non-empty line of local gitignored `config/backend`, then runtime auto-detection from `$TMUX`, `HERDR_ENV=1`, or cmux runtime signals, then default `tmux`.
 If more than one runtime marker is present, detection resolves innermost-first: `$TMUX` is checked before `HERDR_ENV=1`, which is checked before cmux's primary `CMUX_WORKSPACE_ID` marker and its documented fallback signals - tmux or herdr started from inside a cmux terminal is the innermost, currently-executing layer, while cmux itself (a terminal application, not a nestable multiplexer) is always checked last.
 See [`docs/cmux-backend.md`](cmux-backend.md#runtime-detection) for why cmux can be selected when `CMUX_WORKSPACE_ID` is absent.
@@ -830,7 +831,7 @@ FM_STATE_OVERRIDE=       # alternate state dir, mainly for tests
 FM_DATA_OVERRIDE=        # alternate data dir, mainly for tests
 FM_PROJECTS_OVERRIDE=    # alternate projects dir, mainly for tests
 FM_CONFIG_OVERRIDE=      # alternate config dir, mainly for tests
-FM_PROC_ROOT_OVERRIDE=   # alternate /proc root for Linux process-identity reads in fm-wake-lib.sh and fm-teardown.sh, mainly for tests
+FM_PROC_ROOT_OVERRIDE=   # alternate /proc root for Linux process-identity, environ, and cwd reads in fm-wake-lib.sh, fm-worktree-guard.sh, and fm-teardown.sh, mainly for tests
 FM_BACKEND=             # optional runtime backend override for new spawns; tmux/herdr/zellij/orca/cmux support ship/scout spawns, codex-app is not accepted
 FM_TRACE_CONTEXT=       # optional trace-context override; see "Trace context propagation"
 HERDR_SESSION=default  # herdr-only: named session for normal backend ops; not enough for destructive cleanup (docs/herdr-backend.md)
@@ -879,6 +880,7 @@ FMX_FOLLOWUP_MAX_COUNT=3   # local cap on Relay completion follow-ups per linked
 FM_PF_RETRY_BACKOFF_SECS=900   # seconds before the next attempt after a retryable promised-public-reply delivery error
 FM_WAKE_LEDGER=         # alternate wake-outcome ledger path, default data/wake-ledger.tsv (bin/fm-wake-ledger.sh)
 FM_LOCK_STALE_AFTER=2   # seconds before dead-pid lock records can be reclaimed; mid-acquire locks keep at least 2s grace
+FM_SPAWN_POOL_LOCK_POLLS=1200   # 0.1s attempts fm-spawn.sh waits for the cross-home worktree pool slot-selection lock before refusing the spawn
 FM_GUARD_GRACE=300      # seconds before guard warnings, arm health checks, and the primary turn-end guard treat a watcher beacon as stale
 FM_CLAUDE_AUTOARM_ATTEMPTS=2   # bounded Stop-owned arm attempts per Claude auto-arm cycle; accepted values are 1, 2, or 3
 FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=800   # milliseconds the --claude turn-end guard waits for watcher health, a role-verified Stop auto-arm claim, or a fresh epoch before deciding recovery ownership or failure progression
