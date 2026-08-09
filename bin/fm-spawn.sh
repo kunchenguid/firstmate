@@ -2075,6 +2075,54 @@ spawn_current_path() {  # <target>
     cmux) fm_backend_cmux_current_path "$1" "$W" ;;
   esac
 }
+# Second, independent worktree signal, deliberately not a rendered string.
+#
+# spawn_current_path reports the cwd of the PANE'S OWN SHELL. `treehouse get` does not
+# move that shell: it stays put and runs its worktree subshell as a grandchild, so on
+# setups where tmux reads only the pane shell the pane cwd never leaves the project and
+# the wait below times out while the worktree is in fact ready. Read the descendant
+# processes' real cwd from /proc instead - a kernel fact that no treehouse release note
+# can change - and let either signal carry a positive verdict.
+#
+# Yields nothing (leaving the pane-cwd signal as the sole detector) when /proc is absent,
+# as on macOS, or when the backend exposes no pane pid. Never a hard dependency.
+spawn_pane_pid() {  # <target>
+  case "$BACKEND" in
+    tmux) tmux display-message -p -t "$1" '#{pane_pid}' 2>/dev/null ;;
+    *) : ;;
+  esac
+}
+spawn_pid_descendants() {  # <root-pid>; bounded depth, root excluded
+  local queue=$1 depth=0 next pid child
+  while [ -n "$queue" ] && [ "$depth" -lt 6 ]; do
+    next=
+    for pid in $queue; do
+      child=$(pgrep -P "$pid" 2>/dev/null | tr '\n' ' ') || child=
+      [ -z "$child" ] || next="$next $child"
+    done
+    queue=$next
+    [ -z "$queue" ] || printf '%s\n' $queue
+    depth=$((depth + 1))
+  done
+}
+spawn_descendant_worktree() {  # <pane-pid> <project-real>
+  local root=$1 proj=$2 pid cwd
+  [ -n "$root" ] || return 0
+  [ -d /proc ] || return 0
+  # Scan the root pid as well as its descendants: a shell running the worktree command
+  # as its last statement may exec into it rather than fork, leaving the moved process
+  # AT the root. The project-cwd filter below makes including the root harmless when it
+  # did fork, because an unmoved pane shell still reports the project.
+  for pid in "$root" $(spawn_pid_descendants "$root"); do
+    cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null) || continue
+    [ -n "$cwd" ] || continue
+    [ "$(real_path_or_raw "$cwd")" != "$proj" ] || continue
+    # A worktree checkout always carries a .git entry; anything else is an unrelated cwd.
+    [ -e "$cwd/.git" ] || continue
+    printf '%s\n' "$cwd"
+    return 0
+  done
+}
 spawn_send_literal() {  # <target> <text>
   case "$BACKEND" in
     tmux) fm_backend_tmux_send_literal "$1" "$2" ;;
@@ -2193,8 +2241,16 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # pane that is already settled by the first real read only costs the one existing
   # inter-poll sleep as confirmation, not a whole extra cycle on top.
   candidate=""
-  for _ in $(seq 1 60); do
+  # Wait budget for `treehouse get` to land in the worktree, configurable for a slow
+  # filesystem. Raising it does NOT rescue a pane whose cwd never moves: that is the
+  # detection gap the descendant-cwd signal above closes, not a timing problem.
+  pane_pid=$(spawn_pane_pid "$WT_TARGET" || true)
+  for _ in $(seq 1 "${FM_SPAWN_WORKTREE_WAIT_SECS:-60}"); do
     p=$(spawn_current_path "$WT_TARGET" || true)
+    if [ -z "$p" ] || [ "$(real_path_or_raw "$p")" = "$PROJ_ABS_REAL" ]; then
+      # Pane cwd says "still in the project"; ask the kernel where the descendants went.
+      p=$(spawn_descendant_worktree "$pane_pid" "$PROJ_ABS_REAL" || true)
+    fi
     if [ -n "$p" ]; then
       p_real=$(real_path_or_raw "$p")
       if [ "$p_real" != "$PROJ_ABS_REAL" ]; then
@@ -2212,7 +2268,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     sleep 1
   done
   if [ -z "$WT" ]; then
-    echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
+    echo "error: treehouse get did not enter a worktree within ${FM_SPAWN_WORKTREE_WAIT_SECS:-60}s; inspect window $T" >&2
     exit 1
   fi
 
