@@ -535,6 +535,32 @@ EOF
   pass "every malformed envelope is refused with a named reason and fails closed"
 }
 
+# The schema conformance gate for FM_STATUS_EVENT_FIELDS: the field set the
+# parser actually accepts IS the declared constant. Every name the constant
+# declares parses in a minimal well-formed event, and a name outside it is
+# refused by name, which is what makes the constant's "adding one here is the
+# only way to make it writable" claim executable rather than asserted.
+test_status_event_field_set_matches_declared_constant() {
+  local name line reason
+  for name in $FM_STATUS_EVENT_FIELDS; do
+    case "$name" in
+      verb|summary) line='fm-status-event.v1 verb=done summary=x' ;;
+      *) line="fm-status-event.v1 verb=done $name=v1 summary=x" ;;
+    esac
+    fm_status_event_parse "$line" \
+      || fail "declared field '$name' was refused by the parser: $line"
+  done
+  for name in confidence notes; do
+    case " $FM_STATUS_EVENT_FIELDS " in
+      *" $name "*) fail "probe field '$name' is unexpectedly declared in FM_STATUS_EVENT_FIELDS" ;;
+    esac
+    reason=$(fm_status_event_invalid_reason "fm-status-event.v1 verb=done $name=v summary=x")
+    [ "$reason" = "unknown-field:$name" ] \
+      || fail "undeclared field '$name' was not refused by name (got: ${reason:-none})"
+  done
+  pass "the parser's accepted field set equals FM_STATUS_EVENT_FIELDS"
+}
+
 # crew_is_provably_working: the absorb-only-when-provably-working predicate. It is
 # benign (absorb) ONLY when fm-crew-state.sh reports the crew as working from an
 # actively-running pipeline step (source run-step) or a busy pane (source pane);
@@ -2834,3 +2860,4 @@ test_worker_cannot_declare_blocking_on
 test_blocking_on_is_derived_from_crew_state
 test_blocking_on_helpers_cover_every_crew_verdict
 test_malformed_envelopes_fail_closed
+test_status_event_field_set_matches_declared_constant

@@ -32,9 +32,9 @@
 #     paths.status_log.last_event is historical wake-event data only, never
 #     current state.
 #     last_event.envelope is the typed fm-status-event.v1 event's own fields
-#     (schema, phase, evidence[], invalid_reason), or null when the worker wrote
-#     the prose form; a non-null invalid_reason means that event was REFUSED and
-#     its state reads as invalid-status-event.
+#     (schema, key, phase, evidence[], invalid_reason), or null when the worker
+#     wrote the prose form; a non-null invalid_reason means that event was
+#     REFUSED and its state reads as invalid-status-event.
 #     last_event.blocking_on is DERIVED by fm-classify-lib.sh from the event's
 #     verb, its keyed open-decision fold, and current_state - never read off the
 #     event, which cannot carry the field at all. It is one of
@@ -306,7 +306,7 @@ crew_state_json() {  # <id>
 
 status_event_json() {  # <status-log> <task-id> <crew-state> <crew-source>
   local log=$1 id=${2:-} state=${3:-} source=${4:-}
-  local present=0 raw='' verb='' note='' schema='' phase='' evidence='' invalid='' blocking_on=unknown
+  local present=0 raw='' verb='' note='' schema='' key='' phase='' evidence='' invalid='' blocking_on=unknown
   if [ -f "$log" ]; then
     present=1
     raw=$(last_nonempty_line "$log" || true)
@@ -318,6 +318,7 @@ status_event_json() {  # <status-log> <task-id> <crew-state> <crew-source>
     if fm_status_event_is_typed "$raw"; then
       schema=$FM_STATUS_EVENT_SCHEMA
       invalid=$(fm_status_event_invalid_reason "$raw")
+      key=$(fm_status_event_field "$raw" key || true)
       phase=$(fm_status_event_field "$raw" phase || true)
       evidence=$(fm_status_event_field "$raw" evidence || true)
     fi
@@ -333,6 +334,7 @@ status_event_json() {  # <status-log> <task-id> <crew-state> <crew-source>
     --arg note "$note" \
     --arg blocking_on "$blocking_on" \
     --arg schema "$schema" \
+    --arg key "$key" \
     --arg phase "$phase" \
     --arg invalid "$invalid" \
     --arg evidence "$evidence" \
@@ -342,6 +344,7 @@ status_event_json() {  # <status-log> <task-id> <crew-state> <crew-source>
         blocking_on:$blocking_on,
         envelope:(if $schema == "" then null else {
           schema:$schema,
+          key:(if $key == "" then null else $key end),
           phase:(if $phase == "" then null else $phase end),
           evidence:(if $evidence == "" then [] else ($evidence | split("\n")) end),
           invalid_reason:(if $invalid == "" then null else $invalid end)

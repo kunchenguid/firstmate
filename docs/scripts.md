@@ -106,6 +106,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-wake-ledger.sh`      | Own the append-only wake-outcome and terminal-task evidence record, and summarize it |
 | `fm-wake-lib.sh`         | Shared durable wake queue, portable locks, and watcher identity/health helpers       |
 | `fm-classify-lib.sh`     | Shared wake-classification vocabulary, the crew-state verdict set every consumer must handle, and durable keyed-decision folds and scans |
+| `fm-status-event-lib.sh` | Single owner of the `fm-status-event.v1` typed status-event wire format and its only parser |
 | `fm-task-axis-lib.sh`    | Single owner of a task's role, deliverable, and stage axes, their derivation, and the stale-writer refusal |
 | `fm-send.sh`             | Send one verified literal line or supported key through the target's recorded backend |
 | `fm-control.sh`          | Agent lifecycle control plane: allowlisted `interrupt`, `exit`, and transactional `relaunch` verbs for an exact task id ([agent-control.md](agent-control.md)) |

@@ -48,7 +48,7 @@ FM_STATUS_EVENT_SCHEMA='fm-status-event.v1'
 # The COMPLETE set of fields a worker may write. Adding one here is the only way
 # to make it writable, so a derived field stays unwritable-by-the-worker by
 # construction rather than by a reviewer noticing.
-# shellcheck disable=SC2034 # Read by the schema conformance gate in tests/, not by this file.
+# shellcheck disable=SC2034 # Read by the schema conformance gate in tests/fm-watch-triage.test.sh, not by this file.
 FM_STATUS_EVENT_FIELDS='verb key phase evidence summary'
 
 # The verb reported for an envelope that failed validation. Deliberately not a
