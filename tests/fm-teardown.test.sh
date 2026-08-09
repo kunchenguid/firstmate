@@ -3092,6 +3092,87 @@ test_teardown_force_records_abandoned() {
   pass "a --force teardown records the task as abandoned rather than landed"
 }
 
+test_teardown_records_a_declared_failure_as_failed() {
+  local case_dir ledger
+  case_dir=$(make_case ledger-failed)
+  write_profiled_meta "$case_dir" local-only
+  # The task said it failed. Its work still landed on a remote, so this is an
+  # ordinary release, not a --force discard: without the derivation the record
+  # would read landed and be indistinguishable from a success.
+  printf 'working: started\nfailed: the approach does not work\n' \
+    > "$case_dir/state/task-x1.status"
+  wt_commit "$case_dir" "abandoned approach"
+  add_fork_with_pushed_branch "$case_dir"
+
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "ledger-failed: teardown should succeed"
+
+  ledger="$case_dir/data/wake-ledger.tsv"
+  grep -q "outcome=failed" "$ledger" \
+    || fail "ledger-failed: a declared failure recorded no failed outcome:"$'\n'"$(cat "$ledger")"
+  grep -q "outcome_source=declared" "$ledger" \
+    || fail "ledger-failed: the outcome did not record the task's own declaration as its evidence"
+  if grep -q "outcome=landed" "$ledger"; then
+    fail "ledger-failed: a failed task must not also record landed"
+  fi
+  pass "a task that declares failure and is torn down records failed, not landed"
+}
+
+test_teardown_marks_an_uncorroborated_outcome_as_assumed() {
+  local case_dir ledger
+  case_dir=$(make_case ledger-assumed)
+  write_profiled_meta "$case_dir" local-only
+  # No terminal declaration anywhere in the log. landed is still recorded - it
+  # is the only thing teardown can say - but it must be marked as the
+  # unevidenced constant it is, or it counts as a success nobody observed.
+  printf 'working: still going\n' > "$case_dir/state/task-x1.status"
+  wt_commit "$case_dir" "fix the thing"
+  add_fork_with_pushed_branch "$case_dir"
+
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "ledger-assumed: teardown should succeed"
+
+  ledger="$case_dir/data/wake-ledger.tsv"
+  grep -q "outcome=landed" "$ledger" || fail "ledger-assumed: expected the landed default"
+  grep -q "outcome_source=assumed" "$ledger" \
+    || fail "ledger-assumed: an uncorroborated landed outcome must be marked assumed"
+  pass "a landed outcome no declaration corroborates records as assumed"
+}
+
+test_teardown_supersedes_and_clears_a_sweep_receipt() {
+  local case_dir ledger terminal_lines
+  case_dir=$(make_case ledger-supersede)
+  write_profiled_meta "$case_dir" local-only
+  printf 'failed: the approach does not work\n' > "$case_dir/state/task-x1.status"
+  wt_commit "$case_dir" "abandoned approach"
+  add_fork_with_pushed_branch "$case_dir"
+
+  # The sweep records the declared failure first, while the task still holds
+  # state; teardown then releases the same task.
+  FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+    FM_DATA_OVERRIDE="$case_dir/data" \
+    "$ROOT/bin/fm-wake-ledger.sh" sweep >/dev/null \
+    || fail "ledger-supersede: sweep should succeed"
+  [ -f "$case_dir/state/task-x1.terminal-recorded" ] \
+    || fail "ledger-supersede: sweep left no receipt"
+
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "ledger-supersede: teardown should succeed"
+
+  ledger="$case_dir/data/wake-ledger.tsv"
+  terminal_lines=$(grep -c 'task=task-x1' "$ledger" || true)
+  [ "$terminal_lines" -eq 2 ] \
+    || fail "ledger-supersede: expected the sweep record and teardown's release record, got $terminal_lines"
+  grep -q "outcome_source=unreleased" "$ledger" \
+    || fail "ledger-supersede: the sweep's record is missing"
+  # The last word is teardown's, and it is what a reader resolves.
+  [ "$(grep 'task=task-x1' "$ledger" | tail -1 | grep -c 'outcome_source=declared')" -eq 1 ] \
+    || fail "ledger-supersede: teardown's release record did not supersede the sweep's"
+  [ ! -e "$case_dir/state/task-x1.terminal-recorded" ] \
+    || fail "ledger-supersede: the receipt outlived the task's state"
+  pass "teardown supersedes a sweep record and clears its receipt with the rest of the state"
+}
+
 test_unwritable_ledger_never_fails_teardown() {
   local case_dir rc
   case_dir=$(make_case ledger-unwritable)
@@ -3189,5 +3270,8 @@ test_persistent_scan_refuses_after_bounded_retries
 test_process_exit_during_identity_lookup_does_not_refuse
 test_run_abort_precedes_process_reap_precedes_worktree_removal
 test_teardown_records_the_terminal_ledger_line
+test_teardown_records_a_declared_failure_as_failed
+test_teardown_marks_an_uncorroborated_outcome_as_assumed
+test_teardown_supersedes_and_clears_a_sweep_receipt
 test_teardown_force_records_abandoned
 test_unwritable_ledger_never_fails_teardown

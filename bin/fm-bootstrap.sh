@@ -102,11 +102,14 @@
 #          refresh relays any completed fm-fleet-sync.sh output before the
 #          aggregate timeout skip line with timeout and elapsed seconds.
 #          Set FM_FLEET_PRUNE=0 to skip branch pruning during that refresh.
-#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the six MUTATING sweeps
+#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the MUTATING sweeps
 #          (PR-check migration, secondmate_sync, secondmate_liveness_sweep,
 #          secondmate_handoff_resume, x_mode_setup, fleet_sync) while still
-#          printing every read-only detect line
-#          above; the TANGLE line switches to advisory-only wording with no
+#          printing every read-only detect line above.
+#          wake_ledger_terminal_sweep mutates too and honours the same flag by
+#          switching to its dry run, so a read-only session still REPORTS the
+#          declared failures it declined to record.
+#          The TANGLE line switches to advisory-only wording with no
 #          checkout command. Used by
 #          fm-session-start.sh's read-only path when another live session holds
 #          the fleet lock, so a second concurrent session never race-mutates
@@ -1109,6 +1112,34 @@ wake_ledger_reconcile() {
   echo "WAKE_LEDGER: $unjoined outcome record(s) join no wake record - supervision-cost figures drawn from this ledger overcount until they are purged (bin/fm-wake-ledger.sh reconcile)"
 }
 
+# Terminal records for tasks that declared failure and were never torn down.
+# Only teardown writes a terminal line, so a failure nobody released is SILENT
+# in the ledger - and silence there is indistinguishable from a task that never
+# failed. A MUTATING sweep: it appends terminal records and writes a per-task
+# receipt, so it runs only when this session holds the fleet lock; a read-only
+# session reports the same tasks without recording them.
+# bin/fm-wake-ledger.sh owns the vocabulary, the sweep, and its idempotence.
+wake_ledger_terminal_sweep() {
+  local out n
+  [ -x "$SCRIPT_DIR/fm-wake-ledger.sh" ] || return 0
+  if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" = 1 ]; then
+    out=$("$SCRIPT_DIR/fm-wake-ledger.sh" sweep --dry-run 2>/dev/null) || return 0
+    n=$(printf '%s\n' "$out" | grep -c '^unreleased failure: ' || true)
+    case "$n" in
+      ''|*[!0-9]*|0) return 0 ;;
+    esac
+    echo "WAKE_LEDGER: $n task(s) declared failure with no terminal record - read-only session left the recording to the session holding the fleet lock (bin/fm-wake-ledger.sh sweep)"
+    return 0
+  fi
+  out=$("$SCRIPT_DIR/fm-wake-ledger.sh" sweep 2>/dev/null) || return 0
+  n=$(printf '%s\n' "$out" \
+    | sed -n 's/^recorded \([0-9][0-9]*\) unreleased failure(s) as terminal records$/\1/p')
+  case "$n" in
+    ''|*[!0-9]*|0) return 0 ;;
+  esac
+  echo "BOOTSTRAP_INFO: recorded $n declared task failure(s) that no teardown would have recorded"
+}
+
 # The entitlement probe half of the observation floor. A MUTATING sweep: it makes
 # live requests and writes state/model-health.json, so it runs only when this
 # session actually holds the fleet lock, alongside the other mutating sweeps.
@@ -1330,6 +1361,7 @@ detect_local_config() {
   model_registry_validate
   admission_control_validate
   wake_ledger_reconcile
+  wake_ledger_terminal_sweep
   if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] \
     && ! fm_backlog_backend_manual "$CONFIG" && fm_tasks_axi_compatible; then
     echo "BOOTSTRAP_INFO: tasks-axi available"
