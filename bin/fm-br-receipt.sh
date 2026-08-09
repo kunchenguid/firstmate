@@ -126,7 +126,7 @@ post_state_valid() {
   owner=$(live_owner)
   case "$transition" in
     claim) [ "$status" = "$expected_state" ] && [ "$owner" = "$agent" ] ;;
-    close) { [ "$status" = closed ] || [ "$status" = done ]; } && [ "$owner" = "$agent" ] && closure_comment_exists ;;
+    close) { [ "$status" = closed ] || [ "$status" = "done" ]; } && [ "$owner" = "$agent" ] && closure_comment_exists ;;
     status) [ "$status" = "$expected_state" ] && [ "$owner" = "$agent" ] ;;
   esac
 }
@@ -212,9 +212,9 @@ recovery_dirty=0
 mutation_already_applied=0
 receipt_source_hash=$actual_hash
 if [ -n "$pre_paths" ]; then
-  [ "$pre_paths" = .beads/issues.jsonl ] \
-    && [ "$(commit_blob_hash HEAD)" = "$expected_hash" ] \
-    && { post_state_valid || { [ "$transition" = close ] && closure_comment_exists; }; } \
+  { [ "$pre_paths" = .beads/issues.jsonl ] \
+      && [ "$(commit_blob_hash HEAD)" = "$expected_hash" ] \
+      && { post_state_valid || { [ "$transition" = close ] && closure_comment_exists; }; }; } \
     || fail_effect "staged or unstaged paths present before mutation: $pre_paths"
   recovery_dirty=1
   receipt_source_hash=$expected_hash

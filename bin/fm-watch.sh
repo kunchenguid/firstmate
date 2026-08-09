@@ -686,7 +686,7 @@ mark_attempt_reconciliation_surfaced() {
 
 FM_WATCH_TERMINAL_WARNING=
 fm_watch_retry_terminal_reconciliation() {
-  local attempt sig terminal failures= missing request receipt_bin
+  local attempt sig terminal failures='' missing request receipt_bin
   FM_WATCH_TERMINAL_WARNING=
   terminal=${FM_TERMINAL_BIN:-$SCRIPT_DIR/fm-terminal.sh}
   while IFS=$(printf '\t') read -r attempt sig; do

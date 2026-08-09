@@ -223,7 +223,7 @@ fm_capacity_collect_rows() {  # writes rows to $1 and the listed-entity set to $
 }
 
 fm_capacity_ambiguous_for() {  # <entity> <reason> -> ambiguous row JSON
-  local entity=$1 reason=$2 attempt= id= meta
+  local entity=$1 reason=$2 attempt='' id='' meta
   case "$entity" in
     attempt:*)
       attempt=${entity#attempt:}

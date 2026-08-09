@@ -71,25 +71,6 @@ fm_refill_automatic() {  # 0 when automatic refill is authorized by the gate
   return 1
 }
 
-# fm_refill_paths_overlap <path-a> <path-b>: 0 when the two paths concretely
-# overlap at a path-component boundary (equal, or one is a directory prefix
-# of the other). This is the bounded admission-overlap test: it runs only on
-# FROZEN provisional evidence and never inspects live diffs.
-fm_refill_paths_overlap() {
-  local a=$1 b=$2
-  a=${a%/}
-  b=${b%/}
-  [ -n "$a" ] && [ -n "$b" ] || return 1
-  [ "$a" = "$b" ] && return 0
-  case "$a/" in
-    "$b/"*) return 0 ;;
-  esac
-  case "$b/" in
-    "$a/"*) return 0 ;;
-  esac
-  return 1
-}
-
 fm_refill_current_evidence() {  # -> JSON array of current structured evidence
   local dir f aid entry task meta candidate_meta meta_attempt meta_kind bound_count
   local entries=()

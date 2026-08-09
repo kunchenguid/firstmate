@@ -191,6 +191,7 @@ test_total_deadline_child_receives_home_local_context_without_state_override() {
   home="$TMP_ROOT/home-context"
   marker="$home/context-seen"
   mkdir -p "$home/state" "$home/data" "$home/config"
+  # shellcheck disable=SC2016 # $1/$2 expand inside the inner bash, not here.
   aid=$(env FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" bash -c \
     '. "$1"; fm_attempt_alloc pi home-task "$2"' _ "$ROOT/bin/fm-attempt-lib.sh" "$home") \
     || fail "home-context attempt"

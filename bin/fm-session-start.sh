@@ -735,7 +735,7 @@ attempt_exit_hint() {  # <attempt-id>
 }
 
 retry_startup_terminal_reconciliation() {
-  local projection attempt terminal failures= missing request receipt_bin
+  local projection attempt terminal failures='' missing request receipt_bin
   [ "$READ_ONLY" -eq 0 ] || return 0
   projection=$(FM_STATE_OVERRIDE="$STATE" FM_HOME="$FM_HOME" fm_capacity_project 2>/dev/null || true)
   terminal=${FM_TERMINAL_BIN:-$SCRIPT_DIR/fm-terminal.sh}
