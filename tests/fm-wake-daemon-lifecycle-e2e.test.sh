@@ -30,6 +30,10 @@ if [ -z "${FM_TEST_DAEMON_SOURCED:-}" ]; then
   # shellcheck source=/dev/null
   . "$DAEMON"
 fi
+# Housekeeping's wedge gate reads crew state, so every in-process call below must
+# answer from this file's fake rather than from the real reader and whatever the
+# fixture happens to have on disk. The guard makes forgetting that abort the run.
+fm_guard_crew_state_reader
 
 TMP_ROOT=$(fm_test_tmproot fm-wake-daemon-e2e)
 
@@ -86,7 +90,8 @@ test_routine_then_terminal_after_restart() {
     || fail "expected exactly one buffered digest after the terminal signal"
 
   # The catch-all heartbeat scan must NOT re-escalate the same status (no dup).
-  FM_STATE_OVERRIDE="$state" housekeeping "$state"
+  FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    housekeeping "$state"
   [ "$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')" -eq 1 ] \
     || fail "catch-all scan duplicated the already-buffered digest"
 
@@ -116,20 +121,29 @@ test_stale_pane_transient_persistent_resume() {
 
   # Transient: first stale observation self-handles and records a marker.
   stale_marker_record "$win" "$state"
-  case "$(FM_STATE_OVERRIDE="$state" classify_stale "$win" "$state")" in
+  # classify_stale reaches crew_absorb_class for the settled-terminal absorb, so
+  # the reader is stubbed here too: this case is about the transient self-handle,
+  # and its verdict must come from the test rather than from the fixture on disk.
+  case "$(FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    classify_stale "$win" "$state")" in
     self\|*) : ;;
     *) fail "transient stale did not self-handle" ;;
   esac
   [ -e "$state/.subsuper-stale-$key" ] || fail "transient stale did not record a persistence marker"
 
   # Persistent: the marker ages past the threshold and the pane is still idle, so
-  # housekeeping escalates exactly once and clears the marker.
+  # housekeeping escalates exactly once and clears the marker. That path runs
+  # through the provably-working gate, so the verdict is stubbed to a non-working
+  # one here: the escalation must follow the verdict this test names, not whatever
+  # the real reader would make of the fixture at this phase.
   printf 'idle prompt $\n' > "$dir/pane.txt"
   echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
   : > "$state/.subsuper-escalations" 2>/dev/null || true
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$dir/pane.txt" \
-    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 housekeeping "$state" \
-    2>"$dir/housekeeping.err"
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_FAKE_CREW_STATE='state: stopped · source: pane · agent exited' \
+    housekeeping "$state" 2>"$dir/housekeeping.err"
   [ ! -s "$dir/housekeeping.err" ] \
     || fail "missing task metadata leaked a raw read error: $(cat "$dir/housekeeping.err")"
   [ -s "$state/.subsuper-escalations" ] || fail "persistent stale did not escalate"
@@ -147,7 +161,10 @@ test_stale_pane_transient_persistent_resume() {
     --source pi-ext --event agent-start
   : > "$state/.subsuper-escalations"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$dir/pane.txt" \
-    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 housekeeping "$state"
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_FAKE_CREW_STATE='state: stopped · source: pane · agent exited' \
+    housekeeping "$state"
   [ ! -e "$state/.subsuper-stale-$key" ] || fail "resumed stale marker was not cleared"
   [ ! -s "$state/.subsuper-escalations" ] || fail "resumed (busy) stale was escalated"
   pass "lifecycle: stale pane transient self-handles, persistent escalates once and clears, resumed clears quietly"
