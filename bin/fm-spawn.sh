@@ -1033,6 +1033,8 @@ if [ "$RELAUNCH" -eq 1 ]; then
     echo "error: task $ID's endpoint reads '$RELAUNCH_STATE'; a relaunch requires a positively agent-free endpoint (stop the agent first with bin/fm-control.sh $ID exit)" >&2
     exit 1
   }
+  CURSOR_RELAUNCH_HAD_WORKER_RECORD=0
+  [ ! -f "$STATE/$ID.worker-server" ] || CURSOR_RELAUNCH_HAD_WORKER_RECORD=1
   cursor_worker_server_reap_record "$STATE/$ID.worker-server" "$ID" || exit 1
   RELAUNCH_PRIOR_HARNESS=$(fm_meta_get "$RELAUNCH_META" harness)
   KIND=$(fm_meta_get "$RELAUNCH_META" kind)
@@ -1233,17 +1235,22 @@ fi
 
 # Cursor launches a background worker-server that detaches from the pane and
 # leaves the task worktree, so teardown can only reap it by the pid identity
-# recorded at spawn (cursor_worker_server_record below). That discovery reads
-# the pane's own process tree, which only the tmux and herdr backends expose.
-# On any other backend the record would be silently omitted and the detached
+# recorded at spawn (cursor_worker_server_record below). Ownership capture is
+# verified only on the tmux and herdr launch paths. On any other backend the
+# record could be silently omitted and the detached
 # worker-server would leak, so refuse here - before an endpoint is created, a
 # launch command is delivered, or task metadata is published - rather than
 # spawning a task whose cleanup is known to be incomplete.
 if [ "$HARNESS" = cursor ]; then
+  CURSOR_WORKER_LAUNCH_TOKEN=$(fm_trace_context_hex 16) || {
+    echo "error: cursor worker-server launch identity could not be generated" >&2
+    exit 1
+  }
+  export CURSOR_WORKER_LAUNCH_TOKEN
   case "$BACKEND" in
     tmux|herdr) ;;
     *)
-      echo "error: cursor cannot spawn on backend=$BACKEND: this backend does not expose the pane process tree, so the detached worker-server cannot be discovered and would leak after cleanup. Cursor is supported on backends: tmux, herdr." >&2
+      echo "error: cursor cannot spawn on backend=$BACKEND: detached worker-server ownership capture is not verified for this backend and could leak after cleanup. Cursor is supported on backends: tmux, herdr." >&2
       exit 1
       ;;
   esac
@@ -2126,85 +2133,43 @@ kimi_capture() {
 # it by pid even after it detaches (reparents to init) and its cwd leaves the
 # task worktree (an observed worker-server cleanup gap, 2026-08-05).
 #
-# Discovery: the worker-server is a direct child of the cursor-agent process
-# running in this task's pane, so it is found from the pane's own process tree
-# (tmux: ps -t <pane-tty>; herdr: pane process-info foreground pids). The
-# bounded poll runs immediately after Enter, before the worker-server can
-# detach. Ownership evidence is MANDATORY: if the worker-server cannot be
-# found and recorded atomically within the bounded poll, spawn fails and
-# rolls back the endpoint rather than proceeding with untracked state.
+# Discovery is bound to the launch through a random environment token inherited
+# by the worker-server. Ownership evidence is MANDATORY: if the worker-server
+# cannot be found and recorded atomically within the bounded poll, spawn fails
+# and rolls back the endpoint rather than proceeding with untracked state.
 # The record file is written via temp+mv so it is never partially visible.
-# Never matched by a generic worker-server cmdline scan - the install dir and
-# cmdline are shared across homes and tasks.
-# True when the process whose full argument string is $1 is the Cursor CLI
-# launched from the exact resolved executable $2.
-#
-# Two conditions, both required. The process must satisfy the narrowed Cursor
-# identity rule owned by bin/fm-cursor-lib.sh, and its argv[0] must resolve to
-# the SAME canonical executable this spawn selected - binding the exact
-# resolved path, never the basename, so a second Cursor install or an unrelated
-# executable sharing the alias name cannot capture this task's worker-server
-# discovery.
-cursor_process_matches() {  # <args> <cursor-binary> <argv0>
-  local args=$1 binary=$2 argv0=${3:-}
-  [ -n "$args" ] || return 1
-  [ -n "$argv0" ] || return 1
-  # Structural match first; probe-based alias as fallback (mirrors the
-  # resolver's own fallback chain in fm_cursor_resolve_binary).
-  if ! fm_cursor_process_matches "$argv0" "$args" "$argv0"; then
-    fm_cursor_probe_is_cursor "$argv0" || return 1
-  fi
-  [ "$(fm_cursor_canonical_path "$argv0")" = "$(fm_cursor_canonical_path "$binary")" ]
-}
+# Never matched by worker-server cmdline alone - the install dir and cmdline are
+# shared across homes and tasks.
 
-cursor_worker_server_find() {  # <backend> <target> <cursor-binary> -> pid on stdout
-  local backend=$1 target=$2 binary=${3:-${CURSOR_BIN:-cursor-agent}} tty pid args argv0
-  case "$backend" in
-    tmux)
-      tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || return 1
-      [ -n "$tty" ] || return 1
-      # The pane's foreground process group: the cursor-agent process (kernel
-      # comm MainThread) is the group leader. Its worker-server child is NOT in
-      # the foreground group once detached, so match by parent below instead.
-      LC_ALL=C ps -t "${tty#/dev/}" -o pid=,args= 2>/dev/null | while read -r pid args; do
-        argv0=$(fm_cursor_argv0_for_pid "$pid" || true)
-        cursor_process_matches "$args" "$binary" "$argv0" || continue
-        printf '%s\n' "$pid"
-        return 0
-      done
-      ;;
-    herdr)
-      # herdr exposes the pane's foreground processes; the cursor-agent is one
-      # of them. Its worker-server child is found by parent below.
-      fm_backend_herdr_parse_target "$target" || return 1
-      fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane process-info --pane "$FM_BACKEND_HERDR_PANE" 2>/dev/null \
-        | jq -r '.result.process_info.foreground_processes[]?.pid // empty' 2>/dev/null \
-        | while read -r pid; do
-          [ -n "$pid" ] && [ "$pid" -gt 1 ] 2>/dev/null && printf '%s\n' "$pid"
-        done
-      ;;
-    *) return 1 ;;
-  esac
+cursor_worker_server_has_launch_token() {  # <pid> <token>
+  local pid=$1 token=$2 environ
+  environ=${FM_PROC_ROOT_OVERRIDE:-/proc}/$pid/environ
+  if [ -r "$environ" ]; then
+    tr '\0' '\n' < "$environ" 2>/dev/null | grep -Fqx "FM_CURSOR_LAUNCH_TOKEN=$token"
+    return
+  fi
+  LC_ALL=C ps eww -p "$pid" -o command= 2>/dev/null \
+    | tr ' ' '\n' | grep -Fqx "FM_CURSOR_LAUNCH_TOKEN=$token"
 }
 
 cursor_worker_server_find_under_task_roots() {
   local out pid path line root canonical_root args
-  command -v lsof >/dev/null 2>&1 || return 1
-  out=$(lsof -a -d cwd -Fpn 2>/dev/null) || return 1
+  command -v lsof >/dev/null 2>&1 || return 2
+  out=$(lsof -a -d cwd -Fpn 2>/dev/null) || return 2
   pid=
   while IFS= read -r line; do
     case "$line" in
       p*)
         pid=${line#p}
-        case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+        case "$pid" in ''|*[!0-9]*) return 2 ;; esac
         ;;
-      fcwd) [ -n "$pid" ] || return 1 ;;
+      fcwd) [ -n "$pid" ] || return 2 ;;
       n*)
-        [ -n "$pid" ] || return 1
+        [ -n "$pid" ] || return 2
         path=${line#n}
         for root in "${WT:-}" "${TASK_TMP:-}"; do
           [ -n "$root" ] && [ -d "$root" ] || continue
-          canonical_root=$(cd "$root" && pwd -P) || return 1
+          canonical_root=$(cd "$root" && pwd -P) || return 2
           case "$path" in
             "$canonical_root"|"$canonical_root"/*)
               args=$(LC_ALL=C ps -p "$pid" -o args= 2>/dev/null || true)
@@ -2214,7 +2179,7 @@ cursor_worker_server_find_under_task_roots() {
         done
         ;;
       '') ;;
-      *) return 1 ;;
+      *) return 2 ;;
     esac
   done <<EOF
 $out
@@ -2222,29 +2187,38 @@ EOF
   return 1
 }
 
+cursor_worker_server_reap_task_roots() {
+  local pid identity ws_file tmp status
+  ws_file="$STATE/$ID.worker-server"
+  while :; do
+    pid=$(cursor_worker_server_find_under_task_roots)
+    status=$?
+    [ "$status" -eq 0 ] || { [ "$status" -eq 1 ] && return 0; return 1; }
+    identity=$(fm_process_identity "$pid") || return 1
+    tmp="$ws_file.tmp.$$"
+    printf '%s %s\n' "$pid" "$identity" > "$tmp" || return 1
+    mv -f -- "$tmp" "$ws_file" || { rm -f -- "$tmp"; return 1; }
+    cursor_worker_server_reap_record "$ws_file" "$ID" || return 1
+  done
+}
+
 # The recorded identity is produced by the SAME parse teardown re-checks
 # (fm_process_identity, bin/fm-process-identity-lib.sh), so a comm containing
 # spaces cannot make the two disagree and silently defeat the recycled-pid check.
-cursor_worker_server_record() {  # <backend> <target> -> 0 when recorded atomically, 1 when evidence missing
-  local backend=$1 target=$2 agent_pid worker_pid identity binary=${CURSOR_BIN:-cursor-agent} argv0 i ws_file tmp
+cursor_worker_server_record() {  # -> 0 when recorded atomically, 1 when evidence missing
+  local pid worker_pid identity i ws_file tmp
   ws_file="$STATE/$ID.worker-server"
   for i in 1 2 3 4 5; do
-    agent_pid=
+    worker_pid=
     while IFS= read -r pid; do
       [ -n "$pid" ] || continue
-      argv0=$(fm_cursor_argv0_for_pid "$pid" || true)
-      if cursor_process_matches "$(LC_ALL=C ps -p "$pid" -o args= 2>/dev/null)" "$binary" "$argv0"; then
-        agent_pid=$pid
+      if cursor_worker_server_has_launch_token "$pid" "$CURSOR_WORKER_LAUNCH_TOKEN"; then
+        worker_pid=$pid
         break
       fi
     done <<EOF
-$(cursor_worker_server_find "$backend" "$target" "$binary")
+$(pgrep -f 'index.js worker-server' 2>/dev/null || true)
 EOF
-    worker_pid=
-    if [ -n "$agent_pid" ]; then
-      worker_pid=$(pgrep -P "$agent_pid" -f 'index.js worker-server' 2>/dev/null | head -1 || true)
-    fi
-    [ -n "$worker_pid" ] || worker_pid=$(cursor_worker_server_find_under_task_roots || true)
     [ -n "$worker_pid" ] || { sleep 0.3; continue; }
     identity=$(fm_process_identity "$worker_pid" 2>/dev/null || true)
     [ -n "$identity" ] || continue
@@ -2379,7 +2353,8 @@ kimi_spawn_fail() {  # <detail>
   echo "error: $1; inspect window $T" >&2
 }
 
-if [ "$RELAUNCH" -eq 1 ]; then
+if [ "$RELAUNCH" -eq 1 ] && [ "$RELAUNCH_PRIOR_HARNESS" = cursor ] \
+   && [ "$CURSOR_RELAUNCH_HAD_WORKER_RECORD" -eq 0 ]; then
   # No worktree is acquired: the recorded one is reused as-is. What must be
   # proven instead is that the adopted endpoint's shell is actually sitting in
   # that worktree, so the replacement agent starts where the work is rather
@@ -2917,6 +2892,9 @@ fi
 if [ "$HARNESS" != cursor ] && [ "${RAW_LAUNCH:-0}" -eq 0 ]; then
   LAUNCH="env -u CURSOR_AGENT $LAUNCH"
 fi
+if [ "$HARNESS" = cursor ]; then
+  LAUNCH="FM_CURSOR_LAUNCH_TOKEN=$(shell_quote "$CURSOR_WORKER_LAUNCH_TOKEN") $LAUNCH"
+fi
 if [ -z "$SPAWN_TRACEPARENT" ] && [ "$RELAUNCH" -eq 1 ]; then
   LAUNCH="unset TRACEPARENT; $LAUNCH"
 fi
@@ -2962,6 +2940,12 @@ if [ -n "$SPAWN_TRACEPARENT" ]; then
   fi
 fi
 sleep 0.3
+if [ "$RELAUNCH" -eq 1 ]; then
+  cursor_worker_server_reap_task_roots || {
+    echo "error: prior cursor worker-server could not be reaped; refusing relaunch" >&2
+    exit 1
+  }
+fi
 spawn_send_literal "$T" "$LAUNCH"
 sleep 0.3
 if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
@@ -2969,7 +2953,7 @@ if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   spawn_herdr_presentation_order_lock_release
 fi
 if [ "$HARNESS" = cursor ]; then
-  cursor_worker_server_record "$BACKEND" "$T" &
+  cursor_worker_server_record &
   CURSOR_WORKER_RECORDER_PID=$!
   spawn_send_key "$T" Enter
   # Establish worker-server ownership evidence before the task is considered
