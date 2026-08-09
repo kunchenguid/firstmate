@@ -26,10 +26,11 @@
 #     row whose own kind is captain, because a captain hold can gate any item.
 #     The URL is private data and is never fetched or rewritten.
 #     They also carry normalized current_role,
-#     requires_child_metadata, blocked_by_ids, unresolved_blocker_ids,
+#     requires_child_metadata, blocked_by_ids, unresolved_blocker_ids, blocks_ids,
 #     captain_actionable, and captain_deferred fields. Repeated blocker tokens
 #     remain ordered; a blocker resolves only when its structured record is Done,
-#     and missing ids stay open.
+#     missing ids stay open, and blocks_ids retains every dependent record even
+#     after this record is Done.
 #     Any queued row with a non-empty captain hold and no unresolved blocker is
 #     captain_actionable regardless of the row's own kind. captain_deferred is
 #     the same kind-independent classification under a "parked" hold kind: the
@@ -74,7 +75,8 @@
 #     untrusted supplements only and never override readable structured-home facts.
 #     Each structured-home record carries active_children, decisions_open, holds,
 #     queued, landed, endpoints, counts, and omitted. Actionable captain holds
-#     appear in decisions_open; blocked captain holds remain queued with metadata.
+#     appear in decisions_open with blocks_ids; blocked captain holds remain queued
+#     with blocker and reverse-dependency metadata.
 #     An active_children row carries title, model, harness, and stage alongside
 #     its id and doing detail. Those four are additive within the summary schema,
 #     so a home running an older firstmate omits them and a reader must treat an
@@ -180,8 +182,8 @@ validated registered-home handoff. It is local-only, skips nested secondmate
 aggregation, and marks inventory contradictions or unavailable child state invalid.
 Its invalidity object names the normalized failure kind and affected ids.
 Actionable tasks-axi captain holds appear as decisions_open and stay visible in
-queued with hold_reason, hold_kind, captain_deferred, and plural blocker fields
-for downstream projections. A non-empty captain hold is actionable only when
+queued with hold_reason, hold_kind, captain_deferred, plural blocker fields,
+and reverse blocks_ids for downstream projections. A non-empty captain hold is actionable only when
 every blocker is Done, regardless of the row's own kind. The same row under a
 parked hold kind is deferred rather than actionable or blocked, and is left out
 of holds.
@@ -467,9 +469,20 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
     | .records as $records
     | (reduce ($records[] | select(.structured)) as $record ({};
          .[$record.id] = ((.[$record.id] // true) and ($record.state == "done")))) as $resolved_ids
+    | (reduce ($records[] | select(.structured)) as $dependent ({};
+         reduce ($dependent.blocked_by_ids[]?) as $blocker
+           (.;
+            if $blocker == $dependent.id then .
+            else (.[$blocker] // []) as $dependents
+              | .[$blocker] =
+                  (if ($dependents | index($dependent.id)) == null
+                   then $dependents + [$dependent.id]
+                   else $dependents end)
+            end))) as $blocks_by_id
     | .records |= map(
         if .structured then
           . as $record
+          | .blocks_ids = ($blocks_by_id[$record.id] // [])
           | .unresolved_blocker_ids = [
               $record.blocked_by_ids[] as $blocker
               | select($resolved_ids[$blocker] != true)
@@ -777,12 +790,15 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
             affects:((.decision_affects // null) | if . == null then null else trunc(2000) end),
             recommendation:((.decision_recommendation // null) | if . == null then null else trunc(2000) end),
             no_surface:((.decision_no_surface // null) | if . == null then null else trunc(2000) end),
+            blocks_ids:((.blocks_ids // []) | map(trunc(120))),
             reason:(.hold_reason | trunc(160)),source:"backlog"} ]) as $captain_holds_all
-    | ([ $backlog.records[]? | select(.state == "done" and .structured and .kind != "captain")
+    | ([ $backlog.records[]?
+         | select(.state == "done" and .structured and .kind != "captain")
          | {id:(.id | trunc(120)),title:(.title | trunc(120)),
             pr_url:((.pr_url // null) | if . == null then null else trunc(500) end),
             report_path:((.report_path // null) | if . == null then null else trunc(500) end),
-            local_note:((.local_note // null) | if . == null then null else trunc(120) end),completion} ]
+            local_note:((.local_note // null) | if . == null then null else trunc(120) end),
+            blocks_ids:((.blocks_ids // []) | map(trunc(120))),completion} ]
        | sort_by([(.completion.date // ""), .id]) | reverse) as $landed_all
     | ([ $tasks[] | select(.current_state.state == "unknown") ]) as $unknown_children
     | ([ $owned_in_flight[]
@@ -839,6 +855,7 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
             blocked_by:((.unresolved_blocker_ids | join(",")) | if . == "" then null else trunc(120) end),
             blocked_by_ids:(.blocked_by_ids | map(trunc(120))),
             unresolved_blocker_ids:(.unresolved_blocker_ids | map(trunc(120))),
+            blocks_ids:(.blocks_ids | map(trunc(120))),
             reason:((.hold_reason // .blocked_reason // "blocked") | trunc(120)),source:"backlog"} ]
        + [ $owned_in_flight[] as $work
            | $tasks[]
@@ -880,6 +897,7 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
           blocked_by:((.blocked_by // null) | if . == null then null else trunc(120) end),
           blocked_by_ids:((.blocked_by_ids // []) | map(trunc(120))),
           unresolved_blocker_ids:((.unresolved_blocker_ids // []) | map(trunc(120))),
+          blocks_ids:((.blocks_ids // []) | map(trunc(120))),
           blocked_reason:((.blocked_reason // null) | if . == null then null else trunc(160) end),
           hold_reason:((.hold_reason // null) | if . == null then null else trunc(160) end),
           hold_kind:((.hold_kind // null) | if . == null then null else trunc(40) end),

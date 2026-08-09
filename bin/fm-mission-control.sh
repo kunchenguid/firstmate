@@ -644,6 +644,14 @@ def project_glyph($name):
   ]) as $set |
   $set[(($name | explode | add // 0) % ($set | length))];
 
+# A blocker id reaches this renderer even when a secondmate's bounded queued
+# rows omit its title, so retain the id rather than presenting a blank label.
+def blocking_labels($items; $ids):
+  [ $ids[]? as $id
+    | ($items | map(select(.id == $id) | (.title // .id)) | first) as $title
+    | if ($title | type) == "string" and $title != "" then $title else $id end
+  ];
+
 # ---------------------------------------------------------------- inputs ----
 ($registry | map({key: .name, value: .}) | from_entries) as $registry_by_name |
 def yolo_for($repo): ($registry_by_name[$repo // ""].yolo // false);
@@ -677,6 +685,7 @@ def yolo_for($repo): ($registry_by_name[$repo // ""].yolo // false);
   affects: (.decision_affects // null),
   recommendation: (.decision_recommendation // null),
   no_surface: (.decision_no_surface // null),
+  blocks: blocking_labels($records; (.blocks_ids // [])),
   repo: (.repo // "" | short_repo),
   link: (.pr_url // .report_path // null),
   # A main-home captain decision is always a backlog hold, so both controls
@@ -723,6 +732,7 @@ def yolo_for($repo): ($registry_by_name[$repo // ""].yolo // false);
     affects: (.affects // null),
     recommendation: (.recommendation // null),
     no_surface: (.no_surface // null),
+    blocks: blocking_labels(($sm.queued // []); (.blocks_ids // [])),
     repo: "",
     link: null,
     ctl: (if $did == "" and $dkey == "" then null
@@ -1297,7 +1307,8 @@ def need_ctx:
   . as $w |
   (ctx_row("Why now"; $w.why)
    + ctx_row("What it affects"; $w.affects)
-   + ctx_row("Recommendation"; $w.recommendation)) as $rows |
+   + ctx_row("Recommendation"; $w.recommendation)
+   + ctx_row("Blocking:"; (($w.blocks // []) | join(", ")))) as $rows |
   # The conscious "no built surface" choice is shown to the captain too. It is the
   # difference between a decision nobody prepared a surface for and one where the
   # filer established that none applies, and only the second is ready to answer.

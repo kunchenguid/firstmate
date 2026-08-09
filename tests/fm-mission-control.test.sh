@@ -165,8 +165,8 @@ JS
 # one and reading the recommendation must never navigate away. Markup alone cannot
 # prove that, so this measures the real DOM: the context must not be inside any
 # anchor, and it must not push the board sideways at phone width.
-assert_decision_context_placement() {  # <html>
-  local html=$1 chrome
+assert_decision_context_placement() {  # <html> [require-blocking-line]
+  local html=$1 expect_blocking=${2:-false} chrome
   command -v node >/dev/null 2>&1 || {
     printf 'skip: node not found for rendered decision-context placement assertion\n'
     return 0
@@ -176,11 +176,11 @@ assert_decision_context_placement() {  # <html>
     return 0
   }
 
-  node - "$chrome" "$html" <<'JS'
+  node - "$chrome" "$html" "$expect_blocking" <<'JS'
 const { spawn } = require("node:child_process");
 const { pathToFileURL } = require("node:url");
 
-const [chromePath, htmlPath] = process.argv.slice(2);
+const [chromePath, htmlPath, expectBlocking] = process.argv.slice(2);
 const chrome = spawn(chromePath, [
   "--headless=new",
   "--disable-gpu",
@@ -248,6 +248,8 @@ async function measure(sessionId, width, height, mobile) {
       const root = document.documentElement;
       return {
         blocks: blocks.length,
+        blockingLines: [...document.querySelectorAll(".ctx-l")]
+          .filter((label) => label.textContent.trim() === "Blocking:").length,
         insideAnchor: blocks.some((block) => block.closest("a") !== null),
         overflowing: values.some((value) => {
           const rect = value.getBoundingClientRect();
@@ -271,6 +273,9 @@ async function run() {
     const seen = await measure(sessionId, width, height, mobile);
     if (seen.blocks === 0) {
       throw new Error(`no decision context rendered at ${width}px: ${JSON.stringify(seen)}`);
+    }
+    if (expectBlocking === "true" && seen.blockingLines === 0) {
+      throw new Error(`no blocking line rendered at ${width}px: ${JSON.stringify(seen)}`);
     }
     if (seen.insideAnchor) {
       throw new Error(`decision context rendered inside the row link at ${width}px, so reading it navigates away`);
@@ -1099,6 +1104,49 @@ EOF
   assert_decision_context_placement "$linked" \
     || fail "the rendered context must sit outside the row link and fit both widths"
   pass "structured decision context renders as labelled sections and leaves old-style decisions unchanged"
+}
+
+# A decision is a dependency fact as well as a call for an answer, so its card
+# names the affected backlog work without requiring the captain to infer it from
+# prose. A secondmate can omit dependent rows from its bounded summary, in which
+# case the durable id is the only honest label.
+test_decision_blocking_line_names_dependents_and_falls_back_to_ids() {
+  local snap board
+  snap=$TMP_ROOT/decision-blocking.json
+  board=$TMP_ROOT/decision-blocking.html
+  snapshot_json '[
+    {"state":"queued","id":"alpha-route","structured":true,"kind":"captain",
+     "captain_actionable":true,"captain_deferred":false,"unresolved_blocker_ids":[],
+     "blocks_ids":["alpha-dashboard"],"title":"Choose the alpha release route",
+     "hold_reason":"The release window is closing.","repo":"alpha","completion":{"date":null}},
+    {"state":"queued","id":"alpha-dashboard","structured":true,"kind":"ship",
+     "captain_actionable":false,"captain_deferred":false,"unresolved_blocker_ids":["alpha-route"],
+     "blocks_ids":[],"title":"Launch the alpha operations dashboard","repo":"alpha",
+     "completion":{"date":null}},
+    {"state":"queued","id":"quiet-decision","structured":true,"kind":"captain",
+     "captain_actionable":true,"captain_deferred":false,"unresolved_blocker_ids":[],
+     "blocks_ids":[],"title":"Approve the quiet rollout","hold_reason":"The rollout is ready.",
+     "repo":"alpha","completion":{"date":null}}
+  ]' '[{
+    "id":"brain","current":{"state":"captain_decision"},"active_children":[],
+    "decisions_open":[{"id":"brain-route","key":"brain-route","verb":"captain-hold",
+      "summary":"Choose the Brain routing budget","reason":"The capacity decision is due.",
+      "source":"backlog","blocks_ids":["brain-dashboard"]}],
+    "holds":[],"queued":[],"counts":{"active_children":0,"decisions_open":1,"holds":0}
+  }]' > "$snap"
+  "$BOARD" --snapshot "$snap" --no-quota --out "$board" >/dev/null \
+    || fail "a board with decision dependents must render"
+
+  assert_grep '<span class="ctx-l">Blocking:</span><span class="ctx-v">Launch the alpha operations dashboard</span>' \
+    "$board" "a decision must name the titled work it blocks"
+  assert_grep '<span class="ctx-l">Blocking:</span><span class="ctx-v">brain-dashboard</span>' \
+    "$board" "a secondmate decision must fall back to an unavailable dependent title's id"
+  [ "$(grep -o '<span class="ctx-l">Blocking:</span>' "$board" | wc -l | tr -d ' ')" = 2 ] \
+    || fail "only decisions with dependents must render a blocking line"
+
+  assert_decision_context_placement "$board" true \
+    || fail "blocking lines must fit the linked decision card at desktop and phone widths"
+  pass "decision cards name dependents, omit empty impact lines, and fit at both widths"
 }
 
 test_deferred_decision_leaves_the_primary_view() {
@@ -3088,6 +3136,7 @@ test_recent_autonomous_actions_are_bounded_and_appendable
 test_hostile_text_is_escaped
 test_missing_backlog_is_disclosed_as_unavailable
 test_structured_decision_context_renders_as_labelled_sections
+test_decision_blocking_line_names_dependents_and_falls_back_to_ids
 test_deferred_decision_leaves_the_primary_view
 test_deferred_shelf_reaches_a_secondmate_and_discloses_its_bound
 test_navigation_tabs_group_the_board

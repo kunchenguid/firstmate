@@ -33,6 +33,7 @@ The stage itself is derived by the snapshot rather than by the board; see `bin/f
   That third source matters because a secondmate's decisions live in its backlog and never appear in this home's, so a board built from the local backlog alone would silently drop them.
   Each row names the home it came from when that home is not the main one.
   A decision filed with structured context shows it as labelled sections under the row - "Why now", "What it affects", "Recommendation", and, where the filer established that no built surface applies, "No built surface" - so the captain can find the recommendation without reading a paragraph for it.
+  When a decision has downstream backlog dependents, it also shows one compact "Blocking:" line with each dependent's title, or its id when the available snapshot cannot resolve that title.
   That block is a sibling of the row rather than part of it, because the row title is a link whenever the decision has one and reading the context must never navigate away; at phone width each label sits above the text it labels.
   An old-style decision that carries only a plain hold reason renders exactly as it always has, while an earlier decision that already records an optional question or decision-aid URL keeps that behavior without gaining the new labelled context block.
   [`docs/decision-hold-lifecycle.md`](decision-hold-lifecycle.md) owns the fields themselves and which of them a filing must supply.
@@ -226,7 +227,8 @@ An absent backlog, project registry, secondmate table, Token Dashboard reading, 
 ## Where the data comes from
 
 The board does not parse fleet state itself.
-Like `bin/fm-fleet-view.sh` it renders one `bin/fm-fleet-snapshot.sh --json` capture, so current state, backlog roles, captain actionability, and secondmate current state keep exactly one owner.
+Like `bin/fm-fleet-view.sh` it renders one `bin/fm-fleet-snapshot.sh --json` capture, so current state, backlog roles, captain actionability, dependency direction, and secondmate current state keep exactly one owner.
+Each structured backlog record carries `blocked_by_ids`, its unresolved subset `unresolved_blocker_ids`, and reverse `blocks_ids`; the latter retains dependent ids after a blocker is Done, while the board resolves titles only from records available in that capture.
 Paths come from that snapshot's own resolved roots, so the board follows the active home without resolving `FM_HOME` a second time.
 
 Four concerns come from outside the snapshot because the snapshot does not own them:
@@ -278,7 +280,8 @@ The generator does not serve it; how the file is exposed is decided outside it.
 `tests/fm-mission-control.test.sh` renders the board end to end from a fixture home and from captured snapshot payloads, covering present and absent sources, the empty and populated recent autonomous-actions feed, its 12-hour expiry and newest-first order, cross-home captain decisions, escaping of hostile prose, project folding, work outside the registry, per-item stage and model rendering, bounded cross-home stage values, safe handling of valid, missing, and malformed secondmate active-task totals, item overflow, blocked work, rich allowance pace and history, automatic balancing, unavailable and stale allowance sources, narrow allowance labels, unmeasurable fallback windows, self-reload, the self-contained favicon in ordinary and control-enabled boards, the tab structure, the deferred shelf, and labelled structured decision context.
 The deferred cases pin the awaiting count and the section count to literal numbers rather than to the absence of a title, because dropping a decision from the list while still counting it and counting it while still listing it fail separately.
 The decision-context case renders a structured and an old-style decision from one fixture home and pins the count of rendered context blocks, so leaving the old-style decision alone is proven rather than inferred from it happening to look bare.
-It then measures the rendered page in a real browser at desktop and 390px, because markup alone cannot show that the context block sits outside the row link or that it does not push the board sideways; that measurement self-skips when Chrome or Node is absent.
+The dependency case adds a titled dependent, an unavailable secondmate-dependent title, and a decision with no dependents, then pins the titled line, id fallback, and absence of an extra line.
+It then measures the rendered page in a real browser at 1280px and 390px, because markup alone cannot show that the context or dependency line sits outside the row link or that it does not push the board sideways; that measurement self-skips when Chrome or Node is absent.
 It also pins a fixed current time and commits its fixture clones at explicit epochs, so the last-change wording, its three degrade-to-dash paths, and the promise that no clone is written to are all checked against times the test chose.
 
 The reply layer is covered in the same suite: that the default board is unchanged by its existence, that each row offers only the controls it can resolve, that a control names no host, port, or absolute endpoint and derives its target from the URL the document was loaded from, that it stays hidden until a transport is proved, and that the confirmation banner ships hidden with an empty outcome heading.
@@ -299,6 +302,7 @@ With `FM_MISSION_CONTROL_LIVE_HOME` set to an active home, the same suite genera
 `tests/fm-procevent-mission-control.test.sh` pins the request normalizer against bytes captured from a real send through a real browser, and drives every fail-closed path - a forged envelope, an out-of-vocabulary intent, a truncated capture, a defer carrying reason text - to a refusal rather than a plausible request.
 
 `tests/fm-fleet-snapshot-view.test.sh` pins lifecycle-stage derivation and its conservative fallbacks, secondmate Setup liveness, and the captain-hold classification itself: captain holds on ship and scout work are actionable when unblocked, parked captain holds are deferred regardless of the row's own kind, a held row with an unresolved blocker stays blocked rather than deferred, and a deferred row never reaches the secondmate home summary's holds.
+It also pins empty and populated reverse dependency lists, retention after a blocker is Done, and preservation through the secondmate summary.
 
 That a tab survives the board's own reload cannot be shown by a shell test, so it is checked in a real browser alongside project-tag navigation from a decision to its highlighted Projects card at desktop and 390px mobile widths, plus the no-script anchor fallback.
 The existing visual board comparisons and live-fleet reading-position evidence are recorded in [`docs/evidence/mission-control/`](evidence/mission-control/); the project jump itself is exercised by the real-browser regression in `tests/fm-mission-control.test.sh`.
