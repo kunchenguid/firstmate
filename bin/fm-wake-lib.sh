@@ -492,6 +492,23 @@ fm_wake_queued_keys_locked() {
     "$FM_WAKE_QUEUE" 2>/dev/null || true
 }
 
+fm_wake_latest_payload() {
+  local kind=$1 key=$2 payload status
+  case "$kind" in
+    signal|stale|check|heartbeat) ;;
+    *) printf 'fm_wake_latest_payload: invalid wake kind: %s\n' "$kind" >&2; return 2 ;;
+  esac
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
+  payload=$(awk -F '\t' -v kind="$kind" -v key="$key" '
+    NF >= 5 && $3 == kind && $4 == key { payload = $5; found = 1 }
+    END { if (found) print payload; else exit 1 }
+  ' "$FM_WAKE_QUEUE" 2>/dev/null)
+  status=$?
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+  [ "$status" -eq 0 ] || return "$status"
+  printf '%s\n' "$payload"
+}
+
 fm_wake_restore_queue() {
   local drained=$1 restore
   restore="$STATE/.wake-queue.restore.$(fm_current_pid)"

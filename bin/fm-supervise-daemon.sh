@@ -6,7 +6,7 @@
 # ESCALATES a batched, distilled digest to the supervisor pane on
 # captain-relevant events plus bounded declared-pause rechecks. This is the
 # token-efficient replacement for the prior always-inject daemon: routine
-# signal/stale/heartbeat wakes cost zero firstmate context; only done/
+# signal/stale/evidence-free-heartbeat wakes cost zero firstmate context; only done/
 # needs-decision/blocked/failed/persistent-wedge/check-output events and a
 # declared-pause recheck reach the LLM, and even then as one pre-read digest per
 # batch window.
@@ -36,8 +36,8 @@
 #     to daemon-owned one-shot behavior and enqueues every wake to
 #     state/.wake-queue BEFORE advancing its suppression markers, so a
 #     crash/restart/missed injection is recovered on the next fm-wake-drain.sh.
-#     The daemon does not touch the queue; it only reads the watcher's stdout
-#     reason.
+#     The daemon never consumes the queue; it reads the latest queued heartbeat
+#     payload only to route refill evidence through its existing digest path.
 #   - Fail-safe-to-escalate: any wake the classifier cannot confidently mark
 #     routine is escalated.
 #   - Bounded wedge latency: a stale pane without a declared external wait is
@@ -83,9 +83,8 @@
 #                                   tmux primitives against a non-tmux pane.
 #          FM_INJECT_SKIP           |-prefixes force-self-handle bypassing
 #                                   classification (default "heartbeat"); empty
-#                                   disables. Use sparingly: it overrides the
-#                                   captain-relevant escalation for matching
-#                                   kinds.
+#                                   disables. An actionable refill heartbeat
+#                                   still escalates through the digest path.
 #          FM_STALE_ESCALATE_SECS   idle seconds before a stale pane escalates
 #                                   as a possible wedge (default 240)
 #          FM_PAUSE_RESURFACE_SECS  idle seconds before a declared external wait
@@ -414,7 +413,21 @@ classify_check() {  # <full reason>  — check scripts print only when firstmate
   printf 'escalate|%s' "$1"
 }
 
+heartbeat_payload_is_actionable() {
+  local payload=$1
+  case "$payload" in
+    'heartbeat refill: '*) ;;
+    *) return 1 ;;
+  esac
+  "$FM_DAEMON_DIR/fm-refill.sh" --actionable "${payload#heartbeat }"
+}
+
 classify_heartbeat() {
+  local payload=${1:-}
+  if heartbeat_payload_is_actionable "$payload"; then
+    printf 'escalate|%s' "${payload#heartbeat }"
+    return
+  fi
   # The wake itself is routine; the catch-all scan runs separately in
   # housekeeping on the HEARTBEAT_SCAN_SECS cadence.
   printf 'self|heartbeat (catch-all scan runs in housekeeping)'
@@ -1199,12 +1212,17 @@ is_wake_reason() {  # <reason>
 
 # --- dispatch one wake reason to self-handle or escalate --------------------
 # Side effects: logging, marker records, escalation buffer appends.
-handle_wake() {  # <reason> <state>
-  local reason=$1 state=$2 decision action distilled task last stale_detail
+handle_wake() {  # <reason> <state> [durable-payload]
+  local reason=$1 state=$2 payload=${3:-} decision action distilled task last stale_detail
   local kind="" arg=""
   if should_force_self "$reason"; then
-    log "wake force-self (FM_INJECT_SKIP): $reason"
-    return
+    case "$reason" in
+      heartbeat|heartbeat:*)
+        decision=$(classify_heartbeat "$payload")
+        case "$decision" in escalate\|*) ;; *) log "wake force-self (FM_INJECT_SKIP): $reason"; return ;; esac
+        ;;
+      *) log "wake force-self (FM_INJECT_SKIP): $reason"; return ;;
+    esac
   fi
   case "$reason" in
     signal:*) kind=signal; arg="${reason#signal: }"
@@ -1217,7 +1235,7 @@ handle_wake() {  # <reason> <state>
                   decision="escalate|${reason#stale: }" ;;
               esac ;;
     check:*)  decision=$(classify_check "$reason") ;;
-    heartbeat|heartbeat:*) decision=$(classify_heartbeat) ;;
+    heartbeat|heartbeat:*) [ -n "${decision:-}" ] || decision=$(classify_heartbeat "$payload") ;;
     *)        decision=$(classify_unknown "$reason") ;;
   esac
   action=${decision%%|*}
@@ -1458,7 +1476,7 @@ fm_super_main() {
     WATCHER_PID=$!
   }
 
-  local rc reason
+  local rc reason wake_payload
   while true; do
     # --- pane-gone guard (preserved) ---------------------------------------
     # With the #29 watcher's enqueue-before-suppress, a wake is no longer
@@ -1505,7 +1523,13 @@ fm_super_main() {
           continue
         fi
         log "wake: $reason"
-        handle_wake "$reason" "$STATE"
+        wake_payload=
+        case "$reason" in
+          heartbeat|heartbeat:*)
+            wake_payload=$(fm_wake_latest_payload heartbeat heartbeat 2>/dev/null) || wake_payload=
+            ;;
+        esac
+        handle_wake "$reason" "$STATE" "$wake_payload"
         trim_log
       fi
       start_watcher || continue
