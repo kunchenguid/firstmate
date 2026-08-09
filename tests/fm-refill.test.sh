@@ -75,7 +75,7 @@ write_meta() {  # <home> <id> <kind> <window>
 
 # A fake tasks-axi that passes the compatibility probe and behaves as <mode>
 # tells it to for `ready`.
-fake_tasks_axi() {  # <home> <version> <ready-mode: ok|fail|junk|hang>
+fake_tasks_axi() {  # <home> <version> <ready-mode>
   local home=$1 version=$2 mode=$3
   cat > "$home/fakebin/tasks-axi" <<SH
 #!/usr/bin/env bash
@@ -89,7 +89,11 @@ case "\${1:-}" in
       ok)   printf 'count: 1\nready[1]{id,state,kind,repo,title}:\n  fake-one,queued,task,"-",fake\n'; exit 0 ;;
       fail) printf 'error: backlog unreadable\n' >&2; exit 1 ;;
       junk) printf 'ready[nope]{}: <garbage\n  ,,,,\n'; exit 0 ;;
+      missing) printf 'count: 1\n  fake-one,queued,task,"-",fake\n'; exit 0 ;;
+      duplicate) printf 'count: 1\nready[1]{id,state,kind,repo,title}:\n  fake-one,queued,task,"-",fake\nready[1]{id,state,kind,repo,title}:\n  fake-two,queued,task,"-",fake\n'; exit 0 ;;
+      truncated) printf 'count: 2\nready[2]{id,state,kind,repo,title}:\n  fake-one,queued,task,"-",fake\n'; exit 0 ;;
       hang) sleep 30; exit 0 ;;
+      ignore-term) trap '' TERM; while :; do sleep 1; done ;;
     esac
     ;;
 esac
@@ -125,7 +129,7 @@ test_reports_dispatchable_work_and_live_capacity() {
   # Two live seats (a ship and a scout), and three records that are not free
   # capacity: a dead endpoint, an idle-by-design secondmate, and a task with no
   # recorded endpoint at all.
-  write_meta "$home" ship-live scout "sess:1"
+  write_meta "$home" ship-live ship "sess:1"
   write_meta "$home" scout-live scout "sess:2"
   write_meta "$home" ship-dead ship "sess:3"
   write_meta "$home" mate-live secondmate "sess:4"
@@ -198,18 +202,17 @@ test_incompatible_tasks_axi_fails_open() {
 }
 
 test_failing_and_malformed_backend_output_fails_open() {
-  local home out
+  local home out mode
   home=$(make_home broken-backend)
   printf '# Backlog\n' > "$home/data/backlog.md"
   fake_tasks_axi "$home" 0.2.5 fail
   out=$(probe "$home")
   assert_silent "a failing ready query" "$out"
-  fake_tasks_axi "$home" 0.2.5 junk
-  out=$(probe "$home")
-  case "$out" in
-    ''|"refill: ready=0 live=0 ids=") ;;
-    *) fail "malformed ready output leaked into the refill line: got '$out'" ;;
-  esac
+  for mode in junk missing duplicate truncated; do
+    fake_tasks_axi "$home" 0.2.5 "$mode"
+    out=$(probe "$home")
+    assert_silent "malformed ready output ($mode)" "$out"
+  done
   pass "a failing or malformed backlog query never produces a malformed refill line"
 }
 
@@ -226,7 +229,7 @@ test_probe_is_bounded() {
   local home out started elapsed
   home=$(make_home hanging)
   printf '# Backlog\n' > "$home/data/backlog.md"
-  fake_tasks_axi "$home" 0.2.5 hang
+  fake_tasks_axi "$home" 0.2.5 ignore-term
   started=$(date +%s)
   out=$(probe "$home" FM_REFILL_TIMEOUT=2)
   elapsed=$(( $(date +%s) - started ))
@@ -248,7 +251,7 @@ test_the_bound_holds_without_a_timeout_binary() {
     "$home/state" "$home/config" "$home/data/backlog.md")
   [ "$out" = "refill: ready=1 live=0 ids=fake-one" ] \
     || fail "the probe did not answer without a timeout binary on PATH: got '$out'"
-  fake_tasks_axi "$home" 0.2.5 hang
+  fake_tasks_axi "$home" 0.2.5 ignore-term
   started=$(date +%s)
   out=$(PATH="$home/fakebin:/usr/bin:/bin" env FM_REFILL_TIMEOUT=2 "$REFILL" \
     "$home/state" "$home/config" "$home/data/backlog.md")
@@ -311,6 +314,26 @@ test_heartbeat_wake_carries_refill_evidence() {
   pass "an emitted heartbeat carries its refill evidence intact through the durable queue"
 }
 
+test_refill_evidence_alone_fires_a_normal_heartbeat() {
+  local home out drain_out payload
+  home=$(make_home refill-only-wake)
+  printf '# Backlog\n' > "$home/data/backlog.md"
+  fake_tasks_axi "$home" 0.2.5 ok
+  out="$home/watch.out"; drain_out="$home/drain.out"
+  run_heartbeat "$home" "$out" "" \
+    || fail "refillable work alone did not emit a normal-mode heartbeat"
+  grep -Fx "heartbeat" "$out" >/dev/null \
+    || fail "the refill-only heartbeat changed the printed reason: $(cat "$out")"
+  FM_STATE_OVERRIDE="$home/state" "$DRAIN" > "$drain_out" 2>/dev/null \
+    || fail "draining the refill-only heartbeat failed"
+  payload=$(grep "$(printf '\theartbeat\t')" "$drain_out" | head -1)
+  case "$payload" in
+    *"refill: ready=1 live=0 ids=fake-one") ;;
+    *) fail "the refill-only heartbeat lost its evidence: got '$payload'" ;;
+  esac
+  pass "refillable work alone fires a normal-mode heartbeat on the existing cadence"
+}
+
 test_heartbeat_still_fires_when_the_probe_is_broken() {
   local home out drain_out payload
   home=$(make_home wake-probe-broken)
@@ -344,4 +367,5 @@ test_missing_backlog_fails_open
 test_probe_is_bounded
 test_the_bound_holds_without_a_timeout_binary
 test_heartbeat_wake_carries_refill_evidence
+test_refill_evidence_alone_fires_a_normal_heartbeat
 test_heartbeat_still_fires_when_the_probe_is_broken

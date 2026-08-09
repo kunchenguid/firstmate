@@ -24,12 +24,38 @@
 # can never delay, suppress, or break a heartbeat.
 #
 # Usage: fm-refill.sh <state-dir> <config-dir> <backlog-file>
+#        fm-refill.sh --actionable <refill-line>
 # Env:   FM_REFILL_TIMEOUT (default 10) hard bound on the WHOLE probe, backlog
 #                                       read and endpoint probes together
 #        FM_REFILL_IDS_MAX (default 8)  how many ready ids the line carries
+#        FM_REFILL_MIN_LIVE (default 1) live capacity below which ready work is
+#                                       actionable
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+refill_line_is_actionable() {
+  local line=$1 min=${FM_REFILL_MIN_LIVE:-1} rest ready live ids
+  case "$min" in ''|*[!0-9]*) min=1 ;; esac
+  case "$line" in
+    'refill: ready='*' live='*' ids='*) ;;
+    *) return 1 ;;
+  esac
+  rest=${line#refill: ready=}
+  ready=${rest%% live=*}
+  rest=${rest#* live=}
+  live=${rest%% ids=*}
+  ids=${rest#* ids=}
+  case "$ready" in ''|*[!0-9]*) return 1 ;; esac
+  case "$live" in ''|*[!0-9]*) return 1 ;; esac
+  case "$ids" in *[!A-Za-z0-9._,-]*) return 1 ;; esac
+  [ "$ready" -gt 0 ] && [ "$live" -lt "$min" ]
+}
+
+if [ "${1:-}" = --actionable ]; then
+  refill_line_is_actionable "${2:-}"
+  exit "$?"
+fi
 
 STATE_DIR=${1:-}
 CONFIG_DIR=${2:-}
@@ -51,22 +77,27 @@ case "$IDS_MAX" in ''|*[!0-9]*) IDS_MAX=8 ;; esac
 if [ "${FM_REFILL_CHILD:-0}" != 1 ]; then
   run_bounded() {
     if command -v timeout >/dev/null 2>&1; then
-      FM_REFILL_CHILD=1 timeout "$REFILL_TIMEOUT" bash "$0" "$@"
+      FM_REFILL_CHILD=1 timeout --kill-after=1 "$REFILL_TIMEOUT" bash "$0" "$@"
     elif command -v gtimeout >/dev/null 2>&1; then
-      FM_REFILL_CHILD=1 gtimeout "$REFILL_TIMEOUT" bash "$0" "$@"
+      FM_REFILL_CHILD=1 gtimeout --kill-after=1 "$REFILL_TIMEOUT" bash "$0" "$@"
     else
       # shellcheck disable=SC2016  # single quotes are deliberate: Perl expands its own variables.
-      FM_REFILL_CHILD=1 perl -e 'my $t = shift; my $pid = fork; exit 0 unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV; exit 127 } local $SIG{ALRM} = sub { kill "TERM", -$pid; waitpid $pid, 0; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' \
+      FM_REFILL_CHILD=1 perl -MPOSIX=:sys_wait_h -e 'my $t = shift; my $pid = fork; exit 0 unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV; exit 127 } local $SIG{ALRM} = sub { my $reaped = 0; kill "TERM", -$pid; for (1..10) { if (!$reaped) { my $done = waitpid $pid, WNOHANG; $reaped = 1 if $done == $pid || $done == -1 } select undef, undef, undef, 0.1 } kill "KILL", -$pid; waitpid $pid, 0 unless $reaped; exit 124 }; alarm $t; waitpid $pid, 0; alarm 0; exit($? >> 8)' \
         "$REFILL_TIMEOUT" bash "$0" "$@"
     fi
   }
 
   RAW=$(run_bounded "$@" 2>/dev/null) || exit 0
   TAB=$(printf '\t')
+  case "$RAW" in
+    *"$TAB"*"$TAB"*) ;;
+    *) exit 0 ;;
+  esac
   READY=${RAW%%"$TAB"*}
   REST=${RAW#*"$TAB"}
   LIVE=${REST%%"$TAB"*}
   IDS=${REST#*"$TAB"}
+  case "$IDS" in *"$TAB"*) exit 0 ;; esac
   case "$READY" in ''|*[!0-9]*) exit 0 ;; esac
   case "$LIVE" in ''|*[!0-9]*) exit 0 ;; esac
   case "$IDS" in *[!A-Za-z0-9._,-]*) exit 0 ;; esac
@@ -95,7 +126,14 @@ READY_OUT=$(tasks-axi ready --file "$BACKLOG" 2>/dev/null) || exit 0
 # first field; ignore anything that is not a plain id so a crafted backlog
 # cannot inject payload text.
 READY_FIELDS=$(printf '%s\n' "$READY_OUT" | awk -v max="$IDS_MAX" '
-  /^ready\[[0-9]+\]\{/ {
+  /^count: [0-9]+$/ {
+    count_headers++
+    reported = $0
+    sub(/^count: /, "", reported)
+    next
+  }
+  /^ready\[[0-9]+\]\{id,state,kind,repo,title\}:$/ {
+    ready_headers++
     header = $0
     sub(/^ready\[/, "", header)
     sub(/\].*$/, "", header)
@@ -103,19 +141,33 @@ READY_FIELDS=$(printf '%s\n' "$READY_OUT" | awk -v max="$IDS_MAX" '
     collecting = 1
     next
   }
+  /^ready: 0 unblocked queued tasks$/ {
+    empty_headers++
+    count = 0
+    collecting = 0
+    next
+  }
   collecting && /^[[:space:]]/ {
     item = $0
     sub(/^[[:space:]]+/, "", item)
     sub(/,.*$/, "", item)
-    if (item ~ /^[A-Za-z0-9._-]+$/ && n < max) {
-      ids = (n == 0) ? item : ids "," item
-      n++
+    if (item !~ /^[A-Za-z0-9._-]+$/) {
+      invalid = 1
+      next
+    }
+    items++
+    if (listed < max) {
+      ids = (listed == 0) ? item : ids "," item
+      listed++
     }
     next
   }
   collecting { collecting = 0 }
   END {
-    if (count !~ /^[0-9]+$/) count = 0
+    if (invalid || count_headers != 1 || reported !~ /^[0-9]+$/ ||
+        ready_headers + empty_headers != 1 || reported != count ||
+        (count == 0 && empty_headers != 1) ||
+        (count > 0 && (ready_headers != 1 || items != count))) exit 1
     printf "%s\t%s\n", count, ids
   }
 ') || exit 0
