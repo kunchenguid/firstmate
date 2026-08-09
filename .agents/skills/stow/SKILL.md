@@ -101,11 +101,11 @@ Each home keeps its own archive, the archive never cascades, and truncating a gr
 ## Over-budget offload to JIT-loaded owners
 
 Decay handles staleness over time; offload handles scope: knowledge that is current and durable but relevant only in a nameable context, and therefore wrong to pay for in every session of every fleet member.
-Every memory entry has exactly three exits, decided in this fixed order:
+For the offload sweep's evaluation only, each entry has exactly three outcomes decided in this fixed order:
 
-1. Archive, the time exit, always evaluated first: staleness is judged before scope, and offload never moves a stale fact anywhere.
-2. Offload, the scope exit, asked only of current durable entries: is this needed in nearly every session, or only in a nameable context?
-3. Keep, the default: current, durable, and either fleet-wide-relevant or safety-relevant even in sessions that never name the topic.
+1. Archive, the time outcome, always evaluated first: staleness is judged before scope, and offload never moves a stale fact anywhere.
+2. Offload, the scope outcome, asked only of current durable entries: is this needed in nearly every session, or only in a nameable context?
+3. Keep, the default outcome for this sweep: current, durable, and either fleet-wide-relevant or safety-relevant even in sessions that never name the topic.
 
 The offload sweep runs only when the pass is still over budget after decay archiving and consolidation, so routine passes never see proposals.
 Every test must hold for a candidate:

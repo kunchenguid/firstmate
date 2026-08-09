@@ -61,7 +61,7 @@ Everything files to a local destination by default; an external system such as a
 6. **Read the destination before writing: inspect-then-update, never blind-append.**
    Before writing any finding, read the destination file's current contents in full.
    Then ask, for each finding: which existing entry does it supersede; can it be a one-sentence rewrite of an existing entry instead of a new one; and should a stale entry now be refreshed, archived, or replaced in a way that preserves its fact in the same pass?
-   Stamp each entry you write with a tier and date per the tier contract below.
+   Stamp each entry written into a memory file or `.stow-notes.md` with a tier and date per the tier contract below, but never add tier markers to an existing `TODO`/`BACKLOG`/`NOTES` file.
    For an existing `TODO`/`BACKLOG`/`NOTES` item, inspect the full item, classify the change as new, duplicate, superseding, or obsolete, then write a considered replacement body rather than appending to it.
    File each undone next step with what it is waiting on, when it is genuinely blocked on something.
 
@@ -112,7 +112,7 @@ Rules:
   Mere presence in the file is not evidence, and re-reading memory is never reinforcement.
 - Re-confirm a stale `perishable` entry against its named condition: still open means refresh the date, while resolved, expired, or no longer checkable means archive it now.
 - Decay is evaluated only when this skill runs; nothing happens between passes, so an infrequently stowed project experiences the clocks at its stow interval.
-- Stale never means deleted: a stale entry moves, with its marker and a one-line reason, to a `.stow-archive.md` beside the file it came from - the current directory for `.stow-notes.md` and project files - never loaded by any session, and kept out of git the same way as `.stow-notes.md` when it lands in a git worktree.
+- Stale never means deleted: a stale entry moves, with its marker and a one-line reason, to a `.stow-archive.md` in the source file's own directory, never loaded by any session, and kept out of git the same way as `.stow-notes.md` when it lands in a git worktree.
   Recovery is search plus copy back.
 - Pre-existing unmarked entries are the file's default tier with unknown age, and unknown age is not guilt: an unmarked entry in a default-pinned file is simply pinned and exempt from the aging clock, legacy grace cycle, and archive-by-age, though consolidation still applies.
 - In a file whose default tier carries a clock, the first pass stamps each unmarked entry it can confirm; otherwise it adds `<!-- legacy-grace: pending -->` without a `reinforced:` date to persist one grace cycle without treating presence as reinforcement.
