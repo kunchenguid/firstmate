@@ -85,6 +85,84 @@ test_reserved_key_namespace_is_owned_by_its_library() {
   pass "a reserved decision key can only be opened or closed by its owning library"
 }
 
+test_key_after_the_colon_names_the_same_decision() {
+  local dir state out
+  dir=$(make_case key-after-colon)
+  state="$dir/state"
+  out="$dir/drain.out"
+  # The crewmate brief tells workers to append "{state}: {one short line}", so a
+  # keyed decision is naturally written with the token leading the note, AFTER
+  # the first colon. Both placements must name the same decision, or distinct
+  # decisions collide under "default" and an answered one keeps resurfacing.
+  printf 'needs-decision: [key=api-shape] pick REST or RPC\n' > "$state/taskA.status"
+  printf 'needs-decision: [key=rollout] pick the rollout plan\n' >> "$state/taskA.status"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed on post-colon keys"
+
+  grep -F 'taskA [key=api-shape] needs-decision: pick REST or RPC' "$out" >/dev/null \
+    || fail "a post-colon key did not name its own decision: $(cat "$out")"
+  grep -F 'taskA [key=rollout] needs-decision: pick the rollout plan' "$out" >/dev/null \
+    || fail "a second post-colon key collided with the first: $(cat "$out")"
+  if grep -F '[key=default]' "$out" >/dev/null; then
+    fail "a post-colon keyed decision folded to the default key: $(cat "$out")"
+  fi
+  pass "a [key=<slug>] token after the colon names its own decision"
+}
+
+test_both_key_placements_pair_open_and_resolved() {
+  local dir state out
+  dir=$(make_case key-placement-pairing)
+  state="$dir/state"
+  out="$dir/drain.out"
+  # Same-shape pairing, and both cross-shape pairings: whichever placement the
+  # opening line used, a resolution carrying that key in either placement closes
+  # it, and neither placement closes an unrelated key.
+  printf 'needs-decision: [key=post-post] a\n' > "$state/taskB.status"
+  printf 'resolved: [key=post-post] answered a\n' >> "$state/taskB.status"
+  printf 'needs-decision: [key=post-pre] b\n' >> "$state/taskB.status"
+  printf 'resolved [key=post-pre]: answered b\n' >> "$state/taskB.status"
+  printf 'needs-decision [key=pre-post]: c\n' >> "$state/taskB.status"
+  printf 'resolved: [key=pre-post] answered c\n' >> "$state/taskB.status"
+  printf 'needs-decision: [key=still-open] d\n' >> "$state/taskB.status"
+  printf 'resolved: answered something else\n' >> "$state/taskB.status"
+  printf 'done: unrelated later milestone\n' >> "$state/taskB.status"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed on mixed key placements"
+
+  grep -F 'taskB [key=still-open] needs-decision: d' "$out" >/dev/null \
+    || fail "an unanswered post-colon decision stopped surfacing: $(cat "$out")"
+  local key
+  for key in post-post post-pre pre-post; do
+    if grep -F "[key=$key]" "$out" >/dev/null; then
+      fail "a resolution did not close the '$key' decision it answers: $(cat "$out")"
+    fi
+  done
+  pass "open and resolved lines pair on the same key under both placements"
+}
+
+test_reserved_key_namespace_holds_after_the_colon() {
+  local dir state out
+  dir=$(make_case reserved-key-after-colon)
+  state="$dir/state"
+  out="$dir/drain.out"
+  # The reserved-namespace rule reads the note's own vocabulary, so it must see
+  # the same note whichever placement the key token used.
+  printf 'blocked: [key=pending-reply-abcdef0123456789] pending-reply-missed: task=ios pending-reply-id=abcdef0123456789 request=ship it\n' > "$state/taskC.status"
+  printf 'resolved: [key=pending-reply-abcdef0123456789] all good now\n' >> "$state/taskC.status"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed on post-colon reserved keys"
+
+  grep -F 'pending-reply-id=abcdef0123456789' "$out" >/dev/null \
+    || fail "a foreign resolution cleared a reserved decision it does not own: $(cat "$out")"
+
+  printf 'resolved: [key=pending-reply-abcdef0123456789] pending-reply-resolved: task=ios pending-reply-id=abcdef0123456789 via=status\n' >> "$state/taskC.status"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed after the owner closed its decision"
+  if grep -F 'OPEN DECISIONS' "$out" >/dev/null; then
+    fail "the owner's own post-colon resolution did not close its decision: $(cat "$out")"
+  fi
+  pass "the reserved-key rule applies identically to a post-colon key token"
+}
+
 test_later_unrelated_terminal_line_does_not_close_it() {
   local dir state out
   dir=$(make_case unrelated-terminal)
@@ -218,6 +296,9 @@ test_over_long_decision_note_is_capped_with_a_marker() {
 test_buried_decision_still_surfaces
 test_over_long_decision_note_is_capped_with_a_marker
 test_explicit_resolution_closes_it
+test_key_after_the_colon_names_the_same_decision
+test_both_key_placements_pair_open_and_resolved
+test_reserved_key_namespace_holds_after_the_colon
 test_later_unrelated_terminal_line_does_not_close_it
 test_reserved_key_namespace_is_owned_by_its_library
 test_no_open_decisions_prints_nothing

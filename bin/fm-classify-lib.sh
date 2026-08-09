@@ -160,13 +160,23 @@ status_is_paused_or_captain_held() {  # <status-line>
 # rule 6), so closure never depends on a busy worker's discipline.
 #
 # Decision key grammar (backward-compatible with the existing "<verb>: <note>"
-# format): an OPTIONAL "[key=<slug>]" token sits between the verb and the colon,
+# format): an OPTIONAL "[key=<slug>]" token sits either between the verb and the
+# colon or at the head of the note, and the two placements name the SAME key,
 #   needs-decision [key=api-shape]: <summary>
-#   resolved       [key=api-shape]: <how it was decided>
+#   needs-decision: [key=api-shape] <summary>
+# Both are accepted because both are written in practice: firstmate's own writers
+# (bin/fm-send.sh, bin/fm-decision-hold.sh, bin/fm-pending-reply-lib.sh) emit the
+# pre-colon form, while a crewmate following the brief's "{state}: {one short
+# line}" shape naturally puts the token at the head of the note. Accepting one
+# placement only silently folds every line of the other shape onto "default",
+# colliding unrelated decisions and re-surfacing answered ones.
 # A line with no token uses the key "default", preserving the historical
 # one-open-decision-per-task behavior (a bare "resolved:" closes "default").
 # The three parsers are pure reads of a single line; the verb parser strips any
-# key token before the colon so the leading word is recovered cleanly.
+# key token before the colon so the leading word is recovered cleanly, and the
+# note parser strips a leading key token so a note reads identically - and is
+# matched identically, including by the reserved-namespace vocabulary rule
+# below - under either placement.
 status_line_verb() {  # <status-line> -> leading verb word
   local v=${1%%:*}
   v=${v%%\[key=*}
@@ -174,25 +184,53 @@ status_line_verb() {  # <status-line> -> leading verb word
   v=${v%"${v##*[![:space:]]}"}
   printf '%s' "$v"
 }
-status_line_note() {  # <status-line> -> text after the first colon, trimmed
-  case "$1" in
-    *:*) local n=${1#*:}; printf '%s' "${n#"${n%%[![:space:]]*}"}" ;;
-    *) printf '%s' "$1" ;;
+# <text> -> the raw slug of a leading "[key=<slug>]" token, unvalidated; 1 when
+# the text carries no such token. The ONE place the post-colon token's shape is
+# recognised, shared by the note and key parsers so they cannot disagree about
+# what counts as a token.
+_fm_leading_key_token() {  # <text>
+  local t=$1 k
+  case "$t" in
+    \[key=*\]*) k=${t#\[key=}; printf '%s' "${k%%\]*}" ;;
+    *) return 1 ;;
   esac
 }
+# 0 when <slug> is a usable decision key.
+_fm_decision_key_is_valid() {  # <slug>
+  case "$1" in
+    ''|*[!A-Za-z0-9._-]*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+# <status-line> -> text after the first colon, trimmed, minus a leading
+# "[key=<slug>]" token so the note is the same text under either key placement.
+status_line_note() {
+  local n=$1 k
+  case "$n" in *:*) n=${n#*:} ;; esac
+  n=${n#"${n%%[![:space:]]*}"}
+  if k=$(_fm_leading_key_token "$n") && _fm_decision_key_is_valid "$k"; then
+    n=${n#*\]}
+    n=${n#"${n%%[![:space:]]*}"}
+  fi
+  printf '%s' "$n"
+}
 _fm_decision_key() {  # <status-line> -> key slug, or "default" when no token
-  local prefix=${1%%:*} k
+  local prefix=${1%%:*} rest k
   case "$prefix" in
     *\[key=*\]*)
       k=${prefix#*\[key=}
       k=${k%%\]*}
-      case "$k" in
-        ''|*[!A-Za-z0-9._-]*) return 1 ;;
-        *) printf '%s' "$k" ;;
-      esac
       ;;
-    *) printf 'default' ;;
+    *)
+      # No token before the colon: the brief's "{state}: {one short line}" shape
+      # puts it at the head of the note instead.
+      case "$1" in *:*) rest=${1#*:} ;; *) printf 'default'; return 0 ;; esac
+      rest=${rest#"${rest%%[![:space:]]*}"}
+      k=$(_fm_leading_key_token "$rest") || { printf 'default'; return 0; }
+      ;;
   esac
+  _fm_decision_key_is_valid "$k" || return 1
+  printf '%s' "$k"
 }
 # Drop the record for <key> from a newline-terminated "<key>\t<verb>\t<note>" set.
 # Portable (no associative arrays) so the fold runs on bash 3.2 as well as 4+.
@@ -384,7 +422,7 @@ _fm_open_decisions_cursor_path() {  # <status-file>
   printf '%s/.%s.open-decisions-cursor' "$dir" "${base%.status}"
 }
 
-FM_OPEN_DECISIONS_FOLD_VERSION=2
+FM_OPEN_DECISIONS_FOLD_VERSION=3
 
 # Portable device:inode identity for the rotation/recreation check below.
 _fm_open_decisions_file_ident() {  # <file> -> "dev:inode", empty on I/O failure
