@@ -16,14 +16,14 @@
 # shellcheck source=bin/fm-cursor-lib.sh
 . "$(dirname -- "${BASH_SOURCE[0]}")/fm-cursor-lib.sh"
 
-# Known harness command names; extend when a new adapter is verified.
-FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$'
+# Known harness command names; extend when a new adapter is verified. OMP's
+# exact Bun-script shape is verified alongside its primary and worker adapter.
+FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$|^omp$'
 
-# The same harnesses as exact executable names. Keep in sync with
-# FM_HARNESS_RE. Used only for the stricter path evidence below, where the
-# loose regex would also match ordinary firstmate paths such as
-# bin/fm-claude-stop-autoarm.sh.
-FM_HARNESS_NAMES=(claude codex opencode grok kimi pi-signed pi)
+# Exact executable names for the stricter path evidence below. Keep in sync
+# with FM_HARNESS_RE. The exact-component check avoids treating ordinary
+# firstmate paths such as bin/fm-claude-stop-autoarm.sh as harness processes.
+FM_HARNESS_NAMES=(claude codex opencode grok kimi pi-signed pi omp)
 
 # Print the exact harness name carried by executable path $1 - its own basename
 # or any directory component - or return 1.
@@ -57,6 +57,7 @@ fm_harness_path_name() {  # <path>
 #      is identified by its install path on macOS and by argv[0] on Linux.
 #   3. a bare interpreter (node, python) running a harness script path.
 #   4. Cursor's own structural identity, owned by bin/fm-cursor-lib.sh.
+#   3. a bare interpreter (node, python, bun) running a harness script path.
 FM_HARNESS_IS_CLAUDE=0
 fm_harness_process_matches() {  # <comm> <args>
   local comm=$1 args=$2 base argv0 name
@@ -71,7 +72,21 @@ fm_harness_process_matches() {  # <comm> <args>
     case "$name" in claude) FM_HARNESS_IS_CLAUDE=1 ;; esac
     return 0
   fi
-  # Bare interpreter (e.g. node): match the harness name in its script path.
+  # OMP is distributed as a Bun script. Require its script argv to be the exact
+  # `omp` path component; matching arbitrary Bun arguments would let an unrelated
+  # process whose prompt merely mentions OMP claim a firstmate home.
+  case "$comm" in
+    *bun*)
+      local script=${args#* }
+      if [ "$script" != "$args" ]; then
+        script=${script%% *}
+        if name=$(fm_harness_path_name "$script") && [ "$name" = omp ]; then
+          return 0
+        fi
+      fi
+      ;;
+  esac
+  # Bare Node or Python interpreter: match the harness name in its script path.
   case "$comm" in
     *node*|*python*)
       if printf '%s' "$args" | grep -qE "$FM_HARNESS_RE"; then

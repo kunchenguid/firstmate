@@ -100,7 +100,7 @@ SKIPPED=
 # cursor matters for the same reason muse does, from the other direction: it
 # runs as a bundled node script, so its pane title is a bare `node` that no name
 # pattern can own, and identity has to come from its install path or argv[0].
-for harness in claude codex opencode pi pi-signed grok kimi cursor muse; do
+for harness in claude codex opencode pi pi-signed omp grok kimi cursor muse; do
   if ! bin_path=$(resolve_harness_binary "$harness"); then
     SKIPPED="$SKIPPED $harness"
     note "skip: $harness is not installed on this machine, so its classification is unverified here"
@@ -138,6 +138,50 @@ for harness in claude codex opencode pi pi-signed grok kimi cursor muse; do
   pass "harness liveness: $harness $version classifies alive"
   CHECKED=$((CHECKED + 1))
 done
+
+# OMP's verified adapter identity has two independent vendor-controlled surfaces:
+# the positive child-process marker and exact Bun-script ancestry used for the
+# home lock. Probe from inside the real OMP process so a stub cannot restate them.
+if omp_path=$(resolve_harness_binary omp); then
+  omp_version=$("$omp_path" --version 2>/dev/null | head -1 | tr -d '\r') || omp_version=
+  [ -n "$omp_version" ] || omp_version=unknown
+  cat > "$LAB/omp-session-identity.ts" <<'TS'
+import { spawnSync } from "node:child_process";
+
+export default function (pi: { on?: (event: string, handler: () => void) => void }) {
+  pi.on?.("session_start", () => {
+    const root = process.env.FM_LIVE_ROOT || "";
+    const harness = spawnSync(`${root}/bin/fm-harness.sh`, { encoding: "utf8" }).stdout.trim();
+    const lock = spawnSync(
+      "bash",
+      ["-c", `. '${root}/bin/fm-session-lock-lib.sh'; fm_harness_ancestry_pid`],
+      { encoding: "utf8" },
+    ).stdout.trim();
+    const line =
+      `OMP_IDENTITY marker=${process.env.OMPCODE || ""} ` +
+      `harness=${harness} lock=${lock} process=${process.pid}\n`;
+    const ok =
+      process.env.OMPCODE === "1" &&
+      harness === "omp" &&
+      lock === String(process.pid);
+    process.stdout.write(line, () => process.exit(ok ? 0 : 1));
+  });
+}
+TS
+  omp_out=$(FM_LIVE_ROOT="$ROOT" "$omp_path" -p --no-session --no-tools \
+    -e "$LAB/omp-session-identity.ts" probe 2>&1)
+  omp_status=$?
+  [ "$omp_status" -eq 0 ] || fail \
+    "OMP SESSION-IDENTITY DRIFT: $omp_version no longer exports OMPCODE=1, selects the OMP adapter, and resolves its Bun process as the session-lock owner. Observed: $omp_out"
+  case "$omp_out" in
+    *"OMP_IDENTITY marker=1 harness=omp "*) ;;
+    *) fail "OMP session-identity probe returned an unrecognized success payload: $omp_out" ;;
+  esac
+  note "OMP $omp_version: $omp_out"
+  pass "OMP session identity: $omp_version selects the verified adapter and owns the lock"
+else
+  note "skip: OMP is not installed on this machine, so its primary session identity is unverified here"
+fi
 
 [ "$CHECKED" -gt 0 ] || fail \
   "no verified harness is installed here, so this run proved nothing; install at least one harness before trusting a pass"

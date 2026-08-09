@@ -6,6 +6,28 @@ This record contains reusable version-scoped evidence for active runtime guarant
 The backend guides own current setup, safety boundaries, and limitations.
 Exact task chronology, branch names, temporary homes, local paths, process ids, thread ids, and delivery transcripts remain in private reports or PR evidence.
 
+## OMP primary session identity
+
+OMP 17.2.12 was verified on 2026-08-09 as a primary-session lock identity, not as a dispatch or watcher adapter.
+The live OMP tool environment exported `OMPCODE=1` while also inheriting `CLAUDECODE=1`, and its long-lived process had the shape `bun <home>/.bun/bin/omp`.
+The marker therefore selects the unknown supervision protocol before the foreign Claude marker, while the exact Bun script ancestry supplies the stable process id that owns the home lock.
+An unrelated Bun script whose later arguments merely mention OMP remains outside that identity.
+
+Portable and live verification:
+
+```sh
+tests/fm-secondmate-harness.test.sh
+FM_HARNESS_LIVENESS_DRIFT=1 tests/fm-harness-liveness-drift-live-e2e.test.sh
+```
+
+Observed relevant output:
+
+```text
+ok - OMP primary identity: exact Bun script owns the session lock without claiming a verified supervision adapter
+# OMP omp/17.2.12: OMP_IDENTITY marker=1 harness=unknown lock=<pid> process=<same-pid>
+ok - OMP session identity: omp/17.2.12 owns the lock without claiming a verified supervision adapter
+```
+
 ## tmux
 
 Foreground-process behavior was verified on 2026-07-07 with tmux 3.6a on macOS.
