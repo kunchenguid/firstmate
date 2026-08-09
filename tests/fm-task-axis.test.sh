@@ -46,6 +46,18 @@ axis_call() {  # <fn> <args>...
   )
 }
 
+# Does <meta> still parse as PR identity? Read through the real owner
+# (bin/fm-pr-lib.sh), never a local re-implementation of its rule.
+pr_identity_valid() {  # <meta>
+  (
+    # shellcheck source=bin/fm-backend.sh disable=SC1091
+    . "$ROOT/bin/fm-backend.sh"
+    # shellcheck source=bin/fm-pr-lib.sh disable=SC1091
+    . "$ROOT/bin/fm-pr-lib.sh"
+    fm_pr_metadata_identity_parse "$1"
+  ) >/dev/null 2>&1
+}
+
 # Every value the retired field ever took derives to exactly one point on each
 # axis. This table IS the migration contract, so it is asserted directly rather
 # than inferred from a consumer's behavior.
@@ -117,6 +129,35 @@ test_backfill_is_deterministic_and_idempotent() {
   [ "$(grep -c '^stage=' "$dir/partial.meta")" = 1 ] || fail "backfill left a duplicate stage line"
 
   pass "task axes: backfill is deterministic, forward-only, and idempotent"
+}
+
+# A task's record doubles as PR identity, and bin/fm-pr-lib.sh refuses any
+# unrecognized key appearing AFTER `pr=` - that rule is what stops a tampered
+# record from smuggling a second identity past an armed merge poll. Backfill
+# therefore may not simply append: a record with a live poll must still parse, or
+# the watcher silently stops honoring that task's merge watch.
+test_backfill_preserves_pr_identity() {
+  local dir meta sha
+  dir="$TMP_ROOT/pr-identity"
+  mkdir -p "$dir"
+  meta="$dir/polled.meta"
+  sha=$(printf '%040d' 1 | tr '0' 'a')
+  fm_write_meta "$meta" "window=fm-polled" "kind=ship" \
+    "pr=https://github.com/o/r/pull/13" "pr_head=$sha"
+
+  # Negative control: the identity must parse BEFORE the backfill, so a failure
+  # afterwards is the backfill and not an unparseable fixture.
+  pr_identity_valid "$meta" || fail "the fixture did not parse as PR identity before backfill"
+
+  axis_call fm_task_axes_backfill "$meta" || fail "backfill refused a record carrying a PR"
+  pr_identity_valid "$meta" || fail "backfill invalidated the record's PR identity"
+
+  assert_grep 'role=crew' "$meta" "backfill did not derive the axes on a polled record"
+  # Position is the contract, not tidiness: every axis must precede the pr line.
+  [ "$(grep -n 'stage=' "$meta" | cut -d: -f1)" -lt "$(grep -n '^pr=' "$meta" | cut -d: -f1)" ] \
+    || fail "backfill wrote an axis after pr=, which invalidates the record"
+
+  pass "task axes: backfill keeps a polled record's PR identity parseable"
 }
 
 # The stale-writer guard. A writer that still flips only the retired field
@@ -280,6 +321,7 @@ test_teardown_refuses_a_contradictory_identity() {
 
 test_derivation_is_total_and_deterministic
 test_backfill_is_deterministic_and_idempotent
+test_backfill_preserves_pr_identity
 test_conflicted_records_are_refused_not_resolved
 test_bootstrap_sweep_converges_and_reports_conflicts
 test_reflag_writes_the_axes_and_moves_the_stage

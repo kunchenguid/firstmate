@@ -181,6 +181,38 @@ fm_task_axes_conflict() {  # <meta-file>
   return 1
 }
 
+# fm_task_axes_write_before_pr: rewrite <meta> so <lines> land BEFORE its first
+# `pr=` line, keeping every other line in order.
+#
+# The position is a hard contract, not tidiness. A task's metadata doubles as PR
+# identity, and fm_pr_metadata_identity_parse (bin/fm-pr-lib.sh) refuses any
+# unrecognized key that appears AFTER `pr=` - which is what keeps a tampered
+# record from smuggling a second identity past an armed merge poll. Appending an
+# axis to the end of a record carrying `pr=` therefore does not merely look
+# untidy: it invalidates the record, and the watcher stops honoring that task's
+# poll. A record with no `pr=` line simply gets the lines appended.
+fm_task_axes_write_before_pr() {  # <meta-file> <line>...
+  local meta=$1 tmp line seen_pr=0
+  shift
+  tmp="$meta.axis.$$"
+  {
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in
+        pr=*)
+          if [ "$seen_pr" -eq 0 ]; then
+            seen_pr=1
+            printf '%s\n' "$@"
+          fi
+          ;;
+      esac
+      printf '%s\n' "$line"
+    done < "$meta"
+    [ "$seen_pr" -eq 1 ] || printf '%s\n' "$@"
+  } > "$tmp" || { rm -f -- "$tmp"; return 1; }
+  mv -f -- "$tmp" "$meta" || { rm -f -- "$tmp"; return 1; }
+  return 0
+}
+
 # fm_task_axes_backfill: derive the axes INTO an existing record, forward-only
 # and idempotent. Never rewrites an axis the record already states, never
 # rewrites the alias, and never touches any other field - a record it has
@@ -189,7 +221,8 @@ fm_task_axes_conflict() {  # <meta-file>
 # when the record is converged (whether or not this call wrote), 1 on refusal
 # or write failure.
 fm_task_axes_backfill() {  # <meta-file>
-  local meta=${1-} kind tmp add=0
+  local meta=${1-} kind
+  local -a add=()
   [ -f "$meta" ] || return 1
   if fm_task_axes_conflict "$meta"; then
     printf 'fm_task_axes_backfill: refusing conflicted record %s: %s\n' \
@@ -197,20 +230,14 @@ fm_task_axes_backfill() {  # <meta-file>
     return 1
   fi
   kind=$(fm_meta_get "$meta" kind)
-  tmp="$meta.axis.$$"
-  cp -- "$meta" "$tmp" 2>/dev/null || return 1
   fm_task_role_valid "$(fm_meta_get "$meta" role)" \
-    || { printf 'role=%s\n' "$(fm_task_role_of_kind "$kind")" >> "$tmp"; add=1; }
+    || add+=("role=$(fm_task_role_of_kind "$kind")")
   fm_task_deliverable_valid "$(fm_meta_get "$meta" deliverable)" \
-    || { printf 'deliverable=%s\n' "$(fm_task_deliverable_of_kind "$kind")" >> "$tmp"; add=1; }
+    || add+=("deliverable=$(fm_task_deliverable_of_kind "$kind")")
   fm_task_stage_valid "$(fm_meta_get "$meta" stage)" \
-    || { printf 'stage=%s\n' "$FM_TASK_STAGE_DEFAULT" >> "$tmp"; add=1; }
-  if [ "$add" -eq 0 ]; then
-    rm -f -- "$tmp"
-    return 0
-  fi
-  mv -f -- "$tmp" "$meta" || { rm -f -- "$tmp"; return 1; }
-  return 0
+    || add+=("stage=$FM_TASK_STAGE_DEFAULT")
+  [ "${#add[@]}" -gt 0 ] || return 0
+  fm_task_axes_write_before_pr "$meta" "${add[@]}"
 }
 
 # fm_task_axes_set: replace one axis in an existing record, forward-only. Used
@@ -227,7 +254,6 @@ fm_task_axes_set() {  # <meta-file> <axis> <value>
   esac
   tmp="$meta.axis.$$"
   grep -v "^$axis=" "$meta" > "$tmp" || true
-  printf '%s=%s\n' "$axis" "$value" >> "$tmp"
   mv -f -- "$tmp" "$meta" || { rm -f -- "$tmp"; return 1; }
-  return 0
+  fm_task_axes_write_before_pr "$meta" "$axis=$value"
 }
