@@ -66,8 +66,8 @@
 #   Firstmate sets a captain decision aside on the captain's word, in the home
 #   whose backlog holds it, by changing that item's HOLD KIND alone - from
 #   captain to tasks-axi's existing "parked" - and reverses it by restoring
-#   captain. The item stays kind: captain throughout, so it remains a captain
-#   decision rather than becoming generic future work.
+#   captain. The hold kind, not the item's own kind, marks it as a captain
+#   decision, so this preserves ship, scout, and standalone captain work alike.
 #
 #     set aside:   tasks-axi hold <id> --reason "<reason>" --kind parked
 #     bring back:  tasks-axi hold <id> --reason "<reason>" --kind captain

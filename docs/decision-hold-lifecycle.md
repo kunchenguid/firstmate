@@ -50,7 +50,7 @@ A failed intermediate step leaves the hold open.
 
 `bin/fm-fleet-snapshot.sh` parses canonical tasks-axi `(hold: ...)` and `(hold-kind: captain)` metadata alongside existing backlog fields.
 It also parses the decision question and decision URL written by `bin/fm-decision-hold.sh`, then carries them through the main-home record and secondmate-home decision projection.
-It resolves every repeated `blocked-by:` edge against structured Done records, keeps missing blockers unresolved, and classifies only an unblocked captain hold as actionable.
+It resolves every repeated `blocked-by:` edge against structured Done records, keeps missing blockers unresolved, and classifies any unblocked row with hold kind `captain` and a non-empty hold reason as actionable regardless of the row's own kind.
 Its secondmate-home summary classifies an actionable captain hold as `captain_decision` and preserves blocked captain holds as queued work in the owning home.
 
 `bin/fm-bearings-snapshot.sh` projects actionable captain holds into `decisions_open` and leaves blocked captain holds in ordinary queued gates.

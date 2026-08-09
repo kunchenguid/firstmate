@@ -24,8 +24,10 @@
 #     captain_actionable, and captain_deferred fields. Repeated blocker tokens
 #     remain ordered; a blocker resolves only when its structured record is Done,
 #     and missing ids stay open.
-#     captain_deferred is the same captain decision under a "parked" hold kind:
-#     the captain has consciously set it aside, so it is neither actionable nor
+#     Any queued row with a non-empty captain hold and no unresolved blocker is
+#     captain_actionable regardless of the row's own kind. captain_deferred is
+#     the same kind-independent classification under a "parked" hold kind: the
+#     captain has consciously set it aside, so it is neither actionable nor
 #     blocked, and it is excluded from the secondmate holds projection for that
 #     reason.
 #   tasks[]: one row per state/<id>.meta, sorted by id.
@@ -173,9 +175,10 @@ aggregation, and marks inventory contradictions or unavailable child state inval
 Its invalidity object names the normalized failure kind and affected ids.
 Actionable tasks-axi captain holds appear as decisions_open and stay visible in
 queued with hold_reason, hold_kind, captain_deferred, and plural blocker fields
-for downstream projections. A captain hold is actionable only when every blocker
-is Done. A captain decision under a parked hold kind is deferred rather than
-actionable or blocked, and is left out of holds.
+for downstream projections. A non-empty captain hold is actionable only when
+every blocker is Done, regardless of the row's own kind. The same row under a
+parked hold kind is deferred rather than actionable or blocked, and is left out
+of holds.
 Cross-home reads use FM_SNAPSHOT_SECONDMATES (default 20, 0 lifts the count
 bound), FM_SNAPSHOT_SECONDMATE_TIMEOUT, and FM_SNAPSHOT_SECONDMATE_MAX_BYTES.
 Terminal contradiction evidence uses
@@ -462,16 +465,18 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
                elif .state == "queued" then "queued"
                else "done" end)
           | .requires_child_metadata = (.current_role == "worker")
+          # A captain hold can gate any backlog item, not only a standalone
+          # kind "captain" decision record.
           | .captain_actionable =
-              (.state == "queued" and .kind == "captain" and .hold_kind == "captain"
+              (.state == "queued" and .hold_kind == "captain"
                and .hold_reason != null and (.unresolved_blocker_ids | length) == 0)
-          # A captain decision the captain has consciously set aside: the same
+          # A captain-held row the captain has consciously set aside: the same
           # row as an actionable decision in every respect except that its hold
-          # kind is "parked". It stays a captain decision rather than becoming
-          # generic future work, so it can be brought back by restoring the
-          # captain hold kind alone.
+          # kind is "parked". It stays deferred rather than becoming generic
+          # future work, so it can be brought back by restoring the captain
+          # hold kind alone.
           | .captain_deferred =
-              (.state == "queued" and .kind == "captain" and .hold_kind == "parked"
+              (.state == "queued" and .hold_kind == "parked"
                and .hold_reason != null and (.unresolved_blocker_ids | length) == 0)
         else . end)
     | del(.section,.order)

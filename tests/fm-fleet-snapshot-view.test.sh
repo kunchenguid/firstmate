@@ -355,10 +355,9 @@ EOF
   pass "backlog normalization preserves strict roles and resolves every blocker compatibly"
 }
 
-# A captain decision the captain has consciously set aside keeps its identity as
-# a captain decision under a parked hold kind. It is neither actionable nor
-# blocked, so it must leave the actionable set without arriving in holds or
-# putting a home into an externally held state.
+# Any row held for the captain can be set aside under a parked hold kind.
+# It is neither actionable nor blocked, so it must leave the actionable set
+# without arriving in holds or putting a home into an externally held state.
 test_parked_captain_hold_is_deferred_not_blocked() {
   local home fakebin out summary
   home=$(make_home deferred-captain-hold)
@@ -367,6 +366,8 @@ test_parked_captain_hold_is_deferred_not_blocked() {
 
 ## Queued
 - [ ] live-call - Choose the rollout window (repo: alpha) (kind: captain) (hold: Both windows cost money) (hold-kind: captain)
+- [ ] ship-call - Choose the shipment window (repo: alpha) (kind: ship) (hold: Captain selects release timing) (hold-kind: captain)
+- [ ] scout-call - Choose the research path (repo: alpha) (kind: scout) (hold: Captain selects investigation scope) (hold-kind: captain)
 - [ ] set-aside - Approve the subscription (repo: alpha) (kind: captain) (hold: It renews yearly) (hold-kind: parked)
 - [ ] parked-ship - Rework the intake form (repo: alpha) (kind: ship) (hold: waiting on design) (hold-kind: parked)
 - [ ] blocked-aside - Approve the migration (repo: alpha) (kind: captain) blocked-by: live-call (hold: It is one way) (hold-kind: parked)
@@ -378,12 +379,14 @@ EOF
   printf '%s' "$out" | jq -e '
     (.backlog.records[] | select(.id == "live-call")
       | .captain_actionable == true and .captain_deferred == false)
+    and (.backlog.records[] | select(.id == "ship-call")
+      | .captain_actionable == true and .captain_deferred == false)
+    and (.backlog.records[] | select(.id == "scout-call")
+      | .captain_actionable == true and .captain_deferred == false)
     and (.backlog.records[] | select(.id == "set-aside")
       | .captain_actionable == false and .captain_deferred == true)
-    # A parked hold on work that is not a captain decision is ordinary held
-    # work, never a deferred decision.
     and (.backlog.records[] | select(.id == "parked-ship")
-      | .captain_deferred == false)
+      | .captain_actionable == false and .captain_deferred == true)
     # A decision that cannot be taken yet is blocked, not set aside, so parking
     # it must not hide a real dependency.
     and (.backlog.records[] | select(.id == "blocked-aside")
@@ -394,12 +397,13 @@ EOF
   printf '%s' "$summary" | jq -e '
     ([.holds[].id] | index("set-aside")) == null
     and ([.holds[].id] | index("blocked-aside")) != null
-    and ([.holds[].id] | index("parked-ship")) != null
+    and ([.holds[].id] | index("parked-ship")) == null
     and (.queued[] | select(.id == "set-aside") | .captain_deferred == true)
+    and (.queued[] | select(.id == "parked-ship") | .captain_deferred == true)
     and (.queued[] | select(.id == "live-call") | .captain_deferred == false)
     and .state == "captain_decision"
   ' >/dev/null || fail "a deferred decision leaked into the home summary holds: $summary"
-  pass "a parked captain hold reads as deferred rather than blocked or actionable"
+  pass "parked captain-held rows read as deferred rather than blocked or actionable"
 }
 
 test_event_hints_follow_reconciled_current_state() {
