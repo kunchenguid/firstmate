@@ -397,16 +397,19 @@ test_portable_shard_union_and_coverage_guard() {
 # "comm: input is not in sorted order". Pins the guard to be collation
 # independent: it must succeed identically under C and under a language locale.
 test_coverage_guard_is_locale_independent() {
-  local loc out rc probe
+  local loc out rc cand c_order
   # A language locale, not C.utf8 - C.utf8 collates by codepoint exactly like C,
   # so it cannot expose the mismatch and would make this case vacuous.
-  loc=$(locale -a 2>/dev/null | grep -iE '^[a-z][a-z]_[A-Z][A-Z]\.(utf-?8)$' | head -n 1 || true)
-  # A name is not proof. The filter above is name-based, and a name-based filter
-  # cannot see that a C library collates by byte regardless of the locale it
-  # names: on a musl-based image `locale -a` lists en_US.UTF-8 while every
-  # locale sorts in C order. Running there would prove nothing while reporting
-  # that it had, which is the exact vacuity excluding C.utf8 was meant to avoid.
-  # So probe the real behavior instead of the name.
+  #
+  # A name is not proof. A name-based filter cannot see that a C library
+  # collates by byte regardless of the locale it names: on a musl-based image
+  # `locale -a` lists en_US.UTF-8 while every locale sorts in C order. Running
+  # there would prove nothing while reporting that it had, which is the exact
+  # vacuity excluding C.utf8 was meant to avoid. So probe the real behavior
+  # instead of the name, and probe every name-matching candidate rather than
+  # just the first: a host can list both a byte-collating and a truly collating
+  # UTF-8 locale, and stopping at the first would skip the check while a later
+  # candidate would have exercised the guard for real.
   #
   # The probe pair matters. "a-b" vs "a.b" looks like the obvious test and is
   # useless: glibc ignores punctuation at the primary collation level, so both
@@ -418,10 +421,15 @@ test_coverage_guard_is_locale_independent() {
   # the real divergence in this repo's own file set, where
   # fm-backend-herdr-workspace-per-home-e2e.test.sh and
   # fm-backend-herdr.test.sh swap places.
-  if [ -n "$loc" ]; then
-    probe=$(printf 'a-b\na.a\n' | LC_ALL="$loc" sort)
-    [ "$probe" = "$(printf 'a-b\na.a\n' | LC_ALL=C sort)" ] && loc=""
-  fi
+  c_order=$(printf 'a-b\na.a\n' | LC_ALL=C sort)
+  loc=""
+  while read -r cand; do
+    [ -n "$cand" ] || continue
+    if [ "$(printf 'a-b\na.a\n' | LC_ALL="$cand" sort 2>/dev/null)" != "$c_order" ]; then
+      loc="$cand"
+      break
+    fi
+  done < <(locale -a 2>/dev/null | grep -iE '^[a-z][a-z]_[A-Z][A-Z]\.(utf-?8)$' || true)
   if [ -z "$loc" ]; then
     # Report the absent capability rather than passing over it silently.
     echo "note: no locale that collates differently from C; skipping the non-C collation check" >&2
