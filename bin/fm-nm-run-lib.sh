@@ -8,22 +8,23 @@
 # direction is unsafe: a false negative hides a genuinely parked run, and a
 # false positive lets teardown act on a run it does not own.
 #
+# What this file owns is reading and attributing the run record. Bounding the
+# call is owned by bin/fm-timeout-lib.sh, which declares itself the single owner
+# of bounded command execution, so the mechanism selection is not re-derived
+# here. That matters beyond tidiness: its selection ends in a dependency-free
+# bash watchdog, so a host with no timeout, gtimeout or perl still gets the same
+# hard bound and process-group cleanup instead of an unbounded call or a refusal.
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-timeout-lib.sh"
+
 # Bounded call to `no-mistakes "$@"` in dir $1, timeout $2 seconds. The bounded
-# form preserves stdout, stderr, and exit status; the checked form discards
-# stderr, while fm_nm_run keeps the fail-open query contract for read-only callers.
+# form preserves stdout, stderr, and exit status, where 124 means the bound was
+# hit; the checked form discards stderr, while fm_nm_run keeps the fail-open
+# query contract for read-only callers.
 fm_nm_run_bounded() {  # <dir> <timeout_secs> <args...>
-  local dir=$1 timeout_secs=$2 have_timeout=none
+  local dir=$1 timeout_secs=$2
   shift 2
-  if command -v timeout >/dev/null 2>&1; then have_timeout=timeout
-  elif command -v gtimeout >/dev/null 2>&1; then have_timeout=gtimeout
-  elif command -v perl >/dev/null 2>&1; then have_timeout=perl
-  fi
-  case "$have_timeout" in
-    timeout)  ( cd "$dir" && timeout "$timeout_secs" no-mistakes "$@" ) ;;
-    gtimeout) ( cd "$dir" && gtimeout "$timeout_secs" no-mistakes "$@" ) ;;
-    perl)     ( cd "$dir" && perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$timeout_secs" no-mistakes "$@" ) ;;
-    *)        return 1 ;;
-  esac
+  ( cd "$dir" && fm_run_timed "$timeout_secs" no-mistakes "$@" )
 }
 
 fm_nm_run_checked() {  # <dir> <timeout_secs> <args...>
@@ -53,6 +54,25 @@ fm_nm_strip_quotes() {
 # Scalar value of a TOON key in captured `axi status` output $1.
 fm_nm_field() {  # <toon-output> <key>
   printf '%s\n' "$1" | sed -n "s/^[[:space:]]*$2:[[:space:]]*\(.*\)/\1/p" | head -1
+}
+
+# Names of the steps a run has completed, one per line, read from the
+# steps[N]{step,status,...} table in captured `axi status` output $1. The table
+# ends at the next key line, so a scalar or a later block is never read as a row.
+fm_nm_completed_steps() {  # <toon-output>
+  printf '%s\n' "$1" | awk '
+    /steps\[[0-9]+\]\{/ { in_steps = 1; next }
+    !in_steps { next }
+    /^[ \t]*[A-Za-z_]+[:[]/ { in_steps = 0; next }
+    {
+      row = $0
+      sub(/^[ \t]+/, "", row)
+      if (split(row, f, ",") < 2) next
+      gsub(/[ \t"]/, "", f[1])
+      gsub(/[ \t"]/, "", f[2])
+      if (f[2] == "completed") print f[1]
+    }
+  '
 }
 
 # 0 if run head $2 matches worktree $1's code identity, per the same rule
