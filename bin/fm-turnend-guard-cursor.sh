@@ -11,8 +11,9 @@
 # hook-owned process tree, classifies the arm close, applies a per-chain
 # continuation counter, and renders the outcome as {} or a followup_message.
 # The counters bound each chain, not the continuation itself: a chain's
-# ceiling diagnostic resets it, so the next stop starts a fresh chain, and a
-# new distinct wake reason starts fresh without adding to the total. Every
+# ceiling diagnostic resets it, so the next stop starts a fresh chain. A new
+# distinct wake reason keeps the current chain and its total unchanged while
+# resetting the same-reason repeat count. Every
 # stop while supervision is still needed re-evaluates and may emit a
 # follow-up (the guard never ends a needed turn blind).
 # The arm helpers below (cursor_arm_*) are Cursor-specific and live here, not
