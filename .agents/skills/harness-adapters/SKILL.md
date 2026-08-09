@@ -328,7 +328,8 @@ Relaunch uses Firstmate's deterministic brief-based replacement; no private-sess
 
 **Primary-session guard fact.**
 OMP auto-loads `.omp/extensions/fm-primary-turnend-guard.ts` and `.omp/extensions/fm-primary-omp-watch.ts`.
-The wrappers reuse the Pi-family implementations, which select OMP's `agent_end`, `session_switch`, `.omp-*` marker, and `fm_watch_arm_omp` vocabulary from `OMPCODE=1`.
+The wrappers reuse the Pi-family implementations and pass the harness as an argument, which is what selects OMP's `agent_end`, `session_switch`, `.omp-*` marker, and `fm_watch_arm_omp` vocabulary.
+Loading a `.omp/extensions/` wrapper is the authoritative OMP signal because only OMP discovers that directory; the shared core never reads `OMPCODE` for this, so a Pi primary that inherited the marker still gets Pi's `agent_settled`, `.pi-*` markers, and `fm_watch_arm_pi`.
 The primary supervision contract is `docs/supervision-protocols/omp.md`.
 An OMP secondmate launch passes both primary extensions explicitly with `-e`.
 
