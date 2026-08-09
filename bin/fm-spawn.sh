@@ -2147,9 +2147,11 @@ kimi_capture() {
 
 # cursor_worker_server_record: after a cursor-agent launch, find the CLI's
 # background `node .../index.js worker-server` child and record its pid plus a
-# process identity atomically in state/<id>.worker-server so teardown can reap
-# it by pid even after it detaches (reparents to init) and its cwd leaves the
-# task worktree (an observed worker-server cleanup gap, 2026-08-05).
+# process identity atomically in state/<id>.worker-server, so the shared reap
+# primitive (fm_process_record_terminate, bin/fm-process-identity-lib.sh) can
+# kill it by pid from spawn relaunch/rollback and teardown even after it
+# detaches (reparents to init) and its cwd leaves the task worktree (an
+# observed worker-server cleanup gap, 2026-08-05).
 #
 # Discovery is bound to the launch through a random environment token inherited
 # by the worker-server. Ownership evidence is MANDATORY: if the worker-server
