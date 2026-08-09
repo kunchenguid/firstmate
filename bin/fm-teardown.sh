@@ -343,7 +343,7 @@ remote_outbox_cleanup() {
 }
 
 remote_secondmate_teardown() {
-  local remote_host remote_root remote_home kind route_host route_root route_home out rc tmp rec phase task_id
+  local remote_host remote_root remote_home route_host route_root route_home out rc tmp rec phase task_id
   remote_host=$(fm_meta_get "$META" remote_host)
   [ -n "$remote_host" ] || return 3
   [ "$(fm_task_role "$META")" = secondmate ] || { echo "REFUSED: remote placement metadata is valid only for a secondmate" >&2; return 1; }
@@ -472,18 +472,18 @@ ORCA_PATH_MATCH_VERIFIED=0
 
 KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
 [ -n "$KIND" ] || KIND=ship
-# The identity axes this teardown branches on, resolved once. ROLE decides
-# whether this is a persistent direct report at all; DELIVERABLE decides which
-# protection applies to its work. A record predating the axis split derives both
-# from the deprecated alias above (bin/fm-task-axis-lib.sh).
-# Which protection this teardown applies is decided by those axes, so a record
-# whose alias contradicts them has no readable identity and must stop here: a
-# scout's worktree is declared scratch while a ship's is protected, and guessing
-# between them is how unlanded work gets discarded. Stop and investigate.
+# Which protection this teardown applies is decided by the identity axes, so a
+# record whose deprecated alias contradicts them has no readable identity and
+# must stop here: a scout worktree is declared scratch while a ship's is
+# protected, and guessing between them is how unlanded work gets discarded.
+# This is a stop-and-investigate result, not an obstacle to bypass.
 if fm_task_axes_conflict "$META"; then
   echo "REFUSED: task $ID records a contradictory identity ($FM_TASK_AXES_CONFLICT); settle it before teardown" >&2
   exit 1
 fi
+# Resolved once. ROLE decides whether this is a persistent direct report at all;
+# DELIVERABLE decides which protection applies to its work. A record predating
+# the split derives both from the alias above (bin/fm-task-axis-lib.sh).
 ROLE=$(fm_task_role "$META")
 DELIVERABLE=$(fm_task_deliverable "$META")
 MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
@@ -999,8 +999,6 @@ backlog_refresh_reminder() {
     printf '%s\n' "Backlog: $ID just finished. Update data/backlog.md - move $ID to Done, keep Done to the 10 most recent, then re-scan Queued and dispatch only work whose blockers are gone and date is due."
   fi
 }
-
-
 
 path_is_ancestor_of() {
   local ancestor=$1 path=$2
