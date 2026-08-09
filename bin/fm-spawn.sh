@@ -1335,12 +1335,15 @@ antigravity_preflight() {
   tmp_out=$(mktemp "${STATE}/.preflight-${ID}.XXXXXXXX" 2>/dev/null || mktemp "/tmp/.preflight-${ID}.XXXXXXXX")
 
   set +e
-  "$timer" --kill-after=5s "${timeout_seconds}s" "$checker" check 2>&1 |
-    {
-      dd bs=1 count="$output_bytes" 2>/dev/null
-      cat >/dev/null
-    } >"$tmp_out"
-  rc=${PIPESTATUS[0]}
+  "$timer" --kill-after=5s "${timeout_seconds}s" "$BASH" -c '
+    "$1" check 2>&1 |
+      {
+        dd bs=1 count="$2" 2>/dev/null
+        cat >/dev/null
+      } >"$3"
+    exit "${PIPESTATUS[0]}"
+  ' _ "$checker" "$output_bytes" "$tmp_out"
+  rc=$?
   set -e
   rm -f "$tmp_out"
 

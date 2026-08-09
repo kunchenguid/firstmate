@@ -152,7 +152,7 @@ make_forked_preflight_checker() {
 #!/usr/bin/env bash
 set -u
 [ -z "${FM_PREFLIGHT_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_PREFLIGHT_LOG"
-( sleep 10 >/dev/null 2>&1 & )
+sleep 10 &
 printf '%s\n' 'OK: active re***@example.invalid is usable'
 exit 0
 SH
@@ -1097,13 +1097,15 @@ test_antigravity_preflight_forked_checker_does_not_hang() {
   PREFLIGHT_LOG="$CASE_DIR/checker.log"
   make_forked_preflight_checker "$PREFLIGHT_BIN"
 
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+  out=$(PREFLIGHT_TIMEOUT=1 \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
     --model antigravity/gemini-3.6-flash --effort high)
   status=$?
-  expect_code 0 "$status" "forked checker should return promptly and permit spawn"
-  assert_meta_profile "$HOME_DIR/state/$id.meta" pi antigravity/gemini-3.6-flash high
+  expect_code 1 "$status" "forked checker output descendant must be bounded by the timeout"
+  assert_contains "$out" "timed out" "forked checker timeout refusal was not concrete"
+  assert_absent "$HOME_DIR/state/$id.meta" "forked checker timeout wrote task metadata"
   assert_grep "check" "$PREFLIGHT_LOG" "forked checker was not invoked"
-  pass "forked checker process does not hang the preflight"
+  pass "forked checker output descendants stay inside the preflight timeout"
 }
 
 test_antigravity_preflight_invalid_limits_refuse() {
