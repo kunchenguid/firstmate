@@ -29,7 +29,8 @@ The tier names say what the pass does with an entry:
 - `pinned` - no clock is ever read for it: exempt from decay and from budget eviction, changed only through inspect-then-update when the captain or reality changes it.
 - `aging` - it must re-prove itself: a `reinforced:` date older than 30 days is stale, and a stale entry is re-validated (date refreshed) or archived, never kept by inertia alone.
 - `perishable` - it is stored expecting disposal: a `reinforced:` date older than 7 days is stale, and its prose must name a checkable expiry condition, such as a backlog id, a version floor, or a dated expectation.
-  An entry that cannot name a checkable expiry condition is not `perishable`; store it as `aging` or not at all.
+  An admitted durable entry that cannot name a checkable expiry condition is not `perishable` and must be stored as `aging`.
+  Omission is reserved for non-durable material or facts already owned elsewhere.
 
 Marking rules:
 

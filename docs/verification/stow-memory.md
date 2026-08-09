@@ -216,45 +216,48 @@ The secondmate fixture passed the production home validator before the existing 
 Both secondmate passes preserved its unique local preference and learning while leaving those inherited bytes and mode untouched.
 This verifies the real instruction path consolidates to budget, reports truthful deltas, preserves the primary-owned shared boundary, and does not grow on an identical second pass.
 
-## Git-excluded local skill discovery
+## Git-excluded local skill discovery and loading
 
-The internal skill's offload destination relies on the harness discovering a skill directory whose path is listed in the clone's local `.git/info/exclude`.
-This check ran on 2026-08-08 with Claude Code 2.1.226 in a disposable scratch repository, with a second probe left ordinarily untracked as the discovery control:
+The internal skill's offload destination relies on the harness discovering and JIT-loading a skill directory whose path is listed in the clone's local `.git/info/exclude`.
+This check ran on 2026-08-08 with Claude Code 2.1.226 in a disposable scratch repository.
+The unique sentinel appeared only in the skill body below the frontmatter, so returning it required the fresh session to load the excluded skill rather than merely see its indexed name or description.
+
+The exact commands run from this repository root were:
 
 ```bash
 set -eu
-PROBE_ROOT=$(mktemp -d)
+claude --version
+PROBE_ROOT="$PWD/.stow-excluded-probe-tmp"
+rm -rf "$PROBE_ROOT"
+mkdir -p "$PROBE_ROOT"
 cd "$PROBE_ROOT"
 git init -q .
-mkdir -p .claude/skills/excluded-probe .claude/skills/control-probe
+mkdir -p .claude/skills/excluded-probe
 cat >.claude/skills/excluded-probe/SKILL.md <<'EOF'
 ---
 name: excluded-probe
-description: Discovery probe whose directory is listed in .git/info/exclude. Never load it.
+description: A neutral probe used when explicitly requested by name.
 ---
-# excluded-probe
-Test artifact.
-EOF
-cat >.claude/skills/control-probe/SKILL.md <<'EOF'
----
-name: control-probe
-description: Discovery control probe with ordinary untracked git status. Never load it.
----
-# control-probe
-Test artifact.
+
+# Excluded probe
+
+The sentinel token is STOW-EXCLUDE-LOAD-8F3K1.
 EOF
 printf '.claude/skills/excluded-probe/\n' >>.git/info/exclude
 git check-ignore -v .claude/skills/excluded-probe/SKILL.md
-claude --model haiku -p "Inspect the list of skills available to you in this session. Reply with exactly two lines and nothing else: line 1 'CONTROL=YES' if a skill named 'control-probe' is available, else 'CONTROL=NO'. Line 2 'EXCLUDED=YES' if a skill named 'excluded-probe' is available, else 'EXCLUDED=NO'. Do not use any tools."
+claude --model haiku --allowedTools Skill -p "Use your Skill tool to load the skill named 'excluded-probe', then reply with exactly the sentinel token stated inside its body and nothing else."
+cd ..
+rm -rf "$PROBE_ROOT"
 ```
 
-Observed output:
+The exact observed output was:
 
 ```text
+2.1.226 (Claude Code)
 .git/info/exclude:7:.claude/skills/excluded-probe/	.claude/skills/excluded-probe/SKILL.md
-CONTROL=YES
-EXCLUDED=YES
+STOW-EXCLUDE-LOAD-8F3K1
 ```
 
+The `git check-ignore` line proves that the local exclude rule covered the skill body, and the exact sentinel reply proves that a fresh Claude Code session loaded that body through the Skill tool.
 The same day, a `.gitignore`-ignored probe directory under this repository's own `.agents/skills/` was likewise listed by a fresh session alongside the tracked control skill, reached through the `.claude/skills` symlink.
-This verifies skill discovery is a filesystem scan that ignores git ignore status, so a user-owned local skill excluded through `.git/info/exclude` is still listed and JIT-loadable.
+Together these probes verify that ignore status does not prevent filesystem discovery and that a user-owned local skill excluded through `.git/info/exclude` remains JIT-loadable.
