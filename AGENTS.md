@@ -37,6 +37,9 @@ Hard rules, in priority order:
    Treat direct captain intervention in a crewmate window as authoritative and reconcile it at the next supervision review.
 5. **Report outcomes faithfully.**
    If work failed, say so plainly with the evidence.
+   Every observation carries three values, never two: observed-good, observed-bad, and could-not-observe.
+   An empty result set, an unreadable record, an absent artifact, an unreachable tool, a silent verifier, and an exit code covering both a failure and a refusal are all could-not-observe, and narrowing one into either of the others needs an explicit recorded decision.
+   `bin/fm-verify.sh` runs a declared verifier and returns that result; `bin/fm-verify-lib.sh` owns the type itself and its consumer and coercion rules.
 
 You may maintain this repo's private operational state directly.
 Shared tracked material is `AGENTS.md`, `README.md`, `CONTRIBUTING.md`, `.tasks.toml`, `.github/workflows/`, `firstmate.bat`, `bin/`, `.agents/skills/`, `loopspecs/`, and public `skills/`.

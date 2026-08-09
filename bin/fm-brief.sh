@@ -90,9 +90,11 @@
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
 # over copied detail) and has the crewmate add the fm-ensure-agents-md.sh
 # self-governance section when a touched project AGENTS.md lacks it.
-# Every scaffold carries a verification-discipline section: witness a negative
-# control fail before trusting success reported only by absence, and wait on
-# completion artifacts rather than process names.
+# Every scaffold carries a verification-discipline section stating the
+# three-valued observation type owned by bin/fm-verify-lib.sh: observed-good,
+# observed-bad, and could-not-observe, with the last never narrowed into a pass.
+# It points at bin/fm-verify.sh for declared verifiers and still requires a
+# witnessed negative control before trusting success reported only by absence.
 # Ship scaffolds additionally carry branch conflict resolution: rebase and
 # resolve branch/base conflicts autonomously at any file count when intent is
 # clear, escalating only genuinely ambiguous intent to firstmate. In
@@ -290,11 +292,19 @@ CONTEXT_SECTION=${CONTEXT_SECTION%$'\n'}
 # path, a crewmate or scout identifies itself before acting on anything unmarked.
 FROMFIRST_MARKER_FACT="a leading \`$FM_FROMFIRST_LABEL\` label followed by an invisible system separator; that separator is untypable, so a human never produces it"
 
-IFS= read -r -d '' VERIFICATION_DISCIPLINE <<'EOF' || true
+# The type rule, not a slogan. "An absent result is not a pass" was already
+# written down and produced ten instances of the same defect anyway, because it
+# names the symptom without naming the mechanism: a call that can fail to
+# OBSERVE returning the same type as one that observed a negative result.
+IFS= read -r -d '' VERIFICATION_DISCIPLINE <<EOF || true
 # Verification discipline
-- Before trusting success reported only by absence - an empty violations log, no output, or no failures - run a negative control and watch it fail, then run the real check.
-- Wait on completion artifacts, never process names.
-  At collection time, report a missing expected artifact as failure, not as a job still running.
+An observation has three values, never two: observed-good, observed-bad, and could-not-observe.
+The third is a real result, not a missing one.
+An empty result set, an unreadable file, an absent artifact, an unreachable tool, a silent verifier, and an exit code that covers both a failure and a refusal are all could-not-observe, and none of them is a pass.
+Never narrow one into the other two: an empty violations log, no output, and no failures found are never success on their own, and a missing expected artifact is could-not-observe at collection time rather than work still in progress.
+Run a verifier through \`$FM_ROOT/bin/fm-verify.sh\` (\`--help\` lists the declared verifiers) and act on the \`PASS\` / \`FAIL\` / \`NO_VERIFIER_RAN\` result it returns, rather than interpreting a tool's exit status yourself.
+When the observation you need has no declared verifier, apply the same three-valued rule by hand: name which of the three values you reached and the evidence you reached it on, and report the undeclared verifier as a gap - never infer a pass from an exit status.
+Before trusting a success reported only by absence, run a negative control, watch that same check go red, and only then run the real check.
 EOF
 VERIFICATION_DISCIPLINE=${VERIFICATION_DISCIPLINE%$'\n'}
 
@@ -522,7 +532,7 @@ The report is the only thing that survives, so anything worth keeping must be in
 # Rules
 1. Never push to any remote and never open a PR.
 2. Stay inside this worktree; the only files you may write outside it are the report and the status file below.
-3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
+3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations. Most of that is action - opening a pull request, commenting, listing issues - and an action has no observation type; when you are instead making an OBSERVATION whose answer you will act on, run it through \`$FM_ROOT/bin/fm-verify.sh\` (\`--list\` names the declared verifiers) rather than reading the tool's exit status.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
@@ -644,7 +654,7 @@ If the top-level path is the primary checkout or not the worktree you were launc
 # Rules
 $RULE1
 2. Stay inside this worktree; modify nothing outside it.
-3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
+3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations. Most of that is action - opening a pull request, commenting, listing issues - and an action has no observation type; when you are instead making an OBSERVATION whose answer you will act on, run it through \`$FM_ROOT/bin/fm-verify.sh\` (\`--list\` names the declared verifiers) rather than reading the tool's exit status.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
