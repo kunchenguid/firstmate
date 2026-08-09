@@ -1167,21 +1167,8 @@ esac
 # `pi-signed ...` escape-hatch worker would self-identify as plain pi and
 # contradict the harness recorded in its own task meta.
 case "$HARNESS" in
-  pi|pi-signed) PI_MARKER="FM_PI_HARNESS=$HARNESS " ;;
-  *) PI_MARKER= ;;
+  pi|pi-signed) LAUNCH="FM_PI_HARNESS=$HARNESS $LAUNCH" ;;
 esac
-# OMPCODE is OMP's own positive identity marker and bin/fm-harness.sh detect_own
-# reads it ahead of every other marker, so a worker that is not OMP must not
-# inherit one from the session or multiplexer daemon that launched it - it would
-# report a harness its own task meta contradicts. This binds to the RESOLVED
-# harness, not to the launch kind: a raw escape-hatch command names its adapter
-# too, and leaving that one pane unstripped is exactly the case that breaks the
-# FM_PI_HARNESS marker set above.
-if [ "$HARNESS" = omp ]; then
-  LAUNCH="$PI_MARKER$LAUNCH"
-else
-  LAUNCH="env -u OMPCODE $PI_MARKER$LAUNCH"
-fi
 
 # muse is verified as a CREWMATE/SCOUT adapter only. A secondmate is a firstmate
 # instance, so it needs a primary supervision protocol; muse has none, and its
@@ -2664,6 +2651,17 @@ if [ "$KIND" = secondmate ]; then
   # Reuse the single frozen decision from the carrier resolution above so the
   # injected carrier and this on/off snapshot are guaranteed to agree.
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$sq_primary_home FM_HOME=$sq_home FM_TRACE_CONTEXT=$SPAWN_TRACE_EFFECTIVE FM_SUPERVISION_MODEL=$supervision_model $LAUNCH"
+fi
+# OMPCODE is OMP's own positive identity marker and bin/fm-harness.sh detect_own
+# reads it ahead of every other marker, so a worker that is not OMP must not
+# inherit one from the session or multiplexer daemon that launched it: it would
+# report a harness its own task meta contradicts. This binds to the RESOLVED
+# harness, not to the launch kind, because a raw escape-hatch command names its
+# adapter too. It is a pane-shell statement rather than an `env` prefix so that
+# the escape hatch keeps accepting the shell forms it exists for - `cd x && ...`,
+# a sourced launcher, a shell function - which an `env` prefix would break.
+if [ "$HARNESS" != omp ]; then
+  LAUNCH="unset OMPCODE; $LAUNCH"
 fi
 if [ -z "$SPAWN_TRACEPARENT" ] && [ "$RELAUNCH" -eq 1 ]; then
   LAUNCH="unset TRACEPARENT; $LAUNCH"

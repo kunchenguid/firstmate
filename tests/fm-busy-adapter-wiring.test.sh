@@ -35,7 +35,7 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse pi opencode claude codex
+  fm_fake_exit0 "$fakebin" treehouse pi opencode claude codex omp
   printf '%s\n' "$fakebin"
 }
 
@@ -175,6 +175,74 @@ test_pi_extension_stale_incarnation_rejected() {
   out=$(classify pi "$id" "$state")
   [ "$out" = "busy fm-spawn" ] || fail "a stale extension event must not change state, got '$out'"
   pass "pi extension events from a superseded incarnation are rejected as stale"
+}
+
+# drive_omp_ext <ext-path> <mode>: load the generated OMP extension in a plain
+# Node host and fire one lifecycle handler. Modes: agent-start, agent-end,
+# session-shutdown. OMP has no ctx.isIdle(): agent_end fires once after the
+# final turn, so it is the whole idle edge and it also publishes the turn-end
+# notification.
+drive_omp_ext() {
+  EXT_PATH="$1" MODE="$2" node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+const mod = await import(pathToFileURL(process.env.EXT_PATH).href);
+const handlers = {};
+mod.default({ on: (name, fn) => { handlers[name] = fn; } });
+switch (process.env.MODE) {
+  case "agent-start": await handlers["agent_start"]({}, {}); break;
+  case "agent-end": await handlers["agent_end"]({}, {}); break;
+  case "session-shutdown": await handlers["session_shutdown"]({}, {}); break;
+  default: throw new Error("unknown mode " + process.env.MODE);
+}
+EOF
+}
+
+test_omp_extension_semantic_lifecycle() {
+  local rec id=busy-omp-1 out state ext
+  rec=$(make_spawn_case omp-lifecycle omp "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "omp spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  ext="$state/$id.omp-ext.ts"
+  assert_present "$ext" "omp spawn did not write the per-task extension"
+
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "busy fm-spawn" ] || fail "seed after spawn must be 'busy fm-spawn', got '$out'"
+
+  out=$(drive_omp_ext "$ext" agent-start) || fail "agent_start drive failed: $out"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "busy omp-ext" ] || fail "agent_start must classify 'busy omp-ext', got '$out'"
+
+  rm -f "$state/$id.turn-ended"
+  out=$(drive_omp_ext "$ext" agent-end) || fail "agent_end drive failed: $out"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "idle omp-ext" ] || fail "agent_end must classify 'idle omp-ext', got '$out'"
+  [ -f "$state/$id.turn-ended" ] || fail "agent_end no longer publishes the turn-end notification marker"
+
+  out=$(drive_omp_ext "$ext" agent-start) || fail "second agent_start drive failed: $out"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "busy omp-ext" ] || fail "a fresh run must reopen busy, got '$out'"
+
+  out=$(drive_omp_ext "$ext" session-shutdown) || fail "session_shutdown drive failed: $out"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "idle omp-ext" ] || fail "session_shutdown must settle the worker idle, got '$out'"
+  pass "omp extension opens busy on agent_start, settles idle on agent_end with the turn-end marker, and settles on shutdown"
+}
+
+test_omp_extension_stale_incarnation_rejected() {
+  local rec id=busy-omp-2 out state ext
+  rec=$(make_spawn_case omp-stale omp "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "omp spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  ext="$state/$id.omp-ext.ts"
+  "$ROOT/bin/fm-busy-event.sh" arm "$state" "$id" >/dev/null
+  out=$(drive_omp_ext "$ext" agent-end) || fail "stale agent_end drive failed: $out"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "busy fm-spawn" ] || fail "a stale extension event must not change state, got '$out'"
+  pass "omp extension events from a superseded incarnation are rejected as stale"
 }
 
 # drive_oc_plugin <plugin-path> <events-json-lines...>: load the generated
@@ -345,6 +413,8 @@ test_kimi_and_grok_install_no_unverified_wiring() {
 test_pi_extension_semantic_lifecycle
 test_pi_extension_serializes_settle_before_next_start
 test_pi_extension_stale_incarnation_rejected
+test_omp_extension_semantic_lifecycle
+test_omp_extension_stale_incarnation_rejected
 test_kimi_and_grok_install_no_unverified_wiring
 test_opencode_plugin_semantic_lifecycle
 test_claude_hooks_semantic_lifecycle

@@ -129,7 +129,7 @@ test_no_profile_keeps_claude_profile_defaults() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
 
   launch=$(cat "$LAUNCH_LOG")
-  expected="env -u OMPCODE CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
+  expected="unset OMPCODE; CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
   [ "$launch" = "$expected" ] || fail "no-profile claude launch did not use the canonical launch kind"$'\n'"expected: $expected"$'\n'"actual:   $launch"
   pass "no --model/--effort records defaults and types the claude launch instructions"
 }
@@ -362,7 +362,7 @@ test_active_dispatch_profile_allows_raw_launch_command() {
   assert_contains "$out" "spawned $id harness=custom-agent" "spawn did not report raw command harness"
   assert_meta_profile "$HOME_DIR/state/$id.meta" custom-agent default default
   launch=$(cat "$LAUNCH_LOG")
-  [ "$launch" = "env -u OMPCODE custom-agent --flag" ] || fail "raw launch command changed"$'\n'"actual: $launch"
+  [ "$launch" = "unset OMPCODE; custom-agent --flag" ] || fail "raw launch command changed"$'\n'"actual: $launch"
   pass "active crew-dispatch profile allows the raw launch-command escape hatch"
 }
 
@@ -577,6 +577,38 @@ SH
   pass "a raw launch worker self-identifies as its recorded harness even under an inherited OMP marker"
 }
 
+# The raw path is the escape hatch for verifying a new adapter, so it has to keep
+# accepting the shell forms an experimental launcher takes. A command-prefix
+# strip (`env -u OMPCODE cd sub && agent`) would make this pane die at the first
+# word while still looking like a launch, so the composed line is run for real.
+test_raw_launch_preserves_compound_shell_command_forms() {
+  local rec id out status launch probe sub sub_pwd
+  id=profile-raw-shellform-z8g
+  rec=$(make_spawn_case profile-raw-shellform claude "$id")
+  read_case_record "$rec"
+  probe="$CASE_DIR/raw-shellform-probe"
+  sub="$CASE_DIR/subdir"
+  mkdir -p "$sub"
+  sub_pwd=$(cd "$sub" && pwd)
+  cat > "$FAKEBIN_DIR/myagent" <<SH
+#!/usr/bin/env bash
+printf '%s %s\n' "\$PWD" "\${OMPCODE-stripped}" > "$probe"
+SH
+  chmod +x "$FAKEBIN_DIR/myagent"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "cd $sub && myagent --x")
+  status=$?
+  expect_code 0 "$status" "a raw compound-shell launch command should spawn"
+
+  launch=$(cat "$LAUNCH_LOG")
+  env OMPCODE=1 PATH="$FAKEBIN_DIR:$PATH" bash -c "$launch"
+  [ -f "$probe" ] || fail "the raw compound-shell launch command never reached its agent"$'\n'"launch: $launch"
+  [ "$(cat "$probe")" = "$sub_pwd stripped" ] \
+    || fail "raw compound-shell launch produced '$(cat "$probe")', want '$sub_pwd stripped'"
+  pass "a raw launch keeps compound shell forms runnable while still stripping the OMP marker"
+}
+
 test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata() {
   local rec id out status
   id=profile-pi-signed-missing-z8c
@@ -652,7 +684,7 @@ test_claude_forwards_firstmate_config_dir_when_set() {
   status=$?
   expect_code 0 "$status" "claude spawn with CLAUDE_CONFIG_DIR set should succeed"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "CLAUDE_CONFIG_DIR='/opt/test/claude-work' env -u OMPCODE CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude" \
+  assert_contains "$launch" "unset OMPCODE; CLAUDE_CONFIG_DIR='/opt/test/claude-work' CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude" \
     "claude launch did not forward firstmate's CLAUDE_CONFIG_DIR to the crewmate pane"
   pass "claude forwards firstmate's CLAUDE_CONFIG_DIR so the crewmate uses the same credential store"
 }
@@ -728,6 +760,7 @@ test_opencode_threads_model_and_ignores_effort_axis
 test_pi_threads_model_and_max_effort
 test_pi_signed_threads_shared_pi_profile_and_preserves_identity
 test_raw_launch_worker_identity_matches_its_recorded_harness
+test_raw_launch_preserves_compound_shell_command_forms
 test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata
 test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity
 test_batch_forwards_shared_profile_flags
