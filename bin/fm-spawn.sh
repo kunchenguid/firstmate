@@ -161,9 +161,11 @@
 #   secondmate receives the primary's read-only shared captain-preference file
 #   (fm-config-inherit-lib.sh). A successful launch clears pending inherited
 #   config reread generations because the new agent reads the converged files.
-#   --scout records kind=scout in the task's meta (report deliverable, scratch worktree;
-#   see AGENTS.md task lifecycle); --secondmate records kind=secondmate and launches in a
-#   provisioned firstmate home; the default is kind=ship.
+#   --scout records deliverable=scout in the task's meta (report deliverable, scratch
+#   worktree; see AGENTS.md task lifecycle); --secondmate records role=secondmate and
+#   launches in a provisioned firstmate home; the default is a commissioned crew ship
+#   task. The deprecated kind= alias is dual-written beside the axes for the
+#   migration window (bin/fm-task-axis-lib.sh).
 #   Before a secondmate launch, the home is locally fast-forwarded to the primary
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
@@ -257,6 +259,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-ff-lib.sh"
 # shellcheck source=bin/fm-task-base-lib.sh
 . "$SCRIPT_DIR/fm-task-base-lib.sh"
+# shellcheck source=bin/fm-task-axis-lib.sh
+. "$SCRIPT_DIR/fm-task-axis-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-secondmate-nudge-lib.sh
@@ -628,7 +632,7 @@ spawn_remote_secondmate() {
   meta="$STATE/$id.meta"
   if [ -e "$meta" ] || [ -L "$meta" ]; then
     if [ ! -f "$meta" ] || [ -L "$meta" ] \
-      || [ "$(fm_meta_get "$meta" kind)" != secondmate ] \
+      || [ "$(fm_task_role "$meta")" != secondmate ] \
       || [ "$(fm_meta_get "$meta" remote_host)" != "$host" ] \
       || [ "$(fm_meta_get "$meta" remote_root)" != "$root" ] \
       || [ "$(fm_meta_get "$meta" home)" != "$home" ]; then
@@ -758,6 +762,7 @@ spawn_remote_secondmate() {
     echo "project=$root"
     echo "harness=$harness"
     echo "kind=secondmate"
+    fm_task_axes_emit secondmate
     echo "mode=secondmate"
     echo "yolo=off"
     echo "tasktmp="
@@ -896,6 +901,7 @@ spawn_abort_cleanup() {
             echo "project=$PROJ_ABS"
             echo "harness=$HARNESS"
             echo "kind=$KIND"
+            fm_task_axes_emit "$KIND"
             [ -z "${MODE:-}" ] || echo "mode=$MODE"
             [ -z "${YOLO:-}" ] || echo "yolo=$YOLO"
             echo "tasktmp=${TASK_TMP:-}"
@@ -2274,8 +2280,8 @@ fi
 # validate/merge stages can branch on it. A ship task carries the explicit
 # per-task decision validated above; a secondmate's posture is fixed; a scout
 # records none at all, because its deliverable is a report rather than a merge
-# (fm-teardown.sh defaults an absent mode to no-mistakes, and fm-promote.sh
-# requires an explicit mode when a scout is promoted to a ship task).
+# (fm-teardown.sh defaults an absent mode to no-mistakes, and fm-reflag.sh
+# requires an explicit mode when a scout is reflagged as a ship task).
 if [ "$KIND" = secondmate ]; then
   MODE=secondmate
   YOLO=off
@@ -2361,7 +2367,11 @@ fi
   fi
   echo "project=$PROJ_ABS"
   echo "harness=$HARNESS"
+  # The three identity axes, plus the deprecated kind= alias they replace. Every
+  # writer dual-writes through bin/fm-task-axis-lib.sh so no writer spells the
+  # derivation itself; docs/vocabulary-collisions.md owns the alias's retirement.
   echo "kind=$KIND"
+  fm_task_axes_emit "$KIND"
   [ -z "$MODE" ] || echo "mode=$MODE"
   [ -z "$YOLO" ] || echo "yolo=$YOLO"
   # Both base references, so which commit a task read and which it contributed

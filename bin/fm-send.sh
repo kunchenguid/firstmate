@@ -25,7 +25,7 @@
 # nothing else tells firstmate's instructions apart from a human typing into that
 # pane. Every text steer whose target is a task selector resolved through this
 # home's meta therefore uses the live-charter-compatible from-firstmate carrier
-# owned by bin/fm-operational-input.sh. A kind=secondmate target routes its reply
+# owned by bin/fm-operational-input.sh. A role=secondmate target routes its reply
 # via its status file or a status-pointed doc instead of stranding it in chat the
 # main firstmate never reads; a crewmate or scout target reads the same marker
 # through its generated brief (bin/fm-brief.sh), which treats an unmarked message
@@ -86,6 +86,8 @@ fi
 
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-task-axis-lib.sh
+. "$SCRIPT_DIR/fm-task-axis-lib.sh"
 # shellcheck source=bin/fm-marker-lib.sh
 . "$SCRIPT_DIR/fm-marker-lib.sh"
 # shellcheck source=bin/fm-pending-reply-lib.sh
@@ -266,7 +268,7 @@ TARGET_TASK_ID=
 if [ -n "$TARGET_SELECTOR" ] && [ -n "$TARGET_META" ]; then
   MARK_FROM_FIRSTMATE=1
   TARGET_TASK_ID=$(fm_send_id_from_meta "$TARGET_META")
-  if [ "$(fm_meta_get "$TARGET_META" kind)" = secondmate ]; then
+  if [ "$(fm_task_role "$TARGET_META")" = secondmate ]; then
     MARK_PENDING_REPLY=1
   fi
 fi

@@ -2,7 +2,7 @@
 name: bootstrap-diagnostics
 description: >-
   Agent-only handling playbook for session-start bootstrap diagnostics.
-  Use whenever the session-start digest's bootstrap section prints an actionable diagnostic line - MISSING, MISSING_MANUAL, BACKEND_INVALID, NEEDS_GH_AUTH, TANGLE, STARTUP_MEMORY_BUDGET, CREW_DISPATCH invalid, MODEL_REGISTRY, MODEL_PRICE, MODEL_VERIFY, ADMISSION_CONTROL, WAKE_LEDGER, FLEET_SYNC, PR_CHECK_MIGRATION, VALIDATION_DAEMON, SECONDMATE_SYNC, SECONDMATE_LIVENESS, SECONDMATE_HANDOFF, NUDGE_SECONDMATES, or FMX - or when a standalone bin/fm-bootstrap.sh run prints one of those lines.
+  Use whenever the session-start digest's bootstrap section prints an actionable diagnostic line - MISSING, MISSING_MANUAL, BACKEND_INVALID, NEEDS_GH_AUTH, TANGLE, STARTUP_MEMORY_BUDGET, CREW_DISPATCH invalid, MODEL_REGISTRY, MODEL_PRICE, MODEL_VERIFY, ADMISSION_CONTROL, WAKE_LEDGER, TASK_AXIS_BACKFILL, FLEET_SYNC, PR_CHECK_MIGRATION, VALIDATION_DAEMON, SECONDMATE_SYNC, SECONDMATE_LIVENESS, SECONDMATE_HANDOFF, NUDGE_SECONDMATES, or FMX - or when a standalone bin/fm-bootstrap.sh run prints one of those lines.
   A silent bootstrap section, or a BOOTSTRAP_INFO fact, means no skill load.
 user-invocable: false
 metadata:
@@ -53,6 +53,10 @@ When any diagnostic needs captain attention, report the plain consequence and re
 - `WAKE_LEDGER: <n> task(s) declared failure with no terminal record ...` - only a lock-holding session records those, so a read-only session names them and leaves the recording to the session that holds the lock.
   Take no action on the count itself; the next locked session records it, and the tasks themselves are ordinary work whose state is read the usual way.
   Terminal outcome counts stay diagnostic while any of them is unrecorded, so never quote a success rate from the ledger.
+- `TASK_AXIS_BACKFILL: <n> task record(s) state an identity the deprecated kind= alias contradicts - <ids>` - a task's role, deliverable, or stage disagrees with the old single-field value still recorded beside it, so that task's identity is unreliable rather than merely stale.
+  The backfill sweep refuses those records instead of converging them, because either side could be the stale one and choosing silently would pick a task's identity by luck.
+  Read the named record and settle it from evidence outside the file - what the task was dispatched to produce, and whether it was reflagged - then correct the disagreeing field; `bin/fm-task-axis-lib.sh` owns the axes and the derivation, and `docs/vocabulary-collisions.md` owns the alias's retirement condition.
+  A record that appears here after a spawn or a reflag is a writer bug to escalate, not old damage: every current writer writes both sides together.
 - `FLEET_SYNC: <repo>: skipped: <reason>` - a benign one-off skip (offline, no origin, local-only); bootstrap continued, investigate only if it blocks work.
   A skip can also report the bounded fleet-refresh timeout (`FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT`, or a fleet-size-aware default with a 20 second floor); a timeout never blocks startup.
 - `FLEET_SYNC: <repo>: recovered: <detail>` - the clone had drifted onto a clean detached HEAD holding no unique commits and the sync self-healed it (re-attached the default branch and fast-forwarded); no action needed, it is reported only so the self-heal is visible.

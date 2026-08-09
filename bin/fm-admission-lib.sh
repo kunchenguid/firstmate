@@ -354,3 +354,17 @@ fm_admission_digest() {  # <canonical-bytes>
   fi
   printf 'sha256:%s\n' "${sum:0:16}"
 }
+
+# Successful cleanup is admission control's primary release trigger: capacity is
+# freed when a worker actually goes away, not when a task reports done. This adds
+# one deterministic re-examination step to the caller's existing backlog re-scan
+# seam and stays silent for every home that has not configured a policy.
+# A secondmate holds no fleet slot to release, which is the ROLE axis alone
+# (bin/fm-task-axis-lib.sh); what its work produces is irrelevant here.
+fm_admission_release_reminder() {  # <config-dir> <task-id> <role>
+  local config=${1-} id=${2-} role=${3-} state
+  [ "$role" != secondmate ] || return 0
+  state=$(fm_admission_state "$(fm_admission_config_file "$config")")
+  [ "$state" = active ] || return 0
+  printf '%s\n' "Admission: $id released its worker. Run bin/fm-admission.sh to recompute the fleet band before releasing any load-held request, then admit at most one at a time, re-evaluating between each."
+}

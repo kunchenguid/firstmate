@@ -32,7 +32,12 @@
 #     endpoint.exists is the cheap backend endpoint-presence read.
 #     endpoint.agent_alive is populated for secondmates only, where it is useful
 #     return-channel supervision data; other tasks use "not_checked".
-#   scout_reports[]: present data/<id>/report.md pointers.
+#   scout_reports[]: present data/<id>/report.md pointers, each labeled with the
+#     owning task row's deliverable (plus the deprecated kind alias for the
+#     migration window; docs/vocabulary-collisions.md owns its retirement). A
+#     torn-down task has no task row, so its surviving report reports
+#     deliverable=scout; the backlog record's kind is a different vocabulary
+#     (captain/program) and is never consulted.
 #   main_inventory: {valid,reason,orphan_in_flight[],unstructured_current_count} -
 #     main-home current-inventory checks shared with secondmate_home_summary_json
 #     (orphan structured in-flight ids with no state/<id>.meta, and unstructured
@@ -138,6 +143,9 @@ validate_positive_bound FM_SNAPSHOT_REGISTRY_TIMEOUT "$FM_SNAPSHOT_REGISTRY_TIME
 # shellcheck source=bin/fm-classify-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-classify-lib.sh"
+# shellcheck source=bin/fm-task-axis-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-task-axis-lib.sh"
 # shellcheck source=bin/fm-ff-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-ff-lib.sh"  # validate_secondmate_home: shared seeded-home boundary checks
@@ -443,7 +451,7 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
 }
 
 task_json_lines() {
-  local meta id kind harness mode yolo project worktree home projects backend target status_log report_path
+  local meta id kind role deliverable stage harness mode yolo project worktree home projects backend target status_log report_path
   local remote_host remote_root remote_state remote_rc remote_home_present
   local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
   local current_state current_source pending_decision blocked_event report_present=0 pr_from_status
@@ -461,6 +469,12 @@ task_json_lines() {
     id=$(basename "$meta" .meta)
     kind=$(meta_value "$meta" kind)
     [ -n "$kind" ] || kind=ship
+    # The three identity axes travel in the snapshot beside the deprecated alias
+    # so a consumer can filter on the one axis it means. bin/fm-task-axis-lib.sh
+    # derives them for a record written before the split.
+    role=$(fm_task_role "$meta")
+    deliverable=$(fm_task_deliverable "$meta")
+    stage=$(fm_task_stage "$meta")
     harness=$(meta_value "$meta" harness)
     mode=$(meta_value "$meta" mode)
     yolo=$(meta_value "$meta" yolo)
@@ -515,7 +529,7 @@ task_json_lines() {
     # non-authoritative status-log/none read on a still-live task, keeps the fold's
     # open decision surfacing.
     open_decisions_tsv=$(status_open_decisions "$status_log")
-    if [ "$kind" != secondmate ] && \
+    if [ "$role" != secondmate ] && \
        { { { [ "$current_source" = run-step ] || [ "$current_source" = pane ]; } \
            && [ "$current_state" != parked ] && [ "$current_state" != blocked ]; } \
          || { [ "$current_state" = "done" ] || [ "$current_state" = "failed" ]; }; }; then
@@ -558,7 +572,7 @@ task_json_lines() {
           endpoint_exists=false
         fi
       fi
-      if [ "$kind" = secondmate ] && [ -n "$target" ]; then
+      if [ "$role" = secondmate ] && [ -n "$target" ]; then
         agent_alive=$(fm_backend_agent_alive "$backend" "$target" 2>/dev/null || printf unknown)
       fi
     fi
@@ -589,6 +603,9 @@ task_json_lines() {
       | jq -n \
       --arg id "$id" \
       --arg kind "$kind" \
+      --arg role "$role" \
+      --arg deliverable "$deliverable" \
+      --arg stage "$stage" \
       --arg harness "$harness" \
       --arg mode "$mode" \
       --arg yolo "$yolo" \
@@ -619,6 +636,9 @@ task_json_lines() {
       | {
         id:$id,
         kind:$kind,
+        role:$role,
+        deliverable:$deliverable,
+        stage:$stage,
         harness:($harness // ""),
         mode:($mode // ""),
         yolo:($yolo // ""),
@@ -648,7 +668,7 @@ task_json_lines() {
           last_event_text:($status_log.last_event.raw // "")
         },
         actions:(
-          if $kind == "secondmate" then
+          if $role == "secondmate" then
             {send:"bin/fm-send.sh fm-\($id) \u0027<request>\u0027",
              watch:"read status/doc return channel; do not routinely fm-peek a secondmate for answers",
              return_channel_note:"Secondmate answers come back through status/doc paths after a marked fm-send request."}
@@ -1207,7 +1227,7 @@ secondmate_current_json() {  # <parent-tasks-json>
     | (($registered | map(.id)) // []) as $registered_ids
     | ([ $registered[] as $r
          | $r + {parent_task:([$tasks[] | select(.id == $r.id)][0] // null)} ]
-       + [ $tasks[] | select(.kind == "secondmate") as $t
+       + [ $tasks[] | select(.role == "secondmate") as $t
            | select(($registered_ids | index($t.id)) == null)
            | {id:$t.id,home:($t.paths.home.path // null),
               registered:(if $registry.complete == true then false else null end),
@@ -1510,7 +1530,8 @@ json_envelope \
    | $in.secondmate_landed as $secondmate_landed
    | def backlog_by_id($id): ($backlog.records[]? | select(.structured == true and .id == $id) | .) // null;
    def task_by_id($id): ($tasks[]? | select(.id == $id) | .) // null;
-   def report_kind($id): (task_by_id($id).kind // backlog_by_id($id).kind // "scout");
+   def report_kind($id): (task_by_id($id).kind // "scout");
+   def report_deliverable($id): (task_by_id($id).deliverable // "scout");
    {
      schema:"fm-fleet-snapshot.v1",
      generated:$generated,
@@ -1519,10 +1540,10 @@ json_envelope \
      backlog:$backlog,
      tasks:($tasks | map(. + {backlog:backlog_by_id(.id)})),
      main_inventory:$main_inventory,
-     scout_reports:($scout_reports | map(. + {kind:report_kind(.id)})),
+     scout_reports:($scout_reports | map(. + {kind:report_kind(.id), deliverable:report_deliverable(.id)})),
      secondmate_current:$secondmate_current,
      secondmate_landed:$secondmate_landed,
      secondmate_guidance:{
-       note:"For kind=secondmate, bearings selects validated structured state from that registered home; parent events and bounded terminal evidence are fallback-only supplements and never current-state authority."
+       note:"For role=secondmate, bearings selects validated structured state from that registered home; parent events and bounded terminal evidence are fallback-only supplements and never current-state authority."
      }
    }' || { echo "fm-fleet-snapshot: snapshot assembly failed" >&2; exit 1; }

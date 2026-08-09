@@ -577,19 +577,17 @@ test_release_seams_appear_only_for_an_active_policy() {
   assert_contains "$out" "admit at most one at a time" \
     "the digest must state the one-at-a-time release rule"
 
-  # Teardown's reminder is the other release trigger. Assert on the emitting
-  # function directly: driving a full teardown would exercise worktree and
-  # endpoint machinery this suite does not own.
-  assert_grep 'admission_release_reminder' "$ROOT/bin/fm-teardown.sh" \
+  # Teardown's reminder is the other release trigger. Exercise the emitting
+  # function itself: driving a full teardown would exercise worktree and
+  # endpoint machinery this suite does not own. The seam check below still reads
+  # teardown for the call site, which is the one thing this suite cannot reach
+  # behaviorally without owning that machinery.
+  assert_grep 'fm_admission_release_reminder' "$ROOT/bin/fm-teardown.sh" \
     "teardown lost its admission release seam"
   out=$(
-    CONFIG="$home/config" KIND=ship ID=demo-task
-    export CONFIG KIND ID
     # shellcheck source=/dev/null
     . "$ROOT/bin/fm-admission-lib.sh"
-    # shellcheck disable=SC2016
-    eval "$(awk '/^admission_release_reminder\(\) \{/,/^\}/' "$ROOT/bin/fm-teardown.sh")"
-    admission_release_reminder
+    fm_admission_release_reminder "$home/config" demo-task crew
   )
   assert_contains "$out" "recompute the fleet band" \
     "cleanup must prompt a fresh band before releasing held work"
