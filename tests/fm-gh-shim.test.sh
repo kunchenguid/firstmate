@@ -456,12 +456,39 @@ test_pr_create_without_repo_injects_origin_target() {
 
   assert_contains "$out" "https://github.com/o/r/pull/1" \
     "routed pr create did not return the real gh's output"
-  assert_grep 'argv:pr create --head feature --base main --title T --repo fork-owner/fork-repo' \
+  assert_grep 'argv:pr create --repo fork-owner/fork-repo --head feature --base main --title T' \
     "$case_dir/gh.calls" \
     "routed pr create did not receive the fork origin as an explicit --repo target"
   assert_grep 'token:pr-capable-token' "$case_dir/gh.calls" \
     "routed pr create did not receive the credential injected by config/gh-credential"
   pass "gh pr create without --repo injects its checkout origin into the credential route"
+}
+
+test_pr_create_option_value_cannot_mask_origin_target() {
+  local case_dir real_dir shim_dir home checkout
+  case_dir="$TMP_ROOT/repo-like-option-value"
+  real_dir="$case_dir/real"
+  shim_dir="$case_dir/shim"
+  home="$case_dir/home"
+  checkout="$case_dir/checkout"
+  make_fake_gh "$real_dir"
+  make_fake_cred "$case_dir/tools"
+  make_home "$home" "$case_dir/tools/fakecred pr-capable-token --"
+  make_git_checkout "$checkout" "https://github.com/fork-owner/fork-repo.git"
+  mkdir -p "$shim_dir"
+  ln -sf "$SHIM" "$shim_dir/gh"
+
+  (
+    cd "$checkout" || exit 1
+    FAKE_GH_LOG="$case_dir/gh.calls" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+      PATH="$shim_dir:$real_dir:$PATH" gh pr create --body-file -Rnotes.md --title T \
+      < /dev/null > /dev/null 2>&1
+  )
+
+  assert_grep 'argv:pr create --repo fork-owner/fork-repo --body-file -Rnotes.md --title T' \
+    "$case_dir/gh.calls" \
+    "a repository-like body-file value suppressed the explicit origin target"
+  pass "repository-like option values cannot suppress origin targeting"
 }
 
 test_pr_create_with_repo_preserves_caller_target() {
@@ -482,10 +509,19 @@ test_pr_create_with_repo_preserves_caller_target() {
     FM_ROOT_OVERRIDE="$ROOT" PATH="$shim_dir:$real_dir:$PATH" \
     gh pr create --head feature --base main --repo caller-owner/caller-repo --title T < /dev/null 2>&1)
 
+  out=$(cd "$checkout" && FAKE_GH_LOG="$case_dir/gh.calls" FM_HOME="$home" \
+    FM_ROOT_OVERRIDE="$ROOT" PATH="$shim_dir:$real_dir:$PATH" \
+    gh pr create -dRcaller-owner/caller-repo --head feature --title T < /dev/null 2>&1)
+
   assert_grep 'argv:pr create --head feature --base main --repo caller-owner/caller-repo --title T' \
     "$case_dir/gh.calls" \
     "a caller-supplied --repo did not reach real gh unchanged"
-  pass "a caller-supplied --repo always wins over the checkout origin"
+  assert_grep 'argv:pr create -dRcaller-owner/caller-repo --head feature --title T' \
+    "$case_dir/gh.calls" \
+    "a clustered caller-supplied -R did not reach real gh unchanged"
+  assert_contains "$out" "https://github.com/o/r/pull/1" \
+    "a clustered caller-supplied -R did not complete the credential route"
+  pass "caller-supplied --repo and -R always win over the checkout origin"
 }
 
 test_pr_edit_without_origin_refuses_before_credential_route() {
@@ -810,6 +846,7 @@ test_installer_refuses_to_replace_a_foreign_symlink() {
 }
 
 test_pr_create_without_repo_injects_origin_target
+test_pr_create_option_value_cannot_mask_origin_target
 test_pr_create_with_repo_preserves_caller_target
 test_pr_edit_without_origin_refuses_before_credential_route
 test_ci_403_falls_back_to_exact_head_green_without_privileged_token
