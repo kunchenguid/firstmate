@@ -194,17 +194,17 @@ BRIEF="$DATA/$ID/brief.md"
 mkdir -p "$DATA/$ID"
 
 LOCAL_SKILLS_SECTION=""
-if [ "$KIND" != secondmate ] && [ -n "${FM_LOCAL_SKILLS:-}" ] && [ "$NO_LOCAL_SKILLS_ARG" -ne 1 ]; then
+if [ "$KIND" != secondmate ] && [ "$NO_LOCAL_SKILLS_ARG" -ne 1 ]; then
+  LOCAL_SKILLS_BULLETS=$(printf '%s\n' "${FM_LOCAL_SKILLS:-}" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | sed '/^$/d' | sed 's/^/- /')
+  if [ -z "$LOCAL_SKILLS_BULLETS" ]; then
+    echo "error: this scout/ship brief requires FM_LOCAL_SKILLS (the local skill(s) the crewmate must read) or --no-local-skills when no local skill applies, or else the crewmate cannot move forward" >&2
+    exit 1
+  fi
   LOCAL_SKILLS_SECTION=$(printf '%s\n' \
 '# Local skills - read first' \
 'Before writing any new script or one-off tooling, read the following local skill(s)/resource(s) and follow their established scripts/tooling:' \
-"$(printf '%s\n' "${FM_LOCAL_SKILLS}" | tr ',' '\n' | sed 's/^[[:space:]]*//' | sed '/^$/d' | sed 's/^/- /') " \
+"$LOCAL_SKILLS_BULLETS" \
 'Do not write a new one-off script unless the skill genuinely does not cover this exact task. If you deviate from what the skill documents, say so and why in your status/report.')
-fi
-
-if [ "$KIND" != secondmate ] && [ -z "${FM_LOCAL_SKILLS:-}" ] && [ "$NO_LOCAL_SKILLS_ARG" -ne 1 ]; then
-  echo "error: this scout/ship brief requires FM_LOCAL_SKILLS (the local skill(s) the crewmate must read) or --no-local-skills when no local skill applies, or else the crewmate cannot move forward" >&2
-  exit 1
 fi
 
 shell_quote() {
