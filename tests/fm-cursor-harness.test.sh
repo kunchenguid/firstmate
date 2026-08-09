@@ -31,8 +31,39 @@ case "$*" in
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
-  list-windows) exit 0 ;;
-  has-session|new-session|new-window|kill-window) exit 0 ;;
+  list-windows)
+    # Exact recorded-window inventory for the rollback confirmation: prints
+    # the live window names from FM_FAKE_WINDOW_STATE_FILE when present. The
+    # file starts empty (so create_task's duplicate check sees no window) and
+    # gains the window name at new-window, so the inventory models reality.
+    if [ -n "${FM_FAKE_WINDOW_STATE_FILE:-}" ] && [ -f "$FM_FAKE_WINDOW_STATE_FILE" ]; then
+      cat "$FM_FAKE_WINDOW_STATE_FILE" 2>/dev/null
+    fi
+    exit 0 ;;
+  has-session|new-session) exit 0 ;;
+  new-window)
+    # Record the created task window (its -n name) as live.
+    if [ -n "${FM_FAKE_WINDOW_STATE_FILE:-}" ]; then
+      prev=
+      wname=
+      for a in "$@"; do
+        if [ "$prev" = "-n" ]; then wname=$a; fi
+        prev=$a
+      done
+      printf '%s\n' "${wname:-fm-window}" >> "$FM_FAKE_WINDOW_STATE_FILE" 2>/dev/null || true
+    fi
+    exit 0 ;;
+  kill-window)
+    # Best-effort like the real backend: the kill SUPPRESSES failure. A test
+    # can force the failure (FM_FAKE_KILL_FAIL=1) to exercise the rollback's
+    # confirmation gate; otherwise the recorded window is removed.
+    if [ -n "${FM_FAKE_KILL_FAIL:-}" ]; then
+      exit 1
+    fi
+    if [ -n "${FM_FAKE_WINDOW_STATE_FILE:-}" ]; then
+      : > "$FM_FAKE_WINDOW_STATE_FILE" 2>/dev/null || true
+    fi
+    exit 0 ;;
   send-keys)
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
       prev=
@@ -104,7 +135,19 @@ esac
 exit 1
 SH
   chmod +x "$fakebin/pgrep"
-  fm_fake_exit0 "$fakebin" treehouse cursor-agent
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ -n "${FM_FAKE_TREEHOUSE_LOG:-}" ]; then
+  printf 'treehouse %s\n' "$*" >> "$FM_FAKE_TREEHOUSE_LOG" 2>/dev/null || true
+fi
+if [ -n "${FM_FAKE_TREEHOUSE_FAIL:-}" ]; then
+  exit 1
+fi
+exit 0
+SH
+  chmod +x "$fakebin/treehouse"
+  fm_fake_exit0 "$fakebin" cursor-agent
   printf '%s\n' "$fakebin"
 }
 
@@ -636,6 +679,8 @@ test_cursor_worker_server_discovery_timeout_causes_rollback() {
   id=cursor-worker-timeout-ze
   rec=$(make_cursor_case cursor-worker-timeout-rollback "$id")
   read_case_record "$rec"
+  : > "$CASE_DIR/windows.state"
+  : > "$CASE_DIR/treehouse.log"
   out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
@@ -643,6 +688,8 @@ test_cursor_worker_server_discovery_timeout_causes_rollback() {
     FM_FAKE_CURSOR_AGENT_ARGS="$FAKEBIN_DIR/cursor-agent --force --trust brief" \
     FM_PROC_ROOT_OVERRIDE="$CASE_DIR/no-proc" FM_FAKE_CURSOR_PROC_ROOT="$CASE_DIR/no-proc" \
     FM_FAKE_CURSOR_AGENT_PID=4242 FM_FAKE_CURSOR_WORKER_PID='' \
+    FM_FAKE_WINDOW_STATE_FILE="$CASE_DIR/windows.state" \
+    FM_FAKE_TREEHOUSE_LOG="$CASE_DIR/treehouse.log" \
     FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1)
   status=$?
@@ -662,9 +709,86 @@ test_cursor_worker_server_discovery_timeout_causes_rollback() {
     || fail "discovery timeout rollback must not leave its turn-end hook record behind"
   [ ! -e "/tmp/fm-$id" ] \
     || fail "discovery timeout rollback must not leave its task tmp root behind"
+  # The confirmed-cleanup path: the endpoint kill ran (window inventory
+  # cleared) and the leased worktree was returned, BEFORE the records went.
+  [ ! -s "$CASE_DIR/windows.state" ] \
+    || fail "successful rollback must have killed and confirmed the endpoint window"
+  grep -q "treehouse return --force $WT_DIR" "$CASE_DIR/treehouse.log" \
+    || fail "successful rollback must have returned the leased worktree"
+  # Supervision must not treat the fully rolled-back task as live.
+  sup=$(bash -c '. "$1"; fm_supervision_status "$2"; printf "%s" "$FM_SUP_NEEDED"' \
+    _ "$ROOT/bin/fm-supervision-lib.sh" "$HOME_DIR/state")
+  [ "$sup" = false ] \
+    || fail "supervision must not treat a fully rolled-back task as live (FM_SUP_NEEDED=$sup)"
   pass "cursor spawn discovery timeout causes refusal and endpoint rollback"
 }
 
+test_cursor_rollback_tmux_kill_failure_retains_recoverable_state() {
+  # The backend kill suppresses failure by contract (tmux kill-window || true),
+  # so the rollback must CONFIRM exact endpoint absence before deleting any
+  # record. With the kill failing and the recorded window still listed, the
+  # task must stay visible and be marked rollback-needed - never erased into
+  # invisibility while its endpoint may still exist.
+  local rec id out status
+  id=cursor-rollback-killfail-zq
+  rec=$(make_cursor_case cursor-rollback-killfail "$id")
+  read_case_record "$rec"
+  : > "$CASE_DIR/windows.state"
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
+    FM_FAKE_CURSOR_AGENT_ARGS="$FAKEBIN_DIR/cursor-agent --force --trust brief" \
+    FM_PROC_ROOT_OVERRIDE="$CASE_DIR/no-proc" FM_FAKE_CURSOR_PROC_ROOT="$CASE_DIR/no-proc" \
+    FM_FAKE_CURSOR_AGENT_PID=4242 FM_FAKE_CURSOR_WORKER_PID='' \
+    FM_FAKE_WINDOW_STATE_FILE="$CASE_DIR/windows.state" FM_FAKE_KILL_FAIL=1 \
+    FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" PATH="$FAKEBIN_DIR:$PATH" \
+    "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  expect_code 1 "$status" "cursor spawn with an unkillable endpoint must refuse"
+  [ -f "$HOME_DIR/state/$id.meta" ] \
+    || fail "unconfirmed endpoint kill must retain the task meta for a cleanup retry"
+  [ -f "$HOME_DIR/state/$id.status" ] \
+    || fail "unconfirmed endpoint kill must retain the task status"
+  grep -q 'rollback-needed' "$HOME_DIR/state/$id.status" \
+    || fail "unconfirmed endpoint kill must mark the task rollback-needed"
+  [ -e "/tmp/fm-$id" ] \
+    || fail "unconfirmed endpoint kill must retain the task tmp root"
+  pass "rollback retains recoverable task state when the tmux endpoint kill cannot be confirmed"
+}
+
+test_cursor_rollback_treehouse_return_failure_retains_recoverable_state() {
+  # The authoritative .meta is never deleted before the leased worktree is
+  # actually returned: with treehouse return failing, the task records must
+  # survive, marked rollback-needed, so a retry can return the lease using the
+  # recorded identity.
+  local rec id out status
+  id=cursor-rollback-wtfail-zr
+  rec=$(make_cursor_case cursor-rollback-wtfail "$id")
+  read_case_record "$rec"
+  : > "$CASE_DIR/windows.state"
+  : > "$CASE_DIR/treehouse.log"
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
+    FM_FAKE_CURSOR_AGENT_ARGS="$FAKEBIN_DIR/cursor-agent --force --trust brief" \
+    FM_PROC_ROOT_OVERRIDE="$CASE_DIR/no-proc" FM_FAKE_CURSOR_PROC_ROOT="$CASE_DIR/no-proc" \
+    FM_FAKE_CURSOR_AGENT_PID=4242 FM_FAKE_CURSOR_WORKER_PID='' \
+    FM_FAKE_WINDOW_STATE_FILE="$CASE_DIR/windows.state" \
+    FM_FAKE_TREEHOUSE_FAIL=1 FM_FAKE_TREEHOUSE_LOG="$CASE_DIR/treehouse.log" \
+    FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" PATH="$FAKEBIN_DIR:$PATH" \
+    "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  expect_code 1 "$status" "cursor spawn with an unreturnable worktree must refuse"
+  [ -f "$HOME_DIR/state/$id.meta" ] \
+    || fail "unreturned worktree must retain the task meta (the only record naming the lease)"
+  grep -q 'rollback-needed' "$HOME_DIR/state/$id.status" \
+    || fail "unreturned worktree must mark the task rollback-needed"
+  grep -q "treehouse return --force $WT_DIR" "$CASE_DIR/treehouse.log" \
+    || fail "the rollback must have attempted the treehouse return of the leased worktree"
+  pass "rollback retains the recovery record when the worktree return cannot be confirmed"
+}
 test_cursor_worker_server_atomic_record_no_partial_write() {
   # The worker-server record is written atomically via temp+mv. After a
   # successful spawn the record file must exist with exactly one line
@@ -895,6 +1019,8 @@ test_cursor_worker_server_recorded_at_spawn
 test_cursor_worker_server_alias_uses_portable_identity
 test_cursor_worker_server_absent_record_refuses_spawn
 test_cursor_worker_server_discovery_timeout_causes_rollback
+test_cursor_rollback_tmux_kill_failure_retains_recoverable_state
+test_cursor_rollback_treehouse_return_failure_retains_recoverable_state
 test_cursor_worker_server_atomic_record_no_partial_write
 test_cursor_worker_server_reaped_after_cwd_no_longer_belongs_to_task
 test_worker_server_identity_survives_spaced_comm

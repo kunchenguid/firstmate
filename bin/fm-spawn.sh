@@ -2180,38 +2180,63 @@ EOF
 # happened AFTER this invocation published task records. state/<id>.meta is
 # published before launch, so a failure after publication must remove
 # everything THIS invocation created or supervision sees a phantom live task
-# (a published meta with no live endpoint). Removes: the endpoint, the task
-# records (meta/status/turn-end hook), the cursor worker-server record, the
-# per-task tmp root, and - only when this invocation leased one - the
-# treehouse worktree. A secondmate home and its registry entry are seeded
-# BEFORE spawn and are never removed here; orca's worktree keeps its own
-# abort-cleanup ownership, and a projected herdr task re-arms the projection
-# abort cleanup so the EXIT trap removes the projected workspace and journal
-# this invocation created.
+# (a published meta with no live endpoint). Cleanup is CONFIRMATION-GATED:
+# each owned resource is removed and its absence proven through the backend's
+# authoritative presence mechanism before the next step, and the authoritative
+# task records are deleted only after every owned resource is confirmed gone.
+# The backend kill contracts are best-effort by design (tmux suppresses
+# kill-window failure; herdr can refuse an unlocked close and still return
+# success), so the kill alone proves nothing: fm_backend_endpoint_confirmed_gone
+# is the only license to proceed. If any cleanup cannot be confirmed, the task
+# records are RETAINED and marked rollback-needed so a later teardown/retry can
+# finish the cleanup with the exact recorded identity - never erase the
+# information required to retry safely. A secondmate home and its registry
+# entry are seeded BEFORE spawn and are never removed here; orca's worktree
+# keeps its own abort-cleanup ownership, and a projected herdr task re-arms the
+# projection abort cleanup so the EXIT trap removes the projected workspace and
+# journal this invocation created.
 spawn_rollback_task_state() {  # <detail>
   local detail=$1
   echo "failed: $detail" >> "$STATE/$ID.status" 2>/dev/null || true
   echo "error: $detail" >&2
+
+  # 1. Endpoint removal, then CONFIRM exact absence. Only the backend's
+  #    structured absence verdict licenses any record deletion.
   fm_backend_kill "$BACKEND" "$T" 2>/dev/null || true
-  rm -f "$STATE/$ID.worker-server" 2>/dev/null || true
+  if ! fm_backend_endpoint_confirmed_gone "$BACKEND" "$T"; then
+    echo "failed: $detail; endpoint $T could not be confirmed gone - task records retained and marked rollback-needed for cleanup retry" >> "$STATE/$ID.status" 2>/dev/null || true
+    echo "error: $detail; endpoint $T could not be confirmed gone; task records retained for cleanup retry" >&2
+    return 1
+  fi
+
   if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
     # The projection abort cleanup was disarmed before Enter (handoff to the
     # task); a rolled-back task owns no projection, so re-arm it for the
     # EXIT trap.
     HERDR_PROJECTION_ABORT_CLEANUP=1
   fi
+
   # A relaunch failure keeps the pre-existing task records and worktree: the
   # task predates this invocation and its work must stay visible to recovery.
+  # Only the stale worker-server record (if any) is removed.
   if [ "$RELAUNCH" -ne 1 ]; then
-    rm -f "$STATE/$ID.meta" "$STATE/$ID.status" "$STATE/$ID.turn-ended" 2>/dev/null || true
-    rm -rf "$TASK_TMP" 2>/dev/null || true
+    # 2. Owned worktree cleanup, CONFIRMED by the return command itself. The
+    #    authoritative .meta is never deleted before this succeeds: it is the
+    #    only durable record that lets a retry return the lease.
     if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] \
        && [ -n "${WT:-}" ] && [ -d "${WT:-}" ]; then
       if ! ( cd "$PROJ_ABS" && treehouse return --force "$WT" ) >/dev/null 2>&1; then
-        echo "warning: spawn rollback could not return the leased worktree $WT; remove it manually (it holds no landed work)" >&2
+        echo "failed: $detail; worktree $WT could not be returned - task records retained and marked rollback-needed for cleanup retry" >> "$STATE/$ID.status" 2>/dev/null || true
+        echo "error: $detail; worktree $WT could not be returned; task records retained for cleanup retry" >&2
+        return 1
       fi
     fi
+    # 3. Every owned resource is confirmed gone; only now delete the
+    #    authoritative task records.
+    rm -f "$STATE/$ID.meta" "$STATE/$ID.status" "$STATE/$ID.turn-ended" 2>/dev/null || true
+    rm -rf "$TASK_TMP" 2>/dev/null || true
   fi
+  rm -f "$STATE/$ID.worker-server" 2>/dev/null || true
 }
 
 kimi_capture_has_empty_composer() {  # <plain-pane-capture>

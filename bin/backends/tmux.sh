@@ -137,6 +137,23 @@ fm_backend_tmux_kill() {  # <target>
   tmux kill-window -t "=$session:=$window" 2>/dev/null || true
 }
 
+# fm_backend_tmux_endpoint_confirmed_gone: gate durable-record removal on the
+# exact recorded window's structured absence, read-only, so a suppressed
+# kill-window failure (fm_backend_tmux_kill is `|| true` by contract) never
+# erases a live task's endpoint identity. Only fm_backend_tmux_agent_state's
+# `missing` verdict proves the exact window is gone - omitted from a successful
+# session inventory, or a definitive missing-session/server response. Every
+# other verdict (alive, dead, ambiguous, unreadable) refuses: the window may
+# still exist, or the inventory could not be trusted.
+#
+# Used by bin/fm-backend.sh's fm_backend_endpoint_confirmed_gone dispatcher
+# (spawn rollback); teardown's herdr twin is
+# fm_backend_herdr_endpoint_confirmed_gone.
+# shellcheck disable=SC2317 # dispatched entry point
+fm_backend_tmux_endpoint_confirmed_gone() {  # <target>
+  [ "$(fm_backend_tmux_agent_state "$1")" = missing ]
+}
+
 # fm_backend_tmux_current_command: <target>'s live foreground process name -
 # tmux's own `#{pane_current_command}`, already resolved from the pty's
 # foreground process group (verified empirically with real tmux 3.6a: a
