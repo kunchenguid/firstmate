@@ -80,6 +80,8 @@ make_fake_root() {
   ln -s "$ROOT/bin/fm-wake-lib.sh" "$fake/bin/fm-wake-lib.sh"
   # fm-admission-lib.sh: teardown sources it for the admission release reminder.
   ln -s "$ROOT/bin/fm-admission-lib.sh" "$fake/bin/fm-admission-lib.sh"
+  # fm-task-axis-lib.sh: teardown reads the task's identity axes through it.
+  ln -s "$ROOT/bin/fm-task-axis-lib.sh" "$fake/bin/fm-task-axis-lib.sh"
   # fm-landed-lib.sh: teardown sources it for the shared content-containment test
   # behind work_is_landed(). This fixture never reaches that predicate (its
   # worktree path does not exist), but the source line runs unconditionally.
@@ -166,6 +168,8 @@ test_teardown_skips_gracefully_without_tasktmp() {
   ln -s "$ROOT/bin/fm-wake-lib.sh" "$fake/bin/fm-wake-lib.sh"
   # fm-admission-lib.sh: teardown sources it for the admission release reminder.
   ln -s "$ROOT/bin/fm-admission-lib.sh" "$fake/bin/fm-admission-lib.sh"
+  # fm-task-axis-lib.sh: teardown reads the task's identity axes through it.
+  ln -s "$ROOT/bin/fm-task-axis-lib.sh" "$fake/bin/fm-task-axis-lib.sh"
   # fm-landed-lib.sh: teardown sources it for the shared content-containment test
   # behind work_is_landed(). This fixture never reaches that predicate (its
   # worktree path does not exist), but the source line runs unconditionally.
