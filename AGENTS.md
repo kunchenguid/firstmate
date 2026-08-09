@@ -392,6 +392,7 @@ Handle actionable wakes as follows:
 2. For `stale:`, inspect the recorded endpoint and load `stuck-crewmate-recovery` for a stopped, looping, confused, or unresponsive worker; a deep-inspection reason also requires current-state and validation-log inspection.
 3. For `check:`, act on the named poll result, including merges, Relay events, process-to-event source results, and an `ops-inbox:` operational alert or monitoring-failure digest, which reports this machine's unreviewed critical alerts or alert-pipeline health for triage rather than any one task's progress.
 4. For `heartbeat:`, review the whole fleet from the structured fleet view, reconcile suspicious tasks and PR state, update the backlog, and never report an unchanged fleet as progress.
+   A heartbeat carrying a `refill:` line requires that turn to dispatch every eligible ready item or durably record in the backlog why each named item stays queued.
 
 Every mutable wake is one complete closeout-and-refill transaction before the next wait or turn boundary.
 Reconcile every terminal ordinary task, and when a routine ship is green or locally ready with `yolo=on`, select its existing guarded landing owner by metadata mode: `bin/fm-merge-local.sh` for `local-only`, or `bin/fm-pr-merge.sh` for `no-mistakes` and `direct-PR`; preserve every gated, ambiguous, parked, or security-sensitive lane.

@@ -24,7 +24,12 @@ For an ordinary crew that has stopped, the normal-mode watcher first surfaces on
 Live or inconclusive liveness remains fail-open at that initial surface, and the secondmate idle-endpoint exemption is unchanged.
 Its initial normal-mode status signal still surfaces through the no-verb path, while away mode self-handles that routine signal and owns the later recheck.
 Fresh stale panes use the same current-state read before trusting the status log, so an active run or a proven busy worker outranks an old captain-relevant status-log line left behind before validation.
-No-change heartbeats are also benign.
+No-change heartbeats are also benign unless the bounded refill probe reports dispatchable ready work while live ship and scout capacity is below `FM_REFILL_MIN_LIVE`, which defaults to one; that condition emits a wake on the existing heartbeat cadence and preserves its doubling backoff rather than adding a per-poll path.
+An emitted heartbeat additionally carries the bounded refill evidence from `bin/fm-refill.sh` on its durable queue payload: how many queued backlog items the configured backlog backend reported as dispatchable and how many ship and scout endpoints were still live when it fired.
+That turns refilling a drained fleet into part of ordinary wake handling instead of a judgment call, and the numbers are a wake-time observation like every other wake payload rather than current state.
+The probe fails open and never delays, suppresses, or breaks a heartbeat: a `manual` backlog backend, an absent or incompatible `tasks-axi`, or any probe error simply omits the line, and the printed reason line stays exactly `heartbeat` for the arm and checkpoint layers that match it.
+`bin/fm-refill.sh` owns the probe, its bound, and the exact line format.
+In away mode, the sub-supervisor reads but does not consume the latest durable heartbeat payload, routes the same actionable refill condition through its existing escalation digest even though evidence-free heartbeats remain force-self-handled, and leaves all away-mode authority boundaries unchanged.
 Absorbed wakes advance their suppression markers, log to `state/.watch-triage.log`, and keep the watcher blocking without a queue record or LLM turn.
 After each drain, `fm-wake-drain.sh` runs the same liveness guard as the supervision scripts, so a lapsed watcher chain surfaces even on a turn that only drains and handles queued wakes.
 Routine watcher polling, supervision no-ops, elapsed waiting time, and absorbed benign wakes stay silent.

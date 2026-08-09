@@ -658,6 +658,29 @@ test_handle_wake_routes_self_and_escalate() {
   pass "handle_wake routes routine->self and captain->escalate"
 }
 
+test_heartbeat_refill_evidence_routes_through_away_escalation() {
+  local dir state payload
+  dir=$(make_supercase heartbeat-refill-routing)
+  state="$dir/state"
+  append_wake "$state" heartbeat heartbeat "heartbeat refill: ready=1 live=0 ids=ready-one"
+  payload=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_wake_latest_payload heartbeat heartbeat' \
+    _ "$ROOT/bin/fm-wake-lib.sh")
+  FM_STATE_OVERRIDE="$state" FM_INJECT_SKIP=heartbeat \
+    handle_wake heartbeat "$state" "$payload"
+  grep -F "refill: ready=1 live=0 ids=ready-one" "$state/.subsuper-escalations" >/dev/null \
+    || fail "an away heartbeat with refill evidence did not reach the escalation buffer"
+
+  : > "$state/.subsuper-escalations"
+  append_wake "$state" heartbeat heartbeat heartbeat
+  payload=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_wake_latest_payload heartbeat heartbeat' \
+    _ "$ROOT/bin/fm-wake-lib.sh")
+  FM_STATE_OVERRIDE="$state" FM_INJECT_SKIP=heartbeat \
+    handle_wake heartbeat "$state" "$payload"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "an evidence-free away heartbeat stopped self-handling"
+  pass "away heartbeat refill evidence escalates while a bare heartbeat self-handles"
+}
+
 test_inject_skip_forces_self() {
   local dir state
   dir=$(make_supercase skip)
@@ -1859,6 +1882,7 @@ test_escalate_batches_into_one_digest
 test_escalate_batch_age_uses_first_append
 test_heartbeat_scan_dedup
 test_handle_wake_routes_self_and_escalate
+test_heartbeat_refill_evidence_routes_through_away_escalation
 test_inject_skip_forces_self
 test_is_wake_reason_distinguishes_status_stdout
 test_terminal_stale_escalate_leaves_no_marker

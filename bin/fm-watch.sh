@@ -52,7 +52,11 @@
 #                          invalid pending retirements were preserved without
 #                          running a check or removing poll artifacts
 #   heartbeat              fleet-scan backstop found an unsurfaced captain-relevant
-#                          status, unless afk is active
+#                          status, or refillable work found capacity below the
+#                          configured floor, unless afk is active. The printed line stays
+#                          exactly "heartbeat"; its DURABLE QUEUE payload also
+#                          carries the refill evidence owned by bin/fm-refill.sh
+#                          whenever that probe can answer for this home
 # For normal supervision, resume the session-start primary-harness protocol
 # after each printed reason. Direct duplicate invocations of this script still
 # no-op through the watcher singleton lock.
@@ -62,6 +66,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 mkdir -p "$STATE"
 
 # The native event fast-path and only its true dependencies have one narrow
@@ -117,6 +123,7 @@ fi
 POLL=${FM_POLL:-15}                   # seconds between cycles
 HEARTBEAT=${FM_HEARTBEAT:-600}        # base seconds between heartbeat scans
 HEARTBEAT_MAX=${FM_HEARTBEAT_MAX:-7200}  # heartbeat backoff cap
+REFILL_MIN_LIVE=${FM_REFILL_MIN_LIVE:-1}  # ready work wakes below this live capacity
 CHECK_INTERVAL=${FM_CHECK_INTERVAL:-300}  # seconds between *.check.sh sweeps
 CHECK_TIMEOUT=${FM_CHECK_TIMEOUT:-30}     # seconds allowed per *.check.sh
 SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trailing
@@ -662,6 +669,33 @@ mark_all_captain_relevant_surfaced() {
 # firstmate, this normally finds nothing and the heartbeat is absorbed; it
 # surfaces only a captain-relevant status the per-wake path absorbed by mistake -
 # the fail-safe backstop.
+# Heartbeat wake payload: "heartbeat", plus the refill evidence appended when
+# bin/fm-refill.sh (the single owner of that probe and its format) can answer for
+# this home. The evidence rides the DURABLE QUEUE payload rather than the printed
+# reason line: every supervision protocol drains the queue before handling a
+# wake, while the printed line is pattern-matched as `heartbeat($|:)` by the arm,
+# checkpoint, and Stop auto-arm layers, so it must stay exactly "heartbeat".
+# Fail-open by construction - anything other than a well-formed single refill
+# line leaves the payload byte-identical to what it was before this existed.
+heartbeat_payload() {
+  local line
+  line=$("$SCRIPT_DIR/fm-refill.sh" "$STATE" "$CONFIG" "$DATA/backlog.md" 2>/dev/null) || line=
+  case "$line" in
+    'refill: ready='*' live='*' ids='*) printf 'heartbeat %s' "$line" ;;
+    *) printf 'heartbeat' ;;
+  esac
+}
+
+heartbeat_refill_is_actionable() {
+  local payload=$1
+  case "$payload" in
+    'heartbeat refill: '*) ;;
+    *) return 1 ;;
+  esac
+  FM_REFILL_MIN_LIVE="$REFILL_MIN_LIVE" \
+    "$SCRIPT_DIR/fm-refill.sh" --actionable "${payload#heartbeat }"
+}
+
 heartbeat_scan_finds_actionable() {
   local f task last surfaced
   while IFS=$(printf '\t') read -r f task last; do
@@ -1212,22 +1246,28 @@ EOF
   hb=$(( HEARTBEAT * (1 << streak) ))
   [ "$hb" -gt "$HEARTBEAT_MAX" ] && hb=$HEARTBEAT_MAX
   if [ "$(age_of "$STATE/.last-heartbeat")" -ge "$hb" ]; then
-    # Triage: in always-on mode a heartbeat is benign unless the cheap fleet-scan
-    # turns up a captain-relevant status the per-wake path missed. Absorb the
+    heartbeat_record=$(heartbeat_payload)
+    # Triage: in always-on mode a heartbeat is actionable when the cheap fleet-scan
+    # turns up a captain-relevant status the per-wake path missed or validated
+    # refill evidence reports ready work below the live-capacity floor. Absorb the
     # no-change case (advance the schedule and back off exactly as wake() would,
     # without exiting); the away-mode daemon, when present, owns triage and wants
     # every heartbeat.
     if afk_present; then
-      fm_wake_append heartbeat heartbeat heartbeat || exit 1
+      fm_wake_append heartbeat heartbeat "$heartbeat_record" || exit 1
       touch "$STATE/.last-heartbeat"
       wake "heartbeat"
     elif heartbeat_scan_finds_actionable; then
       # Backstop: a captain-relevant status the per-wake path absorbed by mistake.
       # Enqueue first, then mark every captain-relevant status surfaced so the next
       # heartbeat does not re-fire them (enqueue-before-suppress preserved).
-      fm_wake_append heartbeat heartbeat heartbeat || exit 1
+      fm_wake_append heartbeat heartbeat "$heartbeat_record" || exit 1
       touch "$STATE/.last-heartbeat"
       mark_all_captain_relevant_surfaced
+      wake "heartbeat"
+    elif heartbeat_refill_is_actionable "$heartbeat_record"; then
+      fm_wake_append heartbeat heartbeat "$heartbeat_record" || exit 1
+      touch "$STATE/.last-heartbeat"
       wake "heartbeat"
     else
       touch "$STATE/.last-heartbeat"
