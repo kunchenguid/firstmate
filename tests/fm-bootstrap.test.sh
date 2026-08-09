@@ -1149,10 +1149,13 @@ array use with quota-balanced is accepted^{"rules":[{"when":"big feature","use":
 array use with policy-service is accepted^{"rules":[{"when":"big feature","use":[{"harness":"claude"},{"harness":"codex"}],"select":"policy-service","policy":"governor-admission"}]}^empty^
 policy-service requires policy owner^{"rules":[{"when":"big feature","use":[{"harness":"claude"},{"harness":"codex"}],"select":"policy-service"}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - policy-service rules need non-empty policy
 policy-service object use is flagged^{"rules":[{"when":"big feature","use":{"harness":"claude"},"select":"policy-service","policy":"governor-admission"}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - policy-service rules require an array use
+non-string policy owner is flagged^{"rules":[{"when":"big feature","use":[{"harness":"claude"},{"harness":"codex"}],"select":"policy-service","policy":42}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - policy-service rules need non-empty policy
+policy-service array still validates harness and effort^{"rules":[{"when":"big feature","use":[{"harness":"claude"},{"harness":"opencode","effort":"high"}],"select":"policy-service","policy":"governor-admission"}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: opencode:high
 array use without select is accepted^{"rules":[{"when":"big feature","use":[{"harness":"claude"},{"harness":"codex"}]}]}^empty^
 one-element array use is accepted^{"rules":[{"when":"focused feature","use":[{"harness":"claude"}]}]}^empty^
 default array is accepted^{"default":[{"harness":"pi","model":"anthropic/claude-sonnet-5"},{"harness":"grok"}]}^empty^
 default policy-service is accepted^{"default":[{"harness":"claude"},{"harness":"codex"}],"default_select":"policy-service","default_policy":"governor-admission"}^empty^
+explicit quota-balanced default_select is accepted^{"default":[{"harness":"claude"},{"harness":"codex"}],"default_select":"quota-balanced"}^empty^
 default policy-service requires owner^{"default":[{"harness":"claude"},{"harness":"codex"}],"default_select":"policy-service"}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - default policy-service needs non-empty default_policy
 malformed default_select is flagged^{"default":[{"harness":"claude"}],"default_select":7}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - default_select must be a non-empty string
 unknown default_select is flagged^{"default":[{"harness":"claude"}],"default_select":"mystery"}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - unknown default_select: mystery

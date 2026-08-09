@@ -836,15 +836,16 @@ EOF
 }
 
 test_session_lock_concurrent_single_winner() {
-  local rec root home fakebin ready completed winners pids i pid count
+  local rec root home fakebin ready completed claimed winners pids i pid count
   rec=$(new_world lock-concurrency)
   IFS='|' read -r root home fakebin <<EOF
 $rec
 EOF
   ready="$home/ready"
   completed="$home/done"
+  claimed="$home/claimed"
   winners="$home/winners"
-  mkdir -p "$ready" "$completed"
+  mkdir -p "$ready" "$completed" "$claimed"
   : > "$winners"
   cat > "$fakebin/ps" <<'SH'
 #!/usr/bin/env bash
@@ -880,7 +881,14 @@ SH
   i=1
   while [ "$i" -le 40 ]; do
     (
-      harness_pid=$(sh -c 'printf "%s\n" "$PPID"')
+      # Bash 3.2 (the macOS system bash this suite runs under) has no BASHPID,
+      # so the parent publishes this subshell's real pid from $! and the
+      # contender reads it back. It must be a genuinely live pid because
+      # fm_harness_pid_alive settles the race with a real kill -0.
+      while [ ! -s "$claimed/$i" ]; do
+        sleep 0.01
+      done
+      harness_pid=$(cat "$claimed/$i")
       : > "$home/state/harness-$harness_pid"
       : > "$ready/$i"
       while [ "$(find "$ready" -type f | wc -l | tr -d ' ')" -lt 40 ]; do
@@ -896,6 +904,8 @@ SH
         sleep 0.01
       done
     ) &
+    printf '%s\n' "$!" > "$claimed/.$i"
+    mv "$claimed/.$i" "$claimed/$i"
     pids="$pids $!"
     i=$((i + 1))
   done
