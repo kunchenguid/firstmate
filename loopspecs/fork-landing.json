@@ -111,37 +111,37 @@
     {
       "name": "already_carried",
       "kind": "neutral",
-      "maps_to": "NOOP",
+      "maps_to": "no_delta",
       "description": "The fork already carries this contribution and its checks are resolved. Reaching this must cost no model turn."
     },
     {
       "name": "carried_and_checks_resolved",
       "kind": "success",
-      "maps_to": "COMPLETE",
+      "maps_to": "goal_met",
       "description": "The contribution reached the fork as an open pull request and that pull request's checks finished running. This asserts the carry and nothing more: it does not assert the checks are green, and the failed count is recorded alongside it so the record can never be read as a green light. Whether the pull request may land is the merge decision, which this loop deliberately never makes."
     },
     {
       "name": "needs_ruling",
       "kind": "refusal",
-      "maps_to": "REFUSED",
+      "maps_to": "needs_ruling",
       "description": "Whether this contribution should be carried at all cannot be settled from evidence and requires a captain ruling. The loop stops rather than guessing."
     },
     {
       "name": "budget_exhausted",
       "kind": "failure",
-      "maps_to": "EXHAUSTED",
+      "maps_to": "budget_exhausted",
       "description": "The iteration budget was spent before the carry could be verified. Exhaustion is a failure and is never reported as success."
     },
     {
       "name": "verification_failed",
       "kind": "failure",
-      "maps_to": "FAILED",
+      "maps_to": "verification_failed",
       "description": "The verifier ran and rejected the iteration, or could not establish the evidence at all. An unavailable verifier lands here and can never become a pass."
     },
     {
       "name": "no_progress_stalled",
       "kind": "failure",
-      "maps_to": "STALLED",
+      "maps_to": "no_progress_stalled",
       "description": "Consecutive iterations produced no verifier-declared progress, so the loop stopped instead of repeating forever."
     }
   ],

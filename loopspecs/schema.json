@@ -48,6 +48,9 @@
       "declared_by_verifier"
     ]
   },
+  "external_enums": {
+    "unified_terminal": "loopspecs/terminal-states.json unified[].name - the unified terminal-state vocabulary is owned there and deliberately not restated here, so the two can never disagree"
+  },
   "objects": {
     "": {
       "required": {
@@ -183,11 +186,10 @@
       "required": {
         "name": "token",
         "kind": "enum:terminal_kind",
+        "maps_to": "enum:unified_terminal",
         "description": "string"
       },
-      "optional": {
-        "maps_to": "string"
-      }
+      "optional": {}
     },
     "escalation": {
       "required": {
@@ -237,6 +239,8 @@
     "trigger_registered: trigger.id must appear in triggers.json",
     "required_terminals_present: terminal_states must define every name in required_terminal_states - the universal safety stops only, never one domain's vocabulary, so a second spec is authorable",
     "required_terminal_kinds_present: terminal_states must cover every kind in required_terminal_kinds, so every loop declares how it succeeds, how it no-ops, how it fails and how it refuses",
+    "terminal_mapped: every terminal_states[].name must have a loopspec row in terminal-states.json, and maps_to must equal the unified state that row records",
+    "terminal_kind_agrees: every terminal_states[].kind must equal the kind its unified state declares",
     "no_progress_terminal_defined: no_progress.terminal must name a declared terminal state",
     "escalation_terminals_defined: every escalation.on entry must name a declared terminal state",
     "unique_selection: no two specs may share (trigger.id, selection.scope, selection.priority)",
