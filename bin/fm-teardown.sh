@@ -33,6 +33,13 @@
 # declared scratch and the report at data/<task-id>/report.md is the work
 # product. Teardown proceeds only once the report exists and the shared
 # unresolved-decision completion gate verifies its captain-held inventory.
+# The task's durable attempt count (state/<task-id>.attempt, owned by
+# bin/fm-attempt.sh) is retired on an ordinary release, because that release
+# means a sanctioned completion (including a parked release whose PR is still
+# open) and a re-dispatch of that id then starts a fresh budget; it is KEPT
+# under --force, which additionally RECORDS that the attempt ended, because
+# discarded work makes a re-dispatch a genuine retry and this cleanup removes
+# the status log that would otherwise carry that evidence.
 # A ship task released while its PR is still open leaves state/<task-id>.landing
 # behind: a minimal durable record (pr, pr_head, project) that keeps the PR
 # landable through bin/fm-pr-merge.sh and rearmable through bin/fm-pr-check.sh
@@ -785,6 +792,34 @@ write_landing_record_if_unlanded() {
     return 0
   fi
   LANDING_PENDING_URL=$PR_URL
+}
+
+# The task's durable attempt count (bin/fm-attempt.sh) outlives its metadata on
+# purpose, so the retry budget is retired here and only here.
+#
+# An ordinary release means the task reached a sanctioned completion: usually
+# landed work, but write_landing_record_if_unlanded above also releases a ship
+# task while its pull request is still open. Either way the count retires with
+# the task it measured, and a re-dispatch of that id starts a fresh budget -
+# deliberately, because a task id reused for new work must not inherit a spent
+# budget it never earned.
+#
+# --force is the opposite case and KEEPS the record: the work was deliberately
+# discarded, a re-dispatch of that id is a genuine retry, and clearing the count
+# here would make the budget unbounded by simply discarding between attempts.
+retire_attempt_record() {
+  if [ "$FORCE" = "--force" ]; then
+    # The discard ENDS the open attempt, and this cleanup deletes the status log
+    # that carried the task's own failure declaration, so the end is recorded on
+    # the attempt record itself. Without it the next dispatch of that id would
+    # read as a continuation, and discarding between attempts would make the
+    # budget unbounded - the exact hole keeping the record was meant to close.
+    "$FM_ROOT/bin/fm-attempt.sh" end "$ID" \
+      || echo "warning: could not record the discarded attempt for $ID" >&2
+    return 0
+  fi
+  "$FM_ROOT/bin/fm-attempt.sh" retire "$ID" \
+    || echo "warning: could not retire the attempt record for $ID" >&2
 }
 
 # Reported after cleanup so the released PR is not silently forgotten: the task
@@ -2730,6 +2765,7 @@ rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
   "$STATE/$ID.terminal-recorded" \
   "$STATE/$ID.control-relaunch" "$STATE/$ID.control-relaunch.meta-prior" \
   "$STATE/$ID.control-relaunch.brief-prior" "$STATE/$ID.control-relaunch.note"
+retire_attempt_record
 fm_lock_release "$META_LOCK"
 META_LOCK_HELD=0
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
