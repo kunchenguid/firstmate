@@ -2940,7 +2940,13 @@ sleep 0.3
 if [ "$RELAUNCH" -eq 1 ] && [ "$RELAUNCH_PRIOR_HARNESS" = cursor ]; then
   cursor_worker_server_reap_record "$STATE/$ID.worker-server" "$ID" 1 || exit 1
 fi
-spawn_send_literal "$T" "$LAUNCH"
+if ! spawn_send_literal "$T" "$LAUNCH"; then
+  if [ "$RELAUNCH" -eq 1 ] && [ "$RELAUNCH_PRIOR_HARNESS" = cursor ] \
+     && [ "$HARNESS" != cursor ]; then
+    spawn_rollback_task_state "replacement launch command could not be delivered"
+    exit 1
+  fi
+fi
 sleep 0.3
 if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   HERDR_PROJECTION_ABORT_CLEANUP=0
@@ -2963,7 +2969,12 @@ if [ "$HARNESS" = cursor ]; then
   fi
   CURSOR_WORKER_RECORDER_PID=
 else
-  spawn_send_key "$T" Enter
+  if ! spawn_send_key "$T" Enter; then
+    if [ "$RELAUNCH" -eq 1 ] && [ "$RELAUNCH_PRIOR_HARNESS" = cursor ]; then
+      spawn_rollback_task_state "replacement launch command could not be submitted"
+      exit 1
+    fi
+  fi
 fi
 if [ "$RELAUNCH" -eq 1 ] && [ "$RELAUNCH_PRIOR_HARNESS" = cursor ] \
    && [ "$HARNESS" != cursor ]; then

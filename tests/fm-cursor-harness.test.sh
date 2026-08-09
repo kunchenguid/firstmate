@@ -67,6 +67,10 @@ case "${1:-}" in
   send-keys)
     case " $* " in
       *" Enter "*)
+        if [ "${FM_FAKE_SWITCH_SEND_FAIL:-}" = enter ] \
+           && [ -e "${FM_FAKE_SWITCH_LAUNCH_TYPED:-}" ]; then
+          exit 1
+        fi
         if [ -n "${FM_FAKE_CURSOR_RECORD_FILE:-}" ] \
            && [ -e "${FM_FAKE_CURSOR_LAUNCH_TYPED:-}" ]; then
           : > "${FM_FAKE_CURSOR_ENTER_STARTED:?}"
@@ -87,6 +91,12 @@ case "${1:-}" in
         if [ "$prev" = "-l" ]; then
           printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG"
           case "$a" in *cursor-agent*--force*--trust*) : > "${FM_FAKE_CURSOR_LAUNCH_TYPED:-/dev/null}" ;; esac
+          case "$a" in
+            *claude*--dangerously-skip-permissions*)
+              [ -z "${FM_FAKE_SWITCH_LAUNCH_TYPED:-}" ] || : > "$FM_FAKE_SWITCH_LAUNCH_TYPED"
+              [ "${FM_FAKE_SWITCH_SEND_FAIL:-}" != literal ] || exit 1
+              ;;
+          esac
           case "$a" in
             *cursor-agent*--force*--trust*)
               [ -z "${FM_FAKE_LITERAL_SEND_FAIL:-}" ] || exit 1
@@ -788,6 +798,7 @@ test_cursor_relaunch_reaps_prior_worker_before_recording_replacement() {
   assert_grep "$old_pid " "$HOME_DIR/state/$id.worker-server" \
     "failed cursor launch delivery discarded confirmed-dead ownership evidence"
 
+  printf 'fm-%s\n' "$id" > "$CASE_DIR/windows.state"
   rm -f "$FAKEBIN_DIR/lsof"
   rm -f "$CASE_DIR/enter-started" "$CASE_DIR/launch-typed"
   out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
@@ -814,6 +825,58 @@ test_cursor_relaunch_reaps_prior_worker_before_recording_replacement() {
     "cursor relaunch retained stale worker identity"
   kill -KILL "$new_pid" 2>/dev/null || true
   pass "cursor relaunch reaps prior worker before recording replacement"
+}
+
+test_cursor_switch_relaunch_send_failures_preserve_ownership() {
+  local failure rec id out status old_parent old_pid
+  for failure in literal enter; do
+    id="cursor-switch-$failure-zm"
+    rec=$(make_cursor_case "cursor-switch-$failure" "$id")
+    read_case_record "$rec"
+    fm_fake_exit0 "$FAKEBIN_DIR" claude
+    : > "$CASE_DIR/windows.state"
+    bash -c 'sleep 300 & printf "%s\n" "$!" > "$1"; wait' _ "$CASE_DIR/old-worker.pid" &
+    old_parent=$!
+    while [ ! -s "$CASE_DIR/old-worker.pid" ]; do sleep 0.01; done
+    old_pid=$(cat "$CASE_DIR/old-worker.pid")
+
+    out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+      FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+      FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+      FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
+      FM_FAKE_CURSOR_AGENT_ARGS="$FAKEBIN_DIR/cursor-agent --force --trust brief" \
+      FM_PROC_ROOT_OVERRIDE="$CASE_DIR/no-proc" \
+      FM_FAKE_CURSOR_AGENT_PID=4242 FM_FAKE_CURSOR_WORKER_PID=$old_pid \
+      FM_FAKE_WINDOW_STATE_FILE="$CASE_DIR/windows.state" \
+      FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" PATH="$FAKEBIN_DIR:$PATH" \
+      "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1)
+    status=$?
+    expect_code 0 "$status" "initial cursor spawn should record prior worker"
+
+    out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+      FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+      FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+      FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
+      FM_FAKE_CURSOR_AGENT_ARGS="$FAKEBIN_DIR/cursor-agent --force --trust brief" \
+      FM_PROC_ROOT_OVERRIDE="$CASE_DIR/no-proc" FM_FAKE_CURSOR_AGENT_AFTER_ENTER=1 \
+      FM_FAKE_CURSOR_AGENT_PID=4242 FM_FAKE_CURSOR_WORKER_PID=$old_pid \
+      FM_FAKE_SWITCH_SEND_FAIL="$failure" \
+      FM_FAKE_SWITCH_LAUNCH_TYPED="$CASE_DIR/switch-launch-typed" \
+      FM_FAKE_WINDOW_STATE_FILE="$CASE_DIR/windows.state" \
+      FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" PATH="$FAKEBIN_DIR:$PATH" \
+      "$SPAWN" "$id" --relaunch --harness claude 2>&1)
+    status=$?
+    expect_code 1 "$status" "cursor-to-claude relaunch must refuse $failure send failure"$'\n'"$out"
+    if kill -0 "$old_pid" 2>/dev/null; then
+      fail "cursor-to-claude relaunch failed to reap prior worker before $failure send"$'\n'"$out"
+    fi
+    assert_grep "$old_pid " "$HOME_DIR/state/$id.worker-server" \
+      "cursor-to-claude $failure send failure discarded ownership evidence"
+    [ -f "$HOME_DIR/state/$id.meta" ] \
+      || fail "cursor-to-claude $failure send failure removed relaunch metadata"
+    wait "$old_parent" 2>/dev/null || true
+  done
+  pass "cursor harness-switch relaunch preserves ownership after send failures"
 }
 
 test_cursor_relaunch_without_worker_record_refuses() {
@@ -1264,6 +1327,7 @@ test_muse_launch_unsets_cursor_agent
 test_cursor_worker_server_recorded_at_spawn
 test_cursor_worker_server_alias_uses_portable_identity
 test_cursor_relaunch_reaps_prior_worker_before_recording_replacement
+test_cursor_switch_relaunch_send_failures_preserve_ownership
 test_cursor_relaunch_without_worker_record_refuses
 test_cursor_detached_worker_is_recorded_from_task_root
 test_cursor_worker_server_absent_record_refuses_spawn
