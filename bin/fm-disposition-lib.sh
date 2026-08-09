@@ -53,11 +53,17 @@ fm_disposition_target_branch() {
 }
 
 fm_disposition_repo_identity() {
-  case "$1" in
-    git@github.com:*) printf '%s\n' "${1#git@github.com:}" | sed 's/\.git$//' ;;
-    ssh://git@github.com/*) printf '%s\n' "${1#ssh://git@github.com/}" | sed 's/\.git$//' ;;
-    https://github.com/*) printf '%s\n' "${1#https://github.com/}" | sed 's/\.git$//' ;;
-    *) printf '%s\n' "$1" ;;
+  local identity=$1 repo remote
+  repo=$(fm_disposition_canonical_dir "$identity" || true)
+  if [ -n "$repo" ]; then
+    remote=$(git -C "$repo" remote get-url origin 2>/dev/null || true)
+    identity=${remote:-$repo}
+  fi
+  case "$identity" in
+    git@github.com:*) printf '%s\n' "${identity#git@github.com:}" | sed 's/\.git$//' ;;
+    ssh://git@github.com/*) printf '%s\n' "${identity#ssh://git@github.com/}" | sed 's/\.git$//' ;;
+    https://github.com/*) printf '%s\n' "${identity#https://github.com/}" | sed 's/\.git$//' ;;
+    *) printf '%s\n' "$identity" ;;
   esac
 }
 
@@ -118,7 +124,7 @@ fm_disposition_evidence_live() {  # <attempt_id> -> deterministic evidence JSON
       return 0
     fi
     [ -n "$repo_identity" ] \
-      && [ "$(fm_disposition_canonical_dir "$repo" || true)" = "$(fm_disposition_canonical_dir "$repo_identity" || true)" ] || {
+      && [ "$(fm_disposition_repo_identity "$repo")" = "$(fm_disposition_repo_identity "$repo_identity")" ] || {
       fm_disposition_result unknown local-repo-mismatch "$attempt" "$gen" "$observation"
       return 0
     }

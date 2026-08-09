@@ -21,6 +21,7 @@ printf '%s\n' "${FAKE_GH_BODY:-}"
 SH
 chmod +x "$FAKEBIN/gh"
 export PATH="$FAKEBIN:$PATH"
+export FAKE_GH_BODY
 
 new_pr_attempt() {  # <key> <copy>
   local key=$1 copy=$2 aid head
@@ -47,7 +48,7 @@ test_exact_merged_pr_is_landed_with_evidence() {
   copy="$TMP_ROOT/wt-merged"
   aid=$(new_pr_attempt dos-a "$copy")
   head=$(git -C "$copy" rev-parse HEAD)
-  export FAKE_GH_BODY="$(jq -nc --arg head "$head" '{state:"MERGED",headRefOid:$head,baseRefName:"main"}')"
+  FAKE_GH_BODY="$(jq -nc --arg head "$head" '{state:"MERGED",headRefOid:$head,baseRefName:"main"}')"
   out=$(disposition_json "$aid")
   [ "$(printf '%s' "$out" | jq -r '.disposition')" = landed ] || fail "$out"
   printf '%s' "$out" | jq -e --arg head "$head" '.reason == "merged-exact-pr-head" and .evidence.copy_head == $head' >/dev/null || fail "missing deterministic merge evidence"
@@ -81,7 +82,7 @@ test_multi_commit_squash_is_landed_by_exact_content() {
     '{"mode":"direct-PR","base":"main","target":"origin/main","repo_identity":"https://github.com/acme/widgets.git"}' || fail freeze
   fm_attempt_observe "$aid" 1 forge "$(jq -nc --arg head "$head" \
     '{provider:"github",repo:"acme/widgets",source:"dos-squash",target:null,head:$head,state:"merged",before_sha:null,after_sha:null,pr:"https://github.com/acme/widgets/pull/8"}')" || fail forge
-  export FAKE_GH_BODY="$(jq -nc --arg head "$head" '{state:"MERGED",headRefOid:$head,baseRefName:"main"}')"
+  FAKE_GH_BODY="$(jq -nc --arg head "$head" '{state:"MERGED",headRefOid:$head,baseRefName:"main"}')"
   out=$(disposition_json "$aid")
   printf '%s' "$out" | jq -e '.disposition == "landed" and .reason == "merged-exact-pr-head"' >/dev/null \
     || fail "multi-commit squash was not recognized by exact content: $out"
@@ -93,7 +94,7 @@ test_active_open_pr_is_unknown() {
   copy="$TMP_ROOT/wt-open"
   aid=$(new_pr_attempt dos-open "$copy")
   head=$(git -C "$copy" rev-parse HEAD)
-  export FAKE_GH_BODY="$(jq -nc --arg head "$head" '{state:"OPEN",headRefOid:$head,baseRefName:"main"}')"
+  FAKE_GH_BODY="$(jq -nc --arg head "$head" '{state:"OPEN",headRefOid:$head,baseRefName:"main"}')"
   out=$(disposition_json "$aid")
   [ "$(printf '%s' "$out" | jq -r '.disposition')" = unknown ] || fail "OPEN PR was preserved-unlanded: $out"
   pass "an active OPEN PR is unknown"
@@ -104,7 +105,7 @@ test_closed_pr_requires_exact_durable_recovery() {
   copy="$TMP_ROOT/wt-closed"
   aid=$(new_pr_attempt dos-closed "$copy")
   head=$(git -C "$copy" rev-parse HEAD)
-  export FAKE_GH_BODY="$(jq -nc --arg head "$head" '{state:"CLOSED",headRefOid:$head,baseRefName:"main"}')"
+  FAKE_GH_BODY="$(jq -nc --arg head "$head" '{state:"CLOSED",headRefOid:$head,baseRefName:"main"}')"
   out=$(disposition_json "$aid")
   printf '%s' "$out" | jq -e '.disposition == "preserved_unlanded" and .evidence.recovery.durable == true' >/dev/null \
     || fail "closed exact PR lacked recovery evidence: $out"
@@ -119,14 +120,14 @@ test_pr_identity_target_and_content_mismatches_are_unknown() {
   export FAKE_GH_BODY='{"state":"MERGED","headRefOid":"different","baseRefName":"main"}'
   out=$(disposition_json "$aid")
   [ "$(printf '%s' "$out" | jq -r '.reason')" = pr-content-mismatch ] || fail "$out"
-  export FAKE_GH_BODY="$(jq -nc --arg head "$head" '{state:"MERGED",headRefOid:$head,baseRefName:"release"}')"
+  FAKE_GH_BODY="$(jq -nc --arg head "$head" '{state:"MERGED",headRefOid:$head,baseRefName:"release"}')"
   out=$(disposition_json "$aid")
   [ "$(printf '%s' "$out" | jq -r '.reason')" = pr-target-mismatch ] || fail "$out"
   empty_tree=$(git -C "$copy" mktree < /dev/null)
   unrelated=$(printf 'unrelated\n' | git -C "$copy" -c user.name=test -c user.email=test@example.com commit-tree "$empty_tree")
   git -C "$copy" push -q --force origin "$unrelated:refs/heads/main"
   git -C "$copy" fetch -q origin main
-  export FAKE_GH_BODY="$(jq -nc --arg head "$head" '{state:"MERGED",headRefOid:$head,baseRefName:"main"}')"
+  FAKE_GH_BODY="$(jq -nc --arg head "$head" '{state:"MERGED",headRefOid:$head,baseRefName:"main"}')"
   out=$(disposition_json "$aid")
   [ "$(printf '%s' "$out" | jq -r '.reason')" = target-content-not-equivalent ] || fail "$out"
   git -C "$copy" push -q --force origin "$head:refs/heads/main"
@@ -161,6 +162,31 @@ test_authorized_local_only_merge_is_landed() {
   pass "authorized local-only fast-forward evidence is recognized"
 }
 
+test_remote_backed_local_only_merge_is_landed() {
+  local project copy before after aid out repo_identity
+  project="$TMP_ROOT/remote-backed-local-project"
+  copy="$TMP_ROOT/remote-backed-local-copy"
+  fm_git_init_commit "$project"
+  git -C "$project" branch -M main
+  git -C "$project" remote add origin git@github.com:Authentis/decision-os.git
+  before=$(git -C "$project" rev-parse HEAD)
+  git -C "$project" worktree add --detach "$copy" HEAD >/dev/null
+  printf 'remote-backed local content\n' > "$copy/local.txt"
+  git -C "$copy" add local.txt
+  git -C "$copy" -c user.name=test -c user.email=test@example.com commit -qm local
+  after=$(git -C "$copy" rev-parse HEAD)
+  git -C "$project" merge --ff-only "$after" >/dev/null
+  repo_identity=$(git -C "$copy" remote get-url origin)
+  aid=$(fm_attempt_alloc pi dos-remote-local holu) || fail alloc
+  fm_attempt_freeze_allocation "$aid" 1 "$(jq -nc --arg c "$copy" '{provider:"tmux",copy:$c}')" \
+    "$(jq -nc --arg repo "$repo_identity" '{mode:"local-only",base:"main",target:"origin/main",repo_identity:$repo}')" || fail freeze
+  fm_attempt_observe "$aid" 1 forge "$(jq -nc --arg repo "$project" --arg before "$before" --arg after "$after" \
+    '{provider:"local",repo:$repo,source:"dos-remote-local",target:"main",head:$after,state:"merged",before_sha:$before,after_sha:$after,pr:null}')" || fail forge
+  out=$(FM_REFILL_PROJECT="$project" disposition_json "$aid")
+  printf '%s' "$out" | jq -e '.disposition == "landed" and .reason == "authorized-local-merge"' >/dev/null || fail "$out"
+  pass "remote-backed local-only merge uses canonical repository identity"
+}
+
 test_authority_is_bound_to_all_present_identity_fields() {
   local file out
   file="$STATE/authority-current.json"
@@ -180,4 +206,5 @@ test_active_open_pr_is_unknown
 test_closed_pr_requires_exact_durable_recovery
 test_pr_identity_target_and_content_mismatches_are_unknown
 test_authorized_local_only_merge_is_landed
+test_remote_backed_local_only_merge_is_landed
 test_authority_is_bound_to_all_present_identity_fields
