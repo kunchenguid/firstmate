@@ -6,12 +6,15 @@
 # so the shared guard's blind-turn signal must be translated into the mechanism
 # cursor does honour: a JSON body on stdout with a `followup_message`.
 #
-# This adapter is a thin translation layer over the shared hook-arm primitive
-# (bin/fm-hook-arm-lib.sh). It parses the Cursor payload, calls the canonical
-# arm+classify operation, applies a bounded continuation counter, and renders
-# the outcome as {} or a followup_message. The arm lifecycle, actionable-wake
-# classification, and healthy-watcher verification are owned once by the
-# shared primitive.
+# This adapter owns Cursor's arm/interruption translation privately: it
+# parses the Cursor payload, runs the watcher arm in the foreground of this
+# hook-owned process tree, classifies the arm close, applies a bounded
+# continuation counter, and renders the outcome as {} or a followup_message.
+# The arm helpers below (cursor_arm_*) are Cursor-specific and live here, not
+# in a shared layer: fm-claude-stop-autoarm.sh keeps its own retry/epoch
+# semantics, so there is no implementation the two genuinely share beyond the
+# watch-arm/drain marker contract that fm-watch-arm.sh and fm-wake-drain.sh
+# already own directly.
 #
 # docs/supervision-protocols/cursor.md is the single owner of the counter
 # algorithm: chain keys, both budgets, what counts as progress, and how the
@@ -24,8 +27,71 @@ PAYLOAD=$(cat 2>/dev/null || true)
 command -v jq >/dev/null 2>&1 || exit 0
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=bin/fm-hook-arm-lib.sh
-. "$SCRIPT_DIR/fm-hook-arm-lib.sh"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
+
+# --- Cursor-private arm helpers ----------------------------------------------
+# The durable interruption marker (state/.hook-arm-interrupted) is written by
+# fm-watch-arm.sh's signal traps and cleared by fm-wake-drain.sh; only the
+# naming and the park-reason reading are Cursor's own concern here.
+CURSOR_ARM_INTERRUPT_MARKER_SUFFIX=".hook-arm-interrupted"
+
+cursor_arm_interrupt_marker() {  # <state-dir>
+  printf '%s/%s' "${1%/}" "$CURSOR_ARM_INTERRUPT_MARKER_SUFFIX"
+}
+
+# Foreground the watcher arm inside a hook-owned process tree. Never shell &:
+# Cursor owns the process group, so its timeout tears arm and watcher down
+# together; a backgrounded child would exit leaving a stranded watcher and false
+# "already running" on the next arm.
+cursor_arm_foreground() {  # <state-dir> <arm-output-file> -> 0, output in file
+  local state_dir=$1 out_file=$2
+  STATE="$state_dir" "$SCRIPT_DIR/fm-watch-arm.sh" >"$out_file" 2>&1 || true
+}
+
+cursor_arm_has_actionable() {  # <arm-output>
+  grep -Eq '^(signal:|stale:|check:|heartbeat($|:))' "$1" 2>/dev/null
+}
+
+cursor_arm_wake_reason() {  # <arm-output> -> canonical reason line or empty
+  grep -Em1 '^(signal:|stale:|check:|heartbeat($|:))' "$1" 2>/dev/null || true
+}
+
+cursor_arm_interrupted_park_reason() {  # <state-dir>
+  local state_dir=$1 marker queue_file msg
+  marker=$(cursor_arm_interrupt_marker "$state_dir")
+  queue_file="${FM_WAKE_QUEUE:-$state_dir/.wake-queue}"
+  msg=
+  if [ -f "$marker" ]; then
+    msg='Hook-owned supervision was interrupted while parked; the durable wake queue may hold undelivered events.'
+  fi
+  if [ -s "$queue_file" ]; then
+    msg="$msg Undelivered watcher wake records are queued."
+  fi
+  if [ -z "$msg" ]; then
+    return 1
+  fi
+  printf '%s Run bin/fm-wake-drain.sh and reconcile before ending blind.' "$msg"
+}
+
+# Canonicalize a wake reason line so repeated same-reason firings are
+# deduplicated and counted, while a genuinely new reason resets the counter.
+cursor_arm_canonical_reason() {  # <raw-reason>
+  local reason=$1 check_reason
+  case "$reason" in
+    stale:*) reason=${reason%% (*} ;;
+    check:*)
+      check_reason=${reason#check: }
+      case "$check_reason" in
+        procevent\ *\ *\ *) check_reason=${check_reason% *} ;;
+        *': '*) check_reason=${check_reason%%: *} ;;
+      esac
+      reason="check: $check_reason"
+      ;;
+    heartbeat:*) reason=heartbeat ;;
+  esac
+  printf '%s' "$reason"
+}
 
 MAX_BUDGET=1000000
 
@@ -165,9 +231,9 @@ chain_load() {
       total) CHAIN_TOTAL=$value ;;
       fail) CHAIN_FAIL=$value ;;
       wake) CHAIN_WAKE=$value ;;
-      reason) CHAIN_REASON=$(fm_hook_arm_canonical_reason "$value") ;;
+      reason) CHAIN_REASON=$(cursor_arm_canonical_reason "$value") ;;
       wake_reason)
-        value=$(fm_hook_arm_canonical_reason "$value")
+        value=$(cursor_arm_canonical_reason "$value")
         CHAIN_REASONS+=("$value")
         CHAIN_HAS_REASONS=1
         ;;
@@ -225,7 +291,7 @@ fallback_total_from_loop_count() {
 allow_stop() {
   local reason
   rm -f "$CHAIN_FILE" 2>/dev/null || true
-  if reason=$(fm_hook_arm_interrupted_park_reason "$STATE"); then
+  if reason=$(cursor_arm_interrupted_park_reason "$STATE"); then
     jq -cn --arg msg "$reason" '{followup_message:$msg}'
     exit 0
   fi
@@ -256,15 +322,15 @@ RC=$?
 # shellcheck source=/dev/null
 [ -f "$ROOT/config/x-mode.env" ] && . "$ROOT/config/x-mode.env"
 if [ -n "$ARM_OUT" ]; then
-  fm_hook_arm_foreground "$STATE" "$ARM_OUT"
+  cursor_arm_foreground "$STATE" "$ARM_OUT"
   cat "$ARM_OUT" >&2
-  if fm_hook_arm_has_actionable "$ARM_OUT"; then
-    WAKE_REASON=$(fm_hook_arm_wake_reason "$ARM_OUT")
-    WAKE_REASON=$(fm_hook_arm_canonical_reason "$WAKE_REASON")
+  if cursor_arm_has_actionable "$ARM_OUT"; then
+    WAKE_REASON=$(cursor_arm_wake_reason "$ARM_OUT")
+    WAKE_REASON=$(cursor_arm_canonical_reason "$WAKE_REASON")
     ARM_ACTIONABLE=1
   fi
 else
-  fm_hook_arm_foreground "$STATE" /dev/null
+  cursor_arm_foreground "$STATE" /dev/null
 fi
 
 # Re-run the guard against the post-arm state: a healthy watcher or vanished

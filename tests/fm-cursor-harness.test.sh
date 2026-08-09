@@ -615,6 +615,17 @@ test_cursor_worker_server_absent_record_refuses_spawn() {
   if [ -f "$HOME_DIR/state/$id.worker-server" ]; then
     fail "cursor spawn without a worker-server child must not produce a partial record"
   fi
+  # The canonical rollback must remove every record this invocation created:
+  # a published meta with a killed endpoint would be a phantom live task for
+  # supervision, and the status/turn-end records would keep its ghost visible.
+  [ ! -e "$HOME_DIR/state/$id.meta" ] \
+    || fail "refused cursor spawn must not leave a live meta behind"
+  [ ! -e "$HOME_DIR/state/$id.status" ] \
+    || fail "refused cursor spawn must not leave a status record behind"
+  [ ! -e "$HOME_DIR/state/$id.turn-ended" ] \
+    || fail "refused cursor spawn must not leave its turn-end hook record behind"
+  [ ! -e "/tmp/fm-$id" ] \
+    || fail "refused cursor spawn must not leave its task tmp root behind"
   pass "cursor spawn without a worker-server child refuses and rolls back"
 }
 
@@ -639,6 +650,18 @@ test_cursor_worker_server_discovery_timeout_causes_rollback() {
   # The rollback must not leave a worker-server record or meta behind.
   [ ! -f "$HOME_DIR/state/$id.worker-server" ] \
     || fail "discovery timeout rollback must not leave a worker-server record"
+  # Discovery timeout leaves NO live .meta (the review4 blocker): supervision
+  # keys on state/<id>.meta, so a published meta with a killed endpoint would
+  # read as a phantom live task. Status/turn-end records and the task tmp
+  # root are this invocation's creations too and must go.
+  [ ! -e "$HOME_DIR/state/$id.meta" ] \
+    || fail "discovery timeout rollback must not leave a live meta behind"
+  [ ! -e "$HOME_DIR/state/$id.status" ] \
+    || fail "discovery timeout rollback must not leave a status record behind"
+  [ ! -e "$HOME_DIR/state/$id.turn-ended" ] \
+    || fail "discovery timeout rollback must not leave its turn-end hook record behind"
+  [ ! -e "/tmp/fm-$id" ] \
+    || fail "discovery timeout rollback must not leave its task tmp root behind"
   pass "cursor spawn discovery timeout causes refusal and endpoint rollback"
 }
 

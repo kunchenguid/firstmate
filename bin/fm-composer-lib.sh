@@ -108,15 +108,13 @@ fm_composer_strip_ansi() {
 # codes are processed left to right within a sequence, so "ESC[0;2m" reads as dim.
 # LC_ALL=C makes awk walk bytes, so multibyte glyphs (e.g. ❯) and de-emphasised
 # runs alike pass through or drop intact without locale-dependent classes.
+# Cursor's reverse-video cursor-cell gap is NOT this function's concern: it is a
+# Cursor renderer artefact normalized away first by fm_cursor_composer_normalize
+# (bin/fm-cursor-lib.sh), which the Cursor-harness callers route raw rows through
+# before this generic classifier (fm_tmux_composer_row_state and
+# fm_backend_herdr_composer_state branch on FM_COMPOSER_HARNESS=cursor).
 fm_composer_strip_ghost() {
-  # Cursor reverse-video cursor-cell gap buffering and drop are harness-gated:
-  # verified only against Cursor (tmux coalesced and Herdr split SGR forms).
-  # Non-Cursor callers keep pre-Cursor direct-emit semantics - no ghost_gap
-  # buffering, and reverse-video between dim runs is never dropped as a
-  # cursor cell.
-  local cursor_rev_gap=0
-  [ "${FM_COMPOSER_HARNESS:-}" = cursor ] && cursor_rev_gap=1
-  LC_ALL=C awk -v lumamax="${FM_COMPOSER_GHOST_LUMA_MAX:-128}" -v cursor_rev_gap="$cursor_rev_gap" '
+  LC_ALL=C awk -v lumamax="${FM_COMPOSER_GHOST_LUMA_MAX:-128}" '
     function sgr_code(v, b) {
       b = v
       sub(/:.*/, "", b)
@@ -150,7 +148,6 @@ fm_composer_strip_ghost() {
     }
     {
       line = $0; out = ""; dim = 0; darkfg = 0; n = length(line); i = 1
-      ghost_gap = 0; gap_buf = ""; gap_rev = 0
       while (i <= n) {
         c = substr(line, i, 1)
         if (c == "\033") {            # ESC: consume a CSI ... final-byte sequence
@@ -164,81 +161,6 @@ fm_composer_strip_ghost() {
             }
             if (j <= n && substr(line, j, 1) == "m") {   # SGR: update de-emphasis
               if (params == "") params = "0"
-              # Before processing this SGR, flush any pending ghost gap buffer
-              # if this SGR CHANGES de-emphasis (dim/darkfg). Color-only SGRs
-              # (38, 48, 58) between the gap characters must NOT flush the
-              # buffer, because they arrive before the real content and would
-              # close the gap prematurely (cursor-agent reverse-video cursor
-              # cell sits between a dim exit and a dim re-entry, with a
-              # background-color SGR in between). The buffer is dropped on dim
-              # re-entry ONLY when Cursor reverse-gap handling is armed and the
-              # content was reverse-video-marked (SGR 7, how the observed
-              # cursor cell is always rendered): a plain-text gap is real typed
-              # content and survives, deferring injection rather than licensing
-              # it over genuine input. ghost_gap itself only opens under
-              # Cursor reverse-gap handling; non-Cursor never enters this path.
-              if (ghost_gap) {
-                # peek: is this a de-emphasis-changing SGR or a color-only SGR?
-                # Must skip color payload parameters (38;2, 38;5, 48;2, 48;5,
-                # 58;2, 58;5) so the "2" in a TRUECOLOR color spec is not
-                # mistaken for a dim code. Two separate scans: one for
-                # is_deemph (any de-emphasis code), one for dim_reentered
-                # (code 2 after a code 0/22 reset). The scans are separate
-                # because code "0" is de-emphasis but does NOT re-enter dim,
-                # and code "2" may appear after code "0" in the same params.
-                is_deemph = 0; dim_reentered = 0; dark_reentered = 0
-                k_check = split(params, a_check, ";")
-                for (p_check = 1; p_check <= k_check; p_check++) {
-                  v_check = a_check[p_check]; code_check = sgr_code(v_check)
-                  if (code_check == "38" || code_check == "48" || code_check == "58") {
-                    if (code_check == "38" && fg38_is_dark(a_check, p_check, k_check, lumamax)) {
-                      is_deemph = 1; dark_reentered = 1; break
-                    }
-                    p_check = skip_color_payload(a_check, p_check, k_check)
-                    continue
-                  }
-                  if (code_check == "2") { is_deemph = 1; break }
-                  if (code_check == "0" || code_check == "22") { is_deemph = 1; break }
-                  if (code_check == "39") { is_deemph = 1; break }
-                  if (code_check + 0 >= 30 && code_check + 0 <= 37) { is_deemph = 1; break }
-                  if (code_check + 0 >= 90 && code_check + 0 <= 97) { is_deemph = 1; break }
-                }
-                if (is_deemph) {
-                  # Compute the re-entry flags first (dim / dark-38 re-entry in
-                  # this same sequence), then decide. A de-emphasis-END-ONLY
-                  # SGR (0 / 22 / 39 / base fg, with no dim or dark-38 re-entry
-                  # in the same sequence) must NOT flush an open reverse-video
-                  # gap under Cursor: herdr relays the raw split SGR sequences
-                  # (ESC[0m + ESC[2m) while tmux coalesces them (0;2m), and the
-                  # intermediate bare reset would flush the cursor cell as real
-                  # text before the dim re-entry arrives. The gap stays open
-                  # until dim/dark re-entry (drop if gap_rev), rev-off (SGR 27,
-                  # keeps text), or end-of-line / normal content (emit).
-                  for (p_check = 1; p_check <= k_check; p_check++) {
-                    v_check = a_check[p_check]; code_check = sgr_code(v_check)
-                    if (code_check == "38" || code_check == "48" || code_check == "58") {
-                      if (code_check == "38" && fg38_is_dark(a_check, p_check, k_check, lumamax)) {
-                        dark_reentered = 1; break
-                      }
-                      p_check = skip_color_payload(a_check, p_check, k_check)
-                      continue
-                    }
-                    if (code_check == "2") { dim_reentered = 1; break }
-                  }
-                  if (!(gap_rev && !dim_reentered && !dark_reentered)) {
-                    # Not a split-sequence relay reset: flush the gap as before.
-                    ghost_gap = 0
-                    if ((dim_reentered || dark_reentered) && gap_rev) {
-                      gap_buf = ""   # reverse-video gap content is the cursor cell, drop it
-                    } else {
-                      out = out gap_buf   # gap content is real, emit it
-                    }
-                    gap_buf = ""; gap_rev = 0
-                  }
-                  # else: de-emphasis-END-ONLY SGR on a reverse-video gap
-                  # (split-sequence relay) - the gap stays open untouched.
-                }
-              }
               k = split(params, a, ";")
               for (p = 1; p <= k; p++) {
                 v = a[p]; code = sgr_code(v)
@@ -247,49 +169,25 @@ fm_composer_strip_ghost() {
                   p = skip_color_payload(a, p, k)
                 } else if (code == "48" || code == "58") {
                   p = skip_color_payload(a, p, k)
-                } else if (code == "2") {
-                  if (!dim) { dim = 1; ghost_gap = 0; gap_buf = ""; gap_rev = 0 }
-                } else if (code == "0") {
-                  if (cursor_rev_gap && (dim || darkfg)) {
-                    # Exiting de-emphasis under Cursor: start a ghost gap
-                    # buffer to capture a potential reverse-video cursor cell.
-                    ghost_gap = 1; gap_buf = ""; gap_rev = 0
-                  }
-                  dim = 0; darkfg = 0
-                } else if (code == "22") {
-                  if (cursor_rev_gap && dim) { ghost_gap = 1; gap_buf = ""; gap_rev = 0 }
-                  dim = 0
-                } else if (code == "7") {
-                  # Mark reverse-video gaps only for Cursor: non-Cursor never
-                  # opens ghost_gap, so reverse-video content is never dropped
-                  # as a cursor cell.
-                  if (ghost_gap && cursor_rev_gap) gap_rev = 1
-                } else if (code == "27") {
-                  gap_rev = 0
-                } else if (code == "39") { darkfg = 0 }
-                else if (code + 0 >= 30 && code + 0 <= 37) { darkfg = 0 }
-                else if (code + 0 >= 90 && code + 0 <= 97) { darkfg = 0 }
+                } else if (code == "2") dim = 1
+                else if (code == "0") { dim = 0; darkfg = 0 }
+                else if (code == "22") dim = 0
+                else if (code == "39") darkfg = 0
+                else if (code + 0 >= 30 && code + 0 <= 37) darkfg = 0
+                else if (code + 0 >= 90 && code + 0 <= 97) darkfg = 0
               }
             }
             if (j <= n) { i = j + 1; continue }
           }
           i = i + 1; continue          # lone/other ESC: drop the ESC byte only
         }
-        if (ghost_gap) {
-          gap_buf = gap_buf c
-        } else if (dim == 0 && darkfg == 0) {
-          out = out c
-        }
+        if (dim == 0 && darkfg == 0) out = out c   # keep only non-de-emphasised bytes
         i++
       }
-      # End of line: flush any remaining ghost gap buffer (no dim re-entry,
-      # so the gap content is real).
-      if (ghost_gap && gap_buf != "") out = out gap_buf
       print out
     }
   '
 }
-
 # fm_composer_classify_content: the single shared composer-content verdict.
 #   <bordered> 1 when <content> came from a genuine agent-composer container (a
 #              bordered composer box, or a structurally-identified bare AGENT

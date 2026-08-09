@@ -965,6 +965,54 @@ SH
 # resolves correctly with no model/effort tokens anywhere in the chain, and a
 # crew/scout (non-secondmate) launch is entirely unaffected by this feature: no
 # model/effort is invented for it even though its own project has no profile set.
+# A failed CURSOR secondmate spawn must roll back every record the invocation
+# created (meta/status/worker-server/task tmp) while leaving the pre-seeded
+# home and its registry untouched: a published meta with a killed endpoint is a
+# phantom live task, and the meta's home= binding is the only ownership this
+# invocation establishes (the home and data/secondmates.md entry are seeded
+# before spawn, never by it).
+test_spawn_cursor_secondmate_worker_absent_rolls_back_completely() {
+  local w sm launchlog out status
+  w="$TMP_ROOT/spawn-cursor-secondmate-rollback"
+  sm="$w/sm"
+  launchlog="$w/launch.log"
+  mkdir -p "$w/home/config"
+  printf 'cursor\n' > "$w/home/config/secondmate-harness"
+  make_seeded_home "$sm" sm
+  registry_before=$(cat "$w/home/data/secondmates.md" 2>/dev/null || echo absent)
+
+  # No worker-server child: the fake pgrep exits 1, the bounded poll exhausts,
+  # and the spawn must refuse with a complete rollback (review4 blocker).
+  out=$(FM_FAKE_CURSOR_AGENT_ARGS="$w/tmux-sm/fakebin/cursor-agent --force --trust brief" \
+    FM_PROC_ROOT_OVERRIDE="$w/no-proc" FM_FAKE_CURSOR_PROC_ROOT="$w/no-proc" \
+    FM_FAKE_CURSOR_AGENT_PID=4242 FM_FAKE_CURSOR_WORKER_PID='' \
+    spawn_secondmate_capture "$w" sm "$sm" "$launchlog" 2>&1)
+  status=$?
+  expect_code 1 "$status" "cursor secondmate spawn without a worker-server must refuse"$'\n'"$out"
+
+  # No phantom live task: meta, status, turn-end hook, worker record, and the
+  # task tmp root must all be gone.
+  [ ! -e "$w/home/state/sm.meta" ] \
+    || fail "failed cursor secondmate spawn must not leave a live meta behind"
+  [ ! -e "$w/home/state/sm.status" ] \
+    || fail "failed cursor secondmate spawn must not leave a status record behind"
+  [ ! -e "$w/home/state/sm.worker-server" ] \
+    || fail "failed cursor secondmate spawn must not leave a worker-server record"
+  [ ! -e "$w/home/state/sm.turn-ended" ] \
+    || fail "failed cursor secondmate spawn must not leave its turn-end hook record behind"
+  [ ! -e "/tmp/fm-sm" ] \
+    || fail "failed cursor secondmate spawn must not leave its task tmp root behind"
+  # No partial home/registry ownership: the pre-seeded home stays intact and
+  # the registry is byte-identical (spawn never writes it).
+  [ -f "$sm/.fm-secondmate-home" ] \
+    || fail "rollback removed the pre-seeded secondmate home marker"
+  [ -f "$sm/AGENTS.md" ] || fail "rollback removed the pre-seeded secondmate home"
+  registry_after=$(cat "$w/home/data/secondmates.md" 2>/dev/null || echo absent)
+  [ "$registry_after" = "$registry_before" ] \
+    || fail "failed cursor secondmate spawn changed the secondmate registry"
+  pass "failed cursor secondmate spawn rolls back task records and leaves the seeded home/registry intact"
+}
+
 test_spawn_fallback_chain_and_crew_scout_unaffected() {
   local w sm meta home proj wt fakebin launchlog id launch
   w="$TMP_ROOT/spawn-fallback-and-crew"
@@ -2574,6 +2622,7 @@ test_spawn_explicit_harness_does_not_inherit_secondmate_harness_tokens
 test_spawn_explicit_harness_uses_explicit_profile_axes
 test_spawned_secondmate_uses_its_harness_supervision_model
 test_spawn_cursor_secondmate_env_reaches_agent
+test_spawn_cursor_secondmate_worker_absent_rolls_back_completely
 test_spawn_fallback_chain_and_crew_scout_unaffected
 test_bootstrap_sweep_propagates_and_reconverges
 test_bootstrap_sweep_propagates_when_tracked_current

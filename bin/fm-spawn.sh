@@ -626,37 +626,6 @@ spawn_remote_secondmate() {
 }
 
 BACKEND=
-if [ "$KIND" = secondmate ]; then
-  if spawn_remote_secondmate "${POS[0]:-}"; then
-    exit 0
-  else
-    remote_spawn_rc=$?
-  fi
-  [ "$remote_spawn_rc" -eq 3 ] || exit "$remote_spawn_rc"
-fi
-
-# Backend selection (data/fm-backend-design-d7): explicit --backend, else
-# FM_BACKEND env, else config/backend, else runtime auto-detection, else
-# default tmux (fm_backend_name). fm_backend_validate_spawn refuses unknown or
-# non-spawn-capable backends. The resolved value is
-# recorded in meta only when it is NOT tmux (fm-teardown.sh and fm-watch.sh's
-# window_backend/fm_backend_of_meta already treat an absent backend= as tmux),
-# so the default path's meta stays byte-identical.
-if [ "$BACKEND_SET" -eq 1 ]; then
-  BACKEND=$BACKEND_ARG
-else
-  BACKEND=$(fm_backend_name)
-fi
-fm_backend_validate_spawn "$BACKEND" || exit 1
-fm_backend_source "$BACKEND" || exit 1
-if [ "$BACKEND" = orca ] && [ "$KIND" = secondmate ]; then
-  echo "error: backend=orca does not support --secondmate spawns yet" >&2
-  exit 1
-fi
-if [ "$BACKEND" = cmux ] && [ "$KIND" = secondmate ]; then
-  echo "error: backend=cmux does not support --secondmate spawns yet" >&2
-  exit 1
-fi
 ORCA_ABORT_CLEANUP=0
 ORCA_WORKTREE_ID=
 ORCA_TERMINAL=
@@ -972,9 +941,6 @@ if [ "$RELAUNCH" -eq 0 ]; then
     echo "error: backend=cmux does not support --secondmate spawns yet" >&2
     exit 1
   fi
-  if [ "$BACKEND" = orca ]; then
-    fm_backend_orca_runtime_check || exit 1
-  fi
 fi
 SPAWN_TASK_LOCK="$STATE/.spawn-$ID.lock"
 if ! fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
@@ -1238,7 +1204,8 @@ fi
 # a configuration error the operator can fix without a healthy runtime, so it
 # should not be reported as a runtime failure of the backend it can never use.
 # Still well before any endpoint, worktree, launch command, or metadata exists.
-if [ "$BACKEND" = orca ]; then
+# A relaunch proves its backend through the endpoint validation instead.
+if [ "$RELAUNCH" -eq 0 ] && [ "$BACKEND" = orca ]; then
   fm_backend_orca_runtime_check || exit 1
 fi
 
@@ -2209,6 +2176,44 @@ EOF
   return 1
 }
 
+# spawn_rollback_task_state: one canonical rollback for a spawn failure that
+# happened AFTER this invocation published task records. state/<id>.meta is
+# published before launch, so a failure after publication must remove
+# everything THIS invocation created or supervision sees a phantom live task
+# (a published meta with no live endpoint). Removes: the endpoint, the task
+# records (meta/status/turn-end hook), the cursor worker-server record, the
+# per-task tmp root, and - only when this invocation leased one - the
+# treehouse worktree. A secondmate home and its registry entry are seeded
+# BEFORE spawn and are never removed here; orca's worktree keeps its own
+# abort-cleanup ownership, and a projected herdr task re-arms the projection
+# abort cleanup so the EXIT trap removes the projected workspace and journal
+# this invocation created.
+spawn_rollback_task_state() {  # <detail>
+  local detail=$1
+  echo "failed: $detail" >> "$STATE/$ID.status" 2>/dev/null || true
+  echo "error: $detail" >&2
+  fm_backend_kill "$BACKEND" "$T" 2>/dev/null || true
+  rm -f "$STATE/$ID.worker-server" 2>/dev/null || true
+  if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
+    # The projection abort cleanup was disarmed before Enter (handoff to the
+    # task); a rolled-back task owns no projection, so re-arm it for the
+    # EXIT trap.
+    HERDR_PROJECTION_ABORT_CLEANUP=1
+  fi
+  # A relaunch failure keeps the pre-existing task records and worktree: the
+  # task predates this invocation and its work must stay visible to recovery.
+  if [ "$RELAUNCH" -ne 1 ]; then
+    rm -f "$STATE/$ID.meta" "$STATE/$ID.status" "$STATE/$ID.turn-ended" 2>/dev/null || true
+    rm -rf "$TASK_TMP" 2>/dev/null || true
+    if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] \
+       && [ -n "${WT:-}" ] && [ -d "${WT:-}" ]; then
+      if ! ( cd "$PROJ_ABS" && treehouse return --force "$WT" ) >/dev/null 2>&1; then
+        echo "warning: spawn rollback could not return the leased worktree $WT; remove it manually (it holds no landed work)" >&2
+      fi
+    fi
+  fi
+}
+
 kimi_capture_has_empty_composer() {  # <plain-pane-capture>
   printf '%s\n' "$1" \
     | grep -Eq '^[[:space:]]*(│|┃|\|)[[:space:]]*>[[:space:]]*(│|┃|\|)[[:space:]]*$'
@@ -2781,6 +2786,19 @@ if [ "$KIND" = secondmate ]; then
   # injected carrier and this on/off snapshot are guaranteed to agree.
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$sq_primary_home FM_HOME=$sq_home FM_TRACE_CONTEXT=$SPAWN_TRACE_EFFECTIVE FM_SUPERVISION_MODEL=$supervision_model $LAUNCH"
 fi
+# One launch-boundary rule, no per-template exceptions: every TEMPLATE-built
+# worker that is NOT cursor starts without cursor-agent's CURSOR_AGENT=1
+# identity marker. The raw-command escape hatch is excluded because it is
+# passed through byte-identically by contract.
+# fm-harness.sh checks that marker before every other signal, so a marker
+# inherited from a cursor primary would make any markerless harness - codex,
+# opencode, kimi, muse - detect itself as cursor. Stating it as a single
+# non-cursor rule is what keeps a newly added adapter covered by default.
+# Applied BEFORE the shell-prefix wraps below (unset TRACEPARENT; env
+# assignments), so the final literal stays a valid shell sequence.
+if [ "$HARNESS" != cursor ] && [ "${RAW_LAUNCH:-0}" -eq 0 ]; then
+  LAUNCH="env -u CURSOR_AGENT $LAUNCH"
+fi
 if [ -z "$SPAWN_TRACEPARENT" ] && [ "$RELAUNCH" -eq 1 ]; then
   LAUNCH="unset TRACEPARENT; $LAUNCH"
 fi
@@ -2804,18 +2822,6 @@ spawn_record_traceparent() {
   return "$status"
 }
 
-
-# One launch-boundary rule, no per-template exceptions: every TEMPLATE-built
-# worker that is NOT cursor starts without cursor-agent's CURSOR_AGENT=1
-# identity marker. The raw-command escape hatch is excluded because it is
-# passed through byte-identically by contract.
-# fm-harness.sh checks that marker before every other signal, so a marker
-# inherited from a cursor primary would make any markerless harness - codex,
-# opencode, kimi, muse - detect itself as cursor. Stating it as a single
-# non-cursor rule is what keeps a newly added adapter covered by default.
-if [ "$HARNESS" != cursor ] && [ "${RAW_LAUNCH:-0}" -eq 0 ]; then
-  LAUNCH="env -u CURSOR_AGENT $LAUNCH"
-fi
 # Export GOTMPDIR into the crewmate's pane shell so the agent and every child
 # process (go build, go test, ...) inherit it. Sent before the launch command so
 # the env is set when the agent starts; the brief sleep lets the export land.
@@ -2848,13 +2854,12 @@ spawn_send_key "$T" Enter
 if [ "$HARNESS" = cursor ]; then
   # Establish worker-server ownership evidence before the task is considered
   # live. cursor_worker_server_record writes a state/<id>.worker-server file
-  # atomically (temp+mv). Failure here rolls back the endpoint and the task
-  # so no untracked worker-server can survive teardown.
+  # atomically (temp+mv). Failure here rolls back EVERYTHING this invocation
+  # created through the one canonical path (spawn_rollback_task_state), so no
+  # untracked worker-server and no phantom live task can survive: the meta is
+  # published before launch, and supervision keys on it, so it must go too.
   if ! cursor_worker_server_record "$BACKEND" "$T"; then
-    echo "failed: cursor worker-server ownership could not be established; rolling back endpoint and task state" >> "$STATE/$ID.status"
-    echo "error: cursor worker-server ownership could not be established; the task will not be left in an untracked state" >&2
-    fm_backend_kill "$BACKEND" "$T" 2>/dev/null || true
-    rm -f "$STATE/$ID.worker-server" 2>/dev/null || true
+    spawn_rollback_task_state "cursor worker-server ownership could not be established; the task was rolled back completely and will not be left in an untracked state"
     exit 1
   fi
 fi
