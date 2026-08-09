@@ -16,9 +16,18 @@
 #   authorised skills -> verification -> persisted state -> terminal state or
 #   bounded next iteration
 #
-# This script owns exactly three of those arrows: selection, persisted state,
-# and the terminal-state bookkeeping that bounds the next iteration. The wake
-# still comes from the existing watcher. The work still happens in a model turn.
+# This script owns exactly four of those arrows: selection, verification,
+# persisted state, and the terminal-state bookkeeping that bounds the next
+# iteration. The wake still comes from the existing watcher. The work still
+# happens in a model turn.
+#
+# Verification is owned here rather than left to the caller for one reason: a
+# LoopSpec is only genuinely loopable when a named verifier can produce different
+# evidence after an iteration because of the action that iteration took. If the
+# caller reports its own verdict, the party doing the work certifies the work,
+# and a spec naming a verifier that does not exist still reaches a success
+# terminal. `verify` executes the bound command; `finish` consumes what it
+# recorded.
 #
 # EVERYTHING REFUSES BY DEFAULT. Every subcommand that could lead to work prints
 # one stable refusal token on stderr and exits 1 rather than proceeding under
@@ -31,8 +40,15 @@
 #   fm-loopspec.sh triggers [--summary]        the sixteen-trigger register
 #   fm-loopspec.sh select --trigger <id> [--scope <scope>]
 #                                              choose exactly one eligible spec
+#   fm-loopspec.sh candidates --trigger <id> [--scope <scope>]
+#                                              the tiny typed applicability header
+#                                              per match, as JSON lines; never a
+#                                              spec body
 #   fm-loopspec.sh claim <id> --event-key <k> --spec-version <n> [--headroom <pct>]
 #                                              open or resume one iteration
+#   fm-loopspec.sh verify <id> --event-key <k> run the spec's bound verifier and
+#                                              record its verdict against this
+#                                              iteration; exit 0 only on a pass
 #   fm-loopspec.sh finish <id> --event-key <k> --terminal <name>
 #                       --verifier-result pass|fail|unavailable [--evidence <text>]...
 #                       [--progress made|none]
@@ -53,6 +69,10 @@
 #   refuse_version_changed       the spec changed under a running iteration
 #   refuse_evidence_missing      fewer evidence items than the verifier requires
 #   refuse_verifier_unavailable  no verifier verdict, so no success terminal
+#   refuse_verifier_unbound      the spec names a verifier that cannot be run
+#   refuse_verifier_not_run      NO_VERIFIER_RAN: a success terminal was claimed
+#                                without a recorded verifier run bound to this
+#                                spec version, event key and iteration
 #   refuse_verification_mismatch the verifier rejected a success terminal
 #   refuse_capacity_unknown      capacity is bounded but was not supplied
 #   refuse_capacity_stop         capacity is inside the stop band
@@ -182,6 +202,7 @@ validate_structure() {
     | (((try ($spec.authority.permitted_skills) catch null)) // []) as $need_skills
     | ((try ($spec.authority.class) catch null)) as $authority_class
     | (((try ($spec.terminal_states | map(select(type == "object") | .name)) catch null)) // []) as $declared
+    | (((try ($spec.terminal_states | map(select(type == "object") | .kind)) catch null)) // []) as $declared_kinds
     | [
         ( $S.objects | to_entries[] as $obj
           | objects_at($spec; $obj.key)[] as $val
@@ -205,6 +226,11 @@ validate_structure() {
           | "trigger \"\($trigger_id)\" is not in the trigger register" ),
 
         ( (($S.required_terminal_states - $declared)[]) | "missing required terminal state: \(.)" ),
+        # Required by KIND, not by name, so the universal shape of a bounded loop
+        # is enforced without imposing the terminal vocabulary of one domain on
+        # every other spec. Requiring the names of the first spec made a second
+        # spec unauthorable.
+        ( ((($S.required_terminal_kinds // []) - $declared_kinds)[]) | "no terminal state of required kind: \(.)" ),
         ( select(($np_terminal != null) and (($declared | index($np_terminal)) == null))
           | "no_progress.terminal \"\($np_terminal)\" is not a declared terminal state" ),
         ( (($esc_on - $declared)[]) | "escalation.on names an undeclared terminal state: \(.)" ),
@@ -240,7 +266,7 @@ validate_structure() {
 # Registry-wide validation. Returns 0 only when every spec is sound.
 validate_registry() {
   local -a files=()
-  local f base file_id problems skills_json rc=0 count=0 dupes
+  local f base file_id problems skills_json rc=0 count=0 dupes vproblem
 
   if [ "$#" -gt 0 ]; then
     files=("$@")
@@ -276,6 +302,19 @@ validate_registry() {
       rc=1
       continue
     fi
+
+    # An enabled spec must name a verifier that actually resolves. A spec may
+    # declare a verifier it has not built yet while it is still draft or
+    # ready_not_active; the moment it claims to be enabled, the binding has to be
+    # real, because a named-but-unreachable verifier is worse than none - it looks
+    # bound and verifies nothing.
+    if [ "$(jq -r '.status' "$f" 2>/dev/null)" = "enabled" ]; then
+      if ! vproblem=$(verifier_path_for "$(jq -r '.verification.verifier_command // empty' "$f" 2>/dev/null)"); then
+        printf 'refuse_invalid_spec %s: status is enabled but %s\n' "$base" "$vproblem" >&2
+        rc=1
+        continue
+      fi
+    fi
     count=$((count + 1))
   done
 
@@ -302,6 +341,28 @@ validate_registry() {
 
 spec_path_for() {
   printf '%s/%s.json' "$SPEC_DIR" "$1"
+}
+
+# Resolve verification.verifier_command to an absolute path inside the repository
+# root. A verifier is a repository-owned executable, never an arbitrary command
+# line: an absolute path, a shell fragment, or a traversal out of the root is
+# refused rather than resolved, so a spec can never name something outside the
+# reviewed tree as the thing that decides whether an iteration passed.
+# Prints the absolute path and returns 0, or prints the reason and returns 1.
+verifier_path_for() {
+  local cmd=$1 abs
+  case "$cmd" in
+    "") printf 'verification.verifier_command is empty\n'; return 1 ;;
+    /*) printf 'verification.verifier_command must be relative to the repository root: %s\n' "$cmd"; return 1 ;;
+    *..*) printf 'verification.verifier_command must not traverse out of the repository root: %s\n' "$cmd"; return 1 ;;
+    *[[:space:]]*) printf 'verification.verifier_command must be one executable path, not a command line: %s\n' "$cmd"; return 1 ;;
+  esac
+  abs="$FM_ROOT/$cmd"
+  [ -e "$abs" ] || { printf 'verifier command does not exist: %s\n' "$cmd"; return 1; }
+  [ -f "$abs" ] && [ ! -L "$abs" ] || { printf 'verifier command is not a regular file: %s\n' "$cmd"; return 1; }
+  [ -x "$abs" ] || { printf 'verifier command is not executable: %s\n' "$cmd"; return 1; }
+  printf '%s\n' "$abs"
+  return 0
 }
 
 state_path_for() {
@@ -497,6 +558,44 @@ cmd_select() {
     "$lowest"
 }
 
+# The tiny typed applicability header for every spec matching a trigger.
+#
+# This exists so the selection filter never has to read spec bodies. A body is
+# hundreds of lines of authority, evidence and terminal prose; loading the
+# registry into a model context to answer "which loop is this" would cost more
+# than the loop saves and would grow without bound as the registry grows. The
+# header is deliberately fixed-width in fields and short in content, so the
+# judgment call that ruling 2 preserves is made over summaries only.
+#
+# Emitted as JSON lines: one object per candidate, nothing else.
+cmd_candidates() {
+  need_jq
+  local trigger="" scope=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --trigger) [ "$#" -gt 1 ] || die_usage "--trigger requires a value"; trigger=$2; shift 2 ;;
+      --scope) [ "$#" -gt 1 ] || die_usage "--scope requires a value"; scope=$2; shift 2 ;;
+      *) die_usage "unknown option for candidates: $1" ;;
+    esac
+  done
+  [ -n "$trigger" ] || die_usage "candidates requires --trigger <id>"
+
+  local -a files=()
+  local f
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    files+=("$f")
+  done < <(spec_files)
+  [ "${#files[@]}" -gt 0 ] && jq -c -s --arg t "$trigger" --arg s "$scope" '
+    map(select(.trigger.id == $t and ($s == "" or .selection.scope == $s)))
+    | .[]
+    | {id, version: .spec_version, status, scope: .selection.scope,
+       priority: .selection.priority, authority: .authority.class,
+       verifier_level: .verification.verifier_level, title}
+  ' "${files[@]}"
+  return 0
+}
+
 cmd_claim() {
   need_jq
   [ "$#" -ge 1 ] || die_usage "claim requires a spec id"
@@ -590,6 +689,103 @@ cmd_claim() {
   printf 'LOOPSPEC_CLAIM %s version=%s iteration=%s resumed=false\n' "$id" "$disk_version" "$iteration"
 }
 
+# Run the spec's bound verifier against the open iteration and record its verdict.
+#
+# This is the step that makes a LoopSpec verifiable rather than merely repeatable.
+# The verdict is produced HERE, by executing the repository-owned command the spec
+# names, and is persisted bound to (spec id, spec version, event key, iteration).
+# `finish` then consumes that recorded verdict for a success terminal instead of
+# believing a caller-supplied flag, so a worker can no longer certify its own
+# work.
+#
+# Verifier contract, which every bound command must honour:
+#   invoked as: <command> --spec <id> --spec-version <n> --event-key <k> --iteration <i>
+#   exit 0  -> pass         the goal is verified for this iteration
+#   exit 1  -> fail         the verifier ran and rejected the iteration
+#   any other, a timeout, or a command that cannot run -> unavailable
+#   stdout  -> one evidence line per fact observed; these are the loop's evidence
+#
+# Unavailable is deliberately the catch-all. An unavailable verifier is never a
+# pass, so a verifier that crashes, times out or returns a status nobody defined
+# lands in the one bucket that cannot reach a success terminal.
+cmd_verify() {
+  need_jq
+  [ "$#" -ge 1 ] || die_usage "verify requires a spec id"
+  local id=$1; shift
+  local event_key=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --event-key) [ "$#" -gt 1 ] || die_usage "--event-key requires a value"; event_key=$2; shift 2 ;;
+      *) die_usage "unknown option for verify: $1" ;;
+    esac
+  done
+  [ -n "$event_key" ] || die_usage "verify requires --event-key <key>"
+
+  local spec path state vname vcmd vlevel vpath vproblem
+  spec=$(load_spec_or_refuse "$id") || exit 1
+  vname=$(printf '%s' "$spec" | jq -r '.verification.verifier')
+  vcmd=$(printf '%s' "$spec" | jq -r '.verification.verifier_command // empty')
+  vlevel=$(printf '%s' "$spec" | jq -r '.verification.verifier_level // "judgment"')
+
+  path=$(state_path_for "$id" "$(printf '%s' "$spec" | jq -r '.state.path_template')")
+  state=$(read_state "$path") || exit 1
+
+  # A verdict only means something against a specific iteration, so there has to
+  # be one open and it has to be this event's.
+  [ "$(printf '%s' "$state" | jq -r '.open // false')" = "true" ] \
+    || refuse refuse_no_open_iteration "no open iteration for spec \"$id\""
+  local open_key iteration version
+  open_key=$(printf '%s' "$state" | jq -r '.event_key // empty')
+  [ "$open_key" = "$event_key" ] \
+    || refuse refuse_no_open_iteration "the open iteration belongs to event key \"$open_key\""
+  iteration=$(printf '%s' "$state" | jq -r '.iteration // 0')
+  version=$(printf '%s' "$spec" | jq -r '.spec_version')
+
+  if ! vpath=$(verifier_path_for "$vcmd"); then
+    # Record the unavailability rather than only reporting it, so the next
+    # `finish` sees a real recorded verdict of "unavailable" and refuses success
+    # on it, instead of seeing no run at all and refusing for a different reason.
+    vproblem=$vpath
+    write_state "$path" "$(printf '%s' "$state" | jq \
+      --arg v "$vname" --arg c "$vcmd" --arg l "$vlevel" --arg k "$event_key" \
+      --argjson iter "$iteration" --argjson ver "$version" \
+      '.verifier_run = {verifier: $v, command: $c, level: $l, verdict: "unavailable",
+                        event_key: $k, iteration: $iter, spec_version: $ver, evidence: []}')"
+    refuse refuse_verifier_unbound "spec \"$id\" is bound to a verifier that cannot run: $vproblem"
+  fi
+
+  local out rc verdict timeout_secs
+  timeout_secs=${FM_LOOPSPEC_VERIFY_TIMEOUT:-120}
+  if command -v timeout >/dev/null 2>&1; then
+    out=$(timeout "$timeout_secs" "$vpath" --spec "$id" --spec-version "$version" \
+          --event-key "$event_key" --iteration "$iteration" 2>/dev/null)
+    rc=$?
+  else
+    out=$("$vpath" --spec "$id" --spec-version "$version" \
+          --event-key "$event_key" --iteration "$iteration" 2>/dev/null)
+    rc=$?
+  fi
+  case "$rc" in
+    0) verdict=pass ;;
+    1) verdict=fail ;;
+    *) verdict=unavailable ;;
+  esac
+
+  local evidence_json
+  evidence_json=$(printf '%s' "$out" | jq -R -s 'split("\n") | map(select(length > 0))')
+
+  write_state "$path" "$(printf '%s' "$state" | jq \
+    --arg v "$vname" --arg c "$vcmd" --arg l "$vlevel" --arg d "$verdict" --arg k "$event_key" \
+    --argjson iter "$iteration" --argjson ver "$version" --argjson ev "$evidence_json" \
+    '.verifier_run = {verifier: $v, command: $c, level: $l, verdict: $d,
+                      event_key: $k, iteration: $iter, spec_version: $ver, evidence: $ev}')"
+
+  printf 'LOOPSPEC_VERIFY %s verdict=%s verifier=%s level=%s evidence=%s\n' \
+    "$id" "$verdict" "$vname" "$vlevel" "$(printf '%s' "$evidence_json" | jq -r 'length')"
+  [ "$verdict" = "pass" ] || return 1
+  return 0
+}
+
 cmd_finish() {
   need_jq
   [ "$#" -ge 1 ] || die_usage "finish requires a spec id"
@@ -626,17 +822,45 @@ cmd_finish() {
   kind=$(printf '%s' "$spec" | jq -r --arg t "$terminal" '.terminal_states[] | select(.name == $t) | .kind')
   [ -n "$kind" ] || refuse refuse_unknown_terminal "\"$terminal\" is not a terminal state declared by spec \"$id\""
 
-  # An unavailable verifier can never become a pass. Neither can a rejecting one.
+  # A success terminal is settled by the RECORDED verdict of an actual verifier
+  # run, never by the caller's --verifier-result. That flag remains the caller's
+  # own observation and is recorded as such, but it cannot authorize success:
+  # otherwise the party doing the work certifies the work, and a spec naming a
+  # verifier that does not exist still reaches a success terminal.
+  #
+  # Non-success terminals deliberately do not require a run. A loop must always
+  # be able to record that it failed, refused, or found nothing to do, including
+  # when the verifier is exactly what was broken.
   if [ "$kind" = "success" ]; then
-    [ "$verifier" != "unavailable" ] \
+    local run_verdict run_key run_iter run_version run_evidence iteration version
+    run_verdict=$(printf '%s' "$state" | jq -r '.verifier_run.verdict // empty')
+    run_key=$(printf '%s' "$state" | jq -r '.verifier_run.event_key // empty')
+    run_iter=$(printf '%s' "$state" | jq -r '.verifier_run.iteration // empty')
+    run_version=$(printf '%s' "$state" | jq -r '.verifier_run.spec_version // empty')
+    iteration=$(printf '%s' "$state" | jq -r '.iteration // 0')
+    version=$(printf '%s' "$spec" | jq -r '.spec_version')
+
+    [ -n "$run_verdict" ] \
+      || refuse refuse_verifier_not_run "NO_VERIFIER_RAN: terminal \"$terminal\" is a success state and no verifier has run for spec \"$id\""
+    # Binding the verdict to this exact iteration stops a stale pass from an
+    # earlier iteration, or from a different event, carrying a later one.
+    { [ "$run_key" = "$event_key" ] && [ "$run_iter" = "$iteration" ] && [ "$run_version" = "$version" ]; } \
+      || refuse refuse_verifier_not_run "NO_VERIFIER_RAN: the recorded verdict is for event \"$run_key\" iteration $run_iter version $run_version, not event \"$event_key\" iteration $iteration version $version"
+    [ "$run_verdict" != "unavailable" ] \
       || refuse refuse_verifier_unavailable "terminal \"$terminal\" is a success state and the verifier was unavailable"
-    [ "$verifier" = "pass" ] \
-      || refuse refuse_verification_mismatch "terminal \"$terminal\" is a success state and the verifier returned \"$verifier\""
+    [ "$run_verdict" = "pass" ] \
+      || refuse refuse_verification_mismatch "terminal \"$terminal\" is a success state and the verifier returned \"$run_verdict\""
+
+    # Evidence the verifier itself produced counts; the caller may supplement it
+    # but can never substitute for it entirely once the verifier produced none.
     local required have
     required=$(printf '%s' "$spec" | jq -r '.verification.required_evidence | length')
-    have=${#evidence[@]}
+    run_evidence=$(printf '%s' "$state" | jq -r '.verifier_run.evidence // [] | length')
+    have=$(( run_evidence + ${#evidence[@]} ))
     [ "$have" -ge "$required" ] \
-      || refuse refuse_evidence_missing "terminal \"$terminal\" requires $required evidence items, $have supplied"
+      || refuse refuse_evidence_missing "terminal \"$terminal\" requires $required evidence items, $have supplied ($run_evidence from the verifier, ${#evidence[@]} from the caller)"
+    # The recorded verdict, not the caller's claim, is what gets persisted.
+    verifier=$run_verdict
   fi
 
   local next_no_progress
@@ -675,7 +899,9 @@ case "$COMMAND" in
   show) cmd_show "$@" ;;
   triggers) cmd_triggers "$@" ;;
   select) cmd_select "$@" ;;
+  candidates) cmd_candidates "$@" ;;
   claim) cmd_claim "$@" ;;
+  verify) cmd_verify "$@" ;;
   finish) cmd_finish "$@" ;;
   state) cmd_state "$@" ;;
   -h|--help|help) usage ;;

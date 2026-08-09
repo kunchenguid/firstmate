@@ -1,0 +1,177 @@
+{
+  "loopspec_schema_version": 1,
+  "id": "fork-landing",
+  "spec_version": 1,
+  "status": "enabled",
+  "title": "Carry a delivered contribution to the fork",
+  "goal": "When a contribution has been delivered, carry the same content to the fork and open a pull request there, so the fork holds the change and its checks have run.",
+  "success_condition": "The bound verifier confirms, from the forge rather than from the worker, that an open pull request exists on the fork for this branch and that its checks have reached a resolved state with no check still in flight.",
+  "trigger": {
+    "id": "upstream-changes",
+    "source": "git remote",
+    "predicate": "A contribution has been delivered that the fork does not yet carry, identified by the fork branch that would carry it.",
+    "detector_ref": "bin/fm-loop-actuate.sh arm"
+  },
+  "preconditions": [
+    {
+      "id": "branch-identified",
+      "description": "The fork branch that carries this contribution is named by the event key. Without it there is nothing to verify and the verifier reports unavailable rather than guessing."
+    },
+    {
+      "id": "forge-reachable",
+      "description": "The fork's forge is reachable and its pull request listing is readable. An unreachable forge is unavailable, never an implicit no-such-pull-request, because absence of evidence must not be read as evidence of absence."
+    }
+  ],
+  "selection": {
+    "key": [
+      "trigger.id",
+      "selection.scope",
+      "selection.priority"
+    ],
+    "scope": "fork-delivery",
+    "priority": 10,
+    "tie_behavior": "refuse"
+  },
+  "authority": {
+    "class": "firstmate-routine",
+    "permitted_skills": [
+      "harness-adapters"
+    ],
+    "permitted_actions": [
+      "read the delivered contribution and the fork's pull request listing",
+      "dispatch a worker to carry the contribution onto a fork branch",
+      "open a pull request against the fork",
+      "read the fork pull request's own checks",
+      "write this loop's persistent state and execution record"
+    ],
+    "forbidden_actions": [
+      "merge any pull request, on the fork or anywhere else",
+      "close, reopen or edit a pull request this loop did not open",
+      "force-push, discard or tear down unlanded work",
+      "open or modify a pull request against the upstream repository",
+      "expand its own budget, authority or terminal set",
+      "treat a resolved-but-red check set as authorization to land"
+    ]
+  },
+  "verification": {
+    "verifier": "fork-landing-checks",
+    "verifier_command": "bin/fm-verify-fork-landing.sh",
+    "verifier_level": "l2",
+    "required_evidence": [
+      "the fork pull request number observed on the forge for this branch",
+      "the pull request check summary, with passed, failed, pending and total counts",
+      "an explicit statement of whether the resolved check set is green"
+    ],
+    "on_unavailable": "fail_closed"
+  },
+  "state": {
+    "path_template": "state/loopspec/<id>.state.json",
+    "required_fields": [
+      "spec_id",
+      "spec_version",
+      "status",
+      "iteration",
+      "event_key",
+      "open",
+      "consecutive_no_progress",
+      "last_terminal",
+      "verifier_run"
+    ]
+  },
+  "cadence": {
+    "min_interval_secs": 300,
+    "max_interval_secs": 86400,
+    "backoff": {
+      "strategy": "exponential",
+      "factor": 2,
+      "ceiling_secs": 3600
+    },
+    "retry": {
+      "max_attempts": 3
+    },
+    "dedup": {
+      "key": [
+        "trigger.id",
+        "fork_branch"
+      ],
+      "window_secs": 86400
+    }
+  },
+  "budgets": {
+    "max_iterations": 5,
+    "max_wall_secs": 7200,
+    "capacity_stop_band_percent": 0
+  },
+  "no_progress": {
+    "progress_signal": "declared_by_verifier",
+    "max_iterations_without_progress": 2,
+    "terminal": "no_progress_stalled"
+  },
+  "terminal_states": [
+    {
+      "name": "already_carried",
+      "kind": "neutral",
+      "maps_to": "NOOP",
+      "description": "The fork already carries this contribution and its checks are resolved. Reaching this must cost no model turn."
+    },
+    {
+      "name": "carried_and_checks_resolved",
+      "kind": "success",
+      "maps_to": "COMPLETE",
+      "description": "The contribution reached the fork as an open pull request and that pull request's checks finished running. This asserts the carry and nothing more: it does not assert the checks are green, and the failed count is recorded alongside it so the record can never be read as a green light. Whether the pull request may land is the merge decision, which this loop deliberately never makes."
+    },
+    {
+      "name": "needs_ruling",
+      "kind": "refusal",
+      "maps_to": "REFUSED",
+      "description": "Whether this contribution should be carried at all cannot be settled from evidence and requires a captain ruling. The loop stops rather than guessing."
+    },
+    {
+      "name": "budget_exhausted",
+      "kind": "failure",
+      "maps_to": "EXHAUSTED",
+      "description": "The iteration budget was spent before the carry could be verified. Exhaustion is a failure and is never reported as success."
+    },
+    {
+      "name": "verification_failed",
+      "kind": "failure",
+      "maps_to": "FAILED",
+      "description": "The verifier ran and rejected the iteration, or could not establish the evidence at all. An unavailable verifier lands here and can never become a pass."
+    },
+    {
+      "name": "no_progress_stalled",
+      "kind": "failure",
+      "maps_to": "STALLED",
+      "description": "Consecutive iterations produced no verifier-declared progress, so the loop stopped instead of repeating forever."
+    }
+  ],
+  "escalation": {
+    "authority_owner": "firstmate, escalating to the captain for the merge decision this loop never makes",
+    "channel": "the task's durable status record, never a worker pane",
+    "on": [
+      "needs_ruling",
+      "budget_exhausted",
+      "verification_failed",
+      "no_progress_stalled"
+    ]
+  },
+  "idempotency": {
+    "event_key": [
+      "trigger.id",
+      "fork_branch"
+    ],
+    "claim_scope": "At most one open iteration per (spec id, fork branch). A repeated wake carrying an already-claimed branch is refused and mutates nothing, so noticing the same delivery twice cannot open two carries."
+  },
+  "crash_recovery": {
+    "open_iteration_policy": "resume_same_version",
+    "version_change_policy": "refuse"
+  },
+  "evidence": {
+    "links": [
+      "data/captain-rulings-2026-08-06/loopspec-activation-commission.md",
+      "data/captain-rulings-2026-08-06/fork-retarget-standing-rule.md"
+    ],
+    "written_to": "state/loopspec/executions.log, as one loop= record per execution"
+  },
+  "notes": "This is the fleet's first production LoopSpec, authorized as the proof case on 2026-08-06. THE LOOP STOPS BEFORE THE MERGE, by design and not by omission: its terminal is a carried pull request whose checks have run, never a merged one. A loop that merged would prove the wrong thing and would quietly convert a delivery mechanism into an authority expansion. It is deliberately chosen for having a deterministic l2 verifier that needs no vendor diversity, bounded and reversible actions (a pull request can be closed), clear terminal states, and no authority expansion. capacity_stop_band_percent is 0 because the two-threshold capacity band ruled on 2026-08-03 is owned by a separate queued task; this spec does not reimplement a ruled-but-unimplemented contract, and the interpreter's stop-band enforcement remains exercised by the fixture suite."
+}

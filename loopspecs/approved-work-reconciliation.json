@@ -63,6 +63,8 @@
   },
   "verification": {
     "verifier": "research-approved-work-scanner",
+    "verifier_command": "bin/fm-research-scan.sh",
+    "verifier_level": "l2",
     "required_evidence": [
       "corpus inventory hash for this iteration and the previous accepted one",
       "per-report content hash and size for every changed member",
@@ -196,5 +198,5 @@
     ],
     "written_to": "the derived, content-addressed index owned by the research-approved-work skill"
   },
-  "notes": "This spec is ready_not_active and cannot become enabled today, for two independently sufficient reasons the validator enforces rather than asserts: its trigger has no implemented detector and no verified execution path, and its only permitted skill is not installed. It deliberately references research-approved-work instead of restating that skill's workflow, so the scan procedure keeps exactly one owner. Whether the capacity stop band covers validation runs is an open captain decision owned by another lane; capacity_stop_band_percent bounds starting a new iteration only, and never blocks verifying an iteration already in flight."
+  "notes": "This spec is ready_not_active and cannot become enabled today, for three independently sufficient reasons the validator enforces rather than asserts: its trigger has no implemented detector and no verified execution path, its only permitted skill is not installed in this repository, and its declared verifier_command does not yet honour the verifier invocation contract that bin/fm-loopspec.sh verify requires (--spec, --spec-version, --event-key, --iteration, with exit 0 pass / 1 fail / anything else unavailable). The binding is recorded truthfully rather than left as a bare name, so what is missing is visible and the enable gate refuses until an adapter exists. It deliberately references research-approved-work instead of restating that skill's workflow, so the scan procedure keeps exactly one owner. capacity_stop_band_percent bounds starting a new iteration only, and never blocks verifying an iteration already in flight."
 }
