@@ -17,6 +17,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-bearings-snapshot.sh` | Project the fleet snapshot to the compact TOON bearings view; local-only unless `--include-prs` |
 | `fm-admission.sh`        | Decide the task-independent fleet admission band from a fresh census, with the exact per-rule explanation |
 | `fm-admission-lib.sh`    | Shared fleet-admission policy reader and `_scheduling.admission_control` schema validator |
+| `fm-decision-surface.sh` | Compose the read-only operational decision surface, refuse a claim structured state contradicts, and report the compensation ledger and platform seam |
 | `fm-update.sh`           | Fast-forward-only self-update of firstmate and local or remote secondmate homes       |
 | `fm-on.sh`               | Execute one tracked Firstmate command in a configured remote secondmate home, using its job worker except for the doctor bootstrap |
 | `fm-remote-job-lib.sh`   | Shared bounded remote job queue, worker readiness, LaunchAgent contract, and filesystem-composed PATH |

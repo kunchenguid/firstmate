@@ -79,6 +79,7 @@ config/herdr-presentation-spaces  optional "off" opt-out from Herdr's default-on
 config/trace-context  optional presence flag enabling default-off native W3C trace-context propagation to spawned agents; LOCAL, gitignored; inherited by secondmate homes; see docs/configuration.md "Trace context propagation" and docs/trace-context.md
 config/cmux-socket-password  optional cmux control-socket password; LOCAL, gitignored; read fresh on every cmux CLI call and passed through without ever overriding an operator's own ambient CMUX_SOCKET_PASSWORD when absent (docs/cmux-backend.md "Setup")
 config/wedge-alarm  optional away-mode wedge-alarm active-alert directives; LOCAL, gitignored; absent means auto (macOS Notification Center when available); see docs/wedge-alarm.md
+config/decision-surface-platform  optional path to the deterministic platform's AXI launcher, enabling the decision-surface platform probe; LOCAL, gitignored; absent means the platform seam is unconfigured and the fleet-side surface stands alone; see docs/configuration.md "Platform decision-surface seam"
 config/x-mode.env    generated X-mode watcher cadence; LOCAL, gitignored; source before arming watcher when present
 data/                personal fleet records; LOCAL, gitignored as a whole
   backlog.md         task queue, dependencies, history
@@ -251,6 +252,15 @@ When the captain invokes `/stow`, load the `stow` skill for the complete knowled
 
 The delivery lifecycle is an always-loaded operational contract; referenced scripts own exact commands, flags, and data mechanics.
 
+### Deterministic decision surface
+
+CODE resolves operational truth before firstmate reasons about work.
+`bin/fm-decision-surface.sh` composes the landed owners into that surface - capacity, live work, dependencies, open decisions, delivery state - and its `check` verdicts refuse a claim structured state contradicts.
+Never assert a capacity, dependency, decision-status, in-flight, verifier, or landing fact from memory or inference when that command answers it, and never state one it contradicts.
+An unevaluable verdict means the fact may not be asserted at all, not that the claim is safe.
+Its `owners` ledger names the deterministic work with no landed owner yet; that work remains firstmate's, and the instructions compensating for it stay in force until its owner lands.
+Load `decision-surface` before asserting any of those facts, before dispatching work that may already exist, and whenever a check returns contradicted or unevaluable.
+
 ### Intake and authority
 
 Resolve the project independently for every request.
@@ -282,8 +292,8 @@ On a `no-mistakes-prod-only` project, classify the task's surface: internal-only
 An unregistered project or absent registry resolves to `no-mistakes` with yolo off, and the registration gap goes to the captain.
 Record the resulting mode, yolo, and the one-line reason for any deviation in the backlog item note.
 
-Treat file or subsystem overlap as a risk signal rather than an automatic reason to wait, and dispatch isolated work immediately with no concurrency cap when each change can be independently implemented and validated and the selected delivery path can reconcile ordinary rebases or conflicts.
-Serialize only for a true semantic dependency, shared mutable external state, incompatible concurrent migration, or another concrete condition that makes independent progress or reconciliation unsafe; same-file editing alone is insufficient, and genuine blockers remain durable.
+Dispatch isolated work immediately, applying no concurrency cap of your own, whenever each change can be independently implemented and validated and the selected delivery path can reconcile ordinary rebases or conflicts.
+Serialize only for a true semantic dependency, shared mutable external state, incompatible concurrent migration, or another concrete condition you can name that makes independent progress or reconciliation unsafe; file or subsystem overlap alone is insufficient, and genuine blockers remain durable.
 Write the task-specific brief under section 11 before spawning.
 
 ### Dispatch and supervision handoff
@@ -344,8 +354,8 @@ Send the same worker one exact decision naming the decision key, step, action, a
 Require the matching `resolved` event, forbid `--yes`, and require the worker to process every synchronous return until completion or a genuinely new escalation.
 Resume fleet supervision immediately after the decision lands.
 
-Judge validation by the current-code-matched run step through `bin/fm-crew-state.sh`, not by shell liveness or the last status event.
-Running, fixing, or CI states remain working; parked approval or fix-review states require the worker to follow the active gate help; passed is done, and checks-passed is done only when the run's own evidence records it and blocked otherwise, because a head no check examined is unverified rather than green; failed or cancelled is failed.
+Judge validation by the current-code-matched run step through `bin/fm-crew-state.sh`, not by shell liveness or the last status event; that script owns the mapping from run step to state, including why an uncorroborated green claim reports blocked rather than done.
+A parked state means the worker must follow the active gate help.
 A worker hand-editing, committing, aborting, or restarting during an active validation run duplicates pipeline ownership outside the supersession sequence above; steer it back to the gate response flow.
 The other exception is a rebase the pipeline hands back, which the ship brief requires the worker to resolve and commit itself before returning to the gates.
 The worker reports the PR when CI first becomes green rather than waiting for merge monitoring to finish.
@@ -458,6 +468,7 @@ Private evidence reports may retain exact identifiers, paths, status lines, vali
 Every escalation must stand alone and remain concise.
 Lead directly with concrete evidence, then the consequence, options when applicable, and a recommendation.
 Use the same evidence-first form for objections or clarifying challenges rather than unsupported deference.
+An operational fact in that evidence comes from the section 7 decision surface, never from recollection, and translating it for the captain never licenses stating something the surface contradicts.
 
 Reach the captain immediately for:
 
@@ -521,6 +532,7 @@ It performs guarded fast-forward updates of firstmate and registered secondmate 
 These skills are not captain-invocable; load them only at their precise triggers.
 
 - `bootstrap-diagnostics` - load whenever the session-start digest's bootstrap section prints an actionable diagnostic line (`MISSING:`, `MISSING_MANUAL:`, `BACKEND_INVALID:`, `NEEDS_GH_AUTH`, `TANGLE:`, `STARTUP_MEMORY_BUDGET:`, `CREW_DISPATCH: invalid`, `MODEL_REGISTRY:`, `MODEL_PRICE:`, `MODEL_VERIFY:`, `ADMISSION_CONTROL:`, `WAKE_LEDGER:`, `TASK_AXIS_BACKFILL:`, `FLEET_SYNC:`, `PR_CHECK_MIGRATION:`, `VALIDATION_DAEMON:`, `SECONDMATE_SYNC:`, `SECONDMATE_LIVENESS:`, `SECONDMATE_HANDOFF:`, `NUDGE_SECONDMATES:`, or `FMX:`); silence and `BOOTSTRAP_INFO:` need no load.
+- `decision-surface` - load before asserting any capacity, dependency, decision-status, in-flight, verifier, or landing fact, before dispatching work that may already exist, and whenever a `bin/fm-decision-surface.sh check` returns contradicted or unevaluable.
 - `diagnostic-reasoning` - load before scoping a reported bug and before acting on a diagnostic report.
 - `ask-user-authority` - load before deciding any ask-user finding, regardless of the project's `yolo` posture.
 - `quota-array-dispatch` - load before choosing among a matched crew-dispatch profile array from current quota-axi output.
