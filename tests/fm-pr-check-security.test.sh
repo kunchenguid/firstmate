@@ -73,6 +73,30 @@ SH
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
 case " $* " in
+  *" api /graphql "*)
+    python3 - "$FM_TEST_GH_API_HEAD" "$FM_TEST_GH_BASE" <<'PY'
+import json
+import sys
+
+head, base = sys.argv[1:]
+pull = {
+    "headRefOid": head,
+    "baseRefOid": base,
+    "baseRefName": "main",
+    "headRefName": "fm/task-a",
+    "state": "OPEN",
+    "isDraft": False,
+    "merged": False,
+    "headRepository": {"nameWithOwner": "my-org/repo_name.with-dots"},
+    "baseRef": {"branchProtectionRule": {
+        "requiresStrictStatusChecks": True,
+        "isAdminEnforced": True,
+    }},
+}
+print(json.dumps({"data": {"repository": {"pullRequest": pull}}}, separators=(",", ":")))
+PY
+    ;;
+  *" --method PUT "*) printf '{"merged":true}\n' ;;
   *" headRefOid "*) printf '%s\n' "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}" ;;
   *" state "*)
     [ "${FM_TEST_GH_FAIL:-0}" = 0 ] || exit 1
@@ -83,17 +107,94 @@ esac
 SH
   cat > "$fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
+set -u
 printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
 [ "${FM_TEST_GH_AXI_RC:-0}" = 0 ] || exit "$FM_TEST_GH_AXI_RC"
-case "${1:-} ${2:-}" in
-  "api POST")
-    printf 'headRefOid: %s\nbaseRefOid: %s\nbaseRefName: main\nheadRefName: fm/task-a\nstate: OPEN\nisDraft: false\nmerged: false\nnameWithOwner: my-org/repo_name.with-dots\nrequiresStrictStatusChecks: true\nisAdminEnforced: true\n' \
-      "$FM_TEST_GH_API_HEAD" "$FM_TEST_GH_BASE"
-    ;;
-  "api PUT")
-    printf 'merged: true\n'
+[ "${1:-}" = api ] || exit 2
+shift
+method=GET
+case "${1:-}" in
+  GET | POST | PUT | PATCH | DELETE | HEAD)
+    method=$1
+    shift
     ;;
 esac
+[ "$#" -ge 1 ] || exit 2
+endpoint=$1
+shift
+gh_args=(api "$endpoint" --method "$method")
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --field | --header | --jq | --template)
+      [ "$#" -ge 2 ] || exit 2
+      gh_args+=("$1" "$2")
+      shift 2
+      ;;
+    --field=* | --header=* | --jq=* | --template=* | --paginate)
+      gh_args+=("$1")
+      shift
+      ;;
+    *) exit 2 ;;
+  esac
+done
+raw=$(gh "${gh_args[@]}") || exit $?
+python3 - "$raw" <<'PY'
+import json
+import re
+import sys
+
+
+def scalar(value):
+    if value is None:
+        return "null"
+    if value is True:
+        return "true"
+    if value is False:
+        return "false"
+    if isinstance(value, (int, float)):
+        return json.dumps(value, separators=(",", ":"))
+    if (
+        not value
+        or value in {"true", "false", "null"}
+        or re.fullmatch(r"-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?", value)
+        or re.fullmatch(r"[A-Za-z0-9_./+=-]+", value) is None
+    ):
+        return json.dumps(value, ensure_ascii=False)
+    return value
+
+
+def emit_mapping(value, depth=0):
+    prefix = "  " * depth
+    for key, child in value.items():
+        if isinstance(child, dict):
+            print(f"{prefix}{key}:")
+            emit_mapping(child, depth + 1)
+        elif isinstance(child, list):
+            if all(not isinstance(item, (dict, list)) for item in child):
+                rendered = ",".join(scalar(item) for item in child)
+                print(f"{prefix}{key}[{len(child)}]: {rendered}")
+            else:
+                print(f"{prefix}{key}: {scalar(json.dumps(child, separators=(',', ':')))}")
+        else:
+            print(f"{prefix}{key}: {scalar(child)}")
+
+
+raw = sys.argv[1]
+try:
+    document = json.loads(raw)
+except json.JSONDecodeError:
+    body = raw.strip()
+    print("api_response:")
+    print(f"  body: {scalar(body[:4000])}")
+    print(f"  truncated: {'true' if len(body) > 4000 else 'false'}")
+    if len(body) > 4000:
+        print(f"  original_length: {len(body)}")
+else:
+    if isinstance(document, dict):
+        emit_mapping(document)
+    else:
+        print(scalar(document))
+PY
 SH
   # Plain glab, reproducing the real CLI's contract: its field output on stdout
   # and exit 0 on success, and a non-zero exit with no stdout on any failure.
