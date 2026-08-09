@@ -39,7 +39,7 @@ Read the file rather than inferring the posture: a missing bullet, a missing mar
 Never write, mark, or widen such a bullet to create the authority this skill is about to rely on.
 Invoking `/pr-shepherd` is not by itself authority path (a).
 Paths (a) and (b) cover a routine green merge only, so an admin or branch-protection-bypass merge always needs path (c) naming that bypass, per Phase 7.
-A PR that changes `AGENTS.md` hard rule 2, its captain-instruction precedence section, or this merge-authority section needs path (c) for that PR, because paths (a) and (b) never cover a change to the rules that grant them.
+A PR that changes any surface the merge-authority contract rests on needs path (c) for that PR, because paths (a) and (b) never cover a change to the rules that grant them; hard rule 2 owns that list, and it includes the recorded-posture form in `docs/configuration.md` and this section.
 When none of (a), (b), or (c) holds, finish the pipeline and stop at the merge-ready report, exactly as if `--no-merge` had been passed.
 `--no-merge` forces report-only even when authority exists.
 Merging is never the default for an environment that has granted none of these paths.
@@ -127,7 +127,7 @@ Collect all of the following before anything is edited.
 # firstmate
 gh-axi pr view <n> --reviews
 # standalone
-gh api repos/<o>/<r>/pulls/<n>/reviews --jq '.[] | {user: .user.login, state: .state, submitted_at, body}'
+gh api repos/<o>/<r>/pulls/<n>/reviews --paginate --jq '.[] | {user: .user.login, state: .state, submitted_at, body}'
 ```
 
 Note DISMISSED versus active CHANGES_REQUESTED or APPROVED.
@@ -138,16 +138,19 @@ Query GraphQL `reviewThreads` for `isResolved`, `isOutdated`, full comment bodie
 Page until `hasNextPage` is false.
 This is the deliberate raw `gh api graphql` exception described in the command-surface section above.
 
-### 1c. Bot and issue review comments
+### 1c. Issue-level comments, bot and human
 
 ```bash
 # firstmate
-gh-axi api /repos/<o>/<r>/issues/<n>/comments --paginate --jq '.[] | select(.user.login|test("bot|github-actions|gemini|claude|copilot|coderabbit";"i")) | {user: .user.login, body}'
+gh-axi api /repos/<o>/<r>/issues/<n>/comments --paginate --jq '.[] | {user: .user.login, body}'
 # standalone
-gh api repos/<o>/<r>/issues/<n>/comments --jq '.[] | select(.user.login|test("bot|github-actions|gemini|claude|copilot|coderabbit";"i")) | {user: .user.login, body}'
+gh api repos/<o>/<r>/issues/<n>/comments --paginate --jq '.[] | {user: .user.login, body}'
 ```
 
-Parse BLOCKER, WARN, NIT, CONSENSUS, and CHANGES_REQUESTED out of the bodies, including `<!-- claude-pr-review -->` style markers.
+Collect every top-level comment first and classify by author afterwards, because a reviewer who leaves feedback as a plain comment rather than a formal review is invisible to 1a and 1b.
+For a bot body, parse BLOCKER, WARN, NIT, CONSENSUS, and CHANGES_REQUESTED out of the text, including `<!-- claude-pr-review -->` style markers.
+A human comment carries no severity label, so read it and assign one yourself: "this drops the migration, do not land" is a BLOCKER even though nothing marks it as one, and it earns a disposition row exactly like a formal finding.
+The PR author's own comments are context rather than findings, except where one leaves an open question for someone else.
 
 ### 1d. Checks
 
@@ -209,6 +212,7 @@ Build a disposition table for every item from Phase 1.
 |----|--------|----------|---------|-------------|----------|
 | t1 | thread | … | … | fixed \| reply \| defer \| wontfix \| outdated | commit SHA / reply URL / reason |
 | b1 | bot BLOCKER | … | … | … | … |
+| h1 | human comment | severity you assigned | … | … | … |
 
 ### Disposition rules
 
@@ -389,8 +393,8 @@ Standalone path:
 ```bash
 gh pr view N --json url,state,headRefOid,reviewDecision,mergeable,statusCheckRollup
 gh pr checks N
-gh api repos/O/R/pulls/N/reviews
-gh api repos/O/R/issues/N/comments
+gh api repos/O/R/pulls/N/reviews --paginate
+gh api repos/O/R/issues/N/comments --paginate
 gh pr diff N --name-only
 gh pr comment N --body "..."
 gh pr merge N --squash                  # only under authority and green gates
