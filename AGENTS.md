@@ -193,7 +193,7 @@ A silent bootstrap section needs no action; for any printed actionable diagnosti
 
 ## 4. Harness and runtime dispatch
 
-Load `harness-adapters` before every spawn or recovery and before trust handling, skill invocation, interrupt, exit, resume, or adapter verification.
+Load `harness-adapters` before every spawn or recovery and before trust handling, interrupt, exit, resume, or adapter verification.
 The verified harnesses are `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `grok`, and `kimi`, plus `muse` for crewmates and scouts only; never dispatch on an unverified adapter.
 If static `config/crew-harness` or `config/secondmate-harness` names an unverified adapter, report it and fall back only to a verified adapter rather than launching it.
 
@@ -355,9 +355,10 @@ After an autonomous merge, give the captain a one-line full-URL or local-main ou
 
 ### Validate
 
-For a no-mistakes ship, trigger validation on the same worker after its implementation commit, using the harness invocation owned by `harness-adapters`.
+For a no-mistakes ship, the worker starts validation itself: its brief has it call `no-mistakes axi run` as one blocking call the moment its implementation commit lands, so firstmate spends no turn actuating that transition and never types the trigger into a worker's composer.
 The task worker that starts a no-mistakes run drives the pipeline and owns every `no-mistakes axi run` and `no-mistakes axi respond` call through the next gate or outcome.
 Firstmate never invokes `no-mistakes axi respond` for a crew-owned run.
+A worker that stops after its implementation commit is carrying an older brief or skipped this step; steer it into starting the run rather than restoring an actuator.
 Once validation starts, prefer routing new requirements to follow-up work rather than expanding the current task, unless a new requirement completely invalidates the work being validated; however, the smallest downstream changes needed to keep already accepted product or engineering behavior correct, add behavioral tests where an executable contract exists, or keep documentation accurate remain within the current task even when they touch files not named at intake, and corrections required to satisfy already accepted intent are not new requirements.
 
 Only a current, explicit captain instruction that completely invalidates the work being validated keeps the task with the same worker instead of routing it to follow-up work or handing it to a replacement.
@@ -557,7 +558,7 @@ These skills are not captain-invocable; load them only at their precise triggers
 - `quota-array-dispatch` - load before choosing among a matched crew-dispatch profile array from current quota-axi output.
 - `model-onboarding` - load before adding or changing a model in routing config, before probing a model, before acting on an entitlement or price-drift alarm, and before deciding a model promotion or demotion.
 - `fleet-admission` - load at intake before dispatching new work in a home with an active admission policy, and whenever an admission band other than preferred is returned, released, or overridden.
-- `harness-adapters` - load before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter.
+- `harness-adapters` - load before spawning or recovering a crewmate or secondmate, handling a trust dialog, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter.
 - `firstmate-orca` - load before switching to Orca, spawning or supervising Orca-backed work, smoke-testing Orca backend behavior, debugging Orca task state, or reconciling Orca-backed task metadata.
 - `project-management` - load before adding, creating, removing, or initializing a project.
   Cloning or registering a project is add intake and uses the same trigger.
