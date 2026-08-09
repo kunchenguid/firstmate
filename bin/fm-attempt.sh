@@ -81,7 +81,9 @@
 #
 # --budget sets the budget for this task id from here on and is recorded; absent,
 # a recorded budget stands, and an unrecorded one defaults to
-# FM_ATTEMPT_BUDGET_DEFAULT (2). Two is not arbitrary: it is the same threshold
+# FM_ATTEMPT_BUDGET_DEFAULT (2). A default that is not a positive integer is
+# refused outright rather than compared, so a misconfigured environment can
+# never unbind the budget. Two is not arbitrary: it is the same threshold
 # the prose it replaces used, and the one LoopSpec's no_progress block already
 # encodes.
 set -u
@@ -270,6 +272,9 @@ cmd_retire() {
   [ "$#" -eq 0 ] || die "retire takes only a task id"
   rm -f -- "$STATE/$id.attempt"
 }
+
+attempt_is_count "$ATTEMPT_BUDGET_DEFAULT" && [ "$ATTEMPT_BUDGET_DEFAULT" -gt 0 ] \
+  || die "FM_ATTEMPT_BUDGET_DEFAULT must be a positive integer: $ATTEMPT_BUDGET_DEFAULT"
 
 [ "$#" -ge 1 ] || { usage; exit 2; }
 SUBCOMMAND=$1

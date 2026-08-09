@@ -127,6 +127,36 @@ test_raising_the_budget_is_the_only_way_past_it_and_is_recorded() {
   pass "fm-attempt: the budget is raised deliberately, recorded, and still bounds the task"
 }
 
+# The env default is a budget source like any other: one that is not a positive
+# integer must refuse outright rather than fail every comparison open, and the
+# bad value must never reach the durable record or the published metadata.
+test_a_garbage_default_budget_refuses_instead_of_failing_open() {
+  local state out rc bad
+  state=$(make_state envdefault)
+  for bad in garbage 0; do
+    out=$(FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" \
+      FM_ATTEMPT_BUDGET_DEFAULT="$bad" "$ATTEMPT" open t5 2>&1); rc=$?
+    [ "$rc" -eq 2 ] || fail "a default budget of '$bad' must be refused as an error, got $rc"$'\n'"$out"
+    assert_contains "$out" "FM_ATTEMPT_BUDGET_DEFAULT must be a positive integer: $bad" \
+      "the refusal must name the bad value"
+    assert_absent "$state/t5.attempt" "a bad default must never be persisted into the record"
+    assert_absent "$state/t5.status" "a bad default is a caller error, not a task failure"
+    out=$(FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" \
+      FM_ATTEMPT_BUDGET_DEFAULT="$bad" "$ATTEMPT" check t5 2>&1); rc=$?
+    [ "$rc" -eq 2 ] || fail "check must refuse the '$bad' default too, got $rc"
+  done
+
+  out=$(FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" \
+    FM_ATTEMPT_BUDGET_DEFAULT=1 "$ATTEMPT" open t5) \
+    || fail "a valid overridden default must still open the attempt"$'\n'"$out"
+  assert_contains "$out" "attempt=1 attempt_budget=1" "a valid overridden default must be the budget"
+  FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" \
+    FM_ATTEMPT_BUDGET_DEFAULT=1 "$ATTEMPT" check t5 >/dev/null 2>&1; rc=$?
+  [ "$rc" -eq 3 ] || fail "the overridden default must still bound the task, got $rc"
+
+  pass "fm-attempt: a default budget that is not a positive integer refuses instead of failing open"
+}
+
 test_there_is_no_reset_verb() {
   local out rc state
   state=$(make_state noreset)
@@ -335,6 +365,7 @@ EOF
 test_attempts_are_counted_and_persisted
 test_absent_field_reads_as_attempt_one
 test_raising_the_budget_is_the_only_way_past_it_and_is_recorded
+test_a_garbage_default_budget_refuses_instead_of_failing_open
 test_there_is_no_reset_verb
 test_terminal_state_is_in_the_unified_vocabulary
 test_spawn_spends_the_budget_and_publishes_the_count
