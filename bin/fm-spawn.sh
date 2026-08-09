@@ -2251,13 +2251,88 @@ EOF
 # projection abort cleanup so the EXIT trap removes the projected workspace and
 # journal this invocation created.
 spawn_rollback_task_state() {  # <detail> [preserve-endpoint]
-  local detail=$1 preserve_endpoint=${2:-0}
+  local detail=$1 preserve_endpoint=${2:-0} endpoint_ready=0 endpoint_state composer_state
+  local exit_verdict i old_target new_target new_tab new_pane out journal meta_lock meta_tmp
   echo "failed: $detail" >> "$STATE/$ID.status" 2>/dev/null || true
   echo "error: $detail" >&2
 
   # 1. Endpoint removal, then CONFIRM exact absence. Only the backend's
   #    structured absence verdict licenses any record deletion.
-  if [ "$preserve_endpoint" -ne 1 ]; then
+  if [ "$preserve_endpoint" -eq 1 ]; then
+    if spawn_send_key "$T" C-u >/dev/null 2>&1; then
+      composer_state=$(fm_backend_composer_state "$BACKEND" "$T")
+      endpoint_state=$(fm_backend_agent_state "$BACKEND" "$T")
+      if [ "$composer_state" = empty ] && [ "$endpoint_state" = dead ]; then
+        endpoint_ready=1
+      fi
+    else
+      endpoint_state=$(fm_backend_agent_state "$BACKEND" "$T")
+    fi
+    if [ "$endpoint_ready" -ne 1 ] && [ "$HARNESS" = cursor ] \
+       && [ "${endpoint_state:-}" = alive ]; then
+      spawn_send_key "$T" C-c >/dev/null 2>&1 || true
+      sleep 0.3
+      exit_verdict=$(fm_backend_send_text_submit \
+        "$BACKEND" "$T" /exit 3 0.5 1.5 "$W" cursor 2>/dev/null || true)
+      if [ "$exit_verdict" != send-failed ]; then
+        i=0
+        while [ "$i" -lt 10 ]; do
+          endpoint_state=$(fm_backend_agent_state "$BACKEND" "$T")
+          [ "$endpoint_state" != dead ] || { endpoint_ready=1; break; }
+          sleep 0.3
+          i=$((i + 1))
+        done
+      fi
+    fi
+    if [ "$endpoint_ready" -ne 1 ]; then
+      case "$BACKEND" in
+        tmux)
+          fm_backend_kill "$BACKEND" "$T" 2>/dev/null || true
+          fm_backend_endpoint_confirmed_gone "$BACKEND" "$T" \
+            && fm_backend_tmux_create_task "$SES" "$W" "$WT" >/dev/null \
+            && [ "$(fm_backend_agent_state "$BACKEND" "$T")" = dead ] \
+            || return 1
+          ;;
+        herdr)
+          old_target=$T
+          out=$(fm_backend_herdr_cli "$HERDR_SES" tab create \
+            --workspace "$HERDR_WORKSPACE_ID" --cwd "$WT" --label "$W" --no-focus 2>/dev/null) \
+            || return 1
+          new_tab=$(printf '%s' "$out" | jq -r '.result.tab.tab_id // empty' 2>/dev/null)
+          new_pane=$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id // empty' 2>/dev/null)
+          [ -n "$new_tab" ] && [ -n "$new_pane" ] || return 1
+          new_target="$HERDR_SES:$new_pane"
+          [ "$(fm_backend_agent_state "$BACKEND" "$new_target")" = dead ] || return 1
+          fm_backend_kill "$BACKEND" "$old_target" 2>/dev/null || true
+          fm_backend_endpoint_confirmed_gone "$BACKEND" "$old_target" || return 1
+          journal=$(fm_backend_herdr_projection_journal_path "$STATE" "$ID" 2>/dev/null || true)
+          if [ -n "$journal" ] && [ -e "$journal" ]; then
+            fm_backend_herdr_projection_journal_replace_endpoint \
+              "$journal" "$ID" "$HERDR_TAB_ID" "$HERDR_PANE_ID" "$new_tab" "$new_pane" \
+              || return 1
+          fi
+          meta_lock=$(fm_meta_lock_path "$STATE/$ID.meta") || return 1
+          fm_lock_acquire_wait "$meta_lock"
+          meta_tmp="$STATE/.$ID.meta.endpoint.${BASHPID:-$$}"
+          if ! awk -F= '$1 != "window" && $1 != "herdr_tab_id" && $1 != "herdr_pane_id"' \
+              "$STATE/$ID.meta" > "$meta_tmp" \
+             || ! printf 'window=%s\nherdr_tab_id=%s\nherdr_pane_id=%s\n' \
+               "$new_target" "$new_tab" "$new_pane" >> "$meta_tmp" \
+             || ! mv -f "$meta_tmp" "$STATE/$ID.meta"; then
+            rm -f "$meta_tmp" 2>/dev/null || true
+            fm_lock_release "$meta_lock" || true
+            return 1
+          fi
+          fm_lock_release "$meta_lock" || return 1
+          T=$new_target
+          WT_TARGET=$new_target
+          HERDR_TAB_ID=$new_tab
+          HERDR_PANE_ID=$new_pane
+          ;;
+        *) return 1 ;;
+      esac
+    fi
+  else
     fm_backend_kill "$BACKEND" "$T" 2>/dev/null || true
     if ! fm_backend_endpoint_confirmed_gone "$BACKEND" "$T"; then
       echo "failed: $detail; endpoint $T could not be confirmed gone - task records retained and marked rollback-needed for cleanup retry" >> "$STATE/$ID.status" 2>/dev/null || true
@@ -2943,9 +3018,7 @@ if [ "$RELAUNCH" -eq 1 ] && [ "$RELAUNCH_PRIOR_HARNESS" = cursor ]; then
   cursor_worker_server_reap_record "$STATE/$ID.worker-server" "$ID" 1 || exit 1
 fi
 if ! spawn_send_literal "$T" "$LAUNCH"; then
-  if [ "$RELAUNCH" -eq 1 ] && [ "$RELAUNCH_PRIOR_HARNESS" = cursor ] \
-     && [ "$HARNESS" != cursor ]; then
-    spawn_send_key "$T" C-u >/dev/null 2>&1 || true
+  if [ "$RELAUNCH" -eq 1 ] && [ "$RELAUNCH_PRIOR_HARNESS" = cursor ]; then
     spawn_rollback_task_state "replacement launch command could not be delivered" 1
     exit 1
   fi
@@ -2958,7 +3031,14 @@ fi
 if [ "$HARNESS" = cursor ]; then
   cursor_worker_server_record &
   CURSOR_WORKER_RECORDER_PID=$!
-  spawn_send_key "$T" Enter
+  if ! spawn_send_key "$T" Enter \
+     && [ "$RELAUNCH" -eq 1 ] && [ "$RELAUNCH_PRIOR_HARNESS" = cursor ]; then
+    kill "$CURSOR_WORKER_RECORDER_PID" 2>/dev/null || true
+    wait "$CURSOR_WORKER_RECORDER_PID" 2>/dev/null || true
+    CURSOR_WORKER_RECORDER_PID=
+    spawn_rollback_task_state "replacement launch command could not be submitted" 1
+    exit 1
+  fi
   # Establish worker-server ownership evidence before the task is considered
   # live. cursor_worker_server_record writes a state/<id>.worker-server file
   # atomically (temp+mv). Failure here rolls back EVERYTHING this invocation
@@ -2967,14 +3047,13 @@ if [ "$HARNESS" = cursor ]; then
   # published before launch, and supervision keys on it, so it must go too.
   if ! wait "$CURSOR_WORKER_RECORDER_PID"; then
     CURSOR_WORKER_RECORDER_PID=
-    spawn_rollback_task_state "cursor worker-server ownership could not be established; the task was rolled back completely and will not be left in an untracked state"
+    spawn_rollback_task_state "cursor worker-server ownership could not be established; the task was rolled back completely and will not be left in an untracked state" "$RELAUNCH"
     exit 1
   fi
   CURSOR_WORKER_RECORDER_PID=
 else
   if ! spawn_send_key "$T" Enter; then
     if [ "$RELAUNCH" -eq 1 ] && [ "$RELAUNCH_PRIOR_HARNESS" = cursor ]; then
-      spawn_send_key "$T" C-u >/dev/null 2>&1 || true
       spawn_rollback_task_state "replacement launch command could not be submitted" 1
       exit 1
     fi
