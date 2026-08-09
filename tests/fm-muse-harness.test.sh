@@ -168,6 +168,7 @@ test_detects_versioned_process_ancestor() {
   mkdir -p "$dir"
   for bin in muse-bin-0.1.0-R708.1 muse-bin-9.9.9-RZZZ.9 muse; do
     ln -s "$(command -v perl)" "$dir/$bin"
+    # shellcheck disable=SC2016 # Perl expands the probe expression in the fixture.
     out=$(cd "$dir" && env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
       FM_HARNESS_PROBE="$HARNESS" "./$bin" -e 'print `$ENV{FM_HARNESS_PROBE}`')
     [ "$out" = muse ] || fail "fm-harness.sh under process '$bin' reported '$out', expected muse"
@@ -183,6 +184,7 @@ test_detection_is_anchored() {
   mkdir -p "$dir"
   for bin in musescore amuse notmuse-bin muse-binary muse-bind; do
     ln -s "$(command -v perl)" "$dir/$bin"
+    # shellcheck disable=SC2016 # Perl expands the probe expression in the fixture.
     out=$(cd "$dir" && env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
       FM_HARNESS_PROBE="$HARNESS" "./$bin" -e 'print `$ENV{FM_HARNESS_PROBE}`')
     [ "$out" != muse ] || fail "fm-harness.sh misdetected unrelated process '$bin' as muse"
