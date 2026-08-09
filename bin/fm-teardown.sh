@@ -141,10 +141,10 @@
 #     identity atomically in state/<id>.worker-server at launch;
 #     reap_cursor_worker_server TERMs then KILLs the recorded pid only when
 #     that identity still matches (a recycled pid is never touched), then
-#     removes the record. A missing record means ownership was never
-#     established; teardown treats that as nothing to reap. Never matched by a
-#     generic worker-server cmdline or the cursor install dir: both are shared
-#     across homes and tasks.
+#     removes the record once reaping succeeds. A missing record means
+#     ownership was never established; teardown treats that as nothing to reap.
+#     Never matched by a generic worker-server cmdline or the cursor install
+#     dir: both are shared across homes and tasks.
 #     The recorded-pid path is lsof-independent (it uses /proc starttime or
 #     portable ps lstart plus kill). The cwd-based Fix 2 reaper above still
 #     requires lsof for the generic leaked-descendant scan; without lsof it
@@ -1436,9 +1436,15 @@ reap_cursor_worker_server() {  # <state_dir> <id>
   echo "teardown: reaping recorded cursor worker-server for $id: $pid" >&2
   kill -TERM "$pid" 2>/dev/null || true
   sleep 1
-  if fm_process_identity_matches "$pid" "$identity"; then
+  if kill -0 "$pid" 2>/dev/null \
+     && fm_process_identity_matches "$pid" "$identity"; then
     echo "teardown: force-killing recorded cursor worker-server for $id: $pid" >&2
-    kill -KILL "$pid" 2>/dev/null || true
+    if ! kill -KILL "$pid" 2>/dev/null \
+       && kill -0 "$pid" 2>/dev/null \
+       && fm_process_identity_matches "$pid" "$identity"; then
+      echo "REFUSED: recorded cursor worker-server for $id still matches $pid after TERM and KILL failed; preserving $ws_file for retry." >&2
+      return 1
+    fi
   fi
   rm -f "$ws_file" 2>/dev/null || true
 }
@@ -2248,7 +2254,7 @@ cleanup_firstmate_home_children() {
         fm_backend_kill "$child_backend" "$child_t" "$(meta_value "$child_meta" zellij_tab_id)" "fm-$child_id" 2>/dev/null || true
       fi
     fi
-    reap_cursor_worker_server "$sub_state" "$child_id"
+    reap_cursor_worker_server "$sub_state" "$child_id" || return $?
     if [ "$child_kind" = secondmate ]; then
       child_home=$(meta_value "$child_meta" home)
       [ -n "$child_home" ] || child_home=$child_wt
@@ -2415,7 +2421,7 @@ fi
 # not by task-worktree cleanup.
 if [ "$KIND" != secondmate ]; then
   conclude_task_no_mistakes_run "$WT"
-  reap_cursor_worker_server "$STATE" "$ID"
+  reap_cursor_worker_server "$STATE" "$ID" || exit $?
   reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
 fi
 
@@ -2558,7 +2564,7 @@ if [ "$BACKEND" = herdr ]; then
 fi
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
-  reap_cursor_worker_server "$STATE" "$ID"
+  reap_cursor_worker_server "$STATE" "$ID" || exit $?
   remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID" || exit $?
   remove_secondmate_registry_entry "$ID"
 fi

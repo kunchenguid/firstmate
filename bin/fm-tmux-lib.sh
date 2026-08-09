@@ -379,10 +379,28 @@ fm_pane_input_pending() {  # <target>
 # fm_pane_is_busy: 0 if the pane's last few non-blank lines show a busy footer
 # (an agent mid-turn). Scans a 40-line tail like fm-watch.sh.
 fm_pane_is_busy() {  # <target> [harness]
-  local win=$1 harness=${2:-} tail40
+  local win=$1 harness=${2:-} tail40 lines last previous
   tail40=$(tmux capture-pane -p -t "$win" -S -40 2>/dev/null) || return 1
-  printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -12 \
-    | fm_busy_lines_match "$harness"
+  lines=$(printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -12)
+  if [ "$harness" = cursor ]; then
+    last=$(printf '%s\n' "$lines" | tail -1)
+    if printf '%s' "$last" \
+       | grep -qE '^[[:space:]]*→[[:space:]]+Add a follow-up[[:space:]][[:space:]]+'; then
+      printf '%s' "$last" | fm_busy_lines_match "$harness"
+      return $?
+    fi
+    previous=$(printf '%s\n' "$lines" | tail -2 | head -1)
+    previous="${previous#"${previous%%[![:space:]]*}"}"
+    previous="${previous%"${previous##*[![:space:]]}"}"
+    case "$previous" in
+      '╰'*'╯'|'└'*'┘'|'╚'*'╝'|'┗'*'┛'|'+'*'+')
+        printf '%s' "$last" | fm_busy_lines_match "$harness"
+        return $?
+        ;;
+    esac
+    return 1
+  fi
+  printf '%s' "$lines" | fm_busy_lines_match "$harness"
 }
 
 # fm_tmux_submit_core: type <text> into <target> ONCE, then submit with Enter,
