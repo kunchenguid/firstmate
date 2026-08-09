@@ -3,7 +3,7 @@
 `bin/fm-mission-control.sh` renders the fleet's current state into one self-contained HTML board that the captain keeps open.
 It is a generator, not a server: each run writes one file, and the page reloads itself so a regenerated file appears without a click.
 
-The board is a calm, light executive summary: a stat strip, the decisions waiting on the captain, a card per project, what landed today, and a quiet System view carrying fleet health plus allowance pace.
+The board is a calm, light executive summary: a stat strip, the decisions waiting on the captain, a card per project, what landed today, a very recent autonomous-actions feed, and a quiet System view carrying fleet health plus allowance pace.
 Its in-page controls use monochrome SVG line icons and no emoji, while an inline SVG compass mark keeps Mission Control distinct in browser tabs and bookmarks without adding an asset request.
 The script's own header and `--help` own its exact flags, environment variables, paths, and exit codes, including the two commands that set a decision aside and bring it back.
 
@@ -54,6 +54,10 @@ The stage itself is derived by the snapshot rather than by the board; see `bin/f
   If the backlog is unavailable, a card whose calm state cannot be proved says `Unconfirmed` rather than `Idle`.
 - **Shipped today** lists the backlog items that landed on the board's own current date, with their PR or report links.
   Done records without a completion date are excluded from the list and disclosed in the stat tile instead of being silently counted as today.
+- **Recent autonomous actions** is a fleet-wide awareness feed, distinct from shipped backlog work and captain decisions.
+  It shows at most eight newest-first entries from the preceding 12 hours, then lets older entries age out without a page-back control.
+  It includes only a standing-authority finding decision or a standing-authority PR merge that firstmate recorded going forward.
+  An empty feed means no qualifying action has been recorded in that window; it does not reconstruct earlier chat or status prose.
 - **Fleet health** lists blocked or failed tasks, backlog items waiting on an unresolved blocker, and non-decision secondmate work whose own state or blocker linkage says it is held.
   It sits in the closing strip, so anything blocked or failed is also announced in a bar above the primary sections rather than left for the captain to scroll to.
 - **Allowance & pace** integrates the local Token Dashboard into the System view rather than repeating its numbers in a separate dashboard-shaped panel.
@@ -148,13 +152,15 @@ The board does not parse fleet state itself.
 Like `bin/fm-fleet-view.sh` it renders one `bin/fm-fleet-snapshot.sh --json` capture, so current state, backlog roles, captain actionability, and secondmate current state keep exactly one owner.
 Paths come from that snapshot's own resolved roots, so the board follows the active home without resolving `FM_HOME` a second time.
 
-Three concerns come from outside the snapshot because the snapshot does not own them:
+Four concerns come from outside the snapshot because the snapshot does not own them:
 
 - `data/projects.md` is the delivery-posture registry that the project cards group by.
 - The local Token Dashboard API is the preferred allowance source because that service owns normalized pace thresholds, append-only quota history, projected runway, and the automatic balancing feed.
   The board narrows the response to its display contract before rendering and never carries session-level metering into its HTML.
   If the local service has no successful reading or cannot be reached, `quota-axi --json` remains the live-only fallback.
   A provider with no readable window is reported with its reason, because a sign-in gap is not an exhausted allowance.
+- `state/autonomous-actions.ndjson` is the private, append-only source for the narrow recent autonomous-actions feed.
+  It is read only by the board and never derived from task status prose.
 - Each project card's last-change time.
   A registered project is dated by its clone's last commit, read with `git log -1`, which survives task teardown as the per-task state-file times do not.
   A second mate is dated by when it last reported, because its own clone can trail the work it advised on, and a plausible but stale time is worse than no time at all.
@@ -170,7 +176,14 @@ Both name the same project, so both fold onto the same rollup row and display as
 [`docs/decision-hold-lifecycle.md`](decision-hold-lifecycle.md) owns how exact decision context is recorded and backfilled through the supported hold interface.
 The canonical backlog parser and secondmate-home summary carry that context to renderers, so Mission Control does not parse private body conventions itself.
 
-Every value that comes from fleet state, the registry, or either allowance source is HTML-escaped before it reaches the page.
+Every value that comes from fleet state, the registry, the autonomous-action record, or either allowance source is HTML-escaped before it reaches the page.
+
+## Recording autonomous actions
+
+When firstmate decides an ask-user finding under standing authority, it records the project, one-line finding, and decision with `bin/fm-autonomous-action.sh decision <project> <finding> <decision>`.
+When it merges a PR under standing authority, it records the project and full PR URL with `bin/fm-autonomous-action.sh merge <project> <https-pr-url>`.
+The script's header and `--help` own argument limits, timestamp handling, and the exact two record kinds.
+The command is the sole supported writer, so recording needs no edit access to the board renderer or to the NDJSON format.
 
 ## Serving and refreshing
 
@@ -185,7 +198,7 @@ The generator does not serve it; how the file is exposed is decided outside it.
 
 ## Verification
 
-`tests/fm-mission-control.test.sh` renders the board end to end from a fixture home and from captured snapshot payloads, covering present and absent sources, cross-home captain decisions, escaping of hostile prose, project folding, work outside the registry, per-item stage and model rendering, bounded cross-home stage values, safe handling of valid, missing, and malformed secondmate active-task totals, item overflow, blocked work, rich allowance pace and history, automatic balancing, unavailable and stale allowance sources, narrow allowance labels, unmeasurable fallback windows, self-reload, the self-contained favicon in ordinary and control-enabled boards, the tab structure, and the deferred shelf.
+`tests/fm-mission-control.test.sh` renders the board end to end from a fixture home and from captured snapshot payloads, covering present and absent sources, the empty and populated recent autonomous-actions feed, its 12-hour expiry and newest-first order, cross-home captain decisions, escaping of hostile prose, project folding, work outside the registry, per-item stage and model rendering, bounded cross-home stage values, safe handling of valid, missing, and malformed secondmate active-task totals, item overflow, blocked work, rich allowance pace and history, automatic balancing, unavailable and stale allowance sources, narrow allowance labels, unmeasurable fallback windows, self-reload, the self-contained favicon in ordinary and control-enabled boards, the tab structure, and the deferred shelf.
 The deferred cases pin the awaiting count and the section count to literal numbers rather than to the absence of a title, because dropping a decision from the list while still counting it and counting it while still listing it fail separately.
 It also pins a fixed current time and commits its fixture clones at explicit epochs, so the last-change wording, its three degrade-to-dash paths, and the promise that no clone is written to are all checked against times the test chose.
 

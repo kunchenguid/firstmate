@@ -15,6 +15,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 BOARD="$ROOT/bin/fm-mission-control.sh"
+ACTION="$ROOT/bin/fm-autonomous-action.sh"
 TMP_ROOT=$(fm_test_tmproot fm-mission-control)
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
@@ -778,6 +779,50 @@ test_absent_sources_render_empty_sections() {
   assert_grep 'No second mates registered.' "$board" "an absent secondmate registry must be reported"
   assert_grep 'Allowance unavailable' "$board" "a skipped allowance read must be disclosed"
   pass "absent sources render as explicit empty sections instead of failing"
+}
+
+test_recent_autonomous_actions_are_bounded_and_appendable() {
+  local home fakebin board content
+  home=$(make_home recent-actions)
+  printf '## In flight\n\n## Queued\n\n## Done\n' > "$home/data/backlog.md"
+  fakebin=$(make_fakebin "$home")
+
+  board=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_MISSION_CONTROL_NOW_EPOCH="$NOW_EPOCH" \
+    "$BOARD" --no-quota) || fail "an empty recent-actions feed must render"
+  assert_grep 'No autonomous actions were recorded in the last 12 hours.' "$board" \
+    "an empty feed must be a genuine empty state"
+  assert_no_grep '<div class="recent-action">' "$board" \
+    "an empty feed must not invent an action row"
+
+  # The append command is the public writer: two current entries display newest
+  # first, while a third entry just outside the fixed 12-hour window ages out.
+  FM_HOME="$home" FM_AUTONOMOUS_ACTION_NOW_EPOCH=$((NOW_EPOCH - 120)) \
+    "$ACTION" decision alpha 'Validate the accepted threshold range' \
+    'Applied the required range validation' >/dev/null \
+    || fail "a decision event must append directly"
+  FM_HOME="$home" FM_AUTONOMOUS_ACTION_NOW_EPOCH=$((NOW_EPOCH - 60)) \
+    "$ACTION" merge beta https://github.com/example/beta/pull/42 >/dev/null \
+    || fail "a merge event must append directly"
+  FM_HOME="$home" FM_AUTONOMOUS_ACTION_NOW_EPOCH=$((NOW_EPOCH - 43201)) \
+    "$ACTION" decision old-project 'Old finding' 'Old decision' >/dev/null \
+    || fail "an expired fixture event must append directly"
+
+  board=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_MISSION_CONTROL_NOW_EPOCH="$NOW_EPOCH" \
+    "$BOARD" --no-quota) || fail "a populated recent-actions feed must render"
+  assert_grep 'Validate the accepted threshold range' "$board" \
+    "a recent autonomous decision must render"
+  assert_grep 'Applied the required range validation' "$board" \
+    "a recent decision must include its resolution"
+  assert_grep 'https://github.com/example/beta/pull/42' "$board" \
+    "a recent autonomous merge must render its PR URL"
+  assert_no_grep 'Old finding' "$board" \
+    "an event outside the 12-hour window must not render"
+  content=$(cat "$board")
+  case "$content" in
+    *'Merged <a href="https://github.com/example/beta/pull/42"'*'Decided: Validate the accepted threshold range'*) ;;
+    *) fail "recent actions must render newest first" ;;
+  esac
+  pass "recent autonomous actions are appendable, bounded, and newest first"
 }
 
 test_hostile_text_is_escaped() {
@@ -2507,6 +2552,7 @@ test_yesterday_uses_local_calendar_arithmetic
 test_missing_change_time_degrades_to_a_dash
 test_render_writes_nothing_into_the_project_clones
 test_absent_sources_render_empty_sections
+test_recent_autonomous_actions_are_bounded_and_appendable
 test_hostile_text_is_escaped
 test_missing_backlog_is_disclosed_as_unavailable
 test_deferred_decision_leaves_the_primary_view

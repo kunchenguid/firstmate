@@ -13,8 +13,9 @@
 # outside the snapshot because the snapshot does not own them: data/projects.md
 # is the delivery-posture registry; the local Token Dashboard API owns richer
 # allowance history, pace, and balancing with `quota-axi --json` as the live-only
-# fallback; and each project card's last-change time comes from that project's
-# own clone or, for a second mate, from when it last reported.
+# fallback; each project card's last-change time comes from that project's own
+# clone or, for a second mate, from when it last reported; and the narrow,
+# forward-only autonomous-actions record supplies the recent action feed.
 #
 # The board never invents a completion percentage or an ETA. Progress judgement
 # belongs to firstmate, so each project card states only what live state can
@@ -159,6 +160,37 @@ PROJECTS_DIR=$(printf '%s' "$SNAPSHOT" | jq -r '.roots.projects // ""')
 
 NOW=${FM_MISSION_CONTROL_NOW_EPOCH:-$(date +%s)}
 case "$NOW" in ''|*[!0-9]*) NOW=$(date +%s) ;; esac
+
+# This deliberately is not a history view.  The append-only record remains
+# private state, while the board admits only its eight newest valid entries
+# from the previous 12 hours and offers no older-page control.
+RECENT_ACTION_WINDOW_SECS=43200
+RECENT_ACTION_LIMIT=8
+RECENT_ACTIONS_FILE="$STATE_DIR/autonomous-actions.ndjson"
+recent_actions_json() {
+  [ -r "$RECENT_ACTIONS_FILE" ] || { printf '[]\n'; return 0; }
+  jq -R -s --argjson now "$NOW" \
+    --argjson cutoff "$((NOW - RECENT_ACTION_WINDOW_SECS))" \
+    --argjson limit "$RECENT_ACTION_LIMIT" '
+      def text($maximum):
+        (type == "string") and (length > 0) and (length <= $maximum)
+        and (test("[\u0000-\u001f\u007f]") | not);
+      [split("\n")[] | select(length > 0) |
+       (fromjson? | select(type == "object")) |
+       select((.ts | type == "number") and (.ts | floor == .)
+              and .ts >= $cutoff and .ts <= $now) |
+       if .kind == "decision" then
+         select((.project | text(160)) and (.finding | text(400)) and (.decision | text(400))) |
+         {ts, kind, project, finding, decision}
+       elif .kind == "merge" then
+         select((.project | text(160)) and (.pr_url | text(2048))
+                and (.pr_url | startswith("https://"))) |
+         {ts, kind, project, pr_url}
+       else empty end]
+      | sort_by(.ts) | reverse | .[:$limit]
+    ' "$RECENT_ACTIONS_FILE" 2>/dev/null || printf '[]\n'
+}
+RECENT_ACTIONS=$(recent_actions_json)
 
 IS_DARWIN=0
 [ "$(uname -s 2>/dev/null)" = Darwin ] && IS_DARWIN=1
@@ -445,6 +477,7 @@ HTML=$(
     --argjson now "$NOW" \
     --argjson registry "$REGISTRY" \
     --argjson updated "$UPDATED" \
+    --argjson recent_actions "$RECENT_ACTIONS" \
     --argjson projects_present "$PROJECTS_PRESENT" \
     --arg today "$TODAY" \
     --argjson controls "$CONTROLS" \
@@ -573,6 +606,7 @@ def project_glyph($name):
 # ---------------------------------------------------------------- inputs ----
 ($registry | map({key: .name, value: .}) | from_entries) as $registry_by_name |
 def yolo_for($repo): ($registry_by_name[$repo // ""].yolo // false);
+($recent_actions // []) as $recent_actions |
 
 (.tasks // []) as $tasks |
 (.backlog.records // []) as $records |
@@ -809,6 +843,11 @@ def yolo_for($repo): ($registry_by_name[$repo // ""].yolo // false);
 ($records | map(select(.state == "done"))) as $done_all |
 ($done_all | map(select((.completion.date // "") == $today))) as $shipped |
 ($done_all | map(select((.completion.date // "") == "")) | length) as $shipped_undated |
+
+# ------------------------------------------------ recent autonomous actions -
+# The writer emits only these two shapes.  The shell boundary has already
+# rejected malformed or stale entries, and this renderer keeps no archive view.
+($recent_actions | length) as $recent_action_count |
 
 # ------------------------------------------------------------ project cards -
 # One card per registered project, plus any project that is not in the registry
@@ -1056,6 +1095,25 @@ def deferred_row:
   + (@html "<span class=\"ask\">\($d.title)")
   + (if ($d.detail // "") == "" then "" else (@html "<span class=\"hint\">\($d.detail)</span>") end)
   + "</span></div>";
+
+# The recent-action feed is fleet-wide, bounded before this render, and names
+# only an autonomous finding decision or PR merge.  It never tries to infer an
+# action from task-status prose.
+def recent_action_age($ts):
+  ($now - $ts) as $age |
+  if $age < 60 then "just now"
+  elif $age < 3600 then "\(($age / 60) | floor) min ago"
+  else "\(($age / 3600) | floor) hr ago" end;
+
+def recent_action_row:
+  . as $action |
+  (@html "<div class=\"recent-action\"><span class=\"recent-project\">\($action.project)</span>")
+  + (if $action.kind == "decision"
+     then (@html "<span class=\"recent-what\">Decided: \($action.finding) - \($action.decision)</span>")
+     else (@html "<span class=\"recent-what\">Merged <a href=\"\($action.pr_url)\">PR</a><span class=\"recent-url\">\($action.pr_url)</span></span>")
+     end)
+  + (@html "<time class=\"recent-when\">\(recent_action_age($action.ts))</time>")
+  + "</div>";
 
 # ------------------------------------------------------- reply controls ----
 # Every control below queues ONE request and performs nothing. The markup holds
@@ -1728,6 +1786,17 @@ a.need-main:hover .ask{color:var(--amber);}
 .ship .who{color:var(--faint);font-size:12.5px;margin-left:auto;flex:none;padding-left:10px;}
 a.ship:hover{background:#fbfcfe;}
 
+/* ---- recent autonomous actions ---- */
+.recent-actions{background:var(--panel);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow);overflow:hidden;}
+.recent-action{display:flex;align-items:baseline;gap:14px;padding:13px 22px;border-top:1px solid var(--line);font-size:13.5px;}
+.recent-action:first-child{border-top:none;}
+.recent-project{flex:none;width:132px;font-size:12.5px;font-weight:600;color:var(--slate);overflow-wrap:anywhere;}
+.recent-what{flex:1;overflow-wrap:anywhere;}
+.recent-what a{color:var(--green);font-weight:650;}
+.recent-what a:hover{text-decoration:underline;}
+.recent-url{display:block;color:var(--faint);font-family:var(--mono);font-size:11.5px;margin-top:2px;overflow-wrap:anywhere;}
+.recent-when{flex:none;color:var(--faint);font-size:11.5px;white-space:nowrap;}
+
 /* ---- health and allowance strip ---- */
 .strip{display:grid;grid-template-columns:minmax(240px,.72fr) minmax(0,1.8fr);gap:16px;align-items:start;}
 .pane{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px 20px;box-shadow:var(--shadow);}
@@ -1831,6 +1900,10 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
   .ship{padding:12px 16px;align-items:flex-start;flex-wrap:wrap}
   .ship .what{flex:1 1 auto}
   .ship .who{margin-left:0;padding-left:0;flex:1 0 100%}
+  .recent-action{padding:12px 16px;align-items:flex-start;flex-wrap:wrap;gap:8px}
+  .recent-project{width:auto;}
+  .recent-what{flex:1 1 calc(100% - 18px);}
+  .recent-when{flex:1 0 100%;}
   .defer{padding:12px 16px;flex-wrap:wrap;gap:8px}
   .defer .tag{width:auto}
   .shelf summary,.shelf-note{padding-left:16px;padding-right:16px}
@@ -2014,6 +2087,12 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
      + icon_check
      + (@html "<span class=\"what\">\(dash($d.title // $d.raw))</span><span class=\"who\">\(dash(($d.repo // "") | short_repo))</span>")
      + (if $link == "" then "</div>" else "</a>" end)) | add) // "") + "</div>" end)
++ "  </section>
+  <section id=\"recent-autonomous-actions\" data-scroll-anchor=\"section:recent-actions\">
+    <div class=\"sec-h\"><h2>Recent autonomous actions</h2><span class=\"count\">last 12 hours</span></div>"
++ (if $recent_action_count == 0
+   then "<p class=\"quiet\">No autonomous actions were recorded in the last 12 hours.</p>"
+   else "<div class=\"recent-actions\">" + (($recent_actions | map(recent_action_row) | add) // "") + "</div>" end)
 + "  </section>
   </div>
 
