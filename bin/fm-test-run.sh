@@ -147,7 +147,7 @@ family_for_basename() {
     fm-supervision-instructions.test.sh|fm-task-axis.test.sh|\
     fm-task-base.test.sh|fm-task-delivery.test.sh|\
     fm-tmux-submit-busy.test.sh|fm-trace-context-lib.test.sh|\
-    fm-transition-lib.test.sh|\
+    fm-transition-lib.test.sh|fm-verify.test.sh|\
     fm-test-run.test.sh|fm-test-isolation-proof.test.sh)
       printf '%s\n' pure-contract-unit
       ;;
@@ -920,21 +920,31 @@ families_for_changed_path() {
     bin/fm-timeout-lib.sh)
       # The shared hard bound: session start's runtime bound, the fleet/bearings
       # snapshots, the vendor auth probe, and the stow cascade's per-home step
-      # all depend on it.
+      # all depend on it, as does bin/fm-teardown.sh's pre-teardown run abort
+      # (pr-forge) through the fm-nm-run-lib.sh reads it bounds.
       printf '%s\n' session-bootstrap
       printf '%s\n' snapshot-bearings
       printf '%s\n' pure-contract-unit
       printf '%s\n' secondmate
+      printf '%s\n' pr-forge
+      ;;
+    bin/fm-verify-lib.sh)
+      # The shared three-valued observation type and check-set rule: the
+      # wrapper's own suite, and the bearings snapshot, which splices that same
+      # rule and asserts on the label it produces.
+      printf '%s\n' pure-contract-unit
+      printf '%s\n' snapshot-bearings
       ;;
     bin/fm-pr-*|bin/fm-merge-local.sh|bin/fm-teardown.sh|bin/fm-review-diff.sh|\
     bin/fm-x-*|bin/fm-check*)
       printf '%s\n' pr-forge
       ;;
-    bin/fm-nm-run-lib.sh|bin/fm-timeout-lib.sh)
+    bin/fm-nm-run-lib.sh)
       # Shared no-mistakes run-attribution primitives, sourced by both
       # bin/fm-crew-state.sh (pure-contract-unit) and bin/fm-teardown.sh's
       # pre-teardown run abort (pr-forge). The shared hard bound those reads go
-      # through is owned by bin/fm-timeout-lib.sh, so it selects the same lanes.
+      # through is owned by bin/fm-timeout-lib.sh, whose own entry above
+      # includes these same lanes.
       printf '%s\n' pure-contract-unit
       printf '%s\n' pr-forge
       ;;

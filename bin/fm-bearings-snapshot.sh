@@ -63,6 +63,9 @@ FLEET="$SCRIPT_DIR/fm-fleet-snapshot.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
+# shellcheck source=bin/fm-verify-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-verify-lib.sh"
 
 # Bounds (overridable for tests / large fleets).
 FM_BEARINGS_LANDED=${FM_BEARINGS_LANDED:-6}
@@ -234,6 +237,9 @@ EOF
         --json number,title,url,headRefName,reviewDecision,mergeable,statusCheckRollup 2>/dev/null) \
         || { nwarn=$((nwarn + 1)); continue; }
       [ -n "$out" ] || out='[]'
+      # The check-set rule is bin/fm-verify-lib.sh's, spliced in rather than
+      # restated: "none" here and NO_VERIFIER_RAN in bin/fm-verify.sh are the
+      # same empty set, and one copy of that rule is the point.
       repo_result=$(printf '%s' "$out" | jq --arg repo "$repo" --argjson limit "$FM_BEARINGS_PR_LIMIT" '
         [ .[] | {
           num:(.number|tostring),
@@ -242,12 +248,7 @@ EOF
           url:(.url // "-"),
           review:(.reviewDecision // "none"),
           mergeable:(.mergeable // "UNKNOWN"),
-          checks:(
-            (.statusCheckRollup // []) as $c
-            | if ($c|length) == 0 then "none"
-              elif any($c[]; (.conclusion // .state // "") as $s | ($s=="FAILURE" or $s=="ERROR" or $s=="TIMED_OUT" or $s=="CANCELLED" or $s=="ACTION_REQUIRED")) then "failing"
-              elif any($c[]; ((.status // "") != "COMPLETED") and ((.state // "") != "SUCCESS")) then "pending"
-              else "passing" end)
+          checks:('"$FM_VERIFY_CHECK_ROLLUP_EXPR"')
         } ] as $rows | {returned:($rows | length), rows:$rows[:$limit]}') || { nwarn=$((nwarn + 1)); continue; }
       returned=$(printf '%s' "$repo_result" | jq '.returned')
       repo_rows=$(printf '%s' "$repo_result" | jq '.rows')
