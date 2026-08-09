@@ -69,7 +69,7 @@ elif args[:2] == ["upload", "create"]:
     time.sleep(float(os.environ.get("HF_UPLOAD_DELAY", "0")))
     print(json.dumps({"id": "11111111-1111-4111-8111-111111111111"}))
 elif args[:2] == ["generate", "cost"]:
-    response = {"adjustments": [], "credits": 2}
+    response = {"adjustments": [], "credits": 2, "credits_exact": 3}
     if "--aspect_ratio=99:99" in args:
         response["adjustments"] = [{"field": "aspect_ratio", "from": "99:99", "to": "1:1"}]
     print(json.dumps(response))
@@ -476,14 +476,15 @@ assert cost["credits"] == 2
 assert cost["job_count"] == 1
 assert cost["parameters"] == {"aspect_ratio": "1:1", "generate_audio": "false"}
 assert cost["approval_scope"] == {
-    "binds": ["request", "credit_price"],
-    "does_not_bind": ["account", "billing_workspace"],
-    "workspace_switch_warning": "Switching the active billing workspace between approval and run can charge a different workspace at the same credit price.",
+    "binds": ["request", "vendor_credits_field"],
+    "does_not_bind": ["account", "billing_workspace", "vendor_credits_exact_field"],
+    "credits_exact_warning": "The wrapper binds and rechecks the vendor credits field, not credits_exact; a distinct credits_exact value can differ from the approved displayed credits value.",
+    "workspace_switch_warning": "Switching the active billing workspace between approval and run can charge a different workspace at the same displayed credits value.",
 }
 assert set(receipt) == {"cost_approval_capability"}
 assert receipt["cost_approval_capability"].startswith("cost:v1:")
 PY
-pass "cost discloses parameters, approval scope, and an opaque capability"
+pass "cost discloses vendor credit-field and workspace limitations"
 
 cp "$COST_RECEIPT" "$COST_RECEIPT_COPY"
 

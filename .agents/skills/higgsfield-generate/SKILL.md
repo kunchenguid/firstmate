@@ -54,8 +54,8 @@ The wrapper accepts only absolute regular-file paths or existing Higgsfield UUID
 3. Only after upload approval, run `python3 scripts/safe_generate.py upload /absolute/temporary/directory/request.json --approval-token <token-from-plan> --output /absolute/temporary/directory/uploaded-request.json`.
 4. Use the uploaded request from then on.
 5. Run `python3 scripts/safe_generate.py cost /absolute/temporary/directory/uploaded-request.json --receipt /absolute/temporary/directory/cost-receipt.json`.
-6. Show the captain the exact model, job count, parameters, uploaded references, credit cost, and the wrapper's emitted approval-scope warning.
-7. Obtain explicit approval only for the request and credit price shown.
+6. Show the captain the exact model, job count, parameters, uploaded references, displayed vendor `credits` value, and the wrapper's emitted approval-scope warnings.
+7. Obtain explicit approval only for the request and displayed vendor `credits` value shown.
 8. Only after cost approval, run `python3 scripts/safe_generate.py run /absolute/temporary/directory/uploaded-request.json --cost-receipt /absolute/temporary/directory/cost-receipt.json`.
 
 For prompt-only work without step 3, use `/absolute/temporary/directory/request.json` in steps 5 and 8.
@@ -65,6 +65,6 @@ For a multi-job request, stop and obtain separate bulk approval for an enumerate
 
 ## Report the result
 
-Return the completed output URL or file, the model, and the charged credits reported by the wrapper.
+Return the completed output URL or file, the model, and the approved vendor `credits` value reported by the wrapper.
 Distinguish a completed job from visual quality inspection.
 If the job fails or times out, report the failure and do not retry automatically.

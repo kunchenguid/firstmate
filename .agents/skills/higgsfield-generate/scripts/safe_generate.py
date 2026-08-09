@@ -58,11 +58,15 @@ AUDIO_OFF_BY_JOB_TYPE = {
 }
 EXPLICITLY_PROVEN_SILENT_VIDEO_JOB_TYPES: frozenset[str] = frozenset()
 APPROVAL_SCOPE = {
-    "binds": ["request", "credit_price"],
-    "does_not_bind": ["account", "billing_workspace"],
+    "binds": ["request", "vendor_credits_field"],
+    "does_not_bind": ["account", "billing_workspace", "vendor_credits_exact_field"],
+    "credits_exact_warning": (
+        "The wrapper binds and rechecks the vendor credits field, not credits_exact; "
+        "a distinct credits_exact value can differ from the approved displayed credits value."
+    ),
     "workspace_switch_warning": (
         "Switching the active billing workspace between approval and run can charge "
-        "a different workspace at the same credit price."
+        "a different workspace at the same displayed credits value."
     ),
 }
 RESERVED_PARAMS = MEDIA_FLAGS | DISALLOWED_MEDIA_PARAMS | {
@@ -800,7 +804,7 @@ def command_run(args: argparse.Namespace) -> None:
         if not hmac.compare_digest(
             str(approval.get("credits_text", "")), current_credits_text
         ):
-            raise PolicyError("credit cost changed; run cost again and obtain new approval")
+            raise PolicyError("vendor credits value changed; run cost again and obtain new approval")
         consumed_signed = {**signed, "status": "consumed"}
         consumed = {
             **consumed_signed,
