@@ -1150,6 +1150,70 @@ EOF
   pass ".omp primary extension: session_switch restores the loaded marker over the whole load chain"
 }
 
+# OMPCODE is inheritable, so a Pi primary launched from an OMP session's shell
+# carries it. Binding the guard to OMP's agent_end there would be silent and
+# total: Pi never emits agent_end, so every turn would end with no guard at all.
+# The entrypoint Pi auto-loads decides the protocol, and this pins that.
+test_pi_guard_entrypoint_ignores_an_inherited_omp_marker() {
+  local repo home ext log out status
+  repo="$TMP_ROOT/pi-guard-inherited-omp-root"
+  home="$TMP_ROOT/pi-guard-inherited-omp-home"
+  ext="$repo/.pi/extensions/fm-primary-turnend-guard.ts"
+  log="$TMP_ROOT/pi-guard-inherited-omp.log"
+  mkdir -p "$repo/.pi/extensions/lib" "$repo/bin" "$home/state"
+  cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$ext"
+  cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$repo/.pi/extensions/lib/fm-operational-input.ts"
+  cp "$ROOT/bin/fm-operational-input.sh" "$repo/bin/fm-operational-input.sh"
+  cat > "$repo/bin/fm-turnend-guard.sh" <<'SH'
+#!/usr/bin/env bash
+cat >/dev/null
+printf 'guard\n' >> "${FM_GUARD_LOG:?}"
+printf 'inherited-marker guard fired\n' >&2
+exit 2
+SH
+  cat > "$repo/bin/fm-arm-pretool-check.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$repo/bin/fm-turnend-guard.sh" "$repo/bin/fm-arm-pretool-check.sh"
+  out=$(OMPCODE=1 PLUGIN="$ext" FM_HOME="$home" FM_GUARD_LOG="$log" node --input-type=module 2>&1 <<'EOF'
+import { existsSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const handlers = new Map();
+let prompts = 0;
+const pi = {
+  on(event, handler) { handlers.set(event, handler); },
+  async sendUserMessage(message, options) {
+    prompts += 1;
+    if (!message.includes("TURN WOULD END BLIND")) throw new Error(`unexpected prompt: ${message}`);
+    if (options?.deliverAs !== "followUp") throw new Error("guard prompt was not a follow-up");
+    await handlers.get("agent_settled")?.({ type: "agent_settled" }, {});
+  },
+};
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+if (handlers.has("agent_end")) {
+  throw new Error("the Pi entrypoint bound OMP's agent_end under an inherited marker");
+}
+const settled = handlers.get("agent_settled");
+if (!settled) throw new Error("Pi's agent_settled handler was not registered");
+await settled({ type: "agent_settled" }, {});
+if (prompts !== 1) throw new Error(`Pi's logical run injected ${prompts} guard follow-ups`);
+if (!existsSync(`${process.env.FM_HOME}/state/.pi-turnend-extension-loaded`)) {
+  throw new Error("the Pi entrypoint did not write Pi's loaded marker");
+}
+if (existsSync(`${process.env.FM_HOME}/state/.omp-turnend-extension-loaded`)) {
+  throw new Error("the Pi entrypoint wrote OMP's loaded marker under an inherited marker");
+}
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "an inherited OMPCODE must not bind the Pi guard to an event Pi never emits"
+  [ -z "$out" ] || fail "Pi guard inherited-marker test printed output: $out"
+  pass ".pi primary extension: an inherited OMP marker cannot rebind the guard away from agent_settled"
+}
+
 test_pi_extension_retries_after_followup_delivery_failure() {
   local repo home ext out status
   repo="$TMP_ROOT/pi-delivery-failure-root"
@@ -1761,6 +1825,7 @@ test_opencode_plugin_anchors_guard_to_worktree
 test_pi_extension_injects_once_per_logical_agent_run
 test_omp_extension_uses_agent_end_for_logical_runs
 test_omp_session_switch_restores_a_current_loaded_marker
+test_pi_guard_entrypoint_ignores_an_inherited_omp_marker
 test_pi_extension_retries_after_followup_delivery_failure
 test_hook_claude_mode_reblocks_stop_hook_active_when_unhealthy
 test_hook_claude_mode_reblocks_x_mode_without_tasks

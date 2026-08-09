@@ -120,6 +120,65 @@ EOF
   pass "OMP watcher entrypoint selects OMP lifecycle, command, tool, and marker names"
 }
 
+# OMPCODE is inheritable: a Pi primary started from an OMP session's shell, or
+# in a pane whose multiplexer server stored that environment, carries it. The
+# entrypoint Pi auto-loads is the authoritative signal, so the marker must not
+# be able to switch this session onto OMP's vocabulary behind its back.
+test_pi_watcher_entrypoint_ignores_an_inherited_omp_marker() {
+  local repo home plugin out status
+  repo="$TMP_ROOT/pi-entrypoint-inherited-omp-root"
+  home="$TMP_ROOT/pi-entrypoint-inherited-omp-home"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(OMPCODE=1 PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" node --input-type=module 2>&1 <<'EOF'
+import { existsSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const events = new Map();
+const commands = [];
+const tools = [];
+const pi = {
+  on(name, handler) {
+    events.set(name, handler);
+  },
+  registerCommand(name) {
+    commands.push(name);
+  },
+  registerTool(tool) {
+    tools.push(tool.name);
+  },
+  sendUserMessage: async () => {},
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+if (events.has("session_switch")) {
+  throw new Error("the Pi entrypoint bound OMP's session_switch under an inherited marker");
+}
+if (!commands.includes("fm-watch-arm-pi")) throw new Error(`Pi command missing: ${commands}`);
+if (!tools.includes("fm_watch_arm_pi")) throw new Error(`Pi tool missing: ${tools}`);
+await events.get("session_start")();
+if (!existsSync(`${process.env.FM_HOME}/state/.pi-watch-extension-loaded`)) {
+  throw new Error("the Pi entrypoint did not write Pi's loaded marker");
+}
+if (existsSync(`${process.env.FM_HOME}/state/.omp-watch-extension-loaded`)) {
+  throw new Error("the Pi entrypoint wrote OMP's loaded marker under an inherited marker");
+}
+await events.get("session_shutdown")();
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "an inherited OMPCODE must not switch the Pi entrypoint onto OMP's contract"
+  [ -z "$out" ] || fail "Pi entrypoint inherited-marker test printed output: $out"
+  pass "Pi watcher entrypoint keeps Pi's lifecycle, tool, and marker under an inherited OMP marker"
+}
+
 test_pi_extension_reports_external_healthy_watcher() {
   local repo home plugin out status
   repo="$TMP_ROOT/pi-external-healthy-root"
@@ -2187,6 +2246,7 @@ EOF
 
 test_pi_extension_reports_external_healthy_watcher
 test_omp_watcher_entrypoint_selects_omp_contract
+test_pi_watcher_entrypoint_ignores_an_inherited_omp_marker
 test_pi_tool_returns_agent_tool_result
 test_pi_redundant_tool_call_is_owned_noop
 test_pi_scheduled_retry_call_is_owned_noop

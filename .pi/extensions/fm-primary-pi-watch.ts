@@ -552,7 +552,14 @@ function registerPrimaryWatchExtension(pi: ExtensionAPI) {
 }
 
 
-export default function registerPiFamilyPrimaryWatch(pi: ExtensionAPI): void {
-  selectPrimaryHarness(process.env.OMPCODE === "1" ? "omp" : "pi");
+// The LOADED ENTRYPOINT selects the protocol, never an environment marker: a
+// marker is inheritable, so a Pi primary started under a retained OMPCODE would
+// otherwise register OMP's event vocabulary against a runtime that never emits
+// it. Pi auto-loads this file and gets Pi; only .omp/extensions/ passes "omp".
+export default function registerPiFamilyPrimaryWatch(
+  pi: ExtensionAPI,
+  harness: PrimaryHarness = "pi",
+): void {
+  selectPrimaryHarness(harness);
   registerPrimaryWatchExtension(pi);
 }

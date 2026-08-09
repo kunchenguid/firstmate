@@ -274,7 +274,15 @@ function registerPrimaryTurnendGuard(pi: ExtensionAPI) {
 }
 
 
-export default function registerPiFamilyPrimaryTurnendGuard(pi: ExtensionAPI): void {
-  selectPrimaryHarness(process.env.OMPCODE === "1" ? "omp" : "pi");
+// The LOADED ENTRYPOINT selects the protocol, never an environment marker: a
+// marker is inheritable, so a Pi primary started under a retained OMPCODE would
+// otherwise bind the guard to agent_end, which Pi never emits, and every turn
+// would end blind. Pi auto-loads this file and gets Pi; only .omp/extensions/
+// passes "omp".
+export default function registerPiFamilyPrimaryTurnendGuard(
+  pi: ExtensionAPI,
+  harness: PrimaryHarness = "pi",
+): void {
+  selectPrimaryHarness(harness);
   registerPrimaryTurnendGuard(pi);
 }

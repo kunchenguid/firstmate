@@ -64,7 +64,7 @@ detect_own() {
   # without verifying it reaches children AND that it cannot survive in a
   # multiplexer's stored environment, which is the precedence hazard above.
   # Layer 2: walk the parent chain and match the command name.
-  local pid=$$ comm args
+  local pid=$$ comm args script
   for _ in 1 2 3 4 5 6 7 8; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
     case "$(basename -- "$comm")" in
@@ -85,13 +85,17 @@ detect_own() {
       bun*)
         # OMP is distributed as a Bun script. Match only argv[1]'s exact `omp`
         # path component; later prompt arguments may mention OMP and are not
-        # process identity.
+        # process identity. A bare `bun` with no script argument is not OMP even
+        # when its own install path has an `omp` component, so the guard below
+        # mirrors bin/fm-session-lock-lib.sh: judge only a real argv[1].
         args=$(ps -o args= -p "$pid" 2>/dev/null)
-        args=${args#* }
-        args=${args%% *}
-        case "/$args/" in
-          */omp/*) echo omp; return ;;
-        esac ;;
+        script=${args#* }
+        if [ "$script" != "$args" ]; then
+          script=${script%% *}
+          case "/$script/" in
+            */omp/*) echo omp; return ;;
+          esac
+        fi ;;
       node*|python*)
         # Bare interpreter: match the harness name in its script path.
         args=$(ps -o args= -p "$pid" 2>/dev/null)

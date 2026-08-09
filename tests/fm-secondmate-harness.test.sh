@@ -220,9 +220,11 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 case "$field:${FM_TEST_OMP_SHAPE:-omp}" in
+  comm=:bare) printf '%s\n' '/opt/omp/bin/bun' ;;
   comm=:*) printf '%s\n' '/opt/homebrew/bin/bun' ;;
   args=:omp) printf '%s\n' 'bun /Users/u/.bun/bin/omp --model openai/test' ;;
   args=:unrelated) printf '%s\n' 'bun /opt/tools/compiler.js --prompt omp' ;;
+  args=:bare) printf '%s\n' '/opt/omp/bin/bun' ;;
   ppid=:*) printf '%s\n' 1 ;;
 esac
 SH
@@ -243,6 +245,13 @@ SH
   got=$(FM_TEST_OMP_SHAPE=unrelated PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-harness.sh")
   [ "$got" = unknown ] \
     || fail "an unrelated Bun script whose later argument mentions omp resolved '$got', expected unknown"
+  # detect_own attributes an ancestor by process NAME only - it has no install-
+  # path rule - so a bare Bun with no script argument must stay unattributed
+  # even when Bun's own path carries an omp component. The identity Bun can
+  # carry is argv[1], never argv[0].
+  got=$(FM_TEST_OMP_SHAPE=bare PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-harness.sh")
+  [ "$got" = unknown ] \
+    || fail "a bare Bun installed under an omp path component resolved '$got', expected unknown"
 
   got=$(PATH="$fakebin:$BASE_PATH" bash -c \
     '. "$0/bin/fm-session-lock-lib.sh"; fm_harness_ancestry_pid' "$ROOT")
