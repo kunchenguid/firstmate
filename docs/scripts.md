@@ -56,7 +56,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-remote-readiness-lib.sh` | Shared remote second-mate readiness gate: check and, when needed, repair then re-check through `fm-remote-doctor.sh` |
 | [`fm-project-origin-lib.sh`](../bin/fm-project-origin-lib.sh) | Accepted origin-form owner shared by both remote provisioning boundaries |
 | `fm-spawn.sh`            | Spawn crewmates, scouts, `id=repo` batches, and secondmates on the resolved harness and runtime backend |
-| `fm-worktree-guard.sh`   | Refuse Treehouse allocation when an available pool slot is not demonstrably empty    |
+| `fm-worktree-guard.sh`   | Choose the demonstrably empty Treehouse slot a spawn may use, and refuse when no available slot is one |
 | `fm-launch-lib.sh`       | Single owner of every verified harness launch command for crewmate, scout, secondmate, and primary sessions |
 | `fm-launch.sh`           | The captain's front door: probe the harness menu, then start and attach to one primary session in this home (docs/launcher.md) |
 | `fm-wsl-entry.sh`        | Enter the fleet launcher deterministically from the repository-root Windows batch bridge |
