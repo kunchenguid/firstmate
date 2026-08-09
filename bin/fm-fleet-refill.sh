@@ -354,16 +354,28 @@ fm_refill_claim_and_launch() {
 # plus the attempt allocation lock (fm_attempt_alloc owns
 # state/attempts/.alloc.lock per candidate), re-read live bead ownership, and
 # run the split handshake and launch (automatic), or stop alert-only without
-# the lock when the automatic gate is off (Task 15 rollback). Never lands,
-# merges, or decrements capacity.
+# the lock when the automatic gate is off (Task 15 rollback). Alert-only
+# tolerates an unavailable live candidate query as an empty candidate set and
+# still prints its verdict; the lane-contract checker runs under a bounded
+# timeout in both modes. Never lands, merges, or decrements capacity.
 fm_refill_admit_and_dispatch() {
   local cap=$1 candidates evid id reason prod reserved target ceiling checker lane_conflict=
-  local live_evid live_candidate
+  local live_evid live_candidate automatic qrc
   local productive_budget reserved_budget rc=0
   local admitted=() serialized=() available=() cand
-  candidates=$(fm_refill_query_candidates) || return $?
+  automatic=0
+  fm_refill_automatic && automatic=1
+  candidates=$(fm_refill_query_candidates); qrc=$?
+  if [ "$qrc" -ne 0 ]; then
+    if [ "$automatic" = 1 ]; then
+      return "$qrc"
+    fi
+    echo "refill: candidate evidence unavailable; alert-only continues with an empty candidate set" >&2
+    candidates='[]'
+  fi
   checker=${FM_LANE_CONTRACT_CHECKER:-$PROJECT/scripts/check_lane_contract.py}
-  if [ -x "$checker" ] && ! "$checker" --repo "$PROJECT" >/dev/null 2>&1; then
+  if [ -x "$checker" ] \
+    && ! timeout "${FM_LANE_CHECKER_TIMEOUT_SECS:-90}" "$checker" --repo "$PROJECT" >/dev/null 2>&1; then
     lane_conflict="lane contract checker conflict"
   fi
   evid=$(fm_refill_current_evidence) || {
@@ -406,7 +418,7 @@ fm_refill_admit_and_dispatch() {
   # preserved; re-enabling the gate resumes from the persisted effect receipts
   # through the same idempotent claim-replay, obligation-retry, and
   # terminal-reconciliation paths.
-  if ! fm_refill_automatic; then
+  if [ "$automatic" = 0 ]; then
     echo "fleet-ok: alert-only"
     return 0
   fi

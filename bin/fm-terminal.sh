@@ -335,13 +335,10 @@ if [ -n "$cap" ]; then
   cap_file=$(mktemp "${TMPDIR:-/tmp}/fm-terminal-capacity.XXXXXX") || exit 1
   trap 'rm -f "$cap_file"' EXIT
   printf '%s\n' "$cap" > "$cap_file" || exit 1
-  FM_CAPACITY_OBSERVATION_FILE="$cap_file" FM_TERMINAL_ATTEMPT="$attempt" \
-    "${FM_REFILL_BIN:-$SCRIPT_DIR/fm-fleet-refill.sh}" --refill || {
-      echo "terminal: post-retirement refill unavailable or refused for $attempt" >&2
-      rm -f "$cap_file"
-      trap - EXIT
-      exit 1
-    }
+  if ! FM_CAPACITY_OBSERVATION_FILE="$cap_file" FM_TERMINAL_ATTEMPT="$attempt" \
+      "${FM_REFILL_BIN:-$SCRIPT_DIR/fm-fleet-refill.sh}" --refill; then
+    echo "terminal: post-retirement refill unavailable or refused for $attempt; terminal outcome preserved" >&2
+  fi
   rm -f "$cap_file"
   trap - EXIT
 else

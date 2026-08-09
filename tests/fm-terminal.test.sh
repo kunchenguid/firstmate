@@ -111,6 +111,7 @@ set -u
 [ -f "${FM_CAPACITY_OBSERVATION_FILE:-}" ] || exit 3
 jq -e '.schema == "fm-fleet-capacity.v1"' "$FM_CAPACITY_OBSERVATION_FILE" >/dev/null || exit 4
 printf '%s\n' "$(jq -c '.aggregate' "$FM_CAPACITY_OBSERVATION_FILE")" >> "${FM_TERMINAL_REFILL_LOG:?}"
+[ "${FM_TEST_REFILL_FAIL:-0}" != 1 ] || exit 9
 if mkdir "${FM_STATE_OVERRIDE:?}/attempts/${FM_TERMINAL_ATTEMPT:?}.lock" 2>/dev/null; then
   rmdir "${FM_STATE_OVERRIDE:?}/attempts/${FM_TERMINAL_ATTEMPT:?}.lock"
   printf '%s\n' lock-released >> "${FM_TERMINAL_REFILL_LOG:?}"
@@ -380,6 +381,21 @@ test_post_retirement_refill_uses_fresh_projection_after_unlock() {
   pass "terminal invokes refill from the exact fresh post-retirement projection after unlocking"
 }
 
+test_post_retirement_refill_failure_preserves_terminal_success() {
+  # a nonzero post-retirement refill is a best-effort notification step: the
+  # refusal is logged, the terminal outcome stays success, and the attempt
+  # stays retired
+  local aid out rc
+  aid=$(setup_terminal_attempt)
+  : > "$FM_TERMINAL_REFILL_LOG"
+  out=$(FM_TEST_REFILL_FAIL=1 "$ROOT/bin/fm-terminal.sh" "$aid" 2>&1); rc=$?
+  expect_code 0 "$rc" "refused post-retirement refill failed the terminal: $out"
+  assert_contains "$out" "post-retirement refill unavailable or refused" "refill refusal was not logged"
+  fm_attempt_is_retired "$aid" || fail "terminal did not retire the attempt"
+  assert_contains "$(cat "$FM_TERMINAL_REFILL_LOG")" '"productive_count":' "refill did not run from the fresh projection"
+  pass "a refused post-retirement refill is logged and never fails the terminal outcome"
+}
+
 test_preland_actual_diff_conflict_refuses_landing() {
   # FM_REVIEW_DIFF_CONFLICT=1 makes the existing fm-review-diff.sh path report
   # a concrete overlap with another attempt; landing must refuse and serialize
@@ -439,6 +455,7 @@ test_terminal_requires_structured_worker_evidence_before_landing
 test_preserved_unlanded_needs_no_close_authority_or_tracker_closure
 test_real_review_diff_failure_is_propagated
 test_post_retirement_refill_uses_fresh_projection_after_unlock
+test_post_retirement_refill_failure_preserves_terminal_success
 test_preland_actual_diff_conflict_refuses_landing
 test_runtime_record_crash_replays_from_endpoint_receipt
 test_mismatched_endpoint_receipt_does_not_bypass_diff_gate

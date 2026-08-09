@@ -153,6 +153,23 @@ run_cleanup() {  # <attempt> <disposition> [env...]
   env "$@" FM_TERMINAL_QUIET_SECS=0 "$ROOT/bin/fm-cleanup-lib.sh" --run "$aid" "$disposition" 2>&1 || true
 }
 
+test_operator_teardown_bypasses_quiet_gate() {
+  # operator-requested cleanup (FM_CLEANUP_OPERATOR=1, set by fm-teardown.sh)
+  # bypasses the terminal-quiet interval; the same preflight without the
+  # operator flag still refuses on the immature interval
+  local row aid id project copy out
+  row=$(setup_cleanup_attempt quietgate)
+  IFS=$'\t' read -r aid id project copy <<< "$row"
+  out=$(FM_TERMINAL_QUIET_SECS=100000 "$ROOT/bin/fm-cleanup-lib.sh" --run "$aid" landed 2>&1 || true)
+  assert_contains "$out" "quiet interval immature" "automatic cleanup passed the quiet gate"
+  [ -d "$copy" ] || fail "immature automatic cleanup removed the copy"
+  out=$(FM_CLEANUP_OPERATOR=1 FM_TERMINAL_QUIET_SECS=100000 \
+    "$ROOT/bin/fm-cleanup-lib.sh" --run "$aid" landed 2>&1 || true)
+  jq -e '.receipts["cleanup.runtime"][0].state == "observed"' "$STATE/attempts/$aid.json" >/dev/null \
+    || fail "operator cleanup did not complete: $out"
+  pass "operator-requested cleanup bypasses the quiet interval; automatic cleanup retains it"
+}
+
 test_preflight_refuses_exact_identity_mismatch_before_effects() {
   local row aid id project copy out
   row=$(setup_cleanup_attempt identity)
@@ -302,6 +319,7 @@ test_differing_observed_receipt_is_never_rewritten() {
 }
 
 test_preflight_refuses_exact_identity_mismatch_before_effects
+test_operator_teardown_bypasses_quiet_gate
 test_endpoint_stop_requires_authoritative_absence
 test_linked_worktree_preservation_is_verified
 test_branch_failure_stops_provider_and_runtime

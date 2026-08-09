@@ -349,6 +349,47 @@ test_rollback_mode_is_alert_only_and_never_dispatches() {
   pass "rollback mode prints the alert-only verdict and never dispatches, allocates, or claims"
 }
 
+test_alert_only_tolerates_unavailable_candidate_query() {
+  # a missing live br-ready candidate query must not break alert-only
+  # rollback: the verdict still prints, nothing dispatches, and the automatic
+  # path still fails closed on the same missing evidence
+  local out rc aidcount
+  fresh_state
+  out=$(FM_REFILL_CANDIDATES_FILE="$TMP_ROOT/no-such-candidates.json" FM_REFILL_AUTO=0 \
+    "$ROOT/bin/fm-fleet-refill.sh" --refill 2>&1); rc=$?
+  expect_code 0 "$rc" "alert-only failed on unavailable candidate evidence: $out"
+  assert_contains "$out" "fleet-ok: alert-only" "alert-only verdict missing on unavailable candidates"
+  assert_contains "$out" "candidate evidence unavailable" "alert-only did not surface the unavailable query"
+  aidcount=$(find "$STATE/attempts" -name '*.json' 2>/dev/null | wc -l)
+  [ "$aidcount" = 0 ] || fail "alert-only allocated attempts on unavailable evidence"
+  out=$(FM_REFILL_CANDIDATES_FILE="$TMP_ROOT/no-such-candidates.json" FM_REFILL_AUTO=1 \
+    "$ROOT/bin/fm-fleet-refill.sh" --refill 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "automatic refill tolerated unavailable candidate evidence: $out"
+  pass "alert-only tolerates an unavailable candidate query while the automatic path fails closed"
+}
+
+test_lane_contract_checker_is_bounded_and_alert_only_survives() {
+  # a hung lane-contract checker is bounded by the timeout; alert-only still
+  # reports the serialization and its verdict and never dispatches
+  local out rc checker aidcount
+  fresh_state
+  checker="$TMP_ROOT/hung-lane-checker"
+  cat > "$checker" <<'SH'
+#!/usr/bin/env bash
+sleep 1000
+SH
+  chmod +x "$checker"
+  printf '[{"id":"dos-hung","priority":1,"planned_path":"docs/","declared_seams":[],"shared_mutable_state":[],"dependencies":[]}]' > "$READY_JSON"
+  out=$(FM_LANE_CONTRACT_CHECKER="$checker" FM_LANE_CHECKER_TIMEOUT_SECS=1 FM_REFILL_AUTO=0 \
+    "$ROOT/bin/fm-fleet-refill.sh" --refill 2>&1); rc=$?
+  expect_code 0 "$rc" "hung lane checker wedged alert-only refill: $out"
+  assert_contains "$out" "fleet-ok: alert-only" "alert-only verdict missing after checker timeout"
+  assert_contains "$out" "serialize dos-hung (lane contract checker conflict)" "timeout did not serialize the candidate"
+  aidcount=$(find "$STATE/attempts" -name '*.json' 2>/dev/null | wc -l)
+  [ "$aidcount" = 0 ] || fail "alert-only dispatched after checker timeout"
+  pass "the lane-contract checker is bounded and alert-only still reports without dispatching"
+}
+
 test_actual_diffs_remain_authoritative_pre_land() {
   # admission may use provisional planned paths but never lands or merges;
   # the pre-land actual-diff decision belongs to fm-review-diff.sh (Task 11)
@@ -373,6 +414,8 @@ test_launch_receives_the_exact_post_lock_admission_evidence
 test_no_duplicate_dispatch_on_concurrent_refill
 test_completion_or_merge_alone_never_decrements_capacity
 test_rollback_mode_is_alert_only_and_never_dispatches
+test_alert_only_tolerates_unavailable_candidate_query
+test_lane_contract_checker_is_bounded_and_alert_only_survives
 test_actual_diffs_remain_authoritative_pre_land
 
 echo "all fm-refill-admission tests passed"

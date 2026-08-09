@@ -395,7 +395,9 @@ fi
 # preserves the copy and every record. The structured operation runs its own
 # preflight (owned-copy identity match, live processes in the copy, dirty
 # copy, immature terminal-quiet interval, unknown disposition) before any
-# effect, so nothing is mutated on a refusal. Tasks WITHOUT an attempt record
+# effect, so nothing is mutated on a refusal. Operator-requested teardown
+# sets FM_CLEANUP_OPERATOR=1 on the structured call, so the terminal-quiet
+# interval never gates an explicit reclaim. Tasks WITHOUT an attempt record
 # fall through to the exact legacy flow below - byte identical, including the
 # landed-work proofs, PR-discovery fallback, and stale-lock recovery this
 # header documents. NO second cleanup policy exists.
@@ -420,7 +422,7 @@ if [ -n "$ATTEMPT" ] && fm_attempt_load "$ATTEMPT" >/dev/null 2>&1; then
       exit 1
       ;;
   esac
-  if ! fm_cleanup_attempt "$ATTEMPT" "$DISPOSITION"; then
+  if ! FM_CLEANUP_OPERATOR=1 fm_cleanup_attempt "$ATTEMPT" "$DISPOSITION"; then
     echo "error: structured cleanup failed for attempt $ATTEMPT of task $ID; the copy and its durable records are preserved for retry" >&2
     exit 1
   fi

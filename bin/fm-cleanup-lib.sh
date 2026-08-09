@@ -56,7 +56,9 @@ FM_HOME="${FM_HOME:-$(cd "$SCRIPT_DIR/.." && pwd -P)}"
 
 # The copy must have been quiet - no launch activity - for this many seconds
 # before the structured operation may clean it up. Default 2h; 0 disables the
-# quiet gate (tests and explicit forced replay).
+# quiet gate (tests and explicit forced replay). Operator-requested cleanup
+# through fm-teardown.sh sets FM_CLEANUP_OPERATOR=1, which bypasses the
+# interval; automatic terminal reconciliation always retains it.
 FM_TERMINAL_QUIET_SECS="${FM_TERMINAL_QUIET_SECS:-7200}"
 case "$FM_TERMINAL_QUIET_SECS" in ''|*[!0-9]*) FM_TERMINAL_QUIET_SECS=7200 ;; esac
 
@@ -637,10 +639,12 @@ fm_cleanup_preflight() {  # <attempt_id> <disposition>; 0 only when ALL pass
     launch=$(cleanup_launch_epoch "$attempt")
     age=0
     [ -z "$launch" ] || age=$(( now - launch ))
-    [ "$age" -ge "$FM_TERMINAL_QUIET_SECS" ] || {
-      echo "cleanup: refused: quiet interval immature for $attempt (${age}s since launch < FM_TERMINAL_QUIET_SECS=${FM_TERMINAL_QUIET_SECS}s)" >&2
-      return 1
-    }
+    if [ "${FM_CLEANUP_OPERATOR:-0}" != 1 ]; then
+      [ "$age" -ge "$FM_TERMINAL_QUIET_SECS" ] || {
+        echo "cleanup: refused: quiet interval immature for $attempt (${age}s since launch < FM_TERMINAL_QUIET_SECS=${FM_TERMINAL_QUIET_SECS}s)" >&2
+        return 1
+      }
+    fi
   else
     [ "$(cleanup_provider_absence_state "$FM_CLEANUP_BACKEND" "$FM_CLEANUP_COPY" "$FM_CLEANUP_ORCA_WORKTREE_ID")" = missing ] || {
       echo "cleanup: refused: provider copy absence is not authoritative" >&2; return 1; }
