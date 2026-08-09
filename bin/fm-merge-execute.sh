@@ -133,9 +133,55 @@ api_value() {
 GITHUB_GRAPHQL_PAYLOAD=
 GITHUB_GRAPHQL_RAW=
 
+# Resolve a path through symlinks so the capture boundary can identify the
+# repository's installed gh shim regardless of the PATH directory that names it.
+# This intentionally mirrors fm-gh-shim.sh rather than sharing a helper: the shim
+# needs this resolver before it can locate its own source-relative helper scripts.
+capture_resolve_path() {
+  local target=$1
+  if command -v realpath > /dev/null 2>&1; then
+    realpath "$target" 2> /dev/null || printf '%s\n' "$target"
+  else
+    local dir base
+    dir=$(cd "$(dirname "$target")" 2> /dev/null && pwd) || {
+      printf '%s\n' "$target"
+      return 0
+    }
+    base=$(basename "$target")
+    while [ -L "$dir/$base" ]; do
+      local link
+      link=$(readlink "$dir/$base") || break
+      case "$link" in
+        /*) dir=$(cd "$(dirname "$link")" && pwd) ;;
+        *) dir=$(cd "$dir" && cd "$(dirname "$link")" && pwd) ;;
+      esac
+      base=$(basename "$link")
+    done
+    printf '%s\n' "$dir/$base"
+  fi
+}
+
+# The capture wrapper places a temporary gh first on PATH.  Its target must be
+# the genuine gh executable, never this repository's PATH-installed shim, or the
+# shim will rediscover the temporary wrapper and recurse.
+capture_find_real_gh() {
+  local shim_real entry candidate
+  shim_real=$(capture_resolve_path "$SCRIPT_DIR/fm-gh-shim.sh")
+  local IFS=:
+  for entry in $PATH; do
+    [ -n "$entry" ] || entry=.
+    candidate="$entry/gh"
+    [ -f "$candidate" ] && [ -x "$candidate" ] || continue
+    [ "$(capture_resolve_path "$candidate")" = "$shim_real" ] && continue
+    printf '%s\n' "$candidate"
+    return 0
+  done
+  return 1
+}
+
 capture_github_graphql() {
   local query=$1 capture_dir capture_body capture_shim real_gh old_umask output raw rc=0
-  real_gh=$(command -v gh) || return 1
+  real_gh=$(capture_find_real_gh) || return 1
   old_umask=$(umask)
   umask 077
   capture_dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-github-response.XXXXXX") || {
