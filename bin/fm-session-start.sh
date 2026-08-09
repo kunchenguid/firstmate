@@ -43,9 +43,12 @@
 #   5. read-once contract - the do-not-re-read contract covering every source
 #                       represented by the two digests below.
 #   6. fleet digest   - a compact data/backlog.md identity/metadata listing,
-#                       every state/*.meta, a bounded state/*.status tail,
-#                       state/.afk, and a cheap per-task endpoint-liveness read:
-#                       read-only, always runs.
+#                       one bounded RULING_RECONCILE line when open captain
+#                       decisions exist, every state/*.meta, a bounded
+#                       state/*.status tail, state/.afk, and a cheap per-task
+#                       endpoint-liveness read. Always runs, and read-only
+#                       except for the RULING_RECONCILE step, which publishes
+#                       its derived index only when locked (see below).
 #   7. network checks - the result of the deferred network stage started back at
 #                       step 1, harvested WITHOUT waiting for it.
 #   8. context digest - data/projects.md, data/secondmates.md, data/captain.md,
@@ -115,10 +118,13 @@
 # and all of which are safe to compute without verified lock ownership.
 # It deliberately skips the network-only GitHub-auth probe because a read-only
 # session has no dispatch, spawn, steer, or merge action for that verdict to gate.
-# Only projection cleanup, the six bootstrap mutating sweeps, and wake-queue
-# presentation are skipped.
-# The context and fleet-state digests
-# below are always read-only, so they run unconditionally in both modes.
+# Only projection cleanup, the six bootstrap mutating sweeps, wake-queue
+# presentation, and the ruling-index rebuild are skipped.
+# The context digest below is always read-only, and so is every part of the
+# fleet-state digest except its RULING_RECONCILE step: publishing the derived
+# ruling index is a mutation, so a refused session reports the count from the
+# existing index instead of rebuilding it, and does not go dark. Both digests
+# therefore run in both modes.
 #
 # BACKLOG DIGEST: the startup listing is a RECOVERY input, not a reporting
 # surface, so it carries what this turn can act on and nothing else.
@@ -695,6 +701,21 @@ if [ "$(fm_admission_state "$(fm_admission_config_file "$CONFIG")")" = active ];
   subsection "Fleet admission"
   "$SCRIPT_DIR/fm-admission.sh" --brief || true
   printf 'Re-examine load-held requests against this band; admit at most one at a time.\n'
+fi
+
+# Open captain decisions that a ruling document may already have answered. One
+# bounded line, and silence when there is nothing open, because a hold the
+# captain has already ruled is the failure this surfaces - not a routine count.
+# Writing the derived index is a mutation, so a read-only session reads the
+# existing index instead of rebuilding it. An unreadable ruling document is
+# reported rather than absorbed: an unread ruling must never present as "unruled".
+if [ -x "$SCRIPT_DIR/fm-ruling-reconcile.sh" ]; then
+  if [ "$READ_ONLY" -eq 1 ]; then
+    RECONCILE_OUT=$("$SCRIPT_DIR/fm-ruling-reconcile.sh" status 2>&1 | sed -n 's/^open_holds=\([1-9][0-9]*\)$/RULING_RECONCILE: \1 open captain decision(s) in the last index; rerun when locked to refresh/p')
+  else
+    RECONCILE_OUT=$("$SCRIPT_DIR/fm-ruling-reconcile.sh" scan --quiet 2>&1) || true
+  fi
+  [ -n "$RECONCILE_OUT" ] && printf '\n%s\n' "$RECONCILE_OUT"
 fi
 
 subsection "Work under way (state/*.meta)"
