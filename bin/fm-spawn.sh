@@ -1164,12 +1164,22 @@ case "$ARG3" in
     ;;
 esac
 
-if [ "$TEMPLATE_LAUNCH" -eq 1 ]; then
-  case "$HARNESS" in
-    omp) ;;
-    pi|pi-signed) LAUNCH="env -u OMPCODE FM_PI_HARNESS=$HARNESS $LAUNCH" ;;
-    *) LAUNCH="env -u OMPCODE $LAUNCH" ;;
-  esac
+# FM_PI_HARNESS is the identity the WORKER reports back through
+# bin/fm-harness.sh detect_own, which cannot tell pi-signed from pi without it.
+# It binds to the resolved harness for a raw launch command too, or a
+# `pi-signed ...` escape-hatch worker would self-identify as plain pi and
+# contradict the harness recorded in its own task meta.
+case "$HARNESS" in
+  pi|pi-signed) PI_MARKER="FM_PI_HARNESS=$HARNESS " ;;
+  *) PI_MARKER= ;;
+esac
+# OMPCODE is OMP's own positive identity marker, so every other verified
+# template strips an inherited one instead of letting its worker self-identify
+# as OMP. A raw launch command stays the operator's verbatim command line.
+if [ "$TEMPLATE_LAUNCH" -eq 1 ] && [ "$HARNESS" != omp ]; then
+  LAUNCH="env -u OMPCODE $PI_MARKER$LAUNCH"
+else
+  LAUNCH="$PI_MARKER$LAUNCH"
 fi
 
 # muse is verified as a CREWMATE/SCOUT adapter only. A secondmate is a firstmate

@@ -675,13 +675,12 @@ network_stage_report() {
 }
 
 hash_file_for_test() {
-  local file=$1
   if command -v shasum >/dev/null 2>&1; then
-    shasum -a 256 "$file" | awk '{print "sha256:" $1}'
+    cat -- "$@" | shasum -a 256 | awk '{print "sha256:" $1}'
   elif command -v sha256sum >/dev/null 2>&1; then
-    sha256sum "$file" | awk '{print "sha256:" $1}'
+    cat -- "$@" | sha256sum | awk '{print "sha256:" $1}'
   else
-    cksum "$file" | awk '{print "cksum:" $1 ":" $2}'
+    cat -- "$@" | cksum | awk '{print "cksum:" $1 ":" $2}'
   fi
 }
 
@@ -720,13 +719,19 @@ install_omp_extensions_fixture() {
   mkdir -p "$root/.omp/extensions"
   cp "$ROOT/.omp/extensions/fm-primary-omp-watch.ts" "$root/.omp/extensions/fm-primary-omp-watch.ts"
   cp "$ROOT/.omp/extensions/fm-primary-turnend-guard.ts" "$root/.omp/extensions/fm-primary-turnend-guard.ts"
+  install_pi_watch_extension_fixture "$root"
+  install_pi_turnend_extension_fixture "$root"
 }
 
+# The OMP entrypoints only re-export the shared Pi-family implementation, so a
+# loaded marker records the digest of the whole load chain, entrypoint first.
 write_omp_loaded_markers() {
   local home=$1 root=$2 pid=$3 version
-  version=$(hash_file_for_test "$root/.omp/extensions/fm-primary-omp-watch.ts")
+  version=$(hash_file_for_test "$root/.omp/extensions/fm-primary-omp-watch.ts" \
+    "$root/.pi/extensions/fm-primary-pi-watch.ts")
   printf '%s\n%s\n' "$version" "$pid" > "$home/state/.omp-watch-extension-loaded"
-  version=$(hash_file_for_test "$root/.omp/extensions/fm-primary-turnend-guard.ts")
+  version=$(hash_file_for_test "$root/.omp/extensions/fm-primary-turnend-guard.ts" \
+    "$root/.pi/extensions/fm-primary-turnend-guard.ts")
   printf '%s\n%s\n' "$version" "$pid" > "$home/state/.omp-turnend-extension-loaded"
 }
 
@@ -2179,6 +2184,36 @@ EOF
 
   pass "session start accepts current OMP watcher and turn-end markers"
 }
+
+# OMP's tracked entrypoints are re-export shims: every line of watcher and
+# turn-end logic lives in the shared Pi-family core they import. An update that
+# only touches that core must still make the session running the OLD code in
+# memory report itself stale, exactly as it does for a Pi primary.
+test_omp_diagnostic_rejects_shared_core_drift() {
+  local rec root home fakebin out holder_pid
+  rec=$(new_world omp-shared-core-drift)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+
+  sleep 300 &
+  holder_pid=$!
+  make_fake_ps_omp_holder "$fakebin" "$holder_pid"
+  install_omp_extensions_fixture "$root"
+  write_omp_loaded_markers "$home" "$root" "$holder_pid"
+  printf '\n// shared-core update delivered after this session loaded it\n' \
+    >> "$root/.pi/extensions/fm-primary-pi-watch.ts"
+  out=$(FM_FAKE_HARNESS=omp run_session_start "$home" "$root" "$fakebin:$BASE_PATH" omp)
+  kill "$holder_pid" 2>/dev/null || true
+  wait "$holder_pid" 2>/dev/null || true
+
+  assert_contains "$out" "OMP_WATCH_EXTENSION: not loaded" \
+    "an update to the shared Pi-family watcher core left the OMP session reporting itself current"
+
+  pass "session start reports OMP extensions stale when only the shared core changed"
+}
+
 test_pi_diagnostic_rejects_stale_loaded_marker() {
   local rec root home fakebin out marker holder_pid
   rec=$(new_world pi-stale-loaded-marker)
@@ -2318,6 +2353,7 @@ test_supervision_block_exactly_one_and_pi_diagnostic
 test_pi_signed_primary_uses_pi_extensions_without_identity_normalization
 test_omp_primary_uses_verified_supervision_extensions
 test_omp_diagnostic_accepts_current_loaded_markers
+test_omp_diagnostic_rejects_shared_core_drift
 test_pi_diagnostic_rejects_stale_loaded_marker
 test_pi_diagnostic_accepts_prelock_loaded_marker
 test_pi_diagnostic_rejects_missing_turnend_guard_marker

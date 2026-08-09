@@ -338,7 +338,7 @@ OMP loads its tracked `.omp/extensions/` entrypoints over that same core, select
 
 OMP 17.2.12 primary supervision was live-verified on 2026-08-09 from the tracked project root with an isolated Firstmate home.
 Project-local `.omp/extensions/` discovery loaded both tracked entrypoints without explicit `-e` flags.
-The `session_start` hook acquired the isolated home lock and wrote `.omp-watch-extension-loaded` and `.omp-turnend-extension-loaded`; both recorded SHA-256 values matched the current tracked entrypoint bytes and named the live OMP process.
+The `session_start` hook acquired the isolated home lock and wrote `.omp-watch-extension-loaded` and `.omp-turnend-extension-loaded`; both recorded SHA-256 values matched the current bytes of the tracked entrypoint together with the shared Pi-family implementation it re-exports, and named the live OMP process.
 The model then called `fm_watch_arm_omp` exactly once, returned `OMP_TOOL_OK`, and the watcher published a fresh `.last-watcher-beat` plus an owned watcher lock before process-exit cleanup.
 An independent live event probe observed `session_start`, `agent_start`, `session_stop`, `turn_end`, `agent_end`, and same-process `session_switch`; the tracked deterministic tests pin the event-to-generation and guard contracts.
 

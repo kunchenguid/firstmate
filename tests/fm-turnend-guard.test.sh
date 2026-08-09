@@ -1096,6 +1096,60 @@ EOF
   pass ".omp primary extension: agent_end drives one guard follow-up per logical run"
 }
 
+# The loaded marker is what bin/fm-session-start.sh reads to decide whether the
+# running session carries current guard code. OMP replaces a session in the same
+# process with session_switch, so that path has to restore the marker the way
+# session_start does, and the recorded version has to cover the shared core the
+# thin .omp entrypoint re-exports - otherwise a core-only update stays invisible.
+test_omp_session_switch_restores_a_current_loaded_marker() {
+  local repo home ext out status
+  repo="$TMP_ROOT/omp-switch-marker-root"
+  home="$TMP_ROOT/omp-switch-marker-home"
+  ext="$repo/.omp/extensions/fm-primary-turnend-guard.ts"
+  mkdir -p "$repo/.omp/extensions" "$repo/.pi/extensions/lib" "$repo/bin" "$home/state"
+  cp "$ROOT/.omp/extensions/fm-primary-turnend-guard.ts" "$ext"
+  cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$repo/.pi/extensions/fm-primary-turnend-guard.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$repo/.pi/extensions/lib/fm-operational-input.ts"
+  out=$(OMPCODE=1 PLUGIN="$ext" FM_HOME="$home" node --input-type=module 2>&1 <<'EOF'
+import { createHash } from "node:crypto";
+import { existsSync, readFileSync, rmSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
+
+const entrypoint = process.env.PLUGIN;
+const repo = resolve(dirname(entrypoint), "../..");
+const shared = `${repo}/.pi/extensions/fm-primary-turnend-guard.ts`;
+const marker = `${process.env.FM_HOME}/state/.omp-turnend-extension-loaded`;
+const expected = `sha256:${createHash("sha256")
+  .update(readFileSync(entrypoint))
+  .update(readFileSync(shared))
+  .digest("hex")}`;
+
+const handlers = new Map();
+const pi = { on(event, handler) { handlers.set(event, handler); } };
+const mod = await import(pathToFileURL(entrypoint).href);
+mod.default(pi);
+
+if (readFileSync(marker, "utf8").split("\n")[0] !== expected) {
+  throw new Error(`registration recorded ${readFileSync(marker, "utf8").split("\n")[0]}, want ${expected}`);
+}
+
+rmSync(marker);
+const switched = handlers.get("session_switch");
+if (!switched) throw new Error("OMP session_switch handler was not registered");
+await switched({ type: "session_switch", reason: "new" }, {});
+if (!existsSync(marker)) throw new Error("session_switch did not restore the loaded marker");
+const [version, pid] = readFileSync(marker, "utf8").split("\n");
+if (version !== expected) throw new Error(`session_switch recorded ${version}, want ${expected}`);
+if (Number(pid) !== process.pid) throw new Error(`session_switch recorded pid ${pid}, want ${process.pid}`);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "OMP session_switch must restore a marker versioned over the whole load chain"
+  [ -z "$out" ] || fail "OMP session_switch marker test printed output: $out"
+  pass ".omp primary extension: session_switch restores the loaded marker over the whole load chain"
+}
+
 test_pi_extension_retries_after_followup_delivery_failure() {
   local repo home ext out status
   repo="$TMP_ROOT/pi-delivery-failure-root"
@@ -1706,6 +1760,7 @@ test_codex_hook_ignores_nested_git_root_guard
 test_opencode_plugin_anchors_guard_to_worktree
 test_pi_extension_injects_once_per_logical_agent_run
 test_omp_extension_uses_agent_end_for_logical_runs
+test_omp_session_switch_restores_a_current_loaded_marker
 test_pi_extension_retries_after_followup_delivery_failure
 test_hook_claude_mode_reblocks_stop_hook_active_when_unhealthy
 test_hook_claude_mode_reblocks_x_mode_without_tasks

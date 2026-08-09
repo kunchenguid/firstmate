@@ -26,10 +26,16 @@ let extensionVersion = `sha256:${createHash("sha256").update(readFileSync(extens
 function selectPrimaryHarness(harness: PrimaryHarness): void {
   primaryHarness = harness;
   marker = `${state}/.${harness}-turnend-extension-loaded`;
-  const identityFile = harness === "omp"
-    ? `${root}/.omp/extensions/fm-primary-turnend-guard.ts`
-    : extensionFile;
-  extensionVersion = `sha256:${createHash("sha256").update(readFileSync(identityFile)).digest("hex")}`;
+  // The entrypoint alone is a thin re-export, so its bytes never move when the
+  // shared implementation below it changes. Hash the whole load chain, in the
+  // same order bin/fm-session-start.sh hashes it, or a stale in-memory guard
+  // would keep reporting itself current.
+  const identityFiles = harness === "omp"
+    ? [`${root}/.omp/extensions/fm-primary-turnend-guard.ts`, extensionFile]
+    : [extensionFile];
+  const digest = createHash("sha256");
+  for (const file of identityFiles) digest.update(readFileSync(file));
+  extensionVersion = `sha256:${digest.digest("hex")}`;
 }
 
 function parentPid(pid: string): string {
@@ -210,6 +216,7 @@ function registerPrimaryTurnendGuard(pi: ExtensionAPI) {
     const onCrossHarnessEvent = pi.on as unknown as CrossHarnessOn;
     onCrossHarnessEvent.call(pi, "session_switch", async (event) => {
       const source = sessionSource(sessionReason(event));
+      markLoaded();
       if (source) await injectSessionstart(pi, source);
     });
   }

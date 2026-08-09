@@ -482,15 +482,21 @@ print_status_tail() {
   done < <(tail -n "$STATUS_TAIL" "$status")
 }
 
+# One version token over an extension's whole load chain, in argument order:
+# an entrypoint that only re-exports a shared implementation cannot prove the
+# loaded code is current on its own bytes. The extensions hash the same files
+# in the same order, so a single-file call still matches a plain file digest.
 hash_file() {
-  local file=$1
-  [ -f "$file" ] || return 1
+  local file
+  for file in "$@"; do
+    [ -f "$file" ] || return 1
+  done
   if command -v shasum >/dev/null 2>&1; then
-    shasum -a 256 "$file" | awk '{print "sha256:" $1}'
+    cat -- "$@" | shasum -a 256 | awk '{print "sha256:" $1}'
   elif command -v sha256sum >/dev/null 2>&1; then
-    sha256sum "$file" | awk '{print "sha256:" $1}'
+    cat -- "$@" | sha256sum | awk '{print "sha256:" $1}'
   else
-    cksum "$file" | awk '{print "cksum:" $1 ":" $2}'
+    cat -- "$@" | cksum | awk '{print "cksum:" $1 ":" $2}'
   fi
 }
 
@@ -636,8 +642,8 @@ elif [ "$PRIMARY_HARNESS" = omp ]; then
   OMP_WATCH_MARKER="$STATE/.omp-watch-extension-loaded"
   OMP_TURNEND_MARKER="$STATE/.omp-turnend-extension-loaded"
   OMP_LOCK="$STATE/.lock"
-  OMP_WATCH_VERSION=$(hash_file "$OMP_EXT" || printf '')
-  OMP_TURNEND_VERSION=$(hash_file "$OMP_TURNEND_EXT" || printf '')
+  OMP_WATCH_VERSION=$(hash_file "$OMP_EXT" "$FM_ROOT/.pi/extensions/fm-primary-pi-watch.ts" || printf '')
+  OMP_TURNEND_VERSION=$(hash_file "$OMP_TURNEND_EXT" "$FM_ROOT/.pi/extensions/fm-primary-turnend-guard.ts" || printf '')
   if ! pi_extension_loaded "$OMP_WATCH_MARKER" "$OMP_WATCH_VERSION" "$OMP_LOCK" \
     || ! pi_extension_loaded "$OMP_TURNEND_MARKER" "$OMP_TURNEND_VERSION" "$OMP_LOCK"; then
     printf 'OMP_WATCH_EXTENSION: not loaded - restart OMP so %s and %s auto-load for turn-end guard and background wake coverage; use -e %s -e %s as an explicit fallback\n' "$OMP_TURNEND_EXT" "$OMP_EXT" "$OMP_TURNEND_EXT" "$OMP_EXT"
