@@ -14,14 +14,14 @@ It creates a kind `captain` backlog item when absent and invokes `tasks-axi hold
 It rejects an identity collision, a changed title, and attempts to reopen an already resolved identity.
 
 The `complete` subcommand unions the reviewed keys into `decision_keys=` and publishes the complete attestation through a same-directory atomic metadata replacement while originating task metadata is live.
-A repeated `--existing <task-id>` option lets the reviewing origin attest an active structured Captain's Call item that already exists under a formal earlier identity or an arbitrary legacy structured identity.
+Repeated explicit existing task references may accompany current-origin decision keys and let a reviewing origin with live metadata attest an active structured Captain's Call item that already exists under a formal earlier identity or an arbitrary legacy structured identity.
 It validates every explicit identity and raw `blocked-by` edge from the active authoritative backlog before writing and unions exact identities into `decision_refs=` so retries are deterministic and idempotent.
 An existing reference must be queued, unblocked, actively held, kind `captain`, and hold-kind `captain`.
 Missing, malformed, completed, non-captain, inactive, non-queued, ordinary parked, external-hold, blocked, dangling-blocked, and mixed invalid reference sets fail before attestation.
 Existing-reference completion never invokes a backlog mutation, so each referenced task keeps its identity, title, body, dependencies, and open state and no duplicate task is created.
 The `config/backlog-backend=manual` setting retains the contract owned by `docs/configuration.md`; explicit reference validation reads the manually maintained structured backlog through compatible tasks-axi without mutating it.
 A post-teardown visual review can complete against the surviving report and durable holds without recreating volatile task metadata.
-It accepts `--none` as an explicit semantic inventory result, not as inferred absence.
+The no-decisions form records an explicit semantic inventory result, cannot accompany keys or existing references, and is never inferred from absence.
 It verifies every listed identity against tasks-axi before recording completion.
 For an open keyed status decision, it appends a `captain-held [key=<key>]: ...` transfer event only after the matching backlog hold is durable.
 `bin/fm-classify-lib.sh` recognizes that transfer as closing the live status copy without claiming that the captain has answered it.

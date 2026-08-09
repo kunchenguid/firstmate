@@ -21,7 +21,7 @@
 #   fm-decision-hold.sh hold <origin-id> <decision-key> \
 #     --title <title> --reason <reason> [--repo <repo>]
 #   fm-decision-hold.sh complete <origin-id> \
-#     (--none | <decision-key>... | --existing <task-id> [--existing <task-id>]...)
+#     (--none | (<decision-key> | --existing <task-id>)...)
 #   fm-decision-hold.sh verify <origin-id>
 #   fm-decision-hold.sh resolve <origin-id> <decision-key> \
 #     --decision-file <path> --routed-to <task-id> [--routed-to <task-id>...]
@@ -31,13 +31,6 @@
 # no unresolved captain decision. Later review passes may add keys; a live task's
 # metadata inventory is unioned idempotently. A post-teardown visual review can
 # complete against the surviving report and holds without recreating task state.
-# `--existing <task-id>` explicitly reuses an unresolved structured Captain's
-# Call item already present in the active backlog, may repeat, and may accompany
-# current-origin decision keys. Existing references require live origin metadata
-# so `decision_refs=` can durably attest their exact identities. Completion
-# validates every reference before writing the attestation and never creates,
-# closes, or mutates a referenced task. `--none` cannot accompany keys or
-# existing references.
 # `verify` is read-only and is called by scout teardown so teardown cannot erase a
 # source before this gate has succeeded.
 #
