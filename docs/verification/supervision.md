@@ -108,6 +108,9 @@ The portable session-start tests cover continuation classification, baseline imm
 Pi compaction is the only supported stale-cache refresh pair.
 Codex exec exposes only startup and context-preserving resume through tracked registration; Codex interactive reset behavior remains uncovered rather than inferred from direct wrapper invocation.
 
+OMP 17.2.12 joined the run tier on 2026-08-09 through the same tracked guard extension, and the live event probe recorded under [Watcher continuity](#watcher-continuity) is its current source evidence: initial `session_start` plus same-process `session_switch` for replacement.
+It is not yet one of the harnesses the lab below drives, so its cold-open, context-reset, and reopen rows are absent from the table above rather than measured and omitted.
+
 ### Detached session-open workers survive the hook
 
 Session start composes its digest from local reads and runs every external-network call in a worker detached by the hook (`bin/fm-startup-network.sh`), so a harness that reaped the hook's process tree would silently stop running the sweeps rather than merely delaying them.
@@ -147,7 +150,7 @@ SECONDMATE_SYNC: secondmate ios: skipped: remote inheritance failed on remote-ma
 
 The unreachable route was preserved rather than relaunched in both runs, and the result surfaced durably as a queued `check: startup-network` wake once the worker finished.
 
-Codex and Pi were not installed as run-tier labs in this measurement, so their evidence for this fact is NOT refreshed; `tests/fm-sessionstart-hook-live-e2e.test.sh` asserts it for each installed Claude, Codex exec, and Pi adapter and is the command that refreshes their record.
+Codex and Pi were not installed as run-tier labs in this measurement, so their evidence for this fact is NOT refreshed; `tests/fm-sessionstart-hook-live-e2e.test.sh` asserts it for every installed harness that lab drives - currently Claude, Codex, and Pi, not OMP - and is the command that refreshes this record.
 Cursor's separate primary live guard covers its source-free session-open transport but does not claim this detached-worker measurement.
 A harness that did reap the worker degrades loudly rather than silently: the leftover record reads as an abandoned run needing a rerun, and the next session start re-derives every finding, because these sweeps are idempotent detectors.
 
