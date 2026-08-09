@@ -8,7 +8,7 @@
 # FM_REFILL_AUTO=1 the sentinel reports mode=alert-only and never dispatches
 # or launches regardless (the sentinel is a consumer/reporter only).
 set -u
-FM_HOME="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+FM_HOME="${FM_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/fm-capacity-lib.sh
 . "$SCRIPT_DIR/fm-capacity-lib.sh"
@@ -43,7 +43,15 @@ fm_refill_sentinel_cadence() {  # -> seconds
   printf '%s\n' 600
 }
 FM_REFILL_SENTINEL_CADENCE_SECS=$(fm_refill_sentinel_cadence)
-FM_REFILL_SENTINEL_LOG="${FM_REFILL_SENTINEL_LOG:-$FM_HOME/state/refill-sentinel.log}"
+if [ "${1:-}" = --cadence ]; then
+  printf '%s\n' "$FM_REFILL_SENTINEL_CADENCE_SECS"
+  exit 0
+fi
+if [ "$#" -gt 0 ]; then
+  echo "usage: fm-refill-sentinel.sh [--cadence]" >&2
+  exit 2
+fi
+FM_REFILL_SENTINEL_LOG="${FM_REFILL_SENTINEL_LOG:-${FM_STATE_OVERRIDE:-$FM_HOME/state}/refill-sentinel.log}"
 FM_REFILL_TARGET_PRODUCTIVE="${FM_REFILL_TARGET_PRODUCTIVE:-6}"
 FM_REFILL_RESERVED_CEILING="${FM_REFILL_RESERVED_CEILING:-10}"
 

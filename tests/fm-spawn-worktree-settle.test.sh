@@ -25,6 +25,8 @@ TMP_ROOT=$(fm_test_tmproot fm-spawn-worktree-settle)
 # private state. Every spawn in this file passes its own FM_STATE_OVERRIDE, so
 # this export only scopes the direct attempt-lib calls.
 export FM_STATE_OVERRIDE="$TMP_ROOT/state"
+# shellcheck source=bin/fm-attempt-lib.sh
+. "$ROOT/bin/fm-attempt-lib.sh"
 
 # make_settle_fakebin <dir> builds a fake tmux whose `#{pane_current_path}`
 # query returns FM_FAKE_PANE_STALE for the first FM_FAKE_PANE_STALE_READS
@@ -161,7 +163,7 @@ test_already_settled_pane_costs_one_confirm_sleep() {
 # FM_BR_RECEIPT_BIN resolves to. It appends one `claim <request-file>` line per
 # invocation to $ORDER_FILE, honors FM_STEWARD_EXIT=1 (refused claim) and
 # FM_CRASH_AFTER_CLAIM=1 (claim line written, then crash before the receipt),
-# and otherwise simulates a SUCCESSFUL claim by observing the tracker effect
+# and otherwise simulates a successful claim by observing the claim effect
 # receipt on the attempt record.
 make_claim_steward() {
   local dir=$1 fakebin steward
@@ -178,7 +180,10 @@ req=${1:?request file}
 aid=$(jq -r '.attempt_id' "$req")
 gen=$(jq -r '.generation' "$req")
 bead=$(jq -r '.bead_id' "$req")
-fm_attempt_effect_observe "$aid" "$gen" tracker "{\"bead\":\"$bead\",\"status\":\"claimed\"}" || exit 1
+fm_attempt_effect_observe "$aid" "$gen" claim "{\"bead\":\"$bead\",\"status\":\"claimed\"}" || exit 1
+if [ "${FM_PRESEED_BAD_LAUNCH:-0}" = 1 ]; then
+  fm_attempt_effect_observe "$aid" "$gen" launch '{"task":"wrong","status":"launched","endpoint":"wrong","worktree":"wrong","harness":"wrong"}' || exit 1
+fi
 exit 0
 SH
   chmod +x "$steward"
@@ -238,7 +243,7 @@ run_claim_spawn() {
 # A refused claim must leave no workspace, no endpoint, and no meta: the spawn
 # returns before allocation, and the refusal is visible as claim_pending.
 test_no_workspace_or_endpoint_before_claim_observed() {
-  local rec out rc
+  local rec out rc attempt_file
   rec=$(make_claim_case claim-refused test-task)
   read_claim_record "$rec"
   out=$(run_claim_spawn test-task FM_STEWARD_EXIT=1)
@@ -247,7 +252,10 @@ test_no_workspace_or_endpoint_before_claim_observed() {
   assert_contains "$out" "claim_pending" "spawn did not report claim_pending"
   [ ! -d "$TMP_ROOT/worktrees/test-task" ] || fail "workspace created before claim receipt"
   [ ! -e "$CLAIM_HOME/state/test-task.meta" ] || fail "meta written before claim receipt"
-  pass "no workspace or endpoint exists before claim_observed"
+  attempt_file=$(find "$CLAIM_HOME/state/attempts" -maxdepth 1 -name 'test-task-a*.json' | head -1)
+  jq -e '[.receipts.claim[]? | select(.state == "pending" and (.reason.reason | contains("exit 1")))] | length >= 1' \
+    "$attempt_file" >/dev/null || fail "claim pending evidence lost the steward exit status"
+  pass "no workspace or endpoint exists before claim_observed and refusal retains its exit status"
 }
 
 # Across a crash after the claim line and a replay, the ORDER file records
@@ -271,6 +279,63 @@ test_replay_after_receipt_does_not_double_claim() {
   [ "$n" = 1 ] || fail "double claim on replay: $n"
   [ ! -e "$CLAIM_HOME/state/test-task.meta" ] || fail "replay allocated before a valid receipt"
   pass "replay after the receipt never double-claims"
+}
+
+test_replay_rejects_mismatched_claim_evidence() {
+  local rec out rc aid gen n
+  rec=$(make_claim_case claim-mismatch test-task)
+  read_claim_record "$rec"
+  : > "$CLAIM_ORDER"
+  out=$(run_claim_spawn test-task FM_CRASH_AFTER_CLAIM=1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "crash run must refuse the spawn"
+  aid=$(basename "$(find "$CLAIM_HOME/state/attempts" -maxdepth 1 -name 'test-task-a*.json' | head -1)" .json)
+  gen=$(jq -r '.envelope.generation' "$CLAIM_HOME/state/attempts/$aid.json")
+  FM_STATE_OVERRIDE="$CLAIM_HOME/state" fm_attempt_effect_observe "$aid" "$gen" claim \
+    '{"bead":"another-bead","status":"claimed"}' || fail "mismatch fixture"
+  out=$(run_claim_spawn test-task)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "mismatched claim evidence released allocation"
+  assert_contains "$out" "claim_pending" "mismatched claim evidence was not preserved pending"
+  n=$(grep -c '^claim ' "$CLAIM_ORDER" 2>/dev/null || echo 0)
+  [ "$n" = 1 ] || fail "mismatched replay invoked the steward again"
+  [ ! -e "$CLAIM_HOME/state/test-task.meta" ] || fail "mismatched evidence allocated a runtime"
+  pass "resume validates the exact current-generation claim bead and status"
+}
+
+test_successful_launch_receipt_precedes_audit_ledger() {
+  local rec out rc aid
+  rec=$(make_claim_case claim-launch-receipt test-task)
+  read_claim_record "$rec"
+  out=$(run_claim_spawn test-task)
+  rc=$?
+  expect_code 0 "$rc" "claimed spawn should launch"
+  aid=$(sed -n 's/^attempt=//p' "$CLAIM_HOME/state/test-task.meta")
+  jq -e --arg task test-task '
+    . as $record
+    | [.receipts.launch[]?
+       | select(.state == "observed" and .generation == $record.envelope.generation)
+       | select(.evidence.task == $task and .evidence.status == "launched")] | length == 1
+  ' "$CLAIM_HOME/state/attempts/$aid.json" >/dev/null || fail "current-generation launch receipt missing"
+  jq -e --arg aid "$aid" 'select(.attempt_id == $aid)' "$CLAIM_HOME/state/launch-ledger.jsonl" >/dev/null \
+    || fail "audit ledger was not published after the launch receipt"
+  pass "successful launch and instruction delivery publish launch evidence before the audit ledger"
+}
+
+test_launch_receipt_publication_failure_is_loud_and_skips_ledger() {
+  local rec out rc aid
+  rec=$(make_claim_case claim-launch-failure test-task)
+  read_claim_record "$rec"
+  out=$(run_claim_spawn test-task FM_PRESEED_BAD_LAUNCH=1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "contradictory launch receipt did not fail the spawn"
+  assert_contains "$out" "launch receipt could not be published" "launch receipt failure was not loud"
+  aid=$(basename "$(find "$CLAIM_HOME/state/attempts" -maxdepth 1 -name 'test-task-a*.json' | head -1)" .json)
+  if [ -f "$CLAIM_HOME/state/launch-ledger.jsonl" ]; then
+    ! jq -e --arg aid "$aid" 'select(.attempt_id == $aid)' "$CLAIM_HOME/state/launch-ledger.jsonl" >/dev/null \
+      || fail "audit ledger published despite launch receipt failure"
+  fi
+  pass "launch receipt publication failure fails loudly and suppresses the audit ledger"
 }
 
 # --- Task 7 attempt-bound provider-wide physical-copy ownership -----------
@@ -350,6 +415,9 @@ test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_sleep
 test_no_workspace_or_endpoint_before_claim_observed
 test_replay_after_receipt_does_not_double_claim
+test_replay_rejects_mismatched_claim_evidence
+test_successful_launch_receipt_precedes_audit_ledger
+test_launch_receipt_publication_failure_is_loud_and_skips_ledger
 test_same_home_concurrent_attempts_get_distinct_copies
 test_crash_after_allocation_retains_pending_release_obligation
 test_replay_releases_only_the_exact_owning_attempt

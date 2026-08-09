@@ -213,6 +213,15 @@ fm_pr_head_valid() {
   [[ "$head" =~ ^[0-9a-f]{40}$|^[0-9a-f]{64}$ ]]
 }
 
+fm_pr_content_in_ref() {  # <worktree> <target-ref> <source-ref>
+  local worktree=$1 target_ref=$2 source_ref=$3 target_tree merged_tree
+  target_tree=$(git -C "$worktree" rev-parse --quiet --verify "$target_ref^{tree}" 2>/dev/null) || return 1
+  [ -n "$target_tree" ] || return 1
+  merged_tree=$(git -C "$worktree" merge-tree --write-tree "$target_ref" "$source_ref" 2>/dev/null) || return 1
+  merged_tree=$(printf '%s\n' "$merged_tree" | head -1)
+  [ "$merged_tree" = "$target_tree" ]
+}
+
 fm_pr_file_mode() {
   if [ "$(uname)" = Darwin ]; then
     stat -f %Lp "$1" 2>/dev/null
@@ -1029,4 +1038,3 @@ fm_pr_attempt_observe_forge() {  # <meta> <provider> <repo> <source> [target] [h
   fi
   return 0
 }
-

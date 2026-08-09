@@ -36,11 +36,26 @@ write_meta() {  # <id> <kind> <mode> [attempt=]
 }
 
 fake_crew_state() {  # writes a fake fm-crew-state.sh that emits the given structured JSON
+  local quoted
+  printf -v quoted '%q' "$1"
   cat > "$TMP_ROOT/fm-crew-state.sh" <<SH
 #!/usr/bin/env bash
-printf '%s\\n' '$1'
+payload=$quoted
+id="\${!#}"
+if printf '%s' "\$payload" | jq -e 'type == "object"' >/dev/null 2>&1; then
+  printf '%s' "\$payload" | jq -c --arg id "\$id" '.id = \$id'
+else
+  printf '%s\\n' "\$payload"
+fi
 SH
   chmod +x "$TMP_ROOT/fm-crew-state.sh"
+}
+
+write_attempt_meta() {  # <id> <kind> <mode>
+  local id=$1 kind=$2 mode=$3 aid
+  aid=$(fm_attempt_alloc pi "$id" holu) || return 1
+  write_meta "$id" "$kind" "$mode" "attempt=$aid"
+  printf '%s\n' "$aid"
 }
 
 # Every capacity assertion is a global aggregate over the shared state dir, so
@@ -102,30 +117,34 @@ test_retired_attempt_contributes_nothing() {
   fm_attempt_effect_observe "$aid" 1 cleanup.runtime '{"records_removed":true}' || fail "runtime"
   fm_attempt_retire "$aid" 1 '{"audit":"terminal","disposition":"landed"}' || fail "retire"
   write_meta "task-z" ship local-only "attempt=$aid"
-  fake_crew_state '{"schema":"fm-crew-state.v1","id":"task-z","state":"done","source":"status-log","detail":"done: ready in branch"}'
+  fake_crew_state 'retired workers no longer have readable state'
   out=$(fm_capacity_project)
   echo "$out" | jq -e '.aggregate.productive_count == 0 and .aggregate.reserved_ownership_count == 0' >/dev/null \
     || fail "retired attempt still counted"
   pass "only an atomically retired attempt contributes neither productive nor reserved capacity"
 }
 
-test_legacy_row_without_envelope_needs_reconciliation() {
+test_meta_only_state_reserves_uncertainty_without_legacy_liveness() {
   fresh_state
   local out
   write_meta "legacy-1" ship direct-PR
   fake_crew_state '{"schema":"fm-crew-state.v1","id":"legacy-1","state":"working","source":"pane","detail":"busy"}'
   out=$(fm_capacity_project)
-  echo "$out" | jq -e '.rows[0].ambiguity_reasons | index("missing_attempt_envelope") != null' >/dev/null \
-    || fail "legacy row did not name missing envelope"
-  echo "$out" | jq -e '.aggregate.reconciliation_required == true' >/dev/null || fail "no reconciliation flag"
-  pass "legacy task without an envelope is ambiguous and requires reconciliation"
+  echo "$out" | jq -e '
+    .aggregate.productive_count == 0
+    and .aggregate.reserved_ownership_count == 1
+    and .aggregate.refill_safe == false
+    and .rows[0].classification == "unknown"
+    and (.rows[0].ambiguity_reasons | index("missing_attempt_envelope") != null)
+  ' >/dev/null || fail "meta-only state became productive legacy liveness or free capacity"
+  pass "meta-only state reserves uncertainty without restoring legacy liveness arithmetic"
 }
 
 test_scout_and_secondmate_are_excluded() {
   fresh_state
   local out
-  write_meta "scout-1" scout direct-PR
-  write_meta "sm-1" secondmate direct-PR
+  write_attempt_meta "scout-1" scout direct-PR >/dev/null || fail "scout attempt"
+  write_attempt_meta "sm-1" secondmate direct-PR >/dev/null || fail "secondmate attempt"
   fake_crew_state '{"schema":"fm-crew-state.v1","id":"scout-1","state":"working","source":"run-step","detail":"investigating"}'
   out=$(fm_capacity_project)
   [ "$(echo "$out" | jq '.rows | length')" = 0 ] || fail "scouts/secondmates appeared in rows"
@@ -135,7 +154,7 @@ test_scout_and_secondmate_are_excluded() {
 test_per_row_timeout_yields_ambiguous_row() {
   fresh_state
   local out
-  write_meta "slow-1" ship direct-PR
+  write_attempt_meta "slow-1" ship direct-PR >/dev/null || fail "slow attempt"
   cat > "$TMP_ROOT/fm-crew-state.sh" <<'SH'
 #!/usr/bin/env bash
 sleep 30
@@ -150,9 +169,9 @@ SH
 
 test_total_deadline_marks_unfinished_rows_ambiguous() {
   fresh_state
-  local out
-  write_meta "slow-a" ship direct-PR
-  write_meta "slow-b" ship direct-PR
+  local out aid
+  aid=$(write_attempt_meta "slow-a" ship direct-PR) || fail "slow-a attempt"
+  write_attempt_meta "slow-b" ship direct-PR >/dev/null || fail "slow-b attempt"
   cat > "$TMP_ROOT/fm-crew-state.sh" <<'SH'
 #!/usr/bin/env bash
 sleep 30
@@ -162,13 +181,43 @@ SH
   echo "$out" | jq -e '.aggregate.observation_complete == false' >/dev/null || fail "total deadline ignored"
   echo "$out" | jq -e '[.rows[] | select(.ambiguity_reasons | index("worker_read_timeout") != null)] | length >= 2' >/dev/null \
     || fail "unfinished rows not deterministically ambiguous"
-  pass "the total deadline marks every unfinished row ambiguous and incomplete"
+  echo "$out" | jq -e --arg aid "$aid" '.rows[] | select(.task_key == "slow-a") | .attempt_id == $aid' >/dev/null \
+    || fail "total-deadline ambiguity lost immutable attempt identity"
+  pass "the total deadline marks every unfinished row ambiguous and preserves attempt identity"
+}
+
+test_total_deadline_child_receives_home_local_context_without_state_override() {
+  local home out marker aid
+  home="$TMP_ROOT/home-context"
+  marker="$home/context-seen"
+  mkdir -p "$home/state" "$home/data" "$home/config"
+  aid=$(env FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" bash -c \
+    '. "$1"; fm_attempt_alloc pi home-task "$2"' _ "$ROOT/bin/fm-attempt-lib.sh" "$home") \
+    || fail "home-context attempt"
+  printf 'window=w-home\nkind=ship\nmode=direct-PR\nattempt=%s\n' "$aid" > "$home/state/home-task.meta"
+  cat > "$TMP_ROOT/home-context-crew.sh" <<'SH'
+#!/usr/bin/env bash
+[ "$FM_HOME" = "$EXPECTED_HOME" ] || exit 1
+[ -d "${FM_DATA_OVERRIDE:-$FM_HOME/data}" ] || exit 1
+[ -d "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" ] || exit 1
+: > "$EXPECTED_MARKER"
+id="${!#}"
+jq -nc --arg id "$id" '{schema:"fm-crew-state.v1",id:$id,state:"working",source:"run-step",detail:"context ok"}'
+SH
+  chmod +x "$TMP_ROOT/home-context-crew.sh"
+  out=$(env FM_HOME="$home" FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_CONFIG_OVERRIDE= \
+    EXPECTED_HOME="$home" EXPECTED_MARKER="$marker" FM_CREW_STATE_BIN="$TMP_ROOT/home-context-crew.sh" \
+    "$ROOT/bin/fm-fleet-refill.sh" --count-json)
+  [ -e "$marker" ] || fail "total-deadline child did not receive effective home-local context"
+  printf '%s' "$out" | jq -e '.rows[0].productive == true' >/dev/null \
+    || fail "home-local context projection was not productive"
+  pass "the total-deadline child receives effective FM_HOME and home-local data/config context"
 }
 
 test_disappearing_record_is_ambiguous() {
   fresh_state
-  local out
-  write_meta "gone-1" ship direct-PR
+  local out aid
+  aid=$(write_attempt_meta "gone-1" ship direct-PR) || fail "gone attempt"
   fake_crew_state '{"schema":"fm-crew-state.v1","id":"gone-1","state":"working","source":"run-step","detail":"busy"}'
   # FM_CAPACITY_TEST_DISAPPEAR simulates a torn read: the record vanishes
   # between listing and row read. The hook is serial-path-only, so this test
@@ -180,6 +229,8 @@ test_disappearing_record_is_ambiguous() {
   echo "$out" | jq -e --arg id gone-1 \
     '[.rows[] | select(.task_key == $id) | .reserved == true] | any' >/dev/null \
     || fail "disappearing record became a free slot"
+  echo "$out" | jq -e --arg aid "$aid" '.rows[] | select(.task_key == "gone-1") | .attempt_id == $aid' >/dev/null \
+    || fail "torn meta lost its recorded immutable attempt identity"
   echo "$out" | jq -e '.aggregate.refill_safe == false' >/dev/null \
     || fail "disappearing record looked refill-safe"
   pass "a disappearing record yields an ambiguous reserved row, never a free slot or zero capacity"
@@ -187,21 +238,56 @@ test_disappearing_record_is_ambiguous() {
 
 test_malformed_structured_output_is_ambiguous() {
   fresh_state
-  local out
-  write_meta "bad-1" ship direct-PR
+  local out aid
+  aid=$(write_attempt_meta "bad-1" ship direct-PR) || fail "bad attempt"
   fake_crew_state 'this is not json'
   out=$(fm_capacity_project)
   echo "$out" | jq -e '.aggregate.alert_only == true' >/dev/null || fail "malformed output not alert-only"
   echo "$out" | jq -e '.aggregate.refill_safe == false' >/dev/null || fail "malformed output looked refill-safe"
-  echo "$out" | jq -e '[.rows[] | select(.task_key == "bad-1")][0].attempt_id == null' >/dev/null \
-    || fail "timeout row carries a non-null attempt_id (string 'null' shape bug)"
+  echo "$out" | jq -e --arg aid "$aid" '[.rows[] | select(.task_key == "bad-1")][0].attempt_id == $aid' >/dev/null \
+    || fail "malformed worker output lost immutable attempt identity"
   pass "malformed structured worker output yields ambiguity, never idle or zero work"
+}
+
+test_schema_shaped_unsupported_worker_state_is_ambiguous() {
+  fresh_state
+  local out aid
+  aid=$(write_attempt_meta "bad-state" ship direct-PR) || fail "bad-state attempt"
+  fake_crew_state '{"schema":"fm-crew-state.v1","id":"bad-state","state":"idle","source":"pane","detail":"unsupported"}'
+  out=$(fm_capacity_project)
+  echo "$out" | jq -e --arg aid "$aid" '
+    .observation_complete == false
+    and .alert_only == true
+    and .aggregate.refill_safe == false
+    and ([.rows[] | select(.attempt_id == $aid and (.ambiguity_reasons | index("worker_read_invalid") != null))] | length) == 1
+  ' >/dev/null || fail "unsupported worker state was treated as a normal observation"
+  pass "schema-shaped unsupported worker state fails closed as incomplete evidence"
+}
+
+test_multiline_structured_worker_output_is_consumed_whole() {
+  fresh_state
+  local out
+  write_attempt_meta "pretty-json" ship direct-PR >/dev/null || fail "pretty-json attempt"
+  cat > "$TMP_ROOT/fm-crew-state.sh" <<'SH'
+#!/usr/bin/env bash
+id="${!#}"
+jq -n --arg id "$id" \
+  '{schema:"fm-crew-state.v1",id:$id,state:"working",source:"run-step",detail:"busy"}'
+SH
+  chmod +x "$TMP_ROOT/fm-crew-state.sh"
+  out=$(fm_capacity_project)
+  echo "$out" | jq -e '
+    .observation_complete == true
+    and .aggregate.productive_count == 1
+    and .aggregate.reserved_ownership_count == 1
+  ' >/dev/null || fail "pretty-printed worker JSON was not consumed as one document"
+  pass "multi-line structured worker output is consumed as one JSON document"
 }
 
 test_schema_failure_is_alert_only() {
   fresh_state
   local out
-  write_meta "bad-2" ship direct-PR
+  write_attempt_meta "bad-2" ship direct-PR >/dev/null || fail "schema attempt"
   fake_crew_state '{"schema":"fm-crew-state.v1","id":"bad-2","state":"working","source":"run-step","detail":"busy"}'
   out=$(FM_CAPACITY_FORCE_SCHEMA_MISMATCH=1 fm_capacity_project 2>/dev/null || true)
   echo "$out" | jq -e '.schema == "fm-fleet-capacity.v1"' >/dev/null || fail "schema changed"
@@ -213,7 +299,7 @@ test_schema_failure_is_alert_only() {
 test_aggregates_are_exactly_derivable_from_rows() {
   fresh_state
   local out derived
-  write_meta "r1" ship direct-PR
+  write_attempt_meta "r1" ship direct-PR >/dev/null || fail "aggregate attempt"
   fake_crew_state '{"schema":"fm-crew-state.v1","id":"r1","state":"blocked","source":"status-log","detail":"blocked: need credential"}'
   out=$(fm_capacity_project)
   derived=$(echo "$out" | jq '{pc:([.rows[]|select(.productive)]|length),rc:([.rows[]|select(.reserved)]|length),ac:([.rows[]|select((.ambiguity_reasons|length)>0)]|length)}')
@@ -228,8 +314,8 @@ test_parallel_reads_are_byte_identical() {
   # the bounded-parallel DEFAULT (>1, pinned) must produce byte-identical
   # output to a forced-sequential projection of the same state
   local a b
-  write_meta "p1" ship direct-PR
-  write_meta "p2" ship direct-PR
+  write_attempt_meta "p1" ship direct-PR >/dev/null || fail "p1 attempt"
+  write_attempt_meta "p2" ship direct-PR >/dev/null || fail "p2 attempt"
   fake_crew_state '{"schema":"fm-crew-state.v1","id":"p1","state":"working","source":"run-step","detail":"busy"}'
   [ "${FM_CAPACITY_PARALLEL:-4}" -gt 1 ] || fail "bounded-parallel default is not >1"
   a=$(FM_CAPACITY_PARALLEL=1 fm_capacity_project | jq -cS .)
@@ -242,7 +328,8 @@ test_composition_byte_parity_across_consumers_from_one_observation() {
   # one frozen observation drives --count-json, the snapshot embed, and the
   # sentinel; rows and aggregates compare byte-identically
   local frozen snap sentinel
-  write_meta "c1" ship direct-PR
+  fresh_state
+  write_attempt_meta "c1" ship direct-PR >/dev/null || fail "composition attempt"
   frozen="$TMP_ROOT/frozen.json"
   FM_STATE_OVERRIDE="$STATE" "$ROOT/bin/fm-fleet-refill.sh" --count-json 2>/dev/null > "$frozen"
   snap=$(FM_STATE_OVERRIDE="$STATE" FM_CAPACITY_OBSERVATION_FILE="$frozen" \
@@ -272,12 +359,15 @@ test_generated_timestamp_never_breaks_parity() {
 test_implementation_is_productive_and_reserved
 test_merge_wait_stays_reserved
 test_retired_attempt_contributes_nothing
-test_legacy_row_without_envelope_needs_reconciliation
+test_meta_only_state_reserves_uncertainty_without_legacy_liveness
 test_scout_and_secondmate_are_excluded
 test_per_row_timeout_yields_ambiguous_row
 test_total_deadline_marks_unfinished_rows_ambiguous
+test_total_deadline_child_receives_home_local_context_without_state_override
 test_disappearing_record_is_ambiguous
 test_malformed_structured_output_is_ambiguous
+test_schema_shaped_unsupported_worker_state_is_ambiguous
+test_multiline_structured_worker_output_is_consumed_whole
 test_schema_failure_is_alert_only
 test_aggregates_are_exactly_derivable_from_rows
 test_parallel_reads_are_byte_identical

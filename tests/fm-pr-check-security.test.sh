@@ -3348,6 +3348,7 @@ cat > "$PR_ATTEMPT_FAKEBIN/gh" <<'SH'
 printf '%s\n' "$*" >> "${FM_TEST_GH_LOG:-/dev/null}"
 case " $* " in
   *" headRefOid "*) printf '%s\n' '0123456789abcdef0123456789abcdef01234567' ;;
+  *" --json state "*) printf '%s\n' "${FM_TEST_GH_STATE:-OPEN}" ;;
 esac
 SH
 chmod +x "$PR_ATTEMPT_FAKEBIN/gh"
@@ -3410,6 +3411,38 @@ test_open_observation_is_journaled_not_receipted() {
     "$PR_ATTEMPT_STATE/attempts/$aid.json" >/dev/null \
     || fail "check observation did not record the observed head with unobserved fields null"
   pass "provisional forge observations append to the journal and never become receipts"
+}
+
+test_merged_poll_invokes_exact_attempt_terminal_reconciliation() {
+  local aid url terminal_log out rc
+  export FM_STATE_OVERRIDE="$PR_ATTEMPT_STATE"
+  . "$ROOT/bin/fm-attempt-lib.sh"
+  aid=$(setup_pr_attempt)
+  url=https://github.com/kunchenguid/firstmate/pull/1
+  printf 'github\n%s\ngithub.com\nkunchenguid/firstmate\n1\n' "$url" > "$PR_ATTEMPT_STATE/task-p.pr-poll"
+  terminal_log="$PR_ATTEMPT_ROOT/terminal.log"
+  cat > "$PR_ATTEMPT_FAKEBIN/fm-terminal" <<'SH'
+#!/usr/bin/env bash
+printf '%s|%s|%s\n' "$1" "$FM_HOME" "$FM_STATE_OVERRIDE" >> "$FM_TERMINAL_LOG"
+exit 1
+SH
+  chmod +x "$PR_ATTEMPT_FAKEBIN/fm-terminal"
+  set +e
+  out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$PR_ATTEMPT_HOME" FM_STATE_OVERRIDE="$PR_ATTEMPT_STATE" \
+    FM_TERMINAL_BIN="$PR_ATTEMPT_FAKEBIN/fm-terminal" FM_TERMINAL_LOG="$terminal_log" \
+    FM_TEST_GH_STATE=MERGED PATH="$PR_ATTEMPT_FAKEBIN:$BASE_PATH" \
+    "$POLL" --validated github "$url" github.com kunchenguid/firstmate 1 \
+    2> "$PR_ATTEMPT_ROOT/poll-terminal.err")
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "merged PR poll failed while terminal was pending"
+  [ "$out" = merged ] || fail "merged PR poll changed its one-line output contract: $out"
+  grep -Fx "$aid|$PR_ATTEMPT_HOME|$PR_ATTEMPT_STATE" "$terminal_log" >/dev/null \
+    || fail "merged PR poll did not invoke exact attempt terminal reconciliation"
+  grep -F "terminal reconciliation pending for attempt $aid; ownership preserved" "$PR_ATTEMPT_ROOT/poll-terminal.err" >/dev/null \
+    || fail "merged PR poll did not surface ownership-preserving terminal warning"
+  [ -f "$PR_ATTEMPT_STATE/attempts/$aid.json" ] || fail "failed merged-poll terminal reconciliation lost ownership"
+  pass "successful PR poll invokes exact terminal reconciliation and preserves ownership on failure"
 }
 
 test_final_landing_receipt_written_once_at_disposition() {
@@ -3485,5 +3518,6 @@ test_custom_snapshot_cleanup_on_signal
 test_returned_custom_check_descendants_are_drained
 test_teardown_removes_poll_artifacts
 test_open_observation_is_journaled_not_receipted
+test_merged_poll_invokes_exact_attempt_terminal_reconciliation
 test_final_landing_receipt_written_once_at_disposition
 test_unknown_forge_never_guesses

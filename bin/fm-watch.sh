@@ -684,6 +684,44 @@ mark_attempt_reconciliation_surfaced() {
   done < <(_fm_watch_reconciliation_rows)
 }
 
+FM_WATCH_TERMINAL_WARNING=
+fm_watch_retry_terminal_reconciliation() {
+  local attempt sig terminal failures= missing request receipt_bin
+  FM_WATCH_TERMINAL_WARNING=
+  terminal=${FM_TERMINAL_BIN:-$SCRIPT_DIR/fm-terminal.sh}
+  while IFS=$(printf '\t') read -r attempt sig; do
+    [ -n "$attempt" ] || continue
+    missing=$(fm_attempt_obligations "$attempt" 2>/dev/null || true)
+    request="$STATE/attempts/$attempt.request.claim.json"
+    [ -f "$request" ] || request="$STATE/attempts/requests/$attempt.claim.json"
+    if [[ " $missing " = *" claim "* ]] && [ -f "$request" ]; then
+      receipt_bin=${FM_BR_RECEIPT_BIN:-$SCRIPT_DIR/fm-br-receipt.sh}
+      if [ -x "$receipt_bin" ] \
+        && env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$receipt_bin" "$request" >/dev/null 2>&1; then
+        continue
+      fi
+      failures="$failures $attempt(claim-pending)"
+      continue
+    fi
+    if [ ! -x "$terminal" ]; then
+      failures="$failures $attempt(unavailable)"
+      continue
+    fi
+    if ! env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+        FM_DATA_OVERRIDE="${FM_DATA_OVERRIDE:-}" FM_CONFIG_OVERRIDE="${FM_CONFIG_OVERRIDE:-}" \
+        FM_REFILL_PROJECT="${FM_REFILL_PROJECT:-}" \
+        "$terminal" "$attempt" >/dev/null 2>&1; then
+      failures="$failures $attempt(pending)"
+    fi
+  done < <(_fm_watch_reconciliation_rows)
+  if [ -n "$failures" ]; then
+    FM_WATCH_TERMINAL_WARNING="TERMINAL-WARNING: reconciliation failed for${failures}; ownership preserved"
+    printf '%s\n' "$FM_WATCH_TERMINAL_WARNING" >&2
+    return 1
+  fi
+  return 0
+}
+
 # event_wait_or_sleep: the terminal wait of each supervision cycle. For a home
 # with push-capable windows (herdr), it replaces the blind `sleep POLL` with a
 # bounded wait on the backend's native transition stream, so a crew going
@@ -1159,12 +1197,18 @@ EOF
   hb=$(( HEARTBEAT * (1 << streak) ))
   [ "$hb" -gt "$HEARTBEAT_MAX" ] && hb=$HEARTBEAT_MAX
   if [ "$(age_of "$STATE/.last-heartbeat")" -ge "$hb" ]; then
+    fm_watch_retry_terminal_reconciliation || true
     # Triage: in always-on mode a heartbeat is benign unless the cheap fleet-scan
     # turns up a captain-relevant status the per-wake path missed. Absorb the
     # no-change case (advance the schedule and back off exactly as wake() would,
     # without exiting); the away-mode daemon, when present, owns triage and wants
     # every heartbeat.
-    if afk_present; then
+    if [ -n "$FM_WATCH_TERMINAL_WARNING" ]; then
+      reason="heartbeat: $FM_WATCH_TERMINAL_WARNING"
+      fm_wake_append heartbeat heartbeat "$reason" || exit 1
+      touch "$STATE/.last-heartbeat"
+      wake "$reason"
+    elif afk_present; then
       fm_wake_append heartbeat heartbeat heartbeat || exit 1
       touch "$STATE/.last-heartbeat"
       wake "heartbeat"

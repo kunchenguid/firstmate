@@ -1721,7 +1721,7 @@ test_heartbeat_backstop_surfaces_unsurfaced_status() {
 # so an unchanged projection never re-fires.
 
 test_heartbeat_backstop_surfaces_reconciliation_attempt() {
-  local dir state fakebin out drain_out aid pid
+  local dir state fakebin out drain_out aid pid terminal_log
   dir=$(make_case heartbeat-attempt-recon); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; drain_out="$dir/drain.out"
   # A ship task bound to a delivery attempt that reached its intended landing
@@ -1748,8 +1748,16 @@ fi
 printf '%s\n' 'state: done · source: run-step · checks green'
 SH
   chmod +x "$fakebin/fm-crew-state.sh"
+  terminal_log="$dir/terminal.log"
+  cat > "$fakebin/fm-terminal.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$1" >> "$FM_TERMINAL_LOG"
+exit 0
+SH
+  chmod +x "$fakebin/fm-terminal.sh"
 
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_TERMINAL_BIN="$fakebin/fm-terminal.sh" FM_TERMINAL_LOG="$terminal_log" \
     FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 "$WATCH" > "$out" &
   pid=$!
   wait_for_exit "$pid" 40 || fail "heartbeat did not surface the reconciliation-required attempt"
@@ -1758,11 +1766,13 @@ SH
     || fail "attempt-reconciliation wake did not record the surfaced marker"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the attempt-reconciliation heartbeat failed"
   grep "$(printf '\theartbeat\t')" "$drain_out" >/dev/null || fail "attempt-reconciliation heartbeat was not queued"
+  grep -Fx "$aid" "$terminal_log" >/dev/null || fail "heartbeat did not retry the surfaced exact attempt id"
 
   # Bounded: an unchanged projection must not re-fire; the next heartbeat is
   # absorbed against the surfaced marker.
   : > "$out"
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_TERMINAL_BIN="$fakebin/fm-terminal.sh" FM_TERMINAL_LOG="$terminal_log" \
     FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 "$WATCH" > "$out" &
   pid=$!
   if ! wait_live "$pid" 30; then
@@ -1779,7 +1789,7 @@ SH
 # .hb-surfaced-attempt-<id> marker to EXIST with matching content, never treat
 # a missing marker as an already-surfaced empty signature.
 test_heartbeat_empty_signature_reconciliation_fires_once() {
-  local dir state fakebin out drain_out aid pid
+  local dir state fakebin out drain_out aid pid terminal_log
   dir=$(make_case heartbeat-attempt-recon-empty-sig); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; drain_out="$dir/drain.out"
   # A ship task bound to an attempt whose crew state cannot be read: the
@@ -1799,8 +1809,16 @@ fi
 printf '%s\n' 'state: unknown · source: none · worker read timed out'
 SH
   chmod +x "$fakebin/fm-crew-state.sh"
+  terminal_log="$dir/terminal.log"
+  cat > "$fakebin/fm-terminal.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$1" >> "$FM_TERMINAL_LOG"
+exit 0
+SH
+  chmod +x "$fakebin/fm-terminal.sh"
 
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_TERMINAL_BIN="$fakebin/fm-terminal.sh" FM_TERMINAL_LOG="$terminal_log" \
     FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 "$WATCH" > "$out" &
   pid=$!
   wait_for_exit "$pid" 40 || fail "heartbeat did not surface the empty-signature reconciliation attempt"
@@ -1809,11 +1827,13 @@ SH
     || fail "empty-signature reconciliation wake did not record the surfaced marker"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the empty-signature heartbeat failed"
   grep "$(printf '\theartbeat\t')" "$drain_out" >/dev/null || fail "empty-signature heartbeat was not queued"
+  grep -Fx "$aid" "$terminal_log" >/dev/null || fail "heartbeat did not retry the empty-signature exact attempt id"
 
   # Bounded: with the (empty) marker recorded, an unchanged projection must not
   # re-fire; the next heartbeat is absorbed.
   : > "$out"
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_TERMINAL_BIN="$fakebin/fm-terminal.sh" FM_TERMINAL_LOG="$terminal_log" \
     FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 "$WATCH" > "$out" &
   pid=$!
   if ! wait_live "$pid" 30; then
@@ -1822,6 +1842,28 @@ SH
   [ ! -s "$out" ] || { reap "$pid"; fail "an unchanged empty-signature row re-fired a wake reason: $(cat "$out")"; }
   reap "$pid"
   pass "heartbeat fires exactly once for an empty-signature reconciliation row, then stays bounded"
+}
+
+test_heartbeat_surfaces_terminal_unavailable_warning_and_preserves_ownership() {
+  local dir state fakebin out aid pid
+  dir=$(make_case heartbeat-terminal-unavailable); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  aid=$(FM_STATE_OVERRIDE="$state" fm_attempt_alloc pi unavailable-task holu) || fail "attempt alloc"
+  printf 'kind=ship\nmode=direct-PR\nattempt=%s\n' "$aid" > "$state/unavailable-task.meta"
+  cat > "$fakebin/fm-crew-state.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' 'not-json'
+SH
+  chmod +x "$fakebin/fm-crew-state.sh"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_TERMINAL_BIN="$dir/not-installed-terminal" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 "$WATCH" > "$out" 2> "$dir/watch.err" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "terminal-unavailable heartbeat warning was not surfaced"
+  grep -F "heartbeat: TERMINAL-WARNING:" "$out" >/dev/null || fail "terminal-unavailable warning was not in the wake reason"
+  [ -f "$state/attempts/$aid.json" ] || fail "terminal-unavailable retry lost attempt ownership"
+  grep -F "$aid(unavailable)" "$dir/watch.err" >/dev/null || fail "terminal-unavailable warning omitted the exact attempt id"
+  pass "heartbeat retries terminal idempotently and surfaces unavailable warnings while preserving ownership"
 }
 
 # --- beacon stays fresh while absorbing -------------------------------------
@@ -1958,6 +2000,7 @@ test_heartbeat_no_change_absorbed
 test_heartbeat_backstop_surfaces_unsurfaced_status
 test_heartbeat_backstop_surfaces_reconciliation_attempt
 test_heartbeat_empty_signature_reconciliation_fires_once
+test_heartbeat_surfaces_terminal_unavailable_warning_and_preserves_ownership
 test_beacon_stays_fresh_while_absorbing
 test_afk_present_reverts_watcher_to_one_shot
 test_afk_paused_changed_pane_hands_off_plain_stale

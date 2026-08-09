@@ -31,7 +31,8 @@ mkdir -p "$SAFE_STATE" "$ALERT_STATE" "$TMP_ROOT/safe-data" "$TMP_ROOT/alert-dat
 
 cat > "$TMP_ROOT/fm-crew-state.sh" <<'SH'
 #!/usr/bin/env bash
-printf '%s\n' '{"schema":"fm-crew-state.v1","id":"fixture","state":"working","source":"run-step","detail":"busy"}'
+id="${!#}"
+jq -nc --arg id "$id" '{schema:"fm-crew-state.v1",id:$id,state:"working",source:"run-step",detail:"busy"}'
 SH
 chmod +x "$TMP_ROOT/fm-crew-state.sh"
 
@@ -125,6 +126,54 @@ test_sentinel_invalid_cadence_falls_back_to_default() {
   pass "an absent, comment-only, or invalid cadence value falls back to the 600 default"
 }
 
+test_sentinel_cadence_public_mode_preserves_home_override() {
+  local home out
+  home="$TMP_ROOT/override-home"
+  mkdir -p "$home/config"
+  printf '77\n' > "$home/config/refill-sentinel"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-refill-sentinel.sh" --cadence)
+  [ "$out" = 77 ] || fail "--cadence ignored the effective FM_HOME override: $out"
+  pass "--cadence publicly reports resolver precedence from the effective home"
+}
+
+test_daemon_housekeeping_runs_sentinel_on_cadence_and_escalates_alert() {
+  local state fake envlog
+  state="$TMP_ROOT/daemon-state"
+  fake="$TMP_ROOT/fake-sentinel.sh"
+  envlog="$TMP_ROOT/sentinel-env.log"
+  mkdir -p "$state"
+  cat > "$fake" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --cadence ]; then printf '1\n'; exit 0; fi
+printf '%s|%s|%s\n' "$FM_HOME" "$FM_STATE_OVERRIDE" "$FM_CONFIG_OVERRIDE" > "$SENTINEL_ENV_LOG"
+printf 'REFILL-ALERT: fixture below target\n'
+exit 1
+SH
+  chmod +x "$fake"
+  SENTINEL_ENV_LOG="$envlog" FM_HOME="$TMP_ROOT/daemon-home" FM_CONFIG_OVERRIDE="$TMP_ROOT/daemon-config" \
+    FM_REFILL_SENTINEL_BIN="$fake" bash -c '. "$1"; refill_sentinel_housekeeping "$2"' \
+    _ "$ROOT/bin/fm-supervise-daemon.sh" "$state" \
+    || fail "daemon housekeeping did not stay unavailable-safe on sentinel alert exit"
+  [ -e "$state/.subsuper-last-refill-sentinel" ] || fail "daemon did not record the sentinel cadence marker"
+  grep -F 'REFILL-ALERT: fixture below target' "$state/.subsuper-escalations" >/dev/null \
+    || fail "daemon did not route REFILL-ALERT through its escalation buffer"
+  [ "$(cat "$envlog")" = "$TMP_ROOT/daemon-home|$state|$TMP_ROOT/daemon-config" ] \
+    || fail "daemon did not propagate effective home/state/config to sentinel"
+  pass "daemon housekeeping owns sentinel cadence, home propagation, and REFILL-ALERT escalation"
+}
+
+test_daemon_housekeeping_is_safe_when_sentinel_unavailable() {
+  local state
+  state="$TMP_ROOT/daemon-unavailable"
+  mkdir -p "$state"
+  FM_HOME="$TMP_ROOT/daemon-home" FM_REFILL_SENTINEL_BIN="$TMP_ROOT/missing-sentinel" \
+    bash -c '. "$1"; refill_sentinel_housekeeping "$2"' \
+    _ "$ROOT/bin/fm-supervise-daemon.sh" "$state" \
+    || fail "missing sentinel broke daemon housekeeping"
+  [ -e "$state/.subsuper-last-refill-sentinel" ] || fail "unavailable sentinel was not cadence-throttled"
+  pass "missing sentinel is unavailable-safe and cadence-throttled"
+}
+
 test_sentinel_env_cadence_overrides_config() {
   local out
   printf '120\n' > "$CADENCE_CONFIG/refill-sentinel"
@@ -160,5 +209,8 @@ test_sentinel_notifies_on_reconciliation_or_alert
 test_sentinel_never_counts
 test_sentinel_honors_cadence_config
 test_sentinel_invalid_cadence_falls_back_to_default
+test_sentinel_cadence_public_mode_preserves_home_override
+test_daemon_housekeeping_runs_sentinel_on_cadence_and_escalates_alert
+test_daemon_housekeeping_is_safe_when_sentinel_unavailable
 test_sentinel_env_cadence_overrides_config
 test_sentinel_reports_alert_only_mode_without_the_automatic_gate

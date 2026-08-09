@@ -43,7 +43,8 @@ printf '%s\n' '{"id":"dos-t","status":"open"}' > "$PROJECT/.beads/issues.jsonl"
 # the delivery landed
 cat > "$FAKEBIN/gh" <<'SH'
 #!/usr/bin/env bash
-printf '%s\n' '{"state":"MERGED","headRefOid":"abc123","baseRefOid":"old"}'
+head=$(git -C "$FM_TEST_TERMINAL_COPY" rev-parse HEAD)
+printf '%s\n' "{\"state\":\"${FM_TEST_PR_STATE:-MERGED}\",\"headRefOid\":\"$head\",\"baseRefName\":\"main\"}"
 SH
 chmod +x "$FAKEBIN/gh"
 
@@ -52,7 +53,8 @@ chmod +x "$FAKEBIN/gh"
 cat > "$FAKEBIN/br" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = show ]; then
-  printf '%s\n' '[{"id":"dos-t","status":"open"}]'
+  if [ -e "$FM_STATE_OVERRIDE/tracker-closed" ]; then status=closed; else status=open; fi
+  printf '[{"id":"dos-t","status":"%s"}]\n' "$status"
 fi
 SH
 chmod +x "$FAKEBIN/br"
@@ -61,9 +63,21 @@ chmod +x "$FAKEBIN/br"
 # hermetic (the real binary refuses copies it does not manage)
 cat > "$FAKEBIN/treehouse" <<'SH'
 #!/usr/bin/env bash
-exit 0
+[ "${1:-}" = return ] || exit 1
+copy=${3:-}
+rm -rf -- "$copy"
 SH
 chmod +x "$FAKEBIN/treehouse"
+
+cat > "$FAKEBIN/tmux" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  kill-window) exit 0 ;;
+  list-windows) exit 0 ;;
+  *) exit 1 ;;
+esac
+SH
+chmod +x "$FAKEBIN/tmux"
 
 # fake attended steward: on success it observes the tracker effect receipt
 # through the lock-held primitive (the terminal holds the attempt lock for the
@@ -76,20 +90,52 @@ REQ=$(cat "$1")
 attempt=$(echo "$REQ" | jq -r '.attempt_id')
 gen=$(echo "$REQ" | jq -r '.generation')
 bead=$(echo "$REQ" | jq -r '.bead_id')
+if [ "${FM_TEST_STEWARD_CRASH_AFTER_MUTATION:-0}" = 1 ] \
+  && [ ! -e "$FM_STATE_OVERRIDE/steward-mutation-crashed" ]; then
+  printf '%s\n' '{"id":"dos-t","status":"closed"}' > "$FM_REFILL_PROJECT/.beads/issues.jsonl"
+  : > "$FM_STATE_OVERRIDE/tracker-closed"
+  : > "$FM_STATE_OVERRIDE/steward-mutation-crashed"
+  exit 1
+fi
 fm_attempt_effect_observe_held "$attempt" "$gen" tracker \
   "$(jq -n --arg bead "$bead" '{bead:$bead,status:"closed"}')" || exit 1
+[ "${FM_TEST_SKIP_TRACKER_CLOSE:-0}" = 1 ] || : > "$FM_STATE_OVERRIDE/tracker-closed"
 echo "tracker_receipt: $attempt close $bead closed"
 SH
 chmod +x "$FAKEBIN/fm-br-receipt.sh"
+
+cat > "$FAKEBIN/fm-fleet-refill.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+[ "${1:-}" = --refill ] || exit 2
+[ -f "${FM_CAPACITY_OBSERVATION_FILE:-}" ] || exit 3
+jq -e '.schema == "fm-fleet-capacity.v1"' "$FM_CAPACITY_OBSERVATION_FILE" >/dev/null || exit 4
+printf '%s\n' "$(jq -c '.aggregate' "$FM_CAPACITY_OBSERVATION_FILE")" >> "${FM_TERMINAL_REFILL_LOG:?}"
+if mkdir "${FM_STATE_OVERRIDE:?}/attempts/${FM_TERMINAL_ATTEMPT:?}.lock" 2>/dev/null; then
+  rmdir "${FM_STATE_OVERRIDE:?}/attempts/${FM_TERMINAL_ATTEMPT:?}.lock"
+  printf '%s\n' lock-released >> "${FM_TERMINAL_REFILL_LOG:?}"
+else
+  printf '%s\n' lock-held >> "${FM_TERMINAL_REFILL_LOG:?}"
+  exit 5
+fi
+SH
+chmod +x "$FAKEBIN/fm-fleet-refill.sh"
 
 # fake crew-state: the shared capacity projection (terminal step 9 and the
 # concurrent refill samples) needs a fast, deterministic fm-crew-state.v1 read
 FAKE_CREW="$FAKEBIN/fm-crew-state.sh"
 cat > "$FAKE_CREW" <<'SH'
 #!/usr/bin/env bash
-printf '%s\n' '{"schema":"fm-crew-state.v1","id":"fixture","state":"working","source":"fake"}'
+id="${!#}"
+jq -nc --arg id "$id" '{schema:"fm-crew-state.v1",id:$id,state:"working",source:"fake",detail:"working"}'
 SH
 chmod +x "$FAKE_CREW"
+
+cat > "$FAKEBIN/fm-crew-state-invalid.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' '{"schema":"fm-crew-state.v1","id":"wrong","state":"working","source":"fake","detail":"wrong identity"}'
+SH
+chmod +x "$FAKEBIN/fm-crew-state-invalid.sh"
 
 export FM_STATE_OVERRIDE="$STATE"
 export FM_REFILL_PROJECT="$PROJECT"
@@ -97,7 +143,11 @@ export FM_BR_RECEIPT_BIN="$FAKEBIN/fm-br-receipt.sh"
 export FM_AUTHORITY_FILE="$STATE/authority-current.json"
 export FM_TERMINAL_QUIET_SECS=0
 export FM_CREW_STATE_BIN="$FAKE_CREW"
+export FM_REFILL_BIN="$FAKEBIN/fm-fleet-refill.sh"
+export FM_TERMINAL_REFILL_LOG="$TMP_ROOT/refill.log"
 export PATH="$FAKEBIN:$PATH"
+export FM_HOME="$TMP_ROOT/home-override"
+export FM_TEST_TERMINAL_COPY="$TMP_ROOT/wt-t"
 
 # A ship meta named after the envelope task_key (with no attempt= binding) keeps
 # the retired attempt visible to the shared capacity projection: the capacity
@@ -118,26 +168,32 @@ ensure_landed_copy() {
     fm_git_init_commit "$dir"
   fi
   git -C "$dir" checkout -q -B main 2>/dev/null || true
+  if ! git -C "$dir" remote get-url origin >/dev/null 2>&1; then
+    git init -q --bare "$TMP_ROOT/terminal-remote.git"
+    git -C "$dir" remote add origin "$TMP_ROOT/terminal-remote.git"
+  fi
+  git -C "$dir" push -q --force origin HEAD:main
+  git -C "$dir" fetch -q origin main
 }
 
 setup_terminal_attempt() {  # -> prints a fully landed attempt id
-  local aid gen
+  local aid gen head endpoint_id
+  rm -f "$STATE/tracker-closed"
   aid=$(fm_attempt_alloc pi dos-t holu) || fail "alloc"
   gen=$(fm_attempt_generation "$aid") || fail "generation"
-  fm_attempt_effect_observe "$aid" "$gen" claim '{"bead":"dos-t","status":"claimed"}' || fail "claim"
+  fm_attempt_effect_observe "$aid" "$gen" claim '{"bead":"dos-t","status":"claimed","agent":"pi-primary"}' || fail "claim"
   fm_attempt_freeze_allocation "$aid" "$gen" "{\"provider\":\"tmux\",\"copy\":\"$TMP_ROOT/wt-t\"}" \
-    '{"mode":"direct-PR","base":"main","target":"origin/main","planned_path":"docs/"}' || fail "freeze"
+    '{"mode":"direct-PR","base":"main","target":"origin/main","repo_identity":"https://github.com/kunchenguid/firstmate.git","planned_path":"docs/"}' || fail "freeze"
   fm_attempt_effect_observe "$aid" "$gen" launch '{"endpoint":"w-t"}' || fail "launch"
-  fm_attempt_effect_observe "$aid" "$gen" landing '{"disposition":"landed","pr":"https://github.com/kunchenguid/firstmate/pull/1"}' \
-    || fail "landing"
-  # forge journal: fm_disposition_live finds the forge owner only through this
-  # observation, so the fully-landed fixture must journal it
-  fm_attempt_observe "$aid" "$gen" forge '{"provider":"github","pr":"https://github.com/kunchenguid/firstmate/pull/1","state":"open"}' \
-    || fail "forge journal"
   ensure_landed_copy
-  # Fresh per-effect close authority, written per attempt so a test that
-  # overrides the authority file cannot leak into later tests.
-  printf '%s\n' '{"transition":"close","authority":"captain:merge"}' > "$STATE/authority-current.json"
+  head=$(git -C "$TMP_ROOT/wt-t" rev-parse HEAD)
+  fm_attempt_observe "$aid" "$gen" forge "$(jq -nc --arg head "$head" \
+    '{provider:"github",repo:"kunchenguid/firstmate",source:"dos-t",target:null,head:$head,state:"merged",before_sha:null,after_sha:null,pr:"https://github.com/kunchenguid/firstmate/pull/1"}')" \
+    || fail "forge journal"
+  endpoint_id="run-$aid"
+  printf 'window=s:fm-%s\nendpoint_task_id=%s\nworktree=%s\nproject=%s\nkind=ship\nmode=direct-PR\nattempt=%s\n' \
+    "$endpoint_id" "$endpoint_id" "$TMP_ROOT/wt-t" "$TMP_ROOT/wt-t" "$aid" > "$STATE/$endpoint_id.meta"
+  printf '%s\n' "{\"transition\":\"close\",\"task_key\":\"dos-t\",\"attempt_id\":\"$aid\",\"generation\":$gen,\"authority\":\"captain:merge\"}" > "$STATE/authority-current.json"
   printf '%s\n' "$aid"
 }
 
@@ -145,10 +201,13 @@ semantic_equiv() {  # <file-a> <file-b>; receipt names/states/evidence with time
   local norm
   # attempt ids differ between the baseline and replayed attempts (each replay
   # allocates a fresh id), so evidence strings are normalized before compare
-  norm='walk(if type == "string" then gsub("-a[0-9]+$"; "-aN") else . end) | [.receipts | to_entries[] | {name:.key, entries:[.value[] | {state,evidence}]}]'
+  norm='walk(if type == "object" then del(.attempt_id,.generation) elif type == "string" then (gsub("-a[0-9]+$"; "-aN") | gsub("^[0-9a-f]{40}$"; "SHA")) else . end) | [.receipts | to_entries[] | {name:.key, entries:[.value[] | {state,evidence}]}]'
   jq -S "$norm" "$1" > "$TMP_ROOT/sem-a.json"
   jq -S "$norm" "$2" > "$TMP_ROOT/sem-b.json"
-  cmp -s "$TMP_ROOT/sem-a.json" "$TMP_ROOT/sem-b.json"
+  if ! cmp -s "$TMP_ROOT/sem-a.json" "$TMP_ROOT/sem-b.json"; then
+    diff -u "$TMP_ROOT/sem-a.json" "$TMP_ROOT/sem-b.json" >&2 || true
+    return 1
+  fi
 }
 
 test_outer_lock_spans_verification_through_retirement() {
@@ -172,7 +231,7 @@ test_crash_after_every_effect_replays_to_semantic_equivalence() {
   local baseline aid point
   baseline=$(setup_terminal_attempt)
   FM_STATE_OVERRIDE="$STATE" "$ROOT/bin/fm-terminal.sh" "$baseline" >/dev/null 2>&1 || true
-  for point in claim launch closure cleanup retirement; do
+  for point in claim launch landing closure cleanup retirement; do
     aid=$(setup_terminal_attempt)
     FM_STATE_OVERRIDE="$STATE" FM_TERMINAL_CRASH_AFTER="$point" \
       "$ROOT/bin/fm-terminal.sh" "$aid" >/dev/null 2>&1 || true
@@ -218,10 +277,35 @@ test_fresh_closure_authority_is_required() {
   # a claim-only authority record must not authorize bead closure
   local aid out
   aid=$(setup_terminal_attempt)
-  printf '%s\n' '{"transition":"claim","authority":"captain:dispatch"}' > "$STATE/authority-current.json"
+  printf '%s\n' '{"transition":"claim","task_key":"dos-t","authority":"captain:dispatch"}' > "$STATE/authority-current.json"
   out=$(FM_STATE_OVERRIDE="$STATE" "$ROOT/bin/fm-terminal.sh" "$aid" 2>&1 || true)
   assert_contains "$out" "authority" "closure without fresh authority proceeded"
   pass "claim authorization never authorizes later bead closure or destructive cleanup"
+}
+
+test_landed_requires_confirmed_tracker_closure() {
+  local aid out
+  aid=$(setup_terminal_attempt)
+  out=$(FM_TEST_SKIP_TRACKER_CLOSE=1 "$ROOT/bin/fm-terminal.sh" "$aid" 2>&1 || true)
+  assert_contains "$out" "tracker closure is not confirmed" "landed attempt accepted only a receipt without tracker closure"
+  jq -e '.receipts.cleanup == null and .receipts["cleanup.endpoint"] == null' "$STATE/attempts/$aid.json" >/dev/null \
+    || fail "cleanup ran without confirmed tracker closure"
+  pass "landed cleanup requires both close authority and confirmed tracker closure"
+}
+
+test_tracker_mutation_replay_preserves_the_original_close_request() {
+  local aid out request original_hash replay_hash
+  aid=$(setup_terminal_attempt)
+  request="$STATE/attempts/requests/$aid.close.json"
+  out=$(FM_TEST_STEWARD_CRASH_AFTER_MUTATION=1 "$ROOT/bin/fm-terminal.sh" "$aid" 2>&1 || true)
+  assert_contains "$out" "tracker receipt pending" "simulated post-mutation steward crash did not stop terminal"
+  original_hash=$(jq -r '.expected_source_hash' "$request")
+  rm -f "$STATE/authority-current.json"
+  out=$("$ROOT/bin/fm-terminal.sh" "$aid" 2>&1) || fail "close-request replay failed: $out"
+  replay_hash=$(jq -r '.expected_source_hash' "$request")
+  [ "$original_hash" = "$replay_hash" ] || fail "terminal replaced the pre-mutation tracker hash during replay"
+  fm_attempt_is_retired "$aid" || fail "replayed tracker transition did not reach retirement"
+  pass "tracker recovery reuses the exact persisted pre-mutation close request"
 }
 
 test_immature_quiet_preserves_copy_then_matures() {
@@ -232,6 +316,68 @@ test_immature_quiet_preserves_copy_then_matures() {
   out=$(FM_TERMINAL_QUIET_SECS=0 "$ROOT/bin/fm-terminal.sh" "$aid" 2>&1 || true)
   assert_contains "$out" "cleanup:" "mature replay did not remove the copy"
   pass "immature quiet preserves the copy; a later replay removes it only after maturity"
+}
+
+test_terminal_persists_landing_without_preseed() {
+  local aid out
+  aid=$(setup_terminal_attempt)
+  jq -e '.receipts.landing == null' "$STATE/attempts/$aid.json" >/dev/null || fail "fixture preseeded landing"
+  out=$("$ROOT/bin/fm-terminal.sh" "$aid" 2>&1 || true)
+  jq -e --arg worker "run-$aid" '
+    .receipts.landing[0].evidence.reason == "merged-exact-pr-head"
+    and .receipts.landing[0].evidence.facts.bead == {id:"dos-t",status:"open",owner:""}
+    and .receipts.landing[0].evidence.facts.worker.id == $worker
+    and .receipts.landing[0].evidence.facts.endpoint.backend == "tmux"
+    and .receipts.landing[0].evidence.facts.endpoint.state == "missing"
+  ' "$STATE/attempts/$aid.json" >/dev/null \
+    || fail "terminal did not persist exact landing evidence: $out"
+  pass "terminal creates the exact landing receipt under its held lock"
+}
+
+test_terminal_requires_structured_worker_evidence_before_landing() {
+  local aid out
+  aid=$(setup_terminal_attempt)
+  out=$(FM_CREW_STATE_BIN="$FAKEBIN/fm-crew-state-invalid.sh" \
+    "$ROOT/bin/fm-terminal.sh" "$aid" 2>&1 || true)
+  assert_contains "$out" "worker evidence unavailable" "invalid worker evidence did not stop terminal"
+  jq -e '.receipts.landing == null and .receipts["cleanup.endpoint"] == null' \
+    "$STATE/attempts/$aid.json" >/dev/null || fail "terminal persisted effects without valid worker evidence"
+  pass "terminal binds valid structured worker evidence before landing"
+}
+
+test_preserved_unlanded_needs_no_close_authority_or_tracker_closure() {
+  local aid out
+  aid=$(setup_terminal_attempt)
+  rm -f "$STATE/authority-current.json"
+  out=$(FM_TEST_PR_STATE=CLOSED "$ROOT/bin/fm-terminal.sh" "$aid" 2>&1 || true)
+  assert_contains "$out" "preserved_unlanded" "closed delivery did not retire as preserved-unlanded"
+  jq -e '.receipts.landing[0].evidence.disposition == "preserved_unlanded" and (.receipts.tracker == null)' \
+    "$STATE/attempts/$aid.json" >/dev/null || fail "preserved delivery required landed-only tracker work"
+  pass "preserved-unlanded requires neither close authority nor tracker closure"
+}
+
+test_real_review_diff_failure_is_propagated() {
+  local aid out meta
+  aid=$(setup_terminal_attempt)
+  for meta in "$STATE"/*.meta; do
+    [ "$(sed -n 's/^attempt=//p' "$meta")" = "$aid" ] || continue
+    printf 'window=s:fm-run-%s\nendpoint_task_id=run-%s\nworktree=%s\nproject=%s\nkind=ship\nmode=direct-PR\nattempt=%s\n' \
+      "$aid" "$aid" "$TMP_ROOT/wt-t" "$TMP_ROOT/missing-project" "$aid" > "$meta"
+  done
+  out=$("$ROOT/bin/fm-terminal.sh" "$aid" 2>&1 || true)
+  assert_contains "$out" "project for task" "real fm-review-diff failure output was swallowed"
+  jq -e '.receipts["cleanup.endpoint"] == null' "$STATE/attempts/$aid.json" >/dev/null || fail "cleanup ran after review-diff refusal"
+  pass "real fm-review-diff nonzero refusal propagates before cleanup"
+}
+
+test_post_retirement_refill_uses_fresh_projection_after_unlock() {
+  local aid out
+  aid=$(setup_terminal_attempt)
+  : > "$FM_TERMINAL_REFILL_LOG"
+  out=$(FM_TERMINAL_ATTEMPT="$aid" "$ROOT/bin/fm-terminal.sh" "$aid" 2>&1) || fail "$out"
+  assert_contains "$(cat "$FM_TERMINAL_REFILL_LOG")" '"productive_count":' "refill did not receive the fresh projection"
+  assert_contains "$(cat "$FM_TERMINAL_REFILL_LOG")" "lock-released" "refill ran before terminal released the attempt lock"
+  pass "terminal invokes refill from the exact fresh post-retirement projection after unlocking"
 }
 
 test_preland_actual_diff_conflict_refuses_landing() {
@@ -248,5 +394,12 @@ test_crash_after_every_effect_replays_to_semantic_equivalence
 test_concurrent_terminal_and_refill_are_deterministic
 test_unknown_forge_state_refuses_destructive_cleanup
 test_fresh_closure_authority_is_required
+test_landed_requires_confirmed_tracker_closure
+test_tracker_mutation_replay_preserves_the_original_close_request
 test_immature_quiet_preserves_copy_then_matures
+test_terminal_persists_landing_without_preseed
+test_terminal_requires_structured_worker_evidence_before_landing
+test_preserved_unlanded_needs_no_close_authority_or_tracker_closure
+test_real_review_diff_failure_is_propagated
+test_post_retirement_refill_uses_fresh_projection_after_unlock
 test_preland_actual_diff_conflict_refuses_landing

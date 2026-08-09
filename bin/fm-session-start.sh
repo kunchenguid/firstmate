@@ -734,8 +734,46 @@ attempt_exit_hint() {  # <attempt-id>
     else "never started" end' "$path" 2>/dev/null || printf 'unknown'
 }
 
+retry_startup_terminal_reconciliation() {
+  local projection attempt terminal failures= missing request receipt_bin
+  [ "$READ_ONLY" -eq 0 ] || return 0
+  projection=$(FM_STATE_OVERRIDE="$STATE" FM_HOME="$FM_HOME" fm_capacity_project 2>/dev/null || true)
+  terminal=${FM_TERMINAL_BIN:-$SCRIPT_DIR/fm-terminal.sh}
+  while IFS= read -r attempt; do
+    [ -n "$attempt" ] || continue
+    missing=$(fm_attempt_obligations "$attempt" 2>/dev/null || true)
+    request="$STATE/attempts/$attempt.request.claim.json"
+    [ -f "$request" ] || request="$STATE/attempts/requests/$attempt.claim.json"
+    if [[ " $missing " = *" claim "* ]] && [ -f "$request" ]; then
+      receipt_bin=${FM_BR_RECEIPT_BIN:-$SCRIPT_DIR/fm-br-receipt.sh}
+      if [ -x "$receipt_bin" ] \
+        && env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$receipt_bin" "$request" >/dev/null 2>&1; then
+        continue
+      fi
+      failures="$failures $attempt(claim-pending)"
+      continue
+    fi
+    if [ ! -x "$terminal" ]; then
+      failures="$failures $attempt(unavailable)"
+      continue
+    fi
+    if ! env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+        FM_DATA_OVERRIDE="$DATA" FM_CONFIG_OVERRIDE="$CONFIG" \
+        FM_REFILL_PROJECT="${FM_REFILL_PROJECT:-}" \
+        "$terminal" "$attempt" >/dev/null 2>&1; then
+      failures="$failures $attempt(pending)"
+    fi
+  done < <(printf '%s' "$projection" | jq -r '.rows[] | select(.reconciliation_required == true and .attempt_id != null) | .attempt_id' 2>/dev/null || true)
+  if [ -n "$failures" ]; then
+    printf 'TERMINAL_RECONCILIATION: failed for%s; ownership preserved and heartbeat will retry.\n' "$failures"
+    return 1
+  fi
+  return 0
+}
+
 stage fleet-state
 section "FLEET STATE"
+retry_startup_terminal_reconciliation || true
 print_backlog_compact "$DATA/backlog.md" "data/backlog.md"
 
 subsection "Work under way (state/*.meta)"

@@ -144,7 +144,8 @@ test_snapshot_capacity_embed_matches_frozen_object() {
   # hermetic working crew read so the frozen projection is deterministic
   cat > "$fakebin/fm-crew-state.sh" <<'SH'
 #!/usr/bin/env bash
-printf '%s\n' '{"schema":"fm-crew-state.v1","id":"fixture","state":"working","source":"run-step","detail":"busy"}'
+id="${!#}"
+jq -nc --arg id "$id" '{schema:"fm-crew-state.v1",id:$id,state:"working",source:"run-step",detail:"busy"}'
 SH
   chmod +x "$fakebin/fm-crew-state.sh"
   frozen="$TMP_ROOT/capacity-frozen.json"

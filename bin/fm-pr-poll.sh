@@ -16,6 +16,8 @@ export LC_ALL
 # copied check.sh; the journal helper falls back to FM_ROOT_OVERRIDE for the
 # latter, and silently skips when the attempt library cannot be located.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 
 # Provisionally journal a merged forge observation into the task's attempt
 # record when the task is discoverable and its meta carries attempt=. The
@@ -67,6 +69,28 @@ fm_pr_poll_journal_merged() {  # <provider> <url> <path>
 # Find the single task whose private sidecar matches the validated identity, so
 # a --validated poll can attribute its observation without guessing. Zero or
 # multiple matches are refused: an unattributable observation is never journaled.
+fm_pr_poll_terminal_reconcile() {  # <provider> <url>
+  local provider=$1 url=$2 state_dir id meta attempt terminal message
+  state_dir="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+  id=$(fm_pr_poll_find_task "$state_dir" "$provider" "$url" 2>/dev/null) || return 0
+  meta="$state_dir/$id.meta"
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 0
+  attempt=$(sed -n 's/^attempt=//p' "$meta" 2>/dev/null | head -1)
+  [ -n "$attempt" ] || return 0
+  terminal=${FM_TERMINAL_BIN:-$FM_ROOT/bin/fm-terminal.sh}
+  message=
+  if [ ! -x "$terminal" ]; then
+    message="fm-pr-poll: terminal reconciliation unavailable for attempt $attempt; ownership preserved"
+  elif ! env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$state_dir" \
+      FM_DATA_OVERRIDE="${FM_DATA_OVERRIDE:-}" FM_CONFIG_OVERRIDE="${FM_CONFIG_OVERRIDE:-}" \
+      FM_REFILL_PROJECT="${FM_REFILL_PROJECT:-}" FM_CLOSE_AUTHORITY="forge:$provider:$url" \
+      "$terminal" "$attempt" >/dev/null; then
+    message="fm-pr-poll: terminal reconciliation pending for attempt $attempt; ownership preserved"
+  fi
+  [ -z "$message" ] || printf '%s\n' "$message" >&2
+  return 0
+}
+
 fm_pr_poll_find_task() {  # <state> <provider> <url> -> prints the single matching task id
   local state=$1 provider=$2 url=$3
   local file id matches=0 found p u
@@ -142,6 +166,7 @@ case "$provider" in
     if [ "$state" = MERGED ]; then
       printf '%s\n' merged
       fm_pr_poll_journal_merged github "$url" "$path"
+      fm_pr_poll_terminal_reconcile github "$url"
     fi
     ;;
   gitlab)
@@ -185,6 +210,7 @@ case "$provider" in
     if [ "$state" = merged ]; then
       printf '%s\n' merged
       fm_pr_poll_journal_merged gitlab "$url" "$path"
+      fm_pr_poll_terminal_reconcile gitlab "$url"
     fi
     ;;
   *) exit 0 ;;

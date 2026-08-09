@@ -89,6 +89,13 @@ worktree_git_lock_path() {
 # shellcheck disable=SC2034
 FM_CLEANUP_LIB_SOURCED=1
 
+if ! declare -F canonical_existing_dir >/dev/null 2>&1; then
+  canonical_existing_dir() {
+    [ -n "$1" ] && [ -d "$1" ] || return 1
+    (cd "$1" && pwd -P)
+  }
+fi
+
 # --- provider hook-token retirement ----------------------------------------
 remove_grok_turnend_auth() {
   local state_dir=$1 id=$2 token hooks_dir
@@ -383,26 +390,38 @@ remove_task_state_files() {
 #   fm_cleanup_preflight (unknown disposition, owned-copy identity match,
 #   live processes with cwd under the copy, dirty worktree, immature
 #   terminal-quiet interval).
-# Then the effects are observed once each, in order: cleanup.endpoint
-# (fm_backend_stop_receipt), cleanup.preservation (preserved_unlanded only),
-# cleanup.branch (branch disposition, failure recorded never suppressed),
-# cleanup.provider (teardown_treehouse_return), cleanup.runtime (the exact
+# Then the effects are observed once each, in order: cleanup.endpoint,
+# cleanup.preservation (preserved_unlanded only), cleanup.branch,
+# cleanup.provider, and cleanup.runtime (the exact
 # volatile state-file removals fm-teardown.sh performs). The write-once
 # primitives refuse any contradictory second observation.
 
 # Task id whose state meta references the attempt, resolved by scanning the
 # state dir (the attempt record itself has no back-pointer to its task).
 cleanup_task_id_for_attempt() {  # <attempt_id>
-  local attempt=$1 meta id state_dir
+  local attempt=$1 meta id state_dir found=
   state_dir="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
   for meta in "$state_dir"/*.meta; do
     [ -e "$meta" ] || continue
-    [ "$(fm_meta_get "$meta" attempt)" = "$attempt" ] || continue
+    [ "$(fm_backend_meta_exact_value "$meta" attempt 2>/dev/null || true)" = "$attempt" ] || continue
     id=$(basename "$meta" .meta)
-    printf '%s\n' "$id"
-    return 0
+    [ -z "$found" ] || {
+      echo "cleanup: refused: multiple task endpoints claim attempt $attempt" >&2
+      return 1
+    }
+    found=$id
   done
-  return 1
+  [ -n "$found" ] || return 1
+  printf '%s\n' "$found"
+}
+
+cleanup_observed_evidence() {  # <attempt_id> <effect>
+  jq -c --arg name "$2" '[.receipts[$name][]? | select(.state == "observed")][0].evidence // empty' \
+    "$(attempt_path "$1")" 2>/dev/null
+}
+
+cleanup_effect_observed() {  # <attempt_id> <effect>
+  [ -n "$(cleanup_observed_evidence "$1" "$2")" ]
 }
 
 # PIDs of processes whose CURRENT WORKING DIRECTORY is exactly <copy> or under
@@ -441,55 +460,190 @@ cleanup_launch_epoch() {  # <attempt_id>
   date -d "$ts" +%s 2>/dev/null || return 0
 }
 
-# Every non-mutating refusal check, in one place: unknown disposition, missing
-# owned-copy identity, live processes with cwd under the copy, a dirty copy,
-# and an immature terminal-quiet interval. Returns 0 only when ALL pass;
-# anything else refuses before any effect may be written.
+cleanup_orca_missing() {  # <terminal|worktree> <id>
+  local kind=$1 id=$2 out
+  fm_backend_source orca || return 2
+  case "$kind" in
+    terminal) out=$(orca terminal read --terminal "$id" --limit 1 --json 2>&1);;
+    worktree) out=$(orca worktree show --worktree "id:$id" --json 2>&1);;
+    *) return 2 ;;
+  esac
+  if printf '%s' "$out" | jq -e '.ok != false' >/dev/null 2>&1; then
+    return 1
+  fi
+  if printf '%s' "$out" | jq -e '
+    (.error.code // "" | ascii_downcase) as $c
+    | ($c == "not_found" or $c == "terminal_not_found" or $c == "worktree_not_found")
+  ' >/dev/null 2>&1; then
+    return 0
+  fi
+  return 2
+}
+
+cleanup_endpoint_absence_state() {  # <backend> <target> <task_id>
+  local backend=$1 target=$2 state out session pane workspace surface
+  case "$backend" in
+    tmux|herdr)
+      state=$(fm_backend_agent_state "$backend" "$target")
+      [ "$state" = missing ] && { printf 'missing'; return 0; }
+      case "$state" in alive|dead|ambiguous) printf 'present' ;; *) printf 'unknown' ;; esac
+      ;;
+    zellij)
+      fm_backend_source zellij || { printf 'unknown'; return 0; }
+      fm_backend_zellij_parse_target "$target" || { printf 'unknown'; return 0; }
+      session=$FM_BACKEND_ZELLIJ_SESSION
+      pane=$FM_BACKEND_ZELLIJ_PANE
+      out=$(zellij list-sessions --short --no-formatting 2>&1) || { printf 'unknown'; return 0; }
+      if ! printf '%s\n' "$out" | grep -qxF "$session"; then printf 'missing'; return 0; fi
+      out=$(fm_backend_zellij_cli "$session" action list-panes --json 2>&1) || { printf 'unknown'; return 0; }
+      if printf '%s' "$out" | jq -e --argjson p "$pane" 'type == "array" and any(.[]?; .id == $p and .is_plugin == false)' >/dev/null 2>&1; then
+        printf 'present'
+      elif printf '%s' "$out" | jq -e 'type == "array"' >/dev/null 2>&1; then
+        printf 'missing'
+      else
+        printf 'unknown'
+      fi
+      ;;
+    cmux)
+      fm_backend_source cmux || { printf 'unknown'; return 0; }
+      [ "$(fm_backend_cmux_ping_state)" = ok ] || { printf 'unknown'; return 0; }
+      fm_backend_cmux_parse_target "$target" || { printf 'unknown'; return 0; }
+      workspace=$FM_BACKEND_CMUX_WORKSPACE
+      surface=$FM_BACKEND_CMUX_SURFACE
+      out=$(fm_backend_cmux_cli workspace list --json --id-format uuids 2>&1) || { printf 'unknown'; return 0; }
+      if ! printf '%s' "$out" | jq -e --arg w "$workspace" '(.workspaces | type) == "array" and any(.workspaces[]?; .id == $w)' >/dev/null 2>&1; then
+        printf '%s' "$out" | jq -e '(.workspaces | type) == "array"' >/dev/null 2>&1 && printf 'missing' || printf 'unknown'
+        return 0
+      fi
+      out=$(fm_backend_cmux_cli list-panes --workspace "$workspace" --json --id-format uuids 2>&1) || { printf 'unknown'; return 0; }
+      if printf '%s' "$out" | jq -e --arg s "$surface" '(.panes | type) == "array" and any(.panes[]?; (.surface_ids // []) | index($s))' >/dev/null 2>&1; then
+        printf 'present'
+      elif printf '%s' "$out" | jq -e '(.panes | type) == "array"' >/dev/null 2>&1; then
+        printf 'missing'
+      else
+        printf 'unknown'
+      fi
+      ;;
+    orca)
+      if cleanup_orca_missing terminal "$target"; then printf 'missing'; else
+        case $? in 1) printf 'present' ;; *) printf 'unknown' ;; esac
+      fi
+      ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
+cleanup_provider_absence_state() {  # <backend> <copy> <orca-worktree-id>
+  case "$1" in
+    tmux|herdr|zellij|cmux)
+      if [ ! -e "$2" ]; then printf 'missing'; else printf 'present'; fi
+      ;;
+    orca)
+      if cleanup_orca_missing worktree "$3"; then printf 'missing'; else
+        case $? in 1) printf 'present' ;; *) printf 'unknown' ;; esac
+      fi
+      ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
+cleanup_runtime_absent() {  # <state-dir> <task_id> [tasktmp]
+  local state_dir=$1 task_id=$2 tasktmp=${3:-} f
+  for f in "$state_dir/$task_id.status" "$state_dir/$task_id.turn-ended" "$state_dir/$task_id.meta" \
+    "$state_dir/$task_id.pi-ext.ts" "$state_dir/$task_id.grok-turnend-token" \
+    "$state_dir/$task_id.kimi-turnend-token" "$state_dir/$task_id.muse-session" \
+    "$state_dir/$task_id.muse-session-current" "$state_dir/.$task_id.open-decisions-cursor" \
+    "$state_dir/$task_id.check.sh" "$state_dir/$task_id.pr-poll" \
+    "$state_dir/$task_id.pr-poll-registration" "$state_dir/$task_id.pr-poll-retirement" \
+    "$state_dir/$task_id.check-trust" "$state_dir/$task_id.busy" "$state_dir/$task_id.busy-gen"; do
+    [ ! -e "$f" ] && [ ! -L "$f" ] || return 1
+  done
+  [ -z "$tasktmp" ] || [ ! -e "$tasktmp" ]
+}
+
+# Every non-mutating refusal check, in one place.
 fm_cleanup_preflight() {  # <attempt_id> <disposition>; 0 only when ALL pass
-  local attempt=$1 disposition=$2 copy live now launch age
+  local attempt=$1 disposition=$2 record meta endpoint_evidence live now launch age status
+  local recorded_backend recorded_copy recorded_attempt
   fm_attempt_generation_held "$attempt" >/dev/null || return 1
   case "$disposition" in
     landed|preserved_unlanded) ;;
-    *)
-      echo "cleanup: refused: unknown disposition '$disposition' refuses destructive cleanup" >&2
-      return 1
-      ;;
+    *) echo "cleanup: refused: unknown disposition '$disposition' refuses destructive cleanup" >&2; return 1 ;;
   esac
-  copy=$(fm_attempt_load "$attempt" | jq -r '.provider.copy // ""')
-  [ -n "$copy" ] || { echo "cleanup: refused: no owned copy identity for $attempt" >&2; return 1; }
-  # Owned-copy identity match: the attempt owns the exact recorded copy, so a
-  # tmux attempt whose copy is already gone cannot be cleaned (nothing to
-  # verify, nothing to return).
-  if [ "$(fm_attempt_load "$attempt" | jq -r '.provider.provider // ""')" = tmux ] \
-     && [ ! -d "$copy" ]; then
-    echo "cleanup: refused: owned copy $copy missing for $attempt" >&2
-    return 1
+  record=$(fm_attempt_load "$attempt") || return 1
+  FM_CLEANUP_BACKEND=$(printf '%s' "$record" | jq -r '.provider.provider // ""')
+  FM_CLEANUP_COPY=$(printf '%s' "$record" | jq -r '.provider.copy // ""')
+  case "$FM_CLEANUP_BACKEND" in tmux|herdr|zellij|cmux|orca) ;; *)
+    echo "cleanup: refused: unsupported provider '$FM_CLEANUP_BACKEND'" >&2; return 1 ;; esac
+  [ -n "$FM_CLEANUP_COPY" ] || { echo "cleanup: refused: no owned copy identity for $attempt" >&2; return 1; }
+  FM_CLEANUP_STATE_DIR="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+  FM_CLEANUP_TASK_ID=$(cleanup_task_id_for_attempt "$attempt" || true)
+  FM_CLEANUP_TARGET=
+  FM_CLEANUP_ORCA_WORKTREE_ID=
+  FM_CLEANUP_TASKTMP=
+  if [ -n "$FM_CLEANUP_TASK_ID" ]; then
+    meta="$FM_CLEANUP_STATE_DIR/$FM_CLEANUP_TASK_ID.meta"
+    fm_backend_validate_task_endpoint "$meta" "$FM_CLEANUP_TASK_ID" || return 1
+    recorded_backend=$FM_BACKEND_VALIDATED_BACKEND
+    FM_CLEANUP_TARGET=$FM_BACKEND_VALIDATED_TARGET
+    recorded_copy=$(fm_backend_meta_exact_value "$meta" worktree 2>/dev/null || true)
+    recorded_attempt=$(fm_backend_meta_exact_value "$meta" attempt 2>/dev/null || true)
+    [ "$recorded_backend" = "$FM_CLEANUP_BACKEND" ] \
+      && [ "$recorded_copy" = "$FM_CLEANUP_COPY" ] \
+      && [ "$recorded_attempt" = "$attempt" ] || {
+        echo "cleanup: refused: provider, copy, task, or attempt endpoint identity mismatch" >&2
+        return 1
+      }
+    FM_CLEANUP_TASKTMP=$(fm_meta_get "$meta" tasktmp)
+    if [ "$FM_CLEANUP_BACKEND" = orca ]; then
+      FM_CLEANUP_ORCA_WORKTREE_ID=$(fm_backend_meta_exact_value "$meta" orca_worktree_id 2>/dev/null || true)
+      [ -n "$FM_CLEANUP_ORCA_WORKTREE_ID" ] || { echo "cleanup: refused: missing exact Orca worktree identity" >&2; return 1; }
+      if [ -e "$FM_CLEANUP_COPY" ]; then
+        require_orca_worktree_path_match "$FM_CLEANUP_ORCA_WORKTREE_ID" "$FM_CLEANUP_COPY" || return 1
+      fi
+    fi
+  else
+    endpoint_evidence=$(cleanup_observed_evidence "$attempt" cleanup.endpoint)
+    printf '%s' "$endpoint_evidence" | jq -e --arg b "$FM_CLEANUP_BACKEND" --arg c "$FM_CLEANUP_COPY" '
+      .backend == $b and .copy == $c and .confirmed_gone == true
+      and (.endpoint | type == "string" and length > 0)
+      and (.task_id | type == "string" and length > 0)
+    ' >/dev/null 2>&1 || {
+      echo "cleanup: refused: task endpoint identity unavailable before cleanup completion" >&2
+      return 1
+    }
+    FM_CLEANUP_TASK_ID=$(printf '%s' "$endpoint_evidence" | jq -r '.task_id')
+    FM_CLEANUP_TARGET=$(printf '%s' "$endpoint_evidence" | jq -r '.endpoint')
+    FM_CLEANUP_ORCA_WORKTREE_ID=$(printf '%s' "$endpoint_evidence" | jq -r '.orca_worktree_id // ""')
+    FM_CLEANUP_TASKTMP=$(printf '%s' "$endpoint_evidence" | jq -r '.tasktmp // ""')
   fi
-  if ! live=$(cleanup_copy_live_pids "$copy" 2>/dev/null); then
-    echo "cleanup: refused: cannot determine live processes under $copy" >&2
-    return 1
+  endpoint_evidence=$(cleanup_observed_evidence "$attempt" cleanup.endpoint)
+  if [ -n "$endpoint_evidence" ]; then
+    printf '%s' "$endpoint_evidence" | jq -e --arg b "$FM_CLEANUP_BACKEND" --arg c "$FM_CLEANUP_COPY" \
+      --arg t "$FM_CLEANUP_TARGET" --arg id "$FM_CLEANUP_TASK_ID" \
+      '.backend == $b and .copy == $c and .endpoint == $t and .task_id == $id and .confirmed_gone == true' \
+      >/dev/null 2>&1 || { echo "cleanup: refused: differing endpoint receipt" >&2; return 1; }
   fi
-  if [ -n "$live" ]; then
-    echo "cleanup: refused: live process(es) in copy $copy: $(printf '%s' "$live" | tr '\n' ' ')" >&2
-    return 1
-  fi
-  # Dirty copy: the same uncommitted-changes predicate teardown's
-  # validate_worktree_teardown_safety enforces; a non-git copy is never dirty.
-  if git -C "$copy" status --porcelain 2>/dev/null | grep -q .; then
-    echo "cleanup: refused: dirty copy $copy" >&2
-    return 1
-  fi
-  # Immature terminal-quiet interval: the copy must have been quiet - no
-  # launch activity - for the full FM_TERMINAL_QUIET_SECS window.
-  now=$(date +%s)
-  launch=$(cleanup_launch_epoch "$attempt")
-  age=0
-  if [ -n "$launch" ]; then
-    age=$(( now - launch ))
-  fi
-  if [ "$age" -lt "$FM_TERMINAL_QUIET_SECS" ]; then
-    echo "cleanup: refused: quiet interval immature for $attempt (${age}s since launch < FM_TERMINAL_QUIET_SECS=${FM_TERMINAL_QUIET_SECS}s)" >&2
-    return 1
+  if [ -e "$FM_CLEANUP_COPY" ]; then
+    git -C "$FM_CLEANUP_COPY" rev-parse --is-inside-work-tree 2>/dev/null | grep -qx true || {
+      echo "cleanup: refused: owned copy is not the recorded git worktree" >&2; return 1; }
+    live=$(cleanup_copy_live_pids "$FM_CLEANUP_COPY" 2>/dev/null) || {
+      echo "cleanup: refused: cannot determine live processes under $FM_CLEANUP_COPY" >&2; return 1; }
+    [ -z "$live" ] || { echo "cleanup: refused: live process(es) in copy $FM_CLEANUP_COPY: $(printf '%s' "$live" | tr '\n' ' ')" >&2; return 1; }
+    status=$(git -C "$FM_CLEANUP_COPY" status --porcelain 2>/dev/null) || {
+      echo "cleanup: refused: cannot read copy status" >&2; return 1; }
+    [ -z "$status" ] || { echo "cleanup: refused: dirty copy $FM_CLEANUP_COPY" >&2; return 1; }
+    now=$(date +%s)
+    launch=$(cleanup_launch_epoch "$attempt")
+    age=0
+    [ -z "$launch" ] || age=$(( now - launch ))
+    [ "$age" -ge "$FM_TERMINAL_QUIET_SECS" ] || {
+      echo "cleanup: refused: quiet interval immature for $attempt (${age}s since launch < FM_TERMINAL_QUIET_SECS=${FM_TERMINAL_QUIET_SECS}s)" >&2
+      return 1
+    }
+  else
+    [ "$(cleanup_provider_absence_state "$FM_CLEANUP_BACKEND" "$FM_CLEANUP_COPY" "$FM_CLEANUP_ORCA_WORKTREE_ID")" = missing ] || {
+      echo "cleanup: refused: provider copy absence is not authoritative" >&2; return 1; }
   fi
   return 0
 }
@@ -530,27 +684,25 @@ cleanup_branch_fate() {  # <copy> <attempt_id> -> fate JSON
   return 0
 }
 
-# Return the attempt's owned copy to its provider. tmux copies are treehouse
-# pool worktrees returned through teardown_treehouse_return (run from the
-# recorded project when the referencing meta names one, else the copy's own
-# parent so treehouse can resolve the pool by working directory). A missing
-# copy is already returned. Other providers are not yet supported by the
-# structured operation and refuse with the copy preserved.
-cleanup_provider_return() {  # <backend> <copy> <cd_dir>
-  local backend=$1 copy=$2 cd_dir=$3
+# Return the attempt's owned copy through Treehouse for session-only backends
+# or through Orca's recorded worktree id for the Orca-owned provider.
+cleanup_provider_return() {  # <backend> <copy> <cd_dir> [orca-worktree-id]
+  local backend=$1 copy=$2 cd_dir=$3 orca_worktree_id=${4:-}
   case "$backend" in
-    tmux)
-      [ -d "$copy" ] || return 0
-      # Remove our hook file so a reused pool worktree cannot fire signals for
-      # a dead task (mirrors fm-teardown.sh's pre-return hook cleanup).
+    tmux|herdr|zellij|cmux)
+      [ -e "$copy" ] || return 0
       rm -f "$copy/.claude/settings.local.json" "$copy/.opencode/plugins/fm-turn-end.js" \
-        "$copy/.fm-grok-turnend" "$copy/.fm-kimi-turnend"
+        "$copy/.opencode/plugins/fm-busy-state.js" "$copy/.fm-grok-turnend" "$copy/.fm-kimi-turnend"
       teardown_treehouse_return "$copy" "$cd_dir" "worktree" || return 1
       ;;
-    *)
-      echo "cleanup: provider return for backend '$backend' is not supported by the structured operation" >&2
-      return 1
+    orca)
+      [ -n "$orca_worktree_id" ] || return 1
+      if [ -e "$copy" ]; then
+        require_orca_worktree_path_match "$orca_worktree_id" "$copy" || return 1
+      fi
+      fm_backend_remove_worktree orca "$orca_worktree_id" || return 1
       ;;
+    *) return 1 ;;
   esac
   return 0
 }
@@ -593,54 +745,143 @@ cleanup_runtime_records() {  # <task_id>
 # The structured operation itself; the caller holds the attempt lock, so only
 # the lock-held primitives are used here and nothing reacquires.
 fm_cleanup_attempt_held() {  # <attempt_id> <disposition>; caller holds the attempt lock
-  local attempt=$1 disposition=$2 gen copy backend task_id state_dir project cd_dir
+  local attempt=$1 disposition=$2 gen project cd_dir endpoint_state endpoint_evidence
+  local preservation_evidence branch_evidence provider_evidence runtime_evidence ref head ref_head tab_id
   gen=$(fm_attempt_generation_held "$attempt") || return 1
-  # Idempotent replay before any preflight refusal: a fully cleaned attempt is a
-  # no-op success even when the owned copy is already gone (the provider return
-  # removes it), so cleanup retries converge on the same receipts.
   if fm_cleanup_effects_present "$attempt" "$disposition"; then
     echo "cleanup: $attempt already complete (disposition $disposition)"
     return 0
   fi
   fm_cleanup_preflight "$attempt" "$disposition" || return 1
-  state_dir="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
-  task_id=$(cleanup_task_id_for_attempt "$attempt" || true)
-  copy=$(fm_attempt_load "$attempt" | jq -r '.provider.copy // ""')
-  backend=$(fm_attempt_load "$attempt" | jq -r '.provider.provider // ""')
-  # 1. endpoint stop evidence (bin/fm-backend.sh's durable stop receipt)
-  fm_attempt_effect_observe_held "$attempt" "$gen" cleanup.endpoint \
-    "$(fm_backend_stop_receipt "$backend" "$task_id")" || return 1
-  # 2. preservation ref for preserved_unlanded only
-  if [ "$disposition" = preserved_unlanded ]; then
-    if [ -n "$copy" ] && [ -d "$copy/.git" ]; then
-      git -C "$copy" update-ref "refs/fm-preserve/$attempt" HEAD 2>/dev/null || true
-    fi
-    fm_attempt_effect_observe_held "$attempt" "$gen" cleanup.preservation \
-      "$(jq -n --arg ref "refs/fm-preserve/$attempt" --arg head "$(git -C "$copy" rev-parse HEAD 2>/dev/null || true)" '{ref:$ref, head:$head}')" || return 1
-  fi
-  # 3. branch fate: record, never suppress
-  fm_attempt_effect_observe_held "$attempt" "$gen" cleanup.branch \
-    "$(cleanup_branch_fate "$copy" "$attempt")" || return 1
-  # 4. provider return
-  project=$(fm_meta_get "$state_dir/$task_id.meta" project 2>/dev/null || true)
-  if [ -d "$project" ]; then
-    cd_dir=$project
+
+  if cleanup_effect_observed "$attempt" cleanup.endpoint; then
+    endpoint_state=$(cleanup_endpoint_absence_state "$FM_CLEANUP_BACKEND" "$FM_CLEANUP_TARGET" "$FM_CLEANUP_TASK_ID")
+    [ "$endpoint_state" = missing ] || {
+      echo "cleanup: endpoint receipt exists but exact endpoint absence is $endpoint_state" >&2
+      return 1
+    }
   else
-    cd_dir=$(dirname "$copy")
+    endpoint_state=$(cleanup_endpoint_absence_state "$FM_CLEANUP_BACKEND" "$FM_CLEANUP_TARGET" "$FM_CLEANUP_TASK_ID")
+    case "$endpoint_state" in
+      missing) ;;
+      present)
+        tab_id=$(fm_meta_get "$FM_CLEANUP_STATE_DIR/$FM_CLEANUP_TASK_ID.meta" zellij_tab_id)
+        fm_backend_kill "$FM_CLEANUP_BACKEND" "$FM_CLEANUP_TARGET" "$tab_id" "fm-$FM_CLEANUP_TASK_ID" || {
+          echo "cleanup: exact endpoint stop failed" >&2
+          return 1
+        }
+        endpoint_state=$(cleanup_endpoint_absence_state "$FM_CLEANUP_BACKEND" "$FM_CLEANUP_TARGET" "$FM_CLEANUP_TASK_ID")
+        [ "$endpoint_state" = missing ] || {
+          echo "cleanup: exact endpoint absence is $endpoint_state after stop; refusing endpoint receipt" >&2
+          return 1
+        }
+        ;;
+      *)
+        echo "cleanup: exact endpoint absence is $endpoint_state before stop; refusing endpoint action" >&2
+        return 1
+        ;;
+    esac
+    [ "${FM_CLEANUP_CRASH_AFTER_ENDPOINT_STOP:-0}" != 1 ] || return 42
+    endpoint_evidence=$(jq -nc --arg backend "$FM_CLEANUP_BACKEND" --arg endpoint "$FM_CLEANUP_TARGET" \
+      --arg task_id "$FM_CLEANUP_TASK_ID" --arg copy "$FM_CLEANUP_COPY" \
+      --arg orca_worktree_id "$FM_CLEANUP_ORCA_WORKTREE_ID" --arg tasktmp "$FM_CLEANUP_TASKTMP" \
+      '{backend:$backend,endpoint:$endpoint,task_id:$task_id,copy:$copy,confirmed_gone:true}
+       + (if $orca_worktree_id == "" then {} else {orca_worktree_id:$orca_worktree_id} end)
+       + (if $tasktmp == "" then {} else {tasktmp:$tasktmp} end)')
+    fm_attempt_effect_observe_held "$attempt" "$gen" cleanup.endpoint "$endpoint_evidence" || return 1
   fi
-  if ! cleanup_provider_return "$backend" "$copy" "$cd_dir"; then
-    echo "cleanup: provider return failed; copy preserved for $attempt" >&2
-    return 1
+  [ "${FM_CLEANUP_CRASH_AFTER_RECEIPT:-}" != endpoint ] || return 42
+
+  if [ "$disposition" = preserved_unlanded ]; then
+    ref="refs/fm-preserve/$attempt"
+    preservation_evidence=$(cleanup_observed_evidence "$attempt" cleanup.preservation)
+    if [ -n "$preservation_evidence" ]; then
+      printf '%s' "$preservation_evidence" | jq -e --arg ref "$ref" \
+        '.ref == $ref and (.head | type == "string" and length > 0) and .verified == true' >/dev/null 2>&1 || {
+          echo "cleanup: differing preservation receipt" >&2; return 1; }
+      if [ -e "$FM_CLEANUP_COPY" ]; then
+        head=$(printf '%s' "$preservation_evidence" | jq -r '.head')
+        ref_head=$(git -C "$FM_CLEANUP_COPY" rev-parse "$ref" 2>/dev/null) || return 1
+        [ "$ref_head" = "$head" ] || { echo "cleanup: preservation ref no longer matches its receipt" >&2; return 1; }
+      fi
+    else
+      [ -e "$FM_CLEANUP_COPY" ] || { echo "cleanup: preservation copy is absent" >&2; return 1; }
+      head=$(git -C "$FM_CLEANUP_COPY" rev-parse HEAD 2>/dev/null) || return 1
+      git -C "$FM_CLEANUP_COPY" update-ref "$ref" "$head" || {
+        echo "cleanup: preservation ref update failed" >&2
+        return 1
+      }
+      ref_head=$(git -C "$FM_CLEANUP_COPY" rev-parse "$ref" 2>/dev/null) || return 1
+      [ "$ref_head" = "$head" ] || { echo "cleanup: preservation ref verification failed" >&2; return 1; }
+      preservation_evidence=$(jq -nc --arg ref "$ref" --arg head "$head" '{ref:$ref,head:$head,verified:true}')
+      fm_attempt_effect_observe_held "$attempt" "$gen" cleanup.preservation "$preservation_evidence" || return 1
+    fi
   fi
-  fm_attempt_effect_observe_held "$attempt" "$gen" cleanup.provider \
-    "$(jq -n --arg p "$backend" --arg c "$copy" '{provider:$p, returned:true, copy:$c}')" || return 1
-  # 5. runtime-record retirement (the exact removals fm-teardown.sh performs)
-  if ! cleanup_runtime_records "$task_id"; then
-    echo "cleanup: runtime-record retirement failed for $attempt; preserving remaining records" >&2
-    return 1
+  [ "${FM_CLEANUP_CRASH_AFTER_RECEIPT:-}" != preservation ] || return 42
+
+  branch_evidence=$(cleanup_observed_evidence "$attempt" cleanup.branch)
+  if [ -n "$branch_evidence" ]; then
+    if printf '%s' "$branch_evidence" | jq -e '.failed == true' >/dev/null 2>&1; then
+      echo "cleanup: observed branch receipt records failure; provider and runtime effects remain pending" >&2
+      return 1
+    fi
+  else
+    branch_evidence=$(cleanup_branch_fate "$FM_CLEANUP_COPY" "$attempt") || return 1
+    if printf '%s' "$branch_evidence" | jq -e '.failed == true' >/dev/null 2>&1; then
+      fm_attempt_effect_pending_held "$attempt" "$gen" cleanup.branch "$branch_evidence" || return 1
+      echo "cleanup: branch disposition failed; provider and runtime effects remain pending" >&2
+      return 1
+    fi
+    fm_attempt_effect_observe_held "$attempt" "$gen" cleanup.branch "$branch_evidence" || return 1
   fi
-  fm_attempt_effect_observe_held "$attempt" "$gen" cleanup.runtime \
-    "$(jq -n --arg tid "$task_id" '{records_removed:true, task_id:$tid}')" || return 1
+  [ "${FM_CLEANUP_CRASH_AFTER_RECEIPT:-}" != branch ] || return 42
+
+  provider_evidence=$(cleanup_observed_evidence "$attempt" cleanup.provider)
+  if [ -n "$provider_evidence" ]; then
+    printf '%s' "$provider_evidence" | jq -e --arg p "$FM_CLEANUP_BACKEND" --arg c "$FM_CLEANUP_COPY" \
+      '.provider == $p and .copy == $c and .returned == true' >/dev/null 2>&1 || {
+        echo "cleanup: differing provider receipt" >&2; return 1; }
+    [ "$(cleanup_provider_absence_state "$FM_CLEANUP_BACKEND" "$FM_CLEANUP_COPY" "$FM_CLEANUP_ORCA_WORKTREE_ID")" = missing ] || {
+      echo "cleanup: provider receipt exists but exact provider resource is not confirmed absent" >&2
+      return 1
+    }
+  else
+    project=$(fm_meta_get "$FM_CLEANUP_STATE_DIR/$FM_CLEANUP_TASK_ID.meta" project 2>/dev/null || true)
+    if [ -d "$project" ]; then cd_dir=$project; else cd_dir=$(dirname "$FM_CLEANUP_COPY"); fi
+    if [ "$(cleanup_provider_absence_state "$FM_CLEANUP_BACKEND" "$FM_CLEANUP_COPY" "$FM_CLEANUP_ORCA_WORKTREE_ID")" != missing ]; then
+      cleanup_provider_return "$FM_CLEANUP_BACKEND" "$FM_CLEANUP_COPY" "$cd_dir" "$FM_CLEANUP_ORCA_WORKTREE_ID" || {
+        echo "cleanup: provider return failed; copy preserved for $attempt" >&2
+        return 1
+      }
+    fi
+    [ "${FM_CLEANUP_CRASH_AFTER_PROVIDER_RETURN:-0}" != 1 ] || return 42
+    [ "$(cleanup_provider_absence_state "$FM_CLEANUP_BACKEND" "$FM_CLEANUP_COPY" "$FM_CLEANUP_ORCA_WORKTREE_ID")" = missing ] || {
+      echo "cleanup: provider return absence is not authoritative" >&2
+      return 1
+    }
+    provider_evidence=$(jq -nc --arg p "$FM_CLEANUP_BACKEND" --arg c "$FM_CLEANUP_COPY" \
+      --arg worktree_id "$FM_CLEANUP_ORCA_WORKTREE_ID" \
+      '{provider:$p,returned:true,copy:$c} + (if $worktree_id == "" then {} else {worktree_id:$worktree_id} end)')
+    fm_attempt_effect_observe_held "$attempt" "$gen" cleanup.provider "$provider_evidence" || return 1
+  fi
+  [ "${FM_CLEANUP_CRASH_AFTER_RECEIPT:-}" != provider ] || return 42
+
+  if ! cleanup_effect_observed "$attempt" cleanup.runtime; then
+    if ! cleanup_runtime_absent "$FM_CLEANUP_STATE_DIR" "$FM_CLEANUP_TASK_ID" "$FM_CLEANUP_TASKTMP"; then
+      cleanup_runtime_records "$FM_CLEANUP_TASK_ID" || {
+        echo "cleanup: runtime-record retirement failed for $attempt; preserving remaining records" >&2
+        return 1
+      }
+    fi
+    [ "${FM_CLEANUP_CRASH_AFTER_RUNTIME_REMOVE:-0}" != 1 ] || return 42
+    cleanup_runtime_absent "$FM_CLEANUP_STATE_DIR" "$FM_CLEANUP_TASK_ID" "$FM_CLEANUP_TASKTMP" || {
+      echo "cleanup: runtime-record absence is not confirmed" >&2
+      return 1
+    }
+    runtime_evidence=$(jq -nc --arg tid "$FM_CLEANUP_TASK_ID" '{records_removed:true,task_id:$tid,confirmed_absent:true}')
+    fm_attempt_effect_observe_held "$attempt" "$gen" cleanup.runtime "$runtime_evidence" || return 1
+  fi
+  [ "${FM_CLEANUP_CRASH_AFTER_RECEIPT:-}" != runtime ] || return 42
   echo "cleanup: $attempt disposition=$disposition complete"
 }
 

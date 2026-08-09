@@ -1,66 +1,113 @@
 #!/usr/bin/env bash
-# One-time migration helper: classify each legacy task (no attempt envelope)
-# through fm_disposition_live in read/reconcile mode, then create the
-# envelope for the in-flight attempt or retire it with an exact disposition.
-# Never migrates or retires branches, never discards unknown or unlanded
-# work, and never treats bead closure as forge proof. Re-run-safe: a task
-# with an attempt is skipped.
+# One-time migration helper: classify each legacy task through
+# fm_disposition_live in read/reconcile mode, then create or recover the
+# envelope for the in-flight attempt and bind only exact live evidence.
+# It never migrates or retires branches and never discards unknown or
+# unlanded work.
 set -u
-FM_HOME="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FM_ROOT="$(cd "$SCRIPT_DIR/.." && pwd -P)"
+FM_HOME="${FM_HOME:-$FM_ROOT}"
 # shellcheck source=bin/fm-attempt-lib.sh
-. "$(dirname "${BASH_SOURCE[0]}")/fm-attempt-lib.sh"
+. "$SCRIPT_DIR/fm-attempt-lib.sh"
 # shellcheck source=bin/fm-disposition-lib.sh
-. "$(dirname "${BASH_SOURCE[0]}")/fm-disposition-lib.sh"
+. "$SCRIPT_DIR/fm-disposition-lib.sh"
 
 STATE_DIR="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
-migrate_one() {  # <task-id>
-  local id=$1 meta pr aid disp
+migration_observation_exists() {
+  local aid=$1 name=$2 evidence=$3
+  jq -e --arg name "$name" --argjson evidence "$evidence" '
+    . as $record
+    | any(.observations[]?; .name == $name and .generation == $record.envelope.generation and .evidence == $evidence)
+  ' "$(attempt_path "$aid")" >/dev/null 2>&1
+}
+
+migration_observe_once() {
+  local aid=$1 gen=$2 name=$3 evidence=$4
+  migration_observation_exists "$aid" "$name" "$evidence" \
+    || fm_attempt_observe "$aid" "$gen" "$name" "$evidence"
+}
+
+recover_migration_attempt() {
+  local id=$1 f aid count=0 found=
+  for f in "$(attempts_dir)"/*.json; do
+    [ -e "$f" ] || continue
+    jq -e --arg id "$id" --arg home "$FM_HOME" '
+      .schema == "fm-attempt.v1"
+      and .envelope.task_key == $id
+      and .envelope.home_id == $home
+      and (.envelope.task_source == "migration" or .envelope.task_source == "pi")
+      and ([.receipts.retirement[]? | select(.state == "observed")] | length == 0)
+    ' "$f" >/dev/null 2>&1 || continue
+    aid=$(basename "$f" .json)
+    found=$aid
+    count=$((count + 1))
+  done
+  [ "$count" -le 1 ] || return 2
+  [ "$count" -eq 1 ] || return 1
+  printf '%s\n' "$found"
+}
+
+migrate_one() {
+  local id=$1 meta pr aid disp gen existing_attempt forge_evidence reconcile_evidence recover_rc
   meta="$STATE_DIR/$id.meta"
   [ -f "$meta" ] || { echo "skip: no meta for $id"; return 0; }
-  [ -d "$(attempts_dir)" ] || mkdir -p "$(attempts_dir)"
-  local attempt
-  attempt=$(sed -n 's/^attempt=//p' "$meta" | head -1)
-  [ -n "$attempt" ] && [ -f "$(attempt_path "$attempt")" ] && { echo "skip: $id already has $attempt"; return 0; }
-  aid=$(fm_attempt_alloc pi "$id" "${FM_HOME:-local}") || return 1
-  # record the reconciled attempt id on the meta so a re-run skips this task
-  printf 'attempt=%s\n' "$aid" >> "$meta"
-  # journal the meta's forge observation (read/reconcile mode) so the shared
-  # live disposition reader can re-read the forge owner; never authoritative
+  mkdir -p "$(attempts_dir)" || return 1
+  existing_attempt=$(sed -n 's/^attempt=//p' "$meta" | head -1)
+  if [ -n "$existing_attempt" ]; then
+    if [ -f "$(attempt_path "$existing_attempt")" ] \
+      && jq -e --arg id "$id" '.envelope.task_key == $id' "$(attempt_path "$existing_attempt")" >/dev/null 2>&1; then
+      echo "skip: $id already has $existing_attempt"
+      return 0
+    fi
+    echo "migration: invalid existing attempt binding for $id" >&2
+    return 1
+  fi
+
+  if aid=$(recover_migration_attempt "$id" 2>/dev/null); then
+    :
+  else
+    recover_rc=$?
+    if [ "$recover_rc" -eq 2 ]; then
+      echo "migration: multiple unretired attempts match $id; refusing another allocation" >&2
+      return 1
+    fi
+    aid=$(fm_attempt_alloc migration "$id" "$FM_HOME") || return 1
+  fi
+  gen=$(fm_attempt_generation "$aid") || return 1
+
   pr=$(sed -n 's/^pr=//p' "$meta" | head -1)
   if [ -n "$pr" ]; then
-    fm_attempt_observe "$aid" 1 forge "{\"provider\":\"github\",\"pr\":\"$pr\",\"state\":\"legacy-meta\"}" || return 1
+    forge_evidence=$(jq -n --arg pr "$pr" '{provider:"github",pr:$pr,state:"legacy-meta"}')
+    migration_observe_once "$aid" "$gen" forge "$forge_evidence" || return 1
   fi
-  disp=$(fm_disposition_live "$aid")
+
+  disp=$(fm_disposition_live "$aid") || return 1
   case "$disp" in
     unknown)
-      # record the exact disposition so the reconciled record shows the reader
-      # answered unknown; the attempt stays preserved and never retires
-      fm_attempt_effect_observe "$aid" 1 landing "{\"disposition\":\"unknown\",\"migrated\":true}" || return 1
-      echo "preserved: $id disposition=unknown (reconcile from live facts)"
-      return 0 ;;
-    landed)
-      # the complete terminal effect set must be observed before retirement
-      # (obligations derive from missing observed effects, and a landed
-      # disposition also requires tracker plus the five cleanup effects); the
-      # historical legacy facts are the evidence for the reconciled record
-      fm_attempt_effect_observe "$aid" 1 claim "{\"bead\":\"$id\",\"status\":\"claimed\",\"migrated\":true}" || return 1
-      fm_attempt_effect_observe "$aid" 1 provider "{\"provider\":\"legacy\",\"copy\":\"legacy\",\"migrated\":true}" || return 1
-      fm_attempt_effect_observe "$aid" 1 launch "{\"endpoint\":\"legacy\",\"migrated\":true}" || return 1
-      fm_attempt_effect_observe "$aid" 1 landing "{\"disposition\":\"landed\",\"migrated\":true}" || return 1
-      fm_attempt_effect_observe "$aid" 1 tracker "{\"bead\":\"$id\",\"status\":\"closed\",\"migrated\":true}" || return 1
-      fm_attempt_effect_observe "$aid" 1 cleanup.endpoint "{\"endpoint\":\"legacy\",\"gone\":true,\"migrated\":true}" || return 1
-      fm_attempt_effect_observe "$aid" 1 cleanup.branch "{\"fate\":\"merged\",\"migrated\":true}" || return 1
-      fm_attempt_effect_observe "$aid" 1 cleanup.provider "{\"returned\":true,\"migrated\":true}" || return 1
-      fm_attempt_effect_observe "$aid" 1 cleanup.runtime "{\"records_removed\":true,\"migrated\":true}" || return 1
-      fm_attempt_retire "$aid" 1 "{\"audit\":\"migration\",\"disposition\":\"landed\"}" \
-        && echo "retired disposition=landed for $id" || echo "preserved: $id disposition=landed"
+      reconcile_evidence=$(jq -n '{disposition:"unknown",reader:"fm_disposition_live",migrated:true}')
+      migration_observe_once "$aid" "$gen" migration "$reconcile_evidence" || return 1
       ;;
-    preserved_unlanded)
-      fm_attempt_effect_observe "$aid" 1 landing "{\"disposition\":\"preserved_unlanded\",\"migrated\":true}" || return 1
-      echo "preserved: $id disposition=preserved_unlanded (never retired on bead closure)"
+    landed|preserved_unlanded)
+      reconcile_evidence=$(jq -n --arg disposition "$disp" \
+        '{disposition:$disposition,reader:"fm_disposition_live",migrated:true}')
+      fm_attempt_effect_observe "$aid" "$gen" landing "$reconcile_evidence" || return 1
       ;;
+    *)
+      echo "migration: invalid live disposition '$disp' for $id" >&2
+      return 1
+      ;;
+  esac
+
+  printf 'attempt=%s\n' "$aid" >> "$meta" || return 1
+  case "$disp" in
+    unknown) echo "preserved: $id disposition=unknown (journal evidence only)" ;;
+    landed) echo "preserved: $id disposition=landed (exact landing evidence; terminal reconciliation required)" ;;
+    preserved_unlanded) echo "preserved: $id disposition=preserved_unlanded (exact landing evidence; cleanup reconciliation required)" ;;
   esac
 }
 
-for id in "$@"; do migrate_one "$id"; done
+for id in "$@"; do
+  migrate_one "$id" || exit 1
+done

@@ -1144,7 +1144,7 @@ EOF
 # --- delivery-attempt state in the fleet-state digest (Task 14) -------------
 
 test_attempt_state_line_in_fleet_digest() {
-  local rec root home fakebin out aid
+  local rec root home fakebin out aid terminal_log
   rec=$(new_world attempt-digest)
   IFS='|' read -r root home fakebin <<EOF
 $rec
@@ -1181,8 +1181,16 @@ fi
 printf '%s\n' 'state: done · source: run-step · checks green'
 SH
   chmod +x "$fakebin/fm-crew-state.sh"
+  terminal_log="$home/terminal.log"
+  cat > "$fakebin/fm-terminal.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s|%s|%s\n' "$1" "$FM_HOME" "$FM_STATE_OVERRIDE" >> "$FM_TERMINAL_LOG"
+exit 1
+SH
+  chmod +x "$fakebin/fm-terminal.sh"
 
-  out=$(FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  out=$(FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_TERMINAL_BIN="$fakebin/fm-terminal.sh" \
+    FM_TERMINAL_LOG="$terminal_log" run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
   assert_contains "$out" "$aid" "fleet-state digest did not name the attempt id"
   assert_contains "$out" "generation=1" "fleet-state digest did not name the attempt generation"
   assert_contains "$out" "missing=tracker,cleanup.endpoint,cleanup.branch,cleanup.provider,cleanup.runtime" \
@@ -1190,7 +1198,12 @@ SH
   assert_contains "$out" "reconciliation=yes" "fleet-state digest did not name the reconciliation need"
   assert_contains "$out" "intended exit at landing" \
     "fleet-state digest did not derive the intended-exit hint from the receipt set"
-  pass "fleet-state digest exposes the attempt id, generation, obligations, reconciliation, and exit hint"
+  assert_contains "$out" "TERMINAL_RECONCILIATION: failed for $aid(pending); ownership preserved" \
+    "startup did not surface the terminal retry warning"
+  grep -Fx "$aid|$home|$home/state" "$terminal_log" >/dev/null \
+    || fail "startup did not retry the exact attempt with effective home/state"
+  [ -f "$home/state/attempts/$aid.json" ] || fail "failed startup terminal retry lost ownership"
+  pass "fleet digest exposes attempt state and startup retries exact terminal ownership safely"
 }
 
 # --- session-start secondmate recovery boundary -----------------------------

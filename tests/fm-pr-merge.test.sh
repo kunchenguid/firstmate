@@ -428,7 +428,7 @@ EOF
 }
 
 test_local_only_merge_records_receipt_bound_to_local_main() {
-  local root aid repo before_full after_full branch_sha rc
+  local root aid repo before_full after_full branch_sha rc terminal_log
   root="$TMP_ROOT/local-only-landing"
   rm -rf "$root"
   mkdir -p "$root/state" "$root/fakebin"
@@ -466,14 +466,27 @@ test_local_only_merge_records_receipt_bound_to_local_main() {
     "kind=ship" \
     "mode=local-only" \
     "attempt=$aid"
+  terminal_log="$root/terminal.log"
+  cat > "$root/fakebin/fm-terminal" <<'SH'
+#!/usr/bin/env bash
+printf '%s|%s|%s\n' "$1" "$FM_HOME" "$FM_STATE_OVERRIDE" >> "$FM_TERMINAL_LOG"
+exit 1
+SH
+  chmod +x "$root/fakebin/fm-terminal"
 
   set +e
   FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$root/state" \
+    FM_TERMINAL_BIN="$root/fakebin/fm-terminal" FM_TERMINAL_LOG="$terminal_log" \
     PATH="$root/fakebin:$PATH" \
     "$ROOT/bin/fm-merge-local.sh" task-x1 > "$root/out" 2> "$root/err"
   rc=$?
   set -e
   [ "$rc" -eq 0 ] || fail "local-only merge failed: $(cat "$root/err")"
+  grep -Fx "$aid|$ROOT|$root/state" "$terminal_log" >/dev/null \
+    || fail "local-only completion did not invoke exact attempt terminal reconciliation"
+  grep -F "terminal reconciliation pending for attempt $aid; ownership preserved" "$root/err" >/dev/null \
+    || fail "local-only terminal failure was not surfaced as ownership-preserving"
+  [ -f "$root/state/attempts/$aid.json" ] || fail "local-only terminal failure lost attempt ownership"
   after_full=$(git -C "$repo" rev-parse main)
   [ "$after_full" = "$branch_sha" ] || fail "ff-only merge did not land the branch tip"
   # the script journaled the exact local-main identity

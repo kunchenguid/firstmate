@@ -62,10 +62,12 @@ case "${1:-}" in
   ready) cat "${READY_JSON:?READY_JSON unset}" ;;
   show)
     id="${3:-}"
+    entry=$(jq -c --arg id "$id" '.[] | select(.id == $id)' "${READY_JSON:?READY_JSON unset}" | head -1)
+    [ -n "$entry" ] || { printf '%s\n' '[]'; exit 0; }
     if grep -qx "$id" "${FAKE_CLAIMS:?FAKE_CLAIMS unset}" 2>/dev/null; then
-      printf '%s\n' "{\"id\":\"$id\",\"status\":\"claimed\",\"claimed_by\":\"pi\"}"
+      printf '%s' "$entry" | jq -c '[. + {status:"open",claimed_by:"pi"} | .blocked_by=(.blocked_by // [])]'
     else
-      printf '%s\n' "{\"id\":\"$id\",\"status\":\"open\",\"claimed_by\":null}"
+      printf '%s' "$entry" | jq -c '[. + {status:"open",claimed_by:null} | .blocked_by=(.blocked_by // [])]'
     fi ;;
   list) printf '%s\n' '{"total":0}' ;;
   *) printf '%s\n' '[]' ;;
@@ -84,10 +86,11 @@ REQ=$(cat "$1")
 attempt=$(echo "$REQ" | jq -r '.attempt_id')
 gen=$(echo "$REQ" | jq -r '.generation')
 bead=$(echo "$REQ" | jq -r '.bead_id')
+[ "$bead" != "${FM_STEWARD_FAIL_ID:-}" ] || exit 1
 printf '%s\n' "$bead" >> "${FAKE_CLAIMS:?FAKE_CLAIMS unset}"
-fm_attempt_effect_observe "$attempt" "$gen" tracker \
+fm_attempt_effect_observe "$attempt" "$gen" claim \
   "$(jq -n --arg bead "$bead" '{bead:$bead,status:"claimed"}')" || exit 1
-echo "tracker_receipt: $attempt claim $bead claimed"
+echo "claim_receipt: $attempt claim $bead claimed"
 SH
 chmod +x "$FAKEBIN/fm-br-receipt.sh"
 
@@ -96,6 +99,7 @@ chmod +x "$FAKEBIN/fm-br-receipt.sh"
 cat > "$FAKEBIN/fm-spawn.sh" <<'SH'
 #!/usr/bin/env bash
 printf 'spawn %s\n' "$*" >> "${SPAWN_LOG:?SPAWN_LOG unset}"
+printf 'admission %s\n' "${FM_REFILL_ADMISSION_JSON:-}" >> "${SPAWN_LOG:?SPAWN_LOG unset}"
 exit 0
 SH
 chmod +x "$FAKEBIN/fm-spawn.sh"
@@ -104,7 +108,8 @@ chmod +x "$FAKEBIN/fm-spawn.sh"
 # suite is refill-safe and reproducible
 cat > "$FAKEBIN/fm-crew-state.sh" <<'SH'
 #!/usr/bin/env bash
-printf '%s\n' '{"schema":"fm-crew-state.v1","id":"fixture","state":"working","source":"fake"}'
+id="${!#}"
+jq -nc --arg id "$id" '{schema:"fm-crew-state.v1",id:$id,state:"working",source:"fake",detail:"working"}'
 SH
 chmod +x "$FAKEBIN/fm-crew-state.sh"
 
@@ -117,7 +122,7 @@ fresh_state() {
   : > "$FAKE_CLAIMS"
   : > "$DISPATCH_LOG"
   : > "$SPAWN_LOG"
-  : > "$READY_JSON"
+  printf '[]\n' > "$READY_JSON"
   rm -f "$CANDIDATES_QUERIED"
 }
 
@@ -143,14 +148,14 @@ test_provisional_planned_path_admission_serializes_on_concrete_conflict() {
   . "$ROOT/bin/fm-attempt-lib.sh"
   aid=$(fm_attempt_alloc pi dos-h holu)
   fm_attempt_freeze_allocation "$aid" 1 '{"provider":"tmux","copy":"wt-h"}' \
-    '{"mode":"direct-PR","base":"main","target":"origin/main","planned_path":"src/engine","declared_seams":[],"dependencies":[]}' || fail "freeze"
+    '{"mode":"direct-PR","base":"main","target":"origin/main","planned_path":"src/engine","declared_seams":[],"shared_mutable_state":[],"dependencies":[]}' || fail "freeze"
   fm_attempt_effect_observe "$aid" 1 launch '{"endpoint":"w-h"}' || fail "launch"
   printf 'kind=ship\nmode=direct-PR\nattempt=%s\n' "$aid" > "$STATE/task-h.meta"
   cat > "$CANDIDATES" <<'JSON'
-[{"id":"dos-h-a","planned_path":"docs/"},{"id":"dos-h-b","planned_path":"src/engine"}]
+[{"id":"dos-h-a","priority":1,"planned_path":"docs/","declared_seams":[],"shared_mutable_state":[],"dependencies":[]},{"id":"dos-h-b","priority":1,"planned_path":"src/engine","declared_seams":[],"shared_mutable_state":[],"dependencies":[]}]
 JSON
   out=$(FM_STATE_OVERRIDE="$STATE" FM_REFILL_CANDIDATES_FILE="$CANDIDATES" \
-    FM_REFILL_CURRENT_PATHS="src/engine" FM_REFILL_AUTO=1 \
+    FM_REFILL_AUTO=1 \
     FM_REFILL_DISPATCH_LOG="$DISPATCH_LOG" \
     "$ROOT/bin/fm-fleet-refill.sh" --refill 2>&1 || true)
   assert_contains "$out" "admit dos-h-a" "A not admitted"
@@ -158,12 +163,147 @@ JSON
   pass "provisional planned-path admission serializes only on concrete conflict"
 }
 
+test_structured_admission_contract_covers_all_conflicts_and_unrelated_work() {
+  local current out
+  fresh_state
+  current="$TMP_ROOT/current-evidence.json"
+  cat > "$current" <<'JSON'
+[{"attempt_id":"active-a1","task_id":"active","planned_path":"src/engine","declared_seams":["schema-owner"],"shared_mutable_state":["state/fleet.json"],"dependencies":["depends-on-current"]}]
+JSON
+  cat > "$CANDIDATES" <<'JSON'
+[
+ {"id":"path-conflict","priority":1,"planned_path":"src/engine/parser","declared_seams":[],"shared_mutable_state":[],"dependencies":[]},
+ {"id":"seam-conflict","priority":1,"planned_path":"docs/seam","declared_seams":["schema-owner"],"shared_mutable_state":[],"dependencies":[]},
+ {"id":"state-conflict","priority":1,"planned_path":"docs/state","declared_seams":[],"shared_mutable_state":["state/fleet.json"],"dependencies":[]},
+ {"id":"depends-on-current","priority":1,"planned_path":"docs/dependency","declared_seams":[],"shared_mutable_state":[],"dependencies":[]},
+ {"id":"unrelated","priority":1,"planned_path":"docs/unrelated","declared_seams":[],"shared_mutable_state":[],"dependencies":[]}
+]
+JSON
+  out=$(FM_REFILL_CANDIDATES_FILE="$CANDIDATES" FM_REFILL_CURRENT_EVIDENCE_FILE="$current" \
+    FM_REFILL_AUTO=0 \
+    "$ROOT/bin/fm-fleet-refill.sh" --refill 2>&1)
+  assert_contains "$out" "serialize path-conflict (planned path overlap)" "planned path conflict admitted"
+  assert_contains "$out" "serialize seam-conflict (known exclusive seam equality)" "exclusive seam conflict admitted"
+  assert_contains "$out" "serialize state-conflict (shared mutable state collision)" "shared state conflict admitted"
+  assert_contains "$out" "serialize depends-on-current (semantic dependency conflict)" "semantic dependency conflict admitted"
+  assert_contains "$out" "admit unrelated" "unrelated candidate was serialized"
+  pass "structured admission serializes each accepted conflict class and admits unrelated work"
+}
+
+test_same_wave_candidates_are_serialized_against_frozen_admissions() {
+  local out
+  fresh_state
+  cat > "$CANDIDATES" <<'JSON'
+[
+ {"id":"wave-first","priority":1,"planned_path":"docs/first","declared_seams":["fleet-schema"],"shared_mutable_state":[],"dependencies":[]},
+ {"id":"wave-second","priority":1,"planned_path":"docs/second","declared_seams":["fleet-schema"],"shared_mutable_state":[],"dependencies":[]}
+]
+JSON
+  out=$(FM_REFILL_CANDIDATES_FILE="$CANDIDATES" FM_REFILL_AUTO=0 \
+    "$ROOT/bin/fm-fleet-refill.sh" --refill 2>&1)
+  assert_contains "$out" "admit wave-first" "first candidate was not admitted"
+  assert_contains "$out" "serialize wave-second (known exclusive seam equality)" \
+    "second same-wave candidate bypassed the first candidate's frozen seam"
+  pass "same-wave admission serializes conflicts before allocation"
+}
+
+test_nonimplementation_attempts_do_not_supply_admission_evidence() {
+  local aid out
+  fresh_state
+  # shellcheck source=bin/fm-attempt-lib.sh
+  . "$ROOT/bin/fm-attempt-lib.sh"
+  aid=$(fm_attempt_alloc pi scout-task holu) || fail "scout allocation"
+  printf 'kind=scout\nmode=direct-PR\nattempt=%s\n' "$aid" > "$STATE/scout-endpoint.meta"
+  printf '[{"id":"ship-candidate","priority":1,"planned_path":"docs/ship","declared_seams":[],"shared_mutable_state":[],"dependencies":[]}]' > "$CANDIDATES"
+  out=$(FM_REFILL_CANDIDATES_FILE="$CANDIDATES" FM_REFILL_AUTO=0 \
+    "$ROOT/bin/fm-fleet-refill.sh" --refill 2>&1)
+  assert_contains "$out" "admit ship-candidate" "scout evidence blocked an implementation candidate"
+  assert_not_contains "$out" "required current evidence missing" "non-implementation attempt entered admission evidence"
+  pass "scouts and second mates do not participate in implementation admission"
+}
+
+test_tracker_requests_do_not_supply_admission_evidence() {
+  local out
+  fresh_state
+  mkdir -p "$STATE/attempts"
+  printf '%s\n' '{"attempt_id":"request-a1","generation":1,"bead_id":"request","transition":"claim"}' \
+    > "$STATE/attempts/request-a1.request.claim.json"
+  printf '[{"id":"ship-candidate","priority":1,"planned_path":"docs/ship","declared_seams":[],"shared_mutable_state":[],"dependencies":[]}]' > "$CANDIDATES"
+  out=$(FM_REFILL_CANDIDATES_FILE="$CANDIDATES" FM_REFILL_AUTO=0 \
+    "$ROOT/bin/fm-fleet-refill.sh" --refill 2>&1)
+  assert_contains "$out" "admit ship-candidate" "tracker request blocked an implementation candidate"
+  assert_not_contains "$out" "required current evidence missing" "tracker request entered admission evidence"
+  pass "tracker request artifacts never participate in implementation admission"
+}
+
+test_missing_structured_evidence_serializes_fail_closed() {
+  local current out
+  fresh_state
+  current="$TMP_ROOT/current-complete.json"
+  printf '[{"attempt_id":"active-a1","task_id":"active","planned_path":"src/","declared_seams":[],"shared_mutable_state":[],"dependencies":[]}]' > "$current"
+  printf '[{"id":"missing","priority":1,"planned_path":"docs/","declared_seams":[],"dependencies":[]}]' > "$CANDIDATES"
+  out=$(FM_REFILL_CANDIDATES_FILE="$CANDIDATES" FM_REFILL_CURRENT_EVIDENCE_FILE="$current" \
+    FM_REFILL_AUTO=0 "$ROOT/bin/fm-fleet-refill.sh" --refill 2>&1)
+  assert_contains "$out" "serialize missing (required candidate evidence missing)" "missing evidence did not fail closed"
+  pass "missing required admission evidence serializes fail closed"
+}
+
+test_live_query_normalizes_installed_array_and_filters_eligibility() {
+  local out
+  fresh_state
+  cat > "$READY_JSON" <<'JSON'
+[
+ {"id":"eligible","priority":1,"planned_path":"docs/a","declared_seams":[],"shared_mutable_state":[],"dependencies":[]},
+ {"id":"low-priority","priority":4,"planned_path":"docs/b","declared_seams":[],"shared_mutable_state":[],"dependencies":[]},
+ {"id":"blocked","priority":1,"blocked_by":["dep"],"planned_path":"docs/c","declared_seams":[],"shared_mutable_state":[],"dependencies":[]}
+]
+JSON
+  out=$(FM_REFILL_AUTO=0 FM_REFILL_PRIORITY_THRESHOLD=2 "$ROOT/bin/fm-fleet-refill.sh" --refill 2>&1)
+  assert_contains "$out" "admit eligible" "eligible installed-array bead was not admitted"
+  assert_not_contains "$out" "admit low-priority" "candidate above the priority threshold was admitted"
+  assert_not_contains "$out" "admit blocked" "dependency-blocked candidate was admitted"
+  pass "the shared br-show boundary normalizes installed arrays and verifies identity, readiness, ownership, dependencies, and priority"
+}
+
+test_dispatch_wave_respects_both_budgets_and_propagates_failure() {
+  local out rc launches attempts
+  fresh_state
+  printf '[{"id":"one","priority":1,"planned_path":"docs/one","declared_seams":[],"shared_mutable_state":[],"dependencies":[]},{"id":"two","priority":1,"planned_path":"docs/two","declared_seams":[],"shared_mutable_state":[],"dependencies":[]}]' > "$READY_JSON"
+  out=$(FM_REFILL_AUTO=1 FM_REFILL_TARGET_PRODUCTIVE=2 FM_REFILL_RESERVED_CEILING=1 \
+    FM_STEWARD_FAIL_ID=one "$ROOT/bin/fm-fleet-refill.sh" --refill 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "steward failure did not make --refill nonzero"
+  launches=$(grep -c '^launch ' "$DISPATCH_LOG" 2>/dev/null || true)
+  [ "${launches:-0}" -eq 0 ] || fail "failed steward launched a worker"
+  attempts=$(find "$STATE/attempts" -maxdepth 1 -name '*-a[0-9]*.json' ! -name '*.request.*' 2>/dev/null | wc -l)
+  [ "$attempts" -eq 1 ] || fail "reserved ceiling did not stop the wave after one owned failure"
+  assert_contains "$out" "claim_pending one" "failed steward ownership was not preserved as pending"
+  pass "dispatch waves stop at either budget and propagate claim/steward/spawn failure"
+}
+
+test_launch_receives_the_exact_post_lock_admission_evidence() {
+  local out admission
+  fresh_state
+  printf '[{"id":"exact-evidence","priority":1,"planned_path":"docs/exact","declared_seams":["receipt-owner"],"shared_mutable_state":["state/exact.json"],"dependencies":[]}]' > "$READY_JSON"
+  out=$(FM_REFILL_AUTO=1 "$ROOT/bin/fm-fleet-refill.sh" --refill 2>&1) \
+    || fail "exact-evidence refill failed: $out"
+  admission=$(sed -n 's/^admission //p' "$SPAWN_LOG" | head -1)
+  printf '%s' "$admission" | jq -e '
+    .id == "exact-evidence"
+    and .planned_path == "docs/exact"
+    and .declared_seams == ["receipt-owner"]
+    and .shared_mutable_state == ["state/exact.json"]
+    and .dependencies == []
+  ' >/dev/null || fail "spawn did not receive the exact admitted evidence: $admission"
+  pass "launch freezes the exact admission evidence revalidated under the home lock"
+}
+
 test_no_duplicate_dispatch_on_concurrent_refill() {
   # two concurrent --refill invocations; the home lock admits one wave and
   # the loser's post-lock ownership re-read sees the winner's claim
   local launches
   fresh_state
-  printf '[{"id":"dos-conc","planned_path":"docs/"}]' > "$READY_JSON"
+  printf '[{"id":"dos-conc","priority":1,"planned_path":"docs/","declared_seams":[],"shared_mutable_state":[],"dependencies":[]}]' > "$READY_JSON"
   (FM_STATE_OVERRIDE="$STATE" FM_REFILL_AUTO=1 FM_REFILL_DISPATCH_LOG="$DISPATCH_LOG" \
     "$ROOT/bin/fm-fleet-refill.sh" --refill >/dev/null 2>&1) &
   (FM_STATE_OVERRIDE="$STATE" FM_REFILL_AUTO=1 FM_REFILL_DISPATCH_LOG="$DISPATCH_LOG" \
@@ -197,7 +337,7 @@ test_rollback_mode_is_alert_only_and_never_dispatches() {
   # or claims beads
   local out aidcount
   fresh_state
-  printf '[{"id":"dos-att","planned_path":"docs/"},{"id":"dos-att-b","planned_path":"src/"}]' > "$READY_JSON"
+  printf '[{"id":"dos-att","priority":1,"planned_path":"docs/","declared_seams":[],"shared_mutable_state":[],"dependencies":[]},{"id":"dos-att-b","priority":1,"planned_path":"src/","declared_seams":[],"shared_mutable_state":[],"dependencies":[]}]' > "$READY_JSON"
   out=$(FM_REFILL_AUTO=0 "$ROOT/bin/fm-fleet-refill.sh" --refill 2>&1 || true)
   assert_contains "$out" "fleet-ok: alert-only" "rollback mode did not print the alert-only verdict"
   assert_contains "$out" "admit dos-att" "rollback mode omitted the informational admission verdict"
@@ -222,6 +362,14 @@ test_actual_diffs_remain_authoritative_pre_land() {
 
 test_refill_acts_only_on_complete_projection
 test_provisional_planned_path_admission_serializes_on_concrete_conflict
+test_structured_admission_contract_covers_all_conflicts_and_unrelated_work
+test_same_wave_candidates_are_serialized_against_frozen_admissions
+test_nonimplementation_attempts_do_not_supply_admission_evidence
+test_tracker_requests_do_not_supply_admission_evidence
+test_missing_structured_evidence_serializes_fail_closed
+test_live_query_normalizes_installed_array_and_filters_eligibility
+test_dispatch_wave_respects_both_budgets_and_propagates_failure
+test_launch_receives_the_exact_post_lock_admission_evidence
 test_no_duplicate_dispatch_on_concurrent_refill
 test_completion_or_merge_alone_never_decrements_capacity
 test_rollback_mode_is_alert_only_and_never_dispatches

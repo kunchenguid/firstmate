@@ -77,3 +77,15 @@ echo "merged $BRANCH into local $DEFAULT ($before -> $after) in $PROJ"
 # without attempt= behaves exactly as before, and the final landing receipt is
 # written only by the disposition step, never here.
 fm_pr_attempt_observe_forge "$META" local "$PROJ" "$ID" "$DEFAULT" "$after_full" merged "$before_full" "$after_full" "" || true
+attempt=$(sed -n 's/^attempt=//p' "$META" | head -1)
+if [ -n "$attempt" ]; then
+  terminal=${FM_TERMINAL_BIN:-$FM_ROOT/bin/fm-terminal.sh}
+  if [ ! -x "$terminal" ]; then
+    echo "fm-merge-local: terminal reconciliation unavailable for attempt $attempt; ownership preserved" >&2
+  elif ! env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+      FM_DATA_OVERRIDE="${FM_DATA_OVERRIDE:-}" FM_CONFIG_OVERRIDE="${FM_CONFIG_OVERRIDE:-}" \
+      FM_REFILL_PROJECT="${FM_REFILL_PROJECT:-}" FM_CLOSE_AUTHORITY="local-merge:$ID:$after_full" \
+      "$terminal" "$attempt" >/dev/null; then
+    echo "fm-merge-local: terminal reconciliation pending for attempt $attempt; ownership preserved" >&2
+  fi
+fi

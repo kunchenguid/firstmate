@@ -3,7 +3,7 @@
 Audience: maintainer verification.
 
 This record contains reusable version-scoped evidence for the shared fleet-capacity projection (`fm-fleet-capacity.v1`) and its shadow-stage guarantees.
-Current facts, not task chronology: the integration base, the cron-sentinel quarantine, and the shadow-only latency measurement.
+Current facts and dated recorded evidence: the integration base, shared projection, sentinel wiring, private sentinel removal, and capacity latency.
 
 ## Integration base
 
@@ -32,19 +32,11 @@ local main contained
 origin main contained
 ```
 
-## Cron sentinel quarantine
+## Historical cron sentinel quarantine
 
-The fleet-depth cron sentinel was quarantined to alert-only on 2026-08-08 (commit `9e7247b`).
-The decision: legacy capacity arithmetic is never authoritative during the shadow stage, no dispatch decision depends on it, and the shadow object is measured independently of it.
-
-The private half lives in the real home and was completed and verified by firstmate.
-The real home's `data/fleet-depth-check.sh` was replaced with a narrow alert-only unknown-capacity sentinel.
-Firstmate-verified facts: the sentinel passes `bash -n`, is mode `775`, its real query log shows `open_beads=180` with `capacity=unknown`, no wake was appended, `dispatch-staged.flag` is unchanged, and no legacy manifest, output, or stager symbols remain.
-
-The tracked half: `bin/fm-fleet-refill.sh` is quarantined so it always reports `capacity=unknown`, never emits a dispatch verdict, and never stages work; the serialization-debt safety probe and the authoritative bead-query diagnostic remain.
-The shadow recording added on top of the quarantine (this task) never changes that verdict.
-
-Removal is scheduled after the post-parity cutover: the private sentinel and its crontab entry are removed at cutover after the parity proof, and their removal is verified afterwards with home-aware `rg -uu` plus crontab inspection.
+The fleet-depth cron sentinel was quarantined to alert-only on 2026-08-08 at commit `9e7247b` while the shared projection remained in shadow.
+That dated transition established that legacy capacity arithmetic was not authoritative and could not stage dispatch.
+The later removal evidence is recorded under `## Private sentinel removal`; the tracked runtime now uses the shared projection and refill sentinel rather than the quarantine implementation.
 
 ## Latency (shadow)
 
@@ -187,24 +179,14 @@ Results:
 - `bin/fm-lint.sh` on the changed files: clean (ShellCheck 0.11.0 pinned), exit 0; `bash -n` clean on all three changed scripts.
 - `bin/fm-doc-audience-check.sh`: `fm-doc-audience-check: ok surfaces=67 local_links=214`, exit 0.
 
-Automatic refill stays disabled: nothing in the tracked side creates `config/refill-auto`, and the latency budget above does not hold, so the private enablement remains blocked.
+Automatic refill stays disabled because nothing in the tracked side creates `config/refill-auto`; enablement remains a separate home-local operator decision.
 
-## Cron sentinel removal
+## Private sentinel removal
 
-PENDING firstmate (private-home) operation, not performed by the Task 13 tracked work (scope boundary).
-Precondition: this task's cutover proof above (fixture + live parity, latency, and safety-gate evidence).
-The plan's exact removal steps (Task 13 Step 7):
-
-1. Remove the crontab entry: `crontab -l | grep -v 'fleet-depth-check' | crontab -`, then verify `crontab -l | grep -c fleet-depth-check` returns 0.
-2. Delete the private sentinel script: `rm /home/holu/fmate/firstmate/data/fleet-depth-check.sh`, then verify it is gone.
-   No wrapper is retained and the crontab is not repointed.
-3. Switch the cadence to the shared sentinel: the away-mode daemon heartbeat fleet review invokes `bin/fm-refill-sentinel.sh` at its cadence (home-local gitignored `config/refill-sentinel`); the shared sentinel now owns cadence, candidate query, logging, and notification policy.
-4. Keep historical `state/fleet-manifest.jsonl` and any next-wave staging state inert: not deleted, not read, not written by any new mechanism.
-5. Record the removal and its verification in this doc.
-
-Evidence firstmate must produce: crontab entry removed and verified 0 matches; `data/fleet-depth-check.sh` deleted; cadence switched to `bin/fm-refill-sentinel.sh`; `state/fleet-manifest.jsonl` left inert; verification output.
-As of 2026-08-08 the private sentinel is still present at `/home/holu/fmate/firstmate/data/fleet-depth-check.sh` (verified), `config/refill-auto` is absent, and the real home's git status is clean - none of the private operations were touched by the tracked work.
-The cadence switch itself now has an owner schema: see `## Refill sentinel cadence` below, whose pending-operations note names the one private file operation (create `config/refill-sentinel`) that step 3 of this section needs.
+Recorded evidence from 2026-08-08 shows that `/home/holu/fmate/firstmate/data/fleet-depth-check.sh` is absent and `crontab -l | grep -c "fleet-depth-check"` returned `0`.
+The exact recorded command output remains under `### Step 5 verification, exact outputs` below.
+No wrapper replaced the private script, and historical `state/fleet-manifest.jsonl` remains inert rather than becoming an input to the shared classifier.
+These are dated private-home facts, not verification newly performed in this worktree.
 
 ## Refill sentinel cadence
 
@@ -232,17 +214,25 @@ FM_CONFIG_OVERRIDE="$tmp/config" FM_CAPACITY_OBSERVATION_FILE=<frozen-capacity.j
   FM_REFILL_SENTINEL_VERBOSE=1 bin/fm-refill-sentinel.sh 2>&1 | grep 'cadence=120'
 ```
 
-Wiring contract for the away-mode daemon (`bin/fm-supervise-daemon.sh`; Task 14 scope note): the daemon's heartbeat fleet review is `housekeeping()` step (3), the catch-all status scan gated on `state/.subsuper-last-scan` against `FM_HEARTBEAT_SCAN_SECS`. The sentinel invocation lands as a sibling housekeeping step: gate a `state/.subsuper-last-refill-sentinel` marker against the effective cadence resolved exactly as above, invoke `bin/fm-refill-sentinel.sh` with the home's env (`FM_HOME`/`FM_STATE_OVERRIDE`/`FM_CONFIG_OVERRIDE`), feed a printed `REFILL-ALERT:` line into the daemon's normal escalation digest (`escalate_add`) so it reaches firstmate, and touch the marker. The sentinel is unavailable-safe: a missing script, missing jq, or nonzero sentinel exit is ignored and the daemon loop continues unchanged. This integration is documented here rather than implemented because `bin/fm-supervise-daemon.sh` is outside Task 14's file scope; the daemon was not restructured.
+Tracked wiring is implemented in the existing `bin/fm-supervise-daemon.sh` housekeeping pass.
+A sibling housekeeping step gates `state/.subsuper-last-refill-sentinel` on the cadence reported by `bin/fm-refill-sentinel.sh --cadence`, propagates the effective home/state/config context, and routes `REFILL-ALERT:` output through the daemon's existing escalation buffer.
+A missing or failing sentinel remains unavailable-safe and does not transfer or discard daemon ownership.
+No scheduler, daemon, or supervision framework was added.
 
-Idempotent obligation retry (Task 14 step 3): pending effects live inside the single attempt record (`state/attempts/<id>.json`, receipt `state:"pending"`), never in a separate obligation file. Claim retry lands in the existing dispatch/refill replay owners - `bin/fm-spawn.sh`'s claim_pending resume (`FM_TRACKER_CLAIM=1`; replay never re-claims or allocates) and `fm_refill_claim_and_launch`'s identical-request replay - triggered by the surfaced startup digest or heartbeat signal. Tracker/cleanup retry lands in the ordered terminal transaction (`bin/fm-terminal.sh` re-runs the tracker observation; a still-unconfirmed tracker is re-written as a pending receipt) and the structured cleanup replay. All replays are idempotent against the write-once receipt set; no new loop is built.
+Idempotent obligation retry keeps pending effects inside the single attempt record (`state/attempts/<id>.json`, receipt `state:"pending"`), never in a separate obligation file.
+Claim retry remains in the existing spawn/refill replay owners.
+Successful PR-poll and local-only completion invoke the exact attempt terminal transaction, while the existing watcher heartbeat and locked startup reconciliation passes retry surfaced current attempt IDs.
+Missing or nonzero terminal execution preserves ownership and surfaces a warning.
+All replays remain idempotent against the write-once receipt set; no new loop is built.
 
-Pending private operation (not performed by the tracked work; scope boundary): create the real home's cadence file.
+Deferred private operation after the tracked change is merged: create the real home's optional cadence file if the operator wants an explicit value.
 
 ```sh
 printf '600\n' > /home/holu/fmate/firstmate/config/refill-sentinel
 ```
 
-The exact real-home path is the one this doc's latency measurements use; the file content is the documented single cadence line. This is the only private operation Task 14 needs; the tracked side only ever READS a temp/fixture config via `FM_CONFIG_OVERRIDE` in tests. After creation, verify the wiring with the sentinel's verbose/log cadence report as above.
+The tracked heartbeat wiring does not create this file automatically and uses the documented 600-second default while it is absent.
+This deferred private file creation is distinct from the tracked wiring already implemented.
 
 ## Task 14 acceptance
 
@@ -271,7 +261,8 @@ Results:
 - `bin/fm-lint.sh` on the changed files: clean (ShellCheck 0.11.0 pinned), exit 0; `bash -n` clean on all four changed scripts.
 - `bin/fm-doc-audience-check.sh`: clean, exit 0.
 
-Automatic refill stays disabled: nothing in the tracked side creates `config/refill-auto`, and the cadence file in the real home remains the one pending private operation above.
+Automatic refill stays disabled because nothing in the tracked side creates `config/refill-auto`.
+The optional real-home cadence file remains a deferred post-merge operator action, while tracked housekeeping wiring already uses the default when the file is absent.
 
 ## Decision OS contract
 
@@ -305,6 +296,12 @@ ok - preflight requires and accepts --repo --status-out --br-bin
 Run again without the env gate it self-skips: `skip: FM_LIVE_DECISION_OS not set (live Decision OS contract guard)`, exit 0.
 
 No failure was observed. Note: the registered clone is a live store with active tracker-writing lanes; a dirty `.beads/issues.jsonl` working tree observed during the run is live lane traffic (an unrelated no-mistakes lane was actively writing `.beads` at the time), not output of the guard, and was left untouched.
+
+## Review-repair evidence
+
+On 2026-08-08, focused public-interface runs passed for `fm-attempt-migrate`, `fm-br-receipt`, `fm-capacity`, `fm-cleanup`, `fm-disposition`, `fm-refill-admission`, `fm-refill-sentinel`, `fm-spawn-worktree-settle`, `fm-terminal`, `fm-watch-triage`, and `fm-session-start`. Bash syntax checks passed for every touched executable and test. The exercised behavior includes separate claim/closure receipts, tracker crash replay, launch evidence, exact Git/forge and local-only disposition, per-effect cleanup recovery and provider return, bounded structured admission, post-retirement refill, sentinel housekeeping cadence, and startup/heartbeat reconciliation. The dedicated downstream lint and full-suite gates remain authoritative.
+
+The private fleet-depth removal evidence below remains the dated operational record: `data/fleet-depth-check.sh` was absent and crontab inspection returned zero matching entries. Tracked heartbeat/sentinel and terminal-recovery wiring is implemented. The home-local `config/refill-sentinel` cadence file remains intentionally deferred until after merge, and `config/refill-auto` remains absent.
 
 ## Final acceptance
 

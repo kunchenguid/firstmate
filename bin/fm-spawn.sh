@@ -1377,6 +1377,33 @@ if [ "$KIND" = ship ]; then
   fi
 fi
 
+spawn_load_admission_evidence() {  # <task_key> <repo>
+  local task_key=$1 repo=$2 show
+  if [ -n "${FM_REFILL_ADMISSION_JSON:-}" ]; then
+    SPAWN_ADMISSION_JSON=$(printf '%s' "$FM_REFILL_ADMISSION_JSON" | jq -ce --arg id "$task_key" '
+      def strings: type == "array" and all(.[]; type == "string" and length > 0);
+      def list: if type == "string" and length > 0 then [.] elif strings then . else null end;
+      select(type == "object" and .id == $id)
+      | {planned_path,declared_seams,shared_mutable_state,dependencies}
+      | select(((.planned_path | list) != null)
+          and ((.declared_seams | list) != null)
+          and ((.shared_mutable_state | list) != null)
+          and ((.dependencies | list) != null))' 2>/dev/null) || {
+        echo "error: invalid frozen refill admission evidence for $task_key" >&2
+        return 1
+      }
+    return 0
+  fi
+  show=$(cd "$repo" 2>/dev/null && br show --json "$task_key" 2>/dev/null) || show=
+  SPAWN_ADMISSION_JSON=$(printf '%s' "$show" | jq -ce --arg id "$task_key" '
+    if type == "array" and length == 1 and .[0].id == $id then .[0] else error("invalid bead") end
+    | {planned_path:(.planned_path // .admission.planned_path // null),
+       declared_seams:(.declared_seams // .admission.declared_seams // null),
+       shared_mutable_state:(.shared_mutable_state // .admission.shared_mutable_state // null),
+       dependencies:(.dependencies // .admission.dependencies // null)}' 2>/dev/null) \
+    || SPAWN_ADMISSION_JSON='{"planned_path":null,"declared_seams":null,"shared_mutable_state":null,"dependencies":null}'
+}
+
 # Task 6 claim-before-allocation split handshake (fm-tracker-claim design).
 # One ordinary attended dispatch completes the whole handshake here, before
 # any workspace allocation or endpoint creation: allocate the immutable
@@ -1388,30 +1415,63 @@ fi
 # claim_pending and returns nonzero otherwise.
 spawn_claim_before_allocation() {  # <task_key> <home_id>
   local task_key=$1 home_id=$2
-  local attempts_dir resume_attempt f aid tk gen req repo source_hash rc
+  local attempts_dir resume_attempt f aid gen req repo source_hash rc matches candidates
   local authority authority_file auth
   attempts_dir="$STATE/attempts"
-  # RESUME path first: a prior spawn already requested a claim for this task
-  # key (its request file exists). Re-claiming is never allowed: an OBSERVED
-  # tracker receipt may release allocation with the same attempt; anything
-  # else stays claim_pending, reserved until reconciled, and allocates
-  # nothing.
+  repo="${FM_REFILL_PROJECT:-/home/holu/decision-os}"
   resume_attempt=
+  matches=0
+  candidates=0
   if [ -d "$attempts_dir" ]; then
     for f in "$attempts_dir"/*.json; do
       [ -e "$f" ] || continue
       aid=$(basename "$f" .json)
-      [ -f "$attempts_dir/$aid.request.claim.json" ] || continue
-      tk=$(jq -r '.envelope.task_key // ""' "$f" 2>/dev/null || true)
-      [ "$tk" = "$task_key" ] || continue
+      req="$attempts_dir/$aid.request.claim.json"
+      jq -e --arg aid "$aid" --arg task "$task_key" --arg home "$home_id" '
+        .schema == "fm-attempt.v1"
+        and .envelope.attempt_id == $aid
+        and .envelope.task_key == $task
+        and .envelope.home_id == $home
+        and ([.receipts.retirement[]? | select(.state == "observed")] | length == 0)
+      ' "$f" >/dev/null 2>&1 || continue
+      candidates=$((candidates + 1))
+      [ -f "$req" ] && [ ! -L "$req" ] || continue
+      gen=$(jq -r '.envelope.generation' "$f")
+      jq -e --arg aid "$aid" --argjson gen "$gen" --arg task "$task_key" --arg repo "$repo" '
+        .attempt_id == $aid
+        and .generation == $gen
+        and .bead_id == $task
+        and .transition == "claim"
+        and .expected_state == "open"
+        and (.expected_source_hash | type == "string" and length == 64)
+        and (.authority | type == "string" and length > 0)
+        and (.agent | type == "string" and length > 0)
+        and .repo == $repo
+      ' "$req" >/dev/null 2>&1 || continue
       resume_attempt=$aid
-      break
+      matches=$((matches + 1))
     done
   fi
-  if [ -n "$resume_attempt" ]; then
-    if jq -e '[.receipts.tracker[]? | select(.state == "observed")] | length > 0' \
-        "$attempts_dir/$resume_attempt.json" >/dev/null 2>&1; then
+  if [ "$candidates" -gt 1 ]; then
+    echo "claim_pending: multiple unretired attempts for $task_key; reconcile before allocation" >&2
+    return 1
+  fi
+  if [ "$candidates" -eq 1 ] && [ "$matches" -ne 1 ]; then
+    echo "claim_pending: the unretired attempt for $task_key has no exact claim request; reconcile before allocation" >&2
+    return 1
+  fi
+  if [ "$matches" -eq 1 ]; then
+    gen=$(jq -r '.envelope.generation' "$attempts_dir/$resume_attempt.json")
+    req="$attempts_dir/$resume_attempt.request.claim.json"
+    if jq -e --argjson gen "$gen" --arg bead "$task_key" --arg status claimed '
+        [.receipts.claim[]?
+          | select(.state == "observed")
+          | select(.generation == $gen)
+          | select(.evidence.bead == $bead and .evidence.status == $status)]
+        | length == 1
+      ' "$attempts_dir/$resume_attempt.json" >/dev/null 2>&1; then
       ATTEMPT_ID=$resume_attempt
+      spawn_load_admission_evidence "$task_key" "${FM_REFILL_PROJECT:-/home/holu/decision-os}" || return 1
       return 0
     fi
     echo "claim_pending: $resume_attempt (reconcile before allocation)" >&2
@@ -1427,7 +1487,6 @@ spawn_claim_before_allocation() {  # <task_key> <home_id>
     echo "error: cannot resolve generation for $ATTEMPT_ID; refusing to allocate without the claim" >&2
     return 1
   }
-  repo="${FM_REFILL_PROJECT:-/home/holu/decision-os}"
   source_hash=$(cd "$repo" 2>/dev/null && sha256sum .beads/issues.jsonl 2>/dev/null | cut -d' ' -f1) || {
     echo "error: cannot resolve the Decision OS source hash at $repo/.beads/issues.jsonl; refusing to allocate without the claim" >&2
     return 1
@@ -1467,12 +1526,14 @@ spawn_claim_before_allocation() {  # <task_key> <home_id>
     return 1
   }
   # Attended steward: one synchronous invocation. Success persists the
-  # authoritative tracker receipt; refusal or steward unavailability leaves
+  # authoritative claim receipt; refusal or steward unavailability leaves
   # the attempt pending with the failure recorded in the attempt record and
   # refuses this spawn without allocating anything.
-  if ! "$FM_BR_RECEIPT_BIN" "$req"; then
+  if "$FM_BR_RECEIPT_BIN" "$req"; then
+    rc=0
+  else
     rc=$?
-    fm_attempt_effect_pending "$ATTEMPT_ID" "$gen" tracker \
+    fm_attempt_effect_pending "$ATTEMPT_ID" "$gen" claim \
       "$(jq -n --arg reason "claim steward refused or unavailable (exit $rc)" \
             --arg transition claim --arg authority "$authority" \
             '{status:"pending",reason:$reason,transition:$transition,authority:$authority}')" \
@@ -1480,6 +1541,22 @@ spawn_claim_before_allocation() {  # <task_key> <home_id>
     echo "claim_pending: $ATTEMPT_ID (reconcile before allocation)" >&2
     return 1
   fi
+  if ! jq -e --argjson gen "$gen" --arg bead "$task_key" --arg status claimed '
+      [.receipts.claim[]?
+        | select(.state == "observed")
+        | select(.generation == $gen)
+        | select(.evidence.bead == $bead and .evidence.status == $status)]
+      | length == 1
+    ' "$attempts_dir/$ATTEMPT_ID.json" >/dev/null 2>&1; then
+    fm_attempt_effect_pending "$ATTEMPT_ID" "$gen" claim \
+      "$(jq -n --arg reason "claim steward returned without exact current-generation claim evidence" \
+            --arg transition claim --arg authority "$authority" \
+            '{status:"pending",reason:$reason,transition:$transition,authority:$authority}')" \
+      >/dev/null 2>&1 || true
+    echo "claim_pending: $ATTEMPT_ID (reconcile before allocation)" >&2
+    return 1
+  fi
+  spawn_load_admission_evidence "$task_key" "$repo" || return 1
   return 0
 }
 
@@ -1493,7 +1570,7 @@ spawn_claim_before_allocation() {  # <task_key> <home_id>
 # different attempt or home. Only a claim-handshake spawn (ATTEMPT_ID set)
 # reaches this; every ordinary spawn is byte-identical.
 spawn_freeze_allocation() {  # <copy-path>
-  local copy_path=$1 gen base target
+  local copy_path=$1 gen base target base_sha repo_identity admission
   [ -n "${ATTEMPT_ID:-}" ] || return 0
   gen=$(fm_attempt_generation "$ATTEMPT_ID") || {
     echo "error: cannot resolve generation for $ATTEMPT_ID; refusing to launch without an allocation freeze" >&2
@@ -1502,15 +1579,19 @@ spawn_freeze_allocation() {  # <copy-path>
   # Delivery contract at allocation: mode is this spawn's delivery contract;
   # base/target are read from the project's live git state. planned-path, seam,
   # and dependency evidence is PROVISIONAL admission evidence frozen at
-  # allocation (empty at spawn time), never authority.
+  # allocation from the exact post-lock read when refill supplied it, never
+  # landing authority.
   base=$(git -C "$PROJ_ABS" rev-parse --abbrev-ref HEAD 2>/dev/null || true)
   [ -n "$base" ] || base=main
   target="origin/$base"
+  base_sha=$(git -C "$copy_path" rev-parse HEAD 2>/dev/null || true)
+  repo_identity=$(git -C "$copy_path" remote get-url origin 2>/dev/null || (cd "$PROJ_ABS" 2>/dev/null && pwd -P) || true)
+  admission=${SPAWN_ADMISSION_JSON:-'{"planned_path":null,"declared_seams":null,"shared_mutable_state":null,"dependencies":null}'}
   fm_attempt_freeze_allocation "$ATTEMPT_ID" "$gen" \
     "$(jq -n --arg provider "$BACKEND" --arg copy "$copy_path" '{provider:$provider,copy:$copy}')" \
-    "$(jq -n --arg mode "${MODE:-}" --arg base "$base" --arg target "$target" \
-          --arg planned_path "" --arg declared_seams "" --arg dependencies "" \
-          '{mode:$mode,base:$base,target:$target,planned_path:$planned_path,declared_seams:$declared_seams,dependencies:$dependencies}')" \
+    "$(jq -n --arg mode "${MODE:-}" --arg base "$base" --arg target "$target" --arg base_sha "$base_sha" \
+          --arg repo_identity "$repo_identity" --argjson admission "$admission" \
+          '{mode:$mode,base:$base,target:$target,base_sha:$base_sha,repo_identity:$repo_identity} + $admission')" \
     || {
       echo "error: allocation freeze refused for $ATTEMPT_ID: the attempt already owns a different physical copy ($copy_path); refusing to launch into a copy the attempt does not own" >&2
       return 1
@@ -2613,14 +2694,29 @@ if [ "$KIND" = secondmate ] && [ "${FM_SKIP_SECONDMATE_INHERIT:-0}" != 1 ]; then
   fi
 fi
 
+if [ -n "${ATTEMPT_ID:-}" ]; then
+  ATTEMPT_GEN=$(fm_attempt_generation "$ATTEMPT_ID") || {
+    echo "error: runtime launched but attempt generation is unavailable for $ATTEMPT_ID; launch receipt was not published" >&2
+    exit 1
+  }
+  LAUNCH_EVIDENCE=$(jq -n --arg task "$ID" --arg endpoint "$META_WINDOW" \
+    --arg worktree "$WT" --arg harness "$HARNESS" \
+    '{task:$task,status:"launched",endpoint:$endpoint,worktree:$worktree,harness:$harness}')
+  if ! fm_attempt_effect_observe "$ATTEMPT_ID" "$ATTEMPT_GEN" launch "$LAUNCH_EVIDENCE"; then
+    fm_attempt_effect_pending "$ATTEMPT_ID" "$ATTEMPT_GEN" launch \
+      "$(jq -n --arg reason 'runtime launched but launch receipt publication failed' --argjson evidence "$LAUNCH_EVIDENCE" \
+        '{status:"pending",reason:$reason,launch_evidence:$evidence}')" >/dev/null 2>&1 || true
+    echo "error: runtime launched and instructions were delivered, but the launch receipt could not be published for $ATTEMPT_ID" >&2
+    exit 1
+  fi
+fi
+
 SPAWN_DELIVERY=
 [ -z "$MODE" ] || SPAWN_DELIVERY=" mode=$MODE yolo=$YOLO"
 echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY window=$META_WINDOW worktree=$WT"
 
 # Task 6 audit-only launch ledger: one row per attempt, published only after
-# allocation, launch, and instruction delivery all succeeded. Recovery of a
-# crash before this publication relies on the attempt envelope, never this
-# ledger, which is never capacity or ownership truth.
+# allocation, launch, instruction delivery, and the launch receipt succeeded.
 if [ -n "${ATTEMPT_ID:-}" ]; then
   LEDGER="$STATE/launch-ledger.jsonl"
   if ! grep -Fq -- "\"attempt_id\":\"$ATTEMPT_ID\"" "$LEDGER" 2>/dev/null; then

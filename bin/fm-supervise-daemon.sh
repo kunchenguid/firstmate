@@ -194,6 +194,7 @@ STALE_ESCALATE_SECS_DEFAULT=240
 ESCALATE_BATCH_SECS_DEFAULT=90
 HEARTBEAT_SCAN_SECS_DEFAULT=300
 HOUSEKEEPING_TICK_DEFAULT=15
+REFILL_SENTINEL_CADENCE_DEFAULT=600
 # Max time a buffered escalation may sit undelivered before the daemon retries
 # the normal flush path and, if that cannot confirm a submit, raises a loud wedge
 # alarm. The escape hatch makes a guard false-positive visible instead of silent.
@@ -414,10 +415,12 @@ classify_check() {  # <full reason>  — check scripts print only when firstmate
   printf 'escalate|%s' "$1"
 }
 
-classify_heartbeat() {
-  # The wake itself is routine; the catch-all scan runs separately in
-  # housekeeping on the HEARTBEAT_SCAN_SECS cadence.
-  printf 'self|heartbeat (catch-all scan runs in housekeeping)'
+classify_heartbeat() {  # [full-reason]
+  local reason=${1:-heartbeat}
+  case "$reason" in
+    *TERMINAL-WARNING:*) printf 'escalate|%s' "$reason" ;;
+    *) printf 'self|heartbeat (catch-all scan runs in housekeeping)' ;;
+  esac
 }
 
 # Anything unrecognized is escalated (fail-safe).
@@ -942,6 +945,37 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
   fi
 }
 
+refill_sentinel_housekeeping() {  # <state>
+  local state=$1 sentinel cadence marker output rc line
+  sentinel=${FM_REFILL_SENTINEL_BIN:-$FM_DAEMON_DIR/fm-refill-sentinel.sh}
+  marker="$state/.subsuper-last-refill-sentinel"
+  if [ ! -x "$sentinel" ]; then
+    [ "$(_file_age "$marker")" -lt "$REFILL_SENTINEL_CADENCE_DEFAULT" ] || {
+      _now > "$marker"
+      log "refill sentinel unavailable: $sentinel"
+    }
+    return 0
+  fi
+  cadence=$(env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$state" \
+    FM_DATA_OVERRIDE="${FM_DATA_OVERRIDE:-}" FM_CONFIG_OVERRIDE="${FM_CONFIG_OVERRIDE:-}" \
+    "$sentinel" --cadence 2>/dev/null) || cadence=$REFILL_SENTINEL_CADENCE_DEFAULT
+  case "$cadence" in ''|0|*[!0-9]*) cadence=$REFILL_SENTINEL_CADENCE_DEFAULT ;; esac
+  [ "$(_file_age "$marker")" -ge "$cadence" ] || return 0
+  _now > "$marker"
+  output=$(env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$state" \
+    FM_DATA_OVERRIDE="${FM_DATA_OVERRIDE:-}" FM_CONFIG_OVERRIDE="${FM_CONFIG_OVERRIDE:-}" \
+    FM_PROJECTS_OVERRIDE="${FM_PROJECTS_OVERRIDE:-}" \
+    "$sentinel" 2>&1)
+  rc=$?
+  while IFS= read -r line; do
+    case "$line" in REFILL-ALERT:*) escalate_add "$state" "$line" ;; esac
+  done <<< "$output"
+  if [ "$rc" -ne 0 ] && ! printf '%s\n' "$output" | grep -q '^REFILL-ALERT:'; then
+    log "refill sentinel unavailable or failed rc=$rc; daemon ownership preserved"
+  fi
+  return 0
+}
+
 # --- housekeeping (runs every tick while the watcher is mid-cycle) ----------
 # Four cheap jobs, each guarded so an empty/quiet fleet costs near zero:
 #  1) batch flush: if the escalation buffer's oldest content is older than
@@ -1072,6 +1106,8 @@ housekeeping() {  # <state>
       mark_status_seen "$state" "$task" "$last"
     done < <(scan_captain_relevant_statuses "$state")
   fi
+
+  refill_sentinel_housekeeping "$state"
 }
 
 # Find a recorded or live window target whose task id matches the marker key.
@@ -1217,7 +1253,7 @@ handle_wake() {  # <reason> <state>
                   decision="escalate|${reason#stale: }" ;;
               esac ;;
     check:*)  decision=$(classify_check "$reason") ;;
-    heartbeat|heartbeat:*) decision=$(classify_heartbeat) ;;
+    heartbeat|heartbeat:*) decision=$(classify_heartbeat "$reason") ;;
     *)        decision=$(classify_unknown "$reason") ;;
   esac
   action=${decision%%|*}

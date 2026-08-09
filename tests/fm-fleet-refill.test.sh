@@ -67,7 +67,8 @@ write_meta_fixture() {  # <id> <mode> [kind=ship]; kind defaults to ship so the 
 
 cat > "$FAKE_CREW" <<'SH'
 #!/usr/bin/env bash
-printf '%s\n' '{"schema":"fm-crew-state.v1","id":"fixture","state":"working","source":"run-step","detail":"busy"}'
+id="${!#}"
+jq -nc --arg id "$id" '{schema:"fm-crew-state.v1",id:$id,state:"working",source:"run-step",detail:"busy"}'
 SH
 chmod +x "$FAKE_CREW"
 
