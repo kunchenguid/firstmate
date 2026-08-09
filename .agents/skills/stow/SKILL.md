@@ -71,7 +71,8 @@ Every `/stow` invocation performs this complete pass, even when the session cont
    Retain lower-priority material only while budget remains.
 4. Reinforce and stamp.
    Refresh an entry's last-reinforced date to today only when this session actually exercised, confirmed, or re-derived it.
-   The bar is session evidence: an entry's presence in the file is not evidence, and re-reading your own memory is never reinforcement.
+   **Hard rule: reinforcement requires independent evidence from this session that you can name in the receipt; plausibility, importance, prior knowledge, and the entry's own text are not evidence, and any explicit statement that no confirming session evidence exists requires the no-evidence path.**
+   For an unmarked `data/learnings.md` entry with no such evidence, the no-evidence path is always to append `<!--g-->` and retain it for this entire pass; never stamp or archive it during that same invocation.
    Stamp each newly written entry with today's date and its tier per the marking rules, and admit a new `perishable` entry only with its named checkable expiry condition in the prose.
 5. Evaluate every dated entry in each editable memory file against its tier clock.
    Re-validate a stale `aging` entry from current evidence and refresh its date, or archive it.
@@ -204,8 +205,8 @@ The first pass after adoption performs a one-time revalidation sweep of editable
 
 - In `data/captain.md` and `data/captain-shared.md`, every unmarked entry is simply default-pinned and remains exempt from the aging clock, legacy grace cycle, and archive-by-age; consolidation still applies, and only genuine tier deviations receive markers.
 - In `data/learnings.md`, stamp each entry the pass can confirm current with its compact dated marker for today, using a deviating tier letter or `<!--P-->` only where the entry genuinely deviates from the `aging` default.
-- On the first pass that cannot confirm an unmarked entry in `data/learnings.md`, add `<!--g-->` as its trailing marker; carrying no date, it persists that the entry has consumed exactly one grace cycle without pretending it was reinforced.
-- On the next pass, replace that marker with the normal dated tier marker if current evidence confirms the entry; otherwise archive it with provenance `legacy-unvalidated`.
+- On the first pass that cannot cite independent current-session evidence for an unmarked entry in `data/learnings.md`, add `<!--g-->` as its trailing marker and retain it through the rest of that pass; carrying no date, it persists that the entry has consumed exactly one grace cycle without pretending it was reinforced.
+- Only an entry that already carried `<!--g-->` when this invocation began is on the next-pass branch: replace that marker with the normal dated tier marker if independent current-session evidence confirms the entry; otherwise archive it with provenance `legacy-unvalidated`.
 - The grace period is one full stow cycle, not a time window, and the same persisted transition applies when a hand edit later leaves an entry unmarked in `data/learnings.md`.
 
 ## Completion receipt
