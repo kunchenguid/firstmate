@@ -300,7 +300,7 @@ Write the task-specific brief under section 11 before spawning.
 
 Spawn only through `bin/fm-spawn.sh` after the profile and backend checks in section 4.
 The spawn must resolve a genuine isolated task worktree distinct from the primary checkout; a failed isolation assertion stops the task.
-A spawn also refuses before allocating when a pool slot that the worktree pool would hand out still holds live work; the refusal names the slot, the evidence, and the apparent owner, and is a stop-and-investigate result rather than an obstacle to bypass.
+A spawn allocates only a demonstrably empty pool slot and skips any that still holds live work, so it refuses before allocating only when the pool offers no empty slot; that refusal names each slot, its evidence, and the apparent owner, and is a stop-and-investigate result rather than an obstacle to bypass.
 Every ship and scout spawn must also answer why an agent turn was necessary, through `--reason-code` in the closed vocabulary owned by `bin/fm-reasoning-lib.sh`; a broken or absent deterministic reader is never legitimate reasoning demand, so it is `TOOLING_GAP`, which is never counted as justified reasoning and requires `--tooling-gap-item` naming the open backlog item that repairs the reader.
 After spawning, confirm the worker is processing the brief, handle any trust dialog through `harness-adapters`, and record ship or scout work as under way.
 A persistent secondmate is recorded in the secondmate registry and runtime state, never as a backlog work item.
