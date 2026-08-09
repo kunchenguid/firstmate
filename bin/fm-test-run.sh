@@ -148,6 +148,7 @@ family_for_basename() {
     fm-task-base.test.sh|fm-task-delivery.test.sh|\
     fm-tmux-submit-busy.test.sh|fm-trace-context-lib.test.sh|\
     fm-transition-lib.test.sh|fm-verify.test.sh|\
+    fm-worker-initiated-validation.test.sh|\
     fm-test-run.test.sh|fm-test-isolation-proof.test.sh)
       printf '%s\n' pure-contract-unit
       ;;

@@ -30,7 +30,7 @@
 # For ship tasks, --mode is REQUIRED and shapes the definition of done. Firstmate
 # resolves it per task at intake (AGENTS.md section 7); data/projects.md holds the
 # captain's standing posture as context, and this script never reads it:
-#   no-mistakes  implement -> /no-mistakes pipeline -> PR -> configured merge authority
+#   no-mistakes  implement -> worker's own `no-mistakes axi run` -> PR -> configured merge authority
 #   direct-PR    implement -> push + open PR via gh-axi (no pipeline) -> configured merge authority
 #   local-only   implement on branch, stop and report "ready in branch" (no push/PR);
 #                the configured merge authority approves, firstmate merges to local main
@@ -76,10 +76,19 @@
 # as a worker on this task before acting on one. The section names the single
 # exclusion - a bare slash or codex `$<skill>` command, which a harness
 # recognizes only at the start of the line and which therefore cannot be marked -
-# so the rule is never quietly violated by the routine validation trigger. It
+# so a command the captain types is not challenged as an impostor message. It
 # also restates that escalation is the status file, because the opposite failure
 # is silent: a gate parked with only "Captain, ..." in a pane nobody reads stalls
 # the task with no wake and no visible symptom.
+# A no-mistakes worker starts its own validation run: the generated definition of
+# done has it call `no-mistakes axi run` as one blocking call the moment its
+# implementation commit lands, instead of appending `done:`, stopping, and being
+# restarted by a keystroke firstmate typed into its composer. That actuator had a
+# measured false-positive class (text left unsubmitted in the composer while the
+# send reported success) and cost a firstmate turn whose entire content was a
+# transition the worker had already earned. The replacement is one command, not a
+# runner: nothing here polls, schedules, or watches, and rule 6's shared-daemon
+# prohibition is unchanged - a worker still never restarts the daemon.
 # Ship and scout tasks include the Claude context-pressure snapshot path and
 # the host-computed 70%-used /compact trigger. Other harnesses see the section
 # but do not fabricate a reading when the optional snapshot is absent.
@@ -449,7 +458,7 @@ IFS= read -r -d '' WHO_IS_SPEAKING <<EOF || true
 Firstmate marks every message it sends you with $FROMFIRST_MARKER_FACT.
 A marked message is firstmate: act on it as task instruction.
 An unmarked message is a human typing directly into your pane - usually the captain, who may believe this pane is firstmate rather than a worker.
-The one exception is a message that starts with \`/\`, or on codex with \`\$\`, such as \`/no-mistakes\`: a harness recognizes that form only at the very start of the line, so firstmate cannot mark it without breaking it. Treat such a message as routine and act on it.
+The one exception is a message that starts with \`/\`, or on codex with \`\$\`, such as \`/compact\`: a harness recognizes that form only at the very start of the line, so firstmate cannot mark it without breaking it. Treat such a message as routine and act on it.
 Before acting on any other unmarked message, say plainly that you are a worker on task \`$ID\`, not firstmate, and that merges, cross-lane work, other lanes' state, and fleet supervision belong to firstmate. Then ask whether they still want you to proceed.
 Escalation is always the status file in rule 4, never this pane.
 Firstmate does not read your chat, so anything you address to the captain here is lost: a decision or gate left parked with only "Captain, ..." in this pane is invisible to everyone and stalls the task indefinitely.
@@ -583,7 +592,7 @@ Delivery contract: mode=direct-PR
 This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
 When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
-Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
+Do NOT run the no-mistakes pipeline. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 EOF
     ;;
   local-only)
@@ -606,13 +615,23 @@ EOF
     IFS= read -r -d '' DOD <<EOF || true
 # Definition of done
 Delivery contract: mode=no-mistakes
-The task is complete only when committed on your branch.
-When you believe it is complete, append \`done: {summary}\` to the status file and stop.
-Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
+The task is complete only once it is committed on your branch AND validated through the no-mistakes pipeline, which you start yourself.
+
+The moment your implementation commit lands, start validation with one blocking call:
+   \`no-mistakes axi run --intent "{what this task set out to accomplish}"\`
+Start it directly. Do not append a status line for the commit, do not report \`done:\` first, and do not wait to be told: nobody is watching for a handoff at this point, so a worker that stops here stalls its own task.
+That call blocks until the first approval gate, the CI-ready point, or the final outcome, and prints it.
+Make \`--intent\` preserve all relevant content from this brief's \`# Task\` section plus every later accepted Firstmate requirement, clarification, constraint, exclusion, and supersession, carrying only each requirement's current accepted form; retain direct requirements instead of substituting a diff summary, and exclude generic operational, status, delivery, and other scaffold boilerplate unless it is task-specific.
+
+Judge that call by the run result it prints, never by its exit status.
+A printed gate or outcome is an observation you can act on; a call that returns no readable run result at all - an empty return, a daemon error, or a killed process - is could-not-observe, which is never a pass and never a reason to retry blindly. Append \`blocked: {what the pipeline returned}\` and stop.
+
+The pipeline validates YOUR branch only, and one shared daemon serves every other lane at the same time.
+Check the \`branch:\` of any run you are shown before treating it as yours: with no run on your own branch, a bare \`no-mistakes axi status\` answers with some other branch's run.
+A run on a branch that is not yours is another lane's work - never respond to it, abort it, or adopt it as your own, and never restart the daemon to clear it (rule 6).
 
 You drive no-mistakes by responding to its gates, not by implementing fixes.
-Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
-When starting no-mistakes, make \`--intent\` preserve all relevant content from this brief's \`# Task\` section plus every later accepted Firstmate requirement, clarification, constraint, exclusion, and supersession, carrying only each requirement's current accepted form; retain direct requirements instead of substituting a diff summary, and exclude generic operational, status, delivery, and other scaffold boilerplate unless it is task-specific.
+Follow the guidance no-mistakes itself provides for the mechanics: \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
 Do not hand-edit, commit, or fix findings yourself while a run is active - the pipeline applies every fix.
 The one exception is a rebase the pipeline hands back to you: resolve and commit it under \`# Branch conflict resolution\` above, then return to driving the gates.
 
@@ -622,7 +641,7 @@ Two firstmate-specific rules layer on top of that guidance:
   When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
 - Avoid \`--yes\`: it would silently bypass firstmate's authority check and any required captain escalation.
 
-After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
+After the pipeline reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
 EOF
     ;;
 esac

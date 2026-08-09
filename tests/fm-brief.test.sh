@@ -260,7 +260,7 @@ test_ship_mode_is_explicit_not_registry() {
   brief="$home/data/brief-explicit-a5/brief.md"
   grep -qx "Delivery contract: mode=no-mistakes" "$brief" \
     || fail "registered direct-PR posture overrode the explicit --mode"
-  assert_grep "Firstmate will then instruct you to run /no-mistakes" "$brief" \
+  assert_grep "no-mistakes axi run --intent" "$brief" \
     "explicit no-mistakes brief did not render the pipeline definition of done"
 
   # An unregistered project is not a blocker either, because nothing is looked up.
@@ -342,7 +342,7 @@ test_no_mistakes_dod_wording() {
   # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
   assert_grep '`help`' "$brief" \
     "no-mistakes DOD must render literal backticks around help"
-  assert_grep "make \`--intent\` preserve all relevant content from this brief" "$brief" \
+  assert_grep "Make \`--intent\` preserve all relevant content from this brief" "$brief" \
     "no-mistakes DOD must require --intent to retain the accepted task contract"
   assert_grep "carrying only each requirement's current accepted form" "$brief" \
     "no-mistakes DOD must replace superseded requirements with their current accepted form"
@@ -839,7 +839,7 @@ test_crewmate_scaffolds_carry_who_is_speaking() {
       "$kind brief must name its own task id for self-identification"
     # shellcheck disable=SC2016 # single quotes are deliberate: the backticks and \$ must stay literal
     assert_grep 'starts with `/`, or on codex with `$`' "$brief" \
-      "$kind brief must state the one unmarked exception so /no-mistakes is not read as a human"
+      "$kind brief must state the one unmarked exception so a typed command is not read as an impostor"
     assert_grep "never this pane" "$brief" \
       "$kind brief must send escalation to the status file, not the pane"
   done
