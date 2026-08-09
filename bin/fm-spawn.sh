@@ -686,7 +686,7 @@ spawn_abort_cleanup() {
       echo "warning: could not remove replacement wiring after aborted relaunch of $ID" >&2
     fi
     if [ -n "$RELAUNCH_REPLACEMENT_BUSY_GEN" ]; then
-      if ! "$FM_ROOT/bin/fm-busy-event.sh" retire \
+      if ! /bin/bash "$FM_ROOT/bin/fm-busy-event.sh" retire \
           "$RELAUNCH_REPLACEMENT_STATE" "$ID" \
           --gen "$RELAUNCH_REPLACEMENT_BUSY_GEN"; then
         echo "warning: could not retire replacement busy generation after aborted relaunch of $ID" >&2

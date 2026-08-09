@@ -9,6 +9,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$ROOT/bin/fm-timeout-lib.sh"
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-dispatch-profile)
@@ -73,18 +75,19 @@ enable_dispatch_profile() {
     > "$home/config/crew-dispatch.json"
 }
 
-make_invalid_shebang_root() {
-  local name=$1 shadow source base script
+make_stalled_shebang_root() {
+  local name=$1 shadow source base script stall
   shadow="$TMP_ROOT/$name/root"
   mkdir -p "$shadow/bin"
   for source in "$ROOT"/bin/*; do
     base=$(basename "$source")
     ln -s "$source" "$shadow/bin/$base"
   done
+  stall='/usr/bin/tail -f'
   for script in fm-harness.sh fm-project-mode.sh; do
     rm "$shadow/bin/$script"
     {
-      printf '#!/definitely/not-an-interpreter\n'
+      printf '#!%s\n' "$stall"
       tail -n +2 "$ROOT/bin/$script"
     } > "$shadow/bin/$script"
     chmod +x "$shadow/bin/$script"
@@ -155,16 +158,35 @@ test_no_profile_keeps_claude_profile_defaults() {
 }
 
 test_tracked_process_scan_and_project_mode_bypass_shebang() {
-  local rec id out status shadow
+  local rec id out status shadow direct_out public_out direct_status
   id=profile-invalid-shebang-z1a
   rec=$(make_spawn_case profile-invalid-shebang claude "$id")
   read_case_record "$rec"
-  shadow=$(make_invalid_shebang_root profile-invalid-shebang)
+  shadow=$(make_stalled_shebang_root profile-invalid-shebang)
 
-  out=$(FM_TEST_ROOT_OVERRIDE="$shadow" \
-    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
-  status=$?
-  expect_code 0 "$status" "spawn should bypass tracked process-scan and project-mode shebangs"
+  direct_out="$CASE_DIR/direct.out"
+  if fm_run_timed 1 "$shadow/bin/fm-project-mode.sh" --raw "$PROJ_DIR" >"$direct_out" 2>&1; then
+    direct_status=0
+  else
+    direct_status=$?
+  fi
+  expect_code 124 "$direct_status" "the shebang fixture must reproduce an indefinitely stalled tracked launch"
+
+  public_out="$CASE_DIR/public.out"
+  if fm_run_timed 10 env \
+    FM_ROOT_OVERRIDE="$shadow" FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
+    CLAUDE_CONFIG_DIR='' FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" GROK_HOME="$HOME_DIR/grok-home" \
+    PATH="$FAKEBIN_DIR:$PATH" /bin/bash "$SPAWN" "$id" "$PROJ_DIR" \
+    --mode no-mistakes --yolo off >"$public_out" 2>&1; then
+    status=0
+  else
+    status=$?
+  fi
+  out=$(cat "$public_out")
+  expect_code 0 "$status" "spawn should bypass stalled tracked process-scan and project-mode launches"
   assert_contains "$out" "spawned $id harness=claude" \
     "spawn did not complete after Bash-routed process scan and delivery-mode lookup"
   assert_present "$HOME_DIR/state/$id.meta" \
