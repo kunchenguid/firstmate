@@ -471,6 +471,10 @@ For anything the codebase already shows, prefer a pointer to the authoritative f
 If you touch a project \`AGENTS.md\` that lacks \`## Maintaining this file\`, add that short self-governance section from \`$FM_ROOT/bin/fm-ensure-agents-md.sh\` in the same pass.
 Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced no durable project knowledge.
 
+# Test-inventory declaration
+For a project governed by \`.firstmate/test-inventory.json\`, regenerate its literal-source receipt with \`\$FM_ROOT/bin/fm-test-inventory.sh collect .\` after changing literal Python test declarations and commit it with the change.
+The receipt contract and its runtime-observation boundary are in \`$FM_ROOT/docs/test-inventory-receipts.md\`.
+
 $DOD
 EOF
 echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK})"

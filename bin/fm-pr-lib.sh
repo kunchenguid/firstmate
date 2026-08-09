@@ -24,6 +24,8 @@ FM_PR_PATH=
 FM_PR_OWNER=
 FM_PR_REPO=
 FM_PR_NUMBER=
+FM_PR_MERGE_METHOD=
+FM_PR_MERGE_DELETE_BRANCH=
 FM_PR_DATA_PROVIDER=
 FM_PR_DATA_URL=
 FM_PR_DATA_HOST=
@@ -211,6 +213,52 @@ fm_pr_head_valid() {
   local head=${1-}
   local LC_ALL=C
   [[ "$head" =~ ^[0-9a-f]{40}$|^[0-9a-f]{64}$ ]]
+}
+
+fm_pr_merge_args_parse() {
+  local arg method_seen=0
+  FM_PR_MERGE_METHOD=squash
+  FM_PR_MERGE_DELETE_BRANCH=0
+  while [ "$#" -gt 0 ]; do
+    arg=$1
+    shift
+    # FM_PR_MERGE_DELETE_BRANCH is consumed by scripts that source this library.
+    # shellcheck disable=SC2034
+    case "$arg" in
+      --squash) arg=squash ;;
+      --merge) arg=merge ;;
+      --rebase) arg=rebase ;;
+      --method)
+        [ "$#" -gt 0 ] || { echo "error: --method requires squash, merge, or rebase" >&2; return 2; }
+        arg=$1
+        shift
+        ;;
+      --method=*) arg=${arg#--method=} ;;
+      --delete-branch) FM_PR_MERGE_DELETE_BRANCH=1; continue ;;
+      --auto|--disable-auto|--admin)
+        echo "error: $arg is a non-immediate or protection-bypassing merge mode" >&2
+        return 2
+        ;;
+      --repo|--repo=*|-R|-R?*)
+        echo "error: extra merge arguments must not override the repository" >&2
+        return 2
+        ;;
+      *)
+        echo "error: unsupported merge argument at the atomic merge boundary: $arg" >&2
+        return 2
+        ;;
+    esac
+    case "$arg" in
+      squash|merge|rebase) ;;
+      *) echo "error: merge method must be squash, merge, or rebase" >&2; return 2 ;;
+    esac
+    if [ "$method_seen" -eq 1 ] && [ "$FM_PR_MERGE_METHOD" != "$arg" ]; then
+      echo "error: conflicting merge methods are not allowed" >&2
+      return 2
+    fi
+    FM_PR_MERGE_METHOD=$arg
+    method_seen=1
+  done
 }
 
 fm_pr_file_mode() {
