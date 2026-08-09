@@ -17,7 +17,7 @@ Never call `higgsfield generate create` directly.
 - Do not install or update software, execute remote installers, reveal authentication tokens, or open a login flow.
 - Do not create websites, deploy, publish, import marketing data, train identities, create Soul IDs, or generate audio or 3D assets.
 - Do not fetch a remote reference URL.
-- Do not run variants, batches, retries, or edits under an earlier approval.
+- Do not run variants, batches, retries, or edits under an earlier approval; discard a capability after any failed run even when it remains reusable.
 - Stop and ask the captain when the CLI is missing, authentication is unavailable, or the requested work is outside these boundaries.
 
 ## Prepare the request
@@ -58,9 +58,11 @@ The wrapper accepts only absolute regular-file paths or existing Higgsfield UUID
 7. Obtain explicit approval only for those operator-visible fields and the displayed vendor `credits` value, subject to the emitted limitations.
 8. Only after cost approval, run `python3 scripts/safe_generate.py run /absolute/temporary/directory/uploaded-request.json --cost-receipt /absolute/temporary/directory/cost-receipt.json`.
 
+A run that reaches a create attempt consumes its capability, but failures during live model or cost validation before creation leave the capability pending and reusable.
+Discard such a capability and obtain a fresh approval instead of retrying it.
 For prompt-only work without step 3, use `/absolute/temporary/directory/request.json` in steps 5 and 8.
 Do not combine upload approval with cost approval unless the captain explicitly approves both after seeing both disclosures.
-Treat every retry, variation, edit, or additional output as a new generation that must repeat the cost and approval steps.
+Treat every retry, variation, edit, or additional output as a new generation; discard any earlier capability and repeat the cost and approval steps.
 For a multi-job request, stop and obtain separate bulk approval for an enumerated job count and total estimated credits, then execute each job through its own cost receipt.
 
 ## Report the result

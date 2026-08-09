@@ -74,6 +74,11 @@ APPROVAL_SCOPE = {
         "operator-visible disclosure does not attest or guarantee that the exact prompt "
         "was shown before approval."
     ),
+    "precreate_validation_reuse_warning": (
+        "A run that reaches a create attempt consumes the capability, but failures during "
+        "live model or cost validation before creation leave it pending and reusable. "
+        "Discard it and obtain a fresh approval instead of retrying."
+    ),
     "workspace_switch_warning": (
         "Switching the active billing workspace between approval and run can charge "
         "a different workspace at the same displayed credits value."
@@ -852,12 +857,16 @@ def build_parser() -> argparse.ArgumentParser:
     upload.add_argument("--output", required=True)
     upload.set_defaults(handler=command_upload)
 
-    cost = subparsers.add_parser("cost", help="estimate credits and write a single-use receipt")
+    cost = subparsers.add_parser(
+        "cost", help="estimate credits and write an approval capability for one create attempt"
+    )
     cost.add_argument("request")
     cost.add_argument("--receipt", required=True)
     cost.set_defaults(handler=command_cost)
 
-    run = subparsers.add_parser("run", help="verify and consume an approved cost receipt, then create one job")
+    run = subparsers.add_parser(
+        "run", help="validate and consume an approved capability, then attempt one create"
+    )
     run.add_argument("request")
     run.add_argument("--cost-receipt", required=True)
     run.set_defaults(handler=command_run)

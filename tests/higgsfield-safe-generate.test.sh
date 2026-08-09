@@ -480,12 +480,13 @@ assert cost["approval_scope"] == {
     "capability_does_not_bind": ["account", "billing_workspace", "vendor_credits_exact_field"],
     "credits_exact_warning": "The capability binds and the wrapper rechecks the vendor credits field, not credits_exact; a distinct credits_exact value can differ from the approved displayed credits value.",
     "prompt_disclosure_warning": "The capability binds the request including its prompt, but the mandated operator-visible disclosure does not attest or guarantee that the exact prompt was shown before approval.",
+    "precreate_validation_reuse_warning": "A run that reaches a create attempt consumes the capability, but failures during live model or cost validation before creation leave it pending and reusable. Discard it and obtain a fresh approval instead of retrying.",
     "workspace_switch_warning": "Switching the active billing workspace between approval and run can charge a different workspace at the same displayed credits value.",
 }
 assert set(receipt) == {"cost_approval_capability"}
 assert receipt["cost_approval_capability"].startswith("cost:v1:")
 PY
-pass "cost discloses prompt, credit-field, and workspace limitations"
+pass "cost discloses prompt, billing, credit-field, and reuse limitations"
 
 cp "$COST_RECEIPT" "$COST_RECEIPT_COPY"
 
