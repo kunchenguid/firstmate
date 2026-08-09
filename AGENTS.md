@@ -492,6 +492,7 @@ Keep additions task-specific rather than repeating lifecycle instructions, and a
 
 Every ship brief must retain the worktree-isolation assertion and stop if launched in the primary checkout.
 If a ship task touches firstmate's shared tracked material, explicitly require `firstmate-coding-guidelines` before editing.
+Every ship and scout brief must declare the local skill(s) the crewmate must read before writing new code via `FM_LOCAL_SKILLS`, or pass `--no-local-skills` when none apply; omitting both fails the scaffold (the contract lives in `bin/fm-brief.sh`'s header).
 If a task will drive Herdr lifecycle behavior, scaffold with `--herdr-lab`; if that need appears after an unguarded scaffold, stop and regenerate rather than adding commands by hand.
 The generated Herdr contract must use a named non-`default` isolated lab and its guarded helper for every lifecycle action.
 

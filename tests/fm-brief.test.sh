@@ -189,6 +189,59 @@ write_registry() {
 EOF
 }
 
+# The local-skills declaration is a hard gate for ship and scout briefs: omitting
+# both FM_LOCAL_SKILLS and --no-local-skills must fail loudly and write nothing,
+# while either signal scaffolds and injects the "Local skills - read first" section
+# only when FM_LOCAL_SKILLS is set.
+test_local_skills_gate() {
+  local home id brief status
+  home="$TMP_ROOT/local-skills-home"
+  mkdir -p "$home/data"
+
+  for kind in ship scout; do
+    id="brief-nolocal-$kind"
+    if [ "$kind" = scout ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1; status=$?
+    else
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1; status=$?
+    fi
+    expect_code 1 "$status" "$kind brief without FM_LOCAL_SKILLS or --no-local-skills must fail"
+    assert_absent "$home/data/$id/brief.md" "$kind: failed gate still wrote a brief"
+  done
+
+  # --no-local-skills succeeds and omits the section.
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-nolocal-flag some-proj --mode no-mistakes --no-local-skills >/dev/null 2>&1; status=$?
+  expect_code 0 "$status" "ship brief with --no-local-skills should succeed"
+  brief="$home/data/brief-nolocal-flag/brief.md"
+  assert_present "$brief" "--no-local-skills brief was not scaffolded"
+  assert_no_grep "Local skills - read first" "$brief" "--no-local-skills brief included the local-skills section"
+
+  # FM_LOCAL_SKILLS succeeds for both kinds and injects the section with each entry.
+  for kind in ship scout; do
+    id="brief-withskill-$kind"
+    if [ "$kind" = scout ]; then
+      FM_HOME="$home" FM_LOCAL_SKILLS="skill-a,skill b" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1; status=$?
+    else
+      FM_HOME="$home" FM_LOCAL_SKILLS="skill-a,skill b" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1; status=$?
+    fi
+    expect_code 0 "$status" "$kind brief with FM_LOCAL_SKILLS should succeed"
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$kind: FM_LOCAL_SKILLS brief was not scaffolded"
+    assert_grep "# Local skills - read first" "$brief" "$kind brief missing the local-skills section"
+    assert_grep "- skill-a" "$brief" "$kind brief missing first FM_LOCAL_SKILLS entry"
+    assert_grep "- skill b" "$brief" "$kind brief missing second FM_LOCAL_SKILLS entry"
+    assert_grep "Do not write a new one-off script unless the skill genuinely" "$brief" \
+      "$kind brief missing the no-new-one-off-script guard"
+  done
+
+  # --no-local-skills is mutually exclusive with FM_LOCAL_SKILLS.
+  FM_HOME="$home" FM_LOCAL_SKILLS=x "$ROOT/bin/fm-brief.sh" brief-both some-proj --mode no-mistakes --no-local-skills >/dev/null 2>&1; status=$?
+  expect_code 1 "$status" "--no-local-skills combined with FM_LOCAL_SKILLS must fail"
+  assert_absent "$home/data/brief-both/brief.md" "rejected both-signal brief still wrote a file"
+
+  pass "fm-brief.sh: local-skills declaration is gated and injects its section"
+}
+
 # fm-brief.sh must exit 0 and produce a brief with no unreplaced shell
 # metacharacter corruption for every ship delivery mode. This also guards
 # against any *new* unescaped apostrophe or unbalanced quote later added to
@@ -202,7 +255,7 @@ test_ship_modes_generate_clean_briefs() {
   for id_mode in "brief-nomistakes-a1:no-mistakes" "brief-directpr-a2:direct-PR" "brief-localonly-a3:local-only"; do
     id=${id_mode%%:*}
     mode=${id_mode##*:}
-    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" >/dev/null 2>&1; status=$?
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" --no-local-skills >/dev/null 2>&1; status=$?
     expect_code 0 "$status" "fm-brief.sh $id --mode $mode should exit 0"
     brief="$home/data/$id/brief.md"
     assert_present "$brief" "$id: brief was not scaffolded"
@@ -251,7 +304,7 @@ test_ship_mode_is_explicit_not_registry() {
   local home brief
   home="$TMP_ROOT/explicit-over-registry-home"
   write_registry "$home"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-explicit-a5 direct-proj --mode no-mistakes >/dev/null 2>&1 \
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-explicit-a5 direct-proj --mode no-mistakes --no-local-skills >/dev/null 2>&1 \
     || fail "explicit no-mistakes brief on a direct-PR project should scaffold"
   brief="$home/data/brief-explicit-a5/brief.md"
   grep -qx "Delivery contract: mode=no-mistakes" "$brief" \
@@ -260,7 +313,7 @@ test_ship_mode_is_explicit_not_registry() {
     "explicit no-mistakes brief did not render the pipeline definition of done"
 
   # An unregistered project is not a blocker either, because nothing is looked up.
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-explicit-a6 never-registered --mode local-only >/dev/null 2>&1 \
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-explicit-a6 never-registered --mode local-only --no-local-skills >/dev/null 2>&1 \
     || fail "unregistered project should still scaffold from the explicit mode"
   grep -qx "Delivery contract: mode=local-only" "$home/data/brief-explicit-a6/brief.md" \
     || fail "unregistered project did not honour the explicit --mode"
@@ -295,14 +348,14 @@ test_faster_paths_use_configured_authority_without_stacked_review() {
   home="$TMP_ROOT/configured-authority-home"
   write_registry "$home"
   id="brief-direct-authority-a4"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" direct-proj --mode direct-PR >/dev/null 2>&1
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" direct-proj --mode direct-PR --no-local-skills >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
   assert_grep "The configured merge authority decides whether to merge the PR; firstmate relays the outcome." "$brief" \
     "direct-PR brief lost configured merge authority"
   assert_no_grep "The captain reviews and merges the PR" "$brief" \
     "direct-PR brief hard-coded captain-only authority"
   id="brief-local-authority-a4"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" local-proj --mode local-only >/dev/null 2>&1
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" local-proj --mode local-only --no-local-skills >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
   assert_grep "The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path." "$brief" \
     "local-only brief lost configured merge authority and guarded landing"
@@ -313,7 +366,7 @@ test_faster_paths_use_configured_authority_without_stacked_review() {
   assert_no_grep "make \`--intent\` preserve all relevant content from this brief" "$home/data/$id/brief.md" \
     "local-only brief must not include the no-mistakes --intent contract"
   id="brief-direct-intent-a4"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" direct-proj --mode direct-PR >/dev/null 2>&1
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" direct-proj --mode direct-PR --no-local-skills >/dev/null 2>&1
   assert_no_grep "make \`--intent\` preserve all relevant content from this brief" "$home/data/$id/brief.md" \
     "direct-PR brief must not include the no-mistakes --intent contract"
   pass "fm-brief.sh: faster paths use configured authority without stacked review"
@@ -326,7 +379,7 @@ test_no_mistakes_dod_wording() {
   home="$TMP_ROOT/wording-home"
   mkdir -p "$home/data"
   id="brief-wording-b1"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes --no-local-skills >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
   assert_present "$brief" "brief was not scaffolded"
   assert_grep "no-mistakes itself provides for the mechanics" "$brief" \
@@ -359,7 +412,7 @@ test_ship_project_memory_wording() {
   home="$TMP_ROOT/project-memory-home"
   mkdir -p "$home/data"
   id="brief-memory-c1"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes --no-local-skills >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
   assert_present "$brief" "brief was not scaffolded"
   assert_grep "Record only project knowledge useful to almost every future session." "$brief" \
@@ -376,7 +429,7 @@ test_herdr_lab_contract_is_explicit_and_complete() {
   home="$TMP_ROOT/herdr-lab-home"
   mkdir -p "$home/data"
   id="brief-herdr-lab-d1"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode no-mistakes --herdr-lab >/dev/null 2>&1
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode no-mistakes --no-local-skills --herdr-lab >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
   assert_present "$brief" "Herdr lab brief was not scaffolded"
   assert_grep "# Herdr isolation - HARD SAFETY CONTRACT" "$brief" \
@@ -410,7 +463,7 @@ test_herdr_lab_contract_quotes_foreign_firstmate_path() {
   id="brief-herdr-lab-foreign-d2"
   helper=$(printf '%s' "$foreign_root/bin/fm-herdr-lab.sh" | sed "s/'/'\\\\''/g")
   helper="'$helper'"
-  FM_HOME="$home" FM_ROOT_OVERRIDE="$foreign_root" "$ROOT/bin/fm-brief.sh" "$id" foreign --scout --herdr-lab >/dev/null 2>&1
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$foreign_root" "$ROOT/bin/fm-brief.sh" "$id" foreign --no-local-skills --scout --herdr-lab >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
   assert_grep "HERDR_LAB_HELPER=$helper" "$brief" \
     "Herdr lab brief must shell-quote an absolute Firstmate helper path"
@@ -426,9 +479,9 @@ test_herdr_lab_omission_is_loud_for_ship_and_scout() {
   for kind in ship scout; do
     id="brief-herdr-gate-$kind"
     if [ "$kind" = scout ]; then
-      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout >/dev/null 2>&1
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --no-local-skills --scout >/dev/null 2>&1
     else
-      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode no-mistakes >/dev/null 2>&1
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode no-mistakes --no-local-skills >/dev/null 2>&1
     fi
     brief="$home/data/$id/brief.md"
     assert_grep "# Herdr lifecycle declaration - NOT ENABLED" "$brief" \
@@ -621,7 +674,7 @@ test_herdr_lab_contract_applies_to_scouts_but_not_secondmates() {
   local home brief status=0
   home="$TMP_ROOT/herdr-kind-home"
   mkdir -p "$home/data"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" herdr-scout firstmate --scout --herdr-lab >/dev/null 2>&1
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" herdr-scout firstmate --no-local-skills --scout --herdr-lab >/dev/null 2>&1
   brief="$home/data/herdr-scout/brief.md"
   assert_grep "# Herdr isolation - HARD SAFETY CONTRACT" "$brief" \
     "scout --herdr-lab brief missing the contract"
@@ -643,11 +696,11 @@ test_pause_verb_override_renders_all_brief_scaffolds() {
     case "$kind" in
       ship)
         FM_HOME="$home" FM_CLASSIFY_PAUSED_VERB=awaiting \
-          "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode no-mistakes >/dev/null 2>&1
+          "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode no-mistakes --no-local-skills >/dev/null 2>&1
         ;;
       scout)
         FM_HOME="$home" FM_CLASSIFY_PAUSED_VERB=awaiting \
-          "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout >/dev/null 2>&1
+          "$ROOT/bin/fm-brief.sh" "$id" firstmate --no-local-skills --scout >/dev/null 2>&1
         ;;
       secondmate)
         FM_HOME="$home" FM_CLASSIFY_PAUSED_VERB=awaiting \
@@ -676,7 +729,7 @@ test_scout_and_secondmate_load_decision_hold_policy() {
   home="$TMP_ROOT/decision-policy-home"
   mkdir -p "$home/data"
   FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
-    "$ROOT/bin/fm-brief.sh" sample-investigation sample --scout >/dev/null 2>&1
+    "$ROOT/bin/fm-brief.sh" sample-investigation sample --scout --no-local-skills >/dev/null 2>&1
   scout="$home/data/sample-investigation/brief.md"
   assert_grep "$ROOT/.agents/skills/decision-hold-lifecycle/SKILL.md" "$scout" \
     "scout brief did not load the unresolved-decision policy before done"
@@ -693,7 +746,7 @@ test_scout_and_secondmate_load_decision_hold_policy() {
 # Scout and secondmate paths still scaffold well-formed briefs.
 test_scout_and_secondmate_scaffold() {
   local brief
-  FM_HOME="$BRIEF_HOME" "$ROOT/bin/fm-brief.sh" brief-scout-q6 alpha --scout >/dev/null 2>&1 \
+  FM_HOME="$BRIEF_HOME" "$ROOT/bin/fm-brief.sh" brief-scout-q6 alpha --scout --no-local-skills >/dev/null 2>&1 \
     || fail "fm-brief.sh scout scaffold exited non-zero"
   brief="$BRIEF_HOME/data/brief-scout-q6/brief.md"
   assert_present "$brief" "scout brief was not scaffolded"
@@ -713,6 +766,7 @@ test_scout_and_secondmate_scaffold() {
 test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
+test_local_skills_gate
 test_ship_modes_generate_clean_briefs
 test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry

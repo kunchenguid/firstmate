@@ -6,8 +6,8 @@
 # description, acceptance criteria, and context, and may adjust other sections
 # when the task genuinely deviates (e.g. working an existing external PR instead
 # of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--herdr-lab]
-#        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--herdr-lab] [--no-local-skills]
+#        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab] [--no-local-skills]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
@@ -22,6 +22,14 @@
 #   omitting both still fails loudly so an accidental omission is never silent.
 #   Set FM_SECONDMATE_CHARTER='<charter>' to fill the charter text.
 #   Set FM_SECONDMATE_SCOPE='<scope>' to write a routing scope distinct from the charter text.
+#   Ship and scout briefs require the caller to declare the local skill(s) the crewmate
+#   must read before writing new code. Set FM_LOCAL_SKILLS (a single path, or a newline- or
+#   comma-separated list of paths; a short free-text description is fine when no
+#   exact skill file applies but relevant local docs/scripts do) to inject the "Local skills -
+#   read first" section, or pass --no-local-skills when no local skill applies (e.g. a brand-new
+#   project with nothing to point at yet). Omitting both is a hard gate: fm-brief.sh fails loudly
+#   so an accidental omission is never silent, mirroring the --no-projects and --herdr-lab
+#   must-be-explicit reasoning.
 #   --herdr-lab is mandatory when the task will issue Herdr lifecycle commands.
 #   It adds the hard isolation contract backed by bin/fm-herdr-lab.sh.
 #   The flag must be explicit because {TASK} is filled after scaffolding and the
@@ -106,6 +114,7 @@ HERDR_LAB=0
 NO_PROJECTS=0
 MODE=
 MODE_SET=0
+NO_LOCAL_SKILLS=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -131,6 +140,7 @@ for a in "$@"; do
     # brief input. Refuse it loudly so it is never silently dropped here and then
     # believed to have been recorded.
     --yolo|--yolo=*) echo "error: --yolo is not a brief input; pass it to bin/fm-spawn.sh, which records the task's approval posture" >&2; exit 1 ;;
+    --no-local-skills) NO_LOCAL_SKILLS=1 ;;
     *) POS+=("$a") ;;
   esac
 done
@@ -166,9 +176,36 @@ if [ "$NO_PROJECTS" -eq 1 ] && [ "$KIND" != secondmate ]; then
   exit 1
 fi
 
+NO_LOCAL_SKILLS_ARG=0
+if [ "$NO_LOCAL_SKILLS" -eq 1 ]; then
+  if [ -n "${FM_LOCAL_SKILLS:-}" ]; then
+    echo "error: --no-local-skills cannot be combined with FM_LOCAL_SKILLS" >&2
+    exit 1
+  fi
+  if [ "$KIND" = secondmate ]; then
+    echo "error: --no-local-skills applies only to crewmate ship or scout briefs" >&2
+    exit 1
+  fi
+  NO_LOCAL_SKILLS_ARG=1
+fi
+
 BRIEF="$DATA/$ID/brief.md"
 [ -e "$BRIEF" ] && { echo "error: $BRIEF already exists" >&2; exit 1; }
 mkdir -p "$DATA/$ID"
+
+LOCAL_SKILLS_SECTION=""
+if [ "$KIND" != secondmate ] && [ -n "${FM_LOCAL_SKILLS:-}" ] && [ "$NO_LOCAL_SKILLS_ARG" -ne 1 ]; then
+  LOCAL_SKILLS_SECTION=$(printf '%s\n' \
+'# Local skills - read first' \
+'Before writing any new script or one-off tooling, read the following local skill(s)/resource(s) and follow their established scripts/tooling:' \
+"$(printf '%s\n' "${FM_LOCAL_SKILLS}" | tr ',' '\n' | sed 's/^[[:space:]]*//' | sed '/^$/d' | sed 's/^/- /') " \
+'Do not write a new one-off script unless the skill genuinely does not cover this exact task. If you deviate from what the skill documents, say so and why in your status/report.')
+fi
+
+if [ "$KIND" != secondmate ] && [ -z "${FM_LOCAL_SKILLS:-}" ] && [ "$NO_LOCAL_SKILLS_ARG" -ne 1 ]; then
+  echo "error: this scout/ship brief requires FM_LOCAL_SKILLS (the local skill(s) the crewmate must read) or --no-local-skills when no local skill applies, or else the crewmate cannot move forward" >&2
+  exit 1
+fi
 
 shell_quote() {
   printf "'"
@@ -305,6 +342,8 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 # Task
 {TASK}
 
+$LOCAL_SKILLS_SECTION
+
 $HERDR_SECTION
 
 # Setup
@@ -414,6 +453,8 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 
 # Task
 {TASK}
+
+$LOCAL_SKILLS_SECTION
 
 $HERDR_SECTION
 
