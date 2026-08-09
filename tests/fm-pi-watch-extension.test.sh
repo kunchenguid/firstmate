@@ -413,8 +413,7 @@ if [ "$count" -eq 1 ]; then
   printf 'signal: synthetic wake\n'
   exit 0
 fi
-trap 'exit 0' TERM INT
-while :; do sleep 0.02; done
+exec node --input-type=module -e 'process.on("SIGTERM", () => process.exit(0)); setInterval(() => {}, 1000);'
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
   out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_PI_ARM_READY_TIMEOUT_MS=250 FM_WATCH_ARM_RETIRE_TIMEOUT_MS=250 FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node --input-type=module 2>&1 <<'EOF'
@@ -424,6 +423,10 @@ import { pathToFileURL } from "node:url";
 let tool = null;
 let prompt = "";
 let rowsAtPrompt = 0;
+let resolvePrompt = () => {};
+const promptDelivered = new Promise((resolve) => {
+  resolvePrompt = resolve;
+});
 const pi = {
   on() {},
   registerCommand() {},
@@ -435,15 +438,21 @@ const pi = {
     rowsAtPrompt = existsSync(process.env.FM_ARM_LOG)
       ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n").length
       : 0;
+    resolvePrompt();
   },
 };
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
 await tool.execute("tool-call-hung-successor", {}, undefined, undefined, {});
-for (let i = 0; i < 500 && !prompt; i += 1) {
-  await new Promise((resolve) => setTimeout(resolve, 10));
-}
+let promptTimeout;
+await Promise.race([
+  promptDelivered,
+  new Promise((resolve) => {
+    promptTimeout = setTimeout(resolve, 5000);
+  }),
+]);
+clearTimeout(promptTimeout);
 const rows = existsSync(process.env.FM_ARM_LOG)
   ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n")
   : [];
@@ -451,7 +460,7 @@ if (rows.length !== 4) throw new Error(`expected one successor plus two retries,
 if (rowsAtPrompt !== 4) throw new Error(`wake arrived before restoration exhausted (${rowsAtPrompt} arm rows)`);
 if (!prompt.includes("signal: synthetic wake")) throw new Error(`original wake was lost: ${prompt}`);
 if (!prompt.includes("could not restore watcher continuity after 2 retries")) throw new Error(`missing typed restoration failure: ${prompt}`);
-await new Promise((resolve) => setTimeout(resolve, 100));
+await new Promise((resolve) => setImmediate(resolve));
 const stableRows = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n");
 if (stableRows.length !== 4) throw new Error(`single-flight recovery launched ${stableRows.length} arms`);
 EOF
