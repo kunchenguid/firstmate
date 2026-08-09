@@ -4,19 +4,24 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import fcntl
 import hashlib
 import hmac
 import json
 import math
 import os
 import re
+import secrets
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
+from contextlib import contextmanager
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator, TextIO
 
 
 MAX_REQUEST_BYTES = 1_000_000
@@ -28,6 +33,7 @@ UUID_RE = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-"
     r"[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
 )
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 MEDIA_FLAGS = {
     "end-image",
     "image",
@@ -37,6 +43,20 @@ MEDIA_FLAGS = {
     "video-references",
 }
 DISALLOWED_MEDIA_PARAMS = {"audio", "audio-references"}
+AUDIO_CONTROL_PARAMS = {"generate-audio", "sound"}
+AUDIO_OFF_BY_JOB_TYPE = {
+    "cinematic_studio_3_0": {"generate_audio": "false"},
+    "cinematic_studio_video": {"sound": "false"},
+    "cinematic_studio_video_3_5": {"generate_audio": "false"},
+    "cinematic_studio_video_v2": {"sound": "off"},
+    "kling2_6": {"sound": "false"},
+    "kling3_0": {"sound": "off"},
+    "seedance1_5": {"generate_audio": "false"},
+    "seedance_2_0": {"generate_audio": "false"},
+    "seedance_2_0_mini": {"generate_audio": "false"},
+    "veo3_1_lite": {"generate_audio": "false"},
+}
+BLOCKED_AUDIO_JOB_TYPES = {"explainer_video", "veo3", "veo3_1", "video_explainer"}
 RESERVED_PARAMS = MEDIA_FLAGS | DISALLOWED_MEDIA_PARAMS | {
     "json",
     "no-color",
@@ -98,7 +118,7 @@ def _primitive_value(name: str, value: Any) -> str:
         if "\x00" in value:
             raise PolicyError(f"parameter {name!r} contains a NUL byte")
         lowered = value.strip().lower()
-        if lowered.startswith(("file://", "http://", "https://")) or Path(value).is_absolute():
+        if lowered.startswith(("@", "file://", "http://", "https://")) or Path(value).is_absolute():
             raise PolicyError(f"parameter {name!r} must not contain a path or remote URL")
         return value
     raise PolicyError(f"parameter {name!r} must be a string, number, or boolean")
@@ -123,6 +143,8 @@ def _normalize_request(raw: Any) -> dict[str, Any]:
         raise PolicyError("job_type must contain only lowercase letters, digits, dashes, or underscores")
     if job_type.startswith(BLOCKED_MODEL_PREFIXES):
         raise PolicyError(f"model {job_type!r} is outside the hardened generation boundary")
+    if job_type in BLOCKED_AUDIO_JOB_TYPES:
+        raise PolicyError(f"model {job_type!r} cannot enforce the no-audio boundary")
 
     prompt = raw.get("prompt")
     if not isinstance(prompt, str) or not prompt.strip():
@@ -140,6 +162,8 @@ def _normalize_request(raw: Any) -> dict[str, Any]:
         flag_name = name.replace("_", "-")
         if flag_name in RESERVED_PARAMS:
             raise PolicyError(f"reserved parameter must not be supplied: {name}")
+        if flag_name in AUDIO_CONTROL_PARAMS:
+            continue
         normalized_value = _primitive_value(name, value)
         if flag_name in BULK_PARAMS and _is_more_than_one(normalized_value):
             raise PolicyError(f"bulk parameter {name!r} is not supported by this single-job wrapper")
@@ -170,7 +194,9 @@ def _normalize_request(raw: Any) -> dict[str, Any]:
     return {
         "job_type": job_type,
         "prompt": prompt,
-        "parameters": dict(sorted(normalized_parameters.items())),
+        "parameters": dict(
+            sorted({**normalized_parameters, **AUDIO_OFF_BY_JOB_TYPE.get(job_type, {})}.items())
+        ),
         "media": normalized_media,
     }
 
@@ -188,8 +214,8 @@ def _digest(request: dict[str, Any]) -> str:
     return hashlib.sha256(_canonical_bytes(request)).hexdigest()
 
 
-def _local_uploads(request: dict[str, Any]) -> list[dict[str, Any]]:
-    uploads: list[dict[str, Any]] = []
+def _local_upload_paths(request: dict[str, Any]) -> list[str]:
+    uploads: list[str] = []
     seen: set[str] = set()
     for item in request["media"]:
         value = item["value"]
@@ -197,7 +223,40 @@ def _local_uploads(request: dict[str, Any]) -> list[dict[str, Any]]:
         if not path.is_absolute() or value in seen:
             continue
         seen.add(value)
-        uploads.append({"path": value, "bytes": path.stat().st_size})
+        uploads.append(value)
+    return uploads
+
+
+def _open_regular_file(path: Path) -> int:
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise PolicyError(f"cannot open local media {path}: {exc}") from exc
+    if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+        os.close(descriptor)
+        raise PolicyError(f"local media must remain a regular non-symlink file: {path}")
+    return descriptor
+
+
+def _hash_regular_file(path: Path) -> tuple[int, str]:
+    descriptor = _open_regular_file(path)
+    digest = hashlib.sha256()
+    byte_count = 0
+    with os.fdopen(descriptor, "rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            digest.update(chunk)
+            byte_count += len(chunk)
+    return byte_count, digest.hexdigest()
+
+
+def _upload_manifest(request: dict[str, Any]) -> list[dict[str, Any]]:
+    uploads: list[dict[str, Any]] = []
+    for value in _local_upload_paths(request):
+        byte_count, digest = _hash_regular_file(Path(value))
+        uploads.append({"path": value, "bytes": byte_count, "sha256": digest})
     return uploads
 
 
@@ -289,6 +348,8 @@ def _temporary_output(path_text: str, label: str) -> Path:
 
 
 def _require_temporary_input(path: Path, label: str) -> None:
+    if not path.is_absolute():
+        raise PolicyError(f"{label} path must be absolute")
     _require_temporary_location(path, label)
 
 
@@ -297,6 +358,182 @@ def _write_private_json(path: Path, payload: Any) -> None:
     with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
         json.dump(payload, handle, indent=2, sort_keys=True)
         handle.write("\n")
+
+
+def _upload_token(receipt_path: Path, secret: str) -> str:
+    encoded_path = base64.urlsafe_b64encode(
+        str(receipt_path).encode("utf-8")
+    ).decode("ascii")
+    return f"upload:v1:{encoded_path.rstrip('=')}:{secret}"
+
+
+def _decode_upload_token(token: str) -> tuple[Path, str]:
+    parts = token.split(":", 3)
+    if (
+        len(parts) != 4
+        or parts[:2] != ["upload", "v1"]
+        or not parts[2]
+        or len(parts[3]) < 32
+    ):
+        raise PolicyError("upload approval token is invalid or already consumed")
+    try:
+        encoded_path = parts[2] + "=" * (-len(parts[2]) % 4)
+        path_text = base64.urlsafe_b64decode(encoded_path.encode("ascii")).decode("utf-8")
+    except (UnicodeError, ValueError) as exc:
+        raise PolicyError("upload approval token is invalid or already consumed") from exc
+    receipt_path = Path(path_text)
+    _require_temporary_input(receipt_path, "upload approval")
+    if receipt_path.name != "approval.json" or not receipt_path.parent.name.startswith(
+        "higgsfield-upload-approval."
+    ):
+        raise PolicyError("upload approval token is invalid or already consumed")
+    return receipt_path, parts[3]
+
+
+def _create_upload_approval(
+    request: dict[str, Any], uploads: list[dict[str, Any]]
+) -> str:
+    approval_directory = Path(tempfile.mkdtemp(prefix="higgsfield-upload-approval."))
+    receipt_path = approval_directory / "approval.json"
+    secret = secrets.token_urlsafe(32)
+    token = _upload_token(receipt_path, secret)
+    signed = {
+        "request_digest": _digest(request),
+        "status": "pending",
+        "token_sha256": hashlib.sha256(token.encode("utf-8")).hexdigest(),
+        "uploads": uploads,
+    }
+    receipt = {
+        **signed,
+        "approval_hmac": hmac.new(
+            secret.encode("utf-8"), _canonical_bytes(signed), hashlib.sha256
+        ).hexdigest(),
+    }
+    try:
+        _write_private_json(receipt_path, receipt)
+    except OSError:
+        approval_directory.rmdir()
+        raise
+    return token
+
+
+@contextmanager
+def _locked_json(path: Path, label: str) -> Iterator[tuple[TextIO, Any]]:
+    _require_temporary_input(path, label)
+    flags = os.O_RDWR
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise PolicyError(f"{label} is invalid or already consumed") from exc
+    handle: TextIO | None = None
+    try:
+        file_stat = os.fstat(descriptor)
+        if not stat.S_ISREG(file_stat.st_mode) or file_stat.st_size > MAX_REQUEST_BYTES:
+            raise PolicyError(f"{label} is invalid or already consumed")
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise PolicyError(f"{label} is already being consumed") from exc
+        handle = os.fdopen(descriptor, "r+", encoding="utf-8")
+        descriptor = -1
+        try:
+            payload = json.load(handle)
+        except (UnicodeError, json.JSONDecodeError) as exc:
+            raise PolicyError(f"{label} is invalid or already consumed") from exc
+        yield handle, payload
+    finally:
+        if handle is not None:
+            handle.close()
+        elif descriptor >= 0:
+            os.close(descriptor)
+
+
+def _rewrite_locked_json(handle: TextIO, payload: Any) -> None:
+    handle.seek(0)
+    json.dump(payload, handle, indent=2, sort_keys=True)
+    handle.write("\n")
+    handle.truncate()
+    handle.flush()
+    os.fsync(handle.fileno())
+
+
+def _validated_upload_manifest(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list) or not value:
+        raise PolicyError("upload approval is invalid or already consumed")
+    uploads: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict) or set(item) != {"bytes", "path", "sha256"}:
+            raise PolicyError("upload approval is invalid or already consumed")
+        byte_count = item.get("bytes")
+        path = item.get("path")
+        digest = item.get("sha256")
+        if (
+            isinstance(byte_count, bool)
+            or not isinstance(byte_count, int)
+            or byte_count < 0
+            or not isinstance(path, str)
+            or not Path(path).is_absolute()
+            or not isinstance(digest, str)
+            or not SHA256_RE.fullmatch(digest)
+        ):
+            raise PolicyError("upload approval is invalid or already consumed")
+        uploads.append({"bytes": byte_count, "path": path, "sha256": digest})
+    return uploads
+
+
+def _snapshot_uploads(
+    approval_path: Path, uploads: list[dict[str, Any]]
+) -> tuple[Path, list[dict[str, str]]]:
+    snapshot_directory = Path(
+        tempfile.mkdtemp(prefix="snapshots.", dir=approval_path.parent)
+    )
+    snapshots: list[dict[str, str]] = []
+    try:
+        for index, upload in enumerate(uploads):
+            source_path = Path(upload["path"])
+            snapshot_path = snapshot_directory / f"media-{index}"
+            source_descriptor = _open_regular_file(source_path)
+            try:
+                snapshot_descriptor = os.open(
+                    snapshot_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600
+                )
+            except OSError:
+                os.close(source_descriptor)
+                raise
+            digest = hashlib.sha256()
+            byte_count = 0
+            with os.fdopen(source_descriptor, "rb") as source, os.fdopen(
+                snapshot_descriptor, "wb"
+            ) as snapshot:
+                while chunk := source.read(1024 * 1024):
+                    snapshot.write(chunk)
+                    digest.update(chunk)
+                    byte_count += len(chunk)
+                snapshot.flush()
+                os.fsync(snapshot.fileno())
+            if byte_count != upload["bytes"] or not hmac.compare_digest(
+                digest.hexdigest(), upload["sha256"]
+            ):
+                raise PolicyError(
+                    f"local media changed after approval: {source_path}; plan and approve it again"
+                )
+            snapshots.append({"path": upload["path"], "snapshot": str(snapshot_path)})
+    except BaseException:
+        _remove_snapshots(snapshot_directory, snapshots)
+        raise
+    return snapshot_directory, snapshots
+
+
+def _remove_snapshots(
+    snapshot_directory: Path, snapshots: list[dict[str, str]]
+) -> None:
+    for upload in snapshots:
+        Path(upload["snapshot"]).unlink(missing_ok=True)
+    for remaining in snapshot_directory.iterdir():
+        remaining.unlink()
+    snapshot_directory.rmdir()
 
 
 def _extract_upload_id(payload: Any) -> str | None:
@@ -320,7 +557,8 @@ def _extract_upload_id(payload: Any) -> str | None:
 def command_plan(args: argparse.Namespace) -> None:
     request = _load_request(args.request)
     digest = _digest(request)
-    uploads = _local_uploads(request)
+    uploads = _upload_manifest(request)
+    approval_token = _create_upload_approval(request, uploads) if uploads else None
     _json_output(
         {
             "action": "plan",
@@ -330,7 +568,7 @@ def command_plan(args: argparse.Namespace) -> None:
             "prompt_characters": len(request["prompt"]),
             "prompt_sha256": hashlib.sha256(request["prompt"].encode("utf-8")).hexdigest(),
             "request_digest": digest,
-            "upload_approval_token": f"upload:{digest}" if uploads else None,
+            "upload_approval_token": approval_token,
             "uploads": uploads,
         }
     )
@@ -339,19 +577,56 @@ def command_plan(args: argparse.Namespace) -> None:
 def command_upload(args: argparse.Namespace) -> None:
     request = _load_request(args.request)
     digest = _digest(request)
-    uploads = _local_uploads(request)
-    if not uploads:
+    upload_paths = _local_upload_paths(request)
+    if not upload_paths:
         raise PolicyError("request has no local media to upload")
-    if not hmac.compare_digest(args.approval_token, f"upload:{digest}"):
-        raise PolicyError("upload approval token does not match the exact request")
     output = _temporary_output(args.output, "uploaded request")
+    approval_path, secret = _decode_upload_token(args.approval_token)
+    with _locked_json(approval_path, "upload approval") as (approval_handle, receipt):
+        if not isinstance(receipt, dict):
+            raise PolicyError("upload approval is invalid or already consumed")
+        signed = {
+            "request_digest": receipt.get("request_digest"),
+            "status": receipt.get("status"),
+            "token_sha256": receipt.get("token_sha256"),
+            "uploads": receipt.get("uploads"),
+        }
+        expected_hmac = hmac.new(
+            secret.encode("utf-8"), _canonical_bytes(signed), hashlib.sha256
+        ).hexdigest()
+        if not hmac.compare_digest(
+            str(receipt.get("approval_hmac", "")), expected_hmac
+        ) or not hmac.compare_digest(
+            str(receipt.get("token_sha256", "")),
+            hashlib.sha256(args.approval_token.encode("utf-8")).hexdigest(),
+        ):
+            raise PolicyError("upload approval is invalid or already consumed")
+        if receipt.get("status") != "pending":
+            raise PolicyError("upload approval is invalid or already consumed")
+        if not hmac.compare_digest(str(receipt.get("request_digest", "")), digest):
+            raise PolicyError("upload approval does not match the exact request")
+        uploads = _validated_upload_manifest(receipt.get("uploads"))
+        if [upload["path"] for upload in uploads] != upload_paths:
+            raise PolicyError("upload approval does not match the exact request")
+        consumed = dict(receipt)
+        consumed["status"] = "consumed"
+        _rewrite_locked_json(approval_handle, consumed)
+
+    snapshot_directory, snapshots = _snapshot_uploads(approval_path, uploads)
     ids_by_path: dict[str, str] = {}
-    for upload in uploads:
-        response = _run_cli(["upload", "create", upload["path"], "--json"], timeout=600)
-        upload_id = _extract_upload_id(response)
-        if upload_id is None:
-            raise PolicyError(f"upload response for {upload['path']} did not contain a UUID")
-        ids_by_path[upload["path"]] = upload_id
+    try:
+        for upload in snapshots:
+            response = _run_cli(
+                ["upload", "create", upload["snapshot"], "--json"], timeout=600
+            )
+            upload_id = _extract_upload_id(response)
+            if upload_id is None:
+                raise PolicyError(
+                    f"upload response for {upload['path']} did not contain a UUID"
+                )
+            ids_by_path[upload["path"]] = upload_id
+    finally:
+        _remove_snapshots(snapshot_directory, snapshots)
     uploaded_request = json.loads(json.dumps(request))
     for item in uploaded_request["media"]:
         if item["value"] in ids_by_path:
@@ -369,7 +644,7 @@ def command_upload(args: argparse.Namespace) -> None:
 
 def command_cost(args: argparse.Namespace) -> None:
     request = _load_request(args.request)
-    if _local_uploads(request):
+    if _local_upload_paths(request):
         raise PolicyError("costing local paths would upload them; run the approved upload phase first")
     receipt_path = _temporary_output(args.receipt, "cost receipt")
     credits, credits_text = _credits(request)
@@ -397,27 +672,24 @@ def command_cost(args: argparse.Namespace) -> None:
 
 def command_run(args: argparse.Namespace) -> None:
     request = _load_request(args.request)
-    if _local_uploads(request):
+    if _local_upload_paths(request):
         raise PolicyError("run refuses local paths; run the approved upload phase first")
     receipt_path = Path(args.cost_receipt)
-    _require_temporary_input(receipt_path, "cost receipt")
-    receipt = _read_json(receipt_path, "cost receipt")
-    if not isinstance(receipt, dict) or receipt.get("status") != "pending":
-        raise PolicyError("cost receipt is invalid or already consumed")
     digest = _digest(request)
-    if not hmac.compare_digest(str(receipt.get("request_digest", "")), digest):
-        raise PolicyError("cost receipt does not match the exact request")
-    _, current_credits_text = _credits(request)
-    if not hmac.compare_digest(str(receipt.get("credits_text", "")), current_credits_text):
-        raise PolicyError("credit cost changed; run cost again and obtain new approval")
-    consumed = dict(receipt)
-    consumed["status"] = "consumed"
-    replacement = receipt_path.with_name(f".{receipt_path.name}.consuming")
-    if replacement.exists() or replacement.is_symlink():
-        raise PolicyError("temporary cost receipt replacement already exists")
-    _write_private_json(replacement, consumed)
-    os.replace(replacement, receipt_path)
-    result = _run_cli(_generation_arguments(request, "create"), timeout=1_500)
+    with _locked_json(receipt_path, "cost receipt") as (receipt_handle, receipt):
+        if not isinstance(receipt, dict) or receipt.get("status") != "pending":
+            raise PolicyError("cost receipt is invalid or already consumed")
+        if not hmac.compare_digest(str(receipt.get("request_digest", "")), digest):
+            raise PolicyError("cost receipt does not match the exact request")
+        _, current_credits_text = _credits(request)
+        if not hmac.compare_digest(
+            str(receipt.get("credits_text", "")), current_credits_text
+        ):
+            raise PolicyError("credit cost changed; run cost again and obtain new approval")
+        consumed = dict(receipt)
+        consumed["status"] = "consumed"
+        _rewrite_locked_json(receipt_handle, consumed)
+        result = _run_cli(_generation_arguments(request, "create"), timeout=1_500)
     _json_output(
         {
             "action": "run",

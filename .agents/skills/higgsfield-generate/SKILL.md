@@ -1,7 +1,7 @@
 ---
 name: higgsfield-generate
 description: Safely generate a single image or video with the Higgsfield CLI through explicit upload and credit approvals. Use when the captain asks to create or animate visual media with Higgsfield, including prompt-only work and approved local image or video references.
-user-invocable: true
+user-invocable: false
 metadata:
   internal: true
 ---
