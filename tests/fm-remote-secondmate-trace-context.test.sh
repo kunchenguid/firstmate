@@ -104,10 +104,12 @@ while [ "$#" -gt 0 ]; do
   case "$1" in -o) shift 2 ;; --) shift; break ;; *) exit 90 ;; esac
 done
 host=$1
-entry=$2
-shift 2
+interpreter=$2
+entry=$3
+shift 3
 [ "$host" = remote-mac ] || exit 91
-[ "$entry" = fm-remote-entrypoint.sh ] || exit 92
+[ "$interpreter" = /bin/bash ] || exit 92
+[ "$entry" = '"$HOME/.local/bin/fm-remote-entrypoint.sh"' ] || exit 93
 cd "$FM_FAKE_REMOTE_CWD" || exit 93
 # The readiness gate is answered here rather than by the real doctor, which
 # would inspect the RUNNER's own account; tests/fm-remote-doctor.test.sh owns

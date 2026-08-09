@@ -79,10 +79,12 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 host=$1
-entry=$2
-shift 2
+interpreter=$2
+entry=$3
+shift 3
 [ "$host" = remote-mac ] || exit 91
-[ "$entry" = fm-remote-entrypoint.sh ] || exit 92
+[ "$interpreter" = /bin/bash ] || exit 92
+[ "$entry" = '"$HOME/.local/bin/fm-remote-entrypoint.sh"' ] || exit 93
 argv_b64=$4
 command_name=$(perl -MMIME::Base64=decode_base64 -e '$d=decode_base64($ARGV[0]); ($c)=split(/\0/, $d); print $c' "$argv_b64")
 case "${FM_FAKE_SSH_MODE:-normal}:$command_name" in
