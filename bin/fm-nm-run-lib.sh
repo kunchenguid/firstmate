@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 # Shared no-mistakes axi run attribution primitives.
 #
-# ONE owner for the branch+code-identity matching rule that decides whether a
-# no-mistakes run belongs to a given worktree, used by fm-crew-state.sh
-# (read-only current-state reporting) and fm-teardown.sh (pre-teardown run
-# abort, see its "Fix 1" header comment). Getting this wrong in either
+# ONE owner for the rule that decides whether a no-mistakes run belongs to a
+# given worktree, used by fm-crew-state.sh (read-only current-state reporting)
+# and fm-teardown.sh (pre-teardown run abort, see its "Fix 1" header comment).
+# fm_nm_status_matches_worktree composes the two independent proofs, either one
+# sufficient: local history binding (fm_nm_head_matches_worktree) and live
+# pipeline custody read from no-mistakes' own branch_sync object
+# (fm_nm_run_owns_worktree_by_branch_sync). Getting this wrong in either
 # direction is unsafe: a false negative hides a genuinely parked run, and a
 # false positive lets teardown act on a run it does not own.
 #
