@@ -86,6 +86,8 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-nm-run-lib.sh`       | Shared bounded reading and branch-and-code-identity attribution of no-mistakes run records |
 | `fm-timeout-lib.sh`      | Single owner of hard-bounded command execution and its fallback watchdog |
 | `fm-tangle-lib.sh`       | Shared default-branch resolution and primary-checkout tangle classification          |
+| `fm-verify.sh`           | Run one declared verifier and return `PASS`, `FAIL`, or `NO_VERIFIER_RAN`, with exit 0 reserved for `PASS` alone |
+| `fm-verify-lib.sh`       | Single owner of the three-valued observation type, its consumer and coercion rules, and the check-set classification rule |
 | `fm-supervision-lib.sh`  | Shared in-flight-work-without-fresh-watcher-beacon predicate                         |
 | `fm-ff-lib.sh`           | Shared guarded fast-forward helper for origin pulls and local secondmate syncs       |
 | `fm-lock-lib.sh`         | Shared "is this git lock provably abandoned?" proof used by teardown and fleet-sync   |

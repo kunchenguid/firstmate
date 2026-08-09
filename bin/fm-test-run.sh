@@ -147,7 +147,7 @@ family_for_basename() {
     fm-supervision-instructions.test.sh|fm-task-axis.test.sh|\
     fm-task-base.test.sh|fm-task-delivery.test.sh|\
     fm-tmux-submit-busy.test.sh|fm-trace-context-lib.test.sh|\
-    fm-transition-lib.test.sh|\
+    fm-transition-lib.test.sh|fm-verify.test.sh|\
     fm-test-run.test.sh|fm-test-isolation-proof.test.sh)
       printf '%s\n' pure-contract-unit
       ;;
@@ -901,6 +901,13 @@ families_for_changed_path() {
     bin/fm-sessionstart-nudge.sh|bin/fm-tangle*|bin/fm-update.sh|\
     bin/fm-gate-refuse*|bin/fm-lock*|bin/fm-quota-axi-lib.sh)
       printf '%s\n' session-bootstrap
+      ;;
+    bin/fm-verify-lib.sh)
+      # The shared three-valued observation type and check-set rule: the
+      # wrapper's own suite, and the bearings snapshot, which splices that same
+      # rule and asserts on the label it produces.
+      printf '%s\n' pure-contract-unit
+      printf '%s\n' snapshot-bearings
       ;;
     bin/fm-pr-*|bin/fm-merge-local.sh|bin/fm-teardown.sh|bin/fm-review-diff.sh|\
     bin/fm-x-*|bin/fm-check*)

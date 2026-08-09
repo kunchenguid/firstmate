@@ -940,14 +940,58 @@ test_standing_worker_rules_by_variant() {
 
   for id in standing-nomistakes standing-scout standing-secondmate; do
     brief="$home/data/$id/brief.md"
-    assert_grep "run a negative control and watch it fail, then run the real check" "$brief" \
+    assert_grep "run a negative control, watch that same check go red" "$brief" \
       "$id: verification discipline lost the witnessed negative control"
-    assert_grep "Wait on completion artifacts, never process names." "$brief" \
-      "$id: verification discipline lost the artifact-over-process-name rule"
-    assert_grep "report a missing expected artifact as failure" "$brief" \
-      "$id: verification discipline lost missing-artifact-is-failure at collection"
+    assert_grep "An observation has three values, never two" "$brief" \
+      "$id: verification discipline lost the three-valued observation type rule"
+    assert_grep "a missing expected artifact is could-not-observe at collection time" "$brief" \
+      "$id: verification discipline lost the missing-artifact rule at collection"
   done
   pass "fm-brief.sh: standing worker rules render per variant with the delegated-rebase carve-out"
+}
+
+# The verification-discipline block carries the TYPE rule, not the slogan that
+# already failed: ten instances of the same defect landed while "an absent
+# result is not a pass" was written into the shared instructions. It also keeps
+# the negative-control instruction, which fm-verify.sh deliberately does NOT
+# retire - a wrapper cannot run the control for you.
+test_verification_discipline_is_the_type_rule() {
+  local home id brief kind
+  home="$TMP_ROOT/verify-discipline-home"
+  mkdir -p "$home/data"
+  for kind in ship scout; do
+    id="brief-verify-$kind"
+    if [ "$kind" = ship ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
+    else
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1
+    fi
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$kind brief was not scaffolded"
+    assert_grep "An observation has three values, never two" "$brief" \
+      "$kind brief lost the three-valued observation type rule"
+    assert_grep "none of them is a pass" "$brief" \
+      "$kind brief lost the enumeration of could-not-observe conditions"
+    assert_grep "bin/fm-verify.sh" "$brief" \
+      "$kind brief must route verifiers through the wrapper"
+    assert_grep "rather than interpreting a tool's exit status yourself" "$brief" \
+      "$kind brief must retire self-interpreted exit statuses"
+    # Rule 3 routes OBSERVATIONS, not tool use: opening a pull request is an
+    # action, and an action has no observation type to report.
+    assert_grep "making an OBSERVATION whose answer you will act on" "$brief" \
+      "$kind brief must scope the wrapper to observations rather than to tool use"
+    # And the registry is closed, so the undeclared observation needs a stated
+    # path of its own instead of leaving the worker with no sanctioned move.
+    assert_grep "has no declared verifier, apply the same three-valued rule by hand" "$brief" \
+      "$kind brief must say what to do when the observation has no declared verifier"
+    assert_grep "report the undeclared verifier as a gap" "$brief" \
+      "$kind brief must have an undeclared verifier reported rather than inferred past"
+    assert_grep "run a negative control, watch that same check go red" "$brief" \
+      "$kind brief lost the negative-control instruction, which is not retired"
+    assert_no_grep "never process names" "$brief" \
+      "$kind brief still carries the exhortation the wrapper replaces"
+  done
+  pass "fm-brief.sh: briefs carry the three-valued type rule and the wrapper call site"
 }
 
 test_script_parses
@@ -976,3 +1020,4 @@ test_context_pressure_contract_reaches_every_agent_kind
 test_scout_and_secondmate_scaffold
 test_standing_worker_rules_by_variant
 test_no_brief_makes_the_worker_its_own_retry_arbiter
+test_verification_discipline_is_the_type_rule
