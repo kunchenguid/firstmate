@@ -1149,13 +1149,20 @@ printf '%s\n' "$*" >> "${FM_TMUX_LOG:?}"
 case "${1:-}" in
   list-windows)
     target=
+    format=
     prev=
     for arg in "$@"; do
       [ "$prev" = -t ] && target=$arg
+      [ "$prev" = -F ] && format=$arg
       prev=$arg
     done
     case "$target" in
-      =exact) printf 'win\n' ;;
+      =exact)
+        case "$format" in
+          '#{window_name}') printf 'win\n' ;;
+          '#{window_index}') printf '0\n' ;;
+        esac
+        ;;
       =gone) printf "can't find session: gone\n" >&2; exit 1 ;;
       *) printf 'win\n' ;;
     esac
@@ -1169,6 +1176,10 @@ SH
   [ "$out" = present ] || fail "exact session/window target should be present, got $out"
   out=$(PATH="$fakebin:$PATH" FM_TMUX_LOG="$log" fm_backend_tmux_target_state gone:win)
   [ "$out" = missing ] || fail "missing exact session must not match a live session prefix, got $out"
+  out=$(PATH="$fakebin:$PATH" FM_TMUX_LOG="$log" fm_backend_tmux_target_state exact:0)
+  [ "$out" = present ] || fail "exact numeric window index should be present, got $out"
+  out=$(PATH="$fakebin:$PATH" FM_TMUX_LOG="$log" fm_backend_tmux_target_state exact:1)
+  [ "$out" = missing ] || fail "absent numeric window index should be missing, got $out"
   out=$(PATH="$fakebin:$PATH" FM_TMUX_LOG="$log" fm_backend_tmux_target_state %3)
   [ "$out" = present ] || fail "stable tmux pane id should be present, got $out"
   out=$(PATH="$fakebin:$PATH" FM_TMUX_LOG="$log" fm_backend_tmux_target_state %4)
@@ -1177,9 +1188,11 @@ SH
   [ "$out" = unreadable ] || fail "malformed tmux pane id should be unreadable, got $out"
   assert_contains "$(cat "$log")" "list-windows -t =exact -F #{window_name}" \
     "session/window inventory did not require exact session identity"
+  assert_contains "$(cat "$log")" "list-windows -t =exact -F #{window_index}" \
+    "numeric session/window target did not use exact window-index inventory"
   assert_contains "$(cat "$log")" "list-panes -a -F #{pane_id}" \
     "stable pane targets did not use server-wide pane inventory"
-  pass "tmux target state uses exact session/window and stable pane-id inventories"
+  pass "tmux target state uses exact named, numeric, and pane-id inventories"
 }
 
 test_backend_name_precedence

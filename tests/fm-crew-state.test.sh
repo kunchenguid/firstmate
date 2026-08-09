@@ -428,6 +428,23 @@ test_genuine_parked_not_superseded() {
   pass "genuine parked run is not flagged superseded"
 }
 
+test_dead_window_overrides_parked_run_step() {
+  reset_fakes
+  local d; d=$(new_case dead-window-parked)
+  make_repo_on_branch "$d/wt" fm/feat-parked-gone
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-parked-gone.meta" "window=fm:fm-feat-parked-gone" "worktree=$d/wt" "kind=ship"
+  printf 'needs-decision: review gate\n' > "$d/state/feat-parked-gone.status"
+  FM_FAKE_AXI_STATUS="$(run_parked fm/feat-parked-gone)"
+  FM_FAKE_TMUX_MISSING=1
+  local out; out=$(run_crew_state "$d" feat-parked-gone)
+  assert_contains "$out" "state: unknown" "closed pane overrides parked run-step"
+  assert_contains "$out" "source: none" "closed pane removes the parked run-step source"
+  assert_contains "$out" "backend target gone" "closed parked pane reports its missing endpoint"
+  assert_not_contains "$out" "state: parked" "closed pane with a parked run must never report parked"
+  pass "closed pane overrides a parked run-step"
+}
+
 test_scalar_gate_parked_not_superseded() {
   reset_fakes
   local d; d=$(new_case parked-scalar-gate)
@@ -1376,6 +1393,7 @@ test_active_run_is_authoritative
 test_stale_needs_decision_superseded
 test_stale_blocked_superseded
 test_genuine_parked_not_superseded
+test_dead_window_overrides_parked_run_step
 test_scalar_gate_parked_not_superseded
 test_gate_block_parked_not_superseded
 test_ci_ready_done_log_beats_monitoring_run

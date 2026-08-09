@@ -229,7 +229,7 @@ fm_backend_tmux_foreground_argv0s() {  # <target>
 # unreadable so existence checks and recovery-grade agent liveness share one
 # inventory verdict.
 fm_backend_tmux_target_state() {  # <target>
-  local target=$1 session member inventory inventory_status
+  local target=$1 session member inventory inventory_status inventory_format
   case "$target" in
     %*)
       member=${target#%}
@@ -248,7 +248,11 @@ fm_backend_tmux_target_state() {  # <target>
     *:*)
       session=${target%%:*}
       member=${target#*:}
-      if inventory=$(LC_ALL=C tmux list-windows -t "=$session" -F '#{window_name}' 2>&1); then
+      case "$member" in
+        *[!0-9]*) inventory_format='#{window_name}' ;;
+        *) inventory_format='#{window_index}' ;;
+      esac
+      if inventory=$(LC_ALL=C tmux list-windows -t "=$session" -F "$inventory_format" 2>&1); then
         inventory_status=0
       else
         inventory_status=$?

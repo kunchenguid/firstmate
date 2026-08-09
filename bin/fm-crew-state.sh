@@ -136,8 +136,8 @@ map_log_state() {  # <line>
 LOG_LINE=$(log_last_line || true)
 LOG_VERB=$(status_line_verb "$LOG_LINE")
 
-# pane_readable preserves terminal run results after an endpoint closes, while an
-# active run can report working only when its recorded endpoint still exists.
+# pane_readable preserves terminal run results after an endpoint closes, while a
+# nonterminal run requires its recorded endpoint to still exist.
 # Backend-aware
 # (fm_backend_of_meta defaults absent backend= to tmux, the P1 contract): a
 # herdr task is read through fm_backend_capture instead of a bare tmux probe.
@@ -532,10 +532,13 @@ if [ "$HAVE_RUN" = 1 ]; then
     fi
   fi
 
-  if [ "$RUN_STATE" = working ]; then
-    [ -n "$BACKEND_TARGET" ] || emit unknown none "no backend target recorded"
-    pane_readable "$BACKEND_TARGET" || emit unknown none "backend target gone: $BACKEND_TARGET"
-  fi
+  case "$RUN_STATE" in
+    done|failed) ;;
+    *)
+      [ -n "$BACKEND_TARGET" ] || emit unknown none "no backend target recorded"
+      pane_readable "$BACKEND_TARGET" || emit unknown none "backend target gone: $BACKEND_TARGET"
+      ;;
+  esac
 
   if [ "$RUN_STATE" = working ] && log_reports_ci_ready; then
     if [ "$RUN_SOURCE" = coarse ]; then
