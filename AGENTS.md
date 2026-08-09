@@ -357,8 +357,13 @@ Send the same worker one exact decision naming the decision key, step, action, a
 Require the matching `resolved` event, forbid `--yes`, and require the worker to process every synchronous return until completion or a genuinely new escalation.
 Resume fleet supervision immediately after the decision lands.
 
+<<<<<<< HEAD
 Judge validation by the current-code-matched run step through `bin/fm-crew-state.sh`, not by shell liveness or the last status event; that script owns the mapping from run step to state, including why an uncorroborated green claim reports blocked rather than done.
 A parked state means the worker must follow the active gate help.
+=======
+Judge validation by the current-code-matched run step through `bin/fm-crew-state.sh`, not by shell liveness or the last status event.
+Running, fixing, or CI states remain working; parked approval or fix-review states require the worker to follow the active gate help; passed is done, and checks-passed is done only when the run's own evidence records it and blocked otherwise, because a head no check examined is unverified rather than green; a step that judged the work and rejected it is failed, while a deliberate cancel reports aborted and a pipeline that broke without judging the work reports interrupted, both re-run conditions rather than rejected code to fix.
+>>>>>>> d9d423f (no-mistakes(document): align crew-state and busy-verdict docs with typed verdicts)
 A worker hand-editing, committing, aborting, or restarting during an active validation run duplicates pipeline ownership outside the supersession sequence above; steer it back to the gate response flow.
 The other exception is a rebase the pipeline hands back, which the ship brief requires the worker to resolve and commit itself before returning to the gates.
 The worker reports the PR when CI first becomes green rather than waiting for merge monitoring to finish.

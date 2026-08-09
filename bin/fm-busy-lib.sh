@@ -40,11 +40,14 @@
 #   fm-recovery      a documented recovery reset after relaunch
 # Classifier-only sources (never written into a record):
 #   endpoint-gone, herdr-native, grok-regex, missing, malformed,
-#   gen-mismatch, source-mismatch, kimi-unverified, codex-unverified,
-#   capture-failed, no-target
+#   gen-mismatch, record-expired, source-mismatch, kimi-unverified,
+#   codex-unverified, capture-failed, no-target
 #
-# Classification (fm_busy_classify): busy | idle | unknown | dead, always
-# with the producing source as the second token. Precedence:
+# Classification (fm_busy_classify): busy | idle | stale | unknown | dead,
+# always with the producing source as the second token. `stale` means the
+# evidence existed and has aged out; `unknown` means there is no usable
+# evidence. Collapsing the two would answer a question the classifier cannot
+# actually answer, so they stay distinct. Precedence:
 #   1. dead endpoint (fm_busy_classify_live only) -> dead endpoint-gone
 #   2. standalone Kimi before verification       -> unknown kimi-unverified
 #   3. a valid, gen-matching, source-trusted record -> its state and source
@@ -52,7 +55,17 @@
 #      (generation state is sufficient for busy, not for idle), then the
 #      Grok-only temporary regex fallback classifies a grok task from its
 #      rendered tail, then unknown missing
-#   5. malformed, stale, or untrusted records -> unknown, never a fallback
+#   5. malformed, gen-mismatched, or untrusted records -> unknown, never a fallback
+#   6. a BUSY record past FM_BUSY_MAX_BUSY_AGE_SECS -> stale record-expired,
+#      terminal like (5): the record shows no evidence of activity since its
+#      timestamp, so no weaker source may re-answer for it
+# The verdict stays exactly two tokens. A caller that must also report HOW OLD
+# the evidence was reads fm_busy_record_read's age field directly, because only
+# a record-backed verdict has an age at all: the native and rendered-tail
+# sources are read live, and giving them a fabricated age would report a
+# freshness that was never measured. The expired reason carries that age and
+# seq too, so the judgement about the evidence never discards the evidence that
+# produced it.
 # The Grok arm is the ONLY rendered-text classification that survives the
 # redesign, because Grok's structured lifecycle was not credited-live-verified
 # in the approved audit; it is scoped to harness=grok and can never classify
@@ -71,6 +84,35 @@
 # Sourcing: set -u and set -e safe; no subshell-unfriendly globals.
 
 FM_BUSY_LIB_VERSION=v1
+
+# Freshness bound for a BUSY record, in seconds. A record's ts= was parsed for
+# format only and never compared against the clock, so a worker killed mid-turn
+# left its last busy record in place and every later read reported that dead
+# worker as working, indefinitely. A busy record is a claim about the PRESENT -
+# "a turn is in flight right now" - so it expires; an idle record is a settled
+# fact about a turn that already ended and never expires, because age cannot
+# make a finished turn unfinished.
+#
+# The watcher's own FM_BUSY_TURN_MAX_SECS (bin/fm-watch.sh) shares this default
+# but cannot cover this case: it ages a pane the watcher already believes is
+# busy, and a stopped worker's pane renders an IDLE footer, so that backstop is
+# never armed for exactly the workers this bound catches.
+#
+# KNOWN BOUND of the timestamp-age mechanism. ts= is stamped when the turn
+# OPENS and never ticks within it - for the claude harness fm-spawn wires the
+# busy record write to UserPromptSubmit only (bin/fm-spawn.sh) - so a genuinely
+# long single turn crosses this bound while still running and reads `stale`.
+# Age therefore establishes only that the record is old; it never establishes
+# that the worker stopped, and nothing here may claim that it did. The stronger
+# signal that would remove the limit is ADVANCING EVIDENCE: the record's seq is
+# a strictly increasing counter, so a seq that has not moved across two reads
+# separated by more than the bound is positive evidence of no progress, where an
+# unmoved clock is only absence of a refresh. Redesigning expiry onto advancing
+# evidence is separate work and deliberately not done here.
+# The fail direction is the acceptable one: a false `stale` raises an alarm on a
+# live worker, while the defect it replaces went the other way and reported a
+# worker that had stopped as busy forever. Noisy is recoverable, silent is not.
+FM_BUSY_MAX_BUSY_AGE_SECS_DEFAULT=3600
 
 # Standalone-Kimi verification gate. Empty means no installed Kimi version
 # has passed live verification, so every standalone Kimi task classifies
@@ -192,12 +234,26 @@ fm_busy_source_trusted() {  # <harness> <source>
 }
 
 # fm_busy_record_read: parse and validate state/<id>.busy-state against the
-# armed gen. Prints "<state> <source> <event> <seq>" for a valid record.
+# armed gen. Prints "<state> <source> <event> <seq> <age-secs>" for a valid
+# record; age is how long ago the record was written, so callers can report the
+# freshness of the evidence they acted on instead of presenting an old record as
+# a present-tense fact.
 # Non-zero returns name the reason on stdout instead:
 #   missing      no record file (or no armed gen and no record)
 #   malformed    unparseable line, bad tokens, or a missing armed gen for an
 #                existing record
 #   gen-mismatch a record from a stale incarnation
+#   expired <seq> <age-secs>
+#                a BUSY record older than FM_BUSY_MAX_BUSY_AGE_SECS: nothing has
+#                touched the record since its timestamp, so its claim that a turn
+#                is in flight is no longer usable as a present-tense fact.
+#                Distinct from missing/malformed on purpose - "the evidence went
+#                stale" and "there is no evidence" are different answers and
+#                callers must be able to tell them apart. The reason carries the
+#                record's seq and age because expiry is a judgement ABOUT that
+#                evidence and must not discard it: a caller that reports `stale`
+#                has to be able to say how stale, and 61 minutes and 3 days are
+#                different answers.
 fm_busy_record_read() {  # <state-dir> <id>
   local state=$1 id=$2 rec gen line extra ver f
   local r_gen='' r_seq='' r_state='' r_source='' r_event='' r_ts=''
@@ -243,7 +299,21 @@ fm_busy_record_read() {  # <state-dir> <id>
     printf 'gen-mismatch'
     return 1
   fi
-  printf '%s %s %s %s' "$r_state" "$r_source" "$r_event" "$r_seq"
+  local now age bound
+  now=$(date +%s 2>/dev/null || printf '0')
+  case "$now" in ''|*[!0-9]*) now=0 ;; esac
+  age=$(( now - r_ts ))
+  # A clock that moved backwards (or an unreadable clock) yields a negative or
+  # nonsense age. Report age 0 rather than inventing an expiry from it: a bad
+  # clock must not silently retire a live worker's record.
+  [ "$age" -ge 0 ] || age=0
+  bound=${FM_BUSY_MAX_BUSY_AGE_SECS:-$FM_BUSY_MAX_BUSY_AGE_SECS_DEFAULT}
+  case "$bound" in ''|*[!0-9]*) bound=$FM_BUSY_MAX_BUSY_AGE_SECS_DEFAULT ;; esac
+  if [ "$r_state" = busy ] && [ "$age" -ge "$bound" ]; then
+    printf 'expired %s %s' "$r_seq" "$age"
+    return 1
+  fi
+  printf '%s %s %s %s %s' "$r_state" "$r_source" "$r_event" "$r_seq" "$age"
 }
 
 # fm_busy_grok_tail_busy: the Grok-only temporary rendered-tail fallback.
@@ -293,6 +363,20 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
   case "$out" in
     malformed|gen-mismatch)
       printf 'unknown %s' "$out"
+      return 0
+      ;;
+    expired|'expired '*)
+      # Terminal, exactly like malformed and gen-mismatch: this task's own record
+      # shows no evidence of activity since its timestamp, so falling through to
+      # the herdr/grok fallbacks below could re-report that worker as busy
+      # or idle from a weaker source. Stale evidence is its own answer and never
+      # degrades into `unknown missing`, which would claim there was no evidence
+      # when in fact there was, and it had aged out.
+      # The reason carries the record's seq and age; the printed verdict stays
+      # exactly two tokens, so a caller that needs the freshness reads the record
+      # itself (bin/fm-crew-state.sh's read_busy_evidence) rather than widening
+      # this contract for the one consumer that wants it.
+      printf 'stale record-expired'
       return 0
       ;;
   esac

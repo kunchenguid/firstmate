@@ -355,6 +355,55 @@ EOF
   pass "backlog normalization preserves strict roles and resolves every blocker compatibly"
 }
 
+# Absence is never a pass. The snapshot projects the crew-state reader's typed
+# answer, and anything that is not a JSON OBJECT is not an answer: the literal
+# `null` in particular projects to an all-null object under jq's null-indexing
+# rule, which would surface a degraded read as a null state instead of the
+# "unknown" the fallback exists to disclose, letting the task escape the
+# snapshot's unknown-children accounting.
+test_non_object_reader_answer_reports_unknown() {
+  local home fakebin out shape
+  home=$(make_home non-object-reader)
+  mkdir -p "$home/projects/nonobj"
+  fm_write_meta "$home/state/nonobj.meta" \
+    "window=firstmate:fm-nonobj" \
+    "worktree=$home/projects/nonobj" \
+    "project=alpha" \
+    "harness=claude" \
+    "kind=ship" \
+    "mode=ship"
+  record_claude_idle "$home/state" nonobj
+  fakebin=$(make_fakebin "$home")
+  cat > "$fakebin/fake-crew-state.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${FM_FAKE_CREW_STATE_ANSWER:-}"
+SH
+  chmod +x "$fakebin/fake-crew-state.sh"
+  for shape in 'null' '[1,2]' '"idle"' 'false' 'not json at all' ''; do
+    out=$(PATH="$fakebin:$PATH" FM_HOME="$home" \
+      FM_CREW_STATE_BIN="$fakebin/fake-crew-state.sh" \
+      FM_FAKE_CREW_STATE_ANSWER="$shape" "$SNAPSHOT" --json)
+    printf '%s' "$out" | jq -e '
+      .tasks[] | select(.id == "nonobj")
+      | .current_state.state == "unknown"
+        and .current_state.source == "none"
+        and .current_state.detail == "crew-state reader produced no usable answer"
+    ' >/dev/null \
+      || fail "reader answer [$shape] must report unknown, got: $(printf '%s' "$out" | jq -c '.tasks[]|select(.id=="nonobj")|.current_state')"
+  done
+  # Red-capable control: a real object answer must still pass through, so the
+  # assertion above is measuring the guard and not just an always-unknown path.
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" \
+    FM_CREW_STATE_BIN="$fakebin/fake-crew-state.sh" \
+    FM_FAKE_CREW_STATE_ANSWER='{"state":"parked","source":"run-step","detail":"parked at review"}' \
+    "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    .tasks[] | select(.id == "nonobj")
+    | .current_state.state == "parked" and .current_state.source == "run-step"
+  ' >/dev/null || fail "an object answer must still be projected through: $out"
+  pass "a non-object crew-state answer reports unknown rather than a null state"
+}
+
 test_event_hints_follow_reconciled_current_state() {
   local home fakebin out hint_gen
   home=$(make_home event-hints)
@@ -937,6 +986,7 @@ test_empty_fleet_json
 test_fixture_snapshot_json
 test_main_inventory_orphan_and_unstructured_disclosure
 test_normalized_roles_and_plural_blocker_readiness
+test_non_object_reader_answer_reports_unknown
 test_event_hints_follow_reconciled_current_state
 test_open_decision_survives_later_unrelated_event
 test_secondmate_open_decision_survives_live_endpoint
