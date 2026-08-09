@@ -30,8 +30,11 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SOURCE_INPUT=$(printenv FM_SHADOW_SOURCE 2>/dev/null || printf '%s\n' /home/ale/firstmate)
 DEST_INPUT=$(printenv FM_SHADOW_DESTINATION 2>/dev/null || printf '%s\n' /mnt/d/Workspace/shadow)
 SOURCE=
+SOURCE_PARENT=
 DEST=
 DEST_PARENT=
+SOURCE_LOCK_DIR=
+SOURCE_LOCK_HELD=0
 LOCK_DIR=
 LOCK_HELD=0
 STAGE=
@@ -67,6 +70,10 @@ cleanup() {
     rm -f -- "$LOCK_DIR/owner"
     rmdir -- "$LOCK_DIR" 2>/dev/null || true
   fi
+  if [ "$SOURCE_LOCK_HELD" -eq 1 ] && [ -d "$SOURCE_LOCK_DIR" ]; then
+    rm -f -- "$SOURCE_LOCK_DIR/owner"
+    rmdir -- "$SOURCE_LOCK_DIR" 2>/dev/null || true
+  fi
 }
 
 trap 'exit 1' HUP INT TERM
@@ -95,6 +102,7 @@ lowercase() {
 resolve_paths() {
   [ -d "$SOURCE_INPUT" ] || die "source is not an existing directory: $SOURCE_INPUT"
   SOURCE=$(cd "$SOURCE_INPUT" && pwd -P) || die "cannot resolve source: $SOURCE_INPUT"
+  SOURCE_PARENT=$(dirname -- "$SOURCE")
 
   local parent name
   parent=$(dirname -- "$DEST_INPUT")
@@ -106,6 +114,7 @@ resolve_paths() {
   DEST="$DEST_PARENT/$name"
   CONTROL_DIR="$DEST_PARENT/.shadow-control.$name"
   TRANSACTION_DIR="$DEST_PARENT/.shadow-transaction.$name"
+  SOURCE_LOCK_DIR="$SOURCE_PARENT/.shadow-source-lock.$(basename -- "$SOURCE")"
 
   [ "$SOURCE" != "$DEST" ] || die "source and destination are the same path"
   case "$DEST/" in
@@ -135,6 +144,10 @@ resolve_paths() {
   [ ! -L "$TRANSACTION_DIR" ] || die "shadow transaction marker must not be a symbolic link: $TRANSACTION_DIR"
   if [ -e "$TRANSACTION_DIR" ] && [ ! -d "$TRANSACTION_DIR" ]; then
     die "shadow transaction marker is not a directory: $TRANSACTION_DIR"
+  fi
+  [ ! -L "$SOURCE_LOCK_DIR" ] || die "source lock must not be a symbolic link: $SOURCE_LOCK_DIR"
+  if [ -e "$SOURCE_LOCK_DIR" ] && [ ! -d "$SOURCE_LOCK_DIR" ]; then
+    die "source lock is not a directory: $SOURCE_LOCK_DIR"
   fi
 }
 
@@ -177,6 +190,14 @@ check_source() {
 }
 
 acquire_lock() {
+  mkdir -- "$SOURCE_LOCK_DIR" 2>/dev/null \
+    || die "another fm-shadow execution holds the source lock: $SOURCE_LOCK_DIR"
+  SOURCE_LOCK_HELD=1
+  {
+    printf 'pid=%s\n' "$$"
+    printf 'source=%s\n' "$SOURCE"
+    printf 'destination=%s\n' "$DEST"
+  } >"$SOURCE_LOCK_DIR/owner" || die "cannot record source lock owner: $SOURCE_LOCK_DIR"
   LOCK_DIR="$DEST_PARENT/.shadow.lock"
   mkdir -- "$LOCK_DIR" 2>/dev/null \
     || die "another fm-shadow execution holds the lock: $LOCK_DIR"
@@ -269,6 +290,19 @@ same_output() {
     && cmp -s "$CONTROL_STAGE/policy" "$CONTROL_DIR/policy"
 }
 
+source_matches_replica() {
+  local branch commit replica_commit
+  branch=$(git_at "$SOURCE" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+  commit=$(git_at "$SOURCE" rev-parse --verify HEAD 2>/dev/null || true)
+  replica_commit=$(git_at "$DEST" rev-parse --verify HEAD 2>/dev/null || true)
+  [ "$branch" = "$DEFAULT_BRANCH" ] && [ "$commit" = "$replica_commit" ] \
+    || return 1
+  [ -z "$(GIT_OPTIONAL_LOCKS=0 git_at "$SOURCE" status --porcelain=v1 --untracked-files=all)" ] \
+    || return 1
+  python3 "$SCRIPT_DIR/fm-shadow.py" compare --source "$SOURCE" --replica "$DEST" \
+    >/dev/null 2>&1
+}
+
 transaction_child_is_safe() {
   local child=$1
   [ ! -L "$TRANSACTION_DIR/$child" ] || die "shadow transaction contains a symbolic link: $child"
@@ -305,6 +339,22 @@ park_transaction_output() {
   fi
 }
 
+preserve_failed_transaction() {
+  local preserved
+  preserved=$(mktemp -d "$DEST_PARENT/.shadow-recovery-failed.XXXXXX") \
+    || die "cannot preserve the failed shadow output"
+  if [ -e "$TRANSACTION_DIR/failed-destination" ] || [ -L "$TRANSACTION_DIR/failed-destination" ]; then
+    mv -- "$TRANSACTION_DIR/failed-destination" "$preserved/destination" \
+      || die "cannot preserve the failed shadow destination at $preserved"
+  fi
+  if [ -e "$TRANSACTION_DIR/failed-control" ] || [ -L "$TRANSACTION_DIR/failed-control" ]; then
+    mv -- "$TRANSACTION_DIR/failed-control" "$preserved/control" \
+      || die "cannot preserve the failed shadow control metadata at $preserved"
+  fi
+  clear_transaction
+  die "shadow transaction was rolled back; failed output was preserved at $preserved"
+}
+
 recover_transaction() {
   local branch commit destination_present control_present
   [ -e "$TRANSACTION_DIR" ] || return 0
@@ -320,6 +370,10 @@ recover_transaction() {
   transaction_child_is_safe new-control
   transaction_child_is_safe failed-destination
   transaction_child_is_safe failed-control
+  if [ -e "$TRANSACTION_DIR/failed-destination" ] || [ -L "$TRANSACTION_DIR/failed-destination" ] \
+    || [ -e "$TRANSACTION_DIR/failed-control" ] || [ -L "$TRANSACTION_DIR/failed-control" ]; then
+    preserve_failed_transaction
+  fi
   if [ ! -f "$TRANSACTION_DIR/ready" ]; then
     [ ! -e "$TRANSACTION_DIR/old-destination" ] \
       && [ ! -e "$TRANSACTION_DIR/old-control" ] \
@@ -344,7 +398,8 @@ recover_transaction() {
   if [ ! -L "$DEST" ] && [ -d "$DEST" ] && [ ! -L "$CONTROL_DIR" ] && [ -d "$CONTROL_DIR" ] \
     && python3 "$SCRIPT_DIR/fm-shadow.py" validate \
       --root "$DEST" --manifest "$CONTROL_DIR/manifest" --policy "$CONTROL_DIR/policy" \
-      --branch "$branch" --commit "$commit" >/dev/null 2>&1; then
+      --branch "$branch" --commit "$commit" >/dev/null 2>&1 \
+    && source_matches_replica; then
     clear_transaction
     return 0
   fi
@@ -371,6 +426,10 @@ recover_transaction() {
   else
     park_transaction_output "$CONTROL_DIR" failed-control
   fi
+  if [ -e "$TRANSACTION_DIR/failed-destination" ] || [ -L "$TRANSACTION_DIR/failed-destination" ] \
+    || [ -e "$TRANSACTION_DIR/failed-control" ] || [ -L "$TRANSACTION_DIR/failed-control" ]; then
+    preserve_failed_transaction
+  fi
   clear_transaction
 }
 
@@ -390,6 +449,7 @@ begin_transaction() {
 }
 
 swap_replica() {
+  recheck_source
   check_existing_destination
   begin_transaction
   if [ "$(transaction_field destination-present)" -eq 1 ]; then
@@ -418,6 +478,10 @@ swap_replica() {
     --branch "$DEFAULT_BRANCH" --commit "$SOURCE_COMMIT"; then
     recover_transaction
     die "post-install validation failed; old destination was restored"
+  fi
+  if ! source_matches_replica; then
+    recover_transaction
+    die "source changed during shadow installation; old destination was restored"
   fi
   clear_transaction
 }
@@ -460,6 +524,7 @@ check_existing_destination
 build_stage
 recheck_source
 if [ -d "$DEST" ] && same_output; then
+  recheck_source
   check_existing_destination
   printf 'already current: %s at %s\n' "$SOURCE_COMMIT" "$DEST"
   exit 0

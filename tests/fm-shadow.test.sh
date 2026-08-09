@@ -226,6 +226,23 @@ test_concurrent_lock_is_fail_closed() {
   pass 'concurrent execution is serialized by an atomic lock directory'
 }
 
+test_source_lock_is_fail_closed() {
+  local root source destination lock out
+  root=$(fm_test_tmproot shadow-source-lock)
+  new_fixture "$root"
+  source="$root/source"
+  destination="$root/destination-parent/shadow"
+  lock="$root/.shadow-source-lock.source"
+  mkdir "$lock"
+
+  if out=$(run_shadow "$source" "$destination" 2>&1); then
+    fail 'source lock was not enforced'
+  fi
+  assert_contains "$out" 'holds the source lock' 'source lock refusal did not identify the active lock'
+  assert_absent "$destination" 'source-locked first replica created destination output'
+  pass 'concurrent source replication is serialized by a source-side lock'
+}
+
 test_destination_parent_traversal_is_refused() {
   local root source destination out
   root=$(fm_test_tmproot shadow-normalization)
@@ -289,6 +306,51 @@ test_staging_failure_preserves_previous_replica() {
   pass 'unsupported source entry leaves the prior replica intact and cleans temporary output'
 }
 
+test_interrupted_recovery_preserves_failed_output() {
+  local root source destination controls transaction saved_destination saved_control commit out preserved
+  root=$(fm_test_tmproot shadow-recovery-edit)
+  new_fixture "$root"
+  source="$root/source"
+  destination="$root/destination-parent/shadow"
+  controls="$root/destination-parent/.shadow-control.shadow"
+  run_shadow "$source" "$destination" >/dev/null
+  saved_destination="$root/saved-destination"
+  saved_control="$root/saved-control"
+  cp -a "$destination" "$saved_destination"
+  cp -a "$controls" "$saved_control"
+  printf 'new staged source content\n' >"$source/projects/alpha/src/app.txt"
+  run_shadow "$source" "$destination" >/dev/null
+
+  transaction="$root/destination-parent/.shadow-transaction.shadow"
+  mkdir "$transaction"
+  mv "$saved_destination" "$transaction/old-destination"
+  mv "$saved_control" "$transaction/old-control"
+  commit=$(git -C "$source" rev-parse HEAD)
+  printf 'main\n' >"$transaction/source-branch"
+  printf '%s\n' "$commit" >"$transaction/source-commit"
+  printf '1\n' >"$transaction/destination-present"
+  printf '1\n' >"$transaction/control-present"
+  : >"$transaction/ready"
+  printf 'operator edit during recovery\n' >"$destination/README.md"
+
+  if out=$(run_shadow "$source" "$destination" 2>&1); then
+    fail 'interrupted recovery accepted an edited destination'
+  fi
+  assert_contains "$out" 'failed output was preserved' \
+    'interrupted recovery did not report the preserved failed output'
+  assert_grep 'canonical Firstmate fixture' "$destination/README.md" \
+    'interrupted recovery did not restore the previous destination'
+  preserved=$(find "$root/destination-parent" -maxdepth 1 -type d \
+    -name '.shadow-recovery-failed.*' -print -quit)
+  [ -n "$preserved" ] || fail 'interrupted recovery did not create preserved output storage'
+  assert_grep 'operator edit during recovery' "$preserved/destination/README.md" \
+    'interrupted recovery deleted the edited failed output'
+  assert_present "$preserved/control/manifest" \
+    'interrupted recovery did not preserve the failed control metadata'
+  assert_absent "$transaction" 'interrupted recovery left a completed transaction marker'
+  pass 'interrupted recovery restores the old output and preserves failed edits'
+}
+
 test_manifest_tamper_is_refused() {
   local root source destination controls before out
   root=$(fm_test_tmproot shadow-manifest)
@@ -317,7 +379,9 @@ test_repeated_replica_is_idempotent_and_tracks_complete_working_tree
 test_dirty_destination_is_preserved
 test_divergent_destination_is_preserved
 test_concurrent_lock_is_fail_closed
+test_source_lock_is_fail_closed
 test_destination_parent_traversal_is_refused
 test_external_symlink_target_is_not_traversed
 test_staging_failure_preserves_previous_replica
+test_interrupted_recovery_preserves_failed_output
 test_manifest_tamper_is_refused
