@@ -1,0 +1,187 @@
+{
+  "loopspec_schema_version": 1,
+  "description": "The single owner of firstmate's unified terminal-state vocabulary and of the total mapping onto it from every source vocabulary that names the same facts. A terminal state answers one question: why did this stop. Two systems previously answered it in two vocabularies - a LoopSpec finalising on no_progress_stalled and an execution node finalising on iteration-cap-failed are the same fact named twice. This file names each fact once and records where every source name lands. bin/fm-loopspec.sh is its only interpreter; schema.json consumes the unified names through its external_enums pointer and never restates them.",
+  "unified": [
+    {
+      "name": "no_delta",
+      "kind": "neutral",
+      "costs_model_turn": false,
+      "description": "Nothing to do: the watched input is unchanged since the last accepted iteration. Reaching this must cost no model turn, which is why it is the one unified state declaring costs_model_turn false."
+    },
+    {
+      "name": "goal_met",
+      "kind": "success",
+      "costs_model_turn": true,
+      "description": "The work declared its goal met and verification did not reject it."
+    },
+    {
+      "name": "budget_exhausted",
+      "kind": "failure",
+      "costs_model_turn": true,
+      "description": "A declared bound - iterations, wall clock, context, capacity or cost - was reached before the goal was met. Which bound was reached is evidence recorded by the run, not a separate name."
+    },
+    {
+      "name": "no_progress_stalled",
+      "kind": "failure",
+      "costs_model_turn": true,
+      "description": "The repetition bound was reached without declared progress, so iterating again would repeat the same non-result."
+    },
+    {
+      "name": "verification_failed",
+      "kind": "failure",
+      "costs_model_turn": true,
+      "description": "The verifier ran and rejected the iteration, or was unavailable. An unavailable verifier lands here and can never become a pass."
+    },
+    {
+      "name": "blocked_by_evidence_integrity",
+      "kind": "failure",
+      "costs_model_turn": true,
+      "description": "A required source was unreadable, so absence of evidence could not be distinguished from evidence of absence."
+    },
+    {
+      "name": "needs_ruling",
+      "kind": "refusal",
+      "costs_model_turn": true,
+      "description": "The work stopped because an authority must rule before it may continue. A ruling is owed."
+    },
+    {
+      "name": "cancelled",
+      "kind": "neutral",
+      "costs_model_turn": true,
+      "description": "An authority stopped the run deliberately. Nothing failed and nothing is owed, which is what separates this from needs_ruling."
+    },
+    {
+      "name": "unclassified_failure",
+      "kind": "failure",
+      "costs_model_turn": true,
+      "description": "The run stopped and no classified reason held. Kept as a named state rather than folded into another failure, because a stop nobody can explain is a different fact from one that is explained."
+    }
+  ],
+  "sources": [
+    {
+      "source": "loopspec",
+      "owner": "loopspecs/<id>.json terminal_states[].name",
+      "description": "The terminal-state names a LoopSpec declares. Every declared name must appear here, and a spec's terminal_states[].maps_to must equal the unified name recorded for it - an unmapped name is refused, never defaulted.",
+      "map": [
+        {
+          "state": "no_delta",
+          "unified": "no_delta",
+          "note": "Carried through unchanged. Commission section 18's zero-model-turn rule is already encoded in this state and survives the merge intact."
+        },
+        {
+          "state": "delta_emitted",
+          "unified": "goal_met",
+          "note": "One of two goal-met successes; what the success produced is the spec's own business, not a vocabulary distinction."
+        },
+        {
+          "state": "confirmed_work_found",
+          "unified": "goal_met",
+          "note": "The second goal-met success. It already shared a class with delta_emitted before the merge."
+        },
+        {
+          "state": "already_carried",
+          "unified": "no_delta",
+          "note": "The fork already carries the contribution, so there is nothing to do. It shares no_delta's zero-model-turn rule, which is why it lands here rather than on a success."
+        },
+        {
+          "state": "carried_and_checks_resolved",
+          "unified": "goal_met",
+          "note": "A third goal-met success. What the success produced - here, a carried contribution whose checks finished - is the spec's own business, not a vocabulary distinction."
+        },
+        {
+          "state": "needs_ruling",
+          "unified": "needs_ruling",
+          "note": "Carried through unchanged. Deliberately not merged with cancelled: a ruling is owed here and is not owed there."
+        },
+        {
+          "state": "blocked_by_evidence_integrity",
+          "unified": "blocked_by_evidence_integrity",
+          "note": "Carried through unchanged. Distinct from verification_failed: the inputs were unreadable, rather than the verifier rejecting."
+        },
+        {
+          "state": "budget_exhausted",
+          "unified": "budget_exhausted",
+          "note": "Carried through unchanged, and now the single name for every bounded stop on both sides."
+        },
+        {
+          "state": "verification_failed",
+          "unified": "verification_failed",
+          "note": "Carried through unchanged."
+        },
+        {
+          "state": "no_progress_stalled",
+          "unified": "no_progress_stalled",
+          "note": "Carried through unchanged, and the merge target for the execution node's iteration-cap-failed."
+        }
+      ]
+    },
+    {
+      "source": "execution-node",
+      "owner": "the platform's scripts/runtime_execution_node.py FINALIZE_MATRIX",
+      "description": "The finalize outcomes of the platform's execution-node runtime, read at platform commit 5d86b7e. Each row also records the status and exit code that matrix books, so a merge that collapses two names is auditable against the consequence each name actually carried. This side is mapped only; the platform-side rename is a follow-on platform task and no platform file is changed by this record.",
+      "map": [
+        {
+          "state": "context-ceiling",
+          "unified": "budget_exhausted",
+          "consequence": "EXHAUSTED/0",
+          "distinction": "The hardest structural bound the platform has, and the first row of the finalize matrix so it outranks every other outcome. That precedence lives in the matrix ordering, which the merge does not touch.",
+          "note": "A node stopped at the context ceiling obeyed its governor, so the platform books a clean exit."
+        },
+        {
+          "state": "budget-finish",
+          "unified": "budget_exhausted",
+          "consequence": "EXHAUSTED/0",
+          "distinction": "Ranked above the finish row so a budget-tripped run cannot book COMPLETE. That ordering is the mechanism by which bounded beats done, and it survives the merge unchanged.",
+          "note": "A budget trip asks the node to wind down, so a finish declaration is usually present alongside it."
+        },
+        {
+          "state": "timeout",
+          "unified": "budget_exhausted",
+          "consequence": "EXHAUSTED/1",
+          "distinction": "The only bounded stop the platform books unclean. The exit code carries clean against unclean and the status carries the reason, so merging the name loses nothing the record still holds.",
+          "note": "The platform's own rationale: a deadline is a bound, and a run stopped by one did not fail any more than a run stopped by its iteration cap did."
+        },
+        {
+          "state": "iteration-cap-clean",
+          "unified": "budget_exhausted",
+          "consequence": "EXHAUSTED/0",
+          "distinction": "Separated from iteration-cap-failed by whether the last iteration was clean; that split is preserved by mapping the two rows to different unified states.",
+          "note": "The iteration cap was reached and the final iteration completed cleanly."
+        },
+        {
+          "state": "finish-signal",
+          "unified": "goal_met",
+          "consequence": "COMPLETE/0",
+          "note": "The node declared its goal met and no higher-ranked bound held."
+        },
+        {
+          "state": "stop-signal",
+          "unified": "cancelled",
+          "consequence": "CANCELLED/0",
+          "note": "An operator stopped the run. Mapped to cancelled rather than needs_ruling because the authority already decided; nothing is owed back."
+        },
+        {
+          "state": "iteration-cap-failed",
+          "unified": "no_progress_stalled",
+          "consequence": "EXHAUSTED/1",
+          "note": "The fact this increment exists to name once: a node finalising here and a loop finalising on no_progress_stalled are the same fact - the repetition bound was reached and the work is no further forward."
+        },
+        {
+          "state": "unclassified",
+          "unified": "unclassified_failure",
+          "consequence": "FAILED/1",
+          "note": "The matrix's always-holding backstop, so a matrix carrying its row always terminates."
+        }
+      ]
+    }
+  ],
+  "invariants": [
+    "unified_names_unique: no two unified entries may share a name",
+    "source_names_unique: no two rows within one source may name the same state",
+    "mapping_total: every source row must name a unified state declared here",
+    "no_unreachable_unified: every unified state must be the target of at least one source row",
+    "strict_reduction: the unified vocabulary must have strictly fewer members than the total number of source rows",
+    "collapse_declares_distinction: when rows within one source share a unified state but differ in recorded consequence, every row in that group must declare how the distinction is preserved",
+    "zero_model_turn_preserved: exactly one unified state may declare costs_model_turn false, it must be no_delta, and its kind must be neutral"
+  ]
+}

@@ -43,6 +43,7 @@ new_case() {
   local d="$TMP_ROOT/$1"
   mkdir -p "$d/registry" "$d/state"
   cp "$ROOT/loopspecs/schema.json" "$d/registry/schema.json"
+  cp "$ROOT/loopspecs/terminal-states.json" "$d/registry/terminal-states.json"
   cat >"$d/registry/triggers.json" <<'JSON'
 {
   "loopspec_schema_version": 1,

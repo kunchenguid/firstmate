@@ -45,6 +45,9 @@ The second is the work inside a claimed iteration, done under the spec's permitt
 4. Let the bound verifier produce the verdict. Never report one yourself: a success terminal requires a recorded run bound to that iteration, and the party doing the work never certifies the work.
 5. Read the resulting terminal state, then follow the spec's escalation entry for it.
 
+Terminal states are not a per-spec invention: `loopspecs/terminal-states.json` owns the unified terminal-state vocabulary and the total mapping onto it from every source vocabulary that names the same facts, and `fm-loopspec.sh terminal-map` reads it.
+A state with no row there is refused rather than mapped to whatever looks closest, so add the row before adding the state.
+
 ## A refusal is a stop
 
 Every refusal token is a fail-closed result, never an obstacle to route around.
