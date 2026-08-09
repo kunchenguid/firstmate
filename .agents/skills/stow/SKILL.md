@@ -16,32 +16,36 @@ This skill writes only through the existing Firstmate ownership and write bounda
 
 ## Memory tiers and entry markers
 
-Every newly written entry in the three memory files carries one trailing HTML-comment marker holding its tier and, when a clock applies, its last-reinforced date:
+Markers are compact trailing HTML comments, deliberately cheap because marker bytes are counted content:
+
+- `<!--a:YYYY-MM-DD-->` - an `aging` entry; the embedded date is its last-reinforced date.
+- `<!--p:YYYY-MM-DD-->` - a `perishable` entry; the embedded date is its last-reinforced date.
+- `<!--P-->` - an explicitly `pinned` entry in a file whose default tier is not `pinned`.
+- `<!--g-->` - migration-only: an unconfirmed legacy entry that has consumed its one grace cycle, carrying no date because grace is not reinforcement.
 
 ```markdown
-- Never merge a red PR; destructive, irreversible, and security-sensitive choices stay with the captain. <!-- tier: pinned -->
-- Treehouse pool slots share one repo, so workers must create their task branch before editing. <!-- tier: aging | reinforced: 2026-08-03 -->
-- While state/.afk exists, the away-daemon owns triage (until the afk-wake fix lands; tracked: afk-pi-wake-bypass-r1). <!-- tier: perishable | reinforced: 2026-07-20 -->
+- Treehouse pool slots share one repo, so workers must create their task branch before editing. <!--a:2026-08-03-->
+- While state/.afk exists, the away-daemon owns triage (until the afk-wake fix lands; tracked: afk-pi-wake-bypass-r1). <!--p:2026-07-20-->
+- Never restart the shared no-mistakes daemon while runs are active. <!--P-->
 ```
 
 The tier names say what the pass does with an entry:
 
 - `pinned` - no clock is ever read for it: exempt from decay and from budget eviction, changed only through inspect-then-update when the captain or reality changes it, except that an explicit per-item captain approval may offload it under the flow below.
-- `aging` - it must re-prove itself: an entry whose age is greater than or equal to 30 days since its `reinforced:` date is stale, and a stale entry is re-validated (date refreshed) or archived, never kept by inertia alone.
-- `perishable` - it is stored expecting disposal: an entry whose age is greater than or equal to 7 days since its `reinforced:` date is stale, and its prose must name a checkable expiry condition, such as a backlog id, a version floor, or a dated expectation.
+- `aging` - it must re-prove itself: an entry whose age is greater than or equal to 30 days since its last-reinforced date is stale, and a stale entry is re-validated (date refreshed) or archived, never kept by inertia alone.
+- `perishable` - it is stored expecting disposal: an entry whose age is greater than or equal to 7 days since its last-reinforced date is stale, and its prose must name a checkable expiry condition, such as a backlog id, a version floor, or a dated expectation.
   An admitted durable entry that cannot name a checkable expiry condition is not `perishable` and must be stored as `aging`.
   Omission is reserved for non-durable material or facts already owned elsewhere.
 
 Marking rules:
 
 - Tier defaults are file-scoped: entries in `data/captain.md` and `data/captain-shared.md` default to `pinned` because preferences and authority boundaries do not age, and entries in `data/learnings.md` default to `aging` because operational facts must re-prove themselves.
-- Every newly written or rewritten entry explicitly carries `tier:`, including when its tier matches the file default; file defaults exist to interpret pre-existing unmarked entries during migration, not to omit markers from new work.
-- `pinned` entries carry `<!-- tier: pinned -->` with no date because no clock applies; `aging` and `perishable` entries carry `<!-- tier: <tier> | reinforced: YYYY-MM-DD -->`.
-- During legacy migration only, `legacy-grace: pending` may appear in the trailing marker without a `reinforced:` date; it records that the entry has consumed its grace cycle and is not reinforcement.
-- Each memory file's header carries a one-line legend stating that file's default tier, the marker spelling (including the migration-only grace state while one exists), and the current clocks, so the scheme is self-describing to any reader.
-- Inspect every existing file's header legend on every pass, independently of whether any entry needs migration: add or correct it in an editable file; for a read-only `data/captain-shared.md`, leave the file byte-identical but route a missing or outdated legend to the primary owner.
-  The required receipt action for that file is `routed`, not `unchanged`; name the missing or outdated legend as an unresolved ownership exception and do not declare the session reset-safe.
-- The clocks are policy owned by this skill text and echoed by the legends, deliberately not configuration.
+- An entry matching its file's `pinned` default carries no marker at all; every `aging` and `perishable` entry always carries its dated marker, whose letter names the tier, so a clock-carrying entry is never ambiguous with unmarked legacy material.
+- Marker and header-pointer bytes count toward the startup-memory budget: the pass's own bookkeeping is costed content, never free, which is why the spellings above are as short as they are.
+- Each memory file's header carries at most a one-line pointer naming this skill as the scheme owner, such as `<!-- memory tiers: see the stow skill -->`.
+  This skill text is the single owner of tier semantics, marker spellings, and clocks - deliberately policy, not configuration - and no memory file header may restate them.
+- Inspect each editable file's header pointer on every pass and add or correct it; for a read-only `data/captain-shared.md`, leave the file byte-identical and route a missing or outdated pointer to the primary owner.
+  The required receipt action for that file is `routed`, not `unchanged`; name the ownership exception and do not declare the session reset-safe.
 - A pre-existing missing or hand-dropped marker is never grounds for destructive treatment: it means the file's default tier; an unmarked entry in a default-pinned file is simply pinned, while an unmarked entry in a file whose default tier carries a clock follows the migration rule below.
 
 Decay advances only when a pass runs, so a home stowed less often than a clock experiences that clock at its stow interval.
@@ -66,7 +70,7 @@ Every `/stow` invocation performs this complete pass, even when the session cont
    Retain, in order: current captain preferences, authority and safety boundaries, and recurring working style; stable home-local operating facts that repeatedly affect future work and are expensive to rediscover; then concise pointers to an existing authoritative report, project document, configuration, or backlog item.
    Retain lower-priority material only while budget remains.
 4. Reinforce and stamp.
-   Refresh `reinforced:` to today only on entries this session actually exercised, confirmed, or re-derived.
+   Refresh an entry's last-reinforced date to today only when this session actually exercised, confirmed, or re-derived it.
    The bar is session evidence: an entry's presence in the file is not evidence, and re-reading your own memory is never reinforcement.
    Stamp each newly written entry with today's date and its tier per the marking rules, and admit a new `perishable` entry only with its named checkable expiry condition in the prose.
 5. Evaluate every dated entry in each editable memory file against its tier clock.
@@ -78,12 +82,15 @@ Every `/stow` invocation performs this complete pass, even when the session cont
    Prefer one concise current rule or authoritative pointer over duplicate prose.
    Archive completed incident and release chronology, stale versions and paths, transient task state, resolved alternatives, old metrics, and report-sized procedures; merge or remove only superseded claims and duplicates whose facts are preserved elsewhere.
    Never plainly remove a unique current fact: every such exit must archive it with provenance in the recoverable cold tier or relocate it to a live JIT owner or a consolidation merge that preserves the fact.
-7. When the total is still over budget after decay and consolidation, relieve it using editable files only and in this order: archive every editable entry already stale, which needs no further judgment; consolidate tighter; run the over-budget offload sweep below and file its proposals, whose relief lands at migration cadence rather than inside this pass; then archive editable `aging` entries that are not pending offload oldest-`reinforced`-first until within budget.
+7. When the total is still over budget after decay and consolidation, relieve it using editable files only and in this order: archive every editable entry already stale, which needs no further judgment; consolidate tighter; run the over-budget offload sweep below and file its proposals, whose relief lands at migration cadence rather than inside this pass; then, only when the convergence precondition below holds, archive eligible `aging` entries oldest-reinforced-first until within budget.
+   Budget eviction considers only editable `aging` entries that carry a last-reinforced date and are not pending offload; a `<!--g-->` legacy-grace entry is ineligible until its grace cycle resolves, so eviction can neither cancel a promised grace cycle nor prefer just-validated entries over unvalidated ones.
+   Convergence precondition: before evicting anything, total the eligible pool and check that archiving all of it would reach the budget; when even that cannot, skip the eviction rung entirely, archive nothing for budget reasons, and carry the concrete inability to the final step, naming the exempt pinned floor that crowds out the budget.
    Automatic processes never move a `pinned` entry: decay clocks, legacy grace cycles, oldest-first budget eviction, and immediate budget archiving do not apply to it.
    The sole exception is relocation to a JIT owner after explicit, per-item captain approval under the offload flow below, and that entry remains in memory until its destination is live.
 8. Run `bin/fm-startup-memory-budget.sh report` again after the complete pass.
    Finish at or below the effective budget unless a concrete inability remains.
    A secondmate must explicitly report `primary-owned-shared-file-alone-exceeds-budget` when the inherited shared file alone exceeds its allowance, because local curation cannot resolve it.
+   When the convergence precondition skipped eviction, report the exempt pinned floor and the remaining shortfall as that concrete inability rather than archiving eligible knowledge that could not close the gap.
    Any other unresolved excess must identify the fact that cannot safely be archived or routed and why.
 
 A net increase is allowed only for a genuinely new current fact with no stronger owner.
@@ -94,6 +101,7 @@ Never describe the session as reset-safe while the memory total is over budget o
 
 Stale never means deleted: pruning an entry from an editable memory file always means moving it to `data/memory-archive.md`, this home's append-only, never-injected cold tier, gitignored with the rest of `data/` and never counted by the budget report.
 Each archived entry keeps its provenance under a dated pass heading: source file, tier, last-reinforced date, and the reason it left.
+Archive provenance stays verbose rather than compact because the cold tier is never budget-counted.
 
 ```markdown
 ## 2026-08-08 stow
@@ -195,9 +203,9 @@ Legacy entries carry no markers; an unmarked entry is its file's default tier wi
 The first pass after adoption performs a one-time revalidation sweep of editable memory files instead of blanket restamping, while a read-only shared file remains untouched and any required change is routed to its primary owner:
 
 - In `data/captain.md` and `data/captain-shared.md`, every unmarked entry is simply default-pinned and remains exempt from the aging clock, legacy grace cycle, and archive-by-age; consolidation still applies, and only genuine tier deviations receive markers.
-- In `data/learnings.md`, stamp each entry the pass can confirm current with `reinforced:` today, plus a `tier:` where it deviates from the `aging` default.
-- On the first pass that cannot confirm an unmarked entry in `data/learnings.md`, add `<!-- legacy-grace: pending -->` as its trailing marker without a `reinforced:` date; this persists that it has consumed exactly one grace cycle without pretending it was reinforced.
-- On the next pass, replace that marker with the normal tier marker if current evidence confirms the entry; otherwise archive it with provenance `legacy-unvalidated`.
+- In `data/learnings.md`, stamp each entry the pass can confirm current with its compact dated marker for today, using a deviating tier letter or `<!--P-->` only where the entry genuinely deviates from the `aging` default.
+- On the first pass that cannot confirm an unmarked entry in `data/learnings.md`, add `<!--g-->` as its trailing marker; carrying no date, it persists that the entry has consumed exactly one grace cycle without pretending it was reinforced.
+- On the next pass, replace that marker with the normal dated tier marker if current evidence confirms the entry; otherwise archive it with provenance `legacy-unvalidated`.
 - The grace period is one full stow cycle, not a time window, and the same persisted transition applies when a hand edit later leaves an entry unmarked in `data/learnings.md`.
 
 ## Completion receipt

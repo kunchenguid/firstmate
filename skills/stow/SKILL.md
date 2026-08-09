@@ -61,7 +61,7 @@ Everything files to a local destination by default; an external system such as a
 6. **Read the destination before writing: inspect-then-update, never blind-append.**
    Before writing any finding, read the destination file's current contents in full.
    Then ask, for each finding: which existing entry does it supersede; can it be a one-sentence rewrite of an existing entry instead of a new one; and should a stale entry now be refreshed, archived, or replaced in a way that preserves its fact in the same pass?
-   Stamp each entry written into a memory file or `.stow-notes.md` with a tier and date per the tier contract below, but never add tier markers to an existing `TODO`/`BACKLOG`/`NOTES` file.
+   Mark each entry written into a memory file or `.stow-notes.md` per the tier contract below, but never add tier markers to an existing `TODO`/`BACKLOG`/`NOTES` file.
    For an existing `TODO`/`BACKLOG`/`NOTES` item, inspect the full item, classify the change as new, duplicate, superseding, or obsolete, then write a considered replacement body rather than appending to it.
    File each undone next step with what it is waiting on, when it is genuinely blocked on something.
 
@@ -87,30 +87,35 @@ Everything files to a local destination by default; an external system such as a
 
 ## Tiered, decaying entries
 
-Every entry this skill writes into a memory file carries one trailing HTML-comment marker holding its tier and, when a clock applies, its last-reinforced date:
+Markers are compact trailing HTML comments, deliberately cheap because marker bytes are part of every file this skill keeps lean:
+
+- `<!--a:YYYY-MM-DD-->` - an `aging` entry; the embedded date is its last-reinforced date.
+- `<!--p:YYYY-MM-DD-->` - a `perishable` entry; the embedded date is its last-reinforced date.
+- `<!--P-->` - an explicitly `pinned` entry in a file whose default tier is not `pinned`.
+- `<!--g-->` - migration-only: an unconfirmed legacy entry that has consumed its one grace cycle, carrying no date because grace is not reinforcement.
 
 ```markdown
-- Prefer concise progress updates during implementation work. <!-- tier: pinned -->
-- The staging deploy needs the VPN profile active or the smoke test hangs. <!-- tier: aging | reinforced: 2026-08-03 -->
-- CI is red on the flaky auth test until the pinned runner image updates (tracked in TODO). <!-- tier: perishable | reinforced: 2026-07-20 -->
+- The staging deploy needs the VPN profile active or the smoke test hangs. <!--a:2026-08-03-->
+- CI is red on the flaky auth test until the pinned runner image updates (tracked in TODO). <!--p:2026-07-20-->
+- Always run the schema linter before touching migrations. <!--P-->
 ```
 
 The tier names say what this skill does with an entry:
 
 - `pinned` - never decays and is never dropped to shorten a file; it changes only when the user or reality changes it.
-- `aging` - must re-prove itself: an entry whose age is greater than or equal to 30 days since its `reinforced:` date is stale, and a stale entry is re-validated (date refreshed) or archived, never kept by inertia alone.
-- `perishable` - written to be thrown out: an entry whose age is greater than or equal to 7 days since its `reinforced:` date is stale, and its text must name a checkable expiry condition, such as a ticket, a version, or a dated expectation.
+- `aging` - must re-prove itself: an entry whose age is greater than or equal to 30 days since its last-reinforced date is stale, and a stale entry is re-validated (date refreshed) or archived, never kept by inertia alone.
+- `perishable` - written to be thrown out: an entry whose age is greater than or equal to 7 days since its last-reinforced date is stale, and its text must name a checkable expiry condition, such as a ticket, a version, or a dated expectation.
   An entry that cannot name a checkable condition is `aging`, not `perishable`.
 
 Rules:
 
-- Unless a file's own legend says otherwise, a user-level memory file defaults to `pinned`, while a project memory file and `.stow-notes.md` default to `aging`.
-- Every newly written or rewritten entry explicitly carries `tier:`, including when its tier matches the file default; defaults interpret pre-existing unmarked entries during migration rather than permitting new unmarked entries.
-- A `pinned` entry carries `<!-- tier: pinned -->` with no date, while an `aging` or `perishable` entry carries `<!-- tier: <tier> | reinforced: YYYY-MM-DD -->`.
-- During legacy migration only, `legacy-grace: pending` may appear in the trailing marker without a `reinforced:` date; it records that the entry has consumed its grace cycle and is not reinforcement.
-- Every governed memory file this skill curates must carry a one-line header legend stating that file's default tier, the marker spelling (including the migration-only grace state while one exists), and the current clocks, so the scheme explains itself to any later reader or tool.
-  During one-time migration, add the legend even to a default-pinned file that contains only unmarked entries.
-- Refresh a `reinforced:` date only on real evidence from the current session: the fact was used, confirmed, or re-derived.
+- Unless a file's own header pointer names a different default, a user-level memory file defaults to `pinned`, while a project memory file and `.stow-notes.md` default to `aging`.
+- An entry matching its file's `pinned` default carries no marker at all; every `aging` and `perishable` entry always carries its dated marker, whose letter names the tier, so a clock-carrying entry is never ambiguous with unmarked legacy material.
+- Marker and pointer bytes are part of the file's cost, so bookkeeping stays minimal by design.
+- Every governed memory file this skill curates carries at most a one-line header pointer naming this skill as the scheme owner, such as `<!-- memory tiers: see the stow skill -->`, optionally naming that file's default tier when it deviates.
+  The tier semantics, marker spellings, and clocks live only in this skill and are never restated in a file header.
+  During one-time migration, add the pointer even to a default-pinned file that contains only unmarked entries, so every governed file names its scheme owner.
+- Refresh an entry's last-reinforced date only on real evidence from the current session: the fact was used, confirmed, or re-derived.
   Mere presence in the file is not evidence, and re-reading memory is never reinforcement.
 - Re-confirm a stale `perishable` entry against its named condition: still open means refresh the date, while resolved, expired, or no longer checkable means archive it now.
 - Decay is evaluated only when this skill runs; nothing happens between passes, so an infrequently stowed project experiences the clocks at its stow interval.
@@ -120,8 +125,8 @@ Rules:
   Otherwise add a `.stow-archive.md` line to a `.gitignore` file in the archive's directory, and never write archived facts into a git-tracked file.
   Recovery is search plus copy back.
 - Pre-existing unmarked entries are the file's default tier with unknown age, and unknown age is not guilt: an unmarked entry in a default-pinned file is simply pinned and exempt from the aging clock, legacy grace cycle, and archive-by-age, though consolidation still applies.
-- In a file whose default tier carries a clock, the first pass stamps each unmarked entry it can confirm; otherwise it adds `<!-- legacy-grace: pending -->` without a `reinforced:` date to persist one grace cycle without treating presence as reinforcement.
-  On the next pass, current evidence replaces that marker with the normal tier marker; without such evidence, archive the entry with a `legacy-unvalidated` note.
+- In a file whose default tier carries a clock, the first pass stamps each unmarked entry it can confirm with its compact dated marker; otherwise it adds `<!--g-->`, which carries no date, to persist one grace cycle without treating presence as reinforcement.
+  On the next pass, current evidence replaces that marker with the normal dated tier marker; without such evidence, archive the entry with a `legacy-unvalidated` note.
   The same persisted transition applies to an entry a hand edit later leaves unmarked in a file whose default tier carries a clock.
 - When an always-loaded memory file has grown past what every session should pay for, this skill may propose - never execute - moving a durable entry that matters only in a nameable situation into an on-demand-loaded home, such as a skill or scoped instruction file the user's agent loads only when that situation arises.
   The user approves each move, the new home is created through the user's own change process rather than by this skill, and the entry leaves the memory file only once the new home exists.
