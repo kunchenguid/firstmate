@@ -19,6 +19,13 @@
 #                a scout's contract to a ship's, delivered once its work landed.
 #                A field a transition MUTATES is a state, not a type, which is
 #                why the old field could not hold it.
+#                `delivered` is DECLARED BUT NOT YET WRITTEN by any fleet path.
+#                Stamping it belongs after a confirmed landing, inside
+#                bin/fm-pr-merge.sh's private metadata rewrite, whose ordering,
+#                device, and single-link invariants that path owns - so the
+#                writer is a deliberate follow-up rather than something bolted
+#                on beside this split. Read it as "no path has reported this
+#                task landed", never as "this task did not land".
 #
 # The axes are ORTHOGONAL: no consumer may infer one from another. A secondmate
 # records deliverable=ship because its work lands as project change, not because

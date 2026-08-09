@@ -146,6 +146,11 @@ A field describing who a worker is - including a requested agent role, which was
 That deferral was the whole reason the split had to come first: adding a role field to the old single-field vocabulary would have made a fourth conflated axis out of a field that already carried three.
 No such field exists in the fleet today; the axis is what makes adding one a one-line change rather than another conflation.
 
+**Remaining work on the stage axis.**
+`commissioned` and `reflagged` are written by the spawn and the reflag.
+`delivered` is declared but not yet written by any fleet path: stamping it belongs after a confirmed landing, inside the merge path's own private metadata rewrite, and that writer is a deliberate follow-up rather than something added beside this split.
+Until it exists, read an absent `delivered` as "no path has reported this task landed", never as "this task did not land".
+
 **Retirement of the deprecated field.**
 `kind=` is still written to every task's metadata and is still the derivation source for a record that predates the split.
 Its retirement condition is: **stop writing `kind=` once no reader consults it and one full task cycle has run entirely on the three axes.**
