@@ -109,7 +109,7 @@ All are harness-scoped rather than a global pattern union, and none is a recorde
 
 ## Durable implementation capacity and attempt lifecycle design
 
-This section specifies the approved target architecture for durable fleet refill and full attempt-to-terminal lifecycle management, and it does not describe behavior implemented today.
+This section specifies the approved, implemented durable fleet refill and attempt-to-terminal lifecycle design; automatic refill stays gated until the change is explicitly approved and merged.
 It composes the existing worker, Decision OS bead, Git, forge, and cleanup owners instead of adding a scheduler, tracker, daemon, dashboard, wrapper, or second terminal policy.
 Decision OS's `docs/superpowers/plans/2026-08-05-two-writer-delivery-capacity.md` Tasks 7.1 through 7.6 remain the project-specific lifecycle authority.
 
@@ -214,8 +214,8 @@ Ordinary fully evidenced delivery reconciles without another operator action, wh
 
 ### Migration, rollback, and verification
 
-Migration first reconciles repository ownership because the operating Firstmate `main` currently diverges from upstream and owns `bin/fm-fleet-refill.sh` while the reviewed upstream line does not.
-Maintainers must preserve both histories, select and review the canonical integration base, and reconcile that script before runtime implementation begins.
+Migration first reconciled repository ownership because the operating Firstmate `main` diverged from upstream and owned `bin/fm-fleet-refill.sh` while the reviewed upstream line did not.
+This delivery branch preserves both histories on a reviewed canonical integration base and reconciles that script before runtime implementation (evidence: `docs/verification/fleet-capacity.md`).
 Migration then introduces the read-only shared projection, runs shadow counting with measured latency, and reconciles stale records individually from live bead, worker, Git, forge, copy, and queue facts.
 After parity is explained, it introduces immutable envelopes and receipts for new attempts, the synchronous claim path, the shared cleanup operation, and ordered terminal orchestration.
 Both consumers switch to the shared object only after fixture and live parity, automatic refill starts only after safety tests pass, and obsolete output, manifest, duplicated counter, and compatibility reads are removed under the implementation's explicit deletion plan.

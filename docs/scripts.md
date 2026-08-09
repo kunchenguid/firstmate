@@ -14,6 +14,8 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-bootstrap.sh`        | Detect toolchain and fleet problems, run the locked session-start sweeps, and install approved tools |
 | `fm-startup-network.sh`  | Run session start's network checks off its blocking path in a bounded detached worker, and publish the result inline or as a wake |
 | `fm-fleet-sync.sh`       | Refresh project clones with safe fast-forwards, self-heals, `STUCK:` reports, branch pruning, and bounded recovery from an orphaned `.git/packed-refs.lock` |
+| `fm-fleet-refill.sh`     | Print the fleet refill verdict from the shared capacity projection, with the gated `--refill` admission action |
+| `fm-refill-sentinel.sh`  | Private fleet sentinel: cadence, candidate query, logging, and notification only    |
 | `fm-fleet-snapshot.sh`   | Print the read-only structured fleet snapshot JSON (schema `fm-fleet-snapshot.v1`)   |
 | `fm-fleet-view.sh`       | Render the fleet snapshot as a human Markdown view                                   |
 | `fm-bearings-snapshot.sh` | Project the fleet snapshot to the compact TOON bearings view; local-only unless `--include-prs` |
@@ -76,6 +78,12 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-afk-return.sh`       | Own deterministic return shutdown, catch-up evidence, and the firstmate-actionable blocker gate |
 | `fm-supervisor-target-lib.sh` | Resolve the shared supervisor target and backend for the daemon and launcher       |
 | `fm-supervise-daemon.sh` | Presence-gated away-mode sub-supervisor: self-handle routine wakes, guard injection by the detected primary harness, escalate batched digests, alert on failed delivery |
+| `fm-attempt-lib.sh`      | Write-once attempt envelopes, effect receipts, and derived obligations (schema `fm-attempt.v1`) |
+| `fm-attempt-migrate.sh`  | Reconcile legacy tasks into write-once attempt records through live disposition, read-only |
+| `fm-br-receipt.sh`       | Attended Decision OS main-steward adapter executing one tracker mutation request    |
+| `fm-capacity-lib.sh`     | The one shared capacity and attempt projection (schema `fm-fleet-capacity.v1`)      |
+| `fm-disposition-lib.sh`  | Centralized live disposition reader and fresh per-effect authority resolver        |
+| `fm-serialization-debt.sh` | Bounded read-only same-shift serialization-debt probe                            |
 | `fm-crew-state.sh`       | Print one deterministic current-state line for a crew                                |
 | `fm-nm-run-lib.sh`       | Shared branch-and-code-identity attribution for no-mistakes runs                    |
 | `fm-tangle-lib.sh`       | Shared default-branch resolution and primary-checkout tangle classification          |
@@ -104,6 +112,8 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-pr-check.sh`         | Record validated `pr=` and `pr_head=` values, then atomically arm a static merge poll |
 | `fm-pr-merge.sh`         | Record PR metadata, then merge a task's canonical full GitHub URL                    |
 | `fm-promote.sh`          | Promote a scout task in place to a protected ship task with an explicit delivery mode |
+| `fm-cleanup-lib.sh`      | The one structured attempt-bound cleanup operation shared by teardown and terminal orchestration |
+| `fm-terminal.sh`         | Sole attempt-to-terminal orchestrator composing cleanup and tracker receipts        |
 | `fm-teardown.sh`         | Fail-closed teardown: return landed ship worktrees, require completed scout deliverables, retire secondmate homes |
 | `fm-harness.sh`          | Detect the running harness and resolve crew or secondmate harness, model, and effort |
 | `fm-lock.sh`             | Per-home firstmate session lock                                                      |
