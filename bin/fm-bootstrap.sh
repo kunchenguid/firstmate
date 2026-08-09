@@ -1020,6 +1020,10 @@ crew_dispatch_validate() {
     def malformed_optional_fields($items):
       ($items | any(has("model") and (((.model | type) != "string") or (.model | length) == 0)))
       or ($items | any(has("effort") and (((.effort | type) != "string") or (.effort | length) == 0)));
+    def known_selects: ["quota-balanced", "policy-service"];
+    def known_select($s): (known_selects | index($s)) != null;
+    def unknown_selects:
+      [(.rules // [])[]? | .select? // empty | select(known_select(.) | not)] | unique;
     def bad_efforts:
       configured_profiles
       | map({h: .harness, e: .effort})
@@ -1038,14 +1042,14 @@ crew_dispatch_validate() {
     elif [(.rules // [])[]? | profiles(.use?)[]? | select((.harness? | type) != "string" or (.harness | length) == 0)] | length > 0 then "each use profile needs harness"
     elif malformed_optional_fields([(.rules // [])[]? | profiles(.use?)[]?]) then "use profile model and effort must be non-empty strings when present"
     elif [(.rules // [])[]? | select(has("select") and ((.select? | type) != "string" or (.select | length) == 0))] | length > 0 then "select must be a non-empty string"
-    elif [(.rules // [])[]? | .select? // empty | select(. != "quota-balanced" and . != "policy-service")] | length > 0 then
-      "unknown select: " + ([ (.rules // [])[]? | .select? // empty | select(. != "quota-balanced" and . != "policy-service") ] | unique | join(", "))
+    elif (unknown_selects | length) > 0 then
+      "unknown select: " + (unknown_selects | join(", "))
     elif [(.rules // [])[]? | select(.select? == "policy-service") | select((.policy? | type) != "string" or (.policy | length) == 0)] | length > 0 then
       "policy-service rules need non-empty policy"
     elif [(.rules // [])[]? | select(.select? == "policy-service") | select((.use | type) != "array")] | length > 0 then
       "policy-service rules require an array use"
     elif has("default_select") and ((.default_select | type) != "string" or (.default_select | length) == 0) then "default_select must be a non-empty string"
-    elif (.default_select? != null and .default_select != "quota-balanced" and .default_select != "policy-service") then "unknown default_select: " + (.default_select | tostring)
+    elif (.default_select? != null and (known_select(.default_select) | not)) then "unknown default_select: " + (.default_select | tostring)
     elif .default_select? == "policy-service" and ((.default_policy? | type) != "string" or (.default_policy | length) == 0) then "default policy-service needs non-empty default_policy"
     elif .default_select? == "policy-service" and ((.default? | type) != "array") then "default policy-service requires an array default"
     elif has("default") and ((.default | type) != "object" and (.default | type) != "array") then "default must be a profile object or non-empty profile array"

@@ -169,8 +169,9 @@ The intake and authority contract in `AGENTS.md` owns when separate scout resear
 ## Dispatch profiles
 
 Crewmate and scout dispatch can stay on the static crewmate harness resolved by `config/crew-harness`, or it can use local dispatch profiles in `config/crew-dispatch.json`.
-The dispatch file is intentionally judgment-based: firstmate reads the natural-language rules at intake, chooses the best matching rule, resolves profile arrays itself from current quota output under the `AGENTS.md` section 4 intake boundary and the `quota-array-dispatch` selection procedure, and passes only concrete `--harness`, `--model`, and `--effort` axes to `fm-spawn.sh`.
-The shell scripts validate the JSON shape and verified harness/effort combinations, but they do not parse task intent, match natural-language rules, or own array selection.
+The dispatch file is intentionally judgment-based: firstmate reads the natural-language rules at intake, chooses the best matching rule, resolves its profile array under the `AGENTS.md` section 4 intake boundary, and passes only concrete `--harness`, `--model`, and `--effort` axes to `fm-spawn.sh`.
+How an array resolves is a per-rule selector. The default `quota-balanced` selector keeps that decision inside firstmate through the `quota-array-dispatch` procedure over current quota output, while `select: "policy-service"` (or `default_select` for the top-level default) delegates the complete array to the local skill named by the rule's `policy` field and accepts only its selected concrete profile or its explicit no-route.
+The shell scripts validate the JSON shape, the selector and policy-owner fields, and verified harness/effort combinations, but they do not parse task intent, match natural-language rules, or own array selection under either selector.
 The session-start bootstrap step keeps valid dispatch configuration silent unless verbose facts are enabled and surfaces a concise invalid-config line when validation fails.
 When the file exists, `fm-spawn.sh` refuses crewmate and scout launches without an explicit harness, so `config/crew-harness` is only automatic when no dispatch profile file is active.
 Secondmate launches are exempt because they resolve the secondmate harness and any optional secondmate model or effort tokens instead.
