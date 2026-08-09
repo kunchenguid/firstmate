@@ -40,9 +40,12 @@
 #                       data/captain-shared.md, data/learnings.md: read-only,
 #                       always safe, always runs.
 #   5. fleet digest   - a compact data/backlog.md identity/metadata listing,
-#                       every state/*.meta, a bounded state/*.status tail,
-#                       state/.afk, and a cheap per-task endpoint-liveness read:
-#                       read-only, always runs.
+#                       one bounded RULING_RECONCILE line when open captain
+#                       decisions exist, every state/*.meta, a bounded
+#                       state/*.status tail, state/.afk, and a cheap per-task
+#                       endpoint-liveness read. Always runs, and read-only
+#                       except for the RULING_RECONCILE step, which publishes
+#                       its derived index only when locked (see below).
 #   6. closing reminder - prints the context-specific watcher next step; this
 #                       script points back to the emitted harness supervision
 #                       block and deliberately never arms the watcher itself.
@@ -67,10 +70,13 @@
 # tasks-axi and quota-axi tool checks, and tasks-axi availability - none of
 # which mutate shared state and all of which are safe to compute without
 # verified lock ownership.
-# Only projection cleanup, the five bootstrap mutating sweeps, and the
-# wake-queue drain are skipped.
-# The context and fleet-state digests
-# below are always read-only, so they run unconditionally in both modes.
+# Only projection cleanup, the five bootstrap mutating sweeps, the wake-queue
+# drain, and the ruling-index rebuild are skipped.
+# The context digest below is always read-only, and so is every part of the
+# fleet-state digest except its RULING_RECONCILE step: publishing the derived
+# ruling index is a mutation, so a refused session reports the count from the
+# existing index instead of rebuilding it, and does not go dark. Both digests
+# therefore run in both modes.
 #
 # BACKLOG DIGEST: FM_SESSION_START_BACKLOG_LIMIT bounds the startup backlog
 # listing, default 80 items.
@@ -374,6 +380,21 @@ if [ "$(fm_admission_state "$(fm_admission_config_file "$CONFIG")")" = active ];
   subsection "Fleet admission"
   "$SCRIPT_DIR/fm-admission.sh" --brief || true
   printf 'Re-examine load-held requests against this band; admit at most one at a time.\n'
+fi
+
+# Open captain decisions that a ruling document may already have answered. One
+# bounded line, and silence when there is nothing open, because a hold the
+# captain has already ruled is the failure this surfaces - not a routine count.
+# Writing the derived index is a mutation, so a read-only session reads the
+# existing index instead of rebuilding it. An unreadable ruling document is
+# reported rather than absorbed: an unread ruling must never present as "unruled".
+if [ -x "$SCRIPT_DIR/fm-ruling-reconcile.sh" ]; then
+  if [ "$READ_ONLY" -eq 1 ]; then
+    RECONCILE_OUT=$("$SCRIPT_DIR/fm-ruling-reconcile.sh" status 2>&1 | sed -n 's/^open_holds=\([1-9][0-9]*\)$/RULING_RECONCILE: \1 open captain decision(s) in the last index; rerun when locked to refresh/p')
+  else
+    RECONCILE_OUT=$("$SCRIPT_DIR/fm-ruling-reconcile.sh" scan --quiet 2>&1) || true
+  fi
+  [ -n "$RECONCILE_OUT" ] && printf '\n%s\n' "$RECONCILE_OUT"
 fi
 
 subsection "Work under way (state/*.meta)"
