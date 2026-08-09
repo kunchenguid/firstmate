@@ -735,10 +735,4 @@ assert_contains "$help" "advisory transport only" "help omits the authority boun
 assert_not_contains "$help" "x-notes-automation-token:" "help exposes an authentication value surface"
 assert_contains "$help" "claims no exactly-once effect" "help does not reject an exactly-once claim"
 
-# The adapter emits only the existing normalized check event and never reads a
-# primary harness or runtime backend. The generic process-event suite covers
-# that shared delivery boundary; there is no affected harness/backend axis to
-# specialize here.
-pass "the adapter is independent of every primary harness and runtime backend axis"
-
 printf '\nall Forge Firstmate process-event adapter tests passed\n'

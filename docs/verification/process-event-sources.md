@@ -69,7 +69,6 @@ ok - token bytes never enter argv, results, registration, events, state, logs, o
 ok - complete envelope, schema, kind, identity, provenance, freshness, bounds, and unknown fields are validated
 ok - auth, redirects, header bounds, body bounds, truncation, and no-cache failures publish nothing
 ok - a child failure before capture leaves the unchanged cursor safe to retry
-ok - the adapter is independent of every primary harness and runtime backend axis
 
 all Forge Firstmate process-event adapter tests passed
 ```
