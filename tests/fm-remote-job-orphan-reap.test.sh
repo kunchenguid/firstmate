@@ -41,13 +41,15 @@ pgid_of() { ps -p "$1" -o pgid= 2>/dev/null | tr -d '[:space:]'; }
 
 ppid_of() { ps -p "$1" -o ppid= 2>/dev/null | tr -d '[:space:]'; }
 
-inode_of() {
-  if [ "$(uname -s 2>/dev/null || true)" = Darwin ]; then
-    stat -f %i "$1" 2>/dev/null
-  else
-    stat -c %i "$1" 2>/dev/null
-  fi
-}
+# stat's inode selector differs by platform, so resolve it once here rather than
+# paying a uname fork inside anything that watches a file.
+if [ "$(uname -s 2>/dev/null || true)" = Darwin ]; then
+  STAT_INODE=(-f %i)
+else
+  STAT_INODE=(-c %i)
+fi
+
+inode_of() { stat "${STAT_INODE[@]}" "$1" 2>/dev/null; }
 
 # Wait up to <seconds> for <pid> to exit; 0 when it did.
 wait_gone() { # <pid> <seconds>
@@ -64,6 +66,28 @@ wait_child() { # <pid> <seconds>
   local pid=$1 deadline=$(( $(date +%s) + $2 ))
   while [ "$(date +%s)" -lt "$deadline" ]; do
     [ -n "$(pgrep -P "$pid" 2>/dev/null || true)" ] && return 0
+    sleep 0.1
+  done
+  return 1
+}
+
+# A supervisor's genuine serving child - never the sleep it forks for restart
+# backoff, and never a transient subshell of its own state preparation.
+serving_child() { # <supervisor-pid>
+  pgrep -P "$1" -f 'fm-remote-job-worker\.sh --serve' 2>/dev/null | head -n 1
+}
+
+# Wait up to <seconds> for <supervisor> to be serving through a child other than
+# <previous>, and echo it. Retrying against the pid that just died would prove
+# nothing, so the previous one never satisfies this.
+next_serving_child() { # <supervisor-pid> <previous-serving-pid> <seconds>
+  local worker=$1 previous=$2 deadline=$(( $(date +%s) + $3 )) candidate
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    candidate=$(serving_child "$worker")
+    if [ -n "$candidate" ] && [ "$candidate" != "$previous" ]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
     sleep 0.1
   done
   return 1
@@ -109,8 +133,8 @@ build_remote_root "$CASE1/remote-root"
 WORKER=$(start_worker "$CASE1/remote-root" "$CASE1/account" "$CASE1/remote-jobs") ||
   fail "could not start the fixture remote job worker"
 track "$WORKER"
-wait_child "$WORKER" 10 || fail "the fixture worker never started its serving child"
-SERVE=$(pgrep -P "$WORKER" | head -n 1)
+SERVE=$(next_serving_child "$WORKER" '' 10) ||
+  fail "the fixture worker never started its serving child"
 
 [ "$(pgid_of "$WORKER")" = "$WORKER" ] ||
   fail "the started worker is not its own process group leader, so its tree cannot be signalled as one group"
@@ -127,53 +151,86 @@ pass "the Linux start path puts the whole worker tree in its own process group"
 # after its atomic heartbeat replaces the ready inode. It then cannot execute
 # while the state root is removed, and CONT resumes the real loop immediately
 # before its stale-job sweep recreates the root without the ownership lock.
+#
+# The STOP has only the few milliseconds between that rename and the sweep's
+# re-creation of the state root to land in, so the watcher must not fork: a hard
+# link pins the published inode (which also stops the kernel recycling it into
+# the next heartbeat's temp file), and `[ -ef ]`, `kill` and `SECONDS` are all
+# bash builtins, so the loop polls at syscall speed with no sleep at all. A
+# loaded host can still deschedule the watcher past the window; that attempt
+# proves it missed by the serving child dying on its next heartbeat against the
+# removed state root, and the whole construction is retried against the next
+# genuine serving child the supervisor spawns.
 READY="$CASE1/remote-jobs/worker.ready"
-for _ in $(seq 1 200); do
-  READY_INODE=$(inode_of "$READY" 2>/dev/null || true)
-  [ -n "$READY_INODE" ] && break
-  sleep 0.01
-done
-[ -n "${READY_INODE:-}" ] || fail "the serving child did not publish its initial heartbeat"
-for _ in $(seq 1 1000); do
-  NEXT_READY_INODE=$(inode_of "$READY" 2>/dev/null || true)
-  if [ -n "$NEXT_READY_INODE" ] && [ "$NEXT_READY_INODE" != "$READY_INODE" ]; then
-    kill -STOP "$SERVE" || fail "could not stop the serving child after its heartbeat publication"
-    break
+READY_WITNESS="$CASE1/ready.witness"
+
+stopped() { # <pid>
+  case "$(ps -p "$1" -o state= 2>/dev/null | tr -d '[:space:]')" in T*) return 0 ;; esac
+  return 1
+}
+
+lock_free_state_present() {
+  [ -d "$CASE1/remote-jobs/jobs" ] && [ -d "$CASE1/remote-jobs/logs" ] &&
+    [ ! -e "$CASE1/remote-jobs/worker.lock" ] && [ ! -L "$CASE1/remote-jobs/worker.lock" ] &&
+    [ -f "$READY" ]
+}
+
+# 0 once this attempt has observed both the lock-free state and the TERM
+# outcome; 1 when its STOP landed after the sweep had already recreated the
+# state root, which the serving child proves by dying before recreating it.
+construct_lock_free_serving_child() { # <serving-pid>
+  local serve=$1 deadline ready_inode next_ready_inode
+  deadline=$((SECONDS + 30))
+  while [ ! -f "$READY" ]; do
+    [ "$SECONDS" -lt "$deadline" ] || fail "the serving child did not publish its initial heartbeat"
+    sleep 0.01
+  done
+  rm -f -- "$READY_WITNESS"
+  ln "$READY" "$READY_WITNESS" || fail "could not pin the published heartbeat inode"
+  while [ "$READY" -ef "$READY_WITNESS" ]; do
+    alive "$serve" || fail "the serving child died before replacing its heartbeat inode"
+    [ "$SECONDS" -lt "$deadline" ] ||
+      fail "the serving child did not atomically replace its heartbeat inode"
+  done
+  kill -STOP "$serve" || fail "could not stop the serving child after its heartbeat publication"
+  [ -f "$READY" ] && [ ! "$READY" -ef "$READY_WITNESS" ] ||
+    fail "the serving child did not atomically replace its heartbeat inode"
+  deadline=$((SECONDS + 30))
+  until stopped "$serve"; do
+    [ "$SECONDS" -lt "$deadline" ] || fail "the serving child was not stopped before state removal"
+    sleep 0.01
+  done
+  rm -rf "$CASE1/remote-jobs"
+  assert_absent "$CASE1/remote-jobs" "the serving child mutated state while stopped"
+  kill -CONT "$serve" || fail "could not resume the serving child after state removal"
+  deadline=$((SECONDS + 30))
+  until lock_free_state_present; do
+    alive "$serve" || return 1
+    [ "$SECONDS" -lt "$deadline" ] ||
+      fail "the stale-job sweep did not recreate state without the ownership lock"
+    sleep 0.01
+  done
+  ready_inode=$(inode_of "$READY") || fail "the recreated heartbeat has no inode"
+  kill -TERM "$serve" || fail "could not TERM the lock-free serving child"
+  if ! wait_gone "$serve" 6; then
+    next_ready_inode=$(inode_of "$READY" 2>/dev/null || true)
+    fail "the lock-free serving child survived TERM and advanced heartbeat $ready_inode->$next_ready_inode"
   fi
-  sleep 0.001
+}
+
+ATTEMPT=1
+until construct_lock_free_serving_child "$SERVE"; do
+  ATTEMPT=$((ATTEMPT + 1))
+  [ "$ATTEMPT" -le 8 ] ||
+    fail "the STOP never landed between the heartbeat and the stale-job sweep in $((ATTEMPT - 1)) attempts"
+  alive "$WORKER" ||
+    fail "the fixture supervisor stopped before the construction could be retried"
+  SERVE=$(next_serving_child "$WORKER" "$SERVE" 30) ||
+    fail "the supervisor did not respawn a serving child to retry the construction against"
 done
-[ -n "${NEXT_READY_INODE:-}" ] && [ "$NEXT_READY_INODE" != "$READY_INODE" ] \
-  || fail "the serving child did not atomically replace its heartbeat inode"
-for _ in $(seq 1 200); do
-  case "$(ps -p "$SERVE" -o state= 2>/dev/null | tr -d '[:space:]')" in T*) break ;; esac
-  sleep 0.01
-done
-case "$(ps -p "$SERVE" -o state= 2>/dev/null | tr -d '[:space:]')" in
-  T*) ;;
-  *) fail "the serving child was not stopped before state removal" ;;
-esac
-rm -rf "$CASE1/remote-jobs"
-assert_absent "$CASE1/remote-jobs" "the serving child mutated state while stopped"
-kill -CONT "$SERVE" || fail "could not resume the serving child after state removal"
-for _ in $(seq 1 1000); do
-  if [ -d "$CASE1/remote-jobs/jobs" ] && [ -d "$CASE1/remote-jobs/logs" ] &&
-    [ ! -e "$CASE1/remote-jobs/worker.lock" ] && [ -f "$READY" ]; then
-    break
-  fi
-  alive "$SERVE" || fail "the serving child exited before recreating the lock-free state"
-  sleep 0.01
-done
-[ -d "$CASE1/remote-jobs/jobs" ] && [ -d "$CASE1/remote-jobs/logs" ] &&
-  [ ! -e "$CASE1/remote-jobs/worker.lock" ] && [ -f "$READY" ] \
-  || fail "the stale-job sweep did not recreate state without the ownership lock"
-READY_INODE=$(inode_of "$READY") || fail "the recreated heartbeat has no inode"
-kill -TERM "$SERVE" || fail "could not TERM the lock-free serving child"
-if ! wait_gone "$SERVE" 6; then
-  NEXT_READY_INODE=$(inode_of "$READY" 2>/dev/null || true)
-  fail "the lock-free serving child survived TERM and advanced heartbeat $READY_INODE->$NEXT_READY_INODE"
-fi
 alive "$WORKER" || fail "the fixture supervisor did not survive a lone child kill, so this case no longer covers the leak"
-wait_child "$WORKER" 15 || fail "the supervisor did not respawn after its recorded child pid was killed"
+SERVE=$(next_serving_child "$WORKER" "$SERVE" 15) ||
+  fail "the supervisor did not respawn after its recorded child pid was killed"
 pass "a serving child honors TERM after its state root is recreated without the ownership lock"
 
 # A worker whose code root is intact is never a reap candidate, which is what
@@ -184,7 +241,8 @@ alive "$WORKER" || fail "the reaper stopped a worker whose code root still exist
 pass "a worker whose code root still exists is never reaped"
 
 # Prune the code root the way a returned worktree does.
-SURVIVOR=$(pgrep -P "$WORKER" | head -n 1)
+SURVIVOR=$(serving_child "$WORKER")
+[ -n "$SURVIVOR" ] || fail "the worker had no serving child left to outlive its pruned code root"
 rm -rf "$CASE1/remote-root"
 wait_gone "$WORKER" 60 || fail "the worker survived its code root being pruned"
 wait_gone "$SURVIVOR" 60 || fail "a serving child outlived the abandoned supervisor"
