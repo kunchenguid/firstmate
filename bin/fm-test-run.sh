@@ -182,6 +182,7 @@ family_for_basename() {
     fm-afk-pi-herdr-return-e2e.test.sh|\
     fm-cmux-claude-composer-live-e2e.test.sh|\
     fm-composer-matrix-live-e2e.test.sh|\
+    fm-composer-harness-drift-live-e2e.test.sh|\
     fm-codex-continuity-live-e2e.test.sh|fm-grok-continuity-live-e2e.test.sh|\
     fm-grok-stop-live-e2e.test.sh|fm-harness-liveness-drift-live-e2e.test.sh|\
     fm-muse-signals-live-e2e.test.sh|\
@@ -935,8 +936,8 @@ families_for_changed_path() {
       ;;
     bin/fm-composer-lib.sh)
       # The shared shape catalogue is vendor-rendered signal; a change to it
-      # re-selects the live guard (fm-composer-matrix-live-e2e) alongside the
-      # portable families.
+      # re-selects the live guards (fm-composer-matrix-live-e2e and
+      # fm-composer-harness-drift-live-e2e) alongside the portable families.
       printf '%s\n' backend-dispatch
       printf '%s\n' pure-contract-unit
       printf '%s\n' live-harness-optin

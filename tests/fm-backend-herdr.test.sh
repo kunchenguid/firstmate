@@ -3158,6 +3158,51 @@ test_composer_state_claude_unbordered_prompt_is_empty() {
   pass "fm_backend_herdr_composer_state: a real-claude unbordered '❯' prompt row (no border box in view) reads empty"
 }
 
+# THE U+00A0 SEPARATOR regression (task fm-composer-read-unreliable, upstream
+# kunchenguid/firstmate#1988). Captured read-only from a live claude-on-herdr
+# pane on 2026-08-09: claude separates its prompt glyph from the composer's
+# content with U+00A0 NO-BREAK SPACE, not an ASCII space, so an AFFIRMATIVELY
+# EMPTY composer renders as exactly `❯\302\240`. The composer row below is
+# byte-for-byte that capture, dim suggestion and all; the horizontal rules
+# around it are the same 38;2;136;136;136 rules the real pane draws, shortened
+# only in width. Before the fix this read `pending` - "a human has half-typed
+# something here" - so bin/fm-supervise-daemon.sh refused every injection and
+# deferred 2105 escalations over 8.3 hours against an idle pane.
+#
+# U+00A0 is invisible in any plain capture, which is why the emptiness looked
+# correct to the eye the whole time, so both cases assert the fixture still
+# carries the separator rather than trusting it to stay put.
+herdr_nbsp_fixture_check() {  # <file> <what>
+  LC_ALL=C grep -q "$(printf '\302\240')" "$1" \
+    || fail "$2 fixture no longer contains U+00A0; this case would pass vacuously"
+}
+
+test_composer_state_claude_nbsp_prompt_is_empty() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-claude-nbsp-empty"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '\033[0m\033[38;2;153;153;153m\xe2\x9c\xbb\033[0m \033[0m\033[38;2;153;153;153mBaked for 3m 48s\033[0m\r\n\r\n\033[0m\033[38;2;136;136;136m\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\033[0m\r\n\xe2\x9d\xaf\302\240\033[0m\033[2mkeep going, dont stop until the four tracks are landed\033[0m\r\n\033[0m\033[38;2;136;136;136m\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\033[0m\r\n' > "$resp/1.out"
+  herdr_nbsp_fixture_check "$resp/1.out" "empty herdr composer"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = empty ] || fail "a real claude composer row of '\xe2\x9d\xaf'+U+00A0 plus a dim suggestion is EMPTY and must read empty, got '$out' (the 8.3-hour away-mode wedge: 2105 escalations deferred against an idle pane)"
+  pass "fm_backend_herdr_composer_state: a real claude '❯'+U+00A0 empty composer reads empty"
+}
+
+# The negative half, and the one that matters more: the fix must not have
+# bought that `empty` by becoming permissive about real input.
+test_composer_state_claude_nbsp_prompt_with_text_is_pending() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-claude-nbsp-pending"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '\033[0m\033[38;2;136;136;136m\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\033[0m\r\n\xe2\x9d\xaf\302\240captain hold on, still typing\r\n\033[0m\033[38;2;136;136;136m\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\033[0m\r\n' > "$resp/1.out"
+  herdr_nbsp_fixture_check "$resp/1.out" "typed-into herdr composer"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = pending ] || fail "real unsubmitted text after the U+00A0 separator MUST stay pending, got '$out' (a false empty types over the captain's half-written message)"
+  pass "fm_backend_herdr_composer_state: real text after a '❯'+U+00A0 separator still reads pending"
+}
+
 test_composer_state_claude_unbordered_prompt_is_pending() {
   local dir log resp fb out
   dir="$TMP_ROOT/composer-claude-bare-pending"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -4326,6 +4371,8 @@ test_composer_state_pi_separator_idle_is_empty
 test_composer_state_pi_separator_real_text_is_pending
 test_composer_state_pi_incomplete_separator_below_stale_generic_is_unknown
 test_composer_state_pi_separator_requires_safe_native_identity
+test_composer_state_claude_nbsp_prompt_is_empty
+test_composer_state_claude_nbsp_prompt_with_text_is_pending
 test_composer_state_claude_unbordered_prompt_is_empty
 test_composer_state_claude_unbordered_prompt_is_pending
 test_composer_state_bare_prompt_below_stale_bordered_banner_wins

@@ -531,6 +531,78 @@ test_selected_content_is_composer_scoped_and_wrap_normalized() {
   pass "fm_composer_extract_selected_content: scopes user content and excludes furniture"
 }
 
+# --- Unicode whitespace between the prompt glyph and the content ------------
+# Task fm-composer-read-unreliable (upstream kunchenguid/firstmate#1988).
+# Claude 2.x separates its prompt glyph from the composer's content with U+00A0
+# NO-BREAK SPACE, so an affirmatively EMPTY composer is exactly `❯\302\240`.
+# Every trim and glyph comparison here tested only POSIX `[[:space:]]`, which
+# bash excludes U+00A0 from under the C and UTF-8 locales alike, so that lone
+# separator survived as apparent typed content and the row read `pending` - the
+# verdict that stops every caller which must not overwrite unsubmitted input.
+# The owner now follows the Unicode White_Space property instead of a list of
+# separators observed in one release. The screen-level matrix above pins the
+# real captured rows; these cases pin the property itself at the content
+# classifier, where every adapter's verdict ultimately lands.
+
+# The classifier follows the Unicode White_Space property rather than a list of
+# separators observed in one harness release, so the next space-like character a
+# harness picks is already covered. U+200B ZERO WIDTH SPACE pins the deliberate
+# boundary: Unicode gives it White_Space=No, so it is NOT normalized and still
+# reads as content.
+test_unicode_whitespace_property_set_is_covered() {
+  local sep ws glyph out
+  glyph=$(printf '\xe2\x9d\xaf')
+  for sep in '\302\205' '\302\240' '\341\232\200' '\342\200\200' '\342\200\207' \
+             '\342\200\212' '\342\200\250' '\342\200\251' '\342\200\257' \
+             '\342\201\237' '\343\200\200'; do
+    ws=$(printf '%b' "$sep")
+    out=$(fm_composer_classify_content 1 "$glyph$ws")
+    [ "$out" = empty ] || fail "a glyph followed by Unicode whitespace ${sep} should read empty, got '$out'"
+    out=$(fm_composer_classify_content 1 "${glyph}${ws}typed")
+    [ "$out" = pending ] || fail "real text behind Unicode whitespace ${sep} should read pending, got '$out'"
+  done
+  # U+200B is a format character, not whitespace - it stays content.
+  out=$(fm_composer_classify_content 1 "$(printf '\xe2\x9d\xaf\342\200\213')")
+  [ "$out" = pending ] || fail "U+200B ZERO WIDTH SPACE is White_Space=No and must NOT be normalized away, got '$out'"
+  pass "fm_composer_classify_content: the Unicode White_Space property set normalizes, U+200B deliberately does not"
+}
+
+# The leading-glyph strip used `${content#?}`, which drops one BYTE under
+# LC_ALL=C (the fleet default) and one CHARACTER under a UTF-8 locale, so a
+# multibyte glyph left locale-dependent trailing bytes that read as content.
+# The verdict must not depend on the ambient locale in either direction.
+test_composer_verdict_is_locale_independent() {
+  local loc out checked=0
+  for loc in C C.utf8 en_US.utf8; do
+    locale -a 2>/dev/null | grep -qx "$loc" || continue
+    out=$(LC_ALL="$loc" bash -c '. "$1"; fm_composer_classify_content 1 "$(printf "\xe2\x9d\xaf\302\240")"' _ "$ROOT/bin/fm-composer-lib.sh")
+    [ "$out" = empty ] || fail "glyph + U+00A0 must read empty under LC_ALL=$loc, got '$out'"
+    out=$(LC_ALL="$loc" bash -c '. "$1"; fm_composer_classify_content 1 "$(printf "\xe2\x9d\xaf\302\240still typing")"' _ "$ROOT/bin/fm-composer-lib.sh")
+    [ "$out" = pending ] || fail "glyph + U+00A0 + real text must read pending under LC_ALL=$loc, got '$out'"
+    out=$(LC_ALL="$loc" bash -c '. "$1"; fm_composer_classify_content 1 "$(printf "\xe2\x9d\xaf hello")"' _ "$ROOT/bin/fm-composer-lib.sh")
+    [ "$out" = pending ] || fail "glyph + ASCII space + real text must read pending under LC_ALL=$loc, got '$out'"
+    checked=$((checked + 1))
+  done
+  # LC_ALL=C is the fleet default and is guaranteed present, so checking nothing
+  # here means the locale probe itself broke rather than that the case passed.
+  [ "$checked" -gt 0 ] || fail "no installed locale was exercised; this case checked nothing"
+  pass "fm_composer_classify_content: the verdict is identical under every installed locale ($checked checked)"
+}
+
+# The dead-shell refusal is the reason this classifier exists at all, and a
+# Unicode separator must not become a way around it: a bare shell prompt is
+# still never a safe injection target, with or without one.
+test_nbsp_does_not_weaken_the_dead_shell_refusal() {
+  local out glyph
+  for glyph in '>' '$' '%' '#'; do
+    out=$(fm_composer_classify_content 0 "$glyph$NBSP")
+    [ "$out" = unknown ] || fail "a bare dead-shell '$glyph' followed by U+00A0 must stay unknown, got '$out'"
+    out=$(fm_composer_classify_content 1 "$glyph$NBSP")
+    [ "$out" = empty ] || fail "a bordered composer's own '$glyph' prompt with U+00A0 should read empty, got '$out'"
+  done
+  pass "fm_composer_classify_content: U+00A0 never turns a bare dead-shell prompt into an injection target"
+}
+
 test_bare_shell_glyphs_are_unknown
 test_stripped_unbordered_content_uses_plain_content
 test_bare_shell_prompt_with_command_is_not_empty
@@ -559,3 +631,6 @@ test_incomplete_lower_box_invalidates_stale_candidate
 test_titled_bottom_requires_matching_width
 test_cursor_on_proven_box_bottom_classifies_content
 test_selected_content_is_composer_scoped_and_wrap_normalized
+test_unicode_whitespace_property_set_is_covered
+test_composer_verdict_is_locale_independent
+test_nbsp_does_not_weaken_the_dead_shell_refusal

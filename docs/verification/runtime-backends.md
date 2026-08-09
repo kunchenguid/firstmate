@@ -144,6 +144,38 @@ Zellij has no verified recovery-grade agent process probe, while Orca and cmux d
 The current classifier matrix and its refresh guard are recorded in [Composer classification matrix](#composer-classification-matrix), with portable shape coverage in `tests/fm-composer-lib.test.sh` and `tests/fm-composer-ghost.test.sh`.
 Kimi pointer delivery and OpenCode 1.18.4 busy-queue behavior remain pinned by `tests/fm-kimi-harness.test.sh` and `tests/fm-tmux-submit-busy.test.sh`.
 
+### Composer separator rendering
+
+This is the per-harness record of what an EMPTY composer actually renders, and it is the owner the Herdr "Composer and operational input" section below refers to.
+The verdict a composer read produces is taken from the harness's own input row, so the separator that row draws is a vendor surface under no contract.
+Claude Code separates its prompt glyph from the composer's content with U+00A0 NO-BREAK SPACE rather than an ASCII space, which is invisible in any rendered capture and only appears when the bytes are decoded.
+
+Refresh this table with the opt-in guard, which drives each installed harness for real, types a marker, clears it, and decodes the resulting empty row:
+
+```sh
+FM_COMPOSER_HARNESS_DRIFT=1 tests/fm-composer-harness-drift-live-e2e.test.sh
+```
+
+Run on 2026-08-09 with tmux 3.5a on Debian GNU/Linux 13 x86_64, each harness on a private socket in an isolated lab.
+The composer is emptied by the guard itself - it types a marker, confirms the harness rendered it, sends `C-u`, and confirms the marker is gone from the pane - so the row below is affirmatively empty rather than assumed empty.
+
+| Harness | Version | Empty composer row bytes | Separator | Verdict |
+| --- | --- | --- | --- | --- |
+| claude | 2.1.226 | `e2 9d af c2 a0` | U+00A0 | empty |
+| codex | not installed | - | - | unverified here |
+| opencode | not installed | - | - | unverified here |
+| pi | not installed | - | - | unverified here |
+| pi-signed | not installed | - | - | unverified here |
+| grok | not installed | - | - | unverified here |
+| kimi | not installed | - | - | unverified here |
+| muse | not installed | - | - | unverified here |
+
+Every harness absent from this machine is recorded as unverified rather than passed over, and the guard refuses to report a pass when no installed harness reached a readable composer.
+
+Before the fix in `bin/fm-composer-lib.sh`, that exact `e2 9d af c2 a0` row classified `pending`, meaning "a human's unsubmitted text is sitting there", so every caller that must not overwrite unsubmitted input refused to act (upstream `kunchenguid/firstmate#1988`).
+`fm_composer_normalize_trim_var` now maps every code point with the Unicode property `White_Space=Yes` onto an ASCII space before any trim or glyph comparison, so the classifier follows a standards property instead of a separator observed in one release.
+`tests/fm-composer-lib.test.sh` and `tests/fm-composer-ghost.test.sh` pin the same bytes in CI.
+
 ### Cleanup endpoint identity
 
 The cleanup identity boundary was validated on 2026-07-28 with tmux 3.6a and metadata fixtures for every supported backend.
@@ -521,7 +553,7 @@ ok - forced teardown retains a nested secondmate home and its grandchild's Herdr
 
 Real captures verified these active distinctions:
 
-- Claude and Codex use bare `❯` and `›` agent composers.
+- Claude and Codex use bare `❯` and `›` agent composers; the tmux "Composer separator rendering" section above owns the per-harness record of the whitespace each one draws after that glyph.
 - Pi uses content between complete separator rows and requires exact native Pi identity.
 - Dim or faint suggestion text is ghost content, while normally styled text is pending input.
 - Grok dark truecolor placeholders are ghost content, while bright truecolor typed input remains pending.

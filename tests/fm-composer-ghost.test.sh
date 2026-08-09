@@ -681,6 +681,98 @@ test_peek_output_is_escape_free() {
   pass "fm-peek output is escape-free (no raw -e bytes reach firstmate context)"
 }
 
+# --- Unicode whitespace between the prompt glyph and the content -------------
+# Regression coverage for task fm-composer-read-unreliable (upstream
+# kunchenguid/firstmate#1988). Claude 2.x separates its prompt glyph from the
+# composer's content with U+00A0 NO-BREAK SPACE rather than an ASCII space, so
+# an AFFIRMATIVELY EMPTY composer renders as exactly `❯` U+00A0. Every trim and
+# glyph comparison in the shared owner tested only POSIX `[[:space:]]`, which
+# bash excludes U+00A0 from under the C and UTF-8 locales alike, so that lone
+# separator survived as apparent typed content and the row classified
+# `pending` - the verdict meaning "a human's unsubmitted text is sitting
+# there", which stops every caller that must not type over it. The rows below
+# are the real bytes captured read-only from live claude panes on 2026-08-09:
+# tmux paints the glyph `\033[38;5;246m❯\302\240\033[39m`, herdr's ANSI read of
+# the same harness gives `❯\302\240\033[0m\033[2m<suggestion>\033[0m`.
+#
+# NBSP is invisible in any plain capture, so each case first asserts the
+# fixture still CONTAINS the separator. Without that a later edit could replace
+# it with an ASCII space and leave these passing vacuously against the very
+# shape they exist to pin.
+NBSP=$(printf '\302\240')
+
+assert_fixture_has_nbsp() {  # <fixture-text> <what>
+  case "$1" in
+    *"$NBSP"*) return 0 ;;
+  esac
+  fail "$2 fixture no longer contains U+00A0; this case would pass vacuously"
+}
+
+# nbsp_row_state <styled-row>: the tmux verdict for one bare claude composer
+# row, read through the real capture path (fake tmux serves the row, the cursor
+# sits on it) so the fixture travels the same capture -> caps -> classifier
+# route a live pane does.
+nbsp_row_state() {  # <styled-row>
+  local row=$1 dir fb capture
+  dir="$TMP_ROOT/nbsp-$RANDOM"; mkdir -p "$dir"
+  fb=$(make_fake_tmux "$dir")
+  capture="$dir/styled.txt"
+  printf '%s\n' "$row" > "$capture"
+  PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=0 \
+    fm_tmux_composer_state "fakepane"
+}
+
+test_nbsp_separated_prompt_is_empty() {
+  local row out
+  # The live tmux row, byte for byte: a 256-colour prompt glyph and the NBSP,
+  # with no other content whatsoever. 38;5;246 is a PALETTE colour, which the
+  # ghost stripper deliberately never luminance-tests, so the glyph survives
+  # stripping and the whole verdict rests on how the separator is read.
+  row=$(printf '\033[38;5;246m\xe2\x9d\xaf\302\240\033[39m')
+  assert_fixture_has_nbsp "$row" "empty tmux composer"
+  out=$(nbsp_row_state "$row")
+  [ "$out" = empty ] || fail "the real empty claude composer row (glyph + U+00A0) must read empty, got '$out' (this is the 8.3-hour away-mode wedge)"
+  pass "fm_tmux_composer_state: a real claude '❯'+U+00A0 empty composer row reads empty"
+}
+
+# The case that matters most: the fix must not have bought `empty` by becoming
+# permissive. Real typed text after the same NBSP separator must still be
+# pending, or firstmate would type over a captain's half-written message.
+test_nbsp_separated_prompt_with_real_text_is_pending() {
+  local row out
+  row=$(printf '\033[38;5;246m\xe2\x9d\xaf\302\240\033[39mcaptain I am half way through')
+  assert_fixture_has_nbsp "$row" "typed-into tmux composer"
+  out=$(nbsp_row_state "$row")
+  [ "$out" = pending ] || fail "real unsubmitted text after a U+00A0 separator MUST stay pending, got '$out' (a false empty types over the captain's input)"
+  # Content that is ONLY non-ASCII whitespace is not text to protect, but a
+  # single real character anywhere in it is.
+  out=$(nbsp_row_state "$(printf '\xe2\x9d\xaf\302\240\302\240\302\240x')")
+  [ "$out" = pending ] || fail "one real character behind several U+00A0 separators must still read pending, got '$out'"
+  pass "fm_tmux_composer_state: real text behind a U+00A0 separator still reads pending"
+}
+
+# Drive the two independent signals apart. The ghost stripper (de-emphasis) and
+# the whitespace normalization answer different halves of "is anything typed
+# here", and the empty verdict must survive losing either one: the live rows
+# carry both a dim suggestion AND the NBSP, but a row with the NBSP alone still
+# has to read empty, and a row whose ONLY content is a bright dim-free
+# suggestion still has to read pending.
+test_nbsp_composer_verdict_survives_losing_the_ghost_signal() {
+  local out
+  # Both signals present (herdr's live shape: NBSP + a dim suggestion).
+  out=$(nbsp_row_state "$(printf '\xe2\x9d\xaf\302\240\033[0m\033[2mkeep going, dont stop\033[0m')")
+  [ "$out" = empty ] || fail "NBSP + dim ghost should read empty, got '$out'"
+  # Ghost signal removed - the NBSP alone must still carry the empty verdict.
+  out=$(nbsp_row_state "$(printf '\xe2\x9d\xaf\302\240')")
+  [ "$out" = empty ] || fail "the NBSP separator alone must still read empty with no ghost run present, got '$out'"
+  # Whitespace signal removed - a bright, dim-free body must still be pending,
+  # proving normalization did not start swallowing real content.
+  out=$(nbsp_row_state "$(printf '\xe2\x9d\xaf \033[38;2;224;222;244mbright typed\033[0m')")
+  [ "$out" = pending ] || fail "bright dim-free text must remain pending, got '$out'"
+  pass "fm_tmux_composer_state: the empty verdict survives losing the ghost signal, and pending survives losing the whitespace one"
+}
+
+
 test_strip_ghost_drops_dim_keeps_normal
 test_strip_ghost_handles_combined_and_boundary_codes
 test_strip_ghost_keeps_colored_text_with_2_payloads
@@ -714,3 +806,6 @@ test_legitimate_empty_routes_remain_empty
 test_non_bordered_composer_uses_compatibility_fallback
 test_non_bordered_interior_edges_are_pending
 test_peek_output_is_escape_free
+test_nbsp_separated_prompt_is_empty
+test_nbsp_separated_prompt_with_real_text_is_pending
+test_nbsp_composer_verdict_survives_losing_the_ghost_signal
