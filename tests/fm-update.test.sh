@@ -3,11 +3,15 @@
 # firstmate repo and every registered secondmate home.
 #
 # The guarantees under test mirror fm-fleet-sync.sh and prime directive #3:
-#   - The running firstmate repo (on its default branch) fast-forwards from
-#     origin; a leased secondmate home (detached HEAD on the default branch)
-#     fast-forwards the same way.
-#   - FAST-FORWARD ONLY: a dirty, diverged, offline, or wrong-branch target is
-#     skipped and reported, never forced or stashed, so unlanded work survives.
+#   - The updater fetches both the configured fork origin and canonical
+#     upstream, distinguishes their relationship, and selects only a descendant
+#     that contains both histories.
+#   - The running firstmate repo and leased secondmate homes fast-forward to the
+#     selected commit, including a standalone clone that must import it from the
+#     primary code root.
+#   - FAST-FORWARD ONLY: diverged sources stop the entire update, while a dirty,
+#     locally diverged, offline, or wrong-branch target is skipped and reported,
+#     never forced or stashed, so unlanded work survives.
 #   - The update is a single-parent fast-forward (never a merge commit) and a
 #     fast-forward of one worktree never disturbs another worktree's checkout
 #     or the shared default branch.
@@ -29,9 +33,10 @@ fm_git_identity fmtest fmtest@example.com
 
 TMP_ROOT=$(fm_test_tmproot fm-update-tests)
 
-# Build a fresh world: a bare origin seeded with one commit, a firstmate repo
-# clone checked out on main, and a home dir with state/ and data/. Echoes the
-# world dir. Files seeded: AGENTS.md, README.md, bin/tool.sh, and an internal skill note.
+# Build a fresh world: separate bare fork-origin and canonical-upstream repos
+# seeded with one shared commit, a firstmate repo clone checked out on main, and
+# a home dir with state/ and data/. Echoes the world dir. Files seeded:
+# AGENTS.md, README.md, bin/tool.sh, and an internal skill note.
 new_world() {
   local name=$1 w
   w="$TMP_ROOT/$name"
@@ -40,7 +45,9 @@ new_world() {
   touch "$w/home/state/.last-watcher-beat"
 
   git init -q --bare "$w/origin.git"
+  git init -q --bare "$w/canonical.git"
   git -C "$w/origin.git" symbolic-ref HEAD refs/heads/main
+  git -C "$w/canonical.git" symbolic-ref HEAD refs/heads/main
   git clone -q "$w/origin.git" "$w/seed" 2>/dev/null
 
   printf 'v1\n' > "$w/seed/AGENTS.md"
@@ -51,9 +58,14 @@ new_world() {
   git -C "$w/seed" add -A
   git -C "$w/seed" commit -qm c1
   git -C "$w/seed" push -q origin main
+  git -C "$w/seed" remote add canonical "$w/canonical.git"
+  git -C "$w/seed" push -q canonical main
 
+  git clone -q "$w/canonical.git" "$w/canonical-seed"
   git clone -q "$w/origin.git" "$w/main"
   git -C "$w/main" remote set-head origin main >/dev/null 2>&1 || true
+  git -C "$w/main" config url."file://$w/canonical.git".insteadOf \
+    https://github.com/kunchenguid/firstmate
 
   printf '%s\n' "$w"
 }
@@ -83,8 +95,22 @@ bump_origin() {
     printf 's2\n' > "$w/seed/.agents/skills/note.md"
   fi
   git -C "$w/seed" add -A
-  git -C "$w/seed" commit -qm "bump-$mode"
+  git -C "$w/seed" commit -qm "bump-fork-$mode"
   git -C "$w/seed" push -q origin main
+}
+
+bump_canonical() {
+  local w=$1 mode=$2
+  git -C "$w/canonical-seed" pull -q origin main >/dev/null 2>&1 || true
+  printf 'canonical-%s\n' "$mode" >> "$w/canonical-seed/README.md"
+  if [ "$mode" = instr ]; then
+    printf 'canonical-v2\n' > "$w/canonical-seed/AGENTS.md"
+    printf 'echo canonical\n' > "$w/canonical-seed/bin/tool.sh"
+    printf 'canonical-s2\n' > "$w/canonical-seed/.agents/skills/note.md"
+  fi
+  git -C "$w/canonical-seed" add -A
+  git -C "$w/canonical-seed" commit -qm "bump-canonical-$mode"
+  git -C "$w/canonical-seed" push -q origin main
 }
 
 run_update() {
@@ -106,6 +132,9 @@ test_updates_main_and_secondmate() {
 
   assert_contains "$out" "firstmate: updated " "firstmate fast-forwarded"
   assert_contains "$out" "secondmate sm1: updated " "secondmate fast-forwarded"
+  assert_contains "$out" "firstmate fork origin: current" "fork source reported current"
+  assert_contains "$out" "firstmate canonical upstream: incorporated in fork origin" \
+    "canonical source reported as incorporated rather than independently current"
   assert_contains "$out" "reread-firstmate: yes" "instruction change triggers reread"
   assert_contains "$out" "nudge-secondmates: fm-sm1" "updated secondmate is nudged"
 
@@ -125,6 +154,86 @@ test_updates_main_and_secondmate() {
   [ "$(git -C "$w/sm1" rev-list --parents -n1 HEAD | wc -w | tr -d ' ')" -eq 2 ] \
     || fail "secondmate tip is not a single-parent fast-forward"
   pass "T1 main + secondmate fast-forward (single-parent), reread + nudge signalled"
+}
+
+# --- T2: canonical-ahead selection reaches every local home ----------------
+test_canonical_ahead_updates_linked_and_standalone_homes() {
+  local w out nudge_line
+  w=$(new_world t2)
+  add_sm "$w" sm1
+  git clone -q "$w/origin.git" "$w/plain"
+  git -C "$w/plain" checkout -q --detach main
+  printf 'plain\n' > "$w/plain/.fm-secondmate-home"
+  printf -- '- plain - standalone (home: %s/plain; scope: x; projects: p; added 2026-06-23)\n' \
+    "$w" > "$w/home/data/secondmates.md"
+  bump_canonical "$w" instr
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "firstmate fork origin: behind canonical upstream by 1 commit(s)" \
+    "fork-current output is distinct from canonical-current output"
+  assert_contains "$out" "firstmate canonical upstream: current" \
+    "canonical source reported current"
+  assert_contains "$out" "firstmate: updated " "firstmate advanced to canonical upstream"
+  assert_contains "$out" "secondmate sm1: updated " "linked secondmate advanced to canonical upstream"
+  assert_contains "$out" "secondmate plain: updated " \
+    "standalone secondmate imported and advanced to canonical upstream"
+  [ "$(git -C "$w/main" rev-parse HEAD)" = "$(git -C "$w/canonical-seed" rev-parse HEAD)" ] \
+    || fail "firstmate HEAD not at canonical upstream"
+  [ "$(git -C "$w/sm1" rev-parse HEAD)" = "$(git -C "$w/canonical-seed" rev-parse HEAD)" ] \
+    || fail "linked secondmate HEAD not at canonical upstream"
+  [ "$(git -C "$w/plain" rev-parse HEAD)" = "$(git -C "$w/canonical-seed" rev-parse HEAD)" ] \
+    || fail "standalone secondmate HEAD not at canonical upstream"
+  nudge_line=$(printf '%s\n' "$out" | grep '^nudge-secondmates:')
+  assert_contains "$nudge_line" "fm-sm1" "updated live secondmate is nudged"
+  assert_not_contains "$nudge_line" "plain" "registry-only standalone home is not nudged"
+  pass "T2 canonical-ahead source updates primary, linked, and standalone homes"
+}
+
+# --- T2b: source divergence stops the entire update ------------------------
+test_source_divergence_stops_without_changes() {
+  local w out main_before sm_before
+  w=$(new_world t2b)
+  add_sm "$w" sm1
+  main_before=$(git -C "$w/main" rev-parse HEAD)
+  sm_before=$(git -C "$w/sm1" rev-parse HEAD)
+  bump_origin "$w" readme
+  bump_canonical "$w" instr
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "firstmate: skipped: fork origin and canonical upstream diverged" \
+    "source divergence did not stop the update"
+  assert_contains "$out" "firstmate fork origin: diverged" "fork divergence was identified"
+  assert_contains "$out" "firstmate canonical upstream: diverged" \
+    "canonical divergence was identified"
+  assert_contains "$out" "reread-firstmate: no" "divergence did not request a reread"
+  assert_contains "$out" "nudge-secondmates: none" "divergence did not request a nudge"
+  [ "$(git -C "$w/main" rev-parse HEAD)" = "$main_before" ] \
+    || fail "source divergence moved firstmate HEAD"
+  [ "$(git -C "$w/sm1" rev-parse HEAD)" = "$sm_before" ] \
+    || fail "source divergence moved secondmate HEAD"
+  pass "T2b fork/canonical divergence stops every automatic advance"
+}
+
+# --- T2c: unavailable canonical source prevents fork-only advancement ------
+test_canonical_fetch_failure_stops_without_changes() {
+  local w out before
+  w=$(new_world t2c)
+  before=$(git -C "$w/main" rev-parse HEAD)
+  bump_origin "$w" instr
+  rm -rf -- "$w/canonical.git"
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "firstmate: skipped: both fork origin and canonical upstream must be fetched" \
+    "missing canonical source did not stop the update"
+  assert_contains "$out" "firstmate fork origin: fetched" "fork fetch result was distinguished"
+  assert_contains "$out" "firstmate canonical upstream: unavailable" \
+    "canonical fetch failure was distinguished"
+  [ "$(git -C "$w/main" rev-parse HEAD)" = "$before" ] \
+    || fail "canonical fetch failure moved firstmate HEAD"
+  pass "T2c canonical fetch failure stops fork-only advancement"
 }
 
 # --- T3: README-only change does not trigger a reread ----------------------
@@ -174,7 +283,7 @@ test_diverged_secondmate_skipped() {
 
   out=$(run_update "$w")
 
-  assert_contains "$out" "secondmate sm1: skipped: diverged from origin/main" "diverged home skipped"
+  assert_contains "$out" "secondmate sm1: skipped: diverged from " "diverged home skipped"
   assert_not_contains "$out" "fm-sm1" "diverged secondmate is not nudged"
   [ "$(git -C "$w/sm1" rev-parse HEAD)" = "$before" ] \
     || fail "diverged secondmate HEAD moved (unlanded work at risk)"
@@ -292,6 +401,9 @@ test_unsafe_secondmate_home_skipped_before_git_update() {
 }
 
 test_updates_main_and_secondmate
+test_canonical_ahead_updates_linked_and_standalone_homes
+test_source_divergence_stops_without_changes
+test_canonical_fetch_failure_stops_without_changes
 test_reread_gate_is_instruction_only
 test_dirty_secondmate_skipped
 test_diverged_secondmate_skipped

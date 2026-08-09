@@ -209,8 +209,8 @@ Changed live routes receive a marked instruction to re-read the transferred file
 The primary records that remote nudge before delivery and retries it during locked startup convergence after a failed send.
 Local secondmates retain their generation-specific local pointer contract; remote transfers do not copy those primary-local instruction paths.
 
-`/updatefirstmate` updates each remote code root from its own origin, then guardedly fast-forwards the persistent remote home to that code-root commit.
-Dirty, diverged, unavailable, or otherwise unsafe targets are reported and left untouched.
+`/updatefirstmate` compares each remote code root's configured fork origin with canonical Firstmate upstream on that host, then guardedly fast-forwards the persistent remote home to the selected code-root commit.
+Fork/canonical divergence, either source being unavailable, or a dirty, locally diverged, or otherwise unsafe target is reported and left untouched.
 
 Retire a remote second mate with the normal guarded command:
 

@@ -259,9 +259,11 @@ cmd_update() {
     'firstmate: updated '*|'firstmate: already current'*) ;;
     *)
       [ -z "$update_out" ] || printf '%s\n' "$update_out" >&2
-      die "remote code root did not complete a safe origin update"
+      die "remote code root did not complete a safe fork-and-canonical update"
       ;;
   esac
+  printf '%s\n' "$update_out" \
+    | grep -E '^firstmate (fork origin|canonical upstream):' || true
   cmd_sync "$id"
 }
 

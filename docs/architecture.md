@@ -315,10 +315,11 @@ The refresh also prunes local branches whose remote is gone and that no worktree
 
 ## Self-updates stay safe
 
-`/updatefirstmate` fast-forwards the running firstmate repo and registered secondmate homes from `origin`, then re-reads updated instructions and nudges updated secondmates without touching project clones.
-For a remote route, the configured code root updates from its own origin on that host before the persistent home fast-forwards to the code-root commit.
-The update is fast-forward only: dirty, diverged, offline, and off-default targets are reported and left untouched.
-Local homes share the guarded fast-forward helper, while remote updates delegate the same safety decision to the configured host through the generic transport.
+`/updatefirstmate` compares the configured fork `origin` with canonical `https://github.com/kunchenguid/firstmate` `main`, selects a target only when one history cleanly contains the other, then re-reads updated instructions and nudges updated secondmates without touching project clones.
+This makes a fork that merely matches its own origin distinct from one that also contains the latest canonical upstream, while preserving fork-only commits whenever canonical is already their ancestor.
+Fork/canonical divergence or an unavailable source stops the update before any target moves, and dirty, locally diverged, offline, and off-default targets are reported and left untouched.
+For a remote route, the configured code root applies the same comparison on that host before the persistent home fast-forwards to the code-root commit.
+Local homes share the guarded fast-forward helper, and a standalone clone imports the exact selected commit from the primary code root before applying those same guards.
 The mechanics are owned by the `/updatefirstmate` skill and firstmate's operating manual in [`AGENTS.md`](../AGENTS.md) (self-update).
 
 ## Restart-proof

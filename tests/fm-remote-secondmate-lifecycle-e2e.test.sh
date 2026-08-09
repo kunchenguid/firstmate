@@ -101,10 +101,14 @@ git -C "$REMOTE_ROOT" config user.name Test
 git -C "$REMOTE_ROOT" add .
 git -C "$REMOTE_ROOT" commit -qm 'remote fixture root'
 REMOTE_ORIGIN="$TMP_ROOT/firstmate-origin.git"
+REMOTE_CANONICAL="$TMP_ROOT/firstmate-canonical.git"
 git init -q --bare "$REMOTE_ORIGIN"
 git -C "$REMOTE_ROOT" remote add origin "file://$REMOTE_ORIGIN"
 git -C "$REMOTE_ROOT" push -q -u origin main
 git --git-dir="$REMOTE_ORIGIN" symbolic-ref HEAD refs/heads/main
+git clone -q --bare "$REMOTE_ORIGIN" "$REMOTE_CANONICAL"
+git -C "$REMOTE_ROOT" config url."file://$REMOTE_CANONICAL".insteadOf \
+  https://github.com/kunchenguid/firstmate
 
 # One remote-backed direct-PR project. The remote home clones its origin, never
 # the primary working tree.
@@ -1021,6 +1025,10 @@ git -C "$REMOTE_SEED" add REMOTE_UPDATE_PROBE
 git -C "$REMOTE_SEED" commit -qm 'advance remote code root'
 git -C "$REMOTE_SEED" push -q origin main
 UPDATE_OUT=$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh update ios)
+assert_contains "$UPDATE_OUT" 'firstmate fork origin: current' \
+  "remote update did not distinguish its current fork origin"
+assert_contains "$UPDATE_OUT" 'firstmate canonical upstream: incorporated in fork origin' \
+  "remote update did not distinguish its incorporated canonical source"
 assert_contains "$UPDATE_OUT" 'synced:' "remote update did not report a host-local fast-forward"
 [ "$(git -C "$REMOTE_HOME" rev-parse HEAD)" = "$(git -C "$REMOTE_ROOT" rev-parse HEAD)" ] \
   || fail "remote persistent home did not fast-forward to its code-root commit"

@@ -1,9 +1,9 @@
 ---
 name: updatefirstmate
 description: >-
-  Self-update a running firstmate and its secondmates to the latest from origin.
+  Self-update a running firstmate and its secondmates from both the configured fork origin and canonical upstream.
   Use when the captain invokes /updatefirstmate (e.g. "/updatefirstmate", "update firstmate", "pull the latest firstmate").
-  Fast-forwards this firstmate repo's default branch and every local or remote secondmate through its guarded update path (never forced, never disruptive), then re-reads AGENTS.md and nudges each updated secondmate to do the same, so the whole tree runs the latest bin/ and instructions.
+  Advances this firstmate repo's default branch and every local or remote secondmate only when the fork and canonical histories have one clean fast-forward descendant, then re-reads AGENTS.md and nudges each updated secondmate to do the same.
 user-invocable: true
 metadata:
   internal: true
@@ -17,8 +17,11 @@ Only `AGENTS.md`, `bin/`, and `.agents/skills/` are a running firstmate instruct
 This skill performs that pull for the running main firstmate and every secondmate, without disturbing any in-flight work.
 
 The update is **fast-forward only** - the same sanctioned self-write as the fleet sync firstmate already runs.
-For a remote route, it updates the configured Firstmate code root on that host from its own origin, then guardedly fast-forwards the persistent home to that code-root commit.
-It never forces, never creates a merge commit, never stashes, and advances a target only on a clean fast-forward; anything dirty, diverged, offline, or on the wrong branch is skipped and reported.
+It checks the configured fork `origin` and canonical `https://github.com/kunchenguid/firstmate` `main` before moving anything.
+When one source contains the other, the newer descendant is the only automatic target, so fork-only commits remain present while canonical changes are not mistaken for a current fork.
+When the two sources diverge, or either source cannot be checked, the update stops and reports both source states instead of choosing a side.
+For a remote route, it applies the same source comparison in the configured Firstmate code root on that host, then guardedly fast-forwards the persistent home to that code-root commit.
+It never forces, never creates a merge commit, never stashes, never pushes, and advances a target only on a clean fast-forward; anything dirty, locally diverged, offline, or on the wrong branch is skipped and reported.
 A tracked-files fast-forward leaves the gitignored operational dirs (data/, state/, config/, projects/, .no-mistakes/) untouched, so a secondmate's in-flight work is never disrupted.
 This touches only the firstmate repo and its own worktrees, never anything under `projects/`.
 
@@ -28,8 +31,9 @@ This touches only the firstmate repo and its own worktrees, never anything under
    ```sh
    bin/fm-update.sh
    ```
-   It fast-forwards this firstmate repo's default branch from origin, then updates every registered local or remote secondmate home through its placement-specific guarded path.
-   It prints one status line per target (`updated <old>..<new>` / `already current` / `skipped: <reason>`), followed by two action lines that tell you exactly what to do next:
+   It fetches the fork origin and canonical upstream, prints distinct relationship lines for both, and updates every registered local or remote secondmate home through its placement-specific guarded path when their histories have one safe descendant.
+   The leading `firstmate:` line reports whether this running copy advanced, while `firstmate fork origin:` and `firstmate canonical upstream:` distinguish source currency, incorporation, unavailability, or divergence.
+   It then prints one status line per secondmate target (`updated <old>..<new>` / `already current` / `skipped: <reason>`), followed by two action lines that tell you exactly what to do next:
    - `reread-firstmate: yes|no`
    - `nudge-secondmates: fm-<id>...|none`
 
@@ -50,12 +54,13 @@ This touches only the firstmate repo and its own worktrees, never anything under
 4. **Report to the captain in plain outcomes.**
    Summarize what landed under `AGENTS.md` section 9 without firstmate's internal vocabulary: which parts of the fleet are now on the latest, and which were left as-is and why.
    For example: "Captain, firstmate and both second mates are now on the latest."
-   Surface any skipped target whose reason needs the captain's attention - for instance a home with its own un-landed changes (diverged) or local edits (dirty), which were left untouched on purpose.
+   Surface any skipped target whose reason needs the captain's attention - for instance fork/canonical divergence requiring deliberate reconciliation, or a home with its own un-landed changes or local edits, which were left untouched on purpose.
 
 ## Safety
 
 - **Fast-forward only.**
-  A target that has diverged, is dirty, is offline, or is on a non-default branch is skipped and reported, never forced or stashed.
+  Fork and canonical histories must have one descendant containing both before any target moves.
+  A target that has locally diverged, is dirty, is offline, or is on a non-default branch is skipped and reported, never forced or stashed.
   Nothing with unlanded work is ever discarded - this is prime directive #3.
 - **Only the firstmate repo and its worktrees** are touched, never `projects/`.
   It is the same sanctioned self-write as the fleet sync.

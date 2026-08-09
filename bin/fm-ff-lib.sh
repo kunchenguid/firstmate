@@ -5,15 +5,18 @@
 # This is the one implementation of "advance a firstmate checkout to a base by a
 # clean fast-forward, never forcing, merging, or stashing" used by every sync
 # path:
-#   - /updatefirstmate (bin/fm-update.sh) pulls from origin: base_mode "origin".
+#   - /updatefirstmate (bin/fm-update.sh) selects the descendant of the fork
+#     origin and canonical upstream, then advances each home to that exact commit.
 #   - the local-HEAD secondmate sync (bin/fm-spawn.sh on launch, bin/fm-bootstrap.sh
 #     on startup) follows the PRIMARY checkout's current default-branch commit:
 #     base_mode is that local commit, with NO fetch and no origin dependency.
 #
 # A linked-worktree secondmate home already holds the primary's commit in the
 # shared object store, so its local-HEAD sync is a purely local fast-forward that
-# never touches the network. A standalone clone moves through that path only when
-# it already has the target; otherwise it is skipped until the origin path updates it.
+# never touches the network. A standalone clone moves through the ordinary local
+# sync only when it already has the target. /updatefirstmate may instead name an
+# import source, from which process_secondmate imports the exact selected commit
+# before applying the same ff_target guards.
 # A tracked-files fast-forward never touches the gitignored operational dirs
 # (data/, state/, config/, projects/, .no-mistakes/), so it cannot disturb a
 # secondmate's backlog, projects, or in-flight work.
@@ -368,7 +371,7 @@ FF_SEEN_HOMES=""
 # Validate and fast-forward one secondmate home, accumulating its stable
 # fm-<id> task selector into FF_NUDGE_WINDOWS when it should be live-converged.
 # Args:
-#   id home window base_mode nudge_requires_instr
+#   id home window base_mode nudge_requires_instr [missing-commit-import-source]
 # A home is nudged only when it ACTUALLY advanced (FF_STATUS=updated) and has a
 # live window. With nudge_requires_instr=yes the advance must also have changed
 # the instruction surface (FF_INSTR non-empty): an already-current home, or one
@@ -376,7 +379,8 @@ FF_SEEN_HOMES=""
 # firstmate repo itself (FM_ROOT) is never processed as its own secondmate, and
 # each resolved home is processed at most once.
 process_secondmate() {
-  local id=$1 home=$2 window=${3:-} base_mode=$4 nudge_requires_instr=${5:-no} home_real fm_root_real
+  local id=$1 home=$2 window=${3:-} base_mode=$4 nudge_requires_instr=${5:-no}
+  local import_source=${6:-} home_real fm_root_real
   [ -n "$id" ] || return 0
   [ -n "$home" ] || return 0
   fm_root_real=$(resolve_path "$FM_ROOT")
@@ -392,6 +396,15 @@ process_secondmate() {
   esac
   FF_SEEN_HOMES="$FF_SEEN_HOMES $home_real"
 
+  if [ "$base_mode" != origin ] \
+    && ! git -C "$home_real" cat-file -e "$base_mode^{commit}" 2>/dev/null \
+    && [ -n "$import_source" ]; then
+    if ! git -C "$home_real" fetch --quiet --no-tags "$import_source" "$base_mode" 2>/dev/null; then
+      echo "secondmate $id: skipped: selected update commit is unavailable and could not be imported"
+      return 0
+    fi
+  fi
+
   ff_target "$home_real" "secondmate $id" "$base_mode" yes yes
   if [ "$FF_STATUS" = "updated" ] && [ -n "$window" ]; then
     if [ "$nudge_requires_instr" = yes ] && [ -z "$FF_INSTR" ]; then
@@ -406,15 +419,17 @@ process_secondmate() {
 }
 
 # Sweep this home's LIVE secondmate direct reports - state/<id>.meta files with
-# kind=secondmate - fast-forwarding each to base_mode. Passes base_mode and
-# nudge_requires_instr through to process_secondmate. Accumulates into
-# FF_NUDGE_WINDOWS / FF_SEEN_HOMES, which the caller resets before and reads after.
-# The registry argument is only for home= fallback on older or incomplete meta records.
+# kind=secondmate - fast-forwarding each to base_mode. Passes base_mode,
+# nudge_requires_instr, and an optional missing-commit import source through to
+# process_secondmate. Accumulates into FF_NUDGE_WINDOWS / FF_SEEN_HOMES, which
+# the caller resets before and reads after. The registry argument is only for
+# home= fallback on older or incomplete meta records.
 sweep_live_secondmate_metas() {
-  local state=$1 base_mode=$2 nudge_requires_instr=${3:-no} registry=${4:-$FM_HOME/data/secondmates.md} id home window meta
+  local state=$1 base_mode=$2 nudge_requires_instr=${3:-no}
+  local registry=${4:-$FM_HOME/data/secondmates.md} import_source=${5:-} id home window meta
   [ -d "$state" ] || return 0
   while IFS='|' read -r id home window meta; do
     if grep -q '^remote_host=.' "$meta" 2>/dev/null; then continue; fi
-    process_secondmate "$id" "$home" "$window" "$base_mode" "$nudge_requires_instr"
+    process_secondmate "$id" "$home" "$window" "$base_mode" "$nudge_requires_instr" "$import_source"
   done < <(live_secondmate_meta_records "$state" "$registry")
 }
