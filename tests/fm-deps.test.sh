@@ -79,6 +79,30 @@ test_quiet_window_probe_failures_defer() {
   pass "quiet-window probe failures defer upgrades"
 }
 
+test_herdr_quiet_window_requires_session_schema() {
+  local fakebin out payload status
+  fakebin=$(fm_fakebin "$TMP_ROOT/herdr-schema")
+  # shellcheck disable=SC2016
+  printf '%s\n' '#!/usr/bin/env bash' 'printf '\''%s\n'\'' "$FM_DEPS_TEST_HERDR_JSON"' \
+    > "$fakebin/herdr"
+  chmod +x "$fakebin/herdr"
+
+  for payload in '{}' '[]' '{"sessions":[{}]}' \
+    '{"sessions":[{"running":"false"}]}'; do
+    out=$(PATH="$fakebin:$PATH" FM_DEPS_TEST_HERDR_JSON="$payload" \
+      quiet_window_blocker herdr)
+    status=$?
+    [ "$status" -eq 2 ] || fail "invalid Herdr session schema was treated as idle: $payload"
+    assert_contains "$out" "Herdr session inspection failed" \
+      "invalid Herdr session schema did not fail closed"
+  done
+  out=$(PATH="$fakebin:$PATH" FM_DEPS_TEST_HERDR_JSON='{"sessions":[]}' \
+    quiet_window_blocker herdr)
+  status=$?
+  [ "$status" -eq 1 ] || fail "valid empty Herdr sessions were not treated as idle: $out"
+  pass "Herdr quiet windows require the expected sessions schema"
+}
+
 test_quiet_window_rechecks_after_consent() {
   local fakebin count log out
   fakebin=$(fm_fakebin "$TMP_ROOT/quiet-recheck")
@@ -141,38 +165,90 @@ test_node_requires_active_nvm_provenance() {
 }
 
 test_firstmate_update_actions_are_consumed() {
-  local fixture fakebin marker log out
+  local fixture log out confirmed_line send_line
   fixture="$TMP_ROOT/firstmate-update"
-  fakebin=$(fm_fakebin "$fixture")
-  marker="$fixture/updated"
   log="$fixture/send.log"
   mkdir -p "$fixture/bin"
   # shellcheck disable=SC2016
   printf '%s\n' '#!/usr/bin/env bash' \
-    'touch "$FM_DEPS_TEST_UPDATED"' \
     'printf '\''firstmate: updated old..new\n'\''' \
     'printf '\''reread-firstmate: yes\n'\''' \
     'printf '\''nudge-secondmates: fm-one fm-two\n'\''' > "$fixture/bin/fm-update.sh"
   # shellcheck disable=SC2016
   printf '%s\n' '#!/usr/bin/env bash' \
     'printf '\''%s|%s|%s\n'\'' "$FM_HOME" "$1" "$2" >> "$FM_DEPS_TEST_LOG"' \
+    'printf '\''SEND:%s\n'\'' "$1"' \
     > "$fixture/bin/fm-send.sh"
-  # shellcheck disable=SC2016
-  printf '%s\n' '#!/usr/bin/env bash' \
-    'if [ -f "$FM_DEPS_TEST_UPDATED" ]; then printf '\''new\n'\''; else printf '\''old\n'\''; fi' \
-    > "$fakebin/git"
-  chmod +x "$fixture/bin/fm-update.sh" "$fixture/bin/fm-send.sh" "$fakebin/git"
+  chmod +x "$fixture/bin/fm-update.sh" "$fixture/bin/fm-send.sh"
 
-  out=$(PATH="$fakebin:$PATH" FM_ROOT="$fixture" FM_HOME="$fixture" \
-    FM_DEPS_TEST_UPDATED="$marker" FM_DEPS_TEST_LOG="$log" run_upgrade firstmate)
+  out=$(FM_ROOT="$fixture" FM_HOME="$fixture" FM_DEPS_SOURCE_ONLY=1 \
+    FM_DEPS_INTERACTIVE=1 CHECK_ONLY=0 FM_DEPS_TEST_LOG="$log" \
+    run_upgrade firstmate <<<yes)
   assert_contains "$out" \
-    "REREAD_REQUIRED: $fixture/AGENTS.md changed; re-read it before further work" \
+    "REREAD_REQUIRED: $fixture/AGENTS.md changed" \
     "Firstmate reread action was discarded"
+  confirmed_line=$(printf '%s\n' "$out" | grep -n '^REREAD_CONFIRMED:' | cut -d: -f1)
+  send_line=$(printf '%s\n' "$out" | grep -n '^SEND:fm-one$' | cut -d: -f1)
+  if [ -z "$confirmed_line" ] || [ -z "$send_line" ] \
+    || [ "$confirmed_line" -ge "$send_line" ]; then
+    fail "secondmate nudge was not gated behind reread confirmation"
+  fi
   assert_grep "$fixture|fm-one|$FM_SECOND_MATE_NUDGE_MESSAGE" "$log" \
     "first updated secondmate was not nudged"
   assert_grep "$fixture|fm-two|$FM_SECOND_MATE_NUDGE_MESSAGE" "$log" \
     "second updated secondmate was not nudged"
   pass "Firstmate post-update reread and nudge actions are consumed"
+}
+
+test_firstmate_secondmate_only_actions_are_preserved() {
+  local fixture log out
+  fixture="$TMP_ROOT/firstmate-secondmate-only"
+  log="$fixture/send.log"
+  mkdir -p "$fixture/bin"
+  printf '%s\n' '#!/usr/bin/env bash' \
+    'printf '\''firstmate: already current\n'\''' \
+    'printf '\''reread-firstmate: no\n'\''' \
+    'printf '\''nudge-secondmates: fm-only\n'\''' > "$fixture/bin/fm-update.sh"
+  # shellcheck disable=SC2016
+  printf '%s\n' '#!/usr/bin/env bash' \
+    'printf '\''%s|%s\n'\'' "$1" "$2" >> "$FM_DEPS_TEST_LOG"' \
+    > "$fixture/bin/fm-send.sh"
+  chmod +x "$fixture/bin/fm-update.sh" "$fixture/bin/fm-send.sh"
+
+  out=$(FM_ROOT="$fixture" FM_HOME="$fixture" FM_DEPS_TEST_LOG="$log" \
+    run_upgrade firstmate)
+  assert_contains "$out" "nudge-secondmates: fm-only" \
+    "secondmate-only updater action was discarded"
+  assert_grep "fm-only|$FM_SECOND_MATE_NUDGE_MESSAGE" "$log" \
+    "secondmate-only updater action was not performed"
+  pass "secondmate-only Firstmate updater actions are preserved"
+}
+
+test_firstmate_concurrent_update_preserves_actions() {
+  local fixture fakebin log out
+  fixture="$TMP_ROOT/firstmate-concurrent"
+  fakebin=$(fm_fakebin "$fixture")
+  log="$fixture/send.log"
+  mkdir -p "$fixture/bin"
+  printf '%s\n' '#!/usr/bin/env bash' \
+    'printf '\''firstmate: already current\n'\''' \
+    'printf '\''reread-firstmate: yes\n'\''' \
+    'printf '\''nudge-secondmates: fm-concurrent\n'\''' > "$fixture/bin/fm-update.sh"
+  # shellcheck disable=SC2016
+  printf '%s\n' '#!/usr/bin/env bash' \
+    'printf '\''%s|%s\n'\'' "$1" "$2" >> "$FM_DEPS_TEST_LOG"' \
+    > "$fixture/bin/fm-send.sh"
+  printf '%s\n' '#!/usr/bin/env bash' 'printf '\''same-head\n'\''' > "$fakebin/git"
+  chmod +x "$fixture/bin/fm-update.sh" "$fixture/bin/fm-send.sh" "$fakebin/git"
+
+  out=$(PATH="$fakebin:$PATH" FM_ROOT="$fixture" FM_HOME="$fixture" \
+    FM_DEPS_SOURCE_ONLY=1 FM_DEPS_INTERACTIVE=1 CHECK_ONLY=0 \
+    FM_DEPS_TEST_LOG="$log" run_upgrade firstmate <<<yes)
+  assert_contains "$out" "REREAD_CONFIRMED: $fixture/AGENTS.md" \
+    "concurrent update lost the reread action"
+  assert_grep "fm-concurrent|$FM_SECOND_MATE_NUDGE_MESSAGE" "$log" \
+    "concurrent update lost the secondmate nudge action"
+  pass "concurrent Firstmate updates preserve every emitted action"
 }
 
 test_mixed_checkout_majors_report_repository_update() {
@@ -197,10 +273,13 @@ test_apt_metadata
 test_quiet_window_defers
 test_noninteractive_override_is_source_only
 test_quiet_window_probe_failures_defer
+test_herdr_quiet_window_requires_session_schema
 test_quiet_window_rechecks_after_consent
 test_node_upgrade_uses_nvm
 test_node_requires_active_nvm_provenance
 test_firstmate_update_actions_are_consumed
+test_firstmate_secondmate_only_actions_are_preserved
+test_firstmate_concurrent_update_preserves_actions
 test_mixed_checkout_majors_report_repository_update
 
 echo "# all fm-deps tests passed"

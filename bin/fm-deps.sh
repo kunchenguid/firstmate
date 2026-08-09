@@ -170,7 +170,7 @@ quiet_process_blocker() {
 }
 
 quiet_window_blocker() {
-  local out status
+  local out running status
   case "$1" in
     codex)
       quiet_process_blocker codex 'Codex process is active; close Codex and rerun'
@@ -184,11 +184,23 @@ quiet_window_blocker() {
       out=$(herdr session list --json 2>/dev/null)
       status=$?
       if [ "$status" -ne 0 ] || [ -z "$out" ] \
-        || ! printf '%s\n' "$out" | jq -e . >/dev/null 2>&1; then
+        || ! printf '%s\n' "$out" | jq -e '
+          type == "object"
+          and (.sessions | type == "array")
+          and all(.sessions[]; type == "object"
+            and has("running")
+            and (.running | type == "boolean"))
+        ' >/dev/null 2>&1; then
         printf 'Cannot confirm quiet window because Herdr session inspection failed'
         return 2
       fi
-      if printf '%s\n' "$out" | grep -Eq '"running"[[:space:]]*:[[:space:]]*true'; then
+      running=$(printf '%s\n' "$out" | jq -r 'any(.sessions[]; .running == true)')
+      status=$?
+      if [ "$status" -ne 0 ]; then
+        printf 'Cannot confirm quiet window because Herdr session inspection failed'
+        return 2
+      fi
+      if [ "$running" = true ]; then
         printf 'Herdr session is running; finish/stop Herdr-backed work and rerun'
         return 0
       fi
@@ -261,6 +273,27 @@ nvm_manages_active_node() {
   [ "${relative#*/}" = bin/node ]
 }
 
+confirm_firstmate_reread() {
+  local reply
+  if [ "$CHECK_ONLY" -ne 0 ] || ! is_interactive; then
+    printf 'Cannot confirm the required Firstmate instruction reread\n' >&2
+    return 1
+  fi
+  printf 'Re-read %s/AGENTS.md now, then confirm completion before secondmates are nudged. [y/N] ' \
+    "$FM_ROOT"
+  IFS= read -r reply || reply=""
+  case "$reply" in
+    y|Y|yes|YES|Yes)
+      printf '\nREREAD_CONFIRMED: %s/AGENTS.md\n' "$FM_ROOT"
+      return 0
+      ;;
+    *)
+      printf '\nFirstmate instruction reread was not confirmed\n' >&2
+      return 1
+      ;;
+  esac
+}
+
 handle_firstmate_update_actions() {
   local update_out=$1 reread_line nudge_line reread targets selector
   reread_line=$(printf '%s\n' "$update_out" | grep '^reread-firstmate: ' | tail -n 1)
@@ -271,10 +304,7 @@ handle_firstmate_update_actions() {
   fi
   reread=${reread_line#reread-firstmate: }
   case "$reread" in
-    yes)
-      printf 'REREAD_REQUIRED: %s/AGENTS.md changed; re-read it before further work\n' "$FM_ROOT"
-      ;;
-    no) ;;
+    yes|no) ;;
     *) printf 'Firstmate updater returned an invalid reread action\n' >&2; return 1 ;;
   esac
   targets=${nudge_line#nudge-secondmates:}
@@ -283,31 +313,40 @@ handle_firstmate_update_actions() {
     printf 'Firstmate updater returned an invalid secondmate nudge action\n' >&2
     return 1
   }
-  [ "$targets" != none ] || return 0
-  for selector in $targets; do
-    case "${selector#fm-}" in
-      ''|*[!A-Za-z0-9._-]*)
-        printf 'Firstmate updater returned an invalid secondmate selector: %s\n' "$selector" >&2
+  if [ "$targets" != none ]; then
+    for selector in $targets; do
+      case "$selector" in
+        fm-*) ;;
+        *)
+          printf 'Firstmate updater returned an invalid secondmate selector: %s\n' "$selector" >&2
+          return 1
+          ;;
+      esac
+      case "${selector#fm-}" in
+        ''|*[!A-Za-z0-9._-]*)
+          printf 'Firstmate updater returned an invalid secondmate selector: %s\n' "$selector" >&2
+          return 1
+          ;;
+      esac
+    done
+  fi
+  if [ "$reread" = yes ]; then
+    printf 'REREAD_REQUIRED: %s/AGENTS.md changed\n' "$FM_ROOT"
+    confirm_firstmate_reread || return 1
+  fi
+  if [ "$targets" != none ]; then
+    for selector in $targets; do
+      if ! FM_HOME="${FM_HOME:-$FM_ROOT}" FM_ROOT_OVERRIDE="$FM_ROOT" \
+        "$FM_ROOT/bin/fm-send.sh" "$selector" "$FM_SECOND_MATE_NUDGE_MESSAGE"; then
+        printf 'Firstmate post-update nudge failed for %s\n' "$selector" >&2
         return 1
-        ;;
-    esac
-    case "$selector" in
-      fm-*) ;;
-      *)
-        printf 'Firstmate updater returned an invalid secondmate selector: %s\n' "$selector" >&2
-        return 1
-        ;;
-    esac
-    if ! FM_HOME="${FM_HOME:-$FM_ROOT}" FM_ROOT_OVERRIDE="$FM_ROOT" \
-      "$FM_ROOT/bin/fm-send.sh" "$selector" "$FM_SECOND_MATE_NUDGE_MESSAGE"; then
-      printf 'Firstmate post-update nudge failed for %s\n' "$selector" >&2
-      return 1
-    fi
-  done
+      fi
+    done
+  fi
 }
 
 run_upgrade() {
-  local id=$1 installed=${2:-} latest=${3:-} before after update_out
+  local id=$1 installed=${2:-} latest=${3:-} update_out
   case "$id" in
     codex) codex update ;;
     github-cli) run_apt_upgrade gh ;;
@@ -328,14 +367,11 @@ run_upgrade() {
       ;;
     github-actions) return 1 ;;
     firstmate)
-      before=$(git -C "$FM_ROOT" rev-parse HEAD 2>/dev/null) || return 1
       if ! update_out=$("$FM_ROOT/bin/fm-update.sh" 2>&1); then
         printf '%s\n' "$update_out"
         return 1
       fi
       printf '%s\n' "$update_out"
-      after=$(git -C "$FM_ROOT" rev-parse HEAD 2>/dev/null) || return 1
-      [ "$after" != "$before" ] || return 1
       handle_firstmate_update_actions "$update_out"
       ;;
     *) return 1 ;;
