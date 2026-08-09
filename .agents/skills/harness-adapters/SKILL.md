@@ -276,6 +276,7 @@ The follow-up was verified in the interactive TUI; `opencode run` can exit befor
 | Interrupt | single Escape |
 
 Pi has no permission system, so crewmates are always autonomous.
+Pi's `packages/coding-agent/docs/settings.md` UI and display section documents `regular` as the `tuiMode` default, `fullscreen` as experimental, and `--tui-mode` as its startup override; fullscreen can bury steers by rewriting scrollback, so `fm-spawn` always passes `--tui-mode regular` for Pi-family crews.
 `pi-signed` is the signed wrapper identity verified on version 0.82.0 and exposes the same CLI and TUI behavior as Pi.
 Firstmate launches the selected executable name from `PATH`, records `pi-signed` without normalization, and refuses rather than falling back to `pi` when that wrapper is unavailable.
 The observed signed process tree is an exact `pi-signed` wrapper parent with the Pi application as its child, while tmux reports the foreground command as the exact `pi-launcher` name for both selected executables.
