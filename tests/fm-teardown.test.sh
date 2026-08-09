@@ -2434,6 +2434,8 @@ test_recorded_cursor_worker_server_surviving_kill_is_retained() {
   sleep 0.3
   starttime=$(awk '{print $22}' "/proc/$pid/stat" 2>/dev/null)
   printf '%s %s\n' "$pid" "starttime=$starttime" > "$case_dir/state/task-x1.worker-server"
+  # Invoked indirectly by the exported teardown shell.
+  # shellcheck disable=SC2329
   kill() {
     local arg target=
     for arg in "$@"; do target=$arg; done
