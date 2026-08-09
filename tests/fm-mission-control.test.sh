@@ -1028,7 +1028,7 @@ test_missing_backlog_is_disclosed_as_unavailable() {
 # as it always did. Both halves render from one real fixture home so the split is
 # proven end to end rather than assumed from the renderer alone.
 test_structured_decision_context_renders_as_labelled_sections() {
-  local home fakebin board snap linked
+  local home fakebin board snap linked route_block legacy_block
   home=$(make_home decision-context-render)
   make_clone "$home" alpha "$TODAY_0905"
   printf -- '- alpha [direct-PR] - Alpha service\n' > "$home/data/projects.md"
@@ -1040,6 +1040,7 @@ test_structured_decision_context_renders_as_labelled_sections() {
   Origin: alpha-review
   Decision key: route
   State: awaiting captain decision.
+  Decision options: ["Use tailnet route","Use public route"]
   Why now: The alpha launch window closes on Friday and both routes need DNS lead time.
   What it affects: The alpha checkout redirect and every saved bookmark.
   Recommendation: Take the tailnet route; it is reversible within a day.
@@ -1050,7 +1051,7 @@ test_structured_decision_context_renders_as_labelled_sections() {
 EOF
   fakebin=$(make_fakebin "$home")
   board=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_MISSION_CONTROL_NOW_EPOCH="$NOW_EPOCH" \
-    "$BOARD" --no-quota) || fail "a home with a structured decision must render"
+    "$BOARD" --no-quota --controls) || fail "a home with a structured decision must render"
 
   # Each dimension is its own labelled row, which is the whole reason for storing
   # them apart: the captain finds the recommendation without reading for it.
@@ -1060,6 +1061,14 @@ EOF
     "$board" "what a decision affects must be its own labelled section"
   assert_grep '<span class="ctx-l">Recommendation</span><span class="ctx-v">Take the tailnet route; it is reversible within a day.</span>' \
     "$board" "the recommendation must be its own labelled section"
+
+  route_block=$(control_block "$board" "main" "alpha-route")
+  assert_contains "$route_block" 'data-answer-choice="Use tailnet route"' \
+    "a structured option must render as a labelled answer button"
+  assert_contains "$route_block" 'data-answer-choice="Use public route"' \
+    "every structured option must render as its own answer button"
+  assert_contains "$route_block" 'data-open="answer" data-answer-custom>Answer</button>' \
+    "quick answers must retain the legacy label until the direct reply service is proved"
 
   # The conscious "nothing built applies" answer is shown too, because a decision
   # nobody prepared a surface for and one where none applies are not the same.
@@ -1072,6 +1081,11 @@ EOF
     "a decision filed before the structured schema must still reach the captain"
   assert_grep '<span class="hint">The old vendor stops publishing next month</span>' \
     "$board" "an old-style decision must still render its plain reason exactly as before"
+  legacy_block=$(control_block "$board" "main" "alpha-legacy")
+  assert_not_contains "$legacy_block" 'data-answer-choice=' \
+    "an old-style decision must not gain inferred answer buttons"
+  assert_contains "$legacy_block" 'data-open="answer">Answer</button>' \
+    "an old-style decision must keep the original free-text Answer control"
   [ "$(grep -o 'class="need-ctx"' "$board" | wc -l | tr -d ' ')" = 1 ] \
     || fail "an old-style plain-reason decision must render no labelled context block"
   assert_grep '<div class="n">2</div><div class="l">Awaiting you</div>' \
@@ -2416,6 +2430,7 @@ test_decision_context_links_and_submission_state_in_a_browser() {
     {"state":"queued","id":"d-exact","captain_actionable":true,
      "title":"Choose the prototype emphasis","hold_reason":"Guidance and detail compete for the first screen",
      "decision_question":"Should the prototype lead with guidance before showing raw detail?",
+     "decision_options":["Lead with guidance","Lead with raw detail"],
      "decision_url":"https://sample.tailnet.invalid/decision-aid","repo":"sample"},
     {"state":"queued","id":"d-fallback","captain_actionable":true,
      "title":"Choose the comparison layout","hold_reason":"Scanning speed trades off against explanation","repo":"sample"},
@@ -2453,7 +2468,8 @@ test_decision_context_links_and_submission_state_in_a_browser() {
     "decisions_open":[
       {"id":"d-exact","key":"route","verb":"captain-hold","source":"backlog",
        "summary":"Choose the routed emphasis","reason":"The routed choice has two valid shapes",
-       "question":"Which routed shape should lead?","decision_url":"https://ios.tailnet.invalid/decision-aid"},
+       "question":"Which routed shape should lead?","options":["Lead with routed shape","Lead with alternate shape"],
+       "decision_url":"https://ios.tailnet.invalid/decision-aid"},
       {"id":"d-exact","key":"route-b","verb":"needs-decision","source":"status",
        "summary":"Which secondary routed shape should follow?","reason":null}
     ],
@@ -2568,6 +2584,9 @@ function assert(ok, message) { if (!ok) throw new Error(message); }
     function answer(home,id){return block(home,id).querySelector('form[data-intent=answer] textarea');}
     return {
       exact:[answer('main','d-exact').placeholder,answer('main','d-exact').getAttribute('aria-label')],
+      options:[...block('main','d-exact').querySelectorAll('[data-answer-choice]')].map(x=>({text:x.textContent,display:getComputedStyle(x).display})),
+      custom:block('main','d-exact').querySelector('[data-open=answer]').innerText,
+      legacyOptions:block('main','d-fallback').querySelectorAll('[data-answer-choice]').length,
       fallback:answer('main','d-fallback').placeholder,
       empty:answer('main','d-empty').placeholder,
       hostile:answer('main','d-hostile').placeholder,
@@ -2586,6 +2605,10 @@ function assert(ok, message) { if (!ok) throw new Error(message); }
   })()`);
   assert(dom.exact[0] === "Should the prototype lead with guidance before showing raw detail?", "exact question was not the answer prompt");
   assert(dom.exact[1] === "Your answer", "the answer textarea lost its accessible label");
+  assert(JSON.stringify(dom.options) === JSON.stringify([
+      {text:"Lead with guidance",display:"none"},{text:"Lead with raw detail",display:"none"}])
+    && dom.custom === "Answer" && dom.legacyOptions === 0,
+    "Lavish did not preserve its legacy Answer-only view: " + JSON.stringify(dom));
   assert(dom.fallback === "Choose the comparison layout - Scanning speed trades off against explanation", "decision context fallback was not specific");
   assert(dom.empty === "Your answer", "an empty decision invented context");
   assert(dom.hostile === 'Question " ><img src=x onerror=alert(1)> stays text?' && dom.injectedImages === 0, "hostile question escaped its text context");
@@ -2596,7 +2619,19 @@ function assert(ok, message) { if (!ok) throw new Error(message); }
     "the Qwen bounded-judgment report path was not preserved as non-clickable context");
   assert(dom.cards >= 8, "ordinary multi-card decision list did not render");
 
+  await send("Emulation.setDeviceMetricsOverride", {width:1280,height:900,deviceScaleFactor:1,mobile:false}, sid);
+  const wideOptions = await evaluate(sid, `(() => ({buttons:[...document.querySelectorAll('[data-answer-choice]')]
+    .map(x=>getComputedStyle(x).display),answer:[...document.querySelectorAll('[data-answer-custom]')]
+    .map(x=>x.innerText)}))()`);
+  assert(wideOptions.buttons.every(x=>x==="none") && wideOptions.answer.every(x=>x==="Answer"),
+    "Lavish exposed direct-board answer controls at 1280px: "+JSON.stringify(wideOptions));
+
   await send("Emulation.setDeviceMetricsOverride", {width:390,height:844,deviceScaleFactor:1,mobile:true}, sid);
+  const narrowOptions = await evaluate(sid, `(() => ({buttons:[...document.querySelectorAll('[data-answer-choice]')]
+    .map(x=>getComputedStyle(x).display),answer:[...document.querySelectorAll('[data-answer-custom]')]
+    .map(x=>x.innerText)}))()`);
+  assert(narrowOptions.buttons.every(x=>x==="none") && narrowOptions.answer.every(x=>x==="Answer"),
+    "Lavish exposed direct-board answer controls at 390px: "+JSON.stringify(narrowOptions));
   await send("Emulation.setTouchEmulationEnabled", {enabled:true,maxTouchPoints:1}, sid);
   const mobileTap = await evaluate(sid, `(() => {var ref=document.querySelector('.local-ref'); ref.scrollIntoView({block:'center'});
     var r=ref.getBoundingClientRect(); return {x:r.left+r.width/2,y:r.top+r.height/2,before:location.href,anchor:!!ref.closest('a')};})()`);
@@ -2668,13 +2703,19 @@ function assert(ok, message) { if (!ok) throw new Error(message); }
       reply:p.querySelector('[data-open=reply]').textContent,
       routed:routed.querySelector('[data-open=answer]').textContent,
       routedB:routedB.querySelector('[data-open=answer]').textContent,
+      choices:[...a.querySelectorAll('[data-answer-choice]')].map(x=>({hidden:x.hidden,disabled:x.disabled})),
       lavish:!!window.lavish,body:document.body.className,
-      prompts:JSON.parse(localStorage.getItem('test-prompts')||'[]').length};
+      wires:JSON.parse(localStorage.getItem('test-prompts')||'[]').map(x=>JSON.parse(x.prompt.slice('FM-BOARD-REQUEST '.length)))};
   })()`);
   assert(success.answer === "Answer sent" && success.answerDisabled && success.answerClosed, "accepted answer was not acknowledged and closed: " + JSON.stringify(success));
   assert(success.merge === "Merge request sent" && success.mergeDisabled && success.reply === "Reply sent", "PR intents did not keep distinct acknowledgement identities");
   assert(success.routed === "Answer sent" && success.routedB === "Answer sent", "home or decision-key acknowledgement identities collided");
-  assert(success.prompts === 5, "duplicate answer submission reached the bridge or a distinct identity was dropped");
+  assert(success.choices.every(x=>x.hidden&&x.disabled), "acknowledging a quick answer left its sibling buttons actionable");
+  var quickWire=success.wires.find(x=>x.home==='main'&&x.id==='d-exact');
+  var textWire=success.wires.find(x=>x.home==='ios'&&x.id==='d-exact'&&x.key==='route');
+  assert(success.wires.length === 5 && quickWire.intent==='answer' && quickWire.note==='Lead with guidance'
+    && textWire.intent==='answer' && textWire.note==='Lead with the routed shape',
+    "quick and free-text answers did not share the Answer wire path: "+JSON.stringify(success.wires));
 
   await send("Emulation.setDeviceMetricsOverride", {width:1280,height:844,deviceScaleFactor:1,mobile:false}, sid);
   const unconfirmed = await evaluate(sid, `(async()=>{

@@ -384,6 +384,8 @@ test_parked_captain_hold_is_deferred_not_blocked() {
 
 ## Queued
 - [ ] live-call - Choose the rollout window (repo: alpha) (kind: captain) (hold: Both windows cost money) (hold-kind: captain)
+  Decision question: Which rollout window?
+  Decision options: ["Tuesday morning","Thursday evening"]
 - [ ] ship-call - Choose the shipment window (repo: alpha) (kind: ship) (hold: Captain selects release timing) (hold-kind: captain)
 - [ ] scout-call - Choose the research path (repo: alpha) (kind: scout) (hold: Captain selects investigation scope) (hold-kind: captain)
 - [ ] set-aside - Approve the subscription (repo: alpha) (kind: captain) (hold: It renews yearly) (hold-kind: parked)
@@ -396,9 +398,11 @@ EOF
   out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
   printf '%s' "$out" | jq -e '
     (.backlog.records[] | select(.id == "live-call")
-      | .captain_actionable == true and .captain_deferred == false)
+      | .captain_actionable == true and .captain_deferred == false
+        and .decision_options == ["Tuesday morning", "Thursday evening"])
     and (.backlog.records[] | select(.id == "ship-call")
-      | .captain_actionable == true and .captain_deferred == false)
+      | .captain_actionable == true and .captain_deferred == false
+        and .decision_options == null)
     and (.backlog.records[] | select(.id == "scout-call")
       | .captain_actionable == true and .captain_deferred == false)
     and (.backlog.records[] | select(.id == "set-aside")
@@ -418,10 +422,16 @@ EOF
     and ([.holds[].id] | index("parked-ship")) == null
     and (.queued[] | select(.id == "set-aside") | .captain_deferred == true)
     and (.queued[] | select(.id == "parked-ship") | .captain_deferred == true)
-    and (.queued[] | select(.id == "live-call") | .captain_deferred == false)
+    and (.queued[] | select(.id == "live-call")
+      | .captain_deferred == false
+        and .decision_options == ["Tuesday morning", "Thursday evening"])
+    and (.queued[] | select(.id == "ship-call") | .decision_options == null)
+    and (.decisions_open[] | select(.id == "live-call")
+      | .options == ["Tuesday morning", "Thursday evening"])
+    and (.decisions_open[] | select(.id == "ship-call") | .options == null)
     and .state == "captain_decision"
   ' >/dev/null || fail "a deferred decision leaked into the home summary holds: $summary"
-  pass "parked captain-held rows read as deferred rather than blocked or actionable"
+  pass "parked captain-held rows and optional answer labels project without changing legacy decisions"
 }
 
 test_event_hints_follow_reconciled_current_state() {

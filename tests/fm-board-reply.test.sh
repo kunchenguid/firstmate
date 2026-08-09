@@ -61,7 +61,7 @@ cat > "$SNAP" <<'JSON'
  "backlog":{"present":true,"records":[
    {"state":"queued","id":"d1","captain_actionable":true,"title":"Choose the rollout window",
     "hold_reason":"Two valid windows compete","decision_question":"Which rollout window?",
-    "repo":"alpha"},
+    "decision_options":["Tuesday morning","Thursday evening"],"repo":"alpha"},
    {"state":"queued","id":"d2","captain_actionable":true,"title":"Choose the cache shape",
     "hold_reason":"Two shapes compete","repo":"alpha"},
    {"state":"queued","id":"d3","captain_actionable":true,"title":"Choose the fallback region",
@@ -567,6 +567,13 @@ function logLines() {
   try { return fs.readFileSync(logPath, "utf8").split("\n").filter((x) => x.length).length; }
   catch (e) { return 0; }
 }
+function requestWires() {
+  try { return fs.readFileSync(logPath, "utf8").split("\n").filter((x) => x.trim())
+    .flatMap((line) => { try { return [JSON.parse("[" + line.trim() + "]")[2]]; } catch (e) { return []; } })
+    .filter((wire) => typeof wire === "string" && wire.startsWith("FM-BOARD-REQUEST "))
+    .flatMap((wire) => { try { return [JSON.parse(wire.slice("FM-BOARD-REQUEST ".length))]; } catch (e) { return []; } }); }
+  catch (e) { return []; }
+}
 const revealState = `({body:document.body.className,
   visible:[...document.querySelectorAll('.rc')].filter(x=>getComputedStyle(x).display!=='none').length})`;
 (async () => {
@@ -588,13 +595,44 @@ const revealState = `({body:document.body.className,
   assert(live.body.includes("board-reply") && live.visible > 0,
     "the reply layer stayed hidden while the service was answering: " + JSON.stringify(live));
 
+  await send("Emulation.setDeviceMetricsOverride", {width:1280,height:900,deviceScaleFactor:1,mobile:false}, sid);
+  const wideOptions = await evaluate(sid, `(() => {var root=document.documentElement;
+    var b=[...document.querySelectorAll('.rc')].find(x=>x.dataset.id==='d1');
+    var buttons=[...b.querySelectorAll('[data-answer-choice]')]; return {
+      requested:window.innerWidth,viewport:root.clientWidth,document:root.scrollWidth,answer:b.querySelector('[data-open=answer]').innerText,
+      buttons:buttons.map(x=>{var r=x.getBoundingClientRect();return {left:r.left,right:r.right,width:r.width,height:r.height};})};})()`);
+  assert(wideOptions.requested === 1280 && wideOptions.document <= wideOptions.viewport
+    && wideOptions.answer === "Write your own answer" && wideOptions.buttons.length === 2
+    && wideOptions.buttons.every(x=>x.width>0&&x.height>0&&x.left>=0&&x.right<=wideOptions.viewport+.5),
+    "direct-board quick answers did not fit at 1280px: "+JSON.stringify(wideOptions));
+
+  await send("Emulation.setDeviceMetricsOverride", {width:390,height:844,deviceScaleFactor:1,mobile:true}, sid);
+  const narrowOptions = await evaluate(sid, `(() => {var root=document.documentElement;
+    var b=[...document.querySelectorAll('.rc')].find(x=>x.dataset.id==='d1');
+    var buttons=[...b.querySelectorAll('[data-answer-choice]')]; return {
+      requested:window.innerWidth,viewport:root.clientWidth,document:root.scrollWidth,
+      buttons:buttons.map(x=>{var r=x.getBoundingClientRect();return {left:r.left,right:r.right,width:r.width,height:r.height};})};})()`);
+  assert(narrowOptions.requested === 390 && narrowOptions.document <= narrowOptions.viewport
+    && narrowOptions.buttons.every(x=>x.width>0&&x.height>=44&&x.left>=0&&x.right<=narrowOptions.viewport+.5),
+    "direct-board quick answers did not fit at 390px: "+JSON.stringify(narrowOptions));
+  await send("Emulation.clearDeviceMetricsOverride", {}, sid);
+
   const sent = await evaluate(sid, `(async()=>{
     var b=[...document.querySelectorAll('.rc')].find(x=>x.dataset.id==='d1');
-    b.querySelector('[data-open=answer]').click();
-    b.querySelector('textarea').value='Go with the Tuesday window from the board.';
-    b.querySelector('form[data-intent=answer]').requestSubmit();
+    var originalFetch=window.fetch.bind(window),releasePost;
+    window.fetch=function(url,options){
+      if(options&&options.method==='POST')return new Promise(resolve=>{releasePost=()=>resolve(originalFetch(url,options));});
+      return originalFetch(url,options);
+    };
+    var choices=[...b.querySelectorAll('[data-answer-choice]')];
+    choices[0].click();
+    for(var locked=0;locked<100&&!choices.every(x=>x.disabled);locked++)await new Promise(r=>setTimeout(r,10));
+    choices[1].click();
+    var frozen={value:b.querySelector('textarea').value,disabled:choices.map(x=>x.disabled)};
+    releasePost();
     for (var i=0;i<200;i++){ if(!b.querySelector('[data-ok=answer]').hidden) break;
       await new Promise(r=>setTimeout(r,50)); }
+    window.fetch=originalFetch;
     var panel=b.querySelector('[data-ok=answer]');
     var opener=b.querySelector('[data-open=answer]');
     var rect=panel.getBoundingClientRect();
@@ -605,7 +643,7 @@ const revealState = `({body:document.body.className,
       deferStillOffered:!b.querySelector('[data-open=defer]').hidden,
       note:panel.querySelector('.rc-ok-s').textContent,
       tone:panel.className,
-      message:b.querySelector('.rc-sent').textContent};
+      message:b.querySelector('.rc-sent').textContent,frozen:frozen};
   })()`);
   assert(sent.confirmed && sent.head === "Answer received",
     "a request the service accepted was not confirmed truthfully: " + JSON.stringify(sent));
@@ -619,8 +657,13 @@ const revealState = `({body:document.body.className,
     "the confirmation must be a full-width banner, not a small label: " + JSON.stringify(sent));
   assert(sent.deferStillOffered,
     "acknowledging one control removed a sibling the board can still resolve");
+  assert(sent.frozen.value === "Tuesday morning" && sent.frozen.disabled.every(Boolean),
+    "an in-flight quick answer allowed a sibling choice to replace its payload: " + JSON.stringify(sent.frozen));
   assert(logLines() === before + 1,
     `one tap must record exactly one request, log went from ${before} to ${logLines()}`);
+  const quickAnswer = requestWires().find((request) => request.note === "Tuesday morning");
+  assert(quickAnswer && quickAnswer.intent === "answer" && quickAnswer.home === "main" && quickAnswer.id === "d1",
+    "the option button did not submit the existing Answer request: " + JSON.stringify(requestWires()));
 
   await reload(sid);
   const survived = await evaluate(sid, `(() => {
@@ -680,6 +723,9 @@ const revealState = `({body:document.body.className,
     "retrying the interrupted attempt did not confirm receipt: " + JSON.stringify(retried));
   assert(logLines() === before + 2,
     "retrying after response loss recorded the same captain answer twice");
+  const textAnswer = requestWires().find((request) => request.note === "Keep this attempt across response loss.");
+  assert(textAnswer && textAnswer.intent === "answer" && textAnswer.home === "main" && textAnswer.id === "d2",
+    "free text did not reach the same validated Answer path as the option button: " + JSON.stringify(requestWires()));
 
   // The service dies with the page already open. A tap must then say so and stay
   // retryable rather than showing a confirmation nothing recorded.

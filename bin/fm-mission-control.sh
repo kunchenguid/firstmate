@@ -680,6 +680,7 @@ def yolo_for($repo): ($registry_by_name[$repo // ""].yolo // false);
   title: (.title // .raw),
   detail: (.hold_reason // .blocked_reason // ""),
   question: (.decision_question // null),
+  options: (.decision_options // null),
   decision_url: (.decision_url // null),
   why: (.decision_why // null),
   affects: (.decision_affects // null),
@@ -727,6 +728,7 @@ def yolo_for($repo): ($registry_by_name[$repo // ""].yolo // false);
     title: (.summary // .key // "decision"),
     detail: (.reason // ""),
     question: (.question // (if (.source // "") == "status" then (.summary // null) else null end)),
+    options: (.options // null),
     decision_url: (.decision_url // null),
     why: (.why // null),
     affects: (.affects // null),
@@ -1219,6 +1221,25 @@ def rc_button($intent; $label):
 def rc_ask_about($title):
   (@html "<button type=\"button\" class=\"rc-b rc-ask-about\" data-ask-about=\"\($title)\">Ask a question about this</button>");
 
+# Only the explicit structured field can make quick answers appear. The filing
+# command already bounds it, while this guard keeps a hand-built snapshot from
+# turning malformed or duplicate values into misleading controls.
+def answer_options($w):
+  (($w.options // null) | if type == "array" then . else [] end) as $options |
+  if ($options | length) >= 2 and ($options | length) <= 4
+     and all($options[]; type == "string" and . != "" and utf8bytelength <= 80
+       and . == gsub("^[[:space:]]+|[[:space:]]+$"; ""))
+     and (($options | unique | length) == ($options | length))
+  then $options else [] end;
+
+def rc_choices($options):
+  if ($options | length) == 0 then "" else
+    "<span class=\"rc-choice-label\">Quick answers</span>"
+    + (($options | map(
+        @html "<button type=\"button\" class=\"rc-b rc-choice\" data-answer-choice=\"\(.)\">\(.)</button>"
+      )) | add // "")
+  end;
+
 # The confirmed state one control leaves behind. It ships hidden with no outcome
 # heading: only the script applying a durable or immediate acknowledgement fills
 # in what was proved, so a statically served copy can never show a false confirmation.
@@ -1253,6 +1274,7 @@ def answer_prompt($w):
 def controls_for:
   . as $w |
   ($w.ctl // null) as $c |
+  answer_options($w) as $options |
   if ($controls | not) or $c == null then "" else
     (@html "<div class=\"rc\" data-home=\"\($c.home)\" data-id=\"\($c.id)\" data-key=\"\($c.key)\" data-what=\"\($w.title)\" data-recorded-answer=\"\(if $w.answered == true then "true" else "false" end)\">")
     + "<div class=\"rc-acts\">"
@@ -1261,10 +1283,14 @@ def controls_for:
     + (($c.intents
         | map(select(. == "merge" or . == "reply" or . == "answer" or . == "defer"))
         | map(rc_confirm(.))) | add // "")
+    + (if ($c.intents | index("answer")) != null then rc_choices($options) else "" end)
     + (($c.intents | map(
         if . == "merge" then rc_button("merge"; "Approve merge")
         elif . == "reply" then rc_button("reply"; "Reply")
-        elif . == "answer" then rc_button("answer"; "Answer")
+        elif . == "answer" then
+          if ($options | length) > 0
+          then (@html "<button type=\"button\" class=\"rc-b rc-answer\" data-open=\"answer\" data-answer-custom>Answer</button>")
+          else rc_button("answer"; "Answer") end
         elif . == "defer" then rc_button("defer"; "Set aside")
         else "" end)) | add // "")
     + (if $w.kind == "decision" then rc_ask_about($w.title) else "" end)
@@ -1694,6 +1720,12 @@ body.board-reply .rc-ask,body.lavish .rc-ask{border:1px solid var(--line);border
 .rc-b:hover{border-color:#cfd6e0;color:var(--ink);}
 .rc-b.rc-answer{color:#936218;background:var(--amber-soft);border-color:#ead7ae;}
 .rc-b.rc-answer:hover{color:#724b10;background:#f8eccf;border-color:#dfc58e;}
+.rc-choice-label{color:var(--faint);font-size:11px;font-weight:700;letter-spacing:.06em;
+  text-transform:uppercase;margin-right:1px;display:none;}
+.rc-b.rc-choice{color:#724b10;background:var(--panel);border-color:#dfc58e;display:none;}
+body.board-reply .rc-choice-label{display:inline;}
+body.board-reply .rc-b.rc-choice{display:inline-block;}
+.rc-b.rc-choice:hover{background:#f8eccf;border-color:#d3b771;}
 .rc-b.rc-defer{color:var(--slate);background:var(--slate-soft);border-color:#dce1e8;}
 .rc-b.rc-defer:hover{color:var(--ink);background:#e5e9ef;border-color:#cbd2dc;}
 .rc-b.rc-ask-about{color:var(--slate);background:transparent;border-style:dashed;}
@@ -2684,6 +2716,12 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
     });
   }
 
+  function enableDirectAnswers() {
+    Array.prototype.forEach.call(document.querySelectorAll(\"[data-answer-custom]\"), function (opener) {
+      if (!opener.disabled) { opener.textContent = \"Write your own answer\"; }
+    });
+  }
+
   var receiverReady = (function () {
     if (!window.fetch || !window.AbortController) { return Promise.resolve(false); }
     var stop, timer;
@@ -2706,6 +2744,7 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
         try { clearTimeout(timer); } catch (e) { /* already fired */ }
         if (!data) { return false; }
         document.body.classList.add(\"board-reply\");
+        enableDirectAnswers();
         noteCollecting(data.armed !== false);
         return true;
       });
@@ -3052,6 +3091,13 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
       opener.classList.add(\"rc-submitted\");
       if (confirmPanel(block, intent)) { opener.hidden = true; }
     }
+    if (intent === \"answer\") {
+      Array.prototype.forEach.call(block.querySelectorAll(\"[data-answer-choice],.rc-choice-label\"),
+        function (choice) {
+          if (choice.disabled !== undefined) { choice.disabled = true; }
+          if (confirmPanel(block, intent)) { choice.hidden = true; }
+        });
+    }
     formsIn(block).forEach(function (form) {
       if (form.getAttribute(\"data-intent\") !== intent) { return; }
       var submit = form.querySelector(\".rc-go\");
@@ -3099,6 +3145,11 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
     if (area) { area.value = state.note || \"\"; area.disabled = true; }
     if (close) { close.disabled = true; }
     if (submit) { submit.disabled = true; }
+    if (form.getAttribute(\"data-intent\") === \"answer\") {
+      Array.prototype.forEach.call(block.querySelectorAll(\"[data-answer-choice]\"), function (choice) {
+        choice.disabled = true;
+      });
+    }
   }
 
   function releasePayload(form) {
@@ -3108,6 +3159,14 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
     if (area) { area.disabled = false; }
     if (close) { close.disabled = false; }
     if (submit) { submit.disabled = false; }
+    if (form.getAttribute(\"data-intent\") === \"answer\") {
+      var block = form.closest(\".rc\");
+      if (block) {
+        Array.prototype.forEach.call(block.querySelectorAll(\"[data-answer-choice]\"), function (choice) {
+          choice.disabled = false;
+        });
+      }
+    }
   }
 
   /* An interrupted send is genuinely ambiguous, so the exact payload is frozen and
@@ -3157,6 +3216,22 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
       askComposer.scrollIntoView({block:\"center\"});
       askArea.focus();
       window.__fmExplicitNavigation = true;
+      return;
+    }
+
+    var choice = el.closest(\"[data-answer-choice]\");
+    if (choice) {
+      var choiceBlock = choice.closest(\".rc\");
+      if (!choiceBlock || choice.disabled) { return; }
+      var answerForm = choiceBlock.querySelector(\"form[data-intent=answer]\");
+      var answerArea = answerForm && answerForm.querySelector(\".rc-t\");
+      if (!answerForm || !answerArea) { return; }
+      window.__fmExplicitNavigation = true;
+      shut(choiceBlock);
+      answerForm.hidden = false;
+      answerArea.value = choice.getAttribute(\"data-answer-choice\") || \"\";
+      answerArea.dispatchEvent(new Event(\"input\", {bubbles:true}));
+      answerForm.requestSubmit();
       return;
     }
 

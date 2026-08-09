@@ -18,9 +18,9 @@
 #     Structured rows preserve captain-hold metadata such as hold_kind and
 #     hold_reason when tasks-axi emits it. A captain hold filed through
 #     fm-decision-hold also carries its decision context as separate structured
-#     body fields: decision_question, decision_why, decision_affects,
-#     decision_recommendation, and exactly one of decision_url or
-#     decision_no_surface. Each is null on a hold filed before that schema
+#     body fields: decision_question, optional decision_options,
+#     decision_why, decision_affects, decision_recommendation, and exactly one of
+#     decision_url or decision_no_surface. Each is null on a hold filed before that schema
 #     existed, which is what keeps an older hold rendering from hold_reason alone.
 #     They are read for any row whose HOLD kind is captain or parked, not only a
 #     row whose own kind is captain, because a captain hold can gate any item.
@@ -354,6 +354,16 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
     def links($rest): [$rest | scan(url_pattern)];
     def body_field($lines; $label):
       ([ $lines[]? | select(startswith($label + ": ")) | ltrimstr($label + ": ") ] | last) // null;
+    def decision_options($lines):
+      (body_field($lines; "Decision options")) as $raw
+      | if $raw == null then null
+        else try ($raw | fromjson
+          | if type == "array" and length >= 2 and length <= 4
+               and all(.[]; type == "string" and length > 0
+                 and utf8bytelength <= 80 and . == trim)
+               and (unique | length) == length
+            then . else null end) catch null
+        end;
     def strip_trailing_metadata:
       reduce range(0; 20) as $_ (.;
         sub("[[:space:]]*\\([[:space:]]*(?:(?:repo|kind|priority|hold|hold-kind):[[:space:]]*[^)]*|(?:since|merged|reported|done)[[:space:]]+[^)]*)[[:space:]]*\\)[[:space:]]*$"; ""));
@@ -460,6 +470,7 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
         # context parsed.
         | if .structured and (.kind == "captain" or .hold_kind == "captain" or .hold_kind == "parked") then
             .decision_question = body_field(.body_lines; "Decision question")
+            | .decision_options = decision_options(.body_lines)
             | .decision_url = body_field(.body_lines; "Decision URL")
             | .decision_why = body_field(.body_lines; "Why now")
             | .decision_affects = body_field(.body_lines; "What it affects")
@@ -785,6 +796,7 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
          | select(.captain_actionable == true)
          | {id,key:.id,verb:"captain-hold",summary:(.title | trunc(160)),
             question:((.decision_question // null) | if . == null then null else trunc(2000) end),
+            options:(.decision_options // null),
             decision_url:((.decision_url // null) | if . == null then null else trunc(2000) end),
             why:((.decision_why // null) | if . == null then null else trunc(2000) end),
             affects:((.decision_affects // null) | if . == null then null else trunc(2000) end),
@@ -902,6 +914,7 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
           hold_reason:((.hold_reason // null) | if . == null then null else trunc(160) end),
           hold_kind:((.hold_kind // null) | if . == null then null else trunc(40) end),
           decision_question:((.decision_question // null) | if . == null then null else trunc(2000) end),
+          decision_options:(.decision_options // null),
           decision_url:((.decision_url // null) | if . == null then null else trunc(2000) end),
           decision_why:((.decision_why // null) | if . == null then null else trunc(2000) end),
           decision_affects:((.decision_affects // null) | if . == null then null else trunc(2000) end),

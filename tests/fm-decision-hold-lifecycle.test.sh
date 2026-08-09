@@ -948,6 +948,7 @@ test_decision_question_and_private_link_use_the_supported_hold_interface() {
     --title "Choose the sample emphasis" \
     --reason "captain emphasis choice pending" \
     --question "$question" \
+    --option "Keep literal text" --option "Normalize escapes" \
     --why "The sample emphasis blocks the next sample pass." \
     --affects "Every sample row that renders emphasis." \
     --recommendation "Keep the literal text." \
@@ -958,6 +959,7 @@ test_decision_question_and_private_link_use_the_supported_hold_interface() {
   printf '%s' "$out" | jq -e --arg hold "$hold" --arg question "$question" '
     .backlog.records[] | select(.id == $hold)
     | .decision_question == $question
+      and .decision_options == ["Keep literal text", "Normalize escapes"]
       and .decision_url == "https://sample.tailnet.invalid/decision-aid"
   ' >/dev/null || fail "main-home decision context did not reach the canonical snapshot: $out"
 
@@ -965,8 +967,18 @@ test_decision_question_and_private_link_use_the_supported_hold_interface() {
   printf '%s' "$summary" | jq -e --arg hold "$hold" --arg question "$question" '
     .decisions_open[] | select(.id == $hold)
     | .question == $question
+      and .options == ["Keep literal text", "Normalize escapes"]
       and .decision_url == "https://sample.tailnet.invalid/decision-aid"
   ' >/dev/null || fail "decision context did not reach the secondmate-home projection: $summary"
+
+  run_decisions "$home" hold "$origin" emphasis \
+    --title "Choose the sample emphasis" --reason "captain emphasis choice pending" --repo sample \
+    >/dev/null || fail "an idempotent retry without options was refused"
+  out=$(PATH="$home/fakebin:$PATH" FM_HOME="$home" "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+  printf '%s' "$out" | jq -e --arg hold "$hold" '
+    .backlog.records[] | select(.id == $hold)
+    | .decision_options == ["Keep literal text", "Normalize escapes"]
+  ' >/dev/null || fail "an idempotent retry without options erased the stored labels"
 
   run_decisions "$home" link "$origin" emphasis \
     --url "https://sample.tailnet.invalid/revised-aid" >/dev/null \
@@ -974,8 +986,10 @@ test_decision_question_and_private_link_use_the_supported_hold_interface() {
   show=$(tasks_in "$home" show "$hold" --full)
   out=$(PATH="$home/fakebin:$PATH" FM_HOME="$home" "$ROOT/bin/fm-fleet-snapshot.sh" --json)
   printf '%s' "$out" | jq -e --arg hold "$hold" --arg question "$question" '
-    .backlog.records[] | select(.id == $hold) | .decision_question == $question
-  ' >/dev/null || fail "link backfill overwrote the exact question"
+    .backlog.records[] | select(.id == $hold)
+    | .decision_question == $question
+      and .decision_options == ["Keep literal text", "Normalize escapes"]
+  ' >/dev/null || fail "link backfill overwrote the exact question or answer options"
   assert_contains "$show" 'Decision URL: https://sample.tailnet.invalid/revised-aid' \
     "link backfill did not replace the structured URL"
   if run_decisions "$home" link "$origin" emphasis --url "http://public.invalid/not-private" \
@@ -1082,6 +1096,31 @@ test_structured_context_is_required_and_stored_separately() {
   assert_grep "--no-surface" "$home/blank-no-surface.err" \
     "the whitespace refusal did not name the no-surface flag"
 
+  # Options are optional as a set, but a supplied set must be a genuinely small
+  # choice rather than a lone shortcut, duplicates, or a board-sized menu.
+  if run_decisions "$home" "${base[@]}" --option "Only choice" \
+    --why "w" --affects "a" --recommendation "r" --no-surface "none applies" \
+    > "$home/one-option.out" 2> "$home/one-option.err"; then
+    fail "a one-label decision option set was accepted"
+  fi
+  assert_grep "2 to 4" "$home/one-option.err" \
+    "the option-count refusal did not state the supported bound"
+  if run_decisions "$home" "${base[@]}" \
+    --option "One" --option "Two" --option "Three" --option "Four" --option "Five" \
+    --why "w" --affects "a" --recommendation "r" --no-surface "none applies" \
+    > "$home/five-options.out" 2> "$home/five-options.err"; then
+    fail "a five-label decision option set was accepted"
+  fi
+  assert_grep "2 to 4" "$home/five-options.err" \
+    "the oversized option-set refusal did not state the supported bound"
+  if run_decisions "$home" "${base[@]}" --option "Same" --option "Same" \
+    --why "w" --affects "a" --recommendation "r" --no-surface "none applies" \
+    > "$home/duplicate-options.out" 2> "$home/duplicate-options.err"; then
+    fail "duplicate decision option labels were accepted"
+  fi
+  assert_grep "distinct" "$home/duplicate-options.err" \
+    "the duplicate-option refusal did not identify the problem"
+
   # The surface choice must be conscious, so silence refuses and claiming both
   # refuses. Only an explicit answer either way gets through.
   if run_decisions "$home" "${base[@]}" --why "w" --affects "a" --recommendation "r" \
@@ -1111,6 +1150,7 @@ test_structured_context_is_required_and_stored_separately() {
       and .decision_affects == "The sample header and every sample card under it."
       and .decision_recommendation == "Take the compact shape; it survives a narrow screen."
       and .decision_no_surface == "Both shapes are text-only, so there is nothing built to compare."
+      and .decision_options == null
       and .decision_url == null
       and .hold_reason == "captain shape choice pending"
   ' >/dev/null || fail "structured dimensions did not reach the snapshot as separate fields: $out"
@@ -1198,6 +1238,7 @@ test_hold_item_gates_an_existing_work_item_under_the_same_bar() {
   fi
 
   run_decisions "$home" hold-item sample-thread --reason "captain vendor choice pending" \
+    --option "Keep current vendor" --option "Move to second vendor" \
     --why "The current vendor stops publishing on 2026-09-01." \
     --affects "Every sample quote and the sample nightly digest." \
     --recommendation "Move to the second vendor; the shapes already match." \
@@ -1226,7 +1267,8 @@ test_hold_item_gates_an_existing_work_item_under_the_same_bar() {
              and .decision_no_surface == "Nothing is built yet; that is what the decision is about." ]
          | all)
     and ([ .backlog.records[] | select(.id == "sample-thread")
-           | .decision_url == "https://sample.tailnet.invalid/vendor-aid" ] | all)
+           | .decision_options == ["Keep current vendor", "Move to second vendor"]
+             and .decision_url == "https://sample.tailnet.invalid/vendor-aid" ] | all)
   ' >/dev/null || fail "a gated item of another kind did not reach the snapshot as a decision: $out"
 
   # hold-item records context and the hold, nothing else. The inventory that

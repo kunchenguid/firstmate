@@ -18,13 +18,17 @@
 #
 # Every captain decision filed here carries its context as SEPARATE structured
 # body fields rather than one free-text reason, so no dimension can be skipped
-# inside a blob: an optional exact question, a required "Why now", "What it
-# affects", and "Recommendation", and a required conscious choice between a
-# private decision-aid URL and an explicit "no built surface applies"
+# inside a blob: an optional exact question, an optional set of two to four short
+# answer labels, a required "Why now", "What it affects", and "Recommendation",
+# and a required conscious choice between a private decision-aid URL and an
+# explicit "no built surface applies"
 # acknowledgment. Each is required only when the item does not already record it,
 # so a first filing can never omit one while an idempotent retry never has to
-# retype what is already stored. This script judges only that each dimension was
-# addressed. Whether the prose is genuinely clear and jargon-free is a semantic
+# retype what is already stored. Repeating --option supplies the complete ordered
+# set: two to four distinct labels of at most 80 bytes each. Supplying a set later
+# replaces the stored set, while omitting the flag preserves it. This script
+# judges only that each dimension was addressed. Whether the prose is genuinely
+# clear and jargon-free is a semantic
 # judgement no script can make; the skill owns it, and data/captain-shared.md's
 # decision-presentation bar is what it is judged against.
 # `link` is the supported backfill for an existing hold; it accepts HTTPS only,
@@ -36,12 +40,12 @@
 #   fm-decision-hold.sh id <origin-id> <decision-key>
 #   fm-decision-hold.sh hold <origin-id> <decision-key> \
 #     --title <title> --reason <reason> [--repo <repo>] \
-#     [--question <exact-question>] \
+#     [--question <exact-question>] [--option <short-label> --option <short-label> ...] \
 #     --why <why-now> --affects <what-it-affects> \
 #     --recommendation <recommendation> \
 #     (--decision-url <https-url> | --no-surface <why-none-applies>)
 #   fm-decision-hold.sh hold-item <task-id> --reason <reason> \
-#     [--question <exact-question>] \
+#     [--question <exact-question>] [--option <short-label> --option <short-label> ...] \
 #     --why <why-now> --affects <what-it-affects> \
 #     --recommendation <recommendation> \
 #     (--decision-url <https-url> | --no-surface <why-none-applies>)
@@ -178,6 +182,32 @@ validate_context_field() {  # <label> <value>
   fi
   [ "$(printf '%s' "$value" | LC_ALL=C wc -c | tr -d ' ')" -le 2000 ] \
     || fail "$label exceeds 2000 bytes"
+}
+
+# Repeated --option values are one optional bounded set, not independent body
+# fields. Two choices are the useful minimum, four is the board's readable
+# maximum, and short unique labels keep every button honest about what it sends.
+validate_decision_options() {  # [<short-label>...]
+  local count=$# option seen=$'\n' trimmed
+  [ "$count" -eq 0 ] || { [ "$count" -ge 2 ] && [ "$count" -le 4 ]; } \
+    || fail "--option must be repeated 2 to 4 times when decision options are supplied"
+  for option in "$@"; do
+    validate_one_line option "$option"
+    has_non_whitespace "$option" || fail "--option must contain non-whitespace text"
+    trimmed=$(printf '%s' "$option" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+    [ "$option" = "$trimmed" ] || fail "--option labels must not have leading or trailing whitespace"
+    [ "$(printf '%s' "$option" | LC_ALL=C wc -c | tr -d ' ')" -le 80 ] \
+      || fail "option exceeds 80 bytes"
+    case "$seen" in
+      *$'\n'"$option"$'\n'*) fail "--option labels must be distinct: $option" ;;
+    esac
+    seen=$seen$option$'\n'
+  done
+}
+
+encode_decision_options() {  # <short-label>...
+  command -v jq >/dev/null 2>&1 || fail "jq is required"
+  jq -cn --args '$ARGS.positional' -- "$@"
 }
 
 validate_decision_url() {  # <url>
@@ -321,9 +351,10 @@ validate_decision_context_flags() {  # <question> <why> <affects> <recommendatio
 # refusal above is what guarantees nothing is missing. The two surface fields are
 # one choice, so recording either clears the other and the item can never claim a
 # built surface and no built surface at the same time.
-write_decision_context() {  # <body> <question> <why> <affects> <recommendation> <decision-url> <no-surface>
-  local body=$1 question=$2 why=$3 affects=$4 recommendation=$5 decision_url=$6 no_surface=$7
+write_decision_context() {  # <body> <question> <options-json> <why> <affects> <recommendation> <decision-url> <no-surface>
+  local body=$1 question=$2 options_json=$3 why=$4 affects=$5 recommendation=$6 decision_url=$7 no_surface=$8
   [ -z "$question" ] || body=$(set_body_field "$body" "Decision question" "$question")
+  [ -z "$options_json" ] || body=$(set_body_field "$body" "Decision options" "$options_json")
   [ -z "$why" ] || body=$(set_body_field "$body" "Why now" "$why")
   [ -z "$affects" ] || body=$(set_body_field "$body" "What it affects" "$affects")
   [ -z "$recommendation" ] || body=$(set_body_field "$body" "Recommendation" "$recommendation")
@@ -526,7 +557,8 @@ command_id() {
 
 command_hold() {
   local origin=${1:-} key=${2:-} title='' reason='' repo='' question='' decision_url='' no_surface=''
-  local why='' affects='' recommendation=''
+  local why='' affects='' recommendation='' options_json=''
+  local options=()
   local id show state kind existing_title body updated exists=0
   [ "$#" -ge 2 ] || { usage >&2; exit 2; }
   shift 2
@@ -536,6 +568,7 @@ command_hold() {
       --reason) shift; reason=${1:-} ;;
       --repo) shift; repo=${1:-} ;;
       --question) shift; question=${1:-} ;;
+      --option) shift; options+=("${1:-}") ;;
       --why) shift; why=${1:-} ;;
       --affects) shift; affects=${1:-} ;;
       --recommendation) shift; recommendation=${1:-} ;;
@@ -550,6 +583,10 @@ command_hold() {
   validate_one_line title "$title"
   validate_one_line reason "$reason"
   validate_decision_context_flags "$question" "$why" "$affects" "$recommendation" "$decision_url" "$no_surface"
+  if [ "${#options[@]}" -gt 0 ]; then
+    validate_decision_options "${options[@]}"
+    options_json=$(encode_decision_options "${options[@]}")
+  fi
   case "$reason" in *'('*|*')'*) fail "reason must not contain parentheses (tasks-axi hold contract)" ;; esac
   require_tasks_axi
   origin_exists_here "$origin" || fail "origin $origin is not owned by the active home $FM_HOME"
@@ -577,7 +614,7 @@ command_hold() {
   # half-made backlog identity behind for the next attempt to trip over.
   require_decision_context "$id" "$body" \
     "$why" "$affects" "$recommendation" "$decision_url" "$no_surface"
-  updated=$(write_decision_context "$body" "$question" \
+  updated=$(write_decision_context "$body" "$question" "$options_json" \
     "$why" "$affects" "$recommendation" "$decision_url" "$no_surface")
   if [ "$exists" = 1 ]; then
     if [ "$updated" != "$body" ]; then
@@ -599,13 +636,15 @@ command_hold() {
 # being the one decision that skipped the bar.
 command_hold_item() {
   local id=${1:-} reason='' question='' decision_url='' no_surface='' show state body updated
-  local why='' affects='' recommendation=''
+  local why='' affects='' recommendation='' options_json=''
+  local options=()
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   shift
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --reason) shift; reason=${1:-} ;;
       --question) shift; question=${1:-} ;;
+      --option) shift; options+=("${1:-}") ;;
       --why) shift; why=${1:-} ;;
       --affects) shift; affects=${1:-} ;;
       --recommendation) shift; recommendation=${1:-} ;;
@@ -618,6 +657,10 @@ command_hold_item() {
   validate_slug task-id "$id"
   validate_one_line reason "$reason"
   validate_decision_context_flags "$question" "$why" "$affects" "$recommendation" "$decision_url" "$no_surface"
+  if [ "${#options[@]}" -gt 0 ]; then
+    validate_decision_options "${options[@]}"
+    options_json=$(encode_decision_options "${options[@]}")
+  fi
   case "$reason" in *'('*|*')'*) fail "reason must not contain parentheses (tasks-axi hold contract)" ;; esac
   require_tasks_axi
   show=$(task_show "$id") \
@@ -628,7 +671,7 @@ command_hold_item() {
   body=$(show_body "$show") || fail "could not read backlog item $id body"
   require_decision_context "$id" "$body" \
     "$why" "$affects" "$recommendation" "$decision_url" "$no_surface"
-  updated=$(write_decision_context "$body" "$question" \
+  updated=$(write_decision_context "$body" "$question" "$options_json" \
     "$why" "$affects" "$recommendation" "$decision_url" "$no_surface")
   if [ "$updated" != "$body" ]; then
     tasks_axi update "$id" --body "$updated" >/dev/null \

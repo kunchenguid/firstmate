@@ -16,7 +16,9 @@ It rejects an identity collision, a changed title, attempts to reopen an already
 
 ## Structured decision context
 
-A captain decision records its context as separate structured body fields rather than as one free-text hold reason: an optional `Decision question`, a required `Why now`, `What it affects`, and `Recommendation`, and exactly one of `Decision URL` or `No decision surface`.
+A captain decision records its context as separate structured body fields rather than as one free-text hold reason: an optional `Decision question`, optional `Decision options`, a required `Why now`, `What it affects`, and `Recommendation`, and exactly one of `Decision URL` or `No decision surface`.
+`Decision options` is an explicit ordered set of two to four distinct labels, each at most 80 bytes, for a decision whose useful answers are already a clean small pick.
+It is absent rather than inferred when the decision needs free text or when no options were filed.
 The structure makes the required context dimensions and conscious surface choice enforceable.
 A single reason string lets a dimension be skipped silently, and an optional link flag lets the surface question be forgotten, which is what produced decisions that could not be acted on without re-reading their investigation.
 Prose quality is deliberately not machine-checked, because clarity and jargon-freeness are semantic judgements a script cannot make; the skill owns them, and `data/captain-shared.md` states the bar they are judged against.
@@ -25,6 +27,7 @@ Each dimension is required only when the item does not already record it.
 A first filing therefore cannot omit one, while the idempotent retry that `hold` is designed for supplies none and preserves what is stored.
 The two surface fields are one choice, so recording either clears the other and an item can never claim a built surface and no built surface at once; `link` clears a recorded `No decision surface` for the same reason.
 The schema is additive: an old-style hold that carries only a plain hold reason keeps that reason and renders unchanged, while a hold that already records the earlier optional question or URL keeps those fields too.
+Supplying options on a later idempotent filing replaces that one structured set, while a retry that supplies none preserves whatever was already recorded.
 `resolve`, `complete`, `verify`, `retract`, and `link` are untouched on such a hold.
 Re-arming one with `hold` does require the full bar, because the presence check reads the stored body and finds nothing there; that is the going-forward contract rather than a compatibility gap, and it converts an old hold into a complete one at the moment it is next touched.
 Structured context currently reaches the captain through Mission Control only.
@@ -70,9 +73,10 @@ A failed intermediate step leaves the hold open.
 ## Structured read surfaces
 
 `bin/fm-fleet-snapshot.sh` parses canonical tasks-axi `(hold: ...)` and `(hold-kind: captain)` metadata alongside existing backlog fields, preserving internal commas in the free-text hold reason while short metadata fields remain comma-delimited.
-It also parses every structured decision-context field written by `bin/fm-decision-hold.sh`, then carries them through the main-home record and secondmate-home decision projection.
+It also parses every structured decision-context field written by `bin/fm-decision-hold.sh`, including the ordered option labels, then carries them through the main-home record and secondmate-home decision projection.
 It reads them for any row whose hold kind is `captain` or `parked`, not only a row whose own kind is `captain`, because a captain hold can gate an item of any kind and setting one aside changes only its hold kind.
-`bin/fm-mission-control.sh` renders the fields it finds as labelled sections on the decision card and falls back to the plain hold reason for a decision that carries none.
+`bin/fm-mission-control.sh` renders the context fields it finds on the decision card and falls back to the plain hold reason for a decision that carries none.
+Once the direct board-reply service proves it is available, a valid option set becomes quick-answer buttons without replacing the free-text Answer path; the legacy Lavish transport remains Answer-only.
 It resolves every repeated `blocked-by:` edge against structured Done records, keeps missing blockers unresolved, and classifies any unblocked row with hold kind `captain` and a non-empty hold reason as actionable regardless of the row's own kind.
 Its secondmate-home summary classifies an actionable captain hold as `captain_decision` and preserves blocked captain holds as queued work in the owning home.
 
