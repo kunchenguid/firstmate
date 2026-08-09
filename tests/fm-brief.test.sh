@@ -251,7 +251,7 @@ test_project_mode_defaults_and_rejects_malformed() {
 - malformed-third-proj unexpected - malformed third token (added 2026-07-01)
 EOF
   out=$(FM_HOME="$home" "$ROOT/bin/fm-project-mode.sh" omitted-proj)
-  [ "$out" = "direct-PR on" ] || fail "omitted delivery mode did not default to direct-PR on"
+  [ "$out" = "no-mistakes off" ] || fail "omitted delivery mode did not default to no-mistakes off"
   out=$(FM_HOME="$home" "$ROOT/bin/fm-project-mode.sh" explicit-proj)
   [ "$out" = "direct-PR off" ] || fail "explicit delivery mode did not preserve yolo off"
   out=$(FM_HOME="$home" "$ROOT/bin/fm-project-mode.sh" malformed-proj 2>/dev/null)
@@ -267,13 +267,13 @@ EOF
   [ "$out" = "no-mistakes off" ] || fail "malformed third token did not fall back to no-mistakes off"
   grep -F 'malformed mode' "$err" >/dev/null \
     || fail "malformed third token did not emit a warning"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" omitted-brief omitted-proj >/dev/null
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" omitted-brief omitted-proj --mode direct-PR >/dev/null
   brief="$home/data/omitted-brief/brief.md"
-  assert_grep "This project ships **direct-PR**" "$brief" \
+  assert_grep "This task ships **direct-PR**" "$brief" \
     "omitted mode brief did not use direct-PR delivery"
-  assert_no_grep "This project ships **no-mistakes**" "$brief" \
+  assert_no_grep "This task ships **no-mistakes**" "$brief" \
     "omitted mode brief used no-mistakes delivery"
-  pass "fm-project-mode: omitted mode defaults to direct-PR on and malformed modes fall back safely"
+  pass "fm-project-mode: omitted mode defaults to no-mistakes off and malformed modes fall back safely"
 }
 
 # fm-brief.sh must exit 0 and produce a brief with no unreplaced shell
@@ -817,7 +817,7 @@ test_ordinary_briefs_include_todo_tracking_and_secondmate_omits_it() {
   local home ship_brief scout_brief sm_brief
   home="$TMP_ROOT/todo-home"
   mkdir -p "$home/data"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" ship-task myrepo >/dev/null 2>&1
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" ship-task myrepo --mode no-mistakes >/dev/null 2>&1
   ship_brief="$home/data/ship-task/brief.md"
   assert_todo_tracking_rule "$ship_brief" "ship"
 

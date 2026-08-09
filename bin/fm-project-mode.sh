@@ -60,13 +60,25 @@ fi
 parsed=$(awk -v n="$NAME" '
   $1=="-" && $2==n {
     mode="no-mistakes"; yolo="off";
+    if ($3 != "-" && $3 !~ /^\[/) { print "invalid"; exit }
     if ($3 ~ /^\[/) {
-      s="";
-      for (i=3; i<=NF; i++) { s = s (s==""?"":" ") $i; if ($i ~ /\]$/) break }
-      gsub(/^\[|\]$/, "", s);           # strip the surrounding brackets
-      k = split(s, a, " ");
-      if (a[1] != "" && a[1] != "+yolo") mode = a[1];
-      for (j=1; j<=k; j++) if (a[j]=="+yolo") yolo="on";
+      s=""; closed=0;
+      for (i=3; i<=NF; i++) {
+        s = s (s==""?"":" ") $i;
+        if ($i ~ /\]$/) { closed=1; break }
+      }
+      if (!closed || i >= NF || $(i+1) != "-") { print "invalid"; exit }
+      gsub(/^\[/, "", s); gsub(/\]$/, "", s);
+      k = split(s, a, " "); valid=1;
+      if (k < 1 || a[1] == "") valid=0;
+      if (a[1] !~ /^(no-mistakes|direct-PR|local-only|no-mistakes-prod-only)$/) valid=0;
+      else mode=a[1];
+      yolo="off";
+      for (j=2; j<=k; j++) {
+        if (a[j] == "+yolo" && yolo == "off") yolo="on";
+        else valid=0;
+      }
+      if (!valid) { print "invalid"; exit }
     }
     print mode, yolo; exit
   }
@@ -74,6 +86,12 @@ parsed=$(awk -v n="$NAME" '
 
 if [ -z "$parsed" ]; then
   echo "warn: project \"$NAME\" not in registry; defaulting to no-mistakes off" >&2
+  echo "no-mistakes off"
+  exit 0
+fi
+
+if [ "$parsed" = invalid ]; then
+  echo "warn: malformed mode (unknown mode) for $NAME; defaulting to no-mistakes off" >&2
   echo "no-mistakes off"
   exit 0
 fi

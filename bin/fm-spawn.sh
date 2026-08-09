@@ -1262,6 +1262,121 @@ if [ "$KIND" = secondmate ] && [ -z "$ARG3" ]; then
   fi
 fi
 
+antigravity_preflight() {
+  if [ "$RAW_LAUNCH" -eq 1 ] && [ -z "$MODEL" ]; then
+    local cleaned_word
+    for word in $LAUNCH; do
+      cleaned_word=$(printf '%s' "$word" | tr -d "\"'")
+      case "$cleaned_word" in
+        --model=antigravity/*) MODEL=${cleaned_word#--model=} ;;
+        antigravity/*) MODEL=$cleaned_word ;;
+      esac
+    done
+  fi
+
+  case "$MODEL" in
+    antigravity/*) ;;
+    *) return 0 ;;
+  esac
+
+  local checker agent_dir timeout_seconds output_bytes tmp_out rc
+  checker=${FM_ANTIGRAVITY_PREFLIGHT_BIN:-}
+  if [ -z "$checker" ]; then
+    agent_dir=${PI_CODING_AGENT_DIR:-${HOME:-}/.pi/agent}
+    checker="$agent_dir/extensions/antigravity-account-switcher/bin/antigravity-account-check.js"
+    if [ ! -f "$checker" ] || [ ! -x "$checker" ]; then
+      checker="$agent_dir/extensions/pi-antigravity-account-switcher/bin/antigravity-account-check.js"
+    fi
+  fi
+  if [ ! -f "$checker" ] || [ ! -x "$checker" ]; then
+    echo "error: Antigravity quota preflight checker is missing or not executable: $checker" >&2
+    return 1
+  fi
+
+  timeout_seconds=${FM_ANTIGRAVITY_PREFLIGHT_TIMEOUT_SECONDS:-30}
+  output_bytes=${FM_ANTIGRAVITY_PREFLIGHT_OUTPUT_BYTES:-8192}
+  case "$timeout_seconds" in
+    ''|*[!0-9]*)
+      echo "error: Antigravity quota preflight timeout is not a positive integer" >&2
+      return 1
+      ;;
+  esac
+  case "$output_bytes" in
+    ''|*[!0-9]*)
+      echo "error: Antigravity quota preflight output limit is not a positive integer" >&2
+      return 1
+      ;;
+  esac
+  [ "$timeout_seconds" -gt 0 ] || {
+    echo "error: Antigravity quota preflight timeout must be positive" >&2
+    return 1
+  }
+  [ "$output_bytes" -gt 0 ] || {
+    echo "error: Antigravity quota preflight output limit must be positive" >&2
+    return 1
+  }
+
+  local timer='' candidate candidate_path
+  for candidate in timeout gtimeout; do
+    candidate_path=$(command -v "$candidate" 2>/dev/null) || continue
+    if "$candidate_path" --help 2>&1 | grep -q -- '--kill-after'; then
+      timer=$candidate_path
+      break
+    fi
+  done
+  if [ -z "$timer" ]; then
+    echo "error: Antigravity quota preflight requires timeout or gtimeout with --kill-after support" >&2
+    return 1
+  fi
+
+  tmp_out=$(mktemp "${STATE}/.preflight-${ID}.XXXXXXXX" 2>/dev/null || mktemp "/tmp/.preflight-${ID}.XXXXXXXX")
+
+  set +e
+  "$timer" --kill-after=5s "${timeout_seconds}s" "$checker" check >"$tmp_out" 2>&1
+  rc=$?
+  set -e
+  rm -f "$tmp_out"
+
+  case "$rc" in
+    0) return 0 ;;
+    1)
+      MODEL=cockpit/gpt-5.6-luna
+      EFFORT=high
+      ANTIGRAVITY_FALLBACK=1
+      return 0
+      ;;
+    124)
+      echo "error: Antigravity quota preflight timed out" >&2
+      return 1
+      ;;
+    *)
+      echo "error: Antigravity quota preflight failed with unrecognized result (exit $rc)" >&2
+      return 1
+      ;;
+  esac
+}
+
+ANTIGRAVITY_FALLBACK=0
+antigravity_preflight || exit 1
+if [ "$ANTIGRAVITY_FALLBACK" -eq 1 ] && [ "$RAW_LAUNCH" -eq 1 ]; then
+  case "$LAUNCH" in
+    *'antigravity/'*)
+      LAUNCH=$(printf '%s' "$LAUNCH" | sed -E "s/['\"]?antigravity\/[^'\" ]+['\"]?/'cockpit\/gpt-5.6-luna'/g")
+      case "$LAUNCH" in
+        *--effort*)
+          LAUNCH=$(printf '%s' "$LAUNCH" | sed -E "s/--effort[ =]['\"]?[^'\" ]+['\"]?/--effort 'high'/g")
+          ;;
+        *)
+          LAUNCH="$LAUNCH --effort 'high'"
+          ;;
+      esac
+      ;;
+    *)
+      LAUNCH="$LAUNCH --model 'cockpit/gpt-5.6-luna' --effort 'high'"
+      ;;
+  esac
+fi
+
 secondmate_registry_value() {
   secondmate_registry_field "$DATA/secondmates.md" "$1" "$2"
 }
