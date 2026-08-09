@@ -49,7 +49,9 @@ with open(os.environ["HF_FAKE_LOG"], "a", encoding="utf-8") as handle:
     handle.write(json.dumps(args) + "\\n")
 
 if args[:2] == ["model", "get"]:
-    if args[2] == "seed_audio":
+    if os.environ.get("HF_MODEL_TYPE_OVERRIDE"):
+        model_type = os.environ["HF_MODEL_TYPE_OVERRIDE"]
+    elif args[2] == "seed_audio":
         model_type = "audio"
     elif args[2].startswith(("kling", "seedance")):
         model_type = "video"
@@ -223,16 +225,24 @@ if PATH="$FAKE_BIN:$PATH" HF_FAKE_LOG="$FAKE_LOG" \
   > "$TEST_TMP/stale-upload.out" 2> "$TEST_TMP/stale-upload.err"; then
   fail "upload accepted media changed after approval"
 fi
-[ ! -e "$FAKE_LOG" ] || fail "changed media reached the Higgsfield CLI"
+python3 - "$FAKE_LOG" <<'PY' || fail "changed media reached the upload interface"
+import json
+import sys
+
+commands = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8")]
+assert not any(command[:2] == ["upload", "create"] for command in commands)
+PY
 
 printf 'fake image bytes\n' > "$REFERENCE"
+STALE_REPLAY_CALLS_BEFORE=$(wc -l < "$FAKE_LOG")
 if PATH="$FAKE_BIN:$PATH" HF_FAKE_LOG="$FAKE_LOG" \
   python3 "$WRAPPER" upload "$REQUEST" --approval-token "$STALE_UPLOAD_TOKEN" \
   --output "$TEST_TMP/stale-replay-request.json" \
   > "$TEST_TMP/stale-replay.out" 2> "$TEST_TMP/stale-replay.err"; then
   fail "upload reused a consumed approval after media restoration"
 fi
-[ ! -e "$FAKE_LOG" ] || fail "consumed upload approval contacted the Higgsfield CLI"
+STALE_REPLAY_CALLS_AFTER=$(wc -l < "$FAKE_LOG")
+[ "$STALE_REPLAY_CALLS_BEFORE" -eq "$STALE_REPLAY_CALLS_AFTER" ] || fail "consumed upload approval contacted the Higgsfield CLI"
 pass "upload approval is content-bound and consumed before upload"
 
 PATH="$FAKE_BIN:$PATH" HF_FAKE_LOG="$FAKE_LOG" \
@@ -298,6 +308,56 @@ fi
 UPLOAD_CALLS_AFTER=$(wc -l < "$FAKE_LOG")
 [ "$UPLOAD_CALLS_BEFORE" -eq "$UPLOAD_CALLS_AFTER" ] || fail "upload replay contacted the Higgsfield CLI"
 pass "upload approval cannot be replayed"
+
+python3 - "$TEST_TMP/audio-upload-request.json" "$REFERENCE" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+request = {
+    "job_type": "seed_audio",
+    "prompt": "narrate this image",
+    "parameters": {},
+    "media": [{"flag": "image", "value": sys.argv[2]}],
+}
+Path(sys.argv[1]).write_text(json.dumps(request), encoding="utf-8")
+PY
+
+PATH="$FAKE_BIN:$PATH" HF_FAKE_LOG="$FAKE_LOG" \
+  python3 "$WRAPPER" plan "$TEST_TMP/audio-upload-request.json" \
+  > "$TEST_TMP/audio-upload-plan.json"
+AUDIO_UPLOAD_TOKEN=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["upload_approval_token"])' "$TEST_TMP/audio-upload-plan.json")
+AUDIO_UPLOADS_BEFORE=$(python3 - "$FAKE_LOG" <<'PY'
+import json
+import sys
+
+commands = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8")]
+print(sum(command[:2] == ["upload", "create"] for command in commands))
+PY
+)
+if PATH="$FAKE_BIN:$PATH" HF_FAKE_LOG="$FAKE_LOG" \
+  python3 "$WRAPPER" upload "$TEST_TMP/audio-upload-request.json" \
+  --approval-token "$AUDIO_UPLOAD_TOKEN" --output "$TEST_TMP/audio-uploaded-request.json" \
+  > "$TEST_TMP/audio-upload.out" 2> "$TEST_TMP/audio-upload.err"; then
+  fail "upload accepted local media for an audio model"
+fi
+AUDIO_UPLOADS_AFTER=$(python3 - "$FAKE_LOG" <<'PY'
+import json
+import sys
+
+commands = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8")]
+print(sum(command[:2] == ["upload", "create"] for command in commands))
+PY
+)
+[ "$AUDIO_UPLOADS_BEFORE" -eq "$AUDIO_UPLOADS_AFTER" ] || fail "audio model received local media"
+[ ! -e "$TEST_TMP/audio-uploaded-request.json" ] || fail "rejected audio upload wrote an uploaded request"
+
+PATH="$FAKE_BIN:$PATH" HF_FAKE_LOG="$FAKE_LOG" HF_MODEL_TYPE_OVERRIDE=image \
+  python3 "$WRAPPER" upload "$TEST_TMP/audio-upload-request.json" \
+  --approval-token "$AUDIO_UPLOAD_TOKEN" --output "$TEST_TMP/audio-uploaded-request.json" \
+  > "$TEST_TMP/audio-upload-retry.json"
+[ -e "$TEST_TMP/audio-uploaded-request.json" ] || fail "model rejection consumed the upload approval"
+pass "model type is validated before upload approval consumption"
 
 if PATH="$FAKE_BIN:$PATH" HF_FAKE_LOG="$FAKE_LOG" \
   python3 "$WRAPPER" cost "$REQUEST" --receipt "$COST_RECEIPT" \

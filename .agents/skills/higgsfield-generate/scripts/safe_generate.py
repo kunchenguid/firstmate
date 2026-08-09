@@ -608,6 +608,7 @@ def command_upload(args: argparse.Namespace) -> None:
         uploads = _validated_upload_manifest(receipt.get("uploads"))
         if [upload["path"] for upload in uploads] != upload_paths:
             raise PolicyError("upload approval does not match the exact request")
+        _ensure_image_or_video(request["job_type"])
         consumed = dict(receipt)
         consumed["status"] = "consumed"
         _rewrite_locked_json(approval_handle, consumed)

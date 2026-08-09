@@ -49,15 +49,16 @@ The wrapper accepts only absolute regular-file paths or existing Higgsfield UUID
 
 ## Approval sequence
 
-1. Run `python3 scripts/safe_generate.py plan request.json`.
+1. Run `python3 scripts/safe_generate.py plan /absolute/temporary/directory/request.json`.
 2. If the plan lists uploads, show the captain every exact path and obtain explicit approval for those files.
-3. Only after upload approval, run `python3 scripts/safe_generate.py upload request.json --approval-token <token-from-plan> --output <temporary-uploaded-request.json>`.
+3. Only after upload approval, run `python3 scripts/safe_generate.py upload /absolute/temporary/directory/request.json --approval-token <token-from-plan> --output /absolute/temporary/directory/uploaded-request.json`.
 4. Use the uploaded request from then on.
-5. Run `python3 scripts/safe_generate.py cost <request.json> --receipt <temporary-cost-receipt.json>`.
+5. Run `python3 scripts/safe_generate.py cost /absolute/temporary/directory/uploaded-request.json --receipt /absolute/temporary/directory/cost-receipt.json`.
 6. Show the captain the exact model, job count, parameters, uploaded references, and credit cost.
 7. Obtain explicit approval for that exact paid generation.
-8. Only after cost approval, run `python3 scripts/safe_generate.py run <request.json> --cost-receipt <temporary-cost-receipt.json>`.
+8. Only after cost approval, run `python3 scripts/safe_generate.py run /absolute/temporary/directory/uploaded-request.json --cost-receipt /absolute/temporary/directory/cost-receipt.json`.
 
+For prompt-only work without step 3, use `/absolute/temporary/directory/request.json` in steps 5 and 8.
 Do not combine upload approval with cost approval unless the captain explicitly approves both after seeing both disclosures.
 Treat every retry, variation, edit, or additional output as a new generation that must repeat the cost and approval steps.
 For a multi-job request, stop and obtain separate bulk approval for an enumerated job count and total estimated credits, then execute each job through its own cost receipt.
