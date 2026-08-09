@@ -894,12 +894,18 @@ EOF
     # ordering evaluates it ONLY for a non-afk, no-captain-verb signal.
     # shellcheck disable=SC2086  # $files is a space-separated status-path list (ids carry no spaces)
     if afk_present || signal_reason_is_actionable $files || ! signal_crew_provably_working $files; then
+      signal_keys=
       while IFS=$(printf '\t') read -r sf sig f; do
         [ -n "$sf" ] || continue
+        signal_keys="$signal_keys $(basename "$f")"
         fm_wake_append signal "$(basename "$f")" "$reason" || exit 1
       done <<EOF
 $pending
 EOF
+      if [ -n "$signal_keys" ]; then
+        # shellcheck disable=SC2086  # $signal_keys is a space-separated basename list (ids carry no spaces)
+        fm_wake_ack_cursor_add $signal_keys || exit 1
+      fi
       while IFS=$(printf '\t') read -r sf sig f; do
         [ -n "$sf" ] || continue
         printf '%s' "$sig" > "$sf"

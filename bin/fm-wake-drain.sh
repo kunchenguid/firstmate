@@ -135,6 +135,14 @@ DRAIN_TMP=
 fm_lock_release "$FM_WAKE_QUEUE_LOCK"
 DRAIN_LOCK_HELD=false
 
+# Now that the queue is committed, drop the consumed signal keys from the
+# acknowledgement cursor. The cursor still tracks any keys the watcher queued
+# after this drain captured its snapshot, so a concurrent watcher append is
+# never silently lost. The drain is the only producer that removes keys.
+removed_keys=$(printf '%s\n' "$RAW_ROWS" | awk -F '\t' 'NF >= 5 && $3 == "signal" && !seen[$4]++ { print $4 }')
+# shellcheck disable=SC2086  # $removed_keys is an awk-built baseline-key list (ids carry no spaces)
+fm_wake_ack_cursor_remove $removed_keys || true
+
 # Raw output and queue deletion are authoritative. Everything below is
 # best-effort and cannot restore, duplicate, hide, or fail the consumed rows.
 (fm_wake_print_annotations "$RAW_ROWS") || true

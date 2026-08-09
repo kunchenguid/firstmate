@@ -228,11 +228,42 @@ fi
 # Queued wakes are an independent hazard; warn whenever they are pending, even if
 # a watcher is alive. Kept after the banner so the no-watcher alarm reads first.
 # Dedup of the watcher-down banner never suppresses this warning.
+unacked_banner_marker="$STATE/.guard-watcher-unacked-banner"
+unacked_streak_file="$STATE/.wake-unacked-streak"
+unacked_streak=0
+unacked_threshold=${FM_WATCH_UNACKED_THRESHOLD:-3}
+if [ -s "$unacked_streak_file" ]; then
+  unacked_streak=$(cat "$unacked_streak_file" 2>/dev/null || echo 0)
+  case "$unacked_streak" in ''|*[!0-9]*) unacked_streak=0 ;; esac
+fi
+if [ "$unacked_streak" -ge "$unacked_threshold" ] && [ -s "$unacked_banner_marker" ] && [ "$READ_ONLY" -ne 1 ]; then
+  unacked_keys=$(sed -n 's/^.*keys=//p' "$unacked_banner_marker" 2>/dev/null | head -1 || true)
+  rule='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
+  if fm_guard_claim_stale_banner "$STATE" "unacked-exit:$unacked_keys"; then
+    {
+      printf '●%s\n' "$rule"
+      printf '●  WATCHER THRASHING ON UNREAD SIGNAL - %s consecutive unacked exits\n' "$unacked_streak"
+      printf '●  unread task ids: %s\n' "${unacked_keys:-unspecified}"
+      printf '●  The watcher is firing on the same signal set nobody has read. Draining the queue\n'
+      printf '●  removes the keys from the acknowledgement cursor and resets the streak.\n'
+      printf '●  %s\n' "$CONTINUE_LINE"
+      printf '●  drain the queue with bin/fm-wake-drain.sh, then handle the listed tasks.\n'
+      printf '●%s\n' "$rule"
+    } >&2
+  else
+    printf 'WARNING: watcher still thrashing on unread signal (streak %s, ids %s) - full banner already printed this episode.\n' \
+      "$unacked_streak" "${unacked_keys:-unspecified}" >&2
+  fi
+fi
+
 if "$queue_pending"; then
   if [ "$READ_ONLY" -eq 1 ]; then
     echo "WARNING: queued wakes pending - left untouched because this session lacks verified fleet-lock ownership." >&2
   else
     echo "WARNING: queued wakes pending - drain them with bin/fm-wake-drain.sh before anything else." >&2
+  fi
+  if [ "$READ_ONLY" -ne 1 ] && [ "$watcher_healthy" = false ]; then
+    echo "WARNING: watcher is down with queued wakes pending - a Stop hook will not refire unattended. Verify the watcher state and arm bin/fm-watch-arm.sh as a tracked background task after draining the queue." >&2
   fi
 fi
 exit 0

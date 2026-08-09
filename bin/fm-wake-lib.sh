@@ -8,6 +8,8 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-${STATE:-$FM_HOME/state}}"
 FM_WAKE_QUEUE="${FM_WAKE_QUEUE:-$STATE/.wake-queue}"
 FM_WAKE_QUEUE_LOCK="${FM_WAKE_QUEUE_LOCK:-$STATE/.wake-queue.lock}"
+FM_WAKE_ACK_CURSOR="${FM_WAKE_ACK_CURSOR:-$STATE/.wake-acked-cursor}"
+FM_WAKE_ACK_CURSOR_LOCK="${FM_WAKE_ACK_CURSOR_LOCK:-$STATE/.wake-acked-cursor.lock}"
 FM_LOCK_STALE_AFTER="${FM_LOCK_STALE_AFTER:-2}"
 # Resolved once at source time: fm_pid_identity and fm_path_mtime run inside 0.2s
 # confirm and 0.5s attach polls, and forking uname per call is a measurable cost on
@@ -580,6 +582,154 @@ fm_wake_append() {
   fi
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   return "$status"
+}
+
+# Per-signal acknowledgement cursor: distinct signal keys that have been queued
+# by a watcher cycle but not yet consumed by a drain. A key is added when the
+# watcher appends a signal wake and removed when the drain commits the queue.
+# The arm layer reads this cursor to distinguish a cycle that exits on a NEW
+# signal from one that exits on the same signal set the previous cycle already
+# queued. The reader is the durable source of "still pending": the queue itself
+# is the structural truth, but the cursor survives a queue that has been
+# partially drained by a concurrent reader and avoids re-scanning the queue for
+# every cycle close. Stored as one key per line. Updates are atomic under the
+# cursor lock so a concurrent add/remove never observes a half-written key.
+
+fm_wake_ack_cursor_keys() {
+  local key
+  [ -s "$FM_WAKE_ACK_CURSOR" ] || return 0
+  while IFS= read -r key; do
+    [ -n "$key" ] || continue
+    printf '%s\n' "$key"
+  done < "$FM_WAKE_ACK_CURSOR"
+}
+
+fm_wake_ack_cursor_read_locked() {
+  fm_wake_ack_cursor_keys
+}
+
+# fm_wake_ack_cursor_add <key> [<key> ...]
+# Add one or more keys to the acknowledgement cursor. Idempotent: a key already
+# present is not duplicated. Returns 0 on success, 1 on lock contention beyond
+# the spin budget (the caller can retry), 2 if any key is rejected by
+# fm_wake_clean_field.
+fm_wake_ack_cursor_add() {
+  local i=0 status=0 key clean
+  [ "$#" -gt 0 ] || return 0
+  while ! fm_lock_try_acquire "$FM_WAKE_ACK_CURSOR_LOCK"; do
+    [ "$i" -lt 50 ] || return 1
+    sleep 0.02 2>/dev/null || sleep 1
+    i=$((i + 1))
+  done
+  for key in "$@"; do
+    clean=$(printf '%s' "$key" | fm_wake_clean_field)
+    [ -n "$clean" ] || { status=2; continue; }
+    if [ -s "$FM_WAKE_ACK_CURSOR" ] && grep -F -x -e "$clean" "$FM_WAKE_ACK_CURSOR" >/dev/null 2>&1; then
+      continue
+    fi
+    printf '%s\n' "$clean" >> "$FM_WAKE_ACK_CURSOR" || status=1
+  done
+  fm_lock_release "$FM_WAKE_ACK_CURSOR_LOCK"
+  return "$status"
+}
+
+# fm_wake_ack_cursor_remove <key> [<key> ...]
+# Remove one or more keys from the acknowledgement cursor. Missing keys are
+# silently ignored. Returns 0 on success, 1 on lock contention.
+fm_wake_ack_cursor_remove() {
+  local i=0 status=0 key clean current
+  [ "$#" -gt 0 ] || return 0
+  [ -s "$FM_WAKE_ACK_CURSOR" ] || return 0
+  while ! fm_lock_try_acquire "$FM_WAKE_ACK_CURSOR_LOCK"; do
+    [ "$i" -lt 50 ] || return 1
+    sleep 0.02 2>/dev/null || sleep 1
+    i=$((i + 1))
+  done
+  for key in "$@"; do
+    clean=$(printf '%s' "$key" | fm_wake_clean_field)
+    [ -n "$clean" ] || continue
+    tmp=$(umask 077; mktemp "${FM_WAKE_ACK_CURSOR}.tmp.XXXXXX" 2>/dev/null) || { status=1; break; }
+    grep -F -v -x -e "$clean" "$FM_WAKE_ACK_CURSOR" > "$tmp" 2>/dev/null || true
+    mv -f "$tmp" "$FM_WAKE_ACK_CURSOR" || status=1
+  done
+  fm_lock_release "$FM_WAKE_ACK_CURSOR_LOCK"
+  return "$status"
+}
+
+# fm_wake_ack_cursor_has <key>
+# Return 0 iff <key> is currently in the cursor. Reads under the lock so a
+# concurrent add/remove is never observed half-applied.
+fm_wake_ack_cursor_has() {
+  local i=0 key clean rc=1
+  [ "$#" -eq 1 ] || return 1
+  [ -s "$FM_WAKE_ACK_CURSOR" ] || return 1
+  key=$1
+  clean=$(printf '%s' "$key" | fm_wake_clean_field)
+  [ -n "$clean" ] || return 1
+  while ! fm_lock_try_acquire "$FM_WAKE_ACK_CURSOR_LOCK"; do
+    [ "$i" -lt 50 ] || return 1
+    sleep 0.02 2>/dev/null || sleep 1
+    i=$((i + 1))
+  done
+  if grep -F -x -e "$clean" "$FM_WAKE_ACK_CURSOR" >/dev/null 2>&1; then
+    rc=0
+  fi
+  fm_lock_release "$FM_WAKE_ACK_CURSOR_LOCK"
+  return "$rc"
+}
+
+# fm_wake_ack_cursor_intersect <key> [<key> ...]
+# Print the subset of <key>... that is currently in the cursor, one per line.
+# Returns 0 if any key is present, 1 otherwise. Reads under the lock.
+fm_wake_ack_cursor_intersect() {
+  local i=0 matched=0 key clean
+  [ "$#" -gt 0 ] || return 1
+  [ -s "$FM_WAKE_ACK_CURSOR" ] || return 1
+  while ! fm_lock_try_acquire "$FM_WAKE_ACK_CURSOR_LOCK"; do
+    [ "$i" -lt 50 ] || return 1
+    sleep 0.02 2>/dev/null || sleep 1
+    i=$((i + 1))
+  done
+  for key in "$@"; do
+    clean=$(printf '%s' "$key" | fm_wake_clean_field)
+    [ -n "$clean" ] || continue
+    if grep -F -x -e "$clean" "$FM_WAKE_ACK_CURSOR" >/dev/null 2>&1; then
+      printf '%s\n' "$clean"
+      matched=1
+    fi
+  done
+  fm_lock_release "$FM_WAKE_ACK_CURSOR_LOCK"
+  [ "$matched" -eq 1 ]
+}
+
+# fm_wake_ack_cursor_intersect_file <snapshot-file> <key> [<key> ...]
+# Like fm_wake_ack_cursor_intersect but reads the candidate set from a
+# captured snapshot file instead of the live cursor. Used by the arm to
+# compare a cycle's wake keys against the strictly-before-the-cycle cursor
+# state, so a watcher queueing a key during the cycle does not retroactively
+# make its own cycle unacked. Returns 0 if any key is present in the snapshot,
+# 1 otherwise. Does not take the cursor lock; the snapshot is private.
+fm_wake_ack_cursor_intersect_file() {
+  local snap=$1; shift
+  local matched=0 key clean
+  [ "$#" -gt 0 ] || return 1
+  [ -s "$snap" ] || return 1
+  for key in "$@"; do
+    clean=$(printf '%s' "$key" | fm_wake_clean_field)
+    [ -n "$clean" ] || continue
+    if grep -F -x -e "$clean" "$snap" >/dev/null 2>&1; then
+      printf '%s\n' "$clean"
+      matched=1
+    fi
+  done
+  [ "$matched" -eq 1 ]
+}
+
+# fm_wake_ack_cursor_clear
+# Test seam: empty the cursor entirely. Used by tests that want a clean
+# starting state. Not used by production code.
+fm_wake_ack_cursor_clear() {
+  : > "$FM_WAKE_ACK_CURSOR" 2>/dev/null || true
 }
 
 # fm_wake_queued_keys <kind>

@@ -104,12 +104,52 @@ lock_snapshot() {
 WATCH_DELIVERY_LOG="$STATE/.watch-deliveries.log"
 WATCH_DELIVERY_LOCK="$STATE/.watch-deliveries.lock"
 
+# Consecutive unacked-exit streak: the watcher is thrashing on the same unread
+# signal set when the arm closes N cycles in a row where every cycle's signal
+# keys are still in the acknowledgement cursor (the drain never consumed them).
+# Threshold of 3 is deliberate: one unacked exit is a transient (a drain in
+# flight, a race between queue and cursor); two is unusual; three is the issue
+# 2028 failure mode where the watcher is firing constantly on reports nobody has
+# read. Configurable per-home via FM_WATCH_UNACKED_THRESHOLD.
+UNACKED_STREAK_FILE="$STATE/.wake-unacked-streak"
+UNACKED_THRESHOLD=${FM_WATCH_UNACKED_THRESHOLD:-3}
+case "$UNACKED_THRESHOLD" in
+  ''|*[!0-9]*) UNACKED_THRESHOLD=3 ;;
+  0) UNACKED_THRESHOLD=1 ;;
+esac
+# Episode marker for the unacked-exit alarm, written by the arm and consumed by
+# the guard (bin/fm-guard.sh). The same keying approach as the watcher-stale
+# banner: one line = the current episode key, deduplicated.
+UNACKED_BANNER_MARKER="$STATE/.guard-watcher-unacked-banner"
+
 cycle_active=0
 cycle_watcher_pid=none
 cycle_watcher_identity=none
 cycle_origin=unknown
 cycle_started_at=0
 cycle_lock_before='pid:none|identity:none'
+# Snapshot of the acknowledgement cursor captured at the start of each cycle.
+# The arm compares the cycle's wake keys against this snapshot to classify the
+# cycle as actionable-signal or actionable-signal-unacked, so a watcher that
+# appends to the cursor during the cycle does not retroactively make its own
+# cycle unacked. Keyed by the cycle's watcher pid so both the owning arm and
+# any attached observer read the same snapshot for the same cycle.
+CURSOR_SNAPSHOT=
+
+# Capture the current acknowledgement cursor into a per-cycle snapshot file.
+# Named after $1 (the cycle's watcher pid) so the owning arm's snapshot is
+# readable by an attached arm that did not capture it itself. Always freshly
+# overwrites so the snapshot is strictly-before-the-watcher.
+snapshot_cursor() {
+  local watcher_pid=$1
+  local snap="$STATE/.wake-acked-cursor.snapshot.$watcher_pid"
+  CURSOR_SNAPSHOT=$snap
+  if [ -s "$FM_WAKE_ACK_CURSOR" ]; then
+    cp -f "$FM_WAKE_ACK_CURSOR" "$snap" 2>/dev/null || : > "$snap"
+  else
+    : > "$snap" 2>/dev/null || true
+  fi
+}
 
 cycle_begin() {
   cycle_watcher_pid=$1
@@ -118,6 +158,10 @@ cycle_begin() {
   cycle_started_at=$(date +%s)
   cycle_lock_before=$(lock_snapshot)
   cycle_active=1
+  case "$cycle_origin" in
+    started) snapshot_cursor "$cycle_watcher_pid" ;;
+    *) CURSOR_SNAPSHOT="$STATE/.wake-acked-cursor.snapshot.$cycle_watcher_pid" ;;
+  esac
 }
 
 cycle_refresh_lock_before() {
@@ -182,6 +226,8 @@ cycle_log_append() {
   esac
   fm_lock_release "$CYCLE_LOG_LOCK"
   cycle_active=0
+  [ -z "$CURSOR_SNAPSHOT" ] || rm -f "$CURSOR_SNAPSHOT" 2>/dev/null || true
+  CURSOR_SNAPSHOT=
 }
 
 # A persistent adapter passes the arm pid that just closed. Once this new arm
@@ -298,12 +344,17 @@ close_unobserved_cycle() {
   fi
   fm_lock_release "$WATCH_DELIVERY_LOCK"
   if [ -n "$reason" ]; then
+    LAST_OBSERVED_REASON=$reason
     printf '%s\n' "$reason"
     return 0
   fi
   fail_unexplained_cycle
   return 1
 }
+
+# Last wake reason recovered by close_unobserved_cycle. The attach-and-wait path
+# uses it to drive the unacked-streak update without re-reading the delivery log.
+LAST_OBSERVED_REASON=
 
 # Stay alive across identity-matched healthy holders. If one cycle ends, attach
 # to a verified successor. With no successor, report the wake that cycle durably
@@ -330,10 +381,15 @@ attach_and_wait() {
       continue
     fi
     if close_unobserved_cycle; then
+      case "$LAST_OBSERVED_REASON" in
+        signal:*) update_unacked_streak "$(adjust_unacked_reason actionable-signal <(printf '%s\n' "$LAST_OBSERVED_REASON"))" ;;
+        *) update_unacked_streak attached-delivered-wake ;;
+      esac
       cycle_log_append unknown unknown attached-delivered-wake none
       return 0
     fi
     cycle_log_append unknown unknown attached-cycle-ended none
+    update_unacked_streak attached-cycle-ended
     return 1
   done
 }
@@ -365,6 +421,71 @@ watch_output_reason_type() {
     heartbeat*) printf 'actionable-heartbeat' ;;
     *) printf 'none' ;;
   esac
+}
+
+# Extract the status file basenames from a watcher's signal reason line. The
+# basename is the queue key the watcher stored in the cursor. One basename per
+# line on stdout.
+watch_output_signal_keys() {
+  local out=$1 line
+  line=$(grep -E '^signal:' "$out" 2>/dev/null | head -1 || true)
+  [ -n "$line" ] || return 0
+  line=${line#signal:}
+  # shellcheck disable=SC2086  # the watcher prints a space-separated status-path list (ids carry no spaces)
+  for f in $line; do
+    [ -n "$f" ] || continue
+    printf '%s\n' "${f##*/}"
+  done
+}
+
+# Adjust a base reason classification when the cycle's signal keys are still
+# in the acknowledgement cursor: an "already surfaced" wake is the same signal
+# set the previous cycle queued without a drain consuming it. Returns the
+# adjusted reason on stdout. Echoes the input unchanged (with the same
+# base-case default of "actionable-signal") when the cursor is empty or when
+# the keys are not all present, so a fresh detection stays
+# "actionable-signal" and tooling reading the lifecycle ledger sees a new
+# distinct value only when the cycle really is unacked.
+# $3 names the snapshot file the arm captured before forking the watcher.
+# Comparing the cycle's wake keys against the snapshot, not the current cursor,
+# is what makes the verdict cycle-scoped: the watcher appends to the cursor
+# during the cycle, so reading the live cursor after the cycle would classify
+# every cycle as unacked. The snapshot is the strictly-before-the-cycle view.
+adjust_unacked_reason() {
+  local base=$1 out=$2 snapshot=$3 keys present_line
+  [ "$base" = actionable-signal ] || { printf '%s\n' "$base"; return 0; }
+  keys=$(watch_output_signal_keys "$out")
+  [ -n "$keys" ] || { printf '%s\n' "$base"; return 0; }
+  [ -s "$snapshot" ] || { printf '%s\n' "$base"; return 0; }
+  # shellcheck disable=SC2086  # $keys is a newline-separated basename list (ids carry no spaces)
+  present_line=$(fm_wake_ack_cursor_intersect_file "$snapshot" $keys 2>/dev/null || true)
+  if [ -n "$present_line" ]; then
+    printf '%s-unacked\n' "$base"
+  else
+    printf '%s\n' "$base"
+  fi
+}
+
+# Update the unacked-streak counter and, when it crosses the threshold, arm
+# the alarm episode marker in the same way the watcher-stale banner arms. The
+# marker is keyed by the recorded task ids so a different signal set in the
+# next alarm is a new episode and re-prints the full banner.
+update_unacked_streak() {
+  local resolved=$1 keys
+  if [ "$resolved" = actionable-signal-unacked ]; then
+    streak=$(cat "$UNACKED_STREAK_FILE" 2>/dev/null || echo 0)
+    case "$streak" in ''|*[!0-9]*) streak=0 ;; esac
+    streak=$((streak + 1))
+    printf '%s\n' "$streak" > "$UNACKED_STREAK_FILE" 2>/dev/null || true
+    if [ "$streak" -ge "$UNACKED_THRESHOLD" ]; then
+      keys=$(fm_wake_ack_cursor_keys | paste -sd ' ' - 2>/dev/null || true)
+      [ -n "$keys" ] || keys=unspecified
+      printf 'unacked-streak=%s keys=%s\n' "$streak" "$keys" > "$UNACKED_BANNER_MARKER" 2>/dev/null || true
+    fi
+  else
+    : > "$UNACKED_STREAK_FILE" 2>/dev/null || true
+    rm -f "$UNACKED_BANNER_MARKER" 2>/dev/null || true
+  fi
 }
 
 print_watch_output() {
@@ -453,11 +574,13 @@ cycle_begin "$child" started "$(fm_pid_identity "$child" 2>/dev/null || true)"
 child_done=0
 
 owned_child_finished() {
-  local rc=$1 signal reason_type status
+  local rc=$1 signal reason_type resolved status
   signal=$(cycle_signal_name "$rc")
   if [ "$rc" -eq 0 ] && watch_output_has_wake "$child_out"; then
     reason_type=$(watch_output_reason_type "$child_out")
-    cycle_log_append "$rc" "$signal" "$reason_type" none
+    resolved=$(adjust_unacked_reason "$reason_type" "$child_out" "$CURSOR_SNAPSHOT")
+    update_unacked_streak "$resolved"
+    cycle_log_append "$rc" "$signal" "$resolved" none
     print_watch_output "$child_out"
     rm -f "$child_out" 2>/dev/null || true
     child=
@@ -483,16 +606,22 @@ owned_child_finished() {
     child=
     child_out=
     if close_unobserved_cycle; then
+      case "$LAST_OBSERVED_REASON" in
+        signal:*) update_unacked_streak "$(adjust_unacked_reason actionable-signal <(printf '%s\n' "$LAST_OBSERVED_REASON"))" ;;
+        *) update_unacked_streak clean-exit-delivered-wake ;;
+      esac
       cycle_log_append "$rc" "$signal" clean-exit-delivered-wake none
       return 0
     fi
     cycle_log_append "$rc" "$signal" unexpected-clean-exit none
+    update_unacked_streak unexpected-clean-exit
     return 1
   fi
 
   reason_type="nonzero-exit"
   [ "$signal" = none ] || reason_type="signal-exit"
   cycle_log_append "$rc" "$signal" "$reason_type" none
+  update_unacked_streak "$reason_type"
   print_watch_output "$child_out"
   if ! grep -q '^watcher: FAILED' "$child_out" 2>/dev/null; then
     echo "watcher: FAILED - watcher cycle exited $rc without an actionable reason"
@@ -545,5 +674,6 @@ cleanup_child
 wait "$child" 2>/dev/null
 rc=$?
 cycle_log_append "$rc" "$(cycle_signal_name "$rc")" confirmation-timeout none
+update_unacked_streak confirmation-timeout
 echo "watcher: FAILED - no live watcher with a fresh beacon"
 exit 1
