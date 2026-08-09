@@ -97,12 +97,14 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  cp "$(command -v bash)" "$fakebin/muse-bin-test-version"
+  ln -s "$(command -v perl)" "$fakebin/muse-bin-test-version"
   cat > "$fakebin/muse" <<'SH'
 #!/usr/bin/env bash
 set -u
 [ -n "${FM_FAKE_HARNESS_RESULT:-}" ] || exit 0
-exec "$FM_FAKE_MUSE_VERSIONED" -c 'result=$($FM_FAKE_HARNESS_PROBE); printf "%s" "$result" > "$FM_FAKE_HARNESS_RESULT"'
+  versioned_dir=$(dirname "$FM_FAKE_MUSE_VERSIONED")
+  versioned_name=$(basename "$FM_FAKE_MUSE_VERSIONED")
+  (cd "$versioned_dir" && "./$versioned_name" -e 'my $result=`$ENV{FM_FAKE_HARNESS_PROBE}`; open my $fh, ">", $ENV{FM_FAKE_HARNESS_RESULT}; print {$fh} $result')
 SH
   chmod +x "$fakebin/muse"
   fm_fake_exit0 "$fakebin" treehouse gh-axi gh
@@ -157,18 +159,17 @@ run_muse_spawn() {  # <home> <proj> <wt> <fakebin> <id> [extra args...]
 # The foreign env markers are cleared because muse is markerless and the marker
 # layer deliberately outranks ancestry: with one retained, these cases would
 # assert the marker's verdict instead of the ancestry match they exist to pin.
-# The command substitution around the probe is load-bearing: a bare `-c <cmd>`
-# lets the shell exec the probe in place, which REPLACES the muse-bin-* process
-# name the walk is supposed to find. Real muse keeps its TUI process alive and
-# runs tools as children, so forcing a fork is what reproduces that shape.
+# The Perl fixture keeps the versioned process alive while its child runs the
+# probe, reproducing Muse's process ancestry without relying on a copied system
+# Bash binary, which macOS may kill with SIGKILL before the probe runs.
 test_detects_versioned_process_ancestor() {
   local dir bin out
   dir="$TMP_ROOT/detect"
   mkdir -p "$dir"
   for bin in muse-bin-0.1.0-R708.1 muse-bin-9.9.9-RZZZ.9 muse; do
-    cp "$(command -v bash)" "$dir/$bin"
-    out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
-      "$dir/$bin" -c "r=\$(\"$HARNESS\"); printf '%s' \"\$r\"")
+    ln -s "$(command -v perl)" "$dir/$bin"
+    out=$(cd "$dir" && env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+      FM_HARNESS_PROBE="$HARNESS" "./$bin" -e 'print `$ENV{FM_HARNESS_PROBE}`')
     [ "$out" = muse ] || fail "fm-harness.sh under process '$bin' reported '$out', expected muse"
   done
   pass "muse is detected through any versioned muse-bin ancestor"
@@ -181,9 +182,9 @@ test_detection_is_anchored() {
   dir="$TMP_ROOT/detect-neg"
   mkdir -p "$dir"
   for bin in musescore amuse notmuse-bin muse-binary muse-bind; do
-    cp "$(command -v bash)" "$dir/$bin"
-    out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
-      "$dir/$bin" -c "r=\$(\"$HARNESS\"); printf '%s' \"\$r\"")
+    ln -s "$(command -v perl)" "$dir/$bin"
+    out=$(cd "$dir" && env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+      FM_HARNESS_PROBE="$HARNESS" "./$bin" -e 'print `$ENV{FM_HARNESS_PROBE}`')
     [ "$out" != muse ] || fail "fm-harness.sh misdetected unrelated process '$bin' as muse"
   done
   pass "muse detection does not claim unrelated muse-containing commands"
