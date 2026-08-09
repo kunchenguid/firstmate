@@ -1285,6 +1285,29 @@ def ask_block:
     + "</form></div>"
   end;
 
+# What firstmate said back, and what the captain said before it. This is the ONLY
+# control on the board that carries a conversation; every other one resolves in a
+# single action and stays that way.
+#
+# It is display and only display: no control, no target, no intent, and nothing
+# derived from a firstmate message is ever actionable. It also ships EMPTY and
+# hidden, like the confirmation banner, so a statically served copy of this file
+# can never show a conversation - only the script that reached the reply service
+# puts anything here.
+#
+# Deliberately a sibling of the composer rather than a child of it: the refresh
+# hold counts any `.rc-t` holding unsent text, so conversation text living inside
+# that block would read as a draft and stop the board updating for good.
+def thread_block:
+  if ($controls | not) then "" else
+    "<section class=\"thr\" id=\"ask-thread\" hidden>"
+    + "<h3 class=\"thr-h\">Your thread with firstmate</h3>"
+    + "<ol class=\"thr-list\" aria-live=\"polite\"></ol>"
+    + "<p class=\"thr-more\" hidden>Older messages in this thread are outside the"
+    + " window the board keeps.</p>"
+    + "</section>"
+  end;
+
 def project_card:
   . as $p |
   # Every quiet signal on this card - no decisions, nothing queued, nothing in
@@ -1649,10 +1672,32 @@ body.board-reply .rc-ask,body.lavish .rc-ask{border:1px solid var(--line);border
 .rc-ok.rc-warn{border-color:#ead7ae;border-left-color:var(--amber);background:var(--amber-soft);}
 .rc-ok.rc-warn .ck{color:var(--amber);}
 .rc-ok.rc-warn .rc-ok-h{color:#936218;}
+/* The Ask-firstmate thread. Every message is inert text, so nothing here borrows
+   a control's shape: no pill, no button tone, no underlined action. */
+.thr{margin:13px 0 0;padding:0 22px;}
+.thr[hidden]{display:none;}
+.thr-h{margin:0 0 9px;font-size:11px;font-weight:700;letter-spacing:.07em;
+  text-transform:uppercase;color:var(--faint);}
+.thr-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:9px;}
+/* Who said it has to survive a glance, so the two sides differ in fill AND in
+   edge: adjacent bubbles that shared a treatment would read as one long note. */
+.thr-m{min-width:0;border:1px solid var(--line);border-left:3px solid var(--line);
+  border-radius:4px 13px 13px 4px;padding:9px 13px;background:var(--panel);}
+.thr-m.thr-captain{background:var(--slate-soft);border-color:#dce1e8;border-left-color:var(--slate);}
+.thr-m.thr-firstmate{border-left-color:var(--amber);}
+.thr-head{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;min-width:0;margin:0 0 2px;}
+.thr-who{font-size:12px;font-weight:700;color:var(--ink);}
+.thr-m.thr-captain .thr-who{color:var(--slate);}
+.thr-at{font-size:11.5px;color:var(--faint);}
+.thr-t{margin:0;font-size:13.5px;line-height:1.5;color:var(--ink);
+  white-space:pre-wrap;overflow-wrap:anywhere;}
+.thr-more{margin:9px 0 0;color:var(--faint);font-size:11.5px;}
+.thr-more[hidden]{display:none;}
 @media(max-width:720px){
   body.board-reply .rc,body.lavish .rc,
   body.board-reply .rc-ask,body.lavish .rc-ask{padding-left:16px;padding-right:16px;}
   .rc-b,.rc-go{min-height:44px;padding-top:9px;padding-bottom:9px;}
+  .thr{padding-left:16px;padding-right:16px;}
 }
 "
   end;
@@ -2172,6 +2217,7 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
      + (($waiting_calls | map(need_item) | add) // "")
      + (($waiting_prs | map(need_item) | add) // "") + "</div>" end)
 + ask_block
++ thread_block
 + (if $deferred_count == 0 then ""
    else "<details class=\"shelf\" id=\"deferred-shelf\"><summary>"
      + "<svg class=\"chev\" viewBox=\"0 0 24 24\"><polyline points=\"9 6 15 12 9 18\"/></svg>"
@@ -2592,6 +2638,115 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
         return true;
       });
   }());
+
+  /* The Ask-firstmate thread. This reads and renders; it is not a second way to
+     ask for anything. Nothing firstmate says here carries an intent, a target, or
+     a control, so a reply arriving on the board can never become an action - it
+     is the answer to a question the captain already asked, shown where they asked
+     it. Every value lands through textContent, so a reply is text and stays text. */
+  var thread = document.getElementById(\"ask-thread\");
+  var threadList = thread ? thread.querySelector(\".thr-list\") : null;
+  var threadMore = thread ? thread.querySelector(\".thr-more\") : null;
+  var threadReading = false;
+  var threadFirst = true;
+
+  function threadWhen(at) {
+    if (typeof at !== \"string\" || !at) { return \"\"; }
+    var when = new Date(at);
+    if (isNaN(when.getTime())) { return at; }
+    try { return when.toLocaleTimeString([], {hour: \"numeric\", minute: \"2-digit\"}); }
+    catch (e) { return at; }
+  }
+
+  function renderThread(data) {
+    if (!threadList || !data || !data.messages) { return; }
+    if (threadFirst) { threadList.setAttribute(\"aria-live\", \"off\"); }
+    var existing = {};
+    Array.prototype.forEach.call(threadList.children, function (row) {
+      if (row._fmThreadKey) { existing[row._fmThreadKey] = row; }
+    });
+    var wanted = {};
+    var place = threadList.firstChild;
+    Array.prototype.forEach.call(data.messages, function (message) {
+      if (!message || typeof message.text !== \"string\" || !message.text) { return; }
+      var key = (typeof message.id === \"string\" && message.id) ? message.id
+        : (message.from + \" \" + message.at + \" \" + message.text);
+      if (wanted[key]) { return; }
+      wanted[key] = true;
+      var mine = message.from === \"captain\";
+      var row = existing[key];
+      if (!row) {
+        row = document.createElement(\"li\");
+        row._fmThreadKey = key;
+        row.className = mine ? \"thr-m thr-captain\" : \"thr-m thr-firstmate\";
+        var head = document.createElement(\"div\");
+        head.className = \"thr-head\";
+        var who = document.createElement(\"span\");
+        who.className = \"thr-who\";
+        who.textContent = mine ? \"You\" : \"Firstmate\";
+        head.appendChild(who);
+        var when = threadWhen(message.at);
+        if (when) {
+          var stamp = document.createElement(\"time\");
+          stamp.className = \"thr-at\";
+          stamp.textContent = when;
+          if (typeof message.at === \"string\") { stamp.setAttribute(\"datetime\", message.at); }
+          head.appendChild(stamp);
+        }
+        var body = document.createElement(\"p\");
+        body.className = \"thr-t\";
+        body.textContent = message.text;
+        row.appendChild(head);
+        row.appendChild(body);
+      }
+      if (row !== place) { threadList.insertBefore(row, place); }
+      place = row.nextSibling;
+    });
+    Array.prototype.forEach.call(Array.prototype.slice.call(threadList.children), function (row) {
+      if (!row._fmThreadKey || !wanted[row._fmThreadKey]) { threadList.removeChild(row); }
+    });
+    /* Announce what ARRIVES, not what was already there: reading back the whole
+       conversation on load would bury the one line the captain is waiting for. */
+    if (threadFirst) {
+      threadFirst = false;
+      setTimeout(function () { threadList.setAttribute(\"aria-live\", \"polite\"); }, 0);
+    }
+    if (threadMore) { threadMore.hidden = data.truncated !== true; }
+    if (thread) { thread.hidden = !threadList.children.length && data.truncated !== true; }
+  }
+
+  function readThread() {
+    if (!thread || threadReading || !window.fetch || !window.AbortController) { return; }
+    var stop, timer;
+    try {
+      stop = new AbortController();
+      timer = setTimeout(function () { stop.abort(); }, 4000);
+    } catch (e) { return; }
+    threadReading = true;
+    window.fetch(ownUrl() + \"?fm-board-reply=thread\",
+        {method: \"GET\", cache: \"no-store\", signal: stop.signal})
+      .then(function (res) { return res.ok ? res.text() : \"\"; })
+      .then(function (text) {
+        var data = null;
+        try { data = JSON.parse(text); } catch (e) { data = null; }
+        if (data && data.service === \"fm-board-reply\") { renderThread(data); }
+      })
+      .catch(function () { /* a poll that failed simply asks again on the next tick */ })
+      .then(function () {
+        try { clearTimeout(timer); } catch (e) { /* already fired */ }
+        threadReading = false;
+      });
+  }
+
+  /* The document refresh is deliberately held while a composer holds unsent text -
+     exactly when the captain is mid-follow-up and firstmate's answer is most
+     likely to land - so the thread keeps a tick of its own on the board's own
+     cadence rather than riding the reload. */
+  receiverReady.then(function (live) {
+    if (!live || !thread) { return; }
+    readThread();
+    setInterval(readThread, " + (($refresh * 1000) | tostring) + ");
+  });
 
   /* One request, recorded or refused. A 200 means the service validated it and
      stored it durably, which is the only thing the confirmed state ever claims.
@@ -3029,6 +3184,10 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
       }
       shut(block);
       saveDrafts();
+      /* Read the thread back rather than drawing the captain's own message from
+         here: what appears in the conversation is then only ever what the service
+         actually stored, so the board cannot show a message that was never kept. */
+      readThread();
       return;
     }
 

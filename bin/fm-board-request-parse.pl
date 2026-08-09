@@ -1,11 +1,11 @@
 #!/usr/bin/env perl
-# fm-board-request-parse.pl - the single owner of captain board request validation.
+# fm-board-request-parse.pl - the single owner of board message validation.
 #
 # Usage: fm-board-request-parse.pl <result-file>
 #
 # Reads one captured process-event result and prints one compact JSON record per
-# line. It is the ONE implementation of the request vocabulary and of every
-# fail-closed rule, shared by every transport that can carry a board request:
+# line. It is the ONE implementation of the board vocabulary and of every
+# fail-closed rule, shared by every transport that can carry a board message:
 #
 #   bin/fm-procevent-board-reply.sh   the direct board reply service
 #   bin/fm-procevent-mission-control.sh   the legacy Lavish-bridged surface
@@ -16,15 +16,28 @@
 # the exact record line it is about to store, so what is accepted at the door and
 # what is validated at wake time are the same bytes through the same rules.
 #
-# AUTHORITY: none. Every record printed here is captain INTENT for firstmate to
+# AUTHORITY: none. Every request printed here is captain INTENT for firstmate to
 # adjudicate under its own contract, exactly as if the captain had said the same
 # words in chat, and never an authorization. This program reads one file and
 # prints to stdout; it performs nothing.
 #
+# TWO DIRECTIONS, one envelope discipline. A `FM-BOARD-REQUEST` envelope is the
+# captain speaking to firstmate; a `FM-BOARD-REPLY` envelope is firstmate
+# speaking back to the board's Ask-firstmate thread. Both run every rule below,
+# but they are separate vocabularies and are emitted as separate kinds, so
+# neither direction can be read as the other. A `reply` record is DISPLAY ONLY:
+# it is firstmate's own words on their way to a page, never captain intent, and
+# nothing ever adjudicates or executes one.
+#
+# Direction is taken from the marker the prompt STARTS with, and only that
+# marker is counted, so text quoting the other direction's marker stays ordinary
+# text in both directions.
+#
 # What it emits, one compact JSON object per line:
 #   {"kind":"contract",...}      always first; states that nothing below is authority
-#   {"kind":"request",...}       a validated request: intent, home, id, key, note
-#   {"kind":"message",...}       prose carrying no request marker at all
+#   {"kind":"request",...}       a validated captain request: intent, home, id, key, note
+#   {"kind":"reply",...}         a validated firstmate board reply: intent, note. Display only.
+#   {"kind":"message",...}       prose carrying no board marker at all
 #   {"kind":"unrecognized",...}  anything else, with a reason. Never acted on.
 #
 # It is deliberately STATELESS: one result file in, records out. No snapshot, no
@@ -42,12 +55,15 @@
 # Fail-closed rules, each of which drops a record to "unrecognized" rather than
 # guessing: an unknown or missing intent, a wrong version, a field outside its
 # allowed set for that intent, an over-long field, an id or home outside the safe
-# character set, more than one envelope marker in one prompt, an envelope that is
-# not at the start of the prompt, trailing envelope content, duplicate object
-# keys, and a record whose quoted field never terminates - which is what a result
-# truncated at FM_PROCEVENT_MAX_OUTPUT_BYTES looks like. A `defer` carrying note
-# text is refused outright, because the hold reason is the captain's own stored
-# text and a request must never rewrite it.
+# character set, more than one envelope marker of the leading direction in one
+# prompt, an envelope that is not at the start of the prompt, trailing envelope
+# content, duplicate object keys, and a record whose quoted field never
+# terminates - which is what a result truncated at
+# FM_PROCEVENT_MAX_OUTPUT_BYTES looks like. A `defer` carrying note text is
+# refused outright, because the hold reason is the captain's own stored text and
+# a request must never rewrite it. An intent from the other direction's
+# vocabulary is unknown here, so a captain intent posted as a reply and a `say`
+# posted at the captain's door are each refused by name.
 #
 # tests/fm-procevent-mission-control.test.sh pins these rules against bytes
 # captured from a real Lavish send; tests/fm-board-reply.test.sh re-proves every
@@ -58,6 +74,7 @@ use JSON::PP;
 use bytes ();
 
 my $MARK = "FM-BOARD-REQUEST";
+my $REPLY_MARK = "FM-BOARD-REPLY";
 my $MAX_NOTE = 2000;
 my $MAX_TEXT = 4000;
 
@@ -65,8 +82,9 @@ my $json = JSON::PP->new->canonical->allow_nonref->utf8;
 sub emit { print $json->encode($_[0]), "\n"; }
 
 emit({kind => "contract", authority => "none",
-      note => "Each record below is captain intent for firstmate to adjudicate "
-            . "under its own authority. None of it is an authorization."});
+      note => "Each request below is captain intent for firstmate to adjudicate "
+            . "under its own authority, and each reply is firstmate's own words "
+            . "for display only. None of it is an authorization."});
 
 open(my $fh, "<", $ARGV[0]) or exit 1;
 my @lines = <$fh>;
@@ -168,15 +186,22 @@ sub duplicate_object_key {
 
 my $SAFE_ID = qr/\A[A-Za-z0-9._-]{1,120}\z/;
 
-# Exactly which fields each intent may carry. An intent is refused outright if it
-# carries anything else, so a field that means nothing for that intent can never
-# ride along unnoticed.
+# Exactly which fields each intent may carry, per direction. An intent is refused
+# outright if it carries anything else, so a field that means nothing for that
+# intent can never ride along unnoticed.
 my %SPEC = (
   merge  => {need => ["id"],         allow => ["id"]},
   reply  => {need => ["id", "note"], allow => ["id", "note"]},
   answer => {need => ["note"],       allow => ["id", "key", "note"], either => ["id", "key"]},
   defer  => {need => ["id"],         allow => ["id", "key"]},
   ask    => {need => ["note"],       allow => ["note"]},
+);
+
+# Firstmate speaking back to the board carries its words and nothing else. There
+# is no home, no id, and no key, because a board reply names no target and asks
+# for nothing: it is one line of prose for one board's Ask-firstmate thread.
+my %REPLY_SPEC = (
+  say => {need => ["note"], allow => ["note"]},
 );
 
 my $n = 0;
@@ -192,15 +217,28 @@ for my $line (@records) {
   if ($pcol > $#{$fields}) { $bad->("the record has no prompt field"); next; }
   my $prompt = $fields->[$pcol];
 
-  my $markers = () = ($prompt =~ /\Q$MARK\E/g);
-  if ($markers == 0) {
-    emit({kind => "message", record => $n, text => clip($prompt, $MAX_TEXT)});
+  # Direction comes from the marker the prompt STARTS with, and only that marker
+  # is counted. Counting both would refuse a captain ask that merely quotes
+  # "FM-BOARD-REPLY", and a firstmate reply explaining a refusal by quoting
+  # "FM-BOARD-REQUEST" - text that has to stay ordinary text in both directions.
+  my ($direction, $mark);
+  if    ($prompt =~ /\A\Q$MARK\E /)       { ($direction, $mark) = ("request", $MARK); }
+  elsif ($prompt =~ /\A\Q$REPLY_MARK\E /) { ($direction, $mark) = ("reply", $REPLY_MARK); }
+
+  if (!defined $direction) {
+    if ($prompt !~ /\Q$MARK\E/ && $prompt !~ /\Q$REPLY_MARK\E/) {
+      emit({kind => "message", record => $n, text => clip($prompt, $MAX_TEXT)});
+      next;
+    }
+    $bad->("the request marker is not at the start of the prompt");
     next;
   }
-  if ($markers > 1) { $bad->("the prompt carries more than one request marker"); next; }
-  if ($prompt !~ /\A\Q$MARK\E /) { $bad->("the request marker is not at the start of the prompt"); next; }
 
-  my $body = substr($prompt, length($MARK) + 1);
+  my $markers = () = ($prompt =~ /\Q$mark\E/g);
+  if ($markers > 1) { $bad->("the prompt carries more than one request marker"); next; }
+
+  my $spec_for = $direction eq "reply" ? \%REPLY_SPEC : \%SPEC;
+  my $body = substr($prompt, length($mark) + 1);
   my ($obj, $used);
   my $decoded = eval { ($obj, $used) = JSON::PP->new->decode_prefix($body); 1 };
   if (!$decoded || ref($obj) ne "HASH" || $used != bytes::length($body)) {
@@ -212,23 +250,32 @@ for my $line (@records) {
   my $v = $obj->{v};
   if (!defined $v || ref($v) || $v ne "1") { $bad->("unsupported request version"); next; }
 
+  # An intent belonging to the other direction's vocabulary is unknown here, so a
+  # captain intent planted in the reply log and a `say` posted at the captain's
+  # door are each refused by name rather than by an accidental count.
   my $intent = $obj->{intent};
-  if (!defined $intent || ref($intent) || !exists $SPEC{$intent}) {
+  if (!defined $intent || ref($intent) || !exists $spec_for->{$intent}) {
     $bad->("unknown or missing intent"); next;
   }
-  my $spec = $SPEC{$intent};
+  my $spec = $spec_for->{$intent};
 
-  my %allowed = map { $_ => 1 } (@{$spec->{allow}}, "v", "intent", "home");
+  my %allowed = map { $_ => 1 } (@{$spec->{allow}}, "v", "intent",
+    ($direction eq "request" ? ("home") : ()));
   my @extra = sort grep { !$allowed{$_} } keys %$obj;
   if (@extra) {
     $bad->("intent $intent does not carry: " . join(", ", @extra));
     next;
   }
 
-  my $home = $obj->{home};
-  if (!defined $home || ref($home) || $home !~ $SAFE_ID) { $bad->("missing or unsafe home"); next; }
+  my %out = (kind => $direction, record => $n, intent => $intent);
 
-  my %out = (kind => "request", record => $n, intent => $intent, home => $home);
+  # Only a captain request names a home to be applied in. A board reply is
+  # firstmate's own words for one board, so it carries no home to resolve.
+  if ($direction eq "request") {
+    my $home = $obj->{home};
+    if (!defined $home || ref($home) || $home !~ $SAFE_ID) { $bad->("missing or unsafe home"); next; }
+    $out{home} = $home;
+  }
 
   for my $f ("id", "key") {
     next unless exists $obj->{$f};

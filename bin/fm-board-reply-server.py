@@ -7,6 +7,7 @@ hand is supported but the adapter is the interface.
 
 Usage:
   fm-board-reply-server.py --board <board.html> --requests <log>
+                           --replies <log>
                            --parser <fm-board-request-parse.pl>
                            --registration <procevent source record>
                            [--port <n>] [--host 127.0.0.1]
@@ -14,9 +15,17 @@ Usage:
 
 WHAT IT DOES, and nothing else. One loopback port:
 
-  GET  any path            the board file, read fresh from disk every time
-  GET  ?fm-board-reply=... a small JSON presence answer for the board's own probe
-  POST any path            validate one captain request and durably record it
+  GET  any path                 the board file, read fresh from disk every time
+  GET  ?fm-board-reply=probe    a small JSON presence answer for the board's own probe
+  GET  ?fm-board-reply=thread   the Ask-firstmate conversation, for display
+  POST any path                 validate one captain request and durably record it
+
+The thread read is display only, in both directions. It merges the captain `ask`
+requests already recorded here with the replies firstmate posted through
+`bin/fm-procevent-board-reply.sh say`, and it is the ONLY thing that reads the
+reply log. Nothing acts on a reply, nothing wakes from one, and no path here
+lets a reply reach the request log: the two logs are separate files and only the
+request log is what the wake source reads.
 
 Recording a request is not the same as firstmate collecting it, so both answers
 report `armed`: whether a wake is registered for this board right now. The board
@@ -49,8 +58,14 @@ store, so the rules that admit a request at the door and the rules that read it 
 wake time are one implementation and cannot drift.
 
 Path-agnostic on purpose: a reverse proxy may or may not strip its mount prefix,
-so every GET that is not the probe serves the board and a POST is accepted on any
-path. The board therefore posts to its own URL and needs no path convention.
+so every GET that is not a `fm-board-reply` query serves the board and a POST is
+accepted on any path. The board therefore posts to its own URL and needs no path
+convention.
+
+Every answer here, the thread included, is protected by exactly what protects the
+board page itself: this port serves the board to any GET, no `Access-Control-
+Allow-*` is ever sent, so another origin can issue a read but can never see the
+answer. The thread adds no kind of exposure the board file did not already have.
 
 Exit codes: 0 clean shutdown, 1 startup or runtime failure, 2 usage error.
 """
@@ -72,6 +87,11 @@ GUARD_HEADER = "X-Fm-Board-Reply"
 LOOPBACK = ("127.0.0.1", "::1", "localhost")
 DEFAULT_MAX_BODY = 8192
 ATTEMPT_MAX = 80
+# The thread is a conversation on a board, not an archive, so both ends are
+# bounded and a bound that actually dropped something is disclosed rather than
+# left to read as the whole story.
+THREAD_MAX_MESSAGES = 50
+THREAD_TAIL_BYTES = 262144
 
 
 def die(message):
@@ -111,6 +131,141 @@ def no_duplicate_keys(pairs):
             raise ValueError("duplicate key %s" % key)
         seen[key] = value
     return seen
+
+
+def tail_records(path, max_bytes):
+    """The last whole record lines of an append-only log, and whether any were cut.
+
+    Only complete lines are records, so a write in progress at the end of the file
+    contributes nothing, and a line that would end the parser's tabular block early
+    is dropped here rather than being allowed to silently swallow every record
+    after it.
+    """
+    try:
+        with open(path, "rb") as log:
+            log.seek(0, os.SEEK_END)
+            size = log.tell()
+            start = max(0, size - max_bytes)
+            log.seek(start)
+            raw = log.read()
+    except OSError:
+        return [], False
+    lines = raw.decode("utf-8", "replace").split("\n")[:-1]
+    cut = start > 0
+    if cut and lines:
+        lines = lines[1:]
+    usable = [line for line in lines if line[:1] in (" ", "\t") and "\r" not in line]
+    cut = cut or len(usable) != len(lines)
+    return usable, cut
+
+
+def leading_strings(line, count):
+    """The first `count` JSON string fields of a record line, or None."""
+    text = line.lstrip(" \t")
+    decoder = json.JSONDecoder()
+    values = []
+    for _ in range(count):
+        try:
+            value, end = decoder.raw_decode(text)
+        except ValueError:
+            return None
+        if not isinstance(value, str):
+            return None
+        values.append(value)
+        text = text[end:]
+        if text.startswith(","):
+            text = text[1:]
+    return values
+
+
+class Thread:
+    """The Ask-firstmate conversation on one board, for display and nothing else.
+
+    Both sides run through the one shared validator, so a line neither side could
+    have written is never rendered as something either of them said. The captain
+    side reads the request log and keeps `ask` alone, which is what scopes this to
+    the Ask-firstmate control: an answer, a merge request, a note, or a set-aside
+    is a one-action control and never becomes conversation.
+    """
+
+    def __init__(self, requests_log, replies_log, parser):
+        self.requests_log = requests_log
+        self.replies_log = replies_log
+        self.parser = parser
+        self.lock = threading.Lock()
+        self.cache = {}
+
+    def read_side(self, path, kind, intent, sender):
+        """Every message one log contributes, newest last, plus whether any were cut.
+
+        Cached against the log's own size and modification time, so an idle board
+        polling on its refresh cadence re-reads nothing and re-parses nothing.
+        """
+        try:
+            stamp = os.stat(path)
+            fingerprint = (stamp.st_size, stamp.st_mtime_ns)
+        except OSError:
+            fingerprint = None
+        cached = self.cache.get(path)
+        if cached is not None and cached[0] == fingerprint:
+            return cached[1], cached[2]
+        lines, cut = tail_records(path, THREAD_TAIL_BYTES)
+        messages = self.parse(lines, kind, intent, sender) if lines else []
+        self.cache[path] = (fingerprint, messages, cut)
+        return messages, cut
+
+    def parse(self, lines, kind, intent, sender):
+        handle, staged = tempfile.mkstemp(prefix=".thread.",
+                                          dir=os.path.dirname(self.requests_log))
+        try:
+            with os.fdopen(handle, "w", encoding="utf-8") as candidate:
+                candidate.write("prompts[%d]{received,attempt,prompt}:\n" % len(lines))
+                for line in lines:
+                    candidate.write(line + "\n")
+                candidate.write("board-delta-end=0\n")
+            try:
+                done = subprocess.run(["perl", self.parser, staged],
+                                      capture_output=True, timeout=20)
+            except (OSError, subprocess.SubprocessError):
+                return []
+            if done.returncode != 0:
+                return []
+            messages = []
+            for raw in done.stdout.decode("utf-8", "replace").splitlines():
+                if not raw.strip():
+                    continue
+                try:
+                    record = json.loads(raw)
+                except ValueError:
+                    continue
+                if record.get("kind") != kind or record.get("intent") != intent:
+                    continue
+                at = record.get("record")
+                if not isinstance(at, int) or not 1 <= at <= len(lines):
+                    continue
+                provenance = leading_strings(lines[at - 1], 2) or ["", ""]
+                messages.append({"id": provenance[1], "at": provenance[0],
+                                 "from": sender, "text": record.get("note") or ""})
+            return messages
+        finally:
+            try:
+                os.unlink(staged)
+            except OSError:
+                pass
+
+    def messages(self):
+        with self.lock:
+            asked, asked_cut = self.read_side(self.requests_log, "request", "ask", "captain")
+            said, said_cut = self.read_side(self.replies_log, "reply", "say", "firstmate")
+        # Stable by the time each message was RECORDED, which is all either log
+        # knows. The captain side is laid out first, so a same-second tie reads as
+        # the ask preceding the answer to it rather than the other way round.
+        merged = sorted(asked + said, key=lambda message: message["at"])
+        cut = asked_cut or said_cut
+        if len(merged) > THREAD_MAX_MESSAGES:
+            merged = merged[-THREAD_MAX_MESSAGES:]
+            cut = True
+        return merged, cut
 
 
 class Receiver:
@@ -264,6 +419,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     server_version = "fm-board-reply"
     sys_version = ""
     receiver = None
+    thread = None
 
     def log_message(self, fmt, *args):  # noqa: A003 - BaseHTTPRequestHandler hook
         """Quiet by default: a captain surface is not a request log."""
@@ -285,15 +441,24 @@ class Handler(http.server.BaseHTTPRequestHandler):
         body = (json.dumps(payload) + "\n").encode("utf-8")
         self.send_payload(status, body, "application/json; charset=utf-8")
 
-    def is_probe(self):
+    def ask(self):
+        """The value of the `fm-board-reply` query parameter, or None."""
         query = self.path.partition("?")[2].partition("#")[0]
         for part in query.split("&"):
-            if part.partition("=")[0] == PROBE_PARAM:
-                return True
-        return False
+            name, _, value = part.partition("=")
+            if name == PROBE_PARAM:
+                return value
+        return None
 
     def do_GET(self):
-        if self.is_probe():
+        asked = self.ask()
+        if asked == "thread":
+            messages, truncated = self.thread.messages()
+            self.send_json(200, {"service": SERVICE, "v": 1,
+                                 "armed": self.receiver.armed(),
+                                 "messages": messages, "truncated": truncated})
+            return
+        if asked is not None:
             self.send_json(200, {"service": SERVICE, "v": 1,
                                  "armed": self.receiver.armed()})
             return
@@ -366,6 +531,7 @@ def main(argv):
     parser = argparse.ArgumentParser(add_help=True, description=__doc__.splitlines()[0])
     parser.add_argument("--board", required=True)
     parser.add_argument("--requests", required=True)
+    parser.add_argument("--replies", required=True)
     parser.add_argument("--parser", required=True)
     parser.add_argument("--registration", required=True)
     parser.add_argument("--port", type=int, default=4321)
@@ -392,12 +558,17 @@ def main(argv):
         die("cannot create the request log directory: %s" % error)
     if os.path.islink(options.requests):
         die("the request log is a symlink: %s" % options.requests)
+    if os.path.islink(options.replies):
+        die("the reply log is a symlink: %s" % options.replies)
 
     Handler.receiver = Receiver(os.path.abspath(options.board),
                                 os.path.abspath(options.requests),
                                 os.path.abspath(options.parser),
                                 os.path.abspath(options.registration),
                                 options.max_body)
+    Handler.thread = Thread(os.path.abspath(options.requests),
+                            os.path.abspath(options.replies),
+                            os.path.abspath(options.parser))
     family = socket.AF_INET6 if ":" in options.host else socket.AF_INET
     Server.address_family = family
     try:
@@ -408,6 +579,7 @@ def main(argv):
     sys.stdout.write("listening: http://%s:%s/\n" % (options.host, port))
     sys.stdout.write("board: %s\n" % Handler.receiver.board)
     sys.stdout.write("requests: %s\n" % Handler.receiver.requests_log)
+    sys.stdout.write("replies: %s\n" % Handler.thread.replies_log)
     sys.stdout.write("armed: %s\n" % ("yes" if Handler.receiver.armed()
                                       else "no (nothing is collecting replies for this board yet)"))
     sys.stdout.flush()

@@ -825,4 +825,360 @@ JS
 
 test_board_replies_through_the_service_in_a_browser
 
+# ------------------------------------------------------------- the thread ----
+# Ask firstmate is the one control that carries a conversation, so firstmate's own
+# words have to reach the board without ever becoming something the board can act
+# on. Three failures matter and each is proved through a published interface only:
+#
+#   - a reply that is not display. A firstmate message that could be adjudicated,
+#     could wake firstmate, or could reach the wake source at all would be a new
+#     execution path opened by the thing that is meant to be an answer.
+#   - a thread that misreports the conversation. Out of order, one side attributed
+#     to the other, a one-action control shown as conversation, or a partial read
+#     presented as the whole of it.
+#   - a reply that cannot be trusted as firstmate's. Every fail-closed rule the
+#     captain direction is held to applies unchanged in this direction.
+#
+# A board of its own, because the cases above depend on exactly what is in the two
+# logs and the shared fixture's have been deliberately damaged by earlier cases.
+BOARD="$TMP_ROOT/thread-board.html"
+"$BOARD_BIN" --snapshot "$SNAP" --no-quota --controls --refresh 2 --out "$BOARD" >/dev/null \
+  || fail "the thread board fixture must render"
+LOG=$("$ADAPTER" log-path "$BOARD") || fail "log-path must resolve for the thread board"
+REPLY_LOG=$("$ADAPTER" reply-log-path "$BOARD") || fail "reply-log-path must resolve"
+THREAD_SOURCE_ID=$("$ADAPTER" source-id "$BOARD") || fail "source-id must resolve for the thread board"
+[ "$REPLY_LOG" != "$LOG" ] \
+  || fail "firstmate's replies must not share the log the wake source reads"
+"$ADAPTER" arm "$BOARD" >/dev/null || fail "arming the thread board must succeed"
+[ "$("$ADAPTER" board-path "$THREAD_SOURCE_ID")" = "$(perl -MCwd=realpath -e 'print realpath($ARGV[0])' "$BOARD")" ] \
+  || fail "a board-reply wake source must resolve to its originating board"
+"$ADAPTER" board-path board-not-registered >/dev/null 2>&1 \
+  && fail "an unregistered source id must not resolve to a board"
+start_service
+
+thread_read() { body_of "$(http GET "${URL}?fm-board-reply=thread")"; }
+# One value out of the thread, named by a python expression over the parsed body.
+thread_says() { thread_read | python3 -c "import json,sys
+thread = json.load(sys.stdin)
+print($1)"; }
+ask() {  # <note> <attempt>
+  send "$(envelope "$(python3 -c 'import json,sys; print(json.dumps({"v":1,"intent":"ask","home":"main","note":sys.argv[1]}))' "$1")")" "$2"
+}
+
+# --------------------------------------------- unchanged when never replied to -
+[ ! -e "$REPLY_LOG" ] \
+  || fail "serving a board must not create a reply log before firstmate has said anything"
+[ "$(thread_says 'len(thread["messages"])')" = 0 ] \
+  || fail "a board nobody has said anything on must read back empty: $(thread_read)"
+[ "$(status_of "$(ask 'Single shot, never answered.' fm-board:th1)")" = 200 ] \
+  || fail "an ask must still be accepted on a board with no thread yet"
+[ "$(status_of "$(send "$(envelope '{"v":1,"intent":"answer","home":"main","id":"d1","note":"Tuesday."}')" fm-board:th2)")" = 200 ] \
+  || fail "a one-action answer must still be accepted"
+[ "$(thread_says 'len(thread["messages"])')" = 1 ] \
+  || fail "the thread must carry the ask alone, got $(thread_read)"
+[ "$(thread_says 'thread["messages"][0]["text"]')" = "Single shot, never answered." ] \
+  || fail "an ask with no reply must still read back as the captain's own message"
+[ "$(thread_says 'thread["messages"][0]["from"]')" = captain ] \
+  || fail "the captain's own message must be attributed to the captain"
+[ "$(thread_says 'thread["truncated"]')" = False ] || fail "a short thread must not claim truncation"
+[ ! -e "$REPLY_LOG" ] || fail "reading a thread must not create a reply log"
+[ "$(log_lines)" = 2 ] || fail "reading a thread must not disturb the request log"
+pass "the one-shot Ask-firstmate flow is unchanged, and a one-action control never becomes conversation"
+
+# ------------------------------------------------------------- a real thread --
+# The stamps both logs keep are whole seconds, so each turn is taken in its own
+# second here rather than letting the test depend on the same-second tie-break.
+sleep 1.1
+"$ADAPTER" say-source "$THREAD_SOURCE_ID" "Nothing is blocking it - the credential landed." >/dev/null \
+  || fail "firstmate must be able to reply using the source id from the wake"
+sleep 1.1
+[ "$(status_of "$(ask 'Then ship it tonight.' fm-board:th3)")" = 200 ] \
+  || fail "the captain must be able to reply to firstmate's reply"
+sleep 1.1
+printf 'Shipping now; I will confirm when it lands.\n' | "$ADAPTER" say "$BOARD" - >/dev/null \
+  || fail "firstmate must be able to post a reply read from its input"
+ordered=$(thread_says '" | ".join(m["from"] + ": " + m["text"] for m in thread["messages"])')
+[ "$ordered" = "captain: Single shot, never answered. | firstmate: Nothing is blocking it - the credential landed. | captain: Then ship it tonight. | firstmate: Shipping now; I will confirm when it lands." ] \
+  || fail "the thread did not read back as one ordered conversation: $ordered"
+pass "a captain ask, firstmate's answer, and the captain's reply to it read back as one ordered thread"
+
+# -------------------------------------------------------------- display only --
+# The wake source reads the request log and only the request log, so nothing
+# firstmate says to the board can come back to firstmate as work to do.
+[ "$(log_lines)" = 3 ] || fail "a firstmate reply reached the request log, now $(log_lines) lines"
+"$ADAPTER" source "$BOARD" > "$TMP_ROOT/thread-source.txt" || fail "the source must report"
+grep -q "credential landed" "$TMP_ROOT/thread-source.txt" \
+  && fail "a firstmate reply was announced to firstmate as a request"
+[ "$("$ADAPTER" requests "$TMP_ROOT/thread-source.txt" | grep -c '"intent"')" = 3 ] \
+  || fail "the wake carried something other than the three captain requests"
+pass "a firstmate reply never reaches the wake source, so it can open no execution path"
+
+# ---------------------------------------------------------------- fail closed -
+# The same rules, in the other direction. A reply that should never be stored is
+# refused by `say` before it can be displayed as something firstmate said.
+refuse_reply() {  # <name> <text>
+  local name=$1 text=$2 before answer
+  before=$(wc -c < "$REPLY_LOG")
+  answer=$("$ADAPTER" say "$BOARD" "$text" 2>&1) \
+    && fail "$name must be refused, got: $answer"
+  [ "$(wc -c < "$REPLY_LOG")" = "$before" ] \
+    || fail "$name must store nothing, the thread log grew"
+}
+refuse_reply "an empty reply" ""
+refuse_reply "a reply that is only whitespace" "   "
+refuse_reply "a reply longer than the bound" "$(python3 -c 'print("x"*2400)')"
+refuse_reply "a reply carrying a control character" "$(printf 'answer\001here')"
+pass "a firstmate reply is held to the same fail-closed rules as a captain request"
+
+# Firstmate explaining a refusal has to be able to quote the wire format, so that
+# text stays a quotation: it is displayed exactly, and the request it looks like
+# is never parsed out of it. The captain direction is held to the same rule.
+quoted=$(envelope '{"v":1,"intent":"merge","home":"main","id":"d1"}')
+"$ADAPTER" say "$BOARD" "I refused this: $quoted" >/dev/null \
+  || fail "firstmate must be able to quote the wire format in a reply"
+[ "$(thread_says 'thread["messages"][-1]["text"]')" = "I refused this: $quoted" ] \
+  || fail "a quoted request was not displayed as the text firstmate wrote"
+[ "$(thread_says 'thread["messages"][-1]["from"]')" = firstmate ] \
+  || fail "a quoted request was attributed to the captain"
+"$ADAPTER" source "$BOARD" > "$TMP_ROOT/thread-quoted.txt" || fail "the source must report"
+quoted_requests=$("$ADAPTER" requests "$TMP_ROOT/thread-quoted.txt")
+[ "$(printf '%s\n' "$quoted_requests" | grep -c '"intent"')" = 3 ] \
+  || fail "a firstmate reply changed what the wake source announces: $quoted_requests"
+printf '%s\n' "$quoted_requests" | grep -q '"merge"' \
+  && fail "a request quoted inside a firstmate reply was parsed out as a real request"
+pass "firstmate quoting the wire format stays a quotation and is never parsed as a request"
+
+# Neither direction can be spoken at the other's door, so a planted line is
+# refused by name rather than rendered as something the other side said.
+crossed=$(send 'FM-BOARD-REPLY {"v":1,"intent":"say","note":"firstmate did not write this"}' fm-board:th9)
+case "$(status_of "$crossed")" in 4*|5*) ;; *) fail "a reply at the captain door must be refused, got: $crossed" ;; esac
+before_forge=$(thread_says 'len(thread["messages"])')
+{
+  printf '  "2026-01-02T00:00:00Z","fm-board:forged",'
+  python3 -c 'import json; print(json.dumps("FM-BOARD-REQUEST " + json.dumps(
+    {"v":1,"intent":"merge","home":"main","id":"d1"})))'
+  printf '  "2026-01-02T00:00:01Z","fm-reply:junk","not an envelope at all"\n'
+  printf 'this line is not a record at all\n'
+} >> "$REPLY_LOG"
+[ "$(thread_says 'len(thread["messages"])')" = "$before_forge" ] \
+  || fail "a forged line in the thread log was rendered as a message: $(thread_read)"
+[ "$(thread_says 'thread["truncated"]')" = True ] \
+  || fail "a thread that dropped a line must say it is not the whole of it"
+pass "a forged or malformed thread line is never rendered, and a partial read says so"
+
+# --------------------------------------------------------------- in a browser -
+# The whole point is the board, so the thread is proved on a real page: hidden on
+# a copy that reached no service, ordered on one that did, updated by the
+# captain's own tap, and still updated while the board's refresh is held.
+test_the_thread_reads_and_updates_on_the_board() {
+  local chrome static_dir static_pid static_port status waited=0
+  command -v node >/dev/null 2>&1 || {
+    printf 'skip: node not found for the board thread browser regression\n'; return 0; }
+  chrome=$(fm_find_chrome) || {
+    printf 'skip: Chrome or Chromium not found for the board thread browser regression\n'; return 0; }
+
+  static_dir="$TMP_ROOT/thread-static"
+  mkdir -p "$static_dir"
+  cp "$BOARD" "$static_dir/index.html"
+  static_port=$(python3 -c \
+    'import socket
+s = socket.socket()
+s.bind(("127.0.0.1", 0))
+print(s.getsockname()[1])
+s.close()')
+  python3 -m http.server "$static_port" --bind 127.0.0.1 --directory "$static_dir" \
+    > "$TMP_ROOT/thread-static.out" 2>&1 &
+  static_pid=$!
+  while [ "$waited" -lt 100 ]; do
+    [ "$(status_of "$(http GET "http://127.0.0.1:$static_port/")")" = 200 ] && break
+    waited=$((waited + 1))
+    sleep 0.1
+  done
+
+  node - "$chrome" "$URL" "http://127.0.0.1:$static_port/" \
+    "$TMP_ROOT/chrome-profile-thread" "$ADAPTER" "$BOARD" <<'JS'
+const { spawn, spawnSync } = require("node:child_process");
+const fs = require("node:fs");
+const [chromePath, serviceUrl, staticUrl, profile, adapter, board] = process.argv.slice(2);
+const chrome = spawn(chromePath, ["--headless=new", "--disable-gpu", "--no-sandbox",
+  "--remote-debugging-pipe", `--user-data-dir=${profile}`],
+  {stdio:["ignore","ignore","ignore","pipe","pipe"]});
+let buffer = ""; let nextId = 0; const pending = new Map();
+function send(method, params = {}, sessionId) { return new Promise((resolve) => {
+  const id = ++nextId; pending.set(id, resolve);
+  chrome.stdio[3].write(`${JSON.stringify({id,method,params,...(sessionId?{sessionId}:{})})}\0`);
+}); }
+chrome.stdio[4].on("data", (chunk) => { buffer += chunk; let at;
+  while ((at = buffer.indexOf("\0")) >= 0) { const raw = buffer.slice(0, at); buffer = buffer.slice(at + 1);
+    if (!raw) continue; const message = JSON.parse(raw); const resolve = pending.get(message.id);
+    if (resolve) { pending.delete(message.id); resolve(message); } }
+});
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+async function evaluate(sessionId, expression) {
+  const result = await send("Runtime.evaluate", {expression,awaitPromise:true,returnByValue:true}, sessionId);
+  if (result.result.exceptionDetails) throw new Error(result.result.exceptionDetails.text);
+  return result.result.result.value;
+}
+async function open(sessionId, url) {
+  await send("Page.navigate", {url}, sessionId);
+  for (let i=0;i<200;i++) { if (await evaluate(sessionId,"document.readyState") === "complete") break; await delay(20); }
+  await delay(600);
+}
+function assert(ok, message) { if (!ok) throw new Error(message); }
+const rows = `[...document.querySelectorAll('#ask-thread .thr-m')].map(function (row) {
+  return row.querySelector('.thr-who').textContent + ': ' + row.querySelector('.thr-t').textContent; })`;
+(async () => {
+  const created = await send("Target.createTarget", {url:"about:blank"});
+  const attached = await send("Target.attachToTarget", {targetId:created.result.targetId,flatten:true});
+  const sid = attached.result.sessionId;
+  await send("Page.enable", {}, sid);
+  await send("Runtime.enable", {}, sid);
+
+  // The same bytes, served by something that answers no thread read. A copy that
+  // reached no service must show no conversation rather than an empty promise.
+  await open(sid, staticUrl);
+  const inert = await evaluate(sid, `({hidden:document.getElementById('ask-thread').hidden,
+    rows:${rows}.length})`);
+  assert(inert.hidden && inert.rows === 0,
+    "a statically served board showed a conversation it never read: " + JSON.stringify(inert));
+
+  await open(sid, serviceUrl);
+  const shown = await evaluate(sid, `({hidden:document.getElementById('ask-thread').hidden,rows:${rows}})`);
+  assert(!shown.hidden && shown.rows.slice(0, 4).join(" | ") ===
+    "You: Single shot, never answered. | Firstmate: Nothing is blocking it - the credential landed."
+    + " | You: Then ship it tonight. | Firstmate: Shipping now; I will confirm when it lands.",
+    "the board did not show the thread in order: " + JSON.stringify(shown));
+  const base = shown.rows.length;
+
+  // Hold the board's own refresh for the rest of this, exactly as a captain
+  // part-way through another control does. Everything below must still update.
+  await evaluate(sid, `(() => { document.querySelector('.rc [data-open=answer]').click();
+    return window.__fmMissionControlBusy(); })()`);
+  const held = await evaluate(sid, "window.__fmMissionControlBusy()");
+  assert(held === true, "the board's refresh was not held, so the rest proves nothing");
+
+  // The captain's own follow-up, sent from the composer.
+  const sent = await evaluate(sid, `(async()=>{
+    var ask=document.querySelector('.rc-ask');
+    ask.querySelector('textarea').value='One more thing - who signed it off?';
+    ask.querySelector('form[data-intent=ask]').requestSubmit();
+    for (var i=0;i<200;i++){ if(!ask.querySelector('[data-ok=ask]').hidden) break;
+      await new Promise(r=>setTimeout(r,50)); }
+    for (var j=0;j<200;j++){ if(${rows}.length===${base + 1}) break; await new Promise(r=>setTimeout(r,50)); }
+    return {confirmed:!ask.querySelector('[data-ok=ask]').hidden,
+      head:ask.querySelector('[data-ok=ask] .rc-ok-h').textContent,
+      cleared:ask.querySelector('textarea').value,rows:${rows}};
+  })()`);
+  assert(sent.confirmed && sent.head === "Request received" && sent.cleared === "",
+    "the one-shot ask flow changed: " + JSON.stringify(sent));
+  assert(sent.rows.length === base + 1
+    && sent.rows[base] === "You: One more thing - who signed it off?",
+    "the captain's own message did not join the thread: " + JSON.stringify(sent.rows));
+
+  // Firstmate answers while the page is open and its refresh is still held. This
+  // is the case the whole thread exists for.
+  const said = spawnSync(adapter, ["say", board, "Platform did, an hour ago."],
+    {env:process.env,encoding:"utf8"});
+  assert(said.status === 0, "posting a reply failed: " + said.stdout + said.stderr);
+  const arrived = await evaluate(sid, `(async()=>{
+    for (var i=0;i<300;i++){ if(${rows}.length===${base + 2}) break; await new Promise(r=>setTimeout(r,50)); }
+    return {rows:${rows},stillHeld:window.__fmMissionControlBusy()};
+  })()`);
+  assert(arrived.rows.length === base + 2
+    && arrived.rows[base + 1] === "Firstmate: Platform did, an hour ago.",
+    "firstmate's reply never reached the open board: " + JSON.stringify(arrived));
+  assert(arrived.stillHeld === true,
+    "the thread only updated because the board reloaded under it: " + JSON.stringify(arrived));
+
+  for (let i=0;i<51;i++) {
+    const added = spawnSync(adapter, ["say", board, `Window message ${i}.`],
+      {env:process.env,encoding:"utf8"});
+    assert(added.status === 0, "posting a window message failed: " + added.stdout + added.stderr);
+  }
+  const bounded = await evaluate(sid, `(async()=>{
+    for (var i=0;i<300;i++){ var r=${rows};
+      if(r.length===50 && r[r.length-1]==='Firstmate: Window message 50.') return r;
+      await new Promise(x=>setTimeout(x,50)); }
+    return ${rows};
+  })()`);
+  assert(bounded.length === 50 && bounded[bounded.length - 1] === "Firstmate: Window message 50.",
+    "the open board did not reconcile to the authoritative 50-message window: "
+      + JSON.stringify(bounded));
+
+  // Nothing in the conversation is a control, and nothing about it holds the
+  // board: a reply is text, and text alone.
+  const inertRows = await evaluate(sid, `(() => { var t=document.getElementById('ask-thread');
+    return {controls:t.querySelectorAll('button,input,textarea,a,form,[data-intent],[data-open]').length,
+      drafts:t.querySelectorAll('.rc-t,.rc-f').length};})()`);
+  assert(inertRows.controls === 0 && inertRows.drafts === 0,
+    "the conversation offered something to act on: " + JSON.stringify(inertRows));
+
+  await send("Emulation.setDeviceMetricsOverride", {width:390,height:844,deviceScaleFactor:1,mobile:true}, sid);
+  await delay(300);
+  const narrow = await evaluate(sid, `(() => {
+    var box=[...document.querySelectorAll('#ask-thread .thr-m')].map(function (row) {
+      var r=row.getBoundingClientRect(); return {left:Math.round(r.left),right:Math.round(r.right)}; });
+    return {box:box,overflow:document.documentElement.scrollWidth>document.documentElement.clientWidth};})()`);
+  assert(!narrow.overflow && narrow.box.every((r) => r.left >= 0 && r.right <= 390),
+    "the conversation overflowed a 390px viewport: " + JSON.stringify(narrow));
+
+  const requestPath = spawnSync(adapter, ["log-path", board],
+    {env:process.env,encoding:"utf8"}).stdout.trim();
+  const replyPath = spawnSync(adapter, ["reply-log-path", board],
+    {env:process.env,encoding:"utf8"}).stdout.trim();
+  const filler = "x".repeat(1900);
+  const partial = [];
+  for (let i=0;i<150;i++) {
+    const wire = "FM-BOARD-REQUEST " + JSON.stringify(
+      {v:1,intent:"answer",home:"main",id:"d1",note:filler});
+    partial.push(`  ${JSON.stringify("2026-08-09T12:00:00Z")},`
+      + `${JSON.stringify(`fm-board:partial-${i}`)},${JSON.stringify(wire)}\n`);
+  }
+  fs.writeFileSync(requestPath, partial.join(""));
+  fs.writeFileSync(replyPath, "");
+  const emptyPartial = await evaluate(sid, `(async()=>{ for(var i=0;i<300;i++){
+    var t=document.getElementById('ask-thread'); var state={hidden:t.hidden,
+      more:t.querySelector('.thr-more').hidden,rows:${rows}.length};
+    if(!state.hidden && !state.more && state.rows===0) return state;
+    await new Promise(r=>setTimeout(r,50)); } return state; })()`);
+  assert(!emptyPartial.hidden && !emptyPartial.more && emptyPartial.rows === 0,
+    "an empty partial read hid its truncation disclosure: " + JSON.stringify(emptyPartial));
+
+  process.stdout.write("board thread ok\n");
+})().finally(() => chrome.kill()).catch((error) => { console.error(error.stack||error); process.exitCode=1; });
+JS
+  status=$?
+  kill "$static_pid" 2>/dev/null || true
+  wait "$static_pid" 2>/dev/null || true
+  [ "$status" = 0 ] || fail "the board thread browser regression failed"
+  pass "the board shows the thread in order, adds the captain's own message, and still receives firstmate's reply while its refresh is held"
+}
+
+test_the_thread_reads_and_updates_on_the_board
+stop_service
+
+# The record count applies to conversation messages, not unrelated one-action
+# records that happen to share the captain request log.
+BOARD="$TMP_ROOT/thread-window-board.html"
+"$BOARD_BIN" --snapshot "$SNAP" --no-quota --controls --refresh 300 --out "$BOARD" >/dev/null \
+  || fail "the thread window board fixture must render"
+LOG=$("$ADAPTER" log-path "$BOARD") || fail "log-path must resolve for the thread window board"
+REPLY_LOG=$("$ADAPTER" reply-log-path "$BOARD") || fail "reply-log-path must resolve for the thread window board"
+start_service
+[ "$(status_of "$(ask 'Keep this ask visible.' fm-board:window-ask)")" = 200 ] \
+  || fail "the window fixture ask must be accepted"
+window_answer=$(envelope '{"v":1,"intent":"answer","home":"main","id":"d1","note":"Window filler."}')
+n=1
+while [ "$n" -le 55 ]; do
+  [ "$(status_of "$(send "$window_answer" "fm-board:window-$n")")" = 200 ] \
+    || fail "one-action window filler $n must be accepted"
+  n=$((n + 1))
+done
+[ "$(thread_says 'len(thread["messages"])')" = 1 ] \
+  || fail "unrelated one-action records evicted the Ask conversation: $(thread_read)"
+[ "$(thread_says 'thread["messages"][0]["text"]')" = "Keep this ask visible." ] \
+  || fail "the retained Ask conversation message changed: $(thread_read)"
+stop_service
+pass "the 50-message bound is applied after filtering and merging the conversation"
+
 printf '\nall board reply transport tests passed\n'
