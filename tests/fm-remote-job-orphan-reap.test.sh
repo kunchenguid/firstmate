@@ -1,11 +1,19 @@
 #!/usr/bin/env bash
-# Behavior tests for remote job workers abandoned by a pruned code root.
+# Behavior tests for remote job worker teardown: workers abandoned by a pruned
+# code root, and workers whose ownership state was removed underneath them.
 #
 # The leak this pins: a worker launched from a worktree's own bin/ outlives that
 # worktree. Its restart supervisor sits above the serving child, so killing the
 # recorded worker pid only makes the supervisor respawn, and nothing else ever
 # stops it. Observed 2026-08-07 as 29 workers at ppid 1, 1-2 days old, each
 # still appending to a log in a pruned no-mistakes gate worktree.
+#
+# The second leak this pins comes out of the same teardown: removing the state
+# root under a live serving child does not stop it, and its stale-job sweep
+# recreates the state root, jobs, and logs without ever recreating worker.lock.
+# A shutdown signal must still stop that now unowned child, because a swallowed
+# TERM leaves it serving and publishing ready heartbeats that make the account
+# look like it still has a healthy worker.
 #
 # bin/fm-remote-job-reap-orphans.sh is a machine-wide sweep by design, so these
 # cases assert only about their own fixture processes. Any other worker it
