@@ -1009,6 +1009,34 @@ path_is_ancestor_of() {
   return 1
 }
 
+# Absolute path for <path>, resolved through its nearest EXISTING ancestor so a
+# destination that does not exist yet still resolves. Symlinks in the existing
+# prefix are resolved, so two spellings of the same directory compare equal.
+abs_path_through_existing_prefix() { # <path>
+  local path=$1 dir suffix='' resolved
+  [ -n "$path" ] || return 1
+  case "$path" in
+    /*) ;;
+    *) path="$PWD/$path" ;;
+  esac
+  dir=$path
+  while [ ! -d "$dir" ] && [ "$dir" != / ]; do
+    suffix="/$(basename "$dir")$suffix"
+    dir=$(dirname "$dir")
+  done
+  resolved=$(cd "$dir" 2>/dev/null && pwd -P) || return 1
+  printf '%s%s\n' "$resolved" "$suffix"
+}
+
+# Whether <ledger-path> lives inside <home>. Both are resolved through their
+# nearest existing ancestor, so this must be asked while <home> still exists.
+ledger_path_is_inside_home() { # <ledger-path> <home>
+  local ledger home
+  ledger=$(abs_path_through_existing_prefix "$1") || return 1
+  home=$(abs_path_through_existing_prefix "$2") || return 1
+  path_is_ancestor_of "$home" "$ledger"
+}
+
 removal_target_abs_path() {
   local target=$1
   if [ -d "$target" ]; then
@@ -2607,8 +2635,16 @@ if [ "$BACKEND" = herdr ]; then
     exit 1
   fi
 fi
+LEDGER_PATH="${FM_WAKE_LEDGER:-$DATA/wake-ledger.tsv}"
+LEDGER_INSIDE_REMOVED_HOME=0
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
+  # Ask this while the home still exists: afterwards neither path resolves, and
+  # inferring the answer from a missing directory would also silence the ledger
+  # for a destination that simply has not been created yet.
+  if ledger_path_is_inside_home "$LEDGER_PATH" "$HOME_PATH"; then
+    LEDGER_INSIDE_REMOVED_HOME=1
+  fi
   remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID" || exit $?
   remove_secondmate_registry_entry "$ID"
 fi
@@ -2635,7 +2671,19 @@ case "$LEDGER_ESCALATED" in
   yes|no) ;;
   *) LEDGER_ESCALATED=unknown ;;
 esac
-FM_WAKE_LEDGER="${FM_WAKE_LEDGER:-$DATA/wake-ledger.tsv}" \
+# Never write into a home this teardown just removed. A remote secondmate is
+# retired by a host-local teardown whose DATA is a private directory INSIDE that
+# home (bin/fm-remote-secondmate-control.sh), and bin/fm-wake-ledger.sh creates
+# its ledger's directory, so an unguarded append rebuilds the retired home as a
+# stray tree that outlives the retirement. The line is unreachable evidence
+# there anyway: it would live only in the tree that was just deleted. Every other
+# destination keeps its previous behavior, including creating a directory that
+# does not exist yet and warning when the write fails.
+if [ "$LEDGER_INSIDE_REMOVED_HOME" = 1 ]; then
+  LEDGER_PATH=
+fi
+[ -z "$LEDGER_PATH" ] || \
+FM_WAKE_LEDGER="$LEDGER_PATH" \
 "$SCRIPT_DIR/fm-wake-ledger.sh" task "$ID" \
   --outcome "$LEDGER_OUTCOME" \
   --harness "$(meta_value "$META" harness)" \
