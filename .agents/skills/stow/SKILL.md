@@ -52,6 +52,9 @@ Never describe the session as reset-safe while the memory total is over budget o
 3. **Write within the existing boundaries.**
    - Captain preferences and fleet-local operational facts belong in the destination selected by AGENTS.md after the required whole-file curation pass.
      Create `data/learnings.md` only for a genuinely new local learning with no stronger owner.
+   - For a completed ship task, if `data/captain.md` configures a project-insights directory, save a dated learnings retrospective there as a durable captain-facing record, in addition to curating the fleet-local operational facts into `data/learnings.md`.
+     Name it `<project>-<scope>-learnings.md` and cover what was built, key decisions, and operational lessons.
+     This is distinct from the curated `data/learnings.md` entries: the insights file is a standalone retrospective, while `data/learnings.md` holds the concise operational rule that survives the next startup-memory pass.
    - In a primary home, curate shared captain preferences only under the existing primary-authoritative shared-preference contract.
      In a secondmate home, route a newly discovered shared preference to the main firstmate through marked status or a document pointer instead of editing the inherited file.
    - Project-intrinsic knowledge never goes directly into a project's `AGENTS.md`.
