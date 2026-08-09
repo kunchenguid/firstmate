@@ -464,7 +464,7 @@ test_pr_create_without_repo_injects_origin_target() {
   pass "gh pr create without --repo injects its checkout origin into the credential route"
 }
 
-test_pr_create_option_value_cannot_mask_origin_target() {
+test_pr_option_values_cannot_mask_origin_target() {
   local case_dir real_dir shim_dir home checkout
   case_dir="$TMP_ROOT/repo-like-option-value"
   real_dir="$case_dir/real"
@@ -488,6 +488,17 @@ test_pr_create_option_value_cannot_mask_origin_target() {
   assert_grep 'argv:pr create --repo fork-owner/fork-repo --body-file -Rnotes.md --title T' \
     "$case_dir/gh.calls" \
     "a repository-like body-file value suppressed the explicit origin target"
+
+  (
+    cd "$checkout" || exit 1
+    FAKE_GH_LOG="$case_dir/gh.calls" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+      PATH="$shim_dir:$real_dir:$PATH" gh pr edit 7 --add-assignee=Ruser \
+      < /dev/null > /dev/null 2>&1
+  )
+
+  assert_grep 'argv:pr edit --repo fork-owner/fork-repo 7 --add-assignee=Ruser' \
+    "$case_dir/gh.calls" \
+    "an attached long-option value suppressed the explicit origin target"
   pass "repository-like option values cannot suppress origin targeting"
 }
 
@@ -846,7 +857,7 @@ test_installer_refuses_to_replace_a_foreign_symlink() {
 }
 
 test_pr_create_without_repo_injects_origin_target
-test_pr_create_option_value_cannot_mask_origin_target
+test_pr_option_values_cannot_mask_origin_target
 test_pr_create_with_repo_preserves_caller_target
 test_pr_edit_without_origin_refuses_before_credential_route
 test_ci_403_falls_back_to_exact_head_green_without_privileged_token

@@ -157,6 +157,7 @@ has_explicit_repo() {
       --repo | -R | --repo=* | -R?*) return 0 ;;
     esac
     case "$arg" in
+      --*) ;;
       -?*) short_option_has_repo "$subcommand" "$arg" && return 0 ;;
     esac
     if pr_option_takes_value "$subcommand" "$arg"; then
