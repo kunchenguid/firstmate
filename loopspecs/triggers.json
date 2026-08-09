@@ -196,12 +196,13 @@
       "deterministically_selectable": true,
       "determinism_note": "A remote sha comparison is exact.",
       "ruled_never_deterministic": false,
-      "execution_path_implemented": false,
-      "verified": false,
-      "enabled": false,
-      "idempotency_key": "base sha",
-      "idempotency_key_exists": false,
-      "note": "Fleet sync runs once at locked session start. That is a startup sweep, not an event detector."
+      "execution_path_implemented": true,
+      "verified": true,
+      "enabled": true,
+      "idempotency_key": "fork branch name",
+      "idempotency_key_exists": true,
+      "note": "Fleet sync runs once at locked session start. That is a startup sweep, not an event detector, so detector_implemented stays false. What IS implemented and verified is the EXECUTION path: bin/fm-loop-actuate.sh arm appends a check wake onto the existing durable queue, the ordinary drain surfaces it, and `run` selects, claims, runs the bound verifier and executes the lawful transition. Arming is firstmate's existing observation of a delivery, made explicit; it is deliberately not claimed as automatic detection.",
+      "execution_path_ref": "bin/fm-loop-actuate.sh"
     },
     {
       "id": "benchmark-regression-detected",
