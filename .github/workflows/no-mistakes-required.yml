@@ -1,21 +1,28 @@
 name: Require no-mistakes
-run-name: "PR #${{ github.event.pull_request.number }} body compliance - ${{ github.event.action }} - event ${{ github.run_number }} (run ${{ github.run_id }})"
+run-name: "PR #${{ github.event.pull_request.number }} attestation - ${{ github.event.action }} - event ${{ github.run_number }} (run ${{ github.run_id }})"
 
 on:
   pull_request:
-    types: [opened, edited, synchronize, reopened]
+    # This check reads evidence bound to the head commit, so editing the pull
+    # request text can neither satisfy nor invalidate it. `edited` is subscribed
+    # for two reasons that have nothing to do with the body, and removing it as
+    # "just the body trigger" breaks both. It is the cheap way to re-evaluate an
+    # unchanged head after the attestation is published, since pushing
+    # refs/notes/no-mistakes fires no pull request event of its own. And it is
+    # the activity type GitHub fires when a pull request's base branch changes,
+    # so without it a pull request retargeted onto main never runs this check at
+    # all and sits waiting for a status that can no longer be reported.
+    types: [opened, synchronize, reopened, edited]
     branches:
       - main
 
 permissions:
   contents: read
 
-# GitHub concurrency groups retain at most one pending run, replacing older
-# pending runs even when cancel-in-progress is false. Give body-bearing events
-# an immutable per-event group so first-time-fork approvals can never collapse
-# opened/edited checks. Keep synchronize/reopened coalescing as before.
+# One group per head commit, so a check for one head can never replace or cancel
+# the check for another. Re-running the same head coalesces as usual.
 concurrency:
-  group: no-mistakes-required-${{ github.event.pull_request.number }}-${{ (github.event.action == 'opened' || github.event.action == 'edited') && github.run_id || 'head-change' }}
+  group: no-mistakes-required-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
   cancel-in-progress: true
 
 jobs:
@@ -26,28 +33,152 @@ jobs:
       github.event.pull_request.user.login != 'github-actions[bot]' &&
       github.event.pull_request.user.login != 'dependabot[bot]'
     steps:
-      - name: Verify no-mistakes signature in PR body
+      # The head commit itself, not the merge commit: the attestation names this
+      # exact sha, and bin/fm-attest.sh must be the copy under review.
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 1
+
+      # Git notes do not travel with refs/pull/*, so the attestation ref is read
+      # from the repository the branch was pushed to. A read that fails for any
+      # reason other than "the ref is not there" stops the job, so an
+      # unreachable head repository is never silently treated as an absent
+      # attestation and never as a present one.
+      - name: Fetch the attestation ref from the head repository
         env:
-          PR_BODY: ${{ github.event.pull_request.body }}
-          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          BASE_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -eu
-          marker='Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)'
-          if printf '%s' "${PR_BODY:-}" | grep -qF -- "$marker"; then
-            echo "Found no-mistakes signature in PR #${PR_NUMBER} body."
+          case "$HEAD_REPO" in
+            '' | */*/* | /* | */)
+              echo "::error::The pull request head repository is unavailable, so its attestation cannot be read." >&2
+              exit 1
+              ;;
+            *[!A-Za-z0-9._/-]* | *//*)
+              echo "::error::The pull request head repository name is not a usable repository path." >&2
+              exit 1
+              ;;
+            */*) ;;
+            *)
+              echo "::error::The pull request head repository is unavailable, so its attestation cannot be read." >&2
+              exit 1
+              ;;
+          esac
+
+          # The base repository is read through an explicit token URL. A fork is
+          # read through its plain https URL, which still carries the job's token
+          # because actions/checkout persists it in this workspace's git config,
+          # so neither read is anonymous. Both are read-only and both go to the
+          # host the token was issued for.
+          if [ "$HEAD_REPO" = "$BASE_REPO" ]; then
+            url="https://x-access-token:${GH_TOKEN}@github.com/${HEAD_REPO}.git"
+          else
+            url="https://github.com/${HEAD_REPO}.git"
+          fi
+
+          # Both calls are made with their output suppressed and are reported by
+          # the head repository's name instead. When the head repository is the
+          # base repository the URL embeds the job token, and git quotes the
+          # whole remote URL back in its own http errors, so a stream left
+          # attached writes that token into the job log. Actions redacts the
+          # token from logs, which makes this defence in depth rather than the
+          # only thing standing between the token and the log; it is exactly the
+          # reason to keep the two calls consistent rather than to let one of
+          # them rely on that.
+          status=0
+          git ls-remote --exit-code "$url" refs/notes/no-mistakes >/dev/null 2>&1 || status=$?
+          case "$status" in
+            0)
+              if ! git fetch --quiet --no-tags --force "$url" \
+                  'refs/notes/no-mistakes:refs/notes/no-mistakes' >/dev/null 2>&1; then
+                echo "::error::${HEAD_REPO} advertises refs/notes/no-mistakes but would not serve it." >&2
+                exit 1
+              fi
+              ;;
+            2)
+              # No such ref. Leave it absent and let the verifier name that state
+              # in its own words rather than deciding the outcome here.
+              echo "No refs/notes/no-mistakes on ${HEAD_REPO}."
+              ;;
+            *)
+              echo "::error::Could not read refs/notes/no-mistakes from ${HEAD_REPO} (git exit ${status})." >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Verify the head-bound no-mistakes attestation
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: |
+          set -eu
+          # The verifier's two non-zero exits are two different statements and
+          # this check must not collapse them, because collapsing evidence it
+          # never examined into "no evidence" is the defect this whole check
+          # exists to remove. Exit 1 is a refusal: the evidence was examined and
+          # found absent, unbound or invalid, which is a verdict. Anything else
+          # is a failure to reach a verdict at all, and it says nothing about
+          # the evidence either way; a head that predates this check, or one
+          # where bin/fm-attest.sh is absent or has lost its executable bit,
+          # lands there. Both outcomes still fail the check, because a check
+          # that could not look must never report a pass. What differs is what
+          # the contributor is told to go and repair.
+          verify_rc=0
+          bin/fm-attest.sh verify --head "$HEAD_SHA" || verify_rc=$?
+          if [ "$verify_rc" -eq 0 ]; then
             exit 0
           fi
+          if [ "$verify_rc" -ne 1 ]; then
+            {
+              echo "::error::This check could not evaluate the no-mistakes attestation for its head commit."
+              echo
+              echo "bin/fm-attest.sh exited ${verify_rc}, which is not a verdict on the evidence."
+              echo "It reached no conclusion, so this says nothing about whether this head carries"
+              echo "an attestation: it says the check was unable to look. Do not read it as an"
+              echo "absent attestation, and do not publish one expecting it to clear this."
+              echo
+              echo "The verifier runs from this pull request's own head, so the usual causes are"
+              echo "that bin/fm-attest.sh is missing at this head, has lost its executable bit,"
+              echo "or that this head predates the check entirely. Rebase onto the base branch so"
+              echo "the head carries the verifier, then re-run this check."
+              echo
+              echo "The check fails, because a check that could not look must not report a pass."
+              echo
+              echo "See docs/no-mistakes-attestation.md for the error model these exits belong to."
+              echo
+              echo "PR author: ${PR_AUTHOR}"
+            } >&2
+            exit 1
+          fi
           {
-            echo "::error::This PR was not raised through no-mistakes."
+            echo "::error::This pull request carries no verified no-mistakes attestation for its head commit."
             echo
-            echo "Contributions to this repository must be submitted via 'git push no-mistakes'."
-            echo "That pipeline runs the required review/test/lint/CI steps and writes a"
-            echo "deterministic '## Pipeline' section into the PR body containing:"
+            echo "Contributions to this repository must be validated by 'git push no-mistakes',"
+            echo "which reviews, tests and lints the change before it is pushed. The proof of"
+            echo "that is a git note on refs/notes/no-mistakes naming the exact commit it covers:"
             echo
-            echo "    $marker"
+            bin/fm-attest.sh --print-format | sed 's/^/    /'
             echo
-            echo "See CONTRIBUTING.md for setup and the full workflow."
+            echo "Publish it for the head under review with:"
+            echo
+            echo "    bin/fm-attest.sh write"
+            echo
+            echo "It reads the pipeline's own run record and refuses unless that run validated"
+            echo "this exact commit, so it cannot be satisfied by editing text. A new commit is"
+            echo "a new head and needs its own attestation."
+            echo
+            echo "Publishing the note does not re-run this check by itself. refs/notes/no-mistakes"
+            echo "is not a pull request head, so pushing it fires no pull request event and this"
+            echo "verdict stands until something re-evaluates the head. Once the note is published,"
+            echo "close and reopen this pull request, or edit its title or body; both re-run the"
+            echo "check, and because the verdict is bound to the head commit an unchanged head"
+            echo "simply re-derives its result from the evidence now present."
+            echo
+            echo "See CONTRIBUTING.md for setup and docs/no-mistakes-attestation.md for what"
+            echo "this check does and does not establish."
             echo
             echo "PR author: ${PR_AUTHOR}"
           } >&2
