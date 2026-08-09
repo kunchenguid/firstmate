@@ -23,7 +23,20 @@
 #                                - persist the durable per-request reply context;
 #                                refresh=1 resets its retention timestamp
 #   fmx_offer_registry_claim <state> <request_id> - atomically claim the durable
-#                                one-wake offer marker; 0=new, 1=existing, 2=error
+#                                offer-delivery marker; 0=new, 1=existing, 2=error
+#   fmx_offer_registry_commit <state> <request_id> - record that the claimed
+#                                marker's wake was emitted
+#   fmx_offer_registry_emitted <state> <request_id> - true only for a marker
+#                                whose wake was emitted
+#   fmx_answer_registry_claim <state> <request_id> - atomically claim the right
+#                                to post one public answer; 0=claimed,
+#                                1=already answered or unresolved, 2=error
+#   fmx_answer_registry_confirm <state> <request_id> - record that the claimed
+#                                public answer received a 2xx response
+#   fmx_answer_registry_answered <state> <request_id> - true only for a marker
+#                                whose public answer is confirmed
+#   fmx_answer_registry_release <state> <request_id> - drop a claim whose post
+#                                definitely did not land
 #   fmx_context_registry_prune <state> - remove records older than seven days
 #   fmx_context_registry_get <state> <request_id> - read the durable per-request
 #                                reply context, or the empty shape when absent
@@ -535,11 +548,16 @@ fmx_context_registry_set() {
 }
 
 # fmx_offer_registry_claim <state> <request_id>: atomically claim the durable
-# one-wake marker at state/x-context/<request_id>.offered.json. The marker uses
+# offer-delivery marker at state/x-context/<request_id>.offered.json. It uses
 # the context registry's recorded_at retention contract, so its first claim
 # survives inbox cleanup and expires with the relay's bounded follow-up window.
 # Returns 0 only to the caller that created the marker, 1 when a valid marker
 # already exists, and 2 on invalid input or a publication failure.
+#
+# The claim records wake_emitted:false because claiming is not offering: the
+# offer only exists once the wake line is written. fmx_offer_registry_commit
+# flips that field afterwards, and only a committed marker suppresses a later
+# relay re-offer, so an interrupted claim cannot silence the mention.
 fmx_offer_registry_claim() {
   local state=$1 rid=$2 dir now record rc
   case "$rid" in
@@ -552,12 +570,137 @@ fmx_offer_registry_claim() {
   esac
   [ "${#now}" -le 18 ] || return 2
   record=$(jq -cn --arg rid "$rid" --argjson recorded_at "$now" \
-    '{request_id:$rid, recorded_at:$recorded_at}') || return 2
+    '{request_id:$rid, recorded_at:$recorded_at, wake_emitted:false}') || return 2
   dir="$state/x-context"
   printf '%s\n' "$record" \
     | fmx_private_artifact_publish_stdin_once "$dir" "$rid.offered.json" 600
   rc=$?
   return "$rc"
+}
+
+# fmx_offer_registry_commit <state> <request_id>: record that the claimed
+# marker's wake was emitted, preserving the claim's recorded_at so retention
+# still runs from the first claim. Callers commit only after the wake line is
+# written, so a failure here costs one repeated offer rather than a lost
+# mention. Returns non-zero when no valid marker exists or the write fails.
+fmx_offer_registry_commit() {
+  local state=$1 rid=$2 dir file now recorded_at
+  case "$rid" in
+    ''|.*|*[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+  dir="$state/x-context"
+  file="$dir/$rid.offered.json"
+  fmx_private_artifact_file_valid "$dir" "$rid.offered.json" 600 || return 1
+  now=${FMX_NOW_OVERRIDE:-$(date +%s)}
+  case "$now" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ "${#now}" -le 18 ] || return 1
+  recorded_at=$(fmx_context_registry_recorded_at "$file" "$now") || recorded_at=$now
+  (set -o pipefail; jq -cn --arg rid "$rid" --argjson recorded_at "$recorded_at" \
+    '{request_id:$rid, recorded_at:$recorded_at, wake_emitted:true}' \
+    | fmx_private_artifact_publish_stdin "$dir" "$rid.offered.json" 600) || return 1
+}
+
+# fmx_offer_registry_emitted <state> <request_id>: true only when a valid marker
+# records an emitted wake. A marker written before this field existed is treated
+# as emitted, so upgrading firstmate never replays a mention that was already
+# answered; an unreadable marker is treated as not emitted, which at worst
+# repeats one offer and lets the retention prune clear the record.
+fmx_offer_registry_emitted() {
+  local state=$1 rid=$2 dir emitted
+  case "$rid" in
+    ''|.*|*[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+  dir="$state/x-context"
+  fmx_private_artifact_file_valid "$dir" "$rid.offered.json" 600 || return 1
+  emitted=$(jq -r 'if has("wake_emitted") then (.wake_emitted == true) else true end' \
+    "$dir/$rid.offered.json" 2>/dev/null) || return 1
+  [ "$emitted" = true ]
+}
+
+# fmx_answer_registry_claim <state> <request_id>: atomically claim the durable
+# answered marker at state/x-context/<request_id>.answered.json before posting a
+# public answer. The poll offers a mention at least once - an interrupted offer
+# is deliberately re-offered rather than silenced - so exactly-once has to be
+# enforced where the public action happens, not where the wake is produced.
+# The initial marker records answered:false, which grants its creator permission
+# to post but does not claim the answer landed. Returns 0 only to the caller that
+# created the marker, 1 when a request has already been claimed, and 2 on invalid
+# input or a publication failure. Callers must refuse to post on anything but 0.
+# The marker shares the context registry's retention, so it covers the relay's
+# whole follow-up window.
+fmx_answer_registry_claim() {
+  local state=$1 rid=$2 dir now record rc
+  case "$rid" in
+    ''|.*|*[!A-Za-z0-9._-]*) return 2 ;;
+  esac
+  fmx_context_registry_prune "$state"
+  now=${FMX_NOW_OVERRIDE:-$(date +%s)}
+  case "$now" in
+    ''|*[!0-9]*) return 2 ;;
+  esac
+  [ "${#now}" -le 18 ] || return 2
+  record=$(jq -cn --arg rid "$rid" --argjson recorded_at "$now" \
+    '{request_id:$rid, recorded_at:$recorded_at, answered:false}') || return 2
+  dir="$state/x-context"
+  printf '%s\n' "$record" \
+    | fmx_private_artifact_publish_stdin_once "$dir" "$rid.answered.json" 600
+  rc=$?
+  return "$rc"
+}
+
+# fmx_answer_registry_confirm <state> <request_id>: record that the claimed
+# answer received a 2xx response, preserving the claim's recorded_at so
+# retention still runs from the first claim. Returns non-zero when no valid
+# marker exists or the write fails.
+fmx_answer_registry_confirm() {
+  local state=$1 rid=$2 dir file now recorded_at
+  case "$rid" in
+    ''|.*|*[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+  dir="$state/x-context"
+  file="$dir/$rid.answered.json"
+  fmx_private_artifact_file_valid "$dir" "$rid.answered.json" 600 || return 1
+  now=${FMX_NOW_OVERRIDE:-$(date +%s)}
+  case "$now" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ "${#now}" -le 18 ] || return 1
+  recorded_at=$(fmx_context_registry_recorded_at "$file" "$now") || recorded_at=$now
+  (set -o pipefail; jq -cn --arg rid "$rid" --argjson recorded_at "$recorded_at" \
+    '{request_id:$rid, recorded_at:$recorded_at, answered:true}' \
+    | fmx_private_artifact_publish_stdin "$dir" "$rid.answered.json" 600) || return 1
+}
+
+# fmx_answer_registry_answered <state> <request_id>: true only when a valid
+# marker records a confirmed answer. A missing answered field is unresolved,
+# because legacy claim markers cannot prove that their post landed.
+fmx_answer_registry_answered() {
+  local state=$1 rid=$2 dir answered
+  case "$rid" in
+    ''|.*|*[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+  dir="$state/x-context"
+  fmx_private_artifact_file_valid "$dir" "$rid.answered.json" 600 || return 1
+  answered=$(jq -r '.answered == true' "$dir/$rid.answered.json" 2>/dev/null) || return 1
+  [ "$answered" = true ]
+}
+
+# fmx_answer_registry_release <state> <request_id>: drop a claim whose post
+# definitely did not land, so the answer can be retried. Only a definite failure
+# releases it; an unknown outcome must keep the claim so the public surface
+# never gets a second post from an automatic retry. Idempotent when the marker is
+# absent and non-zero when the marker cannot be safely removed.
+fmx_answer_registry_release() {
+  local state=$1 rid=$2 dir
+  case "$rid" in
+    ''|.*|*[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+  dir="$state/x-context"
+  [ -e "$dir" ] || return 0
+  [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
+  rm -f "$dir/$rid.answered.json" 2>/dev/null
 }
 
 # fmx_context_registry_get <state> <request_id>: print the durable per-request
