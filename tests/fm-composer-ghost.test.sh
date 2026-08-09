@@ -772,6 +772,146 @@ test_nbsp_composer_verdict_survives_losing_the_ghost_signal() {
   pass "fm_tmux_composer_state: the empty verdict survives losing the ghost signal, and pending survives losing the whitespace one"
 }
 
+# --- The BORDERED tmux path, which reaches the verdict a different way -------
+# fm_tmux_composer_row_state above is only half of the tmux reader. When the
+# harness draws a box, fm_tmux_find_composer_box also has to agree the box's
+# GEOMETRY is unambiguous, by blanking every character an empty content row is
+# allowed to hold and comparing the result against the border's own width. That
+# scan trimmed with ASCII whitespace only and respelled the prompt glyphs
+# inline, so a non-ASCII separator (and muse's `⟩`, which it never listed) left
+# residue, marked the geometry ambiguous, and fm_tmux_composer_state turned that
+# into `unknown` - a DIFFERENT verdict from the unbordered path's `pending` with
+# the identical consequence: the guard refuses to act. Both paths are therefore
+# pinned end to end through the same public entry point, and every case asserts
+# its exact verdict rather than merely "not pending", which `unknown` would pass.
+
+# Write a bordered composer box whose content row is padded to the border's own
+# width. <inner-columns> is passed rather than derived, because the row's bytes
+# and its columns differ: an SGR run is zero columns wide, and the prompt glyph
+# and U+00A0 are multibyte but one column each.
+write_bordered_box() {  # <file> <inner> <inner-columns> [width]
+  local file=$1 inner=$2 cols=$3 width=${4:-24} rule='' pad='' i=0
+  while [ "$i" -lt "$width" ]; do rule="$rule─"; i=$((i + 1)); done
+  i=$cols
+  while [ "$i" -lt "$width" ]; do pad="$pad "; i=$((i + 1)); done
+  printf '╭%s╮\n│%s%s│\n╰%s╯\n' "$rule" "$inner" "$pad" "$rule" > "$file"
+}
+
+read_composer_state() {  # <dir> <capture> <cursor-y>
+  local fb
+  fb=$(make_fake_tmux "$1")
+  PATH="$fb:$PATH" FM_FAKE_STYLED="$2" FM_FAKE_CY="$3" \
+    fm_tmux_composer_state "fakepane"
+}
+
+test_bordered_nbsp_composer_is_empty() {
+  local dir capture out
+  dir="$TMP_ROOT/bordered-nbsp-empty"; mkdir -p "$dir"
+  capture="$dir/styled.txt"
+  # The live claude row bytes, wrapped in the box a bordered harness draws.
+  write_bordered_box "$capture" "$(printf ' \033[38;5;246m\xe2\x9d\xaf\302\240\033[39m')" 3
+  assert_fixture_has_nbsp "$(cat "$capture")" "empty bordered tmux composer"
+  out=$(read_composer_state "$dir" "$capture" 1)
+  [ "$out" = empty ] \
+    || fail "a bordered composer holding only '❯'+U+00A0 is affirmatively empty and must read empty, got '$out' (the ambiguous-geometry route to the same refuse-to-act wedge)"
+  # And with the cursor parked on the bottom border, the other real tmux shape.
+  out=$(read_composer_state "$dir" "$capture" 2)
+  [ "$out" = empty ] \
+    || fail "the same bordered '❯'+U+00A0 box with the cursor on its bottom border must read empty, got '$out'"
+  pass "fm_tmux_composer_state: a bordered '❯'+U+00A0 composer box reads empty"
+}
+
+# The negative half on the bordered path, and the one that matters more: a false
+# `empty` here makes firstmate type over a captain's half-written message.
+test_bordered_nbsp_composer_with_real_text_is_pending() {
+  local dir capture out
+  dir="$TMP_ROOT/bordered-nbsp-pending"; mkdir -p "$dir"
+  capture="$dir/styled.txt"
+  write_bordered_box "$capture" \
+    "$(printf ' \033[38;5;246m\xe2\x9d\xaf\302\240\033[39mhalf typed')" 13
+  assert_fixture_has_nbsp "$(cat "$capture")" "typed-into bordered tmux composer"
+  out=$(read_composer_state "$dir" "$capture" 1)
+  [ "$out" = pending ] \
+    || fail "real unsubmitted text behind a U+00A0 separator inside a BORDERED box must stay pending, got '$out'"
+  # A single character behind several separators is still text to protect.
+  write_bordered_box "$capture" "$(printf ' \xe2\x9d\xaf\302\240\302\240x')" 5
+  assert_fixture_has_nbsp "$(cat "$capture")" "single-character bordered tmux composer"
+  out=$(read_composer_state "$dir" "$capture" 1)
+  [ "$out" = pending ] \
+    || fail "one real character behind U+00A0 separators inside a bordered box must read pending, got '$out'"
+  pass "fm_tmux_composer_state: real text behind a U+00A0 separator in a bordered box stays pending"
+}
+
+# muse's `⟩` (U+27E9) is an agent prompt glyph the shared classifier recognises,
+# but the box scan's inline glyph list had drifted and omitted it, so an
+# otherwise-empty muse box read `unknown`. The scan now reaches the one shared
+# declaration instead of keeping a fourth copy.
+test_bordered_muse_glyph_composer_is_empty() {
+  local dir capture out
+  dir="$TMP_ROOT/bordered-muse"; mkdir -p "$dir"
+  capture="$dir/styled.txt"
+  # muse's real composer colours (38;2;90;160;255 glyph, 38;2;204;211;219 text).
+  write_bordered_box "$capture" "$(printf ' \033[38;2;90;160;255m\xe2\x9f\xa9 \033[39m')" 3
+  out=$(read_composer_state "$dir" "$capture" 1)
+  [ "$out" = empty ] \
+    || fail "an empty muse composer box ('⟩') must read empty, got '$out' (the glyph the box scan's inline list omitted)"
+  # The same glyph with a non-ASCII separator, the two drifts compounded.
+  write_bordered_box "$capture" "$(printf ' \033[38;2;90;160;255m\xe2\x9f\xa9\302\240\033[39m')" 3
+  assert_fixture_has_nbsp "$(cat "$capture")" "empty bordered muse composer"
+  out=$(read_composer_state "$dir" "$capture" 1)
+  [ "$out" = empty ] \
+    || fail "an empty muse composer box separated with U+00A0 must read empty, got '$out'"
+  # And muse's real typed text in the same box is still pending.
+  write_bordered_box "$capture" \
+    "$(printf ' \033[38;2;90;160;255m\xe2\x9f\xa9\302\240\033[38;2;204;211;219mhello\033[39m')" 8
+  out=$(read_composer_state "$dir" "$capture" 1)
+  [ "$out" = pending ] \
+    || fail "muse's real typed text in a bordered box must read pending, got '$out'"
+  pass "fm_tmux_composer_state: a bordered muse '⟩' composer reads empty, and its typed text pending"
+}
+
+# The unbordered path through the same public entry point, so the two are pinned
+# side by side rather than one through a row helper and one end to end.
+test_unbordered_nbsp_composer_state_is_empty_and_typed_is_pending() {
+  local dir capture out
+  dir="$TMP_ROOT/unbordered-nbsp"; mkdir -p "$dir"
+  capture="$dir/styled.txt"
+  printf '\033[38;5;246m\xe2\x9d\xaf\302\240\033[39m\n' > "$capture"
+  assert_fixture_has_nbsp "$(cat "$capture")" "empty unbordered tmux composer"
+  out=$(read_composer_state "$dir" "$capture" 0)
+  [ "$out" = empty ] \
+    || fail "the real unbordered claude composer row ('❯'+U+00A0) must read empty, got '$out'"
+  printf '\033[38;5;246m\xe2\x9d\xaf\302\240\033[39mhalf typed\n' > "$capture"
+  assert_fixture_has_nbsp "$(cat "$capture")" "typed-into unbordered tmux composer"
+  out=$(read_composer_state "$dir" "$capture" 0)
+  [ "$out" = pending ] \
+    || fail "real text after a U+00A0 separator on an unbordered row must read pending, got '$out'"
+  pass "fm_tmux_composer_state: the unbordered '❯'+U+00A0 row reads empty, and typed text pending"
+}
+
+# Normalization must not have bought those verdicts by making the box scan
+# credulous: genuinely unreadable geometry still has to reach `unknown`, and a
+# bare dead-shell prompt still must never become an injection target.
+test_nbsp_does_not_make_the_box_scan_credulous() {
+  local dir capture out
+  dir="$TMP_ROOT/nbsp-still-unknown"; mkdir -p "$dir"
+  capture="$dir/styled.txt"
+  # A content row one column WIDER than its border, padded with U+00A0 so the
+  # excess is invisible: still ambiguous geometry, still unknown.
+  printf '╭────────╮\n│ \xe2\x9d\xaf\302\240\302\240\302\240\302\240\302\240\302\240\302\240│\n╰────────╯\n' > "$capture"
+  assert_fixture_has_nbsp "$(cat "$capture")" "over-wide bordered tmux composer"
+  out=$(read_composer_state "$dir" "$capture" 1)
+  [ "$out" = unknown ] \
+    || fail "a content row wider than its border stays ambiguous geometry and must read unknown, got '$out'"
+  # A bare dead-shell prompt separated with U+00A0 is not an empty composer.
+  printf '$\302\240\n' > "$capture"
+  assert_fixture_has_nbsp "$(cat "$capture")" "bare dead-shell prompt"
+  out=$(read_composer_state "$dir" "$capture" 0)
+  [ "$out" = unknown ] \
+    || fail "a bare dead-shell '\$' prompt followed by U+00A0 must stay unknown, got '$out'"
+  pass "fm_tmux_composer_state: ambiguous geometry and bare dead-shell prompts still read unknown with U+00A0"
+}
+
 
 test_strip_ghost_drops_dim_keeps_normal
 test_strip_ghost_handles_combined_and_boundary_codes
@@ -809,3 +949,8 @@ test_peek_output_is_escape_free
 test_nbsp_separated_prompt_is_empty
 test_nbsp_separated_prompt_with_real_text_is_pending
 test_nbsp_composer_verdict_survives_losing_the_ghost_signal
+test_bordered_nbsp_composer_is_empty
+test_bordered_nbsp_composer_with_real_text_is_pending
+test_bordered_muse_glyph_composer_is_empty
+test_unbordered_nbsp_composer_state_is_empty_and_typed_is_pending
+test_nbsp_does_not_make_the_box_scan_credulous

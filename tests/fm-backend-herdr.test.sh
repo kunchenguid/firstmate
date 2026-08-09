@@ -3095,6 +3095,42 @@ test_composer_state_pi_separator_real_text_is_pending() {
   pass "fm_backend_herdr_composer_state: real Pi composer text remains pending"
 }
 
+# The herdr adapter's STRUCTURAL half. The row scan above was taught the shared
+# normalizing trim, but the Pi separator recogniser kept an ASCII-only one and
+# then required the remainder be nothing but `─`, so a rule terminated with a
+# non-ASCII space left residue, no complete separator pair was found, the
+# `separated` shape was never established, and the verdict degraded to
+# `unknown` - the same refuse-to-act outcome by a different route. Both rules
+# below carry a trailing U+00A0, and the fixture asserts it is still there
+# because it is invisible in any capture.
+test_composer_state_pi_separator_padded_with_nbsp_is_empty() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-pi-separated-nbsp"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '\x1b[0m\x1b[38;2;129;162;190m─────────────────────────────────────────────────────\302\240\x1b[0m\n\x1b[0m\x1b[7m \x1b[0m                                                    \n\x1b[0m\x1b[38;2;129;162;190m─────────────────────────────────────────────────────\302\240\x1b[0m\n' > "$resp/1.out"
+  herdr_nbsp_fixture_check "$resp/1.out" "U+00A0-padded Pi separator"
+  printf '{"result":{"agent":{"agent":"pi","agent_status":"idle"}}}\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state lab:w1:p2' "$ROOT" )
+  [ "$out" = empty ] || fail "an idle Pi composer whose rules are padded with U+00A0 should read empty, got '$out'"
+  pass "fm_backend_herdr_composer_state: a Pi separator pair padded with U+00A0 still establishes the composer shape"
+}
+
+# And the negative half on that same structural path: recognising the padded
+# rules must not make the content inside them read empty when it is real text.
+test_composer_state_pi_separator_padded_with_nbsp_real_text_is_pending() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-pi-separated-nbsp-pending"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '\x1b[38;2;129;162;190m─────────────────────────────────────────────────────\302\240\x1b[0m\nprivacy safe human draft\x1b[7m \x1b[0m\n\x1b[38;2;129;162;190m─────────────────────────────────────────────────────\302\240\x1b[0m\n' > "$resp/1.out"
+  herdr_nbsp_fixture_check "$resp/1.out" "U+00A0-padded Pi separator with text"
+  printf '{"result":{"agent":{"agent":"pi","agent_status":"done"}}}\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state lab:w1:p2' "$ROOT" )
+  [ "$out" = pending ] || fail "real text between U+00A0-padded Pi rules must stay pending, got '$out'"
+  pass "fm_backend_herdr_composer_state: real text between U+00A0-padded Pi rules remains pending"
+}
+
 test_composer_state_pi_incomplete_separator_below_stale_generic_is_unknown() {
   local dir log resp fb out
   dir="$TMP_ROOT/composer-pi-separated-incomplete"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -4369,6 +4405,8 @@ test_composer_state_unknown_on_capture_failure
 test_composer_state_unknown_when_no_composer_row_found
 test_composer_state_pi_separator_idle_is_empty
 test_composer_state_pi_separator_real_text_is_pending
+test_composer_state_pi_separator_padded_with_nbsp_is_empty
+test_composer_state_pi_separator_padded_with_nbsp_real_text_is_pending
 test_composer_state_pi_incomplete_separator_below_stale_generic_is_unknown
 test_composer_state_pi_separator_requires_safe_native_identity
 test_composer_state_claude_nbsp_prompt_is_empty

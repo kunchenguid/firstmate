@@ -603,6 +603,42 @@ test_nbsp_does_not_weaken_the_dead_shell_refusal() {
   pass "fm_composer_classify_content: U+00A0 never turns a bare dead-shell prompt into an injection target"
 }
 
+# The structural geometry probe asks "is this row blank to the same width as its
+# border", and an empty composer row is allowed to hold its prompt glyph. That
+# probe used to respell the glyphs and had already drifted (it never listed
+# muse's `⟩`), so it must reach the SAME declarations the content classifier
+# reaches. Driving both against every declared glyph is what pins them together:
+# a glyph added to either list without the probe following is a failure here.
+# Every glyph occupies one column, so blanking rather than deleting is what
+# keeps the width comparison honest.
+test_every_declared_prompt_glyph_is_blankable_and_classified() {
+  local glyph blanked verdict seen=0
+  while IFS= read -r glyph; do
+    [ -n "$glyph" ] || continue
+    seen=$((seen + 1))
+    blanked=$(fm_composer_geometry_spaces " $glyph$NBSP ") \
+      || fail "the geometry probe cannot prove a row blank that holds only the declared prompt glyph '$glyph'"
+    [ "$blanked" = "    " ] \
+      || fail "the geometry probe must blank the declared prompt glyph '$glyph' to exactly one column: got '$blanked'"
+    # And the same glyph reads as an empty composer inside a container, which is
+    # the verdict the blanked-geometry row is about to be combined with.
+    verdict=$(fm_composer_classify_content 1 "$glyph$NBSP")
+    [ "$verdict" = empty ] \
+      || fail "declared prompt glyph '$glyph' should classify empty inside a container, got '$verdict'"
+  done <<EOF
+$FM_COMPOSER_AGENT_PROMPT_GLYPHS
+$FM_COMPOSER_SHELL_PROMPT_GLYPHS
+EOF
+  [ "$seen" -ge 7 ] || fail "only $seen prompt glyphs were exercised; the declarations look empty and this case checked nothing"
+  # Exactly ONE leading glyph is blanked. A second non-ASCII character is
+  # residue the width proof cannot account for, so the row fails it rather than
+  # being silently absorbed into the border's own width.
+  if blanked=$(fm_composer_geometry_spaces "❯ ❯"); then
+    fail "only the ONE leading prompt glyph may be blanked; a second must fail the proof, got '$blanked'"
+  fi
+  pass "fm_composer_geometry_spaces: every declared prompt glyph blanks to one column and classifies empty ($seen glyphs)"
+}
+
 test_bare_shell_glyphs_are_unknown
 test_stripped_unbordered_content_uses_plain_content
 test_bare_shell_prompt_with_command_is_not_empty
@@ -634,3 +670,4 @@ test_selected_content_is_composer_scoped_and_wrap_normalized
 test_unicode_whitespace_property_set_is_covered
 test_composer_verdict_is_locale_independent
 test_nbsp_does_not_weaken_the_dead_shell_refusal
+test_every_declared_prompt_glyph_is_blankable_and_classified

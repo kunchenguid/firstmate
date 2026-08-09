@@ -27,6 +27,14 @@
 # and a false `empty` is the strictly worse failure: it types over a captain's
 # half-written message, silently.
 #
+# The shared owner recognises several composer SHAPES on the way to that
+# verdict, and they have failed independently - an unbordered row misreads as
+# `pending`, a bordered box whose geometry cannot be proven blank misreads as
+# `unknown`, and both make every caller refuse to act. Which shape a harness
+# draws is the harness's own choice, so this guard reports the shape each one
+# exercised (and says plainly when a run saw only one of them) rather than
+# pretending a single-shape run covered the others.
+#
 # Backend scope: this drives the tmux adapter, the verified reference backend.
 # The verdict itself comes from the ONE shared owner (bin/fm-composer-lib.sh's
 # fm_composer_classify_content) that the tmux, herdr, orca, and cmux adapters
@@ -114,6 +122,36 @@ composer_row_bytes() {  # <target>
   printf '%s' "$row" | LC_ALL=C od -An -tx1 | tr -s ' \n' ' '
 }
 
+# Which shape from the shared owner's catalogue this harness's composer takes.
+# The shapes reach the same verdict by different routes and have failed
+# independently: an unbordered row misreads as `pending`, while a bordered box
+# whose geometry cannot be proven blank misreads as `unknown`. Both refuse to
+# act, so a fix for one is not evidence for the other, and every verdict below
+# names the path it was reached through. The shape comes from the SAME row scan
+# the verdict does (bin/fm-composer-lib.sh's _fm_composer_scan_screen), so this
+# label can never disagree with the classification it is describing.
+composer_structural_path() {  # <target>
+  local cy pane plain
+  cy=$("$REAL_TMUX" -L "$SOCKET" display-message -p -t "$1" '#{cursor_y}' 2>/dev/null) || cy=
+  case "$cy" in ''|*[!0-9]*) printf 'unreadable'; return 0 ;; esac
+  pane=$("$REAL_TMUX" -L "$SOCKET" capture-pane -p -t "$1" -S 0 -E - 2>/dev/null) || {
+    printf 'unreadable'; return 0
+  }
+  plain=$(printf '%s\n' "$pane" | fm_composer_strip_ansi)
+  _fm_composer_scan_screen "$plain" "$cy"
+  if [ "$FM_COMPOSER_SCAN_BOX_TOP" -ge 0 ]; then
+    printf 'bordered-box'
+  elif [ "$FM_COMPOSER_SCAN_LEFTBAR_START" -ge 0 ]; then
+    printf 'left-bar'
+  elif [ "$FM_COMPOSER_SCAN_PI_PAIR_VALID" = 1 ]; then
+    printf 'separated'
+  elif [ "$FM_COMPOSER_SCAN_BARE_ROW" -ge 0 ]; then
+    printf 'bare-row'
+  else
+    printf 'unrecognised'
+  fi
+}
+
 # Read the verdict twice so a mid-redraw frame cannot be mistaken for a settled
 # one; an unstable pair reports empty, which the callers below treat as not yet
 # settled rather than as a verdict.
@@ -171,6 +209,7 @@ await_marker() {  # <target> <present|absent> <tries>
 CHECKED=0
 SKIPPED=
 UNVERIFIED=
+PATHS_SEEN=
 
 # The verified adapters, in the order .agents/skills/harness-adapters/SKILL.md
 # records them. An adapter that gains a verified launch path belongs here too.
@@ -234,9 +273,12 @@ for harness in claude codex opencode pi pi-signed grok kimi muse; do
     continue
   fi
 
+  structural_path=$(composer_structural_path "$target")
+  note "$harness $version: composer reached through the $structural_path path"
+
   typed=$(await_composer_state "$target" 20 pending)
   [ "$typed" = pending ] || fail \
-    "COMPOSER DRIFT: $harness $version is rendering real unsubmitted text in its composer, yet it classifies '$typed' instead of 'pending'. This is the DANGEROUS direction: firstmate will type over a captain's half-written message, and the loss is silent. Decoded composer row: $(composer_row_bytes "$target")."
+    "COMPOSER DRIFT: $harness $version is rendering real unsubmitted text in its composer (reached through the $structural_path path), yet it classifies '$typed' instead of 'pending'. This is the DANGEROUS direction: firstmate will type over a captain's half-written message, and the loss is silent. Decoded composer row: $(composer_row_bytes "$target")."
 
   # Step 2, the empty direction. Clearing our own marker is what makes the
   # composer AFFIRMATIVELY empty: the row is empty because this guard just
@@ -250,13 +292,18 @@ for harness in claude codex opencode pi pi-signed grok kimi muse; do
     continue
   fi
 
+  empty_path=$(composer_structural_path "$target")
   cleared=$(await_composer_state "$target" 20 empty)
   [ "$cleared" = empty ] || fail \
-    "COMPOSER DRIFT: $harness $version has a composer this guard just emptied - the typed marker is gone from the rendered pane - yet it classifies '$cleared' instead of 'empty'. Every caller that must not overwrite unsubmitted input now refuses to act against this harness: away-mode escalations stop being delivered and steer confirmations report landed messages as unconfirmed. The separator or prompt glyph this release renders is not one bin/fm-composer-lib.sh recognises. Decoded composer row: $(composer_row_bytes "$target") (U+00A0 NO-BREAK SPACE is the byte pair c2 a0; fm_composer_normalize_trim_var maps every Unicode White_Space=Yes code point, so a byte run outside that property is the thing to add)."
+    "COMPOSER DRIFT: $harness $version has a composer this guard just emptied - the typed marker is gone from the rendered pane - yet it classifies '$cleared' instead of 'empty', reached through the $empty_path path. Every caller that must not overwrite unsubmitted input now refuses to act against this harness: away-mode escalations stop being delivered and steer confirmations report landed messages as unconfirmed. On the $empty_path path a '$cleared' verdict means the separator or prompt glyph this release renders is not one bin/fm-composer-lib.sh recognises (bare-row drift usually reads 'pending'; a bordered box whose blanked geometry no longer matches its border reads 'unknown'). Decoded composer row: $(composer_row_bytes "$target") (U+00A0 NO-BREAK SPACE is the byte pair c2 a0; fm_composer_normalize_trim_var maps every Unicode White_Space=Yes code point, so a byte run outside that property is the thing to add)."
 
   note "$harness $version: EMPTY composer row bytes $(composer_row_bytes "$target")"
 
-  pass "composer drift: $harness $version reads pending with real typed text and empty once cleared"
+  case " $PATHS_SEEN " in
+    *" $empty_path "*) : ;;
+    *) PATHS_SEEN="$PATHS_SEEN $empty_path" ;;
+  esac
+  pass "composer drift: $harness $version reads pending with real typed text and empty once cleared (via the $empty_path path)"
   CHECKED=$((CHECKED + 1))
   "$REAL_TMUX" -L "$SOCKET" kill-window -t "$target" >/dev/null 2>&1 || true
 done
@@ -267,6 +314,20 @@ done
 [ -n "$SKIPPED" ] && note "not installed on this machine:$SKIPPED"
 [ -n "$UNVERIFIED" ] && note "installed but composer unverified (no readable composer reached):$UNVERIFIED"
 note "checked $CHECKED installed harness(es) end to end"
+# Which structural paths this run actually covered. Which one a harness takes is
+# the HARNESS's choice, not this guard's, so a machine with only bare-row
+# harnesses installed cannot be failed for it - but a run that saw only one path
+# is not evidence about the other, and says so rather than reading as full
+# coverage. The portable suites pin both paths unconditionally.
+note "structural paths exercised:$PATHS_SEEN"
+case " $PATHS_SEEN " in
+  *" bordered-box "*) : ;;
+  *) note "no installed harness drew a BORDERED composer box, so the bordered structural path is unverified by this run (tests/fm-composer-ghost.test.sh pins it portably)" ;;
+esac
+case " $PATHS_SEEN " in
+  *" bare-row "*) : ;;
+  *) note "no installed harness drew a BARE composer row, so the unbordered structural path is unverified by this run (tests/fm-composer-ghost.test.sh pins it portably)" ;;
+esac
 
 cleanup_all
 trap - EXIT

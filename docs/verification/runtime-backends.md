@@ -174,7 +174,8 @@ Every harness absent from this machine is recorded as unverified rather than pas
 
 Before the fix in `bin/fm-composer-lib.sh`, that exact `e2 9d af c2 a0` row classified `pending`, meaning "a human's unsubmitted text is sitting there", so every caller that must not overwrite unsubmitted input refused to act (upstream `kunchenguid/firstmate#1988`).
 `fm_composer_normalize_trim_var` now maps every code point with the Unicode property `White_Space=Yes` onto an ASCII space before any trim or glyph comparison, so the classifier follows a standards property instead of a separator observed in one release.
-`tests/fm-composer-lib.test.sh` and `tests/fm-composer-ghost.test.sh` pin the same bytes in CI.
+The same shared mapping runs inside the shared owner's own structural row scan, where the separator produced a different symptom with the identical consequence: the box geometry could not be proven blank and an empty bordered composer read `unknown`.
+`tests/fm-composer-lib.test.sh` and `tests/fm-composer-ghost.test.sh` pin the same bytes in CI, on the bordered and unbordered shapes alike, asserting the exact `empty` / `pending` / `unknown` verdict in each case.
 
 ### Cleanup endpoint identity
 
