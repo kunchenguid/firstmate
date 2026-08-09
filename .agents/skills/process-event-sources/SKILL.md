@@ -39,7 +39,9 @@ A continuity break is escalated once and stays unarmed until an operator deliber
 Three rules the commands cannot enforce for you:
 
 - **Never run the source's blocking command yourself in a conversational turn.** That is the problem the runner exists to remove, and for a destructive source it also consumes the result where nothing durable can capture it.
-- **If a turn is about to end while an external wait is still outstanding and no blocking call is running in the foreground, arm it instead of leaving it unregistered.** Registering the source is what lets the turn-end guard see the work is still under way. Skipping both the foreground call and the arm leaves no trace anywhere, so the wait silently falls off the end of the turn.
+- **If a turn is about to end while an external wait is still outstanding and no blocking call is running in the foreground, arm it instead of leaving it unregistered.**
+  Registering the source is what lets the turn-end guard see the work is still under way.
+  Skipping both the foreground call and the arm leaves no trace anywhere, so the wait silently falls off the end of the turn.
 - **A source is a wait on an external process, not a task.** It gets no task metadata and no backlog entry. If the wait itself needs tracking, file it as its own work item.
 
 ## Handling a wake
