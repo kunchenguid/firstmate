@@ -259,6 +259,7 @@ This section is the single owner of the canonical schema and its per-field seman
       "use": [
         { "harness": "<adapter>", "model": "<optional model>", "effort": "<low|medium|high|xhigh|max, optional>" }
       ],
+      "select": "quota-balanced",
       "why": "<optional rationale that helps firstmate choose>"
     }
   ],
@@ -271,11 +272,15 @@ This section is the single owner of the canonical schema and its per-field seman
 Per rule, `when` and `use` are required.
 Both `use` and the optional top-level `default` accept either one profile object or a non-empty array of profile objects.
 The single-object form stays fully backward-compatible, and every profile needs `harness`.
-Profile `model` and `effort` fields and rule `why` are optional.
+Profile `model` and `effort` fields and rule `select` and `why` fields are optional.
+When present, `select` and `why` must be non-empty strings, and `quota-balanced` is the only supported `select` value.
 An omitted model or effort means the selected harness uses its own default for that axis.
-Every profile array is an implicit quota-aware choice resolved through `quota-array-dispatch`.
+Every profile array is an implicit `quota-balanced` choice resolved through `quota-array-dispatch`, so omitting `select` preserves the same behavior.
 If no dispatch rule fits, firstmate resolves `default` through the same object-or-array path before falling back to `config/crew-harness`.
 If a selected profile carries an effort value the chosen harness does not accept, `fm-spawn.sh` records the requested `effort=` in task meta for traceability but omits the launch flag, and bootstrap reports the invalid harness/effort pair as a `CREW_DISPATCH` diagnostic when it is visible in the file.
+Any spawn whose final model begins with `antigravity/` runs the installed deterministic quota checker before creating a worktree, endpoint, process, or task metadata.
+An all-accounts-unusable result changes the launched and recorded profile to `cockpit/gpt-5.6-luna` at high effort, while a missing checker, missing compatible `timeout` or `gtimeout`, timeout, or unrecognized checker result refuses the spawn.
+`fm-spawn.sh --help` owns the exact checker lookup, timeout and output bounds, and test overrides.
 See [`docs/examples/crew-dispatch.json`](examples/crew-dispatch.json) for a starting point to copy into local `config/crew-dispatch.json`.
 When the file exists, bootstrap validates it with `jq`.
 Valid files stay silent by default; with `FM_BOOTSTRAP_VERBOSE_FACTS=1`, bootstrap emits `BOOTSTRAP_INFO: crew dispatch active config/crew-dispatch.json`, one `BOOTSTRAP_INFO:` fact per rule, and one fact for the optional default profile set.
