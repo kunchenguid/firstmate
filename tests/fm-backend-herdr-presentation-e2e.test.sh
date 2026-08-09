@@ -380,10 +380,11 @@ make_project() {  # <dir>
   git -C "$dir" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial
 }
 
-spawn_task() {  # <id> <home> <project>
+spawn_task() {  # <id> <home> <project> [extra fm-spawn flags...]
   local id=$1 home=$2 project=$3
+  shift 3
   FM_GATE_REFUSE_BYPASS=1 FM_SPAWN_NO_GUARD=1 FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
-    "$ROOT/bin/fm-spawn.sh" "$id" "$project" "sh -c 'sleep 120'" --mode no-mistakes --yolo off --backend herdr
+    "$ROOT/bin/fm-spawn.sh" "$id" "$project" "sh -c 'sleep 120'" --mode no-mistakes --yolo off --backend herdr "$@"
 }
 
 finish_concurrent_spawn() {  # <id> <status> <stdout> <stderr>
@@ -417,6 +418,16 @@ teardown_task() {  # <id> <home>
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_CONFIG_OVERRIDE="$home/config" \
     "$ROOT/bin/fm-teardown.sh" "$id" --force
+}
+
+# A --force teardown deliberately PRESERVES the task's durable attempt record
+# (bin/fm-attempt.sh: a discarded task's re-dispatch is a genuine retry), so a
+# fixture that reuses one task id as a brand-new task must retire the count
+# itself or the reuse spends the retry budget the fixtures never meant to test.
+retire_attempt() {  # <id> <home>
+  local id=$1 home=$2
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$home/state" \
+    "$ROOT/bin/fm-attempt.sh" retire "$id"
 }
 
 normalize_meta() {  # <meta>
@@ -523,6 +534,10 @@ fi
 pass "real Herdr lab: an opted-out spawn retains the Stage 1 Herdr command sequence with zero ordering calls"
 teardown_task shape "$HOME_DIR" > "$TMP_ROOT/off-teardown.out" 2> "$TMP_ROOT/off-teardown.err" \
   || fail "opted-out teardown failed: $(cat "$TMP_ROOT/off-teardown.err")"
+# The projected spawn below reuses the same id as a fresh fixture; without this
+# retire its metadata would read attempt=2 and the byte comparison against the
+# opted-out spawn would differ on a field projection never touches.
+retire_attempt shape "$HOME_DIR" || fail "could not retire the opted-out fixture's attempt record"
 
 # A home that configured nothing at all follows the version floor: it is
 # projected on a release at or above it, and takes the ordinary flat layout with
@@ -1198,7 +1213,12 @@ for RESTART_ID in fm-hibit-resume-r1 wheelhouse-healing-r1; do
       || fail "could not reprovision the isolated session for idempotent reclaim"
     PRIOR_RESTART_WT=$NEW_RESTART_WT
     PRIOR_RESTART_PANE=$NEW_RESTART_PANE
-    spawn_task "$RESTART_ID" "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/$RESTART_ID-idempotent.out" 2> "$TMP_ROOT/$RESTART_ID-idempotent.err" \
+    # This third same-id spawn is about reclaim idempotence, not retry budgets;
+    # the first two spawns already spent the default budget of 2, so raise it
+    # the sanctioned way (bin/fm-attempt.sh owns budget refusal coverage in
+    # fm-attempt.test.sh).
+    spawn_task "$RESTART_ID" "$HOME_DIR" "$PROJECT_DIR" --attempt-budget 3 \
+      > "$TMP_ROOT/$RESTART_ID-idempotent.out" 2> "$TMP_ROOT/$RESTART_ID-idempotent.err" \
       || fail "$RESTART_ID repeated reclaim failed: $(cat "$TMP_ROOT/$RESTART_ID-idempotent.err")"
     NEW_RESTART_WT=$(remember_meta_worktree "$RESTART_META")
     NEW_RESTART_WSID=$(grep '^herdr_workspace_id=' "$RESTART_META" | cut -d= -f2-)

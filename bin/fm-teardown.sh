@@ -753,6 +753,13 @@ validate_pr_poll_cleanup() {
 # here would make the budget unbounded by simply discarding between attempts.
 retire_attempt_record() {
   [ "$FORCE" != "--force" ] || return 0
+  # Secondmates never have an attempt record (fm-spawn.sh exempts them), and
+  # skipping them here is load-bearing, not just tidy: a remote secondmate's
+  # host-side teardown runs this tail with STATE inside the home that
+  # remove_firstmate_home just deleted, and merely invoking fm-attempt.sh
+  # re-creates that directory (fm-wake-lib.sh mkdirs STATE at source time),
+  # resurrecting a home the retirement had already removed.
+  [ "$KIND" != secondmate ] || return 0
   "$FM_ROOT/bin/fm-attempt.sh" retire "$ID" \
     || echo "warning: could not retire the attempt record for $ID" >&2
 }
