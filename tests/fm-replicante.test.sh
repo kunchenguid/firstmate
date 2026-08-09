@@ -158,6 +158,65 @@ test_retention_is_configurable() {
   pass 'snapshot retention is configurable and retained snapshots remain verifiable'
 }
 
+test_retention_keeps_current_after_rollback() {
+  local root source destination first_snapshot out
+  root=$(fm_test_tmproot replicante-retention-rollback)
+  new_fixture "$root"
+  source="$root/source"
+  destination="$root/destination-parent/Firstmate-Backup"
+
+  run_replicante "$source" "$destination" run --retain 3 >/dev/null
+  first_snapshot=$(cat "$destination/latest")
+  printf 'rollback state one\n' >"$source/README.md"
+  run_replicante "$source" "$destination" run --retain 3 >/dev/null
+  printf 'rollback state two\n' >"$source/README.md"
+  run_replicante "$source" "$destination" run --retain 3 >/dev/null
+  printf 'canonical Firstmate backup fixture\n' >"$source/README.md"
+  out=$(run_replicante "$source" "$destination" run --retain 2)
+
+  assert_contains "$out" 'replicated: snapshot=' 'rollback to an existing snapshot was not published'
+  [ "$(cat "$destination/latest")" = "$first_snapshot" ] \
+    || fail 'rollback did not make the historical snapshot current'
+  [ "$(snapshot_count "$destination")" = 2 ] \
+    || fail 'retention skipped the current rollback snapshot'
+  run_replicante "$source" "$destination" verify --all >/dev/null
+  pass 'retention keeps the current snapshot when source state rolls back'
+}
+
+test_metadata_symlinks_are_refused() {
+  local root source destination snapshot manifest external latest_target out
+  root=$(fm_test_tmproot replicante-metadata-symlinks)
+  new_fixture "$root"
+  source="$root/source"
+  destination="$root/destination-parent/Firstmate-Backup"
+  run_replicante "$source" "$destination" run >/dev/null
+  snapshot=$(cat "$destination/latest")
+  manifest="$destination/snapshots/$snapshot/manifest.json"
+  external="$root/external-manifest.json"
+  cp "$manifest" "$external"
+  rm "$manifest"
+  ln -s "$external" "$manifest"
+
+  if out=$(run_replicante "$source" "$destination" verify 2>&1); then
+    fail 'manifest symlink was accepted'
+  fi
+  assert_contains "$out" 'snapshot is missing its manifest' \
+    'manifest symlink refusal did not identify the unsafe metadata'
+
+  rm "$manifest"
+  cp "$external" "$manifest"
+  latest_target="$root/external-latest"
+  printf '%s\n' "$snapshot" >"$latest_target"
+  rm "$destination/latest"
+  ln -s "$latest_target" "$destination/latest"
+  if out=$(run_replicante "$source" "$destination" verify 2>&1); then
+    fail 'latest marker symlink was accepted'
+  fi
+  assert_contains "$out" 'latest snapshot marker must not be a symbolic link' \
+    'latest marker symlink refusal did not identify the unsafe metadata'
+  pass 'manifest and latest metadata symlinks are refused'
+}
+
 test_wrong_destination_is_refused() {
   local root source destination out
   root=$(fm_test_tmproot replicante-wrong-destination)
@@ -241,6 +300,8 @@ test_first_backup_and_verify
 test_repeat_is_idempotent
 test_incremental_changes_and_deletion_history
 test_retention_is_configurable
+test_retention_keeps_current_after_rollback
+test_metadata_symlinks_are_refused
 test_wrong_destination_is_refused
 test_concurrent_lock_is_refused
 test_unsupported_source_preserves_absent_destination

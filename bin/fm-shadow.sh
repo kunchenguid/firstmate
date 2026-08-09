@@ -39,8 +39,7 @@ STAGE_MOVED=0
 CONTROL_DIR=
 CONTROL_STAGE=
 CONTROL_STAGE_MOVED=0
-CONTROL_BACKUP=
-BACKUP=
+TRANSACTION_DIR=
 DEFAULT_BRANCH=
 SOURCE_COMMIT=
 
@@ -100,12 +99,13 @@ resolve_paths() {
   local parent name
   parent=$(dirname -- "$DEST_INPUT")
   name=$(basename -- "$DEST_INPUT")
-  [ -n "$name" ] && [ "$name" != . ] && [ "$name" != / ] \
+  [ -n "$name" ] && [ "$name" != . ] && [ "$name" != .. ] && [ "$name" != / ] \
     || die "destination must name a directory: $DEST_INPUT"
   [ -d "$parent" ] || die "destination parent is not an existing directory: $parent"
   DEST_PARENT=$(cd "$parent" && pwd -P) || die "cannot resolve destination parent: $parent"
   DEST="$DEST_PARENT/$name"
   CONTROL_DIR="$DEST_PARENT/.shadow-control.$name"
+  TRANSACTION_DIR="$DEST_PARENT/.shadow-transaction.$name"
 
   [ "$SOURCE" != "$DEST" ] || die "source and destination are the same path"
   case "$DEST/" in
@@ -131,6 +131,10 @@ resolve_paths() {
   [ ! -L "$CONTROL_DIR" ] || die "replica control metadata must not be a symbolic link: $CONTROL_DIR"
   if [ -e "$CONTROL_DIR" ] && [ ! -d "$CONTROL_DIR" ]; then
     die "replica control metadata is not a directory: $CONTROL_DIR"
+  fi
+  [ ! -L "$TRANSACTION_DIR" ] || die "shadow transaction marker must not be a symbolic link: $TRANSACTION_DIR"
+  if [ -e "$TRANSACTION_DIR" ] && [ ! -d "$TRANSACTION_DIR" ]; then
+    die "shadow transaction marker is not a directory: $TRANSACTION_DIR"
   fi
 }
 
@@ -265,88 +269,157 @@ same_output() {
     && cmp -s "$CONTROL_STAGE/policy" "$CONTROL_DIR/policy"
 }
 
+transaction_child_is_safe() {
+  local child=$1
+  [ ! -L "$TRANSACTION_DIR/$child" ] || die "shadow transaction contains a symbolic link: $child"
+}
+
+transaction_field() {
+  local field=$1 value
+  transaction_child_is_safe "$field"
+  [ -f "$TRANSACTION_DIR/$field" ] || die "shadow transaction is missing its $field field"
+  value=$(cat -- "$TRANSACTION_DIR/$field") || die "cannot read shadow transaction field: $field"
+  printf '%s\n' "$value"
+}
+
+clear_transaction() {
+  rm -rf -- "$TRANSACTION_DIR/old-destination" "$TRANSACTION_DIR/old-control" \
+    "$TRANSACTION_DIR/new-destination" "$TRANSACTION_DIR/new-control" \
+    "$TRANSACTION_DIR/failed-destination" "$TRANSACTION_DIR/failed-control" \
+    || die "cannot clear the completed shadow transaction: $TRANSACTION_DIR"
+  rm -f -- "$TRANSACTION_DIR/source-branch" "$TRANSACTION_DIR/source-commit" \
+    "$TRANSACTION_DIR/destination-present" "$TRANSACTION_DIR/control-present" \
+    "$TRANSACTION_DIR/ready" \
+    || die "cannot clear the completed shadow transaction marker: $TRANSACTION_DIR"
+  rmdir -- "$TRANSACTION_DIR" \
+    || die "cannot remove the completed shadow transaction marker: $TRANSACTION_DIR"
+}
+
+park_transaction_output() {
+  local path=$1 name=$2
+  if [ -e "$path" ] || [ -L "$path" ]; then
+    transaction_child_is_safe "$name"
+    [ ! -e "$TRANSACTION_DIR/$name" ] || die "shadow transaction recovery path already exists: $name"
+    mv -- "$path" "$TRANSACTION_DIR/$name" \
+      || die "cannot preserve the incomplete shadow output during recovery: $path"
+  fi
+}
+
+recover_transaction() {
+  local branch commit destination_present control_present
+  [ -e "$TRANSACTION_DIR" ] || return 0
+  [ -d "$TRANSACTION_DIR" ] || die "shadow transaction marker is not a directory: $TRANSACTION_DIR"
+  transaction_child_is_safe ready
+  transaction_child_is_safe source-branch
+  transaction_child_is_safe source-commit
+  transaction_child_is_safe destination-present
+  transaction_child_is_safe control-present
+  transaction_child_is_safe old-destination
+  transaction_child_is_safe old-control
+  transaction_child_is_safe new-destination
+  transaction_child_is_safe new-control
+  transaction_child_is_safe failed-destination
+  transaction_child_is_safe failed-control
+  if [ ! -f "$TRANSACTION_DIR/ready" ]; then
+    [ ! -e "$TRANSACTION_DIR/old-destination" ] \
+      && [ ! -e "$TRANSACTION_DIR/old-control" ] \
+      && [ ! -e "$TRANSACTION_DIR/new-destination" ] \
+      && [ ! -e "$TRANSACTION_DIR/new-control" ] \
+      || die "shadow transaction marker is incomplete: $TRANSACTION_DIR"
+    rm -rf -- "$TRANSACTION_DIR" \
+      || die "cannot remove the incomplete shadow transaction marker: $TRANSACTION_DIR"
+    return 0
+  fi
+  branch=$(transaction_field source-branch)
+  commit=$(transaction_field source-commit)
+  destination_present=$(transaction_field destination-present)
+  control_present=$(transaction_field control-present)
+  [ "$branch" = "$DEFAULT_BRANCH" ] || die "shadow transaction branch does not match the source default branch"
+  case "$destination_present:$control_present" in
+    0:0|0:1|1:0|1:1) ;;
+    *) die "shadow transaction presence fields are malformed" ;;
+  esac
+  git_at "$SOURCE" cat-file -e "$commit^{commit}" \
+    || die "shadow transaction source commit is unavailable: $commit"
+  if [ ! -L "$DEST" ] && [ -d "$DEST" ] && [ ! -L "$CONTROL_DIR" ] && [ -d "$CONTROL_DIR" ] \
+    && python3 "$SCRIPT_DIR/fm-shadow.py" validate \
+      --root "$DEST" --manifest "$CONTROL_DIR/manifest" --policy "$CONTROL_DIR/policy" \
+      --branch "$branch" --commit "$commit" >/dev/null 2>&1; then
+    clear_transaction
+    return 0
+  fi
+
+  if [ "$destination_present" -eq 1 ]; then
+    if [ -d "$TRANSACTION_DIR/old-destination" ]; then
+      park_transaction_output "$DEST" failed-destination
+      mv -- "$TRANSACTION_DIR/old-destination" "$DEST" \
+        || die "cannot restore the previous shadow destination: $DEST"
+    elif [ ! -e "$DEST" ] && [ ! -L "$DEST" ]; then
+      die "previous shadow destination is missing from the transaction: $TRANSACTION_DIR"
+    fi
+  else
+    park_transaction_output "$DEST" failed-destination
+  fi
+  if [ "$control_present" -eq 1 ]; then
+    if [ -d "$TRANSACTION_DIR/old-control" ]; then
+      park_transaction_output "$CONTROL_DIR" failed-control
+      mv -- "$TRANSACTION_DIR/old-control" "$CONTROL_DIR" \
+        || die "cannot restore the previous shadow control metadata: $CONTROL_DIR"
+    elif [ ! -e "$CONTROL_DIR" ] && [ ! -L "$CONTROL_DIR" ]; then
+      die "previous shadow control metadata is missing from the transaction: $TRANSACTION_DIR"
+    fi
+  else
+    park_transaction_output "$CONTROL_DIR" failed-control
+  fi
+  clear_transaction
+}
+
+begin_transaction() {
+  local destination_present=0 control_present=0
+  if [ -d "$DEST" ] && [ -n "$(find "$DEST" -mindepth 1 -print -quit 2>/dev/null)" ]; then
+    destination_present=1
+  fi
+  [ -e "$CONTROL_DIR" ] && control_present=1
+  mkdir -- "$TRANSACTION_DIR" \
+    || die "cannot create the shadow transaction marker: $TRANSACTION_DIR"
+  printf '%s\n' "$DEFAULT_BRANCH" >"$TRANSACTION_DIR/source-branch"
+  printf '%s\n' "$SOURCE_COMMIT" >"$TRANSACTION_DIR/source-commit"
+  printf '%s\n' "$destination_present" >"$TRANSACTION_DIR/destination-present"
+  printf '%s\n' "$control_present" >"$TRANSACTION_DIR/control-present"
+  : >"$TRANSACTION_DIR/ready"
+}
+
 swap_replica() {
-  local failed failed_control old_backup old_control_backup
-
-  restore_old() {
-    if [ -n "$CONTROL_BACKUP" ] && [ -d "$CONTROL_BACKUP" ]; then
-      mv -- "$CONTROL_BACKUP" "$CONTROL_DIR" \
-        || die "replacement failed and restoring replica control metadata also failed; old metadata is at $CONTROL_BACKUP"
-      CONTROL_BACKUP=
-    fi
-    if [ -n "$BACKUP" ] && [ -d "$BACKUP" ]; then
-      mv -- "$BACKUP" "$DEST" \
-        || die "replacement failed and restoring the old destination also failed; old output is at $BACKUP"
-      BACKUP=
-    fi
-  }
-
-  if [ -d "$DEST" ]; then
-    if [ -n "$(find "$DEST" -mindepth 1 -print -quit 2>/dev/null)" ]; then
-      old_backup=$(mktemp -d "$DEST_PARENT/.shadow-backup.XXXXXX") \
-        || die "cannot create replacement backup"
-      rmdir -- "$old_backup"
-      mv -- "$DEST" "$old_backup" \
-        || {
-          rmdir -- "$old_backup" 2>/dev/null || true
-          die "cannot move the validated destination aside; no update was made"
-        }
-      BACKUP=$old_backup
-    else
-      rmdir -- "$DEST" || die "cannot remove the empty destination directory for first replica"
-    fi
+  check_existing_destination
+  begin_transaction
+  if [ "$(transaction_field destination-present)" -eq 1 ]; then
+    mv -- "$DEST" "$TRANSACTION_DIR/old-destination" \
+      || { recover_transaction; die "cannot move the validated destination into the shadow transaction"; }
+  elif [ -d "$DEST" ]; then
+    rmdir -- "$DEST" \
+      || { recover_transaction; die "cannot remove the empty destination for the shadow transaction"; }
   fi
-  if [ -e "$CONTROL_DIR" ]; then
-    old_control_backup=$(mktemp -d "$DEST_PARENT/.shadow-control-backup.XXXXXX") \
-      || die "cannot create replica control backup"
-    rmdir -- "$old_control_backup"
-    if ! mv -- "$CONTROL_DIR" "$old_control_backup"; then
-      rmdir -- "$old_control_backup" 2>/dev/null || true
-      restore_old
-      die "cannot move the validated replica control metadata aside; no update was made"
-    fi
-    CONTROL_BACKUP=$old_control_backup
+  if [ "$(transaction_field control-present)" -eq 1 ]; then
+    mv -- "$CONTROL_DIR" "$TRANSACTION_DIR/old-control" \
+      || { recover_transaction; die "cannot move the validated control metadata into the shadow transaction"; }
   fi
-  if ! mv -- "$STAGE" "$DEST"; then
-    restore_old
-    die "cannot install the complete staged replica; no destination update was made"
-  fi
+  mv -- "$STAGE" "$TRANSACTION_DIR/new-destination" \
+    || { recover_transaction; die "cannot move the staged destination into the shadow transaction"; }
   STAGE_MOVED=1
-  if ! mv -- "$CONTROL_STAGE" "$CONTROL_DIR"; then
-    failed=$(mktemp -d "$DEST_PARENT/.shadow-failed.XXXXXX") \
-      || die "replica control installation failed and recovery storage is unavailable"
-    rmdir -- "$failed"
-    mv -- "$DEST" "$failed" \
-      || die "replica control installation failed; failed output is at $DEST"
-    restore_old
-    die "cannot install replica control metadata; failed output is at $failed after restoring the old replica"
-  fi
+  mv -- "$CONTROL_STAGE" "$TRANSACTION_DIR/new-control" \
+    || { recover_transaction; die "cannot move the staged control metadata into the shadow transaction"; }
   CONTROL_STAGE_MOVED=1
+  mv -- "$TRANSACTION_DIR/new-destination" "$DEST" \
+    || { recover_transaction; die "cannot install the complete staged replica"; }
+  mv -- "$TRANSACTION_DIR/new-control" "$CONTROL_DIR" \
+    || { recover_transaction; die "cannot install the staged control metadata"; }
   if ! python3 "$SCRIPT_DIR/fm-shadow.py" validate \
     --root "$DEST" --manifest "$CONTROL_DIR/manifest" --policy "$CONTROL_DIR/policy" \
     --branch "$DEFAULT_BRANCH" --commit "$SOURCE_COMMIT"; then
-    failed=$(mktemp -d "$DEST_PARENT/.shadow-failed.XXXXXX") || die "post-install validation failed and recovery storage is unavailable"
-    rmdir -- "$failed"
-    mv -- "$DEST" "$failed" \
-      || die "post-install validation failed; failed output is at $DEST"
-    failed_control=$(mktemp -d "$DEST_PARENT/.shadow-failed-control.XXXXXX") \
-      || die "post-install validation failed and control recovery storage is unavailable"
-    rmdir -- "$failed_control"
-    mv -- "$CONTROL_DIR" "$failed_control" \
-      || die "post-install validation failed; failed control metadata is at $CONTROL_DIR"
-    restore_old
-    rm -rf -- "$failed"
-    rm -rf -- "$failed_control"
+    recover_transaction
     die "post-install validation failed; old destination was restored"
   fi
-  if [ -n "$BACKUP" ] && [ -d "$BACKUP" ]; then
-    rm -rf -- "$BACKUP"
-    BACKUP=
-  fi
-  if [ -n "$CONTROL_BACKUP" ] && [ -d "$CONTROL_BACKUP" ]; then
-    rm -rf -- "$CONTROL_BACKUP"
-    CONTROL_BACKUP=
-  fi
+  clear_transaction
 }
 
 while [ "$#" -gt 0 ]; do
@@ -382,10 +455,12 @@ done
 resolve_paths
 acquire_lock
 check_source
+recover_transaction
 check_existing_destination
 build_stage
 recheck_source
 if [ -d "$DEST" ] && same_output; then
+  check_existing_destination
   printf 'already current: %s at %s\n' "$SOURCE_COMMIT" "$DEST"
   exit 0
 fi

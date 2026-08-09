@@ -291,7 +291,10 @@ def load_root(source: Path, destination: Path, allow_initialize: bool) -> tuple[
         for child in (destination / "objects", destination / "snapshots"):
             if not child.is_dir() or child.is_symlink():
                 fail(f"backup layout is incomplete or unsafe: {child}")
-        if not (destination / LATEST_MARKER).is_file():
+        latest = destination / LATEST_MARKER
+        if latest.is_symlink():
+            fail("latest snapshot marker must not be a symbolic link")
+        if not latest.is_file():
             fail("backup destination has no latest snapshot marker")
     return initialized, destination / "objects", destination / "snapshots"
 
@@ -392,7 +395,7 @@ def read_snapshot_manifest(
 ) -> dict[str, Any]:
     snapshot = snapshot_path(snapshots, identifier)
     manifest_path = snapshot / "manifest.json"
-    if not snapshot.is_dir() or snapshot.is_symlink() or not manifest_path.is_file():
+    if snapshot.is_symlink() or not snapshot.is_dir() or manifest_path.is_symlink() or not manifest_path.is_file():
         fail(f"snapshot is missing its manifest: {identifier}")
     try:
         extra = [child for child in snapshot.iterdir() if child.name != "manifest.json"]
@@ -445,7 +448,10 @@ def read_snapshot_manifest(
 
 
 def latest_id(destination: Path) -> str:
-    value = read_bytes(destination / LATEST_MARKER).decode("ascii").strip()
+    marker = destination / LATEST_MARKER
+    if marker.is_symlink() or not marker.is_file():
+        fail("latest snapshot marker is missing or a symbolic link")
+    value = read_bytes(marker).decode("ascii").strip()
     if not SNAPSHOT_ID_RE.fullmatch(value):
         fail("latest snapshot marker is malformed")
     return value
@@ -579,8 +585,14 @@ def prune_snapshots(
     if len(verified) <= retain:
         return
     current = latest_id(destination)
-    for _, identifier in sorted(verified)[: len(verified) - retain]:
-        if identifier == current:
+    ordered = sorted(verified)
+    retained = {current}
+    for _, identifier in reversed(ordered):
+        if len(retained) >= retain:
+            break
+        retained.add(identifier)
+    for _, identifier in ordered:
+        if identifier in retained:
             continue
         target = snapshot_path(snapshots, identifier)
         try:

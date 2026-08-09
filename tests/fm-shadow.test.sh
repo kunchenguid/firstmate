@@ -226,6 +226,22 @@ test_concurrent_lock_is_fail_closed() {
   pass 'concurrent execution is serialized by an atomic lock directory'
 }
 
+test_destination_parent_traversal_is_refused() {
+  local root source destination out
+  root=$(fm_test_tmproot shadow-normalization)
+  new_fixture "$root"
+  source="$root/source"
+  mkdir -p "$root/destination-parent/shadow"
+  destination="$root/destination-parent/shadow/.."
+
+  if out=$(run_shadow "$source" "$destination" 2>&1); then
+    fail 'destination parent traversal was accepted'
+  fi
+  assert_contains "$out" 'destination must name a directory' \
+    'destination parent traversal refusal did not identify the invalid path'
+  pass 'destination parent traversal is refused before path identity checks'
+}
+
 test_external_symlink_target_is_not_traversed() {
   local root source destination controls external out
   root=$(fm_test_tmproot shadow-external)
@@ -301,6 +317,7 @@ test_repeated_replica_is_idempotent_and_tracks_complete_working_tree
 test_dirty_destination_is_preserved
 test_divergent_destination_is_preserved
 test_concurrent_lock_is_fail_closed
+test_destination_parent_traversal_is_refused
 test_external_symlink_target_is_not_traversed
 test_staging_failure_preserves_previous_replica
 test_manifest_tamper_is_refused
