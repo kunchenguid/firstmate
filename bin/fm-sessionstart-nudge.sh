@@ -16,22 +16,30 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-primary-scope-lib.sh"
 # shellcheck source=bin/fm-operational-input.sh
 . "$SCRIPT_DIR/fm-operational-input.sh"
+# Only for the process backend below - the ownership loop stays this wrapper's
+# own. Reading a parent is platform mechanics, not policy, and the one host
+# where it is not simply `ps` (Git Bash/MSYS, which cannot see a native harness
+# parent at all) must not be re-derived here and drift from the real walk.
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$SCRIPT_DIR/fm-session-lock-lib.sh"
 
 fm_is_gate_agent "$FM_ROOT" && exit 0
 fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 
 lock_is_in_ancestry() {
-  local lock_pid pid=$$ _
+  local lock_pid _
   [ -f "$STATE/.lock" ] || return 1
   IFS= read -r lock_pid < "$STATE/.lock" 2>/dev/null || return 1
   case "$lock_pid" in
     ''|*[!0-9]*|1) return 1 ;;
   esac
-  kill -0 "$lock_pid" 2>/dev/null || return 1
+  fm_proc_snapshot || return 1
+  fm_proc_pid_alive "$lock_pid" || return 1
+  fm_proc_walk_start || return 1
   for _ in 1 2 3 4 5 6 7 8; do
-    [ "$pid" = "$lock_pid" ] && return 0
-    pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
-    [ -n "$pid" ] && [ "$pid" -gt 1 ] || return 1
+    [ "$FM_PROC_CURSOR" = "$lock_pid" ] && return 0
+    fm_proc_read "$FM_PROC_CURSOR" || return 1
+    fm_proc_walk_next || return 1
   done
   return 1
 }

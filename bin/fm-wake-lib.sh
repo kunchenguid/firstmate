@@ -252,8 +252,53 @@ fm_lock_link_owner() {
   esac
 }
 
+# Whether this filesystem can hold the symlink the lock below is built on.
+#
+# Git Bash/MSYS without Developer Mode or elevation cannot create one at all:
+# `ln -s` does not fail, it silently DEEP-COPIES the target instead, so the
+# lock path materializes as a real directory that readlink can never resolve.
+# The claim then fails its own verification, and because the cleanup path only
+# removes a lockdir it can confirm it owns, the copy is left behind - which is
+# what turns fm_lock_acquire_wait into an unbounded spin against a lock nobody
+# holds. Probing is therefore about the FILESYSTEM's answer, never uname's.
+#
+# When symlinks are unavailable the lock degrades to a plain directory created
+# by mkdir, which is equally atomic and which the steal, release and removal
+# paths below already accept - they test [ -L ] first and fall through to the
+# directory shape. In that mode the lock directory IS its own owner directory.
+FM_LOCK_SYMLINKS=${FM_LOCK_SYMLINKS:-}
+fm_lock_symlinks_available() {  # <dir-to-probe-in>
+  case "$FM_LOCK_SYMLINKS" in
+    1) return 0 ;;
+    0) return 1 ;;
+  esac
+  local dir=$1 probe
+  probe=$(mktemp -u "$dir/.lock-symprobe.XXXXXX" 2>/dev/null) || {
+    FM_LOCK_SYMLINKS=0
+    return 1
+  }
+  if ln -s .lock-symprobe-target "$probe" 2>/dev/null \
+    && [ -L "$probe" ] \
+    && [ "$(readlink "$probe" 2>/dev/null || true)" = .lock-symprobe-target ]; then
+    FM_LOCK_SYMLINKS=1
+  else
+    FM_LOCK_SYMLINKS=0
+  fi
+  # rm -rf, not rm -f: a failed `ln -s` can leave a copied directory here.
+  rm -rf "$probe" 2>/dev/null || true
+  [ "$FM_LOCK_SYMLINKS" = 1 ]
+}
+
 fm_lock_points_to_owner() {
   local lockdir=$1 ownerdir=$2 actual
+  if [ "$FM_LOCK_SYMLINKS" = 0 ]; then
+    # Directory mode: the lock is its own owner, so ownership is the identity
+    # of the two paths plus the directory still being there and still a plain
+    # directory.
+    [ -n "$ownerdir" ] && [ "$ownerdir" = "$lockdir" ] \
+      && [ -d "$lockdir" ] && [ ! -L "$lockdir" ]
+    return
+  fi
   actual=$(readlink "$lockdir" 2>/dev/null) || return 1
   [ "$actual" = "$ownerdir" ]
 }
@@ -310,8 +355,27 @@ fm_lock_claim() {
 }
 
 fm_lock_try_create() {
-  local lockdir=$1 allowed_steal_owner=${2:-} ownerdir
+  local lockdir=$1 allowed_steal_owner=${2:-} ownerdir lockparent
   FM_LOCK_OWNER_DIR=
+
+  lockparent=$(dirname "$lockdir")
+  if ! fm_lock_symlinks_available "$lockparent"; then
+    # Directory mode. mkdir is the atomic create-if-absent primitive here, so it
+    # both takes the lock and detects a competing holder in one step; there is
+    # no separate owner directory to publish, adopt or leak.
+    mkdir "$lockdir" 2>/dev/null || return 1
+    if ! fm_lock_prepare_owner "$lockdir"; then
+      fm_lock_remove_path "$lockdir" || true
+      return 1
+    fi
+    if fm_lock_claim_blocked_by_steal "$lockdir" "$allowed_steal_owner"; then
+      fm_lock_remove_path "$lockdir" || true
+      return 1
+    fi
+    FM_LOCK_OWNER_DIR=$lockdir
+    return 0
+  fi
+
   ownerdir=$(fm_lock_owner_dir "$lockdir") || return 1
   if [ -e "$lockdir" ] || [ -L "$lockdir" ]; then
     fm_lock_discard_owner "$ownerdir"
