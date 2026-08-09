@@ -1033,10 +1033,14 @@ if [ "$RELAUNCH" -eq 1 ]; then
     echo "error: task $ID's endpoint reads '$RELAUNCH_STATE'; a relaunch requires a positively agent-free endpoint (stop the agent first with bin/fm-control.sh $ID exit)" >&2
     exit 1
   }
-  CURSOR_RELAUNCH_HAD_WORKER_RECORD=0
-  [ ! -f "$STATE/$ID.worker-server" ] || CURSOR_RELAUNCH_HAD_WORKER_RECORD=1
-  cursor_worker_server_reap_record "$STATE/$ID.worker-server" "$ID" || exit 1
   RELAUNCH_PRIOR_HARNESS=$(fm_meta_get "$RELAUNCH_META" harness)
+  if [ "$RELAUNCH_PRIOR_HARNESS" = cursor ]; then
+    [ -f "$STATE/$ID.worker-server" ] || {
+      echo "error: task $ID has no cursor worker-server ownership record; refusing relaunch because prior worker absence cannot be proven" >&2
+      exit 1
+    }
+    cursor_worker_server_reap_record "$STATE/$ID.worker-server" "$ID" || exit 1
+  fi
   KIND=$(fm_meta_get "$RELAUNCH_META" kind)
   [ -n "$KIND" ] || KIND=ship
   MODE=$(fm_meta_get "$RELAUNCH_META" mode)
@@ -2152,56 +2156,6 @@ cursor_worker_server_has_launch_token() {  # <pid> <token>
     | tr ' ' '\n' | grep -Fqx "FM_CURSOR_LAUNCH_TOKEN=$token"
 }
 
-cursor_worker_server_find_under_task_roots() {
-  local out pid path line root canonical_root args
-  command -v lsof >/dev/null 2>&1 || return 2
-  out=$(lsof -a -d cwd -Fpn 2>/dev/null) || return 2
-  pid=
-  while IFS= read -r line; do
-    case "$line" in
-      p*)
-        pid=${line#p}
-        case "$pid" in ''|*[!0-9]*) return 2 ;; esac
-        ;;
-      fcwd) [ -n "$pid" ] || return 2 ;;
-      n*)
-        [ -n "$pid" ] || return 2
-        path=${line#n}
-        for root in "${WT:-}" "${TASK_TMP:-}"; do
-          [ -n "$root" ] && [ -d "$root" ] || continue
-          canonical_root=$(cd "$root" && pwd -P) || return 2
-          case "$path" in
-            "$canonical_root"|"$canonical_root"/*)
-              args=$(LC_ALL=C ps -p "$pid" -o args= 2>/dev/null || true)
-              case "$args" in *index.js\ worker-server*) printf '%s\n' "$pid"; return 0 ;; esac
-              ;;
-          esac
-        done
-        ;;
-      '') ;;
-      *) return 2 ;;
-    esac
-  done <<EOF
-$out
-EOF
-  return 1
-}
-
-cursor_worker_server_reap_task_roots() {
-  local pid identity ws_file tmp status
-  ws_file="$STATE/$ID.worker-server"
-  while :; do
-    pid=$(cursor_worker_server_find_under_task_roots)
-    status=$?
-    [ "$status" -eq 0 ] || { [ "$status" -eq 1 ] && return 0; return 1; }
-    identity=$(fm_process_identity "$pid") || return 1
-    tmp="$ws_file.tmp.$$"
-    printf '%s %s\n' "$pid" "$identity" > "$tmp" || return 1
-    mv -f -- "$tmp" "$ws_file" || { rm -f -- "$tmp"; return 1; }
-    cursor_worker_server_reap_record "$ws_file" "$ID" || return 1
-  done
-}
-
 # The recorded identity is produced by the SAME parse teardown re-checks
 # (fm_process_identity, bin/fm-process-identity-lib.sh), so a comm containing
 # spaces cannot make the two disagree and silently defeat the recycled-pid check.
@@ -2353,8 +2307,7 @@ kimi_spawn_fail() {  # <detail>
   echo "error: $1; inspect window $T" >&2
 }
 
-if [ "$RELAUNCH" -eq 1 ] && [ "$RELAUNCH_PRIOR_HARNESS" = cursor ] \
-   && [ "$CURSOR_RELAUNCH_HAD_WORKER_RECORD" -eq 0 ]; then
+if [ "$RELAUNCH" -eq 1 ]; then
   # No worktree is acquired: the recorded one is reused as-is. What must be
   # proven instead is that the adopted endpoint's shell is actually sitting in
   # that worktree, so the replacement agent starts where the work is rather
@@ -2940,12 +2893,6 @@ if [ -n "$SPAWN_TRACEPARENT" ]; then
   fi
 fi
 sleep 0.3
-if [ "$RELAUNCH" -eq 1 ]; then
-  cursor_worker_server_reap_task_roots || {
-    echo "error: prior cursor worker-server could not be reaped; refusing relaunch" >&2
-    exit 1
-  }
-fi
 spawn_send_literal "$T" "$LAUNCH"
 sleep 0.3
 if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then

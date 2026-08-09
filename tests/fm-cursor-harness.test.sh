@@ -122,7 +122,6 @@ fi
 case "$query" in
   *"eww"*)
     token=${CURSOR_WORKER_LAUNCH_TOKEN:-missing}
-    if [ "$pid" = "${FM_FAKE_CURSOR_STALE_WORKER_PID:-}" ]; then token=stale; fi
     printf '%s FM_CURSOR_LAUNCH_TOKEN=%s\n' "$args" "$token"
     exit 0 ;;
   *"lstart="*)
@@ -145,8 +144,7 @@ case "$query" in
     printf '%s\n' "$comm"
     exit 0 ;;
   *"-p "*)
-    if { [ "$pid" = "${FM_FAKE_CURSOR_WORKER_PID:-}" ] \
-         || [ "$pid" = "${FM_FAKE_CURSOR_STALE_WORKER_PID:-}" ]; } \
+    if [ "$pid" = "${FM_FAKE_CURSOR_WORKER_PID:-}" ] \
        && [ -n "${FM_FAKE_CURSOR_WORKER_ARGS:-}" ]; then
       printf '%s\n' "$FM_FAKE_CURSOR_WORKER_ARGS"
     else
@@ -162,11 +160,6 @@ SH
 set -u
 case "$*" in
   *"index.js worker-server"*)
-    if [ -n "${FM_FAKE_CURSOR_STALE_WORKER_PID:-}" ] \
-       && [ ! -e "${FM_FAKE_CURSOR_ENTER_STARTED:-}" ]; then
-      printf '%s\n' "$FM_FAKE_CURSOR_STALE_WORKER_PID"
-      exit 0
-    fi
     if [ -n "${FM_FAKE_CURSOR_ENTER_STARTED:-}" ]; then
       i=0
       while [ "$i" -lt 200 ]; do
@@ -187,7 +180,7 @@ SH
 #!/usr/bin/env bash
 set -u
 [ -n "${FM_FAKE_CURSOR_WORKER_CWD:-}" ] || exit 0
-pid=${FM_FAKE_CURSOR_STALE_WORKER_PID:-$FM_FAKE_CURSOR_WORKER_PID}
+pid=$FM_FAKE_CURSOR_WORKER_PID
 kill -0 "$pid" 2>/dev/null || exit 0
 printf 'p%s\nfcwd\nn%s\n' "$pid" "$FM_FAKE_CURSOR_WORKER_CWD"
 SH
@@ -734,6 +727,7 @@ test_cursor_relaunch_reaps_prior_worker_before_recording_replacement() {
   assert_grep "$old_pid " "$HOME_DIR/state/$id.worker-server" \
     "initial cursor spawn did not record prior worker"
 
+  rm -f "$FAKEBIN_DIR/lsof"
   rm -f "$CASE_DIR/enter-started" "$CASE_DIR/launch-typed"
   out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
@@ -761,8 +755,8 @@ test_cursor_relaunch_reaps_prior_worker_before_recording_replacement() {
   pass "cursor relaunch reaps prior worker before recording replacement"
 }
 
-test_cursor_relaunch_with_missing_record_reaps_stale_worker() {
-  local rec id out status old_parent old_pid new_pid
+test_cursor_relaunch_without_worker_record_refuses() {
+  local rec id out status old_parent old_pid
   id=cursor-worker-unrecorded-zk
   rec=$(make_cursor_case cursor-worker-unrecorded "$id")
   read_case_record "$rec"
@@ -786,37 +780,26 @@ test_cursor_relaunch_with_missing_record_reaps_stale_worker() {
   status=$?
   expect_code 0 "$status" "initial cursor spawn should record worker"
   rm -f "$HOME_DIR/state/$id.worker-server"
-
-  ( exec sleep 300 ) &
-  new_pid=$!
-  disown
-  rm -f "$CASE_DIR/enter-started" "$CASE_DIR/launch-typed"
+  : > "$LAUNCH_LOG"
   out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
     FM_FAKE_CURSOR_AGENT_ARGS="$FAKEBIN_DIR/cursor-agent --force --trust brief" \
     FM_PROC_ROOT_OVERRIDE="$CASE_DIR/no-proc" \
-    FM_FAKE_CURSOR_AGENT_PID=4242 FM_FAKE_CURSOR_AGENT_AFTER_ENTER=1 \
-    FM_FAKE_CURSOR_STALE_WORKER_PID=$old_pid FM_FAKE_CURSOR_WORKER_PID=$new_pid \
-    FM_FAKE_CURSOR_WORKER_ARGS='node /opt/cursor/index.js worker-server' \
-    FM_FAKE_CURSOR_WORKER_CWD="$WT_DIR" FM_FAKE_CURSOR_ENTER_STARTED="$CASE_DIR/enter-started" \
-    FM_FAKE_CURSOR_RECORD_FILE="$HOME_DIR/state/$id.worker-server" \
-    FM_FAKE_CURSOR_CAPTURE_LOG="$CASE_DIR/capture.log" \
-    FM_FAKE_CURSOR_LAUNCH_TYPED="$CASE_DIR/launch-typed" \
+    FM_FAKE_CURSOR_AGENT_AFTER_ENTER=1 FM_FAKE_CURSOR_ENTER_STARTED="$CASE_DIR/enter-started" \
     FM_FAKE_WINDOW_STATE_FILE="$CASE_DIR/windows.state" \
     FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" --relaunch 2>&1)
   status=$?
-  expect_code 0 "$status" "cursor relaunch should replace unrecorded stale worker"$'\n'"$out"
-  if kill -0 "$old_pid" 2>/dev/null; then
-    fail "cursor relaunch left unrecorded prior worker alive"
-  fi
+  expect_code 1 "$status" "cursor relaunch without worker record must refuse"$'\n'"$out"
+  assert_contains "$out" "prior worker absence cannot be proven" \
+    "cursor relaunch refusal did not explain missing ownership proof"
+  [ ! -s "$LAUNCH_LOG" ] || fail "cursor relaunch typed replacement without prior worker proof"
+  kill -0 "$old_pid" 2>/dev/null || fail "cursor relaunch touched unowned prior worker"
+  kill -KILL "$old_pid" 2>/dev/null || true
   wait "$old_parent" 2>/dev/null || true
-  assert_grep "$new_pid " "$HOME_DIR/state/$id.worker-server" \
-    "cursor relaunch captured stale worker without prior record"
-  kill -KILL "$new_pid" 2>/dev/null || true
-  pass "cursor relaunch replaces unrecorded stale worker with launch-bound ownership"
+  pass "cursor relaunch refuses when prior worker absence is unproven"
 }
 
 test_cursor_worker_server_absent_record_refuses_spawn() {
@@ -1210,7 +1193,7 @@ test_muse_launch_unsets_cursor_agent
 test_cursor_worker_server_recorded_at_spawn
 test_cursor_worker_server_alias_uses_portable_identity
 test_cursor_relaunch_reaps_prior_worker_before_recording_replacement
-test_cursor_relaunch_with_missing_record_reaps_stale_worker
+test_cursor_relaunch_without_worker_record_refuses
 test_cursor_detached_worker_is_recorded_from_task_root
 test_cursor_worker_server_absent_record_refuses_spawn
 test_cursor_worker_server_discovery_timeout_causes_rollback
