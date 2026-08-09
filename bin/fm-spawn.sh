@@ -243,46 +243,26 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-process-identity-lib.sh"
 
 cursor_worker_server_reap_record() {  # <record> <id> [keep-record]
-  local ws_file=$1 id=$2 keep_record=${3:-0} pid identity current signal i
-  [ -f "$ws_file" ] || return 0
-  read -r pid identity < "$ws_file" 2>/dev/null || return 1
-  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
-  [ -n "$identity" ] || return 1
-  if ! kill -0 "$pid" 2>/dev/null; then
-    [ "$keep_record" -eq 1 ] || rm -f "$ws_file"
-    return 0
-  fi
-  current=$(fm_process_identity "$pid") || {
-    echo "error: recorded cursor worker-server for $id still exists at $pid but its identity cannot be read; refusing relaunch" >&2
+  # Thin spawn-side wrapper over the one shared termination primitive
+  # (fm_process_record_terminate, bin/fm-process-identity-lib.sh): caller policy
+  # is malformed-record=refuse (relaunch fails closed on unprovable prior-worker
+  # state), optional --keep-record for the harness-switch path, and spawn-side
+  # refusal diagnostics. The primitive preserves the record on every refusal.
+  local ws_file=$1 id=$2 keep_record=${3:-0} flag='' pid
+  [ "$keep_record" -eq 1 ] && flag="--keep-record"
+  if ! fm_process_record_terminate "$ws_file" "$id" --malformed=refuse $flag; then
+    read -r pid _ < "$ws_file" 2>/dev/null || true
+    case "$FM_PROCESS_RECORD_TERMINATE_REASON" in
+      identity-unreadable)
+        echo "error: recorded cursor worker-server for $id still exists at ${pid:-unknown} but its identity cannot be read; refusing relaunch" >&2
+        ;;
+      survived)
+        echo "error: recorded cursor worker-server for $id survived TERM and KILL; refusing relaunch" >&2
+        ;;
+    esac
     return 1
-  }
-  if [ "$current" != "$identity" ]; then
-    [ "$keep_record" -eq 1 ] || rm -f "$ws_file"
-    return 0
   fi
-  for signal in TERM KILL; do
-    kill -"$signal" "$pid" 2>/dev/null || true
-    for i in 1 2 3 4 5 6 7 8 9 10; do
-      kill -0 "$pid" 2>/dev/null || break 2
-      current=$(fm_process_identity "$pid") || {
-        echo "error: recorded cursor worker-server for $id still exists at $pid but its identity cannot be read; refusing relaunch" >&2
-        return 1
-      }
-      [ "$current" = "$identity" ] || break 2
-      sleep 0.1
-    done
-  done
-  if kill -0 "$pid" 2>/dev/null; then
-    current=$(fm_process_identity "$pid") || {
-      echo "error: recorded cursor worker-server for $id still exists at $pid but its identity cannot be read; refusing relaunch" >&2
-      return 1
-    }
-    [ "$current" != "$identity" ] || {
-      echo "error: recorded cursor worker-server for $id survived TERM and KILL; refusing relaunch" >&2
-      return 1
-    }
-  fi
-  [ "$keep_record" -eq 1 ] || rm -f "$ws_file"
+  return 0
 }
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
