@@ -1335,6 +1335,7 @@ antigravity_preflight() {
   tmp_out=$(mktemp "${STATE}/.preflight-${ID}.XXXXXXXX" 2>/dev/null || mktemp "/tmp/.preflight-${ID}.XXXXXXXX")
 
   set +e
+  # shellcheck disable=SC2016 # Expansion is deliberately deferred to the child shell.
   "$timer" --kill-after=5s "${timeout_seconds}s" "$BASH" -c '
     "$1" check 2>&1 |
       {
