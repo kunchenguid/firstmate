@@ -1083,14 +1083,14 @@ if [ "$RELAUNCH" -eq 1 ]; then
         }
         if [ "$FM_BACKEND_HERDR_JOURNAL_TAB_ID" != "$HERDR_TAB_ID" ] \
            || [ "$FM_BACKEND_HERDR_JOURNAL_PANE_ID" != "$HERDR_PANE_ID" ]; then
-          [ "$HERDR_CLEANUP_ENDPOINT" = "$HERDR_SES:$FM_BACKEND_HERDR_JOURNAL_PANE_ID" ] \
-            && fm_backend_herdr_projection_journal_replace_endpoint \
-              "$HERDR_CLEANUP_JOURNAL" "$ID" \
-              "$FM_BACKEND_HERDR_JOURNAL_TAB_ID" "$FM_BACKEND_HERDR_JOURNAL_PANE_ID" \
-              "$HERDR_TAB_ID" "$HERDR_PANE_ID" || {
+          if [ "$HERDR_CLEANUP_ENDPOINT" != "$HERDR_SES:$FM_BACKEND_HERDR_JOURNAL_PANE_ID" ] \
+             || ! fm_backend_herdr_projection_journal_replace_endpoint \
+               "$HERDR_CLEANUP_JOURNAL" "$ID" \
+               "$FM_BACKEND_HERDR_JOURNAL_TAB_ID" "$FM_BACKEND_HERDR_JOURNAL_PANE_ID" \
+               "$HERDR_TAB_ID" "$HERDR_PANE_ID"; then
             echo "error: task $ID's Herdr recovery journal could not be reconciled; refusing relaunch" >&2
             exit 1
-          }
+          fi
         fi
       fi
       fm_backend_kill "$BACKEND" "$HERDR_CLEANUP_ENDPOINT" 2>/dev/null || true
@@ -3145,7 +3145,7 @@ if [ "$RELAUNCH" -eq 1 ] && [ "$RELAUNCH_PRIOR_HARNESS" = cursor ]; then
   cursor_worker_server_reap_record "$STATE/$ID.worker-server" "$ID" 1 || exit 1
 fi
 if ! spawn_send_literal "$T" "$LAUNCH"; then
-  if [ "$RELAUNCH" -eq 1 ] && [ "$RELAUNCH_PRIOR_HARNESS" = cursor ]; then
+  if [ "$RELAUNCH" -eq 1 ]; then
     spawn_rollback_task_state "replacement launch command could not be delivered" 1
     exit 1
   fi
@@ -3180,7 +3180,7 @@ if [ "$HARNESS" = cursor ]; then
   CURSOR_WORKER_RECORDER_PID=
 else
   if ! spawn_send_key "$T" Enter; then
-    if [ "$RELAUNCH" -eq 1 ] && [ "$RELAUNCH_PRIOR_HARNESS" = cursor ]; then
+    if [ "$RELAUNCH" -eq 1 ]; then
       spawn_rollback_task_state "replacement launch command could not be submitted" 1
       exit 1
     fi

@@ -14,7 +14,7 @@ It does not replace `AGENTS.md`, `docs/orca-backend.md`, or `harness-adapters`.
 Orca is a runtime backend, not an agent harness.
 The runtime backend owns the task endpoint and, for Orca, the task worktree.
 The harness is the agent process launched inside that endpoint, such as `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `grok`, or `kimi`.
-Cursor is not supported on Orca because its detached worker-server can only be safely discovered and reaped on tmux or Herdr.
+Cursor is not supported on Orca because detached worker-server ownership and cleanup are verified only on tmux and Herdr.
 Load `harness-adapters` for harness-specific launch, interrupt, resume, trust-dialog, and skill-invocation facts.
 
 Implementation details, metadata fields, teardown guarantees, and limitations live in `docs/orca-backend.md`.

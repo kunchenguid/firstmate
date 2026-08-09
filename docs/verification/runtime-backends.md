@@ -180,7 +180,7 @@ Valid cleanup removed only the exact task-bound target and left the control wind
 The metadata-only validation covers tmux, Herdr, Zellij, Orca, and cmux before backend dispatch.
 Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, Muse, and Cursor share that backend cleanup boundary; their harness-specific hook files, tokens, and session-log sidecars are cleaned only after it, so no harness needs a separate endpoint parser.
 Cursor's detached worker-server is additionally reaped only from its recorded pid and process-start identity, never from a shared command-line or install path.
-`tests/fm-cursor-harness.test.sh` and `tests/fm-teardown.test.sh` cover Cursor worker-server recording, portable identity fallback, recycled-pid refusal, secondmate retirement, missing-record cwd fallback, and other-home isolation.
+`tests/fm-cursor-harness.test.sh`, `tests/fm-secondmate-harness.test.sh`, and `tests/fm-teardown.test.sh` cover launch-token-bound worker recording, fresh-spawn rollback, prior-worker relaunch refusal, portable identity fallback, recycled-pid refusal, secondmate retirement, missing-record cwd fallback, and other-home isolation.
 
 ## Herdr
 
@@ -733,8 +733,8 @@ Idle cursor composer, ANSI capture (`cat -v`):
 
 The `→` glyph (multibyte `M-bM-^FM-^R`) is SGR 2 (dim) ghost text.
 The cursor cell `A` is wrapped in `^[[0;7m` (reverse video) with the same dark background, then immediately followed by `^[[0;2m` (dim resumption) and the rest of the ghost text.
-Before the fix, `fm_composer_strip_ghost` kept `A` (not dim) and stripped the rest, leaving `A` which classified as `pending`.
-After the fix, the ghost-gap buffer in `fm_composer_strip_ghost` detects the SGR-0-exit followed by SGR-2-re-entry pattern and drops the gap content.
+Before the fix, the generic `fm_composer_strip_ghost` kept `A` (not dim) and stripped the rest, leaving `A` which classified as `pending`.
+After the fix, Cursor-specific `fm_cursor_composer_normalize` removes the reset-delimited reverse-video cursor cell before the generic ghost stripper runs.
 
 **Busy state capture:**
 
