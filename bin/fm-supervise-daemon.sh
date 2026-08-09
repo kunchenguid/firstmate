@@ -682,14 +682,14 @@ escalate_flush() {  # <state>
 
 # Print the configured channel directives, one per line. FM_WEDGE_ALARM_CHANNEL
 # wins (a single directive); else each non-empty, non-comment line of
-# config/wedge-alarm; else "auto".
+# FM_WEDGE_ALARM_CONFIG or config/wedge-alarm; else "auto".
 wedge_alarm_configured_channels() {
   local cfg line found=
   if [ -n "${FM_WEDGE_ALARM_CHANNEL:-}" ]; then
     printf '%s\n' "$FM_WEDGE_ALARM_CHANNEL"
     return 0
   fi
-  cfg="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/wedge-alarm"
+  cfg="${FM_WEDGE_ALARM_CONFIG:-${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/wedge-alarm}"
   if [ -f "$cfg" ]; then
     while IFS= read -r line || [ -n "$line" ]; do
       line="${line#"${line%%[![:space:]]*}"}"
@@ -786,7 +786,7 @@ wedge_alarm_os_notifier_override() {  # <channel> <summary>
 # passed as an argv item (never interpolated into the AppleScript source) so its
 # text can never break the script. Best-effort: logs and returns 1 on failure.
 wedge_alarm_via_osascript() {  # <summary>
-  local summary=$1 rc
+  local summary=$1 rc title=${FM_WEDGE_ALARM_TITLE:-"firstmate: away-mode escalations WEDGED"}
   wedge_alarm_os_notifier_override osascript "$summary"
   rc=$?
   case "$rc" in
@@ -796,8 +796,8 @@ wedge_alarm_via_osascript() {  # <summary>
   command -v osascript >/dev/null 2>&1 || {
     log "wedge alarm: osascript not found; cannot post a macOS notification"; return 1; }
   wedge_alarm_run_bounded osascript osascript -e 'on run argv' \
-    -e 'display notification (item 1 of argv) with title "firstmate: away-mode escalations WEDGED" sound name "Basso"' \
-    -e 'end run' "$summary" >/dev/null 2>&1 && return 0
+    -e 'display notification (item 1 of argv) with title (item 2 of argv) sound name "Basso"' \
+    -e 'end run' "$summary" "$title" >/dev/null 2>&1 && return 0
   log "wedge alarm: osascript notification failed"
   return 1
 }
@@ -805,7 +805,7 @@ wedge_alarm_via_osascript() {  # <summary>
 # Post a herdr UI notification - herdr's own surface, separate from the pane and
 # its status-line. Best-effort: logs and returns 1 on failure.
 wedge_alarm_via_herdr() {  # <summary>
-  local summary=$1 rc
+  local summary=$1 rc title=${FM_WEDGE_ALARM_TITLE:-"firstmate: away-mode escalations WEDGED"}
   wedge_alarm_os_notifier_override herdr "$summary"
   rc=$?
   case "$rc" in
@@ -814,7 +814,7 @@ wedge_alarm_via_herdr() {  # <summary>
   esac
   command -v herdr >/dev/null 2>&1 || {
     log "wedge alarm: herdr not found; cannot post a herdr notification"; return 1; }
-  wedge_alarm_run_bounded herdr herdr notification show "firstmate: away-mode escalations WEDGED" \
+  wedge_alarm_run_bounded herdr herdr notification show "$title" \
     --body "$summary" --sound request >/dev/null 2>&1 && return 0
   log "wedge alarm: herdr notification failed"
   return 1

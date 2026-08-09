@@ -113,6 +113,11 @@ HEARTBEAT=${FM_HEARTBEAT:-600}        # base seconds between heartbeat scans
 HEARTBEAT_MAX=${FM_HEARTBEAT_MAX:-7200}  # heartbeat backoff cap
 CHECK_INTERVAL=${FM_CHECK_INTERVAL:-300}  # seconds between *.check.sh sweeps
 CHECK_TIMEOUT=${FM_CHECK_TIMEOUT:-30}     # seconds allowed per *.check.sh
+CAPTAIN_ACTION_NOTIFY_INTERVAL=${FM_CAPTAIN_ACTION_NOTIFY_INTERVAL:-60}
+case "$CAPTAIN_ACTION_NOTIFY_INTERVAL" in ''|*[!0-9]*|0) CAPTAIN_ACTION_NOTIFY_INTERVAL=60 ;; esac
+CAPTAIN_ACTION_NOTIFY_TIMEOUT=$CAPTAIN_ACTION_NOTIFY_INTERVAL
+[ "$CAPTAIN_ACTION_NOTIFY_TIMEOUT" -le 30 ] || CAPTAIN_ACTION_NOTIFY_TIMEOUT=30
+CAPTAIN_ACTION_NOTIFY_BIN=${FM_CAPTAIN_ACTION_NOTIFY_BIN:-$SCRIPT_DIR/fm-captain-action-notify.sh}
 SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trailing
                                       # signals (a status write, then the same turn's
                                       # turn-end hook) coalesce into one wake
@@ -525,6 +530,20 @@ run_check() {
   ( run_check_process "$@" ) 2>/dev/null || true
 }
 
+run_captain_action_notify() {
+  local notify_lock="$STATE/.captain-action-notification-check.lock"
+  (
+    trap - EXIT HUP INT TERM
+    fm_lock_try_acquire "$notify_lock" || exit 0
+    trap 'fm_lock_release "$notify_lock"' EXIT
+    (
+      CHECK_TIMEOUT="$CAPTAIN_ACTION_NOTIFY_TIMEOUT" FM_HOME="$FM_HOME" \
+        FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" \
+        run_check_process "$CAPTAIN_ACTION_NOTIFY_BIN"
+    ) || triage_log "captain action notification helper failed or timed out"
+  ) >/dev/null 2>&1 &
+}
+
 FM_ACTIVE_CHECK_PID=
 FM_ACTIVE_CHECK_PGID=
 FM_CHECK_OUTPUT=
@@ -776,6 +795,16 @@ while :; do
   # Liveness beacon for fm-guard.sh: a fresh mtime here means a watcher is
   # alive. Supervision scripts warn when this goes stale with tasks in flight.
   touch "$STATE/.last-watcher-beat"
+
+  # A snapshot transition is the independent desktop-alert backstop for a
+  # captain decision or PR that newly needs attention. The helper establishes a
+  # silent first baseline, atomically advances only the immediately prior set,
+  # and runs as a singleton bounded side task, so this periodic check can never
+  # turn an ordinary watcher cycle into an actionable wake, delay, or crash.
+  if [ "$(age_of "$STATE/.last-captain-action-notification-check")" -ge "$CAPTAIN_ACTION_NOTIFY_INTERVAL" ]; then
+    run_captain_action_notify
+    touch "$STATE/.last-captain-action-notification-check" 2>/dev/null || true
+  fi
 
   # Parent-owned secondmate pending-reply reconciliation: resolve correlated
   # parent reports, observe backend busy/idle turn completion, send one recovery

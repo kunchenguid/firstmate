@@ -75,6 +75,7 @@ config/herdr-presentation-spaces  optional "off" opt-out from Herdr's default-on
 config/trace-context  optional presence flag enabling default-off native W3C trace-context propagation to spawned agents; LOCAL, gitignored; inherited by secondmate homes; see docs/configuration.md "Trace context propagation" and docs/trace-context.md
 config/cmux-socket-password  optional cmux control-socket password; LOCAL, gitignored; read fresh on every cmux CLI call and passed through without ever overriding an operator's own ambient CMUX_SOCKET_PASSWORD when absent (docs/cmux-backend.md "Setup")
 config/wedge-alarm  optional away-mode wedge-alarm active-alert directives; LOCAL, gitignored; absent means auto (macOS Notification Center when available); see docs/wedge-alarm.md
+config/captain-action-notifications  optional captain-action desktop-alert directives; LOCAL, gitignored; same channel syntax as wedge-alarm but independently gated so action prompts remain separately controllable; absent means auto (macOS Notification Center when available); see docs/configuration.md "Captain-action notifications"
 config/mission-control-board  optional Mission Control freshness-monitor opt-in; see docs/configuration.md "Mission Control board freshness"
 config/x-mode.env    generated X-mode watcher cadence; LOCAL, gitignored; source before arming watcher when present
 data/                personal fleet records; LOCAL, gitignored as a whole

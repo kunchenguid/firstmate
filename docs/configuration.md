@@ -127,6 +127,20 @@ An absent file means `auto`, i.e. default-on on macOS: the alarm exists precisel
 A missing or failing channel logs and falls through to the next, never crashing the daemon.
 See [`wedge-alarm.md`](wedge-alarm.md) for the current channel reference, [`verification/supervision.md`](verification/supervision.md#wedge-alarm-channels) for active evidence, and [`examples/wedge-alarm`](examples/wedge-alarm) for a copyable config.
 
+## Captain-action notifications (config/captain-action-notifications)
+
+The watcher compares each current `fm-fleet-snapshot.v1` captain-actionable decision and main-home recorded PR against the immediately prior check.
+This check and its desktop alert run independently of the Mission Control page, so closing the page does not disable notifications while the watcher remains active.
+`state/.captain-action-notification-set` stores only that prior identity set, while `state/.last-captain-action-notification-check` schedules the next check.
+An absent set establishes a silent baseline, so enabling this feature never replays existing work.
+Only identities newly entering that set produce one batched alert through each configured channel, while a resolved item that later reopens alerts again.
+`config/captain-action-notifications` is local and gitignored and uses the channel grammar defined for [`config/wedge-alarm`](wedge-alarm.md#channels).
+Its absent default is `auto`, which posts through macOS Notification Center when available.
+It is intentionally a sibling rather than an extension of `config/wedge-alarm`: turning off the rare away-mode wedge alarm must not turn off normal review and decision prompts.
+`FM_CAPTAIN_ACTION_NOTIFICATION_CHANNEL` overrides this config with one directive, and `FM_CAPTAIN_ACTION_NOTIFY_INTERVAL` sets the watcher cadence in seconds (default 60).
+The delivery machinery, timeout, argv-safe AppleScript, and test recorder seam are the existing wedge-alarm implementation.
+An unavailable or malformed snapshot and missing tooling, denied notification permission, or any notifier failure log only to watcher triage and cannot crash supervision or create a supervision wake.
+
 ## Trace context propagation (config/trace-context / FM_TRACE_CONTEXT)
 
 The optional local, gitignored `config/trace-context` presence flag enables default-off native W3C trace-context propagation.
@@ -641,6 +655,8 @@ FM_MAX_DEFER_SECS=300              # max buffered escalation age before retry pl
 FM_WEDGE_ALARM_CHANNEL=            # override config/wedge-alarm with one active-alert directive for the wedge alarm; off|auto|osascript|herdr|command:<cmd>; absent = auto (macOS -> an OS notification)
 FM_WEDGE_ALARM_EXEC=              # notifier seam: route every channel (osascript, herdr, command:) through this command as `<cmd> <channel> <summary>`; "discard" fires nothing; unset in production; the daemon defaults it to "discard" when sourced so no test posts a real notification (docs/wedge-alarm.md)
 FM_WEDGE_ALARM_TIMEOUT_SECS=10    # maximum seconds for each osascript, herdr, override, or command: notifier before its watchdog terminates it and continues to the next channel; invalid or zero values use 10
+FM_CAPTAIN_ACTION_NOTIFICATION_CHANNEL= # override config/captain-action-notifications with one directive using the wedge-alarm channel grammar; absent = auto on macOS
+FM_CAPTAIN_ACTION_NOTIFY_INTERVAL=60 # watcher seconds between captain-action transition checks; invalid or zero uses 60
 FM_INJECT_FAIL_SLEEP=30            # seconds to back off when the supervisor pane is unavailable
 FM_INJECT_CONFIRM_RETRIES=3        # daemon Enter-retry attempts after typing a digest once
 FM_INJECT_CONFIRM_SLEEP=0.5        # seconds between daemon submit checks
