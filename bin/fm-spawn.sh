@@ -241,6 +241,49 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-cursor-lib.sh"
 # shellcheck source=bin/fm-process-identity-lib.sh
 . "$SCRIPT_DIR/fm-process-identity-lib.sh"
+
+cursor_worker_server_reap_record() {  # <record> <id>
+  local ws_file=$1 id=$2 pid identity current signal i
+  [ -f "$ws_file" ] || return 0
+  read -r pid identity < "$ws_file" 2>/dev/null || return 1
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  [ -n "$identity" ] || return 1
+  if ! kill -0 "$pid" 2>/dev/null; then
+    rm -f "$ws_file"
+    return 0
+  fi
+  current=$(fm_process_identity "$pid") || {
+    echo "error: recorded cursor worker-server for $id still exists at $pid but its identity cannot be read; refusing relaunch" >&2
+    return 1
+  }
+  if [ "$current" != "$identity" ]; then
+    rm -f "$ws_file"
+    return 0
+  fi
+  for signal in TERM KILL; do
+    kill -"$signal" "$pid" 2>/dev/null || true
+    for i in 1 2 3 4 5 6 7 8 9 10; do
+      kill -0 "$pid" 2>/dev/null || break 2
+      current=$(fm_process_identity "$pid") || {
+        echo "error: recorded cursor worker-server for $id still exists at $pid but its identity cannot be read; refusing relaunch" >&2
+        return 1
+      }
+      [ "$current" = "$identity" ] || break 2
+      sleep 0.1
+    done
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    current=$(fm_process_identity "$pid") || {
+      echo "error: recorded cursor worker-server for $id still exists at $pid but its identity cannot be read; refusing relaunch" >&2
+      return 1
+    }
+    [ "$current" != "$identity" ] || {
+      echo "error: recorded cursor worker-server for $id survived TERM and KILL; refusing relaunch" >&2
+      return 1
+    }
+  fi
+  rm -f "$ws_file"
+}
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -990,6 +1033,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
     echo "error: task $ID's endpoint reads '$RELAUNCH_STATE'; a relaunch requires a positively agent-free endpoint (stop the agent first with bin/fm-control.sh $ID exit)" >&2
     exit 1
   }
+  cursor_worker_server_reap_record "$STATE/$ID.worker-server" "$ID" || exit 1
   RELAUNCH_PRIOR_HARNESS=$(fm_meta_get "$RELAUNCH_META" harness)
   KIND=$(fm_meta_get "$RELAUNCH_META" kind)
   [ -n "$KIND" ] || KIND=ship
