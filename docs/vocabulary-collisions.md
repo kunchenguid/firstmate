@@ -152,12 +152,13 @@ No such field exists in the fleet today; the axis is what makes adding one a one
 Until it exists, read an absent `delivered` as "no path has reported this task landed", never as "this task did not land".
 
 **Retirement of the deprecated field.**
-No consumer branches on `kind=` any more: every reader was migrated to the axis it actually meant.
+No consumer branches on `kind=` any more, with one recorded exception the retirement step must migrate: the `active_workers.count` evidence detail in [`bin/fm-admission.sh`](../bin/fm-admission.sh) still groups snapshot tasks by the alias, and dropping the alias without migrating that site silently degrades the detail to a single bucket.
 What keeps the field alive is that it is still written - so a home that has not yet fast-forwarded can still read a record this one wrote - and that it is still the derivation source for a record predating the split.
-Its retirement condition is therefore: **stop writing `kind=`, and drop it from the fleet snapshot's task rows, once one full task cycle has run entirely on the three axes across every home this repository serves.**
+The name also stays on the wire during the window: under the unchanged `v1` schema tags, `fm-fleet-snapshot.v1` carries `kind` beside the axes on its task rows and its `scout_reports[]` rows, and `fm-bearings.v1` carries it beside `role`/`deliverable` on its `in_flight` rows, so an external consumer keying on the old name keeps reading; those wire fields retire at the next schema-tag bump of their surface, never silently under `v1`.
+Its retirement condition is therefore: **stop writing `kind=`, migrate the `active_workers.count` detail in [`bin/fm-admission.sh`](../bin/fm-admission.sh) to the axes, and drop `kind` from the `fm-fleet-snapshot.v1` and `fm-bearings.v1` surfaces at their next schema-tag bump, once one full task cycle has run entirely on the three axes across every home this repository serves.**
 Until then it is a dual-written deprecated alias with exactly one owner, and a metadata record whose `kind=` disagrees with its explicit axes is refused rather than silently resolved, so a stale writer that flips the old field alone cannot desynchronize a task's identity.
 
-**Where it bites:** [`bin/fm-task-axis-lib.sh`](../bin/fm-task-axis-lib.sh); the metadata field list in [`AGENTS.md`](../AGENTS.md) section 2; [`docs/architecture.md`](architecture.md).
+**Where it bites:** [`bin/fm-task-axis-lib.sh`](../bin/fm-task-axis-lib.sh); the metadata field list in [`AGENTS.md`](../AGENTS.md) section 2; [`docs/architecture.md`](architecture.md); the `active_workers.count` evidence detail in [`bin/fm-admission.sh`](../bin/fm-admission.sh); the `kind` wire fields of [`bin/fm-fleet-snapshot.sh`](../bin/fm-fleet-snapshot.sh) and [`bin/fm-bearings-snapshot.sh`](../bin/fm-bearings-snapshot.sh).
 
 ## Maintaining this file
 

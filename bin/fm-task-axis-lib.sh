@@ -239,21 +239,3 @@ fm_task_axes_backfill() {  # <meta-file>
   [ "${#add[@]}" -gt 0 ] || return 0
   fm_task_axes_write_before_pr "$meta" "${add[@]}"
 }
-
-# fm_task_axes_set: replace one axis in an existing record, forward-only. Used
-# by a transition that changes a task's identity (bin/fm-reflag.sh), so the
-# axis is rewritten in place rather than appended twice.
-fm_task_axes_set() {  # <meta-file> <axis> <value>
-  local meta=${1-} axis=${2-} value=${3-} tmp
-  [ -f "$meta" ] || return 1
-  case "$axis" in
-    role) fm_task_role_valid "$value" || return 1 ;;
-    deliverable) fm_task_deliverable_valid "$value" || return 1 ;;
-    stage) fm_task_stage_valid "$value" || return 1 ;;
-    *) return 1 ;;
-  esac
-  tmp="$meta.axis.$$"
-  grep -v "^$axis=" "$meta" > "$tmp" || true
-  mv -f -- "$tmp" "$meta" || { rm -f -- "$tmp"; return 1; }
-  fm_task_axes_write_before_pr "$meta" "$axis=$value"
-}

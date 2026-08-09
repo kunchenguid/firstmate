@@ -151,9 +151,11 @@
 #   secondmate receives the primary's read-only shared captain-preference file
 #   (fm-config-inherit-lib.sh). A successful launch clears pending inherited
 #   config reread generations because the new agent reads the converged files.
-#   --scout records kind=scout in the task's meta (report deliverable, scratch worktree;
-#   see AGENTS.md task lifecycle); --secondmate records kind=secondmate and launches in a
-#   provisioned firstmate home; the default is kind=ship.
+#   --scout records deliverable=scout in the task's meta (report deliverable, scratch
+#   worktree; see AGENTS.md task lifecycle); --secondmate records role=secondmate and
+#   launches in a provisioned firstmate home; the default is a commissioned crew ship
+#   task. The deprecated kind= alias is dual-written beside the axes for the
+#   migration window (bin/fm-task-axis-lib.sh).
 #   Before a secondmate launch, the home is locally fast-forwarded to the primary
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real

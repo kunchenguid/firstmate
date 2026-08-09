@@ -411,7 +411,7 @@ process_secondmate() {
 }
 
 # Sweep this home's LIVE secondmate direct reports - state/<id>.meta files with
-# kind=secondmate - fast-forwarding each to base_mode. Passes base_mode and
+# role=secondmate - fast-forwarding each to base_mode. Passes base_mode and
 # nudge_requires_instr through to process_secondmate. Accumulates into
 # FF_NUDGE_WINDOWS / FF_SEEN_HOMES, which the caller resets before and reads after.
 # The registry argument is only for home= fallback on older or incomplete meta records.

@@ -25,7 +25,7 @@
 # nothing else tells firstmate's instructions apart from a human typing into that
 # pane. Every text steer whose target is a task selector resolved through this
 # home's meta therefore uses the live-charter-compatible from-firstmate carrier
-# owned by bin/fm-operational-input.sh. A kind=secondmate target routes its reply
+# owned by bin/fm-operational-input.sh. A role=secondmate target routes its reply
 # via its status file or a status-pointed doc instead of stranding it in chat the
 # main firstmate never reads; a crewmate or scout target reads the same marker
 # through its generated brief (bin/fm-brief.sh), which treats an unmarked message

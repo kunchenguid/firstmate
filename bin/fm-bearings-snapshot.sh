@@ -105,7 +105,9 @@ usage: fm-bearings-snapshot.sh [--json] [--include-prs] [--fields <list>]
 Compact bearings projection over fm-fleet-snapshot.sh. TOON by default.
 Default is LOCAL-ONLY (no network); --include-prs is the only path that fetches.
 
-Default fields: schema, home, generated, prs, in_flight{id,role,deliverable,state,doing},
+Default fields: schema, home, generated, prs, in_flight{id,kind,role,deliverable,state,doing}
+  (kind is the deprecated task-identity alias, kept beside the axes under the
+  unchanged v1 tag until the next schema-tag bump; docs/vocabulary-collisions.md),
   secondmates{id,state,doing,provenance,freshness,age_seconds,contradiction,reason},
   decisions_open{id,key,verb,summary,owner}, landed{id,what,artifact,owner},
   gates{id,title,blocked_by,reason,owner}, reports{id,path}, recorded_prs{id,url},
@@ -370,14 +372,14 @@ MODEL=$(printf '%s' "$SNAP" | jq \
        | select(.role != "secondmate")
        | select(.backlog.current_role != "program")
        | select(.backlog.current_role != "held" or .current_state.state == "working")
-       | {id, role, deliverable,
+       | {id, kind, role, deliverable,
         state: .current_state.state,
         doing: ((.current_state.detail // "") as $d
                 | (if $d != "" then $d else (.hints.last_event_text // "") end) | trunc(90))
       } ]
      + [ $secondmate_views[]
          | select(.bearings_state == "active_child_work")
-         | {id,role:"secondmate",deliverable:"ship",state:.bearings_state,
+         | {id,kind:"secondmate",role:"secondmate",deliverable:"ship",state:.bearings_state,
             doing:([.active_children[] | .id + ": " + (.doing // .state)] | join("; ") | trunc(90))} ]) as $in_flight_all
   | ([ .backlog.records[]
          | select(.structured and .captain_actionable == true)

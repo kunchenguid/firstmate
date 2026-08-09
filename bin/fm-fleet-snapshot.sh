@@ -32,7 +32,12 @@
 #     endpoint.exists is the cheap backend endpoint-presence read.
 #     endpoint.agent_alive is populated for secondmates only, where it is useful
 #     return-channel supervision data; other tasks use "not_checked".
-#   scout_reports[]: present data/<id>/report.md pointers.
+#   scout_reports[]: present data/<id>/report.md pointers, each labeled with the
+#     owning task row's deliverable (plus the deprecated kind alias for the
+#     migration window; docs/vocabulary-collisions.md owns its retirement). A
+#     torn-down task has no task row, so its surviving report reports
+#     deliverable=scout; the backlog record's kind is a different vocabulary
+#     (captain/program) and is never consulted.
 #   main_inventory: {valid,reason,orphan_in_flight[],unstructured_current_count} -
 #     main-home current-inventory checks shared with secondmate_home_summary_json
 #     (orphan structured in-flight ids with no state/<id>.meta, and unstructured
@@ -138,6 +143,9 @@ validate_positive_bound FM_SNAPSHOT_REGISTRY_TIMEOUT "$FM_SNAPSHOT_REGISTRY_TIME
 # shellcheck source=bin/fm-classify-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-classify-lib.sh"
+# shellcheck source=bin/fm-task-axis-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-task-axis-lib.sh"
 # shellcheck source=bin/fm-ff-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-ff-lib.sh"  # validate_secondmate_home: shared seeded-home boundary checks
@@ -1511,6 +1519,7 @@ json_envelope \
    | $in.secondmate_landed as $secondmate_landed
    | def backlog_by_id($id): ($backlog.records[]? | select(.structured == true and .id == $id) | .) // null;
    def task_by_id($id): ($tasks[]? | select(.id == $id) | .) // null;
+   def report_kind($id): (task_by_id($id).kind // "scout");
    def report_deliverable($id): (task_by_id($id).deliverable // "scout");
    {
      schema:"fm-fleet-snapshot.v1",
@@ -1520,7 +1529,7 @@ json_envelope \
      backlog:$backlog,
      tasks:($tasks | map(. + {backlog:backlog_by_id(.id)})),
      main_inventory:$main_inventory,
-     scout_reports:($scout_reports | map(. + {deliverable:report_deliverable(.id)})),
+     scout_reports:($scout_reports | map(. + {kind:report_kind(.id), deliverable:report_deliverable(.id)})),
      secondmate_current:$secondmate_current,
      secondmate_landed:$secondmate_landed,
      secondmate_guidance:{

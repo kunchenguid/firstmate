@@ -64,7 +64,7 @@ fi
 FF_NUDGE_WINDOWS=""
 FF_SEEN_HOMES=""
 
-# Live direct reports first: state/<id>.meta with kind=secondmate carries the
+# Live direct reports first: state/<id>.meta with role=secondmate carries the
 # authoritative home= path.
 sweep_live_secondmate_metas "$STATE" origin no
 
