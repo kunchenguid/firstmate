@@ -10,8 +10,9 @@
 # the caller's ambient GH_TOKEN/GITHUB_TOKEN unchanged. This script never calls
 # fm-gh.sh, never injects config/gh-credential's broader PR-capable credential,
 # and never prints a token. It falls back only after the original command reports
-# the known GraphQL personal-token denial for statusCheckRollup; every other result
-# is replayed unchanged.
+# the GraphQL personal-token denial whose error path names a `statusCheckRollup`
+# component, at whatever depth GitHub currently reports it; every other result,
+# including a denial for any other API, is replayed unchanged.
 #
 # The fallback is intentionally limited to the two literal argument vectors used
 # by the supported no-mistakes CI monitor: a selector, `--repo owner/repository`,
@@ -106,10 +107,14 @@ replay_original() {
   exit "$ORIGINAL_STATUS"
 }
 
-# Requiring the complete permission signature here keeps a changed gh failure
-# from being reinterpreted as CI state.
-if ! grep -Fq 'GraphQL: Resource not accessible by personal access token (node.statusCheckRollup.nodes.0.commit.statusCheckRollup)' \
-  "$ORIGINAL_OUT" "$ORIGINAL_ERR"; then
+# Requiring GitHub's exact denial sentence together with a whole
+# `statusCheckRollup` component inside its GraphQL error path keeps a changed gh
+# failure from being reinterpreted as CI state, while tolerating the deeper
+# property paths GitHub appends to that same denial as its check-runs selection
+# set evolves. A component match is deliberate: a path that merely starts with
+# those characters, and any denial for another API, still replays unchanged.
+DENIAL_PATTERN='GraphQL: Resource not accessible by personal access token \(([A-Za-z0-9_]+\.)*statusCheckRollup(\.[A-Za-z0-9_]+)*\)'
+if ! grep -Eq "$DENIAL_PATTERN" "$ORIGINAL_OUT" "$ORIGINAL_ERR"; then
   replay_original
 fi
 

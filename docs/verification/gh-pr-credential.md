@@ -64,14 +64,15 @@ The routing mechanism is owned only by [`../no-mistakes-pr-credential.md`](../no
 `tests/fm-gh-shim.test.sh` drives the public shim and wrapper interfaces with local fakes, touching no network and no real `gh`.
 `tests/fm-pr-merge.test.sh` drives protected GitHub merge capture through the public merge interface both without the shim and with a symlink to this repository's shim prefixed on `PATH`, and proves both paths preserve the single GraphQL request and exact SHA-conditioned merge mutation.
 
-Seven CI cases reproduce the check-runs authorization boundary and exercise the fallback through the shim's public `gh` interface.
+Eight CI cases reproduce the check-runs authorization boundary and exercise the fallback through the shim's public `gh` interface.
 The fake applies the helper's real jq expression to paginated raw workflow-run fixtures, so the assertions cover the same transformation `gh api --paginate --slurp --jq` performs.
 The green case provides a failed workflow under a stale SHA and a successful workflow under the PR head, then asserts that the only Actions endpoint called contains `head_sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa` and that the result is `bucket: pass`.
 It also configures a distinct PR-capable token and proves that every CI call retains only the ambient narrow token.
 The red case maps an exact-head workflow failure to `bucket: fail` and preserves its Actions link.
 The zero-run case emits a pending placeholder, and a multi-page case maps cancelled, skipped, and queued workflows to the cancellation, skipping, and pending buckets.
 The moving-head case refuses a verdict when the PR advances during pagination.
-The unrelated-failure case proves generic HTTP 403 responses, denials for other APIs, and non-403 failures never reach the fallback API, while the unsupported-shape case proves only the two literal no-mistakes argument vectors enter the capturing helper.
+The deeper-denial-path case drives `(node.statusCheckRollup.nodes.0.commit.statusCheckRollup.contexts.nodes.0)`, the denial GitHub returns today, and reaches the same exact-head green verdict the shorter historical path reaches.
+The unrelated-failure case proves generic HTTP 403 responses, denials for other APIs, a denial whose path only begins with those characters (`node.statusCheckRollupSummary.nodes.0`), and non-403 failures never reach the fallback API, while the unsupported-shape case proves only the two literal no-mistakes argument vectors enter the capturing helper.
 These fixtures establish GitHub Actions behavior only; the workflow-runs API cannot reproduce third-party check-provider evidence hidden behind check-runs.
 
 One case is a legacy-shell regression and self-skips where no bash 3.2 exists.
@@ -85,6 +86,7 @@ ok - repository-like option values cannot suppress origin targeting
 ok - caller-supplied --repo and -R always win over the checkout origin
 ok - credential-routed pr edit without --repo refuses when origin is unavailable
 ok - a check-runs 403 reaches a green exact-head workflow verdict without the privileged token
+ok - a denial naming statusCheckRollup deeper in its path still reaches the exact-head verdict
 ok - a check-runs 403 reaches a red exact-head workflow verdict
 ok - zero exact-head workflow runs remain explicitly pending
 ok - paginated exact-head runs map cancellation, skipping, and pending buckets
