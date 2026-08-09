@@ -2,7 +2,8 @@
 name: process-event-sources
 description: >-
   Agent-only procedure for registered process-to-event sources and their wakes.
-  Use before arming a long-polling source firstmate owns, and on any
+  Use before arming a long-polling source firstmate owns, when starting an
+  external wait that owes a callback, and on any
   `procevent <adapter> <source-id> <sequence>` check wake.
   Owns the arming commands, the durable result read, which wakes must be
   routed to their adapter instead of acknowledged generically, the handled
@@ -15,7 +16,7 @@ metadata:
 
 # process-event-sources
 
-Load this before arming a long-polling source, and whenever a `check:` wake carries `procevent <adapter> <source-id> <sequence>`.
+Load this before arming a long-polling source, when starting an external wait that owes a callback, and whenever a `check:` wake carries `procevent <adapter> <source-id> <sequence>`.
 
 The runner exists so a blocking external process never holds firstmate's conversational turn.
 Firstmate registers a source, keeps working, and is woken when that process completes.
@@ -35,9 +36,10 @@ A continuity break is escalated once and stays unarmed until an operator deliber
 
 `bin/fm-procevent.sh --help`, `bin/fm-procevent-lavish.sh --help`, and `bin/fm-procevent-remote-reply.sh --help` own the exact commands and flags.
 
-Two rules the commands cannot enforce for you:
+Three rules the commands cannot enforce for you:
 
 - **Never run the source's blocking command yourself in a conversational turn.** That is the problem the runner exists to remove, and for a destructive source it also consumes the result where nothing durable can capture it.
+- **If a turn is about to end while an external wait is still outstanding and no blocking call is running in the foreground, arm it instead of leaving it unregistered.** Registering the source is what lets the turn-end guard see the work is still under way. Skipping both the foreground call and the arm leaves no trace anywhere, so the wait silently falls off the end of the turn.
 - **A source is a wait on an external process, not a task.** It gets no task metadata and no backlog entry. If the wait itself needs tracking, file it as its own work item.
 
 ## Handling a wake
