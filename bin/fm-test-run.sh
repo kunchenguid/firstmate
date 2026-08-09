@@ -133,7 +133,7 @@ now_ms() {
 family_for_basename() {
   case "$1" in
     fm-arm-pretool-check.test.sh|fm-ask-user-authority.test.sh|\
-    fm-brief.test.sh|fm-vendor-auth-probe.test.sh|\
+    fm-brief.test.sh|fm-vendor-auth-probe.test.sh|higgsfield-safe-generate.test.sh|\
     fm-calm-pi-extension.test.sh|fm-cd-pretool-check.test.sh|\
     fm-composer-ghost.test.sh|fm-composer-lib.test.sh|\
     fm-crew-state.test.sh|fm-decision-hold-lifecycle.test.sh|\
@@ -950,6 +950,9 @@ families_for_changed_path() {
     bin/fm-vendor-auth-probe.sh|\
     bin/fm-primary-scope-lib.sh|bin/fm-project-mode.sh|bin/fm-promote.sh|\
     bin/fm-ff-lib.sh|bin/fm-gotmp*|bin/*pretool*)
+      printf '%s\n' pure-contract-unit
+      ;;
+    .agents/skills/higgsfield-generate/*)
       printf '%s\n' pure-contract-unit
       ;;
     .agents/skills/quota-array-dispatch/SKILL.md)
