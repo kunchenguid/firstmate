@@ -169,12 +169,12 @@ command -v jq >/dev/null 2>&1 || { echo "fm-bearings-snapshot: jq not found" >&2
 NOW=${FM_BEARINGS_NOW:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}
 if [ "$ALL_LANDED" = 1 ] || [ "$ALL_SECONDMATES" = 1 ]; then
   if [ "$ALL_LANDED" = 1 ]; then
-    SNAP=$(FM_SNAPSHOT_NOW="$NOW" FM_SNAPSHOT_SECONDMATES=0 FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME=0 "$FLEET" --json) || exit $?
+    SNAP=$(FM_SNAPSHOT_NOW="$NOW" FM_SNAPSHOT_MEASURE_AGENT_STATE=1 FM_SNAPSHOT_SECONDMATES=0 FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME=0 "$FLEET" --json) || exit $?
   else
-    SNAP=$(FM_SNAPSHOT_NOW="$NOW" FM_SNAPSHOT_SECONDMATES=0 "$FLEET" --json) || exit $?
+    SNAP=$(FM_SNAPSHOT_NOW="$NOW" FM_SNAPSHOT_MEASURE_AGENT_STATE=1 FM_SNAPSHOT_SECONDMATES=0 "$FLEET" --json) || exit $?
   fi
 else
-  SNAP=$(FM_SNAPSHOT_NOW="$NOW" "$FLEET" --json) || exit $?
+  SNAP=$(FM_SNAPSHOT_NOW="$NOW" FM_SNAPSHOT_MEASURE_AGENT_STATE=1 "$FLEET" --json) || exit $?
 fi
 HOME_LABEL=$(printf '%s' "$SNAP" | jq -er '.fm_home | strings | split("/") | (.[-2:] | join("/"))') \
   || { echo "fm-bearings-snapshot: invalid canonical snapshot" >&2; exit 1; }
@@ -301,6 +301,15 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   --argjson candidate_prs "$CANDIDATE_PRS" '
   def trunc($n): if . == null then null else
     (tostring | gsub("\\s+"; " ") | if (length > $n) then (.[:$n] + "…") else . end) end;
+  def measured_liveness_gate:
+    .kind != "secondmate"
+      and .backlog.state == "in_flight"
+      and .backlog.current_role != "held"
+      and ((.current_state.state == "done" or .current_state.state == "failed")
+           or ((.hints.last_event_text // "") | test("^(done|failed):")))
+      and .liveness.activity == "absent"
+      and .liveness.endpoint.presence == "verified_absent"
+      and .liveness.worker.presence == "verified_absent";
   def round_robin_landed($n):
     . as $groups
     | [range(0; (($groups | map(length) | max) // 0)) as $i
@@ -370,6 +379,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
        | select(.kind != "secondmate")
        | select(.backlog.current_role != "program")
        | select(.backlog.current_role != "held" or .current_state.state == "working")
+       | select(measured_liveness_gate | not)
        | {id, kind,
         state: .current_state.state,
         doing: ((.current_state.detail // "") as $d
@@ -394,6 +404,10 @@ MODEL=$(printf '%s' "$SNAP" | jq \
           reason:"main inventory",
           owner:"(main)"}]
       else [] end)
+     + [ .tasks[]
+         | select(measured_liveness_gate)
+         | {id,title:((.backlog.title // .id) | trunc(60)),blocked_by:"-",
+            reason:("measured liveness: " + .liveness.activity + "; endpoint=" + .liveness.endpoint.presence + "; worker=" + .liveness.worker.presence | trunc(120)),owner:"(main)"} ]
      + [ .backlog.records[]
          | . as $record
          | select(.structured and

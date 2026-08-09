@@ -31,10 +31,61 @@ EOF
   printf '%s\n' "$home"
 }
 
-run_bearings() {  # <home>
-  local home=$1
+run_bearings_with() {  # <bearings-bin> <home>
+  local bearings=$1 home=$2
   PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_BEARINGS_NOW=2026-07-14T12:00:00Z \
-    "$BEARINGS" --json
+    "$bearings" --json
+}
+
+run_bearings() {  # <home>
+  run_bearings_with "$BEARINGS" "$1"
+}
+
+liveness_property_holds() {  # <json> <phantom> <held> <active>
+  printf '%s' "$1" | jq -e --arg phantom "$2" --arg held "$3" --arg active "$4" '
+    (.gates | any(
+      .id == $phantom
+        and .reason == "measured liveness: absent; endpoint=verified_absent; worker=verified_absent"
+    ))
+      and (.gates | any(.id == $held and .reason == "captain route choice pending"))
+      and (.gates | any(
+        .id == $held and (.reason | startswith("measured liveness:"))
+      ) | not)
+      and (.gates | any(.id == $active) | not)
+  ' >/dev/null
+}
+
+install_liveness_tmux_fixture() {  # <home> <active-id>
+  local home=$1 active_id=$2
+  cat > "$home/fakebin/tmux" <<'EOF'
+#!/usr/bin/env bash
+target=
+previous=
+for argument in "$@"; do
+  if [ "$previous" = -t ]; then target=$argument; fi
+  previous=$argument
+done
+case "${1:-}" in
+  list-windows)
+    printf 'fm-%s\n' "${FM_TEST_ACTIVE_ID:?}"
+    ;;
+  display-message)
+    [ "$target" = "firstmate:fm-${FM_TEST_ACTIVE_ID:?}" ] || exit 1
+    case "${*: -1}" in
+      '#{pane_id}') printf '%%1\n' ;;
+      '#{pane_current_command}') printf 'codex\n' ;;
+      '#{pane_tty}') printf '\n' ;;
+      *) printf 'codex\n' ;;
+    esac
+    ;;
+  capture-pane)
+    [ "$target" = "firstmate:fm-${FM_TEST_ACTIVE_ID:?}" ] || exit 1
+    printf 'working\n'
+    ;;
+  *) exit 1 ;;
+esac
+EOF
+  chmod +x "$home/fakebin/tmux"
 }
 
 run_teardown() {  # <home> <id>
@@ -49,13 +100,18 @@ run_teardown() {  # <home> <id>
 # no held backlog item or open status exists, and the authoritative Bearings view
 # correctly omits it. Completion must now refuse before teardown can erase the source.
 test_uninventoried_report_decision_refuses_completion() {
-  local home id json rc
+  local home id held_id active_id mutated_bin json mutated_json rc
   home=$(make_home omitted-decision)
   id=sample-route-review
-  mkdir -p "$home/data/$id"
+  held_id=sample-held-review
+  active_id=sample-active-review
+  mkdir -p "$home/data/$id" "$home/data/$held_id" "$home/data/$active_id" \
+    "$home/projects/active-scratch"
   cat > "$home/data/backlog.md" <<EOF
 ## In flight
 - [ ] $id - Investigate sample routing (repo: sample) (kind: scout) (since 2026-07-14)
+- [ ] $held_id - Hold sample routing (repo: sample) (kind: captain) (since 2026-07-14) (hold: captain route choice pending) (hold-kind: captain)
+- [ ] $active_id - Continue sample routing (repo: sample) (kind: scout) (since 2026-07-14)
 
 ## Queued
 
@@ -68,7 +124,23 @@ EOF
     "harness=codex" \
     "kind=scout" \
     "mode=scout"
+  fm_write_meta "$home/state/$held_id.meta" \
+    "window=firstmate:fm-$held_id" \
+    "worktree=$home/projects/missing-held" \
+    "project=$home/projects/sample" \
+    "harness=codex" \
+    "kind=captain" \
+    "mode=captain"
+  fm_write_meta "$home/state/$active_id.meta" \
+    "window=firstmate:fm-$active_id" \
+    "worktree=$home/projects/active-scratch" \
+    "project=$home/projects/sample" \
+    "harness=codex" \
+    "kind=scout" \
+    "mode=scout"
   printf 'done: report and visual review complete\n' > "$home/state/$id.status"
+  printf 'needs-decision [key=route]: captain route choice pending\n' > "$home/state/$held_id.status"
+  printf 'working: continuing sample routing\n' > "$home/state/$active_id.status"
   cat > "$home/data/$id/report.md" <<'EOF'
 # Sample route review
 
@@ -76,12 +148,33 @@ The evidence is complete.
 The captain still needs to choose route north or route south before follow-up work starts.
 EOF
 
-  json=$(run_bearings "$home") || fail "Bearings failed for unresolved-decision regression"
-  printf '%s' "$json" | jq -e '
-    (.decisions_open | length) == 0
-      and (.gates | length) == 0
-      and (.reports | any(.id == "sample-route-review"))
-  ' >/dev/null || fail "the pre-policy omission shape was not reproduced: $json"
+  install_liveness_tmux_fixture "$home" "$active_id"
+  json=$(FM_TEST_ACTIVE_ID="$active_id" run_bearings "$home") \
+    || fail "Bearings failed for unresolved-decision regression"
+  liveness_property_holds "$json" "$id" "$held_id" "$active_id" \
+    || fail "measured liveness did not distinguish the phantom, held, and active lanes without hiding the held gate: $json"
+  printf '%s' "$json" | jq -e --arg id "$id" '
+    (.decisions_open | any(.id == $id) | not) and (.reports | any(.id == $id))
+  ' >/dev/null || fail "phantom regression lost its report-only decision shape: $json"
+
+  mutated_bin="$home/mutated-bin"
+  cp -R "$ROOT/bin" "$mutated_bin"
+  sed 's/and \.liveness\.activity == "absent"/and false/' \
+    "$BEARINGS" > "$mutated_bin/fm-bearings-snapshot.sh"
+  chmod +x "$mutated_bin/fm-bearings-snapshot.sh"
+  cmp -s "$BEARINGS" "$mutated_bin/fm-bearings-snapshot.sh" \
+    && fail "measured-liveness selector mutation did not alter the executable"
+  mutated_json=$(FM_TEST_ACTIVE_ID="$active_id" \
+    run_bearings_with "$mutated_bin/fm-bearings-snapshot.sh" "$home") \
+    || fail "selector-neutralized Bearings execution failed"
+  if liveness_property_holds "$mutated_json" "$id" "$held_id" "$active_id"; then
+    fail "neutralizing the measured-liveness selector left the guarded property green: $mutated_json"
+  fi
+  printf '%s' "$mutated_json" | jq -e --arg id "$id" --arg held "$held_id" --arg active "$active_id" '
+    (.gates | any(.id == $id) | not)
+      and (.gates | any(.id == $held and .reason == "captain route choice pending"))
+      and (.gates | any(.id == $active) | not)
+  ' >/dev/null || fail "selector neutralization went RED for a reason other than removal of the phantom gate: $mutated_json"
 
   set +e
   run_teardown "$home" "$id" > "$home/teardown.out" 2> "$home/teardown.err"
@@ -90,7 +183,7 @@ EOF
   [ "$rc" -ne 0 ] || fail "completed investigation teardown erased a report-only unresolved decision"
   assert_present "$home/state/$id.meta" "refused completion must preserve investigation metadata"
   assert_grep "REFUSED" "$home/teardown.err" "refusal must be explicit"
-  pass "report-only unresolved decision is reproduced and completion refuses before loss"
+  pass "verified-absent in-flight work gates while held and active workers avoid measured-liveness gates, selector neutralization goes RED, and completion refuses before report loss"
 }
 
 tasks_in() {  # <home> <tasks-axi args...>

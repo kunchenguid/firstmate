@@ -30,8 +30,10 @@
 #     against current_state; hints.pending_decision and hints.blocked_event are
 #     booleans derived from that set.
 #     endpoint.exists is the cheap backend endpoint-presence read.
-#     endpoint.agent_alive is populated for secondmates only, where it is useful
-#     return-channel supervision data; other tasks use "not_checked".
+#     endpoint.agent_alive is populated for secondmates only by default, where it
+#     is useful return-channel supervision data; other tasks use "not_checked".
+#     FM_SNAPSHOT_MEASURE_AGENT_STATE=1 asks the existing recovery-grade backend
+#     classifier for every local task and adds normalized endpoint/worker liveness.
 #   scout_reports[]: present data/<id>/report.md pointers.
 #   main_inventory: {valid,reason,orphan_in_flight[],unstructured_current_count} -
 #     main-home current-inventory checks shared with secondmate_home_summary_json
@@ -66,6 +68,14 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 BACKLOG="$DATA/backlog.md"
 SNAPSHOT_NOW=${FM_SNAPSHOT_NOW:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}
+FM_SNAPSHOT_MEASURE_AGENT_STATE=${FM_SNAPSHOT_MEASURE_AGENT_STATE:-0}
+case "$FM_SNAPSHOT_MEASURE_AGENT_STATE" in
+  0|1) ;;
+  *)
+    echo "fm-fleet-snapshot: FM_SNAPSHOT_MEASURE_AGENT_STATE must be 0 or 1" >&2
+    exit 2
+    ;;
+esac
 if [ -n "${FM_SNAPSHOT_NOW_EPOCH:-}" ]; then
   SNAPSHOT_EPOCH=$FM_SNAPSHOT_NOW_EPOCH
 else
@@ -403,7 +413,7 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
 task_json_lines() {
   local meta id kind harness mode yolo project worktree home projects backend target status_log report_path
   local remote_host remote_root remote_state remote_rc remote_home_present
-  local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
+  local pr pr_source event_json current_json endpoint_exists agent_alive agent_state meta_json status_json report_json worktree_json home_json
   local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
   local open_decisions_tsv open_decisions_json
 
@@ -504,14 +514,26 @@ task_json_lines() {
       fi
     else
       if [ -n "$target" ]; then
-        if fm_backend_target_exists "$backend" "$target" "fm-$id" >/dev/null 2>&1; then
+        if [ "$kind" = secondmate ] || [ "$FM_SNAPSHOT_MEASURE_AGENT_STATE" = 1 ]; then
+          agent_state=$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || printf unreadable)
+          case "$agent_state" in
+            alive) endpoint_exists=true; agent_alive=alive ;;
+            dead) endpoint_exists=true; agent_alive=dead ;;
+            missing) endpoint_exists=false; agent_alive=dead ;;
+            *)
+              if fm_backend_target_exists "$backend" "$target" "fm-$id" >/dev/null 2>&1; then
+                endpoint_exists=true
+              else
+                endpoint_exists=null
+              fi
+              agent_alive=unknown
+              ;;
+          esac
+        elif fm_backend_target_exists "$backend" "$target" "fm-$id" >/dev/null 2>&1; then
           endpoint_exists=true
         else
           endpoint_exists=false
         fi
-      fi
-      if [ "$kind" = secondmate ] && [ -n "$target" ]; then
-        agent_alive=$(fm_backend_agent_alive "$backend" "$target" 2>/dev/null || printf unknown)
       fi
     fi
 
@@ -581,6 +603,17 @@ task_json_lines() {
                   elif $agent_alive == "alive" or $agent_alive == "dead" then $agent_alive
                   else "unknown" end),
           observed_at:$observed_at,freshness:"fresh"},
+        liveness:{
+          endpoint:{presence:(if $endpoint_exists == true then "verified_present"
+                              elif $endpoint_exists == false then "verified_absent"
+                              else "unverified" end)},
+          worker:{presence:(if $agent_alive == "alive" then "verified_present"
+                            elif $agent_alive == "dead" then "verified_absent"
+                            else "unverified" end)},
+          activity:(if $endpoint_exists == false and $agent_alive == "dead" then "absent"
+                    elif $agent_alive == "alive" then "present"
+                    else "unverified" end)
+        },
         pr:{url:($pr | if . == "" then null else . end),source:$pr_source},
         hints:{
           pending_decision:$pending_decision,
