@@ -11,7 +11,9 @@ Exact task chronology, branch names, temporary homes, local paths, process ids, 
 OMP 17.2.12 was verified on 2026-08-09 as a primary-session identity: the marker that selects its own supervision adapter, and the process shape that owns the home lock.
 The live OMP tool environment exported `OMPCODE=1` while also inheriting `CLAUDECODE=1`, and its long-lived process had the shape `bun <home>/.bun/bin/omp`.
 The marker therefore resolves the harness as `omp` before the foreign Claude marker, so supervision instructions select the verified `omp` protocol, while the exact Bun script ancestry supplies the stable process id that owns the home lock.
-An unrelated Bun script whose later arguments merely mention OMP remains outside that identity, and a bare Bun with no script argument stays unattributed even when its install path carries an `omp` component.
+An unrelated Bun script whose later arguments merely mention OMP remains outside that identity on both surfaces, because each judges argv[1] alone.
+The two surfaces deliberately differ for a bare Bun carrying no script argument at all: harness detection leaves it unattributed, while the session-lock owner check reaches it through the same whole-path-component rule that identifies a version-named Claude Code binary, so a Bun installed under an `omp` path component still reads as a possible lock owner there.
+That asymmetry is the conservative direction - a recycled lock pid can only keep a session read-only, never hand two sessions the same lock - and it is not narrowed by the `omp` identity above.
 
 Portable and live verification:
 
