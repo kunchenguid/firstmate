@@ -128,6 +128,11 @@ case "$query" in
   # string for every -p query would make the walk error instead of ending.
   *"ppid="*) exit 1 ;;
   *"-t "*)
+    if [ -n "${FM_FAKE_CURSOR_AGENT_AFTER_ENTER:-}" ] \
+       && [ ! -e "${FM_FAKE_CURSOR_ENTER_STARTED:-}" ]; then
+      printf '777 777 777 bash\n'
+      exit 0
+    fi
     [ "${FM_FAKE_CURSOR_AGENT_PID-unset}" != unset ] || FM_FAKE_CURSOR_AGENT_PID=4242
     [ -z "$FM_FAKE_CURSOR_AGENT_PID" ] || printf '%s %s\n' "$FM_FAKE_CURSOR_AGENT_PID" "$args"
     exit 0 ;;
@@ -680,6 +685,60 @@ test_cursor_worker_server_alias_uses_portable_identity() {
   pass "cursor worker-server discovery handles agent alias and portable identity"
 }
 
+test_cursor_relaunch_reaps_prior_worker_before_recording_replacement() {
+  local rec id out status old_parent old_pid new_pid
+  id=cursor-worker-relaunch-zj
+  rec=$(make_cursor_case cursor-worker-relaunch "$id")
+  read_case_record "$rec"
+  : > "$CASE_DIR/windows.state"
+  bash -c 'sleep 300 & printf "%s\n" "$!" > "$1"; wait' _ "$CASE_DIR/old-worker.pid" &
+  old_parent=$!
+  while [ ! -s "$CASE_DIR/old-worker.pid" ]; do sleep 0.01; done
+  old_pid=$(cat "$CASE_DIR/old-worker.pid")
+  ( exec sleep 300 ) &
+  new_pid=$!
+  disown
+
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
+    FM_FAKE_CURSOR_AGENT_ARGS="$FAKEBIN_DIR/cursor-agent --force --trust brief" \
+    FM_FAKE_CURSOR_AGENT_PID=4242 FM_FAKE_CURSOR_WORKER_PID=$old_pid \
+    FM_FAKE_WINDOW_STATE_FILE="$CASE_DIR/windows.state" \
+    FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" PATH="$FAKEBIN_DIR:$PATH" \
+    "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  expect_code 0 "$status" "initial cursor spawn should record prior worker"
+  assert_grep "$old_pid " "$HOME_DIR/state/$id.worker-server" \
+    "initial cursor spawn did not record prior worker"
+
+  rm -f "$CASE_DIR/enter-started" "$CASE_DIR/launch-typed"
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
+    FM_FAKE_CURSOR_AGENT_ARGS="$FAKEBIN_DIR/cursor-agent --force --trust brief" \
+    FM_FAKE_CURSOR_AGENT_PID=4242 FM_FAKE_CURSOR_AGENT_AFTER_ENTER=1 \
+    FM_FAKE_CURSOR_WORKER_PID=$new_pid FM_FAKE_CURSOR_ENTER_STARTED="$CASE_DIR/enter-started" \
+    FM_FAKE_CURSOR_RECORD_FILE="$HOME_DIR/state/$id.worker-server" \
+    FM_FAKE_CURSOR_CAPTURE_LOG="$CASE_DIR/capture.log" \
+    FM_FAKE_CURSOR_LAUNCH_TYPED="$CASE_DIR/launch-typed" \
+    FM_FAKE_WINDOW_STATE_FILE="$CASE_DIR/windows.state" \
+    FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" PATH="$FAKEBIN_DIR:$PATH" \
+    "$SPAWN" "$id" --relaunch 2>&1)
+  status=$?
+  expect_code 0 "$status" "cursor relaunch should reap prior worker and record replacement"$'\n'"$out"
+  if kill -0 "$old_pid" 2>/dev/null; then
+    fail "cursor relaunch left prior worker alive"
+  fi
+  wait "$old_parent" 2>/dev/null || true
+  assert_grep "$new_pid " "$HOME_DIR/state/$id.worker-server" \
+    "cursor relaunch retained stale worker identity"
+  kill -KILL "$new_pid" 2>/dev/null || true
+  pass "cursor relaunch reaps prior worker before recording replacement"
+}
+
 test_cursor_worker_server_absent_record_refuses_spawn() {
   local rec id out status
   id=cursor-worker-none-z9
@@ -1070,6 +1129,7 @@ test_non_cursor_launch_unsets_cursor_agent
 test_muse_launch_unsets_cursor_agent
 test_cursor_worker_server_recorded_at_spawn
 test_cursor_worker_server_alias_uses_portable_identity
+test_cursor_relaunch_reaps_prior_worker_before_recording_replacement
 test_cursor_detached_worker_is_recorded_from_task_root
 test_cursor_worker_server_absent_record_refuses_spawn
 test_cursor_worker_server_discovery_timeout_causes_rollback
