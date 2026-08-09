@@ -1729,10 +1729,30 @@ EOF
       and .landed == []
       and .endpoints == []
   ' >/dev/null || fail "an unowned unknown child received partial structured projection: $canonical"
-  sed '/## In flight/a\
-- [ ] unreadable-child - Submit App Store build (repo: sshhip) (kind: ship)' \
-    "$sshhip/data/backlog.md" > "$sshhip/data/backlog.next"
+  awk '
+    {
+      lines[NR] = $0
+      if ($0 == "## Queued" && !queued) queued = NR
+    }
+    END {
+      if (!queued) exit 1
+      insert = queued
+      while (insert > 1 && lines[insert - 1] == "") insert--
+      for (i = 1; i < insert; i++) print lines[i]
+      print "- [ ] unreadable-child - Submit App Store build (repo: sshhip) (kind: ship)"
+      print ""
+      for (i = queued; i <= NR; i++) print lines[i]
+    }
+  ' "$sshhip/data/backlog.md" > "$sshhip/data/backlog.next" \
+    || fail "could not reconstruct the SSHHIP fixture around its queued section"
   mv "$sshhip/data/backlog.next" "$sshhip/data/backlog.md"
+  awk '
+    $0 == "## In flight" { in_flight = NR }
+    $0 == "- [ ] unreadable-child - Submit App Store build (repo: sshhip) (kind: ship)" { child = NR }
+    $0 == "## Queued" { queued = NR }
+    END { exit !(child == in_flight + 1 && queued == child + 2) }
+  ' "$sshhip/data/backlog.md" \
+    || fail "restored SSHHIP fixture did not preserve its in-flight row and queued separator"
 
   fm_write_meta "$wheel/state/production-observation.meta" \
     "window=firstmate:fm-production-observation" "worktree=$wheel/projects/worker" "project=wheelhouse" \
