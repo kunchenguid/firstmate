@@ -404,7 +404,14 @@ normalize_meta() {  # <meta>
   # The worktree owner pid and identity name whichever process occupies the
   # slot for that run, so they legitimately differ between two spawns exactly
   # as the Herdr container ids do.
+  #
+  # attempt= is the same kind of per-run fact: these two spawns share one task
+  # id, so the second is attempt 2 by construction (bin/fm-attempt.sh). Only the
+  # count is normalized - attempt_budget= is deliberately left compared, because
+  # the budget is a property of the task rather than of the run and projection
+  # must not change it.
   sed -E \
+    -e 's|^attempt=.*$|attempt=<per-run>|' \
     -e 's|^window=.*$|window=<herdr-container-id>|' \
     -e 's|^herdr_workspace_id=.*$|herdr_workspace_id=<herdr-container-id>|' \
     -e 's|^herdr_tab_id=.*$|herdr_tab_id=<herdr-container-id>|' \

@@ -867,6 +867,31 @@ test_secondmate_charter_keeps_its_own_marker_consequence() {
 # scaffold carries verification discipline, only ship scaffolds carry branch
 # conflict resolution, and the no-mistakes DOD keeps the delegated-rebase
 # carve-out that reconciles that rule with its no-commit-during-a-run line.
+# The worker no longer arbitrates its own retry budget: the count and the bound
+# live in bin/fm-attempt.sh, and the prose that made "twice" the worker's call is
+# gone from every generated brief. The rule list must stay contiguous afterwards,
+# because the briefs cross-reference their own rules by number.
+test_no_brief_makes_the_worker_its_own_retry_arbiter() {
+  local home id brief rules
+  home="$TMP_ROOT/retry-arbiter-home"
+  write_registry "$home"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" retry-ship no-registry-proj --mode no-mistakes >/dev/null 2>&1
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" retry-scout firstmate --scout >/dev/null 2>&1
+  for id in retry-ship retry-scout; do
+    brief="$home/data/$id/brief.md"
+    assert_no_grep "same obstacle twice" "$brief" \
+      "$id: the worker is still told to arbitrate its own retry budget"
+    # Contiguous 1..N, so the numbered cross-references in the brief still resolve.
+    rules=$(sed -n '/^# Rules$/,/^$/p' "$brief" | sed -n 's/^\([0-9]\+\)\..*/\1/p' | tr '\n' ' ')
+    [ "$rules" = "1 2 3 4 5 6 " ] \
+      || fail "$id: the rule list must stay contiguous 1..6, got '$rules'"
+  done
+  assert_grep "escalate to firstmate (rule 5) and stop" "$home/data/retry-ship/brief.md" \
+    "the ask-user cross-reference must point at the renumbered escalation rule"
+  pass "fm-brief.sh: no brief makes the worker the arbiter of its own retry budget"
+}
+
 test_standing_worker_rules_by_variant() {
   local home id brief proj mode
   home="$TMP_ROOT/standing-rules-home"
@@ -949,3 +974,4 @@ test_scout_and_secondmate_load_decision_hold_policy
 test_context_pressure_contract_reaches_every_agent_kind
 test_scout_and_secondmate_scaffold
 test_standing_worker_rules_by_variant
+test_no_brief_makes_the_worker_its_own_retry_arbiter
