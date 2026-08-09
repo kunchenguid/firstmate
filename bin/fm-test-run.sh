@@ -194,8 +194,9 @@ family_for_basename() {
     fm-teardown-endpoint-safety.test.sh)
       printf '%s\n' backend-dispatch
       ;;
-    fm-merge-local.test.sh|fm-pr-check-security.test.sh|fm-pr-merge.test.sh|\
-    fm-review-diff.test.sh|fm-teardown.test.sh|fm-x-mode.test.sh)
+    fm-attest.test.sh|fm-merge-local.test.sh|fm-pr-check-security.test.sh|\
+    fm-pr-merge.test.sh|fm-review-diff.test.sh|\
+    fm-teardown.test.sh|fm-x-mode.test.sh)
       printf '%s\n' pr-forge
       ;;
     fm-afk-inject-e2e.test.sh|fm-afk-return.test.sh)
@@ -903,10 +904,11 @@ families_for_changed_path() {
     bin/fm-x-*|bin/fm-check*)
       printf '%s\n' pr-forge
       ;;
-    bin/fm-nm-run-lib.sh)
+    bin/fm-nm-run-lib.sh|bin/fm-timeout-lib.sh)
       # Shared no-mistakes run-attribution primitives, sourced by both
       # bin/fm-crew-state.sh (pure-contract-unit) and bin/fm-teardown.sh's
-      # pre-teardown run abort (pr-forge).
+      # pre-teardown run abort (pr-forge). The shared hard bound those reads go
+      # through is owned by bin/fm-timeout-lib.sh, so it selects the same lanes.
       printf '%s\n' pure-contract-unit
       printf '%s\n' pr-forge
       ;;
@@ -938,6 +940,13 @@ families_for_changed_path() {
       printf '%s\n' live-harness-optin
       ;;
     .agents/skills/*/SKILL.md)
+      printf '%s\n' pure-contract-unit
+      ;;
+    .github/workflows/no-mistakes-required.yml)
+      # The required attestation gate. Its step scripts are exercised by
+      # tests/fm-attest.test.sh alongside the verifier they drive, so a change
+      # to the workflow has to select that suite and not only the doc lane.
+      printf '%s\n' pr-forge
       printf '%s\n' pure-contract-unit
       ;;
     .github/workflows/ci.yml|.no-mistakes.yaml)

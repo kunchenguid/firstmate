@@ -291,6 +291,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/no-mistakes-attestation.md",
+      "audience": "maintainer-architecture"
+    },
+    {
       "path": "docs/orca-backend.md",
       "audience": "operator-current"
     },

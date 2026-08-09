@@ -9,9 +9,11 @@ We require this to reduce the maintainer's burden of reviewing and merging contr
 `no-mistakes` puts a local git proxy in front of your real remote.
 Pushing through it runs an AI-driven review/test/lint pipeline in an isolated worktree, forwards the push upstream only after every check passes, and opens a clean PR automatically.
 
-A GitHub Actions check (`Require no-mistakes`) runs on PRs targeting `main` and fails if the body is missing the deterministic signature that no-mistakes writes.
-It evaluates every PR opening and body edit independently, so a later edit cannot replace an earlier pending compliance check.
-GitHub Actions and Dependabot are exempt so their automation keeps working, but regular contributor PRs without the signature will not be reviewed or merged.
+A GitHub Actions check (`Require no-mistakes`) runs on PRs targeting `main` and fails unless the pull request's exact head commit carries a no-mistakes attestation.
+The attestation is a git note on `refs/notes/no-mistakes` naming the commit it covers, so it cannot be copied from another pull request and does not survive a rebase, an amend or a force-push; every new head needs its own.
+Publish one for the head you pushed with `bin/fm-attest.sh write`, which reads the pipeline's own run record and attests only the head that run validated.
+[`docs/no-mistakes-attestation.md`](docs/no-mistakes-attestation.md) owns what the check does and does not establish.
+GitHub Actions and Dependabot are exempt so their automation keeps working, but regular contributor PRs without an attestation will not be reviewed or merged.
 
 ## Workflow
 
@@ -28,6 +30,17 @@ GitHub Actions and Dependabot are exempt so their automation keeps working, but 
 6. Run `no-mistakes` to attach to the pipeline, watch findings, authorize auto-fixes, and review ask-user findings as needed.
    Follow the installed no-mistakes version's SKILL.md and live `axi` help for gate mechanics.
 7. Once the pipeline passes, it pushes the branch to your fork and opens the PR against the parent repo for you.
+8. Publish the attestation for the head it pushed:
+
+   ```sh
+   bin/fm-attest.sh write
+   ```
+
+   It publishes to the push target of `origin`, which step 3 pointed at your fork, and prints the repository it reached.
+   That repository must be the one holding the pull request head, because the check reads the attestation from there and nowhere else.
+   If your `origin` pushes to the parent rather than your fork, name the fork explicitly: `bin/fm-attest.sh write --remote <your-fork-remote>`.
+   Repeat this after any later push, because the attestation names one commit and a new commit is a new head.
+9. Re-trigger the check, because it already ran and refused before the note existed and publishing a note fires no pull request event: close and reopen the PR, or edit its title or body.
 
 See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/start-here/quick-start/) for the full first-run walkthrough.
 
