@@ -16,7 +16,39 @@
 # fixed mapping logic, no heuristics and no LLM. Output is one stable, parseable,
 # token-tight line firstmate can read every heartbeat:
 #
-#   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|none> · <detail>
+#   state: <state> · source: <run-step|pane|status-log|none> · <detail>
+#
+# `--json` emits the SAME derivation as typed fields for machine consumers, so
+# no caller has to recover structure by substring-matching the prose above. The
+# prose mode is unchanged and remains the default.
+#
+# STATE VOCABULARY. Every condition this reader can encounter has its own
+# verdict; none borrows another's, because a borrowed verdict is a confident
+# answer to a question the evidence did not answer:
+#   working      a run step is executing, or the harness is mid-turn
+#   parked       waiting at a pipeline gate for a decision
+#   blocked      stopped and needs firstmate
+#   paused       a declared, expected external wait
+#   done         terminal success
+#   failed       the pipeline JUDGED the work and rejected it
+#   aborted      the run was deliberately cancelled - no verdict on the work
+#   interrupted  the run died without reaching a verdict (the pipeline broke,
+#                e.g. "daemon crashed during execution"); the work was never
+#                judged, so this is a re-run condition, not a rejection
+#   idle         endpoint alive, nothing running, and no state-bearing event
+#   stale        the winning evidence exists but has aged out of validity
+#   unknown      genuinely no usable evidence
+# `failed` vs `aborted` vs `interrupted` and `idle` vs `stale` vs `unknown` are
+# the distinctions this reader used to collapse. Collapsing them made an
+# infrastructure kill read as a rejection, a deliberate abort read as a failure,
+# a dead worker read as working, and an ordinary decision-closing `resolved:`
+# line read as "no current-state source available".
+#
+# FRESHNESS. A verdict names both which source won (precedence_applied) and how
+# old that evidence was (evidence_age_secs). Evidence past its bound yields
+# `stale`, never a live-looking answer - the busy record in particular carries a
+# timestamp that was previously parsed for format only and never compared to the
+# clock (see FM_BUSY_MAX_BUSY_AGE_SECS in bin/fm-busy-lib.sh).
 #
 # Logic, in order:
 #   1. Resolve worktree + backend target + identity axes from state/<id>.meta.
@@ -32,7 +64,10 @@
 #      fallback may let an older finished run stand in for the live one.
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
-#      passed/checks-passed -> done, failed/cancelled -> failed. EXCEPT: while
+#      passed/checks-passed -> done, cancelled -> aborted, and failed -> failed
+#      unless the run carries positive evidence the pipeline broke without
+#      judging the work, which reports interrupted
+#      (nm_run_broke_without_verdict). EXCEPT: while
 #      the active step is ci, `axi status` alone cannot tell "still waiting on
 #      checks" from "checks green, waiting on merge" (see nm_ci_checks_state) -
 #      a ci-step log-tail check overrides working -> done once checks read
@@ -48,7 +83,8 @@
 #   4. No run for this crew (pre-validation, or deliverable=scout): fall back to the
 #      recorded backend's pane busy state, then the status log's last line only
 #      when its verb maps to a recognized run-state. Decision-only events such as
-#      `resolved` never become current state or detail.
+#      `resolved` never become current state or detail; a live endpoint whose
+#      last event only closed a decision reports `idle`, not `unknown`.
 #   5. Missing meta or torn-down worktree: report unknown · none. If no run is
 #      attributed to this crew, a dead endpoint also reports unknown · none rather
 #      than trusting a stale status log.
@@ -75,8 +111,17 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
 
+# Output mode. Only `--json` is a recognized flag; every other argument is the
+# task id, exactly as before. `--help` therefore stays an unknown id and still
+# reports `state: unknown · source: none`, which is the contract callers that
+# pass an arbitrary string already depend on.
+MODE=prose
+if [ "${1:-}" = --json ]; then
+  MODE=json
+  shift
+fi
 ID=${1:-}
-[ -n "$ID" ] || { echo "usage: fm-crew-state.sh <id>" >&2; exit 2; }
+[ -n "$ID" ] || { echo "usage: fm-crew-state.sh [--json] <id>" >&2; exit 2; }
 
 META="$STATE/$ID.meta"
 LOG="$STATE/$ID.status"
@@ -90,17 +135,102 @@ FM_CREW_STATE_RUNS_LIMIT=${FM_CREW_STATE_RUNS_LIMIT:-200}
 case "$FM_CREW_STATE_RUNS_LIMIT" in ''|*[!0-9]*) FM_CREW_STATE_RUNS_LIMIT=200 ;; esac
 SEP=' · '
 
-# Emit the one canonical line and exit 0. Detail is optional.
+# Schema version for the structured mode. Bump when a field's MEANING changes;
+# adding a field is backward compatible and does not need a bump.
+FM_CREW_STATE_SCHEMA=1
+
+# Typed context for the structured mode, set at the point each answer is
+# derived. Empty means "this reader did not measure it for this answer" - never
+# a fabricated zero or a stand-in value, so a consumer can always distinguish an
+# unmeasured field from a measured one.
+#
+# PRECEDENCE names the rule that SELECTED this answer. Lane B's Law 3 requires
+# precedence between disagreeing deterministic sources to be declared in code
+# rather than left implicit; emitting it makes the declaration visible to the
+# consumer instead of hiding it in this file's control flow.
+PRECEDENCE=""
+BUSY_SIGNAL=""
+RUN_STEP=""
+EVIDENCE_AGE=""
+TERMINAL_ERROR=""
+RUN_ID=""
+# The busy record's strictly-increasing sequence number: this architecture's own
+# advancing-evidence counter. A consumer comparing it across two reads learns
+# whether the worker's turn state actually moved, which is what a rendered-pane
+# hash used to approximate - less reliably, since the semantic busy-state
+# redesign exists precisely because rendered output is not turn state.
+BUSY_SEQ=""
+
+# Every C0 control character that the named escapes below do not cover, in one
+# string. JSON forbids a RAW control character inside a string, and this object
+# carries verbatim tool output: terminal_error is the pipeline's own `error:`
+# text, which routinely contains ANSI escape sequences. One raw byte of that
+# produced an object bin/fm-fleet-snapshot.sh's jq validation rejected, which
+# replaced a correct failed/interrupted verdict with `unknown` - a reader
+# defeated by the shape of the evidence it was quoting. NUL is absent because a
+# bash variable cannot hold one.
+FM_CREW_STATE_JSON_CONTROLS=$'\001\002\003\004\005\006\007\010\013\014\016\017\020\021\022\023\024\025\026\027\030\031\032\033\034\035\036\037'
+
+# Minimal JSON string escaping. Hand-rolled rather than shelling out to jq
+# because this reader runs on every heartbeat and jq is not a required tool for
+# a home that has not opted into the features that need it.
+json_escape() {  # <text>
+  local s=$1 c hex i
+  s=${s//\\/\\\\}
+  s=${s//\"/\\\"}
+  s=${s//$'\t'/\\t}
+  s=${s//$'\r'/\\r}
+  s=${s//$'\n'/\\n}
+  # The scan runs only when a control byte actually survived the named escapes
+  # above, so the ordinary all-printable answer pays one glob match.
+  case "$s" in
+    *[[:cntrl:]]*)
+      for (( i = 0; i < ${#FM_CREW_STATE_JSON_CONTROLS}; i++ )); do
+        c=${FM_CREW_STATE_JSON_CONTROLS:i:1}
+        case "$s" in
+          *"$c"*)
+            printf -v hex '\\u%04x' "'$c"
+            s=${s//"$c"/"$hex"}
+            ;;
+        esac
+      done
+      ;;
+  esac
+  printf '%s' "$s"
+}
+
+# Emit the one canonical answer and exit 0. Detail is optional. Both modes
+# render the SAME derivation: the structured mode adds typed fields, and never
+# reaches a verdict the prose mode would not.
 emit() {  # <state> <source> [detail]
+  if [ "$MODE" = json ]; then
+    printf '{"schema":%s,"id":"%s","state":"%s","source":"%s","precedence_applied":"%s"' \
+      "$FM_CREW_STATE_SCHEMA" "$(json_escape "$ID")" "$(json_escape "$1")" \
+      "$(json_escape "$2")" "$(json_escape "$PRECEDENCE")"
+    printf ',"busy_signal":%s' "$(json_field_or_null "$BUSY_SIGNAL")"
+    printf ',"busy_seq":%s' "${BUSY_SEQ:-null}"
+    printf ',"run_step":%s' "$(json_field_or_null "$RUN_STEP")"
+    printf ',"run_id":%s' "$(json_field_or_null "$RUN_ID")"
+    printf ',"terminal_error":%s' "$(json_field_or_null "$TERMINAL_ERROR")"
+    printf ',"evidence_age_secs":%s' "${EVIDENCE_AGE:-null}"
+    printf ',"detail":%s}\n' "$(json_field_or_null "${3:-}")"
+    exit 0
+  fi
   local line="state: $1${SEP}source: $2"
   [ -n "${3:-}" ] && line="$line${SEP}$3"
   printf '%s\n' "$line"
   exit 0
 }
 
+# A JSON string, or bare null when this reader did not measure the field.
+json_field_or_null() {  # <text>
+  [ -n "${1:-}" ] || { printf 'null'; return; }
+  printf '"%s"' "$(json_escape "$1")"
+}
+
 # --- meta resolution --------------------------------------------------------
 
-[ -f "$META" ] || emit unknown none "no metadata for $ID"
+[ -f "$META" ] || { PRECEDENCE='no-metadata'; emit unknown none "no metadata for $ID"; }
 
 meta_value() {  # <key>
   grep "^$1=" "$META" 2>/dev/null | tail -1 | cut -d= -f2- || true
@@ -115,6 +245,7 @@ DELIVERABLE=$(fm_task_deliverable "$META")
 
 # A torn-down (or never-created) worktree has no current state to read.
 if [ -z "$WT" ] || [ ! -d "$WT" ]; then
+  PRECEDENCE='worktree-gone'
   emit unknown none "worktree gone (torn down?)"
 fi
 
@@ -326,6 +457,46 @@ nm_ci_checks_state() {
 nm_ci_state_is_green() {
   [ "${1:-}" = green ]
 }
+# The pipeline's own top-level `error:` on a terminal run, unquoted. Verified
+# against the installed no-mistakes v1.40.3 across real terminal runs:
+#   error: "step review failed: refusing to commit review changes: ..."
+#   error: "step test failed: agent run tests: claude exited: exit status 1: "
+#   error: daemon crashed during execution
+# Both quoted and bare forms occur, so strip_quotes normalizes them.
+nm_terminal_error() {
+  local line
+  line=$(printf '%s\n' "$RUN_OUT" | grep -E '^error:[[:space:]]*' | head -1) || true
+  [ -n "$line" ] || return 0
+  strip_quotes "$(trim "${line#error:}")"
+}
+
+# 0 when the run carries POSITIVE evidence that the pipeline itself broke rather
+# than judging the work: a terminal error exists, and it is NOT attributed to one
+# of the pipeline's own steps. The pipeline prefixes step-attributed errors with
+# "step <name> failed:"; the measured unattributed case is "daemon crashed
+# during execution", which appeared five times in one recent run history and
+# reached firstmate as a rejection every time.
+#
+# Positive evidence is REQUIRED. A terminal failure with no error field at all
+# proves nothing about which happened, so it keeps the plain `failed` verdict
+# instead of being upgraded to `interrupted` on the strength of a missing field.
+# Absence of evidence must not manufacture a claim in either direction, and the
+# conservative direction is to leave the pre-existing verdict alone.
+#
+# This tests only the pipeline's own STRUCTURAL attribution marker. It
+# deliberately does NOT read the error prose to decide whether a given step
+# failure was "really" the code's fault: that is a semantic judgement, and
+# encoding it as message-matching here would be exactly the brittle guesswork
+# this reader exists to avoid. The full text travels to the caller as
+# terminal_error so a reader that needs the reason has it verbatim.
+nm_run_broke_without_verdict() {  # <error-text>
+  [ -n "$1" ] || return 1
+  case "$1" in
+    "step "*" failed:"*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
 # Coarse fallback for cross-branch attribution. `no-mistakes axi status` (bare)
 # reports the active-or-most-recent run for the CURRENT branch when one
 # exists, else falls back to some other branch's run purely as informational
@@ -489,16 +660,26 @@ if [ "$HAVE_RUN" = 1 ]; then
     # needs-decision/blocked status-log append (a captain-relevant VERB) is
     # surfaced through signal_reason_is_actionable regardless of this
     # coarse-vs-full distinction, so a real gate is never silently missed.
+    # The coarse runs list is plain text with no run id and no error field, so
+    # a terminal failure here CANNOT be attributed to a step or to the pipeline
+    # breaking. It stays `failed` rather than guessing, and says so in the
+    # detail; precedence_applied reports the degraded source so a consumer can
+    # see the attribution was unavailable rather than absent-because-clean. A
+    # cancelled run needs no error field to be recognized as a deliberate stop.
     case "$COARSE_STATUS" in
       running)   RUN_STATE=working; RUN_DETAIL="validating (background run)" ;;
       completed) RUN_STATE="done";  RUN_DETAIL="run completed" ;;
-      failed)    RUN_STATE=failed;  RUN_DETAIL="run failed" ;;
-      cancelled) RUN_STATE=failed;  RUN_DETAIL="run cancelled" ;;
-      *)         RUN_STATE=unknown; RUN_DETAIL="runs list status: $COARSE_STATUS" ;;
+      failed)    RUN_STATE=failed;  RUN_DETAIL="run failed (runs list: failure reason unattributed)" ;;
+      cancelled) RUN_STATE=aborted; RUN_DETAIL="run cancelled: stopped deliberately, work not judged" ;;
+      *)         RUN_STATE=unknown; RUN_DETAIL="unrecognized runs list status: $COARSE_STATUS" ;;
     esac
   else
     status=$(strip_quotes "$(nm_field status)")
     RUN_STATUS=$status
+    RUN_ID=$(strip_quotes "$(nm_field id)")
+    # The step the pipeline is actually on, so a consumer never has to recover
+    # it by matching the detail prose.
+    RUN_STEP=$status
     outcome=$(strip_quotes "$(nm_field outcome)")
     awaiting=$(printf '%s\n' "$RUN_OUT" | grep -E '^[[:space:]]*awaiting_agent:' | head -1 || true)
     gate_status=$(nm_gate_status)
@@ -506,6 +687,7 @@ if [ "$HAVE_RUN" = 1 ]; then
     nm_has_gate && has_gate=1
 
     if [ -n "$outcome" ]; then
+      TERMINAL_ERROR=$(nm_terminal_error)
       case "$outcome" in
         passed)        RUN_STATE="done"; RUN_DETAIL="run passed: PR merged/closed" ;;
         # checks-passed is the pipeline's REPORTED terminal claim, and on
@@ -531,9 +713,25 @@ if [ "$HAVE_RUN" = 1 ]; then
             esac
           fi
           ;;
-        failed)        RUN_STATE=failed; RUN_DETAIL="run failed" ;;
-        cancelled)     RUN_STATE=failed; RUN_DETAIL="run cancelled" ;;
-        *)             RUN_STATE=unknown; RUN_DETAIL="outcome: $outcome" ;;
+        # A terminal failure is only a REJECTION when a pipeline step reached a
+        # verdict on the work. When the pipeline itself broke, the work was
+        # never judged: reporting that as `failed` told firstmate the change was
+        # rejected and sent it to fix code that nothing had criticised. It is a
+        # re-run condition, so it gets its own verdict.
+        failed)
+          if nm_run_broke_without_verdict "$TERMINAL_ERROR"; then
+            RUN_STATE=interrupted
+            RUN_DETAIL="run stopped without judging the work: $TERMINAL_ERROR"
+          else
+            RUN_STATE=failed
+            RUN_DETAIL="run failed: the pipeline judged the work and rejected it"
+          fi
+          ;;
+        # A deliberate abort is not a failure. Supersession (AGENTS.md's
+        # validate contract) aborts a run on purpose, and reporting that as
+        # `failed` made an intended stop look like rejected work.
+        cancelled)     RUN_STATE=aborted; RUN_DETAIL="run cancelled: stopped deliberately, work not judged" ;;
+        *)             RUN_STATE=unknown; RUN_DETAIL="unrecognized run outcome: $outcome" ;;
       esac
     elif [ -n "$awaiting" ] || [ "$status" = awaiting_approval ] || [ "$status" = fix_review ] || [ -n "$gate_status" ] || [ "$has_gate" = 1 ]; then
       if [ "$has_gate" = 1 ]; then
@@ -551,12 +749,25 @@ if [ "$HAVE_RUN" = 1 ]; then
         RUN_DETAIL="$RUN_DETAIL (ask-user: authority decision)"
       fi
     else
+      # Same failed/aborted/interrupted split as the outcome arm above: this is
+      # the full TOON path, so the pipeline's own error attribution is
+      # available here too and must not be discarded just because the run
+      # reported a terminal status without a separate outcome field.
       case "$status" in
         ci)             RUN_STATE=working; RUN_DETAIL="ci running" ;;
         running|fixing) RUN_STATE=working; RUN_DETAIL="validating ($status)" ;;
         completed)      RUN_STATE="done"; RUN_DETAIL="run completed" ;;
-        failed)         RUN_STATE=failed;  RUN_DETAIL="run failed" ;;
-        cancelled)      RUN_STATE=failed;  RUN_DETAIL="run cancelled" ;;
+        failed)
+          TERMINAL_ERROR=$(nm_terminal_error)
+          if nm_run_broke_without_verdict "$TERMINAL_ERROR"; then
+            RUN_STATE=interrupted
+            RUN_DETAIL="run stopped without judging the work: $TERMINAL_ERROR"
+          else
+            RUN_STATE=failed
+            RUN_DETAIL="run failed: the pipeline judged the work and rejected it"
+          fi
+          ;;
+        cancelled)      RUN_STATE=aborted; RUN_DETAIL="run cancelled: stopped deliberately, work not judged" ;;
         "")             RUN_STATE=working; RUN_DETAIL="run active" ;;
         *)              RUN_STATE=working; RUN_DETAIL="run active ($status)" ;;
       esac
@@ -579,6 +790,7 @@ if [ "$HAVE_RUN" = 1 ]; then
   fi
 
   if [ "$RUN_STATE" = working ] && log_reports_ci_ready; then
+    PRECEDENCE='status-log-ci-ready-over-monitoring-run'
     if [ "$RUN_SOURCE" = coarse ]; then
       RUN_STATE=unknown
       RUN_DETAIL="status log reported readiness, but coarse run data cannot corroborate the claim"
@@ -603,9 +815,12 @@ if [ "$HAVE_RUN" = 1 ]; then
   # Reconcile the status log. A needs-decision/blocked log line that the run-step
   # has moved past (anything but a genuinely parked run) is deterministically
   # stale: the gate resolved and the run resumed or finished.
+  PRECEDENCE='run-step-over-status-log'
+  [ "$RUN_SOURCE" = coarse ] && PRECEDENCE='coarse-runs-list-over-status-log'
   case "$LOG_VERB" in
     needs-decision|blocked)
       if [ "$RUN_STATE" != parked ]; then
+        PRECEDENCE='run-step-supersedes-status-log'
         if [ "$RUN_STATE" = working ]; then
           RUN_DETAIL="$RUN_DETAIL${SEP}status-log superseded by active run"
         else
@@ -623,8 +838,42 @@ fi
 # liveness, so a finished-but-pane-closed crew never reaches here. Down here there
 # is no run to consult, so a dead/unreadable target means the crew is gone: report
 # unknown rather than trusting a possibly-stale status log as the current state.
-[ -n "$BACKEND_TARGET" ] || emit unknown none "no backend target recorded"
-pane_readable "$BACKEND_TARGET" || emit unknown none "backend target gone: $BACKEND_TARGET"
+[ -n "$BACKEND_TARGET" ] || { PRECEDENCE='no-backend-target'; emit unknown none "no backend target recorded"; }
+if ! pane_readable "$BACKEND_TARGET"; then
+  PRECEDENCE='endpoint-gone'
+  emit unknown none "backend target gone: $BACKEND_TARGET"
+fi
+
+# Age of this task's busy record, when it has one. Only a record-backed busy
+# verdict has a measurable age; the live sources (herdr native, grok rendered
+# tail) are read fresh and have none, and reporting a made-up
+# age for them would be a freshness reading that was never taken.
+# Sets EVIDENCE_AGE and BUSY_SEQ from this task's busy record when it has one.
+# fm_busy_record_read prints "<state> <source> <event> <seq> <age>" for a usable
+# record, and names its reason on the failure path.
+#
+# The EXPIRED reason is read too, and that is the point: expiry is a judgement
+# ABOUT the evidence, so discarding the evidence that produced it left the one
+# verdict whose whole meaning is "this aged out" unable to say by how much. A
+# `stale` answer that cannot distinguish a record 61 minutes old from one 3 days
+# old is barely better than the boolean this replaced. Every other reason
+# (missing, malformed, gen-mismatch) names a record there is nothing to measure.
+read_busy_evidence() {
+  local rec
+  if ! rec=$(fm_busy_record_read "$STATE" "$ID"); then
+    case "$rec" in
+      'expired '*)
+        rec=${rec#expired }
+        BUSY_SEQ=${rec%% *}
+        EVIDENCE_AGE=${rec##* }
+        ;;
+    esac
+    return 0
+  fi
+  EVIDENCE_AGE=${rec##* }
+  rec=${rec% *}
+  BUSY_SEQ=${rec##* }
+}
 
 # Secondmates idle on their own watcher (idle pane = healthy), so the busy
 # state is not meaningful for them; read their state from the status log only.
@@ -633,10 +882,32 @@ pane_readable "$BACKEND_TARGET" || emit unknown none "backend target gone: $BACK
 # unverified semantic state remains unknown.
 if [ "$(fm_task_role "$META")" != secondmate ]; then
   BUSY_VERDICT=$(crew_busy_verdict "$BACKEND_TARGET")
+  BUSY_SIGNAL=$BUSY_VERDICT
+  read_busy_evidence
   case "${BUSY_VERDICT%% *}" in
-    busy) emit working pane "harness busy (${BUSY_VERDICT#* })" ;;
+    busy)
+      PRECEDENCE='busy-signal-over-status-log'
+      emit working pane "harness busy (${BUSY_VERDICT#* })"
+      ;;
     idle) ;;
-    *) emit unknown pane "harness state unavailable ($BUSY_VERDICT)" ;;
+    # The record existed and aged out, which is a different answer from never
+    # having had one. What the age establishes is exactly this and no more:
+    # nothing has touched the record since its timestamp. It does NOT establish
+    # that the worker stopped - nothing observed that - and the detail must not
+    # say so, because the record's timestamp is stamped when a turn opens and
+    # does not tick within it (see FM_BUSY_MAX_BUSY_AGE_SECS in
+    # bin/fm-busy-lib.sh, which records that bound and the advancing-evidence
+    # signal that would remove it). Reporting `unknown` here would throw away a
+    # measurement that was actually taken, and reporting `working` from that
+    # record is the defect this replaces - a stopped worker read as busy forever.
+    stale)
+      PRECEDENCE='busy-signal-expired'
+      emit stale pane "harness turn evidence expired (${BUSY_VERDICT#* }); no evidence of activity since the recorded timestamp (${EVIDENCE_AGE:-unknown}s ago)"
+      ;;
+    *)
+      PRECEDENCE='busy-signal-unusable'
+      emit unknown pane "harness state unavailable ($BUSY_VERDICT)"
+      ;;
   esac
 fi
 
@@ -653,8 +924,44 @@ fi
 if [ -n "$LOG_VERB" ]; then
   LOG_STATE=$(map_log_state "$LOG_LINE")
   if [ "$LOG_STATE" != unknown ]; then
+    PRECEDENCE='status-log-only'
     emit "$LOG_STATE" status-log "$(status_line_note "$LOG_LINE")"
   fi
 fi
 
-emit unknown none "no current-state source available"
+# Everything above declined to answer, but that is NOT the same as having no
+# source. To reach here the endpoint was readable, and for an ordinary crew the
+# busy signal said idle - both positive facts. The only thing missing is a
+# DECLARED state, because the log's last event either closes a decision
+# (`resolved:`, `captain-held:`) or the log is empty.
+#
+# This used to report `unknown · none · no current-state source available`,
+# which was measured on the very `resolved:` line every brief instructs workers
+# to write. That claimed no source existed when two did, and it fell out of a
+# mapping that had no case for the verb rather than from any decision about it.
+# An alive, idle crew with nothing to declare is a KNOWN condition and gets its
+# own verdict.
+#
+# `unknown` stays reachable and stays meaningful: a torn-down worktree, missing
+# metadata, a dead endpoint, and an unusable busy signal all still report it
+# above. This case is carved out because it is genuinely knowable, not to make
+# `unknown` unreachable - a reader that cannot say "I do not know" is worse than
+# one that says it too often.
+if status_verb_is_decision_closing "$LOG_VERB"; then
+  PRECEDENCE='decision-event-is-not-a-state'
+  emit idle status-log "endpoint alive and idle; last event closed a decision ($LOG_VERB), no state declared since"
+fi
+
+# A verb outside the whole recognized vocabulary is the one case here that is
+# genuinely unknowable: the log says something this reader has no mapping for,
+# and inventing a state from it would be exactly the guess that made the
+# decision-closing verbs report "no current-state source available". `idle`
+# would be a claim; `unknown` is the truth, and it names the verb so the gap is
+# fixable rather than invisible.
+if [ -n "$LOG_VERB" ]; then
+  PRECEDENCE='unrecognized-status-verb'
+  emit unknown status-log "endpoint alive and idle; last event verb is outside the recognized vocabulary ($LOG_VERB)"
+fi
+
+PRECEDENCE='endpoint-alive-no-declared-state'
+emit idle pane "endpoint alive and idle; no run attributed and no state declared"

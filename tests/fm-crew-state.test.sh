@@ -143,10 +143,27 @@ run_crew_state() {  # <case-dir> <id>
   PATH="$1/fakebin:$PATH" FM_STATE_OVERRIDE="$1/state" "$CREW_STATE" "$2"
 }
 
+run_crew_state_json() {  # <case-dir> <id>
+  PATH="$1/fakebin:$PATH" FM_STATE_OVERRIDE="$1/state" "$CREW_STATE" --json "$2"
+}
+
 new_case() {  # <name> -> echoes case dir with an empty state/
   local d="$TMP_ROOT/$1"
   mkdir -p "$d/state"
   printf '%s\n' "$d"
+}
+
+# A BUSY record whose timestamp is older than the freshness bound: the shape a
+# worker killed mid-turn leaves behind. Written through the real writer, then
+# backdated, so the record stays byte-valid and only its age is the defect.
+arm_expired_busy_record() {  # <state-dir> <id>
+  local state=$1 id=$2 gen old
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" "$id" --state busy \
+    --source claude-hook --event user-prompt-submit)
+  [ -n "$gen" ] || fail "could not arm busy record for $id"
+  old=$(( $(date +%s) - 7200 ))
+  sed -i.bak "s/ts=[0-9][0-9]*/ts=$old/" "$state/$id.busy-state"
+  rm -f "$state/$id.busy-state.bak"
 }
 
 arm_idle_record() {  # <state-dir> <id>
@@ -301,6 +318,67 @@ run:
   pr: "https://github.com/o/r/pull/3"
   findings: none
 outcome: checks-passed
+EOF
+}
+
+run_cancelled() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: completed
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: ""
+  findings: none
+outcome: cancelled
+EOF
+}
+
+# A terminal failure the pipeline ATTRIBUTED to one of its own steps: a step ran
+# and reached a verdict against the work. Error text verbatim from a real
+# no-mistakes v1.40.3 run.
+run_failed_step_attributed() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: completed
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: ""
+  findings: none
+outcome: failed
+error: "step review failed: agent review: codex exited: exit status 1"
+EOF
+}
+
+# A terminal failure the pipeline did NOT attribute to a step: the pipeline
+# itself broke, so the work was never judged. Error text verbatim from a real
+# no-mistakes v1.40.3 run - this exact string appeared on five runs in one
+# afternoon's history and reached firstmate as a rejection every time.
+run_failed_infrastructure() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: completed
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: ""
+  findings: none
+outcome: failed
+error: daemon crashed during execution
+EOF
+}
+
+run_unrecognized_outcome() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: completed
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: ""
+  findings: none
+outcome: quenched
 EOF
 }
 
@@ -1167,13 +1245,23 @@ test_no_run_idle_secondmate_resolved_event_not_state() {
   FM_FAKE_AXI_STATUS=""
   FM_FAKE_BUSY=0
   local out; out=$(run_crew_state "$d" mate)
-  assert_contains "$out" "state: unknown" "resolved-then-idle secondmate is not a spurious run-state"
-  assert_contains "$out" "source: none" "a resolved event is not treated as a status-log state source"
+  # A decision-closing verb still never becomes a state: nothing here reports
+  # parked/blocked from the `resolved:` line, and its prose never becomes the
+  # detail. What CHANGED (CFVC-05) is the verdict for the leftover condition. It
+  # used to be `unknown · none · no current-state source available`, measured on
+  # the very verb every brief tells crews to write - a claim that no source
+  # existed when the endpoint was readable and idle. An alive, idle crew that
+  # has simply declared nothing since closing a decision is a known condition,
+  # so it reports `idle` and names why.
+  assert_contains "$out" "state: idle" "a resolved-then-idle crew is idle, not an absent source"
+  assert_not_contains "$out" "state: unknown" "an alive idle endpoint is not an unknowable state"
   assert_not_contains "$out" "subscribe-before-write" "resolution prose must not leak into the detail"
+  assert_contains "$out" "closed a decision" "the verdict names why no state was derived from the log"
   # A bare (non-keyed) resolved: closes the default key and behaves the same.
   printf 'blocked: waiting on infra\nresolved: infra access granted\n' > "$d/state/mate.status"
   out=$(run_crew_state "$d" mate)
-  assert_contains "$out" "source: none" "a bare resolved: is not a state source either"
+  assert_contains "$out" "state: idle" "a bare resolved: reaches the same idle verdict"
+  assert_not_contains "$out" "state: blocked" "a closed blocker must not resurface as the current state"
   assert_not_contains "$out" "infra access granted" "bare resolution prose must not leak into the detail"
   # Control: a genuine trailing state verb still renders from the log.
   printf 'working: reconciling routed items\n' > "$d/state/mate.status"
@@ -1628,6 +1716,595 @@ test_missing_run_head_falls_back_to_current_state() {
   pass "missing run head falls back instead of matching by branch"
 }
 
+# ---------------------------------------------------------------------------
+# CONFORMANCE TABLE (CFVC-05)
+#
+# One table mapping EVIDENCE INPUTS to the EXPECTED VERDICT, covering every
+# source combination and every status verb. This is the prevention mechanism,
+# not a set of examples: the coverage gates below fail when a verdict or a verb
+# exists with no row, so the next person who adds one cannot add it silently.
+# That is what makes a whole CLASS of defect fail at test time instead of in
+# production - the four defects this closes were each a condition with no row.
+#
+# Every row asserts, for both output modes:
+#   - the prose state, source, and detail equal the structured state, source,
+#     and detail - field by field, not state alone, so a future change that
+#     formats either mode separately is caught here
+#   - the structured state, source, and precedence_applied match expectation
+#   - the state is a member of the declared vocabulary
+#
+# Row format: <name>|<setup-fn>|<state>|<source>|<precedence>
+# The setup fn receives a case dir and echoes the task id it prepared.
+# ---------------------------------------------------------------------------
+
+cf_ship_with_run() {  # <case-dir> <id> <branch> <run-fixture-fn>
+  local d=$1 id=$2 br=$3 fn=$4
+  make_repo_on_branch "$d/wt" "$br"
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/$id.meta" "window=fm:fm-$id" "worktree=$d/wt" \
+    "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS="$("$fn" "$br")"
+}
+
+# --- rows: the run-step source ---------------------------------------------
+cf_working_run() { cf_ship_with_run "$1" wrun fm/cf-a run_running; CF_ID=wrun; }
+cf_parked_run()  { cf_ship_with_run "$1" prun fm/cf-b run_parked;  CF_ID=prun; }
+cf_done_run()    { cf_ship_with_run "$1" drun fm/cf-c run_passed;  CF_ID=drun; }
+cf_failed_run()  { cf_ship_with_run "$1" frun fm/cf-d run_failed_step_attributed; CF_ID=frun; }
+cf_aborted_run() { cf_ship_with_run "$1" arun fm/cf-e run_cancelled; CF_ID=arun; }
+cf_interrupted_run() { cf_ship_with_run "$1" irun fm/cf-f run_failed_infrastructure; CF_ID=irun; }
+cf_unknown_outcome() { cf_ship_with_run "$1" urun fm/cf-g run_unrecognized_outcome; CF_ID=urun; }
+
+# A terminal failure with NO error field at all: the pipeline gave no
+# attribution either way, so `interrupted` must NOT be inferred from the
+# absence. Absence of evidence is not evidence.
+cf_failed_run_unattributed() { cf_ship_with_run "$1" nrun fm/cf-h run_failed; CF_ID=nrun; }
+
+# --- rows: the pane / busy-signal source ------------------------------------
+cf_no_run_case() {  # <case-dir> <id> <kind>
+  local d=$1 id=$2 kind=$3
+  mkdir -p "$d/wt"
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/$id.meta" "window=fm:fm-$id" "worktree=$d/wt" \
+    "kind=$kind" "harness=claude"
+  FM_FAKE_AXI_STATUS=""
+}
+
+cf_working_pane() {
+  cf_no_run_case "$1" wpan scout
+  "$ROOT/bin/fm-busy-event.sh" arm "$1/state" wpan --state busy \
+    --source claude-hook --event user-prompt-submit >/dev/null
+  CF_ID=wpan
+}
+
+# The defect this closes: a worker killed mid-turn left a busy record that never
+# expired, so every later read reported it as working, forever.
+cf_stale_pane() {
+  cf_no_run_case "$1" spane scout
+  arm_expired_busy_record "$1/state" spane
+  CF_ID=spane
+}
+
+# Endpoint alive and idle with NOTHING in the log: known-idle, not unknowable.
+cf_idle_pane() {
+  cf_no_run_case "$1" ipan scout
+  arm_idle_record "$1/state" ipan
+  CF_ID=ipan
+}
+
+# An unusable busy signal is genuinely unknown - the negative control proving
+# `unknown` stays REACHABLE. A reader that can no longer say "I do not know" has
+# lost something more valuable than the verdicts this increment added.
+cf_unknown_pane() {
+  cf_no_run_case "$1" upan scout
+  printf 'v1 gen=nope seq=x state=busy source=claude-hook event=e ts=0\n' \
+    > "$1/state/upan.busy-state"
+  CF_ID=upan
+}
+
+# --- rows: the status-log source, one per verb ------------------------------
+cf_log_case() {  # <case-dir> <id> <line>
+  local d=$1 id=$2 line=$3
+  cf_no_run_case "$d" "$id" scout
+  arm_idle_record "$d/state" "$id"
+  printf '%s\n' "$line" > "$d/state/$id.status"
+}
+cf_verb_working()  { cf_log_case "$1" vwork 'working: still going';            CF_ID=vwork; }
+cf_verb_needs()    { cf_log_case "$1" vneed 'needs-decision: which option';    CF_ID=vneed; }
+cf_verb_blocked()  { cf_log_case "$1" vblok 'blocked: needs a credential';     CF_ID=vblok; }
+cf_verb_paused()   { cf_log_case "$1" vpaus 'paused: awaiting upstream';       CF_ID=vpaus; }
+cf_verb_done()     { cf_log_case "$1" vdone 'done: shipped';                   CF_ID=vdone; }
+cf_verb_failed()   { cf_log_case "$1" vfail 'failed: could not reproduce';     CF_ID=vfail; }
+# The measured defect: the sanctioned closure verb every brief instructs crews
+# to write reported "no current-state source available".
+cf_verb_resolved() { cf_log_case "$1" vres  'resolved: captain chose B';       CF_ID=vres; }
+cf_verb_held()     { cf_log_case "$1" vheld 'captain-held: parked in backlog';  CF_ID=vheld; }
+# A verb outside the vocabulary entirely stays unknown, and says which verb.
+cf_verb_unmapped() { cf_log_case "$1" vunk  'frobnicating: no such verb';      CF_ID=vunk; }
+
+# --- rows: no source at all -------------------------------------------------
+cf_missing_meta() { mkdir -p "$1/state"; make_fakebin "$1" >/dev/null; CF_ID=ghost; }
+cf_worktree_gone() {
+  mkdir -p "$1/state"; make_fakebin "$1" >/dev/null
+  fm_write_meta "$1/state/tgone.meta" "window=fm:fm-tgone" \
+    "worktree=$1/never-existed" "kind=ship"
+  CF_ID=tgone
+}
+cf_endpoint_gone() {
+  mkdir -p "$1/wt" "$1/state"; make_fakebin "$1" >/dev/null
+  fm_write_meta "$1/state/egone.meta" "window=fm:fm-egone" "worktree=$1/wt" \
+    "kind=scout" "harness=claude"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_TMUX_MISSING=1
+  CF_ID=egone
+}
+
+CONFORMANCE_TABLE=(
+  "active run is working|cf_working_run|working|run-step|run-step-over-status-log"
+  "gate is parked|cf_parked_run|parked|run-step|run-step-over-status-log"
+  "passed run is done|cf_done_run|done|run-step|run-step-over-status-log"
+  "step-attributed failure is a rejection|cf_failed_run|failed|run-step|run-step-over-status-log"
+  "unattributed failure stays failed|cf_failed_run_unattributed|failed|run-step|run-step-over-status-log"
+  "deliberate cancel is aborted|cf_aborted_run|aborted|run-step|run-step-over-status-log"
+  "pipeline crash is interrupted|cf_interrupted_run|interrupted|run-step|run-step-over-status-log"
+  "unrecognized outcome is unknown|cf_unknown_outcome|unknown|run-step|run-step-over-status-log"
+  "busy record is working|cf_working_pane|working|pane|busy-signal-over-status-log"
+  "expired busy record is stale|cf_stale_pane|stale|pane|busy-signal-expired"
+  "idle endpoint with no log is idle|cf_idle_pane|idle|pane|endpoint-alive-no-declared-state"
+  "unusable busy signal is unknown|cf_unknown_pane|unknown|pane|busy-signal-unusable"
+  "verb working|cf_verb_working|working|status-log|status-log-only"
+  "verb needs-decision|cf_verb_needs|parked|status-log|status-log-only"
+  "verb blocked|cf_verb_blocked|blocked|status-log|status-log-only"
+  "verb paused|cf_verb_paused|paused|status-log|status-log-only"
+  "verb done|cf_verb_done|done|status-log|status-log-only"
+  "verb failed|cf_verb_failed|failed|status-log|status-log-only"
+  "verb resolved closes a decision|cf_verb_resolved|idle|status-log|decision-event-is-not-a-state"
+  "verb captain-held closes a decision|cf_verb_held|idle|status-log|decision-event-is-not-a-state"
+  "verb outside the vocabulary is unknown|cf_verb_unmapped|unknown|status-log|unrecognized-status-verb"
+  "missing metadata|cf_missing_meta|unknown|none|no-metadata"
+  "torn-down worktree|cf_worktree_gone|unknown|none|worktree-gone"
+  "dead endpoint|cf_endpoint_gone|unknown|none|endpoint-gone"
+)
+
+# Monotonic suffix so every row gets a FRESH case dir. Without it the repeated
+# table walks below reuse one directory per setup fn, the second git checkout -b
+# fails, and a row could silently grade against a previous row's fixture.
+# Every row needs its OWN case dir. A shared counter cannot provide that here:
+# cf_check_row is invoked inside a command substitution so it can report a
+# failure instead of exiting, and any counter it advances dies with that
+# subshell - handing two rows the same directory, where the second git
+# checkout -b fails and the row grades against the first row's fixture. mktemp
+# is unique without depending on state surviving a subshell.
+cf_new_case() {  # -> echoes a fresh case dir
+  local d
+  d=$(mktemp -d "$TMP_ROOT/cf-XXXXXXXX") || fail "cannot create conformance case dir"
+  mkdir -p "$d/state"
+  printf '%s\n' "$d"
+}
+
+# Read one field out of the structured object under test.
+cf_json_field() {  # <json> <field>
+  printf '%s' "$1" | sed -n "s/.*\"$2\":\"\\([^\"]*\\)\".*/\\1/p"
+}
+
+# Split the prose line into its three rendered fields. The reader emits
+#   state: <state> · source: <source>[ · <detail>]
+# and a detail may itself contain the separator, so only the FIRST two are split
+# on: everything after them is the detail, verbatim.
+CF_SEP=' · '
+cf_prose_field() {  # <prose-line> <state|source|detail>
+  local rest=${1#state: } state source detail=''
+  state=${rest%%"$CF_SEP"*}
+  rest=${rest#*"$CF_SEP"}
+  source=${rest#source: }
+  case "$source" in
+    *"$CF_SEP"*)
+      detail=${source#*"$CF_SEP"}
+      source=${source%%"$CF_SEP"*}
+      ;;
+  esac
+  case "$2" in
+    state)  printf '%s' "$state" ;;
+    source) printf '%s' "$source" ;;
+    detail) printf '%s' "$detail" ;;
+  esac
+}
+
+# Normalize the MEASURED age out of a rendered detail. The two modes compared
+# below are two separate invocations of the reader, each measuring the age at its
+# own instant, so an expired-record detail renders "7200s ago" in one and
+# "7201s ago" in the other whenever a second boundary falls between them - the
+# same correct answer, reported one tick apart. Comparing that verbatim tests the
+# clock rather than the rendering, which is a flake, not a guarantee. The age
+# VALUE keeps its own assertion against a SINGLE read
+# (test_busy_verdict_carries_its_evidence_age), which is the only place the two
+# can be compared without a race.
+cf_normalize_age() {  # <detail>
+  printf '%s' "$1" | sed -E 's/\([0-9]+s ago\)/(<age>s ago)/g'
+}
+
+# Evaluate one row. Echoes "PASS" or a diagnosis; never exits, so the verifier
+# can be pointed at a deliberately wrong expectation to prove it goes red.
+cf_check_row() {  # <name> <setup-fn> <want-state> <want-source> <want-precedence>
+  local name=$1 setup=$2 want_state=$3 want_source=$4 want_prec=$5
+  local d id prose json got_state got_source got_prec got_detail
+  local prose_state prose_source prose_detail
+  reset_fakes
+  d=$(cf_new_case)
+  CF_ID=""; "$setup" "$d"; id=$CF_ID
+  prose=$(run_crew_state "$d" "$id")
+  json=$(run_crew_state_json "$d" "$id")
+  prose_state=$(cf_prose_field "$prose" state)
+  prose_source=$(cf_prose_field "$prose" source)
+  prose_detail=$(cf_prose_field "$prose" detail)
+  got_state=$(cf_json_field "$json" state)
+  got_source=$(cf_json_field "$json" source)
+  got_prec=$(cf_json_field "$json" precedence_applied)
+  got_detail=$(cf_json_field "$json" detail)
+  # Field-by-field equivalence, not state alone. Both modes render from the same
+  # emit call today, which is exactly why the assertion has to cover every
+  # rendered field: the cheap check would still pass after a change that gave
+  # one mode its own formatting.
+  [ "$prose_state" = "$got_state" ] || {
+    printf '%s: prose state %s, structured state %s' "$name" "$prose_state" "$got_state"; return; }
+  [ "$prose_source" = "$got_source" ] || {
+    printf '%s: prose source %s, structured source %s' "$name" "$prose_source" "$got_source"; return; }
+  [ "$(cf_normalize_age "$prose_detail")" = "$(cf_normalize_age "$got_detail")" ] || {
+    printf '%s: prose detail [%s], structured detail [%s]' "$name" "$prose_detail" "$got_detail"; return; }
+  [ "$got_state" = "$want_state" ] || {
+    printf '%s: want state %s, got %s' "$name" "$want_state" "$got_state"; return; }
+  [ "$got_source" = "$want_source" ] || {
+    printf '%s: want source %s, got %s' "$name" "$want_source" "$got_source"; return; }
+  [ "$got_prec" = "$want_prec" ] || {
+    printf '%s: want precedence %s, got %s' "$name" "$want_prec" "$got_prec"; return; }
+  crew_state_is_known "$got_state" || {
+    printf '%s: state %s is outside the declared vocabulary' "$name" "$got_state"; return; }
+  printf 'PASS'
+}
+
+test_conformance_table() {
+  local row name setup want_state want_source want_prec result
+  for row in "${CONFORMANCE_TABLE[@]}"; do
+    IFS='|' read -r name setup want_state want_source want_prec <<< "$row"
+    result=$(cf_check_row "$name" "$setup" "$want_state" "$want_source" "$want_prec")
+    [ "$result" = PASS ] || fail "conformance row failed -> $result"
+  done
+  pass "conformance table: every evidence combination maps to its declared verdict"
+}
+
+# The verifier must be able to REJECT. An always-green checker proves nothing,
+# so prove in-band, on every run, that a wrong expectation is actually caught -
+# once per field, because they fail for different reasons.
+test_conformance_checker_is_red_capable() {
+  local r
+  r=$(cf_check_row "control" cf_aborted_run failed run-step run-step-over-status-log)
+  [ "$r" = PASS ] && fail "checker accepted a wrong STATE (aborted reported as failed)"
+  r=$(cf_check_row "control" cf_working_run working status-log run-step-over-status-log)
+  [ "$r" = PASS ] && fail "checker accepted a wrong SOURCE"
+  r=$(cf_check_row "control" cf_working_run working run-step no-metadata)
+  [ "$r" = PASS ] && fail "checker accepted a wrong PRECEDENCE"
+  pass "conformance checker rejects a wrong state, source, and precedence"
+}
+
+# Coverage gate 1: every verdict in the vocabulary owns at least one row.
+# Adding a verdict without a row fails HERE, which is the point.
+test_conformance_covers_every_verdict() {
+  local state row covered
+  for state in $FM_CREW_STATE_VOCABULARY; do
+    covered=0
+    for row in "${CONFORMANCE_TABLE[@]}"; do
+      case "$row" in *"|$state|"*) covered=1; break ;; esac
+    done
+    [ "$covered" = 1 ] || \
+      fail "verdict '$state' is in the vocabulary with no conformance row; add one"
+  done
+  pass "conformance table covers every verdict in the declared vocabulary"
+}
+
+# Coverage gate 2: every status verb a crew is instructed to write owns a row.
+# The verb set is read from the brief scaffold and the classify library, so a
+# new sanctioned verb cannot be introduced without a row here.
+test_conformance_covers_every_status_verb() {
+  local verb row covered
+  local verbs="working needs-decision blocked done failed"
+  verbs="$verbs ${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}"
+  verbs="$verbs ${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}"
+  verbs="$verbs ${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}"
+  for verb in $verbs; do
+    covered=0
+    for row in "${CONFORMANCE_TABLE[@]}"; do
+      case "$row" in *"verb $verb|"*|*"verb $verb "*) covered=1; break ;; esac
+    done
+    [ "$covered" = 1 ] || \
+      fail "status verb '$verb' has no conformance row; add one"
+  done
+  pass "conformance table covers every sanctioned status verb"
+}
+
+# The structured mode must never become a SECOND derivation. It reports the same
+# answer as the prose mode or it is a new place for the two to disagree.
+test_structured_mode_never_diverges_from_prose() {
+  reset_fakes
+  local d out json
+  d=$(new_case json-equivalence)
+  make_repo_on_branch "$d/wt" fm/cf-eq
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/eq.meta" "window=fm:fm-eq" "worktree=$d/wt" "kind=ship" "harness=claude"
+  # The empty-check-set case. Whatever verdict the CI-log rule yields for "no
+  # checks reported", both modes must yield the SAME one, so the structured mode
+  # can never be the path that reports a green a human-readable read would not.
+  # bin/fm-crew-state.sh's nm_ci_checks_state is the single owner of that rule
+  # (upstream PR 1614 is the open change that tightens it); this assertion holds
+  # whichever way that rule resolves, which is why it is written as equivalence
+  # rather than pinning a literal verdict a separate PR owns.
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/cf-eq)"
+  FM_FAKE_CI_LOGS='no CI checks reported - still monitoring until merged or closed'
+  out=$(run_crew_state "$d" eq)
+  json=$(run_crew_state_json "$d" eq)
+  local prose_state; prose_state=${out#state: }; prose_state=${prose_state%% *}
+  [ "$(cf_json_field "$json" state)" = "$prose_state" ] \
+    || fail "empty check set: prose '$prose_state' != structured '$(cf_json_field "$json" state)'"
+  crew_state_is_known "$prose_state" || fail "empty check set produced a verdict outside the vocabulary"
+  pass "structured mode reports the same derivation as prose, including an empty check set"
+}
+
+# precedence_applied is the certification requirement: Lane B's Law 3 says
+# precedence between disagreeing sources must be DECLARED, not implicit. It is
+# only declared if it is actually emitted on every answer.
+test_every_answer_declares_its_precedence() {
+  local row name setup d id json prec
+  for row in "${CONFORMANCE_TABLE[@]}"; do
+    IFS='|' read -r name setup _ _ _ <<< "$row"
+    reset_fakes
+    d=$(cf_new_case)
+    CF_ID=""; "$setup" "$d"; id=$CF_ID
+    json=$(run_crew_state_json "$d" "$id")
+    prec=$(cf_json_field "$json" precedence_applied)
+    [ -n "$prec" ] || fail "no precedence_applied declared for row: $name"
+  done
+  pass "every answer declares which precedence rule selected it"
+}
+
+# A disagreement between two live sources must resolve by the DECLARED rule and
+# say so, rather than resolving silently. Here the status log claims a decision
+# is open while the run has moved on.
+test_source_disagreement_names_the_winning_rule() {
+  reset_fakes
+  local d json
+  d=$(new_case disagreement)
+  make_repo_on_branch "$d/wt" fm/cf-dis
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/dis.meta" "window=fm:fm-dis" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'needs-decision: which option\n' > "$d/state/dis.status"
+  FM_FAKE_AXI_STATUS="$(run_running fm/cf-dis)"
+  json=$(run_crew_state_json "$d" dis)
+  [ "$(cf_json_field "$json" state)" = working ] \
+    || fail "an active run must outrank a superseded needs-decision log"
+  [ "$(cf_json_field "$json" precedence_applied)" = run-step-supersedes-status-log ] \
+    || fail "a superseding read must NAME the rule, got '$(cf_json_field "$json" precedence_applied)'"
+  pass "disagreeing sources resolve by a named, declared precedence rule"
+}
+
+# Freshness must travel with the verdict, not be inferred by the consumer.
+test_busy_verdict_carries_its_evidence_age() {
+  reset_fakes
+  local d json age
+  d=$(new_case evidence-age)
+  cf_no_run_case "$d" agetask scout
+  arm_idle_record "$d/state" agetask
+  json=$(run_crew_state_json "$d" agetask)
+  age=$(printf '%s' "$json" | sed -n 's/.*"evidence_age_secs":\([0-9]*\).*/\1/p')
+  [ -n "$age" ] || fail "a record-backed read must report how old its evidence was"
+  # busy_seq is the advancing-evidence counter: a consumer comparing it across
+  # two reads learns whether the worker's turn state actually moved. It stands
+  # in for the pane hash the increment named, from the architecture's own
+  # semantic source rather than from rendered output.
+  local seq; seq=$(printf '%s' "$json" | sed -n 's/.*"busy_seq":\([0-9]*\).*/\1/p')
+  [ -n "$seq" ] || fail "a record-backed read must report the advancing evidence counter"
+  # A read with no record at all must report NEITHER field rather than a
+  # fabricated zero: "no age exists for this source" and "this evidence is
+  # brand new" are different answers.
+  local d2 json2
+  d2=$(cf_new_case)
+  cf_no_run_case "$d2" norec scout
+  printf 'working: mid-flight\n' > "$d2/state/norec.status"
+  json2=$(run_crew_state_json "$d2" norec)
+  case "$json2" in
+    *'"evidence_age_secs":null'*) ;;
+    *) fail "a read with no busy record must not invent an evidence age" ;;
+  esac
+  pass "a record-backed verdict reports evidence age and the advancing counter, and an ageless one reports neither"
+}
+
+# The verdict whose entire meaning is "this evidence aged out" must be able to
+# say BY HOW MUCH. Expiry is a judgement ABOUT the evidence, so the path that
+# reaches it must not discard the evidence that produced it: a `stale` that
+# cannot distinguish a record 61 minutes old from one 3 days old is barely
+# better than the boolean it replaced.
+test_stale_verdict_reports_how_stale() {
+  reset_fakes
+  local d json age seq
+  d=$(new_case stale-age)
+  cf_no_run_case "$d" staleage scout
+  arm_expired_busy_record "$d/state" staleage
+  json=$(run_crew_state_json "$d" staleage)
+  [ "$(cf_json_field "$json" state)" = stale ] \
+    || fail "an expired busy record must report stale, got '$(cf_json_field "$json" state)'"
+  age=$(printf '%s' "$json" | sed -n 's/.*"evidence_age_secs":\([0-9]*\).*/\1/p')
+  [ -n "$age" ] || fail "a stale verdict must report how old the expired evidence was, got null"
+  # arm_expired_busy_record backdates by 7200s. The assertion is on the MEASURED
+  # age, not merely on non-null, so a fabricated 0 (or the record's own bound
+  # echoed back) is red here too.
+  [ "$age" -ge 7000 ] \
+    || fail "a stale verdict must report the record's real age, got '$age'"
+  seq=$(printf '%s' "$json" | sed -n 's/.*"busy_seq":\([0-9]*\).*/\1/p')
+  [ -n "$seq" ] || fail "a stale verdict must report the expired record's advancing counter"
+  pass "a stale verdict carries the age and sequence of the evidence that expired"
+}
+
+# The reader answers an ARBITRARY string with a verdict rather than a usage
+# error, and `--json` is the only flag it recognizes. Callers that pass a
+# caller-supplied token already depend on that: a later greedy option handler
+# (or a `--help` arm) would break them with every other test still green.
+test_help_flag_stays_an_unknown_id() {
+  reset_fakes
+  local d out json rc
+  d=$(new_case help-contract)
+  mkdir -p "$d/state"
+  make_fakebin "$d" >/dev/null
+  out=$(run_crew_state "$d" --help); rc=$?
+  expect_code 0 "$rc" "--help must be read as an id, not a usage error"
+  assert_contains "$out" "state: unknown" "--help must still report state: unknown"
+  assert_contains "$out" "source: none" "--help must still report source: none"
+  json=$(run_crew_state_json "$d" --help)
+  [ "$(cf_json_field "$json" state)" = unknown ] \
+    || fail "--json --help must report state unknown, got '$(cf_json_field "$json" state)'"
+  [ "$(cf_json_field "$json" source)" = none ] \
+    || fail "--json --help must report source none, got '$(cf_json_field "$json" source)'"
+  pass "--help stays an unknown id and still reports state: unknown, source: none"
+}
+
+# terminal_error is VERBATIM pipeline output, so it can carry an ANSI escape -
+# an ordinary thing for captured tool output. JSON forbids a raw control
+# character inside a string, so emitting one produced an object the snapshot's
+# jq validation rejected, degrading a correct `interrupted` verdict to
+# `unknown`. The reader must not be defeated by the shape of the evidence it is
+# quoting.
+test_control_characters_in_terminal_error_stay_valid_json() {
+  command -v jq >/dev/null 2>&1 || { pass "skip: jq not found for JSON validity check"; return; }
+  reset_fakes
+  local d json esc
+  d=$(new_case control-chars)
+  make_repo_on_branch "$d/wt" fm/cf-ansi
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/ansi.meta" "window=fm:fm-ansi" "worktree=$d/wt" \
+    "kind=ship" "harness=claude"
+  esc=$'\033'
+  FM_FAKE_AXI_STATUS="$(cat <<EOF
+run:
+  id: "01RUN"
+  branch: fm/cf-ansi
+  status: completed
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: ""
+  findings: none
+outcome: failed
+error: daemon crashed during execution ${esc}[31mred${esc}[0m
+EOF
+)"
+  json=$(run_crew_state_json "$d" ansi)
+  printf '%s' "$json" | jq -e . >/dev/null 2>&1 \
+    || fail "a terminal error carrying an ANSI escape produced invalid JSON: $json"
+  printf '%s' "$json" | jq -e '.state == "interrupted"' >/dev/null 2>&1 \
+    || fail "the verdict must survive the escape sequence intact: $json"
+  printf '%s' "$json" | jq -e '.terminal_error | contains("\u001b")' >/dev/null 2>&1 \
+    || fail "the escape must survive as an escaped code point, not be dropped: $json"
+  pass "control characters in verbatim pipeline output stay valid, decodable JSON"
+}
+
+# PROPERTY 3 coverage gate: every consumer must handle the WHOLE verdict set.
+# crew_state_clears_open_decision (fm-classify-lib.sh) owns the rule that
+# bin/fm-fleet-snapshot.sh applies to keyed open decisions, and it answers 2 for
+# a verdict it does not recognize. A verdict added to the vocabulary without an
+# arm there fails HERE rather than silently taking the clearing branch in
+# production, which is how the previous negative-condition chain dropped a
+# captain's question on interrupted, stale, and idle.
+test_every_verdict_has_a_declared_decision_clearing_answer() {
+  local state rc
+  for state in $FM_CREW_STATE_VOCABULARY; do
+    crew_state_clears_open_decision "$state" run-step; rc=$?
+    [ "$rc" != 2 ] || \
+      fail "verdict '$state' reaches no arm of crew_state_clears_open_decision; add one"
+    crew_state_clears_open_decision "$state" status-log; rc=$?
+    [ "$rc" != 2 ] || \
+      fail "verdict '$state' reaches no arm of crew_state_clears_open_decision (status-log)"
+  done
+  # The gate is red-capable: a verdict outside the vocabulary must reach 2.
+  crew_state_clears_open_decision frobnicated run-step; rc=$?
+  [ "$rc" = 2 ] || fail "an unrecognized verdict must be reported, not silently answered"
+  pass "every verdict in the vocabulary has an explicit decision-clearing answer"
+}
+
+# The same gate for the OTHER consumer of the vocabulary, the watcher's absorb
+# path. Its fallback answer is `none`, which is the safe direction and therefore
+# indistinguishable from a correct `none` in the printed token - so the mapper
+# reports HOW it answered, and this walks the vocabulary against that. A verdict
+# added to FM_CREW_STATE_VOCABULARY without a branch in crew_state_absorb_class
+# fails here rather than being silently absorbed into the fallback.
+test_every_verdict_has_a_declared_absorb_class() {
+  local state rc src
+  for state in $FM_CREW_STATE_VOCABULARY; do
+    for src in run-step pane status-log none; do
+      crew_state_absorb_class "$state" "$src" >/dev/null; rc=$?
+      [ "$rc" != 3 ] || \
+        fail "verdict '$state' reaches no arm of crew_state_absorb_class (source $src); add one"
+      [ "$rc" = 0 ] || \
+        fail "verdict '$state' is not answered by an explicit absorb arm (source $src, rc $rc)"
+    done
+  done
+  # Red-capable, once per outcome the gate distinguishes. A verdict this fleet
+  # DECLARES but the mapper does not handle is the failure this gate exists to
+  # catch, so prove the mapper actually reports it by declaring one temporarily.
+  local saved=$FM_CREW_STATE_VOCABULARY
+  FM_CREW_STATE_VOCABULARY="$saved frobnicated"
+  crew_state_absorb_class frobnicated run-step >/dev/null; rc=$?
+  FM_CREW_STATE_VOCABULARY=$saved
+  [ "$rc" = 3 ] || \
+    fail "a declared-but-unhandled verdict must be reported as a gap, got rc $rc"
+  # Outside the vocabulary entirely is the fallback's one legitimate case.
+  crew_state_absorb_class frobnicated run-step >/dev/null; rc=$?
+  [ "$rc" = 2 ] || \
+    fail "an out-of-vocabulary verdict must reach the untaught fallback, got rc $rc"
+  pass "every verdict in the vocabulary has an explicit absorb-class answer"
+}
+
+# The absorb classes themselves, which decide whether a wake is swallowed.
+# Absorbing is the unsafe direction here: it drops a supervisor's chance to see
+# a crew that stopped, so only positive evidence of work in flight may absorb.
+test_only_positive_evidence_absorbs_a_wake() {
+  local state
+  [ "$(crew_state_absorb_class working run-step)" = working ] \
+    || fail "an active run step is provable work"
+  [ "$(crew_state_absorb_class working pane)" = working ] \
+    || fail "a busy pane is provable work"
+  [ "$(crew_state_absorb_class working status-log)" = none ] \
+    || fail "a status-log working claim is not evidence, and must surface"
+  [ "$(crew_state_absorb_class paused status-log)" = paused ] \
+    || fail "a declared external wait is expected to idle"
+  for state in parked blocked "done" failed aborted interrupted idle stale unknown; do
+    [ "$(crew_state_absorb_class "$state" run-step)" = none ] \
+      || fail "verdict '$state' must surface the wake, not be absorbed (run-step)"
+    [ "$(crew_state_absorb_class "$state" pane)" = none ] \
+      || fail "verdict '$state' must surface the wake, not be absorbed (pane)"
+  done
+  pass "a wake is absorbed only on positive evidence of work in flight"
+}
+
+# Only POSITIVE evidence that the crew moved past the gate clears an open
+# decision. The unsafe direction is the one that matters: dropping an open
+# decision loses a captain's question, while keeping a spurious one costs a
+# glance.
+test_only_positive_evidence_clears_an_open_decision() {
+  local state
+  crew_state_clears_open_decision working run-step \
+    || fail "a working run-step must clear a superseded decision"
+  crew_state_clears_open_decision working pane \
+    || fail "a working pane must clear a superseded decision"
+  crew_state_clears_open_decision "done" status-log \
+    || fail "a terminal done must clear on a single-owner task"
+  crew_state_clears_open_decision failed run-step \
+    || fail "a terminal failed must clear on a single-owner task"
+  crew_state_clears_open_decision working status-log \
+    && fail "a non-authoritative working read must not clear a decision"
+  for state in parked blocked paused aborted interrupted idle stale unknown; do
+    crew_state_clears_open_decision "$state" run-step \
+      && fail "verdict '$state' must keep an open decision surfacing (run-step)"
+    crew_state_clears_open_decision "$state" pane \
+      && fail "verdict '$state' must keep an open decision surfacing (pane)"
+  done
+  pass "an open decision clears only on positive evidence the crew moved past the gate"
+}
+
 test_active_run_is_authoritative
 test_stale_needs_decision_superseded
 test_stale_blocked_superseded
@@ -1687,5 +2364,20 @@ test_unresolvable_active_tip_on_own_branch_is_attributed
 test_unresolvable_terminal_head_does_not_report_terminal_verdict
 test_unresolvable_head_with_terminal_status_only_is_not_attributed
 test_unresolvable_terminal_coarse_row_is_not_attributed
+test_conformance_table
+test_conformance_checker_is_red_capable
+test_conformance_covers_every_verdict
+test_conformance_covers_every_status_verb
+test_structured_mode_never_diverges_from_prose
+test_every_answer_declares_its_precedence
+test_source_disagreement_names_the_winning_rule
+test_busy_verdict_carries_its_evidence_age
+test_stale_verdict_reports_how_stale
+test_help_flag_stays_an_unknown_id
+test_control_characters_in_terminal_error_stay_valid_json
+test_every_verdict_has_a_declared_decision_clearing_answer
+test_only_positive_evidence_clears_an_open_decision
+test_every_verdict_has_a_declared_absorb_class
+test_only_positive_evidence_absorbs_a_wake
 
 echo "all fm-crew-state tests passed"
