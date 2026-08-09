@@ -69,7 +69,10 @@ elif args[:2] == ["upload", "create"]:
     time.sleep(float(os.environ.get("HF_UPLOAD_DELAY", "0")))
     print(json.dumps({"id": "11111111-1111-4111-8111-111111111111"}))
 elif args[:2] == ["generate", "cost"]:
-    print(json.dumps({"credits": 2}))
+    response = {"adjustments": [], "credits": 2}
+    if "--aspect_ratio=99:99" in args:
+        response["adjustments"] = [{"field": "aspect_ratio", "from": "99:99", "to": "1:1"}]
+    print(json.dumps(response))
 elif args[:2] == ["generate", "create"]:
     time.sleep(float(os.environ.get("HF_CREATE_DELAY", "0")))
     print(json.dumps({"id": "22222222-2222-4222-8222-222222222222", "status": "completed", "url": "https://example.invalid/result.png"}))
@@ -427,6 +430,39 @@ fi
 [ ! -e "$TEST_TMP/audio-receipt.json" ] || fail "rejected audio model created a cost receipt"
 pass "model inspection rejects non-image and non-video generation"
 
+python3 - "$TEST_TMP/adjusted-cost-request.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+request = {
+    "job_type": "nano_banana_2",
+    "prompt": "square product portrait",
+    "parameters": {"aspect_ratio": "99:99"},
+    "media": [],
+}
+Path(sys.argv[1]).write_text(json.dumps(request), encoding="utf-8")
+PY
+
+if PATH="$FAKE_BIN:$PATH" HF_FAKE_LOG="$FAKE_LOG" \
+  python3 "$WRAPPER" cost "$TEST_TMP/adjusted-cost-request.json" \
+  --receipt "$TEST_TMP/adjusted-cost-receipt.json" \
+  > "$TEST_TMP/adjusted-cost.out" 2> "$TEST_TMP/adjusted-cost.err"; then
+  fail "cost accepted vendor-adjusted parameters"
+fi
+[ ! -e "$TEST_TMP/adjusted-cost-receipt.json" ] || fail "adjusted cost issued an approval receipt"
+python3 - "$FAKE_LOG" <<'PY' || fail "adjusted cost reached generation"
+import json
+import sys
+
+commands = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8")]
+adjusted = [command for command in commands if command[:3] == ["generate", "cost", "nano_banana_2"]]
+assert len(adjusted) == 1
+assert "--aspect_ratio=99:99" in adjusted[0]
+assert not any(command[:3] == ["generate", "create", "nano_banana_2"] for command in commands)
+PY
+pass "vendor-adjusted parameters cannot issue a cost approval"
+
 PATH="$FAKE_BIN:$PATH" HF_FAKE_LOG="$FAKE_LOG" \
   python3 "$WRAPPER" cost "$UPLOADED_REQUEST" --receipt "$COST_RECEIPT" > "$TEST_TMP/cost.json"
 
@@ -439,10 +475,15 @@ receipt = json.load(open(sys.argv[2], encoding="utf-8"))
 assert cost["credits"] == 2
 assert cost["job_count"] == 1
 assert cost["parameters"] == {"aspect_ratio": "1:1", "generate_audio": "false"}
+assert cost["approval_scope"] == {
+    "binds": ["request", "credit_price"],
+    "does_not_bind": ["account", "billing_workspace"],
+    "workspace_switch_warning": "Switching the active billing workspace between approval and run can charge a different workspace at the same credit price.",
+}
 assert set(receipt) == {"cost_approval_capability"}
 assert receipt["cost_approval_capability"].startswith("cost:v1:")
 PY
-pass "cost discloses silent parameters and writes an opaque capability"
+pass "cost discloses parameters, approval scope, and an opaque capability"
 
 cp "$COST_RECEIPT" "$COST_RECEIPT_COPY"
 

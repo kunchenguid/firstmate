@@ -54,8 +54,8 @@ The wrapper accepts only absolute regular-file paths or existing Higgsfield UUID
 3. Only after upload approval, run `python3 scripts/safe_generate.py upload /absolute/temporary/directory/request.json --approval-token <token-from-plan> --output /absolute/temporary/directory/uploaded-request.json`.
 4. Use the uploaded request from then on.
 5. Run `python3 scripts/safe_generate.py cost /absolute/temporary/directory/uploaded-request.json --receipt /absolute/temporary/directory/cost-receipt.json`.
-6. Show the captain the exact model, job count, parameters, uploaded references, and credit cost.
-7. Obtain explicit approval for that exact paid generation.
+6. Show the captain the exact model, job count, parameters, uploaded references, credit cost, and the wrapper's emitted approval-scope warning.
+7. Obtain explicit approval only for the request and credit price shown.
 8. Only after cost approval, run `python3 scripts/safe_generate.py run /absolute/temporary/directory/uploaded-request.json --cost-receipt /absolute/temporary/directory/cost-receipt.json`.
 
 For prompt-only work without step 3, use `/absolute/temporary/directory/request.json` in steps 5 and 8.

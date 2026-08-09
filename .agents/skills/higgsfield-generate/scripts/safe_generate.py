@@ -57,6 +57,14 @@ AUDIO_OFF_BY_JOB_TYPE = {
     "veo3_1_lite": {"generate_audio": "false"},
 }
 EXPLICITLY_PROVEN_SILENT_VIDEO_JOB_TYPES: frozenset[str] = frozenset()
+APPROVAL_SCOPE = {
+    "binds": ["request", "credit_price"],
+    "does_not_bind": ["account", "billing_workspace"],
+    "workspace_switch_warning": (
+        "Switching the active billing workspace between approval and run can charge "
+        "a different workspace at the same credit price."
+    ),
+}
 RESERVED_PARAMS = MEDIA_FLAGS | DISALLOWED_MEDIA_PARAMS | {
     "json",
     "no-color",
@@ -320,6 +328,9 @@ def _generation_arguments(request: dict[str, Any], action: str) -> list[str]:
 def _credits(request: dict[str, Any]) -> tuple[Any, str]:
     _ensure_image_or_video(request)
     response = _run_cli(_generation_arguments(request, "cost"), timeout=120)
+    adjustments = response.get("adjustments") if isinstance(response, dict) else None
+    if adjustments not in (None, [], {}):
+        raise PolicyError("cost response adjusted request parameters; revise the request and cost it again")
     value = response.get("credits") if isinstance(response, dict) else None
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise PolicyError("cost response did not contain numeric credits")
@@ -736,6 +747,7 @@ def command_cost(args: argparse.Namespace) -> None:
     _json_output(
         {
             "action": "cost",
+            "approval_scope": APPROVAL_SCOPE,
             "credits": credits,
             "job_count": 1,
             "job_type": request["job_type"],
