@@ -243,6 +243,22 @@ test_source_lock_is_fail_closed() {
   pass 'concurrent source replication is serialized by a source-side lock'
 }
 
+test_stale_source_snapshot_is_reclaimed() {
+  local root source destination stale out
+  root=$(fm_test_tmproot shadow-stale-source-snapshot)
+  new_fixture "$root"
+  source="$root/source"
+  destination="$root/destination-parent/shadow"
+  stale="$root/destination-parent/.shadow-source-snapshot.stale"
+  mkdir "$stale"
+  printf 'stale snapshot\n' >"$stale/README.md"
+
+  out=$(run_shadow "$source" "$destination")
+  assert_contains "$out" 'replicated:' 'stale source snapshot blocked publication'
+  assert_absent "$stale" 'stale source snapshot was not reclaimed'
+  pass 'interrupted source snapshots are reclaimed before the next publication'
+}
+
 test_destination_parent_traversal_is_refused() {
   local root source destination out
   root=$(fm_test_tmproot shadow-normalization)
@@ -372,6 +388,27 @@ test_manifest_tamper_is_refused() {
   pass 'manifest hash tamper is refused without touching destination output'
 }
 
+test_control_metadata_symlinks_are_refused() {
+  local root source destination controls external out
+  root=$(fm_test_tmproot shadow-control-symlinks)
+  new_fixture "$root"
+  source="$root/source"
+  destination="$root/destination-parent/shadow"
+  controls="$root/destination-parent/.shadow-control.shadow"
+  run_shadow "$source" "$destination" >/dev/null
+  external="$root/external-manifest"
+  cp "$controls/manifest" "$external"
+  rm "$controls/manifest"
+  ln -s "$external" "$controls/manifest"
+
+  if out=$(run_shadow "$source" "$destination" 2>&1); then
+    fail 'control metadata symlink was accepted'
+  fi
+  assert_contains "$out" 'must not be symbolic links' \
+    'control metadata symlink refusal did not identify the unsafe metadata'
+  pass 'shadow control metadata symlinks are refused'
+}
+
 test_first_replica_copies_identity_and_complete_tree
 test_9p_content_fixture_ignores_source_metadata_restrictions
 test_mode_only_destination_drift_is_ignored_on_9p
@@ -380,8 +417,10 @@ test_dirty_destination_is_preserved
 test_divergent_destination_is_preserved
 test_concurrent_lock_is_fail_closed
 test_source_lock_is_fail_closed
+test_stale_source_snapshot_is_reclaimed
 test_destination_parent_traversal_is_refused
 test_external_symlink_target_is_not_traversed
 test_staging_failure_preserves_previous_replica
 test_interrupted_recovery_preserves_failed_output
 test_manifest_tamper_is_refused
+test_control_metadata_symlinks_are_refused

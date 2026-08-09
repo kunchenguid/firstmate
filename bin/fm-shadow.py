@@ -132,6 +132,8 @@ def read_manifest(
     expected_branch: str,
     expected_commit: str,
 ) -> dict[str, tuple[str, str, str]]:
+    if manifest_path.is_symlink() or policy_path.is_symlink():
+        fail("destination manifest and policy must not be symbolic links")
     if not manifest_path.is_file() or not policy_path.is_file():
         fail("destination requires its manifest and policy sidecars")
     try:

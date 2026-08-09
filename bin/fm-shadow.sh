@@ -220,6 +220,18 @@ acquire_lock() {
   } >"$LOCK_DIR/owner" || die "cannot record lock owner: $LOCK_DIR"
 }
 
+cleanup_stale_source_snapshots() {
+  local snapshot
+  for snapshot in "$DEST_PARENT"/.shadow-source-snapshot.*; do
+    if [ ! -e "$snapshot" ] && [ ! -L "$snapshot" ]; then
+      continue
+    fi
+    [ ! -L "$snapshot" ] || die "source snapshot must not be a symbolic link: $snapshot"
+    [ -d "$snapshot" ] || die "source snapshot is not a directory: $snapshot"
+    rm -rf -- "$snapshot" || die "cannot remove stale source snapshot: $snapshot"
+  done
+}
+
 check_destination_git_clean() {
   local status line
   status=$(GIT_OPTIONAL_LOCKS=0 git_status_at "$DEST" status --porcelain=v1 --untracked-files=all) \
@@ -330,6 +342,11 @@ source_matches_replica() {
   fi
   [ -z "$status" ] || return 1
   python3 "$SCRIPT_DIR/fm-shadow.py" compare --source "$SOURCE" --replica "$DEST" \
+    >/dev/null 2>&1
+}
+
+snapshot_matches_replica() {
+  python3 "$SCRIPT_DIR/fm-shadow.py" compare --source "$SOURCE_SNAPSHOT" --replica "$DEST" \
     >/dev/null 2>&1
 }
 
@@ -512,9 +529,9 @@ swap_replica() {
     recover_transaction
     die "post-install validation failed; old destination was restored"
   fi
-  if ! source_matches_replica; then
+  if ! snapshot_matches_replica; then
     recover_transaction
-    die "source changed during shadow installation; old destination was restored"
+    die "published shadow snapshot failed its final comparison; old destination was restored"
   fi
   clear_transaction
 }
@@ -551,6 +568,7 @@ done
 
 resolve_paths
 acquire_lock
+cleanup_stale_source_snapshots
 check_source
 recover_transaction
 check_existing_destination

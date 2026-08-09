@@ -352,6 +352,8 @@ def validate_entry(entry: Any, seen: set[str]) -> None:
         fail("snapshot contains a malformed entry")
     if not relative or relative.startswith("/") or "\\" in relative or "\x00" in relative:
         fail(f"snapshot contains an unsafe path: {relative!r}")
+    if relative != PurePosixPath(relative).as_posix():
+        fail(f"snapshot contains a non-canonical path: {relative}")
     if relative != "." and ".." in PurePosixPath(relative).parts:
         fail(f"snapshot contains a traversal path: {relative}")
     if relative in seen:

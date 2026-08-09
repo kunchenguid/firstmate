@@ -44,7 +44,9 @@ The destination status check also disables Git filemode comparison only for that
 
 Each run captures a complete source snapshot, stages the output beside the destination from that snapshot, validates its content, and swaps it into place only after the source is rechecked.
 
-The source is checked again at the transaction boundary and after installation, and any detected source change aborts the run and restores the prior validated destination.
+The source is checked again at the transaction boundary, and the installed output is compared with the sealed snapshot before the transaction is cleared.
+
+An interrupted run's source snapshot is removed by the next invocation after both locks are acquired.
 
 The staging copier uses 9p-compatible content and symbolic-link operations and does not request POSIX metadata updates from the destination filesystem.
 
