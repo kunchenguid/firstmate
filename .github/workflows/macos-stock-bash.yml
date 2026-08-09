@@ -62,7 +62,7 @@ jobs:
           runner_test_output=$(bin/fm-test-run-stock-bash.sh)
           printf '%s\n' "$runner_test_output"
           runner_test_count=$(printf '%s\n' "$runner_test_output" | grep -c '^ok - ')
-          [ "$runner_test_count" -eq 27 ] || {
-            echo "::error::expected 27 focused runner contract tests, got $runner_test_count"
+          [ "$runner_test_count" -eq 41 ] || {
+            echo "::error::expected 41 focused runner contract tests, got $runner_test_count"
             exit 1
           }
