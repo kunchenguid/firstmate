@@ -58,11 +58,21 @@ AUDIO_OFF_BY_JOB_TYPE = {
 }
 EXPLICITLY_PROVEN_SILENT_VIDEO_JOB_TYPES: frozenset[str] = frozenset()
 APPROVAL_SCOPE = {
-    "binds": ["request", "vendor_credits_field"],
-    "does_not_bind": ["account", "billing_workspace", "vendor_credits_exact_field"],
+    "capability_binds": ["request_including_prompt", "vendor_credits_field"],
+    "capability_does_not_bind": [
+        "account",
+        "billing_workspace",
+        "vendor_credits_exact_field",
+    ],
     "credits_exact_warning": (
-        "The wrapper binds and rechecks the vendor credits field, not credits_exact; "
-        "a distinct credits_exact value can differ from the approved displayed credits value."
+        "The capability binds and the wrapper rechecks the vendor credits field, not "
+        "credits_exact; a distinct credits_exact value can differ from the approved "
+        "displayed credits value."
+    ),
+    "prompt_disclosure_warning": (
+        "The capability binds the request including its prompt, but the mandated "
+        "operator-visible disclosure does not attest or guarantee that the exact prompt "
+        "was shown before approval."
     ),
     "workspace_switch_warning": (
         "Switching the active billing workspace between approval and run can charge "
