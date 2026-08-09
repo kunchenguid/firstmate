@@ -43,10 +43,13 @@ cursor_arm_interrupt_marker() {  # <state-dir>
 # Foreground the watcher arm inside a hook-owned process tree. Never shell &:
 # Cursor owns the process group, so its timeout tears arm and watcher down
 # together; a backgrounded child would exit leaving a stranded watcher and false
-# "already running" on the next arm.
+# "already running" on the next arm. The interrupted-park marker is requested
+# explicitly (FM_WATCH_ARM_INTERRUPT_MARKER): its recovery contract belongs to
+# this hook-owned arm alone, so other arm modes create no durable marker state.
 cursor_arm_foreground() {  # <state-dir> <arm-output-file> -> 0, output in file
   local state_dir=$1 out_file=$2
-  STATE="$state_dir" "$SCRIPT_DIR/fm-watch-arm.sh" >"$out_file" 2>&1 || true
+  FM_WATCH_ARM_INTERRUPT_MARKER="$state_dir/.hook-arm-interrupted" \
+    STATE="$state_dir" "$SCRIPT_DIR/fm-watch-arm.sh" >"$out_file" 2>&1 || true
 }
 
 cursor_arm_has_actionable() {  # <arm-output>

@@ -972,35 +972,42 @@ SH
 # invocation establishes (the home and data/secondmates.md entry are seeded
 # before spawn, never by it).
 test_spawn_cursor_secondmate_worker_absent_rolls_back_completely() {
-  local w sm launchlog out status
+  local w sm launchlog out status id
   w="$TMP_ROOT/spawn-cursor-secondmate-rollback"
   sm="$w/sm"
   launchlog="$w/launch.log"
-  mkdir -p "$w/home/config"
+  # A dedicated id (not the shared "sm") keeps this task's tmp root and meta
+  # exclusive to this test, and a self-contained fake cursor-agent in the
+  # spawn's own fakebin makes the resolver deterministic on CI runners that
+  # have no cursor-agent installed.
+  id=currollback
+  mkdir -p "$w/home/config" "$w/tmux-$id/fakebin"
   printf 'cursor\n' > "$w/home/config/secondmate-harness"
-  make_seeded_home "$sm" sm
+  make_seeded_home "$sm" "$id"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$w/tmux-$id/fakebin/cursor-agent"
+  chmod +x "$w/tmux-$id/fakebin/cursor-agent"
   registry_before=$(cat "$w/home/data/secondmates.md" 2>/dev/null || echo absent)
 
   # No worker-server child: the fake pgrep exits 1, the bounded poll exhausts,
   # and the spawn must refuse with a complete rollback (review4 blocker).
-  out=$(FM_FAKE_CURSOR_AGENT_ARGS="$w/tmux-sm/fakebin/cursor-agent --force --trust brief" \
+  out=$(FM_FAKE_CURSOR_AGENT_ARGS="$w/tmux-$id/fakebin/cursor-agent --force --trust brief" \
     FM_PROC_ROOT_OVERRIDE="$w/no-proc" FM_FAKE_CURSOR_PROC_ROOT="$w/no-proc" \
     FM_FAKE_CURSOR_AGENT_PID=4242 FM_FAKE_CURSOR_WORKER_PID='' \
-    spawn_secondmate_capture "$w" sm "$sm" "$launchlog" 2>&1)
+    spawn_secondmate_capture "$w" "$id" "$sm" "$launchlog" 2>&1)
   status=$?
   expect_code 1 "$status" "cursor secondmate spawn without a worker-server must refuse"$'\n'"$out"
 
   # No phantom live task: meta, status, turn-end hook, worker record, and the
   # task tmp root must all be gone.
-  [ ! -e "$w/home/state/sm.meta" ] \
+  [ ! -e "$w/home/state/$id.meta" ] \
     || fail "failed cursor secondmate spawn must not leave a live meta behind"
-  [ ! -e "$w/home/state/sm.status" ] \
+  [ ! -e "$w/home/state/$id.status" ] \
     || fail "failed cursor secondmate spawn must not leave a status record behind"
-  [ ! -e "$w/home/state/sm.worker-server" ] \
+  [ ! -e "$w/home/state/$id.worker-server" ] \
     || fail "failed cursor secondmate spawn must not leave a worker-server record"
-  [ ! -e "$w/home/state/sm.turn-ended" ] \
+  [ ! -e "$w/home/state/$id.turn-ended" ] \
     || fail "failed cursor secondmate spawn must not leave its turn-end hook record behind"
-  [ ! -e "/tmp/fm-sm" ] \
+  [ ! -e "/tmp/fm-$id" ] \
     || fail "failed cursor secondmate spawn must not leave its task tmp root behind"
   # No partial home/registry ownership: the pre-seeded home stays intact and
   # the registry is byte-identical (spawn never writes it).

@@ -140,6 +140,18 @@ case "$cmd $sub" in
   "pane list")
     jq_state --arg w "$ws" '{result:{panes:[.tabs[]|select(.workspace_id==$w)|{pane_id:.pane_id, tab_id:.tab_id}]}}'
     ;;
+  "pane get")
+    pane=${3:-}
+    read -r tab_id ws_id <<EOF
+$(jq_state -r --arg p "$pane" '.tabs[] | select(.pane_id == $p) | [.tab_id, .workspace_id] | @tsv' | head -1)
+EOF
+    if [ -n "$tab_id" ] && [ -n "$ws_id" ]; then
+      printf '{"result":{"pane":{"pane_id":"%s","tab_id":"%s","workspace_id":"%s","foreground_cwd":"%s"}}}\n' \
+        "$pane" "$tab_id" "$ws_id" "${FM_FAKE_PANE_PATH:-}"
+    else
+      printf '{"error":{"code":"pane_not_found","message":"pane %s not found"}}\n' "$pane"
+    fi
+    ;;
   "pane close")
     pane=${3:-}
     jq_state --arg p "$pane" '.tabs |= [.[]|select(.pane_id != $p)]' | save
@@ -4555,6 +4567,61 @@ test_send_text_submit_busy_queued_fallback_not_applied_to_other_harnesses() {
 test_send_text_submit_busy_queued_fallback_empty_for_cursor
 test_send_text_submit_busy_queued_fallback_keeps_pending_when_idle
 test_send_text_submit_busy_queued_fallback_not_applied_to_other_harnesses
+
+# A failed CURSOR spawn on backend=herdr must not erase the task when the
+# endpoint close cannot be confirmed. herdr's kill contract can REFUSE an
+# unlocked close and still return success; the rollback must then retain the
+# task records, marked rollback-needed, instead of deleting the only identity
+# that lets a retry finish the cleanup. The statefake models the refusal
+# naturally: the presentation session lock path is unresolvable (session list
+# --json returns nothing), so fm_backend_herdr_kill refuses the close and the
+# pane stays present in the fake's state.
+test_cursor_spawn_herdr_unconfirmed_close_retains_recoverable_state() {
+  local dir id proj wt fb log state out status pane_id
+  id=cursor-herdr-rollback-zs
+  dir="$TMP_ROOT/cursor-herdr-rollback"
+  proj="$dir/project"
+  wt="$dir/wt"
+  fb=$(make_herdr_statefake "$dir")
+  fm_fake_exit0 "$fb" treehouse cursor-agent
+  fm_git_worktree "$proj" "$wt" "wt-cursor-herdr-rollback"
+  mkdir -p "$dir/home/data/$id" "$dir/home/state" "$dir/home/config"
+  printf 'cursor\n' > "$dir/home/config/crew-harness"
+  printf 'off\n' > "$dir/home/config/herdr-presentation-spaces"
+  printf 'brief for %s\n' "$id" > "$dir/home/data/$id/brief.md"
+  log="$dir/herdr.log"
+  state="$dir/state.json"
+  : > "$log"
+  out=$(FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" \
+    FM_DATA_OVERRIDE="$dir/home/data" FM_PROJECTS_OVERRIDE="$dir/home/projects" \
+    FM_CONFIG_OVERRIDE="$dir/home/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" HERDR_SESSION=default \
+    FM_FAKE_CURSOR_AGENT_ARGS="$fb/cursor-agent --force --trust brief" \
+    FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" \
+    PATH="$fb:$PATH" "$ROOT/bin/fm-spawn.sh" "$id" "$proj" --backend herdr \
+    --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  expect_code 1 "$status" "cursor spawn on herdr with an unconfirmed close must refuse"$'\n'"$out"
+  # The close was refused, so the rollback must have RETAINED the task records
+  # and marked them rollback-needed: cleanup uncertainty must never erase the
+  # information required to retry the cleanup safely.
+  [ -f "$dir/home/state/$id.meta" ] \
+    || fail "herdr unconfirmed close must retain the task meta for a cleanup retry"
+  [ -f "$dir/home/state/$id.status" ] \
+    || fail "herdr unconfirmed close must retain the task status"
+  grep -q 'rollback-needed' "$dir/home/state/$id.status" \
+    || fail "herdr unconfirmed close must mark the task rollback-needed"
+  [ -e "/tmp/fm-$id" ] \
+    || fail "herdr unconfirmed close must retain the task tmp root"
+  # The endpoint itself is still present in the fake's state: the task records
+  # are exactly what lets a later teardown retry the locked close.
+  pane_id=$(grep '^herdr_pane_id=' "$dir/home/state/$id.meta" | cut -d= -f2-)
+  jq -e --arg p "$pane_id" '.tabs[] | select(.pane_id == $p)' "$state" >/dev/null \
+    || fail "the unconfirmed-close pane must remain present in the runtime state"
+  pass "herdr refused/unconfirmed close preserves recoverable task state"
+}
+
+test_cursor_spawn_herdr_unconfirmed_close_retains_recoverable_state
 test_dispatch_routes_herdr_backend
 test_dispatch_busy_state_unknown_for_tmux
 test_dispatch_composer_state_routes_by_backend
