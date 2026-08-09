@@ -120,6 +120,11 @@ if [ "$field" = comm= ] && [ -n "${FM_FAKE_CURSOR_PROC_ROOT:-}" ] && [ -n "${FM_
   printf '%s\0' "$FM_FAKE_CURSOR_ARGV0" > "$FM_FAKE_CURSOR_PROC_ROOT/$pid/cmdline"
 fi
 case "$query" in
+  *"eww"*)
+    token=${CURSOR_WORKER_LAUNCH_TOKEN:-missing}
+    if [ "$pid" = "${FM_FAKE_CURSOR_STALE_WORKER_PID:-}" ]; then token=stale; fi
+    printf '%s FM_CURSOR_LAUNCH_TOKEN=%s\n' "$args" "$token"
+    exit 0 ;;
   *"lstart="*)
     printf 'Mon Jan  1 00:00:00 2001\n'
     exit 0 ;;
@@ -140,7 +145,9 @@ case "$query" in
     printf '%s\n' "$comm"
     exit 0 ;;
   *"-p "*)
-    if [ "$pid" = "${FM_FAKE_CURSOR_WORKER_PID:-}" ] && [ -n "${FM_FAKE_CURSOR_WORKER_ARGS:-}" ]; then
+    if { [ "$pid" = "${FM_FAKE_CURSOR_WORKER_PID:-}" ] \
+         || [ "$pid" = "${FM_FAKE_CURSOR_STALE_WORKER_PID:-}" ]; } \
+       && [ -n "${FM_FAKE_CURSOR_WORKER_ARGS:-}" ]; then
       printf '%s\n' "$FM_FAKE_CURSOR_WORKER_ARGS"
     else
       printf '%s\n' "$args"
@@ -155,6 +162,11 @@ SH
 set -u
 case "$*" in
   *"index.js worker-server"*)
+    if [ -n "${FM_FAKE_CURSOR_STALE_WORKER_PID:-}" ] \
+       && [ ! -e "${FM_FAKE_CURSOR_ENTER_STARTED:-}" ]; then
+      printf '%s\n' "$FM_FAKE_CURSOR_STALE_WORKER_PID"
+      exit 0
+    fi
     if [ -n "${FM_FAKE_CURSOR_ENTER_STARTED:-}" ]; then
       i=0
       while [ "$i" -lt 200 ]; do
@@ -175,7 +187,9 @@ SH
 #!/usr/bin/env bash
 set -u
 [ -n "${FM_FAKE_CURSOR_WORKER_CWD:-}" ] || exit 0
-printf 'p%s\nfcwd\nn%s\n' "$FM_FAKE_CURSOR_WORKER_PID" "$FM_FAKE_CURSOR_WORKER_CWD"
+pid=${FM_FAKE_CURSOR_STALE_WORKER_PID:-$FM_FAKE_CURSOR_WORKER_PID}
+kill -0 "$pid" 2>/dev/null || exit 0
+printf 'p%s\nfcwd\nn%s\n' "$pid" "$FM_FAKE_CURSOR_WORKER_CWD"
 SH
   chmod +x "$fakebin/lsof"
   cat > "$fakebin/treehouse" <<'SH'
@@ -288,7 +302,7 @@ test_mainthread_only_matches_narrowed_cursor_identity() {
 # --- launch: --force, --trust, env sanitization, encoded brief, no --worktree --
 
 test_cursor_launch_command_typed() {
-  local rec id out status expected launch resolved
+  local rec id out status expected launch resolved token
   id=cursor-launch-z1
   rec=$(make_cursor_case cursor-launch "$id")
   read_case_record "$rec"
@@ -301,6 +315,12 @@ test_cursor_launch_command_typed() {
   launch=$(cat "$LAUNCH_LOG")
   resolved="$FAKEBIN_DIR/cursor-agent"
   expected="env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT '$resolved' --force --trust \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
+  token=${launch%% *}
+  token=${token#FM_CURSOR_LAUNCH_TOKEN=\'}
+  token=${token%\'}
+  case "$token" in ''|*[!0-9a-f]*) fail "cursor launch has invalid worker ownership token" ;; esac
+  [ "${#token}" -eq 32 ] || fail "cursor launch has invalid worker ownership token length"
+  launch=${launch#* }
   [ "$launch" = "$expected" ] || fail "cursor launch did not match the canonical command"$'\n'"expected: $expected"$'\n'"actual:   $launch"
   pass "cursor spawn resolves cursor-agent from PATH and types --force --trust with env sanitization and the encoded brief"
 }
@@ -704,6 +724,7 @@ test_cursor_relaunch_reaps_prior_worker_before_recording_replacement() {
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
     FM_FAKE_CURSOR_AGENT_ARGS="$FAKEBIN_DIR/cursor-agent --force --trust brief" \
+    FM_PROC_ROOT_OVERRIDE="$CASE_DIR/no-proc" \
     FM_FAKE_CURSOR_AGENT_PID=4242 FM_FAKE_CURSOR_WORKER_PID=$old_pid \
     FM_FAKE_WINDOW_STATE_FILE="$CASE_DIR/windows.state" \
     FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" PATH="$FAKEBIN_DIR:$PATH" \
@@ -719,6 +740,7 @@ test_cursor_relaunch_reaps_prior_worker_before_recording_replacement() {
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
     FM_FAKE_CURSOR_AGENT_ARGS="$FAKEBIN_DIR/cursor-agent --force --trust brief" \
+    FM_PROC_ROOT_OVERRIDE="$CASE_DIR/no-proc" \
     FM_FAKE_CURSOR_AGENT_PID=4242 FM_FAKE_CURSOR_AGENT_AFTER_ENTER=1 \
     FM_FAKE_CURSOR_WORKER_PID=$new_pid FM_FAKE_CURSOR_ENTER_STARTED="$CASE_DIR/enter-started" \
     FM_FAKE_CURSOR_RECORD_FILE="$HOME_DIR/state/$id.worker-server" \
@@ -737,6 +759,64 @@ test_cursor_relaunch_reaps_prior_worker_before_recording_replacement() {
     "cursor relaunch retained stale worker identity"
   kill -KILL "$new_pid" 2>/dev/null || true
   pass "cursor relaunch reaps prior worker before recording replacement"
+}
+
+test_cursor_relaunch_with_missing_record_reaps_stale_worker() {
+  local rec id out status old_parent old_pid new_pid
+  id=cursor-worker-unrecorded-zk
+  rec=$(make_cursor_case cursor-worker-unrecorded "$id")
+  read_case_record "$rec"
+  : > "$CASE_DIR/windows.state"
+  bash -c 'cd "$1"; sleep 300 & printf "%s\n" "$!" > "$2"; wait' \
+    _ "$WT_DIR" "$CASE_DIR/old-worker.pid" &
+  old_parent=$!
+  while [ ! -s "$CASE_DIR/old-worker.pid" ]; do sleep 0.01; done
+  old_pid=$(cat "$CASE_DIR/old-worker.pid")
+
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
+    FM_FAKE_CURSOR_AGENT_ARGS="$FAKEBIN_DIR/cursor-agent --force --trust brief" \
+    FM_PROC_ROOT_OVERRIDE="$CASE_DIR/no-proc" \
+    FM_FAKE_CURSOR_WORKER_PID=$old_pid \
+    FM_FAKE_WINDOW_STATE_FILE="$CASE_DIR/windows.state" \
+    FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" PATH="$FAKEBIN_DIR:$PATH" \
+    "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  expect_code 0 "$status" "initial cursor spawn should record worker"
+  rm -f "$HOME_DIR/state/$id.worker-server"
+
+  ( exec sleep 300 ) &
+  new_pid=$!
+  disown
+  rm -f "$CASE_DIR/enter-started" "$CASE_DIR/launch-typed"
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
+    FM_FAKE_CURSOR_AGENT_ARGS="$FAKEBIN_DIR/cursor-agent --force --trust brief" \
+    FM_PROC_ROOT_OVERRIDE="$CASE_DIR/no-proc" \
+    FM_FAKE_CURSOR_AGENT_PID=4242 FM_FAKE_CURSOR_AGENT_AFTER_ENTER=1 \
+    FM_FAKE_CURSOR_STALE_WORKER_PID=$old_pid FM_FAKE_CURSOR_WORKER_PID=$new_pid \
+    FM_FAKE_CURSOR_WORKER_ARGS='node /opt/cursor/index.js worker-server' \
+    FM_FAKE_CURSOR_WORKER_CWD="$WT_DIR" FM_FAKE_CURSOR_ENTER_STARTED="$CASE_DIR/enter-started" \
+    FM_FAKE_CURSOR_RECORD_FILE="$HOME_DIR/state/$id.worker-server" \
+    FM_FAKE_CURSOR_CAPTURE_LOG="$CASE_DIR/capture.log" \
+    FM_FAKE_CURSOR_LAUNCH_TYPED="$CASE_DIR/launch-typed" \
+    FM_FAKE_WINDOW_STATE_FILE="$CASE_DIR/windows.state" \
+    FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" PATH="$FAKEBIN_DIR:$PATH" \
+    "$SPAWN" "$id" --relaunch 2>&1)
+  status=$?
+  expect_code 0 "$status" "cursor relaunch should replace unrecorded stale worker"$'\n'"$out"
+  if kill -0 "$old_pid" 2>/dev/null; then
+    fail "cursor relaunch left unrecorded prior worker alive"
+  fi
+  wait "$old_parent" 2>/dev/null || true
+  assert_grep "$new_pid " "$HOME_DIR/state/$id.worker-server" \
+    "cursor relaunch captured stale worker without prior record"
+  kill -KILL "$new_pid" 2>/dev/null || true
+  pass "cursor relaunch replaces unrecorded stale worker with launch-bound ownership"
 }
 
 test_cursor_worker_server_absent_record_refuses_spawn() {
@@ -1130,6 +1210,7 @@ test_muse_launch_unsets_cursor_agent
 test_cursor_worker_server_recorded_at_spawn
 test_cursor_worker_server_alias_uses_portable_identity
 test_cursor_relaunch_reaps_prior_worker_before_recording_replacement
+test_cursor_relaunch_with_missing_record_reaps_stale_worker
 test_cursor_detached_worker_is_recorded_from_task_root
 test_cursor_worker_server_absent_record_refuses_spawn
 test_cursor_worker_server_discovery_timeout_causes_rollback
