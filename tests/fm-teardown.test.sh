@@ -2390,6 +2390,39 @@ test_recorded_cursor_worker_server_recycled_pid_not_killed() {
   pass "a worker-server record whose starttime no longer matches is never killed, and the stale record is removed"
 }
 
+test_recorded_cursor_worker_server_unreadable_identity_is_retained() {
+  local case_dir rc pid starttime
+  case_dir=$(make_case cursor-worker-server-identity-unreadable)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  ( exec sleep 300 ) &
+  pid=$!
+  disown
+  sleep 0.3
+  starttime=$(awk '{print $22}' "/proc/$pid/stat" 2>/dev/null)
+  printf '%s %s\n' "$pid" "starttime=$starttime" > "$case_dir/state/task-x1.worker-server"
+  cat > "$case_dir/fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = -p ] && [ "${2:-}" = "${FM_FAKE_CURSOR_WORKER_PID:-}" ] \
+   && [ "${3:-}" = -o ] && [ "${4:-}" = lstart= ]; then
+  exit 1
+fi
+exec "$REAL_PS_FOR_TEST" "$@"
+SH
+  chmod +x "$case_dir/fakebin/ps"
+  rc=0
+  FM_PROC_ROOT_OVERRIDE="$case_dir/no-proc" FM_FAKE_CURSOR_WORKER_PID="$pid" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 1 "$rc" "cursor-worker-server-identity-unreadable: teardown must refuse"
+  kill -0 "$pid" 2>/dev/null || fail "cursor-worker-server-identity-unreadable: stand-in exited unexpectedly"
+  [ -f "$case_dir/state/task-x1.worker-server" ] \
+    || fail "cursor-worker-server-identity-unreadable: ownership record was removed"
+  assert_grep 'identity cannot be read' "$case_dir/stderr" \
+    "cursor-worker-server-identity-unreadable: refusal did not report identity failure"
+  kill -KILL "$pid" 2>/dev/null || true
+  pass "unreadable live cursor worker identity preserves ownership record"
+}
+
 test_recorded_cursor_worker_server_surviving_kill_is_retained() {
   local case_dir rc pid starttime
   case_dir=$(make_case cursor-worker-server-kill-survivor)
@@ -2911,6 +2944,7 @@ test_leaked_tasktmp_process_is_reaped
 test_recorded_cursor_worker_server_is_reaped
 test_recorded_cursor_worker_server_lstart_identity_is_reaped
 test_recorded_cursor_worker_server_recycled_pid_not_killed
+test_recorded_cursor_worker_server_unreadable_identity_is_retained
 test_recorded_cursor_worker_server_surviving_kill_is_retained
 test_recorded_cursor_worker_server_is_reaped_for_secondmate
 test_cursor_worker_server_record_missing_falls_back_to_cwd_reaper

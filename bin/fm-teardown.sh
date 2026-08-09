@@ -1426,25 +1426,47 @@ reap_cursor_worker_server() {  # <state_dir> <id>
   read -r pid identity < "$ws_file" 2>/dev/null || { rm -f "$ws_file" 2>/dev/null || true; return 0; }
   case "$pid" in ''|*[!0-9]*) rm -f "$ws_file" 2>/dev/null || true; return 0 ;; esac
   [ -n "$identity" ] || { rm -f "$ws_file" 2>/dev/null || true; return 0; }
-  if ! current=$(fm_process_identity "$pid") \
-     || [ "$current" != "$identity" ]; then
-    # The pid was recycled or is gone; nothing to reap. Remove the stale
-    # record so a later teardown does not re-consult it.
+  if ! kill -0 "$pid" 2>/dev/null; then
+    rm -f "$ws_file" 2>/dev/null || true
+    return 0
+  fi
+  if ! current=$(fm_process_identity "$pid"); then
+    echo "REFUSED: recorded cursor worker-server for $id still exists at $pid but its identity cannot be read; preserving $ws_file for retry." >&2
+    return 1
+  fi
+  if [ "$current" != "$identity" ]; then
     rm -f "$ws_file" 2>/dev/null || true
     return 0
   fi
   echo "teardown: reaping recorded cursor worker-server for $id: $pid" >&2
   kill -TERM "$pid" 2>/dev/null || true
   sleep 1
-  if kill -0 "$pid" 2>/dev/null \
-     && fm_process_identity_matches "$pid" "$identity"; then
-    echo "teardown: force-killing recorded cursor worker-server for $id: $pid" >&2
-    kill -KILL "$pid" 2>/dev/null || true
-    for i in 1 2 3 4 5 6 7 8 9 10; do
-      fm_process_identity_matches "$pid" "$identity" || break
-      sleep 0.1
-    done
-    if fm_process_identity_matches "$pid" "$identity"; then
+  if ! kill -0 "$pid" 2>/dev/null; then
+    rm -f "$ws_file" 2>/dev/null || true
+    return 0
+  fi
+  if ! current=$(fm_process_identity "$pid"); then
+    echo "REFUSED: recorded cursor worker-server for $id still exists at $pid after TERM but its identity cannot be read; preserving $ws_file for retry." >&2
+    return 1
+  fi
+  if [ "$current" != "$identity" ]; then
+    rm -f "$ws_file" 2>/dev/null || true
+    return 0
+  fi
+  echo "teardown: force-killing recorded cursor worker-server for $id: $pid" >&2
+  kill -KILL "$pid" 2>/dev/null || true
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    kill -0 "$pid" 2>/dev/null || break
+    current=$(fm_process_identity "$pid" 2>/dev/null) || current=
+    [ -z "$current" ] || [ "$current" = "$identity" ] || break
+    sleep 0.1
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    if ! current=$(fm_process_identity "$pid"); then
+      echo "REFUSED: recorded cursor worker-server for $id still exists at $pid after TERM and KILL but its identity cannot be read; preserving $ws_file for retry." >&2
+      return 1
+    fi
+    if [ "$current" = "$identity" ]; then
       echo "REFUSED: recorded cursor worker-server for $id still matches $pid after TERM and KILL; preserving $ws_file for retry." >&2
       return 1
     fi
