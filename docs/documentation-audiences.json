@@ -135,6 +135,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/decision-surface/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/diagnostic-reasoning/SKILL.md",
       "audience": "agent-runtime"
     },
@@ -357,6 +361,10 @@
     {
       "path": "docs/turnend-guard.md",
       "audience": "operator-current"
+    },
+    {
+      "path": "docs/verification/decision-surface.md",
+      "audience": "maintainer-verification"
     },
     {
       "path": "docs/verification/dispatch-auth.md",
