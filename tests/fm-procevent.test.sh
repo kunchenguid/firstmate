@@ -15,6 +15,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$ROOT/bin/fm-timeout-lib.sh"
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 TMP_ROOT=$(fm_test_tmproot fm-procevent-tests)
@@ -411,6 +413,70 @@ assert_not_contains "$out" "retired:" "an adapter with no terminal verdict never
 assert_present "$HOPEN/state/procevent/open-src.source" "a source with no terminal verdict stays armed"
 pe_adapter "$HOPEN" retire open-src >/dev/null
 pass "a source stays armed unless its own adapter classifies the result terminal"
+
+STALL_ADAPTER_ROOT="$TMP_ROOT/stall-adapter-root"
+mkdir -p "$STALL_ADAPTER_ROOT/bin"
+cat > "$STALL_ADAPTER_ROOT/bin/fm-procevent-lavish.sh" <<'SH'
+#!/usr/bin/tail -f
+case "${1-}" in
+  terminal) [ -f "${2-}" ] && exit 0 || exit 1 ;;
+  *) exit 1 ;;
+esac
+SH
+cat > "$STALL_ADAPTER_ROOT/bin/fm-procevent-remote-reply.sh" <<'SH'
+#!/usr/bin/tail -f
+case "${1-}" in
+  terminal) exit 1 ;;
+  autohandle)
+    printf '%s %s\n' "$2" "$3" >> "$FM_HOME/state/autohandled"
+    /bin/bash "$FM_PROCEVENT_UNDER_TEST" handled "$2" "$3"
+    ;;
+  *) exit 1 ;;
+esac
+SH
+chmod +x "$STALL_ADAPTER_ROOT/bin/fm-procevent-lavish.sh" \
+  "$STALL_ADAPTER_ROOT/bin/fm-procevent-remote-reply.sh"
+
+direct_adapter_status=0
+fm_run_timed 1 "$STALL_ADAPTER_ROOT/bin/fm-procevent-lavish.sh" terminal /dev/null \
+  >/dev/null 2>&1 || direct_adapter_status=$?
+[ "$direct_adapter_status" = 124 ] \
+  || fail "the Lavish adapter fixture did not reproduce a stalled direct launch"
+direct_adapter_status=0
+fm_run_timed 1 "$STALL_ADAPTER_ROOT/bin/fm-procevent-remote-reply.sh" autohandle stalled 1 /dev/null \
+  >/dev/null 2>&1 || direct_adapter_status=$?
+[ "$direct_adapter_status" = 124 ] \
+  || fail "the remote-reply adapter fixture did not reproduce a stalled direct launch"
+
+HSTALL_LAVISH="$TMP_ROOT/hstall-lavish"; new_home "$HSTALL_LAVISH"
+PE_TRACKED+=("$HSTALL_LAVISH|stalled-lavish")
+FM_ROOT_OVERRIDE="$STALL_ADAPTER_ROOT" FM_HOME="$HSTALL_LAVISH" \
+  "$ROOT/bin/fm-procevent.sh" register lavish stalled-lavish -- /bin/echo "lavish payload" >/dev/null
+lavish_status=0
+lavish_out="$TMP_ROOT/stalled-lavish.out"
+fm_run_timed 10 env FM_ROOT_OVERRIDE="$STALL_ADAPTER_ROOT" FM_HOME="$HSTALL_LAVISH" \
+  /bin/bash "$ROOT/bin/fm-procevent.sh" start stalled-lavish >"$lavish_out" 2>&1 \
+  || lavish_status=$?
+[ "$lavish_status" = 0 ] || fail "Bash-routed Lavish terminal handling stalled: $(cat "$lavish_out")"
+assert_contains "$(cat "$lavish_out")" "retired: stalled-lavish" \
+  "Bash-routed Lavish terminal handling did not retire the source"
+
+HSTALL_REMOTE="$TMP_ROOT/hstall-remote"; new_home "$HSTALL_REMOTE"
+PE_TRACKED+=("$HSTALL_REMOTE|stalled-remote")
+FM_ROOT_OVERRIDE="$STALL_ADAPTER_ROOT" FM_HOME="$HSTALL_REMOTE" \
+  "$ROOT/bin/fm-procevent.sh" register remote-reply stalled-remote -- /bin/echo "remote payload" >/dev/null
+remote_status=0
+remote_out="$TMP_ROOT/stalled-remote.out"
+fm_run_timed 10 env FM_ROOT_OVERRIDE="$STALL_ADAPTER_ROOT" FM_HOME="$HSTALL_REMOTE" \
+  FM_PROCEVENT_UNDER_TEST="$ROOT/bin/fm-procevent.sh" \
+  /bin/bash "$ROOT/bin/fm-procevent.sh" start stalled-remote >"$remote_out" 2>&1 \
+  || remote_status=$?
+[ "$remote_status" = 0 ] || fail "Bash-routed remote-reply handling stalled: $(cat "$remote_out")"
+assert_contains "$(cat "$remote_out")" "autohandled: stalled-remote" \
+  "Bash-routed remote-reply autohandling did not complete"
+assert_grep 'stalled-remote 1' "$HSTALL_REMOTE/state/autohandled" \
+  "remote-reply autohandling did not apply the captured result"
+pass "fixed adapter seams bypass stalled shebangs while registered child argv stays direct"
 
 HREPLACE="$TMP_ROOT/hreplace"; new_home "$HREPLACE"
 PE_TRACKED+=("$HREPLACE|replace-src")

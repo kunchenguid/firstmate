@@ -102,7 +102,7 @@ adapter_result_is_terminal() {  # <adapter> <result-file>
   local script
   script=$(adapter_script "$1")
   [ -f "$script" ] && [ ! -L "$script" ] || return 1
-  "$script" terminal "$2" >/dev/null 2>&1
+  /bin/bash "$script" terminal "$2" >/dev/null 2>&1
 }
 
 source_file()  { printf '%s/%s.source\n' "$REG" "$1"; }
@@ -126,7 +126,7 @@ adapter_autohandle() {  # <adapter> <source-id> <result-file>
   # such command is a quiet no-op rather than runner noise. This runner's own
   # one-line outcome is the interface; an adapter that failed keeps its result
   # announced, and the handler's own call reproduces the diagnostics in full.
-  "$script" autohandle "$id" "$seq" "$result" >/dev/null 2>&1
+  /bin/bash "$script" autohandle "$id" "$seq" "$result" >/dev/null 2>&1
 }
 
 read_adapter() {  # <source-id>
