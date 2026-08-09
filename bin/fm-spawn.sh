@@ -1125,7 +1125,6 @@ launch_template() {
   esac
 }
 
-TEMPLATE_LAUNCH=0
 case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
     LAUNCH=$ARG3
@@ -1155,12 +1154,10 @@ case "$ARG3" in
       harness_src='config/crew-harness'
     fi
     LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: no launch template for harness '$HARNESS' (from $harness_src or detection); pass a raw launch command to use an unverified adapter" >&2; exit 1; }
-    TEMPLATE_LAUNCH=1
     ;;
   *)
     HARNESS=$ARG3
     LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: unknown harness '$HARNESS'; pass a raw launch command to use an unverified adapter" >&2; exit 1; }
-    TEMPLATE_LAUNCH=1
     ;;
 esac
 
@@ -1173,13 +1170,17 @@ case "$HARNESS" in
   pi|pi-signed) PI_MARKER="FM_PI_HARNESS=$HARNESS " ;;
   *) PI_MARKER= ;;
 esac
-# OMPCODE is OMP's own positive identity marker, so every other verified
-# template strips an inherited one instead of letting its worker self-identify
-# as OMP. A raw launch command stays the operator's verbatim command line.
-if [ "$TEMPLATE_LAUNCH" -eq 1 ] && [ "$HARNESS" != omp ]; then
-  LAUNCH="env -u OMPCODE $PI_MARKER$LAUNCH"
-else
+# OMPCODE is OMP's own positive identity marker and bin/fm-harness.sh detect_own
+# reads it ahead of every other marker, so a worker that is not OMP must not
+# inherit one from the session or multiplexer daemon that launched it - it would
+# report a harness its own task meta contradicts. This binds to the RESOLVED
+# harness, not to the launch kind: a raw escape-hatch command names its adapter
+# too, and leaving that one pane unstripped is exactly the case that breaks the
+# FM_PI_HARNESS marker set above.
+if [ "$HARNESS" = omp ]; then
   LAUNCH="$PI_MARKER$LAUNCH"
+else
+  LAUNCH="env -u OMPCODE $PI_MARKER$LAUNCH"
 fi
 
 # muse is verified as a CREWMATE/SCOUT adapter only. A secondmate is a firstmate

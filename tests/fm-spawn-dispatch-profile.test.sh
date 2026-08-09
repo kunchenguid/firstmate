@@ -362,7 +362,7 @@ test_active_dispatch_profile_allows_raw_launch_command() {
   assert_contains "$out" "spawned $id harness=custom-agent" "spawn did not report raw command harness"
   assert_meta_profile "$HOME_DIR/state/$id.meta" custom-agent default default
   launch=$(cat "$LAUNCH_LOG")
-  [ "$launch" = "custom-agent --flag" ] || fail "raw launch command changed"$'\n'"actual: $launch"
+  [ "$launch" = "env -u OMPCODE custom-agent --flag" ] || fail "raw launch command changed"$'\n'"actual: $launch"
   pass "active crew-dispatch profile allows the raw launch-command escape hatch"
 }
 
@@ -544,14 +544,22 @@ test_pi_signed_threads_shared_pi_profile_and_preserves_identity() {
 }
 
 # A raw launch command still resolves a harness identity, and that identity is
-# what the worker must report back. Without FM_PI_HARNESS a raw `pi-signed ...`
-# worker sees only PI_CODING_AGENT and calls itself plain pi, contradicting the
-# harness recorded in its own meta.
-test_raw_pi_signed_launch_keeps_the_self_identification_marker() {
-  local rec id out status launch own
+# what the worker must report back. The composed command line is therefore RUN
+# here, in a pane environment that reproduces a spawn from an OMP primary: OMP's
+# own OMPCODE marker is inherited, and detect_own reads it ahead of every other
+# marker. The invariant under test is worker self-identity == recorded harness,
+# so a leaked marker and a missing FM_PI_HARNESS both have to fail this.
+test_raw_launch_worker_identity_matches_its_recorded_harness() {
+  local rec id out status launch probe
   id=profile-raw-pi-signed-z8e
   rec=$(make_spawn_case profile-raw-pi-signed claude "$id")
   read_case_record "$rec"
+  probe="$CASE_DIR/raw-harness-probe"
+  cat > "$FAKEBIN_DIR/pi-signed" <<SH
+#!/usr/bin/env bash
+"$ROOT/bin/fm-harness.sh" > "$probe"
+SH
+  chmod +x "$FAKEBIN_DIR/pi-signed"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
     "$id" "$PROJ_DIR" "pi-signed --model openai-codex/gpt-5.6-sol")
@@ -559,16 +567,14 @@ test_raw_pi_signed_launch_keeps_the_self_identification_marker() {
   expect_code 0 "$status" "a raw pi-signed launch command should spawn"
   assert_contains "$out" "spawned $id harness=pi-signed" "raw pi-signed launch did not record its harness identity"
   assert_grep "harness=pi-signed" "$HOME_DIR/state/$id.meta" "raw pi-signed launch meta lost harness=pi-signed"
-  launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "FM_PI_HARNESS=pi-signed pi-signed --model openai-codex/gpt-5.6-sol" \
-    "raw pi-signed launch dropped the marker its worker self-identifies with"
-  assert_not_contains "$launch" "env -u OMPCODE" \
-    "raw launch command must stay the operator's verbatim command line"
 
-  own=$(env -u CLAUDECODE -u GROK_AGENT -u OMPCODE \
-    PI_CODING_AGENT=true FM_PI_HARNESS=pi-signed "$ROOT/bin/fm-harness.sh")
-  [ "$own" = pi-signed ] || fail "a worker launched with that marker self-identified as '$own', not pi-signed"
-  pass "a raw pi-signed launch keeps the identity marker its worker reports back"
+  launch=$(cat "$LAUNCH_LOG")
+  env -u CLAUDECODE -u GROK_AGENT OMPCODE=1 PI_CODING_AGENT=true \
+    PATH="$FAKEBIN_DIR:$PATH" bash -c "$launch"
+  [ -f "$probe" ] || fail "the raw launch command did not run its harness probe"
+  [ "$(cat "$probe")" = pi-signed ] \
+    || fail "a raw worker spawned under an inherited OMPCODE self-identified as '$(cat "$probe")', not pi-signed"
+  pass "a raw launch worker self-identifies as its recorded harness even under an inherited OMP marker"
 }
 
 test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata() {
@@ -721,7 +727,7 @@ test_grok_omits_invalid_xhigh_reasoning_effort
 test_opencode_threads_model_and_ignores_effort_axis
 test_pi_threads_model_and_max_effort
 test_pi_signed_threads_shared_pi_profile_and_preserves_identity
-test_raw_pi_signed_launch_keeps_the_self_identification_marker
+test_raw_launch_worker_identity_matches_its_recorded_harness
 test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata
 test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity
 test_batch_forwards_shared_profile_flags
