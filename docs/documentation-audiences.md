@@ -20,7 +20,7 @@ Before removing that evidence from a tracked page, distill every unique current 
 Run the structural check directly with:
 
 ```sh
-bin/fm-doc-audience-check.sh
+/bin/bash bin/fm-doc-audience-check.sh
 ```
 
 The check intentionally does not lint dates, versions, commands, paths, incident language, or transcript-like prose.

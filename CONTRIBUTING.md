@@ -49,7 +49,7 @@ See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/star
   It pins one exact shellcheck version and refuses to run under any other; print it with `/bin/bash bin/fm-lint.sh --required-version` and install that build locally.
 - Harness-adapter ownership spans detection in `bin/fm-harness.sh`, launch and hook mechanics in `bin/fm-spawn.sh`, semantic busy sources and trust gates in `bin/fm-busy-lib.sh`, delivery-only rendered guards in `bin/fm-tmux-lib.sh`, cleanup in `bin/fm-teardown.sh`, and facts in `.agents/skills/harness-adapters/SKILL.md`; the `firstmate-coding-guidelines` skill owns the validation policy for checks that depend on those harnesses.
 - Changes to runtime session backends (`bin/fm-backend.sh`, `bin/backends/`, and the scripts that dispatch through them) keep current setup and limits in the relevant backend guide and active empirical evidence in [`docs/verification/runtime-backends.md`](docs/verification/runtime-backends.md).
-- [`docs/documentation-audiences.md`](docs/documentation-audiences.md) and its machine-consumed inventory own prose classification; run `bin/fm-doc-audience-check.sh` after documentation changes.
+- [`docs/documentation-audiences.md`](docs/documentation-audiences.md) and its machine-consumed inventory own prose classification; run `/bin/bash bin/fm-doc-audience-check.sh` after documentation changes.
 - In Markdown, put each full sentence on its own line.
 - `README.md` stays a concise overview plus pointers: it never carries a wall of inline detail.
   Route detail to the most specific `docs/` file (architecture, configuration, or a backend guide) and link to it instead.
@@ -64,7 +64,7 @@ A crewmate picking up such a brief should load the skill even if the brief preda
 When supervising live crewmates, keep firstmate's own long validation or build commands in the background so watcher wakes can still be handled.
 Crewmate validation follows the installed no-mistakes version's SKILL.md and live `axi` help instead of duplicating gate mechanics in firstmate docs.
 Firstmate's wrapper still matters: crewmates route every `ask-user` finding to firstmate, which applies the authority contract in `AGENTS.md`, and crewmates avoid `--yes` because it would bypass that check and any required captain escalation.
-Local `.no-mistakes/` state and test evidence stay out of this repo; `.no-mistakes.yaml` keeps evidence in a temp directory and pins the gate's lint command to `bin/fm-lint.sh`, matching the Linux CI lint job.
+Local `.no-mistakes/` state and test evidence stay out of this repo; `.no-mistakes.yaml` keeps evidence in a temp directory and pins the gate's lint command to `/bin/bash bin/fm-lint.sh`, matching the Linux CI lint job.
 Local no-mistakes Test is intent-targeted and must not re-run every `tests/*.test.sh`; `.github/workflows/ci.yml` owns the broad behavior suite plus platform-specific compatibility lanes.
 That is firstmate-specific; do not commit `.no-mistakes/evidence/` here even when another no-mistakes-managed target project keeps committed PR evidence.
 

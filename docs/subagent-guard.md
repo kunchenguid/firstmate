@@ -358,9 +358,9 @@ It covers the tracked Claude settings boundary that forbids a `permissions` key;
 Run:
 
 ```sh
-bash -n bin/fm-subagent-pretool-check.sh
-bin/fm-lint.sh
-tests/fm-subagent-pretool-check.test.sh
+/bin/bash -n bin/fm-subagent-pretool-check.sh
+/bin/bash bin/fm-lint.sh
+/bin/bash tests/fm-subagent-pretool-check.test.sh
 ```
 
 ## Known residual gap
