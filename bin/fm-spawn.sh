@@ -2253,6 +2253,7 @@ EOF
 spawn_rollback_task_state() {  # <detail> [preserve-endpoint]
   local detail=$1 preserve_endpoint=${2:-0} endpoint_ready=0 endpoint_state composer_state
   local exit_verdict i old_target new_target new_tab new_pane out journal meta_lock meta_tmp
+  local recovery_name recovery_target backup_name backup_target journal_updated=0
   echo "failed: $detail" >> "$STATE/$ID.status" 2>/dev/null || true
   echo "error: $detail" >&2
 
@@ -2287,11 +2288,39 @@ spawn_rollback_task_state() {  # <detail> [preserve-endpoint]
     if [ "$endpoint_ready" -ne 1 ]; then
       case "$BACKEND" in
         tmux)
-          fm_backend_kill "$BACKEND" "$T" 2>/dev/null || true
-          fm_backend_endpoint_confirmed_gone "$BACKEND" "$T" \
-            && fm_backend_tmux_create_task "$SES" "$W" "$WT" >/dev/null \
-            && [ "$(fm_backend_agent_state "$BACKEND" "$T")" = dead ] \
-            || return 1
+          recovery_name="$W.recovery.${BASHPID:-$$}"
+          recovery_target="$SES:$recovery_name"
+          backup_name="$W.rollback.${BASHPID:-$$}"
+          backup_target="$SES:$backup_name"
+          i=0
+          while [ "$i" -lt 3 ]; do
+            if fm_backend_tmux_create_task "$SES" "$recovery_name" "$WT" >/dev/null \
+               && [ "$(fm_backend_agent_state "$BACKEND" "$recovery_target")" = dead ]; then
+              break
+            fi
+            fm_backend_kill "$BACKEND" "$recovery_target" 2>/dev/null || true
+            i=$((i + 1))
+          done
+          if [ "$i" -ge 3 ]; then
+            return 1
+          fi
+          if ! tmux rename-window -t "$T" "$backup_name"; then
+            fm_backend_kill "$BACKEND" "$recovery_target" 2>/dev/null || true
+            return 1
+          fi
+          if ! tmux rename-window -t "$recovery_target" "$W"; then
+            tmux rename-window -t "$backup_target" "$W" 2>/dev/null || true
+            fm_backend_kill "$BACKEND" "$recovery_target" 2>/dev/null || true
+            return 1
+          fi
+          if [ "$(fm_backend_agent_state "$BACKEND" "$T")" != dead ]; then
+            tmux rename-window -t "$T" "$recovery_name" 2>/dev/null || true
+            tmux rename-window -t "$backup_target" "$W" 2>/dev/null || true
+            fm_backend_kill "$BACKEND" "$recovery_target" 2>/dev/null || true
+            return 1
+          fi
+          fm_backend_kill "$BACKEND" "$backup_target" 2>/dev/null || true
+          fm_backend_endpoint_confirmed_gone "$BACKEND" "$backup_target" || return 1
           ;;
         herdr)
           old_target=$T
@@ -2303,15 +2332,24 @@ spawn_rollback_task_state() {  # <detail> [preserve-endpoint]
           [ -n "$new_tab" ] && [ -n "$new_pane" ] || return 1
           new_target="$HERDR_SES:$new_pane"
           [ "$(fm_backend_agent_state "$BACKEND" "$new_target")" = dead ] || return 1
-          fm_backend_kill "$BACKEND" "$old_target" 2>/dev/null || true
-          fm_backend_endpoint_confirmed_gone "$BACKEND" "$old_target" || return 1
           journal=$(fm_backend_herdr_projection_journal_path "$STATE" "$ID" 2>/dev/null || true)
           if [ -n "$journal" ] && [ -e "$journal" ]; then
-            fm_backend_herdr_projection_journal_replace_endpoint \
-              "$journal" "$ID" "$HERDR_TAB_ID" "$HERDR_PANE_ID" "$new_tab" "$new_pane" \
-              || return 1
+            if ! fm_backend_herdr_projection_journal_replace_endpoint \
+              "$journal" "$ID" "$HERDR_TAB_ID" "$HERDR_PANE_ID" "$new_tab" "$new_pane"; then
+              fm_backend_kill "$BACKEND" "$new_target" 2>/dev/null || true
+              return 1
+            fi
+            journal_updated=1
           fi
-          meta_lock=$(fm_meta_lock_path "$STATE/$ID.meta") || return 1
+          if ! meta_lock=$(fm_meta_lock_path "$STATE/$ID.meta"); then
+            if [ "$journal_updated" -eq 1 ]; then
+              fm_backend_herdr_projection_journal_replace_endpoint \
+                "$journal" "$ID" "$new_tab" "$new_pane" "$HERDR_TAB_ID" "$HERDR_PANE_ID" \
+                || true
+            fi
+            fm_backend_kill "$BACKEND" "$new_target" 2>/dev/null || true
+            return 1
+          fi
           fm_lock_acquire_wait "$meta_lock"
           meta_tmp="$STATE/.$ID.meta.endpoint.${BASHPID:-$$}"
           if ! awk -F= '$1 != "window" && $1 != "herdr_tab_id" && $1 != "herdr_pane_id"' \
@@ -2321,13 +2359,21 @@ spawn_rollback_task_state() {  # <detail> [preserve-endpoint]
              || ! mv -f "$meta_tmp" "$STATE/$ID.meta"; then
             rm -f "$meta_tmp" 2>/dev/null || true
             fm_lock_release "$meta_lock" || true
+            if [ "$journal_updated" -eq 1 ]; then
+              fm_backend_herdr_projection_journal_replace_endpoint \
+                "$journal" "$ID" "$new_tab" "$new_pane" "$HERDR_TAB_ID" "$HERDR_PANE_ID" \
+                || true
+            fi
+            fm_backend_kill "$BACKEND" "$new_target" 2>/dev/null || true
             return 1
           fi
-          fm_lock_release "$meta_lock" || return 1
+          fm_lock_release "$meta_lock" || true
           T=$new_target
           WT_TARGET=$new_target
           HERDR_TAB_ID=$new_tab
           HERDR_PANE_ID=$new_pane
+          fm_backend_kill "$BACKEND" "$old_target" 2>/dev/null || true
+          fm_backend_endpoint_confirmed_gone "$BACKEND" "$old_target" || return 1
           ;;
         *) return 1 ;;
       esac
