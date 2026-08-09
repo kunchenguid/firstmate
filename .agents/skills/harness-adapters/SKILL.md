@@ -421,6 +421,10 @@ Muse Code is a CREWMATE and SCOUT adapter only.
 | Effort | `--reasoning-effort`, default `high`; see the launch-profile table above for the mapping. |
 | Resume | `muse resume --last` or `muse resume <session-uuid>`; bare `muse resume` opens a picker. |
 
+That bordered-box composer is a DESCRIPTION, and it disagrees with the border-free row CAPTURED in `docs/verification/muse.md` "Composer rendering"; task `fm-muse-herdr-bare-glyph` settles which is true against real muse.
+It decides which shape in `bin/fm-composer-lib.sh`'s catalogue an idle muse composer actually exercises - `bordered` or `bare` - and therefore which one a future shape change may break without any test noticing.
+The per-adapter divergence this used to cause is gone: every backend now reaches the same shared classifier, which recognises `⟩` on both shapes, so muse no longer reads `empty` on one backend and `unknown` on another.
+
 ### Credentials are a spawn preflight, not a screen check
 
 muse reads `META_API_KEY` (which always wins) or a stored credential at `${XDG_CONFIG_HOME:-$HOME/.config}/muse/auth.json`, written by `muse login` (an OIDC device-code flow) or `muse auth set --api-key-stdin`.

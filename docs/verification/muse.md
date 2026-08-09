@@ -154,6 +154,9 @@ Captured with `tmux capture-pane -p -e`:
 Prompt glyph `⟩` (U+27E9) at luminance ~149.9 against the 128 default ghost threshold; typed text at ~209.8.
 After a single Escape the interrupted prompt is restored into the composer at the same bright ~209.8, and `C-u` clears it.
 
+The rows above carry no box-drawing border, while `.agents/skills/harness-adapters/SKILL.md`'s muse `Composer` row describes a bordered box; this page holds an observed capture and that row holds a claim, so they are not equal evidence.
+That does not settle it, because these rows do not record when in the session they were taken and a capture made at launch would not show what an IDLE composer draws; task `fm-muse-herdr-bare-glyph` resolves it against real muse, and the SKILL.md row states which shape in the shared catalogue it decides muse exercises.
+
 ## The credentialed multi-step smoke (verified 2026-08-06)
 
 This was the one item deferred until a `META_API_KEY` was available, because it is what decides whether a settled log may classify `idle`.
