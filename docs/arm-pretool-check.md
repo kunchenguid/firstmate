@@ -24,7 +24,7 @@ It tokenizes the bytes and classifies lexical execution positions only.
 
 - Stdin JSON at `.tool_input.command` for Claude and Codex.
 - Stdin JSON at `.toolInput.command` for Grok.
-- `--command <exact string>` for OpenCode, Pi, and pi-signed.
+- `--command <exact string>` for OpenCode, Pi, pi-signed, and OMP.
 - `--background` as a compatibility-only field that never changes the decision.
 - `--claude` to preserve Claude's stderr-only deny requirement.
 
@@ -151,7 +151,7 @@ Prose may improve without changing adapter behavior.
 - `--claude` suppresses stdout completely because Claude ignores a PreToolUse deny when stdout is nonempty.
 - Codex blocks on exit 2 and displays stderr.
 - OpenCode throws only when the checker exits 2.
-- Pi and pi-signed return `{block: true}` only when the checker exits 2.
+- Pi, pi-signed, and OMP return `{block: true}` only when the checker exits 2.
 
 ## Harness wiring
 
@@ -162,6 +162,7 @@ Prose may improve without changing adapter behavior.
 | Grok | `.toolInput.command` | `.grok/hooks/fm-primary-pretool-check.json` forwards stdin and Grok consumes the stdout `decision=deny` object. |
 | OpenCode | `output.args.command` | `.opencode/plugins/fm-primary-pretool-check.js` passes one `--command` argument and throws only for exit 2. |
 | Pi / pi-signed | `event.input.command` | `.pi/extensions/fm-primary-turnend-guard.ts` passes one `--command` argument and returns `{block: true}` only for exit 2. |
+| OMP | `event.input.command` | `.omp/extensions/fm-primary-turnend-guard.ts` reuses the Pi-family core, passes one `--command` argument, and returns `{block: true}` only for exit 2. |
 
 Grok project hooks require folder trust.
 Every shell variable reference in a Grok hook command must carry an inline default such as `${GROK_WORKSPACE_ROOT:-}` because Grok expands the raw hook command before `bash -lc` runs it.
@@ -203,6 +204,7 @@ codex exec --dangerously-bypass-hook-trust --dangerously-bypass-approvals-and-sa
 GROK_HOME="$SCRATCH_GROK_HOME" RUST_LOG=xai_grok_hooks=debug GROK_LOG_FILE="$SCRATCH_LOG" grok --trust -p "$PROMPT" --permission-mode bypassPermissions --output-format plain
 OPENCODE_CONFIG_CONTENT='{"permission":{"*":"allow"}}' opencode run --print-logs --log-level INFO "$PROMPT"
 pi -p -e .pi/extensions/fm-primary-turnend-guard.ts --no-context-files --no-session "$PROMPT"
+OMPCODE=1 omp -p -e .omp/extensions/fm-primary-turnend-guard.ts --no-context-files --no-session --no-tools "$PROMPT"
 ```
 
 Observed output for the four allowed calls was `UNRELATED_EXECUTED`, a successful read-only `pgrep`, `CHECKPOINT_EXECUTED`, and two `TMUX_ARGS:` lines that preserved the watcher text as data.

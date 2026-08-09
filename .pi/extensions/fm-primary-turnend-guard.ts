@@ -18,8 +18,19 @@ const extensionDir = dirname(extensionFile);
 const root = resolve(extensionDir, "../..");
 const fmHome = process.env.FM_HOME || process.env.FM_ROOT_OVERRIDE || root;
 const state = process.env.FM_STATE_OVERRIDE || `${fmHome}/state`;
-const marker = `${state}/.pi-turnend-extension-loaded`;
-const extensionVersion = `sha256:${createHash("sha256").update(readFileSync(extensionFile)).digest("hex")}`;
+type PrimaryHarness = "pi" | "omp";
+let primaryHarness: PrimaryHarness = "pi";
+let marker = `${state}/.pi-turnend-extension-loaded`;
+let extensionVersion = `sha256:${createHash("sha256").update(readFileSync(extensionFile)).digest("hex")}`;
+
+function selectPrimaryHarness(harness: PrimaryHarness): void {
+  primaryHarness = harness;
+  marker = `${state}/.${harness}-turnend-extension-loaded`;
+  const identityFile = harness === "omp"
+    ? `${root}/.omp/extensions/fm-primary-turnend-guard.ts`
+    : extensionFile;
+  extensionVersion = `sha256:${createHash("sha256").update(readFileSync(identityFile)).digest("hex")}`;
+}
 
 function parentPid(pid: string): string {
   const result = spawnSync("ps", ["-o", "ppid=", "-p", pid], { encoding: "utf8" });
@@ -58,16 +69,15 @@ function markLoaded(): void {
   writeFileSync(marker, `${extensionVersion}\n${process.pid}\n`);
 }
 
-// Pi's session_start reasons are startup | reload | new | resume | fork, and a
-// separate session_compact event fires after a compaction. "new" is Pi's /clear
-// (a fresh session in the SAME process, so the fleet lock is still ours), while
-// reload, resume, and fork all keep prior context. bin/fm-sessionstart-run.sh
-// owns what each source means; this maps Pi's vocabulary onto its --source
-// names and injects whatever it prints.
+// Pi's session_start and OMP's session_switch reasons map onto the sources
+// owned by bin/fm-sessionstart-run.sh. "new" is the same-process clear path,
+// while reload, resume, and fork keep prior context.
 const sessionstartDeliveryBytes = 512 * 1024;
-const sessionstartTruncatedMarker =
-  "\n\nPI SESSION-START DELIVERY TRUNCATED - the digest exceeded 512 KiB. " +
-  "Treat omitted context as unread and inspect the named files directly before acting on it.";
+function sessionstartTruncatedMarker(): string {
+  return `\n\n${primaryHarness === "omp" ? "OMP" : "PI"} SESSION-START DELIVERY TRUNCATED - ` +
+    "the digest exceeded 512 KiB. " +
+    "Treat omitted context as unread and inspect the named files directly before acting on it.";
+}
 
 function runSessionstartHook(source: string): Promise<string> {
   return new Promise((resolveResult) => {
@@ -95,7 +105,7 @@ function runSessionstartHook(source: string): Promise<string> {
         return;
       }
       const raw = Buffer.concat(chunks).toString("utf8").trim();
-      resolveResult(truncated ? `${raw}${sessionstartTruncatedMarker}` : raw);
+      resolveResult(truncated ? `${raw}${sessionstartTruncatedMarker()}` : raw);
     });
   });
 }
@@ -166,17 +176,45 @@ function runCdCheck(command: string): Promise<{ code: number; stderr: string }> 
   return runChecker("fm-cd-pretool-check.sh", command);
 }
 
-export default function (pi: ExtensionAPI) {
+function sessionReason(event: unknown): string {
+  if (!event || typeof event !== "object" || !("reason" in event)) return "";
+  return typeof event.reason === "string" ? event.reason : "";
+}
+
+function sessionSource(reason: string): string | undefined {
+  switch (reason) {
+    case "startup": return "startup";
+    case "new": return "clear";
+    case "resume":
+    case "handoff": return "resume";
+    case "fork": return "fork";
+    default: return undefined;
+  }
+}
+
+type CrossHarnessEvent = "session_switch" | "agent_end";
+type CrossHarnessOn = (event: CrossHarnessEvent, handler: (event: unknown) => unknown) => void;
+
+function registerPrimaryTurnendGuard(pi: ExtensionAPI) {
   pi.on?.("session_start", async (event) => {
-    const reason = String((event as { reason?: unknown }).reason ?? "");
-    const source = { startup: "startup", new: "clear", resume: "resume", fork: "fork" }[reason];
+    const source = primaryHarness === "omp"
+      ? "startup"
+      : sessionSource(sessionReason(event));
     markLoaded();
     if (!source) return;
     await injectSessionstart(pi, source);
   });
 
-  // Pi's compaction equivalent. The digest is what a compacted session has just
-  // lost, so re-emitting it here is the point rather than a side effect.
+  if (primaryHarness === "omp") {
+    // OMP's API is a strict event superset of the legacy Pi ExtensionAPI type.
+    const onCrossHarnessEvent = pi.on as unknown as CrossHarnessOn;
+    onCrossHarnessEvent.call(pi, "session_switch", async (event) => {
+      const source = sessionSource(sessionReason(event));
+      if (source) await injectSessionstart(pi, source);
+    });
+  }
+
+  // Pi and OMP share session_compact as the post-compaction notification.
   pi.on?.("session_compact", async () => {
     await injectSessionstart(pi, "compact");
   });
@@ -194,7 +232,7 @@ export default function (pi: ExtensionAPI) {
     return { block: true, reason: result.stderr.trim() || "denied by the watcher-arm PreToolUse seatbelt" };
   });
 
-  pi.on("agent_settled", async () => {
+  const runSettledGuard = async () => {
     if (guardFollowupActive) {
       guardFollowupActive = false;
       return;
@@ -215,7 +253,21 @@ export default function (pi: ExtensionAPI) {
     } catch {
       guardFollowupActive = false;
     }
-  });
+  };
+
+  if (primaryHarness === "omp") {
+    // OMP settles the main loop with agent_end; Pi uses agent_settled.
+    const onCrossHarnessEvent = pi.on as unknown as CrossHarnessOn;
+    onCrossHarnessEvent.call(pi, "agent_end", runSettledGuard);
+  } else {
+    pi.on("agent_settled", runSettledGuard);
+  }
 
   markLoaded();
+}
+
+
+export default function registerPiFamilyPrimaryTurnendGuard(pi: ExtensionAPI): void {
+  selectPrimaryHarness(process.env.OMPCODE === "1" ? "omp" : "pi");
+  registerPrimaryTurnendGuard(pi);
 }

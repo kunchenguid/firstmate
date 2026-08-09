@@ -83,8 +83,27 @@ const fmRoot = process.env.FM_ROOT_OVERRIDE || root;
 const state = process.env.FM_STATE_OVERRIDE || `${fmHome}/state`;
 const config = process.env.FM_CONFIG_OVERRIDE || `${fmHome}/config`;
 const armScript = `${fmRoot}/bin/fm-watch-arm.sh`;
-const marker = `${state}/.pi-watch-extension-loaded`;
-const extensionVersion = `sha256:${createHash("sha256").update(readFileSync(extensionFile)).digest("hex")}`;
+type PrimaryHarness = "pi" | "omp";
+let primaryHarnessSlug: PrimaryHarness = "pi";
+let primaryHarnessLabel = "Pi";
+let watchToolName = "fm_watch_arm_pi";
+let watchCommandName = "fm-watch-arm-pi";
+let marker = `${state}/.pi-watch-extension-loaded`;
+let extensionVersion = `sha256:${createHash("sha256").update(readFileSync(extensionFile)).digest("hex")}`;
+
+function selectPrimaryHarness(harness: PrimaryHarness): void {
+  primaryHarnessSlug = harness;
+  primaryHarnessLabel = harness === "omp" ? "OMP" : "Pi";
+  watchToolName = `fm_watch_arm_${harness}`;
+  watchCommandName = `fm-watch-arm-${harness}`;
+  repairOnlyHint = `call ${watchToolName} again only after a later notification says the cycle is missing, failed, or unhealthy`;
+  shuttingDownMessage = `watcher: not armed - ${primaryHarnessLabel} session is shutting down`;
+  marker = `${state}/.${harness}-watch-extension-loaded`;
+  const identityFile = harness === "omp"
+    ? `${root}/.omp/extensions/fm-primary-omp-watch.ts`
+    : extensionFile;
+  extensionVersion = `sha256:${createHash("sha256").update(readFileSync(identityFile)).digest("hex")}`;
+}
 const retryBaseMs = positiveInteger("FM_WATCH_REARM_RETRY_BASE_MS", 250);
 const retryMaxMs = positiveInteger("FM_WATCH_REARM_RETRY_MAX_MS", 4000);
 const retryLimit = positiveInteger("FM_WATCH_REARM_RETRY_LIMIT", 5);
@@ -96,8 +115,8 @@ const armReadyTimeoutMs = positiveInteger(
   process.platform === "win32" ? 35000 : 12000,
 );
 const armRetireTimeoutMs = positiveInteger("FM_WATCH_ARM_RETIRE_TIMEOUT_MS", 1000);
-const repairOnlyHint = "call fm_watch_arm_pi again only after a later notification says the cycle is missing, failed, or unhealthy";
-const shuttingDownMessage = "watcher: not armed - Pi session is shutting down";
+let repairOnlyHint = `call ${watchToolName} again only after a later notification says the cycle is missing, failed, or unhealthy`;
+let shuttingDownMessage = `watcher: not armed - ${primaryHarnessLabel} session is shutting down`;
 
 let nextGenerationId = 0;
 let activeGeneration: SessionGeneration | null = null;
@@ -161,7 +180,7 @@ function classifyClose(stdout: string, stderr: string, code: number | null, sign
   if (healthy) {
     return {
       kind: "failure",
-      message: `watcher: FAILED - Pi extension arm child found an external healthy watcher instead of owning wake delivery\n${healthy}`,
+      message: `watcher: FAILED - ${primaryHarnessLabel} extension arm child found an external healthy watcher instead of owning wake delivery\n${healthy}`,
     };
   }
   const failed = combined.split(/\r?\n/).find((line) => /^watcher: FAILED/.test(line));
@@ -169,7 +188,7 @@ function classifyClose(stdout: string, stderr: string, code: number | null, sign
   if (signal) {
     return {
       kind: "failure",
-      message: `watcher: FAILED - Pi extension arm child ended from ${signal}${combined ? `\n${combined}` : ""}`,
+      message: `watcher: FAILED - ${primaryHarnessLabel} extension arm child ended from ${signal}${combined ? `\n${combined}` : ""}`,
     };
   }
   if (code && code !== 0) {
@@ -180,7 +199,7 @@ function classifyClose(stdout: string, stderr: string, code: number | null, sign
   }
   return {
     kind: "failure",
-    message: "watcher: FAILED - Pi extension arm cycle ended without an actionable reason",
+    message: `watcher: FAILED - ${primaryHarnessLabel} extension arm cycle ended without an actionable reason`,
   };
 }
 
@@ -217,7 +236,7 @@ const cleanupOnProcessExit = () => {
 };
 process.once("exit", cleanupOnProcessExit);
 
-export default function (pi: ExtensionAPI) {
+function registerPrimaryWatchExtension(pi: ExtensionAPI) {
   let generation = createGeneration();
   activateGeneration(generation);
 
@@ -299,32 +318,32 @@ export default function (pi: ExtensionAPI) {
       const successorChild = owner.child;
       if (replacement.ok && successorChild && await waitForReadiness(successorChild)) return "";
       if (replacement.ok) {
-        failure = "watcher: FAILED - Pi extension could not verify a ready successor watcher";
+        failure = `watcher: FAILED - ${primaryHarnessLabel} extension could not verify a ready successor watcher`;
         if (!(await retireArm(successorChild))) {
-          return `${failure}\nwatcher: FAILED - Pi extension could not restore watcher continuity because the unready successor arm did not exit within ${armRetireTimeoutMs}ms`;
+          return `${failure}\nwatcher: FAILED - ${primaryHarnessLabel} extension could not restore watcher continuity because the unready successor arm did not exit within ${armRetireTimeoutMs}ms`;
         }
       } else {
         failure = /(?:read-only|no live session)/.test(replacement.message)
-          ? `watcher: FAILED - Pi extension cannot restore continuity because this session no longer owns the lock\n${replacement.message}`
-          : `watcher: FAILED - Pi extension could not start the successor watcher cycle\n${replacement.message}`;
+          ? `watcher: FAILED - ${primaryHarnessLabel} extension cannot restore continuity because this session no longer owns the lock\n${replacement.message}`
+          : `watcher: FAILED - ${primaryHarnessLabel} extension could not start the successor watcher cycle\n${replacement.message}`;
         if (/(?:read-only|no live session)/.test(replacement.message)) break;
       }
       if (attempt === retryLimit) break;
       await waitForRetry(attempt + 1);
     }
-    return `${failure}\nwatcher: FAILED - Pi extension could not restore watcher continuity after ${retryLimit} retries`;
+    return `${failure}\nwatcher: FAILED - ${primaryHarnessLabel} extension could not restore watcher continuity after ${retryLimit} retries`;
   }
 
   function scheduleRetry(owner: SessionGeneration, message: string, predecessorArmPid: string): void {
     if (!generationIsLive(owner) || owner.child || owner.retryTimer) return;
     const ownership = lockOwnership();
     if (ownership !== "owned") {
-      surfaceFailure(owner, `watcher: FAILED - Pi extension cannot restore continuity because this session no longer owns the lock\n${message}`);
+      surfaceFailure(owner, `watcher: FAILED - ${primaryHarnessLabel} extension cannot restore continuity because this session no longer owns the lock\n${message}`);
       return;
     }
     owner.retryFailures += 1;
     if (owner.retryFailures > retryLimit) {
-      surfaceFailure(owner, `watcher: FAILED - Pi extension could not restore watcher continuity after ${retryLimit} retries\n${message}`);
+      surfaceFailure(owner, `watcher: FAILED - ${primaryHarnessLabel} extension could not restore watcher continuity after ${retryLimit} retries\n${message}`);
       return;
     }
     const timer = setTimeout(() => {
@@ -332,7 +351,7 @@ export default function (pi: ExtensionAPI) {
       if (!generationIsLive(owner)) return;
       const result = startArm(owner, predecessorArmPid);
       if (!result.ok) {
-        surfaceFailure(owner, `watcher: FAILED - Pi extension could not launch a continuity retry\n${result.message}`);
+        surfaceFailure(owner, `watcher: FAILED - ${primaryHarnessLabel} extension could not launch a continuity retry\n${result.message}`);
       }
     }, retryDelay(owner.retryFailures));
     timer.unref();
@@ -346,20 +365,20 @@ export default function (pi: ExtensionAPI) {
     if (ownership === "missing") {
       return {
         ok: false,
-        message: "watcher: not armed - no live session holds the lock; run bin/fm-session-start.sh to reclaim it, then call fm_watch_arm_pi to re-arm",
+        message: `watcher: not armed - no live session holds the lock; run bin/fm-session-start.sh to reclaim it, then call ${watchToolName} to re-arm`,
       };
     }
     markLoaded();
     if (owner.child) {
       return {
         ok: true,
-        message: `watcher: unchanged - Pi extension already owns an arm child; no manual re-arm needed; ${repairOnlyHint}`,
+        message: `watcher: unchanged - ${primaryHarnessLabel} extension already owns an arm child; no manual re-arm needed; ${repairOnlyHint}`,
       };
     }
     if (owner.retryTimer) {
       return {
         ok: true,
-        message: `watcher: unchanged - Pi extension already owns a scheduled continuity retry; no manual re-arm needed; ${repairOnlyHint}`,
+        message: `watcher: unchanged - ${primaryHarnessLabel} extension already owns a scheduled continuity retry; no manual re-arm needed; ${repairOnlyHint}`,
       };
     }
     const id = ++owner.seq;
@@ -445,25 +464,34 @@ export default function (pi: ExtensionAPI) {
       releaseChild();
       if (!generationIsLive(owner)) return;
       if (owner.restoring) return;
-      scheduleRetry(owner, `watcher: FAILED - Pi extension arm child ${id} failed: ${error.message}`, String(armChild.pid ?? ""));
+      scheduleRetry(owner, `watcher: FAILED - ${primaryHarnessLabel} extension arm child ${id} failed: ${error.message}`, String(armChild.pid ?? ""));
     });
     return {
       ok: true,
-      message: `watcher: started Pi extension arm child ${id}; future ordinary re-arms are automatic; ${repairOnlyHint}`,
+      message: `watcher: started ${primaryHarnessLabel} extension arm child ${id}; future ordinary re-arms are automatic; ${repairOnlyHint}`,
     };
   }
 
-  pi.on?.("session_start", () => {
+  const activateCurrentGeneration = () => {
     if (generation.stopping) generation = createGeneration();
     activateGeneration(generation);
     markLoaded();
-  });
+  };
+  pi.on?.("session_start", activateCurrentGeneration);
+  if (primaryHarnessSlug === "omp") {
+    // OMP emits session_switch, not another session_start, for same-process replacement.
+    const onSessionSwitch = pi.on as unknown as (
+      event: "session_switch",
+      handler: () => void,
+    ) => void;
+    onSessionSwitch.call(pi, "session_switch", activateCurrentGeneration);
+  }
   pi.on?.("session_shutdown", () => {
     stopGeneration(generation);
   });
 
-  pi.registerCommand?.("fm-watch-arm-pi", {
-    description: "Arm firstmate watcher supervision through the Pi extension instead of foreground bash.",
+  pi.registerCommand?.(watchCommandName, {
+    description: `Arm firstmate watcher supervision through the ${primaryHarnessLabel} extension instead of foreground bash.`,
     handler: async (_args, ctx) => {
       const result = startArm(generation);
       ctx.ui.notify(result.message, result.ok ? "info" : "warning");
@@ -471,22 +499,22 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.registerTool?.({
-    name: "fm_watch_arm_pi",
+    name: watchToolName,
     label: "Arm firstmate watcher",
-    description: "Start the first required Pi watcher cycle, or repair one only after a notification says the cycle is missing, failed, or unhealthy. Do not call after ordinary work or ordinary notifications; the Pi extension re-arms automatically. Never run bin/fm-watch-arm.sh through bash.",
-    promptSnippet: "Start the first required Pi watcher cycle or repair a cycle reported missing, failed, or unhealthy; ordinary re-arming is automatic.",
+    description: `Start the first required ${primaryHarnessLabel} watcher cycle, or repair one only after a notification says the cycle is missing, failed, or unhealthy. Do not call after ordinary work or ordinary notifications; the ${primaryHarnessLabel} extension re-arms automatically. Never run bin/fm-watch-arm.sh through bash.`,
+    promptSnippet: `Start the first required ${primaryHarnessLabel} watcher cycle or repair one reported missing, failed, or unhealthy; ordinary re-arming is automatic.`,
     promptGuidelines: [
-      "Call fm_watch_arm_pi only for the first required cycle or after a notification says the cycle is missing, failed, or unhealthy. Do not call it after ordinary work, turn completion, or ordinary signal, stale, check, or heartbeat handling because the Pi extension owns re-arming. Never run bin/fm-watch-arm.sh through bash.",
+      `Call ${watchToolName} only for the first required cycle or after a notification says the cycle is missing, failed, or unhealthy. Do not call it after ordinary work, turn completion, or ordinary signal, stale, check, or heartbeat handling because the ${primaryHarnessLabel} extension owns re-arming. Never run bin/fm-watch-arm.sh through bash.`,
     ],
     parameters: Type.Object({}),
     renderShell: "self",
     renderCall: (_args, theme, context) => {
       if (calmHides("assistant-tool-call")) return new Container();
       if (calmPresentation.stockExportRendering) {
-        return new Text(theme.fg("toolTitle", theme.bold("fm_watch_arm_pi")), 0, 0);
+        return new Text(theme.fg("toolTitle", theme.bold(watchToolName)), 0, 0);
       }
       const state = context.state as WatchToolShellState;
-      state.call = new Text(theme.fg("toolTitle", theme.bold("fm_watch_arm_pi")), 0, 0);
+      state.call = new Text(theme.fg("toolTitle", theme.bold(watchToolName)), 0, 0);
       return refreshWatchToolShell(state, theme, context);
     },
     renderResult: (result, _options, theme, context) => {
@@ -515,4 +543,10 @@ export default function (pi: ExtensionAPI) {
   });
 
   markLoaded();
+}
+
+
+export default function registerPiFamilyPrimaryWatch(pi: ExtensionAPI): void {
+  selectPrimaryHarness(process.env.OMPCODE === "1" ? "omp" : "pi");
+  registerPrimaryWatchExtension(pi);
 }

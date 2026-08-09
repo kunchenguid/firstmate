@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Detect the agent harness this process tree runs on.
-# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|muse|unknown
+# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|muse|omp|unknown
 #        fm-harness.sh crew             print the effective CREWMATE harness
 #                                        (config/crew-harness; "default" resolves to own)
 #        fm-harness.sh secondmate       print the harness the PRIMARY uses to launch
@@ -27,14 +27,20 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
+
 detect_own() {
+  # OMP exports OMPCODE=1 to tool subprocesses (verified: omp 17.2.12).
+  # Check it before foreign markers retained by the surrounding terminal: a
+  # firstmate-launched OMP worker inherited CLAUDECODE=1 while preserving this
+  # positive OMP marker.
+  [ "${OMPCODE:-}" = "1" ] && { echo omp; return; }
   # Layer 1: environment markers for verified harnesses.
   # Keep marker detection before ancestry detection as an explicit precedence rule.
-  # Only claude, pi, and grok set verified markers of their own; codex, opencode,
-  # kimi, and muse are markerless, so a foreign marker retained in a terminal
-  # multiplexer's stored environment can silently misidentify one of them before
-  # ancestry is consulted. This is a precedence hazard, not evidence that
-  # CLAUDECODE inheritance into a kimi child was observed; it was not observed.
+  # Only OMP, claude, pi, and grok set verified adapter markers of their own; codex,
+  # opencode, kimi, and muse are markerless, so a foreign marker retained in a
+  # terminal multiplexer's stored environment can silently misidentify one of
+  # them before ancestry is consulted. This is a precedence hazard, not evidence
+  # that CLAUDECODE inheritance into a kimi child was observed; it was not.
   [ "${CLAUDECODE:-}" = "1" ] && { echo claude; return; }
   if [ "${PI_CODING_AGENT:-}" = "true" ]; then
     if [ "${FM_PI_HARNESS:-}" = pi-signed ]; then echo pi-signed; else echo pi; fi
@@ -67,6 +73,7 @@ detect_own() {
       *opencode*) echo opencode; return ;;
       *grok*) echo grok; return ;;
       kimi) echo kimi; return ;;
+      omp) echo omp; return ;;
       # muse's installed launcher ~/.local/bin/muse execs ~/.local/bin/muse-bin-<version>
       # (verified in the published launcher, muse 0.1.0-R708.1), so the live process
       # name carries the version and CHANGES on every auto-update. Match the stable
@@ -75,6 +82,16 @@ detect_own() {
       muse|muse-bin-*) echo muse; return ;;
       pi-signed) echo pi; return ;;
       pi) echo pi; return ;;
+      bun*)
+        # OMP is distributed as a Bun script. Match only argv[1]'s exact `omp`
+        # path component; later prompt arguments may mention OMP and are not
+        # process identity.
+        args=$(ps -o args= -p "$pid" 2>/dev/null)
+        args=${args#* }
+        args=${args%% *}
+        case "/$args/" in
+          */omp/*) echo omp; return ;;
+        esac ;;
       node*|python*)
         # Bare interpreter: match the harness name in its script path.
         args=$(ps -o args= -p "$pid" 2>/dev/null)

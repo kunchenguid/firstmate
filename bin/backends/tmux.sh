@@ -218,7 +218,7 @@ fm_backend_tmux_foreground_comms() {  # <target>
 }
 
 fm_backend_tmux_foreground_argv0s() {  # <target>
-  local target=$1 tty pid pgid tpgid comm args argv0
+  local target=$1 tty pid pgid tpgid comm args argv0 rest script
   tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || return 0
   [ -n "$tty" ] || return 0
   LC_ALL=C ps -t "${tty#/dev/}" -o pid=,pgid=,tpgid=,comm= 2>/dev/null \
@@ -229,6 +229,18 @@ fm_backend_tmux_foreground_argv0s() {  # <target>
         args=${args#"${args%%[![:space:]]*}"}
         argv0=${args%%[[:space:]]*}
         [ -n "$argv0" ] && printf '%s\n' "$argv0"
+        # OMP's long-lived process is Bun with the exact `omp` script as argv[1].
+        # Export that one verified identity candidate, never later prompt text.
+        case "${comm##*/}" in
+          bun)
+            rest=${args#"$argv0"}
+            rest=${rest#"${rest%%[![:space:]]*}"}
+            script=${rest%%[[:space:]]*}
+            if [ "$(fm_harness_path_name "$script" 2>/dev/null || true)" = omp ]; then
+              printf '%s\n' "$script"
+            fi
+            ;;
+        esac
       done
 }
 

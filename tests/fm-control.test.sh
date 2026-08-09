@@ -35,7 +35,7 @@ mkdir -p "$TMP_ROOT"
 TMP_ROOT=$(cd "$TMP_ROOT" && pwd)
 trap 'rm -rf "$TMP_ROOT"' EXIT
 
-VERIFIED_HARNESSES="claude codex opencode pi pi-signed grok kimi muse"
+VERIFIED_HARNESSES="claude codex opencode pi pi-signed omp grok kimi muse"
 
 # The expectation table, written out independently of the implementation so a
 # silent change to either side shows up here. The fourth field is the composer
@@ -48,6 +48,7 @@ verified_adapter_contract() {  # <harness> -> exit command, interrupt key, repea
     opencode) printf '/exit\tEscape\t2\t\n' ;;
     pi) printf '/quit\tEscape\t1\t\n' ;;
     pi-signed) printf '/quit\tEscape\t1\t\n' ;;
+    omp) printf '/exit\tEscape\t1\t\n' ;;
     grok) printf '/exit\tC-c\t1\t\n' ;;
     kimi) printf '/exit\tEscape\t1\t\n' ;;
     muse) printf '/exit\tEscape\t1\tC-u\n' ;;
@@ -256,7 +257,7 @@ test_interrupt_sends_each_harness_verified_key() {
 test_harness_family_resolution() {
   local pair recorded want got
   for pair in claude:claude claude-latest:claude codex:codex codex-cli:codex \
-      opencode:opencode grok:grok grok-2:grok kimi:kimi muse:muse \
+      opencode:opencode omp:omp omp-17:omp grok:grok grok-2:grok kimi:kimi muse:muse \
       muse-bin-0.1.0:muse pi:pi pi-signed:pi-signed; do
     recorded=${pair%%:*}
     want=${pair#*:}
@@ -365,7 +366,7 @@ test_harness_kind_capability() {
   done
   fm_control_harness_supports_kind muse secondmate \
     && fail "muse has no primary supervision protocol and must not claim a secondmate"
-  for harness in claude codex opencode pi pi-signed grok kimi; do
+  for harness in claude codex opencode pi pi-signed omp grok kimi; do
     fm_control_harness_supports_kind "$harness" secondmate \
       || fail "$harness should be able to run a secondmate"
   done

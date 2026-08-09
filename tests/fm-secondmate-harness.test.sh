@@ -51,13 +51,12 @@ set -u
 . "$ROOT/bin/fm-config-inherit-lib.sh"
 
 # The harness-detection cases below fake `ps` so process ancestry is fully
-# controlled, but bin/fm-harness.sh checks verified ENV markers before ancestry.
-# A suite run from inside one of those harnesses inherits its marker, and the
-# highest-precedence one wins over everything these cases set up: with an
-# ambient CLAUDECODE=1, the pi-signed ancestry case resolves "claude". Drop the
-# ambient markers so what this suite asserts does not depend on which harness it
-# was launched from; every case states the marker it means to test.
-unset CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT
+# controlled, but bin/fm-harness.sh checks environment markers before ancestry.
+# A suite run from inside a harness inherits its marker, and the highest-
+# precedence one wins over everything these cases set up. Drop all ambient
+# markers, including OMP's lock-only identity marker, so every case states the
+# marker it means to test.
+unset OMPCODE CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT
 
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 fm_git_identity fmtest fmtest@example.com
@@ -93,6 +92,7 @@ crew set, secondmate absent -> crew (backward-compat)^codex^-^codex^codex
 crew set, secondmate set -> secondmate wins, crew untouched^codex^grok^grok^codex
 crew absent, secondmate set -> secondmate value, crew own^-^grok^grok^claude
 signed Pi wrapper remains a distinct secondmate value^codex^pi-signed^pi-signed^codex
+OMP remains a distinct secondmate value^codex^omp^omp^codex
 secondmate=default defers to crew^codex^default^codex^codex
 crew=default resolves to own, secondmate follows^default^-^claude^claude
 secondmate=default with crew absent -> own^-^default^claude^claude
@@ -131,6 +131,7 @@ bare harness only -> empty model/effort (backward-compat)^claude^claude^^
 harness + model -> model only^claude opus^claude^opus^
 harness + model + effort -> both^claude opus high^claude^opus^high
 signed Pi wrapper + model + effort preserves every token^pi-signed openai-codex/gpt-5.6-sol max^pi-signed^openai-codex/gpt-5.6-sol^max
+OMP model and effort preserve every token^omp openai-codex/gpt-5.6-sol high^omp^openai-codex/gpt-5.6-sol^high
 default harness token -> falls back to crew, empty model/effort^default^claude^^
 extra whitespace between tokens is tolerated^grok   grok-4    xhigh^grok^grok-4^xhigh
 leading/trailing blank lines and a comment are skipped^# a comment\n\nclaude opus low\n^claude^opus^low
@@ -201,6 +202,56 @@ SH
   fi
 
   pass "pi-signed identity: authoritative launch selection distinguishes shared wrapper ancestry"
+}
+
+test_omp_primary_and_worker_identity() {
+  local dir fakebin got
+  dir="$TMP_ROOT/omp-primary-worker-identity"
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$field:${FM_TEST_OMP_SHAPE:-omp}" in
+  comm=:*) printf '%s\n' '/opt/homebrew/bin/bun' ;;
+  args=:omp) printf '%s\n' 'bun /Users/u/.bun/bin/omp --model openai/test' ;;
+  args=:unrelated) printf '%s\n' 'bun /opt/tools/compiler.js --prompt omp' ;;
+  ppid=:*) printf '%s\n' 1 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+
+  got=$(OMPCODE=1 CLAUDECODE=1 PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-harness.sh")
+  [ "$got" = omp ] \
+    || fail "OMP under an inherited Claude marker selected '$got', expected omp"
+  got=$(FM_TEST_OMP_SHAPE=omp PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-harness.sh")
+  [ "$got" = omp ] \
+    || fail "exact Bun/OMP ancestry selected '$got', expected omp"
+  got=$(FM_TEST_OMP_SHAPE=unrelated CLAUDECODE=1 PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-harness.sh")
+  [ "$got" = claude ] \
+    || fail "an unrelated Bun process suppressed the verified Claude marker, got '$got'"
+
+  got=$(PATH="$fakebin:$BASE_PATH" bash -c \
+    '. "$0/bin/fm-session-lock-lib.sh"; fm_harness_ancestry_pid' "$ROOT")
+  case "$got" in
+    ''|*[!0-9]*) fail "OMP session-lock ancestry returned nonnumeric identity '$got'" ;;
+  esac
+  PATH="$fakebin:$BASE_PATH" bash -c \
+    '. "$0/bin/fm-session-lock-lib.sh"; kill() { return 0; }; fm_harness_pid_alive 777' "$ROOT" \
+    || fail "session-lock liveness rejected the exact Bun/OMP process"
+  if FM_TEST_OMP_SHAPE=unrelated PATH="$fakebin:$BASE_PATH" bash -c \
+    '. "$0/bin/fm-session-lock-lib.sh"; kill() { return 0; }; fm_harness_pid_alive 777' "$ROOT"; then
+    fail "session-lock liveness accepted an unrelated Bun process that merely mentioned OMP"
+  fi
+
+  pass "OMP identity: positive marker and exact Bun script select the verified adapter and session-lock owner"
 }
 
 test_dash_leading_process_names_are_basename_operands() {
@@ -690,6 +741,50 @@ test_spawn_bare_harness_no_model_effort_flag() {
   assert_not_contains "$launch" "--model" "bare-tokens: launch must not carry a --model flag"
   assert_not_contains "$launch" "--effort" "bare-tokens: launch must not carry an --effort flag"
   pass "C2 spawn: a bare harness-only secondmate-harness file launches with no model/effort flag (backward-compat)"
+}
+
+test_spawn_omp_secondmate_contract() {
+  local w sm sm_real meta launchlog launch out status
+  w="$TMP_ROOT/spawn-omp-secondmate"
+  sm="$w/sm"
+  launchlog="$w/launch.log"
+  mkdir -p "$w/home/config"
+  printf 'omp openai-codex/gpt-5.6-sol high\n' > "$w/home/config/secondmate-harness"
+  make_seeded_home "$sm" sm
+  sm_real=$(cd "$sm" && pwd -P)
+  mkdir -p "$w/tmux-sm/fakebin"
+  cat > "$w/tmux-sm/fakebin/omp" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$w/tmux-sm/fakebin/omp"
+
+  out=$(spawn_secondmate_capture "$w" sm "$sm" "$launchlog" 2>&1); status=$?
+  expect_code 0 "$status" "OMP secondmate spawn should succeed"$'\n'"$out"
+
+  meta="$w/home/state/sm.meta"
+  [ "$(meta_field "$meta" harness)" = omp ] \
+    || fail "OMP secondmate meta did not preserve harness=omp"
+  [ "$(meta_field "$meta" model)" = openai-codex/gpt-5.6-sol ] \
+    || fail "OMP secondmate meta did not preserve the selected model"
+  [ "$(meta_field "$meta" effort)" = high ] \
+    || fail "OMP secondmate meta did not preserve the selected effort"
+  launch=$(cat "$launchlog")
+  assert_contains "$launch" "OMPCODE=1" \
+    "OMP secondmate launch did not establish its positive identity marker"
+  assert_contains "$launch" "env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT -u GROK_HOOK_EVENT" \
+    "OMP secondmate launch did not remove inherited foreign harness markers"
+  assert_contains "$launch" "-e '$sm_real/.omp/extensions/fm-primary-turnend-guard.ts'" \
+    "OMP secondmate launch did not load its primary turn-end guard"
+  assert_contains "$launch" "-e '$sm_real/.omp/extensions/fm-primary-omp-watch.ts'" \
+    "OMP secondmate launch did not load its primary watcher"
+  assert_contains "$launch" "--approval-mode yolo" \
+    "OMP secondmate launch did not apply yolo approval mode"
+  assert_contains "$launch" "--model 'openai-codex/gpt-5.6-sol'" \
+    "OMP secondmate launch did not apply the selected model"
+  assert_contains "$launch" "--thinking 'high'" \
+    "OMP secondmate launch did not apply the selected effort"
+  pass "OMP spawn: secondmate launch carries identity, primary extensions, autonomy, model, and effort"
 }
 
 # "<harness> <model>" durably threads --model into the secondmate launch and
@@ -2466,6 +2561,7 @@ SH
 test_harness_resolution
 test_secondmate_model_effort_tokens
 test_pi_signed_detection_and_session_lock_identity
+test_omp_primary_and_worker_identity
 test_dash_leading_process_names_are_basename_operands
 test_propagate_lib
 test_spawn_split_and_inherit
@@ -2476,6 +2572,7 @@ test_spawn_unverified_secondmate_harness_refused
 test_spawn_backend_precedence_over_inherited_config
 test_spawn_explicit_backend_precedence_over_env_and_inherited_config
 test_spawn_bare_harness_no_model_effort_flag
+test_spawn_omp_secondmate_contract
 test_spawn_secondmate_harness_model_token
 test_spawn_secondmate_harness_model_and_effort_tokens
 test_spawn_explicit_model_overrides_secondmate_harness_token

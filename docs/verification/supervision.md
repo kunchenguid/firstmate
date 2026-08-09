@@ -156,6 +156,10 @@ Each pass polled `state/<id>.busy-state` while a real turn ran.
 | Kimi (standalone) | not installed | None usable | No binary on `PATH`, so the gate stays closed and it classifies `unknown kimi-unverified`. |
 | Grok | 0.2.112 | Isolated rendered-tail fallback | Retained unconverted; the approved audit could not credit a live structured-lifecycle run. |
 
+
+OMP 17.2.12 was verified on 2026-08-09 with a live extension event probe and the tracked OMP primary entrypoints.
+The runtime emitted `agent_start`, `session_stop`, `turn_end`, and one final `agent_end` for a completed run, and emitted `session_switch` for same-process replacement.
+`tests/fm-busy-state.test.sh` and `tests/fm-secondmate-harness.test.sh` pin the generated `omp-ext` mapping from `agent_start` to busy and from `agent_end` to idle plus the turn-end marker.
 Codex was probed two ways, both refused:
 
 ```sh
@@ -178,7 +182,7 @@ tests/fm-crew-state.test.sh
 
 ## Turn-end guard
 
-The direct and passive mechanisms were validated across all five harnesses on 2026-07-08 through 2026-07-12, with Claude's replacement Stop-owned path revalidated on 2026-07-24.
+The direct and passive mechanisms were validated across the supported harnesses on 2026-07-08 through 2026-08-09, with Claude's replacement Stop-owned path revalidated on 2026-07-24.
 
 | Harness | Version verified | Mechanism | Observed result |
 | --- | --- | --- | --- |
@@ -186,6 +190,7 @@ The direct and passive mechanisms were validated across all five harnesses on 20
 | Codex | 0.142.1 | Blocking `Stop` hook | Hook process root stayed anchored to the trusted checkout and one continuation ran. |
 | OpenCode | 1.17.6 | Passive `session.idle` callback | Throwing could not block, while `promptAsync` scheduled one TUI follow-up; headless remained fail-open. |
 | Pi | 0.80.5 | Passive `agent_settled` callback | Exactly one guard follow-up ran for an unhealthy cycle, with no recursion across tool turns. |
+| OMP | 17.2.12 | Passive `agent_end` callback | A live run emitted one final `agent_end`; the tracked entrypoint's deterministic integration test injected exactly one recovery follow-up per logical run without registering Pi's `agent_settled` event. |
 | Grok | 0.2.112 native and 0.2.73 pre-native | Running-payload adaptive `Stop` | Native false-to-true continuation stayed in one process with two model turns and zero resume launches; the field-absent pre-native process launched exactly one guarded resume. |
 
 The Grok adaptive matrix ran on 2026-07-28 with separate scratch repositories and homes, dedicated tmux sockets, one target plus one control window, ambient tmux variables removed, and a socket-bound wrapper first in `PATH`.
@@ -328,7 +333,14 @@ tests/fm-pi-primary-types.test.sh
 
 Observed guarantee: after ordinary `session_shutdown` for `/new`, `/resume`, and `/fork`, plus same-instance shutdown-plus-start, the replacement generation armed again without a Pi restart and without the `watcher: not armed - Pi session is shutting down` refusal.
 Stale prior-generation tool callbacks could not mutate the active child, repeated transitions kept exactly one live arm cycle, and terminal `quit` still refused late rearm.
-Plain Pi and pi-signed share the same tracked `.pi/extensions/fm-primary-pi-watch.ts` path, so both inherit the generation owner; other primary harnesses are not applicable because they do not use this Pi extension lifecycle.
+Plain Pi and pi-signed share the tracked `.pi/extensions/fm-primary-pi-watch.ts` entrypoint.
+OMP loads its tracked `.omp/extensions/` entrypoints over that same core, selecting OMP-specific events, tool names, markers, and session-switch behavior; other primary harnesses do not use this Pi-family extension lifecycle.
+
+OMP 17.2.12 primary supervision was live-verified on 2026-08-09 from the tracked project root with an isolated Firstmate home.
+Project-local `.omp/extensions/` discovery loaded both tracked entrypoints without explicit `-e` flags.
+The `session_start` hook acquired the isolated home lock and wrote `.omp-watch-extension-loaded` and `.omp-turnend-extension-loaded`; both recorded SHA-256 values matched the current tracked entrypoint bytes and named the live OMP process.
+The model then called `fm_watch_arm_omp` exactly once, returned `OMP_TOOL_OK`, and the watcher published a fresh `.last-watcher-beat` plus an owned watcher lock before process-exit cleanup.
+An independent live event probe observed `session_start`, `agent_start`, `session_stop`, `turn_end`, `agent_end`, and same-process `session_switch`; the tracked deterministic tests pin the event-to-generation and guard contracts.
 
 Deterministic entry points:
 

@@ -1855,6 +1855,49 @@ fm_backend_herdr_explicit_close_pane_confirmed() {  # <session> <pane_id>
   [ "$presence" = dead ]
 }
 
+# OMP 17.2.12 leaves its Herdr agent registration at `idle` after `/exit` has
+# returned to the task's nested worktree shell. This proof recognizes only that
+# adapter's exact stale-registration shape: one foreground process, its pid is
+# the foreground process group, both reported names are the same recognized
+# shell, and the OS process has no child. Any transient prompt helper or
+# unreadable field keeps the registration live/unknown for the next poll.
+fm_backend_herdr_omp_exited_to_shell() {  # <session> <pane-id>
+  local session=$1 pane=$2 info pid pgid name argv0 shell rows ps_bin
+  info=$(fm_backend_herdr_cli "$session" pane process-info --pane "$pane" 2>/dev/null) || return 1
+  printf '%s' "$info" | jq -e --arg pane "$pane" '
+    .result.type == "pane_process_info"
+    and .result.process_info.pane_id == $pane
+    and (.result.process_info.foreground_processes | type) == "array"
+    and (.result.process_info.foreground_processes | length) == 1
+  ' >/dev/null 2>&1 || return 1
+  pid=$(printf '%s' "$info" | jq -er \
+    '.result.process_info.foreground_processes[0].pid | select(type == "number" and . > 1) | floor' 2>/dev/null) || return 1
+  pgid=$(printf '%s' "$info" | jq -er \
+    '.result.process_info.foreground_process_group_id | select(type == "number" and . > 1) | floor' 2>/dev/null) || return 1
+  [ "$pid" = "$pgid" ] || return 1
+  name=$(printf '%s' "$info" | jq -er \
+    '.result.process_info.foreground_processes[0].name | select(type == "string" and length > 0)' 2>/dev/null) || return 1
+  argv0=$(printf '%s' "$info" | jq -er '
+    .result.process_info.foreground_processes[0] as $process
+    | ($process.argv0 // $process.argv[0])
+    | select(type == "string" and length > 0)
+  ' 2>/dev/null) || return 1
+  shell=${name##*/}
+  argv0=${argv0#-}
+  argv0=${argv0##*/}
+  [ "$argv0" = "$shell" ] || return 1
+  case "$shell" in sh|bash|zsh|dash|ksh|fish) ;; *) return 1 ;; esac
+  ps_bin=${FM_HERDR_PS_BIN:-ps}
+  command -v "$ps_bin" >/dev/null 2>&1 || return 1
+  fm_backend_herdr_pid_is_bare_shell "$ps_bin" "$pid" || return 1
+  rows=$("$ps_bin" -axo pid=,ppid= 2>/dev/null) || return 1
+  printf '%s\n' "$rows" | awk -v shell="$pid" '
+    $1 == shell { found++ }
+    $2 == shell { child++ }
+    END { exit(found == 1 && child == 0 ? 0 : 1) }
+  ' || return 1
+}
+
 # fm_backend_herdr_pane_agent_state: classify <pane_id> in <session> as one of
 # dead|no-agent|live|unknown, purely from the JSON body of two read-only
 # calls - never from process exit status, since a business-logic "not found"
@@ -1877,9 +1920,9 @@ fm_backend_herdr_explicit_close_pane_confirmed() {  # <session> <pane_id>
 #              `resume_agents_on_restore = false` restore would produce too
 #              (a plain shell, never an agent).
 #   live     - `agent get` succeeds and reports a real agent_status (working,
-#              idle, done, or blocked - any registered value). An idle or
-#              blocked agent is still a genuine, still-registered agent, not
-#              a restored husk, so it is never a close-and-replace candidate.
+#              idle, done, or blocked - any registered value), except that an
+#              idle/done OMP registration with the separately proven lone-shell
+#              exit shape above is `no-agent`.
 #   unknown  - anything else: an unparseable/unexpected response from either
 #              call, or a `pane get` success whose own echoed pane_id does not
 #              round-trip (guards against misreading a herdr response shape
@@ -1887,7 +1930,7 @@ fm_backend_herdr_explicit_close_pane_confirmed() {  # <session> <pane_id>
 #              refusal here, never toward closing - this is the conservative
 #              backstop the husk check depends on.
 fm_backend_herdr_pane_agent_state() {  # <session> <pane_id>
-  local session=$1 pane_id=$2 out code presence status
+  local session=$1 pane_id=$2 out code presence status agent
   presence=$(fm_backend_herdr_pane_presence_state "$session" "$pane_id")
   if [ "$presence" != present ]; then
     case "$presence" in
@@ -1902,7 +1945,16 @@ fm_backend_herdr_pane_agent_state() {  # <session> <pane_id>
     [ "$code" = "agent_not_found" ] && printf 'no-agent' || printf 'unknown'
     return 0
   fi
+  agent=$(printf '%s' "$out" | jq -r '.result.agent.agent // empty' 2>/dev/null)
   status=$(printf '%s' "$out" | jq -r '.result.agent.agent_status // empty' 2>/dev/null)
+  case "$agent:$status" in
+    omp:idle|omp:done)
+      if fm_backend_herdr_omp_exited_to_shell "$session" "$pane_id"; then
+        printf 'no-agent'
+        return 0
+      fi
+      ;;
+  esac
   case "$status" in
     working|idle|done|blocked) printf 'live' ;;
     *) printf 'unknown' ;;
@@ -2799,10 +2851,10 @@ fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
         ;;
     esac
   done < <(printf '%s\n' "$cap")
-  # Pi has no prompt glyph or side border. Compare its bottom-most complete
-  # separator pair with the last generic match so an earlier bordered transcript
-  # row can never suppress the live Pi composer. Identity is consulted only when
-  # a lower separator pair could change the verdict.
+  # Pi-family TUIs have no prompt glyph or side border. Compare the bottom-most
+  # complete separator pair with the last generic match so an earlier bordered
+  # transcript row can never suppress the live composer. Identity is consulted
+  # only when a lower separator pair could change the verdict.
   fm_backend_herdr_pi_composer_find "$cap"
   if [ "$FM_BACKEND_HERDR_PI_PAIR_FOUND" -eq 1 ] \
      && [ "$FM_BACKEND_HERDR_PI_PAIR_LINE" -gt "$generic_line" ] \
@@ -2812,7 +2864,7 @@ fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
 $identity
 EOF
     case "$agent:$agent_status" in
-      pi:idle|pi:done|pi:blocked)
+      pi:idle|pi:done|pi:blocked|omp:idle|omp:done|omp:blocked)
         if [ "$FM_BACKEND_HERDR_PI_PAIR_VALID" -eq 1 ]; then
           shape=separated
           raw_match=$FM_BACKEND_HERDR_PI_CONTENT
@@ -2821,12 +2873,13 @@ EOF
           found=0
         fi
         ;;
-      pi:*|:*)
-        # A working Pi or unreadable identity cannot authorize injection, and
-        # the lower separator pair proves any generic row above is not current.
+      pi:*|omp:*|:*)
+        # A working Pi-family agent or unreadable identity cannot authorize
+        # injection, and the lower separator pair proves any generic row above
+        # is not current.
         found=0
         ;;
-      *) : ;; # A known non-Pi agent keeps its established generic verdict.
+      *) : ;; # A known non-Pi-family agent keeps its established generic verdict.
     esac
   elif [ "$FM_BACKEND_HERDR_PI_PAIR_FOUND" -eq 0 ] \
        && [ "$FM_BACKEND_HERDR_PI_LAST_SEPARATOR_LINE" -gt "$generic_line" ]; then

@@ -59,6 +59,67 @@ export const Type = {
 JS
 }
 
+test_omp_watcher_entrypoint_selects_omp_contract() {
+  local repo home plugin out status
+  repo="$TMP_ROOT/omp-entrypoint-root"
+  home="$TMP_ROOT/omp-entrypoint-home"
+  mkdir -p "$repo/bin" "$repo/.omp/extensions" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  cp "$ROOT/.omp/extensions/fm-primary-omp-watch.ts" "$repo/.omp/extensions/fm-primary-omp-watch.ts"
+  plugin="$repo/.omp/extensions/fm-primary-omp-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(OMPCODE=1 PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" node --input-type=module 2>&1 <<'EOF'
+import { existsSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const events = new Map();
+const commands = [];
+const tools = [];
+let commandDescription = "";
+let toolDescription = "";
+const pi = {
+  on(name, handler) {
+    events.set(name, handler);
+  },
+  registerCommand(name, definition) {
+    commands.push(name);
+    commandDescription = definition.description;
+  },
+  registerTool(tool) {
+    tools.push(tool.name);
+    toolDescription = tool.description;
+  },
+  sendUserMessage: async () => {},
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+for (const name of ["session_start", "session_switch", "session_shutdown"]) {
+  if (!events.has(name)) throw new Error(`OMP watcher omitted ${name}`);
+}
+if (events.has("agent_settled")) throw new Error("OMP watcher registered Pi's agent_settled event");
+if (!commands.includes("fm-watch-arm-omp")) throw new Error(`OMP command missing: ${commands}`);
+if (!tools.includes("fm_watch_arm_omp")) throw new Error(`OMP tool missing: ${tools}`);
+if (!commandDescription.includes("OMP extension")) throw new Error(`OMP command description wrong: ${commandDescription}`);
+if (!toolDescription.includes("OMP watcher cycle")) throw new Error(`OMP tool description wrong: ${toolDescription}`);
+await events.get("session_start")();
+if (!existsSync(`${process.env.FM_HOME}/state/.omp-watch-extension-loaded`)) {
+  throw new Error("OMP watcher did not write its loaded marker");
+}
+await events.get("session_shutdown")();
+await events.get("session_switch")();
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "OMP watcher entrypoint must select OMP events, names, and marker"
+  [ -z "$out" ] || fail "OMP watcher entrypoint test printed output: $out"
+  pass "OMP watcher entrypoint selects OMP lifecycle, command, tool, and marker names"
+}
+
 test_pi_extension_reports_external_healthy_watcher() {
   local repo home plugin out status
   repo="$TMP_ROOT/pi-external-healthy-root"
@@ -2125,6 +2186,7 @@ EOF
 }
 
 test_pi_extension_reports_external_healthy_watcher
+test_omp_watcher_entrypoint_selects_omp_contract
 test_pi_tool_returns_agent_tool_result
 test_pi_redundant_tool_call_is_owned_noop
 test_pi_scheduled_retry_call_is_owned_noop

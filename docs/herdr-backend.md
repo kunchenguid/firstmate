@@ -223,13 +223,14 @@ This generous floor is required for small composer and peek reads.
 
 Herdr's native agent state can read idle while a harness waits on its own long foreground tool.
 The shared crew-state path therefore accepts a native `busy` as evidence of activity but never a native `idle` as evidence that a worker has stopped; the task's own semantic busy state (`bin/fm-busy-lib.sh`) decides that.
+OMP 17.2.12 also leaves its native agent registration at `idle` after `/exit` returns to the pane's nested worktree shell, so the backend recognizes stopped OMP only when Herdr process metadata and the OS process table prove the same lone idle shell with no child.
 A human-blocked permission dialog has no busy banner and still surfaces.
 
 ## Composer and injection safety
 
 Herdr has no direct cursor-row primitive.
-The adapter locates the bottom-most recognized bordered row, Claude `❯` row, Codex `›` row, or a Pi separator region admitted only when native identity is exactly Pi and state is idle, done, or blocked.
-A working Pi, pending middle row, missing identity, incomplete separator pair, or over-tall candidate remains pending or unknown.
+The adapter locates the bottom-most recognized bordered row, Claude `❯` row, Codex `›` row, or a Pi-family separator region admitted only when native identity is exactly Pi or OMP and state is idle, done, or blocked.
+A working Pi-family agent, pending middle row, missing identity, incomplete separator pair, or over-tall candidate remains pending or unknown.
 
 ANSI capture preserves de-emphasized placeholder style.
 `bin/fm-composer-lib.sh` is the fleet-wide owner that strips dim or faint runs and dark truecolor placeholders while retaining bright typed input.

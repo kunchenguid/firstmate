@@ -287,6 +287,41 @@ SH
   chmod +x "$fakebin/ps"
 }
 
+make_fake_ps_omp_holder() {
+  local fakebin=$1 holder_pid=$2
+  cat > "$fakebin/ps" <<SH
+#!/usr/bin/env bash
+set -u
+pid=""
+prev=""
+for arg in "\$@"; do
+  [ "\$prev" = "-p" ] && pid="\$arg"
+  prev="\$arg"
+done
+case "\$*" in
+  *"comm="*)
+    if [ "\$pid" = "$holder_pid" ]; then
+      printf '/Users/test/.bun/bin/omp\n'
+    else
+      printf '/bin/zsh\n'
+    fi
+    exit 0
+    ;;
+  *"args="*)
+    if [ "\$pid" = "$holder_pid" ]; then
+      printf '/Users/test/.bun/bin/omp --model openai-codex/gpt-5.6-sol\n'
+    else
+      printf 'zsh\n'
+    fi
+    exit 0
+    ;;
+  *"ppid="*) printf '%s\n' "$holder_pid"; exit 0 ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/ps"
+}
+
 # make_fake_tmux <fakebin> <live-target>: display-message succeeds only for
 # the given "session:window" target - the exact primitive
 # fm_backend_target_exists uses for a tmux endpoint liveness read.
@@ -498,25 +533,31 @@ SH
   chmod +x "$fakebin/herdr"
 }
 
-# run_session_start <home> <root> <path>
-# Drop every harness env marker from bin/fm-harness.sh detect_own so the
-# surrounding interactive shell cannot leak past the suite's fake ps harness.
-# Markers today: CLAUDECODE (claude), PI_CODING_AGENT plus FM_PI_HARNESS
-# (Pi family), GROK_AGENT (grok).
-# codex and opencode have no env markers (ancestry only). Without this, a local
-# claude/pi/grok session fails cases that pin a different fake harness while CI
-# (no ambient markers) still passes.
+# run_session_start <home> <root> <path> [selected-harness]
+# Drop every harness environment marker from bin/fm-harness.sh detect_own so
+# the surrounding interactive shell cannot leak past the suite's fake ps
+# harness. A selected Pi-family or OMP harness then receives only its own
+# positive marker; ancestry-only fixtures receive none.
 run_session_start() {
-  local home=$1 root=$2 path=$3 pi_harness=${4:-}
-  if [ -n "$pi_harness" ]; then
-    env -u CLAUDECODE -u GROK_AGENT PI_CODING_AGENT=true FM_PI_HARNESS="$pi_harness" \
-      FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
-      "$SESSION_START"
-  else
-    env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
-      FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
-      "$SESSION_START"
-  fi
+  local home=$1 root=$2 path=$3 selected_harness=${4:-}
+  case "$selected_harness" in
+    omp)
+      env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+        OMPCODE=1 FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
+        "$SESSION_START"
+      ;;
+    pi|pi-signed)
+      env -u OMPCODE -u CLAUDECODE -u GROK_AGENT \
+        PI_CODING_AGENT=true FM_PI_HARNESS="$selected_harness" \
+        FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
+        "$SESSION_START"
+      ;;
+    *)
+      env -u OMPCODE -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+        FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
+        "$SESSION_START"
+      ;;
+  esac
 }
 
 # prepare_session_start_secondmate <name>: a throwaway main home and Pi
@@ -672,6 +713,21 @@ write_pi_loaded_markers() {
   local home=$1 root=$2 pid=$3
   write_pi_watch_loaded_marker "$home" "$root" "$pid"
   write_pi_turnend_loaded_marker "$home" "$root" "$pid"
+}
+
+install_omp_extensions_fixture() {
+  local root=$1
+  mkdir -p "$root/.omp/extensions"
+  cp "$ROOT/.omp/extensions/fm-primary-omp-watch.ts" "$root/.omp/extensions/fm-primary-omp-watch.ts"
+  cp "$ROOT/.omp/extensions/fm-primary-turnend-guard.ts" "$root/.omp/extensions/fm-primary-turnend-guard.ts"
+}
+
+write_omp_loaded_markers() {
+  local home=$1 root=$2 pid=$3 version
+  version=$(hash_file_for_test "$root/.omp/extensions/fm-primary-omp-watch.ts")
+  printf '%s\n%s\n' "$version" "$pid" > "$home/state/.omp-watch-extension-loaded"
+  version=$(hash_file_for_test "$root/.omp/extensions/fm-primary-turnend-guard.ts")
+  printf '%s\n%s\n' "$version" "$pid" > "$home/state/.omp-turnend-extension-loaded"
 }
 
 # --- context digest: absent vs empty vs present -----------------------------
@@ -1877,7 +1933,7 @@ SH
   chmod +x "$nest"
 
   # shellcheck disable=SC2016 # $$ must expand in the launched shell, not here.
-  out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+  out=$(env -u OMPCODE -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
     FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$fakebin:$BASE_PATH" \
     bash -c 'export FM_FAKE_HARNESS_PID=$$; exec "$1" 8 "$2"' _ "$nest" "$SESSION_START")
 
@@ -1913,7 +1969,7 @@ EOF
 
   append_wake "$home/state" signal task-r "done: queued after the re-emit too" || fail "seed second wake failed"
   reemit=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" FM_FAKE_HARNESS_PID=$$ PATH="$fakebin:$BASE_PATH" \
-    env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    env -u OMPCODE -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
     "$SESSION_START" --reemit)
 
   assert_contains "$reemit" "SESSION START (CONTEXT RE-EMIT) - $home" "--reemit did not label itself"
@@ -1938,7 +1994,7 @@ EOF
   git -C "$root" checkout -q -B fm/reemit-tangle
 
   reemit=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$fakebin:$BASE_PATH" \
-    env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    env -u OMPCODE -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
     "$SESSION_START" --reemit)
 
   # A re-emit skips the sweeps because it ALREADY ran them, not because it lacks
@@ -1953,7 +2009,7 @@ EOF
   holder_pid=$!
   printf '%s\n' "$holder_pid" > "$home/state/.lock"
   readonly_out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$fakebin:$BASE_PATH" \
-    env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    env -u OMPCODE -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
     "$SESSION_START" --reemit)
   kill "$holder_pid" 2>/dev/null || true
   wait "$holder_pid" 2>/dev/null || true
@@ -2076,6 +2132,53 @@ EOF
   pass "session start preserves pi-signed primary identity while applying Pi extension guarantees"
 }
 
+test_omp_primary_uses_verified_supervision_extensions() {
+  local rec root home fakebin out
+  rec=$(new_world omp-supervision-block)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_harness "$fakebin" omp
+
+  out=$(FM_FAKE_HARNESS=omp run_session_start "$home" "$root" "$fakebin:$BASE_PATH" omp)
+
+  assert_contains "$out" "SUPERVISION OPERATING INSTRUCTIONS - primary harness: omp" \
+    "session start did not select OMP's verified supervision protocol"
+  assert_contains "$out" "Mode: OMP extension background wake." \
+    "OMP primary did not render its extension-owned supervision protocol"
+  assert_contains "$out" "OMP_WATCH_EXTENSION: not loaded" \
+    "OMP primary skipped extension validation"
+  assert_contains "$out" "restart OMP so $root/.omp/extensions/fm-primary-turnend-guard.ts and $root/.omp/extensions/fm-primary-omp-watch.ts auto-load" \
+    "OMP extension diagnostic did not name both required entrypoints"
+  assert_not_contains "$out" "Mode: Unknown harness fallback." \
+    "OMP primary still received the unknown fallback"
+
+  pass "session start selects OMP's verified supervision protocol and validates both extensions"
+}
+
+
+test_omp_diagnostic_accepts_current_loaded_markers() {
+  local rec root home fakebin out holder_pid
+  rec=$(new_world omp-current-loaded-markers)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+
+  sleep 300 &
+  holder_pid=$!
+  make_fake_ps_omp_holder "$fakebin" "$holder_pid"
+  install_omp_extensions_fixture "$root"
+  write_omp_loaded_markers "$home" "$root" "$holder_pid"
+  out=$(FM_FAKE_HARNESS=omp run_session_start "$home" "$root" "$fakebin:$BASE_PATH" omp)
+  kill "$holder_pid" 2>/dev/null || true
+  wait "$holder_pid" 2>/dev/null || true
+
+  assert_not_contains "$out" "OMP_WATCH_EXTENSION: not loaded" "OMP diagnostic rejected current loaded markers"
+
+  pass "session start accepts current OMP watcher and turn-end markers"
+}
 test_pi_diagnostic_rejects_stale_loaded_marker() {
   local rec root home fakebin out marker holder_pid
   rec=$(new_world pi-stale-loaded-marker)
@@ -2213,6 +2316,8 @@ test_next_step_sources_x_mode_cadence
 test_next_step_afk_delegates_to_daemon
 test_supervision_block_exactly_one_and_pi_diagnostic
 test_pi_signed_primary_uses_pi_extensions_without_identity_normalization
+test_omp_primary_uses_verified_supervision_extensions
+test_omp_diagnostic_accepts_current_loaded_markers
 test_pi_diagnostic_rejects_stale_loaded_marker
 test_pi_diagnostic_accepts_prelock_loaded_marker
 test_pi_diagnostic_rejects_missing_turnend_guard_marker

@@ -81,6 +81,13 @@ test_cross_harness_ordinary_continuation_and_repair_matrix() {
   out=$("$RENDER" --harness pi --repair-line)
   assert_contains "$out" "fm_watch_arm_pi" "pi recovery line lost the extension-owned repair tool"
 
+  out=$("$RENDER" --harness omp)
+  ordinary=$(printf '%s\n' "$out" | grep -F -- '- Ordinary wake:')
+  assert_contains "$ordinary" "OMP extension already owns watcher continuity" "OMP ordinary-wake line does not leave continuity to the extension"
+  assert_not_contains "$ordinary" "fm_watch_arm_omp" "OMP ordinary-wake line incorrectly calls the recovery tool"
+  out=$("$RENDER" --harness omp --repair-line)
+  assert_contains "$out" "fm_watch_arm_omp" "OMP recovery line lost the extension-owned repair tool"
+
   out=$("$RENDER" --harness opencode)
   ordinary=$(printf '%s\n' "$out" | grep -F -- '- Ordinary wake:')
   assert_contains "$ordinary" "plugin already owns watcher continuity" "opencode ordinary-wake line does not leave continuity to the plugin"
@@ -176,6 +183,24 @@ test_pi_snippet_uses_effective_extension_path() {
   pass "pi supervision snippet renders the effective extension path"
 }
 
+test_omp_snippet_uses_effective_extension_path() {
+  local home out turnend watch
+  home="$TMP_ROOT/omp-home"
+  turnend="$ROOT/.omp/extensions/fm-primary-turnend-guard.ts"
+  watch="$ROOT/.omp/extensions/fm-primary-omp-watch.ts"
+  mkdir -p "$home/state" "$home/config"
+  out=$(FM_HOME="$home" "$RENDER" --harness omp)
+  assert_contains "$out" "primary harness: omp" "OMP supervision heading missing"
+  assert_contains "$out" "Mode: OMP extension background wake." "OMP snippet missing"
+  assert_contains "$out" "-e $turnend -e $watch" "OMP snippet did not render both effective extension launch paths"
+  assert_contains "$out" "The turn-end guard extension lives at \`$turnend\`" "OMP snippet did not render the turn-end guard extension path"
+  assert_contains "$out" "The watcher extension lives at \`$watch\`" "OMP snippet did not render the watcher extension path"
+  assert_not_contains "$out" "__FM_OMP_EXT__" "renderer leaked the OMP extension path placeholder"
+  assert_not_contains "$out" "__FM_OMP_TURNEND_EXT__" "renderer leaked the OMP turn-end extension path placeholder"
+  assert_not_contains "$out" "Mode: Unknown harness fallback." "OMP still received the unknown supervision protocol"
+  pass "OMP supervision snippet renders the effective extension paths and verified protocol"
+}
+
 test_selected_harness_block_only
 test_unknown_fallback
 test_conditional_stanzas
@@ -185,3 +210,4 @@ test_pi_signed_preserves_identity_with_pi_supervision_protocol
 test_grok_is_background_notify
 test_grok_command_sources_effective_config
 test_pi_snippet_uses_effective_extension_path
+test_omp_snippet_uses_effective_extension_path

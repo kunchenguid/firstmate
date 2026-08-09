@@ -7,7 +7,7 @@ Firstmate ships two session-open tiers, and the tier is a property of the harnes
 
 | Tier | What the adapter does | Used by |
 | --- | --- | --- |
-| Run | Executes `bin/fm-session-start.sh` in the hook and lets its ordered digest land in model context before the first turn. | Claude, `codex exec`, Pi / pi-signed |
+| Run | Executes `bin/fm-session-start.sh` in the hook and lets its ordered digest land in model context before the first turn. | Claude, `codex exec`, Pi / pi-signed, OMP |
 | Nudge | Asks the agent to run the digest through the native adapter or the tracked session-start instruction. | Grok, OpenCode, Codex interactive TUI, and run-tier sources routed to the nudge |
 
 The run tier exists because the nudge can only ask.
@@ -70,12 +70,13 @@ A lock another session holds and a truncated digest therefore surface as digest 
 | Codex exec | Run | `.codex/hooks.json` anchors to the hook process working directory, verifies a Firstmate-shaped hook-bearing root, and pipes the hook payload into the wrapper with a 180s timeout. | Native stdout context injection is supported under `codex exec`. |
 | Codex interactive TUI | Nudge | The tracked `AGENTS.md` session-start instruction and Ahoy step-zero fallback remain visible when the project hook does not fire. | Codex 0.146.0 does not fire the tracked project `SessionStart` hook in its interactive TUI. Firstmate ships no global hook and does not depend on one. |
 | Pi / pi-signed | Run | `.pi/extensions/fm-primary-turnend-guard.ts` maps `session_start` reasons `startup`, `new`, `resume`, and `fork` onto wrapper sources, handles `session_compact` as the compaction equivalent, and injects the output with `pi.sendMessage`. | The custom message reaches model context without racing an initial positional prompt. Pi's `reload` reason is deliberately unmapped, as it always was. |
+| OMP | Run | `.omp/extensions/fm-primary-turnend-guard.ts` reuses the Pi-family delivery core, maps initial `session_start` to `startup`, maps `session_switch` reasons `new`, `resume`, and `fork`, and handles `session_compact`; it injects output with `pi.sendMessage`. | OMP's extension API is a strict event superset of Pi's compatibility type; `agent_end` replaces Pi's `agent_settled` for the turn-end path. |
 | OpenCode | Nudge | `.opencode/plugins/fm-primary-sessionstart-nudge.js` listens for `session.created`, runs once per session id, and calls `client.session.promptAsync` only when the wrapper prints a nudge. | Interactive TUI delivery is supported; headless `opencode run` is intentionally fail-open because the process can exit before the queued turn. That early exit is also why OpenCode cannot use the run tier. |
 | Grok | Nudge | `.grok/hooks/fm-primary-sessionstart-nudge.json` registers a project `SessionStart` hook and invokes the wrapper through inline-defaulted `${GROK_WORKSPACE_ROOT:-}`. | The project hook runs when the checkout is trusted, but Grok currently discards hook stdout from model context, so this path is intentionally fail-open and cannot use the run tier. |
 
-Pi is the only adapter that injects a message rather than hook stdout, so whatever it injects must carry operational provenance or the Ahoy skill would have to guess whether it was captain-authored.
-The extension therefore encodes an unencoded digest as `session-start` operational input before sending it, and leaves the already-encoded nudge alone.
-It streams the hook to completion and retains at most 512 KiB for message delivery; this approved containment keeps the prefix and appends a loud `PI SESSION-START DELIVERY TRUNCATED` marker with direct-inspection guidance whenever the digest is incomplete.
+Pi-family adapters are the only adapters that inject a message rather than hook stdout, so whatever they inject must carry operational provenance or the Ahoy skill would have to guess whether it was captain-authored.
+The shared extension core therefore encodes an unencoded digest as `session-start` operational input before sending it, and leaves the already-encoded nudge alone.
+It streams the hook to completion and retains at most 512 KiB for message delivery; this approved containment keeps the prefix and appends a loud harness-named `SESSION-START DELIVERY TRUNCATED` marker with direct-inspection guidance whenever the digest is incomplete.
 
 The OpenCode nudge runs only on `session.created`.
 The watcher-arm and turn-end plugins run later on `session.idle`, and the guard lets the watcher coordinator act first, so the plugins do not race for one lifecycle event.
