@@ -38,7 +38,11 @@ Because no supported configuration seam exists, firstmate intercepts `gh` on the
   When configured, it removes ambient `GH_TOKEN` and `GITHUB_TOKEN` before starting that prefix because `gh` gives `GH_TOKEN` precedence, so a daemon's inherited token cannot override the injected credential.
   With no such file it execs the command unchanged, so an unconfigured home behaves exactly as before.
 - `bin/fm-gh-shim.sh` is installed as a symlink named `gh`.
-  It routes `gh pr create` and `gh pr edit` through `fm-gh.sh`, sends only no-mistakes' JSON `gh pr checks` shape through the bounded CI fallback, and execs the real `gh` directly for every other call.
+  It routes `gh pr create` and `gh pr edit` through `fm-gh.sh`.
+  On either credential-routed mutation, a caller-supplied `--repo` or `-R` wins unchanged.
+  Otherwise, the shim derives `owner/name` from the working checkout's `origin` remote and appends `--repo <owner/name>` before invoking `gh`.
+  If that remote cannot be resolved to an owner/name pair, it refuses the mutation rather than letting `gh` infer a fork's parent repository.
+  It sends only no-mistakes' JSON `gh pr checks` shape through the bounded CI fallback, and execs the real `gh` directly for every other call.
 - `bin/fm-gh-ci-fallback.sh` first runs the real `gh pr checks` with the ambient narrow token.
   Only the known HTTP 403 personal-token denial for check-runs causes it to resolve the PR's exact head SHA and read every workflow run filtered by that SHA with the same token; it never calls `fm-gh.sh` or exposes `config/gh-credential` to CI reads.
   Successful, failed, cancelled, skipped, and pending workflow conclusions are returned in the JSON check shape no-mistakes already consumes, while no exact-head workflow runs emits an explicit pending placeholder rather than a false green verdict.
