@@ -3154,7 +3154,7 @@ test_omp_idle_registration_over_a_lone_shell_is_no_agent() {
   out=$(omp_agent_state_verdict "$TMP_ROOT/omp-husk-idle" omp idle "$(omp_lone_shell_process_info 4242)")
   [ "$out" = no-agent ] \
     || fail "an OMP registration left idle over the bare worktree shell must be a reclaimable husk, got '$out'"
-  out=$(omp_agent_state_verdict "$TMP_ROOT/omp-husk-done" omp done "$(omp_lone_shell_process_info 4242)")
+  out=$(omp_agent_state_verdict "$TMP_ROOT/omp-husk-done" omp "done" "$(omp_lone_shell_process_info 4242)")
   [ "$out" = no-agent ] \
     || fail "the same stale OMP registration reported done must also be a husk, got '$out'"
   pass "herdr agent state: a stale OMP registration over the bare worktree shell classifies no-agent"
