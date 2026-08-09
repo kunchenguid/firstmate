@@ -70,6 +70,8 @@ Agent liveness and composer safety are separate checks.
 The tmux reader is a thin adapter over the fleet-wide classifier in `bin/fm-composer-lib.sh`: it contributes one styled full-pane capture, the `#{cursor_y}` cursor row, and a Pi foreground-process identity probe, and the shape containing the cursor - a complete bordered box (titled bottom borders tolerated), a bare agent-glyph row with its wrapped input, opencode's left bar, or Pi's identity-corroborated separator pair - decides the verdict.
 Real text in an identified shape is pending, while only positively proven emptiness reads empty.
 A blank or otherwise unidentified cursor row is `unknown` and every consumer defers: this strict container-proof rule replaced the earlier permissive blank-row reading, so a modal dialog, a dead shell between stale rules, or a mid-redraw pane is never an injection target.
+The box-geometry probe that proves a row blank to the border's own width uses that same owner's Unicode-whitespace normalization and its single prompt-glyph declarations, so a non-ASCII separator or an accepted prompt glyph can no longer leave the content classifier reading empty while the structure reads ambiguous.
+[herdr-backend.md](herdr-backend.md#composer-and-injection-safety) owns the shared content contract, including the whitespace boundary.
 The shared classifier accepts a shell glyph as an empty agent composer only inside a bordered container.
 A bare shell prompt is `unknown`, so away-mode escalation is never injected into a dead shell.
 
@@ -103,6 +105,7 @@ tests/fm-backend-tmux-smoke.test.sh
 tests/fm-tmux-agent-liveness.test.sh
 tests/fm-harness-liveness-drift-live-e2e.test.sh
 tests/fm-composer-ghost.test.sh
+tests/fm-composer-harness-drift-live-e2e.test.sh
 tests/fm-kimi-harness.test.sh
 tests/fm-muse-harness.test.sh
 tests/fm-tmux-submit-busy.test.sh

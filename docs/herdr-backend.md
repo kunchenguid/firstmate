@@ -236,6 +236,11 @@ ANSI capture preserves de-emphasized placeholder style.
 `bin/fm-composer-lib.sh` is the fleet-wide owner that strips dim or faint runs and dark truecolor placeholders while retaining bright typed input.
 If the ANSI capture ever fails, the plain fallback declares itself unstyled and the classifier degrades a glyph row carrying trailing text to `unknown` instead of misreading ghost suggestions as typed input, which safely defers injection and eventually raises the wedge alarm.
 
+Separator whitespace is normalized rather than enumerated per harness.
+The shared owner's structural row scan and its content classifier alike map each code point carrying the Unicode property `White_Space=Yes` onto an ASCII space before trimming, border stripping, and glyph comparison, so a prompt glyph followed only by a non-ASCII space - claude draws U+00A0 NO-BREAK SPACE - is an affirmatively empty composer instead of pending input.
+The predicate is not otherwise relaxed: any non-whitespace character anywhere is still pending, and U+200B ZERO WIDTH SPACE carries `White_Space=No`, so it stays pending.
+[`verification/runtime-backends.md`](verification/runtime-backends.md#composer-separator-rendering) owns the per-harness captured rows and the refresh command.
+
 A bare shell prompt is never an empty agent composer.
 Away-mode injection proceeds only on an affirmative `empty` result, never on unknown.
 This prevents a dead agent pane from receiving and possibly executing an escalation as shell input.
