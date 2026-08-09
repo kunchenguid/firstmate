@@ -11,6 +11,7 @@ REQUEST="$TEST_TMP/request.json"
 UPLOADED_REQUEST="$TEST_TMP/uploaded-request.json"
 UPLOADED_REQUEST_ALT="$TEST_TMP/uploaded-request-alt.json"
 COST_RECEIPT="$TEST_TMP/cost-receipt.json"
+COST_RECEIPT_COPY="$TEST_TMP/cost-receipt-copy.json"
 SENTINEL="$TEST_TMP/shell-injection-ran"
 REFERENCE="$TEST_TMP/reference.png"
 
@@ -209,6 +210,50 @@ fi
 [ ! -e "$FAKE_LOG" ] || fail "rejected audio-producing video contacted the Higgsfield CLI"
 pass "video models without an audio-off control are rejected"
 
+python3 - "$TEST_TMP/grok-upload-request.json" "$REFERENCE" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+request = {
+    "job_type": "grok_video",
+    "prompt": "animate this image without sound",
+    "parameters": {},
+    "media": [{"flag": "image", "value": sys.argv[2]}],
+}
+Path(sys.argv[1]).write_text(json.dumps(request), encoding="utf-8")
+PY
+
+if PATH="$FAKE_BIN:$PATH" HF_FAKE_LOG="$FAKE_LOG" \
+  python3 "$WRAPPER" plan "$TEST_TMP/grok-upload-request.json" \
+  > "$TEST_TMP/grok-upload-plan.out" 2> "$TEST_TMP/grok-upload-plan.err"; then
+  fail "plan accepted a native-audio model for external upload"
+fi
+
+python3 - "$TEST_TMP/grok-cost-request.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+request = {
+    "job_type": "grok_video",
+    "prompt": "animate a silent landscape",
+    "parameters": {},
+    "media": [],
+}
+Path(sys.argv[1]).write_text(json.dumps(request), encoding="utf-8")
+PY
+
+if PATH="$FAKE_BIN:$PATH" HF_FAKE_LOG="$FAKE_LOG" \
+  python3 "$WRAPPER" cost "$TEST_TMP/grok-cost-request.json" \
+  --receipt "$TEST_TMP/grok-cost-receipt.json" \
+  > "$TEST_TMP/grok-cost.out" 2> "$TEST_TMP/grok-cost.err"; then
+  fail "cost accepted a native-audio model for generation"
+fi
+[ ! -e "$FAKE_LOG" ] || fail "rejected native-audio model contacted the Higgsfield CLI"
+[ ! -e "$TEST_TMP/grok-cost-receipt.json" ] || fail "rejected native-audio model created a cost receipt"
+pass "native-audio models are rejected before upload or generation"
+
 if PATH="$FAKE_BIN:$PATH" HF_FAKE_LOG="$FAKE_LOG" \
   python3 "$WRAPPER" upload "$REQUEST" --approval-token upload:wrong --output "$UPLOADED_REQUEST" \
   > "$TEST_TMP/bad-upload.out" 2> "$TEST_TMP/bad-upload.err"; then
@@ -400,14 +445,16 @@ receipt = json.load(open(sys.argv[2], encoding="utf-8"))
 assert cost["credits"] == 2
 assert cost["job_count"] == 1
 assert cost["parameters"] == {"aspect_ratio": "1:1", "generate_audio": "false"}
-assert receipt["credits_text"] == "2"
-assert receipt["status"] == "pending"
+assert set(receipt) == {"cost_approval_capability"}
+assert receipt["cost_approval_capability"].startswith("cost:v1:")
 PY
-pass "cost discloses silent parameters and writes a pending receipt"
+pass "cost discloses silent parameters and writes an opaque capability"
+
+cp "$COST_RECEIPT" "$COST_RECEIPT_COPY"
 
 set +e
 PATH="$FAKE_BIN:$PATH" HF_FAKE_LOG="$FAKE_LOG" HF_CREATE_DELAY=0.2 \
-  python3 "$WRAPPER" run "$UPLOADED_REQUEST" --cost-receipt "$COST_RECEIPT" \
+  python3 "$WRAPPER" run "$UPLOADED_REQUEST" --cost-receipt "$COST_RECEIPT_COPY" \
   > "$TEST_TMP/run-one.json" 2> "$TEST_TMP/run-one.err" &
 RUN_PID_ONE=$!
 PATH="$FAKE_BIN:$PATH" HF_FAKE_LOG="$FAKE_LOG" HF_CREATE_DELAY=0.2 \
@@ -428,7 +475,7 @@ else
   fail "cost receipt did not authorize exactly one concurrent run"
 fi
 
-python3 - "$FAKE_LOG" "$SENTINEL" "$COST_RECEIPT" "$RUN_RESULT" <<'PY' || fail "run did not preserve safety boundaries"
+python3 - "$FAKE_LOG" "$SENTINEL" "$COST_RECEIPT" "$COST_RECEIPT_COPY" "$RUN_RESULT" <<'PY' || fail "run did not preserve safety boundaries"
 import json
 import os
 import sys
@@ -450,12 +497,14 @@ assert len(prompt_args) == 1
 assert "$(touch " in prompt_args[0]
 assert not os.path.exists(sys.argv[2])
 receipt = json.load(open(sys.argv[3], encoding="utf-8"))
-assert receipt["status"] == "consumed"
-result = json.load(open(sys.argv[4], encoding="utf-8"))
+receipt_copy = json.load(open(sys.argv[4], encoding="utf-8"))
+assert receipt == receipt_copy
+assert set(receipt) == {"cost_approval_capability"}
+result = json.load(open(sys.argv[5], encoding="utf-8"))
 assert result["credits"] == 2
 assert result["result"]["status"] == "completed"
 PY
-pass "one locked receipt authorizes one silent paid run"
+pass "copied capabilities share one locked paid-run approval"
 
 CALLS_BEFORE=$(wc -l < "$FAKE_LOG")
 if PATH="$FAKE_BIN:$PATH" HF_FAKE_LOG="$FAKE_LOG" \
@@ -463,8 +512,13 @@ if PATH="$FAKE_BIN:$PATH" HF_FAKE_LOG="$FAKE_LOG" \
   > "$TEST_TMP/reuse.out" 2> "$TEST_TMP/reuse.err"; then
   fail "run reused a consumed cost receipt"
 fi
+if PATH="$FAKE_BIN:$PATH" HF_FAKE_LOG="$FAKE_LOG" \
+  python3 "$WRAPPER" run "$UPLOADED_REQUEST" --cost-receipt "$COST_RECEIPT_COPY" \
+  > "$TEST_TMP/reuse-copy.out" 2> "$TEST_TMP/reuse-copy.err"; then
+  fail "run reused a copied cost capability"
+fi
 CALLS_AFTER=$(wc -l < "$FAKE_LOG")
 [ "$CALLS_BEFORE" -eq "$CALLS_AFTER" ] || fail "receipt reuse contacted the Higgsfield CLI"
-pass "a cost receipt cannot authorize a retry"
+pass "a cost capability and its copies cannot authorize a retry"
 
 printf 'all higgsfield safe-generation tests passed\n'

@@ -56,7 +56,13 @@ AUDIO_OFF_BY_JOB_TYPE = {
     "seedance_2_0_mini": {"generate_audio": "false"},
     "veo3_1_lite": {"generate_audio": "false"},
 }
-BLOCKED_AUDIO_JOB_TYPES = {"explainer_video", "veo3", "veo3_1", "video_explainer"}
+NATIVE_AUDIO_JOB_TYPES_WITHOUT_OFF = {
+    "explainer_video",
+    "grok_video",
+    "veo3",
+    "veo3_1",
+    "video_explainer",
+}
 RESERVED_PARAMS = MEDIA_FLAGS | DISALLOWED_MEDIA_PARAMS | {
     "json",
     "no-color",
@@ -143,7 +149,7 @@ def _normalize_request(raw: Any) -> dict[str, Any]:
         raise PolicyError("job_type must contain only lowercase letters, digits, dashes, or underscores")
     if job_type.startswith(BLOCKED_MODEL_PREFIXES):
         raise PolicyError(f"model {job_type!r} is outside the hardened generation boundary")
-    if job_type in BLOCKED_AUDIO_JOB_TYPES:
+    if job_type in NATIVE_AUDIO_JOB_TYPES_WITHOUT_OFF:
         raise PolicyError(f"model {job_type!r} cannot enforce the no-audio boundary")
 
     prompt = raw.get("prompt")
@@ -417,6 +423,80 @@ def _create_upload_approval(
     return token
 
 
+def _cost_capability(approval_path: Path, secret: str) -> str:
+    encoded_path = base64.urlsafe_b64encode(
+        str(approval_path).encode("utf-8")
+    ).decode("ascii")
+    return f"cost:v1:{encoded_path.rstrip('=')}:{secret}"
+
+
+def _decode_cost_capability(capability: str) -> tuple[Path, str]:
+    parts = capability.split(":", 3)
+    if (
+        len(parts) != 4
+        or parts[:2] != ["cost", "v1"]
+        or not parts[2]
+        or len(parts[3]) < 32
+    ):
+        raise PolicyError("cost approval is invalid or already consumed")
+    try:
+        encoded_path = parts[2] + "=" * (-len(parts[2]) % 4)
+        path_text = base64.urlsafe_b64decode(encoded_path.encode("ascii")).decode("utf-8")
+    except (UnicodeError, ValueError) as exc:
+        raise PolicyError("cost approval is invalid or already consumed") from exc
+    approval_path = Path(path_text)
+    _require_temporary_input(approval_path, "cost approval")
+    if approval_path.name != "approval.json" or not approval_path.parent.name.startswith(
+        "higgsfield-cost-approval."
+    ):
+        raise PolicyError("cost approval is invalid or already consumed")
+    return approval_path, parts[3]
+
+
+def _create_cost_approval(
+    visible_path: Path,
+    request: dict[str, Any],
+    credits: Any,
+    credits_text: str,
+) -> None:
+    approval_directory = Path(tempfile.mkdtemp(prefix="higgsfield-cost-approval."))
+    approval_path = approval_directory / "approval.json"
+    secret = secrets.token_urlsafe(32)
+    capability = _cost_capability(approval_path, secret)
+    signed = {
+        "capability_sha256": hashlib.sha256(capability.encode("utf-8")).hexdigest(),
+        "credits": credits,
+        "credits_text": credits_text,
+        "request_digest": _digest(request),
+        "status": "pending",
+    }
+    approval = {
+        **signed,
+        "approval_hmac": hmac.new(
+            secret.encode("utf-8"), _canonical_bytes(signed), hashlib.sha256
+        ).hexdigest(),
+    }
+    try:
+        _write_private_json(approval_path, approval)
+        _write_private_json(visible_path, {"cost_approval_capability": capability})
+    except BaseException:
+        approval_path.unlink(missing_ok=True)
+        approval_directory.rmdir()
+        raise
+
+
+def _read_cost_capability(path: Path) -> tuple[Path, str, str]:
+    _require_temporary_input(path, "cost receipt")
+    visible = _read_json(path, "cost receipt")
+    if not isinstance(visible, dict) or set(visible) != {"cost_approval_capability"}:
+        raise PolicyError("cost receipt is invalid or already consumed")
+    capability = visible.get("cost_approval_capability")
+    if not isinstance(capability, str):
+        raise PolicyError("cost receipt is invalid or already consumed")
+    approval_path, secret = _decode_cost_capability(capability)
+    return approval_path, secret, capability
+
+
 @contextmanager
 def _locked_json(path: Path, label: str) -> Iterator[tuple[TextIO, Any]]:
     _require_temporary_input(path, label)
@@ -650,13 +730,7 @@ def command_cost(args: argparse.Namespace) -> None:
     receipt_path = _temporary_output(args.receipt, "cost receipt")
     credits, credits_text = _credits(request)
     digest = _digest(request)
-    receipt = {
-        "credits": credits,
-        "credits_text": credits_text,
-        "request_digest": digest,
-        "status": "pending",
-    }
-    _write_private_json(receipt_path, receipt)
+    _create_cost_approval(receipt_path, request, credits, credits_text)
     _json_output(
         {
             "action": "cost",
@@ -675,26 +749,59 @@ def command_run(args: argparse.Namespace) -> None:
     request = _load_request(args.request)
     if _local_upload_paths(request):
         raise PolicyError("run refuses local paths; run the approved upload phase first")
-    receipt_path = Path(args.cost_receipt)
+    approval_path, secret, capability = _read_cost_capability(Path(args.cost_receipt))
     digest = _digest(request)
-    with _locked_json(receipt_path, "cost receipt") as (receipt_handle, receipt):
-        if not isinstance(receipt, dict) or receipt.get("status") != "pending":
-            raise PolicyError("cost receipt is invalid or already consumed")
-        if not hmac.compare_digest(str(receipt.get("request_digest", "")), digest):
-            raise PolicyError("cost receipt does not match the exact request")
+    with _locked_json(approval_path, "cost approval") as (approval_handle, approval):
+        if not isinstance(approval, dict) or set(approval) != {
+            "approval_hmac",
+            "capability_sha256",
+            "credits",
+            "credits_text",
+            "request_digest",
+            "status",
+        }:
+            raise PolicyError("cost approval is invalid or already consumed")
+        signed = {
+            "capability_sha256": approval.get("capability_sha256"),
+            "credits": approval.get("credits"),
+            "credits_text": approval.get("credits_text"),
+            "request_digest": approval.get("request_digest"),
+            "status": approval.get("status"),
+        }
+        expected_hmac = hmac.new(
+            secret.encode("utf-8"), _canonical_bytes(signed), hashlib.sha256
+        ).hexdigest()
+        if not hmac.compare_digest(
+            str(approval.get("approval_hmac", "")), expected_hmac
+        ) or not hmac.compare_digest(
+            str(approval.get("capability_sha256", "")),
+            hashlib.sha256(capability.encode("utf-8")).hexdigest(),
+        ):
+            raise PolicyError("cost approval is invalid or already consumed")
+        if approval.get("status") != "pending":
+            raise PolicyError("cost approval is invalid or already consumed")
+        if not hmac.compare_digest(str(approval.get("request_digest", "")), digest):
+            raise PolicyError("cost approval does not match the exact request")
         _, current_credits_text = _credits(request)
         if not hmac.compare_digest(
-            str(receipt.get("credits_text", "")), current_credits_text
+            str(approval.get("credits_text", "")), current_credits_text
         ):
             raise PolicyError("credit cost changed; run cost again and obtain new approval")
-        consumed = dict(receipt)
-        consumed["status"] = "consumed"
-        _rewrite_locked_json(receipt_handle, consumed)
+        consumed_signed = {**signed, "status": "consumed"}
+        consumed = {
+            **consumed_signed,
+            "approval_hmac": hmac.new(
+                secret.encode("utf-8"),
+                _canonical_bytes(consumed_signed),
+                hashlib.sha256,
+            ).hexdigest(),
+        }
+        _rewrite_locked_json(approval_handle, consumed)
         result = _run_cli(_generation_arguments(request, "create"), timeout=1_500)
     _json_output(
         {
             "action": "run",
-            "credits": receipt["credits"],
+            "credits": approval["credits"],
             "job_count": 1,
             "job_type": request["job_type"],
             "request_digest": digest,
