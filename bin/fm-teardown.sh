@@ -2213,7 +2213,7 @@ $session	$lock_path"
 }
 
 preflight_firstmate_home_herdr_children() {  # <home>
-  local home=$1 sub_state child_meta child_id child_backend child_target child_kind child_home child_wt
+  local home=$1 sub_state child_meta child_id child_backend child_target child_cleanup child_session child_kind child_home child_wt
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
@@ -2224,6 +2224,15 @@ preflight_firstmate_home_herdr_children() {  # <home>
     child_target=$FM_BACKEND_VALIDATED_TARGET
     if [ "$child_backend" = herdr ]; then
       teardown_herdr_preflight_target "$child_target" "$child_id" || return 1
+      fm_backend_herdr_parse_target "$child_target" || return 1
+      child_session=$FM_BACKEND_HERDR_SESSION
+      child_cleanup=$(meta_value "$child_meta" herdr_cleanup_endpoint)
+      if [ -n "$child_cleanup" ]; then
+        [ "$child_cleanup" != "$child_target" ] || return 1
+        teardown_herdr_preflight_target "$child_cleanup" "$child_id" || return 1
+        fm_backend_herdr_parse_target "$child_cleanup" || return 1
+        [ "$FM_BACKEND_HERDR_SESSION" = "$child_session" ] || return 1
+      fi
     fi
     child_kind=$(meta_value "$child_meta" kind)
     [ -n "$child_kind" ] || child_kind=ship
@@ -2237,7 +2246,7 @@ preflight_firstmate_home_herdr_children() {  # <home>
 }
 
 cleanup_firstmate_home_children() {
-  local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_return_rc child_busy_gen
+  local home=$1 sub_state child_meta child_id child_t child_cleanup child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_return_rc child_busy_gen
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
@@ -2270,6 +2279,19 @@ cleanup_firstmate_home_children() {
         if ! fm_backend_herdr_endpoint_confirmed_gone "$child_t"; then
           echo "error: herdr pane $child_t for child $child_id is not confirmed gone; retaining that child's durable identity records and stopping forced cleanup" >&2
           return 1
+        fi
+        child_cleanup=$(meta_value "$child_meta" herdr_cleanup_endpoint)
+        if [ -n "$child_cleanup" ]; then
+          fm_backend_herdr_parse_target "$child_cleanup" || return 1
+          if ! teardown_herdr_session_lock_held "$FM_BACKEND_HERDR_SESSION"; then
+            echo "error: herdr session presentation lock is not held for child $child_id's pending cleanup; retaining that child's durable identity records and stopping forced cleanup" >&2
+            return 1
+          fi
+          fm_backend_herdr_kill_serialized "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" 2>/dev/null || true
+          if ! fm_backend_herdr_endpoint_confirmed_gone "$child_cleanup"; then
+            echo "error: pending herdr pane $child_cleanup for child $child_id is not confirmed gone; retaining that child's durable identity records and stopping forced cleanup" >&2
+            return 1
+          fi
         fi
       elif [ "$child_backend" = zellij ]; then
         # Zellij titles are scoped by the owning home tag, so forced secondmate
@@ -2463,11 +2485,25 @@ fi
 # refuses before any destructive step.
 TEARDOWN_HERDR_SESSION=
 TEARDOWN_HERDR_PANE=
+TEARDOWN_HERDR_CLEANUP_TARGET=
+TEARDOWN_HERDR_CLEANUP_SESSION=
+TEARDOWN_HERDR_CLEANUP_PANE=
 if [ "$BACKEND" = herdr ]; then
   teardown_herdr_preflight_target "$T" "$ID" || exit 1
   fm_backend_herdr_parse_target "$T" || exit 1
   TEARDOWN_HERDR_SESSION=$FM_BACKEND_HERDR_SESSION
   TEARDOWN_HERDR_PANE=$FM_BACKEND_HERDR_PANE
+  TEARDOWN_HERDR_CLEANUP_TARGET=$(meta_value "$META" herdr_cleanup_endpoint)
+  if [ -n "$TEARDOWN_HERDR_CLEANUP_TARGET" ]; then
+    [ "$TEARDOWN_HERDR_CLEANUP_TARGET" != "$T" ] \
+      || { echo "error: pending Herdr cleanup endpoint duplicates task endpoint for $ID; nothing was changed" >&2; exit 1; }
+    teardown_herdr_preflight_target "$TEARDOWN_HERDR_CLEANUP_TARGET" "$ID" || exit 1
+    fm_backend_herdr_parse_target "$TEARDOWN_HERDR_CLEANUP_TARGET" || exit 1
+    TEARDOWN_HERDR_CLEANUP_SESSION=$FM_BACKEND_HERDR_SESSION
+    TEARDOWN_HERDR_CLEANUP_PANE=$FM_BACKEND_HERDR_PANE
+    [ "$TEARDOWN_HERDR_CLEANUP_SESSION" = "$TEARDOWN_HERDR_SESSION" ] \
+      || { echo "error: pending Herdr cleanup endpoint belongs to another session for $ID; nothing was changed" >&2; exit 1; }
+  fi
 fi
 
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
@@ -2560,6 +2596,14 @@ elif [ "$BACKEND" = herdr ]; then
 elif [ "$BACKEND" != orca ]; then
   fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
 fi
+if [ -n "$TEARDOWN_HERDR_CLEANUP_TARGET" ]; then
+  if teardown_herdr_session_lock_held "$TEARDOWN_HERDR_CLEANUP_SESSION"; then
+    fm_backend_herdr_kill_serialized \
+      "$TEARDOWN_HERDR_CLEANUP_SESSION" "$TEARDOWN_HERDR_CLEANUP_PANE" 2>/dev/null || true
+  else
+    echo "warning: herdr session presentation lock path is unavailable; skipping pending endpoint cleanup rather than closing unlocked" >&2
+  fi
+fi
 if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
   if [ "$(fm_backend_herdr_pane_agent_state "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_PANE")" = dead ]; then
     rm -f "$HERDR_PRESENTATION_JOURNAL"
@@ -2584,6 +2628,11 @@ if [ "$BACKEND" = herdr ]; then
   fi
   if ! fm_backend_herdr_endpoint_confirmed_gone "$T"; then
     echo "error: herdr pane $T for $ID is not confirmed gone after its close was refused, skipped, or failed; retaining every durable task record - rerun teardown once the close can run under the session lock" >&2
+    exit 1
+  fi
+  if [ -n "$TEARDOWN_HERDR_CLEANUP_TARGET" ] \
+     && ! fm_backend_herdr_endpoint_confirmed_gone "$TEARDOWN_HERDR_CLEANUP_TARGET"; then
+    echo "error: pending herdr pane $TEARDOWN_HERDR_CLEANUP_TARGET for $ID is not confirmed gone; retaining every durable task record" >&2
     exit 1
   fi
 fi

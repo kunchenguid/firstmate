@@ -2268,7 +2268,6 @@ spawn_rollback_task_state() {  # <detail> [preserve-endpoint]
   local detail=$1 preserve_endpoint=${2:-0} endpoint_ready=0 endpoint_state composer_state
   local exit_verdict i old_target new_target new_tab new_pane out journal meta_lock meta_tmp
   local before_tabs after_tabs
-  local journal_updated=0
   echo "failed: $detail" >> "$STATE/$ID.status" 2>/dev/null || true
   echo "error: $detail" >&2
 
@@ -2343,18 +2342,26 @@ spawn_rollback_task_state() {  # <detail> [preserve-endpoint]
             else error("missing result.tabs") end' 2>/dev/null) || return 1
           out=$(fm_backend_herdr_cli "$HERDR_SES" tab create \
             --workspace "$HERDR_WORKSPACE_ID" --cwd "$WT" --label "$W" --no-focus 2>/dev/null) \
-            || return 1
-          new_tab=$(printf '%s' "$out" | jq -r '.result.tab.tab_id // empty' 2>/dev/null)
-          new_pane=$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id // empty' 2>/dev/null)
+            || out=
+          new_tab=$(printf '%s' "$out" | jq -r '.result.tab.tab_id // empty' 2>/dev/null) \
+            || new_tab=
+          new_pane=$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id // empty' 2>/dev/null) \
+            || new_pane=
           if [ -z "$new_tab" ]; then
-            out=$(fm_backend_herdr_cli "$HERDR_SES" tab list \
-              --workspace "$HERDR_WORKSPACE_ID" 2>/dev/null) || return 1
-            after_tabs=$(printf '%s' "$out" | jq -c \
-              --arg label "$W" 'if (.result.tabs | type) == "array" then \
-                [.result.tabs[] | select(.label == $label) | .tab_id] \
-              else error("missing result.tabs") end' 2>/dev/null) || return 1
-            new_tab=$(jq -nr --argjson before "$before_tabs" --argjson after "$after_tabs" \
-              '$after - $before | if length == 1 then .[0] else empty end')
+            i=0
+            while [ "$i" -lt 3 ] && [ -z "$new_tab" ]; do
+              if out=$(fm_backend_herdr_cli "$HERDR_SES" tab list \
+                --workspace "$HERDR_WORKSPACE_ID" 2>/dev/null) \
+                && after_tabs=$(printf '%s' "$out" | jq -c \
+                  --arg label "$W" 'if (.result.tabs | type) == "array" then \
+                    [.result.tabs[] | select(.label == $label) | .tab_id] \
+                  else error("missing result.tabs") end' 2>/dev/null); then
+                new_tab=$(jq -nr --argjson before "$before_tabs" --argjson after "$after_tabs" \
+                  '$after - $before | if length == 1 then .[0] else empty end') || new_tab=
+              fi
+              i=$((i + 1))
+              [ -n "$new_tab" ] || sleep 0.1
+            done
           fi
           if [ -z "$new_pane" ] && [ -n "$new_tab" ]; then
             new_pane=$(fm_backend_herdr_pane_for_tab \
@@ -2385,22 +2392,7 @@ spawn_rollback_task_state() {  # <detail> [preserve-endpoint]
             return 1
           fi
           journal=$(fm_backend_herdr_projection_journal_path "$STATE" "$ID" 2>/dev/null || true)
-          if [ -n "$journal" ] && [ -e "$journal" ]; then
-            if ! fm_backend_herdr_projection_journal_replace_endpoint \
-              "$journal" "$ID" "$HERDR_TAB_ID" "$HERDR_PANE_ID" "$new_tab" "$new_pane"; then
-              fm_backend_kill "$BACKEND" "$new_target" 2>/dev/null || true
-              fm_backend_endpoint_confirmed_gone "$BACKEND" "$new_target" || return 1
-              return 1
-            fi
-            journal_updated=1
-          fi
           if ! meta_lock=$(fm_meta_lock_path "$STATE/$ID.meta"); then
-            if [ "$journal_updated" -eq 1 ]; then
-              if ! fm_backend_herdr_projection_journal_replace_endpoint \
-                "$journal" "$ID" "$new_tab" "$new_pane" "$HERDR_TAB_ID" "$HERDR_PANE_ID"; then
-                return 1
-              fi
-            fi
             fm_backend_kill "$BACKEND" "$new_target" 2>/dev/null || true
             fm_backend_endpoint_confirmed_gone "$BACKEND" "$new_target" || return 1
             return 1
@@ -2416,17 +2408,16 @@ spawn_rollback_task_state() {  # <detail> [preserve-endpoint]
              || ! mv -f "$meta_tmp" "$STATE/$ID.meta"; then
             rm -f "$meta_tmp" 2>/dev/null || true
             fm_lock_release "$meta_lock" || true
-            if [ "$journal_updated" -eq 1 ]; then
-              if ! fm_backend_herdr_projection_journal_replace_endpoint \
-                "$journal" "$ID" "$new_tab" "$new_pane" "$HERDR_TAB_ID" "$HERDR_PANE_ID"; then
-                return 1
-              fi
-            fi
             fm_backend_kill "$BACKEND" "$new_target" 2>/dev/null || true
             fm_backend_endpoint_confirmed_gone "$BACKEND" "$new_target" || return 1
             return 1
           fi
           fm_lock_release "$meta_lock" || true
+          if [ -n "$journal" ] && [ -e "$journal" ] \
+             && ! fm_backend_herdr_projection_journal_replace_endpoint \
+               "$journal" "$ID" "$HERDR_TAB_ID" "$HERDR_PANE_ID" "$new_tab" "$new_pane"; then
+            return 1
+          fi
           T=$new_target
           WT_TARGET=$new_target
           HERDR_TAB_ID=$new_tab
