@@ -142,7 +142,7 @@ The portable regression is CI-enforced, while the real-harness drift guard is op
 Run the live guard after any harness upgrade and before trusting or refreshing the table above:
 
 ```sh
-FM_HARNESS_LIVENESS_DRIFT=1 bin/fm-test-run.sh tests/fm-harness-liveness-drift-live-e2e.test.sh
+FM_HARNESS_LIVENESS_DRIFT=1 /bin/bash bin/fm-test-run.sh tests/fm-harness-liveness-drift-live-e2e.test.sh
 ```
 
 Bounded output from the run that produced the table:

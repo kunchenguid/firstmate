@@ -46,7 +46,7 @@ The `projects:` field is a non-exclusive clone list, not ownership.
 Scaffold a secondmate charter with:
 
 ```sh
-bin/fm-brief.sh <id> --secondmate {<project>...|--no-projects}
+/bin/bash bin/fm-brief.sh <id> --secondmate {<project>...|--no-projects}
 ```
 
 The scaffold writes a charter brief instead of a task brief.
@@ -63,13 +63,13 @@ Preserve the generated charter sections unless the domain genuinely needs a hard
 Provision a local persistent home and registry entry after the charter is filled:
 
 ```sh
-bin/fm-home-seed.sh <id> <home|-> {<project>...|--no-projects}
+/bin/bash bin/fm-home-seed.sh <id> <home|-> {<project>...|--no-projects}
 ```
 
 Provision a whole remote home through its configured SSH host with:
 
 ```sh
-bin/fm-remote-home-seed.sh <id> <ssh-alias> <remote-root> <remote-home> {<project>[=<origin-url>]...|--no-projects}
+/bin/bash bin/fm-remote-home-seed.sh <id> <ssh-alias> <remote-root> <remote-home> {<project>[=<origin-url>]...|--no-projects}
 ```
 
 You resolve each project's origin yourself - from the captain, the project registry, a clone that exists elsewhere, `gh-axi`, or an explicit paste - and name it as `<project>=<origin-url>`; the seed validates and transports what you supply.
@@ -182,7 +182,7 @@ Scope-matching is firstmate's judgment against the secondmate's natural-language
 Read `data/backlog.md`, pick queued items that fit the new scope, and move them with:
 
 ```sh
-bin/fm-backlog-handoff.sh <secondmate-id> <item-key>...
+/bin/bash bin/fm-backlog-handoff.sh <secondmate-id> <item-key>...
 ```
 
 After seeding, run this handoff for the new secondmate's in-scope queued items.
@@ -206,7 +206,7 @@ Do not hand off `local-only` items.
 For local `kind=secondmate` meta with no window, treat the secondmate as a dead persistent direct report and respawn it with:
 
 ```sh
-bin/fm-spawn.sh <id> --secondmate
+/bin/bash bin/fm-spawn.sh <id> --secondmate
 ```
 
 Use the recorded `home=` in meta.

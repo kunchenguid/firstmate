@@ -419,7 +419,7 @@ These paths need `jq` to build the JSON payload, but they run before token and n
 A relay request that spawns real work can leave firstmate owing a specific public reply in a specific thread.
 That promise is a typed `kind=public-followup` obligation owned entirely by `tasks-axi public-followup`, with the full private request context staying in `state/x-context/`; firstmate keeps no parallel copy of either.
 `bin/fm-public-followup.sh` is firstmate's side: it registers a commitment, reconciles typed terminal work results into it, and posts the final reply through `bin/fm-x-reply.sh --followup`.
-Run `bin/fm-public-followup.sh --help` for the exact subcommands and flags.
+Run `/bin/bash bin/fm-public-followup.sh --help` for the exact subcommands and flags.
 
 Registration is what creates this home's private transport under `state/public-followup/` (mode 0700): `registry/` for the bounded public-safe binding of each live commitment, `events/` for typed terminal results awaiting reconciliation, `consumed/` for the accepted-event ledger, `rejected/` for refusals kept with a one-line reason, and `surfaced` for the poll's last-surfaced signature.
 The home that owns the commitment also owns the outward post, because only it holds the relay consent, the request context, and the opaque thread binding.

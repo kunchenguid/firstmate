@@ -207,8 +207,8 @@ That is the same terminal shape the `echo`-provider interrupt produced, now conf
 Run both opt-in live guards after any muse upgrade, because the version-suffixed process name, session protocol, and styled composer are vendor-controlled surfaces:
 
 ```
-FM_HARNESS_LIVENESS_DRIFT=1 bin/fm-test-run.sh tests/fm-harness-liveness-drift-live-e2e.test.sh
-FM_MUSE_SIGNALS_LIVE=1 bin/fm-test-run.sh tests/fm-muse-signals-live-e2e.test.sh
+FM_HARNESS_LIVENESS_DRIFT=1 /bin/bash bin/fm-test-run.sh tests/fm-harness-liveness-drift-live-e2e.test.sh
+FM_MUSE_SIGNALS_LIVE=1 /bin/bash bin/fm-test-run.sh tests/fm-muse-signals-live-e2e.test.sh
 ```
 
 The Muse signals guard requires a real `muse` binary and tmux but uses `--provider echo`, so it does not require `META_API_KEY` and cannot re-check the real-model turn-to-run relationship on its own.

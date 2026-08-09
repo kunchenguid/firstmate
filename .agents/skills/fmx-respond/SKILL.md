@@ -152,7 +152,7 @@ Treat `state/x-inbox/` as the source of truth and process **every** file you fin
       Write the composed reply to a temporary file with your own file-writing tool - never via shell interpolation - then pass it by path:
 
       ```sh
-      bin/fm-x-reply.sh <request_id> --text-file <path-to-reply-file>
+      /bin/bash bin/fm-x-reply.sh <request_id> --text-file <path-to-reply-file>
       ```
 
       (`bin/fm-x-reply.sh <request_id> -`, reading the reply on stdin, is equally fine.) It echoes the `request_id` and exits 0 on success; non-zero on a failed live post or failed dry-run record.
@@ -161,7 +161,7 @@ Treat `state/x-inbox/` as the source of truth and process **every** file you fin
    e-skip. **For a skip, dismiss it at the relay instead of replying.** A pure acknowledgment gets no reply, but clearing only the local inbox file is not enough: the relay keeps re-offering that request on every poll until it times out to a polite "offline" auto-reply. So before clearing the file, tell the relay to drop the request:
 
       ```sh
-      bin/fm-x-dismiss.sh <request_id>
+      /bin/bash bin/fm-x-dismiss.sh <request_id>
       ```
 
       It posts nothing, stops the re-offer, and prevents the offline auto-reply; it echoes the `request_id` and exits 0 on success (it honors `FMX_DRY_RUN` like `bin/fm-x-reply.sh`, recording the would-be dismiss to `state/x-outbox/` instead of posting). Do **not** call `bin/fm-x-reply.sh` for a skip.
@@ -222,10 +222,10 @@ This section is the sole owner of that procedure.
 
 **When work reports back, or on a `public-followup ...` check wake, or when the session-start digest lists a public commitment:**
 
-1. Run `bin/fm-public-followup.sh consume`.
+1. Run `/bin/bash bin/fm-public-followup.sh consume`.
    It reconciles every typed terminal result from disk and prints `ready <obligation-id> <request-id> <platform>` for each commitment that became deliverable.
    A refusal prints `rejected <event-id>: <reason>` and quarantines that event; read the reason rather than re-emitting blindly.
-2. For each ready commitment, run `bin/fm-public-followup.sh deliver <obligation-id>`.
+2. For each ready commitment, run `/bin/bash bin/fm-public-followup.sh deliver <obligation-id>`.
    With no `--text-file` it reuses the accepted terminal outcome exactly, which is the preferred path for a landed result.
    Only pass `--text-file` when the outcome genuinely needs composing, and hold it to the same public-safety bar as every other reply here.
    Delivery clears the bound task's legacy Relay link at the validated receipt boundary; if it reports a cleanup failure, use its reconciliation message and do not post a legacy final.

@@ -85,7 +85,7 @@ A candidate failure fails the aggregate run and requires investigation rather th
 ## Re-run
 
 ```sh
-bin/fm-test-isolation-proof.sh --list
-bin/fm-test-isolation-proof.sh --jobs 4 --json /tmp/fm-isolation-proof.json
-bin/fm-test-run.sh --check-coverage
+/bin/bash bin/fm-test-isolation-proof.sh --list
+/bin/bash bin/fm-test-isolation-proof.sh --jobs 4 --json /tmp/fm-isolation-proof.json
+/bin/bash bin/fm-test-run.sh --check-coverage
 ```

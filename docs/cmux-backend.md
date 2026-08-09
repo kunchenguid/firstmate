@@ -43,7 +43,7 @@ It can also be runtime auto-detected when Firstmate itself runs inside cmux.
 A spawn stops with an actionable setup message when the app, minimum version, `jq`, socket access, or password is unavailable.
 The adapter may launch the app with `open -a cmux` only when the socket is down; it does not relaunch the app for access-denied or authentication errors.
 
-Routine supervision uses `bin/fm-peek.sh <id>` and `FM_HOME=<home> bin/fm-send.sh <id> '<text>'` without bringing the cmux window forward.
+Routine supervision uses `/bin/bash bin/fm-peek.sh <id>` and `FM_HOME=<home> /bin/bash bin/fm-send.sh <id> '<text>'` without bringing the cmux window forward.
 Task workspace and surface creation use `focus=false`.
 
 Verify setup by spawning a small task and confirming metadata contains `backend=cmux`, `cmux_workspace_id=`, and `cmux_surface_id=`.

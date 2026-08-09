@@ -79,7 +79,7 @@ The wrapper must execute that absolute target rather than resolving its own name
 Check any host against it directly:
 
 ```sh
-bin/fm-on.sh <secondmate-id|ssh-alias> fm-remote-doctor.sh
+/bin/bash bin/fm-on.sh <secondmate-id|ssh-alias> fm-remote-doctor.sh
 ```
 
 That run is read-only.
@@ -91,7 +91,7 @@ The script's own header owns the full line protocol.
 `--fix` repairs only the automatable gaps and is safe to rerun:
 
 ```sh
-bin/fm-on.sh <secondmate-id|ssh-alias> fm-remote-doctor.sh --fix
+/bin/bash bin/fm-on.sh <secondmate-id|ssh-alias> fm-remote-doctor.sh --fix
 ```
 
 Over the plain SSH doctor bootstrap, it writes and reloads the Firstmate-owned `dev.firstmate.remote-job` and `dev.firstmate.herdr.fm-remote` launch agents on macOS, both scoped with `LimitLoadToSessionType=Aqua` and bootstrapped in `gui/<uid>`.
@@ -116,7 +116,7 @@ A file at `~/.local/bin/fm-remote-entrypoint.sh` that is not Firstmate's own sym
 Create and fill the normal secondmate charter first, then run:
 
 ```sh
-bin/fm-remote-home-seed.sh <id> <ssh-alias> <remote-root> <remote-home> {<project>[=<origin-url>]...|--no-projects}
+/bin/bash bin/fm-remote-home-seed.sh <id> <ssh-alias> <remote-root> <remote-home> {<project>[=<origin-url>]...|--no-projects}
 ```
 
 `<remote-root>` is the remote Firstmate code clone that supplies tracked scripts.
@@ -142,14 +142,14 @@ The promised-public-reply subsystem is same-filesystem by construction, so a rem
 
 Local secondmates keep the existing route form and need no migration.
 A fleet may contain local and remote routes together.
-Use `bin/fm-home-seed.sh validate` to validate either form.
+Use `/bin/bash bin/fm-home-seed.sh validate` to validate either form.
 
 ## Normal operation
 
 Launch or recover the remote second mate with the same command used for a local route:
 
 ```sh
-bin/fm-spawn.sh <id> --secondmate
+/bin/bash bin/fm-spawn.sh <id> --secondmate
 ```
 
 The primary resolves the verified secondmate harness and optional model and effort, runs the same readiness gate the seed runs, transfers the inherited-material allowlist, and asks the remote host to launch on Herdr in `fm-remote`.
@@ -165,7 +165,7 @@ Startup liveness recovery relaunches a dead or missing remote second mate throug
 Send routed requests normally:
 
 ```sh
-FM_HOME=<primary-home> bin/fm-send.sh fm-<id> '<request>'
+FM_HOME=<primary-home> /bin/bash bin/fm-send.sh fm-<id> '<request>'
 ```
 
 Marked requests keep the existing correlation contract.
@@ -192,7 +192,7 @@ An unavailable remote home is projected as unknown and is never replaced by a lo
 Move already-judged queued work with the normal command:
 
 ```sh
-bin/fm-backlog-handoff.sh <id> <item-key>...
+/bin/bash bin/fm-backlog-handoff.sh <id> <item-key>...
 ```
 
 For a remote route, `tasks-axi mv` first moves the dependency-closed set atomically from the primary backlog into `data/handoff/<id>.outbox.md`.
@@ -215,7 +215,7 @@ Dirty, diverged, unavailable, or otherwise unsafe targets are reported and left 
 Retire a remote second mate with the normal guarded command:
 
 ```sh
-bin/fm-teardown.sh <id>
+/bin/bash bin/fm-teardown.sh <id>
 ```
 
 Retirement is executed on the configured host and refuses while the remote home has child work, while the primary has an unfinished backlog outbox, or while a routed reply remains unresolved.
@@ -230,14 +230,14 @@ The portable tests use the real entrypoint protocol, real git repositories, a de
 The lifecycle test covers seeding a registered project that this machine has never cloned, asserts that the local project tree is unchanged afterwards, and carries Bitbucket, self-hosted, and scp-like origins through to the remote clone:
 
 ```sh
-bin/fm-test-run.sh tests/fm-on.test.sh
-bin/fm-test-run.sh tests/fm-remote-job.test.sh
-bin/fm-test-run.sh tests/fm-remote-doctor.test.sh
-bin/fm-test-run.sh tests/fm-project-origin.test.sh
-bin/fm-test-run.sh tests/fm-remote-reply.test.sh
-bin/fm-test-run.sh tests/fm-remote-backlog-handoff.test.sh
-bin/fm-test-run.sh tests/fm-remote-secondmate-lifecycle-e2e.test.sh
-bin/fm-test-run.sh tests/fm-remote-secondmate-trace-context.test.sh
+/bin/bash bin/fm-test-run.sh tests/fm-on.test.sh
+/bin/bash bin/fm-test-run.sh tests/fm-remote-job.test.sh
+/bin/bash bin/fm-test-run.sh tests/fm-remote-doctor.test.sh
+/bin/bash bin/fm-test-run.sh tests/fm-project-origin.test.sh
+/bin/bash bin/fm-test-run.sh tests/fm-remote-reply.test.sh
+/bin/bash bin/fm-test-run.sh tests/fm-remote-backlog-handoff.test.sh
+/bin/bash bin/fm-test-run.sh tests/fm-remote-secondmate-lifecycle-e2e.test.sh
+/bin/bash bin/fm-test-run.sh tests/fm-remote-secondmate-trace-context.test.sh
 ```
 
 The account-level checks the doctor performs - a real Aqua login session, a real `launchctl` domain, and a real herdr server - are only ever exercised against fixtures here, so the readiness gate's behavior on a genuine Mac remains an operator-run smoke test.

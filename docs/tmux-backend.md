@@ -38,7 +38,7 @@ tmux select-window -t <session-name>:fm-<id>
 ```
 
 Typing into an attached task window is authoritative direct intervention.
-Routine supervision does not require attachment: `bin/fm-peek.sh <id>` captures a bounded tail and `FM_HOME=<home> bin/fm-send.sh <id> '<text>'` steers the recorded endpoint.
+Routine supervision does not require attachment: `/bin/bash bin/fm-peek.sh <id>` captures a bounded tail and `FM_HOME=<home> /bin/bash bin/fm-send.sh <id> '<text>'` steers the recorded endpoint.
 
 Verify setup by spawning a small task and confirming its `fm-<id>` window appears in the selected session.
 

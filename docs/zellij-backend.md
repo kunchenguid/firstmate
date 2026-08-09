@@ -27,7 +27,7 @@ zellij attach <session-name>
 ```
 
 Routine supervision does not require attachment.
-Use `bin/fm-peek.sh <id>` and `FM_HOME=<home> bin/fm-send.sh <id> '<text>'` against the metadata-routed endpoint.
+Use `/bin/bash bin/fm-peek.sh <id>` and `FM_HOME=<home> /bin/bash bin/fm-send.sh <id> '<text>'` against the metadata-routed endpoint.
 
 Verify setup by spawning a small task and confirming metadata contains `backend=zellij`, `zellij_session=`, `zellij_tab_id=`, and `zellij_pane_id=`.
 

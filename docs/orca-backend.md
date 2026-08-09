@@ -23,7 +23,7 @@ The first task for a project registers that repository with `orca repo add --pat
 No manual repository registration is required.
 
 Open the Orca app to watch a task's terminal.
-Routine supervision uses the recorded endpoint through `bin/fm-peek.sh <id>` and `FM_HOME=<home> bin/fm-send.sh <id> '<text>'`.
+Routine supervision uses the recorded endpoint through `/bin/bash bin/fm-peek.sh <id>` and `FM_HOME=<home> /bin/bash bin/fm-send.sh <id> '<text>'`.
 Enter and Ctrl-C are supported; Escape is not.
 
 ## Task shape and metadata
