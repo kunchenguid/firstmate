@@ -47,6 +47,7 @@ Marking rules:
 - Inspect each editable file's header pointer on every pass and add or correct it; for a read-only `data/captain-shared.md`, leave the file byte-identical and route a missing or outdated pointer to the primary owner.
   The required receipt action for that file is `routed`, not `unchanged`; name the ownership exception and do not declare the session reset-safe.
 - A pre-existing missing or hand-dropped marker is never grounds for destructive treatment: it means the file's default tier; an unmarked entry in a default-pinned file is simply pinned, while an unmarked entry in a file whose default tier carries a clock follows the migration rule below.
+- A merge-posture bullet in `data/captain.md` or `data/captain-shared.md` carries a separate captain-provenance marker whose form and meaning `docs/configuration.md` owns; carry that marker and the bullet's project scope through verbatim on any rewrite or consolidation, and never add one, widen a scope, or turn a session finding into such a bullet, because that would manufacture merge authority the captain never gave.
 
 Decay advances only when a pass runs, so a home stowed less often than a clock experiences that clock at its stow interval.
 

@@ -143,10 +143,17 @@ Shared captain preferences that apply across secondmate domains live only in the
 
 A captain may record a standing shepherd or merge posture in these files: in `data/captain.md` for one domain, or in `data/captain-shared.md` when it should apply across secondmate domains.
 A recorded posture is a standing relaxation of [AGENTS.md hard rule 2](../AGENTS.md#1-identity-and-prime-directives) alongside a project's `+yolo` flag, and it is changed with the same inspect-then-update rule as any other preference here.
-Only the captain creates such a bullet, by stating the posture or by approving firstmate's proposed wording; firstmate never files one from its own inference and `/stow` never routes a session finding into one.
-Absence of such an entry, or unclear captain authorship, means there is no standing posture, so a merge still needs `+yolo` or a current explicit captain word.
+Because that relaxation is authority rather than taste, a posture bullet is recognized only in this one scoped, marked form, which this section owns:
+
+```markdown
+- merge-posture (acme-api, acme-web): drive routine green PRs to landing without a per-PR ping. <!--captain:2026-08-09-->
+```
+
+The parenthesized scope lists the `data/projects.md` project names the posture covers, or the exact words `all projects` when the captain said it covers every project in the home.
+The trailing `<!--captain:YYYY-MM-DD-->` provenance marker records that the captain stated the posture, or approved firstmate's proposed wording, on that date; firstmate never files one from its own inference, and `/stow` never routes a session finding into a posture bullet or adds this marker to an existing one.
+A bullet missing the `merge-posture` prefix, the scope, or the provenance marker is not a posture at all, and a posture whose scope does not name the PR's project does not cover that project, so a merge there still needs `+yolo` or a current explicit captain word.
 A recorded posture covers a routine green merge only and never an admin or branch-protection-bypass merge.
-Hard rule 2 owns the full rule, and the internal [`pr-shepherd`](../.agents/skills/pr-shepherd/SKILL.md) skill owns how a recorded posture is read and applied to a PR.
+Hard rule 2 owns the full rule, including which changes can never merge under a posture, and the internal [`pr-shepherd`](../.agents/skills/pr-shepherd/SKILL.md) skill owns how a recorded posture is read and applied to a PR.
 
 ## Operational learnings (data/learnings.md)
 
