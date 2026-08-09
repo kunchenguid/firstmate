@@ -131,6 +131,18 @@ esac
 pass "a reparented worker retains a closed endpoint lease"
 kill "$REParent_PID" 2>/dev/null || true
 wait "$REParent_PID" 2>/dev/null || true
+
+stat() { return 1; }
+if fm_agent_worktree_process_census "$WORKTREE"; then
+  census_status=0
+else
+  census_status=$?
+fi
+unset -f stat
+[ "$census_status" -eq 2 ] \
+  || fail "an unreadable process census did not retain uncertainty: $census_status"
+pass "an unreadable process census retains uncertainty"
+
 fm_agent_worktree_process_census() { return 1; }
 verdict=$(fm_slot_disposal_verdict "$HOME_DIR/state" task-a "$WORKTREE" \
   "$HOME_DIR" "$HOME_DIR" crewmate closed herdr lab:pane-a)

@@ -178,8 +178,11 @@ fm_agent_task_owner_conflict() {
   [ -n "$id" ] && [ -n "$index" ] && [ -n "$expected_home" ] || return 1
   while IFS=$'\t' read -r task pid start indexed_home _; do
     [ "$task" = "$id" ] || continue
-    fm_agent_pid_is_numeric "$pid" || continue
-    fm_agent_pid_start_matches "$pid" "$start" || continue
+    if ! fm_agent_pid_is_numeric "$pid" || [ -z "$start" ] \
+       || ! fm_agent_pid_start_matches "$pid" "$start"; then
+      printf '%s' '<unknown>'
+      return 0
+    fi
     [ -n "$indexed_home" ] || { printf '%s' '<missing>'; return 0; }
     if ! fm_agent_paths_same "$indexed_home" "$expected_home"; then
       printf '%s' "$indexed_home"
@@ -200,7 +203,14 @@ fm_agent_worktree_process_census() {
   for entry in /proc/[0-9]*; do
     [ -d "$entry" ] || continue
     pid=${entry#/proc/}
-    proc_uid=$(stat -c '%u' "$entry" 2>/dev/null || true)
+    if ! proc_uid=$(stat -c '%u' "$entry" 2>/dev/null); then
+      [ -d "$entry" ] && uncertain=1
+      continue
+    fi
+    if [ -z "$proc_uid" ]; then
+      [ -d "$entry" ] && uncertain=1
+      continue
+    fi
     [ "$proc_uid" = "$current_uid" ] || continue
     cwd=$(fm_agent_proc_cwd "$pid" 2>/dev/null || true)
     if [ -z "$cwd" ]; then

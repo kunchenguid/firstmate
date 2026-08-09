@@ -94,7 +94,7 @@ test_crewmate_declaration_clears_every_inherited_home() {
   local prefix
   prefix=$( . "$ROOT/bin/fm-worker-isolation-lib.sh" \
     && fm_worker_launch_env_prefix crewmate task-a1 /home/cap/firstmate )
-  [ "$prefix" = "FM_HOME= FM_ROOT= FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_AGENT_ROLE=crewmate FM_AGENT_TASK='task-a1' FM_AGENT_OWNER_HOME='/home/cap/firstmate' " ] \
+  [ "$prefix" = "FM_HOME= FM_ROOT= FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PENDING_REPLY_DIR_OVERRIDE= FM_AGENT_ROLE=crewmate FM_AGENT_TASK='task-a1' FM_AGENT_OWNER_HOME='/home/cap/firstmate' " ] \
     || fail "crewmate declaration changed: $prefix"
   pass "a crewmate declaration clears every operational-home variable and names its owner"
 }
@@ -103,7 +103,7 @@ test_secondmate_declaration_pins_only_its_own_home() {
   local prefix
   prefix=$( . "$ROOT/bin/fm-worker-isolation-lib.sh" \
     && fm_worker_launch_env_prefix secondmate dom-b2 /home/cap/homes/dom )
-  [ "$prefix" = "FM_HOME='/home/cap/homes/dom' FM_ROOT= FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_AGENT_ROLE=secondmate FM_AGENT_TASK='dom-b2' FM_AGENT_OWNER_HOME='/home/cap/homes/dom' " ] \
+  [ "$prefix" = "FM_HOME='/home/cap/homes/dom' FM_ROOT= FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PENDING_REPLY_DIR_OVERRIDE= FM_AGENT_ROLE=secondmate FM_AGENT_TASK='dom-b2' FM_AGENT_OWNER_HOME='/home/cap/homes/dom' " ] \
     || fail "secondmate declaration changed: $prefix"
   pass "a secondmate declaration pins its own home and clears every inherited override"
 }
@@ -141,7 +141,29 @@ test_incomplete_worker_identity_refuses_primary_operations() {
     "$ROOT/bin/fm-worker-isolation-lib.sh" 2>&1)
   status=$?
   expect_code 1 "$status" "a secondmate with a foreign state override must be refused"
+  out=$(FM_AGENT_ROLE=secondmate FM_AGENT_TASK=dom-b2 FM_AGENT_OWNER_HOME=/homes/dom \
+    FM_HOME=/homes/dom FM_PENDING_REPLY_DIR_OVERRIDE=/primary/state/pending-replies \
+    bash -c '. "$1"; fm_worker_refuse_primary_operation operation' _ \
+    "$ROOT/bin/fm-worker-isolation-lib.sh" 2>&1)
+  status=$?
+  expect_code 1 "$status" "a secondmate with a foreign pending-reply override must be refused"
   pass "incomplete worker identities fail closed at the shared guard"
+}
+
+test_unreadable_task_start_proof_remains_contested() {
+  local out status
+  if out=$(bash -c '
+    . "$1"
+    index=$(printf "task-a\\t%s\\t\\t/home/owner\\tcrewmate" "$$")
+    fm_agent_task_owner_conflict task-a "$index" /home/owner
+  ' _ "$ROOT/bin/fm-agent-cwd-lib.sh" 2>&1); then
+    status=0
+  else
+    status=$?
+  fi
+  expect_code 0 "$status" "an indexed task with unreadable start proof must remain contested"
+  [ "$out" = '<unknown>' ] || fail "unreadable task start proof was not contested: $out"
+  pass "unreadable task start proof remains contested"
 }
 
 test_declaration_refuses_rather_than_emitting_a_partial_prefix() {
@@ -1092,6 +1114,7 @@ test_crewmate_declaration_clears_every_inherited_home
 test_secondmate_declaration_pins_only_its_own_home
 test_declaration_refuses_rather_than_emitting_a_partial_prefix
 test_incomplete_worker_identity_refuses_primary_operations
+test_unreadable_task_start_proof_remains_contested
 test_every_verified_harness_launches_with_its_home_declaration
 test_secondmate_child_receives_only_its_own_home
 test_declared_worker_is_never_a_primary_scope_match
