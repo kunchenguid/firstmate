@@ -2212,6 +2212,37 @@ $session	$lock_path"
   return 1
 }
 
+teardown_herdr_reconcile_pending_journal() {  # <state-dir> <meta> <task-id> <target> <cleanup-target>
+  local state=$1 meta=$2 task_id=$3 target=$4 cleanup_target=$5 journal session workspace tab pane
+  [ -n "$cleanup_target" ] || return 0
+  journal=$(fm_backend_herdr_projection_journal_path "$state" "$task_id")
+  [ -e "$journal" ] || [ -L "$journal" ] || return 0
+  session=$(meta_value "$meta" herdr_session)
+  workspace=$(meta_value "$meta" herdr_workspace_id)
+  tab=$(meta_value "$meta" herdr_tab_id)
+  pane=$(meta_value "$meta" herdr_pane_id)
+  if ! fm_backend_herdr_projection_journal_snapshot "$journal" "$task_id" \
+    || [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" != 2 ] \
+    || [ "$FM_BACKEND_HERDR_JOURNAL_SESSION" != "$session" ] \
+    || [ "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID" != "$workspace" ] \
+    || [ "$target" != "$session:$pane" ]; then
+    echo "error: Herdr recovery journal is invalid for $task_id; nothing was changed" >&2
+    return 1
+  fi
+  if [ "$FM_BACKEND_HERDR_JOURNAL_TAB_ID" = "$tab" ] \
+     && [ "$FM_BACKEND_HERDR_JOURNAL_PANE_ID" = "$pane" ]; then
+    return 0
+  fi
+  if [ "$cleanup_target" != "$session:$FM_BACKEND_HERDR_JOURNAL_PANE_ID" ] \
+    || ! fm_backend_herdr_projection_journal_replace_endpoint \
+      "$journal" "$task_id" \
+      "$FM_BACKEND_HERDR_JOURNAL_TAB_ID" "$FM_BACKEND_HERDR_JOURNAL_PANE_ID" \
+      "$tab" "$pane"; then
+    echo "error: Herdr recovery journal could not be reconciled for $task_id; nothing was changed" >&2
+    return 1
+  fi
+}
+
 preflight_firstmate_home_herdr_children() {  # <home>
   local home=$1 sub_state child_meta child_id child_backend child_target child_cleanup child_session child_kind child_home child_wt
   sub_state="$home/state"
@@ -2503,6 +2534,8 @@ if [ "$BACKEND" = herdr ]; then
     TEARDOWN_HERDR_CLEANUP_PANE=$FM_BACKEND_HERDR_PANE
     [ "$TEARDOWN_HERDR_CLEANUP_SESSION" = "$TEARDOWN_HERDR_SESSION" ] \
       || { echo "error: pending Herdr cleanup endpoint belongs to another session for $ID; nothing was changed" >&2; exit 1; }
+    teardown_herdr_reconcile_pending_journal \
+      "$STATE" "$META" "$ID" "$T" "$TEARDOWN_HERDR_CLEANUP_TARGET" || exit 1
   fi
 fi
 

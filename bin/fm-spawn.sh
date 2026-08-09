@@ -1072,6 +1072,27 @@ if [ "$RELAUNCH" -eq 1 ]; then
         echo "error: task $ID has invalid pending Herdr cleanup identity; refusing relaunch" >&2
         exit 1
       }
+      HERDR_CLEANUP_JOURNAL=$(fm_backend_herdr_projection_journal_path "$STATE" "$ID")
+      if [ -e "$HERDR_CLEANUP_JOURNAL" ] || [ -L "$HERDR_CLEANUP_JOURNAL" ]; then
+        fm_backend_herdr_projection_journal_snapshot "$HERDR_CLEANUP_JOURNAL" "$ID" \
+          && [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" = 2 ] \
+          && [ "$FM_BACKEND_HERDR_JOURNAL_SESSION" = "$HERDR_SES" ] \
+          && [ "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID" = "$HERDR_WORKSPACE_ID" ] || {
+          echo "error: task $ID's Herdr recovery journal is invalid; refusing relaunch" >&2
+          exit 1
+        }
+        if [ "$FM_BACKEND_HERDR_JOURNAL_TAB_ID" != "$HERDR_TAB_ID" ] \
+           || [ "$FM_BACKEND_HERDR_JOURNAL_PANE_ID" != "$HERDR_PANE_ID" ]; then
+          [ "$HERDR_CLEANUP_ENDPOINT" = "$HERDR_SES:$FM_BACKEND_HERDR_JOURNAL_PANE_ID" ] \
+            && fm_backend_herdr_projection_journal_replace_endpoint \
+              "$HERDR_CLEANUP_JOURNAL" "$ID" \
+              "$FM_BACKEND_HERDR_JOURNAL_TAB_ID" "$FM_BACKEND_HERDR_JOURNAL_PANE_ID" \
+              "$HERDR_TAB_ID" "$HERDR_PANE_ID" || {
+            echo "error: task $ID's Herdr recovery journal could not be reconciled; refusing relaunch" >&2
+            exit 1
+          }
+        fi
+      fi
       fm_backend_kill "$BACKEND" "$HERDR_CLEANUP_ENDPOINT" 2>/dev/null || true
       fm_backend_endpoint_confirmed_gone "$BACKEND" "$HERDR_CLEANUP_ENDPOINT" || {
         echo "error: task $ID's prior Herdr endpoint could not be confirmed gone; refusing relaunch" >&2
