@@ -827,6 +827,9 @@ const operationalMode = {
   chatContainer: operationalChat,
   editor: { addToHistory: (value) => operationalHistory.push(value) },
   getMarkdownThemeWithSettings: () => undefined,
+  // Pi >= 0.84 calls getMarkdownTransformers() when rendering a user row;
+  // older Pi never reaches it, so an empty array is safe on every version.
+  getMarkdownTransformers: () => [],
   getUserMessageText: (message) => typeof message.content === "string"
     ? message.content
     : message.content.filter((item) => item.type === "text").map((item) => item.text).join(""),

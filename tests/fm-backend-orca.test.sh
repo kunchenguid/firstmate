@@ -1335,6 +1335,9 @@ test_teardown_refuses_orca_worktree_without_terminal_handle
 
 # make_orca_claim_steward <dir>: fake attended Decision OS steward that
 # observes the tracker claim effect on the attempt record.
+# NOTE: the claim transition's receipt effect is named "claim" (the real
+# bin/fm-br-receipt.sh maps claim -> effect=claim and fm-spawn.sh verifies
+# .receipts.claim[]); "tracker" is the distinct closure effect.
 make_orca_claim_steward() {
   local dir=$1 fakebin steward
   fakebin=$(fm_fakebin "$dir")
@@ -1347,7 +1350,7 @@ req=${1:?request file}
 aid=$(jq -r '.attempt_id' "$req")
 gen=$(jq -r '.generation' "$req")
 bead=$(jq -r '.bead_id' "$req")
-fm_attempt_effect_observe "$aid" "$gen" tracker "{\"bead\":\"$bead\",\"status\":\"claimed\"}" || exit 1
+fm_attempt_effect_observe "$aid" "$gen" claim "{\"bead\":\"$bead\",\"status\":\"claimed\"}" || exit 1
 exit 0
 SH
   chmod +x "$steward"
@@ -1399,10 +1402,13 @@ test_attempt_bound_orca_spawn_binds_worktree_to_attempt() {
   [ "$(jq -r '.provider.provider' "$CLAIM_STATE/attempts/$aid1.json")" = orca ] || fail "attempt provider is not orca"
   [ "$(jq -r '.provider.copy' "$CLAIM_STATE/attempts/$aid1.json")" = "$wt" ] || fail "attempt does not own the claimed orca copy"
   [ "$(jq -r '.delivery.mode' "$CLAIM_STATE/attempts/$aid1.json")" = no-mistakes ] || fail "delivery contract not frozen"
-  # the successful freeze IS the provider effect: the release obligation
-  # derives from the missing launch effect
+  # the successful spawn published the launch receipt: the launch obligation
+  # is satisfied, and the release obligation now derives from the missing
+  # landing effect (the attempt is not yet terminal)
+  FM_STATE_OVERRIDE="$CLAIM_STATE" bash -c '. "$0/bin/fm-attempt-lib.sh"; fm_attempt_is_launched "$1"' "$ROOT" "$aid1" \
+    || fail "successful attempt-bound spawn did not publish the launch receipt"
   assert_contains "$(FM_STATE_OVERRIDE="$CLAIM_STATE" bash -c '. "$0/bin/fm-attempt-lib.sh"; fm_attempt_obligations "$1"' "$ROOT" "$aid1")" \
-    "launch" "allocation did not retain the pending launch obligation"
+    "landing" "launched attempt did not retain the pending landing obligation"
   # a second same-home attempt claims a distinct worktree and owns it
   local id2 proj2 wt2
   id2="orcaclaimz2"
