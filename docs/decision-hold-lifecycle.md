@@ -53,7 +53,7 @@ The final verification commands and their exact summarized outputs follow.
 
 ```text
 $ bash tests/fm-decision-hold-lifecycle.test.sh
-ok - report-only unresolved decision is reproduced and completion refuses before loss
+ok - verified-absent in-flight work gates while held and active workers avoid measured-liveness gates, selector neutralization goes RED, and completion refuses before report loss
 ok - non-forced scout teardown always requires durable inventory verification
 ok - captain holds are idempotent, distinct, teardown-safe, Bearings-visible, and durably routed before close
 ok - completion and verification validate origins before constructing paths

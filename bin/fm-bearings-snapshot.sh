@@ -22,6 +22,10 @@
 # This wrapper consumes canonical status decisions plus canonically normalized
 # backlog roles, unresolved blockers, and captain actionability. It never infers
 # decisions from report or visual-review prose or reimplements snapshot semantics.
+# Each invocation requests recovery-grade endpoint and worker liveness from the
+# canonical snapshot. A non-secondmate in-flight row that looks terminal, is not
+# held, and has both endpoint and worker verified absent is projected as a
+# measured-liveness gate; held rows and rows with an active worker are excluded.
 #
 # Main-home inventory validity comes from the canonical snapshot's main_inventory
 # object (orphan structured in-flight without meta, unstructured current rows).

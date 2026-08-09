@@ -37,6 +37,7 @@ It never tears down a task, merges a PR, dispatches new work, steers a worker, a
    Keep the default local-only read unless the captain asks to include PRs.
    For registered secondmates, use the snapshot's structured-home classification and provenance.
    A parent event or bounded terminal contradiction is fallback evidence, never authority over readable structured home state.
+   The snapshot invocation enables recovery-grade endpoint and worker liveness so a non-held, terminal-looking in-flight row with both signals verified absent appears under `gates` as a measured-liveness gate; held rows and active-worker rows do not receive that gate.
    Structured captain-held decisions come from `decision-hold-lifecycle` and appear under `decisions_open`.
    Do not scrape reports, visual-review artifacts, raw status-event tails, or visible conversation history to supplement current state.
    A queued item under `gates` only becomes "next work" when its blocker is gone and its time/date gate has arrived.
