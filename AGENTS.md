@@ -88,7 +88,7 @@ data/                personal fleet records; LOCAL, gitignored as a whole
   projects.md        thin fleet navigation registry recording each project's standing delivery posture; firstmate-private, parsed for mechanical sync and seeding by fm-project-mode.sh (section 6)
   secondmates.md      local and remote secondmate routing table; firstmate-private, maintained by the secondmate seed helpers (section 6)
   wake-ledger.tsv    append-only wake-outcome and terminal-task evidence; bin/fm-wake-ledger.sh owns its format, vocabulary, and append semantics
-  <id>/brief.md      per-task crewmate brief, or per-secondmate charter brief when kind=secondmate
+  <id>/brief.md      per-task crewmate brief, or per-secondmate charter brief when role=secondmate
   <id>/report.md     scout task deliverable, written by the crewmate; survives teardown
 projects/            cloned repos; gitignored; read-only except under hard rule 1's concrete captain-approved project operation exception
 state/               volatile runtime signals; gitignored
@@ -99,7 +99,7 @@ state/               volatile runtime signals; gitignored
   <id>.grok-turnend-token   firstmate-owned grok hook registry token for the task; removed by teardown
   <id>.kimi-turnend-token   firstmate-owned Kimi hook registry token for the task; removed by teardown
   <id>.muse-session  muse busy-source binding (sessions root plus task worktree) written by fm-spawn; removed by teardown
-  <id>.meta          written by fm-spawn: window=, endpoint_task_id=, worktree=, project=, harness=, model=, effort=, kind=, mode=, yolo=, tasktmp=, and (ship and scout) attempt=/attempt_budget= copied from the durable attempt record, where an absent attempt= reads as attempt 1; a ship or scout also records the task's two base references as slot_base=, contribution_target=, and base_state= (bin/fm-task-base-lib.sh); a task dispatch also records the agent-justification fields reasoning_required=, reason_code=, capability_floor=, escalation_policy=, plus tooling_gap_item= for a TOOLING_GAP dispatch (bin/fm-reasoning-lib.sh, section 7), while a secondmate provisioning spawn records none of them and an absent field reads as unknown rather than as justified reasoning; an optional traceparent= only when trace context is enabled (docs/configuration.md "Trace context propagation"); kind=secondmate also records home= and projects=, plus remote_host=/remote_root=/remote_backend=/remote_herdr_session=/remote_target= for a remote route; a non-default runtime backend records further backend-specific fields (docs/configuration.md "Runtime backend"; bin/fm-backend.sh, section 8); fm-pr-check, including through fm-pr-merge, records one canonical pr= and the forge's pr_head= when available (GitHub pull requests and GitLab merge requests; docs/gitlab-merge-watch.md); fm-pr-merge records merge_verification= plus merge_verified_head= for the head it re-verified, or merge_verification=override for an explicitly unverified merge; fm-x-link appends x_request=, x_request_ts=, x_followups=, and optional x_platform=/x_reply_max_chars= for a Relay-originated task (section 14)
+  <id>.meta          written by fm-spawn: window=, endpoint_task_id=, worktree=, project=, harness=, model=, effort=, mode=, yolo=, tasktmp=, and (ship and scout) attempt=/attempt_budget= copied from the durable attempt record, where an absent attempt= reads as attempt 1; the task identity axes role=, deliverable=, and stage=, plus the deprecated kind= they replace, owned with their derivation and retirement by bin/fm-task-axis-lib.sh and docs/vocabulary-collisions.md; a ship or scout also records the task's two base references as slot_base=, contribution_target=, and base_state= (bin/fm-task-base-lib.sh); a task dispatch also records the agent-justification fields reasoning_required=, reason_code=, capability_floor=, escalation_policy=, plus tooling_gap_item= for a TOOLING_GAP dispatch (bin/fm-reasoning-lib.sh, section 7), while a secondmate provisioning spawn records none of them and an absent field reads as unknown rather than as justified reasoning; an optional traceparent= only when trace context is enabled (docs/configuration.md "Trace context propagation"); role=secondmate also records home= and projects=, plus remote_host=/remote_root=/remote_backend=/remote_herdr_session=/remote_target= for a remote route; a non-default runtime backend records further backend-specific fields (docs/configuration.md "Runtime backend"; bin/fm-backend.sh, section 8); fm-pr-check, including through fm-pr-merge, records one canonical pr= and the forge's pr_head= when available (GitHub pull requests and GitLab merge requests; docs/gitlab-merge-watch.md); fm-pr-merge records merge_verification= plus merge_verified_head= for the head it re-verified, or merge_verification=override for an explicitly unverified merge; fm-x-link appends x_request=, x_request_ts=, x_followups=, and optional x_platform=/x_reply_max_chars= for a Relay-originated task (section 14)
   <id>.attempt       durable attempt count and retry budget for the task id (attempt=, attempt_budget=, failures=, terminal=), owned by bin/fm-attempt.sh; spent only by a ship or scout spawn that follows a RECORDED FAILURE, while a spawn after a dead runtime or husk continues the attempt already open, and retired by an ordinary teardown but kept under --force, so a retry decision is arithmetic rather than a judgment
   <id>.herdr-presentation  quarantinable attempt and restart-binding journal for Herdr's optional visual projection; never task or endpoint authority; see docs/herdr-backend.md "Presentation spaces"
   <id>.landing       private minimal landing record (pr=, forge pr_head=, project=) written by fm-teardown when a ship task is released before its PR lands; stands in for the removed meta so fm-pr-merge can still land that PR and fm-pr-check can rearm its merge watch
@@ -252,6 +252,7 @@ Route durable knowledge to its most specific owner:
 - Task-scoped notes belong with the backlog item, and investigation findings belong in the scout report.
 - Knowledge useful to almost every contributor to one project belongs in that project's committed `AGENTS.md`.
 - Knowledge general to every firstmate user belongs in this repo's shared tracked surface.
+- A word that has acquired a second live meaning belongs in `docs/vocabulary-collisions.md`, which owns every ruled disposition and each obsolete name's retirement condition; never settle a collision locally in the file where it surfaced.
 
 Firstmate never writes a project's `AGENTS.md` directly.
 A crewmate creates or updates it lazily through the project's selected delivery path, using `bin/fm-ensure-agents-md.sh` and preferring pointers to authoritative sources over copied detail.
@@ -287,7 +288,7 @@ Never both present a likely-enough solution and launch a parallel design exercis
 A diagnostic request, report, recommendation, or implementation-ready finding is evidence, not authorization to change code.
 Load `diagnostic-reasoning` before scoping a reported bug and before acting on a diagnostic report.
 
-Resolve every ship task's concrete delivery mode and yolo posture at intake, and pass both explicitly to the brief, the spawn, and any scout promotion, which all refuse to guess.
+Resolve every ship task's concrete delivery mode and yolo posture at intake, and pass both explicitly to the brief, the spawn, and any scout reflag, which all refuse to guess.
 A current explicit captain instruction wins; otherwise the project's registry entry is the captain's standing posture, and dropping below its rigor needs a reason you can state.
 On a `no-mistakes-prod-only` project, classify the task's surface: internal-only tooling, automation, contributor or operator process, and release or submission work ships `direct-PR`, while product-facing, mixed, and uncertain work ships `no-mistakes`; never infer internal-only from file location or project name.
 An unregistered project or absent registry resolves to `no-mistakes` with yolo off, and the registration gap goes to the captain.
@@ -381,13 +382,13 @@ After successful teardown, record completion, retain only the configured recent 
 A secondmate is persistent and an empty queue is healthy.
 Retire one only on an explicit captain or main-firstmate decision, after loading `secondmate-provisioning`; its home must contain no work under way, and forced discard still requires explicit captain authority.
 
-### Scout outcome and promotion
+### Scout outcome and reflagging
 
 A completed scout must leave a self-contained report before its scratch worktree can be discarded; read and relay its findings, record the report as the Done artifact, and re-evaluate the queue.
 A report may recommend implementation but does not authorize it.
 Before treating the investigation or any visual review as complete, load `decision-hold-lifecycle`; teardown enforces that shared completion gate.
-When implementation is separately authorized, promote the existing scout through `bin/fm-promote.sh` rather than creating a duplicate task.
-The promoted worker must inventory scratch state, return to a clean default-branch base, carry over only intended fix changes, create the ship branch, and follow the project's selected delivery path while leaving scratch commits and debug edits behind and turning a reproduced bug into the regression test.
+When implementation is separately authorized, reflag the existing scout through `bin/fm-reflag.sh` rather than creating a duplicate task.
+The reflagged worker must inventory scratch state, return to a clean default-branch base, carry over only intended fix changes, create the ship branch, and follow the project's selected delivery path while leaving scratch commits and debug edits behind and turning a reproduced bug into the regression test.
 
 ## 8. Supervision protocol
 
@@ -450,7 +451,7 @@ Load `stuck-crewmate-recovery` after a stale wake, looping or confused pane, ans
 **Talk in outcomes, not mechanics.**
 Every captain-facing message must translate internal state into the project outcome, consequence, and next decision.
 Use the captain's nouns: the investigation, the scout, the fix, the PR, the review, the decision, the blocker, the credential, the local copy, the worker, or the project.
-Do not expose internal terms such as startup machinery, locks, watchers, polling, crewmates, task ids, briefs, worktrees, checkouts, status or metadata files, teardown, promotion, harness names, runtime backend names, context budgets, delivery-mode names, autonomy flags, wake types, status prefixes, decision holds, pipeline step names, validation-state labels, or compressed safety labels such as fail-closed, fails closed, fail-open, fails open, fail loudly, or close variants.
+Do not expose internal terms such as startup machinery, locks, watchers, polling, crewmates, task ids, briefs, worktrees, checkouts, status or metadata files, teardown, reflagging, harness names, runtime backend names, context budgets, delivery-mode names, autonomy flags, wake types, status prefixes, decision holds, pipeline step names, validation-state labels, or compressed safety labels such as fail-closed, fails closed, fail-open, fails open, fail loudly, or close variants.
 Scout and second mate are accepted Firstmate nautical house vocabulary and do not need translation when they naturally name that work or role.
 When evidence uses an internal label, rewrite it before sending:
 
@@ -535,7 +536,7 @@ It performs guarded fast-forward updates of firstmate and registered secondmate 
 
 These skills are not captain-invocable; load them only at their precise triggers.
 
-- `bootstrap-diagnostics` - load whenever the session-start digest's bootstrap or network-checks section prints an actionable diagnostic line (`MISSING:`, `MISSING_MANUAL:`, `BACKEND_INVALID:`, `NEEDS_GH_AUTH`, `TANGLE:`, `STARTUP_MEMORY_BUDGET:`, `CREW_DISPATCH: invalid`, `MODEL_REGISTRY:`, `MODEL_PRICE:`, `MODEL_VERIFY:`, `ADMISSION_CONTROL:`, `WAKE_LEDGER:`, `FLEET_SYNC:`, `NETWORK_CHECKS:`, `PR_CHECK_MIGRATION:`, `VALIDATION_DAEMON:`, `SECONDMATE_SYNC:`, `SECONDMATE_LIVENESS:`, `SECONDMATE_HANDOFF:`, `NUDGE_SECONDMATES:`, or `FMX:`); silence and `BOOTSTRAP_INFO:` need no load.
+- `bootstrap-diagnostics` - load whenever the session-start digest's bootstrap or network-checks section prints an actionable diagnostic line (`MISSING:`, `MISSING_MANUAL:`, `BACKEND_INVALID:`, `NEEDS_GH_AUTH`, `TANGLE:`, `STARTUP_MEMORY_BUDGET:`, `CREW_DISPATCH: invalid`, `MODEL_REGISTRY:`, `MODEL_PRICE:`, `MODEL_VERIFY:`, `ADMISSION_CONTROL:`, `WAKE_LEDGER:`, `TASK_AXIS_BACKFILL:`, `FLEET_SYNC:`, `NETWORK_CHECKS:`, `PR_CHECK_MIGRATION:`, `VALIDATION_DAEMON:`, `SECONDMATE_SYNC:`, `SECONDMATE_LIVENESS:`, `SECONDMATE_HANDOFF:`, `NUDGE_SECONDMATES:`, or `FMX:`); silence and `BOOTSTRAP_INFO:` need no load.
 - `diagnostic-reasoning` - load before scoping a reported bug and before acting on a diagnostic report.
 - `ask-user-authority` - load before deciding any ask-user finding, regardless of the project's `yolo` posture.
 - `quota-array-dispatch` - load before choosing among a matched crew-dispatch profile array from current quota-axi output.

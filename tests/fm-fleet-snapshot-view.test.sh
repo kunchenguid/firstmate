@@ -433,8 +433,8 @@ EOF
   printf '%s' "$out" | jq -e --arg home "$home" '
     (.tasks | length) == 0
       and .scout_reports == [
-        {id:"reported-scout",path:($home + "/data/reported-scout/report.md"),kind:"scout"},
-        {id:"untracked-scout",path:($home + "/data/untracked-scout/report.md"),kind:"scout"}
+        {id:"reported-scout",path:($home + "/data/reported-scout/report.md"),kind:"scout",deliverable:"scout"},
+        {id:"untracked-scout",path:($home + "/data/untracked-scout/report.md"),kind:"scout",deliverable:"scout"}
       ]
   ' >/dev/null || fail "durable scout reports should remain visible after meta teardown"
   pass "snapshot includes durable scout reports after teardown"
@@ -551,7 +551,7 @@ EOF
       and .paths.report.present == true
   ' >/dev/null || fail "bold task did not join to override-backed backlog and report"
   view=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_DATA_OVERRIDE="$data" FM_PROJECTS_OVERRIDE="$projects" "$VIEW")
-  assert_contains "$view" "| bold-task | done / status-log | scout | alpha | tmux | present | $data/bold-task/report.md" \
+  assert_contains "$view" "| bold-task | done / status-log | crew/scout | alpha | tmux | present | $data/bold-task/report.md" \
     "view should render bold in-flight row from snapshot"
   assert_contains "$view" "| blocked-reason | Blocked Reason | beta | ship | queued-comma - waits on queued-comma | - |" \
     "view should render blocked reason without title metadata"
@@ -568,7 +568,7 @@ test_view_renders_snapshot() {
   write_fixture "$home"
   fakebin=$(make_fakebin "$home")
   view=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$VIEW")
-  assert_contains "$view" "| ship-task | working / pane | ship | alpha | tmux | present | https://github.com/kunchenguid/firstmate/pull/9" \
+  assert_contains "$view" "| ship-task | working / pane | crew/ship | alpha | tmux | present | https://github.com/kunchenguid/firstmate/pull/9" \
     "view should render ship row from snapshot"
   assert_contains "$view" "| queued-task | Queued Task | alpha | ship | ship-task | -" \
     "view should render queued backlog row"
@@ -576,7 +576,7 @@ test_view_renders_snapshot() {
     "view should render done backlog row"
   assert_contains "$view" "bin/fm-send.sh fm-secondmate-task" \
     "view should show secondmate send guidance"
-  assert_contains "$view" "| secondmate-task | working / status-log | secondmate | $home/secondmate-home | tmux | present / alive |" \
+  assert_contains "$view" "| secondmate-task | working / status-log | secondmate/ship | $home/secondmate-home | tmux | present / alive |" \
     "view should show secondmate endpoint agent liveness"
   assert_not_contains "$view" "fm-peek.sh fm-secondmate-task" \
     "view must not tell firstmate to routinely peek secondmates"
@@ -597,9 +597,9 @@ test_view_renders_dead_secondmate_agent_status() {
   printf 'working: watching delegated scope\n' > "$home/state/dead-secondmate.status"
   fakebin=$(make_fakebin "$home")
   view=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$VIEW")
-  assert_contains "$view" "| dead-secondmate | unknown / none | secondmate | $home/secondmate-home | tmux | present / dead |" \
+  assert_contains "$view" "| dead-secondmate | unknown / none | secondmate/ship | $home/secondmate-home | tmux | present / dead |" \
     "view should distinguish a present secondmate endpoint from a dead agent"
-  assert_contains "$view" "| dead-secondmate | unknown / none | secondmate | $home/secondmate-home | tmux | present / dead | - | $home/secondmate-home (absent) |" \
+  assert_contains "$view" "| dead-secondmate | unknown / none | secondmate/ship | $home/secondmate-home | tmux | present / dead | - | $home/secondmate-home (absent) |" \
     "view should show a recorded missing secondmate home path"
   pass "fleet view renders secondmate agent liveness"
 }
