@@ -8,7 +8,14 @@
 # an unwritable ledger leaves the drain's raw rows and exit status untouched,
 # and a deliberately slowed ledger phase never blocks a concurrent wake append.
 #
-# Teardown's terminal-record write is covered where teardown's own fixture
+# It also covers the terminal-outcome definition: the derivation from a task's
+# own declaration, the closed evidence vocabulary, and the sweep that records a
+# failure no teardown will ever see. That last one is the case that matters -
+# a task that fails and is never torn down was silent here, and silence is
+# indistinguishable from a task that never failed, so covering only the
+# torn-down path would miss the actual defect.
+#
+# Teardown's own terminal-record write is covered where teardown's fixture
 # lives, in tests/fm-teardown.test.sh.
 set -u
 
@@ -494,6 +501,165 @@ test_an_explicit_joinable_sequence_records_unchanged() {
   pass "an explicit joinable sequence, including several at once, records exactly as before"
 }
 
+test_the_terminal_outcome_derivation_reads_the_task_declaration() {
+  local home status
+  home=$(make_home derive)
+  status="$home/state/alpha.status"
+
+  [ "$(ledger "$home" derive "$home/state/absent.status")" = "landed assumed" ] \
+    || fail "derive: a task with no status log must yield the unevidenced default"
+
+  printf 'working: started\n' > "$status"
+  [ "$(ledger "$home" derive "$status")" = "landed assumed" ] \
+    || fail "derive: progress alone is not evidence of an outcome"
+
+  # An open state is not an outcome. A blocked or parked task that is later
+  # released normally landed its work; treating either as failure would invent
+  # failures out of ordinary supervision traffic.
+  printf 'blocked: needs a credential\nneeds-decision: which base\n' >> "$status"
+  [ "$(ledger "$home" derive "$status")" = "landed assumed" ] \
+    || fail "derive: blocked and needs-decision are open states, not outcomes"
+
+  printf 'failed: the approach does not work\n' >> "$status"
+  [ "$(ledger "$home" derive "$status")" = "failed declared" ] \
+    || fail "derive: a declared failure must derive failed, with the declaration as its evidence"
+
+  # Last declaration wins: a task that failed, was recovered and then shipped
+  # is a landed task, not a permanent failure.
+  printf 'done: PR merged\n' >> "$status"
+  [ "$(ledger "$home" derive "$status")" = "landed declared" ] \
+    || fail "derive: a later done: must supersede an earlier failed:"
+
+  pass "the terminal outcome derives from the task's own last declaration"
+}
+
+test_terminal_outcome_source_is_closed_and_defaults_to_assumed() {
+  local home file src
+  home=$(make_home outcome-source)
+  file=$(ledger_file "$home")
+
+  ledger "$home" task alpha --outcome failed --source declared \
+    || fail "outcome-source: a declared failure should be accepted"
+  [ "$(last_field_of "$file" task outcome_source)" = declared ] \
+    || fail "outcome-source: the evidence was not recorded"
+
+  # An absent --source must never imply evidence nobody produced.
+  ledger "$home" task beta --outcome landed || fail "outcome-source: default source failed"
+  [ "$(last_field_of "$file" task outcome_source)" = assumed ] \
+    || fail "outcome-source: an unstated evidence must record assumed"
+
+  for src in declared discarded unreleased assumed; do
+    ledger "$home" task "src-$src" --outcome landed --source "$src" >/dev/null \
+      || fail "outcome-source: $src should be accepted"
+  done
+  for src in observed guessed '' DECLARED declared-ish; do
+    if ledger "$home" task rejected --outcome landed --source "$src" >/dev/null 2>&1; then
+      fail "outcome-source: '$src' should have been refused"
+    fi
+  done
+  if grep -q 'task=rejected' "$file"; then
+    fail "outcome-source: a refused evidence token still wrote a record"
+  fi
+  pass "the outcome-source vocabulary is closed and an unstated evidence records assumed"
+}
+
+# The defect this whole increment exists for: only teardown wrote a terminal
+# line, so a task that failed and was NEVER torn down left the ledger silent,
+# and that silence is indistinguishable from a task that never failed. A test
+# that covers only the torn-down case misses exactly this.
+test_a_failure_that_is_never_torn_down_is_recorded_not_silent() {
+  local home file out before
+  home=$(make_home sweep)
+  file=$(ledger_file "$home")
+
+  printf 'window=fm:alpha\n' > "$home/state/alpha.meta"
+  printf 'working: running\n' > "$home/state/alpha.status"
+  printf 'harness=pi\nmodel=sol\neffort=high\nkind=ship\nmode=no-mistakes\nbackend=tmux\n' \
+    > "$home/state/beta.meta"
+  printf 'working: running\nfailed: the approach does not work\n' > "$home/state/beta.status"
+
+  # Negative control first: with no failure declared anywhere, the sweep must
+  # record nothing, so the positive result below cannot be the sweep firing
+  # indiscriminately over every task in state/.
+  mv "$home/state/beta.status" "$home/state/beta.status.held"
+  out=$(ledger "$home" sweep) || fail "sweep: control run failed"
+  [ -z "$out" ] || fail "sweep: recorded something with no declared failure:"$'\n'"$out"
+  [ ! -f "$file" ] || fail "sweep: wrote a record with no declared failure"
+  mv "$home/state/beta.status.held" "$home/state/beta.status"
+
+  out=$(ledger "$home" sweep --dry-run) || fail "sweep: dry run failed"
+  printf '%s\n' "$out" | grep -q 'unreleased failure: beta' \
+    || fail "sweep: dry run did not name the unreleased failure:"$'\n'"$out"
+  [ ! -f "$file" ] || fail "sweep: a dry run wrote a record"
+  [ ! -e "$home/state/beta.terminal-recorded" ] || fail "sweep: a dry run left a receipt"
+
+  ledger "$home" sweep >/dev/null || fail "sweep: recording run failed"
+  [ "$(last_field_of "$file" task task)" = beta ] || fail "sweep: the failed task was not recorded"
+  [ "$(last_field_of "$file" task outcome)" = failed ] || fail "sweep: outcome not recorded as failed"
+  [ "$(last_field_of "$file" task outcome_source)" = unreleased ] \
+    || fail "sweep: the record did not say it came from an unreleased task"
+  # The profile join is the reason the record is worth writing now rather than
+  # inferring it later: the metadata that carries it is still on disk.
+  [ "$(last_field_of "$file" task harness)" = pi ] || fail "sweep: harness not captured"
+  [ "$(last_field_of "$file" task model)" = sol ] || fail "sweep: model not captured"
+  if grep -q 'task=alpha' "$file"; then
+    fail "sweep: a task with no declared failure was recorded"
+  fi
+  [ -e "$home/state/beta.terminal-recorded" ] || fail "sweep: no receipt was written"
+
+  # Idempotence, with its own negative control: removing the receipt must make
+  # the sweep record again, so the quiet rerun below proves the receipt works
+  # rather than proving the sweep stopped finding anything.
+  before=$(wc -l < "$file" | tr -d ' ')
+  ledger "$home" sweep >/dev/null || fail "sweep: rerun failed"
+  [ "$(wc -l < "$file" | tr -d ' ')" -eq "$before" ] \
+    || fail "sweep: a rerun appended a second record for the same task"
+  rm -f "$home/state/beta.terminal-recorded"
+  ledger "$home" sweep >/dev/null || fail "sweep: post-control run failed"
+  [ "$(wc -l < "$file" | tr -d ' ')" -eq $((before + 1)) ] \
+    || fail "sweep: removing the receipt did not make the sweep record again"
+  pass "a declared failure that is never torn down is recorded once, not silent"
+}
+
+test_the_report_names_evidence_and_refuses_a_rate() {
+  local home file out
+  home=$(make_home terminal-report)
+  file=$(ledger_file "$home")
+
+  ledger "$home" task alpha --outcome landed --source declared || fail "report: task failed"
+  ledger "$home" task beta --outcome failed --source declared || fail "report: task failed"
+  # A record written before this field existed. It must read as assumed rather
+  # than needing an append-only file rewritten.
+  printf 'v1\ttask\t%s\ttask=gamma\toutcome=landed\tharness=pi\tmodel=sol\teffort=low\n' \
+    "$(date +%s)" >> "$file"
+
+  out=$(ledger "$home" report) || fail "report: failed"
+  printf '%s\n' "$out" | grep -q 'tasks: 3 terminal (landed 2  failed 1)' \
+    || fail "report: terminal counts wrong:"$'\n'"$out"
+  printf '%s\n' "$out" | grep -q 'by evidence:.*declared 2' \
+    || fail "report: declared evidence not counted:"$'\n'"$out"
+  printf '%s\n' "$out" | grep -q 'by evidence:.*assumed 1' \
+    || fail "report: a record predating outcome_source must count as assumed:"$'\n'"$out"
+  printf '%s\n' "$out" | grep -q 'DIAGNOSTIC ONLY - not a success rate' \
+    || fail "report: terminal counts printed without their diagnostic-only qualifier:"$'\n'"$out"
+  printf '%s\n' "$out" | grep -q 'known, named, unreconciled gap' \
+    || fail "report: the fleet/pipeline divergence was not named:"$'\n'"$out"
+  # The certification is the absence of a ratio, so assert it directly: the
+  # only permitted mention of a success rate is the refusal to print one, and
+  # no percentage may appear anywhere in the terminal-outcome section.
+  if printf '%s\n' "$out" | grep -o 'success rate' | grep -qv '^success rate$'; then
+    fail "report: unexpected success-rate text:"$'\n'"$out"
+  fi
+  if [ "$(printf '%s\n' "$out" | grep -c 'not a success rate')" \
+       -ne "$(printf '%s\n' "$out" | grep -c 'success rate')" ]; then
+    fail "report: printed a success rate over unreconciled counts:"$'\n'"$out"
+  fi
+  if printf '%s\n' "$out" | sed -n '/^tasks:/,/^$/p' | grep -q '%'; then
+    fail "report: printed a ratio in the terminal-outcome section:"$'\n'"$out"
+  fi
+  pass "the report breaks outcomes down by evidence and refuses to print a rate"
+}
+
 test_reconcile_counts_outcomes_that_join_no_wake_record() {
   local home out now
   home=$(make_home reconcile)
@@ -546,3 +712,7 @@ test_a_bare_outcome_records_against_the_newest_unrecorded_wake
 test_an_unjoinable_sequence_is_refused_without_the_override
 test_an_explicit_joinable_sequence_records_unchanged
 test_reconcile_counts_outcomes_that_join_no_wake_record
+test_the_terminal_outcome_derivation_reads_the_task_declaration
+test_terminal_outcome_source_is_closed_and_defaults_to_assumed
+test_a_failure_that_is_never_torn_down_is_recorded_not_silent
+test_the_report_names_evidence_and_refuses_a_rate

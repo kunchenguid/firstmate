@@ -54,6 +54,9 @@ When any diagnostic needs captain attention, report the plain consequence and re
   A count that grows during a session means something is still recording against unresolvable sequences, which is a bug to escalate rather than a backlog of old damage.
 - `WAKE_LEDGER: the wake ledger could not be read ...` - the file exists but could not be opened, so the count above is unavailable rather than zero.
   Repair its permissions or path before quoting any supervision-cost figure; an unreadable ledger is reported precisely so it cannot pass as a clean one.
+- `WAKE_LEDGER: <n> task(s) declared failure with no terminal record ...` - only a lock-holding session records those, so a read-only session names them and leaves the recording to the session that holds the lock.
+  Take no action on the count itself; the next locked session records it, and the tasks themselves are ordinary work whose state is read the usual way.
+  Terminal outcome counts stay diagnostic while any of them is unrecorded, so never quote a success rate from the ledger.
 - `FLEET_SYNC: <repo>: skipped: <reason>` - a benign one-off skip (offline, no origin, local-only); bootstrap continued, investigate only if it blocks work.
   A skip can also report the bounded fleet-refresh timeout (`FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT`, or a fleet-size-aware default with a 20 second floor); a timeout never blocks startup.
 - `FLEET_SYNC: <repo>: recovered: <detail>` - the clone had drifted onto a clean detached HEAD holding no unique commits and the sync self-healed it (re-attached the default branch and fast-forwarded); no action needed, it is reported only so the self-heal is visible.

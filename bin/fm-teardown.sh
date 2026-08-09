@@ -410,7 +410,8 @@ remote_secondmate_teardown() {
   grep -vE "^- $ID( |$)" "$SECONDMATE_REG" > "$tmp" || true
   mv -f -- "$tmp" "$SECONDMATE_REG"
   rm -f -- "$STATE/$ID.status" "$STATE/$ID.meta" "$STATE/$ID.turn-ended" "$STATE/$ID.childcpu" \
-    "$STATE/.$ID.open-decisions-cursor"
+    "$STATE/.$ID.open-decisions-cursor" \
+    "$STATE/$ID.terminal-recorded"
   printf 'teardown %s complete (remote %s:%s)\n' "$ID" "$remote_host" "$remote_home"
   return 0
 }
@@ -2669,9 +2670,25 @@ retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
 # harness/model/effort join for this task is available anywhere.
 # bin/fm-wake-ledger.sh owns the record format. Best effort by design - a
 # telemetry write must never stand between the fleet and cleanup.
-LEDGER_OUTCOME=landed
+# The outcome comes from what the task DECLARED, not from a constant: a task
+# that reported failed: must not leave a record that says it landed. The
+# mapping and its evidence vocabulary belong to fm-wake-ledger.sh; this reads
+# the status file before the removal below deletes it, and falls back to the
+# ledger's own unevidenced default if that read fails.
+LEDGER_DERIVED=$(FM_WAKE_LEDGER="${FM_WAKE_LEDGER:-$DATA/wake-ledger.tsv}" \
+  "$SCRIPT_DIR/fm-wake-ledger.sh" derive "$STATE/$ID.status" 2>/dev/null) \
+  || LEDGER_DERIVED=""
+case "$LEDGER_DERIVED" in
+  'landed '*|'failed '*) ;;
+  *) LEDGER_DERIVED="landed assumed" ;;
+esac
+LEDGER_OUTCOME=${LEDGER_DERIVED%% *}
+LEDGER_SOURCE=${LEDGER_DERIVED##* }
+# A discard is the operator's own act and outranks the worker's last word: the
+# work was thrown away whatever the task believed about itself.
 if [ "$FORCE" = "--force" ]; then
   LEDGER_OUTCOME=abandoned
+  LEDGER_SOURCE=discarded
 fi
 LEDGER_ESCALATED=$(meta_value "$META" escalated)
 case "$LEDGER_ESCALATED" in
@@ -2693,6 +2710,7 @@ fi
 FM_WAKE_LEDGER="$LEDGER_PATH" \
 "$SCRIPT_DIR/fm-wake-ledger.sh" task "$ID" \
   --outcome "$LEDGER_OUTCOME" \
+  --source "$LEDGER_SOURCE" \
   --harness "$(meta_value "$META" harness)" \
   --model "$(meta_value "$META" model)" \
   --effort "$(meta_value "$META" effort)" \
@@ -2709,6 +2727,7 @@ rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
   "$STATE/$ID.kimi-turnend-token" "$STATE/$ID.childcpu" "$STATE/$ID.muse-session" \
   "$STATE/$ID.muse-session-current" \
   "$STATE/.$ID.open-decisions-cursor" \
+  "$STATE/$ID.terminal-recorded" \
   "$STATE/$ID.control-relaunch" "$STATE/$ID.control-relaunch.meta-prior" \
   "$STATE/$ID.control-relaunch.brief-prior" "$STATE/$ID.control-relaunch.note"
 fm_lock_release "$META_LOCK"
