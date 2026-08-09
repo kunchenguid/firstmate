@@ -74,6 +74,7 @@ The primary integrations for `claude`, `codex`, `opencode`, `pi`, `pi-signed`, a
 `opencode`, `pi`, and `pi-signed` block by throwing from `tool.execute.before` / returning `{block: true}` from `tool_call`.
 The exact hook files, commands, output-shaping quirks (Claude Code only honors the deny when stdout is empty), and validation transcripts are owned by `docs/arm-pretool-check.md`.
 When changing any watcher-arm PreToolUse hook, validate the real harness behavior in a scratch project before trusting it, then update that doc.
+
 ## Primary delegation-shape guard
 
 Claude exposes built-in delegation, scheduling, and worktree tools that a primary session can use to create work with no `state/<id>.meta`, which makes the whole guard stack inert because every guard counts that metadata.
@@ -114,6 +115,10 @@ Use `low` for well-understood work with an explicit bounded path and `xhigh` for
 Choose intermediate levels proportionally as complexity, uncertainty, blast radius, or open-ended reasoning increases.
 When a verified adapter lacks `xhigh`, cap the choice at its highest supported non-`max` level rather than omitting the intended effort silently.
 Never select `max` from this fallback; use it only when the captain has explicitly expressed that per-task or standing preference.
+
+Role-specific effort and reviewer boundaries are owned here: routine deep Oracle review uses `xhigh`, while `max` requires an explicit architecture or security escalation from the captain.
+`Fixer` is implementation-only, `Oracle` is read-only correctness and architecture review, and `Lelouch` is read-only post-PR release-risk review.
+`AGENTS.md` section 7 owns Oracle review timing, fallback, and cycle budget.
 
 The supported launch-profile flags below are verified locally; each row records its evidence.
 

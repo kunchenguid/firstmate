@@ -42,7 +42,14 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse pi-signed
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+set -u
+[ -z "${FM_FAKE_TREEHOUSE_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_TREEHOUSE_LOG"
+exit 0
+SH
+  chmod +x "$fakebin/treehouse"
+  fm_fake_exit0 "$fakebin" pi-signed
   printf '%s\n' "$fakebin"
 }
 
@@ -72,6 +79,12 @@ enable_dispatch_profile() {
     > "$home/config/crew-dispatch.json"
 }
 
+enable_antigravity_dispatch_profile() {
+  local home=$1
+  printf '%s\n' '{"rules":[{"when":"current events","use":{"harness":"pi","model":"antigravity/gemini-3.6-flash","effort":"high"}}],"default":{"harness":"pi","model":"antigravity/gemini-3.6-flash","effort":"high"}}' \
+    > "$home/config/crew-dispatch.json"
+}
+
 make_seeded_secondmate_home() {
   local home=$1 id=$2
   mkdir -p "$home/bin" "$home/data"
@@ -93,8 +106,134 @@ run_spawn() {
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
     CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
-    FM_FAKE_LAUNCH_LOG="$launchlog" GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
+    FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_TREEHOUSE_LOG="$launchlog.treehouse" \
+    FM_ANTIGRAVITY_PREFLIGHT_BIN="${PREFLIGHT_BIN:-}" \
+    FM_ANTIGRAVITY_PREFLIGHT_TIMEOUT_SECONDS="${PREFLIGHT_TIMEOUT:-30}" \
+    FM_PREFLIGHT_LOG="${PREFLIGHT_LOG:-}" FM_PREFLIGHT_RESULT="${PREFLIGHT_RESULT:-ok}" \
+    GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
     "$SPAWN" "$@" 2>&1
+}
+
+make_preflight_checker() {
+  local path=$1
+  cat > "$path" <<'SH'
+#!/usr/bin/env bash
+set -u
+[ -z "${FM_PREFLIGHT_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_PREFLIGHT_LOG"
+case "${FM_PREFLIGHT_RESULT:-ok}" in
+  ok) printf '%s\n' 'OK: active re***@example.invalid is usable (rotated: false)'; exit 0 ;;
+  exhausted) printf '%s\n' 'EXHAUSTED: all configured accounts are exhausted or unavailable'; exit 1 ;;
+  secret-error) printf '%s\n' 'ERROR: refresh_token=super-secret-value leaked@example.invalid'; exit 2 ;;
+  timeout) sleep 5; exit 0 ;;
+  signal-kill) kill -9 $$ ;;
+  *) exit 23 ;;
+esac
+SH
+  chmod +x "$path"
+}
+
+make_forked_preflight_checker() {
+  local path=$1
+  cat > "$path" <<'SH'
+#!/usr/bin/env bash
+set -u
+[ -z "${FM_PREFLIGHT_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_PREFLIGHT_LOG"
+( sleep 10 >/dev/null 2>&1 & )
+printf '%s\n' 'OK: active re***@example.invalid is usable'
+exit 0
+SH
+  chmod +x "$path"
+}
+
+make_timeout_without_perl() {
+  local fakebin=$1 perl_marker=$2 native_timeout
+  native_timeout=$(command -v timeout || command -v gtimeout) || fail "native timeout command is unavailable"
+  cat > "$fakebin/timeout" <<SH
+#!/usr/bin/env bash
+set -u
+shift
+exec '$native_timeout' "\$@"
+SH
+  chmod +x "$fakebin/timeout"
+  cat > "$fakebin/perl" <<SH
+#!/usr/bin/env bash
+printf '%s\\n' called > '$perl_marker'
+exit 127
+SH
+  chmod +x "$fakebin/perl"
+}
+
+make_incompatible_timeout_with_gtimeout() {
+  local fakebin=$1 timeout_marker=$2 gtimeout_marker=$3 perl_marker=$4 native_timeout
+  native_timeout=$(command -v timeout || command -v gtimeout) || fail "native timeout command is unavailable"
+  cat > "$fakebin/timeout" <<SH
+#!/usr/bin/env bash
+case "\${1:-}" in
+  --help) printf '%s\\n' 'portable timeout'; exit 0 ;;
+esac
+printf '%s\\n' called > '$timeout_marker'
+exit 127
+SH
+  chmod +x "$fakebin/timeout"
+  cat > "$fakebin/gtimeout" <<SH
+#!/usr/bin/env bash
+case "\${1:-}" in
+  --help) printf '%s\\n' '--kill-after=DURATION'; exit 0 ;;
+esac
+printf '%s\\n' called > '$gtimeout_marker'
+exec '$native_timeout' "\$@"
+SH
+  chmod +x "$fakebin/gtimeout"
+  cat > "$fakebin/perl" <<SH
+#!/usr/bin/env bash
+printf '%s\\n' called > '$perl_marker'
+exit 127
+SH
+  chmod +x "$fakebin/perl"
+}
+
+make_incompatible_timeouts() {
+  local fakebin=$1 timeout_marker=$2 gtimeout_marker=$3 perl_marker=$4
+  cat > "$fakebin/timeout" <<SH
+#!/usr/bin/env bash
+case "\${1:-}" in
+  --help) printf '%s\\n' 'portable timeout'; exit 0 ;;
+esac
+printf '%s\\n' called > '$timeout_marker'
+exit 127
+SH
+  chmod +x "$fakebin/timeout"
+  cat > "$fakebin/gtimeout" <<SH
+#!/usr/bin/env bash
+case "\${1:-}" in
+  --help) printf '%s\\n' 'portable gtimeout'; exit 0 ;;
+esac
+printf '%s\\n' called > '$gtimeout_marker'
+exit 127
+SH
+  chmod +x "$fakebin/gtimeout"
+  cat > "$fakebin/perl" <<SH
+#!/usr/bin/env bash
+printf '%s\\n' called > '$perl_marker'
+exit 127
+SH
+  chmod +x "$fakebin/perl"
+}
+
+make_large_preflight_checker() {
+  local path=$1 result=${2:-ok}
+  cat > "$path" <<SH
+#!/usr/bin/env bash
+set -u
+[ -z "\${FM_PREFLIGHT_LOG:-}" ] || printf '%s\n' "\$*" >> "\$FM_PREFLIGHT_LOG"
+python3 -c 'print("X" * 50000)'
+case "$result" in
+  ok) exit 0 ;;
+  exhausted) exit 1 ;;
+  *) exit 2 ;;
+esac
+SH
+  chmod +x "$path"
 }
 
 # Ship spawns carry an explicit delivery contract (AGENTS.md section 7); these
@@ -102,7 +241,6 @@ run_spawn() {
 run_ship_spawn() {
   run_spawn "$@" --mode no-mistakes --yolo off
 }
-
 read_case_record() {
   IFS='|' read -r CASE_DIR HOME_DIR PROJ_DIR WT_DIR FAKEBIN_DIR LAUNCH_LOG <<EOF
 $1
@@ -673,6 +811,499 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
   pass "active crew-dispatch profile does not block secondmate launches"
 }
 
+test_antigravity_preflight_exit_zero_preserves_profile() {
+  local rec id out status
+  id=preflight-ok-z17
+  rec=$(make_spawn_case preflight-ok pi "$id")
+  read_case_record "$rec"
+  PREFLIGHT_BIN="$CASE_DIR/checker"
+  PREFLIGHT_LOG="$CASE_DIR/checker.log"
+  PREFLIGHT_RESULT=ok
+  make_preflight_checker "$PREFLIGHT_BIN"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model antigravity/gemini-3.6-flash --effort high)
+  status=$?
+  expect_code 0 "$status" "usable Antigravity quota should permit the spawn"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" pi antigravity/gemini-3.6-flash high
+  assert_grep "check" "$PREFLIGHT_LOG" "preflight checker was not invoked with check"
+  pass "exit 0 keeps the requested Antigravity model and effort"
+}
+
+test_antigravity_preflight_without_perl_uses_native_timeout() {
+  local rec id out status perl_marker
+  id=preflight-no-perl-z17a
+  rec=$(make_spawn_case preflight-no-perl pi "$id")
+  read_case_record "$rec"
+  PREFLIGHT_BIN="$CASE_DIR/checker"
+  PREFLIGHT_LOG="$CASE_DIR/checker.log"
+  PREFLIGHT_RESULT=ok
+  perl_marker="$CASE_DIR/perl-called"
+  make_preflight_checker "$PREFLIGHT_BIN"
+  make_timeout_without_perl "$FAKEBIN_DIR" "$perl_marker"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model antigravity/gemini-3.6-flash --effort high)
+  status=$?
+  expect_code 0 "$status" "native timeout should permit Antigravity launch without Perl"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" pi antigravity/gemini-3.6-flash high
+  assert_absent "$perl_marker" "Antigravity preflight invoked Perl despite native timeout availability"
+  pass "native timeout path removes Perl as a required Antigravity dependency"
+}
+
+test_antigravity_preflight_prefers_compatible_gtimeout() {
+  local rec id out status timeout_marker gtimeout_marker perl_marker
+  id=preflight-gtimeout-z17b
+  rec=$(make_spawn_case preflight-gtimeout pi "$id")
+  read_case_record "$rec"
+  PREFLIGHT_BIN="$CASE_DIR/checker"
+  PREFLIGHT_RESULT=ok
+  timeout_marker="$CASE_DIR/timeout-called"
+  gtimeout_marker="$CASE_DIR/gtimeout-called"
+  perl_marker="$CASE_DIR/perl-called"
+  make_preflight_checker "$PREFLIGHT_BIN"
+  make_incompatible_timeout_with_gtimeout "$FAKEBIN_DIR" "$timeout_marker" "$gtimeout_marker" "$perl_marker"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model antigravity/gemini-3.6-flash --effort high)
+  status=$?
+  expect_code 0 "$status" "compatible gtimeout should replace incompatible timeout"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" pi antigravity/gemini-3.6-flash high
+  assert_absent "$timeout_marker" "incompatible timeout was selected despite compatible gtimeout"
+  assert_present "$gtimeout_marker" "compatible gtimeout was not selected"
+  assert_absent "$perl_marker" "gtimeout fallback invoked Perl"
+  pass "compatible gtimeout is selected when timeout lacks kill-after"
+}
+
+test_antigravity_preflight_refuses_without_compatible_timeout() {
+  local rec id out status timeout_marker gtimeout_marker perl_marker
+  id=preflight-no-compatible-timeout-z17c
+  rec=$(make_spawn_case preflight-no-compatible-timeout pi "$id")
+  read_case_record "$rec"
+  PREFLIGHT_BIN="$CASE_DIR/checker"
+  PREFLIGHT_RESULT=ok
+  timeout_marker="$CASE_DIR/timeout-called"
+  gtimeout_marker="$CASE_DIR/gtimeout-called"
+  perl_marker="$CASE_DIR/perl-called"
+  make_preflight_checker "$PREFLIGHT_BIN"
+  make_incompatible_timeouts "$FAKEBIN_DIR" "$timeout_marker" "$gtimeout_marker" "$perl_marker"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model antigravity/gemini-3.6-flash --effort high)
+  status=$?
+  expect_code 1 "$status" "preflight should refuse without a compatible timeout"
+  assert_contains "$out" "requires timeout or gtimeout with --kill-after" \
+    "incompatible timeout refusal was not concrete"
+  assert_absent "$HOME_DIR/state/$id.meta" "incompatible timeout wrote task metadata"
+  assert_absent "$timeout_marker" "incompatible timeout was invoked"
+  assert_absent "$gtimeout_marker" "incompatible gtimeout was invoked"
+  assert_absent "$perl_marker" "incompatible timer fallback invoked Perl"
+  pass "preflight refuses before metadata when no timer can clean descendants"
+}
+
+test_antigravity_preflight_configured_profile_covers_scouts() {
+  local rec id out status
+  id=preflight-profile-scout-z17b
+  rec=$(make_spawn_case preflight-profile-scout pi "$id")
+  read_case_record "$rec"
+  enable_antigravity_dispatch_profile "$HOME_DIR"
+  PREFLIGHT_BIN="$CASE_DIR/checker"
+  PREFLIGHT_LOG="$CASE_DIR/checker.log"
+  PREFLIGHT_RESULT=ok
+  make_preflight_checker "$PREFLIGHT_BIN"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --harness pi --model antigravity/gemini-3.6-flash --effort high --scout)
+  status=$?
+  expect_code 0 "$status" "configured Antigravity scout profile should permit the spawn"
+  assert_grep "kind=scout" "$HOME_DIR/state/$id.meta" "configured Antigravity scout did not record kind=scout"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" pi antigravity/gemini-3.6-flash high
+  assert_grep "check" "$PREFLIGHT_LOG" "configured Antigravity scout did not invoke preflight"
+  pass "configured Antigravity profiles use the shared scout boundary"
+}
+
+test_antigravity_preflight_all_unusable_falls_back_before_metadata() {
+  local rec id out status launch
+  id=preflight-exhausted-z18
+  rec=$(make_spawn_case preflight-exhausted pi "$id")
+  read_case_record "$rec"
+  PREFLIGHT_BIN="$CASE_DIR/checker"
+  PREFLIGHT_LOG="$CASE_DIR/checker.log"
+  PREFLIGHT_RESULT=exhausted
+  make_preflight_checker "$PREFLIGHT_BIN"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model antigravity/gemini-3.6-flash --effort xhigh)
+  status=$?
+  expect_code 0 "$status" "exhausted Antigravity accounts should fall back to Luna high"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" pi cockpit/gpt-5.6-luna high
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "--model 'cockpit/gpt-5.6-luna' --thinking 'high'" \
+    "launch command did not receive the Luna high fallback profile"
+  assert_grep "check" "$PREFLIGHT_LOG" "exhausted accounts test did not run the quota checker"
+  pass "exit 1 falls back to Luna high before endpoint and metadata publication"
+}
+
+test_antigravity_preflight_raw_launch_uses_fallback() {
+  local rec id out status launch
+  id=preflight-raw-fallback-z18b
+  rec=$(make_spawn_case preflight-raw-fallback pi "$id")
+  read_case_record "$rec"
+  PREFLIGHT_BIN="$CASE_DIR/checker"
+  PREFLIGHT_LOG="$CASE_DIR/checker.log"
+  PREFLIGHT_RESULT=exhausted
+  make_preflight_checker "$PREFLIGHT_BIN"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    "custom-agent --flag" --model antigravity/gemini-3.6-flash --effort xhigh)
+  status=$?
+  expect_code 0 "$status" "raw launch should use the documented Luna fallback"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" custom-agent cockpit/gpt-5.6-luna high
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "custom-agent --flag --model 'cockpit/gpt-5.6-luna' --effort 'high'" \
+    "raw launch did not receive the Luna fallback"
+  pass "exit 1 applies the Luna fallback to raw launch commands"
+}
+
+test_antigravity_preflight_error_is_secret_safe_and_refuses() {
+  local rec id out status
+  id=preflight-error-z19
+  rec=$(make_spawn_case preflight-error pi "$id")
+  read_case_record "$rec"
+  PREFLIGHT_BIN="$CASE_DIR/checker"
+  PREFLIGHT_LOG="$CASE_DIR/checker.log"
+  PREFLIGHT_RESULT=secret-error
+  make_preflight_checker "$PREFLIGHT_BIN"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model antigravity/gemini-3.6-flash --effort high)
+  status=$?
+  expect_code 1 "$status" "checker error exit code must refuse Antigravity launch"
+  assert_contains "$out" "unrecognized result (exit 2)" "preflight error refusal was not concrete"
+  assert_not_contains "$out" "super-secret-value" "preflight error leaked secret diagnostic text"
+  assert_absent "$HOME_DIR/state/$id.meta" "checker error wrote task metadata"
+  pass "checker error exit code refuses without leaking checker stdout"
+}
+
+test_antigravity_preflight_missing_and_non_executable_refuse() {
+  local rec id out status
+  id=preflight-missing-z20
+  rec=$(make_spawn_case preflight-missing pi "$id")
+  read_case_record "$rec"
+  PREFLIGHT_BIN="$CASE_DIR/missing-checker"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model antigravity/gemini-3.6-flash --effort high)
+  status=$?
+  expect_code 1 "$status" "missing checker must refuse Antigravity launch"
+  assert_contains "$out" "missing or not executable" "missing checker refusal was not concrete"
+  assert_absent "$HOME_DIR/state/$id.meta" "missing checker wrote task metadata"
+
+  touch "$PREFLIGHT_BIN"
+  chmod -x "$PREFLIGHT_BIN"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model antigravity/gemini-3.6-flash --effort high)
+  status=$?
+  expect_code 1 "$status" "non-executable checker must refuse Antigravity launch"
+  assert_contains "$out" "missing or not executable" "non-executable refusal was not concrete"
+  assert_absent "$HOME_DIR/state/$id.meta" "non-executable checker wrote task metadata"
+  pass "missing or non-executable checker refuses before endpoint creation"
+}
+
+test_antigravity_preflight_timeout_refuses() {
+  local rec id out status
+  id=preflight-timeout-z21
+  rec=$(make_spawn_case preflight-timeout pi "$id")
+  read_case_record "$rec"
+  PREFLIGHT_BIN="$CASE_DIR/checker"
+  PREFLIGHT_LOG="$CASE_DIR/checker.log"
+  PREFLIGHT_RESULT=timeout
+  make_preflight_checker "$PREFLIGHT_BIN"
+
+  out=$(PREFLIGHT_TIMEOUT=1 \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model antigravity/gemini-3.6-flash --effort high)
+  status=$?
+  expect_code 1 "$status" "preflight timeout must refuse Antigravity launch"
+  assert_contains "$out" "timed out" "timeout refusal was not concrete"
+  assert_absent "$HOME_DIR/state/$id.meta" "timeout wrote task metadata"
+  pass "preflight timeout refuses before endpoint creation"
+}
+
+test_antigravity_preflight_skips_non_antigravity_models() {
+  local rec id out status
+  id=preflight-luna-z23
+  rec=$(make_spawn_case preflight-luna pi "$id")
+  read_case_record "$rec"
+  PREFLIGHT_BIN="$CASE_DIR/missing-checker"
+  PREFLIGHT_LOG="$CASE_DIR/checker.log"
+  PREFLIGHT_RESULT=ok
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model cockpit/gpt-5.6-luna --effort high)
+  status=$?
+  expect_code 0 "$status" "Luna must not require Antigravity preflight"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" pi cockpit/gpt-5.6-luna high
+  assert_absent "$PREFLIGHT_LOG" "Luna launch unexpectedly invoked Antigravity preflight"
+  pass "Luna and other non-Antigravity models bypass the checker"
+}
+
+test_antigravity_preflight_applies_to_configured_secondmate_model() {
+  local rec id sm out status
+  id=preflight-secondmate-z24
+  rec=$(make_spawn_case preflight-secondmate codex "$id")
+  read_case_record "$rec"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+  mkdir -p "$sm/state" "$sm/config" "$sm/projects"
+  printf '%s\n' 'pi antigravity/gemini-3.6-flash medium' > "$HOME_DIR/config/secondmate-harness"
+  PREFLIGHT_BIN="$CASE_DIR/checker"
+  PREFLIGHT_LOG="$CASE_DIR/checker.log"
+  PREFLIGHT_RESULT=exhausted
+  make_preflight_checker "$PREFLIGHT_BIN"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  expect_code 0 "$status" "secondmate Antigravity model should use the shared preflight boundary"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" pi cockpit/gpt-5.6-luna high
+  assert_grep "check" "$PREFLIGHT_LOG" "secondmate did not invoke the quota checker"
+  pass "secondmate config models use the same preflight and accurate fallback metadata"
+}
+
+test_antigravity_preflight_forked_checker_does_not_hang() {
+  local rec id out status
+  id=preflight-forked-z25
+  rec=$(make_spawn_case preflight-forked pi "$id")
+  read_case_record "$rec"
+  PREFLIGHT_BIN="$CASE_DIR/checker"
+  PREFLIGHT_LOG="$CASE_DIR/checker.log"
+  make_forked_preflight_checker "$PREFLIGHT_BIN"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model antigravity/gemini-3.6-flash --effort high)
+  status=$?
+  expect_code 0 "$status" "forked checker should return promptly and permit spawn"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" pi antigravity/gemini-3.6-flash high
+  assert_grep "check" "$PREFLIGHT_LOG" "forked checker was not invoked"
+  pass "forked checker process does not hang the preflight"
+}
+
+test_antigravity_preflight_invalid_limits_refuse() {
+  local rec id out status
+  id=preflight-invalid-limits-z26
+  rec=$(make_spawn_case preflight-invalid-limits pi "$id")
+  read_case_record "$rec"
+  PREFLIGHT_BIN="$CASE_DIR/checker"
+  PREFLIGHT_LOG="$CASE_DIR/checker.log"
+  PREFLIGHT_RESULT=ok
+  make_preflight_checker "$PREFLIGHT_BIN"
+
+  out=$(PREFLIGHT_TIMEOUT=invalid \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model antigravity/gemini-3.6-flash --effort high)
+  status=$?
+  expect_code 1 "$status" "non-integer timeout must refuse spawn"
+  assert_contains "$out" "timeout is not a positive integer" "invalid timeout refusal missing diagnostic"
+  assert_absent "$HOME_DIR/state/$id.meta" "invalid timeout written metadata"
+
+  out=$(FM_ANTIGRAVITY_PREFLIGHT_OUTPUT_BYTES=0 \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model antigravity/gemini-3.6-flash --effort high)
+  status=$?
+  expect_code 1 "$status" "zero output limit must refuse spawn"
+  assert_contains "$out" "output limit must be positive" "invalid output limit refusal missing diagnostic"
+  assert_absent "$HOME_DIR/state/$id.meta" "invalid output limit written metadata"
+  pass "invalid timeout and output limit settings refuse before endpoint creation"
+}
+
+test_antigravity_preflight_uses_default_checker_path() {
+  local rec id out status agent_dir checker_path
+  id=preflight-default-path-z27
+  rec=$(make_spawn_case preflight-default-path pi "$id")
+  read_case_record "$rec"
+  agent_dir="$CASE_DIR/pi-agent"
+  checker_path="$agent_dir/extensions/antigravity-account-switcher/bin/antigravity-account-check.js"
+  mkdir -p "$(dirname "$checker_path")"
+  PREFLIGHT_LOG="$CASE_DIR/checker.log"
+  PREFLIGHT_RESULT=ok
+  make_preflight_checker "$checker_path"
+
+  out=$(PI_CODING_AGENT_DIR="$agent_dir" PREFLIGHT_BIN="" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model antigravity/gemini-3.6-flash --effort high)
+  status=$?
+  expect_code 0 "$status" "default checker path under PI_CODING_AGENT_DIR should succeed"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" pi antigravity/gemini-3.6-flash high
+  assert_grep "check" "$PREFLIGHT_LOG" "default checker path was not invoked"
+  pass "default checker path under PI_CODING_AGENT_DIR is resolved and executed"
+}
+
+test_antigravity_preflight_uses_secondary_fallback_checker_path() {
+  local rec id out status agent_dir secondary_checker_path
+  id=preflight-secondary-path-z33
+  rec=$(make_spawn_case preflight-secondary-path pi "$id")
+  read_case_record "$rec"
+  agent_dir="$CASE_DIR/pi-agent"
+  secondary_checker_path="$agent_dir/extensions/pi-antigravity-account-switcher/bin/antigravity-account-check.js"
+  mkdir -p "$(dirname "$secondary_checker_path")"
+  PREFLIGHT_LOG="$CASE_DIR/checker.log"
+  PREFLIGHT_RESULT=ok
+  make_preflight_checker "$secondary_checker_path"
+
+  out=$(PI_CODING_AGENT_DIR="$agent_dir" PREFLIGHT_BIN="" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model antigravity/gemini-3.6-flash --effort high)
+  status=$?
+  expect_code 0 "$status" "secondary checker path under PI_CODING_AGENT_DIR should succeed when primary is missing"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" pi antigravity/gemini-3.6-flash high
+  assert_grep "check" "$PREFLIGHT_LOG" "secondary checker path was not invoked"
+  pass "secondary checker path under PI_CODING_AGENT_DIR is resolved and executed when primary path is missing"
+}
+
+test_antigravity_preflight_embedded_raw_launch_model_uses_fallback() {
+  local rec id out status launch
+  id=preflight-raw-embedded-z28
+  rec=$(make_spawn_case preflight-raw-embedded pi "$id")
+  read_case_record "$rec"
+  PREFLIGHT_BIN="$CASE_DIR/checker"
+  PREFLIGHT_LOG="$CASE_DIR/checker.log"
+  PREFLIGHT_RESULT=exhausted
+  make_preflight_checker "$PREFLIGHT_BIN"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    "custom-agent --model=antigravity/gemini-3.6-flash --effort xhigh")
+  status=$?
+  expect_code 0 "$status" "raw launch with embedded antigravity model flag should trigger preflight fallback"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" custom-agent cockpit/gpt-5.6-luna high
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "--model='cockpit/gpt-5.6-luna'" \
+    "embedded raw launch model did not receive Luna fallback"
+  assert_grep "check" "$PREFLIGHT_LOG" "embedded raw launch model did not invoke checker"
+  pass "raw launch commands with embedded model flag trigger preflight and Luna fallback"
+}
+
+test_antigravity_preflight_large_output_does_not_fail() {
+  local rec id out status
+  id=preflight-large-out-z29
+  rec=$(make_spawn_case preflight-large-out pi "$id")
+  read_case_record "$rec"
+  PREFLIGHT_BIN="$CASE_DIR/checker"
+  PREFLIGHT_LOG="$CASE_DIR/checker.log"
+  make_large_preflight_checker "$PREFLIGHT_BIN" ok
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model antigravity/gemini-3.6-flash --effort high)
+  status=$?
+  expect_code 0 "$status" "checker writing large output with exit 0 should succeed"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" pi antigravity/gemini-3.6-flash high
+  pass "checker writing >8KB output with exit 0 does not receive SIGPIPE or fail"
+}
+
+test_antigravity_preflight_space_in_home_path_succeeds() {
+  local rec id out status home_space
+  id=preflight-space-z30
+  rec=$(make_spawn_case preflight-space pi "$id")
+  read_case_record "$rec"
+  home_space="$CASE_DIR/home with spaces"
+  mkdir -p "$home_space/data/$id" "$home_space/projects" "$home_space/state" "$home_space/config"
+  printf '%s\n' pi > "$home_space/config/crew-harness"
+  touch "$home_space/state/.last-watcher-beat"
+  printf 'brief for %s\n' "$id" > "$home_space/data/$id/brief.md"
+  PREFLIGHT_BIN="$CASE_DIR/checker"
+  PREFLIGHT_LOG="$CASE_DIR/checker.log"
+  PREFLIGHT_RESULT=ok
+  make_preflight_checker "$PREFLIGHT_BIN"
+
+  out=$(run_spawn "$home_space" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model antigravity/gemini-3.6-flash --effort high)
+  status=$?
+  expect_code 0 "$status" "preflight with space in home path should succeed"
+  assert_meta_profile "$home_space/state/$id.meta" pi antigravity/gemini-3.6-flash high
+  pass "state path containing spaces is handled safely"
+}
+
+test_antigravity_preflight_quoted_embedded_raw_launch_model_uses_fallback() {
+  local rec id out status launch
+  id=preflight-raw-quoted-z31
+  rec=$(make_spawn_case preflight-raw-quoted pi "$id")
+  read_case_record "$rec"
+  PREFLIGHT_BIN="$CASE_DIR/checker"
+  PREFLIGHT_LOG="$CASE_DIR/checker.log"
+  PREFLIGHT_RESULT=exhausted
+  make_preflight_checker "$PREFLIGHT_BIN"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    "custom-agent --model 'antigravity/gemini-3.6-flash' --effort xhigh")
+  status=$?
+  expect_code 0 "$status" "raw launch with single-quoted antigravity model should trigger fallback and replace flag"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" custom-agent cockpit/gpt-5.6-luna high
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "custom-agent --model 'cockpit/gpt-5.6-luna' --effort 'high'" \
+    "quoted raw launch model and effort were not cleanly replaced"
+  assert_not_contains "$launch" "antigravity" \
+    "quoted raw launch model still contains old antigravity string"
+  assert_not_contains "$launch" "xhigh" \
+    "quoted raw launch effort still contains old xhigh string"
+  pass "single-quoted raw launch model and effort flags are parsed and cleanly replaced on fallback"
+}
+
+test_resume_reuses_recorded_worktree_and_profile() {
+  local rec id out status old_head meta
+  id=resume-existing-z33
+  rec=$(make_spawn_case resume-existing pi "$id")
+  read_case_record "$rec"
+  printf 'committed before resume\n' > "$WT_DIR/resume-committed.txt"
+  git -C "$WT_DIR" add resume-committed.txt
+  git -C "$WT_DIR" -c user.name='Firstmate Test' -c user.email='firstmate@example.invalid' commit -qm 'resume fixture commit'
+  old_head=$(git -C "$WT_DIR" rev-parse HEAD)
+  printf 'uncommitted before resume\n' > "$WT_DIR/resume-uncommitted.txt"
+  meta="$HOME_DIR/state/$id.meta"
+  {
+    printf 'worktree=%s\n' "$WT_DIR"
+    printf 'project=%s\n' "$PROJ_DIR"
+    printf 'harness=pi\n'
+    printf 'kind=ship\n'
+    printf 'model=antigravity/gemini-3.6-flash\n'
+    printf 'effort=high\n'
+  } > "$meta"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --resume --model cockpit/gpt-5.6-luna --effort xhigh)
+  status=$?
+  expect_code 0 "$status" "resume should relaunch from the recorded worktree"
+  assert_contains "$out" "spawned $id harness=pi" "resume did not report the recorded harness"
+  [ "$(git -C "$WT_DIR" rev-parse HEAD)" = "$old_head" ] \
+    || fail "resume changed the recorded branch head"
+  assert_present "$WT_DIR/resume-uncommitted.txt" "resume discarded an uncommitted change"
+  assert_grep "worktree=$WT_DIR" "$meta" "resume metadata lost the recorded worktree"
+  assert_grep "model=cockpit/gpt-5.6-luna" "$meta" "resume metadata lost the actual resumed model"
+  assert_grep "effort=xhigh" "$meta" "resume metadata lost the actual resumed effort"
+  assert_grep "thinking=xhigh" "$meta" "resume metadata lost the actual resumed thinking level"
+  assert_grep "resume=1" "$meta" "resume metadata did not record same-branch recovery"
+  assert_grep "branch=wt-resume-existing" "$meta" "resume metadata did not record the resumed branch"
+  assert_absent "$LAUNCH_LOG.treehouse" "resume allocated a replacement treehouse worktree"
+  pass "--resume preserves commits and uncommitted changes while recording the actual profile"
+}
+
+test_antigravity_preflight_signal_killed_checker_refuses() {
+  local rec id out status
+  id=preflight-sigkill-z32
+  rec=$(make_spawn_case preflight-sigkill pi "$id")
+  read_case_record "$rec"
+  PREFLIGHT_BIN="$CASE_DIR/checker"
+  PREFLIGHT_LOG="$CASE_DIR/checker.log"
+  PREFLIGHT_RESULT=signal-kill
+  make_preflight_checker "$PREFLIGHT_BIN"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model antigravity/gemini-3.6-flash --effort high)
+  status=$?
+  expect_code 1 "$status" "signal-killed checker must refuse Antigravity launch"
+  assert_contains "$out" "unrecognized result (exit 255)" "signal-killed refusal did not report exit 255"
+  assert_absent "$HOME_DIR/state/$id.meta" "signal-killed checker wrote task metadata"
+  pass "checker killed by signal refuses spawn and reports unrecognized result"
+}
+
 test_no_profile_keeps_claude_profile_defaults
 test_relative_home_overrides_launch_with_absolute_cross_process_paths
 test_home_defaults_preserve_absolute_or_resolve_relative_paths
@@ -699,5 +1330,27 @@ test_claude_forwards_firstmate_config_dir_when_set
 test_claude_omits_config_dir_prefix_when_unset
 test_non_claude_harness_ignores_config_dir
 test_active_dispatch_profile_does_not_block_secondmate_launch
+test_antigravity_preflight_exit_zero_preserves_profile
+test_antigravity_preflight_without_perl_uses_native_timeout
+test_antigravity_preflight_prefers_compatible_gtimeout
+test_antigravity_preflight_refuses_without_compatible_timeout
+test_antigravity_preflight_configured_profile_covers_scouts
+test_antigravity_preflight_all_unusable_falls_back_before_metadata
+test_antigravity_preflight_raw_launch_uses_fallback
+test_antigravity_preflight_error_is_secret_safe_and_refuses
+test_antigravity_preflight_missing_and_non_executable_refuse
+test_antigravity_preflight_timeout_refuses
+test_antigravity_preflight_skips_non_antigravity_models
+test_antigravity_preflight_applies_to_configured_secondmate_model
+test_antigravity_preflight_forked_checker_does_not_hang
+test_antigravity_preflight_invalid_limits_refuse
+test_antigravity_preflight_uses_default_checker_path
+test_antigravity_preflight_uses_secondary_fallback_checker_path
+test_antigravity_preflight_embedded_raw_launch_model_uses_fallback
+test_antigravity_preflight_large_output_does_not_fail
+test_antigravity_preflight_space_in_home_path_succeeds
+test_resume_reuses_recorded_worktree_and_profile
+test_antigravity_preflight_quoted_embedded_raw_launch_model_uses_fallback
+test_antigravity_preflight_signal_killed_checker_refuses
 
 echo "# all fm-spawn-dispatch-profile tests passed"

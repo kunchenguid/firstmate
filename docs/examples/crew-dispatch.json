@@ -6,21 +6,40 @@
       "why": "Grok is the preferred dispatch when current web-connected context is central to the work."
     },
     {
-      "when": "The task is a trivial mechanical edit such as a rote rename, formatting sweep, targeted typo fix, or simple file gathering.",
-      "use": { "harness": "claude", "model": "haiku", "effort": "low" },
-      "why": "Use the cheapest fast profile when the task is narrow and low ambiguity."
-    },
-    {
-      "when": "The task is a big or ambiguous multi-file feature, a risky refactor, or work that requires holding many moving parts in mind.",
+      "when": "The task is routine implementation, a bounded mechanical edit, or a low-ambiguity fix.",
       "use": [
-        { "harness": "claude", "model": "claude-sonnet-5", "effort": "high" },
+        { "harness": "pi", "model": "antigravity/gemini-3.6-flash", "effort": "high" },
         { "harness": "codex", "model": "gpt-5.5", "effort": "high" }
       ],
-      "why": "Use a strong coding profile for big, ambiguous work; resolve the alternatives through quota-array-dispatch."
+      "select": "quota-balanced",
+      "why": "Fast implementation profile; Fixer remains implementation-only."
+    },
+    {
+      "when": "The task involves authentication, authorization, security, concurrency, data integrity, or a high-blast-radius refactor.",
+      "use": [
+        { "harness": "pi", "model": "openai-codex/gpt-5.6-sol", "effort": "xhigh" },
+        { "harness": "claude", "model": "claude-sonnet-5", "effort": "xhigh" }
+      ],
+      "select": "quota-balanced",
+      "why": "Stronger implementation profile for elevated risk; keep implementation with Fixer."
+    },
+    {
+      "when": "The task is an independent correctness or architecture review before validation.",
+      "use": [
+        { "harness": "pi", "model": "openai-codex/gpt-5.6-sol", "effort": "xhigh" },
+        { "harness": "claude", "model": "claude-sonnet-5", "effort": "xhigh" }
+      ],
+      "select": "quota-balanced",
+      "why": "Independent deep reviewer profile; Oracle is read-only."
+    },
+    {
+      "when": "The task is a post-PR release-risk review.",
+      "use": { "harness": "pi", "model": "openai-codex/gpt-5.6-sol", "effort": "xhigh" },
+      "why": "Lelouch is read-only and limited to release risk after a PR exists."
     }
   ],
   "default": [
-    { "harness": "codex", "model": "gpt-5.5", "effort": "medium" },
-    { "harness": "pi", "model": "anthropic/claude-sonnet-5", "effort": "medium" }
+    { "harness": "pi", "model": "antigravity/gemini-3.6-flash", "effort": "high" },
+    { "harness": "codex", "model": "gpt-5.5", "effort": "high" }
   ]
 }

@@ -51,7 +51,7 @@ setup_world() {
   cat > "$HOME_DIR/data/projects.md" <<EOF
 - alpha [direct-PR +yolo] - alpha project (added 2026-06-22)
 - beta [direct-PR] - beta project (added 2026-06-22)
-- gamma - gamma project (added 2026-06-22)
+- gamma [no-mistakes] - gamma project (added 2026-06-22)
 EOF
   ALPHA_ORIGIN=$(git -C "$HOME_DIR/projects/alpha" remote get-url origin)
   BETA_ORIGIN=$(git -C "$HOME_DIR/projects/beta" remote get-url origin)

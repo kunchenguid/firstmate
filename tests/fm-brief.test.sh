@@ -189,6 +189,93 @@ write_registry() {
 EOF
 }
 
+assert_specialist_rule() {
+  local brief=$1 context=$2 expected_return
+  if [ "$context" = scout ]; then
+    expected_return="your findings and evidence"
+  else
+    expected_return="implementation, evidence, and any required PR"
+  fi
+  assert_grep "Standard implementation uses one \`antigravity/gemini-3.6-flash\` crewmate at high effort unless Firstmate explicitly overrides dispatch." "$brief" \
+    "$context brief missing standard crewmate dispatch"
+  assert_grep "You own narrow supporting calls to installed specialists: use \`@fixer\` for targeted implementation, \`@explorer\` for repository mapping and search, \`@plan\` for architecture or implementation planning, \`@designer\` for frontend, UI, and visual work, and \`@oracle\` for independent correctness and risk review when authorized." "$brief" \
+    "$context brief missing worker-owned specialist routing"
+  assert_grep "Inspect and incorporate returned findings yourself, then return $expected_return to Firstmate while preserving this brief's isolation, approval, and delivery rules." "$brief" \
+    "$context brief missing delegation boundary guidance"
+  assert_no_grep "lelouch" "$brief" "$context brief must not add an automatic Lelouch review"
+}
+
+assert_web_research_rule() {
+  local brief=$1 context=$2
+  assert_grep "For web research, use Firecrawl MCP first: call \`firecrawl_search\`, call \`firecrawl_search_feedback\` after using its results, and use \`firecrawl_scrape\` for known pages." "$brief" \
+    "$context brief missing Firecrawl MCP routing rule"
+  assert_grep "If Firecrawl is unavailable, use another tool only as a fallback and disclose that fallback in your findings." "$brief" \
+    "$context brief missing Firecrawl fallback disclosure"
+}
+
+assert_review_path_rule() {
+  local brief=$1 context=$2
+  assert_grep "Before pre-commit review, record the base and HEAD SHAs, then have the reviewer inspect the exact committed range with \`git diff <base>...<HEAD>\` and use \`git show <base>..<HEAD>\` for commit details" "$brief" \
+    "$context brief missing committed-range review verification"
+  assert_grep "if the review tool cannot access those commits or shows an empty range, report the mismatch instead of reviewing it." "$brief" \
+    "$context brief missing committed-range mismatch handling"
+  assert_grep "Follow the authoritative role contract in \`harness-adapters\`: Fixer is implementation-only, Oracle is read-only correctness and architecture review, Lelouch is read-only post-PR release-risk review, ordinary deep Oracle review uses xhigh, and max requires explicit architecture or security escalation." "$brief" \
+    "$context brief missing role and effort boundaries"
+  assert_grep "Use one initial Oracle review and at most one re-review after fixes; if actionable findings remain after re-review, escalate or fail instead of looping." "$brief" \
+    "$context brief missing bounded Oracle review cycle"
+}
+
+assert_todo_tracking_rule() {
+  local brief=$1 context=$2
+  assert_grep "# Todo tracking" "$brief" \
+    "$context brief missing Todo tracking section"
+  assert_grep "Derive a useful checklist from the filled \`# Task\`." "$brief" \
+    "$context brief missing task checklist derivation instruction"
+  assert_grep "Create those items with your workspace \`todo\` tool." "$brief" \
+    "$context brief missing workspace todo tool creation instruction"
+  assert_grep "Keep exactly one item in progress at a time, and complete items immediately when done." "$brief" \
+    "$context brief missing in-progress item limit and immediate completion instruction"
+}
+
+test_project_mode_defaults_and_rejects_malformed() {
+  local home out brief err
+  home="$TMP_ROOT/project-mode-home"
+  mkdir -p "$home/data"
+  cat > "$home/data/projects.md" <<'EOF'
+- omitted-proj - omitted mode (added 2026-07-01)
+- explicit-proj [direct-PR] - explicit mode (added 2026-07-01)
+- malformed-proj [bogus +yolo] - malformed mode (added 2026-07-01)
+- malformed-yolo-proj [+yolo] - missing explicit mode (added 2026-07-01)
+- malformed-extra-proj [direct-PR +yolo unexpected] - malformed option (added 2026-07-01)
+- malformed-trailing-proj [direct-PR +yolo] unexpected - malformed trailing token (added 2026-07-01)
+- malformed-third-proj unexpected - malformed third token (added 2026-07-01)
+EOF
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-project-mode.sh" omitted-proj)
+  [ "$out" = "direct-PR on" ] || fail "omitted delivery mode did not default to direct-PR on"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-project-mode.sh" explicit-proj)
+  [ "$out" = "direct-PR off" ] || fail "explicit delivery mode did not preserve yolo off"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-project-mode.sh" malformed-proj 2>/dev/null)
+  [ "$out" = "no-mistakes off" ] || fail "malformed explicit mode did not fall back to no-mistakes off"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-project-mode.sh" malformed-yolo-proj 2>/dev/null)
+  [ "$out" = "no-mistakes off" ] || fail "malformed [+yolo] mode did not fall back to no-mistakes off"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-project-mode.sh" malformed-extra-proj 2>/dev/null)
+  [ "$out" = "no-mistakes off" ] || fail "malformed explicit option did not fall back to no-mistakes off"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-project-mode.sh" malformed-trailing-proj 2>/dev/null)
+  [ "$out" = "no-mistakes off" ] || fail "malformed trailing token did not fall back to no-mistakes off"
+  err="$home/malformed-third.err"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-project-mode.sh" malformed-third-proj 2>"$err")
+  [ "$out" = "no-mistakes off" ] || fail "malformed third token did not fall back to no-mistakes off"
+  grep -F 'malformed mode' "$err" >/dev/null \
+    || fail "malformed third token did not emit a warning"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" omitted-brief omitted-proj >/dev/null
+  brief="$home/data/omitted-brief/brief.md"
+  assert_grep "This project ships **direct-PR**" "$brief" \
+    "omitted mode brief did not use direct-PR delivery"
+  assert_no_grep "This project ships **no-mistakes**" "$brief" \
+    "omitted mode brief used no-mistakes delivery"
+  pass "fm-project-mode: omitted mode defaults to direct-PR on and malformed modes fall back safely"
+}
+
 # fm-brief.sh must exit 0 and produce a brief with no unreplaced shell
 # metacharacter corruption for every ship delivery mode. This also guards
 # against any *new* unescaped apostrophe or unbalanced quote later added to
@@ -212,6 +299,10 @@ test_ship_modes_generate_clean_briefs() {
     assert_grep "{TASK}" "$brief" "$id: brief missing the {TASK} placeholder"
     assert_grep "mid-task \`working:\` line (including setup complete) is nonterminal" "$brief" \
       "$id: brief missing nonterminal working:/setup-complete gate protection"
+    assert_specialist_rule "$brief" "$id"
+    assert_web_research_rule "$brief" "$id"
+    assert_review_path_rule "$brief" "$id"
+    assert_todo_tracking_rule "$brief" "$id"
     assert_no_grep "EOF" "$brief" "$id: brief leaked a heredoc EOF marker (unterminated heredoc)"
   done
   pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"
@@ -299,6 +390,10 @@ test_faster_paths_use_configured_authority_without_stacked_review() {
   brief="$home/data/$id/brief.md"
   assert_grep "The configured merge authority decides whether to merge the PR; firstmate relays the outcome." "$brief" \
     "direct-PR brief lost configured merge authority"
+  assert_grep "Before pushing or requesting a PR, you must ask \`@oracle\` for a fresh read-only review of the complete committed range and verification evidence, using rule 10's exact base/HEAD commands." "$brief" \
+    "direct-PR brief lost its mandatory exact-range Oracle review"
+  assert_grep "if \`@oracle\` is unavailable, disclose the fallback and proceed." "$brief" \
+    "direct-PR brief lost its unavailable Oracle fallback disclosure instruction"
   assert_no_grep "The captain reviews and merges the PR" "$brief" \
     "direct-PR brief hard-coded captain-only authority"
   id="brief-local-authority-a4"
@@ -351,7 +446,9 @@ test_no_mistakes_dod_wording() {
   # guards the structure that makes it safe.
   assert_grep "firstmate's authority check" "$brief" \
     "no-mistakes DOD lost the apostrophe prose that the structural fix makes parse-safe"
-  pass "fm-brief.sh: no-mistakes DOD keeps its apostrophe prose, now parse-safe"
+  assert_no_grep "Before pushing or requesting a PR" "$brief" \
+    "no-mistakes brief must not add the direct-PR Oracle review gate"
+  pass "fm-brief.sh: no-mistakes DOD keeps its apostrophe prose without a direct-PR Oracle gate"
 }
 
 test_ship_project_memory_wording() {
@@ -699,6 +796,10 @@ test_scout_and_secondmate_scaffold() {
   assert_present "$brief" "scout brief was not scaffolded"
   assert_grep "SCOUT task" "$brief" "scout brief must declare itself a scout task"
   assert_grep "report.md" "$brief" "scout brief must point at the report deliverable"
+  assert_specialist_rule "$brief" "scout"
+  assert_web_research_rule "$brief" "scout"
+  assert_review_path_rule "$brief" "scout"
+  assert_todo_tracking_rule "$brief" "scout"
 
   FM_SECONDMATE_CHARTER='Supervise the alpha domain.' \
     FM_HOME="$BRIEF_HOME" "$ROOT/bin/fm-brief.sh" brief-sm-q6 --secondmate alpha >/dev/null 2>&1 \
@@ -707,10 +808,33 @@ test_scout_and_secondmate_scaffold() {
   assert_present "$brief" "secondmate charter was not scaffolded"
   assert_grep "persistent second mate" "$brief" \
     "secondmate charter must declare its role"
+  assert_no_grep "# Todo tracking" "$brief" \
+    "secondmate charter brief must omit the Todo tracking section"
   pass "fm-brief: scout and secondmate code paths still scaffold well-formed briefs"
 }
 
+test_ordinary_briefs_include_todo_tracking_and_secondmate_omits_it() {
+  local home ship_brief scout_brief sm_brief
+  home="$TMP_ROOT/todo-home"
+  mkdir -p "$home/data"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" ship-task myrepo >/dev/null 2>&1
+  ship_brief="$home/data/ship-task/brief.md"
+  assert_todo_tracking_rule "$ship_brief" "ship"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" scout-task myrepo --scout >/dev/null 2>&1
+  scout_brief="$home/data/scout-task/brief.md"
+  assert_todo_tracking_rule "$scout_brief" "scout"
+
+  FM_HOME="$home" FM_SECONDMATE_CHARTER="Secondmate domain" \
+    "$ROOT/bin/fm-brief.sh" sm-task --secondmate --no-projects >/dev/null 2>&1
+  sm_brief="$home/data/sm-task/brief.md"
+  assert_no_grep "# Todo tracking" "$sm_brief" \
+    "secondmate charter brief must omit the Todo tracking section"
+  pass "fm-brief.sh: ordinary ship and scout briefs include Todo tracking, while secondmate charters omit it"
+}
+
 test_script_parses
+test_project_mode_defaults_and_rejects_malformed
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
@@ -730,3 +854,4 @@ test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
+test_ordinary_briefs_include_todo_tracking_and_secondmate_omits_it
