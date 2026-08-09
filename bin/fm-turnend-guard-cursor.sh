@@ -8,8 +8,13 @@
 #
 # This adapter owns Cursor's arm/interruption translation privately: it
 # parses the Cursor payload, runs the watcher arm in the foreground of this
-# hook-owned process tree, classifies the arm close, applies a bounded
+# hook-owned process tree, classifies the arm close, applies a per-chain
 # continuation counter, and renders the outcome as {} or a followup_message.
+# The counters bound each chain, not the continuation itself: a chain's
+# ceiling diagnostic resets it, so the next stop starts a fresh chain, and a
+# new distinct wake reason starts fresh without adding to the total. Every
+# stop while supervision is still needed re-evaluates and may emit a
+# follow-up (the guard never ends a needed turn blind).
 # The arm helpers below (cursor_arm_*) are Cursor-specific and live here, not
 # in a shared layer: fm-claude-stop-autoarm.sh keeps its own retry/epoch
 # semantics, so there is no implementation the two genuinely share beyond the
@@ -29,6 +34,8 @@ command -v jq >/dev/null 2>&1 || exit 0
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-process-identity-lib.sh
+. "$SCRIPT_DIR/fm-process-identity-lib.sh"
 
 # --- Cursor-private arm helpers ----------------------------------------------
 # The durable interruption marker (state/.hook-arm-interrupted) is written by
@@ -138,28 +145,16 @@ STATE=${FM_STATE_OVERRIDE:-${FM_HOME:-$ROOT}/state}
 
 # --- session identity derivation (Cursor-specific) ---------------------------
 
-cursor_parent_identity() {
-  local pid=${PPID:-} proc_root stat_line starttime
-  local -a stat_fields
+cursor_parent_identity() {  # -> <pid>:<canonical-identity> or nothing
+  # One canonical process-reuse identity for the whole fleet: the /proc
+  # starttime / ps lstart parse lives only in fm-process-identity-lib.sh
+  # (fm_process_identity), the same helper spawn and teardown agree on. The
+  # self-describing output (starttime= / lstart=) is hashed into this shim's
+  # session key; the exact wire shape is internal to the session key.
+  local pid=${PPID:-} identity
   case "$pid" in ''|*[!0-9]*|0) return 1 ;; esac
-  proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc}
-  if [ -r "$proc_root/$pid/stat" ]; then
-    stat_line=$(cat "$proc_root/$pid/stat" 2>/dev/null || true)
-    read -r -a stat_fields <<< "${stat_line##*)}"
-    if [ "${#stat_fields[@]}" -ge 20 ]; then
-      starttime=${stat_fields[19]}
-      case "$starttime" in
-        ''|*[!0-9]*) ;;
-        *) printf 'proc:%s:%s' "$pid" "$starttime"; return 0 ;;
-      esac
-    fi
-  fi
-  starttime=$(LC_ALL=C ps -p "$pid" -o lstart= 2>/dev/null | sed 's/^[[:space:]]*//' || true)
-  if [ -n "$starttime" ]; then
-    printf 'ps:%s:%s' "$pid" "$starttime"
-    return 0
-  fi
-  return 1
+  identity=$(fm_process_identity "$pid") || return 1
+  printf '%s:%s' "$pid" "$identity"
 }
 
 SESSION=$(printf '%s' "$PAYLOAD" | jq -r '
@@ -343,7 +338,7 @@ printf '%s' "$NORMALIZED" | "$ROOT/bin/fm-turnend-guard.sh" 2>"$ERR"
 RC=$?
 [ "$RC" -eq 2 ] || allow_stop
 
-# --- bounded continuation counter (Cursor-specific) --------------------------
+# --- per-chain continuation counter (Cursor-specific) ---------------------------
 if [ "$ARM_ACTIONABLE" -eq 1 ]; then
   if [ "$WAKE_REASON" = "$CHAIN_REASON" ]; then
     COUNT=$((CHAIN_WAKE + 1))
