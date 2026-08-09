@@ -8,10 +8,10 @@ Exact task chronology, branch names, temporary homes, local paths, process ids, 
 
 ## OMP primary session identity
 
-OMP 17.2.12 was verified on 2026-08-09 as a primary-session lock identity, not as a dispatch or watcher adapter.
+OMP 17.2.12 was verified on 2026-08-09 as a primary-session identity: the marker that selects its own supervision adapter, and the process shape that owns the home lock.
 The live OMP tool environment exported `OMPCODE=1` while also inheriting `CLAUDECODE=1`, and its long-lived process had the shape `bun <home>/.bun/bin/omp`.
-The marker therefore selects the unknown supervision protocol before the foreign Claude marker, while the exact Bun script ancestry supplies the stable process id that owns the home lock.
-An unrelated Bun script whose later arguments merely mention OMP remains outside that identity.
+The marker therefore resolves the harness as `omp` before the foreign Claude marker, so supervision instructions select the verified `omp` protocol, while the exact Bun script ancestry supplies the stable process id that owns the home lock.
+An unrelated Bun script whose later arguments merely mention OMP remains outside that identity, and a bare Bun with no script argument stays unattributed even when its install path carries an `omp` component.
 
 Portable and live verification:
 
@@ -23,9 +23,9 @@ FM_HARNESS_LIVENESS_DRIFT=1 tests/fm-harness-liveness-drift-live-e2e.test.sh
 Observed relevant output:
 
 ```text
-ok - OMP primary identity: exact Bun script owns the session lock without claiming a verified supervision adapter
-# OMP omp/17.2.12: OMP_IDENTITY marker=1 harness=unknown lock=<pid> process=<same-pid>
-ok - OMP session identity: omp/17.2.12 owns the lock without claiming a verified supervision adapter
+ok - OMP identity: positive marker and exact Bun script select the verified adapter and session-lock owner
+# OMP omp/17.2.12: OMP_IDENTITY marker=1 harness=omp lock=<pid> process=<same-pid>
+ok - OMP session identity: omp/17.2.12 selects the verified adapter and owns the lock
 ```
 
 ## tmux
