@@ -1420,7 +1420,7 @@ reap_task_backend_process_group() {  # <label>
 # that as nothing to reap. Never matches a generic worker-server cmdline or
 # the cursor install dir: both are shared across homes and tasks.
 reap_cursor_worker_server() {  # <state_dir> <id>
-  local state_dir=$1 id=$2 ws_file pid identity current
+  local state_dir=$1 id=$2 ws_file pid identity current i
   ws_file="$state_dir/$id.worker-server"
   [ -f "$ws_file" ] || return 0
   read -r pid identity < "$ws_file" 2>/dev/null || { rm -f "$ws_file" 2>/dev/null || true; return 0; }
@@ -1439,10 +1439,13 @@ reap_cursor_worker_server() {  # <state_dir> <id>
   if kill -0 "$pid" 2>/dev/null \
      && fm_process_identity_matches "$pid" "$identity"; then
     echo "teardown: force-killing recorded cursor worker-server for $id: $pid" >&2
-    if ! kill -KILL "$pid" 2>/dev/null \
-       && kill -0 "$pid" 2>/dev/null \
-       && fm_process_identity_matches "$pid" "$identity"; then
-      echo "REFUSED: recorded cursor worker-server for $id still matches $pid after TERM and KILL failed; preserving $ws_file for retry." >&2
+    kill -KILL "$pid" 2>/dev/null || true
+    for i in 1 2 3 4 5 6 7 8 9 10; do
+      fm_process_identity_matches "$pid" "$identity" || break
+      sleep 0.1
+    done
+    if fm_process_identity_matches "$pid" "$identity"; then
+      echo "REFUSED: recorded cursor worker-server for $id still matches $pid after TERM and KILL; preserving $ws_file for retry." >&2
       return 1
     fi
   fi

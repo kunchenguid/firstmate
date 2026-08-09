@@ -2390,6 +2390,42 @@ test_recorded_cursor_worker_server_recycled_pid_not_killed() {
   pass "a worker-server record whose starttime no longer matches is never killed, and the stale record is removed"
 }
 
+test_recorded_cursor_worker_server_surviving_kill_is_retained() {
+  local case_dir rc pid starttime
+  case_dir=$(make_case cursor-worker-server-kill-survivor)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  ( exec sleep 300 ) &
+  pid=$!
+  disown
+  sleep 0.3
+  starttime=$(awk '{print $22}' "/proc/$pid/stat" 2>/dev/null)
+  printf '%s %s\n' "$pid" "starttime=$starttime" > "$case_dir/state/task-x1.worker-server"
+  kill() {
+    local arg target=
+    for arg in "$@"; do target=$arg; done
+    case "${1:-}:$target" in
+      -TERM:"${FM_FAKE_KILL_SURVIVOR_PID:-}"|-KILL:"${FM_FAKE_KILL_SURVIVOR_PID:-}") return 0 ;;
+    esac
+    builtin kill "$@"
+  }
+  export -f kill
+  export FM_FAKE_KILL_SURVIVOR_PID="$pid"
+  rc=0
+  run_teardown "$case_dir" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  unset FM_FAKE_KILL_SURVIVOR_PID
+  unset -f kill
+  expect_code 1 "$rc" "cursor-worker-server-kill-survivor: teardown must refuse"
+  kill -0 "$pid" 2>/dev/null || fail "cursor-worker-server-kill-survivor: stand-in exited unexpectedly"
+  [ -f "$case_dir/state/task-x1.worker-server" ] \
+    || fail "cursor-worker-server-kill-survivor: ownership record was removed"
+  assert_grep 'still matches' "$case_dir/stderr" \
+    "cursor-worker-server-kill-survivor: refusal did not report surviving identity"
+  kill -KILL "$pid" 2>/dev/null || true
+  pass "surviving cursor worker preserves ownership record for retry"
+}
+
 test_recorded_cursor_worker_server_is_reaped_for_secondmate() {
   local case_dir home rc pid starttime
   case_dir=$(make_case cursor-worker-server-secondmate-reap)
@@ -2875,6 +2911,7 @@ test_leaked_tasktmp_process_is_reaped
 test_recorded_cursor_worker_server_is_reaped
 test_recorded_cursor_worker_server_lstart_identity_is_reaped
 test_recorded_cursor_worker_server_recycled_pid_not_killed
+test_recorded_cursor_worker_server_surviving_kill_is_retained
 test_recorded_cursor_worker_server_is_reaped_for_secondmate
 test_cursor_worker_server_record_missing_falls_back_to_cwd_reaper
 test_cursor_worker_server_record_never_touches_other_home_daemon

@@ -111,13 +111,18 @@ case "$query" in
   # string for every -p query would make the walk error instead of ending.
   *"ppid="*) exit 1 ;;
   *"-t "*)
-    printf '%s %s\n' "${FM_FAKE_CURSOR_AGENT_PID:-4242}" "$args"
+    [ "${FM_FAKE_CURSOR_AGENT_PID-unset}" != unset ] || FM_FAKE_CURSOR_AGENT_PID=4242
+    [ -z "$FM_FAKE_CURSOR_AGENT_PID" ] || printf '%s %s\n' "$FM_FAKE_CURSOR_AGENT_PID" "$args"
     exit 0 ;;
   *"comm="*)
     printf '%s\n' "$comm"
     exit 0 ;;
   *"-p "*)
-    printf '%s\n' "$args"
+    if [ "$pid" = "${FM_FAKE_CURSOR_WORKER_PID:-}" ] && [ -n "${FM_FAKE_CURSOR_WORKER_ARGS:-}" ]; then
+      printf '%s\n' "$FM_FAKE_CURSOR_WORKER_ARGS"
+    else
+      printf '%s\n' "$args"
+    fi
     exit 0 ;;
 esac
 exit 1
@@ -135,6 +140,13 @@ esac
 exit 1
 SH
   chmod +x "$fakebin/pgrep"
+  cat > "$fakebin/lsof" <<'SH'
+#!/usr/bin/env bash
+set -u
+[ -n "${FM_FAKE_CURSOR_WORKER_CWD:-}" ] || exit 0
+printf 'p%s\nfcwd\nn%s\n' "$FM_FAKE_CURSOR_WORKER_PID" "$FM_FAKE_CURSOR_WORKER_CWD"
+SH
+  chmod +x "$fakebin/lsof"
   cat > "$fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -658,18 +670,39 @@ test_cursor_worker_server_absent_record_refuses_spawn() {
   if [ -f "$HOME_DIR/state/$id.worker-server" ]; then
     fail "cursor spawn without a worker-server child must not produce a partial record"
   fi
-  # The canonical rollback must remove every record this invocation created:
-  # a published meta with a killed endpoint would be a phantom live task for
-  # supervision, and the status/turn-end records would keep its ghost visible.
-  [ ! -e "$HOME_DIR/state/$id.meta" ] \
-    || fail "refused cursor spawn must not leave a live meta behind"
-  [ ! -e "$HOME_DIR/state/$id.status" ] \
-    || fail "refused cursor spawn must not leave a status record behind"
-  [ ! -e "$HOME_DIR/state/$id.turn-ended" ] \
-    || fail "refused cursor spawn must not leave its turn-end hook record behind"
-  [ ! -e "/tmp/fm-$id" ] \
-    || fail "refused cursor spawn must not leave its task tmp root behind"
-  pass "cursor spawn without a worker-server child refuses and rolls back"
+  [ -e "$HOME_DIR/state/$id.meta" ] \
+    || fail "unproven worker absence must retain task meta for teardown retry"
+  assert_grep 'rollback-needed' "$HOME_DIR/state/$id.status" \
+    "unproven worker absence must mark task rollback-needed"
+  [ -e "/tmp/fm-$id" ] \
+    || fail "unproven worker absence must retain task tmp root for cwd-based reaping"
+  pass "cursor spawn without worker identity retains cleanup evidence"
+}
+
+test_cursor_detached_worker_is_recorded_from_task_root() {
+  local rec id out status worker_pid
+  id=cursor-worker-detached-zs
+  rec=$(make_cursor_case cursor-worker-detached "$id")
+  read_case_record "$rec"
+  ( exec sleep 300 ) &
+  worker_pid=$!
+  disown
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
+    FM_FAKE_CURSOR_AGENT_ARGS="$FAKEBIN_DIR/cursor-agent --force --trust brief" \
+    FM_FAKE_CURSOR_AGENT_PID='' FM_FAKE_CURSOR_WORKER_PID=$worker_pid \
+    FM_FAKE_CURSOR_WORKER_ARGS='node /opt/cursor/index.js worker-server' \
+    FM_FAKE_CURSOR_WORKER_CWD="$WT_DIR" FM_FAKE_CURSOR_PROC_ROOT="$CASE_DIR/no-proc" \
+    FM_PROC_ROOT_OVERRIDE="$CASE_DIR/no-proc" FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" \
+    PATH="$FAKEBIN_DIR:$PATH" "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  expect_code 0 "$status" "detached cursor worker rooted in task worktree should be recorded"
+  assert_grep "$worker_pid " "$HOME_DIR/state/$id.worker-server" \
+    "task-root fallback did not record detached worker identity"
+  kill -KILL "$worker_pid" 2>/dev/null || true
+  pass "cursor spawn records detached worker from unique task root"
 }
 
 test_cursor_worker_server_discovery_timeout_causes_rollback() {
@@ -694,33 +727,21 @@ test_cursor_worker_server_discovery_timeout_causes_rollback() {
     "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1)
   status=$?
   expect_code 1 "$status" "cursor spawn with discovery timeout must refuse"
-  # The rollback must not leave a worker-server record or meta behind.
+  # No guessed worker-server record may be created.
   [ ! -f "$HOME_DIR/state/$id.worker-server" ] \
     || fail "discovery timeout rollback must not leave a worker-server record"
-  # Discovery timeout leaves NO live .meta (the review4 blocker): supervision
-  # keys on state/<id>.meta, so a published meta with a killed endpoint would
-  # read as a phantom live task. Status/turn-end records and the task tmp
-  # root are this invocation's creations too and must go.
-  [ ! -e "$HOME_DIR/state/$id.meta" ] \
-    || fail "discovery timeout rollback must not leave a live meta behind"
-  [ ! -e "$HOME_DIR/state/$id.status" ] \
-    || fail "discovery timeout rollback must not leave a status record behind"
-  [ ! -e "$HOME_DIR/state/$id.turn-ended" ] \
-    || fail "discovery timeout rollback must not leave its turn-end hook record behind"
-  [ ! -e "/tmp/fm-$id" ] \
-    || fail "discovery timeout rollback must not leave its task tmp root behind"
-  # The confirmed-cleanup path: the endpoint kill ran (window inventory
-  # cleared) and the leased worktree was returned, BEFORE the records went.
+  [ -e "$HOME_DIR/state/$id.meta" ] \
+    || fail "discovery timeout must retain meta until teardown proves worker absence"
+  assert_grep 'rollback-needed' "$HOME_DIR/state/$id.status" \
+    "discovery timeout must mark task rollback-needed"
+  [ -e "/tmp/fm-$id" ] \
+    || fail "discovery timeout must retain task tmp root for cwd-based reaping"
+  # Endpoint absence is still confirmed immediately.
   [ ! -s "$CASE_DIR/windows.state" ] \
     || fail "successful rollback must have killed and confirmed the endpoint window"
-  grep -q "treehouse return --force $WT_DIR" "$CASE_DIR/treehouse.log" \
-    || fail "successful rollback must have returned the leased worktree"
-  # Supervision must not treat the fully rolled-back task as live.
-  sup=$(bash -c '. "$1"; fm_supervision_status "$2"; printf "%s" "$FM_SUP_NEEDED"' \
-    _ "$ROOT/bin/fm-supervision-lib.sh" "$HOME_DIR/state")
-  [ "$sup" = false ] \
-    || fail "supervision must not treat a fully rolled-back task as live (FM_SUP_NEEDED=$sup)"
-  pass "cursor spawn discovery timeout causes refusal and endpoint rollback"
+  [ ! -s "$CASE_DIR/treehouse.log" ] \
+    || fail "unproven worker absence must retain worktree for teardown's cwd-based reaper"
+  pass "cursor spawn discovery timeout retains cleanup evidence"
 }
 
 test_cursor_rollback_tmux_kill_failure_retains_recoverable_state() {
@@ -785,9 +806,9 @@ test_cursor_rollback_treehouse_return_failure_retains_recoverable_state() {
     || fail "unreturned worktree must retain the task meta (the only record naming the lease)"
   grep -q 'rollback-needed' "$HOME_DIR/state/$id.status" \
     || fail "unreturned worktree must mark the task rollback-needed"
-  grep -q "treehouse return --force $WT_DIR" "$CASE_DIR/treehouse.log" \
-    || fail "the rollback must have attempted the treehouse return of the leased worktree"
-  pass "rollback retains the recovery record when the worktree return cannot be confirmed"
+  [ ! -s "$CASE_DIR/treehouse.log" ] \
+    || fail "unproven worker absence must stop before worktree return"
+  pass "rollback retains worktree before worker absence is proven"
 }
 test_cursor_worker_server_atomic_record_no_partial_write() {
   # The worker-server record is written atomically via temp+mv. After a
@@ -1017,6 +1038,7 @@ test_non_cursor_launch_unsets_cursor_agent
 test_muse_launch_unsets_cursor_agent
 test_cursor_worker_server_recorded_at_spawn
 test_cursor_worker_server_alias_uses_portable_identity
+test_cursor_detached_worker_is_recorded_from_task_root
 test_cursor_worker_server_absent_record_refuses_spawn
 test_cursor_worker_server_discovery_timeout_causes_rollback
 test_cursor_rollback_tmux_kill_failure_retains_recoverable_state

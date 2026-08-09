@@ -2138,6 +2138,41 @@ cursor_worker_server_find() {  # <backend> <target> <cursor-binary> -> pid on st
   esac
 }
 
+cursor_worker_server_find_under_task_roots() {
+  local out pid path line root canonical_root args
+  command -v lsof >/dev/null 2>&1 || return 1
+  out=$(lsof -a -d cwd -Fpn 2>/dev/null) || return 1
+  pid=
+  while IFS= read -r line; do
+    case "$line" in
+      p*)
+        pid=${line#p}
+        case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+        ;;
+      fcwd) [ -n "$pid" ] || return 1 ;;
+      n*)
+        [ -n "$pid" ] || return 1
+        path=${line#n}
+        for root in "${WT:-}" "${TASK_TMP:-}"; do
+          [ -n "$root" ] && [ -d "$root" ] || continue
+          canonical_root=$(cd "$root" && pwd -P) || return 1
+          case "$path" in
+            "$canonical_root"|"$canonical_root"/*)
+              args=$(LC_ALL=C ps -p "$pid" -o args= 2>/dev/null || true)
+              case "$args" in *index.js\ worker-server*) printf '%s\n' "$pid"; return 0 ;; esac
+              ;;
+          esac
+        done
+        ;;
+      '') ;;
+      *) return 1 ;;
+    esac
+  done <<EOF
+$out
+EOF
+  return 1
+}
+
 # The recorded identity is produced by the SAME parse teardown re-checks
 # (fm_process_identity, bin/fm-process-identity-lib.sh), so a comm containing
 # spaces cannot make the two disagree and silently defeat the recycled-pid check.
@@ -2156,8 +2191,11 @@ cursor_worker_server_record() {  # <backend> <target> -> 0 when recorded atomica
     done <<EOF
 $(cursor_worker_server_find "$backend" "$target" "$binary")
 EOF
-    [ -n "$agent_pid" ] || { sleep 0.3; continue; }
-    worker_pid=$(pgrep -P "$agent_pid" -f 'index.js worker-server' 2>/dev/null | head -1 || true)
+    worker_pid=
+    if [ -n "$agent_pid" ]; then
+      worker_pid=$(pgrep -P "$agent_pid" -f 'index.js worker-server' 2>/dev/null | head -1 || true)
+    fi
+    [ -n "$worker_pid" ] || worker_pid=$(cursor_worker_server_find_under_task_roots || true)
     [ -n "$worker_pid" ] || { sleep 0.3; continue; }
     identity=$(fm_process_identity "$worker_pid" 2>/dev/null || true)
     [ -n "$identity" ] || continue
@@ -2214,6 +2252,12 @@ spawn_rollback_task_state() {  # <detail>
     # task); a rolled-back task owns no projection, so re-arm it for the
     # EXIT trap.
     HERDR_PROJECTION_ABORT_CLEANUP=1
+  fi
+
+  if [ "$HARNESS" = cursor ] && [ ! -f "$STATE/$ID.worker-server" ]; then
+    echo "failed: $detail; worker-server absence is unproven - task records retained and marked rollback-needed for teardown's cwd-based reaper" >> "$STATE/$ID.status" 2>/dev/null || true
+    echo "error: $detail; worker-server absence is unproven; task records retained for teardown retry" >&2
+    return 1
   fi
 
   # A relaunch failure keeps the pre-existing task records and worktree: the
