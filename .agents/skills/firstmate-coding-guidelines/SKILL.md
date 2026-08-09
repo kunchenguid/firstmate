@@ -73,6 +73,11 @@ Briefs for tasks that touch firstmate's own tracked material should tell the cre
 Firstmate adds this skill's load instruction to firstmate-repo briefs by hand instead.
 `CONTRIBUTING.md`'s "Development" section carries the same instruction as a durable reminder.
 
+## Generated worker discipline
+
+For firstmate-repo work, the generated `# Branch conflict resolution` and `# Verification discipline` sections in [`bin/fm-brief.sh`](../../../bin/fm-brief.sh) own the full worker rules.
+Follow both for branch shipping and verification even if the current task was scaffolded before those sections existed.
+
 ## Compatibility and enforcement
 
 Before changing shared tracked behavior, review every affected supported primary harness and runtime backend rather than checking only the adapters active in the current fleet.
@@ -121,6 +126,7 @@ Run `bin/fm-doc-audience-check.sh`; it enforces classification, README setup rou
 - Run `bin/fm-lint.sh` before treating a script change as done; it is the single owner of the lint definition (file set, config, and pinned shellcheck version) that CI and the no-mistakes pre-push gate both invoke, and it refuses to run under any other shellcheck version.
 - Colocate tests with the existing pattern in `tests/`, name them `<subject>.test.sh`, and extend an existing script rather than inventing a new runner.
 - Tests must exercise behavior through an executable or public interface and must never assert implementation-source bytes, including through parsers, regexes, snapshots, or indirect wrappers.
+- Hand every background process a test launches to `fm_test_reap` as soon as its pid is known, because a case that only kills on its happy path orphans that process on every failing or signalled path.
 - A maintainer-verification record under `docs/verification/` records active empirical facts, not assumptions or task chronology.
 - Include the date, version, exact commands run, and exact output needed to support the current guarantee.
 - Keep incident chronology and delivery evidence in private task reports or PR evidence unless a concise rationale is required to maintain a current safety boundary.

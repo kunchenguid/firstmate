@@ -32,12 +32,40 @@
 #   or herdr), refuses unless the endpoint's shell is sitting in the recorded
 #   worktree, and clears the previous harness's per-task wiring before arming
 #   the new incarnation.
+#   --slot-base <commit-ish> and --contribution-target <commit-ish> are this
+#   task's TWO base references (bin/fm-task-base-lib.sh owns the contract). Both
+#   are DERIVED per spawn and these flags only override that derivation, so an
+#   ordinary spawn passes neither. The slot base is the commit the task's
+#   worktree is placed at, so the worker reads the code the fleet ACTUALLY RUNS
+#   and the brief's file and line citations resolve; it is the project checkout's
+#   local default-branch tip, and the slot is placed there rather than left at
+#   whatever commit the pool last used. The contribution target is the commit the
+#   task's branch is cut from, so the PR carries no commit the target never had;
+#   on a fork layout that is the upstream trunk, which is NOT the slot base.
+#   Derivation cannot see the task's target files, so a task editing code that
+#   exists only on the fork declares its target with the flag instead. When the
+#   two coincide nothing changes. When the upstream trunk exists but cannot be
+#   read locally the target is recorded as "unresolved" rather than guessed onto
+#   the slot base, because that guess is the pollution this separates. A ship or
+#   scout spawn additionally reads the brief's recorded "Base contract:" line and
+#   REFUSES a mismatch, exactly like the delivery contract above. A slot holding
+#   uncommitted work, or sitting on a task branch, is left untouched and launched
+#   as-is with a notice. Refused on --secondmate, which syncs its whole home.
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
 #   --model <name> and --effort <low|medium|high|xhigh|max> are concrete profile
 #   axes chosen by firstmate at intake. They are only threaded into harnesses whose
 #   installed CLIs were verified to support that axis; unsupported axes are omitted
 #   from that harness's launch rather than guessed.
+#   A "provider/model" --model is checked against the local model registry before
+#   anything is created: the spawn REFUSES when an API-key provider's model is not
+#   on the verified-free allowlist, when the provider's cost posture is unclassified,
+#   when the registry records the model as rejected or blocked, or when the model's
+#   recorded concurrency cap is already met. This is the last
+#   gate before a dispatch can spend money, and the only one that sees a --model
+#   passed explicitly rather than resolved from config/crew-dispatch.json. With no
+#   config/models.json present the check is inert and spawns behave as before;
+#   bin/fm-model-registry-lib.sh owns the full enforcement scope.
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   exact task only (docs/configuration.md "Runtime backend" owns when that flag
 #   is authorized). Without it, the script resolves FM_BACKEND, then
@@ -140,16 +168,12 @@
 #   and scout batches. The loop lives here, in bash, so callers never hand-write a
 #   multi-task shell loop (the tool shell is zsh, which does not word-split unquoted
 #   $vars and silently breaks ad-hoc `for ... in $pairs` loops).
-#   Launch templates live in launch_template() below; placeholders replaced before launch:
-#     __BRIEF__    absolute path to data/<task-id>/brief.md
-#     __TURNEND__  absolute path to state/<task-id>.turn-ended (for harnesses whose
-#                  turn-end signal rides the launch command, e.g. codex -c notify=[...])
-#     __PIEXT__    absolute path to state/<task-id>.pi-ext.ts (pi turn-end extension,
-#                  written by this script; outside the worktree to avoid pi's trust gate)
-#     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
-#     __PIWATCH__   absolute path to .pi/extensions/fm-primary-pi-watch.ts in a pi secondmate home
-#     __OPINPUT__   absolute path to the canonical operational-input encoder
+#   Launch templates live in launch_template() in bin/fm-launch-lib.sh, the single owner
+#   of every firstmate launch command; that library's header owns the placeholder
+#   contract this script substitutes before launch.
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
+# Claude task settings also wire bin/fm-context-statusline.sh to the host's
+# statusLine payload and its /tmp/fm-<id>/context-pressure.json snapshot.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
@@ -173,6 +197,11 @@
 #   identity is owned by the parent home that holds its task metadata, while the
 #   pane export happens on the remote host (bin/fm-remote-secondmate-control.sh).
 #   Local spawns never pass it and resolve their own carrier exactly as before.
+# Every ship and scout spawn records slot_base=, contribution_target= (a commit, or the
+# literal "unresolved", or "n/a" for a scout), and base_state=
+# (coincident|distinct|unresolved|read-only), so which commit a task read and which it
+# contributed to stays inspectable after the fact. A scout cuts no branch, so it records
+# base_state=read-only and takes no --contribution-target.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -215,8 +244,12 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 SUB_HOME_MARKER=".fm-secondmate-home"
+# shellcheck source=bin/fm-launch-lib.sh
+. "$SCRIPT_DIR/fm-launch-lib.sh"
 # shellcheck source=bin/fm-ff-lib.sh
 . "$SCRIPT_DIR/fm-ff-lib.sh"
+# shellcheck source=bin/fm-task-base-lib.sh
+. "$SCRIPT_DIR/fm-task-base-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-secondmate-nudge-lib.sh
@@ -233,6 +266,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-busy-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-model-registry-lib.sh
+. "$SCRIPT_DIR/fm-model-registry-lib.sh"
 # shellcheck source=bin/fm-trace-context-lib.sh
 . "$SCRIPT_DIR/fm-trace-context-lib.sh"
 # shellcheck source=bin/fm-remote-readiness-lib.sh
@@ -252,6 +287,8 @@ BACKEND_ARG=
 MODE=
 YOLO=
 TRACEPARENT_ARG=
+SLOT_BASE_ARG=
+CONTRIB_ARG=
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
@@ -260,6 +297,8 @@ MODE_SET=0
 YOLO_SET=0
 TRACEPARENT_SET=0
 RELAUNCH=0
+SLOT_BASE_SET=0
+CONTRIB_SET=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -275,6 +314,8 @@ for a in "$@"; do
       mode) MODE=$a; MODE_SET=1 ;;
       yolo) YOLO=$a; YOLO_SET=1 ;;
       traceparent) TRACEPARENT_ARG=$a; TRACEPARENT_SET=1 ;;
+      slot-base) SLOT_BASE_ARG=$a; SLOT_BASE_SET=1 ;;
+      contribution-target) CONTRIB_ARG=$a; CONTRIB_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -298,6 +339,10 @@ for a in "$@"; do
     --yolo=*) YOLO=${a#--yolo=}; YOLO_SET=1 ;;
     --traceparent) want_value=traceparent ;;
     --traceparent=*) TRACEPARENT_ARG=${a#--traceparent=}; TRACEPARENT_SET=1 ;;
+    --slot-base) want_value=slot-base ;;
+    --slot-base=*) SLOT_BASE_ARG=${a#--slot-base=}; SLOT_BASE_SET=1 ;;
+    --contribution-target) want_value=contribution-target ;;
+    --contribution-target=*) CONTRIB_ARG=${a#--contribution-target=}; CONTRIB_SET=1 ;;
     *) POS+=("$a") ;;
   esac
 done
@@ -322,6 +367,8 @@ if [ "$TRACEPARENT_SET" -eq 1 ]; then
     exit 1
   }
 fi
+[ "$SLOT_BASE_SET" -eq 0 ] || [ -n "$SLOT_BASE_ARG" ] || { echo "error: --slot-base requires a non-empty value" >&2; exit 1; }
+[ "$CONTRIB_SET" -eq 0 ] || [ -n "$CONTRIB_ARG" ] || { echo "error: --contribution-target requires a non-empty value" >&2; exit 1; }
 case "$EFFORT" in
   ''|low|medium|high|xhigh|max) ;;
   *) echo "error: --effort must be one of low, medium, high, xhigh, max" >&2; exit 1 ;;
@@ -845,6 +892,10 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   # spanning several modes is two invocations rather than a silent mixed dispatch.
   [ "$MODE_SET" -eq 0 ] || shared_args+=(--mode "$MODE")
   [ "$YOLO_SET" -eq 0 ] || shared_args+=(--yolo "$YOLO")
+  [ "$SLOT_BASE_SET" -eq 0 ] || shared_args+=(--slot-base "$SLOT_BASE_ARG")
+  if [ "$KIND" = ship ] && [ "$CONTRIB_SET" -eq 1 ]; then
+    shared_args+=(--contribution-target "$CONTRIB_ARG")
+  fi
   for pair in "${POS[@]}"; do
     case "$pair" in
       *=*) : ;;
@@ -913,6 +964,18 @@ if [ "$KIND" = secondmate ]; then
     remote_spawn_rc=$?
   fi
   [ "$remote_spawn_rc" -eq 3 ] || exit "$remote_spawn_rc"
+fi
+# A secondmate is a firstmate home, not a task worktree: it already runs the
+# primary's local-HEAD sync below and cuts no contribution branch at all.
+if [ "$KIND" = secondmate ]; then
+  [ "$SLOT_BASE_SET" -eq 0 ] && [ "$CONTRIB_SET" -eq 0 ] || {
+    echo "error: --slot-base and --contribution-target apply only to ship and scout spawns; a secondmate home syncs to the primary default branch and cuts no contribution branch" >&2
+    exit 1
+  }
+fi
+if [ "$KIND" = scout ] && [ "$CONTRIB_SET" -eq 1 ]; then
+  echo "error: --contribution-target applies only to ship spawns; a scout delivers a report and cuts no branch, so it has only a slot base to read and cite" >&2
+  exit 1
 fi
 # Backend selection (data/fm-backend-design-d7): explicit --backend, else
 # FM_BACKEND env, else config/backend, else runtime auto-detection, else
@@ -1045,76 +1108,6 @@ else
 fi
 [ -z "$HARNESS_ARG" ] || ARG3=$HARNESS_ARG
 
-# The verified launch command per adapter. The knowledge half of each adapter
-# (busy-state source, exit command, dialogs, quirks) lives in the harness-adapters skill.
-launch_template() {
-  local harness=$1 kind=${2:-ship}
-  # shellcheck disable=SC2016  # single quotes are deliberate: $(cat ...) expands in the crewmate pane, not here
-  case "$harness" in
-    # CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false disables claude's interactive
-    # predicted-next-prompt ghost text, which renders as dim/faint text inside an
-    # otherwise-empty composer and would otherwise read like real typed input when
-    # firstmate captures the pane (see the harness-adapters skill). It is a per-launch env
-    # prefix scoped to this firstmate-launched agent; it never touches the captain's
-    # global config. The CLI's --prompt-suggestions flag is print/SDK-mode only and
-    # does NOT suppress the interactive ghost text (verified empirically), so the env
-    # var is the correct control. The dim-aware composer reader in fm-tmux-lib.sh is
-    # the defense-in-depth backstop for any pane this flag cannot reach.
-    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
-    codex)
-      if [ "$kind" = secondmate ]; then
-        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
-      else
-        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
-      fi
-      ;;
-    opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
-    pi|pi-signed)
-      if [ "$kind" = secondmate ]; then
-        printf '%s%s' "$harness" ' __MODELFLAG____EFFORTFLAG__-e __PITURNEND__ -e __PIWATCH__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
-      else
-        printf '%s%s' "$harness" ' __MODELFLAG____EFFORTFLAG__-e __PIEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
-      fi
-      ;;
-    # grok (Grok Build TUI): a positional prompt starts the supervised interactive
-    # session. --always-approve auto-approves every tool execution (verified: the
-    # crewmate runs fully autonomously, no permission gate), which an unattended
-    # crewmate needs; it is the targeted equivalent of claude's
-    # --dangerously-skip-permissions. grok's turn-end signal does NOT ride the
-    # launch command - it is a Stop-event hook installed below (global hook +
-    # per-task pointer), so the template is identical for ship/scout/secondmate.
-    grok) printf '%s' 'grok --always-approve __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
-    # Kimi Code rejects a positional prompt, so it launches bare and receives
-    # only an absolute brief pointer after the TUI readiness gate below.
-    # Its turn-end signal is a globally configured Stop hook plus a guarded
-    # per-task worktree token, so no launch placeholder belongs here.
-    kimi) printf '%s' '__KIMIBIN__ __MODELFLAG__--auto' ;;
-    # muse (Muse Code): a positional prompt starts the supervised interactive
-    # session. --yolo is the single flag that makes a crewmate pane viable: muse
-    # ships approval prompts AND a filesystem/network sandbox ON by default
-    # (--sandbox-network defaults to proxy-only, which refuses outright without a
-    # managed proxy), and it gates a fresh workspace behind a trust dialog. One
-    # --yolo disables approval, disables the sandbox so git and network work, and
-    # trusts the workspace for the run, so no dialog appears on the fresh
-    # per-task worktree (verified, muse 0.1.0-R708.1).
-    # MUSE_EXPERIMENTAL_FOREIGN_PERSONAL_CONTEXT_KILL=on is the privacy control:
-    # muse otherwise loads the OPERATOR's foreign personal rules from ~/.claude
-    # into every run and ships them to Meta-hosted inference, even under an
-    # isolated XDG_CONFIG_HOME. exec mode's --no-foreign-personal-context flag is
-    # NOT accepted by the interactive TUI (it exits with "unexpected argument"),
-    # so this env var is the only control that reaches a pane worker. Verified to
-    # drop the foreign rules_file context block while KEEPING the project's own
-    # AGENTS.md rules, which the crewmate contract depends on.
-    # muse's turn-end signal rides neither the launch command nor a hook: its
-    # plugin engine is off in the default build, so firstmate folds muse's own
-    # session event log instead (bin/fm-busy-lib.sh), bound by the sidecar
-    # written below. Nothing to place in the template for it.
-    # codex, opencode, and kimi are also markerless and share this inherited-marker hazard; changing their verified launch boundaries belongs in follow-up work.
-    muse) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS XDG_CONFIG_HOME=__MUSECONFIG__ XDG_DATA_HOME=__MUSEDATA__ MUSE_EXPERIMENTAL_FOREIGN_PERSONAL_CONTEXT_KILL=on __MUSEBIN__ --yolo __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
-    *) return 1 ;;
-  esac
-}
-
 case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
     LAUNCH=$ARG3
@@ -1122,6 +1115,14 @@ case "$ARG3" in
     for word in $LAUNCH; do
       case "$word" in [A-Za-z_]*=*) continue ;; *) HARNESS=$(basename "$word"); break ;; esac
     done
+    # The verified pi/pi-signed templates carry the FM_PI_HARNESS identity
+    # marker inside launch_template (bin/fm-launch-lib.sh). A raw command
+    # bypasses the library, so re-apply the marker here: even a raw Pi-family
+    # launch must declare its identity, or a signed primary's environment
+    # could relabel a plain Pi worker (docs/configuration.md).
+    case "$HARNESS" in
+      pi|pi-signed) LAUNCH="FM_PI_HARNESS=$HARNESS $LAUNCH" ;;
+    esac
     ;;
   '')
     # No explicit harness: resolve from config. A secondmate AGENT launches on the
@@ -1151,10 +1152,6 @@ case "$ARG3" in
     ;;
 esac
 
-case "$HARNESS" in
-  pi|pi-signed) LAUNCH="FM_PI_HARNESS=$HARNESS $LAUNCH" ;;
-esac
-
 # muse is verified as a CREWMATE/SCOUT adapter only. A secondmate is a firstmate
 # instance, so it needs a primary supervision protocol; muse has none, and its
 # Claude-compatible hook dialect explicitly rejects the model-reawakening and
@@ -1165,6 +1162,7 @@ if [ "$KIND" = secondmate ] && [ "$HARNESS" = muse ]; then
   echo "error: muse is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
   exit 1
 fi
+
 
 # pi-signed is an explicitly selected executable identity, not an alias that may
 # silently fall back to pi. Resolve it from PATH before creating an endpoint and
@@ -1196,14 +1194,33 @@ if [ "$KIND" = secondmate ] && [ -z "$ARG3" ]; then
   fi
 fi
 
+# ZERO-BUDGET AND QUOTA GATE. This is the first point where HARNESS and MODEL are
+# both final (the harness resolves above; config/secondmate-harness can still
+# overwrite MODEL just above this line) and the last point before any mutation -
+# the worktree, the backend endpoint and the task metadata are all created below.
+# A refusal here therefore leaves nothing behind to clean up.
+#
+# It is also the ONLY gate that sees a dispatch where firstmate passed --model
+# explicitly, bypassing config/crew-dispatch.json entirely; bootstrap validation
+# structurally cannot see that path. See bin/fm-model-registry-lib.sh for the
+# enforcement scope, and note that an absent config/models.json leaves this inert.
+if ! ZB_REFUSAL=$(fm_model_zero_budget_decision "$MODEL"); then
+  echo "error: $ZB_REFUSAL" >&2
+  exit 1
+fi
+# Separate axis from cost: a model can be free of any charge and still be one the
+# account cannot use. Only the registry's recorded status catches that here.
+if ! ROUTE_REFUSAL=$(fm_model_routable_decision "$MODEL"); then
+  echo "error: $ROUTE_REFUSAL" >&2
+  exit 1
+fi
+if ! CONC_REFUSAL=$(fm_model_concurrency_decision "$MODEL"); then
+  echo "error: $CONC_REFUSAL" >&2
+  exit 1
+fi
+
 secondmate_registry_value() {
   secondmate_registry_field "$DATA/secondmates.md" "$1" "$2"
-}
-
-shell_quote() {
-  printf "'"
-  printf '%s' "$1" | sed "s/'/'\\\\''/g"
-  printf "'"
 }
 
 resolve_kimi_binary() {
@@ -1277,71 +1294,6 @@ muse_worker_meta_api_key_present() {
 muse_credential_present() {
   local auth=$1
   [ -s "$auth" ] || muse_worker_meta_api_key_present
-}
-
-model_flag_for_harness() {
-  local harness=$1 model=$2
-  [ -n "$model" ] && [ "$model" != default ] || return 0
-  case "$harness" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|muse)
-      printf -- '--model %s ' "$(shell_quote "$model")"
-      ;;
-  esac
-}
-
-effort_flag_for_harness() {
-  local harness=$1 effort=$2
-  [ -n "$effort" ] && [ "$effort" != default ] || return 0
-  case "$harness" in
-    claude)
-      case "$effort" in
-        low|medium|high|xhigh|max) printf -- '--effort %s ' "$(shell_quote "$effort")" ;;
-      esac
-      ;;
-    codex)
-      # The installed codex config schema uses model_reasoning_effort, and the
-      # bundled model catalog advertises low|medium|high|xhigh. Omit max rather
-      # than passing an unsupported value.
-      case "$effort" in
-        low|medium|high|xhigh) printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")" ;;
-      esac
-      ;;
-    grok)
-      # grok exposes both --effort and --reasoning-effort; firstmate's profile
-      # axis is the reasoning knob. As of grok 0.2.99, --reasoning-effort accepts
-      # only low|medium|high and rejects both xhigh and max, so omit those rather
-      # than passing a known-bad value.
-      case "$effort" in
-        low|medium|high) printf -- '--reasoning-effort %s ' "$(shell_quote "$effort")" ;;
-      esac
-      ;;
-    pi|pi-signed)
-      # Pi 0.80.6 accepts the full shared effort vocabulary, including max, through
-      # its --thinking flag.
-      case "$effort" in
-        low|medium|high|xhigh|max) printf -- '--thinking %s ' "$(shell_quote "$effort")" ;;
-      esac
-      ;;
-    muse)
-      # muse 0.1.0-R708.1 --reasoning-effort accepts none|minimal|low|medium|
-      # high|xhigh|ultra and defaults to high, so low..xhigh map straight across.
-      # ultra is muse's max-CLASS level, so firstmate's max maps onto it - but
-      # only ever as an EXPLICIT captain choice, never as a fallback, because
-      # AGENTS.md section 4 forbids selecting max without captain preference and
-      # the omitted effort here leaves muse on its own high default. muse's extra
-      # none/minimal levels sit below firstmate's shared vocabulary and are
-      # deliberately unreachable rather than remapped onto low.
-      case "$effort" in
-        low|medium|high|xhigh) printf -- '--reasoning-effort %s ' "$(shell_quote "$effort")" ;;
-        max) printf -- '--reasoning-effort %s ' "$(shell_quote ultra)" ;;
-      esac
-      ;;
-    # opencode's interactive `opencode --prompt` launch has a verified --model
-    # flag but no verified effort flag. Its `opencode run --variant` flag belongs
-    # to a different, non-interactive launch mode, so fm-spawn does not pass it.
-    # kimi likewise has no reasoning-effort flag; the requested axis stays in
-    # task metadata but never reaches the launch command.
-  esac
 }
 
 case "$LAUNCH" in
@@ -1597,6 +1549,86 @@ if [ "$KIND" = ship ]; then
   fi
 fi
 
+# The task's TWO base references (bin/fm-task-base-lib.sh owns the contract).
+# Resolved from the PROJECT checkout, before any endpoint exists, so a spawn that
+# cannot tell them apart stops here rather than handing a worker a brief whose
+# file and line citations do not resolve against the code the fleet runs.
+# A relaunch reuses the task's recorded worktree and bases instead of creating
+# either, so it re-derives nothing here: the trunk may have moved since the
+# task was created, and re-checking would refuse a legitimate relaunch.
+SLOT_BASE=
+CONTRIB_TARGET=
+BASE_STATE=
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
+  if task_base_resolve "$PROJ_ABS"; then
+    SLOT_BASE=$TASK_BASE_SLOT
+    CONTRIB_TARGET=$TASK_BASE_CONTRIB
+    BASE_STATE=$TASK_BASE_STATE
+  else
+    echo "warning: $ID base references unresolved for $PROJ_ABS ($TASK_BASE_ERROR); the worktree is left at whatever commit the pool last used" >&2
+    BASE_STATE=unresolved
+  fi
+  if [ "$KIND" = ship ] && [ "$MODE" = local-only ] && [ "$CONTRIB_SET" -eq 0 ] && [ -n "$SLOT_BASE" ]; then
+    CONTRIB_TARGET=$SLOT_BASE
+    BASE_STATE=coincident
+  fi
+  # An explicit override is firstmate's per-task answer and wins over derivation.
+  # The derivation cannot see the task's target files; firstmate can, so a task
+  # editing code that exists only on the fork is declared here rather than guessed.
+  if [ "$SLOT_BASE_SET" -eq 1 ]; then
+    SLOT_BASE=$(git -C "$PROJ_ABS" rev-parse --verify --quiet "$SLOT_BASE_ARG^{commit}" 2>/dev/null) || {
+      echo "error: --slot-base '$SLOT_BASE_ARG' is not a commit in $PROJ_ABS" >&2
+      exit 1
+    }
+  fi
+  if [ "$CONTRIB_SET" -eq 1 ]; then
+    CONTRIB_TARGET=$(git -C "$PROJ_ABS" rev-parse --verify --quiet "$CONTRIB_ARG^{commit}" 2>/dev/null) || {
+      echo "error: --contribution-target '$CONTRIB_ARG' is not a commit in $PROJ_ABS" >&2
+      exit 1
+    }
+  fi
+  if [ "$SLOT_BASE_SET" -eq 1 ] || [ "$CONTRIB_SET" -eq 1 ]; then
+    if [ -z "$CONTRIB_TARGET" ]; then
+      BASE_STATE=unresolved
+    elif [ "$SLOT_BASE" = "$CONTRIB_TARGET" ]; then
+      BASE_STATE=coincident
+    else
+      BASE_STATE=distinct
+    fi
+  fi
+  # A scout delivers a report and cuts no branch, so it has no contribution
+  # target to be right or wrong about - only the commit its findings cite. Its
+  # slot is still placed at the fleet trunk, which is the whole fix for a report
+  # whose file and line citations must resolve against the running code.
+  if [ "$KIND" = scout ] && [ -n "$SLOT_BASE" ]; then
+    CONTRIB_TARGET=n/a
+    BASE_STATE=read-only
+  fi
+fi
+
+# Brief/spawn base agreement, the same drift guard the delivery contract uses
+# above. fm-brief.sh records the pair it told the worker about; a spawn that
+# resolved a different pair would hand that worker citations against one commit
+# and a branch cut from another.
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
+  BRIEF_BASE=$(sed -n 's/^Base contract: slot=\([0-9a-f]*\) contribution=\([^ ]*\).*$/\1 \2/p' "$BRIEF" | head -n 1)
+  if [ -z "$BRIEF_BASE" ]; then
+    if [ "$KIND" = ship ] && [ "$BASE_STATE" != coincident ]; then
+      echo "error: $ID brief records no base contract line but this task's read and contribution bases differ (${SLOT_BASE:0:12} vs ${CONTRIB_TARGET:-unresolved}); re-scaffold the brief with --slot-base/--contribution-target before spawning" >&2
+      exit 1
+    elif [ "$KIND" = scout ]; then
+      echo "warning: $BRIEF records no base contract line; the scout will read and cite the resolved slot base ${SLOT_BASE:-unresolved}" >&2
+    fi
+  else
+    BRIEF_SLOT=${BRIEF_BASE%% *}
+    BRIEF_CONTRIB=${BRIEF_BASE##* }
+    if [ "$BRIEF_SLOT" != "$SLOT_BASE" ] || [ "$BRIEF_CONTRIB" != "${CONTRIB_TARGET:-unresolved}" ]; then
+      echo "error: base mismatch for $ID: the brief says slot=$BRIEF_SLOT contribution=$BRIEF_CONTRIB but this spawn resolved slot=$SLOT_BASE contribution=${CONTRIB_TARGET:-unresolved}; re-scaffold the brief or pass matching --slot-base/--contribution-target so the worker's instructions and the task record agree" >&2
+      exit 1
+    fi
+  fi
+fi
+
 BRIEF_DIR_REAL=$(cd "$(dirname "$BRIEF")" && pwd -P)
 BRIEF_REAL="$BRIEF_DIR_REAL/$(basename "$BRIEF")"
 
@@ -1620,6 +1652,17 @@ real_path_or_raw() {  # <path>
     printf '%s\n' "$path"
   fi
 }
+
+# Pool-allocation safety, BEFORE any endpoint exists. `treehouse get` resets a
+# slot as part of acquiring it, so the only place this can be checked is ahead
+# of the allocation - by the time the pane's cwd reveals the worktree, an
+# unlanded branch has already been detached. Running it here (rather than beside
+# the `treehouse get` send below) also means a refusal never leaves an orphan
+# window behind. Secondmate spawns own their home, and Orca owns its own
+# worktree, so neither goes through the treehouse pool.
+if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+  "$FM_ROOT/bin/fm-worktree-guard.sh" check "$PROJ_ABS_REAL" || exit 1
+fi
 
 # Session-provider container-ensure + task creation. tmux stays exactly as P1
 # left it (same session-name / new-window sequence, see bin/backends/tmux.sh);
@@ -2132,6 +2175,33 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   validate_spawn_worktree "treehouse get" "$T"
 fi
 
+# Place the slot at the resolved slot base, so the worker reads the code the
+# fleet ACTUALLY RUNS instead of whatever commit the pool last left there. A
+# pooled slot is disposable, so this is a reset rather than the secondmate path's
+# fast-forward - a fast-forward would silently skip a diverged slot and leave the
+# stale base in place, which is the defect. Purely local, no fetch.
+#
+# It is still guarded, because "disposable" is a claim about the pool, not proof
+# about THIS directory: a slot carrying uncommitted work, or sitting on a task
+# branch, may hold work that was never landed. Either one is left untouched and
+# launched as-is with a loud notice rather than reset over.
+if [ "$KIND" != secondmate ] && [ -n "$WT" ] && [ -n "$SLOT_BASE" ]; then
+  slot_head=$(git -C "$WT" rev-parse --verify --quiet HEAD 2>/dev/null || true)
+  if [ "$slot_head" = "$SLOT_BASE" ]; then
+    :
+  elif [ -n "$(git -C "$WT" status --porcelain 2>/dev/null)" ]; then
+    echo "warning: $ID slot at $WT has uncommitted changes; left at ${slot_head:0:12} instead of the slot base ${SLOT_BASE:0:12} - the brief's file and line citations may not match it" >&2
+  else
+    slot_branch=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+    slot_default=$(default_branch "$WT" 2>/dev/null || true)
+    if [ -n "$slot_branch" ] && [ "$slot_branch" != "$slot_default" ]; then
+      echo "warning: $ID slot at $WT is on branch '$slot_branch', which may hold unlanded work; left at ${slot_head:0:12} instead of the slot base ${SLOT_BASE:0:12}" >&2
+    elif ! git -C "$WT" checkout --quiet --detach "$SLOT_BASE" 2>/dev/null; then
+      echo "warning: $ID slot at $WT could not be placed at the slot base ${SLOT_BASE:0:12}; left at ${slot_head:0:12} - the brief's file and line citations may not match it" >&2
+    fi
+  fi
+fi
+
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
 # create GOTMPDIR, so mkdir before it is used; fm-teardown removes the whole root.
 # Nested (not a bare /tmp/fm-<id>/gotmp) so other per-task temp can live alongside
@@ -2223,8 +2293,9 @@ if [ "$KIND" != secondmate ]; then
       j_stop=$(json_escape "touch $(shell_quote "$TURNEND"); $busy_cmd_prefix idle $busy_suffix --event stop 2>/dev/null || true")
       j_stopfail=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event stop-failure 2>/dev/null || true")
       j_sessionend=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event session-end 2>/dev/null || true")
+      context_statusline_command=$(json_escape "$(shell_quote "$FM_ROOT/bin/fm-context-statusline.sh") --record $(shell_quote "$TASK_TMP/context-pressure.json")")
       cat > "$WT/.claude/settings.local.json" <<EOF
-{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"$j_submit"}]}],"Stop":[{"hooks":[{"type":"command","command":"$j_stop"}]}],"StopFailure":[{"hooks":[{"type":"command","command":"$j_stopfail"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"$j_sessionend"}]}]}}
+{"statusLine":{"type":"command","command":"$context_statusline_command"},"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"$j_submit"}]}],"Stop":[{"hooks":[{"type":"command","command":"$j_stop"}]}],"StopFailure":[{"hooks":[{"type":"command","command":"$j_stopfail"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"$j_sessionend"}]}]}}
 EOF
       exclude_path '.claude/settings.local.json'
       ;;
@@ -2486,11 +2557,27 @@ preserve_relaunch_meta() {
   echo "window=$META_WINDOW"
   echo "endpoint_task_id=$ID"
   echo "worktree=$WT"
+  # Durable ownership for bin/fm-worktree-guard.sh: a process IDENTITY, not a
+  # bare pid, because a reboot reissues pid numbers and a recorded pre-reboot
+  # pid then resolves to an unrelated live process. Empty fields read as
+  # UNRESOLVED at check time, never as a released slot. Only the treehouse pool
+  # path records this: a secondmate owns its home and Orca owns its own
+  # worktree, so neither is allocated from a shared pool.
+  if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+    "$FM_ROOT/bin/fm-worktree-guard.sh" owner-fields "$WT" 2>/dev/null || true
+  fi
   echo "project=$PROJ_ABS"
   echo "harness=$HARNESS"
   echo "kind=$KIND"
   [ -z "$MODE" ] || echo "mode=$MODE"
   [ -z "$YOLO" ] || echo "yolo=$YOLO"
+  # Both base references, so which commit a task read and which it contributed
+  # to is inspectable after the fact rather than inferred from the branch.
+  # base_state names the relationship in one word; an unresolved contribution
+  # target is recorded as the literal "unresolved" and never as a commit.
+  [ -z "$SLOT_BASE" ] || echo "slot_base=$SLOT_BASE"
+  [ -z "$BASE_STATE" ] || echo "contribution_target=${CONTRIB_TARGET:-unresolved}"
+  [ -z "$BASE_STATE" ] || echo "base_state=$BASE_STATE"
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"

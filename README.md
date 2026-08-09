@@ -106,10 +106,18 @@ FM_PI_HARNESS=pi-signed pi-signed
 
 For Grok, `--trust` is needed once per clone so project hooks and the turn-end guard load; `/hooks-trust` inside Grok works too.
 For Pi, approve the project trust prompt once per clone on first launch so the tracked `.pi/extensions/*.ts` files auto-load.
+On Windows with WSL and Herdr, the repository-root `firstmate.bat` opens the optional harness menu without requiring a remembered terminal command; see [the Windows launcher guide](docs/windows-launcher.md).
 Pi's `/calm` toggle hides supported transcript chrome, including canonically classified Firstmate operational user rows, and uses a Calm-only animated working boat during active runs while preserving all model context and session data.
 The hidden operational inputs remain ordinary user-role messages with unchanged delivery, ordering, authority, persistence, and exports.
 The preference persists for the effective Firstmate home, and toggling it off restores ordinary rendering.
 [Calm's current behavior and supported limits](docs/calm.md) are separate from its [version-scoped maintainer evidence](docs/calm-mode-feasibility.md).
+
+### Optional: launch from a menu
+
+If you run the Herdr backend, `bin/fm-launch.sh` offers the same launch as a short menu instead of a remembered command, starts the session in this home's Herdr workspace, and attaches to it.
+It shows every configured harness with honest availability, remembers your last choice, and refuses rather than starting a second session in a home that already has one.
+Herdr is required for this path; launching a harness directly, as above, stays fully supported on every backend.
+See [docs/launcher.md](docs/launcher.md).
 
 ### Talk to it
 
@@ -198,6 +206,8 @@ Firstmate's skills live in two separate places with different audiences:
 
 - [docs/architecture.md](docs/architecture.md) - maintainer architecture for the crew, supervision, worktrees, secondmates, and project modes.
 - [docs/configuration.md](docs/configuration.md) - environment variables, `FM_HOME`, runtime backend selection, optional Relay and its X and Discord setup steps, the files you set, and harness support.
+- [docs/launcher.md](docs/launcher.md) - the optional harness menu that starts and attaches one primary session in a home.
+- [docs/windows-launcher.md](docs/windows-launcher.md) - launch the Herdr-backed harness menu from Windows through WSL.
 - [docs/remote-secondmates.md](docs/remote-secondmates.md) - current setup, routing, transfer, recovery, and safety behavior for whole-home remote second mates.
 - [docs/calm.md](docs/calm.md) - current Pi `/calm` behavior and supported presentation limits.
 - [docs/wedge-alarm.md](docs/wedge-alarm.md) - configure the active alert for an away-mode escalation delivery that gets stuck.

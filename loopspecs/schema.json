@@ -1,0 +1,237 @@
+{
+  "loopspec_schema_version": 1,
+  "description": "Canonical LoopSpec field contract. bin/fm-loopspec.sh is the only interpreter; its header and --help own the mechanics. A LoopSpec answers one question and only that question: under what conditions is this done again, what may execute, how is progress verified, and when must it stop. It is not a ticket, a plan, a skill, an ExecutionUnit, a state machine, or a decomposition node.",
+  "enums": {
+    "status": [
+      "draft",
+      "specified",
+      "ready_not_active",
+      "enabled",
+      "disabled",
+      "retired"
+    ],
+    "authority_class": [
+      "read-only",
+      "firstmate-routine",
+      "captain-required"
+    ],
+    "tie_behavior": [
+      "refuse"
+    ],
+    "on_unavailable": [
+      "fail_closed"
+    ],
+    "terminal_kind": [
+      "success",
+      "neutral",
+      "failure",
+      "refusal"
+    ],
+    "backoff_strategy": [
+      "none",
+      "fixed",
+      "exponential"
+    ],
+    "open_iteration_policy": [
+      "resume_same_version",
+      "refuse"
+    ],
+    "version_change_policy": [
+      "refuse"
+    ],
+    "progress_signal": [
+      "declared_by_verifier"
+    ]
+  },
+  "objects": {
+    "": {
+      "required": {
+        "loopspec_schema_version": "pos_int",
+        "id": "slug",
+        "spec_version": "pos_int",
+        "status": "enum:status",
+        "title": "string",
+        "goal": "string",
+        "success_condition": "string",
+        "trigger": "object",
+        "preconditions": "object[]",
+        "selection": "object",
+        "authority": "object",
+        "verification": "object",
+        "state": "object",
+        "cadence": "object",
+        "budgets": "object",
+        "no_progress": "object",
+        "terminal_states": "object[]",
+        "escalation": "object",
+        "idempotency": "object",
+        "crash_recovery": "object",
+        "evidence": "object"
+      },
+      "optional": {
+        "notes": "string"
+      }
+    },
+    "trigger": {
+      "required": {
+        "id": "slug",
+        "source": "string",
+        "predicate": "string"
+      },
+      "optional": {
+        "detector_ref": "string"
+      }
+    },
+    "preconditions[]": {
+      "required": {
+        "id": "slug",
+        "description": "string"
+      },
+      "optional": {}
+    },
+    "selection": {
+      "required": {
+        "key": "string[]",
+        "scope": "slug",
+        "priority": "nonneg_int",
+        "tie_behavior": "enum:tie_behavior"
+      },
+      "optional": {}
+    },
+    "authority": {
+      "required": {
+        "class": "enum:authority_class",
+        "permitted_skills": "slug[]",
+        "permitted_actions": "string[]",
+        "forbidden_actions": "string[]"
+      },
+      "optional": {}
+    },
+    "verification": {
+      "required": {
+        "verifier": "slug",
+        "required_evidence": "string[]",
+        "on_unavailable": "enum:on_unavailable"
+      },
+      "optional": {}
+    },
+    "state": {
+      "required": {
+        "path_template": "string",
+        "required_fields": "string[]"
+      },
+      "optional": {}
+    },
+    "cadence": {
+      "required": {
+        "min_interval_secs": "nonneg_int",
+        "backoff": "object",
+        "retry": "object",
+        "dedup": "object"
+      },
+      "optional": {
+        "max_interval_secs": "nonneg_int"
+      }
+    },
+    "cadence.backoff": {
+      "required": {
+        "strategy": "enum:backoff_strategy",
+        "ceiling_secs": "nonneg_int"
+      },
+      "optional": {
+        "factor": "pos_int"
+      }
+    },
+    "cadence.retry": {
+      "required": {
+        "max_attempts": "pos_int"
+      },
+      "optional": {}
+    },
+    "cadence.dedup": {
+      "required": {
+        "key": "string[]"
+      },
+      "optional": {
+        "window_secs": "nonneg_int"
+      }
+    },
+    "budgets": {
+      "required": {
+        "max_iterations": "pos_int",
+        "max_wall_secs": "pos_int",
+        "capacity_stop_band_percent": "nonneg_int"
+      },
+      "optional": {}
+    },
+    "no_progress": {
+      "required": {
+        "progress_signal": "enum:progress_signal",
+        "max_iterations_without_progress": "pos_int",
+        "terminal": "token"
+      },
+      "optional": {}
+    },
+    "terminal_states[]": {
+      "required": {
+        "name": "token",
+        "kind": "enum:terminal_kind",
+        "description": "string"
+      },
+      "optional": {
+        "maps_to": "string"
+      }
+    },
+    "escalation": {
+      "required": {
+        "authority_owner": "string",
+        "channel": "string",
+        "on": "token[]"
+      },
+      "optional": {}
+    },
+    "idempotency": {
+      "required": {
+        "event_key": "string[]",
+        "claim_scope": "string"
+      },
+      "optional": {}
+    },
+    "crash_recovery": {
+      "required": {
+        "open_iteration_policy": "enum:open_iteration_policy",
+        "version_change_policy": "enum:version_change_policy"
+      },
+      "optional": {}
+    },
+    "evidence": {
+      "required": {
+        "links": "string[]"
+      },
+      "optional": {
+        "written_to": "string"
+      }
+    }
+  },
+  "required_terminal_states": [
+    "no_delta",
+    "delta_emitted",
+    "confirmed_work_found",
+    "needs_ruling",
+    "blocked_by_evidence_integrity",
+    "budget_exhausted",
+    "verification_failed"
+  ],
+  "invariants": [
+    "schema_version_matches: loopspec_schema_version must equal this file's loopspec_schema_version",
+    "id_matches_filename: id must equal the spec filename without its .json suffix",
+    "trigger_registered: trigger.id must appear in triggers.json",
+    "required_terminals_present: terminal_states must define every name in required_terminal_states",
+    "no_progress_terminal_defined: no_progress.terminal must name a declared terminal state",
+    "escalation_terminals_defined: every escalation.on entry must name a declared terminal state",
+    "unique_selection: no two specs may share (trigger.id, selection.scope, selection.priority)",
+    "enabled_requires_implemented_trigger: status=enabled requires the trigger's execution_path_implemented, verified and enabled axes to all be true in triggers.json",
+    "enabled_requires_available_skills: status=enabled requires every authority.permitted_skills entry to resolve to an installed skill",
+    "captain_required_cannot_self_enable: status=enabled is refused for authority.class=captain-required"
+  ]
+}

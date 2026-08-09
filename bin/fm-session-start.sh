@@ -177,6 +177,14 @@
 # Hosts without timeout, gtimeout, or perl use the shared pure-Bash watchdog, so
 # the digest never runs without the same hard bound and process-group cleanup.
 #
+# FLEET ADMISSION: a home whose config/crew-dispatch.json carries an active
+# `_scheduling.admission_control` policy also gets one `bin/fm-admission.sh
+# --brief` line in the fleet-state digest, because session start is the second
+# of admission's two release triggers and the only re-examination an
+# already-empty fleet receives. Homes without that policy print nothing and pay
+# only one cheap config read. The band never gates this digest: a soft or hard
+# band is reported, never fatal, exactly like every other startup diagnostic.
+#
 # Usage: fm-session-start.sh [--reemit]
 #   Prints the full ordered digest to stdout and always exits 0: this is a
 #   reporting command, not a gate. A lock refusal is reported as a loud
@@ -285,6 +293,8 @@ PRIMARY_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 # shellcheck source=bin/fm-public-followup-lib.sh
 . "$SCRIPT_DIR/fm-public-followup-lib.sh"
+# shellcheck source=bin/fm-admission-lib.sh
+. "$SCRIPT_DIR/fm-admission-lib.sh"
 # shellcheck source=bin/fm-trace-context-lib.sh
 . "$SCRIPT_DIR/fm-trace-context-lib.sh"
 # shellcheck source=bin/fm-line-cap-lib.sh
@@ -674,6 +684,16 @@ EOF
 stage fleet-state
 section "FLEET STATE"
 print_backlog_compact "$DATA/backlog.md" "data/backlog.md"
+
+# Session start is admission control's second release trigger (the first is
+# successful cleanup), and it is the only re-examination a fleet that is already
+# empty gets. A home that has not configured an admission policy prints nothing
+# and pays only one cheap config read.
+if [ "$(fm_admission_state "$(fm_admission_config_file "$CONFIG")")" = active ]; then
+  subsection "Fleet admission"
+  "$SCRIPT_DIR/fm-admission.sh" --brief || true
+  printf 'Re-examine load-held requests against this band; admit at most one at a time.\n'
+fi
 
 subsection "Work under way (state/*.meta)"
 META_FOUND=0

@@ -10,6 +10,12 @@
 #                 "BACKEND_INVALID: <name> (known: <names>)",
 #                 "STARTUP_MEMORY_BUDGET: invalid config/startup-memory-budget - <reason>",
 #                 "CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>",
+#                 "MODEL_REGISTRY: invalid config/models.json - <reason>",
+#                 "MODEL_REGISTRY: <model> <integrity problem>",
+#                 "MODEL_PRICE: <model> <price drift>",
+#                 "MODEL_VERIFY: <model> <probe problem>",
+#                 "ADMISSION_CONTROL: invalid config/crew-dispatch.json
+#                  _scheduling.admission_control - <reason>",
 #                 "FLEET_SYNC: <repo>: skipped|recovered|STUCK: <detail>",
 #                 "PR_CHECK_MIGRATION: <private remediation>",
 #                 "TANGLE: <remediation>",
@@ -67,6 +73,13 @@
 #          guesses at malformed or unsafe existing files, and secondmate homes
 #          await the primary-authoritative inherited value instead of creating
 #          their own.
+#          The optional `_scheduling.admission_control` block inside the same
+#          config/crew-dispatch.json is validated against the fleet-admission
+#          schema owned by bin/fm-admission-lib.sh. A home with no such block, or
+#          one carrying only `_`-prefixed notes, is silent and unaffected; a
+#          malformed or unknown-field policy prints ADMISSION_CONTROL so the
+#          policy stops safely instead of being silently ignored. This is a
+#          read-only detect line and still prints in FM_BOOTSTRAP_DETECT_ONLY=1.
 #          X mode is OPTIONAL and inert unless FM_HOME/.env has a non-empty
 #          FMX_PAIRING_TOKEN. When opted in, bootstrap requires curl+jq, writes
 #          the relay poll shim and 30s cadence config, and prints an FMX line.
@@ -148,6 +161,10 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-x-lib.sh"
 # shellcheck source=bin/fm-backend.sh disable=SC1091
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-model-registry-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-model-registry-lib.sh"
+# shellcheck source=bin/fm-admission-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-admission-lib.sh"
 # shellcheck source=bin/fm-remote-readiness-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
 # fm-timing-lib.sh is inert unless FM_TIMING_LOG names a file, which only the
@@ -984,6 +1001,121 @@ EOF
   echo "FMX: X mode on - relay poll armed via state/x-watch.check.sh; 30s watcher cadence in config/x-mode.env"
 }
 
+# Model registry checks, all detect-only and free: a schema validation, the
+# referential-integrity check that binds config/crew-dispatch.json to
+# config/models.json, and the local price-drift comparison.
+#
+# The integrity check is the entire reason the registry is a second file: it
+# catches a bad model at CONFIG-EDIT time, before any worker is launched against
+# it. A dispatch rule naming a model with no probe record, or one whose recorded
+# status is rejected, fails here.
+#
+# The no-registry branch is what keeps the ruled "inert but never silent" posture
+# honest: with no config/models.json the spawn-time refusal cannot run, so if the
+# dispatch config routes to any provider-prefixed model this says so plainly
+# rather than leaving the zero-budget rule quietly unenforced.
+model_registry_validate() {
+  local reg dispatch err drift routed
+  reg="$CONFIG/models.json"
+  dispatch="$CONFIG/crew-dispatch.json"
+
+  if [ ! -f "$reg" ]; then
+    [ -f "$dispatch" ] || return 0
+    command -v jq >/dev/null 2>&1 || return 0
+    routed=$(jq -r '
+      def profiles($v):
+        if ($v | type) == "array" then $v elif ($v | type) == "object" then [$v] else [] end;
+      [ (((.rules // [])[]? | profiles(.use?)[]?), (profiles(.default // null)[]?))
+        | .model? // empty ]
+      | map(select(type == "string" and (. != "default") and (test("/"))))
+      | unique | join(", ")' "$dispatch" 2>/dev/null || true)
+    if [ -n "$routed" ]; then
+      echo "MODEL_REGISTRY: no config/models.json, so the zero-budget rule is not enforced for routed provider models: $routed"
+    fi
+    return 0
+  fi
+
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "MISSING: jq (install: $(install_cmd jq))"
+    return 0
+  fi
+  if ! err=$(fm_model_registry_validate "$reg"); then
+    echo "MODEL_REGISTRY: invalid config/models.json - $err"
+    return 0
+  fi
+  fm_model_registry_integrity "$dispatch" "$reg" || true
+  drift=$(fm_model_price_drift "$reg" || true)
+  [ -z "$drift" ] || printf '%s\n' "$drift"
+}
+
+admission_control_validate() {
+  local file reason state
+  file=$(fm_admission_config_file "$CONFIG")
+  [ -f "$file" ] || return 0
+  if ! command -v jq >/dev/null 2>&1; then
+    # The MISSING: jq line already carries the install-consent flow.
+    return 0
+  fi
+  # crew_dispatch_validate owns the file-level JSON parse for this exact file;
+  # reporting it twice would give one broken file two diagnostics.
+  jq -e . "$file" >/dev/null 2>&1 || return 0
+  reason=$(fm_admission_validate_reason "$file") || true
+  if [ -n "$reason" ]; then
+    echo "ADMISSION_CONTROL: invalid config/crew-dispatch.json _scheduling.admission_control - $reason"
+    return 0
+  fi
+  if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ]; then
+    # A dispatch file with no admission block at all is the ordinary case and is
+    # not a fact worth reporting; only a policy that exists gets a verbose line.
+    state=$(fm_admission_state "$file")
+    case "$state" in
+      inert|active) echo "BOOTSTRAP_INFO: fleet admission control $state" ;;
+    esac
+  fi
+}
+
+# Outcome records in the wake ledger that join no wake record. They read as
+# ordinary supervision cost while measuring nothing, and the state they leave -
+# queued=unknown - is also what a legitimately wiped state/ produces, so the
+# only way the fleet ever notices is a count reported at session start.
+# bin/fm-wake-ledger.sh owns the join and the number; this only reports it.
+wake_ledger_reconcile() {
+  local unjoined
+  # A code root without the ledger script predates this check; that is a missing
+  # feature, not an unreadable ledger, so say nothing rather than misreport it.
+  [ -x "$SCRIPT_DIR/fm-wake-ledger.sh" ] || return 0
+  # An absent ledger reports a real 0 and stays silent here. A failure means the
+  # ledger exists and could not be read, which must not read as "clean".
+  if ! unjoined=$("$SCRIPT_DIR/fm-wake-ledger.sh" reconcile --count 2>/dev/null); then
+    echo "WAKE_LEDGER: the wake ledger could not be read, so unjoined outcome records cannot be counted - treat supervision-cost figures as unverified until it is readable"
+    return 0
+  fi
+  case "$unjoined" in
+    ''|*[!0-9]*) return 0 ;;
+    0) return 0 ;;
+  esac
+  echo "WAKE_LEDGER: $unjoined outcome record(s) join no wake record - supervision-cost figures drawn from this ledger overcount until they are purged (bin/fm-wake-ledger.sh reconcile)"
+}
+
+# The entitlement probe half of the observation floor. A MUTATING sweep: it makes
+# live requests and writes state/model-health.json, so it runs only when this
+# session actually holds the fleet lock, alongside the other mutating sweeps.
+#
+# Interval-gated by each model's observation level, so the steady-state cost is
+# usually zero probes and one file read rather than ~4s per routed model on every
+# session start. fm-model-verify.sh owns the probe mechanics, the hard timeout,
+# and the closed stdin.
+model_probe_sweep() {
+  local out
+  [ -f "$CONFIG/models.json" ] || return 0
+  # stderr is captured alongside stdout: the script's failure diagnostics (a
+  # due-selection query that dies at runtime) arrive there, and a sweep whose
+  # failures are swallowed reads as a healthy sweep that probed nothing.
+  # Non-fatal either way - bootstrap detects and reports, never aborts.
+  out=$("$SCRIPT_DIR/fm-model-verify.sh" 2>&1 || true)
+  [ -z "$out" ] || printf '%s\n' "$out"
+}
+
 crew_dispatch_validate() {
   local file err
   file="$CONFIG/crew-dispatch.json"
@@ -1176,6 +1308,9 @@ detect_local_config() {
     echo "BOOTSTRAP_INFO: crew harness override active: $crew"
   fi
   crew_dispatch_validate
+  model_registry_validate
+  admission_control_validate
+  wake_ledger_reconcile
   if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] \
     && ! fm_backlog_backend_manual "$CONFIG" && fm_tasks_axi_compatible; then
     echo "BOOTSTRAP_INFO: tasks-axi available"
@@ -1228,6 +1363,13 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
     __fm_timing_stamp=$(fm_timing_now_ms)
     fleet_sync
     fm_timing_record phase fleet-sync "$__fm_timing_stamp"
+  fi
+  # model_probe_sweep makes live entitlement requests and writes
+  # state/model-health.json, so it runs with the other mutating network sweeps.
+  if network_phase && network_sweep_authorized 'model entitlement probes'; then
+    __fm_timing_stamp=$(fm_timing_now_ms)
+    model_probe_sweep
+    fm_timing_record phase model-probes "$__fm_timing_stamp"
   fi
 fi
 local_phase && secondmate_handoff_detect

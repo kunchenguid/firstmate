@@ -17,6 +17,8 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-fleet-snapshot.sh`   | Print the read-only structured fleet snapshot JSON (schema `fm-fleet-snapshot.v1`)   |
 | `fm-fleet-view.sh`       | Render the fleet snapshot as a human Markdown view                                   |
 | `fm-bearings-snapshot.sh` | Project the fleet snapshot to the compact TOON bearings view; local-only unless `--include-prs` |
+| `fm-admission.sh`        | Decide the task-independent fleet admission band from a fresh census, with the exact per-rule explanation |
+| `fm-admission-lib.sh`    | Shared fleet-admission policy reader and `_scheduling.admission_control` schema validator |
 | `fm-update.sh`           | Fast-forward-only self-update of firstmate and local or remote secondmate homes       |
 | `fm-on.sh`               | Execute one tracked Firstmate command in a configured remote secondmate home, using its job worker except for the doctor bootstrap |
 | `fm-remote-job-lib.sh`   | Shared bounded remote job queue, worker readiness, LaunchAgent contract, and filesystem-composed PATH |
@@ -38,6 +40,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-primary-scope-lib.sh` | Shared marker-or-plain-checkout primary-home predicate for tracked hooks             |
 | `fm-session-lock-lib.sh` | Shared session-lock harness identity (ancestry walk and holder liveness) for fm-lock.sh and the Claude Stop auto-arm |
 | `fm-claude-stop-autoarm.sh` | Claude Stop `asyncRewake` hook owning tokenless watcher continuity with single-flight exit-2 rewake (docs/watcher-continuity.md) |
+| `fm-context-statusline.sh` | Render Claude's host-computed context pressure and optional task snapshot with the 70-percent compaction advisory |
 | `fm-turnend-guard.sh`    | Shared primary turn-end guard predicate so no turn ends blind (docs/turnend-guard.md) |
 | `fm-turnend-guard-grok.sh` | Grok Stop-hook adapter for the primary turn-end guard                              |
 | `fm-kimi-turnend-hook.sh` | Surgically install or remove Kimi's guarded global crew turn-end hook                |
@@ -50,6 +53,10 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-remote-readiness-lib.sh` | Shared remote second-mate readiness gate: check and, when needed, repair then re-check through `fm-remote-doctor.sh` |
 | [`fm-project-origin-lib.sh`](../bin/fm-project-origin-lib.sh) | Accepted origin-form owner shared by both remote provisioning boundaries |
 | `fm-spawn.sh`            | Spawn crewmates, scouts, `id=repo` batches, and secondmates on the resolved harness and runtime backend |
+| `fm-worktree-guard.sh`   | Refuse Treehouse allocation when an available pool slot is not demonstrably empty    |
+| `fm-launch-lib.sh`       | Single owner of every verified harness launch command for crewmate, scout, secondmate, and primary sessions |
+| `fm-launch.sh`           | The captain's front door: probe the harness menu, then start and attach to one primary session in this home (docs/launcher.md) |
+| `fm-wsl-entry.sh`        | Enter the fleet launcher deterministically from the repository-root Windows batch bridge |
 | `fm-backend.sh`          | Runtime-backend selection, meta helpers, selector resolution, and operation dispatch |
 | `fm-backend-hometag-lib.sh` | Shared per-installation home-tag derivation for zellij tab and cmux workspace titles |
 | `fm-composer-lib.sh`     | Single fleet-wide owner of composer-content classification for all backends          |
@@ -62,6 +69,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-project-mode.sh`     | Resolve a project's registered delivery posture from `data/projects.md` for fleet sync and home seeding |
 | `fm-merge-local.sh`      | Fast-forward a `local-only` project's local default branch after approval            |
 | `fm-review-diff.sh`      | Review a crewmate branch or resolved PR head against the authoritative base          |
+| `fm-research-scan.sh`    | Model-free prefilter over `data/**/report.md` plus the separate approval, implementation, and delivery evidence provers |
 | `fm-marker-lib.sh`       | Compatibility entry point for the from-firstmate carrier owned by `fm-operational-input.sh` |
 | `fm-pending-reply-lib.sh` | Parent-owned secondmate pending-reply expectations, recovery, and keyed escalation lifecycle |
 | `fm-secondmate-report.sh` | Optional helper to append a correlated parent status or document-pointer report       |
@@ -83,11 +91,13 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-supervision-lib.sh`  | Shared in-flight-work-without-fresh-watcher-beacon predicate                         |
 | `fm-ff-lib.sh`           | Shared guarded fast-forward helper for origin pulls and local secondmate syncs       |
 | `fm-lock-lib.sh`         | Shared "is this git lock provably abandoned?" proof used by teardown and fleet-sync   |
+| `fm-landed-lib.sh`       | Shared "has this content already landed?" containment test, default-branch name, push-remote landing target, and landing-target candidate refs |
 | `fm-config-inherit-lib.sh` | Shared primary-to-secondmate inherited local-material propagation and config-reread delivery |
 | `fm-tasks-axi-lib.sh`    | Shared backlog-backend selector and `tasks-axi` compatibility probe                  |
 | `fm-quota-axi-lib.sh`    | Shared `quota-axi` compatibility floor for the bootstrap diagnostic                  |
 | `fm-vendor-auth-probe.sh`| Run one hard-bounded, non-destructive authentication probe of a named vendor CLI and report the fact |
-| `fm-wake-drain.sh`       | Atomically drain queued watcher wakes, emit bounded best-effort status-event annotations and a fleet-wide OPEN DECISIONS section, then assert supervision health |
+| `fm-wake-drain.sh`       | Atomically drain queued watcher wakes, emit bounded best-effort status-event annotations and a fleet-wide OPEN DECISIONS section, record the ledger's wake half, then assert supervision health |
+| `fm-wake-ledger.sh`      | Own the append-only wake-outcome and terminal-task evidence record, and summarize it |
 | `fm-wake-lib.sh`         | Shared durable wake queue, portable locks, and watcher identity/health helpers       |
 | `fm-classify-lib.sh`     | Shared wake-classification vocabulary and durable keyed-decision folds and scans     |
 | `fm-send.sh`             | Send one verified literal line or supported key through the target's recorded backend |
@@ -97,13 +107,15 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-busy-event.sh`       | The only writer of a task's semantic busy-state record; arms an incarnation and applies lifecycle events |
 | `fm-tmux-lib.sh`         | Shared tmux pane primitives for composer capture, verified submit, and the submit-time busy check |
 | `fm-peek.sh`             | Print a bounded tail of a crewmate endpoint                                          |
+| `fm-model-registry-lib.sh` | Parse and validate the model registry and own the zero-budget and concurrency routing decisions |
+| `fm-model-verify.sh`     | Live entitlement probes and local price-drift checks for routed models              |
 | `fm-check-register.sh`   | Bind an intentional custom watcher check to its current bytes                       |
 | `fm-check-lib.sh`        | Validate custom-check registrations and prepare private execution snapshots          |
 | `fm-pr-lib.sh`           | Own canonical task and PR validation plus private atomic PR-poll publication and identity-bound retirement |
-| `fm-pr-poll.sh`          | Provide the byte-static watcher program for validated PR/MR-poll sidecars           |
+| `fm-pr-poll.sh`          | Provide the byte-static watcher program reporting merged and conflicted PR/MR-poll sidecars |
 | `fm-pr-check-migrate.sh` | Quarantine older task polls without execution and rebuild only canonical polls       |
-| `fm-pr-check.sh`         | Record validated `pr=` and `pr_head=` values, then atomically arm a static merge poll |
-| `fm-pr-merge.sh`         | Record PR metadata, then merge a task's canonical full GitHub URL                    |
+| `fm-pr-check.sh`         | Record validated PR identity in live meta or a landing record, then atomically arm a static PR poll |
+| `fm-pr-merge.sh`         | Forge-verify landing identity, re-verify a PR's current head, then merge a task's canonical full GitHub URL |
 | `fm-promote.sh`          | Promote a scout task in place to a protected ship task with an explicit delivery mode |
 | `fm-teardown.sh`         | Fail-closed teardown: return landed ship worktrees, require completed scout deliverables, retire secondmate homes |
 | `fm-harness.sh`          | Detect the running harness and resolve crew or secondmate harness, model, and effort |

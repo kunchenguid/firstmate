@@ -4,6 +4,10 @@
 # clear volatile state, refresh/prune the project's clone for PR-based ship
 # tasks, then print a backlog-refresh reminder for ship and scout teardowns
 # (a secondmate teardown prints none, since secondmates are not backlog items).
+# A home with an active fleet-admission policy also gets the admission release
+# reminder on the same seam: successful cleanup is admission's primary release
+# trigger, so the fleet band is recomputed before any load-held request is
+# released. Homes without that policy see no extra line.
 # REFUSES if the worktree holds work that has not LANDED, because cleanup
 # hard-resets/removes the worktree and kills its processes. Work has landed when it is
 # reachable from any remote-tracking branch (a fork counts as a remote, so
@@ -29,6 +33,11 @@
 # declared scratch and the report at data/<task-id>/report.md is the work
 # product. Teardown proceeds only once the report exists and the shared
 # unresolved-decision completion gate verifies its captain-held inventory.
+# A ship task released while its PR is still open leaves state/<task-id>.landing
+# behind: a minimal durable record (pr, pr_head, project) that keeps the PR
+# landable through bin/fm-pr-merge.sh and rearmable through bin/fm-pr-check.sh
+# after the task itself is gone. It is written unless the forge reports the PR
+# already merged, and a failed write warns without blocking cleanup.
 # Before destructive cleanup, teardown validates task check artifacts and any
 # matching quarantine entries as ordinary single-link files on the state
 # device. It refuses and preserves task state when that proof fails; otherwise
@@ -162,6 +171,10 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
 # shellcheck source=bin/fm-secondmate-parent-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-parent-lib.sh"
+# shellcheck source=bin/fm-admission-lib.sh
+. "$SCRIPT_DIR/fm-admission-lib.sh"
+# shellcheck source=bin/fm-landed-lib.sh
+. "$SCRIPT_DIR/fm-landed-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
@@ -393,7 +406,7 @@ remote_secondmate_teardown() {
   grep -vE "^- $ID( |$)" "$SECONDMATE_REG" > "$tmp" || true
   mv -f -- "$tmp" "$SECONDMATE_REG"
   rm -f -- "$STATE/$ID.status" "$STATE/$ID.meta" "$STATE/$ID.turn-ended" \
-    "$STATE/.$ID.open-decisions-cursor"
+    "$STATE/.$ID.open-decisions-cursor" "$STATE/$ID.childcpu"
   printf 'teardown %s complete (remote %s:%s)\n' "$ID" "$remote_host" "$remote_home"
   return 0
 }
@@ -440,6 +453,8 @@ if [ "${FM_TEARDOWN_GUARD_DONE:-0}" != 1 ]; then
 fi
 HOME_PATH=$(grep '^home=' "$META" | cut -d= -f2- || true)
 PR_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
+PR_HEAD_RECORDED=$(grep '^pr_head=' "$META" | tail -1 | cut -d= -f2- || true)
+LANDING_PENDING_URL=
 # tasktmp is recorded by fm-spawn for tasks that set up a per-task temp root
 # (/tmp/fm-<id>/); absent for tasks spawned before that change, so tolerate empty.
 TASK_TMP=$(grep '^tasktmp=' "$META" | cut -d= -f2- || true)
@@ -737,6 +752,43 @@ validate_pr_poll_cleanup() {
   done
 }
 
+# The captain's parked-completion ruling releases a ship worker once its pull
+# request is done, green, and mergeable - that is, before it lands - and this
+# cleanup then removes the meta bin/fm-pr-merge.sh needs. Leave a minimal
+# durable landing record behind so the request can still be landed through the
+# sanctioned path, and so bin/fm-pr-check.sh can rearm its merge watch.
+#
+# The forge decides whether the record is needed: it is written unless the forge
+# positively reports the request already merged, because an unreachable forge is
+# not evidence that anything landed. Writing a record for an already-landed
+# request would only leave an inert file, while omitting one for an open request
+# is what strands it.
+#
+# A failed write is reported and never blocks cleanup. bin/fm-pr-merge.sh
+# rebuilds the record from the request itself, so a missing record costs the
+# merge watch but not the ability to land.
+write_landing_record_if_unlanded() {
+  [ -n "$PR_URL" ] || return 0
+  [ "$KIND" = ship ] || return 0
+  [ "$MODE" != local-only ] || return 0
+  fm_pr_url_parse "$PR_URL" || return 0
+  if fm_pr_forge_view "$PR_URL" && [ "$FM_PR_FORGE_STATE" = merged ]; then
+    return 0
+  fi
+  if ! fm_pr_landing_record_write "$STATE" "$ID" "$PR_URL" "$PR_HEAD_RECORDED" "$PROJ"; then
+    echo "warning: could not record the pending landing for $ID; land $PR_URL with bin/fm-pr-merge.sh, which rebuilds that record from the pull request" >&2
+    return 0
+  fi
+  LANDING_PENDING_URL=$PR_URL
+}
+
+# Reported after cleanup so the released PR is not silently forgotten: the task
+# is gone from the fleet, but its PR still needs landing.
+report_pending_landing() {
+  [ -n "$LANDING_PENDING_URL" ] || return 0
+  printf '%s\n' "Pending landing: $ID was released before $LANDING_PENDING_URL landed. Land it with bin/fm-pr-merge.sh $ID $LANDING_PENDING_URL once it is approved."
+}
+
 remove_pr_poll_artifacts() {
   local state_dir=$1 id=$2 quarantine artifact
   validate_pr_poll_cleanup "$state_dir" "$id" || return 1
@@ -745,6 +797,9 @@ remove_pr_poll_artifacts() {
     "$state_dir/$id.pr-poll-registration" "$state_dir/$id.pr-poll-retirement" \
     "$state_dir/$id.check-trust" || return 1
   if fm_task_id_path_safe "$id"; then
+    # The watcher's conflict-episode marker belongs to the poll it dedupes, so
+    # it retires with the other poll artifacts rather than outliving the task.
+    rm -f "$state_dir/.pr-dirty-$id" || return 1
     quarantine="$state_dir/.pr-check-quarantine"
     if [ -d "$quarantine" ] && [ ! -L "$quarantine" ]; then
       for artifact in "$quarantine/$id."*; do
@@ -854,29 +909,37 @@ pr_is_merged() {
   unpushed_patches_are_in_pr_head "$head"
 }
 
-# Is the branch's content already present in the up-to-date default branch? Fetches
-# first, then 3-way merges the default branch with HEAD: when HEAD introduces nothing
-# the default branch does not already contain (e.g. its change landed via squash) the
-# merged tree equals the default branch's tree. This isolates branch-only changes, so
-# unrelated commits the default branch gained past the merge-base do not count as
-# "added". Returns non-zero when inconclusive (no default ref, or a merge conflict),
-# so the caller refuses rather than guesses.
+# Is the branch's content already present in the up-to-date default branch?
+# Teardown owns the POLICY here - refresh before measuring, and measure against
+# the refreshed remote trunks whenever an origin exists, preferring the trunk
+# this fleet actually pushes to - while bin/fm-landed-lib.sh owns the
+# containment instrument itself and why content beats commit reachability.
+# Returns non-zero when inconclusive (no default ref, unreadable refs, or a
+# merge conflict), so the caller refuses rather than guesses.
 content_in_default() {
-  local name ref default_tree merged_tree
+  local name ref push_ref
   name=$(default_branch) || return 1
   if git -C "$WT" remote get-url origin >/dev/null 2>&1; then
     git -C "$WT" fetch --quiet origin "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1 || return 1
+    # When origin FETCHES an upstream but PUSHES a fork, the ref just refreshed
+    # is the upstream trunk - a trunk this fleet never lands on - so measuring
+    # only it reports provably merged work as unlanded. Refresh the push
+    # remote's trunk as well and measure that first. A push url that exists but
+    # cannot be read is the landing target itself going unread, so it refuses
+    # rather than falling back to the upstream answer.
+    fm_landed_refresh_push_target "$WT" "$name" || return 1
+    if push_ref=$(fm_landed_push_target_ref "$WT" "$name"); then
+      if fm_landed_tree_contains "$WT" "$push_ref"; then
+        return 0
+      fi
+    fi
     ref="refs/remotes/origin/$name"
   elif git -C "$WT" rev-parse --quiet --verify "refs/heads/$name" >/dev/null 2>&1; then
     ref="refs/heads/$name"
   else
     return 1
   fi
-  default_tree=$(git -C "$WT" rev-parse --quiet --verify "$ref^{tree}" 2>/dev/null) || return 1
-  [ -n "$default_tree" ] || return 1
-  merged_tree=$(git -C "$WT" merge-tree --write-tree "$ref" HEAD 2>/dev/null) || return 1
-  merged_tree=$(printf '%s\n' "$merged_tree" | head -1)
-  [ "$merged_tree" = "$default_tree" ]
+  fm_landed_tree_contains "$WT" "$ref"
 }
 
 # Has the worktree's committed work actually LANDED, though its commits are not
@@ -917,6 +980,19 @@ backlog_refresh_reminder() {
     printf '%s\n' "Backlog: $ID just finished. Update data/backlog.md - move $ID to Done, keep Done to the 10 most recent, then re-scan Queued and dispatch only work whose blockers are gone and date is due."
   fi
 }
+
+# Successful cleanup is admission control's primary release trigger: capacity is
+# freed when a worker actually goes away, not when a task reports done. This adds
+# one deterministic re-examination step to the existing backlog re-scan seam and
+# stays silent for every home that has not configured an admission policy.
+admission_release_reminder() {
+  local state
+  [ "$KIND" = secondmate ] && return 0
+  state=$(fm_admission_state "$(fm_admission_config_file "$CONFIG")")
+  [ "$state" = active ] || return 0
+  printf '%s\n' "Admission: $ID released its worker. Run bin/fm-admission.sh to recompute the fleet band before releasing any load-held request, then admit at most one at a time, re-evaluating between each."
+}
+
 
 path_is_ancestor_of() {
   local ancestor=$1 path=$2
@@ -1140,7 +1216,11 @@ validate_worktree_teardown_safety() {
     secondmate|scout) return 0 ;;
   esac
 
-  if ! dirty_raw=$(git -C "$WT" status --porcelain 2>/dev/null); then
+  # --untracked-files=all so git never collapses an untracked directory to a bare
+  # "?? .opencode/" line: the allowlist below names one exact spawn-written file, and
+  # a collapsed directory line could neither match it nor prove the directory holds
+  # nothing else. Expanding only ever adds lines, so it cannot hide real dirty work.
+  if ! dirty_raw=$(git -C "$WT" status --porcelain --untracked-files=all 2>/dev/null); then
     if worktree_safety_blocked_by_lock "uncommitted changes"; then
       return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
     fi
@@ -1148,7 +1228,10 @@ validate_worktree_teardown_safety() {
     echo "Restore the git index state, or get the captain's explicit OK to discard, then --force." >&2
     return 1
   fi
-  dirty=$(printf '%s\n' "$dirty_raw" | grep -vE '^\?\? (\.claude/|\.fm-(grok|kimi)-turnend$)' | head -1 || true)
+  # Firstmate's own spawn-written turn-end scaffolding (bin/fm-spawn.sh) is never the
+  # crewmate's work, so it must not read as uncommitted changes when the info/exclude
+  # write did not take. Allowlist those exact paths only.
+  dirty=$(printf '%s\n' "$dirty_raw" | grep -vE '^\?\? (\.claude/|\.opencode/plugins/fm-turn-end\.js$|\.fm-(grok|kimi)-turnend$)' | head -1 || true)
 
   if ! unpushed_raw=$(git -C "$WT" log --oneline HEAD --not --remotes -- 2>/dev/null); then
     if worktree_safety_blocked_by_lock "commits not on a remote"; then
@@ -2531,13 +2614,42 @@ fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 # Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
+write_landing_record_if_unlanded
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
+# The wake-outcome ledger's terminal line, written while the task metadata still
+# exists: the removal just below deletes it, and this is the last moment the
+# harness/model/effort join for this task is available anywhere.
+# bin/fm-wake-ledger.sh owns the record format. Best effort by design - a
+# telemetry write must never stand between the fleet and cleanup.
+LEDGER_OUTCOME=landed
+if [ "$FORCE" = "--force" ]; then
+  LEDGER_OUTCOME=abandoned
+fi
+LEDGER_ESCALATED=$(meta_value "$META" escalated)
+case "$LEDGER_ESCALATED" in
+  yes|no) ;;
+  *) LEDGER_ESCALATED=unknown ;;
+esac
+FM_WAKE_LEDGER="${FM_WAKE_LEDGER:-$DATA/wake-ledger.tsv}" \
+"$SCRIPT_DIR/fm-wake-ledger.sh" task "$ID" \
+  --outcome "$LEDGER_OUTCOME" \
+  --harness "$(meta_value "$META" harness)" \
+  --model "$(meta_value "$META" model)" \
+  --effort "$(meta_value "$META" effort)" \
+  --mode "$MODE" \
+  --kind "$KIND" \
+  --project "$PROJ" \
+  --backend "$BACKEND" \
+  --route "$(meta_value "$META" route)" \
+  --escalated "$LEDGER_ESCALATED" \
+  --pr "$PR_URL" >/dev/null \
+  || echo "warning: wake ledger terminal line not recorded for $ID" >&2
 rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" \
   "$STATE/$ID.kimi-turnend-token" "$STATE/$ID.muse-session" \
   "$STATE/$ID.muse-session-current" \
-  "$STATE/.$ID.open-decisions-cursor" \
+  "$STATE/.$ID.open-decisions-cursor" "$STATE/$ID.childcpu" \
   "$STATE/$ID.control-relaunch" "$STATE/$ID.control-relaunch.meta-prior" \
   "$STATE/$ID.control-relaunch.brief-prior" "$STATE/$ID.control-relaunch.note"
 fm_lock_release "$META_LOCK"
@@ -2546,4 +2658,6 @@ if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only 
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi
 echo "teardown $ID complete (window $T, worktree $WT)"
+report_pending_landing
 backlog_refresh_reminder
+admission_release_reminder

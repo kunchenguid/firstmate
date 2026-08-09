@@ -191,6 +191,135 @@ test_stale_diagnostic_wedge_survives_busy_housekeeping() {
   pass "enriched stale wedges bypass status absorption without disturbing busy workers"
 }
 
+# A push-capable backend reports an agent-state edge to `blocked` - the harness
+# stopped for a human prompt - through a stale wake whose detail is built by
+# stale_detail_blocked_on_human. A task correctly parked on a captain decision
+# has an UNCHANGED terminal status line by definition, so the ordinary
+# status-line dedupe would absorb every such edge after the first and the worker
+# would sit on an unanswered prompt forever. The whole matrix is asserted here on
+# one task: the blocked-on-human edge escalates with the seen marker already
+# matching, the same task's ordinary stale tick still dedupes, and a declared
+# pause still self-handles.
+test_stale_blocked_on_human_escalates_despite_unchanged_status() {
+  local dir state key out detail parked before after
+  dir=$(make_supercase stale-blocked-on-human)
+  state="$dir/state"
+  parked='needs-decision: pick A or B'
+  detail=$(stale_detail_blocked_on_human herdr blocked)
+  [ -n "$detail" ] || fail "stale_detail_blocked_on_human produced no detail"
+  printf '%s\n' "$parked" > "$state/park-b1.status"
+  key=$(printf '%s' "park-b1" | tr ':/.' '___')
+  printf '%s' "$parked" > "$state/.subsuper-seen-status-$key"
+  before=$(cat "$state/park-b1.status")
+
+  # Negative control: WITHOUT the blocked-on-human detail the same already-seen
+  # terminal status must still dedupe to a single digest entry.
+  out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-park-b1" "$state")
+  case "$out" in self\|*already\ escalated*) ;; *) fail "ordinary stale tick stopped deduping an already-escalated terminal status: $out" ;; esac
+
+  out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-park-b1" "$state" "$detail")
+  case "$out" in escalate\|*) ;; *) fail "blocked-on-human edge was absorbed by the status-line dedupe: $out" ;; esac
+
+  after=$(cat "$state/park-b1.status")
+  [ "$before" = "$after" ] || fail "the regression requires an unchanged status line across the transition"
+
+  # A declared external-wait pause stays self-handled even when a backend pushes
+  # a blocked edge for it.
+  printf 'paused: awaiting the upstream release\n' > "$state/park-b2.status"
+  out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-park-b2" "$state" "$detail")
+  case "$out" in pause\|*) ;; *) fail "a declared pause was escalated by a blocked-on-human edge: $out" ;; esac
+
+  pass "a blocked-on-human edge escalates on an unchanged status line while ordinary stale dedupe and declared pauses are untouched"
+}
+
+# The same matrix through handle_wake, on real marker state, counting digest
+# entries rather than reading a classifier string.
+test_handle_wake_blocked_on_human_keeps_one_entry_per_edge() {
+  local dir state key win detail parked
+  dir=$(make_supercase handle-blocked-on-human)
+  state="$dir/state"
+  win="sess:fm-park-b3"
+  parked='needs-decision: pick A or B'
+  detail=$(stale_detail_blocked_on_human herdr blocked)
+  printf '%s\n' "$parked" > "$state/park-b3.status"
+  key=$(printf '%s' "park-b3" | tr ':/.' '___')
+
+  # A first signal wake escalates the parked decision and records the seen marker.
+  FM_STATE_OVERRIDE="$state" handle_wake "signal: $state/park-b3.status" "$state"
+  [ "$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')" = 1 ] \
+    || fail "the parked decision did not produce exactly one digest entry"
+
+  # Negative control: an ordinary stale tick on the same unchanged status must
+  # NOT add a second entry.
+  FM_STATE_OVERRIDE="$state" handle_wake "stale: $win" "$state"
+  [ "$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')" = 1 ] \
+    || fail "an ordinary duplicate signal/stale pair stopped deduping to one digest entry"
+
+  # The blocked-on-human edge is a genuinely new event and MUST escalate.
+  FM_STATE_OVERRIDE="$state" handle_wake "stale: $win ($detail)" "$state"
+  [ "$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')" = 2 ] \
+    || fail "the blocked-on-human edge was swallowed: $(cat "$state/.subsuper-escalations")"
+  [ ! -e "$state/.subsuper-stale-$key" ] \
+    || fail "the blocked-on-human escalation left wedge aging behind"
+
+  # A declared pause absorbs the same edge and records pause tracking instead.
+  printf 'paused: awaiting the upstream release\n' > "$state/park-b4.status"
+  FM_STATE_OVERRIDE="$state" handle_wake "stale: sess:fm-park-b4 ($detail)" "$state"
+  [ "$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')" = 2 ] \
+    || fail "a declared pause was escalated by a blocked-on-human edge: $(cat "$state/.subsuper-escalations")"
+  [ -e "$state/.subsuper-paused-$(printf '%s' park-b4 | tr ':/.' '___')" ] \
+    || fail "a declared pause did not record pause tracking under a blocked-on-human edge"
+
+  pass "handle_wake escalates each blocked-on-human edge once while ordinary duplicates and declared pauses stay self-handled"
+}
+
+# The interaction between the two absorb classes that describe the SAME crew. A
+# task parked on a captain decision reconciles as settled terminal (parked with
+# that decision still open), so if the settled absorb ran first it would swallow a
+# backend-pushed blocked-on-human edge exactly as the status-line dedupe once did,
+# and the defect would return through a different key. The fixture proves the
+# collision is real rather than assumed: the SAME task and state are classified
+# without the detail first, and that call must return `settled`.
+test_stale_blocked_on_human_outranks_settled_absorb() {
+  local dir state fakebin out key detail
+  dir=$(make_supercase blocked-on-human-vs-settled); state="$dir/state"; fakebin="$dir/fakebin"
+  make_fake_crew_state "$fakebin" >/dev/null
+  export FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
+  detail=$(stale_detail_blocked_on_human herdr blocked)
+  fm_write_meta "$state/park-s2.meta" "window=sess:fm-park-s2" "backend=herdr"
+  printf 'needs-decision: which landing path\n' > "$state/park-s2.status"
+  key=$(printf '%s' "park-s2" | tr ':/.' '___')
+  export FM_FAKE_CREW_STATE='state: parked · source: run-step · parked at review: 2 finding(s) (ask-user: authority decision)'
+
+  # Precondition, not decoration: this exact task IS settled, so the branches
+  # genuinely compete. If this ever stops holding, the assertion below would pass
+  # for the wrong reason and silently stop testing the ordering.
+  out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-park-s2" "$state")
+  case "$out" in settled\|*) ;; *) fail "fixture no longer reconciles as settled, so the ordering is untested: $out" ;; esac
+
+  # The pushed edge must outrank it: the harness is stopped on a human prompt, and
+  # only a human can clear it, however settled the crew's own work is.
+  out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-park-s2" "$state" "$detail")
+  case "$out" in escalate\|*) ;; *) fail "the settled absorb swallowed a blocked-on-human edge: $out" ;; esac
+
+  # Through handle_wake on real markers: the settled wake self-handles and the
+  # pushed edge on the same task escalates, leaving no wedge aging behind.
+  FM_STATE_OVERRIDE="$state" handle_wake "stale: sess:fm-park-s2" "$state"
+  [ ! -s "$state/.subsuper-escalations" ] || fail "a settled stale escalated: $(cat "$state/.subsuper-escalations")"
+  FM_STATE_OVERRIDE="$state" handle_wake "stale: sess:fm-park-s2 ($detail)" "$state"
+  [ "$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')" = 1 ] \
+    || fail "the blocked-on-human edge was swallowed by the settled absorb: $(cat "$state/.subsuper-escalations")"
+  [ ! -e "$state/.subsuper-stale-$key" ] || fail "the blocked-on-human escalation left wedge aging behind"
+
+  # A declared pause still outranks BOTH: it is checked before either.
+  printf 'paused: awaiting the upstream release\n' > "$state/park-s3.status"
+  out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-park-s3" "$state" "$detail")
+  case "$out" in pause\|*) ;; *) fail "a declared pause lost precedence to the blocked-on-human edge: $out" ;; esac
+
+  unset FM_FAKE_CREW_STATE FM_CREW_STATE_BIN
+  pass "a blocked-on-human edge outranks the settled absorb on the same crew, while a declared pause still outranks both"
+}
+
 test_stale_terminal_escalates() {
   local dir state out
   dir=$(make_supercase stale-terminal)
@@ -203,6 +332,68 @@ test_stale_terminal_escalates() {
   out=$(FM_STATE_OVERRIDE="$state" classify_stale "default:w1:p2" "$state")
   case "$out" in escalate\|*) ;; *) fail "terminal herdr stale did not escalate through metadata: $out" ;; esac
   pass "stale + terminal status escalates immediately"
+}
+
+# The away-mode half of the measured `stale-fires-on-finished-task` defect. A
+# task whose RECONCILED state is settled terminal - done, or parked/blocked with
+# a decision still open above the crew - has an idle pane for the correct reason,
+# so the daemon self-handles it instead of escalating a possible wedge, and
+# leaves no persistence marker for housekeeping to age. The shared owner of that
+# verdict is fm-classify-lib.sh's crew_absorb_class, the same one the always-on
+# watcher reads, so both supervisors reach the identical verdict.
+test_stale_settled_terminal_self_handles() {
+  local dir state fakebin out key
+  dir=$(make_supercase stale-settled); state="$dir/state"; fakebin="$dir/fakebin"
+  make_fake_crew_state "$fakebin" >/dev/null
+  export FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
+  fm_write_meta "$state/fin-s1.meta" "window=sess:fm-fin-s1" "backend=tmux"
+  printf 'done: PR https://example.test/pr/12 checks green\n' > "$state/fin-s1.status"
+  key=$(printf '%s' "fin-s1" | tr ':/.' '___')
+
+  export FM_FAKE_CREW_STATE='state: done · source: run-step · checks green: PR ready for review'
+  out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-fin-s1" "$state")
+  case "$out" in settled\|*) ;; *) fail "a settled terminal state did not self-handle: $out" ;; esac
+
+  # A decision-open parked task reaches the same verdict.
+  printf 'needs-decision: which landing path\n' > "$state/fin-s1.status"
+  export FM_FAKE_CREW_STATE='state: parked · source: run-step · parked at review: 2 finding(s) (ask-user: authority decision)'
+  out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-fin-s1" "$state")
+  case "$out" in settled\|*) ;; *) fail "a decision-open parked task did not self-handle: $out" ;; esac
+
+  # handle_wake must clear rather than record wedge tracking, and escalate nothing.
+  date +%s > "$state/.subsuper-stale-$key"
+  FM_STATE_OVERRIDE="$state" handle_wake "stale: sess:fm-fin-s1" "$state"
+  [ ! -e "$state/.subsuper-stale-$key" ] || fail "a settled stale retained wedge tracking"
+  [ ! -s "$state/.subsuper-escalations" ] || fail "a settled stale escalated to the captain"
+
+  # Negative control on the same fixture: an unreadable crew is NOT settled.
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+  out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-fin-s1" "$state")
+  case "$out" in settled\|*) fail "an unknown crew was classed settled: $out" ;; esac
+  unset FM_FAKE_CREW_STATE FM_CREW_STATE_BIN
+  pass "settled terminal stales self-handle without wedge tracking, while an unknown crew still does not"
+}
+
+# The dedupe path the settled verdict must not disturb: a terminal status the
+# signal path already escalated stays one digest entry, not two.
+test_stale_terminal_dedupes_against_signal() {
+  local dir state fakebin out key
+  dir=$(make_supercase stale-terminal-dedupe); state="$dir/state"; fakebin="$dir/fakebin"
+  make_fake_crew_state "$fakebin" >/dev/null
+  export FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+  fm_write_meta "$state/dup-s2.meta" "window=sess:fm-dup-s2" "backend=tmux"
+  printf 'done: ready in branch fm/dup\n' > "$state/dup-s2.status"
+  key=$(printf '%s' "dup-s2" | tr ':/.' '___')
+  FM_STATE_OVERRIDE="$state" handle_wake "signal: $state/dup-s2.status" "$state"
+  [ "$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')" = 1 ] || fail "the signal did not escalate exactly once"
+  [ -e "$state/.subsuper-seen-status-$key" ] || fail "the signal did not record its seen marker"
+  out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-dup-s2" "$state")
+  case "$out" in self\|*) ;; *) fail "the duplicate stale did not dedupe against the signal: $out" ;; esac
+  FM_STATE_OVERRIDE="$state" handle_wake "stale: sess:fm-dup-s2" "$state"
+  [ "$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')" = 1 ] || fail "the duplicate signal/stale pair produced more than one entry"
+  unset FM_FAKE_CREW_STATE FM_CREW_STATE_BIN
+  pass "a duplicate signal/stale pair on a terminal status still de-duplicates to one entry"
 }
 
 # A DECLARED external-wait pause (paused:) is neither a wedge nor a terminal
@@ -349,6 +540,141 @@ test_housekeeping_paused_resurfaces_and_resets() {
   pass "housekeeping re-surfaces a stale declared pause on the long cadence and resets its window"
 }
 
+# --- pause kind and the re-surface cadence ----------------------------------
+#
+# The cadence exists to recheck a wait that CAN change without the captain. A
+# captain-gated wait cannot: it clears only when the captain acts, and the captain
+# acting is already the away-mode exit, which runs the full return catch-up. The
+# next three tests pin BOTH directions on purpose, because a change that
+# suppressed every pause would look exactly like a fix while silencing the
+# external rechecks that do pay off.
+#
+# Seed a real backlog home so the captain/external distinction is read from the
+# tool that owns it rather than from a hand-built imitation of its output.
+seed_pause_backlog() {  # <home> [<task-id> <hold-kind>]...
+  local home=$1
+  shift
+  mkdir -p "$home/data"
+  cat > "$home/.tasks.toml" <<'TOML'
+backend = "markdown"
+
+[markdown]
+path = "data/backlog.md"
+archive = "data/done-archive.md"
+done_keep = 10
+TOML
+  while [ "$#" -ge 2 ]; do
+    ( cd "$home" \
+      && tasks-axi add "$1" --title "pause cadence fixture" \
+      && tasks-axi hold "$1" --reason "pause cadence fixture hold" --kind "$2" ) >/dev/null 2>&1 \
+      || fail "could not seed a $2 backlog hold for $1"
+    shift 2
+  done
+}
+
+# A captain-gated pause is NOT re-surfaced on the cadence: rechecking it can only
+# ever cost a turn to answer "still waiting". It must still be TRACKED, and its
+# window must still reset, so it resumes rechecking the moment its kind stops
+# being captain-gated.
+test_housekeeping_captain_gated_pause_is_not_resurfaced() {
+  local dir state fakebin home win pane key age
+  if ! command -v tasks-axi >/dev/null 2>&1; then
+    printf 'skip - captain-gated pause cadence (tasks-axi not installed)\n'
+    return 0
+  fi
+  dir=$(make_supercase paused-captain-gated)
+  state="$dir/state"; fakebin="$dir/fakebin"; home="$dir/home"
+  win="sess:fm-held-cap1"; pane="$dir/pane.txt"
+  printf 'paused: ask-user finding escalated to the captain, review gate held\n' > "$state/held-cap1.status"
+  printf 'idle prompt $\n' > "$pane"
+  seed_pause_backlog "$home" held-cap1 captain
+  key=$(printf '%s' "held-cap1" | tr ':/.' '___')
+  echo $(( $(date +%s) - 5000 )) > "$state/.subsuper-paused-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_PAUSE_RESURFACE_SECS=240 housekeeping "$state"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "a captain-gated pause was re-surfaced on the cadence: $(cat "$state/.subsuper-escalations")"
+  [ -e "$state/.subsuper-paused-$key" ] \
+    || fail "suppressing the recheck also dropped the pause marker, so the wait stopped being tracked"
+  age=$(( $(date +%s) - $(cat "$state/.subsuper-paused-$key" 2>/dev/null || echo 0) ))
+  [ "$age" -lt 60 ] \
+    || fail "captain-gated pause window was not reset (age ${age}s), so it re-evaluates every tick"
+  pass "housekeeping does not re-surface a captain-gated pause, and keeps tracking it"
+}
+
+# The other direction, and the one that must not regress: a declared EXTERNAL wait
+# can clear without the captain, so it keeps its existing recheck exactly as before.
+test_housekeeping_external_pause_still_resurfaces() {
+  local dir state fakebin home win pane key age
+  if ! command -v tasks-axi >/dev/null 2>&1; then
+    printf 'skip - external pause cadence (tasks-axi not installed)\n'
+    return 0
+  fi
+  dir=$(make_supercase paused-external-kind)
+  state="$dir/state"; fakebin="$dir/fakebin"; home="$dir/home"
+  win="sess:fm-held-ext1"; pane="$dir/pane.txt"
+  printf 'paused: awaiting upstream maintainer approval for the checks to run\n' > "$state/held-ext1.status"
+  printf 'idle prompt $\n' > "$pane"
+  seed_pause_backlog "$home" held-ext1 external
+  key=$(printf '%s' "held-ext1" | tr ':/.' '___')
+  echo $(( $(date +%s) - 5000 )) > "$state/.subsuper-paused-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_PAUSE_RESURFACE_SECS=240 housekeeping "$state"
+  grep -F "awaiting external" "$state/.subsuper-escalations" >/dev/null 2>&1 \
+    || fail "a declared external wait stopped being re-surfaced on the cadence"
+  grep -F "possible wedge" "$state/.subsuper-escalations" >/dev/null 2>&1 \
+    && fail "a declared external wait was mislabeled a possible wedge"
+  [ -e "$state/.subsuper-paused-$key" ] || fail "external pause marker cleared instead of reset"
+  age=$(( $(date +%s) - $(cat "$state/.subsuper-paused-$key" 2>/dev/null || echo 0) ))
+  [ "$age" -lt 60 ] || fail "external pause marker was not reset to now on re-surface (age ${age}s)"
+  pass "housekeeping still re-surfaces a declared external wait, unchanged"
+}
+
+# An UNKNOWN kind is not a captain-gated kind. Whether the backlog reader errors or
+# reports the item as not held at all, the pause must keep being rechecked rather
+# than silently dropped. Both shapes are driven through the reader on PATH, so this
+# guarantee holds even where the real backlog tool is absent.
+test_housekeeping_indeterminate_pause_kind_still_resurfaces() {
+  local case_name dir state fakebin win pane key
+  for case_name in reader-fails not-held; do
+    dir=$(make_supercase "paused-kind-$case_name")
+    state="$dir/state"; fakebin="$dir/fakebin"
+    win="sess:fm-held-unk"; pane="$dir/pane.txt"
+    printf 'paused: idling while the kind of this wait cannot be established\n' > "$state/held-unk.status"
+    printf 'idle prompt $\n' > "$pane"
+    case "$case_name" in
+      reader-fails)
+        cat > "$fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+printf 'error: "Task not found in this backlog"\n'
+exit 1
+SH
+        ;;
+      not-held)
+        cat > "$fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+cat <<'OUT'
+task:
+  id: held-unk
+  state: in_flight
+  held: no
+  hold_reason: "-"
+  hold_kind: "-"
+OUT
+SH
+        ;;
+    esac
+    chmod +x "$fakebin/tasks-axi"
+    key=$(printf '%s' "held-unk" | tr ':/.' '___')
+    echo $(( $(date +%s) - 5000 )) > "$state/.subsuper-paused-$key"
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+      FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_PAUSE_RESURFACE_SECS=240 housekeeping "$state"
+    grep -F "awaiting external" "$state/.subsuper-escalations" >/dev/null 2>&1 \
+      || fail "an indeterminate pause kind ($case_name) was dropped from the cadence instead of rechecked"
+  done
+  pass "an indeterminate pause kind keeps being re-surfaced, never silently suppressed"
+}
+
 # A pause whose pane became busy again (the crew resumed) drops its marker without
 # escalating, exactly like a resumed wedge.
 test_housekeeping_paused_resumed_cleared() {
@@ -438,6 +764,43 @@ test_housekeeping_persistent_stale_escalates() {
   [ -s "$state/.subsuper-escalations" ] || fail "persistent stale was not escalated"
   [ ! -e "$state/.subsuper-stale-$key" ] || fail "stale marker not cleared after escalation"
   pass "persistent stale escalates after threshold and clears its marker"
+}
+
+# A task can go stale while its status line is still non-terminal and only then
+# settle (its run finishes, or its decision is handed up). Housekeeping ages the
+# marker recorded earlier, so the reconciled state has to be consulted at the one
+# point that matters - immediately before escalating a possible wedge - or the
+# same false alarm returns through the away-mode path.
+test_housekeeping_settled_stale_not_escalated() {
+  local dir state fakebin win pane key
+  dir=$(make_supercase stale-settled-housekeeping); state="$dir/state"; fakebin="$dir/fakebin"
+  make_fake_crew_state "$fakebin" >/dev/null
+  win="sess:fm-set-w7"
+  pane="$dir/pane.txt"
+  fm_write_meta "$state/set-w7.meta" "window=$win" "backend=tmux"
+  printf 'working: driving the pipeline\n' > "$state/set-w7.status"
+  printf 'idle prompt $\n' > "$pane"
+  key=$(printf '%s' "set-w7" | tr ':/.' '___')
+
+  # Negative control first: the identical fixture with an unreadable crew still
+  # escalates its possible wedge.
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available' \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 housekeeping "$state"
+  [ -s "$state/.subsuper-escalations" ] || fail "the unknown-crew control did not escalate its persistent stale"
+
+  # Same pane, same aged marker, but the run has since finished green.
+  : > "$state/.subsuper-escalations"
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_FAKE_CREW_STATE='state: done · source: run-step · checks green: PR ready for review' \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 housekeeping "$state"
+  [ ! -s "$state/.subsuper-escalations" ] || fail "a settled terminal state escalated a possible wedge: $(cat "$state/.subsuper-escalations")"
+  [ ! -e "$state/.subsuper-stale-$key" ] || fail "a settled terminal state kept its wedge marker"
+  pass "housekeeping drops a persistent stale that has since settled, while an unreadable crew still escalates"
 }
 
 test_housekeeping_resumed_stale_cleared() {
@@ -1257,10 +1620,13 @@ SH
 printf '%s\n' osascript >> "${FM_WEDGE_ALARM_REAL_LOG:-/dev/null}"
 exit 0
 SH
+  # FM_FAKE_HERDR_PAYLOAD lets a case reproduce herdr's own outcome payload
+  # (`notification show` exits 0 whether or not it actually showed anything).
   cat > "$fakebin/herdr" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' herdr >> "${FM_WEDGE_ALARM_REAL_LOG:-/dev/null}"
-exit 0
+[ -z "${FM_FAKE_HERDR_PAYLOAD:-}" ] || printf '%s\n' "$FM_FAKE_HERDR_PAYLOAD"
+exit "${FM_FAKE_HERDR_EXIT:-0}"
 SH
   chmod +x "$fakebin/uname" "$fakebin/osascript" "$fakebin/herdr"
   : > "$dir/alert.log"
@@ -1349,6 +1715,57 @@ test_wedge_alarm_herdr_channel_selected() {
   grep -F 'WEDGED 800s undelivered' "$log" >/dev/null || fail "herdr channel did not carry the summary"
   grep -F 'osascript' "$log" >/dev/null && fail "herdr-only config also selected osascript"
   pass "herdr channel routes through the notifier seam with the summary (never a real notification)"
+}
+
+# A "delivered" channel must prove it delivered. `herdr notification show` exits
+# 0 even when herdr showed nothing - with `[ui.toast] delivery` off (herdr's
+# default) it answers {"shown":false,"reason":"disabled"} - so before this the
+# captain could configure the herdr channel, read a clean daemon log, and still
+# be reached by nobody while escalations sat wedged. The real payload envelope is
+# in docs/verification/supervision.md.
+test_wedge_alarm_herdr_unshown_payload_is_a_failure() {
+  local dir daemon_log real_log rc
+  dir=$(make_wedge_case wedge-herdr-unshown)
+  daemon_log="$dir/daemon.log"; real_log="$dir/real.log"
+  PATH="$dir/fakebin:$PATH" LOG="$daemon_log" FM_WEDGE_ALARM_EXEC='' \
+    FM_WEDGE_ALARM_REAL_LOG="$real_log" \
+    FM_FAKE_HERDR_PAYLOAD='{"id":"cli:notification:show","result":{"reason":"disabled","shown":false,"type":"notification_show"}}' \
+    wedge_alarm_via_herdr "away-mode WEDGED 900s"
+  rc=$?
+  [ "$rc" -eq 1 ] \
+    || fail "herdr answering \"shown\":false must be a channel failure, got rc $rc (regression: a disabled channel looked healthy)"
+  grep -F 'did not show it (reason: disabled)' "$daemon_log" >/dev/null \
+    || fail "an unshown herdr notification did not log its reason: $(cat "$daemon_log" 2>/dev/null)"
+  pass "herdr channel: an exit-0 \"shown\":false payload is logged as a failure, not silent success"
+}
+
+test_wedge_alarm_herdr_shown_payload_succeeds() {
+  local dir daemon_log real_log rc
+  dir=$(make_wedge_case wedge-herdr-shown)
+  daemon_log="$dir/daemon.log"; real_log="$dir/real.log"
+  PATH="$dir/fakebin:$PATH" LOG="$daemon_log" FM_WEDGE_ALARM_EXEC='' \
+    FM_WEDGE_ALARM_REAL_LOG="$real_log" \
+    FM_FAKE_HERDR_PAYLOAD='{"id":"cli:notification:show","result":{"reason":"shown","shown":true,"type":"notification_show"}}' \
+    wedge_alarm_via_herdr "away-mode WEDGED 900s"
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "a genuinely shown herdr notification must succeed, got rc $rc"
+  # An older herdr that reports no outcome at all keeps its exit-status verdict.
+  PATH="$dir/fakebin:$PATH" LOG="$daemon_log" FM_WEDGE_ALARM_EXEC='' \
+    FM_WEDGE_ALARM_REAL_LOG="$real_log" wedge_alarm_via_herdr "away-mode WEDGED 900s"
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "a herdr build reporting no outcome payload must keep its exit-0 verdict, got rc $rc"
+  [ ! -s "$daemon_log" ] \
+    || fail "a successful herdr notification logged a failure: $(cat "$daemon_log")"
+  grep -q herdr "$real_log" || fail "the herdr notifier never ran"
+  # And a herdr that exits non-zero still fails loudly on its exit status alone.
+  PATH="$dir/fakebin:$PATH" LOG="$daemon_log" FM_WEDGE_ALARM_EXEC='' \
+    FM_WEDGE_ALARM_REAL_LOG="$real_log" FM_FAKE_HERDR_EXIT=3 \
+    wedge_alarm_via_herdr "away-mode WEDGED 900s"
+  rc=$?
+  [ "$rc" -eq 1 ] || fail "a non-zero herdr exit must remain a channel failure, got rc $rc"
+  grep -F 'herdr notification failed' "$daemon_log" >/dev/null \
+    || fail "a non-zero herdr exit did not log its failure: $(cat "$daemon_log" 2>/dev/null)"
+  pass "herdr channel: a \"shown\":true payload and a payload-less herdr succeed silently, a non-zero exit still fails"
 }
 
 test_wedge_alarm_command_channel_receives_summary() {
@@ -1836,8 +2253,13 @@ test_classify_terminal_signal_escalates
 test_classify_check_and_unknown_escalate
 test_stale_transient_self_records_marker
 test_stale_diagnostic_wedge_survives_busy_housekeeping
+test_stale_blocked_on_human_escalates_despite_unchanged_status
+test_handle_wake_blocked_on_human_keeps_one_entry_per_edge
+test_stale_blocked_on_human_outranks_settled_absorb
 test_stale_terminal_escalates
 test_stale_paused_classifies_pause
+test_stale_settled_terminal_self_handles
+test_stale_terminal_dedupes_against_signal
 test_handle_wake_paused_records_pause_marker
 test_handle_wake_paused_signal_records_pause_marker
 test_handle_wake_terminal_signal_clears_pause_tracking
@@ -1845,8 +2267,12 @@ test_housekeeping_migrates_watcher_pause_marker
 test_housekeeping_migrates_watcher_unpaused_marker_to_clear
 test_housekeeping_seeds_pause_marker_from_status
 test_housekeeping_persistent_stale_escalates
+test_housekeeping_settled_stale_not_escalated
 test_housekeeping_resumed_stale_cleared
 test_housekeeping_paused_resurfaces_and_resets
+test_housekeeping_captain_gated_pause_is_not_resurfaced
+test_housekeeping_external_pause_still_resurfaces
+test_housekeeping_indeterminate_pause_kind_still_resurfaces
 test_housekeeping_paused_resumed_cleared
 test_housekeeping_paused_unpaused_cleared
 test_housekeeping_stale_marker_transitions_to_pause
@@ -1897,6 +2323,8 @@ test_wedge_alarm_discard_seam_fires_nothing
 test_wedge_alarm_direct_notifiers_honor_discard_seam
 test_wedge_alarm_osascript_channel_selected
 test_wedge_alarm_herdr_channel_selected
+test_wedge_alarm_herdr_unshown_payload_is_a_failure
+test_wedge_alarm_herdr_shown_payload_succeeds
 test_wedge_alarm_command_channel_receives_summary
 test_wedge_alarm_command_failure_hides_configured_command
 test_wedge_alarm_unknown_channel_hides_configured_directive

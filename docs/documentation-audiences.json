@@ -24,7 +24,9 @@
     "operator-example"
   ],
   "readmeSetupTargets": [
+    "docs/launcher.md",
     "docs/configuration.md",
+    "docs/windows-launcher.md",
     "docs/wedge-alarm.md",
     "docs/tmux-backend.md",
     "docs/herdr-backend.md",
@@ -149,6 +151,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/fleet-admission/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/fmx-respond/SKILL.md",
       "audience": "agent-runtime"
     },
@@ -157,7 +163,15 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/model-onboarding/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/process-event-sources/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/loopspec/SKILL.md",
       "audience": "agent-runtime"
     },
     {
@@ -166,6 +180,10 @@
     },
     {
       "path": ".agents/skills/quota-array-dispatch/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/research-approved-work/SKILL.md",
       "audience": "agent-runtime"
     },
     {
@@ -253,6 +271,10 @@
       "audience": "operator-example"
     },
     {
+      "path": "docs/examples/models.json",
+      "audience": "operator-example"
+    },
+    {
       "path": "docs/examples/wedge-alarm",
       "audience": "operator-example"
     },
@@ -270,6 +292,10 @@
     },
     {
       "path": "docs/herdr-backend.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "docs/launcher.md",
       "audience": "operator-current"
     },
     {
@@ -361,7 +387,15 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/verification/worktree-allocation.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/watcher-continuity.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "docs/windows-launcher.md",
       "audience": "operator-current"
     },
     {

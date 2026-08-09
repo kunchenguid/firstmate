@@ -44,7 +44,13 @@
 #     escalated only after it has been idle for STALE_ESCALATE_SECS
 #     (configurable), rechecked once. A wedged crewmate is therefore detected
 #     within STALE_ESCALATE_SECS + a tick, never lost. A declared pause instead
-#     gets its own longer PAUSE_RESURFACE_SECS recheck, never a wedge escalation.
+#     gets its own longer PAUSE_RESURFACE_SECS recheck, never a wedge escalation,
+#     and a crew whose reconciled state is settled terminal (fm-classify-lib.sh's
+#     crew_absorb_class) is dropped from wedge aging entirely, because its idle
+#     pane is the correct condition rather than a symptom.
+#     That recheck is skipped for a wait the backlog records as captain-gated,
+#     because only the captain can clear it and the captain's return already
+#     surfaces it.
 #     Crewmates are autonomous, so a delayed stale response does not stall a
 #     healthy crewmate's own progress.
 #     Buffered escalation delivery also has a max-defer alarm: if a digest stays
@@ -89,7 +95,8 @@
 #          FM_STALE_ESCALATE_SECS   idle seconds before a stale pane escalates
 #                                   as a possible wedge (default 240)
 #          FM_PAUSE_RESURFACE_SECS  idle seconds before a declared external wait
-#                                   re-surfaces as a recheck (default 3600)
+#                                   re-surfaces as a recheck (default 3600); a
+#                                   captain-gated wait is never re-surfaced on it
 #          FM_ESCALATE_BATCH_SECS   buffer window for batched escalation
 #                                   digests; 0 = flush immediately (default 90)
 #          FM_HEARTBEAT_SCAN_SECS   cadence for the catch-all status scan
@@ -331,9 +338,12 @@ _collapse_newlines() {  # <text>
 # and dedup state below layer the daemon's escalation-digest concerns on top.
 #
 # Decision protocol: every classifier prints exactly one line on stdout of the
-# form "<action>|<distilled>" where action is "self" or "escalate". The distilled
-# field for "self" is informational (logged); for "escalate" it is the pre-read
-# summary firstmate would otherwise have to re-read.
+# form "<action>|<distilled>". The action is "escalate" (surface it), "self"
+# (routine; a stale also records/refreshes the wedge marker), "pause" (declared
+# external wait; record the long-cadence pause marker), or "settled" (reconciled
+# terminal state; drop both markers). The distilled field is the pre-read summary
+# firstmate would otherwise have to re-read for "escalate", and informational
+# (logged) for the self-handled actions.
 
 classify_signal() {  # <reason-after-colon> <state>
   local reason=$1 state=$2 f last distilled="" rel="" all_seen=1 task seen
@@ -368,8 +378,8 @@ classify_signal() {  # <reason-after-colon> <state>
 # classify_stale decides the WAKE itself (one-shot per distinct hash). On a
 # first sight of a non-terminal stale it returns "self" and the caller records a
 # timestamp marker; persistence is escalated by housekeeping's recheck, not here.
-classify_stale() {  # <window> <state>
-  local win=$1 state=$2 task last seen
+classify_stale() {  # <window> <state> [<stale-detail>]
+  local win=$1 state=$2 detail=${3:-} task last seen
   task=$(window_to_task "$win" "$state")
   last=$(last_status_line "$state/$task.status")
   if [ -n "$last" ] && status_is_paused "$last"; then
@@ -379,6 +389,38 @@ classify_stale() {  # <window> <state>
     # status line already read, no fm-crew-state.sh call, mirroring the daemon's
     # existing status-log classification.
     printf 'pause|paused (awaiting external), rechecked on a long cadence: %s' "$last"
+    return
+  fi
+  if stale_detail_is_blocked_on_human "$detail"; then
+    # A backend-pushed blocked-on-human edge (fm-classify-lib.sh): the harness
+    # stopped for a human prompt. The producer already deduped this on AGENT
+    # STATE - one wake per ->blocked edge - so the status-line dedupe below must
+    # not run. It keys on what the crew last SAID, and a crew parked on a captain
+    # decision has an unchanged terminal line by definition, so keying on it here
+    # absorbed every block after the first and left the crew on a dead prompt.
+    #
+    # This sits BEFORE the settled check below, and the order is load-bearing.
+    # Both absorb classes describe the SAME crew: one parked on a captain
+    # decision reconciles as settled (parked with that decision still open), so
+    # settling first would swallow this edge exactly as the status-line dedupe
+    # once did. The two tests differ in what they observe. Settled reads a
+    # standing condition - work is over, the next move is above the crew - and
+    # rightly drops an IDLE pane from wedge aging. This reads a backend-reported
+    # EDGE: the harness affirmatively stopped on a prompt, so the pane is not
+    # merely idle and no one but a human can clear it. A new blocking event on a
+    # settled crew is still a new blocking event.
+    printf 'escalate|stale + blocked on human: %s (%s): %s' "$win" "$detail" "${last:-no status}"
+    return
+  fi
+  if [ "$(crew_absorb_class "$task" "$state")" = settled ]; then
+    # The crew's RECONCILED current state is settled terminal - done, or
+    # parked/blocked with a decision still open above it - so the idle pane is
+    # that task's correct condition rather than a wedge symptom, whatever its
+    # status line happens to say. Self-handle, and let the caller drop rather
+    # than record wedge tracking. One fm-crew-state.sh read per stale wake: the
+    # watcher enqueues at most one stale wake per distinct pane hash, so this
+    # matches the always-on path's own one-read-per-newly-classified-hash bound.
+    printf 'settled|settled terminal state (idle pane is the expected condition): %s' "${last:-no status}"
     return
   fi
   if [ -n "$last" ] && status_is_captain_relevant "$last"; then
@@ -448,9 +490,10 @@ stale_marker_remove() {  # <window> <state>
 
 # Pause marker: state/.subsuper-paused-<key> holds the epoch a declared pause was
 # first observed idle. Housekeeping ages it against PAUSE_RESURFACE_SECS (much
-# longer than a wedge) and re-surfaces the pause once per window. Recording is
-# create-if-absent so the timestamp is stable across a churny idle pane (many
-# distinct stale hashes map to one marker), keeping the cadence hash-immune.
+# longer than a wedge) and applies the pause-kind cadence decision once per window.
+# Recording is create-if-absent so the timestamp is stable across a churny idle
+# pane (many distinct stale hashes map to one marker), keeping the cadence
+# hash-immune.
 pause_marker_record() {  # <window> <state> - create if absent
   local win=$1 state=$2 key marker
   key=$(_stale_key "$(window_to_task "$win" "$state")")
@@ -804,8 +847,18 @@ wedge_alarm_via_osascript() {  # <summary>
 
 # Post a herdr UI notification - herdr's own surface, separate from the pane and
 # its status-line. Best-effort: logs and returns 1 on failure.
+#
+# EXIT 0 IS NOT DELIVERY. `herdr notification show` reports its own outcome in
+# the payload and exits 0 either way: it answers `"shown":true` with
+# `"reason":"shown"` when it really posted, and `"shown":false` with a reason
+# such as `"disabled"` when herdr's `[ui.toast] delivery` is off - which is
+# herdr's default, so a captain who configures this channel today gets a healthy
+# log line and no alert. That is exactly the failure mode this alarm exists to
+# rule out, so an explicit `"shown":false` is a channel failure and the reason is
+# logged. A payload that carries no `shown` field (an older herdr, or an
+# unreadable capture) keeps its exit-status verdict rather than inventing one.
 wedge_alarm_via_herdr() {  # <summary>
-  local summary=$1 rc
+  local summary=$1 rc payload="" out="" reason=""
   wedge_alarm_os_notifier_override herdr "$summary"
   rc=$?
   case "$rc" in
@@ -814,10 +867,35 @@ wedge_alarm_via_herdr() {  # <summary>
   esac
   command -v herdr >/dev/null 2>&1 || {
     log "wedge alarm: herdr not found; cannot post a herdr notification"; return 1; }
-  wedge_alarm_run_bounded herdr herdr notification show "firstmate: away-mode escalations WEDGED" \
-    --body "$summary" --sound request >/dev/null 2>&1 && return 0
-  log "wedge alarm: herdr notification failed"
-  return 1
+  # The payload is captured through a file, not a command substitution, so the
+  # notifier stays a direct child of this shell and wedge_alarm_run_bounded keeps
+  # its process-group timeout and WEDGE_ALARM_NOTIFIER_PID cleanup.
+  out=$(mktemp "${TMPDIR:-/tmp}/fm-wedge-herdr.XXXXXX" 2>/dev/null) || out=
+  if [ -n "$out" ]; then
+    wedge_alarm_run_bounded herdr herdr notification show "firstmate: away-mode escalations WEDGED" \
+      --body "$summary" --sound request >"$out" 2>/dev/null
+    rc=$?
+    payload=$(tr '\n' ' ' < "$out" 2>/dev/null)
+    rm -f "$out"
+  else
+    wedge_alarm_run_bounded herdr herdr notification show "firstmate: away-mode escalations WEDGED" \
+      --body "$summary" --sound request >/dev/null 2>&1
+    rc=$?
+  fi
+  if [ "$rc" -ne 0 ]; then
+    log "wedge alarm: herdr notification failed"
+    return 1
+  fi
+  if [[ $payload =~ \"shown\"[[:space:]]*:[[:space:]]*false ]]; then
+    if [[ $payload =~ \"reason\"[[:space:]]*:[[:space:]]*\"([^\"]*)\" ]]; then
+      reason=${BASH_REMATCH[1]}
+      reason=${reason//[^A-Za-z0-9 ._-]/}
+      reason=${reason:0:60}
+    fi
+    log "wedge alarm: herdr accepted the notification but did not show it (reason: ${reason:-unreported}); this channel reached nobody"
+    return 1
+  fi
+  return 0
 }
 
 # Run a captain-supplied command with the summary on $1 and on stdin, so an
@@ -953,7 +1031,8 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
 #     re-peek the pane; still idle -> escalate (wedge); resumed -> clear marker.
 #  2b) pause re-surface: for each declared-pause marker past PAUSE_RESURFACE_SECS,
 #     re-peek; busy/gone -> clear; still idle + still paused -> escalate a recheck
-#     digest and reset the window (repeating bounded re-surface, never a wedge).
+#     digest and reset the window (repeating bounded re-surface, never a wedge),
+#     except for a captain-gated wait, which resets its window without escalating.
 #  3) heartbeat scan: every HEARTBEAT_SCAN_SECS, grep state/*.status for a
 #     captain-relevant line the per-wake classifier missed and escalate it.
 housekeeping() {  # <state>
@@ -1014,8 +1093,19 @@ housekeeping() {  # <state>
     case "$?" in
       0) rm -f "$marker" ;;
       2) rm -f "$marker" ;;
-      *) escalate_add "$state" "stale persisted ${age}s (possible wedge): $win"
-         stale_marker_remove "$win" "$state" ;;
+      *) # A task can go stale while its status line is still non-terminal and
+         # only THEN settle (its run finishes, or its decision is handed up), so
+         # the marker recorded earlier outlives the reason for it. Consult the
+         # reconciled state at the one point that matters - immediately before
+         # escalating a possible wedge - which keeps the read off every tick and
+         # off every still-working pane.
+         if [ "$(crew_absorb_class "$task" "$state")" = settled ]; then
+           log "stale marker dropped (settled terminal state): $win"
+           rm -f "$marker"
+         else
+           escalate_add "$state" "stale persisted ${age}s (possible wedge): $win"
+           stale_marker_remove "$win" "$state"
+         fi ;;
     esac
   done
 
@@ -1025,6 +1115,17 @@ housekeeping() {  # <state>
   # rot invisibly. Past the window: busy (resumed) or gone -> drop; still idle and
   # still declaring the pause -> escalate a recheck digest and reset the marker so
   # the window repeats.
+  #
+  # A CAPTAIN-GATED wait is the one exception, and it is a cadence exception only.
+  # It cannot clear without the captain, and the captain acting is already the
+  # away-mode exit signal, which runs the full return catch-up - so the recheck can
+  # never surface anything the exit does not, and only ever costs a turn to answer
+  # "still waiting". Its marker is still kept and its window still reset, so the
+  # wait stays tracked here and stays exactly as visible as before in the backlog
+  # digest, the fleet view, and the return catch-up; it also resumes ordinary
+  # rechecking within one window if its recorded kind stops being captain-gated.
+  # An indeterminate kind is NOT a captain-gated kind and keeps being rechecked
+  # (pause_is_captain_gated in bin/fm-classify-lib.sh).
   pause_secs=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}
   for marker in "$state"/.subsuper-paused-*; do
     [ -e "$marker" ] || continue
@@ -1048,7 +1149,11 @@ housekeeping() {  # <state>
       *)
         last=$(last_status_line "$state/$task.status")
         if [ -n "$last" ] && status_is_paused "$last"; then
-          escalate_add "$state" "paused ${age}s (awaiting external, recheck whether the wait still holds): $win"
+          if pause_is_captain_gated "$task"; then
+            log "pause recheck suppressed for $win: captain-gated wait, only the captain can clear it"
+          else
+            escalate_add "$state" "paused ${age}s (awaiting external, recheck whether the wait still holds): $win"
+          fi
           _now > "$marker"
         else
           rm -f "$marker"
@@ -1211,7 +1316,8 @@ handle_wake() {  # <reason> <state>
               decision=$(classify_signal "$arg" "$state") ;;
     stale:*)  kind=stale; arg="${reason#stale: }"; stale_detail="${arg#"$arg"}"
               case "$arg" in *" ("*) stale_detail="${arg#*" ("}"; arg="${arg%% \(*}" ;; esac
-              decision=$(classify_stale "$arg" "$state")
+              stale_detail="${stale_detail%)}"
+              decision=$(classify_stale "$arg" "$state" "$stale_detail")
               case "$stale_detail" in
                 idle\ *s,\ possible\ wedge,\ escalation\ *)
                   decision="escalate|${reason#stale: }" ;;
@@ -1243,6 +1349,19 @@ handle_wake() {  # <reason> <state>
         pause_marker_record "$arg" "$state"
       fi
       log "self-handle (paused): $reason -> $distilled"
+      ;;
+    settled)
+      # Reconciled terminal state: the crew's own work is over, so drop BOTH
+      # trackers rather than aging either. There is no run that could freeze and
+      # no external wait to recheck; the terminal status still reaches the
+      # captain through the signal path and, if that was missed, through
+      # housekeeping's heartbeat catch-all scan, and an open decision keeps
+      # surfacing on every wake drain. Only stale produces this action.
+      if [ "$kind" = "stale" ]; then
+        stale_marker_remove "$arg" "$state"
+        pause_marker_remove "$arg" "$state"
+      fi
+      log "self-handle (settled): $reason -> $distilled"
       ;;
     *)
       # Transient (non-terminal) stale: record/refresh the wedge marker so

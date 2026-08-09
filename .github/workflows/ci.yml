@@ -24,6 +24,16 @@ jobs:
       # re-spell the shellcheck command here; keep CI and the pre-push gate on it.
       - run: bin/fm-lint.sh
 
+  windows-launcher:
+    name: Windows launcher bridge
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - name: Exercise the batch command and WSL entry contracts
+        shell: bash
+        run: bash tests/fm-wsl-entry.test.sh
+
   # Deterministic proof that portable parallel shards + portable serial + Herdr
   # equal the complete tests/*.test.sh inventory with no missing or duplicates,
   # and that the portable serial CI shards partition that serial lane exactly.
@@ -350,8 +360,8 @@ jobs:
           snapshot_output=$(/bin/bash tests/fm-fleet-snapshot-view.test.sh)
           printf '%s\n' "$snapshot_output"
           snapshot_count=$(printf '%s\n' "$snapshot_output" | grep -c '^ok - ')
-          [ "$snapshot_count" -eq 15 ] || {
-            echo "::error::expected 15 snapshot/fleet-view tests, got $snapshot_count"
+          [ "$snapshot_count" -eq 20 ] || {
+            echo "::error::expected 20 snapshot/fleet-view tests, got $snapshot_count"
             exit 1
           }
 

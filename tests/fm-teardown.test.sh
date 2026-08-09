@@ -7,6 +7,12 @@
 # and GitHub reports a PR head that contains the current local work, or its content
 # is already in the up-to-date default branch.
 #
+# That last containment step is the shared instrument in bin/fm-landed-lib.sh.
+# Teardown keeps its own policy on top of it (refresh before measuring, and
+# measure the refreshed remote trunks whenever an origin exists, preferring the
+# trunk this fleet pushes to), so these cases are the regression coverage for
+# changes to that library reaching the releaser of work.
+#
 # Covers three fixes:
 #   - local-only fork-remote: a fork IS a remote, so fork-pushed upstream-
 #     contribution PRs are teardown-eligible (the pre-fix code false-refused them).
@@ -38,6 +44,20 @@
 #   (o) fm-pr-check rerun after HEAD moved                      -> no stale pr_head
 #   (p) fm-pr-check when local HEAD lags                        -> record remote PR head
 #   (q) no-mistakes + NO pr= recorded, PR discovered by branch  -> ALLOW  (yolo/no-CI merge)
+#   (u) fetch/push split + content squash-merged on FORK trunk  -> ALLOW  (fork-landing fix)
+#   (v) fetch/push split + work landed nowhere                  -> REFUSE (safety preserved)
+#   (w) fetch/push split + push url unreadable                  -> REFUSE (unresolvable target)
+#   (x) fetch/push split + content only on upstream trunk       -> ALLOW  (fallback intact)
+#   (y) single remote (no push split)                           -> ALLOW  (identical path)
+#   (z) spawn-written turn-end artifacts, no info/exclude       -> ALLOW  (firstmate's own)
+#   (aa) untracked crew file beside a turn-end artifact         -> REFUSE (exact-path allowlist)
+#
+# Also covers the durable landing record. The captain's parked-completion ruling
+# releases a ship worker once its PR is green and mergeable, which is before the
+# PR lands, and cleanup removes the meta bin/fm-pr-merge.sh needs. A minimal
+# record left behind keeps that PR landable through the sanctioned path:
+#   (q1) ship + PR still open at the forge                     -> record written
+#   (q2) ship + PR already merged at the forge                 -> no record
 #
 # Also covers backlog teardown-lock-race: a git index.lock left in the worktree by a
 # killed crew process (bin/fm-teardown.sh's teardown_treehouse_return).
@@ -76,7 +96,7 @@ make_case() {
   local name=$1 case_dir fakebin
   case_dir="$TMP_ROOT/$name"
   fakebin="$case_dir/fakebin"
-  mkdir -p "$case_dir/state" "$case_dir/config" "$fakebin"
+  mkdir -p "$case_dir/state" "$case_dir/config" "$case_dir/data" "$fakebin"
 
   # Mocks for the post-check teardown steps. Refuse logic exits before these
   # run; the ALLOW cases need them so the script can complete cleanly.
@@ -240,6 +260,23 @@ wt_commit_file() {
   git -C "$case_dir/wt" -c user.email=t@t -c user.name=t commit -q -m "$msg"
 }
 
+# Recreate every per-harness turn-end artifact bin/fm-spawn.sh writes INTO the task
+# worktree, without the info/exclude entries that normally keep them out of git's
+# view. That is the real failure mode: fm-spawn's exclude_path returns silently when
+# info/exclude cannot be resolved, leaving teardown's dirty check as the only defense.
+# Pins the repo's ignore file too, so a machine-global ignore of .claude/ cannot mask
+# the case on a developer box while CI still exercises it. Args: case_dir
+write_turnend_artifacts() {
+  local case_dir=$1 wt
+  wt="$case_dir/wt"
+  git -C "$case_dir/project" config core.excludesFile /dev/null
+  mkdir -p "$wt/.claude" "$wt/.opencode/plugins"
+  printf '%s\n' '{"hooks":{"Stop":[]}}' > "$wt/.claude/settings.local.json"
+  printf '%s\n' 'export const FmTurnEnd = async () => ({})' > "$wt/.opencode/plugins/fm-turn-end.js"
+  printf '%s\n' 'token=fm.abcdefghijkl' > "$wt/.fm-grok-turnend"
+  printf '%s\n' 'token=fm.abcdefghijkl' > "$wt/.fm-kimi-turnend"
+}
+
 # Land <file>=<content> as a single commit on origin's default branch, simulating a
 # squash merge whose net change matches the task branch but whose commit differs.
 # After this, the branch's content is in origin/main even though the branch's own
@@ -248,6 +285,35 @@ land_on_origin_main() {
   local case_dir=$1 file=$2 content=$3 tmp
   tmp="$case_dir/_land"
   git clone -q "$case_dir/origin.git" "$tmp"
+  printf '%s\n' "$content" > "$tmp/$file"
+  git -C "$tmp" add -- "$file"
+  git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "squash $file"
+  git -C "$tmp" push -q origin HEAD:main
+  rm -rf "$tmp"
+}
+
+# Turn a case into the fetch/push split: `origin` keeps FETCHING origin.git but
+# PUSHES to a second bare repo, so refs/remotes/origin/main tracks a trunk this
+# fleet never lands on and NO ref follows the trunk it does. That is firstmate's
+# own layout (origin fetches kunchenguid/firstmate, pushes the sbracewell64
+# fork). Pass a url to point the push somewhere unreadable instead.
+add_fork_push_remote() {  # <case-dir> [push-url]
+  local case_dir=$1 push=${2:-}
+  if [ -z "$push" ]; then
+    git clone -q --bare "$case_dir/origin.git" "$case_dir/fork.git"
+    push="$case_dir/fork.git"
+  fi
+  git -C "$case_dir/project" remote set-url --push origin "$push"
+}
+
+# Land <file>=<content> as ONE new commit on the FORK trunk, which is what a
+# squash merge at the forge does: the content is in the trunk, and the branch's
+# own commits are ancestors of nothing there. This is the exact shape that held
+# a pool slot - content demonstrably landed, ancestry demonstrably broken.
+land_squashed_on_fork() {  # <case-dir> <file> <content>
+  local case_dir=$1 file=$2 content=$3 tmp
+  tmp="$case_dir/_forkland"
+  git clone -q "$case_dir/fork.git" "$tmp"
   printf '%s\n' "$content" > "$tmp/$file"
   git -C "$tmp" add -- "$file"
   git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "squash $file"
@@ -282,6 +348,43 @@ echo "error: pull request not found" >&2
 exit 1
 SH
   chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
+}
+
+# Override GitHub lookups to report PR 7 as still open with the supplied head.
+# This is the state the captain's parked-completion ruling releases a worker in:
+# the PR is done and green, and it has not landed yet.
+add_gh_pr_open_for_head() {
+  local case_dir=$1 head=$2
+  cat > "$case_dir/fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "pr list") printf '%s\n' "count: 0 (showing first 0)" "pull_requests[]: []" ; exit 0 ;;
+  "pr view") printf '%s\n' "pull_request:" "  number: 7" "  state: open" ; exit 0 ;;
+esac
+exit 0
+SH
+  cat > "$case_dir/fakebin/gh" <<SH
+#!/usr/bin/env bash
+case "\${1:-} \${2:-}" in
+  "pr view")
+    case " \$* " in
+      *"state,headRefOid"*) printf '%s\t%s\n' 'OPEN' '$head' ; exit 0 ;;
+      *"headRefOid"*) printf '%s\n' '$head' ; exit 0 ;;
+    esac
+    ;;
+esac
+echo "error: pull request not found" >&2
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
+}
+
+file_mode_of() {
+  if [ "$(uname)" = Darwin ]; then
+    stat -f %Lp "$1"
+  else
+    stat -c %a "$1"
+  fi
 }
 
 append_pr_meta_for_current_head() {
@@ -545,6 +648,7 @@ run_teardown() {
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_CONFIG_OVERRIDE="$case_dir/config" \
+  FM_DATA_OVERRIDE="$case_dir/data" \
   PATH="$case_dir/fakebin:${FM_TEARDOWN_TEST_PATH:-$PATH}" \
     "$TEARDOWN" task-x1 "$@"
 }
@@ -713,6 +817,65 @@ test_squash_merged_branch_deleted_allows() {
   expect_code 0 "$rc" "squash-merged: teardown should succeed when the PR is merged"
   ! grep -q REFUSED "$case_dir/stderr" || fail "squash-merged: teardown printed a REFUSED line"
   pass "squash-merged + deleted-branch worktree (PR merged) is torn down (the fix)"
+}
+
+test_release_with_open_pr_leaves_landing_record() {
+  local case_dir rc head
+  case_dir=$(make_case release-open-pr)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "green work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  append_pr_meta_for_current_head "$case_dir"
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  add_gh_pr_open_for_head "$case_dir" "$head"
+  assert_absent "$case_dir/state/task-x1.landing" \
+    "release-open-pr: the fixture already had a landing record"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "release-open-pr: teardown should succeed"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "release-open-pr: releasing the task should still remove its meta"
+  assert_present "$case_dir/state/task-x1.landing" \
+    "release-open-pr: an unlanded PR was released with no way to land it"
+  assert_grep 'pr=https://github.com/example/repo/pull/7' "$case_dir/state/task-x1.landing" \
+    "release-open-pr: the landing record does not name the PR"
+  assert_grep "pr_head=$head" "$case_dir/state/task-x1.landing" \
+    "release-open-pr: the landing record does not carry the released head"
+  assert_grep "project=$case_dir/project" "$case_dir/state/task-x1.landing" \
+    "release-open-pr: the landing record does not name the project"
+  [ "$(file_mode_of "$case_dir/state/task-x1.landing")" = 600 ] \
+    || fail "release-open-pr: the landing record is not private"
+  assert_grep 'Pending landing: task-x1 was released before https://github.com/example/repo/pull/7 landed' \
+    "$case_dir/stdout" "release-open-pr: the pending landing was not reported"
+  pass "releasing a task whose PR has not landed leaves a durable landing record"
+}
+
+test_release_with_merged_pr_leaves_no_landing_record() {
+  local case_dir rc pr_head
+  case_dir=$(make_case release-merged-pr)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  append_pr_meta_for_current_head "$case_dir"
+  pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  # Same shape as the case above; only the forge's answer differs.
+  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "release-merged-pr: teardown should succeed"
+  assert_absent "$case_dir/state/task-x1.landing" \
+    "release-merged-pr: a PR the forge reports as merged needs no landing record"
+  assert_no_grep 'Pending landing:' "$case_dir/stdout" \
+    "release-merged-pr: an already-landed PR was reported as pending"
+  pass "releasing a task whose PR already merged leaves no landing record"
 }
 
 test_squash_merged_pr_allows_when_head_ancestor_of_pr_head() {
@@ -906,6 +1069,123 @@ test_content_fallback_refreshes_stale_origin_ref() {
   pass "content fallback refreshes origin default before comparing trees"
 }
 
+# (u) THE DEFECT. Measured 2026-08-05: PR 44 squash-merged, the slot's HEAD
+# content byte-identical to the fork trunk, and teardown refused anyway because
+# every ref it measured belonged to a trunk this fleet does not land on.
+test_fork_split_content_landed_on_fork_trunk_allows() {
+  local case_dir rc
+  case_dir=$(make_case fork-split-landed)
+  add_fork_push_remote "$case_dir"
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  land_squashed_on_fork "$case_dir" feature.txt hello
+
+  # Assert the fixture really is the defect shape before trusting the verdict:
+  # the content IS on the fork trunk and is on NEITHER ref the old check read.
+  git -C "$case_dir/wt" fetch -q "$case_dir/fork.git" main
+  git -C "$case_dir/wt" diff --quiet FETCH_HEAD HEAD -- feature.txt \
+    || fail "fork-split-landed: fixture does not have the content on the fork trunk"
+  ! git -C "$case_dir/wt" merge-base --is-ancestor HEAD FETCH_HEAD \
+    || fail "fork-split-landed: fixture is a fast-forward, not the squash shape"
+  git -C "$case_dir/wt" rev-parse --quiet --verify refs/remotes/origin/main >/dev/null \
+    || fail "fork-split-landed: fixture has no origin/main to be wrong about"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "fork-split-landed: teardown should succeed when the fork trunk holds the content"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "fork-split-landed: teardown printed a REFUSED line"
+  pass "work squash-merged into the fork trunk is torn down though no tracking ref follows it"
+}
+
+# (v) The refusal this must never trade away. Same fetch/push split, same
+# absence of any ref tracking the fork trunk - but the work genuinely never
+# landed anywhere, so the widened target set must not launder it.
+test_fork_split_unlanded_work_still_refuses() {
+  local case_dir rc
+  case_dir=$(make_case fork-split-unlanded)
+  add_fork_push_remote "$case_dir"
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "unpushed work"
+  # The fork trunk advances, but with entirely unrelated content, so it is
+  # freshly readable and still does not contain this branch's work.
+  land_squashed_on_fork "$case_dir" unrelated.txt other
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "fork-split-unlanded: teardown should refuse genuinely unlanded work"
+  grep -q REFUSED "$case_dir/stderr" || fail "fork-split-unlanded: no REFUSED line in stderr"
+  pass "genuinely unlanded work is still refused on a fetch/push split"
+}
+
+# (w) An unresolvable landing target must stay a refusal. The push url exists
+# but cannot be read, so the trunk this fleet lands on goes unread - and the
+# content sitting on the UPSTREAM trunk must not stand in for that answer.
+test_fork_split_unreadable_push_url_refuses() {
+  local case_dir rc
+  case_dir=$(make_case fork-split-unreadable)
+  add_fork_push_remote "$case_dir" "$TMP_ROOT/fork-split-unreadable/nonexistent.git"
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  # Landed upstream, which pre-fix was the whole answer. It is not the fleet's
+  # landing target, so an unreadable fork trunk still refuses.
+  land_on_origin_main "$case_dir" feature.txt hello
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "fork-split-unreadable: teardown should refuse when the landing target cannot be read"
+  grep -q REFUSED "$case_dir/stderr" || fail "fork-split-unreadable: no REFUSED line in stderr"
+  pass "an unreadable landing target refuses rather than falling back to the upstream answer"
+}
+
+# (x) The upstream answer is not lost, only demoted: a readable fork trunk that
+# does not carry the content still falls through to the upstream trunk.
+test_fork_split_content_only_on_upstream_allows() {
+  local case_dir rc
+  case_dir=$(make_case fork-split-upstream)
+  add_fork_push_remote "$case_dir"
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  land_on_origin_main "$case_dir" feature.txt hello
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "fork-split-upstream: teardown should still accept content landed upstream"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "fork-split-upstream: teardown printed a REFUSED line"
+  pass "content landed on the upstream trunk is still accepted when the fork trunk is readable"
+}
+
+# (y) An ordinary single-remote repository must take the identical path: no
+# push url to diverge, so no landing ref is named, fetched, or measured.
+test_single_remote_repo_names_no_landing_ref() {
+  local case_dir rc
+  case_dir=$(make_case single-remote-unchanged)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  land_on_origin_main "$case_dir" feature.txt hello
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "single-remote-unchanged: teardown should succeed exactly as before"
+  [ -z "$(git -C "$case_dir/project" for-each-ref --format='%(refname)' refs/fm-landing/)" ] \
+    || fail "single-remote-unchanged: a landing ref was created for a repository with no push split"
+  pass "an ordinary single-remote repository names no landing ref and is unaffected"
+}
+
 test_dirty_worktree_refuses() {
   local case_dir rc pr_head
   case_dir=$(make_case dirty-wt)
@@ -929,6 +1209,63 @@ test_dirty_worktree_refuses() {
   grep -q REFUSED "$case_dir/stderr" || fail "dirty-wt: no REFUSED line in stderr"
   grep -q "uncommitted changes" "$case_dir/stderr" || fail "dirty-wt: refusal did not cite uncommitted changes"
   pass "dirty worktree is refused even when its committed work has landed (dirty always wins)"
+}
+
+# Firstmate's own spawn-written turn-end scaffolding is not the crewmate's work, so
+# the dirty check allowlists it. The allowlist is a hand-maintained copy of the
+# artifact list and drifted once: .opencode/plugins/fm-turn-end.js was missing, so an
+# opencode worktree whose info/exclude write did not take was refused as having
+# uncommitted changes. This pins every worktree-resident artifact at once so the next
+# harness added to fm-spawn cannot silently drift the same way.
+test_spawn_turnend_artifacts_are_not_dirty_work() {
+  local case_dir rc pr_head
+  case_dir=$(make_case turnend-artifacts)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  land_on_origin_main "$case_dir" feature.txt hello
+  pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+  write_turnend_artifacts "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "turnend-artifacts: teardown should ignore firstmate's own spawn-written turn-end artifacts"
+  ! grep -q REFUSED "$case_dir/stderr" \
+    || fail "turnend-artifacts: teardown refused over its own scaffolding: $(cat "$case_dir/stderr")"
+  pass "spawn-written turn-end artifacts (claude, opencode, grok, kimi) do not read as uncommitted work"
+}
+
+# The allowlist above names exact firstmate-owned paths; it must not wave through a
+# whole directory. A crewmate file sitting beside the opencode plugin is real
+# uncommitted work and still has to refuse, because treehouse return hard-resets.
+test_untracked_work_beside_turnend_artifacts_refuses() {
+  local case_dir rc pr_head
+  case_dir=$(make_case turnend-artifacts-plus-work)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  land_on_origin_main "$case_dir" feature.txt hello
+  pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+  write_turnend_artifacts "$case_dir"
+  printf '%s\n' 'real work' > "$case_dir/wt/.opencode/notes.md"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "turnend-artifacts-plus-work: teardown should refuse untracked work sharing a directory with the plugin"
+  grep -q REFUSED "$case_dir/stderr" || fail "turnend-artifacts-plus-work: no REFUSED line in stderr"
+  grep -q "uncommitted changes" "$case_dir/stderr" \
+    || fail "turnend-artifacts-plus-work: refusal did not cite uncommitted changes"
+  [ -f "$case_dir/state/task-x1.meta" ] \
+    || fail "turnend-artifacts-plus-work: teardown completed despite untracked work"
+  pass "untracked work beside a turn-end artifact still refuses (allowlist is per-path, not per-directory)"
 }
 
 test_gh_error_and_content_absent_refuses() {
@@ -2002,6 +2339,85 @@ test_herdr_projection_teardown_surfaces_restore_failure_without_blocking_cleanup
   pass "herdr projection teardown surfaces failed focus restoration without turning confirmed cleanup into a hard failure"
 }
 
+# Write a meta carrying the dispatch profile, so the ledger's terminal line has
+# a harness/model/effort join to capture before teardown deletes it.
+write_profiled_meta() {  # <case_dir> <mode>
+  local case_dir=$1 mode=$2
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=firstmate:fm-task-x1" \
+    "endpoint_task_id=task-x1" \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=$mode" \
+    "harness=pi" \
+    "model=openai-codex/gpt-5.6-sol" \
+    "effort=medium"
+}
+
+test_teardown_records_the_terminal_ledger_line() {
+  local case_dir ledger
+  case_dir=$(make_case ledger-terminal)
+  write_profiled_meta "$case_dir" local-only
+  wt_commit "$case_dir" "fix the thing"
+  add_fork_with_pushed_branch "$case_dir"
+
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "ledger-terminal: teardown should succeed"
+
+  ledger="$case_dir/data/wake-ledger.tsv"
+  [ -f "$ledger" ] || fail "ledger-terminal: teardown wrote no terminal record"
+  grep -q "task=task-x1" "$ledger" || fail "ledger-terminal: task id missing"
+  grep -q "outcome=landed" "$ledger" || fail "ledger-terminal: terminal outcome missing"
+  # The model join must be captured BEFORE the meta is deleted; this is the last
+  # moment those facts exist anywhere.
+  grep -q "harness=pi" "$ledger" || fail "ledger-terminal: harness not captured from the meta"
+  grep -q "model=openai-codex/gpt-5.6-sol" "$ledger" || fail "ledger-terminal: model not captured"
+  grep -q "effort=medium" "$ledger" || fail "ledger-terminal: effort not captured"
+  grep -q "mode=local-only" "$ledger" || fail "ledger-terminal: delivery mode not captured"
+  [ ! -f "$case_dir/state/task-x1.meta" ] || fail "ledger-terminal: meta should be gone after teardown"
+  pass "teardown records the terminal ledger line with the meta's profile before deleting it"
+}
+
+test_teardown_force_records_abandoned() {
+  local case_dir
+  case_dir=$(make_case ledger-abandoned)
+  write_profiled_meta "$case_dir" local-only
+  wt_commit "$case_dir" "unpushed work"
+
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "ledger-abandoned: --force teardown should succeed"
+
+  grep -q "outcome=abandoned" "$case_dir/data/wake-ledger.tsv" \
+    || fail "ledger-abandoned: discarded work should record an abandoned outcome"
+  pass "a --force teardown records the task as abandoned rather than landed"
+}
+
+test_unwritable_ledger_never_fails_teardown() {
+  local case_dir rc
+  case_dir=$(make_case ledger-unwritable)
+  write_profiled_meta "$case_dir" local-only
+  wt_commit "$case_dir" "fix the thing"
+  add_fork_with_pushed_branch "$case_dir"
+
+  set +e
+  FM_ROOT_OVERRIDE="$ROOT" \
+  FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_CONFIG_OVERRIDE="$case_dir/config" \
+  FM_DATA_OVERRIDE="$case_dir/data" \
+  FM_WAKE_LEDGER="/dev/null/impossible/wake-ledger.tsv" \
+  PATH="$case_dir/fakebin:$PATH" \
+    "$TEARDOWN" task-x1 > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "ledger-unwritable: a telemetry write must never fail a teardown"
+  [ ! -f "$case_dir/state/task-x1.meta" ] || fail "ledger-unwritable: cleanup did not complete"
+  grep -q "wake ledger terminal line not recorded" "$case_dir/stderr" \
+    || fail "ledger-unwritable: teardown should warn that the record was lost"
+  pass "an unwritable ledger warns but never fails or halts a teardown"
+}
+
 # --- Fix 1: conclude/abort the task's own parked no-mistakes run before the
 # worker is removed, and Fix 2: reap leaked descendant processes rooted under
 # the task's own worktree/tasktmp - both exercised through the real teardown
@@ -2612,6 +3028,8 @@ test_herdr_projection_teardown_retires_journal_only_after_confirmed_close
 test_herdr_projection_teardown_retains_journal_when_close_unconfirmed
 test_herdr_projection_teardown_surfaces_restore_failure_without_blocking_cleanup
 test_squash_merged_branch_deleted_allows
+test_release_with_open_pr_leaves_landing_record
+test_release_with_merged_pr_leaves_no_landing_record
 test_squash_merged_pr_allows_when_head_ancestor_of_pr_head
 test_no_pr_recorded_discovers_merged_pr_by_branch_allows
 test_squash_merged_pr_allows_replayed_unpushed_patch
@@ -2620,7 +3038,14 @@ test_pr_check_does_not_refresh_stale_pr_head
 test_pr_check_records_remote_head_when_local_lags
 test_content_in_default_fallback_allows
 test_content_fallback_refreshes_stale_origin_ref
+test_fork_split_content_landed_on_fork_trunk_allows
+test_fork_split_unlanded_work_still_refuses
+test_fork_split_unreadable_push_url_refuses
+test_fork_split_content_only_on_upstream_allows
+test_single_remote_repo_names_no_landing_ref
 test_dirty_worktree_refuses
+test_spawn_turnend_artifacts_are_not_dirty_work
+test_untracked_work_beside_turnend_artifacts_refuses
 test_gh_error_and_content_absent_refuses
 test_stale_index_lock_cleared_and_teardown_succeeds
 test_live_index_lock_is_never_removed_and_teardown_refuses
@@ -2632,6 +3057,9 @@ test_transient_index_lock_clears_after_first_attempt_and_retry_succeeds
 test_persistent_index_lock_exhausts_retries_and_refuses_loudly
 test_empty_retry_wait_uses_default_without_aborting
 test_fractional_legacy_retry_wait_refuses_without_arithmetic_error
+test_teardown_records_the_terminal_ledger_line
+test_teardown_force_records_abandoned
+test_unwritable_ledger_never_fails_teardown
 test_parked_own_run_is_aborted_before_teardown
 test_parked_own_run_refuses_when_abort_is_unconfirmed
 test_mismatched_run_after_abort_refuses_unconfirmed

@@ -10,7 +10,7 @@ The shared orchestrator behavior lives in [`AGENTS.md`](../AGENTS.md) - edit it 
 
 This section is the single owner of the top-level operational-home layout; producer script headers and their help own exact child-file fields and mutation contracts.
 The tracked code root contains the shared instruction, skill, documentation, workflow, and `bin/` surfaces, while each effective `FM_HOME` contains private operational directories.
-`data/` holds durable private fleet records such as the project and secondmate registries, captain preferences, optional shared captain preferences, learnings, backlog, briefs, and scout reports.
+`data/` holds durable private fleet records such as the project and secondmate registries, captain preferences, optional shared captain preferences, learnings, backlog, briefs, scout reports, and the wake-outcome ledger.
 `state/` holds volatile runtime records such as task metadata, append-only status events, endpoint signals, watcher and wake-queue coordination, away-mode state, generated Relay artifacts, private secondmate config-reread generations with their retry and quarantine state, and parent-owned secondmate pending-reply records under `state/pending-replies/` (`bin/fm-pending-reply-lib.sh`).
 `config/` holds local gitignored operating choices, and `projects/` holds the local project clones that Firstmate reads but changes only through the narrow guarded and concrete captain-approved exceptions in `AGENTS.md`.
 
@@ -32,6 +32,15 @@ The `/calm` command replaces the file atomically before changing live presentati
 The extension reloads this preference on every Pi `session_start`, including startup, new, resume, fork, and reload reasons.
 This preference is local to each Firstmate home and is not part of secondmate inherited configuration.
 
+## Fleet launcher menu (config/launch-presets.json / state/.launch-last)
+
+`bin/fm-launch.sh` reads its menu from gitignored `config/launch-presets.json` under the effective Firstmate home, and falls back to a built-in five-entry menu when that file is absent, so a fresh home needs no configuration.
+Each entry is an object with `id`, `label`, and `harness`, plus optional `model` and `effort` that both default to `default`; an entry never carries a launch command, because `bin/fm-launch-lib.sh` remains the single owner of every verified launch command.
+A present but malformed file refuses at the door rather than silently falling back to the built-in menu, and an entry naming an adapter with no verified primary shape renders unavailable rather than launching.
+The launcher records the last successfully launched entry id in `state/.launch-last`, written atomically so an interrupted launcher cannot corrupt the default.
+Neither file is part of secondmate inherited configuration: a secondmate home is provisioned and launched by the primary through `bin/fm-spawn.sh`, never through this front door, so there is no consumer for an inherited menu there.
+[docs/launcher.md](launcher.md) is the operator-facing owner of launcher behavior and setup.
+
 ## Backlog backend (.tasks.toml / config/backlog-backend)
 
 The tracked `.tasks.toml` pins the default `tasks-axi` markdown backend to `data/backlog.md`, with `done_keep = 10` and an archive at `data/done-archive.md`.
@@ -51,6 +60,9 @@ The file format is unchanged in both modes; tasks-axi and manual edits produce t
 For spawn-capable adapters, the runtime session-provider backend controls where task windows/endpoints are created, captured, sent to, watched, and killed.
 `tmux` is the verified reference backend (see [`docs/tmux-backend.md`](tmux-backend.md)); `herdr`, `zellij`, `orca`, and `cmux` are experimental spawn backends (see [`docs/herdr-backend.md`](herdr-backend.md), [`docs/zellij-backend.md`](zellij-backend.md), [`docs/orca-backend.md`](orca-backend.md), and [`docs/cmux-backend.md`](cmux-backend.md)).
 Treehouse remains the worktree provider for tmux, herdr, zellij, and cmux, since herdr, zellij, and cmux are session providers only; Orca provides both the task worktree and terminal endpoint.
+Every Treehouse-backed crewmate or scout spawn inspects Treehouse's pool status before allocation and refuses an available pool slot that still holds work.
+It prefers `treehouse status --json`, which needs `jq`; on Treehouse builds older than v2.1.0, which have no `--json` flag, it reads the human-readable table instead and needs no `jq`.
+The guard is refusal-only, runs before `treehouse get`, and leaves release decisions to `fm-teardown.sh`; [`verification/worktree-allocation.md`](verification/worktree-allocation.md) owns the empirical Treehouse behavior behind that boundary.
 New spawns choose the backend in this order: an explicit `--backend` flag that current authority for that exact task alone has authorized (a present captain instruction or the task's own accepted brief; never later-task precedent by analogy), then `FM_BACKEND`, then the first non-empty line of local gitignored `config/backend`, then runtime auto-detection from `$TMUX`, `HERDR_ENV=1`, or cmux runtime signals, then default `tmux`.
 If more than one runtime marker is present, detection resolves innermost-first: `$TMUX` is checked before `HERDR_ENV=1`, which is checked before cmux's primary `CMUX_WORKSPACE_ID` marker and its documented fallback signals - tmux or herdr started from inside a cmux terminal is the innermost, currently-executing layer, while cmux itself (a terminal application, not a nestable multiplexer) is always checked last.
 See [`docs/cmux-backend.md`](cmux-backend.md#runtime-detection) for why cmux can be selected when `CMUX_WORKSPACE_ID` is absent.
@@ -76,7 +88,7 @@ Task selectors for `fm-peek.sh`, `fm-send.sh`, and `fm-crew-state.sh` resolve ce
 A selector containing `:` is passed through as an explicit backend endpoint escape hatch.
 Otherwise an exact task id matching `state/<id>.meta` wins before the legacy `fm-<id>` label fallback, so task ids that themselves start with `fm-` route to their own metadata instead of being stripped.
 A metadata-routed selector returns the recorded backend target (`terminal=` for Orca, otherwise `window=`), and matching explicit targets can still recover the recorded backend when metadata contains the same endpoint.
-Only metadata-routed task selectors carry secondmate-marker and Codex-harness context; explicit endpoint escape hatches do not.
+Only metadata-routed task selectors carry from-firstmate-marker and Codex-harness context; explicit endpoint escape hatches do not.
 These five sentences are the single owner of the task-selector vocabulary; backend guides and other documents point here instead of restating the resolution order.
 `fm-teardown.sh <id>` takes a task id directly and validates the complete metadata-only endpoint identity before any runtime dispatch or cleanup mutation.
 Missing, empty, duplicate, malformed, backend-inconsistent, or task-mismatched endpoint records are preserved and refused.
@@ -212,7 +224,7 @@ muse also needs a worker-reachable credential before spawning, and the portable 
 New harnesses get verified through a supervised trial task before joining the set.
 The verified adapter evidence - each harness's busy-state source, interrupt and exit behavior, skill-invocation syntax, and per-harness quirks - lives in [`.agents/skills/harness-adapters/SKILL.md`](../.agents/skills/harness-adapters/SKILL.md).
 The executable interrupt and exit mechanics live in [`bin/fm-control-lib.sh`](../bin/fm-control-lib.sh), and [`docs/agent-control.md`](agent-control.md) owns their lifecycle-control architecture.
-Launch mechanics, including the verified command templates, live in [`bin/fm-spawn.sh`](../bin/fm-spawn.sh).
+The verified launch command templates have one owner, [`bin/fm-launch-lib.sh`](../bin/fm-launch-lib.sh); the remaining per-task launch mechanics live in [`bin/fm-spawn.sh`](../bin/fm-spawn.sh), which sources it.
 Enabled primary-session turn-end guard integrations are tracked as repo-level hook files and documented in [`docs/turnend-guard.md`](turnend-guard.md).
 Kimi remains outside the primary turn-end guard integrations; [`docs/turnend-guard.md`](turnend-guard.md#compatibility-limits) owns its separate captain-approved crew wake hook.
 Primary-session watcher wake protocols are rendered at session start by [`bin/fm-supervision-instructions.sh`](../bin/fm-supervision-instructions.sh) from [`docs/supervision-protocols/`](supervision-protocols/).
@@ -240,6 +252,19 @@ Kimi continues to use the captain's normal Kimi home, including the existing con
 The Kimi installer requires an existing regular non-symlink `~/.kimi-code/config.toml`, `python3` with `tomllib`, and `jq`; it validates but never serializes the captain's TOML and refuses before writing when the config is missing, malformed, or surprising or when either tool requirement is unavailable.
 Its `remove` action excises only the marker-delimited Firstmate region and removes Firstmate's hook files.
 For Pi and pi-signed secondmate launches, `fm-spawn.sh` starts the selected executable with `-e` pointed at the secondmate home's own tracked `.pi/extensions/fm-primary-pi-watch.ts` and `.pi/extensions/fm-primary-turnend-guard.ts`, both already present from the secondmate home's git worktree.
+
+### Claude context-pressure telemetry
+
+Claude Code passes a host-computed `context_window` object to status-line commands with `remaining_percentage`, `used_percentage`, `total_tokens`, and `current_usage`.
+Firstmate's tracked Claude settings send that payload to [`bin/fm-context-statusline.sh`](../bin/fm-context-statusline.sh), which displays the real used and remaining percentages rather than estimating pressure from transcript text.
+At 70 percent used or higher, the display adds `COMPACT NOW: /compact` so the existing compaction doctrine has an instrument-backed trigger.
+Only `used_percentage` and `remaining_percentage` are required; when the optional `total_tokens` or `current_usage` is missing or invalid, the real percentages and the 70 percent trigger keep rendering and each missing optional field is named in the display, so the instrument never invents a value and never degrades silently.
+A spawned Claude crewmate also receives a git-excluded local setting that writes the `context_window` fields actually present, a `missing_optional_fields` list when any optional field is absent, and the derived `compact_recommended` boolean atomically to `/tmp/fm-<task-id>/context-pressure.json`.
+Generated crewmate instructions tell the worker to use that snapshot as the source of truth at phase boundaries and run `/compact` when the boolean becomes true.
+The snapshot stays in the existing per-task temporary root, so ordinary cleanup removes it without adding fleet state or a new completion signal.
+Payloads without both valid percentages produce no display, remove the optional stale snapshot, and leave the Claude session running normally.
+This is presentation and worker advisory only: it does not emit fleet notifications or change routing, supervision, worker lifecycle, isolation, or completion detection.
+The other verified worker runtimes do not expose this verified Claude `statusLine` payload contract, so their adapters and behavior remain unchanged.
 
 ## Crew dispatch profiles (config/crew-dispatch.json)
 
@@ -283,6 +308,280 @@ Malformed JSON, an empty or malformed rule/default array, an unverified harness,
 While the file remains present, no crewmate or scout spawn may proceed without an explicit resolved harness; malformed configuration must be reported and corrected rather than selected around.
 Secondmate homes inherit this file from the primary, so a secondmate's own crewmates apply the same dispatch profile behavior.
 
+## Model registry (config/models.json)
+
+`config/models.json` is an optional local, gitignored registry of the models this home is allowed to route work to, and the enforced copy of its zero-budget rule.
+This section is the single owner of the schema and its per-field semantics.
+`.agents/skills/model-onboarding/SKILL.md` owns the admission policy that decides what belongs here, and `bin/fm-model-registry-lib.sh` owns the enforcement mechanics.
+
+The registry exists to make one safety rule checkable by a machine rather than by memory: an API-key provider may be routed only to a model on an explicit verified-free allowlist.
+One credential commonly reaches both free and metered models on the same provider, rendered identically in every catalogue listing, so a single plausible model name is a charge.
+The unit of authorization is therefore the model, never the provider and never the credential.
+
+Keeping the registry separate from `config/crew-dispatch.json` is what enables the referential-integrity check: bootstrap refuses when a dispatch rule names a model that is absent from the registry, carries a non-approved status, or has no live-probe record.
+That catches a bad model at config-edit time, before any worker is launched against it.
+
+```json
+{
+  "schema": "fm-model-registry.v1",
+  "providers": {
+    "<provider-id>": {
+      "access_class": "<A|B|C|D>",
+      "cost_posture": "<subscription-flat|api-key|self-hosted>",
+      "credential_env": "<ENV VAR NAME ONLY, never a value>",
+      "catalogue_sources": ["<path to a harness price catalogue>"],
+      "status": "<active|blocked|dropped>",
+      "status_reason": "<required when status is not active>"
+    }
+  },
+  "models": {
+    "<provider>/<model-id>": {
+      "provider": "<provider-id>",
+      "model_id": "<model-id>",
+      "harness": "<adapter that can reach it>",
+      "cost_class": "<subscription-flat|verified-free|metered|unknown>",
+      "status": "<rejected|blocked|experimental|approved-fallback|approved-specialist|approved-primary>",
+      "status_reason": "<required for rejected and blocked>",
+      "price_at_verification": { "input": 0, "output": 0 },
+      "eligible_routes": [], "prohibited_routes": [],
+      "context": { "advertised": 0, "operational_ceiling": 0, "max_output": 0 },
+      "controls": { "effort_bands": [], "tool_calling": true, "structured_output": true },
+      "limits": { "concurrency": null, "shared_quota_pool": "<pool id>" },
+      "observation_level": "<O1|O2|O3|O4>",
+      "evidence": {
+        "probe": { "result": "ok", "rc": 0, "latency_s": 0, "at": "<ISO8601>" },
+        "price": { "at": "<ISO8601>", "sources": ["<source kind>"] },
+        "dossier": "<path to the dossier>"
+      },
+      "last_verified": "<ISO8601>"
+    }
+  },
+  "zero_budget": {
+    "allowlist": {
+      "<provider>/<model-id>": {
+        "price_at_verification": { "input": 0, "output": 0 },
+        "verified_at": "<ISO8601>",
+        "sources": ["<source kind>"],
+        "hard_ceiling": "<provider-side mechanism that refuses rather than bills>"
+      }
+    }
+  },
+  "observation": { "levels": { "<O1|O2|O3|O4>": { "probe_max_age_days": 0 } } },
+  "promotion": {
+    "enabled": false,
+    "requires_instrument": "<named evidence instrument>",
+    "thresholds": {},
+    "authority": {
+      "t4_to_t3": "automatic-notify-immediate",
+      "t3_to_t2": "captain-confirm",
+      "t2_to_t1": "never-by-evidence",
+      "t1_to_t0": "never-by-evidence"
+    }
+  }
+}
+```
+
+`schema` is required and must be exactly `fm-model-registry.v1`; an unrecognized value is refused rather than best-effort parsed, so a future format change fails loudly instead of being silently misread.
+Every other top-level block is optional, and an absent block simply has nothing to enforce.
+
+`providers` classifies each provider's cost posture, and it is what lets enforcement answer "can this call cost money" for a model that is not in `models` at all.
+A `subscription-flat` or `self-hosted` provider is allowed without an allowlist entry, because no per-call charge exists.
+An `api-key` provider is allowed only for models named in `zero_budget.allowlist`.
+A provider absent from this block is **refused**: an unknown cost posture is never treated as a default-allow.
+A provider whose `status` is `blocked` or `dropped` is refused with its recorded `status_reason`.
+
+`price_at_verification` stores the price numerically rather than only a cost class, because that is what makes a later repricing detectable; a name-only allowlist is structurally blind to one.
+`catalogue_sources` names the harness price catalogues to compare against, as local data rather than a path hardcoded in tracked code, since those paths are version-pinned and move on every harness upgrade.
+Both the pinned per-provider catalogue shape and the provider-fetched store shape are understood.
+
+Evidence `sources` accept `probe`, `provider-entitlement`, `provider-doc`, `harness-static-catalogue`, `harness-fetched-cache`, `third-party`, and `inference`, in descending authority.
+An allowlist entry must carry at least one genuinely price-bearing source - `provider-doc` or `harness-static-catalogue` - or it **fails validation**.
+A `harness-fetched-cache` price is refreshed by the provider underneath you and cannot establish one, and a `probe` deliberately does not count either: it proves the account gets an answer, not what that answer costs.
+An allowlist entry must also record `verified_at` and a `price_at_verification` that is zero in every field.
+
+`limits.concurrency` caps how many workers may run on a model at once, and `limits.shared_quota_pool` makes siblings that draw on one free-tier pool count against the same cap, so several workers cannot collectively breach one quota.
+`observation.levels[<level>].probe_max_age_days` sets how stale a model's probe evidence may become before it is reported, which is what keeps the session-start probe sweep interval-gated rather than probing every routed model every time.
+
+`promotion.authority` is validated as a ceiling in each direction: a home may be equally or more conservative than the values above, never more permissive.
+`t2_to_t1` and `t1_to_t0` must be `never-by-evidence`, because Tier 1 is triggered by risk rather than capability rank and no accumulation of evidence may enter it.
+Promotion stays dormant until both `promotion.enabled` is true and the named instrument is producing records, so activating it is a configuration and data change rather than a code change.
+
+Enforcement is deliberately asymmetric about the file's absence.
+With **no** `config/models.json`, the spawn-time check is inert and spawns behave exactly as they did before the registry existed, so nothing is forced on a home that never opted in; bootstrap then reports `MODEL_REGISTRY: no config/models.json ...` whenever the dispatch config routes to a provider-prefixed model, so the unenforced state is never silent.
+With the file **present**, every unclear answer refuses: malformed JSON, an unsupported schema, an unclassified provider, a stale-evidence allowlist entry, and a missing `jq` all refuse rather than pass, because a broken safety file must never read as an absent one.
+A bare model name with no provider prefix is a harness-native selector and is always allowed.
+
+Routability is a separate axis from cost, and the two are enforced independently.
+A model recorded as `rejected` or `blocked` is refused at spawn even when it carries no cost risk at all, because a model on a flat subscription can still be one the account is not entitled to use.
+Availability is a third axis again: a rate-limited or cooling-down model is unavailable rather than rejected, lives in `state/model-health.json`, and never changes the routing status recorded here.
+
+A live probe is itself a billable act on a metered provider, so `bin/fm-model-verify.sh` consults the same zero-budget decision before issuing any request, on the interval-gated sweep and on an explicit `--model` alike - a typed model name is not authorization to spend money.
+A refused model is reported as `MODEL_VERIFY: refusing to probe <model> - <reason>`, no request is issued, and its prior record in `state/model-health.json` is left untouched.
+`--force-probe` is the only override, and a forced probe announces itself on stdout so an authorized billable probe is never invisible.
+Bootstrap reports registry problems as `MODEL_REGISTRY: invalid config/models.json - <reason>` for schema failures, `MODEL_REGISTRY: <model> ...` for integrity failures, `MODEL_PRICE: <model> ...` for drift, and `MODEL_VERIFY: <model> ...` for probe results.
+Valid, current registries stay silent.
+See [`docs/examples/models.json`](examples/models.json) for a starting point to copy into local `config/models.json`, and `bin/fm-model-verify.sh --help` for the probe and drift mechanics.
+Rollback is deleting the file: every check becomes a no-op.
+
+## Fleet admission control (`_scheduling.admission_control`)
+
+Admission control is the third layer above routing and scheduling.
+Routing decides who is capable, scheduling decides when accepted work runs, and admission decides whether the fleet should accept another task at all right now.
+It is a property of the fleet, not of any task: admission reads only the fleet snapshot, never the incoming task's tier, project, model, priority, urgency, token estimate, or file overlap, so the same snapshot returns the same band for every task.
+That boundary is what keeps it a separate layer instead of scheduling under a new name.
+
+The policy lives in the optional local, gitignored `config/crew-dispatch.json` under `_scheduling.admission_control`, alongside the dispatch rules above.
+This section is the single owner of the schema and its per-field semantics.
+`bin/fm-admission-lib.sh` owns the executable check of that schema, `bin/fm-admission.sh` owns the evaluator and its decision record, and [`fleet-admission`](../.agents/skills/fleet-admission/SKILL.md) owns what firstmate does with each band.
+
+Admission ships inert.
+A home with no `admission_control` object, or one carrying only `_`-prefixed operator notes, changes nothing about dispatch and costs one cheap config read.
+Enabling it adds no concurrency cap: every numeric threshold ships `null` with `enforce: false`, and `enforcement_mode: "safety-only"` makes numeric enforcement structurally unreachable until an evidence-gated mode is added.
+The standing contract that isolated work dispatches immediately with no concurrency cap is therefore unchanged.
+
+```json
+{
+  "_scheduling": {
+    "admission_control": {
+      "schema_version": 1,
+      "enabled": true,
+      "enforcement_mode": "safety-only",
+      "fleet_id": "<fleet-id>",
+      "combine": "most_restrictive",
+      "severity_order": ["preferred", "soft", "hard"],
+      "unknown_band": "hard",
+
+      "bands": {
+        "preferred": { "action": "admit" },
+        "soft": { "action": "queue", "hold_kind": "load", "auto_reconsider": true },
+        "hard": { "action": "refuse", "hold_kind": "load", "auto_reconsider": true }
+      },
+
+      "signals": {
+        "census_integrity": {
+          "enabled": true, "required": true,
+          "source": "fresh-authority-census",
+          "unknown_band": "hard",
+          "max_snapshot_age_seconds": null
+        },
+        "backlog_consistency": {
+          "enabled": true, "enforce": false,
+          "source": "main-inventory",
+          "unknown_band": "hard"
+        },
+        "admission_queue_pressure": {
+          "enabled": true, "enforce": false,
+          "source": "tasks-axi-load-holds-plus-ledger",
+          "queued_soft_count": null, "queued_hard_count": null,
+          "oldest_wait_soft_seconds": null, "oldest_wait_hard_seconds": null
+        },
+        "active_workers": {
+          "enabled": true, "enforce": false,
+          "source": "fresh-authority-census",
+          "soft_count": null, "hard_count": null
+        },
+        "coordination_debt": {
+          "enabled": false, "enforce": false,
+          "source": "wake-outcome-ledger",
+          "pending_wakes_soft_count": null, "pending_wakes_hard_count": null,
+          "oldest_unhandled_wake_soft_seconds": null, "oldest_unhandled_wake_hard_seconds": null,
+          "handled_wake_latency_window_seconds": null,
+          "handled_wake_latency_soft_seconds": null, "handled_wake_latency_hard_seconds": null
+        },
+        "host_resources": {
+          "enabled": false, "enforce": false,
+          "source": "node-summaries",
+          "metrics": {}
+        },
+        "reservation_pressure": {
+          "enabled": false, "enforce": false,
+          "source": "admission-registry",
+          "soft_count": null, "hard_count": null
+        }
+      },
+
+      "authority": {
+        "mode": "single-primary",
+        "authority_id": "<authority-id>",
+        "config_mismatch_band": "hard",
+        "unreachable_band": "hard"
+      },
+      "reservations": {
+        "enabled": false,
+        "ttl_seconds": null, "heartbeat_seconds": null, "clock_skew_tolerance_seconds": null,
+        "release_on": ["spawn-failure", "teardown"],
+        "reconcile_on": ["session-start"]
+      },
+      "queue": {
+        "substrate": "tasks-axi hold --kind load",
+        "release_triggers": ["teardown", "session-start"],
+        "already_empty_fleet_recheck": "session-start-only"
+      },
+      "notifications": {
+        "policy_ref": "/_scheduling/notification_bands",
+        "episode_dedupe_seconds": null
+      },
+      "telemetry": {
+        "sink": "wake-outcome-ledger",
+        "record_every_decision": true, "record_signal_values": true,
+        "record_config_paths": true, "record_config_digest": true,
+        "credentials_forbidden": true
+      },
+      "dormant_triggers": {
+        "<trigger-name>": { "<measurable-condition>": 1, "checkpoint": "<named review point>" }
+      }
+    }
+  }
+}
+```
+
+Values shown as `<...>` are operator-supplied, not defaults.
+`null` means unmeasured or disabled; it never means zero or infinity.
+Keys beginning with `_` are operator notes and are ignored, matching the surrounding scheduling config's convention.
+
+### Fields
+
+`schema_version` must be `1`, and `enabled` turns the whole layer on.
+`enforcement_mode` accepts only `safety-only` today: the deterministic safety conditions (admission authority, census integrity, snapshot freshness) may set a band, and no other signal may.
+`fleet_id` names the set of sessions sharing this policy and capacity.
+`combine` accepts only `most_restrictive` and `severity_order` only `["preferred","soft","hard"]`, so no combination rule can average a hard result away.
+`unknown_band` is the band a missing or contradictory required signal maps to; it accepts only `soft` or `hard`, because missing evidence must never resolve to "probably fine".
+
+`bands` binds each band to its action: `preferred` admits, `soft` queues, and `hard` refuses.
+Both non-preferred bands must name `hold_kind: "load"` - admission never opens a second queue, and a load hold can never masquerade as a captain decision.
+The `preferred` band admits and therefore has no hold at all: it carries only `action`, and a `hold_kind` or `auto_reconsider` there is refused as misleading configuration.
+
+Each entry under `signals` carries `enabled`, a fixed recognized `source`, and its own thresholds.
+`census_integrity` is the required safety signal and is the only one that may set a band under `safety-only`; its `max_snapshot_age_seconds` bounds how old a reused snapshot may be before the decision is treated as unknown.
+When a limit is configured and the snapshot's age cannot be measured, the freshness rule fails closed to the configured unknown band instead of admitting; with no configured limit an unmeasurable age is only recorded.
+`backlog_consistency` is deliberately separate from `census_integrity`: a backlog record that contradicts task metadata must be reported and repaired, but it is not evidence that the fleet is physically saturated, and collapsing both into one health bit would close the fleet for an unrelated bookkeeping error.
+`admission_queue_pressure` counts `hold_kind=load` requests; its oldest-wait age stays unmeasured because backlog age is task age, not admission wait age.
+`active_workers` records the live worker count as an explanatory baseline with no cap.
+`coordination_debt`, `host_resources`, and `reservation_pressure` have no collector in this home yet and must stay `enabled: false`; enabling one would record an invented value instead of an observation.
+
+`authority` accepts only `mode: "single-primary"`.
+The existing per-home session lock supplies that authority, so admission adds no new process, daemon, or reservation store; a session that does not hold the lock is not the admission authority and gets `unreachable_band`.
+`reservations` must stay disabled until a second intake authority or a remote node is registered; its durations exist so the distributed contract is settled in advance, not so it can be switched on early.
+`queue` pins the substrate and the two release triggers, and names the known already-empty-fleet gap that is deliberately left to session start rather than cured with a timer.
+`telemetry` names the sink for decision records; while admission is enabled, `record_every_decision` and `credentials_forbidden` must both be true.
+Each entry under `dormant_triggers` needs a named `checkpoint`, so no dormant mechanism can be reconsidered without a stated review point.
+
+### Validation
+
+When the file exists, bootstrap validates the policy with `jq` on every session start, including in a read-only session that did not get the fleet lock.
+A home with no policy, or a note-only policy, stays silent; with `FM_BOOTSTRAP_VERBOSE_FACTS=1` bootstrap emits `BOOTSTRAP_INFO: fleet admission control inert|active` for a policy that exists, while an absent policy stays silent even then.
+Anything malformed is reported as `ADMISSION_CONTROL: invalid config/crew-dispatch.json _scheduling.admission_control - <reason>` and must be corrected rather than worked around.
+
+Validation refuses a policy that has an unknown field at any level, a threshold that is not null or a non-negative number, a soft threshold more restrictive than its hard counterpart, a threshold key without a `_count` or `_seconds` unit suffix, an unrecognized signal source, a signal enabled while its source is uncollectable, `enforce` set while its signal is disabled or while `enforcement_mode` is `safety-only`, a queue action naming any hold kind other than `load`, a `hold_kind` or `auto_reconsider` on the admitting `preferred` band, a `queue.release_triggers` value other than exactly `["teardown", "session-start"]`, a second queue substrate, telemetry disabled while admission is enabled, reservations or a non-single-primary authority enabled before their dormant trigger fires, or a dormant trigger with no named checkpoint.
+Unknown fields are refused rather than ignored so a typo cannot silently disable a safety condition.
+
+`bin/fm-admission.sh` prints the band and its explanation and exits `0` for preferred, `3` for soft, `4` for hard, and `2` when the policy is malformed or the census cannot be evaluated, so a caller that ignores the output still stops safely.
+Every rule in that explanation names the observed value, its source and freshness, the exact JSON configuration path, the configured value, and the resulting band.
+The decision record from `--json` is the unit of admission telemetry; when the wake-outcome ledger exposes its extension seam, that record is what gets appended, and admission never opens a competing store.
+
+See [`docs/examples/crew-dispatch.json`](examples/crew-dispatch.json) for a copyable starting point.
+Secondmate homes inherit `config/crew-dispatch.json` from the primary, so an admission policy applies in each inheriting home against that home's own fleet.
+
 ## Toolchain
 
 On session start the first mate detects what its required toolchain is missing or too old and lists each problem with either an exact install command or manual instructions.
@@ -293,12 +592,13 @@ The universal toolchain is node, git, gh with GitHub auth via `gh auth login`, n
 This section is the single owner of that universal toolchain list; backend guides' prerequisites point here and add only their backend-specific tools.
 In that list, no-mistakes runs the validation pipeline, gh-axi, chrome-devtools-axi, and lavish-axi cover GitHub, browser, and rich-review operations, and tasks-axi plus quota-axi back backlog mutations and quota-aware array dispatch.
 The per-backend delta is required only for the backend resolved from `FM_BACKEND`, then `config/backend`, then runtime auto-detection, then default `tmux`, so a home is never told to install a tool an inactive backend or feature would need.
-That delta is owned in code by `fm_backend_required_tools` in `bin/fm-backend.sh`: the resolved backend's own session-provider CLI (`tmux`, `herdr`, `zellij`, `orca`, or `cmux`), `jq` for the JSON-emitting experimental adapters (`herdr`, `zellij`, `cmux`) whose spawn and liveness paths parse the backend's JSON output, and the `treehouse` worktree provider for every session-provider-only backend (`tmux`, `herdr`, `zellij`, `cmux`).
+That delta is owned in code by `fm_backend_required_tools` in `bin/fm-backend.sh`: the resolved backend's own session-provider CLI (`tmux`, `herdr`, `zellij`, `orca`, or `cmux`), the `treehouse` worktree provider for every session-provider-only backend (`tmux`, `herdr`, `zellij`, `cmux`), and `jq` for the JSON-emitting experimental adapters (`herdr`, `zellij`, `cmux`) whose spawn and liveness paths parse backend output.
+Independently of that backend-output requirement, a Treehouse-backed crewmate or scout spawn needs `jq` for its pre-allocation pool inspection only when the installed Treehouse offers `status --json` (v2.1.0 and newer); older builds are inspected through the human-readable table without it.
 Backend tool availability uses the adapter's own executable resolver, so bootstrap and spawn agree on supported non-`PATH` locations such as cmux's bundled CLI.
 An unknown resolved backend emits `BACKEND_INVALID` and blocks dispatch instead of silently dropping its dependency delta or falling back to tmux.
 Orca provides both the task worktree and terminal endpoint (see "Runtime backend" above), so `backend=orca` requires only `orca` on top of the universal toolchain and skips both `treehouse` and every other backend's session CLI.
 A herdr, zellij, or cmux home is therefore never told `tmux` is missing, and the `treehouse` durable-lease upgrade check runs only for the backends that actually use treehouse.
-When `config/crew-dispatch.json` exists, bootstrap also requires `jq` for dispatch profile validation.
+When `config/crew-dispatch.json` exists, bootstrap also requires `jq` for dispatch profile validation, and when `config/models.json` exists, `jq` is required for model registry validation and the spawn-time zero-budget check refuses without it.
 When Relay is opted in, bootstrap also requires `curl` and `jq` before arming the relay poll shim.
 `tasks-axi` and `quota-axi` are required bootstrap tools in every profile, the same class as `lavish-axi`.
 An absent or incompatible `tasks-axi` reports `MISSING: tasks-axi (install: npm install -g tasks-axi)`; when `config/backlog-backend` is not `manual` and compatible `tasks-axi` is on `PATH`, bootstrap stays silent and firstmate uses its verbs for routine backlog mutations, otherwise it hand-edits `data/backlog.md` until installation is approved and completed.
@@ -321,7 +621,7 @@ When a running home advances and its loaded instruction surface (`AGENTS.md`, `b
 If that send fails, bootstrap keeps an idempotent retry marker and emits `NUDGE_SECONDMATES:` with the failure reason.
 The same bootstrap run emits `SECONDMATE_LIVENESS:` only when a registered secondmate is skipped or its relaunch fails; already-live and successfully relaunched secondmates are handled silently.
 For a mid-session inherited local-material edit where tracked-file sync is not needed, run `bin/fm-config-push.sh`.
-It uses the same live secondmate discovery and propagation helper as bootstrap, prints each live home's `crew-dispatch.json`, `crew-harness`, `backlog-backend`, `backend`, `herdr-presentation-spaces`, `startup-memory-budget`, `trace-context`, and `data/captain-shared.md` result as `pushed`, `unchanged`, `skipped`, or `error`, and exits non-zero for real propagation errors or config-reread send failures.
+It uses the same live secondmate discovery and propagation helper as bootstrap, prints each live home's `crew-dispatch.json`, `models.json`, `crew-harness`, `backlog-backend`, `backend`, `herdr-presentation-spaces`, `startup-memory-budget`, `trace-context`, and `data/captain-shared.md` result as `pushed`, `unchanged`, `skipped`, or `error`, and exits non-zero for real propagation errors or config-reread send failures.
 When an allowlisted config item changes for an already-running local home, it sends the literal-content reread pointer described in [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md); unchanged allowlisted config sends no pointer unless a previous delivery is pending.
 A changed remote home instead receives one durably recorded marked re-read instruction after the allowlisted bytes have transferred because primary-local generation paths are not meaningful on another host.
 The locked bootstrap inheritance pass uses the same placement-specific behavior; see `secondmate-provisioning` for the single contract owner.
@@ -548,6 +848,7 @@ FMX_X_THREAD_MAX=25     # maximum messages in one auto-split reply thread
 FMX_FOLLOWUP_MAX_AGE_SECS=604800   # local window for posting Relay completion follow-ups (7 days)
 FMX_FOLLOWUP_MAX_COUNT=3   # local cap on Relay completion follow-ups per linked mention
 FM_PF_RETRY_BACKOFF_SECS=900   # seconds before the next attempt after a retryable promised-public-reply delivery error
+FM_WAKE_LEDGER=         # alternate wake-outcome ledger path, default data/wake-ledger.tsv (bin/fm-wake-ledger.sh)
 FM_LOCK_STALE_AFTER=2   # seconds before dead-pid lock records can be reclaimed; mid-acquire locks keep at least 2s grace
 FM_GUARD_GRACE=300      # seconds before guard warnings, arm health checks, and the primary turn-end guard treat a watcher beacon as stale
 FM_CLAUDE_AUTOARM_ATTEMPTS=2   # bounded Stop-owned arm attempts per Claude auto-arm cycle; accepted values are 1, 2, or 3
@@ -569,8 +870,12 @@ FM_SIGNAL_GRACE=30      # seconds to coalesce nearby status and turn-end signals
 FM_CAPTAIN_RE='done:|needs-decision:|blocked:|failed:|PR ready|checks green|ready in branch|merged'   # captain-relevant status regex; nonterminal progress verbs remain excluded even when their prose matches
 FM_CLASSIFY_PAUSED_VERB=paused     # leading status verb for a declared external wait; excluded from FM_CAPTAIN_RE and distinct from blocked
 FM_STALE_ESCALATE_SECS=240         # idle seconds before a provably-working stale pane escalates; stale panes whose crew is not provably working surface immediately unless they declare the pause verb
-FM_BUSY_TURN_MAX_SECS=3600         # maximum age of a busy pane's latest state/<id>.turn-ended marker, or its state/<id>.meta spawn record before any turn completes, before the same wedge escalation used for a provably-working non-busy stale takes over; inspection-only, never an automatic interrupt or restart
-FM_PAUSE_RESURFACE_SECS=3600       # seconds before an idle declared external wait re-surfaces for a recheck in the watcher or away-mode daemon
+FM_BUSY_TURN_MAX_SECS=3600         # maximum age of a provably-working pane's latest state/<id>.turn-ended marker, or its state/<id>.meta spawn record before any turn completes, before the same wedge escalation takes over; proof may be a busy harness or advancing descendant CPU; inspection-only, never an automatic interrupt or restart
+FM_CHILD_CPU_MIN_TICKS=100         # minimum descendant CPU growth between samples that proves work; Linux kernel ticks, normally 100 per CPU-second
+FM_CHILD_CPU_MAX_SAMPLE_AGE=120    # maximum age in seconds of a descendant CPU baseline eligible for comparison
+FM_CHILD_CPU_SAMPLE_INTERVAL=5     # minimum age in seconds before replacing a descendant CPU baseline, so repeated probes in one watcher cycle compare against the same sample
+FM_PAUSE_RESURFACE_SECS=3600       # seconds before an idle declared external wait re-surfaces for a recheck in the watcher or away-mode daemon; the away-mode daemon skips this recheck for a wait the backlog records as captain-gated, because only the captain can clear it
+FM_PR_DIRTY_RESURFACE_SECS=3600    # seconds before a monitored pull request still conflicting at the same head commit re-surfaces; a changed head is a new conflict and wakes immediately
 FM_WEDGE_DEMAND_INSPECT_COUNT=3    # consecutive provably-working stale escalations on the same unchanged pane before demand-deep-inspection is added
 FM_WATCH_TRIAGE_LOG_MAX_BYTES=262144   # size cap for the watcher's absorbed-wake debug log
 FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT=     # optional seconds allowed for bootstrap's best-effort clone refresh; unset/blank defaults to max(20, 5 + 3 * origin-backed-project-count)

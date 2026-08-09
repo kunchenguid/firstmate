@@ -174,6 +174,10 @@ test_help_includes_entire_header() {
   local help
   help=$("$ROOT/bin/fm-brief.sh" --help)
   assert_contains "$help" "Refuses to overwrite an existing brief." "fm-brief.sh --help omitted its header terminator"
+  assert_contains "$help" "verification-discipline section" \
+    "fm-brief.sh --help does not document the generated verification-discipline section"
+  assert_contains "$help" "Ship scaffolds additionally carry branch conflict resolution" \
+    "fm-brief.sh --help does not document the ship-only branch conflict resolution section"
   pass "fm-brief.sh: --help renders the complete header"
 }
 
@@ -690,6 +694,40 @@ test_scout_and_secondmate_load_decision_hold_policy() {
   pass "fm-brief.sh: investigation and visual-review completions load the shared decision policy"
 }
 
+test_context_pressure_contract_reaches_every_agent_kind() {
+  local home ship scout charter
+  home="$TMP_ROOT/context-pressure-home"
+  mkdir -p "$home/data"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" context-ship-z1 firstmate --mode no-mistakes >/dev/null 2>&1
+  ship="$home/data/context-ship-z1/brief.md"
+  assert_grep '/tmp/fm-context-ship-z1/context-pressure.json' "$ship" \
+    "ship brief missing its task-scoped Claude context snapshot"
+  # shellcheck disable=SC2016 # Literal Markdown backticks must remain unexpanded.
+  assert_grep 'When `compact_recommended` is `true` (70 percent used or higher), run `/compact` before continuing.' "$ship" \
+    "ship brief missing the instrument-backed compaction trigger"
+  assert_grep 'use it instead of a self-estimate' "$ship" \
+    "ship brief still permits estimated context pressure when telemetry exists"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" context-scout-z2 firstmate --scout >/dev/null 2>&1
+  scout="$home/data/context-scout-z2/brief.md"
+  assert_grep '/tmp/fm-context-scout-z2/context-pressure.json' "$scout" \
+    "scout brief missing its task-scoped Claude context snapshot"
+  assert_grep 'never fabricate a reading when it is absent' "$scout" \
+    "scout brief did not preserve the non-Claude compatibility boundary"
+
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='Handle routed work.' \
+    "$ROOT/bin/fm-brief.sh" context-mate-z3 --secondmate --no-projects >/dev/null 2>&1
+  charter="$home/data/context-mate-z3/brief.md"
+  # shellcheck disable=SC2016 # Literal Markdown backticks must remain unexpanded.
+  assert_grep 'the bottom `CTX` row is host-computed context pressure' "$charter" \
+    "secondmate charter did not identify the real Claude context instrument"
+  # shellcheck disable=SC2016 # Literal Markdown backticks must remain unexpanded.
+  assert_grep 'when it shows `COMPACT NOW: /compact` at 70 percent used or higher, run `/compact`' "$charter" \
+    "secondmate charter missing the status-line compaction trigger"
+  pass "fm-brief.sh: every agent kind receives the instrument-backed Claude compaction contract"
+}
+
 # Scout and secondmate paths still scaffold well-formed briefs.
 test_scout_and_secondmate_scaffold() {
   local brief
@@ -710,9 +748,129 @@ test_scout_and_secondmate_scaffold() {
   pass "fm-brief: scout and secondmate code paths still scaffold well-formed briefs"
 }
 
+# A crewmate cannot otherwise tell a firstmate steer from a human typing into its
+# pane (bin/fm-send.sh marks the former). Both crewmate scaffolds must carry the
+# reader side of that contract, name the worker's own task id so the
+# self-identification is concrete, state the command-shaped exclusion so the
+# routine validation trigger does not read as a rule violation, and repeat that
+# escalation is the status file - the failure that direction is silent.
+test_crewmate_scaffolds_carry_who_is_speaking() {
+  local home brief kind
+  home="$TMP_ROOT/who-speaks-home"
+  mkdir -p "$home/data"
+  for kind in ship scout; do
+    if [ "$kind" = scout ]; then
+      FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+        "$ROOT/bin/fm-brief.sh" "speaks-$kind" alpha --scout >/dev/null 2>&1
+    else
+      FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+        "$ROOT/bin/fm-brief.sh" "speaks-$kind" alpha --mode no-mistakes >/dev/null 2>&1
+    fi
+    brief="$home/data/speaks-$kind/brief.md"
+    assert_present "$brief" "$kind brief was not scaffolded"
+    assert_grep "# Who is speaking to you" "$brief" \
+      "$kind brief must carry the pane-provenance section"
+    assert_grep '[fm-from-firstmate]' "$brief" \
+      "$kind brief must name the marker a firstmate message carries"
+    assert_grep "untypable, so a human never produces it" "$brief" \
+      "$kind brief must say why an unmarked message means a human"
+    assert_grep "you are a worker on task \`speaks-$kind\`" "$brief" \
+      "$kind brief must name its own task id for self-identification"
+    # shellcheck disable=SC2016 # single quotes are deliberate: the backticks and \$ must stay literal
+    assert_grep 'starts with `/`, or on codex with `$`' "$brief" \
+      "$kind brief must state the one unmarked exception so /no-mistakes is not read as a human"
+    assert_grep "never this pane" "$brief" \
+      "$kind brief must send escalation to the status file, not the pane"
+  done
+  pass "fm-brief: ship and scout scaffolds teach the crewmate who is speaking to it"
+}
+
+# The charter keeps its own consequence (route the answer to the status path);
+# only the marker's shape is shared with the crewmate scaffolds.
+test_secondmate_charter_keeps_its_own_marker_consequence() {
+  local home charter
+  home="$TMP_ROOT/charter-marker-home"
+  mkdir -p "$home/data"
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_SECONDMATE_CHARTER='alpha reviews' \
+    "$ROOT/bin/fm-brief.sh" charter-marker --secondmate --no-projects >/dev/null 2>&1
+  charter="$home/data/charter-marker/brief.md"
+  assert_grep "untypable, so a human never produces it" "$charter" \
+    "charter lost the shared marker-shape fact"
+  assert_grep "respond via the STATUS/ESCALATION path below" "$charter" \
+    "charter must keep its own routing consequence"
+  if grep -q "# Who is speaking to you" "$charter"; then
+    fail "charter must not take the crewmate section; its consequence differs"
+  fi
+  pass "fm-brief: the charter shares the marker fact but keeps its own consequence"
+}
+
+# The standing worker rules are captain-approved contract text, and the brief is
+# the only place the worker reads them. Pin the variant split directly: every
+# scaffold carries verification discipline, only ship scaffolds carry branch
+# conflict resolution, and the no-mistakes DOD keeps the delegated-rebase
+# carve-out that reconciles that rule with its no-commit-during-a-run line.
+test_standing_worker_rules_by_variant() {
+  local home id brief proj mode
+  home="$TMP_ROOT/standing-rules-home"
+  write_registry "$home"
+
+  for id_proj in "standing-nomistakes:no-registry-proj:no-mistakes" "standing-directpr:direct-proj:direct-PR" "standing-localonly:local-proj:local-only"; do
+    id=${id_proj%%:*}
+    mode=${id_proj##*:}
+    proj=${id_proj#*:}; proj=${proj%%:*}
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" "$proj" --mode "$mode" >/dev/null 2>&1
+    brief="$home/data/$id/brief.md"
+    assert_grep "# Branch conflict resolution" "$brief" \
+      "$id: ship brief lost the branch conflict resolution section"
+    assert_grep "Rebase and resolve branch/base conflicts yourself whenever intent is clear, at any file count" "$brief" \
+      "$id: ship brief lost autonomous conflict resolution at any file count"
+    assert_grep "preserve every prior pipeline fix commit through the rebase" "$brief" \
+      "$id: ship brief lost prior-fix-commit preservation"
+    assert_grep "Escalate only genuinely ambiguous intent to firstmate, never the captain." "$brief" \
+      "$id: ship brief lost the firstmate-only escalation target"
+    assert_grep "# Verification discipline" "$brief" \
+      "$id: ship brief lost the verification discipline section"
+  done
+
+  brief="$home/data/standing-nomistakes/brief.md"
+  assert_grep "The one exception is a rebase the pipeline hands back to you" "$brief" \
+    "no-mistakes DOD lost the delegated-rebase carve-out from the no-commit-during-a-run rule"
+  brief="$home/data/standing-directpr/brief.md"
+  assert_no_grep "The one exception is a rebase the pipeline hands back to you" "$brief" \
+    "direct-PR brief carries a pipeline carve-out for a path with no pipeline"
+
+  id="standing-scout"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep "# Verification discipline" "$brief" "scout brief lost the verification discipline section"
+  assert_no_grep "# Branch conflict resolution" "$brief" \
+    "scout brief carries branch conflict resolution though it ships no branch"
+
+  id="standing-secondmate"
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='Supervise the alpha domain.' \
+    "$ROOT/bin/fm-brief.sh" "$id" --secondmate --no-projects >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep "# Verification discipline" "$brief" "secondmate charter lost the verification discipline section"
+  assert_no_grep "# Branch conflict resolution" "$brief" \
+    "secondmate charter carries branch conflict resolution though it ships no branch"
+
+  for id in standing-nomistakes standing-scout standing-secondmate; do
+    brief="$home/data/$id/brief.md"
+    assert_grep "run a negative control and watch it fail, then run the real check" "$brief" \
+      "$id: verification discipline lost the witnessed negative control"
+    assert_grep "Wait on completion artifacts, never process names." "$brief" \
+      "$id: verification discipline lost the artifact-over-process-name rule"
+    assert_grep "report a missing expected artifact as failure" "$brief" \
+      "$id: verification discipline lost missing-artifact-is-failure at collection"
+  done
+  pass "fm-brief.sh: standing worker rules render per variant with the delegated-rebase carve-out"
+}
+
 test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
+test_crewmate_scaffolds_carry_who_is_speaking
+test_secondmate_charter_keeps_its_own_marker_consequence
 test_ship_modes_generate_clean_briefs
 test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry
@@ -729,4 +887,6 @@ test_secondmate_marked_request_reporting_contract
 test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
+test_context_pressure_contract_reaches_every_agent_kind
 test_scout_and_secondmate_scaffold
+test_standing_worker_rules_by_variant

@@ -132,17 +132,18 @@ now_ms() {
 # unclassified so new tests are still runnable and visible in summaries.
 family_for_basename() {
   case "$1" in
+    fm-admission.test.sh|\
     fm-arm-pretool-check.test.sh|fm-ask-user-authority.test.sh|\
     fm-brief.test.sh|fm-vendor-auth-probe.test.sh|\
     fm-calm-pi-extension.test.sh|fm-cd-pretool-check.test.sh|\
-    fm-composer-ghost.test.sh|fm-composer-lib.test.sh|\
+    fm-composer-ghost.test.sh|fm-composer-lib.test.sh|fm-context-statusline.test.sh|\
     fm-crew-state.test.sh|fm-decision-hold-lifecycle.test.sh|\
     fm-documentation-audiences.test.sh|fm-ensure-agents-md.test.sh|fm-grok-harness.test.sh|\
-    fm-kimi-harness.test.sh|fm-muse-harness.test.sh|fm-herdr-lab.test.sh|fm-lint.test.sh|\
+    fm-kimi-harness.test.sh|fm-muse-harness.test.sh|fm-herdr-lab.test.sh|fm-launch-lib.test.sh|fm-lint.test.sh|\
     fm-operational-input.test.sh|fm-pi-primary-types.test.sh|\
     fm-send-popup-settle.test.sh|fm-send-settle.test.sh|\
     fm-subagent-pretool-check.test.sh|\
-    fm-supervision-instructions.test.sh|fm-task-delivery.test.sh|\
+    fm-supervision-instructions.test.sh|fm-task-base.test.sh|fm-task-delivery.test.sh|\
     fm-tmux-submit-busy.test.sh|fm-trace-context-lib.test.sh|\
     fm-transition-lib.test.sh|\
     fm-test-run.test.sh|fm-test-isolation-proof.test.sh)
@@ -151,8 +152,8 @@ family_for_basename() {
     fm-daemon.test.sh|fm-guard-stale-banner.test.sh|fm-pi-watch-extension.test.sh|\
     fm-session-lock-ancestry.test.sh|\
     fm-supervision-events.test.sh|fm-turnend-guard.test.sh|fm-wake-daemon-lifecycle-e2e.test.sh|\
-    fm-wake-queue.test.sh|fm-watch-arm.test.sh|fm-watch-checkpoint.test.sh|fm-watch-triage.test.sh|\
-    fm-watcher-lock.test.sh)
+    fm-wake-ledger.test.sh|fm-wake-queue.test.sh|fm-watch-arm.test.sh|\
+    fm-watch-checkpoint.test.sh|fm-watch-triage.test.sh|fm-watcher-lock.test.sh)
       printf '%s\n' watcher-wake-lock
       ;;
     fm-afk-inject-herdr-e2e.test.sh|fm-afk-launch.test.sh|fm-backend-autodetect-smoke.test.sh|\
@@ -171,7 +172,7 @@ family_for_basename() {
     fm-secondmate-harness.test.sh|fm-secondmate-lifecycle-e2e.test.sh|\
     fm-secondmate-liveness.test.sh|fm-secondmate-safety.test.sh|fm-secondmate-sync.test.sh|\
     fm-startup-memory-budget.test.sh|fm-stow-cascade.test.sh|\
-    fm-send-secondmate-marker.test.sh|fm-shared-captain-inheritance.test.sh)
+    fm-send-marker.test.sh|fm-shared-captain-inheritance.test.sh)
       printf '%s\n' secondmate
       ;;
     fm-bootstrap.test.sh|fm-fleet-sync.test.sh|fm-gate-refuse.test.sh|fm-gotmp.test.sh|\
@@ -192,14 +193,14 @@ family_for_basename() {
     fm-backend-herdr.test.sh|fm-backend-tmux-smoke.test.sh|fm-backend.test.sh|\
     fm-tmux-agent-liveness.test.sh|\
     fm-control.test.sh|fm-control-relaunch.test.sh|\
-    fm-herdr-session-cleanup.test.sh|fm-send-resolve-key.test.sh|fm-send-strict.test.sh|fm-spawn-batch.test.sh|\
-    fm-spawn-dispatch-profile.test.sh|\
+    fm-herdr-session-cleanup.test.sh|fm-launch.test.sh|fm-send-resolve-key.test.sh|fm-send-strict.test.sh|\
+    fm-spawn-batch.test.sh|fm-spawn-dispatch-profile.test.sh|\
     fm-trace-context-spawn.test.sh|fm-spawn-worktree-settle.test.sh|\
     fm-teardown-endpoint-safety.test.sh)
       printf '%s\n' backend-dispatch
       ;;
-    fm-pr-check-security.test.sh|fm-pr-merge.test.sh|fm-review-diff.test.sh|\
-    fm-teardown.test.sh|fm-x-mode.test.sh)
+    fm-merge-local.test.sh|fm-pr-check-security.test.sh|fm-pr-merge.test.sh|\
+    fm-review-diff.test.sh|fm-teardown.test.sh|fm-x-mode.test.sh)
       printf '%s\n' pr-forge
       ;;
     fm-afk-inject-e2e.test.sh|fm-afk-return.test.sh)
@@ -931,7 +932,7 @@ families_for_changed_path() {
       printf '%s\n' pure-contract-unit
       printf '%s\n' pr-forge
       ;;
-    bin/fm-spawn.sh|bin/fm-send.sh|bin/fm-harness.sh|\
+    bin/fm-spawn.sh|bin/fm-launch-lib.sh|bin/fm-send.sh|bin/fm-harness.sh|\
     bin/fm-peek.sh|bin/fm-composer*)
       printf '%s\n' backend-dispatch
       printf '%s\n' pure-contract-unit
