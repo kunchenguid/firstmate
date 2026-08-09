@@ -303,3 +303,28 @@ assert_absent() {
 assert_present() {
   [ -e "$1" ] || fail "$2"
 }
+
+# fm_find_chrome: print a usable headless Chrome or Chromium, or fail.
+# One owner, because every browser regression needs the same locator and a
+# suite that guessed differently would skip where another one runs.
+# FM_CHROME_BIN overrides the search.
+fm_find_chrome() {
+  local candidate
+  if [ -n "${FM_CHROME_BIN:-}" ] && [ -x "$FM_CHROME_BIN" ]; then
+    printf '%s\n' "$FM_CHROME_BIN"
+    return 0
+  fi
+  for candidate in \
+    google-chrome \
+    google-chrome-stable \
+    chromium \
+    chromium-browser \
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+  do
+    if command -v "$candidate" >/dev/null 2>&1; then
+      command -v "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}

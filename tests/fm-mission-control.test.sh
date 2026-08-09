@@ -20,26 +20,7 @@ TMP_ROOT=$(fm_test_tmproot fm-mission-control)
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 
-find_chrome() {
-  local candidate
-  if [ -n "${FM_CHROME_BIN:-}" ] && [ -x "$FM_CHROME_BIN" ]; then
-    printf '%s\n' "$FM_CHROME_BIN"
-    return 0
-  fi
-  for candidate in \
-    google-chrome \
-    google-chrome-stable \
-    chromium \
-    chromium-browser \
-    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-  do
-    if command -v "$candidate" >/dev/null 2>&1; then
-      command -v "$candidate"
-      return 0
-    fi
-  done
-  return 1
-}
+find_chrome() { fm_find_chrome; }
 
 assert_narrow_board_geometry() {  # <html> <window-label> <provider-label>
   local html=$1 window_label=$2 provider_label=$3 chrome
@@ -2082,26 +2063,45 @@ test_controls_can_only_queue_a_request() {
   "$BOARD" --snapshot "$snap" --no-quota --controls --out "$board" >/dev/null \
     || fail "the controls board must render"
 
-  # No way out of the page other than the Lavish bridge.
-  assert_no_grep 'fetch(' "$board" "a control must not call out over the network"
-  assert_no_grep 'XMLHttpRequest' "$board" "a control must not call out over the network"
+  # The only way out of the page is the document its own URL, or the legacy
+  # Lavish bridge. A named host, port, or absolute endpoint would mean a control
+  # could reach somewhere the captain did not choose to serve this board from.
+  assert_grep 'window.location.pathname' "$board" \
+    "a request target must be derived from the URL this document was loaded from"
+  assert_no_grep '127.0.0.1' "$board" "a control must not carry a hard-coded host"
+  assert_no_grep 'localhost' "$board" "a control must not carry a hard-coded host"
+  assert_no_grep '4321' "$board" "a control must not carry a hard-coded port"
+  assert_no_grep 'XMLHttpRequest' "$board" "a control must not open a legacy transport"
   assert_no_grep 'WebSocket' "$board" "a control must not open a socket"
-  assert_no_grep 'method="post"' "$board" "a control must not post anywhere"
-  ! grep -Eq '<form[^>]*action=' "$board" || fail "a control must not post anywhere"
-  assert_grep 'queuePrompt' "$board" "a control queues its request through the Lavish bridge"
-  assert_grep 'FM-BOARD-REQUEST' "$board" "a queued request carries the request marker"
+  assert_no_grep 'method="post"' "$board" "a control must not post from markup"
+  ! grep -Eq '<form[^>]*action=' "$board" || fail "a control must not post from markup"
+  assert_grep 'queuePrompt' "$board" "the legacy Lavish bridge path is retained"
+  assert_grep 'FM-BOARD-REQUEST' "$board" "a recorded request carries the request marker"
 
-  # Hidden by CSS, revealed only once the bridge is proved present, so a
-  # statically served copy of this same file shows no control at all.
+  # Hidden by CSS, revealed only once a transport that can actually reach
+  # firstmate is proved, so a statically served copy of this same file shows no
+  # control at all whichever transport is missing.
   assert_grep '.rc{display:none' "$board" "the reply layer must be hidden by default"
-  assert_grep 'body.lavish .rc{display:block' "$board" \
-    "the reply layer must be revealed only for a page carrying the Lavish bridge"
+  assert_grep 'body.board-reply .rc,body.lavish .rc{display:block' "$board" \
+    "the reply layer must be revealed only for a page with a proved transport"
+  assert_grep 'classList.add("board-reply")' "$board" \
+    "the reveal must be gated on the reply service answering its probe"
   assert_grep 'classList.add("lavish")' "$board" \
-    "the reveal must be gated on the bridge being present"
+    "the reveal must still be gated on the legacy bridge being present"
   # An explicit display beats [hidden], so without this a closed control stands
   # open and every form on the board shows at once.
   assert_grep '.rc-f[hidden]{display:none' "$board" \
     "a closed control must stay closed against the layer own display rule"
+
+  # The confirmed state ships hidden and EMPTY. Only the script that saw a
+  # transport accept the request fills it in, so a statically served copy can
+  # never show the captain a confirmation that never happened.
+  assert_grep 'class="rc-ok" data-ok="answer" hidden' "$board" \
+    "an acknowledged control must have a confirmation banner that ships hidden"
+  assert_grep '<strong class="rc-ok-h"></strong>' "$board" \
+    "the confirmation banner must ship with no claim in it"
+  assert_grep '.rc-ok{flex-basis:100%' "$board" \
+    "the confirmation banner must be a full-width replacement, not a small label"
 
   # The script-managed reload can hold while a control is open.
   # The meta refresh survives only for a page that runs no script, so every

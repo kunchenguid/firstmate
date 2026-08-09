@@ -205,7 +205,7 @@ family_for_basename() {
       printf '%s\n' afk
       ;;
     fm-bearings-snapshot.test.sh|fm-fleet-snapshot-view.test.sh|\
-    fm-mission-control.test.sh)
+    fm-board-reply.test.sh|fm-mission-control.test.sh)
       printf '%s\n' snapshot-bearings
       ;;
     fm-backend-cmux.test.sh|fm-backend-cmux-smoke.test.sh)

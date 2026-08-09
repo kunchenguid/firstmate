@@ -12,7 +12,8 @@ The script's own header and `--help` own its exact flags, environment variables,
 The board shows state.
 By default it shows nothing else: no reply controls, no review surface, no browser network requests, and no supervision wiring.
 The generator's allowance read is a bounded loopback GET to the local Token Dashboard, never a request from the rendered page or to a remote host.
-`--controls` adds the captain reply layer described under "Replying from the board", which queues requests and still performs nothing itself.
+`--controls` adds the captain reply layer described under "Replying from the board", which records requests and still performs nothing itself.
+That layer is the only thing that makes the page itself reach the network, and only to the URL it was loaded from.
 
 The board never shows a completion percentage or an estimated finish time.
 Progress judgement is firstmate's, derived from evidence a renderer cannot see, so inventing a number here would be a guess presented as a measurement.
@@ -98,13 +99,13 @@ Project overflow shelves do not share or persist the Deferred shelf preference.
 ## Replying from the board
 
 `--controls` adds a reply layer to the same board file.
-Every control on it does exactly one thing: it queues one request that wakes firstmate.
-It performs no action, calls no endpoint, and carries no authority.
+Every control on it does exactly one thing: it records one request that wakes firstmate.
+It performs no action, reaches no external host, and carries no authority.
 
 That distinction is the whole safety model, so it is worth stating plainly.
 A board request is evidence of the captain's intent, not an authenticated captain instruction.
 Firstmate does with it exactly what it would have done had the captain said the same words in chat, under its own contract in `AGENTS.md`: an approval that needs the captain's explicit word still gets confirmed with the captain first, a merge still happens only if firstmate's own checks pass, and nothing destructive, irreversible, or security-sensitive is ever executed from a tap.
-The surface is reachable by anything that can reach the local Lavish port, so being able to reach it is never treated as authorization for any of that.
+The surface is reachable by anything that can reach the service serving it, so being able to reach it is never treated as authorization for any of that.
 
 There are five controls, and each row offers only what it can actually resolve:
 
@@ -119,29 +120,73 @@ The textarea retains `Your answer` as its accessible label in every case.
 Setting a decision aside carries no reason text at all: the stored reason is the captain's own, and firstmate reads it from the owning home rather than letting a request overwrite it.
 A row the board cannot name unambiguously gets no controls, because a request firstmate cannot resolve is worse than one the captain makes in chat.
 
-The layer is hidden by CSS and revealed only after a script confirms the Lavish bridge is present.
-The same file served statically is therefore the read-only board exactly as before, with no controls and no dead affordances, and only the copy served through Lavish grows the reply layer.
+A request travels to the URL the document was loaded from, so the board carries no endpoint, no port, and no path convention, and works unchanged behind any reverse proxy.
+The layer is hidden by CSS and revealed only after a script proves a transport that can actually reach firstmate: the reply service answering its presence probe, or the legacy Lavish bridge being present.
+The same file served by a plain static server, or opened from disk, is therefore the read-only board exactly as before, with no controls and no dead affordances.
 With script available, a managed reload preserves the active tab and meaningful reading position.
 Browser-native restoration is disabled and the saved anchor is applied synchronously after draft layout is restored, so refreshed content does not paint at an intermediate position and visibly jump back.
 With `--controls`, that reload also holds while a control is open or contains unsent text.
 The no-script fallback remains read-only and refreshes through its meta tag.
 
-After the Lavish bridge accepts a request, the affected control reports only what the bridge proved and refuses an accidental duplicate while that same action remains on the board.
-A delivery result of `true` produces a confirmed label such as `Answer sent`; the pinned Lavish bridge currently returns before delivery completes, so its truthful labels are `Answer queued`, `Merge request queued`, and their corresponding request forms rather than a false claim that delivery succeeded.
-A failure before queuing leaves the form open, keeps its text editable, and remains retryable.
-When queuing succeeds but delivery fails, the board keeps the exact queued payload in that draft's session record and locks editing and cancellation across full-document reloads, so a retry can neither enqueue a duplicate nor acknowledge newer text while sending the older payload.
-An enqueue attempt receives one durable browser-generated identity that is reused as Lavish's queue key after an asynchronous acceptance is interrupted by a reload, so the bridge replaces that exact attempt instead of appending another request.
+An acknowledged control is replaced in place by a full-width confirmation banner, because a small coloured label beside an unchanged row was missed.
+The banner leads its row, so a decision already answered reads as answered at a glance, and whatever the row can still resolve stays available under it.
+It ships hidden and empty: only the script that saw a transport accept the request fills in what was proved, so a statically served copy can never show a confirmation that never happened.
+The banner claims only that, and never that the requested merge or decision has happened.
+The reply service answers after it has validated and durably recorded the request, so its labels are `Answer received`, `Merge request received`, and their corresponding forms.
+The pinned Lavish bridge returns before delivery completes, so on that path the truthful labels remain `Answer queued` and `Answer sent` according to what it confirmed.
+
+Recorded is not the same as collected, and the difference is a reachable live state rather than a hypothetical: a continuity break retires the wake until an operator rebases it, and a deployment that never armed leaves the same gap from the start.
+The service therefore reports whether a wake is registered for this board, and the banner says `Recorded, but firstmate is not collecting replies from this board yet` when it is not, instead of implying firstmate already has it.
+A confirmation restored on load is corrected as soon as the probe answers, so the wording always reflects the current state rather than the state at the time of the tap.
+
+A failed or interrupted send leaves the form open, keeps its text editable, remains retryable, and records no acknowledgement.
+The draft's session record keeps the attempted payload and its browser-generated identity across reloads: a byte-identical retry reuses that identity, while edited text receives a new identity.
+That lets the service recognise an exact retry and record it once rather than twice without preventing the captain from changing the request.
 Every open composer and its draft are saved eagerly in session storage under the exact board, owning home, item, decision key, and intent identity.
 A full document reload restores only controls whose exact identity still exists, so an external generator rewrite cannot erase an in-progress answer and cannot attach it to a neighbouring decision.
 Submitted presentation state is browser-local, scoped by board home, document, owning home, item, decision key, and intent.
-It survives a reload only while the same actionable item remains and is retired when that item disappears; it is never fleet truth and never claims that the requested merge or decision has happened.
+It survives a reload only while the same actionable item remains, and is retired when that item disappears; it is never fleet truth.
 
-[`bin/fm-procevent-mission-control.sh`](../bin/fm-procevent-mission-control.sh) owns arming the wake and turning what comes back into validated requests, and its `--help` owns the request format, the fail-closed rules, and the lavish-axi version the format is verified against.
+[`bin/fm-procevent-board-reply.sh`](../bin/fm-procevent-board-reply.sh) owns the reply service, arming the wake, and turning what was recorded into validated requests.
+[`bin/fm-board-request-parse.pl`](../bin/fm-board-request-parse.pl) is the single owner of the request vocabulary and of every fail-closed rule, shared by both transports, and the service validates a request at its door with that same program over the same bytes it is about to store.
 
-The reply surface lasts as long as the review session behind it.
-Ending that session from the panel, which the captain can do with one tap beside the send button, delivers the request in hand and then retires the surface, and arming it before the session is open retires it before it ever works.
-Either way the read-only board is unaffected; only the ability to reply from it stops, until the session is opened again and the surface re-armed.
-How the control surface is exposed beyond this machine is a separate decision and is not made here.
+The legacy Lavish-bridged surface in [`bin/fm-procevent-mission-control.sh`](../bin/fm-procevent-mission-control.sh) remains supported and is not extended.
+It is superseded because Lavish's own annotate review mode defaults on and cannot be configured off, and while it is on a real tap on a board control reaches Lavish's annotation prompt instead of the button.
+That surface also lasts only as long as the review session behind it: ending the session delivers the request in hand and then retires it, and arming before the session is open retires it before it ever works.
+
+## The board reply service
+
+`bin/fm-procevent-board-reply.sh serve <board.html>` runs one small service in the foreground.
+It serves the board file for GET and accepts one validated captain request per POST, on one port, and does nothing else.
+It binds loopback only and refuses a non-loopback bind rather than making the port wider.
+The default port is 4321, `FM_BOARD_REPLY_PORT` changes the default, and `--port` overrides it for one run.
+The script's own header and `--help` own its exact flags, and [`bin/fm-board-reply-server.py`](../bin/fm-board-reply-server.py) owns the exact wire behavior.
+
+Tailnet reachability comes from reverse-proxying that port, which is this project's existing trust boundary for every captain-facing local surface, so the service adds no token layer of its own.
+Firstmate deploys it in three steps, none of which touch this repo:
+
+1. Render the board with `--controls` to a durable path outside any worktree, and keep regenerating it there.
+2. Run `bin/fm-procevent-board-reply.sh serve <board.html>` as a long-lived process, and point `tailscale serve` at `http://127.0.0.1:<port>/` rather than at the file.
+3. Arm the wake once with `bin/fm-procevent-board-reply.sh arm <board.html>`.
+
+`serve` and `arm` must run with the same `FM_HOME`, because both resolve the request log and the registration from it.
+A launch agent or unit that inherits no `FM_HOME` resolves them against the tracked code root instead, which reads as a working service on a board nothing is collecting.
+`serve` prints the home it resolved and whether the board is armed in its startup output, so a mismatch is visible immediately rather than as a request that silently goes nowhere.
+
+Arming has no precondition and is safe in any order: the request log is append-only and never consumed, so requests accepted while nothing is armed are picked up whole by a later arm.
+A request recorded by the service becomes an ordinary durable `check` wake through the same `state/procevent/` framework every other source uses, so firstmate's normal wake drain picks it up with no second notification path.
+
+Two properties are worth stating precisely, because both are easy to assume and wrong.
+
+The service never consumes its own log, and the source that reads it advances no cursor of its own: the resume point is derived from the runner's own durably captured results, so capture is the only commit point.
+A runner that died after the source printed but before the runner captured therefore re-derives the same bytes instead of losing them, which removes the pre-capture loss window the Lavish poll has.
+This is still not lossless delivery, and must never be described as such; [`bin/fm-procevent-lib.sh`](../bin/fm-procevent-lib.sh) owns the exact boundary, and a request the browser never managed to send was never here at all.
+
+A loopback port is reachable by any page the captain happens to have open, so the service refuses a cross-site write three independent ways: the required `application/json` content type and the required `X-Fm-Board-Reply` header are both outside what a cross-origin request may send without a preflight, no preflight is ever granted, and a browser-asserted `Sec-Fetch-Site` that is present and not `same-origin` is rejected outright.
+The request itself still carries no authority either way; this only keeps another page from putting words in the captain's mouth.
+
+If the request log stops matching the recorded cursor - it was replaced, truncated, or hand-edited - the source reports one continuity break, retires itself, and stays unarmed rather than re-announcing forever.
+`bin/fm-procevent-board-reply.sh arm --rebase <board.html>` is the supported recovery, and it deliberately skips whatever the recorded cursor can no longer account for.
 
 ## Deferring a decision
 
@@ -206,8 +251,15 @@ The generator does not serve it; how the file is exposed is decided outside it.
 The deferred cases pin the awaiting count and the section count to literal numbers rather than to the absence of a title, because dropping a decision from the list while still counting it and counting it while still listing it fail separately.
 It also pins a fixed current time and commits its fixture clones at explicit epochs, so the last-change wording, its three degrade-to-dash paths, and the promise that no clone is written to are all checked against times the test chose.
 
-The reply layer is covered in the same suite: that the default board is unchanged by its existence, that each row offers only the controls it can resolve, that a control reaches nothing but the Lavish bridge, that it stays hidden until that bridge is proved present, and that fleet prose stays escaped inside the attributes a control carries.
+The reply layer is covered in the same suite: that the default board is unchanged by its existence, that each row offers only the controls it can resolve, that a control names no host, port, or absolute endpoint and derives its target from the URL the document was loaded from, that it stays hidden until a transport is proved, and that the confirmation banner ships hidden and empty.
+Fleet prose is checked to stay escaped inside the attributes a control carries.
 A real-browser regression also covers exact and fallback Answer prompts, main-home and secondmate decision links, malformed and hostile inputs, successful and failed sends, duplicate prevention, acknowledgement restoration and retirement, active-tab restoration, stable reading anchors, explicit-navigation precedence, and disappeared-anchor fallback.
+
+`tests/fm-board-reply.test.sh` covers the direct transport with no Lavish anywhere.
+It re-proves every fail-closed rule at the service door and again at wake time, refuses a cross-site write and a non-loopback bind, holds captain text that looks like the wire format inside its own field, and pins the properties the cursor design rests on: a delta discarded before capture is re-derived byte for byte, a capture truncated before its end sentinel records no cursor and loses nothing, a captured delta advances the cursor so nothing is announced twice, a request accepted before arming survives to the next arm, one retried attempt is recorded once, and a broken cursor escalates exactly once with rebase as the recovery.
+It also pins that the service reports an unarmed board as uncollected, at its probe, in the answer to a recorded request, and in its own startup output.
+Its real-browser case serves the board through the service itself and drives a genuine Answer through to its confirmation, checks that the confirmation is a full-width banner rather than a label, that it survives a reload and fits a 390 by 844 viewport, and that killing the service leaves the next control open, editable, retryable, and unacknowledged.
+A second browser case retires the wake and proves that a request recorded while nothing is collecting is confirmed as recorded and explicitly not collected.
 That regression rewrites the served HTML file repeatedly while an Answer composer contains unsent text, then performs full document reloads and verifies the exact draft, control identity, tab, and anchored reading offset survive both replacements.
 With `FM_MISSION_CONTROL_LIVE_HOME` set to an active home, the same suite generates a fresh board directly from that fleet and uses Chrome at 390 by 844 to verify a meaningful reading anchor remains fixed through regeneration, a full reload, and the early refresh frames without printing fleet records.
 `tests/fm-procevent-mission-control.test.sh` pins the request normalizer against bytes captured from a real send through a real browser, and drives every fail-closed path - a forged envelope, an out-of-vocabulary intent, a truncated capture, a defer carrying reason text - to a refusal rather than a plausible request.

@@ -83,15 +83,23 @@
 #
 # Reply controls (--controls):
 #   The render stays read-only. --controls adds a reply layer whose every control
-#   does exactly one thing: queue ONE request through the Lavish bridge that wakes
-#   firstmate. It performs no action, calls no endpoint, and carries no authority;
-#   firstmate adjudicates each request under its own contract, exactly as if the
-#   captain had said the same words in chat. The surface is reachable by anything
-#   that can reach the local Lavish port, so reachability is never authorization.
+#   does exactly one thing: record ONE request that wakes firstmate. It performs no
+#   action, reaches no external host, and carries no authority; firstmate
+#   adjudicates each request under its own contract, exactly as if the captain had
+#   said the same words in chat. The surface is reachable by anything that can
+#   reach the service serving it, so reachability is never authorization.
 #
-#   The layer is hidden by CSS and revealed only after a script confirms the
-#   Lavish bridge is present, so the same file served statically is the read-only
-#   board it is without this flag, and no viewer is ever shown a dead control.
+#   A request travels to THIS DOCUMENT'S OWN URL, so the board needs no endpoint
+#   and no knowledge of how it is served or proxied. bin/fm-procevent-board-reply.sh
+#   owns that service, arming the wake, and normalizing what comes back. The legacy
+#   Lavish bridge remains supported for a board served through Lavish and is not
+#   extended; see docs/mission-control.md for both and for their limits.
+#
+#   The layer is hidden by CSS and revealed only after a script PROVES a transport
+#   that can reach firstmate, so the same file served statically or opened from
+#   disk is the read-only board it is without this flag, and no viewer is ever
+#   shown a dead control. An acknowledged control is then replaced in place by a
+#   full-width confirmation banner claiming only what the transport proved.
 #   With script available, session-scoped presentation memory preserves the
 #   active tab and stable reading position across both managed reloads and full
 #   document replacement after an external output-file rewrite. --controls also
@@ -100,8 +108,6 @@
 #   keeps the same cadence with a meta refresh and remains the read-only board.
 #
 #   Each request is one line: FM-BOARD-REQUEST followed by one JSON object.
-#   bin/fm-procevent-mission-control.sh owns arming the wake and normalizing what
-#   comes back; see docs/mission-control.md for the controls and their limits.
 #
 # Exit codes: 0 rendered, 1 runtime failure, 2 usage error.
 #
@@ -468,7 +474,7 @@ if [ "$WITH_QUOTA" = 1 ]; then
   fi
 fi
 
-HTML=$(
+render_html() {
   printf '%s' "$SNAPSHOT" | jq -L "$SCRIPT_DIR" -r \
     --argjson quota "$QUOTA" \
     --arg quota_note "$QUOTA_NOTE" \
@@ -481,7 +487,7 @@ HTML=$(
     --argjson projects_present "$PROJECTS_PRESENT" \
     --arg today "$TODAY" \
     --argjson controls "$CONTROLS" \
-    --argjson refresh "$REFRESH" '
+    --argjson refresh "$REFRESH" -f /dev/fd/3 3<<'FM_MISSION_CONTROL_JQ'
 
 include "fm-web-url";
 
@@ -1144,6 +1150,16 @@ def recent_action_row:
 def rc_button($intent; $label):
   (@html "<button type=\"button\" class=\"rc-b rc-\($intent)\" data-open=\"\($intent)\">\($label)</button>");
 
+# The confirmed state one control leaves behind. It ships hidden and carries no
+# text: only the script that saw a transport actually accept the request fills in
+# what was proved, so a statically served copy can never show a false confirmation.
+def rc_confirm($intent):
+  (@html "<div class=\"rc-ok\" data-ok=\"\($intent)\" hidden role=\"status\">")
+  + icon_check
+  + "<span class=\"rc-ok-t\"><strong class=\"rc-ok-h\"></strong>"
+  + "<span class=\"rc-ok-s\">Recorded for firstmate, which applies it under its own"
+  + " checks. It stays here until the call clears.</span></span></div>";
+
 def rc_form($intent; $question; $note_label; $placeholder; $send_label):
   (@html "<form class=\"rc-f\" data-toggle data-intent=\"\($intent)\" hidden>")
   + (@html "<p class=\"rc-q\">\($question)</p>")
@@ -1172,13 +1188,19 @@ def controls_for:
   if ($controls | not) or $c == null then "" else
     (@html "<div class=\"rc\" data-home=\"\($c.home)\" data-id=\"\($c.id)\" data-key=\"\($c.key)\" data-what=\"\($w.title)\">")
     + "<div class=\"rc-acts\">"
+    # The confirmations lead, so a row the captain has already answered reads as
+    # answered at a glance and whatever it can still resolve sits under that.
+    + (($c.intents
+        | map(select(. == "merge" or . == "reply" or . == "answer" or . == "defer"))
+        | map(rc_confirm(.))) | add // "")
     + (($c.intents | map(
         if . == "merge" then rc_button("merge"; "Approve merge")
         elif . == "reply" then rc_button("reply"; "Reply")
         elif . == "answer" then rc_button("answer"; "Answer")
         elif . == "defer" then rc_button("defer"; "Set aside")
         else "" end)) | add // "")
-    + "<span class=\"rc-sent\" hidden></span></div>"
+    + "<span class=\"rc-sent\" hidden></span>"
+    + "</div>"
     + (($c.intents | map(
         if . == "merge" then rc_form("merge";
              "Ask firstmate to merge this? Firstmate runs its own checks first and merges only if they pass.";
@@ -1210,7 +1232,9 @@ def ask_block:
     + "<p class=\"rc-q\">Ask firstmate for something new, or say what you want changed.</p>"
     + "<textarea class=\"rc-t\" rows=\"3\" maxlength=\"2000\" aria-label=\"Ask firstmate\"></textarea>"
     + "<div class=\"rc-row\"><button type=\"submit\" class=\"rc-go\">Send to firstmate</button>"
-    + "<span class=\"rc-sent\" hidden></span></div>"
+    + "<span class=\"rc-sent\" hidden></span>"
+    + rc_confirm("ask")
+    + "</div>"
     # This composer is always open, so text left in it holds the refresh with no
     # form to close. It has to say so, or the board just quietly stops updating.
     + "<p class=\"rc-hold\">The board holds its refresh while there is text here.</p>"
@@ -1522,16 +1546,18 @@ def quota_block:
     + balancing_block
   end;
 
-# Hidden by CSS, revealed only once a script confirms the Lavish bridge, so the
+# Hidden by CSS, revealed only once a script proves a transport that can actually
+# reach firstmate - the direct reply service, or the legacy Lavish bridge - so the
 # same file served statically stays the read-only board and no viewer is ever
 # shown a control that cannot reach anything.
 def controls_css:
   if ($controls | not) then "" else
 "/* ---- captain reply layer (--controls) ---- */
 .rc{display:none;}
-body.lavish .rc{display:block;border-top:1px solid var(--line);background:#fbfcfe;padding:4px 22px 13px;}
-body.lavish .rc-ask{border:1px solid var(--line);border-radius:16px;background:var(--panel);
-  box-shadow:var(--shadow);margin-top:14px;padding:15px 22px 17px;}
+body.board-reply .rc,body.lavish .rc{display:block;border-top:1px solid var(--line);
+  background:#fbfcfe;padding:4px 22px 13px;}
+body.board-reply .rc-ask,body.lavish .rc-ask{border:1px solid var(--line);border-radius:16px;
+  background:var(--panel);box-shadow:var(--shadow);margin-top:14px;padding:15px 22px 17px;}
 .rc-acts{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:8px 0 0;}
 .rc-b{appearance:none;-webkit-appearance:none;border:1px solid var(--line);background:var(--panel);
   color:var(--slate);font:inherit;font-size:12.5px;font-weight:600;padding:6px 13px;min-height:34px;
@@ -1562,8 +1588,26 @@ body.lavish .rc-ask{border:1px solid var(--line);border-radius:16px;background:v
 .rc-hold{margin:0;color:var(--faint);font-size:11.5px;}
 .rc-sent{color:var(--green);font-size:12.5px;font-weight:600;overflow-wrap:anywhere;}
 .rc-sent.rc-bad{color:var(--red);}
+/* The confirmed state. A small coloured label was missable, so an acknowledged
+   control is replaced in place by a full-width banner: the row cannot be read as
+   still waiting for the captain. Siblings that can still be resolved stay, and a
+   row whose every control is acknowledged becomes the banner alone. */
+.rc-ok{flex-basis:100%;display:flex;align-items:flex-start;gap:10px;margin:3px 0 1px;
+  padding:11px 14px;border:1px solid #bfe0cf;border-left:4px solid var(--green);
+  border-radius:13px;background:var(--green-soft);}
+.rc-ok[hidden]{display:none;}
+.rc-ok .ck{flex:none;width:19px;height:19px;color:var(--green);margin-top:1px;stroke-width:2.4;}
+.rc-ok-t{display:flex;flex-direction:column;gap:1px;min-width:0;}
+.rc-ok-h{color:#0b6b49;font-size:13.5px;font-weight:700;overflow-wrap:anywhere;}
+.rc-ok-s{color:var(--slate);font-size:12px;overflow-wrap:anywhere;}
+/* Recorded, but nothing is collecting it. The board proved only the first half,
+   so this keeps the needs-you tone rather than reading as a clean success. */
+.rc-ok.rc-warn{border-color:#ead7ae;border-left-color:var(--amber);background:var(--amber-soft);}
+.rc-ok.rc-warn .ck{color:var(--amber);}
+.rc-ok.rc-warn .rc-ok-h{color:#936218;}
 @media(max-width:720px){
-  body.lavish .rc,body.lavish .rc-ask{padding-left:16px;padding-right:16px;}
+  body.board-reply .rc,body.lavish .rc,
+  body.board-reply .rc-ask,body.lavish .rc-ask{padding-left:16px;padding-right:16px;}
   .rc-b,.rc-go{min-height:44px;padding-top:9px;padding-bottom:9px;}
 }
 "
@@ -2412,11 +2456,12 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
 "
 + (if ($controls | not) then "" else
 "<script>
-/* The captain reply layer. It queues requests and performs nothing: the only
-   call it makes is to the Lavish bridge, and the only thing it sends is one
-   FM-BOARD-REQUEST line per deliberate tap. There is no endpoint, no token, and
-   no action here, so a tap can never be the thing that merges, answers, or sets
-   anything aside - firstmate decides all of that under its own contract. */
+/* The captain reply layer. It records requests and performs nothing: the only
+   call it makes is to the reply service serving this board (or, on the legacy path,
+   to the Lavish bridge), and the only thing it sends is one FM-BOARD-REQUEST line
+   per deliberate tap. There is no external host, no token, and no action here, so
+   a tap can never be the thing that merges, answers, or sets anything aside -
+   firstmate decides all of that under its own contract. */
 (function () {
   var tries = 0;
 
@@ -2435,6 +2480,92 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
   }
   reveal();
 
+  /* The direct transport. Every request goes to the URL THIS DOCUMENT WAS LOADED
+     FROM, so the
+     board needs no endpoint, no path convention, and no knowledge of how it is
+     being served or proxied. A page opened from a file, or served by any plain
+     static server, gets no answer to the probe below and therefore stays the
+     read-only board with no dead controls. */
+  function ownUrl() { return window.location.pathname || \"/\"; }
+
+  var COLLECTED = \"Recorded for firstmate, which applies it under its own checks. It stays here until the call clears.\";
+  var UNCOLLECTED = \"Recorded, but firstmate is not collecting replies from this board yet.\";
+  var collecting = true;
+
+  /* A confirmation restored on load is written before the probe can answer, so
+     once it does, any panel already on screen is corrected rather than left
+     claiming a collection that is not happening. */
+  function noteCollecting(ok) {
+    collecting = ok;
+    Array.prototype.forEach.call(document.querySelectorAll(\".rc-ok\"), function (panel) {
+      var note = panel.querySelector(\".rc-ok-s\");
+      if (ok) {
+        if (note) { note.textContent = COLLECTED; }
+        panel.classList.remove(\"rc-warn\");
+      } else if (!panel.hidden) {
+        if (note) { note.textContent = UNCOLLECTED; }
+        panel.classList.add(\"rc-warn\");
+      }
+    });
+  }
+
+  var receiverReady = (function () {
+    if (!window.fetch || !window.AbortController) { return Promise.resolve(false); }
+    var stop, timer;
+    try {
+      stop = new AbortController();
+      /* A hung service must not make the first tap look dead, which is the whole
+         failure this transport exists to remove, so the probe is bounded. */
+      timer = setTimeout(function () { stop.abort(); }, 2000);
+    } catch (e) { return Promise.resolve(false); }
+    return window.fetch(ownUrl() + \"?fm-board-reply=probe\",
+        {method: \"GET\", cache: \"no-store\", signal: stop.signal})
+      .then(function (res) { return res.ok ? res.text() : \"\"; })
+      .then(function (text) {
+        var data = null;
+        try { data = JSON.parse(text); } catch (e) { return null; }
+        return (data && data.service === \"fm-board-reply\") ? data : null;
+      })
+      .catch(function () { return null; })
+      .then(function (data) {
+        try { clearTimeout(timer); } catch (e) { /* already fired */ }
+        if (!data) { return false; }
+        document.body.classList.add(\"board-reply\");
+        noteCollecting(data.armed !== false);
+        return true;
+      });
+  }());
+
+  /* One request, recorded or refused. A 200 means the service validated it and
+     stored it durably, which is the only thing the confirmed state ever claims.
+     The attempt identity is what makes a retry after an interrupted send replace
+     that exact attempt instead of recording one captain answer twice. */
+  async function postRequest(wire, attempt) {
+    var res = await window.fetch(ownUrl(), {
+      method: \"POST\",
+      cache: \"no-store\",
+      headers: {\"Content-Type\": \"application/json\", \"X-Fm-Board-Reply\": \"1\"},
+      body: JSON.stringify({wire: wire, attempt: attempt})
+    });
+    var text = \"\";
+    if (!res.ok) {
+      try { text = await res.text(); } catch (e) { text = \"\"; }
+      var refusalData = null;
+      try { refusalData = JSON.parse(text); } catch (e) { refusalData = null; }
+      var refusal = new Error((refusalData && typeof refusalData.reason === \"string\"
+        && refusalData.reason) || \"firstmate did not accept it\");
+      refusal.definite = !!(refusalData && refusalData.ok === false
+        && typeof refusalData.reason === \"string\");
+      throw refusal;
+    }
+    text = await res.text();
+    var data = null;
+    try { data = JSON.parse(text); } catch (e) { data = null; }
+    if (data && data.ok === true) { return data; }
+    throw new Error((data && typeof data.reason === \"string\" && data.reason)
+      || \"firstmate did not confirm receipt\");
+  }
+
   function formsIn(block) {
     return Array.prototype.slice.call(block.querySelectorAll(\".rc-f\"));
   }
@@ -2451,6 +2582,37 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
     sent.hidden = false;
     sent.textContent = message;
     if (bad) { sent.classList.add(\"rc-bad\"); } else { sent.classList.remove(\"rc-bad\"); }
+  }
+
+  /* Keep the outcome readable to anything reading the text of this row without adding
+     a second green line beside the confirmation banner that already says it. */
+  function noteOnly(block, message) {
+    var sent = block.querySelector(\".rc-sent\");
+    if (!sent) { return; }
+    sent.textContent = message;
+    sent.hidden = true;
+    sent.classList.remove(\"rc-bad\");
+  }
+
+  function confirmPanel(block, intent) {
+    return block.querySelector(\"[data-ok=\\\"\" + intent + \"\\\"]\");
+  }
+
+  function showConfirm(block, intent, label, warning) {
+    var panel = confirmPanel(block, intent);
+    if (!panel) { return; }
+    /* Unhide first: a live region mutated while hidden is often not announced. */
+    panel.hidden = false;
+    var head = panel.querySelector(\".rc-ok-h\");
+    if (head) { head.textContent = label; }
+    var note = panel.querySelector(\".rc-ok-s\");
+    if (note && warning) { note.textContent = warning; }
+    if (warning) { panel.classList.add(\"rc-warn\"); }
+  }
+
+  function hideConfirm(block, intent) {
+    var panel = confirmPanel(block, intent);
+    if (panel) { panel.hidden = true; }
   }
 
   function summary(intent, what) {
@@ -2495,8 +2657,13 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
         var note = area ? area.value : \"\";
         var open = form.hasAttribute(\"data-toggle\") ? !form.hidden : note !== \"\";
         var pending = requestState[identity];
+        var retry = records[identity] && records[identity].retry;
         if (!open && !note) { delete records[identity]; return; }
         records[identity] = {identity:identity,open:open,note:note};
+        if (retry && typeof retry.payload === \"string\"
+            && typeof retry.attempt === \"string\" && retry.attempt) {
+          records[identity].retry = {payload:retry.payload,attempt:retry.attempt};
+        }
         if (pending) {
           records[identity].queued = {status:pending.status,payload:pending.payload,
             note:pending.note,attempt:pending.attempt};
@@ -2509,6 +2676,30 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
       else { window.sessionStorage.removeItem(draftKey); }
     } catch (e) { /* draft memory unavailable */ }
     if (!skipView && window.__fmSaveView) { window.__fmSaveView(); }
+  }
+  function storedRetry(identity) {
+    var record = storedDrafts().find(function (candidate) {
+      return candidate && candidate.identity === identity;
+    });
+    var retry = record && record.retry;
+    return retry && typeof retry.payload === \"string\"
+      && typeof retry.attempt === \"string\" && retry.attempt ? retry : null;
+  }
+  function rememberRetry(identity, retry) {
+    var records = storedDrafts();
+    var found = false;
+    records.forEach(function (record) {
+      if (!record || record.identity !== identity) { return; }
+      found = true;
+      if (retry) { record.retry = {payload:retry.payload,attempt:retry.attempt}; }
+      else { delete record.retry; }
+    });
+    if (!found && retry) {
+      records.push({identity:identity,open:true,note:\"\",
+        retry:{payload:retry.payload,attempt:retry.attempt}});
+    }
+    try { window.sessionStorage.setItem(draftKey, JSON.stringify(records)); }
+    catch (e) { /* retry memory unavailable */ }
   }
   function restoreDrafts() {
     var records = storedDrafts();
@@ -2527,7 +2718,8 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
         if (record.queued && typeof record.queued.payload === \"string\"
             && typeof record.queued.note === \"string\"
             && typeof record.queued.attempt === \"string\" && record.queued.attempt) {
-          var status = record.queued.status === \"queuing\" ? \"queuing\" : \"queued\";
+          var status = record.queued.status === \"queuing\" ? \"queuing\"
+            : (record.queued.status === \"sending\" ? \"sending\" : \"queued\");
           requestState[record.identity] = {
             status:status, payload:record.queued.payload, note:record.queued.note,
             attempt:record.queued.attempt
@@ -2540,28 +2732,43 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
     saveDrafts(true);
   }
 
+  /* Say only what the transport actually proved. The direct service answers after
+     it has validated and stored the request, so \"received\" is a fact; the pinned
+     Lavish bridge returns before delivery completes, so it can only claim
+     \"queued\" unless it confirmed the send itself. */
   function ackLabel(intent, delivery) {
-    var verb = delivery === \"sent\" ? \"sent\" : \"queued\";
+    var verb = delivery === \"received\" ? \"received\" : (delivery === \"sent\" ? \"sent\" : \"queued\");
     if (intent === \"merge\") { return \"Merge request \" + verb; }
     if (intent === \"answer\") { return \"Answer \" + verb; }
     if (intent === \"reply\") { return \"Reply \" + verb; }
     if (intent === \"defer\") { return \"Set-aside request \" + verb; }
     return \"Request \" + verb;
   }
-  function applyAck(block, intent, delivery) {
+  function ackSentence(label, delivery) {
+    return label + (delivery === \"received\" ? \" by firstmate.\" : \" for firstmate.\");
+  }
+  /* An acknowledged control is REPLACED by its confirmation banner rather than
+     just recoloured, because a small label beside an unchanged row was missed.
+     The button keeps its acknowledged text and disabled state while hidden, so
+     anything reading the row still sees which intent was acknowledged, and a
+     sibling control the board can still resolve stays available. */
+  function applyAck(block, intent, delivery, warning) {
     var label = ackLabel(intent, delivery);
     var opener = block.querySelector(\"[data-open=\\\"\" + intent + \"\\\"]\");
     if (opener) {
       opener.disabled = true;
       opener.textContent = label;
       opener.classList.add(\"rc-submitted\");
+      if (confirmPanel(block, intent)) { opener.hidden = true; }
     }
     formsIn(block).forEach(function (form) {
       if (form.getAttribute(\"data-intent\") !== intent) { return; }
       var submit = form.querySelector(\".rc-go\");
       if (submit) { submit.disabled = true; submit.textContent = label; }
     });
-    say(block, label + \" for firstmate.\", false);
+    showConfirm(block, intent, label, warning);
+    if (confirmPanel(block, intent)) { noteOnly(block, ackSentence(label, delivery)); }
+    else { say(block, ackSentence(label, delivery), false); }
   }
   function restoreAcks() {
     var current = {};
@@ -2573,7 +2780,9 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
         current[key] = true;
         try {
           var delivery = window.localStorage.getItem(key);
-          if (delivery === \"sent\" || delivery === \"queued\") { applyAck(block, intent, delivery); }
+          if (delivery === \"sent\" || delivery === \"queued\" || delivery === \"received\") {
+            applyAck(block, intent, delivery);
+          }
         }
         catch (e) { /* acknowledgement memory unavailable */ }
       });
@@ -2609,13 +2818,18 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
     if (submit) { submit.disabled = false; }
   }
 
+  /* An interrupted send is genuinely ambiguous, so the exact payload is frozen and
+     offered for retry under its own attempt identity rather than being edited or
+     silently re-sent as newer text. */
   function keepQueuedPayload(block, form, state) {
     freezePayload(block, form, state);
     var submit = form.querySelector(\".rc-go\");
     if (submit) { submit.disabled = false; }
     say(block, state.status === \"queuing\"
       ? \"Queue interrupted - retry this saved answer.\"
-      : \"Queued but not sent - retry to send this saved answer.\", true);
+      : (state.status === \"sending\"
+        ? \"Sending was interrupted - retry to send this saved answer.\"
+        : \"Queued but not sent - retry to send this saved answer.\"), true);
   }
 
   function newAttempt() {
@@ -2704,12 +2918,62 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
     var requestIdentity = draftIdentity(block, request.intent);
     try {
       var rememberedDelivery = persistent ? window.localStorage.getItem(identity) : null;
-      if (rememberedDelivery === \"sent\" || rememberedDelivery === \"queued\") {
+      if (rememberedDelivery === \"sent\" || rememberedDelivery === \"queued\"
+        || rememberedDelivery === \"received\") {
         applyAck(block, request.intent, rememberedDelivery);
         shut(block);
         return;
       }
     } catch (e) { /* duplicate prevention continues for this page */ }
+
+    var wire = \"FM-BOARD-REQUEST \" + JSON.stringify(request);
+    if (await receiverReady) {
+      /* The direct path is one step: the service either recorded the request or
+         it did not. There is no queued-but-undelivered middle state to recover
+         from, so a clean failure leaves the composer open and editable. */
+      if (requestInFlight[requestIdentity]) { return; }
+      var retry = storedRetry(requestIdentity);
+      var attempting = {payload:wire,note:note,
+        attempt:retry && retry.payload === wire ? retry.attempt : newAttempt()};
+      requestInFlight[requestIdentity] = true;
+      freezePayload(block, form, attempting);
+      saveDrafts(true);
+      rememberRetry(requestIdentity, attempting);
+      var recorded = null;
+      var refused = \"\";
+      var definiteRefusal = false;
+      try { recorded = await postRequest(wire, attempting.attempt); }
+      catch (e) {
+        refused = (e && e.message) || \"\";
+        definiteRefusal = !!(e && e.definite === true);
+      }
+      delete requestInFlight[requestIdentity];
+      if (!recorded) {
+        if (definiteRefusal) { rememberRetry(requestIdentity, null); }
+        releasePayload(form);
+        say(block, \"Not sent - \" + (refused || \"the board could not reach firstmate\")
+          + \". Try again.\", true);
+        saveDrafts();
+        return;
+      }
+      rememberRetry(requestIdentity, null);
+      releasePayload(form);
+      if (area) { area.value = \"\"; }
+      noteCollecting(recorded.armed !== false);
+      var uncollected = collecting ? \"\" : UNCOLLECTED;
+      if (persistent) {
+        try { window.localStorage.setItem(identity, \"received\"); }
+        catch (e) { /* page state still prevents a duplicate */ }
+        applyAck(block, request.intent, \"received\", uncollected);
+      } else {
+        var askLabel = ackLabel(request.intent, \"received\");
+        showConfirm(block, request.intent, askLabel, uncollected);
+        noteOnly(block, ackSentence(askLabel, \"received\"));
+      }
+      shut(block);
+      saveDrafts();
+      return;
+    }
 
     var lav = bridge();
     if (!lav) {
@@ -2717,8 +2981,6 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
       saveDrafts();
       return;
     }
-    var submit = form.querySelector(\".rc-go\");
-    var wire = \"FM-BOARD-REQUEST \" + JSON.stringify(request);
     var pending = requestState[requestIdentity];
     if (requestInFlight[requestIdentity]) { return; }
     if (pending && pending.payload !== wire) {
@@ -2772,7 +3034,9 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
       try { window.localStorage.setItem(identity, delivery); } catch (e) { /* page state still prevents a duplicate */ }
       applyAck(block, request.intent, delivery);
     } else {
-      say(block, ackLabel(request.intent, delivery) + \" for firstmate.\", false);
+      var bridgedLabel = ackLabel(request.intent, delivery);
+      showConfirm(block, request.intent, bridgedLabel);
+      noteOnly(block, ackSentence(bridgedLabel, delivery));
     }
     shut(block);
     saveDrafts();
@@ -2796,6 +3060,9 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
       if (submit) { submit.disabled = false; submit.textContent = \"Send to firstmate\"; }
       var sent = ask.querySelector(\".rc-sent\");
       if (sent) { sent.hidden = true; }
+      /* A new ask is a new request, so the previous confirmation stops standing
+         over text that has not been sent. */
+      hideConfirm(ask, \"ask\");
     }
     if (area.classList && area.classList.contains(\"rc-t\")) { saveDrafts(); }
   });
@@ -2820,8 +3087,10 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
 " end)
 + "</body></html>
 "
-'
-) || die "rendering failed"
+FM_MISSION_CONTROL_JQ
+}
+
+HTML=$(render_html) || die "rendering failed"
 
 if [ "$TO_STDOUT" = 1 ]; then
   printf '%s\n' "$HTML"
