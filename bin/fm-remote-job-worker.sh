@@ -29,6 +29,19 @@
 # loop that never stays up only burns CPU and grows its log without bound. A
 # child that stays up for FM_REMOTE_JOB_SUPERVISOR_HEALTHY_SECONDS clears that
 # count. fm-on's ensure path restarts a worker that gave up.
+#
+# A serving child also stops when its own worker lock - the only record that it
+# owns this account's queue - is gone from under it. Deleting the state root is
+# not enough on its own: the stale-record reap runs on every serving pass and
+# reaches fm_remote_job_prepare_state, which recreates the state root, so the
+# heartbeat keeps succeeding while the lock directory inside it stays missing.
+# A worker serving from that half-restored state owns nothing, so a second
+# worker can take the free lock and run beside it, and worker_publish_quarantine
+# can never succeed again - which makes worker_shutdown re-arm and return on
+# every signal, leaving a worker no signal can stop. Losing the lock is
+# therefore fatal to the serving child exactly like a failed heartbeat: it exits
+# non-zero and the supervisor starts a replacement that acquires ownership
+# cleanly.
 set -u
 
 # A non-numeric override falls back to the default rather than crashing the
@@ -167,6 +180,15 @@ worker_acquire_lock() {
     rmdir "$WORKER_LOCK" || return 1
   done
   return 1
+}
+
+# True while this process still holds a real worker lock directory. A lock that
+# was acquired and then removed underneath the worker is not a transient the
+# serving loop can wait out: nothing on the worker's own paths recreates it (see
+# the header), so the answer never changes back.
+worker_holds_lock() {
+  [ "$WORKER_LOCK_HELD" -eq 1 ] || return 1
+  [ -d "$WORKER_LOCK" ] && [ ! -L "$WORKER_LOCK" ]
 }
 
 worker_publish_quarantine() {
@@ -687,6 +709,9 @@ main() {
   worker_publish_identity "$account_home" || { worker_error "cannot publish worker code identity"; exit 1; }
   worker_publish_pid || { worker_error "cannot publish worker pid"; exit 1; }
   while :; do
+    # Checked before the heartbeat, so an unowned worker never publishes another
+    # round of readiness for a queue it no longer holds.
+    worker_holds_lock || { worker_error "worker ownership record is gone"; exit 1; }
     worker_write_heartbeat || { worker_error "cannot update worker heartbeat"; exit 1; }
     # Checked right after a fresh heartbeat, so the grace window cannot make a
     # still-healthy worker read as unready to a concurrent probe.

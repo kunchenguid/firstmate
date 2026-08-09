@@ -113,6 +113,20 @@ pass "the Linux start path puts the whole worker tree in its own process group"
 [ "$(ppid_of "$WORKER")" = 1 ] ||
   fail "the fixture worker is not orphaned to init, so this case does not reproduce the leak"
 
+# The lock directory is the only record that this child owns the account queue,
+# and nothing on the serving path recreates it - unlike the state root around
+# it, which the stale-record reap restores on every pass. A child that kept
+# serving without it would own nothing a second worker could not take, and could
+# never publish the shutdown quarantine again, so every later signal would be
+# swallowed by the shutdown guard and the child could no longer be stopped.
+rm -rf "$CASE1/remote-jobs/worker.lock"
+wait_gone "$SERVE" 15 ||
+  fail "the serving child kept serving after its ownership record was removed"
+alive "$WORKER" || fail "losing a child's worker lock stopped the supervisor too"
+wait_child "$WORKER" 20 || fail "the supervisor did not replace the child that lost its worker lock"
+SERVE=$(pgrep -P "$WORKER" | head -n 1)
+pass "a serving child stops once its worker lock is gone, and the supervisor replaces it"
+
 # The exact teardown shape that leaked in production: a fixture cleanup removes
 # the worker's state root and then stops only the single recorded worker pid -
 # which is the serving child, not the supervisor. KILL makes that obsolete
