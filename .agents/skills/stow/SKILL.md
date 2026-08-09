@@ -125,11 +125,12 @@ Every test must hold for a candidate:
 ### Destinations
 
 **Hard rule: the stow process never creates or writes a firstmate-repo-tracked skill.**
-**Every skill stow's offload produces for a Firstmate home is user-owned and local, excluded through the repository-local exclude file resolved by `git rev-parse --git-path info/exclude`; contributing a lesson to the shared tracked template is a separate deliberate captain action, never automatic.**
+**Every skill stow's offload produces for a Firstmate home is user-owned and local, excluded through that active home's repository-local exclude file resolved with `git -C "$home_root" rev-parse --git-path info/exclude`; contributing a lesson to the shared tracked template is a separate deliberate captain action, never automatic.**
 Approved project-level destinations are not produced by stow: they ship normally through that project's own registered delivery path.
 
-- A user-owned local skill: a directory under `.agents/skills/<freeform-name>/` whose path is appended to this home clone's repository-local exclude file resolved by `git rev-parse --git-path info/exclude`, never to a `.gitignore`.
-  Before approval and again before migration, validate that the chosen freeform destination is absent from the git index and collides with no existing file or directory, and reject the destination if either check fails.
+- A user-owned local skill: a directory under `.agents/skills/<freeform-name>/` whose path is appended to the active home clone's repository-local exclude file, never to a `.gitignore`.
+  Resolve `home_root` to `$FM_HOME` when it is set and otherwise to the Firstmate code root, and anchor every destination index check, exclude-path lookup, and ignore verification to that root with `git -C "$home_root"`.
+  Before approval and again before migration, validate that the chosen freeform destination under `home_root` is absent from that home's git index and collides with no existing file or directory, and reject the destination if either check fails.
   The name is freeform with no user-vs-firstmate naming convention, the skill stays per-home and untracked, and the harness still lists and JIT-loads it because skill discovery scans the filesystem and ignores git status (verified in `docs/verification/stow-memory.md`).
   Its precise, condition-stated description line is its entire trigger; it gets no `AGENTS.md` declaration because `AGENTS.md` is shared tracked material.
   Because this destination is local and untracked, it is also the JIT home for private conditional knowledge that no committed surface may hold.
@@ -150,11 +151,14 @@ A local skill exists only in this home, so offloading an entry out of `data/capt
 2. Approve.
    The captain approves per candidate in plain chat, and firstmate records the approval in the held item's body.
 3. Migrate, outside this pass.
-   An approved local skill is created through firstmate's normal direct maintenance of private local material only after re-validating that its destination is absent from the git index and collides with no existing content: write the `SKILL.md` with its precise description trigger, resolve the repository-local exclude file with `git rev-parse --git-path info/exclude`, append the directory path to that resolved file, and confirm the skill appears in a fresh session's skill index.
+   Resolve `home_root` to `$FM_HOME` when it is set and otherwise to the Firstmate code root, then re-validate the approved local-skill destination under that root for both index absence with `git -C "$home_root"` and filesystem collision absence.
+   Before creating the destination or writing any private content, resolve the exclude file with `git -C "$home_root" rev-parse --git-path info/exclude`, append the destination directory path to it, and verify the future `SKILL.md` path is ignored with `git -C "$home_root" check-ignore`.
+   Only after that verification succeeds, create the destination and write the `SKILL.md` with its precise description trigger, then confirm the skill appears in a fresh session's skill index.
+   If any migration step fails, remove the destination content and the exclude rule written by this attempt, leaving neither partial private content nor a partial rule behind.
    An approved project destination ships as a normal task through that project's registered delivery mode.
    The migration's source of truth is the entry as quoted in the proposal, or its archive line when budget pressure already retired it.
 4. Remove only once live.
-   The memory entry leaves its always-injected file only after the destination is live: the local skill exists with its line in the resolved repository-local exclude file, or the project change has landed.
+   The memory entry leaves its always-injected file only after the destination is live: the local skill exists with its verified line in the active home's resolved repository-local exclude file, or the project change has landed.
    Until then the entry stays, so knowledge is never in limbo between owners.
    For a non-pinned entry, when the home is still over budget after approval, this remove-only-once-live rule relaxes solely into immediate archival with provenance `offloading to <destination> via <task id>` in the recoverable cold tier, never into plain removal, so the archive remains the source if migration fails.
    A pinned entry never takes that budget-archive exception and leaves memory only after its approved destination is live.
