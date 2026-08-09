@@ -45,8 +45,12 @@
 #            immediately before the task metadata is deleted - the last moment
 #            the harness/model/effort join exists - and by this script's
 #            `sweep` for a task that declared failure and was never torn down.
-#            Fields: task, harness, model, effort, mode, kind, project,
-#            backend, outcome, outcome_source, route, escalated, findings, pr.
+#            Fields: task, harness, model, effort, mode, role, deliverable,
+#            project, backend, outcome, outcome_source, route, escalated,
+#            findings, pr. role and deliverable are the task identity axes; a
+#            record written before that split carries the retired single kind
+#            field instead and is never rewritten, because this ledger is
+#            append-only evidence.
 #            A task id may carry more than one terminal line: `sweep` records a
 #            declared failure at declaration time and a later teardown records
 #            the same task's release. The LAST terminal line for a task id is
@@ -152,7 +156,8 @@
 #   fm-wake-ledger.sh task <id> [--outcome landed|failed|abandoned]
 #                     [--source declared|discarded|unreleased|assumed]
 #                     [--harness H] [--model M] [--effort E] [--mode M]
-#                     [--kind K] [--project P] [--backend B] [--pr URL]
+#                     [--role R] [--deliverable D] [--project P]
+#                     [--backend B] [--pr URL]
 #                     [--route R] [--escalated yes|no] [--findings N]
 #       Append one terminal task record. Absent facts record as unknown rather
 #       than being guessed, and an absent --source records assumed rather than
@@ -196,6 +201,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Reused rather than re-stated so there is one owner of that rule.
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# fm-task-axis-lib.sh owns the identity axes and the deprecated kind= alias's
+# derivation, so the sweep reads a pre-split record's role and deliverable
+# through the same owner every other reader uses.
+# shellcheck source=bin/fm-task-axis-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-task-axis-lib.sh"
 
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 LEDGER="${FM_WAKE_LEDGER:-$DATA/wake-ledger.tsv}"
@@ -560,7 +570,8 @@ cmd_outcome() {
 
 cmd_task() {
   local id='' outcome=landed osource=assumed route=unknown escalated=unknown findings=unknown
-  local harness=unknown model=unknown effort=unknown mode=unknown kind=unknown
+  local harness=unknown model=unknown effort=unknown mode=unknown
+  local role=unknown deliverable=unknown
   local project=unknown backend=unknown pr='' now
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -570,7 +581,8 @@ cmd_task() {
       --model) [ "$#" -ge 2 ] || die "--model needs a value"; model=$2; shift 2 ;;
       --effort) [ "$#" -ge 2 ] || die "--effort needs a value"; effort=$2; shift 2 ;;
       --mode) [ "$#" -ge 2 ] || die "--mode needs a value"; mode=$2; shift 2 ;;
-      --kind) [ "$#" -ge 2 ] || die "--kind needs a value"; kind=$2; shift 2 ;;
+      --role) [ "$#" -ge 2 ] || die "--role needs a value"; role=$2; shift 2 ;;
+      --deliverable) [ "$#" -ge 2 ] || die "--deliverable needs a value"; deliverable=$2; shift 2 ;;
       --project) [ "$#" -ge 2 ] || die "--project needs a value"; project=$2; shift 2 ;;
       --backend) [ "$#" -ge 2 ] || die "--backend needs a value"; backend=$2; shift 2 ;;
       --pr) [ "$#" -ge 2 ] || die "--pr needs a value"; pr=$2; shift 2 ;;
@@ -614,7 +626,8 @@ cmd_task() {
     "model=$(ledger_sanitize "${model:-unknown}" "$LEDGER_KEY_MAX")" \
     "effort=$(ledger_sanitize "${effort:-unknown}" "$LEDGER_SHORT_MAX")" \
     "mode=$(ledger_sanitize "${mode:-unknown}" "$LEDGER_SHORT_MAX")" \
-    "kind=$(ledger_sanitize "${kind:-unknown}" "$LEDGER_SHORT_MAX")" \
+    "role=$(ledger_sanitize "${role:-unknown}" "$LEDGER_SHORT_MAX")" \
+    "deliverable=$(ledger_sanitize "${deliverable:-unknown}" "$LEDGER_SHORT_MAX")" \
     "project=$(ledger_sanitize "${project:-unknown}" "$LEDGER_SHORT_MAX")" \
     "backend=$(ledger_sanitize "${backend:-unknown}" "$LEDGER_SHORT_MAX")" \
     "outcome=$outcome" \
@@ -726,7 +739,8 @@ cmd_sweep() {
       --model "$(ledger_meta_value "$meta" model)" \
       --effort "$(ledger_meta_value "$meta" effort)" \
       --mode "$(ledger_meta_value "$meta" mode)" \
-      --kind "$(ledger_meta_value "$meta" kind)" \
+      --role "$(fm_task_role "$meta")" \
+      --deliverable "$(fm_task_deliverable "$meta")" \
       --project "$(ledger_meta_value "$meta" project)" \
       --backend "$(ledger_meta_value "$meta" backend)" \
       --route "$(ledger_meta_value "$meta" route)" || continue

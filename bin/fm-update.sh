@@ -64,7 +64,7 @@ fi
 FF_NUDGE_WINDOWS=""
 FF_SEEN_HOMES=""
 
-# Live direct reports first: state/<id>.meta with kind=secondmate carries the
+# Live direct reports first: state/<id>.meta with role=secondmate carries the
 # authoritative home= path.
 sweep_live_secondmate_metas "$STATE" origin no
 
@@ -88,7 +88,7 @@ if [ -f "$SECONDMATES_MD" ]; then
         case "$remote_result" in
           synced:*)
             echo "remote secondmate $id: updated on $SECONDMATE_REGISTRY_HOST (${remote_result#synced: })"
-            if [ -f "$STATE/$id.meta" ] && grep -qx 'kind=secondmate' "$STATE/$id.meta"; then
+            if [ -f "$STATE/$id.meta" ] && [ "$(fm_task_role "$STATE/$id.meta")" = secondmate ]; then
               FF_NUDGE_WINDOWS="$FF_NUDGE_WINDOWS fm-$id"
             fi
             ;;
