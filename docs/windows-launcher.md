@@ -31,12 +31,15 @@ Use the launcher's own usage text for its supported arguments.
 
 The bridge starts one WSL process, sets its working directory to the batch file's repository, selects `/bin/bash` directly, and enters through `bin/fm-wsl-entry.sh`.
 The WSL helper resolves the repository from its own location and replaces itself with `bin/fm-launch.sh`, so the current Windows directory and shell profiles cannot redirect the launch.
+Because that session never runs a login shell, the helper puts the distribution's standard private bin directories, `~/.local/bin` and `~/bin`, on `PATH` when they exist, so the menu sees the same installed harnesses an interactive shell sees.
+A harness installed somewhere else stays visible but dim, exactly as it would in a shell whose `PATH` does not carry it.
 
 ## Troubleshooting
 
 If Windows says WSL is missing, run `wsl --install`, restart Windows if prompted, finish the distribution setup, and retry.
 If the helper reports that `bin/fm-launch.sh` is absent, update the repository before retrying.
 If the menu reports a Herdr or harness problem, install or configure that dependency inside the default WSL distribution rather than only on Windows.
+If the menu calls a harness uninstalled that an interactive WSL shell can run, check where that binary lives: link or install it under `~/.local/bin` so a session that starts without a login shell resolves it too.
 
 ## Maintaining this file
 
