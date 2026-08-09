@@ -165,7 +165,7 @@ test_no_profile_keeps_claude_profile_defaults() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
 
   launch=$(cat "$LAUNCH_LOG")
-  expected="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
+  expected="env -u OMPCODE -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
   [ "$launch" = "$expected" ] || fail "no-profile claude launch did not use the canonical launch kind"$'\n'"expected: $expected"$'\n'"actual:   $launch"
   pass "no --model/--effort records defaults and types the claude launch instructions"
 }
@@ -695,6 +695,34 @@ test_pi_tui_mode_probe_is_safe_for_old_and_new_pi() {
   pass "Pi launch probing omits --tui-mode on older Pi and preserves it on supporting Pi"
 }
 
+# A raw launch command still resolves a harness identity, and that identity is
+# what the worker must report back. Without FM_PI_HARNESS a raw `pi-signed ...`
+# worker sees only PI_CODING_AGENT and calls itself plain pi, contradicting the
+# harness recorded in its own meta.
+test_raw_pi_signed_launch_keeps_the_self_identification_marker() {
+  local rec id out status launch own
+  id=profile-raw-pi-signed-z8e
+  rec=$(make_spawn_case profile-raw-pi-signed claude "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "pi-signed --model openai-codex/gpt-5.6-sol")
+  status=$?
+  expect_code 0 "$status" "a raw pi-signed launch command should spawn"
+  assert_contains "$out" "spawned $id harness=pi-signed" "raw pi-signed launch did not record its harness identity"
+  assert_grep "harness=pi-signed" "$HOME_DIR/state/$id.meta" "raw pi-signed launch meta lost harness=pi-signed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "FM_PI_HARNESS=pi-signed pi-signed --model openai-codex/gpt-5.6-sol" \
+    "raw pi-signed launch dropped the marker its worker self-identifies with"
+  assert_not_contains "$launch" "env -u OMPCODE" \
+    "raw launch command must stay the operator's verbatim command line"
+
+  own=$(env -u CLAUDECODE -u GROK_AGENT -u OMPCODE \
+    PI_CODING_AGENT=true FM_PI_HARNESS=pi-signed "$ROOT/bin/fm-harness.sh")
+  [ "$own" = pi-signed ] || fail "a worker launched with that marker self-identified as '$own', not pi-signed"
+  pass "a raw pi-signed launch keeps the identity marker its worker reports back"
+}
+
 test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata() {
   local rec id out status
   id=profile-pi-signed-missing-z8c
@@ -770,7 +798,7 @@ test_claude_forwards_firstmate_config_dir_when_set() {
   status=$?
   expect_code 0 "$status" "claude spawn with CLAUDE_CONFIG_DIR set should succeed"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "CLAUDE_CONFIG_DIR='/opt/test/claude-work' env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude" \
+  assert_contains "$launch" "CLAUDE_CONFIG_DIR='/opt/test/claude-work' env -u OMPCODE -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude" \
     "claude launch did not forward firstmate's CLAUDE_CONFIG_DIR to the crewmate pane"
   pass "claude forwards firstmate's CLAUDE_CONFIG_DIR so the crewmate uses the same credential store"
 }
@@ -850,6 +878,7 @@ test_opencode_threads_model_and_ignores_effort_axis
 test_pi_threads_model_and_max_effort
 test_pi_tui_mode_probe_is_safe_for_old_and_new_pi
 test_pi_signed_threads_shared_pi_profile_and_preserves_identity
+test_raw_pi_signed_launch_keeps_the_self_identification_marker
 test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata
 test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity
 test_batch_forwards_shared_profile_flags

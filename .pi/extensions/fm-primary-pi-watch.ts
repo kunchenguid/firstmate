@@ -99,10 +99,16 @@ function selectPrimaryHarness(harness: PrimaryHarness): void {
   repairOnlyHint = `call ${watchToolName} again only after a later notification says the cycle is missing, failed, or unhealthy`;
   shuttingDownMessage = `watcher: not armed - ${primaryHarnessLabel} session is shutting down`;
   marker = `${state}/.${harness}-watch-extension-loaded`;
-  const identityFile = harness === "omp"
-    ? `${root}/.omp/extensions/fm-primary-omp-watch.ts`
-    : extensionFile;
-  extensionVersion = `sha256:${createHash("sha256").update(readFileSync(identityFile)).digest("hex")}`;
+  // The entrypoint alone is a thin re-export, so its bytes never move when the
+  // shared implementation below it changes. Hash the whole load chain, in the
+  // same order bin/fm-session-start.sh hashes it, or a stale in-memory watcher
+  // would keep reporting itself current.
+  const identityFiles = harness === "omp"
+    ? [`${root}/.omp/extensions/fm-primary-omp-watch.ts`, extensionFile]
+    : [extensionFile];
+  const digest = createHash("sha256");
+  for (const file of identityFiles) digest.update(readFileSync(file));
+  extensionVersion = `sha256:${digest.digest("hex")}`;
 }
 const retryBaseMs = positiveInteger("FM_WATCH_REARM_RETRY_BASE_MS", 250);
 const retryMaxMs = positiveInteger("FM_WATCH_REARM_RETRY_MAX_MS", 4000);
