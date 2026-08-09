@@ -2250,18 +2250,20 @@ EOF
 # keeps its own abort-cleanup ownership, and a projected herdr task re-arms the
 # projection abort cleanup so the EXIT trap removes the projected workspace and
 # journal this invocation created.
-spawn_rollback_task_state() {  # <detail>
-  local detail=$1
+spawn_rollback_task_state() {  # <detail> [preserve-endpoint]
+  local detail=$1 preserve_endpoint=${2:-0}
   echo "failed: $detail" >> "$STATE/$ID.status" 2>/dev/null || true
   echo "error: $detail" >&2
 
   # 1. Endpoint removal, then CONFIRM exact absence. Only the backend's
   #    structured absence verdict licenses any record deletion.
-  fm_backend_kill "$BACKEND" "$T" 2>/dev/null || true
-  if ! fm_backend_endpoint_confirmed_gone "$BACKEND" "$T"; then
-    echo "failed: $detail; endpoint $T could not be confirmed gone - task records retained and marked rollback-needed for cleanup retry" >> "$STATE/$ID.status" 2>/dev/null || true
-    echo "error: $detail; endpoint $T could not be confirmed gone; task records retained for cleanup retry" >&2
-    return 1
+  if [ "$preserve_endpoint" -ne 1 ]; then
+    fm_backend_kill "$BACKEND" "$T" 2>/dev/null || true
+    if ! fm_backend_endpoint_confirmed_gone "$BACKEND" "$T"; then
+      echo "failed: $detail; endpoint $T could not be confirmed gone - task records retained and marked rollback-needed for cleanup retry" >> "$STATE/$ID.status" 2>/dev/null || true
+      echo "error: $detail; endpoint $T could not be confirmed gone; task records retained for cleanup retry" >&2
+      return 1
+    fi
   fi
 
   if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
@@ -2943,7 +2945,8 @@ fi
 if ! spawn_send_literal "$T" "$LAUNCH"; then
   if [ "$RELAUNCH" -eq 1 ] && [ "$RELAUNCH_PRIOR_HARNESS" = cursor ] \
      && [ "$HARNESS" != cursor ]; then
-    spawn_rollback_task_state "replacement launch command could not be delivered"
+    spawn_send_key "$T" C-u >/dev/null 2>&1 || true
+    spawn_rollback_task_state "replacement launch command could not be delivered" 1
     exit 1
   fi
 fi
@@ -2971,13 +2974,13 @@ if [ "$HARNESS" = cursor ]; then
 else
   if ! spawn_send_key "$T" Enter; then
     if [ "$RELAUNCH" -eq 1 ] && [ "$RELAUNCH_PRIOR_HARNESS" = cursor ]; then
-      spawn_rollback_task_state "replacement launch command could not be submitted"
+      spawn_send_key "$T" C-u >/dev/null 2>&1 || true
+      spawn_rollback_task_state "replacement launch command could not be submitted" 1
       exit 1
     fi
   fi
 fi
-if [ "$RELAUNCH" -eq 1 ] && [ "$RELAUNCH_PRIOR_HARNESS" = cursor ] \
-   && [ "$HARNESS" != cursor ]; then
+if [ "$RELAUNCH" -eq 1 ] && [ "$HARNESS" != cursor ]; then
   rm -f "$STATE/$ID.worker-server"
 fi
 if [ "$HARNESS" = kimi ]; then

@@ -874,6 +874,24 @@ test_cursor_switch_relaunch_send_failures_preserve_ownership() {
       "cursor-to-claude $failure send failure discarded ownership evidence"
     [ -f "$HOME_DIR/state/$id.meta" ] \
       || fail "cursor-to-claude $failure send failure removed relaunch metadata"
+    assert_grep "fm-$id" "$CASE_DIR/windows.state" \
+      "cursor-to-claude $failure send failure removed relaunch endpoint"
+
+    out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+      FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+      FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+      FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
+      FM_FAKE_CURSOR_AGENT_ARGS="$FAKEBIN_DIR/cursor-agent --force --trust brief" \
+      FM_PROC_ROOT_OVERRIDE="$CASE_DIR/no-proc" FM_FAKE_CURSOR_AGENT_AFTER_ENTER=1 \
+      FM_FAKE_CURSOR_AGENT_PID=4242 FM_FAKE_CURSOR_WORKER_PID=$old_pid \
+      FM_FAKE_SWITCH_LAUNCH_TYPED="$CASE_DIR/switch-launch-typed" \
+      FM_FAKE_WINDOW_STATE_FILE="$CASE_DIR/windows.state" \
+      FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" PATH="$FAKEBIN_DIR:$PATH" \
+      "$SPAWN" "$id" --relaunch --harness claude 2>&1)
+    status=$?
+    expect_code 0 "$status" "cursor-to-claude relaunch must retry after $failure send failure"$'\n'"$out"
+    [ ! -e "$HOME_DIR/state/$id.worker-server" ] \
+      || fail "successful cursor-to-claude retry retained cursor ownership evidence"
     wait "$old_parent" 2>/dev/null || true
   done
   pass "cursor harness-switch relaunch preserves ownership after send failures"
