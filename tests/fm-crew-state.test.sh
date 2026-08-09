@@ -1566,6 +1566,38 @@ test_missing_run_head_falls_back_to_current_state() {
   pass "missing run head falls back instead of matching by branch"
 }
 
+# The same contract, with the branch_sync block present that the custody rule
+# made routine. branch_sync.local.head IS this worktree's HEAD by construction,
+# so an unscoped read of `head:` over the whole payload answers with it whenever
+# the run object omits its own head - and the history rule then "binds" a run it
+# has no head evidence about at all, on branch name alone. Custody is refused
+# here (custody released to the user, submitted from another commit), so nothing
+# may attribute this run.
+test_missing_run_head_with_branch_sync_falls_back_to_current_state() {
+  reset_fakes
+  local d out
+  d=$(new_case missing-run-head-sync)
+  make_repo_on_branch "$d/wt" fm/feat-no-head-sync
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/no-head-sync.meta" "window=fm:fm-no-head-sync" "worktree=$d/wt" \
+    "kind=ship" "harness=claude"
+  printf 'working: current stage still in progress\n' > "$d/state/no-head-sync.status"
+  FM_FAKE_SYNC_STATE=user_owned
+  FM_FAKE_SYNC_SUBMITTED_HEAD=0000000000000000000000000000000000000001
+  FM_FAKE_AXI_STATUS=$(run_pipeline_owned_prepush fm/feat-no-head-sync | grep -v '^  head:')
+  printf '%s\n' "$FM_FAKE_AXI_STATUS" | grep -q "^    head: $(git -C "$d/wt" rev-parse HEAD)$" \
+    || fail "missing-head-sync: fixture lost the branch_sync local head this case turns on"
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" no-head-sync
+  out=$(run_crew_state "$d" no-head-sync)
+  assert_not_contains "$out" "source: run-step" \
+    "a missing run head must not borrow branch_sync's local head as evidence"
+  assert_contains "$out" "source: status-log" "missing run head falls back to current state sources"
+  assert_contains "$out" "state: working" "status-log remains current after missing run head"
+  pass "missing run head beside a branch_sync block still refuses branch-only attribution"
+}
+
 test_active_run_is_authoritative
 test_stale_needs_decision_superseded
 test_stale_blocked_superseded
@@ -1615,6 +1647,7 @@ test_historical_same_branch_rewritten_head_not_current
 test_active_run_descendant_fix_head_remains_current
 test_local_advanced_past_run_head_invalidates
 test_missing_run_head_falls_back_to_current_state
+test_missing_run_head_with_branch_sync_falls_back_to_current_state
 test_prepush_pipeline_custody_is_attributed
 test_released_custody_unresolvable_head_not_attributed
 test_pipeline_custody_submitted_elsewhere_not_attributed

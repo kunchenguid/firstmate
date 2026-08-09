@@ -2024,6 +2024,48 @@ gate: review
 EOF
 }
 
+# A parked run in its pre-push phase: its head is a commit in no-mistakes' own
+# gate repo and NOT an object in this worktree, so no history test can bind it,
+# and the branch_sync custody object is the only proof of ownership. This is the
+# shape that decides whether teardown may abort, so it is exercised here on the
+# destructive path rather than only through fm-crew-state's read-only reporting.
+# The head placeholder is deliberately unresolvable; the cases assert that.
+PREPUSH_UNRESOLVABLE_HEAD=a1b2c3d4
+parked_prepush_axi_status_toon() {  # <branch> <local-head> <submitted-head> [run-id]
+  cat <<EOF
+run:
+  id: "${4:-01RUN}"
+  branch: $1
+  status: awaiting_approval
+  awaiting_agent: parked 2m10s
+  head: "$PREPUSH_UNRESOLVABLE_HEAD"
+  pr: ""
+  findings: none
+gate: review
+branch_sync:
+  state: pipeline_owned
+  changed: false
+  local:
+    branch: $1
+    head: $2
+    clean: true
+  pipeline:
+    run: "${4:-01RUN}"
+    status: awaiting_approval
+    phase: pre_push
+    submitted_head: $3
+    current_head: $PREPUSH_UNRESOLVABLE_HEAD
+    pushed_head: ""
+  safety: blocked_pipeline_owned
+EOF
+}
+
+assert_head_unresolvable() {  # <worktree> <head> <label>
+  git -C "$1" rev-parse --verify "$2^{commit}" >/dev/null 2>&1 \
+    && fail "$3: head $2 resolves in the worktree, the case is vacuous"
+  return 0
+}
+
 running_axi_status_toon() {  # <branch> <head> [run-id]
   cat <<EOF
 run:
@@ -2159,6 +2201,60 @@ EOF
   kill -0 "$pid" 2>/dev/null || fail "parked-run-abort-unconfirmed: process reap ran before refusal"
   kill -KILL "$pid" 2>/dev/null || true
   pass "teardown refuses before reap or removal when a task-owned run remains parked"
+}
+
+# Custody binds on the destructive side: the run parked at this task's gate is
+# the pipeline that currently owns this branch and was submitted from exactly
+# this checkout, even though its own head is invisible here. Teardown must abort
+# it rather than orphan it holding a fleet slot.
+test_parked_prepush_run_owned_by_custody_is_aborted() {
+  local case_dir rc head
+  case_dir=$(make_case parked-prepush-custody)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  assert_head_unresolvable "$case_dir/wt" "$PREPUSH_UNRESOLVABLE_HEAD" "parked-prepush-custody"
+
+  rc=0
+  FM_FAKE_AXI_STATUS="$(parked_prepush_axi_status_toon fm/task-x1 "$head" "$head")" \
+  FM_FAKE_NM_ABORT_LOG="$case_dir/nm-abort.log" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "parked-prepush-custody: teardown should still succeed"
+  assert_present "$case_dir/nm-abort.log" \
+    "parked-prepush-custody: teardown never aborted the pipeline that owns this branch"
+  assert_grep "abort --run 01RUN" "$case_dir/nm-abort.log" \
+    "parked-prepush-custody: teardown did not target the verified run id"
+  assert_grep "parked at a gate; aborting" "$case_dir/stderr" \
+    "parked-prepush-custody: teardown did not report aborting the parked pre-push run"
+  pass "a parked pre-push run proven by branch_sync custody is aborted before the worker is removed"
+}
+
+# The mirror, and the direction that matters most: the custody claim is live and
+# for this branch, but the run was submitted from a DIFFERENT commit than the one
+# checked out here, so it is not this task's run. With the head unresolvable
+# there is no history evidence either, so teardown has proven nothing and must
+# not touch the run.
+test_parked_prepush_run_submitted_elsewhere_is_never_aborted() {
+  local case_dir rc head
+  case_dir=$(make_case parked-prepush-other-head)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  assert_head_unresolvable "$case_dir/wt" "$PREPUSH_UNRESOLVABLE_HEAD" "parked-prepush-other-head"
+
+  rc=0
+  FM_FAKE_AXI_STATUS="$(parked_prepush_axi_status_toon fm/task-x1 "$head" \
+    0000000000000000000000000000000000000001)" \
+  FM_FAKE_NM_ABORT_LOG="$case_dir/nm-abort.log" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "parked-prepush-other-head: teardown should still succeed"
+  assert_absent "$case_dir/nm-abort.log" \
+    "parked-prepush-other-head: teardown aborted a run submitted from another commit"
+  assert_not_contains "$(cat "$case_dir/stderr")" "aborting" \
+    "parked-prepush-other-head: teardown reported aborting a run it has not proven it owns"
+  pass "a parked run whose custody names another submitted head is never aborted"
 }
 
 test_another_branchs_parked_run_is_never_touched() {
@@ -2637,6 +2733,8 @@ test_parked_own_run_refuses_when_abort_is_unconfirmed
 test_mismatched_run_after_abort_refuses_unconfirmed
 test_empty_status_after_abort_refuses_unconfirmed
 test_not_found_status_after_abort_confirms_completion
+test_parked_prepush_run_owned_by_custody_is_aborted
+test_parked_prepush_run_submitted_elsewhere_is_never_aborted
 test_another_branchs_parked_run_is_never_touched
 test_own_autonomous_run_is_left_alone
 test_leaked_worktree_process_is_reaped

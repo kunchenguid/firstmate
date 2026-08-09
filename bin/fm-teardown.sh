@@ -1213,14 +1213,14 @@ task_status_is_own_parked_run() {  # <worktree> <axi-status-output>
   branch=$(git -C "$wt" symbolic-ref --quiet --short HEAD 2>/dev/null) || return 1
   [ -n "$branch" ] || return 1
   [ -n "$out" ] || return 1
-  run_id=$(fm_nm_strip_quotes "$(fm_nm_field "$out" id)")
+  run_id=$(fm_nm_strip_quotes "$(fm_nm_run_field "$out" id)")
   [ -n "$run_id" ] || return 1
-  run_branch=$(fm_nm_strip_quotes "$(fm_nm_field "$out" branch)")
+  run_branch=$(fm_nm_strip_quotes "$(fm_nm_run_field "$out" branch)")
   [ -n "$run_branch" ] && [ "$run_branch" = "$branch" ] || return 1
   fm_nm_status_matches_worktree "$wt" "$out" || return 1
   outcome=$(fm_nm_strip_quotes "$(fm_nm_field "$out" outcome)")
   [ -z "$outcome" ] || return 1
-  status=$(fm_nm_strip_quotes "$(fm_nm_field "$out" status)")
+  status=$(fm_nm_strip_quotes "$(fm_nm_run_field "$out" status)")
   awaiting=$(printf '%s\n' "$out" | grep -E '^[[:space:]]*awaiting_agent:' | head -1 || true)
   has_gate=$(printf '%s\n' "$out" | grep -Eq '^[[:space:]]*gate:[[:space:]]*' && echo 1 || echo 0)
   case "$status" in
@@ -1243,7 +1243,7 @@ task_run_is_own_parked_run() {  # <worktree>
 
 task_status_is_terminal_run() {  # <axi-status-output> <run-id>
   local out=$1 expected_id=$2 run_id outcome
-  run_id=$(fm_nm_strip_quotes "$(fm_nm_field "$out" id)")
+  run_id=$(fm_nm_strip_quotes "$(fm_nm_run_field "$out" id)")
   [ "$run_id" = "$expected_id" ] || return 1
   outcome=$(fm_nm_strip_quotes "$(fm_nm_field "$out" outcome)")
   case "$outcome" in

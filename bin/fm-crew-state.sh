@@ -186,10 +186,17 @@ nm_run() {  # <args...>
   fm_nm_run "$WT" "$NM_TIMEOUT" "$@"
 }
 
-# Scalar value of a TOON key in the captured run output ($RUN_OUT).
+# Scalar value of a TOON key in the captured run output ($RUN_OUT). nm_run_field
+# is for keys of the RUN OBJECT itself and scopes the read to its block, because
+# `run:` and `branch_sync.local:`/`branch_sync.pipeline:` share key names; plain
+# nm_field is for keys that are the run's top-level siblings, such as `gate:` and
+# `outcome:`, which a run-scoped read would never find.
 RUN_OUT=""
 nm_field() {  # <key>
   fm_nm_field "$RUN_OUT" "$1"
+}
+nm_run_field() {  # <key>
+  fm_nm_run_field "$RUN_OUT" "$1"
 }
 # Finding count from a findings[N]{...} table header; empty when none.
 nm_findings_count() {
@@ -298,7 +305,7 @@ nm_effective_ci_step_status() {
 # green right now, still only waiting on merge/close.
 nm_ci_checks_state() {
   local run_id log_tail marker
-  run_id=$(strip_quotes "$(nm_field id)")
+  run_id=$(strip_quotes "$(nm_run_field id)")
   [ -n "$run_id" ] || { printf 'unknown'; return; }
   log_tail=$(nm_run axi logs --step ci --run "$run_id") || true
   [ -n "$log_tail" ] || { printf 'unknown'; return; }
@@ -411,7 +418,7 @@ COARSE_STATUS=""
 if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/null 2>&1; then
   RUN_OUT=$(nm_run axi status)
   if [ -n "$RUN_OUT" ]; then
-    run_branch=$(strip_quotes "$(nm_field branch)")
+    run_branch=$(strip_quotes "$(nm_run_field branch)")
     if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] && nm_run_matches_worktree; then
       HAVE_RUN=1
     else
@@ -455,7 +462,7 @@ if [ "$HAVE_RUN" = 1 ]; then
       *)         RUN_STATE=unknown; RUN_DETAIL="runs list status: $COARSE_STATUS" ;;
     esac
   else
-    status=$(strip_quotes "$(nm_field status)")
+    status=$(strip_quotes "$(nm_run_field status)")
     RUN_STATUS=$status
     outcome=$(strip_quotes "$(nm_field outcome)")
     awaiting=$(printf '%s\n' "$RUN_OUT" | grep -E '^[[:space:]]*awaiting_agent:' | head -1 || true)

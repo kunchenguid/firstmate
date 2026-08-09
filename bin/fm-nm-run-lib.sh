@@ -104,6 +104,23 @@ fm_nm_block() {  # <toon-output> <indent> <key>
   '
 }
 
+# Scalar value of TOON key $2 belonging to the RUN OBJECT of `axi status` output
+# $1, i.e. scoped to the top-level `run:` block when the output has one and read
+# unscoped otherwise (older or flatter shapes that emit the run's fields at top
+# level). Every read of a run field must go through this rather than fm_nm_field:
+# `run:` and `branch_sync.local:` both carry a bare `head:`, and a plain
+# fm_nm_field answers with whichever appears first, so a run object that simply
+# omits a key would silently borrow the branch_sync value - and branch_sync.local
+# describes this worktree by construction, which would turn an absent run head
+# into a false identity match.
+fm_nm_run_field() {  # <toon-output> <key>
+  if printf '%s\n' "$1" | grep -q '^run:[[:space:]]*$'; then
+    fm_nm_field "$(fm_nm_block "$1" 0 run)" "$2"
+  else
+    fm_nm_field "$1" "$2"
+  fi
+}
+
 # 0 when `axi status` output $2 itself asserts that the run it reports currently
 # holds custody of worktree $1's branch, independent of whether that run's head
 # is a visible object here.
@@ -173,7 +190,7 @@ fm_nm_run_owns_worktree_by_branch_sync() {  # <worktree> <axi-status-output>
   [ "$sync_branch" = "$wt_branch" ] || return 1
   sync_head=$(fm_nm_strip_quotes "$(fm_nm_field "$local_block" head)")
   [ "$sync_head" = "$wt_head" ] || return 1
-  run_id=$(fm_nm_strip_quotes "$(fm_nm_field "$out" id)")
+  run_id=$(fm_nm_strip_quotes "$(fm_nm_run_field "$out" id)")
   [ -n "$run_id" ] || return 1
   pipeline_block=$(fm_nm_block "$sync_block" 2 pipeline)
   pipeline_run=$(fm_nm_strip_quotes "$(fm_nm_field "$pipeline_block" run)")
@@ -190,7 +207,7 @@ fm_nm_run_owns_worktree_by_branch_sync() {  # <worktree> <axi-status-output>
 # match stays the caller's precondition, checked before this is consulted.
 fm_nm_status_matches_worktree() {  # <worktree> <axi-status-output>
   local wt=$1 out=$2 run_head
-  run_head=$(fm_nm_strip_quotes "$(fm_nm_field "$out" head)")
+  run_head=$(fm_nm_strip_quotes "$(fm_nm_run_field "$out" head)")
   fm_nm_head_matches_worktree "$wt" "$run_head" && return 0
   fm_nm_run_owns_worktree_by_branch_sync "$wt" "$out"
 }
