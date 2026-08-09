@@ -53,6 +53,8 @@ FM_HOME="${FM_HOME:-$(cd "$SCRIPT_DIR/.." && pwd -P)}"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-attempt-lib.sh
 . "$SCRIPT_DIR/fm-attempt-lib.sh"
+# shellcheck source=bin/fm-control-lib.sh
+. "$SCRIPT_DIR/fm-control-lib.sh"
 
 # The copy must have been quiet - no launch activity - for this many seconds
 # before the structured operation may clean it up. Default 2h; 0 disables the
@@ -99,20 +101,29 @@ if ! declare -F canonical_existing_dir >/dev/null 2>&1; then
 fi
 
 # --- provider hook-token retirement ----------------------------------------
+# Where a harness's firstmate-owned global turn-end registry entry lives is
+# owned by bin/fm-control-lib.sh, so cleanup and the control plane's relaunch
+# retire the same artifact rather than each carrying its own copy of the path.
 remove_grok_turnend_auth() {
-  local state_dir=$1 id=$2 token hooks_dir
-  token=$(cat "$state_dir/$id.grok-turnend-token" 2>/dev/null || true)
-  case "$token" in ''|*[!A-Za-z0-9._-]*) return 0 ;; esac
-  hooks_dir="${GROK_HOME:-$HOME/.grok}/hooks/fm-turn-end.d"
-  rm -f "$hooks_dir/$token"
+  local state_dir=$1 id=$2 token_path token='' path
+  token_path=$(fm_control_harness_turnend_token_path grok "$state_dir" "$id") || return 1
+  if [ -n "$token_path" ] && [ -f "$token_path" ]; then
+    IFS= read -r token < "$token_path" || [ -n "$token" ] || return 1
+  fi
+  path=$(fm_control_harness_turnend_auth_path grok "$token") || return 1
+  [ -n "$path" ] || return 0
+  rm -f -- "$path"
 }
 
 remove_kimi_turnend_auth() {
-  local state_dir=$1 id=$2 token hooks_dir
-  token=$(cat "$state_dir/$id.kimi-turnend-token" 2>/dev/null || true)
-  case "$token" in ''|*[!A-Za-z0-9._-]*) return 0 ;; esac
-  hooks_dir="$HOME/.kimi-code/fm-turn-end.d"
-  rm -f "$hooks_dir/$token"
+  local state_dir=$1 id=$2 token_path token='' path
+  token_path=$(fm_control_harness_turnend_token_path kimi "$state_dir" "$id") || return 1
+  if [ -n "$token_path" ] && [ -f "$token_path" ]; then
+    IFS= read -r token < "$token_path" || [ -n "$token" ] || return 1
+  fi
+  path=$(fm_control_harness_turnend_auth_path kimi "$token") || return 1
+  [ -n "$path" ] || return 0
+  rm -f -- "$path"
 }
 
 # --- busy-state retirement ------------------------------------------------
@@ -375,7 +386,9 @@ remove_task_state_files() {
     "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" \
     "$STATE/$ID.kimi-turnend-token" "$STATE/$ID.muse-session" \
     "$STATE/$ID.muse-session-current" \
-    "$STATE/.$ID.open-decisions-cursor"
+    "$STATE/.$ID.open-decisions-cursor" \
+    "$STATE/$ID.control-relaunch" "$STATE/$ID.control-relaunch.meta-prior" \
+    "$STATE/$ID.control-relaunch.brief-prior" "$STATE/$ID.control-relaunch.note"
 }
 
 # --- structured attempt-bound cleanup operation ----------------------------

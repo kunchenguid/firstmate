@@ -742,25 +742,36 @@ fm_remote_job_worker_process_group() { # <pid>
 
 # Stop a worker and every descendant it leaked, TERM first and KILL only for a
 # survivor. Signals the isolated worker group when one is provable and the lone
-# process otherwise. Returns non-zero when the worker is still alive afterwards.
+# process otherwise. Returns non-zero when any verified worker-group member is
+# still alive afterwards.
 fm_remote_job_stop_worker_tree() { # <pid>
   local pid=$1 pgid i=0
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
   [ "$pid" -gt 1 ] || return 1
   pgid=$(fm_remote_job_worker_process_group "$pid" 2>/dev/null || true)
   if [ -n "$pgid" ]; then kill -TERM -- "-$pgid" 2>/dev/null || true; else kill -TERM "$pid" 2>/dev/null || true; fi
-  while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 50 ]; do
+  while { [ -n "$pgid" ] && kill -0 -- "-$pgid" 2>/dev/null || [ -z "$pgid" ] && kill -0 "$pid" 2>/dev/null; } \
+    && [ "$i" -lt 50 ]; do
     i=$((i + 1))
     sleep 0.1
   done
-  kill -0 "$pid" 2>/dev/null || return 0
+  if [ -n "$pgid" ]; then
+    kill -0 -- "-$pgid" 2>/dev/null || return 0
+  else
+    kill -0 "$pid" 2>/dev/null || return 0
+  fi
   if [ -n "$pgid" ]; then kill -KILL -- "-$pgid" 2>/dev/null || true; else kill -KILL "$pid" 2>/dev/null || true; fi
   i=0
-  while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 50 ]; do
+  while { [ -n "$pgid" ] && kill -0 -- "-$pgid" 2>/dev/null || [ -z "$pgid" ] && kill -0 "$pid" 2>/dev/null; } \
+    && [ "$i" -lt 50 ]; do
     i=$((i + 1))
     sleep 0.1
   done
-  ! kill -0 "$pid" 2>/dev/null
+  if [ -n "$pgid" ]; then
+    ! kill -0 -- "-$pgid" 2>/dev/null
+  else
+    ! kill -0 "$pid" 2>/dev/null
+  fi
 }
 
 fm_remote_job_read_single_line() {

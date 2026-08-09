@@ -201,6 +201,14 @@
       "audience": "public-product"
     },
     {
+      "path": "VISION.md",
+      "audience": "public-product"
+    },
+    {
+      "path": "docs/agent-control.md",
+      "audience": "maintainer-architecture"
+    },
+    {
       "path": "docs/architecture.md",
       "audience": "maintainer-architecture"
     },
