@@ -16,6 +16,37 @@ RUNNER="$ROOT/bin/fm-test-run.sh"
 assert_present "$RUNNER" "bin/fm-test-run.sh is missing"
 [ -x "$RUNNER" ] || fail "bin/fm-test-run.sh must be executable"
 
+run_in_new_process_group() {
+  local python=$1 cwd=$2 stdout_path=$3 stderr_path=$4
+  shift 4
+  "$python" - "$cwd" "$stdout_path" "$stderr_path" "$@" <<'PY'
+import os
+import signal
+import subprocess
+import sys
+
+cwd, stdout_path, stderr_path, *command = sys.argv[1:]
+with open(stdout_path, "w", encoding="utf-8") as out, open(stderr_path, "w", encoding="utf-8") as err:
+    child = subprocess.Popen(
+        command,
+        cwd=cwd,
+        stdout=out,
+        stderr=err,
+        start_new_session=True,
+    )
+    try:
+        rc = child.wait(timeout=5)
+    except BaseException:
+        try:
+            os.killpg(child.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        child.wait()
+        raise
+print(rc)
+PY
+}
+
 test_list_all_exact_suite_coverage() {
   local listed expected missing extra f
   listed=$("$RUNNER" --list --all | LC_ALL=C sort)
@@ -184,12 +215,14 @@ test_changed_dependency_selection_and_unmapped_failure() {
 }
 
 test_empty_selection_emits_summary() {
-  local tmp repo out json
+  local tmp repo out json journal run_dir
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-empty.XXXXXX")
   repo="$tmp/repo"
+  journal="$tmp/journal"
   init_changed_fixture_repo "$repo"
   printf 'documentation only\n' >"$repo/README.md"
-  out=$(cd "$repo" && bin/fm-test-run.sh --changed --base HEAD --json "$tmp/artifacts/timing.json" 2>"$tmp/err") \
+  out=$(cd "$repo" && /bin/bash bin/fm-test-run.sh --changed --base HEAD \
+    --progress-journal "$journal" --json "$tmp/artifacts/timing.json" 2>"$tmp/err") \
     || fail "empty valid changed selection must pass"
   [ "$out" = "FM_TEST_SUMMARY total=0 failed=0 skipped_gate=0 duration_ms=0" ] \
     || fail "empty selection summary is missing or non-deterministic: $out"
@@ -201,8 +234,30 @@ assert doc["summary"] == {"duration_ms": 0, "failed": 0, "skipped_gate": 0, "tot
 assert doc["scripts"] == []
 assert doc["families"] == []
 ' "$json" || { rm -rf "$tmp"; fail "empty selection JSON summary is wrong"; }
+  run_dir=$(journal_run_dir "$journal")
+  assert_journal_run "$run_dir/run.json" passed 0 1 serial \
+    || { rm -rf "$tmp"; fail "empty selection did not finalize its zero-worker plan"; }
+  if find "$run_dir/events" "$run_dir/states" -type f -print | grep -q .; then
+    rm -rf "$tmp"
+    fail "empty selection created an unplanned worker record"
+  fi
   rm -rf "$tmp"
-  pass "empty changed selection emits deterministic text and JSON summaries"
+  pass "empty changed selection emits summaries and a terminal zero-worker plan"
+}
+
+test_empty_selection_preserves_disabled_fast_path() {
+  local tmp repo out
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-empty-disabled.XXXXXX")
+  repo="$tmp/repo"
+  init_changed_fixture_repo "$repo"
+  printf 'documentation only\n' >"$repo/README.md"
+  out=$(cd "$repo" && TMPDIR="$tmp/missing" /bin/bash bin/fm-test-run.sh \
+    --changed --base HEAD --jobs 2 2>"$tmp/err") \
+    || { cat "$tmp/err"; rm -rf "$tmp"; fail "disabled empty selection must not require runner temp state"; }
+  [ "$out" = "FM_TEST_SUMMARY total=0 failed=0 skipped_gate=0 duration_ms=0" ] \
+    || { rm -rf "$tmp"; fail "disabled empty selection changed its summary: $out"; }
+  rm -rf "$tmp"
+  pass "empty disabled selection exits before journal runner setup"
 }
 
 test_timing_markers_and_json() {
@@ -427,7 +482,7 @@ SH
   [ -n "$descendant_pid" ] || { kill "$runner_pid" 2>/dev/null || true; wait "$runner_pid" 2>/dev/null || true; rm -rf "$tmp"; fail "descendant fixture never started"; }
   kill -TERM "$runner_pid"
   waited=0
-  while kill -0 "$runner_pid" 2>/dev/null && [ "$waited" -lt 50 ]; do
+  while kill -0 "$runner_pid" 2>/dev/null && [ "$waited" -lt 100 ]; do
     sleep 0.1
     waited=$((waited + 1))
   done
@@ -1125,12 +1180,700 @@ assert len(doc["scripts"])==3
   pass "aggregate-json merges lane timing artifacts"
 }
 
+journal_run_dir() {
+  local journal=$1
+  find "$journal/runs" -mindepth 2 -maxdepth 2 -name run.json -type f -exec dirname {} \; | head -n 1
+}
+
+assert_journal_state() {
+  local path=$1 expected_state=$2 expected_worker=$3 expected_script=${4:-} expected_exit=${5:-}
+  python3 - "$path" "$expected_state" "$expected_worker" "$expected_script" "$expected_exit" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as fh:
+    record = json.load(fh)
+assert record["schema"] == 1
+assert record["state"] == sys.argv[2]
+assert record["worker_id"] == sys.argv[3]
+assert record["run_id"]
+assert record["runner_pid"] > 0
+assert record["script"]
+assert record["transition_ordinal"] == 2
+if sys.argv[4]:
+    assert record["script"] == sys.argv[4]
+if sys.argv[5]:
+    assert record["exit"] == int(sys.argv[5])
+    assert record["duration_ms"] >= 0
+PY
+}
+
+assert_journal_run() {
+  local path=$1 expected_state=$2 expected_exit=$3 expected_jobs=$4 worker_prefix=$5
+  shift 5
+  python3 - "$path" "$expected_state" "$expected_exit" "$expected_jobs" "$worker_prefix" "$@" <<'PY'
+import json
+import sys
+
+path, expected_state, expected_exit, expected_jobs, worker_prefix, *scripts = sys.argv[1:]
+with open(path, encoding="utf-8") as fh:
+    record = json.load(fh)
+expected_workers = [
+    {"worker_id": "%s-%s" % (worker_prefix, index), "script": script}
+    for index, script in enumerate(scripts, start=1)
+]
+assert record["schema"] == 1
+assert record["state"] == expected_state
+assert record["run_id"]
+assert record["runner_pid"] > 0
+assert record["started_at"]
+assert record["finished_at"]
+assert record["selection"]
+assert record["jobs"] == int(expected_jobs)
+assert record["planned_worker_count"] == len(scripts)
+assert record["planned_workers"] == expected_workers
+assert record["exit"] == int(expected_exit)
+PY
+}
+
+test_progress_journal_terminal_transitions_and_atomic_state() {
+  local tmp journal slow fail_f timeout_f run_dir
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-progress.XXXXXX")
+  journal="$tmp/journal"
+  slow="$tmp/slow.test.sh"
+  fail_f="$tmp/fail.test.sh"
+  timeout_f="$tmp/timeout.test.sh"
+  cat >"$slow" <<'SH'
+#!/usr/bin/env bash
+sleep 0.3
+printf 'ok - slow pass\n'
+SH
+  cat >"$fail_f" <<'SH'
+#!/usr/bin/env bash
+printf 'not ok - expected failure\n'
+exit 1
+SH
+  cat >"$timeout_f" <<'SH'
+#!/usr/bin/env bash
+printf 'not ok - conventional timeout exit\n'
+exit 124
+SH
+  chmod +x "$slow" "$fail_f" "$timeout_f"
+  python3 - "$RUNNER" "$journal" "$slow" "$fail_f" "$timeout_f" "$tmp" <<'PY' \
+    || { rm -rf "$tmp"; fail "journal replacement controller failed"; }
+import glob
+import json
+import os
+import subprocess
+import sys
+import time
+
+runner, journal, slow, failed, timeout, root = sys.argv[1:]
+with open(os.path.join(root, "out"), "w", encoding="utf-8") as out, open(os.path.join(root, "err"), "w", encoding="utf-8") as err:
+    child = subprocess.Popen(
+        [runner, "--progress-journal", journal, slow, failed, timeout],
+        stdout=out,
+        stderr=err,
+    )
+    deadline = time.monotonic() + 3
+    parsed = False
+    while child.poll() is None:
+        records = glob.glob(os.path.join(journal, "runs", "*", "run.json"))
+        records += glob.glob(os.path.join(journal, "runs", "*", "states", "serial-1.json"))
+        for record_path in records:
+            with open(record_path, encoding="utf-8") as fh:
+                json.load(fh)
+            parsed = True
+        if time.monotonic() >= deadline:
+            child.kill()
+            child.wait()
+            raise SystemExit("journal run exceeded bounded replacement check")
+        time.sleep(0.01)
+    if child.wait() == 0:
+        raise SystemExit("failure and timeout fixtures must fail the aggregate")
+    if not parsed:
+        raise SystemExit("journal never exposed a parseable started current-state record")
+PY
+  run_dir=$(journal_run_dir "$journal")
+  [ -n "$run_dir" ] || { rm -rf "$tmp"; fail "progress journal did not create a run directory"; }
+  assert_journal_state "$run_dir/states/serial-1.json" passed serial-1 \
+    || { rm -rf "$tmp"; fail "serial pass state missing stable identity"; }
+  assert_journal_state "$run_dir/states/serial-2.json" failed serial-2 \
+    || { rm -rf "$tmp"; fail "serial failure state missing"; }
+  assert_journal_state "$run_dir/states/serial-3.json" timed-out serial-3 \
+    || { rm -rf "$tmp"; fail "serial timeout state missing"; }
+  assert_journal_run "$run_dir/run.json" failed 1 1 serial "$slow" "$fail_f" "$timeout_f" \
+    || { rm -rf "$tmp"; fail "failed run did not preserve its selected plan"; }
+  [ -f "$run_dir/events/serial-1.1.started.json" ] \
+    && [ -f "$run_dir/events/serial-1.2.passed.json" ] \
+    && [ -f "$run_dir/events/serial-2.2.failed.json" ] \
+    && [ -f "$run_dir/events/serial-3.2.timed-out.json" ] \
+    || { rm -rf "$tmp"; fail "journal must preserve immutable terminal transitions"; }
+  if find "$run_dir" -name '.*.tmp' -print | grep -q .; then
+    rm -rf "$tmp"
+    fail "journal left a temporary replacement record behind"
+  fi
+  rm -rf "$tmp"
+  pass "progress journal records terminal transitions with atomically replaced state"
+}
+
+test_progress_journal_parallel_workers_preserve_transitions() {
+  local tmp repo runner journal run_dir rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-progress-parallel.XXXXXX")
+  repo="$tmp/repo"
+  runner="$repo/bin/fm-test-run.sh"
+  journal="$tmp/journal"
+  mkdir -p "$repo/bin" "$repo/tests"
+  cp "$RUNNER" "$runner"
+  cat >"$repo/tests/fm-brief.test.sh" <<'SH'
+#!/usr/bin/env bash
+sleep 0.05
+printf 'ok - parallel one\n'
+SH
+  cat >"$repo/tests/fm-composer-lib.test.sh" <<'SH'
+#!/usr/bin/env bash
+sleep 0.05
+printf 'ok - parallel two\n'
+SH
+  chmod +x "$runner" "$repo/tests/fm-brief.test.sh" "$repo/tests/fm-composer-lib.test.sh"
+  set +e
+  (cd "$repo" && "$runner" --jobs 2 --progress-journal "$journal" \
+    tests/fm-brief.test.sh tests/fm-composer-lib.test.sh) >"$tmp/out" 2>"$tmp/err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || { cat "$tmp/out" "$tmp/err"; rm -rf "$tmp"; fail "parallel journal fixtures should pass"; }
+  run_dir=$(journal_run_dir "$journal")
+  [ "$(find "$run_dir/events" -type f | wc -l | tr -d ' ')" -eq 4 ] \
+    || { rm -rf "$tmp"; fail "concurrent workers lost a durable transition"; }
+  assert_journal_state "$run_dir/states/parallel-1.json" passed parallel-1 \
+    || { rm -rf "$tmp"; fail "parallel worker one state missing"; }
+  assert_journal_state "$run_dir/states/parallel-2.json" passed parallel-2 \
+    || { rm -rf "$tmp"; fail "parallel worker two state missing"; }
+  assert_journal_run "$run_dir/run.json" passed 0 2 parallel \
+    tests/fm-brief.test.sh tests/fm-composer-lib.test.sh \
+    || { rm -rf "$tmp"; fail "parallel run did not finalize its selected plan"; }
+  rm -rf "$tmp"
+  pass "progress journal preserves concurrent worker transitions"
+}
+
+test_progress_journal_ignores_malformed_prior_state() {
+  local tmp journal fixture run_dir
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-progress-malformed.XXXXXX")
+  journal="$tmp/journal"
+  fixture="$tmp/pass.test.sh"
+  mkdir -p "$journal/runs/stale/events" "$journal/runs/stale/states"
+  printf '{not json\n' >"$journal/runs/stale/states/bad.json"
+  printf '{not json\n' >"$journal/runs/stale/events/bad.json"
+  cat >"$fixture" <<'SH'
+#!/usr/bin/env bash
+printf 'ok - pass\n'
+SH
+  chmod +x "$fixture"
+  "$RUNNER" --progress-journal "$journal" "$fixture" >"$tmp/out" 2>"$tmp/err" \
+    || { cat "$tmp/out" "$tmp/err"; rm -rf "$tmp"; fail "malformed historical journal state must not block a new run"; }
+  [ "$(cat "$journal/runs/stale/states/bad.json")" = '{not json' ] \
+    || { rm -rf "$tmp"; fail "malformed historical state was unexpectedly rewritten"; }
+  run_dir=$(journal_run_dir "$journal")
+  [ "$run_dir" != "$journal/runs/stale" ] \
+    || { rm -rf "$tmp"; fail "new run reused malformed historical state"; }
+  assert_journal_state "$run_dir/states/serial-1.json" passed serial-1 \
+    || { rm -rf "$tmp"; fail "new run did not write a valid isolated state"; }
+  rm -rf "$tmp"
+  pass "progress journal ignores malformed historical state deterministically"
+}
+
+test_progress_journal_marks_abrupt_interruptions() {
+  local tmp journal fixture run_dir rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-progress-interrupt.XXXXXX")
+  journal="$tmp/journal"
+  fixture="$tmp/slow.test.sh"
+  cat >"$fixture" <<'SH'
+#!/usr/bin/env bash
+printf 'started\n' >"$SCHED_EVIDENCE/started"
+kill -TERM "$PPID"
+while :; do sleep 1; done
+SH
+  chmod +x "$fixture"
+  set +e
+  SCHED_EVIDENCE="$tmp" "$RUNNER" --progress-journal "$journal" "$fixture" >"$tmp/out" 2>"$tmp/err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 143 ] || { rm -rf "$tmp"; fail "interrupted runner should exit 143, got $rc"; }
+  run_dir=$(journal_run_dir "$journal")
+  assert_journal_state "$run_dir/states/serial-1.json" interrupted serial-1 \
+    || { rm -rf "$tmp"; fail "abrupt interrupt was not journaled"; }
+  [ -f "$run_dir/events/serial-1.2.interrupted.json" ] \
+    || { rm -rf "$tmp"; fail "interrupted transition was not preserved"; }
+  assert_journal_run "$run_dir/run.json" interrupted 143 1 serial "$fixture" \
+    || { rm -rf "$tmp"; fail "interrupted run was not finalized"; }
+  rm -rf "$tmp"
+  pass "progress journal records abrupt interruptions before cleanup"
+}
+
+test_progress_journal_does_not_advance_state_after_event_failure() {
+  local tmp journal fixture run_dir rc real_python
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-progress-event-failure.XXXXXX")
+  journal="$tmp/journal"
+  fixture="$tmp/slow.test.sh"
+  real_python=$(command -v python3)
+  mkdir -p "$tmp/bin"
+  cat >"$tmp/bin/python3" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}:${2:-}:${3:-}" in
+  -:worker:*/events/serial-1.2.interrupted.json) exit 1 ;;
+esac
+exec "$REAL_PYTHON" "$@"
+SH
+  cat >"$fixture" <<'SH'
+#!/usr/bin/env bash
+kill -TERM "$PPID"
+while :; do sleep 1; done
+SH
+  chmod +x "$tmp/bin/python3" "$fixture"
+  set +e
+  REAL_PYTHON="$real_python" PATH="$tmp/bin:$PATH" \
+    "$RUNNER" --progress-journal "$journal" "$fixture" >"$tmp/out" 2>"$tmp/err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 143 ] || { cat "$tmp/out" "$tmp/err"; rm -rf "$tmp"; fail "event-write failure interrupt should exit 143, got $rc"; }
+  run_dir=$(journal_run_dir "$journal")
+  [ ! -e "$run_dir/events/serial-1.2.interrupted.json" ] \
+    || { rm -rf "$tmp"; fail "failed immutable event write unexpectedly created an event"; }
+  python3 - "$run_dir/states/serial-1.json" "$fixture" <<'PY' \
+    || { rm -rf "$tmp"; fail "current state advanced without its immutable event"; }
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as fh:
+    record = json.load(fh)
+assert record["state"] == "started"
+assert record["transition_ordinal"] == 1
+assert record["script"] == sys.argv[2]
+PY
+  rm -rf "$tmp"
+  pass "journal state never advances past a failed event write"
+}
+
+test_progress_journal_closes_startup_signal_windows() {
+  local tmp real_python fixture journal run_dir rc repo runner
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-progress-start-signal.XXXXXX")
+  real_python=$(command -v python3)
+  mkdir -p "$tmp/bin"
+  cat >"$tmp/bin/python3" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = - ] && [ "${2:-}" = worker ]; then
+  case "${3:-}" in
+    */events/"$SIGNAL_WORKER".1.started.json)
+      group=$(ps -o pgid= -p "$5" | awk 'NR == 1 { gsub(/[[:space:]]/, "", $1); print $1 }')
+      kill -TERM -- "-$group"
+      exec "$REAL_PYTHON" "$@"
+      ;;
+  esac
+fi
+exec "$REAL_PYTHON" "$@"
+SH
+  chmod +x "$tmp/bin/python3"
+
+  fixture="$tmp/serial.test.sh"
+  journal="$tmp/serial-journal"
+  cat >"$fixture" <<'SH'
+#!/usr/bin/env bash
+printf 'not ok - startup signal should prevent launch\n'
+exit 1
+SH
+  chmod +x "$fixture"
+  set +e
+  rc=$(SIGNAL_WORKER=serial-1 REAL_PYTHON="$real_python" PATH="$tmp/bin:$PATH" \
+    run_in_new_process_group "$real_python" "$ROOT" "$tmp/serial.out" "$tmp/serial.err" \
+      "$RUNNER" --progress-journal "$journal" "$fixture")
+  set -e
+  [ "$rc" -eq 143 ] || { cat "$tmp/serial.out" "$tmp/serial.err"; rm -rf "$tmp"; fail "serial startup signal should exit 143, got $rc"; }
+  run_dir=$(journal_run_dir "$journal")
+  assert_journal_state "$run_dir/states/serial-1.json" interrupted serial-1 "$fixture" \
+    || { rm -rf "$tmp"; fail "serial startup signal orphaned its started worker"; }
+  assert_journal_run "$run_dir/run.json" interrupted 143 1 serial "$fixture" \
+    || { rm -rf "$tmp"; fail "serial startup signal did not finalize the run"; }
+
+  repo="$tmp/repo"
+  runner="$repo/bin/fm-test-run.sh"
+  journal="$tmp/parallel-journal"
+  mkdir -p "$repo/bin" "$repo/tests"
+  cp "$RUNNER" "$runner"
+  cat >"$repo/tests/fm-brief.test.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'not ok - startup signal should prevent launch\n'
+exit 1
+SH
+  chmod +x "$runner" "$repo/tests/fm-brief.test.sh"
+  set +e
+  rc=$(SIGNAL_WORKER=parallel-1 REAL_PYTHON="$real_python" PATH="$tmp/bin:$PATH" \
+    run_in_new_process_group "$real_python" "$repo" "$tmp/parallel.out" "$tmp/parallel.err" \
+      "$runner" --jobs 2 --progress-journal "$journal" tests/fm-brief.test.sh)
+  set -e
+  [ "$rc" -eq 143 ] || { cat "$tmp/parallel.out" "$tmp/parallel.err"; rm -rf "$tmp"; fail "parallel startup signal should exit 143, got $rc"; }
+  run_dir=$(journal_run_dir "$journal")
+  assert_journal_state "$run_dir/states/parallel-1.json" interrupted parallel-1 tests/fm-brief.test.sh \
+    || { rm -rf "$tmp"; fail "parallel startup signal orphaned its started worker"; }
+  assert_journal_run "$run_dir/run.json" interrupted 143 2 parallel tests/fm-brief.test.sh \
+    || { rm -rf "$tmp"; fail "parallel startup signal did not finalize the run"; }
+  rm -rf "$tmp"
+  pass "progress journal closes serial and parallel startup signal windows"
+}
+
+test_progress_journal_defers_initialization_signal_until_started() {
+  local tmp journal fixture run_dir rc real_python
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-progress-init-signal.XXXXXX")
+  journal="$tmp/journal"
+  fixture="$tmp/not-run.test.sh"
+  real_python=$(command -v python3)
+  mkdir -p "$tmp/bin"
+  cat >"$tmp/bin/python3" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = - ] && [ "${2:-}" = sync-directories ]; then
+  printf 'ready\n' >"$SYNC_EVIDENCE"
+  sleep 0.2
+  exec "$REAL_PYTHON" "$@"
+fi
+if [ "${1:-}" = - ] && [ "${2:-}" = run ] && [ "${7:-}" = started ]; then
+  "$REAL_PYTHON" "$@"
+  rc=$?
+  cp "$3" "$STARTED_EVIDENCE"
+  exit "$rc"
+fi
+exec "$REAL_PYTHON" "$@"
+SH
+  cat >"$fixture" <<'SH'
+#!/usr/bin/env bash
+printf 'not ok - initialization signal should prevent launch\n'
+exit 1
+SH
+  chmod +x "$tmp/bin/python3" "$fixture"
+  rc=$(REAL_PYTHON="$real_python" STARTED_EVIDENCE="$tmp/started.json" \
+    SYNC_EVIDENCE="$tmp/sync-ready" PATH="$tmp/bin:$PATH" \
+    "$real_python" - "$RUNNER" "$journal" "$fixture" "$tmp" <<'PY'
+import os
+import signal
+import subprocess
+import sys
+import time
+
+runner, journal, fixture, root = sys.argv[1:]
+with open(os.path.join(root, "out"), "w", encoding="utf-8") as out, open(os.path.join(root, "err"), "w", encoding="utf-8") as err:
+    child = subprocess.Popen(
+        [runner, "--progress-journal", journal, fixture],
+        stdout=out,
+        stderr=err,
+        start_new_session=True,
+    )
+    try:
+        deadline = time.monotonic() + 3
+        ready = os.path.join(root, "sync-ready")
+        while not os.path.exists(ready):
+            if child.poll() is not None:
+                raise SystemExit("runner exited before the directory sync helper")
+            if time.monotonic() >= deadline:
+                raise SystemExit("directory sync helper never became ready")
+            time.sleep(0.01)
+        os.killpg(child.pid, signal.SIGTERM)
+        rc = child.wait(timeout=5)
+    except BaseException:
+        try:
+            os.killpg(child.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        child.wait()
+        raise
+    print(rc)
+PY
+  ) || { cat "$tmp/out" "$tmp/err"; rm -rf "$tmp"; fail "process-group signal controller failed"; }
+  [ "$rc" -eq 143 ] || { cat "$tmp/out" "$tmp/err"; rm -rf "$tmp"; fail "initialization signal should exit 143, got $rc"; }
+  [ -f "$tmp/started.json" ] \
+    || { rm -rf "$tmp"; fail "initialization signal exited before the started record was durable"; }
+  python3 - "$tmp/started.json" <<'PY' \
+    || { rm -rf "$tmp"; fail "initialization signal did not preserve the durable started state"; }
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as fh:
+    record = json.load(fh)
+assert record["state"] == "started"
+PY
+  run_dir=$(journal_run_dir "$journal")
+  [ -n "$run_dir" ] || { rm -rf "$tmp"; fail "initialization signal orphaned the durable run directory"; }
+  assert_journal_run "$run_dir/run.json" interrupted 143 1 serial "$fixture" \
+    || { rm -rf "$tmp"; fail "initialization signal did not finalize the durable run"; }
+  ! grep -Fq 'initialization signal should prevent launch' "$tmp/out" \
+    || { rm -rf "$tmp"; fail "initialization signal launched a selected worker"; }
+  rm -rf "$tmp"
+  pass "progress journal shields initialization helpers until started state is durable"
+}
+
+test_progress_journal_preserves_post_terminal_signal_outcome() {
+  local tmp journal fixture run_dir rc real_python
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-progress-terminal-signal.XXXXXX")
+  journal="$tmp/journal"
+  fixture="$tmp/pass.test.sh"
+  real_python=$(command -v python3)
+  mkdir -p "$tmp/bin"
+  cat >"$tmp/bin/python3" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}:${2:-}:${3:-}" in
+  -:worker:*/events/serial-1.2.passed.json)
+    "$REAL_PYTHON" "$@"
+    rc=$?
+    kill -TERM "$5"
+    exit "$rc"
+    ;;
+esac
+exec "$REAL_PYTHON" "$@"
+SH
+  cat >"$fixture" <<'SH'
+#!/usr/bin/env bash
+printf 'ok - completed before signal\n'
+SH
+  chmod +x "$tmp/bin/python3" "$fixture"
+  set +e
+  REAL_PYTHON="$real_python" PATH="$tmp/bin:$PATH" \
+    "$RUNNER" --progress-journal "$journal" "$fixture" >"$tmp/out" 2>"$tmp/err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 143 ] || { cat "$tmp/out" "$tmp/err"; rm -rf "$tmp"; fail "post-terminal signal should exit 143, got $rc"; }
+  run_dir=$(journal_run_dir "$journal")
+  assert_journal_state "$run_dir/states/serial-1.json" passed serial-1 "$fixture" 0 \
+    || { rm -rf "$tmp"; fail "post-terminal signal regressed completed worker state"; }
+  [ ! -e "$run_dir/events/serial-1.2.interrupted.json" ] \
+    || { rm -rf "$tmp"; fail "post-terminal signal created a conflicting interruption"; }
+  assert_journal_run "$run_dir/run.json" interrupted 143 1 serial "$fixture" \
+    || { rm -rf "$tmp"; fail "post-terminal signal did not finalize the run"; }
+  rm -rf "$tmp"
+  pass "progress journal keeps terminal worker outcomes monotonic on signal"
+}
+
+test_progress_journal_publishes_adjudicated_outcome_before_bookkeeping() {
+  local tmp fixture journal run_dir rc repo runner
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-progress-adjudicated-signal.XXXXXX")
+  fixture="$tmp/serial.test.sh"
+  mkdir -p "$tmp/bin"
+  cat >"$tmp/bin/mv" <<'SH'
+#!/usr/bin/env bash
+case "${FAKE_MV_MODE:-signal}:${2:-}" in
+  fail:*/families.tsv) exit 1 ;;
+esac
+/bin/mv "$@"
+rc=$?
+case "${FAKE_MV_MODE:-signal}:${2:-}" in
+  signal:*/families.tsv) kill -TERM "$PPID" ;;
+esac
+exit "$rc"
+SH
+  cat >"$fixture" <<'SH'
+#!/usr/bin/env bash
+printf 'ok - raw child passed\nskip: injected gate\n'
+SH
+  chmod +x "$tmp/bin/mv" "$fixture"
+
+  journal="$tmp/serial-journal"
+  set +e
+  PATH="$tmp/bin:$PATH" "$RUNNER" --progress-journal "$journal" \
+    --fail-on-gate-skip 'injected gate' "$fixture" >"$tmp/serial.out" 2>"$tmp/serial.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 143 ] || { cat "$tmp/serial.out" "$tmp/serial.err"; rm -rf "$tmp"; fail "serial bookkeeping signal should exit 143, got $rc"; }
+  run_dir=$(journal_run_dir "$journal")
+  assert_journal_state "$run_dir/states/serial-1.json" failed serial-1 "$fixture" 1 \
+    || { rm -rf "$tmp"; fail "serial bookkeeping signal lost the adjudicated failure"; }
+
+  repo="$tmp/repo"
+  runner="$repo/bin/fm-test-run.sh"
+  journal="$tmp/parallel-journal"
+  mkdir -p "$repo/bin" "$repo/tests"
+  cp "$RUNNER" "$runner"
+  cp "$fixture" "$repo/tests/fm-brief.test.sh"
+  chmod +x "$runner" "$repo/tests/fm-brief.test.sh"
+  set +e
+  (cd "$repo" && PATH="$tmp/bin:$PATH" "$runner" --jobs 2 \
+    --progress-journal "$journal" --fail-on-gate-skip 'injected gate' tests/fm-brief.test.sh) \
+    >"$tmp/parallel.out" 2>"$tmp/parallel.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 143 ] || { cat "$tmp/parallel.out" "$tmp/parallel.err"; rm -rf "$tmp"; fail "parallel bookkeeping signal should exit 143, got $rc"; }
+  run_dir=$(journal_run_dir "$journal")
+  assert_journal_state "$run_dir/states/parallel-1.json" failed parallel-1 tests/fm-brief.test.sh 1 \
+    || { rm -rf "$tmp"; fail "parallel cleanup inferred raw child success instead of the adjudicated failure"; }
+
+  journal="$tmp/bookkeeping-failure-journal"
+  set +e
+  FAKE_MV_MODE=fail PATH="$tmp/bin:$PATH" "$RUNNER" --progress-journal "$journal" \
+    "$fixture" >"$tmp/failure.out" 2>"$tmp/failure.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 1 ] || { cat "$tmp/failure.out" "$tmp/failure.err"; rm -rf "$tmp"; fail "bookkeeping failure should exit 1, got $rc"; }
+  run_dir=$(journal_run_dir "$journal")
+  assert_journal_state "$run_dir/states/serial-1.json" passed serial-1 "$fixture" 0 \
+    || { rm -rf "$tmp"; fail "bookkeeping failure left the adjudicated worker at started"; }
+  assert_journal_run "$run_dir/run.json" failed 1 1 serial "$fixture" \
+    || { rm -rf "$tmp"; fail "bookkeeping failure did not finalize the failed run"; }
+  rm -rf "$tmp"
+  pass "journal persists adjudicated outcomes before bookkeeping"
+}
+
+test_progress_journal_terminal_publication_failure_changes_only_green_exit() {
+  local tmp python_path pass_fixture interrupt_fixture journal rc run_dir
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-progress-terminal-publication.XXXXXX")
+  python_path="$tmp/python"
+  pass_fixture="$tmp/pass.test.sh"
+  interrupt_fixture="$tmp/interrupt.test.sh"
+  mkdir -p "$python_path"
+  cat >"$python_path/sitecustomize.py" <<'PY'
+import os
+import stat
+import sys
+
+if len(sys.argv) > 6 and sys.argv[1] == "run" and sys.argv[6] == os.environ.get("FAIL_RUN_STATE"):
+    real_fsync = os.fsync
+
+    def fail_directory_fsync(fd):
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
+            raise OSError("injected directory fsync failure")
+        real_fsync(fd)
+
+    os.fsync = fail_directory_fsync
+PY
+  cat >"$pass_fixture" <<'SH'
+#!/usr/bin/env bash
+printf 'ok - completed before publication failure\n'
+SH
+  cat >"$interrupt_fixture" <<'SH'
+#!/usr/bin/env bash
+kill -TERM "$PPID"
+while :; do sleep 1; done
+SH
+  chmod +x "$pass_fixture" "$interrupt_fixture"
+
+  journal="$tmp/pass-journal"
+  set +e
+  FAIL_RUN_STATE=passed PYTHONPATH="$python_path" \
+    "$RUNNER" --progress-journal "$journal" "$pass_fixture" >"$tmp/pass.out" 2>"$tmp/pass.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || { cat "$tmp/pass.out" "$tmp/pass.err"; rm -rf "$tmp"; fail "terminal publication failure left a green exit"; }
+  grep -Fq 'injected directory fsync failure' "$tmp/pass.err" \
+    || { cat "$tmp/pass.err"; rm -rf "$tmp"; fail "green run did not surface its terminal publication failure"; }
+  run_dir=$(journal_run_dir "$journal")
+  assert_journal_run "$run_dir/run.json" passed 0 1 serial "$pass_fixture" \
+    || { rm -rf "$tmp"; fail "terminal replacement did not precede its failed durability barrier"; }
+
+  journal="$tmp/interrupt-journal"
+  set +e
+  FAIL_RUN_STATE=interrupted PYTHONPATH="$python_path" \
+    "$RUNNER" --progress-journal "$journal" "$interrupt_fixture" >"$tmp/interrupt.out" 2>"$tmp/interrupt.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 143 ] || { cat "$tmp/interrupt.out" "$tmp/interrupt.err"; rm -rf "$tmp"; fail "terminal publication failure replaced interrupt exit with $rc"; }
+  grep -Fq 'injected directory fsync failure' "$tmp/interrupt.err" \
+    || { cat "$tmp/interrupt.err"; rm -rf "$tmp"; fail "interrupted run did not surface its terminal publication failure"; }
+  rm -rf "$tmp"
+  pass "terminal publication failure changes only an otherwise-green exit"
+}
+
+test_progress_journal_requires_durable_run_directory_chain() {
+  local tmp journal fixture rc real_python run_dir
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-progress-directory-barrier.XXXXXX")
+  journal="$tmp/existing/new-a/new-b/journal"
+  fixture="$tmp/pass.test.sh"
+  real_python=$(command -v python3)
+  mkdir -p "$tmp/bin" "$tmp/existing"
+  cat >"$tmp/bin/python3" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = - ] && [ "${2:-}" = sync-directories ]; then
+  shift 2
+  printf '%s\n' "$@" >"$BARRIER_EVIDENCE"
+  exit 73
+fi
+exec "$REAL_PYTHON" "$@"
+SH
+  cat >"$fixture" <<'SH'
+#!/usr/bin/env bash
+printf 'not ok - initialization barrier should prevent launch\n'
+exit 1
+SH
+  chmod +x "$tmp/bin/python3" "$fixture"
+  set +e
+  BARRIER_EVIDENCE="$tmp/barriers" REAL_PYTHON="$real_python" PATH="$tmp/bin:$PATH" \
+    "$RUNNER" --progress-journal "$journal" "$fixture" >"$tmp/out" 2>"$tmp/err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] || { cat "$tmp/out" "$tmp/err"; rm -rf "$tmp"; fail "directory barrier failure should fail initialization with 2, got $rc"; }
+  grep -Fq 'could not make progress journal durable' "$tmp/err" \
+    || { cat "$tmp/err"; rm -rf "$tmp"; fail "directory barrier failure was not actionable"; }
+  run_dir=$(find "$journal/runs" -mindepth 1 -maxdepth 1 -type d | head -n 1)
+  [ -n "$run_dir" ] || { rm -rf "$tmp"; fail "directory barrier fixture did not publish a run directory"; }
+  [ "$(sed -n '1p' "$tmp/barriers")" = "$run_dir/events" ] \
+    && [ "$(sed -n '2p' "$tmp/barriers")" = "$run_dir/states" ] \
+    && [ "$(sed -n '3p' "$tmp/barriers")" = "$run_dir" ] \
+    && [ "$(sed -n '4p' "$tmp/barriers")" = "$journal/runs" ] \
+    && [ "$(sed -n '5p' "$tmp/barriers")" = "$journal" ] \
+    && [ "$(sed -n '6p' "$tmp/barriers")" = "$tmp/existing/new-a/new-b" ] \
+    && [ "$(sed -n '7p' "$tmp/barriers")" = "$tmp/existing/new-a" ] \
+    && [ "$(sed -n '8p' "$tmp/barriers")" = "$tmp/existing" ] \
+    || { cat "$tmp/barriers"; rm -rf "$tmp"; fail "directory barrier omitted the published run chain"; }
+  [ ! -e "$run_dir/run.json" ] \
+    || { rm -rf "$tmp"; fail "run state published after its directory barrier failed"; }
+  rm -rf "$tmp"
+  pass "progress journal requires the published run directory chain to be durable"
+}
+
+test_progress_journal_restores_caller_umask() {
+  local tmp journal fixture timing fixture_mode timing_mode
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-progress-umask.XXXXXX")
+  journal="$tmp/journal"
+  fixture="$tmp/pass.test.sh"
+  timing="$tmp/timing.json"
+  cat >"$fixture" <<'SH'
+#!/usr/bin/env bash
+: >"$SCHED_EVIDENCE/fixture-created"
+printf 'ok - caller umask preserved\n'
+SH
+  chmod +x "$fixture"
+  (umask 022 && SCHED_EVIDENCE="$tmp" "$RUNNER" --progress-journal "$journal" \
+    --json "$timing" "$fixture") >"$tmp/out" 2>"$tmp/err" \
+    || { cat "$tmp/out" "$tmp/err"; rm -rf "$tmp"; fail "umask fixture should pass"; }
+  fixture_mode=$(stat -c %a "$tmp/fixture-created" 2>/dev/null || stat -f %Lp "$tmp/fixture-created")
+  timing_mode=$(stat -c %a "$timing" 2>/dev/null || stat -f %Lp "$timing")
+  [ "$fixture_mode" = 644 ] \
+    || { rm -rf "$tmp"; fail "journal changed test-created file mode to $fixture_mode"; }
+  [ "$timing_mode" = 644 ] \
+    || { rm -rf "$tmp"; fail "journal changed timing artifact mode to $timing_mode"; }
+  rm -rf "$tmp"
+  pass "progress journal restores the caller umask"
+}
+
+test_progress_journal_disabled_mode_has_no_filesystem_effect() {
+  local tmp fixture absent
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-progress-disabled.XXXXXX")
+  fixture="$tmp/pass.test.sh"
+  absent="$tmp/not-created"
+  cat >"$fixture" <<'SH'
+#!/usr/bin/env bash
+printf 'ok - disabled journal pass\n'
+SH
+  chmod +x "$fixture"
+  "$RUNNER" "$fixture" >"$tmp/out" 2>"$tmp/err" \
+    || { cat "$tmp/out" "$tmp/err"; rm -rf "$tmp"; fail "disabled journal fixture should pass"; }
+  [ ! -e "$absent" ] || { rm -rf "$tmp"; fail "runner created progress state without --progress-journal"; }
+  grep -Fq 'FM_TEST_SUMMARY total=1 failed=0' "$tmp/out" \
+    || { rm -rf "$tmp"; fail "disabled journal changed normal summary output"; }
+  rm -rf "$tmp"
+  pass "progress journal is fully disabled unless selected"
+}
+
 test_list_all_exact_suite_coverage
 test_family_selection
 test_single_script_selection
 test_changed_file_selection_is_conservative
 test_changed_dependency_selection_and_unmapped_failure
 test_empty_selection_emits_summary
+test_empty_selection_preserves_disabled_fast_path
 test_timing_markers_and_json
 test_quoting_and_platform_temp_paths
 test_stock_bash_wrapper_pins_nested_runner
@@ -1152,3 +1895,16 @@ test_portable_serial_shard_lane_refusals
 test_jobs_requires_proven_isolated
 test_jobs_parallel_scheduler_and_failure_propagation
 test_aggregate_json
+test_progress_journal_terminal_transitions_and_atomic_state
+test_progress_journal_parallel_workers_preserve_transitions
+test_progress_journal_ignores_malformed_prior_state
+test_progress_journal_marks_abrupt_interruptions
+test_progress_journal_does_not_advance_state_after_event_failure
+test_progress_journal_closes_startup_signal_windows
+test_progress_journal_defers_initialization_signal_until_started
+test_progress_journal_preserves_post_terminal_signal_outcome
+test_progress_journal_publishes_adjudicated_outcome_before_bookkeeping
+test_progress_journal_terminal_publication_failure_changes_only_green_exit
+test_progress_journal_requires_durable_run_directory_chain
+test_progress_journal_restores_caller_umask
+test_progress_journal_disabled_mode_has_no_filesystem_effect
