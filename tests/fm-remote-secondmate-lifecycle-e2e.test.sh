@@ -24,6 +24,13 @@ HERDR_LOG="$TMP_ROOT/remote-herdr.log"
 TMUX_LOG="$TMP_ROOT/remote-tmux.log"
 TMUX_STATE="$TMP_ROOT/remote-tmux.state"
 CLAIMS="$TMP_ROOT/claims"
+# Wall-clock bounds for the deliberately blocked workers below (fm_test_wait_file).
+# A remote transaction traverses several SSH-boundary jobs before it reaches its
+# blocked write or launch, and a loaded runner has been measured taking 26s to get
+# there; a local marker is one process away. Both are hang tripwires with margin,
+# not expected durations - a healthy wait ends the moment its marker appears.
+WAIT_REMOTE_SECONDS=90
+WAIT_LOCAL_SECONDS=30
 mkdir -p "$PARENT/data" "$PARENT/state" "$PARENT/config" "$PARENT/projects" "$REMOTE_ROOT" "$CLAIMS"
 cleanup() {
   local worker_pid='' wait_attempt=0
@@ -322,13 +329,9 @@ PATH="$FAKEBIN:$PATH" FM_HOME="$TMP_ROOT/concurrent-home" FM_ROOT_OVERRIDE="$REM
   "$REMOTE_ROOT/bin/fm-remote-home-provision.sh" < "$TMP_ROOT/provision.manifest" \
   > "$TMP_ROOT/provision-one.out" 2>&1 &
 provision_one=$!
-provision_wait=0
-while [ ! -f "$TMP_ROOT/provision.entered" ]; do
-  kill -0 "$provision_one" 2>/dev/null || fail "first provisioning attempt exited before cloning"
-  provision_wait=$((provision_wait + 1))
-  [ "$provision_wait" -le 250 ] || fail "first provisioning attempt never reached cloning"
-  sleep 0.02
-done
+fm_test_wait_file "$TMP_ROOT/provision.entered" "$WAIT_LOCAL_SECONDS" "$provision_one" \
+  "first provisioning attempt exited before cloning" \
+  "first provisioning attempt never reached cloning"
 PATH="$FAKEBIN:$PATH" FM_HOME="$TMP_ROOT/concurrent-home" FM_ROOT_OVERRIDE="$REMOTE_ROOT" \
   "$REMOTE_ROOT/bin/fm-remote-home-provision.sh" < "$TMP_ROOT/provision.manifest" \
   > "$TMP_ROOT/provision-two.out" 2>&1 &
@@ -355,13 +358,9 @@ FM_SECONDMATE_CHARTER='Failing seed charter.' FM_SECONDMATE_SCOPE='failed seed' 
   seed-fail remote-mac "$REMOTE_ROOT" "$TMP_ROOT/seed-fail-home" --no-projects \
   > "$TMP_ROOT/seed-fail.out" 2>&1 &
 seed_fail_pid=$!
-seed_wait=0
-while [ ! -f "$TMP_ROOT/seed.entered" ]; do
-  kill -0 "$seed_fail_pid" 2>/dev/null || fail "failing seed exited before remote provisioning"
-  seed_wait=$((seed_wait + 1))
-  [ "$seed_wait" -le 250 ] || fail "failing seed never reached remote provisioning"
-  sleep 0.02
-done
+fm_test_wait_file "$TMP_ROOT/seed.entered" "$WAIT_LOCAL_SECONDS" "$seed_fail_pid" \
+  "failing seed exited before remote provisioning" \
+  "failing seed never reached remote provisioning"
 FM_SECONDMATE_CHARTER='Successful seed charter.' FM_SECONDMATE_SCOPE='successful seed' \
   seed_env "$ROOT/bin/fm-remote-home-seed.sh" seed-keep remote-mac "$REMOTE_ROOT" \
   "$TMP_ROOT/seed-keep-home" --no-projects > "$TMP_ROOT/seed-keep.out" 2>&1 &
@@ -628,15 +627,9 @@ EOF
 FM_FAKE_SSH_MODE=inherit-block remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate \
   > "$TMP_ROOT/spawn-concurrent.out" 2>&1 &
 spawn_concurrent=$!
-spawn_inherit_wait=0
-# Earlier inherited files traverse the worker before captain-shared.md, so give
-# a loaded portable runner 30 seconds to reach this deliberately blocked write.
-while [ ! -f "$TMP_ROOT/inherit.entered" ]; do
-  kill -0 "$spawn_concurrent" 2>/dev/null || fail "remote spawn exited before its blocked inheritance write"
-  spawn_inherit_wait=$((spawn_inherit_wait + 1))
-  [ "$spawn_inherit_wait" -le 1500 ] || fail "remote spawn never reached its blocked inheritance write"
-  sleep 0.02
-done
+fm_test_wait_file "$TMP_ROOT/inherit.entered" "$WAIT_REMOTE_SECONDS" "$spawn_concurrent" \
+  "remote spawn exited before its blocked inheritance write" \
+  "remote spawn never reached its blocked inheritance write"
 cat > "$PARENT/data/captain-shared.md" <<'EOF'
 # Shared captain preferences
 This file is main-authoritative and maintained by the main firstmate.
@@ -725,13 +718,9 @@ EOF
 FM_FAKE_SSH_MODE=inherit-block remote_env "$ROOT/bin/fm-config-push.sh" \
   > "$TMP_ROOT/config-concurrent-first.out" 2>&1 &
 config_first=$!
-inherit_wait=0
-while [ ! -f "$TMP_ROOT/inherit.entered" ]; do
-  kill -0 "$config_first" 2>/dev/null || fail "first inheritance transaction exited before its blocked write"
-  inherit_wait=$((inherit_wait + 1))
-  [ "$inherit_wait" -le 250 ] || fail "first inheritance transaction never reached its blocked write"
-  sleep 0.02
-done
+fm_test_wait_file "$TMP_ROOT/inherit.entered" "$WAIT_REMOTE_SECONDS" "$config_first" \
+  "first inheritance transaction exited before its blocked write" \
+  "first inheritance transaction never reached its blocked write"
 cat > "$PARENT/data/captain-shared.md" <<'EOF'
 # Shared captain preferences
 This file is main-authoritative and maintained by the main firstmate.
@@ -959,26 +948,16 @@ FM_HOME="$PARENT" /bin/bash -c '
 ' _ "$ROOT/bin/fm-wake-lib.sh" "$handoff_lock" "$TMP_ROOT/handoff.entered" \
   "$TMP_ROOT/handoff.release" &
 handoff_holder_pid=$!
-handoff_wait=0
-while [ ! -f "$TMP_ROOT/handoff.entered" ]; do
-  kill -0 "$handoff_holder_pid" 2>/dev/null || fail "handoff lock holder exited before acquiring the route lock"
-  handoff_wait=$((handoff_wait + 1))
-  [ "$handoff_wait" -le 250 ] || fail "handoff lock holder never acquired the route lock"
-  sleep 0.02
-done
+fm_test_wait_file "$TMP_ROOT/handoff.entered" "$WAIT_LOCAL_SECONDS" "$handoff_holder_pid" \
+  "handoff lock holder exited before acquiring the route lock" \
+  "handoff lock holder never acquired the route lock"
 rm -f "$TMUX_STATE" "$TMP_ROOT/launch.entered" "$TMP_ROOT/launch.release"
 FM_FAKE_SSH_MODE=launch-block remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate \
   > "$TMP_ROOT/spawn-retirement.out" 2>&1 &
 spawn_retirement_pid=$!
-launch_wait=0
-# The respawn performs readiness and inheritance jobs before launch, so allow
-# the same 30-second loaded-runner bound as the earlier blocked worker path.
-while [ ! -f "$TMP_ROOT/launch.entered" ]; do
-  kill -0 "$spawn_retirement_pid" 2>/dev/null || fail "remote respawn exited before its blocked launch"
-  launch_wait=$((launch_wait + 1))
-  [ "$launch_wait" -le 1500 ] || fail "remote respawn never reached its blocked launch"
-  sleep 0.02
-done
+fm_test_wait_file "$TMP_ROOT/launch.entered" "$WAIT_REMOTE_SECONDS" "$spawn_retirement_pid" \
+  "remote respawn exited before its blocked launch" \
+  "remote respawn never reached its blocked launch"
 remote_env "$ROOT/bin/fm-teardown.sh" ios > "$TMP_ROOT/teardown-serialized.out" 2>&1 &
 teardown_pid=$!
 sleep 0.2

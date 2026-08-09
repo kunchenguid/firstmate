@@ -390,6 +390,34 @@ fm_write_secondmate_meta() {
     "projects=$projects"
 }
 
+# --- bounded waits ----------------------------------------------------------
+
+# fm_test_wait_file <path> <seconds> <pid|-> <exited-msg> <timeout-msg>: poll
+# until <path> exists, bounded by WALL-CLOCK seconds rather than an iteration
+# count. An iteration budget is not a duration: the same "250 iterations of
+# sleep 0.02" spends ~5s on an idle runner and ~20s on a loaded one, so a bound
+# written as a count silently shrinks exactly when the work it waits for is
+# slowest. bin/fm-remote-job-lib.sh bounds its own polls the same way.
+# Choose <seconds> as a hang tripwire with margin over the measured worst case,
+# never as the expected duration: a healthy wait returns the moment <path>
+# appears and costs nothing extra.
+# Fails with <exited-msg> when <pid> dies without producing <path>, or with
+# <timeout-msg> at the deadline. Pass - for <pid> when no process backs the wait.
+fm_test_wait_file() {
+  local path=$1 seconds=$2 pid=$3 exited_msg=$4 timeout_msg=$5 deadline
+  deadline=$((SECONDS + seconds))
+  while [ ! -e "$path" ]; do
+    if [ "$pid" != - ] && ! kill -0 "$pid" 2>/dev/null; then
+      # The process can create <path> and exit between the two checks, so a
+      # dead pid only proves failure once <path> is still absent afterwards.
+      [ ! -e "$path" ] || return 0
+      fail "$exited_msg"
+    fi
+    [ "$SECONDS" -lt "$deadline" ] || fail "$timeout_msg"
+    sleep 0.02
+  done
+}
+
 # --- common assertions ------------------------------------------------------
 
 # assert_contains <haystack> <needle> <msg>

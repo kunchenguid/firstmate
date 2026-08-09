@@ -648,7 +648,7 @@ run_teardown() {
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_CONFIG_OVERRIDE="$case_dir/config" \
-  FM_DATA_OVERRIDE="$case_dir/data" \
+  FM_DATA_OVERRIDE="${FM_TEARDOWN_TEST_DATA:-$case_dir/data}" \
   PATH="$case_dir/fakebin:${FM_TEARDOWN_TEST_PATH:-$PATH}" \
     "$TEARDOWN" task-x1 "$@"
 }
@@ -2103,6 +2103,80 @@ test_forced_teardown_retains_nested_secondmate_home_when_grandchild_close_unconf
   pass "forced teardown retains a nested secondmate home and its grandchild's Herdr identity when the grandchild close is unconfirmed"
 }
 
+# A remote secondmate is retired by a host-local teardown whose own state and
+# data directories are private paths INSIDE the home being removed
+# (bin/fm-remote-secondmate-control.sh). Nothing may write to this home after it
+# is gone: a writer that creates its parent directories rebuilds a retired home
+# as a stray tree, and the next readiness or seeding pass sees a home that was
+# reported retired.
+test_secondmate_retirement_writes_nothing_into_the_removed_home() {
+  local case_dir home rc leftovers
+  case_dir=$(make_case secondmate-home-owned-data)
+  write_meta "$case_dir" local-only secondmate
+  home="$case_dir/secondmate-home"
+  mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects"
+  printf '%s\n' task-x1 > "$home/.fm-secondmate-home"
+  printf '%s\n' "home=$home" >> "$case_dir/state/task-x1.meta"
+  rc=0
+  FM_TEARDOWN_TEST_DATA="$home/data/.parent-route" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  [ "$rc" -eq 0 ] \
+    || fail "secondmate-home-owned-data: retirement failed"$'\n'"$(cat "$case_dir/stderr")"
+  if [ -e "$home" ]; then
+    leftovers=$(find "$home" | head -20)
+    fail "secondmate-home-owned-data: retirement rebuilt the removed home"$'\n'"$leftovers"
+  fi
+  pass "secondmate retirement writes nothing back into the home it removed"
+}
+
+# The other direction of the same guard: a retirement whose ledger lives OUTSIDE
+# the removed home keeps recording its terminal line, so refusing to resurrect a
+# home never turns into silently dropping this home's telemetry.
+test_secondmate_retirement_still_records_a_ledger_outside_the_home() {
+  local case_dir home rc
+  case_dir=$(make_case secondmate-home-external-data)
+  write_meta "$case_dir" local-only secondmate
+  home="$case_dir/secondmate-home"
+  mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects"
+  printf '%s\n' task-x1 > "$home/.fm-secondmate-home"
+  printf '%s\n' "home=$home" >> "$case_dir/state/task-x1.meta"
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  [ "$rc" -eq 0 ] \
+    || fail "secondmate-home-external-data: retirement failed"$'\n'"$(cat "$case_dir/stderr")"
+  [ ! -e "$home" ] || fail "secondmate-home-external-data: the home survived retirement"
+  grep -q "task=task-x1" "$case_dir/data/wake-ledger.tsv" \
+    || fail "secondmate-home-external-data: retirement recorded no terminal ledger line"
+  pass "secondmate retirement still records a terminal line in a ledger outside that home"
+}
+
+# The narrow edge the guard must not swallow: a ledger outside the removed home
+# whose directory does not exist yet. Deciding containment from a missing
+# directory after the removal would skip this write - and skip its warning with
+# it - even though nothing about this destination was removed.
+test_secondmate_retirement_creates_a_missing_ledger_directory_outside_the_home() {
+  local case_dir home ledger rc
+  case_dir=$(make_case secondmate-home-external-fresh-ledger)
+  write_meta "$case_dir" local-only secondmate
+  home="$case_dir/secondmate-home"
+  ledger="$case_dir/fresh-ledger-dir/wake-ledger.tsv"
+  mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects"
+  printf '%s\n' task-x1 > "$home/.fm-secondmate-home"
+  printf '%s\n' "home=$home" >> "$case_dir/state/task-x1.meta"
+  assert_absent "$(dirname "$ledger")" "secondmate-home-external-fresh-ledger: fixture pre-created the ledger directory"
+  rc=0
+  FM_WAKE_LEDGER="$ledger" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  [ "$rc" -eq 0 ] \
+    || fail "secondmate-home-external-fresh-ledger: retirement failed"$'\n'"$(cat "$case_dir/stderr")"
+  [ ! -e "$home" ] || fail "secondmate-home-external-fresh-ledger: the home survived retirement"
+  [ -f "$ledger" ] \
+    || fail "secondmate-home-external-fresh-ledger: retirement skipped a ledger whose directory it should have created"
+  grep -q "task=task-x1" "$ledger" \
+    || fail "secondmate-home-external-fresh-ledger: the created ledger holds no terminal line"
+  pass "secondmate retirement creates a missing ledger directory outside the home it removed"
+}
+
 configure_herdr_projection_teardown_case() {  # <case-dir>
   local case_dir=$1 token=AbCdEfGhIjKlMnOpQrStUv
   sed -i.bak 's/^window=.*/window=fmtest:w1:p2/' "$case_dir/state/task-x1.meta"
@@ -2907,6 +2981,9 @@ test_herdr_flat_teardown_preflight_refuses_before_changes
 test_forced_secondmate_herdr_child_preflight_refuses_before_changes
 test_forced_secondmate_herdr_child_retains_records_when_close_unconfirmed
 test_forced_teardown_retains_nested_secondmate_home_when_grandchild_close_unconfirmed
+test_secondmate_retirement_writes_nothing_into_the_removed_home
+test_secondmate_retirement_still_records_a_ledger_outside_the_home
+test_secondmate_retirement_creates_a_missing_ledger_directory_outside_the_home
 test_herdr_projection_teardown_retires_journal_only_after_confirmed_close
 test_herdr_projection_teardown_retains_journal_when_close_unconfirmed
 test_squash_merged_branch_deleted_allows
