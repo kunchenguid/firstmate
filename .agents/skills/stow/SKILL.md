@@ -58,6 +58,8 @@ Every `/stow` invocation performs this complete pass, even when the session cont
    Treat an absent local file as absent, not as an invitation to manufacture content.
    In a primary home, all three are curation inputs under their existing ownership rules.
    In a secondmate home, `data/captain-shared.md` is a read-only primary-owned input: count it, never edit it, and curate only the editable local files.
+   Every mutation in the rest of this pass, including reinforcement, retiering, decay archival, legacy migration, consolidation, budget archival, and offload, applies only to an editable memory file.
+   When a read-only shared entry appears to require one of those changes, leave it untouched, report the required change as an ownership exception, and route it to the primary owner.
 3. Build one whole-file retention plan before editing.
    Retain, in order: current captain preferences, authority and safety boundaries, and recurring working style; stable home-local operating facts that repeatedly affect future work and are expensive to rediscover; then concise pointers to an existing authoritative report, project document, configuration, or backlog item.
    Retain lower-priority material only while budget remains.
@@ -65,7 +67,7 @@ Every `/stow` invocation performs this complete pass, even when the session cont
    Refresh `reinforced:` to today only on entries this session actually exercised, confirmed, or re-derived.
    The bar is session evidence: an entry's presence in the file is not evidence, and re-reading your own memory is never reinforcement.
    Stamp each newly written entry with today's date and its tier per the marking rules, and admit a new `perishable` entry only with its named checkable expiry condition in the prose.
-5. Evaluate every dated entry against its tier clock.
+5. Evaluate every dated entry in each editable memory file against its tier clock.
    Re-validate a stale `aging` entry from current evidence and refresh its date, or archive it.
    Re-confirm a stale `perishable` entry against its named condition: still open means refresh the date, while resolved, expired, or no longer checkable means archive it in this pass.
    Promote `perishable` to `aging` when its condition keeps proving durable past its expected life, and retier in place when a supersession changes an entry's lifetime.
@@ -74,7 +76,7 @@ Every `/stow` invocation performs this complete pass, even when the session cont
    Prefer one concise current rule or authoritative pointer over duplicate prose.
    Archive completed incident and release chronology, stale versions and paths, transient task state, resolved alternatives, old metrics, and report-sized procedures; merge or remove only superseded claims and duplicates whose facts are preserved elsewhere.
    Never plainly remove a unique current fact: every such exit must archive it with provenance in the recoverable cold tier or relocate it to a live JIT owner or a consolidation merge that preserves the fact.
-7. When the total is still over budget after decay and consolidation, relieve it in this order: archive everything already stale, which needs no further judgment; consolidate tighter; run the over-budget offload sweep below and file its proposals, whose relief lands at migration cadence rather than inside this pass; then archive `aging` entries oldest-`reinforced`-first until within budget.
+7. When the total is still over budget after decay and consolidation, relieve it using editable files only and in this order: archive every editable entry already stale, which needs no further judgment; consolidate tighter; run the over-budget offload sweep below and file its proposals, whose relief lands at migration cadence rather than inside this pass; then archive editable `aging` entries oldest-`reinforced`-first until within budget.
    Automatic processes never move a `pinned` entry: decay clocks, legacy grace cycles, oldest-first budget eviction, and immediate budget archiving do not apply to it.
    The sole exception is relocation to a JIT owner after explicit, per-item captain approval under the offload flow below, and that entry remains in memory until its destination is live.
 8. Run `bin/fm-startup-memory-budget.sh report` again after the complete pass.
@@ -88,7 +90,7 @@ Never describe the session as reset-safe while the memory total is over budget o
 
 ## The cold tier: data/memory-archive.md
 
-Stale never means deleted: pruning a memory entry always means moving it to `data/memory-archive.md`, this home's append-only, never-injected cold tier, gitignored with the rest of `data/` and never counted by the budget report.
+Stale never means deleted: pruning an entry from an editable memory file always means moving it to `data/memory-archive.md`, this home's append-only, never-injected cold tier, gitignored with the rest of `data/` and never counted by the budget report.
 Each archived entry keeps its provenance under a dated pass heading: source file, tier, last-reinforced date, and the reason it left.
 
 ```markdown
@@ -112,6 +114,7 @@ For the offload sweep's evaluation only, each entry has exactly three outcomes d
 The offload sweep runs only when the pass is still over budget after decay archiving and consolidation, so routine passes never see proposals.
 Every test must hold for a candidate:
 
+- Editable source: this home owns the memory file and may relocate the entry; a read-only shared entry is routed to its primary owner instead.
 - Durable: not `perishable`, not stale, and expected to remain true for months.
 - Eligible by authority: an `aging` entry may be proposed normally, while a `pinned` entry may be proposed only for explicit, per-item captain-approved relocation and can never be archived for budget relief.
 - Conditional: a one-line nameable trigger exists, and a session that never touches that trigger runs no risk from omitting the fact.
@@ -183,7 +186,7 @@ A local skill exists only in this home, so offloading an entry out of `data/capt
 ## One-time migration of unmarked entries
 
 Legacy entries carry no markers; an unmarked entry is its file's default tier with unknown age, and unknown age is not guilt.
-The first pass after adoption performs a one-time revalidation sweep instead of blanket restamping:
+The first pass after adoption performs a one-time revalidation sweep of editable memory files instead of blanket restamping, while a read-only shared file remains untouched and any required change is routed to its primary owner:
 
 - In `data/captain.md` and `data/captain-shared.md`, every unmarked entry is simply default-pinned and remains exempt from the aging clock, legacy grace cycle, and archive-by-age; consolidation still applies, and only genuine tier deviations receive markers.
 - In `data/learnings.md`, stamp each entry the pass can confirm current with `reinforced:` today, plus a `tier:` where it deviates from the `aging` default.
