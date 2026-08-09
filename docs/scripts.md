@@ -39,7 +39,6 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-session-lock-lib.sh` | Shared session-lock harness identity, including narrowed Cursor ancestry, for lock ownership and liveness consumers |
 | `fm-cursor-lib.sh`       | Single owner of Cursor executable resolution and legacy-alias proof, and Cursor process identity |
 | `fm-process-identity-lib.sh` | Shared spawn/teardown process-reuse identity (`starttime=` / `lstart=`) |
-| `fm-hook-arm-lib.sh`    | Shared hook-owned watcher arm primitive: foreground lifecycle, wake classification, healthy-watcher verification, and interruption-marker contract; sourced by the cursor stop-hook adapter |
 | `fm-claude-stop-autoarm.sh` | Claude Stop `asyncRewake` hook owning tokenless watcher continuity with single-flight exit-2 rewake (docs/watcher-continuity.md) |
 | `fm-turnend-guard.sh`    | Shared primary turn-end guard predicate so no turn ends blind (docs/turnend-guard.md) |
 | `fm-turnend-guard-grok.sh` | Grok Stop-hook adapter for the primary turn-end guard                              |

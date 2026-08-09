@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # Cursor executable resolution and Cursor process identity.
 # Sourced by bin/fm-spawn.sh, bin/fm-harness.sh, bin/fm-session-lock-lib.sh,
-# and bin/backends/tmux.sh.
+# bin/backends/tmux.sh, bin/fm-tmux-lib.sh, and bin/backends/herdr.sh.
 # This file is sourced by scripts and has no side effects on source.
 # Generic spawn/teardown PID reuse guards live in bin/fm-process-identity-lib.sh.
+# Cursor composer raw-render normalization (reverse-video cursor-cell gap) also
+# lives here - see fm_cursor_composer_normalize below.
 #
 # Why one owner: cursor ships TWO executable names - `cursor-agent`, plus the
 # legacy alias `agent` it installs on every platform. `agent` is far too
@@ -203,4 +205,194 @@ fm_cursor_process_matches() {  # <comm> <args> [argv0]
   # its install path.
   case "$comm" in */*) fm_cursor_path_is_cursor "$comm" && return 0 ;; esac
   return 1
+}
+
+# --- Cursor composer raw-render normalization ---------------------------------
+# Cursor renders its idle composer prompt fully de-emphasised, with the cursor
+# cell wrapped in reverse video (SGR 7) between two de-emphasised runs. A raw
+# ANSI capture of that row survives the generic ghost stripper with the cursor
+# cell intact, which would classify the idle composer as pending. The gap is a
+# Cursor RENDERER artefact, so its mechanics live here, not in the shared
+# stripper: fm_cursor_composer_normalize turns a raw ANSI row into a normalized
+# row with the reverse-video cursor cell removed, then the generic
+# fm_composer_strip_ghost (bin/fm-composer-lib.sh) classifies the rest. The
+# boundary is "raw ANSI row -> Cursor normalization -> generic ghost/composer
+# classifier": no generic semantic rule (empty|pending|unknown, idle
+# placeholder, busy-queued Enter) is duplicated here.
+#
+# The gap machine: when de-emphasis (dim/dark-truecolor) EXITS, buffer every
+# following byte (SGRs and text) as a span; on de-emphasis RE-ENTRY, drop the
+# span when it is reverse-video-marked (the cursor cell) and emit it otherwise
+# (real typed text must survive). A bare reset (SGR 0) inside the span is a
+# split-SGR relay artefact (herdr transmits ESC[0m + ESC[2m where tmux
+# coalesces 0;2m) and must NOT flush the span; only a real dim/dark re-entry
+# closes it. End of line always emits (no re-entry means the gap is real).
+# Verified against cursor-agent 2026.07.23-e383d2b (tmux coalesced and herdr
+# split forms) and pinned by tests/fm-composer-ghost.test.sh.
+FM_CURSOR_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/fm-composer-lib.sh
+. "$FM_CURSOR_LIB_DIR/fm-composer-lib.sh"
+
+fm_cursor_composer_normalize() {  # raw ANSI row on stdin -> normalized ANSI row on stdout
+  LC_ALL=C awk -v lumamax="${FM_COMPOSER_GHOST_LUMA_MAX:-128}" '
+    function sgr_code(v, b) {
+      b = v
+      sub(/:.*/, "", b)
+      if (b == "") b = "0"
+      return b
+    }
+    function skip_color_payload(a, p, k, mode, code) {
+      if (index(a[p], ":") > 0) return p
+      if (p >= k) return p
+      mode = a[p + 1]
+      code = sgr_code(mode)
+      if (index(mode, ":") > 0) return p + 1
+      if (code == "5") return p + 2
+      if (code == "2") return p + 4
+      return p + 1
+    }
+    function fg38_is_dark(a, p, k, lumamax,   spec, nf, f, r, g, b) {
+      spec = a[p]
+      if (index(spec, ":") > 0) {
+        nf = split(spec, f, ":")
+        if (f[2] != "2" || nf < 5) return 0
+        r = f[nf - 2] + 0; g = f[nf - 1] + 0; b = f[nf] + 0
+        return ((299*r + 587*g + 114*b) / 1000 < lumamax) ? 1 : 0
+      }
+      if (p + 1 > k || a[p + 1] != "2" || p + 4 > k) return 0
+      r = a[p + 2] + 0; g = a[p + 3] + 0; b = a[p + 4] + 0
+      return ((299*r + 587*g + 114*b) / 1000 < lumamax) ? 1 : 0
+    }
+    {
+      line = $0; out = ""; dim = 0; darkfg = 0; n = length(line); i = 1
+      ghost_gap = 0; gap_buf = ""; gap_rev = 0
+      while (i <= n) {
+        c = substr(line, i, 1)
+        if (c == "\033") {
+          j = i + 1
+          if (substr(line, j, 1) == "[") {
+            j++; params = ""
+            while (j <= n) {
+              cc = substr(line, j, 1)
+              if (cc ~ /[@-~]/) break
+              params = params cc; j++
+            }
+            if (j <= n && substr(line, j, 1) == "m") {
+              if (params == "") params = "0"
+              if (ghost_gap) {
+                # Peek: is this SGR de-emphasis-changing (flushes the span) or
+                # color-only (stays inside the span)? Color payloads (38;2,
+                # 38;5, 48;2, 48;5, 58;2, 58;5) are skipped so a "2" inside a
+                # TRUECOLOR spec is not read as a dim code. Two scans: one for
+                # any de-emphasis code, one for dim/dark-38 re-entry (code "0"
+                # is de-emphasis but does NOT re-enter dim; "2" may follow "0"
+                # in the same params).
+                is_deemph = 0; dim_reentered = 0; dark_reentered = 0
+                k_check = split(params, a_check, ";")
+                for (p_check = 1; p_check <= k_check; p_check++) {
+                  v_check = a_check[p_check]; code_check = sgr_code(v_check)
+                  if (code_check == "38" || code_check == "48" || code_check == "58") {
+                    if (code_check == "38" && fg38_is_dark(a_check, p_check, k_check, lumamax)) {
+                      is_deemph = 1; dark_reentered = 1; break
+                    }
+                    p_check = skip_color_payload(a_check, p_check, k_check)
+                    continue
+                  }
+                  if (code_check == "2") { is_deemph = 1; break }
+                  if (code_check == "0" || code_check == "22") { is_deemph = 1; break }
+                  if (code_check == "39") { is_deemph = 1; break }
+                  if (code_check + 0 >= 30 && code_check + 0 <= 37) { is_deemph = 1; break }
+                  if (code_check + 0 >= 90 && code_check + 0 <= 97) { is_deemph = 1; break }
+                }
+                if (is_deemph) {
+                  for (p_check = 1; p_check <= k_check; p_check++) {
+                    v_check = a_check[p_check]; code_check = sgr_code(v_check)
+                    if (code_check == "38" || code_check == "48" || code_check == "58") {
+                      if (code_check == "38" && fg38_is_dark(a_check, p_check, k_check, lumamax)) {
+                        dark_reentered = 1; break
+                      }
+                      p_check = skip_color_payload(a_check, p_check, k_check)
+                      continue
+                    }
+                    if (code_check == "2") { dim_reentered = 1; break }
+                  }
+                  if (!(gap_rev && !dim_reentered && !dark_reentered)) {
+                    ghost_gap = 0
+                    if ((dim_reentered || dark_reentered) && gap_rev) {
+                      gap_buf = ""   # reverse-video span is the cursor cell, drop it
+                    } else {
+                      out = out gap_buf   # span is real, emit it in place
+                    }
+                    gap_buf = ""; gap_rev = 0
+                  }
+                  # else: de-emphasis-END-ONLY SGR on a reverse-video span
+                  # (split-SGR relay) - the span stays open untouched.
+                }
+              }
+              k = split(params, a, ";")
+              for (p = 1; p <= k; p++) {
+                v = a[p]; code = sgr_code(v)
+                if (code == "38") {
+                  darkfg = fg38_is_dark(a, p, k, lumamax)
+                  p = skip_color_payload(a, p, k)
+                } else if (code == "48" || code == "58") {
+                  p = skip_color_payload(a, p, k)
+                } else if (code == "2") {
+                  if (!dim) { dim = 1; ghost_gap = 0; gap_buf = ""; gap_rev = 0 }
+                } else if (code == "0") {
+                  if (dim || darkfg) { ghost_gap = 1; gap_buf = ""; gap_rev = 0 }
+                  dim = 0; darkfg = 0
+                } else if (code == "22") {
+                  if (dim) { ghost_gap = 1; gap_buf = ""; gap_rev = 0 }
+                  dim = 0
+                } else if (code == "7") {
+                  if (ghost_gap) gap_rev = 1
+                } else if (code == "27") {
+                  gap_rev = 0
+                } else if (code == "39") { darkfg = 0 }
+                else if (code + 0 >= 30 && code + 0 <= 37) { darkfg = 0 }
+                else if (code + 0 >= 90 && code + 0 <= 97) { darkfg = 0 }
+              }
+              if (ghost_gap) {
+                gap_buf = gap_buf "\033[" params "m"
+              } else {
+                out = out "\033[" params "m"
+              }
+            }
+            if (j <= n) { i = j + 1; continue }
+          }
+          i = i + 1; continue
+        }
+        if (ghost_gap) {
+          gap_buf = gap_buf c
+        } else {
+          out = out c
+        }
+        i++
+      }
+      if (ghost_gap && gap_buf != "") out = out gap_buf
+      print out
+    }
+  '
+}
+
+# fm_cursor_composer_strip: the Cursor-aware entry point callers route raw rows
+# through when FM_COMPOSER_HARNESS=cursor: normalize the reverse-video cursor
+# cell away, then delegate the ghost/placeholder extraction to the shared
+# generic stripper.
+fm_cursor_composer_strip() {  # raw ANSI row on stdin -> plain non-ghost text on stdout
+  fm_cursor_composer_normalize | fm_composer_strip_ghost
+}
+
+# fm_cursor_bare_prompt_re: the effective structural bare-prompt regex for a
+# composer scan under Cursor identity. Cursor's `→` prompt glyph is admitted as
+# a bare composer candidate only when FM_COMPOSER_HARNESS=cursor (verified on
+# herdr 2026-08-05); an unscoped arrow is a common decoration and must never be
+# inferred from an idle regex alone.
+fm_cursor_bare_prompt_re() {  # <base-re> -> effective regex
+  if [ "${FM_COMPOSER_HARNESS:-}" = cursor ]; then
+    printf '%s' "${1%)}|${FM_COMPOSER_CURSOR_PROMPT_GLYPH:-→})"
+  else
+    printf '%s' "$1"
+  fi
 }

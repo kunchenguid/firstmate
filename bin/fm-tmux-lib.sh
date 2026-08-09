@@ -67,6 +67,11 @@
 
 # shellcheck source=bin/fm-composer-lib.sh
 . "$(dirname -- "${BASH_SOURCE[0]}")/fm-composer-lib.sh"
+# Cursor composer raw-render normalization (reverse-video cursor-cell gap) is
+# owned by bin/fm-cursor-lib.sh; the cursor-harness branch below routes raw rows
+# through it before the shared generic stripper.
+# shellcheck source=bin/fm-cursor-lib.sh
+. "$(dirname -- "${BASH_SOURCE[0]}")/fm-cursor-lib.sh"
 
 # Delivery-only rendered busy footers per harness. claude/codex: "esc to
 # interrupt"; opencode: "esc interrupt"; pi: "Working..."; grok: "Ctrl+c:cancel".
@@ -127,6 +132,12 @@ fm_tmux_composer_row_state() {  # <raw-row> [bordered] [allow-busy] -> empty|pen
   plain="${plain#"${plain%%[![:space:]]*}"}"
   plain="${plain%"${plain##*[![:space:]]}"}"
   stripped=$(printf '%s\n' "$raw" | fm_composer_strip_ghost)
+  if [ "${FM_COMPOSER_HARNESS:-}" = cursor ]; then
+    # Cursor renders its cursor cell in reverse video between de-emphasised
+    # runs; normalize that renderer artefact away before the generic strip
+    # (bin/fm-cursor-lib.sh owns the gap mechanics).
+    stripped=$(printf '%s\n' "$raw" | fm_cursor_composer_strip)
+  fi
   stripped="${stripped#"${stripped%%[![:space:]]*}"}"
   stripped="${stripped%"${stripped##*[![:space:]]}"}"
   case "$stripped" in

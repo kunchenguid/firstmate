@@ -74,9 +74,13 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 
 # Shared composer-content classifier (empty|pending|unknown, and the fleet-wide
 # dead-shell-vs-agent-composer rule). Owned by bin/fm-composer-lib.sh, reused by
-# every backend so the decision cannot drift.
+# every backend so the decision cannot drift. Cursor's reverse-video cursor-cell
+# normalization is owned by bin/fm-cursor-lib.sh and used only by the
+# cursor-harness branch below.
 # shellcheck source=bin/fm-composer-lib.sh
 . "$FM_BACKEND_HERDR_ROOT/bin/fm-composer-lib.sh"
+# shellcheck source=bin/fm-cursor-lib.sh
+. "$FM_BACKEND_HERDR_ROOT/bin/fm-cursor-lib.sh"
 
 # Shared, backend-neutral normalized-transition shape and the single-owner
 # status->action policy table (bin/fm-transition-lib.sh). This adapter's event
@@ -2775,10 +2779,10 @@ fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
   pane=$FM_BACKEND_HERDR_PANE
   # Bare → is Cursor's prompt glyph only. Admit it structurally when the
   # composer harness is cursor; never infer Cursor from idle regex alone.
-  # Build the prompt regex from the shared glyph table so Cursor's glyph is
-  # defined once (fm-composer-lib.sh), not duplicated here.
-  bare_prompt_re=$FM_BACKEND_HERDR_BARE_PROMPT_RE
-  [ "${FM_COMPOSER_HARNESS:-}" = cursor ] && bare_prompt_re="${bare_prompt_re%)}|${FM_COMPOSER_CURSOR_PROMPT_GLYPH:-→})"
+  # The effective regex is owned by bin/fm-cursor-lib.sh so the Cursor
+  # identity gate and glyph stay with the Cursor owner; the base glyph table
+  # remains the shared FM_BACKEND_HERDR_BARE_PROMPT_RE.
+  bare_prompt_re=$(fm_cursor_bare_prompt_re "$FM_BACKEND_HERDR_BARE_PROMPT_RE")
   cap=$(fm_backend_herdr_capture_ansi "$target" "$FM_BACKEND_HERDR_COMPOSER_LINES" 2>/dev/null \
     || fm_backend_herdr_capture "$target" "$FM_BACKEND_HERDR_COMPOSER_LINES") || { printf 'unknown'; return 0; }
   # Structural scan: locate the bottom-most composer row and remember its RAW
@@ -2855,6 +2859,12 @@ EOF
   # dark box border too, which is why the bordered flag was read from the plain
   # shape above, not from this ghost-stripped content.
   stripped=$(printf '%s\n' "$raw_match" | fm_composer_strip_ghost)
+  if [ "${FM_COMPOSER_HARNESS:-}" = cursor ]; then
+    # Cursor renders its cursor cell in reverse video between de-emphasised
+    # runs and herdr relays the split SGR forms; normalize that renderer
+    # artefact away before the generic strip (bin/fm-cursor-lib.sh).
+    stripped=$(printf '%s\n' "$raw_match" | fm_cursor_composer_strip)
+  fi
   stripped="${stripped#"${stripped%%[![:space:]]*}"}"
   stripped="${stripped%"${stripped##*[![:space:]]}"}"
   if [ "$shape" = bordered ]; then
