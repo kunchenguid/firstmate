@@ -1378,7 +1378,7 @@ set -u
 printf '%s\n' "\$*" >> "\${FM_FAKE_HERDR_LOG:?}"
 case "\${1:-} \${2:-}" in
   "workspace list")
-    printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"wH","active_tab_id":"wH:t1","focused":true},{"workspace_id":"wG","active_tab_id":"wG:tQ","focused":false}]}}'
+    printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"wH","active_tab_id":"wH:t1","focused":true},{"workspace_id":"wG","active_tab_id":"wG:tQ","label":"└ task-x1 · p:AbCdEfGhIjKlMnOpQrStUv","focused":false}]}}'
     ;;
   "tab list")
     case "\$*" in
@@ -1403,7 +1403,14 @@ case "\${1:-} \${2:-}" in
   "pane close")
     case "\$*" in
       *"wG:pOld"*) : > "\${FM_FAKE_HERDR_CLEANUP_CLOSED:?}" ;;
-      *) : > "\${FM_FAKE_HERDR_CLOSED:?}" ;;
+      *)
+        if [ -n "\${FM_FAKE_HERDR_JOURNAL:-}" ]; then
+          grep -qx 'tab_id=wG:tQ' "\$FM_FAKE_HERDR_JOURNAL" \
+            && grep -qx 'pane_id=wG:pQ' "\$FM_FAKE_HERDR_JOURNAL" || exit 1
+          : > "\${FM_FAKE_HERDR_JOURNAL_RECONCILED:?}"
+        fi
+        : > "\${FM_FAKE_HERDR_CLOSED:?}"
+        ;;
     esac
     ;;
   "pane get")
@@ -1513,23 +1520,43 @@ SH
 }
 
 test_herdr_teardown_consumes_pending_cleanup_endpoint() {
-  local case_dir log closed cleanup_closed rc
+  local case_dir log closed cleanup_closed journal reconciled rc
   case_dir=$(make_case herdr-pending-cleanup)
   write_meta "$case_dir" local-only ship
   configure_flat_herdr_teardown_case "$case_dir"
   printf '%s\n' 'herdr_cleanup_endpoint=default:wG:pOld' >> "$case_dir/state/task-x1.meta"
+  journal="$case_dir/state/task-x1.herdr-presentation"
+  printf '%s\n' \
+    'version=2' \
+    'task_id=task-x1' \
+    'projection_id=AbCdEfGhIjKlMnOpQrStUv' \
+    "home=$case_dir/wt" \
+    'session=default' \
+    'workspace_id=wG' \
+    'tab_id=wG:tQ' \
+    'pane_id=wG:pOld' \
+    'parent_workspace_id=wH' \
+    'parent_label=firstmate' \
+    'workspace_label=└ task-x1 · p:AbCdEfGhIjKlMnOpQrStUv' \
+    'task_label=fm-task-x1' > "$journal"
   log="$case_dir/herdr.log"; : > "$log"
   closed="$case_dir/closed"
   cleanup_closed="$case_dir/cleanup-closed"
+  reconciled="$case_dir/journal-reconciled"
 
   rc=0
   FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" \
     FM_FAKE_HERDR_CLEANUP_CLOSED="$cleanup_closed" \
+    FM_FAKE_HERDR_JOURNAL="$journal" FM_FAKE_HERDR_JOURNAL_RECONCILED="$reconciled" \
     run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
 
   expect_code 0 "$rc" "herdr-pending-cleanup: teardown should close both owned panes"
   assert_present "$closed" "herdr-pending-cleanup: teardown left current pane live"
   assert_present "$cleanup_closed" "herdr-pending-cleanup: teardown left pending old pane live"
+  assert_present "$reconciled" \
+    "herdr-pending-cleanup: teardown closed pane before reconciling journal"
+  assert_absent "$journal" \
+    "herdr-pending-cleanup: teardown orphaned stale presentation journal"
   assert_absent "$case_dir/state/task-x1.meta" \
     "herdr-pending-cleanup: teardown retained metadata after confirmed cleanup"
   pass "herdr teardown consumes pending old endpoint before deleting task records"
