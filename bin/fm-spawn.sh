@@ -2156,10 +2156,10 @@ cursor_worker_server_has_launch_token() {  # <pid> <token>
 }
 
 cursor_worker_server_reap_launch_token() {
-  local pid identity ws_file reap_file tmp pids matched clear_scans=0 i
+  local pid identity ws_file reap_file tmp pids matched clear_scans=0 matches=0
   ws_file="$STATE/$ID.worker-server"
   reap_file="$STATE/.$ID.rollback-worker-server.$$"
-  for i in 1 2 3 4 5 6 7 8 9 10; do
+  while [ "$clear_scans" -lt 3 ]; do
     pids=$(LC_ALL=C ps -e -o pid= 2>/dev/null) || return 1
     matched=
     while IFS= read -r pid; do
@@ -2172,10 +2172,17 @@ $pids
 EOF
     if [ -z "$matched" ]; then
       clear_scans=$((clear_scans + 1))
-      [ "$clear_scans" -lt 3 ] || { rm -f "$reap_file"; return 0; }
     else
       clear_scans=0
-      identity=$(fm_process_identity "$matched") || return 1
+      matches=$((matches + 1))
+      [ "$matches" -le 10 ] || return 1
+      if ! identity=$(fm_process_identity "$matched"); then
+        if kill -0 "$matched" 2>/dev/null; then
+          return 1
+        fi
+        sleep 0.1
+        continue
+      fi
       tmp="$reap_file.tmp"
       printf '%s %s\n' "$matched" "$identity" > "$tmp" || return 1
       mv -f -- "$tmp" "$reap_file" || { rm -f -- "$tmp"; return 1; }
@@ -2186,7 +2193,7 @@ EOF
     fi
     sleep 0.1
   done
-  return 1
+  rm -f "$reap_file"
 }
 
 # The recorded identity is produced by the SAME parse teardown re-checks

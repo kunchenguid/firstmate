@@ -126,15 +126,21 @@ if [ "$field" = comm= ] && [ -n "${FM_FAKE_CURSOR_PROC_ROOT:-}" ] && [ -n "${FM_
 fi
 case "$query" in
   *"-e -o pid="*)
-    if [ -n "${FM_FAKE_CURSOR_TOKEN_PID:-}" ] \
-       && kill -0 "$FM_FAKE_CURSOR_TOKEN_PID" 2>/dev/null; then
+    if [ -n "${FM_FAKE_CURSOR_TOKEN_SCAN_COUNT:-}" ]; then
       count=0
-      [ ! -f "${FM_FAKE_CURSOR_TOKEN_SCAN_COUNT:-}" ] \
+      [ ! -f "$FM_FAKE_CURSOR_TOKEN_SCAN_COUNT" ] \
         || count=$(cat "$FM_FAKE_CURSOR_TOKEN_SCAN_COUNT")
       count=$((count + 1))
-      printf '%s\n' "$count" > "${FM_FAKE_CURSOR_TOKEN_SCAN_COUNT:?}"
-      [ "$count" -lt "${FM_FAKE_CURSOR_TOKEN_AFTER_SCAN:-1}" ] \
-        || printf '%s\n' "$FM_FAKE_CURSOR_TOKEN_PID"
+      printf '%s\n' "$count" > "$FM_FAKE_CURSOR_TOKEN_SCAN_COUNT"
+      if [ -n "${FM_FAKE_CURSOR_TOKEN_PID:-}" ] \
+         && kill -0 "$FM_FAKE_CURSOR_TOKEN_PID" 2>/dev/null \
+         && [ "$count" -ge "${FM_FAKE_CURSOR_TOKEN_AFTER_SCAN:-1}" ]; then
+        printf '%s\n' "$FM_FAKE_CURSOR_TOKEN_PID"
+      else
+        case " ${FM_FAKE_CURSOR_VANISHED_SCANS:-} " in
+          *" $count "*) printf '%s\n' "${FM_FAKE_CURSOR_VANISHED_PID:?}" ;;
+        esac
+      fi
     fi
     exit 0 ;;
   *"eww"*)
@@ -142,6 +148,7 @@ case "$query" in
     printf '%s FM_CURSOR_LAUNCH_TOKEN=%s\n' "$args" "$token"
     exit 0 ;;
   *"lstart="*)
+    [ "$pid" != "${FM_FAKE_CURSOR_VANISHED_PID:-}" ] || exit 1
     printf 'Mon Jan  1 00:00:00 2001\n'
     exit 0 ;;
   # ppid= must be answered separately from args=/comm=: the ancestry walk in
@@ -932,7 +939,8 @@ test_cursor_worker_server_discovery_timeout_causes_rollback() {
     FM_FAKE_CURSOR_AGENT_ARGS="$FAKEBIN_DIR/cursor-agent --force --trust brief" \
     FM_PROC_ROOT_OVERRIDE="$CASE_DIR/no-proc" FM_FAKE_CURSOR_PROC_ROOT="$CASE_DIR/no-proc" \
     FM_FAKE_CURSOR_AGENT_PID=4242 FM_FAKE_CURSOR_WORKER_PID='' \
-    FM_FAKE_CURSOR_TOKEN_PID=$token_pid FM_FAKE_CURSOR_TOKEN_AFTER_SCAN=2 \
+    FM_FAKE_CURSOR_TOKEN_PID=$token_pid FM_FAKE_CURSOR_TOKEN_AFTER_SCAN=8 \
+    FM_FAKE_CURSOR_VANISHED_PID=99999999 FM_FAKE_CURSOR_VANISHED_SCANS='2 4 6 9' \
     FM_FAKE_CURSOR_TOKEN_SCAN_COUNT="$CASE_DIR/token-scans" \
     FM_FAKE_WINDOW_STATE_FILE="$CASE_DIR/windows.state" \
     FM_FAKE_TREEHOUSE_LOG="$CASE_DIR/treehouse.log" \
