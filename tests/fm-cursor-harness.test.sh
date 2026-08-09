@@ -27,7 +27,6 @@ make_cursor_fakebin() {
 set -u
 case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
-  *recovery.*"#{pane_tty}"*) printf '%s\n' /dev/pts/98; exit 0 ;;
   *"#{pane_tty}"*) printf '%s\n' "${FM_FAKE_PANE_TTY:-/dev/pts/99}"; exit 0 ;;
 esac
 case "${1:-}" in
@@ -51,15 +50,6 @@ case "${1:-}" in
         if [ "$prev" = "-n" ]; then wname=$a; fi
         prev=$a
       done
-      case "${wname:-}" in
-        *recovery.*)
-          if [ -n "${FM_FAKE_RECOVERY_CREATE_FAIL_ONCE:-}" ] \
-             && [ ! -e "$FM_FAKE_RECOVERY_CREATE_FAIL_ONCE" ]; then
-            : > "$FM_FAKE_RECOVERY_CREATE_FAIL_ONCE"
-            exit 1
-          fi
-          ;;
-      esac
       printf '%s\n' "${wname:-fm-window}" >> "$FM_FAKE_WINDOW_STATE_FILE" 2>/dev/null || true
     fi
     exit 0 ;;
@@ -86,25 +76,14 @@ case "${1:-}" in
     [ -z "${FM_FAKE_PENDING_INPUT:-}" ] || rm -f "$FM_FAKE_PENDING_INPUT"
     [ -z "${FM_FAKE_CURSOR_ENTER_STARTED:-}" ] || rm -f "$FM_FAKE_CURSOR_ENTER_STARTED"
     exit 0 ;;
-  rename-window)
-    target=
-    prev=
-    new_name=${!#}
-    for a in "$@"; do
-      if [ "$prev" = "-t" ]; then target=$a; fi
-      prev=$a
-    done
-    old_name=${target#*:}
-    if [ -n "${FM_FAKE_WINDOW_STATE_FILE:-}" ]; then
-      awk -v old="$old_name" -v new="$new_name" '$0 == old { print new; next } { print }' \
-        "$FM_FAKE_WINDOW_STATE_FILE" > "$FM_FAKE_WINDOW_STATE_FILE.tmp.$$" || exit 1
-      mv -f "$FM_FAKE_WINDOW_STATE_FILE.tmp.$$" "$FM_FAKE_WINDOW_STATE_FILE" || exit 1
+  respawn-window)
+    if [ -n "${FM_FAKE_RESPAWN_FAIL_ONCE:-}" ] \
+       && [ ! -e "$FM_FAKE_RESPAWN_FAIL_ONCE" ]; then
+      : > "$FM_FAKE_RESPAWN_FAIL_ONCE"
+      exit 1
     fi
-    case "$old_name:$new_name" in
-      *recovery.*:fm-*)
-        [ -z "${FM_FAKE_CURSOR_ENTER_STARTED:-}" ] || rm -f "$FM_FAKE_CURSOR_ENTER_STARTED"
-        ;;
-    esac
+    [ -z "${FM_FAKE_PENDING_INPUT:-}" ] || rm -f "$FM_FAKE_PENDING_INPUT"
+    [ -z "${FM_FAKE_CURSOR_ENTER_STARTED:-}" ] || rm -f "$FM_FAKE_CURSOR_ENTER_STARTED"
     exit 0 ;;
   send-keys)
     case " $* " in
@@ -231,7 +210,6 @@ case "$query" in
   # string for every -p query would make the walk error instead of ending.
   *"ppid="*) exit 1 ;;
   *"-t "*)
-    case "$query" in *dev/pts/98*) printf '777 777 777 bash\n'; exit 0 ;; esac
     if [ -n "${FM_FAKE_CURSOR_AGENT_AFTER_ENTER:-}" ] \
        && [ ! -e "${FM_FAKE_CURSOR_ENTER_STARTED:-}" ]; then
       printf '777 777 777 bash\n'
@@ -966,7 +944,7 @@ test_cursor_switch_relaunch_send_failures_preserve_ownership() {
       FM_FAKE_SWITCH_SEND_FAIL="$failure" \
       FM_FAKE_SWITCH_LAUNCH_TYPED="$CASE_DIR/switch-launch-typed" \
       FM_FAKE_PENDING_INPUT="$CASE_DIR/pending-input" \
-      FM_FAKE_RECOVERY_CREATE_FAIL_ONCE="$CASE_DIR/recovery-create-failed" \
+      FM_FAKE_RESPAWN_FAIL_ONCE="$CASE_DIR/respawn-failed" \
       FM_FAKE_WINDOW_STATE_FILE="$CASE_DIR/windows.state" \
       FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" PATH="$FAKEBIN_DIR:$PATH" \
       "$SPAWN" "$id" --relaunch --harness claude 2>&1)
@@ -982,8 +960,8 @@ test_cursor_switch_relaunch_send_failures_preserve_ownership() {
     [ ! -e "$CASE_DIR/pending-input" ] \
       || fail "cursor-to-claude $failure send failure left stale endpoint input"
     if [ "$failure" = literal-clear ]; then
-      [ -e "$CASE_DIR/recovery-create-failed" ] \
-        || fail "cursor-to-claude clear failure did not exercise replacement creation failure"
+      [ -e "$CASE_DIR/respawn-failed" ] \
+        || fail "cursor-to-claude clear failure did not exercise endpoint respawn failure"
     fi
     assert_grep "fm-$id" "$CASE_DIR/windows.state" \
       "cursor-to-claude $failure send failure removed relaunch endpoint"
