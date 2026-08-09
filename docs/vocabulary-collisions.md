@@ -152,8 +152,9 @@ No such field exists in the fleet today; the axis is what makes adding one a one
 Until it exists, read an absent `delivered` as "no path has reported this task landed", never as "this task did not land".
 
 **Retirement of the deprecated field.**
-`kind=` is still written to every task's metadata and is still the derivation source for a record that predates the split.
-Its retirement condition is: **stop writing `kind=` once no reader consults it and one full task cycle has run entirely on the three axes.**
+No consumer branches on `kind=` any more: every reader was migrated to the axis it actually meant.
+What keeps the field alive is that it is still written - so a home that has not yet fast-forwarded can still read a record this one wrote - and that it is still the derivation source for a record predating the split.
+Its retirement condition is therefore: **stop writing `kind=`, and drop it from the fleet snapshot's task rows, once one full task cycle has run entirely on the three axes across every home this repository serves.**
 Until then it is a dual-written deprecated alias with exactly one owner, and a metadata record whose `kind=` disagrees with its explicit axes is refused rather than silently resolved, so a stale writer that flips the old field alone cannot desynchronize a task's identity.
 
 **Where it bites:** [`bin/fm-task-axis-lib.sh`](../bin/fm-task-axis-lib.sh); the metadata field list in [`AGENTS.md`](../AGENTS.md) section 2; [`docs/architecture.md`](architecture.md).

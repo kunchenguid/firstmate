@@ -470,8 +470,6 @@ fi
 ORCA_WORKTREE_ID=$(fm_meta_get "$META" orca_worktree_id)
 ORCA_PATH_MATCH_VERIFIED=0
 
-KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
-[ -n "$KIND" ] || KIND=ship
 # Which protection this teardown applies is decided by the identity axes, so a
 # record whose deprecated alias contradicts them has no readable identity and
 # must stop here: a scout worktree is declared scratch while a ship's is
