@@ -1084,6 +1084,137 @@ JS
   pass "a fragment-selected tab is remembered before the fragment disappears"
 }
 
+# Project tags should lead to the complete current-state card rather than leave
+# the captain to scan the Projects tab. The fixture covers registered,
+# unregistered, and secondmate cards, while the browser check proves that the
+# decision and PR tags use the existing tab and reading-anchor mechanics.
+test_project_tags_jump_to_current_state_cards() {
+  local home snap board chrome
+  home=$(make_home project-tag-jumps)
+  cat > "$home/data/projects.md" <<'EOF'
+# Project registry
+
+- alpha [no-mistakes] - Registered project
+EOF
+  snap=$TMP_ROOT/project-tag-jumps.json
+  board=$TMP_ROOT/project-tag-jumps.html
+  snapshot_json '[
+    {"id":"alpha-decision","title":"Choose alpha rollout","raw":"Choose alpha rollout","repo":"alpha","state":"queued","kind":"captain","structured":true,"captain_actionable":true,"captain_deferred":false,"unresolved_blocker_ids":[],"completion":{"date":null}},
+    {"id":"gamma-decision","title":"Choose gamma rollout","raw":"Choose gamma rollout","repo":"gamma","state":"queued","kind":"captain","structured":true,"captain_actionable":true,"captain_deferred":false,"unresolved_blocker_ids":[],"completion":{"date":null}}
+  ]' '[{
+    "id":"brain","current":{"state":"captain_decision"},"active_children":[],
+    "decisions_open":[{"id":"brain-decision","key":"brain-decision","summary":"Choose brain route","reason":"Needs a route","source":"backlog"}],
+    "holds":[],"counts":{"active_children":0,"decisions_open":1,"holds":0}
+  }]' "[$(live_task alpha-pr 'Review alpha PR' alpha claude-opus-5 4 Checks ready | jq '.pr.url = "https://example.invalid/alpha/pull/1"'),
+             $(live_task gamma-task 'Build gamma route' gamma claude-opus-5 2 Building live)]" > "$snap"
+  FM_HOME=$home "$BOARD" --snapshot "$snap" --no-quota --refresh 300 --out "$board" >/dev/null \
+    || fail "the project-tag fixture must render"
+
+  assert_grep 'href="#project:alpha" data-project-anchor="project:alpha" class="tag">alpha</a>' "$board" \
+    "registered project tags must point at their card"
+  assert_grep 'href="#project:gamma" data-project-anchor="project:gamma" class="tag">gamma</a>' "$board" \
+    "unregistered project tags must point at their card"
+  assert_grep 'href="#secondmate:brain" data-project-anchor="secondmate:brain" class="tag">brain</a>' "$board" \
+    "secondmate tags must point at their card"
+  assert_grep 'id="project:alpha" class="proj' "$board" \
+    "a registered project card must expose its card anchor"
+  assert_grep 'id="project:gamma" class="proj' "$board" \
+    "an unregistered project card must expose its card anchor"
+  assert_grep 'id="secondmate:brain" class="proj' "$board" \
+    "a secondmate card must expose its card anchor"
+
+  command -v node >/dev/null 2>&1 || { printf 'skip: node not found for project-tag browser regression\n'; return 0; }
+  chrome=$(find_chrome) || { printf 'skip: Chrome or Chromium not found for project-tag browser regression\n'; return 0; }
+  node - "$chrome" "$board" <<'JS' \
+    || fail "project tags did not navigate to their card in a real browser"
+const { spawn } = require("node:child_process");
+const { pathToFileURL } = require("node:url");
+const [chromePath, boardPath] = process.argv.slice(2);
+const chrome = spawn(chromePath, ["--headless=new", "--disable-gpu", "--no-sandbox",
+  "--remote-debugging-pipe", `--user-data-dir=${boardPath}.project-jump-profile`],
+  {stdio:["ignore","ignore","ignore","pipe","pipe"]});
+let buffer = ""; let nextId = 0; const pending = new Map();
+function send(method, params = {}, sessionId) { return new Promise((resolve) => {
+  const id = ++nextId; pending.set(id, resolve);
+  chrome.stdio[3].write(`${JSON.stringify({id,method,params,...(sessionId?{sessionId}:{})})}\0`);
+}); }
+chrome.stdio[4].on("data", (chunk) => { buffer += chunk; let at;
+  while ((at = buffer.indexOf("\0")) >= 0) { const raw = buffer.slice(0, at); buffer = buffer.slice(at + 1);
+    if (!raw) continue; const message = JSON.parse(raw); const resolve = pending.get(message.id);
+    if (resolve) { pending.delete(message.id); resolve(message); } }
+});
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+async function evaluate(sessionId, expression) {
+  const result = await send("Runtime.evaluate", {expression,awaitPromise:true,returnByValue:true}, sessionId);
+  if (result.result.exceptionDetails) throw new Error(result.result.exceptionDetails.text);
+  return result.result.result.value;
+}
+async function navigate(sessionId) {
+  await send("Page.navigate", {url:pathToFileURL(boardPath).href}, sessionId);
+  for (let i=0;i<100;i++) { if (await evaluate(sessionId,"document.readyState") === "complete") break; await delay(20); }
+  await delay(100);
+}
+function assert(ok, message) { if (!ok) throw new Error(message); }
+(async () => {
+  const created = await send("Target.createTarget", {url:"about:blank"});
+  const attached = await send("Target.attachToTarget", {targetId:created.result.targetId,flatten:true});
+  const sid = attached.result.sessionId;
+  await send("Page.enable", {}, sid); await send("Runtime.enable", {}, sid);
+  await navigate(sid);
+  async function jump() {
+    return evaluate(sid, `(() => {
+      document.documentElement.className="js t-decisions";
+      var tag=[...document.querySelectorAll('.need-wrap .tag[data-project-anchor="project:alpha"]')][0];
+      tag.click(); var target=document.getElementById('project:alpha');
+      var view=JSON.parse(sessionStorage.getItem(window.__fmViewKey)||'null'); var rect=target.getBoundingClientRect();
+      return {projects:document.documentElement.classList.contains('t-projects'),highlight:target.classList.contains('project-arrived'),
+        visible:rect.bottom>0&&rect.top<innerHeight,anchor:view&&view.anchor,
+        alphaTags:document.querySelectorAll('.need-wrap .tag[data-project-anchor="project:alpha"]').length};
+    })()`);
+  }
+  let result = await jump();
+  assert(result.projects && result.highlight && result.visible && result.anchor === 'project:alpha' && result.alphaTags >= 2,
+    'desktop project tag did not select, highlight, and save the alpha card: '+JSON.stringify(result));
+  await delay(1850);
+  assert(!(await evaluate(sid,"document.getElementById('project:alpha').classList.contains('project-arrived')")),
+    'the project arrival highlight did not fade away');
+  await send("Emulation.setDeviceMetricsOverride", {width:390,height:844,deviceScaleFactor:1,mobile:true}, sid);
+  await send("Emulation.setTouchEmulationEnabled", {enabled:true,maxTouchPoints:1}, sid);
+  await navigate(sid);
+  result = await jump();
+  assert(result.projects && result.highlight && result.visible && result.anchor === 'project:alpha' && result.alphaTags >= 2,
+    'mobile project tag did not select, highlight, and save the alpha card: '+JSON.stringify(result));
+  await send("Emulation.setEmulatedMedia", {features:[{name:"prefers-reduced-motion",value:"reduce"}]}, sid);
+  result = await evaluate(sid, `(() => {
+    document.documentElement.className="js t-decisions";
+    var alpha=document.querySelector('.need-wrap .tag[data-project-anchor="project:alpha"]');
+    var gamma=document.querySelector('.need-wrap .tag[data-project-anchor="project:gamma"]');
+    alpha.click(); gamma.click();
+    return {alpha:document.getElementById('project:alpha').classList.contains('project-arrived'),
+      gamma:document.getElementById('project:gamma').classList.contains('project-arrived')};
+  })()`);
+  assert(!result.alpha && result.gamma,
+    'a replaced reduced-motion highlight remained visible: '+JSON.stringify(result));
+  await delay(2200);
+  assert(!(await evaluate(sid,"document.getElementById('project:gamma').classList.contains('project-arrived')")),
+    'the reduced-motion project arrival highlight did not clear');
+  await send("Emulation.setTouchEmulationEnabled", {enabled:false}, sid);
+  await send("Emulation.clearDeviceMetricsOverride", {}, sid);
+  await send("Emulation.setScriptExecutionDisabled", {value:true}, sid);
+  await navigate(sid);
+  const fallback = await evaluate(sid, `(() => {
+    var tag=[...document.querySelectorAll('.need-wrap .tag[href="#project:alpha"]')][0]; tag.click();
+    var target=document.getElementById('project:alpha'); var rect=target.getBoundingClientRect();
+    return {scripted:document.documentElement.classList.contains('js'),hash:location.hash,
+      visible:rect.bottom>0&&rect.top<innerHeight};
+  })()`);
+  assert(!fallback.scripted && fallback.hash === '#project:alpha' && fallback.visible,
+    'the no-script project link no longer reaches its visible card: '+JSON.stringify(fallback));
+})().finally(() => chrome.kill()).catch((error) => { console.error(error.stack||error); process.exitCode=1; });
+JS
+  pass "project tags open and briefly highlight current-state cards on desktop, mobile, and without script"
+}
+
 # An attention bar the captain cannot follow is worse than none: clicking it has
 # to reach fleet health wherever health now lives.
 test_attention_bar_reaches_health_across_tabs() {
@@ -1202,7 +1333,8 @@ test_secondmate_captain_decision_is_surfaced() {
   # so building the section from the main backlog alone would silently drop it.
   assert_grep 'Approve the paid notification tier' "$board" \
     "a captain decision held inside a secondmate home must reach the board"
-  assert_grep '<span class="tag">brain</span>' "$board" "the owning home must be named on the row"
+  assert_grep 'href="#secondmate:brain" data-project-anchor="secondmate:brain" class="tag">brain</a>' "$board" \
+    "the owning home must link to its secondmate card"
   assert_grep '<div class="n">1</div><div class="l">Awaiting you</div>' "$board" \
     "a secondmate decision must be counted as waiting"
   assert_grep 'Routed work is waiting for your decision.' "$board" \
@@ -2559,6 +2691,7 @@ test_deferred_decision_leaves_the_primary_view
 test_deferred_shelf_reaches_a_secondmate_and_discloses_its_bound
 test_navigation_tabs_group_the_board
 test_fragment_selected_tab_survives_reload
+test_project_tags_jump_to_current_state_cards
 test_attention_bar_reaches_health_across_tabs
 test_unreadable_backlog_does_not_leave_projects_looking_calm
 test_blocked_work_is_raised_above_the_board

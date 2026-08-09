@@ -79,12 +79,16 @@ The board opens on Decisions.
 
 The tabs are keyboard-reachable, carry the tab and tabpanel roles with their selected state, and move with the arrow, Home, and End keys.
 With no script the tab strip is hidden and every section stays visible, so the board degrades to the single scrolling page it was before rather than hiding its content behind controls that cannot work.
+Every project or second-mate name on a project card, and every matching project or home tag on an awaiting or deferred row, is a click target.
+With no script each target is an ordinary in-page link to the exact current card, while a name with no card in the current snapshot remains inert instead of leading to a dead destination.
 
 The self-reload navigates without the URL fragment, so a fragment cannot be what carries the selected tab across a reload; the tab is remembered in browser-local state scoped to this board home and document and restored before the page paints, so it neither resets nor flashes the default panel every 25 seconds.
 The same scoped session memory preserves the visible card or section plus its viewport offset, with a clamped scroll fallback when that anchor disappears.
 Because the memory is updated while the captain reads and types, it also survives a full document replacement triggered by an external board-file rewrite rather than only the board's own reload timer.
 A `#tab=<name>` fragment still selects a tab on the first load, which is what a hand-typed or copied link uses.
 Explicit fragment navigation and deliberate tab changes win over saved reading position.
+With script, the same target selects Projects, scrolls to the exact card, records it as the reading anchor, and briefly highlights it before the board returns to its ordinary appearance.
+This works for registered projects, unregistered projects with current work, and second mates.
 A browser that refuses storage - a private context, or a restricted `file://` origin - simply opens on Decisions each time.
 
 The Deferred shelf is held to the same bar, because a shelf that snapped shut every 25 seconds would be the same jarring reset in a smaller place.
@@ -210,4 +214,5 @@ With `FM_MISSION_CONTROL_LIVE_HOME` set to an active home, the same suite genera
 
 `tests/fm-fleet-snapshot-view.test.sh` pins lifecycle-stage derivation and its conservative fallbacks, secondmate Setup liveness, and the captain-hold classification itself: captain holds on ship and scout work are actionable when unblocked, parked captain holds are deferred regardless of the row's own kind, a held row with an unresolved blocker stays blocked rather than deferred, and a deferred row never reaches the secondmate home summary's holds.
 
-That a tab survives the board's own reload cannot be shown by a shell test, so it is checked in a real browser and the before and after boards are captured in [`docs/evidence/mission-control/`](evidence/mission-control/).
+That a tab survives the board's own reload cannot be shown by a shell test, so it is checked in a real browser alongside project-tag navigation from a decision to its highlighted Projects card at desktop and 390px mobile widths, plus the no-script anchor fallback.
+The existing visual board comparisons and live-fleet reading-position evidence are recorded in [`docs/evidence/mission-control/`](evidence/mission-control/); the project jump itself is exercised by the real-browser regression in `tests/fm-mission-control.test.sh`.

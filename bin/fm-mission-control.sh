@@ -953,6 +953,24 @@ def yolo_for($repo): ($registry_by_name[$repo // ""].yolo // false);
 # double-escaped into a visible entity by the surrounding @html format.
 def none_mark: "&mdash;";
 
+# Project labels are ordinary fragment links without script, and the same card
+# anchors are the reading-position identifiers used by the scripted board.
+# Only render a link when the corresponding card exists in this snapshot, so a
+# stale backlog name cannot create a dead destination.
+def project_card_anchor($repo; $home):
+  (($repo // "") | tostring | short_repo) as $repo_name |
+  (if $repo_name != "" then "project:" + $repo_name
+   elif (($home // "main") | tostring) != "main" then "secondmate:" + (($home // "main") | tostring)
+   else "" end) as $candidate |
+  if $candidate != ""
+     and ((($project_cards + $secondmate_cards) | map(.key) | index($candidate)) != null)
+  then $candidate else "" end;
+
+def project_jump($label; $anchor; $class):
+  if $anchor == "" then (@html "<span class=\"\($class)\">\($label)</span>")
+  else (@html "<a href=\"#\($anchor)\" data-project-anchor=\"\($anchor)\" class=\"\($class)\">\($label)</a>")
+  end;
+
 def updated_line($key):
   ($updated[$key].label // "") as $label |
   "<div class=\"proj-updated\">" + icon_clock + "Updated "
@@ -1062,12 +1080,13 @@ def need_row:
    elif ($w.repo // "") != "" then $w.repo
    elif ($w.home // "main") != "main" then $w.home
    else "Fleet" end) as $tag |
+  (project_card_anchor($w.repo; $w.home)) as $project_anchor |
   (if $w.kind == "pr" then (if $w.yolo then "your merge call (autonomous)" else "your review or merge" end)
    elif $w.kind == "incomplete" then ""
    else "" end) as $ask_note |
   "<div class=\"need\(if $w.kind == "incomplete" then " warn" else "" end)\">"
   + "<span class=\"band\"></span>"
-  + (@html "<span class=\"tag\">\($tag)</span>")
+  + project_jump($tag; $project_anchor; "tag")
   + (if $link == "" then "<span class=\"need-main\">"
      else (@html "<a class=\"need-main\" href=\"\($link)\">") end)
   + (@html "<span class=\"ask\">\($w.title)")
@@ -1090,8 +1109,9 @@ def deferred_row:
   (if ($d.repo // "") != "" then $d.repo
    elif ($d.home // "main") != "main" then $d.home
    else "Fleet" end) as $tag |
+  (project_card_anchor($d.repo; $d.home)) as $project_anchor |
   "<div class=\"defer\">"
-  + (@html "<span class=\"tag\">\($tag)</span>")
+  + project_jump($tag; $project_anchor; "tag")
   + (@html "<span class=\"ask\">\($d.title)")
   + (if ($d.detail // "") == "" then "" else (@html "<span class=\"hint\">\($d.detail)</span>") end)
   + "</span></div>";
@@ -1221,12 +1241,13 @@ def project_card:
    elif $p.prs > 0 then "\($p.prs) \(plural($p.prs; "PR awaits"; "PRs await")) your call"
    elif ($p.registered | not) then "Not in the project registry"
    else "" end) as $meta_line |
-  (@html "<div class=\"proj s-\($tone)\" data-scroll-anchor=\"\($p.key)\">
+  (@html "<div id=\"\($p.key)\" class=\"proj s-\($tone)\" data-scroll-anchor=\"\($p.key)\">
      <div class=\"proj-top\"><span class=\"badge\">")
   + project_glyph($p.name)
-  + (@html "</span><span class=\"proj-name\">\($p.name)")
+  + "</span>"
+  + project_jump($p.name; $p.key; "proj-name")
   + (if $p.registered then "" else "<span class=\"sub-role\">&middot; unregistered</span>" end)
-  + (@html "</span><span class=\"pill \(if $tone == "attn" then "attn" elif $tone == "live" then "live" elif $tone == "unknown" then "unknown" else "idle" end)\">\($pill)</span></div>
+  + (@html "<span class=\"pill \(if $tone == "attn" then "attn" elif $tone == "live" then "live" elif $tone == "unknown" then "unknown" else "idle" end)\">\($pill)</span></div>
      <div class=\"proj-state\">\($state_line)</div>")
   + work_list($p.items; $p.active)
   + meta_block($meta_line; $p.items)
@@ -1265,10 +1286,12 @@ def secondmate_card:
    elif $s.children_omitted > 0 then "\($s.children) active tasks (\($s.children_shown) shown)"
    elif $s.holds > $s.holds_shown then "\($s.holds) held tasks (\($s.holds_shown) shown)"
    else "" end) as $meta_line |
-  (@html "<div class=\"proj s-\($tone)\" data-scroll-anchor=\"\($s.key)\">
+  (@html "<div id=\"\($s.key)\" class=\"proj s-\($tone)\" data-scroll-anchor=\"\($s.key)\">
      <div class=\"proj-top\"><span class=\"badge\">")
   + icon_compass
-  + (@html "</span><span class=\"proj-name\">\($s.name)<span class=\"sub-role\">&middot; second mate</span></span>
+  + "</span>"
+  + project_jump($s.name; $s.key; "proj-name")
+  + (@html "<span class=\"sub-role\">&middot; second mate</span>
      <span class=\"pill \(if $tone == "attn" then "attn" elif $tone == "live" then "live" elif $tone == "unknown" then "unknown" else "idle" end)\">\($pill)</span></div>
      <div class=\"proj-state\">\($state_line)</div>")
   + work_list($s.items; $s.children)
@@ -1729,7 +1752,17 @@ a.need-main:hover .ask{color:var(--amber);}
   display:flex;align-items:center;justify-content:center;flex:none;}
 .badge svg{width:19px;height:19px;}
 .proj-name{font-size:15px;font-weight:630;letter-spacing:-.01em;flex:1;overflow-wrap:anywhere;}
+[data-project-anchor]{cursor:pointer;}
+[data-project-anchor]:hover{color:var(--amber);text-decoration:underline;text-underline-offset:2px;}
+[data-project-anchor]:focus-visible{outline:2px solid var(--amber);outline-offset:2px;border-radius:2px;}
 .sub-role{color:var(--faint);font-weight:500;font-size:12px;margin-left:4px;}
+@keyframes project-arrival{
+  0%{background:var(--amber-soft);box-shadow:0 0 0 0 rgba(183,121,31,.55),var(--shadow);}
+  35%{background:#fffaf0;box-shadow:0 0 0 8px rgba(183,121,31,0),var(--shadow);}
+  100%{background:var(--panel);box-shadow:var(--shadow);}
+}
+.proj.project-arrived{animation:project-arrival 1.8s ease-out both;}
+@media(prefers-reduced-motion:reduce){.proj.project-arrived{animation:none;background:var(--amber-soft);outline:2px solid var(--amber);outline-offset:2px;}}
 .pill{font-size:11.5px;font-weight:600;padding:3px 10px;border-radius:999px;letter-spacing:.02em;flex:none;}
 .pill.live{color:var(--green);background:var(--green-soft);}
 .pill.attn{color:var(--amber);background:var(--amber-soft);}
@@ -2184,6 +2217,41 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
     select(key, false);
   });
 
+  /* Project tags use the same card anchors and reading-position memory as the
+     rest of the board. Without script their href reaches the card directly;
+     with script this selects Projects first, then preserves that card as the
+     current reading position through the next managed reload. */
+  var arrivalTimer = null;
+  var arrivalTarget = null;
+  document.addEventListener(\"click\", function (ev) {
+    var el = ev.target;
+    if (el && el.nodeType !== 1) { el = el.parentElement; }
+    el = el && el.closest ? el.closest(\"[data-project-anchor]\") : null;
+    if (!el) { return; }
+    var anchor = el.getAttribute(\"data-project-anchor\");
+    var candidates = document.querySelectorAll(\"[data-scroll-anchor]\");
+    var target = null;
+    for (var i = 0; i < candidates.length; i++) {
+      if (candidates[i].getAttribute(\"data-scroll-anchor\") === anchor) { target = candidates[i]; break; }
+    }
+    if (!target) { return; }
+    ev.preventDefault();
+    select(\"projects\", false);
+    target.scrollIntoView({block:\"center\"});
+    if (arrivalTimer) { window.clearTimeout(arrivalTimer); }
+    if (arrivalTarget) { arrivalTarget.classList.remove(\"project-arrived\"); }
+    target.classList.remove(\"project-arrived\");
+    void target.offsetWidth;
+    target.classList.add(\"project-arrived\");
+    arrivalTarget = target;
+    arrivalTimer = window.setTimeout(function () {
+      target.classList.remove(\"project-arrived\");
+      if (arrivalTarget === target) { arrivalTarget = null; }
+      arrivalTimer = null;
+    }, 1800);
+    if (window.__fmSaveView) { window.__fmSaveView(target); }
+  });
+
   document.querySelector(\".tabs\").addEventListener(\"keydown\", function (ev) {
     var at = keys.indexOf(current());
     var to = -1;
@@ -2277,8 +2345,8 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
     return crossing || below;
   }
 
-  function saveView() {
-    var anchor = visibleAnchor();
+  function saveView(preferredAnchor) {
+    var anchor = preferredAnchor || visibleAnchor();
     var state = {y: Math.max(0, window.scrollY || 0)};
     if (anchor) {
       state.anchor = anchor.getAttribute(\"data-scroll-anchor\");
