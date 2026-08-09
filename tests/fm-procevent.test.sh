@@ -450,8 +450,11 @@ fm_run_timed 1 "$STALL_ADAPTER_ROOT/bin/fm-procevent-remote-reply.sh" autohandle
 
 HSTALL_LAVISH="$TMP_ROOT/hstall-lavish"; new_home "$HSTALL_LAVISH"
 PE_TRACKED+=("$HSTALL_LAVISH|stalled-lavish")
-FM_ROOT_OVERRIDE="$STALL_ADAPTER_ROOT" FM_HOME="$HSTALL_LAVISH" \
-  "$ROOT/bin/fm-procevent.sh" register lavish stalled-lavish -- /bin/echo "lavish payload" >/dev/null
+lavish_register_status=0
+fm_run_timed 10 env FM_ROOT_OVERRIDE="$STALL_ADAPTER_ROOT" FM_HOME="$HSTALL_LAVISH" \
+  /bin/bash "$ROOT/bin/fm-procevent.sh" register lavish stalled-lavish -- /bin/echo "lavish payload" \
+  >/dev/null 2>&1 || lavish_register_status=$?
+[ "$lavish_register_status" = 0 ] || fail "bounded Lavish registration stalled"
 lavish_status=0
 lavish_out="$TMP_ROOT/stalled-lavish.out"
 fm_run_timed 10 env FM_ROOT_OVERRIDE="$STALL_ADAPTER_ROOT" FM_HOME="$HSTALL_LAVISH" \
@@ -463,8 +466,11 @@ assert_contains "$(cat "$lavish_out")" "retired: stalled-lavish" \
 
 HSTALL_REMOTE="$TMP_ROOT/hstall-remote"; new_home "$HSTALL_REMOTE"
 PE_TRACKED+=("$HSTALL_REMOTE|stalled-remote")
-FM_ROOT_OVERRIDE="$STALL_ADAPTER_ROOT" FM_HOME="$HSTALL_REMOTE" \
-  "$ROOT/bin/fm-procevent.sh" register remote-reply stalled-remote -- /bin/echo "remote payload" >/dev/null
+remote_register_status=0
+fm_run_timed 10 env FM_ROOT_OVERRIDE="$STALL_ADAPTER_ROOT" FM_HOME="$HSTALL_REMOTE" \
+  /bin/bash "$ROOT/bin/fm-procevent.sh" register remote-reply stalled-remote -- /bin/echo "remote payload" \
+  >/dev/null 2>&1 || remote_register_status=$?
+[ "$remote_register_status" = 0 ] || fail "bounded remote-reply registration stalled"
 remote_status=0
 remote_out="$TMP_ROOT/stalled-remote.out"
 fm_run_timed 10 env FM_ROOT_OVERRIDE="$STALL_ADAPTER_ROOT" FM_HOME="$HSTALL_REMOTE" \
