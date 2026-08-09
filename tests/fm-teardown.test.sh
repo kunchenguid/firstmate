@@ -2594,6 +2594,42 @@ test_another_branchs_parked_run_is_never_touched() {
   pass "a parked run on another branch is never aborted by this task's teardown (ownership is precise)"
 }
 
+# The abort decision is three-valued upstream (bin/fm-nm-run-lib.sh) but must
+# stay two-valued here: only a positive code-identity match authorizes an abort.
+# A parked run on THIS branch whose head this worktree cannot resolve - the
+# shape of a pipeline tip committed in no-mistakes' own clone - is "cannot
+# determine", and teardown resolves that by declining, never by guessing that
+# the run is ours and killing it.
+test_unresolvable_parked_run_head_is_never_aborted() {
+  local case_dir rc gate tip
+  case_dir=$(make_case parked-run-unresolvable-head)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+
+  # A real commit made in a SEPARATE clone: present nowhere in the task
+  # worktree's object store, exactly like an unpushed pipeline fix commit.
+  gate="$case_dir/gate-clone"
+  git clone -q "$case_dir/project" "$gate" 2>/dev/null \
+    || fail "parked-run-unresolvable-head: could not clone a gate repo"
+  git -C "$gate" -c user.email=t@t -c user.name=t \
+    commit -q --allow-empty -m 'pipeline fix commit'
+  tip=$(git -C "$gate" rev-parse HEAD)
+  git -C "$case_dir/wt" cat-file -e "${tip}^{commit}" 2>/dev/null \
+    && fail "parked-run-unresolvable-head: fixture tip is already reachable from the worktree"
+
+  rc=0
+  FM_FAKE_AXI_STATUS="$(parked_axi_status_toon fm/task-x1 "$tip")" \
+  FM_FAKE_NM_ABORT_LOG="$case_dir/nm-abort.log" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "parked-run-unresolvable-head: teardown should still succeed"
+  assert_absent "$case_dir/nm-abort.log" \
+    "parked-run-unresolvable-head: teardown aborted a run it could not positively attribute"
+  assert_not_contains "$(cat "$case_dir/stderr")" "aborting" \
+    "parked-run-unresolvable-head: teardown reported aborting an unattributable run"
+  pass "a parked run whose head cannot be resolved is never aborted (unknown declines, it does not guess)"
+}
+
 test_own_autonomous_run_is_left_alone() {
   local case_dir rc head
   case_dir=$(make_case autonomous-run-left-alone)
@@ -3140,6 +3176,7 @@ test_mismatched_run_after_abort_refuses_unconfirmed
 test_empty_status_after_abort_refuses_unconfirmed
 test_not_found_status_after_abort_confirms_completion
 test_another_branchs_parked_run_is_never_touched
+test_unresolvable_parked_run_head_is_never_aborted
 test_own_autonomous_run_is_left_alone
 test_leaked_worktree_process_is_reaped
 test_leaked_tasktmp_process_is_reaped

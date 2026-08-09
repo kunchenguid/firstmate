@@ -128,6 +128,9 @@ Run `bin/fm-doc-audience-check.sh`; it enforces classification, README setup rou
 - Colocate tests with the existing pattern in `tests/`, name them `<subject>.test.sh`, and extend an existing script rather than inventing a new runner.
 - Tests must exercise behavior through an executable or public interface and must never assert implementation-source bytes, including through parsers, regexes, snapshots, or indirect wrappers.
 - Hand every background process a test launches to `fm_test_reap` as soon as its pid is known, because a case that only kills on its happy path orphans that process on every failing or signalled path.
+- Pin every fixture git command to the test's own temp root, because a helper that resolves an empty repo path turns `git -C "" reset --hard` into a destructive command against the checkout the tests live in.
+- One bash behavior produces exactly that empty path: bash expands every `local` right-hand side before assigning any of them, so `local a=$1 b="$a/x"` with `a` visible but empty (an empty global, or a caller's dynamically-scoped local) silently gives `b` an empty or stale value, and `set -u` does not help - it aborts loudly, the safe direction, only when the name is wholly unset.
+- The other: `fail` inside a command substitution kills only the subshell, so a fixture that echoes its path hands the caller an empty string and keeps going.
 - A maintainer-verification record under `docs/verification/` records active empirical facts, not assumptions or task chronology.
 - Include the date, version, exact commands run, and exact output needed to support the current guarantee.
 - Keep incident chronology and delivery evidence in private task reports or PR evidence unless a concise rationale is required to maintain a current safety boundary.
