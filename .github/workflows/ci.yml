@@ -383,6 +383,10 @@ jobs:
           set -eu
           [ "$(readlink CLAUDE.md)" = "AGENTS.md" ] || { echo "::error::CLAUDE.md must be a symlink to AGENTS.md"; exit 1; }
           [ "$(readlink .claude/skills)" = "../.agents/skills" ] || { echo "::error::.claude/skills must be a symlink to ../.agents/skills"; exit 1; }
+      # Single owner of the marker forms and their exclusions; do not re-spell
+      # the grep here.
+      - name: Tracked files must carry no unresolved conflict markers
+        run: bin/fm-conflict-marker-check.sh
       - name: Personal fleet paths must not be tracked
         run: |
           set -eu
