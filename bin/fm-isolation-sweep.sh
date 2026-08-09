@@ -72,8 +72,20 @@ for meta in "$STATE"/*.meta; do
   [ -n "$recorded" ] || continue
   backend=$(fm_backend_of_meta "$meta")
   target=$(fm_backend_target_of_meta "$meta")
+  kind=$(fm_meta_get "$meta" kind)
+  expected_home=$HOME_REAL
+  if [ "$kind" = secondmate ]; then
+    expected_declared=$(fm_meta_get "$meta" home)
+    [ -n "$expected_declared" ] || expected_declared=$recorded
+    expected_home=$(fm_agent_canonical_dir "$expected_declared") || expected_home=$expected_declared
+  fi
 
-  record=$(fm_agent_cwd_verdict "$id" "$backend" "$target" "$PID_INDEX")
+  record=$(fm_agent_cwd_verdict "$id" "$backend" "$target" "$PID_INDEX" "$expected_home")
+  if [ "$(fm_agent_verdict_field "$record" source)" != proc ] && [ -n "$PID_INDEX" ]; then
+    fallback_record=$(fm_agent_cwd_verdict "$id" "$backend" "$target" "$PID_INDEX")
+    [ "$(fm_agent_verdict_field "$fallback_record" source)" = proc ] || fallback_record=
+    [ -z "$fallback_record" ] || record=$fallback_record
+  fi
   source=$(fm_agent_verdict_field "$record" source)
   if [ "$source" != proc ]; then
     # Unproven isolation blocks the fleet, but only while the task's endpoint
@@ -112,13 +124,6 @@ for meta in "$STATE"/*.meta; do
   # Comparing it against this home would report every healthy secondmate in the
   # fleet as a foreign worker on every session start, so the expected owner is
   # taken from the record itself.
-  kind=$(fm_meta_get "$meta" kind)
-  expected_home=$HOME_REAL
-  if [ "$kind" = secondmate ]; then
-    expected_declared=$(fm_meta_get "$meta" home)
-    [ -n "$expected_declared" ] || expected_declared=$recorded
-    expected_home=$(fm_agent_canonical_dir "$expected_declared") || expected_home=$expected_declared
-  fi
   declared_home=$(fm_agent_proc_env "$pid" FM_AGENT_OWNER_HOME 2>/dev/null || true)
   if [ -n "$declared_home" ]; then
     declared_real=$(fm_agent_canonical_dir "$declared_home") || declared_real=$declared_home

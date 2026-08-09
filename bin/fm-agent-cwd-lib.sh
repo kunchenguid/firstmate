@@ -118,7 +118,37 @@ fm_agent_proc_env() {
   printf '%s' "$value"
 }
 
-# fm_agent_task_pid_index: one `<task-id>\t<pid>` line per live process that
+fm_agent_proc_start_time() {
+  local pid=$1 stat rest start
+  fm_agent_pid_is_numeric "$pid" || return 1
+  if [ -r "/proc/$pid/stat" ]; then
+    stat=$(cat "/proc/$pid/stat" 2>/dev/null) || return 1
+    rest=$(printf '%s\n' "$stat" | sed -E 's/^[0-9]+ \(.*\) //')
+    start=$(printf '%s\n' "$rest" | awk '{print $20}')
+  else
+    start=$(ps -o lstart= -p "$pid" 2>/dev/null | sed 's/^[[:space:]]*//')
+  fi
+  [ -n "$start" ] || return 1
+  printf '%s' "$start"
+}
+
+fm_agent_pid_start_matches() {
+  local pid=$1 expected=$2 actual
+  [ -n "$expected" ] || return 1
+  actual=$(fm_agent_proc_start_time "$pid") || return 1
+  [ "$actual" = "$expected" ]
+}
+
+fm_agent_paths_same() {
+  local left=${1:-} right=${2:-} left_real right_real
+  [ -n "$left" ] && [ -n "$right" ] || return 1
+  [ "$left" = "$right" ] && return 0
+  left_real=$(fm_agent_canonical_dir "$left" 2>/dev/null || printf '%s' "$left")
+  right_real=$(fm_agent_canonical_dir "$right" 2>/dev/null || printf '%s' "$right")
+  [ "$left_real" = "$right_real" ]
+}
+
+# fm_agent_task_pid_index: one `<task-id>\t<pid>\t<start>\t<home>\t<role>` line per live process that
 # declares a task, built from a SINGLE walk of /proc.
 #
 # Reading one process's environment costs several processes of its own, so a
@@ -128,13 +158,16 @@ fm_agent_proc_env() {
 # exists for had 17 concurrent tasks.
 # Returns 1 when procfs is unavailable or no live process declares a task.
 fm_agent_task_pid_index() {
-  local entry pid task found=1
+  local entry pid task start home role found=1
   [ -d /proc ] || return 1
   for entry in /proc/[0-9]*; do
     [ -d "$entry" ] || continue
     pid=${entry#/proc/}
     task=$(fm_agent_proc_env "$pid" FM_AGENT_TASK) || continue
-    printf '%s\t%s\n' "$task" "$pid"
+    start=$(fm_agent_proc_start_time "$pid" 2>/dev/null || true)
+    home=$(fm_agent_proc_env "$pid" FM_AGENT_OWNER_HOME 2>/dev/null || true)
+    role=$(fm_agent_proc_env "$pid" FM_AGENT_ROLE 2>/dev/null || true)
+    printf '%s\t%s\t%s\t%s\t%s\n' "$task" "$pid" "$start" "$home" "$role"
     found=0
   done
   return "$found"
@@ -147,20 +180,34 @@ fm_agent_task_pid_index() {
 # walking /proc again; an empty one is a real answer - no process declares a
 # task - not a missing argument.
 fm_agent_pids_for_task() {
-  local id=$1 index pids entry pid found=1
+  local id=$1 index indexed_task pid start indexed_home expected_home found=1
   [ -n "$id" ] || return 1
+  expected_home=${3:-}
   if [ "$#" -ge 2 ]; then
     index=$2
-    pids=$(printf '%s\n' "$index" | awk -F'\t' -v t="$id" '$1 == t {print $2}')
-    [ -n "$pids" ] || return 1
-    printf '%s\n' "$pids"
-    return 0
+    while IFS=$'\t' read -r indexed_task pid start indexed_home _; do
+      [ "$indexed_task" = "$id" ] || continue
+      fm_agent_pid_is_numeric "$pid" || continue
+      fm_agent_pid_start_matches "$pid" "$start" || continue
+      if [ -n "$expected_home" ]; then
+        [ -n "$indexed_home" ] && fm_agent_paths_same "$indexed_home" "$expected_home" || continue
+      fi
+      printf '%s\n' "$pid"
+      found=0
+    done <<EOF
+$index
+EOF
+    return "$found"
   fi
   [ -d /proc ] || return 1
   for entry in /proc/[0-9]*; do
     [ -d "$entry" ] || continue
     pid=${entry#/proc/}
     fm_agent_environ "$pid" | grep -qxF "FM_AGENT_TASK=$id" || continue
+    if [ -n "$expected_home" ]; then
+      indexed_home=$(fm_agent_proc_env "$pid" FM_AGENT_OWNER_HOME 2>/dev/null || true)
+      [ -n "$indexed_home" ] && fm_agent_paths_same "$indexed_home" "$expected_home" || continue
+    fi
     printf '%s\n' "$pid"
     found=0
   done
@@ -172,11 +219,24 @@ fm_agent_pids_for_task() {
 # subprocesses, which is the process whose cwd answers "is this worker
 # isolated?". The root is the match whose own parent is not also a match.
 fm_agent_pid_for_task() {
-  local id=$1 matches pid ppid
+  local id=$1 matches pid ppid expected_home=${3:-}
   if [ "$#" -ge 2 ]; then
-    matches=$(fm_agent_pids_for_task "$id" "$2") || return 1
+    matches=$(fm_agent_pids_for_task "$id" "$2" "$expected_home") || return 1
   else
     matches=$(fm_agent_pids_for_task "$id") || return 1
+    if [ -n "$expected_home" ]; then
+      local filtered= indexed_home
+      filtered=$(while IFS= read -r pid; do
+        indexed_home=$(fm_agent_proc_env "$pid" FM_AGENT_OWNER_HOME 2>/dev/null || true)
+        [ -n "$indexed_home" ] && fm_agent_paths_same "$indexed_home" "$expected_home" || continue
+        printf '%s\n' "$pid"
+      done <<EOF
+$matches
+EOF
+)
+      matches=$filtered
+      [ -n "$matches" ] || return 1
+    fi
   fi
   [ -n "$matches" ] || return 1
   while IFS= read -r pid; do
@@ -314,10 +374,10 @@ fm_agent_harness_pid_below() {
 # A caller looping over many tasks passes one fm_agent_task_pid_index so the
 # declared-agent lookup costs a single /proc walk for the whole loop.
 fm_agent_cwd_verdict() {
-  local id=${1:-} backend=${2:-} target=${3:-} pid='' cwd shell_pid
+  local id=${1:-} backend=${2:-} target=${3:-} pid='' cwd shell_pid expected_home=${5:-}
   if [ -n "$id" ]; then
     if [ "$#" -ge 4 ]; then
-      pid=$(fm_agent_pid_for_task "$id" "$4") || pid=
+      pid=$(fm_agent_pid_for_task "$id" "$4" "$expected_home") || pid=
     else
       pid=$(fm_agent_pid_for_task "$id") || pid=
     fi

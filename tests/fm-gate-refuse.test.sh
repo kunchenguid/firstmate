@@ -178,18 +178,17 @@ test_entrypoints_refuse() {
 }
 
 test_tracked_contracts() {
-  assert_grep 'disable_project_settings: true' "$ROOT/.no-mistakes.yaml" \
-    "tracked no-mistakes config must disable gate project settings"
-  for script in fm-spawn.sh fm-send.sh fm-teardown.sh; do
-    assert_grep 'fm-gate-refuse-lib.sh' "$ROOT/bin/$script" \
-      "$script must source the shared gate refusal helper"
-    assert_grep 'fm_refuse_if_gate_agent' "$ROOT/bin/$script" \
-      "$script must call the shared gate refusal helper"
-  done
-  if grep -F 'FM_GATE_REFUSE_BYPASS' "$ROOT/bin/fm-gate-refuse-lib.sh" >/dev/null; then
-    fail "gate refusal library must not expose a bypass variable"
-  fi
-  pass "tracked gate-refusal wiring and trusted no-mistakes config are present"
+  python3 - "$ROOT/.no-mistakes.yaml" <<'PY'
+import sys
+import yaml
+with open(sys.argv[1], encoding="utf-8") as fh:
+    config = yaml.safe_load(fh)
+assert config.get("disable_project_settings") is True
+PY
+  out=$(run_helper "$NORMAL_CWD" set); rc=$?
+  expect_code 3 "$rc" "the live refusal consumer must reject the gate marker"
+  assert_contains "$out" 'NO_MISTAKES_GATE set' "the live refusal consumer lost its marker error"
+  pass "normalized gate configuration and live refusal behavior are enforced"
 }
 
 test_helper_signals

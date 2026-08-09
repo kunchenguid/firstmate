@@ -71,6 +71,9 @@
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/fm-worker-isolation-lib.sh
+. "$SCRIPT_DIR/fm-worker-isolation-lib.sh"
+fm_worker_refuse_primary_operation "teardown" || exit 1
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
@@ -98,10 +101,6 @@ fm_normalize_tool_path
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-slot-owner-lib.sh
 . "$SCRIPT_DIR/fm-slot-owner-lib.sh"
-# shellcheck source=bin/fm-worker-isolation-lib.sh
-. "$SCRIPT_DIR/fm-worker-isolation-lib.sh"
-# A task worker never tears down through an inherited operational home.
-fm_worker_refuse_primary_operation "teardown" || exit 1
 if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
   echo "error: invalid teardown request" >&2
   exit 2

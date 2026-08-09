@@ -84,10 +84,38 @@ verdict=$(fm_slot_disposal_verdict "$HOME_DIR/state" task-a "$WORKTREE" \
   || fail "missing exact endpoint proof did not retain the durable lease: $verdict"
 pass "missing exact endpoint proof retains the durable lease"
 
+kill "$ENDPOINT_PID" "$SELF_PID" 2>/dev/null || true
+wait "$ENDPOINT_PID" 2>/dev/null || true
+wait "$SELF_PID" 2>/dev/null || true
+fm_agent_proc_cwd() {
+  _fm_real_agent_proc_cwd "$1"
+}
+OTHER_HOME="$TMP_ROOT/other-home"
+mkdir -p "$OTHER_HOME"
+(
+  cd "$WORKTREE" || exit 1
+  exec env FM_AGENT_TASK=legacy-reparented FM_AGENT_OWNER_HOME="$OTHER_HOME" \
+    FM_AGENT_ROLE=crewmate sleep 300
+) >/dev/null 2>&1 &
+REParent_PID=$!
+BG_PIDS+=("$REParent_PID")
+for _ in $(seq 1 50); do
+  [ "$(readlink "/proc/$REParent_PID/cwd" 2>/dev/null || true)" = "$WORKTREE" ] && break
+  sleep 0.02
+done
+verdict=$(fm_slot_disposal_verdict "$HOME_DIR/state" task-a "$WORKTREE" \
+  "$HOME_DIR" "$HOME_DIR" crewmate closed herdr lab:pane-a)
+case "$verdict" in
+  "retain: declared worker process for task(s) legacy-reparented is running in the slot"*) ;;
+  *) fail "a reparented worker did not retain a closed endpoint lease: $verdict" ;;
+esac
+pass "a reparented worker retains a closed endpoint lease"
+kill "$REParent_PID" 2>/dev/null || true
+wait "$REParent_PID" 2>/dev/null || true
 verdict=$(fm_slot_disposal_verdict "$HOME_DIR/state" task-a "$WORKTREE" \
   "$HOME_DIR" "$HOME_DIR" crewmate closed herdr lab:pane-a)
 [ "$verdict" = dispose ] \
-  || fail "a proven closed endpoint blocked clean disposal: $verdict"
-pass "a proven closed endpoint needs no live-process census"
+  || fail "a closed endpoint with no worker blocked clean disposal: $verdict"
+pass "a proven closed endpoint disposes after global occupancy is absent"
 
 echo "# all fm-slot-occupant-proof tests passed"

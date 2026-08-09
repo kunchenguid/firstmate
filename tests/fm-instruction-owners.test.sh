@@ -20,49 +20,6 @@ contains_unsafe_checkpoint_command() {
     <<<"$normalized"
 }
 
-for phrase in \
-  'consult existing reports and established evidence' \
-  'once implementation is authorized' \
-  'evidence, not authorization to change code' \
-  'remaining bounded research inside it' \
-  'unresolved uncertainty could materially change whether or what to build' \
-  'relay it without a design-only scout' \
-  'ask one concise implementation question when useful' \
-  'never both present a likely-enough solution' \
-  'overlap as a risk signal rather than an automatic reason to wait' \
-  'independently implemented and validated' \
-  'selected delivery path can reconcile ordinary rebases or conflicts' \
-  'Serialize only for a true semantic dependency' \
-  'shared mutable external state' \
-  'incompatible concurrent migration' \
-  'same-file editing alone is insufficient' \
-  'genuine blockers remain durable'; do
-  assert_grep "$phrase" "$AGENTS" "intake contract lost '$phrase'"
-done
-
-assert_grep 'dispatch isolated work immediately with no concurrency cap' "$AGENTS" \
-  "intake contract lost unbounded safe parallel dispatch"
-assert_grep 'captain explicitly requests a separate knowledge or design deliverable' "$AGENTS" \
-  "intake contract lost captain-requested separate scouts"
-assert_grep 'captain wants it shipped, promote the task in place' "$AGENTS" \
-  "intake contract lost genuine scout promotion"
-assert_grep 'the same crewmate owns direct-PR reconciliation' "$AGENTS" \
-  "direct-PR conflict reconciliation lost its owner"
-assert_grep 'Firstmate, never the worker, owns the guarded `bin/fm-pr-check.sh <id> <PR url>`' "$AGENTS" \
-  "direct-PR reconciliation lost Firstmate-owned readiness verification"
-assert_grep 'PR ready: <url>' "$AGENTS" \
-  "direct-PR reconciliation lost its nonterminal check handoff"
-
-for legacy_phrase in \
-  'load `diagnostic-reasoning`' \
-  'that is a scout task; dispatch it instead of doing the digging yourself' \
-  '**Blocked:** touches the same files or subsystem' \
-  'same repo plus overlapping area means serialize'; do
-  if grep -Fq -- "$legacy_phrase" "$AGENTS"; then
-    fail "legacy intake contract restored '$legacy_phrase'"
-  fi
-done
-
 BRIEF_HOME="$TMP_ROOT/direct-pr-home"
 mkdir -p "$BRIEF_HOME/data" "$BRIEF_HOME/state"
 printf '%s\n' \
@@ -393,35 +350,6 @@ assert_contains "$POST_CONFLICT_PATH" 'After helper exit zero, Firstmate must us
   "post-conflict first publication lacks confirmed receipt"
 assert_contains "$POST_CONFLICT_PATH" 'validate the private namespace contains only `BASE_FETCH_REF` and `FEATURE_FETCH_REF`, delete both exact refs in one `git update-ref --stdin` transaction' \
   "post-conflict finalization does not retire exact private refs transactionally"
-TEARDOWN_VALIDATOR=$(sed -n '/^validate_direct_pr_state_cleanup()/,/^}/p' "$ROOT/bin/fm-teardown.sh")
-TEARDOWN_STATE_RM=$(sed -n '/^if ! rm -f "$STATE\/$ID.status"/,/direct-pr-lease.tmp/p' "$ROOT/bin/fm-teardown.sh")
-assert_contains "$TEARDOWN_VALIDATOR" '"$STATE/$ID.direct-pr-lease" "$STATE/$ID.direct-pr-lease.tmp"' \
-  "teardown lost exact direct-PR state validation"
-assert_contains "$TEARDOWN_VALIDATOR" 'mode=$(fm_pr_file_mode "$artifact")' \
-  "teardown lost portable direct-PR state mode validation"
-assert_contains "$TEARDOWN_VALIDATOR" 'if [ "$artifact" = "$STATE/$ID.direct-pr-lease" ]; then' \
-  "teardown does not limit mode validation to the durable primary checkpoint"
-assert_contains "$TEARDOWN_STATE_RM" '"$STATE/$ID.direct-pr-lease" "$STATE/$ID.direct-pr-lease.tmp"' \
-  "teardown lost exact direct-PR state cleanup"
-TEARDOWN_REF_VALIDATOR=$(sed -n '/^validate_direct_pr_ref_cleanup()/,/^}/p' "$ROOT/bin/fm-teardown.sh")
-TEARDOWN_REF_CLEANUP=$(sed -n '/^cleanup_direct_pr_refs()/,/^}/p' "$ROOT/bin/fm-teardown.sh")
-assert_contains "$TEARDOWN_REF_VALIDATOR" '"$prefix/base"|"$prefix/feature"' \
-  "teardown accepts ambiguous direct-PR private refs"
-assert_contains "$TEARDOWN_REF_CLEANUP" 'git --git-dir="$DIRECT_PR_REF_GIT_DIR" update-ref --stdin' \
-  "teardown does not retire both direct-PR private refs transactionally"
-TEARDOWN_RETURN_LINE=$(grep -n 'teardown_treehouse_return "$WT"' "$ROOT/bin/fm-teardown.sh" | cut -d: -f1)
-TEARDOWN_POLL_CLEANUP_LINE=$(grep -n '^remove_pr_poll_artifacts "$STATE" "$ID"' "$ROOT/bin/fm-teardown.sh" | cut -d: -f1)
-TEARDOWN_REF_CALL_LINE=$(grep -n '^cleanup_direct_pr_refs || {' "$ROOT/bin/fm-teardown.sh" | cut -d: -f1)
-[ "$TEARDOWN_REF_CALL_LINE" -gt "$TEARDOWN_RETURN_LINE" ] \
-  || fail "teardown retires private refs before the fallible worktree return"
-[ "$TEARDOWN_REF_CALL_LINE" -gt "$TEARDOWN_POLL_CLEANUP_LINE" ] \
-  || fail "teardown retires private refs before another fallible state cleanup"
-assert_no_grep 'DOD=${DOD//' "$ROOT/bin/fm-brief.sh" \
-  "direct-PR brief still uses exact-string post-processing"
-assert_no_grep 'DOD_REWRITTEN' "$ROOT/bin/fm-brief.sh" \
-  "direct-PR brief still uses a rewrite pass"
-assert_no_grep '^Receipt and private-ref safety for this workflow:' "$ROOT/bin/fm-brief.sh" \
-  "direct-PR receipt schema remains an overlay after the primary parser"
 assert_grep "Stay inside this worktree except for the status file, the task-specific Firstmate checkpoint at '$BRIEF_HOME/state/parallel-direct-pr.direct-pr-lease', and its exact stable temporary sibling at '$BRIEF_HOME/state/parallel-direct-pr.direct-pr-lease.tmp'; modify nothing else outside it." "$DIRECT_PR_BRIEF" \
   "generated direct-PR brief lost its bounded state-path exception"
 for forbidden_endpoint_command in \

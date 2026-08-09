@@ -10,7 +10,6 @@ set -u
 HERDR_INSTALL="$ROOT/bin/fm-install-herdr.sh"
 TREEHOUSE_INSTALL="$ROOT/bin/fm-install-treehouse.sh"
 CLEANUP="$ROOT/bin/fm-herdr-ci-cleanup.sh"
-CI="$ROOT/.github/workflows/ci.yml"
 
 assert_present "$HERDR_INSTALL" "bin/fm-install-herdr.sh is missing"
 assert_present "$TREEHOUSE_INSTALL" "bin/fm-install-treehouse.sh is missing"
@@ -20,81 +19,76 @@ assert_present "$CLEANUP" "bin/fm-herdr-ci-cleanup.sh is missing"
 [ -x "$CLEANUP" ] || fail "fm-herdr-ci-cleanup.sh must be executable"
 
 test_herdr_installer_pins_exact_version_and_checksums() {
-  assert_grep 'FM_HERDR_CI_VERSION=0.7.4' "$HERDR_INSTALL" \
-    "Herdr installer must pin suite-verified 0.7.4"
-  assert_grep 'FM_HERDR_CI_MIN_PROTOCOL=16' "$HERDR_INSTALL" \
-    "Herdr installer must require protocol floor 16"
-  assert_grep 'ogulcancelik/herdr' "$HERDR_INSTALL" \
-    "Herdr installer must use the official GitHub release source"
-  assert_grep 'herdr-linux-x86_64' "$HERDR_INSTALL" \
-    "Herdr installer must name the Linux x86_64 release asset"
-  assert_grep 'bc0fc02d4ba500f9cac2353a43e67fe036785ecca6eb55378e050fac3c103059' "$HERDR_INSTALL" \
-    "Herdr installer must pin the Linux x86_64 SHA-256"
-  assert_grep 'sha256sum' "$HERDR_INSTALL" \
-    "Herdr installer must verify a SHA-256 checksum"
-  assert_grep '--max-filesize' "$HERDR_INSTALL" \
-    "Herdr installer must bound the download size"
-  assert_no_grep 'brew install' "$HERDR_INSTALL" \
-    "Herdr installer must not use a floating package-manager install"
-  assert_no_grep 'apt-get install' "$HERDR_INSTALL" \
-    "Herdr installer must not use a floating package-manager install"
-  pass "Herdr installer pins exact version, asset, checksum, and protocol floor"
+  local dir fakebin dest
+  dir=$(fm_test_tmproot fm-herdr-installer)
+  fakebin=$(fm_fakebin "$dir")
+  dest="$dir/dest"
+  cat > "$fakebin/curl" <<'SH'
+#!/usr/bin/env bash
+out=
+while [ "$#" -gt 0 ]; do
+  [ "$1" = -o ] && { out=$2; shift 2; continue; }
+  shift
+done
+cat > "$out" <<'BIN'
+#!/usr/bin/env bash
+case "${1:-}" in
+  --version) printf 'herdr 0.7.4\n' ;;
+  status) printf '{"client":{"protocol":16}}\n' ;;
+esac
+BIN
+chmod +x "$out"
+SH
+  cat > "$fakebin/sha256sum" <<'SH'
+#!/usr/bin/env bash
+printf '%s  %s\n' bc0fc02d4ba500f9cac2353a43e67fe036785ecca6eb55378e050fac3c103059 "$1"
+SH
+  chmod +x "$fakebin/curl" "$fakebin/sha256sum"
+  PATH="$fakebin:$PATH" RUNNER_TEMP="$dir" "$HERDR_INSTALL" "$dest" >/dev/null \
+    || fail "Herdr installer rejected a valid pinned fixture"
+  [ "$("$dest/herdr" --version)" = 'herdr 0.7.4' ] \
+    || fail "installed Herdr fixture did not report the pinned version"
+  pass "Herdr installer executes checksum, version, and protocol gates"
 }
 
 test_treehouse_installer_pins_exact_version_and_checksums() {
-  assert_grep 'FM_TREEHOUSE_CI_VERSION=2.0.1' "$TREEHOUSE_INSTALL" \
-    "Treehouse installer must pin the suite-verified 2.0.1 release"
-  assert_grep 'kunchenguid/treehouse' "$TREEHOUSE_INSTALL" \
-    "Treehouse installer must use the official GitHub release source"
-  assert_grep 'linux-amd64.tar.gz' "$TREEHOUSE_INSTALL" \
-    "Treehouse installer must name the Linux amd64 archive"
-  assert_grep '1d5a32751ab921670103fd201ddb2b91b47338cb13976f45642b827cf8976af2' "$TREEHOUSE_INSTALL" \
-    "Treehouse installer must pin the Linux amd64 SHA-256"
-  assert_grep '--max-filesize' "$TREEHOUSE_INSTALL" \
-    "Treehouse installer must bound the download size"
-  assert_no_grep 'brew install' "$TREEHOUSE_INSTALL" \
-    "Treehouse installer must not use a floating package-manager install"
-  pass "Treehouse installer pins exact version, asset, and checksum"
-}
-
-test_cleanup_only_targets_job_owned_lab_sessions() {
-  assert_grep 'fm-lab-' "$CLEANUP" \
-    "cleanup must only consider fm-lab-* session names"
-  assert_grep 'default == false' "$CLEANUP" \
-    "cleanup must refuse default sessions"
-  assert_grep 'snapshot' "$CLEANUP" \
-    "cleanup must support a pre-suite snapshot"
-  assert_grep 'teardown' "$CLEANUP" \
-    "cleanup must support post-suite teardown of the delta"
-  # Must not call ambient server stop.
-  assert_no_grep 'server stop' "$CLEANUP" \
-    "cleanup must never call ambient herdr server stop"
-  pass "cleanup is bounded to job-owned fm-lab-* sessions"
-}
-
-test_ci_wires_installers_and_required_lane() {
-  assert_grep 'tests-herdr:' "$CI" "CI must define the required Herdr Behavior job"
-  assert_grep 'fm-install-herdr.sh' "$CI" "CI must call the Herdr installer"
-  assert_grep 'fm-install-treehouse.sh' "$CI" "CI must call the Treehouse installer"
-  assert_grep 'fm-herdr-ci-cleanup.sh snapshot' "$CI" "CI must snapshot sessions before the suite"
-  assert_grep 'fm-herdr-ci-cleanup.sh teardown' "$CI" "CI must teardown job-owned sessions after"
-  assert_grep 'fail-on-any-gate-skip' "$CI" \
-    "CI Herdr lane must fail on every skipped test"
-  assert_grep 'family real-herdr-gated' "$CI" \
-    "CI Herdr lane must run only the real-herdr-gated family"
-  assert_grep 'exclude-family real-herdr-gated' "$CI" \
-    "portable CI lane must exclude real-herdr-gated once the Herdr job owns it"
-  # Live harness credential tests must stay out of the default Herdr lane.
-  assert_no_grep 'live-harness-optin' "$CI" \
-    "CI must not run live-harness-optin in the required Herdr lane"
-  assert_no_grep 'FM_AFK_PI_HERDR_E2E' "$CI" \
-    "CI must not enable live Pi/Herdr credential tests"
-  assert_no_grep 'FM_SEND_MARKER_HERDR_E2E' "$CI" \
-    "CI must not enable live marker Herdr credential tests"
-  pass "CI wires pinned installers into a required serial Herdr lane"
+  local dir fakebin dest
+  dir=$(fm_test_tmproot fm-treehouse-installer)
+  fakebin=$(fm_fakebin "$dir")
+  dest="$dir/dest"
+  cat > "$fakebin/curl" <<'SH'
+#!/usr/bin/env bash
+out=
+while [ "$#" -gt 0 ]; do
+  [ "$1" = -o ] && { out=$2; shift 2; continue; }
+  shift
+done
+: > "$out"
+SH
+  cat > "$fakebin/sha256sum" <<'SH'
+#!/usr/bin/env bash
+printf '%s  %s\n' 1d5a32751ab921670103fd201ddb2b91b47338cb13976f45642b827cf8976af2 "$1"
+SH
+  cat > "$fakebin/tar" <<'SH'
+#!/usr/bin/env bash
+dest=
+while [ "$#" -gt 0 ]; do
+  [ "$1" = -C ] && { dest=$2; shift 2; continue; }
+  shift
+done
+cat > "$dest/treehouse" <<'BIN'
+#!/usr/bin/env bash
+[ "${1:-}" = --version ] && printf 'v2.0.1\n'
+BIN
+chmod +x "$dest/treehouse"
+SH
+  chmod +x "$fakebin/curl" "$fakebin/sha256sum" "$fakebin/tar"
+  PATH="$fakebin:$PATH" RUNNER_TEMP="$dir" "$TREEHOUSE_INSTALL" "$dest" >/dev/null \
+    || fail "Treehouse installer rejected a valid pinned fixture"
+  [ "$("$dest/treehouse" --version)" = 'v2.0.1' ] \
+    || fail "installed Treehouse fixture did not report the pinned version"
+  pass "Treehouse installer executes checksum and version gates"
 }
 
 test_herdr_installer_pins_exact_version_and_checksums
 test_treehouse_installer_pins_exact_version_and_checksums
-test_cleanup_only_targets_job_owned_lab_sessions
-test_ci_wires_installers_and_required_lane

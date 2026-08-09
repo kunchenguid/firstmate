@@ -105,6 +105,9 @@
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/fm-worker-isolation-lib.sh
+. "$SCRIPT_DIR/fm-worker-isolation-lib.sh"
+fm_worker_refuse_primary_operation "spawn" || exit 1
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
@@ -132,14 +135,10 @@ fm_normalize_tool_path
 . "$SCRIPT_DIR/fm-task-label-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
-# shellcheck source=bin/fm-worker-isolation-lib.sh
-. "$SCRIPT_DIR/fm-worker-isolation-lib.sh"
 # shellcheck source=bin/fm-agent-cwd-lib.sh
 . "$SCRIPT_DIR/fm-agent-cwd-lib.sh"
 # shellcheck source=bin/fm-slot-owner-lib.sh
 . "$SCRIPT_DIR/fm-slot-owner-lib.sh"
-# A task worker never dispatches from an inherited operational home.
-fm_worker_refuse_primary_operation "spawn" || exit 1
 # Skip the watcher guard when re-exec'd for one pair of a batch (FM_SPAWN_NO_GUARD is
 # set by the batch loop below), so the guard runs once for the batch, not once per pair.
 [ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
@@ -246,6 +245,7 @@ SPAWN_SLOT_STAMPED=0
 SPAWN_SLOT_LOCK_HELD=0
 SPAWN_SLOT_LOCK_PATH=
 SPAWN_WORKTREE_PATH=
+SPAWN_WORKTREE_LEASE_PROOF=
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -295,8 +295,10 @@ spawn_abort_recovery_meta() {
       # would be a record teardown could only ever refuse. Record the lease
       # holder (and whatever candidate path the settle poll saw) instead, so the
       # leaked lease stays traceable and the record stays retirable.
-      echo "worktree=${WT:-}"
-      if [ -z "${WT:-}" ]; then
+      if [ "${SPAWN_WORKTREE_PROVEN:-0}" = 1 ] && [ -n "${WT:-}" ]; then
+        echo "worktree=$WT"
+      else
+        echo "worktree="
         echo "slot_lease_state=unresolved"
         echo "slot_lease_holder=$ID"
         [ -z "${WT_CANDIDATE:-}" ] || echo "slot_worktree_candidate=$WT_CANDIDATE"
@@ -461,6 +463,7 @@ spawn_abort_cleanup() {
   if [ -n "${META_TMP:-}" ] && [ -e "$META_TMP" ]; then
     rm -f "$META_TMP"
   fi
+  [ -z "${SPAWN_WORKTREE_LEASE_PROOF:-}" ] || rm -f "$SPAWN_WORKTREE_LEASE_PROOF" 2>/dev/null || true
   if [ "$SPAWN_TASK_LOCK_HELD" = 1 ]; then
     SPAWN_TASK_LOCK_HELD=0
     fm_lock_release "$SPAWN_TASK_LOCK" || true
@@ -1486,7 +1489,7 @@ EOF
 esac
 SPAWN_ENDPOINT_CREATED=1
 spawn_settle_path() {  # <target>
-  local record
+  local record lease_path
   SPAWN_WORKTREE_PATH=
   SPAWN_WORKTREE_PATH_SOURCE=
   record=$(fm_agent_cwd_verdict "" "$BACKEND" "$1")
@@ -1495,12 +1498,20 @@ spawn_settle_path() {  # <target>
     SPAWN_WORKTREE_PATH=$(fm_agent_verdict_field "$record" cwd)
     return 0
   fi
+  lease_path=$(cat "${SPAWN_WORKTREE_LEASE_PROOF:-}" 2>/dev/null || true)
+  if [ -n "$lease_path" ]; then
+    SPAWN_WORKTREE_PATH_SOURCE=lease
+    SPAWN_WORKTREE_PATH=$lease_path
+    return 0
+  fi
   SPAWN_WORKTREE_PATH_SOURCE=hint
   SPAWN_WORKTREE_PATH=$(fm_backend_current_path "$BACKEND" "$1" 2>/dev/null || true)
 }
 
 if [ "$KIND" != secondmate ]; then
-  TREEHOUSE_LEASE_COMMAND=$(fm_worker_treehouse_lease_command "$ID") || exit 1
+  SPAWN_WORKTREE_LEASE_PROOF="$STATE/.$ID.spawn-worktree"
+  rm -f "$SPAWN_WORKTREE_LEASE_PROOF"
+  TREEHOUSE_LEASE_COMMAND=$(fm_worker_treehouse_lease_command "$ID" "$SPAWN_WORKTREE_LEASE_PROOF") || exit 1
   SPAWN_WORKTREE_LEASED=1
   fm_backend_send_text_line "$BACKEND" "$WID" "$TREEHOUSE_LEASE_COMMAND"
 
@@ -1516,15 +1527,14 @@ if [ "$KIND" != secondmate ]; then
       WT_CANDIDATE="$p"
       if worktree_of_target_repo "$p"; then
         WT="$p"
-        [ "$SPAWN_WORKTREE_PATH_SOURCE" = proc ] && SPAWN_WORKTREE_PROVEN=1
+        case "$SPAWN_WORKTREE_PATH_SOURCE" in
+          proc|lease) SPAWN_WORKTREE_PROVEN=1 ;;
+        esac
         break
       fi
     fi
     sleep 1
   done
-  if [ -z "$WT" ] && [ -n "$WT_CANDIDATE" ]; then
-    WT="$WT_CANDIDATE"
-  fi
   if [ -z "$WT" ]; then
     echo "error: treehouse get did not enter a worktree within ${FM_SPAWN_WT_WAIT_SECS:-60}s; inspect window $T" >&2
     exit 1

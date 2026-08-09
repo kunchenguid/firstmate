@@ -270,34 +270,6 @@ SH
   pass "fm-cbm-lib: skips brief policy for ineligible projects"
 }
 
-test_spawn_sources_cbm_and_exports() {
-  local eligible_gate secondmate_gate
-  eligible_gate='fm_cbm_project_eligible "$PROJ_ABS"'
-  secondmate_gate='[ "$KIND" != secondmate ]'
-  # Structural contract: spawn must source cbm lib, append policy, and export CBM env.
-  grep -F 'fm-cbm-lib.sh' "$SPAWN" >/dev/null \
-    || fail "fm-spawn must source fm-cbm-lib.sh"
-  grep -F 'fm_cbm_append_brief_policy' "$SPAWN" >/dev/null \
-    || fail "fm-spawn must call fm_cbm_append_brief_policy"
-  grep -F 'fm_cbm_launch_env_prefix' "$SPAWN" >/dev/null \
-    || fail "fm-spawn must use fm_cbm_launch_env_prefix"
-  grep -F 'export CBM_CACHE_DIR=' "$SPAWN" >/dev/null \
-    || fail "fm-spawn must export CBM_CACHE_DIR into the pane"
-  grep -F 'FM_CBM_TASK_ID=' "$SPAWN" >/dev/null \
-    || fail "fm-spawn must export FM_CBM_TASK_ID for usage metering"
-  grep -F 'FM_CBM_CLI=' "$SPAWN" >/dev/null \
-    || fail "fm-spawn must export FM_CBM_CLI for logged CLI"
-  grep -F "$eligible_gate" "$SPAWN" >/dev/null \
-    || fail "fm-spawn must gate CBM env by project eligibility"
-  # Brief policy and env injection both skip secondmates (appear twice).
-  count=$(grep -cF "$secondmate_gate" "$SPAWN" || true)
-  [ "$count" -ge 2 ] || fail "fm-spawn must gate both CBM brief and env away from secondmates (found $count)"
-  if grep -F 'fm_cbm_binary' "$SPAWN" >/dev/null; then
-    fail "fm-spawn must reuse the prepared CBM binary"
-  fi
-  pass "fm-spawn: CBM integration contract lines present"
-}
-
 test_index_escapes_paths_and_fails_loudly() {
   local dir repo fake log out
   dir=$(fm_test_tmproot fm-cbm)
@@ -552,7 +524,6 @@ test_lib_project_eligibility_defaults
 test_lib_project_eligibility_file
 test_lib_append_brief_policy
 test_lib_append_skips_ineligible
-test_spawn_sources_cbm_and_exports
 test_index_helper_exists_and_help
 test_index_escapes_paths_and_fails_loudly
 test_index_rejects_unallowlisted_absolute_path

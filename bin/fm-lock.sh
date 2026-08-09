@@ -8,8 +8,8 @@
 # This script is the ONLY writer of state/.lock. The owner record is never
 # hand-edited, and acquisition never displaces a live holder: an existing lock
 # naming another live harness refuses, and a declared task worker
-# (bin/fm-worker-isolation-lib.sh) refuses acquisition before touching the
-# record at all, while its read-only `status` inspection stays available.
+# (bin/fm-worker-isolation-lib.sh) refuses every operation before touching the
+# record at all.
 # A task child that inherited a primary's FM_HOME would otherwise resolve THIS
 # home's state directory and take the primary's own session ownership - the
 # 2026-07-24 incident where a suspended-then-resumed primary came back locked
@@ -19,20 +19,11 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/fm-worker-isolation-lib.sh
 . "$SCRIPT_DIR/fm-worker-isolation-lib.sh"
-# Refuse acquisition before any state directory is resolved or created, so a
-# task worker cannot even publish a probe file into the home it inherited.
-# Read-only `status` keeps its documented always-exit-0 contract.
-if [ "${1:-}" != status ]; then
-  fm_worker_refuse_primary_operation "session lock acquisition" || exit 1
-fi
+fm_worker_refuse_primary_operation "session lock operation" || exit 1
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 LOCK="$STATE/.lock"
-mkdir -p "$STATE" 2>/dev/null || {
-  echo "error: cannot create session-lock state directory $STATE; operate read-only until resolved" >&2
-  exit 1
-}
 
 # shellcheck source=bin/fm-session-lock-lib.sh
 . "$SCRIPT_DIR/fm-session-lock-lib.sh"
@@ -53,6 +44,11 @@ if [ "${1:-}" = status ]; then
   esac
   exit 0
 fi
+
+mkdir -p "$STATE" 2>/dev/null || {
+  echo "error: cannot create session-lock state directory $STATE; operate read-only until resolved" >&2
+  exit 1
+}
 
 owner=$(fm_session_lock_owner) || {
   echo "error: cannot locate harness process in ancestry" >&2

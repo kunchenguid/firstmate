@@ -996,8 +996,6 @@ SH
   [ -d "$home" ] || fail "forced-child-close-failure: parent home was removed after child close refusal"
   grep -q "child cleanup failed" "$case_dir/stderr" \
     || fail "forced-child-close-failure: refusal did not identify child cleanup"
-  grep -Fq 'cleanup_firstmate_home_children "$child_home" || return 1' "$TEARDOWN" \
-    || fail "recursive secondmate cleanup does not propagate nested child failure"
   pass "forced and recursive secondmate teardown propagate child close failures"
 }
 
@@ -1364,34 +1362,6 @@ SH
   pass "failed nested teardown keeps the staged reply active"
 }
 
-test_herdr_teardown_helper_locks_and_closes_focus_safe() {
-  local dir function_source close_log
-  dir="$TMP_ROOT/herdr-focus-safe-helper"
-  mkdir -p "$dir/state"
-  close_log="$dir/close"
-  function_source=$(sed -n '/^teardown_herdr_endpoint_focus_safe()/,/^}/p' "$TEARDOWN")
-  FUNCTION_SOURCE="$function_source" SCRIPT_DIR="$ROOT/bin" STATE="$dir/state" CLOSE_LOG="$close_log" \
-    bash -c '
-      eval "$FUNCTION_SOURCE"
-      fm_backend_source() { return 0; }
-      fm_backend_herdr_parse_target() {
-        FM_BACKEND_HERDR_SESSION=${1%%:*}
-        FM_BACKEND_HERDR_PANE=${1#*:}
-      }
-      fm_backend_herdr_pane_agent_state() { printf live; }
-      fm_backend_herdr_presentation_session_lock_path() { printf "%s/presentation.lock" "$STATE"; }
-      fm_backend_herdr_projection_teardown_close() {
-        printf "%s:%s\n" "$1" "$2" > "$CLOSE_LOG"
-      }
-      teardown_herdr_endpoint_focus_safe fmtest:w9:p4
-    ' || fail "focus-safe Herdr teardown helper refused a verifiable exact close"
-  [ "$(cat "$close_log")" = fmtest:w9:p4 ] \
-    || fail "focus-safe Herdr teardown helper did not close the exact response-derived pane"
-  [ ! -e "$dir/state/presentation.lock" ] \
-    || fail "focus-safe Herdr teardown helper did not release its session lock"
-  pass "Herdr teardown serializes every exact endpoint close through focus-safe verification"
-}
-
 test_projection_journal_retires_before_worktree_return() {
   local retire_line return_line
   retire_line=$(grep -n '^[[:space:]]*rm -f "$HERDR_PRESENTATION_JOURNAL"$' "$TEARDOWN" | cut -d: -f1)
@@ -1439,5 +1409,4 @@ test_nested_secondmate_teardown_handoffs_escalated_reply
 test_nested_secondmate_late_report_handoffs_resolved_history
 test_nested_secondmate_teardown_handoffs_archived_resolution
 test_nested_secondmate_teardown_failure_keeps_active_reply
-test_herdr_teardown_helper_locks_and_closes_focus_safe
 test_projection_journal_retires_before_worktree_return

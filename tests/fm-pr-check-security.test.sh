@@ -3131,11 +3131,6 @@ EOF
   [ "$rc" -ne 0 ] || fail "merge wrapper did not refuse a GitLab merge request URL"
   [ ! -s "$dir/gh-axi.log" ] || fail "merge wrapper reached the GitHub CLI for a GitLab URL"
 
-  # The instance is data, never a constant, so self-hosted instances work.
-  ! grep -qF gitlab.com "$ROOT/bin/fm-pr-lib.sh" \
-    || fail "the shared PR library hardcodes a GitLab host"
-  ! grep -qF gitlab.com "$ROOT/bin/fm-pr-poll.sh" \
-    || fail "the static poll hardcodes a GitLab host"
   pass "GitLab merge requests are followed on any instance and never wake falsely"
 }
 

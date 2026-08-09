@@ -16,12 +16,9 @@
 #      the observed incident, and it needs no cooperation from the occupant;
 #   2. the slot's ownership stamp names a different task or home - the metadata
 #      being trusted is positively stale because the slot was reissued;
-#   3. the process bound to THIS task's own backend endpoint is running inside
-#      the slot but is not this task's declared worker (bin/fm-agent-cwd-lib.sh's
-#      authoritative process cwd). The check is endpoint-scoped on purpose: a
-#      durable task lease already stops the pool from handing the slot to
-#      another task, so a host-wide /proc census adds no ownership proof while
-#      letting any unrelated unreadable process block every clean teardown.
+#   3. a declared worker process is running inside the slot, whether or not its
+#      current endpoint metadata still points at the slot (bin/fm-agent-cwd-lib.sh's
+#      authoritative process cwd).
 #
 # Retain means the lease is not returned to the pool: firstmate finishes the
 # rest of the teardown (records and endpoint) and leaves the directory on disk,
@@ -273,6 +270,33 @@ fm_slot_endpoint_occupant_tasks() {
   printf '%s\n' "${task:-unidentified-process-$pid}"
 }
 
+fm_slot_process_occupant_tasks() {
+  local wt=$1 wt_real index task pid start home role cwd cwd_real
+  local found=1 uncertain=0
+  wt_real=$(fm_agent_canonical_dir "$wt") || return 2
+  [ -d /proc ] || return 2
+  index=$(fm_agent_task_pid_index 2>/dev/null || true)
+  [ -n "$index" ] || return 1
+  while IFS=$'\t' read -r task pid start home role; do
+    [ -n "$task" ] || continue
+    [ -n "$start" ] || { uncertain=1; continue; }
+    fm_agent_pid_start_matches "$pid" "$start" || continue
+    cwd=$(fm_agent_proc_cwd "$pid" 2>/dev/null || true)
+    [ -n "$cwd" ] || { uncertain=1; continue; }
+    cwd_real=$(fm_agent_canonical_dir "$cwd" 2>/dev/null || true)
+    [ -n "$cwd_real" ] || { uncertain=1; continue; }
+    if fm_agent_path_within "$wt_real" "$cwd_real"; then
+      printf '%s\n' "$task"
+      found=0
+    fi
+  done <<EOF
+$index
+EOF
+  [ "$found" -eq 0 ] && return 0
+  [ "$uncertain" -eq 1 ] && return 2
+  return 1
+}
+
 # fm_slot_join_ids <newline-separated>: comma-joined single line.
 fm_slot_join_ids() {
   printf '%s' "$1" | LC_ALL=C sort -u | tr '\n' ',' | sed 's/,$//'
@@ -284,7 +308,7 @@ fm_slot_disposal_verdict() {
   local state=$1 self=$2 wt=$3 stamp_owner_home=${4:-}
   local worker_home=${5:-$stamp_owner_home} role=${6:-crewmate}
   local endpoint_state=${7:-unknown} backend=${8:-} target=${9:-}
-  local stamp_task stamp_home stamp_path refs occupants
+  local stamp_task stamp_home stamp_path refs occupants process_occupants
   if [ -z "$wt" ] || [ ! -d "$wt" ]; then
     printf 'retain: recorded worktree is missing; lease ownership cannot be proved'
     return 0
@@ -317,7 +341,16 @@ fm_slot_disposal_verdict() {
     return 0
   fi
   case "$endpoint_state" in
-    closed) ;;
+    closed)
+      if process_occupants=$(fm_slot_process_occupant_tasks "$wt"); then
+        printf 'retain: declared worker process for task(s) %s is running in the slot' \
+          "$(fm_slot_join_ids "$process_occupants")"
+        return 0
+      elif [ "$?" -eq 2 ]; then
+        printf 'retain: authoritative slot-occupant evidence is unavailable'
+        return 0
+      fi
+      ;;
     live)
       if occupants=$(fm_slot_endpoint_occupant_tasks \
         "$wt" "$self" "$worker_home" "$role" "$backend" "$target"); then

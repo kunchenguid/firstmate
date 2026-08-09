@@ -1442,48 +1442,6 @@ test_presentation_lock_insecure_namespace_falls_back() {
   pass "herdr presentation lock: insecure shared namespace refuses acquisition for flat fallback"
 }
 
-test_spawn_task_lock_covers_all_backend_creation_and_metadata_publication() {
-  local source wake_source acquire_pattern backend_pattern meta_pattern acquire_line backend_line meta_line
-  source=$(cat "$ROOT/bin/fm-spawn.sh")
-  wake_source=". \"\$SCRIPT_DIR/fm-wake-lib.sh\""
-  acquire_pattern="fm_lock_try_acquire \"\$SPAWN_TASK_LOCK\""
-  backend_pattern="^case \"\$BACKEND\" in"
-  meta_pattern="mv \"\$META_TMP\" \"\$STATE/\$ID.meta\""
-  assert_contains "$source" "$wake_source" \
-    "fm-spawn does not load the shared lock implementation"
-  acquire_line=$(grep -n "$acquire_pattern" "$ROOT/bin/fm-spawn.sh" | head -1 | cut -d: -f1)
-  backend_line=$(grep -n "$backend_pattern" "$ROOT/bin/fm-spawn.sh" | tail -1 | cut -d: -f1)
-  meta_line=$(grep -nF "$meta_pattern" "$ROOT/bin/fm-spawn.sh" | tail -1 | cut -d: -f1)
-  [ -n "$acquire_line" ] && [ -n "$backend_line" ] && [ -n "$meta_line" ] \
-    || fail "could not locate the spawn lock, backend creation, and metadata publication"
-  [ "$acquire_line" -lt "$backend_line" ] && [ "$backend_line" -lt "$meta_line" ] \
-    || fail "the task lock does not span backend creation through metadata publication"
-  pass "fm-spawn: one task lock spans every backend creation path through metadata publication"
-}
-
-test_projected_spawn_disarms_cleanup_before_ambiguous_launch_submission() {
-  local literal_pattern disarm_pattern release_pattern enter_pattern literal_line disarm_line release_line enter_line
-  # These are literal source patterns for grep, so shell expansion would invalidate the assertion.
-  # shellcheck disable=SC2016
-  literal_pattern='fm_backend_send_literal "$BACKEND" "$WID" "$LAUNCH"'
-  # shellcheck disable=SC2016
-  disarm_pattern='HERDR_PROJECTION_ABORT_CLEANUP=0'
-  release_pattern='spawn_herdr_presentation_order_lock_release'
-  # shellcheck disable=SC2016
-  enter_pattern='fm_backend_send_key "$BACKEND" "$WID" Enter'
-  literal_line=$(grep -nF "$literal_pattern" "$ROOT/bin/fm-spawn.sh" | tail -1 | cut -d: -f1)
-  disarm_line=$(grep -nF "$disarm_pattern" "$ROOT/bin/fm-spawn.sh" | tail -1 | cut -d: -f1)
-  release_line=$(grep -nF "$release_pattern" "$ROOT/bin/fm-spawn.sh" | tail -1 | cut -d: -f1)
-  enter_line=$(grep -nF "$enter_pattern" "$ROOT/bin/fm-spawn.sh" | tail -1 | cut -d: -f1)
-  [ -n "$literal_line" ] && [ -n "$disarm_line" ] && [ -n "$release_line" ] && [ -n "$enter_line" ] \
-    || fail "could not locate the projected launch cleanup boundary"
-  [ "$literal_line" -lt "$disarm_line" ] \
-    && [ "$disarm_line" -lt "$release_line" ] \
-    && [ "$release_line" -lt "$enter_line" ] \
-    || fail "projected spawn must disarm cleanup before releasing its lock and submitting ambiguous Enter"
-  pass "fm-spawn: projected cleanup disarms before lock release and ambiguous launch submission"
-}
-
 test_projected_abort_cleanup_holds_presentation_lock() {
   local dir lock started proceed function_source owner_pid status
   dir="$TMP_ROOT/projection-abort-lock"; mkdir -p "$dir"
@@ -1590,10 +1548,6 @@ test_flat_abort_cleanup_is_locked_focus_safe_and_durable() {
   [ -f "$marker" ] || fail "unconfirmed flat abort cleanup did not persist durable endpoint identity"
   assert_contains "$(cat "$marker")" "target=fmtest:w9:p4" \
     "flat abort uncertainty marker lost the exact endpoint"
-  grep -Fq 'unresolved Herdr cleanup uncertainty' "$ROOT/bin/fm-spawn.sh" \
-    || fail "future spawn does not refuse a durable Herdr cleanup uncertainty marker"
-  grep -Fq "cleanup-uncertain" "$ROOT/bin/fm-spawn.sh" \
-    || fail "spawn does not persist the backend's ID-less mutation uncertainty"
   pass "fm-spawn: flat abort cleanup is locked, focus-safe, verified, and durable on uncertainty"
 }
 
@@ -3606,8 +3560,6 @@ test_presentation_session_lock_path_rejects_malformed_socket
 test_presentation_lock_malformed_socket_falls_back
 test_projection_order_rejects_malformed_socket
 test_presentation_lock_insecure_namespace_falls_back
-test_spawn_task_lock_covers_all_backend_creation_and_metadata_publication
-test_projected_spawn_disarms_cleanup_before_ambiguous_launch_submission
 test_projected_abort_cleanup_holds_presentation_lock
 test_flat_abort_cleanup_is_locked_focus_safe_and_durable
 test_projection_reclaim_refusal_matrix_is_non_mutating

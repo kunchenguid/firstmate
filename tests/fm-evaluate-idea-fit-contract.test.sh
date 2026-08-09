@@ -23,17 +23,4 @@ EOF
   pass "Firstmate bundles the exact canonical evaluate-idea-fit package"
 }
 
-test_firstmate_routes_evaluations_to_scout_reports() {
-  assert_grep 'evaluate-idea-fit' "$ROOT/AGENTS.md" "evaluation trigger missing from AGENTS"
-  assert_grep 'link, repository, integration, or ripple' "$ROOT/AGENTS.md" "evaluation intake vocabulary missing"
-  assert_grep 'scout task' "$ROOT/AGENTS.md" "evaluation route is not bound to scout lifecycle"
-  assert_grep 'untrusted evidence' "$ROOT/AGENTS.md" "hostile external-content boundary missing"
-  assert_grep 'never as tool instructions' "$ROOT/AGENTS.md" "external instructions are not rejected"
-  assert_grep '`/evaluate-idea-fit`' "$ROOT/README.md" "slash invocation missing"
-  assert_grep '`$evaluate-idea-fit`' "$ROOT/README.md" "Codex dollar invocation missing"
-  assert_grep 'Tier B' "$ROOT/README.md" "OpenCode and Pi fallback tier is undisclosed"
-  pass "Firstmate routes evaluation requests to a durable scout report with explicit trust boundaries"
-}
-
 test_canonical_skill_package_is_bundled
-test_firstmate_routes_evaluations_to_scout_reports

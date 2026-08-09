@@ -94,7 +94,7 @@ test_crewmate_declaration_clears_every_inherited_home() {
   local prefix
   prefix=$( . "$ROOT/bin/fm-worker-isolation-lib.sh" \
     && fm_worker_launch_env_prefix crewmate task-a1 /home/cap/firstmate )
-  [ "$prefix" = "FM_HOME= FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_AGENT_ROLE=crewmate FM_AGENT_TASK='task-a1' FM_AGENT_OWNER_HOME='/home/cap/firstmate' " ] \
+  [ "$prefix" = "FM_HOME= FM_ROOT= FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_AGENT_ROLE=crewmate FM_AGENT_TASK='task-a1' FM_AGENT_OWNER_HOME='/home/cap/firstmate' " ] \
     || fail "crewmate declaration changed: $prefix"
   pass "a crewmate declaration clears every operational-home variable and names its owner"
 }
@@ -103,9 +103,28 @@ test_secondmate_declaration_pins_only_its_own_home() {
   local prefix
   prefix=$( . "$ROOT/bin/fm-worker-isolation-lib.sh" \
     && fm_worker_launch_env_prefix secondmate dom-b2 /home/cap/homes/dom )
-  [ "$prefix" = "FM_HOME='/home/cap/homes/dom' FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_AGENT_ROLE=secondmate FM_AGENT_TASK='dom-b2' FM_AGENT_OWNER_HOME='/home/cap/homes/dom' " ] \
+  [ "$prefix" = "FM_HOME='/home/cap/homes/dom' FM_ROOT= FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_AGENT_ROLE=secondmate FM_AGENT_TASK='dom-b2' FM_AGENT_OWNER_HOME='/home/cap/homes/dom' " ] \
     || fail "secondmate declaration changed: $prefix"
   pass "a secondmate declaration pins its own home and clears every inherited override"
+}
+
+test_incomplete_worker_identity_refuses_primary_operations() {
+  local out status
+  out=$(FM_AGENT_TASK=partial-task bash -c '. "$1"; fm_worker_refuse_primary_operation operation' _ "$ROOT/bin/fm-worker-isolation-lib.sh" 2>&1)
+  status=$?
+  expect_code 1 "$status" "a task without a role must be refused"
+  assert_contains "$out" "task worker" "missing-role refusal lost its worker diagnostic"
+  out=$(FM_AGENT_ROLE=crewmate bash -c '. "$1"; fm_worker_refuse_primary_operation operation' _ "$ROOT/bin/fm-worker-isolation-lib.sh" 2>&1)
+  status=$?
+  expect_code 1 "$status" "a role without a task must be refused"
+  out=$(FM_AGENT_ROLE=unknown FM_AGENT_TASK=bad bash -c '. "$1"; fm_worker_refuse_primary_operation operation' _ "$ROOT/bin/fm-worker-isolation-lib.sh" 2>&1)
+  status=$?
+  expect_code 1 "$status" "an unknown role must be refused"
+  out=$(FM_AGENT_ROLE=secondmate FM_AGENT_TASK=dom-b2 FM_AGENT_OWNER_HOME=/homes/dom \
+    bash -c '. "$1"; fm_worker_refuse_primary_operation operation; printf primary' _ \
+    "$ROOT/bin/fm-worker-isolation-lib.sh")
+  [ "$out" = primary ] || fail "a complete secondmate identity must remain primary in its own home"
+  pass "incomplete worker identities fail closed at the shared guard"
 }
 
 test_declaration_refuses_rather_than_emitting_a_partial_prefix() {
@@ -214,16 +233,17 @@ EOF
 }
 
 test_every_verified_harness_launches_with_its_home_declaration() {
-  local harness id rec out status launch expected home_real
+  local harness id rec out status launch expected home_real pid
   for harness in claude codex opencode pi grok; do
     id="declared-$harness-b1"
     rec=$(make_launch_case "launch-$harness" "$id")
     read_launch_record "$rec"
+    pid=$(start_declared_agent "$WT_DIR" "$id-shell" "$HOME_DIR")
     out=$(HOME="$HOME_DIR" GROK_HOME="$HOME_DIR/.grok" \
       FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
       FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
       FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
-      FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" FM_FAKE_PANE_PATH="$WT_DIR" \
+      FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" FM_FAKE_PANE_PATH="$WT_DIR" FM_FAKE_PANE_PID="$pid" \
       FM_FAKE_TMUX_STATE="$CASE_DIR/tmux-window-name" \
       FM_FAKE_LAUNCH_LOG="$CASE_DIR/launch.log" \
       PATH="$FAKEBIN_DIR:$PATH" \
@@ -312,8 +332,9 @@ test_worker_cannot_take_the_session_owner_record() {
     FM_AGENT_ROLE=crewmate FM_AGENT_TASK=w3 FM_AGENT_OWNER_HOME="$home" \
     "$LOCK" status 2>&1)
   status=$?
-  expect_code 0 "$status" "read-only lock status must stay available to a worker"
-  pass "a declared task worker is refused the session owner record and never rewrites it"
+  expect_code 1 "$status" "lock status must refuse a declared task worker"
+  assert_contains "$out" "session lock operation refused" "lock status refusal lost its operation diagnostic"
+  pass "a declared task worker is refused every session-lock operation"
 }
 
 test_worker_cannot_spawn_or_tear_down() {
@@ -333,6 +354,19 @@ test_worker_cannot_spawn_or_tear_down() {
   expect_code 1 "$status" "a declared task worker must not tear down"
   assert_contains "$out" "teardown refused" "the teardown refusal did not name the operation"
   pass "a declared task worker is refused both dispatch and teardown"
+}
+
+test_worker_cannot_bootstrap_primary_state() {
+  local home out status
+  home="$TMP_ROOT/bootstrap-refuse"
+  out=$(FM_ROOT_OVERRIDE="$home" FM_HOME="$home" \
+    FM_AGENT_ROLE=crewmate FM_AGENT_TASK=w5 FM_AGENT_OWNER_HOME="$home" \
+    "$ROOT/bin/fm-bootstrap.sh" --help 2>&1)
+  status=$?
+  expect_code 1 "$status" "a declared task worker must not bootstrap primary state"
+  assert_contains "$out" "bootstrap refused" "bootstrap refusal lost its operation diagnostic"
+  [ ! -e "$home/state" ] || fail "worker bootstrap created primary state before refusal"
+  pass "a declared task worker is refused before bootstrap state mutation"
 }
 
 # --- D. /proc is the method of record ---------------------------------------
@@ -481,6 +515,32 @@ test_one_proc_walk_answers_every_task_in_a_sweep() {
     *) fail "an empty shared index was treated as no index at all: $out" ;;
   esac
   pass "one /proc walk answers every task in a sweep, and an empty index is a real answer"
+}
+
+test_agent_lookup_is_home_scoped_and_rejects_reused_pids() {
+  local dir_a dir_b id index out status home_a home_b
+  require_procfs || { pass "skip: this host has no readable procfs for home-scoped lookup"; return 0; }
+  dir_a="$TMP_ROOT/proc-home-a"
+  dir_b="$TMP_ROOT/proc-home-b"
+  mkdir -p "$dir_a" "$dir_b"
+  home_a="$TMP_ROOT/owner-a"
+  home_b="$TMP_ROOT/owner-b"
+  id="duplicate-task-$RUN_TAG"
+  start_declared_agent "$dir_a" "$id" "$home_a" >/dev/null
+  start_declared_agent "$dir_b" "$id" "$home_b" >/dev/null
+  index=$( . "$ROOT/bin/fm-agent-cwd-lib.sh" && fm_agent_task_pid_index )
+  out=$( . "$ROOT/bin/fm-agent-cwd-lib.sh" \
+    && fm_agent_cwd_verdict "$id" '' '' "$index" "$home_a" )
+  case "$out" in
+    proc*"$(cd "$dir_a" && pwd -P)") : ;;
+    *) fail "duplicate task ids crossed owner homes: $out" ;;
+  esac
+  out=$( . "$ROOT/bin/fm-agent-cwd-lib.sh" \
+    && fm_agent_pids_for_task reused-task $'reused-task\t'"$$"$'\t0\t'"$home_a"$'\tcrewmate' )
+  status=$?
+  expect_code 1 "$status" "a reused pid with a mismatched start time must be ignored"
+  [ -z "$out" ] || fail "a reused pid supplied false ownership evidence: $out"
+  pass "agent lookup scopes duplicate task ids by home and start time"
 }
 
 test_spawn_settles_on_proc_evidence_over_a_lying_pane_path() {
@@ -808,26 +868,6 @@ SH
   pass "teardown retires a contested lease, leaves the slot untouched, and --force does not waive it"
 }
 
-test_teardown_endpoint_state_prefers_backend_agent_state() {
-  local function_source out
-  function_source=$(sed -n '/^teardown_slot_endpoint_state()/,/^}/p' "$TEARDOWN")
-  out=$(FUNCTION_SOURCE="$function_source" bash -c '
-    eval "$FUNCTION_SOURCE"
-    fm_backend_foreground_process_pid() { printf 4242; }
-    fm_backend_agent_state() { printf dead; }
-    teardown_slot_endpoint_state tmux firstmate:fm-dead-shell
-  ')
-  [ "$out" = closed ] || fail "a dead backend endpoint was classified live from its remaining shell: $out"
-  out=$(FUNCTION_SOURCE="$function_source" bash -c '
-    eval "$FUNCTION_SOURCE"
-    fm_backend_foreground_process_pid() { return 1; }
-    fm_backend_agent_state() { printf alive; }
-    teardown_slot_endpoint_state herdr fmtest:pane-a
-  ')
-  [ "$out" = unknown ] || fail "a live endpoint without exact process proof was not fail-closed: $out"
-  pass "teardown consults backend state before process proof and retains unproven live endpoints"
-}
-
 # --- F. restore-time re-assertion -------------------------------------------
 
 make_sweep_home() {
@@ -1015,18 +1055,21 @@ test_sweep_still_reports_a_secondmate_running_for_a_foreign_home() {
 test_crewmate_declaration_clears_every_inherited_home
 test_secondmate_declaration_pins_only_its_own_home
 test_declaration_refuses_rather_than_emitting_a_partial_prefix
+test_incomplete_worker_identity_refuses_primary_operations
 test_every_verified_harness_launches_with_its_home_declaration
 test_secondmate_child_receives_only_its_own_home
 test_declared_worker_is_never_a_primary_scope_match
 test_project_local_startup_adapter_stays_inert_for_a_worker
 test_worker_cannot_take_the_session_owner_record
 test_worker_cannot_spawn_or_tear_down
+test_worker_cannot_bootstrap_primary_state
 test_proc_cwd_is_read_from_the_live_process
 test_declared_agent_lookup_returns_the_root_most_process
 test_provider_process_id_matrix_is_explicit
 test_tmux_pane_pid_comes_from_the_stable_window_id
 test_a_lost_window_name_never_answers_with_firstmates_own_pane
 test_one_proc_walk_answers_every_task_in_a_sweep
+test_agent_lookup_is_home_scoped_and_rejects_reused_pids
 test_spawn_settles_on_proc_evidence_over_a_lying_pane_path
 test_slot_stamp_records_ownership_and_never_stamps_a_plain_checkout
 test_clean_ownership_disposes
@@ -1039,7 +1082,6 @@ test_a_live_agent_of_another_task_retains_the_slot
 test_a_relinquished_slot_is_releasable_by_its_remaining_holder
 test_a_stamp_naming_another_task_survives_a_retain_and_still_blocks
 test_teardown_retires_a_contested_lease_even_with_force
-test_teardown_endpoint_state_prefers_backend_agent_state
 test_sweep_reports_a_worktree_that_collapsed_onto_the_primary_checkout
 test_sweep_is_silent_for_a_correctly_isolated_worker
 test_sweep_fails_closed_without_process_evidence

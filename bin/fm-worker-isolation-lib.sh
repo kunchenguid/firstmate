@@ -41,7 +41,7 @@
 
 # Every operational-home variable a firstmate script reads. Extend here, not at
 # a call site, when a new home override is introduced.
-FM_WORKER_ISOLATION_HOME_VARS="FM_HOME FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE"
+FM_WORKER_ISOLATION_HOME_VARS="FM_HOME FM_ROOT FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE"
 
 fm_worker_shell_quote() {  # <text>
   printf "'"
@@ -49,17 +49,23 @@ fm_worker_shell_quote() {  # <text>
   printf "'"
 }
 
-# fm_worker_treehouse_lease_command <task-id>
+# fm_worker_treehouse_lease_command <task-id> [proof-file]
 # Print the pane command that durably leases a pooled slot and enters it. The
 # lease remains held even if the worker process exits, so only Firstmate's
 # ownership-gated teardown can return and recycle the slot.
 fm_worker_treehouse_lease_command() {
-  local id=$1 quoted
+  local id=$1 proof=${2:-} quoted proof_quoted
   [ -n "$id" ] || return 1
   case "$id" in *$'\n'*|*$'\r'*) return 1 ;; esac
   quoted=$(fm_worker_shell_quote "$id") || return 1
-  printf 'fm_wt=$(treehouse get --lease --lease-holder %s) && cd -- "$fm_wt" && unset fm_wt' \
-    "$quoted"
+  if [ -n "$proof" ]; then
+    proof_quoted=$(fm_worker_shell_quote "$proof") || return 1
+    printf 'fm_wt=$(treehouse get --lease --lease-holder %s) && cd -- "$fm_wt" && printf "%%s\\n" "$fm_wt" > %s && unset fm_wt' \
+      "$quoted" "$proof_quoted"
+  else
+    printf 'fm_wt=$(treehouse get --lease --lease-holder %s) && cd -- "$fm_wt" && unset fm_wt' \
+      "$quoted"
+  fi
 }
 
 # fm_worker_launch_env_prefix <role> <task-id> <owner-home>
@@ -90,10 +96,30 @@ fm_worker_launch_env_prefix() {
   printf 'FM_AGENT_OWNER_HOME=%s ' "$(fm_worker_shell_quote "$home")"
 }
 
+fm_worker_declaration_present() {
+  [ -n "${FM_AGENT_ROLE:-}" ] || [ -n "${FM_AGENT_TASK:-}" ] || [ -n "${FM_AGENT_OWNER_HOME:-}" ]
+}
+
+fm_worker_identity_is_complete() {
+  case "${FM_AGENT_ROLE:-}" in
+    crewmate|secondmate) ;;
+    *) return 1 ;;
+  esac
+  [ -n "${FM_AGENT_TASK:-}" ] || return 1
+  case "${FM_AGENT_OWNER_HOME:-}" in
+    /*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # fm_worker_is_task_worker: 0 when this process is a declared task child that
 # must never act as a firstmate primary in any home.
 fm_worker_is_task_worker() {
-  [ "${FM_AGENT_ROLE:-}" = crewmate ]
+  fm_worker_declaration_present || return 1
+  if [ "${FM_AGENT_ROLE:-}" = secondmate ] && fm_worker_identity_is_complete; then
+    return 1
+  fi
+  return 0
 }
 
 # fm_worker_refuse_primary_operation <operation>

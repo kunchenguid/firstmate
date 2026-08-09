@@ -68,9 +68,13 @@ test_stdin_transport_blocks_harness_payload() {
 test_tracked_hook_snippets_are_present() {
   assert_present "$ROOT/.grok/hooks/fm-primary-cd-check.json" "Grok cd hook snippet is missing"
   assert_present "$ROOT/.codex/hooks.json" "Codex hook snippet is missing"
-  assert_grep 'fm-cd-pretool-check.sh' "$ROOT/.grok/hooks/fm-primary-cd-check.json" "Grok hook does not call cd guard"
-  assert_grep 'fm-cd-pretool-check.sh' "$ROOT/.codex/hooks.json" "Codex hook does not call cd guard"
-  pass "tracked Grok and Codex hook snippets point at the cd guard"
+  jq -e '.hooks.PreToolUse | any(.[]; any(.hooks[]?; .type == "command" and (.command | contains("fm-cd-pretool-check.sh"))))' \
+    "$ROOT/.grok/hooks/fm-primary-cd-check.json" >/dev/null \
+    || fail "Grok hook has no executable cd-guard command"
+  jq -e '.hooks.PreToolUse | any(.[]; any(.hooks[]?; .type == "command" and (.command | contains("fm-cd-pretool-check.sh"))))' \
+    "$ROOT/.codex/hooks.json" >/dev/null \
+    || fail "Codex hook has no executable cd-guard command"
+  pass "parsed Grok and Codex hook contracts point at the cd guard"
 }
 
 test_primary_blocks_persistent_project_cd

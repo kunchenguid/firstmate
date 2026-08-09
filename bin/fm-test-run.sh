@@ -794,11 +794,16 @@ for script in "${SCRIPTS[@]}"; do
 
   set +e
   # Stream live output while retaining a copy for gate-skip detection.
-  # PIPESTATUS[0] is the test script; tee's exit is ignored for aggregate.
   bash "$script" 2>&1 | tee "$out"
-  rc=${PIPESTATUS[0]}
+  pipeline_status=("${PIPESTATUS[@]}")
+  rc=${pipeline_status[0]}
+  tee_rc=${pipeline_status[1]}
   set -e
   : "${rc:=1}"
+  if [ "${tee_rc:-1}" -ne 0 ]; then
+    log "could not retain output for $script"
+    [ "$rc" -ne 0 ] || rc="$tee_rc"
+  fi
 
   end_ms=$(now_ms)
   end_iso=$(now_iso)

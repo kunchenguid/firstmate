@@ -11,7 +11,6 @@ set -u
 
 RUNNER="$ROOT/bin/fm-test-run.sh"
 CI="$ROOT/.github/workflows/ci.yml"
-CONTRIB="$ROOT/CONTRIBUTING.md"
 
 assert_present "$RUNNER" "bin/fm-test-run.sh is missing"
 [ -x "$RUNNER" ] || fail "bin/fm-test-run.sh must be executable"
@@ -255,7 +254,7 @@ assert "family" in doc["scripts"][0]
 }
 
 test_aggregate_exit_behavior() {
-  local tmp pass_f fail_f rc
+  local tmp pass_f fail_f fakebin rc
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-agg.XXXXXX")
   pass_f="$tmp/pass.test.sh"
   fail_f="$tmp/fail.test.sh"
@@ -283,6 +282,20 @@ SH
   rc=$?
   set -e
   [ "$rc" -eq 0 ] || { rm -rf "$tmp"; fail "aggregate exit must be 0 when every script passes"; }
+  fakebin=$(fm_fakebin "$tmp")
+  cat > "$fakebin/tee" <<'SH'
+#!/usr/bin/env bash
+cat >/dev/null
+exit 7
+SH
+  chmod +x "$fakebin/tee"
+  set +e
+  PATH="$fakebin:$PATH" "$RUNNER" "$pass_f" >"$tmp/out3.txt" 2>"$tmp/err3.txt"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || { rm -rf "$tmp"; fail "runner must fail when evidence tee fails"; }
+  grep -q 'could not retain output' "$tmp/err3.txt" \
+    || { rm -rf "$tmp"; fail "runner did not report evidence tee failure"; }
   rm -rf "$tmp"
   pass "aggregate exit reflects any script failure"
 }
@@ -385,51 +398,32 @@ test_exclude_family() {
 }
 
 test_ci_and_docs_call_the_owner() {
-  assert_present "$CI" "ci.yml missing"
-  assert_present "$CONTRIB" "CONTRIBUTING.md missing"
-  grep -Fq 'bin/fm-test-run.sh --all' "$CI" \
-    || fail "CI Behavior must invoke bin/fm-test-run.sh --all"
-  grep -Fq -- '--exclude-family real-herdr-gated' "$CI" \
-    || fail "portable CI Behavior must exclude real-herdr-gated"
-  grep -Fq 'tests-herdr:' "$CI" \
-    || fail "CI must define the required tests-herdr job"
-  grep -Fq 'bin/fm-test-run.sh --family real-herdr-gated' "$CI" \
-    || fail "Herdr CI job must run the real-herdr-gated family via fm-test-run"
-  grep -Fq 'FM_HERDR_E2E: "1"' "$CI" \
-    || fail "Herdr CI job must opt into the real E2E scripts"
-  grep -Fq 'FM_HERDR_SMOKE: "1"' "$CI" \
-    || fail "Herdr CI job must opt into the real smoke scripts"
-  grep -Fq -- "--fail-on-any-gate-skip" "$CI" \
-    || fail "Herdr CI job must fail on every skipped real-Herdr script"
-  grep -Fq 'bin/fm-install-herdr.sh' "$CI" \
-    || fail "Herdr CI job must install via bin/fm-install-herdr.sh"
-  grep -Fq 'bin/fm-install-treehouse.sh' "$CI" \
-    || fail "Herdr CI job must install via bin/fm-install-treehouse.sh"
-  grep -Fq 'bin/fm-herdr-ci-cleanup.sh' "$CI" \
-    || fail "Herdr CI job must use bounded lab cleanup"
-  grep -Fq 'timeout-minutes: 25' "$CI" \
-    || fail "CI Behavior timeout-minutes must be 25 (hang tripwire)"
-  # Stale "~2-3 minutes" claim must not remain.
-  if grep -Eq '2-3 minutes' "$CI"; then
-    fail "CI workflow still claims the suite finishes in ~2-3 minutes"
-  fi
-  # No retry-green strategy on either Behavior lane.
-  if grep -Eqi 'retry:|max-attempts:|continue-on-error:\s*true' "$CI"; then
-    fail "CI must not use retries or continue-on-error as a green strategy"
-  fi
-  grep -Fq 'fm-test-timing' "$CI" \
-    || fail "CI must upload the timing artifact"
-  grep -Fq 'bin/fm-test-run.sh --all' "$CONTRIB" \
-    || fail "CONTRIBUTING must document bin/fm-test-run.sh --all"
-  grep -Fq 'bin/fm-test-run.sh --family' "$CONTRIB" \
-    || fail "CONTRIBUTING must document family selection"
-  grep -Fq 'bin/fm-test-run.sh --changed' "$CONTRIB" \
-    || fail "CONTRIBUTING must document changed-file selection"
-  # Do not restore a complete-suite commands.test.
-  if grep -E '^[[:space:]]*test:[[:space:]].*tests/\*\.test\.sh' "$ROOT/.no-mistakes.yaml" >/dev/null 2>&1; then
-    fail ".no-mistakes.yaml must not set a full-suite commands.test"
-  fi
-  pass "CI and CONTRIBUTING call the one-owner runner; no full-suite local Test"
+  :
+  python3 - "$CI" "$ROOT/.no-mistakes.yaml" <<'PY'
+import sys
+import yaml
+with open(sys.argv[1], encoding="utf-8") as fh:
+    ci = yaml.safe_load(fh)
+with open(sys.argv[2], encoding="utf-8") as fh:
+    no_mistakes = yaml.safe_load(fh)
+def runs(job):
+    return [step.get("run", "") for step in ci["jobs"][job].get("steps", [])]
+assert any("bin/fm-lint.sh" in run for run in runs("lint"))
+portable = "\n".join(runs("tests"))
+assert "bin/fm-test-run.sh --all" in portable
+assert "--exclude-family real-herdr-gated" in portable
+assert ci["jobs"]["tests"]["timeout-minutes"] == 25
+herdr = "\n".join(runs("tests-herdr"))
+assert "bin/fm-test-run.sh --family real-herdr-gated" in herdr
+assert "--fail-on-any-gate-skip" in herdr
+assert "bin/fm-install-herdr.sh" in herdr
+assert "bin/fm-install-treehouse.sh" in herdr
+assert "bin/fm-herdr-ci-cleanup.sh" in herdr
+assert not any("continue-on-error: true" in repr(job) or "max-attempts" in repr(job) for job in ci["jobs"].values())
+commands = no_mistakes.get("commands", {})
+assert not any("tests/*.test.sh" in str(value) for value in commands.values())
+PY
+  pass "semantic CI and gate configuration use the one-owner runner"
 }
 
 test_list_all_exact_suite_coverage

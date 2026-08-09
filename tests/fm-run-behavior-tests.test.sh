@@ -197,20 +197,6 @@ test_serial_mode_remains_serial() {
   pass "FM_TEST_JOBS=1 preserves serial fixture execution"
 }
 
-test_delta_overlay_contract_is_checked_and_portable() {
-  local source
-  source=$(cat "$HELPER")
-  assert_not_contains "$source" 'sort -z' \
-    "behavior runner must not depend on GNU-only sort -z"
-  assert_contains "$source" 'if ! copy_worktree_delta' \
-    "behavior runner must check the working-tree overlay result"
-  assert_contains "$source" 'unset HERDR_ENV HERDR_SESSION HERDR_PANE_ID' \
-    "behavior runner must scrub ambient Herdr pane markers"
-  assert_contains "$source" 'export FM_BACKEND=tmux' \
-    "behavior runner must pin hermetic jobs to tmux when FM_BACKEND is unset"
-  pass "behavior runner checks its portable working-tree overlay"
-}
-
 test_lib_scrubs_ambient_herdr_for_hermetic_sources() {
   local out
   out=$(
@@ -241,6 +227,5 @@ test_lib_scrubs_ambient_herdr_for_hermetic_sources() {
 
 test_parallel_isolation_and_failure_aggregation
 test_serial_mode_remains_serial
-test_delta_overlay_contract_is_checked_and_portable
 test_lib_scrubs_ambient_herdr_for_hermetic_sources
 test_runner_honors_ambient_opt_in

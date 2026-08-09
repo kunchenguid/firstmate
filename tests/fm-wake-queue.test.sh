@@ -266,6 +266,15 @@ test_unpreparable_lock_refuses_instead_of_spinning() {
   expect_code 0 "$status" "fm_lock_acquire_wait spun instead of refusing an unpreparable lock"
   assert_contains "$out" "refused rc=1" "fm_lock_acquire_wait did not refuse an unpreparable lock: $out"
 
+  out=$(FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_LOCK_WAIT_SECS=0 bash -c '
+    . "$1"
+    fm_lock_try_acquire() { return 1; }
+    fm_lock_acquire_wait "$2"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$dir/held.lock" 2>&1)
+  status=$?
+  expect_code 1 "$status" "a contended pooled lock must time out"
+  assert_contains "$out" "timed out after 0s" "lock timeout lost its diagnostic: $out"
+
   out=$(timeout 20 env FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
     FM_WAKE_QUEUE_LOCK="$absent" bash -c '
       . "$1"

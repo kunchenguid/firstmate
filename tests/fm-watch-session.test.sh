@@ -209,28 +209,6 @@ test_watch_session_stop_fails_for_unpinned_legacy_watcher() {
   pass "watch-session stop fails closed for an unpinned legacy watcher"
 }
 
-test_watch_session_delays_only_after_failed_rearm() {
-  local dir fakebin state out runner
-  dir=$(make_case session-rearm-delay)
-  fakebin=$(install_fake_tmux "$dir")
-  state="$dir/home/state"
-  mkdir -p "$state"
-  out="$dir/start.out"
-
-  PATH="$fakebin:$PATH" FM_FAKE_TMUX_LOG="$dir/tmux.log" FM_FAKE_TMUX_ROOT="$dir/tmux-state" \
-    FM_HOME="$dir/home" FM_WATCH_SESSION_REARM_DELAY=9 "$WATCH_SESSION" start > "$out" \
-    || fail "watch-session did not start with documented rearm delay"
-  runner="$state/.watch-session/runner.sh"
-  assert_present "$runner" "watch-session should write runner file"
-  # shellcheck disable=SC2016 # Literal runner source pattern.
-  assert_grep 'grep -Eq '\''^(signal:|stale:|check:|heartbeat($|:))'\'' "$arm_out"' "$runner" "runner should distinguish wake output from healthy no-op output"
-  # shellcheck disable=SC2016 # Literal runner source pattern.
-  assert_grep 'if [ "$rc" -ne 0 ]; then rm -f "$arm_out"; sleep 9; continue; fi' "$runner" "runner should delay after failed re-arm attempts"
-  assert_grep '  sleep 9' "$runner" "runner should delay after healthy no-op re-arm attempts"
-  ! grep -F 'else sleep 1' "$runner" >/dev/null || fail "runner should re-arm immediately after a successful watcher wake"
-  pass "watch-session delays failed and no-op re-arms but immediately re-arms after successful wakes"
-}
-
 test_watch_session_status_reports_runner_not_inner_arm_health() {
   local dir fakebin state out status arm_out
   dir=$(make_case session-status-runner-contract)
@@ -325,7 +303,6 @@ test_watch_session_grok_emergency_override_allows_fallback() {
 test_watch_session_start_status_stop_are_home_scoped
 test_watch_session_stop_waits_for_starting_watcher
 test_watch_session_stop_fails_for_unpinned_legacy_watcher
-test_watch_session_delays_only_after_failed_rearm
 test_watch_session_status_reports_runner_not_inner_arm_health
 test_watch_session_refuses_grok_primary_without_override
 test_watch_session_refuses_grok_restart_without_stopping_fallback

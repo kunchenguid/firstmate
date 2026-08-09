@@ -10,6 +10,7 @@ FM_WAKE_QUEUE="${FM_WAKE_QUEUE:-$STATE/.wake-queue}"
 FM_WAKE_QUEUE_LOCK="${FM_WAKE_QUEUE_LOCK:-$STATE/.wake-queue.lock}"
 FM_LOCK_STALE_AFTER="${FM_LOCK_STALE_AFTER:-2}"
 FM_LOCK_LEGACY_IDENTITY_MAX_AGE="${FM_LOCK_LEGACY_IDENTITY_MAX_AGE:-300}"
+FM_LOCK_WAIT_SECS="${FM_LOCK_WAIT_SECS:-30}"
 mkdir -p "$STATE"
 
 fm_current_pid() {
@@ -580,7 +581,11 @@ fm_lock_try_acquire() {
 # spawn and teardown hot paths instead of letting the caller take its
 # fail-closed refusal. Returns nonzero for that case so every caller can refuse.
 fm_lock_acquire_wait() {
-  local lockdir=$1 rc
+  local lockdir=$1 rc max_ticks elapsed=0 owner
+  case "$FM_LOCK_WAIT_SECS" in
+    ''|*[!0-9]*) max_ticks=300 ;;
+    *) max_ticks=$((FM_LOCK_WAIT_SECS * 10)) ;;
+  esac
   while :; do
     rc=0
     fm_lock_try_acquire "$lockdir" || rc=$?
@@ -588,7 +593,14 @@ fm_lock_acquire_wait() {
       0) return 0 ;;
       2) return 1 ;;
     esac
+    if [ "$elapsed" -ge "$max_ticks" ]; then
+      owner=${FM_LOCK_HELD_PID:-unknown}
+      printf 'fm-wake-lib: timed out after %ss waiting for %s (owner %s)\n' \
+        "$FM_LOCK_WAIT_SECS" "$lockdir" "$owner" >&2
+      return 1
+    fi
     sleep 0.1
+    elapsed=$((elapsed + 1))
   done
 }
 
