@@ -241,6 +241,7 @@ SH
 run_ship_spawn() {
   run_spawn "$@" --mode no-mistakes --yolo off
 }
+
 read_case_record() {
   IFS='|' read -r CASE_DIR HOME_DIR PROJ_DIR WT_DIR FAKEBIN_DIR LAUNCH_LOG <<EOF
 $1
