@@ -67,10 +67,17 @@ case "${1:-}" in
   send-keys)
     case " $* " in
       *" Enter "*)
-        if [ -n "${FM_FAKE_CURSOR_RECORDER_READY:-}" ] \
+        if [ -n "${FM_FAKE_CURSOR_RECORD_FILE:-}" ] \
            && [ -e "${FM_FAKE_CURSOR_LAUNCH_TYPED:-}" ]; then
-          [ -e "$FM_FAKE_CURSOR_RECORDER_READY" ] || exit 1
-          printf 'recorder-ready-before-enter\n' >> "${FM_FAKE_CURSOR_CAPTURE_LOG:?}"
+          : > "${FM_FAKE_CURSOR_ENTER_STARTED:?}"
+          i=0
+          while [ "$i" -lt 200 ]; do
+            [ -e "$FM_FAKE_CURSOR_RECORD_FILE" ] && break
+            sleep 0.01
+            i=$((i + 1))
+          done
+          [ -e "$FM_FAKE_CURSOR_RECORD_FILE" ] || exit 1
+          printf 'worker-recorded-before-enter-return\n' >> "${FM_FAKE_CURSOR_CAPTURE_LOG:?}"
         fi
         ;;
     esac
@@ -143,6 +150,15 @@ SH
 set -u
 case "$*" in
   *"index.js worker-server"*)
+    if [ -n "${FM_FAKE_CURSOR_ENTER_STARTED:-}" ]; then
+      i=0
+      while [ "$i" -lt 200 ]; do
+        [ -e "$FM_FAKE_CURSOR_ENTER_STARTED" ] && break
+        sleep 0.01
+        i=$((i + 1))
+      done
+      [ -e "$FM_FAKE_CURSOR_ENTER_STARTED" ] || exit 1
+    fi
     [ -n "${FM_FAKE_CURSOR_WORKER_PID:-}" ] || exit 1
     printf '%s\n' "$FM_FAKE_CURSOR_WORKER_PID"
     exit 0 ;;
@@ -587,7 +603,7 @@ SH
 # --- worker-server record: the cursor child daemon pid lands in meta ---------
 
 test_cursor_worker_server_recorded_at_spawn() {
-  local rec id out status worker_pid ready_file
+  local rec id out status worker_pid
   id=cursor-worker-z8
   rec=$(make_cursor_case cursor-worker "$id")
   read_case_record "$rec"
@@ -600,7 +616,6 @@ test_cursor_worker_server_recorded_at_spawn() {
   sleep 0.3
   kill -0 "$worker_pid" 2>/dev/null || fail "cursor-worker-z8: worker stand-in did not start"
   make_spaced_comm_proc "$CASE_DIR/no-proc" "$worker_pid" 5551212
-  ready_file="/tmp/fm-$id/.cursor-worker-recorder-ready"
   : > "$CASE_DIR/capture.log"
 
   out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
@@ -610,7 +625,8 @@ test_cursor_worker_server_recorded_at_spawn() {
     FM_FAKE_CURSOR_AGENT_ARGS="$FAKEBIN_DIR/cursor-agent --force --trust brief" \
     FM_PROC_ROOT_OVERRIDE="$CASE_DIR/no-proc" FM_FAKE_CURSOR_PROC_ROOT="$CASE_DIR/no-proc" \
     FM_FAKE_CURSOR_AGENT_PID=4242 FM_FAKE_CURSOR_WORKER_PID=$worker_pid \
-    FM_FAKE_CURSOR_RECORDER_READY="$ready_file" FM_FAKE_CURSOR_CAPTURE_LOG="$CASE_DIR/capture.log" \
+    FM_FAKE_CURSOR_RECORD_FILE="$HOME_DIR/state/$id.worker-server" \
+    FM_FAKE_CURSOR_ENTER_STARTED="$CASE_DIR/enter-started" FM_FAKE_CURSOR_CAPTURE_LOG="$CASE_DIR/capture.log" \
     FM_FAKE_CURSOR_LAUNCH_TYPED="$CASE_DIR/launch-typed" \
     FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1)
@@ -622,8 +638,8 @@ test_cursor_worker_server_recorded_at_spawn() {
     "cursor spawn did not record the worker-server starttime identity"
   [ "$(wc -l < "$HOME_DIR/state/$id.worker-server")" -eq 1 ] \
     || fail "cursor spawn worker-server record must be exactly one line"
-  assert_grep 'recorder-ready-before-enter' "$CASE_DIR/capture.log" \
-    "cursor worker identity capture did not start before Enter"
+  assert_grep 'worker-recorded-before-enter-return' "$CASE_DIR/capture.log" \
+    "cursor worker identity was not recorded during Enter delivery"
   kill -KILL "$worker_pid" 2>/dev/null || true
   pass "cursor spawn records the worker-server pid and starttime identity atomically"
 }
