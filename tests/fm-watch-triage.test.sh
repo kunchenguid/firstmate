@@ -2031,6 +2031,7 @@ test_live_lane_count_excludes_dead_endpoints() (
   FM_HOME="$dir"
   FM_STATE_OVERRIDE="$state"
   export FM_HOME FM_STATE_OVERRIDE
+  # shellcheck disable=SC2030 # The function body IS a subshell so this PATH change stays contained.
   PATH="$fakebin:$PATH"
   export PATH
   # shellcheck source=/dev/null
@@ -2057,6 +2058,7 @@ test_captain_pulse_reports_dead_endpoints_as_zero() {
   dir=$(make_case captain-pulse-dead); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
   fm_write_meta "$state/dead-a.meta" "window=sess:fm-dead-a" "backend=tmux" "kind=ship"
   fm_write_meta "$state/dead-b.meta" "window=sess:fm-dead-b" "backend=tmux" "kind=ship"
+  # shellcheck disable=SC2031 # The prior test's PATH change was deliberately subshell-contained; this is a fresh per-command PATH.
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available' FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
