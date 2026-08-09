@@ -139,7 +139,8 @@ A local skill exists only in this home, so offloading an entry out of `data/capt
 1. Propose.
    The sweep appends a `proposed-offload` section to the completion receipt: each candidate's first line, source file, estimated tokens, the one-line trigger, the proposed destination as a freeform skill name plus draft description line or a project plus file, the privacy and visibility verdict, and the expected budget relief.
    The same list is the body of a single durable captain-held backlog item, created on first use with `tasks-axi add <id> <title> --kind captain --repo firstmate --body "<proposal body>"` before `tasks-axi hold <id> --reason "<reason>" --kind captain` transitions it to a hold.
-   On later passes, inspect it with `tasks-axi show <id> --full`, replace its proposal body in place with `tasks-axi update <id> --body-file <path>`, and keep the existing hold rather than appending or creating a duplicate.
+   On later passes, inspect it with `tasks-axi show <id> --full`, refresh unresolved proposals in place with `tasks-axi update <id> --body-file <path>`, preserve every candidate's recorded approval state, and keep the existing hold rather than appending or creating a duplicate.
+   The held item's body is the durable approval record, so an approved candidate remains approved and is never forgotten or proposed again.
    If the captain never answers, nothing migrates and the held item simply persists; there is no auto-migration, ever.
 2. Approve.
    The captain approves per candidate in plain chat, and firstmate records the approval in the held item's body.

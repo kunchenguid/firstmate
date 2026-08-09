@@ -112,7 +112,7 @@ Rules:
   Mere presence in the file is not evidence, and re-reading memory is never reinforcement.
 - Re-confirm a stale `perishable` entry against its named condition: still open means refresh the date, while resolved, expired, or no longer checkable means archive it now.
 - Decay is evaluated only when this skill runs; nothing happens between passes, so an infrequently stowed project experiences the clocks at its stow interval.
-- Stale never means deleted: a stale entry moves, with its marker and a one-line reason, to a `.stow-archive.md` in the source file's own directory, never loaded by any session.
+- Stale never means deleted: a stale entry moves to a `.stow-archive.md` in the source file's own directory, never loaded by any session, and its archive record includes the source filename, tier, reinforcement date when present, and a one-line reason.
   In a git worktree, verify that this archive path is not already tracked in the index before writing any archived fact there.
   If it is tracked, do not write to it and report that archival is blocked until the user chooses a safe destination.
   Otherwise add a `.stow-archive.md` line to a `.gitignore` file in the archive's directory, and never write archived facts into a git-tracked file.
@@ -123,7 +123,8 @@ Rules:
   The same persisted transition applies to an entry a hand edit later leaves unmarked in a file whose default tier carries a clock.
 - When an always-loaded memory file has grown past what every session should pay for, this skill may propose - never execute - moving a durable entry that matters only in a nameable situation into an on-demand-loaded home, such as a skill or scoped instruction file the user's agent loads only when that situation arises.
   The user approves each move, the new home is created through the user's own change process rather than by this skill, and the entry leaves the memory file only once the new home exists.
-  No unique current fact is ever plainly removed during this flow; before the on-demand home is live, its only exit from the loaded file is archival with provenance in the recoverable cold tier.
+  No unique current fact is ever plainly removed during this flow; before the on-demand home is live, a non-pinned entry's only exit from the loaded file is archival with provenance in the recoverable cold tier.
+  Automatic archival never moves a pinned entry, which stays loaded until its user-approved relocation is live.
 
 ## What this skill does not do
 
