@@ -77,6 +77,15 @@ case "${1:-}" in
     [ -z "${FM_FAKE_CURSOR_ENTER_STARTED:-}" ] || rm -f "$FM_FAKE_CURSOR_ENTER_STARTED"
     exit 0 ;;
   respawn-window)
+    if [ -n "${FM_FAKE_RESPAWN_TERMINAL_FAIL:-}" ]; then
+      [ -z "${FM_FAKE_RESPAWN_FAILURE_MARKER:-}" ] || : > "$FM_FAKE_RESPAWN_FAILURE_MARKER"
+      if [ -n "${FM_FAKE_WINDOW_STATE_FILE:-}" ]; then
+        : > "$FM_FAKE_WINDOW_STATE_FILE"
+      fi
+      [ -z "${FM_FAKE_PENDING_INPUT:-}" ] || rm -f "$FM_FAKE_PENDING_INPUT"
+      [ -z "${FM_FAKE_CURSOR_ENTER_STARTED:-}" ] || rm -f "$FM_FAKE_CURSOR_ENTER_STARTED"
+      exit 1
+    fi
     if [ -n "${FM_FAKE_RESPAWN_FAIL_ONCE:-}" ] \
        && [ ! -e "$FM_FAKE_RESPAWN_FAIL_ONCE" ]; then
       : > "$FM_FAKE_RESPAWN_FAIL_ONCE"
@@ -909,7 +918,7 @@ test_cursor_relaunch_reaps_prior_worker_before_recording_replacement() {
 }
 
 test_cursor_switch_relaunch_send_failures_preserve_ownership() {
-  local failure rec id out status old_parent old_pid
+  local failure rec id out status old_parent old_pid respawn_terminal_fail
   for failure in literal enter literal-clear; do
     id="cursor-switch-$failure-zm"
     rec=$(make_cursor_case "cursor-switch-$failure" "$id")
@@ -920,6 +929,8 @@ test_cursor_switch_relaunch_send_failures_preserve_ownership() {
     old_parent=$!
     while [ ! -s "$CASE_DIR/old-worker.pid" ]; do sleep 0.01; done
     old_pid=$(cat "$CASE_DIR/old-worker.pid")
+    respawn_terminal_fail=
+    [ "$failure" != literal-clear ] || respawn_terminal_fail=1
 
     out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
       FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
@@ -945,6 +956,8 @@ test_cursor_switch_relaunch_send_failures_preserve_ownership() {
       FM_FAKE_SWITCH_LAUNCH_TYPED="$CASE_DIR/switch-launch-typed" \
       FM_FAKE_PENDING_INPUT="$CASE_DIR/pending-input" \
       FM_FAKE_RESPAWN_FAIL_ONCE="$CASE_DIR/respawn-failed" \
+      FM_FAKE_RESPAWN_TERMINAL_FAIL="$respawn_terminal_fail" \
+      FM_FAKE_RESPAWN_FAILURE_MARKER="$CASE_DIR/respawn-terminal-failed" \
       FM_FAKE_WINDOW_STATE_FILE="$CASE_DIR/windows.state" \
       FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" PATH="$FAKEBIN_DIR:$PATH" \
       "$SPAWN" "$id" --relaunch --harness claude 2>&1)
@@ -960,8 +973,8 @@ test_cursor_switch_relaunch_send_failures_preserve_ownership() {
     [ ! -e "$CASE_DIR/pending-input" ] \
       || fail "cursor-to-claude $failure send failure left stale endpoint input"
     if [ "$failure" = literal-clear ]; then
-      [ -e "$CASE_DIR/respawn-failed" ] \
-        || fail "cursor-to-claude clear failure did not exercise endpoint respawn failure"
+      [ -e "$CASE_DIR/respawn-terminal-failed" ] \
+        || fail "cursor-to-claude clear failure did not exercise terminal respawn failure"
     fi
     assert_grep "fm-$id" "$CASE_DIR/windows.state" \
       "cursor-to-claude $failure send failure removed relaunch endpoint"

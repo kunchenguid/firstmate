@@ -1064,6 +1064,20 @@ if [ "$RELAUNCH" -eq 1 ]; then
     HERDR_WORKSPACE_ID=$(fm_meta_get "$RELAUNCH_META" herdr_workspace_id)
     HERDR_TAB_ID=$(fm_meta_get "$RELAUNCH_META" herdr_tab_id)
     HERDR_PANE_ID=$(fm_meta_get "$RELAUNCH_META" herdr_pane_id)
+    HERDR_CLEANUP_ENDPOINT=$(fm_meta_get "$RELAUNCH_META" herdr_cleanup_endpoint)
+    if [ -n "$HERDR_CLEANUP_ENDPOINT" ]; then
+      fm_backend_herdr_parse_target "$HERDR_CLEANUP_ENDPOINT" \
+        && [ "$FM_BACKEND_HERDR_SESSION" = "$HERDR_SES" ] \
+        && [ "$HERDR_CLEANUP_ENDPOINT" != "$RELAUNCH_TARGET" ] || {
+        echo "error: task $ID has invalid pending Herdr cleanup identity; refusing relaunch" >&2
+        exit 1
+      }
+      fm_backend_kill "$BACKEND" "$HERDR_CLEANUP_ENDPOINT" 2>/dev/null || true
+      fm_backend_endpoint_confirmed_gone "$BACKEND" "$HERDR_CLEANUP_ENDPOINT" || {
+        echo "error: task $ID's prior Herdr endpoint could not be confirmed gone; refusing relaunch" >&2
+        exit 1
+      }
+    fi
   fi
   # With no explicit harness, a relaunch reuses the harness already recorded
   # for this task. It must NOT fall through to the fresh-spawn config
@@ -2298,6 +2312,25 @@ spawn_rollback_task_state() {  # <detail> [preserve-endpoint]
             fi
             i=$((i + 1))
           done
+          if [ "$endpoint_ready" -ne 1 ]; then
+            endpoint_state=$(fm_backend_agent_state "$BACKEND" "$T")
+            if [ "$endpoint_state" = dead ]; then
+              endpoint_ready=1
+            else
+              fm_backend_kill "$BACKEND" "$T" 2>/dev/null || true
+              if fm_backend_endpoint_confirmed_gone "$BACKEND" "$T"; then
+                i=0
+                while [ "$i" -lt 3 ]; do
+                  if fm_backend_tmux_create_task "$SES" "$W" "$WT" >/dev/null \
+                     && [ "$(fm_backend_agent_state "$BACKEND" "$T")" = dead ]; then
+                    endpoint_ready=1
+                    break
+                  fi
+                  i=$((i + 1))
+                done
+              fi
+            fi
+          fi
           [ "$endpoint_ready" -eq 1 ] || return 1
           ;;
         herdr)
@@ -2305,8 +2338,8 @@ spawn_rollback_task_state() {  # <detail> [preserve-endpoint]
           out=$(fm_backend_herdr_cli "$HERDR_SES" tab list \
             --workspace "$HERDR_WORKSPACE_ID" 2>/dev/null) || return 1
           before_tabs=$(printf '%s' "$out" | jq -c \
-            'if (.result.tabs | type) == "array" then \
-              [.result.tabs[].tab_id] \
+            --arg label "$W" 'if (.result.tabs | type) == "array" then \
+              [.result.tabs[] | select(.label == $label) | .tab_id] \
             else error("missing result.tabs") end' 2>/dev/null) || return 1
           out=$(fm_backend_herdr_cli "$HERDR_SES" tab create \
             --workspace "$HERDR_WORKSPACE_ID" --cwd "$WT" --label "$W" --no-focus 2>/dev/null) \
@@ -2317,8 +2350,8 @@ spawn_rollback_task_state() {  # <detail> [preserve-endpoint]
             out=$(fm_backend_herdr_cli "$HERDR_SES" tab list \
               --workspace "$HERDR_WORKSPACE_ID" 2>/dev/null) || return 1
             after_tabs=$(printf '%s' "$out" | jq -c \
-              'if (.result.tabs | type) == "array" then \
-                [.result.tabs[].tab_id] \
+              --arg label "$W" 'if (.result.tabs | type) == "array" then \
+                [.result.tabs[] | select(.label == $label) | .tab_id] \
               else error("missing result.tabs") end' 2>/dev/null) || return 1
             new_tab=$(jq -nr --argjson before "$before_tabs" --argjson after "$after_tabs" \
               '$after - $before | if length == 1 then .[0] else empty end')
@@ -2363,9 +2396,10 @@ spawn_rollback_task_state() {  # <detail> [preserve-endpoint]
           fi
           if ! meta_lock=$(fm_meta_lock_path "$STATE/$ID.meta"); then
             if [ "$journal_updated" -eq 1 ]; then
-              fm_backend_herdr_projection_journal_replace_endpoint \
-                "$journal" "$ID" "$new_tab" "$new_pane" "$HERDR_TAB_ID" "$HERDR_PANE_ID" \
-                || true
+              if ! fm_backend_herdr_projection_journal_replace_endpoint \
+                "$journal" "$ID" "$new_tab" "$new_pane" "$HERDR_TAB_ID" "$HERDR_PANE_ID"; then
+                return 1
+              fi
             fi
             fm_backend_kill "$BACKEND" "$new_target" 2>/dev/null || true
             fm_backend_endpoint_confirmed_gone "$BACKEND" "$new_target" || return 1
@@ -2373,17 +2407,20 @@ spawn_rollback_task_state() {  # <detail> [preserve-endpoint]
           fi
           fm_lock_acquire_wait "$meta_lock"
           meta_tmp="$STATE/.$ID.meta.endpoint.${BASHPID:-$$}"
-          if ! awk -F= '$1 != "window" && $1 != "herdr_tab_id" && $1 != "herdr_pane_id"' \
+          if ! awk -F= '$1 != "window" && $1 != "herdr_tab_id" \
+              && $1 != "herdr_pane_id" && $1 != "herdr_cleanup_endpoint"' \
               "$STATE/$ID.meta" > "$meta_tmp" \
              || ! printf 'window=%s\nherdr_tab_id=%s\nherdr_pane_id=%s\n' \
                "$new_target" "$new_tab" "$new_pane" >> "$meta_tmp" \
+             || ! printf 'herdr_cleanup_endpoint=%s\n' "$old_target" >> "$meta_tmp" \
              || ! mv -f "$meta_tmp" "$STATE/$ID.meta"; then
             rm -f "$meta_tmp" 2>/dev/null || true
             fm_lock_release "$meta_lock" || true
             if [ "$journal_updated" -eq 1 ]; then
-              fm_backend_herdr_projection_journal_replace_endpoint \
-                "$journal" "$ID" "$new_tab" "$new_pane" "$HERDR_TAB_ID" "$HERDR_PANE_ID" \
-                || true
+              if ! fm_backend_herdr_projection_journal_replace_endpoint \
+                "$journal" "$ID" "$new_tab" "$new_pane" "$HERDR_TAB_ID" "$HERDR_PANE_ID"; then
+                return 1
+              fi
             fi
             fm_backend_kill "$BACKEND" "$new_target" 2>/dev/null || true
             fm_backend_endpoint_confirmed_gone "$BACKEND" "$new_target" || return 1
@@ -2396,6 +2433,16 @@ spawn_rollback_task_state() {  # <detail> [preserve-endpoint]
           HERDR_PANE_ID=$new_pane
           fm_backend_kill "$BACKEND" "$old_target" 2>/dev/null || true
           fm_backend_endpoint_confirmed_gone "$BACKEND" "$old_target" || return 1
+          meta_lock=$(fm_meta_lock_path "$STATE/$ID.meta") || return 1
+          fm_lock_acquire_wait "$meta_lock"
+          meta_tmp="$STATE/.$ID.meta.cleanup.${BASHPID:-$$}"
+          if ! awk -F= '$1 != "herdr_cleanup_endpoint"' "$STATE/$ID.meta" > "$meta_tmp" \
+             || ! mv -f "$meta_tmp" "$STATE/$ID.meta"; then
+            rm -f "$meta_tmp" 2>/dev/null || true
+            fm_lock_release "$meta_lock" || true
+            return 1
+          fi
+          fm_lock_release "$meta_lock" || true
           ;;
         *) return 1 ;;
       esac
@@ -2907,7 +2954,7 @@ fi
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id herdr_cleanup_endpoint zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
