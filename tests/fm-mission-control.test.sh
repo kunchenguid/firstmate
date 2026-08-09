@@ -160,6 +160,138 @@ run().then(() => {
 JS
 }
 
+# The labelled decision context is deliberately a SIBLING of the row rather than
+# part of it, because the row title is wrapped in a link whenever the decision has
+# one and reading the recommendation must never navigate away. Markup alone cannot
+# prove that, so this measures the real DOM: the context must not be inside any
+# anchor, and it must not push the board sideways at phone width.
+assert_decision_context_placement() {  # <html>
+  local html=$1 chrome
+  command -v node >/dev/null 2>&1 || {
+    printf 'skip: node not found for rendered decision-context placement assertion\n'
+    return 0
+  }
+  chrome=$(find_chrome) || {
+    printf 'skip: Chrome or Chromium not found for rendered decision-context placement assertion\n'
+    return 0
+  }
+
+  node - "$chrome" "$html" <<'JS'
+const { spawn } = require("node:child_process");
+const { pathToFileURL } = require("node:url");
+
+const [chromePath, htmlPath] = process.argv.slice(2);
+const chrome = spawn(chromePath, [
+  "--headless=new",
+  "--disable-gpu",
+  "--no-sandbox",
+  "--remote-debugging-pipe",
+  `--user-data-dir=${htmlPath}.ctx-profile`,
+], { stdio: ["ignore", "ignore", "ignore", "pipe", "pipe"] });
+let buffer = "";
+let nextId = 0;
+let finished = false;
+const pending = new Map();
+
+function finish(code, message) {
+  if (finished) return;
+  finished = true;
+  if (message) process.stderr.write(`${message}\n`);
+  chrome.kill();
+  process.exitCode = code;
+}
+
+chrome.on("error", (error) => finish(1, error.message));
+chrome.stdio[3].on("error", (error) => finish(1, error.message));
+chrome.stdio[4].on("error", (error) => finish(1, error.message));
+chrome.stdio[4].on("data", (chunk) => {
+  buffer += chunk;
+  let boundary;
+  while ((boundary = buffer.indexOf("\0")) >= 0) {
+    const raw = buffer.slice(0, boundary);
+    buffer = buffer.slice(boundary + 1);
+    if (!raw) continue;
+    const message = JSON.parse(raw);
+    const resolve = pending.get(message.id);
+    if (resolve) {
+      pending.delete(message.id);
+      resolve(message);
+    }
+  }
+});
+
+function send(method, params = {}, sessionId) {
+  return new Promise((resolve) => {
+    const id = ++nextId;
+    pending.set(id, resolve);
+    chrome.stdio[3].write(`${JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) })}\0`);
+  });
+}
+
+async function measure(sessionId, width, height, mobile) {
+  await send("Emulation.setDeviceMetricsOverride", {
+    width, height, deviceScaleFactor: 1, mobile,
+  }, sessionId);
+  await send("Page.navigate", { url: pathToFileURL(htmlPath).href }, sessionId);
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const ready = await send("Runtime.evaluate", {
+      expression: "document.readyState", returnByValue: true,
+    }, sessionId);
+    if (ready.result.result.value === "complete") break;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  const evaluated = await send("Runtime.evaluate", {
+    returnByValue: true,
+    expression: `(() => {
+      const blocks = [...document.querySelectorAll(".need-ctx")];
+      const values = [...document.querySelectorAll(".ctx-v")];
+      const root = document.documentElement;
+      return {
+        blocks: blocks.length,
+        insideAnchor: blocks.some((block) => block.closest("a") !== null),
+        overflowing: values.some((value) => {
+          const rect = value.getBoundingClientRect();
+          return rect.left < 0 || rect.right > root.clientWidth + 0.5;
+        }),
+        documentWidth: root.scrollWidth,
+        viewportWidth: root.clientWidth,
+      };
+    })()`,
+  }, sessionId);
+  return evaluated.result.result.value;
+}
+
+async function run() {
+  const created = await send("Target.createTarget", { url: "about:blank" });
+  const attached = await send("Target.attachToTarget", {
+    targetId: created.result.targetId, flatten: true,
+  });
+  const sessionId = attached.result.sessionId;
+  for (const [width, height, mobile] of [[1280, 1000, false], [390, 844, true]]) {
+    const seen = await measure(sessionId, width, height, mobile);
+    if (seen.blocks === 0) {
+      throw new Error(`no decision context rendered at ${width}px: ${JSON.stringify(seen)}`);
+    }
+    if (seen.insideAnchor) {
+      throw new Error(`decision context rendered inside the row link at ${width}px, so reading it navigates away`);
+    }
+    if (seen.overflowing || seen.documentWidth > seen.viewportWidth) {
+      throw new Error(`decision context overflowed at ${width}px: ${JSON.stringify(seen)}`);
+    }
+  }
+}
+
+const timeout = setTimeout(() => finish(1, "timed out measuring the rendered decision context"), 90000);
+run().then(() => {
+  clearTimeout(timeout);
+  finish(0);
+}).catch((error) => {
+  clearTimeout(timeout);
+  finish(1, error.message);
+});
+JS
+}
+
 # 2026-01-02T15:00:00Z, with TZ=UTC pinned by every case that renders a time.
 NOW_EPOCH=1767366000
 TODAY_0905=1767344700    # 2026-01-02T09:05:00Z
@@ -886,6 +1018,89 @@ test_missing_backlog_is_disclosed_as_unavailable() {
 # in the quiet shelf. Dropping it from the list while still counting it, or
 # counting it while still listing it, are separate failures, so both are pinned
 # to literal numbers rather than to the absence of the title alone.
+# A decision filed with separate context fields must reach the captain as labelled
+# sections, and a decision filed before that schema existed must reach them exactly
+# as it always did. Both halves render from one real fixture home so the split is
+# proven end to end rather than assumed from the renderer alone.
+test_structured_decision_context_renders_as_labelled_sections() {
+  local home fakebin board snap linked
+  home=$(make_home decision-context-render)
+  make_clone "$home" alpha "$TODAY_0905"
+  printf -- '- alpha [direct-PR] - Alpha service\n' > "$home/data/projects.md"
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+- [ ] alpha-route - Choose the alpha rollout route (repo: alpha) (kind: captain) (hold: Two routes, one call) (hold-kind: captain)
+  Origin: alpha-review
+  Decision key: route
+  State: awaiting captain decision.
+  Why now: The alpha launch window closes on Friday and both routes need DNS lead time.
+  What it affects: The alpha checkout redirect and every saved bookmark.
+  Recommendation: Take the tailnet route; it is reversible within a day.
+  No decision surface: Both routes are configuration only, so there is nothing built to compare.
+- [ ] alpha-legacy - Approve the alpha vendor swap (repo: alpha) (kind: captain) (hold: The old vendor stops publishing next month) (hold-kind: captain)
+
+## Done
+EOF
+  fakebin=$(make_fakebin "$home")
+  board=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_MISSION_CONTROL_NOW_EPOCH="$NOW_EPOCH" \
+    "$BOARD" --no-quota) || fail "a home with a structured decision must render"
+
+  # Each dimension is its own labelled row, which is the whole reason for storing
+  # them apart: the captain finds the recommendation without reading for it.
+  assert_grep '<span class="ctx-l">Why now</span><span class="ctx-v">The alpha launch window closes on Friday and both routes need DNS lead time.</span>' \
+    "$board" "the reason a decision is needed now must be its own labelled section"
+  assert_grep '<span class="ctx-l">What it affects</span><span class="ctx-v">The alpha checkout redirect and every saved bookmark.</span>' \
+    "$board" "what a decision affects must be its own labelled section"
+  assert_grep '<span class="ctx-l">Recommendation</span><span class="ctx-v">Take the tailnet route; it is reversible within a day.</span>' \
+    "$board" "the recommendation must be its own labelled section"
+
+  # The conscious "nothing built applies" answer is shown too, because a decision
+  # nobody prepared a surface for and one where none applies are not the same.
+  assert_grep '<span class="ctx-l">No built surface</span><span class="ctx-v">Both routes are configuration only, so there is nothing built to compare.</span>' \
+    "$board" "an explicit no-built-surface acknowledgment must reach the captain"
+
+  # The legacy half. One structured block on a board with two decisions is what
+  # proves the old-style decision was left alone rather than coincidentally bare.
+  assert_grep 'Approve the alpha vendor swap' "$board" \
+    "a decision filed before the structured schema must still reach the captain"
+  assert_grep '<span class="hint">The old vendor stops publishing next month</span>' \
+    "$board" "an old-style decision must still render its plain reason exactly as before"
+  [ "$(grep -o 'class="need-ctx"' "$board" | wc -l | tr -d ' ')" = 1 ] \
+    || fail "an old-style plain-reason decision must render no labelled context block"
+  assert_grep '<div class="n">2</div><div class="l">Awaiting you</div>' \
+    "$board" "both decisions must still be counted"
+
+  # The placement hazard only exists for a decision that HAS a link, because that
+  # is the only row whose title is wrapped in an anchor. A decision with nothing to
+  # link renders no anchor at all, so asserting placement against one would pass no
+  # matter where the context sat. This second board carries a recorded PR so the
+  # anchor is really on the page when the context is measured against it.
+  snap=$TMP_ROOT/decision-context-linked.json
+  linked=$TMP_ROOT/decision-context-linked.html
+  snapshot_json '[{
+    "state":"queued","id":"alpha-linked","structured":true,"kind":"captain",
+    "captain_actionable":true,"captain_deferred":false,"unresolved_blocker_ids":[],
+    "title":"Choose the linked alpha route","hold_reason":"Two routes, one call",
+    "decision_why":"The alpha launch window closes on Friday.",
+    "decision_affects":"The alpha checkout redirect and every saved bookmark.",
+    "decision_recommendation":"Take the tailnet route; it is reversible within a day.",
+    "pr_url":"https://github.com/example/alpha/pull/12","repo":"alpha",
+    "completion":{"date":null}
+  }]' '[]' > "$snap"
+  "$BOARD" --snapshot "$snap" --no-quota --out "$linked" >/dev/null \
+    || fail "a linked structured decision must render"
+  assert_grep '<a class="need-main" href="https://github.com/example/alpha/pull/12">' "$linked" \
+    "the linked fixture must really wrap its row title in an anchor"
+  assert_grep '</a></div><div class="need-ctx">' "$linked" \
+    "the context block must start only after the row link and the row itself have closed"
+
+  assert_decision_context_placement "$linked" \
+    || fail "the rendered context must sit outside the row link and fit both widths"
+  pass "structured decision context renders as labelled sections and leaves old-style decisions unchanged"
+}
+
 test_deferred_decision_leaves_the_primary_view() {
   local home fakebin board
   home=$(make_home deferred)
@@ -1300,7 +1515,11 @@ test_secondmate_captain_decision_is_surfaced() {
     "decisions_open": [{
       "id": "brain-cost", "key": "brain-cost", "verb": "captain-hold",
       "summary": "Approve the paid notification tier",
-      "reason": "The two-way leg needs the paid tier"
+      "reason": "The two-way leg needs the paid tier",
+      "why": "The free tier stops accepting two-way replies next month.",
+      "affects": "Every reply that comes back from a notification.",
+      "recommendation": "Take the paid tier; the one-way fallback loses replies.",
+      "no_surface": "There is nothing to look at; the difference is in the reply path."
     }],
     "holds": [{
       "id": "brain-cost", "source": "backlog", "unresolved_blocker_ids": [],
@@ -1316,6 +1535,13 @@ test_secondmate_captain_decision_is_surfaced() {
     "a captain decision held inside a secondmate home must reach the board"
   assert_grep 'href="#secondmate:brain" data-project-anchor="secondmate:brain" class="tag">brain</a>' "$board" \
     "the owning home must link to its secondmate card"
+  # The bar applies to decisions filed in any home, and the secondmate projection
+  # reaches the board through different key names than the main-home one, so the
+  # cross-home half needs its own assertion rather than inheriting the main one.
+  assert_grep '<span class="ctx-l">Recommendation</span><span class="ctx-v">Take the paid tier; the one-way fallback loses replies.</span>' \
+    "$board" "a secondmate decision must carry its structured context to the board"
+  assert_grep '<span class="ctx-l">No built surface</span><span class="ctx-v">There is nothing to look at; the difference is in the reply path.</span>' \
+    "$board" "a secondmate no-built-surface acknowledgment must reach the captain"
   assert_grep '<div class="n">1</div><div class="l">Awaiting you</div>' "$board" \
     "a secondmate decision must be counted as waiting"
   assert_grep 'Routed work is waiting for your decision.' "$board" \
@@ -2687,6 +2913,7 @@ test_absent_sources_render_empty_sections
 test_recent_autonomous_actions_are_bounded_and_appendable
 test_hostile_text_is_escaped
 test_missing_backlog_is_disclosed_as_unavailable
+test_structured_decision_context_renders_as_labelled_sections
 test_deferred_decision_leaves_the_primary_view
 test_deferred_shelf_reaches_a_secondmate_and_discloses_its_bound
 test_navigation_tabs_group_the_board

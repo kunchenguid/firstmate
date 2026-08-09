@@ -638,6 +638,10 @@ def yolo_for($repo): ($registry_by_name[$repo // ""].yolo // false);
   detail: (.hold_reason // .blocked_reason // ""),
   question: (.decision_question // null),
   decision_url: (.decision_url // null),
+  why: (.decision_why // null),
+  affects: (.decision_affects // null),
+  recommendation: (.decision_recommendation // null),
+  no_surface: (.decision_no_surface // null),
   repo: (.repo // "" | short_repo),
   link: (.pr_url // .report_path // null),
   # A main-home captain decision is always a backlog hold, so both controls
@@ -680,6 +684,10 @@ def yolo_for($repo): ($registry_by_name[$repo // ""].yolo // false);
     detail: (.reason // ""),
     question: (.question // (if (.source // "") == "status" then (.summary // null) else null end)),
     decision_url: (.decision_url // null),
+    why: (.why // null),
+    affects: (.affects // null),
+    recommendation: (.recommendation // null),
+    no_surface: (.no_surface // null),
     repo: "",
     link: null,
     ctl: (if $did == "" and $dkey == "" then null
@@ -1218,10 +1226,46 @@ def controls_for:
     + "</div>"
   end;
 
+# The decision context a filed decision now carries as separate fields. Each
+# dimension is a labelled row of its own, because the whole point of storing them
+# apart is that the captain can find the recommendation without reading a
+# paragraph to look for it. A decision filed before this schema existed has none
+# of these fields and renders exactly as it always has, from its reason alone.
+#
+# This block sits OUTSIDE the row anchor deliberately. The row title is wrapped in
+# a link whenever the decision has one, and putting three lines of readable
+# context inside that link would make reading or selecting the recommendation
+# navigate away instead - worst on a phone, where the tap target is the whole row.
+def ctx_row($label; $value):
+  (($value // "") | if type == "string" then gsub("^[[:space:]]+|[[:space:]]+$"; "") else "" end) as $v |
+  if $v == "" then ""
+  else (@html "<div class=\"ctx-r\"><span class=\"ctx-l\">\($label)</span><span class=\"ctx-v\">\($v)</span></div>")
+  end;
+
+def need_ctx:
+  . as $w |
+  (ctx_row("Why now"; $w.why)
+   + ctx_row("What it affects"; $w.affects)
+   + ctx_row("Recommendation"; $w.recommendation)) as $rows |
+  # The conscious "no built surface" choice is shown to the captain too. It is the
+  # difference between a decision nobody prepared a surface for and one where the
+  # filer established that none applies, and only the second is ready to answer.
+  ((($w.no_surface // "") | if type == "string" then gsub("^[[:space:]]+|[[:space:]]+$"; "") else "" end)) as $none |
+  if $rows == "" and $none == "" then ""
+  else
+    "<div class=\"need-ctx\">"
+    + $rows
+    + (if $none == "" then ""
+       else (@html "<div class=\"ctx-r ctx-none\"><span class=\"ctx-l\">No built surface</span><span class=\"ctx-v\">\($none)</span></div>")
+       end)
+    + "</div>"
+  end;
+
 def need_item:
   . as $w |
   (@html "<div class=\"need-wrap\" data-scroll-anchor=\"call:\($w.home // "main"):\($w.id // ""):\($w.ctl.key // ""):\($w.kind // "")\">")
   + ($w | need_row)
+  + ($w | need_ctx)
   + ($w | controls_for)
   + "</div>";
 
@@ -1777,6 +1821,15 @@ section{margin-bottom:38px;}
 .need .url{display:block;color:var(--faint);font-family:var(--mono);font-size:11.5px;margin-top:4px;overflow-wrap:anywhere;}
 .need .go{flex:none;color:var(--faint);font-size:18px;width:10px;text-align:right;}
 a.need-main:hover .ask{color:var(--amber);}
+/* The left padding and the label column repeat the .need padding + band + gap and
+   the .tag width + gap, so a label lands in the project-tag column and its value
+   lands exactly under the decision title rather than near it. */
+.need-ctx{padding:0 22px 15px 39px;display:grid;gap:7px;}
+.ctx-r{display:grid;grid-template-columns:132px minmax(0,1fr);gap:14px;align-items:baseline;}
+.ctx-l{font-size:11px;font-weight:660;letter-spacing:.04em;text-transform:uppercase;
+  color:var(--faint);}
+.ctx-v{font-size:13px;line-height:1.5;color:var(--muted);overflow-wrap:anywhere;}
+.ctx-none .ctx-v{color:var(--faint);font-style:italic;}
 .decision-aid{flex:none;color:var(--amber);background:var(--amber-soft);border:1px solid #ead7ae;
   border-radius:999px;padding:7px 12px;font-size:12px;font-weight:650;white-space:nowrap;}
 .decision-aid:hover{background:#f8eccf;border-color:#dfc58e;}
@@ -1974,6 +2027,10 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
   .tag{width:auto}
   .decision-aid{margin-left:13px;min-height:44px;display:inline-flex;align-items:center;white-space:normal}
   .need .go{display:none}
+  /* A 132px label column leaves too little for the value at phone widths, so the
+     label sits above what it labels rather than squeezing it to a few words. */
+  .need-ctx{padding:0 16px 14px 29px;gap:9px}
+  .ctx-r{grid-template-columns:minmax(0,1fr);gap:1px}
   .ship{padding:12px 16px;align-items:flex-start;flex-wrap:wrap}
   .ship .what{flex:1 1 auto}
   .ship .who{margin-left:0;padding-left:0;flex:1 0 100%}

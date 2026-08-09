@@ -5,15 +5,36 @@ This document records the deterministic mechanism, structured surfaces, and priv
 
 ## Mechanism
 
-`bin/fm-decision-hold.sh` is the only lifecycle command for an investigation or visual review's unresolved captain decisions.
+`bin/fm-decision-hold.sh` is the only filing command for captain decisions, whether an investigation or visual review discovered them or they gate a work item that already exists.
 The command runs tasks-axi in the active `FM_HOME`, so the existing backlog remains the only durable work database and a secondmate-owned decision stays in the secondmate home.
 It never reads report bodies, review artifacts, terminal output, or chat.
 
 The `hold` subcommand maps an originating work id and stable decision key to `<origin-id>-decision-<decision-key>`.
 It creates a kind `captain` backlog item when absent and invokes `tasks-axi hold <id> --reason <reason> --kind captain` on every retry.
-It can record an exact question and an HTTPS decision-aid URL as structured body fields without probing or rewriting the destination.
 The `link` subcommand is the supported HTTPS-only backfill for an existing active hold and preserves every other body field.
 It rejects an identity collision, a changed title, attempts to reopen an already resolved identity, malformed links, and non-HTTPS links.
+
+## Structured decision context
+
+A captain decision records its context as separate structured body fields rather than as one free-text hold reason: an optional `Decision question`, a required `Why now`, `What it affects`, and `Recommendation`, and exactly one of `Decision URL` or `No decision surface`.
+The structure makes the required context dimensions and conscious surface choice enforceable.
+A single reason string lets a dimension be skipped silently, and an optional link flag lets the surface question be forgotten, which is what produced decisions that could not be acted on without re-reading their investigation.
+Prose quality is deliberately not machine-checked, because clarity and jargon-freeness are semantic judgements a script cannot make; the skill owns them, and `data/captain-shared.md` states the bar they are judged against.
+
+Each dimension is required only when the item does not already record it.
+A first filing therefore cannot omit one, while the idempotent retry that `hold` is designed for supplies none and preserves what is stored.
+The two surface fields are one choice, so recording either clears the other and an item can never claim a built surface and no built surface at once; `link` clears a recorded `No decision surface` for the same reason.
+The schema is additive: an old-style hold that carries only a plain hold reason keeps that reason and renders unchanged, while a hold that already records the earlier optional question or URL keeps those fields too.
+`resolve`, `complete`, `verify`, `retract`, and `link` are untouched on such a hold.
+Re-arming one with `hold` does require the full bar, because the presence check reads the stored body and finds nothing there; that is the going-forward contract rather than a compatibility gap, and it converts an old hold into a complete one at the moment it is next touched.
+Structured context currently reaches the captain through Mission Control only.
+`bin/fm-bearings-snapshot.sh` and the session-start digest still surface the hold reason alone, so a decision relayed from Bearings carries the reason and the board carries the context.
+
+The `hold-item` subcommand applies that same bar to a backlog item that already exists, under whatever kind the item carries.
+It is the supported replacement for filing a captain decision with a bare `tasks-axi hold <id> --kind captain`, which reached the captain without passing any bar.
+It never creates the item, never rewrites its title, kind, or repo, and never touches the `decision_keys` inventory that `complete`, `verify`, and scout teardown read.
+It requires a queued item because a captain hold leaves an in-flight row in flight, where the snapshot classifies it as work under way rather than as an actionable decision, so a decision filed there would never reach the captain.
+Setting a decision aside and bringing it back stay outside this bar because they restore stored text rather than file a decision; `bin/fm-mission-control.sh` owns both, including the reason-rewriting hazard.
 
 The `complete` subcommand unions the reviewed keys into `decision_keys=` and appends `decisions_reviewed=1` while originating task metadata is live.
 A post-teardown visual review can complete against the surviving report and durable holds without recreating volatile task metadata.
@@ -49,7 +70,9 @@ A failed intermediate step leaves the hold open.
 ## Structured read surfaces
 
 `bin/fm-fleet-snapshot.sh` parses canonical tasks-axi `(hold: ...)` and `(hold-kind: captain)` metadata alongside existing backlog fields.
-It also parses the decision question and decision URL written by `bin/fm-decision-hold.sh`, then carries them through the main-home record and secondmate-home decision projection.
+It also parses every structured decision-context field written by `bin/fm-decision-hold.sh`, then carries them through the main-home record and secondmate-home decision projection.
+It reads them for any row whose hold kind is `captain` or `parked`, not only a row whose own kind is `captain`, because a captain hold can gate an item of any kind and setting one aside changes only its hold kind.
+`bin/fm-mission-control.sh` renders the fields it finds as labelled sections on the decision card and falls back to the plain hold reason for a decision that carries none.
 It resolves every repeated `blocked-by:` edge against structured Done records, keeps missing blockers unresolved, and classifies any unblocked row with hold kind `captain` and a non-empty hold reason as actionable regardless of the row's own kind.
 Its secondmate-home summary classifies an actionable captain hold as `captain_decision` and preserves blocked captain holds as queued work in the owning home.
 
@@ -65,6 +88,7 @@ Plural blocker-readiness and mixed-home projection verification date: 2026-07-22
 Archived resolved decision lookup verification date: 2026-08-05.
 Duplicate decision key retraction verification date: 2026-08-08.
 Decision-context field and HTTPS-link verification date: 2026-08-08.
+Structured decision context and one filing bar verification date: 2026-08-09.
 
 The focused end-to-end regression uses only synthetic `sample` identities and decision text.
 It begins with a completed investigation and visual review whose genuine unresolved choice exists only in the report.
@@ -187,4 +211,57 @@ fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
 
 $ bin/fm-doc-audience-check.sh
 fm-doc-audience-check: ok surfaces=70 local_links=217
+```
+
+### Structured decision context and one filing bar
+
+Verification date: 2026-08-09, against tasks-axi 0.2.4, ShellCheck 0.11.0, and Chrome for the rendered assertions.
+
+Two cases are added to `tests/fm-decision-hold-lifecycle.test.sh`; `tests/fm-mission-control.test.sh` gains one case and extends its existing cross-home decision case. All use synthetic `sample`, `alpha`, and `brain` identities.
+
+The schema case asserts that each dimension refuses on its own naming the flag it wants, that a refusal creates no partial backlog identity, that the surface choice refuses both when silent and when both answers are given, that a complete filing stores every dimension as a separate snapshot field beside an unchanged `hold_reason`, that an idempotent retry supplying nothing preserves the stored context rather than demanding or blanking it, and that recording a surface either way clears the opposite claim so an item never holds both.
+The `hold-item` case asserts that the ad-hoc path now refuses a bare filing, refuses an absent item, refuses an in-flight item whose captain hold could never be classified as actionable, gates a queued item of another kind without rewriting its title or kind, reaches the snapshot as an actionable decision carrying its context, and leaves the `decision_keys` inventory and originating-task metadata untouched.
+The render case builds one fixture home holding a structured and an old-style decision, asserts each labelled section by its exact rendered markup, and pins the rendered context-block count to one so leaving the old-style decision alone is proven rather than inferred.
+It then renders a SECOND board whose structured decision carries a recorded PR, because only a decision with a link has its row title wrapped in an anchor, and a placement assertion against a decision with nothing to link would pass wherever the context sat.
+That board is measured in headless Chrome at 1280px and 390px to assert the context block is outside the row link and overflows neither width; the measurement self-skips when Chrome or Node is absent, so CI without them still runs the markup half.
+The existing cross-home case is extended to assert the same labelled sections on a decision projected from a secondmate home, because that path reaches the renderer through different key names than the main-home one and the bar applies to decisions filed in any home.
+
+Both placement guards were shown to bite by rebuilding the renderer with the context emitted inside the row anchor.
+The rendered measurement reports `decision context rendered inside the row link at 1280px, so reading it navigates away` and fails the case, which the markup assertion alone did not catch in that build because a second correctly placed copy still satisfied the string match.
+That is the reason the rendered measurement exists alongside the markup assertion rather than instead of it.
+
+Non-vacuity was established by reverting only `bin/fm-decision-hold.sh`, `bin/fm-fleet-snapshot.sh`, and `bin/fm-mission-control.sh` while keeping the new cases.
+Both new lifecycle cases then fail at their first assertion, `not ok - a decision with no stated reason for needing a call was filed`, and the render case fails at `not ok - the reason a decision is needed now must be its own labelled section`.
+The fourteen pre-existing lifecycle cases were updated to pass one standard synthetic context set, because a first filing must now address every dimension; that change is the contract, not a workaround.
+
+The suites covering the surfaces this change touches were run and pass: `tests/fm-fleet-snapshot-view.test.sh`, `tests/fm-bearings-snapshot.test.sh`, `tests/fm-brief.test.sh`, `tests/fm-documentation-audiences.test.sh`, `tests/fm-wake-drain-open-decisions.test.sh`, `tests/fm-test-run.test.sh`, and `tests/fm-test-isolation-proof.test.sh`.
+`tests/fm-teardown.test.sh` again reports only the pre-existing environment-dependent `herdr-preflight-missing-adapter` failure; stashing every changed file reproduces the identical single failure before and after.
+
+```text
+$ bash tests/fm-decision-hold-lifecycle.test.sh
+ok - report-only unresolved decision is reproduced and completion refuses before loss
+ok - non-forced scout teardown always requires durable inventory verification
+ok - an archived resolved captain decision satisfies the completion gate
+ok - only a genuinely resolved archived captain decision satisfies the gate
+ok - captain holds are idempotent, distinct, teardown-safe, Bearings-visible, and durably routed before close
+ok - exact questions and private HTTPS links use one supported hold interface across homes
+ok - each decision dimension is separately required, stored, and retrievable
+ok - an existing work item of any kind is gated under the same due-diligence bar
+ok - completion and verification validate origins before constructing paths
+ok - ended visual review follows the same decision-hold completion owner
+ok - resolved findings and decision-like prose do not create false holds
+ok - terminal single-owner stale status decisions do not block empty inventory
+ok - main-home and secondmate-home captain holds remain correctly routed
+ok - resolve matches first/middle/last in quoted blocked_by and rejects a genuinely absent id
+ok - a de-duplicated decision key is retractable and no longer strands teardown
+
+$ bash tests/fm-mission-control.test.sh
+ok - structured decision context renders as labelled sections and leaves old-style decisions unchanged
+ok - a captain decision inside a secondmate home is surfaced and counted
+
+$ bin/fm-lint.sh
+fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
+
+$ bin/fm-doc-audience-check.sh
+fm-doc-audience-check: ok surfaces=70 local_links=222
 ```

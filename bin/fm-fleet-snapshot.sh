@@ -16,9 +16,15 @@
 #     Canonical tasks-axi rows are structured; free-form non-empty lines in
 #     those sections are preserved as unstructured records.
 #     Structured rows preserve captain-hold metadata such as hold_kind and
-#     hold_reason when tasks-axi emits it. A captain hold created through
-#     fm-decision-hold may also carry decision_question and decision_url in its
-#     structured body; the URL is private data and is never fetched or rewritten.
+#     hold_reason when tasks-axi emits it. A captain hold filed through
+#     fm-decision-hold also carries its decision context as separate structured
+#     body fields: decision_question, decision_why, decision_affects,
+#     decision_recommendation, and exactly one of decision_url or
+#     decision_no_surface. Each is null on a hold filed before that schema
+#     existed, which is what keeps an older hold rendering from hold_reason alone.
+#     They are read for any row whose HOLD kind is captain or parked, not only a
+#     row whose own kind is captain, because a captain hold can gate any item.
+#     The URL is private data and is never fetched or rewritten.
 #     They also carry normalized current_role,
 #     requires_child_metadata, blocked_by_ids, unresolved_blocker_ids,
 #     captain_actionable, and captain_deferred fields. Repeated blocker tokens
@@ -443,9 +449,18 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
         if (.body_lines | length) > 0 then
           .body_excerpt = ((.body_lines | join(" "))[:240])
         else . end
-        | if .structured and .kind == "captain" then
+        # A captain hold can gate a row of any kind, so the decision context is
+        # read from the HOLD kind rather than from the kind the item carries
+        # itself. A parked row is included because setting a decision aside
+        # changes only its hold kind, and bringing it back must still find its
+        # context parsed.
+        | if .structured and (.kind == "captain" or .hold_kind == "captain" or .hold_kind == "parked") then
             .decision_question = body_field(.body_lines; "Decision question")
             | .decision_url = body_field(.body_lines; "Decision URL")
+            | .decision_why = body_field(.body_lines; "Why now")
+            | .decision_affects = body_field(.body_lines; "What it affects")
+            | .decision_recommendation = body_field(.body_lines; "Recommendation")
+            | .decision_no_surface = body_field(.body_lines; "No decision surface")
           else . end)
     | .records as $records
     | (reduce ($records[] | select(.structured)) as $record ({};
@@ -756,6 +771,10 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
          | {id,key:.id,verb:"captain-hold",summary:(.title | trunc(160)),
             question:((.decision_question // null) | if . == null then null else trunc(2000) end),
             decision_url:((.decision_url // null) | if . == null then null else trunc(2000) end),
+            why:((.decision_why // null) | if . == null then null else trunc(2000) end),
+            affects:((.decision_affects // null) | if . == null then null else trunc(2000) end),
+            recommendation:((.decision_recommendation // null) | if . == null then null else trunc(2000) end),
+            no_surface:((.decision_no_surface // null) | if . == null then null else trunc(2000) end),
             reason:(.hold_reason | trunc(160)),source:"backlog"} ]) as $captain_holds_all
     | ([ $backlog.records[]? | select(.state == "done" and .structured and .kind != "captain")
          | {id:(.id | trunc(120)),title:(.title | trunc(120)),
@@ -864,6 +883,10 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
           hold_kind:((.hold_kind // null) | if . == null then null else trunc(40) end),
           decision_question:((.decision_question // null) | if . == null then null else trunc(2000) end),
           decision_url:((.decision_url // null) | if . == null then null else trunc(2000) end),
+          decision_why:((.decision_why // null) | if . == null then null else trunc(2000) end),
+          decision_affects:((.decision_affects // null) | if . == null then null else trunc(2000) end),
+          decision_recommendation:((.decision_recommendation // null) | if . == null then null else trunc(2000) end),
+          decision_no_surface:((.decision_no_surface // null) | if . == null then null else trunc(2000) end),
           captain_actionable:(.captain_actionable // false),
           captain_deferred:(.captain_deferred // false),
           repo:((.repo // null) | if . == null then null else trunc(120) end),

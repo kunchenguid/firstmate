@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# End-to-end tests for durable captain-held decisions discovered by investigations
-# and visual reviews.
+# End-to-end tests for durable captain-held decisions, whether an investigation or
+# visual review discovered them or they were filed against an existing work item.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -11,6 +11,17 @@ TEARDOWN="$ROOT/bin/fm-teardown.sh"
 BEARINGS="$ROOT/bin/fm-bearings-snapshot.sh"
 TMP_ROOT=$(fm_test_tmproot fm-decision-hold)
 TASKS_AXI_BIN=$(command -v tasks-axi || true)
+
+# Filing a captain decision requires each context dimension to be addressed. The
+# cases below are about identity, routing, retraction, and teardown rather than
+# about context, so they pass one standard synthetic set and leave the bar itself
+# to test_decision_context_* below.
+SAMPLE_CONTEXT=(
+  --why "The sample review cannot proceed until this is chosen."
+  --affects "The sample surface named in the report."
+  --recommendation "Take the first sample option."
+  --no-surface "Synthetic sample decision with nothing built to look at."
+)
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 command -v tasks-axi >/dev/null 2>&1 || { echo "skip: tasks-axi not found"; exit 0; }
@@ -145,17 +156,17 @@ EOF
     "failed completion recorded a false completion attestation"
 
   route_hold=$(run_decisions "$home" hold "$id" route \
-    --title "Choose the sample route" --reason "captain route choice pending" --repo sample) \
+    --title "Choose the sample route" --reason "captain route choice pending" --repo sample "${SAMPLE_CONTEXT[@]}") \
     || fail "could not register route hold"
   [ "$route_hold" = "$id-decision-route" ] || fail "route hold identity was not deterministic: $route_hold"
   run_decisions "$home" hold "$id" route \
-    --title "Choose the sample route" --reason "captain route choice pending" --repo sample >/dev/null \
+    --title "Choose the sample route" --reason "captain route choice pending" --repo sample "${SAMPLE_CONTEXT[@]}" >/dev/null \
     || fail "idempotent hold retry failed"
   if run_decisions "$home" complete "$id" route access > "$home/partial-complete.out" 2> "$home/partial-complete.err"; then
     fail "completion succeeded while one of two distinct decisions lacked a hold"
   fi
   access_hold=$(run_decisions "$home" hold "$id" access \
-    --title "Choose the sample access level" --reason "captain access choice pending" --repo sample) \
+    --title "Choose the sample access level" --reason "captain access choice pending" --repo sample "${SAMPLE_CONTEXT[@]}") \
     || fail "could not register access hold"
   [ "$access_hold" = "$id-decision-access" ] || fail "access hold identity was not distinct: $access_hold"
   [ "$(grep -cE "^- \[ \] $route_hold -" "$home/data/backlog.md")" = 1 ] \
@@ -341,7 +352,7 @@ test_visual_review_uses_shared_completion_owner() {
   mkdir -p "$home/.lavish"
   printf '<html><body>Synthetic sample board</body></html>\n' > "$home/.lavish/sample-board.html"
   hold=$(run_decisions "$home" hold "$id" layout \
-    --title "Choose the sample layout" --reason "captain layout choice pending" --repo sample) \
+    --title "Choose the sample layout" --reason "captain layout choice pending" --repo sample "${SAMPLE_CONTEXT[@]}") \
     || fail "post-teardown visual review could not use the shared hold owner"
   run_decisions "$home" complete "$id" layout >/dev/null \
     || fail "post-teardown visual review could not use the shared completion owner"
@@ -434,7 +445,7 @@ EOF
   printf 'done: report and visual review complete\n' > "$mate/state/$origin.status"
   printf '# Sample secondmate review\n\nOne captain choice remains.\n' > "$mate/data/$origin/report.md"
   hold=$(run_decisions "$mate" hold "$origin" release \
-    --title "Choose the sample release" --reason "captain release choice pending" --repo sample) \
+    --title "Choose the sample release" --reason "captain release choice pending" --repo sample "${SAMPLE_CONTEXT[@]}") \
     || fail "secondmate-owned hold creation failed"
   run_decisions "$mate" complete "$origin" release >/dev/null \
     || fail "secondmate-owned completion failed"
@@ -470,16 +481,16 @@ test_resolve_matches_quoted_blocked_by_edges() {
   printf '# Quote edge review\n\nThree edge decisions and one absent control.\n' > "$home/data/$origin/report.md"
 
   hold_first=$(run_decisions "$home" hold "$origin" edge-first \
-    --title "First edge decision" --reason "captain first pending" --repo sample) \
+    --title "First edge decision" --reason "captain first pending" --repo sample "${SAMPLE_CONTEXT[@]}") \
     || fail "could not register first-edge hold"
   hold_mid=$(run_decisions "$home" hold "$origin" edge-mid \
-    --title "Middle edge decision" --reason "captain mid pending" --repo sample) \
+    --title "Middle edge decision" --reason "captain mid pending" --repo sample "${SAMPLE_CONTEXT[@]}") \
     || fail "could not register mid-edge hold"
   hold_last=$(run_decisions "$home" hold "$origin" edge-last \
-    --title "Last edge decision" --reason "captain last pending" --repo sample) \
+    --title "Last edge decision" --reason "captain last pending" --repo sample "${SAMPLE_CONTEXT[@]}") \
     || fail "could not register last-edge hold"
   hold_absent=$(run_decisions "$home" hold "$origin" edge-absent \
-    --title "Absent edge decision" --reason "captain absent pending" --repo sample) \
+    --title "Absent edge decision" --reason "captain absent pending" --repo sample "${SAMPLE_CONTEXT[@]}") \
     || fail "could not register absent-edge hold"
 
   tasks_in "$home" add pad-a "Pad A" --kind ship --repo sample >/dev/null \
@@ -567,7 +578,7 @@ test_archived_resolved_decision_satisfies_the_gate() {
     > "$home/data/$origin/report.md"
 
   hold=$(run_decisions "$home" hold "$origin" anchors \
-    --title "Choose the sample evidence anchors" --reason "captain anchor choice pending" --repo sample) \
+    --title "Choose the sample evidence anchors" --reason "captain anchor choice pending" --repo sample "${SAMPLE_CONTEXT[@]}") \
     || fail "could not register the retention hold"
   run_decisions "$home" complete "$origin" anchors >/dev/null \
     || fail "completion failed while the hold was still live"
@@ -761,13 +772,13 @@ An early review pass filed the route question twice under two different keys.
 EOF
 
   survivor=$(run_decisions "$home" hold "$id" route-choice \
-    --title "Choose the sample route" --reason "captain route choice pending" --repo sample) \
+    --title "Choose the sample route" --reason "captain route choice pending" --repo sample "${SAMPLE_CONTEXT[@]}") \
     || fail "could not register the surviving hold"
   duplicate=$(run_decisions "$home" hold "$id" routing-direction \
-    --title "Choose the sample routing direction" --reason "captain route choice pending" --repo sample) \
+    --title "Choose the sample routing direction" --reason "captain route choice pending" --repo sample "${SAMPLE_CONTEXT[@]}") \
     || fail "could not register the duplicate hold"
   distinct=$(run_decisions "$home" hold "$id" access-level \
-    --title "Choose the sample access level" --reason "captain access choice pending" --repo sample) \
+    --title "Choose the sample access level" --reason "captain access choice pending" --repo sample "${SAMPLE_CONTEXT[@]}") \
     || fail "could not register the second distinct hold"
   run_decisions "$home" complete "$id" route-choice routing-direction access-level >/dev/null \
     || fail "completion gate failed while all three keys were held"
@@ -815,7 +826,7 @@ EOF
   assert_grep "$survivor" "$home/data/backlog.md" "a refused retraction removed the surviving hold"
 
   unreviewed=$(run_decisions "$home" hold "$id" later-question \
-    --title "Choose a later sample option" --reason "later captain choice pending" --repo sample) \
+    --title "Choose a later sample option" --reason "later captain choice pending" --repo sample "${SAMPLE_CONTEXT[@]}") \
     || fail "could not register an uninventoried hold"
   printf 'needs-decision [key=later-question]: choose a later sample option\n' \
     >> "$home/state/$id.status"
@@ -937,6 +948,9 @@ test_decision_question_and_private_link_use_the_supported_hold_interface() {
     --title "Choose the sample emphasis" \
     --reason "captain emphasis choice pending" \
     --question "$question" \
+    --why "The sample emphasis blocks the next sample pass." \
+    --affects "Every sample row that renders emphasis." \
+    --recommendation "Keep the literal text." \
     --decision-url "https://sample.tailnet.invalid/decision-aid" \
     --repo sample) || fail "the supported hold interface could not record decision context"
 
@@ -995,6 +1009,236 @@ test_decision_question_and_private_link_use_the_supported_hold_interface() {
   pass "exact questions and private HTTPS links use one supported hold interface across homes"
 }
 
+# The whole point of separate fields is that a dimension cannot be skipped inside
+# a reason blob, so every refusal below is the feature rather than an edge case.
+# The surface choice is asserted hardest: an omitted optional flag is exactly what
+# produced decisions the captain could not act on.
+test_structured_context_is_required_and_stored_separately() {
+  local home origin base show out body
+  home=$(make_home structured-context)
+  origin=sample-structured-review
+  mkdir -p "$home/data/$origin"
+  tasks_in "$home" add "$origin" "Review sample structure" --kind scout --repo sample --start >/dev/null
+  write_origin_meta "$home" "$origin"
+  printf '# Sample structured review\n' > "$home/data/$origin/report.md"
+  printf 'done: review complete\n' > "$home/state/$origin.status"
+  base=(hold "$origin" shape --title "Choose the sample shape" \
+    --reason "captain shape choice pending" --repo sample)
+
+  # Each dimension refuses on its own, and nothing is created by a refusal: a
+  # half-made identity would make the honest retry look like a title collision.
+  if run_decisions "$home" "${base[@]}" > "$home/no-why.out" 2> "$home/no-why.err"; then
+    fail "a decision with no stated reason for needing a call was filed"
+  fi
+  assert_grep "--why" "$home/no-why.err" "the refusal did not name the missing dimension"
+  assert_no_grep "$origin-decision-shape" "$home/data/backlog.md" \
+    "a refused filing left a partial backlog identity behind"
+  if run_decisions "$home" "${base[@]}" --why "w" \
+    > "$home/no-affects.out" 2> "$home/no-affects.err"; then
+    fail "a decision with no stated blast radius was filed"
+  fi
+  assert_grep "--affects" "$home/no-affects.err" "the refusal did not name the missing dimension"
+  if run_decisions "$home" "${base[@]}" --why "w" --affects "a" \
+    > "$home/no-rec.out" 2> "$home/no-rec.err"; then
+    fail "a decision with no recommendation was filed"
+  fi
+  assert_grep "--recommendation" "$home/no-rec.err" "the refusal did not name the missing dimension"
+
+  # A supplied field must survive the same trimming used by the snapshot and
+  # board, or it has not actually addressed its dimension.
+  if run_decisions "$home" "${base[@]}" --question " " --why "w" --affects "a" \
+    --recommendation "r" --no-surface "none applies" \
+    > "$home/blank-question.out" 2> "$home/blank-question.err"; then
+    fail "a whitespace-only question was accepted"
+  fi
+  assert_grep "--question" "$home/blank-question.err" \
+    "the whitespace refusal did not name the question flag"
+  if run_decisions "$home" "${base[@]}" --why " " --affects "a" \
+    --recommendation "r" --no-surface "none applies" \
+    > "$home/blank-why.out" 2> "$home/blank-why.err"; then
+    fail "a whitespace-only why value was accepted"
+  fi
+  assert_grep "--why" "$home/blank-why.err" \
+    "the whitespace refusal did not name the why flag"
+  if run_decisions "$home" "${base[@]}" --why "w" --affects " " \
+    --recommendation "r" --no-surface "none applies" \
+    > "$home/blank-affects.out" 2> "$home/blank-affects.err"; then
+    fail "a whitespace-only affects value was accepted"
+  fi
+  assert_grep "--affects" "$home/blank-affects.err" \
+    "the whitespace refusal did not name the affects flag"
+  if run_decisions "$home" "${base[@]}" --why "w" --affects "a" \
+    --recommendation " " --no-surface "none applies" \
+    > "$home/blank-recommendation.out" 2> "$home/blank-recommendation.err"; then
+    fail "a whitespace-only recommendation was accepted"
+  fi
+  assert_grep "--recommendation" "$home/blank-recommendation.err" \
+    "the whitespace refusal did not name the recommendation flag"
+  if run_decisions "$home" "${base[@]}" --why "w" --affects "a" \
+    --recommendation "r" --no-surface " " \
+    > "$home/blank-no-surface.out" 2> "$home/blank-no-surface.err"; then
+    fail "a whitespace-only no-surface acknowledgment was accepted"
+  fi
+  assert_grep "--no-surface" "$home/blank-no-surface.err" \
+    "the whitespace refusal did not name the no-surface flag"
+
+  # The surface choice must be conscious, so silence refuses and claiming both
+  # refuses. Only an explicit answer either way gets through.
+  if run_decisions "$home" "${base[@]}" --why "w" --affects "a" --recommendation "r" \
+    > "$home/no-surface.out" 2> "$home/no-surface.err"; then
+    fail "the surface choice was silently skippable"
+  fi
+  assert_grep "--no-surface" "$home/no-surface.err" \
+    "the refusal did not offer the explicit no-built-surface acknowledgment"
+  if run_decisions "$home" "${base[@]}" --why "w" --affects "a" --recommendation "r" \
+    --decision-url "https://sample.tailnet.invalid/aid" --no-surface "none applies" \
+    > "$home/both-surface.out" 2> "$home/both-surface.err"; then
+    fail "a decision claimed both a built surface and no built surface"
+  fi
+
+  run_decisions "$home" "${base[@]}" \
+    --why "The sample build stops until the shape is chosen." \
+    --affects "The sample header and every sample card under it." \
+    --recommendation "Take the compact shape; it survives a narrow screen." \
+    --no-surface "Both shapes are text-only, so there is nothing built to compare." \
+    >/dev/null || fail "a complete filing was refused"
+
+  # Stored and retrievable as separate fields, not concatenated into the reason.
+  out=$(PATH="$home/fakebin:$PATH" FM_HOME="$home" "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+  printf '%s' "$out" | jq -e --arg id "$origin-decision-shape" '
+    .backlog.records[] | select(.id == $id)
+    | .decision_why == "The sample build stops until the shape is chosen."
+      and .decision_affects == "The sample header and every sample card under it."
+      and .decision_recommendation == "Take the compact shape; it survives a narrow screen."
+      and .decision_no_surface == "Both shapes are text-only, so there is nothing built to compare."
+      and .decision_url == null
+      and .hold_reason == "captain shape choice pending"
+  ' >/dev/null || fail "structured dimensions did not reach the snapshot as separate fields: $out"
+
+  # An idempotent retry supplying nothing must keep the recorded context rather
+  # than demanding it be retyped or, worse, blanking it.
+  run_decisions "$home" "${base[@]}" >/dev/null \
+    || fail "an idempotent retry was refused after the context was already recorded"
+  show=$(tasks_in "$home" show "$origin-decision-shape" --full)
+  assert_contains "$show" 'Why now: The sample build stops until the shape is chosen.' \
+    "an idempotent retry lost the recorded context"
+
+  tasks_in "$home" update "$origin-decision-shape" --body $'Why now:  \t\nWhat it affects: The sample header and every sample card under it.\nRecommendation: Take the compact shape; it survives a narrow screen.\nNo decision surface: Both shapes are text-only, so there is nothing built to compare.' >/dev/null
+  if run_decisions "$home" "${base[@]}" \
+    > "$home/stored-blank.out" 2> "$home/stored-blank.err"; then
+    fail "a whitespace-only stored context field satisfied the presence bar"
+  fi
+  assert_grep "--why" "$home/stored-blank.err" \
+    "the stored whitespace refusal did not name the missing dimension"
+  run_decisions "$home" "${base[@]}" \
+    --why "The sample build stops until the shape is chosen." >/dev/null \
+    || fail "a supplied value could not repair whitespace-only stored context"
+
+  tasks_in "$home" update "$origin-decision-shape" --body $'Why now: The sample build stops until the shape is chosen.\nWhat it affects: The sample header and every sample card under it.\nRecommendation: Take the compact shape; it survives a narrow screen.\nDecision URL: https://sample.tailnet.invalid/stale-aid\nNo decision surface: Both shapes are text-only, so there is nothing built to compare.' >/dev/null
+  if run_decisions "$home" "${base[@]}" \
+    > "$home/stored-surface-conflict.out" 2> "$home/stored-surface-conflict.err"; then
+    fail "contradictory stored surface choices were accepted without settlement"
+  fi
+  assert_grep "both Decision URL and No decision surface" "$home/stored-surface-conflict.err" \
+    "the stored surface conflict was not named"
+  assert_grep "--decision-url or --no-surface" "$home/stored-surface-conflict.err" \
+    "the stored surface conflict did not explain how to settle it"
+
+  # A decision that gains a built surface must stop claiming it has none, through
+  # either supported path, or the board would show a link and a denial together.
+  run_decisions "$home" "${base[@]}" --decision-url "https://sample.tailnet.invalid/shape-aid" \
+    >/dev/null || fail "a later surface could not be recorded on an existing decision"
+  show=$(tasks_in "$home" show "$origin-decision-shape" --full)
+  assert_contains "$show" 'Decision URL: https://sample.tailnet.invalid/shape-aid' \
+    "the built surface was not recorded"
+  assert_not_contains "$show" 'No decision surface:' \
+    "a decision kept claiming no built surface after gaining one"
+  run_decisions "$home" hold "$origin" shape --title "Choose the sample shape" \
+    --reason "captain shape choice pending" --repo sample \
+    --no-surface "The surface was withdrawn, so there is nothing to look at again." \
+    >/dev/null || fail "a withdrawn surface could not be recorded"
+  show=$(tasks_in "$home" show "$origin-decision-shape" --full)
+  assert_not_contains "$show" 'Decision URL:' \
+    "a decision kept a stale link after declaring no built surface"
+
+  body=$(tasks_in "$home" show "$origin-decision-shape" --full | sed -n 's/^  body: //p')
+  case "$body" in
+    *'Why now'*'What it affects'*'Recommendation'*) : ;;
+    *) fail "the stored dimensions were not written in reading order: $body" ;;
+  esac
+  pass "each decision dimension is separately required, stored, and retrievable"
+}
+
+# A captain-gated thread filed by hand against an existing work item used to skip
+# the bar entirely. One owner now covers it, whatever kind the item carries.
+test_hold_item_gates_an_existing_work_item_under_the_same_bar() {
+  local home show out
+  home=$(make_home hold-item)
+  tasks_in "$home" add sample-thread "Choose the sample vendor" --kind captain --repo sample >/dev/null
+  tasks_in "$home" add sample-queued-ship "Sample ship awaiting a call" --kind ship --repo sample >/dev/null
+  tasks_in "$home" add sample-live-ship "Sample ship under way" --kind ship --repo sample --start >/dev/null
+
+  if run_decisions "$home" hold-item sample-thread --reason "captain vendor choice pending" \
+    > "$home/bare.out" 2> "$home/bare.err"; then
+    fail "the ad-hoc captain-hold path still skipped the due-diligence bar"
+  fi
+  assert_grep "--why" "$home/bare.err" "the ad-hoc path refused without naming the bar"
+  if run_decisions "$home" hold-item sample-absent --reason "captain call" \
+    --why w --affects a --recommendation r --no-surface n \
+    > "$home/absent.out" 2> "$home/absent.err"; then
+    fail "hold-item invented a backlog item that did not exist"
+  fi
+  # A captain hold leaves an in-flight row in flight, where it never reads as a
+  # decision waiting on the captain, so filing one there is refused rather than
+  # quietly producing a decision that never reaches the board.
+  if run_decisions "$home" hold-item sample-live-ship --reason "captain call" \
+    --why w --affects a --recommendation r --no-surface n \
+    > "$home/live.out" 2> "$home/live.err"; then
+    fail "hold-item filed a decision that could never reach the captain"
+  fi
+
+  run_decisions "$home" hold-item sample-thread --reason "captain vendor choice pending" \
+    --why "The current vendor stops publishing on 2026-09-01." \
+    --affects "Every sample quote and the sample nightly digest." \
+    --recommendation "Move to the second vendor; the shapes already match." \
+    --decision-url "https://sample.tailnet.invalid/vendor-aid" >/dev/null \
+    || fail "hold-item could not gate a standalone captain thread"
+  # The HOLD kind, never the kind the item carries itself, is what marks a
+  # captain decision, so an ordinary queued ship gates the same way.
+  run_decisions "$home" hold-item sample-queued-ship --reason "captain scope choice pending" \
+    --why "The sample scope decides how much of the sample ships this week." \
+    --affects "The sample checkout path." \
+    --recommendation "Ship the narrow scope first." \
+    --no-surface "Nothing is built yet; that is what the decision is about." >/dev/null \
+    || fail "hold-item could not gate a queued item of another kind"
+
+  show=$(tasks_in "$home" show sample-queued-ship --full)
+  assert_contains "$show" "kind: ship" "hold-item rewrote the kind the item already carried"
+  assert_contains "$show" "hold_kind: captain" "hold-item did not activate the captain hold"
+  assert_contains "$show" "title: Sample ship awaiting a call" "hold-item rewrote the item title"
+
+  out=$(PATH="$home/fakebin:$PATH" FM_HOME="$home" "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+  printf '%s' "$out" | jq -e '
+    ([ .backlog.records[] | select(.captain_actionable == true) ] | length) == 2
+    and ([ .backlog.records[] | select(.id == "sample-queued-ship")
+           | .kind == "ship"
+             and .decision_why == "The sample scope decides how much of the sample ships this week."
+             and .decision_no_surface == "Nothing is built yet; that is what the decision is about." ]
+         | all)
+    and ([ .backlog.records[] | select(.id == "sample-thread")
+           | .decision_url == "https://sample.tailnet.invalid/vendor-aid" ] | all)
+  ' >/dev/null || fail "a gated item of another kind did not reach the snapshot as a decision: $out"
+
+  # hold-item records context and the hold, nothing else. The inventory that
+  # `complete`, `verify`, and scout teardown read stays untouched, so gating an
+  # ordinary work item can never be mistaken for a completed review pass.
+  assert_no_grep "decisions_reviewed" "$home/data/backlog.md" \
+    "hold-item wrote inventory attestation into the backlog"
+  [ ! -f "$home/state/sample-thread.meta" ] \
+    || fail "hold-item created originating task metadata for a plain backlog item"
+  pass "an existing work item of any kind is gated under the same due-diligence bar"
+}
+
 test_uninventoried_report_decision_refuses_completion
 
 test_scout_teardown_always_requires_inventory_verification
@@ -1002,6 +1246,8 @@ test_archived_resolved_decision_satisfies_the_gate
 test_archive_lookup_refuses_every_unresolved_shape
 test_structured_holds_survive_teardown_and_route_resolution
 test_decision_question_and_private_link_use_the_supported_hold_interface
+test_structured_context_is_required_and_stored_separately
+test_hold_item_gates_an_existing_work_item_under_the_same_bar
 test_origin_slug_validation_precedes_path_construction
 test_visual_review_uses_shared_completion_owner
 test_none_inventory_and_resolved_prose_do_not_create_holds

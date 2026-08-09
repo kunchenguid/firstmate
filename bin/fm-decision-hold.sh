@@ -13,24 +13,61 @@
 # A hold identity is <origin-id>-decision-<decision-key>. Origin ids and decision
 # keys must already be privacy-safe slugs. Repeating `hold` with the same identity
 # is idempotent. A different decision key creates a different backlog identity.
-# An optional exact question and private decision-aid URL live in the hold body as
-# structured fields. `link` is the supported backfill for an existing hold; it
-# accepts HTTPS only, preserves the rest of the body, and never fetches or rewrites
-# the URL.
 # All backlog mutations run in the active FM_HOME, which keeps main-home and
 # secondmate-home ownership aligned with the work that discovered the decision.
+#
+# Every captain decision filed here carries its context as SEPARATE structured
+# body fields rather than one free-text reason, so no dimension can be skipped
+# inside a blob: an optional exact question, a required "Why now", "What it
+# affects", and "Recommendation", and a required conscious choice between a
+# private decision-aid URL and an explicit "no built surface applies"
+# acknowledgment. Each is required only when the item does not already record it,
+# so a first filing can never omit one while an idempotent retry never has to
+# retype what is already stored. This script judges only that each dimension was
+# addressed. Whether the prose is genuinely clear and jargon-free is a semantic
+# judgement no script can make; the skill owns it, and data/captain-shared.md's
+# decision-presentation bar is what it is judged against.
+# `link` is the supported backfill for an existing hold; it accepts HTTPS only,
+# preserves the rest of the body, and never fetches or rewrites the URL. It also
+# clears a recorded "no built surface" claim, because a decision that has gained a
+# built surface must stop saying it has none.
 #
 # Usage:
 #   fm-decision-hold.sh id <origin-id> <decision-key>
 #   fm-decision-hold.sh hold <origin-id> <decision-key> \
 #     --title <title> --reason <reason> [--repo <repo>] \
-#     [--question <exact-question>] [--decision-url <https-url>]
+#     [--question <exact-question>] \
+#     --why <why-now> --affects <what-it-affects> \
+#     --recommendation <recommendation> \
+#     (--decision-url <https-url> | --no-surface <why-none-applies>)
+#   fm-decision-hold.sh hold-item <task-id> --reason <reason> \
+#     [--question <exact-question>] \
+#     --why <why-now> --affects <what-it-affects> \
+#     --recommendation <recommendation> \
+#     (--decision-url <https-url> | --no-surface <why-none-applies>)
 #   fm-decision-hold.sh link <origin-id> <decision-key> --url <https-url>
 #   fm-decision-hold.sh complete <origin-id> (--none | <decision-key>...)
 #   fm-decision-hold.sh verify <origin-id>
 #   fm-decision-hold.sh retract <origin-id> <decision-key> --superseded-by <decision-key>
 #   fm-decision-hold.sh resolve <origin-id> <decision-key> \
 #     --decision-file <path> --routed-to <task-id> [--routed-to <task-id>...]
+#
+# `hold-item` applies that same bar to a backlog item that ALREADY EXISTS, whatever
+# its own kind. It is the supported replacement for a bare
+# `tasks-axi hold <id> --kind captain`, so a captain decision meets one bar
+# whichever path filed it. It never creates the item and never changes its title,
+# kind, or repo, and it never touches the decision_keys inventory that `complete`,
+# `verify`, and scout teardown read: it records context and activates the captain
+# hold, nothing else. It requires a QUEUED item, because a captain hold on an
+# in-flight row leaves that row in flight, where it reads as work under way rather
+# than as a decision waiting on the captain. Gate work already under way with
+# `hold` under its own decision identity instead.
+#
+# Two captain-hold operations stay deliberately outside this bar because they
+# restore text that already exists rather than file a decision: setting a decision
+# aside under tasks-axi's "parked" hold kind, and bringing it back by restoring
+# hold kind captain. bin/fm-mission-control.sh owns both, including the hazard that
+# a different --reason silently rewrites the captain's own stored text.
 #
 # `complete` is the shared investigation and visual-review completion gate.
 # `--none` is an explicit semantic attestation that the just-reviewed surface has
@@ -116,6 +153,33 @@ validate_one_line() {  # <label> <value>
   esac
 }
 
+has_non_whitespace() {  # <value>
+  case "$1" in
+    *[![:space:]]*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# One structured context field as supplied on the command line. The byte cap is
+# the same one the exact question already carried, so no dimension can smuggle an
+# unbounded blob into a backlog row.
+validate_context_field() {  # <label> <value>
+  local label=$1 value=$2
+  validate_one_line "$label" "$value"
+  if ! has_non_whitespace "$value"; then
+    case "$label" in
+      question) fail "--question must state the concrete choice the captain needs to make" ;;
+      why) fail "--why must state plainly why this decision is needed now" ;;
+      affects) fail "--affects must state what this decision affects and what led to it" ;;
+      recommendation) fail "--recommendation must state which way you would go and why" ;;
+      no-surface) fail "--no-surface must state why no built surface applies" ;;
+      *) fail "$label must contain non-whitespace text" ;;
+    esac
+  fi
+  [ "$(printf '%s' "$value" | LC_ALL=C wc -c | tr -d ' ')" -le 2000 ] \
+    || fail "$label exceeds 2000 bytes"
+}
+
 validate_decision_url() {  # <url>
   local url=$1
   validate_one_line decision-url "$url"
@@ -181,6 +245,12 @@ show_body() {  # <show-output>
 
 set_body_field() {  # <body> <label> <value>
   local body=$1 label=$2 value=$3
+  # An item that carries no body at all is the ordinary hold-item case. Appending
+  # to the empty string would leave a blank first line in the backlog row.
+  if [ -z "$body" ]; then
+    printf '%s: %s\n' "$label" "$value"
+    return 0
+  fi
   printf '%s\n' "$body" | FM_BODY_FIELD_VALUE=$value awk -v label="$label: " '
     BEGIN { found = 0 }
     index($0, label) == 1 {
@@ -191,6 +261,80 @@ set_body_field() {  # <body> <label> <value>
     { print }
     END { if (!found) print label ENVIRON["FM_BODY_FIELD_VALUE"] }
   '
+}
+
+get_body_field() {  # <body> <label>
+  printf '%s\n' "$1" | awk -v label="$2: " '
+    index($0, label) == 1 { print substr($0, length(label) + 1); exit }
+  '
+}
+
+clear_body_field() {  # <body> <label>
+  printf '%s\n' "$1" | awk -v label="$2: " '
+    index($0, label) == 1 { next }
+    { print }
+  '
+}
+
+# The due-diligence bar, enforced in the CALLING shell so a refusal stops the
+# command before anything is created or held. A dimension counts as addressed when
+# it is supplied now or already recorded on the item, which is what makes a first
+# filing unable to skip one and an idempotent retry able to supply none.
+require_decision_context() {  # <id> <body> <why> <affects> <recommendation> <decision-url> <no-surface>
+  local id=$1 body=$2 why=$3 affects=$4 recommendation=$5 decision_url=$6 no_surface=$7
+  local stored_why stored_affects stored_recommendation stored_decision_url stored_no_surface
+  stored_why=$(get_body_field "$body" "Why now")
+  stored_affects=$(get_body_field "$body" "What it affects")
+  stored_recommendation=$(get_body_field "$body" "Recommendation")
+  stored_decision_url=$(get_body_field "$body" "Decision URL")
+  stored_no_surface=$(get_body_field "$body" "No decision surface")
+  has_non_whitespace "$why" || has_non_whitespace "$stored_why" \
+    || fail "captain decision $id needs --why: state plainly why this decision is needed now"
+  has_non_whitespace "$affects" || has_non_whitespace "$stored_affects" \
+    || fail "captain decision $id needs --affects: state what it affects and what led to it"
+  has_non_whitespace "$recommendation" || has_non_whitespace "$stored_recommendation" \
+    || fail "captain decision $id needs --recommendation: state which way you would go and why"
+  if [ -z "$decision_url" ] && [ -z "$no_surface" ] \
+    && has_non_whitespace "$stored_decision_url" && has_non_whitespace "$stored_no_surface"; then
+    fail "captain decision $id records both Decision URL and No decision surface: pass --decision-url or --no-surface to settle the conflict"
+  fi
+  [ -z "$decision_url" ] || [ -z "$no_surface" ] \
+    || fail "captain decision $id cannot claim both a decision surface and none: pass --decision-url or --no-surface, not both"
+  has_non_whitespace "$decision_url" || has_non_whitespace "$no_surface" \
+    || has_non_whitespace "$stored_decision_url" || has_non_whitespace "$stored_no_surface" \
+    || fail "captain decision $id needs a conscious surface choice: pass --decision-url with the built surface the captain should look at, or --no-surface stating why no built surface applies"
+}
+
+# Shape validation for the context flags both filing paths accept. Kept separate
+# from the presence bar above so a malformed value is refused on its own terms
+# rather than being reported as a missing dimension.
+validate_decision_context_flags() {  # <question> <why> <affects> <recommendation> <decision-url> <no-surface>
+  [ -z "$1" ] || validate_context_field question "$1"
+  [ -z "$2" ] || validate_context_field why "$2"
+  [ -z "$3" ] || validate_context_field affects "$3"
+  [ -z "$4" ] || validate_context_field recommendation "$4"
+  [ -z "$5" ] || validate_decision_url "$5"
+  [ -z "$6" ] || validate_context_field no-surface "$6"
+}
+
+# Prints the body with every supplied dimension merged in. It only writes; the
+# refusal above is what guarantees nothing is missing. The two surface fields are
+# one choice, so recording either clears the other and the item can never claim a
+# built surface and no built surface at the same time.
+write_decision_context() {  # <body> <question> <why> <affects> <recommendation> <decision-url> <no-surface>
+  local body=$1 question=$2 why=$3 affects=$4 recommendation=$5 decision_url=$6 no_surface=$7
+  [ -z "$question" ] || body=$(set_body_field "$body" "Decision question" "$question")
+  [ -z "$why" ] || body=$(set_body_field "$body" "Why now" "$why")
+  [ -z "$affects" ] || body=$(set_body_field "$body" "What it affects" "$affects")
+  [ -z "$recommendation" ] || body=$(set_body_field "$body" "Recommendation" "$recommendation")
+  if [ -n "$decision_url" ]; then
+    body=$(set_body_field "$body" "Decision URL" "$decision_url")
+    body=$(clear_body_field "$body" "No decision surface")
+  elif [ -n "$no_surface" ]; then
+    body=$(set_body_field "$body" "No decision surface" "$no_surface")
+    body=$(clear_body_field "$body" "Decision URL")
+  fi
+  printf '%s' "$body"
 }
 
 origin_exists_here() {  # <origin-id>
@@ -296,8 +440,12 @@ archive_record_field() {  # <record> <label>
   printf '%s\n' "$1" | sed -n "s/^[[:space:]]*$2: //p" | head -1
 }
 
-verify_hold_active() {  # <hold-id>
-  local id=$1 show state held kind hold_kind
+# The item kind is required by default because a decision identity this script
+# created is always kind captain. `hold-item` passes an empty second argument
+# because it gates an item that already exists under its own kind, where the HOLD
+# kind, never the item kind, is what marks it as a captain decision.
+verify_hold_active() {  # <hold-id> [required-item-kind, "" for any]
+  local id=$1 require_kind=${2-captain} show state held kind hold_kind
   show=$(task_show "$id") || fail "captain hold $id is absent from $FM_HOME/data/backlog.md"
   state=$(show_field "$show" state)
   held=$(show_field "$show" held)
@@ -305,7 +453,8 @@ verify_hold_active() {  # <hold-id>
   hold_kind=$(show_field "$show" hold_kind)
   [ "$state" = queued ] || fail "captain hold $id is not queued (state=$state)"
   [ "$held" = yes ] || fail "captain hold $id is not active"
-  [ "$kind" = captain ] || fail "backlog item $id is not kind captain"
+  [ -z "$require_kind" ] || [ "$kind" = "$require_kind" ] \
+    || fail "backlog item $id is not kind $require_kind"
   [ "$hold_kind" = captain ] || fail "backlog item $id is not held for the captain"
 }
 
@@ -376,7 +525,9 @@ command_id() {
 }
 
 command_hold() {
-  local origin=${1:-} key=${2:-} title='' reason='' repo='' question='' decision_url='' id show state kind existing_title body
+  local origin=${1:-} key=${2:-} title='' reason='' repo='' question='' decision_url='' no_surface=''
+  local why='' affects='' recommendation=''
+  local id show state kind existing_title body updated exists=0
   [ "$#" -ge 2 ] || { usage >&2; exit 2; }
   shift 2
   while [ "$#" -gt 0 ]; do
@@ -385,6 +536,10 @@ command_hold() {
       --reason) shift; reason=${1:-} ;;
       --repo) shift; repo=${1:-} ;;
       --question) shift; question=${1:-} ;;
+      --why) shift; why=${1:-} ;;
+      --affects) shift; affects=${1:-} ;;
+      --recommendation) shift; recommendation=${1:-} ;;
+      --no-surface) shift; no_surface=${1:-} ;;
       --decision-url) shift; decision_url=${1:-} ;;
       *) usage >&2; exit 2 ;;
     esac
@@ -394,23 +549,20 @@ command_hold() {
   validate_slug decision-key "$key"
   validate_one_line title "$title"
   validate_one_line reason "$reason"
-  if [ -n "$question" ]; then
-    validate_one_line question "$question"
-    [ "$(printf '%s' "$question" | LC_ALL=C wc -c | tr -d ' ')" -le 2000 ] \
-      || fail "question exceeds 2000 bytes"
-  fi
-  [ -z "$decision_url" ] || validate_decision_url "$decision_url"
+  validate_decision_context_flags "$question" "$why" "$affects" "$recommendation" "$decision_url" "$no_surface"
   case "$reason" in *'('*|*')'*) fail "reason must not contain parentheses (tasks-axi hold contract)" ;; esac
   require_tasks_axi
   origin_exists_here "$origin" || fail "origin $origin is not owned by the active home $FM_HOME"
   id=$(hold_id "$origin" "$key")
   if show=$(task_show "$id"); then
+    exists=1
     state=$(show_field "$show" state)
     kind=$(show_field "$show" kind)
     existing_title=$(show_field "$show" title)
     [ "$state" != "done" ] || fail "captain decision $id is already durably resolved; use a new decision key for a new decision"
     [ "$kind" = captain ] || fail "existing backlog identity $id is not kind captain"
     [ "$existing_title" = "$title" ] || fail "existing captain hold $id has a different title"
+    body=$(show_body "$show") || fail "could not read captain hold $id body"
   else
     if [ -z "$repo" ] && [ -f "$STATE/$origin.meta" ]; then
       repo=$(meta_value "$STATE/$origin.meta" project)
@@ -420,22 +572,71 @@ command_hold() {
     [ -n "$repo" ] || repo=firstmate
     validate_one_line repo "$repo"
     body=$(printf 'Origin: %s\nDecision key: %s\nState: awaiting captain decision.' "$origin" "$key")
-    [ -z "$question" ] || body=$(set_body_field "$body" "Decision question" "$question")
-    [ -z "$decision_url" ] || body=$(set_body_field "$body" "Decision URL" "$decision_url")
-    tasks_axi add "$id" "$title" --kind captain --repo "$repo" --body "$body" >/dev/null \
-      || fail "could not create captain decision item $id"
   fi
-  if [ -n "$question" ] || [ -n "$decision_url" ]; then
-    show=$(task_show "$id") || fail "captain hold $id disappeared before its decision context was recorded"
-    body=$(show_body "$show") || fail "could not read captain hold $id body"
-    [ -z "$question" ] || body=$(set_body_field "$body" "Decision question" "$question")
-    [ -z "$decision_url" ] || body=$(set_body_field "$body" "Decision URL" "$decision_url")
-    tasks_axi update "$id" --body "$body" >/dev/null \
-      || fail "could not record decision context on $id"
+  # Refuse before anything is created or held, so an incomplete filing leaves no
+  # half-made backlog identity behind for the next attempt to trip over.
+  require_decision_context "$id" "$body" \
+    "$why" "$affects" "$recommendation" "$decision_url" "$no_surface"
+  updated=$(write_decision_context "$body" "$question" \
+    "$why" "$affects" "$recommendation" "$decision_url" "$no_surface")
+  if [ "$exists" = 1 ]; then
+    if [ "$updated" != "$body" ]; then
+      tasks_axi update "$id" --body "$updated" >/dev/null \
+        || fail "could not record decision context on $id"
+    fi
+  else
+    tasks_axi add "$id" "$title" --kind captain --repo "$repo" --body "$updated" >/dev/null \
+      || fail "could not create captain decision item $id"
   fi
   tasks_axi hold "$id" --reason "$reason" --kind captain >/dev/null \
     || fail "could not activate captain hold $id"
   verify_hold_active "$id"
+  printf '%s\n' "$id"
+}
+
+# The same due-diligence bar on a backlog item that already exists, under whatever
+# kind it already has. This is what keeps a captain-gated thread filed by hand from
+# being the one decision that skipped the bar.
+command_hold_item() {
+  local id=${1:-} reason='' question='' decision_url='' no_surface='' show state body updated
+  local why='' affects='' recommendation=''
+  [ "$#" -ge 1 ] || { usage >&2; exit 2; }
+  shift
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --reason) shift; reason=${1:-} ;;
+      --question) shift; question=${1:-} ;;
+      --why) shift; why=${1:-} ;;
+      --affects) shift; affects=${1:-} ;;
+      --recommendation) shift; recommendation=${1:-} ;;
+      --no-surface) shift; no_surface=${1:-} ;;
+      --decision-url) shift; decision_url=${1:-} ;;
+      *) usage >&2; exit 2 ;;
+    esac
+    shift
+  done
+  validate_slug task-id "$id"
+  validate_one_line reason "$reason"
+  validate_decision_context_flags "$question" "$why" "$affects" "$recommendation" "$decision_url" "$no_surface"
+  case "$reason" in *'('*|*')'*) fail "reason must not contain parentheses (tasks-axi hold contract)" ;; esac
+  require_tasks_axi
+  show=$(task_show "$id") \
+    || fail "backlog item $id does not exist in the active home $FM_HOME; hold-item gates an existing item and never creates one"
+  state=$(show_field "$show" state)
+  [ "$state" = queued ] \
+    || fail "backlog item $id is $state, and a captain hold leaves it there; only a queued captain hold is classified as an actionable decision, so gate work already under way with the hold subcommand under its own decision identity"
+  body=$(show_body "$show") || fail "could not read backlog item $id body"
+  require_decision_context "$id" "$body" \
+    "$why" "$affects" "$recommendation" "$decision_url" "$no_surface"
+  updated=$(write_decision_context "$body" "$question" \
+    "$why" "$affects" "$recommendation" "$decision_url" "$no_surface")
+  if [ "$updated" != "$body" ]; then
+    tasks_axi update "$id" --body "$updated" >/dev/null \
+      || fail "could not record decision context on $id"
+  fi
+  tasks_axi hold "$id" --reason "$reason" --kind captain >/dev/null \
+    || fail "could not activate the captain hold on $id"
+  verify_hold_active "$id" ''
   printf '%s\n' "$id"
 }
 
@@ -460,6 +661,10 @@ command_link() {
   show=$(task_show "$id") || fail "captain hold $id disappeared before its link was recorded"
   body=$(show_body "$show") || fail "could not read captain hold $id body"
   body=$(set_body_field "$body" "Decision URL" "$url")
+  # A decision that has since gained a built surface must stop claiming it has
+  # none, or the board would show the captain a link and a "no built surface"
+  # note side by side.
+  body=$(clear_body_field "$body" "No decision surface")
   tasks_axi update "$id" --body "$body" >/dev/null \
     || fail "could not record the decision URL on $id"
   printf 'linked: %s -> %s\n' "$id" "$url"
@@ -733,6 +938,7 @@ command_resolve() {
 case "${1:-}" in
   id) shift; command_id "$@" ;;
   hold) shift; command_hold "$@" ;;
+  hold-item) shift; command_hold_item "$@" ;;
   link) shift; command_link "$@" ;;
   complete) shift; command_complete "$@" ;;
   verify) shift; command_verify "$@" ;;

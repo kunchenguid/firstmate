@@ -32,6 +32,10 @@ The stage itself is derived by the snapshot rather than by the board; see `bin/f
 - **Awaiting your decision**, first and most prominent, merges three sources of captain-gated work: captain-held items in this home's backlog, tasks with a recorded PR awaiting a review or merge call, and captain-held decisions inside a registered secondmate's own home.
   That third source matters because a secondmate's decisions live in its backlog and never appear in this home's, so a board built from the local backlog alone would silently drop them.
   Each row names the home it came from when that home is not the main one.
+  A decision filed with structured context shows it as labelled sections under the row - "Why now", "What it affects", "Recommendation", and, where the filer established that no built surface applies, "No built surface" - so the captain can find the recommendation without reading a paragraph for it.
+  That block is a sibling of the row rather than part of it, because the row title is a link whenever the decision has one and reading the context must never navigate away; at phone width each label sits above the text it labels.
+  An old-style decision that carries only a plain hold reason renders exactly as it always has, while an earlier decision that already records an optional question or decision-aid URL keeps that behavior without gaining the new labelled context block.
+  [`docs/decision-hold-lifecycle.md`](decision-hold-lifecycle.md) owns the fields themselves and which of them a filing must supply.
   A structured HTTPS decision aid appears as its own readable link and remains on its recorded private host.
   Only valid HTTP or HTTPS references are clickable; a local report path such as `data/example/report.md` remains non-clickable context when no explicit served HTTPS aid exists, because the board does not serve fleet-local files.
   URL validation runs in the required jq rendering path, so valid links do not disappear when optional browser tooling such as Node is unavailable.
@@ -222,7 +226,7 @@ Reading a project clone's history is the only thing the board does to a project,
 A backlog row may record its project as a bare name or as a full clone path.
 Both name the same project, so both fold onto the same rollup row and display as the project name.
 
-[`docs/decision-hold-lifecycle.md`](decision-hold-lifecycle.md) owns how exact decision context is recorded and backfilled through the supported hold interface.
+[`docs/decision-hold-lifecycle.md`](decision-hold-lifecycle.md) owns which structured context fields a captain decision records and how they are backfilled through the supported hold interface.
 The canonical backlog parser and secondmate-home summary carry that context to renderers, so Mission Control does not parse private body conventions itself.
 
 Every value that comes from fleet state, the registry, the autonomous-action record, or either allowance source is HTML-escaped before it reaches the page.
@@ -247,8 +251,10 @@ The generator does not serve it; how the file is exposed is decided outside it.
 
 ## Verification
 
-`tests/fm-mission-control.test.sh` renders the board end to end from a fixture home and from captured snapshot payloads, covering present and absent sources, the empty and populated recent autonomous-actions feed, its 12-hour expiry and newest-first order, cross-home captain decisions, escaping of hostile prose, project folding, work outside the registry, per-item stage and model rendering, bounded cross-home stage values, safe handling of valid, missing, and malformed secondmate active-task totals, item overflow, blocked work, rich allowance pace and history, automatic balancing, unavailable and stale allowance sources, narrow allowance labels, unmeasurable fallback windows, self-reload, the self-contained favicon in ordinary and control-enabled boards, the tab structure, and the deferred shelf.
+`tests/fm-mission-control.test.sh` renders the board end to end from a fixture home and from captured snapshot payloads, covering present and absent sources, the empty and populated recent autonomous-actions feed, its 12-hour expiry and newest-first order, cross-home captain decisions, escaping of hostile prose, project folding, work outside the registry, per-item stage and model rendering, bounded cross-home stage values, safe handling of valid, missing, and malformed secondmate active-task totals, item overflow, blocked work, rich allowance pace and history, automatic balancing, unavailable and stale allowance sources, narrow allowance labels, unmeasurable fallback windows, self-reload, the self-contained favicon in ordinary and control-enabled boards, the tab structure, the deferred shelf, and labelled structured decision context.
 The deferred cases pin the awaiting count and the section count to literal numbers rather than to the absence of a title, because dropping a decision from the list while still counting it and counting it while still listing it fail separately.
+The decision-context case renders a structured and an old-style decision from one fixture home and pins the count of rendered context blocks, so leaving the old-style decision alone is proven rather than inferred from it happening to look bare.
+It then measures the rendered page in a real browser at desktop and 390px, because markup alone cannot show that the context block sits outside the row link or that it does not push the board sideways; that measurement self-skips when Chrome or Node is absent.
 It also pins a fixed current time and commits its fixture clones at explicit epochs, so the last-change wording, its three degrade-to-dash paths, and the promise that no clone is written to are all checked against times the test chose.
 
 The reply layer is covered in the same suite: that the default board is unchanged by its existence, that each row offers only the controls it can resolve, that a control names no host, port, or absolute endpoint and derives its target from the URL the document was loaded from, that it stays hidden until a transport is proved, and that the confirmation banner ships hidden and empty.
