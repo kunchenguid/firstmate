@@ -2,27 +2,36 @@
 # Ensure a project worktree follows the agent-memory file convention.
 # AGENTS.md is the real project-intrinsic knowledge file; CLAUDE.md is a
 # relative symlink to it for compatibility. Creates a minimal AGENTS.md skeleton
-# when neither file exists, promotes a real CLAUDE.md file when it is the only
-# file present, and refuses to clobber distinct real files or wrong symlinks.
+# when neither file exists, and refuses to clobber distinct real files or wrong
+# symlinks. By default a project whose only memory file is a real CLAUDE.md is
+# left untouched: a crewmate running this as a routine step must not rewrite a
+# project that is already in a perfectly valid state. Promotion of a real
+# CLAUDE.md into the AGENTS.md convention is explicit and opt-in via --promote,
+# which keeps the rename, symlink, and self-governance injection in one step.
 # Owns the canonical "## Maintaining this file" self-governance wording for
 # project AGENTS.md files, injecting it idempotently into created skeletons,
-# promoted CLAUDE.md files, and any existing AGENTS.md that still lacks it.
+# --promoted CLAUDE.md files, and any existing AGENTS.md that still lacks it.
 # Refuses a case-variant real memory file such as a lowercase agents.md, whose
 # CLAUDE.md symlink would carry an uppercase literal target that dangles on a
 # case-sensitive filesystem (issue #389).
 # This is a worktree utility for crewmates, not a supervision script, so it does
 # not call fm-guard.sh.
-# Usage: fm-ensure-agents-md.sh [repo-or-worktree-dir]
+# Usage: fm-ensure-agents-md.sh [--promote] [repo-or-worktree-dir]
 set -eu
 
 usage() {
-  echo "usage: fm-ensure-agents-md.sh [repo-or-worktree-dir]" >&2
+  echo "usage: fm-ensure-agents-md.sh [--promote] [repo-or-worktree-dir]" >&2
 }
 
+PROMOTE=0
 case "${1:-}" in
   -h|--help)
     usage
     exit 0
+    ;;
+  --promote)
+    PROMOTE=1
+    shift
     ;;
 esac
 [ "$#" -le 1 ] || { usage; exit 1; }
@@ -183,6 +192,10 @@ fi
 
 if [ -e "$CLAUDE" ]; then
   if [ -f "$CLAUDE" ]; then
+    if [ "$PROMOTE" -ne 1 ]; then
+      echo "unchanged: project already has agent memory at CLAUDE.md in $DIR; pass --promote to adopt the AGENTS.md convention"
+      exit 0
+    fi
     mv "$CLAUDE" "$AGENTS"
     ensure_maintenance_section
     ln -s "$AGENTS" "$CLAUDE"

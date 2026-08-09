@@ -37,7 +37,8 @@ test_promoted_claude_md_includes_self_governance() {
 
 Run tests with `make test`.
 EOF
-  "$ROOT/bin/fm-ensure-agents-md.sh" "$repo" >/dev/null 2>&1 || fail "fm-ensure-agents-md.sh failed for CLAUDE.md promotion"
+  "$ROOT/bin/fm-ensure-agents-md.sh" --promote "$repo" >/dev/null 2>&1 \
+    || fail "fm-ensure-agents-md.sh --promote failed for CLAUDE.md promotion"
   agents="$repo/AGENTS.md"
   assert_present "$agents" "AGENTS.md was not created during promotion"
   [ -L "$repo/CLAUDE.md" ] || fail "CLAUDE.md is not a symlink after promotion"
@@ -47,7 +48,7 @@ EOF
   [ "$count" -eq 1 ] || fail "promotion wrote $count self-governance sections"
   assert_grep "Keep this file for knowledge useful to almost every future agent session in this project." "$agents" \
     "promoted AGENTS.md missing self-governance wording"
-  pass "fm-ensure-agents-md.sh: promoted CLAUDE.md includes self-governance section"
+  pass "fm-ensure-agents-md.sh: --promote on CLAUDE.md includes self-governance section"
 }
 
 test_promoted_claude_md_without_trailing_newline_keeps_blank_separator() {
@@ -55,7 +56,8 @@ test_promoted_claude_md_without_trailing_newline_keeps_blank_separator() {
   repo="$TMP_ROOT/no-trailing-newline-project"
   mkdir -p "$repo"
   printf '# Existing agent memory\n\nRun tests with make test.' > "$repo/CLAUDE.md"
-  "$ROOT/bin/fm-ensure-agents-md.sh" "$repo" >/dev/null 2>&1 || fail "fm-ensure-agents-md.sh failed for newline-less CLAUDE.md promotion"
+  "$ROOT/bin/fm-ensure-agents-md.sh" --promote "$repo" >/dev/null 2>&1 \
+    || fail "fm-ensure-agents-md.sh --promote failed for newline-less CLAUDE.md promotion"
   agents="$repo/AGENTS.md"
   assert_grep "Run tests with make test." "$agents" \
     "newline-less promotion lost or mangled the last content line"
@@ -63,7 +65,49 @@ test_promoted_claude_md_without_trailing_newline_keeps_blank_separator() {
     "newline-less promotion did not append the self-governance section"
   before=$(grep -B1 -Fx '## Maintaining this file' "$agents" | head -n 1)
   [ -z "$before" ] || fail "self-governance heading not preceded by a blank line (got: $before)"
-  pass "fm-ensure-agents-md.sh: newline-less promotion keeps a blank separator line"
+  pass "fm-ensure-agents-md.sh: --promote on newline-less CLAUDE.md keeps a blank separator line"
+}
+
+test_default_run_leaves_real_claude_md_untouched() {
+  local repo rc out snapshot
+  repo="$TMP_ROOT/default-claude-project"
+  mkdir -p "$repo"
+  cat > "$repo/CLAUDE.md" <<'EOF'
+# Existing agent memory
+
+Run tests with `make test`.
+EOF
+  snapshot="$repo/.claude-snapshot"
+  cp "$repo/CLAUDE.md" "$snapshot"
+  out=$("$ROOT/bin/fm-ensure-agents-md.sh" "$repo" 2>&1)
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "default run exited non-zero ($rc) on a project with real CLAUDE.md: $out"
+  assert_absent "$repo/AGENTS.md" "default run created AGENTS.md on a project with only CLAUDE.md"
+  [ -f "$repo/CLAUDE.md" ] || fail "default run no longer leaves CLAUDE.md as a regular file"
+  [ ! -L "$repo/CLAUDE.md" ] || fail "default run replaced CLAUDE.md with a symlink"
+  cmp -s "$snapshot" "$repo/CLAUDE.md" \
+    || fail "default run modified the bytes of the project's CLAUDE.md"
+  assert_contains "$out" "--promote" "default-run output did not mention --promote"
+  pass "fm-ensure-agents-md.sh: default run leaves real CLAUDE.md untouched and exits 0"
+}
+
+test_default_run_does_not_inject_self_governance_into_claude_md() {
+  local repo rc out
+  repo="$TMP_ROOT/default-no-inject-project"
+  mkdir -p "$repo"
+  cat > "$repo/CLAUDE.md" <<'EOF'
+# Existing agent memory
+
+Run tests with `make test`.
+EOF
+  out=$("$ROOT/bin/fm-ensure-agents-md.sh" "$repo" 2>&1)
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "default run exited non-zero ($rc): $out"
+  assert_no_grep "## Maintaining this file" "$repo/CLAUDE.md" \
+    "default run injected the self-governance section into the project's CLAUDE.md"
+  assert_no_grep "Keep this file for knowledge useful to almost every future agent session in this project." "$repo/CLAUDE.md" \
+    "default run injected self-governance wording into the project's CLAUDE.md"
+  pass "fm-ensure-agents-md.sh: default run does not inject self-governance into a real CLAUDE.md"
 }
 
 test_existing_agents_md_with_symlink_gains_self_governance() {
@@ -203,6 +247,8 @@ test_lowercase_agents_md_refuses_case_fragile_symlink() {
 test_created_agents_md_includes_self_governance
 test_promoted_claude_md_includes_self_governance
 test_promoted_claude_md_without_trailing_newline_keeps_blank_separator
+test_default_run_leaves_real_claude_md_untouched
+test_default_run_does_not_inject_self_governance_into_claude_md
 test_existing_agents_md_with_symlink_gains_self_governance
 test_existing_agents_md_without_claude_gains_section_and_symlink
 test_existing_agents_md_with_section_reports_unchanged
