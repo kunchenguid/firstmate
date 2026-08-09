@@ -123,8 +123,9 @@ last_status_line() {
 }
 
 # 0 if the given (last) status line's leading verb is a real terminal captain verb
-# (done, needs-decision, blocked, failed). Free-text tokens alone never count here;
-# callers that need legacy free-text matching use status_is_captain_relevant.
+# (done, needs-decision, blocked, failed). The verb is all that counts here; the
+# only prose matching left anywhere is status_is_captain_relevant's opt-in
+# FM_CAPTAIN_RE arm.
 status_is_terminal_verb() {
   local line=$1 verb
   [ -n "$line" ] || return 1

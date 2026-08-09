@@ -478,11 +478,12 @@ classify_stale() {  # <window> <state> [<stale-detail>]
     return
   fi
   if [ -n "$last" ] && status_is_captain_relevant "$last"; then
-    # Independent of free-text captain-relevant matching: a nonterminal progress
-    # verb (working:) must never take the terminal stale path. Seen-status dedupe
+    # However the line became captain-relevant: a nonterminal progress verb
+    # (working:) must never take the terminal stale path. Seen-status dedupe
     # must not permanently suppress or clear possible-wedge aging merely because
-    # prose once looked captain-relevant. Real terminal verbs and legacy free-text
-    # captain lines without those verbs keep the terminal escalate/dedupe path.
+    # a line once looked captain-relevant. Real terminal verbs, refused typed
+    # events, and a home's own FM_CAPTAIN_RE matches keep the terminal
+    # escalate/dedupe path.
     if ! status_is_terminal_verb "$last" \
       && status_verb_is_nonterminal "$(status_line_verb "$last")"; then
       printf 'self|transient stale (%s): %s' "$win" "$last"
@@ -1532,9 +1533,10 @@ handle_wake() {  # <reason> <state>
       if [ "$kind" = "stale" ]; then
         task=$(window_to_task "$arg" "$state")
         last=$(last_status_line "$state/$task.status")
-        # Clear wedge aging only for terminal (or legacy free-text) captain lines.
-        # Nonterminal progress verbs keep possible-wedge markers even if free text
-        # once looked captain-relevant or was written into a seen marker.
+        # Clear wedge aging only for terminal captain lines, refused typed
+        # events, and a home's own FM_CAPTAIN_RE matches. Nonterminal progress
+        # verbs keep possible-wedge markers even if their line once looked
+        # captain-relevant or was written into a seen marker.
         _clear_wedge=0
         if [ -n "$last" ] && status_is_captain_relevant "$last"; then
           if status_is_terminal_verb "$last"; then
