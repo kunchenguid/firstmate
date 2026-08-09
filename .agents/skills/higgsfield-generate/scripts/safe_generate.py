@@ -605,7 +605,7 @@ def _snapshot_uploads(
     try:
         for index, upload in enumerate(uploads):
             source_path = Path(upload["path"])
-            snapshot_path = snapshot_directory / f"media-{index}"
+            snapshot_path = snapshot_directory / f"media-{index}{source_path.suffix}"
             source_descriptor = _open_regular_file(source_path)
             try:
                 snapshot_descriptor = os.open(

@@ -14,6 +14,9 @@ COST_RECEIPT="$TEST_TMP/cost-receipt.json"
 COST_RECEIPT_COPY="$TEST_TMP/cost-receipt-copy.json"
 SENTINEL="$TEST_TMP/shell-injection-ran"
 REFERENCE="$TEST_TMP/reference.png"
+VIDEO_REFERENCE="$TEST_TMP/reference.mp4"
+VIDEO_REQUEST="$TEST_TMP/video-request.json"
+VIDEO_UPLOADED_REQUEST="$TEST_TMP/video-uploaded-request.json"
 
 cleanup() {
   rm -rf "$TEST_TMP"
@@ -31,6 +34,7 @@ pass() {
 
 mkdir -p "$FAKE_BIN"
 printf 'fake image bytes\n' > "$REFERENCE"
+printf 'fake video bytes\n' > "$VIDEO_REFERENCE"
 
 python3 - "$FAKE_BIN/higgsfield" <<'PY'
 from pathlib import Path
@@ -60,6 +64,9 @@ if args[:2] == ["model", "get"]:
         model_type = "image"
     print(json.dumps({"job_type": args[2], "type": model_type}))
 elif args[:2] == ["upload", "create"]:
+    if Path(args[2]).suffix.lower() not in {".mp4", ".png"}:
+        print(f"Cannot detect media type from extension {Path(args[2]).suffix!r}", file=sys.stderr)
+        raise SystemExit(5)
     if os.environ.get("HF_MUTATE_SOURCE"):
         Path(os.environ["HF_MUTATE_SOURCE"]).write_text("mutated during upload\\n", encoding="utf-8")
     expected = os.environ.get("HF_EXPECT_UPLOAD_SHA256")
@@ -323,11 +330,13 @@ python3 - "$FAKE_LOG" "$REFERENCE" <<'PY' || fail "approved upload did not use o
 import json
 import os
 import sys
+from pathlib import Path
 
 commands = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8")]
 uploads = [command for command in commands if command[:2] == ["upload", "create"]]
 assert len(uploads) == 1
 assert uploads[0][2] != os.path.realpath(sys.argv[2])
+assert Path(uploads[0][2]).suffix == Path(sys.argv[2]).suffix == ".png"
 PY
 
 python3 - "$UPLOADED_REQUEST" <<'PY' || fail "approved upload did not replace the local path"
@@ -338,7 +347,45 @@ request = json.load(open(sys.argv[1], encoding="utf-8"))
 assert request["media"] == [{"flag": "image", "value": "11111111-1111-4111-8111-111111111111"}]
 assert request["parameters"] == {"aspect_ratio": "1:1", "generate_audio": "false"}
 PY
-pass "approved local media uploads once from a private snapshot"
+pass "approved .png media uploads once from a private snapshot"
+
+python3 - "$VIDEO_REQUEST" "$VIDEO_REFERENCE" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+request = {
+    "job_type": "seedance_2_0",
+    "prompt": "animate the approved video reference",
+    "parameters": {},
+    "media": [{"flag": "video", "value": sys.argv[2]}],
+}
+Path(sys.argv[1]).write_text(json.dumps(request), encoding="utf-8")
+PY
+
+PATH="$FAKE_BIN:$PATH" HF_FAKE_LOG="$FAKE_LOG" \
+  python3 "$WRAPPER" plan "$VIDEO_REQUEST" > "$TEST_TMP/video-plan.json"
+VIDEO_UPLOAD_TOKEN=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["upload_approval_token"])' "$TEST_TMP/video-plan.json")
+PATH="$FAKE_BIN:$PATH" HF_FAKE_LOG="$FAKE_LOG" \
+  python3 "$WRAPPER" upload "$VIDEO_REQUEST" --approval-token "$VIDEO_UPLOAD_TOKEN" \
+  --output "$VIDEO_UPLOADED_REQUEST" > "$TEST_TMP/video-upload.json"
+
+python3 - "$FAKE_LOG" "$VIDEO_REFERENCE" "$VIDEO_UPLOADED_REQUEST" <<'PY' || fail "approved video upload did not preserve its suffix"
+import json
+import os
+import sys
+from pathlib import Path
+
+commands = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8")]
+uploads = [command for command in commands if command[:2] == ["upload", "create"]]
+video_uploads = [command for command in uploads if Path(command[2]).suffix == ".mp4"]
+assert len(video_uploads) == 1
+assert video_uploads[0][2] != os.path.realpath(sys.argv[2])
+request = json.load(open(sys.argv[3], encoding="utf-8"))
+assert request["media"] == [{"flag": "video", "value": "11111111-1111-4111-8111-111111111111"}]
+assert request["parameters"] == {"generate_audio": "false"}
+PY
+pass "approved .mp4 media uploads once from a private snapshot"
 
 UPLOAD_CALLS_BEFORE=$(wc -l < "$FAKE_LOG")
 if PATH="$FAKE_BIN:$PATH" HF_FAKE_LOG="$FAKE_LOG" \
