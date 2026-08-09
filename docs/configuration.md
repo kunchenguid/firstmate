@@ -608,6 +608,8 @@ An absent or incompatible `lavish-axi` reports `MISSING: lavish-axi (install: np
 An absent or too-old `quota-axi` reports `MISSING: quota-axi (install: npm install -g quota-axi)`; firstmate cannot resolve a profile array without a compatible binary.
 Bootstrap also reports a `TANGLE:` line when `FM_ROOT` is on a named non-default branch; follow the printed checkout remediation rather than treating it as an installable tool problem.
 In a read-only session that did not get the fleet lock, the same line is advisory and omits the checkout command.
+Bootstrap also checks the shared no-mistakes validation daemon without invoking its CLI or changing its lifecycle, including in read-only sessions.
+A healthy daemon and a daemon root that has never existed stay silent, while `VALIDATION_DAEMON:` reports a down daemon or an unreadable pid record; `bin/fm-bootstrap.sh`'s header owns the line format and `bin/fm-validation-daemon-lib.sh` owns the state contract.
 The locked session-start deferred network stage runs bootstrap's best-effort project clone refresh through `fm-fleet-sync.sh`.
 It emits `FLEET_SYNC:` for skipped refreshes that may matter, recovered self-heals, and `STUCK:` alarms.
 Normal completed runs keep local-only and no-origin skips silent.
