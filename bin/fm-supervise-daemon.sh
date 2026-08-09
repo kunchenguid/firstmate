@@ -42,15 +42,39 @@
 #     routine is escalated.
 #   - Bounded wedge latency: a stale pane without a declared external wait is
 #     escalated only after it has been idle for STALE_ESCALATE_SECS
-#     (configurable), rechecked once. A wedged crewmate is therefore detected
-#     within STALE_ESCALATE_SECS + a tick, never lost. A declared pause instead
-#     gets its own longer PAUSE_RESURFACE_SECS recheck, never a wedge escalation,
-#     and a crew whose reconciled state is settled terminal (fm-classify-lib.sh's
-#     crew_absorb_class) is dropped from wedge aging entirely, because its idle
-#     pane is the correct condition rather than a symptom.
-#     That recheck is skipped for a wait the backlog records as captain-gated,
-#     because only the captain can clear it and the captain's return already
-#     surfaces it.
+#     (configurable), rechecked once. Absent the provably-working refresh below,
+#     a wedged crewmate is therefore detected within STALE_ESCALATE_SECS + a
+#     tick; with it the bound is two thresholds (see below). Either way the
+#     wedge is never lost - only the constant differs. A declared pause instead
+#     gets its own longer PAUSE_RESURFACE_SECS recheck, never a wedge escalation.
+#     At the escalation point, and only there, a marker whose crew is PROVABLY
+#     WORKING (fm-classify-lib.sh's crew_absorb_class reports `working`) is
+#     REFRESHED instead of escalated, because its static pane is the correct
+#     condition rather than a symptom. That retires the timer-only wedge alarm for
+#     such a crew: a long-running worker whose evidence of progress lives off the
+#     pane no longer re-alarms every STALE_ESCALATE_SECS for as long as its work
+#     runs. Refreshing rather than dropping keeps the drop bounded and failing
+#     toward noise: staying silent requires that verdict to be re-earned every
+#     threshold, so a crew that freezes - or a reader that stops answering -
+#     simply ages out and escalates, with nothing needing to notice and re-arm.
+#     The accepted cost is that detection after a freeze takes at most TWO
+#     thresholds rather than one; still bounded, still never lost. The age in the
+#     escalation line correspondingly measures time since positive evidence was
+#     last seen, not time since the pane first went idle, and the line says so.
+#     That gate is a bounded-cost read, so a single pass makes at most
+#     STALE_WORKING_GATE_READS of them; markers past the budget keep their aged
+#     marker and are reconsidered next pass, so the budget delays an escalation
+#     and can never drop one. For a BURST of D markers due at once with a budget
+#     of B, the last of them waits ceil(D/B) - 1 passes, i.e. that many
+#     HOUSEKEEPING_TICKs. That formula holds only while the due set drains; it is
+#     not a bound under sustained fleet-wide staleness, where the wait grows with
+#     the backlog instead (see the gate itself for the arithmetic and threshold).
+#     That PAUSE_RESURFACE_SECS recheck is skipped for a wait the backlog
+#     records as captain-gated, because only the captain can clear it and
+#     the captain's return already surfaces it. A crew whose reconciled
+#     state is settled terminal (fm-classify-lib.sh's crew_absorb_class)
+#     is dropped from wedge aging entirely at that same gate, because its
+#     idle pane is the correct condition rather than a symptom.
 #     Crewmates are autonomous, so a delayed stale response does not stall a
 #     healthy crewmate's own progress.
 #     Buffered escalation delivery also has a max-defer alarm: if a digest stays
@@ -97,6 +121,17 @@
 #          FM_PAUSE_RESURFACE_SECS  idle seconds before a declared external wait
 #                                   re-surfaces as a recheck (default 3600); a
 #                                   captain-gated wait is never re-surfaced on it
+#          FM_STALE_WORKING_GATE_READS
+#                                   max provably-working crew-state reads one
+#                                   housekeeping pass may make; markers past the
+#                                   budget stay aged for the next pass rather
+#                                   than escalating or being dropped (default 3).
+#                                   Unset, blank, or not a nonnegative integer
+#                                   uses that default, and an invalid value is
+#                                   logged rather than applied silently: on first
+#                                   sight, again whenever it changes, and
+#                                   otherwise at most once per
+#                                   STALE_GATE_INVALID_REMIND_SECS; 0 floors to 1
 #          FM_ESCALATE_BATCH_SECS   buffer window for batched escalation
 #                                   digests; 0 = flush immediately (default 90)
 #          FM_HEARTBEAT_SCAN_SECS   cadence for the catch-all status scan
@@ -198,6 +233,19 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 FM_SUPERVISOR_SUPPORTED_BACKENDS="tmux herdr"
 INJECT_SKIP_DEFAULT="heartbeat"
 STALE_ESCALATE_SECS_DEFAULT=240
+# Per-PASS budget for the provably-working gate's crew-state reads. The gate is
+# one read per crew per STALE_ESCALATE_SECS, but housekeeping runs inline in the
+# daemon's main loop, so without a per-pass cap N simultaneously-due crews cost N
+# serial reads - each of which may make a bounded no-mistakes call - and stall
+# watcher-exit detection, wake handling and escalation flush for that whole time.
+# Capping the count makes the added stall a constant instead of fleet-sized.
+STALE_WORKING_GATE_READS_DEFAULT=3
+# Longest a persistent FM_STALE_WORKING_GATE_READS misconfiguration may go
+# unmentioned in the daemon log. Far above HOUSEKEEPING_TICK on purpose: the
+# substitution is read once per pass, so reporting it every pass would emit
+# thousands of identical lines a day and evict the watcher-crash and escalation
+# history that LOG_KEEP_LINES exists to retain.
+STALE_GATE_INVALID_REMIND_SECS=3600
 ESCALATE_BATCH_SECS_DEFAULT=90
 HEARTBEAT_SCAN_SECS_DEFAULT=300
 HOUSEKEEPING_TICK_DEFAULT=15
@@ -337,6 +385,12 @@ _collapse_newlines() {  # <text>
 # the single classifier shared with bin/fm-watch.sh. The decision-string wrappers
 # and dedup state below layer the daemon's escalation-digest concerns on top.
 #
+# The provably-working test that drops a static pane from wedge aging is NOT here
+# on purpose: crew_absorb_class reuses bin/fm-crew-state.sh and may make a bounded
+# no-mistakes call, so it lives in housekeeping's persistence recheck, which runs
+# once per STALE_ESCALATE_SECS per crew, instead of on the per-wake path that a
+# static pane can re-enter arbitrarily often.
+#
 # Decision protocol: every classifier prints exactly one line on stdout of the
 # form "<action>|<distilled>". The action is "escalate" (surface it), "self"
 # (routine; a stale also records/refreshes the wedge marker), "pause" (declared
@@ -448,7 +502,8 @@ classify_stale() {  # <window> <state> [<stale-detail>]
     return
   fi
   # Non-terminal (or no status): defer to the persistence recheck. The caller
-  # records/refreshes the stale marker so housekeeping can age it.
+  # records/refreshes the stale marker so housekeeping can age it, and that
+  # recheck - not this wake - asks whether the crew is provably working.
   printf 'self|transient stale (%s): %s' "$win" "${last:-no status}"
 }
 
@@ -1020,6 +1075,50 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
   fi
 }
 
+# Effective per-pass budget for the provably-working gate's crew-state reads.
+# Unset or blank takes the default. A value that is not a nonnegative integer is
+# REPORTED and then takes the default too, matching how bin/fm-fleet-sync.sh and
+# bin/fm-bootstrap.sh treat their own invalid tunables: a typo such as a trailing
+# space would otherwise cut gate throughput threefold with nothing said, and a
+# silently wrong budget costs more than a log line.
+# The report is never silent but is bounded: it fires on first sight, again
+# whenever the supplied value CHANGES so a re-botched edit is called out, and
+# otherwise at most once per STALE_GATE_INVALID_REMIND_SECS, so a persistent
+# misconfiguration stays visible in any recent log window without becoming it.
+# The two facts it remembers live in this process for the daemon's lifetime and
+# nowhere else: a durable file would need its own staleness, cleanup and
+# permission handling, and re-reporting once after a restart is correct anyway.
+# Remembering them is why this ASSIGNS STALE_GATE_READ_BUDGET rather than printing
+# the number: a caller writing `x=$(stale_gate_read_budget)` would run it in a
+# subshell, and every throttle fact it recorded would die with that subshell while
+# the number still looked right. It prints nothing, so that form yields an empty
+# budget and fails loudly instead of silently resetting the throttle each pass.
+# Zero is in range but is floored to one, since a budget of zero would defer every
+# marker on every pass, which is permanent silence - the one outcome this whole
+# path exists to prevent.
+stale_gate_read_budget() {  # sets STALE_GATE_READ_BUDGET; call directly, never in $( )
+  local raw=${FM_STALE_WORKING_GATE_READS:-} budget now
+  if [ -z "$raw" ]; then
+    STALE_GATE_READ_BUDGET=$STALE_WORKING_GATE_READS_DEFAULT
+    return 0
+  fi
+  case "$raw" in
+    *[!0-9]*)
+      now=$(_now)
+      if [ "${_fm_gate_budget_last_invalid:-}" != "$raw" ] \
+         || [ "$(( now - ${_fm_gate_budget_reported_at:-0} ))" -ge "$STALE_GATE_INVALID_REMIND_SECS" ]; then
+        _fm_gate_budget_last_invalid=$raw
+        _fm_gate_budget_reported_at=$now
+        log "invalid FM_STALE_WORKING_GATE_READS '$raw'; using $STALE_WORKING_GATE_READS_DEFAULT"
+      fi
+      STALE_GATE_READ_BUDGET=$STALE_WORKING_GATE_READS_DEFAULT
+      return 0 ;;
+  esac
+  budget=$raw
+  [ "$budget" -ge 1 ] || budget=1
+  STALE_GATE_READ_BUDGET=$budget
+}
+
 # --- housekeeping (runs every tick while the watcher is mid-cycle) ----------
 # Four cheap jobs, each guarded so an empty/quiet fleet costs near zero:
 #  1) batch flush: if the escalation buffer's oldest content is older than
@@ -1037,6 +1136,9 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
 #     captain-relevant line the per-wake classifier missed and escalate it.
 housekeeping() {  # <state>
   local state=$1 now due f key task win marker age last max_defer oldest pause_secs
+  local working_reads=0 working_reads_max absorb
+  stale_gate_read_budget
+  working_reads_max=$STALE_GATE_READ_BUDGET
   now=$(_now)
   migrate_watcher_pause_markers "$state"
 
@@ -1093,17 +1195,79 @@ housekeeping() {  # <state>
     case "$?" in
       0) rm -f "$marker" ;;
       2) rm -f "$marker" ;;
-      *) # A task can go stale while its status line is still non-terminal and
-         # only THEN settle (its run finishes, or its decision is handed up), so
-         # the marker recorded earlier outlives the reason for it. Consult the
-         # reconciled state at the one point that matters - immediately before
-         # escalating a possible wedge - which keeps the read off every tick and
-         # off every still-working pane.
-         if [ "$(crew_absorb_class "$task" "$state")" = settled ]; then
+      *) # The single provably-working gate, placed here rather than on the wake
+         # path because crew_absorb_class reuses bin/fm-crew-state.sh and may make
+         # a bounded no-mistakes call. A marker only reaches this point once per
+         # STALE_ESCALATE_SECS per crew, so the read is bounded by the threshold
+         # instead of by how often a static pane is re-surfaced.
+         # stale_window_is_busy above only compares PANE TEXT, which a worker
+         # waiting on a completion artifact never changes, so it cannot answer
+         # whether this pane is static because the crew is STUCK or because it is
+         # still working; the reconciled state (an attributed run step, or the
+         # backend's own busy verdict) can.
+         #
+         # Provably working REFRESHES the marker rather than removing it, so the
+         # drop is bounded and fails toward noise: silence requires this positive
+         # verdict to keep being re-earned every threshold, and the moment it
+         # stops - the crew freezes, the reader errors, the run detaches - the
+         # marker simply ages out and escalates. Nothing has to notice the freeze
+         # and re-arm anything. The cost is that detection after a freeze takes at
+         # most TWO thresholds instead of one: the guarantee that a wedge is found
+         # within a bounded time and never lost is preserved, the constant doubles.
+         # Only a POSITIVE working verdict refreshes; stopped, parked, failed and
+         # unreadable crews all escalate exactly as before.
+         #
+         # The read is bounded per crew per threshold but housekeeping runs
+         # INLINE in the main loop, so N simultaneously-due crews would otherwise
+         # cost N serial bounded reads and stall wake handling for their sum.
+         # STALE_WORKING_GATE_READS caps how many one pass may make. Past the
+         # budget the gate is SKIPPED rather than decided either way, and the
+         # marker is left aged and untouched - it is neither escalated nor
+         # refreshed - so the next pass reconsiders it with a fresh budget.
+         # That is the direction this fails: a deferred read delays an escalation
+         # and can never suppress one. How LONG it delays depends on the load.
+         # For a BURST - D markers due at once, nothing else arriving - the delay
+         # is one pass per full budget of markers ahead of it: the last waits
+         # ceil(D/B) - 1 passes, so at the defaults (B = 3, HOUSEKEEPING_TICK =
+         # 15s) ten due crews put the last escalation about 45s late. That bound
+         # relies on the due set draining, which every spent read helps do: a
+         # marker that spends budget leaves the due set, refreshed for a threshold
+         # or escalated and removed.
+         # Under SUSTAINED staleness it does not hold. Throughput is B reads per
+         # tick (12/min at the defaults) while each continuously-stale crew needs
+         # one read per STALE_ESCALATE_SECS (0.25/min at the defaults), so beyond
+         # roughly 48 simultaneously-stale crews arrivals outpace reads and the
+         # backlog - and with it the delay - grows without bound. Markers are also
+         # walked in stable glob order rather than round-robin, so that delay is
+         # not shared fairly: it lands repeatedly on the same late-sorting task
+         # ids. Nothing is dropped even then, because a deferred marker stays aged
+         # and is reconsidered every pass, but a fleet that large loses the
+         # ceil(D/B) - 1 bound and should raise STALE_WORKING_GATE_READS.
+         #
+         # The same read answers the settled-terminal question: a task can go
+         # stale while its status line is still non-terminal and only THEN
+         # settle (its run finishes, or its decision is handed up), so the
+         # marker recorded earlier outlives the reason for it. One bounded read
+         # decides both at the one point that matters. Deferring past the budget
+         # leaves such a marker aged rather than escalating it, so an absorb is
+         # delayed by a pass and never turned into a false wedge.
+         if [ "$working_reads" -ge "$working_reads_max" ]; then
+           log "stale gate deferred to next pass (read budget ${working_reads_max} spent, marker kept aged): $win"
+           continue
+         fi
+         working_reads=$(( working_reads + 1 ))
+         absorb=$(crew_absorb_class "$task" "$state")
+         if [ "$absorb" = settled ]; then
            log "stale marker dropped (settled terminal state): $win"
            rm -f "$marker"
+         elif [ "$absorb" = working ]; then
+           log "stale marker refreshed (provably working, wedge aging restarts): $win"
+           _now > "$marker"
          else
-           escalate_add "$state" "stale persisted ${age}s (possible wedge): $win"
+           # ${age} is time since positive evidence was last seen, NOT time since
+           # the pane first went idle: a refresh restarts it. The wording says so
+           # because this line is what a human reads for triage.
+           escalate_add "$state" "no progress evidence for ${age}s (possible wedge): $win"
            stale_marker_remove "$win" "$state"
          fi ;;
     esac
