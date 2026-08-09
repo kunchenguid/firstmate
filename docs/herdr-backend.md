@@ -73,13 +73,14 @@ After a ship or scout harness launch on Herdr, Firstmate best-effort renames the
 The name is pure-derived from the task id and kind (`fm_backend_herdr_display_name`), capped at 32 characters, and matches Herdr's agent-name grammar.
 It is also recorded as `herdr_display_name=` in task meta for recovery and debugging.
 Display names are never ownership authority: peeks, sends, teardown, and supervision keep using recorded pane and tab ids.
-Only the agent (the sidebar entry) is renamed, in both projected and non-projected modes; the TAB always keeps its `fm-<id>` create label for life.
+Only the agent (the sidebar entry) is renamed, in both projected and non-projected modes; the tab always keeps its `fm-<id>` create label for life.
 That is deliberate: the stem is a lossy many-to-one map (lowercased, sanitized, truncated) while task ids run to 64 characters over `[A-Za-z0-9._-]`, so two distinct ids can produce one stem.
 Keeping tab labels at `fm-<id>` keeps them an injective task identity, so husk reclaim's exact-label match and `fm_backend_herdr_list_live` can never match, refuse, or close a different task's tab.
-Herdr requires agent names be unique among live agents, so the stem is truncated to leave room for a trailing six-hex-character digest of the full untruncated task id, and that digest is appended to EVERY name, not only to ids observed to collide.
+Herdr requires agent names be unique among live agents, so the stem is truncated to leave room for a trailing six-hex-character digest of the full untruncated task id, and that digest is appended to every name rather than only to ids observed to collide.
 Two tasks that share a stem still differ in the tail of their ids and therefore in their digest.
-Deciding to disambiguate from a live `herdr agent list` query instead was tried and rejected: it is racy (two concurrent spawns each read a list in which neither has renamed yet, so both send the same name) and environment-dependent (the same task id renames differently depending on which other agents happen to be live), which is exactly the sidebar churn the digest prevents.
-There is therefore no live-agent query on this path at all: the name is a function of the task id alone, so a relaunch of the same task always reproduces the name recorded in `herdr_display_name=`.
+A host with no usable hashing utility at all (`shasum`, `sha256sum`, `cksum`) falls back to the bare stem and loses that guarantee, which is the only case where two live tasks can contend for one agent name.
+Disambiguating from a live `herdr agent list` query instead is unsound on both counts: it is racy (two concurrent spawns each read a list in which neither has renamed yet, so both send the same name) and environment-dependent (the same task id renames differently depending on which other agents happen to be live), which is exactly the sidebar churn the digest prevents.
+No live-agent query happens on this path at all: the name is a function of the task id alone, so a relaunch of the same task always reproduces the name recorded in `herdr_display_name=`.
 The rename is best-effort and must not fail the spawn; a rejected rename warns and leaves Herdr's default names in place.
 Secondmate launches are out of scope for automatic display names.
 
@@ -210,11 +211,13 @@ herdr_session=<session>
 herdr_workspace_id=<workspace-id>
 herdr_tab_id=<tab-id>
 herdr_pane_id=<pane-id>
+herdr_display_name=<agent-display-name>   # ship and scout only
 ```
 
 A Herdr pane id contains a colon, so the adapter splits `window=` on the first colon only.
 The recorded pane is the operational fast path.
 Workspace and tab ids support verification and cleanup but are not inferred from mutable labels during normal operation.
+`herdr_display_name=` is a readability record only, never an endpoint (see [Crewmate display names](#crewmate-display-names)).
 
 ## Current transport behavior
 
