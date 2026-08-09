@@ -17,13 +17,19 @@ TMP_ROOT=$(fm_test_tmproot fm-spawn-batch)
 export FM_BACKEND=tmux
 
 # Clear ambient firstmate overrides so the behavior test owns its environment.
+# FM_CONFIG_OVERRIDE points at an empty directory rather than '', because an
+# empty value falls through to the live home's config/, and a real
+# crew-dispatch.json there trips the consultation backstop before the batch
+# behavior under test is ever reached.
+EMPTY_CONFIG="$TMP_ROOT/empty-config"
+mkdir -p "$EMPTY_CONFIG"
 run_spawn() {
   FM_ROOT_OVERRIDE='' \
     FM_HOME='' \
     FM_STATE_OVERRIDE='' \
     FM_DATA_OVERRIDE='' \
     FM_PROJECTS_OVERRIDE='' \
-    FM_CONFIG_OVERRIDE='' \
+    FM_CONFIG_OVERRIDE="$EMPTY_CONFIG" \
     FM_SPAWN_NO_GUARD=1 \
     "$SPAWN" "$@" 2>&1
 }
