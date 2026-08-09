@@ -836,6 +836,7 @@ make_routine_bootstrap_fixture() {
   } > "$home/state/sm.meta"
   fakebin=$(make_fake_toolchain "$case_dir")
   add_real_jq "$fakebin"
+  rm -f "$fakebin/tmux"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 case "${1:-}" in
@@ -851,6 +852,7 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
+  fm_fake_bash_tool "$fakebin/tmux"
   printf '%s|%s|%s\n' "$root" "$home" "$fakebin"
 }
 

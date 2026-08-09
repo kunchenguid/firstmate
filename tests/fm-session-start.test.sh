@@ -292,6 +292,7 @@ SH
 # fm_backend_target_exists uses for a tmux endpoint liveness read.
 make_fake_tmux() {
   local fakebin=$1 live=$2
+  rm -f "$fakebin/tmux"
   cat > "$fakebin/tmux" <<SH
 #!/usr/bin/env bash
 set -u
@@ -310,6 +311,7 @@ esac
 exit 1
 SH
   chmod +x "$fakebin/tmux"
+  fm_fake_bash_tool "$fakebin/tmux"
 }
 
 # make_fake_tmux_secondmate_recovery <fakebin>: a stateful tmux boundary
@@ -318,6 +320,7 @@ SH
 # reproduces real tmux's active-window fallback while inventory omits the mate.
 make_fake_tmux_secondmate_recovery() {
   local fakebin=$1
+  rm -f "$fakebin/tmux"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -399,6 +402,7 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
+  fm_fake_bash_tool "$fakebin/tmux"
 }
 
 make_fake_herdr_secondmate_recovery() {
