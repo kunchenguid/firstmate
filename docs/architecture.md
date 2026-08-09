@@ -64,8 +64,12 @@ The script header owns the exact JSON schema.
 
 `data/wake-ledger.tsv` is the durable record of what supervision actually costs, so coordinator attention is measured rather than estimated.
 `bin/fm-wake-ledger.sh` is its single owner: record format, the closed outcome vocabulary, and append semantics all live in that script's header and `--help`.
-It carries three record kinds - one `wake` record per drained wake, one `outcome` record per handled wake joined to it on the (seq, queued) pair, and one terminal `task` record per finished task.
+It carries three record kinds - one `wake` record per drained wake, one `outcome` record per handled wake joined to it on the (seq, queued) pair, and terminal `task` records naming how each task ended.
 It lives under `data/` rather than `state/` because teardown clears `state/<id>.*` and this evidence must outlive the tasks it describes.
+
+A terminal outcome is derived from what the task itself declared, and every terminal record names the evidence behind it, so an outcome nothing corroborated cannot pass as an observed one.
+Teardown is not the only producer, because a task that fails and is never released would otherwise leave the ledger silent, and silence there is indistinguishable from a task that never failed.
+Terminal counts remain diagnostic rather than a success rate while this ledger counts released tasks and the no-mistakes pipeline counts validation runs; that divergence is an unreconciled gap the report names on every run.
 
 The wake half is written deterministically by `bin/fm-wake-drain.sh` and the outcome half by the first mate.
 That split is the point rather than an accident: a single coordinator-written line would make measured attention cost fall whenever the recording step was skipped, so the metric would move without the underlying quantity moving.

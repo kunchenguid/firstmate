@@ -18,7 +18,7 @@
 # standalone with unchanged default behavior - other flows (fm-bootstrap.sh
 # install <tools> after consent, /updatefirstmate, the afk daemon, existing
 # tests) still call them directly. The one seam this script needed -
-# bootstrap running its detect-only diagnostics without its six mutating
+# bootstrap running its detect-only diagnostics without its mutating
 # sweeps - is an opt-in FM_BOOTSTRAP_DETECT_ONLY=1 flag on fm-bootstrap.sh
 # itself (default unset/0 = unchanged behavior), not a fork.
 #
@@ -29,11 +29,9 @@
 #                       mutating step runs.
 #   2. bootstrap      - home-local stale Herdr projection cleanup runs only
 #                       when this session actually holds the lock. Detect-only
-#                       diagnostics always run. Bootstrap's six MUTATING sweeps
-#                       (legacy PR-check migration, secondmate convergence,
-#                       secondmate liveness, pending remote handoff retry,
-#                       X-mode artifact writes, fleet sync) also run only when
-#                       locked.
+#                       diagnostics always run. Bootstrap's MUTATING sweeps
+#                       also run only when locked; bin/fm-bootstrap.sh's own
+#                       header owns that list.
 #   3. wake-drain     - mutates the durable wake queue, so it also only runs
 #                       when locked.
 #   4. context digest - data/projects.md, data/secondmates.md, data/captain.md,
@@ -70,7 +68,7 @@
 # tasks-axi and quota-axi tool checks, and tasks-axi availability - none of
 # which mutate shared state and all of which are safe to compute without
 # verified lock ownership.
-# Only projection cleanup, the five bootstrap mutating sweeps, the wake-queue
+# Only projection cleanup, the bootstrap mutating sweeps, the wake-queue
 # drain, and the ruling-index rebuild are skipped.
 # The context digest below is always read-only, and so is every part of the
 # fleet-state digest except its RULING_RECONCILE step: publishing the derived

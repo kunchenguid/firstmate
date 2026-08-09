@@ -43,9 +43,52 @@
 #
 #   task     one terminal line per task, written by bin/fm-teardown.sh
 #            immediately before the task metadata is deleted - the last moment
-#            the harness/model/effort join exists. Fields: task, harness,
-#            model, effort, mode, kind, project, backend, outcome, route,
-#            escalated, findings, pr.
+#            the harness/model/effort join exists - and by this script's
+#            `sweep` for a task that declared failure and was never torn down.
+#            Fields: task, harness, model, effort, mode, kind, project,
+#            backend, outcome, outcome_source, route, escalated, findings, pr.
+#            A task id may carry more than one terminal line: `sweep` records a
+#            declared failure at declaration time and a later teardown records
+#            the same task's release. The LAST terminal line for a task id is
+#            its outcome; every reader here already resolves it that way.
+#
+# THE TERMINAL OUTCOME DEFINITION. This script owns it.
+#
+#   landed     the task's change reached its delivery target.
+#   failed     the task ended without producing its change.
+#   abandoned  the task's unlanded work was deliberately discarded.
+#
+# The enum is deliberately three members and is pinned to the v1 line schema.
+# Widening it belongs to the unified terminal vocabulary that will arrive under
+# a new schema token, not to a fourth member bolted onto v1.
+#
+# An outcome is worth nothing without its evidence, so every terminal line also
+# carries WHERE ITS OUTCOME CAME FROM, in outcome_source:
+#
+#   declared    the task's own status log declared it (`done:` or `failed:`).
+#   discarded   an operator tore the task down with --force.
+#   unreleased  `sweep` found a declared failure with no terminal line and no
+#               teardown; the task was still holding state when this was
+#               written.
+#   assumed     nothing corroborated the outcome. This is the historical
+#               default: teardown set outcome=landed as a constant, so a line
+#               with no outcome_source field reads as assumed rather than as
+#               evidence, and the pre-existing records stay honest without a
+#               rewrite.
+#
+# assumed exists because the constant is the actual defect. Before it, a fleet
+# record reading "40 terminal (landed 40)" was not a success rate: nothing
+# produced `failed`, so the numerator could not move. Naming the unsupported
+# records is what makes the supported ones countable.
+#
+# DIAGNOSTIC ONLY - NO RATE. `report` prints terminal outcome COUNTS and never
+# a success rate, and it says so in its own output. Two authoritative records
+# still disagree about the same changes: this ledger counts tasks the fleet
+# released, while the no-mistakes pipeline counts validation runs, and a task
+# can hold many runs or none. Until that divergence is reconciled, a ratio
+# computed here would be a number about neither. The divergence is a KNOWN
+# NAMED GAP, not an oversight, and `report` names it every time it prints
+# terminal outcomes.
 #
 # THE COORDINATOR NAMES THE COST, NOT THE SEQUENCE. `outcome <token>` with no
 # sequence resolves the most recent wake record no outcome record joins, and
@@ -107,12 +150,33 @@
 #       --allow-unjoined says the wake records are genuinely gone. task and
 #       after are resolved from the matching wake record when --task is absent.
 #   fm-wake-ledger.sh task <id> [--outcome landed|failed|abandoned]
+#                     [--source declared|discarded|unreleased|assumed]
 #                     [--harness H] [--model M] [--effort E] [--mode M]
 #                     [--kind K] [--project P] [--backend B] [--pr URL]
 #                     [--route R] [--escalated yes|no] [--findings N]
 #       Append one terminal task record. Absent facts record as unknown rather
-#       than being guessed. Called by teardown, which supplies them from the
-#       task metadata it is about to delete.
+#       than being guessed, and an absent --source records assumed rather than
+#       implying evidence nobody produced. Called by teardown, which supplies
+#       them from the task metadata it is about to delete.
+#   fm-wake-ledger.sh derive <status-file>
+#       Print "<outcome> <outcome_source>" for a task's status log: the LAST
+#       `done:` or `failed:` line decides, and a log with neither prints
+#       "landed assumed". This is the one implementation of the mapping;
+#       teardown calls it rather than restating it.
+#   fm-wake-ledger.sh sweep [--dry-run]
+#       Record the failures teardown will never see. For every task in state/
+#       whose status log declares `failed:`, append one terminal record with
+#       outcome=failed outcome_source=unreleased and leave a
+#       state/<id>.terminal-recorded receipt so a rerun records nothing twice.
+#       A task that fails and is never torn down is otherwise SILENT in this
+#       ledger, and that silence is indistinguishable from a task that never
+#       failed. A task holding state with no declaration at all is a different
+#       thing and is not recorded here: it is already visible as an ordinary
+#       unfinished task in the fleet state a session start reads, and guessing
+#       a terminal outcome for it would put back the constant this replaced.
+#       --dry-run prints the same lines and writes nothing. Teardown
+#       removes the receipt with the rest of the task's state and writes its
+#       own release record, which supersedes this one.
 #   fm-wake-ledger.sh reconcile [--count]
 #       Count the outcome records that join no wake record. --count prints that
 #       number alone, for a caller that formats its own line. Session-start
@@ -495,12 +559,13 @@ cmd_outcome() {
 }
 
 cmd_task() {
-  local id='' outcome=landed route=unknown escalated=unknown findings=unknown
+  local id='' outcome=landed osource=assumed route=unknown escalated=unknown findings=unknown
   local harness=unknown model=unknown effort=unknown mode=unknown kind=unknown
   local project=unknown backend=unknown pr='' now
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --outcome) [ "$#" -ge 2 ] || die "--outcome needs a value"; outcome=$2; shift 2 ;;
+      --source) [ "$#" -ge 2 ] || die "--source needs a value"; osource=$2; shift 2 ;;
       --harness) [ "$#" -ge 2 ] || die "--harness needs a value"; harness=$2; shift 2 ;;
       --model) [ "$#" -ge 2 ] || die "--model needs a value"; model=$2; shift 2 ;;
       --effort) [ "$#" -ge 2 ] || die "--effort needs a value"; effort=$2; shift 2 ;;
@@ -523,6 +588,12 @@ cmd_task() {
   case "$outcome" in
     landed|failed|abandoned) ;;
     *) die "unknown terminal outcome: $outcome (landed failed abandoned)" ;;
+  esac
+  # An unrecognized provenance is refused rather than downgraded to assumed: a
+  # caller that meant to record evidence must not have it silently erased.
+  case "$osource" in
+    declared|discarded|unreleased|assumed) ;;
+    *) die "unknown outcome source: $osource (declared discarded unreleased assumed)" ;;
   esac
   case "$escalated" in
     yes|no|unknown) ;;
@@ -547,6 +618,7 @@ cmd_task() {
     "project=$(ledger_sanitize "${project:-unknown}" "$LEDGER_SHORT_MAX")" \
     "backend=$(ledger_sanitize "${backend:-unknown}" "$LEDGER_SHORT_MAX")" \
     "outcome=$outcome" \
+    "outcome_source=$osource" \
     "route=$(ledger_sanitize "${route:-unknown}" "$LEDGER_SHORT_MAX")" \
     "escalated=$escalated" \
     "findings=$findings"
@@ -555,6 +627,116 @@ cmd_task() {
     printf 'error: could not append terminal record for task %s to %s\n' "$id" "$LEDGER" >&2
     return 1
   }
+  return 0
+}
+
+# --- terminal outcome derivation --------------------------------------------
+
+# The one mapping from a task's own status log to its terminal outcome. The
+# LAST done: or failed: line decides, so a task that failed, was recovered, and
+# then reported done records landed rather than its worst moment. blocked: and
+# needs-decision: are open states, not outcomes, and never decide one. A log
+# with no terminal declaration yields the historical constant, explicitly
+# marked assumed so it can never be counted as evidence.
+# fm-classify-lib.sh owns status_line_verb, the one parser for a status line's
+# leading verb; the derivation below must read the same verbs the watcher and
+# the daemon read rather than carry a second parser. Loaded on first use, not
+# at source time: `drain-record` runs on the wake path and never derives an
+# outcome, and that path must stay as cheap as it was.
+_ledger_need_status_parser() {
+  command -v status_line_verb >/dev/null 2>&1 && return 0
+  # shellcheck source=bin/fm-classify-lib.sh
+  . "$SCRIPT_DIR/fm-classify-lib.sh" 2>/dev/null || return 1
+  command -v status_line_verb >/dev/null 2>&1
+}
+
+ledger_derive_outcome() {  # <status-file> -> "<outcome> <source>"
+  local file=${1-} line verb outcome=''
+  _ledger_need_status_parser || return 1
+  if [ -n "$file" ] && [ -f "$file" ]; then
+    while IFS= read -r line || [ -n "$line" ]; do
+      verb=$(status_line_verb "$line")
+      case "$verb" in
+        done) outcome=landed ;;
+        failed) outcome=failed ;;
+      esac
+    done < "$file"
+  fi
+  [ -n "$outcome" ] || { printf 'landed assumed'; return 0; }
+  printf '%s declared' "$outcome"
+}
+
+# One key's value from a task metadata file, last assignment winning. Absent
+# key and absent file both yield the empty string; every caller substitutes
+# unknown rather than guessing.
+ledger_meta_value() {  # <meta-file> <key>
+  [ -f "$1" ] || return 0
+  LC_ALL=C awk -F= -v k="$2" '$1 == k { sub(/^[^=]*=/, ""); v = $0 } END { print v }' "$1"
+}
+
+cmd_derive() {
+  local file='' derived
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      -h|--help) usage; exit 0 ;;
+      -*) die "unknown flag for derive: $1" ;;
+      *) [ -z "$file" ] || die "derive takes one status file"; file=$1; shift ;;
+    esac
+  done
+  [ -n "$file" ] || die "derive needs a status file"
+  # A refusal is louder than a wrong outcome: teardown falls back to the
+  # unevidenced default when this exits nonzero, which is the old behavior.
+  derived=$(ledger_derive_outcome "$file") || die "the status-line parser is unavailable"
+  printf '%s\n' "$derived"
+}
+
+cmd_sweep() {
+  local dry='' meta id derived outcome receipt recorded=0
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --dry-run) dry=1; shift ;;
+      -h|--help) usage; exit 0 ;;
+      *) die "unknown flag for sweep: $1" ;;
+    esac
+  done
+
+  [ -d "$STATE" ] || return 0
+  for meta in "$STATE"/*.meta; do
+    [ -f "$meta" ] || continue
+    id=$(basename "$meta" .meta)
+    fm_task_id_path_safe "$id" || continue
+    receipt="$STATE/$id.terminal-recorded"
+    # The receipt is the whole idempotence story: this sweep runs at every
+    # locked session start, and without it a task holding a declared failure
+    # would append a fresh terminal record on every one of them.
+    if [ -e "$receipt" ] || [ -L "$receipt" ]; then continue; fi
+    derived=$(ledger_derive_outcome "$STATE/$id.status") \
+      || die "the status-line parser is unavailable"
+    outcome=${derived%% *}
+    # Only a declared failure is recorded here. A declared done: or an
+    # undeclared task is teardown's to record: teardown is still coming for it,
+    # and its record carries facts this sweep cannot see.
+    [ "$outcome" = failed ] || continue
+    printf 'unreleased failure: %s\n' "$id"
+    [ -z "$dry" ] || continue
+    cmd_task "$id" \
+      --outcome failed \
+      --source unreleased \
+      --harness "$(ledger_meta_value "$meta" harness)" \
+      --model "$(ledger_meta_value "$meta" model)" \
+      --effort "$(ledger_meta_value "$meta" effort)" \
+      --mode "$(ledger_meta_value "$meta" mode)" \
+      --kind "$(ledger_meta_value "$meta" kind)" \
+      --project "$(ledger_meta_value "$meta" project)" \
+      --backend "$(ledger_meta_value "$meta" backend)" \
+      --route "$(ledger_meta_value "$meta" route)" || continue
+    # Written only after the record is durable. A receipt ahead of the append
+    # would suppress the retry that a failed append needs.
+    printf 'failed\n' > "$receipt" 2>/dev/null || true
+    recorded=$((recorded + 1))
+  done
+  [ -n "$dry" ] || [ "$recorded" -eq 0 ] \
+    || printf 'recorded %s unreleased failure(s) as terminal records\n' "$recorded"
   return 0
 }
 
@@ -682,6 +864,10 @@ cmd_report() {
       # The most recent terminal line wins if a task id was ever reused.
       profile[t] = f["harness"] "/" f["model"] "/" f["effort"]
       terminal[t] = f["outcome"]
+      # A record written before outcome_source existed carries no evidence, and
+      # that is exactly what assumed means, so the absent field maps onto it
+      # rather than needing the file rewritten.
+      terminal_source[t] = (f["outcome_source"] == "" ? "assumed" : f["outcome_source"])
       next
     }
     END {
@@ -711,7 +897,11 @@ cmd_report() {
       }
 
       tasks = 0
-      for (t in terminal) { tasks++; term_count[terminal[t]]++ }
+      for (t in terminal) {
+        tasks++
+        term_count[terminal[t]]++
+        src_count[terminal_source[t]]++
+      }
       printf "\ntasks: %d terminal", tasks
       if (tasks > 0) {
         printf " ("
@@ -724,6 +914,19 @@ cmd_report() {
         printf ")"
       }
       printf "\n"
+      if (tasks > 0) {
+        printf "  by evidence:"
+        split("declared discarded unreleased assumed", sv, " ")
+        for (i = 1; i <= 4; i++) if (sv[i] in src_count) printf "  %s %d", sv[i], src_count[sv[i]]
+        printf "\n"
+        # Counts only, never a rate. Two records still disagree about the same
+        # changes, so any ratio printed here would describe neither of them.
+        printf "  counts are DIAGNOSTIC ONLY - not a success rate:"
+        printf " assumed outcomes carry no evidence,"
+        printf " and this ledger counts released tasks while the no-mistakes"
+        printf " pipeline counts validation runs.\n"
+        printf "  that fleet/pipeline divergence is a known, named, unreconciled gap.\n"
+      }
 
       if (tasks > 0) {
         printf "\nper profile (harness/model/effort):\n"
@@ -794,8 +997,10 @@ case "$SUBCOMMAND" in
   drain-record) cmd_drain_record "$@" ;;
   outcome) cmd_outcome "$@" ;;
   task) cmd_task "$@" ;;
+  derive) cmd_derive "$@" ;;
+  sweep) cmd_sweep "$@" ;;
   reconcile) cmd_reconcile "$@" ;;
   report) cmd_report "$@" ;;
   -h|--help|help) usage ;;
-  *) die "unknown subcommand: $SUBCOMMAND (drain-record outcome task reconcile report)" ;;
+  *) die "unknown subcommand: $SUBCOMMAND (drain-record outcome task derive sweep reconcile report)" ;;
 esac
