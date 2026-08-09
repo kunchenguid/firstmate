@@ -139,10 +139,11 @@
 #     2026-08-05: one worker-server survived teardown reparented to init, self-
 #     exited ~6 minutes later). fm-spawn records its pid and process-start
 #     identity atomically in state/<id>.worker-server at launch;
-#     reap_cursor_worker_server TERMs then KILLs the recorded pid only when
-#     that identity still matches (a recycled pid is never touched), then
-#     removes the record once reaping succeeds. A missing record means
-#     ownership was never established; teardown treats that as nothing to reap.
+#     reap_cursor_worker_server delegates to the shared fm_process_record_terminate
+#     primitive (bin/fm-process-identity-lib.sh), the single owner of the
+#     TERM-wait-KILL-revalidate sequence and the record-removal contract.
+#     A missing record means ownership was never established; teardown treats
+#     that as nothing to reap.
 #     Never matched by a generic worker-server cmdline or the cursor install
 #     dir: both are shared across homes and tasks.
 #     The recorded-pid path is lsof-independent (it uses /proc starttime or
