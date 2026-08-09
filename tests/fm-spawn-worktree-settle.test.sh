@@ -52,10 +52,18 @@ case "$*" in
     fi
     exit 0
     ;;
+  *"#{pane_current_command}"*)
+    printf '%s\n' "${FM_FAKE_PANE_COMMAND:-bash}"
+    exit 0
+    ;;
+  *"#{pane_tty}"*) exit 0 ;;
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
-  list-windows) exit 0 ;;
+  list-windows)
+    [ -z "${FM_FAKE_LIVE_WINDOW:-}" ] || printf '%s\n' "$FM_FAKE_LIVE_WINDOW"
+    exit 0
+    ;;
   has-session|new-session|new-window|kill-window) exit 0 ;;
   send-keys) exit 0 ;;
 esac
@@ -338,6 +346,59 @@ test_launch_receipt_publication_failure_is_loud_and_skips_ledger() {
   pass "launch receipt publication failure fails loudly and suppresses the audit ledger"
 }
 
+test_live_endpoint_reconciles_missing_launch_receipt_on_resume() {
+  local rec out rc aid attempt_file claims ledger_rows
+  rec=$(make_claim_case claim-live-launch-replay test-task)
+  read_claim_record "$rec"
+  : > "$CLAIM_ORDER"
+  out=$(run_claim_spawn test-task)
+  rc=$?
+  expect_code 0 "$rc" "initial claimed spawn should launch"
+  aid=$(sed -n 's/^attempt=//p' "$CLAIM_HOME/state/test-task.meta")
+  attempt_file="$CLAIM_HOME/state/attempts/$aid.json"
+  jq '.receipts.launch = null' "$attempt_file" > "$attempt_file.tmp"
+  mv -f "$attempt_file.tmp" "$attempt_file"
+  rm -f "$CLAIM_HOME/state/launch-ledger.jsonl"
+  out=$(run_claim_spawn test-task FM_FAKE_LIVE_WINDOW=fm-test-task FM_FAKE_PANE_COMMAND=codex)
+  rc=$?
+  expect_code 0 "$rc" "live endpoint resume should restore its launch receipt: $out"
+  assert_contains "$out" "reconciled launch receipt" "spawn did not report launch reconciliation"
+  jq -e --arg task test-task --arg endpoint firstmate:fm-test-task '
+    [.receipts.launch[]?
+      | select(.state == "observed")
+      | select(.evidence.task == $task and .evidence.endpoint == $endpoint)
+      | select(.evidence.status == "launched" and .evidence.recovered_from == "verified-live-endpoint")]
+    | length == 1
+  ' "$attempt_file" >/dev/null || fail "verified live endpoint did not restore exact launch evidence"
+  claims=$(grep -c '^claim ' "$CLAIM_ORDER" 2>/dev/null || echo 0)
+  [ "$claims" = 1 ] || fail "launch reconciliation repeated the authoritative claim"
+  ledger_rows=$(jq -s --arg aid "$aid" '[.[] | select(.attempt_id == $aid)] | length' \
+    "$CLAIM_HOME/state/launch-ledger.jsonl")
+  [ "$ledger_rows" = 1 ] || fail "launch reconciliation did not publish exactly one audit row"
+  pass "verified live endpoint restores a missing launch receipt on resume"
+}
+
+test_live_endpoint_with_mismatched_attempt_still_refuses_resume() {
+  local rec out rc aid attempt_file
+  rec=$(make_claim_case claim-live-launch-mismatch test-task)
+  read_claim_record "$rec"
+  out=$(run_claim_spawn test-task)
+  rc=$?
+  expect_code 0 "$rc" "initial claimed spawn should launch"
+  aid=$(sed -n 's/^attempt=//p' "$CLAIM_HOME/state/test-task.meta")
+  attempt_file="$CLAIM_HOME/state/attempts/$aid.json"
+  jq '.receipts.launch = null' "$attempt_file" > "$attempt_file.tmp"
+  mv -f "$attempt_file.tmp" "$attempt_file"
+  sed -i 's/^attempt=.*/attempt=another-attempt/' "$CLAIM_HOME/state/test-task.meta"
+  out=$(run_claim_spawn test-task FM_FAKE_LIVE_WINDOW=fm-test-task FM_FAKE_PANE_COMMAND=codex)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "mismatched attempt metadata authorized launch reconciliation"
+  assert_contains "$out" "refusing launch receipt recovery" "mismatched endpoint identity was not refused"
+  jq -e '.receipts.launch == null' "$attempt_file" >/dev/null \
+    || fail "mismatched endpoint identity published launch evidence"
+  pass "live endpoint cannot reconcile a different attempt identity"
+}
+
 # --- Task 7 attempt-bound provider-wide physical-copy ownership -----------
 #
 # The treehouse pool lease binds BOTH home and attempt (home_id:attempt_id),
@@ -418,6 +479,8 @@ test_replay_after_receipt_does_not_double_claim
 test_replay_rejects_mismatched_claim_evidence
 test_successful_launch_receipt_precedes_audit_ledger
 test_launch_receipt_publication_failure_is_loud_and_skips_ledger
+test_live_endpoint_reconciles_missing_launch_receipt_on_resume
+test_live_endpoint_with_mismatched_attempt_still_refuses_resume
 test_same_home_concurrent_attempts_get_distinct_copies
 test_crash_after_allocation_retains_pending_release_obligation
 test_replay_releases_only_the_exact_owning_attempt

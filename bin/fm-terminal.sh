@@ -62,6 +62,30 @@ fm_review_diff_recheck() {  # <attempt_id>; 0 only when no concrete overlap exis
   "$SCRIPT_DIR/fm-review-diff.sh" "$task_id" --stat
 }
 
+terminal_cleanup_endpoint_receipt_proves_stop() {  # <attempt_id>
+  local attempt=$1 record
+  record=$(fm_attempt_load "$attempt") || return 1
+  printf '%s' "$record" | jq -e '
+    . as $record
+    | ([.receipts["cleanup.endpoint"][]?
+        | select(.state == "observed" and .generation == $record.envelope.generation)][0].evidence // null) as $endpoint
+    | ([.receipts.landing[]?
+        | select(.state == "observed" and .generation == $record.envelope.generation)][0].evidence // null) as $landing
+    | $endpoint.confirmed_gone == true
+    and ($endpoint.backend | type == "string" and length > 0)
+    and ($endpoint.endpoint | type == "string" and length > 0)
+    and ($endpoint.task_id | type == "string" and length > 0)
+    and ($endpoint.copy | type == "string" and length > 0)
+    and $landing.disposition == "landed"
+    and $endpoint.backend == $record.provider.provider
+    and $endpoint.copy == $record.provider.copy
+    and $endpoint.backend == $landing.facts.endpoint.backend
+    and $endpoint.endpoint == $landing.facts.endpoint.id
+    and $endpoint.task_id == $landing.facts.endpoint.task_id
+    and $endpoint.copy == $landing.facts.endpoint.copy
+  ' >/dev/null 2>&1
+}
+
 # Lock probes prove the outer lock contract to tests: at steps 1 and 8 a
 # nested acquire must REFUSE (non-reentrant), and before step 9 it must
 # succeed. Only active with FM_TERMINAL_HOLD_LOCK_PROBE=1.
@@ -189,7 +213,8 @@ fi
 
 # 4b. pre-land actual-diff recheck: the existing diff helper is authoritative
 #     for overlap; a concrete conflict refuses landing and serializes
-if [ "$disp" = landed ] && [ "$cleanup_complete" = 0 ]; then
+if [ "$disp" = landed ] && [ "$cleanup_complete" = 0 ] \
+  && ! terminal_cleanup_endpoint_receipt_proves_stop "$attempt"; then
   if ! fm_review_diff_recheck "$attempt"; then
     echo "terminal: pre-land actual-diff gate refused landing for $attempt" >&2
     exit 1

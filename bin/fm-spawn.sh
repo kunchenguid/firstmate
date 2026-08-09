@@ -1471,6 +1471,7 @@ spawn_claim_before_allocation() {  # <task_key> <home_id>
         | length == 1
       ' "$attempts_dir/$resume_attempt.json" >/dev/null 2>&1; then
       ATTEMPT_ID=$resume_attempt
+      SPAWN_ATTEMPT_RESUME=1
       spawn_load_admission_evidence "$task_key" "${FM_REFILL_PROJECT:-/home/holu/decision-os}" || return 1
       return 0
     fi
@@ -1606,6 +1607,7 @@ spawn_freeze_allocation() {  # <copy-path>
 # uncertain claim receipt remains reserved until reconciled, so any handshake
 # failure refuses the spawn loudly rather than proceeding without the claim.
 FM_BR_RECEIPT_BIN="${FM_BR_RECEIPT_BIN:-$FM_ROOT/bin/fm-br-receipt.sh}"
+SPAWN_ATTEMPT_RESUME=0
 if [ "$KIND" = ship ] && [ "${FM_TRACKER_CLAIM:-0}" = 1 ]; then
   if ! spawn_claim_before_allocation "$ID" "$FM_HOME"; then
     exit 1
@@ -1826,6 +1828,67 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
       ;;
   esac
 }
+
+spawn_append_launch_ledger() {  # <attempt_id> <endpoint>
+  local attempt_id=$1 endpoint=$2 ledger
+  ledger="$STATE/launch-ledger.jsonl"
+  if ! grep -Fq -- "\"attempt_id\":\"$attempt_id\"" "$ledger" 2>/dev/null; then
+    printf '%s\n' "{\"attempt_id\":\"$attempt_id\",\"launched_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"endpoint\":\"$endpoint\"}" >> "$ledger"
+  fi
+}
+
+spawn_reconcile_live_launch() {
+  local meta record recorded_attempt recorded_backend recorded_target recorded_copy
+  local recorded_project recorded_project_real current_project recorded_harness endpoint_state gen evidence
+  [ "$SPAWN_ATTEMPT_RESUME" = 1 ] || return 1
+  fm_attempt_is_launched "$ATTEMPT_ID" && return 1
+  meta="$STATE/$ID.meta"
+  if [ ! -f "$meta" ] || [ -L "$meta" ]; then
+    [ ! -e "$meta" ] && [ ! -L "$meta" ] && return 1
+    echo "error: existing endpoint metadata is not a regular file; refusing launch receipt recovery" >&2
+    return 2
+  fi
+  fm_backend_validate_task_endpoint "$meta" "$ID" || return 2
+  recorded_backend=$FM_BACKEND_VALIDATED_BACKEND
+  recorded_target=$FM_BACKEND_VALIDATED_TARGET
+  recorded_attempt=$(fm_backend_meta_exact_value "$meta" attempt 2>/dev/null || true)
+  recorded_copy=$(fm_backend_meta_exact_value "$meta" worktree 2>/dev/null || true)
+  recorded_project=$(fm_backend_meta_exact_value "$meta" project 2>/dev/null || true)
+  recorded_harness=$(fm_backend_meta_exact_value "$meta" harness 2>/dev/null || true)
+  record=$(fm_attempt_load "$ATTEMPT_ID") || return 2
+  current_project=$(real_path_or_raw "$PROJ_ABS")
+  recorded_project_real=$(real_path_or_raw "$recorded_project")
+  if [ "$recorded_attempt" != "$ATTEMPT_ID" ] \
+    || [ "$recorded_backend" != "$BACKEND" ] \
+    || [ "$recorded_project_real" != "$current_project" ] \
+    || [ "$recorded_harness" != "$HARNESS" ] \
+    || ! printf '%s' "$record" | jq -e --arg p "$recorded_backend" --arg c "$recorded_copy" \
+      '.provider.provider == $p and .provider.copy == $c' >/dev/null 2>&1; then
+    echo "error: existing endpoint identity does not match $ATTEMPT_ID; refusing launch receipt recovery" >&2
+    return 2
+  fi
+  endpoint_state=$(fm_backend_agent_state "$recorded_backend" "$recorded_target" 2>/dev/null || printf 'unreadable')
+  [ "$endpoint_state" = alive ] || return 1
+  gen=$(fm_attempt_generation "$ATTEMPT_ID") || return 2
+  evidence=$(jq -n --arg task "$ID" --arg endpoint "$recorded_target" \
+    --arg worktree "$recorded_copy" --arg harness "$recorded_harness" \
+    --arg backend "$recorded_backend" \
+    '{task:$task,status:"launched",endpoint:$endpoint,worktree:$worktree,harness:$harness,backend:$backend,recovered_from:"verified-live-endpoint"}')
+  fm_attempt_effect_observe "$ATTEMPT_ID" "$gen" launch "$evidence" || {
+    echo "error: verified live endpoint could not publish the launch receipt for $ATTEMPT_ID" >&2
+    return 2
+  }
+  spawn_append_launch_ledger "$ATTEMPT_ID" "$recorded_target"
+  echo "spawned $ID harness=$HARNESS kind=$KIND mode=$MODE yolo=$YOLO window=$recorded_target worktree=$recorded_copy (reconciled launch receipt)"
+  return 0
+}
+
+if spawn_reconcile_live_launch; then
+  exit 0
+else
+  SPAWN_LAUNCH_RECONCILE_RC=$?
+  [ "$SPAWN_LAUNCH_RECONCILE_RC" -ne 2 ] || exit 1
+fi
 
 W="fm-$ID"
 case "$BACKEND" in
@@ -2718,8 +2781,5 @@ echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY window=$META_WINDOW
 # Task 6 audit-only launch ledger: one row per attempt, published only after
 # allocation, launch, instruction delivery, and the launch receipt succeeded.
 if [ -n "${ATTEMPT_ID:-}" ]; then
-  LEDGER="$STATE/launch-ledger.jsonl"
-  if ! grep -Fq -- "\"attempt_id\":\"$ATTEMPT_ID\"" "$LEDGER" 2>/dev/null; then
-    printf '%s\n' "{\"attempt_id\":\"$ATTEMPT_ID\",\"launched_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"endpoint\":\"$META_WINDOW\"}" >> "$LEDGER"
-  fi
+  spawn_append_launch_ledger "$ATTEMPT_ID" "$META_WINDOW"
 fi

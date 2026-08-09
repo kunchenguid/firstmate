@@ -389,6 +389,43 @@ test_preland_actual_diff_conflict_refuses_landing() {
   pass "the pre-land actual-diff recheck refuses landing on a concrete overlap"
 }
 
+test_runtime_record_crash_replays_from_endpoint_receipt() {
+  local aid out rc
+  aid=$(setup_terminal_attempt)
+  out=$(FM_CLEANUP_CRASH_AFTER_RUNTIME_REMOVE=1 "$ROOT/bin/fm-terminal.sh" "$aid" 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "runtime-record crash point did not stop terminal"
+  [ ! -e "$STATE/run-$aid.meta" ] || fail "runtime-record crash did not remove task metadata"
+  jq -e '
+    ([.receipts["cleanup.endpoint"][]?
+      | select(.state == "observed" and .evidence.confirmed_gone == true)] | length) == 1
+    and (.receipts["cleanup.runtime"] == null)
+  ' "$STATE/attempts/$aid.json" >/dev/null || fail "runtime-record crash fixture lacks the endpoint replay boundary"
+  out=$("$ROOT/bin/fm-terminal.sh" "$aid" 2>&1)
+  rc=$?
+  expect_code 0 "$rc" "terminal should replay after runtime metadata removal: $out"
+  fm_attempt_is_retired "$aid" || fail "runtime-record replay did not retire the attempt"
+  jq -e '
+    ([.receipts["cleanup.runtime"][]?
+      | select(.state == "observed" and .evidence.confirmed_absent == true)] | length) == 1
+  ' "$STATE/attempts/$aid.json" >/dev/null || fail "runtime-record replay did not publish exact absence evidence"
+  pass "endpoint receipt resumes terminal after runtime metadata removal"
+}
+
+test_mismatched_endpoint_receipt_does_not_bypass_diff_gate() {
+  local aid gen out
+  aid=$(setup_terminal_attempt)
+  gen=$(fm_attempt_generation "$aid") || fail "generation"
+  fm_attempt_effect_observe "$aid" "$gen" cleanup.endpoint \
+    "$(jq -nc --arg copy "$TMP_ROOT/wt-t" \
+      '{backend:"tmux",endpoint:"firstmate:fm-other",task_id:"other",copy:$copy,confirmed_gone:true}')" \
+    || fail "mismatched endpoint receipt fixture"
+  out=$(FM_REVIEW_DIFF_CONFLICT=1 "$ROOT/bin/fm-terminal.sh" "$aid" 2>&1 || true)
+  assert_contains "$out" "pre-land" "mismatched endpoint receipt bypassed the strict diff gate"
+  fm_attempt_is_retired "$aid" && fail "mismatched endpoint receipt retired the attempt"
+  pass "only the exact stopped endpoint receipt bypasses the unavailable diff gate"
+}
+
 test_outer_lock_spans_verification_through_retirement
 test_crash_after_every_effect_replays_to_semantic_equivalence
 test_concurrent_terminal_and_refill_are_deterministic
@@ -403,3 +440,5 @@ test_preserved_unlanded_needs_no_close_authority_or_tracker_closure
 test_real_review_diff_failure_is_propagated
 test_post_retirement_refill_uses_fresh_projection_after_unlock
 test_preland_actual_diff_conflict_refuses_landing
+test_runtime_record_crash_replays_from_endpoint_receipt
+test_mismatched_endpoint_receipt_does_not_bypass_diff_gate
