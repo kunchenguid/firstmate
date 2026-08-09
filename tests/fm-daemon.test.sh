@@ -20,8 +20,24 @@ if [ -z "${FM_TEST_DAEMON_SOURCED:-}" ]; then
   # shellcheck source=bin/fm-supervise-daemon.sh
   . "$DAEMON"
 fi
+fm_guard_crew_state_reader
 
 TMP_ROOT=$(fm_test_tmproot fm-daemon-tests)
+
+# bin/fm-classify-lib.sh defaults FM_CREW_STATE_BIN to the REAL reader at source
+# time, and this base reaches crew_absorb_class on the per-wake path as well as at
+# the housekeeping gate, so a case that never stubs it would take its verdict from
+# whatever this checkout happens to look like rather than from the test. Default
+# the whole suite to a shared fake that returns the same inert verdict every
+# per-case fake returns, which removes that class of accident by construction
+# instead of aborting on it. A test that needs a particular verdict still sets
+# FM_CREW_STATE_BIN and FM_FAKE_CREW_STATE as a per-call env prefix, which wins
+# over this default; fm_guard_crew_state_reader stays armed for a reader that is
+# unusable or explicitly pointed back at the real one.
+mkdir -p "$TMP_ROOT/suite-fakebin"
+FM_DAEMON_SUITE_CREW_STATE_BIN=$(make_fake_crew_state "$TMP_ROOT/suite-fakebin")
+FM_CREW_STATE_BIN=$FM_DAEMON_SUITE_CREW_STATE_BIN
+
 FM_DAEMON_PRIMARY_HARNESS=claude
 export FM_DAEMON_PRIMARY_HARNESS
 
@@ -133,7 +149,8 @@ test_stale_transient_self_records_marker() {
   state="$dir/state"
   printf 'working: building\n' > "$state/qux-w4.status"
   stale_marker_record "sess:fm-qux-w4" "$state"
-  out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-qux-w4" "$state")
+  out=$(FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
+    classify_stale "sess:fm-qux-w4" "$state")
   case "$out" in self\|*) ;; *) fail "transient stale did not self-handle: $out" ;; esac
   key=$(printf '%s' "$(window_to_task "sess:fm-qux-w4")" | tr ':/.' '___')
   [ -e "$state/.subsuper-stale-$key" ] || fail "stale marker was not recorded"
@@ -169,9 +186,11 @@ test_stale_diagnostic_wedge_survives_busy_housekeeping() {
     (
       kill() { printf 'kill %s\n' "$*" >> "$action_log"; }
       fm_backend_send_text_submit() { printf 'interrupt %s\n' "$*" >> "$action_log"; }
-      LOG="$dir/daemon.log" FM_STATE_OVERRIDE="$state" handle_wake "$reason" "$state"
+      LOG="$dir/daemon.log" FM_STATE_OVERRIDE="$state" \
+        FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" handle_wake "$reason" "$state"
       PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
-        FM_STATE_OVERRIDE="$state" FM_ESCALATE_BATCH_SECS=999999 housekeeping "$state"
+        FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+        FM_ESCALATE_BATCH_SECS=999999 housekeeping "$state"
     )
     [ "$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')" = 1 ] \
       || fail "$case_name enriched wedge did not produce exactly one escalation"
@@ -316,7 +335,11 @@ test_stale_blocked_on_human_outranks_settled_absorb() {
   out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-park-s3" "$state" "$detail")
   case "$out" in pause\|*) ;; *) fail "a declared pause lost precedence to the blocked-on-human edge: $out" ;; esac
 
-  unset FM_FAKE_CREW_STATE FM_CREW_STATE_BIN
+  # Restore the suite default rather than unsetting it: an unset here would strip
+  # the fake for every later case in this file, and the next one to reach
+  # crew_absorb_class would die on the unusable-reader leg instead of running.
+  unset FM_FAKE_CREW_STATE
+  FM_CREW_STATE_BIN=$FM_DAEMON_SUITE_CREW_STATE_BIN
   pass "a blocked-on-human edge outranks the settled absorb on the same crew, while a declared pause still outranks both"
 }
 
@@ -370,7 +393,8 @@ test_stale_settled_terminal_self_handles() {
   export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
   out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-fin-s1" "$state")
   case "$out" in settled\|*) fail "an unknown crew was classed settled: $out" ;; esac
-  unset FM_FAKE_CREW_STATE FM_CREW_STATE_BIN
+  unset FM_FAKE_CREW_STATE
+  FM_CREW_STATE_BIN=$FM_DAEMON_SUITE_CREW_STATE_BIN
   pass "settled terminal stales self-handle without wedge tracking, while an unknown crew still does not"
 }
 
@@ -392,7 +416,8 @@ test_stale_terminal_dedupes_against_signal() {
   case "$out" in self\|*) ;; *) fail "the duplicate stale did not dedupe against the signal: $out" ;; esac
   FM_STATE_OVERRIDE="$state" handle_wake "stale: sess:fm-dup-s2" "$state"
   [ "$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')" = 1 ] || fail "the duplicate signal/stale pair produced more than one entry"
-  unset FM_FAKE_CREW_STATE FM_CREW_STATE_BIN
+  unset FM_FAKE_CREW_STATE
+  FM_CREW_STATE_BIN=$FM_DAEMON_SUITE_CREW_STATE_BIN
   pass "a duplicate signal/stale pair on a terminal status still de-duplicates to one entry"
 }
 
@@ -427,6 +452,510 @@ test_handle_wake_paused_records_pause_marker() {
   [ ! -e "$state/.subsuper-stale-$key" ] || fail "wedge marker not cleared when the crew declared a pause"
   [ ! -s "$state/.subsuper-escalations" ] || fail "a declared pause escalated on the wake itself (should defer to the long recheck)"
   pass "handle_wake on a paused stale records a pause marker, drops the wedge marker, and does not escalate"
+}
+
+# The recorded incident, as a unit: a healthy long-running worker holds a static
+# pane because it is waiting on a completion ARTIFACT rather than printing, and
+# every wedge timer fired on it anyway. The provably-working GATE is not on this
+# path: a static pane can be re-surfaced arbitrarily often, so a non-terminal
+# stale only records the daemon's own marker here and the provably-working
+# question is asked once per threshold in housekeeping.
+#
+# This base does read crew state on the wake path, once per wake, for a DIFFERENT
+# question - the settled-terminal absorb that classify_stale asks before the
+# status-line tests. That read is the base's own deliberate, documented choice
+# (see classify_stale and docs/architecture.md), so what this case pins is that
+# the wake path adds no read of its own and never runs the gate: the marker is
+# recorded, never refreshed, never escalated, and the reader is consulted exactly
+# once per wake rather than once per gate.
+test_stale_transient_records_marker_without_reading_crew_state() {
+  local dir state fakebin out win key calls i
+  dir=$(make_supercase stale-provably-working); state="$dir/state"; fakebin="$dir/fakebin"
+  win="sess:fm-longrun-w1"
+  key=$(printf '%s' "longrun-w1" | tr ':/.' '___')
+  calls="$dir/crew-state-calls"
+  printf 'working: rebuilding the fixture corpus, awaiting the completion marker\n' \
+    > "$state/longrun-w1.status"
+
+  # Every stub is a PER-CALL env prefix. FM_CREW_STATE_BIN in particular is owned
+  # by bin/fm-classify-lib.sh, which defaults it once at source time: exporting it
+  # here and unsetting it afterwards would strip that default for the rest of this
+  # file, so a later test reaching the gate without its own stub would die on an
+  # unbound variable inside the command substitution and merely fail to read
+  # `working` - passing an escalation control for the wrong reason.
+  out=$(FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_FAKE_CREW_STATE='state: working · source: run-step · running: tests' \
+    FM_FAKE_CREW_STATE_LOG="$calls" classify_stale "$win" "$state")
+  case "$out" in self\|*) ;; *) fail "a transient stale did not self-handle: $out" ;; esac
+
+  # Repeated wakes for the same window keep recording the marker and never run the
+  # gate, which is what keeps the per-wake path bounded by the base's single
+  # settled-absorb read rather than by how often a static pane is re-surfaced.
+  for i in 1 2 3; do
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+      FM_FAKE_CREW_STATE='state: working · source: run-step · running: tests' \
+      FM_FAKE_CREW_STATE_LOG="$calls" handle_wake "stale: $win" "$state"
+  done
+  [ -e "$state/.subsuper-stale-$key" ] || fail "a transient stale did not record wedge tracking"
+  [ ! -e "$state/.subsuper-paused-$key" ] || fail "a transient stale invented pause tracking"
+  [ ! -s "$state/.subsuper-escalations" ] || fail "a transient stale escalated: $(cat "$state/.subsuper-escalations")"
+  # Four wakes, four reads: the base's one settled-absorb read each, and nothing
+  # the gate added. A count above this means the gate leaked onto the wake path,
+  # which is the regression this case exists to catch; a count below it means the
+  # settled absorb stopped running and its own cases are the ones to trust.
+  [ "$(wc -l < "$calls" | tr -d ' ')" = 4 ] \
+    || fail "the wake path read crew state $(wc -l < "$calls" | tr -d ' ') time(s) across 4 wakes; expected exactly one settled-absorb read per wake and no gate read"
+
+  pass "a non-terminal stale wake records its marker without reading crew state"
+}
+
+# The gate itself, at the one point it lives: an aged marker about to escalate.
+# The negative control runs FIRST on the same fixture so the escalation path is
+# witnessed firing before the gate is trusted to suppress it, and the suppression
+# leg asserts the marker is REFRESHED rather than removed - that refresh is what
+# makes silence conditional on re-earning the verdict every threshold.
+test_housekeeping_provably_working_stale_not_escalated() {
+  local dir state fakebin win pane key before after
+  dir=$(make_supercase stale-provably-working-housekeeping)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  win="sess:fm-longrun-w2"; pane="$dir/pane.txt"
+  printf 'working: waiting on the completion marker\n' > "$state/longrun-w2.status"
+  printf 'idle prompt $\n' > "$pane"
+  key=$(printf '%s' "longrun-w2" | tr ':/.' '___')
+
+  # Negative control: no advancing evidence, same aged marker and same threshold.
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available' \
+    housekeeping "$state"
+  grep -F "possible wedge" "$state/.subsuper-escalations" >/dev/null 2>&1 \
+    || fail "a genuinely hung pane no longer wedge-escalates on the same schedule"
+  [ ! -e "$state/.subsuper-stale-$key" ] || fail "wedge marker not cleared after escalation"
+  : > "$state/.subsuper-escalations"
+
+  # Same fixture, same aged marker, same static pane - now provably working.
+  before=$(( $(date +%s) - 500 ))
+  echo "$before" > "$state/.subsuper-stale-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_FAKE_CREW_STATE='state: working · source: pane · harness busy (claude-hook)' \
+    housekeeping "$state"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "a provably-working crew escalated a possible wedge: $(cat "$state/.subsuper-escalations")"
+  [ -e "$state/.subsuper-stale-$key" ] \
+    || fail "a provably-working crew LOST its wedge marker; silence must stay conditional on re-earning the verdict"
+  after=$(cat "$state/.subsuper-stale-$key")
+  [ "$after" -gt "$before" ] \
+    || fail "the wedge marker was not refreshed ($after not newer than $before), so aging did not restart"
+  pass "housekeeping refreshes a persistent stale that is provably working, while an unreadable crew still escalates"
+}
+
+# Simulate one threshold elapsing WITHOUT re-creating anything: back-date only a
+# marker that is already there. A design that removed the marker instead of
+# refreshing it leaves nothing to age, so the escalation legs below go silent
+# rather than passing on a marker the test itself put back.
+age_existing_stale_marker() {  # <marker> <seconds>
+  [ -e "$1" ] || return 0
+  echo $(( $(cat "$1") - $2 )) > "$1"
+}
+
+# THE FAIL-SAFE, and the property the whole design rests on: silence must require
+# an active, repeated, positive refresh. Once the working verdict stops arriving -
+# the crew freezes, the reader errors, the run detaches - nothing has to notice and
+# re-arm anything; the refreshed marker simply ages out and escalates on the next
+# threshold. Detection after a freeze therefore costs at most TWO thresholds, not
+# one, and never becomes unbounded. Both ways of losing the verdict are exercised,
+# because a design that removed the marker instead of refreshing it would be silent
+# forever under either.
+test_housekeeping_working_stale_escalates_once_refresh_stops() {
+  local dir state fakebin win pane key marker
+  dir=$(make_supercase stale-working-then-frozen)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  win="sess:fm-longrun-w3"; pane="$dir/pane.txt"
+  key=$(printf '%s' "longrun-w3" | tr ':/.' '___')
+  marker="$state/.subsuper-stale-$key"
+  printf 'working: waiting on the completion marker\n' > "$state/longrun-w3.status"
+  printf 'idle prompt $\n' > "$pane"
+
+  # The wake path recorded this marker once; everything after it is the daemon's
+  # own doing, so the marker is never written by this test again.
+  echo $(( $(date +%s) - 500 )) > "$marker"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_FAKE_CREW_STATE='state: working · source: run-step · running: tests' \
+    housekeeping "$state"
+  [ ! -s "$state/.subsuper-escalations" ] || fail "a working crew escalated on its first threshold"
+
+  # A second threshold, still working: still silent, so the escalation below
+  # cannot be an artefact of the marker merely aging twice.
+  age_existing_stale_marker "$marker" 500
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_FAKE_CREW_STATE='state: working · source: run-step · running: tests' \
+    housekeeping "$state"
+  [ ! -s "$state/.subsuper-escalations" ] || fail "a still-working crew escalated on its second threshold"
+
+  # Now it freezes. The pane text never changes, so nothing but the marker the
+  # daemon kept refreshing can find it - and one more threshold is all it takes.
+  age_existing_stale_marker "$marker" 500
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_FAKE_CREW_STATE='state: stopped · source: pane · agent exited' \
+    housekeeping "$state"
+  grep -F "possible wedge" "$state/.subsuper-escalations" >/dev/null 2>&1 \
+    || fail "a crew that froze after being classed working never escalated a possible wedge"
+  [ ! -e "$marker" ] || fail "wedge marker not cleared after the escalation"
+  : > "$state/.subsuper-escalations"
+
+  # The same fail-safe when the READER stops answering rather than the crew: an
+  # unreadable verdict is not a working verdict, so a refreshed marker ages out
+  # too. The marker is recorded once more through the daemon's own helper, as a
+  # fresh stale wake would, and never written by the test after that.
+  FM_STATE_OVERRIDE="$state" stale_marker_record "$win" "$state"
+  age_existing_stale_marker "$marker" 500
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_FAKE_CREW_STATE='state: working · source: run-step · running: tests' \
+    housekeeping "$state"
+  [ ! -s "$state/.subsuper-escalations" ] || fail "a working crew escalated while its verdict still held"
+  age_existing_stale_marker "$marker" 500
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 \
+    FM_CREW_STATE_BIN="$dir/no-such-crew-state.sh" FM_TEST_CREW_STATE_UNREADABLE=1 \
+    housekeeping "$state"
+  grep -F "possible wedge" "$state/.subsuper-escalations" >/dev/null 2>&1 \
+    || fail "an unanswerable crew-state read stayed silent instead of escalating"
+  pass "a refreshed wedge marker escalates within one more threshold once the working verdict stops"
+}
+
+# THE HOT-PATH CHECK. The gate's cost must be bounded by the threshold, not by how
+# often a static pane is re-surfaced: crew_absorb_class may make a bounded
+# no-mistakes call, so one read per tick would be a fleet-wide load multiplier for
+# exactly the long-running workers this change exists to protect. Counted rather
+# than reasoned about, and paired with the assertion that the working path leaves
+# every watcher per-hash marker alone - removing one is what makes the watcher
+# re-enqueue the same hash immediately and turns this into a spin loop.
+test_housekeeping_working_gate_read_is_bounded_per_threshold() {
+  local dir state fakebin win pane key watcher_key calls n i
+  dir=$(make_supercase stale-working-read-budget)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  win="sess:fm-longrun-w4"; pane="$dir/pane.txt"
+  key=$(printf '%s' "longrun-w4" | tr ':/.' '___')
+  watcher_key=$(printf '%s' "$win" | tr ':/.' '___')
+  calls="$dir/crew-state-calls"
+  printf 'working: waiting on the completion marker\n' > "$state/longrun-w4.status"
+  printf 'idle prompt $\n' > "$pane"
+  printf 'PANEHASH' > "$state/.stale-$watcher_key"
+  date +%s > "$state/.stale-since-$watcher_key"
+  printf '1' > "$state/.wedge-escalations-$watcher_key"
+  : > "$calls"
+
+  # Six ticks inside one threshold, then one tick past it. Only the tick that
+  # reaches the escalation point may read crew state.
+  date +%s > "$state/.subsuper-stale-$key"
+  for i in 1 2 3 4 5 6; do
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+      FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 \
+      FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_FAKE_CREW_STATE_LOG="$calls" \
+      FM_FAKE_CREW_STATE='state: working · source: run-step · running: tests' \
+      housekeeping "$state"
+  done
+  n=$(wc -l < "$calls" | tr -d ' ')
+  [ "$n" = "0" ] || fail "housekeeping read crew state $n time(s) below the threshold; the gate must only run at the escalation point"
+
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_FAKE_CREW_STATE_LOG="$calls" \
+    FM_FAKE_CREW_STATE='state: working · source: run-step · running: tests' \
+    housekeeping "$state"
+  n=$(wc -l < "$calls" | tr -d ' ')
+  [ "$n" = "1" ] || fail "expected exactly one crew-state read per threshold, got $n over seven ticks"
+
+  # The watcher's own per-hash markers are not the daemon's to clear: removing one
+  # makes the watcher re-enqueue the same unchanged hash on its next poll.
+  [ -e "$state/.stale-$watcher_key" ] \
+    || fail "the working path removed the watcher's per-hash stale marker, re-surfacing the same hash every poll"
+  [ -e "$state/.stale-since-$watcher_key" ] \
+    || fail "the working path removed the watcher's stale-since marker"
+  [ -e "$state/.wedge-escalations-$watcher_key" ] \
+    || fail "the working path removed the watcher's wedge-escalation counter"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "a continuously-working crew escalated: $(cat "$state/.subsuper-escalations")"
+  pass "the provably-working gate costs one crew-state read per threshold and leaves watcher markers alone"
+}
+
+# THE PER-PASS BUDGET, and the property that makes it safe to have one. The gate
+# is one read per crew per threshold, but housekeeping runs INLINE in the daemon's
+# main loop, so N crews going due in the same pass would cost N serial bounded
+# reads and stall wake handling for their sum. STALE_WORKING_GATE_READS caps the
+# count per pass; what must be true is that a marker denied its read this pass is
+# only DELAYED, never suppressed. Two crews go due together with a budget of one:
+# the first spends it, the second is deferred untouched, and the very next pass -
+# where the first is no longer due, because spending budget always leaves the due
+# set - escalates the second. A budget that dropped or absorbed the deferred
+# marker would leave the second crew silent forever, so both legs are asserted.
+test_housekeeping_working_gate_budget_defers_without_suppressing() {
+  local dir state fakebin pane calls key_a key_b before_a before_b after_a n
+  dir=$(make_supercase stale-working-gate-pass-budget)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  pane="$dir/pane.txt"; calls="$dir/crew-state-calls"
+  printf 'idle prompt $\n' > "$pane"
+  : > "$calls"
+  # Marker iteration is glob-ordered, so budget-a-w1 is read before budget-b-w2.
+  fm_write_meta "$state/budget-a-w1.meta" "window=sess:fm-budget-a-w1" "backend=tmux"
+  fm_write_meta "$state/budget-b-w2.meta" "window=sess:fm-budget-b-w2" "backend=tmux"
+  printf 'working: awaiting the completion marker\n' > "$state/budget-a-w1.status"
+  printf 'working: awaiting the completion marker\n' > "$state/budget-b-w2.status"
+  key_a=$(printf '%s' "budget-a-w1" | tr ':/.' '___')
+  key_b=$(printf '%s' "budget-b-w2" | tr ':/.' '___')
+  before_a=$(( $(date +%s) - 500 )); before_b=$before_a
+  echo "$before_a" > "$state/.subsuper-stale-$key_a"
+  echo "$before_b" > "$state/.subsuper-stale-$key_b"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 FM_STALE_WORKING_GATE_READS=1 \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_FAKE_CREW_STATE_LOG="$calls" \
+    FM_FAKE_CREW_STATE_budget_a_w1='state: working · source: run-step · running: tests' \
+    FM_FAKE_CREW_STATE_budget_b_w2='state: stopped · source: pane · agent exited' \
+    housekeeping "$state"
+  n=$(wc -l < "$calls" | tr -d ' ')
+  [ "$n" = "1" ] || fail "the pass budget of one allowed $n crew-state read(s)"
+  grep -Fx "budget-a-w1" "$calls" >/dev/null || fail "the budget was not spent on the first due marker: $(cat "$calls")"
+  after_a=$(cat "$state/.subsuper-stale-$key_a")
+  [ "$after_a" -gt "$before_a" ] || fail "the crew that spent the budget was not refreshed"
+  # The deferred marker must be left exactly as it was: not escalated, not
+  # refreshed, not removed. Refreshing it would restart its clock and silently
+  # postpone the wedge; removing it would lose the wedge outright.
+  [ -e "$state/.subsuper-stale-$key_b" ] || fail "the deferred marker was dropped, losing the wedge entirely"
+  [ "$(cat "$state/.subsuper-stale-$key_b")" = "$before_b" ] \
+    || fail "the deferred marker was refreshed without evidence, postponing its wedge silently"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "the deferred marker escalated without its read: $(cat "$state/.subsuper-escalations")"
+
+  # Next pass, same budget of one. The refreshed crew is no longer due, so the
+  # budget reaches the deferred marker and it escalates - one tick late, not lost.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 FM_STALE_WORKING_GATE_READS=1 \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_FAKE_CREW_STATE_LOG="$calls" \
+    FM_FAKE_CREW_STATE_budget_a_w1='state: working · source: run-step · running: tests' \
+    FM_FAKE_CREW_STATE_budget_b_w2='state: stopped · source: pane · agent exited' \
+    housekeeping "$state"
+  grep -Fx "budget-b-w2" "$calls" >/dev/null \
+    || fail "the deferred marker never got its read on the next pass: $(cat "$calls")"
+  grep -F "possible wedge" "$state/.subsuper-escalations" >/dev/null 2>&1 \
+    || fail "a deferred read suppressed the escalation instead of delaying it by one pass"
+  grep -F "sess:fm-budget-b-w2" "$state/.subsuper-escalations" >/dev/null \
+    || fail "the escalation names the wrong crew: $(cat "$state/.subsuper-escalations")"
+  [ ! -e "$state/.subsuper-stale-$key_b" ] || fail "the escalated marker was not cleared"
+  [ -e "$state/.subsuper-stale-$key_a" ] || fail "the still-working crew lost its refreshed marker"
+  pass "a gate read deferred by the per-pass budget delays an escalation by one pass and never suppresses it"
+}
+
+# The guard is installed per test FILE, so two suites sharing one process would
+# install it twice. A re-wrap would derive the "unguarded" alias from the already
+# guarded function, leaving the alias calling itself: a forgotten stub would then
+# blow the stack instead of naming the reason, which is strictly worse than the
+# defect the guard exists to catch. Both halves are witnessed in child shells,
+# because the assertion is about the abort itself. FUNCNEST bounds a regression to
+# a fast error rather than an out-of-memory hang.
+test_crew_state_reader_guard_install_is_idempotent() {
+  local dir fakebin out code alias_body
+  dir="$TMP_ROOT/guard-idempotent"; fakebin="$dir/fakebin"
+  mkdir -p "$fakebin"
+  make_fake_crew_state "$fakebin" >/dev/null
+
+  # Structural: after two installs the alias must still be the ORIGINAL classifier,
+  # with none of the guard's own body folded into it.
+  alias_body=$(FUNCNEST=200 bash -c '
+    set -u
+    . "$1/tests/wake-helpers.sh"
+    . "$1/bin/fm-supervise-daemon.sh"
+    fm_guard_crew_state_reader
+    fm_guard_crew_state_reader
+    declare -f _fm_unguarded_crew_absorb_class
+  ' _ "$ROOT" 2>/dev/null)
+  [ -n "$alias_body" ] || fail "installing the guard twice left no unguarded alias behind"
+  case "$alias_body" in
+    *FM_TEST_CREW_STATE_UNREADABLE*)
+      fail "installing the guard twice re-wrapped the alias around the guard, so it now calls itself" ;;
+  esac
+
+  # Behavioural, the leg that can actually observe a re-wrap: a reader that EXISTS
+  # and answers, so both guard branches pass and control reaches the alias. Only
+  # this fixture recurses under a re-wrap - an unusable reader aborts in the first
+  # branch before the alias is ever entered, so it can never witness the nesting.
+  out=$(FUNCNEST=200 bash -c '
+    set -u
+    . "$1/tests/wake-helpers.sh"
+    . "$1/bin/fm-supervise-daemon.sh"
+    fm_guard_crew_state_reader
+    fm_guard_crew_state_reader
+    FM_CREW_STATE_BIN="$2/fm-crew-state.sh" \
+      FM_FAKE_CREW_STATE="state: working · source: run-step · running: tests" \
+      crew_absorb_class some-task
+  ' _ "$ROOT" "$fakebin" 2>&1)
+  case "$out" in
+    *"nesting level exceeded"*)
+      fail "installing the guard twice made the alias call itself: $out" ;;
+  esac
+  [ "$out" = working ] \
+    || fail "the alias did not return the reader's verdict after a second install: $out"
+
+  # And the second install must not have disarmed the first: an unusable reader
+  # still aborts with the diagnostic.
+  out=$(FUNCNEST=200 bash -c '
+    set -u
+    . "$1/tests/wake-helpers.sh"
+    . "$1/bin/fm-supervise-daemon.sh"
+    fm_guard_crew_state_reader
+    fm_guard_crew_state_reader
+    FM_CREW_STATE_BIN="$2/no-such-crew-state.sh" crew_absorb_class some-task
+  ' _ "$ROOT" "$dir" 2>&1)
+  code=$?
+  case "$out" in
+    *"unusable FM_CREW_STATE_BIN"*) ;;
+    *) fail "installing the guard twice lost the abort diagnostic (exit $code): $out" ;;
+  esac
+  [ "$code" -ne 0 ] || fail "installing the guard twice let an unusable reader through with exit 0"
+  pass "installing the crew-state reader guard twice leaves the alias unwrapped, answering, and still guarded"
+}
+
+# The budget sanitizer, both legs. An invalid value must restore the DEFAULT, not
+# floor to one - flooring a typo would cut gate throughput threefold - and it must
+# say so, because a silent correction teaches the operator nothing. Zero is in
+# range rather than invalid, so it floors to one and says nothing.
+test_stale_gate_read_budget_reports_invalid_and_floors_zero() {
+  local dir daemon_log budget
+  dir="$TMP_ROOT/gate-budget-sanitizer"
+  mkdir -p "$dir"
+  daemon_log="$dir/daemon.log"; : > "$daemon_log"
+
+  # Called directly, never through $( ): the helper ASSIGNS its answer so its
+  # throttle memory survives, and a substitution would discard both.
+  LOG="$daemon_log" FM_STALE_WORKING_GATE_READS='3 ' stale_gate_read_budget
+  budget=$STALE_GATE_READ_BUDGET
+  [ "$budget" = 3 ] || fail "an invalid budget did not restore the default of 3: got '$budget'"
+  grep -F "invalid FM_STALE_WORKING_GATE_READS '3 '; using 3" "$daemon_log" >/dev/null \
+    || fail "an invalid budget was corrected silently: $(cat "$daemon_log")"
+
+  : > "$daemon_log"
+  LOG="$daemon_log" FM_STALE_WORKING_GATE_READS=-5 stale_gate_read_budget
+  budget=$STALE_GATE_READ_BUDGET
+  [ "$budget" = 3 ] || fail "a negative budget did not restore the default of 3: got '$budget'"
+  [ -s "$daemon_log" ] || fail "a negative budget was corrected silently"
+
+  : > "$daemon_log"
+  LOG="$daemon_log" FM_STALE_WORKING_GATE_READS=0 stale_gate_read_budget
+  budget=$STALE_GATE_READ_BUDGET
+  [ "$budget" = 1 ] || fail "a budget of 0 did not floor to 1: got '$budget'"
+  [ ! -s "$daemon_log" ] \
+    || fail "an in-range budget of 0 logged an invalid-value diagnostic: $(cat "$daemon_log")"
+
+  : > "$daemon_log"
+  LOG="$daemon_log" FM_STALE_WORKING_GATE_READS='' stale_gate_read_budget
+  budget=$STALE_GATE_READ_BUDGET
+  [ "$budget" = 3 ] || fail "a blank budget did not use the default of 3: got '$budget'"
+  [ ! -s "$daemon_log" ] || fail "a blank budget logged an invalid-value diagnostic: $(cat "$daemon_log")"
+
+  LOG="$daemon_log" FM_STALE_WORKING_GATE_READS=2 stale_gate_read_budget
+  budget=$STALE_GATE_READ_BUDGET
+  [ "$budget" = 2 ] || fail "a valid budget was not honoured: got '$budget'"
+  pass "an invalid gate budget restores the default and is logged, while 0 floors to 1 quietly"
+}
+
+# The sanitizer's verdict must be what housekeeping actually spends, counted
+# rather than asserted at the helper: four crews go due at once with an invalid
+# budget, and exactly the default of three reads may happen.
+test_housekeeping_spends_the_sanitized_budget() {
+  local dir state fakebin pane calls daemon_log i key n
+  dir=$(make_supercase gate-budget-sanitized-spend)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  pane="$dir/pane.txt"; calls="$dir/crew-state-calls"; daemon_log="$dir/daemon.log"
+  printf 'idle prompt $\n' > "$pane"
+  : > "$calls"; : > "$daemon_log"
+  for i in 1 2 3 4; do
+    fm_write_meta "$state/spend-w$i.meta" "window=sess:fm-spend-w$i" "backend=tmux"
+    printf 'working: awaiting the completion marker\n' > "$state/spend-w$i.status"
+    key=$(printf '%s' "spend-w$i" | tr ':/.' '___')
+    echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+  done
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$pane" LOG="$daemon_log" \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 FM_STALE_WORKING_GATE_READS='4 ' \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_FAKE_CREW_STATE_LOG="$calls" \
+    FM_FAKE_CREW_STATE='state: working · source: run-step · running: tests' \
+    housekeeping "$state"
+  n=$(wc -l < "$calls" | tr -d ' ')
+  [ "$n" = 3 ] || fail "an invalid budget spent $n read(s); the sanitized default of 3 must be what housekeeping uses"
+  # Names the value, so the in-process report throttle cannot let this pass on a
+  # line some earlier test's misconfiguration emitted.
+  grep -F "invalid FM_STALE_WORKING_GATE_READS '4 '; using 3" "$daemon_log" >/dev/null \
+    || fail "housekeeping applied the corrected budget without reporting it: $(cat "$daemon_log")"
+  pass "housekeeping spends the sanitized budget and reports the invalid value it replaced"
+}
+
+# The report must be neither silent nor a flood. It is read once per housekeeping
+# pass, so reporting unconditionally would emit thousands of identical lines a day
+# and evict, from a log trimmed to LOG_KEEP_LINES, exactly the watcher-crash and
+# escalation history an operator opens the log to find.
+# Every leg drives HOUSEKEEPING, the daemon's own call site, not the helper: a
+# throttle can be perfectly correct inside the helper and still be discarded on
+# return, so only the production call path can show that its memory survives. The
+# legs share one child shell because that memory is per-process.
+test_stale_gate_read_budget_report_is_throttled() {
+  local dir msg n
+  dir="$TMP_ROOT/gate-budget-report-cadence"
+  mkdir -p "$dir"
+  msg="invalid FM_STALE_WORKING_GATE_READS"
+
+  FUNCNEST=200 bash -c '
+    set -u
+    . "$1/tests/wake-helpers.sh"
+    . "$1/bin/fm-supervise-daemon.sh"
+    state="$2/state"; mkdir -p "$state"
+    export FM_STATE_OVERRIDE="$state"
+
+    # Four passes, one standing typo: the daemon would emit four lines a minute.
+    LOG="$2/persist.log"
+    for _i in 1 2 3 4; do FM_STALE_WORKING_GATE_READS=abc housekeeping "$state"; done
+
+    LOG="$2/changed.log"; FM_STALE_WORKING_GATE_READS=zzz housekeeping "$state"
+
+    # A real interval decides both of the next two, so a broken elapsed
+    # computation cannot pass: back-dated inside it, then well past it.
+    # Defaulted, not bare: if the passes above failed to record a timestamp at
+    # all, these legs must still run and report it, not abort the probe.
+    STALE_GATE_INVALID_REMIND_SECS=30
+    LOG="$2/within.log"
+    _fm_gate_budget_reported_at=$(( ${_fm_gate_budget_reported_at:-0} - 2 ))
+    FM_STALE_WORKING_GATE_READS=zzz housekeeping "$state"
+    LOG="$2/elapsed.log"
+    _fm_gate_budget_reported_at=$(( ${_fm_gate_budget_reported_at:-0} - 60 ))
+    FM_STALE_WORKING_GATE_READS=zzz housekeeping "$state"
+  ' _ "$ROOT" "$dir" 2>/dev/null || fail "the cadence probe did not run to completion"
+
+  n=$(grep -Fc "$msg" "$dir/persist.log" 2>/dev/null || echo 0)
+  [ "$n" = 1 ] \
+    || fail "four housekeeping passes with one standing invalid budget emitted $n report(s); exactly 1 is the bound"
+  n=$(grep -Fc "$msg 'zzz'" "$dir/changed.log" 2>/dev/null || echo 0)
+  [ "$n" -ge 1 ] \
+    || fail "a changed invalid budget was not reported, so a re-botched edit would go unmentioned"
+  # Same value from here on, so only the elapsed-interval arm can decide.
+  n=$(grep -Fc "$msg" "$dir/within.log" 2>/dev/null || echo 0)
+  [ "$n" = 0 ] \
+    || fail "the reminder fired $n time(s) inside its own interval, so the interval is not being honoured"
+  n=$(grep -Fc "$msg 'zzz'" "$dir/elapsed.log" 2>/dev/null || echo 0)
+  [ "$n" -ge 1 ] \
+    || fail "the periodic reminder never fired past its interval, so a standing misconfiguration would rot invisibly"
+  pass "through housekeeping itself, the invalid-budget report fires once per standing typo, again on change, and only past its reminder interval"
 }
 
 test_handle_wake_paused_signal_records_pause_marker() {
@@ -749,18 +1278,29 @@ test_housekeeping_pause_marker_transitions_to_clear() {
 }
 
 test_housekeeping_persistent_stale_escalates() {
-  local dir state fakebin win pane key
+  local dir state fakebin win pane key calls
   dir=$(make_supercase stale-persistent)
   state="$dir/state"
   fakebin="$dir/fakebin"
   win="sess:fm-pers-w5"
   pane="$dir/pane.txt"
+  calls="$dir/crew-state-calls"
   printf 'working\n' > "$state/pers-w5.status"
   printf 'idle prompt $\n' > "$pane"
   key=$(printf '%s' "pers-w5" | tr ':/.' '___')
   echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+  # The provably-working gate is stubbed to a non-working verdict, and the call
+  # log below proves the reader actually answered it. Asserting the escalation
+  # alone is not enough: an unresolvable reader also fails to equal "working", so
+  # this control would pass through an error rather than through the stopped
+  # verdict it names, which is exactly how it passed before.
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
-    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 housekeeping "$state"
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_FAKE_CREW_STATE_LOG="$calls" \
+    FM_FAKE_CREW_STATE='state: stopped · source: pane · agent exited' \
+    housekeeping "$state"
+  grep -Fx "pers-w5" "$calls" >/dev/null 2>&1 \
+    || fail "the crew-state reader never answered, so the stopped verdict was never the reason for this escalation"
   [ -s "$state/.subsuper-escalations" ] || fail "persistent stale was not escalated"
   [ ! -e "$state/.subsuper-stale-$key" ] || fail "stale marker not cleared after escalation"
   pass "persistent stale escalates after threshold and clears its marker"
@@ -828,9 +1368,11 @@ test_housekeeping_resumed_stale_cleared() {
 }
 
 test_housekeeping_herdr_persistent_stale_resolves_meta() {
-  local dir state key
+  local dir state fakebin key calls
   dir=$(make_supercase stale-herdr-persistent)
   state="$dir/state"
+  fakebin="$dir/fakebin"
+  calls="$dir/crew-state-calls"
   fm_write_meta "$state/herdr-w7.meta" "window=default:w1:p2" "backend=herdr"
   printf 'working\n' > "$state/herdr-w7.status"
   key=$(printf '%s' "herdr-w7" | tr ':/.' '___')
@@ -848,8 +1390,13 @@ test_housekeeping_herdr_persistent_stale_resolves_meta() {
     }
     fm_backend_capture herdr default:w1:p2 40 >/dev/null
     [ "$(fm_backend_busy_state herdr default:w1:p2)" = idle ] || fail "herdr busy stub did not report idle"
-    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 housekeeping "$state"
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 \
+      FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_FAKE_CREW_STATE_LOG="$calls" \
+      FM_FAKE_CREW_STATE='state: stopped · source: pane · agent exited' \
+      housekeeping "$state"
   ) || fail "herdr persistent stale housekeeping failed"
+  grep -Fx "herdr-w7" "$calls" >/dev/null 2>&1 \
+    || fail "the crew-state reader never answered, so the stopped verdict was never the reason for this escalation"
   [ -s "$state/.subsuper-escalations" ] || fail "persistent herdr stale was not escalated"
   [ ! -e "$state/.subsuper-stale-$key" ] || fail "herdr stale marker not cleared after escalation"
   pass "persistent herdr stale resolves the target from metadata and escalates"
@@ -919,9 +1466,11 @@ test_housekeeping_herdr_resumed_stale_cleared() {
 }
 
 test_housekeeping_orca_persistent_stale_resolves_terminal() {
-  local dir state key
+  local dir state fakebin key calls
   dir=$(make_supercase stale-orca-persistent)
   state="$dir/state"
+  fakebin="$dir/fakebin"
+  calls="$dir/crew-state-calls"
   fm_write_meta "$state/orca-w8.meta" "window=fm-orca-w8" "terminal=term-orca-w8" "backend=orca"
   printf 'working\n' > "$state/orca-w8.status"
   key=$(printf '%s' "orca-w8" | tr ':/.' '___')
@@ -939,8 +1488,13 @@ test_housekeeping_orca_persistent_stale_resolves_terminal() {
     }
     fm_backend_capture orca term-orca-w8 40 >/dev/null
     [ "$(fm_backend_busy_state orca term-orca-w8)" = idle ] || fail "Orca busy stub did not report idle"
-    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 housekeeping "$state"
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 \
+      FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_FAKE_CREW_STATE_LOG="$calls" \
+      FM_FAKE_CREW_STATE='state: stopped · source: pane · agent exited' \
+      housekeeping "$state"
   ) || fail "Orca persistent stale housekeeping failed"
+  grep -Fx "orca-w8" "$calls" >/dev/null 2>&1 \
+    || fail "the crew-state reader never answered, so the stopped verdict was never the reason for this escalation"
   [ -s "$state/.subsuper-escalations" ] || fail "persistent Orca stale was not escalated"
   [ ! -e "$state/.subsuper-stale-$key" ] || fail "Orca stale marker not cleared after escalation"
   pass "persistent Orca stale resolves the terminal from metadata"
@@ -1372,10 +1926,11 @@ test_classify_stale_dedup_against_signal() {
 # aging. handle_wake must record the stale marker; housekeeping re-escalates
 # once at the configured bound.
 test_afk_nonterminal_working_merged_keeps_wedge_aging() {
-  local dir state key out win pane incident fakebin
+  local dir state key out win pane incident fakebin calls
   dir=$(make_supercase afk-working-merged-wedge)
   state="$dir/state"
   fakebin="$dir/fakebin"
+  calls="$dir/crew-state-calls"
   win="sess:fm-wishlist-w1"
   pane="$dir/pane.txt"
   incident='working: stage 2 setup complete on PR #74 exact source branch rebased onto merged #76; task dates preserved'
@@ -1403,7 +1958,12 @@ test_afk_nonterminal_working_merged_keeps_wedge_aging() {
   # Age the marker past the escalate bound (marker stores first-seen epoch).
   echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
-    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 housekeeping "$state"
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_FAKE_CREW_STATE_LOG="$calls" \
+    FM_FAKE_CREW_STATE='state: stopped · source: pane · agent exited' \
+    housekeeping "$state"
+  grep -Fx "wishlist-w1" "$calls" >/dev/null 2>&1 \
+    || fail "the crew-state reader never answered, so the stopped verdict was never the reason for this escalation"
   [ -s "$state/.subsuper-escalations" ] \
     || fail "housekeeping did not re-escalate aged nonterminal working: wedge"
   grep -q 'possible wedge' "$state/.subsuper-escalations" \
@@ -2266,6 +2826,7 @@ test_stale_paused_classifies_pause
 test_stale_settled_terminal_self_handles
 test_stale_terminal_dedupes_against_signal
 test_handle_wake_paused_records_pause_marker
+test_stale_transient_records_marker_without_reading_crew_state
 test_handle_wake_paused_signal_records_pause_marker
 test_handle_wake_terminal_signal_clears_pause_tracking
 test_housekeeping_migrates_watcher_pause_marker
@@ -2273,6 +2834,14 @@ test_housekeeping_migrates_watcher_unpaused_marker_to_clear
 test_housekeeping_seeds_pause_marker_from_status
 test_housekeeping_persistent_stale_escalates
 test_housekeeping_settled_stale_not_escalated
+test_housekeeping_provably_working_stale_not_escalated
+test_housekeeping_working_stale_escalates_once_refresh_stops
+test_housekeeping_working_gate_read_is_bounded_per_threshold
+test_housekeeping_working_gate_budget_defers_without_suppressing
+test_crew_state_reader_guard_install_is_idempotent
+test_stale_gate_read_budget_reports_invalid_and_floors_zero
+test_housekeeping_spends_the_sanitized_budget
+test_stale_gate_read_budget_report_is_throttled
 test_housekeeping_resumed_stale_cleared
 test_housekeeping_paused_resurfaces_and_resets
 test_housekeeping_captain_gated_pause_is_not_resurfaced

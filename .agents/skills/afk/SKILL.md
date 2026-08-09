@@ -165,8 +165,12 @@ Classify each wake this way:
 - `stale` with a terminal status or bare legacy captain-relevant line -> escalate.
   Nonterminal progress remains transient even when its prose contains a legacy free-text token or its seen-status marker already matches, so record a marker and self-handle.
   If the pane is still idle past `FM_STALE_ESCALATE_SECS` (default 240s), housekeeping escalates it as a possible wedge.
-  This bounds wedge-detection latency to the threshold plus a tick: a delay, never a loss.
+  Absent the provably-working refresh below, this bounds wedge-detection latency to the threshold plus a tick; with it the bound is two thresholds.
+  Either way it is a delay, never a loss - only the constant differs.
   Healthy crewmates are autonomous and do not wait on firstmate mid-task.
+- A wedge marker that reaches its escalation point is checked against `bin/fm-crew-state.sh` once: a crew reported as provably working has its marker refreshed instead of escalated, while a stopped, parked, failed, or unreadable crew still escalates on the unchanged schedule.
+  Those reads are budgeted per housekeeping pass, and a marker that does not get its read stays aged for the next pass, so the budget can delay a wedge escalation but never suppress one.
+  `docs/architecture.md` "Event-driven supervision" owns the rest: why the marker is refreshed rather than dropped, what the age in that escalation line measures, and the read budget's capacity arithmetic and tuning.
 - `heartbeat` -> self-handle. The daemon runs its own cheap bash fleet scan
   every `FM_HEARTBEAT_SCAN_SECS` (default 300s) as the catch-all for a
   captain-relevant status line the per-wake classifier might miss.
