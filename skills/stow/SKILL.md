@@ -98,8 +98,8 @@ Every entry this skill writes into a memory file may carry one trailing HTML-com
 The tier names say what this skill does with an entry:
 
 - `pinned` - never decays and is never dropped to shorten a file; it changes only when the user or reality changes it.
-- `aging` - must re-prove itself: a `reinforced:` date older than 30 days is stale, and a stale entry is re-validated (date refreshed) or archived, never kept by inertia alone.
-- `perishable` - written to be thrown out: a date older than 7 days is stale, and its text must name a checkable expiry condition, such as a ticket, a version, or a dated expectation.
+- `aging` - must re-prove itself: an entry whose age is greater than or equal to 30 days since its `reinforced:` date is stale, and a stale entry is re-validated (date refreshed) or archived, never kept by inertia alone.
+- `perishable` - written to be thrown out: an entry whose age is greater than or equal to 7 days since its `reinforced:` date is stale, and its text must name a checkable expiry condition, such as a ticket, a version, or a dated expectation.
   An entry that cannot name a checkable condition is `aging`, not `perishable`.
 
 Rules:
@@ -112,7 +112,10 @@ Rules:
   Mere presence in the file is not evidence, and re-reading memory is never reinforcement.
 - Re-confirm a stale `perishable` entry against its named condition: still open means refresh the date, while resolved, expired, or no longer checkable means archive it now.
 - Decay is evaluated only when this skill runs; nothing happens between passes, so an infrequently stowed project experiences the clocks at its stow interval.
-- Stale never means deleted: a stale entry moves, with its marker and a one-line reason, to a `.stow-archive.md` in the source file's own directory, never loaded by any session, and kept out of git the same way as `.stow-notes.md` when it lands in a git worktree.
+- Stale never means deleted: a stale entry moves, with its marker and a one-line reason, to a `.stow-archive.md` in the source file's own directory, never loaded by any session.
+  In a git worktree, verify that this archive path is not already tracked in the index before writing any archived fact there.
+  If it is tracked, do not write to it and report that archival is blocked until the user chooses a safe destination.
+  Otherwise add a `.stow-archive.md` line to a `.gitignore` file in the archive's directory, and never write archived facts into a git-tracked file.
   Recovery is search plus copy back.
 - Pre-existing unmarked entries are the file's default tier with unknown age, and unknown age is not guilt: an unmarked entry in a default-pinned file is simply pinned and exempt from the aging clock, legacy grace cycle, and archive-by-age, though consolidation still applies.
 - In a file whose default tier carries a clock, the first pass stamps each unmarked entry it can confirm; otherwise it adds `<!-- legacy-grace: pending -->` without a `reinforced:` date to persist one grace cycle without treating presence as reinforcement.

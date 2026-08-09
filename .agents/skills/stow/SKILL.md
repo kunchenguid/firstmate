@@ -26,9 +26,9 @@ Every entry in the three memory files may carry one trailing HTML-comment marker
 
 The tier names say what the pass does with an entry:
 
-- `pinned` - no clock is ever read for it: exempt from decay and from budget eviction, changed only through inspect-then-update when the captain or reality changes it.
-- `aging` - it must re-prove itself: a `reinforced:` date older than 30 days is stale, and a stale entry is re-validated (date refreshed) or archived, never kept by inertia alone.
-- `perishable` - it is stored expecting disposal: a `reinforced:` date older than 7 days is stale, and its prose must name a checkable expiry condition, such as a backlog id, a version floor, or a dated expectation.
+- `pinned` - no clock is ever read for it: exempt from decay and from budget eviction, changed only through inspect-then-update when the captain or reality changes it, except that an explicit per-item captain approval may offload it under the flow below.
+- `aging` - it must re-prove itself: an entry whose age is greater than or equal to 30 days since its `reinforced:` date is stale, and a stale entry is re-validated (date refreshed) or archived, never kept by inertia alone.
+- `perishable` - it is stored expecting disposal: an entry whose age is greater than or equal to 7 days since its `reinforced:` date is stale, and its prose must name a checkable expiry condition, such as a backlog id, a version floor, or a dated expectation.
   An admitted durable entry that cannot name a checkable expiry condition is not `perishable` and must be stored as `aging`.
   Omission is reserved for non-durable material or facts already owned elsewhere.
 
@@ -69,13 +69,14 @@ Every `/stow` invocation performs this complete pass, even when the session cont
    Re-validate a stale `aging` entry from current evidence and refresh its date, or archive it.
    Re-confirm a stale `perishable` entry against its named condition: still open means refresh the date, while resolved, expired, or no longer checkable means archive it in this pass.
    Promote `perishable` to `aging` when its condition keeps proving durable past its expected life, and retier in place when a supersession changes an entry's lifetime.
-   `pinned` is exempt from this step entirely.
+   `pinned` is exempt from this automatic decay step entirely.
 6. Consolidate every editable memory file as needed, not only the file apparently related to a new finding.
    Prefer one concise current rule or authoritative pointer over duplicate prose.
    Archive completed incident and release chronology, stale versions and paths, transient task state, resolved alternatives, old metrics, and report-sized procedures; merge or remove only superseded claims and duplicates whose facts are preserved elsewhere.
    Never plainly remove a unique current fact: every such exit must archive it with provenance in the recoverable cold tier or relocate it to a live JIT owner or a consolidation merge that preserves the fact.
 7. When the total is still over budget after decay and consolidation, relieve it in this order: archive everything already stale, which needs no further judgment; consolidate tighter; run the over-budget offload sweep below and file its proposals, whose relief lands at migration cadence rather than inside this pass; then archive `aging` entries oldest-`reinforced`-first until within budget.
-   `pinned` is never touched by budget pressure.
+   Automatic processes never move a `pinned` entry: decay clocks, legacy grace cycles, oldest-first budget eviction, and immediate budget archiving do not apply to it.
+   The sole exception is relocation to a JIT owner after explicit, per-item captain approval under the offload flow below, and that entry remains in memory until its destination is live.
 8. Run `bin/fm-startup-memory-budget.sh report` again after the complete pass.
    Finish at or below the effective budget unless a concrete inability remains.
    A secondmate must explicitly report `primary-owned-shared-file-alone-exceeds-budget` when the inherited shared file alone exceeds its allowance, because local curation cannot resolve it.
@@ -112,6 +113,7 @@ The offload sweep runs only when the pass is still over budget after decay archi
 Every test must hold for a candidate:
 
 - Durable: not `perishable`, not stale, and expected to remain true for months.
+- Eligible by authority: an `aging` entry may be proposed normally, while a `pinned` entry may be proposed only for explicit, per-item captain-approved relocation and can never be archived for budget relief.
 - Conditional: a one-line nameable trigger exists, and a session that never touches that trigger runs no risk from omitting the fact.
 - Fat enough to matter: roughly 50 estimated tokens or more, proposed largest-first, because consolidation handles smaller entries.
 - A destination below fits the entry's privacy and visibility.
@@ -136,7 +138,8 @@ A local skill exists only in this home, so offloading an entry out of `data/capt
 
 1. Propose.
    The sweep appends a `proposed-offload` section to the completion receipt: each candidate's first line, source file, estimated tokens, the one-line trigger, the proposed destination as a freeform skill name plus draft description line or a project plus file, the privacy and visibility verdict, and the expected budget relief.
-   The same list is the body of a single durable captain-held backlog item (`tasks-axi hold <id> --reason "..." --kind captain`), created on first use and updated in place through inspect-then-update by later passes, never appended to and never duplicated.
+   The same list is the body of a single durable captain-held backlog item, created on first use with `tasks-axi add <id> <title> --kind captain --repo firstmate --body "<proposal body>"` before `tasks-axi hold <id> --reason "<reason>" --kind captain` transitions it to a hold.
+   On later passes, inspect it with `tasks-axi show <id> --full`, replace its proposal body in place with `tasks-axi update <id> --body-file <path>`, and keep the existing hold rather than appending or creating a duplicate.
    If the captain never answers, nothing migrates and the held item simply persists; there is no auto-migration, ever.
 2. Approve.
    The captain approves per candidate in plain chat, and firstmate records the approval in the held item's body.
@@ -147,7 +150,8 @@ A local skill exists only in this home, so offloading an entry out of `data/capt
 4. Remove only once live.
    The memory entry leaves its always-injected file only after the destination is live: the local skill exists with its exclude line in place, or the project change has landed.
    Until then the entry stays, so knowledge is never in limbo between owners.
-   When the home is still over budget after approval, this remove-only-once-live rule relaxes solely into immediate archival with provenance `offloading to <destination> via <task id>` in the recoverable cold tier, never into plain removal, so the archive remains the source if migration fails.
+   For a non-pinned entry, when the home is still over budget after approval, this remove-only-once-live rule relaxes solely into immediate archival with provenance `offloading to <destination> via <task id>` in the recoverable cold tier, never into plain removal, so the archive remains the source if migration fails.
+   A pinned entry never takes that budget-archive exception and leaves memory only after its approved destination is live.
    Leave no pointer behind by default, and at most one line only when the destination's discoverability is genuinely doubtful.
 
 ## Knowledge sweep and routing
