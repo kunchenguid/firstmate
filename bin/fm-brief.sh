@@ -34,6 +34,9 @@
 #   direct-PR    implement -> push + open PR via gh-axi (no pipeline) -> configured merge authority
 #   local-only   implement on branch, stop and report "ready in branch" (no push/PR);
 #                the configured merge authority approves, firstmate merges to local main
+# Every ship brief also carries the mapped focused-validation preflight section
+# (AGENTS.md section 7): the worker-facing step, the one-line stop rule, and the
+# pointer to the focused-validation skill that owns the full procedure.
 # no-mistakes-prod-only is a registry policy, not a task mode; resolve it to one of
 # the three concrete modes at intake before calling this script.
 # The generated ship brief records the chosen mode as a fixed machine-readable
@@ -360,6 +363,8 @@ case "$MODE" in
 Delivery contract: mode=direct-PR
 This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
+Run the mapped focused validation slice from the Focused validation section and record its timing before pushing; it is the review for this fast path.
+If the changed surface is not isolated and proven under the stop rule, or the slice fails, fix within the task - or append \`needs-decision\` instead of pushing when the surface turns out to be product-facing, mixed, or uncertain.
 When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 EOF
@@ -372,6 +377,7 @@ EOF
 Delivery contract: mode=local-only
 This task ships **local-only**: no remote, no PR, no pipeline.
 The task is complete only when committed on your branch \`fm/$ID\`. Do NOT push, do NOT open a PR, do NOT merge.
+Run the mapped focused validation slice from the Focused validation section and record its timing before appending \`done: ready in branch\`.
 Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
 When it is implemented and committed, append \`done: ready in branch fm/$ID\` to the status file and stop.
 The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path.
@@ -385,6 +391,7 @@ EOF
 # Definition of done
 Delivery contract: mode=no-mistakes
 The task is complete only when committed on your branch.
+Run the mapped focused validation slice from the Focused validation section and record its timing before appending \`done: {summary}\`; a slice that fails must be fixed before the pipeline starts.
 When you believe it is complete, append \`done: {summary}\` to the status file and stop.
 Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
 
@@ -408,6 +415,20 @@ esac
 # $(...) command substitution used to strip. Drop that one newline so generated
 # briefs stay byte-identical to the historical Bash 5 output.
 DOD=${DOD%$'\n'}
+
+# Every ship brief carries the mapped focused-validation preflight (AGENTS.md
+# section 7). The full procedure, isolation proof, and file-to-test-family map
+# live in the focused-validation skill; this section is the worker-facing step
+# plus the one-line stop rule, and each mode's DOD above references it.
+IFS= read -r -d '' FOCUSED_VALIDATION_SECTION <<EOF || true
+# Focused validation
+Run the mapped focused validation slice for this change before reporting done, and record its timing.
+Map the touched files to the project's test surface: for firstmate-repo tasks run \`$FM_ROOT/bin/fm-test-run.sh --changed\` or the touched \`tests/<family>.test.sh\` scripts; for other projects use the focused test families that project's \`AGENTS.md\` names.
+The stop rule is an isolated and proven surface: the touched files resolve to one module and one test family, no shared middleware, config, deploy, or edge file, no external mutation, and existing focused tests cover the module and pass.
+An isolated and proven surface qualifies for the fast path only for \`direct-PR\` work inside the internal-only boundary; product-facing, mixed, and uncertain work still climbs to the full review.
+Follow \`$FM_ROOT/.agents/skills/focused-validation/SKILL.md\` for the ladder, the isolation proof, and the file-to-test-family map.
+EOF
+FOCUSED_VALIDATION_SECTION=${FOCUSED_VALIDATION_SECTION%$'\n'}
 
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
@@ -458,6 +479,8 @@ Record only project knowledge useful to almost every future session.
 For anything the codebase already shows, prefer a pointer to the authoritative file, command, or doc over copying the detail.
 If you touch a project \`AGENTS.md\` that lacks \`## Maintaining this file\`, add that short self-governance section from \`$FM_ROOT/bin/fm-ensure-agents-md.sh\` in the same pass.
 Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced no durable project knowledge.
+
+$FOCUSED_VALIDATION_SECTION
 
 $DOD
 EOF

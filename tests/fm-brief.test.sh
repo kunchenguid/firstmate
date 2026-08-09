@@ -22,6 +22,50 @@ TMP_ROOT=$(fm_test_tmproot fm-brief)
 BRIEF_HOME="$TMP_ROOT/home"
 mkdir -p "$BRIEF_HOME/data"
 
+# Every ship brief carries the mapped focused-validation preflight (AGENTS.md
+# section 7) in all three delivery modes: the worker-facing step, the stop rule,
+# the file-to-test-family map, and the skill pointer. Each mode's DOD references
+# the shared section without restating it, and scout briefs never carry the
+# section because their deliverable is a report, not a ship.
+test_focused_validation_preflight_in_ship_briefs() {
+  local home id mode brief
+  home="$TMP_ROOT/focused-validation-home"
+  mkdir -p "$home/data"
+
+  for id_mode in "fv-nomistakes:no-mistakes" "fv-directpr:direct-PR" "fv-localonly:local-only"; do
+    id=${id_mode%%:*}
+    mode=${id_mode#*:}
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+      "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" >/dev/null 2>&1 \
+      || fail "fm-brief.sh $id --mode $mode should exit 0"
+    brief="$home/data/$id/brief.md"
+    assert_grep "# Focused validation" "$brief" "$mode brief missing the focused-validation section"
+    assert_grep "record its timing" "$brief" "$mode brief lost the timing record requirement"
+    assert_grep "$ROOT/bin/fm-test-run.sh --changed" "$brief" \
+      "$mode brief lost the firstmate-repo file-to-test-family map"
+    assert_grep "tests/<family>.test.sh" "$brief" "$mode brief lost the direct test-script map"
+    assert_grep "isolated and proven" "$brief" "$mode brief lost the stop rule"
+    assert_grep "$ROOT/.agents/skills/focused-validation/SKILL.md" "$brief" \
+      "$mode brief lost the focused-validation skill pointer"
+  done
+
+  assert_grep "before the pipeline starts" "$home/data/fv-nomistakes/brief.md" \
+    "no-mistakes DOD lost the preflight-before-pipeline rule"
+  assert_grep "it is the review for this fast path" "$home/data/fv-directpr/brief.md" \
+    "direct-PR DOD lost the focused-validation-as-review rule"
+  assert_grep "product-facing, mixed, or uncertain" "$home/data/fv-directpr/brief.md" \
+    "direct-PR DOD lost the internal-only escalation boundary"
+  assert_grep "before appending \`done: ready in branch\`" "$home/data/fv-localonly/brief.md" \
+    "local-only DOD lost the preflight-before-ready rule"
+
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-brief.sh" fv-scout alpha --scout >/dev/null 2>&1 \
+    || fail "fm-brief.sh scout scaffold should exit 0"
+  assert_no_grep "# Focused validation" "$home/data/fv-scout/brief.md" \
+    "scout brief must not carry the ship-only focused-validation section"
+  pass "fm-brief.sh: ship briefs carry the mapped focused-validation preflight in every mode"
+}
+
 # The script itself must always parse under the ambient bash. That is Bash 5 in
 # CI and locally, where the issue #958/#1069 parser bug does not fire, so this
 # is a weak guard on its own; test_no_heredoc_in_command_substitution and the
@@ -714,6 +758,7 @@ test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
+test_focused_validation_preflight_in_ship_briefs
 test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply

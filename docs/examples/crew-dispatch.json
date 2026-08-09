@@ -1,26 +1,34 @@
 {
   "rules": [
     {
-      "when": "The task depends on fresh news, current events, live public facts, or recent market and product changes.",
-      "use": { "harness": "grok" },
-      "why": "Grok is the preferred dispatch when current web-connected context is central to the work."
+      "when": "The task's deliverable is a visible UI change, screenshot, layout check, or visual review, or the ship touches a rendered surface.",
+      "use": {
+        "harness": "pi",
+        "model": "opencode-go/gpt-5.6-luna",
+        "effort": "max"
+      },
+      "why": "Vision-capable Luna owns the visual surface; a UI-touching ship also gets a separate Luna visual-review worker under AGENTS.md section 7."
     },
     {
-      "when": "The task is a trivial mechanical edit such as a rote rename, formatting sweep, targeted typo fix, or simple file gathering.",
-      "use": { "harness": "claude", "model": "haiku", "effort": "low" },
-      "why": "Use the cheapest fast profile when the task is narrow and low ambiguity."
+      "when": "The task is bounded non-visual implementation, tests, tooling, automation, a routine mechanical edit, or a well-understood operational check that can be verified without a rendered surface.",
+      "use": {
+        "harness": "pi",
+        "model": "opencode-go/deepseek-v4-flash",
+        "effort": "max"
+      },
+      "why": "DeepSeek Flash is the default for bounded non-visual work: cheap and no vision needed. Verify the current model name in the harness catalog at dispatch."
     },
     {
       "when": "The task is a big or ambiguous multi-file feature, a risky refactor, or work that requires holding many moving parts in mind.",
       "use": [
-        { "harness": "claude", "model": "claude-sonnet-5", "effort": "high" },
+        { "harness": "pi", "model": "opencode-go/gpt-5.6-luna", "effort": "max" },
         { "harness": "codex", "model": "gpt-5.5", "effort": "high" }
       ],
-      "why": "Use a strong coding profile for big, ambiguous work; resolve the alternatives through quota-array-dispatch."
+      "why": "Use a strong coding profile for big, ambiguous work; resolve the alternatives through quota-array-dispatch. Sol is explicit-only, never automatic."
     }
   ],
   "default": [
-    { "harness": "codex", "model": "gpt-5.5", "effort": "medium" },
-    { "harness": "pi", "model": "anthropic/claude-sonnet-5", "effort": "medium" }
+    { "harness": "pi", "model": "opencode-go/gpt-5.6-luna", "effort": "max" },
+    { "harness": "codex", "model": "gpt-5.5", "effort": "medium" }
   ]
 }
