@@ -58,8 +58,11 @@ Auto-detected herdr or cmux prints a stderr notice naming `config/backend` and `
 Zellij and Orca are never auto-detected; select them by putting the name in a local `config/backend` file, by exporting `FM_BACKEND=<name>`, or by telling the first mate in chat.
 Any value other than `tmux`, `herdr`, `zellij`, `orca`, or `cmux` is rejected until another adapter is implemented and verified.
 `fm-spawn.sh` accepts `tmux`, `herdr`, `zellij`, `orca`, and `cmux` for ship and scout tasks; `backend=orca` and `backend=cmux` both still refuse `--secondmate` until secondmate launch semantics are designed for each.
-The `cursor` harness is supported only on `tmux` and `herdr`: its background worker-server detaches from the pane and leaves the task worktree, so cleanup depends on the process identity recorded at spawn from the pane's process tree, and only those two backends expose it.
+The `cursor` harness is supported only on `tmux` and `herdr`: its background worker-server detaches from the pane and leaves the task worktree, so each launch carries a random `FM_CURSOR_LAUNCH_TOKEN` and must atomically record the matching worker pid and process-start identity before the task is considered live.
 A `cursor` spawn on `zellij`, `orca`, or `cmux` is refused before any endpoint, launch command, or task metadata exists, rather than creating a task whose detached worker-server could not be cleaned up.
+A fresh Cursor spawn whose bounded worker discovery fails confirmation-gates removal of its owned endpoint and worktree, then removes its live task records; a pre-seeded secondmate home and registry entry remain untouched.
+If owned-resource absence cannot be confirmed, task records stay marked for cleanup retry instead of discarding required ownership evidence.
+A Cursor relaunch first reaps the prior recorded worker and refuses if its death cannot be confirmed; replacement failure retains the pre-existing task records for retry instead of erasing task ownership.
 `codex-app` is not an accepted runtime backend yet; [`docs/codex-app-backend.md`](codex-app-backend.md) owns the Codex App boundary.
 The session-start secondmate liveness sweep uses the recovery-grade `fm_backend_agent_state` classifier where verified.
 The comment above that function in `bin/fm-backend.sh` is the single owner of its detailed state contract and recovery authorization.
