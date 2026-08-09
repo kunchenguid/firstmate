@@ -654,7 +654,6 @@ RELAUNCH_REPLACEMENT_WT=
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
 CURSOR_WORKER_RECORDER_PID=
-CURSOR_WORKER_RECORDER_READY=
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -676,11 +675,9 @@ parse_orca_worktree_result() {
 spawn_abort_cleanup() {
   local status=$?
   if [ -n "$CURSOR_WORKER_RECORDER_PID" ]; then
-    [ -z "$CURSOR_WORKER_RECORDER_READY" ] || printf 'go\n' > "$CURSOR_WORKER_RECORDER_READY" 2>/dev/null || true
     wait "$CURSOR_WORKER_RECORDER_PID" 2>/dev/null || true
     CURSOR_WORKER_RECORDER_PID=
   fi
-  [ -z "$CURSOR_WORKER_RECORDER_READY" ] || rm -f -- "$CURSOR_WORKER_RECORDER_READY" 2>/dev/null || true
   if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ] \
      && [ "$SPAWN_META_PUBLISH_STARTED" = 1 ] \
      && [ -n "$SPAWN_META_TMP" ] \
@@ -2185,12 +2182,8 @@ EOF
 # (fm_process_identity, bin/fm-process-identity-lib.sh), so a comm containing
 # spaces cannot make the two disagree and silently defeat the recycled-pid check.
 cursor_worker_server_record() {  # <backend> <target> -> 0 when recorded atomically, 1 when evidence missing
-  local backend=$1 target=$2 ready=${3:-} agent_pid worker_pid identity binary=${CURSOR_BIN:-cursor-agent} argv0 i ws_file tmp
+  local backend=$1 target=$2 agent_pid worker_pid identity binary=${CURSOR_BIN:-cursor-agent} argv0 i ws_file tmp
   ws_file="$STATE/$ID.worker-server"
-  if [ -n "$ready" ]; then
-    : > "$ready"
-    while [ ! -s "$ready" ]; do sleep 0.01; done
-  fi
   for i in 1 2 3 4 5; do
     agent_pid=
     while IFS= read -r pid; do
@@ -2932,24 +2925,9 @@ if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   spawn_herdr_presentation_order_lock_release
 fi
 if [ "$HARNESS" = cursor ]; then
-  CURSOR_WORKER_RECORDER_READY="$TASK_TMP/.cursor-worker-recorder-ready"
-  rm -f -- "$CURSOR_WORKER_RECORDER_READY"
-  cursor_worker_server_record "$BACKEND" "$T" "$CURSOR_WORKER_RECORDER_READY" &
+  cursor_worker_server_record "$BACKEND" "$T" &
   CURSOR_WORKER_RECORDER_PID=$!
-  for _ in 1 2 3 4 5 6 7 8 9 10; do
-    [ -e "$CURSOR_WORKER_RECORDER_READY" ] && break
-    kill -0 "$CURSOR_WORKER_RECORDER_PID" 2>/dev/null || break
-    sleep 0.1
-  done
-  if [ ! -e "$CURSOR_WORKER_RECORDER_READY" ]; then
-    kill "$CURSOR_WORKER_RECORDER_PID" 2>/dev/null || true
-    wait "$CURSOR_WORKER_RECORDER_PID" 2>/dev/null || true
-    CURSOR_WORKER_RECORDER_PID=
-    spawn_rollback_task_state "cursor worker-server ownership capture could not start; the task was rolled back completely and will not be left in an untracked state"
-    exit 1
-  fi
   spawn_send_key "$T" Enter
-  printf 'go\n' > "$CURSOR_WORKER_RECORDER_READY"
   # Establish worker-server ownership evidence before the task is considered
   # live. cursor_worker_server_record writes a state/<id>.worker-server file
   # atomically (temp+mv). Failure here rolls back EVERYTHING this invocation
@@ -2962,8 +2940,6 @@ if [ "$HARNESS" = cursor ]; then
     exit 1
   fi
   CURSOR_WORKER_RECORDER_PID=
-  rm -f -- "$CURSOR_WORKER_RECORDER_READY"
-  CURSOR_WORKER_RECORDER_READY=
 else
   spawn_send_key "$T" Enter
 fi
