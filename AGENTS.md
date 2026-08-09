@@ -63,7 +63,7 @@ README.md            public overview and development notes
 .agents/skills/      firstmate-loaded internal skills, committed; each carries metadata.internal=true for installers
 .claude/skills       symlink to .agents/skills for claude compatibility
 skills/              standalone public installer-facing skills, committed; not loaded by firstmate
-loopspecs/           canonical LoopSpec registry, committed: schema.json (field contract), triggers.json (the sixteen-trigger register), and one <id>.json per loop; bin/fm-loopspec.sh is their only interpreter (section 13)
+loopspecs/           canonical LoopSpec registry, committed: schema.json (field contract), triggers.json (the sixteen-trigger register), terminal-states.json (the unified terminal-state vocabulary and its total mapping from every source vocabulary), and one <id>.json per loop; bin/fm-loopspec.sh is their only interpreter (section 13)
 firstmate.bat        Windows-to-WSL launcher bridge, committed; docs/windows-launcher.md owns setup
 bin/                 helper scripts, committed; read each script's header before first use
 .env                 optional Relay pairing token; LOCAL, gitignored; presence-gates section 14
