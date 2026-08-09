@@ -50,5 +50,7 @@ Each mutation was applied to `bin/fm-decision-surface.sh`, the suite run, and th
 | seam always reports wired | `not ok - an unconfigured seam is not wired` |
 | an incoherent inventory is ignored | `not ok - an incoherent inventory must not answer the duplicate question: expected exit 4, got 0` |
 | the probe runs unbounded when no bounding tool exists | `not ok - with no bounding tool the probe must report unreachable, never run unbounded` |
+| the seam counts a fleet id by substring containment | `not ok - a fleet id embedded in a longer token or in prose must not resolve` |
+| the probe bound loses its kill-after grace | `not ok - the probe must return within its bound against a launcher that ignores TERM: expected exit 0, got 124` |
 
-Refresh this evidence with `bin/fm-test-run.sh tests/fm-decision-surface.test.sh`, which passes twelve cases against canned `fm-fleet-snapshot.v1` documents and needs no live fleet, worker, or platform.
+Refresh this evidence with `bin/fm-test-run.sh tests/fm-decision-surface.test.sh`, which passes thirteen cases against canned `fm-fleet-snapshot.v1` documents and needs no live fleet, worker, or platform.

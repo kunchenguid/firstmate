@@ -117,6 +117,7 @@ while [ $# -gt 0 ]; do
     --probe-platform) PROBE=1 ;;
     -h|--help) usage; exit "$EXIT_OK" ;;
     check)
+      [ -z "$SUBCOMMAND" ] || die "unexpected argument '$1'"
       SUBCOMMAND=check
       shift
       [ $# -gt 0 ] || die "check needs a claim: capacity-blocked, decision-pending, or duplicate-dispatch"
@@ -131,8 +132,14 @@ while [ $# -gt 0 ]; do
         *) die "unknown claim '$CHECK_CLAIM': capacity-blocked, decision-pending, duplicate-dispatch" ;;
       esac
       ;;
-    owners) SUBCOMMAND=owners ;;
-    platform-seam) SUBCOMMAND=platform-seam ;;
+    owners)
+      [ -z "$SUBCOMMAND" ] || die "unexpected argument '$1'"
+      SUBCOMMAND=owners
+      ;;
+    platform-seam)
+      [ -z "$SUBCOMMAND" ] || die "unexpected argument '$1'"
+      SUBCOMMAND=platform-seam
+      ;;
     -*) die "unknown option $1" ;;
     *)
       [ -z "$SUBCOMMAND" ] || die "unexpected argument '$1'"
@@ -192,6 +199,14 @@ read_admission() {
 }
 
 snap() { printf '%s' "$SNAPSHOT" | jq "$@"; }
+
+# An inactive admission record explains itself in .reason; an active one
+# explains itself through the rules that actually controlled the band.
+JQ_ADMISSION_REASON='def admission_reason:
+  .reason
+  // (if (.controlling_rules // []) | length > 0
+      then "controlling rules: " + (.controlling_rules | join(", "))
+      else "no controlling rule recorded" end);'
 
 # --- the compensation ledger -------------------------------------------------
 #
@@ -326,9 +341,9 @@ run_timed() {  # <seconds> <command...>
   local seconds=$1
   shift
   if command -v timeout >/dev/null 2>&1; then
-    timeout "$seconds" "$@"
+    timeout -k 5 "$seconds" "$@"
   elif command -v gtimeout >/dev/null 2>&1; then
-    gtimeout "$seconds" "$@"
+    gtimeout -k 5 "$seconds" "$@"
   else
     return 124
   fi
@@ -355,11 +370,13 @@ platform_seam_json() {
       reachable=true
       live_ids=0
       if read_snapshot; then
-        local id
+        local id nl tokens
+        nl=$'\n'
+        tokens=$nl$(printf '%s' "$probe_out" | tr -c 'A-Za-z0-9._-' "$nl")$nl
         while IFS= read -r id; do
           [ -n "$id" ] || continue
-          case "$probe_out" in
-            *"$id"*) live_ids=$((live_ids + 1)) ;;
+          case "$tokens" in
+            *"$nl$id$nl"*) live_ids=$((live_ids + 1)) ;;
           esac
         done <<EOF
 $(snap -r '.tasks[].id')
@@ -504,11 +521,11 @@ render_surface() {
     printf '%s\n' "$doc"
     return "$EXIT_OK"
   fi
-  printf '%s\n' "$doc" | jq -r '
+  printf '%s\n' "$doc" | jq -r "$JQ_ADMISSION_REASON"'
     "decision surface · scope: \(.scope)\(if .work_id then " · work: \(.work_id)" else "" end)",
     "  live work:  \(.census.live_task_count)\(if (.census.live_task_ids | length) > 0 then " (\(.census.live_task_ids | join(", ")))" else "" end)",
     "  census:     \(if .census.inventory_valid then "coherent" else "INCOHERENT - \(.census.inventory_reason)" end)",
-    "  capacity:   \(if .capacity == null then "UNEVALUABLE" else "\(.capacity.decision_band) · \(.capacity.action) · \(.capacity.reason)" end)",
+    "  capacity:   \(if .capacity == null then "UNEVALUABLE" else "\(.capacity.decision_band) · \(.capacity.action) · \(.capacity | admission_reason)" end)",
     (if .work != null then "  state:      \(.work.current_state.raw)" else empty end),
     (if .work != null then "  delivery:   mode=\(.work.mode) yolo=\(.work.yolo) pr=\(.work.pr.url // "none")" else empty end),
     "  decisions:  \(if (.open_decisions | length) == 0 then "none open" else ([.open_decisions[].id] | join(", ")) end)",
@@ -541,13 +558,7 @@ check_capacity_blocked() {
   local action band reason configured
   action=$(printf '%s' "$ADMISSION" | jq -r '.action')
   band=$(printf '%s' "$ADMISSION" | jq -r '.decision_band')
-  # An inactive record explains itself in .reason; an active one explains itself
-  # through the rules that actually controlled the band.
-  reason=$(printf '%s' "$ADMISSION" | jq -r '
-    .reason
-    // (if (.controlling_rules // []) | length > 0
-        then "controlling rules: " + ((.controlling_rules) | join(", "))
-        else "no controlling rule recorded" end)')
+  reason=$(printf '%s' "$ADMISSION" | jq -r "$JQ_ADMISSION_REASON"' admission_reason')
   configured=$(printf '%s' "$ADMISSION" | jq -r '.configured // "active"')
   local census='census unread'
   if read_snapshot; then

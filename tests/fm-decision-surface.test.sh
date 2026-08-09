@@ -325,6 +325,20 @@ test_the_platform_seam_is_wired_only_when_it_resolves_this_fleet_work() {
   [ "$(printf '%s' "$OUT" | jq -r '.wiring')" = not-wired ] \
     || fail "reachable but foreign must not be reported as wired"
 
+  # A projection where the fleet id occurs only inside a longer identifier and
+  # inside a prose word. A coincidental substring is not a resolved identity,
+  # and counting one would flip the seam to wired on foreign work.
+  launcher="$home/embedded-launcher"
+  printf '#!/bin/sh\necho "surfaces: WRK-alpha-0001 (alphabetical listing)"\n' > "$launcher"; chmod +x "$launcher"
+  OUT=$(FM_HOME="$home" FM_DECISION_SURFACE_SNAPSHOT="$snap" \
+    FM_DECISION_SURFACE_PLATFORM="$launcher" "$SURFACE" platform-seam --probe-platform --json 2>&1)
+  [ "$(printf '%s' "$OUT" | jq -r '.reachable')" = true ] \
+    || fail "a launcher answering with embedded ids must still probe reachable"
+  [ "$(printf '%s' "$OUT" | jq -r '.fleet_identities_resolved')" = 0 ] \
+    || fail "a fleet id embedded in a longer token or in prose must not resolve"
+  [ "$(printf '%s' "$OUT" | jq -r '.wiring')" = not-wired ] \
+    || fail "an embedded occurrence of a fleet id must not report the seam wired"
+
   # NEGATIVE CONTROL: the same probe against a launcher that does resolve this
   # home's work. Without it, "not-wired" could be hard-coded.
   launcher="$home/live-launcher"
@@ -409,6 +423,43 @@ test_a_probe_that_cannot_be_bounded_does_not_run() {
   pass "a probe that cannot be bounded does not run"
 }
 
+test_a_launcher_that_ignores_term_cannot_outlive_the_probe_bound() {
+  local home snap launcher bound rc=0
+  home=$(make_home seam-term-immune)
+  snap="$home/snap.json"; write_snapshot "$snap"
+  bound=timeout
+  command -v timeout >/dev/null 2>&1 || bound=gtimeout
+  command -v "$bound" >/dev/null 2>&1 \
+    || { printf 'skip: host has no bounding tool\n'; return 0; }
+
+  # A launcher that traps TERM and never exits on its own: the shape a merely
+  # TERM-based bound cannot stop. The probe must still return, because a wedged
+  # command substitution would hold the whole read hostage.
+  launcher="$home/stubborn-launcher"
+  cat > "$launcher" <<SH
+#!/bin/sh
+trap '' TERM
+echo \$\$ > "$home/launcher.pid"
+echo "surfaces: alpha"
+exec >/dev/null 2>&1
+while :; do sleep 1; done
+SH
+  chmod +x "$launcher"
+
+  # The outer bound converts a regression into a failure instead of a hang.
+  OUT=$(FM_HOME="$home" FM_DECISION_SURFACE_SNAPSHOT="$snap" \
+    FM_DECISION_SURFACE_PLATFORM="$launcher" FM_DECISION_SURFACE_PROBE_TIMEOUT=1 \
+    "$bound" 30 "$SURFACE" platform-seam --probe-platform --json 2>&1) || rc=$?
+  [ ! -f "$home/launcher.pid" ] || fm_test_reap "$(cat "$home/launcher.pid")"
+  expect_code 0 "$rc" "the probe must return within its bound against a launcher that ignores TERM"
+  [ "$(printf '%s' "$OUT" | jq -r '.reachable')" = false ] \
+    || fail "a launcher killed at the bound must probe unreachable"
+  [ "$(printf '%s' "$OUT" | jq -r '.wiring')" = not-wired ] \
+    || fail "a launcher killed at the bound must leave the seam not wired"
+
+  pass "a launcher that ignores TERM cannot outlive the probe bound"
+}
+
 # --- surface rendering and usage --------------------------------------------
 
 test_the_surface_renders_both_scopes_and_refuses_an_unknown_task() {
@@ -420,6 +471,14 @@ test_the_surface_renders_both_scopes_and_refuses_an_unknown_task() {
   expect_code 0 "$RC" "the fleet surface must render"
   assert_contains "$OUT" "scope: fleet" "the fleet surface must name its scope"
   assert_contains "$OUT" "alpha" "the fleet surface must list live work"
+
+  # An active admission record has no top-level reason field: the capacity line
+  # must fall back to the controlling rules, never render a literal null.
+  write_policy "$home"
+  run_surface "$home" "$snap"
+  expect_code 0 "$RC" "the fleet surface must render under an active admission policy"
+  assert_not_contains "$OUT" "· null" \
+    "the capacity line must carry a reason for an active admission record"
 
   run_surface "$home" "$snap" alpha --json
   expect_code 0 "$RC" "the task surface must render"
@@ -453,6 +512,17 @@ test_usage_errors_are_refused_before_any_read() {
   run_surface "$home" "" --nonsense
   expect_code 2 "$RC" "an unknown option is a usage error"
 
+  # A named subcommand after a task id must be refused in that order too, never
+  # silently drop the task scope or reassign the target.
+  run_surface "$home" "" alpha owners
+  expect_code 2 "$RC" "a task id followed by owners is a usage error"
+  run_surface "$home" "" alpha platform-seam
+  expect_code 2 "$RC" "a task id followed by platform-seam is a usage error"
+  run_surface "$home" "" alpha check decision-pending demo-decision-open
+  expect_code 2 "$RC" "a task id followed by check must be refused, not silently retargeted"
+  run_surface "$home" "" owners platform-seam
+  expect_code 2 "$RC" "two named subcommands is a usage error"
+
   pass "usage errors are refused before any state is read"
 }
 
@@ -468,5 +538,6 @@ test_every_ledger_row_names_either_its_owner_or_the_capability_it_waits_for
 test_the_platform_seam_is_wired_only_when_it_resolves_this_fleet_work
 test_the_seam_takes_a_launcher_path_and_never_a_shell_command_line
 test_a_probe_that_cannot_be_bounded_does_not_run
+test_a_launcher_that_ignores_term_cannot_outlive_the_probe_bound
 test_the_surface_renders_both_scopes_and_refuses_an_unknown_task
 test_usage_errors_are_refused_before_any_read
