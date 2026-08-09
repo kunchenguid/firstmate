@@ -104,19 +104,46 @@ fm_nm_block() {  # <toon-output> <indent> <key>
   '
 }
 
+# Output $1 with the whole block named $3 at indent $2 removed, header included.
+# The inverse of fm_nm_block and its exact complement: same header match, same
+# "ends at the first later non-blank line indented at or above that level" rule.
+# Callers that read the run's OWN detail out of a full `axi status` payload use
+# this to drop the cached branch_sync object first, so a key that branch_sync
+# also carries cannot answer a question about the run.
+fm_nm_without_block() {  # <toon-output> <indent> <key>
+  printf '%s\n' "$1" | awk -v ind="$2" -v key="$3" '
+    BEGIN { pad = ""; for (i = 0; i < ind + 0; i++) pad = pad " "; hdr = pad key ":" }
+    { line = $0; sub(/[[:space:]]+$/, "", line) }
+    skipping {
+      if (line == "") next
+      match($0, /^ */)
+      if (RLENGTH > ind + 0) next
+      skipping = 0
+    }
+    line == hdr { skipping = 1; next }
+    { print }
+  '
+}
+
 # Scalar value of TOON key $2 belonging to the RUN OBJECT of `axi status` output
-# $1, i.e. scoped to the top-level `run:` block when the output has one and read
-# unscoped otherwise (older or flatter shapes that emit the run's fields at top
-# level). Every read of a run field must go through this rather than fm_nm_field:
-# `run:` and `branch_sync.local:` both carry a bare `head:`, and a plain
-# fm_nm_field answers with whichever appears first, so a run object that simply
-# omits a key would silently borrow the branch_sync value - and branch_sync.local
-# describes this worktree by construction, which would turn an absent run head
-# into a false identity match.
+# $1, i.e. scoped to the top-level `run:` block. Every read of a run field must
+# go through this rather than fm_nm_field: `run:` and `branch_sync.local:` both
+# carry a bare `head:`, and a plain fm_nm_field answers with whichever appears
+# first, so a run object that simply omits a key would silently borrow the
+# branch_sync value - and branch_sync.local describes this worktree by
+# construction, which would turn an absent run head into a false identity match.
+#
+# The unscoped read is kept only for a payload that has no `run:` block AND no
+# `branch_sync:` block, which is the older or flatter shape the fallback exists
+# for. A payload carrying branch_sync without a run block gets no answer at all:
+# no such shape is known to be produced, and reading self-describing fields there
+# is the unsafe direction, since fm-teardown.sh shares this rule and a false
+# positive would grant it abort authority over a run we have not proven we own.
+# Refusing only declines to attribute.
 fm_nm_run_field() {  # <toon-output> <key>
   if printf '%s\n' "$1" | grep -q '^run:[[:space:]]*$'; then
     fm_nm_field "$(fm_nm_block "$1" 0 run)" "$2"
-  else
+  elif ! printf '%s\n' "$1" | grep -q '^branch_sync:[[:space:]]*$'; then
     fm_nm_field "$1" "$2"
   fi
 }
@@ -139,9 +166,17 @@ fm_nm_run_field() {  # <toon-output> <key>
 # a branch_sync object only when the run it reports actually relates to the
 # invoking worktree - verified by querying the same run from the repo's own main
 # clone on `main`, which returned the run as informational display with no
-# branch_sync block at all - and branch_sync.state names current custody from a
-# fixed vocabulary (pipeline_owned, user_owned, target_changed, remote_missing,
-# legacy_unbound, and the blocked_* variants). Every conjunct below is required,
+# branch_sync block at all - and branch_sync.state names current custody with an
+# un-prefixed value, pipeline_owned and user_owned both observed directly across
+# eight runs driven against v1.45.4. The blocked_* names belong to a DIFFERENT
+# key, branch_sync.safety (blocked_pipeline_owned and
+# blocked_pipeline_owned_recoverable both observed there), and never appeared as
+# a state: every blocked-sync observation paired a blocked_* safety with state
+# pipeline_owned, so a live pipeline whose sync is blocked still binds here and
+# needs no case of its own. Neither list is claimed to be exhaustive; what the
+# predicate relies on is that state itself is un-prefixed.
+#
+# Every conjunct below is required,
 # so the predicate stays a proof rather than a hint. Three of them carry the
 # safety weight and each is pinned by its own case in
 # tests/fm-crew-state.test.sh, verified by deleting the conjunct and watching

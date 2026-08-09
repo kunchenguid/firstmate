@@ -186,25 +186,34 @@ nm_run() {  # <args...>
   fm_nm_run "$WT" "$NM_TIMEOUT" "$@"
 }
 
-# Scalar value of a TOON key in the captured run output ($RUN_OUT). nm_run_field
-# is for keys of the RUN OBJECT itself and scopes the read to its block, because
-# `run:` and `branch_sync.local:`/`branch_sync.pipeline:` share key names; plain
-# nm_field is for keys that are the run's top-level siblings, such as `gate:` and
-# `outcome:`, which a run-scoped read would never find.
+# $RUN_OUT is the whole `axi status` payload; $RUN_DETAIL_OUT is that payload with
+# the cached branch_sync object excised, and is what every read of the run's OWN
+# detail below scans. branch_sync answers a different question - who holds the
+# branch right now - from a cache this script deliberately does not trust for
+# anything else (see fm_nm_run_owns_worktree_by_branch_sync), and it repeats key
+# names the run object uses: branch_sync.pipeline.status can read
+# awaiting_approval while the run itself is running, which would emit a false
+# `parked at a gate` verdict. Only the attribution rule, which validates
+# branch_sync against this worktree before believing any of it, reads $RUN_OUT.
+#
+# nm_run_field is for keys of the RUN OBJECT itself and scopes the read to its
+# block; plain nm_field is for keys that are the run's top-level siblings, such as
+# `gate:` and `outcome:`, which a run-scoped read would never find.
 RUN_OUT=""
+RUN_DETAIL_OUT=""
 nm_field() {  # <key>
-  fm_nm_field "$RUN_OUT" "$1"
+  fm_nm_field "$RUN_DETAIL_OUT" "$1"
 }
 nm_run_field() {  # <key>
   fm_nm_run_field "$RUN_OUT" "$1"
 }
 # Finding count from a findings[N]{...} table header; empty when none.
 nm_findings_count() {
-  printf '%s\n' "$RUN_OUT" | grep -oE 'findings\[[0-9]+\]' | head -1 | grep -oE '[0-9]+'
+  printf '%s\n' "$RUN_DETAIL_OUT" | grep -oE 'findings\[[0-9]+\]' | head -1 | grep -oE '[0-9]+'
 }
 nm_gate_step_row() {
   local row step rest status findings
-  row=$(printf '%s\n' "$RUN_OUT" | grep -E '^[[:space:]]*[^,]+,[[:space:]]*"?(awaiting_approval|fix_review)"?[[:space:]]*,' | head -1)
+  row=$(printf '%s\n' "$RUN_DETAIL_OUT" | grep -E '^[[:space:]]*[^,]+,[[:space:]]*"?(awaiting_approval|fix_review)"?[[:space:]]*,' | head -1)
   [ -n "$row" ] || return 0
   row=$(trim "$row")
   step=$(trim "${row%%,*}")
@@ -216,7 +225,7 @@ nm_gate_step_row() {
 }
 nm_gate_status() {
   local s row
-  s=$(printf '%s\n' "$RUN_OUT" | grep -E '^[[:space:]]*(status|state):[[:space:]]*"?(awaiting_approval|fix_review)"?[[:space:]]*$' | head -1)
+  s=$(printf '%s\n' "$RUN_DETAIL_OUT" | grep -E '^[[:space:]]*(status|state):[[:space:]]*"?(awaiting_approval|fix_review)"?[[:space:]]*$' | head -1)
   if [ -n "$s" ]; then
     s=$(strip_quotes "$(trim "${s#*:}")")
     printf '%s' "$s"
@@ -226,13 +235,13 @@ nm_gate_status() {
   [ -n "$row" ] && { row=${row#*|}; printf '%s' "${row%%|*}"; }
 }
 nm_has_gate() {
-  printf '%s\n' "$RUN_OUT" | grep -Eq '^[[:space:]]*gate:[[:space:]]*'
+  printf '%s\n' "$RUN_DETAIL_OUT" | grep -Eq '^[[:space:]]*gate:[[:space:]]*'
 }
 nm_gate_line_name() {
   local gate step
   gate=$(strip_quotes "$(nm_field gate)")
   [ -n "$gate" ] && { printf '%s' "$gate"; return; }
-  step=$(printf '%s\n' "$RUN_OUT" | sed -n '/^[[:space:]]*gate:[[:space:]]*$/,/^[^[:space:]][^:]*:/s/^[[:space:]]*step:[[:space:]]*\(.*\)/\1/p' | head -1)
+  step=$(printf '%s\n' "$RUN_DETAIL_OUT" | sed -n '/^[[:space:]]*gate:[[:space:]]*$/,/^[^[:space:]][^:]*:/s/^[[:space:]]*step:[[:space:]]*\(.*\)/\1/p' | head -1)
   step=$(strip_quotes "$step")
   [ -n "$step" ] && printf '%s' "$step"
 }
@@ -265,7 +274,7 @@ log_reports_ci_ready() {
 
 nm_ci_step_status() {
   local row rest
-  row=$(printf '%s\n' "$RUN_OUT" | grep -E '^[[:space:]]*ci,[[:space:]]*"?(running|fixing)"?[[:space:]]*,' | head -1)
+  row=$(printf '%s\n' "$RUN_DETAIL_OUT" | grep -E '^[[:space:]]*ci,[[:space:]]*"?(running|fixing)"?[[:space:]]*,' | head -1)
   [ -n "$row" ] || return 0
   row=$(trim "$row")
   rest=${row#*,}
@@ -417,6 +426,7 @@ COARSE_STATUS=""
 # worktree, so skip the lookup for them and read state from pane/log directly.
 if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/null 2>&1; then
   RUN_OUT=$(nm_run axi status)
+  RUN_DETAIL_OUT=$(fm_nm_without_block "$RUN_OUT" 0 branch_sync)
   if [ -n "$RUN_OUT" ]; then
     run_branch=$(strip_quotes "$(nm_run_field branch)")
     if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] && nm_run_matches_worktree; then
@@ -465,7 +475,7 @@ if [ "$HAVE_RUN" = 1 ]; then
     status=$(strip_quotes "$(nm_run_field status)")
     RUN_STATUS=$status
     outcome=$(strip_quotes "$(nm_field outcome)")
-    awaiting=$(printf '%s\n' "$RUN_OUT" | grep -E '^[[:space:]]*awaiting_agent:' | head -1 || true)
+    awaiting=$(printf '%s\n' "$RUN_DETAIL_OUT" | grep -E '^[[:space:]]*awaiting_agent:' | head -1 || true)
     gate_status=$(nm_gate_status)
     has_gate=0
     nm_has_gate && has_gate=1
@@ -490,7 +500,7 @@ if [ "$HAVE_RUN" = 1 ]; then
       RUN_DETAIL="parked at $gate"
       fcount=$(nm_gate_findings_count)
       [ -n "$fcount" ] && RUN_DETAIL="$RUN_DETAIL: $fcount finding(s)"
-      if printf '%s\n' "$RUN_OUT" | grep -q 'ask-user'; then
+      if printf '%s\n' "$RUN_DETAIL_OUT" | grep -q 'ask-user'; then
         RUN_DETAIL="$RUN_DETAIL (ask-user: authority decision)"
       fi
     else

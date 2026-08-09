@@ -175,10 +175,11 @@ reset_fakes() {
   FM_FAKE_SYNC_LOCAL_HEAD=""
   FM_FAKE_SYNC_PIPELINE_RUN=""
   FM_FAKE_SYNC_SUBMITTED_HEAD=""
+  FM_FAKE_SYNC_PIPELINE_STATUS=""
   export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING
   export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS
   export FM_FAKE_PIPELINE_HEAD FM_FAKE_SYNC_STATE FM_FAKE_SYNC_LOCAL_HEAD
-  export FM_FAKE_SYNC_PIPELINE_RUN FM_FAKE_SYNC_SUBMITTED_HEAD
+  export FM_FAKE_SYNC_PIPELINE_RUN FM_FAKE_SYNC_SUBMITTED_HEAD FM_FAKE_SYNC_PIPELINE_STATUS
 }
 
 # --- run-object fixtures (TOON, as `no-mistakes axi status` emits) -----------
@@ -255,7 +256,7 @@ branch_sync:
     clean: true
   pipeline:
     run: "${FM_FAKE_SYNC_PIPELINE_RUN:-01RUN}"
-    status: running
+    status: ${FM_FAKE_SYNC_PIPELINE_STATUS:-running}
     phase: pre_push
     submitted_head: ${FM_FAKE_SYNC_SUBMITTED_HEAD:-${FM_FAKE_RUN_HEAD:-}}
     current_head: ${FM_FAKE_PIPELINE_HEAD:-a1b2c3d4}
@@ -1398,6 +1399,36 @@ test_prepush_pipeline_custody_is_attributed() {
   pass "pre-push pipeline custody is attributed to its own crew"
 }
 
+# The custody block is a CACHE, and a cache can lag the run it describes: the crew
+# answers a gate, the run resumes to running, and branch_sync.pipeline.status can
+# still read awaiting_approval while every custody conjunct (state, branch, local
+# head, run id, submitted head) still holds. The run's own status is the gate
+# verdict; the cached block must never supply one. Before the branch_sync block
+# was excised from the detail scans this reported `parked at running`, a false
+# parked verdict that also suppressed the crew's real state.
+test_cached_branch_sync_gate_status_does_not_park_a_running_run() {
+  reset_fakes
+  local d out
+  d=$(new_case sync-gate-bleed)
+  make_repo_on_branch "$d/wt" fm/feat-syncgate
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/syncgate.meta" "window=fm:fm-syncgate" "worktree=$d/wt" "kind=ship" \
+    "harness=claude"
+  printf 'needs-decision: authority call on finding r2\n' > "$d/state/syncgate.status"
+  FM_FAKE_PIPELINE_HEAD=a1b2c3d4
+  assert_head_unresolvable "$d/wt" "$FM_FAKE_PIPELINE_HEAD" "sync gate bleed"
+  FM_FAKE_SYNC_PIPELINE_STATUS=awaiting_approval
+  FM_FAKE_AXI_STATUS="$(run_pipeline_owned_prepush fm/feat-syncgate)"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" syncgate
+  out=$(run_crew_state "$d" syncgate)
+  assert_contains "$out" "source: run-step" "custody-bound run is still authoritative"
+  assert_not_contains "$out" "state: parked" "a cached branch_sync status must not park a running run"
+  assert_not_contains "$out" "parked at" "a cached branch_sync status must not name a gate"
+  assert_contains "$out" "state: working" "the run's own running status decides"
+  pass "a cached branch_sync pipeline status does not become the run's gate verdict"
+}
+
 # Direction 2 (must keep working): same invisible head, but branch_sync reports
 # custody already RELEASED back to the user (`user_owned` - the run went terminal
 # without changing the submitted head). No live pipeline owns this branch, so the
@@ -1547,6 +1578,50 @@ test_custody_claim_for_another_run_not_attributed() {
   pass "custody claim naming a different run is not attributed"
 }
 
+# Fail-closed hardening for the unscoped fallback. That fallback exists for an
+# older or flatter payload that carries the run's fields with no `run:` block
+# wrapping them; no known CLI shape pairs it with a branch_sync object. If one
+# ever did, an unscoped read would answer `branch` and `head` out of
+# branch_sync.local, which IS this worktree's branch and head by construction, so
+# the run would be attributed on self-evidence alone. Refusing is the safe
+# direction: fm-teardown.sh shares this rule, where a false positive grants abort
+# authority over a run we have not proven we own.
+test_branch_sync_without_run_block_is_not_attributed() {
+  reset_fakes
+  local d out head
+  d=$(new_case sync-without-run)
+  make_repo_on_branch "$d/wt" fm/feat-noblock
+  head=$(git -C "$d/wt" rev-parse HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/noblock.meta" "window=fm:fm-noblock" "worktree=$d/wt" "kind=ship" \
+    "harness=claude"
+  printf 'working: crew still working on its own\n' > "$d/state/noblock.status"
+  FM_FAKE_AXI_STATUS="$(cat <<EOF
+branch_sync:
+  state: pipeline_owned
+  changed: false
+  local:
+    branch: fm/feat-noblock
+    head: $head
+    clean: true
+  pipeline:
+    run: "01RUN"
+    status: running
+    phase: pre_push
+    submitted_head: $head
+EOF
+)"
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" noblock
+  out=$(run_crew_state "$d" noblock)
+  assert_not_contains "$out" "source: run-step" \
+    "a branch_sync block with no run object must not attribute a run"
+  assert_contains "$out" "source: status-log" "falls back to the crew's own current state"
+  assert_contains "$out" "state: working" "status-log working: remains current"
+  pass "a branch_sync block with no run object is never attributed"
+}
+
 test_missing_run_head_falls_back_to_current_state() {
   reset_fakes
   local d out
@@ -1649,10 +1724,12 @@ test_local_advanced_past_run_head_invalidates
 test_missing_run_head_falls_back_to_current_state
 test_missing_run_head_with_branch_sync_falls_back_to_current_state
 test_prepush_pipeline_custody_is_attributed
+test_cached_branch_sync_gate_status_does_not_park_a_running_run
 test_released_custody_unresolvable_head_not_attributed
 test_pipeline_custody_submitted_elsewhere_not_attributed
 test_stale_cached_custody_block_not_attributed
 test_custody_claim_for_another_run_not_attributed
+test_branch_sync_without_run_block_is_not_attributed
 test_coarse_older_terminal_row_does_not_outrank_newest_row
 
 echo "all fm-crew-state tests passed"
