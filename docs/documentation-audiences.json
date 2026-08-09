@@ -285,6 +285,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/replicante.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/shadow.md",
       "audience": "operator-current"
     },

@@ -8,6 +8,8 @@ The default destination is /mnt/d/Workspace/shadow, which is the WSL spelling of
 
 The destination is an output surface for Windows inspection and is not part of the agent workflow.
 
+The separate bin/fm-replicante.sh backup keeps historical recovery snapshots on H:\Firstmate-Backup and never changes this visual mirror's contract.
+
 Manual destination edits are preserved on disk but make the next replication stop safely.
 
 ## Operation

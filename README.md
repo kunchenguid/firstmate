@@ -197,6 +197,7 @@ Firstmate's skills live in two separate places with different audiences:
 ## Documentation
 
 - [docs/shadow.md](docs/shadow.md) - the fail-closed WSL replica for Windows-visible Firstmate inspection.
+- [docs/replicante.md](docs/replicante.md) - the incremental, content-addressed WSL backup for H:\Firstmate-Backup.
 - [docs/architecture.md](docs/architecture.md) - maintainer architecture for the crew, supervision, worktrees, secondmates, and project modes.
 - [docs/configuration.md](docs/configuration.md) - environment variables, `FM_HOME`, runtime backend selection, optional Relay and its X and Discord setup steps, the files you set, and harness support.
 - [docs/remote-secondmates.md](docs/remote-secondmates.md) - current setup, routing, transfer, recovery, and safety behavior for whole-home remote second mates.
