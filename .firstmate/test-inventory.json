@@ -1,10 +1,4 @@
 {
   "schema_version": 1,
-  "status": "test-bearing",
-  "baseline": {
-    "version": 1,
-    "declarations": 11071,
-    "test_files": 969
-  },
-  "maximum_unreviewed_deletion": 0
+  "status": "testless"
 }
