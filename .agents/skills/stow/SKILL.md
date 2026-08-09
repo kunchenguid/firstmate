@@ -78,7 +78,7 @@ Every `/stow` invocation performs this complete pass, even when the session cont
    Prefer one concise current rule or authoritative pointer over duplicate prose.
    Archive completed incident and release chronology, stale versions and paths, transient task state, resolved alternatives, old metrics, and report-sized procedures; merge or remove only superseded claims and duplicates whose facts are preserved elsewhere.
    Never plainly remove a unique current fact: every such exit must archive it with provenance in the recoverable cold tier or relocate it to a live JIT owner or a consolidation merge that preserves the fact.
-7. When the total is still over budget after decay and consolidation, relieve it using editable files only and in this order: archive every editable entry already stale, which needs no further judgment; consolidate tighter; run the over-budget offload sweep below and file its proposals, whose relief lands at migration cadence rather than inside this pass; then archive editable `aging` entries oldest-`reinforced`-first until within budget.
+7. When the total is still over budget after decay and consolidation, relieve it using editable files only and in this order: archive every editable entry already stale, which needs no further judgment; consolidate tighter; run the over-budget offload sweep below and file its proposals, whose relief lands at migration cadence rather than inside this pass; then archive editable `aging` entries that are not pending offload oldest-`reinforced`-first until within budget.
    Automatic processes never move a `pinned` entry: decay clocks, legacy grace cycles, oldest-first budget eviction, and immediate budget archiving do not apply to it.
    The sole exception is relocation to a JIT owner after explicit, per-item captain approval under the offload flow below, and that entry remains in memory until its destination is live.
 8. Run `bin/fm-startup-memory-budget.sh report` again after the complete pass.
@@ -100,7 +100,7 @@ Each archived entry keeps its provenance under a dated pass heading: source file
 - (from learnings.md, tier: perishable, reinforced: 2026-06-30) While state/.afk exists, the away-daemon owns triage... [archived: unreinforced 39d]
 ```
 
-Reasons include `unreinforced <N>d`, `budget oldest-first`, `legacy-unvalidated`, and `offloading to <destination> via <task id>`.
+Reasons include `unreinforced <N>d`, `budget oldest-first`, and `legacy-unvalidated`.
 Archiving is a move, not a removal, and recovery is `grep` plus copy back with no tooling.
 Each home keeps its own archive, the archive never cascades, and truncating a grown archive is a captain decision, not a mechanism.
 
@@ -158,12 +158,10 @@ A local skill exists only in this home, so offloading an entry out of `data/capt
    Only after that verification succeeds, create the destination and write the `SKILL.md` with its precise description trigger, then confirm the skill appears in a fresh session's skill index.
    If any migration step fails, remove the destination content and the exclude rule written by this attempt, leaving neither partial private content nor a partial rule behind.
    An approved project destination ships as a normal task through that project's registered delivery mode.
-   The migration's source of truth is the entry as quoted in the proposal, or its archive line when budget pressure already retired it.
+   The migration's source of truth is the entry as quoted in the proposal.
 4. Remove only once live.
    The memory entry leaves its always-injected file only after the destination is live: the local skill exists with its verified line in the active home's resolved repository-local exclude file, or the project change has landed.
-   Until then the entry stays, so knowledge is never in limbo between owners.
-   For a non-pinned entry, when the home is still over budget after approval, this remove-only-once-live rule relaxes solely into immediate archival with provenance `offloading to <destination> via <task id>` in the recoverable cold tier, never into plain removal, so the archive remains the source if migration fails.
-   A pinned entry never takes that budget-archive exception and leaves memory only after its approved destination is live.
+   Until then the entry stays, so knowledge is never in limbo between owners; an unresolved approved migration may therefore remain a concrete over-budget exception.
    Leave no pointer behind by default, and at most one line only when the destination's discoverability is genuinely doubtful.
 
 ## Knowledge sweep and routing
