@@ -14,7 +14,7 @@ Manual destination edits are preserved on disk but make the next replication sto
 
 ## Operation
 
-Run the replicator from WSL with bin/fm-shadow.sh.
+Run the mirror from WSL with bin/fm-shadow.sh.
 
 Override either path for a controlled fixture or another installation with bin/fm-shadow.sh --source <source> --destination <destination>.
 
@@ -26,13 +26,13 @@ The command creates an atomic lock at the destination parent's .shadow.lock.
 
 The command also creates a source-side lock at the source parent's .shadow-source-lock.<source-name>.
 
-Both locks are persistent markers, and the source-side lock coordinates shadow executions while the source snapshot is the sealed source tree for that run.
+The two locks are atomic run markers that a normal exit releases, and the source-side lock coordinates shadow executions while the source snapshot is the sealed source tree for that run.
 
 An existing lock is treated as active and is never removed automatically.
 
 The source must be the root of a Git worktree on the default branch with a clean tracked and untracked tree.
 
-The destination must be the root of a Git worktree on the same default branch with a valid prior manifest and no local changes.
+An existing destination must be the root of a Git worktree on the same default branch with a valid prior manifest and no local changes.
 
 The destination commit must be an ancestor of the source commit in the source repository.
 
@@ -51,6 +51,14 @@ An interrupted run's source snapshot is removed by the next invocation after bot
 The staging copier uses 9p-compatible content and symbolic-link operations and does not request POSIX metadata updates from the destination filesystem.
 
 An unchanged source and unchanged complete tree returns already current without replacing the destination.
+
+## Scheduling
+
+Create one Windows Task Scheduler action for the WSL command, such as wsl.exe -d Ubuntu -- /home/ale/firstmate/bin/fm-shadow.sh.
+
+Run the task in the WSL distribution where /home/ale/firstmate is the canonical source.
+
+Schedule shadow separately from replicante; the commands have different destinations and independent locks.
 
 ## Mirrored contents
 
@@ -76,17 +84,17 @@ The command refuses a dirty source, a dirty destination, a detached or wrong bra
 
 It never uses a forced Git operation, a stash, a hard reset, a partial destination copy, or a deletion of destination changes.
 
-If staging or the final atomic installation fails, the previous validated destination remains the recovery point.
+If staging or the final atomic installation fails, an existing validated destination remains the recovery point.
 
 Inspect the owner file in a stale .shadow.lock or .shadow-source-lock.<source-name> only after verifying that no fm-shadow.sh process is running.
 
-Remove only the exact stale lock directory for that source and destination after confirming that its recorded process is no longer active.
-
-Do not repair the destination by hand and retry after an integrity refusal unless the manual change is intentionally removed through the separate operating procedure that owns the Windows output.
+Remove only the exact stale .shadow.lock or .shadow-source-lock.<source-name> directory after confirming that its recorded process is no longer active.
 
 ## Tests
 
-The fixture suite covers first publication, repeated idempotent publication, complete working-tree content, destination dirtiness, destination divergence, concurrent locking, external-source protection, and recovery from an unsupported source entry.
+The fixture suite covers first publication, repeated idempotent publication, complete working-tree content, destination dirtiness, destination divergence, concurrent locking, external symlink-target protection, and recovery from an unsupported source entry.
+
+The fixture suite uses temporary source and destination paths and never accesses the live Firstmate home or Windows destination.
 
 Run the focused suite with bash tests/fm-shadow.test.sh.
 

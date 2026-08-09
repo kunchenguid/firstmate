@@ -12,11 +12,13 @@ The worker does not accept normal source or destination overrides.
 
 ## Operation
 
-The H: volume must be mounted at /mnt/h before every run.
+The H: volume must be mounted at /mnt/h before every operational command.
 
 Run the first complete backup with /home/ale/firstmate/bin/fm-replicante.sh run.
 
-Set retention explicitly when the default of 30 snapshots is not appropriate, for example /home/ale/firstmate/bin/fm-replicante.sh run --retain 60.
+Set retention explicitly when the built-in default of 30 snapshots is not appropriate, for example /home/ale/firstmate/bin/fm-replicante.sh run --retain 60.
+
+The REPLICANTE_RETENTION environment variable changes the default for run, and an explicit --retain value takes precedence for that invocation.
 
 Each snapshot has a complete manifest of the source paths and points regular-file content at SHA-256 objects.
 
@@ -52,13 +54,15 @@ Restore never overwrites an existing output, the canonical source, the backup st
 
 Source modes are recorded in snapshot manifests.
 
-The 9p object store uses content operations, and --apply-modes requests mode restoration only when the recovery filesystem supports it.
+The --apply-modes option attempts to apply the recorded modes during restoration; omit it when the recovery filesystem does not support those mode updates.
 
 Inspect a restored tree before any separate operator-owned replacement or import procedure.
 
 ## Scheduling
 
 Create one Windows Task Scheduler action for the WSL command, such as wsl.exe -d Ubuntu -- /home/ale/firstmate/bin/fm-replicante.sh run --retain 30.
+
+Run the task in the WSL distribution where /mnt/h is mounted and /home/ale/firstmate is the canonical source.
 
 Use one scheduled replicante action rather than parallel backup writers.
 
@@ -71,5 +75,7 @@ Do not schedule a command that points at /mnt/h generally or at a different back
 ## Tests
 
 Run the fixture suite with bash tests/fm-replicante.test.sh.
+
+The fixture suite enables REPLICANTE_TEST_MODE=1 with temporary paths and never accesses /home/ale/firstmate or /mnt/h/Firstmate-Backup.
 
 The suite covers first backup, idempotent repetition, incremental changes, deletion history, retention, destination identity, concurrent locking, unsupported source entries, corruption refusal, verification, and restoration.
