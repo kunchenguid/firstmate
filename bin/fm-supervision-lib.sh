@@ -3,9 +3,10 @@
 # Usage: . bin/fm-supervision-lib.sh
 #
 # Reports whether a firstmate home needs supervision because it has in-flight
-# work (a state/<id>.meta exists) or an X-mode relay poll
-# (state/x-watch.check.sh), and whether its watcher has a fresh liveness beacon
-# (state/.last-watcher-beat, touched every poll cycle, within the grace window).
+# work (a state/<id>.meta exists), a registered process-event source, or an
+# X-mode relay poll (state/x-watch.check.sh), and whether its watcher has a
+# fresh liveness beacon (state/.last-watcher-beat, touched every poll cycle,
+# within the grace window).
 # bin/fm-guard.sh uses the fresh-beacon field directly so a completed one-shot
 # watcher remains inside the pull guard's grace window while its wake is being
 # handled. bin/fm-turnend-guard.sh separately uses fm_watcher_healthy from

@@ -919,10 +919,11 @@ EOF
     fi
   fi
 
-  # Layer 1 backbone: pane staleness. Two consecutive identical hashes with no busy
-  # signature means the crewmate finished, is waiting, or is wedged. Each distinct
-  # stale hash is surfaced, absorbed, or timed toward escalation once (.stale-*
-  # remembers the hash already classified).
+  # Layer 1 backbone: pane staleness. A capture failure surfaces immediately
+  # through the nonterminal stale boundary. Otherwise, two consecutive identical
+  # hashes with no busy signature mean the crewmate finished, is waiting, or is
+  # wedged. Each distinct stale hash is surfaced, absorbed, or timed toward
+  # escalation once (.stale-* remembers the hash already classified).
   while IFS= read -r w; do
     kind=$(window_kind "$w")
     task=$(window_to_task "$w" "$STATE")

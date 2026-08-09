@@ -5,10 +5,11 @@
 # First, always warn if the firstmate primary checkout (FM_ROOT) is on a named
 # non-default branch, because that means firstmate-on-itself work landed in the
 # primary instead of an isolated worktree.
-# Then, if a task is in flight (a state/<id>.meta exists) or X-mode relay
-# polling is active (state/x-watch.check.sh exists) and the watcher liveness
-# beacon (state/.last-watcher-beat, touched every poll cycle) is not fresh
-# within FM_GUARD_GRACE seconds, prints a loud, clearly delimited
+# Then, if a task is in flight (a state/<id>.meta exists), a process-event
+# source is registered, or X-mode relay polling is active
+# (state/x-watch.check.sh exists), and the watcher liveness beacon
+# (state/.last-watcher-beat, touched every poll cycle) is not fresh within
+# FM_GUARD_GRACE seconds, prints a loud, clearly delimited
 # banner so the agent cannot skim past it in the tool output of whatever it was
 # doing - the one channel every harness has. The full banner is emitted once per
 # distinct staleness episode in this FM_HOME (keyed to beacon mtime or absence);
@@ -152,17 +153,17 @@ beacon_desc=$FM_SUP_BEACON_DESC
 beacon_fresh=$FM_SUP_WATCHER_FRESH
 if [ "$needed" = false ]; then
   # Leave the unhealthy state (nothing riding on the watcher): clear so a later
-  # work or X-mode need + stale combination is a fresh episode even if the
-  # beacon is still absent with the same key string.
+  # work, process-event, or X-mode need plus stale beacon is a fresh episode even
+  # if the beacon is still absent with the same key string.
   [ "$READ_ONLY" -eq 1 ] || fm_guard_clear_stale_banner
   exit 0
 fi
 
 [ -s "$FM_WAKE_QUEUE" ] && queue_pending=true
 
-# No fresh watcher with tasks in flight is the dangerous state: emit a prominent,
-# bordered banner FIRST so it reads as an alarm, not a buried stderr line. Later
-# calls in the same episode get a one-line reminder only.
+# No fresh beacon while supervision is needed is the dangerous state: emit a
+# prominent, bordered banner FIRST so it reads as an alarm, not a buried stderr
+# line. Later calls in the same episode get a one-line reminder only.
 if [ "$beacon_fresh" = false ]; then
   episode_key=$(fm_guard_stale_episode_key "$STATE")
   episode_key=${episode_key%$'\n'}

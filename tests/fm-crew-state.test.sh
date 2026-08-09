@@ -1110,9 +1110,9 @@ test_gone_pi_window_overrides_busy_record() {
   pass "a missing Pi window overrides a stale busy marker"
 }
 
-# A closed/unreadable pane must NOT mask an authoritative run-step: judge by the
-# run-step, not the shell. The common case is a finished crew whose agent has
-# exited and closed its window (the normal gap between completion and teardown) -
+# A closed or unreadable pane must not mask an authoritative terminal run result.
+# The common case is a finished crew whose agent has exited and closed its window
+# (the normal gap between completion and teardown) -
 # it must still report its terminal run-step state (e.g. done), never unknown.
 test_dead_window_still_reports_terminal_run_step() {
   reset_fakes

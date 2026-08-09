@@ -195,7 +195,7 @@ fm_backend_tmux_classify_process_name() {  # <path> [argv0] -> agent|shell|other
 #
 # Like fm_backend_tmux_current_command this is a RAW pane read: tmux answers an
 # absent target from the client's active window rather than failing, so callers
-# must confirm exact window membership first, exactly as the classifier below
+# must confirm exact endpoint membership first, exactly as the classifier below
 # does, or they will describe some other pane entirely.
 fm_backend_tmux_foreground_comms() {  # <target>
   local target=$1 tty pid pgid tpgid comm

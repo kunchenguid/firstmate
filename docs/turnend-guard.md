@@ -34,7 +34,7 @@ Every mode treats `state/x-watch.check.sh` as supervision need, so X-mode relay 
 The turn-end guard calls `fm_watcher_healthy <state-dir> <watch-path> [grace-seconds] [home]` from `bin/fm-wake-lib.sh`, the same identity-matched lock and fresh-beacon check used by `bin/fm-watch-arm.sh`.
 A stale beacon blocks turn end even when a watcher pid is live.
 A fresh leftover beacon does not satisfy the turn-end guard when the lock is missing, dead, or identity-mismatched.
-`bin/fm-guard.sh` instead consumes the beacon freshness and description from `bin/fm-supervision-lib.sh` in one read, clears its stale-episode latch on freshness recovery, and alarms only after the beacon genuinely exceeds the grace window.
+`bin/fm-guard.sh` instead consumes the beacon freshness and description from `bin/fm-supervision-lib.sh` in one read, clears its stale-episode latch on freshness recovery, and alarms only after the beacon genuinely falls outside the grace window.
 
 `FM_STATE_OVERRIDE` wins over `FM_HOME/state`, and `FM_HOME` wins over repository-root `state/`.
 `FM_GUARD_GRACE` controls beacon freshness and defaults to 300 seconds.

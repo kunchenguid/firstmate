@@ -7,10 +7,10 @@
 # last EVENT, not the current STATE. After firstmate resolves a needs-decision
 # or blocked and the crew resumes (responds to the gate, the pipeline fixes, it
 # re-validates), the log's last line stays stale. This helper never infers the
-# current state from a tail of the log: it reads the authoritative source (a
-# no-mistakes run-step attributed to this crew's branch and current code
-# identity, else the pane busy-signature) and reconciles the possibly-stale log
-# against it.
+# current state from a tail of the log: it reads an attributed no-mistakes
+# run-step with endpoint liveness gating for every nonterminal result, else the
+# semantic busy state of a present endpoint, and reconciles the possibly-stale
+# log against it.
 #
 # The determinism lives entirely here - only run-step / pane / log reads plus
 # fixed mapping logic, no heuristics and no LLM. Output is one stable, parseable,
@@ -29,8 +29,9 @@
 #      the same line of history). Local work that advanced past the run head, or
 #      diverged from it, invalidates attribution.
 #      Terminal run results are AUTHORITATIVE: passed/checks-passed -> done and
-#      failed/cancelled -> failed. Active running/fixing/ci states report working
-#      only while the recorded backend target still exists. EXCEPT: while
+#      failed/cancelled -> failed. Every nonterminal run result, including an
+#      approval-parked run, requires the recorded backend target to still exist.
+#      Active running/fixing/ci states then report working. EXCEPT: while
 #      the active step is ci, `axi status` alone cannot tell "still waiting on
 #      checks" from "checks green, waiting on merge" (see nm_ci_checks_state) -
 #      a ci-step log-tail check overrides working -> done once checks read
@@ -38,14 +39,15 @@
 #   3. Reconcile the status log: if its last line says needs-decision/blocked but
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
-#      agree, and are reported as parked.
+#      agree, and are reported as parked while the recorded endpoint exists.
 #   4. No run for this crew (pre-validation, or kind=scout): fall back to the
-#      recorded backend's pane busy state, then the status log's last line only
-#      when its verb maps to a recognized run-state. Decision-only events such as
-#      `resolved` never become current state or detail.
-#   5. Missing meta or torn-down worktree: report unknown · none. If no run is
-#      attributed to this crew, a dead endpoint also reports unknown · none rather
-#      than trusting a stale status log.
+#      recorded endpoint's semantic busy state, then the status log's last line
+#      only when its verb maps to a recognized run-state. Decision-only events
+#      such as `resolved` never become current state or detail.
+#   5. Missing meta or torn-down worktree: report unknown · none. A dead or
+#      unreadable endpoint also reports unknown · none for every nonterminal
+#      path rather than trusting a run step, busy marker, or stale status log;
+#      only an attributed terminal run result survives endpoint loss.
 #
 # Read-only and side-effect free. Always exits 0 on a successful read regardless
 # of state; exit 2 only on a usage error (no id).
@@ -138,9 +140,8 @@ LOG_VERB=$(status_line_verb "$LOG_LINE")
 
 # pane_readable preserves terminal run results after an endpoint closes, while a
 # nonterminal run requires its recorded endpoint to still exist.
-# Backend-aware
-# (fm_backend_of_meta defaults absent backend= to tmux, the P1 contract): a
-# herdr task is read through fm_backend_capture instead of a bare tmux probe.
+# The shared backend-aware target-existence primitive keeps this check exact;
+# fm_backend_of_meta defaults an absent backend= field to tmux for compatibility.
 TASK_BACKEND=$(fm_backend_of_meta "$META")
 BACKEND_TARGET=$(fm_backend_target_of_meta "$META")
 EXPECTED_LABEL="fm-$ID"
@@ -576,10 +577,10 @@ if [ "$HAVE_RUN" = 1 ]; then
 fi
 
 # --- fallback: no run attributed to this crew ------------------------------
-# The run-step path above already handled any crew with a terminal or parked run.
-# Down here there
-# is no run to consult, so a dead/unreadable target means the crew is gone: report
-# unknown rather than trusting a possibly-stale status log as the current state.
+# The run-step path above already handled every matching run or returned unknown
+# when its nonterminal endpoint was unavailable. Down here there is no run to
+# consult, so a dead/unreadable target means the crew is gone: report unknown
+# rather than trusting a possibly-stale status log as the current state.
 [ -n "$BACKEND_TARGET" ] || emit unknown none "no backend target recorded"
 pane_readable "$BACKEND_TARGET" || emit unknown none "backend target gone: $BACKEND_TARGET"
 
