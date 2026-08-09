@@ -81,11 +81,6 @@ for meta in "$STATE"/*.meta; do
   fi
 
   record=$(fm_agent_cwd_verdict "$id" "$backend" "$target" "$PID_INDEX" "$expected_home")
-  if [ "$(fm_agent_verdict_field "$record" source)" != proc ] && [ -n "$PID_INDEX" ]; then
-    fallback_record=$(fm_agent_cwd_verdict "$id" "$backend" "$target" "$PID_INDEX")
-    [ "$(fm_agent_verdict_field "$fallback_record" source)" = proc ] || fallback_record=
-    [ -z "$fallback_record" ] || record=$fallback_record
-  fi
   source=$(fm_agent_verdict_field "$record" source)
   if [ "$source" != proc ]; then
     # Unproven isolation blocks the fleet, but only while the task's endpoint

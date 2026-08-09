@@ -35,12 +35,18 @@ exit 0
 SH
 chmod +x "$FAKEBIN/gh" "$FAKEBIN/date" "$FAKEBIN/sleep"
 
+workflow_json() {
+  python3 "$ROOT/tests/workflow-contract.py" "$1"
+}
+
 extract_signature_script() {
-  python3 - "$WORKFLOW" <<'PY'
-import sys
-import yaml
-with open(sys.argv[1], encoding="utf-8") as fh:
-    workflow = yaml.safe_load(fh)
+  local workflow
+  workflow=$(workflow_json "$WORKFLOW")
+  WORKFLOW_JSON="$workflow" python3 - <<'PY'
+import json
+import os
+
+workflow = json.loads(os.environ["WORKFLOW_JSON"])
 for step in workflow["jobs"]["check"]["steps"]:
     if step.get("name") == "Verify no-mistakes signature in PR body":
         print(step["run"], end="")
@@ -106,31 +112,36 @@ test_workflow_semantics() {
   [ "$first" = 'PR #418 body compliance - edited - event 73 (run 9002)' ] || fail "first synthetic run name is incomplete"
   [ "$second" = 'PR #418 body compliance - edited - event 74 (run 9003)' ] || fail "second synthetic run name is incomplete"
   [ "$first" != "$second" ] || fail "distinct events must have unique run names"
-  python3 - "$WORKFLOW" "$MARKER" <<'PY'
-import sys
-import yaml
-with open(sys.argv[1], encoding="utf-8") as fh:
-    workflow = yaml.safe_load(fh)
-event = workflow.get("on", workflow.get(True))
+  local workflow
+  workflow=$(workflow_json "$WORKFLOW")
+  WORKFLOW_JSON="$workflow" MARKER="$MARKER" python3 - <<'PY'
+import json
+import os
+
+workflow = json.loads(os.environ["WORKFLOW_JSON"])
+marker = os.environ["MARKER"]
+event = workflow["on"]
 assert event["pull_request"]["types"] == ["opened", "edited", "synchronize", "reopened"]
 assert event["pull_request"]["branches"] == ["main"]
-assert workflow["permissions"] == {"contents": "read"}
+assert workflow["permissions"] == {"contents": "read", "pull-requests": "read"}
 assert workflow["concurrency"]["cancel-in-progress"] is True
 assert "github.event.pull_request.number" in workflow["concurrency"]["group"]
 assert "github.run_id" in workflow["concurrency"]["group"]
 assert workflow["run-name"] == "PR #${{ github.event.pull_request.number }} body compliance - ${{ github.event.action }} - event ${{ github.run_number }} (run ${{ github.run_id }})"
 job = workflow["jobs"]["check"]
 assert job["name"] == "PR must be raised via no-mistakes"
-assert "pull_request_target" not in repr(workflow)
-assert "actions/checkout" not in repr(workflow)
-assert "secrets." not in repr(workflow)
+assert set(event) == {"pull_request"}
+assert all(step.get("uses") != "actions/checkout" for step in job["steps"])
+assert all("secrets." not in value for value in job.get("if", "").split())
 condition = job["if"]
 assert "github-actions[bot]" in condition and "dependabot[bot]" in condition
 assert "release-please[bot]" not in condition
 run = next(step["run"] for step in job["steps"] if step.get("name") == "Verify no-mistakes signature in PR body")
-assert sys.argv[2] in run
-assert "api repos/JTInventory/firstmate/pulls/" in run
+assert marker in run
+assert 'gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}"' in run
 PY
+  local status=$?
+  expect_code 0 "$status" "workflow semantic assertions must pass"
   pass "semantic workflow identity, security, and signature contracts are preserved"
 }
 

@@ -101,15 +101,22 @@ fm_worker_declaration_present() {
 }
 
 fm_worker_identity_is_complete() {
+  local effective_home
   case "${FM_AGENT_ROLE:-}" in
-    crewmate|secondmate) ;;
+    crewmate) ;;
+    secondmate)
+      effective_home=${FM_HOME:-${FM_ROOT_OVERRIDE:-${FM_ROOT:-}}}
+      [ -n "$effective_home" ] || return 1
+      [ "$effective_home" = "$FM_AGENT_OWNER_HOME" ] || return 1
+      ;;
     *) return 1 ;;
   esac
   [ -n "${FM_AGENT_TASK:-}" ] || return 1
   case "${FM_AGENT_OWNER_HOME:-}" in
-    /*) return 0 ;;
+    /*) ;;
     *) return 1 ;;
   esac
+  return 0
 }
 
 # fm_worker_is_task_worker: 0 when this process is a declared task child that

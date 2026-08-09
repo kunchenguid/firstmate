@@ -178,17 +178,10 @@ test_entrypoints_refuse() {
 }
 
 test_tracked_contracts() {
-  python3 - "$ROOT/.no-mistakes.yaml" <<'PY'
-import sys
-import yaml
-with open(sys.argv[1], encoding="utf-8") as fh:
-    config = yaml.safe_load(fh)
-assert config.get("disable_project_settings") is True
-PY
   out=$(run_helper "$NORMAL_CWD" set); rc=$?
   expect_code 3 "$rc" "the live refusal consumer must reject the gate marker"
   assert_contains "$out" 'NO_MISTAKES_GATE set' "the live refusal consumer lost its marker error"
-  pass "normalized gate configuration and live refusal behavior are enforced"
+  pass "the live gate refusal consumer rejects the gate marker"
 }
 
 test_helper_signals

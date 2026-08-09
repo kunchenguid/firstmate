@@ -120,10 +120,21 @@ test_incomplete_worker_identity_refuses_primary_operations() {
   out=$(FM_AGENT_ROLE=unknown FM_AGENT_TASK=bad bash -c '. "$1"; fm_worker_refuse_primary_operation operation' _ "$ROOT/bin/fm-worker-isolation-lib.sh" 2>&1)
   status=$?
   expect_code 1 "$status" "an unknown role must be refused"
-  out=$(FM_AGENT_ROLE=secondmate FM_AGENT_TASK=dom-b2 FM_AGENT_OWNER_HOME=/homes/dom \
+  out=$(FM_AGENT_ROLE=secondmate FM_AGENT_TASK=dom-b2 FM_AGENT_OWNER_HOME=/homes/dom FM_HOME=/homes/dom \
     bash -c '. "$1"; fm_worker_refuse_primary_operation operation; printf primary' _ \
     "$ROOT/bin/fm-worker-isolation-lib.sh")
   [ "$out" = primary ] || fail "a complete secondmate identity must remain primary in its own home"
+  out=$(FM_AGENT_ROLE=secondmate FM_AGENT_TASK=dom-b2 FM_AGENT_OWNER_HOME=/homes/dom FM_HOME=/primary \
+    bash -c '. "$1"; fm_worker_refuse_primary_operation operation' _ \
+    "$ROOT/bin/fm-worker-isolation-lib.sh" 2>&1)
+  status=$?
+  expect_code 1 "$status" "a secondmate with a foreign effective home must be refused"
+  assert_contains "$out" "task worker" "foreign secondmate home refusal lost its worker diagnostic"
+  out=$(FM_AGENT_ROLE=secondmate FM_AGENT_TASK=dom-b2 FM_AGENT_OWNER_HOME=/homes/dom FM_ROOT=/primary \
+    bash -c '. "$1"; fm_worker_refuse_primary_operation operation' _ \
+    "$ROOT/bin/fm-worker-isolation-lib.sh" 2>&1)
+  status=$?
+  expect_code 1 "$status" "a secondmate with an inherited primary root must be refused"
   pass "incomplete worker identities fail closed at the shared guard"
 }
 
@@ -332,9 +343,9 @@ test_worker_cannot_take_the_session_owner_record() {
     FM_AGENT_ROLE=crewmate FM_AGENT_TASK=w3 FM_AGENT_OWNER_HOME="$home" \
     "$LOCK" status 2>&1)
   status=$?
-  expect_code 1 "$status" "lock status must refuse a declared task worker"
-  assert_contains "$out" "session lock operation refused" "lock status refusal lost its operation diagnostic"
-  pass "a declared task worker is refused every session-lock operation"
+  expect_code 0 "$status" "lock status must remain read-only for a declared task worker"
+  assert_contains "$out" "lock: held" "lock status lost its read-only holder report"
+  pass "a declared task worker is refused lock acquisition but can inspect status"
 }
 
 test_worker_cannot_spawn_or_tear_down() {

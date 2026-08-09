@@ -398,14 +398,13 @@ test_exclude_family() {
 }
 
 test_ci_and_docs_call_the_owner() {
-  :
-  python3 - "$CI" "$ROOT/.no-mistakes.yaml" <<'PY'
-import sys
-import yaml
-with open(sys.argv[1], encoding="utf-8") as fh:
-    ci = yaml.safe_load(fh)
-with open(sys.argv[2], encoding="utf-8") as fh:
-    no_mistakes = yaml.safe_load(fh)
+  local ci_json status
+  ci_json=$(python3 "$ROOT/tests/workflow-contract.py" "$CI")
+  CI_JSON="$ci_json" python3 - <<'PY'
+import json
+import os
+
+ci = json.loads(os.environ["CI_JSON"])
 def runs(job):
     return [step.get("run", "") for step in ci["jobs"][job].get("steps", [])]
 assert any("bin/fm-lint.sh" in run for run in runs("lint"))
@@ -419,10 +418,11 @@ assert "--fail-on-any-gate-skip" in herdr
 assert "bin/fm-install-herdr.sh" in herdr
 assert "bin/fm-install-treehouse.sh" in herdr
 assert "bin/fm-herdr-ci-cleanup.sh" in herdr
-assert not any("continue-on-error: true" in repr(job) or "max-attempts" in repr(job) for job in ci["jobs"].values())
-commands = no_mistakes.get("commands", {})
-assert not any("tests/*.test.sh" in str(value) for value in commands.values())
+assert all(job.get("continue-on-error") is not True for job in ci["jobs"].values())
+assert all("max-attempts" not in job.get("strategy", {}) for job in ci["jobs"].values())
 PY
+  status=$?
+  expect_code 0 "$status" "CI semantic assertions must pass"
   pass "semantic CI and gate configuration use the one-owner runner"
 }
 

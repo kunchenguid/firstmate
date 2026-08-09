@@ -276,7 +276,7 @@ fm_slot_process_occupant_tasks() {
   wt_real=$(fm_agent_canonical_dir "$wt") || return 2
   [ -d /proc ] || return 2
   index=$(fm_agent_task_pid_index 2>/dev/null || true)
-  [ -n "$index" ] || return 1
+  [ -n "$index" ] || return 2
   while IFS=$'\t' read -r task pid start home role; do
     [ -n "$task" ] || continue
     [ -n "$start" ] || { uncertain=1; continue; }

@@ -114,8 +114,8 @@ kill "$REParent_PID" 2>/dev/null || true
 wait "$REParent_PID" 2>/dev/null || true
 verdict=$(fm_slot_disposal_verdict "$HOME_DIR/state" task-a "$WORKTREE" \
   "$HOME_DIR" "$HOME_DIR" crewmate closed herdr lab:pane-a)
-[ "$verdict" = dispose ] \
-  || fail "a closed endpoint with no worker blocked clean disposal: $verdict"
-pass "a proven closed endpoint disposes after global occupancy is absent"
+[ "$verdict" = "retain: authoritative slot-occupant evidence is unavailable" ] \
+  || fail "a closed endpoint with no declared worker did not retain unknown occupancy: $verdict"
+pass "a closed endpoint retains the lease when global occupancy is unknown"
 
 echo "# all fm-slot-occupant-proof tests passed"
