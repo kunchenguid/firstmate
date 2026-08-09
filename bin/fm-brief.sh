@@ -423,7 +423,7 @@ DOD=${DOD%$'\n'}
 IFS= read -r -d '' FOCUSED_VALIDATION_SECTION <<EOF || true
 # Focused validation
 Run the mapped focused validation slice for this change before reporting done, and record its timing.
-Map the touched files to the project's test surface: for firstmate-repo tasks run \`$FM_ROOT/bin/fm-test-run.sh --changed\` or the touched \`tests/<family>.test.sh\` scripts; for other projects use the focused test families that project's \`AGENTS.md\` names.
+Map the touched files to the project's test surface: for firstmate-repo tasks run \`bin/fm-test-run.sh --changed\` from the worktree root or the touched \`tests/<family>.test.sh\` scripts; for other projects use the focused test families that project's \`AGENTS.md\` names.
 The stop rule is an isolated and proven surface: the touched files resolve to one module and one test family, no shared middleware, config, deploy, or edge file, no external mutation, and existing focused tests cover the module and pass.
 An isolated and proven surface qualifies for the fast path only for \`direct-PR\` work inside the internal-only boundary; product-facing, mixed, and uncertain work still climbs to the full review.
 Follow \`$FM_ROOT/.agents/skills/focused-validation/SKILL.md\` for the ladder, the isolation proof, and the file-to-test-family map.

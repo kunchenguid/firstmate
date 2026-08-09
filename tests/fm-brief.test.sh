@@ -41,8 +41,13 @@ test_focused_validation_preflight_in_ship_briefs() {
     brief="$home/data/$id/brief.md"
     assert_grep "# Focused validation" "$brief" "$mode brief missing the focused-validation section"
     assert_grep "record its timing" "$brief" "$mode brief lost the timing record requirement"
-    assert_grep "$ROOT/bin/fm-test-run.sh --changed" "$brief" \
+    assert_grep "bin/fm-test-run.sh --changed" "$brief" \
       "$mode brief lost the firstmate-repo file-to-test-family map"
+    assert_no_grep "$ROOT/bin/fm-test-run.sh" "$brief" \
+      "$mode brief points firstmate-repo workers at the primary checkout's test runner"
+    # shellcheck disable=SC2016  # literal $FM_ROOT must stay unexpanded in the grep pattern
+    assert_no_grep '$FM_ROOT/bin/fm-test-run.sh' "$brief" \
+      "$mode brief leaks a literal unexpanded FM_ROOT test-run path"
     assert_grep "tests/<family>.test.sh" "$brief" "$mode brief lost the direct test-script map"
     assert_grep "isolated and proven" "$brief" "$mode brief lost the stop rule"
     assert_grep "$ROOT/.agents/skills/focused-validation/SKILL.md" "$brief" \
