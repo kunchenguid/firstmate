@@ -13,11 +13,11 @@ The `hold` subcommand maps an originating work id and stable decision key to `<o
 It creates a kind `captain` backlog item when absent and invokes `tasks-axi hold <id> --reason <reason> --kind captain` on every retry.
 It rejects an identity collision, a changed title, and attempts to reopen an already resolved identity.
 
-The `complete` subcommand unions the reviewed keys into `decision_keys=` and appends `decisions_reviewed=1` while originating task metadata is live.
+The `complete` subcommand unions the reviewed keys into `decision_keys=` and publishes the complete attestation through a same-directory atomic metadata replacement while originating task metadata is live.
 A repeated `--existing <task-id>` option lets the reviewing origin attest an active structured Captain's Call item that already exists under a formal earlier identity or an arbitrary legacy structured identity.
-It validates every explicit identity from the active authoritative backlog before writing and unions exact identities into `decision_refs=` so retries are deterministic and idempotent.
+It validates every explicit identity and raw `blocked-by` edge from the active authoritative backlog before writing and unions exact identities into `decision_refs=` so retries are deterministic and idempotent.
 An existing reference must be queued, unblocked, actively held, kind `captain`, and hold-kind `captain`.
-Missing, malformed, completed, non-captain, ordinary parked, external-hold, blocked, and mixed invalid reference sets fail before attestation.
+Missing, malformed, completed, non-captain, inactive, non-queued, ordinary parked, external-hold, blocked, dangling-blocked, and mixed invalid reference sets fail before attestation.
 Existing-reference completion never invokes a backlog mutation, so each referenced task keeps its identity, title, body, dependencies, and open state and no duplicate task is created.
 The `config/backlog-backend=manual` setting retains the contract owned by `docs/configuration.md`; explicit reference validation reads the manually maintained structured backlog through compatible tasks-axi without mutating it.
 A post-teardown visual review can complete against the surviving report and durable holds without recreating volatile task metadata.
@@ -51,12 +51,13 @@ Verification date: 2026-07-14.
 Additional quoted `blocked_by` regression verification date: 2026-07-17.
 Plural blocker-readiness and mixed-home projection verification date: 2026-07-22.
 Existing Captain's Call reference verification date: 2026-08-08.
+Failure-atomic and complete rejection-class verification date: 2026-08-09.
 
 The focused end-to-end regression uses only synthetic `sample` identities and decision text.
 It begins with a completed investigation and visual review whose genuine unresolved choice exists only in the report.
 The initial Bearings snapshot correctly has no open decision, and the new teardown gate refuses to erase the source.
 A later regression covers tasks-axi's quoted multi-entry `blocked_by` output so `resolve` matches the first, middle, and last ids and rejects a genuinely absent id.
-The existing-reference regression covers a formal earlier hold, an arbitrary legacy structured identity, multiple references, manual-backend validation, idempotent retry, byte-identical referenced rows, verification, teardown gating, and fail-closed invalid reference sets.
+The existing-reference regression covers a formal earlier hold, an arbitrary legacy structured identity, multiple references, manual-backend validation, idempotent retry, byte-identical referenced rows, verification, teardown gating, every invalid state including a dangling blocker, and interrupted attestation publication.
 
 The final verification commands and their exact summarized outputs follow.
 
@@ -66,7 +67,8 @@ ok - report-only unresolved decision is reproduced and completion refuses before
 ok - non-forced scout teardown always requires durable inventory verification
 ok - captain holds are idempotent, distinct, teardown-safe, Bearings-visible, and durably routed before close
 ok - existing formal and legacy Captain's Call references attest idempotently without backlog mutation
-ok - missing, malformed, done, unrelated, parked, external, blocked, and mixed existing references fail closed
+ok - all invalid existing-reference states fail closed without metadata or backlog mutation
+ok - completion attestation publishes atomically after an interrupted write
 ok - completion and verification validate origins before constructing paths
 ok - ended visual review follows the same decision-hold completion owner
 ok - resolved findings and decision-like prose do not create false holds

@@ -178,13 +178,36 @@ verify_hold_active() {  # <hold-id>
   [ "$hold_kind" = captain ] || fail "backlog item $id is not held for the captain"
 }
 
+unresolved_blocker_ids() {
+  local deps=$1 dep blocker blocker_show blocker_state unresolved=''
+  deps=$(printf '%s' "$deps" | tr -d '[:space:]')
+  deps=${deps#\"}
+  deps=${deps%\"}
+  [ "$deps" != none ] || return 0
+  while IFS= read -r dep; do
+    case "$dep" in
+      blocked-by:*) blocker=${dep#blocked-by:} ;;
+      *) continue ;;
+    esac
+    if blocker_show=$(task_show "$blocker"); then
+      blocker_state=$(show_field "$blocker_show" state)
+      [ "$blocker_state" = done ] && continue
+    fi
+    if ! list_has_key "$unresolved" "$blocker"; then
+      unresolved="${unresolved}${unresolved:+,}$blocker"
+    fi
+  done <<EOF
+$(printf '%s\n' "$deps" | tr ',' '\n')
+EOF
+  printf '%s' "$unresolved"
+}
+
 verify_existing_captain_call() {  # <task-id>
-  local id=$1 show state blocked blocked_by held kind hold_kind
+  local id=$1 show state deps unresolved held kind hold_kind
   show=$(task_show "$id") \
     || fail "existing Captain's Call task $id does not exist in the active backlog $FM_HOME/data/backlog.md"
   state=$(show_field "$show" state)
-  blocked=$(show_field "$show" blocked)
-  blocked_by=$(show_field "$show" blocked_by)
+  deps=$(show_field "$show" deps)
   held=$(show_field "$show" held)
   kind=$(show_field "$show" kind)
   hold_kind=$(show_field "$show" hold_kind)
@@ -199,8 +222,31 @@ verify_existing_captain_call() {  # <task-id>
     || fail "existing captain item $id is not held for the captain (hold_kind=$hold_kind)"
   [ "$state" = queued ] \
     || fail "existing captain item $id is not queued Captain's Call work (state=$state)"
-  [ "$blocked" = no ] \
-    || fail "existing captain item $id is blocked by $blocked_by and is not an actionable Captain's Call item"
+  unresolved=$(unresolved_blocker_ids "$deps")
+  [ -z "$unresolved" ] \
+    || fail "existing captain item $id is blocked by $unresolved and is not an actionable Captain's Call item"
+}
+
+publish_completion_attestation() {
+  local meta=$1 keys=$2 refs=$3 tmp
+  tmp=$(mktemp "${meta%/*}/.${meta##*/}.decision-hold.XXXXXX") \
+    || fail "could not prepare completion attestation for $meta"
+  if ! cp "$meta" "$tmp"; then
+    rm -f "$tmp"
+    fail "could not prepare completion attestation for $meta"
+  fi
+  if ! {
+    printf 'decision_keys=%s\n' "$keys"
+    [ -z "$refs" ] || printf 'decision_refs=%s\n' "$refs"
+    printf 'decisions_reviewed=1\n'
+  } >> "$tmp"; then
+    rm -f "$tmp"
+    fail "could not write completion attestation for $meta"
+  fi
+  if ! mv -f "$tmp" "$meta"; then
+    rm -f "$tmp"
+    fail "could not publish completion attestation for $meta"
+  fi
 }
 
 verify_hold_resolved() {  # <hold-id>
@@ -387,10 +433,7 @@ EOF
   if [ "$has_meta" = 1 ]; then
     if [ "$(meta_value "$meta" decisions_reviewed)" != 1 ] \
       || [ "$previous" != "$keys" ] || [ "$previous_refs" != "$refs" ]; then
-      printf 'decisions_reviewed=1\ndecision_keys=%s\n' "$keys" >> "$meta"
-      if [ -n "$refs" ] || [ -n "$previous_refs" ]; then
-        printf 'decision_refs=%s\n' "$refs" >> "$meta"
-      fi
+      publish_completion_attestation "$meta" "$keys" "$refs"
     fi
 
     # Transfer any still-open status decision to its durable backlog owner so the

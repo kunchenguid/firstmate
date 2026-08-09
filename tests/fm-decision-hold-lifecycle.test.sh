@@ -350,7 +350,8 @@ test_existing_captain_call_references_attest_without_mutation() {
 }
 
 test_existing_captain_call_reference_rejections_fail_closed() {
-  local home origin valid done_ref noncaptain parked external blocker blocked_ref backlog_before backlog_after
+  local home origin valid done_ref noncaptain parked external inactive nonqueued blocker blocked_ref
+  local dangling_blocker dangling_ref dangling_missing missing_meta_origin show meta_before meta_after backlog_before backlog_after
   home=$(make_home invalid-existing-captain-call-references)
   origin=sample-invalid-reference-review
   mkdir -p "$home/data/$origin"
@@ -375,14 +376,48 @@ test_existing_captain_call_reference_rejections_fail_closed() {
   external=sample-external-hold
   tasks_in "$home" add "$external" "External hold" --kind scout --repo sample >/dev/null
   tasks_in "$home" hold "$external" --reason "upstream release pending" --kind external >/dev/null
+  inactive=sample-inactive-captain-call
+  tasks_in "$home" add "$inactive" "Inactive captain call" --kind captain --repo sample >/dev/null
+  nonqueued=sample-nonqueued-captain-call
+  tasks_in "$home" add "$nonqueued" "Non-queued captain call" --kind captain --repo sample >/dev/null
+  tasks_in "$home" hold "$nonqueued" --reason "captain non-queued choice pending" --kind captain >/dev/null
+  tasks_in "$home" start "$nonqueued" >/dev/null
   blocker=sample-captain-call-prerequisite
   tasks_in "$home" add "$blocker" "Captain call prerequisite" --kind ship --repo sample >/dev/null
   blocked_ref=sample-blocked-captain-call
   tasks_in "$home" add "$blocked_ref" "Blocked captain call" --kind captain --repo sample >/dev/null
   tasks_in "$home" hold "$blocked_ref" --reason "captain blocked choice pending" --kind captain >/dev/null
   tasks_in "$home" block "$blocked_ref" --by "$blocker" >/dev/null
+  dangling_blocker=sample-dangling-prerequisite
+  tasks_in "$home" add "$dangling_blocker" "Dangling prerequisite source" --kind ship --repo sample >/dev/null
+  dangling_ref=sample-dangling-captain-call
+  tasks_in "$home" add "$dangling_ref" "Dangling-blocked captain call" --kind captain --repo sample >/dev/null
+  tasks_in "$home" hold "$dangling_ref" --reason "captain dangling choice pending" --kind captain >/dev/null
+  tasks_in "$home" block "$dangling_ref" --by "$dangling_blocker" >/dev/null
+  dangling_missing=sample-missing-prerequisite
+  sed "s/blocked-by: $dangling_blocker/blocked-by: $dangling_missing/" \
+    "$home/data/backlog.md" > "$home/data/backlog.next"
+  mv "$home/data/backlog.next" "$home/data/backlog.md"
+  show=$(tasks_in "$home" show "$dangling_ref" --full)
+  assert_contains "$show" "blocked: no" "dangling-blocker fixture must expose tasks-axi's resolved projection"
+  assert_contains "$show" "blocked-by:$dangling_missing" \
+    "dangling-blocker fixture must retain the authoritative dependency edge"
+  show=$(tasks_in "$home" show "$nonqueued" --full)
+  assert_contains "$show" "state: in_flight" "non-queued fixture must remain outside the queued section"
+  assert_contains "$show" "held: yes" "non-queued fixture must retain its active captain hold"
+  missing_meta_origin=sample-missing-metadata-review
+  tasks_in "$home" add "$missing_meta_origin" "Review without live metadata" --kind scout --repo sample >/dev/null
 
+  meta_before=$(shasum -a 256 "$home/state/$origin.meta" | awk '{print $1}')
   backlog_before=$(shasum -a 256 "$home/data/backlog.md" | awk '{print $1}')
+  if run_decisions "$home" complete "$missing_meta_origin" --existing "$valid" \
+    > "$home/missing-meta.out" 2> "$home/missing-meta.err"; then
+    fail "completion accepted an existing reference without live reviewing-origin metadata"
+  fi
+  assert_grep "requires live origin metadata" "$home/missing-meta.err" \
+    "missing live reviewing-origin metadata did not produce actionable output"
+  [ ! -e "$home/state/$missing_meta_origin.meta" ] \
+    || fail "missing-metadata rejection created reviewing-origin metadata"
   if run_decisions "$home" complete "$origin" --existing sample-missing-captain-call \
     > "$home/missing.out" 2> "$home/missing.err"; then
     fail "completion accepted a missing existing reference"
@@ -419,12 +454,30 @@ test_existing_captain_call_reference_rejections_fail_closed() {
   fi
   assert_grep "is an external hold" "$home/external.err" \
     "external-hold existing reference did not produce actionable output"
+  if run_decisions "$home" complete "$origin" --existing "$inactive" \
+    > "$home/inactive.out" 2> "$home/inactive.err"; then
+    fail "completion accepted an inactive captain item"
+  fi
+  assert_grep "is not actively held" "$home/inactive.err" \
+    "inactive captain item did not produce actionable output"
+  if run_decisions "$home" complete "$origin" --existing "$nonqueued" \
+    > "$home/nonqueued.out" 2> "$home/nonqueued.err"; then
+    fail "completion accepted non-queued captain work"
+  fi
+  assert_grep "is not queued Captain's Call work" "$home/nonqueued.err" \
+    "non-queued captain work did not produce actionable output"
   if run_decisions "$home" complete "$origin" --existing "$blocked_ref" \
     > "$home/blocked.out" 2> "$home/blocked.err"; then
     fail "completion accepted a blocked captain item outside Captain's Call"
   fi
   assert_grep "is blocked by $blocker" "$home/blocked.err" \
     "blocked captain item did not produce actionable output"
+  if run_decisions "$home" complete "$origin" --existing "$dangling_ref" \
+    > "$home/dangling.out" 2> "$home/dangling.err"; then
+    fail "completion accepted a captain item with a dangling blocker"
+  fi
+  assert_grep "is blocked by $dangling_missing" "$home/dangling.err" \
+    "dangling blocker did not follow canonical unresolved dependency semantics"
   if run_decisions "$home" complete "$origin" --existing "$valid" --existing "$external" \
     > "$home/mixed.out" 2> "$home/mixed.err"; then
     fail "completion accepted mixed valid and invalid existing references"
@@ -446,12 +499,80 @@ test_existing_captain_call_reference_rejections_fail_closed() {
 
   assert_no_grep "decisions_reviewed=1" "$home/state/$origin.meta" \
     "a rejected existing-reference set recorded completion"
+  meta_after=$(shasum -a 256 "$home/state/$origin.meta" | awk '{print $1}')
+  [ "$meta_before" = "$meta_after" ] \
+    || fail "rejected existing references changed reviewing-origin metadata"
   backlog_after=$(shasum -a 256 "$home/data/backlog.md" | awk '{print $1}')
   [ "$backlog_before" = "$backlog_after" ] \
     || fail "rejected existing references created or mutated backlog work"
   run_decisions "$home" verify "$origin" > "$home/unattested-verify.out" 2> "$home/unattested-verify.err" \
     && fail "verify accepted an origin after every existing-reference completion was rejected"
-  pass "missing, malformed, done, unrelated, parked, external, blocked, and mixed existing references fail closed"
+  pass "all invalid existing-reference states fail closed without metadata or backlog mutation"
+}
+
+test_completion_attestation_publication_is_failure_atomic() {
+  local home origin existing meta_before meta_after backlog_before backlog_after
+  home=$(make_home atomic-existing-reference-attestation)
+  origin=sample-atomic-reference-review
+  tasks_in "$home" add "$origin" "Review atomic reference publication" --kind scout --repo sample --start >/dev/null
+  write_origin_meta "$home" "$origin"
+  printf 'done: report complete\n' > "$home/state/$origin.status"
+  existing=sample-atomic-captain-call
+  tasks_in "$home" add "$existing" "Atomic captain call" --kind captain --repo sample >/dev/null
+  tasks_in "$home" hold "$existing" --reason "captain atomic choice pending" --kind captain >/dev/null
+  cat > "$home/fakebin/mv" <<'EOF'
+#!/usr/bin/env bash
+last=''
+for arg in "$@"; do last=$arg; done
+case "$last" in
+  */state/*.meta)
+    if [ ! -e "$FM_HOME/meta-publish-failed-once" ]; then
+      : > "$FM_HOME/meta-publish-failed-once"
+      exit 91
+    fi
+    ;;
+esac
+exec /bin/mv "$@"
+EOF
+  chmod +x "$home/fakebin/mv"
+
+  meta_before=$(shasum -a 256 "$home/state/$origin.meta" | awk '{print $1}')
+  backlog_before=$(shasum -a 256 "$home/data/backlog.md" | awk '{print $1}')
+  if run_decisions "$home" complete "$origin" --existing "$existing" \
+    > "$home/interrupted.out" 2> "$home/interrupted.err"; then
+    fail "completion succeeded after interrupted attestation publication"
+  fi
+  assert_grep "could not publish completion attestation" "$home/interrupted.err" \
+    "interrupted attestation publication did not fail actionably"
+  meta_after=$(shasum -a 256 "$home/state/$origin.meta" | awk '{print $1}')
+  [ "$meta_before" = "$meta_after" ] \
+    || fail "interrupted attestation publication exposed partial metadata"
+  assert_no_grep "decisions_reviewed=" "$home/state/$origin.meta" \
+    "interrupted attestation publication exposed the reviewed marker"
+  assert_no_grep "decision_refs=" "$home/state/$origin.meta" \
+    "interrupted attestation publication exposed references"
+  if find "$home/state" -name ".$origin.meta.decision-hold.*" -print | grep . >/dev/null; then
+    fail "interrupted attestation publication left a temporary metadata file"
+  fi
+  if run_decisions "$home" verify "$origin" \
+    > "$home/interrupted-verify.out" 2> "$home/interrupted-verify.err"; then
+    fail "verify accepted interrupted attestation publication"
+  fi
+  backlog_after=$(shasum -a 256 "$home/data/backlog.md" | awk '{print $1}')
+  [ "$backlog_before" = "$backlog_after" ] \
+    || fail "interrupted attestation publication mutated the backlog"
+
+  run_decisions "$home" complete "$origin" --existing "$existing" >/dev/null \
+    || fail "attestation publication did not recover on retry"
+  assert_grep "decision_keys=" "$home/state/$origin.meta" \
+    "successful retry omitted the current-origin key inventory"
+  assert_grep "decision_refs=$existing" "$home/state/$origin.meta" \
+    "successful retry omitted the existing reference"
+  assert_grep "decisions_reviewed=1" "$home/state/$origin.meta" \
+    "successful retry omitted the reviewed marker"
+  run_decisions "$home" verify "$origin" >/dev/null \
+    || fail "verify rejected the atomically published attestation"
+  pass "completion attestation publishes atomically after an interrupted write"
 }
 
 test_scout_teardown_always_requires_inventory_verification() {
@@ -734,6 +855,7 @@ test_scout_teardown_always_requires_inventory_verification
 test_structured_holds_survive_teardown_and_route_resolution
 test_existing_captain_call_references_attest_without_mutation
 test_existing_captain_call_reference_rejections_fail_closed
+test_completion_attestation_publication_is_failure_atomic
 test_origin_slug_validation_precedes_path_construction
 test_visual_review_uses_shared_completion_owner
 test_none_inventory_and_resolved_prose_do_not_create_holds
