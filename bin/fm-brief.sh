@@ -586,6 +586,7 @@ case "$MODE" in
   direct-PR)
     SETUP2=""
     RULE1='1. Never push to the default branch (push only your `fm/'"$ID"'` branch). Never merge a PR.'
+    RULE4_PHASES='(setup done, bug reproduced, fix implemented, validation passed)'
     IFS= read -r -d '' DOD <<EOF || true
 # Definition of done
 Delivery contract: mode=direct-PR
@@ -598,6 +599,7 @@ EOF
   local-only)
     SETUP2=""
     RULE1="1. Never push to any remote and never open a PR. Work only on your \`fm/$ID\` branch; firstmate handles the merge into local \`main\`."
+    RULE4_PHASES='(setup done, bug reproduced, fix implemented, validation passed)'
     IFS= read -r -d '' DOD <<EOF || true
 # Definition of done
 Delivery contract: mode=local-only
@@ -612,6 +614,7 @@ EOF
     SETUP2="
 2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
     RULE1='1. Never push to the default branch. Never merge a PR.'
+    RULE4_PHASES='(setup done, bug reproduced - never the implementation commit, whose only next step is the pipeline call under Definition of done)'
     IFS= read -r -d '' DOD <<EOF || true
 # Definition of done
 Delivery contract: mode=no-mistakes
@@ -624,7 +627,8 @@ That call blocks until the first approval gate, the CI-ready point, or the final
 Make \`--intent\` preserve all relevant content from this brief's \`# Task\` section plus every later accepted Firstmate requirement, clarification, constraint, exclusion, and supersession, carrying only each requirement's current accepted form; retain direct requirements instead of substituting a diff summary, and exclude generic operational, status, delivery, and other scaffold boilerplate unless it is task-specific.
 
 Judge that call by the run result it prints, never by its exit status.
-A printed gate or outcome is an observation you can act on; a call that returns no readable run result at all - an empty return, a daemon error, or a killed process - is could-not-observe, which is never a pass and never a reason to retry blindly. Append \`blocked: {what the pipeline returned}\` and stop.
+A printed gate or outcome is an observation you can act on; a call that returns no readable run result at all - an empty return, a daemon error, or a killed process - is could-not-observe, which is never a pass and never a reason to retry blindly.
+Only in that could-not-observe case, append \`blocked: {what you observed instead of a run result}\` and stop; a printed gate or outcome is never \`blocked:\` - drive it as described below.
 
 The pipeline validates YOUR branch only, and one shared daemon serves every other lane at the same time.
 Check the \`branch:\` of any run you are shown before treating it as yours: with no run on your own branch, a bare \`no-mistakes axi status\` answers with some other branch's run.
@@ -678,7 +682,7 @@ $RULE1
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
    Each append wakes firstmate, so report sparingly: only phase changes a supervisor
-   would act on (setup done, bug reproduced, fix implemented, validation passed) and the
+   would act on $RULE4_PHASES and the
    needs-decision/blocked/paused/done/failed states. No step-by-step FYI progress lines;
    firstmate reads your pane for that.
    A mid-task \`working:\` line (including setup complete) is nonterminal: do not end the

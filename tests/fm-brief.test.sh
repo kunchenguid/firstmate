@@ -812,8 +812,8 @@ test_scout_and_secondmate_scaffold() {
 # A crewmate cannot otherwise tell a firstmate steer from a human typing into its
 # pane (bin/fm-send.sh marks the former). Both crewmate scaffolds must carry the
 # reader side of that contract, name the worker's own task id so the
-# self-identification is concrete, state the command-shaped exclusion so the
-# routine validation trigger does not read as a rule violation, and repeat that
+# self-identification is concrete, state the command-shaped exclusion so a typed
+# command is not read as an impostor, and repeat that
 # escalation is the status file - the failure that direction is silent.
 test_crewmate_scaffolds_carry_who_is_speaking() {
   local home brief kind
