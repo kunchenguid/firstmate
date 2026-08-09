@@ -16,7 +16,7 @@
 # which lavish-axi version is on PATH.
 # Dedicated fleet-sync cases pin the computed bootstrap timeout, explicit
 # override, blank-env defaulting, partial-output relay, and pre-launch timeout
-# scan.
+# scan. Mission Control cases pin its opt-in local board freshness diagnostic.
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -877,6 +877,119 @@ test_routine_bootstrap_contract_runs_under_system_bash() {
   pass "bootstrap routine contract runs under system /bin/bash"
 }
 
+test_mission_control_board_staleness_check() {
+  local case_dir home fakebin board curl_log out fresh
+  case_dir="$TMP_ROOT/mission-control-staleness"
+  home="$case_dir/home"
+  mkdir -p "$home/config"
+  fakebin=$(make_fake_toolchain "$case_dir")
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "unconfigured Mission Control board check should be silent, got: $out"
+
+  board="$case_dir/board.html"
+  fresh=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  printf '<footer>rendered %s</footer>\n' "$fresh" > "$board"
+  printf '%s\n' "$board" > "$home/config/mission-control-board"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "fresh Mission Control board should be silent, got: $out"
+
+  printf '%s\n' '<footer>rendered 2000-01-01T00:00:00Z</footer>' > "$board"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  printf '%s\n' "$out" | grep -Eq '^MISSION_CONTROL_STALE: board last rendered 2000-01-01T00:00:00Z \(age [0-9]+s, threshold 300s\); refresh its local generator$' \
+    || fail "stale Mission Control board should report its diagnostic, got: $out"
+
+  printf '%s\n' "$case_dir/missing-board.html" > "$home/config/mission-control-board"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "unreadable Mission Control board should fail closed, got: $out"
+
+  printf '%s\n' '<footer>rendered 2025-02-30T00:00:00Z</footer>' > "$board"
+  printf '%s\n' "$board" > "$home/config/mission-control-board"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "malformed Mission Control timestamp should fail closed, got: $out"
+
+  curl_log="$case_dir/curl.log"
+  cat > "$fakebin/curl" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_FAKE_CURL_LOG"
+if [ "${FM_FAKE_CURL_OVERSIZED:-0}" = 1 ]; then
+  perl -e '$SIG{PIPE} = "IGNORE"; print "<footer>rendered 2000-01-01T00:00:00Z</footer>\n"; print "x" x 8388609;'
+  exit 0
+fi
+if [ "${FM_FAKE_CURL_NUL:-0}" = 1 ]; then
+  printf '<footer>rendered 2000-01-01T00:00:00Z</footer>\n\0'
+  exit 0
+fi
+printf '%s\n' '<footer>rendered 2000-01-01T00:00:00Z</footer>'
+SH
+  chmod +x "$fakebin/curl"
+  printf '%s\n' 'http://127.0.0.1' > "$home/config/mission-control-board"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_CURL_LOG="$curl_log" "$ROOT/bin/fm-bootstrap.sh")
+  printf '%s\n' "$out" | grep -F 'MISSION_CONTROL_STALE: board last rendered 2000-01-01T00:00:00Z' >/dev/null \
+    || fail "bare loopback Mission Control URL should be fetched, got: $out"
+  grep -F -- '--disable --fail --silent --noproxy * --proto =http --proto-redir =http --max-filesize 8388608 --max-time 2 http://127.0.0.1' "$curl_log" >/dev/null \
+    || fail "loopback Mission Control GET should disable curl config, proxies, and non-HTTP protocols"
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_CURL_LOG="$curl_log" FM_FAKE_CURL_OVERSIZED=1 \
+    "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "oversized unknown-length Mission Control response should be silent, got: $out"
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_CURL_LOG="$curl_log" FM_FAKE_CURL_NUL=1 \
+    "$ROOT/bin/fm-bootstrap.sh" 2>&1)
+  printf '%s\n' "$out" | grep -F 'MISSION_CONTROL_STALE:' >/dev/null \
+    && fail "NUL-containing Mission Control response should not report staleness"
+  printf '%s\n' "$out" | grep -F 'ignored null byte' >/dev/null \
+    && fail "NUL-containing Mission Control response should not emit a shell warning"
+
+  : > "$curl_log"
+  printf '%s\n' 'http://127.0.0.1:80@example.com/board' > "$home/config/mission-control-board"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_CURL_LOG="$curl_log" "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "non-loopback Mission Control URL should be silent, got: $out"
+  [ ! -s "$curl_log" ] || fail "non-loopback Mission Control URL should not invoke curl"
+
+  printf '<footer>rendered 2000-01-01T00:00:00Z</footer>\n\0' > "$board"
+  printf '%s\n' "$board" > "$home/config/mission-control-board"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh" 2>&1)
+  printf '%s\n' "$out" | grep -F 'MISSION_CONTROL_STALE:' >/dev/null \
+    && fail "NUL-containing Mission Control file should not report staleness"
+  printf '%s\n' "$out" | grep -F 'ignored null byte' >/dev/null \
+    && fail "NUL-containing Mission Control file should not emit a shell warning"
+
+  printf '%s\n' '<footer>rendered 2000-01-01T00:00:00Z</footer>' > "$board"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+    FM_MISSION_CONTROL_STALE_SECS=999999999999999999999999999999999999 \
+    "$ROOT/bin/fm-bootstrap.sh" 2>&1)
+  printf '%s\n' "$out" | grep -F 'threshold 300s' >/dev/null \
+    || fail "out-of-range Mission Control threshold should use the 300-second default, got: $out"
+  printf '%s\n' "$out" | grep -F 'integer expression expected' >/dev/null \
+    && fail "out-of-range Mission Control threshold should not emit an arithmetic warning"
+
+  cat > "$fakebin/perl" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' 'fake perl failure' >&2
+exit 127
+SH
+  chmod +x "$fakebin/perl"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh" 2>&1)
+  printf '%s\n' "$out" | grep -F 'fake perl failure' >/dev/null \
+    && fail "Mission Control parser dependency failure should stay silent"
+  printf '%s\n' "$out" | grep -F 'MISSION_CONTROL_STALE:' >/dev/null \
+    && fail "Mission Control parser dependency failure should not report staleness"
+  pass "bootstrap bounds opted-in Mission Control reads and reports only proved staleness"
+}
+
 test_crew_dispatch_active_rules_are_verbose_bootstrap_info() {
   local case_dir fakebin out expect
   case_dir="$TMP_ROOT/dispatch-active"
@@ -982,5 +1095,6 @@ test_fleet_sync_timeout_empty_override_uses_default
 test_fleet_sync_timeout_is_computed_before_launch
 test_routine_bootstrap_confirmations_are_silent
 test_routine_bootstrap_contract_runs_under_system_bash
+test_mission_control_board_staleness_check
 test_crew_dispatch_active_rules_are_verbose_bootstrap_info
 test_crew_dispatch_validation

@@ -31,6 +31,18 @@ The `/calm` command replaces the file atomically before changing live presentati
 The extension reloads this preference on every Pi `session_start`, including startup, new, resume, fork, and reload reasons.
 This preference is local to each Firstmate home and is not part of secondmate inherited configuration.
 
+## Mission Control board freshness (config/mission-control-board / FM_MISSION_CONTROL_STALE_SECS)
+
+To opt into a session-start stale-board diagnostic, create the local, gitignored `config/mission-control-board` file with exactly one line.
+That line is either an absolute path to the generated Mission Control HTML file or an `http://127.0.0.1` URL, with an optional local port.
+An absent, malformed, unreadable, symlinked, oversized, or non-local target silently disables the check rather than blocking startup or emitting a false alarm.
+For a URL, bootstrap uses a proxy-disabled, two-second, 8 MiB-bounded loopback GET.
+For a file, it reads only a regular non-symlinked file up to the same 8 MiB bound.
+Bootstrap reads the board footer's `rendered <ISO-8601 UTC timestamp>` value and emits `MISSION_CONTROL_STALE:` only when its age exceeds 300 seconds.
+Set the documented environment override `FM_MISSION_CONTROL_STALE_SECS` to a positive decimal number of seconds to select a different threshold; absent, zero, or invalid values use 300 seconds.
+This is a best-effort convenience check, so malformed timestamps, future timestamps, and any read failure remain silent.
+See [`mission-control.md`](mission-control.md#serving-and-refreshing) for the board-facing setup and response.
+
 ## Backlog backend (.tasks.toml / config/backlog-backend)
 
 The tracked `.tasks.toml` pins the default `tasks-axi` markdown backend to `data/backlog.md`, with `done_keep = 10` and an archive at `data/done-archive.md`.
@@ -603,6 +615,7 @@ FM_PAUSE_RESURFACE_SECS=3600       # seconds before an idle declared external wa
 FM_WEDGE_DEMAND_INSPECT_COUNT=3    # consecutive provably-working stale escalations on the same unchanged pane before demand-deep-inspection is added
 FM_WATCH_TRIAGE_LOG_MAX_BYTES=262144   # size cap for the watcher's absorbed-wake debug log
 FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT=     # optional seconds allowed for bootstrap's best-effort clone refresh; unset/blank defaults to max(20, 5 + 3 * origin-backed-project-count)
+FM_MISSION_CONTROL_STALE_SECS=        # optional positive stale-board threshold when config/mission-control-board opts in; invalid, zero, or absent uses 300
 FM_FLEET_PRUNE=1        # set to 0 to skip pruning local branches whose upstream is gone
 FM_STALE_WORKTREE_LOCK_AGE_SECS=30       # min mtime age before fm-teardown.sh treats a leftover worktree git index.lock as provably stale
 FM_TREEHOUSE_RETURN_LOCK_RETRIES=3        # retries after a treehouse return fails on the transient git index.lock signature

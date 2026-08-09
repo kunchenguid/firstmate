@@ -19,6 +19,7 @@
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
 #                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed after <cause>: <reason>",
 #                 "SECONDMATE_HANDOFF: secondmate <id>: pending delivery: <n> item(s)",
+#                 "MISSION_CONTROL_STALE: board last rendered <timestamp> (age <seconds>s, threshold <seconds>s); refresh its local generator",
 #                 "FMX: X mode on ..." or "FMX: X mode off ...".
 #          When a RUNNING local secondmate worktree is fast-forwarded to
 #          firstmate's own current default-branch commit, that update is a
@@ -98,6 +99,15 @@
 #          refresh relays any completed fm-fleet-sync.sh output before the
 #          aggregate timeout skip line with timeout and elapsed seconds.
 #          Set FM_FLEET_PRUNE=0 to skip branch pruning during that refresh.
+#          A regular non-symlinked config/mission-control-board file optionally
+#          enables a read-only stale-board check. Its one line is either an
+#          absolute regular-file path or an http://127.0.0.1 URL (with an
+#          optional port). File reads and loopback GETs are capped at 8 MiB, and
+#          GETs have a two-second bound with proxies disabled. The board must
+#          contain its rendered ISO-8601 UTC footer timestamp. Missing,
+#          unreadable, malformed, future, or otherwise unprovable targets stay
+#          silent. FM_MISSION_CONTROL_STALE_SECS overrides the 300-second
+#          threshold only with a positive decimal integer.
 #          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the six MUTATING sweeps
 #          (PR-check migration, secondmate_sync, secondmate_liveness_sweep,
 #          secondmate_handoff_resume, x_mode_setup, fleet_sync) while still
@@ -1027,6 +1037,82 @@ crew_dispatch_validate() {
   fi
 }
 
+mission_control_rendered_stamp() {
+  LC_ALL=C perl -e '
+    my $limit = 8388608;
+    my $total = 0;
+    my $tail = "";
+    my $stamp;
+    while (1) {
+      my $want = $limit + 1 - $total;
+      $want = 65536 if $want > 65536;
+      my $read = read STDIN, my $chunk, $want;
+      exit 1 if !defined $read;
+      last if $read == 0;
+      $total += $read;
+      exit 1 if $total > $limit || index($chunk, "\0") >= 0;
+      my $scan = $tail . $chunk;
+      $stamp = $1 if !defined $stamp && $scan =~ /rendered ([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z)/;
+      $tail = length($scan) > 64 ? substr($scan, -64) : $scan;
+    }
+    print $stamp if defined $stamp;
+  ' 2>/dev/null
+}
+
+mission_control_board_staleness_check() {
+  local config_file target line_count size stamp timestamp_epoch now threshold age
+  config_file="$CONFIG/mission-control-board"
+  [ -f "$config_file" ] && [ ! -L "$config_file" ] || return 0
+  line_count=$(wc -l < "$config_file" 2>/dev/null) || return 0
+  line_count=${line_count//[[:space:]]/}
+  [ "$line_count" = 1 ] || return 0
+  IFS= read -r target < "$config_file" || return 0
+  [ -n "$target" ] || return 0
+  command -v perl >/dev/null 2>&1 || return 0
+
+  case "$target" in
+    /*)
+      [ -f "$target" ] && [ ! -L "$target" ] || return 0
+      size=$(wc -c < "$target" 2>/dev/null) || return 0
+      size=${size//[[:space:]]/}
+      case "$size" in ''|*[!0-9]*) return 0 ;; esac
+      [ "$size" -le 8388608 ] || return 0
+      stamp=$(mission_control_rendered_stamp < "$target") || return 0
+      ;;
+    http://*)
+      [[ "$target" =~ ^http://127[.]0[.]0[.]1(:[0-9]+)?([/?#][^[:space:]]*)?$ ]] || return 0
+      command -v curl >/dev/null 2>&1 || return 0
+      stamp=$(
+        set -o pipefail
+        curl --disable --fail --silent --noproxy '*' --proto '=http' --proto-redir '=http' --max-filesize 8388608 --max-time 2 "$target" 2>/dev/null |
+          mission_control_rendered_stamp
+      ) || return 0
+      ;;
+    *) return 0 ;;
+  esac
+
+  [ -n "$stamp" ] || return 0
+  timestamp_epoch=$(TZ=UTC perl -MTime::Piece -e 'my $s = $ARGV[0]; my $t = eval { Time::Piece->strptime($s, "%Y-%m-%dT%H:%M:%SZ") }; exit 1 if $@ || !defined $t || $t->strftime("%Y-%m-%dT%H:%M:%SZ") ne $s; print $t->epoch' "$stamp" 2>/dev/null) || return 0
+  case "$timestamp_epoch" in ''|*[!0-9]*) return 0 ;; esac
+  now=$(date +%s 2>/dev/null) || return 0
+  case "$now" in ''|*[!0-9]*) return 0 ;; esac
+  threshold=${FM_MISSION_CONTROL_STALE_SECS:-300}
+  threshold=$(perl -MConfig -e '
+    my $value = $ARGV[0];
+    exit 1 if $value !~ /\A[0-9]+\z/;
+    $value =~ s/\A0+//;
+    exit 1 if $value eq "";
+    my $maximum = $Config{ivsize} >= 8 ? "9223372036854775807" : "2147483647";
+    exit 1 if length($value) > length($maximum);
+    exit 1 if length($value) == length($maximum) && $value gt $maximum;
+    print $value;
+  ' "$threshold" 2>/dev/null) || threshold=300
+  [ "$now" -ge "$timestamp_epoch" ] || return 0
+  age=$((now - timestamp_epoch))
+  [ "$age" -gt "$threshold" ] || return 0
+  echo "MISSION_CONTROL_STALE: board last rendered $stamp (age ${age}s, threshold ${threshold}s); refresh its local generator"
+}
+
 startup_memory_budget_setup() {
   # Primary bootstrap owns default publication. A secondmate is deliberately
   # passive here because its setting must converge from the primary through the
@@ -1131,6 +1217,7 @@ if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] && [ -n "$crew" ] && [ "$crew" != 
   echo "BOOTSTRAP_INFO: crew harness override active: $crew"
 fi
 crew_dispatch_validate
+mission_control_board_staleness_check
 if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] \
   && ! fm_backlog_backend_manual "$CONFIG" && fm_tasks_axi_compatible; then
   echo "BOOTSTRAP_INFO: tasks-axi available"
