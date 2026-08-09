@@ -727,6 +727,23 @@ test_cursor_relaunch_reaps_prior_worker_before_recording_replacement() {
   assert_grep "$old_pid " "$HOME_DIR/state/$id.worker-server" \
     "initial cursor spawn did not record prior worker"
 
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$PROJ_DIR" TMUX="fake,1,0" \
+    FM_FAKE_CURSOR_AGENT_ARGS="$FAKEBIN_DIR/cursor-agent --force --trust brief" \
+    FM_PROC_ROOT_OVERRIDE="$CASE_DIR/no-proc" \
+    FM_FAKE_CURSOR_AGENT_PID=4242 FM_FAKE_CURSOR_WORKER_PID=$old_pid \
+    FM_FAKE_WINDOW_STATE_FILE="$CASE_DIR/windows.state" \
+    FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" PATH="$FAKEBIN_DIR:$PATH" \
+    "$SPAWN" "$id" --relaunch 2>&1)
+  status=$?
+  expect_code 1 "$status" "cursor relaunch outside recorded worktree must refuse"$'\n'"$out"
+  kill -0 "$old_pid" 2>/dev/null \
+    || fail "cursor relaunch reaped prior worker before endpoint cwd validation"
+  assert_grep "$old_pid " "$HOME_DIR/state/$id.worker-server" \
+    "cursor relaunch removed ownership record before endpoint cwd validation"
+
   rm -f "$FAKEBIN_DIR/lsof"
   rm -f "$CASE_DIR/enter-started" "$CASE_DIR/launch-typed"
   out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
@@ -824,13 +841,13 @@ test_cursor_worker_server_absent_record_refuses_spawn() {
   if [ -f "$HOME_DIR/state/$id.worker-server" ]; then
     fail "cursor spawn without a worker-server child must not produce a partial record"
   fi
-  [ -e "$HOME_DIR/state/$id.meta" ] \
-    || fail "unproven worker absence must retain task meta for teardown retry"
-  assert_grep 'rollback-needed' "$HOME_DIR/state/$id.status" \
-    "unproven worker absence must mark task rollback-needed"
-  [ -e "/tmp/fm-$id" ] \
-    || fail "unproven worker absence must retain task tmp root for cwd-based reaping"
-  pass "cursor spawn without worker identity retains cleanup evidence"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] \
+    || fail "confirmed worker absence must remove task meta"
+  [ ! -e "$HOME_DIR/state/$id.status" ] \
+    || fail "confirmed worker absence must remove task status"
+  [ ! -e "/tmp/fm-$id" ] \
+    || fail "confirmed worker absence must remove task tmp root"
+  pass "cursor spawn without worker identity rolls back completely"
 }
 
 test_cursor_detached_worker_is_recorded_from_task_root() {
@@ -884,18 +901,18 @@ test_cursor_worker_server_discovery_timeout_causes_rollback() {
   # No guessed worker-server record may be created.
   [ ! -f "$HOME_DIR/state/$id.worker-server" ] \
     || fail "discovery timeout rollback must not leave a worker-server record"
-  [ -e "$HOME_DIR/state/$id.meta" ] \
-    || fail "discovery timeout must retain meta until teardown proves worker absence"
-  assert_grep 'rollback-needed' "$HOME_DIR/state/$id.status" \
-    "discovery timeout must mark task rollback-needed"
-  [ -e "/tmp/fm-$id" ] \
-    || fail "discovery timeout must retain task tmp root for cwd-based reaping"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] \
+    || fail "discovery timeout rollback must remove task meta"
+  [ ! -e "$HOME_DIR/state/$id.status" ] \
+    || fail "discovery timeout rollback must remove task status"
+  [ ! -e "/tmp/fm-$id" ] \
+    || fail "discovery timeout rollback must remove task tmp root"
   # Endpoint absence is still confirmed immediately.
   [ ! -s "$CASE_DIR/windows.state" ] \
     || fail "successful rollback must have killed and confirmed the endpoint window"
-  [ ! -s "$CASE_DIR/treehouse.log" ] \
-    || fail "unproven worker absence must retain worktree for teardown's cwd-based reaper"
-  pass "cursor spawn discovery timeout retains cleanup evidence"
+  assert_grep 'treehouse return --force' "$CASE_DIR/treehouse.log" \
+    "discovery timeout rollback did not return its worktree"
+  pass "cursor spawn discovery timeout rolls back completely"
 }
 
 test_cursor_rollback_tmux_kill_failure_retains_recoverable_state() {
@@ -960,9 +977,9 @@ test_cursor_rollback_treehouse_return_failure_retains_recoverable_state() {
     || fail "unreturned worktree must retain the task meta (the only record naming the lease)"
   grep -q 'rollback-needed' "$HOME_DIR/state/$id.status" \
     || fail "unreturned worktree must mark the task rollback-needed"
-  [ ! -s "$CASE_DIR/treehouse.log" ] \
-    || fail "unproven worker absence must stop before worktree return"
-  pass "rollback retains worktree before worker absence is proven"
+  assert_grep 'treehouse return --force' "$CASE_DIR/treehouse.log" \
+    "confirmed worker absence did not attempt worktree return"
+  pass "rollback retains recoverable state when worktree return fails"
 }
 test_cursor_worker_server_atomic_record_no_partial_write() {
   # The worker-server record is written atomically via temp+mv. After a

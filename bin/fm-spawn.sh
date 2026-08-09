@@ -1039,7 +1039,6 @@ if [ "$RELAUNCH" -eq 1 ]; then
       echo "error: task $ID has no cursor worker-server ownership record; refusing relaunch because prior worker absence cannot be proven" >&2
       exit 1
     }
-    cursor_worker_server_reap_record "$STATE/$ID.worker-server" "$ID" || exit 1
   fi
   KIND=$(fm_meta_get "$RELAUNCH_META" kind)
   [ -n "$KIND" ] || KIND=ship
@@ -2156,6 +2155,34 @@ cursor_worker_server_has_launch_token() {  # <pid> <token>
     | tr ' ' '\n' | grep -Fqx "FM_CURSOR_LAUNCH_TOKEN=$token"
 }
 
+cursor_worker_server_reap_launch_token() {
+  local pid identity ws_file tmp pids status matched
+  ws_file="$STATE/$ID.worker-server"
+  while :; do
+    if pids=$(pgrep -f 'index.js worker-server' 2>/dev/null); then
+      status=0
+    else
+      status=$?
+    fi
+    case "$status" in 0|1) ;; *) return 1 ;; esac
+    matched=
+    while IFS= read -r pid; do
+      [ -n "$pid" ] || continue
+      cursor_worker_server_has_launch_token "$pid" "$CURSOR_WORKER_LAUNCH_TOKEN" || continue
+      matched=$pid
+      break
+    done <<EOF
+$pids
+EOF
+    [ -n "$matched" ] || return 0
+    identity=$(fm_process_identity "$matched") || return 1
+    tmp="$ws_file.tmp.$$"
+    printf '%s %s\n' "$matched" "$identity" > "$tmp" || return 1
+    mv -f -- "$tmp" "$ws_file" || { rm -f -- "$tmp"; return 1; }
+    cursor_worker_server_reap_record "$ws_file" "$ID" || return 1
+  done
+}
+
 # The recorded identity is produced by the SAME parse teardown re-checks
 # (fm_process_identity, bin/fm-process-identity-lib.sh), so a comm containing
 # spaces cannot make the two disagree and silently defeat the recycled-pid check.
@@ -2232,9 +2259,11 @@ spawn_rollback_task_state() {  # <detail>
   fi
 
   if [ "$HARNESS" = cursor ] && [ ! -f "$STATE/$ID.worker-server" ]; then
-    echo "failed: $detail; worker-server absence is unproven - task records retained and marked rollback-needed for teardown's cwd-based reaper" >> "$STATE/$ID.status" 2>/dev/null || true
-    echo "error: $detail; worker-server absence is unproven; task records retained for teardown retry" >&2
-    return 1
+    if ! cursor_worker_server_reap_launch_token; then
+      echo "failed: $detail; worker-server absence is unproven - task records retained and marked rollback-needed for cleanup retry" >> "$STATE/$ID.status" 2>/dev/null || true
+      echo "error: $detail; worker-server absence is unproven; task records retained for cleanup retry" >&2
+      return 1
+    fi
   fi
 
   # A relaunch failure keeps the pre-existing task records and worktree: the
@@ -2893,6 +2922,9 @@ if [ -n "$SPAWN_TRACEPARENT" ]; then
   fi
 fi
 sleep 0.3
+if [ "$RELAUNCH" -eq 1 ] && [ "$RELAUNCH_PRIOR_HARNESS" = cursor ]; then
+  cursor_worker_server_reap_record "$STATE/$ID.worker-server" "$ID" || exit 1
+fi
 spawn_send_literal "$T" "$LAUNCH"
 sleep 0.3
 if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
