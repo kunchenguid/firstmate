@@ -252,7 +252,6 @@ test_spawn_maps_effort_and_model() {
     "medium|--reasoning-effort 'medium'"
     "high|--reasoning-effort 'high'"
     "xhigh|--reasoning-effort 'xhigh'"
-    "max|--reasoning-effort 'ultra'"
   )
   local entry effort expect
   for entry in "${cases[@]}"; do
@@ -269,8 +268,20 @@ EOF
     assert_contains "$launch" "$expect" "muse effort $effort did not map to '$expect'"
     assert_contains "$launch" "--model 'muse-spark-1.2'" "muse spawn dropped the model axis"
   done
-  # ultra is muse's max-class level and must be reachable ONLY through an
-  # explicit max, never as the fallback when no effort was chosen.
+  rec=$(make_spawn_case effort-max)
+  IFS='|' read -r case_dir home proj wt fakebin id <<EOF
+$rec
+EOF
+  out=$(run_muse_spawn "$home" "$proj" "$wt" "$fakebin" "$id" \
+    --mode no-mistakes --yolo off --model muse-spark-1.2 --effort max 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "muse max effort was accepted"
+  assert_contains "$out" "refusing muse spawn with effort 'max'" \
+    "muse max refusal did not explain the unsupported exact effort"
+  assert_absent "$home/state/$id.meta" "muse max refusal wrote metadata"
+  assert_absent "$home/launch.log" "muse max refusal launched a worker"
+
+  # No effort remains omitted rather than being invented at launch.
   rec=$(make_spawn_case effort-default)
   IFS='|' read -r case_dir home proj wt fakebin id <<EOF
 $rec
@@ -279,7 +290,7 @@ EOF
     || fail "muse spawn without an effort axis failed"
   launch=$(cat "$home/launch.log")
   assert_not_contains "$launch" '--reasoning-effort' "muse spawn invented an effort when none was chosen"
-  pass "muse maps the shared effort vocabulary and reaches ultra only via explicit max"
+  pass "muse maps only verified efforts and refuses max before launch"
 }
 
 # An unauthenticated muse pane does not exit: it sits on an OAuth device-code
