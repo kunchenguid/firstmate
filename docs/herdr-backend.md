@@ -76,6 +76,10 @@ Display names are never ownership authority: peeks, sends, teardown, and supervi
 Only the agent (the sidebar entry) is renamed, in both projected and non-projected modes; the TAB always keeps its `fm-<id>` create label for life.
 That is deliberate: the display name is a lossy many-to-one map (lowercased, sanitized, truncated to 32) while task ids run to 64 characters over `[A-Za-z0-9._-]`, so two distinct ids can collapse to one display name.
 Keeping tab labels at `fm-<id>` keeps them an injective task identity, so husk reclaim's exact-label match and `fm_backend_herdr_list_live` can never match, refuse, or close a different task's tab.
+Herdr requires agent names be unique among live agents, so before renaming, Firstmate checks the candidate against the live agent list (`herdr agent list`, ignoring its own pane).
+On a collision it trades the tail of the name for a six-hex-character digest of the untruncated task id (`fm_backend_herdr_display_name_disambiguate`), which is deterministic, so retries and relaunches of the same task always land on the same sidebar name.
+Meta records the undisambiguated `herdr_display_name=`; the applied name is recoverable from the same task id through that helper.
+When the live agent list cannot be read, or the disambiguated name is taken too, the rename is skipped with a warning naming the collision.
 The rename is best-effort and must not fail the spawn.
 Secondmate launches are out of scope for automatic display names.
 

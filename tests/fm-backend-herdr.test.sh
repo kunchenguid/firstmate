@@ -781,7 +781,7 @@ test_display_name_pure_helper_shapes() {
   pass "fm_backend_herdr_display_name: scout/ship prefixes, strip, sanitize, truncate to 32"
 }
 
-test_create_task_refuses_colliding_display_name_tab() {
+test_create_task_ignores_colliding_display_name_tab() {
   # Two distinct task ids can collapse to ONE display name (lowercase, sanitize,
   # truncate at 32). Tabs therefore keep their exact fm-<id> label for life, and
   # husk/dup matching stays exact: phase-two's spawn must NOT see phase-one's
@@ -875,6 +875,95 @@ test_apply_display_name_gives_up_early_on_dead_pane() {
   fi
   assert_not_contains "$(cat "$log")" $'\x1f''agent'$'\x1f''rename' "must not rename a dead pane"
   pass "fm_backend_herdr_apply_display_name: breaks out of the poll loop on a dead pane"
+}
+
+# run_apply_display_name: drive one fm_backend_herdr_apply_display_name call
+# against a canned herdr whose agent list already holds <taken>, and echo the
+# name the agent was finally renamed to (empty when no rename was attempted).
+run_apply_display_name() {  # <dir> <name> <task-id> <taken-name>
+  local dir=$1 name=$2 id=$3 taken=$4 log resp fb
+  rm -rf "$dir"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"pane":{"pane_id":"w1:p9"}}}\n' > "$resp/1.out"
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/2.out"
+  printf '{"result":{"agents":[{"pane_id":"w1:p1","name":"%s"},{"pane_id":"w1:p2","name":null}]}}\n' "$taken" > "$resp/3.out"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_BACKEND_HERDR_DISPLAY_NAME_POLLS=2 FM_BACKEND_HERDR_DISPLAY_NAME_SLEEP=0 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_apply_display_name "$1" "$2" "$3" "$4"' \
+    "$ROOT" fmtest w1:p9 "$name" "$id" >/dev/null 2>"$dir/err" \
+    || { echo "apply_display_name exited non-zero" >&2; return 1; }
+  awk -F$'\x1f' '{for (i = 1; i <= NF; i++) if ($i == "rename") { print $(i + 2); exit } }' "$log"
+}
+
+test_apply_display_name_disambiguates_live_name_collision() {
+  # fm-alpha-service-refactor-phase-one and ...-phase-two both truncate to the
+  # 32-char name scout-alpha-service-refactor-pha, and herdr rejects a rename to
+  # a name a live agent already holds. The second spawn must therefore land on a
+  # distinct name rather than lose its rename, and the two tasks must not
+  # collapse onto each other again.
+  local taken one two again
+  taken=$( . "$ROOT/bin/backends/herdr.sh"; fm_backend_herdr_display_name fm-alpha-service-refactor-phase-one scout )
+  [ "$taken" = scout-alpha-service-refactor-pha ] \
+    || fail "expected the truncated collision name, got '$taken'"
+  one=$(run_apply_display_name "$TMP_ROOT/apply-display-collide-one" "$taken" fm-alpha-service-refactor-phase-one "$taken") \
+    || fail "apply_display_name must return 0 on a live-name collision"
+  two=$(run_apply_display_name "$TMP_ROOT/apply-display-collide-two" "$taken" fm-alpha-service-refactor-phase-two "$taken") \
+    || fail "apply_display_name must return 0 on a live-name collision"
+  again=$(run_apply_display_name "$TMP_ROOT/apply-display-collide-again" "$taken" fm-alpha-service-refactor-phase-two "$taken") \
+    || fail "apply_display_name must return 0 on a live-name collision"
+  [ -n "$one" ] && [ -n "$two" ] || fail "a collision must still produce a rename, got '$one' / '$two'"
+  [ "$one" != "$taken" ] && [ "$two" != "$taken" ] \
+    || fail "apply_display_name must not send a name a live agent already holds"
+  [ "$one" != "$two" ] || fail "two colliding task ids must diverge, both got '$two'"
+  [ "$two" = "$again" ] || fail "the same task id must be deterministic, got '$two' then '$again'"
+  for candidate in "$one" "$two"; do
+    case "$candidate" in
+      [a-z]*[!a-z0-9_-]*|[!a-z]*) fail "disambiguated name breaks herdr's grammar: $candidate" ;;
+      scout-*) ;;
+      *) fail "disambiguated name lost its role prefix: $candidate" ;;
+    esac
+    [ "${#candidate}" -le 32 ] || fail "disambiguated name exceeds 32 chars: $candidate"
+  done
+  pass "fm_backend_herdr_apply_display_name: deterministically disambiguates a live agent-name collision"
+}
+
+test_apply_display_name_skips_collision_it_cannot_disambiguate() {
+  # Without a task id there is nothing stable to disambiguate from, so the
+  # rename herdr would reject is skipped with a warning that names the cause,
+  # never sent blind.
+  local dir log resp fb err
+  dir="$TMP_ROOT/apply-display-collide-blind"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"pane":{"pane_id":"w1:p9"}}}\n' > "$resp/1.out"
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/2.out"
+  printf '{"result":{"agents":[{"pane_id":"w1:p1","name":"scout-x"}]}}\n' > "$resp/3.out"
+  fb=$(make_herdr_fakebin "$dir")
+  err=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_BACKEND_HERDR_DISPLAY_NAME_POLLS=2 FM_BACKEND_HERDR_DISPLAY_NAME_SLEEP=0 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_apply_display_name fmtest w1:p9 scout-x' "$ROOT" 2>&1 ) \
+    || fail "apply_display_name must return 0 when a collision cannot be disambiguated"
+  assert_contains "$err" "already taken by a live agent" "expected a collision-specific warning"
+  assert_not_contains "$(cat "$log")" $'\x1f''agent'$'\x1f''rename' \
+    "apply_display_name must not send a rename herdr is certain to reject"
+  pass "fm_backend_herdr_apply_display_name: skips an undisambiguatable collision with a warning naming it"
+}
+
+test_apply_display_name_ignores_own_pane_when_checking_collisions() {
+  # A re-run over an already-renamed pane must not read its own name as another
+  # agent's and disambiguate away from it.
+  local dir log resp fb renamed
+  dir="$TMP_ROOT/apply-display-self"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"pane":{"pane_id":"w1:p9"}}}\n' > "$resp/1.out"
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/2.out"
+  printf '{"result":{"agents":[{"pane_id":"w1:p9","name":"scout-terse-phase01"}]}}\n' > "$resp/3.out"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_BACKEND_HERDR_DISPLAY_NAME_POLLS=2 FM_BACKEND_HERDR_DISPLAY_NAME_SLEEP=0 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_apply_display_name fmtest w1:p9 scout-terse-phase01 fm-terse-phase01' "$ROOT" \
+    >/dev/null 2>&1 || fail "apply_display_name should return 0"
+  renamed=$(awk -F$'\x1f' '{for (i = 1; i <= NF; i++) if ($i == "rename") { print $(i + 2); exit } }' "$log")
+  [ "$renamed" = scout-terse-phase01 ] \
+    || fail "apply_display_name must keep its own name, renamed to '$renamed'"
+  pass "fm_backend_herdr_apply_display_name: its own pane's name is never a collision"
 }
 
 test_apply_display_name_skips_when_agent_never_registers() {
@@ -4459,11 +4548,14 @@ test_projection_recovery_is_read_only_and_refuses_live_duplicate_risk
 test_workspace_find_matches_only_this_homes_own_label
 test_list_live_scoped_to_this_homes_workspace_only
 test_display_name_pure_helper_shapes
-test_create_task_refuses_colliding_display_name_tab
+test_create_task_ignores_colliding_display_name_tab
 test_list_live_emits_only_reversible_fm_labels
 test_apply_display_name_renames_agent_only
 test_apply_display_name_rejects_invalid_grammar
 test_apply_display_name_gives_up_early_on_dead_pane
+test_apply_display_name_disambiguates_live_name_collision
+test_apply_display_name_skips_collision_it_cannot_disambiguate
+test_apply_display_name_ignores_own_pane_when_checking_collisions
 test_apply_display_name_skips_when_agent_never_registers
 test_parse_target
 test_normalize_key
