@@ -24,6 +24,7 @@ pass() { printf 'ok - %s\n' "$1"; }
 
 command -v tmux >/dev/null 2>&1 || { echo "skip: tmux not found"; exit 0; }
 SLEEP_BIN=$(command -v sleep) || { echo "skip: sleep not found"; exit 0; }
+SH_BIN=$(command -v sh) || { echo "skip: sh not found"; exit 0; }
 
 REAL_TMUX=$(command -v tmux)
 SOCKET="fm-liveness-$$"
@@ -160,6 +161,37 @@ new_window omp "$LAB/bin/omp" 900
 wait_for_state "$SESSION:omp" alive \
   || fail "a running exact OMP process must classify alive"
 pass "tmux liveness: an exact OMP process classifies alive"
+
+# --- OMP's real shape: a Bun runtime whose script argument is the identity ----
+# The installed OMP is a Bun script, so nothing in the process NAME says omp -
+# the only identity is argv[1]. A pane misread here reads as a dead endpoint,
+# which is the verdict that tears down or duplicates a live OMP worker. The
+# decoy pins the same anchoring rule the muse cases pin: a script path that
+# merely contains "omp" is a different program.
+
+mkdir -p "$LAB/bunroot" "$LAB/decoyroot"
+ln -s "$SH_BIN" "$LAB/bin/bun"
+cat > "$LAB/bunroot/omp" <<SH
+#!/bin/sh
+"$SLEEP_BIN" 900
+SH
+cat > "$LAB/decoyroot/ompanion" <<SH
+#!/bin/sh
+"$SLEEP_BIN" 900
+SH
+chmod +x "$LAB/bunroot/omp" "$LAB/decoyroot/ompanion"
+
+new_window ompbun "$LAB/bin/bun" "$LAB/bunroot/omp"
+wait_for_state "$SESSION:ompbun" alive \
+  || fail "Bun running the exact omp script must classify alive"
+title_classifies_agent "$SESSION:ompbun" \
+  && fail "the Bun case went vacuous: the process name alone already named a harness"
+pass "tmux liveness: a Bun process whose script argument is the exact omp path classifies alive"
+
+new_window ompbun-decoy "$LAB/bin/bun" "$LAB/decoyroot/ompanion"
+wait_for_state "$SESSION:ompbun-decoy" ambiguous \
+  || fail "a Bun script path that merely contains 'omp' must not classify as a live agent pane"
+pass "tmux liveness: a Bun script path that only contains 'omp' stays ambiguous"
 
 # --- muse's version-suffixed binary name ------------------------------------
 # A muse crewmate pane misclassified here reads as a dead endpoint, so a healthy

@@ -37,8 +37,8 @@
 # `resume` is deliberately NOT a verb. It is not deterministic across the
 # verified adapters: codex and grok resume only from a session id printed at
 # exit, opencode resumes the most recent session for the cwd with --continue,
-# and claude, pi, pi-signed, and kimi have no verified pane-resume contract at
-# all. `relaunch` covers the same need deterministically for every adapter,
+# and claude, pi, pi-signed, omp, kimi, and muse have no verified pane-resume
+# contract at all. `relaunch` covers the same need deterministically for every adapter,
 # because the brief on disk - not a harness-private session - is the durable
 # instruction.
 
