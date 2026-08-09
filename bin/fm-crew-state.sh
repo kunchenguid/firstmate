@@ -23,11 +23,13 @@
 #   2. Matching no-mistakes run for this crew's branch AND current code identity,
 #      active or terminal (from `axi status`, or the coarse `no-mistakes runs`
 #      fallback)? Branch name alone is not enough: a historical run on a reused
-#      branch whose head was rewritten or diverged must not be attributed.
-#      A run matches when its head equals the worktree HEAD, or the worktree HEAD
-#      is an ancestor of the run head (pipeline fix commits advanced the run on
-#      the same line of history). Local work that advanced past the run head, or
-#      diverged from it, invalidates attribution.
+#      branch whose head was rewritten or diverged must not be attributed. The
+#      three-valued match/no-match/unresolvable rule is owned by
+#      fm_nm_head_matches_worktree in bin/fm-nm-run-lib.sh. Unresolvable is a
+#      real answer here and never a terminal verdict: an active run on this
+#      branch whose tip this worktree cannot see is the ordinary pre-push
+#      pipeline state and reads as working, and neither it nor the coarse
+#      fallback may let an older finished run stand in for the live one.
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
 #      passed/checks-passed -> done, failed/cancelled -> failed. EXCEPT: while
@@ -349,9 +351,10 @@ nm_ci_state_is_green() {
 # is exact) - but branch + coarse status is exactly what this predicate needs:
 # is a run for THIS branch active right now. Echoes the first (most recent)
 # matching row's status word (running/completed/cancelled/failed), or empty
-# when the branch has no run within FM_CREW_STATE_RUNS_LIMIT rows.
+# when the branch has no run within FM_CREW_STATE_RUNS_LIMIT rows or that
+# newest row cannot be bound to this worktree.
 nm_runs_status_for_branch() {  # <branch>
-  local branch=$1 out row st rest br sha
+  local branch=$1 out row st rest br sha verdict
   out=$(nm_run runs --limit "$FM_CREW_STATE_RUNS_LIMIT")
   [ -n "$out" ] || return 0
   while IFS= read -r row; do
@@ -364,15 +367,25 @@ nm_runs_status_for_branch() {  # <branch>
     rest=${rest#* }
     rest=$(trim "$rest")
     sha=${rest%% *}
-    if [ "$br" = "$branch" ]; then
-      # Same code-identity rule as axi status: skip a same-branch row whose
-      # short-sha does not match this worktree (rewritten or advanced tip).
-      if ! nm_coarse_head_matches_worktree "$sha"; then
-        continue
-      fi
+    [ "$br" = "$branch" ] || continue
+    # The list is newest-first, so the FIRST row for this branch IS the
+    # branch's current run and any row below it can only be staler. Bind that
+    # one row and stop: walking past it to find some older row whose sha
+    # happens to match this worktree is how a long-finished failed run once
+    # won attribution over the live one (2026-08-06).
+    nm_coarse_head_matches_worktree "$sha"
+    verdict=$?
+    if [ "$verdict" = 0 ]; then
       printf '%s' "$st"
-      return 0
+    elif [ "$verdict" = 2 ] && [ "$st" = running ]; then
+      # Unresolvable sha on this branch's newest row: the expected shape of a
+      # live run whose pipeline fix commits are not pushed yet. "A run for this
+      # branch is active right now" is answerable without resolving the tip, so
+      # answer it; a terminal row stays unattributed because its claim is
+      # exactly what the unresolvable sha would have had to corroborate.
+      printf '%s' "$st"
     fi
+    return 0
   done <<< "$out"
   return 0
 }
@@ -381,20 +394,31 @@ nm_runs_status_for_branch() {  # <branch>
 # scratch worktree); with no branch there is no run to attribute to this crew.
 CREW_BRANCH=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
 
-# 0 if the active axi-status run's head field matches this worktree's code
-# identity. Branch match is a precondition (caller). Rule owned by
-# fm_nm_head_matches_worktree in bin/fm-nm-run-lib.sh.
+# Code-identity verdict for the active axi-status run's head field against this
+# worktree: 0 match, 1 no match, 2 unresolvable. Branch match is a precondition
+# (caller). Three-valued rule owned by fm_nm_head_matches_worktree in
+# bin/fm-nm-run-lib.sh; this reader must never collapse 2 into 1.
 nm_run_head_matches_worktree() {
   local run_head
   run_head=$(strip_quotes "$(nm_field head)")
   fm_nm_head_matches_worktree "$WT" "$run_head"
 }
 
-# Coarse runs-list rows are "<status> <branch> <short-sha> ...". 0 if the short
-# sha for this branch row matches the worktree head under the same rules as
-# nm_run_head_matches_worktree (equal, or local is ancestor of run tip).
+# Coarse runs-list rows are "<status> <branch> <short-sha> ...". Same three
+# verdicts as nm_run_head_matches_worktree, for a row's short sha.
 nm_coarse_head_matches_worktree() {  # <short-sha>
   fm_nm_head_matches_worktree "$WT" "$1"
+}
+
+# Whether the axi-status run claims a terminal result by EITHER signal: a
+# non-empty outcome, or a terminal status word with the outcome absent (a
+# shape axi can emit transiently before the outcome is written).
+nm_run_claims_terminal() {
+  [ -n "$(strip_quotes "$(nm_field outcome)")" ] && return 0
+  case "$(strip_quotes "$(nm_field status)")" in
+    completed|failed|cancelled) return 0 ;;
+  esac
+  return 1
 }
 
 HAVE_RUN=0
@@ -410,11 +434,27 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
   RUN_OUT=$(nm_run axi status)
   if [ -n "$RUN_OUT" ]; then
     run_branch=$(strip_quotes "$(nm_field branch)")
-    if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] && nm_run_head_matches_worktree; then
+    head_verdict=1
+    if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ]; then
+      nm_run_head_matches_worktree
+      head_verdict=$?
+    fi
+    if [ "$head_verdict" = 0 ]; then
+      HAVE_RUN=1
+    elif [ "$head_verdict" = 2 ] && ! nm_run_claims_terminal; then
+      # This branch's run, still active, with a tip this worktree cannot see:
+      # the normal pre-push state, because no-mistakes commits its fix rounds in
+      # its own gate-repo clone. Bare `axi status` answers for the queried
+      # branch whenever that branch has a run, so branch identity already
+      # establishes ownership here and the unseen tip only leaves the run's
+      # exact code state unknown - which the non-terminal statuses below never
+      # depend on. Attributing it is also what keeps the coarse scan from
+      # answering this crew with an older terminal row instead.
       HAVE_RUN=1
     else
       # The active-or-most-recent run is for another branch, or same branch with
-      # a rewritten/diverged head (the CLI is alive and answered; only the
+      # a rewritten/diverged head, or a terminal run whose head cannot be bound
+      # to this worktree at all (the CLI is alive and answered; only the
       # attribution missed) - try the coarse fallback.
       # Deliberately nested inside `[ -n "$RUN_OUT" ]`: an empty/timed-out
       # primary call means the CLI itself did not respond, so retrying it
