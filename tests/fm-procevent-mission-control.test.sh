@@ -96,6 +96,22 @@ pass "a real captured send normalizes to one request through the published poll 
   || fail "note text must never contribute tokens to the parsed intent"
 pass "a note containing intent=merge cannot change the parsed intent"
 
+DURABLE="$TMP_ROOT/durable-log.txt"
+{
+  printf 'prompts[0]{received,attempt,prompt}:\n'
+  printf '  "2026-01-04T00:00:01Z","fm-board:ios","FM-BOARD-REQUEST {\\"v\\":1,\\"intent\\":\\"answer\\",\\"home\\":\\"ios\\",\\"id\\":\\"shared\\",\\"key\\":\\"route\\",\\"note\\":\\"Use iOS.\\"}"\n'
+  printf '  "2026-01-04T00:00:02Z","fm-board:android","FM-BOARD-REQUEST {\\"v\\":1,\\"intent\\":\\"answer\\",\\"home\\":\\"android\\",\\"id\\":\\"shared\\",\\"key\\":\\"route\\",\\"note\\":\\"Use Android.\\"}"\n'
+  printf 'board-delta-end=0\n'
+} > "$DURABLE"
+out=$(requests "$DURABLE")
+durable_req=$(only "$out" request)
+[ "$(printf '%s\n' "$durable_req" | jq -s 'length')" = 2 ] \
+  || fail "the durable request-log shape must normalize both answers, got: $durable_req"
+[ "$(printf '%s\n' "$durable_req" | jq -s '[.[] | {home,id,key,intent}]' -c)" = \
+  '[{"home":"ios","id":"shared","key":"route","intent":"answer"},{"home":"android","id":"shared","key":"route","intent":"answer"}]' ] \
+  || fail "durable answer identities must preserve exact home, item, key, and intent: $durable_req"
+pass "durable answer-log records preserve exact cross-home decision identities"
+
 U="$TMP_ROOT/unicode.txt"
 # Build the exact UTF-8 bytes without a literal Unicode quote that trips SC1112.
 unicode_note=$(printf 'Captain\342\200\231s caf\303\251 \360\237\232\200')

@@ -41,6 +41,8 @@ The stage itself is derived by the snapshot rather than by the board; see `bin/f
   URL validation runs in the required jq rendering path, so valid links do not disappear when optional browser tooling such as Node is unavailable.
   The board never probes, publishes, mounts, or rewrites that destination.
   Bounded or unavailable secondmate registries, omitted homes, and registered homes whose decisions could not be read all mark the waiting status incomplete.
+  A decision with a durably recorded Answer request stays visible until its underlying decision resolves, but it sorts after every decision that still needs an answer so the remaining work stays at the top.
+  This is presentation ordering within the waiting list only: it neither changes backlog order nor touches the Deferred shelf.
   Credential and login needs are not detected and are not faked.
 - **Deferred** is the quiet shelf under that list, closed by default, holding the decisions the captain has consciously set aside.
   A deferred decision is excluded from the waiting list, from the section count, and from the "Awaiting you" tile, because reducing what is in the captain's eyeline is the entire point of setting one aside.
@@ -111,7 +113,7 @@ A board request is evidence of the captain's intent, not an authenticated captai
 Firstmate does with it exactly what it would have done had the captain said the same words in chat, under its own contract in `AGENTS.md`: an approval that needs the captain's explicit word still gets confirmed with the captain first, a merge still happens only if firstmate's own checks pass, and nothing destructive, irreversible, or security-sensitive is ever executed from a tap.
 The surface is reachable by anything that can reach the service serving it, so being able to reach it is never treated as authorization for any of that.
 
-There are five controls, and each row offers only what it can actually resolve:
+There are five request types, and each row offers only what it can actually resolve:
 
 - **Approve merge** and **Reply**, on a PR awaiting the captain.
 - **Answer** and **Set aside**, on a decision the captain holds in a backlog.
@@ -121,6 +123,8 @@ There are five controls, and each row offers only what it can actually resolve:
 A decision belonging to a second mate carries the home it came from and is applied in that home, never in the main one.
 An Answer form uses the exact structured question when one was recorded, otherwise it uses the decision title and reason as a concise reminder, and only falls back to `Your answer` when no useful context exists.
 The textarea retains `Your answer` as its accessible label in every case.
+Each decision also offers `Ask a question about this`, which focuses the one shared Ask-firstmate composer and pre-fills a quoted reference to that decision's title.
+It never creates a per-decision conversation or another transport.
 Setting a decision aside carries no reason text at all: the stored reason is the captain's own, and firstmate reads it from the owning home rather than letting a request overwrite it.
 A row the board cannot name unambiguously gets no controls, because a request firstmate cannot resolve is worse than one the captain makes in chat.
 
@@ -134,13 +138,16 @@ The no-script fallback remains read-only and refreshes through its meta tag.
 
 An acknowledged control is replaced in place by a full-width confirmation banner, because a small coloured label beside an unchanged row was missed.
 The banner leads its row, so a decision already answered reads as answered at a glance, and whatever the row can still resolve stays available under it.
-It ships hidden and empty: only the script that saw a transport accept the request fills in what was proved, so a statically served copy can never show a confirmation that never happened.
+Its outcome heading ships hidden and empty: the script fills in either an immediate acknowledgement or a matching durable record, so a statically served copy can never show a confirmation that has no evidence.
 The banner claims only that, and never that the requested merge or decision has happened.
+A collected banner says that no action is needed from the captain right now and uses the board's neutral quiet treatment rather than reading like another need.
 The reply service answers after it has validated and durably recorded the request, so its labels are `Answer received`, `Merge request received`, and their corresponding forms.
 The pinned Lavish bridge returns before delivery completes, so on that path the truthful labels remain `Answer queued` and `Answer sent` according to what it confirmed.
+A queued banner keeps that distinction in its wording while using the same quiet no-action-needed treatment.
 
 Recorded is not the same as collected, and the difference is a reachable live state rather than a hypothetical: a continuity break retires the wake until an operator rebases it, and a deployment that never armed leaves the same gap from the start.
 The service therefore reports whether a wake is registered for this board, and the banner says `Recorded, but firstmate is not collecting replies from this board yet` when it is not, instead of implying firstmate already has it.
+That uncollected variant keeps the board's amber needs-you treatment and is never flattened into the quiet collected state.
 A confirmation restored on load is corrected as soon as the probe answers, so the wording always reflects the current state rather than the state at the time of the tap.
 
 Ask firstmate is the one control that continues past its acknowledgement.
@@ -155,8 +162,11 @@ The draft's session record keeps the attempted payload and its browser-generated
 That lets the service recognise an exact retry and record it once rather than twice without preventing the captain from changing the request.
 Every open composer and its draft are saved eagerly in session storage under the exact board, owning home, item, decision key, and intent identity.
 A full document reload restores only controls whose exact identity still exists, so an external generator rewrite cannot erase an in-progress answer and cannot attach it to a neighbouring decision.
-Submitted presentation state is browser-local, scoped by board home, document, owning home, item, decision key, and intent.
-It survives a reload only while the same actionable item remains, and is retired when that item disappears; it is never fleet truth.
+Draft and immediate post-submit presentation state are browser-local, scoped by board home, document, owning home, item, decision key, and intent.
+They bridge an in-progress edit or the interval between submission and the next board regeneration, survive a reload only while the same actionable item remains, and retire when that item disappears.
+On every regeneration, the generator reads the direct reply service's append-only request log and marks a still-actionable Answer by the same owning-home, item, decision-key, and intent identity.
+That durable signal makes a fresh board agree across devices, supplies the answered-row ordering, and never claims the underlying decision was resolved.
+The direct request log is the source of truth for recorded Answer requests; browser storage is not fleet truth.
 
 [`bin/fm-procevent-board-reply.sh`](../bin/fm-procevent-board-reply.sh) owns the reply service, arming the wake, posting firstmate's replies into the board conversation, and turning what was recorded into validated requests.
 [`bin/fm-board-request-parse.pl`](../bin/fm-board-request-parse.pl) is the single owner of the board message vocabulary in both directions and of every fail-closed rule, shared by both transports, and the service validates a message at its door with that same program over the same bytes it is about to store.
@@ -271,15 +281,16 @@ The decision-context case renders a structured and an old-style decision from on
 It then measures the rendered page in a real browser at desktop and 390px, because markup alone cannot show that the context block sits outside the row link or that it does not push the board sideways; that measurement self-skips when Chrome or Node is absent.
 It also pins a fixed current time and commits its fixture clones at explicit epochs, so the last-change wording, its three degrade-to-dash paths, and the promise that no clone is written to are all checked against times the test chose.
 
-The reply layer is covered in the same suite: that the default board is unchanged by its existence, that each row offers only the controls it can resolve, that a control names no host, port, or absolute endpoint and derives its target from the URL the document was loaded from, that it stays hidden until a transport is proved, and that the confirmation banner ships hidden and empty.
+The reply layer is covered in the same suite: that the default board is unchanged by its existence, that each row offers only the controls it can resolve, that a control names no host, port, or absolute endpoint and derives its target from the URL the document was loaded from, that it stays hidden until a transport is proved, and that the confirmation banner ships hidden with an empty outcome heading.
 Fleet prose is checked to stay escaped inside the attributes a control carries.
-A real-browser regression also covers exact and fallback Answer prompts, main-home and secondmate decision links, malformed and hostile inputs, successful and failed sends, duplicate prevention, acknowledgement restoration and retirement, active-tab restoration, stable reading anchors, explicit-navigation precedence, and disappeared-anchor fallback.
+A real-browser regression also covers exact and fallback Answer prompts, the per-decision entry into the one shared Ask-firstmate composer, main-home and secondmate decision links, malformed and hostile inputs, successful and failed sends, duplicate prevention, acknowledgement restoration and retirement, active-tab restoration, stable reading anchors, explicit-navigation precedence, and disappeared-anchor fallback.
+It renders two fresh board copies from one durable request log and measures the recorded quiet banners, answered-row ordering, shared composer, Deferred shelf, and exact cross-home identity at 1280px and 390px.
 
 `tests/fm-board-reply.test.sh` covers the direct transport with no Lavish anywhere.
 It re-proves every fail-closed rule at the service door and again at wake time, refuses a cross-site write and a non-loopback bind, holds captain text that looks like the wire format inside its own field, and pins the properties the cursor design rests on: a delta discarded before capture is re-derived byte for byte, a capture truncated before its end sentinel records no cursor and loses nothing, a captured delta advances the cursor so nothing is announced twice, a request accepted before arming survives to the next arm, one retried attempt is recorded once, and a broken cursor escalates exactly once with rebase as the recovery.
 It also pins that the service reports an unarmed board as uncollected, at its probe, in the answer to a recorded request, and in its own startup output.
-Its real-browser case serves the board through the service itself and drives a genuine Answer through to its confirmation, checks that the confirmation is a full-width banner rather than a label, that it survives a reload and fits a 390 by 844 viewport, and that killing the service leaves the next control open, editable, retryable, and unacknowledged.
-A second browser case retires the wake and proves that a request recorded while nothing is collecting is confirmed as recorded and explicitly not collected.
+Its real-browser case serves the board through the service itself and drives a genuine Answer through to its quiet no-action-needed confirmation, checks that the confirmation is a full-width banner rather than a label, that it survives a reload and fits a 390 by 844 viewport, and that killing the service leaves the next control open, editable, retryable, and unacknowledged.
+A second browser case retires the wake and proves that a request recorded while nothing is collecting is confirmed as recorded with the amber needs-you treatment and explicitly not collected.
 That regression rewrites the served HTML file repeatedly while an Answer composer contains unsent text, then performs full document reloads and verifies the exact draft, control identity, tab, and anchored reading offset survive both replacements.
 The Ask-firstmate conversation is covered in the same suite: a real thread of captain message, firstmate reply, and the captain's reply to that reply reads back in order, while the single-message flow is unchanged when no reply is ever posted.
 A firstmate reply never reaches the wake source, is held to the same fail-closed rules as a captain request, and stays a quotation when it quotes the wire format; a forged or malformed conversation line is never rendered, and a partial read says so.

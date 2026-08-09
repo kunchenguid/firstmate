@@ -609,8 +609,10 @@ const revealState = `({body:document.body.className,
   })()`);
   assert(sent.confirmed && sent.head === "Answer received",
     "a request the service accepted was not confirmed truthfully: " + JSON.stringify(sent));
-  assert(sent.note.indexOf("Recorded for firstmate") === 0 && sent.tone.indexOf("rc-warn") === -1,
-    "a collected request must not be described or toned as uncollected: " + JSON.stringify(sent));
+  assert(sent.note.indexOf("No action is needed from you right now.") === 0
+    && sent.note.indexOf("Firstmate has your request") !== -1
+    && sent.tone.indexOf("rc-quiet") !== -1 && sent.tone.indexOf("rc-needs-you") === -1,
+    "a collected request must use the board's quiet, no-action-needed treatment: " + JSON.stringify(sent));
   assert(sent.openerHidden && sent.openerText === "Answer received" && sent.formClosed,
     "the acknowledged control was not replaced by its confirmation: " + JSON.stringify(sent));
   assert(sent.width >= sent.rowWidth - 2,
@@ -775,6 +777,7 @@ function assert(ok, message) { if (!ok) throw new Error(message); }
   const sid = attached.result.sessionId;
   await send("Page.enable", {}, sid);
   await send("Runtime.enable", {}, sid);
+  await send("Emulation.setDeviceMetricsOverride", {width:1280,height:844,deviceScaleFactor:1,mobile:false}, sid);
   await send("Page.navigate", {url:serviceUrl}, sid);
   for (let i=0;i<200;i++) { if (await evaluate(sid,"document.readyState") === "complete") break; await delay(20); }
   await delay(600);
@@ -792,8 +795,18 @@ function assert(ok, message) { if (!ok) throw new Error(message); }
   assert(uncollected.confirmed && uncollected.head === "Answer received",
     "an uncollected request must still confirm what the service proved: " + JSON.stringify(uncollected));
   assert(uncollected.note.indexOf("not collecting") !== -1
-    && uncollected.tone.indexOf("rc-warn") !== -1,
-    "a request nothing is collecting read as a clean success: " + JSON.stringify(uncollected));
+    && uncollected.tone.indexOf("rc-needs-you") !== -1
+    && uncollected.tone.indexOf("rc-quiet") === -1,
+    "a request nothing is collecting did not keep the board's needs-you treatment: " + JSON.stringify(uncollected));
+  await send("Emulation.setDeviceMetricsOverride", {width:390,height:844,deviceScaleFactor:1,mobile:true}, sid);
+  const uncollectedNarrow = await evaluate(sid, `(() => {var panel=[...document.querySelectorAll('.rc')]
+    .find(x=>x.dataset.id==='d2').querySelector('[data-ok=answer]');panel.scrollIntoView({block:'center'});
+    var rect=panel.getBoundingClientRect();return {left:rect.left,right:rect.right,tone:panel.className,
+      overflow:document.documentElement.scrollWidth>document.documentElement.clientWidth};})()`);
+  assert(uncollectedNarrow.left >= 0 && uncollectedNarrow.right <= 390 && !uncollectedNarrow.overflow
+    && uncollectedNarrow.tone.indexOf("rc-needs-you") !== -1,
+    "the uncollected needs-you banner overflowed or changed tone at 390px: " + JSON.stringify(uncollectedNarrow));
+  await send("Emulation.clearDeviceMetricsOverride", {}, sid);
   const armed = spawnSync(adapter, ["arm", board], {env:process.env,encoding:"utf8"});
   assert(armed.status === 0, "arming the board failed: " + armed.stdout + armed.stderr);
   const collecting = await evaluate(sid, `(async()=>{
@@ -810,10 +823,11 @@ function assert(ok, message) { if (!ok) throw new Error(message); }
       askConfirmed:!ask.querySelector('[data-ok=ask]').hidden,
       askTone:ask.querySelector('[data-ok=ask]').className};
   })()`);
-  assert(collecting.askConfirmed && collecting.askTone.indexOf("rc-warn") === -1
-    && collecting.priorNote.indexOf("Recorded for firstmate") === 0
-    && collecting.priorTone.indexOf("rc-warn") === -1,
-    "an armed response left stale uncollected styling: " + JSON.stringify(collecting));
+  assert(collecting.askConfirmed && collecting.askTone.indexOf("rc-quiet") !== -1
+    && collecting.priorNote.indexOf("No action is needed from you right now.") === 0
+    && collecting.priorTone.indexOf("rc-quiet") !== -1
+    && collecting.priorTone.indexOf("rc-needs-you") === -1,
+    "an armed response left stale needs-you styling: " + JSON.stringify(collecting));
   process.stdout.write("uncollected wording ok\n");
 })().finally(() => chrome.kill()).catch((error) => { console.error(error.stack||error); process.exitCode=1; });
 JS

@@ -100,6 +100,9 @@
 #   disk is the read-only board it is without this flag, and no viewer is ever
 #   shown a dead control. An acknowledged control is then replaced in place by a
 #   full-width confirmation banner claiming only what the transport proved.
+#   A regeneration reads this physical board's direct-service request log, so a
+#   recorded Answer remains visible and sorts below unanswered decisions across
+#   devices while browser storage bridges the interval before regeneration.
 #   With script available, session-scoped presentation memory preserves the
 #   active tab and stable reading position across both managed reloads and full
 #   document replacement after an external output-file rewrite. --controls also
@@ -163,6 +166,11 @@ printf '%s' "$SNAPSHOT" | jq -e 'type == "object" and has("tasks")' >/dev/null 2
 STATE_DIR=$(printf '%s' "$SNAPSHOT" | jq -r '.roots.state // ""')
 DATA_DIR=$(printf '%s' "$SNAPSHOT" | jq -r '.roots.data // ""')
 PROJECTS_DIR=$(printf '%s' "$SNAPSHOT" | jq -r '.roots.projects // ""')
+
+if [ "$TO_STDOUT" = 0 ] && [ -z "$OUT" ]; then
+  [ -n "$STATE_DIR" ] || die "snapshot reported no state directory; pass --out"
+  OUT="$STATE_DIR/mission-control.html"
+fi
 
 NOW=${FM_MISSION_CONTROL_NOW_EPOCH:-$(date +%s)}
 case "$NOW" in ''|*[!0-9]*) NOW=$(date +%s) ;; esac
@@ -474,6 +482,32 @@ if [ "$WITH_QUOTA" = 1 ]; then
   fi
 fi
 
+# The direct reply service keeps an append-only log for this physical board.
+# Browser storage bridges the instant after a submit, but a regeneration reads
+# that durable record so another device sees the same answered decisions.
+recorded_answers_json() {
+  local log records
+  if [ "$CONTROLS" != true ] || [ "$TO_STDOUT" = 1 ] || [ ! -f "$OUT" ] || [ -L "$OUT" ]; then
+    printf '[]\n'
+    return 0
+  fi
+  log=$(FM_STATE_OVERRIDE="$STATE_DIR" "$SCRIPT_DIR/fm-procevent-board-reply.sh" log-path "$OUT" 2>/dev/null) \
+    || { printf '[]\n'; return 0; }
+  [ -f "$log" ] && [ ! -L "$log" ] && [ -r "$log" ] \
+    || { printf '[]\n'; return 0; }
+  records=$(
+    {
+      printf 'prompts[0]{received,attempt,prompt}:\n'
+      while IFS= read -r line; do printf '%s\n' "$line"; done < "$log"
+      printf 'board-delta-end=0\n'
+    } | perl "$SCRIPT_DIR/fm-board-request-parse.pl" /dev/stdin \
+      | jq -s '[.[] | select(.kind == "request" and .intent == "answer") |
+          {home, id: (.id // ""), key: (.key // ""), intent}] | unique'
+  ) || { printf '[]\n'; return 0; }
+  printf '%s\n' "$records"
+}
+PENDING_ANSWERS=$(recorded_answers_json)
+
 render_html() {
   printf '%s' "$SNAPSHOT" | jq -L "$SCRIPT_DIR" -r \
     --argjson quota "$QUOTA" \
@@ -485,6 +519,7 @@ render_html() {
     --argjson updated "$UPDATED" \
     --argjson recent_actions "$RECENT_ACTIONS" \
     --argjson projects_present "$PROJECTS_PRESENT" \
+    --argjson pending_answers "$PENDING_ANSWERS" \
     --arg today "$TODAY" \
     --argjson controls "$CONTROLS" \
     --argjson refresh "$REFRESH" -f /dev/fd/3 3<<'FM_MISSION_CONTROL_JQ'
@@ -771,7 +806,20 @@ def yolo_for($repo): ($registry_by_name[$repo // ""].yolo // false);
   link: null
 }] end) as $waiting_backlog_unavailable |
 
-($waiting_decisions + $waiting_secondmate) as $waiting_calls |
+def has_recorded_answer($w):
+  ($w.ctl // null) as $c |
+  if $c == null or (($c.intents // []) | index("answer") | not) then false
+  else any($pending_answers[];
+    .intent == "answer"
+    and .home == ($c.home // "main")
+    and .id == ($c.id // "")
+    and .key == ($c.key // ""))
+  end;
+
+(($waiting_decisions + $waiting_secondmate)
+  | map(. + {answered: has_recorded_answer(.)})) as $waiting_calls_all |
+(($waiting_calls_all | map(select(.answered != true)))
+  + ($waiting_calls_all | map(select(.answered == true)))) as $waiting_calls |
 ($waiting_calls + $waiting_prs) as $waiting |
 ($waiting_secondmate_omitted + $waiting_secondmate_truncated + $waiting_secondmate_registry + $waiting_secondmate_unavailable + $waiting_backlog_unavailable) as $waiting_notices |
 (($waiting | length) + ($waiting_secondmate_omitted | map(.omitted_count) | add // 0)) as $waiting_count |
@@ -1158,15 +1206,17 @@ def recent_action_row:
 def rc_button($intent; $label):
   (@html "<button type=\"button\" class=\"rc-b rc-\($intent)\" data-open=\"\($intent)\">\($label)</button>");
 
-# The confirmed state one control leaves behind. It ships hidden and carries no
-# text: only the script that saw a transport actually accept the request fills in
-# what was proved, so a statically served copy can never show a false confirmation.
+def rc_ask_about($title):
+  (@html "<button type=\"button\" class=\"rc-b rc-ask-about\" data-ask-about=\"\($title)\">Ask a question about this</button>");
+
+# The confirmed state one control leaves behind. It ships hidden with no outcome
+# heading: only the script applying a durable or immediate acknowledgement fills
+# in what was proved, so a statically served copy can never show a false confirmation.
 def rc_confirm($intent):
-  (@html "<div class=\"rc-ok\" data-ok=\"\($intent)\" hidden role=\"status\">")
+  (@html "<div class=\"rc-ok rc-quiet\" data-ok=\"\($intent)\" hidden role=\"status\">")
   + icon_check
   + "<span class=\"rc-ok-t\"><strong class=\"rc-ok-h\"></strong>"
-  + "<span class=\"rc-ok-s\">Recorded for firstmate, which applies it under its own"
-  + " checks. It stays here until the call clears.</span></span></div>";
+  + "<span class=\"rc-ok-s\">No action is needed from you right now.</span></span></div>";
 
 def rc_form($intent; $question; $note_label; $placeholder; $send_label):
   (@html "<form class=\"rc-f\" data-toggle data-intent=\"\($intent)\" hidden>")
@@ -1194,7 +1244,7 @@ def controls_for:
   . as $w |
   ($w.ctl // null) as $c |
   if ($controls | not) or $c == null then "" else
-    (@html "<div class=\"rc\" data-home=\"\($c.home)\" data-id=\"\($c.id)\" data-key=\"\($c.key)\" data-what=\"\($w.title)\">")
+    (@html "<div class=\"rc\" data-home=\"\($c.home)\" data-id=\"\($c.id)\" data-key=\"\($c.key)\" data-what=\"\($w.title)\" data-recorded-answer=\"\(if $w.answered == true then "true" else "false" end)\">")
     + "<div class=\"rc-acts\">"
     # The confirmations lead, so a row the captain has already answered reads as
     # answered at a glance and whatever it can still resolve sits under that.
@@ -1207,6 +1257,7 @@ def controls_for:
         elif . == "answer" then rc_button("answer"; "Answer")
         elif . == "defer" then rc_button("defer"; "Set aside")
         else "" end)) | add // "")
+    + (if $w.kind == "decision" then rc_ask_about($w.title) else "" end)
     + "<span class=\"rc-sent\" hidden></span>"
     + "</div>"
     + (($c.intents | map(
@@ -1271,7 +1322,7 @@ def need_item:
 
 def ask_block:
   if ($controls | not) then "" else
-    "<div class=\"rc rc-ask\" data-home=\"main\" data-id=\"\" data-key=\"\" data-what=\"\">"
+    "<div class=\"rc rc-ask\" id=\"ask-firstmate-composer\" data-home=\"main\" data-id=\"\" data-key=\"\" data-what=\"\">"
     + "<form class=\"rc-f\" data-intent=\"ask\">"
     + "<p class=\"rc-q\">Ask firstmate for something new, or say what you want changed.</p>"
     + "<textarea class=\"rc-t\" rows=\"3\" maxlength=\"2000\" aria-label=\"Ask firstmate\"></textarea>"
@@ -1634,6 +1685,8 @@ body.board-reply .rc-ask,body.lavish .rc-ask{border:1px solid var(--line);border
 .rc-b.rc-answer:hover{color:#724b10;background:#f8eccf;border-color:#dfc58e;}
 .rc-b.rc-defer{color:var(--slate);background:var(--slate-soft);border-color:#dce1e8;}
 .rc-b.rc-defer:hover{color:var(--ink);background:#e5e9ef;border-color:#cbd2dc;}
+.rc-b.rc-ask-about{color:var(--slate);background:transparent;border-style:dashed;}
+.rc-b.rc-ask-about:hover{color:var(--ink);background:var(--slate-soft);border-style:solid;}
 .rc-b:disabled,.rc-go:disabled{opacity:.66;cursor:default;}
 .rc-b.rc-submitted{color:var(--green);background:var(--green-soft);border-color:#cfe7da;}
 .rc-b:focus-visible,.rc-go:focus-visible,.rc-x:focus-visible{outline:2px solid var(--amber);outline-offset:1px;}
@@ -1660,18 +1713,18 @@ body.board-reply .rc-ask,body.lavish .rc-ask{border:1px solid var(--line);border
    still waiting for the captain. Siblings that can still be resolved stay, and a
    row whose every control is acknowledged becomes the banner alone. */
 .rc-ok{flex-basis:100%;display:flex;align-items:flex-start;gap:10px;margin:3px 0 1px;
-  padding:11px 14px;border:1px solid #bfe0cf;border-left:4px solid var(--green);
-  border-radius:13px;background:var(--green-soft);}
+  padding:11px 14px;border:1px solid #dce1e8;border-left:4px solid var(--slate);
+  border-radius:13px;background:var(--slate-soft);}
 .rc-ok[hidden]{display:none;}
-.rc-ok .ck{flex:none;width:19px;height:19px;color:var(--green);margin-top:1px;stroke-width:2.4;}
+.rc-ok .ck{flex:none;width:19px;height:19px;color:var(--slate);margin-top:1px;stroke-width:2.4;}
 .rc-ok-t{display:flex;flex-direction:column;gap:1px;min-width:0;}
-.rc-ok-h{color:#0b6b49;font-size:13.5px;font-weight:700;overflow-wrap:anywhere;}
+.rc-ok-h{color:var(--ink);font-size:13.5px;font-weight:700;overflow-wrap:anywhere;}
 .rc-ok-s{color:var(--slate);font-size:12px;overflow-wrap:anywhere;}
 /* Recorded, but nothing is collecting it. The board proved only the first half,
    so this keeps the needs-you tone rather than reading as a clean success. */
-.rc-ok.rc-warn{border-color:#ead7ae;border-left-color:var(--amber);background:var(--amber-soft);}
-.rc-ok.rc-warn .ck{color:var(--amber);}
-.rc-ok.rc-warn .rc-ok-h{color:#936218;}
+.rc-ok.rc-needs-you,.rc-ok.rc-warn{border-color:#ead7ae;border-left-color:var(--amber);background:var(--amber-soft);}
+.rc-ok.rc-needs-you .ck,.rc-ok.rc-warn .ck{color:var(--amber);}
+.rc-ok.rc-needs-you .rc-ok-h,.rc-ok.rc-warn .rc-ok-h{color:#936218;}
 /* The Ask-firstmate thread. Every message is inert text, so nothing here borrows
    a control's shape: no pill, no button tone, no underlined action. */
 .thr{margin:13px 0 0;padding:0 22px;}
@@ -2591,9 +2644,15 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
      read-only board with no dead controls. */
   function ownUrl() { return window.location.pathname || \"/\"; }
 
-  var COLLECTED = \"Recorded for firstmate, which applies it under its own checks. It stays here until the call clears.\";
   var UNCOLLECTED = \"Recorded, but firstmate is not collecting replies from this board yet.\";
   var collecting = true;
+
+  function collectedCopy(delivery) {
+    if (delivery === \"queued\") {
+      return \"No action is needed from you right now. Your request is queued for firstmate, and it stays here until the call clears.\";
+    }
+    return \"No action is needed from you right now. Firstmate has your request, and it stays here until the call clears.\";
+  }
 
   /* A confirmation restored on load is written before the probe can answer, so
      once it does, any panel already on screen is corrected rather than left
@@ -2603,11 +2662,13 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
     Array.prototype.forEach.call(document.querySelectorAll(\".rc-ok\"), function (panel) {
       var note = panel.querySelector(\".rc-ok-s\");
       if (ok) {
-        if (note) { note.textContent = COLLECTED; }
-        panel.classList.remove(\"rc-warn\");
+        if (note) { note.textContent = collectedCopy(panel.getAttribute(\"data-delivery\") || \"received\"); }
+        panel.classList.add(\"rc-quiet\");
+        panel.classList.remove(\"rc-needs-you\", \"rc-warn\");
       } else if (!panel.hidden) {
         if (note) { note.textContent = UNCOLLECTED; }
-        panel.classList.add(\"rc-warn\");
+        panel.classList.remove(\"rc-quiet\");
+        panel.classList.add(\"rc-needs-you\", \"rc-warn\");
       }
     });
   }
@@ -2810,16 +2871,23 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
     return block.querySelector(\"[data-ok=\\\"\" + intent + \"\\\"]\");
   }
 
-  function showConfirm(block, intent, label, warning) {
+  function showConfirm(block, intent, label, warning, delivery) {
     var panel = confirmPanel(block, intent);
     if (!panel) { return; }
     /* Unhide first: a live region mutated while hidden is often not announced. */
     panel.hidden = false;
+    panel.setAttribute(\"data-delivery\", delivery || \"received\");
     var head = panel.querySelector(\".rc-ok-h\");
     if (head) { head.textContent = label; }
     var note = panel.querySelector(\".rc-ok-s\");
-    if (note && warning) { note.textContent = warning; }
-    if (warning) { panel.classList.add(\"rc-warn\"); }
+    if (note) { note.textContent = warning || collectedCopy(delivery); }
+    if (warning) {
+      panel.classList.remove(\"rc-quiet\");
+      panel.classList.add(\"rc-needs-you\", \"rc-warn\");
+    } else {
+      panel.classList.add(\"rc-quiet\");
+      panel.classList.remove(\"rc-needs-you\", \"rc-warn\");
+    }
   }
 
   function hideConfirm(block, intent) {
@@ -2978,7 +3046,7 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
       var submit = form.querySelector(\".rc-go\");
       if (submit) { submit.disabled = true; submit.textContent = label; }
     });
-    showConfirm(block, intent, label, warning);
+    showConfirm(block, intent, label, warning, delivery);
     if (confirmPanel(block, intent)) { noteOnly(block, ackSentence(label, delivery)); }
     else { say(block, ackSentence(label, delivery), false); }
   }
@@ -2991,7 +3059,8 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
         var key = ackKey(block, intent);
         current[key] = true;
         try {
-          var delivery = window.localStorage.getItem(key);
+          var delivery = block.getAttribute(\"data-recorded-answer\") === \"true\" && intent === \"answer\"
+            ? \"received\" : window.localStorage.getItem(key);
           if (delivery === \"sent\" || delivery === \"queued\" || delivery === \"received\") {
             applyAck(block, intent, delivery);
           }
@@ -3059,6 +3128,26 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
     var el = ev.target;
     if (el && el.nodeType !== 1) { el = el.parentElement; }
     if (!el || !el.closest) { return; }
+
+    var askAbout = el.closest(\"[data-ask-about]\");
+    if (askAbout) {
+      var askComposer = document.getElementById(\"ask-firstmate-composer\");
+      var askArea = askComposer && askComposer.querySelector(\"textarea\");
+      if (!askArea) { return; }
+      var title = (askAbout.getAttribute(\"data-ask-about\") || \"this decision\").slice(0, 240);
+      var reference = \"About \\u201c\" + title + \"\\u201d:\\n\";
+      if (!askArea.value.replace(/^\\s+|\\s+$/g, \"\")) { askArea.value = reference; }
+      else if (askArea.value.indexOf(reference) === -1) {
+        var draft = askArea.value.replace(/\\s+$/g, \"\");
+        var available = Math.max(0, 2000 - reference.length - 2);
+        askArea.value = draft.slice(0, available).replace(/\\s+$/g, \"\") + \"\\n\\n\" + reference;
+      }
+      askArea.dispatchEvent(new Event(\"input\", {bubbles:true}));
+      askComposer.scrollIntoView({block:\"center\"});
+      askArea.focus();
+      window.__fmExplicitNavigation = true;
+      return;
+    }
 
     var opener = el.closest(\"[data-open]\");
     if (opener) {
@@ -3179,7 +3268,7 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
         applyAck(block, request.intent, \"received\", uncollected);
       } else {
         var askLabel = ackLabel(request.intent, \"received\");
-        showConfirm(block, request.intent, askLabel, uncollected);
+        showConfirm(block, request.intent, askLabel, uncollected, \"received\");
         noteOnly(block, ackSentence(askLabel, \"received\"));
       }
       shut(block);
@@ -3251,7 +3340,7 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
       applyAck(block, request.intent, delivery);
     } else {
       var bridgedLabel = ackLabel(request.intent, delivery);
-      showConfirm(block, request.intent, bridgedLabel);
+      showConfirm(block, request.intent, bridgedLabel, \"\", delivery);
       noteOnly(block, ackSentence(bridgedLabel, delivery));
     }
     shut(block);
@@ -3311,11 +3400,6 @@ HTML=$(render_html) || die "rendering failed"
 if [ "$TO_STDOUT" = 1 ]; then
   printf '%s\n' "$HTML"
   exit 0
-fi
-
-if [ -z "$OUT" ]; then
-  [ -n "$STATE_DIR" ] || die "snapshot reported no state directory; pass --out"
-  OUT="$STATE_DIR/mission-control.html"
 fi
 
 OUT_DIR=$(dirname "$OUT")

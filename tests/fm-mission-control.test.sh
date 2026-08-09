@@ -2334,8 +2334,8 @@ test_controls_can_only_queue_a_request() {
   # The confirmed state ships hidden and EMPTY. Only the script that saw a
   # transport accept the request fills it in, so a statically served copy can
   # never show the captain a confirmation that never happened.
-  assert_grep 'class="rc-ok" data-ok="answer" hidden' "$board" \
-    "an acknowledged control must have a confirmation banner that ships hidden"
+  assert_grep 'class="rc-ok rc-quiet" data-ok="answer" hidden' "$board" \
+    "an acknowledged control must have a quiet confirmation banner that ships hidden"
   assert_grep '<strong class="rc-ok-h"></strong>' "$board" \
     "the confirmation banner must ship with no claim in it"
   assert_grep '.rc-ok{flex-basis:100%' "$board" \
@@ -2628,6 +2628,7 @@ function assert(ok, message) { if (!ok) throw new Error(message); }
   assert(success.routed === "Answer sent" && success.routedB === "Answer sent", "home or decision-key acknowledgement identities collided");
   assert(success.prompts === 5, "duplicate answer submission reached the bridge or a distinct identity was dropped");
 
+  await send("Emulation.setDeviceMetricsOverride", {width:1280,height:844,deviceScaleFactor:1,mobile:false}, sid);
   const unconfirmed = await evaluate(sid, `(async()=>{
     localStorage.setItem('test-delivery-unconfirmed','1');
     var b=[...document.querySelectorAll('.rc')].find(x=>x.dataset.id==='d-hostile');
@@ -2638,14 +2639,29 @@ function assert(ok, message) { if (!ok) throw new Error(message); }
     var stored=[...Array(localStorage.length)].map((_,i)=>localStorage.key(i))
       .filter(k=>k&&k.startsWith('fm-mission-control-ack-v1:')&&localStorage.getItem(k)==='queued');
     localStorage.removeItem('test-delivery-unconfirmed');
+    var panel=b.querySelector('[data-ok=answer]');
     return {label:b.querySelector('[data-open=answer]').textContent,message:b.querySelector('.rc-sent').textContent,
-      disabled:b.querySelector('[data-open=answer]').disabled,stored:stored.length,
+      banner:panel.querySelector('.rc-ok-h').textContent,note:panel.querySelector('.rc-ok-s').textContent,
+      tone:panel.className,disabled:b.querySelector('[data-open=answer]').disabled,stored:stored.length,
       beforeDuplicate,afterDuplicate:JSON.parse(localStorage.getItem('test-prompts')||'[]').length};
   })()`);
   assert(unconfirmed.label === 'Answer queued' && unconfirmed.message === 'Answer queued for firstmate.'
+    && unconfirmed.banner === 'Answer queued'
+    && unconfirmed.note.startsWith('No action is needed from you right now.')
+    && unconfirmed.note.includes('queued for firstmate')
+    && unconfirmed.tone.includes('rc-quiet') && !unconfirmed.tone.includes('rc-needs-you')
     && unconfirmed.disabled && unconfirmed.stored === 1
     && unconfirmed.beforeDuplicate === unconfirmed.afterDuplicate,
-    'an unconfirmed Lavish delivery was reported as sent or allowed to duplicate: '+JSON.stringify(unconfirmed));
+    'a queued answer lost its quiet no-action-needed treatment, was reported as sent, or duplicated: '+JSON.stringify(unconfirmed));
+  await send("Emulation.setDeviceMetricsOverride", {width:390,height:844,deviceScaleFactor:1,mobile:true}, sid);
+  const queuedNarrow = await evaluate(sid, `(() => {var b=[...document.querySelectorAll('.rc')].find(x=>x.dataset.id==='d-hostile');
+    var panel=b.querySelector('[data-ok=answer]');panel.scrollIntoView({block:'center'});var rect=panel.getBoundingClientRect();
+    return {left:rect.left,right:rect.right,tone:panel.className,note:panel.querySelector('.rc-ok-s').textContent,
+      overflow:document.documentElement.scrollWidth>document.documentElement.clientWidth};})()`);
+  assert(queuedNarrow.left >= 0 && queuedNarrow.right <= 390 && !queuedNarrow.overflow
+    && queuedNarrow.tone.includes('rc-quiet') && queuedNarrow.note.includes('queued for firstmate'),
+    'the queued quiet banner overflowed or changed tone at 390px: '+JSON.stringify(queuedNarrow));
+  await send("Emulation.clearDeviceMetricsOverride", {}, sid);
 
   const asynchronous = await evaluate(sid, `(async()=>{
     localStorage.setItem('test-queue-delay','1');
@@ -2891,6 +2907,152 @@ JS
   pass "a privacy-safe live fleet stays anchored across regeneration and full reload"
 }
 
+test_recorded_answers_persist_across_devices_and_sink() {
+  local snap state board log device_one device_two chrome
+  snap=$TMP_ROOT/recorded-answers.json
+  state=$TMP_ROOT/recorded-answers-state
+  board=$TMP_ROOT/recorded-answers.html
+  device_one=$TMP_ROOT/recorded-answers-device-one.html
+  device_two=$TMP_ROOT/recorded-answers-device-two.html
+  mkdir -p "$state"
+  snapshot_json '[
+    {"state":"queued","id":"alpha","captain_actionable":true,"captain_deferred":false,
+     "title":"Choose alpha path","hold_reason":"Alpha is still open","repo":"sample"},
+    {"state":"queued","id":"beta","captain_actionable":true,"captain_deferred":false,
+     "title":"Choose beta path","hold_reason":"Beta was answered","repo":"sample"},
+    {"state":"queued","id":"delta","captain_actionable":true,"captain_deferred":false,
+     "title":"Choose delta path","hold_reason":"Delta is still open","repo":"sample"},
+    {"state":"queued","id":"defer-one","captain_actionable":false,"captain_deferred":true,
+     "title":"Defer first","hold_reason":"First shelf row","repo":"sample"},
+    {"state":"queued","id":"defer-two","captain_actionable":false,"captain_deferred":true,
+     "title":"Defer second","hold_reason":"Second shelf row","repo":"sample"}
+  ]' '[
+    {"id":"ios","registered":true,"provenance":{"selected":"structured-home"},
+     "current":{"state":"captain_decision"},"active_children":[],"holds":[],"queued":[],
+     "decisions_open":[{"id":"shared","key":"route","source":"status",
+       "summary":"Choose iOS shared route","reason":"The iOS answer was recorded"}],
+     "counts":{"active_children":0,"decisions_open":1,"holds":0,"queued":0},"omitted":[]},
+    {"id":"android","registered":true,"provenance":{"selected":"structured-home"},
+     "current":{"state":"captain_decision"},"active_children":[],"holds":[],"queued":[],
+     "decisions_open":[{"id":"shared","key":"route","source":"status",
+       "summary":"Choose Android shared route","reason":"The Android answer is still open"}],
+     "counts":{"active_children":0,"decisions_open":1,"holds":0,"queued":0},"omitted":[]}
+  ]' | jq --arg state "$state" '.roots.state = $state' > "$snap"
+
+  "$BOARD" --snapshot "$snap" --no-quota --controls --refresh 300 --out "$board" >/dev/null \
+    || fail "the initial recorded-answer board must render"
+  log=$(FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-procevent-board-reply.sh" log-path "$board") \
+    || fail "the board request log path must resolve"
+  mkdir -p "$(dirname "$log")"
+  cat > "$log" <<'EOF'
+  "2026-01-04T00:00:01Z","fm-board:beta","FM-BOARD-REQUEST {\"v\":1,\"intent\":\"answer\",\"home\":\"main\",\"id\":\"beta\",\"note\":\"Use beta.\"}"
+  "2026-01-04T00:00:02Z","fm-board:ios","FM-BOARD-REQUEST {\"v\":1,\"intent\":\"answer\",\"home\":\"ios\",\"id\":\"shared\",\"key\":\"route\",\"note\":\"Use the iOS route.\"}"
+  "2026-01-04T00:00:03Z","fm-board:deferred","FM-BOARD-REQUEST {\"v\":1,\"intent\":\"answer\",\"home\":\"main\",\"id\":\"defer-two\",\"note\":\"Keep this deferred.\"}"
+EOF
+
+  "$BOARD" --snapshot "$snap" --no-quota --controls --refresh 300 --out "$board" >/dev/null \
+    || fail "the first durable-answer regeneration must render"
+  cp "$board" "$device_one"
+  "$BOARD" --snapshot "$snap" --no-quota --controls --refresh 300 --out "$board" >/dev/null \
+    || fail "the second durable-answer regeneration must render"
+  cp "$board" "$device_two"
+
+  [ "$(grep -o 'data-recorded-answer="true"' "$device_one" | wc -l | tr -d ' ')" = 2 ] \
+    || fail "only the two still-actionable exact answer identities should be marked recorded"
+  cmp -s "$device_one" "$device_two" \
+    || fail "two regenerations over the same durable request log disagreed"
+
+  command -v node >/dev/null 2>&1 || {
+    printf 'skip: node not found for durable decision-card browser regression\n'; return 0; }
+  chrome=$(find_chrome) || {
+    printf 'skip: Chrome or Chromium not found for durable decision-card browser regression\n'; return 0; }
+  node - "$chrome" "$device_one" "$device_two" <<'JS' \
+    || fail "durable answer ordering and shared Ask-firstmate wiring failed in a real browser"
+const {spawn} = require("node:child_process");
+const {pathToFileURL} = require("node:url");
+const [chromePath, ...boards] = process.argv.slice(2);
+const chrome = spawn(chromePath, ["--headless=new","--disable-gpu","--no-sandbox",
+  "--remote-debugging-pipe",`--user-data-dir=${boards[0]}.profile`],
+  {stdio:["ignore","ignore","ignore","pipe","pipe"]});
+let buffer="", nextId=0; const pending=new Map();
+function send(method,params={},sessionId){return new Promise(resolve=>{const id=++nextId;pending.set(id,resolve);
+  chrome.stdio[3].write(`${JSON.stringify({id,method,params,...(sessionId?{sessionId}:{})})}\0`);});}
+chrome.stdio[4].on("data",chunk=>{buffer+=chunk;let at;while((at=buffer.indexOf("\0"))>=0){
+  const raw=buffer.slice(0,at);buffer=buffer.slice(at+1);if(!raw)continue;const message=JSON.parse(raw);
+  const resolve=pending.get(message.id);if(resolve){pending.delete(message.id);resolve(message);}}});
+const delay=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+async function evaluate(sid,expression){const result=await send("Runtime.evaluate",{expression,returnByValue:true,awaitPromise:true},sid);
+  if(result.result.exceptionDetails)throw new Error(result.result.exceptionDetails.text);return result.result.result.value;}
+function assert(ok,message){if(!ok)throw new Error(message);}
+async function inspect(path,width,mobile){
+  const context=await send("Target.createBrowserContext");
+  const created=await send("Target.createTarget",{url:"about:blank",browserContextId:context.result.browserContextId});
+  const attached=await send("Target.attachToTarget",{targetId:created.result.targetId,flatten:true});
+  const sid=attached.result.sessionId;
+  await send("Page.enable",{},sid); await send("Runtime.enable",{},sid);
+  await send("Page.addScriptToEvaluateOnNewDocument",{source:`window.lavish={queuePrompt:()=>true,sendQueuedPrompts:()=>true};`},sid);
+  await send("Emulation.setDeviceMetricsOverride",{width,height:844,deviceScaleFactor:1,mobile},sid);
+  await send("Page.navigate",{url:pathToFileURL(path).href},sid);
+  for(let i=0;i<100;i++){if(await evaluate(sid,"document.readyState") === "complete")break;await delay(20);}
+  for(let i=0;i<40;i++){if(await evaluate(sid,"document.body.classList.contains('lavish')"))break;await delay(25);}
+  const seen=await evaluate(sid,`(() => {
+    const blocks=[...document.querySelectorAll('.needs .rc[data-what]')];
+    const answered=blocks.filter(block=>block.dataset.recordedAnswer==='true');
+    const android=blocks.find(block=>block.dataset.home==='android');
+    const askButton=blocks.find(block=>block.dataset.id==='alpha').querySelector('[data-ask-about]');
+    askButton.scrollIntoView({block:'center'}); askButton.click();
+    const composer=document.querySelector('#ask-firstmate-composer textarea');
+    const composerValue=composer.value;
+    composer.value='x'.repeat(1998); composer.dispatchEvent(new Event('input',{bubbles:true}));
+    blocks.find(block=>block.dataset.id==='delta').querySelector('[data-ask-about]').click();
+    const boundedComposerValue=composer.value;
+    const boxes=[askButton,...answered.map(block=>block.querySelector('[data-ok=answer]'))]
+      .map(element=>{const rect=element.getBoundingClientRect();return {left:rect.left,right:rect.right,width:rect.width};});
+    return {
+      order:blocks.map(block=>block.dataset.what), total:blocks.length,
+      answered:answered.map(block=>({home:block.dataset.home,id:block.dataset.id,
+        head:block.querySelector('[data-ok=answer] .rc-ok-h').textContent,
+        note:block.querySelector('[data-ok=answer] .rc-ok-s').textContent,
+        tone:block.querySelector('[data-ok=answer]').className,
+        visible:!block.querySelector('[data-ok=answer]').hidden})),
+      androidPending:android.dataset.recordedAnswer,
+      deferred:[...document.querySelectorAll('#deferred-shelf .defer .ask')].map(row=>row.firstChild.textContent),
+      deferredControls:document.querySelectorAll('#deferred-shelf .rc').length,
+      composers:document.querySelectorAll('#ask-firstmate-composer').length,
+      composerValue, boundedComposerValue, focused:document.activeElement===composer,
+      boxes, documentWidth:document.documentElement.scrollWidth,
+      viewportWidth:document.documentElement.clientWidth
+    };
+  })()`);
+  await send("Target.disposeBrowserContext",{browserContextId:context.result.browserContextId});
+  return seen;
+}
+(async()=>{
+  const expected=["Choose alpha path","Choose delta path","Choose Android shared route",
+    "Choose beta path","Choose iOS shared route"];
+  for(const path of boards){for(const [width,mobile] of [[1280,false],[390,true]]){
+    const seen=await inspect(path,width,mobile);
+    assert(JSON.stringify(seen.order)===JSON.stringify(expected),`answered decisions did not sink at ${width}px: ${JSON.stringify(seen)}`);
+    assert(seen.total===5 && seen.answered.length===2 && seen.answered.every(row=>row.visible
+      && row.head==="Answer received" && row.note.startsWith("No action is needed from you right now.")
+      && row.tone.includes("rc-quiet") && !row.tone.includes("rc-needs-you")),
+      `durable collected banners were not quiet and reassuring at ${width}px: ${JSON.stringify(seen)}`);
+    assert(seen.androidPending==="false",`another home's matching id/key inherited the iOS answer: ${JSON.stringify(seen)}`);
+    assert(JSON.stringify(seen.deferred)===JSON.stringify(["Defer first","Defer second"])
+      && seen.deferredControls===0,`the Deferred shelf was reordered or made actionable: ${JSON.stringify(seen)}`);
+    assert(seen.composers===1 && seen.focused && seen.composerValue==="About “Choose alpha path”:\n",
+      `the per-decision question entry did not focus and prefill the one shared composer: ${JSON.stringify(seen)}`);
+    assert(seen.boundedComposerValue.length<=2000
+      && seen.boundedComposerValue.endsWith("About “Choose delta path”:\n"),
+      `a near-limit shared composer lost the quoted decision reference: ${JSON.stringify(seen)}`);
+    assert(seen.documentWidth<=seen.viewportWidth && seen.boxes.every(box=>box.left>=0&&box.right<=seen.viewportWidth+0.5&&box.width>0),
+      `a new decision-card visual state overflowed at ${width}px: ${JSON.stringify(seen)}`);
+  }}
+})().finally(()=>chrome.kill()).catch(error=>{console.error(error.stack||error);process.exitCode=1;});
+JS
+  pass "recorded answers survive independent regenerations, sink exactly, and share one question composer"
+}
+
 test_control_targets_are_escaped() {
   local snap board
   snap=$TMP_ROOT/hostile-controls.json
@@ -2957,6 +3119,7 @@ test_favicon_is_self_contained_in_every_board
 test_controls_are_absent_unless_asked_for
 test_controls_match_what_each_row_can_actually_resolve
 test_controls_can_only_queue_a_request
+test_recorded_answers_persist_across_devices_and_sink
 test_control_targets_are_escaped
 test_decision_context_links_and_submission_state_in_a_browser
 test_live_fleet_mobile_refresh_keeps_reading_position
