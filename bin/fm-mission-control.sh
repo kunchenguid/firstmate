@@ -50,7 +50,7 @@
 #   fm-mission-control.sh --out <path>     write to an explicit path
 #   fm-mission-control.sh --stdout         print the HTML instead of writing
 #   fm-mission-control.sh --no-quota       skip local allowance reads
-#   fm-mission-control.sh --refresh <sec>  self-reload interval (default 25)
+#   fm-mission-control.sh --refresh <sec>  self-reload interval (default 60)
 #   fm-mission-control.sh --controls       add the captain reply layer
 #   fm-mission-control.sh --snapshot <f>   render a captured snapshot JSON file
 #   fm-mission-control.sh -h|--help        usage
@@ -127,7 +127,7 @@ die() { echo "fm-mission-control: $1" >&2; exit "${2:-1}"; }
 OUT=""
 TO_STDOUT=0
 WITH_QUOTA=1
-REFRESH=25
+REFRESH=60
 SNAPSHOT_FILE=""
 CONTROLS=false
 

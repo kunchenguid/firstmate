@@ -87,7 +87,7 @@ With no script the tab strip is hidden and every section stays visible, so the b
 Every project or second-mate name on a project card, and every matching project or home tag on an awaiting or deferred row, is a click target.
 With no script each target is an ordinary in-page link to the exact current card, while a name with no card in the current snapshot remains inert instead of leading to a dead destination.
 
-The self-reload navigates without the URL fragment, so a fragment cannot be what carries the selected tab across a reload; the tab is remembered in browser-local state scoped to this board home and document and restored before the page paints, so it neither resets nor flashes the default panel every 25 seconds.
+The self-reload navigates without the URL fragment, so a fragment cannot be what carries the selected tab across a reload; the tab is remembered in browser-local state scoped to this board home and document and restored before the page paints, so it neither resets nor flashes the default panel every 60 seconds.
 The same scoped session memory preserves the visible card or section plus its viewport offset, with a clamped scroll fallback when that anchor disappears.
 Because the memory is updated while the captain reads and types, it also survives a full document replacement triggered by an external board-file rewrite rather than only the board's own reload timer.
 A `#tab=<name>` fragment still selects a tab on the first load, which is what a hand-typed or copied link uses.
@@ -96,7 +96,7 @@ With script, the same target selects Projects, scrolls to the exact card, record
 This works for registered projects, unregistered projects with current work, and second mates.
 A browser that refuses storage - a private context, or a restricted `file://` origin - simply opens on Decisions each time.
 
-The Deferred shelf is held to the same bar, because a shelf that snapped shut every 25 seconds would be the same jarring reset in a smaller place.
+The Deferred shelf is held to the same bar, because a shelf that snapped shut every 60 seconds would be the same jarring reset in a smaller place.
 It is closed for a captain who never opens it, stays open for one who does, and stays closed again once they close it.
 Project overflow shelves do not share or persist the Deferred shelf preference.
 
@@ -255,7 +255,7 @@ The command is the sole supported writer, so recording needs no edit access to t
 ## Serving and refreshing
 
 Firstmate regenerates the board by running the script again; the output is written to a temporary file and renamed into place, so a browser refreshing on its own cadence never reads a half-written page.
-With script available, the page reloads on a managed cadence of 25 seconds by default, configurable with `--refresh`, and the no-script fallback carries the equivalent meta refresh.
+With script available, the page reloads on a managed cadence of 60 seconds by default, configurable with `--refresh`, and the no-script fallback carries the equivalent meta refresh.
 The page shows how long ago it was rendered, so a board whose generator has stopped is visibly stale rather than quietly wrong.
 To have Firstmate also surface that condition at session start, opt into the local freshness check described in [`docs/configuration.md`](configuration.md#mission-control-board-freshness-configmission-control-board--fm_mission_control_stale_secs).
 When it does report staleness, restore or refresh the local generator and run another session start to confirm the board is current.

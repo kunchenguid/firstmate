@@ -507,6 +507,7 @@ test_backlog_tasks_axi_forms_and_overrides() {
 - [ ] parenthetical-title - Refresh sidebar (mobile) (repo: beta) (kind: ship)
 - [ ] blocked-reason - Blocked Reason (repo: beta) (kind: ship) blocked-by: queued-comma - waits on queued-comma
 - [ ] sample-decision-route - Choose sample route (repo: sample) (kind: captain) (since 2026-07-14) (hold: captain route choice pending) (hold-kind: captain)
+- [ ] hold-comma - Reconcile position lineage (repo: sample) (kind: captain) (priority: 2) (hold: The 3,000 shares have no reconciled origin) (hold-kind: captain)
 
 ## Done
 - [x] done-comma - Done Comma Task https://github.com/kunchenguid/firstmate/pull/42 (repo: gamma, merged 2026-07-09) (kind: ship)
@@ -566,6 +567,14 @@ EOF
       and .hold_reason == "captain route choice pending"
       and .hold_kind == "captain"
   ' >/dev/null || fail "tasks-axi captain-hold metadata did not parse"
+  printf '%s' "$out" | jq -e '
+    .backlog.records[] | select(.id == "hold-comma")
+    | .repo == "sample"
+      and .kind == "captain"
+      and .priority == "2"
+      and .hold_reason == "The 3,000 shares have no reconciled origin"
+      and .hold_kind == "captain"
+  ' >/dev/null || fail "hold metadata must retain internal commas without changing short fields"
   printf '%s' "$out" | jq -e '
     .backlog.records[] | select(.id == "done-comma")
     | .repo == "gamma"

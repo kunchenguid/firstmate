@@ -359,7 +359,7 @@ EOF
 - [ ] ship-task - Rebuild the alpha intake form (repo: alpha) (kind: ship) (since 2026-01-03)
 
 ## Queued
-- [ ] alpha-decision - Choose the alpha rollout window (repo: alpha) (kind: captain) (hold: Two rollout windows both cost money) (hold-kind: captain) (since 2026-01-03)
+- [ ] alpha-decision - Choose the alpha rollout window (repo: alpha) (kind: captain) (hold: Two rollout windows, both cost money) (hold-kind: captain) (since 2026-01-03)
 
 ## Done
 - [x] alpha-landed - Ship the alpha health check https://github.com/example/alpha/pull/7 (repo: alpha) (kind: ship) (merged 2026-01-02)
@@ -740,7 +740,7 @@ test_renders_live_fixture_home() {
 
   assert_grep 'Awaiting your decision' "$board" "the board must carry a decisions-awaiting section"
   assert_grep 'Choose the alpha rollout window' "$board" "a captain-held item must be surfaced"
-  assert_grep 'Two rollout windows both cost money' "$board" "the captain-held reason must be shown"
+  assert_grep 'Two rollout windows, both cost money' "$board" "a hold reason with a comma must reach the card intact"
   assert_grep 'https://github.com/example/alpha/pull/9' "$board" "a recorded PR must be surfaced as a call"
 
   # End to end from the task metadata through the snapshot to the card. Every
@@ -2090,14 +2090,26 @@ test_usage_errors_refuse() {
 }
 
 test_self_reload_is_wired() {
-  local snap board
+  local snap board default_board help
   snap=$TMP_ROOT/reload.json
   board=$TMP_ROOT/reload.html
+  default_board=$TMP_ROOT/reload-default.html
   snapshot_json '[]' '[]' > "$snap"
+  "$BOARD" --snapshot "$snap" --no-quota --out "$default_board" >/dev/null \
+    || fail "the board must render with its default refresh interval"
+  assert_grep 'http-equiv="refresh" content="60"' "$default_board" \
+    "the default board refresh interval must be 60 seconds"
+  assert_grep 'var every = 60000;' "$default_board" \
+    "the script-managed default refresh interval must be 60 seconds"
+  help=$("$BOARD" --help)
+  assert_contains "$help" 'self-reload interval (default 60)' \
+    "the usage text must state the default refresh interval"
   "$BOARD" --snapshot "$snap" --no-quota --refresh 30 --out "$board" >/dev/null \
     || fail "the board must render with an explicit refresh interval"
   assert_grep 'http-equiv="refresh" content="30"' "$board" \
     "the board must reload itself so a regenerated file is picked up"
+  assert_grep 'var every = 30000;' "$board" \
+    "an explicit refresh interval must override the default"
   assert_no_grep 'src="http' "$board" "the board must not depend on a network asset"
   assert_no_grep 'href="http://' "$board" "the board must not load a remote stylesheet"
   pass "the board self-reloads and stays self-contained"
@@ -2207,7 +2219,7 @@ test_controls_are_absent_unless_asked_for() {
   assert_no_grep 'class="rc"' "$board" "a board rendered without --controls carries no reply layer"
   assert_no_grep 'FM-BOARD-REQUEST' "$board" "a board rendered without --controls queues nothing"
   assert_no_grep 'data-open=' "$board" "a board rendered without --controls has no control markup"
-  assert_grep '<noscript><meta http-equiv="refresh" content="25"' "$board" \
+  assert_grep '<noscript><meta http-equiv="refresh" content="60"' "$board" \
     "a board rendered without --controls keeps its no-script refresh fallback"
   pass "the default board is unchanged by the existence of the reply layer"
 }

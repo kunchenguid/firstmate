@@ -69,7 +69,7 @@ A failed intermediate step leaves the hold open.
 
 ## Structured read surfaces
 
-`bin/fm-fleet-snapshot.sh` parses canonical tasks-axi `(hold: ...)` and `(hold-kind: captain)` metadata alongside existing backlog fields.
+`bin/fm-fleet-snapshot.sh` parses canonical tasks-axi `(hold: ...)` and `(hold-kind: captain)` metadata alongside existing backlog fields, preserving internal commas in the free-text hold reason while short metadata fields remain comma-delimited.
 It also parses every structured decision-context field written by `bin/fm-decision-hold.sh`, then carries them through the main-home record and secondmate-home decision projection.
 It reads them for any row whose hold kind is `captain` or `parked`, not only a row whose own kind is `captain`, because a captain hold can gate an item of any kind and setting one aside changes only its hold kind.
 `bin/fm-mission-control.sh` renders the fields it finds as labelled sections on the decision card and falls back to the plain hold reason for a decision that carries none.
