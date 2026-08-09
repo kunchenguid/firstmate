@@ -576,18 +576,19 @@ select_lane() {
 # `fm-backend-herdr-workspace-per-home-e2e.test.sh` first because '-' (0x2D)
 # precedes '.' (0x2E), while glibc drops punctuation at the primary level and
 # then compares 't' against 'w', putting `fm-backend-herdr.test.sh` first.
-# Punctuation alone is not enough to diverge, so pick any replacement example by
-# running `sort` under both locales rather than by eye: `fm-pr-check-security`
-# versus `fm-pr-check` agrees in C and en_US.UTF-8, because there the characters
-# after the punctuation, 's' and 't', order the same way either way.
 # That mismatch made the guard fail on any developer machine with a UTF-8
 # locale while staying green in CI's C locale, and it failed in the worst way:
-# `comm` exits non-zero on a
-# sort-order complaint, so the unguarded overlap comparison below aborted the
-# whole script under `set -e` with no diagnostic beyond a bare
-# "comm: input is not in sorted order". Pinning the collation for the function
-# keeps the sorts and the comparisons in one order and restores the real
-# diagnostics.
+# `comm` exits non-zero on a sort-order complaint, so the unguarded overlap
+# comparison below aborted the whole script under `set -e` with no diagnostic
+# beyond a bare "comm: input is not in sorted order". Pinning the collation for
+# the function keeps the sorts and the comparisons in one order and restores
+# the real diagnostics.
+#
+# Sharing a prefix is not enough to diverge, so check any replacement example
+# by running `sort` under both locales rather than by eye:
+# `fm-backend-herdr-smoke.test.sh` sorts before `fm-backend-herdr.test.sh`
+# under both, because there the characters that decide are 's' and 't', which
+# order the same way byte-wise and at the primary level alike.
 run_coverage_guard() {
   local tmp missing extra a b shard
   local -a saved_scripts=()

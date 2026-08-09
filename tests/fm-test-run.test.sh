@@ -432,8 +432,8 @@ test_coverage_guard_is_locale_independent() {
   done < <(locale -a 2>/dev/null | grep -iE '^[a-z][a-z]_[A-Z][A-Z]\.(utf-?8)$' || true)
   if [ -z "$loc" ]; then
     # Report the absent capability rather than passing over it silently.
+    echo "skip: no differently-collating locale"
     echo "note: no locale that collates differently from C; skipping the non-C collation check" >&2
-    pass "coverage guard collation check skipped (no differently-collating locale available)"
     return 0
   fi
   out=$(LC_ALL="$loc" "$RUNNER" --check-coverage 2>&1) && rc=0 || rc=$?
