@@ -54,7 +54,7 @@ if args[:2] == ["model", "get"]:
         model_type = os.environ["HF_MODEL_TYPE_OVERRIDE"]
     elif args[2] == "seed_audio":
         model_type = "audio"
-    elif args[2].startswith(("kling", "seedance")):
+    elif args[2].startswith(("grok_video", "kling", "seedance")):
         model_type = "video"
     else:
         model_type = "image"
@@ -188,55 +188,41 @@ PY
 [ ! -e "$FAKE_LOG" ] || fail "audio-control planning contacted the Higgsfield CLI"
 pass "plan neutralizes forwarded audio controls"
 
-python3 - "$TEST_TMP/veo-request.json" <<'PY'
+python3 - "$TEST_TMP/unvetted-video-upload-request.json" "$REFERENCE" <<'PY'
 import json
 import sys
 from pathlib import Path
 
 request = {
-    "job_type": "veo3_1",
-    "prompt": "silent landscape",
-    "parameters": {},
-    "media": [],
-}
-Path(sys.argv[1]).write_text(json.dumps(request), encoding="utf-8")
-PY
-
-if PATH="$FAKE_BIN:$PATH" HF_FAKE_LOG="$FAKE_LOG" \
-  python3 "$WRAPPER" plan "$TEST_TMP/veo-request.json" \
-  > "$TEST_TMP/veo.out" 2> "$TEST_TMP/veo.err"; then
-  fail "plan accepted a video model without an audio-off control"
-fi
-[ ! -e "$FAKE_LOG" ] || fail "rejected audio-producing video contacted the Higgsfield CLI"
-pass "video models without an audio-off control are rejected"
-
-python3 - "$TEST_TMP/grok-upload-request.json" "$REFERENCE" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-request = {
-    "job_type": "grok_video",
+    "job_type": "grok_video_v15",
     "prompt": "animate this image without sound",
     "parameters": {},
-    "media": [{"flag": "image", "value": sys.argv[2]}],
+    "media": [{"flag": "start-image", "value": sys.argv[2]}],
 }
 Path(sys.argv[1]).write_text(json.dumps(request), encoding="utf-8")
 PY
 
-if PATH="$FAKE_BIN:$PATH" HF_FAKE_LOG="$FAKE_LOG" \
-  python3 "$WRAPPER" plan "$TEST_TMP/grok-upload-request.json" \
-  > "$TEST_TMP/grok-upload-plan.out" 2> "$TEST_TMP/grok-upload-plan.err"; then
-  fail "plan accepted a native-audio model for external upload"
-fi
+PATH="$FAKE_BIN:$PATH" HF_FAKE_LOG="$FAKE_LOG" \
+  python3 "$WRAPPER" plan "$TEST_TMP/unvetted-video-upload-request.json" \
+  > "$TEST_TMP/unvetted-video-upload-plan.json"
+UNVETTED_UPLOAD_TOKEN=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["upload_approval_token"])' "$TEST_TMP/unvetted-video-upload-plan.json")
+[ ! -e "$FAKE_LOG" ] || fail "unvetted video planning contacted the Higgsfield CLI"
 
-python3 - "$TEST_TMP/grok-cost-request.json" <<'PY'
+if PATH="$FAKE_BIN:$PATH" HF_FAKE_LOG="$FAKE_LOG" \
+  python3 "$WRAPPER" upload "$TEST_TMP/unvetted-video-upload-request.json" \
+  --approval-token "$UNVETTED_UPLOAD_TOKEN" --output "$TEST_TMP/unvetted-video-uploaded-request.json" \
+  > "$TEST_TMP/unvetted-video-upload.out" 2> "$TEST_TMP/unvetted-video-upload.err"; then
+  fail "upload accepted an unvetted video model"
+fi
+[ ! -e "$TEST_TMP/unvetted-video-uploaded-request.json" ] || fail "rejected video upload wrote an uploaded request"
+
+python3 - "$TEST_TMP/unvetted-video-cost-request.json" <<'PY'
 import json
 import sys
 from pathlib import Path
 
 request = {
-    "job_type": "grok_video",
+    "job_type": "grok_video_v15",
     "prompt": "animate a silent landscape",
     "parameters": {},
     "media": [],
@@ -245,14 +231,22 @@ Path(sys.argv[1]).write_text(json.dumps(request), encoding="utf-8")
 PY
 
 if PATH="$FAKE_BIN:$PATH" HF_FAKE_LOG="$FAKE_LOG" \
-  python3 "$WRAPPER" cost "$TEST_TMP/grok-cost-request.json" \
-  --receipt "$TEST_TMP/grok-cost-receipt.json" \
-  > "$TEST_TMP/grok-cost.out" 2> "$TEST_TMP/grok-cost.err"; then
-  fail "cost accepted a native-audio model for generation"
+  python3 "$WRAPPER" cost "$TEST_TMP/unvetted-video-cost-request.json" \
+  --receipt "$TEST_TMP/unvetted-video-cost-receipt.json" \
+  > "$TEST_TMP/unvetted-video-cost.out" 2> "$TEST_TMP/unvetted-video-cost.err"; then
+  fail "cost accepted an unvetted video model"
 fi
-[ ! -e "$FAKE_LOG" ] || fail "rejected native-audio model contacted the Higgsfield CLI"
-[ ! -e "$TEST_TMP/grok-cost-receipt.json" ] || fail "rejected native-audio model created a cost receipt"
-pass "native-audio models are rejected before upload or generation"
+[ ! -e "$TEST_TMP/unvetted-video-cost-receipt.json" ] || fail "rejected video model created a cost receipt"
+python3 - "$FAKE_LOG" <<'PY' || fail "unvetted video model reached upload or generation"
+import json
+import sys
+
+commands = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8")]
+assert len(commands) == 2
+assert all(command[:3] == ["model", "get", "grok_video_v15"] for command in commands)
+PY
+pass "unvetted video models are rejected before upload or generation"
+rm -f "$FAKE_LOG"
 
 if PATH="$FAKE_BIN:$PATH" HF_FAKE_LOG="$FAKE_LOG" \
   python3 "$WRAPPER" upload "$REQUEST" --approval-token upload:wrong --output "$UPLOADED_REQUEST" \

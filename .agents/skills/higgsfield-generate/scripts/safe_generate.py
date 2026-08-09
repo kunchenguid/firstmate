@@ -56,13 +56,7 @@ AUDIO_OFF_BY_JOB_TYPE = {
     "seedance_2_0_mini": {"generate_audio": "false"},
     "veo3_1_lite": {"generate_audio": "false"},
 }
-NATIVE_AUDIO_JOB_TYPES_WITHOUT_OFF = {
-    "explainer_video",
-    "grok_video",
-    "veo3",
-    "veo3_1",
-    "video_explainer",
-}
+EXPLICITLY_PROVEN_SILENT_VIDEO_JOB_TYPES: frozenset[str] = frozenset()
 RESERVED_PARAMS = MEDIA_FLAGS | DISALLOWED_MEDIA_PARAMS | {
     "json",
     "no-color",
@@ -149,9 +143,6 @@ def _normalize_request(raw: Any) -> dict[str, Any]:
         raise PolicyError("job_type must contain only lowercase letters, digits, dashes, or underscores")
     if job_type.startswith(BLOCKED_MODEL_PREFIXES):
         raise PolicyError(f"model {job_type!r} is outside the hardened generation boundary")
-    if job_type in NATIVE_AUDIO_JOB_TYPES_WITHOUT_OFF:
-        raise PolicyError(f"model {job_type!r} cannot enforce the no-audio boundary")
-
     prompt = raw.get("prompt")
     if not isinstance(prompt, str) or not prompt.strip():
         raise PolicyError("prompt must be a non-empty string")
@@ -295,11 +286,22 @@ def _run_cli(arguments: list[str], timeout: int) -> Any:
         raise PolicyError("higgsfield returned invalid JSON") from exc
 
 
-def _ensure_image_or_video(job_type: str) -> str:
+def _ensure_image_or_video(request: dict[str, Any]) -> str:
+    job_type = request["job_type"]
     model = _run_cli(["model", "get", job_type, "--json"], timeout=120)
     model_type = model.get("type") if isinstance(model, dict) else None
     if model_type not in {"image", "video"}:
         raise PolicyError(f"model type {model_type!r} is outside the image/video boundary")
+    audio_off = AUDIO_OFF_BY_JOB_TYPE.get(job_type)
+    enforces_audio_off = audio_off is not None and all(
+        request["parameters"].get(name) == value for name, value in audio_off.items()
+    )
+    if (
+        model_type == "video"
+        and not enforces_audio_off
+        and job_type not in EXPLICITLY_PROVEN_SILENT_VIDEO_JOB_TYPES
+    ):
+        raise PolicyError(f"video model {job_type!r} has no enforced no-audio policy")
     return model_type
 
 
@@ -316,7 +318,7 @@ def _generation_arguments(request: dict[str, Any], action: str) -> list[str]:
 
 
 def _credits(request: dict[str, Any]) -> tuple[Any, str]:
-    _ensure_image_or_video(request["job_type"])
+    _ensure_image_or_video(request)
     response = _run_cli(_generation_arguments(request, "cost"), timeout=120)
     value = response.get("credits") if isinstance(response, dict) else None
     if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -688,7 +690,7 @@ def command_upload(args: argparse.Namespace) -> None:
         uploads = _validated_upload_manifest(receipt.get("uploads"))
         if [upload["path"] for upload in uploads] != upload_paths:
             raise PolicyError("upload approval does not match the exact request")
-        _ensure_image_or_video(request["job_type"])
+        _ensure_image_or_video(request)
         consumed = dict(receipt)
         consumed["status"] = "consumed"
         _rewrite_locked_json(approval_handle, consumed)
