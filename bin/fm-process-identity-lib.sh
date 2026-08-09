@@ -154,6 +154,27 @@ fm_process_record_terminate() {  # <record-file> <label> [--malformed=refuse|rem
   done
 
   if kill -0 "$pid" 2>/dev/null; then
+    if ! current=$(fm_process_identity "$pid"); then
+      # Same exit-race tolerance as the waits: a process dying from TERM can
+      # still answer kill -0 while /proc/<pid> is already gone.
+      sleep "$poll_interval"
+      kill -0 "$pid" 2>/dev/null || {
+        [ "$keep_record" -eq 1 ] || rm -f "$ws_file" 2>/dev/null || true
+        return 0
+      }
+      current=$(fm_process_identity "$pid") || {
+        # shellcheck disable=SC2034 # out-param read by fm-spawn.sh and fm-teardown.sh callers
+        FM_PROCESS_RECORD_TERMINATE_REASON='identity-unreadable'
+        return 1
+      }
+    fi
+    if [ "$current" != "$identity" ]; then
+      # Recycled pid: the TERM wait broke on mismatch and this pid now
+      # belongs to an unrelated process. Never signal it; the record is
+      # stale evidence.
+      [ "$keep_record" -eq 1 ] || rm -f "$ws_file" 2>/dev/null || true
+      return 0
+    fi
     if [ "$verbose" -eq 1 ]; then
       printf 'force-killing recorded cursor worker-server for %s: %s\n' "$label" "$pid" >&2
     fi
