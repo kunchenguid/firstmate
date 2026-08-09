@@ -2501,7 +2501,7 @@ fi
 # per-task decision validated above; a secondmate's posture is fixed; a scout
 # records none at all, because its deliverable is a report rather than a merge
 # (fm-teardown.sh defaults an absent mode to no-mistakes, and fm-reflag.sh
-# requires an explicit mode when a scout is promoted to a ship task).
+# requires an explicit mode when a scout is reflagged as a ship task).
 if [ "$KIND" = secondmate ]; then
   MODE=secondmate
   YOLO=off
