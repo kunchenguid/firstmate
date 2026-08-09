@@ -983,7 +983,9 @@ if [ "$RESUME" -eq 1 ]; then
   fi
   old_target=$(fm_backend_target_of_meta "$RESUME_META" 2>/dev/null || true)
   if [ -n "$old_target" ]; then
-    old_backend=$(fm_backend_of_meta "$RESUME_META")
+    fm_backend_validate_task_endpoint "$RESUME_META" "$ID" || exit 1
+    old_backend=$FM_BACKEND_VALIDATED_BACKEND
+    old_target=$FM_BACKEND_VALIDATED_TARGET
     old_state=$(fm_backend_agent_alive "$old_backend" "$old_target")
     case "$old_state" in
       alive|unknown)
@@ -991,6 +993,7 @@ if [ "$RESUME" -eq 1 ]; then
         exit 1
         ;;
     esac
+    [ "$old_backend" != tmux ] || fm_backend_kill "$old_backend" "$old_target"
   fi
   if [ "$HARNESS_SET" -eq 0 ]; then
     HARNESS_ARG=$(grep '^harness=' "$RESUME_META" | tail -1 | cut -d= -f2- || true)
@@ -1332,8 +1335,12 @@ antigravity_preflight() {
   tmp_out=$(mktemp "${STATE}/.preflight-${ID}.XXXXXXXX" 2>/dev/null || mktemp "/tmp/.preflight-${ID}.XXXXXXXX")
 
   set +e
-  "$timer" --kill-after=5s "${timeout_seconds}s" "$checker" check >"$tmp_out" 2>&1
-  rc=$?
+  "$timer" --kill-after=5s "${timeout_seconds}s" "$checker" check 2>&1 |
+    {
+      dd bs=1 count="$output_bytes" 2>/dev/null
+      cat >/dev/null
+    } >"$tmp_out"
+  rc=${PIPESTATUS[0]}
   set -e
   rm -f "$tmp_out"
 

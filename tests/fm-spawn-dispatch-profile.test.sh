@@ -21,11 +21,23 @@ make_spawn_fakebin() {
 set -u
 case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+  *"#{pane_tty}"*) exit 0 ;;
+  *"#{pane_current_command}"*) printf 'zsh\n'; exit 0 ;;
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
-  list-windows) exit 0 ;;
-  has-session|new-session|new-window|kill-window) exit 0 ;;
+  list-windows)
+    [ -z "${FM_FAKE_EXISTING_WINDOW_FILE:-}" ] || [ ! -f "$FM_FAKE_EXISTING_WINDOW_FILE" ] \
+      || cat "$FM_FAKE_EXISTING_WINDOW_FILE"
+    exit 0
+    ;;
+  kill-window)
+    [ -z "${FM_FAKE_TMUX_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_TMUX_LOG"
+    [ -z "${FM_FAKE_EXISTING_WINDOW_FILE:-}" ] || rm -f "$FM_FAKE_EXISTING_WINDOW_FILE"
+    exit 0
+    ;;
+  has-session|new-session) exit 0 ;;
+  new-window) printf '%%1\n'; exit 0 ;;
   send-keys)
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
       prev=
@@ -107,6 +119,8 @@ run_spawn() {
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
     CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
     FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_TREEHOUSE_LOG="$launchlog.treehouse" \
+    FM_FAKE_EXISTING_WINDOW_FILE="${FAKE_TMUX_WINDOW_FILE:-}" \
+    FM_FAKE_TMUX_LOG="$launchlog.tmux" \
     FM_ANTIGRAVITY_PREFLIGHT_BIN="${PREFLIGHT_BIN:-}" \
     FM_ANTIGRAVITY_PREFLIGHT_TIMEOUT_SECONDS="${PREFLIGHT_TIMEOUT:-30}" \
     FM_PREFLIGHT_LOG="${PREFLIGHT_LOG:-}" FM_PREFLIGHT_RESULT="${PREFLIGHT_RESULT:-ok}" \
@@ -227,6 +241,9 @@ make_large_preflight_checker() {
 set -u
 [ -z "\${FM_PREFLIGHT_LOG:-}" ] || printf '%s\n' "\$*" >> "\$FM_PREFLIGHT_LOG"
 python3 -c 'print("X" * 50000)'
+for output in "\${FM_STATE_OVERRIDE}"/.preflight-*; do
+  [ ! -f "\$output" ] || wc -c < "\$output" > "\${FM_PREFLIGHT_LOG}.output-bytes"
+done
 case "$result" in
   ok) exit 0 ;;
   exhausted) exit 1 ;;
@@ -1192,11 +1209,14 @@ test_antigravity_preflight_large_output_does_not_fail() {
   PREFLIGHT_LOG="$CASE_DIR/checker.log"
   make_large_preflight_checker "$PREFLIGHT_BIN" ok
 
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+  out=$(FM_ANTIGRAVITY_PREFLIGHT_OUTPUT_BYTES=1024 \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
     --model antigravity/gemini-3.6-flash --effort high)
   status=$?
   expect_code 0 "$status" "checker writing large output with exit 0 should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" pi antigravity/gemini-3.6-flash high
+  [ "$(tr -d ' ' < "$PREFLIGHT_LOG.output-bytes")" = 1024 ] \
+    || fail "preflight output file exceeded its configured limit"
   pass "checker writing >8KB output with exit 0 does not receive SIGPIPE or fail"
 }
 
@@ -1260,6 +1280,8 @@ test_resume_reuses_recorded_worktree_and_profile() {
   printf 'uncommitted before resume\n' > "$WT_DIR/resume-uncommitted.txt"
   meta="$HOME_DIR/state/$id.meta"
   {
+    printf 'window=firstmate:fm-%s\n' "$id"
+    printf 'endpoint_task_id=%s\n' "$id"
     printf 'worktree=%s\n' "$WT_DIR"
     printf 'project=%s\n' "$PROJ_DIR"
     printf 'harness=pi\n'
@@ -1267,6 +1289,8 @@ test_resume_reuses_recorded_worktree_and_profile() {
     printf 'model=antigravity/gemini-3.6-flash\n'
     printf 'effort=high\n'
   } > "$meta"
+  FAKE_TMUX_WINDOW_FILE="$CASE_DIR/existing-window"
+  printf 'fm-%s\n' "$id" > "$FAKE_TMUX_WINDOW_FILE"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
     --resume --model cockpit/gpt-5.6-luna --effort xhigh)
@@ -1282,6 +1306,8 @@ test_resume_reuses_recorded_worktree_and_profile() {
   assert_grep "thinking=xhigh" "$meta" "resume metadata lost the actual resumed thinking level"
   assert_grep "resume=1" "$meta" "resume metadata did not record same-branch recovery"
   assert_grep "branch=wt-resume-existing" "$meta" "resume metadata did not record the resumed branch"
+  assert_grep "kill-window -t =firstmate:=fm-$id" "$LAUNCH_LOG.tmux" \
+    "resume did not remove the recorded dead tmux window"
   assert_absent "$LAUNCH_LOG.treehouse" "resume allocated a replacement treehouse worktree"
   pass "--resume preserves commits and uncommitted changes while recording the actual profile"
 }
