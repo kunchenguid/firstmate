@@ -1160,7 +1160,7 @@ case "${1:-}" in
       =exact)
         case "$format" in
           '#{window_name}') printf 'win\n' ;;
-          '#{window_index}') printf '0\n' ;;
+          $'#{window_index}\t#{window_name}') printf '0\twin\n7\t123\n' ;;
         esac
         ;;
       =gone) printf "can't find session: gone\n" >&2; exit 1 ;;
@@ -1180,6 +1180,8 @@ SH
   [ "$out" = present ] || fail "exact numeric window index should be present, got $out"
   out=$(PATH="$fakebin:$PATH" FM_TMUX_LOG="$log" fm_backend_tmux_target_state exact:1)
   [ "$out" = missing ] || fail "absent numeric window index should be missing, got $out"
+  out=$(PATH="$fakebin:$PATH" FM_TMUX_LOG="$log" fm_backend_tmux_target_state exact:123)
+  [ "$out" = present ] || fail "exact numeric window name should be present, got $out"
   out=$(PATH="$fakebin:$PATH" FM_TMUX_LOG="$log" fm_backend_tmux_target_state %3)
   [ "$out" = present ] || fail "stable tmux pane id should be present, got $out"
   out=$(PATH="$fakebin:$PATH" FM_TMUX_LOG="$log" fm_backend_tmux_target_state %4)
@@ -1188,8 +1190,8 @@ SH
   [ "$out" = unreadable ] || fail "malformed tmux pane id should be unreadable, got $out"
   assert_contains "$(cat "$log")" "list-windows -t =exact -F #{window_name}" \
     "session/window inventory did not require exact session identity"
-  assert_contains "$(cat "$log")" "list-windows -t =exact -F #{window_index}" \
-    "numeric session/window target did not use exact window-index inventory"
+  assert_contains "$(cat "$log")" $'list-windows -t =exact -F #{window_index}\t#{window_name}' \
+    "numeric session/window target did not inventory exact indexes and names"
   assert_contains "$(cat "$log")" "list-panes -a -F #{pane_id}" \
     "stable pane targets did not use server-wide pane inventory"
   pass "tmux target state uses exact named, numeric, and pane-id inventories"

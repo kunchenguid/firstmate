@@ -229,7 +229,7 @@ fm_backend_tmux_foreground_argv0s() {  # <target>
 # unreadable so existence checks and recovery-grade agent liveness share one
 # inventory verdict.
 fm_backend_tmux_target_state() {  # <target>
-  local target=$1 session member inventory inventory_status inventory_format
+  local target=$1 session member inventory inventory_status inventory_format member_is_numeric=0
   case "$target" in
     %*)
       member=${target#%}
@@ -250,7 +250,10 @@ fm_backend_tmux_target_state() {  # <target>
       member=${target#*:}
       case "$member" in
         *[!0-9]*) inventory_format='#{window_name}' ;;
-        *) inventory_format='#{window_index}' ;;
+        *)
+          inventory_format='#{window_index}'$'\t''#{window_name}'
+          member_is_numeric=1
+          ;;
       esac
       if inventory=$(LC_ALL=C tmux list-windows -t "=$session" -F "$inventory_format" 2>&1); then
         inventory_status=0
@@ -274,7 +277,14 @@ fm_backend_tmux_target_state() {  # <target>
     esac
     return 0
   fi
-  if printf '%s\n' "$inventory" | grep -Fqx "$member"; then
+  if [ "$member_is_numeric" = 1 ]; then
+    if printf '%s\n' "$inventory" | awk -F '\t' -v member="$member" \
+      '"x" $1 == "x" member || "x" $2 == "x" member { found = 1 } END { exit !found }'; then
+      printf 'present'
+    else
+      printf 'missing'
+    fi
+  elif printf '%s\n' "$inventory" | grep -Fqx "$member"; then
     printf 'present'
   else
     printf 'missing'
