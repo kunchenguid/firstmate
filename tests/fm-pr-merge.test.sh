@@ -304,7 +304,7 @@ SH
 }
 
 run_github_merge() {
-  local case_dir=$1 head=$2 api_head=$3 base=$4 method=${5:-merge}
+  local case_dir=$1 head=$2 api_head=$3 base=$4 method=${5:-merge} path_prefix=${6:-}
   FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
     FM_TEST_GH_HEAD="$head" FM_TEST_GH_API_HEAD="$api_head" FM_TEST_GH_BASE="$base" \
     FM_TEST_GH_API_HEAD_AFTER="${FM_TEST_GH_API_HEAD_AFTER:-}" \
@@ -317,7 +317,7 @@ run_github_merge() {
     FM_TEST_GH_METHOD="$method" \
     FM_TEST_GH_REBASE_AHEAD="${FM_TEST_GH_REBASE_AHEAD:-}" \
     FM_TEST_GH_REBASE_FIRST="${FM_TEST_GH_REBASE_FIRST:-}" \
-    FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" PATH="$case_dir/fakebin:$PATH" \
+    FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" PATH="$path_prefix$case_dir/fakebin:$PATH" \
     "$PR_MERGE" task-x1 https://github.com/example/repo/pull/9 -- "--$method"
 }
 
@@ -508,6 +508,43 @@ test_github_merge_uses_verified_exact_sha() {
   [ "$(grep -c '^api POST ' "$case_dir/gh-axi.log")" -eq 1 ] \
     || fail "protected GitHub merge changed the legacy request sequence"
   pass "GitHub merge conditions its REST request on the verified candidate SHA"
+}
+
+test_github_merge_capture_without_shim_preserves_request_sequence() {
+  local values case_dir base candidate
+  values=$(make_case github-capture-no-shim)
+  case_dir=$(printf '%s\n' "$values" | sed -n '1p')
+  base=$(printf '%s\n' "$values" | sed -n '2p')
+  candidate=$(printf '%s\n' "$values" | sed -n '3p')
+  fm_write_meta "$case_dir/state/task-x1.meta" "window=fm-task-x1" "worktree=$case_dir/wt" "project=$case_dir/project" "kind=ship" "mode=no-mistakes"
+  add_github_mocks "$case_dir"
+  run_github_merge "$case_dir" "$candidate" "$candidate" "$base" >/dev/null \
+    || fail "GitHub boundary refused the verified candidate without an installed shim"
+  [ "$(grep -c '^api POST ' "$case_dir/gh-axi.log")" -eq 1 ] \
+    || fail "no-shim GitHub merge changed the GraphQL request sequence"
+  grep -qxF "api PUT /repos/example/repo/pulls/9/merge --field sha=$candidate --field merge_method=merge" "$case_dir/gh-axi.log" \
+    || fail "no-shim GitHub merge did not preserve the exact conditional mutation"
+  pass "GitHub capture preserves the protected merge path without an installed shim"
+}
+
+test_github_merge_capture_bypasses_installed_shim() {
+  local values case_dir base candidate shim_dir
+  values=$(make_case github-capture-shim)
+  case_dir=$(printf '%s\n' "$values" | sed -n '1p')
+  base=$(printf '%s\n' "$values" | sed -n '2p')
+  candidate=$(printf '%s\n' "$values" | sed -n '3p')
+  fm_write_meta "$case_dir/state/task-x1.meta" "window=fm-task-x1" "worktree=$case_dir/wt" "project=$case_dir/project" "kind=ship" "mode=no-mistakes"
+  add_github_mocks "$case_dir"
+  shim_dir="$case_dir/shim"
+  mkdir -p "$shim_dir"
+  ln -s "$ROOT/bin/fm-gh-shim.sh" "$shim_dir/gh"
+  run_github_merge "$case_dir" "$candidate" "$candidate" "$base" merge "$shim_dir:" >/dev/null \
+    || fail "GitHub boundary could not capture GraphQL through an installed shim"
+  [ "$(grep -c '^api POST ' "$case_dir/gh-axi.log")" -eq 1 ] \
+    || fail "installed shim caused the GraphQL capture to recurse or repeat"
+  grep -qxF "api PUT /repos/example/repo/pulls/9/merge --field sha=$candidate --field merge_method=merge" "$case_dir/gh-axi.log" \
+    || fail "installed shim capture did not preserve the exact conditional mutation"
+  pass "GitHub capture bypasses the installed shim and reaches the genuine gh"
 }
 
 test_unprotected_github_merge_uses_verified_exact_sha() {
@@ -796,6 +833,8 @@ test_unchanged_path_drift_is_preserved
 test_prepared_transaction_drift_is_preserved
 test_wrong_branch_transaction_is_refused
 test_github_merge_uses_verified_exact_sha
+test_github_merge_capture_without_shim_preserves_request_sequence
+test_github_merge_capture_bypasses_installed_shim
 test_unprotected_github_merge_uses_verified_exact_sha
 test_github_merge_refuses_changed_remote_head
 test_unprotected_github_merge_refuses_changed_remote_base

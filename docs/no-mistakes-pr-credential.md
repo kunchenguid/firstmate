@@ -42,6 +42,7 @@ Because no supported configuration seam exists, firstmate intercepts `gh` on the
 - `bin/fm-gh-ci-fallback.sh` first runs the real `gh pr checks` with the ambient narrow token.
   Only the known HTTP 403 personal-token denial for check-runs causes it to resolve the PR's exact head SHA and read every workflow run filtered by that SHA with the same token; it never calls `fm-gh.sh` or exposes `config/gh-credential` to CI reads.
   Successful, failed, cancelled, skipped, and pending workflow conclusions are returned in the JSON check shape no-mistakes already consumes, while no exact-head workflow runs emits an explicit pending placeholder rather than a false green verdict.
+- The GitHub merge boundary resolves the genuine `gh` binary itself, so its raw GraphQL capture remains valid when the shim is installed on `PATH`.
 - `bin/fm-gh-shim-install.sh` installs, removes, and verifies that symlink, and reports whether the install directory actually precedes the real `gh` on the evaluated `PATH`.
 
 Nothing installs the shim automatically.
