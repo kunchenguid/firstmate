@@ -2655,11 +2655,10 @@ spawn_send_key "$T" Enter
 # Secondmates are out of scope. The TAB is never renamed - its fm-<id> create
 # label is the identity husk reclaim and list_live match on, and display names
 # are lossy. Ownership stays on recorded pane/tab ids in meta
-# (docs/herdr-backend.md). The task id is passed so a name already taken by
-# another live agent can be deterministically disambiguated from it.
+# (docs/herdr-backend.md).
 if [ "$BACKEND" = herdr ] && [ "$KIND" != secondmate ] && [ -n "${HERDR_DISPLAY_NAME:-}" ]; then
   fm_backend_herdr_apply_display_name \
-    "$HERDR_SES" "$HERDR_PANE_ID" "$HERDR_DISPLAY_NAME" "$ID" || true
+    "$HERDR_SES" "$HERDR_PANE_ID" "$HERDR_DISPLAY_NAME" || true
 fi
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then

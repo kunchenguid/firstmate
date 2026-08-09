@@ -641,20 +641,58 @@ fm_backend_herdr_projection_concise_task_label() {  # <task-id>
   printf '%s' "$task"
 }
 
+# fm_backend_herdr_display_name_digest: 6 lowercase hex characters derived
+# deterministically from the FULL (untruncated, unsanitized) task id, so two ids
+# that share a truncated or sanitized display-name stem still diverge. Pure
+# apart from the hashing binary; returns non-zero when no hasher is available.
+fm_backend_herdr_display_name_digest() {  # <task-id>
+  local id=$1 hash=
+  if command -v shasum >/dev/null 2>&1; then
+    hash=$(printf '%s' "$id" | shasum -a 256 2>/dev/null | awk '{print $1}')
+  elif command -v sha256sum >/dev/null 2>&1; then
+    hash=$(printf '%s' "$id" | sha256sum 2>/dev/null | awk '{print $1}')
+  elif command -v cksum >/dev/null 2>&1; then
+    hash=$(printf '%s' "$id" | cksum 2>/dev/null | awk '{printf "%08x", $1}')
+  fi
+  case "$hash" in
+    ''|*[!0-9a-f]*) return 1 ;;
+  esac
+  [ "${#hash}" -ge 6 ] || return 1
+  printf '%s' "${hash:0:6}"
+}
+
 # fm_backend_herdr_display_name: pure map of (task_id, kind) to a valid Herdr
-# agent/tab display name matching ^[a-z][a-z0-9_-]{0,31}$.
-# kind=scout -> scout-<slug>; any other kind -> ship-<slug>.
+# agent display name matching ^[a-z][a-z0-9_-]{0,31}$.
+# kind=scout -> scout-<stem>-<digest>; any other kind -> ship-<stem>-<digest>.
 # Strips redundant fm-/scout-/ship- prefixes from the id before composing,
 # lowercases, replaces invalid characters with '-', collapses runs of '-',
-# truncates to 32 characters, and never leaves a trailing '-' or '_'.
-# Pure: no I/O. Display names are never ownership authority (recorded pane/tab
-# ids in meta remain authoritative; see docs/herdr-backend.md).
+# truncates the stem to leave room for the digest, and never leaves a trailing
+# '-' or '_'.
+# The digest is appended UNCONDITIONALLY, for every task, never only for ids
+# observed to collide. Herdr requires agent names be unique among live agents,
+# and the stem is a lossy many-to-one map of the id, so two tasks whose ids
+# differ only past the truncation point (or only in characters the sanitizer
+# folds) would otherwise land on one name and the second rename would be
+# rejected. Deciding that from a live agent-name query instead would be both
+# racy (two concurrent spawns each observe no collision) and environment-
+# dependent (the same id renames differently depending on who happens to be
+# live), so no such query exists: the name is a function of the task id alone
+# and a relaunch of the same task always reproduces it.
+# Pure: no I/O beyond hashing the id. Display names are never ownership
+# authority (recorded pane/tab ids in meta remain authoritative; see
+# docs/herdr-backend.md).
 fm_backend_herdr_display_name() {  # <task-id> <kind>
-  local id=$1 kind=$2 prefix slug out
+  local id=$1 kind=$2 prefix slug out digest budget
   case "$kind" in
     scout) prefix=scout ;;
     *) prefix=ship ;;
   esac
+  digest=$(fm_backend_herdr_display_name_digest "$1") || digest=
+  if [ -n "$digest" ]; then
+    budget=$((32 - ${#digest} - 1))
+  else
+    budget=32
+  fi
   id=$(printf '%s' "$id" | tr '[:upper:]' '[:lower:]')
   while :; do
     case "$id" in
@@ -678,8 +716,8 @@ fm_backend_herdr_display_name() {  # <task-id> <kind>
   else
     out=$prefix
   fi
-  if [ "${#out}" -gt 32 ]; then
-    out=${out:0:32}
+  if [ "${#out}" -gt "$budget" ]; then
+    out=${out:0:budget}
     while [ -n "$out" ]; do
       case "$out" in
         *-|*_ ) out=${out%?} ;;
@@ -687,6 +725,8 @@ fm_backend_herdr_display_name() {  # <task-id> <kind>
       esac
     done
   fi
+  [ -n "$out" ] || out=$prefix
+  [ -z "$digest" ] || out="${out}-${digest}"
   case "$out" in
     [a-z]*[!a-z0-9_-]*) out=$prefix ;;
     [a-z]*) ;;
@@ -698,75 +738,6 @@ fm_backend_herdr_display_name() {  # <task-id> <kind>
   printf '%s' "$out"
 }
 
-# fm_backend_herdr_display_name_digest: 6 lowercase hex characters derived
-# deterministically from the FULL (untruncated) task id, so two ids that share
-# a truncated display-name prefix still diverge. Pure apart from the hashing
-# binary; returns non-zero when no usable hasher is available.
-fm_backend_herdr_display_name_digest() {  # <task-id>
-  local id=$1 hash=
-  if command -v shasum >/dev/null 2>&1; then
-    hash=$(printf '%s' "$id" | shasum -a 256 2>/dev/null | awk '{print $1}')
-  elif command -v sha256sum >/dev/null 2>&1; then
-    hash=$(printf '%s' "$id" | sha256sum 2>/dev/null | awk '{print $1}')
-  elif command -v cksum >/dev/null 2>&1; then
-    hash=$(printf '%s' "$id" | cksum 2>/dev/null | awk '{printf "%08x", $1}')
-  fi
-  case "$hash" in
-    ''|*[!0-9a-f]*) return 1 ;;
-  esac
-  [ "${#hash}" -ge 6 ] || return 1
-  printf '%s' "${hash:0:6}"
-}
-
-# fm_backend_herdr_display_name_disambiguate: rewrite an already-valid display
-# <name> into a distinct one for <task-id> by trading the tail of the name for
-# a stable digest of the untruncated id, staying inside ^[a-z][a-z0-9_-]{0,31}$.
-# Deterministic: the same task id always yields the same disambiguated name, so
-# retries and relaunches never churn the sidebar entry.
-fm_backend_herdr_display_name_disambiguate() {  # <name> <task-id>
-  local name=$1 id=$2 digest base budget out
-  [ -n "$name" ] && [ -n "$id" ] || return 1
-  digest=$(fm_backend_herdr_display_name_digest "$id") || return 1
-  budget=$((32 - ${#digest} - 1))
-  [ "$budget" -gt 0 ] || return 1
-  base=$name
-  if [ "${#base}" -gt "$budget" ]; then
-    base=${base:0:budget}
-  fi
-  while [ -n "$base" ]; do
-    case "$base" in
-      *-|*_ ) base=${base%?} ;;
-      *) break ;;
-    esac
-  done
-  [ -n "$base" ] || return 1
-  out="${base}-${digest}"
-  case "$out" in
-    [a-z]*[!a-z0-9_-]*|[!a-z]*) return 1 ;;
-  esac
-  [ "${#out}" -le 32 ] || return 1
-  [ "$out" != "$name" ] || return 1
-  printf '%s' "$out"
-}
-
-# fm_backend_herdr_live_agent_names: one currently-registered agent display name
-# per line for <session>, skipping the agent in <self-pane-id> (our own pane, if
-# it already carries a name) so a re-run never collides with itself. Read-only.
-# Non-zero when herdr cannot be asked or the response cannot be parsed, which
-# callers treat as "cannot tell" rather than "no collision".
-fm_backend_herdr_live_agent_names() {  # <session> [<self-pane-id>]
-  local session=$1 self=${2:-} out
-  out=$(fm_backend_herdr_cli "$session" agent list 2>/dev/null) || return 1
-  printf '%s' "$out" | jq -r --arg self "$self" '
-    if (.result.agents | type) == "array" then
-      .result.agents[]
-      | select((.pane_id // "") != $self)
-      | .name
-      | select(type == "string" and . != "")
-    else error("missing result.agents") end
-  ' 2>/dev/null
-}
-
 # fm_backend_herdr_apply_display_name: best-effort wait until <pane> reports a
 # registered agent, then rename that AGENT (the agents-sidebar entry) to <name>.
 # Tabs are deliberately never renamed: the tab label fm-<id> is the injective
@@ -774,16 +745,14 @@ fm_backend_herdr_live_agent_names() {  # <session> [<self-pane-id>]
 # names are lossy (lowercased, sanitized, truncated to 32) so two distinct task
 # ids can share one. Renaming a tab to a display name would let one task's
 # reclaim match another task's tab.
-# Herdr requires agent names be unique among live agents, and display names are
-# lossy, so <name> can already be taken by another live task. When <task-id> is
-# supplied the collision is detected against the live agent list first and the
-# name is deterministically disambiguated with a digest of the untruncated id
-# rather than sent to a rename herdr is certain to reject.
+# Uniqueness among live agents is already carried by the name itself: every
+# display name ends in a digest of its own task id (fm_backend_herdr_display_name),
+# so no live agent-name query happens here and there is no check-then-act window.
 # Failures warn on stderr and never fail the spawn (exit 0 always).
 # Polls/sleep are overridable for tests via FM_BACKEND_HERDR_DISPLAY_NAME_POLLS
 # and FM_BACKEND_HERDR_DISPLAY_NAME_SLEEP.
-fm_backend_herdr_apply_display_name() {  # <session> <pane_id> <name> [<task-id>]
-  local session=$1 pane=$2 name=$3 id=${4:-} state i names alt final
+fm_backend_herdr_apply_display_name() {  # <session> <pane_id> <name>
+  local session=$1 pane=$2 name=$3 state i
   local polls=${FM_BACKEND_HERDR_DISPLAY_NAME_POLLS:-20}
   local sleep_s=${FM_BACKEND_HERDR_DISPLAY_NAME_SLEEP:-0.25}
   # Reject anything outside ^[a-z][a-z0-9_-]{0,31}$. A trailing bare * in a glob
@@ -818,20 +787,8 @@ fm_backend_herdr_apply_display_name() {  # <session> <pane_id> <name> [<task-id>
     echo "warning: herdr agent not registered in time to rename to $name; leaving default names" >&2
     return 0
   fi
-  final=$name
-  if names=$(fm_backend_herdr_live_agent_names "$session" "$pane"); then
-    if printf '%s\n' "$names" | grep -Fxq -- "$name"; then
-      if alt=$(fm_backend_herdr_display_name_disambiguate "$name" "$id") \
-        && ! printf '%s\n' "$names" | grep -Fxq -- "$alt"; then
-        final=$alt
-      else
-        echo "warning: herdr display name $name is already taken by a live agent and could not be disambiguated; leaving default names" >&2
-        return 0
-      fi
-    fi
-  fi
-  if ! fm_backend_herdr_cli "$session" agent rename "$pane" "$final" >/dev/null 2>&1; then
-    echo "warning: herdr agent rename to $final failed" >&2
+  if ! fm_backend_herdr_cli "$session" agent rename "$pane" "$name" >/dev/null 2>&1; then
+    echo "warning: herdr agent rename to $name failed" >&2
   fi
   return 0
 }
