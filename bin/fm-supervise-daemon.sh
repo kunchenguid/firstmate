@@ -483,13 +483,10 @@ classify_stale() {  # <window> <state> [<stale-detail>]
     # must not permanently suppress or clear possible-wedge aging merely because
     # prose once looked captain-relevant. Real terminal verbs and legacy free-text
     # captain lines without those verbs keep the terminal escalate/dedupe path.
-    if ! status_is_terminal_verb "$last"; then
-      case "$(status_line_verb "$last")" in
-        working|resolved|captain-held)
-          printf 'self|transient stale (%s): %s' "$win" "$last"
-          return
-          ;;
-      esac
+    if ! status_is_terminal_verb "$last" \
+      && status_verb_is_nonterminal "$(status_line_verb "$last")"; then
+      printf 'self|transient stale (%s): %s' "$win" "$last"
+      return
     fi
     # Dedupe against the signal path: if this status was already escalated
     # (seen marker matches), self-handle to avoid a duplicate in the digest.
@@ -1542,11 +1539,10 @@ handle_wake() {  # <reason> <state>
         if [ -n "$last" ] && status_is_captain_relevant "$last"; then
           if status_is_terminal_verb "$last"; then
             _clear_wedge=1
+          elif status_verb_is_nonterminal "$(status_line_verb "$last")"; then
+            _clear_wedge=0
           else
-            case "$(status_line_verb "$last")" in
-              working|resolved|captain-held) _clear_wedge=0 ;;
-              *) _clear_wedge=1 ;;
-            esac
+            _clear_wedge=1
           fi
         fi
         if [ "$_clear_wedge" = 1 ]; then

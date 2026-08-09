@@ -14,6 +14,13 @@ FM_LOCK_STALE_AFTER="${FM_LOCK_STALE_AFTER:-2}"
 # the platform (Git Bash/MSYS) that already pays the highest fork price.
 _FM_UNAME=$(uname 2>/dev/null || echo unknown)
 
+# The typed status-event envelope, used by the drain annotation below to render a
+# bounded human line out of a typed event. Pure and side-effect-free, so it does
+# not compromise this library's own "sourcing observes a home, never creates one"
+# contract stated below.
+# shellcheck source=bin/fm-status-event-lib.sh
+. "$FM_WAKE_LIB_DIR/fm-status-event-lib.sh"
+
 # Sourcing this library observes a home; it never creates one. The state
 # directory is materialized by the paths that write into it, so a read-only
 # consumer - a ledger reconcile count, a detect-only bootstrap - can source
@@ -786,6 +793,16 @@ fm_wake_print_annotations() {  # <deduped-raw-rows>
     reads=$((reads + 1))
     path="$STATE/$status_key"
     fm_wake_latest_event "$path" "$tail_bytes" || continue
+    # A typed fm-status-event.v1 line is rendered as its canonical prose
+    # projection before the byte budget is applied. The budget truncates from the
+    # END, and a typed event puts its schema token, verb, key, phase and every
+    # evidence reference AHEAD of the summary - so annotating the raw line would
+    # spend the budget on machine fields and cut off the one sentence a reader
+    # needs. The full event is still on disk; this is the bounded hint, not the
+    # record.
+    if fm_status_event_is_typed "$FM_WAKE_EVENT_LINE"; then
+      FM_WAKE_EVENT_LINE=$(fm_status_event_prose "$FM_WAKE_EVENT_LINE")
+    fi
     prefix="wake annotation: latest wake-EVENT observed at drain, not current state"
     if [ "$mode" = historical ]; then
       prefix="$prefix; historical / not necessarily the triggering event"

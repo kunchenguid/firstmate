@@ -96,7 +96,7 @@ data/                personal fleet records; LOCAL, gitignored as a whole
   <id>/report.md     scout task deliverable, written by the crewmate; survives teardown
 projects/            cloned repos; gitignored; read-only except under hard rule 1's concrete captain-approved project operation exception
 state/               volatile runtime signals; gitignored
-  <id>.status        appended by crewmates, plus fm-spawn.sh launch-failure and fm-attempt.sh budget-exhaustion declarations: "<state>: <note>" wake-event lines, not current-state truth
+  <id>.status        appended by crewmates, plus fm-spawn.sh launch-failure and fm-attempt.sh budget-exhaustion declarations: wake-event lines, not current-state truth; each is a typed `fm-status-event.v1` envelope owned by bin/fm-status-event-lib.sh, with the legacy "<state>: <note>" prose form still read during migration
   <id>.turn-ended    touched by turn-end hooks
   <id>.childcpu      identity-bound sample of the CPU consumed by the task agent's descendants, so supervision can see work happening in a child process; written by the watcher, removed by teardown
   <id>.terminal-recorded  receipt proving the ledger already holds a terminal record for a task that declared failure and was never torn down, so the recording sweep never repeats it; written only by bin/fm-wake-ledger.sh, removed by teardown
@@ -538,7 +538,7 @@ If a task will drive Herdr lifecycle behavior, scaffold with `--herdr-lab`; if t
 The generated Herdr contract must use a named non-`default` isolated lab and its guarded helper for every lifecycle action.
 
 Load `secondmate-provisioning` before creating or using a charter brief and preserve its idle-by-default and marked-return-channel contracts.
-Status appends are sparse supervisor-actionable events, not routine progress; `bin/fm-classify-lib.sh` owns keyed open and resolved semantics.
+Status appends are sparse supervisor-actionable events, not routine progress; `bin/fm-classify-lib.sh` owns keyed open and resolved semantics, and what a task is waiting on is derived there rather than declared by the worker.
 The scaffold is a safety contract, not a suggestion.
 
 ## 12. Self-update
