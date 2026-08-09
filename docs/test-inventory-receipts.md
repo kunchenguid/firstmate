@@ -12,7 +12,24 @@ The boundary verifies clean exact candidate and base commits, then verifies the 
 The local path lets Git own the checkout and ref transition while its prepared reference transaction verifies the expected default ref, base, and candidate on a quiescent project checkout.
 Concurrent uncooperative writers to that project checkout during landing are outside the supported boundary; best-effort dirty-state checks refuse detected drift but do not provide cross-writer atomicity.
 The GitHub path submits an immediate REST merge conditioned on the verified head SHA.
-GitHub execution requires strict, administrator-enforced base-branch protection so the conditional merge cannot bypass required status checks.
+Its GraphQL response must contain exactly one base-branch protection entry.
+The boundary captures that exact raw response before `gh-axi` normalization can collapse duplicate JSON keys or discard its error envelope.
+For the literal-null path, any top-level GraphQL error or structurally unexpected response envelope fails closed before protection data is interpreted.
+A structured protection rule remains supported only when it contains exactly one `requiresStrictStatusChecks` value and one `isAdminEnforced` value, both `true`.
+A literal `branchProtectionRule: null` is the one sanctioned unprotected-repository path and does not synthesize strict or administrator values.
+Selecting that path emits an explicit diagnostic before proceeding.
+Missing, duplicate, non-null scalar, partial-object, or null-with-child protection data is malformed or ambiguous and fails closed.
+Both protection paths verify the requested canonical PR identity, current exact head and base OIDs, and candidate ancestry.
+Immediately before an unprotected mutation, the boundary re-reads the PR and refuses any identity, head, base, state, or protection-data drift, then rechecks that the clean local worktree remains at the exact head.
+The merge mutation is conditioned on that exact expected-head SHA, and both paths require GitHub to confirm that it merged the conditional request.
+GitHub's merge API exposes an expected-head precondition but no expected-base OID precondition.
+The unprotected response must also identify the resulting commit.
+For the unprotected path, the boundary immediately re-reads the base ref after mutation and requires it to point to GitHub's reported result commit.
+Method-specific parent or history validation must attribute that result to the exact pre-mutation base and expected-head candidate.
+The unprotected rebase path rejects candidates containing originally empty commits because GitHub drops them and their missing rewrite can conceal unrelated mutation-time base advancement from this bounded history check.
+These adjacent pre-mutation and post-mutation base observations bound but cannot eliminate every residual external-writer race.
+That remaining window assumes Firstmate is the single merge authority and no concurrent uncooperative writer advances the base.
+The unprotected path does not claim that GitHub enforces required status checks; it preserves the exact-candidate boundary after the delivery lifecycle has established that the candidate's checks are green.
 
 ## Literal-source inventory
 
