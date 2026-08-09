@@ -397,14 +397,35 @@ test_portable_shard_union_and_coverage_guard() {
 # "comm: input is not in sorted order". Pins the guard to be collation
 # independent: it must succeed identically under C and under a language locale.
 test_coverage_guard_is_locale_independent() {
-  local loc out rc
+  local loc out rc probe
   # A language locale, not C.utf8 - C.utf8 collates by codepoint exactly like C,
   # so it cannot expose the mismatch and would make this case vacuous.
   loc=$(locale -a 2>/dev/null | grep -iE '^[a-z][a-z]_[A-Z][A-Z]\.(utf-?8)$' | head -n 1 || true)
+  # A name is not proof. The filter above is name-based, and a name-based filter
+  # cannot see that a C library collates by byte regardless of the locale it
+  # names: on a musl-based image `locale -a` lists en_US.UTF-8 while every
+  # locale sorts in C order. Running there would prove nothing while reporting
+  # that it had, which is the exact vacuity excluding C.utf8 was meant to avoid.
+  # So probe the real behavior instead of the name.
+  #
+  # The probe pair matters. "a-b" vs "a.b" looks like the obvious test and is
+  # useless: glibc ignores punctuation at the primary collation level, so both
+  # reduce to "ab", tie, and fall back to codepoint order - identical to C even
+  # on a fully collating locale. The pair below differs in the character AFTER
+  # the punctuation, so the primary keys themselves diverge ("ab" vs "aa"): C
+  # orders by '-' (0x2D) < '.' (0x2E) and puts a-b first, while a collating
+  # locale compares b against a and puts a.a first. That is the same shape as
+  # the real divergence in this repo's own file set, where
+  # fm-backend-herdr-workspace-per-home-e2e.test.sh and
+  # fm-backend-herdr.test.sh swap places.
+  if [ -n "$loc" ]; then
+    probe=$(printf 'a-b\na.a\n' | LC_ALL="$loc" sort)
+    [ "$probe" = "$(printf 'a-b\na.a\n' | LC_ALL=C sort)" ] && loc=""
+  fi
   if [ -z "$loc" ]; then
-    # Report the absent dependency rather than passing over it silently.
-    echo "note: no language UTF-8 locale installed; skipping the non-C collation check" >&2
-    pass "coverage guard collation check skipped (no language locale available)"
+    # Report the absent capability rather than passing over it silently.
+    echo "note: no locale that collates differently from C; skipping the non-C collation check" >&2
+    pass "coverage guard collation check skipped (no differently-collating locale available)"
     return 0
   fi
   out=$(LC_ALL="$loc" "$RUNNER" --check-coverage 2>&1) && rc=0 || rc=$?
