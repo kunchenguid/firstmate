@@ -301,6 +301,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/test-inventory-receipts.md",
+      "audience": "maintainer-architecture"
+    },
+    {
       "path": "docs/subagent-guard.md",
       "audience": "maintainer-architecture"
     },

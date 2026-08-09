@@ -12,6 +12,14 @@ set -u
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-check-lib.sh"
 
+# Fixture commits must not rely on a developer or CI runner identity.
+unset GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL EMAIL
+export GIT_CONFIG_NOSYSTEM=1
+export GIT_CONFIG_GLOBAL=/dev/null
+export GIT_CONFIG_COUNT=1
+export GIT_CONFIG_KEY_0=user.useConfigOnly
+export GIT_CONFIG_VALUE_0=true
+
 PR_CHECK="$ROOT/bin/fm-pr-check.sh"
 PR_MERGE="$ROOT/bin/fm-pr-merge.sh"
 MIGRATE="$ROOT/bin/fm-pr-check-migrate.sh"
@@ -76,7 +84,16 @@ SH
   cat > "$fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
-exit "${FM_TEST_GH_AXI_RC:-0}"
+[ "${FM_TEST_GH_AXI_RC:-0}" = 0 ] || exit "$FM_TEST_GH_AXI_RC"
+case "${1:-} ${2:-}" in
+  "api POST")
+    printf 'headRefOid: %s\nbaseRefOid: %s\nbaseRefName: main\nheadRefName: fm/task-a\nstate: OPEN\nisDraft: false\nmerged: false\nnameWithOwner: my-org/repo_name.with-dots\nrequiresStrictStatusChecks: true\nisAdminEnforced: true\n' \
+      "$FM_TEST_GH_API_HEAD" "$FM_TEST_GH_BASE"
+    ;;
+  "api PUT")
+    printf 'merged: true\n'
+    ;;
+esac
 SH
   # Plain glab, reproducing the real CLI's contract: its field output on stdout
   # and exit 0 on success, and a non-zero exit with no stdout on any failure.
@@ -104,6 +121,33 @@ write_task_meta() {
     "project=$dir/project" \
     "kind=ship" \
     "mode=no-mistakes"
+}
+
+prepare_merge_repository() {
+  local dir=$1 base candidate
+  rm -rf "$dir/project" "$dir/wt"
+  fm_git_worktree "$dir/project" "$dir/wt" fm/task-a
+  git -C "$dir/project" branch -M main
+  git -C "$dir/wt" config --local user.name 'Firstmate Tests'
+  git -C "$dir/wt" config --local user.email 'tests@example.invalid'
+  mkdir -p "$dir/wt/.firstmate" "$dir/wt/tests"
+  cat > "$dir/wt/.firstmate/test-inventory.json" <<'EOF'
+{"schema_version":1,"status":"test-bearing","baseline":{"version":1,"declarations":1,"test_files":1},"maximum_unreviewed_deletion":0}
+EOF
+  cat > "$dir/wt/tests/test_receipt.py" <<'EOF'
+def test_literal():
+    pass
+EOF
+  "$ROOT/bin/fm-test-inventory.sh" collect "$dir/wt" >/dev/null
+  git -C "$dir/wt" add .firstmate tests
+  git -C "$dir/wt" commit -qm inventory
+  git -C "$dir/project" merge --ff-only fm/task-a >/dev/null
+  base=$(git -C "$dir/project" rev-parse main)
+  printf 'candidate\n' > "$dir/wt/change.txt"
+  git -C "$dir/wt" add change.txt
+  git -C "$dir/wt" commit -qm candidate
+  candidate=$(git -C "$dir/wt" rev-parse HEAD)
+  printf '%s\n%s\n' "$base" "$candidate"
 }
 
 write_poll_meta() {
@@ -514,10 +558,12 @@ test_invalid_entrypoints_have_zero_side_effects() {
 }
 
 test_valid_recording_and_merge_derivation() {
-  local dir expected sidecar count rc
+  local dir values base expected sidecar count rc
   dir=$(make_case valid-recording)
   write_task_meta "$dir"
-  expected=0123456789abcdef0123456789abcdef01234567
+  values=$(prepare_merge_repository "$dir")
+  base=$(printf '%s\n' "$values" | sed -n '1p')
+  expected=$(printf '%s\n' "$values" | sed -n '2p')
   FM_TEST_GH_HEAD=$expected run_check_entry "$dir" task-a https://github.com/my-org/repo_name.with-dots/pull/37 \
     > "$dir/stdout" 2> "$dir/stderr" || fail "valid direct check failed"
 
@@ -547,10 +593,11 @@ test_valid_recording_and_merge_derivation() {
   [ "$count" -eq 1 ] || fail "duplicate pr_head metadata was appended"
 
   : > "$dir/gh-axi.log"
-  run_merge_entry "$dir" task-a https://github.com/my-org/repo_name.with-dots/pull/37 -- --merge \
+  FM_TEST_GH_HEAD=$expected FM_TEST_GH_API_HEAD=$expected FM_TEST_GH_BASE=$base \
+    run_merge_entry "$dir" task-a https://github.com/my-org/repo_name.with-dots/pull/37 -- --merge \
     >/dev/null 2>/dev/null || fail "valid merge wrapper failed"
-  grep -qxF 'pr merge 37 --repo my-org/repo_name.with-dots --merge' "$dir/gh-axi.log" \
-    || fail "merge wrapper did not preserve repository derivation and method"
+  grep -qxF "api PUT /repos/my-org/repo_name.with-dots/pulls/37/merge --field sha=$expected --field merge_method=merge" "$dir/gh-axi.log" \
+    || fail "merge wrapper did not preserve the repository, method, and exact head"
   set +e
   FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/merged-watch.out" 2> "$dir/merged-watch.err"
   rc=$?
@@ -572,7 +619,11 @@ test_valid_recording_and_merge_derivation() {
 
   dir=$(make_case lifecycle-compatible-id)
   write_task_meta "$dir" Task_A.1
-  run_merge_entry "$dir" Task_A.1 https://github.com/o/r/pull/3 \
+  values=$(prepare_merge_repository "$dir")
+  base=$(printf '%s\n' "$values" | sed -n '1p')
+  expected=$(printf '%s\n' "$values" | sed -n '2p')
+  FM_TEST_GH_HEAD=$expected FM_TEST_GH_API_HEAD=$expected FM_TEST_GH_BASE=$base \
+    run_merge_entry "$dir" Task_A.1 https://github.com/o/r/pull/3 \
     > "$dir/stdout" 2> "$dir/stderr" \
     || fail "safe lifecycle-compatible task ID could not use the PR merge flow"
   fm_pr_poll_artifacts_valid "$dir/home/state" Task_A.1 "$POLL" \
@@ -595,10 +646,13 @@ SH
     fm_write_meta "$dir/home/state/$id.meta" \
       "window=firstmate:fm-$id" \
       "endpoint_task_id=$id" \
-      "worktree=$dir/missing-worktree" \
+      "worktree=$dir/wt" \
       "project=$dir/project" \
       'kind=ship' \
-      'mode=local-only'
+      'mode=no-mistakes'
+    values=$(prepare_merge_repository "$dir")
+    base=$(printf '%s\n' "$values" | sed -n '1p')
+    expected=$(printf '%s\n' "$values" | sed -n '2p')
     mkdir -p "$dir/home/state/.pr-check-quarantine"
     chmod 0700 "$dir/home/state/.pr-check-quarantine"
     printf 'reserved migration evidence\n' \
@@ -626,11 +680,13 @@ SH
       --carry-count 0 --carry-ts 1700000000 --carry-platform x --carry-max 280 \
       > "$dir/x-link.out" 2> "$dir/x-link.err" \
       || fail "path-safe legacy task ID could not link an X request"
-    run_merge_entry "$dir" "$id" https://github.com/o/r/pull/4 \
+    FM_TEST_GH_HEAD=$expected FM_TEST_GH_API_HEAD=$expected FM_TEST_GH_BASE=$base \
+      run_merge_entry "$dir" "$id" https://github.com/o/r/pull/4 \
       > "$dir/merge.out" 2> "$dir/merge.err" \
       || fail "path-safe legacy task ID could not use the PR merge flow"
     fm_pr_poll_artifacts_valid "$dir/home/state" "$id" "$POLL" \
       || fail "path-safe legacy task ID did not publish an authenticated poll"
+    rm -rf "$dir/wt"
     FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" PATH="$dir/fakebin:$BASE_PATH" \
       "$TEARDOWN" "$id" --force > "$dir/teardown.out" 2> "$dir/teardown.err" \
       || fail "legacy path-safe task ID could not be torn down"

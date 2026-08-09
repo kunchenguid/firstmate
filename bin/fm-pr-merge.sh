@@ -1,13 +1,10 @@
 #!/usr/bin/env bash
-# Merge a task's PR after recording pr= and any available pr_head= through
-# bin/fm-pr-check.sh, so teardown can verify landed work after squash merges.
-# The full canonical GitHub PR URL is parsed by bin/fm-pr-lib.sh and the derived
-# owner/repository and PR number are passed to gh-axi as separate arguments.
-#
-# Merge method defaults to --squash when the caller passes none of --squash,
-# --merge, --rebase, or --method after the optional -- separator. Extra args
-# must not include --repo or -R because the repository comes only from the URL.
-# Usage: fm-pr-merge.sh <task-id> <pr-url> [-- <extra gh-axi pr merge args>]
+# Record a task's canonical GitHub PR metadata, then delegate its merge to the
+# one shared exact-candidate execution boundary.
+# Usage: fm-pr-merge.sh <task-id> <pr-url> [-- <merge-options>]
+# Merge options are --squash, --merge, --rebase,
+# --method <squash|merge|rebase>, --method=<squash|merge|rebase>, and
+# --delete-branch; the default method is squash.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -33,35 +30,9 @@ if ! fm_pr_task_id_valid "$ID" || ! fm_pr_url_parse "$RAW_URL" \
   exit 2
 fi
 URL=$FM_PR_URL
-PR_OWNER=$FM_PR_OWNER
-PR_REPO=$FM_PR_REPO
-PR_NUMBER=$FM_PR_NUMBER
 shift 2
 [ "${1:-}" = "--" ] && shift
-
-caller_has_merge_method() {
-  local arg
-  for arg in "$@"; do
-    case "$arg" in
-      --squash|--merge|--rebase|--method|--method=*) return 0 ;;
-    esac
-  done
-  return 1
-}
-
-reject_repo_overrides() {
-  local arg
-  for arg in "$@"; do
-    case "$arg" in
-      --repo|--repo=*|-R|-R?*)
-        echo "error: extra merge arguments must not override the repository" >&2
-        return 1
-        ;;
-    esac
-  done
-}
-
-reject_repo_overrides "$@" || exit 1
+fm_pr_merge_args_parse "$@" || exit $?
 
 # Task-derived paths are constructed only after the canonical ID validation.
 META="$STATE/$ID.meta"
@@ -76,9 +47,4 @@ grep -qxF "pr=$URL" "$META" || {
   exit 1
 }
 
-merge_args=()
-if ! caller_has_merge_method "$@"; then
-  merge_args=(--squash)
-fi
-
-gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" "${merge_args[@]+"${merge_args[@]}"}" "$@"
+exec "$SCRIPT_DIR/fm-merge-execute.sh" github "$ID" "$URL" -- "$@"

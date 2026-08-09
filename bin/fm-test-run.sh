@@ -202,7 +202,7 @@ family_for_basename() {
     fm-teardown-endpoint-safety.test.sh)
       printf '%s\n' backend-dispatch
       ;;
-    fm-pr-check-security.test.sh|fm-pr-merge.test.sh|fm-review-diff.test.sh|\
+    fm-pr-check-security.test.sh|fm-pr-merge.test.sh|fm-test-inventory.test.sh|fm-review-diff.test.sh|\
     fm-teardown.test.sh|fm-x-mode.test.sh)
       printf '%s\n' pr-forge
       ;;
@@ -977,7 +977,21 @@ families_for_changed_path() {
     bin/fm-gate-refuse*|bin/fm-lock*|bin/fm-quota-axi-lib.sh)
       printf '%s\n' session-bootstrap
       ;;
-    bin/fm-pr-*|bin/fm-merge-local.sh|bin/fm-teardown.sh|bin/fm-review-diff.sh|\
+    bin/fm-sessionstart-run.sh|.claude/settings.json|.codex/hooks.json|\
+    .pi/extensions/fm-primary-turnend-guard.ts)
+      # The run tier's two harness-supplied facts (source vocabulary and
+      # context-reset stdout injection) only show up against a real harness.
+      printf '%s\n' session-bootstrap
+      printf '%s\n' live-harness-optin
+      ;;
+    bin/fm-timeout-lib.sh)
+      # The shared hard bound: session start's runtime bound, the fleet/bearings
+      # snapshots, and the vendor auth probe all depend on it.
+      printf '%s\n' session-bootstrap
+      printf '%s\n' snapshot-bearings
+      printf '%s\n' pure-contract-unit
+      ;;
+    bin/fm-pr-*|bin/fm-merge-execute.sh|bin/fm-merge-local.sh|bin/fm-test-inventory.sh|bin/fm-teardown.sh|bin/fm-review-diff.sh|\
     bin/fm-x-*|bin/fm-check*)
       printf '%s\n' pr-forge
       ;;
