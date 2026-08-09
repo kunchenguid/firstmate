@@ -2368,7 +2368,7 @@ touch "\$t" 2>/dev/null || true
 exit 0
 EOF
       chmod +x "$GROK_HOOKS_DIR/fm-turn-end.sh"
-      hook_command=$(json_escape "bash $(shell_quote "$GROK_HOOKS_DIR/fm-turn-end.sh")")
+      hook_command=$(json_escape "/bin/bash $(shell_quote "$GROK_HOOKS_DIR/fm-turn-end.sh")")
       printf '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"%s"}]}]}}\n' "$hook_command" > "$GROK_HOOKS_DIR/fm-turn-end.json"
       printf 'token=%s\n' "${auth_file##*/}" > "$WT/.fm-grok-turnend"
       exclude_path '.fm-grok-turnend'

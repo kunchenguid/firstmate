@@ -162,7 +162,7 @@ def block(marker: bytes) -> bytes:
             b"[[hooks]]",
             b'event = "Stop"',
             b'matcher = "^$"',
-            b'command = "bash \\"$HOME/.kimi-code/fm-turn-end.sh\\" >/dev/null 2>&1 || true"',
+            b'command = "/bin/bash \\"$HOME/.kimi-code/fm-turn-end.sh\\" >/dev/null 2>&1 || true"',
             b"timeout = 1",
             END,
             b"",

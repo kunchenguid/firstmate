@@ -57,7 +57,7 @@ run_grok_spawn() {
 }
 
 test_grok_hook_requires_registered_token() {
-  local rec case_dir home proj wt fakebin grok_home id out status hook token target evil evil_target
+  local rec case_dir home proj wt fakebin grok_home id out status hook grok_command token target evil evil_target
   rec=$(make_spawn_case hook-auth)
   IFS='|' read -r case_dir home proj wt fakebin grok_home id <<EOF
 $rec
@@ -69,6 +69,9 @@ EOF
 
   hook="$grok_home/hooks/fm-turn-end.sh"
   assert_present "$hook" "grok hook script was not installed"
+  grok_command=$(jq -r '.hooks.Stop[0].hooks[0].command' "$grok_home/hooks/fm-turn-end.json")
+  [ "$grok_command" = "/bin/bash '$hook'" ] \
+    || fail "grok hook command did not use the explicit Bash interpreter: $grok_command"
   assert_grep 'token=' "$wt/.fm-grok-turnend" "grok pointer did not contain a token"
   target="$home/state/$id.turn-ended"
   assert_no_grep "$target" "$wt/.fm-grok-turnend" "grok pointer exposed the turn-end path"

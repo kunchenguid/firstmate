@@ -217,7 +217,7 @@ test_kimi_launch_then_send_is_verified() {
 }
 
 test_kimi_hook_install_is_surgical_idempotent_and_removable() {
-  local home config original once stripped count
+  local home config original once stripped count kimi_command
   home="$TMP_ROOT/config-surgery"
   config="$home/.kimi-code/config.toml"
   original="$home/original.toml"
@@ -246,6 +246,20 @@ EOF
   cp "$config" "$original"
 
   HOME="$home" "$KIMI_HOOK" install || fail "Kimi hook install refused a realistic config"
+  kimi_command=$(python3 - "$config" <<'PY'
+import sys
+import tomllib
+
+with open(sys.argv[1], "rb") as stream:
+    hooks = tomllib.load(stream).get("hooks", [])
+for hook in hooks:
+    if hook.get("event") == "Stop" and hook.get("matcher") == "^$":
+        print(hook["command"])
+        break
+PY
+  )
+  [ "$kimi_command" = "/bin/bash \"\$HOME/.kimi-code/fm-turn-end.sh\" >/dev/null 2>&1 || true" ] \
+    || fail "Kimi hook command did not use the explicit Bash interpreter: $kimi_command"
   cp "$config" "$once"
   HOME="$home" "$KIMI_HOOK" install || fail "second Kimi hook install failed"
   cmp -s "$once" "$config" || fail "second Kimi hook install changed config bytes"
