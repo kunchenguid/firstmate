@@ -19,8 +19,10 @@ set -u
 
 LINT="$ROOT/bin/fm-lint.sh"
 INSTALLER="$ROOT/bin/fm-install-shellcheck.sh"
+run_lint() { /bin/bash "$LINT" "$@"; }
+run_installer() { /bin/bash "$INSTALLER" "$@"; }
 # The pinned version, read from the single source (the one owner itself).
-REQUIRED=$("$LINT" --required-version)
+REQUIRED=$(run_lint --required-version)
 
 # True only when the resolved shellcheck is exactly the pinned version, so the
 # lint-running tests below match what CI enforces instead of a runner default.
@@ -34,7 +36,7 @@ test_list_files_reports_the_shell_inventory() {
   # CI=true forces the full canonical set regardless of the ambient branch or
   # working-tree diff a local test run happens to have, so this stays a pure
   # inventory check independent of fm-lint.sh's own changed-file mode below.
-  listed=$(CI=true "$LINT" --list-files)
+  listed=$(CI=true run_lint --list-files)
   expected=$(find bin bin/backends tests -maxdepth 1 -type f -name '*.sh' -print | LC_ALL=C sort)
   [ "$(printf '%s\n' "$listed" | LC_ALL=C sort)" = "$expected" ] \
     || fail "fm-lint.sh --list-files did not return the complete shell inventory"
@@ -91,6 +93,7 @@ case "$*" in
 esac
 SH
   chmod +x "$fakebin/git"
+  fm_fake_bash_tool "$fakebin/git"
 }
 
 # fm_lint_write_diff_file <file> <path>...: writes NUL-separated changed paths
@@ -120,6 +123,7 @@ printf '%s\n' "\$@" >> "$log"
 exit 0
 SH
   chmod +x "$fakebin/shellcheck"
+  fm_fake_bash_tool "$fakebin/shellcheck"
 }
 
 test_changed_mode_lints_only_the_changed_file() {
@@ -137,7 +141,7 @@ test_changed_mode_lints_only_the_changed_file() {
   # exercised: a CI run sets them and would otherwise force the full lint here.
   out=$(PATH="$fakebin:$PATH" GITHUB_ACTIONS='' CI='' FM_LINT_JOBS=1 \
     FM_TEST_GIT_BRANCH=feature \
-    FM_TEST_GIT_DIFF_FILE="$diff_file" "$LINT" 2>&1) \
+    FM_TEST_GIT_DIFF_FILE="$diff_file" run_lint 2>&1) \
     || fail "changed-mode lint run failed"$'\n'"$out"
   [ "$(cat "$log")" = "$target" ] \
     || fail "changed-mode lint did not run ShellCheck on exactly the changed file"$'\n'"logged: $(cat "$log")"
@@ -148,7 +152,7 @@ test_ci_forces_full_lint_even_with_empty_diff() {
   local listed expected
   # No git stub: CI=true must short-circuit fm-lint.sh's mode selection before
   # it ever consults git, so this proves CI wins regardless of local diff state.
-  listed=$(CI=true "$LINT" --list-files)
+  listed=$(CI=true run_lint --list-files)
   expected=$(find bin bin/backends tests -maxdepth 1 -type f -name '*.sh' -print | LC_ALL=C sort)
   [ "$(printf '%s\n' "$listed" | LC_ALL=C sort)" = "$expected" ] \
     || fail "CI=true did not force the full canonical file set"
@@ -164,7 +168,7 @@ test_main_branch_forces_full_lint() {
   # Clear CI/GITHUB_ACTIONS so the on-main branch is what forces the full lint,
   # not the ambient CI signal a real CI run would otherwise supply.
   listed=$(PATH="$fakebin:$PATH" GITHUB_ACTIONS='' CI='' \
-    FM_TEST_GIT_BRANCH=main "$LINT" --list-files)
+    FM_TEST_GIT_BRANCH=main run_lint --list-files)
   expected=$(find bin bin/backends tests -maxdepth 1 -type f -name '*.sh' -print | LC_ALL=C sort)
   [ "$(printf '%s\n' "$listed" | LC_ALL=C sort)" = "$expected" ] \
     || fail "fm-lint.sh did not force a full lint when HEAD is on main"
@@ -186,7 +190,7 @@ test_explicit_path_bypasses_changed_logic() {
   # already forced full mode. An explicit path must never even consult git.
   out=$(PATH="$fakebin:$PATH" GITHUB_ACTIONS='' CI='' FM_LINT_JOBS=1 \
     FM_TEST_GIT_MERGE_BASE_OK=0 \
-    "$LINT" "$target" 2>&1) || fail "explicit-path lint failed"$'\n'"$out"
+    run_lint "$target" 2>&1) || fail "explicit-path lint failed"$'\n'"$out"
   [ "$(cat "$log")" = "$target" ] \
     || fail "explicit path lint did not run on exactly the requested file"$'\n'"logged: $(cat "$log")"
   pass "fm-lint.sh explicit paths bypass changed-file mode selection"
@@ -204,7 +208,7 @@ test_zero_changed_files_exits_clean() {
   # Clear CI/GITHUB_ACTIONS so changed-file mode runs and can reach the empty
   # target set; a CI run would otherwise force a full lint instead.
   out=$(PATH="$fakebin:$PATH" GITHUB_ACTIONS='' CI='' FM_TEST_GIT_BRANCH=feature \
-    FM_TEST_GIT_DIFF_FILE="$diff_file" "$LINT" 2>&1) || rc=$?
+    FM_TEST_GIT_DIFF_FILE="$diff_file" run_lint 2>&1) || rc=$?
   [ "$rc" -eq 0 ] || fail "zero changed lint targets must exit 0, got $rc"$'\n'"$out"
   assert_contains "$out" "ShellCheck 0.11.0" "zero-changed run did not print the ShellCheck version line"
   assert_contains "$out" "no changed lint targets" "zero-changed run did not note the empty target set"
@@ -225,7 +229,7 @@ test_list_files_respects_changed_mode() {
   # Clear CI/GITHUB_ACTIONS so --list-files reflects the changed set rather than
   # the full canonical set a CI run's ambient signals would otherwise force.
   listed=$(PATH="$fakebin:$PATH" GITHUB_ACTIONS='' CI='' FM_TEST_GIT_BRANCH=feature \
-    FM_TEST_GIT_DIFF_FILE="$diff_file" "$LINT" --list-files)
+    FM_TEST_GIT_DIFF_FILE="$diff_file" run_lint --list-files)
   [ "$listed" = "tests/fm-lint.test.sh" ] \
     || fail "--list-files did not report the would-be changed set in changed mode"$'\n'"got: $listed"
   pass "fm-lint.sh --list-files reports the would-be changed set in changed mode"
@@ -270,24 +274,28 @@ SH
 while [ "$#" -gt 0 ]; do
   if [ "$1" = "-C" ]; then
     mkdir -p "$2/shellcheck-v0.11.0"
-    cat > "$2/shellcheck-v0.11.0/shellcheck" <<'EOF'
-#!/usr/bin/env bash
-printf 'ShellCheck - shell script analysis tool\nversion: 0.11.0\n'
-EOF
-    chmod +x "$2/shellcheck-v0.11.0/shellcheck"
+    ln -s /usr/bin/true "$2/shellcheck-v0.11.0/shellcheck"
     exit 0
   fi
   shift
 done
 exit 2
 SH
-  cat > "$fakebin/sleep" <<'SH'
+  cat > "$fakebin/install" <<'SH'
 #!/usr/bin/env bash
-exit 0
+for destination do :; done
+rm -f "$destination"
+ln -s /usr/bin/true "$destination"
 SH
-  chmod +x "$fakebin/curl" "$fakebin/sha256sum" "$fakebin/tar" "$fakebin/sleep"
+  chmod +x "$fakebin/curl" "$fakebin/sha256sum" "$fakebin/tar" "$fakebin/install"
+  fm_fake_bash_tool "$fakebin/curl"
+  fm_fake_bash_tool "$fakebin/sha256sum"
+  fm_fake_bash_tool "$fakebin/tar"
+  fm_fake_bash_tool "$fakebin/install"
+  ln -s /usr/bin/true "$fakebin/sleep"
 
-  out=$(CURL_COUNT="$tmp/curl-count" PATH="$fakebin:$PATH" "$INSTALLER" "$destination" 2>&1) \
+  out=$(CURL_COUNT="$tmp/curl-count" PATH="$fakebin:$PATH" \
+    run_installer "$destination" 2>&1) \
     || fail "installer did not recover from a transient download failure"$'\n'"$out"
   [ "$(cat "$tmp/curl-count")" -eq 2 ] || fail "installer did not retry exactly once after recovery"
   assert_contains "$out" "download attempt 1 failed; retrying" "installer did not disclose its retry"
@@ -310,8 +318,9 @@ fi
 exit 0
 SH
   chmod +x "$fakebin/shellcheck"
+  fm_fake_bash_tool "$fakebin/shellcheck"
   rc=0
-  out=$(PATH="$fakebin:$PATH" "$LINT" 2>&1) || rc=$?
+  out=$(PATH="$fakebin:$PATH" run_lint 2>&1) || rc=$?
   [ "$rc" -ne 0 ] || fail "fm-lint.sh accepted a shellcheck version other than the pin"$'\n'"$out"
   assert_contains "$out" "$REQUIRED" "fm-lint.sh did not name the required version on mismatch"
   assert_contains "$out" "0.9.9" "fm-lint.sh did not report the resolved (wrong) version"
@@ -343,7 +352,7 @@ foo() {
 foo
 SH
   rc=0
-  out=$("$LINT" "$bad" 2>&1) || rc=$?
+  out=$(run_lint "$bad" 2>&1) || rc=$?
   [ "$rc" -ne 0 ] || fail "fm-lint.sh passed a known-bad fixture"$'\n'"$out"
   assert_contains "$out" "SC1007" "fm-lint.sh did not report the expected ShellCheck finding"
   pass "fm-lint.sh catches a real lint defect the old no-op gate passed"
@@ -367,7 +376,7 @@ foo() {
 foo
 SH
   rc=0
-  out=$(SHELLCHECK_OPTS='--exclude=SC1007' "$LINT" "$bad" 2>&1) || rc=$?
+  out=$(SHELLCHECK_OPTS='--exclude=SC1007' run_lint "$bad" 2>&1) || rc=$?
   [ "$rc" -ne 0 ] || fail "fm-lint.sh allowed ambient SHELLCHECK_OPTS to hide a finding"$'\n'"$out"
   assert_contains "$out" "SC1007" "fm-lint.sh did not neutralize ambient SHELLCHECK_OPTS"
   pass "fm-lint.sh ignores ambient ShellCheck options"
@@ -390,7 +399,7 @@ if [ -n "${1:-}" ] && [ -d "$1" ]; then
 fi
 SH
   rc=0
-  "$LINT" "$good" >/dev/null 2>&1 || rc=$?
+  run_lint "$good" >/dev/null 2>&1 || rc=$?
   [ "$rc" -eq 0 ] || fail "fm-lint.sh flagged a clean fixture (exit $rc)"
   pass "fm-lint.sh passes a clean fixture"
 }
@@ -427,18 +436,18 @@ bad_b() {
 SH
 
   rc_clean_1=0
-  out_clean_1=$(FM_LINT_JOBS=1 "$LINT" "$good" 2>&1) || rc_clean_1=$?
+  out_clean_1=$(FM_LINT_JOBS=1 run_lint "$good" 2>&1) || rc_clean_1=$?
   rc_clean_2=0
-  out_clean_2=$(FM_LINT_JOBS=2 "$LINT" "$good" 2>&1) || rc_clean_2=$?
+  out_clean_2=$(FM_LINT_JOBS=2 run_lint "$good" 2>&1) || rc_clean_2=$?
   [ "$rc_clean_1" -eq 0 ] && [ "$rc_clean_2" -eq 0 ] || fail "clean jobs=1/jobs=2 paths must both pass"
   [ "$out_clean_1" = "$out_clean_2" ] || fail "clean jobs=1/jobs=2 output differs"
 
   rc_fail_1=0
-  out_fail_1=$(FM_LINT_JOBS=1 "$LINT" "$bad_a" "$bad_b" 2>&1) || rc_fail_1=$?
+  out_fail_1=$(FM_LINT_JOBS=1 run_lint "$bad_a" "$bad_b" 2>&1) || rc_fail_1=$?
   rc_fail_2=0
-  out_fail_2=$(FM_LINT_JOBS=2 "$LINT" "$bad_a" "$bad_b" 2>&1) || rc_fail_2=$?
+  out_fail_2=$(FM_LINT_JOBS=2 run_lint "$bad_a" "$bad_b" 2>&1) || rc_fail_2=$?
   rc_fail_2b=0
-  out_fail_2b=$(FM_LINT_JOBS=2 "$LINT" "$bad_a" "$bad_b" 2>&1) || rc_fail_2b=$?
+  out_fail_2b=$(FM_LINT_JOBS=2 run_lint "$bad_a" "$bad_b" 2>&1) || rc_fail_2b=$?
   [ "$rc_fail_1" -ne 0 ] && [ "$rc_fail_1" -eq "$rc_fail_2" ] && [ "$rc_fail_2" -eq "$rc_fail_2b" ] \
     || fail "failing jobs=1/jobs=2 exit results differ: $rc_fail_1/$rc_fail_2/$rc_fail_2b"
   [ "$out_fail_1" = "$out_fail_2" ] && [ "$out_fail_2" = "$out_fail_2b" ] \
@@ -446,10 +455,10 @@ SH
   assert_contains "$out_fail_1" "SC1007" "the first failing root diagnostic was lost"
   assert_contains "$out_fail_1" "SC2086" "the later failing root diagnostic was lost"
   rc_bad_jobs=0
-  FM_LINT_JOBS=3 "$LINT" "$good" >/dev/null 2>&1 || rc_bad_jobs=$?
+  FM_LINT_JOBS=3 run_lint "$good" >/dev/null 2>&1 || rc_bad_jobs=$?
   [ "$rc_bad_jobs" -eq 2 ] || fail "the lint owner must reject unbounded worker counts"
 
-  telemetry_out=$(FM_LINT_JOBS=2 FM_LINT_TELEMETRY="$telemetry" "$LINT" "$good" 2>&1) \
+  telemetry_out=$(FM_LINT_JOBS=2 FM_LINT_TELEMETRY="$telemetry" run_lint "$good" 2>&1) \
     || fail "telemetry-enabled clean lint failed"
   [ "$telemetry_out" = "$out_clean_2" ] || fail "quiet telemetry changed routine lint output"
   assert_grep $'format\tfm-lint-telemetry-v1' "$telemetry" "telemetry format marker is missing"
@@ -464,7 +473,7 @@ SH
 
   cleanup_tmp="$tmp/lint-tmp"
   mkdir -p "$cleanup_tmp"
-  cleanup_out=$(TMPDIR="$cleanup_tmp" FM_LINT_JOBS=2 "$LINT" "$good" 2>&1) \
+  cleanup_out=$(TMPDIR="$cleanup_tmp" FM_LINT_JOBS=2 run_lint "$good" 2>&1) \
     || fail "cleanup fixture lint failed"
   [ "$cleanup_out" = "$out_clean_2" ] || fail "cleanup fixture changed routine diagnostics"
   [ -z "$(find "$cleanup_tmp" -mindepth 1 -maxdepth 1 -name 'fm-lint.*' -print -quit)" ] \
@@ -496,6 +505,7 @@ while :; do
 done
 SH
   chmod +x "$fakebin/shellcheck"
+  fm_fake_bash_tool_exec "$fakebin/shellcheck"
 
   for jobs in 1 2; do
     for telemetry in off on; do
@@ -509,7 +519,7 @@ SH
       fi
       PATH="$fakebin:$PATH" TMPDIR="$lint_tmp" FM_LINT_JOBS="$jobs" \
         FM_LINT_TELEMETRY="$telemetry_file" FM_TEST_SHELLCHECK_PID="$pid_file" \
-        "$LINT" "$fixture" > "$out_file" 2>&1 &
+        /bin/bash "$LINT" "$fixture" > "$out_file" 2>&1 &
       parent_pid=$!
       i=0
       while [ "$i" -lt 500 ] && [ ! -s "$pid_file" ]; do
@@ -605,7 +615,7 @@ test_local_bad() {
 SH
 
   rc=0
-  out=$(FM_LINT_JOBS=2 "$LINT" "$dispatcher" "$adapter" "$owner" "$test_root" 2>&1) || rc=$?
+  out=$(FM_LINT_JOBS=2 run_lint "$dispatcher" "$adapter" "$owner" "$test_root" 2>&1) || rc=$?
   [ "$rc" -ne 0 ] || fail "seeded module-boundary defects unexpectedly passed"
   assert_contains "$out" "SC1007" "representative dispatcher defect was hidden"
   assert_contains "$out" "SC2086" "representative canonical adapter defect was hidden"

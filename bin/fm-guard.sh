@@ -184,7 +184,7 @@ if [ "$watcher_healthy" = false ]; then
     "$queue_pending" && queue_arg=1
     x_mode=0
     [ -f "$CONFIG/x-mode.env" ] && x_mode=1
-    fix=$("$SCRIPT_DIR/fm-supervision-instructions.sh" \
+    fix=$(/bin/bash "$SCRIPT_DIR/fm-supervision-instructions.sh" \
       --read-only "$READ_ONLY" \
       --afk "$afk" \
       --x-mode "$x_mode" \
@@ -232,7 +232,7 @@ if "$queue_pending"; then
   if [ "$READ_ONLY" -eq 1 ]; then
     echo "WARNING: queued wakes pending - left untouched because this session lacks verified fleet-lock ownership." >&2
   else
-    echo "WARNING: queued wakes pending - drain them with bin/fm-wake-drain.sh before anything else." >&2
+    echo "WARNING: queued wakes pending - drain them with /bin/bash bin/fm-wake-drain.sh before anything else." >&2
   fi
 fi
 exit 0

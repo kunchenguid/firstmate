@@ -70,6 +70,36 @@ pass() {
 
 FM_TEST_CLEANUP_DIRS=()
 FM_TEST_CLEANUP_REGISTRY=$(mktemp "${TMPDIR:-/tmp}/.fm-test-cleanup.$$.XXXXXX") || return 1
+FM_TEST_BASH_ENV=$(mktemp "${TMPDIR:-/tmp}/.fm-test-bash-env.$$.XXXXXX") || {
+  rm -f "$FM_TEST_CLEANUP_REGISTRY"
+  return 1
+}
+FM_TEST_BASH_TOOL_REGISTRY=$(mktemp "${TMPDIR:-/tmp}/.fm-test-bash-tools.$$.XXXXXX") || {
+  rm -f "$FM_TEST_CLEANUP_REGISTRY" "$FM_TEST_BASH_ENV"
+  return 1
+}
+FM_TEST_BASH_TOOL_EXEC_REGISTRY=$(mktemp "${TMPDIR:-/tmp}/.fm-test-bash-exec.$$.XXXXXX") || {
+  rm -f "$FM_TEST_CLEANUP_REGISTRY" "$FM_TEST_BASH_ENV" "$FM_TEST_BASH_TOOL_REGISTRY"
+  return 1
+}
+if [ -n "${BASH_ENV:-}" ]; then
+  printf '. %q\n' "$BASH_ENV" > "$FM_TEST_BASH_ENV"
+fi
+cat >> "$FM_TEST_BASH_ENV" <<'SH'
+_fm_test_bash_tool() {
+  local tool=$1 path
+  shift
+  path=$(type -P "$tool") || return 127
+  if /usr/bin/grep -Fqx -- "$path" "$FM_TEST_BASH_TOOL_EXEC_REGISTRY"; then
+    exec /bin/bash "$path" "$@"
+  elif /usr/bin/grep -Fqx -- "$path" "$FM_TEST_BASH_TOOL_REGISTRY"; then
+    /bin/bash "$path" "$@"
+  else
+    "$path" "$@"
+  fi
+}
+SH
+export BASH_ENV=$FM_TEST_BASH_ENV FM_TEST_BASH_TOOL_REGISTRY FM_TEST_BASH_TOOL_EXEC_REGISTRY
 
 fm_test_pid_identity() {
   local pid=$1
@@ -93,6 +123,7 @@ fm_test_cleanup() {
     done < "$FM_TEST_CLEANUP_REGISTRY"
     rm -f "$FM_TEST_CLEANUP_REGISTRY"
   fi
+  rm -f "$FM_TEST_BASH_ENV" "$FM_TEST_BASH_TOOL_REGISTRY" "$FM_TEST_BASH_TOOL_EXEC_REGISTRY"
 }
 
 fm_test_tmproot() {
@@ -147,10 +178,12 @@ fm_test_reap_orphans
 # --- fakebin / PATH shims ---------------------------------------------------
 #
 # fm_fakebin <dir> creates <dir>/fakebin and echoes it; prepend it to PATH to
-# shadow real tools with stubs. fm_fake_exit0 drops trivial exit-0 stubs for the
-# named tools into a fakebin dir. fm_fake_version_tool drops a stub for a tool
-# whose installed version bootstrap gates, so a fixture cannot be reported as an
-# unparseable build simply for answering `--version` with nothing.
+# shadow real tools with stubs. fm_fake_bash_tool registers a written Bash stub
+# as an exported test-only function that invokes /bin/bash explicitly, so macOS
+# test runs do not depend on direct shebang execution. fm_fake_exit0 uses the
+# native system true executable. fm_fake_version_tool drops a Bash-routed stub for a
+# tool whose installed version bootstrap gates, so a fixture cannot be reported
+# as an unparseable build simply for answering `--version` with nothing.
 
 fm_fakebin() {
   local dir=$1 fakebin="$1/fakebin"
@@ -158,15 +191,40 @@ fm_fakebin() {
   printf '%s\n' "$fakebin"
 }
 
+# fm_fake_bash_tool <stub-path>: register a generated Bash fixture by command
+# name in the BASH_ENV shared by test-owned child shells. The production command
+# still performs its ordinary direct invocation, while the test function checks
+# the currently resolved path against the fixture registry before selecting
+# /bin/bash. Unregistered native binaries and absolute overrides remain direct.
+fm_fake_bash_tool() {
+  local target=$1 tool=${1##*/}
+  case "$tool" in
+    ''|*[!A-Za-z0-9_.-]*)
+      printf 'unsafe Bash fixture command name: %s\n' "$tool" >&2
+      return 1
+      ;;
+  esac
+  printf '%s\n' "$target" >> "$FM_TEST_BASH_TOOL_REGISTRY"
+  {
+    printf '\n%s() { _fm_test_bash_tool %s "$@"; }\n' "$tool" "$tool"
+    printf 'export -f %s\n' "$tool"
+  } >> "$FM_TEST_BASH_ENV"
+}
+
+# fm_fake_bash_tool_exec <stub-path>: the generated command is known to run in
+# an isolated child, so replace that child with Bash instead of adding a helper
+# process. Use this for process-lifecycle fixtures whose asserted PID must stay
+# the interpreted tool process.
+fm_fake_bash_tool_exec() {
+  fm_fake_bash_tool "$1" || return 1
+  printf '%s\n' "$1" >> "$FM_TEST_BASH_TOOL_EXEC_REGISTRY"
+}
+
 fm_fake_exit0() {
   local fakebin=$1 tool
   shift
   for tool in "$@"; do
-    cat > "$fakebin/$tool" <<'SH'
-#!/usr/bin/env bash
-exit 0
-SH
-    chmod +x "$fakebin/$tool"
+    ln -sf /usr/bin/true "$fakebin/$tool"
   done
 }
 
@@ -185,6 +243,7 @@ fi
 exit 0
 SH
   chmod +x "$fakebin/$tool"
+  fm_fake_bash_tool "$fakebin/$tool"
 }
 
 # --- deterministic git identity and fixtures --------------------------------

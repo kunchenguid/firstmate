@@ -103,10 +103,12 @@ case "$ALIVE_COUNT_MAX" in ''|*[!0-9]*) die "FM_SSH_ALIVE_COUNT_MAX must be a po
 [ "$ALIVE_INTERVAL" -gt 0 ] || die "FM_SSH_ALIVE_INTERVAL must be a positive integer: $ALIVE_INTERVAL"
 [ "$ALIVE_COUNT_MAX" -gt 0 ] || die "FM_SSH_ALIVE_COUNT_MAX must be a positive integer: $ALIVE_COUNT_MAX"
 
+# shellcheck disable=SC2016 # The remote login shell, not this process, expands $HOME.
 "$SSH_BIN" \
   -o ForwardAgent=no \
   -o ClearAllForwardings=yes \
   -o 'SendEnv=-*' \
   -o "ServerAliveInterval=$ALIVE_INTERVAL" \
   -o "ServerAliveCountMax=$ALIVE_COUNT_MAX" \
-  -- "$HOST" fm-remote-entrypoint.sh "$PROTOCOL" "$ROOT_B64" "$HOME_B64" "$ARGV_B64"
+  -- "$HOST" /bin/bash '"$HOME/.local/bin/fm-remote-entrypoint.sh"' \
+  "$PROTOCOL" "$ROOT_B64" "$HOME_B64" "$ARGV_B64"

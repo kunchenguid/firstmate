@@ -129,11 +129,11 @@ clear_delivery_artifacts() {
 
 return_guard() {
   if [ -e "$STATE/.afk" ]; then
-    printf 'fm-afk-return: away mode is still active; run bin/fm-afk-return.sh before ordinary captain work\n' >&2
+    printf 'fm-afk-return: away mode is still active; run /bin/bash bin/fm-afk-return.sh before ordinary captain work\n' >&2
     return 3
   fi
   if [ -e "$GATE" ]; then
-    printf 'fm-afk-return: return catch-up is pending; remediate or durably reclassify every listed blocker, then run bin/fm-afk-return.sh check\n' >&2
+    printf 'fm-afk-return: return catch-up is pending; remediate or durably reclassify every listed blocker, then run /bin/bash bin/fm-afk-return.sh check\n' >&2
     print_blockers "$GATE" >&2
     return 3
   fi
@@ -147,13 +147,13 @@ return_reconcile() {
   preserve_evidence "$evidence"
 
   if [ -e "$STATE/.afk" ] || [ -e "$STATE/.afk-daemon-terminal" ]; then
-    if ! "$SCRIPT_DIR/fm-afk-launch.sh" stop; then
+    if ! /bin/bash "$SCRIPT_DIR/fm-afk-launch.sh" stop; then
       lifecycle_ok=0
       append_evidence lifecycle 'away-mode shutdown failed; lifecycle state preserved for retry' "$evidence"
     fi
   fi
 
-  drained=$("$SCRIPT_DIR/fm-wake-drain.sh") || {
+  drained=$(/bin/bash "$SCRIPT_DIR/fm-wake-drain.sh") || {
     append_evidence lifecycle 'durable wake drain failed; retry catch-up before ordinary work' "$evidence"
     lifecycle_ok=0
     drained=""
@@ -175,7 +175,7 @@ return_reconcile() {
     printf 'fm-afk-return: catch-up must finish before the captain request\n' >&2
     print_evidence "$GATE" >&2
     print_blockers "$GATE" >&2
-    printf 'fm-afk-return: handle each blocker now, or close it with resolved [key=...] and append a durable reclassification reason, then run bin/fm-afk-return.sh check\n' >&2
+    printf 'fm-afk-return: handle each blocker now, or close it with resolved [key=...] and append a durable reclassification reason, then run /bin/bash bin/fm-afk-return.sh check\n' >&2
     rm -f "$evidence" "$blockers"
     return 3
   fi

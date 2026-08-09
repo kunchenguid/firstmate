@@ -789,13 +789,20 @@ function analyzeProgram(command, context, depth = 0) {
     const shell = shellInvocation(position);
     const shellPayload = shell?.kind === "command" ? shell.payload : null;
     const shellScript = shell?.kind === "script" ? shell.payload : null;
+    const shellScriptKind = shellScript && basename(position.command?.value || "") === "bash"
+      && position.words[position.index + 1] === shellScript
+      && shellScript.literal && shellScript.subs.length === 0 && !shellScript.unquotedExpansion
+      ? protectedIdentity(shellScript.value, context.root)
+      : "";
     const sourceScript = sourcedScript(position);
     const literalEvalPayload = evalPayload(position);
     const heredocPayloads = shellHeredocPayloads(tokens, position);
     const hereStringPayloads = shellHereStringPayloads(tokens, position);
     for (const script of [shellScript, sourceScript]) {
       if (!script) continue;
-      nodeNestedProtected ||= Boolean(protectedIdentity(script.value, context.root)) || wordReferencesAny(script, nodeContext.protectedVariables);
+      if (script !== shellScript || !shellScriptKind) {
+        nodeNestedProtected ||= Boolean(protectedIdentity(script.value, context.root)) || wordReferencesAny(script, nodeContext.protectedVariables);
+      }
       unclassifiableProtected ||= hasUnclassifiableProtectedExpansion(script, context.root);
     }
     if (shellPayload && (!shellPayload.literal || shellPayload.subs.length > 0)) {
@@ -817,7 +824,7 @@ function analyzeProgram(command, context, depth = 0) {
     }
 
     const executable = position.command?.value || "";
-    const protectedKind = protectedIdentity(executable, context.root);
+    const protectedKind = shellScriptKind || protectedIdentity(executable, context.root);
     if (hasUnclassifiableProtectedExpansion(position.command, context.root)) unclassifiableProtected = true;
     const commandName = basename(executable);
     const args = position.words.slice(position.index + 1);

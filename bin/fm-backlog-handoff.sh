@@ -301,14 +301,14 @@ remote_deliver_outbox() { # <secondmate-id> <outbox-path>
   mv -f -- "$counter_tmp" "$counter" \
     || { rm -f -- "$snapshot" "$counter_tmp"; return 1; }
   remote_rel="state/handoff/$id.outbox.md"
-  if ! "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-file.sh put "$remote_rel" 1048576 \
+  if ! /bin/bash "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-file.sh put "$remote_rel" 1048576 \
     "$bytes" "$hash" "$generation" < "$snapshot"; then
     rm -f -- "$snapshot"
     echo "error: handoff transfer to $id was unavailable or completion is unknown; outbox preserved at $outbox" >&2
     return 1
   fi
   rm -f -- "$snapshot"
-  if ! receive_out=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-backlog-receive.sh \
+  if ! receive_out=$(/bin/bash "$SCRIPT_DIR/fm-on.sh" "$id" fm-backlog-receive.sh \
     "$remote_rel" "$bytes" "$hash" "$generation" < /dev/null 2>&1); then
     [ -z "$receive_out" ] || printf '%s\n' "$receive_out" >&2
     echo "error: handoff receipt by $id was unavailable or completion is unknown; outbox preserved at $outbox" >&2
@@ -355,7 +355,7 @@ remote_handoff() { # <secondmate-id> <keys...>
   validate_backlog_file "main backlog" "$MAIN_BACKLOG" || return 1
   validate_backlog_file "remote handoff outbox" "$outbox" || return 1
   fm_tasks_axi_compatible || {
-    echo "error: a compatible tasks-axi with atomic multi-ID mv support is required to stage remote handoffs; run bin/fm-bootstrap.sh for the required version" >&2
+    echo "error: a compatible tasks-axi with atomic multi-ID mv support is required to stage remote handoffs; run /bin/bash bin/fm-bootstrap.sh for the required version" >&2
     return 1
   }
   to_move=()
@@ -540,7 +540,7 @@ if [ "$FAILED" -ne 0 ]; then
 fi
 
 if ! fm_tasks_axi_compatible; then
-  echo "error: a compatible tasks-axi with atomic multi-ID mv support is required to move backlog items; run bin/fm-bootstrap.sh for the required version" >&2
+  echo "error: a compatible tasks-axi with atomic multi-ID mv support is required to move backlog items; run /bin/bash bin/fm-bootstrap.sh for the required version" >&2
   exit 1
 fi
 

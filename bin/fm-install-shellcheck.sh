@@ -6,7 +6,7 @@
 set -eu
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VERSION="$("$ROOT/bin/fm-lint.sh" --required-version)"
+VERSION="$(/bin/bash "$ROOT/bin/fm-lint.sh" --required-version)"
 SHA256=8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
 ARCHIVE="shellcheck-v${VERSION}.linux.x86_64.tar.xz"
 URL="https://github.com/koalaman/shellcheck/releases/download/v${VERSION}/${ARCHIVE}"

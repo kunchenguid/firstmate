@@ -131,7 +131,7 @@ if [ "$COMMAND" = fm-remote-doctor.sh ]; then
   fi
   trap - EXIT
   rm -rf -- "$TMP"
-  exec "${DOCTOR_ENV[@]}" "$COMMAND_PATH" "${ARGV[@]:1}"
+  exec "${DOCTOR_ENV[@]}" /bin/bash "$COMMAND_PATH" "${ARGV[@]:1}"
 fi
 
 if ! fm_remote_job_ensure_worker "$ROOT" "$ACCOUNT_HOME"; then

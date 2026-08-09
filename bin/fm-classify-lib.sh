@@ -32,8 +32,11 @@ _FM_CLASSIFY_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null)"
 
 # The crew current-state reader used for the "provably working" decision.
 # Overridable so tests can stub the run-step/pane verdict without a real worktree
-# or no-mistakes install; absent, it points at the real sibling script.
-FM_CREW_STATE_BIN="${FM_CREW_STATE_BIN:-$_FM_CLASSIFY_LIB_DIR/fm-crew-state.sh}"
+# or no-mistakes install; absent, it points at the real sibling script. The
+# tracked default runs through Bash, while an override remains an arbitrary
+# executable and therefore runs directly.
+_FM_CLASSIFY_DEFAULT_CREW_STATE_BIN="$_FM_CLASSIFY_LIB_DIR/fm-crew-state.sh"
+FM_CREW_STATE_BIN="${FM_CREW_STATE_BIN:-$_FM_CLASSIFY_DEFAULT_CREW_STATE_BIN}"
 
 # Captain-relevant status verbs. A status line carrying any of these is work
 # firstmate must see. Lines without these verbs are no-verb signals: the watcher
@@ -623,7 +626,11 @@ signal_reason_is_actionable() {  # <file> ...
 crew_absorb_class() {  # <id>
   local id=$1 line state src
   [ -n "$id" ] || { printf 'none'; return; }
-  line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
+  if [ "$FM_CREW_STATE_BIN" = "$_FM_CLASSIFY_DEFAULT_CREW_STATE_BIN" ]; then
+    line=$(/bin/bash "$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
+  else
+    line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
+  fi
   case "$line" in state:*) ;; *) printf 'none'; return ;; esac
   state=${line#state: }; state=${state%% *}
   if [ "$state" = paused ]; then printf 'paused'; return; fi

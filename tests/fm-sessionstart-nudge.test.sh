@@ -13,14 +13,14 @@ set -u
 # ancestor. This also prevents a developer's ambient harness from making the
 # portable regression pass locally while failing on a harness-free CI runner.
 if [ "${FM_SESSIONSTART_TEST_HARNESS:-0}" != 1 ]; then
-  HARNESS_FIXTURE=$(mktemp -d "${TMPDIR:-/tmp}/fm-sessionstart-harness.XXXXXX") || exit 1
-  ln -s /bin/bash "$HARNESS_FIXTURE/codex" || exit 1
+  # A direct symlinked-shell launch exercises the host shebang defect rather
+  # than the harness classifier. Keep the fixture process native while setting
+  # its observable argv[0] to the same codex identity the ancestry walk reads.
   # shellcheck disable=SC2016 # Expand in the fixture shell, not this parent.
-  FM_SESSIONSTART_TEST_HARNESS=1 "$HARNESS_FIXTURE/codex" \
-    -c '"$@"; rc=$?; :; exit "$rc"' _ "$0" "$@"
-  HARNESS_STATUS=$?
-  rm -rf "$HARNESS_FIXTURE"
-  exit "$HARNESS_STATUS"
+  FM_SESSIONSTART_TEST_HARNESS=1 /bin/bash -c \
+    'exec -a codex /bin/bash -c '\''/bin/bash "$@"; rc=$?; :; exit "$rc"'\'' _ "$@"' \
+    _ "$0" "$@"
+  exit $?
 fi
 
 # shellcheck source=tests/lib.sh
@@ -33,7 +33,7 @@ NUDGE="$ROOT/bin/fm-sessionstart-nudge.sh"
 RUN="$ROOT/bin/fm-sessionstart-run.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-operational-input.sh"
-NUDGE_TEXT="Run \`bin/fm-session-start.sh\` now, exactly once, before executing any other instructions."
+NUDGE_TEXT="Run \`/bin/bash bin/fm-session-start.sh\` now, exactly once, before executing any other instructions."
 fm_operational_input_encode session-start "$NUDGE_TEXT" NUDGE_LINE \
   || fail "could not construct expected session-start nudge"
 fm_git_identity fmtest fmtest@example.invalid
@@ -48,7 +48,7 @@ make_primary() {
 
 run_nudge() {
   local root=$1
-  FM_GATE_REFUSE_BYPASS=0 FM_ROOT_OVERRIDE="$root" FM_HOME="$root" "$NUDGE"
+  FM_GATE_REFUSE_BYPASS=0 FM_ROOT_OVERRIDE="$root" FM_HOME="$root" /bin/bash "$NUDGE"
 }
 
 expect_silent_zero() {
@@ -75,7 +75,7 @@ test_gate_env_is_silent() {
   local root="$TMP_ROOT/gate-env"
   make_primary "$root"
   expect_silent_zero "gate env nudge" env NO_MISTAKES_GATE=1 FM_GATE_REFUSE_BYPASS=0 \
-    FM_ROOT_OVERRIDE="$root" FM_HOME="$root" "$NUDGE"
+    FM_ROOT_OVERRIDE="$root" FM_HOME="$root" /bin/bash "$NUDGE"
   pass "fm-sessionstart-nudge: NO_MISTAKES_GATE is silent"
 }
 
@@ -90,7 +90,7 @@ test_gate_common_dir_is_silent() {
   : > "$root/AGENTS.md"
   printf 'gate-test\n' > "$root/.fm-secondmate-home"
   expect_silent_zero "gate common-dir nudge" env FM_GATE_REFUSE_BYPASS=0 \
-    FM_ROOT_OVERRIDE="$root" FM_HOME="$root" "$NUDGE"
+    FM_ROOT_OVERRIDE="$root" FM_HOME="$root" /bin/bash "$NUDGE"
   pass "fm-sessionstart-nudge: .no-mistakes gate common-dir is silent"
 }
 
@@ -190,7 +190,7 @@ make_run_primary() {
 run_hook() {  # <root> [args...]
   local root=$1
   shift
-  FM_GATE_REFUSE_BYPASS=0 FM_ROOT_OVERRIDE="$root" FM_HOME="$root" PATH="$RUN_PATH" "$RUN" "$@"
+  FM_GATE_REFUSE_BYPASS=0 FM_ROOT_OVERRIDE="$root" FM_HOME="$root" PATH="$RUN_PATH" /bin/bash "$RUN" "$@"
 }
 
 # Every run-tier assertion keys off the digest banner, which fm-session-start.sh
@@ -369,7 +369,7 @@ test_run_gate_and_scope_are_silent() {
   local root="$TMP_ROOT/run-gate" base="$TMP_ROOT/run-linked-base" linked="$TMP_ROOT/run-linked"
   make_run_primary "$root"
   expect_silent_zero "gate env run" env NO_MISTAKES_GATE=1 FM_GATE_REFUSE_BYPASS=0 \
-    FM_ROOT_OVERRIDE="$root" FM_HOME="$root" PATH="$RUN_PATH" "$RUN" --source startup
+    FM_ROOT_OVERRIDE="$root" FM_HOME="$root" PATH="$RUN_PATH" /bin/bash "$RUN" --source startup
   assert_absent "$root/state/.lock" "a gate agent's session open still took the fleet lock"
 
   fm_git_worktree "$base" "$linked" fm/run-linked

@@ -15,11 +15,11 @@ cleanup() {
 trap cleanup EXIT
 
 classify_cli() {
-  printf '%s' "$1" | "$OWNER" classify 2>/dev/null
+  printf '%s' "$1" | /bin/bash "$OWNER" classify 2>/dev/null
 }
 
 kind_cli() {
-  printf '%s' "$1" | "$OWNER" kind 2>/dev/null
+  printf '%s' "$1" | /bin/bash "$OWNER" kind 2>/dev/null
 }
 
 test_current_generic_matrix() {
@@ -142,10 +142,10 @@ JS
 
 test_invalid_current_encodings_are_rejected() {
   local output
-  output=$(printf 'body' | "$OWNER" encode legacy-operational 2>/dev/null) \
+  output=$(printf 'body' | /bin/bash "$OWNER" encode legacy-operational 2>/dev/null) \
     && fail "legacy-operational was accepted as a current producer kind"
   [ -z "$output" ] || fail "invalid current kind printed protocol data"
-  output=$(printf '' | "$OWNER" encode watcher 2>/dev/null) \
+  output=$(printf '' | /bin/bash "$OWNER" encode watcher 2>/dev/null) \
     && fail "empty current operational body was accepted"
   [ -z "$output" ] || fail "empty current body printed protocol data"
   pass "operational input: current construction rejects legacy kinds and empty bodies"

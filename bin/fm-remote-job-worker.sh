@@ -608,7 +608,7 @@ worker_run_job() { # <account-home> <job-dir>
   set +e
   WORKER_PREEMPTIBLE=$preemptible
   worker_run_with_timeout "$job" "$remaining" "${child_env[@]}" \
-    "$command_path" "${argv[@]:1}" < "$job/stdin" > "$stdout_pipe" 2> "$stderr_pipe"
+    /bin/bash "$command_path" "${argv[@]:1}" < "$job/stdin" > "$stdout_pipe" 2> "$stderr_pipe"
   rc=$?
   WORKER_PREEMPTIBLE=0
   wait "$stdout_reader"
@@ -746,7 +746,7 @@ worker_supervise_linux() {
       return 0
     fi
     started=$SECONDS
-    "$SCRIPT_DIR/fm-remote-job-worker.sh" --serve &
+    /bin/bash "$SCRIPT_DIR/fm-remote-job-worker.sh" --serve &
     WORKER_SUPERVISED_PID=$!
     wait "$WORKER_SUPERVISED_PID" 2>/dev/null
     child_status=$?

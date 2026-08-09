@@ -12,6 +12,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 CHECK="$ROOT/bin/fm-arm-pretool-check.sh"
+run_check() { /bin/bash "$CHECK" "$@"; }
 POLICY="$ROOT/bin/fm-arm-command-policy.mjs"
 
 # --- full cross-harness acceptance matrix ----------------------------------
@@ -43,6 +44,9 @@ matrix_case A14 allow "[ -f 'config/x-mode.env' ] && source 'config/x-mode.env';
 matrix_case A15 allow "cd $ROOT && exec bin/fm-watch-arm.sh"
 matrix_case A16 allow "export FM_HOME=$ROOT && bin/fm-watch-checkpoint.sh --seconds 180"
 matrix_case A17 allow $'source "config/x-mode.env"\nbin/fm-watch-checkpoint.sh --seconds 180'
+matrix_case A18 allow '/bin/bash bin/fm-watch-arm.sh'
+matrix_case A19 allow '/bin/bash bin/fm-watch-checkpoint.sh --seconds 180'
+matrix_case A20 allow 'exec /bin/bash bin/fm-watch-arm.sh'
 
 matrix_case R01 allow "pgrep -fl '/bin/fm-watch.sh' || true"
 matrix_case R02 allow "ps aux | rg '/bin/fm-watch.sh'"
@@ -122,6 +126,9 @@ matrix_case D55 deny 'while true; do pkill -f fm-watch; done'
 matrix_case D56 deny 'for x in 1; do pkill -f fm-watch; done'
 matrix_case D57 deny 'case x in x) pkill -f fm-watch ;; esac'
 matrix_case D58 deny 'until false; do kill $(pgrep -f fm-watch); done'
+matrix_case D59 deny '/bin/bash -e bin/fm-watch-arm.sh'
+matrix_case D60 deny '/bin/bash bin/fm-watch.sh'
+matrix_case D61 deny 'env /bin/bash bin/fm-watch-arm.sh'
 
 matrix_case E01 allow "bin/fm-watch-checkpoint.sh --seconds '180;still-one-arg'"
 matrix_case E02 allow "bin/fm-watch-checkpoint.sh --label 'fm-watch-arm.sh; literal argument'"
@@ -153,21 +160,21 @@ run_matrix_entry() {
   case "$entry" in
     codex)
       payload=$(jq -cn --arg command "$cmd" '{tool_name:"Bash",tool_input:{command:$command}}')
-      printf '%s' "$payload" | "$CHECK" >"$out_file" 2>"$err_file"
+      printf '%s' "$payload" | run_check >"$out_file" 2>"$err_file"
       rc=$?
       ;;
     claude)
       payload=$(jq -cn --arg command "$cmd" '{tool_name:"Bash",tool_input:{command:$command}}')
-      printf '%s' "$payload" | "$CHECK" --claude >"$out_file" 2>"$err_file"
+      printf '%s' "$payload" | run_check --claude >"$out_file" 2>"$err_file"
       rc=$?
       ;;
     grok)
       payload=$(jq -cn --arg command "$cmd" '{toolName:"run_terminal_command",toolInput:{command:$command}}')
-      printf '%s' "$payload" | "$CHECK" >"$out_file" 2>"$err_file"
+      printf '%s' "$payload" | run_check >"$out_file" 2>"$err_file"
       rc=$?
       ;;
     opencode|pi)
-      "$CHECK" --command "$cmd" >"$out_file" 2>"$err_file"
+      run_check --command "$cmd" >"$out_file" 2>"$err_file"
       rc=$?
       ;;
     *)
@@ -242,16 +249,16 @@ test_direct_policy_contract() {
 # --- CLI parsing -------------------------------------------------------------
 
 test_command_equals_form() {
-  "$CHECK" --command='bin/fm-watch-arm.sh &' >/dev/null 2>&1
+  run_check --command='bin/fm-watch-arm.sh &' >/dev/null 2>&1
   [ "$?" -eq 2 ] || fail "--command=<val> form must parse the same as --command <val>"
   pass "--command=<val> equals-form parses correctly"
 }
 
 test_background_flag_accepted_and_non_gating() {
   local rc_bg rc_nobg
-  "$CHECK" --command 'exec bin/fm-watch-arm.sh' --background true >/dev/null 2>&1
+  run_check --command 'exec bin/fm-watch-arm.sh' --background true >/dev/null 2>&1
   rc_bg=$?
-  "$CHECK" --command 'exec bin/fm-watch-arm.sh' >/dev/null 2>&1
+  run_check --command 'exec bin/fm-watch-arm.sh' >/dev/null 2>&1
   rc_nobg=$?
   [ "$rc_bg" -eq 0 ] || fail "--background true must not change the allow decision on its own, got exit $rc_bg"
   [ "$rc_bg" -eq "$rc_nobg" ] || fail "--background flag must be accepted without altering the decision"
@@ -259,7 +266,7 @@ test_background_flag_accepted_and_non_gating() {
 }
 
 test_unknown_flag_errors() {
-  "$CHECK" --bogus-flag >/dev/null 2>&1
+  run_check --bogus-flag >/dev/null 2>&1
   [ "$?" -eq 2 ] || fail "an unrecognized flag must exit non-zero, not silently allow"
   pass "unknown CLI flag is rejected"
 }
@@ -268,7 +275,7 @@ test_unknown_flag_errors() {
 
 test_stdin_grok_schema_deny() {
   local out rc
-  out=$(printf '%s' '{"toolInput":{"command":"bin/fm-watch-arm.sh &","background":false},"toolName":"run_terminal_command"}' | "$CHECK" 2>/dev/null)
+  out=$(printf '%s' '{"toolInput":{"command":"bin/fm-watch-arm.sh &","background":false},"toolName":"run_terminal_command"}' | run_check 2>/dev/null)
   rc=$?
   [ "$rc" -eq 2 ] || fail "grok toolInput.command schema must be read and denied, got exit $rc"
   printf '%s' "$out" | jq -e '.decision == "deny"' >/dev/null 2>&1 || fail "stdout must carry Grok's {\"decision\":\"deny\",...} shape: $out"
@@ -277,7 +284,7 @@ test_stdin_grok_schema_deny() {
 
 test_stdin_claude_codex_schema_allow() {
   local rc
-  printf '%s' '{"tool_input":{"command":"exec bin/fm-watch-arm.sh"},"tool_name":"Bash"}' | "$CHECK" >/dev/null 2>&1
+  printf '%s' '{"tool_input":{"command":"exec bin/fm-watch-arm.sh"},"tool_name":"Bash"}' | run_check >/dev/null 2>&1
   rc=$?
   [ "$rc" -eq 0 ] || fail "claude/codex tool_input.command schema must be read and allowed for the blessed shape, got exit $rc"
   pass "stdin claude/codex schema (tool_input.command): blessed shape allowed"
@@ -285,7 +292,7 @@ test_stdin_claude_codex_schema_allow() {
 
 test_stdin_claude_codex_schema_deny() {
   local rc
-  printf '%s' '{"tool_input":{"command":"bin/fm-watch-arm.sh &"},"tool_name":"Bash"}' | "$CHECK" >/dev/null 2>&1
+  printf '%s' '{"tool_input":{"command":"bin/fm-watch-arm.sh &"},"tool_name":"Bash"}' | run_check >/dev/null 2>&1
   rc=$?
   [ "$rc" -eq 2 ] || fail "claude/codex tool_input.command schema must be denied for the backgrounded shape, got exit $rc"
   pass "stdin claude/codex schema (tool_input.command): backgrounded shape denied"
@@ -293,7 +300,7 @@ test_stdin_claude_codex_schema_deny() {
 
 test_stdin_unrelated_command_allowed() {
   local rc
-  printf '%s' '{"tool_input":{"command":"ls -la"},"tool_name":"Bash"}' | "$CHECK" >/dev/null 2>&1
+  printf '%s' '{"tool_input":{"command":"ls -la"},"tool_name":"Bash"}' | run_check >/dev/null 2>&1
   rc=$?
   [ "$rc" -eq 0 ] || fail "an unrelated command must pass through allowed, got exit $rc"
   pass "stdin: unrelated command is a fast allow"
@@ -303,49 +310,49 @@ test_prefilter_is_strict_superset() {
   local rc
   # A command with no fm-watch substring is fast-allowed by the transport
   # prefilter without ever invoking the classifier.
-  "$CHECK" --command 'ls -la /bin && echo done' >/dev/null 2>&1
+  run_check --command 'ls -la /bin && echo done' >/dev/null 2>&1
   rc=$?
   [ "$rc" -eq 0 ] || fail "a command with no fm-watch substring must be fast-allowed, got exit $rc"
   # A deniable protected execution carries the fm-watch bytes, so the prefilter
   # must delegate to the classifier and the deny must survive.
-  "$CHECK" --command 'bin/fm-watch-arm.sh &' >/dev/null 2>&1
+  run_check --command 'bin/fm-watch-arm.sh &' >/dev/null 2>&1
   rc=$?
   [ "$rc" -eq 2 ] || fail "prefilter must delegate a deniable fm-watch command, not fast-allow it, got exit $rc"
   # A broad watcher kill also contains the fm-watch bytes and must still deny.
-  "$CHECK" --command "pkill -f '/bin/fm-watch.sh'" >/dev/null 2>&1
+  run_check --command "pkill -f '/bin/fm-watch.sh'" >/dev/null 2>&1
   rc=$?
   [ "$rc" -eq 2 ] || fail "prefilter must delegate a broad watcher kill, not fast-allow it, got exit $rc"
   # Obfuscated protected paths lose the literal fm-watch bytes (a line
   # continuation or a quote splits them), yet the classifier reconstructs them.
   # The prefilter normalizes those bytes first, so both must still delegate and
   # deny rather than slip through as a fast allow.
-  "$CHECK" --command "$(printf 'bin/fm-watc\\\nh-arm.sh &')" >/dev/null 2>&1
+  run_check --command "$(printf 'bin/fm-watc\\\nh-arm.sh &')" >/dev/null 2>&1
   rc=$?
   [ "$rc" -eq 2 ] || fail "prefilter must delegate a line-continuation-split protected path, not fast-allow it, got exit $rc"
-  "$CHECK" --command 'bin/fm-"watch-arm.sh" &' >/dev/null 2>&1
+  run_check --command 'bin/fm-"watch-arm.sh" &' >/dev/null 2>&1
   rc=$?
   [ "$rc" -eq 2 ] || fail "prefilter must delegate a quote-split protected path, not fast-allow it, got exit $rc"
   # A quoting-decoder marker ($' ANSI-C or $" locale) hides the fm-watch bytes
   # from the cheap byte strip but the classifier reconstructs them, so the
   # prefilter must delegate on the marker rather than fast-allow. Without this
   # the byte strip loses the encoded character and slips the command through.
-  "$CHECK" --command "bin/fm-\$'\x77'atch-arm.sh &" >/dev/null 2>&1
+  run_check --command "bin/fm-\$'\x77'atch-arm.sh &" >/dev/null 2>&1
   rc=$?
   [ "$rc" -eq 2 ] || fail "prefilter must delegate an ANSI-C-encoded protected path, not fast-allow it, got exit $rc"
-  "$CHECK" --command 'bin/fm-$"watch"-arm.sh &' >/dev/null 2>&1
+  run_check --command 'bin/fm-$"watch"-arm.sh &' >/dev/null 2>&1
   rc=$?
   [ "$rc" -eq 2 ] || fail "prefilter must delegate a locale-string-encoded protected path, not fast-allow it, got exit $rc"
   # The marker is specifically $ followed by a quote, not any $ expansion: an
   # ordinary $VAR that is not a watcher reference still takes the fast path.
-  "$CHECK" --command '$FM_HOME/bin/fm-teardown.sh &' >/dev/null 2>&1
+  run_check --command '$FM_HOME/bin/fm-teardown.sh &' >/dev/null 2>&1
   rc=$?
   [ "$rc" -eq 0 ] || fail "a benign \$VAR non-watcher command must still fast-allow, got exit $rc"
-  "$CHECK" --command 'echo "$HOME/scratch" && ls -la' >/dev/null 2>&1
+  run_check --command 'echo "$HOME/scratch" && ls -la' >/dev/null 2>&1
   rc=$?
   [ "$rc" -eq 0 ] || fail "a benign \$HOME command must still fast-allow, got exit $rc"
   # A benign command that only mentions fm-watch as data still reaches the
   # classifier and is allowed there, proving the prefilter owns no verdict.
-  "$CHECK" --command "echo 'pkill -f fm-watch'" >/dev/null 2>&1
+  run_check --command "echo 'pkill -f fm-watch'" >/dev/null 2>&1
   rc=$?
   [ "$rc" -eq 0 ] || fail "a benign fm-watch-substring command must be classified and allowed, got exit $rc"
   pass "transport prefilter is a strict superset: non-fm-watch fast-allows, every fm-watch and quoting-decoder-marker command reaches the classifier"
@@ -355,7 +362,7 @@ test_prefilter_is_strict_superset() {
 
 test_failopen_empty_stdin() {
   local rc
-  printf '' | "$CHECK" >/dev/null 2>&1
+  printf '' | run_check >/dev/null 2>&1
   rc=$?
   [ "$rc" -eq 0 ] || fail "empty stdin must fail open (exit 0), got exit $rc"
   pass "fail-open: empty stdin"
@@ -363,7 +370,7 @@ test_failopen_empty_stdin() {
 
 test_failopen_garbage_stdin() {
   local rc
-  printf 'not json at all {{{' | "$CHECK" >/dev/null 2>&1
+  printf 'not json at all {{{' | run_check >/dev/null 2>&1
   rc=$?
   [ "$rc" -eq 0 ] || fail "unparseable stdin must fail open (exit 0), got exit $rc"
   pass "fail-open: unparseable JSON on stdin"
@@ -379,7 +386,7 @@ test_failopen_missing_jq() {
     real=$(command -v "$tool")
     ln -sf "$real" "$fakebin/$tool"
   done
-  PATH="$fakebin" bash -c "printf '%s' '{\"tool_input\":{\"command\":\"bin/fm-watch-arm.sh &\"}}' | '$CHECK'" >/dev/null 2>&1
+  PATH="$fakebin" bash -c "printf '%s' '{\"tool_input\":{\"command\":\"bin/fm-watch-arm.sh &\"}}' | /bin/bash '$CHECK'" >/dev/null 2>&1
   rc=$?
   [ "$rc" -eq 0 ] || fail "missing jq must fail open (exit 0) rather than crash-deny, got exit $rc"
   pass "fail-open: missing jq on stdin path"
@@ -394,7 +401,7 @@ test_failopen_missing_node() {
     real=$(command -v "$tool")
     ln -sf "$real" "$fakebin/$tool"
   done
-  PATH="$fakebin" "$CHECK" --command 'bin/fm-watch-arm.sh &' >/dev/null 2>&1
+  PATH="$fakebin" run_check --command 'bin/fm-watch-arm.sh &' >/dev/null 2>&1
   rc=$?
   [ "$rc" -eq 0 ] || fail "missing node must fail open (exit 0), got exit $rc"
   pass "fail-open: missing classifier runtime"
@@ -407,7 +414,7 @@ test_claude_mode_stdout_empty_on_deny() {
   # Keep stderr capture under TMPDIR so concurrent isolation-proof workers do
   # not share a fixed global /tmp path.
   stderr_file=$(mktemp "${TMPDIR:-/tmp}/fm-arm-pretool-check-claude-stderr.XXXXXX")
-  out=$("$CHECK" --claude --command 'bin/fm-watch-arm.sh &' 2>"$stderr_file")
+  out=$(run_check --claude --command 'bin/fm-watch-arm.sh &' 2>"$stderr_file")
   rc=$?
   err=$(cat "$stderr_file" 2>/dev/null)
   rm -f "$stderr_file"
@@ -420,7 +427,7 @@ test_claude_mode_stdout_empty_on_deny() {
 
 test_default_mode_stdout_has_grok_json_on_deny() {
   local out rc
-  out=$("$CHECK" --command 'bin/fm-watch-arm.sh &' 2>/dev/null)
+  out=$(run_check --command 'bin/fm-watch-arm.sh &' 2>/dev/null)
   rc=$?
   [ "$rc" -eq 2 ] || fail "default deny must exit 2, got $rc"
   printf '%s' "$out" | jq -e '.decision == "deny"' >/dev/null 2>&1 \
@@ -430,8 +437,8 @@ test_default_mode_stdout_has_grok_json_on_deny() {
 
 test_allow_is_silent_both_modes() {
   local out1 out2
-  out1=$("$CHECK" --command 'exec bin/fm-watch-arm.sh' 2>&1)
-  out2=$("$CHECK" --claude --command 'exec bin/fm-watch-arm.sh' 2>&1)
+  out1=$(run_check --command 'exec bin/fm-watch-arm.sh' 2>&1)
+  out2=$(run_check --claude --command 'exec bin/fm-watch-arm.sh' 2>&1)
   [ -z "$out1" ] || fail "default allow must be silent, got: $out1"
   [ -z "$out2" ] || fail "--claude allow must be silent, got: $out2"
   pass "allow is silent on both stdout and stderr in default and --claude mode"

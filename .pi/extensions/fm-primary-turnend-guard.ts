@@ -71,7 +71,7 @@ const sessionstartTruncatedMarker =
 
 function runSessionstartHook(source: string): Promise<string> {
   return new Promise((resolveResult) => {
-    const child = spawn(`${root}/bin/fm-sessionstart-run.sh`, ["--source", source], {
+    const child = spawn("/bin/bash", [`${root}/bin/fm-sessionstart-run.sh`, "--source", source], {
       stdio: ["ignore", "pipe", "ignore"],
     });
     const chunks: Buffer[] = [];
@@ -124,7 +124,7 @@ async function injectSessionstart(pi: ExtensionAPI, source: string): Promise<voi
 
 function runGuard(): Promise<{ code: number; stderr: string }> {
   return new Promise((resolveResult) => {
-    const child = spawn(`${root}/bin/fm-turnend-guard.sh`, {
+    const child = spawn("/bin/bash", [`${root}/bin/fm-turnend-guard.sh`], {
       stdio: ["pipe", "ignore", "pipe"],
     });
     let stderr = "";
@@ -146,7 +146,7 @@ function runGuard(): Promise<{ code: number; stderr: string }> {
 // script owns its own decision and is inert outside the real primary checkout.
 function runChecker(script: string, command: string): Promise<{ code: number; stderr: string }> {
   return new Promise((resolveResult) => {
-    const child = spawn(`${root}/bin/${script}`, ["--command", command], {
+    const child = spawn("/bin/bash", [`${root}/bin/${script}`, "--command", command], {
       stdio: ["ignore", "ignore", "pipe"],
     });
     let stderr = "";

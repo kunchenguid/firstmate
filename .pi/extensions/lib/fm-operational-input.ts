@@ -2,8 +2,9 @@ import { spawnSync } from "node:child_process";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+const operationalInputOverride = process.env.FM_OPERATIONAL_INPUT_SCRIPT;
 const operationalInputScript =
-  process.env.FM_OPERATIONAL_INPUT_SCRIPT ||
+  operationalInputOverride ||
   resolve(dirname(fileURLToPath(import.meta.url)), "../../../bin/fm-operational-input.sh");
 
 export const FIRSTMATE_CURRENT_OPERATIONAL_KINDS = [
@@ -23,8 +24,10 @@ function runOperationalInputCommand(
   content: string,
   kind?: FirstmateCurrentOperationalKind,
 ): string | undefined {
-  const args = command === "encode" ? [command, kind ?? ""] : [command];
-  const result = spawnSync(operationalInputScript, args, {
+  const scriptArgs = command === "encode" ? [command, kind ?? ""] : [command];
+  const executable = operationalInputOverride ? operationalInputScript : "/bin/bash";
+  const args = operationalInputOverride ? scriptArgs : [operationalInputScript, ...scriptArgs];
+  const result = spawnSync(executable, args, {
     encoding: "utf8",
     input: content,
     maxBuffer: 1024 * 1024,

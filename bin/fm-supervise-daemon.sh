@@ -574,7 +574,7 @@ mark_escalated_seen() {  # <kind> <arg> <state>
 # launcher source it purely for its pure functions).
 fm_daemon_primary_harness() {
   if [ -z "${FM_DAEMON_PRIMARY_HARNESS:-}" ]; then
-    FM_DAEMON_PRIMARY_HARNESS=$("$FM_DAEMON_DIR/fm-harness.sh" 2>/dev/null || printf 'unknown')
+    FM_DAEMON_PRIMARY_HARNESS=$(/bin/bash "$FM_DAEMON_DIR/fm-harness.sh" 2>/dev/null || printf 'unknown')
     [ -n "$FM_DAEMON_PRIMARY_HARNESS" ] || FM_DAEMON_PRIMARY_HARNESS=unknown
   fi
   printf '%s' "$FM_DAEMON_PRIMARY_HARNESS"
@@ -1453,7 +1453,7 @@ fm_super_main() {
 
   start_watcher() {
     CUR_TMP=$(mktemp "${TMPDIR:-/tmp}/fm-watch.XXXXXX") || { log "error: mktemp failed; retrying in 5s"; sleep 5; return 1; }
-    "$WATCH" >"$CUR_TMP" 2>>"$WATCH_ERR" &
+    /bin/bash "$WATCH" >"$CUR_TMP" 2>>"$WATCH_ERR" &
     WATCHER_PID=$!
   }
 

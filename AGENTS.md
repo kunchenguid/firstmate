@@ -129,7 +129,8 @@ Treat `data/captain.md` as the domain-local record of captain preferences, optio
 
 ## 3. Session start (run once at every session start)
 
-Run `bin/fm-session-start.sh` exactly once at session start.
+Run `/bin/bash bin/fm-session-start.sh` exactly once at session start.
+Launch every Firstmate-owned shell script process through `/bin/bash <script> ...`, including when another instruction abbreviates the command to `bin/fm-*.sh`; this bypasses a macOS process-launch defect that can strand direct shebang execution before the script starts, while explicit executable overrides remain direct because they may not be Bash scripts.
 Its header is the single owner of composed commands, ordering, and digest contents.
 `bin/fm-supervision-instructions.sh` renders the emitted supervision block from `docs/supervision-protocols/`.
 Do not reimplement it by separately running its lock, bootstrap, initial wake-drain, or deferred-network components.

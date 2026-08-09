@@ -58,7 +58,7 @@ Malformed or unsupported shell syntax that contains a protected command is a sem
 The tokenizer recognizes cooked words with quote provenance, comments, heredoc bodies, shell list operators, pipelines, redirections, command and process substitutions, parenthesized subshells, brace groups, and literal nested execution payloads.
 Quoted text, comments, heredoc bodies, and later argument words are data positions unless a recognized execution sink recursively executes them.
 
-A command word in executed position is a protected execution when its normalized path suffix matches one of the protected watcher scripts:
+A command word in executed position, or the first literal script operand of an option-free `bash`, is a protected execution when its normalized path suffix matches one of the protected watcher scripts:
 
 ```text
 bin/fm-watch-arm.sh          (arm; blessed entry point)
@@ -89,8 +89,8 @@ An actual protected command with a heredoc still has a redirection and is denied
 
 ## Blessed syntax tree
 
-An allowed watcher program is one linear outer command list with zero or more approved setup nodes followed by exactly one direct protected node.
-`bin/fm-watch-arm.sh` and `bin/fm-watch-checkpoint.sh` are the only blessed final nodes, including their expanded-path forms; a `bin/fm-watch.sh` final node is never blessed and denies with `watcher-direct`.
+An allowed watcher program is one linear outer command list with zero or more approved setup nodes followed by exactly one protected node.
+`bin/fm-watch-arm.sh` and `bin/fm-watch-checkpoint.sh` are the only blessed final nodes, including their expanded-path forms and the exact `/bin/bash <script> ...` process-launch form; a `bin/fm-watch.sh` final node is never blessed and denies with `watcher-direct` in either form.
 
 Approved setup nodes are:
 
@@ -106,10 +106,11 @@ Approved nodes may be separated by `;`, a real newline, or `&&`.
 `&&` is accepted after setup so a failed `cd`, `export`, or source prevents the protected call from running under the wrong setup.
 
 The final protected node may have one immediate `exec` wrapper.
+It may also use an option-free `bash` command with the literal protected script as its immediate first operand, which is the tracked-script launch contract rather than a nested command payload.
 Its arguments are ordinary shell words and may contain quoted semicolons or watcher names.
 No other wrapper is approved.
 
-Inline environment assignments, `env`, `sudo`, `nohup`, nested shells, `eval`, subshell groups, substitutions, redirections, pipelines, asynchronous lists, `disown`, unrelated list nodes, and unsupported compound syntax are not blessed.
+Inline environment assignments, `env`, `sudo`, `nohup`, shell `-c` payloads, shell options before the protected script, `eval`, subshell groups, substitutions, redirections, pipelines, asynchronous lists, `disown`, unrelated list nodes, and unsupported compound syntax are not blessed.
 
 ## Broad watcher kills
 

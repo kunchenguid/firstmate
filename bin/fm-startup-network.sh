@@ -246,7 +246,7 @@ EOF
   local monitor_was_on=0
   case $- in *m*) monitor_was_on=1 ;; esac
   set -m 2>/dev/null || true
-  nohup "$SCRIPT_DIR/fm-startup-network.sh" run --locked "$locked" --lock-pid "$lock_pid" \
+  nohup /bin/bash "$SCRIPT_DIR/fm-startup-network.sh" run --locked "$locked" --lock-pid "$lock_pid" \
     --generation "$generation" \
     >/dev/null 2>&1 </dev/null &
   worker_pid=$!
@@ -323,7 +323,7 @@ EOF
     fi
     if [ "$claim_live" -eq 0 ]; then
       fm_wake_append check startup-network \
-        "check: startup-network: deferred startup network checks finished ($state); read them with $FM_ROOT/bin/fm-startup-network.sh report" \
+        "check: startup-network: deferred startup network checks finished ($state); read them with /bin/bash $FM_ROOT/bin/fm-startup-network.sh report" \
         || true
       fm_lock_release "$PUBLISH_LOCK"
       return 0
@@ -338,7 +338,7 @@ EOF
     return 0
   fi
   fm_wake_append check startup-network \
-    "check: startup-network: deferred startup network checks finished ($state); read them with $FM_ROOT/bin/fm-startup-network.sh report" \
+    "check: startup-network: deferred startup network checks finished ($state); read them with /bin/bash $FM_ROOT/bin/fm-startup-network.sh report" \
     || true
   fm_lock_release "$PUBLISH_LOCK"
 }
@@ -449,10 +449,10 @@ EOF
   if [ "$sweep_locked" -eq 1 ]; then
     fm_run_timed "$budget" env FM_BOOTSTRAP_NETWORK=only \
       FM_BOOTSTRAP_NETWORK_LOCK_PID="$lock_pid" \
-      "$SCRIPT_DIR/fm-bootstrap.sh" >"$out" 2>&1 || rc=$?
+      /bin/bash "$SCRIPT_DIR/fm-bootstrap.sh" >"$out" 2>&1 || rc=$?
   else
     fm_run_timed "$budget" env FM_BOOTSTRAP_NETWORK=only FM_BOOTSTRAP_DETECT_ONLY=1 \
-      "$SCRIPT_DIR/fm-bootstrap.sh" >"$out" 2>&1 || rc=$?
+      /bin/bash "$SCRIPT_DIR/fm-bootstrap.sh" >"$out" 2>&1 || rc=$?
   fi
   [ "$lease_held" -eq 0 ] || fm_lock_release "$STATE/.lock.acquire"
   # The bounded run as a whole, so the per-phase records can be read against the
@@ -465,12 +465,12 @@ EOF
   case "$rc" in
     0) publish "$generation" 'done' "$phases" "$sweep_locked" "$started" "$rc" "$out" "$timings" ;;
     124)
-      printf 'NETWORK_CHECKS: hit the %ss bound before finishing, so %s may be incomplete; rerun %s/bin/fm-startup-network.sh run --locked %s\n' \
+      printf 'NETWORK_CHECKS: hit the %ss bound before finishing, so %s may be incomplete; rerun /bin/bash %s/bin/fm-startup-network.sh run --locked %s\n' \
         "$budget" "$(phase_label "$phases")" "$FM_ROOT" "$sweep_locked" >> "$out"
       publish "$generation" timeout "$phases" "$sweep_locked" "$started" "$rc" "$out" "$timings"
       ;;
     *)
-      printf 'NETWORK_CHECKS: the deferred check worker exited %s, so %s may be incomplete; rerun %s/bin/fm-startup-network.sh run --locked %s\n' \
+      printf 'NETWORK_CHECKS: the deferred check worker exited %s, so %s may be incomplete; rerun /bin/bash %s/bin/fm-startup-network.sh run --locked %s\n' \
         "$rc" "$(phase_label "$phases")" "$FM_ROOT" "$sweep_locked" >> "$out"
       publish "$generation" failed "$phases" "$sweep_locked" "$started" "$rc" "$out" "$timings"
       ;;
@@ -495,7 +495,7 @@ print_finished() {  # <state>
   printf 'completed off the startup path in %ss: %s.\n' "$took" "$(phase_label "$phases")"
   [ "$state" = 'done' ] || printf 'The stage itself did not finish cleanly (%s) - the NETWORK_CHECKS line below names what to rerun.\n' "$state"
   if [ "$report_published" = 0 ]; then
-    printf 'NETWORK_CHECKS: could not publish the deferred check report, so %s results are unavailable; rerun %s/bin/fm-startup-network.sh run --locked %s\n' \
+    printf 'NETWORK_CHECKS: could not publish the deferred check report, so %s results are unavailable; rerun /bin/bash %s/bin/fm-startup-network.sh run --locked %s\n' \
       "$(phase_label "$phases")" "$FM_ROOT" "$(status_get locked)"
   elif [ -s "$REPORT_FILE" ]; then
     cat "$REPORT_FILE"
@@ -524,7 +524,7 @@ print_pending() {
   [ -z "$age" ] || printf 'Started %ss ago, bounded at %ss.\n' "$age" "$(stage_budget)"
   # shellcheck disable=SC2016  # The backticked wake name is literal digest text.
   printf 'The result is durable in state/.startup-network.report and arrives as a `check: startup-network` wake.\n'
-  printf 'Read it now with %s/bin/fm-startup-network.sh report; until it lands, treat none of it as confirmed.\n' "$FM_ROOT"
+  printf 'Read it now with /bin/bash %s/bin/fm-startup-network.sh report; until it lands, treat none of it as confirmed.\n' "$FM_ROOT"
 }
 
 print_state() {
@@ -534,7 +534,7 @@ print_state() {
       if worker_alive; then
         print_pending
       else
-        printf 'NETWORK_CHECKS: the deferred check worker stopped before publishing, so %s did not complete; rerun %s/bin/fm-startup-network.sh run --locked %s\n' \
+        printf 'NETWORK_CHECKS: the deferred check worker stopped before publishing, so %s did not complete; rerun /bin/bash %s/bin/fm-startup-network.sh run --locked %s\n' \
           "$(phase_label "$(status_get phases)")" "$FM_ROOT" "$(status_get locked)"
       fi
       ;;

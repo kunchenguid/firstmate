@@ -141,7 +141,7 @@ fm_supervision_model() {
   case "${FM_SUPERVISION_MODEL:-}" in
     autoarm|persistent) printf '%s\n' "$FM_SUPERVISION_MODEL"; return 0 ;;
   esac
-  harness=$("$FM_WAKE_LIB_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
+  harness=$(/bin/bash "$FM_WAKE_LIB_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
   case "$harness" in
     claude) printf 'autoarm\n' ;;
     *) printf 'persistent\n' ;;

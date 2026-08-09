@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash -lc '[ -n \"${GROK_WORKSPACE_ROOT:-}\" ] || exit 0; exec \"${GROK_WORKSPACE_ROOT:-}/bin/fm-sessionstart-nudge.sh\"'",
+            "command": "bash -lc '[ -n \"${GROK_WORKSPACE_ROOT:-}\" ] || exit 0; exec /bin/bash \"${GROK_WORKSPACE_ROOT:-}/bin/fm-sessionstart-nudge.sh\"'",
             "timeout": 10
           }
         ]

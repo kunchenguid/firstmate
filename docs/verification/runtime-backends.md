@@ -6,6 +6,64 @@ This record contains reusable version-scoped evidence for active runtime guarant
 The backend guides own current setup, safety boundaries, and limitations.
 Exact task chronology, branch names, temporary homes, local paths, process ids, thread ids, and delivery transcripts remain in private reports or PR evidence.
 
+## Tracked shell process launch
+
+Tracked-script process launch was verified on 2026-08-08 on macOS 26.3 arm64 with system Bash 3.2.57 and Herdr 0.7.4.
+The bounded reproduction launched the public `fm-harness.sh` process-scan interface 50 times through its shebang and 50 times through the system Bash executable, with a two-second limit on each attempt.
+
+```sh
+python3 - <<'PY'
+import pathlib, subprocess
+script = str(pathlib.Path("bin/fm-harness.sh").resolve())
+for label, argv in (("tracked script", [script]), ("/bin/bash", ["/bin/bash", script])):
+    completed = timed_out = 0
+    for _ in range(50):
+        try:
+            subprocess.run(argv, timeout=2, check=True, capture_output=True)
+            completed += 1
+        except subprocess.TimeoutExpired:
+            timed_out += 1
+    print(label, completed, timed_out)
+PY
+```
+
+Observed output:
+
+```text
+tracked script 0 50
+/bin/bash 50 0
+```
+
+A one-second `sample` of a stuck direct launch showed `/usr/bin/env` still at `_dyld_start`, before the Bash script body or its safety checks could run.
+Changing the shebang to `/bin/bash` did not help: 50 of 50 direct launches still timed out, while 50 of 50 `/bin/bash <script>` launches completed.
+The runtime contract therefore launches Firstmate-owned shell subprocesses through `/bin/bash` rather than changing interpreter discovery, and it keeps explicit executable overrides direct because those overrides may be native binaries or non-Bash programs.
+
+The corrected process-scan, task-dispatch help, cleanup-refusal, away-launch help, and watcher command-guard interfaces each completed 20 of 20 bounded `/bin/bash` launches with no timeout.
+The command guard retained its denial result for `/bin/bash bin/fm-watch-arm.sh &`, so interpreter bypass does not weaken the background-watcher seatbelt.
+The public away-launch regression additionally uses a non-Bash-script executable override and a default daemon fixture whose deliberately unusable shebang proves that only the tracked default is routed through Bash.
+
+```sh
+/bin/bash tests/fm-afk-launch.test.sh
+/bin/bash tests/fm-supervision-instructions.test.sh
+```
+
+Observed focused guarantees:
+
+```text
+ok - default daemon: public start bypasses the tracked script shebang
+ok - stop process group: dedicated daemon and blocked watcher child exit together
+ok - renderer repair-line mode is harness-aware and honors conditional state
+```
+
+The real Herdr check used `bin/fm-herdr-lab.sh` with a generated non-default session, a default-session fleet-state tripwire, and helper-owned teardown.
+The default away daemon became live in its dedicated workspace, then start and stop each completed in less than one second; stop removed the exact terminal record and away flag, and teardown confirmed the default session was unchanged.
+The same check with `/bin/bash` as an explicit arbitrary entry override created and removed only the recorded lab workspace.
+
+Compatibility was reviewed across every runtime and harness integration surface.
+Tmux, Herdr, Zellij, Orca, and cmux all receive the same backend-neutral worker launch payload with its tracked operational-input encoder routed through Bash; the away terminal remains supported only on tmux and Herdr, while the other backends retain their explicit refusal.
+Claude and Codex tracked hooks, OpenCode and Pi child-process adapters, and Grok hook commands now invoke tracked scripts through Bash; pi-signed shares Pi's adapter, Kimi's generated hook already used Bash, and the crewmate-only Muse path adds no script-launch hook.
+Launch-agent and remote-job execution now name `/bin/bash` before the tracked worker or command, while SSH still preserves the fixed entrypoint, encoded argument boundaries, clean environment, exact process identity, and task-owned cleanup.
+
 ## tmux
 
 Foreground-process behavior was verified on 2026-07-07 with tmux 3.6a on macOS.

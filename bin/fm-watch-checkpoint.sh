@@ -70,15 +70,15 @@ run_with_perl_timeout() {
     alarm $seconds;
     waitpid $pid, 0;
     exit($? >> 8);
-  ' "$SECONDS_ARG" "$SCRIPT_DIR/fm-watch.sh"
+  ' "$SECONDS_ARG" /bin/bash "$SCRIPT_DIR/fm-watch.sh"
 }
 
 set +e
 if command -v timeout >/dev/null 2>&1; then
-  timeout "$SECONDS_ARG" "$SCRIPT_DIR/fm-watch.sh" >"$OUT" 2>"$ERR"
+  timeout "$SECONDS_ARG" /bin/bash "$SCRIPT_DIR/fm-watch.sh" >"$OUT" 2>"$ERR"
   RC=$?
 elif command -v gtimeout >/dev/null 2>&1; then
-  gtimeout "$SECONDS_ARG" "$SCRIPT_DIR/fm-watch.sh" >"$OUT" 2>"$ERR"
+  gtimeout "$SECONDS_ARG" /bin/bash "$SCRIPT_DIR/fm-watch.sh" >"$OUT" 2>"$ERR"
   RC=$?
 else
   run_with_perl_timeout >"$OUT" 2>"$ERR"

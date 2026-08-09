@@ -50,7 +50,7 @@ ROOT=${ROOT%/}
 [ -x "$ROOT/bin/fm-turnend-guard.sh" ] || exit 0
 
 if [ "$CAPABILITY" = native ]; then
-  printf '%s' "$PAYLOAD" | "$ROOT/bin/fm-turnend-guard.sh"
+  printf '%s' "$PAYLOAD" | /bin/bash "$ROOT/bin/fm-turnend-guard.sh"
   RC=$?
   case "$RC" in
     0|2) exit "$RC" ;;
@@ -68,7 +68,7 @@ command -v grok >/dev/null 2>&1 || exit 0
 ERR=$(mktemp "${TMPDIR:-/tmp}/fm-turnend-grok.XXXXXX") || exit 0
 trap 'rm -f "$ERR"' EXIT
 
-printf '%s' "$PAYLOAD" | "$ROOT/bin/fm-turnend-guard.sh" 2>"$ERR"
+printf '%s' "$PAYLOAD" | /bin/bash "$ROOT/bin/fm-turnend-guard.sh" 2>"$ERR"
 RC=$?
 [ "$RC" -eq 2 ] || exit 0
 

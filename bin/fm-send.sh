@@ -104,7 +104,7 @@ fi
 # shellcheck source=bin/fm-line-cap-lib.sh
 . "$SCRIPT_DIR/fm-line-cap-lib.sh"
 
-FM_GUARD_CONTINUE_LINE='This is a supervision warning only; the requested message WILL still be sent.' "$SCRIPT_DIR/fm-guard.sh" || true
+FM_GUARD_CONTINUE_LINE='This is a supervision warning only; the requested message WILL still be sent.' /bin/bash "$SCRIPT_DIR/fm-guard.sh" || true
 
 fm_send_id_from_meta() {  # <meta-file>
   local base
@@ -152,10 +152,10 @@ fm_send_record_interrupt() {  # <key>
   [ -f "$STATE/$id.busy-gen" ] || return 0
   gen=$(fm_meta_get "$TARGET_META" busy_gen)
   if [ -n "$gen" ]; then
-    "$FM_ROOT/bin/fm-busy-event.sh" apply "$STATE" "$id" idle \
+    /bin/bash "$FM_ROOT/bin/fm-busy-event.sh" apply "$STATE" "$id" idle \
       --gen "$gen" --source fm-interrupt --event interrupt
   else
-    "$FM_ROOT/bin/fm-busy-event.sh" apply "$STATE" "$id" idle \
+    /bin/bash "$FM_ROOT/bin/fm-busy-event.sh" apply "$STATE" "$id" idle \
       --current-gen --source fm-interrupt --event interrupt
   fi || {
     echo "error: key '$key' reached $T, but the Claude interrupt state could not be recorded for $id" >&2
@@ -413,7 +413,7 @@ if [ "${1:-}" = "--key" ]; then
   key=$2
   semantic_key=$(fm_send_normalize_key "$key")
   if [ "$TARGET_BACKEND" = remote ]; then
-    if ! "$SCRIPT_DIR/fm-on.sh" "$TARGET_REMOTE_ID" fm-remote-secondmate-control.sh key "$TARGET_REMOTE_ID" "$key" < /dev/null; then
+    if ! /bin/bash "$SCRIPT_DIR/fm-on.sh" "$TARGET_REMOTE_ID" fm-remote-secondmate-control.sh key "$TARGET_REMOTE_ID" "$key" < /dev/null; then
       echo "error: key '$key' not sent to remote secondmate $TARGET_REMOTE_ID; completion may be unknown" >&2
       exit 1
     fi
@@ -474,7 +474,7 @@ else
   # verdict preserves the loud refusal boundary.
   send_rc=0
   if [ "$TARGET_BACKEND" = remote ]; then
-    if "$SCRIPT_DIR/fm-on.sh" "$TARGET_REMOTE_ID" fm-remote-secondmate-control.sh send "$TARGET_REMOTE_ID" "$MESSAGE" < /dev/null >/dev/null; then
+    if /bin/bash "$SCRIPT_DIR/fm-on.sh" "$TARGET_REMOTE_ID" fm-remote-secondmate-control.sh send "$TARGET_REMOTE_ID" "$MESSAGE" < /dev/null >/dev/null; then
       verdict=empty
     else
       send_rc=$?

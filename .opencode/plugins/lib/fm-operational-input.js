@@ -13,7 +13,7 @@ export function encodeFirstmateOperationalInput(root, kind, content) {
     const script = existsSync(requested)
       ? requested
       : `${adapterRoot}/bin/fm-operational-input.sh`;
-    const child = spawn(script, ["encode", kind], {
+    const child = spawn("/bin/bash", [script, "encode", kind], {
       stdio: ["pipe", "pipe", "pipe"],
     });
     let stdout = "";

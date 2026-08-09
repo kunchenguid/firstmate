@@ -27,7 +27,7 @@ RAW_ROWS=
 # queued-wakes notice for the records this run just drained, and never let a
 # guard hiccup change the drain's exit status.
 assert_watcher_liveness() {
-  "$SCRIPT_DIR/fm-guard.sh" || true
+  /bin/bash "$SCRIPT_DIR/fm-guard.sh" || true
 }
 
 # Print the consolidated OPEN DECISIONS section: every still-open
@@ -83,7 +83,7 @@ EOF
   # the send that answers a listed decision also closes it, so closure never
   # depends on the busy worker writing a matching resolved line (contract:
   # bin/fm-send.sh header).
-  printf "OPEN DECISIONS: close one by answering it: bin/fm-send.sh <task> --resolve-key <key> '<answer>'\n"
+  printf "OPEN DECISIONS: close one by answering it: /bin/bash bin/fm-send.sh <task> --resolve-key <key> '<answer>'\n"
 }
 
 # shellcheck disable=SC2317,SC2329 # Invoked by trap handlers below.

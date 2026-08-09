@@ -235,9 +235,9 @@ isolate_runner() {  # <wait|detach> <source-id>
     exit(128 + ($status & 127)) if $status & 127;
     exit($status >> 8);'
   if [ "$mode" = wait ]; then
-    exec perl -e "$program" "$mode" "$SCRIPT_DIR/fm-procevent.sh" _start "$id"
+    exec perl -e "$program" "$mode" /bin/bash "$SCRIPT_DIR/fm-procevent.sh" _start "$id"
   fi
-  perl -e "$program" "$mode" "$SCRIPT_DIR/fm-procevent.sh" _start "$id" >/dev/null 2>&1 &
+  perl -e "$program" "$mode" /bin/bash "$SCRIPT_DIR/fm-procevent.sh" _start "$id" >/dev/null 2>&1 &
 }
 
 require_runner_group() {
@@ -732,7 +732,7 @@ cmd_sweep_home() {
     [ -n "$id" ] || continue
     attempted=$((attempted + 1))
     if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
-        "$SCRIPT_DIR/fm-procevent.sh" retire "$id"; then
+        /bin/bash "$SCRIPT_DIR/fm-procevent.sh" retire "$id"; then
       failed=$((failed + 1))
     fi
   done <<< "$SWEEP_IDS"

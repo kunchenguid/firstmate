@@ -19,14 +19,14 @@ EOF
 
 case "${1:-}" in
   -h|--help) usage; exit 0 ;;
-  --json) "$SCRIPT_DIR/fm-fleet-snapshot.sh" --json; exit $? ;;
+  --json) /bin/bash "$SCRIPT_DIR/fm-fleet-snapshot.sh" --json; exit $? ;;
   "") ;;
   *) usage >&2; exit 2 ;;
 esac
 
 command -v jq >/dev/null 2>&1 || { echo "fm-fleet-view: jq not found" >&2; exit 1; }
 
-SNAPSHOT=$("$SCRIPT_DIR/fm-fleet-snapshot.sh" --json) || exit $?
+SNAPSHOT=$(/bin/bash "$SCRIPT_DIR/fm-fleet-snapshot.sh" --json) || exit $?
 
 printf '%s\n' "$SNAPSHOT" | jq -r '
   def dash($v): if $v == null or $v == "" then "-" else $v end;

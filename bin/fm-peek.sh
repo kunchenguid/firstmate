@@ -13,7 +13,7 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
 
-"$SCRIPT_DIR/fm-guard.sh" || true
+/bin/bash "$SCRIPT_DIR/fm-guard.sh" || true
 
 RAW_TARGET=$1
 T=$(fm_backend_resolve_selector "$RAW_TARGET" "$STATE")

@@ -144,7 +144,7 @@ resolve_remote_transport() { # <id>
     set_transport deferred 'no recorded endpoint and no remote memory write path'
     return 0
   fi
-  run_step "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh state "$id" || rc=$?
+  run_step /bin/bash "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh state "$id" || rc=$?
   if [ "$rc" -eq 124 ]; then
     set_transport deferred "remote endpoint probe exceeded the ${BOUND}s bound"
     return 0
@@ -195,7 +195,7 @@ while IFS= read -r line || [ -n "$line" ]; do
     emit 'placement=remote'
     emit "host=$host"
     emit "home=$home"
-    run_step "$SCRIPT_DIR/fm-on.sh" "$id" "$BUDGET_CMD" report || rc=$?
+    run_step /bin/bash "$SCRIPT_DIR/fm-on.sh" "$id" "$BUDGET_CMD" report || rc=$?
   else
     emit 'placement=local'
     if ! validate_secondmate_home "$id" "$home"; then
@@ -216,7 +216,7 @@ while IFS= read -r line || [ -n "$line" ]; do
       FM_STATE_OVERRIDE="$resolved/state" \
       FM_DATA_OVERRIDE="$resolved/data" \
       FM_CONFIG_OVERRIDE="$resolved/config" \
-      "$SCRIPT_DIR/$BUDGET_CMD" report || rc=$?
+      /bin/bash "$SCRIPT_DIR/$BUDGET_CMD" report || rc=$?
   fi
   if [ "$rc" -eq 124 ]; then
     emit 'budget_report=timeout'

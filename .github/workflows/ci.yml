@@ -18,11 +18,11 @@ jobs:
       - name: Install pinned ShellCheck
         run: |
           set -eu
-          bin/fm-install-shellcheck.sh "$RUNNER_TEMP/bin"
+          /bin/bash bin/fm-install-shellcheck.sh "$RUNNER_TEMP/bin"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
       # Single owner of the lint definition (file set + config + version). Do not
       # re-spell the shellcheck command here; keep CI and the pre-push gate on it.
-      - run: bin/fm-lint.sh
+      - run: /bin/bash bin/fm-lint.sh
 
   # Deterministic proof that portable parallel shards + portable serial + Herdr
   # equal the complete tests/*.test.sh inventory with no missing or duplicates,
@@ -33,7 +33,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - name: Prove complete regression partition
-        run: bin/fm-test-run.sh --check-coverage
+        run: /bin/bash bin/fm-test-run.sh --check-coverage
 
   # Two duration-balanced portable parallel shards of the Phase 2 proven-isolated
   # set only. Composition owner: bin/fm-test-run.sh (docs/fm-test-portable-shards.md).
@@ -50,7 +50,7 @@ jobs:
       - name: Install pinned ShellCheck
         run: |
           set -eu
-          bin/fm-install-shellcheck.sh "$RUNNER_TEMP/bin"
+          /bin/bash bin/fm-install-shellcheck.sh "$RUNNER_TEMP/bin"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
       - name: Install tasks-axi
         run: |
@@ -61,7 +61,7 @@ jobs:
         run: |
           set -eu
           mkdir -p "$RUNNER_TEMP/fm-test"
-          bin/fm-test-run.sh --lane portable-parallel-1 \
+          /bin/bash bin/fm-test-run.sh --lane portable-parallel-1 \
             --json "$RUNNER_TEMP/fm-test/fm-test-timing-portable-parallel-1.json"
       - name: Upload shard 1 timing artifact
         if: always()
@@ -82,7 +82,7 @@ jobs:
       - name: Install pinned ShellCheck
         run: |
           set -eu
-          bin/fm-install-shellcheck.sh "$RUNNER_TEMP/bin"
+          /bin/bash bin/fm-install-shellcheck.sh "$RUNNER_TEMP/bin"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
       - name: Install tasks-axi
         run: |
@@ -93,7 +93,7 @@ jobs:
         run: |
           set -eu
           mkdir -p "$RUNNER_TEMP/fm-test"
-          bin/fm-test-run.sh --lane portable-parallel-2 \
+          /bin/bash bin/fm-test-run.sh --lane portable-parallel-2 \
             --json "$RUNNER_TEMP/fm-test/fm-test-timing-portable-parallel-2.json"
       - name: Upload shard 2 timing artifact
         if: always()
@@ -128,7 +128,7 @@ jobs:
       - name: Install pinned ShellCheck
         run: |
           set -eu
-          bin/fm-install-shellcheck.sh "$RUNNER_TEMP/bin"
+          /bin/bash bin/fm-install-shellcheck.sh "$RUNNER_TEMP/bin"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
       - name: Require tmux for e2e tests
         run: |
@@ -153,7 +153,7 @@ jobs:
         run: |
           set -eu
           mkdir -p "$RUNNER_TEMP/fm-test"
-          bin/fm-test-run.sh --lane "$FM_SERIAL_LANE" \
+          /bin/bash bin/fm-test-run.sh --lane "$FM_SERIAL_LANE" \
             --json "$RUNNER_TEMP/fm-test/fm-test-timing-portable-serial-${FM_SERIAL_SHARD}.json"
       - name: Upload portable serial shard ${{ matrix.shard }} timing artifact
         if: always()
@@ -189,14 +189,14 @@ jobs:
       - name: Install pinned Herdr
         run: |
           set -eu
-          bin/fm-install-herdr.sh "$RUNNER_TEMP/bin"
+          /bin/bash bin/fm-install-herdr.sh "$RUNNER_TEMP/bin"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
       - name: Install pinned Treehouse
         run: |
           set -eu
           # Several real-herdr-gated E2E scripts require treehouse for spawn
           # worktree acquisition (presentation, workspace-per-home, autodetect).
-          bin/fm-install-treehouse.sh "$RUNNER_TEMP/bin"
+          /bin/bash bin/fm-install-treehouse.sh "$RUNNER_TEMP/bin"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
       - name: Assert Herdr pin and protocol floor
         run: |
@@ -250,21 +250,21 @@ jobs:
         run: |
           set -eu
           mkdir -p "$RUNNER_TEMP/fm-herdr"
-          bin/fm-herdr-ci-cleanup.sh snapshot "$RUNNER_TEMP/fm-herdr/sessions-before.json"
+          /bin/bash bin/fm-herdr-ci-cleanup.sh snapshot "$RUNNER_TEMP/fm-herdr/sessions-before.json"
       - name: Run real-Herdr family (serial, required)
         run: |
           set -eu
           mkdir -p "$RUNNER_TEMP/fm-test"
           # Serial only. Fail if any script reports herdr not found. Live
           # harness credential tests stay outside this family (opt-in env only).
-          bin/fm-test-run.sh --family real-herdr-gated \
+          /bin/bash bin/fm-test-run.sh --family real-herdr-gated \
             --fail-on-gate-skip 'herdr not found' \
             --json "$RUNNER_TEMP/fm-test/fm-test-timing-herdr.json"
       - name: Cleanup job-owned Herdr lab sessions
         if: always()
         run: |
           set -eu
-          bin/fm-herdr-ci-cleanup.sh teardown "$RUNNER_TEMP/fm-herdr/sessions-before.json" || {
+          /bin/bash bin/fm-herdr-ci-cleanup.sh teardown "$RUNNER_TEMP/fm-herdr/sessions-before.json" || {
             echo "::warning::lab session cleanup reported a problem; see logs"
             # Surface diagnostics without weakening the suite result above.
             herdr session list --json || true
@@ -309,7 +309,7 @@ jobs:
             echo "::warning::no per-lane timing JSON found to aggregate"
             exit 0
           fi
-          bin/fm-test-run.sh --aggregate-json \
+          /bin/bash bin/fm-test-run.sh --aggregate-json \
             "$RUNNER_TEMP/fm-test/fm-test-timing-aggregate.json" \
             "${inputs[@]}"
       - name: Upload aggregate timing artifact
@@ -340,7 +340,7 @@ jobs:
           command -v jq >/dev/null || { echo "::error::jq is required"; exit 1; }
 
           shell_inventory="$RUNNER_TEMP/fm-shell-inventory"
-          bin/fm-lint.sh --list-files > "$shell_inventory"
+          /bin/bash bin/fm-lint.sh --list-files > "$shell_inventory"
           parse_fail=0
           while IFS= read -r f; do
             /bin/bash -n "$f" || { echo "::error::stock macOS Bash 3.2 failed to parse $f"; parse_fail=1; }

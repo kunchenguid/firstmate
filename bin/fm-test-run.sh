@@ -674,7 +674,7 @@ run_coverage_guard() {
   fi
 
   if [ -x "$ROOT/bin/fm-test-isolation-proof.sh" ]; then
-    "$ROOT/bin/fm-test-isolation-proof.sh" --list | LC_ALL=C sort -u >"$tmp/proof_list"
+    /bin/bash "$ROOT/bin/fm-test-isolation-proof.sh" --list | LC_ALL=C sort -u >"$tmp/proof_list"
     if ! cmp -s "$tmp/proven" "$tmp/proof_list"; then
       log "coverage guard: embedded proven-isolated set diverges from bin/fm-test-isolation-proof.sh --list"
       comm -3 "$tmp/proven" "$tmp/proof_list" >&2 || true
@@ -905,10 +905,17 @@ families_for_changed_path() {
       printf '%s\n' session-bootstrap
       ;;
     bin/fm-sessionstart-run.sh|.claude/settings.json|.codex/hooks.json|\
-    .pi/extensions/fm-primary-turnend-guard.ts)
+    .grok/hooks/fm-primary-*.json|.opencode/plugins/fm-primary-*.js|\
+    .opencode/plugins/lib/fm-operational-input.js|\
+    .pi/extensions/fm-primary-turnend-guard.ts|.pi/extensions/fm-primary-pi-watch.ts|\
+    .pi/extensions/lib/fm-operational-input.ts)
       # The run tier's two harness-supplied facts (source vocabulary and
       # context-reset stdout injection) only show up against a real harness.
+      # Primary adapter launchers also own watcher and guard subprocesses, so a
+      # change here selects those portable contracts as well as the live proof.
       printf '%s\n' session-bootstrap
+      printf '%s\n' watcher-wake-lock
+      printf '%s\n' pure-contract-unit
       printf '%s\n' live-harness-optin
       ;;
     bin/fm-timeout-lib.sh)

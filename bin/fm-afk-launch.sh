@@ -472,7 +472,7 @@ fm_afk_launch_create_tmux() {  # <captain-target> <captain-backend>
 fm_afk_launch_start() {
   local captain_target captain_backend backup artifact had_afk=0 result
   if [ -e "$FM_AFK_LAUNCH_STATE/.afk-return-catchup" ]; then
-    fm_afk_launch_log "return catch-up is still pending; run bin/fm-afk-return.sh check before re-entering away mode"
+    fm_afk_launch_log "return catch-up is still pending; run /bin/bash bin/fm-afk-return.sh check before re-entering away mode"
     return 1
   fi
   # Capture the captain pane FIRST, before creating anything.
@@ -542,7 +542,7 @@ fm_afk_launch_start_native() {
   local backup artifact had_afk=0 result=0
   mkdir -p "$FM_AFK_LAUNCH_STATE" || return 1
   if [ -e "$FM_AFK_LAUNCH_STATE/.afk-return-catchup" ]; then
-    fm_afk_launch_log "return catch-up is still pending; run bin/fm-afk-return.sh check before re-entering away mode"
+    fm_afk_launch_log "return catch-up is still pending; run /bin/bash bin/fm-afk-return.sh check before re-entering away mode"
     return 1
   fi
   if daemon_lock_held_by_live_daemon; then
@@ -582,7 +582,7 @@ fm_afk_launch_start_native() {
 }
 
 fm_afk_launch_stop() {
-  local pid pid_identity current_identity result=0 read_result
+  local pid pid_identity current_identity daemon_pgid own_pgid signal_target result=0 read_result
   fm_afk_launch_record_read
   read_result=$?
   if [ "$read_result" -eq 2 ]; then
@@ -599,7 +599,17 @@ fm_afk_launch_stop() {
     pid_identity=$(fm_pid_identity "$pid" 2>/dev/null) || return 1
   fi
   if [ -n "$pid" ]; then
-    if ! kill -TERM "$pid" 2>/dev/null; then
+    signal_target=$pid
+    daemon_pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d '[:space:]') || daemon_pgid=
+    own_pgid=$(ps -o pgid= -p "$$" 2>/dev/null | tr -d '[:space:]') || own_pgid=
+    # A daemon launched in its dedicated tracked terminal is that terminal's
+    # process-group leader. Signal the exact group only under that proof so a
+    # watcher child blocked below Bash's deferred trap receives TERM too; a
+    # native daemon that shares some caller group keeps the exact-pid path.
+    if [ "$daemon_pgid" = "$pid" ] && [ "$daemon_pgid" != "$own_pgid" ]; then
+      signal_target="-$daemon_pgid"
+    fi
+    if ! kill -TERM -- "$signal_target" 2>/dev/null; then
       fm_afk_launch_log "failed to signal away-mode daemon pid=$pid"
       result=1
     fi

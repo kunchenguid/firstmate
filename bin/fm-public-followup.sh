@@ -268,7 +268,7 @@ cmd_brief() {
 When this work reaches its promised terminal outcome, report it as typed data
 (never as a sentence for someone to parse) by running exactly:
 
-  $FM_ROOT/bin/fm-public-followup-emit.sh \\
+  /bin/bash $FM_ROOT/bin/fm-public-followup-emit.sh \\
     --home $FM_HOME \\
     --obligation $id \\
     --relation $relation \\
@@ -449,7 +449,7 @@ cmd_pending() {
       printed=1
     fi
     if fm_pf_has_events "$STATE"; then
-      printf 'unconsumed terminal results are waiting; run %s/bin/fm-public-followup.sh consume\n' "$FM_ROOT"
+      printf 'unconsumed terminal results are waiting; run /bin/bash %s/bin/fm-public-followup.sh consume\n' "$FM_ROOT"
       printed=1
     fi
     [ "$printed" -eq 1 ] || exit 0
@@ -495,7 +495,7 @@ EOF
   # Events that arrived while no agent was present are actionable on their own,
   # so surface them even when every registration currently looks settled.
   if fm_pf_has_events "$STATE"; then
-    printf 'unconsumed terminal results are waiting; run %s/bin/fm-public-followup.sh consume\n' "$FM_ROOT"
+    printf 'unconsumed terminal results are waiting; run /bin/bash %s/bin/fm-public-followup.sh consume\n' "$FM_ROOT"
     printed=1
   fi
   [ "$printed" -eq 1 ] || exit 0
@@ -552,7 +552,7 @@ clear_public_followup_link() {
     *) return 1 ;;
   esac
   FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_ROOT_OVERRIDE="$FM_ROOT" \
-    "$FM_ROOT/bin/fm-x-followup.sh" --clear "$work_id" >/dev/null
+    /bin/bash "$FM_ROOT/bin/fm-x-followup.sh" --clear "$work_id" >/dev/null
 }
 
 public_followup_legacy_link_status() {
@@ -719,7 +719,7 @@ cmd_deliver() {
 
   rc=0
   FMX_REPLY_PLATFORM="$platform" FM_HOME="$FM_HOME" \
-    "$FM_ROOT/bin/fm-x-reply.sh" "$request" --followup --receipt-file "$receipt" \
+    /bin/bash "$FM_ROOT/bin/fm-x-reply.sh" "$request" --followup --receipt-file "$receipt" \
     --text-file "$tmp_text" >/dev/null || rc=$?
 
   if [ "$rc" -eq 0 ]; then

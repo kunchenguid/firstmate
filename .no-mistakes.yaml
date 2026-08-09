@@ -25,7 +25,7 @@ document:
 # Pin lint to the same owner CI runs instead of leaving it to no-mistakes'
 # default handling, which does not invoke the repository's canonical lint gate.
 # `bin/fm-lint.sh` owns the complete lint definition and
-# `.github/workflows/ci.yml` invokes it directly, with parity asserted by
+# `.github/workflows/ci.yml` invokes it through the system Bash, with parity asserted by
 # `tests/fm-lint.test.sh`.
 #
 # Do not set commands.test to a complete tests/*.test.sh walk. Local no-mistakes
@@ -34,7 +34,7 @@ document:
 # security, Herdr, tmux, and lifecycle coverage). A full-suite override here
 # would duplicate CI and defeat the targeted Test contract.
 commands:
-  lint: 'bin/fm-lint.sh'
+  lint: '/bin/bash bin/fm-lint.sh'
 
 # Keep test evidence out of this repo; it stays in a temp dir instead.
 test:

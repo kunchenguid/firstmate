@@ -15,7 +15,6 @@ trap 'if [ -f "$TMP_ROOT/remote-jobs/worker.pid" ]; then kill "$(cat "$TMP_ROOT/
 LOCAL_HOME="$TMP_ROOT/local-home"
 REMOTE_ROOT="$TMP_ROOT/remote-root"
 REMOTE_HOME="$TMP_ROOT/remote-home"
-TOOL_PROBE_LOG="$TMP_ROOT/tool-probe.log"
 FAKEBIN=$(fm_fakebin "$TMP_ROOT/fakebin")
 SSH_LOG="$TMP_ROOT/ssh.log"
 SSH_COUNT="$TMP_ROOT/ssh.count"
@@ -45,17 +44,10 @@ cat > "$REMOTE_ROOT/bin/fm-probe-path.sh" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$PATH"
 SH
-cat > "$REMOTE_ROOT/bin/tasks-axi" <<SH
-#!/usr/bin/env bash
-printf '%s\n' "\${FM_REMOTE_JOB_ACTIVE:-absent}" >> "$TOOL_PROBE_LOG"
-case "\${1:-}:\${2:-}" in
-  --version:*) printf '0.2.4\n' ;;
-  update:--help) printf '%s\n' --archive-body ;;
-  mv:--help) printf '%s\n' 'usage: tasks-axi mv <id> [<id>...]' ;;
-esac
-SH
+ln -s /usr/bin/true "$REMOTE_ROOT/bin/tasks-axi"
 cp "$ROOT/bin/fm-remote-doctor.sh" "$ROOT/bin/fm-tasks-axi-lib.sh" \
-  "$ROOT/bin/fm-backend.sh" "$REMOTE_ROOT/bin/"
+  "$ROOT/bin/fm-backend.sh" "$ROOT/bin/fm-composer-lib.sh" \
+  "$ROOT/bin/fm-transition-lib.sh" "$REMOTE_ROOT/bin/"
 mkdir -p "$REMOTE_ROOT/bin/backends"
 cp "$ROOT/bin/backends/herdr.sh" "$REMOTE_ROOT/bin/backends/herdr.sh"
 cat > "$REMOTE_ROOT/bin/fm-mutate.sh" <<'SH'
@@ -83,20 +75,23 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 host=$1
-entry=$2
-shift 2
+interpreter=$2
+entry=$3
+shift 3
 [ "$host" = remote-mac ] || exit 91
-[ "$entry" = fm-remote-entrypoint.sh ] || exit 92
+[ "$interpreter" = /bin/bash ] || exit 92
+[ "$entry" = '"$HOME/.local/bin/fm-remote-entrypoint.sh"' ] || exit 93
 case "${FM_FAKE_SSH_MODE:-normal}" in
   unreachable) exit 255 ;;
   ambiguous)
-    "$FM_FAKE_REMOTE_ENTRYPOINT" "$@"
+    /bin/bash "$FM_FAKE_REMOTE_ENTRYPOINT" "$@"
     exit 255
     ;;
-  *) exec "$FM_FAKE_REMOTE_ENTRYPOINT" "$@" ;;
+  *) exec /bin/bash "$FM_FAKE_REMOTE_ENTRYPOINT" "$@" ;;
 esac
 SH
 chmod +x "$FAKEBIN/fake-ssh"
+fm_fake_bash_tool "$FAKEBIN/fake-ssh"
 
 write_registry() {
   cat > "$LOCAL_HOME/data/secondmates.md" <<EOF
@@ -108,13 +103,14 @@ write_registry
 fm_on() {
   FM_HOME="$LOCAL_HOME" \
   FM_ROOT_OVERRIDE="$REMOTE_ROOT" \
-  FM_SSH_BIN="$FAKEBIN/fake-ssh" \
+  FM_SSH_BIN=fake-ssh \
   FM_FAKE_SSH_COUNT="$SSH_COUNT" \
   FM_FAKE_SSH_LOG="$SSH_LOG" \
   FM_FAKE_REMOTE_ENTRYPOINT="$REMOTE_ROOT/bin/fm-remote-entrypoint.sh" \
   FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux \
   FM_REMOTE_JOB_STATE_ROOT="$TMP_ROOT/remote-jobs" \
-  "$ROOT/bin/fm-on.sh" "$@"
+  PATH="$FAKEBIN:$PATH" \
+  /bin/bash "$ROOT/bin/fm-on.sh" "$@"
 }
 
 # The pre-feature user path had no executable transport at all. The regression
@@ -224,7 +220,7 @@ expect_dir "$REMOTE_ROOT/bin"
 if [ -d "$ACCOUNT_HOME/.local/bin" ] && [ ! -L "$ACCOUNT_HOME/.local/bin" ]; then
   expect_dir "$ACCOUNT_HOME/.local/bin"
 fi
-for candidate in "${NVM_CHILD_DIRS[@]}"; do expect_dir "$candidate"; done
+for candidate in "${NVM_CHILD_DIRS[@]+"${NVM_CHILD_DIRS[@]}"}"; do expect_dir "$candidate"; done
 for candidate in "${MANAGER_DIRS[@]}"; do
   [ -d "$candidate" ] && [ ! -L "$candidate" ] && expect_dir "$candidate"
 done
@@ -286,14 +282,13 @@ assert_contains "$out" 'required git=' "the remote doctor did not report the req
 pass "the remote doctor reports the same PATH the entrypoint hands its children"
 
 fm_on ios fm-probe-two.sh >/dev/null
-: > "$TOOL_PROBE_LOG"
 set +e
 out=$(fm_on ios fm-remote-doctor.sh 2>&1)
 set -e
 assert_contains "$out" 'check remote-job-probe=ok: the remote job worker completed the required-tool probe' \
   "the doctor did not use a completed worker probe for tool readiness"
-assert_grep '1' "$TOOL_PROBE_LOG" "the required-tool probe did not execute inside the worker"
-assert_not_contains "$(cat "$TOOL_PROBE_LOG")" absent "the bootstrap process probed required tools locally"
+assert_contains "$out" 'required tasks-axi=MISSING (incompatible)' \
+  "the worker probe did not report its deterministic incompatible native fixture"
 pass "the remote doctor derives tool readiness from the installed worker"
 
 DOCTOR_BIN="$TMP_ROOT/doctor-bin"
@@ -308,8 +303,9 @@ cat > "$DOCTOR_BIN/uname" <<'SH'
 printf 'Linux\n'
 SH
 chmod +x "$DOCTOR_BIN/uname"
+fm_fake_bash_tool "$DOCTOR_BIN/uname"
 set +e
-out=$(HOME="$DOCTOR_HOME" PATH="$DOCTOR_BIN:/usr/bin:/bin:/usr/sbin:/sbin" "$ROOT/bin/fm-remote-doctor.sh" 2>&1)
+out=$(HOME="$DOCTOR_HOME" PATH="$DOCTOR_BIN:/usr/bin:/bin:/usr/sbin:/sbin" /bin/bash "$ROOT/bin/fm-remote-doctor.sh" 2>&1)
 rc=$?
 set -e
 [ "$rc" -ne 0 ] || fail "the remote doctor passed with a missing required tool"
@@ -318,24 +314,18 @@ assert_contains "$out" 'required tasks-axi=MISSING' "the remote doctor did not m
 assert_contains "$out" 'required tools do not resolve on the remote runtime PATH: herdr tasks-axi treehouse harness' "the remote doctor did not name the missing tools"
 assert_contains "$out" '.local/bin' "the remote doctor did not offer the wrapper escape hatch"
 ln -sf "$(command -v git)" "$DOCTOR_BIN/git"
-# The direct doctor fixture needs the complete required tool set. These stubs
-# exercise resolution only; the dedicated doctor suite owns worker and Herdr
-# lifecycle behavior against controlled launchctl fixtures.
-printf '#!/usr/bin/env bash\nexit 0\n' > "$DOCTOR_BIN/jq"
-printf '#!/usr/bin/env bash\nprintf "{\\\"server\\\":{\\\"running\\\":false}}\\n"\n' > "$DOCTOR_BIN/herdr"
-cat > "$DOCTOR_BIN/tasks-axi" <<'SH'
-#!/usr/bin/env bash
-case "${1:-}:${2:-}" in
-  --version:*) printf '0.2.4\n' ;;
-  update:--help) printf '%s\n' --archive-body ;;
-  mv:--help) printf '%s\n' 'usage: tasks-axi mv <id> [<id>...]' ;;
-esac
-SH
-printf '#!/usr/bin/env bash\nexit 0\n' > "$DOCTOR_BIN/treehouse"
-printf '#!/usr/bin/env bash\nexit 0\n' > "$DOCTOR_BIN/claude"
-chmod +x "$DOCTOR_BIN/jq" "$DOCTOR_BIN/herdr" "$DOCTOR_BIN/tasks-axi" "$DOCTOR_BIN/treehouse" "$DOCTOR_BIN/claude"
+# The direct doctor fixture needs the complete required tool set. Native
+# no-op links exercise resolution without introducing script-shebang launches;
+# the dedicated doctor suite owns worker and Herdr lifecycle behavior.
+ln -sf /usr/bin/true "$DOCTOR_BIN/jq"
+ln -sf /usr/bin/true "$DOCTOR_BIN/herdr"
+ln -sf /usr/bin/true "$DOCTOR_BIN/tasks-axi"
+ln -sf /usr/bin/true "$DOCTOR_BIN/treehouse"
+ln -sf /usr/bin/true "$DOCTOR_BIN/claude"
 set +e
-out=$(HOME="$DOCTOR_HOME" PATH="$DOCTOR_BIN:/usr/bin:/bin:/usr/sbin:/sbin" "$ROOT/bin/fm-remote-doctor.sh" 2>&1)
+out=$(HOME="$DOCTOR_HOME" FM_TASKS_AXI_COMPATIBLE=1 \
+  PATH="$DOCTOR_BIN:/usr/bin:/bin:/usr/sbin:/sbin" \
+  /bin/bash "$ROOT/bin/fm-remote-doctor.sh" 2>&1)
 rc=$?
 set -e
 assert_contains "$out" "required git=$DOCTOR_BIN/git" "the remote doctor did not report where the required tool resolved"
@@ -381,14 +371,15 @@ printf 'consulted\n' >> "$FM_GIT_SHADOW_LOG"
 exit 0
 SH
 chmod +x "$REMOTE_ROOT/bin/git"
-FM_GIT_SHADOW_LOG="$GIT_SHADOW_LOG" "$REMOTE_ROOT/bin/git" -C "$REMOTE_ROOT" ls-files --error-unmatch bin/fm-untracked.sh \
+FM_GIT_SHADOW_LOG="$GIT_SHADOW_LOG" /bin/bash "$REMOTE_ROOT/bin/git" \
+  -C "$REMOTE_ROOT" ls-files --error-unmatch bin/fm-untracked.sh \
   || fail "the checkout-local git shim did not demonstrate that it would authorize the untracked command"
 untracked_root_b64=$(printf '%s' "$REMOTE_ROOT" | base64 | tr -d '\n')
 untracked_home_b64=$(printf '%s' "$REMOTE_HOME" | base64 | tr -d '\n')
 untracked_argv_b64=$(printf '%s\0' fm-untracked.sh | base64 | tr -d '\n')
 set +e
 out=$(FM_GIT_SHADOW_LOG="$GIT_SHADOW_LOG" FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux \
-  FM_REMOTE_JOB_STATE_ROOT="$TMP_ROOT/remote-jobs" "$REMOTE_ROOT/bin/fm-remote-entrypoint.sh" \
+  FM_REMOTE_JOB_STATE_ROOT="$TMP_ROOT/remote-jobs" /bin/bash "$REMOTE_ROOT/bin/fm-remote-entrypoint.sh" \
   1 "$untracked_root_b64" "$untracked_home_b64" "$untracked_argv_b64" 2>&1)
 rc=$?
 set -e
@@ -432,8 +423,8 @@ cp "$ROOT/bin/fm-remote-doctor.sh" "$REMOTE_ROOT/bin/fm-remote-doctor.sh"
 chmod +x "$REMOTE_ROOT/bin/fm-remote-doctor.sh"
 pass "doctor bootstrap remains authenticated when git is unavailable"
 
-if FM_HOME="$LOCAL_HOME" FM_ROOT_OVERRIDE="$REMOTE_ROOT" FM_SSH_BIN="$FAKEBIN/fake-ssh" \
-  "$ROOT/bin/fm-on.sh" '-oProxyCommand=bad' fm-probe-two.sh >/dev/null 2>&1; then
+if FM_HOME="$LOCAL_HOME" FM_ROOT_OVERRIDE="$REMOTE_ROOT" FM_SSH_BIN=fake-ssh \
+  PATH="$FAKEBIN:$PATH" /bin/bash "$ROOT/bin/fm-on.sh" '-oProxyCommand=bad' fm-probe-two.sh >/dev/null 2>&1; then
   fail "an option-shaped SSH route was accepted"
 fi
 ssh_before_bad_path=$(cat "$SSH_COUNT")
@@ -450,11 +441,11 @@ pass "transport rejects shell escape, traversal, symlink, and option-injection s
 root_b64=$(printf '%s' "$REMOTE_ROOT" | base64 | tr -d '\n')
 home_b64=$(printf '%s' "$REMOTE_HOME" | base64 | tr -d '\n')
 argv_b64=$(printf '%s\0' fm-probe-two.sh | base64 | tr -d '\n')
-if "$REMOTE_ROOT/bin/fm-remote-entrypoint.sh" 2 "$root_b64" "$home_b64" "$argv_b64" >/dev/null 2>&1; then
+if /bin/bash "$REMOTE_ROOT/bin/fm-remote-entrypoint.sh" 2 "$root_b64" "$home_b64" "$argv_b64" >/dev/null 2>&1; then
   fail "an incompatible transport protocol was accepted"
 fi
 traversal_root_b64=$(printf '%s' "$REMOTE_ROOT/../remote-root" | base64 | tr -d '\n')
-if "$REMOTE_ROOT/bin/fm-remote-entrypoint.sh" 1 "$traversal_root_b64" "$home_b64" "$argv_b64" >/dev/null 2>&1; then
+if /bin/bash "$REMOTE_ROOT/bin/fm-remote-entrypoint.sh" 1 "$traversal_root_b64" "$home_b64" "$argv_b64" >/dev/null 2>&1; then
   fail "the fixed entrypoint accepted traversal in the configured root"
 fi
 pass "the fixed entrypoint refuses incompatible protocols and unsafe roots"
