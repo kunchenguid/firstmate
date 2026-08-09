@@ -1438,9 +1438,6 @@ reap_cursor_worker_server() {  # <state_dir> <id>
       survived)
         echo "REFUSED: recorded cursor worker-server for $id still matches ${pid:-unknown} after TERM and KILL; preserving $ws_file for retry." >&2
         ;;
-      malformed)
-        echo "REFUSED: recorded cursor worker-server record $ws_file for $id is malformed; preserving it for retry." >&2
-        ;;
     esac
     return 1
   fi
