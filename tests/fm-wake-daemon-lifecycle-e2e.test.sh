@@ -156,8 +156,21 @@ test_stale_pane_transient_persistent_resume() {
 # This deliberately drives the executable producer path instead of constructing
 # a heartbeat payload. It is the regression for the overnight refill loop:
 # watcher -> fm-refill -> durable queue -> away-supervisor routing.
+run_refill_cycle() {  # <home> <state> <fakebin> <out> <ready-case>
+  local home=$1 state=$2 fakebin=$3 out=$4 ready_case=$5 pid
+  rm -f "$state/.last-heartbeat"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 FM_REFILL_IDS_MAX=2 FM_FAKE_READY_CASE="$ready_case" \
+    "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 50 || fail "refill heartbeat watcher pass ($ready_case) did not exit"
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_wake_latest_payload heartbeat heartbeat' \
+    _ "$ROOT/bin/fm-wake-lib.sh"
+}
+
 test_refill_heartbeat_dedupes_after_real_producer_path() {
-  local dir state fakebin out payload
+  local dir state fakebin out payload initial_fingerprint changed_fingerprint
   dir=$(make_supercase wd-refill-dedupe)
   state="$dir/state"
   fakebin="$dir/fakebin"
@@ -170,7 +183,15 @@ case "${1:-}" in
   --version|-v|-V) printf 'tasks-axi 0.2.5\n' ;;
   update) printf '%s\n' '--archive-body' ;;
   mv) printf '%s\n' '[<id>...]' ;;
-  ready) printf 'count: 2\nready[2]{id,state,kind,repo,title}:\n  beta,queued,task,"-",beta\n  alpha,queued,task,"-",alpha\n' ;;
+  ready)
+    case "${FM_FAKE_READY_CASE:-initial}" in
+      initial) printf 'count: 4\nready[4]{id,state,kind,repo,title}:\n  beta,queued,task,"-",beta\n  alpha,queued,task,"-",alpha\n  hidden-a,queued,task,"-",hidden a\n  hidden-b,queued,task,"-",hidden b\n' ;;
+      reordered) printf 'count: 4\nready[4]{id,state,kind,repo,title}:\n  beta,queued,task,"-",beta\n  alpha,queued,task,"-",alpha\n  hidden-b,queued,task,"-",hidden b\n  hidden-a,queued,task,"-",hidden a\n' ;;
+      count-change) printf 'count: 5\nready[5]{id,state,kind,repo,title}:\n  beta,queued,task,"-",beta\n  alpha,queued,task,"-",alpha\n  hidden-a,queued,task,"-",hidden a\n  hidden-b,queued,task,"-",hidden b\n  hidden-c,queued,task,"-",hidden c\n' ;;
+      replacement) printf 'count: 5\nready[5]{id,state,kind,repo,title}:\n  beta,queued,task,"-",beta\n  alpha,queued,task,"-",alpha\n  hidden-a,queued,task,"-",hidden a\n  hidden-b,queued,task,"-",hidden b\n  hidden-d,queued,task,"-",hidden d\n' ;;
+      *) exit 1 ;;
+    esac
+    ;;
   *) exit 1 ;;
 esac
 SH
@@ -179,12 +200,12 @@ SH
   # A first real watcher pass produces the refill evidence and the supervisor
   # surfaces it once.
   date '+%s' > "$state/.afk"
-  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
-    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 "$WATCH" > "$out" &
-  wait_for_exit "$!" 50 || fail "first refill heartbeat watcher pass did not exit"
-  payload=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_wake_latest_payload heartbeat heartbeat' \
-    _ "$ROOT/bin/fm-wake-lib.sh")
-  case "$payload" in 'heartbeat refill: ready=2 live=0 ids='*) ;; *) fail "real refill producer did not queue evidence: $payload" ;; esac
+  payload=$(run_refill_cycle "$dir" "$state" "$fakebin" "$out" initial)
+  case "$payload" in
+    'heartbeat refill: ready=4 live=0 ids=beta,alpha fingerprint='*) ;;
+    *) fail "real refill producer did not queue capped evidence: $payload" ;;
+  esac
+  initial_fingerprint=${payload##* fingerprint=}
   FM_STATE_OVERRIDE="$state" FM_INJECT_SKIP=heartbeat handle_wake heartbeat "$state" "$payload"
   [ "$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')" -eq 1 ] \
     || fail "first real refill heartbeat did not reach one escalation"
@@ -192,17 +213,37 @@ SH
   # Force the next scheduled heartbeat without changing fleet evidence. The
   # durable refill state survives the watcher restart and suppresses its digest.
   : > "$state/.subsuper-escalations"
-  rm -f "$state/.last-heartbeat"
-  : > "$out"
-  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
-    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 "$WATCH" > "$out" &
-  wait_for_exit "$!" 50 || fail "second refill heartbeat watcher pass did not exit"
-  payload=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_wake_latest_payload heartbeat heartbeat' \
-    _ "$ROOT/bin/fm-wake-lib.sh")
+  payload=$(run_refill_cycle "$dir" "$state" "$fakebin" "$out" reordered)
+  [ "${payload##* fingerprint=}" = "$initial_fingerprint" ] \
+    || fail "canonical ready-id ordering changed the producer fingerprint"
   FM_STATE_OVERRIDE="$state" FM_INJECT_SKIP=heartbeat handle_wake heartbeat "$state" "$payload"
   [ ! -s "$state/.subsuper-escalations" ] \
     || fail "unchanged real refill heartbeat created a second away digest"
-  pass "lifecycle: real refill heartbeat surfaces once and suppresses unchanged repeats"
+
+  payload=$(run_refill_cycle "$dir" "$state" "$fakebin" "$out" count-change)
+  case "$payload" in
+    'heartbeat refill: ready=5 live=0 ids=beta,alpha fingerprint='*) ;;
+    *) fail "count-change case did not preserve the capped display ids: $payload" ;;
+  esac
+  changed_fingerprint=${payload##* fingerprint=}
+  [ "$changed_fingerprint" != "$initial_fingerprint" ] \
+    || fail "a ready-count change beyond the display cap kept the old fingerprint"
+  FM_STATE_OVERRIDE="$state" FM_INJECT_SKIP=heartbeat handle_wake heartbeat "$state" "$payload"
+  [ "$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')" -eq 1 ] \
+    || fail "a ready-count change beyond the display cap was suppressed"
+
+  : > "$state/.subsuper-escalations"
+  payload=$(run_refill_cycle "$dir" "$state" "$fakebin" "$out" replacement)
+  case "$payload" in
+    'heartbeat refill: ready=5 live=0 ids=beta,alpha fingerprint='*) ;;
+    *) fail "replacement case did not preserve the capped display ids: $payload" ;;
+  esac
+  [ "${payload##* fingerprint=}" != "$changed_fingerprint" ] \
+    || fail "a same-count replacement beyond the display cap kept the old fingerprint"
+  FM_STATE_OVERRIDE="$state" FM_INJECT_SKIP=heartbeat handle_wake heartbeat "$state" "$payload"
+  [ "$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')" -eq 1 ] \
+    || fail "a same-count replacement beyond the display cap was suppressed"
+  pass "lifecycle: refill dedupe covers complete canonical ready state behind capped display ids"
 }
 
 test_routine_then_terminal_after_restart

@@ -450,33 +450,32 @@ classify_unknown() {  # <reason>
 #           and its escalation epoch. This is durable across daemon and primary
 #           restarts, unlike the session-scoped delivery buffer.
 
-refill_fingerprint() {  # <heartbeat payload> -> stable live/id-set identity
-  local payload=$1 line rest ready live ids canonical
+refill_fingerprint() {  # <heartbeat payload> -> producer's complete refill identity
+  local payload=$1 line rest ready live ids fingerprint
   case "$payload" in 'heartbeat refill: '*) ;; *) return 1 ;; esac
   line=${payload#heartbeat }
-  case "$line" in 'refill: ready='*' live='*' ids='*) ;; *) return 1 ;; esac
+  case "$line" in 'refill: ready='*' live='*' ids='*' fingerprint='*) ;; *) return 1 ;; esac
   rest=${line#refill: ready=}
   ready=${rest%% live=*}
   rest=${rest#* live=}
   live=${rest%% ids=*}
   ids=${rest#* ids=}
+  fingerprint=${ids#* fingerprint=}
+  ids=${ids%% fingerprint=*}
   case "$ready" in ''|*[!0-9]*) return 1 ;; esac
   case "$live" in ''|*[!0-9]*) return 1 ;; esac
   case "$ids" in *[!A-Za-z0-9._,-]*|,*|*,|*,,*) return 1 ;; esac
-  if [ -n "$ids" ]; then
-    canonical=$(printf '%s\n' "$ids" | tr ',' '\n' | LC_ALL=C sort -u | paste -sd, -) || return 1
-  else
-    canonical=
-  fi
-  printf 'live=%s;ids=%s' "$live" "$canonical"
+  [ "${#fingerprint}" -eq 64 ] || return 1
+  case "$fingerprint" in *[!0-9a-f]*) return 1 ;; esac
+  printf 'sha256=%s' "$fingerprint"
 }
 
 # The refill state is deliberately separate from the session-scoped escalation
-# buffer. A valid v1 record is exactly three lines, written through a same-
+# buffer. A valid v2 record is exactly three lines, written through a same-
 # directory temporary then rename, so a crash leaves either the prior record or
 # a complete successor. Invalid, future-dated, or stale records fail open.
 refill_dedupe_read() {  # <state> -> REFILL_DEDUPE_FINGERPRINT/TIMESTAMP
-  local state=$1 file version fingerprint timestamp extra stored_live stored_ids
+  local state=$1 file version fingerprint timestamp extra stored_hash
   file="$state/.subsuper-refill-escalation"
   [ -r "$file" ] || return 1
   {
@@ -485,13 +484,11 @@ refill_dedupe_read() {  # <state> -> REFILL_DEDUPE_FINGERPRINT/TIMESTAMP
     IFS= read -r timestamp || return 1
     IFS= read -r extra && return 1
   } < "$file"
-  [ "$version" = v1 ] || return 1
-  case "$fingerprint" in live=*';ids='*) ;; *) return 1 ;; esac
-  stored_live=${fingerprint#live=}
-  stored_live=${stored_live%%;ids=*}
-  stored_ids=${fingerprint#*;ids=}
-  case "$stored_live" in ''|*[!0-9]*) return 1 ;; esac
-  case "$stored_ids" in *[!A-Za-z0-9._,-]*|,*|*,|*,,*) return 1 ;; esac
+  [ "$version" = v2 ] || return 1
+  case "$fingerprint" in sha256=*) ;; *) return 1 ;; esac
+  stored_hash=${fingerprint#sha256=}
+  [ "${#stored_hash}" -eq 64 ] || return 1
+  case "$stored_hash" in *[!0-9a-f]*) return 1 ;; esac
   case "$timestamp" in ''|*[!0-9]*) return 1 ;; esac
   REFILL_DEDUPE_FINGERPRINT=$fingerprint
   REFILL_DEDUPE_TIMESTAMP=$timestamp
@@ -521,7 +518,7 @@ refill_dedupe_record() {  # <state> <fingerprint>
   umask 077
   tmp=$(mktemp "$state/.subsuper-refill-escalation.tmp.XXXXXX") || { umask "$old_umask"; return 1; }
   umask "$old_umask"
-  if ! { printf 'v1\n%s\n%s\n' "$fingerprint" "$(_now)" > "$tmp" && mv -f "$tmp" "$state/.subsuper-refill-escalation"; }; then
+  if ! { printf 'v2\n%s\n%s\n' "$fingerprint" "$(_now)" > "$tmp" && mv -f "$tmp" "$state/.subsuper-refill-escalation"; }; then
     rm -f "$tmp"
     return 1
   fi

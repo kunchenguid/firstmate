@@ -15,16 +15,15 @@ Visible symptom before this regression: unchanged evidence appended an identical
 The route now uses the same durable-state pattern as the existing signal, stale, and catch-all escalation dedupe rather than session memory.
 The public boundary regression drives `fm-watch.sh`, `fm-refill.sh`, the durable wake payload, and away-supervisor routing twice with unchanged ready work and no live workers.
 The first heartbeat produced one digest and the second produced none.
-The focused state matrix additionally covered canonical ready-id ordering, ready-id and live-worker changes, restart-persistent home scope, malformed and stale state, backward clock movement, empty-to-nonempty transitions, and preservation of a typed failure batched beside suppressed refill evidence.
+The focused state matrix additionally covered producer-side canonical ready-id ordering, count changes and same-count replacements beyond capped display ids, live-worker changes, restart-persistent home scope, malformed and stale state, backward clock movement, empty-to-nonempty transitions, and preservation of a typed failure batched beside suppressed refill evidence.
 The existing per-home daemon singleton test coverage remains the concurrency boundary for the read-check-write transition.
 
 ```sh
 bin/fm-test-run.sh tests/fm-refill.test.sh tests/fm-daemon.test.sh \
-  tests/fm-wake-daemon-lifecycle-e2e.test.sh tests/fm-afk-launch.test.sh \
-  tests/fm-afk-return.test.sh tests/fm-afk-inject-e2e.test.sh
+  tests/fm-wake-daemon-lifecycle-e2e.test.sh
 ```
 
-Observed result: every selected suite exited 0, including `lifecycle: real refill heartbeat surfaces once and suppresses unchanged repeats` and `away refill escalation dedupes stable state, re-surfaces safely, and preserves other events`.
+Observed result: every selected suite exited 0, including `lifecycle: refill dedupe covers complete canonical ready state behind capped display ids` and `away refill escalation dedupes stable state, re-surfaces safely, and preserves other events`.
 
 ## Native session-start delivery
 

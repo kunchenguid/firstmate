@@ -629,7 +629,7 @@ heartbeat_payload() {
   local line
   line=$("$SCRIPT_DIR/fm-refill.sh" "$STATE" "$CONFIG" "$DATA/backlog.md" 2>/dev/null) || line=
   case "$line" in
-    'refill: ready='*' live='*' ids='*) printf 'heartbeat %s' "$line" ;;
+    'refill: ready='*' live='*' ids='*' fingerprint='*) printf 'heartbeat %s' "$line" ;;
     *) printf 'heartbeat' ;;
   esac
 }
