@@ -91,6 +91,8 @@ Knowing where coverage stops is part of trusting a clean result.
 - A commit that belongs to no branch and no pull request is reachable only by SHA and is not enumerable. The sweep cannot see it and does not pretend to.
 - GitHub stops listing a pull request's commits at 250. Reaching that wall is reported as could-not-observe for the scope rather than treated as the end of the list.
 - Review comments left on individual diff lines are a separate GitHub object from the review bodies the `reviews` kind reads. They are not currently swept.
+- A review submitted with no body carries no token, so the `reviews` kind reports every bare approval as a candidate.
+  That is correct by the definition above - the write is undeclared - but it is the sweep's standing source of routine candidates, and the `state=` field in a candidate's evidence is what separates a bodiless `APPROVED` from a review that had prose and still omitted the token.
 - An issue body, a pull request title or body, and a commit comment are all writes under the same identity that no kind reads.
   They sit outside the swept scope of comments, reviews, and commits, so a clean run says nothing about them either way.
 - A commit is matched to the window by the later of its committer and author dates, because a rebase or cherry-pick carries an author date from before the window onto a commit pushed inside it.
