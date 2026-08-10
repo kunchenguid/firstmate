@@ -394,7 +394,7 @@ When starting no-mistakes, make \`--intent\` preserve all relevant content from 
 Do not hand-edit, commit, or fix findings yourself while a run is active - the pipeline applies every fix.
 
 Prefer folding documentation-only follow-up changes into the next known code round - review findings, a queued fix, or anything else - instead of starting a separate validation run.
-When a documentation-only change is genuinely the last thing standing, use \`--skip test\` with \`no-mistakes axi run\` or top-level \`no-mistakes\` so the pipeline skips the \`test\` step, and confirm the current flag and accepted step names with \`no-mistakes axi run --help\` in this worktree.
+When a documentation-only change is genuinely the last thing standing, use \`--skip test\` with \`no-mistakes axi run\` or top-level \`no-mistakes\` so the pipeline skips the \`test\` step - the step is named \`test\`, and \`no-mistakes axi status\` lists every step name if you need another; confirm the current \`--skip\` flag with \`no-mistakes axi run --help\` in this worktree.
 Documentation-only means no change to any source, test, configuration, dependency, or build file - documentation and comments only; anything else is an ordinary code round.
 
 Two firstmate-specific rules layer on top of that guidance:
