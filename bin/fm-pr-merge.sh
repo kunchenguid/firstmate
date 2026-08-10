@@ -40,8 +40,13 @@
 # so a typo cannot silently widen the waiver back into a total override, and a
 # bare --allow-unverified carrying no name is refused for the same reason: an
 # override that cannot say what it waived is the defect this argument exists to
-# remove. The name must be a single line with no quote or backslash character,
-# because it is embedded in the forge query as a string literal and repeated in
+# remove. A name matching more than one check run on the head is refused too:
+# GitHub can carry several runs under one name - two workflows defining the same
+# job, a reusable workflow called twice, a re-run leaving an older suite's run -
+# and one such name would waive that many independent verdicts while the record
+# could still say only the name. The waiver covers exactly one member or none.
+# The name must be a single line with no quote or backslash character, because
+# it is embedded in the forge query as a string literal and repeated in
 # refusals.
 #
 # An overridden merge records merge_verification=override and
@@ -121,7 +126,6 @@ waived_check_name_valid() {
   [ "$name" = "${name//[[:cntrl:]]/}" ]
 }
 
-ALLOW_UNVERIFIED=0
 WAIVED_CHECK=
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -136,7 +140,6 @@ while [ "$#" -gt 0 ]; do
         exit 2
       fi
       WAIVED_CHECK=$1
-      ALLOW_UNVERIFIED=1
       shift
       ;;
     --allow-unverified=*)
@@ -352,6 +355,8 @@ verify_current_head() {
     remaining=$((checks - waived))
     if [ "$waived" -eq 0 ]; then
       reasons+=("no check run named \"$WAIVED_CHECK\" exists on this head, so the override names nothing it could waive")
+    elif [ "$waived" -gt 1 ]; then
+      reasons+=("$waived check runs on this head are named \"$WAIVED_CHECK\", so the override does not name one check and would waive $waived separate verdicts")
     elif [ "$remaining" -eq 0 ]; then
       reasons+=("waiving check \"$WAIVED_CHECK\" leaves no other check run on this head, so nothing examined it")
     else
@@ -491,7 +496,7 @@ grep -qxF "pr=$URL" "$RECORD" || {
 
 VERIFIED_HEAD=
 verify_current_head || exit 1
-if [ "$ALLOW_UNVERIFIED" -eq 1 ]; then
+if [ -n "$WAIVED_CHECK" ]; then
   # One check on this head was waived rather than verified, so the merge records
   # the waiver and no verified head: the head as a whole was never verified.
   MERGE_VERIFICATION=override

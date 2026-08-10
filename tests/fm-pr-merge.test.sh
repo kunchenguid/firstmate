@@ -38,6 +38,7 @@
 #   (o5) a bare --allow-unverified, with or without a following flag, is refused
 #   (o6) waived counts that cannot be a subset of the totals refuse as unreadable
 #   (o7) a merge with no override asks the forge for nothing extra
+#   (o8) a name carried by more than one check run refuses: it names no one check
 #   (p) the override is never inferred from the environment or from after --
 #   (q) the torn-down-metadata refusal still fires first, unchanged
 #   (r) the real GitHub query is exercised end to end against API-shaped JSON
@@ -943,6 +944,34 @@ test_allow_unverified_refuses_when_the_waiver_empties_the_rollup() {
   pass "fm-pr-merge refuses a waiver that would leave no check run examining the head"
 }
 
+# GitHub can carry several check runs under one name, so a name is not by itself
+# a single verdict. One override may waive one member, so a name matching more
+# than one refuses rather than hiding that many failures behind one name.
+test_allow_unverified_refuses_a_name_carried_by_several_check_runs() {
+  local case_dir rc head=6868686868686868686868686868686868686868
+  case_dir=$(make_case override-duplicate-name)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  # Two red members, and BOTH carry the waived name: without the cardinality
+  # bound the totals cancel exactly and this head merges.
+  write_verify_payload "$case_dir/verify.txt" "$head" MERGEABLE '' 10 2 2 0
+  append_waived_counts "$case_dir/verify.txt" 2 2 0
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/50 \
+    --allow-unverified "$WAIVED_CHECK_NAME" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "override-duplicate-name: a name matching two check runs must refuse"
+  assert_grep "2 check runs on this head are named \"$WAIVED_CHECK_NAME\"" \
+    "$case_dir/stderr" "override-duplicate-name: the refusal did not report how many runs carry the name"
+  assert_no_merge_side_effects "$case_dir" override-duplicate-name
+  pass "fm-pr-merge refuses an override whose name is carried by more than one check run"
+}
+
 # A nameless override is the defect this argument exists to remove, so every
 # shape of it refuses rather than falling back to waiving everything.
 test_bare_allow_unverified_is_refused() {
@@ -1268,6 +1297,11 @@ test_real_query_against_api_shaped_json() {
   # A legacy commit status names itself in .context rather than .name.
   run_fixture_case waive-legacy-status "[${success_runs%,},$legacy_red]" MERGEABLE '' 71 0 '' \
     --allow-unverified ci/legacy
+  # The same name on two members: one override cannot stand for two verdicts.
+  run_fixture_case waive-duplicate-name \
+    "[${success_runs%,},$waived_red,$waived_red]" MERGEABLE '' 75 1 \
+    "2 check runs on this head are named \"$WAIVED_CHECK_NAME\"" \
+    --allow-unverified "$WAIVED_CHECK_NAME"
   # Waiving the only member leaves nothing that examined the head.
   run_fixture_case waive-only-member "[$waived_red]" MERGEABLE '' 72 1 \
     "waiving check \"$WAIVED_CHECK_NAME\" leaves no other check run on this head" \
@@ -1535,6 +1569,7 @@ test_allow_unverified_still_refuses_an_unrun_check
 test_allow_unverified_still_refuses_empty_rollup
 test_allow_unverified_refuses_a_check_absent_from_the_head
 test_allow_unverified_refuses_when_the_waiver_empties_the_rollup
+test_allow_unverified_refuses_a_name_carried_by_several_check_runs
 test_bare_allow_unverified_is_refused
 test_waived_counts_outside_the_totals_refuse_as_unreadable
 test_no_override_asks_the_forge_for_nothing_extra
