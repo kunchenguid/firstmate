@@ -225,7 +225,7 @@ fm_control_harness_wiring_paths() {  # <harness> <worktree> <state-dir> <id>
 }
 
 fm_control_cursor_hooks_backup() {  # <worktree> <state-dir> <id>
-  local wt=$1 state=$2 id=$3 path backup cursor_dir="$1/.cursor" hooks_dir="$1/.cursor/hooks"
+  local wt=$1 state=$2 id=$3 path backup installed cursor_dir="$1/.cursor" hooks_dir="$1/.cursor/hooks"
   [ ! -L "$cursor_dir" ] && [ ! -L "$hooks_dir" ] || return 1
   [ ! -e "$cursor_dir" ] || [ -d "$cursor_dir" ] || return 1
   [ ! -e "$hooks_dir" ] || [ -d "$hooks_dir" ] || return 1
@@ -238,11 +238,34 @@ fm_control_cursor_hooks_backup() {  # <worktree> <state-dir> <id>
       [ ! -e "$backup" ] || return 1
       cp -p -- "$path" "$backup"
     fi
+    installed="$state/$id.cursor-$(basename "$path").installed"
+    [ ! -e "$installed" ] && [ ! -L "$installed" ] || return 1
   done
 }
 
+fm_control_cursor_hooks_record_installed() {  # <worktree> <state-dir> <id> <hooks-json> <hook-script>
+  local wt=$1 state=$2 id=$3 hooks_source=$4 script_source=$5 path source installed
+  [ ! -L "$wt/.cursor" ] && [ ! -L "$wt/.cursor/hooks" ] || return 1
+  for path in "$wt/.cursor/hooks.json" "$wt/.cursor/hooks/fm-busy-turnend.sh"; do
+    case "$(basename "$path")" in
+      hooks.json) source=$hooks_source ;;
+      fm-busy-turnend.sh) source=$script_source ;;
+    esac
+    [ -f "$source" ] && [ ! -L "$source" ] || return 1
+    installed="$state/$id.cursor-$(basename "$path").installed"
+    [ ! -e "$installed" ] && [ ! -L "$installed" ] || return 1
+    cp -p -- "$source" "$installed" || return 1
+  done
+}
+
+fm_control_cursor_hooks_forget() {  # <state-dir> <id>
+  local state=$1 id=$2
+  rm -f -- "$state/$id.cursor-hooks.json" "$state/$id.cursor-fm-busy-turnend.sh" \
+    "$state/$id.cursor-hooks.json.installed" "$state/$id.cursor-fm-busy-turnend.sh.installed"
+}
+
 fm_control_cursor_hooks_restore() {  # <worktree> <state-dir> <id>
-  local wt=$1 state=$2 id=$3 path backup cursor_dir="$1/.cursor" hooks_dir="$1/.cursor/hooks"
+  local wt=$1 state=$2 id=$3 path backup installed cursor_dir="$1/.cursor" hooks_dir="$1/.cursor/hooks"
   [ ! -L "$cursor_dir" ] && [ ! -L "$hooks_dir" ] || return 1
   [ ! -e "$cursor_dir" ] || [ -d "$cursor_dir" ] || return 1
   [ ! -e "$hooks_dir" ] || [ -d "$hooks_dir" ] || return 1
@@ -253,10 +276,52 @@ fm_control_cursor_hooks_restore() {  # <worktree> <state-dir> <id>
     else
       backup="$state/$id.cursor-fm-busy-turnend.sh"
     fi
-    if [ -e "$backup" ]; then
-      cp -p -- "$backup" "$path" && rm -f -- "$backup" || return 1
-    else
-      rm -f -- "$path" || return 1
+    installed="$state/$id.cursor-$(basename "$path").installed"
+    [ ! -e "$backup" ] || { [ -f "$backup" ] && [ ! -L "$backup" ]; } || return 1
+    [ ! -e "$installed" ] || { [ -f "$installed" ] && [ ! -L "$installed" ]; } || return 1
+    if [ -f "$installed" ] && [ -f "$path" ] && cmp -s "$path" "$installed"; then
+      if [ -e "$backup" ]; then
+        cp -p -- "$backup" "$path" || return 1
+      else
+        rm -f -- "$path" || return 1
+      fi
+      rm -f -- "$backup" "$installed" || return 1
+    elif [ "$(basename "$path")" = hooks.json ] && [ -f "$path" ]; then
+      python3 - "$path" <<'PY' || return 1
+import json
+import os
+import sys
+import tempfile
+
+path = sys.argv[1]
+commands = {
+    ".cursor/hooks/fm-busy-turnend.sh busy",
+    ".cursor/hooks/fm-busy-turnend.sh idle-stop",
+    ".cursor/hooks/fm-busy-turnend.sh idle-session-end",
+}
+with open(path, encoding="utf-8") as handle:
+    document = json.load(handle)
+hooks = document.get("hooks")
+if not isinstance(hooks, dict):
+    raise SystemExit("Cursor hooks must be a JSON object")
+changed = False
+for event, entries in hooks.items():
+    if not isinstance(entries, list):
+        raise SystemExit(f"Cursor {event} hooks must be arrays")
+    retained = [entry for entry in entries if not (
+        isinstance(entry, dict) and entry.get("command") in commands
+    )]
+    if len(retained) != len(entries):
+        hooks[event] = retained
+        changed = True
+if changed:
+    directory = os.path.dirname(path)
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=directory, delete=False) as handle:
+        json.dump(document, handle, separators=(",", ":"))
+        handle.write("\n")
+        temporary = handle.name
+    os.replace(temporary, path)
+PY
     fi
   done
 }

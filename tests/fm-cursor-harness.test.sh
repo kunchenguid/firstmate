@@ -39,6 +39,9 @@ case "${1:-}" in
     for arg in "$@"; do
       if [ "$prev" = -l ]; then
         printf '%s\n' "$arg" >> "$FM_FAKE_LAUNCH_LOG"
+        if [ "${FM_FAKE_LAUNCH_FAIL:-0}" = 1 ] && [[ "$arg" = *cursor-agent* ]]; then
+          exit 70
+        fi
         bash -c "$arg"
         break
       fi
@@ -248,6 +251,8 @@ test_cursor_hooks_restore_existing_files() {
   fm_control_cursor_hooks_backup "$wt" "$state" restore
   printf '%s\n' 'firstmate hook' > "$wt/.cursor/hooks.json"
   printf '%s\n' 'firstmate script' > "$wt/.cursor/hooks/fm-busy-turnend.sh"
+  fm_control_cursor_hooks_record_installed "$wt" "$state" restore \
+    "$wt/.cursor/hooks.json" "$wt/.cursor/hooks/fm-busy-turnend.sh"
   fm_control_cursor_hooks_restore "$wt" "$state" restore
   python3 - "$wt/.cursor/hooks.json" <<'PY' || fail "existing Cursor hooks.json was not restored semantically"
 import json, sys
@@ -256,6 +261,87 @@ PY
   cmp -s "$dir/expected-hook" "$wt/.cursor/hooks/fm-busy-turnend.sh" \
     || fail "existing Cursor hook script content was not restored exactly"
   pass "Cursor wiring restores pre-existing hook files"
+}
+
+test_cursor_hook_restore_preserves_user_hook_edits() {
+  local dir="$TMP_ROOT/preserve-hook-edits" wt="$TMP_ROOT/preserve-hook-edits/wt" state="$TMP_ROOT/preserve-hook-edits/state"
+  mkdir -p "$wt/.cursor/hooks" "$state"
+  printf '%s\n' '{"version":1,"hooks":{"user":[{"command":"keep"}]}}' > "$wt/.cursor/hooks.json"
+  fm_control_cursor_hooks_backup "$wt" "$state" preserve
+  python3 - "$wt/.cursor/hooks.json" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    document = json.load(handle)
+document["hooks"].update({
+    "beforeSubmitPrompt": [{"command": ".cursor/hooks/fm-busy-turnend.sh busy"}],
+    "stop": [{"command": ".cursor/hooks/fm-busy-turnend.sh idle-stop"}],
+    "sessionEnd": [{"command": ".cursor/hooks/fm-busy-turnend.sh idle-session-end"}],
+})
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(document, handle, separators=(",", ":"))
+    handle.write("\n")
+PY
+  printf '%s\n' 'firstmate script' > "$wt/.cursor/hooks/fm-busy-turnend.sh"
+  fm_control_cursor_hooks_record_installed "$wt" "$state" preserve \
+    "$wt/.cursor/hooks.json" "$wt/.cursor/hooks/fm-busy-turnend.sh"
+  python3 - "$wt/.cursor/hooks.json" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    document = json.load(handle)
+document["hooks"]["user"].append({"command": "user-later"})
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(document, handle, separators=(",", ":"))
+    handle.write("\n")
+PY
+  fm_control_cursor_hooks_restore "$wt" "$state" preserve
+  python3 - "$wt/.cursor/hooks.json" <<'PY' || fail "Cursor hook restore discarded a non-Firstmate edit"
+import json
+import sys
+
+hooks = json.load(open(sys.argv[1]))["hooks"]
+assert hooks["user"] == [{"command": "keep"}, {"command": "user-later"}], hooks
+for event in ("beforeSubmitPrompt", "stop", "sessionEnd"):
+    assert not hooks[event], hooks
+PY
+  assert_absent "$wt/.cursor/hooks/fm-busy-turnend.sh" \
+    "Cursor hook restore left its generated script after preserving user edits"
+  pass "Cursor hook restoration preserves user edits while removing Firstmate entries"
+}
+
+test_spawn_abort_restores_cursor_hooks() {
+  local rec case_dir home proj wt fakebin id out status expected_hooks expected_script
+  rec=$(make_spawn_case abort-hooks)
+  IFS='|' read -r case_dir home proj wt fakebin id <<EOF
+$rec
+EOF
+  mkdir -p "$wt/.cursor/hooks"
+  printf '%s\n' '{"version":1,"hooks":{"user":[{"command":"keep"}]}}' > "$wt/.cursor/hooks.json"
+  printf '%s\n' 'user hook' > "$wt/.cursor/hooks/fm-busy-turnend.sh"
+  expected_hooks="$case_dir/expected-hooks.json"
+  expected_script="$case_dir/expected-hook.sh"
+  cp "$wt/.cursor/hooks.json" "$expected_hooks"
+  cp "$wt/.cursor/hooks/fm-busy-turnend.sh" "$expected_script"
+  out=$(FM_FAKE_LAUNCH_FAIL=1 run_cursor_spawn "$home" "$proj" "$wt" "$fakebin" "$id" \
+    --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn failure injection unexpectedly succeeded"
+  cmp -s "$expected_hooks" "$wt/.cursor/hooks.json" \
+    || fail "aborted Cursor spawn did not restore hooks.json"
+  cmp -s "$expected_script" "$wt/.cursor/hooks/fm-busy-turnend.sh" \
+    || fail "aborted Cursor spawn did not restore the pre-existing hook script"
+  assert_absent "$home/state/$id.busy-gen" \
+    "aborted Cursor spawn left its busy generation armed"
+  assert_absent "$home/state/$id.cursor-hooks.json" \
+    "aborted Cursor spawn left its hook backup behind"
+  assert_absent "$home/state/$id.cursor-hooks.json.installed" \
+    "aborted Cursor spawn left its hook transaction snapshot behind"
+  pass "aborted Cursor spawn restores its hook transaction"
 }
 
 test_cursor_hooks_reject_parent_symlinks() {
@@ -318,6 +404,8 @@ test_control_tables
 test_cursor_family_is_exact
 test_cursor_composer_placeholder_requires_cursor_glyph
 test_cursor_hooks_restore_existing_files
+test_cursor_hook_restore_preserves_user_hook_edits
+test_spawn_abort_restores_cursor_hooks
 test_cursor_hooks_reject_parent_symlinks
 test_cursor_malformed_hooks_fail_before_writing
 test_tmux_classifies_cursor_agent_only

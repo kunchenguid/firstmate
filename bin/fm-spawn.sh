@@ -657,6 +657,10 @@ RELAUNCH_REPLACEMENT_BUSY_GEN=
 RELAUNCH_REPLACEMENT_HARNESS=
 RELAUNCH_REPLACEMENT_STATE=
 RELAUNCH_REPLACEMENT_WT=
+CURSOR_WIRING_PENDING=0
+CURSOR_WIRING_BUSY_GEN=
+CURSOR_WIRING_STATE=
+CURSOR_WIRING_WT=
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
 
@@ -700,6 +704,19 @@ spawn_abort_cleanup() {
           "$RELAUNCH_REPLACEMENT_STATE" "$ID" \
           --gen "$RELAUNCH_REPLACEMENT_BUSY_GEN"; then
         echo "warning: could not retire replacement busy generation after aborted relaunch of $ID" >&2
+      fi
+    fi
+  fi
+  if [ "$CURSOR_WIRING_PENDING" = 1 ]; then
+    CURSOR_WIRING_PENDING=0
+    if ! fm_control_cursor_hooks_restore "$CURSOR_WIRING_WT" "$CURSOR_WIRING_STATE" "$ID"; then
+      echo "warning: could not restore Cursor hooks after aborted spawn of $ID" >&2
+    fi
+    fm_control_cursor_hooks_forget "$CURSOR_WIRING_STATE" "$ID" || true
+    if [ -n "$CURSOR_WIRING_BUSY_GEN" ]; then
+      if ! "$FM_ROOT/bin/fm-busy-event.sh" retire \
+          "$CURSOR_WIRING_STATE" "$ID" --gen "$CURSOR_WIRING_BUSY_GEN"; then
+        echo "warning: could not retire Cursor busy generation after aborted spawn of $ID" >&2
       fi
     fi
   fi
@@ -2423,6 +2440,17 @@ esac
 printf '{}\\n'
 EOF
       chmod 700 "$cursor_hook_script_tmp"
+      fm_control_cursor_hooks_record_installed "$WT" "$STATE_REAL" "$ID" \
+        "$cursor_hooks_tmp" "$cursor_hook_script_tmp" || {
+        echo "error: could not record the Cursor hook transaction" >&2
+        exit 1
+      }
+      [ "$RELAUNCH" -eq 1 ] || {
+        CURSOR_WIRING_PENDING=1
+        CURSOR_WIRING_BUSY_GEN=$BUSY_GEN
+        CURSOR_WIRING_STATE=$STATE_REAL
+        CURSOR_WIRING_WT=$WT
+      }
       mkdir -p "$WT/.cursor/hooks"
       mv -f -- "$cursor_hook_script_tmp" "$WT/.cursor/hooks/fm-busy-turnend.sh"
       mv -f -- "$cursor_hooks_tmp" "$WT/.cursor/hooks.json"
@@ -2880,6 +2908,7 @@ if [ "$KIND" = secondmate ] && [ "${FM_SKIP_SECONDMATE_INHERIT:-0}" != 1 ]; then
   fi
 fi
 
+CURSOR_WIRING_PENDING=0
 SPAWN_DELIVERY=
 [ -z "$MODE" ] || SPAWN_DELIVERY=" mode=$MODE yolo=$YOLO"
 echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY window=$META_WINDOW worktree=$WT"
