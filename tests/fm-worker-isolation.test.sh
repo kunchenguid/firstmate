@@ -130,6 +130,12 @@ test_incomplete_worker_identity_refuses_primary_operations() {
   status=$?
   expect_code 1 "$status" "a secondmate with a foreign effective home must be refused"
   assert_contains "$out" "task worker" "foreign secondmate home refusal lost its worker diagnostic"
+  out=$(FM_AGENT_ROLE=secondmate FM_AGENT_TASK=dom-b2 FM_HOME=/homes/dom \
+    bash -c 'set -u; . "$1"; fm_worker_refuse_primary_operation operation' _ \
+    "$ROOT/bin/fm-worker-isolation-lib.sh" 2>&1)
+  status=$?
+  expect_code 1 "$status" "a secondmate without an owner home must be refused normally"
+  assert_contains "$out" "task worker" "missing-owner secondmate refusal lost its worker diagnostic"
   out=$(FM_AGENT_ROLE=secondmate FM_AGENT_TASK=dom-b2 FM_AGENT_OWNER_HOME=/homes/dom FM_ROOT=/primary \
     bash -c '. "$1"; fm_worker_refuse_primary_operation operation' _ \
     "$ROOT/bin/fm-worker-isolation-lib.sh" 2>&1)
@@ -556,6 +562,29 @@ test_one_proc_walk_answers_every_task_in_a_sweep() {
   pass "one /proc walk answers every task in a sweep, and an empty index is a real answer"
 }
 
+test_tmux_fallback_requires_complete_worker_identity() {
+  local dir pid out
+  require_procfs || { pass "skip: this host has no readable procfs for tmux identity fallback"; return 0; }
+  dir="$TMP_ROOT/tmux-identity"
+  mkdir -p "$dir"
+  ( cd "$dir" && env -u FM_AGENT_TASK -u FM_AGENT_ROLE -u FM_AGENT_OWNER_HOME sleep 300 ) >/dev/null 2>&1 </dev/null &
+  pid=$!
+  BG_PIDS+=("$pid")
+  out=$(FM_TEST_PID="$pid" FM_TEST_HOME="$TMP_ROOT/tmux-identity-home" \
+    bash -c '
+      . "$1"
+      fm_agent_backend_shell_pid() { printf "%s" "$FM_TEST_PID"; }
+      fm_agent_harness_pid_below() { return 1; }
+      fm_agent_foreground_pid() { printf "%s" "$FM_TEST_PID"; }
+      fm_agent_cwd_verdict task-tmux tmux pane "" "$FM_TEST_HOME"
+    ' _ "$ROOT/bin/fm-agent-cwd-lib.sh")
+  case "$out" in
+    unverified*) : ;;
+    *) fail "a tmux process without task identity was accepted: $out" ;;
+  esac
+  pass "tmux cwd fallback requires complete worker identity"
+}
+
 test_agent_lookup_is_home_scoped_and_rejects_reused_pids() {
   local dir_a dir_b id index out status home_a home_b
   require_procfs || { pass "skip: this host has no readable procfs for home-scoped lookup"; return 0; }
@@ -608,6 +637,33 @@ test_spawn_settles_on_proc_evidence_over_a_lying_pane_path() {
   assert_no_grep "worktree=$lying" "$HOME_DIR/state/$id.meta" \
     "spawn recorded the lying pane path as the worktree"
   pass "spawn settles on the process's own working directory, not a pane field that names another process"
+}
+
+test_spawn_does_not_promote_an_unproven_pane_path() {
+  local rec id out status
+  id="settle-hint-d4-$RUN_TAG"
+  rec=$(make_launch_case settle-hint "$id")
+  read_launch_record "$rec"
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 FM_SPAWN_WT_WAIT_SECS=1 TMUX="fake,1,0" \
+    FM_FAKE_PANE_PATH="$WT_DIR" \
+    FM_FAKE_TMUX_STATE="$CASE_DIR/tmux-window-name" \
+    FM_FAKE_LAUNCH_LOG="$CASE_DIR/launch.log" \
+    PATH="$FAKEBIN_DIR:$PATH" \
+    "$SPAWN" "$id" "$PROJ_DIR" --harness claude 2>&1)
+  status=$?
+  expect_code 1 "$status" "spawn must refuse a valid-looking pane hint without proof"
+  assert_contains "$out" "treehouse get did not enter a worktree" \
+    "spawn did not report missing authoritative worktree proof"
+  assert_present "$HOME_DIR/state/$id.meta" \
+    "spawn did not preserve recovery metadata for the unresolved lease"
+  assert_grep 'slot_lease_state=unresolved' "$HOME_DIR/state/$id.meta" \
+    "spawn did not mark the unproven lease unresolved"
+  assert_no_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id.meta" \
+    "spawn recorded an unproven pane hint as its worktree"
+  pass "spawn keeps an unproven pane path diagnostic-only"
 }
 
 # --- E. pooled-slot ownership -----------------------------------------------
@@ -1128,8 +1184,10 @@ test_provider_process_id_matrix_is_explicit
 test_tmux_pane_pid_comes_from_the_stable_window_id
 test_a_lost_window_name_never_answers_with_firstmates_own_pane
 test_one_proc_walk_answers_every_task_in_a_sweep
+test_tmux_fallback_requires_complete_worker_identity
 test_agent_lookup_is_home_scoped_and_rejects_reused_pids
 test_spawn_settles_on_proc_evidence_over_a_lying_pane_path
+test_spawn_does_not_promote_an_unproven_pane_path
 test_slot_stamp_records_ownership_and_never_stamps_a_plain_checkout
 test_clean_ownership_disposes
 test_missing_ownership_stamp_retains

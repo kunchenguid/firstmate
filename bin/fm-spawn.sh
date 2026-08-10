@@ -1523,6 +1523,11 @@ if [ "$KIND" != secondmate ]; then
   for _ in $(seq 1 "${FM_SPAWN_WT_WAIT_SECS:-60}"); do
     spawn_settle_path "$WID"
     p=$SPAWN_WORKTREE_PATH
+    if [ "$SPAWN_WORKTREE_PATH_SOURCE" = hint ]; then
+      [ -z "$p" ] || WT_CANDIDATE="$p"
+      sleep 1
+      continue
+    fi
     if [ -n "$p" ] && [ "$(real_path_or_raw "$p")" != "$PROJ_ABS_REAL" ]; then
       WT_CANDIDATE="$p"
       if worktree_of_target_repo "$p"; then

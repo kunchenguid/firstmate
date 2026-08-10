@@ -28,8 +28,9 @@
 # its own shape:
 #     <source>\t<pid>\t<cwd>
 # with source one of:
-#   proc       - authoritative, read from the named process
-#   unknown    - no authoritative reading is available here (pid and cwd empty)
+#   proc         - authoritative, read from the named process
+#   unverified   - a process was found but its task identity is incomplete
+#   unknown      - no authoritative reading is available here (pid and cwd empty)
 #
 # On a host without procfs (macOS) step 1 is unavailable and step 2 falls back
 # to `lsof -d cwd`; when neither works the verdict is `unknown` rather than a
@@ -116,6 +117,25 @@ fm_agent_proc_env() {
   value=$(fm_agent_environ "$pid" | sed -n "s/^$var=//p" | head -1)
   [ -n "$value" ] || return 1
   printf '%s' "$value"
+}
+
+fm_agent_worker_identity_matches() {
+  local pid=$1 expected_task=$2 expected_home=${3:-}
+  local task role owner
+  fm_agent_pid_is_numeric "$pid" || return 1
+  task=$(fm_agent_proc_env "$pid" FM_AGENT_TASK 2>/dev/null) || return 1
+  role=$(fm_agent_proc_env "$pid" FM_AGENT_ROLE 2>/dev/null) || return 1
+  owner=$(fm_agent_proc_env "$pid" FM_AGENT_OWNER_HOME 2>/dev/null) || return 1
+  [ "$task" = "$expected_task" ] || return 1
+  case "$role" in
+    crewmate|secondmate) ;;
+    *) return 1 ;;
+  esac
+  case "$owner" in
+    /*) ;;
+    *) return 1 ;;
+  esac
+  [ -z "$expected_home" ] || fm_agent_paths_same "$owner" "$expected_home"
 }
 
 fm_agent_proc_start_time() {
@@ -439,6 +459,10 @@ fm_agent_cwd_verdict() {
     fi
   fi
   if [ -n "$pid" ]; then
+    if [ -n "$id" ] && ! fm_agent_worker_identity_matches "$pid" "$id" "$expected_home"; then
+      printf 'unverified\t%s\t' "$pid"
+      return 0
+    fi
     if cwd=$(fm_agent_proc_cwd "$pid"); then
       printf 'proc\t%s\t%s' "$pid" "$cwd"
       return 0
@@ -449,6 +473,10 @@ fm_agent_cwd_verdict() {
     pid=$(fm_agent_harness_pid_below "$shell_pid" 2>/dev/null) \
       || pid=$(fm_agent_foreground_pid "$shell_pid" 2>/dev/null) \
       || pid=$shell_pid
+    if [ -n "$id" ] && ! fm_agent_worker_identity_matches "$pid" "$id" "$expected_home"; then
+      printf 'unverified\t%s\t' "$pid"
+      return 0
+    fi
     if cwd=$(fm_agent_proc_cwd "$pid"); then
       printf 'proc\t%s\t%s' "$pid" "$cwd"
       return 0

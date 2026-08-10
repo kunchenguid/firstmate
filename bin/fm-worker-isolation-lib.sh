@@ -107,8 +107,8 @@ fm_worker_identity_is_complete() {
     secondmate)
       effective_home=${FM_HOME:-${FM_ROOT_OVERRIDE:-${FM_ROOT:-}}}
       [ -n "$effective_home" ] || return 1
-      [ "$effective_home" = "$FM_AGENT_OWNER_HOME" ] || return 1
-      owner=$FM_AGENT_OWNER_HOME
+      [ "$effective_home" = "${FM_AGENT_OWNER_HOME:-}" ] || return 1
+      owner=${FM_AGENT_OWNER_HOME:-}
       for var in $FM_WORKER_ISOLATION_HOME_VARS; do
         case "$var" in
           FM_HOME|FM_ROOT|FM_ROOT_OVERRIDE) expected=$owner ;;

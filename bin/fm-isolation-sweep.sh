@@ -95,6 +95,11 @@ for meta in "$STATE"/*.meta; do
 
   record=$(fm_agent_cwd_verdict "$id" "$backend" "$target" "$PID_INDEX" "$expected_home")
   source=$(fm_agent_verdict_field "$record" source)
+  if [ "$source" = unverified ]; then
+    echo "ISOLATION: task $id worker identity is incomplete or unverified; stop it before it acts on this home's records"
+    sweep_status=1
+    continue
+  fi
   if [ "$source" != proc ]; then
     # Unproven isolation blocks the fleet, but only while the task's endpoint
     # could still be running something. A record whose endpoint is PROVABLY
