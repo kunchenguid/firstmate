@@ -356,6 +356,61 @@ test_boolean_view_never_promotes_unknown() {
   pass "the boolean view reports busy only on an exact busy verdict"
 }
 
+# Issue #2076: lock_acquire's stale-lock break reads the lock's mtime via the
+# shared fm_lock_path_mtime (bin/fm-lock-lib.sh). GNU coreutils' `stat -f` is
+# *filesystem* stat, not BSD's per-field flag, so a naive
+# `stat -f %m ... || stat -c %Y ...` fallback does not fail cleanly on Linux -
+# "%m" becomes a bogus second file operand, and the real path's dump still
+# reaches stdout before the command exits nonzero, corrupting the arithmetic
+# that computes lock age and aborting under `set -u` with an "unbound
+# variable" error. Force the GNU branch explicitly (fake uname + fake stat,
+# reproducing that exact dump on the -f path) so a regression to the old
+# chained fallback fails loudly no matter which platform runs the test.
+test_lock_stale_break_survives_gnu_stat_quirk() {
+  local state gen fakebin lock_dir out rc
+  state=$(new_state_dir lock-gnu-stale)
+  gen=$("$EV" arm "$state" t1) || fail "arm failed"
+  lock_dir="$state/t1.busy-state.lock"
+  mkdir -p "$lock_dir"
+
+  fakebin="$TMP_ROOT/lock-gnu-stale/fakebin"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/uname" <<'EOF'
+#!/usr/bin/env bash
+echo Linux
+EOF
+  chmod +x "$fakebin/uname"
+  cat > "$fakebin/stat" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+  -f)
+    printf '  File: "%s"\n' "$3"
+    printf '    ID: 0        Namelen: 255     Type: tmpfs\n'
+    exit 1
+    ;;
+  -c)
+    if [ "$2" = "%Y" ] && [ -e "$3" ]; then
+      printf '%s\n' "${FAKE_STAT_MTIME:-0}"
+      exit 0
+    fi
+    exit 1
+    ;;
+esac
+exit 1
+EOF
+  chmod +x "$fakebin/stat"
+
+  out=$(PATH="$fakebin:$PATH" FAKE_STAT_MTIME=1 FM_BUSY_LOCK_STALE_SECS=1 \
+    "$EV" apply "$state" t1 idle --gen "$gen" --source claude-hook --event stop 2>&1)
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "apply against a provably-stale lock must break it and succeed under GNU stat, got rc=$rc: $out"
+  case "$out" in
+    *"unbound variable"*) fail "GNU stat -f quirk leaked into lock-age arithmetic: $out" ;;
+    *File:*) fail "GNU stat -f quirk leaked filesystem dump text: $out" ;;
+  esac
+  pass "lock_acquire computes lock age via the shared GNU stat -c path, never the BSD -f fallback that corrupts mtime on Linux"
+}
+
 test_arm_seeds_busy_spawn
 test_apply_advances_seq_and_source
 test_apply_current_gen_reset
@@ -376,5 +431,6 @@ test_dead_endpoint_overrides
 test_herdr_native_busy_only
 test_record_read_leaves_caller_shell_intact
 test_boolean_view_never_promotes_unknown
+test_lock_stale_break_survives_gnu_stat_quirk
 
 echo "all fm-busy-state tests passed"
