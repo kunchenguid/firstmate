@@ -44,7 +44,7 @@ Because no supported configuration seam exists, firstmate intercepts `gh` on the
   If that remote cannot be resolved to an owner/name pair, it refuses the mutation rather than letting `gh` infer a fork's parent repository.
   It sends only no-mistakes' JSON `gh pr checks` shape through the bounded CI fallback, and execs the real `gh` directly for every other call.
 - `bin/fm-gh-ci-fallback.sh` first runs the real `gh pr checks` with the ambient narrow token.
-  Only the known HTTP 403 personal-token denial for check-runs causes it to resolve the PR's exact head SHA and read every workflow run filtered by that SHA with the same token; it never calls `fm-gh.sh` or exposes `config/gh-credential` to CI reads.
+  Only the personal-token denial whose GraphQL error path names a `statusCheckRollup` component, at whatever depth GitHub currently reports it, causes it to resolve the PR's exact head SHA and read every workflow run filtered by that SHA with the same token; it never calls `fm-gh.sh` or exposes `config/gh-credential` to CI reads.
   Successful, failed, cancelled, skipped, and pending workflow conclusions are returned in the JSON check shape no-mistakes already consumes, while no exact-head workflow runs emits an explicit pending placeholder rather than a false green verdict.
 - The GitHub merge boundary resolves the genuine `gh` binary itself, so its raw GraphQL capture remains valid when the shim is installed on `PATH`.
 - `bin/fm-gh-shim-install.sh` installs, removes, and verifies that symlink, and reports whether the install directory actually precedes the real `gh` on the evaluated `PATH`.
@@ -76,7 +76,7 @@ The shim is scoped to a `PATH`, never to a repository, a task, or a worktree.
 A worktree-scoped shim is not possible: the PR step executes in the daemon process, whose environment is fixed at daemon startup, so nothing placed inside a task worktree is on the `PATH` that resolves `gh`.
 Every process that resolves `gh` through the install directory is therefore affected, including interactive shells and unrelated tools.
 The shim keeps that blast radius bounded by changing only `pr create`, `pr edit`, and the exact JSON `pr checks` shapes no-mistakes uses.
-Interactive `pr checks` output, every failure outside the known check-runs permission denial, and every other invocation remain the real `gh` behavior.
+Interactive `pr checks` output, every failure outside that `statusCheckRollup` permission denial, and every other invocation remain the real `gh` behavior.
 The fallback can observe GitHub Actions workflow runs only; it is not equivalent to readable check-runs for repositories whose merge gate depends on a third-party check provider.
 
 The daemon caches the `PATH` value it captured at startup, but `PATH` directories are scanned at exec time and `fm-gh.sh` reads `config/gh-credential` on every routed invocation.
