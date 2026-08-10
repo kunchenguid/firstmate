@@ -402,12 +402,15 @@ Two firstmate-specific rules layer on top of that guidance:
 Before you report the PR, confirm the push did not silently change what was validated.
 The pipeline rebases your branch onto its target immediately before pushing, and a rebase that drops content opens a PR misrepresenting the code the pipeline actually judged.
 That has happened twice, and no pipeline signal reported it either time.
-Take the pushed head from the PR, then run:
+The pipeline builds the pushed head inside its own repository and those objects never reach your clone, so the check fetches that head from the forge by pull request URL rather than expecting a local commit.
+Run it with the PR's full URL:
 
+    TRUNK=\$(git rev-parse --verify --quiet origin/HEAD || git rev-parse --verify --quiet main)
     $FM_ROOT/bin/fm-rebase-equivalence.sh --repo . \\
-      --validated-base "\$(git merge-base HEAD origin/HEAD 2>/dev/null || git merge-base HEAD main)" \\
+      --validated-base "\$(git merge-base HEAD "\$TRUNK")" \\
       --validated-head HEAD \\
-      --candidate-head <the PR head commit>
+      --candidate-pr {the PR url} \\
+      --candidate-base "\$TRUNK"
 
 Your local branch never moved during the run, so its head is the content you are entitled to see in the PR; work the pipeline added afterwards is growth, which this check does not refuse.
 Only \`REBASE-EQUIVALENCE: PASS\` clears the PR to be reported.

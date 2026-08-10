@@ -354,6 +354,33 @@ test_no_mistakes_dod_wording() {
   pass "fm-brief.sh: no-mistakes DOD keeps its apostrophe prose, now parse-safe"
 }
 
+# Pin the rebase-equivalence gate itself. Clearing it is a precondition for
+# reporting a PR, so a heredoc edit that dropped it would otherwise remove the
+# gate from every generated brief with this suite still green.
+test_no_mistakes_dod_pins_rebase_equivalence_gate() {
+  local home id brief
+  home="$TMP_ROOT/rebase-equivalence-home"
+  mkdir -p "$home/data"
+  id="brief-rebase-equivalence-c1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "brief was not scaffolded"
+  assert_grep "bin/fm-rebase-equivalence.sh" "$brief" \
+    "no-mistakes DOD lost the rebase-equivalence check"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+  assert_grep 'Only `REBASE-EQUIVALENCE: PASS` clears the PR to be reported.' "$brief" \
+    "no-mistakes DOD must make the pass verdict the only clearance"
+  assert_grep "--candidate-pr" "$brief" \
+    "no-mistakes DOD must fetch the candidate head from the forge"
+  assert_no_grep "--candidate-head" "$brief" \
+    "no-mistakes DOD must not name a pushed head the worker's clone cannot hold"
+  assert_grep "blocked: the pushed PR dropped validated content" "$brief" \
+    "no-mistakes DOD must block on a dropping rebase instead of reporting the PR"
+  assert_grep "that is never a pass" "$brief" \
+    "no-mistakes DOD must refuse to read could-not-observe as a clearance"
+  pass "fm-brief.sh: no-mistakes DOD pins the rebase-equivalence gate"
+}
+
 test_ship_project_memory_wording() {
   local home id brief
   home="$TMP_ROOT/project-memory-home"
@@ -719,6 +746,7 @@ test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
+test_no_mistakes_dod_pins_rebase_equivalence_gate
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
