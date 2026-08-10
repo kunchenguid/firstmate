@@ -173,15 +173,14 @@ test_matrix_claude_bare_nbsp_row() {
   # Real idle claude: `❯` + U+00A0, borderless, between horizontal rules.
   # The audit's headline defect: this row read `pending` under LC_ALL=C
   # (issue #1988), deferring every away-mode escalation in daemon contexts.
-  local screen typed claude_idle
+  local screen typed
   screen=$'transcript line\n────────────────────────\n❯'"$NBSP"$'\n────────────────────────\n  bypass permissions'
-  claude_idle=$(printf 'claude\tidle')
-  assert_screen "claude idle on tmux" empty "$CAPS_TMUX" "$screen" 2 "$claude_idle"
-  assert_screen "claude idle on herdr" empty "$CAPS_STYLED" "$screen" '' "$claude_idle"
+  assert_screen "claude idle on tmux" empty "$CAPS_TMUX" "$screen" 2 probe-absent
+  assert_screen "claude idle on herdr" empty "$CAPS_STYLED" "$screen" '' probe-absent
   assert_screen "claude idle on zellij" empty "$CAPS_STYLED_NOID" "$screen"
   assert_screen "claude idle on cmux/orca" empty "$CAPS_PLAIN" "$screen"
   typed=$'────────────────────────\n❯ fix the login bug\n────────────────────────'
-  assert_screen "claude typed on tmux" pending "$CAPS_TMUX" "$typed" 1 "$claude_idle"
+  assert_screen "claude typed on tmux" pending "$CAPS_TMUX" "$typed" 1 probe-absent
   # Plain capture cannot tell typed text from claude's rotating suggestion:
   # the styled=0 degradation defers instead of fabricating pending.
   assert_screen "claude typed on plain backends" unknown "$CAPS_PLAIN" "$typed"
@@ -243,6 +242,7 @@ test_matrix_pi_separated_needs_identity() {
   # parked on a blank line between two rules, NO pi process. The permissive
   # rule read this `empty`; identity+structure refuses it.
   assert_screen "sleep-pane counterexample" unknown "$CAPS_TMUX" "$screen" 2 "$none"
+  assert_screen "absent identity cannot prove blank pi pair" unknown "$CAPS_TMUX" "$screen" 2 probe-absent
   typed=$'────────────────────────\nfix the flaky test\n────────────────────────'
   assert_screen "pi typed" pending "$CAPS_STYLED" "$typed" '' "$pi_idle"
   typed=$'────────────────────────\n❯\n────────────────────────'

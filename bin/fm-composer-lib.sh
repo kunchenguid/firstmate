@@ -437,13 +437,15 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
 #   [cursor_row] zero-based row index of the cursor within <screen>, only
 #                meaningful when caps carry cursor=1.
 #   [identity]   "<agent>\t<status>" from the backend's native identity probe,
-#                only meaningful when caps carry identity=1.
+#                or `probe-absent` when the probe found no live identity; only
+#                meaningful when caps carry identity=1.
 # Prints exactly one verdict: empty | pending | pending-unproven | unknown,
 # or the internal sentinel `need-identity` when caps declare identity=1, no
-# identity string was supplied, and the verdict depends on it. Adapters answer
-# `need-identity` by running their identity probe once and re-calling; the
-# sentinel never escapes an adapter. Identity stays a lazy second pass so the
-# common non-pi read never pays for the probe.
+# identity result was supplied, and the verdict depends on it. Adapters answer
+# `need-identity` by running their identity probe once and re-calling with
+# either its result or `probe-absent`; the sentinel never escapes an adapter.
+# Identity stays a lazy second pass so the common non-pi read never pays for
+# the probe.
 #
 # Consumers that can overwrite input or confirm delivery must accept only the
 # exact positive proof they require (`empty`), so unrecognized future verdicts
@@ -1042,6 +1044,10 @@ _fm_composer_classify_bare_pi_overlap() {  # <screen> <styled> <has-identity> <i
     printf 'need-identity'
     return 0
   fi
+  if [ "$identity" = probe-absent ]; then
+    _fm_composer_classify_bare_row "$screen" "$styled" "$row"
+    return 0
+  fi
   agent=${identity%%$'\t'*}
   if [ "$agent" = pi ]; then
     _fm_composer_pi_verdict "$screen" "$styled" "$has_identity" "$identity"
@@ -1063,6 +1069,10 @@ _fm_composer_pi_verdict() {  # <screen> <styled> <has_identity> <identity>
   fi
   if [ -z "$identity" ]; then
     printf 'need-identity'
+    return 0
+  fi
+  if [ "$identity" = probe-absent ]; then
+    printf 'unknown'
     return 0
   fi
   agent=${identity%%$'\t'*}

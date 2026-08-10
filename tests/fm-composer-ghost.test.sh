@@ -565,6 +565,20 @@ test_single_capture_leaves_no_fallback_race() {
   pass "fm_tmux_composer_state: one capture feeds the classifier; no band-capture race remains"
 }
 
+test_absent_tmux_identity_keeps_enclosed_bare_verdict() {
+  local dir fb capture out nbsp
+  dir="$TMP_ROOT/absent-identity"; mkdir -p "$dir"
+  fb=$(make_fake_tmux "$dir")
+  capture="$dir/styled.txt"
+  nbsp=$(printf '\302\240')
+  printf '────────────────────────\n❯%s\n────────────────────────\n' "$nbsp" > "$capture"
+  out=$(PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=1 \
+    fm_tmux_composer_state "fakepane")
+  [ "$out" = empty ] \
+    || fail "an enclosed Claude glyph must keep its bare empty verdict when the Pi-only probe is absent, got '$out'"
+  pass "fm_tmux_composer_state: absent Pi identity preserves Claude's enclosed bare verdict"
+}
+
 test_legitimate_empty_routes_remain_empty() {
   local dir fb capture out fixture cursor
   dir="$TMP_ROOT/legitimate-empty"; mkdir -p "$dir"
@@ -668,6 +682,7 @@ test_wide_composer_text_is_pending
 test_all_tmux_harness_composers_share_classification
 test_unrecognized_state_defers_input_guard
 test_single_capture_leaves_no_fallback_race
+test_absent_tmux_identity_keeps_enclosed_bare_verdict
 test_legitimate_empty_routes_remain_empty
 test_non_bordered_composer_uses_compatibility_fallback
 test_non_bordered_interior_edges_are_pending

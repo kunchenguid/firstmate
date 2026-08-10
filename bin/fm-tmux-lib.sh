@@ -214,11 +214,10 @@ fm_tmux_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
   pane=$(fm_tmux_composer_capture "$target") || { printf 'unknown'; return 0; }
   verdict=$(fm_composer_classify_screen "$(fm_tmux_composer_caps)" "$pane" "$cy")
   if [ "$verdict" = need-identity ]; then
-    if identity=$(fm_tmux_composer_identity "$target") && [ -n "$identity" ]; then
-      verdict=$(fm_composer_classify_screen "$(fm_tmux_composer_caps)" "$pane" "$cy" "$identity")
-    else
-      verdict=unknown
+    if ! identity=$(fm_tmux_composer_identity "$target") || [ -z "$identity" ]; then
+      identity=probe-absent
     fi
+    verdict=$(fm_composer_classify_screen "$(fm_tmux_composer_caps)" "$pane" "$cy" "$identity")
     [ "$verdict" != need-identity ] || verdict=unknown
   fi
   printf '%s' "$verdict"
