@@ -6,7 +6,7 @@
 # description, acceptance criteria, and context, and may adjust other sections
 # when the task genuinely deviates (e.g. working an existing external PR instead
 # of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--branch <name>] [--herdr-lab]
 #        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
@@ -43,6 +43,15 @@
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
 # --mode is refused on scout and secondmate scaffolds: a scout's deliverable is a
 # report rather than a merge, and a charter is not a delivery contract.
+# --branch <name> overrides the ship branch the crewmate is told to create; it
+# defaults to fm/<task-id> so every existing caller is unaffected. It is refused
+# on scout and secondmate scaffolds (no branch is created there) and rejects an
+# empty value, a leading dash, whitespace, or a quote character, because the
+# name is interpolated into printed shell commands the crewmate and operator
+# run verbatim. It is also refused together with --mode local-only: firstmate's
+# own local merge gate (bin/fm-merge-local.sh) hardcodes branch fm/<task-id> and
+# hard-refuses when that ref is absent, so a custom branch there would scaffold
+# a task firstmate's own merge path can never land.
 # There is no --yolo flag here. The worker never owns approval decisions, so yolo is
 # a spawn-time and firstmate-side input only (AGENTS.md section 7).
 # Every scaffold's status protocol distinguishes the configured
@@ -106,6 +115,8 @@ HERDR_LAB=0
 NO_PROJECTS=0
 MODE=
 MODE_SET=0
+BRANCH=
+BRANCH_SET=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -115,6 +126,7 @@ for a in "$@"; do
     esac
     case "$want_value" in
       mode) MODE=$a; MODE_SET=1 ;;
+      branch) BRANCH=$a; BRANCH_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -127,6 +139,8 @@ for a in "$@"; do
     --no-projects) NO_PROJECTS=1 ;;
     --mode) want_value=mode ;;
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
+    --branch) want_value=branch ;;
+    --branch=*) BRANCH=${a#--branch=}; BRANCH_SET=1 ;;
     # yolo never reaches the worker: it is firstmate's approval authority, not a
     # brief input. Refuse it loudly so it is never silently dropped here and then
     # believed to have been recorded.
@@ -165,6 +179,36 @@ if [ "$NO_PROJECTS" -eq 1 ] && [ "$KIND" != secondmate ]; then
   echo "error: --no-projects applies only to --secondmate charters" >&2
   exit 1
 fi
+
+# --branch is a ship-only input: a scout creates no branch and a secondmate
+# charter is not a delivery contract, so a value here would look recorded and
+# change nothing, exactly the trap --mode already refuses above.
+if [ "$BRANCH_SET" -eq 1 ] && [ "$KIND" != ship ]; then
+  echo "error: --branch applies only to ship briefs; a scout creates no branch and a secondmate charter is not a delivery contract" >&2
+  exit 1
+fi
+if [ "$BRANCH_SET" -eq 1 ]; then
+  case "$BRANCH" in
+    '') echo "error: --branch requires a non-empty value" >&2; exit 1 ;;
+    -*) echo "error: --branch value must not start with '-' (got '$BRANCH')" >&2; exit 1 ;;
+  esac
+  case "$BRANCH" in
+    *[[:space:]]*) echo "error: --branch value must not contain whitespace (got '$BRANCH')" >&2; exit 1 ;;
+  esac
+  case "$BRANCH" in
+    *"'"*) echo "error: --branch value must not contain a single quote (got '$BRANCH')" >&2; exit 1 ;;
+    *'"'*) echo "error: --branch value must not contain a double quote (got '$BRANCH')" >&2; exit 1 ;;
+  esac
+  # bin/fm-merge-local.sh hardcodes BRANCH="fm/$ID" for a local-only task and
+  # hard-refuses when that ref is absent (its own load-bearing safety check,
+  # out of this script's scope to change): a custom branch here would scaffold
+  # a task firstmate's own local merge gate can never land.
+  if [ "$MODE" = local-only ]; then
+    echo "error: --branch is not supported with --mode local-only: bin/fm-merge-local.sh hardcodes branch fm/$ID and hard-refuses when that ref is absent, so a custom branch would leave this task unmergeable through firstmate's local merge path; use --mode no-mistakes or direct-PR with --branch, or omit --branch for local-only" >&2
+    exit 1
+  fi
+fi
+BRANCH=${BRANCH:-fm/$ID}
 
 BRIEF="$DATA/$ID/brief.md"
 [ -e "$BRIEF" ] && { echo "error: $BRIEF already exists" >&2; exit 1; }
@@ -354,7 +398,7 @@ fi
 case "$MODE" in
   direct-PR)
     SETUP2=""
-    RULE1='1. Never push to the default branch (push only your `fm/'"$ID"'` branch). Never merge a PR.'
+    RULE1='1. Never push to the default branch (push only your `'"$BRANCH"'` branch). Never merge a PR.'
     IFS= read -r -d '' DOD <<EOF || true
 # Definition of done
 Delivery contract: mode=direct-PR
@@ -366,14 +410,14 @@ EOF
     ;;
   local-only)
     SETUP2=""
-    RULE1="1. Never push to any remote and never open a PR. Work only on your \`fm/$ID\` branch; firstmate handles the merge into local \`main\`."
+    RULE1="1. Never push to any remote and never open a PR. Work only on your \`$BRANCH\` branch; firstmate handles the merge into local \`main\`."
     IFS= read -r -d '' DOD <<EOF || true
 # Definition of done
 Delivery contract: mode=local-only
 This task ships **local-only**: no remote, no PR, no pipeline.
-The task is complete only when committed on your branch \`fm/$ID\`. Do NOT push, do NOT open a PR, do NOT merge.
+The task is complete only when committed on your branch \`$BRANCH\`. Do NOT push, do NOT open a PR, do NOT merge.
 Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
-When it is implemented and committed, append \`done: ready in branch fm/$ID\` to the status file and stop.
+When it is implemented and committed, append \`done: ready in branch $BRANCH\` to the status file and stop.
 The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path.
 EOF
     ;;
@@ -424,7 +468,7 @@ You are in a disposable git worktree of $REPO, at a detached HEAD on a clean def
 The path check is authoritative: \`git rev-parse --git-dir\` and \`git rev-parse --git-common-dir\` can help inspect the repo, but they do not prove you are outside the primary checkout.
 If the top-level path is the primary checkout or not the worktree you were launched in, STOP - do not branch or commit here - append \`blocked: launched in primary checkout, not an isolated worktree\` to the status file and stop.
 
-1. First action: create your branch: \`git checkout -b fm/$ID\`$SETUP2
+1. First action: create your branch: \`git checkout -b $BRANCH\`$SETUP2
 
 # Rules
 $RULE1

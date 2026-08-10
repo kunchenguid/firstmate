@@ -217,6 +217,110 @@ test_ship_modes_generate_clean_briefs() {
   pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"
 }
 
+# Issue #1887: fm-brief.sh hardcoded the ship branch as fm/<task-id>, so a team
+# with its own branch convention had to hand-edit every generated brief before
+# dispatch - and on unfixed code, passing --branch has no effect at all: the
+# flag was not recognized, silently absorbed as an inert positional argument,
+# and the brief still hardcoded fm/<id> regardless. This reproduces exactly
+# that reported condition (assert the custom name appears and the default
+# fm/<id> string is gone) rather than only checking a fresh happy path, and
+# also pins that the historical default stays byte-for-byte unchanged when
+# --branch is omitted, so existing homes see no behavior change.
+test_branch_flag_overrides_default_branch_name() {
+  local home id brief custom
+  home="$TMP_ROOT/branch-flag-home"
+  mkdir -p "$home/data"
+  custom="feat/646/migration-schema"
+
+  id="brief-branch-nomistakes-e1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes --branch "$custom" >/dev/null 2>&1 \
+    || fail "no-mistakes brief with --branch should exit 0"
+  brief="$home/data/$id/brief.md"
+  assert_grep "git checkout -b $custom" "$brief" \
+    "no-mistakes brief did not substitute --branch into the first-action step"
+  assert_grep "1. Never push to the default branch. Never merge a PR." "$brief" \
+    "no-mistakes brief RULE1 changed unexpectedly"
+  assert_no_grep "fm/$id" "$brief" \
+    "no-mistakes brief with --branch still carried the hardcoded fm/<id> default"
+
+  id="brief-branch-directpr-e2"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode direct-PR --branch "$custom" >/dev/null 2>&1 \
+    || fail "direct-PR brief with --branch should exit 0"
+  brief="$home/data/$id/brief.md"
+  assert_grep "git checkout -b $custom" "$brief" \
+    "direct-PR brief did not substitute --branch into the first-action step"
+  assert_grep "push only your \`$custom\` branch" "$brief" \
+    "direct-PR brief did not substitute --branch into RULE1"
+  assert_no_grep "fm/$id" "$brief" \
+    "direct-PR brief with --branch still carried the hardcoded fm/<id> default"
+
+  # Omitting --branch must render byte-identical historical output: the same
+  # fm/<id> default no existing caller has ever had to change.
+  id="brief-branch-default-e3"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1 \
+    || fail "brief without --branch should exit 0"
+  brief="$home/data/$id/brief.md"
+  assert_grep "git checkout -b fm/$id" "$brief" \
+    "brief without --branch lost the historical fm/<id> default"
+  assert_grep "1. Never push to the default branch. Never merge a PR." "$brief" \
+    "brief without --branch changed RULE1 unexpectedly"
+  pass "fm-brief.sh: --branch overrides the ship branch and the fm/<id> default is unchanged when omitted"
+}
+
+# The value is rendered into printed shell commands the crewmate and operator
+# run verbatim (e.g. `git checkout -b <branch>`), so a value that would break
+# that quoting must be refused rather than silently corrupt the generated brief.
+test_branch_flag_validation_rejects_unsafe_values() {
+  local home id out status label value expect
+  home="$TMP_ROOT/branch-validation-home"
+  mkdir -p "$home/data"
+  id=0
+  while IFS='|' read -r label value expect; do
+    [ -n "$label" ] || continue
+    id=$((id + 1))
+    out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "brief-branch-invalid-$id" some-proj --mode no-mistakes --branch "$value" 2>&1)
+    status=$?
+    [ "$status" -ne 0 ] || fail "$label: expected a non-zero exit"
+    assert_contains "$out" "$expect" "$label: refusal did not explain the contract"
+    assert_absent "$home/data/brief-branch-invalid-$id/brief.md" "$label: refused scaffold still wrote a brief"
+  done <<'ROWS'
+empty value|--branch requires a non-empty value
+leading dash|-oops|must not start with '-'
+embedded whitespace|feat/with space|must not contain whitespace
+embedded single quote|feat/with'quote|must not contain a single quote
+embedded double quote|feat/with"quote|must not contain a double quote
+ROWS
+  pass "fm-brief.sh: --branch rejects empty, leading-dash, whitespace, and quote values"
+}
+
+# --branch applies only to a ship brief with a mergeable PR-based mode: a scout
+# creates no branch, a secondmate charter is not a delivery contract, and
+# bin/fm-merge-local.sh hardcodes branch fm/<task-id> for mode=local-only and
+# hard-refuses when that ref is absent - so honoring --branch there would
+# scaffold a task firstmate's own local merge gate could never land. Each case
+# must refuse loudly rather than accept and silently drop the flag.
+test_branch_flag_refused_where_it_does_not_apply() {
+  local home out status label args expect
+  home="$TMP_ROOT/branch-refused-home"
+  mkdir -p "$home/data"
+  while IFS='|' read -r label args expect; do
+    [ -n "$label" ] || continue
+    # shellcheck disable=SC2086  # args is an intentional word-split arg list
+    out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" $args 2>&1)
+    status=$?
+    [ "$status" -ne 0 ] || fail "$label: expected a non-zero exit"
+    assert_contains "$out" "$expect" "$label: refusal did not explain why"
+  done <<'ROWS'
+branch on a scout brief|brief-branch-refused-f1 some-proj --scout --branch feat/x|--branch applies only to ship briefs
+branch on a secondmate charter|brief-branch-refused-f2 --secondmate --no-projects --branch feat/x|--branch applies only to ship briefs
+branch with local-only mode|brief-branch-refused-f3 some-proj --mode local-only --branch feat/x|--branch is not supported with --mode local-only
+ROWS
+  assert_absent "$home/data/brief-branch-refused-f1/brief.md" "scout --branch refusal still wrote a brief"
+  assert_absent "$home/data/brief-branch-refused-f2/brief.md" "secondmate --branch refusal still wrote a brief"
+  assert_absent "$home/data/brief-branch-refused-f3/brief.md" "local-only --branch refusal still wrote a brief"
+  pass "fm-brief.sh: --branch is refused on scout, secondmate, and local-only scaffolds"
+}
+
 # A ship task's delivery mode is firstmate's per-task decision, so a missing or
 # unusable value must stop the scaffold instead of silently defaulting. The
 # no-mistakes-prod-only row is the conditional registry policy: it is never a task
@@ -714,6 +818,9 @@ test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
+test_branch_flag_overrides_default_branch_name
+test_branch_flag_validation_rejects_unsafe_values
+test_branch_flag_refused_where_it_does_not_apply
 test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
