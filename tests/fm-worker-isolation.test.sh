@@ -810,6 +810,7 @@ make_slot_world() {
   wt="$world/wt"
   other="$world/wt-other"
   mkdir -p "$world/home/state" "$world/home/data" "$world/home/config"
+  : > "$world/home/AGENTS.md"
   make_primary_root "$world/primary-root"
   fm_git_worktree "$proj" "$wt" "slot-$name"
   git -C "$proj" worktree add --quiet -b "slot-$name-other" "$other"
