@@ -19,7 +19,7 @@
 # Every captain decision filed here carries its context as SEPARATE structured
 # body fields rather than one free-text reason, so no dimension can be skipped
 # inside a blob: an optional exact question, an optional set of two to four short
-# answer labels, an optional `fact` intake kind with a short expected-answer hint,
+# answer labels, an optional `fact` intake kind carrying its expected-answer hint,
 # an optional shared-group slug, a required "Why now", "What it affects", and
 # "Recommendation", and a required
 # conscious choice between a private decision-aid URL and an explicit "no built
@@ -27,8 +27,10 @@
 # already record it, so a first filing can never omit one while an idempotent retry
 # never has to retype what is already stored. Repeating --option supplies the
 # complete ordered set: two to four distinct labels of at most 80 bytes each.
-# --kind accepts only `fact`; --expects describes the expected free-text shape and
-# is valid only for that kind. --group accepts one privacy-safe slug of at most 80
+# --kind accepts only `fact`; --expects describes the expected free-text shape,
+# is valid only for that kind, and is REQUIRED once that kind is set, because a
+# fact request the captain cannot answer in the expected shape is not answerable.
+# --group accepts one privacy-safe slug of at most 80
 # bytes and marks decisions that share one origin without changing their separate
 # identities. Supplying an optional field later replaces that
 # stored field, while omitting its flag preserves it. This script
@@ -40,6 +42,28 @@
 # preserves the rest of the body, and never fetches or rewrites the URL. It also
 # clears a recorded "no built surface" claim, because a decision that has gained a
 # built surface must stop saying it has none.
+#
+# Those per-flag rules are the filing bar. On top of them, one STRUCTURAL
+# readiness checklist decides whether a filed decision is answerable at all, and
+# bin/fm-decision-readiness.jq owns it so this script, `doctor`, and the board
+# apply exactly the same rule. A decision carrying structured context is ready
+# when it records a question and a recommendation, makes exactly one surface
+# choice, keeps any option set to two to four distinct short labels, and pairs a
+# `fact` kind with an expected-answer hint. Both filing paths refuse an
+# incomplete filing, reporting every gap at once. A hold carrying only a
+# free-text reason predates structured context and is deliberately outside the
+# checklist, so it is never reported as incomplete. The checklist judges presence
+# and shape only; whether the question is clear or the recommendation sound stays
+# the semantic judgement above.
+#
+# `doctor` is the read-only sweep of that checklist. With no argument it checks
+# every open captain decision in the active home, meaning an item that is not
+# done and carries an active captain hold; a parked decision stays out of scope
+# because the captain set it aside. With a task id it checks that one item. It
+# names the specific failed check and the flag that fixes it, and exits non-zero
+# when anything is incomplete. Nobody has to remember to run it: the same
+# checklist reaches bin/fm-fleet-snapshot.sh and surfaces on the board's fleet
+# health section, which docs/mission-control.md owns.
 #
 # Usage:
 #   fm-decision-hold.sh id <origin-id> <decision-key>
@@ -57,6 +81,7 @@
 #     --recommendation <recommendation> \
 #     (--decision-url <https-url> | --no-surface <why-none-applies>)
 #   fm-decision-hold.sh link <origin-id> <decision-key> --url <https-url>
+#   fm-decision-hold.sh doctor [<task-id>]
 #   fm-decision-hold.sh complete <origin-id> (--none | <decision-key>...)
 #   fm-decision-hold.sh verify <origin-id>
 #   fm-decision-hold.sh retract <origin-id> <decision-key> --superseded-by <decision-key>
@@ -345,33 +370,51 @@ clear_body_field() {  # <body> <label>
   '
 }
 
-# The due-diligence bar, enforced in the CALLING shell so a refusal stops the
-# command before anything is created or held. A dimension counts as addressed when
-# it is supplied now or already recorded on the item, which is what makes a first
-# filing unable to skip one and an idempotent retry able to supply none.
-require_decision_context() {  # <id> <body> <why> <affects> <recommendation> <decision-url> <no-surface>
-  local id=$1 body=$2 why=$3 affects=$4 recommendation=$5 decision_url=$6 no_surface=$7
-  local stored_why stored_affects stored_recommendation stored_decision_url stored_no_surface
+# The legacy context bar owns Why now and What it affects, which are outside the
+# structural readiness checklist. A dimension counts as addressed when it is
+# supplied now or already recorded on the item.
+require_decision_context() {  # <id> <body> <why> <affects>
+  local id=$1 body=$2 why=$3 affects=$4
+  local stored_why stored_affects
   stored_why=$(get_body_field "$body" "Why now")
   stored_affects=$(get_body_field "$body" "What it affects")
-  stored_recommendation=$(get_body_field "$body" "Recommendation")
-  stored_decision_url=$(get_body_field "$body" "Decision URL")
-  stored_no_surface=$(get_body_field "$body" "No decision surface")
   has_non_whitespace "$why" || has_non_whitespace "$stored_why" \
     || fail "captain decision $id needs --why: state plainly why this decision is needed now"
   has_non_whitespace "$affects" || has_non_whitespace "$stored_affects" \
     || fail "captain decision $id needs --affects: state what it affects and what led to it"
-  has_non_whitespace "$recommendation" || has_non_whitespace "$stored_recommendation" \
-    || fail "captain decision $id needs --recommendation: state which way you would go and why"
-  if [ -z "$decision_url" ] && [ -z "$no_surface" ] \
-    && has_non_whitespace "$stored_decision_url" && has_non_whitespace "$stored_no_surface"; then
-    fail "captain decision $id records both Decision URL and No decision surface: pass --decision-url or --no-surface to settle the conflict"
-  fi
-  [ -z "$decision_url" ] || [ -z "$no_surface" ] \
-    || fail "captain decision $id cannot claim both a decision surface and none: pass --decision-url or --no-surface, not both"
-  has_non_whitespace "$decision_url" || has_non_whitespace "$no_surface" \
-    || has_non_whitespace "$stored_decision_url" || has_non_whitespace "$stored_no_surface" \
-    || fail "captain decision $id needs a conscious surface choice: pass --decision-url with the built surface the captain should look at, or --no-surface stating why no built surface applies"
+}
+
+# The structural readiness checklist is owned once by bin/fm-decision-readiness.jq
+# so this script, the read-only sweep, and the board apply the same rule. Prints
+# one "detail<TAB>flag" line per gap, and nothing for a ready decision or for an
+# older free-text hold the checklist deliberately leaves alone.
+# Prints the decision's shape on the first line, then one indented actionable
+# line per gap. Both the filing refusal and the sweep read this one rendering, so
+# a gap is worded the same wherever it is reported.
+decision_readiness_report() {  # <body>
+  printf '%s' "$1" | jq -R -s -L "$SCRIPT_DIR" -r '
+    include "fm-decision-readiness";
+    split("\n") | decision_readiness
+    | (if .structured then "structured" else "free-text" end),
+      (.gaps[] | "  - \(.detail) (\(.flag))")'
+}
+
+decision_readiness_gaps() {  # <report>
+  printf '%s\n' "$1" | tail -n +2
+}
+
+# A filing that is already knowably incomplete is refused at the point of filing
+# rather than left for the sweep to find, so an unanswerable decision never
+# reaches the captain's board at all. Every gap is reported at once, because a
+# filer fixing them one refusal at a time learns the bar one dimension at a time.
+require_decision_readiness() {  # <id> <body>
+  local report gaps
+  report=$(decision_readiness_report "$2") \
+    || fail "could not check captain decision $1 against the readiness checklist"
+  gaps=$(decision_readiness_gaps "$report")
+  [ -n "$gaps" ] || return 0
+  fail "captain decision $1 is not ready for the captain:
+$gaps"
 }
 
 # Shape validation for the context flags both filing paths accept. Kept separate
@@ -386,10 +429,7 @@ validate_decision_context_flags() {  # <question> <why> <affects> <recommendatio
   [ -z "$6" ] || validate_context_field no-surface "$6"
 }
 
-# Prints the body with every supplied dimension merged in. It only writes; the
-# refusal above is what guarantees nothing is missing. The two surface fields are
-# one choice, so recording either clears the other and the item can never claim a
-# built surface and no built surface at the same time.
+# Prints the body with every supplied dimension merged in.
 write_decision_context() {  # <body> <question> <options-json> <decision-kind> <expects> <group> <why> <affects> <recommendation> <decision-url> <no-surface>
   local body=$1 question=$2 options_json=$3 decision_kind=$4 expects=$5 group=$6
   local why=$7 affects=$8 recommendation=$9 decision_url=${10} no_surface=${11}
@@ -401,7 +441,10 @@ write_decision_context() {  # <body> <question> <options-json> <decision-kind> <
   [ -z "$why" ] || body=$(set_body_field "$body" "Why now" "$why")
   [ -z "$affects" ] || body=$(set_body_field "$body" "What it affects" "$affects")
   [ -z "$recommendation" ] || body=$(set_body_field "$body" "Recommendation" "$recommendation")
-  if [ -n "$decision_url" ]; then
+  if [ -n "$decision_url" ] && [ -n "$no_surface" ]; then
+    body=$(set_body_field "$body" "Decision URL" "$decision_url")
+    body=$(set_body_field "$body" "No decision surface" "$no_surface")
+  elif [ -n "$decision_url" ]; then
     body=$(set_body_field "$body" "Decision URL" "$decision_url")
     body=$(clear_body_field "$body" "No decision surface")
   elif [ -n "$no_surface" ]; then
@@ -660,11 +703,11 @@ command_hold() {
   fi
   # Refuse before anything is created or held, so an incomplete filing leaves no
   # half-made backlog identity behind for the next attempt to trip over.
-  require_decision_context "$id" "$body" \
-    "$why" "$affects" "$recommendation" "$decision_url" "$no_surface"
+  require_decision_context "$id" "$body" "$why" "$affects"
   require_decision_intake_kind "$body" "$decision_kind" "$expects"
   updated=$(write_decision_context "$body" "$question" "$options_json" \
     "$decision_kind" "$expects" "$group" "$why" "$affects" "$recommendation" "$decision_url" "$no_surface")
+  require_decision_readiness "$id" "$updated"
   if [ "$exists" = 1 ]; then
     if [ "$updated" != "$body" ]; then
       tasks_axi update "$id" --body "$updated" >/dev/null \
@@ -723,11 +766,11 @@ command_hold_item() {
   [ "$state" = queued ] \
     || fail "backlog item $id is $state, and a captain hold leaves it there; only a queued captain hold is classified as an actionable decision, so gate work already under way with the hold subcommand under its own decision identity"
   body=$(show_body "$show") || fail "could not read backlog item $id body"
-  require_decision_context "$id" "$body" \
-    "$why" "$affects" "$recommendation" "$decision_url" "$no_surface"
+  require_decision_context "$id" "$body" "$why" "$affects"
   require_decision_intake_kind "$body" "$decision_kind" "$expects"
   updated=$(write_decision_context "$body" "$question" "$options_json" \
     "$decision_kind" "$expects" "$group" "$why" "$affects" "$recommendation" "$decision_url" "$no_surface")
+  require_decision_readiness "$id" "$updated"
   if [ "$updated" != "$body" ]; then
     tasks_axi update "$id" --body "$updated" >/dev/null \
       || fail "could not record decision context on $id"
@@ -1033,8 +1076,88 @@ command_resolve() {
   printf 'resolved: %s -> %s\n' "$id" "$routed"
 }
 
+# The swept population, defined once here so the sweep and the board can never
+# disagree about which decisions are in scope: an item that is not done and
+# carries an ACTIVE captain hold. A parked decision is deliberately out of scope,
+# because the captain set it aside and re-surfacing it would undo that choice.
+open_captain_decision_ids() {
+  tasks_axi list --state held --fields hold_kind 2>/dev/null | awk '
+    /^tasks\[/ { in_tasks = 1; next }
+    /^[^ ]/ { in_tasks = 0 }
+    in_tasks && /^  / {
+      split(substr($0, 3), field, ",")
+      if (field[1] != "") print field[1]
+    }
+  '
+}
+
+decisions_phrase() {  # <count>
+  if [ "$1" -eq 1 ]; then
+    printf '1 structured captain decision'
+  else
+    printf '%d structured captain decisions' "$1"
+  fi
+}
+
+is_open_captain_decision() {  # <show-output>
+  [ "$(show_field "$1" held)" = yes ] || return 1
+  [ "$(show_field "$1" hold_kind)" = captain ] || return 1
+  [ "$(show_field "$1" state)" != "done" ] || return 1
+}
+
+# Read-only. Reports which specific check a decision fails rather than a bare
+# verdict, so the reader can act on the output directly. Exits non-zero when any
+# checked decision is incomplete, which is what makes it usable as a gate.
+command_doctor() {  # [<task-id>]
+  local named=${1:-} ids id show body report gaps checked=0 incomplete=0
+  [ "$#" -le 1 ] || { usage >&2; exit 2; }
+  require_tasks_axi
+  if [ -n "$named" ]; then
+    validate_slug task-id "$named"
+    task_show "$named" >/dev/null \
+      || fail "backlog item $named does not exist in the active home $FM_HOME"
+    ids=$named
+  else
+    ids=$(open_captain_decision_ids)
+  fi
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    show=$(task_show "$id") || continue
+    # A named item is checked as asked; a swept one must be an open captain
+    # decision, because the sweep speaks for the board and nothing else.
+    if [ -z "$named" ]; then
+      is_open_captain_decision "$show" || continue
+    fi
+    body=$(show_body "$show") || fail "could not read backlog item $id body"
+    report=$(decision_readiness_report "$body") \
+      || fail "could not check captain decision $id against the readiness checklist"
+    if [ "$(printf '%s\n' "$report" | head -1)" = free-text ]; then
+      [ -z "$named" ] || printf '%s: filed as free text, which this checklist does not cover\n' "$id"
+      continue
+    fi
+    checked=$((checked + 1))
+    gaps=$(decision_readiness_gaps "$report")
+    [ -n "$gaps" ] || continue
+    incomplete=$((incomplete + 1))
+    printf '%s: not ready for the captain\n%s\n' "$id" "$gaps"
+  done <<EOF
+$ids
+EOF
+  if [ "$incomplete" -gt 0 ]; then
+    printf '%d of %s not ready for the captain\n' \
+      "$incomplete" "$(decisions_phrase "$checked")"
+    exit 1
+  fi
+  if [ "$checked" -eq 0 ]; then
+    printf 'no structured captain decisions to check\n'
+    return 0
+  fi
+  printf 'checked %s; all ready for the captain\n' "$(decisions_phrase "$checked")"
+}
+
 case "${1:-}" in
   id) shift; command_id "$@" ;;
+  doctor) shift; command_doctor "$@" ;;
   hold) shift; command_hold "$@" ;;
   hold-item) shift; command_hold_item "$@" ;;
   link) shift; command_link "$@" ;;

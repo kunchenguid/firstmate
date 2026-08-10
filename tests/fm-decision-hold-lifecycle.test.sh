@@ -17,6 +17,7 @@ TASKS_AXI_BIN=$(command -v tasks-axi || true)
 # about context, so they pass one standard synthetic set and leave the bar itself
 # to test_decision_context_* below.
 SAMPLE_CONTEXT=(
+  --question "Which sample option should the captain take?"
   --why "The sample review cannot proceed until this is chosen."
   --affects "The sample surface named in the report."
   --recommendation "Take the first sample option."
@@ -976,7 +977,8 @@ test_decision_question_and_private_link_use_the_supported_hold_interface() {
   fact_hold=$(run_decisions "$home" hold "$origin" cost-basis \
     --title "Supply the sample cost basis" \
     --reason "captain cost basis needed" \
-    --kind fact \
+    --question "What cost basis should the sample position use?" \
+    --kind fact --expects "one number in GBP as printed on the statement" \
     --why "The sample valuation cannot be calculated without its cost basis." \
     --affects "The sample position valuation and tax estimate." \
     --recommendation "Use the acquisition statement figure." \
@@ -985,13 +987,16 @@ test_decision_question_and_private_link_use_the_supported_hold_interface() {
   out=$(PATH="$home/fakebin:$PATH" FM_HOME="$home" "$ROOT/bin/fm-fleet-snapshot.sh" --json)
   printf '%s' "$out" | jq -e --arg hold "$fact_hold" '
     .backlog.records[] | select(.id == $hold)
-    | .decision_kind == "fact" and .decision_expects == null
+    | .decision_kind == "fact"
+      and .decision_expects == "one number in GBP as printed on the statement"
       and .decision_options == null
   ' >/dev/null || fail "fact intake did not reach the canonical snapshot: $out"
   summary=$(PATH="$home/fakebin:$PATH" FM_HOME="$home" "$ROOT/bin/fm-fleet-snapshot.sh" --secondmate-home-summary)
   printf '%s' "$summary" | jq -e --arg hold "$fact_hold" '
     .decisions_open[] | select(.id == $hold)
-    | .kind == "fact" and .expects == null and .options == null
+    | .kind == "fact"
+      and .expects == "one number in GBP as printed on the statement"
+      and .options == null
   ' >/dev/null || fail "fact intake did not reach the secondmate-home projection: $summary"
 
   run_decisions "$home" hold "$origin" cost-basis \
@@ -1200,9 +1205,12 @@ test_structured_context_is_required_and_stored_separately() {
     > "$home/both-surface.out" 2> "$home/both-surface.err"; then
     fail "a decision claimed both a built surface and no built surface"
   fi
+  assert_grep "both a link to look at and a note that none applies" "$home/both-surface.err" \
+    "both supplied surfaces did not reach the shared readiness checklist"
 
   run_decisions "$home" "${base[@]}" \
     --group "sample-structure-review" \
+    --question "Which sample shape should the header take?" \
     --why "The sample build stops until the shape is chosen." \
     --affects "The sample header and every sample card under it." \
     --recommendation "Take the compact shape; it survives a narrow screen." \
@@ -1234,7 +1242,7 @@ test_structured_context_is_required_and_stored_separately() {
   assert_contains "$show" 'Decision group: sample-structure-review' \
     "an idempotent retry lost the optional group key"
 
-  tasks_in "$home" update "$origin-decision-shape" --body $'Why now:  \t\nWhat it affects: The sample header and every sample card under it.\nRecommendation: Take the compact shape; it survives a narrow screen.\nNo decision surface: Both shapes are text-only, so there is nothing built to compare.' >/dev/null
+  tasks_in "$home" update "$origin-decision-shape" --body $'Decision question: Which sample shape should the header take?\nWhy now:  \t\nWhat it affects: The sample header and every sample card under it.\nRecommendation: Take the compact shape; it survives a narrow screen.\nNo decision surface: Both shapes are text-only, so there is nothing built to compare.' >/dev/null
   if run_decisions "$home" "${base[@]}" \
     > "$home/stored-blank.out" 2> "$home/stored-blank.err"; then
     fail "a whitespace-only stored context field satisfied the presence bar"
@@ -1245,12 +1253,12 @@ test_structured_context_is_required_and_stored_separately() {
     --why "The sample build stops until the shape is chosen." >/dev/null \
     || fail "a supplied value could not repair whitespace-only stored context"
 
-  tasks_in "$home" update "$origin-decision-shape" --body $'Why now: The sample build stops until the shape is chosen.\nWhat it affects: The sample header and every sample card under it.\nRecommendation: Take the compact shape; it survives a narrow screen.\nDecision URL: https://sample.tailnet.invalid/stale-aid\nNo decision surface: Both shapes are text-only, so there is nothing built to compare.' >/dev/null
+  tasks_in "$home" update "$origin-decision-shape" --body $'Decision question: Which sample shape should the header take?\nWhy now: The sample build stops until the shape is chosen.\nWhat it affects: The sample header and every sample card under it.\nRecommendation: Take the compact shape; it survives a narrow screen.\nDecision URL: https://sample.tailnet.invalid/stale-aid\nNo decision surface: Both shapes are text-only, so there is nothing built to compare.' >/dev/null
   if run_decisions "$home" "${base[@]}" \
     > "$home/stored-surface-conflict.out" 2> "$home/stored-surface-conflict.err"; then
     fail "contradictory stored surface choices were accepted without settlement"
   fi
-  assert_grep "both Decision URL and No decision surface" "$home/stored-surface-conflict.err" \
+  assert_grep "both a link to look at and a note that none applies" "$home/stored-surface-conflict.err" \
     "the stored surface conflict was not named"
   assert_grep "--decision-url or --no-surface" "$home/stored-surface-conflict.err" \
     "the stored surface conflict did not explain how to settle it"
@@ -1309,6 +1317,7 @@ test_hold_item_gates_an_existing_work_item_under_the_same_bar() {
   fi
 
   run_decisions "$home" hold-item sample-thread --reason "captain vendor choice pending" \
+    --question "Which vendor should the sample quotes use?" \
     --option "Keep current vendor" --option "Move to second vendor" \
     --group "sample-vendor-review" \
     --why "The current vendor stops publishing on 2026-09-01." \
@@ -1319,6 +1328,7 @@ test_hold_item_gates_an_existing_work_item_under_the_same_bar() {
   # The HOLD kind, never the kind the item carries itself, is what marks a
   # captain decision, so an ordinary queued ship gates the same way.
   run_decisions "$home" hold-item sample-queued-ship --reason "captain scope choice pending" \
+    --question "Should the sample ship its narrow scope this week?" \
     --kind fact --expects "yes/no" \
     --why "The sample scope decides how much of the sample ships this week." \
     --affects "The sample checkout path." \
@@ -1358,6 +1368,163 @@ test_hold_item_gates_an_existing_work_item_under_the_same_bar() {
   pass "an existing work item of any kind is gated under the same due-diligence bar"
 }
 
+# The readiness checklist is structural only: it refuses a decision the captain
+# could not act on, names which check failed, and leaves every older free-text
+# hold exactly as it is. Malformed shapes are unreachable through the filing
+# flags, which already refuse them, so those fixtures are written directly.
+test_structural_readiness_is_checked_at_filing_and_swept() {
+  local home origin base out
+  home=$(make_home readiness-gate)
+  origin=sample-readiness-review
+  mkdir -p "$home/data/$origin"
+  tasks_in "$home" add "$origin" "Review sample readiness" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create investigation backlog fixture"
+  write_origin_meta "$home" "$origin"
+  printf '# Sample readiness review\n' > "$home/data/$origin/report.md"
+  printf 'done: review complete\n' > "$home/state/$origin.status"
+  base=(hold "$origin" shape --title "Choose the sample shape" \
+    --reason "captain shape choice pending" --repo sample)
+
+  # A filing already knowably unanswerable is refused before it exists, so the
+  # captain never sees it and no half-made identity survives the refusal.
+  if run_decisions "$home" "${base[@]}" \
+    --why "The sample build stops until the shape is chosen." \
+    --affects "The sample header and every sample card under it." \
+    > "$home/unready-filing.out" 2> "$home/unready-filing.err"; then
+    fail "a decision with no question, recommendation, or surface choice was filed"
+  fi
+  assert_grep "the decision question is missing" "$home/unready-filing.err" \
+    "the readiness refusal did not name the failed check"
+  assert_grep "--question" "$home/unready-filing.err" \
+    "the readiness refusal did not name the flag that fixes it"
+  assert_grep "the recommendation is missing" "$home/unready-filing.err" \
+    "the readiness refusal did not collect the missing recommendation"
+  assert_grep "neither a link to look at nor a note that none applies is recorded" \
+    "$home/unready-filing.err" \
+    "the readiness refusal did not collect the missing surface choice"
+  assert_no_grep "$origin-decision-shape" "$home/data/backlog.md" \
+    "a filing refused for readiness left a partial backlog identity behind"
+
+  # A fact request the captain cannot answer in the expected shape is refused on
+  # the same bar, and every gap is reported at once rather than one per retry.
+  if run_decisions "$home" hold "$origin" basis --title "Supply the sample basis" \
+    --reason "captain basis needed" --repo sample --kind fact \
+    --why "The sample valuation needs it." --affects "The sample estimate." \
+    --recommendation "Use the acquisition statement figure." \
+    --no-surface "The source statement is not available in this home." \
+    > "$home/unready-fact.out" 2> "$home/unready-fact.err"; then
+    fail "a fact request with no expected-answer hint and no question was filed"
+  fi
+  assert_grep "answer shape it expects" "$home/unready-fact.err" \
+    "the readiness refusal did not name the missing expected-answer hint"
+  assert_grep "the decision question is missing" "$home/unready-fact.err" \
+    "the readiness refusal reported only the first gap instead of every gap"
+
+  # A complete decision carrying neither options nor a fact kind is ready: those
+  # two are optional, and the checklist validates them only when present.
+  run_decisions "$home" "${base[@]}" \
+    --question "Which sample shape should the header take?" \
+    --why "The sample build stops until the shape is chosen." \
+    --affects "The sample header and every sample card under it." \
+    --recommendation "Take the compact shape; it survives a narrow screen." \
+    --no-surface "Both shapes are text-only, so there is nothing built to compare." \
+    >/dev/null || fail "a complete filing without options or a fact kind was refused"
+  out=$(run_decisions "$home" doctor "$origin-decision-shape") \
+    || fail "a complete structured decision was reported as not ready: $out"
+  assert_contains "$out" "all ready for the captain" \
+    "the check did not confirm a complete structured decision"
+
+  # A hold filed with only a free-text reason predates structured context. The
+  # checklist must leave it alone rather than report it as incomplete.
+  tasks_in "$home" add sample-free-text "Choose the sample schedule" \
+    --kind captain --repo sample >/dev/null
+  tasks_in "$home" hold sample-free-text --reason "captain schedule choice pending" \
+    --kind captain >/dev/null
+  out=$(run_decisions "$home" doctor sample-free-text) \
+    || fail "a free-text captain hold was reported as not ready: $out"
+  assert_contains "$out" "does not cover" \
+    "the checklist did not report the free-text hold as outside its scope"
+
+  # A decision the captain set aside stays out of scope, because re-surfacing it
+  # would undo that choice.
+  tasks_in "$home" add sample-parked "Choose the sample font" \
+    --kind captain --repo sample >/dev/null
+  tasks_in "$home" update sample-parked --body 'Decision question: Which sample font?' >/dev/null
+  tasks_in "$home" hold sample-parked --reason "set aside for now" --kind parked >/dev/null
+
+  # One fixture per failed check, each complete except for the dimension under
+  # test, so the sweep must name that specific check and nothing else.
+  _readiness_fixture "$home" gap-question \
+    'Why now: w
+What it affects: a
+Recommendation: Take the compact shape.
+No decision surface: nothing built'
+  _readiness_fixture "$home" gap-recommendation \
+    'Decision question: Which sample shape?
+Why now: w
+What it affects: a
+No decision surface: nothing built'
+  _readiness_fixture "$home" gap-both-surfaces \
+    'Decision question: Which sample shape?
+Recommendation: Take the compact shape.
+Decision URL: https://sample.tailnet.invalid/aid
+No decision surface: nothing built'
+  _readiness_fixture "$home" gap-no-surface \
+    'Decision question: Which sample shape?
+Recommendation: Take the compact shape.
+Why now: w'
+  _readiness_fixture "$home" gap-options \
+    'Decision question: Which sample shape?
+Recommendation: Take the compact shape.
+No decision surface: nothing built
+Decision options: ["Same","Same"]'
+  _readiness_fixture "$home" gap-expects \
+    'Decision question: Which sample shape?
+Recommendation: Take the compact shape.
+No decision surface: nothing built
+Decision kind: fact'
+  _readiness_fixture "$home" gap-expects-spaced \
+    $'Decision question: Which sample shape?\nRecommendation: Take the compact shape.\nNo decision surface: nothing built\nDecision kind: fact \t'
+
+  if run_decisions "$home" doctor > "$home/sweep.out" 2>&1; then
+    fail "the sweep reported every open captain decision as ready"
+  fi
+  out=$(cat "$home/sweep.out")
+  assert_contains "$out" "gap-question: not ready" "the sweep missed the missing question"
+  assert_contains "$out" "the decision question is missing (--question)" \
+    "the sweep did not name the missing question and its flag"
+  assert_contains "$out" "the recommendation is missing (--recommendation)" \
+    "the sweep did not name the missing recommendation and its flag"
+  assert_contains "$out" "it records both a link to look at and a note that none applies" \
+    "the sweep did not name a decision claiming two surface answers"
+  assert_contains "$out" "neither a link to look at nor a note that none applies is recorded" \
+    "the sweep did not name a decision with no surface answer"
+  assert_contains "$out" "the answer options are not two to four distinct short labels (--option)" \
+    "the sweep did not name a malformed option set, which the snapshot alone cannot show"
+  assert_contains "$out" "answer shape it expects (--expects)" \
+    "the sweep did not name a fact request with no expected-answer hint"
+  assert_contains "$out" "gap-expects-spaced: not ready" \
+    "the sweep did not normalize a fact marker with trailing whitespace"
+
+  # Scope: the ready decision, the free-text hold, and the decision set aside are
+  # all absent from the sweep's findings.
+  assert_not_contains "$out" "$origin-decision-shape" \
+    "the sweep reported a complete structured decision as not ready"
+  assert_not_contains "$out" "sample-free-text" \
+    "the sweep reported an older free-text captain hold as not ready"
+  assert_not_contains "$out" "sample-parked" \
+    "the sweep reported a decision the captain had set aside"
+  pass "structural readiness is refused at filing and swept with the specific failed check"
+}
+
+# A captain decision whose stored body is written directly, which is the only way
+# to reach a shape the filing flags already refuse.
+_readiness_fixture() {  # <home> <id> <body>
+  tasks_in "$1" add "$2" "Sample decision $2" --kind captain --repo sample >/dev/null
+  tasks_in "$1" update "$2" --body "$3" >/dev/null
+  tasks_in "$1" hold "$2" --reason "captain choice pending" --kind captain >/dev/null
+}
+
 test_uninventoried_report_decision_refuses_completion
 
 test_scout_teardown_always_requires_inventory_verification
@@ -1374,3 +1541,4 @@ test_terminal_single_owner_status_decision_does_not_block_empty_inventory
 test_secondmate_hold_stays_in_authoritative_home
 test_resolve_matches_quoted_blocked_by_edges
 test_duplicate_decision_key_retraction_unstrands_teardown
+test_structural_readiness_is_checked_at_filing_and_swept

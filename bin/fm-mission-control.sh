@@ -905,10 +905,23 @@ def valid_group_key($w):
   | add // 0) as $deferred_bounded |
 
 # ----------------------------------------------------------- fleet health --
-($work_tasks | map(select(
+# A decision the captain cannot answer is a fleet health problem, not a decision
+# waiting on them. The verdict is carried on the snapshot record from
+# bin/fm-decision-readiness.jq, so the board never restates the checklist. A
+# parked decision is out of scope because the captain set it aside, and a record
+# from a home that predates the field carries no verdict, which reads as
+# unrecorded rather than as ready.
+($records | map(select(.state != "done"
+  and (.hold_kind // "") == "captain"
+  and ((.decision_readiness // {}) | (.structured == true and .ready == false)))))
+  as $unready_decisions |
+($unready_decisions | map(.id)) as $unready_decision_ids |
+($work_tasks | map(. as $task | select((($unready_decision_ids | index($task.id)) == null) and (
   ((.current_state.state // "") | test("block|fail|error|cancel"; "i"))
-  or (.hints.blocked_event == true)))) as $unhealthy_raw |
-($records | map(select(.state != "done" and ((.unresolved_blocker_ids // []) | length) > 0))) as $blocked_items_raw |
+  or (.hints.blocked_event == true))))) as $unhealthy_raw |
+($records | map(. as $row | select(.state != "done"
+  and (($unready_decision_ids | index($row.id)) == null)
+  and ((.unresolved_blocker_ids // []) | length) > 0))) as $blocked_items_raw |
 ($unhealthy_raw | map(.id)) as $unhealthy_ids |
 ($unhealthy_raw | map(. as $task |
   ($blocked_items_raw | map(select(.id == $task.id)) | first) as $row |
@@ -941,7 +954,8 @@ def valid_group_key($w):
   or ($sm_registry_complete | not)
   or ($secondmate_unknown | length) > 0
   or ($secondmate_holds_omitted | length) > 0)) as $health_incomplete |
-(($unhealthy | length) + ($blocked_items | length) + $secondmate_hold_count) as $health_count |
+(($unhealthy | length) + ($blocked_items | length) + $secondmate_hold_count
+  + ($unready_decisions | length)) as $health_count |
 
 # -------------------------------------------------------- shipped today ----
 ($records | map(select(.state == "done"))) as $done_all |
@@ -1922,6 +1936,8 @@ def health_block:
         (@html "<li><span class=\"hstate\">\($t.current_state.state // "blocked")</span><span class=\"hwhat\">\($t.id)<span class=\"hint\">\(if ($t.health_blocker_ids | length) > 0 then "blocked by \($t.health_blocker_ids | join(", "))" else dash($t.paths.status_log.last_event.raw) end)</span></span></li>")) | add) // "")
     + (($blocked_items | map(. as $r |
         (@html "<li><span class=\"hstate wait\">waiting</span><span class=\"hwhat\">\(dash($r.title // $r.raw))<span class=\"hint\">blocked by \(($r.unresolved_blocker_ids // []) | join(", "))</span></span></li>")) | add) // "")
+    + (($unready_decisions | map(. as $d |
+        (@html "<li><span class=\"hstate\">incomplete</span><span class=\"hwhat\">\(dash($d.title // $d.raw))<span class=\"hint\">\([(($d.decision_readiness.gaps // [])[] | .detail)] | join("; "))</span></span></li>")) | add) // "")
     + (($secondmate_holds | map(. as $h |
         (@html "<li><span class=\"hstate wait\">held</span><span class=\"hwhat\">\(dash($h.id // $h.title))<span class=\"hint\">\($h.home): \(dash($h.reason // $h.blocked_by))</span></span></li>")) | add) // "")
     + (($secondmate_holds_omitted | map(. as $o |
@@ -2406,7 +2422,7 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
 "
 + (if ($health_count > 0) or $health_incomplete or ($backlog_present | not)
    then "<a class=\"attnbar\" href=\"#health\" data-tab=\"system\">" + icon_alert
-     + (@html "<span>\(if $health_count > 0 then "\(if $secondmate_hold_count > 0 then "\($health_count) fleet health \(plural($health_count; "item needs"; "items need")) attention" else "\($health_count) \(plural($health_count; "item is"; "items are")) blocked or failed" end)\(if $health_incomplete or ($backlog_present | not) then "; health details are incomplete" else "" end)" else "Fleet health cannot be confirmed from the available sources" end)</span>")
+     + (@html "<span>\(if $health_count > 0 then "\(if $secondmate_hold_count > 0 or ($unready_decisions | length) > 0 then "\($health_count) fleet health \(plural($health_count; "item needs"; "items need")) attention" else "\($health_count) \(plural($health_count; "item is"; "items are")) blocked or failed" end)\(if $health_incomplete or ($backlog_present | not) then "; health details are incomplete" else "" end)" else "Fleet health cannot be confirmed from the available sources" end)</span>")
      + "<span class=\"go\">&rsaquo;</span></a>"
    else "" end)
 + "

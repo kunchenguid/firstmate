@@ -24,11 +24,14 @@ Every captain decision must be self-contained and readable cold, because the cap
 `bin/fm-decision-hold.sh` makes the bar structural by requiring each dimension as its own field rather than as prose inside one reason, and by forcing an explicit choice about the built surface instead of letting an optional flag be forgotten.
 What the script cannot judge is whether the prose is genuinely clear, jargon-free, and decidable without re-reading the investigation, or whether the options are really built and viewable.
 When the captain's useful answers are a clean small pick, record two to four short explicit labels through the supported filing command; otherwise leave options absent and preserve the free-text decision rather than forcing nuance into misleading buttons.
-When the decision asks the captain to supply a specific fact or classification rather than choose a course, mark it `fact` and add a short expected-answer hint when that would clarify the useful shape.
+When the decision asks the captain to supply a specific fact or classification rather than choose a course, mark it `fact` and give the expected-answer shape with it, which the script now requires together.
 The marker changes only how the existing free-text Answer control is framed; never use it to imply that a richer data-entry surface exists.
 When two or more distinct decisions genuinely come from the same investigation or report, assign the same privacy-safe group slug to each so Mission Control can contain them visually without merging their identities or answer paths.
 Never group decisions merely because their subjects are similar, and never derive a group key, options, a fact marker, or an expected-answer hint from prose.
 That judgement is yours on every filing, and passing the script is not evidence you met it.
+
+The script also refuses a filing that fails one structural readiness checklist, and `bin/fm-decision-hold.sh doctor` sweeps the same checklist across open decisions; [`docs/decision-hold-lifecycle.md`](../../../docs/decision-hold-lifecycle.md) states it.
+Passing it means only that each dimension is present and well-shaped, never that the decision is worth the captain's time.
 
 Use `hold` when an investigation or visual review discovered the decision, so it gets its own durable decision identity under that origin.
 Use `hold-item` when the decision gates a backlog item that already exists, whatever kind that item carries.

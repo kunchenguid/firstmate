@@ -3286,6 +3286,67 @@ test_control_targets_are_escaped() {
   pass "fleet prose stays escaped where a control carries it"
 }
 
+
+# A decision the captain cannot act on is worse than no decision: it sits in
+# Captain's Call looking answerable. Fleet health is where the board already
+# reports what needs attention, so an incomplete decision surfaces there with the
+# specific gap, without anyone remembering to run a separate check.
+test_incomplete_decision_reaches_fleet_health() {
+  local snap board
+  snap=$TMP_ROOT/decision-readiness.json
+  board=$TMP_ROOT/decision-readiness.html
+  snapshot_json '[
+    {"id": "ready-decision", "structured": true, "state": "queued", "kind": "captain",
+     "title": "Choose the route", "repo": "sample",
+     "hold_reason": "captain route choice pending", "hold_kind": "captain",
+     "decision_readiness": {"structured": true, "ready": true, "gaps": []}},
+    {"id": "unready-decision", "structured": true, "state": "queued", "kind": "captain",
+     "title": "Choose the palette", "repo": "sample",
+     "hold_reason": "captain palette choice pending", "hold_kind": "captain",
+     "unresolved_blocker_ids": ["palette-source"],
+     "decision_readiness": {"structured": true, "ready": false, "gaps": [
+       {"check": "question", "flag": "--question", "detail": "the decision question is missing"},
+       {"check": "recommendation", "flag": "--recommendation", "detail": "the recommendation is missing"}]}},
+    {"id": "free-text-decision", "structured": true, "state": "queued", "kind": "captain",
+     "title": "Choose the schedule", "repo": "sample",
+     "hold_reason": "captain schedule choice pending", "hold_kind": "captain",
+     "decision_readiness": {"structured": false, "ready": true, "gaps": []}},
+    {"id": "parked-decision", "structured": true, "state": "queued", "kind": "captain",
+     "title": "Choose the font", "repo": "sample",
+     "hold_reason": "set aside for now", "hold_kind": "parked",
+     "captain_actionable": false, "captain_deferred": true,
+     "decision_readiness": {"structured": true, "ready": false, "gaps": [
+       {"check": "question", "flag": "--question", "detail": "the decision question is missing"}]}}
+  ]' '[]' > "$snap"
+  "$BOARD" --snapshot "$snap" --no-quota --out "$board" >/dev/null \
+    || fail "a snapshot carrying an incomplete decision must render"
+
+  assert_grep '<li><span class="hstate">incomplete</span><span class="hwhat">Choose the palette<span class="hint">the decision question is missing; the recommendation is missing</span></span></li>' \
+    "$board" "an incomplete decision must reach fleet health naming every gap"
+  assert_grep '<h3>Fleet health<span class="count">1 item</span></h3>' "$board" \
+    "an incomplete blocked decision must be counted once in fleet health"
+  assert_no_grep 'blocked by palette-source' "$board" \
+    "an incomplete decision must retain its readiness details instead of a duplicate blocker row"
+  assert_no_grep 'Nothing blocked or failed.' "$board" \
+    "fleet health must not read as all clear while a decision is unanswerable"
+
+  # The bar above the board summarises fleet health, and an unanswerable decision
+  # is neither blocked nor failed, so the wording has to widen with it.
+  assert_grep '1 fleet health item needs attention' "$board" \
+    "the attention bar must describe an incomplete decision honestly"
+  assert_no_grep '1 item is blocked or failed' "$board" \
+    "an incomplete decision must not be reported as blocked or failed"
+
+  # Scope: only a decision the checklist actually covers and actually failed.
+  assert_no_grep '<span class="hwhat">Choose the route' "$board" \
+    "a complete decision must not appear in fleet health"
+  assert_no_grep '<span class="hwhat">Choose the schedule' "$board" \
+    "an older free-text captain hold must not appear in fleet health"
+  assert_no_grep '<span class="hwhat">Choose the font' "$board" \
+    "a decision the captain set aside must not be re-surfaced by fleet health"
+  pass "an unanswerable captain decision surfaces in fleet health with its gap"
+}
+
 test_in_progress_items_are_listed_with_stage_and_model
 test_stalled_items_do_not_read_as_progress
 test_setup_uses_neutral_tone
@@ -3341,3 +3402,4 @@ test_recorded_answers_persist_across_devices_and_sink
 test_control_targets_are_escaped
 test_decision_context_links_and_submission_state_in_a_browser
 test_live_fleet_mobile_refresh_keeps_reading_position
+test_incomplete_decision_reaches_fleet_health

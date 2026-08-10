@@ -26,6 +26,13 @@
 #     They are read for any row whose HOLD kind is captain or parked, not only a
 #     row whose own kind is captain, because a captain hold can gate any item.
 #     The URL is private data and is never fetched or rewritten.
+#     Those same rows also carry decision_readiness, the structural verdict from
+#     bin/fm-decision-readiness.jq, so a reader never has to reimplement the
+#     checklist: {structured, ready, gaps} where each gap names its failed check
+#     and the flag that fixes it. A hold predating the structured schema reports
+#     structured false and ready true, because the checklist does not cover it.
+#     The verdict is scoped to this home's own backlog rows, so a decision owned
+#     by a secondmate home carries none and is that home's own to check.
 #     They also carry normalized current_role,
 #     requires_child_metadata, blocked_by_ids, unresolved_blocker_ids, blocks_ids,
 #     captain_actionable, and captain_deferred fields. Repeated blocker tokens
@@ -334,7 +341,8 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
   fi
 
   # shellcheck disable=SC2094
-  jq -Rn --arg path "$backlog" '
+  jq -Rn -L "$SCRIPT_DIR" --arg path "$backlog" '
+    include "fm-decision-readiness";
     def trim: gsub("^[[:space:]]+|[[:space:]]+$"; "");
     def section_state:
       if . == "In flight" then "in_flight"
@@ -494,6 +502,10 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
             | .decision_affects = body_field(.body_lines; "What it affects")
             | .decision_recommendation = body_field(.body_lines; "Recommendation")
             | .decision_no_surface = body_field(.body_lines; "No decision surface")
+            # Readiness reads the raw body rather than the parsed fields above,
+            # because a malformed option set parses to null and would otherwise
+            # be indistinguishable from one that was never supplied.
+            | .decision_readiness = (.body_lines | decision_readiness)
           else . end)
     | .records as $records
     | (reduce ($records[] | select(.structured)) as $record ({};
