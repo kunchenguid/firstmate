@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # fm-test-run.sh - single owner of Firstmate's serial behavior-test runner.
 #
-# Replaces duplicated `for test_script in tests/*.test.sh` loops in CONTRIBUTING
+# Replaces duplicated test loops in CONTRIBUTING
 # and the CI Behavior job. This phase is intentionally serial: no sharding and
 # no local --jobs parallelism.
 #
@@ -93,7 +93,7 @@ now_ms() {
   fi
 }
 
-# Primary family for one tests/*.test.sh basename. Unmapped scripts are
+# Primary family for one test basename. Unmapped scripts are
 # unclassified so new tests are still runnable and visible in summaries.
 family_for_basename() {
   case "$1" in
@@ -117,6 +117,7 @@ family_for_basename() {
       printf '%s\n' watcher-wake-lock
       ;;
     fm-afk-inject-herdr-e2e.test.sh|fm-afk-launch.test.sh|fm-backend-autodetect-smoke.test.sh|\
+    fm-backend-herdr-eventwait.test.py|\
     fm-backend-herdr-eventwait-smoke.test.sh|fm-backend-herdr-presentation-e2e.test.sh|\
     fm-backend-herdr-prune-safety-e2e.test.sh|fm-backend-herdr-respawn-idem-e2e.test.sh|\
     fm-herdr-session-cleanup-e2e.test.sh|\
@@ -205,7 +206,7 @@ all_repo_tests() {
   # Deterministic lexical order (same as bash glob expansion under LC_ALL=C).
   local f
   # shellcheck disable=SC2035
-  for f in tests/*.test.sh; do
+  for f in tests/*.test.sh tests/*.test.py; do
     [ -f "$f" ] || continue
     printf '%s\n' "$f"
   done | LC_ALL=C sort
@@ -219,7 +220,7 @@ normalize_script_path() {
       p=${p#./}
       printf '%s\n' "$p"
       ;;
-    *.test.sh)
+    *.test.sh|*.test.py)
       if [ -f "tests/$p" ]; then
         printf 'tests/%s\n' "$p"
       else
@@ -781,6 +782,16 @@ family_bump() {
   mv "$tmp" "$FAMILIES_TSV"
 }
 
+run_test_script() {
+  case "$1" in
+    *.test.py)
+      command -v python3 >/dev/null 2>&1 || return 127
+      python3 "$1"
+      ;;
+    *) bash "$1" ;;
+  esac
+}
+
 for script in "${SCRIPTS[@]}"; do
   base=$(basename "$script")
   family=$(family_for_basename "$base")
@@ -794,7 +805,7 @@ for script in "${SCRIPTS[@]}"; do
 
   set +e
   # Stream live output while retaining a copy for gate-skip detection.
-  bash "$script" 2>&1 | tee "$out"
+  run_test_script "$script" 2>&1 | tee "$out"
   pipeline_status=("${PIPESTATUS[@]}")
   rc=${pipeline_status[0]}
   tee_rc=${pipeline_status[1]}

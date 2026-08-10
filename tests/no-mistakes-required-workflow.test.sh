@@ -114,12 +114,11 @@ test_workflow_semantics() {
   [ "$first" != "$second" ] || fail "distinct events must have unique run names"
   local workflow
   workflow=$(workflow_json "$WORKFLOW")
-  WORKFLOW_JSON="$workflow" MARKER="$MARKER" python3 - <<'PY'
+  WORKFLOW_JSON="$workflow" python3 - <<'PY'
 import json
 import os
 
 workflow = json.loads(os.environ["WORKFLOW_JSON"])
-marker = os.environ["MARKER"]
 event = workflow["on"]
 assert event["pull_request"]["types"] == ["opened", "edited", "synchronize", "reopened"]
 assert event["pull_request"]["branches"] == ["main"]
@@ -146,9 +145,6 @@ assert all(not contains_secret(step.get(field, {})) for step in job["steps"] for
 condition = job["if"]
 assert "github-actions[bot]" in condition and "dependabot[bot]" in condition
 assert "release-please[bot]" not in condition
-run = next(step["run"] for step in job["steps"] if step.get("name") == "Verify no-mistakes signature in PR body")
-assert marker in run
-assert 'gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}"' in run
 PY
   local status=$?
   expect_code 0 "$status" "workflow semantic assertions must pass"

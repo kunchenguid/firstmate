@@ -248,6 +248,7 @@ SPAWN_HOME_LOCK=
 SPAWN_HOME_LOCK_HELD=0
 SPAWN_WORKTREE_PATH=
 SPAWN_WORKTREE_LEASE_PROOF=
+SPAWN_ARTIFACTS_CLEAN=0
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -345,8 +346,64 @@ spawn_release_home_lock() {
   return 1
 }
 
+spawn_release_task_lock() {
+  [ "${SPAWN_TASK_LOCK_HELD:-0}" = 1 ] || return 0
+  if fm_lock_release "$SPAWN_TASK_LOCK"; then
+    SPAWN_TASK_LOCK_HELD=0
+    return 0
+  fi
+  return 1
+}
+
+spawn_acquire_home_lock() {
+  local lock_home=$1 lock_path
+  [ -d "$lock_home" ] || return 1
+  lock_path=$(fm_config_inherit_lock_path "$lock_home") || return 1
+  fm_lock_acquire_wait "$lock_path" || return 1
+  SPAWN_HOME_LOCK=$lock_path
+  SPAWN_HOME_LOCK_HELD=1
+}
+
+spawn_abort_artifacts_cleanup() {
+  local rc=0 token auth_dir auth_file owner_file
+  [ -n "${ID:-}" ] || return 0
+  if [ -n "${WT:-}" ] && [ -d "$WT" ]; then
+    rm -f "$WT/.claude/settings.local.json" \
+      "$WT/.opencode/plugins/fm-turn-end.js" "$WT/.fm-grok-turnend" || rc=1
+  fi
+  rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.pi-ext.ts" || rc=1
+  if [ -n "${STATE:-}" ] && [ -f "$STATE/$ID.grok-turnend-token" ]; then
+    token=$(cat "$STATE/$ID.grok-turnend-token" 2>/dev/null || true)
+    case "$token" in
+      fm.????????????)
+        case "$token" in *[!A-Za-z0-9._-]*) rc=1 ;; *)
+          auth_dir="${GROK_HOME:-$HOME/.grok}/hooks/fm-turn-end.d"
+          auth_file="$auth_dir/$token"
+          rm -f "$auth_file" || rc=1
+          rm -f "$STATE/$ID.grok-turnend-token" || rc=1
+          ;;
+        esac
+        ;;
+      *) rc=1 ;;
+    esac
+  fi
+  [ -z "${HERDR_LABEL_JOURNAL:-}" ] || rm -f "$HERDR_LABEL_JOURNAL" || rc=1
+  [ -z "${HERDR_PRESENTATION_JOURNAL:-}" ] || rm -f "$HERDR_PRESENTATION_JOURNAL" || rc=1
+  if [ -n "${TASK_TMP:-}" ] && [ -d "$TASK_TMP" ]; then
+    owner_file="$TASK_TMP/.fm-tasktmp-owner"
+    if [ -f "$owner_file" ] && [ ! -L "$owner_file" ] \
+       && printf 'task=%s\npath=%s\n' "$ID" "$TASK_TMP" | cmp -s - "$owner_file"; then
+      rm -rf -- "$TASK_TMP" || rc=1
+    else
+      rc=1
+    fi
+  fi
+  return "$rc"
+}
+
 spawn_abort_cleanup() {
   local status=$? cleanup_session endpoint_cleanup_status=1 slot_returned=0
+  [ "${SPAWN_ENDPOINT_CREATED:-0}" = 1 ] || endpoint_cleanup_status=0
   if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ] \
      && [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" != 1 ]; then
     if ! spawn_herdr_presentation_order_lock_acquire "${HERDR_PROJECTION_ABORT_SESSION:-}"; then
@@ -387,10 +444,6 @@ spawn_abort_cleanup() {
       "tab create mutation identity unavailable" "" "$HERDR_FLAT_ABORT_SCOPE" "$HERDR_FLAT_ABORT_LABEL" \
       || echo "error: could not persist Herdr create uncertainty for $ID" >&2
     HERDR_FLAT_ABORT_UNCERTAIN=0
-  fi
-  if [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" = 1 ]; then
-    HERDR_PRESENTATION_ORDER_LOCK_HELD=0
-    fm_lock_release "$HERDR_PRESENTATION_ORDER_LOCK" || true
   fi
   if [ "${HERDR_LABEL_LOCK_HELD:-0}" = 1 ]; then
     spawn_release_label_lock || true
@@ -433,6 +486,13 @@ spawn_abort_cleanup() {
       endpoint_cleanup_status=0
     fi
   fi
+  if [ "$status" -ne 0 ] && [ "$endpoint_cleanup_status" -eq 0 ]; then
+    if spawn_abort_artifacts_cleanup; then
+      SPAWN_ARTIFACTS_CLEAN=1
+    else
+      echo "warning: spawn abort could not remove every task artifact; preserving recovery metadata" >&2
+    fi
+  fi
   if [ "$status" -ne 0 ] \
      && [ "${SPAWN_WORKTREE_LEASED:-0}" = 1 ] \
      && [ "${SPAWN_WORKTREE_PROVEN:-0}" = 1 ] \
@@ -452,6 +512,7 @@ spawn_abort_cleanup() {
      && [ "${SPAWN_WORKTREE_LEASED:-0}" = 1 ] \
      && [ "${SPAWN_WORKTREE_PROVEN:-0}" = 1 ] \
      && [ "$endpoint_cleanup_status" -eq 0 ] \
+     && [ "$SPAWN_ARTIFACTS_CLEAN" = 1 ] \
      && [ -n "${WT:-}" ] \
      && [ -n "${PROJ_ABS:-}" ] \
      && spawn_slot_stamp_owned; then
@@ -487,16 +548,19 @@ spawn_abort_cleanup() {
     rm -f "$META_TMP"
   fi
   [ -z "${SPAWN_WORKTREE_LEASE_PROOF:-}" ] || rm -f "$SPAWN_WORKTREE_LEASE_PROOF" 2>/dev/null || true
-  if [ "$SPAWN_TASK_LOCK_HELD" = 1 ]; then
-    SPAWN_TASK_LOCK_HELD=0
-    fm_lock_release "$SPAWN_TASK_LOCK" || true
-  fi
   if [ "$SPAWN_SLOT_LOCK_HELD" = 1 ]; then
     SPAWN_SLOT_LOCK_HELD=0
     fm_slot_lock_release "$SPAWN_SLOT_LOCK_PATH" || true
   fi
+  if [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" = 1 ]; then
+    HERDR_PRESENTATION_ORDER_LOCK_HELD=0
+    fm_lock_release "$HERDR_PRESENTATION_ORDER_LOCK" || true
+  fi
   if [ "${SPAWN_HOME_LOCK_HELD:-0}" = 1 ]; then
     spawn_release_home_lock || true
+  fi
+  if [ "${SPAWN_TASK_LOCK_HELD:-0}" = 1 ]; then
+    spawn_release_task_lock || true
   fi
   return "$status"
 }
@@ -578,18 +642,6 @@ if [ "$DISPLAY_TITLE_SET" -eq 0 ] && [ -e "$DATA/$ID/display-title" ]; then
   DISPLAY_TITLE=$(cat "$DATA/$ID/display-title")
 fi
 SPAWN_TASK_LOCK="$STATE/.spawn-$ID.lock"
-if [ -f "$FM_HOME/$SUB_HOME_MARKER" ]; then
-  mkdir -p "$STATE" || exit 1
-  SPAWN_HOME_LOCK=$(fm_config_inherit_lock_path "$FM_HOME") || {
-    echo "error: could not resolve the per-home spawn lock for $ID" >&2
-    exit 1
-  }
-  if ! fm_lock_acquire_wait "$SPAWN_HOME_LOCK"; then
-    echo "error: could not acquire the per-home spawn lock for $ID" >&2
-    exit 1
-  fi
-  SPAWN_HOME_LOCK_HELD=1
-fi
 if ! fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
   echo "error: another spawn is already creating task $ID" >&2
   exit 1
@@ -1016,6 +1068,10 @@ if [ "$KIND" = secondmate ]; then
   [ -n "$FIRSTMATE_HOME" ] || { echo "error: no firstmate home supplied or registered for $ID" >&2; exit 1; }
   PROJ_ABS=$(validate_firstmate_home_for_spawn "$ID" "$FIRSTMATE_HOME")
   WT="$PROJ_ABS"
+  if ! spawn_acquire_home_lock "$PROJ_ABS"; then
+    echo "error: could not acquire the per-home spawn lock for $ID" >&2
+    exit 1
+  fi
   # Local-HEAD sync: before launch, fast-forward this secondmate's worktree to the
   # PRIMARY checkout's current default-branch commit, so a freshly spawned or
   # recovery-respawned secondmate always runs the primary's version (AGENTS.md
@@ -1049,6 +1105,10 @@ if [ "$KIND" = secondmate ]; then
 else
   PROJ_ABS="$(cd "$(resolve_project_dir_arg "$PROJ")" && pwd)"
   WT=""
+  if [ -f "$FM_HOME/$SUB_HOME_MARKER" ] && ! spawn_acquire_home_lock "$FM_HOME"; then
+    echo "error: could not acquire the per-home spawn lock for $ID" >&2
+    exit 1
+  fi
   BRIEF="$DATA/$ID/brief.md"
 fi
 [ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
@@ -1182,6 +1242,13 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
 }
 
 W="fm-$ID"
+if [ -e "$STATE/$ID.meta" ] || [ -L "$STATE/$ID.meta" ]; then
+  if [ "$(awk -F= '$1 == "slot_returning" { print $2; exit }' "$STATE/$ID.meta" 2>/dev/null || true)" = 1 ]; then
+    echo "error: existing task $ID is in the middle of a pooled-slot return; refusing duplicate launch" >&2
+    exit 1
+  fi
+  herdr_projection_existing_meta_allows_flat "$STATE/$ID.meta" || exit 1
+fi
 DISPLAY_LABEL=
 TASK_KEY=
 HERDR_LABEL_JOURNAL=
@@ -1849,7 +1916,6 @@ fm_backend_send_literal "$BACKEND" "$WID" "$LAUNCH"
 sleep 0.3
 if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   HERDR_PROJECTION_ABORT_CLEANUP=0
-  spawn_herdr_presentation_order_lock_release
 fi
 HERDR_FLAT_ABORT_CLEANUP=0
 fm_backend_send_key "$BACKEND" "$WID" Enter
@@ -1863,11 +1929,21 @@ fm_backend_send_key "$BACKEND" "$WID" Enter
     fm_slot_lock_release "$SPAWN_SLOT_LOCK_PATH" \
       || echo "warning: $ID launched but its pooled-slot ownership lock $SPAWN_SLOT_LOCK_PATH could not be released; clear the stale lock file manually" >&2
   fi
+if [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" = 1 ]; then
+  spawn_herdr_presentation_order_lock_release
+fi
 if [ "$SPAWN_HOME_LOCK_HELD" = 1 ]; then
   spawn_release_home_lock \
     || echo "warning: $ID launched but its per-home spawn lock $SPAWN_HOME_LOCK could not be released; the exit cleanup will retry" >&2
 fi
-if [ "$HERDR_LABEL_LOCK_HELD" = 0 ] && [ "$SPAWN_HOME_LOCK_HELD" = 0 ]; then
+if [ "$SPAWN_TASK_LOCK_HELD" = 1 ]; then
+  spawn_release_task_lock \
+    || echo "warning: $ID launched but its task lock $SPAWN_TASK_LOCK could not be released; the exit cleanup will retry" >&2
+fi
+if [ "$HERDR_LABEL_LOCK_HELD" = 0 ] \
+   && [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" = 0 ] \
+   && [ "$SPAWN_HOME_LOCK_HELD" = 0 ] \
+   && [ "$SPAWN_TASK_LOCK_HELD" = 0 ]; then
   trap - EXIT
 fi
 

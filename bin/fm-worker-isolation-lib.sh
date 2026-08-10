@@ -43,6 +43,16 @@
 # a call site, when a new home override is introduced.
 _FM_WORKER_ISOLATION_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_WORKER_ISOLATION_HOME_VARS="FM_HOME FM_ROOT FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE FM_PENDING_REPLY_DIR_OVERRIDE STATE"
+if [ "${_FM_WORKER_ISOLATION_SNAPSHOT_READY:-0}" != 1 ]; then
+  _FM_WORKER_ISOLATION_SNAPSHOT_READY=1
+  _FM_WORKER_INITIAL_AGENT_ROLE=${FM_AGENT_ROLE:-}
+  _FM_WORKER_INITIAL_AGENT_TASK=${FM_AGENT_TASK:-}
+  _FM_WORKER_INITIAL_AGENT_OWNER_HOME=${FM_AGENT_OWNER_HOME:-}
+  for _fm_worker_var in $FM_WORKER_ISOLATION_HOME_VARS; do
+    printf -v "_FM_WORKER_INITIAL_${_fm_worker_var}" '%s' "${!_fm_worker_var-}"
+  done
+  unset _fm_worker_var
+fi
 
 fm_worker_shell_quote() {  # <text>
   printf "'"
@@ -98,7 +108,9 @@ fm_worker_launch_env_prefix() {
 }
 
 fm_worker_declaration_present() {
-  [ -n "${FM_AGENT_ROLE:-}" ] || [ -n "${FM_AGENT_TASK:-}" ] || [ -n "${FM_AGENT_OWNER_HOME:-}" ]
+  [ -n "${_FM_WORKER_INITIAL_AGENT_ROLE:-}" ] \
+    || [ -n "${_FM_WORKER_INITIAL_AGENT_TASK:-}" ] \
+    || [ -n "${_FM_WORKER_INITIAL_AGENT_OWNER_HOME:-}" ]
 }
 
 fm_worker_canonical_path() {
@@ -156,14 +168,15 @@ fm_worker_primary_ancestry_clear() {
 fm_worker_primary_origin_proven() {
   local root home state root_real home_real state_real git_dir git_common
   local var value expected
-  case "${FM_AGENT_ROLE:-}" in
+  case "${_FM_WORKER_INITIAL_AGENT_ROLE:-}" in
     "") ;;
     *) return 1 ;;
   esac
-  [ -z "${FM_AGENT_TASK:-}" ] && [ -z "${FM_AGENT_OWNER_HOME:-}" ] || return 1
-  root=${FM_ROOT_OVERRIDE:-$(cd "$_FM_WORKER_ISOLATION_LIB_DIR/.." && pwd)}
-  home=${FM_HOME:-$root}
-  state=${FM_STATE_OVERRIDE:-$home/state}
+  [ -z "${_FM_WORKER_INITIAL_AGENT_TASK:-}" ] \
+    && [ -z "${_FM_WORKER_INITIAL_AGENT_OWNER_HOME:-}" ] || return 1
+  root=${_FM_WORKER_INITIAL_FM_ROOT_OVERRIDE:-$(cd "$_FM_WORKER_ISOLATION_LIB_DIR/.." && pwd)}
+  home=${_FM_WORKER_INITIAL_FM_HOME:-$root}
+  state=${_FM_WORKER_INITIAL_FM_STATE_OVERRIDE:-$home/state}
   root_real=$(fm_worker_canonical_path "$root") || return 1
   home_real=$(fm_worker_canonical_path "$home") || return 1
   state_real=$(fm_worker_canonical_path "$state") || return 1
@@ -191,7 +204,17 @@ fm_worker_primary_origin_proven() {
       FM_PENDING_REPLY_DIR_OVERRIDE) expected=$home_real/state/pending-replies ;;
       *) continue ;;
     esac
-    eval "value=\${$var:-}"
+    case "$var" in
+      FM_HOME) value=${_FM_WORKER_INITIAL_FM_HOME:-} ;;
+      FM_ROOT) value=${_FM_WORKER_INITIAL_FM_ROOT:-} ;;
+      FM_ROOT_OVERRIDE) value=${_FM_WORKER_INITIAL_FM_ROOT_OVERRIDE:-} ;;
+      FM_STATE_OVERRIDE) value=${_FM_WORKER_INITIAL_FM_STATE_OVERRIDE:-} ;;
+      FM_DATA_OVERRIDE) value=${_FM_WORKER_INITIAL_FM_DATA_OVERRIDE:-} ;;
+      FM_PROJECTS_OVERRIDE) value=${_FM_WORKER_INITIAL_FM_PROJECTS_OVERRIDE:-} ;;
+      FM_CONFIG_OVERRIDE) value=${_FM_WORKER_INITIAL_FM_CONFIG_OVERRIDE:-} ;;
+      FM_PENDING_REPLY_DIR_OVERRIDE) value=${_FM_WORKER_INITIAL_FM_PENDING_REPLY_DIR_OVERRIDE:-} ;;
+      STATE) value=${_FM_WORKER_INITIAL_STATE:-} ;;
+    esac
     if [ -n "$value" ]; then
       fm_worker_paths_same "$value" "$expected" || return 1
     elif [ "$home_real" = "$root_real" ]; then
@@ -203,13 +226,13 @@ fm_worker_primary_origin_proven() {
 
 fm_worker_identity_is_complete() {
   local effective_home owner var value expected
-  case "${FM_AGENT_ROLE:-}" in
+  case "${_FM_WORKER_INITIAL_AGENT_ROLE:-}" in
     crewmate) ;;
     secondmate)
-      effective_home=${FM_HOME:-}
+      effective_home=${_FM_WORKER_INITIAL_FM_HOME:-}
       [ -n "$effective_home" ] || return 1
-      [ "$effective_home" = "${FM_AGENT_OWNER_HOME:-}" ] || return 1
-      owner=${FM_AGENT_OWNER_HOME:-}
+      [ "$effective_home" = "${_FM_WORKER_INITIAL_AGENT_OWNER_HOME:-}" ] || return 1
+      owner=${_FM_WORKER_INITIAL_AGENT_OWNER_HOME:-}
       for var in $FM_WORKER_ISOLATION_HOME_VARS; do
         case "$var" in
           FM_HOME|FM_ROOT|FM_ROOT_OVERRIDE) expected=$owner ;;
@@ -222,23 +245,23 @@ fm_worker_identity_is_complete() {
           *) continue ;;
         esac
         case "$var" in
-          FM_HOME) value=${FM_HOME:-} ;;
-          FM_ROOT) value=${FM_ROOT:-} ;;
-          FM_ROOT_OVERRIDE) value=${FM_ROOT_OVERRIDE:-} ;;
-          FM_STATE_OVERRIDE) value=${FM_STATE_OVERRIDE:-} ;;
-          FM_DATA_OVERRIDE) value=${FM_DATA_OVERRIDE:-} ;;
-          FM_PROJECTS_OVERRIDE) value=${FM_PROJECTS_OVERRIDE:-} ;;
-          FM_CONFIG_OVERRIDE) value=${FM_CONFIG_OVERRIDE:-} ;;
-          FM_PENDING_REPLY_DIR_OVERRIDE) value=${FM_PENDING_REPLY_DIR_OVERRIDE:-} ;;
-          STATE) value=${STATE:-} ;;
+          FM_HOME) value=${_FM_WORKER_INITIAL_FM_HOME:-} ;;
+          FM_ROOT) value=${_FM_WORKER_INITIAL_FM_ROOT:-} ;;
+          FM_ROOT_OVERRIDE) value=${_FM_WORKER_INITIAL_FM_ROOT_OVERRIDE:-} ;;
+          FM_STATE_OVERRIDE) value=${_FM_WORKER_INITIAL_FM_STATE_OVERRIDE:-} ;;
+          FM_DATA_OVERRIDE) value=${_FM_WORKER_INITIAL_FM_DATA_OVERRIDE:-} ;;
+          FM_PROJECTS_OVERRIDE) value=${_FM_WORKER_INITIAL_FM_PROJECTS_OVERRIDE:-} ;;
+          FM_CONFIG_OVERRIDE) value=${_FM_WORKER_INITIAL_FM_CONFIG_OVERRIDE:-} ;;
+          FM_PENDING_REPLY_DIR_OVERRIDE) value=${_FM_WORKER_INITIAL_FM_PENDING_REPLY_DIR_OVERRIDE:-} ;;
+          STATE) value=${_FM_WORKER_INITIAL_STATE:-} ;;
         esac
         [ -z "$value" ] || [ "$value" = "$expected" ] || return 1
       done
       ;;
     *) return 1 ;;
   esac
-  [ -n "${FM_AGENT_TASK:-}" ] || return 1
-  case "${FM_AGENT_OWNER_HOME:-}" in
+  [ -n "${_FM_WORKER_INITIAL_AGENT_TASK:-}" ] || return 1
+  case "${_FM_WORKER_INITIAL_AGENT_OWNER_HOME:-}" in
     /*) ;;
     *) return 1 ;;
   esac
@@ -248,7 +271,8 @@ fm_worker_identity_is_complete() {
 # fm_worker_is_task_worker: 0 unless this process has a complete secondmate
 # identity or a proven primary origin.
 fm_worker_is_task_worker() {
-  if [ "${FM_AGENT_ROLE:-}" = secondmate ] && fm_worker_identity_is_complete; then
+  if [ "${_FM_WORKER_INITIAL_AGENT_ROLE:-}" = secondmate ] \
+    && fm_worker_identity_is_complete; then
     return 1
   fi
   if fm_worker_primary_origin_proven; then
@@ -264,6 +288,6 @@ fm_worker_is_task_worker() {
 fm_worker_refuse_primary_operation() {
   local operation=$1
   fm_worker_is_task_worker || return 0
-  echo "error: $operation refused: this process is task worker '${FM_AGENT_TASK:-unnamed}' launched by ${FM_AGENT_OWNER_HOME:-an unrecorded home}; a task worker never owns a firstmate operational home" >&2
+  echo "error: $operation refused: this process is task worker '${_FM_WORKER_INITIAL_AGENT_TASK:-unnamed}' launched by ${_FM_WORKER_INITIAL_AGENT_OWNER_HOME:-an unrecorded home}; a task worker never owns a firstmate operational home" >&2
   return 1
 }

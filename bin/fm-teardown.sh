@@ -477,31 +477,54 @@ teardown_cleanup_returned_slot() {
   fm_slot_lock_release "$lock_path"
 }
 
+teardown_acquire_herdr_presentation_lock() {
+  local target=$1 session lock attempt=0
+  fm_backend_herdr_parse_target "$target" || return 1
+  session=$FM_BACKEND_HERDR_SESSION
+  lock=$(fm_backend_herdr_presentation_session_lock_path "$session") || return 1
+  if [ "${HERDR_PRESENTATION_LOCK_HELD:-0}" = 1 ]; then
+    [ "$HERDR_PRESENTATION_LOCK_PATH" = "$lock" ]
+    return
+  fi
+  while [ "$attempt" -lt 50 ]; do
+    if fm_lock_try_acquire "$lock"; then
+      HERDR_PRESENTATION_LOCK_PATH=$lock
+      HERDR_PRESENTATION_LOCK_HELD=1
+      return 0
+    fi
+    sleep 0.1
+    attempt=$((attempt + 1))
+  done
+  return 1
+}
+
+teardown_release_herdr_presentation_lock() {
+  if [ "${HERDR_PRESENTATION_LOCK_HELD:-0}" = 1 ]; then
+    fm_lock_release "$HERDR_PRESENTATION_LOCK_PATH" || return 1
+    HERDR_PRESENTATION_LOCK_HELD=0
+  fi
+}
+
 teardown_herdr_endpoint_focus_safe() {
-  local target=$1 session pane state lock attempt=0 held=0 close_status=1
+  local target=$1 session pane state close_status=1 acquired_here=0
   fm_backend_source herdr || return 1
   fm_backend_herdr_parse_target "$target" || return 1
   session=$FM_BACKEND_HERDR_SESSION
   pane=$FM_BACKEND_HERDR_PANE
   state=$(fm_backend_herdr_pane_agent_state "$session" "$pane")
   [ "$state" = dead ] && return 0
-  . "$SCRIPT_DIR/fm-wake-lib.sh"
-  lock=$(fm_backend_herdr_presentation_session_lock_path "$session") || return 1
-  while [ "$attempt" -lt 50 ]; do
-    if fm_lock_try_acquire "$lock"; then
-      held=1
-      break
-    fi
-    sleep 0.1
-    attempt=$((attempt + 1))
-  done
-  [ "$held" = 1 ] || return 1
+  if [ "${HERDR_PRESENTATION_LOCK_HELD:-0}" != 1 ]; then
+    teardown_acquire_herdr_presentation_lock "$target" || return 1
+    acquired_here=1
+  fi
   if fm_backend_herdr_projection_teardown_close "$session" "$pane"; then
     close_status=0
   else
     close_status=$?
   fi
-  fm_lock_release "$lock" || true
+  if [ "$acquired_here" = 1 ]; then
+    teardown_release_herdr_presentation_lock || close_status=1
+  fi
   return "$close_status"
 }
 
@@ -1037,7 +1060,7 @@ remove_firstmate_home() {  # <home> <label> [expected-id] [state-dir] [home-scop
     return 1
   fi
   if [ "$(meta_value "$meta_path" slot_returned)" = 1 ]; then
-    teardown_cleanup_returned_slot "$home" "${expected_id:-$ID}" "$home" || {
+    teardown_cleanup_returned_slot "$home" "${expected_id:-$ID}" "$home_scope" || {
       echo "error: could not clear the ownership stamp for returned $label $home; preserving task state" >&2
       return 1
     }
@@ -1093,7 +1116,7 @@ remove_firstmate_home() {  # <home> <label> [expected-id] [state-dir] [home-scop
       teardown_slot_returning_recovery_line "$meta_path" "$abs_home_path" "${expected_id:-$ID}"
       return 1
     }
-    fm_slot_stamp_clear_after_return "$abs_home_path" "${expected_id:-$ID}" "$abs_home_path" || {
+    fm_slot_stamp_clear_after_return "$abs_home_path" "${expected_id:-$ID}" "$home_scope" || {
       fm_slot_lock_release "$lock_path" || true
       echo "error: could not clear the ownership stamp for $label $abs_home_path; preserving task state" >&2
       return 1
@@ -1233,7 +1256,7 @@ cleanup_firstmate_home_children() {
       child_home=$(meta_value "$child_meta" home)
       [ -n "$child_home" ] || child_home=$child_wt
       if [ "$child_slot_returned" = 1 ] && [ -n "$child_home" ]; then
-        teardown_cleanup_returned_slot "$child_home" "$child_id" "$child_home" || return 1
+        teardown_cleanup_returned_slot "$child_home" "$child_id" "$home" || return 1
       elif [ -n "$child_home" ] && [ -d "$child_home" ]; then
         cleanup_firstmate_home_children "$child_home" || return 1
         # Nested homes belong to their immediate parent home's state and stamp
@@ -1499,13 +1522,21 @@ TOP_SLOT_RETAIN_VERDICT=
 TOP_SLOT_ENDPOINT_STATE=closed
 TOP_SLOT_LOCK_HELD=0
 TOP_SLOT_LOCK_PATH=
+HERDR_PRESENTATION_LOCK_HELD=0
+HERDR_PRESENTATION_LOCK_PATH=
 teardown_release_top_slot_lock() {
   if [ "$TOP_SLOT_LOCK_HELD" = 1 ]; then
     fm_slot_lock_release "$TOP_SLOT_LOCK_PATH" || return 1
     TOP_SLOT_LOCK_HELD=0
   fi
 }
-trap 'teardown_release_top_slot_lock || true; teardown_release_home_child_lock || true' EXIT
+trap 'teardown_release_top_slot_lock || true; teardown_release_home_child_lock || true; teardown_release_herdr_presentation_lock || true' EXIT
+if [ "$TOP_SLOT_RETURNED" != 1 ] && [ "$BACKEND" = herdr ]; then
+  teardown_acquire_herdr_presentation_lock "$T" || {
+    echo "REFUSED: could not acquire the Herdr presentation lock for $ID; preserving task state and worktree" >&2
+    exit 1
+  }
+fi
 if [ "$KIND" != secondmate ]; then
   if [ "$TOP_SLOT_RETURNED" = 1 ]; then
     if fm_slot_stamp_path "$WT" >/dev/null 2>&1; then
@@ -1687,6 +1718,10 @@ if [ -n "$TOP_SLOT_RETAIN_VERDICT" ]; then
 fi
 teardown_release_top_slot_lock || {
   echo "error: could not release the ownership lock for $ID" >&2
+  exit 1
+}
+teardown_release_herdr_presentation_lock || {
+  echo "error: could not release the Herdr presentation lock for $ID" >&2
   exit 1
 }
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then

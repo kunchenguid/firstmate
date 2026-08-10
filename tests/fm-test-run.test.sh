@@ -19,7 +19,7 @@ test_list_all_exact_suite_coverage() {
   local listed expected missing extra f
   listed=$("$RUNNER" --list --all | LC_ALL=C sort)
   expected=$(
-    for f in "$ROOT"/tests/*.test.sh; do
+    for f in "$ROOT"/tests/*.test.sh "$ROOT"/tests/*.test.py; do
       [ -f "$f" ] || continue
       printf 'tests/%s\n' "$(basename "$f")"
     done | LC_ALL=C sort
@@ -33,7 +33,7 @@ test_list_all_exact_suite_coverage() {
   [ "$(printf '%s\n' "$listed" | uniq | wc -l | tr -d ' ')" = \
     "$(printf '%s\n' "$listed" | wc -l | tr -d ' ')" ] \
     || fail "--list --all must not duplicate scripts"
-  pass "exact suite coverage: --all lists every tests/*.test.sh once"
+  pass "exact suite coverage: --all lists every behavior test once"
 }
 
 test_family_selection() {
@@ -45,7 +45,7 @@ test_family_selection() {
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     case "$line" in
-      tests/*.test.sh) ;;
+      tests/*.test.sh|tests/*.test.py) ;;
       *) fail "family selection produced non-test path: $line" ;;
     esac
   done <<<"$listed"
@@ -391,6 +391,8 @@ test_exclude_family() {
     || fail "family real-herdr-gated must list smoke test"
   printf '%s\n' "$listed" | grep -Fq 'tests/fm-send-secondmate-marker-herdr-e2e.test.sh' \
     || fail "family real-herdr-gated must include credential-free marker/send coverage"
+  printf '%s\n' "$listed" | grep -Fq 'tests/fm-backend-herdr-eventwait.test.py' \
+    || fail "family real-herdr-gated must include Python eventwait coverage"
   listed=$("$RUNNER" --list --all --exclude-family live-harness-optin)
   printf '%s\n' "$listed" | grep -Fq 'tests/fm-send-secondmate-marker-herdr-e2e.test.sh' \
     || fail "credential-free marker/send coverage must not remain live-harness opt-in"
@@ -404,21 +406,42 @@ test_ci_and_docs_call_the_owner() {
   CI_JSON="$ci_json" python3 - <<'PY'
 import json
 import os
+import shlex
 
 ci = json.loads(os.environ["CI_JSON"])
-def runs(job):
-    return [step.get("run", "") for step in ci["jobs"][job].get("steps", [])]
-assert any("bin/fm-lint.sh" in run for run in runs("lint"))
-portable = "\n".join(runs("tests"))
-assert "bin/fm-test-run.sh --all" in portable
-assert "--exclude-family real-herdr-gated" in portable
+def command_args(job, name):
+    found = []
+    for step in ci["jobs"][job].get("steps", []):
+        run = step.get("run", "").replace("\\\n", " ")
+        for line in run.splitlines():
+            try:
+                tokens = shlex.split(line, comments=True)
+            except ValueError:
+                continue
+            for index, token in enumerate(tokens):
+                if token == name or token.endswith("/" + name):
+                    found.append(tokens[index:])
+    return found
+
+assert command_args("lint", "fm-lint.sh")
+portable_runner = command_args("tests", "fm-test-run.sh")
+assert any(
+    "--all" in args
+    and "--exclude-family" in args
+    and args[args.index("--exclude-family") + 1] == "real-herdr-gated"
+    for args in portable_runner
+)
 assert ci["jobs"]["tests"]["timeout-minutes"] == 25
-herdr = "\n".join(runs("tests-herdr"))
-assert "bin/fm-test-run.sh --family real-herdr-gated" in herdr
-assert "--fail-on-any-gate-skip" in herdr
-assert "bin/fm-install-herdr.sh" in herdr
-assert "bin/fm-install-treehouse.sh" in herdr
-assert "bin/fm-herdr-ci-cleanup.sh" in herdr
+herdr_runner = command_args("tests-herdr", "fm-test-run.sh")
+assert any(
+    "--family" in args
+    and args[args.index("--family") + 1] == "real-herdr-gated"
+    and "--fail-on-any-gate-skip" in args
+    for args in herdr_runner
+)
+assert command_args("tests-herdr", "fm-install-herdr.sh")
+assert command_args("tests-herdr", "fm-install-treehouse.sh")
+assert command_args("tests-herdr", "fm-herdr-ci-cleanup.sh")
 assert all(job.get("continue-on-error") is not True for job in ci["jobs"].values())
 assert all("max-attempts" not in job.get("strategy", {}) for job in ci["jobs"].values())
 assert all(
