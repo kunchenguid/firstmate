@@ -124,6 +124,26 @@ test_agent_glyph_continuation_retries_swallowed_enter() {
   pass "fm_tmux_submit_enter_core: agent-glyph continuation retains swallowed-Enter retries"
 }
 
+test_placeholder_like_bare_input_retries_swallowed_enter() {
+  local dir fakebin composer sent vfile
+  dir="$TMP_ROOT/placeholder-like-swallow"
+  fakebin=$(make_submit_mock "$dir")
+  composer="$dir/composer"
+  sent="$dir/sent.log"
+  vfile="$dir/verdict"
+  printf 'transcript\n❯ Type a message...\n' > "$composer"
+  : > "$sent"
+  touch "$dir/.swallow"
+  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_SENT="$sent" \
+    FM_FAKE_SWALLOW="$dir/.swallow" FM_FAKE_PERSIST_SWALLOW=1 FM_FAKE_PANE_BUSY=0 \
+    fm_tmux_submit_enter_core "win" 3 0.05 > "$vfile" 2>/dev/null
+  [ "$(cat "$vfile")" = pending ] \
+    || fail "placeholder-like bare input must remain pending after swallowed Enter, got '$(cat "$vfile")'"
+  [ "$(grep -c '^Enter$' "$sent" 2>/dev/null || true)" -eq 3 ] \
+    || fail "placeholder-like bare input should consume the Enter retry budget"
+  pass "fm_tmux_submit_enter_core: placeholder-like bare input retains swallowed-Enter retries"
+}
+
 test_busy_pane_composer_clears_first_try() {
   local dir fakebin composer sent vfile
   dir="$TMP_ROOT/busy-clear"
@@ -310,6 +330,7 @@ test_claude_busy_signature_uses_real_capture_shapes() {
 test_busy_pane_pending_returns_empty
 test_idle_pane_pending_returns_pending
 test_agent_glyph_continuation_retries_swallowed_enter
+test_placeholder_like_bare_input_retries_swallowed_enter
 test_busy_pane_composer_clears_first_try
 test_idle_pane_composer_clears_first_try
 test_busy_pane_unknown_stays_unknown

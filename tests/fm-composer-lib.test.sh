@@ -98,23 +98,22 @@ test_empty_content_is_empty() {
 
 test_idle_placeholder_is_empty() {
   local idle='^Type a message\.\.\.$' out
-  # Placeholder with no prompt glyph (grok's bordered empty composer).
-  out=$(classify 1 'Type a message...' "$idle")
+  out=$(classify 1 'Type a message...' "$idle" sensitive 'Type a message...' 1 1)
   [ "$out" = empty ] || fail "the grok idle placeholder should read empty, got '$out'"
-  # Placeholder after an agent glyph (post-strip match).
-  out=$(classify 0 '❯ Type a message...' "$idle")
-  [ "$out" = empty ] || fail "the idle placeholder after a glyph should read empty, got '$out'"
-  # Without the idle regex it is just text -> pending.
+  out=$(classify 0 '❯ Type a message...' "$idle" sensitive '❯ Type a message...' 0 1)
+  [ "$out" = pending ] || fail "placeholder text on a styled bare input row must be pending, got '$out'"
+  out=$(classify 0 '❯ Type a message...' "$idle" sensitive '❯ Type a message...' 0 0)
+  [ "$out" = unknown ] || fail "placeholder text on a plain bare input row must be unknown, got '$out'"
   out=$(classify 1 'Type a message...')
   [ "$out" = pending ] || fail "without an idle regex the placeholder text is pending, got '$out'"
-  pass "fm_composer_classify_content: a known idle placeholder reads empty, before and after glyph stripping"
+  pass "fm_composer_classify_content: idle matching is limited to proven placeholder positions"
 }
 
 test_idle_placeholder_case_mode_is_explicit() {
   local idle='^Type a message\.\.\.$' out
-  out=$(classify 1 'type a message...' "$idle")
+  out=$(classify 1 'type a message...' "$idle" sensitive 'type a message...' 1 1)
   [ "$out" = pending ] || fail "a case-variant idle placeholder should remain pending by default, got '$out'"
-  out=$(classify 1 'type a message...' "$idle" insensitive)
+  out=$(classify 1 'type a message...' "$idle" insensitive 'type a message...' 1 1)
   [ "$out" = empty ] || fail "an explicitly insensitive idle placeholder should read empty, got '$out'"
   pass "fm_composer_classify_content: idle matching preserves the caller's case mode"
 }
@@ -273,6 +272,9 @@ test_matrix_opencode_leftbar_signals() {
   typed=$'┃\n┃  refactor the parser please\n┃\n┃  Build · GPT-5.5 Fast OpenAI · high\n╹▀▀▀▀'
   assert_screen "opencode typed on tmux" pending "$CAPS_TMUX" "$typed" 1
   assert_screen "opencode typed on plain backends" unknown "$CAPS_PLAIN" "$typed"
+  typed=$'┃  Ask anything... please investigate\n┃\n┃  Build · GPT-5.5 Fast OpenAI · high\n╹▀▀▀▀'
+  assert_screen "opencode placeholder-like input on tmux" pending "$CAPS_TMUX" "$typed" 0
+  assert_screen "opencode placeholder-like input on plain backends" unknown "$CAPS_PLAIN" "$typed"
   typed=$'┃  refactor the parser please\n┃\n┃  Build · GPT-5.5 Fast OpenAI · high'
   assert_screen "opencode multiline draft above blank cursor row" pending "$CAPS_TMUX" "$typed" 1
   pass "matrix: opencode's left-bar composer reads empty everywhere and scans the full active run"
@@ -418,14 +420,14 @@ test_cursorless_container_rejects_contiguous_lower_activity() {
   assert_screen "stale box above activity on zellij" unknown "$CAPS_STYLED_NOID" "$box"
   assert_screen "stale box above activity on cmux/orca" unknown "$CAPS_PLAIN" "$box"
 
-  leftbar=$'┃  Ask anything...\n┃\n┃  Build · GPT-5.5 Fast OpenAI · high\n╹▀▀▀▀▀▀▀▀\nWorking on request...'
+  leftbar=$'┃\n┃  Ask anything...\n┃\n┃  Build · GPT-5.5 Fast OpenAI · high\n╹▀▀▀▀▀▀▀▀\nWorking on request...'
   assert_screen "stale left-bar above activity on herdr" unknown "$CAPS_STYLED" "$leftbar"
   assert_screen "stale left-bar above activity on zellij" unknown "$CAPS_STYLED_NOID" "$leftbar"
   assert_screen "stale left-bar above activity on cmux/orca" unknown "$CAPS_PLAIN" "$leftbar"
 
   grok=$'╭────────────────────────╮\n│ ❯                      │\n╰──────── Grok 4.5 ──────╯\n\nGrok status'
   kimi=$'╭────────────────────────╮\n│ >                      │\n╰────────────────────────╯\n\nKimi status'
-  opencode=$'┃  Ask anything...\n┃\n┃  Build · GPT-5.5 Fast OpenAI · high\n╹▀▀▀▀▀▀▀▀\n\nOpenCode status'
+  opencode=$'┃\n┃  Ask anything...\n┃\n┃  Build · GPT-5.5 Fast OpenAI · high\n╹▀▀▀▀▀▀▀▀\n\nOpenCode status'
   assert_screen "blank-separated grok footer" empty "$CAPS_STYLED_NOID" "$grok"
   assert_screen "blank-separated kimi footer" empty "$CAPS_PLAIN" "$kimi"
   assert_screen "left-bar floor and blank-separated footer" empty "$CAPS_STYLED_NOID" "$opencode"
@@ -483,14 +485,18 @@ test_selected_content_is_composer_scoped_and_wrap_normalized() {
   out=$(fm_composer_extract_selected_content "$CAPS_STYLED_NOID" "$screen")
   [ "$out" = 'hello captain' ] \
     || fail "left-bar extraction should join user rows without footer furniture, got '$out'"
+  screen=$'╭────────────────────╮\n│ ❯ '"${ESC}[2mType a message...${ESC}[0m"$'│\n╰────────────────────╯'
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED_NOID" "$screen")
+  [ -z "$out" ] \
+    || fail "ghost agent-prompt placeholders should be excluded from extracted user content, got '$out'"
+  screen=$'╭────────────────────╮\n│ > '"${ESC}[2mType a message...${ESC}[0m"$'│\n╰────────────────────╯'
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED_NOID" "$screen")
+  [ -z "$out" ] \
+    || fail "ghost shell-prompt placeholders should be excluded from boxed user content, got '$out'"
   screen=$'╭────────────────────╮\n│ ❯ Type a message...│\n╰────────────────────╯'
   out=$(fm_composer_extract_selected_content "$CAPS_STYLED_NOID" "$screen")
-  [ -z "$out" ] \
-    || fail "agent-prompt idle placeholders should be excluded from extracted user content, got '$out'"
-  screen=$'╭────────────────────╮\n│ > Type a message...│\n╰────────────────────╯'
-  out=$(fm_composer_extract_selected_content "$CAPS_STYLED_NOID" "$screen")
-  [ -z "$out" ] \
-    || fail "shell-prompt idle placeholders should be excluded from boxed user content, got '$out'"
+  [ "$out" = 'Type a message...' ] \
+    || fail "surviving placeholder-like input should remain extracted user content, got '$out'"
   screen=$'❯ a legitimately long steer that\nwraps across the next bare row\n\ntranscript below the break'
   out=$(fm_composer_extract_selected_content "$CAPS_STYLED_NOID" "$screen")
   [ "$out" = 'a legitimately long steer that wraps across the next bare row' ] \

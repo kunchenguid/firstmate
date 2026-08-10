@@ -398,8 +398,9 @@ fm_composer_idle_matches() {
 # Content and plain_content are normalized and re-trimmed on entry, so the
 # verdict never depends on which whitespace alphabet the calling adapter
 # trimmed with.
-fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [plain_content]
+fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [plain_content] [placeholder-position] [styled]
   local bordered=$1 idle_re=${3:-} idle_case=${4:-sensitive} content plain_content glyph=''
+  local placeholder_position=${6:-0} styled=${7:-1} idle_collision=0
   content=$2
   fm_composer_normalize_trim_var content
   plain_content=${5:-$2}
@@ -410,36 +411,29 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
     fi
     printf 'unknown'; return 0
   fi
-  # A bare prompt glyph on its own row.
-  # Agent prompt glyph: a genuine empty agent composer, bordered or bare.
   if _fm_composer_is_prompt_glyph "$content" "$FM_COMPOSER_AGENT_PROMPT_GLYPHS"; then
     printf 'empty'; return 0
   fi
-  # Shell prompt glyph: empty ONLY inside a composer container (the harness's
-  # own prompt). Bare, it is a dead-shell prompt - never a safe injection
-  # target.
   if _fm_composer_is_prompt_glyph "$content" "$FM_COMPOSER_SHELL_PROMPT_GLYPHS"; then
     if [ "$bordered" = 1 ]; then printf 'empty'; else printf 'unknown'; fi
     return 0
   fi
-  # Nothing on the row = empty composer. The caller proved the container.
   [ -n "$content" ] || { printf 'empty'; return 0; }
-  # Known idle placeholder (matched before a leading glyph is stripped).
-  if fm_composer_idle_matches "$content" "$idle_re" "$idle_case"; then
-    printf 'empty'; return 0
-  fi
-  # Strip a leading prompt glyph byte-exactly, then re-judge the remainder.
+  fm_composer_idle_matches "$content" "$idle_re" "$idle_case" && idle_collision=1
   if fm_composer_leading_prompt_glyph_var glyph "$content"; then
     content=${content#*"$glyph"}
   fi
   fm_composer_normalize_trim_var content
   [ -n "$content" ] || { printf 'empty'; return 0; }
-  # Known idle placeholder (matched again after the leading glyph was stripped,
-  # e.g. "❯ Type a message...").
-  if fm_composer_idle_matches "$content" "$idle_re" "$idle_case"; then
-    printf 'empty'; return 0
+  fm_composer_idle_matches "$content" "$idle_re" "$idle_case" && idle_collision=1
+  if [ "$idle_collision" = 1 ]; then
+    if [ "$placeholder_position" = 1 ] && [ -z "$glyph" ]; then
+      printf 'empty'; return 0
+    fi
+    if [ "$styled" != 1 ]; then
+      printf 'unknown'; return 0
+    fi
   fi
-  # Real, unsubmitted content remains.
   printf 'pending'; return 0
 }
 
@@ -787,7 +781,7 @@ _fm_composer_classify_rows() {  # <screen> <styled> <ambiguous> <first-row> <las
     content=$(_fm_composer_row_content "$raw" "$styled")
     plain=$(_fm_composer_row_content "$raw" 0)
     state=$(fm_composer_classify_content 1 "$content" \
-      "${FM_COMPOSER_IDLE_RE:-$FM_COMPOSER_IDLE_RE_DEFAULT}" insensitive "$plain")
+      "${FM_COMPOSER_IDLE_RE:-$FM_COMPOSER_IDLE_RE_DEFAULT}" insensitive "$plain" 1 "$styled")
     case "$state" in
       pending)
         if [ "$ambiguous" = 1 ]; then printf 'pending-unproven'; else printf 'pending'; fi
@@ -814,7 +808,7 @@ _fm_composer_classify_bare_row() {  # <screen> <styled> <row>
   content=$(_fm_composer_row_content "$raw" "$styled")
   plain=$(_fm_composer_row_content "$raw" 0)
   state=$(fm_composer_classify_content 0 "$content" \
-    "${FM_COMPOSER_IDLE_RE:-$FM_COMPOSER_IDLE_RE_DEFAULT}" insensitive "$plain")
+    "${FM_COMPOSER_IDLE_RE:-$FM_COMPOSER_IDLE_RE_DEFAULT}" insensitive "$plain" 0 "$styled")
   if [ "$styled" != 1 ] && [ "$state" = pending ]; then
     printf 'unknown'
     return 0
@@ -873,7 +867,7 @@ _fm_composer_classify_bare_wrap() {  # <screen> <styled> <glyph-row> <cursor-row
 # can prove it real, unknown otherwise.
 _fm_composer_classify_leftbar() {  # <screen> <styled> <first-row> <last-row>
   local screen=$1 styled=$2 first=$3 last=$4
-  local row raw content pending_seen=0 footer_re
+  local row raw content pending_seen=0 footer_re leading_blank=1 placeholder_position=0
   footer_re=${FM_COMPOSER_LEFTBAR_FOOTER_RE:-$FM_COMPOSER_LEFTBAR_FOOTER_RE_DEFAULT}
   row=$first
   while [ "$row" -le "$last" ]; do
@@ -884,7 +878,14 @@ _fm_composer_classify_leftbar() {  # <screen> <styled> <first-row> <last-row>
     esac
     fm_composer_normalize_trim_var content
     if [ -z "$content" ]; then row=$((row + 1)); continue; fi
-    if fm_composer_idle_matches "$content" "${FM_COMPOSER_IDLE_RE:-$FM_COMPOSER_IDLE_RE_DEFAULT}" insensitive; then
+    if [ "$leading_blank" = 1 ] && [ "$row" -gt "$first" ]; then
+      placeholder_position=1
+    else
+      placeholder_position=0
+    fi
+    leading_blank=0
+    if [ "$placeholder_position" = 1 ] \
+       && fm_composer_idle_matches "$content" "${FM_COMPOSER_IDLE_RE:-$FM_COMPOSER_IDLE_RE_DEFAULT}" insensitive; then
       row=$((row + 1)); continue
     fi
     if [ "$row" -eq "$last" ] \
@@ -996,6 +997,7 @@ _fm_composer_select_cursorless() {
 
 fm_composer_extract_selected_content() {  # <caps> <screen>
   local caps=$1 screen=$2 styled=0 kv plain row raw content glyph joined= footer_re prompt_row=-1
+  local had_prompt=0 leading_blank=1 placeholder_position=0
   footer_re=${FM_COMPOSER_LEFTBAR_FOOTER_RE:-$FM_COMPOSER_LEFTBAR_FOOTER_RE_DEFAULT}
   while IFS= read -r kv; do
     [ "$kv" = styled=1 ] && styled=1
@@ -1009,26 +1011,44 @@ EOF
   while [ "$row" -le "$FM_COMPOSER_SELECTED_LAST" ]; do
     raw=$(_fm_composer_screen_row "$row" "$screen")
     content=$(_fm_composer_row_content "$raw" "$styled")
+    had_prompt=0
+    placeholder_position=0
     case "$FM_COMPOSER_SELECTED_KIND" in
       bare)
         if [ "$row" -eq "$FM_COMPOSER_SELECTED_FIRST" ] \
            && fm_composer_leading_agent_glyph_var glyph "$content"; then
+          had_prompt=1
           content=${content#*"$glyph"}
         fi
         ;;
-      leftbar) case "$content" in '┃'*) content=${content#┃} ;; esac ;;
+      leftbar)
+        case "$content" in '┃'*) content=${content#┃} ;; esac
+        fm_composer_normalize_trim_var content
+        if [ -z "$content" ]; then
+          :
+        elif [ "$leading_blank" = 1 ] && [ "$row" -gt "$FM_COMPOSER_SELECTED_FIRST" ]; then
+          placeholder_position=1
+          leading_blank=0
+        else
+          leading_blank=0
+        fi
+        ;;
       box)
         if [ "$prompt_row" -lt 0 ] \
            && fm_composer_leading_prompt_glyph_var glyph "$content"; then
+          had_prompt=1
           prompt_row=$row
           content=${content#*"$glyph"}
+        elif [ "$prompt_row" -lt 0 ]; then
+          placeholder_position=1
         fi
         ;;
     esac
     fm_composer_normalize_spaces_var content
     fm_composer_normalize_trim_var content
     if [ -z "$content" ] \
-       || fm_composer_idle_matches "$content" "${FM_COMPOSER_IDLE_RE:-$FM_COMPOSER_IDLE_RE_DEFAULT}" insensitive \
+       || { [ "$placeholder_position" = 1 ] && [ "$had_prompt" = 0 ] \
+            && fm_composer_idle_matches "$content" "${FM_COMPOSER_IDLE_RE:-$FM_COMPOSER_IDLE_RE_DEFAULT}" insensitive; } \
        || { [ "$FM_COMPOSER_SELECTED_KIND" = leftbar ] \
             && [ "$row" -eq "$FM_COMPOSER_SELECTED_LAST" ] \
             && fm_composer_idle_matches "$content" "$footer_re" sensitive; }; then
