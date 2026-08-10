@@ -372,22 +372,40 @@ print_watch_output() {
   [ -s "$out" ] && cat "$out"
 }
 
-establish_handling_successor() {
+handling_successor_generation() {
   [ -n "${FM_WATCH_PREDECESSOR_ARM_PID:-}" ] || return 0
   fm_recovery_marker_snapshot "$STATE/.watcher-down" || return 1
   case "$FM_RECOVERY_MARKER_TOKEN" in
-    pending:downtime:*) fm_recovery_marker_begin_handling "$STATE/.watcher-down" ;;
-    pending:handling:*|acked:*|'') return 0 ;;
+    pending:downtime:*|pending:handling:*) printf '%s' "${FM_RECOVERY_MARKER_TOKEN##*:}" ;;
+    acked:*|'') ;;
     *) return 1 ;;
   esac
 }
 
 mode=arm
+handling_generation=
+handling_watcher_pid=
 case "${1:-}" in
   ''|arm|--arm) mode=arm ;;
   --restart) mode=restart ;;
-  *) echo "usage: $(basename "$0") [--restart]" >&2; exit 2 ;;
+  --handling-delivered)
+    mode=handling-delivered
+    handling_generation=${2:-}
+    [ "${3:-}" = --watcher-pid ] || { echo "watcher: invalid handling delivery confirmation" >&2; exit 2; }
+    handling_watcher_pid=${4:-}
+    case "$handling_generation" in ''|*[!A-Za-z0-9._-]*) echo "watcher: invalid recovery generation" >&2; exit 2 ;; esac
+    case "$handling_watcher_pid" in ''|*[!0-9]*) echo "watcher: invalid successor watcher pid" >&2; exit 2 ;; esac
+    [ "$#" -eq 4 ] || { echo "watcher: unexpected handling delivery arguments" >&2; exit 2; }
+    ;;
+  *) echo "usage: $(basename "$0") [--restart | --handling-delivered GENERATION --watcher-pid PID]" >&2; exit 2 ;;
 esac
+
+if [ "$mode" = handling-delivered ]; then
+  fm_pid_alive "$handling_watcher_pid" \
+    && fm_watcher_lock_matches_pid "$STATE" "$WATCH" "$handling_watcher_pid" "$FM_HOME" \
+    && fm_recovery_marker_begin_handling "$STATE/.watcher-down" "$handling_generation"
+  exit $?
+fi
 
 if [ "$mode" = restart ]; then
   # Home-scoped stop: only the watcher pid recorded in THIS home's lock.
@@ -532,15 +550,19 @@ while :; do
   if healthy_watcher; then
     if [ "$HEALTHY_PID" = "$child" ]; then
       cycle_refresh_lock_before
-      if ! establish_handling_successor; then
+      if ! handling_generation=$(handling_successor_generation); then
         cleanup_child
         wait "$child" 2>/dev/null || true
         cycle_log_append 1 none handling-handoff-failed none
-        echo "watcher: FAILED - established successor could not enter handling state"
+        echo "watcher: FAILED - established successor could not inspect handling state"
         exit 1
       fi
       cycle_mark_predecessor_successor "started:$child"
-      echo "watcher: started pid=$child (beacon fresh)"
+      if [ -n "$handling_generation" ]; then
+        echo "watcher: started pid=$child (beacon fresh) recovery-generation=$handling_generation"
+      else
+        echo "watcher: started pid=$child (beacon fresh)"
+      fi
       wait "$child"
       rc=$?
       owned_child_finished "$rc"

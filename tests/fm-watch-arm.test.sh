@@ -429,7 +429,7 @@ test_delivery_gap_wake_is_recovered_once() {
 }
 
 test_interrupted_handling_is_redrained_on_rearm() {
-  local dir home state fakebin first_arm recovery_arm generation_before sequence generation
+  local dir home state fakebin first_arm recovery_arm generation_before sequence generation handling_watcher_pid
   dir=$(make_case interrupted-handling-redrain)
   home="$dir/home"
   state="$dir/state"
@@ -470,8 +470,14 @@ test_interrupted_handling_is_redrained_on_rearm() {
   start_rearm_arm "$home" "$state" "$fakebin" "$dir/handling-successor-arm.out" "$recovery_arm"
   is_live_non_zombie "$ARM_PID" \
     || fail "expected handling successor looped on the pending durable wake"
+  [ "$(cat "$state/.watcher-down" 2>/dev/null || true)" = "pending:downtime:$generation_before" ] \
+    || fail "successor launch marked recovery handled before prompt delivery"
+  handling_watcher_pid=$(sed -n 's/^watcher: started pid=\([0-9][0-9]*\).* recovery-generation=.*$/\1/p' "$dir/handling-successor-arm.out")
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$WATCH_ARM" --handling-delivered "$generation_before" \
+    --watcher-pid "$handling_watcher_pid" \
+    || fail "confirmed prompt delivery did not begin handling"
   [ "$(cat "$state/.watcher-down" 2>/dev/null || true)" = "pending:handling:$generation_before" ] \
-    || fail "established handling successor did not transition its recovery generation"
+    || fail "confirmed prompt delivery did not transition its recovery generation"
   ! grep -F 'check: rearm-resurface' "$dir/handling-successor-arm.out" >/dev/null \
     || fail "expected handling successor emitted a recursive recovery wake"
   FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/interrupted-drain.out" \
@@ -589,6 +595,32 @@ test_restart_preserves_recovery_across_reused_pid_lock() {
   pass "watch-arm: restart publishes recovery before clearing a reused-pid watcher lock"
 }
 
+test_markerless_legacy_queue_is_recovered_on_arm() {
+  local dir home state fakebin row
+  dir=$(make_case markerless-legacy-arm)
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  mkdir -p "$home/data"
+  row=$(printf '1700000000\t7\tcheck\tlegacy-process-event\tcheck: legacy process-event')
+  printf '%s\n' "$row" > "$state/.wake-queue"
+
+  start_rearm_arm "$home" "$state" "$fakebin" "$dir/arm.out"
+  wait_for_exit "$ARM_PID" 80 || fail "markerless legacy queue was stranded at re-arm"
+  grep -F 'check: rearm-resurface' "$dir/arm.out" >/dev/null \
+    || fail "markerless legacy queue did not trigger recovery"
+  case "$(cat "$state/.watcher-down" 2>/dev/null || true)" in
+    pending:downtime:*) ;;
+    *) fail "markerless legacy queue was not adopted into downtime recovery" ;;
+  esac
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/drain.out" \
+    || fail "adopted legacy queue could not be drained"
+  grep -F "$row" "$dir/drain.out" >/dev/null \
+    || fail "adopted legacy wake was not presented"
+  ack_wakes "$state" || fail "adopted legacy wake could not be acknowledged"
+  pass "watch-arm: markerless legacy queues are adopted and recovered"
+}
+
 test_downtime_marker_does_not_follow_symlink() {
   local dir home state fakebin armout watcher_pid sentinel
   dir=$(make_case downtime-marker-symlink)
@@ -624,4 +656,5 @@ test_interrupted_handling_is_redrained_on_rearm
 test_malformed_marker_is_quarantined_once
 test_recovery_consumption_serializes_queue_publication
 test_restart_preserves_recovery_across_reused_pid_lock
+test_markerless_legacy_queue_is_recovered_on_arm
 test_downtime_marker_does_not_follow_symlink
