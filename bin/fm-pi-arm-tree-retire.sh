@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 set -u
 
-pid=${1:-}
+native_pid=${1:-}
 token=${2:-}
 state=${3:-}
 watch_path=${4:-}
 home=${5:-}
-case "$pid" in ''|*[!0-9]*|0|1) exit 2 ;; esac
+case "$native_pid" in ''|*[!0-9]*|0|1) exit 2 ;; esac
 case "$token" in ''|*[!0-9a-f]*) exit 2 ;; esac
 [ -n "$state" ] && [ -n "$watch_path" ] && [ -n "$home" ] || exit 2
 
@@ -18,9 +18,30 @@ export FM_HOME FM_STATE_OVERRIDE
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 
 proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc}
+wrapper_pid_file="$state/.pi-arm-wrapper-$token.pid"
+FM_PI_ARM_WRAPPER_PID_FILE=$wrapper_pid_file
+export FM_PI_ARM_WRAPPER_PID_FILE
+
+read_single_pid() {
+  awk '
+    NR == 1 && /^[0-9]+$/ && $0 != "0" && $0 != "1" { pid = $0; next }
+    { invalid = 1 }
+    END {
+      if (!invalid && pid != "") print pid
+      else exit 1
+    }
+  ' "$1" 2>/dev/null
+}
+
+msys_pid=$(read_single_pid "$wrapper_pid_file") || exit 3
+mapped_native_pid=$(read_single_pid "$proc_root/$msys_pid/winpid") || exit 3
+[ "$mapped_native_pid" = "$native_pid" ] || exit 3
 tree_matches() {
-  [ -r "$proc_root/$pid/environ" ] \
-    && tr '\0' '\n' < "$proc_root/$pid/environ" 2>/dev/null \
+  local current_native_pid
+  current_native_pid=$(read_single_pid "$proc_root/$msys_pid/winpid") || return 1
+  [ "$current_native_pid" = "$native_pid" ] \
+    && [ -r "$proc_root/$msys_pid/environ" ] \
+    && tr '\0' '\n' < "$proc_root/$msys_pid/environ" 2>/dev/null \
       | grep -F -x -- "FM_PI_ARM_TREE_TOKEN=$token" >/dev/null 2>&1
 }
 
@@ -42,7 +63,7 @@ watcher_matches() {
 }
 
 taskkill_status=0
-MSYS2_ARG_CONV_EXCL='*' taskkill.exe /PID "$pid" /T /F >/dev/null 2>&1 || taskkill_status=$?
+MSYS2_ARG_CONV_EXCL='*' taskkill.exe /PID "$native_pid" /T /F >/dev/null 2>&1 || taskkill_status=$?
 i=0
 while [ "$i" -lt 20 ]; do
   if ! tree_matches && ! watcher_matches; then

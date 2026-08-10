@@ -251,19 +251,24 @@ EOF
 }
 
 test_pi_afk_windows_handoff_retires_exact_tree() {
-  local repo home plugin fakebin log watcher_file taskkill_log out status
+  local repo home plugin fakebin proc_root log watcher_file taskkill_log out status
   repo="$TMP_ROOT/pi-afk-windows-tree-root"
   home="$TMP_ROOT/pi-afk-windows-tree-home"
   fakebin="$TMP_ROOT/pi-afk-windows-tree-bin"
+  proc_root="$TMP_ROOT/pi-afk-windows-tree-proc"
   log="$TMP_ROOT/pi-afk-windows-tree.log"
   watcher_file="$TMP_ROOT/pi-afk-windows-tree-watcher"
   taskkill_log="$TMP_ROOT/pi-afk-windows-taskkill.log"
-  mkdir -p "$repo/bin" "$home/state" "$home/config" "$fakebin"
+  mkdir -p "$repo/bin" "$home/state" "$home/config" "$fakebin" "$proc_root"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
 . "$(dirname "$0")/fm-wake-lib.sh"
+mkdir -p "$FM_PROC_ROOT_OVERRIDE/$FM_FAKE_MSYS_PID"
+printf '%s\n' "$FM_FAKE_MSYS_PID" > "$FM_PI_ARM_WRAPPER_PID_FILE"
+printf '%s\n' "$$" > "$FM_PROC_ROOT_OVERRIDE/$FM_FAKE_MSYS_PID/winpid"
+printf 'FM_PI_ARM_TREE_TOKEN=%s\000' "$FM_PI_ARM_TREE_TOKEN" > "$FM_PROC_ROOT_OVERRIDE/$FM_FAKE_MSYS_PID/environ"
 sleep 300 &
 watcher=$!
 mkdir -p "$STATE/.watch.lock"
@@ -288,14 +293,17 @@ case "$pid" in ''|*[!0-9]*) exit 2 ;; esac
 watcher=$(cat "${FM_FAKE_WATCHER_FILE:?}")
 kill -TERM "$watcher" 2>/dev/null || true
 kill -TERM "$pid" 2>/dev/null || true
+msys_pid=$(cat "${FM_PI_ARM_WRAPPER_PID_FILE:?}" 2>/dev/null || true)
+rm -f "${FM_PROC_ROOT_OVERRIDE:?}/$msys_pid/winpid" "${FM_PROC_ROOT_OVERRIDE:?}/$msys_pid/environ"
 exit 0
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh" "$fakebin/taskkill.exe"
   out=$(PATH="$fakebin:$PATH" PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" \
-    FM_FAKE_WATCHER_FILE="$watcher_file" FM_FAKE_TASKKILL_LOG="$taskkill_log" FM_PI_AFK_HANDOFF_POLL_MS=5 \
+    FM_FAKE_WATCHER_FILE="$watcher_file" FM_FAKE_TASKKILL_LOG="$taskkill_log" FM_FAKE_MSYS_PID=424242 \
+    FM_PROC_ROOT_OVERRIDE="$proc_root" FM_PI_AFK_HANDOFF_POLL_MS=5 \
     node --input-type=module 2>&1 <<'EOF'
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 Object.defineProperty(process, "platform", { value: "win32" });
@@ -332,6 +340,13 @@ const watcherPid = Number(match[2]);
 const wrapperIdentity = identity(wrapperPid);
 const watcherIdentity = identity(watcherPid);
 if (!wrapperIdentity || !watcherIdentity) throw new Error("arm tree identities were not live before handoff");
+const wrapperPidFiles = readdirSync(state).filter((name) => /^\.pi-arm-wrapper-[0-9a-f]+\.pid$/.test(name));
+if (wrapperPidFiles.length !== 1) throw new Error(`ambiguous wrapper PID publication: ${wrapperPidFiles.join(" | ")}`);
+const wrapperPidFile = `${state}/${wrapperPidFiles[0]}`;
+const msysPid = Number(readFileSync(wrapperPidFile, "utf8").trim());
+if (msysPid !== Number(process.env.FM_FAKE_MSYS_PID) || msysPid === wrapperPid) {
+  throw new Error(`wrapper did not publish its distinct MSYS PID: native=${wrapperPid} msys=${msysPid}`);
+}
 const sibling = spawn("sleep", ["300"], { stdio: "ignore" });
 let siblingIdentity = "";
 await waitFor(() => {
@@ -342,6 +357,7 @@ try {
   writeFileSync(`${state}/.afk`, "away\n");
   await waitFor(() => existsSync(process.env.FM_FAKE_TASKKILL_LOG), "Windows tree retirement");
   await waitFor(() => identity(wrapperPid) !== wrapperIdentity && identity(watcherPid) !== watcherIdentity, "retired wrapper and watcher identities");
+  await waitFor(() => !existsSync(wrapperPidFile), "wrapper PID publication cleanup");
   const taskkill = readFileSync(process.env.FM_FAKE_TASKKILL_LOG, "utf8").trim();
   if (taskkill !== `/PID ${wrapperPid} /T /F`) throw new Error(`wrong rooted taskkill: ${taskkill}`);
   if (identity(sibling.pid) !== siblingIdentity) throw new Error("Windows tree retirement changed an unrelated sibling identity");
@@ -357,16 +373,115 @@ EOF
   pass "Pi Windows AFK handoff retires one identity-bounded arm tree"
 }
 
+test_pi_afk_windows_namespace_identity_refusals() {
+  local dir home state fakebin proc_root ready taskkill_log token watch_path wrapper watcher wrapper_expected watcher_expected
+  local msys_pid wrapper_pid_file out status wrapper_current watcher_current
+  dir="$TMP_ROOT/pi-afk-windows-namespace-refusals"
+  home="$dir/home"
+  state="$home/state"
+  fakebin="$dir/bin"
+  proc_root="$dir/proc"
+  ready="$dir/ready"
+  taskkill_log="$dir/taskkill.log"
+  token=0123456789abcdef0123456789abcdef
+  watch_path="$dir/fm-watch.sh"
+  msys_pid=434343
+  wrapper_pid_file="$state/.pi-arm-wrapper-$token.pid"
+  mkdir -p "$state" "$fakebin" "$proc_root/$msys_pid"
+  cat > "$fakebin/taskkill.exe" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_FAKE_TASKKILL_LOG:?}"
+exit 0
+SH
+  chmod +x "$fakebin/taskkill.exe"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_PROC_ROOT_OVERRIDE="$proc_root" FM_PI_ARM_TREE_TOKEN="$token" \
+    FM_READY_FILE="$ready" FM_WATCH_PATH="$watch_path" bash -c '
+      . "$1"
+      sleep 300 &
+      watcher=$!
+      mkdir -p "$STATE/.watch.lock"
+      printf "%s\n" "$watcher" > "$STATE/.watch.lock/pid"
+      printf "%s\n" "$FM_HOME" > "$STATE/.watch.lock/fm-home"
+      printf "%s\n" "$FM_WATCH_PATH" > "$STATE/.watch.lock/watcher-path"
+      fm_pid_identity "$watcher" > "$STATE/.watch.lock/pid-identity"
+      printf "%s\n" "$watcher" > "$FM_READY_FILE"
+      wait "$watcher"
+    ' _ "$ROOT/bin/fm-wake-lib.sh" &
+  wrapper=$!
+  for _ in $(seq 1 300); do [ -s "$ready" ] && break; sleep 0.01; done
+  [ -s "$ready" ] || fail "Windows namespace refusal fixture did not publish its watcher"
+  watcher=$(cat "$ready")
+  wrapper_expected=$(FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_PROC_ROOT_OVERRIDE="$proc_root" \
+    bash -c '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$wrapper") \
+    || fail "Windows namespace refusal fixture did not capture the wrapper identity"
+  watcher_expected=$(cat "$state/.watch.lock/pid-identity")
+
+  set +e
+  out=$(PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_PROC_ROOT_OVERRIDE="$proc_root" FM_FAKE_TASKKILL_LOG="$taskkill_log" \
+    "$ROOT/bin/fm-pi-arm-tree-retire.sh" "$wrapper" "$token" "$state" "$watch_path" "$home" 2>&1)
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "Windows retirement accepted an absent wrapper PID publication"
+
+  printf '%s\n%s\n' "$msys_pid" "$((msys_pid + 1))" > "$wrapper_pid_file"
+  set +e
+  out=$(PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_PROC_ROOT_OVERRIDE="$proc_root" FM_FAKE_TASKKILL_LOG="$taskkill_log" \
+    "$ROOT/bin/fm-pi-arm-tree-retire.sh" "$wrapper" "$token" "$state" "$watch_path" "$home" 2>&1)
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "Windows retirement accepted an ambiguous wrapper PID publication"
+
+  printf '%s\n' "$msys_pid" > "$wrapper_pid_file"
+  set +e
+  out=$(PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_PROC_ROOT_OVERRIDE="$proc_root" FM_FAKE_TASKKILL_LOG="$taskkill_log" \
+    "$ROOT/bin/fm-pi-arm-tree-retire.sh" "$wrapper" "$token" "$state" "$watch_path" "$home" 2>&1)
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "Windows retirement accepted an absent MSYS-to-native PID mapping"
+
+  printf '%s\n' "$((wrapper + 1))" > "$proc_root/$msys_pid/winpid"
+  printf 'FM_PI_ARM_TREE_TOKEN=%s\000' "$token" > "$proc_root/$msys_pid/environ"
+  set +e
+  out=$(PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_PROC_ROOT_OVERRIDE="$proc_root" FM_FAKE_TASKKILL_LOG="$taskkill_log" \
+    "$ROOT/bin/fm-pi-arm-tree-retire.sh" "$wrapper" "$token" "$state" "$watch_path" "$home" 2>&1)
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "Windows retirement accepted a mismatched native PID namespace mapping"
+
+  printf '%s\n' "$wrapper" > "$proc_root/$msys_pid/winpid"
+  printf 'FM_PI_ARM_TREE_TOKEN=reused\000' > "$proc_root/$msys_pid/environ"
+  set +e
+  out=$(PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_PROC_ROOT_OVERRIDE="$proc_root" FM_FAKE_TASKKILL_LOG="$taskkill_log" \
+    "$ROOT/bin/fm-pi-arm-tree-retire.sh" "$wrapper" "$token" "$state" "$watch_path" "$home" 2>&1)
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "Windows retirement accepted a reused MSYS wrapper identity"
+  [ ! -e "$taskkill_log" ] || fail "Windows namespace refusal reached taskkill: $(cat "$taskkill_log")"
+  [ -z "$out" ] || fail "Windows namespace refusal printed output: $out"
+  wrapper_current=$(FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_PROC_ROOT_OVERRIDE="$proc_root" \
+    bash -c '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$wrapper" 2>/dev/null || true)
+  watcher_current=$(FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_PROC_ROOT_OVERRIDE="$proc_root" \
+    bash -c '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$watcher" 2>/dev/null || true)
+  [ "$wrapper_current" = "$wrapper_expected" ] || fail "Windows namespace refusal changed the wrapper identity"
+  [ "$watcher_current" = "$watcher_expected" ] || fail "Windows namespace refusal changed the watcher identity"
+  kill -TERM "$watcher" 2>/dev/null || true
+  wait "$wrapper" 2>/dev/null || true
+  pass "Pi Windows retirement refuses absent, ambiguous, mismatched, and reused PID identities"
+}
+
 test_pi_afk_windows_partial_tree_retirement_fails_closed() {
-  local dir home state fakebin ready token watch_path wrapper watcher expected current out status
+  local dir home state fakebin proc_root ready token watch_path msys_pid wrapper_pid_file wrapper watcher expected current out status
   dir="$TMP_ROOT/pi-afk-windows-partial-tree"
   home="$dir/home"
   state="$home/state"
   fakebin="$dir/bin"
+  proc_root="$dir/proc"
   ready="$dir/ready"
   token=0123456789abcdef0123456789abcdef
   watch_path="$dir/fm-watch.sh"
-  mkdir -p "$state" "$fakebin"
+  msys_pid=444444
+  wrapper_pid_file="$state/.pi-arm-wrapper-$token.pid"
+  mkdir -p "$state" "$fakebin" "$proc_root/$msys_pid"
   cat > "$fakebin/taskkill.exe" <<'SH'
 #!/usr/bin/env bash
 pid=
@@ -376,10 +491,13 @@ while [ "$#" -gt 0 ]; do
 done
 case "$pid" in ''|*[!0-9]*) exit 2 ;; esac
 kill -KILL "$pid" 2>/dev/null || true
+msys_pid=$(cat "${FM_PI_ARM_WRAPPER_PID_FILE:?}" 2>/dev/null || true)
+rm -f "${FM_PROC_ROOT_OVERRIDE:?}/$msys_pid/winpid" "${FM_PROC_ROOT_OVERRIDE:?}/$msys_pid/environ"
 exit 0
 SH
   chmod +x "$fakebin/taskkill.exe"
-  FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_PI_ARM_TREE_TOKEN="$token" FM_READY_FILE="$ready" FM_WATCH_PATH="$watch_path" \
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_PROC_ROOT_OVERRIDE="$proc_root" FM_PI_ARM_TREE_TOKEN="$token" \
+    FM_READY_FILE="$ready" FM_WATCH_PATH="$watch_path" \
     bash -c '
       . "$1"
       sleep 300 &
@@ -400,13 +518,16 @@ SH
   [ -s "$ready" ] || fail "partial Windows retirement fixture did not publish watcher identity"
   watcher=$(head -1 "$ready")
   expected=$(tail -n +2 "$ready")
+  printf '%s\n' "$msys_pid" > "$wrapper_pid_file"
+  printf '%s\n' "$wrapper" > "$proc_root/$msys_pid/winpid"
+  printf 'FM_PI_ARM_TREE_TOKEN=%s\000' "$token" > "$proc_root/$msys_pid/environ"
   set +e
-  out=$(PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" \
+  out=$(PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_PROC_ROOT_OVERRIDE="$proc_root" FM_PI_ARM_WRAPPER_PID_FILE="$wrapper_pid_file" \
     "$ROOT/bin/fm-pi-arm-tree-retire.sh" "$wrapper" "$token" "$state" "$watch_path" "$home" 2>&1)
   status=$?
   set -e
   [ "$status" -ne 0 ] || fail "partial Windows tree kill was accepted despite a surviving watcher identity"
-  current=$(FM_HOME="$home" FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' \
+  current=$(FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_PROC_ROOT_OVERRIDE="$proc_root" bash -c '. "$1"; fm_pid_identity "$2"' \
     _ "$ROOT/bin/fm-wake-lib.sh" "$watcher" 2>/dev/null || true)
   [ "$current" = "$expected" ] || fail "partial Windows fixture did not retain the recorded watcher identity"
   kill -TERM "$watcher" 2>/dev/null || true
@@ -2502,6 +2623,7 @@ EOF
 test_pi_extension_reports_external_healthy_watcher
 test_pi_afk_handoff_yields_and_resumes_exact_cycle
 test_pi_afk_windows_handoff_retires_exact_tree
+test_pi_afk_windows_namespace_identity_refusals
 test_pi_afk_windows_partial_tree_retirement_fails_closed
 test_pi_afk_handoff_is_home_scoped
 test_pi_tool_returns_agent_tool_result

@@ -10,7 +10,7 @@
 // callbacks from a prior generation are no-ops against the active replacement.
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
@@ -159,6 +159,16 @@ function awayModeActive(): boolean {
   return existsSync(`${state}/.afk`);
 }
 
+function clearArmTreePidFile(armChild: ChildProcess): void {
+  if (process.platform !== "win32") return;
+  const token = armTreeTokens.get(armChild);
+  if (!token) return;
+  try {
+    unlinkSync(`${state}/.pi-arm-wrapper-${token}.pid`);
+  } catch {
+  }
+}
+
 function terminateArmTree(armChild: ChildProcess): boolean {
   const pid = armChild.pid;
   if (process.platform === "win32" && pid) {
@@ -259,7 +269,10 @@ function stopGeneration(generation: SessionGeneration): void {
   generation.awayMonitor = null;
   generation.awayResumePending = false;
   generation.awayResumePredecessor = "";
-  if (generation.child) terminateArmTree(generation.child);
+  if (generation.child) {
+    terminateArmTree(generation.child);
+    clearArmTreePidFile(generation.child);
+  }
   generation.child = null;
 }
 
@@ -506,6 +519,9 @@ export default function (pi: ExtensionAPI) {
     }
     const id = ++owner.seq;
     const armTreeToken = randomBytes(24).toString("hex");
+    const armLaunch = process.platform === "win32"
+      ? "wrapper_pid=${BASHPID:-$$}; wrapper_pid_file=${FM_PI_ARM_WRAPPER_PID_FILE:?}; wrapper_pid_tmp=$wrapper_pid_file.$wrapper_pid; printf '%s\\n' \"$wrapper_pid\" > \"$wrapper_pid_tmp\" && mv -f \"$wrapper_pid_tmp\" \"$wrapper_pid_file\" || { rm -f \"$wrapper_pid_tmp\"; exit 125; }; config_dir=\"${FM_CONFIG_OVERRIDE:-$FM_HOME/config}\"; [ -f \"$config_dir/x-mode.env\" ] && . \"$config_dir/x-mode.env\"; exec \"$FM_WATCH_ARM_SCRIPT\" --restart"
+      : "config_dir=\"${FM_CONFIG_OVERRIDE:-$FM_HOME/config}\"; [ -f \"$config_dir/x-mode.env\" ] && . \"$config_dir/x-mode.env\"; exec \"$FM_WATCH_ARM_SCRIPT\" --restart";
     const env = {
       ...process.env,
       FM_HOME: fmHome,
@@ -514,8 +530,9 @@ export default function (pi: ExtensionAPI) {
       FM_WATCH_ARM_SCRIPT: armScript,
       FM_WATCH_PREDECESSOR_ARM_PID: predecessorArmPid,
       FM_PI_ARM_TREE_TOKEN: armTreeToken,
+      ...(process.platform === "win32" ? { FM_PI_ARM_WRAPPER_PID_FILE: `${state}/.pi-arm-wrapper-${armTreeToken}.pid` } : {}),
     };
-    const armChild = spawn("bash", ["-lc", "config_dir=\"${FM_CONFIG_OVERRIDE:-$FM_HOME/config}\"; [ -f \"$config_dir/x-mode.env\" ] && . \"$config_dir/x-mode.env\"; exec \"$FM_WATCH_ARM_SCRIPT\" --restart"], {
+    const armChild = spawn("bash", ["-lc", armLaunch], {
       cwd: fmRoot,
       env,
       detached: process.platform !== "win32",
@@ -564,6 +581,7 @@ export default function (pi: ExtensionAPI) {
     armChild.on("close", (code: number | null, signal: NodeJS.Signals | null) => {
       if (settled) return;
       settled = true;
+      clearArmTreePidFile(armChild);
       resolveClosed();
       settleReadiness(false);
       const yieldedToAway = awayYieldedArms.delete(armChild);
@@ -603,6 +621,7 @@ export default function (pi: ExtensionAPI) {
     armChild.on("error", (error: Error) => {
       if (settled) return;
       settled = true;
+      clearArmTreePidFile(armChild);
       resolveClosed();
       settleReadiness(false);
       releaseChild();
