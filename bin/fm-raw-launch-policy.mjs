@@ -16,18 +16,33 @@ function isOmpWord(word) {
   return Boolean(word && (!word.literal || basename(word.value) === "omp"));
 }
 
+const DISPATCHER_OPTIONS = {
+  nice: { takesArgument: new Set(["n", "adjustment"]) },
+  setsid: { takesArgument: new Set() },
+  time: { takesArgument: new Set(["f", "format", "o", "output"]) },
+};
+
 function dispatcherTarget(position) {
-  if (basename(position.command?.value || "") !== "nice") return null;
+  const options = DISPATCHER_OPTIONS[basename(position.command?.value || "")];
+  if (!options) return null;
   let index = position.index + 1;
   while (position.words[index]) {
     const value = position.words[index].value;
     if (value === "--") return position.words[index + 1] || null;
     if (!value.startsWith("-") || value === "-") return position.words[index];
-    if (value === "-n" || value === "--adjustment") {
-      index += 2;
+    if (value.startsWith("--")) {
+      const equals = value.indexOf("=");
+      const option = value.slice(2, equals === -1 ? undefined : equals);
+      index += equals === -1 && options.takesArgument.has(option) ? 2 : 1;
       continue;
     }
-    index += 1;
+    let takesArgument = false;
+    for (let offset = 1; offset < value.length; offset += 1) {
+      if (!options.takesArgument.has(value[offset])) continue;
+      takesArgument = true;
+      break;
+    }
+    index += takesArgument ? 2 : 1;
   }
   return null;
 }

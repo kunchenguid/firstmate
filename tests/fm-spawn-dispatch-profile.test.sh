@@ -758,6 +758,23 @@ SH
   pass "raw OMP launches remain unverified without semantic busy wiring"
 }
 
+test_raw_omp_dispatch_policy_handles_common_launchers() {
+  local policy=$ROOT/bin/fm-raw-launch-policy.mjs command result
+  for command in \
+    "setsid /tmp/omp --raw-flag" \
+    "time /tmp/omp --raw-flag" \
+    "time -p /tmp/omp --raw-flag" \
+    "time -f %E /tmp/omp --raw-flag"; do
+    result=$(node "$policy" --command "$command")
+    [ "$result" = omp ] || fail "raw OMP dispatcher '$command' was classified as '$result'"
+  done
+  for command in "setsid printf '%s\\n' omp" "time printf '%s\\n' omp"; do
+    result=$(node "$policy" --command "$command")
+    [ "$result" = other ] || fail "non-OMP dispatcher '$command' was classified as '$result'"
+  done
+  pass "raw OMP dispatch policy recognizes launcher targets without matching arguments"
+}
+
 # The raw path is the escape hatch for verifying a new adapter, so it has to keep
 # accepting the shell forms an experimental launcher takes. A command-prefix
 # strip (`env -u OMPCODE cd sub && agent`) would make this pane die at the first
@@ -973,6 +990,7 @@ test_pi_tui_mode_probe_is_safe_for_old_and_new_pi
 test_pi_signed_threads_shared_pi_profile_and_preserves_identity
 test_raw_launch_worker_identity_matches_its_recorded_harness
 test_raw_omp_launch_does_not_arm_unwired_semantic_busy
+test_raw_omp_dispatch_policy_handles_common_launchers
 test_raw_launch_preserves_compound_shell_command_forms
 test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata
 test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity
