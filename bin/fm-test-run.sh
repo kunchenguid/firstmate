@@ -981,6 +981,15 @@ families_for_changed_path() {
     bin/fm-ff-lib.sh|bin/fm-gotmp*|bin/*pretool*)
       printf '%s\n' pure-contract-unit
       ;;
+    commitments/*)
+      # The typed commitment register. Registering an entry is a routine
+      # operation, so this maps the directory rather than leaning on some test
+      # happening to mention each new entry's path: the interpreter's own suite,
+      # plus session start, which relays the open set and is the surface that
+      # must not be able to go quiet while an entry is open.
+      printf '%s\n' "__script__:fm-commitment-register.test.sh"
+      printf '%s\n' session-bootstrap
+      ;;
     .agents/skills/quota-array-dispatch/SKILL.md)
       printf '%s\n' pure-contract-unit
       printf '%s\n' live-harness-optin

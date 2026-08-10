@@ -189,6 +189,10 @@ An absent overlay is silent, because most homes have no private commitments.
 `bin/fm-commitment-register.sh` is the only interpreter, and its header and `--help` own the mechanics.
 Every state it prints is computed from that entry's probe on the spot and is never stored, so an entry retires by itself when its commitment becomes real, and no hand-written status word can satisfy one.
 
+The one thing it writes is `state/commitment-probe-cache/`, and only for the probes pinned into decision files, which are consulted on the open-decision fold's hot path rather than once per session.
+That cache is an accelerator for an answer and never a substitute for one: a stored result carries its observation time into whatever reads it, it is invalidated by any recorded progress on the task it belongs to, and past `FM_COMMITMENT_PROBE_CACHE_TTL` seconds (default 120, `0` to disable) it is not served at all.
+Session start never reaches it, because the open-set relay evaluates no decision probes.
+
 ## Startup memory budget (config/startup-memory-budget)
 
 `config/startup-memory-budget` is the primary-authoritative per-home allowance for the startup prompt-memory surface: `data/captain.md`, `data/captain-shared.md`, and `data/learnings.md` together.

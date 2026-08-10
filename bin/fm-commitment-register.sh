@@ -86,8 +86,42 @@
 # Three-valued results are produced and consumed through bin/fm-verify-lib.sh, so
 # no probe's silence, error, or empty answer can reach a pass terminal.
 #
-# It never mutates. It takes no lock, spawns nothing, writes nothing, and touches
-# no project. bin/fm-bootstrap.sh relays --open at every session start, so session
+# WHY THIS IS NOT bin/fm-decision-surface.sh, said plainly. That script is this
+# fleet's derived-state composer and its typed verdicts are the right shape, and
+# fm-verify-lib.sh's three-valued observation type is used here rather than
+# reinvented. The decision surface still does not fit as the host, for three
+# reasons that are properties of the input rather than preferences:
+#   1. Different input class. The decision surface composes ONE home's live
+#      operational state - tasks, holds, wake ledger - through
+#      bin/fm-fleet-snapshot.sh. This reads TRACKED repository material that ships
+#      to every home and answers about the code itself, and it must answer
+#      identically in a home that has no tasks, no snapshot, and no fleet at all.
+#   2. Different call site and cost budget. The decision surface is invoked by a
+#      human or a composer once; --closes runs inside bin/fm-classify-lib.sh's
+#      open-decision fold, on the wake-drain path, per resolved status line.
+#      Putting that on a composer that loads a fleet snapshot first would make the
+#      fold pay for state it does not read.
+#   3. Different failure obligation. A commitment that cannot be evaluated must
+#      take a fail-closed EXIT STATUS a caller ignoring stdout still stops on. The
+#      decision surface reports; it is not a gate.
+# What the decision surface does own is the fact that this compensation now has an
+# owner at all: its owners ledger carries the unenforced_commitments row pointing
+# here, so the two surfaces are joined rather than parallel.
+#
+# WHAT IT DOES AND DOES NOT TOUCH. It takes no lock and touches no project. It
+# does NOT execute anything from the tracked register, which is the whole reason
+# that register's probes are typed. It DOES execute three things, all of them
+# home-private or repo-local: a decision file's `run:` (see TRUST BOUNDARY above),
+# an entry's declared owner command, and an entry's named test. The only thing it
+# writes is the decision-probe result cache described under Environment below,
+# which no session-start path reaches: bin/fm-bootstrap.sh relays --open, and
+# --open evaluates no decision probes. Because a `run:` executes inside the task
+# worktree, a probe that writes scratch files there leaves that worktree dirty,
+# which bin/fm-teardown.sh's dirty check then refuses on - a `run:` that mutates
+# its worktree is a badly written probe, and the cache bounds how often it runs
+# but cannot make it harmless.
+#
+# bin/fm-bootstrap.sh relays --open at every session start, so session
 # start cannot report a clean or quiet state while a registered commitment is open,
 # and bin/fm-classify-lib.sh's open-decision fold calls --closes so a reported-
 # applied fix cannot close a criterion nothing established.
@@ -135,7 +169,35 @@
 #   FM_HOME                       operational home to read (default: repo root)
 #   FM_COMMITMENT_DIR             read this tracked register instead (tests)
 #   FM_COMMITMENT_HOME_DIR        read this home overlay instead (tests)
-#   FM_COMMITMENT_PROBE_TIMEOUT   seconds bounding one probe (default 10)
+#   FM_COMMITMENT_PROBE_TIMEOUT   seconds bounding one register-entry probe
+#                                 (default 10)
+#   FM_COMMITMENT_DECISION_PROBE_TIMEOUT
+#                                 seconds bounding one decision-file `run:`
+#                                 (default 60). Deliberately larger than the entry
+#                                 bound: the ruling makes cited-control the DEFAULT
+#                                 tier and its `run` is a test invocation, and a
+#                                 bound too small to let the pinned default finish
+#                                 would refuse every such closure forever, which is
+#                                 a park rather than a verdict.
+#   FM_COMMITMENT_PROBE_CACHE_TTL seconds a decision-probe result stays servable
+#                                 (default 120; 0 disables the cache entirely)
+#   FM_COMMITMENT_PROBE_CACHE_DIR where those results live (default
+#                                 $FM_HOME/state/commitment-probe-cache)
+#
+# THE DECISION-PROBE CACHE, and the one rule it may not break. --closes runs on
+# the open-decision fold's hot path, which recomputes from the whole status stream
+# on every wake drain, every fleet snapshot, and every decision-hold read - so an
+# uncached probe re-runs a test for the remaining life of a status file, once per
+# fold, per task. The cache bounds that. It may not buy the cost back with the
+# correctness this register exists to establish, so:
+#   - a served result CARRIES ITS OBSERVATION TIME in its own evidence, so an old
+#     answer can never read as a fresh one;
+#   - it is keyed on a fingerprint of the probe block, the task worktree path, and
+#     the task's status stream, so any recorded progress on the task invalidates
+#     it rather than being answered from before;
+#   - past the freshness bound it is not served at all: the probe re-runs, and if
+#     it cannot re-run the answer is could-not-observe, never the stale verdict.
+# The cache is an accelerator for an answer, never a substitute for one.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -198,21 +260,35 @@ while [ $# -gt 0 ]; do
   shift
 done
 
-command -v jq >/dev/null 2>&1 || {
-  # No jq means no JSON entry can be read at all. That is the register failing,
-  # not an empty register, so it takes the fail-closed exit rather than a quiet 0.
-  case "$MODE" in
-    open) printf 'COMMITMENT: register unreadable - jq is required to read commitment entries\n' ;;
-    closes) printf 'the commitment register could not be read (jq is required), so this resolution is not accepted\n' ;;
-    *) printf 'fm-commitment-register: jq is required to read commitment entries\n' >&2 ;;
-  esac
-  exit "$EXIT_UNOBSERVED"
-}
+# jq reads JSON ENTRIES, and only the reports that read them need it. --closes
+# reads a decision file's pinned probe block, which is line-oriented text parsed
+# in shell, so gating it on jq would stall the whole fleet's decision lifecycle on
+# a dependency the operation never uses: no `resolved` event could close anywhere,
+# for want of a tool that would not have been called.
+case "$MODE" in
+  closes) ;;
+  *)
+    command -v jq >/dev/null 2>&1 || {
+      # No jq means no JSON entry can be read at all. That is the register
+      # failing, not an empty register, so it takes the fail-closed exit rather
+      # than a quiet 0.
+      case "$MODE" in
+        open) printf 'COMMITMENT: register unreadable - jq is required to read commitment entries\n' ;;
+        *) printf 'fm-commitment-register: jq is required to read commitment entries\n' >&2 ;;
+      esac
+      exit "$EXIT_UNOBSERVED"
+    }
+    ;;
+esac
 
 # A probe must be bounded on every supported host, so a wedged command cannot
 # stall session start. With no bounding tool the probe does not run: reporting it
 # unobservable is honest, and it is also the answer that never reads as enforced.
 PROBE_TIMEOUT=${FM_COMMITMENT_PROBE_TIMEOUT:-10}
+# A decision file's `run:` gets its own, larger bound - see Environment above.
+DECISION_PROBE_TIMEOUT=${FM_COMMITMENT_DECISION_PROBE_TIMEOUT:-60}
+PROBE_CACHE_TTL=${FM_COMMITMENT_PROBE_CACHE_TTL:-120}
+PROBE_CACHE_DIR=${FM_COMMITMENT_PROBE_CACHE_DIR:-$STATE/commitment-probe-cache}
 bounding_tool() {
   if command -v timeout >/dev/null 2>&1; then printf 'timeout'
   elif command -v gtimeout >/dev/null 2>&1; then printf 'gtimeout'
@@ -292,11 +368,16 @@ read_probe_argv() {  # <probe-json>
   done < <(printf '%s' "$1" | jq -r '(.args // [])[]')
 }
 
+# The answer probe_command_answers last read, so a probe that must inspect that
+# answer does not have to run the owner a second time to see it.
+PROBE_COMMAND_OUT=
+
 # Does the declared owner exist and answer? An owner that is not there is an
 # observed absence, not an unobservable one - that distinction is the whole point
 # of naming an owner in the entry.
 probe_command_answers() {  # <probe-json>
   local probe=$1 rel cmd out rc
+  PROBE_COMMAND_OUT=
   rel=$(printf '%s' "$probe" | jq -r '.command // ""')
   if [ -z "$rel" ]; then
     probe_answer NO_VERIFIER_RAN usage_error "probe declares no command"
@@ -333,7 +414,43 @@ probe_command_answers() {  # <probe-json>
       "the declared owner $rel exited 0 printing nothing, which answers nothing"
     return 0
   fi
+  PROBE_COMMAND_OUT=$out
   probe_answer PASS verified "the declared owner $rel answered"
+}
+
+# Does the declared owner's ANSWER say what the commitment requires? command_answers
+# establishes only that something answered, which is the right question for "does
+# an owner exist" and the wrong one for "does the derived row say what it should":
+# a composer that prints a stale row exits 0 and prints plenty. This kind reads the
+# answer with a jq filter, so a commitment about the CONTENT of derived state is
+# probed against that content rather than against the composer's exit status.
+# The filter is jq rather than a command because the tracked register must never
+# become a shell-execution seam; see TRUST BOUNDARY in the header.
+probe_command_answer_matches() {  # <probe-json>
+  local probe=$1 filter verdict
+  filter=$(printf '%s' "$probe" | jq -r '.jq // ""')
+  if [ -z "$filter" ]; then
+    probe_answer NO_VERIFIER_RAN usage_error "probe declares no jq filter over the answer"
+    return 0
+  fi
+  probe_command_answers "$probe"
+  # Only an answer that arrived can be read; an absent or silent owner keeps the
+  # verdict command_answers already reached for it.
+  [ "$PROBE_RESULT" = PASS ] || return 0
+  local rel
+  rel=$(printf '%s' "$probe" | jq -r '.command // ""')
+  verdict=$(printf '%s' "$PROBE_COMMAND_OUT" | jq -r "$filter" 2>/dev/null) || verdict=
+  case "$verdict" in
+    true) probe_answer PASS verified "the answer from $rel satisfies the declared condition" ;;
+    false)
+      probe_answer FAIL verifier_reported_failure \
+        "the answer from $rel does not satisfy the declared condition, so what it reports is not what was committed"
+      ;;
+    *)
+      probe_answer NO_VERIFIER_RAN verification_unreachable \
+        "the condition over $rel's answer produced \"${verdict:-nothing}\" rather than true or false, so the answer was not read"
+      ;;
+  esac
 }
 
 # Does the named test exist and pass NOW? The probe half of the cited-control
@@ -479,6 +596,7 @@ run_probe() {  # <probe-json>
   case "$kind" in
     launch_permission_enforced) probe_launch_permission_enforced "$1" ;;
     command_answers) probe_command_answers "$1" ;;
+    command_answer_matches) probe_command_answer_matches "$1" ;;
     test_passes) probe_test_passes "$1" ;;
     symbol_called) probe_symbol_called "$1" ;;
     work_owned) probe_work_owned "$1" ;;
@@ -582,9 +700,85 @@ task_worktree() {  # <task> -> path, or empty
   printf '%s' "$wt"
 }
 
+# --- the decision-probe result cache -----------------------------------------
+#
+# See THE DECISION-PROBE CACHE in the header for why this exists and the one rule
+# it may not break. Everything below is best-effort: a cache that cannot be read
+# or written costs a probe run, never an answer.
+
+TAB=$'\t'
+
+# A key's fingerprint. Any change to the probe block, to which worktree it runs
+# from, or to the task's own recorded progress makes a stored result inapplicable
+# rather than merely old, so all three are in the key.
+probe_cache_fingerprint() {  # <task> <worktree>
+  local status="$STATE/$1.status" progress=no-status
+  # The redirection is guarded rather than silenced: an absent file would put a
+  # shell error on stderr before any 2>/dev/null on the command could apply, and
+  # this runs inside a fold that must answer rather than emit.
+  [ -r "$status" ] && progress=$(cksum < "$status" 2>/dev/null || printf 'unreadable-status')
+  # The record below is tab-separated and the fingerprint is not its last field,
+  # so a tab read out of a decision file's `run:` is folded rather than carried.
+  local fp="$DP_TIER|$DP_RUN|$DP_CONTROL|$2|$progress"
+  printf '%s' "${fp//$'\t'/ }"
+}
+
+probe_cache_path() {  # <task> <key>
+  local safe="$1__$2"
+  printf '%s/%s' "$PROBE_CACHE_DIR" "$(printf '%s' "$safe" | tr -c 'A-Za-z0-9._-' '_')"
+}
+
+# 0 with PROBE_* set from a result still inside the freshness bound. Anything
+# else - no entry, a different fingerprint, an unreadable or malformed line, or an
+# observation older than the bound - returns 1, and the caller runs the probe.
+probe_cache_read() {  # <task> <key> <fingerprint> <now>
+  local path line stamp iso fp result reason evidence age t=$'\t'
+  [ "$PROBE_CACHE_TTL" -gt 0 ] 2>/dev/null || return 1
+  path=$(probe_cache_path "$1" "$2")
+  [ -r "$path" ] || return 1
+  IFS= read -r line < "$path" 2>/dev/null || return 1
+  case "$line" in *"$t"*"$t"*"$t"*"$t"*"$t"*) ;; *) return 1 ;; esac
+  stamp=${line%%"$t"*};  line=${line#*"$t"}
+  iso=${line%%"$t"*};    line=${line#*"$t"}
+  fp=${line%%"$t"*};     line=${line#*"$t"}
+  result=${line%%"$t"*}; line=${line#*"$t"}
+  reason=${line%%"$t"*}
+  evidence=${line#*"$t"}
+  [ -n "$stamp" ] && [ -n "$result" ] && [ -n "$reason" ] || return 1
+  case "$stamp" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$fp" = "$3" ] || return 1
+  age=$(( $4 - stamp ))
+  [ "$age" -ge 0 ] && [ "$age" -le "$PROBE_CACHE_TTL" ] || return 1
+  # The observation time rides the evidence, so nothing downstream - a refusal
+  # note, a fold record, a human read - can mistake this for a fresh answer.
+  probe_answer "$result" "$reason" \
+    "$evidence [observed ${iso:-at an unrecorded time}, ${age}s ago, within the ${PROBE_CACHE_TTL}s freshness bound]"
+  PROBE_FROM_CACHE=1
+  return 0
+}
+
+probe_cache_write() {  # <task> <key> <fingerprint> <now> <iso>
+  local path tmp
+  [ "$PROBE_CACHE_TTL" -gt 0 ] 2>/dev/null || return 0
+  path=$(probe_cache_path "$1" "$2")
+  mkdir -p "$PROBE_CACHE_DIR" 2>/dev/null || return 0
+  tmp="$path.$$"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$4" "$5" "$3" "$PROBE_RESULT" "$PROBE_REASON" "$PROBE_EVIDENCE" \
+    > "$tmp" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 0; }
+  mv -f "$tmp" "$path" 2>/dev/null || rm -f "$tmp" 2>/dev/null
+  return 0
+}
+
+# 1 when the PROBE_* fields were served from a stored observation rather than
+# from a run just now. Read by the closure gate, so an acceptance resting on an
+# earlier observation says so instead of passing silently.
+PROBE_FROM_CACHE=0
+
 # Runs one parsed decision probe, setting PROBE_*. DP_* must already be valid.
 run_decision_probe() {  # <task> <key>
-  local task=$1 key=$2 wt out rc
+  local task=$1 key=$2 wt out rc fingerprint now iso stamps
+  PROBE_FROM_CACHE=0
   if [ "$DP_TIER" = attested ]; then
     # Marked and visible, never verified: an attested criterion has no verdict to
     # reach, so it stays could-not-observe by construction rather than by failure.
@@ -606,29 +800,36 @@ run_decision_probe() {  # <task> <key>
       "no timeout tool is available to bound the probe for $key, so it was not run"
     return 0
   fi
-  out=$(cd "$wt" && run_timed "$PROBE_TIMEOUT" bash -c "$DP_RUN" 2>&1)
+  # Everything above this line is a guard that costs nothing to re-evaluate, so
+  # only the execution below is worth caching - and only it can be served from a
+  # stored observation.
+  stamps=$(date -u "+%s${TAB}%Y-%m-%dT%H:%M:%SZ" 2>/dev/null) || stamps=
+  now=${stamps%%"$TAB"*}
+  iso=${stamps#*"$TAB"}
+  fingerprint=$(probe_cache_fingerprint "$task" "$wt")
+  case "$now" in
+    ''|*[!0-9]*) now= ;;
+    *) probe_cache_read "$task" "$key" "$fingerprint" "$now" && return 0 ;;
+  esac
+  out=$(cd "$wt" && run_timed "$DECISION_PROBE_TIMEOUT" bash -c "$DP_RUN" 2>&1)
   rc=$?
   if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
     probe_answer NO_VERIFIER_RAN verification_unreachable \
-      "the probe for $key did not finish within ${PROBE_TIMEOUT}s"
-    return 0
-  fi
-  if [ "$rc" -eq 125 ] || [ "$rc" -eq 126 ] || [ "$rc" -eq 127 ]; then
+      "the probe for $key did not finish within ${DECISION_PROBE_TIMEOUT}s"
+  elif [ "$rc" -eq 125 ] || [ "$rc" -eq 126 ] || [ "$rc" -eq 127 ]; then
     probe_answer NO_VERIFIER_RAN verification_unreachable \
       "the probe for $key could not execute (exit $rc): $(printf '%s' "$out" | tail -1)"
-    return 0
-  fi
-  if [ "$rc" -ne 0 ]; then
+  elif [ "$rc" -ne 0 ]; then
     probe_answer FAIL verifier_reported_failure \
       "the criterion is not met: the probe for $key exited $rc: $(printf '%s' "$out" | tail -1)"
-    return 0
-  fi
-  if [ "$DP_TIER" = cited-control ]; then
+  elif [ "$DP_TIER" = cited-control ]; then
     probe_answer PASS verified \
       "the probe for $key passes now, with $(control_citation "$DP_CONTROL") cited as the control watched to fail first"
-    return 0
+  else
+    probe_answer PASS verified "the probe for $key exits 0, so the criterion is met"
   fi
-  probe_answer PASS verified "the probe for $key exits 0, so the criterion is met"
+  [ -z "$now" ] || probe_cache_write "$task" "$key" "$fingerprint" "$now" "$iso"
+  return 0
 }
 
 # --- admissibility -----------------------------------------------------------
@@ -761,18 +962,24 @@ collect_decisions() {
   done
 }
 
-collect_dir "$REG_DIR" 1
-[ -n "$REGISTER_FAULT" ] || collect_dir "$HOME_REG_DIR" 0
-if [ -z "$REGISTER_FAULT" ] && [ "${#ENTRY_IDS[@]}" -gt 0 ] && ! read_schema; then
-  REGISTER_FAULT="$REG_DIR/schema.json is missing or unreadable, so no entry could be validated"
+# --closes reads no register at all: it is asked about one named decision key and
+# reads only that key's file. Collecting entries for it would spend the fold's
+# budget on JSON it never looks at, and would drag jq back onto a path that does
+# not use it.
+if [ "$MODE" != closes ]; then
+  collect_dir "$REG_DIR" 1
+  [ -n "$REGISTER_FAULT" ] || collect_dir "$HOME_REG_DIR" 0
+  if [ -z "$REGISTER_FAULT" ] && [ "${#ENTRY_IDS[@]}" -gt 0 ] && ! read_schema; then
+    REGISTER_FAULT="$REG_DIR/schema.json is missing or unreadable, so no entry could be validated"
+  fi
+  # --open does not need the decision inventory either: it deliberately leaves
+  # discovered probes to the open-decision fold rather than adding a second
+  # surface for them.
+  case "$MODE" in
+    open) ;;
+    *) [ -n "$REGISTER_FAULT" ] || collect_decisions ;;
+  esac
 fi
-# Neither --open nor --closes needs the decision inventory: --open deliberately
-# leaves discovered probes to the open-decision fold, and --closes is asked about
-# one named key and reads only that key's file.
-case "$MODE" in
-  open|closes) ;;
-  *) [ -n "$REGISTER_FAULT" ] || collect_decisions ;;
-esac
 
 # --- evaluation --------------------------------------------------------------
 
@@ -788,11 +995,11 @@ on_fail() { ENTRY_STATE=UNMET; }
 on_unverified() { ENTRY_STATE=UNOBSERVED; }
 
 E_ID='' E_RECORDED='' E_AUTHORITY='' E_UNMET_STATE='' E_SATISFIED_WHEN='' E_TIER='' E_KIND=''
-E_CONTROL='' E_DEADLINE='' E_NOTE='' E_OVERDUE=0 E_SOURCE=''
+E_CONTROL='' E_DEADLINE='' E_NOTE='' E_OVERDUE=0 E_SOURCE='' E_UNOBSERVED_CONDITIONS=''
 
 reset_entry_fields() {
   E_RECORDED='' E_AUTHORITY='' E_UNMET_STATE='' E_SATISFIED_WHEN='' E_TIER='' E_KIND=''
-  E_CONTROL='' E_DEADLINE='' E_NOTE='' E_OVERDUE=0
+  E_CONTROL='' E_DEADLINE='' E_NOTE='' E_OVERDUE=0 E_UNOBSERVED_CONDITIONS=''
 }
 
 # Maps PROBE_* onto ENTRY_STATE through the three-valued consumer, which refuses a
@@ -826,6 +1033,7 @@ evaluate_json_entry() {  # <id> <path>
   E_CONTROL=$(printf '%s' "$doc" | jq -r '.control // ""')
   E_DEADLINE=$(printf '%s' "$doc" | jq -r '.deadline // ""')
   E_NOTE=$(printf '%s' "$doc" | jq -r '.note // ""')
+  E_UNOBSERVED_CONDITIONS=$(printf '%s' "$doc" | jq -r '(.unobserved_conditions // []) | join("; ")')
   if [ -n "$reason" ]; then
     # Inadmissible is could-not-observe, and loudly so: an entry this file cannot
     # interpret is an entry whose commitment it cannot judge.
@@ -843,6 +1051,20 @@ evaluate_json_entry() {  # <id> <path>
   if [ "$E_TIER" = cited-control ] && [ "$PROBE_RESULT" = PASS ]; then
     probe_answer PASS verified \
       "$PROBE_EVIDENCE, with $(control_citation "$E_CONTROL") cited as the control watched to fail first"
+  fi
+  # A commitment whose probe covers only part of it must not have that part's
+  # verdict read as the whole. The covered half is reported exactly as the probe
+  # found it; the declared-uncovered half is could-not-observe, which is what
+  # stops the entry retiring on half an answer. The field can only ever withhold
+  # SATISFIED, never grant it, which is why it is not a refused status word.
+  if [ -n "$E_UNOBSERVED_CONDITIONS" ]; then
+    if [ "$PROBE_RESULT" = PASS ]; then
+      probe_answer NO_VERIFIER_RAN verification_unreachable \
+        "$PROBE_EVIDENCE - but this commitment also requires $E_UNOBSERVED_CONDITIONS, which no probe here observes, so only part of it is answered"
+    else
+      probe_answer "$PROBE_RESULT" "$PROBE_REASON" \
+        "$PROBE_EVIDENCE; and this commitment further requires $E_UNOBSERVED_CONDITIONS, which no probe here observes"
+    fi
   fi
   settle_entry_state "$id"
 }
@@ -960,6 +1182,8 @@ render_human() {
     printf '              tier:       %s\n' "${E_TIER:-none declared}"
     [ -z "$E_CONTROL" ] || printf '              control:    %s\n' "$E_CONTROL"
     printf '              observed:   %s\n' "$PROBE_EVIDENCE"
+    [ -z "$E_UNOBSERVED_CONDITIONS" ] \
+      || printf '              not probed: %s\n' "$E_UNOBSERVED_CONDITIONS"
     [ "$E_OVERDUE" -eq 1 ] && printf '              OVERDUE:    the %s deadline has passed\n' "$E_DEADLINE"
     [ -z "$E_NOTE" ] || printf '              note:       %s\n' "$E_NOTE"
     printf '\n'
@@ -995,6 +1219,7 @@ render_json() {
       --arg kind "$E_KIND" --arg control "$E_CONTROL" --arg deadline "$E_DEADLINE" \
       --arg note "$E_NOTE" --arg state "$ENTRY_STATE" --arg result "$PROBE_RESULT" \
       --arg reason "$PROBE_REASON" --arg evidence "$PROBE_EVIDENCE" \
+      --arg unobserved "$E_UNOBSERVED_CONDITIONS" \
       --argjson overdue "$E_OVERDUE" \
       '{id:$id, source:$source, recorded:$recorded, authority:$authority,
         unmet_state:$unmet_state, satisfied_when:$satisfied_when,
@@ -1003,6 +1228,7 @@ render_json() {
         control:(if $control == "" then null else $control end),
         deadline:(if $deadline == "" then null else $deadline end),
         note:(if $note == "" then null else $note end),
+        unobserved_conditions:(if $unobserved == "" then null else $unobserved end),
         state:$state, probe_result:$result, probe_reason:$reason,
         probe_evidence:$evidence, overdue:($overdue == 1),
         state_is_derived:true}')
@@ -1050,7 +1276,13 @@ render_closes() {
   fi
   run_decision_probe "$CLOSES_TASK" "$CLOSES_KEY"
   case "$PROBE_RESULT" in
-    PASS) return "$EXIT_OK" ;;
+    PASS)
+      # An acceptance resting on an earlier observation says when that
+      # observation was made. Silence here would be exactly the "old answer
+      # served as a current one" the cache is not allowed to introduce.
+      [ "$PROBE_FROM_CACHE" -eq 0 ] || printf 'accepted on a probe result: %s\n' "$PROBE_EVIDENCE"
+      return "$EXIT_OK"
+      ;;
     FAIL) printf '%s\n' "$PROBE_EVIDENCE"; return "$EXIT_UNMET" ;;
     *) printf '%s\n' "$PROBE_EVIDENCE"; return "$EXIT_UNOBSERVED" ;;
   esac

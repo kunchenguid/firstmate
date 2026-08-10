@@ -2,6 +2,7 @@
   "commitment_schema_version": 1,
   "description": "Canonical field contract for one RECORDED-BUT-NOT-YET-REAL commitment. bin/fm-commitment-register.sh is the only interpreter; its header and --help own the mechanics. An entry answers one question and only that question: what was committed, and what would have to be observably true for that commitment to be real. It is not a ticket, a plan, a decision hold, or a backlog item - those record intent, and recorded intent reading as protection is exactly what this register refuses.",
   "why": "A commitment recorded with no enforcement probe reads as protection while protecting nothing. The probe is the load-bearing field: an entry whose state is asserted rather than observed is the defect, not the record of it.",
+  "why_not_the_decision_surface": "bin/fm-decision-surface.sh is this fleet's derived-state composer and its typed verdicts are the right shape, and bin/fm-verify-lib.sh's three-valued observation type is consumed here rather than reinvented - so it is worth saying plainly why the register is its own interpreter instead of another decision-surface report. Three reasons, all properties of the input rather than preferences. The decision surface composes ONE home's live operational state through bin/fm-fleet-snapshot.sh; this register reads TRACKED repository material that ships to every home and must answer identically where there is no task, no snapshot, and no fleet. The decision surface is invoked once by a human or a composer; the register's --closes runs inside bin/fm-classify-lib.sh's open-decision fold on the wake-drain path, per resolved status line, so hosting it on a composer that loads a fleet snapshot first would make the fold pay for state it never reads. And a commitment that cannot be evaluated must take a fail-closed EXIT STATUS that a caller ignoring stdout still stops on, whereas the decision surface reports and is not a gate. The two are joined rather than parallel: the decision surface's owners ledger carries the unenforced_commitments row pointing at this register.",
   "entry_classes": {
     "ruling_not_enforced": "A ruling or standing rule is recorded and nothing enforces it. Probe: whatever would be observably true once it is enforced.",
     "authorisation_not_owned": "Authorised work has no owner. Probe: whether a live task, branch, or backlog record owns the identity.",
@@ -44,6 +45,7 @@
     "control": "name of the test or artifact watched to fail first, as the 2026-08-10 ruling pins it. Required by cited-control. Surfaced, and marked when it also resolves on disk.",
     "reason": "why no probe is possible. Required by attested, and never treated as verification.",
     "deadline": "ISO date (YYYY-MM-DD). An entry still unmet after it is reported overdue. It never turns an unmet entry into a met one, and it never suppresses one.",
+    "unobserved_conditions": "array of one-sentence conditions this commitment includes that its probe does NOT observe. Use it when the recorded commitment has more than one half and only some of them have a landed artifact to probe. The covered half is reported exactly as the probe found it, and the declared-uncovered half is reported as could-not-observe, so the entry can never reach SATISFIED - and therefore never retire - on a partial answer. It can only withhold satisfaction, never grant it, which is why it is not one of the refused status words. It is not a place to record work that is merely unfinished: that is what a second entry with its own probe is for.",
     "note": "free prose for a reader; never consumed"
   },
   "refused_keys": [
@@ -73,6 +75,17 @@
       "pass_when": "the command exists, is executable, exits 0, and prints something",
       "fail_when": "the command is absent, is not executable, or exits non-zero - an owner that does not exist is observed, not unobservable",
       "could_not_observe_when": "the command exits 0 printing nothing, or is stopped by the probe timeout"
+    },
+    "command_answer_matches": {
+      "args": {
+        "command": "path relative to the firstmate code root",
+        "args": "optional array of literal arguments; never a shell string",
+        "jq": "a jq filter over the command's JSON answer that must produce exactly true or false. A filter, not a command: the tracked register ships to every home and must never become a shell-execution seam."
+      },
+      "pass_when": "the command answers and the filter over that answer produces true",
+      "fail_when": "the command is absent or exits non-zero, or the filter produces false - the answer was read and it is not what was committed",
+      "could_not_observe_when": "the command answers nothing, the filter errors or produces anything other than true or false, or the probe timeout stops it",
+      "why_not_command_answers": "command_answers establishes that something answered, which is the right question for whether an owner exists and the wrong one for whether a derived row says what it should: a composer printing a stale row exits 0 and prints plenty. A commitment about the CONTENT of derived state has to read the content."
     },
     "test_passes": {
       "args": {

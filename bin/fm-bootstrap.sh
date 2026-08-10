@@ -1047,9 +1047,21 @@ EOF
 # noise, which is the failure it exists to prevent.
 # bin/fm-commitment-register.sh owns the register, the probes, and the exact line
 # wording; this function only relays it.
+#
+# An ABSENT interpreter is the one way this relay could go quietly vacuous, so it
+# is the loudest case here rather than the silent one. The register already
+# reports an unreadable register rather than an empty one; a home running a bin/
+# that predates it, or one whose exec bit a checkout dropped, would otherwise
+# report "silent - all good" while every recorded commitment went unchecked -
+# which is the reads-as-protection-while-protecting-nothing shape this whole
+# mechanism exists to refuse.
 commitment_register_report() {
   local bin="$SCRIPT_DIR/fm-commitment-register.sh" out
-  [ -x "$bin" ] || return 0
+  if [ ! -x "$bin" ]; then
+    printf 'COMMITMENT: register unreadable - %s is missing or not executable, so no recorded commitment could be checked\n' \
+      "bin/fm-commitment-register.sh"
+    return 0
+  fi
   out=$(FM_HOME="$FM_HOME" "$bin" --open 2>/dev/null || true)
   [ -n "$out" ] || return 0
   printf '%s\n' "$out"

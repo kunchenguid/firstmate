@@ -455,5 +455,46 @@ test_permission_posture_never_invents_enforcement() {
   pass "an unrecorded posture stays unknown and an unverified adapter is refused"
 }
 
+# The roster the posture walks is DERIVED from launch_template's own case arms.
+# A second hand-maintained copy of the adapter list would go vacuous the day an
+# adapter is ADDED rather than renamed - the same failure the accessor exists to
+# refuse, one step over - and the consequence is specific: once the staged
+# enforcement work flips the recorded adapters to enforced, an adapter missing
+# from a hand-maintained roster would leave nothing unrestricted and nothing
+# unknown, so the commitment would retire while an unrestricted harness was still
+# launchable.
+#
+# So the case adds an adapter to launch_template exactly the way a real one is
+# added - a new case arm in the source - and requires that it appears, as unknown.
+# Silently excluding it is the failure; unknown is the honest third value.
+test_posture_roster_is_derived_so_a_new_adapter_cannot_be_excluded() {
+  local patched out
+  patched="$TMP_ROOT/launch-lib-plus-one-adapter.sh"
+  awk '{ print }
+       /^    kimi\) printf/ { print "    frobnicator) printf %s frobnicator ;;" }' \
+    "$LAUNCH_LIB" > "$patched"
+
+  # The control on the fixture itself: the shipped library must NOT list the
+  # invented adapter, or the case below would pass without proving anything.
+  launch_permission_posture | grep -q '^frobnicator ' \
+    && fail "the shipped roster already lists the invented adapter, so this case proves nothing"
+
+  out=$(bash -c '. "$1" && launch_permission_posture' _ "$patched") \
+    || fail "the patched library could not report a posture roster at all"
+  printf '%s\n' "$out" | grep -q '^frobnicator unknown$' \
+    || fail "an adapter added to launch_template was excluded from the posture roster instead of reading unknown, got:
+$out"
+  local h
+  for h in "${HARNESSES[@]}"; do
+    printf '%s\n' "$out" | grep -q "^$h " \
+      || fail "adding an adapter dropped $h from the roster"
+  done
+  [ "$(printf '%s\n' "$out" | wc -l)" -eq "$((${#HARNESSES[@]} + 1))" ] \
+    || fail "the derived roster is not exactly the shipped adapters plus the added one:
+$out"
+  pass "the posture roster is derived, so an added adapter reads unknown rather than vanishing"
+}
+
 test_permission_posture_is_declared_for_every_launchable_harness
 test_permission_posture_never_invents_enforcement
+test_posture_roster_is_derived_so_a_new_adapter_cannot_be_excluded

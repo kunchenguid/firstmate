@@ -521,14 +521,31 @@ _fm_decision_key() {  # <status-line> -> key slug, or "default" when no token
 # keyed open/resolved fold - rather than as a second surface.
 #
 # COST CONTRACT, and the third exception to this library's pure-read rule (the
-# other two are task_hold_kind and the absorb classification). A key with no
-# registered probe costs two syscalls: the per-task decision directory usually
-# does not exist, and a decision file usually carries no probe block. Only a
-# `resolved` line whose key has a real probe block spends a bounded subprocess,
-# and only once per such line. Every decision ruled before the format existed
-# therefore folds exactly as it always did - the ruling forbids back-filling them
-# with invented probes, so they have no registered probe to gate on.
+# other two are task_hold_kind and the absorb classification). Only a `resolved`
+# line whose key has a real probe BLOCK spends a bounded subprocess, and only once
+# per such line. The gate proves that itself rather than asserting it: existing is
+# what a decision file usually does - every decision ruled before 2026-08-10 has
+# one and none of them carries a probe block, and the ruling forbids back-filling
+# them - so the fence below reads the file in-process and looks for the fence
+# line. A home carrying a dozen legacy decision files therefore spends a dozen
+# small reads on a fold, not a dozen interpreter subprocesses, and every such
+# decision folds exactly as it always did.
 FM_CLASSIFY_COMMITMENT_BIN="${FM_CLASSIFY_COMMITMENT_BIN:-$_FM_CLASSIFY_LIB_DIR/fm-commitment-register.sh}"
+
+# 0 when a probe block cannot be ruled out for this decision file, so the
+# interpreter has to be asked; 1 when the file demonstrably carries none.
+#
+# An existing file this process cannot read is the first case, not the second: it
+# may carry a probe nobody here can see, and the interpreter is what turns that
+# into a refusal rather than a silent acceptance.
+_fm_decision_probe_fenced() {  # <decision-file>
+  local file=$1 line
+  [ -r "$file" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in '```probe'|'```probe '*) return 0 ;; esac
+  done < "$file" 2>/dev/null
+  return 1
+}
 
 # 0 when a registered probe REFUSES this closure, printing why on stdout; 1 when
 # the closure may be accepted (no probe registered, the probe passed, or the
@@ -543,7 +560,17 @@ decision_close_refused() {  # <task-id> <key> [home]
   [ -n "$home" ] || return 1
   # Cheap gate first: no decision file, no registered probe, no cost.
   [ -f "$home/data/$task/decision-$key.md" ] || return 1
-  [ -x "$bin" ] || return 1
+  _fm_decision_probe_fenced "$home/data/$task/decision-$key.md" || return 1
+  if [ ! -x "$bin" ]; then
+    # Past the fence, so a registered probe for this key cannot be ruled out and
+    # there is no interpreter to evaluate one. Accepting here would read an
+    # unevaluated criterion as met, which is the failure the gate exists to
+    # close; refusing wedges nothing, because the decision simply keeps showing
+    # with the reason.
+    printf 'a registered probe for this criterion could not be ruled out and %s is not available to evaluate it, so the resolution is not accepted' \
+      "${bin##*/}"
+    return 0
+  fi
   out=$(FM_HOME="$home" "$bin" --closes "$task" "$key" 2>/dev/null)
   rc=$?
   [ "$rc" -eq 0 ] && return 1
