@@ -80,7 +80,7 @@ A Claude failure notice describes the automatic mechanism as broken and does not
 The Claude Stop auto-arm can record `outcome=failed-suppressed`, which means the home has no verified watcher while live work still needs supervision.
 The tell is an empty `Stop hook feedback` message.
 Read `state/.claude-autoarm-epoch`, `state/.last-watcher-beat`, and `state/.watch.lock` instead of trusting the notice or a process-name match.
-A beacon older than 300 seconds means the watcher is stale, an absent lock means no watcher owns the home, and an `fm-watch` process from another home is not evidence for this one.
+A beacon older than the `FM_GUARD_GRACE` freshness window above means the watcher is stale, an absent lock means no watcher owns the home, and an `fm-watch` process from another home is not evidence for this one.
 Do not hand-arm the watcher on your own initiative; the bounded Stop-owned recovery path may recover on its next cycle.
 
 OpenCode, Pi, and pi-signed expose passive callbacks for this purpose.
