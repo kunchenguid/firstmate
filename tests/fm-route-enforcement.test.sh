@@ -341,6 +341,8 @@ test_held_model_is_refused_at_the_chokepoint_and_check_agrees_with_eligible() {
     --harness codex --route R-MED --model vendor/large --effort medium); rc=$?
   expect_code 1 "$rc" "a held model must not be dispatched at the spawn chokepoint"
   assert_contains "$out" "FM_SPAWN_ROUTE_MODEL_HELD" "the stable refusal token is missing at the chokepoint"
+  assert_contains "$out" "already checked against the model registry" \
+    "the chokepoint holds the registry decisions, so its substitutes must be checked ones"
   assert_absent "$HOME_DIR/state/heldtask.meta" "a held model must leave no task metadata"
   # With every candidate held there is nothing to fail over TO, and saying so is
   # the honest answer: an empty substitute list would read as "substitute
@@ -358,6 +360,35 @@ test_held_model_is_refused_at_the_chokepoint_and_check_agrees_with_eligible() {
   out=$(run_route "$HOME_DIR" check --route R-MED --model vendor/large --effort medium); rc=$?
   expect_code 0 "$rc" "a released model must be dispatchable again"
   pass "an unavailable model is refused at the chokepoint and check agrees with eligible"
+}
+
+test_a_substitute_list_says_whether_it_was_registry_checked() {
+  local rec out rc
+  rec=$(make_refusal_home substitute-checked); read_home_record "$rec"
+  run_route "$HOME_DIR" availability hold vendor/large --state rate_limited --for-seconds 300 >/dev/null
+  # fm-route.sh supplies the registry verdicts it already computes, so the
+  # substitute it names is one the operator can actually dispatch.
+  out=$(run_route "$HOME_DIR" check --route R-MED --model vendor/large --effort medium); rc=$?
+  expect_code 1 "$rc" "a held model must be refused"
+  assert_contains "$out" "in pool order (other/small)" "the substitute is not named"
+  assert_contains "$out" "already checked against the model registry" \
+    "a caller-supplied registry verdict must be reported as a checked substitute list"
+  # A caller that supplies no verdicts must be TOLD the list is unchecked. The
+  # routing library owns routing eligibility and asks the registry nothing, so
+  # presenting its answer as registry-checked would send an operator into a
+  # second refusal from an owner the message never mentioned.
+  out=$(bash -c '
+      . "$1/bin/fm-route-lib.sh"
+      d=$(fm_route_decision "$2" R-MED vendor/large medium "$3") || exit 9
+      fm_route_refusal_from_decision "$2" R-MED vendor/large "$d" "$3"' \
+    _ "$ROOT" "$HOME_DIR/config" "$HOME_DIR/state" 2>&1); rc=$?
+  expect_code 1 "$rc" "a raw decision must still refuse a held model"
+  assert_contains "$out" "in pool order (other/small)" "the substitute is not named"
+  assert_contains "$out" "were NOT checked against the model registry" \
+    "an unchecked substitute list must say so rather than reading as a checked one"
+  assert_contains "$out" "fm-route.sh eligible --route R-MED" \
+    "an unchecked list must point at the registry-checked one"
+  pass "a substitute list states whether it was checked against the model registry"
 }
 
 test_default_only_route_is_listed_and_enforced() {
@@ -623,11 +654,13 @@ test_route_claim_is_refused_where_nothing_can_check_it() {
 }
 
 test_spawn_records_the_route_and_the_policy_that_checked_it() {
-  local rec out meta fakebin
+  local rec out meta fakebin launchlog
   rec=$(make_refusal_home spawn-record); read_home_record "$rec"
   # This case must reach metadata, so it needs a tmux that succeeds and a real
-  # worktree for the isolation assertion.
+  # worktree for the isolation assertion. The same fake captures the literal
+  # launch command, which is where the worker's environment is constructed.
   fakebin="$TMP_ROOT/spawn-record/okbin"
+  launchlog="$TMP_ROOT/spawn-record/launch.log"
   mkdir -p "$fakebin"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
@@ -637,6 +670,18 @@ esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
+  send-keys)
+    if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
+      printf 'inherited_admission_snapshot=[%s]\n' "${FM_SPAWN_ADMISSION_SNAPSHOT-unset}" \
+        >> "$FM_FAKE_LAUNCH_LOG"
+      prev=
+      for a in "$@"; do
+        [ "$prev" != -l ] || printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG"
+        prev=$a
+      done
+    fi
+    exit 0
+    ;;
 esac
 exit 0
 SH
@@ -646,7 +691,12 @@ SH
   fm_git_worktree "$TMP_ROOT/spawn-record/repo" "$TMP_ROOT/spawn-record/wt" wt-record
   write_brief "$HOME_DIR" recordtask no-mistakes
   touch "$HOME_DIR/state/.last-watcher-beat"
+  : > "$launchlog"
+  # A ship spawn started WITH a shared census in its environment, which is
+  # exactly what a batch parent hands each pair.
   out=$(FM_FAKE_PANE_PATH="$TMP_ROOT/spawn-record/wt" TMUX="fake,1,0" \
+    FM_FAKE_LAUNCH_LOG="$launchlog" \
+    FM_SPAWN_ADMISSION_SNAPSHOT="$TMP_ROOT/spawn-record/absent-census.json" \
     run_spawn "$HOME_DIR" "$fakebin" recordtask "$TMP_ROOT/spawn-record/repo" \
       --mode no-mistakes --yolo off --reason-code NL_RULE_CLASSIFICATION \
       --harness codex --route R-MED --model vendor/large --effort medium); rc=$?
@@ -655,6 +705,13 @@ SH
   assert_grep "route=R-MED" "$meta" "meta must record the route the dispatch was checked against"
   assert_grep "capability_floor=F-MED" "$meta" "meta must record the route's own floor"
   assert_grep "route_policy_digest=sha256:" "$meta" "meta must record a digest of the policy that checked it"
+  # The shared census is the spawn's input, not the worker's: anything that
+  # inherited it would admit against a census taken before it existed. Ship and
+  # scout are the kinds that receive it, and the backend that opens the pane is
+  # the process that would carry it onward, so its environment is where the
+  # clearing has to show.
+  assert_grep 'inherited_admission_snapshot=[unset]' "$launchlog" \
+    "the shared admission census reached the process that creates the worker"
   pass "a compliant dispatch records the route, its floor, and the policy surface that checked it"
 }
 
@@ -766,6 +823,7 @@ SH
       --reason-code NL_RULE_CLASSIFICATION --harness codex \
       --route R-MED --model vendor/large --effort medium >/dev/null 2>&1 &
   pid=$!
+  fm_test_reap "$pid"
   fm_test_wait_file "$marker" 60 "$pid" \
     "the batch parent exited before any pair reached the queue substrate" \
     "the batch parent never dispatched a pair, so this case proves nothing"
@@ -836,6 +894,7 @@ test_unstated_model_is_refused_rather_than_recorded_as_checked
 test_absent_models_block_refuses_as_unverifiable
 test_undefined_floor_id_refuses_and_records_no_capability_floor
 test_held_model_is_refused_at_the_chokepoint_and_check_agrees_with_eligible
+test_a_substitute_list_says_whether_it_was_registry_checked
 test_default_only_route_is_listed_and_enforced
 test_failover_stays_inside_the_pool_in_order
 test_availability_hold_removes_a_candidate_and_release_restores_it

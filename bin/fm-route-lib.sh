@@ -385,6 +385,36 @@ fm_route_decision() {
      "$FM_ROUTE_DECISION_JQ" "$file" 2>/dev/null || return 2
 }
 
+# fm_route_decision_with_registry <decision-json> <verdict-lines>
+# Record the CALLER's registry verdicts on a decision record and recompute
+# eligibility with them. <verdict-lines> is one "<model><TAB><refusal>" line per
+# candidate, with an empty second field meaning the registry admits it.
+#
+# This library asks the model registry nothing. Cost, reachability and
+# concurrency belong to bin/fm-model-registry-lib.sh and to the caller that
+# already holds its answers; merging them here would make this file a second
+# owner of a question it explicitly does not own. What it owns is the SHAPE: one
+# merge, so a refusal can tell a substitute list that was checked against the
+# registry from one that is routing-eligible only.
+fm_route_decision_with_registry() {  # <decision-json> <verdict-lines>
+  local decision=$1 verdicts=${2:-} merged
+  command -v jq >/dev/null 2>&1 || { printf '%s' "$decision"; return 0; }
+  merged=$(printf '%s' "$verdicts" | jq -R -s -c '
+    [ split("\n")[] | select(length > 0) | (. / "\t")
+      | {model: .[0],
+         registry_refusal: (if (((.[1] // "") | length) > 0) then .[1] else null end)} ]') \
+    || { printf '%s' "$decision"; return 1; }
+  printf '%s' "$decision" | jq -c --argjson reg "$merged" '
+    .candidates = [ .candidates[]?
+      | . as $c
+      | (first($reg[] | select(.model == $c.model)) // null) as $r
+      | ($r.registry_refusal // null) as $rr
+      | $c + {registry_refusal:$rr,
+              registry_checked:($r != null),
+              eligible:($c.floor_met and ($c.held == null) and ($rr == null))} ]' \
+    || { printf '%s' "$decision"; return 1; }
+}
+
 # The routes this home defines, one per line, for a refusal that has to name
 # them.
 fm_route_ids() {  # [<config-dir>]
@@ -447,7 +477,7 @@ fm_route_unreadable_refusal() {  # <config-dir>
 # availability records, and then the refusal and the recorded floor no longer
 # describe the same decision.
 fm_route_refusal_from_decision() {
-  local cfg=$1 route=$2 model=${3:-} decision=$4 state=${5:-} known dup resolution count held substitutes
+  local cfg=$1 route=$2 model=${3:-} decision=$4 state=${5:-} known dup resolution count held substitutes checked
   known=$(printf '%s' "$decision" | jq -r '.route_known')
   if [ "$known" != true ]; then
     printf '%s: route %s is not defined by %s/crew-dispatch.json. Defined: %s\n' \
@@ -491,9 +521,18 @@ fm_route_refusal_from_decision() {
     # never the whole pool: offering the model that was just refused as its own
     # replacement is advice an operator cannot act on.
     substitutes=$(printf '%s' "$decision" | jq -r '[ .candidates[]? | select(.eligible) | .model ] | join(", ")')
-    if [ -n "$substitutes" ]; then
-      printf '%s: route %s: %s in %s, so it is not an eligible candidate. Fail over to the next eligible model inside this route pool, in pool order (%s), rather than dispatching a held one; never substitute outside it and never lower the floor\n' \
+    # Whether the caller supplied registry verdicts, from the record itself. A
+    # routing-only list presented as if it had been checked is the same defect
+    # one rung down: the operator dispatches the named substitute and meets a
+    # second refusal from an owner nobody mentioned.
+    checked=$(printf '%s' "$decision" | jq -r \
+      '[ .candidates[]? | select(.eligible) | select(.registry_checked != true) ] | length == 0')
+    if [ -n "$substitutes" ] && [ "$checked" = true ]; then
+      printf '%s: route %s: %s in %s, so it is not an eligible candidate. Fail over to the next eligible model inside this route pool, in pool order (%s), each already checked against the model registry for cost, reachability and concurrency; never substitute outside this pool and never lower the floor\n' \
         "$FM_ROUTE_TOKEN_HELD" "$route" "$held" "$(fm_route_health_path "$state")" "$substitutes"
+    elif [ -n "$substitutes" ]; then
+      printf '%s: route %s: %s in %s, so it is not an eligible candidate. Fail over to the next eligible model inside this route pool, in pool order (%s). Those names are routing-eligible ONLY and were NOT checked against the model registry, so cost, reachability and concurrency may still refuse them; run fm-route.sh eligible --route %s for the registry-checked list. Never substitute outside this pool and never lower the floor\n' \
+        "$FM_ROUTE_TOKEN_HELD" "$route" "$held" "$(fm_route_health_path "$state")" "$substitutes" "$route"
     else
       printf '%s: route %s: %s in %s, and no other candidate in this route pool is eligible either, so there is nothing to fail over to. Run fm-route.sh eligible --route %s for the terminal report naming every candidate and why, then stop and escalate: do not substitute outside this pool and do not lower the floor\n' \
         "$FM_ROUTE_TOKEN_HELD" "$route" "$held" "$(fm_route_health_path "$state")" "$route"

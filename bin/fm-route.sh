@@ -136,25 +136,18 @@ registry_refusal() {  # <qualified-model>
 # and it takes the decision it enriches so no command in this file evaluates the
 # same policy twice against possibly different config or availability state.
 enrich() {  # <decision-json>
-  local decision=$1 candidates model refusal enriched
+  local decision=$1 model refusal verdicts=
   [ "$(printf '%s' "$decision" | jq -r '.route_known')" = true ] || { printf '%s' "$decision"; return 0; }
   [ -z "$(printf '%s' "$decision" | jq -r '.duplicate_paths // empty')" ] || { printf '%s' "$decision"; return 0; }
-  candidates=$(printf '%s' "$decision" | jq -r '.candidates[]?.model')
-  enriched='[]'
   while IFS= read -r model; do
     [ -n "$model" ] || continue
     if refusal=$(registry_refusal "$model"); then refusal=; fi
-    enriched=$(printf '%s' "$enriched" | jq -c --arg m "$model" --arg r "$refusal" \
-      '. + [{model:$m, registry_refusal:(if ($r|length)>0 then $r else null end)}]')
+    verdicts="$verdicts$model	$(printf '%s' "$refusal" | tr '\n\t' '  ')
+"
   done <<EOF
-$candidates
+$(printf '%s' "$decision" | jq -r '.candidates[]?.model')
 EOF
-  printf '%s' "$decision" | jq -c --argjson reg "$enriched" '
-    .candidates = [ .candidates[]
-      | . as $c
-      | (($reg[] | select(.model == $c.model) | .registry_refusal) // null) as $rr
-      | $c + {registry_refusal:$rr,
-              eligible:($c.floor_met and ($c.held == null) and ($rr == null))} ]'
+  fm_route_decision_with_registry "$decision" "$verdicts"
 }
 
 # The policy names exactly what a terminal report has to contain: the route and
@@ -216,9 +209,11 @@ case "$CMD" in
     [ -n "$MODEL" ] || die "check needs --model"
     DECISION=$(fm_route_decision "$CONFIG" "$ROUTE" "$MODEL" "$EFFORT" "$STATE") \
       || { printf '%s\n' "$(fm_route_unreadable_refusal "$CONFIG")" >&2; exit 2; }
+    # Registry verdicts are this caller's to supply, and supplying them here is
+    # what lets a refusal name substitutes an operator can actually dispatch.
+    DECISION=$(enrich "$DECISION")
     if [ "$JSON" -eq 1 ]; then
-      enrich "$DECISION"
-      printf '\n'
+      printf '%s\n' "$DECISION"
     fi
     if refusal=$(fm_route_refusal_from_decision "$CONFIG" "$ROUTE" "$MODEL" "$DECISION" "$STATE"); then
       rc=0

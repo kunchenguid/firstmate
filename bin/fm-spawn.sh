@@ -1647,6 +1647,27 @@ spawn_admission_gate() {
   return 1
 }
 
+# The registry verdict for every candidate in a route decision, as the
+# "<model><TAB><refusal>" lines bin/fm-route-lib.sh merges. Cost, reachability
+# and concurrency stay with bin/fm-model-registry-lib.sh and are asked here,
+# where they are already sourced; the routing library records the answer and
+# never asks for itself.
+spawn_route_registry_verdicts() {  # <decision-json>
+  local model out
+  while IFS= read -r model; do
+    [ -n "$model" ] || continue
+    out=
+    if out=$(fm_model_zero_budget_decision "$model") \
+      && out=$(fm_model_routable_decision "$model") \
+      && out=$(fm_model_concurrency_decision "$model"); then
+      out=
+    fi
+    printf '%s\t%s\n' "$model" "$(printf '%s' "$out" | tr '\n\t' '  ')"
+  done <<EOF
+$(printf '%s' "$1" | jq -r '.candidates[]?.model' 2>/dev/null)
+EOF
+}
+
 # ROUTE, ADMIT, ELIGIBLE - the routing policy's own intake order
 # (`_interfaces.order_at_intake`), enforced at the one point where HARNESS,
 # MODEL and EFFORT are all final and nothing has been created yet. A refusal
@@ -1701,6 +1722,14 @@ if [ "$KIND" != secondmate ]; then
       echo "error: $(fm_route_unreadable_refusal "$CONFIG")" >&2
       exit 1
     fi
+    # Only the held-model refusal names substitutes, so the registry verdicts a
+    # substitute list has to carry are computed only when one is about to be
+    # printed. The happy path stays a single route evaluation with no registry
+    # probe per candidate.
+    if [ -n "$(printf '%s' "$ROUTE_DECISION" | jq -r '.subject.held // empty' 2>/dev/null)" ]; then
+      ROUTE_DECISION=$(fm_route_decision_with_registry "$ROUTE_DECISION" \
+        "$(spawn_route_registry_verdicts "$ROUTE_DECISION")")
+    fi
     if ! ROUTE_REFUSAL=$(fm_route_refusal_from_decision "$CONFIG" "$ROUTE" "$MODEL" "$ROUTE_DECISION" "$STATE"); then
       echo "error: $ROUTE_REFUSAL" >&2
       exit 1
@@ -1727,6 +1756,14 @@ if [ "$KIND" != secondmate ]; then
   # nothing changes.
   spawn_admission_gate || exit 1
 fi
+
+# The shared census a batch parent hands down is THIS process's input and nothing
+# else's. Dropped from the environment the moment the gate above has consumed it,
+# so no child - the backend that opens the pane, a hook, the worker itself - can
+# inherit a census taken before it existed and admit against it. Dropping it here
+# rather than clearing it on the launch line covers every one of those channels
+# at once and leaves the literal launch command tests pin unchanged.
+unset FM_SPAWN_ADMISSION_SNAPSHOT
 
 # ZERO-BUDGET AND QUOTA GATE. This is the first point where HARNESS and MODEL are
 # both final (the harness resolves above; config/secondmate-harness can still
@@ -3307,7 +3344,7 @@ if [ "$KIND" = secondmate ]; then
   # not enable them across the launch boundary (bin/fm-trace-context-lib.sh header).
   # Reuse the single frozen decision from the carrier resolution above so the
   # injected carrier and this on/off snapshot are guaranteed to agree.
-  LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_SPAWN_ADMISSION_SNAPSHOT= FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$sq_primary_home FM_HOME=$sq_home FM_TRACE_CONTEXT=$SPAWN_TRACE_EFFECTIVE FM_SUPERVISION_MODEL=$supervision_model $LAUNCH"
+  LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$sq_primary_home FM_HOME=$sq_home FM_TRACE_CONTEXT=$SPAWN_TRACE_EFFECTIVE FM_SUPERVISION_MODEL=$supervision_model $LAUNCH"
 fi
 if [ -z "$SPAWN_TRACEPARENT" ] && [ "$RELAUNCH" -eq 1 ]; then
   LAUNCH="unset TRACEPARENT; $LAUNCH"
