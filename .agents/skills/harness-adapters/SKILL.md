@@ -50,7 +50,7 @@ If the captain asks for a new harness, propose verifying it first: spawn a trivi
 ## Detection
 
 `bin/fm-harness.sh` prints firstmate's own harness, using verified env markers first and then process ancestry.
-OMP 17.2.12 exports `OMPCODE=1`; that positive marker wins over inherited foreign markers, and its exact Bun-script process is recognized by ancestry and may own the session lock.
+Firstmate-launched OMP workers export `OMPCODE=1`, which wins over inherited foreign markers; a verified primary OMP session may omit it, so exact Bun-script ancestry identifies the session and may own the lock.
 Within the Pi family, only the exact launch-boundary marker `FM_PI_HARNESS=pi-signed` alongside `PI_CODING_AGENT=true` selects the signed identity; unmarked shared launcher ancestry remains `pi`.
 `bin/fm-harness.sh crew` resolves the effective crewmate harness from `config/crew-harness` (absent or `default` -> own).
 `bin/fm-harness.sh secondmate` resolves the secondmate-launch harness through the chain `config/secondmate-harness` -> `config/crew-harness` -> own, so an unset `config/secondmate-harness` matches the crew harness.
