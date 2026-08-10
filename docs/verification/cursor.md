@@ -26,8 +26,10 @@ Portable regressions: `tests/fm-cursor-harness.test.sh`.
 ### Process identity
 
 The launcher is a bash wrapper that `exec -a "$0"`s the bundled Node binary, so the live process basename remains `cursor-agent`.
-Detection uses `CURSOR_AGENT=1` (observed on the live process environment) as a fast path and exact `cursor-agent` ancestry as the guarantee.
+Exact `cursor-agent` ancestry is the guaranteed detection signal.
+The adapter also accepts `CURSOR_AGENT=1` as an optional fast path, but the verified CLI does not export that environment marker itself.
 A bare `cursor` basename is deliberately rejected so IDE helpers cannot be misread as this adapter.
+[`runtime-backends.md`](runtime-backends.md#agent-liveness-name-sources) owns the resulting tmux liveness verdict and its portable regression.
 
 ### Launch and autonomy
 
@@ -59,6 +61,8 @@ Project hooks under `.cursor/hooks.json` (gitignored via git info/exclude):
 
 Busy source name: `cursor-hook`.
 Unlike Claude, Cursor's `stop` hook fires on interrupt.
+Firstmate merges its hook entries with existing regular files, backs both files up before replacement, and restores their original contents at teardown or a failed spawn.
+Symlinked or malformed hook paths fail closed before Firstmate writes anything.
 
 ### Interrupt and exit
 

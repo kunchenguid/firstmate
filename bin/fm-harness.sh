@@ -30,8 +30,8 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 detect_own() {
   # Layer 1: environment markers for verified harnesses.
   # Keep marker detection before ancestry detection as an explicit precedence rule.
-  # Only claude, pi, grok, and cursor set verified markers of their own; codex, opencode,
-  # kimi, and muse are markerless, so a foreign marker retained in a terminal
+  # Only claude, pi, and grok set verified markers of their own; codex, opencode,
+  # kimi, muse, and cursor are markerless, so a foreign marker retained in a terminal
   # multiplexer's stored environment can silently misidentify one of them before
   # ancestry is consulted. This is a precedence hazard, not evidence that
   # CLAUDECODE inheritance into a kimi child was observed; it was not observed.
@@ -50,10 +50,10 @@ detect_own() {
   # identified, and any rule that must be RELIABLE under grok has to test the hook
   # markers too (see .claude/settings.json Stop entries, docs/turnend-guard.md).
   [ "${GROK_AGENT:-}" = "1" ] && { echo grok; return; }
-  # cursor-agent sets CURSOR_AGENT=1 for its live process (verified 2026-08-10
-  # on cursor-agent 2026.08.04-aaa8809 via exec -a preserving argv0). Treat it
-  # as a fast path like GROK_AGENT; ancestry on the exact cursor-agent name
-  # remains the guarantee when the marker is absent from a child.
+  # CURSOR_AGENT=1 remains an accepted explicit fast path, but the verified
+  # cursor-agent CLI does not export it itself. Exact cursor-agent ancestry is
+  # the guarantee; preserving this input keeps externally managed launches
+  # compatible without mistaking it for vendor-provided evidence.
   [ "${CURSOR_AGENT:-}" = "1" ] && { echo cursor; return; }
   # muse (Muse Code) publishes no harness-identity marker of its own. The only
   # MUSE_* variable it is documented to hand a child is MUSE_CURRENT_SESSION_LOG,

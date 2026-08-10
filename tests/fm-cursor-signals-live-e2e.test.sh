@@ -70,7 +70,7 @@ JSON
 
 tmux new-session -d -s "$SESSION" -c "$SCRATCH" -x 120 -y 36
 tmux send-keys -t "$SESSION" \
-  "cursor-agent --yolo --trust --model composer-2.5-fast 'Reply with exactly LIVEOK then wait.'" \
+  "cursor-agent --yolo --trust --model composer-2.5-fast 'Reply with exactly LIVEOK, then stop.'" \
   Enter
 
 saw_ready=0
@@ -84,25 +84,34 @@ for _ in $(seq 1 40); do
 done
 [ "$saw_ready" = 1 ] || fail "cursor-agent never produced LIVEOK"$'\n'"$(tmux capture-pane -t "$SESSION" -p | tail -40)"
 
-# Process identity: argv0 preserved as cursor-agent, CURSOR_AGENT=1 present.
+# Process identity: the documented wrapper preserves the exact cursor-agent
+# argv0.  This is the guaranteed detection signal; the vendor does not promise
+# a CURSOR_AGENT environment marker.
 pane_pid=$(tmux display-message -t "$SESSION" -p '#{pane_pid}')
 child=$(pgrep -P "$pane_pid" | head -1)
 [ -n "$child" ] || fail "no child process under cursor pane"
 comm=$(ps -o comm= -p "$child" | tr -d ' ')
 base=$(basename -- "$comm")
 [ "$base" = cursor-agent ] || fail "foreground child basename was '$base', expected cursor-agent"
-env_blob=$(ps eww -p "$child" 2>/dev/null || true)
-printf '%s' "$env_blob" | grep -q 'CURSOR_AGENT=1' \
-  || fail "CURSOR_AGENT=1 missing from live cursor-agent environment"
 
 # Autonomy: --yolo on the live process argv (footer also shows Run Everything).
 ps -p "$child" -o args= | grep -q -- '--yolo' \
   || fail "live cursor-agent argv missing --yolo"
 
-# Hooks fired for the positional launch brief.
+# Hooks fired for the positional launch brief.  The reply is rendered before
+# the stop hook runs, so wait on the hook's durable protocol output rather than
+# treating the first visible response as a completed turn.
 grep -q 'beforeSubmitPrompt' "$PROBE_LOG" \
   || fail "beforeSubmitPrompt never fired for positional launch"$'\n'"$(cat "$PROBE_LOG" 2>/dev/null)"
-grep -q 'stop completed' "$PROBE_LOG" \
+saw_stop=0
+for _ in $(seq 1 15); do
+  if grep -q 'stop completed' "$PROBE_LOG"; then
+    saw_stop=1
+    break
+  fi
+  sleep 1
+done
+[ "$saw_stop" = 1 ] \
   || fail "stop completed never fired after LIVEOK"$'\n'"$(cat "$PROBE_LOG" 2>/dev/null)"
 
 # Interrupt path.
@@ -115,7 +124,7 @@ tmux capture-pane -t "$SESSION" -p | grep -qi 'ctrl+c to stop' \
 tmux send-keys -t "$SESSION" C-c
 sleep 2
 tmux capture-pane -t "$SESSION" -p | grep -qi 'Cancelled' \
-  || fail "Ctrl+C did not cancel the in-flight shell"
+  || fail "Ctrl+C did not cancel the in-flight shell"$'\n'"$(tmux capture-pane -t "$SESSION" -p | tail -40)"
 grep -Eq 'stop (aborted|error|completed)' "$PROBE_LOG" \
   || fail "stop hook did not fire after interrupt"$'\n'"$(cat "$PROBE_LOG" 2>/dev/null)"
 

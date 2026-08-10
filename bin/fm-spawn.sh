@@ -1157,9 +1157,10 @@ launch_template() {
     # the supervised interactive session. --yolo (alias of --force) is the Run
     # Everything autonomy mode; --trust skips the workspace trust prompt on a
     # fresh per-task worktree (verified 2026-08-10 on cursor-agent
-    # 2026.08.04-aaa8809). Foreign primary markers are cleared because cursor
-    # sets CURSOR_AGENT=1 itself and otherwise inherits the multiplexer's stored
-    # environment the same way muse does. There is no standalone --effort flag;
+    # 2026.08.04-aaa8809). Foreign primary markers, including an explicitly
+    # supplied CURSOR_AGENT, are cleared so multiplexer's stored environment
+    # cannot override exact cursor-agent ancestry. The CLI itself does not
+    # export CURSOR_AGENT. There is no standalone --effort flag;
     # effort is selected through the model id catalog (or documented bracket
     # overrides on parameterized models), so __EFFORTFLAG__ is intentionally
     # absent. Turn-end and busy ride project-local .cursor hooks installed below.

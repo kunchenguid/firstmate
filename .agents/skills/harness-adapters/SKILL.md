@@ -487,7 +487,7 @@ Cursor Agent CLI is a CREWMATE and SCOUT adapter only.
 | Skill invocation | `/<skill>`, for example `/no-mistakes`. |
 | Autonomy | `--yolo` (alias of `--force`; footer shows `Run Everything`). |
 | Trust dialog | `--trust` skips the workspace trust prompt on a fresh worktree. |
-| Environment marker | `CURSOR_AGENT=1` on the live process; detection also matches exact `cursor-agent` ancestry (never `*cursor*`). |
+| Environment marker | `CURSOR_AGENT=1` is an optional detection fast path, but the verified CLI does not export it itself; exact `cursor-agent` ancestry is the guarantee (never `*cursor*`). |
 | Composer | Idle placeholder `→ Add a follow-up` (U+2192), plain text with no dark-truecolor ghost styling observed. |
 | Effort | No standalone `--effort` flag; see the launch-profile table. |
 | Resume | `--resume [chatId]` / `--continue` exist on the CLI; firstmate has no verified pane-resume contract for cursor yet. |
