@@ -10,8 +10,10 @@
 #   2. The SAME shell glyph INSIDE a bordered composer box is the harness's own
 #      prompt and still reads `empty` (existing behavior preserved).
 #   3. The AGENT prompt glyphs `❯` (claude) and `›` (codex) are a genuine empty
-#      agent composer either way, bordered or bare.
-#   4. Real unsubmitted text reads `pending`; a known idle placeholder reads
+#      agent composer in bordered or verified bare-prompt shapes.
+#   4. A structurally proven PROMPTLESS composer treats every non-empty glyph as
+#      pending text, including glyphs that another harness uses as a prompt.
+#   5. Real unsubmitted text reads `pending`; a known idle placeholder reads
 #      `empty`.
 set -u
 
@@ -21,7 +23,7 @@ set -u
 # shellcheck source=bin/fm-composer-lib.sh
 . "$ROOT/bin/fm-composer-lib.sh"
 
-# classify <bordered> <content> [idle_re] -> echoes the verdict.
+# classify <container> <content> [idle_re] -> echoes the verdict.
 classify() { fm_composer_classify_content "$@"; }
 
 # --- Safety fix: bare shell prompt is NOT an empty agent composer -----------
@@ -82,6 +84,20 @@ test_agent_glyphs_are_empty_bordered_and_bare() {
   pass "fm_composer_classify_content: agent prompt glyphs (❯ claude, › codex) read empty bordered or bare"
 }
 
+# --- Promptless structural composers ----------------------------------------
+
+test_promptless_container_distinguishes_blank_from_every_glyph() {
+  local content out
+  out=$(classify promptless '')
+  [ "$out" = empty ] || fail "a blank promptless composer should read empty, got '$out'"
+  for content in '>' '$' '%' '#' '❯' '›' 'ordinary pending text'; do
+    out=$(classify promptless "$content")
+    [ "$out" = pending ] \
+      || fail "promptless composer content '$content' must read pending, got '$out'"
+  done
+  pass "fm_composer_classify_content: a promptless container reads only blank as empty and every glyph as pending"
+}
+
 # --- Empty content and idle placeholder -------------------------------------
 
 test_empty_content_is_empty() {
@@ -130,6 +146,7 @@ test_stripped_unbordered_content_uses_plain_content
 test_bare_shell_prompt_with_command_is_not_empty
 test_bordered_shell_glyph_is_empty
 test_agent_glyphs_are_empty_bordered_and_bare
+test_promptless_container_distinguishes_blank_from_every_glyph
 test_empty_content_is_empty
 test_idle_placeholder_is_empty
 test_idle_placeholder_case_mode_is_explicit

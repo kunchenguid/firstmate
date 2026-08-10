@@ -354,7 +354,7 @@ backend=herdr
 expected-label=fm-marker-pi-sm
 ```
 
-Pi's separator-only idle composer is outside the Herdr structural classifier's recognized bordered/bare shapes, so composer state was conservatively `unknown` both before and after the send.
+At the time, Pi's separator-only idle composer was outside the Herdr structural classifier's recognized bordered/bare shapes, so composer state was conservatively `unknown` both before and after the send.
 The endpoint's native agent state was idle before submission, and the normal idle-to-working confirmation made `fm-send.sh` return successfully.
 A task-local Pi `before_agent_start` hook then captured the exact received prompt and UTF-8 bytes:
 
@@ -460,12 +460,95 @@ See `fm_backend_herdr_composer_state`, `fm_backend_herdr_wait_for_working`, and 
 ## Composer-state classifier: structural row read, not delta-based
 
 The herdr adapter no longer diffs raw pane content before/after Enter (see the incident above for why that was unsafe).
-It keeps `fm_backend_herdr_composer_state` as a structural classifier for the composer's own row - located as the bottom-most bordered composer row or verified bare prompt row described above - and reports `empty`, `pending`, or `unknown`.
-When ANSI capture is available, the classifier keeps the raw styled row long enough to route it through the shared `fm_composer_strip_ghost` extractor before classification.
+It keeps `fm_backend_herdr_composer_state` as a structural classifier for the composer's own row and reports `empty`, `pending`, or `unknown`.
+The classifier recognizes three shapes in one forward scan, with the bottom-most recognized or invalidating shape winning:
+
+- **Bordered** - the trimmed row starts and ends with the same `│`, `┃`, or ASCII `|` border glyph.
+- **Bare** - the trimmed row starts with the verified agent prompt glyph `❯` for Claude or `›` for Codex.
+- **Pi separator-only** - two equal rules fill the current captured pane width with U+2500 `─`, surround exactly one content row, and that raw ANSI content row contains exactly one Pi Editor fake-cursor cell encoded as `SGR-7 space SGR-0`.
+
+Herdr 0.7.3 does not expose pane columns in `pane get`, so the classifier derives the current width from the terminal display width of the longest ANSI-stripped physical row in the bounded pane capture.
+The Pi shape has no side border and no prompt glyph.
+A matching rule pair with more than one interior row or without the fake cursor is replacement UI or otherwise ambiguous, so it invalidates stale bordered/bare matches above it and reports `unknown`.
+Because Pi has no prompt glyph or ghost content, its promptless shared-classifier mode removes only the exact cursor cell and treats every remaining visible glyph as `pending`, including dim or dark-styled text and text equal to `❯`, `›`, `>`, `$`, `%`, or `#`; only a blank row is `empty`.
+Plain-capture fallback cannot prove Pi's cursor and stays `unknown`.
+Multi-line or scrolled Pi editor content also stays `unknown`, which is conservative because it cannot be an empty composer.
+When ANSI capture is available, bordered and bare rows use the shared `fm_composer_strip_ghost` extractor, while Pi rows use plain visible content after cursor-cell removal.
 The 2026-07-10 incident below records the supported dim/faint and dark-TRUECOLOR ghost/placeholder styling.
 That classifier is still the terminal-backed away-mode compatibility path's affirmative-empty pre-injection guard and the conservative fallback when `fm_backend_herdr_send_text_submit` cannot use an idle/done native agent-state baseline.
 Normal idle-baseline submit confirmation now uses herdr's native agent-state instead; see "Native agent-state submit confirmation" for the current submit path.
 A dedicated composer-state or cursor-row/style primitive is still a candidate upstream Herdr feature request; it would let the guard/fallback classifier eventually reach tmux's cursor-row precision instead of relying on a structural approximation over captured tail rows and ANSI style.
+
+### Pi separator-only composer verification (2026-08-09)
+
+This fix was verified read-only and through ordinary terminal input against an already-running, completed Pi lane in the default Herdr session.
+No Herdr session, workspace, tab, pane, or agent lifecycle command was run.
+The environment was Pi 0.84.0 and Herdr 0.7.3:
+
+```text
+$ pi --version
+0.84.0
+$ herdr --version
+herdr 0.7.3
+```
+
+Herdr's real plain capture showed the idle structure below, with the middle row visually empty.
+The displayed rules are shortened for readability; each captured rule contained exactly 185 U+2500 glyphs and filled the pane width.
+
+```text
+────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────
+<working directory and branch>
+↑178k ↓25k R5.3M CH99.5% $4.289 54.1%/272k (auto)  (openai-codex-5) gpt-5.6-sol • xhigh
+```
+
+The same `pane read --format ansi` showed the top and bottom U+2500 rules in Pi's accent colour and the middle row beginning `\x1b[0m\x1b[7m \x1b[0m`, which is the SGR-7 fake cursor emitted by `@earendil-works/pi-tui`'s `Editor`.
+Before the fix, the branch's real classifier reproduced the defect:
+
+```text
+$ FM_HOME=<platform-v3-home> HERDR_SESSION=default bash -c \
+    '. bin/backends/herdr.sh; fm_backend_herdr_composer_state default:wX:p3H'
+unknown
+```
+
+After the fix, the same real idle pane returned `empty`.
+Literal unsubmitted input and Pi's documented Ctrl+U editor clear then proved the distinct pending and empty states:
+
+```text
+$ herdr pane send-text wX:p3H PI_PENDING_C8 --session default
+$ <same classifier command>
+pending
+$ herdr pane send-keys wX:p3H ctrl+u --session default
+$ <same classifier command>
+empty
+$ herdr pane send-text wX:p3H '❯' --session default
+$ <same classifier command>
+pending
+$ herdr pane send-keys wX:p3H ctrl+u --session default
+$ <same classifier command>
+empty
+```
+
+The literal `❯` case proves Pi's promptless mode does not inherit Claude's prompt-glyph semantics.
+Opening Pi's real `/model` replacement UI returned `unknown`, and Escape restored `empty`.
+The selector used the same full-width DynamicBorder primitive but had multiple interior rows, proving that separator rules alone do not authorize input.
+An executed capture-failure case also returned `unknown`.
+The unchanged classifier returned `empty` against separate real idle Claude and Codex panes in the same Herdr 0.7.3 session, in addition to the captured-fixture regressions below.
+
+The public send path was exercised with a task-local metadata home pointing at that same live pane:
+
+```text
+$ FM_HOME=<task-local-home> FM_SEND_SETTLE=0 bin/fm-send.sh v3-gate-open-w9 \
+    'HERDR_PI_E2E_C8_20260809: Reply with exactly HERDR_PI_E2E_OK_C8 and do not modify files or status.'
+fm_send_exit=0
+final_agent_state=done
+prompt_hits=1
+exact_response_lines=1
+```
+
+The real Pi transcript contained the prompt once and the response `HERDR_PI_E2E_OK_C8`, proving `fm-send` passed its preflight, staged and submitted the text, and reached the running agent end to end.
+`FM_TEST_FOCUSED=composer-pi tests/fm-backend-herdr.test.sh` pins empty, pending, cursorless, modal, multi-line, unreadable, bare-shell, Claude, and Codex cases without requiring a live lane.
 
 All implemented backends expose the identical caller-facing verdict vocabulary (`empty`, `pending`, `unknown`, `send-failed`).
 `fm-send.sh` additionally requires an affirmative `empty` preflight for Herdr text sends before it stages text; [`fm-send` modal safety](fm-send-modal-safety.md) owns that guard's scope, evidence, and remaining race.
@@ -792,7 +875,8 @@ The terminal-backed away-mode compatibility injector (`bin/fm-supervise-daemon.s
 The herdr adapter was already safe here (its bare shape only matches the agent glyphs `❯`/`›`; a bare shell prompt has no composer row and reads `unknown`), which is why its structural classifier is the prior art for the fix.
 
 **Consolidation.** The one glyph/idle/pending decision now lives in a single shared owner, `bin/fm-composer-lib.sh`'s `fm_composer_classify_content`, which every adapter delegates to: `fm_tmux_composer_state` (via `bin/fm-tmux-lib.sh`), `fm_backend_herdr_composer_state`, `fm_backend_orca_composer_state`, and `fm_backend_cmux_composer_state`.
-Each adapter still owns its own capture and structural row-finding (genuinely different primitives), then hands the border-stripped, trimmed candidate content plus a `<bordered>` flag to the shared classifier.
+Each adapter still owns its own capture and structural row-finding (genuinely different primitives), then hands the border-stripped, trimmed candidate content plus a container mode to the shared classifier.
+The promptless mode added for Pi preserves the same one-owner rule while preventing glyphs that are prompts in Claude or Codex from being misread as prompts in Pi.
 
 **The safety rule.** A bare shell prompt glyph is a genuine empty agent composer ONLY inside a bordered composer container (where the harness draws its own prompt glyph, e.g. claude's older `| > ... |`).
 On a bare, unstructured row it is a dead-shell prompt and reads `unknown` (not a safe injection target), never `empty`.

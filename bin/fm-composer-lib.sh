@@ -20,7 +20,10 @@
 # glyph (e.g. claude's older `| > ... |`). On a bare, unstructured row it is a
 # dead-shell prompt and is NEVER "empty"; it classifies as `unknown` (not a safe
 # injection target). The AGENT prompt glyphs `❯` (claude) and `›` (codex) are a
-# genuine empty agent composer either way, bordered or bare.
+# genuine empty agent composer in verified bordered/bare-prompt shapes. A
+# structurally proven promptless composer such as Pi's separator-only Editor is
+# the deliberate exception: every non-empty glyph is typed input and therefore
+# `pending`, while only a truly blank content row is `empty`.
 #
 # GHOST/PLACEHOLDER TEXT is the other half of this owner (task
 # afk-herdr-false-pending): a harness fills an otherwise-empty composer with
@@ -43,7 +46,7 @@
 # tail scan, orca/cmux's plain read-screen). Once an adapter has a candidate
 # composer row it hands the RAW styled row to fm_composer_strip_ghost for the
 # real-typed-content extraction, strips the box borders, trims, and hands the
-# result plus a <bordered> flag to fm_composer_classify_content for the shared
+# result plus a <container> mode to fm_composer_classify_content for the shared
 # empty|pending|unknown verdict. orca/cmux read a plain (unstyled) screen so
 # they have no ghost styling to strip and rely on the idle-placeholder match
 # below. Re-sourcing is a cheap idempotent redefinition, so this file needs no
@@ -160,10 +163,12 @@ fm_composer_strip_ghost() {
 }
 
 # fm_composer_classify_content: the single shared composer-content verdict.
-#   <bordered> 1 when <content> came from a genuine agent-composer container (a
-#              bordered composer box, or a structurally-identified bare AGENT
-#              prompt row); 0 for a bare, unstructured row (e.g. tmux's raw
-#              cursor line that carried no box border).
+#   <container> 1 when <content> came from a bordered composer box whose leading
+#               shell/agent glyph can be the harness prompt; 0 for a bare,
+#               unstructured row whose only verified prompts are the AGENT
+#               glyphs; `promptless` for a structurally proven composer such as
+#               Pi's separator-only Editor, where every non-empty glyph is real
+#               typed content because the harness renders no prompt at all.
 #   <content>  the candidate composer content, already border-stripped and
 #              whitespace-trimmed by the caller.
 #   [idle_re]  optional per-harness idle-placeholder regex (e.g. grok's
@@ -179,10 +184,14 @@ fm_composer_idle_matches() {
   esac
 }
 
-fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [plain_content]
-  local bordered=$1 content=$2 idle_re=${3:-} idle_case=${4:-sensitive} plain_content
+fm_composer_classify_content() {  # <container> <content> [idle_re] [idle_case] [plain_content]
+  local container=$1 content=$2 idle_re=${3:-} idle_case=${4:-sensitive} plain_content
   plain_content=${5:-$content}
-  if [ "$bordered" != 1 ] && [ -z "$content" ] && [ -n "$plain_content" ]; then
+  if [ "$container" = promptless ]; then
+    if [ -n "$content" ]; then printf 'pending'; else printf 'empty'; fi
+    return 0
+  fi
+  if [ "$container" != 1 ] && [ -z "$content" ] && [ -n "$plain_content" ]; then
     case "$plain_content" in
       '❯'|'›') printf 'empty'; return 0 ;;
       *) printf 'unknown'; return 0 ;;
@@ -196,7 +205,7 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
     '>'|'$'|'%'|'#')
       # Shell prompt glyph: empty ONLY inside a composer box (the harness's own
       # prompt). Bare, it is a dead-shell prompt - never a safe injection target.
-      if [ "$bordered" = 1 ]; then printf 'empty'; else printf 'unknown'; fi
+      if [ "$container" = 1 ]; then printf 'empty'; else printf 'unknown'; fi
       return 0 ;;
   esac
   # Nothing on the row = empty composer.

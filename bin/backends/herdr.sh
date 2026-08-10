@@ -2798,7 +2798,7 @@ fm_backend_herdr_strip_ansi() {  # <text>
 # fm_backend_herdr_composer_state: classify the composer's own row as
 # empty|pending|unknown, scanning a generous tail-window capture of <target>.
 # herdr's CLI exposes no cursor-row primitive (unlike tmux's #{cursor_y}), so
-# this locates the composer row structurally, recognizing TWO row shapes and
+# this locates the composer row structurally, recognizing THREE row shapes and
 # keeping whichever match comes LAST (scanning forward), so a shape earlier in
 # scrollback/a popup can never outrank the real (bottom-anchored) composer row:
 #
@@ -2827,6 +2827,18 @@ fm_backend_herdr_strip_ansi() {  # <text>
 #              deliberately narrower than the bordered content classifier so a
 #              no-agent shell fallback prompt (`>`, `$`, `%`, or `#`) falls
 #              through to `unknown` instead of being misread as delivered.
+#   pi       - an UNBORDERED editor (verified real pi 0.84.0 under herdr 0.7.3):
+#              two equal full-width rules made only of U+2500 BOX DRAWINGS LIGHT
+#              HORIZONTAL, with exactly one content row between them. Pi draws
+#              neither side borders nor a prompt glyph. The raw ANSI content
+#              row must contain exactly one `SGR-7 space SGR-0` cursor cell. This
+#              distinguishes the live editor from transcript separators and
+#              replacement UI: a rule pair with more than one interior row or
+#              without that cursor is a modal/unknown shape, and it overrides
+#              stale bordered or bare matches above it rather than authorizing
+#              input. Plain-capture fallback cannot prove the cursor and stays
+#              unknown. Multi-line/scrolled Pi input also stays unknown, which
+#              is the fail-closed direction because it cannot be empty.
 #
 #   empty   - blank, a bare prompt glyph, known ghost/placeholder text
 #             ("Type a message...", verified grok 0.2.82's empty-composer
@@ -2840,19 +2852,13 @@ fm_backend_herdr_strip_ansi() {  # <text>
 #             composer (e.g. "/compact" -> "/compact compaction
 #             instructions", verified live against real grok 0.2.82) - that
 #             first Enter is a SELECTION, not a submission.
-#   unknown - the pane could not be read, or no composer row (of either shape)
-#             was found in the captured window.
+#   unknown - the pane could not be read, or no composer row of a recognized
+#             shape was found in the captured window.
 #
-# Ghost/placeholder note: herdr's ANSI pane read preserves the harness's own
-# de-emphasis styling, and the classifier extracts real typed content with the
-# shared fm_composer_strip_ghost (bin/fm-composer-lib.sh), which drops dim/faint
-# runs (claude's rotating prompt suggestion, codex's idle suggestion after the
-# bare `›` prompt) AND dark/muted truecolor foreground runs (grok's placeholder),
-# while keeping non-de-emphasised real typed input. This is the same owner the
-# tmux adapter routes through, so the two backends cannot drift (task
-# afk-herdr-false-pending); it superseded a herdr-only faint byte-pattern check
-# that recognized only codex's bold-wrapped bare prompt and missed claude's own
-# dim ghost - the overnight away-mode injection wedge on the primary claude pane.
+# Ghost/placeholder note: bordered and bare rows use the shared
+# fm_composer_strip_ghost extractor described above. Pi rows instead remove the
+# exact cursor cell and strip ANSI without dropping styled glyphs because Pi has
+# no ghost content and every non-empty glyph is pending input.
 FM_BACKEND_HERDR_COMPOSER_LINES=${FM_BACKEND_HERDR_COMPOSER_LINES:-20}
 # Known ghost/placeholder composer text. Extend this if another
 # herdr-verified harness needs its own idle placeholder recognized.
@@ -2867,18 +2873,134 @@ fm_backend_herdr_is_bare_prompt_row() {  # <plain-trimmed-row>
   esac
 }
 
+fm_backend_herdr_display_columns() {
+  # shellcheck disable=SC2016 # The single-quoted payload is Perl, not shell.
+  fm_backend_herdr_control_perl -MEncode=decode,FB_CROAK -e '
+    local $/;
+    my $bytes = <STDIN>;
+    $bytes = "" unless defined $bytes;
+    my $text;
+    eval { $text = decode("UTF-8", $bytes, FB_CROAK) };
+    exit 1 if $@;
+    my $max = 0;
+    for my $line (split /\n/, $text, -1) {
+      $line =~ s/\r\z//;
+      my $width = 0;
+      for my $cluster ($line =~ /\X/g) {
+        if ($cluster eq "\t") {
+          $width += 8 - ($width % 8);
+        } elsif ($cluster =~ /\p{Emoji_Presentation}|\p{Regional_Indicator}|\x{20E3}|\x{FE0F}/) {
+          $width += 2;
+        } elsif ($cluster =~ /\p{East_Asian_Width=Wide}|\p{East_Asian_Width=Fullwidth}/) {
+          $width += 2;
+        } elsif ($cluster !~ /\A[\p{Mn}\p{Me}\p{Cf}\p{Cc}]*\z/) {
+          $width += 1;
+        }
+      }
+      $max = $width if $width > $max;
+    }
+    print $max;
+  '
+}
+
+fm_backend_herdr_is_pi_rule_row() {  # <plain-trimmed-row>
+  local rule=$1 pane_width=$2 rule_width
+  rule_width=$(printf '%s' "$rule" | fm_backend_herdr_display_columns) || return 1
+  case "$1" in
+    '─'*) [ "$rule_width" -eq "$pane_width" ] && [ -z "${rule//─/}" ] ;;
+    *) return 1 ;;
+  esac
+}
+
+fm_backend_herdr_is_pi_boundary_row() {  # <plain-trimmed-row>
+  case "$1" in
+    '─'*) [ -z "${1//─/}" ] ;;
+    *) return 1 ;;
+  esac
+}
+
+fm_backend_herdr_pi_plain_content() {  # <raw-ansi-row>
+  local raw=$1 cursor=$'\033[7m \033[0m' before after
+  # Pi's Editor renders exactly one fake cursor cell as SGR-7, one space, then
+  # SGR-0. Reject any other reverse-video run or a second cursor cell.
+  case "$raw" in
+    *"$cursor"*) ;;
+    *) return 1 ;;
+  esac
+  before=${raw%%"$cursor"*}
+  after=${raw#*"$cursor"}
+  case "$before$after" in
+    *$'\033[7m'*) return 1 ;;
+  esac
+  printf '%s%s' "$before" "$after" | fm_composer_strip_ansi
+}
+
 fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
-  local target=$1 cap line trimmed found=0 shape="" raw_match="" bordered=0 stripped
+  local target=$1 cap plain_cap pane_width line plain trimmed found=0 shape="" raw_match="" container=0 stripped
+  local pi_rule="" pi_rows=0 pi_middle_raw="" pi_middle_trimmed="" last_trimmed=""
   cap=$(fm_backend_herdr_capture_ansi "$target" "$FM_BACKEND_HERDR_COMPOSER_LINES" 2>/dev/null \
     || fm_backend_herdr_capture "$target" "$FM_BACKEND_HERDR_COMPOSER_LINES") || { printf 'unknown'; return 0; }
+  plain_cap=$(fm_backend_herdr_strip_ansi "$cap")
+  pane_width=$(printf '%s' "$plain_cap" | fm_backend_herdr_display_columns 2>/dev/null) \
+    || { printf 'unknown'; return 0; }
+  [ "$pane_width" -gt 0 ] || { printf 'unknown'; return 0; }
   # Structural scan: locate the bottom-most composer row and remember its RAW
   # (styled) bytes. Shape detection runs on the plain row (fm_backend_herdr_strip_ansi
   # keeps ghost text so the border/prompt glyph is still visible); the raw row is
   # kept for ANSI-aware content extraction after the scan.
   while IFS= read -r line; do
-    trimmed=$(fm_backend_herdr_strip_ansi "$line")
-    trimmed="${trimmed#"${trimmed%%[![:space:]]*}"}"
+    plain=$(fm_backend_herdr_strip_ansi "$line")
+    trimmed="${plain#"${plain%%[![:space:]]*}"}"
     trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
+
+    # Pi's main editor is the exact rule/content/rule triple documented above.
+    # A closing rule for any other equal-rule pair identifies replacement UI
+    # (or an otherwise ambiguous shape) and deliberately invalidates an older
+    # bordered/bare match. Claude's verified rule/❯/rule composer remains owned
+    # by the bare branch and is not invalidated here.
+    if fm_backend_herdr_is_pi_boundary_row "$trimmed"; then
+      if fm_backend_herdr_is_pi_rule_row "$trimmed" "$pane_width"; then
+        if [ -n "$pi_rule" ] && [ "$pi_rule" = "$trimmed" ]; then
+          if [ "$pi_rows" -eq 1 ] && fm_backend_herdr_pi_plain_content "$pi_middle_raw" >/dev/null; then
+            shape=pi
+            raw_match=$pi_middle_raw
+            found=1
+          elif [ "$pi_rows" -eq 1 ] && fm_backend_herdr_is_bare_prompt_row "$pi_middle_trimmed"; then
+            :
+          else
+            shape=pi-unknown
+            raw_match=""
+            found=0
+          fi
+        elif ! fm_backend_herdr_is_bare_prompt_row "$last_trimmed"; then
+          shape=pi-unknown
+          raw_match=""
+          found=0
+        fi
+        pi_rule=$trimmed
+      else
+        pi_rule=""
+        if ! fm_backend_herdr_is_bare_prompt_row "$last_trimmed"; then
+          shape=pi-unknown
+          raw_match=""
+          found=0
+        fi
+      fi
+      pi_rows=0
+      pi_middle_raw=""
+      pi_middle_trimmed=""
+      last_trimmed=$trimmed
+      continue
+    fi
+    if [ -n "$pi_rule" ]; then
+      pi_rows=$((pi_rows + 1))
+      if [ "$pi_rows" -eq 1 ]; then
+        pi_middle_raw=$line
+        pi_middle_trimmed=$trimmed
+      fi
+    fi
+    last_trimmed=$trimmed
+
     [ -n "$trimmed" ] || continue
     case "$trimmed" in
       '│'*'│'|'┃'*'┃'|'|'*'|')
@@ -2896,30 +3018,31 @@ fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
     esac
   done < <(printf '%s\n' "$cap")
   [ "$found" -eq 1 ] || { printf 'unknown'; return 0; }
-  # Content: extract the real typed text from the raw row with the shared,
-  # fleet-wide ghost stripper (bin/fm-composer-lib.sh), which drops dim/faint AND
-  # dark-truecolor ghost/placeholder runs. This replaces the former herdr-only
-  # faint byte-pattern check (which recognized only Codex's bold-wrapped bare
-  # prompt and missed claude's own dim prompt-suggestion ghost - the overnight
-  # afk-herdr-false-pending wedge) and, in a dark theme, drops the composer's own
-  # dark box border too, which is why the bordered flag was read from the plain
-  # shape above, not from this ghost-stripped content.
-  stripped=$(printf '%s\n' "$raw_match" | fm_composer_strip_ghost)
+  if [ "$shape" = pi ]; then
+    stripped=$(fm_backend_herdr_pi_plain_content "$raw_match")
+  else
+    stripped=$(printf '%s\n' "$raw_match" | fm_composer_strip_ghost)
+  fi
   stripped="${stripped#"${stripped%%[![:space:]]*}"}"
   stripped="${stripped%"${stripped##*[![:space:]]}"}"
   if [ "$shape" = bordered ]; then
-    bordered=1
+    container=1
     stripped=${stripped//│/}
     stripped=${stripped//┃/}
     stripped=${stripped//|/}
     stripped="${stripped#"${stripped%%[![:space:]]*}"}"
     stripped="${stripped%"${stripped##*[![:space:]]}"}"
+  elif [ "$shape" = pi ]; then
+    # Pi is structurally proven but promptless. This mode lets a blank content
+    # row read empty while treating every non-empty glyph - including `❯`, `›`,
+    # and shell-style glyphs - as real pending text rather than a harness prompt.
+    container=promptless
   fi
   # Delegate the empty/pending/unknown decision to the shared owner. The bare
   # shape only ever starts with an AGENT glyph (`❯` or `›`), so a bare shell
   # prompt never reaches here - it stays `unknown` via the no-composer-row path
   # above, exactly as before.
-  fm_composer_classify_content "$bordered" "$stripped" "$FM_BACKEND_HERDR_IDLE_RE"
+  fm_composer_classify_content "$container" "$stripped" "$FM_BACKEND_HERDR_IDLE_RE"
 }
 
 # fm_backend_herdr_send_text_submit: type <text> into <target> once (raw,
