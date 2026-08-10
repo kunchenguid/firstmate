@@ -393,6 +393,10 @@ Follow the guidance no-mistakes itself provides for the mechanics: it loads when
 When starting no-mistakes, make \`--intent\` preserve all relevant content from this brief's \`# Task\` section plus every later accepted Firstmate requirement, clarification, constraint, exclusion, and supersession, carrying only each requirement's current accepted form; retain direct requirements instead of substituting a diff summary, and exclude generic operational, status, delivery, and other scaffold boilerplate unless it is task-specific.
 Do not hand-edit, commit, or fix findings yourself while a run is active - the pipeline applies every fix.
 
+Prefer folding documentation-only follow-up changes into the next known code round - review findings, a queued fix, or anything else - instead of starting a separate validation run.
+When a documentation-only change is genuinely the last thing standing, use \`--skip test\` with \`no-mistakes axi run\` or top-level \`no-mistakes\` so the pipeline skips the \`test\` step, and confirm the current flag and accepted step names with \`no-mistakes axi run --help\` in this worktree.
+Documentation-only means no change to any source, test, configuration, dependency, or build file - documentation and comments only; anything else is an ordinary code round.
+
 Two firstmate-specific rules layer on top of that guidance:
 - ask-user findings are never yours to answer: escalate to firstmate (rule 6) and stop.
   Firstmate applies the authority contract in its \`AGENTS.md\` and obtains any required captain decision.

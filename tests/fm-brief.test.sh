@@ -354,6 +354,39 @@ test_no_mistakes_dod_wording() {
   pass "fm-brief.sh: no-mistakes DOD keeps its apostrophe prose, now parse-safe"
 }
 
+test_docs_only_pipeline_guidance_is_no_mistakes_only() {
+  local home id brief
+  home="$TMP_ROOT/docs-only-guidance-home"
+  mkdir -p "$home/data"
+
+  id="brief-docs-only-no-mistakes"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep "Prefer folding documentation-only follow-up changes into the next known code round" "$brief" \
+    "no-mistakes brief lost the documentation-only folding guidance"
+  # shellcheck disable=SC2016 # Literal backticks must stay unexpanded.
+  assert_grep 'use `--skip test` with `no-mistakes axi run` or top-level `no-mistakes`' "$brief" \
+    "no-mistakes brief lost the verified pipeline skip guidance"
+  assert_grep "Documentation-only means no change to any source, test, configuration, dependency, or build file" "$brief" \
+    "no-mistakes brief lost the concrete documentation-only definition"
+  # shellcheck disable=SC2016 # Literal backticks must stay unexpanded.
+  assert_grep 'confirm the current flag and accepted step names with `no-mistakes axi run --help`' "$brief" \
+    "no-mistakes brief lost the version-matched help instruction"
+
+  for mode in direct-PR local-only; do
+    id="brief-docs-only-$mode"
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" >/dev/null 2>&1
+    brief="$home/data/$id/brief.md"
+    assert_no_grep "Prefer folding documentation-only follow-up changes" "$brief" \
+      "$mode brief unexpectedly gained no-mistakes documentation-only guidance"
+    # shellcheck disable=SC2016 # Literal backticks must stay unexpanded.
+    assert_no_grep 'Use `--skip test` with `no-mistakes axi run`' "$brief" \
+      "$mode brief unexpectedly gained the no-mistakes pipeline skip guidance"
+  done
+
+  pass "fm-brief.sh: documentation-only pipeline guidance is limited to no-mistakes briefs"
+}
+
 test_ship_project_memory_wording() {
   local home id brief
   home="$TMP_ROOT/project-memory-home"
@@ -719,6 +752,7 @@ test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
+test_docs_only_pipeline_guidance_is_no_mistakes_only
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
