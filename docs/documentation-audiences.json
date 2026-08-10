@@ -205,6 +205,10 @@
       "audience": "public-product"
     },
     {
+      "path": "docs/adlc-standard.md",
+      "audience": "maintainer-architecture"
+    },
+    {
       "path": "docs/agent-control.md",
       "audience": "maintainer-architecture"
     },

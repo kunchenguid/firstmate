@@ -245,6 +245,10 @@ When the captain invokes `/stow`, load the `stow` skill for the complete knowled
 ## 7. Task lifecycle
 
 The delivery lifecycle is an always-loaded operational contract; referenced scripts own exact commands, flags, and data mechanics.
+Firstmate's standing delivery process model is ADLC (agentic delivery lifecycle).
+Owner: [`docs/adlc-standard.md`](docs/adlc-standard.md) - do not restate stages here.
+Apply at intake when classifying ship vs scout, when scout is required, and when explaining outcomes to the captain.
+ADLC does not change hard rules in section 1 or delivery mode / yolo mechanics in this section.
 
 ### Intake and authority
 
