@@ -923,8 +923,10 @@ test_send_text_submit_detects_landed_send() {
   dir="$TMP_ROOT/submit-ok"; mkdir -p "$dir/responses"
   zellij_pane_response "$dir" 1 7 3
   zellij_pane_response "$dir" 3 7 3
+  printf '%s' $'❯ hello captain' > "$dir/responses/4.out"
   zellij_pane_response "$dir" 5 7 3
-  printf '%s' $'hello captain\n❯ ' > "$dir/responses/6.out"
+  zellij_pane_response "$dir" 7 7 3
+  printf '%s' $'hello captain\n❯ ' > "$dir/responses/8.out"
   fb=$(make_zellij_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
     FM_ZELLIJ_SESSION_LIST="firstmate" \
@@ -945,11 +947,13 @@ test_send_text_submit_detects_swallowed_enter() {
   dir="$TMP_ROOT/submit-swallow"; mkdir -p "$dir/responses"
   zellij_pane_response "$dir" 1 7 3
   zellij_pane_response "$dir" 3 7 3
+  printf '%s' $'❯ hello captain' > "$dir/responses/4.out"
   zellij_pane_response "$dir" 5 7 3
   zellij_pane_response "$dir" 7 7 3
+  printf '%s' $'❯ hello captain' > "$dir/responses/8.out"
   zellij_pane_response "$dir" 9 7 3
-  printf '%s' $'❯ hello captain' > "$dir/responses/6.out"
-  printf '%s' $'❯ hello captain' > "$dir/responses/10.out"
+  zellij_pane_response "$dir" 11 7 3
+  printf '%s' $'❯ hello captain' > "$dir/responses/12.out"
   fb=$(make_zellij_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
     FM_ZELLIJ_SESSION_LIST="firstmate" \
@@ -971,11 +975,13 @@ test_send_text_submit_unrelated_change_is_not_delivery() {
   dir="$TMP_ROOT/submit-false-positive"; mkdir -p "$dir/responses"
   zellij_pane_response "$dir" 1 7 3
   zellij_pane_response "$dir" 3 7 3
+  printf '%s' $'clock 12:00:00\n❯ hello captain' > "$dir/responses/4.out"
   zellij_pane_response "$dir" 5 7 3
   zellij_pane_response "$dir" 7 7 3
+  printf '%s' $'clock 12:00:01\n❯ hello captain' > "$dir/responses/8.out"
   zellij_pane_response "$dir" 9 7 3
-  printf '%s' $'clock 12:00:01\n❯ hello captain' > "$dir/responses/6.out"
-  printf '%s' $'clock 12:00:02\n❯ hello captain' > "$dir/responses/10.out"
+  zellij_pane_response "$dir" 11 7 3
+  printf '%s' $'clock 12:00:02\n❯ hello captain' > "$dir/responses/12.out"
   fb=$(make_zellij_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
     FM_ZELLIJ_SESSION_LIST="firstmate" \
@@ -983,6 +989,22 @@ test_send_text_submit_unrelated_change_is_not_delivery() {
   [ "$out" != empty ] || fail "an unrelated pane change must never read as delivered (the content-diff false positive)"
   [ "$out" = pending ] || fail "the still-typed composer should classify pending, got '$out'"
   pass "fm_backend_zellij_send_text_submit: an unrelated pane change is not a delivery confirmation (false-positive regression)"
+}
+
+test_send_text_submit_rejects_unobserved_paste() {
+  local dir fb out
+  dir="$TMP_ROOT/submit-unobserved"; mkdir -p "$dir/responses"
+  zellij_pane_response "$dir" 1 7 3
+  zellij_pane_response "$dir" 3 7 3
+  printf '%s' $'transcript line\n❯ ' > "$dir/responses/4.out"
+  fb=$(make_zellij_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST="firstmate" \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_send_text_submit firstmate:7 "hello captain" 2 0.01 0.01' "$ROOT" )
+  [ "$out" = send-failed ] || fail "an unobserved paste should report send-failed, got '$out'"
+  assert_not_contains "$(cat "$dir/log")" $'\x1f''send-keys' \
+    "send_text_submit should not send Enter when the pasted text was not observed"
+  pass "fm_backend_zellij_send_text_submit: refuses confirmation when paste exits successfully without typing"
 }
 
 test_composer_state_reads_styled_dump() {
@@ -1179,6 +1201,7 @@ test_forced_secondmate_teardown_kills_zellij_children_with_child_home_tag
 test_send_text_submit_detects_landed_send
 test_send_text_submit_detects_swallowed_enter
 test_send_text_submit_unrelated_change_is_not_delivery
+test_send_text_submit_rejects_unobserved_paste
 test_composer_state_reads_styled_dump
 test_composer_state_dead_pane_is_unknown
 test_send_text_submit_send_failed_when_session_absent

@@ -536,6 +536,22 @@ fm_backend_zellij_composer_state() {  # <target> [expected-label] -> empty|pendi
   printf '%s' "$verdict"
 }
 
+fm_backend_zellij_composer_observed_text() {  # <target> <text> [expected-label]
+  local target=$1 text=$2 expected_label=${3:-} cap caps verdict plain needle
+  [ -n "$text" ] || return 1
+  cap=$(fm_backend_zellij_composer_capture "$target" "$expected_label") || return 1
+  caps=$(printf 'styled=1\ncursor=0\nidentity=0\nrows=%s' "$FM_COMPOSER_CAPTURE_LINES")
+  verdict=$(fm_composer_classify_screen "$caps" "$cap")
+  case "$verdict" in pending|pending-unproven) ;; *) return 1 ;; esac
+  plain=$(printf '%s' "$cap" | fm_composer_strip_ansi)
+  fm_composer_normalize_spaces_var plain
+  fm_composer_normalize_spaces_var text
+  plain=${plain//[$' \t\r\n\v\f']/}
+  needle=${text//[$' \t\r\n\v\f']/}
+  [ -n "$needle" ] || return 1
+  case "$plain" in *"$needle"*) return 0 ;; *) return 1 ;; esac
+}
+
 # fm_backend_zellij_send_text_submit: type <text> into <target> once (raw,
 # unsubmitted, via send_literal), then drive the shared verify-and-retry-Enter
 # loop (bin/fm-composer-lib.sh: fm_composer_submit_retry_core) against the
@@ -547,6 +563,8 @@ fm_backend_zellij_send_text_submit() {  # <target> <text> <retries> <enter-sleep
   local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 expected_label=${6:-}
   fm_backend_zellij_send_literal "$target" "$text" "$expected_label" || { printf 'send-failed'; return 0; }
   sleep "$settle"
+  fm_backend_zellij_composer_observed_text "$target" "$text" "$expected_label" \
+    || { printf 'send-failed'; return 0; }
   fm_composer_submit_retry_core fm_backend_zellij_send_key fm_backend_zellij_composer_state \
     "$target" "$retries" "$sleep_s" "$expected_label"
 }
