@@ -238,6 +238,26 @@ test_omp_source_isolation() {
   pass "OMP trusts only its exact per-task extension lifecycle source"
 }
 
+test_raw_omp_identity_is_unverified_for_direct_callers() {
+  local state out
+  state=$(new_state_dir raw-omp-identity)
+  fm_backend_busy_state() { printf 'busy'; }
+  out=$(fm_busy_classify herdr s:p raw-omp t1 "$state")
+  [ "$out" = "unknown raw-unverified" ] \
+    || fail "Herdr must reject raw-omp before native busy classification, got '$out'"
+  out=$(fm_busy_classify tmux w1 raw-omp t1 "$state")
+  [ "$out" = "unknown raw-unverified" ] \
+    || fail "tmux must reject raw-omp at the shared classifier, got '$out'"
+  out=$(FM_HARNESS_UNVERIFIED=raw-launch fm_busy_classify herdr s:p omp t1 "$state")
+  [ "$out" = "unknown raw-unverified" ] \
+    || fail "Herdr must reject the inherited raw-launch marker, got '$out'"
+  out=$(FM_HARNESS_UNVERIFIED=raw-launch fm_busy_classify tmux w1 omp t1 "$state")
+  [ "$out" = "unknown raw-unverified" ] \
+    || fail "tmux must reject the inherited raw-launch marker, got '$out'"
+  unset -f fm_backend_busy_state
+  pass "direct Herdr and tmux busy callers reject raw OMP identities"
+}
+
 test_converted_adapters_ignore_footer_text() {
   local state out h
   state=$(new_state_dir no-footer)
@@ -417,6 +437,7 @@ test_malformed_record_unknown
 test_record_without_sidecar_unknown
 test_source_mismatch_cross_adapter
 test_omp_source_isolation
+test_raw_omp_identity_is_unverified_for_direct_callers
 test_converted_adapters_ignore_footer_text
 test_grok_regex_isolated
 test_codex_unverified_gate
