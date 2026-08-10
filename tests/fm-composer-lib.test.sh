@@ -531,6 +531,21 @@ test_selected_content_is_composer_scoped_and_wrap_normalized() {
   pass "fm_composer_extract_selected_content: scopes user content and excludes furniture"
 }
 
+test_claude_nbsp_padding_is_normalized_narrowly() {
+  local nbsp=$'\xc2\xa0' zwj=$'\xe2\x80\x8d' out
+  out=$(LC_ALL=C classify 0 "❯$nbsp")
+  [ "$out" = empty ] || fail "an NBSP-padded claude prompt should read empty, got '$out'"
+  out=$(LC_ALL=C classify 0 "❯${nbsp}draft")
+  [ "$out" = pending ] || fail "real text after the NBSP pad should remain pending, got '$out'"
+  out=$(LC_ALL=C classify 0 '' '' sensitive "❯$nbsp")
+  [ "$out" = empty ] || fail "NBSP padding in plain content should read empty, got '$out'"
+  out=$(LC_ALL=C classify 0 ">$nbsp")
+  [ "$out" = unknown ] || fail "an NBSP-padded bare shell prompt should remain unknown, got '$out'"
+  out=$(LC_ALL=C classify 0 "$zwj")
+  [ "$out" = pending ] || fail "an isolated join control should remain pending, got '$out'"
+  pass "fm_composer_classify_content: normalizes only Claude's NBSP pad under LC_ALL=C"
+}
+
 test_bare_shell_glyphs_are_unknown
 test_stripped_unbordered_content_uses_plain_content
 test_bare_shell_prompt_with_command_is_not_empty
@@ -559,3 +574,4 @@ test_incomplete_lower_box_invalidates_stale_candidate
 test_titled_bottom_requires_matching_width
 test_cursor_on_proven_box_bottom_classifies_content
 test_selected_content_is_composer_scoped_and_wrap_normalized
+test_claude_nbsp_padding_is_normalized_narrowly

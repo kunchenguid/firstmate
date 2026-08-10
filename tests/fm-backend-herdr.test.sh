@@ -3169,6 +3169,19 @@ test_composer_state_claude_unbordered_prompt_is_pending() {
   pass "fm_backend_herdr_composer_state: a real-claude unbordered '❯ <text>' prompt row reads pending"
 }
 
+# Claude pads its real idle composer prompt with U+00A0 rather than ASCII space.
+test_composer_state_claude_unbordered_nbsp_pad_is_empty() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-claude-bare-nbsp-empty"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '  20\n  21\n\n\xe2\x9c\xbb Worked for 2s\n\n\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\n\xe2\x9d\xaf\xc2\xa0\n\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\n  Opus 4.8 (1M context)   \xe2\x96\x8d               3%%\n  \xe2\x86\x90 for agents\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( LC_ALL=C FM_BACKEND_HERDR_IDLE_RE='^Type a message\.\.\.$' \
+    PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = empty ] || fail "the real Claude '❯'+U+00A0 idle composer should read empty, got '$out'"
+  pass "fm_backend_herdr_composer_state: Claude's U+00A0-padded idle composer reads empty"
+}
+
 # The exact incident shape: a bordered decorative box (claude's own startup
 # welcome banner) is STILL in the capture window, sitting ABOVE the live,
 # unbordered "❯" prompt. Before the fix, the bordered branch was the ONLY one
@@ -4328,6 +4341,7 @@ test_composer_state_pi_incomplete_separator_below_stale_generic_is_unknown
 test_composer_state_pi_separator_requires_safe_native_identity
 test_composer_state_claude_unbordered_prompt_is_empty
 test_composer_state_claude_unbordered_prompt_is_pending
+test_composer_state_claude_unbordered_nbsp_pad_is_empty
 test_composer_state_bare_prompt_below_stale_bordered_banner_wins
 test_composer_state_claude_dim_prompt_suggestion_ghost_is_empty
 test_composer_state_claude_dim_ghost_row_with_real_text_is_pending
