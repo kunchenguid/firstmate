@@ -1,7 +1,7 @@
 # Primary turn-end supervision guard
 
 This is the authoritative current contract for the "no turn ends blind" primary backstop referenced from AGENTS.md section 8.
-The predicate lives in `bin/fm-turnend-guard.sh`.
+The turn-end predicate lives in `bin/fm-turnend-guard.sh` and delegates the shared supervision-need decision to its sole authority, `bin/fm-supervision-lib.sh`.
 Primary scope lives in `bin/fm-primary-scope-lib.sh`, shared with the native session-start nudge in [`sessionstart-nudge.md`](sessionstart-nudge.md).
 Harness hook files adapt each enabled primary harness integration's turn-end mechanism to that shared predicate.
 
@@ -26,7 +26,10 @@ An unmarked checkout or invalid marker falls through to the git-dir check.
 That check keeps crewmate and scout linked worktrees inert because their git dir differs from their git common dir.
 It also requires `AGENTS.md`, `bin/`, and the effective state directory.
 
-For an in-scope primary, the guard counts in-flight work from `state/*.meta`.
+For an in-scope primary, ordinary worker and scout `state/*.meta` records always count as in-flight work.
+A persistent `kind=secondmate` record is excluded only when cheap durable local parent evidence positively proves it is resting: its status is readable and parseable, ends in a resting reconciliation, has no open keyed activity, decision, or blocker under `bin/fm-classify-lib.sh`, and has no open parent pending reply.
+Missing, unreadable, or ambiguous status evidence and unreadable or malformed pending-reply evidence count as need.
+The shared `FM_SUP_IN_FLIGHT` banner count excludes only those positively idle secondmates, so a task count never includes work that does not require a watcher.
 Registered `state/procevent/*.source` records also require supervision even though they have no task metadata.
 The default cross-harness mode exits silently with no supervision need.
 Every mode treats `state/x-watch.check.sh` as supervision need, so X-mode relay polling remains guarded without an in-flight task.
@@ -109,7 +112,7 @@ Extending one means adding the same two structural signals from that harness's o
 ## Compatibility limits
 
 - Child crewmate and scout worktrees are outside scope.
-- A valid secondmate home is in scope; an idle secondmate endpoint with no X-mode relay poll remains healthy because it has no supervision need.
+- A valid secondmate home is in scope; a positively idle secondmate endpoint with no X-mode relay poll or registered process-event source has no supervision need.
 - The direct-blocking and bounded passive-follow-up split is limited to the primary integrations listed above.
 - OpenCode headless mode and untrusted Grok project hooks remain fail-open at the host boundary.
 - Kimi Code CLI 0.29.1 exposes only global `[[hooks]]` configuration in `~/.kimi-code/config.toml`, including a `Stop` event with snake_case payload fields `hook_event_name`, `session_id`, `cwd`, and `stop_hook_active`.
@@ -125,7 +128,7 @@ Extending one means adding the same two structural signals from that harness's o
 
 ## Regression coverage
 
-`tests/fm-turnend-guard.test.sh` covers the predicate, main and secondmate primary scope, child-worktree exclusion, `FM_HOME` and `FM_STATE_OVERRIDE` precedence, the live-lock and fresh-beacon guard predicate, the cooperative `--claude` claim wait, monotonic failed-epoch progression, bounded attended fail-open, post-alarm continuation suppression, positive recovery reset, Pi logical-run latching, missing-`jq` behavior, all five primary registrations, Grok native and legacy selection, typed field precedence, malformed input, and exactly-one-path safety.
+`tests/fm-turnend-guard.test.sh` covers the supervision predicate's ordinary metadata, positively idle secondmate exclusion, active and parent-attention secondmate cases, fail-closed status and pending-reply evidence, process-event and X-mode sources, main and secondmate primary scope, child-worktree exclusion, `FM_HOME` and `FM_STATE_OVERRIDE` precedence, the live-lock and fresh-beacon guard predicate, the cooperative `--claude` claim wait, monotonic failed-epoch progression, bounded attended fail-open, post-alarm continuation suppression, positive recovery reset, Pi logical-run latching, missing-`jq` behavior, all five primary registrations, Grok native and legacy selection, typed field precedence, malformed input, and exactly-one-path safety.
 `tests/fm-guard-stale-banner.test.sh` covers the pull-guard predicate, including the persistent-model fresh-leftover-beacon negative control, the auto-arm model's healthy fresh-beacon-without-a-watcher case and its stale-beacon alarm, the true-reason banner wording, and the reason-keyed episode dedup surviving a beacon mtime change.
 `tests/fm-captain-commitment.test.sh` covers the follow-through owner and its integrations: an operational injection creating no commitment, a deferred request becoming one durable actionable item without storing its message, `track` refusing an absent, Done, or bodyless item, restart and compaction recovery retaining exactly one record, completion clearing the reminder, a same-turn completed request staying clean, a declared external wait staying quiet across repeated turns, away-mode and non-primary inertness, and the Pi handler's classification and latch behavior.
 `tests/fm-kimi-harness.test.sh` covers the separate Kimi crew hook's format preservation, idempotence, refusal cases, token guard, spawn registration, and teardown cleanup.

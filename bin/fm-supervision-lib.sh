@@ -3,8 +3,9 @@
 # Usage: . bin/fm-supervision-lib.sh
 #
 # Reports whether a firstmate home needs supervision because it has in-flight
-# work (a state/<id>.meta exists) or an X-mode relay poll
-# (state/x-watch.check.sh), and whether its watcher has a fresh liveness beacon
+# work (a state/<id>.meta exists, except a positively established idle
+# secondmate) or an X-mode relay poll (state/x-watch.check.sh), and whether its
+# watcher has a fresh liveness beacon
 # (state/.last-watcher-beat, touched every poll cycle, within the grace window).
 # bin/fm-turnend-guard.sh uses the PID-strict fm_watcher_healthy from
 # bin/fm-wake-lib.sh for its block decision. bin/fm-guard.sh uses the model-aware
@@ -13,6 +14,10 @@
 # with no live watcher is healthy; under persistent-watcher harnesses a live
 # identity-matched watcher is still required. The status fields here retain the
 # beacon-age details used in their messages.
+
+# shellcheck source=bin/fm-classify-lib.sh
+_FM_SUPERVISION_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null)" || _FM_SUPERVISION_LIB_DIR="."
+. "$_FM_SUPERVISION_LIB_DIR/fm-classify-lib.sh"
 
 # Portable mtime; Linux stat lacks -f, macOS stat lacks -c.
 fm_sup_stat_mtime() {
@@ -25,7 +30,8 @@ fm_sup_stat_mtime() {
 
 # fm_supervision_status <state-dir> [grace-seconds]
 # Populates, for the state dir at $1:
-#   FM_SUP_IN_FLIGHT      count of state/*.meta (in-flight tasks)
+#   FM_SUP_IN_FLIGHT      count of tasks that need a watcher; positively idle
+#                         secondmates are excluded so caller banners are truthful
 #   FM_SUP_SOURCES        count of registered process-to-event sources
 #   FM_SUP_NEEDED         true/false - in-flight work, an X-mode relay poll, or a
 #                         registered event source (a source is a wait on an
@@ -35,8 +41,90 @@ fm_sup_stat_mtime() {
 #   FM_SUP_QUEUE_PENDING  true/false - state/.wake-queue has unread records
 # grace-seconds defaults to $FM_GUARD_GRACE, then 300, matching fm-guard.sh.
 # Always returns 0; callers read the vars, or use fm_supervision_unhealthy below.
+#
+# A persistent secondmate is idle only after durable parent evidence positively
+# establishes it: a parseable resting status with no open keyed activity or
+# decision, and no open parent pending-reply record. Any unreadable, missing, or
+# ambiguous evidence returns true from fm_sup_secondmate_needs_supervision, so
+# the caller keeps a watcher rather than guessing from a quiet endpoint.
+fm_sup_pending_reply_task_has_open() {  # <state-dir> <task-id>
+  local state=$1 task_id=$2 dir rec line rec_task phase task_fields phase_fields
+  dir="$state/pending-replies"
+  [ -e "$dir" ] || return 1
+  [ -d "$dir" ] && [ ! -L "$dir" ] && [ -r "$dir" ] && [ -x "$dir" ] || return 0
+  for rec in "$dir"/*; do
+    [ -e "$rec" ] || continue
+    [ -f "$rec" ] && [ ! -L "$rec" ] && [ -r "$rec" ] || return 0
+    rec_task=
+    phase=
+    task_fields=0
+    phase_fields=0
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in
+        task_id=*)
+          task_fields=$((task_fields + 1))
+          rec_task=${line#task_id=}
+          ;;
+        phase=*)
+          phase_fields=$((phase_fields + 1))
+          phase=${line#phase=}
+          ;;
+      esac
+    done < "$rec" || return 0
+    [ "$task_fields" -eq 1 ] && [ "$phase_fields" -eq 1 ] || return 0
+    [ -n "$rec_task" ] && [ -n "$phase" ] || return 0
+    [ "$rec_task" = "$task_id" ] || continue
+    [ "$phase" = resolved ] || return 0
+  done
+  return 1
+}
+
+fm_sup_secondmate_needs_supervision() {  # <state-dir> <task-id>
+  local state=$1 task_id=$2 status line prefix rest verb key saw=0 decisions activities last
+  status="$state/$task_id.status"
+  [ -f "$status" ] && [ ! -L "$status" ] && [ -r "$status" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    [ -n "${line//[[:space:]]/}" ] || continue
+    case "$line" in *:*) ;; *) return 0 ;; esac
+    prefix=${line%%:*}
+    prefix=${prefix#"${prefix%%[![:space:]]*}"}
+    prefix=${prefix%"${prefix##*[![:space:]]}"}
+    verb=$(status_line_verb "$line")
+    case "$verb" in
+      working|done|needs-decision|blocked|failed|resolved|captain-held|"${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}")
+        ;;
+      *) return 0 ;;
+    esac
+    key=$(_fm_decision_key "$line") || return 0
+    [ -n "$key" ] || return 0
+    case "$prefix" in
+      "$verb") ;;
+      "$verb"[[:space:]]*)
+        rest=${prefix#"$verb"}
+        rest=${rest#"${rest%%[![:space:]]*}"}
+        [ "$rest" = "[key=$key]" ] || return 0
+        ;;
+      *) return 0 ;;
+    esac
+    saw=1
+  done < "$status" || return 0
+  [ "$saw" = 1 ] || return 0
+
+  decisions=$(status_open_decisions "$status")
+  [ -z "$decisions" ] || return 0
+  activities=$(status_open_activities "$status")
+  [ -z "$activities" ] || return 0
+  last=$(last_status_line "$status")
+  case "$(status_line_verb "$last")" in
+    done|resolved|captain-held) ;;
+    *) return 0 ;;
+  esac
+  fm_sup_pending_reply_task_has_open "$state" "$task_id" && return 0
+  return 1
+}
+
 fm_supervision_status() {
-  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} meta source beat m age
+  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} meta source beat m age task_id
   FM_SUP_IN_FLIGHT=0
   FM_SUP_NEEDED=false
   FM_SUP_WATCHER_FRESH=false
@@ -45,6 +133,11 @@ fm_supervision_status() {
 
   for meta in "$state"/*.meta; do
     [ -e "$meta" ] || continue
+    if grep -qx 'kind=secondmate' "$meta" 2>/dev/null; then
+      task_id=$(basename "$meta")
+      task_id=${task_id%.meta}
+      fm_sup_secondmate_needs_supervision "$state" "$task_id" || continue
+    fi
     FM_SUP_IN_FLIGHT=$((FM_SUP_IN_FLIGHT + 1))
   done
   FM_SUP_SOURCES=0

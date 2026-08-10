@@ -66,6 +66,90 @@ test_predicate_healthy_fresh_beacon() {
   pass "fm_supervision_unhealthy: false with in-flight task and a fresh beacon"
 }
 
+test_predicate_idle_secondmate_needs_no_supervision() {
+  local state="$TMP_ROOT/pred-idle-secondmate/state"
+  mkdir -p "$state"
+  printf 'kind=secondmate\n' > "$state/mate.meta"
+  printf 'working [key=route]: handling routed work\nneeds-decision [key=route]: choose the next route\nresolved [key=route]: queue is empty\n' > "$state/mate.status"
+  if fm_supervision_needed "$state" 300; then
+    fail "a positively idle secondmate must not need supervision"
+  fi
+  [ "$FM_SUP_IN_FLIGHT" -eq 0 ] || fail "an idle secondmate must be excluded from the in-flight banner count"
+  pass "fm_supervision_needed: a resting secondmate alone does not need supervision"
+}
+
+test_predicate_secondmate_work_and_parent_attention_need_supervision() {
+  local state="$TMP_ROOT/pred-active-secondmate/state"
+  mkdir -p "$state"
+  printf 'kind=secondmate\n' > "$state/mate.meta"
+
+  printf 'working [key=report]: gathering evidence\n' > "$state/mate.status"
+  fm_supervision_needed "$state" 300 || fail "a working secondmate must need supervision"
+
+  printf 'done [key=report]: report delivered\n' > "$state/mate.status"
+  mkdir -p "$state/pending-replies"
+  printf 'task_id=mate\nphase=awaiting_report\n' > "$state/pending-replies/request"
+  fm_supervision_needed "$state" 300 || fail "an open parent pending reply must need supervision"
+
+  rm -f "$state/pending-replies/request"
+  printf 'needs-decision [key=scope]: choose the next route\ndone: waiting\n' > "$state/mate.status"
+  fm_supervision_needed "$state" 300 || fail "a buried open secondmate decision must need supervision"
+
+  printf 'blocked [key=scope]: credential required\ndone: waiting\n' > "$state/mate.status"
+  fm_supervision_needed "$state" 300 || fail "a buried open secondmate blocker must need supervision"
+
+  printf 'failed [key=scope]: recovery required\n' > "$state/mate.status"
+  fm_supervision_needed "$state" 300 || fail "a failed secondmate must need supervision until the parent reconciles it"
+  pass "fm_supervision_needed: active secondmate work, parent replies, and open decisions stay watched"
+}
+
+test_predicate_secondmate_pending_reply_evidence_fails_closed() {
+  local state="$TMP_ROOT/pred-secondmate-pending-evidence/state"
+  mkdir -p "$state/pending-replies"
+  printf 'kind=secondmate\n' > "$state/mate.meta"
+  printf 'done: waiting\n' > "$state/mate.status"
+  chmod 000 "$state/pending-replies"
+  fm_supervision_needed "$state" 300 || {
+    chmod 700 "$state/pending-replies"
+    fail "an unreadable pending-replies directory must need supervision"
+  }
+  chmod 700 "$state/pending-replies"
+
+  printf 'task_id=mate\ntask_id=other\nphase=resolved\n' > "$state/pending-replies/duplicate-task"
+  fm_supervision_needed "$state" 300 || fail "a duplicate pending-reply task_id must need supervision"
+
+  rm -f "$state/pending-replies/duplicate-task"
+  printf 'task_id=mate\nphase=awaiting_report\nphase=resolved\n' > "$state/pending-replies/duplicate-phase"
+  fm_supervision_needed "$state" 300 || fail "a duplicate pending-reply phase must need supervision"
+  pass "fm_supervision_needed: unreadable and ambiguous pending-reply evidence fails closed"
+}
+
+test_predicate_secondmate_status_evidence_fails_closed() {
+  local state="$TMP_ROOT/pred-secondmate-status-evidence/state"
+  mkdir -p "$state"
+  printf 'kind=secondmate\n' > "$state/mate.meta"
+
+  fm_supervision_needed "$state" 300 || fail "a missing secondmate status log must need supervision"
+
+  printf 'done: waiting\n' > "$state/mate.status"
+  chmod 000 "$state/mate.status"
+  fm_supervision_needed "$state" 300 || {
+    chmod 600 "$state/mate.status"
+    fail "an unreadable secondmate status log must need supervision"
+  }
+  chmod 600 "$state/mate.status"
+
+  printf 'idle: waiting\n' > "$state/mate.status"
+  fm_supervision_needed "$state" 300 || fail "an unparseable secondmate status log must need supervision"
+
+  printf 'done [key=route: waiting\n' > "$state/mate.status"
+  fm_supervision_needed "$state" 300 || fail "an unterminated status key must need supervision"
+
+  printf 'done [key=route] trailing: waiting\n' > "$state/mate.status"
+  fm_supervision_needed "$state" 300 || fail "a noncanonical keyed status prefix must need supervision"
+  pass "fm_supervision_needed: missing, unreadable, and malformed secondmate status evidence fails closed"
+}
+
 test_predicate_queue_pending_flag() {
   local state="$TMP_ROOT/pred-queue/state"
   mkdir -p "$state"
@@ -114,6 +198,7 @@ install_guard_scripts() {
   cp "$ROOT/bin/fm-harness.sh" "$dir/bin/fm-harness.sh"
   cp "$ROOT/bin/fm-primary-scope-lib.sh" "$dir/bin/fm-primary-scope-lib.sh"
   cp "$ROOT/bin/fm-supervision-lib.sh" "$dir/bin/fm-supervision-lib.sh"
+  cp "$ROOT/bin/fm-classify-lib.sh" "$dir/bin/fm-classify-lib.sh"
   cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/fm-wake-lib.sh"
   mkdir -p "$dir/docs"
   cp -R "$ROOT/docs/supervision-protocols" "$dir/docs/supervision-protocols"
@@ -225,6 +310,17 @@ test_hook_silent_when_no_work_in_flight() {
   expect_code 0 "$status" "hook must exit 0 with no in-flight work"
   [ -z "$out" ] || fail "hook produced output with no in-flight work: $out"
   pass "fm-turnend-guard: silent no-op with nothing in flight"
+}
+
+test_hook_silent_with_only_idle_secondmate() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-idle-secondmate")
+  printf 'kind=secondmate\n' > "$dir/state/mate.meta"
+  printf 'done: waiting for routed work\n' > "$dir/state/mate.status"
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 0 "$status" "hook must not demand a watcher for only an idle secondmate"
+  [ -z "$out" ] || fail "idle secondmate primary produced guard output: $out"
+  pass "fm-turnend-guard: silent when only a positively idle secondmate remains"
 }
 
 test_hook_blocks_when_fresh_beacon_has_no_live_lock() {
@@ -1056,6 +1152,7 @@ install_integrated_autoarm() {
   cp "$ROOT/bin/fm-claude-stop-autoarm.sh" "$dir/bin/fm-claude-stop-autoarm.sh"
   cp "$ROOT/bin/fm-primary-scope-lib.sh" "$dir/bin/fm-primary-scope-lib.sh"
   cp "$ROOT/bin/fm-supervision-lib.sh" "$dir/bin/fm-supervision-lib.sh"
+  cp "$ROOT/bin/fm-classify-lib.sh" "$dir/bin/fm-classify-lib.sh"
   cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/fm-wake-lib.sh"
   cp "$ROOT/bin/fm-session-lock-lib.sh" "$dir/bin/fm-session-lock-lib.sh"
   cp "$ROOT/bin/fm-lock.sh" "$dir/bin/fm-lock.sh"
@@ -1539,10 +1636,15 @@ test_predicate_healthy_no_inflight
 test_predicate_unhealthy_no_beacon
 test_predicate_unhealthy_stale_beacon
 test_predicate_healthy_fresh_beacon
+test_predicate_idle_secondmate_needs_no_supervision
+test_predicate_secondmate_work_and_parent_attention_need_supervision
+test_predicate_secondmate_pending_reply_evidence_fails_closed
+test_predicate_secondmate_status_evidence_fails_closed
 test_predicate_queue_pending_flag
 test_predicate_x_mode_needs_supervision
 test_predicate_source_needs_supervision
 test_hook_silent_when_no_work_in_flight
+test_hook_silent_with_only_idle_secondmate
 test_hook_blocks_when_fresh_beacon_has_no_live_lock
 test_hook_blocks_source_only_home
 test_hook_blocks_when_dead_lock_has_fresh_beacon
