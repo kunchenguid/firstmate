@@ -84,10 +84,15 @@ There is no `docs/supervision-protocols/cursor.md`, so a primary detected as cur
 | Backend | Applicability | Evidence |
 |---|---|---|
 | tmux | Supported | Live TUI probes and process classification of exact `cursor-agent` |
-| herdr | Not verified for Cursor | No live Cursor-Agent Herdr spawn/send evidence; only generic backend behavior is covered |
-| zellij | N/A for proof in this change | No cursor-specific key requirement beyond Ctrl+C/Enter already mapped |
-| cmux | N/A for proof in this change | Same as zellij; idle default updated |
+| herdr | Supported | Real Cursor-Agent Herdr spawn/send passed in the opt-in live guard below |
+| zellij | Unverified / out of scope | No Cursor-specific live spawn, send, or composer evidence |
+| cmux | Unverified / out of scope | No Cursor-specific live spawn, send, or composer evidence |
 | orca | Interrupt-capable only | Orca can deliver `C-c` and Enter; Escape-only harnesses remain refused |
+
+### Herdr live guard
+
+Command: FM_CURSOR_HERDR_LIVE=1 bin/fm-test-run.sh tests/fm-cursor-herdr-live-e2e.test.sh.
+On 2026-08-10, this passed with Cursor Agent 2026.08.04-aaa8809, proving real Herdr spawn and fm-send.sh delivery of a follow-up prompt.
 
 ## Still unproven / out of scope
 
