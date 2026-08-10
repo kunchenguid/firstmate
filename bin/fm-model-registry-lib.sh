@@ -114,17 +114,31 @@ fm_model_provider_of() {
 
 # Echo the registry key ("provider/model") for a model this fleet ROUTED, given
 # the harness and model recorded for the worker. A name already carrying a
-# provider is used as written. A bare name is resolved by matching both harness
-# and model_id, and an ambiguous match echoes nothing: two entries fitting one
-# bare name means the fleet cannot say which one ran.
+# provider is used as written ONCE THIS REGISTRY DECLARES IT: echoing back an
+# undeclared name would hand its caller a key that resolves to no provider and
+# no pool, and a comparison against a real key would then differ purely because
+# the two names differ - the inference every resolver here exists to refuse. A
+# bare name is resolved by matching both harness and model_id, and an ambiguous
+# match echoes nothing: two entries fitting one bare name means the fleet cannot
+# say which one ran.
 fm_model_key_for_route() {  # <harness> <model>
   local harness=${1:-} model=${2:-} reg
   [ -n "$model" ] && [ "$model" != default ] || return 0
-  case "$model" in */*) printf '%s\n' "$model"; return 0 ;; esac
-  [ -n "$harness" ] || return 0
   reg=$(fm_model_registry_path)
   [ -f "$reg" ] || return 0
   command -v jq >/dev/null 2>&1 || return 0
+  case "$model" in
+    */*)
+      jq -r --arg m "$model" --arg schema "$FM_MODEL_SCHEMA_VERSION" '
+        if type != "object" or (.schema? // "") != $schema then empty
+        elif (.models[$m]? // null) == null then empty
+        else $m
+        end
+      ' "$reg" 2>/dev/null || true
+      return 0
+      ;;
+  esac
+  [ -n "$harness" ] || return 0
   jq -r --arg h "$harness" --arg m "$model" --arg schema "$FM_MODEL_SCHEMA_VERSION" '
     if type != "object" or (.schema? // "") != $schema then empty
     else

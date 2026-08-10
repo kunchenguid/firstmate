@@ -150,12 +150,18 @@ if [ -n "$TASK" ]; then
   [ -n "$MAKER_MODEL" ] || MAKER_MODEL=$(meta_value "$META" model)
   [ -n "$MODE" ] || MODE=$(meta_value "$META" mode)
   [ -n "$PR" ] || PR=$(meta_value "$META" pr)
-  if [ -z "$BRANCH" ]; then
-    WT=$(meta_value "$META" worktree)
-    if [ -n "$WT" ] && [ -d "$WT" ]; then
+  WT=$(meta_value "$META" worktree)
+  if [ -n "$WT" ] && [ -d "$WT" ]; then
+    if [ -z "$BRANCH" ]; then
       BRANCH=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || true)
       [ "$BRANCH" != HEAD ] || BRANCH=''
     fi
+    # The head is derived from the same place as the branch, and for the same
+    # reason: a live task still has its worktree, so leaving the head unread
+    # would make the attestation predicate permanently could-not-observe on
+    # every signable route - a predicate nothing can ever satisfy is not a
+    # gate, it is a certification command that can only ever refuse.
+    [ -n "$HEAD" ] || HEAD=$(git -C "$WT" rev-parse HEAD 2>/dev/null || true)
   fi
 fi
 
@@ -197,7 +203,11 @@ add_row() {  # <predicate> <result> <reason> [route]
 # The per-step identity behind the verdict, captured at invocation time. Kept
 # beside the verdict so a reader can see WHICH steps were agent-backed and who
 # ran each one, rather than only the run-level summary derived from them.
-STEPS=$(fm_independence_steps "$REPO" "$BRANCH" || true)
+#
+# Loaded in THIS shell rather than through a command substitution, so the
+# derivation below inherits the block and the pipeline is read once.
+fm_independence_steps_load "$REPO" "$BRANCH" || true
+STEPS=$FM_INDEPENDENCE_STEPS_VAL
 
 # INDEPENDENCE. Always applicable.
 IND=$(fm_independence_dimensions "$REPO" "$BRANCH" "$MAKER_HARNESS" "$MAKER_MODEL")
@@ -274,8 +284,11 @@ while IFS='	' read -r name result reason route; do
       NOT_APPLICABLE="${NOT_APPLICABLE:+$NOT_APPLICABLE,}$name(${route:-unknown-route})"
       continue
       ;;
+    # "unmet" is the predicate-neutral word: only independence has dimensions,
+    # and an attestation or a check rollup that failed did not fail by being
+    # dependent. The independence rewrite below supplies the dimension detail.
     FAIL)
-      GAPS="${GAPS:+$GAPS,}$name:not-independent"
+      GAPS="${GAPS:+$GAPS,}$name:unmet"
       CERT_STATE=$STATE_GAP
       [ "$CERT_EXIT" = "$EXIT_UNOBSERVED" ] || CERT_EXIT=$EXIT_UNMET
       ;;
@@ -343,12 +356,18 @@ else
     printf '  %-14s %-18s %s\n' "$name" "$label" "$reason"
     [ -z "$route" ] || printf '  %-14s %-18s route=%s\n' '' '' "$route"
   done
-  printf '%s\n' "$IND" | awk -F, '
+  # bin/fm-independence-lib.sh owns the result-to-word mapping; it is passed in
+  # rather than restated, so this renderer cannot drift into a fourth word for a
+  # value the library already named.
+  printf '%s\n' "$IND" | awk -F, \
+    -v pass="$(fm_independence_label PASS)" \
+    -v fail="$(fm_independence_label FAIL)" \
+    -v unobserved="$(fm_independence_label NO_VERIFIER_RAN)" '
     /^  independence-/ {
       dim = $1
       sub(/^  independence-/, "", dim)
       if (dim == "overall") next
-      label = ($2 == "PASS" ? "independent" : ($2 == "FAIL" ? "not-independent" : "could-not-observe"))
+      label = ($2 == "PASS" ? pass : ($2 == "FAIL" ? fail : unobserved))
       printf "  %-14s %-18s %s\n", "  " dim, label, $3
     }'
   [ -z "$GAPS" ] || printf 'gap=%s\n' "$GAPS"

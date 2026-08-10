@@ -395,7 +395,10 @@ ledger_task_for_key() {  # <kind> <key>
 ledger_resolve_critic() {  # <repo> <branch> <maker-harness> <maker-model>
   local repo=${1:-} branch=${2:-} mharness=${3:-} mmodel=${4:-}
   local steps critic vendor model dims summary
-  steps=$(fm_independence_steps "$repo" "$branch") || return 1
+  # Loaded in this shell so the derivation below inherits the block: teardown
+  # pays for one read of the pipeline, not one per consumer of it.
+  fm_independence_steps_load "$repo" "$branch" || return 1
+  steps=$FM_INDEPENDENCE_STEPS_VAL
   [ -n "$steps" ] || return 1
   critic=$(fm_independence_critic "$steps") || return 1
   vendor=$(printf '%s' "$critic" | cut -f1)
@@ -403,13 +406,19 @@ ledger_resolve_critic() {  # <repo> <branch> <maker-harness> <maker-model>
   dims=$(fm_independence_dimensions "$repo" "$branch" "$mharness" "$mmodel")
   # One compact field per dimension, so the record answers "independent on
   # WHICH dimensions" rather than collapsing four different facts into one
-  # word. bin/fm-certify.sh refuses certification on the same derivation.
-  summary=$(printf '%s\n' "$dims" | awk -F, '
+  # word. bin/fm-certify.sh refuses certification on the same derivation, and
+  # the words come from the library that owns the derivation rather than being
+  # restated here - only the unobserved word is this record's own, matching the
+  # "unknown" every other unresolved field on the same line already says.
+  summary=$(printf '%s\n' "$dims" | awk -F, \
+    -v pass="$(fm_independence_label PASS)" \
+    -v fail="$(fm_independence_label FAIL)" \
+    -v unobserved="$(fm_independence_label NO_VERIFIER_RAN unknown)" '
     /^  independence-/ {
       dim = $1
       sub(/^  independence-/, "", dim)
       if (dim == "overall") next
-      label = ($2 == "PASS" ? "independent" : ($2 == "FAIL" ? "not-independent" : "unknown"))
+      label = ($2 == "PASS" ? pass : ($2 == "FAIL" ? fail : unobserved))
       out = out (out == "" ? "" : "+") dim ":" label
     }
     END { print out }')

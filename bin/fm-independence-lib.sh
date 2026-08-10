@@ -51,10 +51,15 @@
 # entirely" are different facts and a reader needs to know which one they have,
 # so the verdict names the dimensions rather than collapsing them:
 #
-#   process  the review ran in its own agent process, not the maker's. Observed
-#            NOT independent when the pipeline recorded the reviewer and the
-#            review-fixer sharing one session on the same run: the party fixing
-#            the code is then also the party judging it.
+#   process  the review ran in its own agent process, not the maker's. It is
+#            derived from the sessions the pipeline recorded for the run:
+#            independent when the reviewer held sessions of its own, NOT
+#            independent when it shared one with the review-fixer (the party
+#            fixing the code is then also the party judging it), and
+#            could-not-observe when the run carries no reviewer session at all.
+#            A recorded reviewing invocation says a review RAN; only a recorded
+#            session says it ran as a process apart from the maker's, and
+#            reading the first as the second is the collapse this file refuses.
 #   model    the reviewing model differs from the making model.
 #   vendor   the reviewing model provider differs from the making one.
 #   pool     the reviewing model draws on a different credential pool - a
@@ -122,20 +127,35 @@ FM_INDEPENDENCE_CRITIC_PURPOSE='review'
 #
 # The reason is what a reader needs to act: which two identities were compared,
 # or which declaration was missing.
+#
+# The delimiter wins over the prose. The reason is free text and the evidence
+# reference follows it, so a comma inside a reason would silently move part of
+# that reason into the evidence field of every reader - bin/fm-verify-lib.sh's
+# fm_verify_parse included. Commas are turned into semicolons here rather than
+# left to each reason's author to remember.
 
 # fm_independence_record <dimension> <result> <reason> <evidence>
 fm_independence_record() {
+  local reason=${3:-}
+  reason=${reason//,/;}
   printf 'verify[1]{verifier,result,reason,evidence_ref}:\n  independence-%s,%s,%s,%s\n' \
-    "$1" "$2" "$3" "$4"
+    "$1" "$2" "$reason" "$4"
 }
 
 # Echo the human vocabulary for one three-valued result. The ledger and the
-# certification command both render it, so the mapping is stated once.
-fm_independence_label() {  # <PASS|FAIL|NO_VERIFIER_RAN>
+# certification command both render it through this function, so the mapping is
+# stated once and no reader may invent a fourth word for a value.
+#
+# The optional second argument is the word for the unobserved value only. The
+# ledger's compact per-task field says "unknown" there, matching every other
+# unresolved field on that record; the certification command spells it out. The
+# two observed values are never overridable: a reader that could rename PASS
+# could rename it to something that overstates what was seen.
+fm_independence_label() {  # <PASS|FAIL|NO_VERIFIER_RAN> [unobserved-word]
   case "${1:-}" in
     PASS) printf 'independent' ;;
     FAIL) printf 'not-independent' ;;
-    *) printf 'could-not-observe' ;;
+    *) printf '%s' "${2:-could-not-observe}" ;;
   esac
 }
 
@@ -146,13 +166,17 @@ fm_independence_db() {
 
 # --- identity capture ---------------------------------------------------------
 
-# fm_independence_steps <repo> <branch>
+# fm_independence_steps_query <repo> <branch>
 # Echo one TSV row per agent-backed step the pipeline recorded for those bytes:
 #
-#   <step>\t<round>\t<purpose>\t<agent>\t<vendor>\t<model>\t<exit_status>\t<sessions>
+#   <step>\t<round>\t<purpose>\t<agent>\t<vendor>\t<model>\t<exit_status>
+#     \t<shared_sessions>\t<reviewer_sessions>
 #
-# <sessions> is the count of distinct sessions the reviewer and review-fixer
-# shared on that run, which is what makes the process dimension observable.
+# <shared_sessions> is the count of distinct sessions the reviewer and the
+# review-fixer shared on that run and <reviewer_sessions> the count the reviewer
+# held at all. Both are needed: the first is what makes the process dimension
+# observably absent, and the second is what makes it observable in the first
+# place, so "no session was recorded" cannot read as "no session was shared".
 # An absent value is the empty string and is never filled in.
 #
 # Returns non-zero when the database, python3, or the repo/branch join is
@@ -160,7 +184,7 @@ fm_independence_db() {
 # success. An empty result set with a readable database is likewise NOT a
 # success: the caller cannot tell "no reviewer ran" from "these bytes were never
 # validated here", so it stays could-not-observe.
-fm_independence_steps() {  # <repo> <branch>
+fm_independence_steps_query() {  # <repo> <branch>
   local repo=${1:-} branch=${2:-} db out
   [ -n "$repo" ] && [ -n "$branch" ] || return 1
   db=$(fm_independence_db)
@@ -202,8 +226,12 @@ try:
 
     # The reviewer and the review-fixer sharing one session on a run means the
     # party judging the code is the party changing it. Counted per run here so
-    # the process dimension is derived from a record rather than assumed.
+    # the process dimension is derived from a record rather than assumed. The
+    # reviewer's own session count is carried beside it because a run that
+    # recorded no reviewer session has nothing to share, and an empty overlap
+    # read as a pass would be exactly the could-not-observe collapse.
     shared = 0
+    reviewer_sessions = 0
     for run_id in run_ids:
         roles = {}
         for role, session_id in conn.execute(
@@ -211,8 +239,9 @@ try:
             (run_id,),
         ):
             roles.setdefault(role, set()).add(session_id)
-        overlap = roles.get("reviewer", set()) & roles.get("review-fixer", set())
-        shared += len(overlap)
+        reviewer = roles.get("reviewer", set())
+        reviewer_sessions += len(reviewer)
+        shared += len(reviewer & roles.get("review-fixer", set()))
 
     rows = []
     for run_id in run_ids:
@@ -240,12 +269,51 @@ for step, rnd, purpose, agent, provider, model, exit_status in rows:
                 str(model or ""),
                 str(exit_status or ""),
                 str(shared),
+                str(reviewer_sessions),
             )
         )
     )
 PY
   ) || return 1
   printf '%s' "$out"
+}
+
+# The pipeline read, held for the (repo, branch) it was made for. Both consumers
+# need the step block AND the verdict derived from it, and the ledger's call is
+# on a teardown's critical path where a second python3 startup buys nothing.
+# Reading twice is also a second chance to disagree with itself.
+FM_INDEPENDENCE_STEPS_KEY=''
+FM_INDEPENDENCE_STEPS_VAL=''
+FM_INDEPENDENCE_STEPS_RC=1
+
+# fm_independence_steps_load <repo> <branch>
+# Read the pipeline once for those bytes into FM_INDEPENDENCE_STEPS_VAL and
+# return what the read returned. A caller that runs this in ITS OWN shell, then
+# derives the verdict, pays for one read: a command substitution inherits the
+# variables of the shell that spawned it, so the derivation below finds the
+# block already there. Nothing may write the block from outside - it is set only
+# from fm_independence_steps_query, which is the authoritative read.
+fm_independence_steps_load() {  # <repo> <branch>
+  local key="${1:-}|${2:-}"
+  if [ "$key" = "$FM_INDEPENDENCE_STEPS_KEY" ]; then
+    return "$FM_INDEPENDENCE_STEPS_RC"
+  fi
+  if FM_INDEPENDENCE_STEPS_VAL=$(fm_independence_steps_query "${1:-}" "${2:-}"); then
+    FM_INDEPENDENCE_STEPS_RC=0
+  else
+    FM_INDEPENDENCE_STEPS_VAL=''
+    FM_INDEPENDENCE_STEPS_RC=1
+  fi
+  FM_INDEPENDENCE_STEPS_KEY=$key
+  return "$FM_INDEPENDENCE_STEPS_RC"
+}
+
+# fm_independence_steps <repo> <branch>: the step block for those bytes, read
+# once. Same contract as fm_independence_steps_query, including its non-zero
+# return for a read that could not be made.
+fm_independence_steps() {  # <repo> <branch>
+  fm_independence_steps_load "${1:-}" "${2:-}" || return 1
+  printf '%s' "$FM_INDEPENDENCE_STEPS_VAL"
 }
 
 # Collapse the distinct non-empty values on stdin to one field value:
@@ -266,20 +334,22 @@ fm_independence_collapse() {
 }
 
 # fm_independence_critic <steps>
-# Echo "<vendor>\t<model>\t<count>\t<shared_sessions>" for the reviewing
-# invocations in a <steps> block, where count is how many reviewer invocations
-# were recorded at all. Returns non-zero when the block records no reviewer, so
-# the caller reports could-not-observe rather than an empty agreement.
+# Echo "<vendor>\t<model>\t<count>\t<shared_sessions>\t<reviewer_sessions>" for
+# the reviewing invocations in a <steps> block, where count is how many reviewer
+# invocations were recorded at all. Returns non-zero when the block records no
+# reviewer, so the caller reports could-not-observe rather than an empty
+# agreement.
 fm_independence_critic() {  # <steps>
-  local steps=${1:-} critic vendor model count shared
+  local steps=${1:-} critic vendor model count shared sessions
   critic=$(printf '%s\n' "$steps" | awk -F'\t' -v p="$FM_INDEPENDENCE_CRITIC_PURPOSE" '$3 == p')
   [ -n "$critic" ] || return 1
   count=$(printf '%s\n' "$critic" | grep -c .)
   vendor=$(printf '%s\n' "$critic" | cut -f5 | fm_independence_collapse)
   model=$(printf '%s\n' "$critic" | cut -f6 | fm_independence_collapse)
-  # Every row of a block carries the same shared-session count; take the first.
+  # Every row of a block carries the same session counts; take the first.
   shared=$(printf '%s\n' "$critic" | head -1 | cut -f8)
-  printf '%s\t%s\t%s\t%s' "$vendor" "$model" "$count" "${shared:-0}"
+  sessions=$(printf '%s\n' "$critic" | head -1 | cut -f9)
+  printf '%s\t%s\t%s\t%s\t%s' "$vendor" "$model" "$count" "${shared:-0}" "${sessions:-0}"
 }
 
 # --- the derived verdict ------------------------------------------------------
@@ -295,7 +365,7 @@ fm_independence_critic() {  # <steps>
 # declared routing config, which is what makes independence underivable by hand.
 fm_independence_dimensions() {  # <repo> <branch> <maker-harness> <maker-model>
   local repo=${1:-} branch=${2:-} mharness=${3:-} mmodel=${4:-}
-  local steps critic cvendor cmodel ccount cshared
+  local steps critic cvendor cmodel ccount cshared csessions
   local mkey mprovider mpool ckey cprovider cpool
   local process=NO_VERIFIER_RAN model=NO_VERIFIER_RAN vendor=NO_VERIFIER_RAN pool=NO_VERIFIER_RAN
   local process_why='' model_why='' vendor_why='' pool_why='' evidence overall
@@ -319,18 +389,25 @@ fm_independence_dimensions() {  # <repo> <branch> <maker-harness> <maker-model>
     cmodel=$(printf '%s' "$critic" | cut -f2)
     ccount=$(printf '%s' "$critic" | cut -f3)
     cshared=$(printf '%s' "$critic" | cut -f4)
+    csessions=$(printf '%s' "$critic" | cut -f5)
     evidence="$evidence reviews=$ccount critic=${cvendor:-unrecorded}/${cmodel:-unrecorded}"
 
-    # PROCESS. A recorded reviewing invocation is itself the evidence that the
-    # review ran as its own agent process. It is observed NOT independent when
-    # the pipeline recorded that reviewer sharing a session with the agent that
-    # rewrites the code in response to it.
+    # PROCESS. The recorded SESSIONS are the evidence, not the invocation: an
+    # invocation row says a review ran, and says nothing about whose process it
+    # ran in. Observed NOT independent when the pipeline recorded that reviewer
+    # sharing a session with the agent that rewrites the code in response to it,
+    # observed independent when the reviewer held sessions of its own, and
+    # could-not-observe when the run recorded no reviewer session at all - where
+    # the empty overlap is an absence of evidence rather than evidence of
+    # separation.
     if [ "${cshared:-0}" -gt 0 ] 2>/dev/null; then
       process=FAIL
       process_why="the reviewer shared $cshared session(s) with the agent that fixes its findings"
-    else
+    elif [ "${csessions:-0}" -gt 0 ] 2>/dev/null; then
       process=PASS
-      process_why="$ccount reviewing invocation(s) ran as their own agent process"
+      process_why="$ccount reviewing invocation(s) ran in $csessions session(s) of their own"
+    else
+      process_why="the pipeline recorded $ccount reviewing invocation(s) but no reviewer session; whose process reviewed is not observable"
     fi
 
     # The maker's routed identity, and the critic's, both resolved through
@@ -344,7 +421,7 @@ fm_independence_dimensions() {  # <repo> <branch> <maker-harness> <maker-model>
     # prevent.
     if [ "$cmodel" = mixed ]; then
       model=NO_VERIFIER_RAN
-      model_why='the reviews disagree on which model reviewed, so no single reviewing model is observable'
+      model_why='the reviews disagree on which model reviewed; no single reviewing model is observable'
     elif [ -z "$mkey" ]; then
       model_why="the model registry declares no entry for the making model ${mharness:-unknown}/${mmodel:-unknown}"
     elif [ -z "$ckey" ]; then
