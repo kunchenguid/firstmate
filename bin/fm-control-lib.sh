@@ -396,15 +396,21 @@ fm_control_cursor_hooks_restore() {  # <worktree> <state-dir> <id>
       python3 - "$path" "$backup" <<'PY' || return 1
 import json
 import os
+import re
+import stat
 import sys
 import tempfile
 
 path, backup_path = sys.argv[1:]
+firstmate_script = ".cursor/hooks/fm-busy-turnend.sh"
 expected = {
-    "beforeSubmitPrompt": ".cursor/hooks/fm-busy-turnend.sh busy",
-    "stop": ".cursor/hooks/fm-busy-turnend.sh idle-stop",
-    "sessionEnd": ".cursor/hooks/fm-busy-turnend.sh idle-session-end",
+    "beforeSubmitPrompt": f"{firstmate_script} busy",
+    "stop": f"{firstmate_script} idle-stop",
+    "sessionEnd": f"{firstmate_script} idle-session-end",
 }
+firstmate_target = re.compile(
+    rf"(?<![A-Za-z0-9_.-]){re.escape(firstmate_script)}(?![A-Za-z0-9_./-])"
+)
 with open(path, encoding="utf-8") as handle:
     document = json.load(handle)
 hooks = document.get("hooks")
@@ -437,6 +443,8 @@ for event, entries in hooks.items():
             command = entry.get("command")
             owner_event = expected_event.get(command)
             if owner_event is None:
+                if isinstance(command, str) and firstmate_target.search(command):
+                    raise SystemExit(f"Cannot safely reconcile generated Cursor {event} hook")
                 continue
             if event != owner_event or entry != {"command": command}:
                 raise SystemExit(f"Cannot safely reconcile generated Cursor {event} hook")
@@ -450,10 +458,12 @@ for event, indices in removals.items():
     changed = True
 if changed:
     directory = os.path.dirname(path)
+    mode = stat.S_IMODE(os.stat(path).st_mode)
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=directory, delete=False) as handle:
         json.dump(document, handle, separators=(",", ":"))
         handle.write("\n")
         temporary = handle.name
+    os.chmod(temporary, mode)
     os.replace(temporary, path)
 PY
     elif [ "$(basename "$path")" = fm-busy-turnend.sh ]; then

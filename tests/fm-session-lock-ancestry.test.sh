@@ -258,6 +258,50 @@ SH
   pass "session-lock: Cursor worker identity is ineligible for primary ownership"
 }
 
+test_cursor_worker_blocks_outer_primary_lock_ancestry() {
+  local dir fakebin out rc
+  dir="$TMP_ROOT/cursor-worker-barrier"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state" "$dir/config"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field" in
+  700:comm=) printf '%s\n' cursor-agent ;;
+  700:args=) printf '%s\n' cursor-agent ;;
+  700:ppid=) printf '%s\n' 800 ;;
+  800:comm=) printf '%s\n' claude ;;
+  800:args=) printf '%s\n' claude ;;
+  800:ppid=) printf '%s\n' 1 ;;
+  *:comm=) printf '%s\n' bash ;;
+  *:args=) printf '%s\n' 'bash /repo/bin/fm-lock.sh' ;;
+  *:ppid=) printf '%s\n' 700 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$dir" FM_CONFIG_OVERRIDE="$dir/config" \
+    "$ROOT/bin/fm-harness.sh")
+  [ "$out" = cursor ] || fail "nested Cursor worker resolved past its own identity to '$out'"
+
+  rc=0
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" \
+    "$ROOT/bin/fm-lock.sh" > "$dir/lock.out" 2> "$dir/lock.err" || rc=$?
+  expect_code 1 "$rc" "a Cursor worker nested under Claude must not acquire the primary session lock"
+  assert_absent "$dir/state/.lock" "nested Cursor worker published an outer primary's session lock"
+  assert_grep 'cannot locate harness process in ancestry' "$dir/lock.err" \
+    "nested Cursor primary-lock refusal was not actionable"
+  pass "session-lock: Cursor worker blocks traversal to an outer primary"
+}
+
 # --- end-to-end layer: the real Stop auto-arm in real process trees ----------
 
 install_autoarm_scripts() {
@@ -397,6 +441,7 @@ test_ordinary_paths_are_never_harness_processes
 test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live
 test_cursor_worker_cannot_acquire_primary_session_lock
+test_cursor_worker_blocks_outer_primary_lock_ancestry
 test_e2e_version_named_session_claims_the_home
 test_e2e_daemon_parented_session_claims_the_home
 test_e2e_daemon_parented_version_named_session_keeps_its_lock

@@ -128,6 +128,8 @@ fm_harness_ancestry_pids() {
       printed=1
       [ "$FM_HARNESS_IS_CLAUDE" -eq 1 ] || break
       extending=1
+    elif [ -n "$FM_HARNESS_MATCHED_NAME" ]; then
+      break
     elif [ "$extending" -eq 1 ]; then
       break
     fi

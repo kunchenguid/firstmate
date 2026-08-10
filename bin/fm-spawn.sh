@@ -2433,6 +2433,8 @@ EOF
         '.cursor/hooks/fm-busy-turnend.sh idle-stop' \
         '.cursor/hooks/fm-busy-turnend.sh idle-session-end' <<'PY'
 import json
+import os
+import stat
 import sys
 
 source, destination, busy, stop, session_end = sys.argv[1:]
@@ -2449,6 +2451,7 @@ for event, command in (("beforeSubmitPrompt", busy), ("stop", stop), ("sessionEn
 with open(destination, "w", encoding="utf-8") as handle:
     json.dump(document, handle, separators=(",", ":"))
     handle.write("\n")
+os.chmod(destination, stat.S_IMODE(os.stat(source).st_mode))
 PY
       cursor_backup_mode=
       [ "$RELAUNCH_PRIOR_CURSOR" = 1 ] && cursor_backup_mode=reuse

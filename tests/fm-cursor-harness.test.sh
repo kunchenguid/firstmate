@@ -16,6 +16,14 @@ CONTROL_LIB="$ROOT/bin/fm-control-lib.sh"
 BUSY_LIB="$ROOT/bin/fm-busy-lib.sh"
 TMP_ROOT=$(fm_test_tmproot fm-cursor-harness)
 
+file_mode() {
+  if [ "$(uname)" = Darwin ]; then
+    stat -f %Lp "$1"
+  else
+    stat -c %a "$1"
+  fi
+}
+
 # shellcheck source=bin/fm-control-lib.sh
 . "$CONTROL_LIB"
 # shellcheck source=bin/fm-busy-lib.sh
@@ -207,13 +215,14 @@ test_detection_is_anchored() {
 }
 
 test_spawn_launch_shape() {
-  local rec case_dir home proj wt fakebin id out status trusted hook_out
+  local rec case_dir home proj wt fakebin id out status trusted hook_out mode
   rec=$(make_spawn_case launch)
   IFS='|' read -r case_dir home proj wt fakebin id <<EOF
 $rec
 EOF
   mkdir -p "$wt/.cursor"
   printf '%s\n' '{"version":1,"hooks":{"beforeSubmitPrompt":[{"command":"user-before"}],"stop":[{"command":"user-stop"}],"custom":[{"command":"keep"}]}}' > "$wt/.cursor/hooks.json"
+  chmod 600 "$wt/.cursor/hooks.json"
   out=$(run_cursor_spawn "$home" "$proj" "$wt" "$fakebin" "$id" \
     --mode no-mistakes --yolo off --model composer-2.5-fast --effort low)
   status=$?
@@ -236,6 +245,8 @@ PY
 
   assert_present "$wt/.cursor/hooks.json" "cursor spawn did not write project hooks.json"
   assert_present "$wt/.cursor/hooks/fm-busy-turnend.sh" "cursor spawn did not write busy/turnend hook"
+  mode=$(file_mode "$wt/.cursor/hooks.json")
+  [ "$mode" = 600 ] || fail "cursor spawn changed hooks.json mode 0600 to $mode"
   [ -x "$wt/.cursor/hooks/fm-busy-turnend.sh" ] \
     || fail "cursor busy/turnend hook must be executable"
   git -C "$wt" check-ignore -q -- .cursor/hooks.json \
@@ -459,7 +470,31 @@ PY
     "failed Cursor reconciliation removed the installed hook script"
   assert_present "$state/edited.cursor-hooks.json.installed" \
     "failed Cursor reconciliation discarded recovery ownership"
-  pass "Cursor restore fails closed on edited generated hook entries"
+  python3 - "$wt/.cursor/hooks.json" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    document = json.load(handle)
+document["hooks"]["beforeSubmitPrompt"][0] = {
+    "command": ".cursor/hooks/fm-busy-turnend.sh busy && printf stale"
+}
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(document, handle, separators=(",", ":"))
+    handle.write("\n")
+PY
+  cp "$wt/.cursor/hooks.json" "$expected"
+  if fm_control_cursor_hooks_restore "$wt" "$state" edited; then
+    fail "Cursor restore accepted edited generated command text"
+  fi
+  cmp -s "$expected" "$wt/.cursor/hooks.json" \
+    || fail "failed command reconciliation partially rewrote hooks.json"
+  assert_present "$wt/.cursor/hooks/fm-busy-turnend.sh" \
+    "failed command reconciliation removed the installed hook script"
+  assert_present "$state/edited.cursor-hooks.json.installed" \
+    "failed command reconciliation discarded recovery ownership"
+  pass "Cursor restore fails closed on edited generated hook entries and commands"
 }
 
 test_cursor_hook_backup_is_atomic() {
