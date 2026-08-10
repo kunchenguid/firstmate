@@ -1403,8 +1403,9 @@ if [ "$TOP_SLOT_RETURNED" != 1 ] && [ "$BACKEND" = herdr ] \
 fi
 
 # Prove pooled-slot occupancy against the exact task endpoint before closing it.
-# Once the endpoint is gone, a closed endpoint needs no live-process census; an
-# endpoint that is live but whose pid/cwd cannot be proved retains the lease.
+# A live endpoint must provide stable pid/start-time/cwd/identity proof. Once the
+# endpoint is gone, a complete same-user process census catches reparented or
+# undeclared workers; an incomplete proof retains the lease.
 teardown_slot_endpoint_state() {
   local backend=$1 target=$2 state
   state=$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || true)

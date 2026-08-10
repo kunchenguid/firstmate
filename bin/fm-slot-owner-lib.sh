@@ -17,9 +17,10 @@
 #      occupant;
 #   2. the slot's ownership stamp names a different task or home - the metadata
 #      being trusted is positively stale because the slot was reissued;
-#   3. a declared worker process is running inside the slot, whether or not its
-#      current endpoint metadata still points at the slot (bin/fm-agent-cwd-lib.sh's
-#      authoritative process cwd).
+#   3. a live task endpoint proves a foreign, unidentified, or otherwise
+#      unproven process inside the slot; after the endpoint closes, a complete
+#      same-user process census catches reparented or undeclared occupants
+#      (bin/fm-agent-cwd-lib.sh owns both forms of process-cwd proof).
 #
 # Retain means the lease is not returned to the pool: firstmate finishes the
 # rest of the teardown (records and endpoint) and leaves the directory on disk,
@@ -314,8 +315,9 @@ fm_slot_meta_referencing_tasks() {
 # fm_slot_endpoint_occupant_tasks <worktree> <task-id> <home> <role> <backend> <target>:
 # inspect only the process bound to this task's already-validated backend
 # endpoint. A durable task lease prevents Treehouse from assigning the slot to
-# another task, so a host-wide process census adds no ownership proof and lets
-# unrelated unreadable /proc entries block every clean teardown.
+# another task, so a host-wide process census is not used while the endpoint is
+# live; once it is closed, fm_slot_process_occupant_tasks uses a complete
+# same-user census to catch reparented or undeclared occupants.
 #
 # Returns 0 with a foreign or unidentified occupant proven inside the slot, 1
 # when the endpoint process is this exact task or is proven outside the slot,

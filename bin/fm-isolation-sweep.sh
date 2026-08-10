@@ -11,8 +11,9 @@
 # every resume, not assumed from the launch that happened before the reboot.
 #
 # This sweep is READ-ONLY and exits nonzero when isolation is actionable or its
-# required process evidence is unproven. It prints one `ISOLATION:` line per
-# such task so bin/fm-bootstrap.sh can block mutation until the home is safe.
+# required process evidence is unproven for a possibly live endpoint. It prints
+# one `ISOLATION:` line per such task so bin/fm-bootstrap.sh can block mutation
+# until the home is safe.
 #
 # Evidence discipline (bin/fm-agent-cwd-lib.sh owns the method of record): a
 # collapse is reported only from an AUTHORITATIVE /proc reading of the agent

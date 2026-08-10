@@ -70,7 +70,7 @@ Per-provider process id availability:
 
 | Provider | Per-pane process id | Consequence |
 |---|---|---|
-| tmux | `#{pane_pid}`, a real shell pid | Authoritative reading available even for an agent with no declaration marker. |
+| tmux | `#{pane_pid}`, a real shell pid | Process cwd is readable without the marker, but task isolation still requires complete worker identity. |
 | herdr | none; the pane API exposes `foreground_cwd` only | Authoritative reading requires the declaration marker. |
 | zellij | none exposed at all | Same. |
 | cmux | none on the control socket | Same. |
@@ -94,7 +94,7 @@ Getting this wrong turns unrelated host processes into stderr noise on a read-on
 ### Pooled-slot ownership
 
 `bin/fm-slot-owner-lib.sh` owns the release-or-retain verdict.
-Disposal is gated on positive evidence of a conflict in three independent forms, any one of which retains the lease: another task recorded in the same home naming the same physical slot, an ownership stamp naming a different task or home, or a live agent declared for a different task running inside the slot.
+Disposal is gated on positive evidence of a conflict in three independent forms, any one of which retains the lease: another task recorded in a discoverable home naming the same physical slot, an ownership stamp naming a different task or home, or a live/closed-endpoint occupancy proof finding a foreign, unidentified, or otherwise unproven process inside the slot.
 
 The stamp is written by `bin/fm-spawn.sh` into the worktree's private git directory, never into the working tree, so it can never dirty a status check or reach a commit.
 Writing is refused for anything that is not a linked worktree, so a primary checkout can never be marked as a disposable slot.
@@ -127,6 +127,12 @@ process, cwd, and worker declaration. An unavailable exact endpoint proof retain
 the durable lease; unrelated host processes are not occupancy evidence.
 If authoritative cwd or process-identity capability is unavailable, the slot is retained.
 Once a process is proven inside the slot, unreadable, partial, undeclared, or mixed-version identity is contested ownership rather than absence of an occupant.
+When the endpoint is closed, teardown uses a complete same-user process census of
+the slot to catch a reparented or undeclared process. An incomplete census
+retains the lease; only a complete empty census permits disposal.
+The live endpoint path is stable-proofed by checking the endpoint pid, process
+start time, cwd, and declaration twice; PID reuse or any changed identity/cwd
+observation retains the lease as unproven.
 
 The restore-time isolation sweep returns nonzero when any identity or cwd finding is actionable or unproven. Bootstrap reports those findings in read-only mode and refuses every later mutation until the sweep is clean.
 
@@ -164,15 +170,19 @@ It is the captain's authority to discard *this* task's work, never authority to 
 ### Restore-time re-assertion
 
 `bin/fm-isolation-sweep.sh` re-establishes at session start what spawn could only assert at launch.
-It is read-only, returns nonzero for an actionable finding or unproven required process evidence, and prints one `ISOLATION:` line per blocked task.
+It is read-only, returns nonzero for an actionable finding or unproven required process evidence at a possibly live endpoint, and prints one `ISOLATION:` line per blocked task.
 `bin/fm-bootstrap.sh` runs it before any mutating sweep, surfaces those lines in the session-start digest, and refuses later mutation until the sweep is clean; the `bootstrap-diagnostics` skill owns what the agent does about each shape.
 
 Positive location and identity findings come only from an authoritative process reading.
-A task with no such reading is reported as unproven `ISOLATION:` evidence and blocks mutation. `FM_ISOLATION_VERBOSE=1` adds the matching `BOOTSTRAP_INFO` fact; a pane path remains a hint and is never promoted to a violation.
+A task with no such reading is normally reported as unproven `ISOLATION:` evidence and blocks mutation; a proven missing, dead, or agent-less endpoint with no live owner conflict is the documented non-actionable exception. `FM_ISOLATION_VERBOSE=1` adds the matching `BOOTSTRAP_INFO` fact; a pane path remains a hint and is never promoted to a violation.
 
-The block is scoped to records whose endpoint could still be running a worker.
-An endpoint the provider reports as gone or agent-less has no worker that could act on the record at all, so such a stale record is a non-actionable `BOOTSTRAP_INFO` fact under `FM_ISOLATION_VERBOSE` rather than a finding that drops the whole home to read-only with no per-task override.
-An endpoint that merely cannot be read is not proof of absence and still blocks, so the gate stays fail-closed exactly where a live collapsed worker is still possible.
+The sweep first checks for a live process declaring the task with incomplete or
+foreign owner-home proof; that is actionable even if the recorded endpoint is
+gone. If no such process exists, an endpoint the provider reports as gone or
+agent-less has no worker that could act on the record, so the stale record is a
+non-actionable `BOOTSTRAP_INFO` fact under `FM_ISOLATION_VERBOSE` rather than a
+finding that drops the whole home to read-only. An endpoint that merely cannot
+be read is not proof of absence and still blocks, so the gate stays fail-closed.
 
 Which home a record expects is read from the record, never assumed to be the home running the sweep.
 A secondmate declares its own home while its record lives in the launching primary's state directory, so comparing every declaration against this home would report every healthy secondmate in the fleet as a foreign worker on every session start.
@@ -186,7 +196,8 @@ A sweep that cries wolf on a normal fleet is worse than no sweep, because the `b
 
 ## Regression coverage
 
-`tests/fm-worker-isolation.test.sh` covers all four mechanisms: the declaration's exact bytes and its refusals, the launch declaration for every verified harness, each consuming refusal, the process-cwd method of record against a deliberately lying pane path, the provider matrix, the stable-window-id resolution and its refusal to answer from a lost window name, all three slot-conflict forms plus the clean-disposal case, teardown retiring a contested lease under `--force`, the contested-then-released and still-blocked stamp sequences, and the sweep outcomes including a healthy secondmate staying silent.
+`tests/fm-worker-isolation.test.sh` covers all four mechanisms: the declaration's exact bytes and its refusals, the launch declaration for every verified harness, each consuming refusal, the process-cwd method of record against a deliberately lying pane path, the provider matrix, the stable-window-id resolution and its refusal to answer from a lost window name, all three slot-conflict forms plus the clean-disposal case, teardown retiring a contested lease under `--force`, the contested-then-released and still-blocked stamp sequences, and the sweep outcomes including a healthy secondmate staying silent, unproven evidence blocking, stale endpoints staying quiet, and live foreign-owner processes still blocking.
+`tests/fm-slot-occupant-proof.test.sh` owns focused pooled-slot endpoint proof: exact endpoint selection, PID reuse, foreign and undeclared occupants, closed-endpoint census uncertainty, cross-home metadata, and disposal only after a complete empty census.
 
 ## Maintaining this file
 

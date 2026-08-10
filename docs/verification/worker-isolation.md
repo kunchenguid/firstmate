@@ -14,11 +14,11 @@ fm_worker_launch_env_prefix crewmate demo-task /home/cap/firstmate; echo
 fm_worker_launch_env_prefix secondmate dom-x /home/cap/homes/dom; echo
 ```
 
-Observed output, one trailing space per assignment included:
+Observed output, with the final trailing space shown as `<space>`:
 
 ```text
-FM_HOME= FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_AGENT_ROLE=crewmate FM_AGENT_TASK='demo-task' FM_AGENT_OWNER_HOME='/home/cap/firstmate' 
-FM_HOME='/home/cap/homes/dom' FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_AGENT_ROLE=secondmate FM_AGENT_TASK='dom-x' FM_AGENT_OWNER_HOME='/home/cap/homes/dom' 
+FM_HOME= FM_ROOT= FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PENDING_REPLY_DIR_OVERRIDE= STATE= FM_AGENT_ROLE=crewmate FM_AGENT_TASK='demo-task' FM_AGENT_OWNER_HOME='/home/cap/firstmate' <space>
+FM_HOME='/home/cap/homes/dom' FM_ROOT= FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PENDING_REPLY_DIR_OVERRIDE= STATE= FM_AGENT_ROLE=secondmate FM_AGENT_TASK='dom-x' FM_AGENT_OWNER_HOME='/home/cap/homes/dom' <space>
 ```
 
 A crewmate carries no home at all; a secondmate carries only its own.
@@ -46,11 +46,11 @@ Captured by driving `bin/fm-spawn.sh` against the fake-provider fixture used by 
 The operating home and repository root are elided as `<HOME>` and `<ROOT>`.
 
 ```text
-claude:   FM_HOME= FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_AGENT_ROLE=crewmate FM_AGENT_TASK='ev-claude' FM_AGENT_OWNER_HOME='<HOME>' CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions "$('<ROOT>/bin/fm-operational-input.sh' encode launch-brief < '<HOME>/data/ev-claude/brief.md')"
-codex:    FM_HOME= FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_AGENT_ROLE=crewmate FM_AGENT_TASK='ev-codex' FM_AGENT_OWNER_HOME='<HOME>' codex --dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch '<HOME>/state/ev-codex.turn-ended'\"]" "$('<ROOT>/bin/fm-operational-input.sh' encode launch-brief < '<HOME>/data/ev-codex/brief.md')"
-opencode: FM_HOME= FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_AGENT_ROLE=crewmate FM_AGENT_TASK='ev-opencode' FM_AGENT_OWNER_HOME='<HOME>' OPENCODE_CONFIG_CONTENT='{"permission":{"*":"allow"}}' opencode --prompt "$('<ROOT>/bin/fm-operational-input.sh' encode launch-brief < '<HOME>/data/ev-opencode/brief.md')"
-pi:       FM_HOME= FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_AGENT_ROLE=crewmate FM_AGENT_TASK='ev-pi' FM_AGENT_OWNER_HOME='<HOME>' pi -e '<HOME>/state/ev-pi.pi-ext.ts' "$('<ROOT>/bin/fm-operational-input.sh' encode launch-brief < '<HOME>/data/ev-pi/brief.md')"
-grok:     FM_HOME= FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_AGENT_ROLE=crewmate FM_AGENT_TASK='ev-grok' FM_AGENT_OWNER_HOME='<HOME>' grok --always-approve "$('<ROOT>/bin/fm-operational-input.sh' encode launch-brief < '<HOME>/data/ev-grok/brief.md')"
+claude:   FM_HOME= FM_ROOT= FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PENDING_REPLY_DIR_OVERRIDE= STATE= FM_AGENT_ROLE=crewmate FM_AGENT_TASK='ev-claude' FM_AGENT_OWNER_HOME='<HOME>' CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions "$('<ROOT>/bin/fm-operational-input.sh' encode launch-brief < '<HOME>/data/ev-claude/brief.md')"
+codex:    FM_HOME= FM_ROOT= FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PENDING_REPLY_DIR_OVERRIDE= STATE= FM_AGENT_ROLE=crewmate FM_AGENT_TASK='ev-codex' FM_AGENT_OWNER_HOME='<HOME>' codex --dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch '<HOME>/state/ev-codex.turn-ended'\"]" "$('<ROOT>/bin/fm-operational-input.sh' encode launch-brief < '<HOME>/data/ev-codex/brief.md')"
+opencode: FM_HOME= FM_ROOT= FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PENDING_REPLY_DIR_OVERRIDE= STATE= FM_AGENT_ROLE=crewmate FM_AGENT_TASK='ev-opencode' FM_AGENT_OWNER_HOME='<HOME>' OPENCODE_CONFIG_CONTENT='{"permission":{"*":"allow"}}' opencode --prompt "$('<ROOT>/bin/fm-operational-input.sh' encode launch-brief < '<HOME>/data/ev-opencode/brief.md')"
+pi:       FM_HOME= FM_ROOT= FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PENDING_REPLY_DIR_OVERRIDE= STATE= FM_AGENT_ROLE=crewmate FM_AGENT_TASK='ev-pi' FM_AGENT_OWNER_HOME='<HOME>' pi -e '<HOME>/state/ev-pi.pi-ext.ts' "$('<ROOT>/bin/fm-operational-input.sh' encode launch-brief < '<HOME>/data/ev-pi/brief.md')"
+grok:     FM_HOME= FM_ROOT= FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PENDING_REPLY_DIR_OVERRIDE= STATE= FM_AGENT_ROLE=crewmate FM_AGENT_TASK='ev-grok' FM_AGENT_OWNER_HOME='<HOME>' grok --always-approve "$('<ROOT>/bin/fm-operational-input.sh' encode launch-brief < '<HOME>/data/ev-grok/brief.md')"
 ```
 
 The declaration precedes each adapter's own environment and flags, so an adapter cannot opt out of it.
@@ -126,10 +126,12 @@ bin/fm-agent-cwd-lib.sh: line 114: /proc/462/environ: Permission denied
 Redirections are applied left to right, so a trailing `2>/dev/null` on the same command is established only after the input redirect has already failed and written to stderr.
 The group form is what suppresses it, and `fm_agent_environ` is the single reader that applies it.
 
-Regression: `tests/fm-worker-isolation.test.sh`'s isolated-worker sweep case captures the sweep with stderr folded into stdout and requires it to be completely empty, so an unreadable `/proc` entry anywhere on the host fails the suite.
+Regression: `tests/fm-worker-isolation.test.sh`'s isolated-worker sweep case captures the sweep with stderr folded into stdout and requires it to be completely empty, so a permission diagnostic from any unreadable `/proc` entry would fail the suite.
 
 Pooled-slot occupancy is endpoint-scoped by `tests/fm-slot-occupant-proof.test.sh`:
 the proof follows the exact backend endpoint, rejects a foreign declared process
-inside the slot, retains on unavailable endpoint evidence, and permits disposal
-after the endpoint is proven closed. It never performs a host-wide process census
-for normal teardown.
+inside the slot, retains on unavailable endpoint evidence, and checks PID reuse
+between endpoint reads. When the endpoint is closed, teardown uses a complete
+same-user process census to catch reparented or undeclared occupants; an
+incomplete census retains the lease, and only a complete empty census permits
+disposal.
