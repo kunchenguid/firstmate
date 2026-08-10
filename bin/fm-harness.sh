@@ -30,12 +30,51 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 # shellcheck source=bin/fm-cursor-lib.sh
 . "$SCRIPT_DIR/fm-cursor-lib.sh"
 
+fm_harness_omp_process_matches() {  # <comm> <args>
+  local comm=$1 args=$2 script
+  case "$(basename -- "$comm")" in
+    omp) return 0 ;;
+    bun*)
+      # OMP is distributed as a Bun script. Match only argv[1]'s exact `omp`
+      # path component; later prompt arguments may mention OMP and are not
+      # process identity. A bare `bun` with no script argument is not OMP even
+      # when its own install path has an `omp` component, so the guard below
+      # mirrors bin/fm-session-lock-lib.sh: judge only a real argv[1].
+      script=${args#* }
+      if [ "$script" != "$args" ]; then
+        script=${script%% *}
+        case "/$script/" in
+          */omp/*) return 0 ;;
+        esac
+      fi ;;
+  esac
+  return 1
+}
+
+fm_harness_omp_ancestry_matches() {
+  local pid=$$ comm args
+  for _ in 1 2 3 4 5 6 7 8; do
+    comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
+    args=$(ps -o args= -p "$pid" 2>/dev/null)
+    fm_harness_omp_process_matches "$comm" "$args" && return 0
+    pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+    if [ -z "$pid" ] || [ "$pid" -le 1 ]; then
+      break
+    fi
+  done
+  return 1
+}
+
+
 detect_own() {
-  # OMP exports OMPCODE=1 to tool subprocesses (verified: omp 17.2.12).
-  # Check it before foreign markers retained by the surrounding terminal: a
-  # firstmate-launched OMP worker inherited CLAUDECODE=1 while preserving this
-  # positive OMP marker.
+  # OMP workers launched by Firstmate carry OMPCODE=1. A primary OMP 17.2.12
+  # session may omit it, so its exact Bun ancestry must also outrank an
+  # inherited foreign Claude marker.
   [ "${OMPCODE:-}" = "1" ] && { echo omp; return; }
+  if [ "${CLAUDECODE:-}" = "1" ] && fm_harness_omp_ancestry_matches; then
+    echo omp
+    return
+  fi
   # Layer 1: environment markers for verified harnesses.
   # Keep marker detection before ancestry detection as an explicit precedence rule.
   # OMP, Claude, Pi, Grok, and Cursor set verified markers of their own; codex,
@@ -92,7 +131,6 @@ detect_own() {
       *opencode*) echo opencode; return ;;
       *grok*) echo grok; return ;;
       kimi) echo kimi; return ;;
-      omp) echo omp; return ;;
       # muse's installed launcher ~/.local/bin/muse execs ~/.local/bin/muse-bin-<version>
       # (verified in the published launcher, muse 0.1.0-R708.1), so the live process
       # name carries the version and CHANGES on every auto-update. Match the stable
@@ -101,20 +139,9 @@ detect_own() {
       muse|muse-bin-*) echo muse; return ;;
       pi-signed) echo pi; return ;;
       pi) echo pi; return ;;
-      bun*)
-        # OMP is distributed as a Bun script. Match only argv[1]'s exact `omp`
-        # path component; later prompt arguments may mention OMP and are not
-        # process identity. A bare `bun` with no script argument is not OMP even
-        # when its own install path has an `omp` component, so the guard below
-        # mirrors bin/fm-session-lock-lib.sh: judge only a real argv[1].
+      omp|bun*)
         args=$(ps -o args= -p "$pid" 2>/dev/null)
-        script=${args#* }
-        if [ "$script" != "$args" ]; then
-          script=${script%% *}
-          case "/$script/" in
-            */omp/*) echo omp; return ;;
-          esac
-        fi ;;
+        fm_harness_omp_process_matches "$comm" "$args" && { echo omp; return; } ;;
       node*|python*)
         # Bare interpreter: match the harness name in its script path.
         args=$(ps -o args= -p "$pid" 2>/dev/null)
