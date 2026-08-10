@@ -26,8 +26,9 @@
 # paginated active-workflow inventory,
 # repos/<owner>/<repo>/actions/runs?head_sha=<exact-sha>, and each relevant run's
 # paginated Actions jobs. No branch name or local HEAD can certify green. A run
-# counts only when its repository, head SHA, and pull-request association all
-# match, and every active workflow must have one unambiguous latest run. The
+# counts only when its PR trigger, repository, head SHA, and pull-request
+# association all match, and every active workflow must have one unambiguous
+# latest run. The
 # highest attempt of one run supersedes its older attempts. A completed
 # successful workflow still requires every job in that attempt to complete
 # successfully, so an unexpectedly skipped job cannot hide behind workflow-level
@@ -348,10 +349,10 @@ def positive_integer(value):
     return isinstance(value, int) and not isinstance(value, bool) and value > 0
 
 
-def diagnostic(kind, message, bucket="pending"):
-    state = "timed_out" if bucket == "fail" else f"{kind}_evidence"
+def diagnostic(kind, message, bucket="pending", name=None, state=None):
+    state = state or ("timed_out" if bucket == "fail" else f"{kind}_evidence")
     check = {
-        "name": f"Firstmate CI fallback - {kind} evidence",
+        "name": f"Firstmate CI fallback - {name or f'{kind} evidence'}",
         "state": state,
         "bucket": bucket,
         "completedAt": "",
@@ -432,6 +433,8 @@ try:
     for run in read_json_lines(runs_path, "workflow runs"):
         workflow_id = run.get("workflow_id")
         if workflow_id not in active:
+            continue
+        if run.get("event") not in ("pull_request", "pull_request_target"):
             continue
         if run.get("head_sha") != head:
             continue
@@ -522,6 +525,13 @@ try:
 except EvidenceError as error:
     evidence_kind = error.kind
     checks, reason = diagnostic(error.kind, str(error))
+except Exception as error:
+    evidence_kind = "terminal"
+    reason = f"cannot normalize Actions evidence: {type(error).__name__}: {error}"
+    checks, reason = diagnostic(
+        "normalizer", reason, bucket="fail", name="normalizer error", state="normalizer_error"
+    )
+    print(f"fm-gh-ci-fallback: normalizer-error: {reason}", file=sys.stderr)
 
 safe_repo = re.sub(r"[^A-Za-z0-9_.-]+", "_", repo)
 state_path = os.path.join(state_root, f"{safe_repo}-pr-{number}.json")

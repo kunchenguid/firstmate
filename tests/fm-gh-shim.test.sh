@@ -521,7 +521,7 @@ test_ci_unrelated_exact_head_workflow_does_not_certify_green() {
         "updated_at": "2026-08-07T12:35:56Z",
         "html_url": "https://github.com/o/r/actions/runs/301",
         "repository": {"full_name": "o/r"},
-        "pull_requests": []
+        "pull_requests": [{"number": 7, "head": {"sha": "$head"}}]
       }
     ]
   }
@@ -543,6 +543,37 @@ EOF
   printf '%s' "$json" | "$jq_bin" -e 'all(.[]; .bucket != "pass")' >/dev/null ||
     fail "an exact-head workflow unrelated to the PR incorrectly certified green"
   pass "an unrelated exact-head workflow cannot certify the PR green"
+}
+
+test_ci_normalizer_failure_becomes_a_typed_terminal_check() {
+  local case_dir real_dir shim_dir head out status jq_bin
+  case_dir="$TMP_ROOT/ci-normalizer-failure"
+  real_dir="$case_dir/real"
+  shim_dir="$case_dir/shim"
+  head=bcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbc
+  jq_bin=$(command -v jq) || fail "jq is required to exercise gh's built-in --jq contract"
+  make_fake_ci_gh "$real_dir"
+  write_ci_pages "$case_dir/exact.json" CI completed '{"unexpected":"shape"}' "$head"
+  write_ci_pages "$case_dir/stale.json" stale-head completed '"success"'
+  mkdir -p "$shim_dir"
+  ln -sf "$SHIM" "$shim_dir/gh"
+
+  status=0
+  out=$(FAKE_GH_LOG="$case_dir/gh.calls" FM_TEST_PR_HEAD="$head" \
+    FM_TEST_WORKFLOW_PAGES="$case_dir/exact.json" FM_TEST_STALE_PAGES="$case_dir/stale.json" \
+    FM_TEST_JQ="$jq_bin" GITHUB_TOKEN=narrow-ci-token PATH="$shim_dir:$real_dir:$PATH" \
+    gh pr checks 7 --repo o/r --json name,state,bucket,completedAt 2>&1) || status=$?
+
+  expect_code 0 "$status" "normalizer failure transport"
+  assert_contains "$out" "fm-gh-ci-fallback: normalizer-error:" \
+    "an unexpected evidence shape did not emit a typed normalizer diagnostic"
+  assert_run_field "$jq_bin" "$out" "Firstmate CI fallback - normalizer error" bucket fail \
+    "an unexpected evidence shape did not become a terminal failed check"
+  assert_run_field "$jq_bin" "$out" "Firstmate CI fallback - normalizer error" state normalizer_error \
+    "an unexpected evidence shape lost its typed terminal state"
+  assert_not_contains "$out" '"bucket":"pass"' \
+    "an unexpected evidence shape incorrectly certified green"
+  pass "an unexpected normalizer failure becomes a typed terminal check"
 }
 
 test_ci_latest_rerun_attempt_supersedes_the_failed_attempt() {
@@ -1683,6 +1714,7 @@ test_ci_deeper_denial_path_falls_back_to_exact_head_green
 test_ci_403_falls_back_to_exact_head_red
 test_ci_zero_exact_head_runs_stays_pending
 test_ci_unrelated_exact_head_workflow_does_not_certify_green
+test_ci_normalizer_failure_becomes_a_typed_terminal_check
 test_ci_latest_rerun_attempt_supersedes_the_failed_attempt
 test_ci_paginated_skipped_job_prevents_workflow_green
 test_ci_missing_active_workflow_does_not_certify_green
