@@ -477,6 +477,7 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty>
   FM_COMPOSER_SCAN_BOX_TOP=-1
   FM_COMPOSER_SCAN_BOX_BOTTOM=-1
   FM_COMPOSER_SCAN_BOX_AMBIG=0
+  FM_COMPOSER_SCAN_INCOMPLETE_BOX_FROM=-1
   FM_COMPOSER_SCAN_UNSAFE=0
   FM_COMPOSER_SCAN_CURSOR_EDGE=0
   FM_COMPOSER_SCAN_BARE_ROW=-1
@@ -555,6 +556,7 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty>
         FM_COMPOSER_SCAN_UNSAFE=1
       fi
       top=$row
+      FM_COMPOSER_SCAN_INCOMPLETE_BOX_FROM=$row
       current_family=$family
       current_indent=$indent
       valid=1
@@ -590,7 +592,7 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty>
             # tolerated when the inner still starts and ends with the family's
             # own rule glyph: the corners, family, indent, and every content
             # row's geometry were already proven. Anything else is ambiguity.
-            if ! _fm_composer_titled_bottom_ok "$family" "$bottom_inner"; then
+            if ! _fm_composer_titled_bottom_ok "$family" "$bottom_inner" "$top_spaces"; then
               geometry_ambiguous=1
             fi
           fi
@@ -606,10 +608,16 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty>
           FM_COMPOSER_SCAN_BOX_BOTTOM=$row
           FM_COMPOSER_SCAN_BOX_AMBIG=$geometry_ambiguous
         fi
-      elif [ -n "$cy" ]; then
-        if { [ "$top" -ge 0 ] && [ "$top" -lt "$cy" ] && [ "$cy" -le "$row" ]; } \
-           || [ "$row" -eq "$cy" ]; then
-          FM_COMPOSER_SCAN_UNSAFE=1
+        FM_COMPOSER_SCAN_INCOMPLETE_BOX_FROM=-1
+      else
+        if [ "$FM_COMPOSER_SCAN_INCOMPLETE_BOX_FROM" -lt 0 ]; then
+          FM_COMPOSER_SCAN_INCOMPLETE_BOX_FROM=$row
+        fi
+        if [ -n "$cy" ]; then
+          if { [ "$top" -ge 0 ] && [ "$top" -lt "$cy" ] && [ "$cy" -le "$row" ]; } \
+             || [ "$row" -eq "$cy" ]; then
+            FM_COMPOSER_SCAN_UNSAFE=1
+          fi
         fi
       fi
       top=-1
@@ -659,8 +667,8 @@ EOF
 # 0 when a mismatched bottom border reads as a legitimate TITLE: the trimmed
 # inner (corners already stripped) still starts and ends with the family's own
 # rule glyph, so the title is embedded IN the rule rather than replacing it.
-_fm_composer_titled_bottom_ok() {  # <family> <bottom-inner>
-  local family=$1 inner=$2 dash
+_fm_composer_titled_bottom_ok() {  # <family> <bottom-inner> <top-spaces>
+  local family=$1 inner=$2 expected=$3 dash spaces
   fm_composer_normalize_trim_var inner
   case "$family" in
     rounded|light) dash='─' ;;
@@ -670,9 +678,15 @@ _fm_composer_titled_bottom_ok() {  # <family> <bottom-inner>
     *) return 1 ;;
   esac
   case "$inner" in
-    "$dash"*"$dash") return 0 ;;
+    "$dash"*"$dash") ;;
+    *) return 1 ;;
   esac
-  return 1
+  spaces=${inner//"$dash"/ }
+  spaces=$(printf '%s' "$spaces" | LC_ALL=C sed 's/[!-~]/ /g')
+  case "$spaces" in
+    *[![:space:]]*) return 1 ;;
+  esac
+  [ "$spaces" = "$expected" ]
 }
 
 # fm_composer_row_has_edge: 0 when the trimmed row starts or ends with a
@@ -951,6 +965,10 @@ EOF
   if [ "$FM_COMPOSER_SCAN_LEFTBAR_END" -gt "$generic" ]; then
     generic=$FM_COMPOSER_SCAN_LEFTBAR_END
     winner=leftbar
+  fi
+  if [ "$FM_COMPOSER_SCAN_INCOMPLETE_BOX_FROM" -gt "$generic" ]; then
+    printf 'unknown'
+    return 0
   fi
   if [ "$FM_COMPOSER_SCAN_PI_PAIR_FOUND" = 1 ] \
      && [ "$FM_COMPOSER_SCAN_PI_CLOSE" -gt "$generic" ] \

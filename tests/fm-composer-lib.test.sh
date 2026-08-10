@@ -375,6 +375,24 @@ test_bottom_most_candidate_wins() {
   pass "fm_composer_classify_screen: the bottom-most candidate wins; stale banners cannot"
 }
 
+test_incomplete_lower_box_invalidates_stale_candidate() {
+  local screen out
+  screen=$'╭────────────────────────╮\n│ ❯                      │\n╰────────────────────────╯\nstartup complete\n╭────────────────────────╮\n│ ❯ clipped live draft  '
+  out=$(fm_composer_classify_screen "$CAPS_PLAIN" "$screen")
+  [ "$out" = unknown ] \
+    || fail "an incomplete lower box must invalidate an earlier empty box, got '$out'"
+  pass "fm_composer_classify_screen: incomplete lower structure invalidates stale boxes"
+}
+
+test_titled_bottom_requires_matching_width() {
+  local screen out
+  screen=$'╭────────────────────────╮\n│ ❯                      │\n╰─ Grok ─╯'
+  out=$(fm_composer_classify_screen "$CAPS_TMUX" "$screen" 1)
+  [ "$out" = unknown ] \
+    || fail "a short titled bottom must not prove an empty box, got '$out'"
+  pass "fm_composer_classify_screen: titled bottoms retain full box geometry"
+}
+
 test_bare_shell_glyphs_are_unknown
 test_stripped_unbordered_content_uses_plain_content
 test_bare_shell_prompt_with_command_is_not_empty
@@ -395,3 +413,5 @@ test_matrix_claude_inside_zellij_ansi_dump
 test_strict_blank_row_divergence
 test_bare_wrap_region_classifies
 test_bottom_most_candidate_wins
+test_incomplete_lower_box_invalidates_stale_candidate
+test_titled_bottom_requires_matching_width
