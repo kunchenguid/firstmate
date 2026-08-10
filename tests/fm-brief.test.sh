@@ -371,6 +371,44 @@ test_ship_project_memory_wording() {
   pass "fm-brief.sh: ship project-memory wording carries the AGENTS.md authoring bar"
 }
 
+# The no-mistakes anomaly-bypass rule must render identically (same source
+# variable, not a duplicated literal) right after the daemon rule in both
+# crewmate briefs that carry that rule - ship (no-mistakes mode) and scout -
+# so crews never invent a bypass and never touch the shared daemon or product
+# code without an AGENTS.md-documented, worker-safe escape hatch.
+test_no_mistakes_anomaly_bypass_rule() {
+  local home id brief scout_id scout
+  home="$TMP_ROOT/anomaly-bypass-home"
+  mkdir -p "$home/data"
+
+  id="brief-anomaly-e1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "brief was not scaffolded"
+  assert_grep "check the current project's own \`AGENTS.md\` for an exact, approved, worker-safe bypass" "$brief" \
+    "ship DOD must point workers at the project's own AGENTS.md before blocking on an anomaly"
+  assert_grep "does not touch the shared no-mistakes daemon, edit product code, or require captain authorization" "$brief" \
+    "ship DOD must scope the documented bypass to worker-safe, daemon-untouched, captain-free actions"
+  assert_grep "apply it directly and independently verify the expected outcome (for example with \`gh-axi\` or \`gh pr checks\`)" "$brief" \
+    "ship DOD must require independent verification of a documented bypass, not blind trust"
+  assert_grep "Never invent a bypass; if the symptom is not already documented there, append \`blocked: {the anomaly}\` and stop." "$brief" \
+    "ship DOD must still block undocumented anomaly symptoms instead of improvising"
+  awk '/Never stop, restart, or update the shared `no-mistakes` daemon/{found=1} found && /check the current project.s own/{print "adjacent"; exit}' "$brief" \
+    | grep -q adjacent \
+    || fail "ship DOD anomaly-bypass rule must immediately follow the daemon-preservation rule"
+
+  scout_id="brief-anomaly-e2"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$scout_id" some-proj --scout >/dev/null 2>&1
+  scout="$home/data/$scout_id/brief.md"
+  assert_present "$scout" "scout brief was not scaffolded"
+  assert_grep "check the current project's own \`AGENTS.md\` for an exact, approved, worker-safe bypass" "$scout" \
+    "scout brief lost the AGENTS.md anomaly-bypass instruction"
+  assert_grep "Never invent a bypass; if the symptom is not already documented there, append \`blocked: {the anomaly}\` and stop." "$scout" \
+    "scout brief must still block undocumented anomaly symptoms instead of improvising"
+
+  pass "fm-brief.sh: no-mistakes anomaly-bypass rule sends workers to AGENTS.md, requires verification, and still blocks undocumented symptoms"
+}
+
 test_herdr_lab_contract_is_explicit_and_complete() {
   local home id brief
   home="$TMP_ROOT/herdr-lab-home"
@@ -720,6 +758,7 @@ test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
 test_ship_project_memory_wording
+test_no_mistakes_anomaly_bypass_rule
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
 test_herdr_lab_omission_is_loud_for_ship_and_scout
