@@ -82,6 +82,9 @@
 #
 # --home defaults to $FM_HOME. --all reads <home>/data/secondmates.md and skips
 # entries carrying "machine: <host>", which name a home on another machine.
+#
+# docs/treehouse-pool.md records the measurements behind all of the above and the
+# supervised order for backfilling a machine that already has shared pools.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

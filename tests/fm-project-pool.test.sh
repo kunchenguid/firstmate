@@ -38,7 +38,8 @@ pool() {  # run the script with the sandboxed HOME and no inherited FM_HOME
 
 # make_home <name> [secondmate-id]: a directory shaped like a firstmate home.
 make_home() {
-  local name=$1 id=${2:-} home="$TMP_ROOT/$1"
+  local name=$1 id=${2:-} home
+  home="$TMP_ROOT/$name"
   mkdir -p "$home/data" "$home/projects" "$home/state" "$home/config"
   : >"$home/AGENTS.md"
   mkdir -p "$home/bin"
@@ -53,7 +54,8 @@ ORIGIN="$TMP_ROOT/origin.git"
 fm_git_init_commit "$TMP_ROOT/seed"
 git clone --quiet --bare "$TMP_ROOT/seed" "$ORIGIN"
 make_clone() {
-  local home=$1 project=$2 dst="$1/projects/$2"
+  local home=$1 project=$2 dst
+  dst="$home/projects/$project"
   git clone --quiet "$ORIGIN" "$dst"
   printf '%s\n' "$dst"
 }
