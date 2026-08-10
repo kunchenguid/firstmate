@@ -287,7 +287,7 @@ The other verified worker runtimes do not expose this verified Claude `statusLin
 ## Crew dispatch profiles (config/crew-dispatch.json)
 
 `config/crew-dispatch.json` is an optional local, gitignored file containing natural-language rules that firstmate reads before dispatching a crewmate or scout.
-The shell scripts do not match those rules; firstmate chooses the best matching rule with judgment, resolves its profile object or array under the operating contract in `AGENTS.md` section 4 and `quota-array-dispatch`, and passes only concrete `--harness`, `--model`, and `--effort` flags to `fm-spawn.sh`.
+The shell scripts do not match those rules; firstmate chooses the best matching rule with judgment, resolves its profile object or array under the operating contract in `AGENTS.md` section 4 and `quota-array-dispatch`, and passes only concrete `--harness`, `--model`, and `--effort` flags to `fm-spawn.sh`, plus the `--route` a dispatch claims once this home configures routed pools ([below](#routed-pools-optional)).
 When the file exists, `fm-spawn.sh` enforces that contract by refusing crewmate and scout spawns that lack an explicit harness (`--harness`, a positional adapter, or a raw launch command).
 Batch spawns satisfy the same requirement with a shared `--harness`.
 Secondmate spawns are exempt and still resolve through `config/secondmate-harness` and its optional model and effort tokens.
@@ -322,7 +322,7 @@ Profile `model` and `effort` fields and rule `why` are optional.
 An omitted model or effort means the selected harness uses its own default for that axis.
 Every profile array is an implicit quota-aware choice resolved through `quota-array-dispatch`.
 If no dispatch rule fits, firstmate resolves `default` through the same object-or-array path before falling back to `config/crew-harness`.
-The optional top-level `_floors` object declares this home's capability floor vocabulary: each key names a floor, and each value is a free-form note the shell scripts never read.
+The optional top-level `_floors` object declares this home's capability floor vocabulary: each key names a floor, and each value is a free-form note the shell scripts never read unless this home also configures routed pools, where an object value declares axes they do check ([below](#routed-pools-optional)).
 The optional `floor` field names the capability floor a route resolves against, and it is accepted on a rule, on any `use` profile, and on `default` in either its object or its array form.
 [`bin/fm-reasoning-lib.sh`](../bin/fm-reasoning-lib.sh) reads the vocabulary as the union of the `_floors` keys and every `floor` value the file defines, and `fm-spawn.sh` refuses a `--capability-floor` outside it rather than recording a capability band this config never granted.
 A dispatch that names no floor inherits the default route's floor, which for an array-form `default` is the first floor its profiles define.

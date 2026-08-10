@@ -155,6 +155,8 @@ Discriminate a model outage from a provider outage with two probes: a sibling th
 
 **On free-tier exhaustion:** mark unavailable, do not cross into paid usage, do not repeatedly retry, fall back only to a same-route candidate on the allowlist that meets the floor, otherwise stop and escalate.
 
+In a home with routed pools, `bin/fm-route.sh` is how that is done rather than by hand: `availability hold` and `availability release` are the only writers of `state/model-health.json` and refuse a subject no configured pool can match, and `next` names the substitute inside the failed model's own pool, exiting `3` with the terminal report above when there is none.
+
 **The terminal state:**
 
 > **When no candidate in a route's pool meets that route's floor and is available, firstmate stops, queues the work, and reports to the captain immediately, naming the route, the floor, every candidate considered, and why each was unavailable.**

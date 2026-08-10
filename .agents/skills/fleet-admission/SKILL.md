@@ -51,6 +51,9 @@ Read the band, not the exit code alone, and act on it:
 
 An unknown required signal has already been mapped to its configured band by the evaluator; treat the result as that band and name the missing or contradictory evidence when you report it.
 
+`bin/fm-spawn.sh` asks the same question again after the route check and before it allocates anything, so a ship or scout dispatch in an admission-active home is stopped rather than started when the band is not `preferred`: a `queue` action stops it as `FM_SPAWN_ADMISSION_DEFERRED` and a `refuse` action as `FM_SPAWN_ADMISSION_REFUSED`, and the spawn itself places the record's own hold kind with the reason shape below, so do not record a second hold for a request it already queued.
+That backstop replaces none of this procedure: it tells the captain nothing, and when it warns that it could not queue the request, placing the hold is yours.
+
 Admitting several requests in one intake means evaluating them one at a time: each admission changes the snapshot before the next is evaluated.
 
 ## Queueing a deferred or refused request
