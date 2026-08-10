@@ -9,7 +9,7 @@ The bounded real reproduction reached Pi visibly while Herdr kept the native age
 before-fix.png
 ```
 
-![e01de716-2026-08-10](e01de716-2026-08-10.png)
+![7d052665-2026-08-10](7d052665-2026-08-10.png)
 
 The recorded pre-fix negative control returned pending with an empty Pi composer and retained the unchanged buffer.
 
