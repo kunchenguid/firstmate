@@ -129,11 +129,11 @@
       "audience": "agent-runtime"
     },
     {
-      "path": ".agents/skills/decision-hold-lifecycle/SKILL.md",
+      "path": ".agents/skills/decision-brief/SKILL.md",
       "audience": "agent-runtime"
     },
     {
-      "path": ".agents/skills/decision-brief/SKILL.md",
+      "path": ".agents/skills/decision-hold-lifecycle/SKILL.md",
       "audience": "agent-runtime"
     },
     {
