@@ -12,13 +12,25 @@
 FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$'
 
 # The same harnesses as exact executable names. Keep in sync with
-# FM_HARNESS_RE. Used only for the stricter path evidence below, where the
-# loose regex would also match ordinary firstmate paths such as
-# bin/fm-claude-stop-autoarm.sh.
+# FM_HARNESS_RE. Used only by the bare-interpreter script-argument check below,
+# where an interpreter's immediate script argument is allowed to name any
+# supported harness, not only Claude.
 FM_HARNESS_NAMES=(claude codex opencode grok kimi pi-signed pi)
 
-# Print the exact harness name carried by executable path $1 - its own basename
-# or any directory component - or return 1.
+# True when path $1 has $2 as a whole path component - its own basename or any
+# directory component, but never a component that merely contains $2 as a
+# substring (an unrelated directory such as pi-codex-conversion must not read
+# as "codex", and .pi must not read as "pi").
+fm_path_has_component() {  # <path> <name>
+  local path=$1 name=$2
+  [ -n "$path" ] && [ -n "$name" ] || return 1
+  case "/$path/" in
+    */"$name"/*) return 0 ;;
+  esac
+  return 1
+}
+
+# True when executable path $1 carries a "claude" whole path component.
 #
 # This exists because Claude Code's native installer names the per-session
 # executable by its version (~/.local/share/claude/versions/2.1.220), so the
@@ -26,15 +38,16 @@ FM_HARNESS_NAMES=(claude codex opencode grok kimi pi-signed pi)
 # whole path components only is what keeps that widening safe: an ordinary path
 # such as bin/fm-claude-stop-autoarm.sh or ~/.claude/hooks/notify.sh has no
 # "claude" component and is correctly not a harness process.
+#
+# Deliberately Claude-only: no other supported harness names its per-session
+# executable by version, so widening this to every FM_HARNESS_NAMES entry would
+# accept an unrelated helper merely installed under an agent-named directory
+# (e.g. .../node_modules/@vendor/pi-codex-conversion/.../exec_bridge) as that
+# agent. bin/backends/tmux.sh's fm_backend_tmux_classify_process_name shares
+# this exact fallback for the same reason.
 fm_harness_path_name() {  # <path>
-  local path=$1 name
-  [ -n "$path" ] || return 1
-  for name in "${FM_HARNESS_NAMES[@]}"; do
-    case "/$path/" in
-      */"$name"/*) printf '%s' "$name"; return 0 ;;
-    esac
-  done
-  return 1
+  fm_path_has_component "$1" claude || return 1
+  printf 'claude'
 }
 
 # True when the process described by command name $1 and full argument string $2
@@ -42,15 +55,22 @@ fm_harness_path_name() {  # <path>
 #
 # Evidence, in order:
 #   1. the basename of the reported command name, against FM_HARNESS_RE.
-#   2. an exact harness component in that command path or in argv[0]. Both are
-#      needed because the two platforms report different things: macOS reports
-#      argv[0] in `ps -o comm=`, while procps on Linux reports the kernel exec
-#      name and ignores argv[0] entirely, so a version-named Claude Code binary
-#      is identified by its install path on macOS and by argv[0] on Linux.
-#   3. a bare interpreter (node, python) running a harness script path.
+#   2. a "claude" whole path component in that command path or in argv[0]. Both
+#      are needed because the two platforms report different things: macOS
+#      reports argv[0] in `ps -o comm=`, while procps on Linux reports the
+#      kernel exec name and ignores argv[0] entirely, so a version-named Claude
+#      Code binary is identified by its install path on macOS and by argv[0] on
+#      Linux.
+#   3. a bare interpreter (node, python) whose IMMEDIATE script argument - not
+#      the whole argument string - names a supported harness via a whole path
+#      component. Checking only argv[1] and only whole components is what keeps
+#      an unrelated helper safe: a compiled binary that merely lives under
+#      node_modules (so $base, its own basename, never contains "node") and
+#      whose install path merely contains a harness name as part of a longer,
+#      unrelated component (e.g. pi-codex-conversion) must never match here.
 FM_HARNESS_IS_CLAUDE=0
 fm_harness_process_matches() {  # <comm> <args>
-  local comm=$1 args=$2 base argv0 name
+  local comm=$1 args=$2 base argv0 argv1 rest name
   FM_HARNESS_IS_CLAUDE=0
   base=$(basename -- "$comm")
   if printf '%s' "$base" | grep -qE "$FM_HARNESS_RE"; then
@@ -58,17 +78,22 @@ fm_harness_process_matches() {  # <comm> <args>
     return 0
   fi
   argv0=${args%% *}
-  if name=$(fm_harness_path_name "$comm") || name=$(fm_harness_path_name "$argv0"); then
-    case "$name" in claude) FM_HARNESS_IS_CLAUDE=1 ;; esac
+  if fm_harness_path_name "$comm" >/dev/null || fm_harness_path_name "$argv0" >/dev/null; then
+    FM_HARNESS_IS_CLAUDE=1
     return 0
   fi
-  # Bare interpreter (e.g. node): match the harness name in its script path.
-  case "$comm" in
+  case "$base" in
     *node*|*python*)
-      if printf '%s' "$args" | grep -qE "$FM_HARNESS_RE"; then
-        case "$args" in *claude*) FM_HARNESS_IS_CLAUDE=1 ;; esac
-        return 0
-      fi
+      case "$args" in
+        *' '*) rest=${args#* }; argv1=${rest%% *} ;;
+        *) argv1='' ;;
+      esac
+      for name in "${FM_HARNESS_NAMES[@]}"; do
+        if fm_path_has_component "$argv1" "$name"; then
+          case "$name" in claude) FM_HARNESS_IS_CLAUDE=1 ;; esac
+          return 0
+        fi
+      done
       ;;
   esac
   return 1

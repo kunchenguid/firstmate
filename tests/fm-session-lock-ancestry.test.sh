@@ -134,6 +134,144 @@ SH
   pass "session-lock: ordinary script paths under a harness directory are not harness processes"
 }
 
+test_exec_bridge_under_agent_named_directory_is_not_misclassified() {
+  local dir fakebin shape got
+  dir="$TMP_ROOT/exec-bridge"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+EXEC_BRIDGE_PATH='/Users/u/.pi/agent/npm/node_modules/@howaboua/pi-codex-conversion/src/tools/exec/bin/darwin-arm64/exec_bridge'
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field:${FM_TEST_BRIDGE_SHAPE:-linux}" in
+  # Linux: ps -o comm= reports the kernel exec name, so comm is exec_bridge's
+  # own basename with no directory components at all.
+  300:comm=:linux) printf '%s\n' 'exec_bridge' ;;
+  300:args=:linux) printf '%s\n' "$EXEC_BRIDGE_PATH --serve" ;;
+  # macOS: ps -o comm= reports argv[0], the full install path - the exact shape
+  # the reported issue reproduced.
+  300:comm=:macos) printf '%s\n' "$EXEC_BRIDGE_PATH" ;;
+  300:args=:macos) printf '%s\n' "$EXEC_BRIDGE_PATH --serve" ;;
+  # A genuine node interpreter whose immediate script argument happens to be
+  # this same unrelated helper path.
+  300:comm=:node_argv1) printf '%s\n' node ;;
+  300:args=:node_argv1) printf '%s\n' "node $EXEC_BRIDGE_PATH --serve" ;;
+  300:ppid=:*) printf '%s\n' 310 ;;
+  310:comm=:*) printf '%s\n' pi ;;
+  310:args=:*) printf '%s\n' pi ;;
+  310:ppid=:*) printf '%s\n' 1 ;;
+  *:comm=:*) printf '%s\n' bash ;;
+  *:args=:*) printf '%s\n' 'bash /repo/bin/fm-watch-arm.sh' ;;
+  *:ppid=:*) printf '%s\n' 300 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  printf '310\n' > "$dir/state/.lock"
+
+  for shape in linux macos node_argv1; do
+    got=$(FM_TEST_BRIDGE_SHAPE="$shape" lib_eval "$fakebin" 'fm_harness_ancestry_pid') \
+      || fail "$shape: no harness ancestor was found at all above the exec_bridge helper"
+    [ "$got" = 310 ] || fail "$shape: ancestry resolved '$got', expected the parent Pi engine pid 310, not the exec_bridge helper (300)"
+    FM_TEST_BRIDGE_SHAPE="$shape" lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
+      || fail "$shape: the real Pi session holding the lock was not recognized as the owner"
+  done
+  pass "session-lock: a helper executable under an agent-named directory (exec_bridge) is never the session owner - its parent harness is"
+}
+
+test_every_supported_harness_still_resolves_as_lock_owner() {
+  local dir fakebin harness got
+  dir="$TMP_ROOT/every-harness"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field" in
+  950:comm=) printf '%s\n' "${FM_TEST_HARNESS_NAME:-claude}" ;;
+  950:args=) printf '%s\n' "${FM_TEST_HARNESS_NAME:-claude}" ;;
+  950:ppid=) printf '%s\n' 1 ;;
+  *:comm=) printf '%s\n' bash ;;
+  *:args=) printf '%s\n' 'bash tests/run.sh' ;;
+  *:ppid=) printf '%s\n' 950 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  printf '950\n' > "$dir/state/.lock"
+
+  # Negative controls against the exec_bridge fix above: the narrowed
+  # classifier must still recognize every verified adapter's exact executable
+  # name, so tightening the false-positive paths never locks a real session
+  # out of its own fleet.
+  for harness in claude codex opencode pi pi-signed grok kimi; do
+    got=$(FM_TEST_HARNESS_NAME="$harness" lib_eval "$fakebin" 'fm_harness_ancestry_pid') \
+      || fail "$harness: exact executable name was not recognized as a harness process at all"
+    [ "$got" = 950 ] || fail "$harness: ancestry resolved '$got', expected the exact-named harness pid 950"
+    FM_TEST_HARNESS_NAME="$harness" lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
+      || fail "$harness: the session holding the lock did not recognize itself as the owner"
+  done
+  pass "session-lock: every supported harness's exact executable name still resolves as the lock owner"
+}
+
+test_bare_interpreter_positive_cases_still_resolve() {
+  local dir fakebin shape got
+  dir="$TMP_ROOT/bare-interpreter"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field:${FM_TEST_INTERP_SHAPE:-node-codex}" in
+  400:comm=:node-codex) printf '%s\n' node ;;
+  400:args=:node-codex) printf '%s\n' '/usr/local/bin/node /usr/local/lib/node_modules/@vendor/codex/bin/codex.js --flag' ;;
+  400:comm=:node-opencode) printf '%s\n' node ;;
+  400:args=:node-opencode) printf '%s\n' 'node /home/u/.opencode/bin/opencode' ;;
+  400:comm=:python-grok) printf '%s\n' python3 ;;
+  400:args=:python-grok) printf '%s\n' 'python3 /opt/grok/grok_cli.py' ;;
+  400:comm=:python-kimi) printf '%s\n' python ;;
+  400:args=:python-kimi) printf '%s\n' 'python /opt/kimi/kimi.py' ;;
+  400:ppid=:*) printf '%s\n' 1 ;;
+  *:comm=:*) printf '%s\n' bash ;;
+  *:args=:*) printf '%s\n' 'bash tests/run.sh' ;;
+  *:ppid=:*) printf '%s\n' 400 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  printf '400\n' > "$dir/state/.lock"
+
+  for shape in node-codex node-opencode python-grok python-kimi; do
+    got=$(FM_TEST_INTERP_SHAPE="$shape" lib_eval "$fakebin" 'fm_harness_ancestry_pid') \
+      || fail "$shape: a bare interpreter whose immediate script argument names a harness was not recognized"
+    [ "$got" = 400 ] || fail "$shape: ancestry resolved '$got', expected the interpreter pid 400"
+    FM_TEST_INTERP_SHAPE="$shape" lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
+      || fail "$shape: the interpreter-run harness holding the lock did not recognize itself as the owner"
+  done
+  pass "session-lock: a bare node/python interpreter whose immediate script argument names a harness still resolves"
+}
+
 test_harness_beyond_a_gap_never_owns_the_lock() {
   local dir fakebin got
   dir="$TMP_ROOT/gap"
@@ -356,6 +494,9 @@ test_e2e_daemon_parented_version_named_session_keeps_its_lock() {
 
 test_version_named_session_is_identified_on_both_platforms
 test_ordinary_paths_are_never_harness_processes
+test_exec_bridge_under_agent_named_directory_is_not_misclassified
+test_every_supported_harness_still_resolves_as_lock_owner
+test_bare_interpreter_positive_cases_still_resolve
 test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live
 test_e2e_version_named_session_claims_the_home
