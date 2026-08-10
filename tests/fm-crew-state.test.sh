@@ -744,14 +744,21 @@ test_terminal_failed() {
 # These four cases pin both directions: the banner reclassifies, and every
 # ambiguous kill signal keeps failing loudly.
 
-# The exact step-log shape from the report's test.log evidence.
+# The exact step-log shape, copied from real evidence
+# (~/.no-mistakes/logs/01KZGYR8NW7NHRW6EJTF7YSD1K/test.log). Note the banner is
+# CONCATENATED onto the end of the agent's own prose line rather than sitting on
+# a line of its own - the provider writes it straight into the stream. A
+# line-anchored matcher would miss it, so the fixture keeps the real shape.
 quota_killed_step_log() {  # [reset-phrase]
   cat <<EOF
 no test command configured, asking agent to run tests...
+
 claude started pid=22552
-I'll start by understanding the change and the repo state.
-You've hit your session limit${1:+ · resets $1}
+
+I'll start by understanding the change and the repo state.You've hit your session limit${1:+ · resets $1}
 claude exited pid=22552 error=claude exited: exit status 1:
+
+
 error: agent run tests: claude exited: exit status 1:
 EOF
 }
