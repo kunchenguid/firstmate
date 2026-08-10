@@ -375,12 +375,14 @@ clear_pause_tracking() {  # <window>
 # Only a confidently dead ordinary crew may recover paused classification after
 # fm-crew-state has fallen back to stopped or unknown.
 pause_state_class() {  # <window> <task>
-  local win=$1 task=$2 key last recheck_file class agent_alive harness
+  local win=$1 task=$2 key last recheck_file class agent_alive harness meta raw_launch
   key=${win//:/_}
   key=${key//\//_}
   key=${key//./_}
   last=$(last_status_line "$STATE/$task.status")
   harness=$(window_harness "$win")
+  meta="$STATE/$task.meta"
+  raw_launch=$(fm_meta_get "$meta" raw_launch 2>/dev/null || true)
   recheck_file="$STATE/.paused-rechecked-$key"
   if ! status_is_paused_or_captain_held "$last"; then
     rm -f "$recheck_file"
@@ -389,7 +391,7 @@ pause_state_class() {  # <window> <task>
   fi
   if [ -e "$STATE/.paused-$key" ] && [ "$(age_of "$recheck_file")" -lt "$STALE_ESCALATE_SECS" ]; then
     if [ "$(window_kind "$win")" != secondmate ]; then
-      agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" "$harness" 2>/dev/null) || agent_alive=unknown
+      agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" "$harness" "$raw_launch" 2>/dev/null) || agent_alive=unknown
       if [ "$agent_alive" != dead ]; then
         rm -f "$recheck_file"
         printf 'none'
@@ -406,7 +408,7 @@ pause_state_class() {  # <window> <task>
     return
   fi
   if [ "$(window_kind "$win")" != secondmate ]; then
-    agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" "$harness" 2>/dev/null) || agent_alive=unknown
+    agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" "$harness" "$raw_launch" 2>/dev/null) || agent_alive=unknown
     if [ "$agent_alive" != dead ]; then
       rm -f "$recheck_file"
       printf 'none'

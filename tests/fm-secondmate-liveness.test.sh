@@ -192,6 +192,9 @@ test_agent_state_dispatcher_and_compatibility() {
 
   out=$(PATH="$fb:$BASE_PATH" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state tmux sess:win raw-omp' "$ROOT")
   [ "$out" = unverified ] || fail "raw-omp metadata should stop the shared liveness dispatcher, got '$out'"
+  fb=$(make_probe_tmux "$TMP_ROOT/tmux-raw-launch-omp" omp)
+  out=$(PATH="$fb:$BASE_PATH" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state tmux sess:win omp 1' "$ROOT")
+  [ "$out" != alive ] || fail "raw-launch metadata must stop exact OMP process attribution, got '$out'"
   out=$(bash -c '. "$0/bin/backends/herdr.sh"; FM_HARNESS_UNVERIFIED=raw-omp fm_backend_herdr_pane_agent_state sess:p1' "$ROOT")
   [ "$out" = unknown ] || fail "raw-omp marker should stop direct Herdr attribution, got '$out'"
 
@@ -201,6 +204,18 @@ test_agent_state_dispatcher_and_compatibility() {
   [ "$out" = unknown ] || fail "the compatibility dispatcher should map unverified to unknown, got '$out'"
 
   pass "fm_backend_agent_state: gates raw-omp and routes tmux/Herdr safely"
+}
+
+test_raw_marker_gates_busy_and_control() {
+  local meta="$TMP_ROOT/raw-marker-meta" state="$TMP_ROOT/raw-marker-state" out
+  mkdir -p "$state"
+  printf '%s\n' 'window=sess:win' 'harness=omp' 'raw_launch=1' > "$meta"
+  out=$(bash -c '. "$0/bin/fm-backend.sh"; . "$0/bin/fm-busy-lib.sh"; fm_busy_classify_meta "$1" raw-marker "$2"' "$ROOT" "$meta" "$state")
+  [ "$out" = "unknown raw-unverified" ] || fail "raw-launch metadata must gate OMP busy classification, got '$out'"
+  if bash -c '. "$0/bin/fm-control-lib.sh"; fm_control_harness_family omp 1' "$ROOT"; then
+    fail "raw-launch metadata must reject OMP control mechanics"
+  fi
+  pass "raw-launch metadata gates OMP busy and control mechanics"
 }
 
 # --- sweep level: bin/fm-bootstrap.sh's secondmate_liveness_sweep -----------
@@ -564,6 +579,7 @@ test_tmux_agent_state_classifies
 test_tmux_agent_state_rejects_malformed_targets_before_probe
 test_herdr_agent_state_preserves_husk_classifier
 test_agent_state_dispatcher_and_compatibility
+test_raw_marker_gates_busy_and_control
 test_sweep_respawns_confirmed_dead_secondmate
 test_sweep_leaves_alive_secondmate_untouched
 test_sweep_respawns_authoritatively_missing_pi_secondmate

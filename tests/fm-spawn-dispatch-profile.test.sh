@@ -413,8 +413,9 @@ test_active_dispatch_profile_allows_raw_launch_command() {
   expect_code 0 "$status" "raw launch command should satisfy active dispatch-profile requirement"
   assert_contains "$out" "spawned $id harness=custom-agent" "spawn did not report raw command harness"
   assert_meta_profile "$HOME_DIR/state/$id.meta" custom-agent default default
+  assert_grep "raw_launch=1" "$HOME_DIR/state/$id.meta" "raw launch metadata did not retain the unverified process-tree marker"
   launch=$(cat "$LAUNCH_LOG")
-  [ "$launch" = "unset FM_HARNESS_UNVERIFIED OMPCODE CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS FM_PRIMARY_HARNESS GROK_AGENT GROK_HOOK_EVENT; custom-agent --flag" ] || fail "raw launch command changed"$'\n'"actual: $launch"
+  [ "$launch" = "unset FM_HARNESS_UNVERIFIED OMPCODE CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS FM_PRIMARY_HARNESS GROK_AGENT GROK_HOOK_EVENT; export FM_HARNESS_UNVERIFIED=raw-launch; custom-agent --flag" ] || fail "raw launch command changed"$'\n'"actual: $launch"
   pass "active crew-dispatch profile allows the raw launch-command escape hatch"
 }
 
@@ -738,7 +739,7 @@ test_raw_omp_launch_does_not_arm_unwired_semantic_busy() {
   probe="$CASE_DIR/raw-omp-env"
   cat > "$raw_omp" <<SH
 #!/usr/bin/env bash
-printf '%s\n' "\${OMPCODE:-unset}" > "$probe"
+printf '%s|%s\n' "\${OMPCODE:-unset}" "\${FM_HARNESS_UNVERIFIED:-unset}" > "$probe"
 exit 0
 SH
   chmod +x "$raw_omp"
@@ -751,39 +752,71 @@ SH
     "$id" "$PROJ_DIR" "bash \"$wrapper\"")
   status=$?
   expect_code 0 "$status" "a raw OMP launch command should spawn"
-  assert_contains "$out" "spawned $id harness=raw-omp" "raw OMP launch was recorded as verified"
-  assert_grep "harness=raw-omp" "$HOME_DIR/state/$id.meta" "raw OMP launch meta was recorded as verified"
+  assert_contains "$out" "spawned $id harness=bash" "raw OMP wrapper changed the recorded dispatch harness"
+  assert_grep "harness=bash" "$HOME_DIR/state/$id.meta" "raw OMP wrapper changed the recorded dispatch harness"
+  assert_grep "raw_launch=1" "$HOME_DIR/state/$id.meta" "raw OMP wrapper did not retain its unverified process-tree marker"
   assert_absent "$HOME_DIR/state/$id.busy-gen" "raw OMP launch armed semantic busy without loading the generated extension"
   assert_absent "$HOME_DIR/state/$id.busy-state" "raw OMP launch seeded busy state without loading the generated extension"
   launch=$(cat "$LAUNCH_LOG")
   OMPCODE=1 PI_CODING_AGENT=true PATH="$FAKEBIN_DIR:$PATH" bash -c "$launch"
-  [ "$(cat "$probe")" = unset ] || fail "raw OMP launch retained inherited OMP identity"
+  [ "$(cat "$probe")" = "unset|raw-launch" ] || fail "raw OMP launch did not replace inherited OMP identity: $(cat "$probe")"
   pass "raw OMP launches remain unverified without semantic busy wiring"
 }
 
-test_raw_omp_dispatch_policy_handles_common_launchers() {
-  local policy=$ROOT/bin/fm-raw-launch-policy.mjs command result omp_script agent_script
-  omp_script="$TMP_ROOT/raw-policy-start-omp.sh"
-  agent_script="$TMP_ROOT/raw-policy-agent.sh"
-  printf '%s\n' '#!/usr/bin/env bash' 'exec /tmp/omp --raw-flag' > "$omp_script"
-  printf '%s\n' '#!/usr/bin/env bash' 'printf agent' > "$agent_script"
+test_raw_launch_marker_covers_process_tree_forms() {
+  local rec id out status launch raw_omp script sub probe command expected_harness
+  local direct_id wrapped_id nested_id script_id stdin_id env_id cwd_id no_node_id
+  direct_id=profile-raw-marker-direct-z8h
+  wrapped_id=profile-raw-marker-wrapped-z8i
+  nested_id=profile-raw-marker-nested-z8j
+  script_id=profile-raw-marker-script-z8k
+  stdin_id=profile-raw-marker-stdin-z8l
+  env_id=profile-raw-marker-env-z8m
+  cwd_id=profile-raw-marker-cwd-z8n
+  no_node_id=profile-raw-marker-no-node-z8o
+  rec=$(make_spawn_case raw-marker-forms claude "$direct_id" "$wrapped_id" "$nested_id" "$script_id" "$stdin_id" "$env_id" "$cwd_id" "$no_node_id")
+  read_case_record "$rec"
+  raw_omp="$CASE_DIR/omp"
+  script="$CASE_DIR/start-omp.sh"
+  sub="$CASE_DIR/subdir"
+  probe="$CASE_DIR/raw-marker-probe"
+  mkdir -p "$sub"
+  ln -s "$raw_omp" "$sub/omp"
+  cat > "$raw_omp" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\${FM_HARNESS_UNVERIFIED:-unset}" > "$probe"
+SH
+  chmod +x "$raw_omp"
+  printf '%s\n' '#!/usr/bin/env bash' "exec $raw_omp --raw-flag" > "$script"
+  chmod +x "$script"
+
   for command in \
-    "setsid /tmp/omp --raw-flag" \
-    "nice -n10 /tmp/omp --raw-flag" \
-    "stdbuf -o0 /tmp/omp --raw-flag" \
-    "time /tmp/omp --raw-flag" \
-    "time -p /tmp/omp --raw-flag" \
-    "time -f%E /tmp/omp --raw-flag" \
-    "bash $omp_script" \
-    ". $omp_script"; do
-    result=$(node "$policy" --command "$command")
-    [ "$result" = omp ] || fail "raw OMP dispatcher '$command' was classified as '$result'"
+    "$raw_omp --raw-flag|$direct_id|raw-omp|run" \
+    "nice $raw_omp --raw-flag|$wrapped_id|nice|run" \
+    "time nice $raw_omp --raw-flag|$nested_id|time|run" \
+    "bash $script|$script_id|bash|run" \
+    "bash < $script|$stdin_id|bash|run" \
+    "env -S '$raw_omp --raw-flag'|$env_id|env|metadata" \
+    "cd $sub && ./omp --raw-flag|$cwd_id|cd|run"; do
+    IFS='|' read -r command id expected_harness status <<< "$command"
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" "$command")
+    expect_code 0 "$?" "raw launch form '$command' should spawn"
+    assert_contains "$out" "spawned $id harness=$expected_harness" "raw launch form '$command' changed its recorded dispatch harness"
+    assert_grep "raw_launch=1" "$HOME_DIR/state/$id.meta" "raw launch form '$command' lost the process-tree marker"
+    launch=$(cat "$LAUNCH_LOG")
+    assert_contains "$launch" "export FM_HARNESS_UNVERIFIED=raw-launch;" "raw launch form '$command' did not export the inherited marker"
+    if [ "$status" = run ]; then
+      rm -f "$probe"
+      OMPCODE=1 PI_CODING_AGENT=true PATH="$FAKEBIN_DIR:$PATH" bash -c "$launch"
+      [ "$(cat "$probe")" = raw-launch ] || fail "raw launch form '$command' did not inherit raw-launch marker"
+    fi
   done
-  for command in "setsid printf '%s\\n' omp" "time printf '%s\\n' omp" "bash $agent_script" ". $agent_script"; do
-    result=$(node "$policy" --command "$command")
-    [ "$result" = other ] || fail "non-OMP dispatcher '$command' was classified as '$result'"
-  done
-  pass "raw OMP dispatch policy recognizes launcher targets without matching arguments"
+
+  PATH="$FAKEBIN_DIR:/usr/bin:/bin" out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$no_node_id" "$PROJ_DIR" "$raw_omp --raw-flag")
+  expect_code 0 "$?" "raw launch should not depend on the policy runtime"
+  assert_contains "$out" "spawned $no_node_id harness=raw-omp" "raw launch changed harness when policy runtime was unavailable"
+  assert_grep "raw_launch=1" "$HOME_DIR/state/$no_node_id.meta" "policy-runtime-unavailable raw launch lost its marker"
+  pass "raw launch process trees inherit one unverified marker across direct, wrapped, indirect, and runtime-free forms"
 }
 
 # The raw path is the escape hatch for verifying a new adapter, so it has to keep
@@ -1001,7 +1034,7 @@ test_pi_tui_mode_probe_is_safe_for_old_and_new_pi
 test_pi_signed_threads_shared_pi_profile_and_preserves_identity
 test_raw_launch_worker_identity_matches_its_recorded_harness
 test_raw_omp_launch_does_not_arm_unwired_semantic_busy
-test_raw_omp_dispatch_policy_handles_common_launchers
+test_raw_launch_marker_covers_process_tree_forms
 test_raw_launch_preserves_compound_shell_command_forms
 test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata
 test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity

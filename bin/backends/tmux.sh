@@ -282,8 +282,11 @@ fm_backend_tmux_foreground_argv0s() {  # <target>
 # live worktree, while the foreground process group - when it is readable - is
 # authoritative for the negative verdicts, since it is the only source that can
 # distinguish a truly idle pane from a rewritten process title.
-fm_backend_tmux_agent_state() {  # <target>
-  local target=$1 comm session window windows inventory_status
+fm_backend_tmux_agent_state() {  # <target> [raw-launch]
+  local target=$1 raw_launch=${2:-} comm session window windows inventory_status
+  local inherited_unverified=${FM_HARNESS_UNVERIFIED:-}
+  local FM_HARNESS_UNVERIFIED=$inherited_unverified
+  [ "$raw_launch" = 1 ] && FM_HARNESS_UNVERIFIED=raw-launch
   local foreground argv0s name fg_seen=0 fg_shell=0 fg_other=0
   case "$target" in
     *:*:*|'':*|*:'') printf 'unreadable'; return 0 ;;
@@ -368,8 +371,8 @@ EOF
 
 # Backward-compatible three-state view for callers that only need a yes/no
 # agent verdict. The detailed state contract is owned by fm_backend_agent_state.
-fm_backend_tmux_agent_alive() {  # <target>
-  case "$(fm_backend_tmux_agent_state "$1")" in
+fm_backend_tmux_agent_alive() {  # <target> [raw-launch]
+  case "$(fm_backend_tmux_agent_state "$1" "${2:-}")" in
     alive) printf 'alive' ;;
     dead|missing) printf 'dead' ;;
     *) printf 'unknown' ;;

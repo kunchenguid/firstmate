@@ -77,8 +77,10 @@ fm_control_harness_supported() {  # <harness>
 # `pi-signed` are exact because a `pi*` prefix would swallow the signed adapter,
 # and an unrecognized value returns nonzero rather than being guessed into a
 # family.
-fm_control_harness_family() {  # <recorded-harness>
-  case "${1-}" in
+fm_control_harness_family() {  # <recorded-harness> [raw-launch]
+  local recorded_harness=${1-} raw_launch=${2:-}
+  [ "$raw_launch" = 1 ] && [ "$recorded_harness" = omp ] && return 1
+  case "$recorded_harness" in
     pi) printf 'pi' ;;
     pi-signed) printf 'pi-signed' ;;
     claude*) printf 'claude' ;;

@@ -890,8 +890,11 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
 # classifier. Zellij remains unverified because its secondmate ghost-tab and
 # agent-process recovery path has not been empirically validated. Orca and cmux
 # do not support secondmate spawns.
-fm_backend_agent_state() {  # <backend> <target> [recorded-harness]
-  local backend=$1 target=$2 recorded_harness=${3:-}
+fm_backend_agent_state() {  # <backend> <target> [recorded-harness] [raw-launch]
+  local backend=$1 target=$2 recorded_harness=${3:-} raw_launch=${4:-}
+  local inherited_unverified=${FM_HARNESS_UNVERIFIED:-}
+  local FM_HARNESS_UNVERIFIED=$inherited_unverified
+  [ "$raw_launch" = 1 ] && FM_HARNESS_UNVERIFIED=raw-launch
   [ "$recorded_harness" = raw-omp ] && { printf 'unverified'; return 0; }
   fm_backend_source "$backend" || { printf 'unverified'; return 0; }
   case "$backend" in
@@ -904,8 +907,8 @@ fm_backend_agent_state() {  # <backend> <target> [recorded-harness]
 # Backward-compatible three-state view for existing callers. An
 # authoritatively missing endpoint is confidently not a live agent, while every
 # ambiguous, unreadable, or unverified result stays unknown.
-fm_backend_agent_alive() {  # <backend> <target> [recorded-harness]
-  case "$(fm_backend_agent_state "$1" "$2" "${3:-}")" in
+fm_backend_agent_alive() {  # <backend> <target> [recorded-harness] [raw-launch]
+  case "$(fm_backend_agent_state "$1" "$2" "${3:-}" "${4:-}")" in
     alive) printf 'alive' ;;
     dead|missing) printf 'dead' ;;
     *) printf 'unknown' ;;

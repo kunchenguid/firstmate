@@ -48,7 +48,7 @@ fm_harness_path_name() {  # <path>
 }
 
 fm_harness_omp_attribution_allowed() {
-  [ "${FM_HARNESS_UNVERIFIED:-}" != raw-omp ]
+  [ -z "${FM_HARNESS_UNVERIFIED:-}" ]
 }
 
 fm_harness_omp_script_matches() {  # <path>

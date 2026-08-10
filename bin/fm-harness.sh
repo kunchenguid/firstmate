@@ -46,15 +46,20 @@ fm_harness_omp_ancestry_matches() {
 
 
 detect_own() {
-  [ "${FM_HARNESS_UNVERIFIED:-}" = raw-omp ] && { echo unknown; return; }
+  case "${FM_PI_HARNESS:-}" in
+    pi|pi-signed) echo "$FM_PI_HARNESS"; return ;;
+  esac
   # OMP workers launched by Firstmate carry OMPCODE=1. A primary OMP 17.2.12
   # session may omit it, so its exact Bun executable/script ancestry must also
   # outrank an inherited foreign Claude marker.
   case "${FM_PRIMARY_HARNESS:-}" in
-    pi|pi-signed|omp) echo "$FM_PRIMARY_HARNESS"; return ;;
+    pi|pi-signed) echo "$FM_PRIMARY_HARNESS"; return ;;
+    omp)
+      [ -z "${FM_HARNESS_UNVERIFIED:-}" ] && { echo omp; return; }
+      ;;
   esac
-  [ "${OMPCODE:-}" = "1" ] && { echo omp; return; }
-  if [ "${CLAUDECODE:-}" = "1" ] && fm_harness_omp_ancestry_matches; then
+  [ "${OMPCODE:-}" = "1" ] && [ -z "${FM_HARNESS_UNVERIFIED:-}" ] && { echo omp; return; }
+  if [ "${CLAUDECODE:-}" = "1" ] && [ -z "${FM_HARNESS_UNVERIFIED:-}" ] && fm_harness_omp_ancestry_matches; then
     echo omp
     return
   fi

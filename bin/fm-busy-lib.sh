@@ -946,8 +946,11 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
 # fm_busy_classify_live: fm_busy_classify behind the one process-level
 # override - a gone endpoint is dead, never busy. Requires fm-backend.sh to
 # be sourced for fm_backend_target_exists.
-fm_busy_classify_live() {  # <backend> <target> <harness> <id> <state-dir> [expected-label]
-  local backend=$1 target=$2 harness=$3 id=$4 state=$5 label=${6-}
+fm_busy_classify_live() {  # <backend> <target> <harness> <id> <state-dir> [expected-label] [raw-launch]
+  local backend=$1 target=$2 harness=$3 id=$4 state=$5 label=${6-} raw_launch=${7-}
+  local inherited_unverified=${FM_HARNESS_UNVERIFIED:-}
+  local FM_HARNESS_UNVERIFIED=$inherited_unverified
+  [ "$raw_launch" = 1 ] && FM_HARNESS_UNVERIFIED=raw-launch
   if [ -z "$target" ]; then
     printf 'unknown no-target'
     return 0
@@ -964,11 +967,18 @@ fm_busy_classify_live() {  # <backend> <target> <harness> <id> <state-dir> [expe
 # re-deriving them. Requires fm-backend.sh to be sourced. <tail40> is
 # optional pre-captured plain output reused by the Grok arm.
 fm_busy_classify_meta() {  # <meta-file> <id> <state-dir> [tail40]
-  local meta=$1 id=$2 state=$3 tail40=${4-} backend target harness
+  local meta=$1 id=$2 state=$3 tail40=${4-} backend target harness raw_launch
   [ -f "$meta" ] || { printf 'unknown missing'; return 0; }
   backend=$(fm_backend_of_meta "$meta")
   target=$(fm_backend_target_of_meta "$meta")
   harness=$(fm_meta_get "$meta" harness)
+  raw_launch=$(fm_meta_get "$meta" raw_launch)
+  if [ "$raw_launch" = 1 ]; then
+    local inherited_unverified=${FM_HARNESS_UNVERIFIED:-}
+    local FM_HARNESS_UNVERIFIED=$inherited_unverified
+    FM_HARNESS_UNVERIFIED=raw-launch
+    [ "$harness" = omp ] && { printf 'unknown raw-unverified'; return 0; }
+  fi
   if [ -z "$target" ]; then
     printf 'unknown no-target'
     return 0

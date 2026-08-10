@@ -288,11 +288,12 @@ BACKEND=$FM_BACKEND_VALIDATED_BACKEND
 T=$FM_BACKEND_VALIDATED_TARGET
 LABEL="fm-$ID"
 RECORDED_HARNESS=$(fm_meta_get "$META" harness)
+RAW_LAUNCH=$(fm_meta_get "$META" raw_launch)
 KIND=$(fm_meta_get "$META" kind)
 WT=$(fm_meta_get "$META" worktree)
 [ -n "$KIND" ] || KIND=ship
 
-HARNESS=$(fm_control_harness_family "$RECORDED_HARNESS") \
+HARNESS=$(fm_control_harness_family "$RECORDED_HARNESS" "$RAW_LAUNCH") \
   || die "task $ID records harness '${RECORDED_HARNESS:-none}', which has no verified control mechanics; fm-control refuses to guess an interrupt key or exit command"
 fm_control_harness_supported "$HARNESS" \
   || die "task $ID records harness '${RECORDED_HARNESS:-none}', which has no verified control mechanics; fm-control refuses to guess an interrupt key or exit command"
@@ -302,7 +303,7 @@ fm_backend_validate "$BACKEND" || exit 1
 # --- shared helpers ---------------------------------------------------------
 
 agent_state() {
-  fm_backend_agent_state "$BACKEND" "$T" "$RECORDED_HARNESS"
+  fm_backend_agent_state "$BACKEND" "$T" "$RECORDED_HARNESS" "$RAW_LAUNCH"
 }
 
 busy_verdict() {

@@ -839,8 +839,11 @@ fm_backend_herdr_projection_focus_restore() {  # <session> <snapshot> <operation
 # pane-death path. The exact-tab restore below remains the backstop, and any
 # ambiguity falls back to the plain explicit close, which the backstop masks
 # exactly as before this hardening.
-fm_backend_herdr_projection_close_pane_focus_preserving() {  # <session> <pane-id> [required-agent-state] [recorded-harness]
-  local session=$1 pane_id=$2 required_agent_state=${3:-} recorded_harness=${4:-}
+fm_backend_herdr_projection_close_pane_focus_preserving() {  # <session> <pane-id> [required-agent-state] [recorded-harness] [raw-launch]
+  local session=$1 pane_id=$2 required_agent_state=${3:-} recorded_harness=${4:-} raw_launch=${5:-}
+  local inherited_unverified=${FM_HARNESS_UNVERIFIED:-}
+  local FM_HARNESS_UNVERIFIED=$inherited_unverified
+  [ "$raw_launch" = 1 ] && FM_HARNESS_UNVERIFIED=raw-launch
   local before active_tab info target_pane target_tab target_ws close_status state plan plan_shell_pid plan_move_record workspace_presence
   FM_BACKEND_HERDR_PROJECTION_CLOSE_AGENT_STATE=""
   [ -n "$pane_id" ] || return 0
@@ -865,7 +868,7 @@ fm_backend_herdr_projection_close_pane_focus_preserving() {  # <session> <pane-i
     return 1
   fi
   if [ -n "$required_agent_state" ]; then
-    state=$(fm_backend_herdr_pane_agent_state "$session" "$pane_id" "$recorded_harness")
+    state=$(fm_backend_herdr_pane_agent_state "$session" "$pane_id" "$recorded_harness" "$raw_launch")
     FM_BACKEND_HERDR_PROJECTION_CLOSE_AGENT_STATE=$state
     [ "$state" = "$required_agent_state" ] || return 1
   fi
@@ -1898,9 +1901,12 @@ fm_backend_herdr_omp_exited_to_shell() {  # <session> <pane-id>
 #              change as "the pane exists"). The caller must fail safe toward
 #              refusal here, never toward closing - this is the conservative
 #              backstop the husk check depends on.
-fm_backend_herdr_pane_agent_state() {  # <session> <pane_id> [recorded-harness]
-  local session=$1 pane_id=$2 recorded_harness=${3:-} out code presence status agent
-  if [ "$recorded_harness" = raw-omp ] || ! fm_harness_omp_attribution_allowed; then
+fm_backend_herdr_pane_agent_state() {  # <session> <pane_id> [recorded-harness] [raw-launch]
+  local session=$1 pane_id=$2 recorded_harness=${3:-} raw_launch=${4:-} out code presence status agent
+  local inherited_unverified=${FM_HARNESS_UNVERIFIED:-}
+  local FM_HARNESS_UNVERIFIED=$inherited_unverified
+  [ "$raw_launch" = 1 ] && FM_HARNESS_UNVERIFIED=raw-launch
+  if [ "$recorded_harness" = raw-omp ]; then
     printf 'unknown'
     return 0
   fi
@@ -1920,6 +1926,10 @@ fm_backend_herdr_pane_agent_state() {  # <session> <pane_id> [recorded-harness]
   fi
   agent=$(printf '%s' "$out" | jq -r '.result.agent.agent // empty' 2>/dev/null)
   status=$(printf '%s' "$out" | jq -r '.result.agent.agent_status // empty' 2>/dev/null)
+  if [ "$agent" = omp ] && ! fm_harness_omp_attribution_allowed; then
+    printf 'unknown'
+    return 0
+  fi
   case "$agent:$status" in
     omp:idle|omp:done)
       if fm_backend_herdr_omp_exited_to_shell "$session" "$pane_id"; then
@@ -1939,8 +1949,8 @@ fm_backend_herdr_pane_agent_state() {  # <session> <pane_id> [recorded-harness]
 # confirm; live and unknown both refuse (1), so an inconclusive read never
 # licenses closing anything. Restored-layout recovery depends on this
 # fail-safe-toward-refusal behavior.
-fm_backend_herdr_tab_is_husk() {  # <session> <pane_id> [recorded-harness]
-  case "$(fm_backend_herdr_pane_agent_state "$1" "$2" "${3:-}")" in
+fm_backend_herdr_tab_is_husk() {  # <session> <pane_id> [recorded-harness] [raw-launch]
+  case "$(fm_backend_herdr_pane_agent_state "$1" "$2" "${3:-}" "${4:-}")" in
     dead|no-agent) return 0 ;;
     *) return 1 ;;
   esac
@@ -1951,11 +1961,14 @@ fm_backend_herdr_tab_is_husk() {  # <session> <pane_id> [recorded-harness]
 # creating a second Herdr state machine: a structurally gone pane is `missing`,
 # a confirmed agent-less pane is `dead`, a registered agent is `alive`, and an
 # unexpected or failed API read is `unreadable`.
-fm_backend_herdr_agent_state() {  # <target> [recorded-harness]
-  local target=$1 recorded_harness=${2:-}
+fm_backend_herdr_agent_state() {  # <target> [recorded-harness] [raw-launch]
+  local target=$1 recorded_harness=${2:-} raw_launch=${3:-}
+  local inherited_unverified=${FM_HARNESS_UNVERIFIED:-}
+  local FM_HARNESS_UNVERIFIED=$inherited_unverified
+  [ "$raw_launch" = 1 ] && FM_HARNESS_UNVERIFIED=raw-launch
   [ "$recorded_harness" = raw-omp ] && { printf 'unverified'; return 0; }
   fm_backend_herdr_parse_target "$target" || { printf 'unreadable'; return 0; }
-  case "$(fm_backend_herdr_pane_agent_state "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" "$recorded_harness")" in
+  case "$(fm_backend_herdr_pane_agent_state "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" "$recorded_harness" "$raw_launch")" in
     dead) printf 'missing' ;;
     no-agent) printf 'dead' ;;
     live) printf 'alive' ;;
@@ -1965,8 +1978,8 @@ fm_backend_herdr_agent_state() {  # <target> [recorded-harness]
 
 # Backward-compatible three-state view for callers that only need a yes/no
 # agent verdict. The detailed state contract is owned by fm_backend_agent_state.
-fm_backend_herdr_agent_alive() {  # <target> [recorded-harness]
-  case "$(fm_backend_herdr_agent_state "$1" "${2:-}")" in
+fm_backend_herdr_agent_alive() {  # <target> [recorded-harness] [raw-launch]
+  case "$(fm_backend_herdr_agent_state "$1" "${2:-}" "${3:-}")" in
     alive) printf 'alive' ;;
     dead|missing) printf 'dead' ;;
     *) printf 'unknown' ;;
@@ -2300,9 +2313,12 @@ fm_backend_herdr_projection_reclaim_rollback() {  # <session> <new-pane>
 # Return 0 means exact reclaim, 2 means non-mutating or exactly rolled-back
 # refusal with flat fallback permitted, and 1 means a live/unknown or
 # post-mutation uncertainty that must refuse the launch.
-fm_backend_herdr_projection_reclaim_task() {  # <session> <journal> <task-id> <home> <meta-workspace> <meta-tab> <meta-pane> <parent-label> <task-label> <cwd> [recorded-harness]
+fm_backend_herdr_projection_reclaim_task() {  # <session> <journal> <task-id> <home> <meta-workspace> <meta-tab> <meta-pane> <parent-label> <task-label> <cwd> [recorded-harness] [raw-launch]
   local session=$1 journal=$2 id=$3 home=$4 meta_workspace=$5 meta_tab=$6 meta_pane=$7
-  local parent_label=$8 task_label=$9 cwd=${10} recorded_harness=${11:-}
+  local parent_label=$8 task_label=$9 cwd=${10} recorded_harness=${11:-} raw_launch=${12:-}
+  local inherited_unverified=${FM_HARNESS_UNVERIFIED:-}
+  local FM_HARNESS_UNVERIFIED=$inherited_unverified
+  [ "$raw_launch" = 1 ] && FM_HARNESS_UNVERIFIED=raw-launch
   local canonical_home state focus_before active_tab out new_tab new_pane info close_status
   FM_BACKEND_HERDR_PROJECTION_TAB_ID=""
   FM_BACKEND_HERDR_PROJECTION_PANE_ID=""
@@ -2333,7 +2349,7 @@ fm_backend_herdr_projection_reclaim_task() {  # <session> <journal> <task-id> <h
     echo "warning: herdr presentation binding for $id has an ambiguous, renamed, foreign, or non-nested live shape; spawning flat" >&2
     return 2
   fi
-  state=$(fm_backend_herdr_pane_agent_state "$session" "$meta_pane" "$recorded_harness")
+  state=$(fm_backend_herdr_pane_agent_state "$session" "$meta_pane" "$recorded_harness" "$raw_launch")
   case "$state" in
     no-agent) ;;
     dead)
@@ -2386,7 +2402,7 @@ fm_backend_herdr_projection_reclaim_task() {  # <session> <journal> <task-id> <h
     echo "warning: herdr presentation reclaim for $id could not verify its replacement pane; spawning flat" >&2
     return 2
   fi
-  state=$(fm_backend_herdr_pane_agent_state "$session" "$meta_pane" "$recorded_harness")
+  state=$(fm_backend_herdr_pane_agent_state "$session" "$meta_pane" "$recorded_harness" "$raw_launch")
   case "$state" in
     no-agent) ;;
     live|unknown)
@@ -2400,7 +2416,7 @@ fm_backend_herdr_projection_reclaim_task() {  # <session> <journal> <task-id> <h
       return 2
       ;;
   esac
-  if fm_backend_herdr_projection_close_pane_focus_preserving "$session" "$meta_pane" no-agent "$recorded_harness"; then
+  if fm_backend_herdr_projection_close_pane_focus_preserving "$session" "$meta_pane" no-agent "$recorded_harness" "$raw_launch"; then
     close_status=0
   else
     close_status=$?
@@ -2420,7 +2436,7 @@ fm_backend_herdr_projection_reclaim_task() {  # <session> <journal> <task-id> <h
     echo "warning: herdr presentation reclaim for $id could not close the exact old husk; spawning flat" >&2
     return 2
   fi
-  if [ "$(fm_backend_herdr_pane_agent_state "$session" "$meta_pane" "$recorded_harness")" != dead ]; then
+  if [ "$(fm_backend_herdr_pane_agent_state "$session" "$meta_pane" "$recorded_harness" "$raw_launch")" != dead ]; then
     fm_backend_herdr_projection_reclaim_rollback "$session" "$new_pane" || return 1
     return 1
   fi
@@ -2450,8 +2466,11 @@ fm_backend_herdr_projection_reclaim_task() {  # <session> <journal> <task-id> <h
 # Missing matches safely degrade to the normal flat workspace.
 # One or more matches allow flat fallback only when every pane is positively
 # dead or agent-free; a live or unknown pane refuses a duplicate launch.
-fm_backend_herdr_projection_recovery_allows_flat() {  # <session> <journal> <task-id> [recorded-harness]
-  local session=$1 journal=$2 id=$3 recorded_harness=${4:-}
+fm_backend_herdr_projection_recovery_allows_flat() {  # <session> <journal> <task-id> [recorded-harness] [raw-launch]
+  local session=$1 journal=$2 id=$3 recorded_harness=${4:-} raw_launch=${5:-}
+  local inherited_unverified=${FM_HARNESS_UNVERIFIED:-}
+  local FM_HARNESS_UNVERIFIED=$inherited_unverified
+  [ "$raw_launch" = 1 ] && FM_HARNESS_UNVERIFIED=raw-launch
   local token list wsids count wsid panes pane_ids pane state
   token=$(fm_backend_herdr_projection_journal_token "$journal" "$id") || {
     echo "error: malformed herdr presentation journal for $id; refusing duplicate launch" >&2
@@ -2492,7 +2511,7 @@ fm_backend_herdr_projection_recovery_allows_flat() {  # <session> <journal> <tas
     pane_ids=$(printf '%s' "$panes" | jq -r '.result.panes[]? | .pane_id' 2>/dev/null)
     while IFS= read -r pane; do
       [ -n "$pane" ] || continue
-      state=$(fm_backend_herdr_pane_agent_state "$session" "$pane" "$recorded_harness")
+      state=$(fm_backend_herdr_pane_agent_state "$session" "$pane" "$recorded_harness" "$raw_launch")
       case "$state" in
         dead|no-agent) : ;;
         live|unknown)
