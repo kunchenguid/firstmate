@@ -1031,6 +1031,66 @@ PY
   pass "dirty teardown refusal leaves live Cursor supervision hooks armed"
 }
 
+test_cursor_generated_untracked_hooks_allow_teardown() {
+  local case_dir hook_script rc
+  case_dir=$(make_case cursor-generated-untracked-hooks)
+  write_meta "$case_dir" local-only ship
+  printf '%s\n' 'harness=cursor' >> "$case_dir/state/task-x1.meta"
+  mkdir -p "$case_dir/wt/.cursor/hooks"
+  fm_control_cursor_hooks_backup "$case_dir/wt" "$case_dir/state" task-x1
+  printf '%s\n' '{"version":1,"hooks":{"beforeSubmitPrompt":[{"command":".cursor/hooks/fm-busy-turnend.sh busy"}],"stop":[{"command":".cursor/hooks/fm-busy-turnend.sh idle-stop"}],"sessionEnd":[{"command":".cursor/hooks/fm-busy-turnend.sh idle-session-end"}]}}' \
+    > "$case_dir/wt/.cursor/hooks.json"
+  hook_script="$case_dir/wt/.cursor/hooks/fm-busy-turnend.sh"
+  printf '%s\n' 'firstmate hook script' > "$hook_script"
+  fm_control_cursor_hooks_record_installed "$case_dir/wt" "$case_dir/state" task-x1 \
+    "$case_dir/wt/.cursor/hooks.json" "$hook_script"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "exact generated untracked Cursor hooks should not block teardown"
+  assert_absent "$case_dir/wt/.cursor/hooks.json" \
+    "teardown did not retire generated hooks.json"
+  assert_absent "$hook_script" \
+    "teardown did not retire the generated hook script"
+  git -C "$case_dir/wt" check-ignore -q -- .cursor/hooks/fm-busy-turnend.sh \
+    && fail "teardown left the generated Cursor hook path ignored"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "successful generated-hook teardown retained task metadata"
+  pass "exact generated untracked Cursor hooks do not block teardown"
+}
+
+test_cursor_preexisting_untracked_hooks_refuse_teardown() {
+  local case_dir hook_script installed_hooks rc
+  case_dir=$(make_case cursor-preexisting-untracked-hooks)
+  write_meta "$case_dir" local-only ship
+  printf '%s\n' 'harness=cursor' >> "$case_dir/state/task-x1.meta"
+  mkdir -p "$case_dir/wt/.cursor/hooks"
+  printf '%s\n' '{"version":1,"hooks":{"user":[{"command":"keep"}]}}' \
+    > "$case_dir/wt/.cursor/hooks.json"
+  fm_control_cursor_hooks_backup "$case_dir/wt" "$case_dir/state" task-x1
+  printf '%s\n' '{"version":1,"hooks":{"user":[{"command":"keep"}],"beforeSubmitPrompt":[{"command":".cursor/hooks/fm-busy-turnend.sh busy"}],"stop":[{"command":".cursor/hooks/fm-busy-turnend.sh idle-stop"}],"sessionEnd":[{"command":".cursor/hooks/fm-busy-turnend.sh idle-session-end"}]}}' \
+    > "$case_dir/wt/.cursor/hooks.json"
+  hook_script="$case_dir/wt/.cursor/hooks/fm-busy-turnend.sh"
+  printf '%s\n' 'firstmate hook script' > "$hook_script"
+  fm_control_cursor_hooks_record_installed "$case_dir/wt" "$case_dir/state" task-x1 \
+    "$case_dir/wt/.cursor/hooks.json" "$hook_script"
+  installed_hooks="$case_dir/installed-hooks.json"
+  cp "$case_dir/wt/.cursor/hooks.json" "$installed_hooks"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 1 "$rc" "pre-existing untracked Cursor hooks must refuse teardown"
+  assert_grep "uncommitted changes present" "$case_dir/stderr" \
+    "pre-existing untracked Cursor hook state was not reported"
+  cmp -s "$installed_hooks" "$case_dir/wt/.cursor/hooks.json" \
+    || fail "pre-existing untracked hook refusal removed live wiring"
+  assert_present "$case_dir/state/task-x1.cursor-hooks.json" \
+    "pre-existing untracked hook refusal discarded the original backup"
+  pass "pre-existing untracked Cursor hooks remain teardown-visible"
+}
+
 test_cursor_untracked_hook_edit_refuses_teardown() {
   local case_dir hook_script installed_hooks rc
   case_dir=$(make_case cursor-untracked-hook-edit)
@@ -1861,6 +1921,61 @@ test_cursor_herdr_teardown_retry_retains_hook_ownership() {
   assert_absent "$case_dir/state/task-x1.meta" \
     "successful Cursor Herdr teardown retained task metadata"
   pass "Cursor Herdr teardown retains hook ownership until retry commits"
+}
+
+test_cursor_herdr_closes_before_restore_and_worktree_return() {
+  local case_dir log closed hook_script attempt observed rc
+  case_dir=$(make_case cursor-herdr-commit-order)
+  write_meta "$case_dir" local-only ship
+  configure_flat_herdr_teardown_case "$case_dir"
+  printf '%s\n' 'harness=cursor' >> "$case_dir/state/task-x1.meta"
+  log="$case_dir/herdr.log"; : > "$log"
+  closed="$case_dir/closed"
+  attempt="$case_dir/treehouse-attempt"
+  observed="$case_dir/treehouse-observed"
+  mkdir -p "$case_dir/wt/.cursor/hooks"
+  fm_control_cursor_hooks_backup "$case_dir/wt" "$case_dir/state" task-x1
+  printf '%s\n' '{"version":1,"hooks":{"beforeSubmitPrompt":[{"command":".cursor/hooks/fm-busy-turnend.sh busy"}],"stop":[{"command":".cursor/hooks/fm-busy-turnend.sh idle-stop"}],"sessionEnd":[{"command":".cursor/hooks/fm-busy-turnend.sh idle-session-end"}]}}' \
+    > "$case_dir/wt/.cursor/hooks.json"
+  hook_script="$case_dir/wt/.cursor/hooks/fm-busy-turnend.sh"
+  printf '%s\n' 'firstmate hook script' > "$hook_script"
+  fm_control_cursor_hooks_record_installed "$case_dir/wt" "$case_dir/state" task-x1 \
+    "$case_dir/wt/.cursor/hooks.json" "$hook_script"
+  cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+count=0
+[ ! -f "$attempt" ] || count=\$(cat "$attempt")
+count=\$((count + 1))
+printf '%s\n' "\$count" > "$attempt"
+if [ -e "$closed" ] && [ ! -e "$case_dir/wt/.cursor/hooks.json" ] && [ ! -e "$hook_script" ]; then
+  printf '%s\n' 'endpoint-gone-hooks-restored' > "$observed"
+fi
+[ "\$count" -ne 1 ] || { echo 'injected treehouse return failure' >&2; exit 70; }
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  rc=0
+  FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" \
+    FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS=1 \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  [ "$rc" -ne 0 ] || fail "injected treehouse failure unexpectedly completed teardown"
+  assert_grep "endpoint-gone-hooks-restored" "$observed" \
+    "treehouse return ran before Cursor endpoint shutdown and hook restoration"
+  assert_present "$case_dir/state/task-x1.cursor-hooks.json.installed" \
+    "failed worktree return discarded Cursor recovery ownership"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "failed worktree return discarded task metadata"
+
+  FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" \
+    FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS=1 \
+    run_teardown "$case_dir" --force > "$case_dir/stdout2" 2> "$case_dir/stderr2" \
+    || fail "Cursor Herdr teardown retry after worktree failure failed: $(cat "$case_dir/stderr2")"
+  assert_absent "$case_dir/state/task-x1.cursor-hooks.json.installed" \
+    "successful Cursor Herdr retry retained hook ownership"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "successful Cursor Herdr retry retained task metadata"
+  pass "Cursor Herdr teardown commits endpoint, hooks, then worktree"
 }
 
 configure_secondmate_with_herdr_child() {  # <case-dir>
@@ -2881,6 +2996,7 @@ test_herdr_flat_teardown_refuses_orphaning_records_then_retry_completes
 test_herdr_flat_teardown_refuses_records_on_unparseable_presence
 test_herdr_flat_teardown_preflight_refuses_before_changes
 test_cursor_herdr_teardown_retry_retains_hook_ownership
+test_cursor_herdr_closes_before_restore_and_worktree_return
 test_forced_secondmate_herdr_child_preflight_refuses_before_changes
 test_forced_secondmate_teardown_holds_descendant_lifecycle_locks
 test_forced_secondmate_herdr_child_retains_records_when_close_unconfirmed
@@ -2900,6 +3016,8 @@ test_content_fallback_refreshes_stale_origin_ref
 test_dirty_worktree_refuses
 test_cursor_hook_transaction_is_normalized_before_safety_check
 test_cursor_dirty_refusal_keeps_live_hook_transaction
+test_cursor_generated_untracked_hooks_allow_teardown
+test_cursor_preexisting_untracked_hooks_refuse_teardown
 test_cursor_untracked_hook_edit_refuses_teardown
 test_cursor_relaunch_dirty_baseline_refuses_teardown
 test_gh_error_and_content_absent_refuses

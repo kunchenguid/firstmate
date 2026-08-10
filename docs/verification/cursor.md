@@ -52,7 +52,7 @@ Help documents bracket overrides such as `'claude-opus-4-8[effort=high]'`, but t
 
 ### Busy state and turn-end
 
-Project hooks under `.cursor/hooks.json`, which remains visible to Git safety checks while a generated script is excluded only when Firstmate created that path:
+Project hooks under `.cursor/hooks.json` remain visible to Git safety checks, which exempt only exact transaction-owned generated snapshots:
 
 | Event | Observed | Firstmate action |
 |---|---|---|

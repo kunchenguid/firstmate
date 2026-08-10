@@ -189,7 +189,7 @@ test_detection_is_anchored() {
 }
 
 test_spawn_launch_shape() {
-  local rec case_dir home proj wt fakebin id out status trusted
+  local rec case_dir home proj wt fakebin id out status trusted hook_out
   rec=$(make_spawn_case launch)
   IFS='|' read -r case_dir home proj wt fakebin id <<EOF
 $rec
@@ -223,7 +223,7 @@ PY
   git -C "$wt" check-ignore -q -- .cursor/hooks.json \
     && fail "cursor spawn permanently ignored the user-owned hooks.json"
   git -C "$wt" check-ignore -q -- .cursor/hooks/fm-busy-turnend.sh \
-    || fail "cursor spawn did not ignore its generated hook script"
+    && fail "cursor spawn permanently ignored its generated hook script"
   python3 - "$wt/.cursor/hooks.json" <<'PY' || fail "cursor hooks JSON does not expose the required events"
 import json, sys
 hooks = json.load(open(sys.argv[1]))["hooks"]
@@ -244,6 +244,21 @@ PY
     || fail "unverified cursor-ide must not trust cursor-hook busy events"
   [ -f "$home/state/$id.busy-gen" ] \
     || fail "cursor spawn must arm a busy generation"
+  hook_out=$(printf '%s\n' '{"hook_event_name":"stop","status":"completed"}' \
+    | "$wt/.cursor/hooks/fm-busy-turnend.sh" idle-stop)
+  [ "$hook_out" = '{}' ] || fail "cursor stop hook did not emit an empty response object"
+  [ "$(fm_busy_classify tmux "fm-$id" cursor "$id" "$home/state")" = 'idle cursor-hook' ] \
+    || fail "cursor stop hook did not persist idle cursor-hook state"
+  assert_present "$home/state/$id.turn-ended" \
+    "cursor stop hook did not persist the turn-ended marker"
+  rm -f "$home/state/$id.turn-ended"
+  hook_out=$(printf '%s\n' '{"hook_event_name":"beforeSubmitPrompt","prompt":"next turn"}' \
+    | "$wt/.cursor/hooks/fm-busy-turnend.sh" busy)
+  [ "$hook_out" = '{}' ] || fail "cursor busy hook did not emit an empty response object"
+  [ "$(fm_busy_classify tmux "fm-$id" cursor "$id" "$home/state")" = 'busy cursor-hook' ] \
+    || fail "cursor busy hook did not persist busy cursor-hook state"
+  assert_absent "$home/state/$id.turn-ended" \
+    "cursor busy hook wrote a turn-ended marker"
   pass "cursor spawn launches with yolo+trust, omits effort flags, and wires project hooks"
 }
 

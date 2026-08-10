@@ -2482,10 +2482,6 @@ EOF
       mkdir -p "$WT/.cursor/hooks"
       mv -f -- "$cursor_hook_script_tmp" "$WT/.cursor/hooks/fm-busy-turnend.sh"
       mv -f -- "$cursor_hooks_tmp" "$WT/.cursor/hooks.json"
-      if [ ! -e "$STATE_REAL/$ID.cursor-fm-busy-turnend.sh" ] \
-         && [ ! -L "$STATE_REAL/$ID.cursor-fm-busy-turnend.sh" ]; then
-        exclude_path '.cursor/hooks/fm-busy-turnend.sh'
-      fi
       ;;
     opencode*)
       mkdir -p "$WT/.opencode/plugins"

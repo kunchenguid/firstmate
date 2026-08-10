@@ -11,6 +11,9 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$ROOT/bin/fm-session-lock-lib.sh"
+
 if [ "${FM_CURSOR_SIGNALS_LIVE:-}" != 1 ]; then
   echo "skip: set FM_CURSOR_SIGNALS_LIVE=1 to run live cursor-agent signal checks"
   exit 0
@@ -91,8 +94,14 @@ pane_pid=$(tmux display-message -t "$SESSION" -p '#{pane_pid}')
 child=$(pgrep -P "$pane_pid" | head -1)
 [ -n "$child" ] || fail "no child process under cursor pane"
 comm=$(ps -o comm= -p "$child" | tr -d ' ')
-base=$(basename -- "$comm")
-[ "$base" = cursor-agent ] || fail "foreground child basename was '$base', expected cursor-agent"
+args=$(ps -o args= -p "$child")
+argv0=${args%% *}
+identity=$(fm_harness_path_name "$comm" 2>/dev/null \
+  || fm_harness_path_name "$argv0" 2>/dev/null || true)
+fm_harness_process_matches "$comm" "$args" \
+  || fail "foreground child was not a verified harness process (comm='$comm' argv0='$argv0')"
+[ "$identity" = cursor-agent ] \
+  || fail "foreground child was not Cursor (comm='$comm' argv0='$argv0')"
 
 # Autonomy: --yolo on the live process argv (footer also shows Run Everything).
 ps -p "$child" -o args= | grep -q -- '--yolo' \
