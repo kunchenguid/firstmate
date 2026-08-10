@@ -24,6 +24,7 @@ herdr_forget_inherited_pane
 
 TMP_ROOT=$(fm_test_tmproot fm-backend-herdr-tests)
 export FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP=0
+export FM_HERDR_DEFAULT_IDENTITY=1
 
 # make_herdr_fakebin: a `herdr` stub that logs every invocation (one line,
 # unit-separated args, to $FM_HERDR_LOG) and returns the canned response for
@@ -52,6 +53,36 @@ if [ "${1:-}" = status ] && [ "${2:-}" = --json ] && [ "${FM_HERDR_SCRIPT_STATUS
   exit 0
 fi
 n=$next
+if [ "${1:-}" = agent ] && [ "${2:-}" = get ]; then
+  if [ ! -f "$RESP/.identity-used" ]; then
+    if [ -f "$RESP/identity.exit" ]; then
+      : > "$RESP/.identity-used"
+      exit "$(cat "$RESP/identity.exit")"
+    fi
+    if [ -f "$RESP/identity.out" ]; then
+      : > "$RESP/.identity-used"
+      cat "$RESP/identity.out"
+      exit 0
+    fi
+    if [ "${FM_HERDR_DEFAULT_IDENTITY:-0}" = 1 ] \
+      && [ ! -f "$RESP/$n.out" ] && [ ! -f "$RESP/$n.exit" ]; then
+      : > "$RESP/.identity-used"
+      printf '%s\n' '{"result":{"agent":{"agent":"claude","agent_status":"idle"}}}'
+      exit 0
+    fi
+  fi
+  if [ -f "$RESP/$n.out" ] || [ -f "$RESP/$n.exit" ]; then
+    :
+  elif [ -f "$RESP/identity.exit" ]; then
+    exit "$(cat "$RESP/identity.exit")"
+  elif [ -f "$RESP/identity.out" ]; then
+    cat "$RESP/identity.out"
+    exit 0
+  elif [ "${FM_HERDR_DEFAULT_IDENTITY:-0}" = 1 ]; then
+    printf '%s\n' '{"result":{"agent":{"agent":"claude","agent_status":"idle"}}}'
+    exit 0
+  fi
+fi
 echo "$n" > "$COUNT_FILE"
 if [ -f "$RESP/$n.exit" ]; then
   exit "$(cat "$RESP/$n.exit")"
@@ -3148,6 +3179,7 @@ test_composer_state_omp_separator_idle_is_empty() {
   dir="$TMP_ROOT/composer-omp-separated-idle"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   printf '│ stale bordered transcript row │\n\x1b[0m\x1b[38;2;129;162;190m─────────────────────────────────────────────────────\x1b[0m\n\x1b[0m\x1b[7m \x1b[0m                                                    \n\x1b[0m\x1b[38;2;129;162;190m─────────────────────────────────────────────────────\x1b[0m\n' > "$resp/1.out"
   printf '{"result":{"agent":{"agent":"omp","agent_status":"idle"}}}\n' > "$resp/2.out"
+  omp_live_bun_process_info > "$resp/3.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state lab:w1:p2' "$ROOT" )
@@ -3212,6 +3244,80 @@ SH
   pass "fm_backend_send_text_submit: no-metadata input rejects an exited OMP husk before typing"
 }
 
+test_herdr_input_rejects_identity_read_failure_before_text() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/input-identity-read-failure"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '1\n' > "$resp/identity.exit"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_send_text_submit herdr lab:w1:p2 "hello" 1 0 0 label claude' "$ROOT" )
+  [ "$out" = unknown ] || fail "an identity-read failure must deny Herdr text input, got '$out'"
+  [ "$(grep -c $'\x1f''agent\x1f''get' "$log")" -eq 1 ] || fail "identity-read failure should be observed exactly once"
+  if grep -q $'\x1fpane\x1fsend-text' "$log" || grep -q $'\x1fpane\x1fsend-keys' "$log"; then
+    fail "identity-read failure must be denied before Herdr sends text or Enter"
+  fi
+  pass "Herdr input: identity-read failure fails closed before text submission"
+}
+
+test_herdr_input_rejects_ambiguous_omp_process_before_text() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/input-omp-process-ambiguous"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s\n' '{"result":{"agent":{"agent":"omp","agent_status":"idle"}}}' > "$resp/1.out"
+  printf '%s\n' '{"result":{"type":"pane_process_info","process_info":{}}}' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_send_text_submit herdr lab:w1:p2 "hello" 1 0 0 label omp' "$ROOT" )
+  [ "$out" = unknown ] || fail "ambiguous OMP process evidence must deny Herdr text input, got '$out'"
+  if grep -q $'\x1fpane\x1fsend-text' "$log" || grep -q $'\x1fpane\x1fsend-keys' "$log"; then
+    fail "ambiguous OMP process evidence must be denied before Herdr sends text or Enter"
+  fi
+  pass "Herdr input: ambiguous OMP process evidence fails closed before text submission"
+}
+
+test_herdr_input_rejects_stale_omp_after_non_omp_relaunch() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/input-stale-omp-relaunch"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s\n' '{"result":{"agent":{"agent":"omp","agent_status":"idle"}}}' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_send_text_submit herdr lab:w1:p2 "hello" 1 0 0 label claude' "$ROOT" )
+  [ "$out" = unknown ] || fail "a stale OMP registration must not authorize a relaunch recorded as Claude, got '$out'"
+  [ "$(grep -c $'\x1f''agent\x1f''get' "$log")" -eq 1 ] || fail "same-endpoint relaunch should corroborate Herdr identity once"
+  if grep -q $'\x1fpane\x1fsend-text' "$log" || grep -q $'\x1fpane\x1fsend-keys' "$log"; then
+    fail "a stale OMP registration must be rejected before Herdr sends relaunch input"
+  fi
+  pass "Herdr input: stale OMP registration cannot authorize a non-OMP relaunch"
+}
+
+test_herdr_key_rejects_stale_omp_after_non_omp_relaunch() {
+  local dir log resp fb status
+  dir="$TMP_ROOT/key-stale-omp-relaunch"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s\n' '{"result":{"agent":{"agent":"omp","agent_status":"idle"}}}' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_send_key herdr lab:w1:p2 Escape label claude' "$ROOT" >/dev/null 2>&1
+  status=$?
+  [ "$status" -ne 0 ] || fail "a stale OMP registration must reject Herdr key input for a non-OMP relaunch"
+  if grep -q $'\x1fpane\x1fsend-keys' "$log"; then
+    fail "a stale OMP registration must be rejected before Herdr key input"
+  fi
+  pass "Herdr input: stale OMP registration blocks key input at the shared boundary"
+}
+
+test_herdr_input_allows_current_non_omp_identity() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/input-current-non-omp"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s\n' '{"result":{"agent":{"agent":"claude","agent_status":"idle"}}}' > "$resp/identity.out"
+  printf '%s\n' '{"result":{"agent":{"agent_status":"idle"}}}' > "$resp/2.out"
+  printf '%s\n' '{"result":{"agent":{"agent_status":"working"}}}' > "$resp/4.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_send_text_submit herdr lab:w1:p2 "hello" 1 0.01 0.01 label claude' "$ROOT" )
+  [ "$out" = empty ] || fail "a positively corroborated current Claude endpoint should still accept input, got '$out'"
+  assert_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''send-text'$'\x1f''w1:p2'$'\x1f''hello' "positive non-OMP identity did not reach Herdr text input"
+  pass "Herdr input: positively corroborated non-OMP identity preserves text submission"
+}
+
 # --- OMP's stale idle agent registration after /exit ------------------------
 #
 # OMP 17.2.12 leaves its Herdr agent registration at `idle` once /exit has
@@ -3265,6 +3371,10 @@ SH
 
 omp_lone_shell_process_info() {  # <pid>
   printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p1","shell_pid":%s,"foreground_process_group_id":%s,"foreground_processes":[{"pid":%s,"name":"zsh","argv0":"zsh"}]}}}' "$1" "$1" "$1"
+}
+
+omp_live_bun_process_info() {
+  printf '%s' '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":4242,"foreground_process_group_id":5150,"foreground_processes":[{"pid":5150,"name":"bun","argv0":"bun"}]}}}'
 }
 
 test_composer_state_rejects_exited_omp_husk() {
@@ -3965,6 +4075,7 @@ test_send_text_submit_slow_transition_within_one_enter_needs_no_extra_enter() {
 test_send_text_submit_send_failed() {
   local dir log resp fb out
   dir="$TMP_ROOT/submit-fail"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s\n' '{"result":{"agent":{"agent":"claude","agent_status":"idle"}}}' > "$resp/identity.out"
   printf '1\n' > "$resp/1.exit"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
@@ -4716,6 +4827,11 @@ test_composer_state_omp_separator_idle_is_empty
 test_composer_state_rejects_wrapped_raw_omp_identity
 test_send_text_submit_rejects_wrapped_raw_omp_before_typing
 test_send_text_submit_rejects_no_metadata_exited_omp_husk
+test_herdr_input_rejects_identity_read_failure_before_text
+test_herdr_input_rejects_ambiguous_omp_process_before_text
+test_herdr_input_rejects_stale_omp_after_non_omp_relaunch
+test_herdr_key_rejects_stale_omp_after_non_omp_relaunch
+test_herdr_input_allows_current_non_omp_identity
 test_composer_state_rejects_exited_omp_husk
 test_omp_idle_registration_over_a_lone_shell_is_no_agent
 test_omp_idle_registration_over_a_running_bun_stays_live

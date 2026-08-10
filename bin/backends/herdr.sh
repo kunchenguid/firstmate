@@ -1209,33 +1209,44 @@ fm_backend_herdr_pane_idle_shell_pid() {  # <session> <pane-id>
 
 # fm_backend_herdr_pane_idle_shell_sample: one strict instantaneous
 # observation for fm_backend_herdr_pane_idle_shell_pid, which owns the proof
-# contract and the settle retry.
+# contract and the settle retry. Returns 0 for stale, 1 for a valid live
+# process shape, and 2 for unreadable or ambiguous evidence.
 fm_backend_herdr_pane_idle_shell_sample() {  # <session> <pane-id>
   local session=$1 pane=$2 info shell_pid foreground_pgid count
-  local process_pid name argv0 shell_name rows stat ps_bin
-  info=$(fm_backend_herdr_cli "$session" pane process-info --pane "$pane" 2>/dev/null) || return 1
+  local process_pid name argv0 shell_name rows stat ps_bin child_count
+  info=$(fm_backend_herdr_cli "$session" pane process-info --pane "$pane" 2>/dev/null) || return 2
   printf '%s' "$info" | jq -e --arg pane "$pane" '
     .result.type == "pane_process_info"
     and .result.process_info.pane_id == $pane
-  ' >/dev/null 2>&1 || return 1
+  ' >/dev/null 2>&1 || return 2
   shell_pid=$(printf '%s' "$info" | jq -er \
-    '.result.process_info.shell_pid | select(type == "number" and . > 1) | floor' 2>/dev/null) || return 1
+    '.result.process_info.shell_pid | select(type == "number" and . > 1) | floor' 2>/dev/null) || return 2
   foreground_pgid=$(printf '%s' "$info" | jq -er \
-    '.result.process_info.foreground_process_group_id | select(type == "number" and . > 1) | floor' 2>/dev/null) || return 1
-  [ "$foreground_pgid" = "$shell_pid" ] || return 1
+    '.result.process_info.foreground_process_group_id | select(type == "number" and . > 1) | floor' 2>/dev/null) || return 2
   count=$(printf '%s' "$info" | jq -er \
-    '.result.process_info.foreground_processes | select(type == "array") | length' 2>/dev/null) || return 1
+    '.result.process_info.foreground_processes | select(type == "array") | length' 2>/dev/null) || return 2
+  [ "$count" -gt 0 ] || return 2
+  printf '%s' "$info" | jq -e '
+    .result.process_info.foreground_processes
+    | all(.[];
+        (.pid | type) == "number"
+        and (.name | type) == "string" and (.name | length) > 0
+        and ((.argv0 // .argv[0]) | type) == "string"
+        and ((.argv0 // .argv[0]) | length) > 0
+      )
+  ' >/dev/null 2>&1 || return 2
+  [ "$foreground_pgid" = "$shell_pid" ] || return 1
   [ "$count" -eq 1 ] || return 1
   process_pid=$(printf '%s' "$info" | jq -er \
-    '.result.process_info.foreground_processes[0].pid | select(type == "number") | floor' 2>/dev/null) || return 1
+    '.result.process_info.foreground_processes[0].pid | select(type == "number") | floor' 2>/dev/null) || return 2
   [ "$process_pid" = "$shell_pid" ] || return 1
   name=$(printf '%s' "$info" | jq -er \
-    '.result.process_info.foreground_processes[0].name | select(type == "string" and length > 0)' 2>/dev/null) || return 1
+    '.result.process_info.foreground_processes[0].name | select(type == "string" and length > 0)' 2>/dev/null) || return 2
   argv0=$(printf '%s' "$info" | jq -er '
     .result.process_info.foreground_processes[0] as $process
     | ($process.argv0 // $process.argv[0])
     | select(type == "string" and length > 0)
-  ' 2>/dev/null) || return 1
+  ' 2>/dev/null) || return 2
   shell_name=${name##*/}
   argv0=${argv0#-}
   argv0=${argv0##*/}
@@ -1243,14 +1254,24 @@ fm_backend_herdr_pane_idle_shell_sample() {  # <session> <pane-id>
   case "$shell_name" in sh|bash|zsh|dash|ksh|fish) ;; *) return 1 ;; esac
 
   ps_bin=${FM_HERDR_PS_BIN:-ps}
-  command -v "$ps_bin" >/dev/null 2>&1 || return 1
-  rows=$("$ps_bin" -axo pid=,ppid= 2>/dev/null) || return 1
-  printf '%s\n' "$rows" | awk -v shell="$shell_pid" '
+  command -v "$ps_bin" >/dev/null 2>&1 || return 2
+  rows=$("$ps_bin" -axo pid=,ppid= 2>/dev/null) || return 2
+  child_count=$(printf '%s\n' "$rows" | awk -v shell="$shell_pid" '
     $1 == shell { found++ }
     $2 == shell { child++ }
-    END { exit(found == 1 && child == 0 ? 0 : 1) }
-  ' || return 1
-  stat=$("$ps_bin" -p "$shell_pid" -o stat= 2>/dev/null | tr -d '[:space:]') || return 1
+    END {
+      if (found != 1) exit 2
+      print child + 0
+    }
+  ') || return 2
+  case "$child_count" in
+    0) ;;
+    *[!0-9]*) return 2 ;;
+    *) return 1 ;;
+  esac
+  stat=$("$ps_bin" -p "$shell_pid" -o stat= 2>/dev/null) || return 2
+  stat=$(printf '%s' "$stat" | tr -d '[:space:]') || return 2
+  [ -n "$stat" ] || return 2
   case "$stat" in S*|I*) ;; *) return 1 ;; esac
   printf '%s\n' "$shell_pid"
 }
@@ -2696,8 +2717,46 @@ EOF
   [ "$agent" = omp ]
 }
 
+fm_backend_herdr_omp_process_state() {  # <session> <pane> -> stale|live|unknown
+  local rc
+  if fm_backend_herdr_pane_idle_shell_sample "$1" "$2" >/dev/null; then
+    rc=0
+  else
+    rc=$?
+  fi
+  case "$rc" in
+    0) printf 'stale' ;;
+    1) printf 'live' ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
+fm_backend_herdr_identity_matches() {  # <recorded-harness> <registered-agent>
+  local recorded_harness=$1 agent=$2
+  case "$recorded_harness" in
+    omp) [ "$agent" = omp ] ;;
+    pi|pi-signed) case "$agent" in pi|pi-signed) return 0 ;; *) return 1 ;; esac ;;
+    claude*) [ "$agent" = claude ] ;;
+    codex*) [ "$agent" = codex ] ;;
+    opencode*) [ "$agent" = opencode ] ;;
+    grok*) [ "$agent" = grok ] ;;
+    kimi*) [ "$agent" = kimi ] ;;
+    muse*) [ "$agent" = muse ] ;;
+    ''|unknown)
+      case "$agent" in
+        claude|codex|opencode|grok|kimi|muse|pi|pi-signed|omp) return 0 ;;
+        *) return 1 ;;
+      esac
+      ;;
+    *) [ "$recorded_harness" = "$agent" ] ;;
+  esac
+}
+
+# Return 0 for an authorized endpoint, 1 for a confirmed refusal, and 2 when
+# current-endpoint evidence is unknown.
 fm_backend_herdr_omp_input_safe() {  # <session> <pane> [recorded-harness] [raw-launch]
-  local session=$1 pane=$2 recorded_harness=${3:-} raw_launch=${4:-} identity agent agent_status
+  local session=$1 pane=$2 recorded_harness=${3:-} raw_launch=${4:-} identity agent agent_status process_state
+  local identity_supplied=${5+x}
   local inherited_unverified=${FM_HARNESS_UNVERIFIED:-}
   local FM_HARNESS_UNVERIFIED=$inherited_unverified
   [ "$raw_launch" = 1 ] && FM_HARNESS_UNVERIFIED=raw-launch
@@ -2705,23 +2764,31 @@ fm_backend_herdr_omp_input_safe() {  # <session> <pane> [recorded-harness] [raw-
   if [ "$recorded_harness" = omp ] && ! fm_harness_omp_attribution_allowed; then
     return 1
   fi
-  if [ "$raw_launch" = 1 ] || [ -z "$recorded_harness" ] || [ "$recorded_harness" = unknown ]; then
-    [ "$recorded_harness" = omp ] && return 1
-    identity=$(fm_backend_herdr_agent_identity_raw "$session" "$pane" 2>/dev/null || true)
-    IFS=$'\t' read -r agent agent_status <<EOF
+  if [ -n "$identity_supplied" ]; then
+    identity=$5
+  else
+    identity=$(fm_backend_herdr_agent_identity_raw "$session" "$pane" 2>/dev/null) || return 2
+  fi
+  IFS=$'\t' read -r agent agent_status <<EOF
 $identity
 EOF
-    if [ "$agent" = omp ]; then
-      fm_harness_omp_attribution_allowed || return 1
-      if fm_backend_herdr_omp_exited_to_shell "$session" "$pane"; then
-        return 1
-      fi
-    fi
+  [ -n "$agent" ] || return 2
+  case "$agent_status" in
+    working|idle|done|blocked) ;;
+    *) return 2 ;;
+  esac
+  if [ "$agent" = omp ]; then
+    fm_harness_omp_attribution_allowed || return 1
+    [ "$raw_launch" = 1 ] && return 1
+    fm_backend_herdr_identity_matches "$recorded_harness" "$agent" || return 2
+    process_state=$(fm_backend_herdr_omp_process_state "$session" "$pane")
+    case "$process_state" in
+      stale) return 1 ;;
+      live) return 0 ;;
+      *) return 2 ;;
+    esac
   fi
-  if [ "$recorded_harness" = omp ] \
-    && fm_backend_herdr_omp_exited_to_shell "$session" "$pane"; then
-    return 1
-  fi
+  fm_backend_herdr_identity_matches "$recorded_harness" "$agent" || return 2
   return 0
 }
 
@@ -2734,16 +2801,17 @@ EOF
 # pair below every other candidate), preserving this adapter's original
 # consult-only-when-needed behavior.
 fm_backend_herdr_composer_state() {  # <target> [recorded-harness] [raw-launch] -> empty|pending|pending-unproven|unknown
-  local target=$1 recorded_harness=${2:-} raw_launch=${3:-} session pane cap caps verdict identity identity_checked=0
+  local target=$1 recorded_harness=${2:-} raw_launch=${3:-} session pane cap caps verdict identity input_checked=0
   [ "$recorded_harness" = raw-omp ] && { printf 'unknown'; return 0; }
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
   session=$FM_BACKEND_HERDR_SESSION
   pane=$FM_BACKEND_HERDR_PANE
-  if [ "$raw_launch" = 1 ] || { [ -n "$recorded_harness" ] && [ "$recorded_harness" != unknown ]; }; then
+  if [ "$raw_launch" = 1 ]; then
     if ! fm_backend_herdr_omp_input_safe "$session" "$pane" "$recorded_harness" "$raw_launch"; then
       printf 'unknown'
       return 0
     fi
+    input_checked=1
   fi
   if cap=$(fm_backend_herdr_capture_ansi "$target" "$FM_COMPOSER_CAPTURE_LINES" 2>/dev/null); then
     caps=$(printf 'styled=1\ncursor=0\nidentity=1\nrows=%s' "$FM_COMPOSER_CAPTURE_LINES")
@@ -2758,31 +2826,24 @@ fm_backend_herdr_composer_state() {  # <target> [recorded-harness] [raw-launch] 
     if ! identity=$(fm_backend_herdr_composer_identity "$target" 2>/dev/null) || [ -z "$identity" ]; then
       identity=probe-absent
     fi
-    identity_checked=1
-    # OMP draws the same separated composer shape as Pi, while the shared
-    # classifier keeps that verified shape under its original Pi name.
-    case "$identity" in
-      omp$'\t'*)
-        if ! fm_harness_omp_attribution_allowed           || fm_backend_herdr_omp_exited_to_shell "$session" "$pane"; then
-          identity=omp-untrusted
-        else
-          identity="pi${identity#omp}"
-        fi
-        ;;
-    esac
+    if fm_backend_herdr_omp_input_safe "$session" "$pane" "$recorded_harness" "$raw_launch" "$identity"; then
+      input_checked=1
+      case "$identity" in
+        omp$'\t'*) identity="pi${identity#omp}" ;;
+      esac
+    else
+      identity=untrusted
+    fi
     verdict=$(fm_composer_classify_screen "$caps" "$cap" '' "$identity")
     [ "$verdict" != need-identity ] || verdict=unknown
   fi
-  if [ "$identity_checked" -eq 0 ] \
-    && { [ -z "$recorded_harness" ] || [ "$recorded_harness" = unknown ]; } \
-    && [ "$verdict" != unknown ]; then
+  if [ "$verdict" != unknown ] && [ "$input_checked" -eq 0 ]; then
     if ! fm_backend_herdr_omp_input_safe "$session" "$pane" "$recorded_harness" "$raw_launch"; then
       verdict=unknown
     fi
   fi
   printf '%s' "$verdict"
 }
-
 # fm_backend_herdr_rendered_busy_state: busy|idle|unknown from the pane's
 # RENDERED busy footer, the same delivery-only signal bin/fm-tmux-lib.sh's
 # fm_pane_busy_state reads, scanning the same 40-line tail folded to its last
