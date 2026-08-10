@@ -219,10 +219,40 @@ fm_control_harness_wiring_paths() {  # <harness> <worktree> <state-dir> <id>
       printf '%s\n' "$state/$id.muse-session-current"
       ;;
     cursor)
-      printf '%s\n' "$wt/.cursor/hooks.json"
       printf '%s\n' "$wt/.cursor/hooks/fm-busy-turnend.sh"
       ;;
   esac
+}
+
+fm_control_cursor_hooks_backup() {  # <worktree> <state-dir> <id>
+  local wt=$1 state=$2 id=$3 path backup
+  for path in "$wt/.cursor/hooks.json" "$wt/.cursor/hooks/fm-busy-turnend.sh"; do
+    if [ -L "$path" ] || { [ -e "$path" ] && [ ! -f "$path" ]; }; then
+      return 1
+    fi
+    if [ -e "$path" ]; then
+      backup="$state/$id.cursor-$(basename "$path")"
+      [ ! -e "$backup" ] || return 1
+      cp -p -- "$path" "$backup"
+    fi
+  done
+}
+
+fm_control_cursor_hooks_restore() {  # <worktree> <state-dir> <id>
+  local wt=$1 state=$2 id=$3 path backup
+  for path in "$wt/.cursor/hooks.json" "$wt/.cursor/hooks/fm-busy-turnend.sh"; do
+    [ ! -L "$path" ] || return 1
+    if [ "$(basename "$path")" = hooks.json ]; then
+      backup="$state/$id.cursor-hooks.json"
+    else
+      backup="$state/$id.cursor-fm-busy-turnend.sh"
+    fi
+    if [ -e "$backup" ]; then
+      cp -p -- "$backup" "$path" && rm -f -- "$backup" || return 1
+    else
+      rm -f -- "$path" || return 1
+    fi
+  done
 }
 
 # The firstmate-owned global turn-end registry entry a harness mints per task.

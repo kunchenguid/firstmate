@@ -230,6 +230,20 @@ test_cursor_composer_placeholder_requires_cursor_glyph() {
   pass "cursor placeholder classification requires the prompt glyph"
 }
 
+test_cursor_hooks_restore_existing_files() {
+  local dir="$TMP_ROOT/restore-hooks" wt="$TMP_ROOT/restore-hooks/wt" state="$TMP_ROOT/restore-hooks/state"
+  mkdir -p "$wt/.cursor/hooks" "$state"
+  printf '%s\n' '{"hooks":{"user":[{"command":"keep"}]}}' > "$wt/.cursor/hooks.json"
+  printf '%s\n' 'user hook' > "$wt/.cursor/hooks/fm-busy-turnend.sh"
+  fm_control_cursor_hooks_backup "$wt" "$state" restore
+  printf '%s\n' 'firstmate hook' > "$wt/.cursor/hooks.json"
+  printf '%s\n' 'firstmate script' > "$wt/.cursor/hooks/fm-busy-turnend.sh"
+  fm_control_cursor_hooks_restore "$wt" "$state" restore
+  assert_grep '"keep"' "$wt/.cursor/hooks.json" "existing Cursor hooks.json was not restored"
+  assert_grep 'user hook' "$wt/.cursor/hooks/fm-busy-turnend.sh" "existing Cursor hook script was not restored"
+  pass "Cursor wiring restores pre-existing hook files"
+}
+
 test_cursor_family_is_exact() {
   [ "$(fm_control_harness_family cursor-ide 2>/dev/null || true)" != cursor ] \
     || fail "unverified cursor-ide basename was accepted as cursor"
@@ -261,4 +275,5 @@ test_spawn_refuses_secondmate
 test_control_tables
 test_cursor_family_is_exact
 test_cursor_composer_placeholder_requires_cursor_glyph
+test_cursor_hooks_restore_existing_files
 test_tmux_classifies_cursor_agent_only

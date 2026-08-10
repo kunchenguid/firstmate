@@ -2416,6 +2416,12 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
         git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
       fi
     fi
+    if [ "$(fm_control_harness_family "$(meta_value "$META" harness)" 2>/dev/null || true)" = cursor ]; then
+      fm_control_cursor_hooks_restore "$WT" "$STATE" "$ID" || {
+        echo "error: could not restore Cursor hooks for $ID; teardown aborted" >&2
+        exit 1
+      }
+    fi
     rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
       "$WT/.opencode/plugins/fm-busy-state.js" \
       "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
@@ -2428,6 +2434,12 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
     if git -C "$WT" checkout --detach -q 2>/dev/null; then
       git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
     fi
+  fi
+  if [ "$(fm_control_harness_family "$(meta_value "$META" harness)" 2>/dev/null || true)" = cursor ]; then
+    fm_control_cursor_hooks_restore "$WT" "$STATE" "$ID" || {
+      echo "error: could not restore Cursor hooks for $ID; teardown aborted" >&2
+      exit 1
+    }
   fi
   # Remove our hook file so a reused pool worktree cannot fire signals for a dead task.
   rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \

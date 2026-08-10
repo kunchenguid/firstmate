@@ -92,7 +92,7 @@ detect_own() {
           *codex*) echo codex; return ;;
           *opencode*) echo opencode; return ;;
           *grok*) echo grok; return ;;
-          */cursor-agent/*|*cursor-agent*) echo cursor; return ;;
+          *" /cursor-agent "*|*" /cursor-agent") echo cursor; return ;;
           *" pi "*|*/pi) echo pi; return ;;
         esac ;;
     esac

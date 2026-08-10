@@ -819,6 +819,9 @@ clear_relaunch_harness_wiring() {
   done <<EOF
 $(fm_control_harness_wiring_paths "$harness" "$wt" "$state" "$id")
 EOF
+  if [ "$harness" = cursor ]; then
+    fm_control_cursor_hooks_restore "$wt" "$state" "$id" || return 1
+  fi
 }
 
 spawn_herdr_presentation_order_lock_release() {
@@ -2315,7 +2318,7 @@ if [ "$KIND" != secondmate ]; then
       ;;
   esac
   case "$HARNESS" in
-    claude*|opencode*|pi|pi-signed|cursor*)
+    claude*|opencode*|pi|pi-signed|cursor)
       BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || {
         echo "error: failed to arm the busy-state contract for $ID" >&2
         exit 1
@@ -2356,7 +2359,7 @@ if [ "$KIND" != secondmate ]; then
 EOF
       exclude_path '.claude/settings.local.json'
       ;;
-    cursor*)
+    cursor)
       # Cursor Agent project hooks (verified 2026-08-10 on cursor-agent
       # 2026.08.04-aaa8809): beforeSubmitPrompt opens a turn (fires for both
       # positional launch briefs and interactive submits), stop closes it for
@@ -2364,6 +2367,10 @@ EOF
       # closes on /exit. stop also touches the turn-ended notification. Hook
       # commands must consume stdin JSON and print {} - the small script below
       # owns that shape so hooks.json stays declarative.
+      fm_control_cursor_hooks_backup "$WT" "$STATE_REAL" "$ID" || {
+        echo "error: existing Cursor hooks.json is not a safe regular file" >&2
+        exit 1
+      }
       mkdir -p "$WT/.cursor/hooks"
       cat > "$WT/.cursor/hooks/fm-busy-turnend.sh" <<EOF
 #!/usr/bin/env bash
