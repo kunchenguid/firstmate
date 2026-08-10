@@ -304,9 +304,9 @@ secondmate_sync() {
 
   secondmate_write_nudge_marker() {
     local id=$1 home=$2 commit=$3 instr=$4 message=${5:-$SECOND_MATE_NUDGE_MESSAGE}
-    local remote=${6:-0} remote_host=${7:-} remote_root=${8:-}
+    local remote=${6:-0} remote_host=${7:-} remote_root=${8:-} mode=${9:-replace}
     fm_secondmate_nudge_write "$STATE" "$id" "$home" "$commit" "$instr" "$message" \
-      "$remote" "" "$remote_host" "$remote_root"
+      "$remote" "" "$remote_host" "$remote_root" "$mode"
   }
 
   secondmate_deliver_nudge_locked() {
@@ -352,7 +352,16 @@ secondmate_sync() {
         return 1
         ;;
     esac
-    if ! secondmate_write_nudge_marker "$id" "$home" "$after" "$instr"; then
+    if [ -e "$marker" ] || [ -L "$marker" ]; then
+      if ! fm_secondmate_local_nudge_matches "$marker" "$id" "$home" "$after" \
+        && ! fm_secondmate_local_nudge_record_matches "$marker" "$id" "$home" \
+          "$after" "$instr" "$SECOND_MATE_NUDGE_MESSAGE"; then
+        echo "NUDGE_SECONDMATES: secondmate $id: deferred: prior retry marker remains pending"
+        fm_lock_release "$lock" || true
+        return 1
+      fi
+    elif ! secondmate_write_nudge_marker "$id" "$home" "$after" AGENTS.md \
+      "$SECOND_MATE_NUDGE_MESSAGE" 0 "" "" create; then
       echo "NUDGE_SECONDMATES: secondmate $id: send failed: cannot record retry marker"
       fm_lock_release "$lock" || true
       return 1

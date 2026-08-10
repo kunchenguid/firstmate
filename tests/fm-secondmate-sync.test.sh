@@ -657,6 +657,46 @@ test_bootstrap_nudge_retry_defers_on_busy_transaction() {
   pass "T8g bootstrap journals before advancing under nudge contention"
 }
 
+test_bootstrap_preserves_prior_nudge_before_new_update() {
+  local w c1 primary_head fakebin marker out out2
+  w=$(new_world nudge-prior-action)
+  c1=$(head_of "$w/main")
+  add_sm_worktree "$w" sm-instr "$c1"
+  marker="$w/home/state/.secondmate-nudge-pending/sm-instr.pending"
+  mkdir -p "${marker%/*}"
+  {
+    printf 'id=sm-instr\n'
+    printf 'selector=fm-sm-instr\n'
+    printf 'home=%s\n' "$w/sm-instr"
+    printf 'commit=%s\n' "$c1"
+    printf 'instructions=AGENTS.md\n'
+    printf 'message=firstmate was updated to the latest - please re-read your AGENTS.md to pick up the new instructions.\n'
+    printf 'remote=0\n'
+  } > "$marker"
+  bump_primary "$w" instr
+  primary_head=$(head_of "$w/main")
+  fakebin=$(make_fake_toolchain "$w")
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_SEND_SETTLE=0 FM_FAKE_TMUX_FAIL_LITERAL=1 \
+    "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+  assert_contains "$out" \
+    "NUDGE_SECONDMATES: secondmate sm-instr: deferred: prior retry marker remains pending" \
+    "pending prior nudge did not defer the next tracked-file update"
+  [ "$(head_of "$w/sm-instr")" = "$c1" ] \
+    || fail "pending prior nudge was overwritten before the new update completed"
+  assert_grep "commit=$c1" "$marker" "pending prior nudge was replaced speculatively"
+
+  out2=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_SEND_SETTLE=0 "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+  assert_contains "$out2" "BOOTSTRAP_INFO: nudged fm-sm-instr with" \
+    "released prior nudge did not allow convergence"
+  [ "$(head_of "$w/sm-instr")" = "$primary_head" ] \
+    || fail "checkout did not converge after the prior nudge was delivered"
+  assert_absent "$marker" "converged update retained its retry marker"
+  pass "T8h bootstrap preserves prior nudges before new updates"
+}
+
 test_bootstrap_nudge_retry_refuses_changed_home() {
   local w c1 fakebin marker out other
   w=$(new_world nudge-retry-home-change)
@@ -986,6 +1026,7 @@ test_bootstrap_nudge_retry_rejects_malformed_marker_id
 test_bootstrap_nudge_failure_records_retry_marker
 test_bootstrap_nudge_retry_is_idempotent
 test_bootstrap_nudge_retry_defers_on_busy_transaction
+test_bootstrap_preserves_prior_nudge_before_new_update
 test_bootstrap_nudge_retry_refuses_changed_home
 test_nudge_retry_uses_fresh_herdr_endpoint_after_respawn
 test_bootstrap_sweep_surfaces_skipped_home

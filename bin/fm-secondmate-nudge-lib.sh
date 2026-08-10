@@ -79,8 +79,9 @@ fm_secondmate_legacy_remote_nudge_matches() {
   [ "$lines" = 7 ]
 }
 
-fm_secondmate_local_nudge_matches() {
-  local marker=$1 id=$2 home=$3 commit=$4 owner=${5:-} value lines expected_lines=7
+fm_secondmate_local_nudge_record_matches() {
+  local marker=$1 id=$2 home=$3 commit=$4 instructions=$5 message=$6 owner=${7:-}
+  local value lines expected_lines=7
   value=$(fm_secondmate_nudge_value "$marker" id 2>/dev/null) || return 1
   [ "$value" = "$id" ] || return 1
   value=$(fm_secondmate_nudge_value "$marker" selector 2>/dev/null) || return 1
@@ -90,9 +91,9 @@ fm_secondmate_local_nudge_matches() {
   value=$(fm_secondmate_nudge_value "$marker" commit 2>/dev/null) || return 1
   [ "$value" = "$commit" ] || return 1
   value=$(fm_secondmate_nudge_value "$marker" instructions 2>/dev/null) || return 1
-  [ "$value" = AGENTS.md ] || return 1
+  [ "$value" = "$instructions" ] || return 1
   value=$(fm_secondmate_nudge_value "$marker" message 2>/dev/null) || return 1
-  [ "$value" = "$FM_SECOND_MATE_NUDGE_MESSAGE" ] || return 1
+  [ "$value" = "$message" ] || return 1
   value=$(fm_secondmate_nudge_value "$marker" remote 2>/dev/null) || return 1
   [ "$value" = 0 ] || return 1
   if [ -n "$owner" ]; then
@@ -105,6 +106,11 @@ fm_secondmate_local_nudge_matches() {
   grep -Eq '^remote_(host|root)=' "$marker" 2>/dev/null && return 1
   lines=$(awk 'END { print NR }' "$marker" 2>/dev/null) || return 1
   [ "$lines" = "$expected_lines" ]
+}
+
+fm_secondmate_local_nudge_matches() {
+  fm_secondmate_local_nudge_record_matches "$1" "$2" "$3" "$4" AGENTS.md \
+    "$FM_SECOND_MATE_NUDGE_MESSAGE" "${5:-}"
 }
 
 fm_secondmate_remote_nudge_matches() {
