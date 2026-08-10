@@ -377,6 +377,169 @@ test_firstmate_action_publication_is_serialized() {
   pass "Firstmate action publication is serialized per home"
 }
 
+test_dependency_check_lock_is_run_wide_and_bounded() {
+  local fixture ready release events holder holder_status out status started elapsed i
+  fixture="$TMP_ROOT/dependency-check-run-lock"
+  ready="$fixture/holder.ready"
+  release="$fixture/holder.release"
+  events="$fixture/events.log"
+  mkdir -p "$fixture/state"
+
+  # shellcheck disable=SC2016
+  FM_ROOT_OVERRIDE="$fixture" FM_HOME="$fixture" FM_STATE_OVERRIDE="$fixture/state" \
+    FM_DEPS_SOURCE_ONLY=1 FM_DEPS_INTERACTIVE=0 FM_DEPS_LOCK_TIMEOUT=3 bash -c '
+      deps=$1
+      ready=$2
+      release=$3
+      set --
+      . "$deps"
+      check_release_tool() {
+        if [ ! -e "$ready" ]; then
+          : > "$ready"
+          while [ ! -e "$release" ]; do
+            sleep 0.02
+          done
+        fi
+      }
+      check_apt_package() { :; }
+      check_npm_tool() { :; }
+      check_herdr() { :; }
+      check_node() { :; }
+      check_zellij() { :; }
+      check_shellcheck_pin() { :; }
+      check_github_actions() { :; }
+      check_firstmate() { :; }
+      run_dependency_check
+    ' _ "$DEPS" "$ready" "$release" > "$fixture/holder.out" 2>&1 &
+  holder=$!
+  for ((i = 0; i < 100; i++)); do
+    [ -e "$ready" ] && break
+    kill -0 "$holder" 2>/dev/null || break
+    sleep 0.02
+  done
+  if [ ! -e "$ready" ]; then
+    wait "$holder" 2>/dev/null || true
+    fail "run-wide dependency checker owner did not reach its first check"
+  fi
+
+  started=$(date +%s)
+  # shellcheck disable=SC2016
+  out=$(FM_ROOT_OVERRIDE="$fixture" FM_HOME="$fixture" \
+    FM_STATE_OVERRIDE="$fixture/state" FM_DEPS_SOURCE_ONLY=1 \
+    FM_DEPS_INTERACTIVE=0 FM_DEPS_LOCK_TIMEOUT=1 FM_DEPS_TEST_EVENTS="$events" \
+    bash -c '
+      deps=$1
+      set --
+      . "$deps"
+      check_release_tool() { printf "entered\n" >> "$FM_DEPS_TEST_EVENTS"; }
+      check_apt_package() { :; }
+      check_npm_tool() { :; }
+      check_herdr() { :; }
+      check_node() { :; }
+      check_zellij() { :; }
+      check_shellcheck_pin() { :; }
+      check_github_actions() { :; }
+      check_firstmate() { :; }
+      run_dependency_check
+    ' _ "$DEPS" 2>&1)
+  status=$?
+  elapsed=$(( $(date +%s) - started ))
+  : > "$release"
+  wait "$holder"
+  holder_status=$?
+
+  [ "$holder_status" -eq 0 ] || fail "run-wide dependency checker owner failed"
+  [ "$status" -eq 0 ] || fail "busy dependency check did not return a deferred result: $out"
+  [ "$elapsed" -le 4 ] || fail "busy dependency check exceeded its ownership bound"
+  assert_contains "$out" \
+    "DEFER: dependency check - another invocation is still running; retry later" \
+    "busy dependency check did not report its deferred result"
+  assert_contains "$out" \
+    "SUMMARY: 0 update(s) available; 0 completed; 1 deferred; 0 check/upgrade failure(s)" \
+    "busy dependency check did not produce a deferred summary"
+  assert_absent "$events" "concurrent dependency check entered an upgrade-capable check"
+  pass "dependency checker ownership is run-wide and bounded"
+}
+
+test_loaded_revision_change_defers_run() {
+  local fixture fakebin events out status
+  fixture="$TMP_ROOT/dependency-check-revision-change"
+  fakebin=$(fm_fakebin "$fixture")
+  events="$fixture/events.log"
+  mkdir -p "$fixture/state"
+  printf '%s\n' '#!/usr/bin/env bash' 'printf '\''current-head\n'\''' > "$fakebin/git"
+  chmod +x "$fakebin/git"
+
+  # shellcheck disable=SC2016
+  out=$(PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$fixture" FM_HOME="$fixture" \
+    FM_STATE_OVERRIDE="$fixture/state" FM_DEPS_SOURCE_ONLY=1 \
+    FM_DEPS_INTERACTIVE=0 FM_DEPS_TEST_EVENTS="$events" bash -c '
+      deps=$1
+      set --
+      . "$deps"
+      _FM_DEPS_LOADED_REVISION=loaded-head
+      check_release_tool() { printf "entered\n" >> "$FM_DEPS_TEST_EVENTS"; }
+      check_apt_package() { :; }
+      check_npm_tool() { :; }
+      check_herdr() { :; }
+      check_node() { :; }
+      check_zellij() { :; }
+      check_shellcheck_pin() { :; }
+      check_github_actions() { :; }
+      check_firstmate() { :; }
+      run_dependency_check
+    ' _ "$DEPS" 2>&1)
+  status=$?
+
+  [ "$status" -eq 0 ] || fail "changed loaded revision did not return a deferred result: $out"
+  assert_contains "$out" \
+    "DEFER: dependency check - Firstmate changed while this invocation waited; rerun" \
+    "changed loaded revision was not deferred"
+  assert_absent "$events" "changed loaded revision entered an upgrade-capable check"
+  pass "changed loaded revisions are deferred before checks"
+}
+
+test_invalid_pending_action_directory_stops_run() {
+  local kind fixture events out status
+  for kind in symlink file; do
+    fixture="$TMP_ROOT/invalid-pending-$kind"
+    events="$fixture/events.log"
+    mkdir -p "$fixture/state"
+    if [ "$kind" = symlink ]; then
+      ln -s missing "$fixture/state/.fm-deps-pending"
+    else
+      printf 'invalid\n' > "$fixture/state/.fm-deps-pending"
+    fi
+
+    # shellcheck disable=SC2016
+    out=$(FM_ROOT_OVERRIDE="$fixture" FM_HOME="$fixture" \
+      FM_STATE_OVERRIDE="$fixture/state" FM_DEPS_SOURCE_ONLY=1 \
+      FM_DEPS_INTERACTIVE=0 FM_DEPS_TEST_EVENTS="$events" bash -c '
+        deps=$1
+        set --
+        . "$deps"
+        check_release_tool() { printf "entered\n" >> "$FM_DEPS_TEST_EVENTS"; }
+        check_apt_package() { :; }
+        check_npm_tool() { :; }
+        check_herdr() { :; }
+        check_node() { :; }
+        check_zellij() { :; }
+        check_shellcheck_pin() { :; }
+        check_github_actions() { :; }
+        check_firstmate() { :; }
+        run_dependency_check
+      ' _ "$DEPS" 2>&1)
+    status=$?
+    [ "$status" -ne 0 ] || fail "$kind pending action directory was accepted: $out"
+    assert_contains "$out" "Firstmate pending action directory is invalid" \
+      "$kind pending action directory was not diagnosed"
+    assert_contains "$out" "FAILED: Firstmate pending action storage is invalid" \
+      "$kind pending action directory did not stop the dependency check"
+    assert_absent "$events" "$kind pending action directory allowed later checks"
+  done
+  pass "invalid pending action directories stop dependency checks"
+}
+
 test_firstmate_actions_are_durable_and_retry_every_target() {
   local fixture log out status pending nudge one_home one_commit replacement before after
   local manifest_contents
@@ -859,6 +1022,9 @@ test_firstmate_update_actions_are_consumed
 test_firstmate_secondmate_only_actions_are_preserved
 test_firstmate_concurrent_update_preserves_actions
 test_firstmate_action_publication_is_serialized
+test_dependency_check_lock_is_run_wide_and_bounded
+test_loaded_revision_change_defers_run
+test_invalid_pending_action_directory_stops_run
 test_firstmate_actions_are_durable_and_retry_every_target
 test_remote_secondmate_actions_use_shared_retry_markers
 test_nudge_delivery_preserves_concurrent_replacement

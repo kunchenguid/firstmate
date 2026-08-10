@@ -24,6 +24,7 @@
 # Test seams:
 #   FM_DEPS_INTERACTIVE=1|0 overrides terminal detection when source-only.
 #   FM_DEPS_PROBE_TIMEOUT bounds each read-only dependency probe.
+#   FM_DEPS_LOCK_TIMEOUT bounds per-home checker ownership acquisition.
 #   FM_ROOT_OVERRIDE points at an isolated Firstmate fixture.
 #   FM_DEPS_HERDR_MANIFEST_URL and FM_DEPS_NODE_INDEX_URL override release data.
 #   FM_DEPS_NVM_DIR points at an isolated NVM fixture.
@@ -39,6 +40,8 @@ AVAILABLE=0
 FIRSTMATE_UPDATE_RESULT=""
 HERDR_MANIFEST_URL=${FM_DEPS_HERDR_MANIFEST_URL:-https://herdr.dev/latest.json}
 NODE_INDEX_URL=${FM_DEPS_NODE_INDEX_URL:-https://nodejs.org/dist/index.json}
+_FM_DEPS_ACTION_LOCK_HELD=0
+_FM_DEPS_LOADED_REVISION=""
 
 # shellcheck source=bin/fm-secondmate-nudge-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-nudge-lib.sh"
@@ -59,6 +62,11 @@ case "${1:-}" in
 esac
 [ "$#" -le 1 ] || { usage; exit 1; }
 
+if [ "${FM_DEPS_SOURCE_ONLY:-0}" != 1 ]; then
+  _FM_DEPS_LOADED_REVISION=$(env GIT_TERMINAL_PROMPT=0 GIT_OPTIONAL_LOCKS=0 \
+    git -C "$FM_ROOT" rev-parse HEAD 2>/dev/null || true)
+fi
+
 is_interactive() {
   if [ "${FM_DEPS_SOURCE_ONLY:-0}" = 1 ]; then
     case "${FM_DEPS_INTERACTIVE:-}" in
@@ -69,12 +77,20 @@ is_interactive() {
   [ -t 0 ] && [ -t 1 ]
 }
 
-probe_timeout_is_valid() {
-  case "${FM_DEPS_PROBE_TIMEOUT:-30}" in
+positive_integer_is_valid() {
+  case "$1" in
     ''|*[!0-9]*) return 1 ;;
     *[1-9]*) return 0 ;;
     *) return 1 ;;
   esac
+}
+
+probe_timeout_is_valid() {
+  positive_integer_is_valid "${FM_DEPS_PROBE_TIMEOUT:-30}"
+}
+
+action_lock_timeout_is_valid() {
+  positive_integer_is_valid "${FM_DEPS_LOCK_TIMEOUT:-5}"
 }
 
 run_probe() {
@@ -346,6 +362,31 @@ ensure_deps_pending_dir() {
   fi
 }
 
+validate_firstmate_action_storage() {
+  local state pending shared
+  state=$(deps_state_dir) || return 1
+  pending=$(deps_pending_dir) || return 1
+  shared="$state/.secondmate-nudge-pending"
+  if [ -e "$state" ] || [ -L "$state" ]; then
+    if [ ! -d "$state" ] || [ -L "$state" ]; then
+      printf 'Firstmate dependency state directory is invalid\n' >&2
+      return 1
+    fi
+  fi
+  if [ -e "$pending" ] || [ -L "$pending" ]; then
+    if [ ! -d "$pending" ] || [ -L "$pending" ]; then
+      printf 'Firstmate pending action directory is invalid\n' >&2
+      return 1
+    fi
+  fi
+  if [ -e "$shared" ] || [ -L "$shared" ]; then
+    if [ ! -d "$shared" ] || [ -L "$shared" ]; then
+      printf 'Firstmate pending secondmate nudge directory is invalid\n' >&2
+      return 1
+    fi
+  fi
+}
+
 write_deps_pending_marker() {
   local marker=$1 parent tmp line
   shift
@@ -405,13 +446,32 @@ deps_data_dir() {
   fi
 }
 
+acquire_firstmate_action_lock() {
+  local lock=$1 raw timeout started
+  raw=${FM_DEPS_LOCK_TIMEOUT:-5}
+  action_lock_timeout_is_valid || return 2
+  timeout=$((10#$raw))
+  started=$SECONDS
+  while ! fm_lock_try_acquire "$lock"; do
+    [ $((SECONDS - started)) -lt "$timeout" ] || return 75
+    sleep 0.1
+  done
+}
+
 with_firstmate_action_lock() {
-  local callback=$1 state lock action_root action_home rc=0
+  local callback=$1 state lock action_root action_home lock_status current_revision rc=0
   shift
+  if [ "$_FM_DEPS_ACTION_LOCK_HELD" -eq 1 ]; then
+    "$callback" "$@"
+    return
+  fi
   state=$(deps_state_dir) || return 1
   action_root=$FM_ROOT
   action_home=$(deps_home_dir) || return 1
-  ensure_deps_state_dir || return 1
+  ensure_deps_state_dir || {
+    printf 'fm-deps.sh: dependency checker state directory is invalid\n' >&2
+    return 2
+  }
   local FM_ROOT_OVERRIDE FM_ROOT FM_HOME STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
   FM_ROOT_OVERRIDE=$action_root
   FM_ROOT=$action_root
@@ -420,7 +480,17 @@ with_firstmate_action_lock() {
   lock="$state/.fm-deps-actions.lock"
   # shellcheck source=bin/fm-wake-lib.sh
   . "$SCRIPT_DIR/fm-wake-lib.sh"
-  fm_lock_acquire_wait "$lock" || return 1
+  acquire_firstmate_action_lock "$lock"
+  lock_status=$?
+  [ "$lock_status" -eq 0 ] || return "$lock_status"
+  if [ -n "$_FM_DEPS_LOADED_REVISION" ]; then
+    current_revision=$(run_git_probe -C "$action_root" rev-parse HEAD 2>/dev/null || true)
+    if [ -z "$current_revision" ] || [ "$current_revision" != "$_FM_DEPS_LOADED_REVISION" ]; then
+      fm_lock_release "$lock"
+      return 76
+    fi
+  fi
+  local _FM_DEPS_ACTION_LOCK_HELD=1
   "$callback" "$@" || rc=$?
   fm_lock_release "$lock"
   return "$rc"
@@ -950,8 +1020,9 @@ persist_firstmate_update_actions() {
 }
 
 firstmate_update_actions_pending() {
-  local pending marker state
+  local pending marker state shared
   pending=$(deps_pending_dir) || return 1
+  validate_firstmate_action_storage || return 2
   marker=$(firstmate_action_manifest_path) || return 1
   if [ -e "$marker" ] || [ -L "$marker" ]; then
     return 0
@@ -971,7 +1042,8 @@ firstmate_update_actions_pending() {
     fi
   done
   state=$(deps_state_dir) || return 1
-  for marker in "$state/.secondmate-nudge-pending"/*.pending; do
+  shared="$state/.secondmate-nudge-pending"
+  for marker in "$shared"/*.pending; do
     if [ -e "$marker" ] || [ -L "$marker" ]; then
       return 0
     fi
@@ -982,6 +1054,7 @@ firstmate_update_actions_pending() {
 process_pending_firstmate_actions() {
   local pending manifest reread_marker action path marker targets selector failed_targets=""
   local record_failed=0 send_failed=0
+  validate_firstmate_action_storage || return 3
   pending=$(deps_pending_dir) || return 1
   if [ -e "$pending" ] || [ -L "$pending" ]; then
     [ -d "$pending" ] && [ ! -L "$pending" ] || {
@@ -1136,7 +1209,7 @@ run_firstmate_upgrade_locked() {
 }
 
 run_upgrade() {
-  local id=$1 installed=${2:-} latest=${3:-}
+  local id=$1 installed=${2:-} latest=${3:-} lock_status
   case "$id" in
     codex) codex update ;;
     github-cli) run_apt_upgrade gh ;;
@@ -1157,6 +1230,13 @@ run_upgrade() {
     firstmate)
       FIRSTMATE_UPDATE_RESULT=""
       with_firstmate_action_lock run_firstmate_upgrade_locked
+      lock_status=$?
+      if [ "$lock_status" -eq 75 ]; then
+        printf 'Firstmate update deferred because another dependency check is running\n' >&2
+      elif [ "$lock_status" -eq 76 ]; then
+        printf 'Firstmate update deferred because the loaded checkout changed\n' >&2
+      fi
+      return "$lock_status"
       ;;
     *) return 1 ;;
   esac
@@ -1341,7 +1421,7 @@ check_github_actions() {
 }
 
 check_firstmate() {
-  local branch branch_out local_sha remote_sha status_out
+  local branch branch_out local_sha remote_sha status_out pending_status
   if branch_out=$(run_git_probe -C "$FM_ROOT" symbolic-ref --short \
     refs/remotes/origin/HEAD 2>/dev/null); then
     branch=${branch_out#origin/}
@@ -1365,11 +1445,21 @@ check_firstmate() {
     printf 'UPDATE: Firstmate %s -> origin/%s %s [guarded fast-forward]\n' \
       "$(printf '%.12s' "$local_sha")" "$branch" "$(printf '%.12s' "$remote_sha")"
     AVAILABLE=$((AVAILABLE + 1))
-    if firstmate_update_actions_pending; then
-      printf 'DEFER: Firstmate - previous post-update actions remain incomplete; complete them and rerun\n'
-      DEFERRED=$((DEFERRED + 1))
-      return 0
-    fi
+    firstmate_update_actions_pending
+    pending_status=$?
+    case "$pending_status" in
+      0)
+        printf 'DEFER: Firstmate - previous post-update actions remain incomplete; complete them and rerun\n'
+        DEFERRED=$((DEFERRED + 1))
+        return 0
+        ;;
+      1) ;;
+      *)
+        printf 'DEFER: Firstmate - pending action storage is invalid; repair it and rerun\n'
+        DEFERRED=$((DEFERRED + 1))
+        return 0
+        ;;
+    esac
     if ! status_out=$(run_git_probe -C "$FM_ROOT" status --porcelain 2>/dev/null); then
       printf 'DEFER: Firstmate - checkout status inspection failed; rerun when Git is responsive\n'
       DEFERRED=$((DEFERRED + 1))
@@ -1409,6 +1499,74 @@ check_firstmate() {
   fi
 }
 
+run_dependency_check_body() {
+  local pending_action_status
+  if [ "$CHECK_ONLY" -eq 0 ] && ! is_interactive; then
+    printf 'INFO: non-interactive shell detected; running checks without upgrade prompts\n'
+  fi
+
+  printf 'AI workspace dependency check (Linux)\n'
+  printf '%s\n' '----------------------------------------'
+
+  process_pending_firstmate_actions
+  pending_action_status=$?
+  if [ "$pending_action_status" -eq 2 ]; then
+    printf 'FAILED: required Firstmate instruction reread remains incomplete\n' >&2
+    return 1
+  elif [ "$pending_action_status" -eq 3 ]; then
+    printf 'FAILED: Firstmate pending action storage is invalid\n' >&2
+    return 1
+  elif [ "$pending_action_status" -ne 0 ]; then
+    printf 'FAILED: Firstmate post-update actions remain incomplete\n' >&2
+    FAILURES=$((FAILURES + 1))
+  fi
+
+  check_release_tool codex Codex codex openai/codex quiet
+  check_apt_package github-cli 'GitHub CLI' gh normal
+  check_npm_tool gh-axi gh-axi gh-axi
+  check_npm_tool chrome-devtools-axi chrome-devtools-axi chrome-devtools-axi
+  check_npm_tool lavish-axi lavish-axi lavish-axi
+  check_npm_tool quota-axi quota-axi quota-axi
+  check_npm_tool tasks-axi tasks-axi tasks-axi
+  check_release_tool no-mistakes no-mistakes no-mistakes kunchenguid/no-mistakes normal
+  check_release_tool treehouse Treehouse treehouse kunchenguid/treehouse normal
+  check_herdr
+  check_release_tool opencode OpenCode opencode anomalyco/opencode quiet
+  check_apt_package tmux tmux tmux quiet
+  check_node
+  check_zellij
+  check_shellcheck_pin
+  check_github_actions
+  check_firstmate
+
+  printf '%s\n' '----------------------------------------'
+  printf 'SUMMARY: %s update(s) available; %s completed; %s deferred; %s check/upgrade failure(s)\n' \
+    "$AVAILABLE" "$UPDATES" "$DEFERRED" "$FAILURES"
+  [ "$FAILURES" -eq 0 ]
+}
+
+run_dependency_check() {
+  local run_status
+  with_firstmate_action_lock run_dependency_check_body
+  run_status=$?
+  if [ "$run_status" -eq 75 ] || [ "$run_status" -eq 76 ]; then
+    if [ "$CHECK_ONLY" -eq 0 ] && ! is_interactive; then
+      printf 'INFO: non-interactive shell detected; running checks without upgrade prompts\n'
+    fi
+    printf 'AI workspace dependency check (Linux)\n'
+    printf '%s\n' '----------------------------------------'
+    if [ "$run_status" -eq 75 ]; then
+      printf 'DEFER: dependency check - another invocation is still running; retry later\n'
+    else
+      printf 'DEFER: dependency check - Firstmate changed while this invocation waited; rerun\n'
+    fi
+    printf '%s\n' '----------------------------------------'
+    printf 'SUMMARY: 0 update(s) available; 0 completed; 1 deferred; 0 check/upgrade failure(s)\n'
+    return 0
+  fi
+  return "$run_status"
+}
+
 if [ "${FM_DEPS_SOURCE_ONLY:-0}" = 1 ]; then
   # shellcheck disable=SC2317 # exit is the direct-execution fallback; sourcing uses return.
   return 0 2>/dev/null || exit 0
@@ -1422,6 +1580,10 @@ if ! probe_timeout_is_valid; then
   printf 'fm-deps.sh: FM_DEPS_PROBE_TIMEOUT must be a positive integer\n' >&2
   exit 1
 fi
+if ! action_lock_timeout_is_valid; then
+  printf 'fm-deps.sh: FM_DEPS_LOCK_TIMEOUT must be a positive integer\n' >&2
+  exit 1
+fi
 for required_command in dpkg dpkg-query apt-cache; do
   if ! command -v "$required_command" >/dev/null 2>&1; then
     printf 'fm-deps.sh: Debian/Ubuntu command %s is required\n' "$required_command" >&2
@@ -1429,47 +1591,4 @@ for required_command in dpkg dpkg-query apt-cache; do
   fi
 done
 
-if [ "$CHECK_ONLY" -eq 0 ] && ! is_interactive; then
-  printf 'INFO: non-interactive shell detected; running checks without upgrade prompts\n'
-fi
-
-printf 'AI workspace dependency check (Linux)\n'
-printf '%s\n' '----------------------------------------'
-
-pending_action_status=0
-if firstmate_update_actions_pending; then
-  with_firstmate_action_lock process_pending_firstmate_actions
-  pending_action_status=$?
-fi
-if [ "$pending_action_status" -eq 2 ]; then
-  printf 'FAILED: required Firstmate instruction reread remains incomplete\n' >&2
-  exit 1
-elif [ "$pending_action_status" -ne 0 ]; then
-  printf 'FAILED: Firstmate post-update actions remain incomplete\n' >&2
-  FAILURES=$((FAILURES + 1))
-fi
-
-check_release_tool codex Codex codex openai/codex quiet
-check_apt_package github-cli 'GitHub CLI' gh normal
-check_npm_tool gh-axi gh-axi gh-axi
-check_npm_tool chrome-devtools-axi chrome-devtools-axi chrome-devtools-axi
-check_npm_tool lavish-axi lavish-axi lavish-axi
-check_npm_tool quota-axi quota-axi quota-axi
-check_npm_tool tasks-axi tasks-axi tasks-axi
-check_release_tool no-mistakes no-mistakes no-mistakes kunchenguid/no-mistakes normal
-check_release_tool treehouse Treehouse treehouse kunchenguid/treehouse normal
-check_herdr
-check_release_tool opencode OpenCode opencode anomalyco/opencode quiet
-check_apt_package tmux tmux tmux quiet
-check_node
-check_zellij
-check_shellcheck_pin
-check_github_actions
-
-# Self-update last: a successful fast-forward may replace this script.
-check_firstmate
-
-printf '%s\n' '----------------------------------------'
-printf 'SUMMARY: %s update(s) available; %s completed; %s deferred; %s check/upgrade failure(s)\n' \
-  "$AVAILABLE" "$UPDATES" "$DEFERRED" "$FAILURES"
-[ "$FAILURES" -eq 0 ]
+run_dependency_check
