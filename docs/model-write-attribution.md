@@ -119,7 +119,7 @@ If you are looking at a candidate and wondering whether to act on it, check this
 
 | Kind | Identifier | How it identifies itself |
 |---|---|---|
-| Issue comment | `5158866063` | body is the nonce |
+| Issue comment | `5158866063` | body carries the nonce |
 | Review | `4838962417` | body carries the nonce |
 | Review | `4838972180` | body carries the nonce |
 | Commit | `c73f62d045e8` | empty commit, message `test: verify browser commit capability` |
@@ -143,17 +143,19 @@ A candidate that fails all four checks is not a probe artifact and should be jud
 They are what a browser model session produced on 2026-08-02 when it was asked to prove it could comment, review, and push a commit.
 That measurement is the evidence the whole convention rests on: every one of them recorded the account owner with `author_association: OWNER` and no bot marker, which is why write-time enforcement was ruled impossible and detection after the fact was chosen instead.
 Independent evidence is preserved outside this repository at `data/sol-capability-probe/github-evidence.md`.
+That note enumerates only four artifacts, omitting scaffolding commit `3e05033a95a1`, which appears there as a parent SHA rather than as a swept write.
+The table above supersedes it on the set, and every entry was verified against the live API rather than copied from the note.
 
 ### Why they were not deleted
 
 Deletion was proposed, investigated, and declined on measured grounds.
 
-It is only partly possible in the first place: a pull request cannot be deleted, only closed, and the commit survives because the pull request retains it.
-Removing the comment while the reviews and commit stayed would have left a half-removed control, which is worse than either keeping or removing the whole thing.
+It is only partly possible in the first place: a pull request cannot be deleted, only closed, and both commits survive because the pull request retains them.
+Removing the comment while the reviews and commits stayed would have left a half-removed control, which is worse than either keeping or removing the whole thing.
 
 The stronger reason is that a red control which exists in the real world, on the real account, is worth more than tidiness.
 Every other control this detector has is synthetic, and a synthetic control can only confirm the assumption already written into it.
-These four already earned their keep: proving the sweep against them is what exposed a real defect, an early filter that skipped app-performed writes and would therefore have hidden comment `5158866063` - the single most representative example of what the sweep exists to catch.
+These five already earned their keep: proving the sweep against them is what exposed a real defect, an early filter that skipped app-performed writes and would therefore have hidden comment `5158866063` - the single most representative example of what the sweep exists to catch.
 
 ### Why they are not filtered out
 
