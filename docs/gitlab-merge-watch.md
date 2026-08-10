@@ -153,6 +153,7 @@ Arming is the one point where that can be reported, so it refuses there instead 
 
 ```
 $ PATH="$noglab" fm-pr-check.sh e5 https://gitlab.com/KarotKris/gitlab-merge-watch-fixture/-/merge_requests/1
+venue: unchecked (task e5 records no contribution venue)
 error: watching a GitLab merge request requires glab on PATH
 $ echo $?
 1

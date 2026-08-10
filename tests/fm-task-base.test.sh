@@ -711,6 +711,38 @@ test_venue_is_single_when_there_is_no_fetch_push_split() {
   pass "fm-task-base: a project with no fetch/push split resolves one venue"
 }
 
+# An upstream relationship exists but its trunk was never fetched. Testing an
+# unreadable ref for ancestry FAILS FATALLY, which reads exactly like a clean
+# "not an ancestor", so the derivation would fall through to the fork trunk and
+# record the fork venue for a target that is genuinely upstream - and
+# bin/fm-pr-check.sh would then refuse that task's own correct pull request.
+# The target here is deliberately reachable from the fork trunk, because that is
+# the only way an upstream commit exists locally at all when the upstream trunk
+# was never fetched: it is already merged into the fork.
+test_venue_refuses_an_unreadable_upstream_trunk() {
+  local dir target rc
+  dir="$TMP_ROOT/venue-unfetched/repo"
+  mkdir -p "$dir"
+  git -C "$dir" init -q
+  git -C "$dir" symbolic-ref HEAD refs/heads/main
+  commit_in "$dir" base
+  git -C "$dir" remote add origin 'https://github.com/fixture-up/venue-unfetched.git'
+  git -C "$dir" remote set-url --push origin 'https://github.com/fixture-fork/venue-unfetched.git'
+  git -C "$dir" rev-parse --verify --quiet refs/remotes/origin/main >/dev/null \
+    && fail "venue-unfetched: fixture already holds the upstream trunk; it proves nothing"
+  target=$(git -C "$dir" rev-parse main)
+  rc=0; task_base_venue "$dir" "$target" || rc=$?
+  [ "$rc" -eq 2 ] \
+    || fail "venue-unfetched: an unreadable upstream trunk must refuse, got rc=$rc"
+  [ -z "$TASK_BASE_VENUE" ] \
+    || fail "venue-unfetched: a venue must not be invented (got '$TASK_BASE_VENUE')"
+  [ "$TASK_BASE_VENUE" != 'github.com/fixture-fork/venue-unfetched' ] \
+    || fail "venue-unfetched: an unreadable upstream trunk must never degrade to the fork venue"
+  assert_contains "$TASK_BASE_ERROR" "not readable locally" \
+    "venue-unfetched: the reason must name the unreadable upstream trunk"
+  pass "fm-task-base: an unreadable upstream trunk refuses instead of degrading to the fork venue"
+}
+
 # A target on neither trunk is could-not-observe, not a venue to guess at.
 test_venue_refuses_a_target_on_neither_trunk() {
   local repo orphan rc
@@ -852,6 +884,7 @@ test_a_fork_only_target_never_resolves_the_upstream_venue
 test_venue_follows_the_target_with_a_separate_upstream_remote
 test_venue_resolves_the_fork_trunk_when_the_local_branch_lags
 test_venue_is_single_when_there_is_no_fetch_push_split
+test_venue_refuses_an_unreadable_upstream_trunk
 test_venue_refuses_a_target_on_neither_trunk
 test_venue_identity_is_transport_and_case_insensitive
 test_spawn_records_the_venue_its_contribution_target_names

@@ -213,6 +213,49 @@ task_base_venue_identity() {  # <url>
   printf '%s/%s\n' "$host" "$path" | tr '[:upper:]' '[:lower:]'
 }
 
+# The same identity with an SSH HOST ALIAS resolved to the host it actually
+# addresses. `git@gh-work:owner/repo` is the ordinary way one machine addresses
+# two accounts at the same forge, and it names the venue "gh-work/owner/repo"
+# while every pull request raised at that repository is "github.com/owner/repo".
+# The alias is addressing, not identity, exactly like the port stripped above.
+# Resolution is LOCAL and read-only: `ssh -G` prints the effective client
+# configuration and contacts nothing.
+#
+# This is an ALTERNATIVE identity, never a replacement. A caller compares
+# against the literal identity AND this one, because a configuration that
+# rewrites a real forge host rather than aliasing a private name would otherwise
+# turn a venue that matches today into a refusal.
+# Prints the resolved identity, or returns 1 when there is nothing to resolve: a
+# non-SSH transport, no ssh to ask, a host name that is not a plain alias, or a
+# host that resolves to itself.
+task_base_venue_identity_alias() {  # <url>
+  local url=${1-} rest host resolved identity
+  case $url in
+    ssh://*)
+      rest=${url#ssh://}
+      rest=${rest%%/*}
+      host=${rest##*@}
+      host=${host%%:*}
+      ;;
+    '' | /* | file://* | https://* | http://* | git://*) return 1 ;;
+    *:*)
+      rest=${url##*@}
+      host=${rest%%:*}
+      ;;
+    *) return 1 ;;
+  esac
+  # Only a plain alias label is resolvable, and refusing everything else keeps
+  # a host that could be read as an option away from ssh's argument list.
+  case $host in
+    '' | -* | *[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+  command -v ssh >/dev/null 2>&1 || return 1
+  resolved=$(ssh -G "$host" 2>/dev/null | awk '$1 == "hostname" { print $2; exit }') || return 1
+  [ -n "$resolved" ] && [ "$resolved" != "$host" ] || return 1
+  identity=$(task_base_venue_identity "$url") || return 1
+  printf '%s/%s\n' "$resolved" "${identity#*/}" | tr '[:upper:]' '[:lower:]'
+}
+
 # The venue a contribution target names, set into TASK_BASE_VENUE_URL (the
 # remote URL) and TASK_BASE_VENUE (its comparable forge identity, empty when the
 # URL names no forge).
@@ -234,15 +277,22 @@ task_base_venue_identity() {  # <url>
 #
 # The fork trunk is then tested against every ref that can hold it, because the
 # local branch is the fork trunk only while something keeps fast-forwarding it.
-# bin/fm-landed-lib.sh maintains refs/fm-landing/origin/<name> for exactly that
-# lag, so a target already on the fork trunk at the forge resolves the fork
-# venue instead of degrading to unresolved and leaving its request unchecked.
+# bin/fm-landed-lib.sh owns that candidate list - it already names the local
+# branch, the refs/fm-landing/origin/<name> ref it maintains for exactly that
+# lag, and origin's trunk, filtered to the ones that exist - so a target already
+# on the fork trunk at the forge resolves the fork venue instead of degrading to
+# unresolved and leaving its request unchecked.
+#
+# EVERY TRUNK IS PROVEN READABLE BEFORE IT IS TESTED. `merge-base --is-ancestor`
+# fails FATALLY on a ref that does not resolve, which is indistinguishable from
+# a clean "not an ancestor" once the error is discarded, so an unfetched trunk
+# would silently hand its targets to whichever trunk IS readable - the exact
+# inversion this derivation exists to prevent.
 #
 # 0 with the venue set, 2 when it could not be derived. There is no "probably";
 # an underivable venue is reported so a caller can refuse rather than guess.
 task_base_venue() {  # <repo-dir> <contribution-target>
-  local dir=$1 target=${2-} fetch_url push_url upstream_url upstream_ref name target_sha ref landing_ref
-  local -a fork_refs
+  local dir=$1 target=${2-} fetch_url push_url upstream_url upstream_ref name target_sha ref fork_seen
   TASK_BASE_VENUE=
   TASK_BASE_VENUE_URL=
   TASK_BASE_ERROR=
@@ -263,6 +313,15 @@ task_base_venue() {  # <repo-dir> <contribution-target>
     return 0
   fi
 
+  # An upstream relationship exists but its trunk was never fetched. Refused for
+  # the same reason task_base_resolve refuses it: guessing past it would assign
+  # an upstream-cut task the fork venue, and bin/fm-pr-check.sh would then refuse
+  # that task's own correct pull request.
+  if ! git --no-optional-locks -C "$dir" rev-parse --verify --quiet "$upstream_ref^{commit}" >/dev/null 2>&1; then
+    TASK_BASE_ERROR="upstream trunk $upstream_ref is not readable locally (never fetched?), so the venue '$target' names cannot be derived"
+    return 2
+  fi
+
   # Which url is which follows the shape task_base_upstream_ref just resolved: a
   # separate `upstream` remote names the upstream side, and otherwise origin
   # FETCHES the upstream side and PUSHES the fork.
@@ -280,18 +339,20 @@ task_base_venue() {  # <repo-dir> <contribution-target>
     TASK_BASE_ERROR="no default branch in $dir, so the fork trunk cannot be named"
     return 2
   }
-  fork_refs=("refs/heads/$name" "refs/remotes/origin/$name")
-  if landing_ref=$(fm_landed_push_target_ref "$dir" "$name"); then
-    fork_refs+=("$landing_ref")
-  fi
-  for ref in "${fork_refs[@]}"; do
+  fork_seen=0
+  while IFS= read -r ref; do
+    fork_seen=1
     if git --no-optional-locks -C "$dir" merge-base --is-ancestor \
       "$target_sha" "$ref" 2>/dev/null; then
       TASK_BASE_VENUE_URL=$push_url
       TASK_BASE_VENUE=$(task_base_venue_identity "$push_url" || true)
       return 0
     fi
-  done
+  done < <(fm_landed_candidate_refs "$dir" "$name" || true)
+  if [ "$fork_seen" -eq 0 ]; then
+    TASK_BASE_ERROR="fork trunk $name is not held by any ref in $dir, so the venue '$target' names cannot be derived"
+    return 2
+  fi
 
   TASK_BASE_ERROR="contribution target '$target' is on neither the upstream trunk ($upstream_ref) nor the fork trunk ($name), so the venue it names cannot be derived"
   return 2

@@ -1017,6 +1017,73 @@ test_venue_guard_reports_an_unresolved_venue_as_unchecked() {
   pass "fm-pr-check: a task recording an unresolved venue is reported unchecked and still armed"
 }
 
+# One machine addressing two accounts at the same forge writes its remotes
+# through an SSH host alias, so the venue is recorded as `gh-work/owner/repo`
+# while every pull request at that repository is `github.com/owner/repo`. That
+# is one venue spelled two ways; refusing it would make every ship task in such
+# a project permanently unlandable, with hand-editing state/<id>.meta the only
+# way out. The alias is resolved from the recorded url - hermetically here,
+# through a stub ssh that answers exactly as `ssh -G` does.
+write_alias_resolving_ssh() {  # <dir> <alias> <hostname>
+  local dir=$1 alias=$2 hostname=$3
+  cat > "$dir/fakebin/ssh" <<SH
+#!/usr/bin/env bash
+host=\${*: -1}
+printf 'user git\n'
+case "\$host" in
+  $alias) printf 'hostname %s\n' '$hostname' ;;
+  *) printf 'hostname %s\n' "\$host" ;;
+esac
+SH
+  chmod +x "$dir/fakebin/ssh"
+}
+
+test_venue_guard_sees_through_an_ssh_host_alias() {
+  local dir rc
+  dir=$(make_case venue-alias)
+  write_alias_resolving_ssh "$dir" gh-work github.com
+  fm_write_meta "$dir/home/state/task-a.meta" \
+    'window=firstmate:fm-task-a' \
+    'endpoint_task_id=task-a' \
+    "worktree=$dir/wt" \
+    "project=$dir/project" \
+    'kind=ship' \
+    'mode=no-mistakes' \
+    'contribution_venue=gh-work/fixture-fork/proj' \
+    'contribution_venue_url=git@gh-work:fixture-fork/proj.git'
+  FM_TEST_GH_HEAD=0123456789abcdef0123456789abcdef01234567 \
+    run_check_entry "$dir" task-a https://github.com/fixture-fork/proj/pull/5 \
+    > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "venue-alias: an aliased host naming the same repository must be accepted: $(cat "$dir/stderr")"
+  assert_contains "$(cat "$dir/stdout")" 'ssh alias' \
+    "venue-alias: the match must say the host was an alias rather than claim a literal match"
+  assert_present "$dir/home/state/task-a.check.sh" \
+    "venue-alias: an aliased venue that agrees must arm its poll"
+
+  # The control the acceptance above is worthless without: resolving the alias
+  # must not make the guard agree with a DIFFERENT repository at that host.
+  dir=$(make_case venue-alias-wrong)
+  write_alias_resolving_ssh "$dir" gh-work github.com
+  fm_write_meta "$dir/home/state/task-a.meta" \
+    'window=firstmate:fm-task-a' \
+    'endpoint_task_id=task-a' \
+    "worktree=$dir/wt" \
+    "project=$dir/project" \
+    'kind=ship' \
+    'mode=no-mistakes' \
+    'contribution_venue=gh-work/fixture-fork/proj' \
+    'contribution_venue_url=git@gh-work:fixture-fork/proj.git'
+  rc=0
+  FM_TEST_GH_HEAD=0123456789abcdef0123456789abcdef01234567 \
+    run_check_entry "$dir" task-a https://github.com/fixture-up/proj/pull/5 \
+    > "$dir/stdout" 2> "$dir/stderr" || rc=$?
+  [ "$rc" -eq 1 ] \
+    || fail "venue-alias-wrong: alias resolution must not excuse a different repository (rc=$rc)"
+  assert_absent "$dir/home/state/task-a.check.sh" \
+    "venue-alias-wrong: a refused venue must arm no poll"
+  pass "fm-pr-check: an ssh host alias is one venue spelled twice, and resolving it still refuses the wrong repository"
+}
+
 test_migration_excludes_older_watcher_before_scan() {
   local dir state gate sentinel older_pid rc
   dir=$(make_case migration-pause-before-scan)
@@ -3819,3 +3886,4 @@ test_venue_guard_refuses_a_pull_request_at_the_wrong_venue
 test_venue_guard_accepts_a_pull_request_at_the_recorded_venue
 test_venue_guard_reports_an_unrecorded_venue_as_unchecked
 test_venue_guard_reports_an_unresolved_venue_as_unchecked
+test_venue_guard_sees_through_an_ssh_host_alias
