@@ -281,7 +281,8 @@ secondmate_sync() {
   # a deterministic locked sweep and can report success as BOOTSTRAP_INFO while
   # preserving failed sends as NUDGE_SECONDMATES retry markers.
   [ -d "$STATE" ] || return 0
-  local primary_head update_nudge_lock="" update_nudge_marker="" update_nudge_id=""
+  local primary_head update_nudge_lock="" update_nudge_id=""
+  local update_sync_journal="" update_sync_home="" update_sync_before="" update_sync_after=""
   if ! primary_head=$(primary_head_commit "$FM_ROOT"); then
     local meta id
     for meta in "$STATE"/*.meta; do
@@ -297,6 +298,7 @@ secondmate_sync() {
   SECOND_MATE_NUDGE_MESSAGE=$FM_SECOND_MATE_NUDGE_MESSAGE
   REMOTE_SECOND_MATE_NUDGE_MESSAGE=$FM_REMOTE_SECOND_MATE_NUDGE_MESSAGE
   SECOND_MATE_NUDGE_PENDING_DIR="$STATE/.secondmate-nudge-pending"
+  SECOND_MATE_SYNC_PENDING_DIR="$STATE/.secondmate-sync-pending"
 
   secondmate_nudge_marker_path() {
     fm_secondmate_nudge_marker_path "$STATE" "$1"
@@ -307,6 +309,14 @@ secondmate_sync() {
     local remote=${6:-0} remote_host=${7:-} remote_root=${8:-} mode=${9:-replace}
     fm_secondmate_nudge_write "$STATE" "$id" "$home" "$commit" "$instr" "$message" \
       "$remote" "" "$remote_host" "$remote_root" "$mode"
+  }
+
+  secondmate_sync_journal_path() {
+    fm_secondmate_sync_journal_path "$STATE" "$1"
+  }
+
+  secondmate_write_sync_journal() {
+    fm_secondmate_sync_journal_write "$STATE" "$@"
   }
 
   secondmate_deliver_nudge_locked() {
@@ -323,11 +333,135 @@ secondmate_sync() {
     fi
   }
 
+  secondmate_publish_sync_nudge_locked() {
+    local id=$1 home=$2 commit=$3 journal=$4 marker old_commit old_instr
+    marker=$(secondmate_nudge_marker_path "$id") || return 1
+    if [ -e "$marker" ] || [ -L "$marker" ]; then
+      if ! fm_secondmate_local_nudge_matches "$marker" "$id" "$home" "$commit"; then
+        old_commit=$(fm_secondmate_nudge_value "$marker" commit 2>/dev/null || true)
+        old_instr=$(fm_secondmate_nudge_value "$marker" instructions 2>/dev/null || true)
+        if ! fm_secondmate_sync_commit_is_valid "$old_commit" \
+          || ! fm_secondmate_local_nudge_record_matches "$marker" "$id" "$home" \
+            "$old_commit" "$old_instr" "$SECOND_MATE_NUDGE_MESSAGE" \
+          || ! git -C "$home" merge-base --is-ancestor "$old_commit" "$commit" \
+            >/dev/null 2>&1 \
+          || ! secondmate_write_nudge_marker "$id" "$home" "$commit" AGENTS.md; then
+          echo "NUDGE_SECONDMATES: secondmate $id: deferred: prior retry marker remains pending"
+          return 1
+        fi
+      fi
+    elif ! secondmate_write_nudge_marker "$id" "$home" "$commit" AGENTS.md \
+      "$SECOND_MATE_NUDGE_MESSAGE" 0 "" "" create; then
+      echo "NUDGE_SECONDMATES: secondmate $id: send failed: cannot record retry marker"
+      return 1
+    fi
+    if ! rm -f -- "$journal"; then
+      echo "NUDGE_SECONDMATES: secondmate $id: send failed: cannot clear update journal"
+      return 1
+    fi
+    secondmate_deliver_nudge_locked "$id" "$marker"
+  }
+
+  secondmate_recover_sync_journal_locked() {
+    local journal=$1 id phase home before after expected meta meta_home home_real head
+    id=$(fm_secondmate_nudge_value "$journal" id 2>/dev/null || true)
+    phase=$(fm_secondmate_nudge_value "$journal" phase 2>/dev/null || true)
+    home=$(fm_secondmate_nudge_value "$journal" home 2>/dev/null || true)
+    before=$(fm_secondmate_nudge_value "$journal" before 2>/dev/null || true)
+    after=$(fm_secondmate_nudge_value "$journal" after 2>/dev/null || true)
+    expected=$(secondmate_sync_journal_path "$id" 2>/dev/null || true)
+    if [ "$journal" != "$expected" ] \
+      || { [ "$phase" != prepared ] && [ "$phase" != updated ]; } \
+      || ! fm_secondmate_sync_journal_matches "$journal" "$phase" "$id" "$home" \
+        "$before" "$after"; then
+      echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: send failed: update journal is invalid"
+      return 1
+    fi
+    meta="$STATE/$id.meta"
+    [ -f "$meta" ] && [ "$(fm_meta_get "$meta" kind)" = secondmate ] || {
+      echo "NUDGE_SECONDMATES: secondmate $id: send failed: update target has no live secondmate metadata"
+      return 1
+    }
+    meta_home=$(fm_meta_get "$meta" home)
+    [ -n "$meta_home" ] || meta_home=$(secondmate_registry_field "$DATA/secondmates.md" "$id" home || true)
+    if ! validate_secondmate_home "$id" "$meta_home"; then
+      echo "NUDGE_SECONDMATES: secondmate $id: send failed: update target home unsafe: $VALIDATION_ERROR"
+      return 1
+    fi
+    home_real=$VALIDATED_HOME
+    [ "$home_real" = "$home" ] || {
+      echo "NUDGE_SECONDMATES: secondmate $id: send failed: update target home changed"
+      return 1
+    }
+    head=$(git -C "$home" rev-parse HEAD 2>/dev/null || true)
+    fm_secondmate_sync_commit_is_valid "$head" || {
+      echo "NUDGE_SECONDMATES: secondmate $id: send failed: update target commit is unreadable"
+      return 1
+    }
+    if [ "$phase" = prepared ] && [ "$head" = "$before" ]; then
+      if [ "$primary_head" = "$before" ]; then
+        rm -f -- "$journal" || {
+          echo "NUDGE_SECONDMATES: secondmate $id: send failed: cannot cancel obsolete update journal"
+          return 1
+        }
+      fi
+      return 0
+    fi
+    if ! git -C "$home" merge-base --is-ancestor "$after" "$head" >/dev/null 2>&1; then
+      echo "NUDGE_SECONDMATES: secondmate $id: send failed: update journal no longer matches checkout"
+      return 1
+    fi
+    if [ "$phase" = prepared ] \
+      && ! secondmate_write_sync_journal updated "$id" "$home" "$before" "$after"; then
+      echo "NUDGE_SECONDMATES: secondmate $id: send failed: cannot finalize update journal"
+      return 1
+    fi
+    secondmate_publish_sync_nudge_locked "$id" "$home" "$head" "$journal"
+  }
+
+  secondmate_retry_pending_sync_journals() {
+    local journal id expected lock lock_status
+    [ -d "$SECOND_MATE_SYNC_PENDING_DIR" ] || return 0
+    for journal in "$SECOND_MATE_SYNC_PENDING_DIR"/*.pending; do
+      [ -f "$journal" ] || continue
+      id=$(fm_secondmate_nudge_value "$journal" id 2>/dev/null || true)
+      expected=$(secondmate_sync_journal_path "$id" 2>/dev/null || true)
+      if [ "$journal" != "$expected" ]; then
+        echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: send failed: update journal filename mismatch"
+        continue
+      fi
+      lock=$(fm_secondmate_nudge_transaction_lock_path "$STATE" "$id" 2>/dev/null || true)
+      if [ -z "$lock" ]; then
+        echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: send failed: transaction lock failed"
+        continue
+      fi
+      fm_dependency_acquire_lock "$lock"
+      lock_status=$?
+      case "$lock_status" in
+        0) ;;
+        75)
+          echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: deferred: transaction lock is busy"
+          continue
+          ;;
+        *)
+          echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: send failed: transaction lock failed"
+          continue
+          ;;
+      esac
+      secondmate_recover_sync_journal_locked "$journal"
+      fm_lock_release "$lock" || true
+    done
+  }
+
   fm_ff_before_fast_forward() {
-    local _dir=$1 _before=$2 after=$3 instr=$4 id home marker lock lock_status
+    local _dir=$1 before=$2 after=$3 instr=$4 id home marker journal lock lock_status
+    local marker_commit marker_instr journal_phase journal_home journal_before journal_after
     update_nudge_lock=""
-    update_nudge_marker=""
     update_nudge_id=""
+    update_sync_journal=""
+    update_sync_home=""
+    update_sync_before=""
+    update_sync_after=""
     [ -n "$instr" ] && [ -n "$FF_UPDATE_SECOND_MATE_WINDOW" ] || return 0
     id=$FF_UPDATE_SECOND_MATE_ID
     home=$FF_UPDATE_SECOND_MATE_HOME
@@ -353,41 +487,103 @@ secondmate_sync() {
         ;;
     esac
     if [ -e "$marker" ] || [ -L "$marker" ]; then
-      if ! fm_secondmate_local_nudge_matches "$marker" "$id" "$home" "$after" \
-        && ! fm_secondmate_local_nudge_record_matches "$marker" "$id" "$home" \
-          "$after" "$instr" "$SECOND_MATE_NUDGE_MESSAGE"; then
-        echo "NUDGE_SECONDMATES: secondmate $id: deferred: prior retry marker remains pending"
+      if fm_secondmate_local_nudge_matches "$marker" "$id" "$home" "$after"; then
+        :
+      else
+        marker_commit=$(fm_secondmate_nudge_value "$marker" commit 2>/dev/null || true)
+        marker_instr=$(fm_secondmate_nudge_value "$marker" instructions 2>/dev/null || true)
+        if ! fm_secondmate_sync_commit_is_valid "$marker_commit" \
+          || [ "$marker_commit" = "$before" ] \
+          || ! fm_secondmate_local_nudge_record_matches "$marker" "$id" "$home" \
+            "$marker_commit" "$marker_instr" "$SECOND_MATE_NUDGE_MESSAGE" \
+          || { ! git -C "$home" merge-base --is-ancestor "$before" "$marker_commit" \
+              >/dev/null 2>&1 \
+            && ! git -C "$home" merge-base --is-ancestor "$marker_commit" "$before" \
+              >/dev/null 2>&1; }; then
+          echo "NUDGE_SECONDMATES: secondmate $id: deferred: prior retry marker remains pending"
+          fm_lock_release "$lock" || true
+          return 1
+        fi
+      fi
+    fi
+    journal=$(secondmate_sync_journal_path "$id") || {
+      echo "NUDGE_SECONDMATES: secondmate $id: send failed: unsafe update journal"
+      fm_lock_release "$lock" || true
+      return 1
+    }
+    if [ -e "$journal" ] || [ -L "$journal" ]; then
+      journal_phase=$(fm_secondmate_nudge_value "$journal" phase 2>/dev/null || true)
+      journal_home=$(fm_secondmate_nudge_value "$journal" home 2>/dev/null || true)
+      journal_before=$(fm_secondmate_nudge_value "$journal" before 2>/dev/null || true)
+      journal_after=$(fm_secondmate_nudge_value "$journal" after 2>/dev/null || true)
+      if [ "$journal_phase" != prepared ] || [ "$journal_home" != "$home" ] \
+        || [ "$journal_before" != "$before" ] \
+        || ! fm_secondmate_sync_journal_matches "$journal" prepared "$id" "$home" \
+          "$journal_before" "$journal_after" \
+        || ! git -C "$home" rev-parse --verify --quiet "$journal_after^{commit}" \
+          >/dev/null 2>&1 \
+        || ! git -C "$home" merge-base --is-ancestor "$before" "$after" \
+          >/dev/null 2>&1; then
+        echo "NUDGE_SECONDMATES: secondmate $id: deferred: update journal no longer matches checkout"
         fm_lock_release "$lock" || true
         return 1
       fi
-    elif ! secondmate_write_nudge_marker "$id" "$home" "$after" AGENTS.md \
-      "$SECOND_MATE_NUDGE_MESSAGE" 0 "" "" create; then
-      echo "NUDGE_SECONDMATES: secondmate $id: send failed: cannot record retry marker"
+      if [ "$journal_after" != "$after" ] \
+        && ! secondmate_write_sync_journal prepared "$id" "$home" "$before" "$after"; then
+        echo "NUDGE_SECONDMATES: secondmate $id: send failed: cannot supersede update journal"
+        fm_lock_release "$lock" || true
+        return 1
+      fi
+    elif ! secondmate_write_sync_journal prepared "$id" "$home" "$before" "$after" create; then
+      echo "NUDGE_SECONDMATES: secondmate $id: send failed: cannot record update journal"
       fm_lock_release "$lock" || true
       return 1
     fi
     update_nudge_lock=$lock
-    update_nudge_marker=$marker
     update_nudge_id=$id
+    update_sync_journal=$journal
+    update_sync_home=$home
+    update_sync_before=$before
+    update_sync_after=$after
   }
 
   fm_ff_after_instruction_update() {
+    local result=0
     [ -n "$update_nudge_lock" ] || return 0
-    secondmate_deliver_nudge_locked "$update_nudge_id" "$update_nudge_marker"
-    fm_lock_release "$update_nudge_lock" || true
+    if ! secondmate_write_sync_journal updated "$update_nudge_id" "$update_sync_home" \
+      "$update_sync_before" "$update_sync_after"; then
+      echo "NUDGE_SECONDMATES: secondmate $update_nudge_id: send failed: cannot finalize update journal"
+      result=1
+    elif ! secondmate_publish_sync_nudge_locked "$update_nudge_id" "$update_sync_home" \
+      "$update_sync_after" "$update_sync_journal"; then
+      result=1
+    fi
+    fm_lock_release "$update_nudge_lock" || result=1
     update_nudge_lock=""
-    update_nudge_marker=""
     update_nudge_id=""
+    update_sync_journal=""
+    update_sync_home=""
+    update_sync_before=""
+    update_sync_after=""
+    return "$result"
   }
 
   fm_ff_abort_fast_forward() {
-    local remove_status=0
+    local _dir=$1 before=$2 after=$3 _instr=$4 remove_status=0
     [ -n "$update_nudge_lock" ] || return 0
-    rm -f -- "$update_nudge_marker" || remove_status=1
+    if fm_secondmate_sync_journal_matches "$update_sync_journal" prepared \
+      "$update_nudge_id" "$update_sync_home" "$before" "$after"; then
+      rm -f -- "$update_sync_journal" || remove_status=1
+    else
+      remove_status=1
+    fi
     fm_lock_release "$update_nudge_lock" || remove_status=1
     update_nudge_lock=""
-    update_nudge_marker=""
     update_nudge_id=""
+    update_sync_journal=""
+    update_sync_home=""
+    update_sync_before=""
+    update_sync_after=""
     return "$remove_status"
   }
 
@@ -491,6 +687,7 @@ secondmate_sync() {
   }
 
   local tmp line
+  secondmate_retry_pending_sync_journals
   secondmate_retry_pending_nudges
   tmp=$(mktemp "${TMPDIR:-/tmp}/fm-secondmate-sync.XXXXXX" 2>/dev/null) || return 0
   sweep_live_secondmate_metas "$STATE" "$primary_head" yes "$DATA/secondmates.md" >"$tmp"

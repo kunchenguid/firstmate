@@ -697,6 +697,63 @@ test_bootstrap_preserves_prior_nudge_before_new_update() {
   pass "T8h bootstrap preserves prior nudges before new updates"
 }
 
+test_bootstrap_supersedes_interrupted_update_journals() {
+  local w c1 c2 c3 fakebin marker journal out
+  w=$(new_world nudge-interrupted-legacy)
+  c1=$(head_of "$w/main")
+  add_sm_worktree "$w" sm-instr "$c1"
+  bump_primary "$w" instr
+  c2=$(head_of "$w/main")
+  marker="$w/home/state/.secondmate-nudge-pending/sm-instr.pending"
+  mkdir -p "${marker%/*}"
+  {
+    printf 'id=sm-instr\n'
+    printf 'selector=fm-sm-instr\n'
+    printf 'home=%s\n' "$w/sm-instr"
+    printf 'commit=%s\n' "$c2"
+    printf 'instructions=AGENTS.md\n'
+    printf 'message=firstmate was updated to the latest - please re-read your AGENTS.md to pick up the new instructions.\n'
+    printf 'remote=0\n'
+  } > "$marker"
+  bump_primary "$w" instr
+  c3=$(head_of "$w/main")
+  fakebin=$(make_fake_toolchain "$w")
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_SEND_SETTLE=0 "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+  [ "$(head_of "$w/sm-instr")" = "$c3" ] \
+    || fail "legacy interrupted update marker blocked the newer primary commit"
+  assert_contains "$out" "BOOTSTRAP_INFO: nudged fm-sm-instr with" \
+    "legacy interrupted update marker did not converge to a durable nudge"
+  assert_absent "$marker" "legacy interrupted update retained its nudge marker"
+
+  w=$(new_world nudge-interrupted-journal)
+  c1=$(head_of "$w/main")
+  add_sm_worktree "$w" sm-instr "$c1"
+  bump_primary "$w" instr
+  c2=$(head_of "$w/main")
+  journal="$w/home/state/.secondmate-sync-pending/sm-instr.pending"
+  FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" bash -c '
+    . "$1"
+    fm_secondmate_sync_journal_write "$2" prepared sm-instr "$3" "$4" "$5" create
+  ' _ "$ROOT/bin/fm-secondmate-nudge-lib.sh" "$w/home/state" "$w/sm-instr" "$c1" "$c2" \
+    || fail "could not prepare interrupted sync journal"
+  bump_primary "$w" instr
+  c3=$(head_of "$w/main")
+  fakebin=$(make_fake_toolchain "$w")
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_SEND_SETTLE=0 "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+  [ "$(head_of "$w/sm-instr")" = "$c3" ] \
+    || fail "prepared update journal did not supersede to the newer primary commit"
+  assert_contains "$out" "BOOTSTRAP_INFO: nudged fm-sm-instr with" \
+    "superseded update journal did not converge to a durable nudge"
+  assert_absent "$journal" "superseded update retained its prepared journal"
+  assert_absent "$w/home/state/.secondmate-nudge-pending/sm-instr.pending" \
+    "superseded update retained its delivered nudge marker"
+  pass "T8i bootstrap supersedes interrupted update journals"
+}
+
 test_bootstrap_nudge_retry_refuses_changed_home() {
   local w c1 fakebin marker out other
   w=$(new_world nudge-retry-home-change)
@@ -1027,6 +1084,7 @@ test_bootstrap_nudge_failure_records_retry_marker
 test_bootstrap_nudge_retry_is_idempotent
 test_bootstrap_nudge_retry_defers_on_busy_transaction
 test_bootstrap_preserves_prior_nudge_before_new_update
+test_bootstrap_supersedes_interrupted_update_journals
 test_bootstrap_nudge_retry_refuses_changed_home
 test_nudge_retry_uses_fresh_herdr_endpoint_after_respawn
 test_bootstrap_sweep_surfaces_skipped_home

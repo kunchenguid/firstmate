@@ -24,6 +24,63 @@ fm_remote_inherit_transaction_lock_path() { # <state-dir> <id>
   fm_secondmate_nudge_transaction_lock_path "$@"
 }
 
+fm_secondmate_sync_journal_path() {
+  local state=$1 id=$2
+  case "$id" in *[!/A-Za-z0-9._-]*|''|*/*) return 1 ;; esac
+  printf '%s/.secondmate-sync-pending/%s.pending\n' "$state" "$id"
+}
+
+fm_secondmate_sync_commit_is_valid() {
+  local commit=$1
+  case "${#commit}" in 40|64) ;; *) return 1 ;; esac
+  case "$commit" in *[!0-9A-Fa-f]*) return 1 ;; esac
+}
+
+fm_secondmate_sync_journal_write() {
+  local state=$1 phase=$2 id=$3 home=$4 before=$5 after=$6 mode=${7:-replace}
+  local marker parent tmp
+  case "$phase" in prepared|updated) ;; *) return 1 ;; esac
+  case "$mode" in replace|create) ;; *) return 1 ;; esac
+  [ -n "$home" ] && fm_secondmate_sync_commit_is_valid "$before" \
+    && fm_secondmate_sync_commit_is_valid "$after" && [ "$before" != "$after" ] \
+    || return 1
+  case "$home" in *$'\n'*|*$'\r'*) return 1 ;; esac
+  marker=$(fm_secondmate_sync_journal_path "$state" "$id") || return 1
+  parent=${marker%/*}
+  if [ -e "$parent" ] || [ -L "$parent" ]; then
+    [ -d "$parent" ] && [ ! -L "$parent" ] || return 1
+  else
+    mkdir -p "$parent" || return 1
+  fi
+  if [ -e "$marker" ] || [ -L "$marker" ]; then
+    [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+    [ "$mode" != create ] || return 2
+  fi
+  tmp=$(umask 077; mktemp "$parent/.sync.XXXXXX" 2>/dev/null) || return 1
+  {
+    printf 'action=bootstrap-secondmate-update\n'
+    printf 'phase=%s\n' "$phase"
+    printf 'id=%s\n' "$id"
+    printf 'selector=fm-%s\n' "$id"
+    printf 'home=%s\n' "$home"
+    printf 'before=%s\n' "$before"
+    printf 'after=%s\n' "$after"
+    printf 'instructions=AGENTS.md\n'
+    printf 'remote=0\n'
+  } > "$tmp" || { rm -f -- "$tmp"; return 1; }
+  chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
+  if [ "$mode" = create ]; then
+    if ln -- "$tmp" "$marker" 2>/dev/null; then
+      rm -f -- "$tmp"
+    else
+      rm -f -- "$tmp"
+      return 2
+    fi
+  else
+    mv -f -- "$tmp" "$marker" || { rm -f -- "$tmp"; return 1; }
+  fi
+}
+
 fm_remote_inherit_generation_next() { # <state-dir> <id>
   local state=$1 id=$2 path current next tmp
   case "$id" in *[!/A-Za-z0-9._-]*|''|*/*) return 1 ;; esac
@@ -57,6 +114,30 @@ fm_secondmate_nudge_value() {
       print value
     }
   ' "$marker"
+}
+
+fm_secondmate_sync_journal_matches() {
+  local marker=$1 phase=$2 id=$3 home=$4 before=$5 after=$6 value lines
+  value=$(fm_secondmate_nudge_value "$marker" action 2>/dev/null) || return 1
+  [ "$value" = bootstrap-secondmate-update ] || return 1
+  value=$(fm_secondmate_nudge_value "$marker" phase 2>/dev/null) || return 1
+  [ "$value" = "$phase" ] || return 1
+  value=$(fm_secondmate_nudge_value "$marker" id 2>/dev/null) || return 1
+  [ "$value" = "$id" ] || return 1
+  value=$(fm_secondmate_nudge_value "$marker" selector 2>/dev/null) || return 1
+  [ "$value" = "fm-$id" ] || return 1
+  value=$(fm_secondmate_nudge_value "$marker" home 2>/dev/null) || return 1
+  [ "$value" = "$home" ] || return 1
+  value=$(fm_secondmate_nudge_value "$marker" before 2>/dev/null) || return 1
+  [ "$value" = "$before" ] || return 1
+  value=$(fm_secondmate_nudge_value "$marker" after 2>/dev/null) || return 1
+  [ "$value" = "$after" ] || return 1
+  value=$(fm_secondmate_nudge_value "$marker" instructions 2>/dev/null) || return 1
+  [ "$value" = AGENTS.md ] || return 1
+  value=$(fm_secondmate_nudge_value "$marker" remote 2>/dev/null) || return 1
+  [ "$value" = 0 ] || return 1
+  lines=$(awk 'END { print NR }' "$marker" 2>/dev/null) || return 1
+  [ "$lines" = 9 ]
 }
 
 fm_secondmate_legacy_remote_nudge_matches() {
