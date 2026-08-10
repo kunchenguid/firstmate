@@ -362,7 +362,15 @@ test_bordered_busy_signatures_are_pending() {
   pass "fm_tmux_composer_state: typed Pi and Grok busy signatures inside a box are pending"
 }
 
-test_non_bordered_busy_footer_remains_empty() {
+test_non_bordered_busy_footer_is_unknown_strict() {
+  # STRICT divergence (captain decision blank-row-injection-posture): a bare
+  # busy-footer row under the cursor is not a composer container, so it no
+  # longer reads `empty` the way the old allow-busy compatibility fallback
+  # did. Its one load-bearing consumer - submit confirmation on a harness
+  # whose mid-turn screen hides the composer (pi) - moved to the submit
+  # core's baseline-idle turn-started conversion (fm_tmux_submit_core), which
+  # requires an idle-to-busy transition across our own Enter instead of
+  # trusting any busy-looking row.
   local dir fb capture out
   dir="$TMP_ROOT/non-bordered-busy"; mkdir -p "$dir"
   fb=$(make_fake_tmux "$dir")
@@ -370,9 +378,9 @@ test_non_bordered_busy_footer_remains_empty() {
   printf 'Working...\n' > "$capture"
   out=$(PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=0 \
     fm_tmux_composer_state "fakepane")
-  [ "$out" = empty ] \
-    || fail "a non-bordered busy footer should remain empty, got '$out'"
-  pass "fm_tmux_composer_state: non-bordered busy footers retain compatibility behavior"
+  [ "$out" = unknown ] \
+    || fail "a non-bordered busy footer must read unknown under the strict rule, got '$out'"
+  pass "fm_tmux_composer_state: a bare busy-footer row reads unknown (strict container-proof rule)"
 }
 
 test_clipped_bordered_box_is_unknown() {
@@ -535,7 +543,14 @@ test_unrecognized_state_defers_input_guard() {
   pass "fm_pane_input_pending: unrecognized states defer by default"
 }
 
-test_fallback_capture_race_with_edge_is_unknown() {
+test_single_capture_leaves_no_fallback_race() {
+  # The old reader captured twice (a full-pane scan, then a separate
+  # cursor-row band capture), so a pane redraw between the two could hand the
+  # verdict a row the scan never saw. The consolidated reader classifies ONE
+  # capture (bin/fm-composer-lib.sh, fm_composer_classify_screen), so the
+  # race is structurally gone: a divergent band-capture row (served via
+  # FM_FAKE_ROW, which only a band capture would read) must have no effect on
+  # the verdict.
   local dir fb capture row_capture out
   dir="$TMP_ROOT/fallback-race"; mkdir -p "$dir"
   fb=$(make_fake_tmux "$dir")
@@ -545,9 +560,9 @@ test_fallback_capture_race_with_edge_is_unknown() {
   printf '│ > │\n' > "$row_capture"
   out=$(PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_ROW="$row_capture" FM_FAKE_CY=0 \
     fm_tmux_composer_state "fakepane")
-  [ "$out" = unknown ] \
-    || fail "an edge appearing between full-pane and fallback captures should be unknown, got '$out'"
-  pass "fm_tmux_composer_state: fallback capture races cannot admit unbounded edges"
+  [ "$out" = pending ] \
+    || fail "the verdict must come from the one full capture (agent glyph + typed text = pending), got '$out'"
+  pass "fm_tmux_composer_state: one capture feeds the classifier; no band-capture race remains"
 }
 
 test_legitimate_empty_routes_remain_empty() {
@@ -555,12 +570,14 @@ test_legitimate_empty_routes_remain_empty() {
   dir="$TMP_ROOT/legitimate-empty"; mkdir -p "$dir"
   fb=$(make_fake_tmux "$dir")
   capture="$dir/styled.txt"
-  for fixture in bordered double-bordered agent-prompt blank; do
+  # A blank pane is deliberately absent here: under the strict container-proof
+  # rule (captain decision blank-row-injection-posture) a blank cursor row is
+  # unknown, pinned by tests/fm-daemon.test.sh and tests/fm-composer-lib.test.sh.
+  for fixture in bordered double-bordered agent-prompt; do
     case "$fixture" in
       bordered) printf '╭────╮\n│    │\n╰────╯\n' > "$capture"; cursor=1 ;;
       double-bordered) printf '╔════╗\n║    ║\n╚════╝\n' > "$capture"; cursor=1 ;;
       agent-prompt) printf '›\n' > "$capture"; cursor=0 ;;
-      blank) printf '\n' > "$capture"; cursor=0 ;;
     esac
     out=$(PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY="$cursor" \
       fm_tmux_composer_state "fakepane")
@@ -640,7 +657,7 @@ test_two_row_composer_reads_text_above_empty_cursor_row
 test_wrapped_composer_reads_all_content_rows
 test_bottom_border_cursor_reads_ghost_only_box_as_empty
 test_bordered_busy_signatures_are_pending
-test_non_bordered_busy_footer_remains_empty
+test_non_bordered_busy_footer_is_unknown_strict
 test_clipped_bordered_box_is_unknown
 test_asymmetric_composer_edges_are_unknown
 test_mismatched_box_families_are_unknown
@@ -650,7 +667,7 @@ test_differing_widths_use_asymmetric_verdicts
 test_wide_composer_text_is_pending
 test_all_tmux_harness_composers_share_classification
 test_unrecognized_state_defers_input_guard
-test_fallback_capture_race_with_edge_is_unknown
+test_single_capture_leaves_no_fallback_race
 test_legitimate_empty_routes_remain_empty
 test_non_bordered_composer_uses_compatibility_fallback
 test_non_bordered_interior_edges_are_pending

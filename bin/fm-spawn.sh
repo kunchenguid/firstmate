@@ -2018,9 +2018,16 @@ kimi_capture() {
   fm_backend_capture "$BACKEND" "$T" 120 "$W" 2>/dev/null || true
 }
 
-kimi_capture_has_empty_composer() {  # <plain-pane-capture>
-  printf '%s\n' "$1" \
-    | grep -Eq '^[[:space:]]*(│|┃|\|)[[:space:]]*>[[:space:]]*(│|┃|\|)[[:space:]]*$'
+# Kimi launch-readiness and delivery route their composer-emptiness half
+# through the shared classifier (bin/fm-composer-lib.sh via
+# fm_backend_composer_state), the same owner every steer and injection guard
+# reads. This retired a fourth, spawn-local copy of composer shape knowledge -
+# a hardcoded bordered `│ > │` regex that would have silently broken kimi
+# spawn readiness fleet-wide the day kimi's TUI goes borderless the way
+# claude's did. The banner and brief-echo greps below are launch-progress
+# signals, not composer shapes, so they stay here.
+kimi_composer_is_empty() {
+  [ "$(fm_backend_composer_state "$BACKEND" "$T" "$W" 2>/dev/null)" = empty ]
 }
 
 kimi_wait_for_ready() {
@@ -2028,7 +2035,7 @@ kimi_wait_for_ready() {
   while [ "$i" -lt "$max" ]; do
     pane=$(kimi_capture)
     if printf '%s\n' "$pane" | grep -Fq 'Welcome to Kimi Code!' \
-       || kimi_capture_has_empty_composer "$pane"; then
+       || kimi_composer_is_empty; then
       return 0
     fi
     i=$((i + 1))
@@ -2039,7 +2046,7 @@ kimi_wait_for_ready() {
 
 kimi_delivery_is_confirmed() {  # <plain-pane-capture>
   local pane=$1
-  kimi_capture_has_empty_composer "$pane" || return 1
+  kimi_composer_is_empty || return 1
   if { printf '%s\n' "$pane" | grep -Fq '✨' \
        && printf '%s\n' "$pane" | grep -Fq 'Read the brief at'; } \
      || printf '%s\n' "$pane" \

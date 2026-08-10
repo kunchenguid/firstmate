@@ -908,7 +908,15 @@ test_forced_secondmate_teardown_kills_zellij_children_with_child_home_tag() {
   pass "fm-teardown.sh: force cleanup kills zellij children using the child home tag"
 }
 
-# --- send_text_submit: delta-based verify-and-retry --------------------------
+# --- send_text_submit: classifier-based verify-and-retry ---------------------
+#
+# The old content-diff strategy ("pane changed after Enter = submitted") was
+# the fleet's only FALSE-POSITIVE delivery confirmation and is deleted; these
+# tests pin its replacement: the shared composer classifier read through
+# `dump-screen --ansi` (styled=1), where only a positively classified empty
+# composer confirms delivery.
+# Call numbering per attempt: list-panes + paste, then per Enter attempt
+# list-panes + send-keys followed by list-panes + dump-screen --ansi.
 
 test_send_text_submit_detects_landed_send() {
   local dir fb out
@@ -916,20 +924,20 @@ test_send_text_submit_detects_landed_send() {
   zellij_pane_response "$dir" 1 7 3
   zellij_pane_response "$dir" 3 7 3
   zellij_pane_response "$dir" 5 7 3
-  zellij_pane_response "$dir" 7 7 3
-  printf '%s' $'❯ hello captain' > "$dir/responses/4.out"
-  printf '%s' $'hello captain\n❯' > "$dir/responses/8.out"
+  printf '%s' $'hello captain\n❯ ' > "$dir/responses/6.out"
   fb=$(make_zellij_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
     FM_ZELLIJ_SESSION_LIST="firstmate" \
     bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_send_text_submit firstmate:7 "hello captain" 3 0.01 0.01' "$ROOT" )
-  [ "$out" = empty ] || fail "send_text_submit should report empty (submitted) once the pane visibly changes, got '$out'"
+  [ "$out" = empty ] || fail "send_text_submit should report empty once the composer positively classifies empty, got '$out'"
   zellij_assert_call_order "$dir/log" $'\x1f''list-panes'$'\x1f''--json' $'\x1f''paste' \
     "send_text_submit did not verify the pane before paste"
   zellij_assert_call_order "$dir/log" $'\x1f''list-panes'$'\x1f''--json' $'\x1f''dump-screen' \
     "send_text_submit did not verify the pane before capture"
+  assert_contains "$(cat "$dir/log")" $'\x1f''dump-screen'$'\x1f''--pane-id'$'\x1f''7'$'\x1f''--ansi' \
+    "send_text_submit did not read the composer through the styled dump"
   assert_contains "$(cat "$dir/log")" $'\x1f''paste'$'\x1f''--pane-id'$'\x1f''7'$'\x1f''--'$'\x1f''hello captain' "send_text_submit did not type the literal text first"
-  pass "fm_backend_zellij_send_text_submit: reports 'empty' once the pane content changes after Enter (submitted)"
+  pass "fm_backend_zellij_send_text_submit: reports 'empty' once the composer classifies empty (submitted)"
 }
 
 test_send_text_submit_detects_swallowed_enter() {
@@ -940,18 +948,75 @@ test_send_text_submit_detects_swallowed_enter() {
   zellij_pane_response "$dir" 5 7 3
   zellij_pane_response "$dir" 7 7 3
   zellij_pane_response "$dir" 9 7 3
-  zellij_pane_response "$dir" 11 7 3
-  printf '%s' $'❯ hello captain' > "$dir/responses/4.out"
-  printf '%s' $'❯ hello captain' > "$dir/responses/8.out"
-  printf '%s' $'❯ hello captain' > "$dir/responses/12.out"
+  printf '%s' $'❯ hello captain' > "$dir/responses/6.out"
+  printf '%s' $'❯ hello captain' > "$dir/responses/10.out"
   fb=$(make_zellij_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
     FM_ZELLIJ_SESSION_LIST="firstmate" \
     bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_send_text_submit firstmate:7 "hello captain" 2 0.01 0.01' "$ROOT" )
-  [ "$out" = pending ] || fail "send_text_submit should report pending once retries are exhausted with no visible change, got '$out'"
+  [ "$out" = pending ] || fail "send_text_submit should report pending once retries are exhausted with the text still in the composer, got '$out'"
   zellij_assert_call_order "$dir/log" $'\x1f''list-panes'$'\x1f''--json' $'\x1f''send-keys' \
     "send_text_submit did not verify the pane before send-keys"
-  pass "fm_backend_zellij_send_text_submit: reports 'pending' when the pane never changes after retried Enters (swallowed)"
+  pass "fm_backend_zellij_send_text_submit: reports 'pending' when the composer still holds the text after retried Enters (swallowed)"
+}
+
+test_send_text_submit_unrelated_change_is_not_delivery() {
+  # THE false-positive regression (audit fm-composer-consolidation-audit-s1,
+  # section 3.5, verified live): a pane whose content changes for reasons
+  # unrelated to submission - a clock, a spinner, streaming output - must NOT
+  # read as delivered while the typed text still sits in the composer. The
+  # deleted content-diff heuristic reported `empty` here and let fm-send close
+  # --resolve-key decision records for a message the crew never received.
+  local dir fb out
+  dir="$TMP_ROOT/submit-false-positive"; mkdir -p "$dir/responses"
+  zellij_pane_response "$dir" 1 7 3
+  zellij_pane_response "$dir" 3 7 3
+  zellij_pane_response "$dir" 5 7 3
+  zellij_pane_response "$dir" 7 7 3
+  zellij_pane_response "$dir" 9 7 3
+  printf '%s' $'clock 12:00:01\n❯ hello captain' > "$dir/responses/6.out"
+  printf '%s' $'clock 12:00:02\n❯ hello captain' > "$dir/responses/10.out"
+  fb=$(make_zellij_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST="firstmate" \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_send_text_submit firstmate:7 "hello captain" 2 0.01 0.01' "$ROOT" )
+  [ "$out" != empty ] || fail "an unrelated pane change must never read as delivered (the content-diff false positive)"
+  [ "$out" = pending ] || fail "the still-typed composer should classify pending, got '$out'"
+  pass "fm_backend_zellij_send_text_submit: an unrelated pane change is not a delivery confirmation (false-positive regression)"
+}
+
+test_composer_state_reads_styled_dump() {
+  local dir fb out
+  dir="$TMP_ROOT/composer-styled"; mkdir -p "$dir/responses"
+  zellij_pane_response "$dir" 1 7 3
+  # Real claude-in-zellij capture shape (audit section 3.5): ESC[m ❯ U+00A0.
+  printf 'transcript line\n\033[m\342\235\257\302\240' > "$dir/responses/2.out"
+  fb=$(make_zellij_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST="firstmate" \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_composer_state firstmate:7' "$ROOT" )
+  [ "$out" = empty ] || fail "the real claude-in-zellij ANSI dump should classify empty, got '$out'"
+  assert_contains "$(cat "$dir/log")" $'\x1f''dump-screen'$'\x1f''--pane-id'$'\x1f''7'$'\x1f''--ansi' \
+    "composer_state did not request the styled dump"
+  pass "fm_backend_zellij_composer_state: classifies the real claude-in-zellij --ansi dump as empty"
+}
+
+test_composer_state_dead_pane_is_unknown() {
+  # The unconditional-exit-0 CLI quirk (file header): a dead target dumps
+  # nothing. Both the styled and the plain fallback come back empty, so the
+  # verdict must be unknown - never a confirmation.
+  local dir fb out
+  dir="$TMP_ROOT/composer-dead"; mkdir -p "$dir/responses"
+  zellij_pane_response "$dir" 1 7 3
+  zellij_pane_response "$dir" 3 7 3
+  : > "$dir/responses/2.out"
+  : > "$dir/responses/4.out"
+  fb=$(make_zellij_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST="firstmate" \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_composer_state firstmate:7' "$ROOT" )
+  [ "$out" = unknown ] || fail "a dead pane's empty dumps must classify unknown, got '$out'"
+  pass "fm_backend_zellij_composer_state: a dead pane (empty dumps) reads unknown, never a confirmation"
 }
 
 test_send_text_submit_send_failed_when_session_absent() {
@@ -1113,6 +1178,9 @@ test_teardown_passes_recorded_tab_id_to_zellij_kill
 test_forced_secondmate_teardown_kills_zellij_children_with_child_home_tag
 test_send_text_submit_detects_landed_send
 test_send_text_submit_detects_swallowed_enter
+test_send_text_submit_unrelated_change_is_not_delivery
+test_composer_state_reads_styled_dump
+test_composer_state_dead_pane_is_unknown
 test_send_text_submit_send_failed_when_session_absent
 test_send_text_submit_send_failed_when_pane_absent
 test_scripts_route_explicit_target_through_meta_backend

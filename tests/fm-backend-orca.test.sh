@@ -138,8 +138,7 @@ test_send_text_submit_verifies_empty_composer_after_enter() {
   orca_case send-submit
   printf '{"ok":true,"result":{"send":{"handle":"term-123","accepted":true}}}\n' > "$RESP/1.out"
   printf '{"ok":true,"result":{"send":{"handle":"term-123","accepted":true}}}\n' > "$RESP/2.out"
-  printf '{"ok":true,"result":{"terminal":{"tail":["╭──╮","│ > │","╰──╯"],"limited":true,"oldestCursor":"cursor-old"},"limited":true,"oldestCursor":"cursor-old"}}\n' > "$RESP/3.out"
-  printf '{"ok":true,"result":{"terminal":{"tail":["╭──╮","│ > │","╰──╯"],"latestCursor":"cursor-new"}}}\n' > "$RESP/4.out"
+  printf '{"ok":true,"result":{"terminal":{"tail":["╭───╮","│ > │","╰───╯"]}}}\n' > "$RESP/3.out"
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_send_text_submit term-123 "hello captain" 3 0.01 0.01' "$ROOT" )
   [ "$out" = empty ] || fail "send_text_submit should report empty on successful Orca send, got '$out'"
@@ -147,27 +146,46 @@ test_send_text_submit_verifies_empty_composer_after_enter() {
     "send_text_submit did not type the text literally before Enter"
   assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''send'$'\x1f''--terminal'$'\x1f''term-123'$'\x1f''--text'$'\x1f\x1f''--enter'$'\x1f''--json' \
     "send_text_submit did not send Enter after typing"
-  assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''read'$'\x1f''--terminal'$'\x1f''term-123'$'\x1f''--cursor'$'\x1f''cursor-old'$'\x1f''--limit' \
-    "send_text_submit did not follow cursor-backed reads when Orca reports a limited page"
-  pass "fm_backend_orca_send_text_submit: verifies empty composer after Enter"
+  # The composer read is ONE bounded tail read: the old backward paging
+  # (--cursor follow-ups on a limited page) is deleted, because paging into
+  # scrollback is what let a stale startup banner compete with the live
+  # composer (audit fm-composer-consolidation-audit-s1, section 3.3).
+  assert_not_contains "$(cat "$LOG")" $'\x1f''--cursor'$'\x1f' \
+    "the composer read must never page backward into scrollback"
+  pass "fm_backend_orca_send_text_submit: verifies empty composer after Enter with one bounded read"
 }
 
-test_send_text_submit_keeps_current_tail_when_limited() {
-  local out log_text enter_count
-  orca_case send-submit-limited-current-pending
+test_send_text_submit_borderless_claude_confirms() {
+  # The #2029 analogue this adapter never received: a borderless claude
+  # composer (bare `❯` row between horizontal rules) must confirm a submit.
+  # Before consolidation orca knew only the bordered shape, so every steer to
+  # a borderless harness exited unconfirmed and --resolve-key never closed.
+  local out
+  orca_case send-submit-borderless
   printf '{"ok":true,"result":{"send":{"handle":"term-123","accepted":true}}}\n' > "$RESP/1.out"
   printf '{"ok":true,"result":{"send":{"handle":"term-123","accepted":true}}}\n' > "$RESP/2.out"
-  printf '{"ok":true,"result":{"terminal":{"tail":["noise","│ > hello captain │"],"limited":true,"oldestCursor":"cursor-old"},"limited":true,"oldestCursor":"cursor-old"}}\n' > "$RESP/3.out"
-  printf '{"ok":true,"result":{"terminal":{"tail":["╭──╮","│ > │","╰──╯"],"latestCursor":"cursor-new"}}}\n' > "$RESP/4.out"
-  printf '{"ok":true,"result":{"send":{"handle":"term-123","accepted":true}}}\n' > "$RESP/5.out"
-  printf '{"ok":true,"result":{"terminal":{"tail":["│ > │"]}}}\n' > "$RESP/6.out"
+  printf '{"ok":true,"result":{"terminal":{"tail":["────────────────","❯","────────────────"]}}}\n' > "$RESP/3.out"
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_send_text_submit term-123 "hello captain" 3 0.01 0.01' "$ROOT" )
-  [ "$out" = empty ] || fail "send_text_submit should keep the limited current tail and retry, got '$out'"
-  log_text=$(cat "$LOG")
-  enter_count=$(printf '%s\n' "$log_text" | grep -c $'orca\x1fterminal\x1fsend\x1f--terminal\x1fterm-123\x1f--text\x1f\x1f--enter\x1f--json')
-  [ "$enter_count" -eq 2 ] || fail "send_text_submit should see pending text in the current tail before older cursor text, got $enter_count Enter(s)"
-  pass "fm_backend_orca_send_text_submit: preserves current tail when limited reads fetch older cursor text"
+  [ "$out" = empty ] || fail "a borderless claude composer should confirm the submit, got '$out'"
+  pass "fm_backend_orca_send_text_submit: a borderless claude composer confirms delivery (the missing #2029 shape)"
+}
+
+test_composer_state_stale_banner_never_wins() {
+  # The audit's confidently-wrong case (section 3.3): codex's startup banner
+  # (`│ permissions: YOLO mode │` inside a rounded box) classified as the
+  # composer, reading `pending` for a row that is not a composer at all. With
+  # the full shape catalogue the live bare row below the banner wins; with a
+  # plain capture its trailing hint text is unreadable, so the verdict is
+  # `unknown` (defer) - never the banner's false `pending`.
+  local out
+  orca_case composer-stale-banner
+  printf '{"ok":true,"result":{"terminal":{"tail":["╭────────────────────────╮","│ permissions: YOLO mode │","╰────────────────────────╯","› Use /skills to list available skills"]}}}\n' > "$RESP/1.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_composer_state term-123' "$ROOT" )
+  [ "$out" != pending ] || fail "a stale startup banner must never classify as pending composer text"
+  [ "$out" = unknown ] || fail "the plain-capture codex hint should defer as unknown, got '$out'"
+  pass "fm_backend_orca_composer_state: a stale startup banner cannot outrank the live composer row"
 }
 
 test_send_text_submit_retries_when_composer_stays_pending() {
@@ -175,9 +193,9 @@ test_send_text_submit_retries_when_composer_stays_pending() {
   orca_case send-submit-pending
   printf '{"ok":true,"result":{"send":{"handle":"term-123","accepted":true}}}\n' > "$RESP/1.out"
   printf '{"ok":true,"result":{"send":{"handle":"term-123","accepted":true}}}\n' > "$RESP/2.out"
-  printf '{"ok":true,"result":{"terminal":{"tail":["│ > hello captain │"]}}}\n' > "$RESP/3.out"
+  printf '{"ok":true,"result":{"terminal":{"tail":["╭─────────────────╮","│ > hello captain │","╰─────────────────╯"]}}}\n' > "$RESP/3.out"
   printf '{"ok":true,"result":{"send":{"handle":"term-123","accepted":true}}}\n' > "$RESP/4.out"
-  printf '{"ok":true,"result":{"terminal":{"tail":["│ > │"]}}}\n' > "$RESP/5.out"
+  printf '{"ok":true,"result":{"terminal":{"tail":["╭─────────────────╮","│ >               │","╰─────────────────╯"]}}}\n' > "$RESP/5.out"
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_send_text_submit term-123 "hello captain" 3 0.01 0.01' "$ROOT" )
   [ "$out" = empty ] || fail "send_text_submit should retry Enter until the composer clears, got '$out'"
@@ -190,7 +208,7 @@ test_send_text_submit_retries_when_composer_stays_pending() {
 test_composer_state_popup_placeholder_fill_is_pending() {
   local out
   orca_case composer-popup-placeholder
-  printf '{"ok":true,"result":{"terminal":{"tail":["  ╭──────────────────────────────────────╮","  │ ❯ /compact compaction instructions    │","  ╰──────────────── Composer ─────────────╯","","  Enter:send"]}}}\n' > "$RESP/1.out"
+  printf '{"ok":true,"result":{"terminal":{"tail":["  ╭──────────────────────────────────────╮","  │ ❯ /compact compaction instructions   │","  ╰──────────────── Composer ─────────────╯","","  Enter:send"]}}}\n' > "$RESP/1.out"
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_composer_state term-123' "$ROOT" )
   [ "$out" = pending ] || fail "a popup-close-with-placeholder-fill must still read as pending (not yet submitted), got '$out'"
@@ -219,7 +237,7 @@ test_send_text_submit_popup_autocomplete_requires_second_enter() {
   # 3: read - composer still holds real pending text
   printf '{"ok":true,"result":{"send":{"handle":"term-123","accepted":true}}}\n' > "$RESP/1.out"
   printf '{"ok":true,"result":{"send":{"handle":"term-123","accepted":true}}}\n' > "$RESP/2.out"
-  printf '{"ok":true,"result":{"terminal":{"tail":["  ╭──────────────────────────────────────╮","  │ ❯ /compact compaction instructions    │","  ╰──────────────── Composer ─────────────╯","","  Enter:send"]}}}\n' > "$RESP/3.out"
+  printf '{"ok":true,"result":{"terminal":{"tail":["  ╭──────────────────────────────────────╮","  │ ❯ /compact compaction instructions   │","  ╰──────────────── Composer ─────────────╯","","  Enter:send"]}}}\n' > "$RESP/3.out"
   # 4: Enter #2 actually submits
   # 5: read - composer is empty
   printf '{"ok":true,"result":{"send":{"handle":"term-123","accepted":true}}}\n' > "$RESP/4.out"
@@ -1285,7 +1303,8 @@ test_capture_fails_on_orca_error_json
 test_runtime_check_accepts_ready_orca_status
 test_runtime_check_refuses_unready_orca_status
 test_send_text_submit_verifies_empty_composer_after_enter
-test_send_text_submit_keeps_current_tail_when_limited
+test_send_text_submit_borderless_claude_confirms
+test_composer_state_stale_banner_never_wins
 test_send_text_submit_retries_when_composer_stays_pending
 test_composer_state_popup_placeholder_fill_is_pending
 test_composer_state_bare_shell_prompt_is_unknown

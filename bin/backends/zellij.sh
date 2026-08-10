@@ -119,6 +119,11 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # shellcheck source=bin/fm-backend-hometag-lib.sh
 . "$FM_BACKEND_ZELLIJ_ROOT/bin/fm-backend-hometag-lib.sh"
 
+# Shared composer classification (the fleet-wide shape catalogue and verdict
+# owner; this adapter contributes only capture and capability facts).
+# shellcheck source=bin/fm-composer-lib.sh
+. "$FM_BACKEND_ZELLIJ_ROOT/bin/fm-composer-lib.sh"
+
 # Verified minimum: report.md recommends "likely Zellij 0.44 or newer" for
 # returned pane/tab IDs and dump-screen --pane-id; empirically verified
 # against the installed 0.44.0 (docs/zellij-backend.md).
@@ -488,36 +493,62 @@ fm_backend_zellij_capture() {  # <target> <lines> [expected-label]
   printf '%s' "$out" | tail -n "$lines"
 }
 
+# --- zellij composer capture and capability primitives ----------------------
+#
+# `zellij action dump-screen --ansi` ("Preserve ANSI styling in the dump
+# output", verified live at zellij 0.44.0 against real Claude Code) gives
+# zellij a styled capture, so the shared classifier reads its composer with
+# the same ghost-stripping confidence as tmux and herdr. Every shape lives in
+# the shared owner (bin/fm-composer-lib.sh, fm_composer_classify_screen);
+# this adapter contributes only the capture and its capability facts.
+
+# fm_backend_zellij_composer_capture: bounded styled tail of the pane. When
+# --ansi is unsupported (an older zellij), the caller falls back to the plain
+# dump and a styled=0 descriptor - see fm_backend_zellij_composer_state.
+fm_backend_zellij_composer_capture() {  # <target> [expected-label]
+  fm_backend_zellij_target_ready "$1" "${2:-}" || return 1
+  local out
+  out=$(fm_backend_zellij_cli "$FM_BACKEND_ZELLIJ_SESSION" action dump-screen --pane-id "$FM_BACKEND_ZELLIJ_PANE" --ansi 2>/dev/null) || return 1
+  [ -n "$out" ] || return 1
+  printf '%s' "$out" | tail -n "$FM_COMPOSER_CAPTURE_LINES"
+}
+
+# fm_backend_zellij_composer_state: thin adapter - capture plus capabilities
+# in, shared verdict out. This replaced the content-diff submit heuristic
+# that was the fleet's only FALSE-POSITIVE delivery confirmation: a pane
+# whose content changed for any reason (a spinner, streaming output, a
+# clock) read as "submitted", which could close a --resolve-key decision for
+# a message the crew never received. A dead pane still fails safe here: the
+# unconditional-exit-0 CLI quirk (file header) yields an empty dump, which
+# classifies unknown - never a confirmation.
+fm_backend_zellij_composer_state() {  # <target> [expected-label] -> empty|pending|pending-unproven|unknown
+  local target=$1 expected_label=${2:-} cap caps verdict
+  if cap=$(fm_backend_zellij_composer_capture "$target" "$expected_label"); then
+    caps=$(printf 'styled=1\ncursor=0\nidentity=0\nrows=%s' "$FM_COMPOSER_CAPTURE_LINES")
+  elif cap=$(fm_backend_zellij_capture "$target" "$FM_COMPOSER_CAPTURE_LINES" "$expected_label") && [ -n "$cap" ]; then
+    caps=$(printf 'styled=0\ncursor=0\nidentity=0\nrows=%s' "$FM_COMPOSER_CAPTURE_LINES")
+  else
+    printf 'unknown'
+    return 0
+  fi
+  verdict=$(fm_composer_classify_screen "$caps" "$cap")
+  [ "$verdict" != need-identity ] || verdict=unknown
+  printf '%s' "$verdict"
+}
+
 # fm_backend_zellij_send_text_submit: type <text> into <target> once (raw,
-# unsubmitted, via send_literal), then submit with a named Enter key, retried
-# (Enter only, never retyped) until the pane visibly changes. Unlike herdr's
-# current native agent-state idle-baseline verifier and composer-state
-# fallback, zellij still uses a content-diff strategy because its CLI has no
-# cursor-row/ANSI capture primitive exposed:
-# capture the pane right after typing (before any Enter) as the TYPED baseline,
-# then after each Enter attempt capture again - unchanged means Enter was
-# swallowed (retry); changed means submitted. This content-diff approach is
-# also the load-bearing defense against the
-# unconditional-exit-0 CLI quirk documented in the file header: a truly dead
-# target never shows a change, so it correctly reports pending/unknown rather
-# than a false "sent". Echoes empty|pending|unknown|send-failed, a subset of the
-# proof-carrying submit vocabulary.
+# unsubmitted, via send_literal), then drive the shared verify-and-retry-Enter
+# loop (bin/fm-composer-lib.sh: fm_composer_submit_retry_core) against the
+# real composer verdict above. Echoes empty|pending|unknown|send-failed, a
+# subset of the proof-carrying submit vocabulary. Only a positively classified
+# empty composer confirms delivery - a pane that merely CHANGED does not, so
+# the old heuristic's false "delivery confirmed" cannot recur.
 fm_backend_zellij_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle> [expected-label]
-  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 expected_label=${6:-} typed after i=0
+  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 expected_label=${6:-}
   fm_backend_zellij_send_literal "$target" "$text" "$expected_label" || { printf 'send-failed'; return 0; }
   sleep "$settle"
-  typed=$(fm_backend_zellij_capture "$target" 6 "$expected_label") || { printf 'unknown'; return 0; }
-  while :; do
-    fm_backend_zellij_send_key "$target" Enter "$expected_label" || true
-    sleep "$sleep_s"
-    after=$(fm_backend_zellij_capture "$target" 6 "$expected_label") || { printf 'unknown'; return 0; }
-    if [ "$after" != "$typed" ]; then
-      printf 'empty'
-      return 0
-    fi
-    i=$((i + 1))
-    [ "$i" -lt "$retries" ] || { printf 'pending'; return 0; }
-  done
+  fm_composer_submit_retry_core fm_backend_zellij_send_key fm_backend_zellij_composer_state \
+    "$target" "$retries" "$sleep_s" "$expected_label"
 }
 
 # fm_backend_zellij_kill: remove the task's tab, best-effort (mirrors

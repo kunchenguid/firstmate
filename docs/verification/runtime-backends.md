@@ -180,6 +180,37 @@ Valid cleanup removed only the exact task-bound target and left the control wind
 The metadata-only validation covers tmux, Herdr, Zellij, Orca, and cmux before backend dispatch.
 Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, and Muse share that backend cleanup boundary; their harness-specific hook files, tokens, and session-log sidecars are cleaned only after it, so no harness needs a separate endpoint parser.
 
+## Composer classification matrix
+
+The shared composer classifier (`bin/fm-composer-lib.sh`, `fm_composer_classify_screen`) owns every composer shape fleet-wide; each backend contributes only a capture and a capability descriptor.
+The live half of that guarantee was verified on 2026-08-09 against every installed harness on tmux 3.6a, macOS arm64, on an isolated private socket, with no prompt submitted to any harness.
+
+```sh
+FM_COMPOSER_MATRIX_LIVE=1 tests/fm-composer-matrix-live-e2e.test.sh
+```
+
+Observed output:
+
+```text
+ok - claude (2.1.226 (Claude Code)): real idle composer classifies empty
+ok - codex (codex-cli 0.146.0): real idle composer classifies empty
+ok - opencode (1.14.46): real idle composer classifies empty
+ok - pi (0.84.0): real idle composer classifies empty
+ok - grok (grok 1.0.0 (3cd0d0cbcebe) [stable]): real idle composer classifies empty
+# harness absent, not verified here: kimi
+ok - muse (Muse Code 0.1.0 (0.1.0-R708.1)): real idle composer classifies empty
+ok - strict posture live: a blank shell row classifies unknown and injection defers
+ok - zellij (zellij 0.44.0): unrelated pane change never confirms delivery (verdict: unknown)
+ok - live composer-matrix guard verified 8 live surface(s)
+```
+
+Every installed harness's real idle composer reached a proven `empty`, including pi through the tmux foreground-process identity probe, grok through the titled-bottom-border tolerance, and opencode through the left-bar shape; codex and opencode first parked on vendor update-available modals that the strict classifier correctly refused until the guard's single non-submitting Escape dismissed them.
+The strict blank-row posture held live (a blank shell row deferred injection), and a zellij pane changing for reasons unrelated to submission never confirmed a delivery, replacing the retired content-diff heuristic's false positive.
+Kimi was not installed on the verification machine; its bordered shape is pinned by the portable byte-capture regressions in `tests/fm-composer-lib.test.sh`, which also carry the other five adapters' capability profiles for every harness under both a UTF-8 locale and `LC_ALL=C`.
+This guard is the refresh command after any harness upgrade; rerun it and update the versions above rather than trusting this table across releases.
+
+`zellij action dump-screen --pane-id <id> --ansi` was verified at zellij 0.44.0 to preserve ANSI styling (real Claude Code rendered inside a zellij pane dumped `ESC[m` `❯` U+00A0 for its idle composer row), which is the capability the zellij composer classifier reads.
+
 ## Herdr
 
 The compatibility floor is protocol 14.
@@ -577,6 +608,7 @@ All real tests use a uniquely named session and `tests/zellij-test-safety.sh`; t
 | Literal send | `zellij action paste --pane-id <id> -- <text>` | Left text unsubmitted. |
 | Keys | `send-keys --pane-id <id> Enter`, `Esc`, and one argument `Ctrl c` | All three shared operations worked. |
 | Capture | `dump-screen --pane-id <id>` or `--full` | Worked with no attached client; no line-bound flag exists. |
+| Styled capture | `dump-screen --pane-id <id> --ansi` | Preserved ANSI styling ("Composer classification matrix" above); feeds the zellij composer classifier. |
 | Close | `close-tab-by-id <id>` | Removed the live task pane and tab together. |
 | Failure exit | actions against missing targets | Returned exit 0, requiring structural preflight and output-shape validation. |
 

@@ -557,9 +557,11 @@ mark_escalated_seen() {  # <kind> <arg> <state>
 #
 # pane_input_pending returns 0 unless the composer is positively proven empty.
 # This includes real unsubmitted text, ambiguous structure, unreadable state,
-# and future verdicts. The detector drops dim/faint ghost text and strips the
-# harness's composer box borders, so an aligned ghost-only or idle bordered
-# claude composer ("│ > … │") is correctly proven empty.
+# blank or otherwise unidentified rows (the strict container-proof rule owned
+# by bin/fm-composer-lib.sh), and future verdicts. The detector drops
+# dim/faint ghost text and strips the harness's composer box borders, so an
+# aligned ghost-only or idle bordered claude composer ("│ > … │") is correctly
+# proven empty while a modal dialog or dead shell never is.
 # pane_is_busy / pane_input_pending: BACKEND-AWARE (dispatch goes through
 # bin/fm-backend.sh's generic per-backend primitives rather than a hand-rolled
 # case statement here). <backend> defaults to tmux when omitted, so every
