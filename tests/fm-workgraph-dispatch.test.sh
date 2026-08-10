@@ -354,18 +354,63 @@ test_spawn_legacy_path_rejects_before_backend_creation() {
   make_repo "$fixture"
   mkdir -p "$home/data/new-task" "$home/state" "$home/config"
   printf 'legacy brief\n' >"$home/data/new-task/brief.md"
+  printf 'window=fm-existing\nworktree=%s\nkind=ship\n' "$fixture/project" >"$home/state/existing.meta"
+  set +e
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-spawn.sh" new-task "$fixture/project" --harness codex 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "fm-spawn admitted a legacy task whose project matches an existing meta"
+  assert_contains "$out" 'declared project is already owned by existing' \
+    "fm-spawn did not expose the WorkGraph legacy refusal"
+  [ ! -e "$home/state/new-task.meta" ] \
+    || fail "refused legacy spawn published task metadata"
+  pass "fm-spawn rejects a legacy task whose project matches an existing meta"
+}
+
+test_spawn_legacy_path_admits_independent_worktree() {
+  local fixture="$TMP_ROOT/spawn-fixture" home="$TMP_ROOT/spawn-home" out rc
+  make_repo "$fixture"
+  mkdir -p "$home/data/new-task" "$home/state" "$home/config"
+  printf 'legacy brief\n' >"$home/data/new-task/brief.md"
+  # Existing meta records an unrelated worktree (wt-a) that does not overlap
+  # with the proposed task's project.  The legacy dispatch must admit it.
   printf 'window=fm-existing\nworktree=%s\nkind=ship\n' "$fixture/wt-a" >"$home/state/existing.meta"
   set +e
   out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     "$ROOT/bin/fm-spawn.sh" new-task "$fixture/project" --harness codex 2>&1)
   rc=$?
   set -e
-  [ "$rc" -ne 0 ] || fail "fm-spawn admitted a legacy task beside active metadata"
-  assert_contains "$out" 'legacy task new-task is exclusive while active task metadata exists' \
-    "fm-spawn did not expose the WorkGraph legacy refusal"
-  [ ! -e "$home/state/new-task.meta" ] \
-    || fail "refused legacy spawn published task metadata"
-  pass "fm-spawn rejects known legacy collisions before backend creation"
+  [ "$rc" -eq 0 ] || fail "fm-spawn refused a legacy task whose worktree does not overlap existing meta: $out"
+  assert_not_contains "$out" 'legacy task new-task is exclusive while active task metadata exists' \
+    "fm-spawn conservatively refused an independent legacy task"
+  [ -e "$home/state/new-task.meta" ] \
+    || fail "admitted legacy spawn did not publish task metadata"
+  pass "fm-spawn admits a legacy task whose worktree does not overlap an existing meta"
+}
+
+test_spawn_legacy_path_skips_dead_endpoint_metadata() {
+  local fixture="$TMP_ROOT/spawn-fixture" home="$TMP_ROOT/spawn-home" out rc
+  make_repo "$fixture"
+  mkdir -p "$home/data/new-task" "$home/state" "$home/config"
+  printf 'legacy brief\n' >"$home/data/new-task/brief.md"
+  # The existing meta points at a worktree that matches the project, but the
+  # recorded backend endpoint is dead (a herdr session:pane that does not
+  # exist).  The legacy dispatch must skip the dead meta and admit.
+  printf 'window=fm-dead:p99\nworktree=%s\nkind=ship\nbackend=herdr\n' "$fixture/project" >"$home/state/existing.meta"
+  set +e
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-spawn.sh" new-task "$fixture/project" --harness codex 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "fm-spawn refused a legacy task whose only conflicting meta has a dead endpoint: $out"
+  assert_not_contains "$out" 'legacy task new-task is exclusive while active task metadata exists' \
+    "fm-spawn refused a legacy task even though the only conflicting meta has a dead endpoint"
+  assert_not_contains "$out" 'declared project is already owned by existing' \
+    "fm-spawn refused a legacy task even though the only conflicting meta has a dead endpoint"
+  [ -e "$home/state/new-task.meta" ] \
+    || fail "admitted legacy spawn (dead-endpoint skip) did not publish task metadata"
+  pass "fm-spawn skips meta entries whose recorded endpoint is dead"
 }
 
 test_contract_binding_mismatch_fails_before_lease() {
@@ -440,6 +485,8 @@ test_compatible_dispatch_and_capacity
 test_resource_and_legacy_refusals
 test_cross_goal_conflict_refuses_before_lease
 test_spawn_legacy_path_rejects_before_backend_creation
+test_spawn_legacy_path_admits_independent_worktree
+test_spawn_legacy_path_skips_dead_endpoint_metadata
 test_contract_binding_mismatch_fails_before_lease
 test_contract_accepts_explicit_no_effort_axis
 test_workgraph_brief_replaces_legacy_delivery_instructions

@@ -351,8 +351,10 @@ fm_workgraph_active_contract_compatible() { # <meta>
 fm_workgraph_dispatch_lock() {
   mkdir -p "$STATE"
   FM_WORKGRAPH_DISPATCH_LOCK="$STATE/.workgraph-dispatch.lock"
-  fm_lock_try_acquire "$FM_WORKGRAPH_DISPATCH_LOCK" \
-    || fm_workgraph_dispatch_error "another dispatch is currently deciding compatibility"
+  if ! fm_lock_try_acquire "$FM_WORKGRAPH_DISPATCH_LOCK"; then
+    fm_workgraph_dispatch_error "another dispatch is currently deciding compatibility"
+    return 1
+  fi
   FM_WORKGRAPH_DISPATCH_LOCK_HELD=1
 }
 
@@ -362,8 +364,35 @@ fm_workgraph_dispatch_unlock() {
   fm_lock_release "$FM_WORKGRAPH_DISPATCH_LOCK"
 }
 
+fm_workgraph_legacy_endpoint_state() { # <meta> -> alive|dead|unknown
+  local meta=$1 backend target
+  # fm-spawn sources fm-backend.sh before this library.  Keep this helper
+  # fail-closed for direct library consumers and tests that do not provide the
+  # backend surface.
+  if ! type fm_backend_of_meta >/dev/null 2>&1 \
+      || ! type fm_backend_target_of_meta >/dev/null 2>&1 \
+      || ! type fm_backend_target_exists >/dev/null 2>&1; then
+    printf 'unknown\n'
+    return 0
+  fi
+  backend=$(fm_backend_of_meta "$meta" 2>/dev/null || true)
+  target=$(fm_backend_target_of_meta "$meta" 2>/dev/null || true)
+  if [ -z "$backend" ] || [ -z "$target" ]; then
+    printf 'unknown\n'
+  elif fm_backend_target_exists "$backend" "$target" \
+      "fm-$(basename "$meta" .meta)"; then
+    printf 'alive\n'
+  else
+    # The shared backend primitive defines a gone or unqueryable recorded
+    # endpoint as absent for passive liveness.  No process is signalled and no
+    # metadata is rewritten here.
+    printf 'dead\n'
+  fi
+}
+
 fm_workgraph_enforce_dispatch() { # <task-id> <project>
   local id=$1 project=$2 meta other_worktree active_count=0 mode capacity waves provisional_seed
+  local legacy_endpoint_state
   fm_workgraph_dispatch_lock || return 1
   if [ "$FM_WORKGRAPH_ENABLED" = 1 ]; then
     fm_workgraph_validate_worktree "$project" || return 1
@@ -377,13 +406,40 @@ fm_workgraph_enforce_dispatch() { # <task-id> <project>
     [ "$(basename "$meta" .meta)" != "$id" ] || continue
     [ -f "$meta" ] && [ ! -L "$meta" ] \
       || { fm_workgraph_dispatch_error "active metadata is not a regular file: $meta"; return 1; }
-    active_count=$((active_count + 1))
-    if [ "$FM_WORKGRAPH_ENABLED" != 1 ]; then
-      fm_workgraph_dispatch_error "legacy task $id is exclusive while active task metadata exists"
+    if ! fm_workgraph_active_lease_valid "$meta"; then
+      legacy_endpoint_state=$(fm_workgraph_legacy_endpoint_state "$meta")
+      # Historical or pre-lease WorkGraph metadata is durable evidence, not
+      # proof that an agent remains active forever.  Only a definitively absent
+      # recorded endpoint is ignored.  In WorkGraph mode a live or ambiguous
+      # endpoint without a valid held lease remains broadly exclusive; in
+      # legacy mode the meta only blocks when its worktree overlaps the
+      # proposed task's project (see below).
+      [ "$legacy_endpoint_state" != dead ] || continue
+      active_count=$((active_count + 1))
+      if [ "$FM_WORKGRAPH_ENABLED" != 1 ]; then
+        # Legacy mode: refuse only on worktree overlap.  Other in-flight or
+        # already-landed work on unrelated worktrees must not block an
+        # independent new legacy dispatch.
+        other_worktree=$(fm_workgraph_meta_exact "$meta" worktree) \
+          || { fm_workgraph_dispatch_error "active task metadata lacks one worktree"; return 1; }
+        [ "$other_worktree" != "$project" ] \
+          || { fm_workgraph_dispatch_error "declared project is already owned by $(basename "$meta" .meta)"; return 1; }
+        continue
+      fi
+      fm_workgraph_dispatch_error "active task $(basename "$meta" .meta) is legacy, ambiguous, or lacks a valid held lease"
       return 1
     fi
-    fm_workgraph_active_lease_valid "$meta" \
-      || { fm_workgraph_dispatch_error "active task $(basename "$meta" .meta) is legacy, ambiguous, or lacks a valid held lease"; return 1; }
+    active_count=$((active_count + 1))
+    if [ "$FM_WORKGRAPH_ENABLED" != 1 ]; then
+      # Legacy mode: only refuse when the existing meta's worktree matches the
+      # task's project.  Other in-flight or already-landed work on unrelated
+      # worktrees must not block an independent new legacy dispatch.
+      other_worktree=$(fm_workgraph_meta_exact "$meta" worktree) \
+        || { fm_workgraph_dispatch_error "active task metadata lacks one worktree"; return 1; }
+      [ "$other_worktree" != "$project" ] \
+        || { fm_workgraph_dispatch_error "declared project is already owned by $(basename "$meta" .meta)"; return 1; }
+      continue
+    fi
     fm_workgraph_active_contract_compatible "$meta" \
       || { fm_workgraph_dispatch_error "sealed contract conflicts with active task $(basename "$meta" .meta)"; return 1; }
     other_worktree=$(fm_workgraph_meta_exact "$meta" worktree) \
