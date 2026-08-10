@@ -211,7 +211,7 @@ Observed output for the four allowed calls was `UNRELATED_EXECUTED`, a successfu
 Each harness blocked the final command with exit 2 mapped through its native adapter behavior.
 The stable reason was `[watcher-background] a protected watcher command cannot run in an asynchronous shell list or through nohup/disown`.
 The dummy arm body would have created `<harness>.sentinel` if the denied command executed.
-All five sentinel files remained absent.
+All six sentinel files remained absent.
 
 The Codex transcript showed `PreToolUse Completed` for all three originally reported false-positive shapes and `PreToolUse Blocked` only for the backgrounded arm.
 The Grok debug transcript showed four exit-0 results from `project/fm-primary-pretool-check`, then exit 2 with 145 stdout bytes, 214 stderr bytes, and `hook denied` for the backgrounded arm.
