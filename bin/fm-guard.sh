@@ -15,7 +15,9 @@
 # only a stale beacon (beyond FM_GUARD_GRACE) is a genuine lapse; under every
 # persistent-watcher harness a live identity-matched watcher with a fresh beacon
 # is required. The banner names the true failing condition (a missing live
-# watcher process vs a genuinely stale beacon). The full banner is emitted once
+# watcher process, a live process that fails identity verification, or a
+# genuinely stale beacon; see FM_WATCHER_VERDICT_REASON in bin/fm-wake-lib.sh).
+# The full banner is emitted once
 # per distinct down-episode in this FM_HOME (keyed to the failing condition, not
 # the beacon mtime, which a healthy between-turns watcher advances every poll);
 # later guarded commands in the same episode print a one-line reminder instead.
@@ -196,6 +198,8 @@ if [ "$watcher_healthy" = false ]; then
       printf '●  WATCHER DOWN - SUPERVISION IS OFF\n'
       if [ "$watcher_down_reason" = no-watcher ]; then
         watcher_cause=$(printf 'no live watcher process holds this home lock (last beat: %s)' "$beacon_desc")
+      elif [ "$watcher_down_reason" = identity-mismatch ]; then
+        watcher_cause=$(printf 'the process holding this home lock fails watcher identity verification (last beat: %s)' "$beacon_desc")
       else
         watcher_cause=$(printf 'no watcher has a fresh beacon (last beat: %s, grace %ss)' "$beacon_desc" "$GRACE")
       fi

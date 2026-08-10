@@ -153,11 +153,19 @@ fm_supervision_model() {
 # guard (bin/fm-guard.sh), NOT the arm layer or the turn-end guard. Sets:
 #   FM_WATCHER_VERDICT_OK      true when supervision is healthy for this model
 #   FM_WATCHER_VERDICT_REASON  when not ok, the true failing condition:
-#                              no-watcher   - a live watcher process is the real
-#                                             signal for this model but none holds
-#                                             the lock (the beacon is still fresh)
-#                              stale-beacon - the beacon is stale beyond grace or
-#                                             absent (a genuine supervision lapse)
+#                              no-watcher        - a live watcher process is the
+#                                                   real signal for this model but
+#                                                   no process holds the lock at all
+#                                                   (the beacon is still fresh)
+#                              identity-mismatch - a live process holds the lock but
+#                                                   fails identity verification
+#                                                   (home, watcher path, or pid
+#                                                   identity), so it is not confirmed
+#                                                   as the recorded watcher (the
+#                                                   beacon is still fresh)
+#                              stale-beacon      - the beacon is stale beyond grace
+#                                                   or absent (a genuine supervision
+#                                                   lapse)
 # autoarm: a fresh beacon within grace is healthy even with no live watcher,
 # because the watcher only runs between turns; only a stale beacon is a lapse.
 # persistent: require a live identity-matched watcher with a fresh beacon
@@ -168,7 +176,7 @@ FM_WATCHER_VERDICT_OK=false
 FM_WATCHER_VERDICT_REASON=stale-beacon
 fm_watcher_supervision_verdict() {
   local state=$1 watch=$2 grace=${3:-${FM_GUARD_GRACE:-300}} home=${4:-$FM_HOME}
-  local beat age fresh=false
+  local beat age fresh=false lock_pid
   FM_WATCHER_VERDICT_OK=false
   FM_WATCHER_VERDICT_REASON=stale-beacon
   beat="$state/.last-watcher-beat"
@@ -185,8 +193,19 @@ fm_watcher_supervision_verdict() {
     # shellcheck disable=SC2034 # Read by callers after the function returns.
     FM_WATCHER_VERDICT_OK=true
   elif [ "$fresh" = true ]; then
-    # shellcheck disable=SC2034 # Read by callers after the function returns.
-    FM_WATCHER_VERDICT_REASON=no-watcher
+    lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+    if fm_pid_alive "$lock_pid"; then
+      # A live process holds the lock but fm_watcher_healthy still rejected it, so
+      # the rejection came from the identity check (home, watcher path, or pid
+      # identity), not from a missing process.
+      # shellcheck disable=SC2034,SC2100 # Read by callers after the function
+      # returns; SC2100 is a false positive on this hyphenated reason string, not
+      # arithmetic.
+      FM_WATCHER_VERDICT_REASON=identity-mismatch
+    else
+      # shellcheck disable=SC2034 # Read by callers after the function returns.
+      FM_WATCHER_VERDICT_REASON=no-watcher
+    fi
   fi
   return 0
 }

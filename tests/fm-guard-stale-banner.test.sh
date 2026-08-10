@@ -41,6 +41,19 @@ record_live_watcher() {
   printf '%s\n' "$identity" > "$home/state/.watch.lock/pid-identity"
 }
 
+# A live process holds the lock (a real pid, so fm_pid_alive is true), but the
+# recorded pid-identity does not match it - the identity-mismatch condition,
+# distinct from no process holding the lock at all.
+record_live_watcher_with_mismatched_identity() {
+  local dir=$1 pid=$2 home
+  home=$(case_home "$dir")
+  mkdir -p "$home/state/.watch.lock"
+  printf '%s\n' "$pid" > "$home/state/.watch.lock/pid"
+  printf '%s\n' "$home" > "$home/state/.watch.lock/fm-home"
+  printf '%s\n' "$ROOT/bin/fm-watch.sh" > "$home/state/.watch.lock/watcher-path"
+  printf 'stale-identity-does-not-match-current-process\n' > "$home/state/.watch.lock/pid-identity"
+}
+
 # These cases exercise the persistent-watcher model (a live pid is the real
 # liveness signal), so pin the model rather than letting the host test runner's
 # ambient harness ancestry pick it.
@@ -351,6 +364,31 @@ test_persistent_no_watcher_banner_names_missing_process() {
   pass "fm-guard stale banner: persistent no-watcher banner names the true reason"
 }
 
+test_persistent_identity_mismatch_banner_names_the_true_condition() {
+  local dir home out pid
+  dir=$(make_guard_case persistent-identity-mismatch)
+  home=$(case_home "$dir")
+  # A live process holds the lock (fm_pid_alive is true for it), but its recorded
+  # identity does not match, so fm_watcher_healthy still rejects it. The true
+  # failing condition is identity verification, not a missing process - naming it
+  # "no live watcher process" is false when a process is, in fact, alive and
+  # holding the lock.
+  sleep 60 &
+  pid=$!
+  record_live_watcher_with_mismatched_identity "$dir" "$pid"
+  touch "$home/state/.last-watcher-beat"
+  out=$(run_guard_case "$dir")
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  assert_contains "$out" "fails watcher identity verification" \
+    "identity-mismatch banner must name identity verification as the true failing condition"
+  assert_not_contains "$out" "no live watcher process holds this home lock" \
+    "identity-mismatch banner must not claim no process is alive when one holds the lock"
+  assert_not_contains "$out" "no watcher has a fresh beacon" \
+    "identity-mismatch banner must not blame the fresh beacon"
+  pass "fm-guard stale banner: persistent identity-mismatch banner names the true condition"
+}
+
 test_persistent_no_watcher_episode_survives_beacon_touch() {
   local dir home out1 out2
   dir=$(make_guard_case persistent-no-watcher-episode)
@@ -379,6 +417,7 @@ test_autoarm_fresh_beacon_without_watcher_is_healthy
 test_autoarm_stale_beacon_alarms_with_correct_reason
 test_autoarm_stale_episode_is_stable
 test_persistent_no_watcher_banner_names_missing_process
+test_persistent_identity_mismatch_banner_names_the_true_condition
 test_persistent_no_watcher_episode_survives_beacon_touch
 test_fresh_beacon_without_live_watcher_stays_alarm
 test_x_mode_without_live_watcher_stays_alarm
