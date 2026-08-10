@@ -393,6 +393,15 @@ test_titled_bottom_requires_matching_width() {
   pass "fm_composer_classify_screen: titled bottoms retain full box geometry"
 }
 
+test_cursor_on_box_bottom_is_unknown() {
+  local screen out
+  screen=$'╭────────────────────────╮\n│ ❯                      │\n╰────────────────────────╯'
+  out=$(fm_composer_classify_screen "$CAPS_TMUX" "$screen" 2)
+  [ "$out" = unknown ] \
+    || fail "a cursor on a box bottom border must be unknown, got '$out'"
+  pass "fm_composer_classify_screen: a box bottom border is never an input row"
+}
+
 test_bare_shell_glyphs_are_unknown
 test_stripped_unbordered_content_uses_plain_content
 test_bare_shell_prompt_with_command_is_not_empty
@@ -415,3 +424,4 @@ test_bare_wrap_region_classifies
 test_bottom_most_candidate_wins
 test_incomplete_lower_box_invalidates_stale_candidate
 test_titled_bottom_requires_matching_width
+test_cursor_on_box_bottom_is_unknown
