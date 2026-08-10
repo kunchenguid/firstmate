@@ -1065,6 +1065,7 @@ import { pathToFileURL } from "node:url";
 
 const handlers = new Map();
 let prompts = 0;
+let replaced = false;
 const pi = {
   on(event, handler) {
     handlers.set(event, handler);
@@ -1074,6 +1075,12 @@ const pi = {
     if (!message.startsWith("\u2063FIRSTMATE_OP: v1 turn-end-guard: ")) throw new Error(`untyped operational prompt: ${message}`);
     if (!message.includes("TURN WOULD END BLIND")) throw new Error(`unexpected prompt: ${message}`);
     if (options?.deliverAs !== "followUp") throw new Error("OMP guard prompt was not a follow-up");
+    if (!replaced) {
+      replaced = true;
+      const switched = handlers.get("session_switch");
+      if (!switched) throw new Error("OMP session_switch handler was not registered");
+      await switched({ type: "session_switch", reason: "new" }, {});
+    }
     await handlers.get("agent_end")?.({ type: "agent_end" }, {});
   },
 };
@@ -1084,18 +1091,18 @@ const ended = handlers.get("agent_end");
 if (!ended) throw new Error("OMP agent_end handler was not registered");
 
 await ended({ type: "agent_end" }, {});
-if (prompts !== 1) throw new Error(`OMP run injected ${prompts} follow-ups`);
+if (prompts !== 2) throw new Error(`OMP session replacement injected ${prompts} follow-ups`);
 await ended({ type: "agent_end" }, {});
-if (prompts !== 2) throw new Error(`second OMP run injected ${prompts - 1} follow-ups`);
+if (prompts !== 3) throw new Error(`second OMP run injected ${prompts - 2} follow-ups`);
 
 const guardRuns = readFileSync(process.env.FM_GUARD_LOG, "utf8").trim().split("\n").length;
-if (guardRuns !== 2) throw new Error(`OMP guard predicate ran ${guardRuns} times for two logical runs`);
+if (guardRuns !== 3) throw new Error(`OMP guard predicate ran ${guardRuns} times across two logical runs and a replacement`);
 EOF
 )
   status=$?
   expect_code 0 "$status" "OMP guard must use agent_end and inject once per logical run"
   [ -z "$out" ] || fail "OMP logical-run guard test printed output: $out"
-  pass ".omp primary extension: agent_end drives one guard follow-up per logical run"
+  pass ".omp primary extension: agent_end guards logical runs across session replacement"
 }
 
 # The loaded marker is what bin/fm-session-start.sh reads to decide whether the

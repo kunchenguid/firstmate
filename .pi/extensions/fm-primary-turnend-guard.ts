@@ -9,7 +9,8 @@ import {
   encodeFirstmateOperationalInput,
 } from "./lib/fm-operational-input.ts";
 
-let guardFollowupActive = false;
+let guardFollowupGeneration: number | undefined;
+let sessionGeneration = 0;
 
 type LockOwnership = "owned" | "missing" | "other";
 
@@ -262,6 +263,8 @@ function registerPrimaryTurnendGuard(pi: ExtensionAPI): void {
     // OMP's API is a strict event superset of the legacy Pi ExtensionAPI type.
     const onCrossHarnessEvent = pi.on as unknown as CrossHarnessOn;
     onCrossHarnessEvent.call(pi, "session_switch", async (event) => {
+      sessionGeneration += 1;
+      guardFollowupGeneration = undefined;
       const source = sessionSource(sessionReason(event));
       markLoaded();
       if (source) await injectSessionstart(pi, source);
@@ -287,15 +290,17 @@ function registerPrimaryTurnendGuard(pi: ExtensionAPI): void {
   });
 
   const runSettledGuard = async () => {
-    if (guardFollowupActive) {
-      guardFollowupActive = false;
+    const generation = sessionGeneration;
+    if (guardFollowupGeneration === generation) {
+      guardFollowupGeneration = undefined;
       return;
     }
+    guardFollowupGeneration = undefined;
 
     const result = await runGuard();
-    if (result.code !== 2) return;
+    if (generation !== sessionGeneration || result.code !== 2) return;
 
-    guardFollowupActive = true;
+    guardFollowupGeneration = generation;
     try {
       const content = encodeFirstmateOperationalInput(
         "turn-end-guard",
@@ -305,7 +310,7 @@ function registerPrimaryTurnendGuard(pi: ExtensionAPI): void {
       );
       await pi.sendUserMessage(content, { deliverAs: "followUp" });
     } catch {
-      guardFollowupActive = false;
+      if (guardFollowupGeneration === generation) guardFollowupGeneration = undefined;
     }
   };
 

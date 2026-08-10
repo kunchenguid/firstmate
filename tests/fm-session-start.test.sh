@@ -702,8 +702,13 @@ hash_file_for_test() {
     cat -- "$@" | shasum -a 256 | awk '{print "sha256:" $1}'
   elif command -v sha256sum >/dev/null 2>&1; then
     cat -- "$@" | sha256sum | awk '{print "sha256:" $1}'
+  elif command -v openssl >/dev/null 2>&1; then
+    local digest
+    digest=$(cat -- "$@" | openssl dgst -sha256 2>/dev/null | awk -F'= ' 'NF == 2 {print $2}')
+    [ -n "$digest" ] || return 1
+    printf 'sha256:%s\n' "$digest"
   else
-    cat -- "$@" | cksum | awk '{print "cksum:" $1 ":" $2}'
+    return 1
   fi
 }
 
@@ -717,6 +722,42 @@ hash_manifest_for_test() {
     files+=("$root/$line")
   done < "$manifest"
   hash_file_for_test "${files[@]}"
+}
+
+hash_manifest_cksum_for_test() {
+  local manifest=$1 root=$2 line checksum bytes
+  local -a files=("$manifest")
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    [ -n "$line" ] || continue
+    files+=("$root/$line")
+  done < "$manifest"
+  read -r checksum bytes < <(cat -- "${files[@]}" | cksum)
+  printf 'cksum:%s:%s\n' "$checksum" "$bytes"
+}
+
+write_omp_cksum_loaded_markers() {
+  local home=$1 root=$2 pid=$3 version
+  version=$(hash_manifest_cksum_for_test "$root/.omp/extensions/fm-primary-omp-watch.manifest" "$root")
+  printf '%s\n%s\n' "$version" "$pid" > "$home/state/.omp-watch-extension-loaded"
+  version=$(hash_manifest_cksum_for_test "$root/.omp/extensions/fm-primary-turnend-guard.manifest" "$root")
+  printf '%s\n%s\n' "$version" "$pid" > "$home/state/.omp-turnend-extension-loaded"
+}
+
+make_hashless_path() {
+  local fakebin=$1 dir tool name
+  for dir in /bin /usr/bin /sbin /usr/sbin /usr/local/bin /opt/homebrew/bin; do
+    [ -d "$dir" ] || continue
+    for tool in "$dir"/*; do
+      [ -x "$tool" ] || continue
+      name=${tool##*/}
+      case "$name" in
+        shasum|sha256sum) continue ;;
+      esac
+      [ -e "$fakebin/$name" ] || ln -s "$tool" "$fakebin/$name" 2>/dev/null || true
+    done
+  done
 }
 
 install_pi_turnend_extension_fixture() {
@@ -2471,6 +2512,30 @@ EOF
   pass "session start reports OMP extensions stale when a transitive library changes"
 }
 
+test_omp_diagnostic_rejects_cksum_markers_without_sha_tools() {
+  local rec root home fakebin out holder_pid
+  rec=$(new_world omp-cksum-loaded-markers)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+
+  sleep 300 &
+  holder_pid=$!
+  make_fake_ps_omp_holder "$fakebin" "$holder_pid"
+  install_omp_extensions_fixture "$root"
+  write_omp_cksum_loaded_markers "$home" "$root" "$holder_pid"
+  make_hashless_path "$fakebin"
+  out=$(FM_FAKE_HARNESS=omp run_session_start "$home" "$root" "$fakebin" omp)
+  kill "$holder_pid" 2>/dev/null || true
+  wait "$holder_pid" 2>/dev/null || true
+
+  assert_contains "$out" "OMP_WATCH_EXTENSION: not loaded" \
+    "session start accepted a cksum marker when SHA-256 tools were unavailable"
+
+  pass "session start rejects non-SHA OMP markers when SHA-256 tools are unavailable"
+}
+
 test_pi_diagnostic_rejects_stale_loaded_marker() {
   local rec root home fakebin out marker holder_pid
   rec=$(new_world pi-stale-loaded-marker)
@@ -2612,6 +2677,7 @@ test_omp_primary_uses_verified_supervision_extensions
 test_omp_diagnostic_accepts_current_loaded_markers
 test_omp_diagnostic_rejects_shared_core_drift
 test_omp_diagnostic_rejects_transitive_dependency_drift
+test_omp_diagnostic_rejects_cksum_markers_without_sha_tools
 test_pi_diagnostic_rejects_stale_loaded_marker
 test_pi_diagnostic_accepts_prelock_loaded_marker
 test_pi_diagnostic_rejects_missing_turnend_guard_marker

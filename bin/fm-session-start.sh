@@ -614,8 +614,13 @@ hash_file() {
     cat -- "$@" | shasum -a 256 | awk '{print "sha256:" $1}'
   elif command -v sha256sum >/dev/null 2>&1; then
     cat -- "$@" | sha256sum | awk '{print "sha256:" $1}'
+  elif command -v openssl >/dev/null 2>&1; then
+    local digest
+    digest=$(cat -- "$@" | openssl dgst -sha256 2>/dev/null | awk -F'= ' 'NF == 2 {print $2}')
+    [ -n "$digest" ] || return 1
+    printf 'sha256:%s\n' "$digest"
   else
-    cat -- "$@" | cksum | awk '{print "cksum:" $1 ":" $2}'
+    return 1
   fi
 }
 
