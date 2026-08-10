@@ -48,10 +48,6 @@
 #   fmx_meta_link_clear <meta> - remove the X-request link entirely
 # Callers must have FM_HOME set before calling fmx_load_config.
 
-_FM_X_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null)" || _FM_X_LIB_DIR="."
-# shellcheck source=bin/fm-lock-lib.sh
-. "$_FM_X_LIB_DIR/fm-lock-lib.sh"
-
 # Read the value of KEY from a .env-style file: last assignment wins; tolerates a
 # leading "export ", surrounding whitespace, and one layer of matching single or
 # double quotes. Prints nothing (and succeeds) when the file or key is absent, so
@@ -422,7 +418,7 @@ fmx_request_relay_context() {
 
 fmx_context_registry_mtime() {
   local file=$1 mtime
-  mtime=$(fm_lock_path_mtime "$file")
+  mtime=$(stat -f '%m' "$file" 2>/dev/null) || mtime=$(stat -c '%Y' "$file" 2>/dev/null) || return 1
   case "$mtime" in
     ''|*[!0-9]*) return 1 ;;
   esac
