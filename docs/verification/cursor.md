@@ -38,7 +38,7 @@ cursor-agent --yolo --trust [--model <id>] "$(encode launch-brief < brief)"
 - `--yolo` (alias of `--force`) produces the `Run Everything` footer and auto-approves tool use.
 - `--trust` skips the workspace trust prompt on a fresh worktree.
 - The brief is a positional prompt.
-- Foreign markers `CLAUDECODE`, `PI_CODING_AGENT`, `GROK_AGENT`, and `FM_PI_HARNESS` are cleared at launch.
+- Foreign markers `CLAUDECODE`, `PI_CODING_AGENT`, `GROK_AGENT`, `FM_PI_HARNESS`, and `CURSOR_AGENT` are cleared at launch.
 
 ### Model and effort
 
@@ -71,7 +71,7 @@ Unlike Claude, Cursor's `stop` hook fires on interrupt.
 ### Composer
 
 Idle placeholder is plain text `→ Add a follow-up` (U+2192), with no dark-truecolor ghost styling observed.
-`bin/fm-composer-lib.sh` treats `→` as an agent prompt glyph; idle regex defaults also match `Add a follow-up`.
+The Cursor-specific send path passes `Add a follow-up` as an idle placeholder after the `→` glyph is recognized.
 
 ### Secondmate / primary boundary
 
@@ -84,7 +84,7 @@ There is no `docs/supervision-protocols/cursor.md`, so a primary detected as cur
 | Backend | Applicability | Evidence |
 |---|---|---|
 | tmux | Supported | Live TUI probes and process classification of exact `cursor-agent` |
-| herdr | Supported for spawn/send when selected | Shared composer idle default includes `Add a follow-up`; Ctrl+C and Enter are deliverable |
+| herdr | Not verified for Cursor | No live Cursor-Agent Herdr spawn/send evidence; only generic backend behavior is covered |
 | zellij | N/A for proof in this change | No cursor-specific key requirement beyond Ctrl+C/Enter already mapped |
 | cmux | N/A for proof in this change | Same as zellij; idle default updated |
 | orca | Interrupt-capable only | Orca can deliver `C-c` and Enter; Escape-only harnesses remain refused |
