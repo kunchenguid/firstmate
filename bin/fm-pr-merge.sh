@@ -28,14 +28,31 @@
 #     UNKNOWN both refuse;
 #   * a review requests changes.
 #
-# --allow-unverified is the captain's explicit override. It is never a default
-# and never inferred from the environment: it skips verification entirely and
-# records merge_verification=override in the task's meta so an unverified merge
-# stays visible afterwards. A verified merge records merge_verification=verified
-# and merge_verified_head=<sha>; absence of both keys means unknown, never
-# verified. Both keys are written before pr= so the metadata identity contract in
-# bin/fm-pr-lib.sh still parses. The flag is recognised only before the optional
-# -- separator; after it, it is forwarded to gh-axi, which rejects it.
+# --allow-unverified <check-name> is the captain's explicit override. It is never
+# a default and never inferred from the environment, and it waives exactly the
+# one named check and nothing else. Verification still runs: every refusal above
+# still refuses, so an empty rollup, any other failing check run, any other check
+# run that reported no result, an unmergeable state, and a blocking review each
+# still stop the merge. A head whose only check run is the waived one refuses
+# too, because waiving it leaves nothing that examined the head at all.
+#
+# A name that matches no check run on the head is refused rather than accepted,
+# so a typo cannot silently widen the waiver back into a total override, and a
+# bare --allow-unverified carrying no name is refused for the same reason: an
+# override that cannot say what it waived is the defect this argument exists to
+# remove. The name must be a single line with no quote or backslash character,
+# because it is embedded in the forge query as a string literal and repeated in
+# refusals.
+#
+# An overridden merge records merge_verification=override and
+# merge_waived_check=<name> in the task's meta, so the record says which check
+# was waived rather than only that something was. A verified merge records
+# merge_verification=verified and merge_verified_head=<sha>; an overridden merge
+# records no verified head, because one check on it was never verified. Absence
+# of all of these keys means unknown, never verified. They are written before pr=
+# so the metadata identity contract in bin/fm-pr-lib.sh still parses. The flag is
+# recognised only before the optional -- separator; after it, it is forwarded to
+# gh-axi, which rejects it.
 #
 # The final verification is not atomically bound to the merge. It narrows the
 # remaining race window to the verification metadata write, but a head can still
@@ -57,7 +74,7 @@
 # Merge method defaults to --squash when the caller passes none of --squash,
 # --merge, --rebase, or --method after the optional -- separator. Extra args
 # must not include --repo or -R because the repository comes only from the URL.
-# Usage: fm-pr-merge.sh <task-id> <pr-url> [--allow-unverified] [-- <extra gh-axi pr merge args>]
+# Usage: fm-pr-merge.sh <task-id> <pr-url> [--allow-unverified <check-name>] [-- <extra gh-axi pr merge args>]
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -88,10 +105,44 @@ PR_REPO=$FM_PR_REPO
 PR_NUMBER=$FM_PR_NUMBER
 shift 2
 
+# The waived check name is embedded in the forge query as a jq string literal and
+# repeated in refusals, so a quote, a backslash, or a control character is
+# refused rather than escaped. A name beginning with a dash is refused because
+# the flag's argument is the name itself: a following flag means the name was
+# omitted, and a nameless override is the defect this argument removes.
+waived_check_name_valid() {
+  local name=$1
+  [ -n "$name" ] || return 1
+  case "$name" in
+    -*) return 1 ;;
+    *'"'*) return 1 ;;
+    *\\*) return 1 ;;
+  esac
+  [ "$name" = "${name//[[:cntrl:]]/}" ]
+}
+
 ALLOW_UNVERIFIED=0
+WAIVED_CHECK=
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --allow-unverified) ALLOW_UNVERIFIED=1; shift ;;
+    --allow-unverified)
+      shift
+      if [ "$#" -eq 0 ]; then
+        echo "error: --allow-unverified requires the name of the one check it waives; a nameless override is refused" >&2
+        exit 2
+      fi
+      if ! waived_check_name_valid "$1"; then
+        echo "error: --allow-unverified requires one check name: a single line with no quote or backslash character, not starting with a dash" >&2
+        exit 2
+      fi
+      WAIVED_CHECK=$1
+      ALLOW_UNVERIFIED=1
+      shift
+      ;;
+    --allow-unverified=*)
+      echo "error: --allow-unverified requires the name of the one check it waives as a separate argument" >&2
+      exit 2
+      ;;
     --) shift; break ;;
     *) break ;;
   esac
@@ -166,6 +217,22 @@ PR_VERIFY_QUERY='"head=\(.headRefOid // "")",
 "failing=\((.statusCheckRollup // []) | map(select(((.conclusion // .state // "") | ascii_upcase) as $s | ('"$PR_VERIFY_FAILING"' | index($s)) != null)) | length)",
 "unrun=\((.statusCheckRollup // []) | map(select(((.conclusion // .state // "") | ascii_upcase) as $s | $s != "SUCCESS" and ('"$PR_VERIFY_FAILING"' | index($s)) == null)) | length)"'
 
+# Three further lines, asked for only when a check is waived, so a merge with no
+# override sends byte-identical query text and reads back the same seven lines it
+# always did. They count the named check's members and how those members break
+# down, which is exactly what has to be subtracted from the totals above. A
+# CheckRun carries .name and a legacy StatusContext carries .context.
+if [ -n "$WAIVED_CHECK" ]; then
+  PR_VERIFY_WAIVED_SELECT='(.statusCheckRollup // []) | map(select(((.name // .context // "") == "'"$WAIVED_CHECK"'")))'
+  # $s below is jq's own binding, as above; only PR_VERIFY_WAIVED_SELECT and
+  # PR_VERIFY_FAILING are expanded by the shell.
+  # shellcheck disable=SC2016
+  PR_VERIFY_QUERY=$PR_VERIFY_QUERY',
+"waived=\(('"$PR_VERIFY_WAIVED_SELECT"') | length)",
+"waived_failing=\(('"$PR_VERIFY_WAIVED_SELECT"') | map(select(((.conclusion // .state // "") | ascii_upcase) as $s | ('"$PR_VERIFY_FAILING"' | index($s)) != null)) | length)",
+"waived_unrun=\(('"$PR_VERIFY_WAIVED_SELECT"') | map(select(((.conclusion // .state // "") | ascii_upcase) as $s | $s != "SUCCESS" and ('"$PR_VERIFY_FAILING"' | index($s)) == null)) | length)"'
+fi
+
 VERIFIED_HEAD=
 
 # An empty rollup has more than one cause, and the two common ones need
@@ -198,8 +265,9 @@ empty_rollup_evidence() {
 }
 
 verify_current_head() {
-  local output line joined
+  local output line joined remaining eff_failing eff_unrun
   local head='' mergeable='' review='' checks='' unsuccessful='' failing='' unrun=''
+  local waived='' waived_failing='' waived_unrun=''
   local -a reasons=()
 
   command -v gh >/dev/null 2>&1 || {
@@ -221,6 +289,9 @@ verify_current_head() {
       unsuccessful=*) unsuccessful=${line#unsuccessful=} ;;
       failing=*) failing=${line#failing=} ;;
       unrun=*) unrun=${line#unrun=} ;;
+      waived=*) waived=${line#waived=} ;;
+      waived_failing=*) waived_failing=${line#waived_failing=} ;;
+      waived_unrun=*) waived_unrun=${line#waived_unrun=} ;;
     esac
   done <<< "$output"
 
@@ -247,6 +318,22 @@ verify_current_head() {
       "$head" >&2
     return 1
   fi
+  # The waived counts are subtracted from the totals below, so a count that is
+  # unreadable or cannot be a subset of what it is subtracted from would silently
+  # shrink a refusal. Each is validated on its own and against its own total,
+  # exactly as the three above are, and an unreadable answer stays unreadable.
+  if [ -n "$WAIVED_CHECK" ]; then
+    if [ -z "$waived" ] || [ -n "${waived//[0-9]/}" ] \
+      || [ -z "$waived_failing" ] || [ -n "${waived_failing//[0-9]/}" ] \
+      || [ -z "$waived_unrun" ] || [ -n "${waived_unrun//[0-9]/}" ] \
+      || [ "$waived" -gt "$checks" ] \
+      || [ "$((waived_failing + waived_unrun))" -gt "$waived" ] \
+      || [ "$waived_failing" -gt "$failing" ] || [ "$waived_unrun" -gt "$unrun" ]; then
+      printf 'error: refusing to merge head %s: the check rollup could not be read from GitHub\n' \
+        "$head" >&2
+      return 1
+    fi
+  fi
 
   [ "$mergeable" = MERGEABLE ] \
     || reasons+=("the pull request is not mergeable (mergeable=${mergeable:-unreported})")
@@ -256,8 +343,25 @@ verify_current_head() {
   # counts below. A non-empty rollup reports its failed and its unrun members
   # separately, so "this was examined and found broken" never reaches the
   # captain wearing the words of "this was never examined", or the reverse.
+  # An empty rollup is decided first and identically either way, because there is
+  # nothing on the head for a waiver to name. Everything the waiver does not name
+  # is then judged by exactly the counts above, less the waived member's own.
   if [ "$checks" -eq 0 ]; then
     reasons+=("no check runs exist on this head$(empty_rollup_evidence "$head")")
+  elif [ -n "$WAIVED_CHECK" ]; then
+    remaining=$((checks - waived))
+    if [ "$waived" -eq 0 ]; then
+      reasons+=("no check run named \"$WAIVED_CHECK\" exists on this head, so the override names nothing it could waive")
+    elif [ "$remaining" -eq 0 ]; then
+      reasons+=("waiving check \"$WAIVED_CHECK\" leaves no other check run on this head, so nothing examined it")
+    else
+      eff_failing=$((failing - waived_failing))
+      eff_unrun=$((unrun - waived_unrun))
+      [ "$eff_failing" -eq 0 ] \
+        || reasons+=("$eff_failing of the $remaining check runs other than the waived \"$WAIVED_CHECK\" failed")
+      [ "$eff_unrun" -eq 0 ] \
+        || reasons+=("$eff_unrun of the $remaining check runs other than the waived \"$WAIVED_CHECK\" reported no result (queued, in progress, skipped, neutral, cancelled, or held for approval)")
+    fi
   else
     [ "$failing" -eq 0 ] \
       || reasons+=("$failing of $checks check runs failed")
@@ -281,11 +385,11 @@ merge_meta_cleanup() {
 trap merge_meta_cleanup EXIT
 trap 'exit 1' HUP INT TERM
 
-# Record how this merge was authorised. The two keys are emitted before any
+# Record how this merge was authorised. The three keys are emitted before any
 # pr=/pr_head= lines so fm_pr_metadata_identity_parse, which refuses any unknown
 # key after pr=, still accepts the file at every instant.
 record_merge_verification() {
-  local status=$1 head=$2 line state_device meta_device
+  local status=$1 head=$2 waived=$3 line state_device meta_device
   state_device=$(fm_pr_file_device "$STATE") || return 1
   meta_device=$(fm_pr_file_device "$META") || return 1
   [ "$meta_device" = "$state_device" ] || return 1
@@ -293,12 +397,13 @@ record_merge_verification() {
   {
     while IFS= read -r line || [ -n "$line" ]; do
       case "$line" in
-        merge_verification=*|merge_verified_head=*|pr=*|pr_head=*) ;;
+        merge_verification=*|merge_verified_head=*|merge_waived_check=*|pr=*|pr_head=*) ;;
         *) printf '%s\n' "$line" ;;
       esac
     done < "$META"
     printf 'merge_verification=%s\n' "$status"
     [ -z "$head" ] || printf 'merge_verified_head=%s\n' "$head"
+    [ -z "$waived" ] || printf 'merge_waived_check=%s\n' "$waived"
     while IFS= read -r line || [ -n "$line" ]; do
       case "$line" in
         pr=*|pr_head=*) printf '%s\n' "$line" ;;
@@ -372,9 +477,10 @@ else
   [ "$REBUILD" = 0 ] || printf 'rebuilt: state/%s.landing from %s\n' "$ID" "$URL"
 fi
 
-if [ "$ALLOW_UNVERIFIED" -ne 1 ]; then
-  verify_current_head || exit 1
-fi
+# The override does not skip this. It waives one named check inside the same
+# verification, so a head that is red for any other reason still leaves the task
+# with no pr= and no armed poll.
+verify_current_head || exit 1
 
 [ "$LIVE_TASK" = 0 ] || "$SCRIPT_DIR/fm-pr-check.sh" "$ID" "$URL"
 META=$RECORD
@@ -383,20 +489,26 @@ grep -qxF "pr=$URL" "$RECORD" || {
   exit 1
 }
 
+VERIFIED_HEAD=
+verify_current_head || exit 1
 if [ "$ALLOW_UNVERIFIED" -eq 1 ]; then
+  # One check on this head was waived rather than verified, so the merge records
+  # the waiver and no verified head: the head as a whole was never verified.
   MERGE_VERIFICATION=override
   VERIFIED_HEAD=
 else
-  VERIFIED_HEAD=
-  verify_current_head || exit 1
   MERGE_VERIFICATION=verified
 fi
 
-record_merge_verification "$MERGE_VERIFICATION" "$VERIFIED_HEAD" || {
+record_merge_verification "$MERGE_VERIFICATION" "$VERIFIED_HEAD" "$WAIVED_CHECK" || {
   echo "error: merge verification metadata could not be recorded" >&2
   exit 1
 }
 grep -qxF "merge_verification=$MERGE_VERIFICATION" "$META" || {
+  echo "error: merge verification metadata could not be recorded" >&2
+  exit 1
+}
+[ -z "$WAIVED_CHECK" ] || grep -qxF "merge_waived_check=$WAIVED_CHECK" "$META" || {
   echo "error: merge verification metadata could not be recorded" >&2
   exit 1
 }

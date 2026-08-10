@@ -30,7 +30,14 @@
 #   (l) a non-mergeable PR refuses, including a not-yet-computed UNKNOWN
 #   (m) a review requesting changes refuses
 #   (n) an unreadable or absent gh refuses rather than merging unverified
-#   (o) --allow-unverified merges without verifying and records the override
+#   (o) --allow-unverified <check> waives exactly that check and records which
+#   (o1) the same head with a second red still refuses under the same override
+#   (o2) an empty rollup still refuses under the override
+#   (o3) a named check absent from the head refuses rather than waiving nothing
+#   (o4) waiving the head's only check run refuses: nothing examined it
+#   (o5) a bare --allow-unverified, with or without a following flag, is refused
+#   (o6) waived counts that cannot be a subset of the totals refuse as unreadable
+#   (o7) a merge with no override asks the forge for nothing extra
 #   (p) the override is never inferred from the environment or from after --
 #   (q) the torn-down-metadata refusal still fires first, unchanged
 #   (r) the real GitHub query is exercised end to end against API-shaped JSON
@@ -98,6 +105,14 @@ write_verify_payload() {
 # A green head: mergeable, no review blocking, ten check runs, none unsuccessful.
 write_green_payload() {
   write_verify_payload "$1" "${2:-$GREEN_HEAD}" MERGEABLE '' 10 0
+}
+
+# append_waived_counts <file> <waived> <waived_failing> <waived_unrun>
+# The three further lines fm-pr-merge.sh reads back only when a check is waived:
+# how many rollup members carry the waived name, and how those members break
+# down between the two disjoint unsuccessful buckets.
+append_waived_counts() {
+  printf 'waived=%s\nwaived_failing=%s\nwaived_unrun=%s\n' "$2" "$3" "$4" >> "$1"
 }
 
 # gh-axi mock recording every invocation to a log file, and a `gh` mock standing
@@ -761,35 +776,259 @@ test_absent_gh_refuses() {
 }
 
 # --- explicit override ------------------------------------------------------
+# The override waives one NAMED check. Everything it does not name is still
+# verified, so each case below constructs a head that is red for a second reason
+# and watches the same override refuse it.
 
-test_allow_unverified_merges_and_records_override() {
+WAIVED_CHECK_NAME='PR must be raised via no-mistakes'
+
+test_allow_unverified_waives_only_the_named_check() {
   local case_dir rc head=6161616161616161616161616161616161616161
-  case_dir=$(make_case override-allowed)
+  case_dir=$(make_case override-waives-named)
   mkdir -p "$case_dir/wt"
   add_gh_mocks "$case_dir" "$head"
-  # Red on every axis, so only the explicit override can let this through.
-  write_verify_payload "$case_dir/verify.txt" "$head" CONFLICTING CHANGES_REQUESTED 0 0
+  # Ten check runs, one of them red, and that one is the waived check: the
+  # fork-landing shape the override exists for.
+  write_verify_payload "$case_dir/verify.txt" "$head" MERGEABLE '' 10 1 1 0
+  append_waived_counts "$case_dir/verify.txt" 1 1 0
   : > "$case_dir/gh-axi.log"
   : > "$case_dir/gh.log"
 
   set +e
-  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/41 --allow-unverified \
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/41 \
+    --allow-unverified "$WAIVED_CHECK_NAME" \
     > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
 
-  expect_code 0 "$rc" "override-allowed: the explicit override should merge"
+  expect_code 0 "$rc" "override-waives-named: a head red only on the named check should merge"
   grep -qxF 'pr merge 41 --repo example/repo --squash' "$case_dir/gh-axi.log" \
-    || fail "override-allowed: the overridden merge did not run"
+    || fail "override-waives-named: the overridden merge did not run"
   assert_grep 'merge_verification=override' "$case_dir/state/task-x1.meta" \
-    "override-allowed: the override was not recorded in the task record"
+    "override-waives-named: the override was not recorded in the task record"
+  assert_grep "merge_waived_check=$WAIVED_CHECK_NAME" "$case_dir/state/task-x1.meta" \
+    "override-waives-named: the record does not name which check was waived"
   assert_no_grep 'merge_verification=verified' "$case_dir/state/task-x1.meta" \
-    "override-allowed: an unverified merge was recorded as verified"
+    "override-waives-named: a merge with a waived check was recorded as verified"
   assert_no_grep 'merge_verified_head=' "$case_dir/state/task-x1.meta" \
-    "override-allowed: an unverified merge recorded a verified head"
-  assert_no_grep 'statusCheckRollup' "$case_dir/gh.log" \
-    "override-allowed: the override still queried the forge for a verification it ignores"
-  pass "fm-pr-merge merges on the explicit override and records it as unverified"
+    "override-waives-named: a merge with a waived check recorded a verified head"
+  assert_grep 'statusCheckRollup' "$case_dir/gh.log" \
+    "override-waives-named: the override skipped verification instead of narrowing it"
+  pass "fm-pr-merge waives exactly the named check and records which check it waived"
+}
+
+# The paired negative control: the SAME pull request, the SAME override, plus one
+# more red. The second red is not the captain's named exception, so it refuses.
+test_allow_unverified_still_refuses_a_second_red() {
+  local case_dir rc head=6161616161616161616161616161616161616161
+  case_dir=$(make_case override-second-red)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  write_verify_payload "$case_dir/verify.txt" "$head" MERGEABLE '' 11 2 2 0
+  append_waived_counts "$case_dir/verify.txt" 1 1 0
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/42 \
+    --allow-unverified "$WAIVED_CHECK_NAME" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "override-second-red: a second failing check must still refuse the merge"
+  assert_grep "1 of the 10 check runs other than the waived \"$WAIVED_CHECK_NAME\" failed" \
+    "$case_dir/stderr" "override-second-red: the refusal did not name the unwaived failure"
+  assert_grep "$head" "$case_dir/stderr" \
+    "override-second-red: the refusal did not name the head it evaluated"
+  assert_no_merge_side_effects "$case_dir" override-second-red
+  pass "fm-pr-merge refuses a second red under the same named override"
+}
+
+# A check still running is not a pass, and the override does not make it one.
+test_allow_unverified_still_refuses_an_unrun_check() {
+  local case_dir rc head=6262626262626262626262626262626262626262
+  case_dir=$(make_case override-unrun-remains)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  write_verify_payload "$case_dir/verify.txt" "$head" MERGEABLE '' 11 2 1 1
+  append_waived_counts "$case_dir/verify.txt" 1 1 0
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/43 \
+    --allow-unverified "$WAIVED_CHECK_NAME" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "override-unrun-remains: a check with no verdict must still refuse"
+  assert_grep "1 of the 10 check runs other than the waived \"$WAIVED_CHECK_NAME\" reported no result" \
+    "$case_dir/stderr" "override-unrun-remains: the refusal did not name the member with no verdict"
+  assert_no_merge_side_effects "$case_dir" override-unrun-remains
+  pass "fm-pr-merge refuses an unwaived check that reported no result under the named override"
+}
+
+# The empty-check-set law survives the override intact: nothing examined the
+# head, so there is nothing on it the override could name.
+test_allow_unverified_still_refuses_empty_rollup() {
+  local case_dir rc head=6363636363636363636363636363636363636363
+  case_dir=$(make_case override-empty-rollup)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  write_verify_payload "$case_dir/verify.txt" "$head" MERGEABLE '' 0 0
+  append_waived_counts "$case_dir/verify.txt" 0 0 0
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/44 \
+    --allow-unverified "$WAIVED_CHECK_NAME" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "override-empty-rollup: an empty rollup must refuse even under the override"
+  assert_grep 'no check runs exist on this head' "$case_dir/stderr" \
+    "override-empty-rollup: the refusal did not name the empty check rollup"
+  assert_no_merge_side_effects "$case_dir" override-empty-rollup
+  pass "fm-pr-merge still refuses an empty check rollup under the named override"
+}
+
+# A name that matches nothing is refused, so a typo cannot become a waiver of
+# everything by waiving nothing in particular.
+test_allow_unverified_refuses_a_check_absent_from_the_head() {
+  local case_dir rc head=6464646464646464646464646464646464646464
+  case_dir=$(make_case override-absent-check)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  write_verify_payload "$case_dir/verify.txt" "$head" MERGEABLE '' 10 1 1 0
+  append_waived_counts "$case_dir/verify.txt" 0 0 0
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/45 \
+    --allow-unverified 'PR must be raised via no-mistkaes' \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "override-absent-check: a name matching no check run must refuse"
+  assert_grep 'no check run named "PR must be raised via no-mistkaes" exists on this head' \
+    "$case_dir/stderr" "override-absent-check: the refusal did not name the absent check"
+  assert_no_merge_side_effects "$case_dir" override-absent-check
+  pass "fm-pr-merge refuses a waiver naming a check that is not on the head"
+}
+
+# Waiving the only check on a head leaves nothing that examined it, which is the
+# empty rollup again by another route.
+test_allow_unverified_refuses_when_the_waiver_empties_the_rollup() {
+  local case_dir rc head=6565656565656565656565656565656565656565
+  case_dir=$(make_case override-empties-rollup)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  write_verify_payload "$case_dir/verify.txt" "$head" MERGEABLE '' 1 1 1 0
+  append_waived_counts "$case_dir/verify.txt" 1 1 0
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/46 \
+    --allow-unverified "$WAIVED_CHECK_NAME" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "override-empties-rollup: waiving the only check run must refuse"
+  assert_grep "waiving check \"$WAIVED_CHECK_NAME\" leaves no other check run on this head" \
+    "$case_dir/stderr" "override-empties-rollup: the refusal did not say the head was left unexamined"
+  assert_no_merge_side_effects "$case_dir" override-empties-rollup
+  pass "fm-pr-merge refuses a waiver that would leave no check run examining the head"
+}
+
+# A nameless override is the defect this argument exists to remove, so every
+# shape of it refuses rather than falling back to waiving everything.
+test_bare_allow_unverified_is_refused() {
+  local case_dir rc head=6666666666666666666666666666666666666666
+  local -a variants=('' '--' '=named')
+  local variant label
+  case_dir=$(make_case override-bare)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  # Green everywhere except one failing check, so a total override would merge
+  # and only a refusal keeps this head where it is.
+  write_verify_payload "$case_dir/verify.txt" "$head" MERGEABLE '' 10 1 1 0
+  append_waived_counts "$case_dir/verify.txt" 1 1 0
+
+  for variant in "${variants[@]}"; do
+    label=${variant:-none}
+    : > "$case_dir/gh-axi.log"
+    set +e
+    case "$variant" in
+      '') run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/47 \
+            --allow-unverified > "$case_dir/stdout" 2> "$case_dir/stderr" ;;
+      '--') run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/47 \
+            --allow-unverified -- --squash > "$case_dir/stdout" 2> "$case_dir/stderr" ;;
+      *) run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/47 \
+            "--allow-unverified=$WAIVED_CHECK_NAME" > "$case_dir/stdout" 2> "$case_dir/stderr" ;;
+    esac
+    rc=$?
+    set -e
+
+    expect_code 2 "$rc" "override-bare($label): a nameless override must be refused"
+    assert_grep 'error: --allow-unverified requires' "$case_dir/stderr" \
+      "override-bare($label): the refusal did not say the override needs a check name"
+    assert_no_merge_side_effects "$case_dir" "override-bare($label)"
+  done
+  pass "fm-pr-merge refuses --allow-unverified with no check name of its own"
+}
+
+# The waived counts are subtracted from the totals, so a response whose waived
+# members cannot be a subset of them was not understood, and an unreadable
+# rollup stays unreadable rather than shrinking a refusal.
+test_waived_counts_outside_the_totals_refuse_as_unreadable() {
+  local case_dir rc head=6767676767676767676767676767676767676767
+  case_dir=$(make_case override-unreadable-waived)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  write_verify_payload "$case_dir/verify.txt" "$head" MERGEABLE '' 10 1 1 0
+  # Two failures waived out of the one the rollup reported.
+  append_waived_counts "$case_dir/verify.txt" 2 2 0
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/48 \
+    --allow-unverified "$WAIVED_CHECK_NAME" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "override-unreadable-waived: waived counts outside the totals must refuse"
+  assert_grep 'the check rollup could not be read from GitHub' "$case_dir/stderr" \
+    "override-unreadable-waived: the refusal did not report the rollup as unreadable"
+  assert_no_merge_side_effects "$case_dir" override-unreadable-waived
+  pass "fm-pr-merge refuses waived counts that cannot be a subset of the rollup it read"
+}
+
+# The other direction of the same change: with no override, the forge is asked
+# for exactly what it was always asked for and nothing about a waived check.
+test_no_override_asks_the_forge_for_nothing_extra() {
+  local case_dir rc
+  case_dir=$(make_case no-override-query)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$GREEN_HEAD"
+  : > "$case_dir/gh-axi.log"
+  : > "$case_dir/gh.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/49 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "no-override-query: a green PR must still merge"
+  assert_no_grep 'waived' "$case_dir/gh.log" \
+    "no-override-query: a merge with no override asked the forge about a waived check"
+  assert_no_grep 'merge_waived_check=' "$case_dir/state/task-x1.meta" \
+    "no-override-query: a merge with no override recorded a waived check"
+  pass "fm-pr-merge asks the forge for nothing about a waiver when no check is waived"
 }
 
 test_verified_merge_records_verification() {
@@ -858,6 +1097,7 @@ test_override_is_never_inferred() {
 
   set +e
   FM_ALLOW_UNVERIFIED=1 ALLOW_UNVERIFIED=1 FM_PR_MERGE_ALLOW_UNVERIFIED=1 \
+  WAIVED_CHECK="$WAIVED_CHECK_NAME" FM_PR_MERGE_WAIVED_CHECK="$WAIVED_CHECK_NAME" \
     run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/43 \
       > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
@@ -872,7 +1112,8 @@ test_override_is_never_inferred() {
 
   : > "$case_dir/gh-axi.log"
   set +e
-  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/43 -- --allow-unverified \
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/43 \
+    -- --allow-unverified "$WAIVED_CHECK_NAME" \
     > "$case_dir/stdout2" 2> "$case_dir/stderr2"
   rc=$?
   set -e
@@ -899,14 +1140,21 @@ write_rollup_fixture() {
 check_runs_json() {
   local total=$1 conclusion=$2 i out=
   for ((i = 0; i < total; i++)); do
-    out="$out{\"__typename\":\"CheckRun\",\"status\":\"COMPLETED\",\"conclusion\":\"$conclusion\"},"
+    out="$out{\"__typename\":\"CheckRun\",\"name\":\"ci/job-$i\",\"status\":\"COMPLETED\",\"conclusion\":\"$conclusion\"},"
   done
   printf '%s' "$out"
+}
+
+# One named check run, so a waiver has something concrete to name and the
+# selection has other names to discriminate against.
+named_check_run_json() {
+  printf '{"__typename":"CheckRun","name":"%s","status":"COMPLETED","conclusion":"%s"}' "$1" "$2"
 }
 
 run_fixture_case() {
   local name=$1 rollup=$2 mergeable=$3 review=$4 number=$5 expect_rc=$6 expect_msg=$7
   local case_dir rc head=9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a
+  shift 7
   case_dir=$(make_case "fixture-$name")
   mkdir -p "$case_dir/wt"
   add_gh_mocks "$case_dir" "$head"
@@ -915,7 +1163,7 @@ run_fixture_case() {
 
   set +e
   FM_TEST_GH_FIXTURE="$case_dir/pr.json" \
-    run_pr_merge "$case_dir" task-x1 "https://github.com/example/repo/pull/$number" \
+    run_pr_merge "$case_dir" task-x1 "https://github.com/example/repo/pull/$number" "$@" \
       > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
@@ -996,6 +1244,41 @@ test_real_query_against_api_shaped_json() {
     'the pull request is not mergeable (mergeable=CONFLICTING)'
   run_fixture_case changes-requested "[${success_runs%,}]" MERGEABLE CHANGES_REQUESTED 59 1 \
     'a review requests changes'
+
+  # The waiver runs through the same real query, so the name matching is under
+  # test against API-shaped members rather than against a canned count.
+  local waived_red second_red legacy_red
+  waived_red=$(named_check_run_json "$WAIVED_CHECK_NAME" FAILURE)
+  second_red=$(named_check_run_json 'build (ubuntu-latest)' FAILURE)
+  legacy_red='{"__typename":"StatusContext","context":"ci/legacy","state":"FAILURE"}'
+
+  # Red only on the named check: the fork-landing shape, and the one case the
+  # override exists to let through.
+  run_fixture_case waive-named-red "[${success_runs%,},$waived_red]" MERGEABLE '' 68 0 '' \
+    --allow-unverified "$WAIVED_CHECK_NAME"
+  # The same pull request with a second red: the same override, still refused.
+  run_fixture_case waive-named-red-second-red \
+    "[${success_runs%,},$waived_red,$second_red]" MERGEABLE '' 69 1 \
+    "1 of the 11 check runs other than the waived \"$WAIVED_CHECK_NAME\" failed" \
+    --allow-unverified "$WAIVED_CHECK_NAME"
+  # A name that matches no member, against a rollup that does have a red one.
+  run_fixture_case waive-absent-name "[${success_runs%,},$waived_red]" MERGEABLE '' 70 1 \
+    'no check run named "no such check" exists on this head' \
+    --allow-unverified 'no such check'
+  # A legacy commit status names itself in .context rather than .name.
+  run_fixture_case waive-legacy-status "[${success_runs%,},$legacy_red]" MERGEABLE '' 71 0 '' \
+    --allow-unverified ci/legacy
+  # Waiving the only member leaves nothing that examined the head.
+  run_fixture_case waive-only-member "[$waived_red]" MERGEABLE '' 72 1 \
+    "waiving check \"$WAIVED_CHECK_NAME\" leaves no other check run on this head" \
+    --allow-unverified "$WAIVED_CHECK_NAME"
+  # The waiver narrows the check rollup and nothing else.
+  run_fixture_case waive-does-not-cover-review "[${success_runs%,},$waived_red]" \
+    MERGEABLE CHANGES_REQUESTED 73 1 'a review requests changes' \
+    --allow-unverified "$WAIVED_CHECK_NAME"
+  run_fixture_case waive-does-not-cover-mergeable "[${success_runs%,},$waived_red]" \
+    CONFLICTING '' 74 1 'the pull request is not mergeable (mergeable=CONFLICTING)' \
+    --allow-unverified "$WAIVED_CHECK_NAME"
   pass "fm-pr-merge's own GitHub query reads API-shaped responses correctly, empty rollups included"
 }
 # --- released tasks (fork landing records) ----------------------------------
@@ -1246,7 +1529,15 @@ test_approved_review_still_merges
 test_unreadable_check_counts_refuse
 test_unreadable_forge_state_refuses
 test_absent_gh_refuses
-test_allow_unverified_merges_and_records_override
+test_allow_unverified_waives_only_the_named_check
+test_allow_unverified_still_refuses_a_second_red
+test_allow_unverified_still_refuses_an_unrun_check
+test_allow_unverified_still_refuses_empty_rollup
+test_allow_unverified_refuses_a_check_absent_from_the_head
+test_allow_unverified_refuses_when_the_waiver_empties_the_rollup
+test_bare_allow_unverified_is_refused
+test_waived_counts_outside_the_totals_refuse_as_unreadable
+test_no_override_asks_the_forge_for_nothing_extra
 test_verified_merge_records_verification
 test_final_verification_refuses_changed_head
 test_override_is_never_inferred
