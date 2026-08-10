@@ -107,6 +107,88 @@ fi
 REAL_GH=$1
 shift
 
+FALLBACK_SUPPORTED=0
+STATE_ROOT=
+STATE_PATH=
+if fallback_shape_parse "$@"; then
+  FALLBACK_SUPPORTED=1
+fi
+
+emit_typed_failure() {
+  local label=$1 state=$2
+  if [ "$JSON_FIELDS" = name,state,bucket,completedAt,link ]; then
+    printf '[{"name":"Firstmate CI fallback - %s","state":"%s","bucket":"fail","completedAt":"","link":""}]\n' \
+      "$label" "$state"
+  else
+    printf '[{"name":"Firstmate CI fallback - %s","state":"%s","bucket":"fail","completedAt":""}]\n' \
+      "$label" "$state"
+  fi
+}
+
+canonical_lowercase() {
+  local value=$1
+  value=${value//A/a}
+  value=${value//B/b}
+  value=${value//C/c}
+  value=${value//D/d}
+  value=${value//E/e}
+  value=${value//F/f}
+  value=${value//G/g}
+  value=${value//H/h}
+  value=${value//I/i}
+  value=${value//J/j}
+  value=${value//K/k}
+  value=${value//L/l}
+  value=${value//M/m}
+  value=${value//N/n}
+  value=${value//O/o}
+  value=${value//P/p}
+  value=${value//Q/q}
+  value=${value//R/r}
+  value=${value//S/s}
+  value=${value//T/t}
+  value=${value//U/u}
+  value=${value//V/v}
+  value=${value//W/w}
+  value=${value//X/x}
+  value=${value//Y/y}
+  value=${value//Z/z}
+  printf '%s\n' "$value"
+}
+
+if [ "$FALLBACK_SUPPORTED" -eq 1 ]; then
+  if [ -n "${FM_GH_CI_STATE_ROOT:-}" ]; then
+    STATE_ROOT=$FM_GH_CI_STATE_ROOT
+  elif [ -n "${XDG_STATE_HOME:-}" ]; then
+    STATE_ROOT="$XDG_STATE_HOME/firstmate/gh-ci-fallback"
+  elif [ -n "${HOME:-}" ]; then
+    STATE_ROOT="$HOME/.local/state/firstmate/gh-ci-fallback"
+  fi
+  if [ -n "$STATE_ROOT" ]; then
+    REPO_OWNER=${REPO%%/*}
+    REPO_NAME=${REPO#*/}
+    CANONICAL_OWNER=$(canonical_lowercase "$REPO_OWNER")
+    CANONICAL_REPO=$(canonical_lowercase "$REPO_NAME")
+    STATE_PATH="$STATE_ROOT/owner-$CANONICAL_OWNER/repository-$CANONICAL_REPO/pr-$NUMBER.json"
+  fi
+fi
+
+clear_deadline_state_or_fail() {
+  if rm -f -- "$STATE_PATH"; then
+    return 0
+  fi
+  echo "fm-gh-ci-fallback: state-error: cannot clear terminal deadline state" >&2
+  emit_typed_failure "state evidence" state_error
+  return 1
+}
+
+finish_terminal() {
+  local label=$1 state=$2
+  clear_deadline_state_or_fail || exit 0
+  emit_typed_failure "$label" "$state"
+  exit 0
+}
+
 ORIGINAL_OUT=$(mktemp "${TMPDIR:-/tmp}/fm-gh-ci-original-out.XXXXXX")
 ORIGINAL_ERR=$(mktemp "${TMPDIR:-/tmp}/fm-gh-ci-original-err.XXXXXX")
 FALLBACK_OUT=$(mktemp "${TMPDIR:-/tmp}/fm-gh-ci-fallback-out.XXXXXX")
@@ -131,6 +213,9 @@ trap 'exit 1' HUP INT TERM
 ORIGINAL_STATUS=0
 "$REAL_GH" "$@" > "$ORIGINAL_OUT" 2> "$ORIGINAL_ERR" || ORIGINAL_STATUS=$?
 if [ "$ORIGINAL_STATUS" -eq 0 ]; then
+  if [ "$FALLBACK_SUPPORTED" -eq 1 ] && [ -n "$STATE_PATH" ]; then
+    clear_deadline_state_or_fail || exit 0
+  fi
   cat "$ORIGINAL_OUT"
   cat "$ORIGINAL_ERR" >&2
   exit 0
@@ -153,43 +238,14 @@ if ! grep -Eq "$DENIAL_PATTERN" "$ORIGINAL_OUT" "$ORIGINAL_ERR"; then
   replay_original
 fi
 
-fallback_shape_parse "$@" || replay_original
-
-emit_typed_failure() {
-  local label=$1 state=$2
-  if [ "$JSON_FIELDS" = name,state,bucket,completedAt,link ]; then
-    printf '[{"name":"Firstmate CI fallback - %s","state":"%s","bucket":"fail","completedAt":"","link":""}]\n' \
-      "$label" "$state"
-  else
-    printf '[{"name":"Firstmate CI fallback - %s","state":"%s","bucket":"fail","completedAt":""}]\n' \
-      "$label" "$state"
-  fi
-}
-
-if [ -n "${FM_GH_CI_STATE_ROOT:-}" ]; then
-  STATE_ROOT=$FM_GH_CI_STATE_ROOT
-elif [ -n "${XDG_STATE_HOME:-}" ]; then
-  STATE_ROOT="$XDG_STATE_HOME/firstmate/gh-ci-fallback"
-elif [ -n "${HOME:-}" ]; then
-  STATE_ROOT="$HOME/.local/state/firstmate/gh-ci-fallback"
-else
+if [ "$FALLBACK_SUPPORTED" -ne 1 ]; then
+  replay_original
+fi
+if [ -z "$STATE_PATH" ]; then
   echo "fm-gh-ci-fallback: configuration-error: no deadline state root is available" >&2
   emit_typed_failure "configuration error" configuration_error
   exit 0
 fi
-SAFE_REPO=${REPO//[^A-Za-z0-9_.-]/_}
-STATE_PATH="$STATE_ROOT/${SAFE_REPO}-pr-${NUMBER}.json"
-
-finish_terminal() {
-  local label=$1 state=$2
-  if ! rm -f -- "$STATE_PATH"; then
-    echo "fm-gh-ci-fallback: state-error: cannot clear terminal deadline state" >&2
-    label="state evidence"
-    state=state_error
-  fi
-  emit_typed_failure "$label" "$state"
-  exit 0
-}
 
 if ! command -v python3 >/dev/null 2>&1 || ! python3 -c '' >/dev/null 2>&1; then
   echo "fm-gh-ci-fallback: dependency-error: python3 is unavailable" >&2

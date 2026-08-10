@@ -3,11 +3,12 @@
 # exact-head workflow-runs CI fallback, and fm-gh.sh's credential-prefix contract.
 #
 # The routed invocation under test is the exact argument vector the no-mistakes PR
-# step builds for GitHub. Nothing here touches the real gh, the real daemon, or any
-# network: a fake gh records how it was called, and a fake credential runner stands in
-# for whatever the home configures. CI cases feed raw workflow-run pages through the
-# same jq expression the helper gives gh, so they exercise the public command contract
-# rather than asserting implementation bytes.
+# step builds for GitHub. Nothing here touches the real gh or the real daemon: a fake gh
+# records how it was called, and a fake credential runner stands in for whatever the
+# home configures. The pinned no-mistakes module is resolved for its public CI consumer
+# boundary. CI cases feed raw workflow-run pages through the same jq expression the
+# helper gives gh, so they exercise the public command contract rather than asserting
+# implementation bytes.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -17,8 +18,11 @@ SHIM="$ROOT/bin/fm-gh-shim.sh"
 WRAPPER="$ROOT/bin/fm-gh.sh"
 CI_FALLBACK="$ROOT/bin/fm-gh-ci-fallback.sh"
 INSTALLER="$ROOT/bin/fm-gh-shim-install.sh"
+NO_MISTAKES_CI_CONSUMER="$ROOT/tests/fixtures/no-mistakes-ci-consumer"
 assert_present "$CI_FALLBACK" "bin/fm-gh-ci-fallback.sh is missing"
 [ -x "$CI_FALLBACK" ] || fail "bin/fm-gh-ci-fallback.sh must be executable"
+assert_present "$NO_MISTAKES_CI_CONSUMER/main.go" "the no-mistakes CI consumer fixture is missing"
+assert_present "$NO_MISTAKES_CI_CONSUMER/go.mod" "the no-mistakes CI consumer module is missing"
 TMP_ROOT=$(fm_test_tmproot fm-gh-shim)
 # Create before normalizing, then normalize: $TMPDIR often carries a trailing slash and
 # these cases compare fixture paths against the installer's own `cd`-normalized output,
@@ -263,13 +267,26 @@ assert_run_field() {
 }
 
 assert_no_mistakes_ci_consumer_rejects() {
-  local jq_bin=$1 out=$2 message=$3 json verdict
+  local out=$1 message=$2 json consumer_dir consumer response verdict
   json=$(printf '%s\n' "$out" | grep -E '^\[' | tail -1)
   [ -n "$json" ] || fail "$message (no JSON check array in the output)"
-  verdict=$(printf '%s' "$json" | "$jq_bin" -r \
-    'if any(.[]; .bucket == "fail") then "fail" elif any(.[]; .bucket == "pending") then "pending" else "pass" end') ||
-    fail "$message (the emitted check output is not valid JSON)"
-  [ "$verdict" = fail ] || fail "$message (consumer verdict was $verdict)"
+  consumer_dir="$TMP_ROOT/no-mistakes-ci-consumer"
+  consumer="$consumer_dir/consumer"
+  response="$consumer_dir/response.json"
+  if [ ! -x "$consumer" ]; then
+    command -v go >/dev/null 2>&1 || fail "$message (Go is required for the pinned no-mistakes consumer)"
+    mkdir -p "$consumer_dir"
+    cp "$NO_MISTAKES_CI_CONSUMER/main.go" "$NO_MISTAKES_CI_CONSUMER/go.mod" "$consumer_dir/"
+    (cd "$consumer_dir" && GOWORK=off go build -mod=mod -o "$consumer" .) ||
+      fail "$message (the pinned no-mistakes consumer did not build)"
+  fi
+  printf '%s\n' "$json" > "$response"
+  verdict=$("$consumer" "$response") || fail "$message (consumer verdict was $verdict)"
+  [ "$verdict" = rejected ] || fail "$message (consumer verdict was $verdict)"
+}
+
+ci_state_path() {
+  printf '%s/owner-o/repository-r/pr-7.json\n' "$1"
 }
 
 write_ci_pages() {
@@ -370,17 +387,21 @@ EOF
 }
 
 test_ci_primary_checks_path_is_preserved_when_readable() {
-  local case_dir real_dir shim_dir out status jq_bin
+  local case_dir real_dir shim_dir state_dir state_path out status jq_bin
   case_dir="$TMP_ROOT/ci-primary"
   real_dir="$case_dir/real"
   shim_dir="$case_dir/shim"
+  state_dir="$case_dir/state"
+  state_path=$(ci_state_path "$state_dir")
   jq_bin=$(command -v jq) || fail "jq is required to inspect the primary check response"
   make_fake_ci_gh "$real_dir"
-  mkdir -p "$shim_dir"
+  mkdir -p "$shim_dir" "$(dirname "$state_path")"
+  printf '%s\n' '{"head":"old","first_seen":1}' > "$state_path"
   ln -sf "$SHIM" "$shim_dir/gh"
 
   status=0
   out=$(FAKE_GH_LOG="$case_dir/gh.calls" FM_TEST_CHECKS_ERROR=success \
+    FM_GH_CI_STATE_ROOT="$state_dir" \
     PATH="$shim_dir:$real_dir:$PATH" \
     gh pr checks 7 --repo o/r --json name,state,bucket,completedAt 2>&1) || status=$?
 
@@ -389,7 +410,42 @@ test_ci_primary_checks_path_is_preserved_when_readable() {
     "the readable primary check result did not pass through unchanged"
   assert_no_grep 'argv:api' "$case_dir/gh.calls" \
     "the readable primary check result unnecessarily reached the Actions fallback"
+  assert_absent "$state_path" "a readable primary check result retained fallback deadline state"
   pass "a readable primary status-check rollup bypasses the Actions fallback"
+}
+
+test_ci_state_identity_is_canonical_and_collision_free() {
+  local case_dir real_dir state_dir first_path second_path out status jq_bin
+  case_dir="$TMP_ROOT/ci-state-identity"
+  real_dir="$case_dir/real"
+  state_dir="$case_dir/state"
+  first_path="$state_dir/owner-foo/repository-bar_baz/pr-7.json"
+  second_path="$state_dir/owner-foo-bar/repository-baz/pr-7.json"
+  jq_bin=$(command -v jq) || fail "jq is required to inspect the primary check response"
+  make_fake_ci_gh "$real_dir"
+  mkdir -p "$(dirname "$first_path")" "$(dirname "$second_path")"
+  printf '%s\n' '{"head":"first","first_seen":1}' > "$first_path"
+  printf '%s\n' '{"head":"second","first_seen":1}' > "$second_path"
+
+  status=0
+  out=$(FAKE_GH_LOG="$case_dir/first.calls" FM_TEST_CHECKS_ERROR=success \
+    FM_GH_CI_STATE_ROOT="$state_dir" \
+    "$CI_FALLBACK" "$real_dir/gh" pr checks 7 --repo Foo/Bar_Baz \
+    --json name,state,bucket,completedAt 2>&1) || status=$?
+  expect_code 0 "$status" "canonical mixed-case primary state cleanup"
+  assert_run_field "$jq_bin" "$out" native-check bucket pass \
+    "canonical mixed-case state cleanup changed the primary result"
+  assert_absent "$first_path" "mixed-case repository identity did not clear its canonical state"
+  assert_present "$second_path" "one repository identity cleared another repository's state"
+
+  status=0
+  out=$(FAKE_GH_LOG="$case_dir/second.calls" FM_TEST_CHECKS_ERROR=success \
+    FM_GH_CI_STATE_ROOT="$state_dir" \
+    "$CI_FALLBACK" "$real_dir/gh" pr checks 7 --repo foo-bar/baz \
+    --json name,state,bucket,completedAt 2>&1) || status=$?
+  expect_code 0 "$status" "distinct repository primary state cleanup"
+  assert_absent "$second_path" "the distinct repository identity did not clear its own state"
+  pass "deadline state identity is canonical and collision-free"
 }
 
 test_ci_403_falls_back_to_exact_head_green_without_privileged_token() {
@@ -463,13 +519,13 @@ test_ci_green_requires_actions_only_repository_authority() {
   real_dir="$case_dir/real"
   shim_dir="$case_dir/shim"
   state_dir="$case_dir/state"
-  state_path="$state_dir/o_r-pr-7.json"
+  state_path=$(ci_state_path "$state_dir")
   head=9898989898989898989898989898989898989898
   jq_bin=$(command -v jq) || fail "jq is required to exercise gh's built-in --jq contract"
   make_fake_ci_gh "$real_dir"
   write_ci_pages "$case_dir/exact.json" exact-head completed '"success"' "$head"
   write_ci_pages "$case_dir/stale.json" stale-head completed '"failure"'
-  mkdir -p "$shim_dir" "$state_dir"
+  mkdir -p "$shim_dir" "$(dirname "$state_path")"
   printf '%s\n' '{"head":"old","first_seen":1}' > "$state_path"
   ln -sf "$SHIM" "$shim_dir/gh"
 
@@ -483,7 +539,7 @@ test_ci_green_requires_actions_only_repository_authority() {
   expect_code 0 "$status" "Actions-only evidence without completeness authority"
   assert_run_field "$jq_bin" "$out" "Firstmate CI fallback - incomplete evidence" bucket fail \
     "green Actions evidence certified a repository without Actions-only authority"
-  assert_no_mistakes_ci_consumer_rejects "$jq_bin" "$out" \
+  assert_no_mistakes_ci_consumer_rejects "$out" \
     "the public CI consumer accepted incomplete Actions-only evidence"
   assert_absent "$state_path" "terminal incomplete evidence retained a stale pending deadline"
   pass "green Actions evidence requires exact repository-level completeness authority"
@@ -514,7 +570,7 @@ test_ci_terminal_actions_conclusions_fail_at_the_consumer_boundary() {
       "$conclusion workflow lost its provider conclusion"
     assert_run_field "$jq_bin" "$out" "$conclusion-workflow" bucket fail \
       "$conclusion workflow did not map to the consumer's failure bucket"
-    assert_no_mistakes_ci_consumer_rejects "$jq_bin" "$out" \
+    assert_no_mistakes_ci_consumer_rejects "$out" \
       "the public CI consumer accepted a $conclusion workflow"
   done
   pass "every terminal non-success Actions conclusion fails at the CI consumer boundary"
@@ -526,10 +582,10 @@ test_ci_unavailable_python_emits_typed_failure_and_clears_state() {
   real_dir="$case_dir/real"
   bad_bin="$case_dir/bad-bin"
   state_dir="$case_dir/state"
-  state_path="$state_dir/o_r-pr-7.json"
+  state_path=$(ci_state_path "$state_dir")
   jq_bin=$(command -v jq) || fail "jq is required to inspect the typed dependency failure"
   make_fake_ci_gh "$real_dir"
-  mkdir -p "$bad_bin" "$state_dir"
+  mkdir -p "$bad_bin" "$(dirname "$state_path")"
   printf '%s\n' '{"head":"old","first_seen":1}' > "$state_path"
   cat > "$bad_bin/python3" <<'EOF'
 #!/bin/sh
@@ -564,8 +620,8 @@ test_ci_head_lookup_errors_preserve_diagnostics_and_clear_state() {
 
   for phase in initial recheck; do
     state_dir="$case_dir/state-$phase"
-    state_path="$state_dir/o_r-pr-7.json"
-    mkdir -p "$state_dir"
+    state_path=$(ci_state_path "$state_dir")
+    mkdir -p "$(dirname "$state_path")"
     printf '%s\n' '{"head":"old","first_seen":1}' > "$state_path"
     status=0
     if [ "$phase" = initial ]; then
@@ -736,7 +792,7 @@ test_ci_terminal_state_cleanup_failure_becomes_a_typed_check() {
   real_dir="$case_dir/real"
   shim_dir="$case_dir/shim"
   state_dir="$case_dir/state"
-  state_path="$state_dir/o_r-pr-7.json"
+  state_path=$(ci_state_path "$state_dir")
   head=bdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbd
   jq_bin=$(command -v jq) || fail "jq is required to exercise gh's built-in --jq contract"
   make_fake_ci_gh "$real_dir"
@@ -778,22 +834,22 @@ test_ci_malformed_deadline_state_becomes_one_typed_check() {
 
   for state_case in corrupt-encoding truncated wrong-shape wrong-types unwritable-root; do
     state_dir="$case_dir/state-$state_case"
-    state_path="$state_dir/o_r-pr-7.json"
+    state_path=$(ci_state_path "$state_dir")
     case "$state_case" in
       corrupt-encoding)
-        mkdir -p "$state_dir"
+        mkdir -p "$(dirname "$state_path")"
         printf '\xff' > "$state_path"
         ;;
       truncated)
-        mkdir -p "$state_dir"
+        mkdir -p "$(dirname "$state_path")"
         printf '%s' '{"head":' > "$state_path"
         ;;
       wrong-shape)
-        mkdir -p "$state_dir"
+        mkdir -p "$(dirname "$state_path")"
         printf '%s\n' '[]' > "$state_path"
         ;;
       wrong-types)
-        mkdir -p "$state_dir"
+        mkdir -p "$(dirname "$state_path")"
         printf '%s\n' '{"head":7,"first_seen":"never"}' > "$state_path"
         ;;
       unwritable-root)
@@ -1208,14 +1264,14 @@ test_ci_workflow_runs_failure_preserves_the_gh_error() {
   case_dir="$TMP_ROOT/ci-runs-error"
   real_dir="$case_dir/real"
   state_dir="$case_dir/state"
-  state_path="$state_dir/o_r-pr-7.json"
+  state_path=$(ci_state_path "$state_dir")
   head=5656565656565656565656565656565656565656
   jq_bin=$(command -v jq) || fail "jq is required to exercise gh's built-in --jq contract"
   make_fake_ci_gh "$real_dir"
   write_ci_pages "$case_dir/stale.json" stale-head completed '"success"'
   printf '%s\n' '[{"workflows":[{"id":7001,"name":"CI","path":".github/workflows/ci.yml","state":"active"}]}]' \
     > "$case_dir/workflows.json"
-  mkdir -p "$state_dir"
+  mkdir -p "$(dirname "$state_path")"
   printf '%s\n' '{"head":"old","first_seen":1}' > "$state_path"
 
   # No FM_TEST_WORKFLOW_PAGES fixture exists, so the workflow-runs read fails the
@@ -1965,6 +2021,7 @@ test_missing_database_record_refuses_before_credential_route
 test_contradictory_registered_remote_refuses_before_credential_route
 test_malformed_and_non_github_targets_refuse_before_credential_route
 test_ci_primary_checks_path_is_preserved_when_readable
+test_ci_state_identity_is_canonical_and_collision_free
 test_ci_403_falls_back_to_exact_head_green_without_privileged_token
 test_ci_deeper_denial_path_falls_back_to_exact_head_green
 test_ci_green_requires_actions_only_repository_authority
