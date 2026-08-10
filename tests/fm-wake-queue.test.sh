@@ -412,28 +412,24 @@ test_slow_annotation_does_not_block_append_and_deleted_file_fails_open() {
 }
 
 test_wake_publish_requires_atomic_recovery_evidence() {
-  local dir state fakebin real_node rc out
+  local dir state fakebin real_mv rc out
   dir=$(make_case wake-publish-recovery-evidence)
   state="$dir/state"
   fakebin="$dir/fakebin"
-  real_node=$(command -v node) || fail "could not locate node for recovery publication fixture"
+  real_mv=$(command -v mv) || fail "could not locate mv for recovery publication fixture"
   printf 'pending:handling:existing\n' > "$state/.watcher-down"
-  cat > "$fakebin/node" <<'SH'
+  cat > "$fakebin/mv" <<'SH'
 #!/usr/bin/env bash
 last=${!#}
 if [ "$last" = "${FM_TEST_PUBLISH_MARKER:-}" ]; then
   exit 1
 fi
-exec "$FM_TEST_REAL_NODE" "$@"
+exec "$FM_TEST_REAL_MV" "$@"
 SH
-  cat > "$fakebin/perl" <<'SH'
-#!/usr/bin/env bash
-exit 127
-SH
-  chmod +x "$fakebin/node" "$fakebin/perl"
+  chmod +x "$fakebin/mv"
 
   set +e
-  PATH="$fakebin:$PATH" FM_TEST_REAL_NODE="$real_node" FM_TEST_PUBLISH_MARKER="$state/.watcher-down" \
+  PATH="$fakebin:$PATH" FM_TEST_REAL_MV="$real_mv" FM_TEST_PUBLISH_MARKER="$state/.watcher-down" \
     append_wake "$state" signal task.status "signal: publish failure"
   rc=$?
   set -e
@@ -443,9 +439,9 @@ SH
   [ ! -s "$state/.wake-queue" ] \
     || fail "wake became durable before its recovery evidence"
 
-  PATH="$fakebin:$PATH" FM_TEST_REAL_NODE="$real_node" \
+  PATH="$fakebin:$PATH" FM_TEST_REAL_MV="$real_mv" \
     append_wake "$state" signal task.status "signal: recovered retry" \
-    || fail "wake retry without perl did not publish durable recovery evidence"
+    || fail "wake retry did not publish durable recovery evidence"
   out="$dir/drain.out"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
     || fail "wake retry did not drain"

@@ -1517,10 +1517,10 @@ test_procevent_captured_result_surfaces_proactively() {
   pass "a captured process-event result wakes a healthy watcher proactively, with no manual drain"
 }
 
-test_procevent_surfaced_result_does_not_rewake() {
-  local dir state out pid before after
-  dir=$(make_case procevent-no-rewake); state="$dir/state"
-  out="$dir/watch.out"
+test_procevent_unacknowledged_result_redrains_until_handled() {
+  local dir state out replay_out replay_err pid before after sequence generation
+  dir=$(make_case procevent-redrain); state="$dir/state"
+  out="$dir/watch.out"; replay_out="$dir/replay.out"; replay_err="$dir/replay.err"
   seed_captured_procevent_result "$dir" || fail "the fixture captured no process-event result"
 
   procevent_watch_bg "$dir" "$out"
@@ -1528,20 +1528,29 @@ test_procevent_surfaced_result_does_not_rewake() {
   wait_for_exit "$pid" 100 || fail "the first proactive wake never happened: $(cat "$out")"
   FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2>&1 || fail "drain after the first process-event wake failed"
 
-  # Still unhandled: the result stays eligible for re-announcement on the durable
-  # queue, but that must never produce a second proactive wake.
+  # An interrupted handler leaves the captured result durable. The successor
+  # must re-surface it through recovery, then its drain must print the same row.
   : > "$out"
   procevent_watch_bg "$dir" "$out"
   pid=$!
-  if ! wait_live "$pid" 40; then
-    fail "an already-surfaced process-event result woke the watcher again: $(cat "$out")"
-  fi
-  reap "$pid"
-  grep -F "procevent lavish delivery-src 1" "$state/.wake-queue" >/dev/null \
-    || fail "re-announcement of the unhandled result stopped when its wake was suppressed"
+  wait_for_exit "$pid" 100 \
+    || fail "an unacknowledged process-event result was not re-surfaced on re-arm: $(cat "$out")"
+  grep -F 'check: rearm-resurface' "$out" >/dev/null \
+    || fail "the successor did not report recovery for the unacknowledged result: $(cat "$out")"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$replay_out" 2> "$replay_err" \
+    || fail "the successor could not re-drain the unacknowledged process-event result"
+  grep "$(printf '\tcheck\t')" "$replay_out" | grep -F 'procevent lavish delivery-src 1' >/dev/null \
+    || fail "the successor drain did not re-print the durable process-event row"
 
   pe_case "$dir" handled delivery-src 1 >/dev/null || fail "could not acknowledge the captured result"
-  FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2>&1 || fail "drain before the handled control failed"
+  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$replay_err")
+  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$replay_err")
+  [ -n "$sequence" ] && [ -n "$generation" ] \
+    || fail "the replay drain omitted its post-handling acknowledgement boundary"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" --recovery-generation "$generation" \
+    || fail "completed process-event handling could not acknowledge the replay"
+  [ ! -s "$state/.wake-queue" ] || fail "acknowledged process-event replay remained durable"
+
   before=$(awk 'END { print NR + 0 }' "$state/.wake-queue" 2>/dev/null || echo 0)
   : > "$out"
   procevent_watch_bg "$dir" "$out"
@@ -1552,7 +1561,7 @@ test_procevent_surfaced_result_does_not_rewake() {
   reap "$pid"
   after=$(awk 'END { print NR + 0 }' "$state/.wake-queue" 2>/dev/null || echo 0)
   [ "$after" = "$before" ] || fail "a handled result was announced again ($before -> $after queued records)"
-  pass "a process-event wake is delivered once: no duplicate wake while queued, and none once handled"
+  pass "an unacknowledged process-event result re-drains until handling is acknowledged"
 }
 
 test_procevent_marker_keys_are_injective() {
@@ -1619,7 +1628,7 @@ test_procevent_surface_serializes_with_drain() {
 }
 
 test_procevent_surface_crash_boundaries() {
-  local dir state out fifo pid reader marker exit_status
+  local dir state out fifo pid reader marker exit_status replay_err sequence generation
   dir=$(make_case procevent-output-fail); state="$dir/state"; out="$dir/watch.out"; fifo="$dir/output.fifo"
   append_wake "$state" check "procevent:output-fail:1" "check: procevent fixture output-fail 1"
   mkfifo "$fifo"
@@ -1664,12 +1673,23 @@ test_procevent_surface_crash_boundaries() {
   [ -n "$marker" ] || fail "the post-marker crash did not reach marker commit"
   : > "$out.replay"
   procevent_watch_bg "$dir" "$out.replay"; pid=$!
-  if ! wait_live "$pid" 40; then
-    fail "a delivered and durably marked record woke again: $(cat "$out.replay")"
-  fi
-  reap "$pid"
-  FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2>&1 || fail "post-marker fixture drain failed"
-  pass "surfacing failures replay before marker commit and suppress only after delivered output"
+  wait_for_exit "$pid" 100 \
+    || fail "an unacknowledged delivered record was not re-surfaced on re-arm: $(cat "$out.replay")"
+  grep -F 'check: rearm-resurface' "$out.replay" >/dev/null \
+    || fail "the successor did not recover the delivered-but-unacknowledged record: $(cat "$out.replay")"
+  replay_err="$out.replay.err"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out.replay.drain" 2> "$replay_err" \
+    || fail "post-marker successor drain failed"
+  grep "$(printf '\tcheck\t')" "$out.replay.drain" | grep -F 'procevent fixture after-marker 1' >/dev/null \
+    || fail "post-marker successor did not re-drain the durable record"
+  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$replay_err")
+  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$replay_err")
+  [ -n "$sequence" ] && [ -n "$generation" ] \
+    || fail "post-marker replay omitted its post-handling acknowledgement boundary"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" --recovery-generation "$generation" \
+    || fail "post-marker replay acknowledgement failed"
+  [ ! -s "$state/.wake-queue" ] || fail "post-marker acknowledgement left the durable record queued"
+  pass "surfacing failures replay until post-handling acknowledgement"
 }
 
 test_procevent_marker_failure_exits_and_replays() {
@@ -1861,7 +1881,7 @@ test_paused_authoritative_working_preserves_wedge_timer
 test_nonterminal_stale_repairs_missing_or_corrupt_timer
 test_triage_log_size_cap_accepts_spaced_wc_counts
 test_procevent_captured_result_surfaces_proactively
-test_procevent_surfaced_result_does_not_rewake
+test_procevent_unacknowledged_result_redrains_until_handled
 test_procevent_marker_keys_are_injective
 test_procevent_surface_serializes_with_drain
 test_procevent_surface_crash_boundaries
