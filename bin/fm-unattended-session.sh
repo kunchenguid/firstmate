@@ -87,6 +87,7 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
 ORIGIN_RECORD="$STATE/.session-origin"
 ORIGIN_LOG="$STATE/unattended-sessions.log"
+START_LOCK="$STATE/.unattended-start.lock"
 CLAIM_WINDOW=${FM_UNATTENDED_CLAIM_WINDOW:-900}
 case "$CLAIM_WINDOW" in ''|*[!0-9]*) CLAIM_WINDOW=900 ;; esac
 
@@ -144,8 +145,10 @@ append_log() {  # <event> <origin-id> <trigger> <detail> [<harness-pid>]
 # unattended session. No backlog read, no project scan, no survey: with an empty
 # queue there is nothing this session was woken for, and it must not go looking.
 queue_record_count() {
-  [ -s "$STATE/.wake-queue" ] || { printf '0\n'; return 0; }
-  grep -c . "$STATE/.wake-queue" 2>/dev/null || printf '0\n'
+  local count
+  count=$(grep -c . "$STATE/.wake-queue" 2>/dev/null)
+  case "$count" in ''|*[!0-9]*) count=0 ;; esac
+  printf '%s\n' "$count"
 }
 
 # Constraint (c), first owner: a live session in this home already owns
@@ -183,6 +186,17 @@ pending_launch_in_flight() {
   [ "$age" -lt "$CLAIM_WINDOW" ]
 }
 
+# A launch entry id is a single safe token: it is written into the flat
+# key=value origin record and the tab-separated attribution log, so anything
+# outside this charset would corrupt the records that make a session
+# attributable.
+entry_id_ok() {  # <candidate>
+  [ -n "$1" ] || return 1
+  case "$1" in
+    *[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+}
+
 # The launch entry, never guessed. config/unattended-session first, then the
 # launcher's own last-used entry, then refuse.
 resolve_entry() {
@@ -193,10 +207,7 @@ resolve_entry() {
   if [ -z "$entry" ] && [ -r "$STATE/.launch-last" ]; then
     IFS=$' \t\n' read -r entry < "$STATE/.launch-last" || entry=""
   fi
-  [ -n "$entry" ] || return 1
-  case "$entry" in
-    *[!A-Za-z0-9._-]*) return 1 ;;
-  esac
+  entry_id_ok "$entry" || return 1
   printf '%s\n' "$entry"
 }
 
@@ -215,6 +226,10 @@ cmd_start() {
   done
   trigger=$(printf '%s' "$trigger" | tr '\t\r\n' '   ')
   [ -n "$trigger" ] || trigger="-"
+  if [ -n "$entry" ]; then
+    entry_id_ok "$entry" \
+      || die_usage "--entry must be a launch entry id using only [A-Za-z0-9._-] characters"
+  fi
 
   # (d) Work first: the cheapest gate, and the one that keeps a timer firing over
   # an idle home from ever starting anything.
@@ -252,6 +267,17 @@ cmd_start() {
 
   fm_state_ensure \
     || refuse refuse_state_unwritable "cannot create the state directory $STATE"
+
+  # The in-flight gate, the record write and the launch happen under one start
+  # lock, so two timers firing together cannot both pass the gate and have the
+  # loser's failed-launch record clobber the winner's pending one.
+  fm_lock_try_acquire "$START_LOCK" \
+    || refuse refuse_launch_in_flight "an unattended session start is already in flight (start lock held by pid ${FM_LOCK_HELD_PID:-unknown})"
+  trap 'fm_lock_release "$START_LOCK"' EXIT
+
+  if pending_launch_in_flight; then
+    refuse refuse_launch_in_flight "an unattended session start is already in flight (origin $(origin_field origin_id))"
+  fi
 
   # (a) The record is written BEFORE the launch, so a launch that dies mid-flight
   # is still attributable to an unattended start rather than vanishing.
