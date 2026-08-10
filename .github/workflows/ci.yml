@@ -10,6 +10,15 @@ permissions:
   contents: read
 
 jobs:
+  codex-hooks-windows:
+    name: Codex hooks (native Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Run native Codex hook regression
+        shell: pwsh
+        run: tests/fm-codex-hooks.windows.test.ps1
+
   lint:
     name: Lint shell scripts
     runs-on: ubuntu-latest

@@ -602,9 +602,10 @@ const PROTECTED_SCRIPTS = [
 ];
 
 function protectedIdentity(value, root) {
-  const normalized = path.normalize(value);
+  const normalized = path.normalize(value).replaceAll("\\", "/");
+  const normalizedRoot = path.normalize(root).replaceAll("\\", "/");
   for (const { relative, kind } of PROTECTED_SCRIPTS) {
-    if (normalized === relative || normalized === path.join(root, relative) || normalized.endsWith(`/${relative}`)) return kind;
+    if (normalized === relative || normalized === `${normalizedRoot}/${relative}` || normalized.endsWith(`/${relative}`)) return kind;
   }
   return "";
 }
@@ -857,7 +858,9 @@ function analyzeProgram(command, context, depth = 0) {
 function xModePathAllowed(value, home) {
   if (value === "config/x-mode.env" || value === "./config/x-mode.env") return true;
   if (!path.isAbsolute(value)) return false;
-  return path.normalize(value) === path.join(path.normalize(home), "config/x-mode.env");
+  const normalized = path.normalize(value).replaceAll("\\", "/");
+  const normalizedHome = path.normalize(home).replaceAll("\\", "/");
+  return normalized === `${normalizedHome}/config/x-mode.env`;
 }
 
 function ordinaryWordsOnly(tokens) {
@@ -958,3 +961,5 @@ if (invokedDirectly()) {
     process.exitCode = 1;
   }
 }
+
+export { decision };

@@ -115,6 +115,9 @@ install_guard_scripts() {
   cp "$ROOT/bin/fm-primary-scope-lib.sh" "$dir/bin/fm-primary-scope-lib.sh"
   cp "$ROOT/bin/fm-supervision-lib.sh" "$dir/bin/fm-supervision-lib.sh"
   cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/fm-wake-lib.sh"
+  cp "$ROOT/bin/fm-codex-hook.mjs" "$dir/bin/fm-codex-hook.mjs"
+  cp "$ROOT/bin/fm-arm-command-policy.mjs" "$dir/bin/fm-arm-command-policy.mjs"
+  cp "$ROOT/bin/fm-cd-command-policy.mjs" "$dir/bin/fm-cd-command-policy.mjs"
   mkdir -p "$dir/docs"
   cp -R "$ROOT/docs/supervision-protocols" "$dir/docs/supervision-protocols"
   chmod +x "$dir/bin/fm-turnend-guard.sh" "$dir/bin/fm-turnend-guard-grok.sh" "$dir/bin/fm-operational-input.sh" "$dir/bin/fm-supervision-instructions.sh" "$dir/bin/fm-harness.sh"
@@ -123,7 +126,7 @@ install_guard_scripts() {
 mark_codex_hook_root() {
   local dir=$1
   mkdir -p "$dir/.codex"
-  printf '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"fm-turnend-guard.sh"}]}]}}\n' > "$dir/.codex/hooks.json"
+  printf '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"node bin/fm-codex-hook.mjs stop"}]}]}}\n' > "$dir/.codex/hooks.json"
 }
 
 # A primary-shaped checkout: plain (non-worktree) git repo, AGENTS.md, bin/,
