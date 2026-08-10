@@ -100,6 +100,8 @@ test_idle_placeholder_is_empty() {
   local idle='^Type a message\.\.\.$' out
   out=$(classify 1 'Type a message...' "$idle" sensitive 'Type a message...' 1 1)
   [ "$out" = empty ] || fail "the grok idle placeholder should read empty, got '$out'"
+  out=$(classify 1 '❯ Type a message...' "$idle" sensitive '❯ Type a message...' 1 0)
+  [ "$out" = empty ] || fail "a glyph-bearing plain box placeholder should read empty, got '$out'"
   out=$(classify 0 '❯ Type a message...' "$idle" sensitive '❯ Type a message...' 0 1)
   [ "$out" = pending ] || fail "placeholder text on a styled bare input row must be pending, got '$out'"
   out=$(classify 0 '❯ Type a message...' "$idle" sensitive '❯ Type a message...' 0 0)
@@ -358,8 +360,8 @@ test_bare_wrap_region_classifies() {
   local wrapped ghost_wrapped out
   wrapped=$'❯ a very long steer message that\nwraps onto the following line'
   assert_screen "wrapped typed input" pending "$CAPS_TMUX" "$wrapped" 1
-  wrapped=$'❯ wrapped typed input\n❯'
-  assert_screen "agent-glyph-leading wrapped input" pending "$CAPS_TMUX" "$wrapped" 1
+  wrapped=$'❯ wrapped typed input\ncontinues without a terminal-inserted glyph'
+  assert_screen "ordinary wrapped input" pending "$CAPS_TMUX" "$wrapped" 1
   ghost_wrapped=$'❯ '"${ESC}[2ma long rotating suggestion that${ESC}[0m"$'\n'"${ESC}[2mwraps onto the next line${ESC}[0m"
   out=$(fm_composer_classify_screen "$CAPS_TMUX" "$ghost_wrapped" 1)
   [ "$out" = empty ] || fail "a wrapped ghost suggestion should still prove empty, got '$out'"
@@ -369,6 +371,15 @@ test_bare_wrap_region_classifies() {
   out=$(fm_composer_classify_screen "$CAPS_TMUX" $'❯ text\n$ live shell' 1)
   [ "$out" = unknown ] || fail "a shell prompt below a glyph row must not become wrapped input, got '$out'"
   pass "fm_composer_classify_screen: the bare composer's wrap region stays identified; structure breaks it"
+}
+
+test_contiguous_transcript_reanchors_on_live_prompt() {
+  local screen
+  screen=$'❯ hi\nHello!\n❯'
+  assert_screen "contiguous transcript live prompt on cursorless styled backend" empty "$CAPS_STYLED_NOID" "$screen"
+  assert_screen "contiguous transcript live prompt on cursorless plain backend" empty "$CAPS_PLAIN" "$screen"
+  assert_screen "contiguous transcript live prompt with cursor" empty "$CAPS_TMUX" "$screen" 2
+  pass "fm_composer_classify_screen: a row-leading agent glyph reanchors the live composer"
 }
 
 test_lower_dead_shell_invalidates_cursorless_candidate() {
@@ -501,10 +512,10 @@ test_selected_content_is_composer_scoped_and_wrap_normalized() {
   out=$(fm_composer_extract_selected_content "$CAPS_STYLED_NOID" "$screen")
   [ "$out" = 'a legitimately long steer that wraps across the next bare row' ] \
     || fail "bare extraction should include only its contiguous wrap region, got '$out'"
-  screen=$'❯ wrapped user content\n❯ preserves its leading glyph'
+  screen=$'❯ wrapped user content\ncontinuation preserves a mid-row ❯ glyph'
   out=$(fm_composer_extract_selected_content "$CAPS_STYLED_NOID" "$screen")
-  [ "$out" = 'wrapped user content ❯ preserves its leading glyph' ] \
-    || fail "bare extraction should preserve agent glyphs on continuation rows, got '$out'"
+  [ "$out" = 'wrapped user content continuation preserves a mid-row ❯ glyph' ] \
+    || fail "bare extraction should preserve mid-row agent glyph bytes, got '$out'"
   screen=$'❯ stale composer\n$ live shell'
   if out=$(fm_composer_extract_selected_content "$CAPS_STYLED_NOID" "$screen"); then
     fail "a lower live shell must invalidate composer extraction, got '$out'"
@@ -535,6 +546,7 @@ test_matrix_kimi_bordered_shell_glyph_box
 test_matrix_claude_inside_zellij_ansi_dump
 test_strict_blank_row_divergence
 test_bare_wrap_region_classifies
+test_contiguous_transcript_reanchors_on_live_prompt
 test_lower_dead_shell_invalidates_cursorless_candidate
 test_cursorless_bare_wrap_region_classifies
 test_cursorless_container_rejects_contiguous_lower_activity

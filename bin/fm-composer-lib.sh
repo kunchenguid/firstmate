@@ -427,7 +427,7 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
   [ -n "$content" ] || { printf 'empty'; return 0; }
   fm_composer_idle_matches "$content" "$idle_re" "$idle_case" && idle_collision=1
   if [ "$idle_collision" = 1 ]; then
-    if [ "$placeholder_position" = 1 ] && [ -z "$glyph" ]; then
+    if [ "$placeholder_position" = 1 ] && [ "$bordered" = 1 ]; then
       printf 'empty'; return 0
     fi
     if [ "$styled" != 1 ]; then
@@ -559,8 +559,7 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
     if [ "$top" -lt 0 ] && fm_composer_leading_shell_glyph_var glyph "$trimmed"; then
       FM_COMPOSER_SCAN_SHELL_ROW=$row
       bare_start=-1
-    elif fm_composer_leading_agent_glyph_var glyph "$trimmed" \
-         && [ "$bare_start" -lt 0 ]; then
+    elif fm_composer_leading_agent_glyph_var glyph "$trimmed"; then
       bare_start=$row
       FM_COMPOSER_SCAN_BARE_ROW=$row
     fi
