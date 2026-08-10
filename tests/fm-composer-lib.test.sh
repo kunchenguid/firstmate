@@ -407,6 +407,27 @@ test_cursorless_bare_wrap_region_classifies() {
   pass "fm_composer_classify_screen: cursorless bare wrap regions participate in verdicts"
 }
 
+test_cursorless_container_rejects_contiguous_lower_activity() {
+  local box leftbar grok kimi opencode
+  box=$'╭────────────────────────╮\n│ ❯                      │\n╰────────────────────────╯\nWorking on request...'
+  assert_screen "stale box above activity on herdr" unknown "$CAPS_STYLED" "$box"
+  assert_screen "stale box above activity on zellij" unknown "$CAPS_STYLED_NOID" "$box"
+  assert_screen "stale box above activity on cmux/orca" unknown "$CAPS_PLAIN" "$box"
+
+  leftbar=$'┃  Ask anything...\n┃\n┃  Build · GPT-5.5 Fast OpenAI · high\n╹▀▀▀▀▀▀▀▀\nWorking on request...'
+  assert_screen "stale left-bar above activity on herdr" unknown "$CAPS_STYLED" "$leftbar"
+  assert_screen "stale left-bar above activity on zellij" unknown "$CAPS_STYLED_NOID" "$leftbar"
+  assert_screen "stale left-bar above activity on cmux/orca" unknown "$CAPS_PLAIN" "$leftbar"
+
+  grok=$'╭────────────────────────╮\n│ ❯                      │\n╰──────── Grok 4.5 ──────╯\n\nGrok status'
+  kimi=$'╭────────────────────────╮\n│ >                      │\n╰────────────────────────╯\n\nKimi status'
+  opencode=$'┃  Ask anything...\n┃\n┃  Build · GPT-5.5 Fast OpenAI · high\n╹▀▀▀▀▀▀▀▀\n\nOpenCode status'
+  assert_screen "blank-separated grok footer" empty "$CAPS_STYLED_NOID" "$grok"
+  assert_screen "blank-separated kimi footer" empty "$CAPS_PLAIN" "$kimi"
+  assert_screen "left-bar floor and blank-separated footer" empty "$CAPS_STYLED_NOID" "$opencode"
+  pass "fm_composer_classify_screen: cursorless containers reject only contiguous unclaimed activity"
+}
+
 test_bottom_most_candidate_wins() {
   # The one ranking rule: the live composer is bottom-anchored, so a stale
   # decorative box (codex's startup banner) can never outrank the real row
@@ -492,6 +513,7 @@ test_strict_blank_row_divergence
 test_bare_wrap_region_classifies
 test_lower_dead_shell_invalidates_cursorless_candidate
 test_cursorless_bare_wrap_region_classifies
+test_cursorless_container_rejects_contiguous_lower_activity
 test_bottom_most_candidate_wins
 test_incomplete_lower_box_invalidates_stale_candidate
 test_titled_bottom_requires_matching_width

@@ -894,8 +894,17 @@ _fm_composer_classify_leftbar() {  # <screen> <styled> <first-row> <last-row>
   fi
 }
 
+_fm_composer_leftbar_floor_row() {  # <trimmed-row>
+  local row=$1 blocks
+  case "$row" in
+    '╹▀'*) blocks=${row#╹} ;;
+    *) return 1 ;;
+  esac
+  [ -z "${blocks//▀/}" ]
+}
+
 _fm_composer_select_cursorless() {
-  local plain=$1 generic=-1 next raw trimmed
+  local plain=$1 generic=-1 next boundary raw trimmed
   FM_COMPOSER_SELECTED_KIND=
   FM_COMPOSER_SELECTED_FIRST=-1
   FM_COMPOSER_SELECTED_LAST=-1
@@ -951,6 +960,29 @@ _fm_composer_select_cursorless() {
       FM_COMPOSER_SELECTED_LAST=$next
       next=$((next + 1))
     done
+  fi
+  if [ "$FM_COMPOSER_SELECTED_KIND" = box ] \
+     || [ "$FM_COMPOSER_SELECTED_KIND" = leftbar ]; then
+    boundary=$FM_COMPOSER_SELECTED_LAST
+    if [ "$FM_COMPOSER_SELECTED_KIND" = box ]; then
+      boundary=$FM_COMPOSER_SCAN_BOX_BOTTOM
+    else
+      next=$((boundary + 1))
+      raw=$(_fm_composer_screen_row "$next" "$plain")
+      trimmed=$raw
+      fm_composer_normalize_trim_var trimmed
+      if _fm_composer_leftbar_floor_row "$trimmed"; then
+        boundary=$next
+      fi
+    fi
+    next=$((boundary + 1))
+    raw=$(_fm_composer_screen_row "$next" "$plain")
+    trimmed=$raw
+    fm_composer_normalize_trim_var trimmed
+    if [ -n "$trimmed" ] && ! fm_composer_row_has_edge "$trimmed"; then
+      FM_COMPOSER_SELECTED_KIND=
+      return 1
+    fi
   fi
   [ -n "$FM_COMPOSER_SELECTED_KIND" ]
 }
