@@ -1718,8 +1718,14 @@ if [ "$KIND" != secondmate ]; then
     # window where the check and the recorded floor observe different config or
     # different availability state, and a record that disagrees with the check
     # that produced it is exactly what this enforcement exists to prevent.
-    if ! ROUTE_DECISION=$(fm_route_decision "$CONFIG" "$ROUTE" "$MODEL" "$EFFORT" "$STATE"); then
-      echo "error: $(fm_route_unreadable_refusal "$CONFIG")" >&2
+    ROUTE_DECISION_RC=0
+    ROUTE_DECISION=$(fm_route_decision "$CONFIG" "$ROUTE" "$MODEL" "$EFFORT" "$STATE") || ROUTE_DECISION_RC=$?
+    if [ "$ROUTE_DECISION_RC" -ne 0 ]; then
+      # The refusal names the file that is ACTUALLY unreadable. The routing
+      # config and the availability record fail independently and are repaired
+      # differently, so sending an operator to the one that parses perfectly
+      # costs them the whole diagnosis.
+      echo "error: $(fm_route_undetermined_refusal "$ROUTE_DECISION_RC" "$CONFIG" "$STATE")" >&2
       exit 1
     fi
     # Only the held-model refusal names substitutes, so the registry verdicts a

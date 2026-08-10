@@ -135,8 +135,14 @@ registry_refusal() {  # <qualified-model>
 # policy cannot answer by itself. One record, so prose and --json never diverge,
 # and it takes the decision it enriches so no command in this file evaluates the
 # same policy twice against possibly different config or availability state.
-enrich() {  # <decision-json>
-  local decision=$1 model refusal verdicts=
+#
+# WHICH candidates is the caller's call, because a registry verdict costs a read
+# per owner per model and only two things ever consume one: the substitute list
+# a held-model refusal prints, which needs every candidate, and one dispatch's
+# own verdict, which needs exactly one. Checking the rest of a pool on a
+# compliant dispatch answers a question nobody asked.
+enrich() {  # <decision-json> [<model>]
+  local decision=$1 only=${2:-} model refusal verdicts=
   [ "$(printf '%s' "$decision" | jq -r '.route_known')" = true ] || { printf '%s' "$decision"; return 0; }
   [ -z "$(printf '%s' "$decision" | jq -r '.duplicate_paths // empty')" ] || { printf '%s' "$decision"; return 0; }
   while IFS= read -r model; do
@@ -145,9 +151,29 @@ enrich() {  # <decision-json>
     verdicts="$verdicts$model	$(printf '%s' "$refusal" | tr '\n\t' '  ')
 "
   done <<EOF
-$(printf '%s' "$decision" | jq -r '.candidates[]?.model')
+$(printf '%s' "$decision" | jq -r --arg only "$only" \
+   '.candidates[]? | select(($only | length) == 0 or .model == $only) | .model')
 EOF
   fm_route_decision_with_registry "$decision" "$verdicts"
+}
+
+# The registry verdict for the ONE model a dispatch names, read off the record
+# that already carries it. A route's own candidate rows are where a verdict
+# lives, so asking the three owners a second time for the same model would let
+# one invocation report two answers.
+subject_registry_refusal() {  # <enriched-decision-json> <model>
+  local decision=$1 model=$2
+  if [ "$(printf '%s' "$decision" | jq -r --arg m "$model" \
+          '[ .candidates[]? | select(.model == $m and .registry_checked == true) ] | length > 0')" = true ]; then
+    printf '%s' "$decision" | jq -r --arg m "$model" \
+      '[ .candidates[]? | select(.model == $m) ] | .[0].registry_refusal // empty'
+    return 0
+  fi
+  # The one case the record cannot answer: a route that configures no pool has
+  # no candidate row to carry a verdict, so the owners are asked directly. Named
+  # rather than left to fall out of an empty match, because a silent fallback is
+  # how a dispatch ends up registry-unchecked without anyone noticing.
+  registry_refusal "$model" || true
 }
 
 # The policy names exactly what a terminal report has to contain: the route and
@@ -207,13 +233,18 @@ case "$CMD" in
   check)
     [ -n "$ROUTE" ] || die "check needs --route"
     [ -n "$MODEL" ] || die "check needs --model"
-    DECISION=$(fm_route_decision "$CONFIG" "$ROUTE" "$MODEL" "$EFFORT" "$STATE") \
-      || { printf '%s\n' "$(fm_route_unreadable_refusal "$CONFIG")" >&2; exit 2; }
+    DECISION_RC=0
+    DECISION=$(fm_route_decision "$CONFIG" "$ROUTE" "$MODEL" "$EFFORT" "$STATE") || DECISION_RC=$?
+    if [ "$DECISION_RC" -ne 0 ]; then
+      printf '%s\n' "$(fm_route_undetermined_refusal "$DECISION_RC" "$CONFIG" "$STATE")" >&2
+      exit 2
+    fi
     # Registry verdicts are this caller's to supply, and supplying them here is
     # what lets a refusal name substitutes an operator can actually dispatch.
-    DECISION=$(enrich "$DECISION")
-    if [ "$JSON" -eq 1 ]; then
-      printf '%s\n' "$DECISION"
+    # Only a held subject prints such a list, so only a held subject pays for
+    # the whole pool's verdicts.
+    if [ -n "$(printf '%s' "$DECISION" | jq -r '.subject.held // empty')" ]; then
+      DECISION=$(enrich "$DECISION")
     fi
     if refusal=$(fm_route_refusal_from_decision "$CONFIG" "$ROUTE" "$MODEL" "$DECISION" "$STATE"); then
       rc=0
@@ -221,13 +252,23 @@ case "$CMD" in
       rc=$?
     fi
     if [ "$rc" -ne 0 ]; then
-      [ "$JSON" -eq 1 ] || printf '%s\n' "$refusal" >&2
+      if [ "$JSON" -eq 1 ]; then printf '%s\n' "$DECISION"; else printf '%s\n' "$refusal" >&2; fi
       exit "$rc"
     fi
     # The routing policy allows it; the landed registry owners still decide
-    # whether it may be paid for, reached, and run concurrently.
+    # whether it may be paid for, reached, and run concurrently. The subject is
+    # a candidate of its own route, so its verdict is recorded on the record and
+    # read back from there rather than computed a second time.
     resolved=$(printf '%s' "$DECISION" | jq -r '.subject.resolved // empty')
-    if [ -n "$resolved" ] && ! refusal=$(registry_refusal "$resolved"); then
+    refusal=
+    if [ -n "$resolved" ]; then
+      DECISION=$(enrich "$DECISION" "$resolved")
+      refusal=$(subject_registry_refusal "$DECISION" "$resolved")
+    fi
+    if [ "$JSON" -eq 1 ]; then
+      printf '%s\n' "$DECISION"
+    fi
+    if [ -n "$refusal" ]; then
       [ "$JSON" -eq 1 ] || printf 'error: %s\n' "$refusal" >&2
       exit 1
     fi
@@ -238,15 +279,35 @@ case "$CMD" in
   eligible|next)
     [ -n "$ROUTE" ] || die "$CMD needs --route"
     [ "$CMD" != next ] || [ -n "$AFTER" ] || die "next needs --after <model>"
-    DECISION=$(fm_route_decision "$CONFIG" "$ROUTE" "" "" "$STATE") \
-      || die "the routing policy could not be read: $CONFIG_FILE"
+    DECISION_RC=0
+    DECISION=$(fm_route_decision "$CONFIG" "$ROUTE" "" "" "$STATE") || DECISION_RC=$?
+    if [ "$DECISION_RC" -ne 0 ]; then
+      printf 'error: %s\n' "$(fm_route_undetermined_refusal "$DECISION_RC" "$CONFIG" "$STATE")" >&2
+      exit 2
+    fi
+    # Every candidate's registry verdict IS the answer here: the eligible list
+    # this command prints is the registry-checked one its own header promises.
     DECISION=$(enrich "$DECISION")
     [ "$(printf '%s' "$DECISION" | jq -r '.route_known')" = true ] \
       || die "route $ROUTE is not defined by $CONFIG_FILE"
     if [ "$CMD" = next ]; then
-      AFTER_POS=$(printf '%s' "$DECISION" | jq -r --arg a "$AFTER" '
-        [ .candidates[] | select(.model == $a or (.model | endswith("/" + $a))) | .position ] | first // empty')
-      [ -n "$AFTER_POS" ] || die "$FM_ROUTE_TOKEN_POOL: $AFTER is not in route $ROUTE's pool, so no substitution inside that pool can follow it"
+      # The failover anchor resolves under the SAME mixed-key rule every other
+      # resolver here uses: an exact pool entry, else the one entry whose model
+      # half matches. A bare name matching two entries names two different
+      # failures, and anchoring on the earlier one would hand back the later one
+      # - which can be the model that just failed, offered as its own
+      # replacement.
+      AFTER_MATCHES=$(printf '%s' "$DECISION" | jq -r --arg a "$AFTER" '
+        ([ .candidates[] | select(.model == $a) ]) as $exact
+        | (if ($exact | length) > 0 then $exact
+           else [ .candidates[] | select(.model | endswith("/" + $a)) ] end)
+        | .[] | .model + " " + (.position | tostring)')
+      AFTER_COUNT=$(printf '%s\n' "$AFTER_MATCHES" | grep -c . || true)
+      if [ "$AFTER_COUNT" -gt 1 ]; then
+        die "$FM_ROUTE_TOKEN_POOL: the bare model name $AFTER matches more than one entry in route $ROUTE's pool ($(printf '%s\n' "$AFTER_MATCHES" | awk 'NF {print $1}' | tr '\n' ',' | sed 's/,$//; s/,/, /g')); the mixed-key rule forbids guessing which one failed, so name the model in full"
+      fi
+      [ "$AFTER_COUNT" -eq 1 ] || die "$FM_ROUTE_TOKEN_POOL: $AFTER is not in route $ROUTE's pool, so no substitution inside that pool can follow it"
+      AFTER_POS=${AFTER_MATCHES##* }
       DECISION=$(printf '%s' "$DECISION" | jq -c --argjson p "$AFTER_POS" \
         '.candidates = [ .candidates[] | select(.position > $p) ]')
     fi

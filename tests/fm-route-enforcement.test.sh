@@ -253,6 +253,46 @@ test_tool_loop_axis_is_enforced() {
   pass "the tool-loop axis refuses an in-pool candidate that does not meet it"
 }
 
+test_a_floor_axis_outside_its_vocabulary_refuses_rather_than_skipping() {
+  local rec out home rc
+  rec=$(make_refusal_home floor-vocabulary); read_home_record "$rec"
+  home=$HOME_DIR
+  # The likeliest way a floor ever reaches this code wrong: the right word with
+  # the wrong separator. The tool-loop axis used to be skipped outright for it,
+  # so every candidate passed a floor nothing measured and the check said ok.
+  jq '._floors["F-MED"].tool_loop = "verified_agentic"' \
+    "$home/config/crew-dispatch.json" > "$home/config/tmp.json"
+  mv "$home/config/tmp.json" "$home/config/crew-dispatch.json"
+  out=$(run_route "$home" check --route R-MED --model vendor/large --effort medium); rc=$?
+  expect_code 1 "$rc" "a tool_loop floor outside the closed vocabulary must refuse, never skip the axis"
+  assert_contains "$out" "tool_loop_malformed" "the violated rule is not named"
+  assert_contains "$out" "/_floors/F-MED/tool_loop" "the exact config path is not named"
+  assert_contains "$out" "verified_agentic" "the value that could not be interpreted is not named"
+  # And the chokepoint refuses it too, so an uninterpretable floor cannot admit
+  # a dispatch by the other door.
+  write_brief "$home" vocabtask no-mistakes
+  out=$(run_spawn "$home" "$FAKEBIN" vocabtask "$PROJ_DIR" \
+    --mode no-mistakes --yolo off --reason-code NL_RULE_CLASSIFICATION \
+    --harness codex --route R-MED --model vendor/large --effort medium); rc=$?
+  expect_code 1 "$rc" "the spawn chokepoint must refuse an uninterpretable tool_loop floor"
+  assert_contains "$out" "tool_loop_malformed" "the chokepoint does not name the violated rule"
+  assert_absent "$home/state/vocabtask.meta" "a dispatch checked against an uninterpretable floor must record nothing"
+  # A non-numeric context_ceiling failed closed but blamed the candidate,
+  # reporting a smart_zone below a string it could never be compared against.
+  jq '._floors["F-MED"].tool_loop = "verified-agentic"
+      | ._floors["F-MED"].context_ceiling = "140k"' \
+    "$home/config/crew-dispatch.json" > "$home/config/tmp.json"
+  mv "$home/config/tmp.json" "$home/config/crew-dispatch.json"
+  out=$(run_route "$home" check --route R-MED --model vendor/large --effort medium); rc=$?
+  expect_code 1 "$rc" "a non-numeric context_ceiling must refuse naming the ceiling"
+  assert_contains "$out" "context_ceiling_malformed" "the violated rule is not named"
+  assert_contains "$out" "/_floors/F-MED/context_ceiling" "the exact config path is not named"
+  assert_contains "$out" "140k" "the value that could not be interpreted is not named"
+  assert_not_contains "$out" "context_below_floor" \
+    "an uninterpretable ceiling must not be reported as a candidate falling below it"
+  pass "a floor axis value outside its closed vocabulary refuses by name instead of skipping the axis"
+}
+
 # --- a missing input is a refusal, never a skipped check ---------------------
 #
 # Every case below was silently ADMITTED before this section existed: the check
@@ -391,6 +431,41 @@ test_a_substitute_list_says_whether_it_was_registry_checked() {
   pass "a substitute list states whether it was checked against the model registry"
 }
 
+test_check_asks_the_registry_only_about_the_model_it_answers_for() {
+  local rec out rc
+  rec=$(make_refusal_home check-enrich); read_home_record "$rec"
+  # A compliant dispatch consumes exactly one registry verdict: the subject's.
+  # Every other candidate's was computed for nothing, and the subject's was
+  # computed twice, which is how one invocation can report two answers.
+  out=$(run_route "$HOME_DIR" check --json --route R-MED --model vendor/large --effort medium); rc=$?
+  expect_code 0 "$rc" "a compliant dispatch must still pass"
+  [ "$(printf '%s' "$out" | jq -r '[ .candidates[] | select(.model == "vendor/large") ] | .[0].registry_checked')" = true ] \
+    || fail "the dispatched model's registry verdict must be recorded on the decision it was read from: $out"
+  [ "$(printf '%s' "$out" | jq -r '[ .candidates[] | select(.model == "other/small") ] | .[0].registry_checked')" != true ] \
+    || fail "a compliant dispatch must not ask the registry about candidates nothing consumes: $out"
+  # And the verdict read off that record is the real one: a model the registry
+  # refuses is still refused, so laziness bought nothing at the answer's expense.
+  cat > "$HOME_DIR/config/models.json" <<'JSON'
+{
+  "schema": "fm-model-registry.v1",
+  "providers": { "vendor": { "status": "active", "cost_posture": "subscription-flat" } },
+  "models": { "vendor/large": { "status": "rejected", "status_reason": "withdrawn by the provider" } }
+}
+JSON
+  out=$(run_route "$HOME_DIR" check --route R-MED --model vendor/large --effort medium); rc=$?
+  expect_code 1 "$rc" "a routing-compliant model the registry rejects must still be refused"
+  assert_contains "$out" "records vendor/large as rejected" "the registry's own refusal is not reported"
+  # A held subject is the case that DOES need every candidate's verdict, because
+  # it is about to print a substitute list an operator will dispatch from.
+  rm -f "$HOME_DIR/config/models.json"
+  run_route "$HOME_DIR" availability hold vendor/large --state rate_limited --for-seconds 300 >/dev/null
+  out=$(run_route "$HOME_DIR" check --json --route R-MED --model vendor/large --effort medium); rc=$?
+  expect_code 1 "$rc" "a held model must still be refused"
+  [ "$(printf '%s' "$out" | jq -r '[ .candidates[] | select(.model == "other/small") ] | .[0].registry_checked')" = true ] \
+    || fail "a substitute an operator is about to be handed must carry a registry verdict: $out"
+  pass "check asks the registry about the model it answers for, and about the whole pool only when it names substitutes"
+}
+
 test_default_only_route_is_listed_and_enforced() {
   local rec out
   rec=$(make_refusal_home default-only none); read_home_record "$rec"
@@ -443,6 +518,36 @@ test_failover_stays_inside_the_pool_in_order() {
   expect_code 2 "$rc" "a model outside the pool cannot anchor an in-pool substitution"
   assert_contains "$out" "FM_SPAWN_ROUTE_POOL_VIOLATION" "the stable refusal token is missing"
   pass "failover substitutes only inside the same pool, in pool order"
+}
+
+test_an_ambiguous_failover_anchor_is_refused_rather_than_resolved() {
+  local rec out rc
+  rec=$(make_refusal_home failover-ambiguous); read_home_record "$rec"
+  # Two pool entries sharing the bare half of their qualified names is exactly
+  # the shape the mixed-key rule exists for. Anchoring on the first match hands
+  # back the second - which here is the model the operator just said failed.
+  jq '.rules[1].pool += ["vendor/small"]' \
+    "$HOME_DIR/config/crew-dispatch.json" > "$HOME_DIR/config/tmp.json"
+  mv "$HOME_DIR/config/tmp.json" "$HOME_DIR/config/crew-dispatch.json"
+  out=$(run_route "$HOME_DIR" next --route R-MED --after small); rc=$?
+  expect_code 2 "$rc" "an ambiguous failover anchor must be refused"
+  assert_contains "$out" "FM_SPAWN_ROUTE_POOL_VIOLATION" "the stable refusal token is missing"
+  assert_contains "$out" "more than one entry" "the ambiguity is not explained"
+  assert_contains "$out" "other/small" "the refusal must name every entry the bare name matched"
+  assert_contains "$out" "vendor/small" "the refusal must name every entry the bare name matched"
+  # Named in full the same anchor resolves, and the substitute still comes
+  # strictly after it in pool order.
+  out=$(run_route "$HOME_DIR" next --route R-MED --after other/small); rc=$?
+  expect_code 0 "$rc" "a fully qualified anchor must still resolve"
+  assert_contains "$out" "vendor/small" "the in-pool substitute after the named anchor is missing"
+  out=$(run_route "$HOME_DIR" next --route R-MED --after vendor/small); rc=$?
+  expect_code 3 "$rc" "the last entry in a pool has nothing after it to fail over to"
+  # A bare name matching exactly one entry stays usable: the rule refuses
+  # guessing, not abbreviating.
+  out=$(run_route "$HOME_DIR" next --route R-MED --after large); rc=$?
+  expect_code 0 "$rc" "a bare name matching exactly one pool entry must still anchor a substitution"
+  assert_contains "$out" "other/small" "the substitute after an unambiguous bare anchor is missing"
+  pass "an ambiguous failover anchor is refused naming every entry it matched, never resolved to the first"
 }
 
 test_availability_hold_removes_a_candidate_and_release_restores_it() {
@@ -544,7 +649,42 @@ test_malformed_availability_record_is_not_an_empty_one() {
   printf 'not json at all\n' > "$HOME_DIR/state/model-health.json"
   out=$(run_route "$HOME_DIR" eligible --route R-MED); rc=$?
   expect_code 2 "$rc" "an unreadable availability record must not read as an empty one"
+  assert_contains "$out" "model-health.json" "the refusal must name the record that could not be read"
   pass "an unreadable availability record refuses rather than treating every model as available"
+}
+
+test_an_unreadable_input_names_the_file_that_could_not_be_read() {
+  local rec out rc
+  rec=$(make_refusal_home unreadable-health); read_home_record "$rec"
+  # An availability record truncated by an interrupted write. The routing config
+  # parses perfectly, so a refusal naming IT sends the operator to repair a file
+  # that is not broken - the same misdirection as naming an unchecked substitute.
+  printf '{"models":{"vendor/large":{"state":"rate_li\n' > "$HOME_DIR/state/model-health.json"
+  out=$(run_route "$HOME_DIR" check --route R-MED --model vendor/large --effort medium); rc=$?
+  expect_code 2 "$rc" "an unreadable availability record must never read as an empty one"
+  assert_contains "$out" "FM_ROUTE_HEALTH_UNREADABLE" "the stable refusal token is missing"
+  assert_contains "$out" "model-health.json" "the refusal must name the record that could not be read"
+  assert_contains "$out" "could not be determined" "the refusal must say which determination it could not make"
+  assert_not_contains "$out" "crew-dispatch.json" \
+    "a routing config that parses perfectly must not be blamed for an unreadable availability record"
+  # The chokepoint is where a ship or scout dispatch meets this, so it has to
+  # name the same file.
+  write_brief "$HOME_DIR" healthtask no-mistakes
+  out=$(run_spawn "$HOME_DIR" "$FAKEBIN" healthtask "$PROJ_DIR" \
+    --mode no-mistakes --yolo off --reason-code NL_RULE_CLASSIFICATION \
+    --harness codex --route R-MED --model vendor/large --effort medium); rc=$?
+  expect_code 1 "$rc" "an unreadable availability record must stop the spawn"
+  assert_contains "$out" "FM_ROUTE_HEALTH_UNREADABLE" "the chokepoint names the wrong unreadable input"
+  assert_contains "$out" "model-health.json" "the chokepoint must name the record that could not be read"
+  assert_absent "$HOME_DIR/state/healthtask.meta" "an undetermined dispatch must leave no task metadata"
+  # The other cause keeps naming the other file.
+  rec=$(make_refusal_home unreadable-config); read_home_record "$rec"
+  printf 'not json at all\n' > "$HOME_DIR/config/crew-dispatch.json"
+  out=$(run_route "$HOME_DIR" check --route R-MED --model vendor/large --effort medium); rc=$?
+  expect_code 2 "$rc" "an unreadable routing config must refuse"
+  assert_contains "$out" "FM_SPAWN_ROUTE_UNREADABLE" "the stable refusal token is missing"
+  assert_contains "$out" "crew-dispatch.json" "the refusal must name the config that could not be read"
+  pass "each unreadable input refuses naming the file that actually could not be read"
 }
 
 # --- the spawn chokepoint ---------------------------------------------------
@@ -890,19 +1030,23 @@ test_compliant_dispatch_is_unaffected
 test_unknown_route_and_ambiguous_bare_name_are_refused
 test_waived_effort_floor_and_unselectable_floor
 test_tool_loop_axis_is_enforced
+test_a_floor_axis_outside_its_vocabulary_refuses_rather_than_skipping
 test_unstated_model_is_refused_rather_than_recorded_as_checked
 test_absent_models_block_refuses_as_unverifiable
 test_undefined_floor_id_refuses_and_records_no_capability_floor
 test_held_model_is_refused_at_the_chokepoint_and_check_agrees_with_eligible
 test_a_substitute_list_says_whether_it_was_registry_checked
+test_check_asks_the_registry_only_about_the_model_it_answers_for
 test_default_only_route_is_listed_and_enforced
 test_failover_stays_inside_the_pool_in_order
+test_an_ambiguous_failover_anchor_is_refused_rather_than_resolved
 test_availability_hold_removes_a_candidate_and_release_restores_it
 test_a_hold_that_cannot_match_a_candidate_is_refused_rather_than_recorded
 test_unknown_availability_state_is_refused
 test_exhausted_pool_stops_and_reports_rather_than_degrading
 test_expired_hold_stops_binding_without_a_sweep
 test_malformed_availability_record_is_not_an_empty_one
+test_an_unreadable_input_names_the_file_that_could_not_be_read
 test_spawn_refuses_a_pool_violation_and_creates_nothing
 test_spawn_refuses_a_floor_violation_and_creates_nothing
 test_spawn_requires_the_route_claim_or_derives_it_from_an_explicit_floor

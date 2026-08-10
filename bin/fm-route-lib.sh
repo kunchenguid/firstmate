@@ -54,14 +54,17 @@
 #                                `pool`, behaves exactly as it did before this
 #                                existed. Nothing to check is not a refusal.
 #   A routed pool configured   -> fail closed. A dispatch must name the route it
-#                                claims, and an unreadable config, an unknown
-#                                route, a duplicate route id, an unstated model,
-#                                a floor id `_floors` does not define, a floor
-#                                axis whose evidence is missing, and a model the
-#                                availability record holds all REFUSE. A safety
-#                                file that cannot be read must never read as an
-#                                absent one, and an input that is missing must
-#                                never read as an input that passed.
+#                                claims, and an unreadable config, an unreadable
+#                                availability record, an unknown route, a
+#                                duplicate route id, an unstated model, a floor
+#                                id `_floors` does not define, a floor axis whose
+#                                configured value is outside its closed
+#                                vocabulary, a floor axis whose evidence is
+#                                missing, and a model the availability record
+#                                holds all REFUSE. A safety file that cannot be
+#                                read must never read as an absent one, and an
+#                                input that is missing must never read as an
+#                                input that passed.
 #
 # Every refusal names the violated rule: the route, the exact JSON config path,
 # the configured value, and the observed value. A refusal a reader cannot trace
@@ -98,6 +101,7 @@ admin_disabled'
 FM_ROUTE_TOKEN_REQUIRED=FM_SPAWN_ROUTE_REQUIRED
 FM_ROUTE_TOKEN_UNKNOWN=FM_SPAWN_ROUTE_UNKNOWN
 FM_ROUTE_TOKEN_UNREADABLE=FM_SPAWN_ROUTE_UNREADABLE
+FM_ROUTE_TOKEN_HEALTH_UNREADABLE=FM_ROUTE_HEALTH_UNREADABLE
 FM_ROUTE_TOKEN_AMBIGUOUS=FM_SPAWN_ROUTE_AMBIGUOUS
 FM_ROUTE_TOKEN_FLOOR_MISMATCH=FM_SPAWN_ROUTE_FLOOR_MISMATCH
 FM_ROUTE_TOKEN_POOL=FM_SPAWN_ROUTE_POOL_VIOLATION
@@ -218,6 +222,13 @@ fm_route_policy_digest() {  # [<config-dir>]
 # config path the evidence is missing from. Enforcement that quietly does
 # nothing when an input is absent is indistinguishable from no enforcement, and
 # the absent input is exactly the case nobody tests by hand.
+#
+# AN UNINTERPRETABLE FLOOR IS THE SAME CLASS, and every axis treats it the same
+# way: a `tool_loop` or `context_ceiling` or `effort_floor` whose configured
+# value is outside its closed vocabulary is refused by name rather than skipped.
+# A misspelling - `verified_agentic` for `verified-agentic` - is the likeliest
+# way a floor ever reaches this code, and an axis that silently enforces nothing
+# for it is a floor an operator believes is armed.
 # shellcheck disable=SC2016 # jq program, not shell expansion.
 FM_ROUTE_DECISION_JQ="$FM_ROUTE_ENTRIES_JQ"'
 def bands: ["low","medium","high","xhigh","max","ultra"];
@@ -260,8 +271,12 @@ def provider_of($m): (if ($m | test("/")) then ($m | split("/") | .[0]) else nul
     | (if ($ef_raw | type) == "string" and (rank($ef_raw) != null) then $ef_raw else null end) as $ef
     | (($ef_raw | type) == "string" and ($ef_raw | startswith("WAIVED"))) as $ef_waived
     | (($ef_raw != null) and ($ef == null) and ($ef_waived | not)) as $ef_malformed
-    | ($floor.context_ceiling? // null) as $ctx
-    | ($floor.tool_loop? // null) as $tl
+    | ($floor.context_ceiling? // null) as $ctx_raw
+    | (if ($ctx_raw | type) == "number" then $ctx_raw else null end) as $ctx
+    | (($ctx_raw != null) and ($ctx == null)) as $ctx_malformed
+    | ($floor.tool_loop? // null) as $tl_raw
+    | (if (loop_rank($tl_raw) != null) then $tl_raw else null end) as $tl
+    | (($tl_raw != null) and ($tl == null)) as $tl_malformed
     | (($floor.selectable_by_crew_rule? // true) == false) as $unselectable
 
     | def held($m):
@@ -320,7 +335,15 @@ def provider_of($m): (if ($m | test("/")) then ($m | split("/") | .[0]) else nul
                      configured:($ctx | tostring), observed:($sz | tostring)}
                else empty end
            else empty end),
-          (if ($tl != null) and (loop_rank($tl) != null) and (loop_rank($tl) > 0)
+          (if ($ctx_malformed)
+           then {rule:"context_ceiling_malformed", config_path:($floor_path + "/context_ceiling"),
+                 configured:($ctx_raw | tostring), observed:"unreadable"}
+           else empty end),
+          (if ($tl_malformed)
+           then {rule:"tool_loop_malformed", config_path:($floor_path + "/tool_loop"),
+                 configured:($tl_raw | tostring), observed:"unreadable"}
+           else empty end),
+          (if ($tl != null) and (loop_rank($tl) > 0)
            then ($models[$m].tool_loop? // null) as $mt
              | if (loop_rank($mt) == null)
                then {rule:"tool_loop_unverifiable", config_path:("/_models/" + $m + "/tool_loop"),
@@ -371,15 +394,24 @@ def provider_of($m): (if ($m | test("/")) then ($m | split("/") | .[0]) else nul
 '
 
 # fm_route_decision <config-dir> <route> <model> <effort> [<state-dir>]
-# Print the decision record for one route. Return 2 when the config is absent or
-# unreadable, so a caller can tell "no policy" from "policy says no".
+# Print the decision record for one route. Return non-zero when the decision
+# could not be made at all, so a caller can tell "no policy" from "policy says
+# no" - and WHICH input it could not read, because the two live in different
+# files with different repairs:
+#
+#   2  the routing config is absent or unreadable
+#   3  the availability record exists and could not be parsed
+#
+# Collapsing the two sends an operator to repair a crew-dispatch.json that
+# parses perfectly while the truncated model-health.json goes unmentioned, which
+# is the same misdirection class as naming a substitute nothing checked.
 fm_route_decision() {
   local cfg=$1 route=$2 model=${3:-} effort=${4:-} state=${5:-} file holds now
   file=$(fm_route_config_path "$cfg")
   [ -f "$file" ] || return 2
   command -v jq >/dev/null 2>&1 || return 2
   now=$(date -u +%s)
-  holds=$(fm_route_health_active "$state" "$now") || return 2
+  holds=$(fm_route_health_active "$state" "$now") || return 3
   jq -c --arg route "$route" --arg model "$model" --arg effort "$effort" \
      --argjson holds "$holds" \
      "$FM_ROUTE_DECISION_JQ" "$file" 2>/dev/null || return 2
@@ -468,6 +500,27 @@ fm_route_unreadable_refusal() {  # <config-dir>
     "$FM_ROUTE_TOKEN_UNREADABLE" "$1"
 }
 
+# fm_route_health_unreadable_refusal [<state-dir>]
+# The other unreadable input, and it names the other file. The routing config
+# can be perfect while the availability record is truncated mid-write, and a
+# refusal that points at the wrong file costs the operator the whole diagnosis.
+fm_route_health_unreadable_refusal() {  # [<state-dir>]
+  printf '%s: %s exists but could not be parsed, so which models this fleet currently holds unavailable could not be determined and no dispatch can be checked against the route it claims. Repair or remove that record; the routing config is not what failed here\n' \
+    "$FM_ROUTE_TOKEN_HEALTH_UNREADABLE" "$(fm_route_health_path "${1:-}")"
+}
+
+# fm_route_undetermined_refusal <fm_route_decision-status> <config-dir>
+#                               [<state-dir>]
+# The refusal for a decision that could not be made, chosen by WHICH input the
+# decision could not read. Spelled once so no caller has to remember the status
+# code mapping, and so every surface names the same file for the same cause.
+fm_route_undetermined_refusal() {
+  case "$1" in
+    3) fm_route_health_unreadable_refusal "${3:-}" ;;
+    *) fm_route_unreadable_refusal "$2" ;;
+  esac
+}
+
 # fm_route_refusal_from_decision <config-dir> <route> <model> <decision-json>
 #                                [<state-dir>]
 # The verdict and its rendering, from a decision record already computed.
@@ -540,19 +593,6 @@ fm_route_refusal_from_decision() {
     return 1
   fi
   return 0
-}
-
-# fm_route_check_refusal <config-dir> <route> <model> <effort> [<state-dir>]
-# Print a complete refusal and return 1 when the dispatch violates the route it
-# claims; print nothing and return 0 when it is compliant. Return 2 when the
-# route decision itself could not be read, which is never a pass.
-fm_route_check_refusal() {
-  local cfg=$1 route=$2 model=${3:-} effort=${4:-} state=${5:-} decision
-  decision=$(fm_route_decision "$cfg" "$route" "$model" "$effort" "$state") || {
-    fm_route_unreadable_refusal "$cfg"
-    return 2
-  }
-  fm_route_refusal_from_decision "$cfg" "$route" "$model" "$decision" "$state"
 }
 
 # ---------------------------------------------------------------------------
