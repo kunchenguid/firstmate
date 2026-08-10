@@ -1513,7 +1513,8 @@ test_unread_instructions_stop_dependency_mutations() {
 }
 
 run_firstmate_outcome_case() {
-  local fixture=$1 status=$2 nudge=$3 fakebin out_file selector
+  local fixture=$1 status=$2 nudge=$3 hold_nudge_lock=${4:-no} fakebin out_file selector
+  local lock="" ready="" release="" holder="" i lock_timeout=${FM_DEPS_LOCK_TIMEOUT:-5}
   fakebin=$(fm_fakebin "$fixture")
   out_file="$fixture/output"
   mkdir -p "$fixture/bin"
@@ -1544,11 +1545,42 @@ run_firstmate_outcome_case() {
     'esac' > "$fakebin/git"
   chmod +x "$fixture/bin/fm-update.sh" "$fixture/bin/fm-send.sh" "$fakebin/git"
 
+  if [ "$hold_nudge_lock" = yes ]; then
+    lock=$(fm_secondmate_nudge_transaction_lock_path "$fixture/state" "${nudge#fm-}")
+    ready="$fixture/nudge-lock.ready"
+    release="$fixture/nudge-lock.release"
+    FM_ROOT_OVERRIDE="$fixture" FM_HOME="$fixture" \
+      FM_STATE_OVERRIDE="$fixture/state" bash -c '
+        . "$1"
+        fm_lock_acquire_wait "$2"
+        : > "$3"
+        while [ ! -e "$4" ]; do sleep 0.02; done
+        fm_lock_release "$2"
+      ' _ "$ROOT/bin/fm-wake-lib.sh" "$lock" "$ready" "$release" \
+      > "$fixture/nudge-lock-holder.out" 2>&1 &
+    holder=$!
+    for ((i = 0; i < 100; i++)); do
+      [ -e "$ready" ] && break
+      kill -0 "$holder" 2>/dev/null || break
+      sleep 0.02
+    done
+    if [ ! -e "$ready" ]; then
+      wait "$holder" 2>/dev/null || true
+      fail "Firstmate outcome nudge lock holder did not start"
+    fi
+    lock_timeout=1
+  fi
+
   AVAILABLE=0 UPDATES=0 FAILURES=0 DEFERRED=0
   PATH="$fakebin:$PATH" FM_ROOT="$fixture" FM_HOME="$fixture" \
     FM_DEPS_SOURCE_ONLY=1 FM_DEPS_INTERACTIVE=1 CHECK_ONLY=0 \
+    FM_DEPS_LOCK_TIMEOUT="$lock_timeout" \
     FM_DEPS_TEST_FIRSTMATE_STATUS="$status" FM_DEPS_TEST_FIRSTMATE_NUDGE="$nudge" \
     FM_DEPS_TEST_LOG="$fixture/send.log" check_firstmate <<<yes > "$out_file" 2>&1
+  if [ "$hold_nudge_lock" = yes ]; then
+    : > "$release"
+    wait "$holder" || fail "Firstmate outcome nudge lock holder failed"
+  fi
   FIRSTMATE_OUTCOME_OUTPUT=$(< "$out_file")
 }
 
@@ -1559,6 +1591,25 @@ test_firstmate_updated_outcome_counts_upgrade() {
   [ "$UPDATES" -eq 1 ] || fail "updated Firstmate outcome was not counted"
   [ "$FAILURES" -eq 0 ] || fail "updated Firstmate outcome was counted as failed"
   pass "updated Firstmate outcomes count one completed upgrade"
+}
+
+test_firstmate_busy_post_update_actions_defer() {
+  local fixture="$TMP_ROOT/firstmate-outcome-busy-actions"
+  local manifest="$fixture/state/.fm-deps-pending/firstmate-actions.pending"
+  run_firstmate_outcome_case "$fixture" 'updated old..new' fm-busy yes
+  assert_contains "$FIRSTMATE_OUTCOME_OUTPUT" "firstmate: updated old..new" \
+    "busy post-update action lost the successful updater outcome"
+  assert_contains "$FIRSTMATE_OUTCOME_OUTPUT" \
+    "DEFER: Firstmate - post-update actions are busy; retry later" \
+    "busy post-update action was not reported as deferred"
+  assert_not_contains "$FIRSTMATE_OUTCOME_OUTPUT" \
+    "FAILED: Firstmate guarded update failed or was skipped" \
+    "busy post-update action was reported as a guarded update failure"
+  [ "$DEFERRED" -eq 1 ] || fail "busy post-update action was not counted as deferred"
+  [ "$FAILURES" -eq 0 ] || fail "busy post-update action was counted as failed"
+  [ "$UPDATES" -eq 0 ] || fail "busy post-update action was counted as completed"
+  assert_present "$manifest" "busy post-update action lost its durable inventory"
+  pass "busy Firstmate post-update actions defer without false failure"
 }
 
 test_firstmate_current_outcome_is_success_without_upgrade() {
@@ -1639,6 +1690,7 @@ test_remote_secondmate_actions_use_shared_retry_markers
 test_prepared_remote_update_journal_retries_before_nudge
 test_nudge_delivery_preserves_concurrent_replacement
 test_firstmate_updated_outcome_counts_upgrade
+test_firstmate_busy_post_update_actions_defer
 test_firstmate_current_outcome_is_success_without_upgrade
 test_firstmate_skipped_outcome_fails_without_upgrade
 test_npm_upgrade_pins_version_and_retries_hooks

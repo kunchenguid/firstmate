@@ -586,20 +586,24 @@ test_bootstrap_nudge_retry_is_idempotent() {
 }
 
 test_bootstrap_nudge_retry_defers_on_busy_transaction() {
-  local w c1 fakebin marker lock ready release holder out started elapsed i
+  local w c1 primary_head fakebin marker lock ready release holder out out2 started elapsed i
   w=$(new_world nudge-retry-lock-busy)
   c1=$(head_of "$w/main")
   add_sm_worktree "$w" sm-instr "$c1"
-  bump_primary "$w" instr
-  fakebin=$(make_fake_toolchain "$w")
-
-  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
-    FM_SEND_SETTLE=0 FM_FAKE_TMUX_FAIL_LITERAL=1 \
-    "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
-  assert_contains "$out" "NUDGE_SECONDMATES: secondmate sm-instr: send failed:" \
-    "precondition: first nudge should fail"
   marker="$w/home/state/.secondmate-nudge-pending/sm-instr.pending"
-  assert_present "$marker" "precondition: failed nudge should leave marker"
+  mkdir -p "${marker%/*}"
+  {
+    printf 'id=sm-instr\n'
+    printf 'selector=fm-sm-instr\n'
+    printf 'home=%s\n' "$w/sm-instr"
+    printf 'commit=%s\n' "$c1"
+    printf 'instructions=AGENTS.md\n'
+    printf 'message=firstmate was updated to the latest - please re-read your AGENTS.md to pick up the new instructions.\n'
+    printf 'remote=0\n'
+  } > "$marker"
+  bump_primary "$w" instr
+  primary_head=$(head_of "$w/main")
+  fakebin=$(make_fake_toolchain "$w")
   lock="$w/home/state/.remote-inherit-sm-instr.lock"
   ready="$w/lock.ready"
   release="$w/lock.release"
@@ -636,8 +640,21 @@ test_bootstrap_nudge_retry_defers_on_busy_transaction() {
   assert_contains "$out" \
     "NUDGE_SECONDMATES: secondmate sm-instr: deferred: transaction lock is busy" \
     "busy bootstrap nudge lock was not reported as deferred"
-  assert_present "$marker" "busy bootstrap nudge retry discarded its marker"
-  pass "T8g bootstrap bounds and defers busy nudge retries"
+  assert_contains "$out" \
+    "SECONDMATE_SYNC: secondmate sm-instr: skipped: update action journal is unavailable" \
+    "busy nudge lock allowed the checkout to advance without a journal"
+  [ "$(head_of "$w/sm-instr")" = "$c1" ] \
+    || fail "busy nudge lock advanced the checkout without a durable new action"
+  assert_grep "commit=$c1" "$marker" "busy bootstrap replaced the sender's existing marker"
+
+  out2=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_SEND_SETTLE=0 "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+  assert_contains "$out2" "BOOTSTRAP_INFO: nudged fm-sm-instr with" \
+    "released nudge transaction did not deliver the pending rereads"
+  [ "$(head_of "$w/sm-instr")" = "$primary_head" ] \
+    || fail "released nudge transaction did not converge the checkout"
+  assert_absent "$marker" "converged nudge transaction retained its retry marker"
+  pass "T8g bootstrap journals before advancing under nudge contention"
 }
 
 test_bootstrap_nudge_retry_refuses_changed_home() {

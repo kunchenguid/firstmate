@@ -1651,7 +1651,7 @@ handle_firstmate_update_actions() {
 }
 
 run_firstmate_upgrade_locked() {
-  local firstmate_line update_out update_status update_tmp pending_status
+  local firstmate_line update_out update_status update_tmp pending_status action_status
   local journal_dir="" journaled=no
   process_pending_firstmate_actions
   pending_status=$?
@@ -1682,7 +1682,9 @@ run_firstmate_upgrade_locked() {
     return 1
   fi
   printf '%s\n' "$update_out"
-  handle_firstmate_update_actions "$update_out" "$journaled" || return 1
+  handle_firstmate_update_actions "$update_out" "$journaled"
+  action_status=$?
+  [ "$action_status" -eq 0 ] || return "$action_status"
   firstmate_line=$(printf '%s\n' "$update_out" | grep '^firstmate: ' || true)
   if [ -z "$firstmate_line" ] || [[ "$firstmate_line" == *$'\n'* ]]; then
     printf 'Firstmate updater returned an invalid primary outcome\n' >&2
@@ -1723,7 +1725,7 @@ run_upgrade() {
       with_firstmate_action_lock run_firstmate_upgrade_locked
       lock_status=$?
       if [ "$lock_status" -eq 75 ]; then
-        printf 'Firstmate update deferred because another dependency check is running\n' >&2
+        printf 'Firstmate update deferred because post-update actions are busy\n' >&2
       fi
       return "$lock_status"
       ;;
@@ -1910,7 +1912,7 @@ check_github_actions() {
 }
 
 check_firstmate() {
-  local branch branch_out local_sha remote_sha status_out pending_status
+  local branch branch_out local_sha remote_sha status_out pending_status upgrade_status
   if branch_out=$(run_git_probe -C "$FM_ROOT" symbolic-ref --short \
     refs/remotes/origin/HEAD 2>/dev/null); then
     branch=${branch_out#origin/}
@@ -1965,7 +1967,9 @@ check_firstmate() {
       return 0
     fi
     if prompt_yes Firstmate; then
-      if run_upgrade firstmate; then
+      upgrade_status=0
+      run_upgrade firstmate || upgrade_status=$?
+      if [ "$upgrade_status" -eq 0 ]; then
         case "$FIRSTMATE_UPDATE_RESULT" in
           updated)
             printf 'UPGRADED: Firstmate\n'
@@ -1980,6 +1984,9 @@ check_firstmate() {
             FAILURES=$((FAILURES + 1))
             ;;
         esac
+      elif [ "$upgrade_status" -eq 75 ]; then
+        printf 'DEFER: Firstmate - post-update actions are busy; retry later\n'
+        DEFERRED=$((DEFERRED + 1))
       else
         printf 'FAILED: Firstmate guarded update failed or was skipped\n' >&2
         FAILURES=$((FAILURES + 1))

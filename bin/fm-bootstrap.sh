@@ -281,7 +281,7 @@ secondmate_sync() {
   # a deterministic locked sweep and can report success as BOOTSTRAP_INFO while
   # preserving failed sends as NUDGE_SECONDMATES retry markers.
   [ -d "$STATE" ] || return 0
-  local primary_head
+  local primary_head update_nudge_lock="" update_nudge_marker="" update_nudge_id=""
   if ! primary_head=$(primary_head_commit "$FM_ROOT"); then
     local meta id
     for meta in "$STATE"/*.meta; do
@@ -309,16 +309,35 @@ secondmate_sync() {
       "$remote" "" "$remote_host" "$remote_root"
   }
 
-  secondmate_send_nudge() {
-    local id=$1 home=$2 commit=$3 instr=$4 selector marker lock out lock_status
+  secondmate_deliver_nudge_locked() {
+    local id=$1 marker=$2 selector out
     selector="fm-$id"
+    if out=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-send.sh" "$selector" "$SECOND_MATE_NUDGE_MESSAGE" 2>&1); then
+      if rm -f -- "$marker"; then
+        echo "BOOTSTRAP_INFO: nudged $selector with '$SECOND_MATE_NUDGE_MESSAGE'"
+      else
+        echo "NUDGE_SECONDMATES: secondmate $id: send failed: cannot clear retry marker"
+      fi
+    else
+      echo "NUDGE_SECONDMATES: secondmate $id: send failed: $(first_line "$out")"
+    fi
+  }
+
+  fm_ff_before_fast_forward() {
+    local _dir=$1 _before=$2 after=$3 instr=$4 id home marker lock lock_status
+    update_nudge_lock=""
+    update_nudge_marker=""
+    update_nudge_id=""
+    [ -n "$instr" ] && [ -n "$FF_UPDATE_SECOND_MATE_WINDOW" ] || return 0
+    id=$FF_UPDATE_SECOND_MATE_ID
+    home=$FF_UPDATE_SECOND_MATE_HOME
     marker=$(secondmate_nudge_marker_path "$id") || {
       echo "NUDGE_SECONDMATES: secondmate $id: send failed: unsafe id"
-      return 0
+      return 1
     }
     lock=$(fm_secondmate_nudge_transaction_lock_path "$STATE" "$id") || {
       echo "NUDGE_SECONDMATES: secondmate $id: send failed: unsafe transaction lock"
-      return 0
+      return 1
     }
     fm_dependency_acquire_lock "$lock"
     lock_status=$?
@@ -326,34 +345,45 @@ secondmate_sync() {
       0) ;;
       75)
         echo "NUDGE_SECONDMATES: secondmate $id: deferred: transaction lock is busy"
-        return 0
+        return 1
         ;;
       *)
         echo "NUDGE_SECONDMATES: secondmate $id: send failed: transaction lock failed"
-        return 0
+        return 1
         ;;
     esac
-    if ! secondmate_write_nudge_marker "$id" "$home" "$commit" "$instr"; then
+    if ! secondmate_write_nudge_marker "$id" "$home" "$after" "$instr"; then
       echo "NUDGE_SECONDMATES: secondmate $id: send failed: cannot record retry marker"
       fm_lock_release "$lock" || true
-      return 0
+      return 1
     fi
-    if out=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-send.sh" "$selector" "$SECOND_MATE_NUDGE_MESSAGE" 2>&1); then
-      rm -f "$marker"
-      echo "BOOTSTRAP_INFO: nudged $selector with '$SECOND_MATE_NUDGE_MESSAGE'"
-    else
-      echo "NUDGE_SECONDMATES: secondmate $id: send failed: $(first_line "$out")"
-    fi
-    fm_lock_release "$lock" || true
+    update_nudge_lock=$lock
+    update_nudge_marker=$marker
+    update_nudge_id=$id
   }
 
   fm_ff_after_instruction_update() {
-    local id=$1 home=$2 _window=$3 instr=$4
-    secondmate_send_nudge "$id" "$home" "$primary_head" "$instr"
+    [ -n "$update_nudge_lock" ] || return 0
+    secondmate_deliver_nudge_locked "$update_nudge_id" "$update_nudge_marker"
+    fm_lock_release "$update_nudge_lock" || true
+    update_nudge_lock=""
+    update_nudge_marker=""
+    update_nudge_id=""
+  }
+
+  fm_ff_abort_fast_forward() {
+    local remove_status=0
+    [ -n "$update_nudge_lock" ] || return 0
+    rm -f -- "$update_nudge_marker" || remove_status=1
+    fm_lock_release "$update_nudge_lock" || remove_status=1
+    update_nudge_lock=""
+    update_nudge_marker=""
+    update_nudge_id=""
+    return "$remove_status"
   }
 
   secondmate_retry_pending_nudge_locked() {
-    local marker id selector home commit message remote expected_marker meta meta_home home_real head out
+    local marker id selector home commit message remote expected_marker meta meta_home home_real head
     marker=$1
     [ -f "$marker" ] || return 0
     id=$(fm_meta_get "$marker" id)
@@ -411,12 +441,7 @@ secondmate_sync() {
       echo "NUDGE_SECONDMATES: secondmate $id: send failed: retry target is not at recorded instruction commit"
       return 0
     }
-    if out=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-send.sh" "$selector" "$SECOND_MATE_NUDGE_MESSAGE" 2>&1); then
-      rm -f "$marker"
-      echo "BOOTSTRAP_INFO: nudged $selector with '$SECOND_MATE_NUDGE_MESSAGE'"
-    else
-      echo "NUDGE_SECONDMATES: secondmate $id: send failed: $(first_line "$out")"
-    fi
+    secondmate_deliver_nudge_locked "$id" "$marker"
   }
 
   secondmate_retry_pending_nudges() {
@@ -468,7 +493,7 @@ secondmate_sync() {
     esac
   done < "$tmp"
   rm -f "$tmp"
-  unset -f fm_ff_after_instruction_update
+  unset -f fm_ff_before_fast_forward fm_ff_after_instruction_update fm_ff_abort_fast_forward
   # Inheritance propagation: push the primary-authoritative local inheritance
   # surface into every VALIDATED live secondmate home swept above.
   # FF_SEEN_HOMES is exactly that set, and fm-config-inherit-lib.sh owns the
