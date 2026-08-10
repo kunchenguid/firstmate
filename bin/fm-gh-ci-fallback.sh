@@ -536,25 +536,29 @@ except Exception as error:
 safe_repo = re.sub(r"[^A-Za-z0-9_.-]+", "_", repo)
 state_path = os.path.join(state_root, f"{safe_repo}-pr-{number}.json")
 
-if evidence_kind == "terminal":
-    try:
-        os.unlink(state_path)
-    except FileNotFoundError:
-        pass
-    except OSError as error:
-        checks, reason = diagnostic("state", f"cannot clear terminal evidence state: {error}", bucket="fail")
-        print(f"fm-gh-ci-fallback: state-error: {reason}", file=sys.stderr)
-else:
-    try:
+try:
+    if evidence_kind == "terminal":
+        try:
+            os.unlink(state_path)
+        except FileNotFoundError:
+            pass
+    else:
         os.makedirs(state_root, mode=0o700, exist_ok=True)
         first_seen = now
         try:
             with open(state_path, encoding="utf-8") as stream:
                 prior = json.load(stream)
-            if prior.get("head") == head and isinstance(prior.get("first_seen"), int) and 0 <= prior["first_seen"] <= now:
-                first_seen = prior["first_seen"]
-        except (FileNotFoundError, json.JSONDecodeError, OSError, AttributeError):
-            pass
+        except FileNotFoundError:
+            prior = None
+        if prior is not None:
+            if not isinstance(prior, dict):
+                raise ValueError("saved deadline state is not an object")
+            prior_head = prior.get("head")
+            prior_first_seen = prior.get("first_seen")
+            if not isinstance(prior_head, str) or not isinstance(prior_first_seen, int) or isinstance(prior_first_seen, bool):
+                raise ValueError("saved deadline state has invalid field types")
+            if prior_head == head and 0 <= prior_first_seen <= now:
+                first_seen = prior_first_seen
         if now - first_seen >= max_pending:
             checks, reason = diagnostic(evidence_kind, reason, bucket="fail")
             print(f"fm-gh-ci-fallback: evidence-timeout: {reason}", file=sys.stderr)
@@ -568,9 +572,10 @@ else:
                 json.dump({"head": head, "first_seen": first_seen}, stream, separators=(",", ":"))
                 stream.write("\n")
             os.replace(temporary, state_path)
-    except OSError as error:
-        checks, reason = diagnostic("state", f"cannot persist the pending deadline: {error}", bucket="fail")
-        print(f"fm-gh-ci-fallback: state-error: {reason}", file=sys.stderr)
+except Exception as error:
+    reason = f"cannot manage deadline state: {type(error).__name__}: {error}"
+    checks, reason = diagnostic("state", reason, bucket="fail")
+    print(f"fm-gh-ci-fallback: state-error: {reason}", file=sys.stderr)
 
 print(json.dumps(checks, separators=(",", ":")))
 PY
