@@ -439,6 +439,135 @@ test_herdr_lab_omission_is_loud_for_ship_and_scout() {
   pass "fm-brief.sh: ship and scout scaffolds make omitted Herdr intent fail-visible"
 }
 
+test_firstmate_repo_identity_guard_applies_to_ship_and_scout() {
+  local home firstmate_clone id kind brief command
+  home="$TMP_ROOT/firstmate-identity-guard-home"
+  firstmate_clone="$home/projects/firstmate"
+  mkdir -p "$home/data" "$home/projects"
+  git clone -q "$ROOT" "$firstmate_clone" \
+    || fail "firstmate-repository guard fixture clone failed"
+
+  for kind in ship scout; do
+    id="brief-firstmate-identity-$kind"
+    if [ "$kind" = scout ]; then
+      command=("$ROOT/bin/fm-brief.sh" "$id" firstmate --scout)
+    else
+      command=("$ROOT/bin/fm-brief.sh" "$id" firstmate --mode no-mistakes)
+    fi
+    FM_HOME="$home" "${command[@]}" >/dev/null 2>&1 \
+      || fail "$kind firstmate-repository brief should scaffold"
+    brief="$home/data/$id/brief.md"
+    assert_grep "AGENTS.md" "$brief" \
+      "$kind firstmate-repository brief did not name AGENTS.md as the instruction collision"
+    assert_grep "CLAUDE.md" "$brief" \
+      "$kind firstmate-repository brief did not name CLAUDE.md as the instruction collision"
+    assert_grep "You are not firstmate." "$brief" \
+      "$kind firstmate-repository brief did not separate the worker from firstmate"
+    for command in bin/fm-spawn.sh bin/fm-brief.sh tasks-axi bin/fm-wake-drain.sh bin/fm-peek.sh bin/fm-send.sh bin/fm-watch.sh bin/fm-supervise-daemon.sh; do
+      assert_grep "\`$command\`" "$brief" \
+        "$kind firstmate-repository brief did not forbid $command"
+    done
+    assert_grep "only read or edit them as task work" "$brief" \
+      "$kind firstmate-repository brief did not limit orchestration commands to task editing"
+    assert_grep 'Never address "the captain"' "$brief" \
+      "$kind firstmate-repository brief did not forbid captain-facing communication"
+  done
+  pass "fm-brief.sh: firstmate-repository ship and scout briefs carry the identity guard"
+}
+
+test_firstmate_repo_identity_guard_normalizes_ssh_and_https_origins() {
+  local home firstmate_clone firstmate_remote ssh_remote brief
+  home="$TMP_ROOT/firstmate-identity-normalized-home"
+  firstmate_clone="$home/projects/firstmate"
+  mkdir -p "$home/data" "$home/projects"
+  git clone -q "$ROOT" "$firstmate_clone" \
+    || fail "firstmate-repository normalized-origin fixture clone failed"
+  firstmate_remote=$(git -C "$ROOT" remote get-url origin) \
+    || fail "firstmate-repository normalized-origin fixture has no origin remote"
+  case "$firstmate_remote" in
+    https://*) ssh_remote="git@${firstmate_remote#https://}" ;;
+    http://*) ssh_remote="git@${firstmate_remote#http://}" ;;
+    *) fail "firstmate-repository normalized-origin fixture requires an HTTP origin" ;;
+  esac
+  ssh_remote="${ssh_remote%%/*}:${ssh_remote#*/}"
+  git -C "$firstmate_clone" remote set-url origin "$ssh_remote" \
+    || fail "firstmate-repository normalized-origin fixture could not set its SSH origin"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-firstmate-identity-normalized firstmate --mode no-mistakes >/dev/null 2>&1 \
+    || fail "firstmate-repository brief with equivalent SSH origin should scaffold"
+  brief="$home/data/brief-firstmate-identity-normalized/brief.md"
+  assert_grep "You are not firstmate." "$brief" \
+    "equivalent SSH and HTTPS origins did not receive the firstmate identity guard"
+  pass "fm-brief.sh: firstmate-repository identity normalizes SSH and HTTPS origins"
+}
+
+test_firstmate_repo_identity_guard_normalizes_bare_local_origins() {
+  local fixture bare_source firstmate_runtime home firstmate_clone brief
+  fixture="$TMP_ROOT/firstmate-identity-bare-local"
+  bare_source="$fixture/firstmate.git"
+  firstmate_runtime="$fixture/runtime"
+  home="$fixture/home"
+  firstmate_clone="$home/projects/firstmate"
+  mkdir -p "$home/data" "$home/projects"
+  git clone --bare -q "$ROOT" "$bare_source" \
+    || fail "firstmate-repository bare local source fixture failed"
+  git clone -q "$bare_source" "$firstmate_runtime" \
+    || fail "firstmate-repository runtime fixture clone failed"
+  cp "$ROOT/bin/fm-brief.sh" "$firstmate_runtime/bin/fm-brief.sh" \
+    || fail "firstmate-repository runtime fixture did not receive the current fm-brief.sh"
+  git clone -q "$bare_source" "$firstmate_clone" \
+    || fail "firstmate-repository registered fixture clone failed"
+  git -C "$firstmate_clone" remote set-url origin "file://$bare_source" \
+    || fail "firstmate-repository registered fixture could not set its file origin"
+  FM_HOME="$home" "$firstmate_runtime/bin/fm-brief.sh" brief-firstmate-identity-bare-local firstmate --mode no-mistakes >/dev/null 2>&1 \
+    || fail "firstmate-repository brief with equivalent bare local origins should scaffold"
+  brief="$home/data/brief-firstmate-identity-bare-local/brief.md"
+  assert_grep "You are not firstmate." "$brief" \
+    "equivalent bare local origins did not receive the firstmate identity guard"
+  pass "fm-brief.sh: firstmate-repository identity normalizes bare local origins"
+}
+
+test_firstmate_repo_identity_guard_resolves_bare_local_upstream() {
+  local fixture bare_source home firstmate_clone firstmate_remote brief
+  fixture="$TMP_ROOT/firstmate-identity-bare-upstream"
+  bare_source="$fixture/firstmate.git"
+  home="$fixture/home"
+  firstmate_clone="$home/projects/firstmate"
+  mkdir -p "$home/data" "$home/projects"
+  firstmate_remote=$(git -C "$ROOT" remote get-url origin) \
+    || fail "firstmate-repository bare upstream fixture has no origin remote"
+  git clone --bare -q "$ROOT" "$bare_source" \
+    || fail "firstmate-repository bare upstream source fixture failed"
+  git -C "$bare_source" remote set-url origin "$firstmate_remote" \
+    || fail "firstmate-repository bare upstream fixture could not set its network origin"
+  git clone -q "$bare_source" "$firstmate_clone" \
+    || fail "firstmate-repository bare upstream registered clone failed"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-firstmate-identity-bare-upstream firstmate --mode no-mistakes >/dev/null 2>&1 \
+    || fail "firstmate-repository brief through a bare local upstream should scaffold"
+  brief="$home/data/brief-firstmate-identity-bare-upstream/brief.md"
+  assert_grep "You are not firstmate." "$brief" \
+    "bare local source upstream identity did not receive the firstmate identity guard"
+  pass "fm-brief.sh: firstmate-repository identity resolves bare local upstreams"
+}
+
+test_ordinary_registered_project_brief_is_byte_stable() {
+  local home project brief digest expected
+  home="$TMP_ROOT/ordinary-project-byte-stability-home"
+  project="$home/projects/ordinary-project"
+  mkdir -p "$home/data" "$project"
+  printf '%s\n' '- ordinary-project [no-mistakes] - fixture' > "$home/data/projects.md"
+  fm_git_init_commit "$project"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" ordinary-project-byte-stability ordinary-project --mode no-mistakes >/dev/null 2>&1 \
+    || fail "ordinary registered project brief should scaffold"
+  brief="$home/data/ordinary-project-byte-stability/brief.md"
+  assert_no_grep "You are not firstmate." "$brief" \
+    "ordinary registered project brief unexpectedly gained the firstmate identity guard"
+  digest=$(sed -e "s|$home|<home>|g" -e "s|$ROOT|<root>|g" "$brief" | cksum)
+  expected='1215957393 6458'
+  [ "$digest" = "$expected" ] \
+    || fail "ordinary registered project brief changed bytes (got: $digest)"
+  pass "fm-brief.sh: ordinary registered project brief remains byte-identical"
+}
+
 test_secondmate_no_projects_charter() {
   local home brief status
   home="$TMP_ROOT/no-projects-home"
@@ -722,6 +851,11 @@ test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
 test_herdr_lab_omission_is_loud_for_ship_and_scout
 test_herdr_lab_contract_applies_to_scouts_but_not_secondmates
+test_firstmate_repo_identity_guard_applies_to_ship_and_scout
+test_firstmate_repo_identity_guard_normalizes_ssh_and_https_origins
+test_firstmate_repo_identity_guard_normalizes_bare_local_origins
+test_firstmate_repo_identity_guard_resolves_bare_local_upstream
+test_ordinary_registered_project_brief_is_byte_stable
 test_secondmate_no_projects_charter
 test_secondmate_marked_request_reporting_contract
 test_secondmate_directory_paths_are_absolute_and_output_is_stable
