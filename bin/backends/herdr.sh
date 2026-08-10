@@ -2056,7 +2056,7 @@ EOF
 # Return codes: 0 replacement created, 2 exact endpoint revived agent-free,
 # 1 refusal or failed/ambiguous Herdr response. On success or return 2, the
 # FM_BACKEND_HERDR_RELAUNCH_* globals contain the authoritative exact ids.
-fm_backend_herdr_relaunch_missing_task() {  # <session> <workspace> <tab> <pane> <label> <cwd>
+fm_backend_herdr_relaunch_missing_task_serialized() {  # <session> <workspace> <tab> <pane> <label> <cwd>
   local session=$1 workspace=$2 recorded_tab=$3 recorded_pane=$4 label=$5 cwd=$6
   local tabs panes tab_count label_count exact_count old_pane old_pane_count recorded_pane_count recorded_pane_tab
   local out new_tab new_pane remaining old_present new_present new_pane_count
@@ -2223,6 +2223,32 @@ fm_backend_herdr_relaunch_missing_task() {  # <session> <workspace> <tab> <pane>
   # shellcheck disable=SC2034 # callers consume these same-process output globals
   FM_BACKEND_HERDR_RELAUNCH_PANE_ID=$new_pane
   return 0
+}
+
+fm_backend_herdr_relaunch_missing_task() {  # <session> <workspace> <tab> <pane> <label> <cwd>
+  local session=$1 lock_path attempt=0 lock_held=0
+  if ! declare -F fm_lock_try_acquire >/dev/null 2>&1; then
+    # shellcheck source=bin/fm-wake-lib.sh
+    . "$FM_BACKEND_HERDR_ROOT/bin/fm-wake-lib.sh"
+  fi
+  if lock_path=$(fm_backend_herdr_presentation_session_lock_path "$session"); then
+    while [ "$attempt" -lt 50 ]; do
+      if fm_lock_try_acquire "$lock_path"; then
+        lock_held=1
+        break
+      fi
+      sleep 0.1
+      attempt=$((attempt + 1))
+    done
+  fi
+  if [ "$lock_held" = 1 ]; then
+    fm_backend_herdr_relaunch_missing_task_serialized "$@"
+    local status=$?
+    fm_lock_release "$lock_path" || true
+    return "$status"
+  fi
+  echo "error: could not acquire Herdr session presentation lock; refusing recovery" >&2
+  return 1
 }
 
 # fm_backend_herdr_projection_create_task: create one disposable presentation
