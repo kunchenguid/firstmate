@@ -99,7 +99,7 @@ test_empty_content_is_empty() {
 test_idle_placeholder_is_empty() {
   local idle='^Type a message\.\.\.$' out
   out=$(classify 1 'Type a message...' "$idle" sensitive 'Type a message...' 1 1)
-  [ "$out" = empty ] || fail "the grok idle placeholder should read empty, got '$out'"
+  [ "$out" = pending ] || fail "placeholder-like text surviving a styled box capture should read pending, got '$out'"
   out=$(classify 1 '❯ Type a message...' "$idle" sensitive '❯ Type a message...' 1 0)
   [ "$out" = empty ] || fail "a glyph-bearing plain box placeholder should read empty, got '$out'"
   out=$(classify 0 '❯ Type a message...' "$idle" sensitive '❯ Type a message...' 0 1)
@@ -113,10 +113,10 @@ test_idle_placeholder_is_empty() {
 
 test_idle_placeholder_case_mode_is_explicit() {
   local idle='^Type a message\.\.\.$' out
-  out=$(classify 1 'type a message...' "$idle" sensitive 'type a message...' 1 1)
+  out=$(classify 1 'type a message...' "$idle" sensitive 'type a message...' 1 0)
   [ "$out" = pending ] || fail "a case-variant idle placeholder should remain pending by default, got '$out'"
-  out=$(classify 1 'type a message...' "$idle" insensitive 'type a message...' 1 1)
-  [ "$out" = empty ] || fail "an explicitly insensitive idle placeholder should read empty, got '$out'"
+  out=$(classify 1 'type a message...' "$idle" insensitive 'type a message...' 1 0)
+  [ "$out" = empty ] || fail "an explicitly insensitive plain placeholder should read empty, got '$out'"
   pass "fm_composer_classify_content: idle matching preserves the caller's case mode"
 }
 
@@ -262,13 +262,13 @@ test_matrix_opencode_leftbar_signals() {
   # (works on styled captures even if the pattern is overridden away).
   local screen typed dim_screen out
   screen=$'  ┃\n  ┃  Ask anything... "What is the tech stack?"\n  ┃\n  ┃  Build · GPT-5.5 Fast OpenAI · high\n  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀'
-  assert_screen "opencode idle on tmux (cursor on hint)" empty "$CAPS_TMUX" "$screen" 1
-  assert_screen "opencode idle on herdr" empty "$CAPS_STYLED" "$screen"
-  assert_screen "opencode idle on zellij" empty "$CAPS_STYLED_NOID" "$screen"
+  dim_screen=$'  ┃\n  ┃  '"${ESC}[2mAsk anything...${ESC}[0m"$'\n  ┃\n  ┃  Build · GPT-5.5 Fast OpenAI · high\n  ╹▀▀▀▀'
+  assert_screen "opencode idle on tmux (cursor on hint)" empty "$CAPS_TMUX" "$dim_screen" 1
+  assert_screen "opencode idle on herdr" empty "$CAPS_STYLED" "$dim_screen"
+  assert_screen "opencode idle on zellij" empty "$CAPS_STYLED_NOID" "$dim_screen"
   assert_screen "opencode idle on cmux/orca" empty "$CAPS_PLAIN" "$screen"
   # Signal separation: with the idle pattern overridden to something that
   # cannot match, a DIM-styled hint still proves empty through the ghost strip.
-  dim_screen=$'  ┃\n  ┃  '"${ESC}[2mAsk anything...${ESC}[0m"$'\n  ┃\n  ┃  Build · GPT-5.5 Fast OpenAI · high\n  ╹▀▀▀▀'
   out=$(FM_COMPOSER_IDLE_RE='^NEVER-MATCHES$' fm_composer_classify_screen "$CAPS_TMUX" "$dim_screen" 1)
   [ "$out" = empty ] || fail "a dim opencode hint must stay empty via the ghost strip alone, got '$out'"
   typed=$'┃\n┃  refactor the parser please\n┃\n┃  Build · GPT-5.5 Fast OpenAI · high\n╹▀▀▀▀'
@@ -286,12 +286,15 @@ test_matrix_grok_titled_bottom_border() {
   # Real idle grok: a bordered box whose BOTTOM border carries the model name.
   # The audit showed the title alone flipped tmux's geometry check to
   # ambiguous and the verdict to unknown, stranding every grok steer.
-  local titled plain_border typed
+  local titled plain_border typed placeholder_draft
   titled=$'  ╭──────────────────────────────────────╮\n  │ ❯                                    │\n  ╰──────────────────── Grok 4.5 (high) ─╯'
   plain_border=$'  ╭──────────────────────────────────────╮\n  │ ❯                                    │\n  ╰──────────────────────────────────────╯'
   assert_screen "grok titled on tmux" empty "$CAPS_TMUX" "$titled" 1
   assert_screen "grok titled on tmux bottom-border cursor" empty "$CAPS_TMUX" "$titled" 2
   assert_screen "grok titled on herdr" empty "$CAPS_STYLED" "$titled"
+  placeholder_draft=$'  ╭──────────────────────────────────────╮\n  │ ❯ Type a message...                  │\n  ╰──────────────────── Grok 4.5 (high) ─╯'
+  assert_screen "grok bright placeholder-like draft on tmux" pending "$CAPS_TMUX" "$placeholder_draft" 1
+  assert_screen "grok placeholder on plain backends" empty "$CAPS_PLAIN" "$placeholder_draft"
   assert_screen "grok titled on cmux/orca" empty "$CAPS_PLAIN" "$titled"
   assert_screen "grok titled on zellij" empty "$CAPS_STYLED_NOID" "$titled"
   # The tolerance is additive: an untitled border still proves the same box.

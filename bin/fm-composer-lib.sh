@@ -427,7 +427,7 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
   [ -n "$content" ] || { printf 'empty'; return 0; }
   fm_composer_idle_matches "$content" "$idle_re" "$idle_case" && idle_collision=1
   if [ "$idle_collision" = 1 ]; then
-    if [ "$placeholder_position" = 1 ] && [ "$bordered" = 1 ]; then
+    if [ "$placeholder_position" = 1 ] && [ "$bordered" = 1 ] && [ "$styled" != 1 ]; then
       printf 'empty'; return 0
     fi
     if [ "$styled" != 1 ]; then
