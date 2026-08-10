@@ -68,9 +68,12 @@
 #   dispatch profiles records "unconfigured" and refuses an explicit floor.
 #   --route <ROUTE> names the configured route this dispatch CLAIMS, and the spawn
 #   checks the claim: the model must be in that route's ordered pool and must meet
-#   the route's capability floor on every axis the config records evidence for.
-#   A violation is REFUSED naming the route, the exact JSON config path, the
-#   configured value and the observed one. Required for ship and scout spawns in a
+#   the route's capability floor on every axis the config declares. A violation is
+#   REFUSED naming the route, the exact JSON config path, the configured value and
+#   the observed one, and a MISSING input is a violation too: an unstated model, a
+#   floor id _floors does not define, an axis the config records no evidence for,
+#   and a model the availability record holds each refuse rather than passing
+#   unchecked. Required for ship and scout spawns in a
 #   home whose config/crew-dispatch.json carries routed pools, unless an explicit
 #   --capability-floor already names exactly one route; refused on --secondmate.
 #   A home with no routed pool - which is every home using the documented profile
@@ -81,8 +84,11 @@
 #   bin/fm-route.sh to read them, list a route's eligible candidates in pool
 #   order, or resolve a failover substitute inside the same pool.
 #   Ship and scout spawns also consult bin/fm-admission.sh before allocating
-#   anything: a fleet that is not accepting another task refuses the spawn and
-#   the request is queued as a `load` hold rather than dropped.
+#   anything: a fleet that is not accepting another task stops the spawn and the
+#   request is queued as a `load` hold rather than dropped. The two non-preferred
+#   bands are distinct answers - a `queue` action is FM_SPAWN_ADMISSION_DEFERRED
+#   and a `refuse` action is FM_SPAWN_ADMISSION_REFUSED - and a batch takes one
+#   fleet census for every pair rather than one per pair.
 #   The spawn additionally derives reasoning_required from the reason code and
 #   escalation_policy from kind plus the delivery contract, so neither can be
 #   declared into disagreement with the record it summarizes. All of it lands in
@@ -1218,6 +1224,29 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   [ "$ROUTE_SET" -eq 0 ] || shared_args+=(--route "$ROUTE")
   [ "$TOOLING_GAP_ITEM_SET" -eq 0 ] || shared_args+=(--tooling-gap-item "$TOOLING_GAP_ITEM")
   [ "$ATTEMPT_BUDGET_SET" -eq 0 ] || shared_args+=(--attempt-budget "$ATTEMPT_BUDGET_ARG")
+  # ADMIT is a property of the FLEET, never of the pair, so one census answers it
+  # for the whole batch. Without this each pair re-runs a full fm-fleet-snapshot
+  # census serially, which is N censuses to answer one fleet-wide question. The
+  # snapshot carries its own generation time and fm-admission.sh still ages it
+  # against the configured freshness limit, so the census-integrity signal is
+  # unchanged - a batch slow enough to stale the census is refused exactly as a
+  # stale one always was. Taken only where a home has an active admission policy;
+  # bin/fm-admission-lib.sh owns that question, and an inert home pays nothing.
+  batch_snapshot=
+  # shellcheck source=bin/fm-admission-lib.sh
+  . "$SCRIPT_DIR/fm-admission-lib.sh"
+  if [ "$(fm_admission_state "$(fm_admission_config_file "$CONFIG")")" = active ] \
+    && [ -x "$FM_ROOT/bin/fm-fleet-snapshot.sh" ]; then
+    batch_snapshot=$(mktemp "${TMPDIR:-/tmp}/fm-spawn-admission-snapshot.XXXXXX") || batch_snapshot=
+    if [ -n "$batch_snapshot" ] \
+      && ! "$FM_ROOT/bin/fm-fleet-snapshot.sh" --json > "$batch_snapshot" 2>/dev/null; then
+      # A census that could not be taken is not a shared census. Drop it and let
+      # each pair ask for its own, so a batch never admits on a snapshot the
+      # fleet snapshot owner refused to produce.
+      rm -f "$batch_snapshot"
+      batch_snapshot=
+    fi
+  fi
   for pair in "${POS[@]}"; do
     case "$pair" in
       *=*) : ;;
@@ -1228,11 +1257,12 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
       rc=2
       continue
     elif [ "$KIND" = scout ]; then
-      if FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "${pair%%=*}" "${pair#*=}" "${shared_args[@]+"${shared_args[@]}"}" --scout; then :; else echo "batch: FAILED to spawn ${pair%%=*} (${pair#*=})" >&2; rc=1; fi
+      if FM_SPAWN_NO_GUARD=1 FM_SPAWN_ADMISSION_SNAPSHOT="$batch_snapshot" "$FM_ROOT/bin/fm-spawn.sh" "${pair%%=*}" "${pair#*=}" "${shared_args[@]+"${shared_args[@]}"}" --scout; then :; else echo "batch: FAILED to spawn ${pair%%=*} (${pair#*=})" >&2; rc=1; fi
     else
-      if FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "${pair%%=*}" "${pair#*=}" "${shared_args[@]+"${shared_args[@]}"}"; then :; else echo "batch: FAILED to spawn ${pair%%=*} (${pair#*=})" >&2; rc=1; fi
+      if FM_SPAWN_NO_GUARD=1 FM_SPAWN_ADMISSION_SNAPSHOT="$batch_snapshot" "$FM_ROOT/bin/fm-spawn.sh" "${pair%%=*}" "${pair#*=}" "${shared_args[@]+"${shared_args[@]}"}"; then :; else echo "batch: FAILED to spawn ${pair%%=*} (${pair#*=})" >&2; rc=1; fi
     fi
   done
+  [ -z "$batch_snapshot" ] || rm -f "$batch_snapshot"
   exit "$rc"
 fi
 ID=${POS[0]}
@@ -1524,17 +1554,31 @@ fi
 # as its exit status; this is the caller that applies the outcome. A home with no
 # admission policy exits 0 and nothing here changes.
 #
-# Both non-preferred bands place the same `load` hold, which is the whole queue
-# substrate - .agents/skills/fleet-admission/SKILL.md owns that procedure and
-# admission never opens a second queue. A hard band additionally names the
-# controlling condition, because "the fleet refused" without the condition that
-# must clear is a refusal nobody can act on. A hold that cannot be placed does
-# not soften the refusal: the work is refused either way and the failure is said
-# out loud, so a request can never be silently dropped instead of queued.
+# The two non-preferred bands are NOT the same answer and must not read as one.
+# The decision record's own `action` splits them: `queue` is a DEFERRAL - the
+# work is held and reconsidered - and `refuse` is a refusal. Each carries its own
+# stable token and its own prose, because a caller matching tokens cannot act on
+# a deferral it cannot tell from a refusal. Both place the hold the record's own
+# `hold_kind` names, which is the whole queue substrate -
+# .agents/skills/fleet-admission/SKILL.md owns that procedure and admission never
+# opens a second queue - and both name the controlling condition, because a band
+# without the condition that must clear is something nobody can act on. A hold
+# that cannot be placed softens neither answer: the spawn stops either way and
+# the failure is said out loud, so a request can never be silently dropped
+# instead of queued.
+#
+# A batch parent may take one fleet census for the whole batch and hand it down
+# through FM_SPAWN_ADMISSION_SNAPSHOT; admission still ages that snapshot against
+# its own configured freshness limit, so sharing it cannot smuggle a stale census
+# past the census-integrity signal.
 spawn_admission_gate() {
-  local record band rc reason controlling
+  local record band action hold_kind rc reason controlling token headline
   [ -x "$FM_ROOT/bin/fm-admission.sh" ] || return 0
-  record=$("$FM_ROOT/bin/fm-admission.sh" --json 2>/dev/null)
+  if [ -n "${FM_SPAWN_ADMISSION_SNAPSHOT:-}" ] && [ -f "${FM_SPAWN_ADMISSION_SNAPSHOT:-}" ]; then
+    record=$("$FM_ROOT/bin/fm-admission.sh" --json --snapshot "$FM_SPAWN_ADMISSION_SNAPSHOT" 2>/dev/null)
+  else
+    record=$("$FM_ROOT/bin/fm-admission.sh" --json 2>/dev/null)
+  fi
   rc=$?
   [ "$rc" -ne 0 ] || return 0
   if [ -z "$record" ] || ! band=$(printf '%s' "$record" | jq -r '.decision_band // empty' 2>/dev/null) \
@@ -1555,9 +1599,22 @@ spawn_admission_gate() {
     | if length > 0 then join("; ") else ($c | join("; ")) end' 2>/dev/null)
   reason="Fleet admission $band: ${controlling:-no controlling rule recorded}; config $(printf '%s' "$record" | jq -r '.config_digest // "unknown"')"
   reason=$(printf '%s' "$reason" | tr -d '()' | tr '\n' ' ')
-  echo "error: FM_SPAWN_ADMISSION_REFUSED: the fleet is not accepting another task right now - $reason" >&2
+  action=$(printf '%s' "$record" | jq -r '.action // empty' 2>/dev/null)
+  hold_kind=$(printf '%s' "$record" | jq -r '.hold_kind // empty' 2>/dev/null)
+  [ -n "$hold_kind" ] || hold_kind=load
+  case "$action" in
+    queue)
+      token=FM_SPAWN_ADMISSION_DEFERRED
+      headline="the fleet is not accepting another task right now, so this dispatch is deferred and queued for reconsideration rather than started"
+      ;;
+    *)
+      token=FM_SPAWN_ADMISSION_REFUSED
+      headline="the fleet is not accepting another task right now, so this dispatch is refused"
+      ;;
+  esac
+  echo "error: $token: $headline - $reason" >&2
   if fm_tasks_axi_backend_available "$CONFIG" \
-    && tasks-axi hold "$ID" --file "$DATA/backlog.md" --kind load --reason "$reason" >/dev/null 2>&1; then
+    && tasks-axi hold "$ID" --file "$DATA/backlog.md" --kind "$hold_kind" --reason "$reason" >/dev/null 2>&1; then
     echo "queued $ID for reconsideration at the next successful cleanup or session start" >&2
   else
     echo "warning: could not queue $ID; record the hold by hand so this request is not lost" >&2
@@ -1611,13 +1668,23 @@ if [ "$KIND" != secondmate ]; then
       echo "error: $FM_ROUTE_TOKEN_REQUIRED: $CONFIG/crew-dispatch.json configures routed pools, so this dispatch must name the route it claims: pass --route <$(fm_route_ids "$CONFIG" | tr '\n' '|' | sed 's/|$//')>, or a --capability-floor that names exactly one of them." >&2
       exit 1
     fi
-    if ! ROUTE_REFUSAL=$(fm_route_check_refusal "$CONFIG" "$ROUTE" "$MODEL" "$EFFORT" "$STATE"); then
+    # ONE evaluation answers both questions below. Evaluating twice would open a
+    # window where the check and the recorded floor observe different config or
+    # different availability state, and a record that disagrees with the check
+    # that produced it is exactly what this enforcement exists to prevent.
+    if ! ROUTE_DECISION=$(fm_route_decision "$CONFIG" "$ROUTE" "$MODEL" "$EFFORT" "$STATE"); then
+      echo "error: $(fm_route_unreadable_refusal "$CONFIG")" >&2
+      exit 1
+    fi
+    if ! ROUTE_REFUSAL=$(fm_route_refusal_from_decision "$CONFIG" "$ROUTE" "$MODEL" "$ROUTE_DECISION" "$STATE"); then
       echo "error: $ROUTE_REFUSAL" >&2
       exit 1
     fi
     # The floor is the route's own, so the recorded capability band and the
-    # enforced route can never describe two different rungs of the ladder.
-    ROUTE_FLOOR=$(fm_route_decision "$CONFIG" "$ROUTE" "$MODEL" "$EFFORT" "$STATE" | jq -r '.floor // empty' 2>/dev/null || true)
+    # enforced route can never describe two different rungs of the ladder. The
+    # check above already refused a floor id `_floors` does not define, so a
+    # floor recorded here is always one that was measured against a definition.
+    ROUTE_FLOOR=$(printf '%s' "$ROUTE_DECISION" | jq -r '.floor // empty' 2>/dev/null || true)
     if [ -n "$ROUTE_FLOOR" ]; then
       if [ "$CAPABILITY_FLOOR_SET" -eq 1 ] && [ "$CAPABILITY_FLOOR" != "$ROUTE_FLOOR" ]; then
         echo "error: $FM_ROUTE_TOKEN_FLOOR_MISMATCH: route $ROUTE resolves against floor $ROUTE_FLOOR, but this dispatch recorded --capability-floor $CAPABILITY_FLOOR; a record that disagrees with the route it was checked against is worse than no record" >&2

@@ -32,11 +32,12 @@
     { "harness": "pi", "model": "anthropic/claude-sonnet-5", "effort": "medium", "floor": "F-GEN" }
   ],
   "_scheduling": {
-    "_note": "Optional. Delete this whole block to leave fleet admission control inert.",
+    "_note": "Optional, and shipped switched OFF so copying this file changes nothing about dispatch. The whole block is here so the schema is readable; delete it, or leave enabled false, to keep fleet admission control inert.",
     "admission_control": {
       "_note": "Third layer above routing and scheduling: whether the fleet should accept another task at all right now, from fleet state only. Every numeric threshold is deliberately null and observation-only until production evidence justifies a value.",
+      "_activation": "Set enabled to true DELIBERATELY, per home. An enabled policy is consulted at the spawn chokepoint and its authority rule bands any invocation that does not hold this home's session lock, so switching it on changes when spawns are admitted.",
       "schema_version": 1,
-      "enabled": true,
+      "enabled": false,
       "enforcement_mode": "safety-only",
       "fleet_id": "example-fleet",
       "combine": "most_restrictive",

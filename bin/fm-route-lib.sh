@@ -55,10 +55,13 @@
 #                                existed. Nothing to check is not a refusal.
 #   A routed pool configured   -> fail closed. A dispatch must name the route it
 #                                claims, and an unreadable config, an unknown
-#                                route, a duplicate route id, or a floor axis
-#                                whose evidence is missing all REFUSE. A safety
+#                                route, a duplicate route id, an unstated model,
+#                                a floor id `_floors` does not define, a floor
+#                                axis whose evidence is missing, and a model the
+#                                availability record holds all REFUSE. A safety
 #                                file that cannot be read must never read as an
-#                                absent one.
+#                                absent one, and an input that is missing must
+#                                never read as an input that passed.
 #
 # Every refusal names the violated rule: the route, the exact JSON config path,
 # the configured value, and the observed value. A refusal a reader cannot trace
@@ -99,9 +102,31 @@ FM_ROUTE_TOKEN_AMBIGUOUS=FM_SPAWN_ROUTE_AMBIGUOUS
 FM_ROUTE_TOKEN_FLOOR_MISMATCH=FM_SPAWN_ROUTE_FLOOR_MISMATCH
 FM_ROUTE_TOKEN_POOL=FM_SPAWN_ROUTE_POOL_VIOLATION
 FM_ROUTE_TOKEN_FLOOR=FM_SPAWN_ROUTE_FLOOR_VIOLATION
+FM_ROUTE_TOKEN_HELD=FM_SPAWN_ROUTE_MODEL_HELD
 FM_ROUTE_TOKEN_NO_CANDIDATE=FM_ROUTE_NO_CANDIDATE
 FM_ROUTE_TOKEN_HEALTH_STATE=FM_ROUTE_HEALTH_STATE_UNKNOWN
+FM_ROUTE_TOKEN_HOLD_SUBJECT=FM_ROUTE_HOLD_SUBJECT_UNRESOLVED
 }
+
+# Where a route may be defined, spelled ONCE so every reader agrees. A route id
+# comes from a `rules[]` entry or from the top-level `default` in either its
+# object or its array form, and anything that may name a route may also name a
+# pool. Two readers disagreeing about where a route lives is how a home ends up
+# enforced by one command and inert at the chokepoint.
+# shellcheck disable=SC2016 # jq program, not shell expansion.
+FM_ROUTE_ENTRIES_JQ='
+def route_entries:
+  [ (.rules // []) | to_entries[]?
+    | select((.value.route? | type) == "string")
+    | {id: .value.route, path: ("/rules/" + (.key | tostring)), rule: .value, source: "rule"} ]
+  + ( (.default // null) as $d
+      | if ($d | type) == "object" and (($d.route? | type) == "string")
+        then [{id: $d.route, path: "/default", rule: $d, source: "default"}]
+        elif ($d | type) == "array"
+        then [ $d | to_entries[] | select((.value.route? | type) == "string")
+               | {id: .value.route, path: ("/default/" + (.key | tostring)), rule: .value, source: "default"} ]
+        else [] end );
+'
 
 # ---------------------------------------------------------------------------
 # Location and presence
@@ -129,11 +154,25 @@ fm_route_pools_configured() {  # [<config-dir>]
   file=$(fm_route_config_path "${1:-}")
   [ -f "$file" ] || return 1
   command -v jq >/dev/null 2>&1 || return 2
-  answer=$(jq -r '
-    [ (.rules // [])[]? | select((.route? | type) == "string")
-      | select((.pool? | type) == "array" and (.pool | length) > 0) ] | length > 0
+  answer=$(jq -r "$FM_ROUTE_ENTRIES_JQ"'
+    [ route_entries[]
+      | select((.rule.pool? | type) == "array" and ((.rule.pool | length) > 0)) ] | length > 0
   ' "$file" 2>/dev/null) || return 2
   [ "$answer" = true ]
+}
+
+# Every model any routed pool lists, one per line. The availability record is
+# only useful against these: a hold on anything else can never remove a
+# candidate, so recording one would report success for nothing.
+fm_route_pool_models() {  # [<config-dir>]
+  local file
+  file=$(fm_route_config_path "${1:-}")
+  [ -f "$file" ] || return 1
+  command -v jq >/dev/null 2>&1 || return 2
+  jq -r "$FM_ROUTE_ENTRIES_JQ"'
+    [ route_entries[] | .rule.pool? | select(type == "array") | .[] | select(type == "string") ]
+    | unique | .[]
+  ' "$file" 2>/dev/null || return 2
 }
 
 # A content digest of the surface this library actually enforces, so a recorded
@@ -172,8 +211,15 @@ fm_route_policy_digest() {  # [<config-dir>]
 # loop. The six axes it lists as judged at admission are deliberately NOT
 # checked here - reading a passing floor check as evidence on them is the exact
 # mistake that block exists to prevent.
+#
+# A MISSING INPUT IS A VIOLATION, never a skipped check. An unstated model, a
+# floor id `_floors` does not define, and a candidate with no recorded evidence
+# for an axis the floor declares all produce a named violation carrying the
+# config path the evidence is missing from. Enforcement that quietly does
+# nothing when an input is absent is indistinguishable from no enforcement, and
+# the absent input is exactly the case nobody tests by hand.
 # shellcheck disable=SC2016 # jq program, not shell expansion.
-FM_ROUTE_DECISION_JQ='
+FM_ROUTE_DECISION_JQ="$FM_ROUTE_ENTRIES_JQ"'
 def bands: ["low","medium","high","xhigh","max","ultra"];
 def rank($b): (if ($b | type) == "string" then (bands | index($b)) else null end);
 def loop_rank($v): (if ($v | type) == "string"
@@ -185,40 +231,31 @@ def provider_of($m): (if ($m | test("/")) then ($m | split("/") | .[0]) else nul
 # default and carries its profile, so a default pointing at an existing rule is
 # not a second definition of that route - only a rules[] id used twice is, and
 # that one is refused because every check against it would be meaningless.
-def rule_routes:
-  [ (.rules // []) | to_entries[]
-    | select((.value.route? | type) == "string")
-    | {id: .value.route, path: ("/rules/" + (.key | tostring)), rule: .value} ];
-def default_routes:
-  ( (.default // null) as $d
-    | if ($d | type) == "object" and (($d.route? | type) == "string")
-      then [{id: $d.route, path: "/default", rule: $d}]
-      elif ($d | type) == "array"
-      then [ $d | to_entries[] | select((.value.route? | type) == "string")
-             | {id: .value.route, path: ("/default/" + (.key | tostring)), rule: .value} ]
-      else [] end );
-
 . as $cfg
-| (rule_routes | map(select(.id == $route))) as $rule_matches
+| route_entries as $entries
+| ($entries | map(select(.source == "rule" and .id == $route))) as $rule_matches
 | (if ($rule_matches | length) > 0 then $rule_matches
-   else (default_routes | map(select(.id == $route)) | .[0:1]) end) as $matches
+   else ($entries | map(select(.source == "default" and .id == $route)) | .[0:1]) end) as $matches
 | ($cfg._models // null) as $models
 | ($matches | length) as $n
 | if $n == 0 then
     {schema:"fm-route-decision.v1", route:$route, route_known:false,
-     known_routes:((rule_routes + default_routes) | map(.id) | unique)}
+     known_routes:($entries | map(.id) | unique)}
   elif $n > 1 then
     {schema:"fm-route-decision.v1", route:$route, route_known:true,
      duplicate_paths:($matches | map(.path))}
   else
-    $matches[0] as $m
-    | $m.rule as $rule
+    $matches[0] as $entry
+    | $entry.rule as $rule
+    | $entry.path as $route_path
     | ($rule.floor? // null) as $floor_id
-    | (if ($floor_id != null) then ($cfg._floors // {})[$floor_id] else null end) as $floor_raw
+    | ($cfg._floors // {}) as $floors
+    | (if ($floor_id != null) then $floors[$floor_id] else null end) as $floor_raw
+    | (($floor_id != null) and (($floors | has($floor_id)) | not)) as $floor_undefined
     | (if ($floor_raw | type) == "object" then $floor_raw else {} end) as $floor
     | (if ($floor_id != null) then ("/_floors/" + $floor_id) else null end) as $floor_path
     | (if (($rule.pool? | type) == "array") then $rule.pool else [] end) as $pool
-    | ($m.path + "/pool") as $pool_path
+    | ($route_path + "/pool") as $pool_path
     | ($floor.effort_floor? // null) as $ef_raw
     | (if ($ef_raw | type) == "string" and (rank($ef_raw) != null) then $ef_raw else null end) as $ef
     | (($ef_raw | type) == "string" and ($ef_raw | startswith("WAIVED"))) as $ef_waived
@@ -236,7 +273,12 @@ def default_routes:
           else null end;
 
     def violations($m; $e):
-        [ (if ($unselectable)
+        [ (if ($floor_undefined)
+           then {rule:"floor_undefined", config_path:($route_path + "/floor"),
+                 configured:$floor_id,
+                 observed:("absent: " + $floor_path + " is not defined, so no axis of the claimed floor can be checked")}
+           else empty end),
+          (if ($unselectable)
            then {rule:"floor_not_selectable", config_path:($floor_path + "/selectable_by_crew_rule"),
                  configured:"false", observed:$m}
            else empty end),
@@ -258,7 +300,7 @@ def default_routes:
            then {rule:"effort_floor_malformed", config_path:($floor_path + "/effort_floor"),
                  configured:($ef_raw | tostring), observed:"unreadable"}
            else empty end),
-          (if ($models != null) and ($ef != null) and (($e | length) > 0) and (rank($e) != null)
+          (if ($ef != null) and (($e | length) > 0) and (rank($e) != null)
            then ($models[$m].effort_expressible? // null) as $ee
              | if $ee == null
                then {rule:"effort_unverifiable", config_path:("/_models/" + $m + "/effort_expressible"),
@@ -268,7 +310,7 @@ def default_routes:
                      configured:($ee | join(", ")), observed:$e}
                else empty end
            else empty end),
-          (if ($models != null) and ($ctx != null)
+          (if ($ctx != null)
            then ($models[$m].smart_zone? // null) as $sz
              | if ($sz | type) != "number"
                then {rule:"context_unverifiable", config_path:("/_models/" + $m + "/smart_zone"),
@@ -278,7 +320,7 @@ def default_routes:
                      configured:($ctx | tostring), observed:($sz | tostring)}
                else empty end
            else empty end),
-          (if ($models != null) and ($tl != null) and (loop_rank($tl) != null) and (loop_rank($tl) > 0)
+          (if ($tl != null) and (loop_rank($tl) != null) and (loop_rank($tl) > 0)
            then ($models[$m].tool_loop? // null) as $mt
              | if (loop_rank($mt) == null)
                then {rule:"tool_loop_unverifiable", config_path:("/_models/" + $m + "/tool_loop"),
@@ -300,8 +342,8 @@ def default_routes:
         end;
 
     {schema:"fm-route-decision.v1",
-     route:$route, route_known:true, route_path:$m.path,
-     floor:$floor_id, floor_path:$floor_path,
+     route:$route, route_known:true, route_path:$route_path,
+     floor:$floor_id, floor_path:$floor_path, floor_defined:($floor_undefined | not),
      floor_axes:{effort_floor:$ef, effort_waived:$ef_waived, context_ceiling:$ctx,
                  tool_loop:$tl, selectable:($unselectable | not)},
      models_recorded:($models != null),
@@ -311,7 +353,13 @@ def default_routes:
      subject:( (resolve($model)) as $r
                | $r + {requested:$model, effort:$effort,
                        held:(if $r.resolved != null then held($r.resolved) else null end),
-                       violations:(if $r.resolved != null then violations($r.resolved; $effort) else [] end)} ),
+                       violations:(if $r.resolved != null then violations($r.resolved; $effort)
+                                   elif $r.resolution == "unstated"
+                                   then [{rule:"model_unstated", config_path:$pool_path,
+                                          configured:(if ($pool | length) > 0 then ($pool | join(", "))
+                                                      else "an ordered pool" end),
+                                          observed:"no model named on this dispatch, so pool membership and every floor axis are unverifiable"}]
+                                   else [] end)} ),
      candidates:[ $pool | to_entries[]
                   | .value as $c
                   | (held($c)) as $h
@@ -344,11 +392,8 @@ fm_route_ids() {  # [<config-dir>]
   file=$(fm_route_config_path "${1:-}")
   [ -f "$file" ] || return 1
   command -v jq >/dev/null 2>&1 || return 2
-  jq -r '
-    [ (.rules // [])[]? | .route? | select(type == "string") ]
-    + [ (.default // empty) | if type == "object" then .route? elif type == "array" then .[]?.route? else empty end
-        | select(type == "string") ]
-    | unique | .[]
+  jq -r "$FM_ROUTE_ENTRIES_JQ"'
+    [ route_entries[] | .id ] | unique | .[]
   ' "$file" 2>/dev/null || return 2
 }
 
@@ -361,12 +406,8 @@ fm_route_for_floor() {  # <config-dir> <floor>
   file=$(fm_route_config_path "$1")
   [ -f "$file" ] || return 1
   command -v jq >/dev/null 2>&1 || return 1
-  matches=$(jq -r --arg floor "$2" '
-    [ (.rules // [])[]? | select((.route? | type) == "string") | select(.floor? == $floor) | .route ]
-    + [ (.default // empty)
-        | if type == "object" then . elif type == "array" then .[]? else empty end
-        | select((.route? | type) == "string") | select(.floor? == $floor) | .route ]
-    | unique | .[]
+  matches=$(jq -r --arg floor "$2" "$FM_ROUTE_ENTRIES_JQ"'
+    [ route_entries[] | select(.rule.floor? == $floor) | .id ] | unique | .[]
   ' "$file" 2>/dev/null) || return 1
   [ "$(printf '%s\n' "$matches" | grep -c .)" = 1 ] || return 1
   printf '%s\n' "$matches"
@@ -389,17 +430,24 @@ fm_route_violation_lines() {  # <route> <decision-json> <jq-path-to-violations>
   " 2>/dev/null
 }
 
-# fm_route_check_refusal <config-dir> <route> <model> <effort> [<state-dir>]
-# Print a complete refusal and return 1 when the dispatch violates the route it
-# claims; print nothing and return 0 when it is compliant. Return 2 when the
-# route decision itself could not be read, which is never a pass.
-fm_route_check_refusal() {
-  local cfg=$1 route=$2 model=${3:-} effort=${4:-} state=${5:-} decision known dup resolution count
-  decision=$(fm_route_decision "$cfg" "$route" "$model" "$effort" "$state") || {
-    printf '%s: %s/crew-dispatch.json defines routed pools but its route decision could not be read (missing jq or malformed JSON), so a dispatch cannot be checked against the policy it claims\n' \
-      "$FM_ROUTE_TOKEN_UNREADABLE" "$cfg"
-    return 2
-  }
+# fm_route_unreadable_refusal <config-dir>
+# The one wording for "this home configures routed pools and the policy that
+# would check this dispatch cannot be read".
+fm_route_unreadable_refusal() {  # <config-dir>
+  printf '%s: %s/crew-dispatch.json defines routed pools but its route decision could not be read (missing jq or malformed JSON), so a dispatch cannot be checked against the policy it claims\n' \
+    "$FM_ROUTE_TOKEN_UNREADABLE" "$1"
+}
+
+# fm_route_refusal_from_decision <config-dir> <route> <model> <decision-json>
+#                                [<state-dir>]
+# The verdict and its rendering, from a decision record already computed.
+# Separated from the evaluation so a caller that also needs the record - the
+# spawn chokepoint needs the route's floor - evaluates the policy exactly ONCE:
+# two evaluations can observe two different configs or two different
+# availability records, and then the refusal and the recorded floor no longer
+# describe the same decision.
+fm_route_refusal_from_decision() {
+  local cfg=$1 route=$2 model=${3:-} decision=$4 state=${5:-} known dup resolution count held
   known=$(printf '%s' "$decision" | jq -r '.route_known')
   if [ "$known" != true ]; then
     printf '%s: route %s is not defined by %s/crew-dispatch.json. Defined: %s\n' \
@@ -421,11 +469,43 @@ fm_route_check_refusal() {
     return 1
   fi
   count=$(printf '%s' "$decision" | jq -r '.subject.violations | length')
-  [ "$count" = 0 ] && return 0
-  printf 'this dispatch violates the route it claims (%s, floor %s):\n' \
-    "$route" "$(printf '%s' "$decision" | jq -r '.floor // "unconfigured"')"
-  fm_route_violation_lines "$route" "$decision" '.subject.violations'
-  return 1
+  if [ "$count" != 0 ]; then
+    printf 'this dispatch violates the route it claims (%s, floor %s):\n' \
+      "$route" "$(printf '%s' "$decision" | jq -r '.floor // "unconfigured"')"
+    fm_route_violation_lines "$route" "$decision" '.subject.violations'
+    return 1
+  fi
+  # AVAILABILITY. The routing policy admits this model; the record says the
+  # fleet currently cannot reach it. Refusing here is what makes `check` and
+  # `eligible` answer the same question the same way - two commands in this
+  # library giving opposite answers about one model is how a held primary gets
+  # dispatched and failover never runs.
+  held=$(printf '%s' "$decision" | jq -r '
+    .subject.held // empty
+    | "the " + .scope + " " + .subject + " is held " + .state
+      + (if .until != null then " until epoch " + (.until | tostring)
+         else " until it is released explicitly" end)
+      + (if ((.evidence // "") | length) > 0 then " (" + .evidence + ")" else "" end)')
+  if [ -n "$held" ]; then
+    printf '%s: route %s: %s in %s, so it is not an eligible candidate. Fail over to the next eligible model inside this pool (%s) rather than dispatching a held one; never substitute outside it and never lower the floor\n' \
+      "$FM_ROUTE_TOKEN_HELD" "$route" "$held" "$(fm_route_health_path "$state")" \
+      "$(printf '%s' "$decision" | jq -r '.pool | join(", ")')"
+    return 1
+  fi
+  return 0
+}
+
+# fm_route_check_refusal <config-dir> <route> <model> <effort> [<state-dir>]
+# Print a complete refusal and return 1 when the dispatch violates the route it
+# claims; print nothing and return 0 when it is compliant. Return 2 when the
+# route decision itself could not be read, which is never a pass.
+fm_route_check_refusal() {
+  local cfg=$1 route=$2 model=${3:-} effort=${4:-} state=${5:-} decision
+  decision=$(fm_route_decision "$cfg" "$route" "$model" "$effort" "$state") || {
+    fm_route_unreadable_refusal "$cfg"
+    return 2
+  }
+  fm_route_refusal_from_decision "$cfg" "$route" "$model" "$decision" "$state"
 }
 
 # ---------------------------------------------------------------------------
@@ -440,6 +520,85 @@ fm_route_health_state_known() {  # <state>
 $FM_ROUTE_HEALTH_STATES
 EOF
   return 1
+}
+
+# fm_route_hold_subject <config-dir> <requested-scope: model|provider|""> <subject>
+# Which record a hold names, as "<scope> <subject>", or a refusal on stderr.
+#
+# The scope is NEVER inferred from the shape of the name. A slash says nothing
+# about intent, and inferring `provider` from its absence records a hold under a
+# key no candidate can ever match while reporting success - which is worse than
+# refusing, because the operator then believes failover is armed. So a model is
+# resolved against the pools this home actually configures, exactly as a
+# dispatch's `--model` is, and a provider hold has to be asked for outright.
+fm_route_hold_subject() {
+  local cfg=$1 want_scope=${2:-} subject=$3 file pool_models entry providers matches count
+  file=$(fm_route_config_path "$cfg")
+  pool_models=$(fm_route_pool_models "$cfg") || {
+    echo "$FM_ROUTE_TOKEN_HOLD_SUBJECT: $file could not be read, so '$subject' cannot be resolved against the pools a hold would have to match" >&2
+    return 1
+  }
+  if [ -z "$pool_models" ]; then
+    echo "$FM_ROUTE_TOKEN_HOLD_SUBJECT: $file configures no routed pool, so an availability hold on '$subject' could not remove any candidate; configure a route with an ordered pool before recording holds" >&2
+    return 1
+  fi
+  if [ "$want_scope" = provider ]; then
+    providers=
+    while IFS= read -r entry; do
+      [ -n "$entry" ] || continue
+      case "$entry" in
+        */*) [ "${entry%%/*}" != "$subject" ] || { printf 'provider %s\n' "$subject"; return 0; }
+             providers="$providers ${entry%%/*}" ;;
+      esac
+    done <<EOF
+$pool_models
+EOF
+    echo "$FM_ROUTE_TOKEN_HOLD_SUBJECT: no pool entry in $file names the provider '$subject', so a provider hold on it could not remove any candidate. Configured providers:$(printf '%s' "$providers" | tr ' ' '\n' | sort -u | tr '\n' ' ')" >&2
+    return 1
+  fi
+  matches=
+  count=0
+  while IFS= read -r entry; do
+    [ -n "$entry" ] || continue
+    if [ "$entry" = "$subject" ]; then
+      printf 'model %s\n' "$entry"
+      return 0
+    fi
+    case "$subject" in
+      */*) : ;;
+      *) case "$entry" in
+           */"$subject") matches="$matches $entry"; count=$((count + 1)) ;;
+         esac ;;
+    esac
+  done <<EOF
+$pool_models
+EOF
+  if [ "$count" -eq 1 ]; then
+    printf 'model %s\n' "${matches# }"
+    return 0
+  fi
+  if [ "$count" -gt 1 ]; then
+    echo "$FM_ROUTE_TOKEN_HOLD_SUBJECT: the bare name '$subject' matches more than one pool entry in $file ($(printf '%s' "${matches# }" | tr ' ' ',' | sed 's/,/, /g')); the mixed-key rule forbids guessing which one was meant, so name the model in full" >&2
+    return 1
+  fi
+  echo "$FM_ROUTE_TOKEN_HOLD_SUBJECT: '$subject' matches no pool entry in $file, so a hold on it could not remove any candidate. Pool entries: $(printf '%s' "$pool_models" | tr '\n' ' ' | sed 's/ $//'). Pass --scope provider to hold a whole provider instead." >&2
+  return 1
+}
+
+# fm_route_hold_recorded_scope <state-dir> <subject>
+# The scope a hold is ALREADY recorded under, or nothing. Release resolves
+# against the record first, so a hold survives a config edit that drops its
+# subject from every pool: a record that can be written and not cleared is a
+# trap, and clearing an availability hold is always safe.
+fm_route_hold_recorded_scope() {
+  local state=$1 subject=$2 file
+  file=$(fm_route_health_path "$state")
+  [ -f "$file" ] || return 1
+  command -v jq >/dev/null 2>&1 || return 1
+  jq -er --arg s "$subject" '
+    if ((.models // {}) | has($s)) then "model"
+    elif ((.providers // {}) | has($s)) then "provider"
+    else empty end' "$file" 2>/dev/null
 }
 
 fm_route_health_states_oneline() {

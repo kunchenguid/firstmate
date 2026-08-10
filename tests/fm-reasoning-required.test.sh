@@ -484,15 +484,12 @@ EOF
     "a refused floor under an array-form default still wrote task metadata"
 
   # The shipped example is what a new home copies into config/, so the file the
-  # docs hand out has to be readable by the code that reads it.
-  #
-  # Its `_scheduling` block is dropped for this case only. The example also
-  # opts a home into admission control, and an enabled admission policy bands
-  # an invocation that does not hold the home's session lock to `hard` - which
-  # every test invocation is, and which fm-spawn now honors at the chokepoint.
-  # That behavior is covered directly in tests/fm-route-enforcement.test.sh;
-  # what THIS case is about is the example's floor vocabulary being readable.
-  jq 'del(._scheduling)' "$ROOT/docs/examples/crew-dispatch.json" > "$home/config/crew-dispatch.json"
+  # docs hand out has to be readable by the code that reads it - verbatim,
+  # including its `_scheduling` block. That block ships switched off, so copying
+  # the example arms no admission policy; tests/fm-route-enforcement.test.sh
+  # pins that directly, and this case pins that the example's floor vocabulary
+  # dispatches.
+  cp "$ROOT/docs/examples/crew-dispatch.json" "$home/config/crew-dispatch.json"
   write_brief "$home" array-shipped no-mistakes
   out=$(run_record_spawn "$home" "$proj" "$wt" "$fakebin" array-shipped "$proj" codex \
     --mode no-mistakes --yolo off --reason-code UNFAMILIAR_CODE)

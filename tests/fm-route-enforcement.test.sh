@@ -82,17 +82,17 @@ write_unrouted_config() {  # <home>
 JSON
 }
 
-# An admission policy whose authority rule bands to hard, which is what an
-# unheld session lock produces. The test never holds the lock, so this is a
-# deterministic hard band with no timing dependence.
-write_admission_policy() {  # <home>
-  local file="$1/config/crew-dispatch.json" tmp="$1/config/crew-dispatch.json.tmp"
-  jq '. + {"_scheduling": {"admission_control": {
+# An admission policy whose authority rule bands to the requested band, which is
+# what an unheld session lock produces. The test never holds the lock, so this is
+# deterministic with no timing dependence.
+write_admission_policy() {  # <home> [hard|soft]
+  local file="$1/config/crew-dispatch.json" tmp="$1/config/crew-dispatch.json.tmp" band=${2:-hard}
+  jq --arg band "$band" '. + {"_scheduling": {"admission_control": {
         "schema_version": 1, "enabled": true, "enforcement_mode": "safety-only",
         "fleet_id": "test-fleet", "combine": "most_restrictive",
         "severity_order": ["preferred","soft","hard"], "unknown_band": "hard",
         "authority": {"mode": "single-primary", "authority_id": "test-fleet",
-                      "unreachable_band": "hard", "config_mismatch_band": "hard"},
+                      "unreachable_band": $band, "config_mismatch_band": $band},
         "bands": {"preferred": {"action": "admit"},
                   "soft": {"action": "queue", "hold_kind": "load", "auto_reconsider": true},
                   "hard": {"action": "refuse", "hold_kind": "load", "auto_reconsider": true}},
@@ -253,6 +253,127 @@ test_tool_loop_axis_is_enforced() {
   pass "the tool-loop axis refuses an in-pool candidate that does not meet it"
 }
 
+# --- a missing input is a refusal, never a skipped check ---------------------
+#
+# Every case below was silently ADMITTED before this section existed: the check
+# ran, found nothing it could measure, and reported compliance. Enforcement that
+# quietly does nothing when an input is absent is indistinguishable from no
+# enforcement, and an absent input is exactly the case nobody tries by hand.
+
+test_unstated_model_is_refused_rather_than_recorded_as_checked() {
+  local rec out
+  rec=$(make_refusal_home unstated-model); read_home_record "$rec"
+  write_brief "$HOME_DIR" nomodel no-mistakes
+  # No --model at all. Nothing can show an unstated model is in the route's pool
+  # or meets any floor axis, so it is unverifiable rather than compliant.
+  out=$(run_spawn "$HOME_DIR" "$FAKEBIN" nomodel "$PROJ_DIR" \
+    --mode no-mistakes --yolo off --reason-code NL_RULE_CLASSIFICATION \
+    --harness codex --route R-MED --effort medium); rc=$?
+  expect_code 1 "$rc" "a routed dispatch that names no model must be refused"
+  assert_contains "$out" "model_unstated" "the violated rule is not named"
+  assert_contains "$out" "/rules/1/pool" "the pool config path the claim cannot be checked against is not named"
+  assert_contains "$out" "vendor/large, other/small" "the configured pool is not named"
+  assert_absent "$HOME_DIR/state/nomodel.meta" "an unverifiable dispatch must not be recorded as route-checked"
+  pass "a dispatch that omits --model is refused instead of recorded as checked"
+}
+
+test_absent_models_block_refuses_as_unverifiable() {
+  local rec out
+  rec=$(make_refusal_home no-models); read_home_record "$rec"
+  # A routed config with floors that declare evidence axes, and no evidence at
+  # all. Unmeasured is not the same as met, whether one model lacks an entry or
+  # the whole block is missing.
+  jq 'del(._models)' "$HOME_DIR/config/crew-dispatch.json" > "$HOME_DIR/config/tmp.json"
+  mv "$HOME_DIR/config/tmp.json" "$HOME_DIR/config/crew-dispatch.json"
+  out=$(run_route "$HOME_DIR" check --route R-MED --model vendor/large --effort medium); rc=$?
+  expect_code 1 "$rc" "a candidate with no recorded evidence must be refused as unverifiable"
+  assert_contains "$out" "context_unverifiable" "the context axis is silently skipped without a _models block"
+  assert_contains "$out" "/_models/vendor/large/smart_zone" "the config path the missing evidence belongs at is not named"
+  assert_contains "$out" "effort_unverifiable" "the effort-expressibility axis is silently skipped"
+  assert_contains "$out" "tool_loop_unverifiable" "the tool-loop axis is silently skipped"
+  pass "a floor axis with no recorded evidence refuses as unverifiable, including with no _models block at all"
+}
+
+test_undefined_floor_id_refuses_and_records_no_capability_floor() {
+  local rec out
+  rec=$(make_refusal_home floor-undefined); read_home_record "$rec"
+  jq '.rules[1].floor = "F-MISSING"' "$HOME_DIR/config/crew-dispatch.json" > "$HOME_DIR/config/tmp.json"
+  mv "$HOME_DIR/config/tmp.json" "$HOME_DIR/config/crew-dispatch.json"
+  out=$(run_route "$HOME_DIR" check --route R-MED --model vendor/large --effort medium); rc=$?
+  expect_code 1 "$rc" "a rule whose floor id is undefined must refuse rather than enforce nothing"
+  assert_contains "$out" "floor_undefined" "the violated rule is not named"
+  assert_contains "$out" "/rules/1/floor" "the config path that names the undefined floor is not named"
+  assert_contains "$out" "/_floors/F-MISSING" "the missing floor definition is not named"
+  # And the record: a capability floor nothing was checked against is worse than
+  # no record, so the dispatch must not reach metadata at all.
+  write_brief "$HOME_DIR" nofloor no-mistakes
+  out=$(run_spawn "$HOME_DIR" "$FAKEBIN" nofloor "$PROJ_DIR" \
+    --mode no-mistakes --yolo off --reason-code NL_RULE_CLASSIFICATION \
+    --harness codex --route R-MED --model vendor/large --effort medium); rc=$?
+  expect_code 1 "$rc" "the spawn chokepoint must refuse an undefined floor id"
+  assert_absent "$HOME_DIR/state/nofloor.meta" "a floor that was never checked against a definition must not be recorded"
+  pass "an undefined floor id refuses with the rule named and records no capability floor"
+}
+
+test_held_model_is_refused_at_the_chokepoint_and_check_agrees_with_eligible() {
+  local rec out
+  rec=$(make_refusal_home held-model); read_home_record "$rec"
+  run_route "$HOME_DIR" availability hold vendor/large --state provider_unavailable \
+    --for-seconds 300 --evidence '503 from the provider' >/dev/null
+  out=$(run_route "$HOME_DIR" check --route R-MED --model vendor/large --effort medium); rc=$?
+  expect_code 1 "$rc" "a held model must be refused by check, not only dropped by eligible"
+  assert_contains "$out" "FM_SPAWN_ROUTE_MODEL_HELD" "the stable refusal token is missing"
+  assert_contains "$out" "provider_unavailable" "the held state is not named"
+  assert_contains "$out" "model vendor/large" "the held scope and subject are not named"
+  assert_contains "$out" "until epoch" "the recorded expiry is not named"
+  assert_contains "$out" "vendor/large, other/small" "the pool failover must stay inside is not named"
+  # The two commands must never give opposite answers about the same model.
+  out=$(run_route "$HOME_DIR" eligible --route R-MED)
+  assert_not_contains "$out" "vendor/large" "eligible must agree with check that a held model is out"
+  # And the chokepoint honours it, so failover is triggered rather than skipped.
+  write_brief "$HOME_DIR" heldtask no-mistakes
+  out=$(run_spawn "$HOME_DIR" "$FAKEBIN" heldtask "$PROJ_DIR" \
+    --mode no-mistakes --yolo off --reason-code NL_RULE_CLASSIFICATION \
+    --harness codex --route R-MED --model vendor/large --effort medium); rc=$?
+  expect_code 1 "$rc" "a held model must not be dispatched at the spawn chokepoint"
+  assert_contains "$out" "FM_SPAWN_ROUTE_MODEL_HELD" "the stable refusal token is missing at the chokepoint"
+  assert_absent "$HOME_DIR/state/heldtask.meta" "a held model must leave no task metadata"
+  # A hold on the substitute is not a hold on the primary: releasing restores it.
+  run_route "$HOME_DIR" availability release vendor/large >/dev/null
+  out=$(run_route "$HOME_DIR" check --route R-MED --model vendor/large --effort medium); rc=$?
+  expect_code 0 "$rc" "a released model must be dispatchable again"
+  pass "an unavailable model is refused at the chokepoint and check agrees with eligible"
+}
+
+test_default_only_route_is_listed_and_enforced() {
+  local rec out
+  rec=$(make_refusal_home default-only none); read_home_record "$rec"
+  cat > "$HOME_DIR/config/crew-dispatch.json" <<'JSON'
+{
+  "_floors": { "F-MED": { "effort_floor": "medium" } },
+  "_models": { "vendor/large": { "effort_expressible": ["low","medium","high"] } },
+  "rules": [ { "when": "anything", "use": { "harness": "codex", "model": "vendor/large", "effort": "medium" } } ],
+  "default": { "harness": "codex", "model": "vendor/large", "effort": "medium",
+               "route": "R-DEF", "floor": "F-MED", "pool": ["vendor/large"] }
+}
+JSON
+  out=$(run_route "$HOME_DIR" routes)
+  assert_contains "$out" "R-DEF" "a route defined only under default must be listed by routes"
+  assert_contains "$out" "defined_at=/default" "the listing must say where a route is defined"
+  out=$(run_route "$HOME_DIR" check --route R-DEF --model vendor/large --effort medium); rc=$?
+  expect_code 0 "$rc" "check must accept a route defined only under default"
+  # And the chokepoint must agree that this home is enforcing, rather than
+  # staying inert while fm-route.sh enforces the same file.
+  write_brief "$HOME_DIR" deftask no-mistakes
+  out=$(run_spawn "$HOME_DIR" "$FAKEBIN" deftask "$PROJ_DIR" \
+    --mode no-mistakes --yolo off --reason-code NL_RULE_CLASSIFICATION \
+    --harness codex --model vendor/large --effort medium); rc=$?
+  expect_code 1 "$rc" "a pool that lives only under default must still turn enforcement on"
+  assert_contains "$out" "FM_SPAWN_ROUTE_REQUIRED" "the stable refusal token is missing"
+  assert_contains "$out" "R-DEF" "the route the dispatch could claim is not named"
+  pass "a route defined only under default is listed, checked and enforced by every reader"
+}
+
 # --- eligibility, failover and the terminal stop ----------------------------
 
 test_failover_stays_inside_the_pool_in_order() {
@@ -289,6 +410,39 @@ test_availability_hold_removes_a_candidate_and_release_restores_it() {
   out=$(run_route "$HOME_DIR" eligible --route R-MED)
   assert_contains "$out" "vendor/large" "a released model must be eligible again"
   pass "an availability hold removes a candidate, and releasing it restores the candidate"
+}
+
+test_a_hold_that_cannot_match_a_candidate_is_refused_rather_than_recorded() {
+  local rec out
+  rec=$(make_refusal_home hold-scope); read_home_record "$rec"
+  # A bare pool entry used to become a PROVIDER hold, recorded under a key no
+  # candidate can ever match, and the command reported success for it.
+  out=$(run_route "$HOME_DIR" availability hold small --state model_unavailable); rc=$?
+  expect_code 2 "$rc" "a bare name matching two pool entries must be refused"
+  assert_contains "$out" "FM_ROUTE_HOLD_SUBJECT_UNRESOLVED" "the stable refusal token is missing"
+  assert_contains "$out" "more than one pool entry" "the ambiguity is not explained"
+  assert_absent "$HOME_DIR/state/model-health.json" "a refused hold must record nothing"
+  out=$(run_route "$HOME_DIR" availability hold gpt-5 --state model_unavailable); rc=$?
+  expect_code 2 "$rc" "a name no pool lists must be refused rather than recorded"
+  assert_contains "$out" "matches no pool entry" "the reason the hold could not match is not explained"
+  assert_absent "$HOME_DIR/state/model-health.json" "a hold that cannot match a candidate must record nothing"
+  # A bare name that resolves to exactly one pool entry is held as that MODEL.
+  out=$(run_route "$HOME_DIR" availability hold large --state rate_limited); rc=$?
+  expect_code 0 "$rc" "a bare name matching exactly one pool entry must resolve"
+  assert_contains "$out" "held model vendor/large" "an unqualified name must resolve to the model, not a provider"
+  out=$(run_route "$HOME_DIR" eligible --route R-MED)
+  assert_not_contains "$out" "vendor/large" "a hold reported as recorded must actually remove the candidate"
+  run_route "$HOME_DIR" availability release large >/dev/null
+  # A provider hold is asked for outright, and its subject must be one a pool names.
+  out=$(run_route "$HOME_DIR" availability hold nosuch --scope provider --state provider_unavailable); rc=$?
+  expect_code 2 "$rc" "a provider no pool entry names must be refused"
+  out=$(run_route "$HOME_DIR" availability hold vendor --scope provider --state provider_unavailable); rc=$?
+  expect_code 0 "$rc" "an explicit provider hold on a configured provider must be recorded"
+  assert_contains "$out" "held provider vendor" "an explicit provider hold is not recorded as one"
+  out=$(run_route "$HOME_DIR" eligible --route R-MED)
+  assert_not_contains "$out" "vendor/large" "a provider hold must remove that provider's candidates"
+  assert_contains "$out" "other/small" "a provider hold must not reach another provider's candidates"
+  pass "an availability hold resolves against the configured pools and never reports success for a hold that cannot match"
 }
 
 test_unknown_availability_state_is_refused() {
@@ -500,6 +654,48 @@ test_admission_hard_band_refuses_the_spawn_naming_the_condition() {
   pass "a hard admission band refuses the spawn, names the controlling condition, and creates nothing"
 }
 
+test_soft_admission_band_defers_distinguishably_from_a_refusal() {
+  local rec out
+  rec=$(make_refusal_home spawn-admission-soft); read_home_record "$rec"
+  write_admission_policy "$HOME_DIR" soft
+  write_brief "$HOME_DIR" defertask no-mistakes
+  out=$(run_spawn "$HOME_DIR" "$FAKEBIN" defertask "$PROJ_DIR" \
+    --mode no-mistakes --yolo off --reason-code NL_RULE_CLASSIFICATION \
+    --harness codex --route R-MED --model vendor/large --effort medium); rc=$?
+  expect_code 1 "$rc" "a soft admission band must still stop the spawn"
+  # The record's own action splits the bands; a caller matching tokens has to be
+  # able to tell a deferral from a refusal.
+  assert_contains "$out" "FM_SPAWN_ADMISSION_DEFERRED" "a queued band must carry its own stable token"
+  assert_not_contains "$out" "FM_SPAWN_ADMISSION_REFUSED" "a deferral must not read as a refusal"
+  assert_contains "$out" "deferred" "the deferral prose is missing"
+  assert_contains "$out" "authority.single_primary" "a deferral must name the controlling condition too"
+  assert_absent "$HOME_DIR/state/defertask.meta" "a deferred dispatch must leave no task metadata"
+  pass "a soft admission band defers with its own token and prose, distinct from a hard refusal"
+}
+
+test_shipped_example_ships_admission_switched_off() {
+  local rec out enabled
+  # Downstream homes copy this file verbatim. An enabled admission policy bands
+  # every invocation that does not hold the home's session lock, so a shipped
+  # `enabled: true` would arm admission for every home that copied the example
+  # without anyone choosing it. The whole block stays present and documented;
+  # only activation is deliberate.
+  enabled=$(jq -r '._scheduling.admission_control.enabled' "$ROOT/docs/examples/crew-dispatch.json")
+  [ "$enabled" = false ] \
+    || fail "docs/examples/crew-dispatch.json must ship admission control switched off, got enabled=$enabled"
+  [ "$(jq -r '._scheduling.admission_control | has("bands")' "$ROOT/docs/examples/crew-dispatch.json")" = true ] \
+    || fail "the shipped example must keep the full admission schema so a reader can switch it on deliberately"
+  rec=$(make_refusal_home shipped-example none); read_home_record "$rec"
+  cp "$ROOT/docs/examples/crew-dispatch.json" "$HOME_DIR/config/crew-dispatch.json"
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" \
+    FM_DATA_OVERRIDE="$HOME_DIR/data" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    "$ROOT/bin/fm-admission.sh" --json 2>&1); rc=$?
+  expect_code 0 "$rc" "the shipped example must leave admission inert"
+  [ "$(printf '%s' "$out" | jq -r '.active')" = false ] \
+    || fail "the shipped example must evaluate as inert admission, got: $out"
+  pass "the shipped example ships admission control switched off, so copying it arms nothing"
+}
+
 # --- activation safety ------------------------------------------------------
 
 test_activation_does_not_recheck_work_already_dispatched() {
@@ -530,8 +726,14 @@ test_compliant_dispatch_is_unaffected
 test_unknown_route_and_ambiguous_bare_name_are_refused
 test_waived_effort_floor_and_unselectable_floor
 test_tool_loop_axis_is_enforced
+test_unstated_model_is_refused_rather_than_recorded_as_checked
+test_absent_models_block_refuses_as_unverifiable
+test_undefined_floor_id_refuses_and_records_no_capability_floor
+test_held_model_is_refused_at_the_chokepoint_and_check_agrees_with_eligible
+test_default_only_route_is_listed_and_enforced
 test_failover_stays_inside_the_pool_in_order
 test_availability_hold_removes_a_candidate_and_release_restores_it
+test_a_hold_that_cannot_match_a_candidate_is_refused_rather_than_recorded
 test_unknown_availability_state_is_refused
 test_exhausted_pool_stops_and_reports_rather_than_degrading
 test_expired_hold_stops_binding_without_a_sweep
@@ -545,4 +747,6 @@ test_unrouted_home_is_untouched_by_activation
 test_route_claim_is_refused_where_nothing_can_check_it
 test_spawn_records_the_route_and_the_policy_that_checked_it
 test_admission_hard_band_refuses_the_spawn_naming_the_condition
+test_soft_admission_band_defers_distinguishably_from_a_refusal
+test_shipped_example_ships_admission_switched_off
 test_activation_does_not_recheck_work_already_dispatched

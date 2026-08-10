@@ -21,10 +21,17 @@
 #                                            eligible candidate INSIDE the same
 #                                            pool, after <model>
 #   fm-route.sh availability                 every hold still in force
-#   fm-route.sh availability hold <model|provider> --state <state>
+#   fm-route.sh availability hold <model> [--scope provider] --state <state>
 #                                [--for-seconds <n>] [--evidence <text>]
-#   fm-route.sh availability release <model|provider>
+#   fm-route.sh availability release <model> [--scope provider]
 #   fm-route.sh --help
+#
+# A hold names a MODEL by default, resolved against the configured pools exactly
+# as a dispatch's --model is: a fully qualified entry must be in a pool, and a
+# bare name must match exactly one. Holding a whole provider is asked for with
+# --scope provider. Nothing is inferred from the presence of a slash, because a
+# hold recorded under a key no candidate can match is a hold that silently does
+# nothing while reporting success.
 #
 # --json prints the decision record instead of prose, on check, eligible, next
 # and availability.
@@ -78,6 +85,7 @@ AFTER=
 HOLD_STATE=
 HOLD_SECONDS=
 HOLD_EVIDENCE=
+HOLD_SCOPE=
 CMD=
 POS=()
 
@@ -98,6 +106,8 @@ while [ $# -gt 0 ]; do
     --for-seconds=*) HOLD_SECONDS=${1#--for-seconds=} ;;
     --evidence) shift; [ $# -gt 0 ] || die "--evidence needs a value"; HOLD_EVIDENCE=$1 ;;
     --evidence=*) HOLD_EVIDENCE=${1#--evidence=} ;;
+    --scope) shift; [ $# -gt 0 ] || die "--scope needs a value"; HOLD_SCOPE=$1 ;;
+    --scope=*) HOLD_SCOPE=${1#--scope=} ;;
     -h|--help) usage; exit 0 ;;
     -*) die "unknown option $1" ;;
     *) if [ -z "$CMD" ]; then CMD=$1; else POS+=("$1"); fi ;;
@@ -122,11 +132,11 @@ registry_refusal() {  # <qualified-model>
 }
 
 # The route decision plus, per candidate, the registry verdict the routing
-# policy cannot answer by itself. One record, so prose and --json never diverge.
-decide() {  # <route> <model> <effort>
-  local decision candidates model refusal enriched
-  decision=$(fm_route_decision "$CONFIG" "$1" "$2" "$3" "$STATE") \
-    || die "the routing policy could not be read: $CONFIG_FILE"
+# policy cannot answer by itself. One record, so prose and --json never diverge,
+# and it takes the decision it enriches so no command in this file evaluates the
+# same policy twice against possibly different config or availability state.
+enrich() {  # <decision-json>
+  local decision=$1 candidates model refusal enriched
   [ "$(printf '%s' "$decision" | jq -r '.route_known')" = true ] || { printf '%s' "$decision"; return 0; }
   [ -z "$(printf '%s' "$decision" | jq -r '.duplicate_paths // empty')" ] || { printf '%s' "$decision"; return 0; }
   candidates=$(printf '%s' "$decision" | jq -r '.candidates[]?.model')
@@ -179,14 +189,22 @@ terminal_report() {  # <decision-json>
 
 case "$CMD" in
   routes)
-    jq -r '
+    # Every route this home defines, from the one place bin/fm-route-lib.sh says
+    # a route may be defined. A listing that omits a route `check` enforces and
+    # `fm-spawn.sh` demands is what makes a route look like a typo.
+    jq -r "$FM_ROUTE_ENTRIES_JQ"'
       def profiles($v): if ($v|type) == "array" then $v elif ($v|type) == "object" then [$v] else [] end;
-      (.rules // [])[]? | select((.route?|type) == "string")
-      | .route + "  floor=" + (.floor // "-")
-        + "  primary=" + ((profiles(.use)[0]?.model) // "-")
-        + "  effort=" + ((profiles(.use)[0]?.effort) // "-")
-        + "  pool=" + ((.pool // []) | join(","))
-        + "  promotes_to=" + (.promotion_target // "-")
+      [ route_entries[] ] as $all
+      | ([ $all[] | select(.source == "rule") ]) as $rules
+      | ([ $rules[] | .id ]) as $rule_ids
+      | ($rules + [ $all[] | select(.source == "default")
+                    | . as $e | select(($rule_ids | index($e.id)) == null) ])[]
+      | .id + "  floor=" + (.rule.floor // "-")
+        + "  primary=" + ((profiles(.rule.use)[0]?.model) // "-")
+        + "  effort=" + ((profiles(.rule.use)[0]?.effort) // "-")
+        + "  pool=" + ((.rule.pool // []) | join(","))
+        + "  promotes_to=" + (.rule.promotion_target // "-")
+        + "  defined_at=" + .path
     ' "$CONFIG_FILE"
     printf 'policy_digest=%s\n' "$(fm_route_policy_digest "$CONFIG")"
     ;;
@@ -194,11 +212,13 @@ case "$CMD" in
   check)
     [ -n "$ROUTE" ] || die "check needs --route"
     [ -n "$MODEL" ] || die "check needs --model"
+    DECISION=$(fm_route_decision "$CONFIG" "$ROUTE" "$MODEL" "$EFFORT" "$STATE") \
+      || { printf '%s\n' "$(fm_route_unreadable_refusal "$CONFIG")" >&2; exit 2; }
     if [ "$JSON" -eq 1 ]; then
-      decide "$ROUTE" "$MODEL" "$EFFORT"
+      enrich "$DECISION"
       printf '\n'
     fi
-    if refusal=$(fm_route_check_refusal "$CONFIG" "$ROUTE" "$MODEL" "$EFFORT" "$STATE"); then
+    if refusal=$(fm_route_refusal_from_decision "$CONFIG" "$ROUTE" "$MODEL" "$DECISION" "$STATE"); then
       rc=0
     else
       rc=$?
@@ -209,7 +229,7 @@ case "$CMD" in
     fi
     # The routing policy allows it; the landed registry owners still decide
     # whether it may be paid for, reached, and run concurrently.
-    resolved=$(fm_route_decision "$CONFIG" "$ROUTE" "$MODEL" "$EFFORT" "$STATE" | jq -r '.subject.resolved // empty')
+    resolved=$(printf '%s' "$DECISION" | jq -r '.subject.resolved // empty')
     if [ -n "$resolved" ] && ! refusal=$(registry_refusal "$resolved"); then
       [ "$JSON" -eq 1 ] || printf 'error: %s\n' "$refusal" >&2
       exit 1
@@ -221,7 +241,9 @@ case "$CMD" in
   eligible|next)
     [ -n "$ROUTE" ] || die "$CMD needs --route"
     [ "$CMD" != next ] || [ -n "$AFTER" ] || die "next needs --after <model>"
-    DECISION=$(decide "$ROUTE" "" "")
+    DECISION=$(fm_route_decision "$CONFIG" "$ROUTE" "" "" "$STATE") \
+      || die "the routing policy could not be read: $CONFIG_FILE"
+    DECISION=$(enrich "$DECISION")
     [ "$(printf '%s' "$DECISION" | jq -r '.route_known')" = true ] \
       || die "route $ROUTE is not defined by $CONFIG_FILE"
     if [ "$CMD" = next ]; then
@@ -260,7 +282,25 @@ case "$CMD" in
       hold|release)
         SUBJECT=${POS[1]:-}
         [ -n "$SUBJECT" ] || die "availability $SUB needs a model or provider"
-        case "$SUBJECT" in */*) SCOPE=model ;; *) SCOPE=provider ;; esac
+        case "$HOLD_SCOPE" in
+          ''|model|provider) ;;
+          *) die "--scope takes model or provider, not '$HOLD_SCOPE'" ;;
+        esac
+        # A release resolves against what is actually recorded first, so a hold
+        # can always be cleared even after a config edit dropped its subject
+        # from every pool. A record that can be written and never cleared is a
+        # trap; clearing availability is always safe.
+        SCOPE=
+        if [ "$SUB" = release ]; then
+          SCOPE=$(fm_route_hold_recorded_scope "$STATE" "$SUBJECT" || true)
+          [ -z "$SCOPE" ] || [ -z "$HOLD_SCOPE" ] || [ "$SCOPE" = "$HOLD_SCOPE" ] \
+            || die "$SUBJECT is recorded as a $SCOPE hold, not a $HOLD_SCOPE one"
+        fi
+        if [ -z "$SCOPE" ]; then
+          RESOLVED=$(fm_route_hold_subject "$CONFIG" "$HOLD_SCOPE" "$SUBJECT") || exit 2
+          SCOPE=${RESOLVED%% *}
+          SUBJECT=${RESOLVED#* }
+        fi
         if [ "$SUB" = release ]; then
           fm_route_health_write "$STATE" "$SCOPE" "$SUBJECT" '' '' '' || exit 2
           printf 'released %s %s\n' "$SCOPE" "$SUBJECT"
