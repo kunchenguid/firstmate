@@ -669,6 +669,14 @@ PLACEMENT_HANDLE=
 PLACEMENT_BRIDGE=
 PLACEMENT_ABORT_CLEANUP=0
 PLACEMENT_KITS=()
+SPAWN_ENDPOINT_CLEANUP=0
+SPAWN_ENDPOINT_BACKEND=
+SPAWN_ENDPOINT_TARGET=
+SPAWN_ENDPOINT_AUX=
+SPAWN_ENDPOINT_LABEL=
+SPAWN_WORKTREE_CLEANUP=0
+SPAWN_WORKTREE_PATH=
+SPAWN_WORKTREE_PROJECT=
 EXECUTOR=local
 EXECUTION_PROFILE=
 SANDBOX_PRESET=
@@ -687,6 +695,20 @@ RELAUNCH_REPLACEMENT_WT=
 RELAUNCH_REPLACEMENT_PLACEMENT=
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
+
+spawn_register_endpoint() {
+  SPAWN_ENDPOINT_CLEANUP=1
+  SPAWN_ENDPOINT_BACKEND=$1
+  SPAWN_ENDPOINT_TARGET=$2
+  SPAWN_ENDPOINT_AUX=${3:-}
+  SPAWN_ENDPOINT_LABEL=${4:-}
+}
+
+spawn_register_worktree() {
+  SPAWN_WORKTREE_CLEANUP=1
+  SPAWN_WORKTREE_PATH=$1
+  SPAWN_WORKTREE_PROJECT=$2
+}
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -709,6 +731,9 @@ spawn_abort_cleanup() {
   local status=$?
   if [ "$PLACEMENT_ABORT_CLEANUP" = 1 ]; then
     PLACEMENT_ABORT_CLEANUP=0
+    if [ -z "$PLACEMENT_HANDLE" ] && [ -n "${FM_WORKSPACE_PLACEMENT_ACQUIRED_HANDLE:-}" ]; then
+      PLACEMENT_HANDLE=$FM_WORKSPACE_PLACEMENT_ACQUIRED_HANDLE
+    fi
     if [ -n "$PLACEMENT_HANDLE" ]; then
       fm_workspace_placement_release "$PLACEMENT" "$PLACEMENT_HANDLE" force || \
         echo "warning: could not release unpublished placement for $ID" >&2
@@ -720,6 +745,15 @@ spawn_abort_cleanup() {
     if [ -n "$PLACEMENT_BRIDGE" ]; then
       fm_sandbox_bridge_remove "$PLACEMENT_BRIDGE" "$STATE" "$ID" "$WT" || \
         echo "warning: could not remove verified unpublished sandbox bridge for $ID" >&2
+    fi
+  fi
+  if [ "$SPAWN_WORKTREE_CLEANUP" = 1 ]; then
+    SPAWN_WORKTREE_CLEANUP=0
+    if [ -z "$SPAWN_WORKTREE_PATH" ] || [ -z "$SPAWN_WORKTREE_PROJECT" ] \
+       || ! command -v treehouse >/dev/null 2>&1 \
+       || ! ( CDPATH='' cd -- "$SPAWN_WORKTREE_PROJECT" \
+              && treehouse return --force "$SPAWN_WORKTREE_PATH" ); then
+      echo "warning: could not return unpublished worktree for $ID" >&2
     fi
   fi
   if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ] \
@@ -791,6 +825,16 @@ spawn_abort_cleanup() {
           } > "$STATE/$ID.meta" 2>/dev/null || true
         fi
       fi
+    fi
+  fi
+  if [ "$SPAWN_ENDPOINT_CLEANUP" = 1 ]; then
+    SPAWN_ENDPOINT_CLEANUP=0
+    if ! fm_backend_kill \
+      "$SPAWN_ENDPOINT_BACKEND" \
+      "$SPAWN_ENDPOINT_TARGET" \
+      "$SPAWN_ENDPOINT_AUX" \
+      "$SPAWN_ENDPOINT_LABEL"; then
+      echo "warning: could not remove unpublished endpoint for $ID" >&2
     fi
   fi
   if [ "$SPAWN_TASK_LOCK_HELD" = 1 ]; then
@@ -1949,6 +1993,7 @@ case "$BACKEND" in
     # stays $T (the name form), which is safe now that rename is disabled.
     WID=$(fm_backend_tmux_create_task "$SES" "$W" "$PROJ_ABS") || exit 1
     WT_TARGET="$WID"
+    spawn_register_endpoint tmux "$T"
     ;;
   herdr)
     # fm_backend_herdr_workspace_label resolves the target workspace from
@@ -2116,6 +2161,9 @@ EOF
       exit 1
     fi
     T="$HERDR_SES:$HERDR_PANE_ID"
+    if [ "$HERDR_PROJECTED" -ne 1 ]; then
+      spawn_register_endpoint herdr "$T"
+    fi
     ;;
   zellij)
     ZELLIJ_SES=$(fm_backend_zellij_container_ensure) || exit 1
@@ -2128,6 +2176,7 @@ EOF
       exit 1
     fi
     T="$ZELLIJ_SES:$ZELLIJ_PANE_ID"
+    spawn_register_endpoint zellij "$T" "$ZELLIJ_TAB_ID" "$W"
     ;;
   cmux)
     fm_backend_cmux_container_ensure || exit 1
@@ -2140,6 +2189,7 @@ EOF
       exit 1
     fi
     T="$CMUX_WORKSPACE_ID:$CMUX_SURFACE_ID"
+    spawn_register_endpoint cmux "$T" '' "$W"
     ;;
   orca)
     set +e
@@ -2338,6 +2388,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   fi
 
   validate_spawn_worktree "treehouse get" "$T"
+  spawn_register_worktree "$WT" "$PROJ_ABS"
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
@@ -2378,13 +2429,19 @@ if [ "$PLACEMENT" = docker-sandbox ]; then
     fm_sandbox_bridge_validate "$PLACEMENT_BRIDGE" "$STATE_REAL" "$ID" "$WT" || exit 1
     BRIEF="$PLACEMENT_BRIDGE/runtime-brief.md"
   else
+    PLACEMENT_ABORT_CLEANUP=1
     fm_sandbox_bridge_create "$STATE_REAL" "$ID" "$WT" "$BRIEF" "$FM_ROOT/bin/fm-operational-input.sh" || exit 1
     PLACEMENT_BRIDGE=$FM_SANDBOX_BRIDGE_PATH
-    PLACEMENT_ABORT_CLEANUP=1
     if [ "${PLACEMENT_KITS[0]+set}" = set ]; then
-      fm_workspace_placement_prepare "$PLACEMENT" direct "$ID" "$WT" "$SANDBOX_PRESET" "$PLACEMENT_BRIDGE" "${PLACEMENT_KITS[@]}" || exit 1
+      if ! fm_workspace_placement_prepare "$PLACEMENT" direct "$ID" "$WT" "$SANDBOX_PRESET" "$PLACEMENT_BRIDGE" "${PLACEMENT_KITS[@]}"; then
+        PLACEMENT_HANDLE=${FM_WORKSPACE_PLACEMENT_ACQUIRED_HANDLE:-}
+        exit 1
+      fi
     else
-      fm_workspace_placement_prepare "$PLACEMENT" direct "$ID" "$WT" "$SANDBOX_PRESET" "$PLACEMENT_BRIDGE" || exit 1
+      if ! fm_workspace_placement_prepare "$PLACEMENT" direct "$ID" "$WT" "$SANDBOX_PRESET" "$PLACEMENT_BRIDGE"; then
+        PLACEMENT_HANDLE=${FM_WORKSPACE_PLACEMENT_ACQUIRED_HANDLE:-}
+        exit 1
+      fi
     fi
     BRIEF="$PLACEMENT_BRIDGE/runtime-brief.md"
     PLACEMENT_HANDLE=$FM_WORKSPACE_PLACEMENT_HANDLE
@@ -2841,6 +2898,8 @@ if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
 fi
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 [ "$PLACEMENT" = docker-sandbox ] && PLACEMENT_ABORT_CLEANUP=0
+SPAWN_ENDPOINT_CLEANUP=0
+SPAWN_WORKTREE_CLEANUP=0
 
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")

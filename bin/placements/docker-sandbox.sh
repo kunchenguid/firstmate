@@ -95,12 +95,12 @@ EOF
 fm_workspace_placement_docker_sandbox_cleanup_unpublished() {  # <name>
   local name=$1
   sbx stop "$name" >/dev/null 2>&1 || true
-  sbx rm "$name" >/dev/null 2>&1 || true
+  sbx rm --force "$name" >/dev/null 2>&1 || true
 }
 
 fm_workspace_placement_docker_sandbox_prepare() {  # <direct|clone> <task-id> <workspace> <preset> [additional-workspace] [kit-ref...]
   local mode=$1 task_id=$2 workspace=$3 preset=$4 additional_workspace=${5:-}
-  local name handle resolved_workspace resolved_additional clone_cwd state kit
+  local name handle resolved_workspace resolved_additional clone_cwd state kit create_error
   local -a kits=() create_argv
   if [ "$#" -gt 5 ]; then
     kits=("${@:6}")
@@ -151,16 +151,17 @@ fm_workspace_placement_docker_sandbox_prepare() {  # <direct|clone> <task-id> <w
       create_argv+=("$preset" "$resolved_workspace")
       if [ -n "$resolved_additional" ]; then
         create_argv+=("$resolved_additional")
-        "${create_argv[@]}" >/dev/null || {
-          fm_workspace_placement_error "could not create Docker Sandbox '$name' for the selected workspaces"
-          return 1
-        }
+        create_error="could not create Docker Sandbox '$name' for the selected workspaces"
       else
-        "${create_argv[@]}" >/dev/null || {
-          fm_workspace_placement_error "could not create Docker Sandbox '$name' for the selected workspace"
-          return 1
-        }
+        create_error="could not create Docker Sandbox '$name' for the selected workspace"
       fi
+      if ! "${create_argv[@]}" >/dev/null; then
+        fm_workspace_placement_docker_sandbox_cleanup_unpublished "$name"
+        fm_workspace_placement_error "$create_error"
+        return 1
+      fi
+      # shellcheck disable=SC2034
+      FM_WORKSPACE_PLACEMENT_ACQUIRED_HANDLE=$handle
       fm_workspace_placement_result_set "$handle" "$resolved_workspace" "$resolved_workspace" 'yes'
       ;;
     clone)
@@ -173,6 +174,8 @@ fm_workspace_placement_docker_sandbox_prepare() {  # <direct|clone> <task-id> <w
         fm_workspace_placement_error "could not create cloned Docker Sandbox '$name'"
         return 1
       }
+      # shellcheck disable=SC2034
+      FM_WORKSPACE_PLACEMENT_ACQUIRED_HANDLE=$handle
       clone_cwd=$(sbx exec "$name" pwd) || {
         fm_workspace_placement_docker_sandbox_cleanup_unpublished "$name"
         fm_workspace_placement_error "could not determine the working directory inside cloned Docker Sandbox '$name'; removed the unpublished placement when possible"

@@ -60,6 +60,9 @@ case "$1" in
     fi
     [ -n "${name:-}" ] || exit 2
     printf '%s\n' "$name" >> "$SBX_STATE"
+    if [ "${SBX_FAIL_CREATE_AFTER_RECORD:-0}" = '1' ]; then
+      exit 1
+    fi
     ;;
   exec)
     shift
@@ -158,6 +161,18 @@ assert_grep $'create\t--name\tfm-kit.task\t--kit\tkit ref with spaces\t--kit\tki
   'Docker direct did not preserve repeatable kit refs when no additional workspace was supplied'
 pass 'Docker direct accepts zero or more explicit kit refs without shell splitting'
 
+: > "$SBX_STATE"
+: > "$SBX_LOG"
+export SBX_FAIL_CREATE_AFTER_RECORD=1
+if fm_workspace_placement_prepare docker-sandbox direct partial.task "$workspace_real" official-agent; then
+  fail 'Docker create failure unexpectedly published a partial placement'
+fi
+unset SBX_FAIL_CREATE_AFTER_RECORD
+assert_no_grep 'fm-partial.task' "$SBX_STATE" 'Docker create failure left a partial sandbox'
+assert_grep $'stop\tfm-partial.task' "$SBX_LOG" 'Docker create failure did not stop the exact partial sandbox'
+assert_grep $'rm\t--force\tfm-partial.task' "$SBX_LOG" 'Docker create failure did not remove the exact partial sandbox'
+pass 'Docker create failure cleans a partial placement before returning'
+
 printf 'fm-collision\nother\n' > "$SBX_STATE"
 : > "$SBX_LOG"
 if fm_workspace_placement_prepare docker-sandbox direct collision "$workspace_real" official-agent; then
@@ -214,7 +229,8 @@ unset SBX_FAIL_EXEC_PWD
 assert_grep 'survivor' "$SBX_STATE" 'clone cwd failure removed an unrelated sandbox'
 assert_no_grep 'fm-failed.task' "$SBX_STATE" 'clone cwd failure left unpublished sandbox'
 assert_grep $'stop\tfm-failed.task' "$SBX_LOG" 'clone cwd failure did not stop unpublished sandbox'
-assert_grep $'rm\tfm-failed.task' "$SBX_LOG" 'clone cwd failure did not remove unpublished sandbox'
+assert_grep $'rm\t--force\tfm-failed.task' "$SBX_LOG" 'clone cwd failure did not remove unpublished sandbox'
+[ "$FM_WORKSPACE_PLACEMENT_ACQUIRED_HANDLE" = 'docker-sandbox:failed.task:fm-failed.task' ] || fail 'clone cwd failure lost the exact acquired placement handle'
 assert_no_grep $'stop\tsurvivor' "$SBX_LOG" 'clone cwd failure stopped unrelated sandbox'
 assert_no_grep $'rm\tsurvivor' "$SBX_LOG" 'clone cwd failure removed unrelated sandbox'
 pass 'clone cwd failure cleans only its unpublished name'
