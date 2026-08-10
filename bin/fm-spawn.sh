@@ -1230,7 +1230,21 @@ case "$ARG3" in
     ;;
 esac
 
-if [ "$RAW_LAUNCH" -eq 1 ] && [ "$HARNESS" = omp ]; then
+raw_launch_uses_omp() {
+  local launch=$1 result
+  if command -v node >/dev/null 2>&1 && [ -f "$SCRIPT_DIR/fm-raw-launch-policy.mjs" ]; then
+    if result=$(node "$SCRIPT_DIR/fm-raw-launch-policy.mjs" --command "$launch" 2>/dev/null); then
+      case "$result" in
+        omp) return 0 ;;
+        other) return 1 ;;
+      esac
+    fi
+    return 0
+  fi
+  [[ "$launch" =~ (^|[[:space:];&|()<>])([^[:space:];&|()<>]*\/)?omp([[:space:];&|()<>]|$) ]]
+}
+
+if [ "$RAW_LAUNCH" -eq 1 ] && raw_launch_uses_omp "$LAUNCH"; then
   HARNESS=raw-omp
 fi
 
