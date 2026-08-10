@@ -2393,9 +2393,31 @@ esac
 printf '{}\\n'
 EOF
       chmod 700 "$WT/.cursor/hooks/fm-busy-turnend.sh"
-      cat > "$WT/.cursor/hooks.json" <<EOF
-{"version":1,"hooks":{"beforeSubmitPrompt":[{"command":".cursor/hooks/fm-busy-turnend.sh busy"}],"stop":[{"command":".cursor/hooks/fm-busy-turnend.sh idle-stop"}],"sessionEnd":[{"command":".cursor/hooks/fm-busy-turnend.sh idle-session-end"}]}}
-EOF
+      cursor_hooks_tmp="$TASK_TMP/cursor-hooks.json"
+      [ -e "$WT/.cursor/hooks.json" ] || printf '%s\n' '{"version":1,"hooks":{}}' > "$WT/.cursor/hooks.json"
+      python3 - "$WT/.cursor/hooks.json" "$cursor_hooks_tmp" \
+        '.cursor/hooks/fm-busy-turnend.sh busy' \
+        '.cursor/hooks/fm-busy-turnend.sh idle-stop' \
+        '.cursor/hooks/fm-busy-turnend.sh idle-session-end' <<'PY'
+import json
+import sys
+
+source, destination, busy, stop, session_end = sys.argv[1:]
+with open(source, encoding="utf-8") as handle:
+    document = json.load(handle)
+hooks = document.setdefault("hooks", {})
+if not isinstance(hooks, dict):
+    raise SystemExit("Cursor hooks must be a JSON object")
+for event, command in (("beforeSubmitPrompt", busy), ("stop", stop), ("sessionEnd", session_end)):
+    entries = hooks.setdefault(event, [])
+    if not isinstance(entries, list):
+        raise SystemExit(f"Cursor {event} hooks must be arrays")
+    entries.append({"command": command})
+with open(destination, "w", encoding="utf-8") as handle:
+    json.dump(document, handle, separators=(",", ":"))
+    handle.write("\n")
+PY
+      mv -f -- "$cursor_hooks_tmp" "$WT/.cursor/hooks.json"
       exclude_path '.cursor/hooks.json'
       exclude_path '.cursor/hooks/fm-busy-turnend.sh'
       ;;

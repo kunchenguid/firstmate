@@ -140,6 +140,8 @@ test_spawn_launch_shape() {
   IFS='|' read -r case_dir home proj wt fakebin id <<EOF
 $rec
 EOF
+  mkdir -p "$wt/.cursor"
+  printf '%s\n' '{"version":1,"hooks":{"beforeSubmitPrompt":[{"command":"user-before"}],"stop":[{"command":"user-stop"}],"custom":[{"command":"keep"}]}}' > "$wt/.cursor/hooks.json"
   out=$(run_cursor_spawn "$home" "$proj" "$wt" "$fakebin" "$id" \
     --mode no-mistakes --yolo off --model composer-2.5-fast --effort low)
   status=$?
@@ -166,11 +168,12 @@ PY
   python3 - "$wt/.cursor/hooks.json" <<'PY' || fail "cursor hooks JSON does not expose the required events"
 import json, sys
 hooks = json.load(open(sys.argv[1]))["hooks"]
-assert hooks["beforeSubmitPrompt"], hooks
-assert hooks["stop"], hooks
-assert hooks["sessionEnd"], hooks
-assert hooks["stop"][0]["command"].endswith("fm-busy-turnend.sh idle-stop"), hooks
-assert hooks["sessionEnd"][0]["command"].endswith("fm-busy-turnend.sh idle-session-end"), hooks
+assert hooks["beforeSubmitPrompt"][0]["command"] == "user-before", hooks
+assert hooks["stop"][0]["command"] == "user-stop", hooks
+assert hooks["custom"][0]["command"] == "keep", hooks
+assert hooks["beforeSubmitPrompt"][-1]["command"].endswith("fm-busy-turnend.sh busy"), hooks
+assert hooks["stop"][-1]["command"].endswith("fm-busy-turnend.sh idle-stop"), hooks
+assert hooks["sessionEnd"][-1]["command"].endswith("fm-busy-turnend.sh idle-session-end"), hooks
 PY
 
   trusted=$(fm_busy_sources_for_harness cursor)
@@ -178,6 +181,8 @@ PY
     *" cursor-hook "*) ;;
     *) fail "cursor must trust cursor-hook, got '$trusted'" ;;
   esac
+  [ -z "$(fm_busy_sources_for_harness cursor-ide)" ] \
+    || fail "unverified cursor-ide must not trust cursor-hook busy events"
   [ -f "$home/state/$id.busy-gen" ] \
     || fail "cursor spawn must arm a busy generation"
   pass "cursor spawn launches with yolo+trust, omits effort flags, and wires project hooks"

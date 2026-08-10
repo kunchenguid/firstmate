@@ -179,7 +179,7 @@ fm_busy_sources_for_harness() {  # <harness>
   local adapter=
   case "${1:-}" in
     claude*) adapter=claude-hook ;;
-    cursor*) adapter=cursor-hook ;;
+    cursor|cursor-agent) adapter=cursor-hook ;;
     codex*)
       fm_busy_codex_semantic_source || { printf ''; return 0; }
       adapter='codex-hook codex-appserver'
