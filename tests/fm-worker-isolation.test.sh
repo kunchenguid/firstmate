@@ -156,6 +156,32 @@ test_incomplete_worker_identity_refuses_primary_operations() {
   pass "incomplete worker identities fail closed at the shared guard"
 }
 
+test_markerless_worker_is_refused_before_primary_state_resolution() {
+  local home script name out status
+  home=$(make_primary_home "$TMP_ROOT/markerless-worker-home")
+  mkdir -p "$TMP_ROOT/markerless-worker-cwd"
+  for script in "$LOCK" "$ROOT/bin/fm-send.sh" "$ROOT/bin/fm-watch.sh" \
+    "$ROOT/bin/fm-watch-arm.sh" "$ROOT/bin/fm-watch-session.sh" "$ROOT/bin/fm-wake-drain.sh"; do
+    name=$(basename "$script")
+    if out=$(cd "$TMP_ROOT/markerless-worker-cwd" && env \
+      -u FM_AGENT_ROLE -u FM_AGENT_TASK -u FM_AGENT_OWNER_HOME \
+      -u FM_ROOT -u FM_ROOT_OVERRIDE -u FM_STATE_OVERRIDE -u FM_DATA_OVERRIDE \
+      -u FM_PROJECTS_OVERRIDE -u FM_CONFIG_OVERRIDE -u FM_PENDING_REPLY_DIR_OVERRIDE \
+      FM_HOME="$home" FM_ROOT_OVERRIDE="$home" "$script" 2>&1); then
+      status=0
+    else
+      status=$?
+    fi
+    expect_code 1 "$status" "$name must refuse a markerless worker outside the primary origin"
+    assert_contains "$out" "task worker" "$name lost the markerless-worker refusal"
+  done
+  [ ! -e "$home/state/.lock.acquire" ] || fail "markerless worker created a session-lock claim"
+  [ ! -e "$home/state/.watch.lock" ] || fail "markerless worker created a watcher lock"
+  [ ! -e "$home/state/.wake-queue" ] || fail "markerless worker created a wake queue"
+  [ ! -e "$home/state/.watch-session" ] || fail "markerless worker created a watcher session"
+  pass "markerless workers are refused before lock, send, and watcher state resolution"
+}
+
 test_unreadable_task_start_proof_remains_contested() {
   local out status
   if out=$(bash -c '
@@ -1170,6 +1196,7 @@ test_crewmate_declaration_clears_every_inherited_home
 test_secondmate_declaration_pins_only_its_own_home
 test_declaration_refuses_rather_than_emitting_a_partial_prefix
 test_incomplete_worker_identity_refuses_primary_operations
+test_markerless_worker_is_refused_before_primary_state_resolution
 test_unreadable_task_start_proof_remains_contested
 test_every_verified_harness_launches_with_its_home_declaration
 test_secondmate_child_receives_only_its_own_home
