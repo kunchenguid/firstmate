@@ -1,53 +1,27 @@
 #!/usr/bin/env bash
 # fm-tmux-lib.sh — shared tmux pane primitives for firstmate.
 #
-# ONE source of truth for: busy detection, composer-empty (pending-input)
-# detection, and a verify-and-retry-Enter submit. Sourced by both the away-mode
-# daemon (bin/fm-supervise-daemon.sh) and bin/fm-send.sh so the composer/submit
-# logic cannot drift between the two.
+# ONE tmux source for delivery-busy detection, composer capture primitives,
+# and verified submit.
+# Both the away-mode daemon and bin/fm-send.sh reach these primitives through
+# backend dispatch, while bin/fm-composer-lib.sh owns the shared verdict.
 #
-# Why this exists (incident afk-invx-i5): the daemon's old composer check only
-# recognized a BARE prompt glyph ("> ") as an empty composer. claude draws its
-# input box with box-drawing borders ("│ > … │"), so every idle claude pane read
-# as "pending input" and the away-mode daemon deferred 100% of escalations for
-# 9.5 hours with no escape. The detector below strips the box borders before
-# deciding, so a bordered-but-empty composer is correctly seen as empty. The same
-# corrected detector backs the submit acknowledgement (a submit "landed" iff the
-# composer is empty afterward), fixing the parallel false "Enter swallowed".
+# Composer shapes and verdicts are owned by bin/fm-composer-lib.sh.
+# This file owns only tmux's styled capture, cursor and Pi identity primitives,
+# delivery busy read, and submit conversions that consume the shared verdict.
+# Styled captures remain internal; fm-peek and every human-facing capture stay
+# plain.
 #
-# Ghost text (incident composer-robust): claude renders a predicted-next-prompt
-# "suggestion" as dim/faint text inside an otherwise-empty composer. A plain
-# capture cannot tell it apart from text a human typed, so the old reader saw an
-# idle pane as holding pending input and the daemon deferred injection / firstmate
-# misjudged the pane. The composer reader now captures the visible pane WITH ANSI
-# styling (tmux capture-pane -e), locates a bordered composer structurally, and
-# extracts the real typed content from every row with the shared, fleet-wide
-# fm_composer_strip_ghost (bin/fm-composer-lib.sh), which drops every
-# de-emphasised run - dim/faint (SGR 2) AND a dark/muted truecolor foreground -
-# so ghost/placeholder text never counts as real input. The styled capture is
-# consumed internally and parsed into a boolean here; it is NEVER surfaced
-# (fm-peek and every human/LLM-facing path stay plain). This is harness-generic:
-# any harness that de-emphasises placeholder/ghost text
-# benefits, and the herdr adapter routes through the same owner (task
-# afk-herdr-false-pending), so the two backends cannot drift.
+# OpenCode's busy-queued Enter conversion accepts only structurally proven
+# pending text after retries, while the separate turn-started conversion accepts
+# an unknown post-Enter composer only after this submit observed an idle baseline
+# become busy.
+# Herdr's OpenCode busy-queue limitation remains documented in
+# docs/herdr-backend.md.
 #
-# Busy-queued Enter (opencode 1.18.4, on the tmux backend only for now): when
-# the agent is mid-turn, opencode accepts Enter as a "send when the turn ends"
-# keystroke but does NOT clear the composer until then, so the composer keeps
-# showing the typed text the whole time. The plain "empty iff composer cleared"
-# acknowledgement above false-positives on a swallowed Enter for every steer
-# sent to a busy opencode pane, and `fm-send` exits non-zero on a normal
-# captain instruction. The submit core now falls back to `fm_pane_is_busy` once
-# the Enter-retry budget is spent: a busy pane means the harness accepted and
-# queued the Enter (report `empty` so the caller does not re-send), while an
-# idle pane keeps the `pending` verdict (a genuine swallow). The herdr backend
-# observes the same opencode behavior but needs a separate fix; it is recorded
-# as a known gap in `docs/herdr-backend.md` rather than patched here, so the
-# tmux adapter does not paper over a herdr-specific shape.
-#
-# Overrides: FM_COMPOSER_IDLE_RE matches an empty composer after ghost and
-# structural border stripping. FM_BUSY_REGEX overrides the rendered busy-footer
-# matching used here.
+# FM_COMPOSER_IDLE_RE is interpreted by the shared classifier with its structural
+# and styling safety gates.
+# FM_BUSY_REGEX overrides the rendered delivery-busy matching used here.
 #
 # NOT a task-state source: task busy state is owned by bin/fm-busy-lib.sh's
 # semantic contract. The matching below serves only delivery guards: the submit

@@ -99,9 +99,8 @@
 #                                   the watcher is mid-cycle (default 15)
 #          FM_BUSY_REGEX            optional rendered busy-signature override
 #                                   for delivery guards and Grok's fallback
-#          FM_COMPOSER_IDLE_RE      empty-composer regex applied after dim-ghost
-#                                   and structural border stripping (default:
-#                                   bare prompt glyphs plus busy footers)
+#          FM_COMPOSER_IDLE_RE      optional shared classifier override; see
+#                                   docs/configuration.md for its safety gates
 #          FM_MAX_DEFER_SECS        max seconds a buffered escalation may sit
 #                                   undelivered before one normal flush attempt;
 #                                   if that cannot confirm a submit, a wedge

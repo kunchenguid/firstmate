@@ -2995,15 +2995,15 @@ test_composer_state_bare_prompt_is_empty() {
   pass "fm_backend_herdr_composer_state: a bare '❯' composer row reads empty"
 }
 
-test_composer_state_ghost_placeholder_is_empty() {
+test_composer_state_styled_placeholder_draft_is_pending() {
   local dir log resp fb out
   dir="$TMP_ROOT/composer-ghost"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   printf '  ╭────────────────────────╮\n  │ ❯ Type a message...    │\n  ╰──────── Composer ──────╯\n' > "$resp/1.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
-  [ "$out" = empty ] || fail "the known ghost placeholder 'Type a message...' should read as empty, got '$out'"
-  pass "fm_backend_herdr_composer_state: the ghost placeholder text reads empty, not pending"
+  [ "$out" = pending ] || fail "bright placeholder-like text in a styled capture should remain pending, got '$out'"
+  pass "fm_backend_herdr_composer_state: bright placeholder-like text stays pending rather than being mistaken for an idle ghost"
 }
 
 test_composer_state_real_text_is_pending() {
@@ -4317,7 +4317,7 @@ test_busy_state_working_maps_to_busy
 test_busy_state_done_and_blocked_map_to_idle
 test_busy_state_unknown_on_no_agent
 test_composer_state_bare_prompt_is_empty
-test_composer_state_ghost_placeholder_is_empty
+test_composer_state_styled_placeholder_draft_is_pending
 test_composer_state_real_text_is_pending
 test_composer_state_popup_placeholder_fill_is_pending
 test_composer_state_unknown_on_capture_failure

@@ -187,7 +187,8 @@ the operational prefix lets firstmate distinguish it from a real captain message
 - The active backend passes its capture plus declarative styled, cursor, identity, and row capabilities to the shared screen classifier; all structural recognition and verdict logic remains in `bin/fm-composer-lib.sh`.
   Styled captures let that owner remove dim/faint and dark-TRUECOLOR ghost or placeholder text while shape detection uses the ANSI-stripped screen, so a dark border is not lost with ghost content.
   A ghost-only or idle bordered composer such as claude's `│ > ... │` therefore reads empty without allowing an unbordered shell prompt to do the same.
-  `FM_COMPOSER_IDLE_RE` overrides the fleet-wide empty-composer placeholder set after shared ghost and border stripping on every backend, and `FM_BUSY_REGEX` overrides the rendered delivery guards plus Grok's isolated task-state fallback.
+  `FM_COMPOSER_IDLE_RE` overrides the shared idle-placeholder regex, but a match alone never bypasses the classifier's shape-specific position and ANSI de-emphasis safety gates.
+  `FM_BUSY_REGEX` overrides the rendered delivery guards plus Grok's isolated task-state fallback.
   A blank or otherwise unidentified input row carries no positive container proof and defers injection, so a modal dialog or a mid-redraw pane is never an injection target.
 - **Max-defer escape** - the daemon must never silently wedge. If anything stays
   buffered past `FM_MAX_DEFER_SECS` (default 300s), the daemon attempts one

@@ -465,33 +465,36 @@ test_misaligned_box_is_unknown() {
   pass "fm_tmux_composer_state: misaligned box bounds fail closed"
 }
 
-test_unproved_empty_geometry_is_unknown() {
-  local dir fb capture out fixture
+test_unproved_empty_geometry_fails_closed() {
+  local dir fb capture out fixture expected
   dir="$TMP_ROOT/unproved-empty-geometry"; mkdir -p "$dir"
   fb=$(make_fake_tmux "$dir")
   capture="$dir/styled.txt"
   for fixture in ghost idle malformed-top; do
     case "$fixture" in
       ghost)
+        expected=unknown
         printf '╭────────────╮\n│ \033[2mghost\033[0m │\n╰────────────╯\n' > "$capture"
         out=$(PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=1 \
           fm_tmux_composer_state "fakepane")
         ;;
       idle)
+        expected=pending-unproven
         printf '╭────────────╮\n│ idle hint │\n╰────────────╯\n' > "$capture"
         out=$(PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=1 \
           FM_COMPOSER_IDLE_RE='^idle hint$' fm_tmux_composer_state "fakepane")
         ;;
       malformed-top)
+        expected=unknown
         printf '╭────x───────╮\n│            │\n╰────────────╯\n' > "$capture"
         out=$(PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=1 \
           fm_tmux_composer_state "fakepane")
         ;;
     esac
-    [ "$out" = unknown ] \
-      || fail "unproved empty geometry '$fixture' should be unknown, got '$out'"
+    [ "$out" = "$expected" ] \
+      || fail "unproved geometry '$fixture' should be $expected, got '$out'"
   done
-  pass "fm_tmux_composer_state: unproved ghost, idle, and border geometry stays unknown"
+  pass "fm_tmux_composer_state: unproved ghost and malformed geometry stay unknown while styled placeholder-like text stays pending-unproven"
 }
 
 test_differing_widths_use_asymmetric_verdicts() {
@@ -700,7 +703,7 @@ test_clipped_bordered_box_is_unknown
 test_asymmetric_composer_edges_are_unknown
 test_mismatched_box_families_are_unknown
 test_misaligned_box_is_unknown
-test_unproved_empty_geometry_is_unknown
+test_unproved_empty_geometry_fails_closed
 test_differing_widths_use_asymmetric_verdicts
 test_wide_composer_text_is_pending
 test_all_tmux_harness_composers_share_classification

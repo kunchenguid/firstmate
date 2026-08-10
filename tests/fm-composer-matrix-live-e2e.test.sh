@@ -75,7 +75,7 @@ harness_version() {  # <binary>
 }
 
 check_harness_idle_empty() {  # <name> <launch-cmd...>
-  local name=$1 win="hx-$1" verdict='' i=0 budget=${FM_COMPOSER_MATRIX_LIVE_POLLS:-45} version dismissed=0
+  local name=$1 win="hx-$1" verdict='' i=0 budget=${FM_COMPOSER_MATRIX_LIVE_POLLS:-45} version dismissed=0 startup_screen
   shift
   version=$(harness_version "$1")
   tmux -L "$SOCKET" new-window -d -t "$SESSION:" -n "$win" -c "$ROOT" -- "$@" \
@@ -91,14 +91,21 @@ check_harness_idle_empty() {  # <name> <launch-cmd...>
     # the audit declined the same prompts. Never Enter: on codex's dialog
     # Enter would RUN the upgrade.
     if [ "$dismissed" -eq 0 ] && [ "$i" -ge $((budget / 3)) ]; then
-      tmux -L "$SOCKET" send-keys -t "$SESSION:$win" Escape 2>/dev/null || true
+      # Trust prompts also accept Escape, but there it exits the harness and
+      # erases the actionable failure surface. Preserve those prompts; only
+      # dismiss a non-trust startup modal.
+      startup_screen=$(tmux -L "$SOCKET" capture-pane -p -t "$SESSION:$win" 2>/dev/null || true)
+      if ! printf '%s\n' "$startup_screen" | grep -qi 'trust'; then
+        tmux -L "$SOCKET" send-keys -t "$SESSION:$win" Escape 2>/dev/null || true
+      fi
       dismissed=1
     fi
     sleep 1
   done
   if [ "$verdict" != empty ]; then
     printf '# %s pane tail at failure:\n' "$name" >&2
-    tmux -L "$SOCKET" capture-pane -p -t "$SESSION:$win" 2>/dev/null | tail -8 | sed 's/^/#   /' >&2
+    tmux -L "$SOCKET" capture-pane -p -t "$SESSION:$win" 2>/dev/null \
+      | grep '[^[:space:]]' | tail -8 | sed 's/^/#   /' >&2
     FAILED=1
     printf 'not ok - %s (%s): idle composer never classified empty (last verdict: %s)\n' \
       "$name" "$version" "${verdict:-unreadable}" >&2
