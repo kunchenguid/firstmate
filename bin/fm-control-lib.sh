@@ -305,7 +305,7 @@ fm_control_cursor_hooks_forget() {  # <state-dir> <id>
 }
 
 fm_control_cursor_hook_path_matches_installed() {  # <worktree> <state-dir> <id> <relative-path>
-  local wt=$1 state=$2 id=$3 relative=$4 installed
+  local wt=$1 state=$2 id=$3 relative=$4 installed backup
   case "$relative" in
     .cursor/hooks.json|.cursor/hooks/fm-busy-turnend.sh) ;;
     *) return 1 ;;
@@ -313,7 +313,14 @@ fm_control_cursor_hook_path_matches_installed() {  # <worktree> <state-dir> <id>
   installed="$state/$id.cursor-$(basename "$relative").installed"
   [ -f "$installed" ] && [ ! -L "$installed" ] \
     && [ -f "$wt/$relative" ] && [ ! -L "$wt/$relative" ] \
-    && cmp -s "$wt/$relative" "$installed"
+    && cmp -s "$wt/$relative" "$installed" || return 1
+  backup="$state/$id.cursor-$(basename "$relative")"
+  if git -C "$wt" ls-files --error-unmatch -- "$relative" >/dev/null 2>&1; then
+    [ -f "$backup" ] && [ ! -L "$backup" ] || return 1
+    git -C "$wt" show ":$relative" | cmp -s "$backup" -
+  else
+    [ ! -e "$backup" ] && [ ! -L "$backup" ]
+  fi
 }
 
 fm_control_cursor_hooks_restore() {  # <worktree> <state-dir> <id>
@@ -386,19 +393,19 @@ for event, command in expected.items():
     original_entries = backup_hooks.get(event, [])
     if not isinstance(original_entries, list):
         raise SystemExit(f"Backed-up Cursor {event} hooks must be arrays")
-    original_count = sum(
-        isinstance(entry, dict) and entry.get("command") == command
-        for entry in original_entries
-    )
-    seen = 0
+    unmatched_original = list(original_entries)
+    surplus_index = None
     for index, entry in enumerate(entries):
-        if not (isinstance(entry, dict) and entry.get("command") == command):
-            continue
-        if seen == original_count:
-            del entries[index]
-            changed = True
-            break
-        seen += 1
+        try:
+            original_index = unmatched_original.index(entry)
+        except ValueError:
+            if surplus_index is None and entry == {"command": command}:
+                surplus_index = index
+        else:
+            del unmatched_original[original_index]
+    if surplus_index is not None:
+        del entries[surplus_index]
+        changed = True
 if changed:
     directory = os.path.dirname(path)
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=directory, delete=False) as handle:

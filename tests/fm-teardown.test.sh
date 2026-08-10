@@ -1031,6 +1031,90 @@ PY
   pass "dirty teardown refusal leaves live Cursor supervision hooks armed"
 }
 
+test_cursor_relaunch_dirty_baseline_refuses_teardown() {
+  local case_dir hook_script installed_hooks rc
+  case_dir=$(make_case cursor-relaunch-dirty-baseline)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'harness=cursor' >> "$case_dir/state/task-x1.meta"
+  mkdir -p "$case_dir/wt/.cursor/hooks"
+  printf '%s\n' '{"version":1,"hooks":{}}' > "$case_dir/wt/.cursor/hooks.json"
+  git -C "$case_dir/wt" add .cursor/hooks.json
+  git -C "$case_dir/wt" -c user.email=t@t -c user.name=t commit -q -m "tracked cursor hooks"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  fm_control_cursor_hooks_backup "$case_dir/wt" "$case_dir/state" task-x1
+  python3 - "$case_dir/wt/.cursor/hooks.json" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    document = json.load(handle)
+document["hooks"].update({
+    "beforeSubmitPrompt": [{"command": ".cursor/hooks/fm-busy-turnend.sh busy"}],
+    "stop": [{"command": ".cursor/hooks/fm-busy-turnend.sh idle-stop"}],
+    "sessionEnd": [{"command": ".cursor/hooks/fm-busy-turnend.sh idle-session-end"}],
+})
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(document, handle, separators=(",", ":"))
+    handle.write("\n")
+PY
+  hook_script="$case_dir/wt/.cursor/hooks/fm-busy-turnend.sh"
+  printf '%s\n' 'firstmate hook script' > "$hook_script"
+  fm_control_cursor_hooks_record_installed "$case_dir/wt" "$case_dir/state" task-x1 \
+    "$case_dir/wt/.cursor/hooks.json" "$hook_script"
+  python3 - "$case_dir/wt/.cursor/hooks.json" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    document = json.load(handle)
+document["hooks"]["user-during-task"] = [{"command": "keep-this-edit"}]
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(document, handle, separators=(",", ":"))
+    handle.write("\n")
+PY
+  fm_control_cursor_hooks_restore "$case_dir/wt" "$case_dir/state" task-x1
+  fm_control_cursor_hooks_backup "$case_dir/wt" "$case_dir/state" task-x1 reuse
+  python3 - "$case_dir/wt/.cursor/hooks.json" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    document = json.load(handle)
+document["hooks"].update({
+    "beforeSubmitPrompt": [{"command": ".cursor/hooks/fm-busy-turnend.sh busy"}],
+    "stop": [{"command": ".cursor/hooks/fm-busy-turnend.sh idle-stop"}],
+    "sessionEnd": [{"command": ".cursor/hooks/fm-busy-turnend.sh idle-session-end"}],
+})
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(document, handle, separators=(",", ":"))
+    handle.write("\n")
+PY
+  printf '%s\n' 'replacement firstmate hook script' > "$hook_script"
+  fm_control_cursor_hooks_record_installed "$case_dir/wt" "$case_dir/state" task-x1 \
+    "$case_dir/wt/.cursor/hooks.json" "$hook_script"
+  installed_hooks="$case_dir/installed-hooks-after-relaunch.json"
+  cp "$case_dir/wt/.cursor/hooks.json" "$installed_hooks"
+  printf '%s\n' '.cursor/hooks/fm-busy-turnend.sh' \
+    >> "$(git -C "$case_dir/wt" rev-parse --git-path info/exclude)"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "Cursor relaunch must not hide a dirty hook baseline"
+  assert_grep "uncommitted changes present" "$case_dir/stderr" \
+    "dirty Cursor hook baseline was not reported"
+  cmp -s "$installed_hooks" "$case_dir/wt/.cursor/hooks.json" \
+    || fail "dirty baseline refusal removed live Cursor hook entries"
+  assert_present "$case_dir/state/task-x1.cursor-hooks.json.installed" \
+    "dirty baseline refusal discarded Cursor transaction ownership"
+  pass "same-Cursor relaunch cannot hide a dirty hook baseline"
+}
+
 test_gh_error_and_content_absent_refuses() {
   local case_dir rc
   case_dir=$(make_case gh-error)
@@ -2765,6 +2849,7 @@ test_content_fallback_refreshes_stale_origin_ref
 test_dirty_worktree_refuses
 test_cursor_hook_transaction_is_normalized_before_safety_check
 test_cursor_dirty_refusal_keeps_live_hook_transaction
+test_cursor_relaunch_dirty_baseline_refuses_teardown
 test_gh_error_and_content_absent_refuses
 test_stale_index_lock_cleared_and_teardown_succeeds
 test_live_index_lock_is_never_removed_and_teardown_refuses

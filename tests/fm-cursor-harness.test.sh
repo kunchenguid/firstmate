@@ -120,6 +120,15 @@ test_detects_cursor_agent_marker() {
   pass "cursor is detected through CURSOR_AGENT=1"
 }
 
+test_static_crew_harness_resolution() {
+  local home="$TMP_ROOT/static-crew-resolution" out
+  mkdir -p "$home/config"
+  printf '%s\n' cursor > "$home/config/crew-harness"
+  out=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$home/config" "$HARNESS" crew)
+  [ "$out" = cursor ] || fail "config/crew-harness=cursor resolved to '$out'"
+  pass "cursor resolves through the public static crew harness interface"
+}
+
 test_detects_exact_cursor_agent_ancestor() {
   local dir out
   dir="$TMP_ROOT/detect"
@@ -289,7 +298,7 @@ PY
 test_cursor_hook_restore_preserves_user_hook_edits() {
   local dir="$TMP_ROOT/preserve-hook-edits" wt="$TMP_ROOT/preserve-hook-edits/wt" state="$TMP_ROOT/preserve-hook-edits/state"
   mkdir -p "$wt/.cursor/hooks" "$state"
-  printf '%s\n' '{"version":1,"hooks":{"user":[{"command":"keep"}],"beforeSubmitPrompt":[{"command":".cursor/hooks/fm-busy-turnend.sh busy"}]}}' > "$wt/.cursor/hooks.json"
+  printf '%s\n' '{"version":1,"hooks":{"user":[{"command":"keep"}],"beforeSubmitPrompt":[{"command":".cursor/hooks/fm-busy-turnend.sh busy","matcher":"user-before"}]}}' > "$wt/.cursor/hooks.json"
   fm_control_cursor_hooks_backup "$wt" "$state" preserve
   python3 - "$wt/.cursor/hooks.json" <<'PY'
 import json
@@ -319,6 +328,8 @@ path = sys.argv[1]
 with open(path, encoding="utf-8") as handle:
     document = json.load(handle)
 document["hooks"]["user"].append({"command": "user-later"})
+entries = document["hooks"]["beforeSubmitPrompt"]
+entries.insert(0, entries.pop())
 with open(path, "w", encoding="utf-8") as handle:
     json.dump(document, handle, separators=(",", ":"))
     handle.write("\n")
@@ -331,7 +342,7 @@ import sys
 hooks = json.load(open(sys.argv[1]))["hooks"]
 assert hooks["user"] == [{"command": "keep"}, {"command": "user-later"}], hooks
 assert hooks["beforeSubmitPrompt"] == [
-    {"command": ".cursor/hooks/fm-busy-turnend.sh busy"}
+    {"command": ".cursor/hooks/fm-busy-turnend.sh busy", "matcher": "user-before"}
 ], hooks
 for event in ("stop", "sessionEnd"):
     assert hooks[event] == [], hooks
@@ -561,6 +572,7 @@ test_tmux_classifies_cursor_agent_only() {
 }
 
 test_detects_cursor_agent_marker
+test_static_crew_harness_resolution
 test_detects_exact_cursor_agent_ancestor
 test_detection_is_anchored
 test_spawn_launch_shape
