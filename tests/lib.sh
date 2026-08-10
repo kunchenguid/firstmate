@@ -232,13 +232,21 @@ fm_git_worktree() {
 # for the validation pipeline's state database, holding exactly the tables and
 # columns the independence derivation joins.
 #
-# Each <invocation> is "<branch>|<provider>|<model>[|<purpose>[|<shared>]]".
+# Each <invocation> is "<branch>|<provider>|<model>[|<purpose>[|<sessions>]]".
 # An empty provider or model writes SQL NULL, the shape the real database uses
 # when it recorded no such fact. <purpose> defaults to review, the reviewing
 # invocation; pass review-fix for the agent that rewrites code in response,
-# which is maker-side and must never be read as the critic. <shared> set to 1
-# makes the reviewer and the review-fixer share one session on that run, the
-# recorded shape that makes process independence observably absent.
+# which is maker-side and must never be read as the critic.
+#
+# <sessions> selects which of the three recorded session shapes this run has,
+# because all three have to be expressible or the derivation's three values
+# cannot each be reached from a fixture:
+#
+#   ''      the reviewer and the review-fixer hold distinct sessions
+#   1       they share one session - process independence observably ABSENT
+#   none    the run records NO session rows at all - the reviewing invocation
+#           happened and whose process ran it was never captured, which is
+#           could-not-observe and must never read as independent
 #
 # Returns nonzero when python3 is unavailable, which callers report as a
 # skipped case.
@@ -267,7 +275,7 @@ for n, spec in enumerate(specs):
     parts = spec.split("|")
     branch, provider, model = parts[0], parts[1], parts[2]
     purpose = parts[3] if len(parts) > 3 and parts[3] else "review"
-    shared = parts[4] if len(parts) > 4 else ""
+    sessions = parts[4] if len(parts) > 4 else ""
     run = "run%d" % n
     conn.execute("insert into runs values (?, 'r1', ?)", (run, branch))
     conn.execute(
@@ -275,9 +283,15 @@ for n, spec in enumerate(specs):
         " values (?, ?, 'review', 1, ?, 'codex', ?, ?, ?, 'success')",
         ("inv%d" % n, run, purpose, provider or None, model or None, n),
     )
+    # The invocation above is written either way: this run reviewed. Only the
+    # SESSION rows are withheld, which is the whole point of the shape - the
+    # derivation must not be able to reach it through "no invocation was
+    # recorded for these bytes" and call the case proven.
+    if sessions == "none":
+        continue
     # The reviewer and the review-fixer are distinct sessions unless the spec
     # deliberately collapses them.
-    fixer = "s-review-%d" % n if shared == "1" else "s-fix-%d" % n
+    fixer = "s-review-%d" % n if sessions == "1" else "s-fix-%d" % n
     conn.execute(
         "insert into run_agent_sessions values (?, 'reviewer', 'codex', ?)",
         (run, "s-review-%d" % n),

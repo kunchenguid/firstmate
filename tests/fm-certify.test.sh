@@ -50,6 +50,7 @@ certify() {  # <case_dir> [args...]
   shift
   FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$dir" FM_CONFIG_OVERRIDE="$dir/config" \
   FM_STATE_OVERRIDE="$dir/state" FM_PIPELINE_STATE_DB="$dir/pipeline.sqlite" \
+  FM_CERTIFY_ATTEST="${FM_CERTIFY_ATTEST:-}" \
     "$CERTIFY" "$@"
 }
 
@@ -133,6 +134,104 @@ test_undeclared_mapping_refuses_rather_than_inferring() {
       fail "undeclared: independence was inferred from differing names:"$'\n'"$out" ;;
   esac
   pass "an undeclared vocabulary mapping refuses rather than inferring independence"
+}
+
+test_a_review_with_no_recorded_session_is_could_not_observe() {
+  local dir out rc
+  dir=$(make_case unsessioned yes yes)
+  # The reviewing invocation IS recorded; only its session rows are absent. That
+  # is the case the process dimension exists to hold apart: "a review ran" and
+  # "the review ran in a process of its own" are different facts, and an empty
+  # reviewer/review-fixer overlap on a run that recorded no session at all is an
+  # absence of evidence rather than evidence of separation.
+  fm_test_pipeline_db "$dir/pipeline.sqlite" "$dir/repo" "fm/alpha|openai|gpt-5.6-sol||none" \
+    || { pass "SKIP (python3 unavailable): an unrecorded session is could-not-observe"; return; }
+
+  out=$(certify "$dir" --repo "$dir/repo" --branch fm/alpha \
+    --maker-harness claude --maker-model opus --mode local-only) && rc=0 || rc=$?
+  [ "$rc" = 4 ] || fail "unsessioned: expected a could-not-observe refusal (4), got $rc:"$'\n'"$out"
+  assert_contains "$out" "process:could-not-observe" \
+    "unsessioned: a review with no recorded session was not could-not-observe"
+  case "$(squeezed "$out")" in
+    *"process independent"*)
+      fail "unsessioned: a session that was never recorded read as independent:"$'\n'"$out" ;;
+  esac
+  # The other dimensions resolving is what proves this case did NOT arrive at
+  # its answer through the earlier "no agent invocation for these bytes" branch.
+  # Without this, the same assertion would pass against an unconditional PASS.
+  assert_contains "$(squeezed "$out")" "model independent" \
+    "unsessioned: the reviewing invocation was not read, so the case proves nothing"
+  pass "a recorded review whose session was never captured is could-not-observe, not independent"
+}
+
+test_one_unobserved_run_is_not_masked_by_a_sibling_that_recorded_one() {
+  local dir out rc
+  dir=$(make_case unsessioned-sibling yes yes)
+  # Two runs on ONE branch: the first recorded its sessions, the second did not.
+  # Independence is a property of a run against specific bytes, so the branch
+  # reports its WEAKEST run - summing the evidence would answer a different
+  # question, and answer it reassuringly.
+  fm_test_pipeline_db "$dir/pipeline.sqlite" "$dir/repo" \
+    "fm/alpha|openai|gpt-5.6-sol" "fm/alpha|openai|gpt-5.6-sol||none" \
+    || { pass "SKIP (python3 unavailable): an unobserved run is not masked"; return; }
+
+  out=$(certify "$dir" --repo "$dir/repo" --branch fm/alpha \
+    --maker-harness claude --maker-model opus --mode local-only) && rc=0 || rc=$?
+  [ "$rc" = 4 ] || fail "sibling: a masked unobserved run certified (rc=$rc):"$'\n'"$out"
+  assert_contains "$out" "process:could-not-observe" \
+    "sibling: a run with no recorded session was masked by one that had them"
+  pass "a run whose session was never recorded is not masked by a sibling run that recorded one"
+}
+
+# --- an unmet predicate says what was unmet, and by which predicate ----------
+
+test_an_observed_attestation_failure_is_not_labelled_not_independent() {
+  local dir out rc
+  dir=$(make_case attestation-unmet no yes)
+  fm_test_pipeline_db "$dir/pipeline.sqlite" "$dir/repo" "fm/alpha|openai|gpt-5.6-sol" \
+    || { pass "SKIP (python3 unavailable): an attestation failure is not mislabelled"; return; }
+  # A signable route whose attestation verifier REFUSES. Only independence has
+  # dimensions, so naming this gap "not-independent" would be a false statement
+  # about what went wrong - and fm-decision-surface.sh relays the line verbatim.
+  printf '#!/bin/sh\necho "no note covers those bytes"\nexit 1\n' > "$dir/attest"
+  chmod +x "$dir/attest"
+
+  out=$(FM_CERTIFY_ATTEST="$dir/attest" certify "$dir" --repo "$dir/repo" --branch fm/alpha \
+    --maker-harness claude --maker-model opus --mode local-only --head deadbeef) && rc=0 || rc=$?
+  [ "$rc" = 3 ] || fail "attestation-unmet: expected an observed-unmet refusal (3), got $rc:"$'\n'"$out"
+  assert_contains "$out" "gap=attestation:unmet" \
+    "attestation-unmet: the gap did not name the predicate neutrally"
+  case "$out" in
+    *"attestation:not-independent"*)
+      fail "attestation-unmet: an attestation failure was reported as a dependence:"$'\n'"$out" ;;
+  esac
+  pass "an observed attestation failure names its own predicate, not independence"
+}
+
+test_an_unreadable_repository_is_could_not_observe_not_a_refusal() {
+  local dir out
+  dir=$(make_case attestation-unreadable no yes)
+  fm_test_pipeline_db "$dir/pipeline.sqlite" "$dir/repo" "fm/alpha|openai|gpt-5.6-sol" \
+    || { pass "SKIP (python3 unavailable): an unreadable repository is could-not-observe"; return; }
+  # The head is derived from a live task's worktree while the repository comes
+  # from the durable record, so a project directory that moved leaves a head to
+  # verify and nowhere to verify it. That reached NO VERDICT, and reporting it
+  # as a refusal would be a could-not-observe wearing an observation's words.
+  printf '#!/bin/sh\nexit 0\n' > "$dir/attest"
+  chmod +x "$dir/attest"
+
+  out=$(FM_CERTIFY_ATTEST="$dir/attest" certify "$dir" --repo "$dir/repo-moved-away" \
+    --branch fm/alpha --maker-harness claude --maker-model opus --mode local-only \
+    --head deadbeef || true)
+  assert_contains "$(squeezed "$out")" "attestation could-not-observe" \
+    "unreadable: an unenterable repository was not could-not-observe"
+  assert_contains "$out" "repo-moved-away" \
+    "unreadable: the refusal did not name the repository it could not read"
+  case "$(squeezed "$out")" in
+    *"attestation unmet"*)
+      fail "unreadable: an unobservable attestation was reported as an observed refusal:"$'\n'"$out" ;;
+  esac
+  pass "a repository that cannot be entered is could-not-observe, never an observed refusal"
 }
 
 # --- the fourth, structural value --------------------------------------------
@@ -262,6 +361,10 @@ test_json_form_carries_every_dimension_and_the_route() {
 test_an_independent_checker_certifies
 test_a_shared_pool_refuses_and_names_the_dimension
 test_missing_verifier_identity_refuses_as_unobserved
+test_a_review_with_no_recorded_session_is_could_not_observe
+test_one_unobserved_run_is_not_masked_by_a_sibling_that_recorded_one
+test_an_observed_attestation_failure_is_not_labelled_not_independent
+test_an_unreadable_repository_is_could_not_observe_not_a_refusal
 test_undeclared_mapping_refuses_rather_than_inferring
 test_not_applicable_is_carried_with_its_route
 test_not_applicable_is_distinct_from_unobserved_on_the_same_predicate

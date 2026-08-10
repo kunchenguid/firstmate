@@ -231,7 +231,21 @@ else
   if [ ! -x "$ATTEST" ]; then
     add_row attestation NO_VERIFIER_RAN "the attestation verifier is not executable at $ATTEST"
   else
-    ATTEST_OUT=$( (cd "$REPO" 2>/dev/null && "$ATTEST" verify --head "$HEAD" 2>&1) ) && ATTEST_RC=0 || ATTEST_RC=$?
+    # A repository that cannot be entered reached NO VERDICT. Letting the failed
+    # cd fall through would hand its exit 1 to the refusal arm below and report
+    # an observed refusal, with the verifier's empty output as its reason - a
+    # could-not-observe wearing the words of an observation, which is the one
+    # collapse this command exists to refuse. The attest owner reserves exit 2
+    # for exactly this, so the miss is raised in its vocabulary.
+    ATTEST_OUT=$(
+      (
+        cd "$REPO" 2>/dev/null || {
+          printf 'the repository at %s could not be entered\n' "$REPO"
+          exit 2
+        }
+        "$ATTEST" verify --head "$HEAD" 2>&1
+      )
+    ) && ATTEST_RC=0 || ATTEST_RC=$?
     case "$ATTEST_RC" in
       0) add_row attestation PASS "a head-bound attestation covers $HEAD" ;;
       1) add_row attestation FAIL "the attestation for $HEAD was refused: $(printf '%s' "$ATTEST_OUT" | head -1)" ;;

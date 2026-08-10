@@ -52,7 +52,7 @@
 # so the verdict names the dimensions rather than collapsing them:
 #
 #   process  the review ran in its own agent process, not the maker's. It is
-#            derived from the sessions the pipeline recorded for the run:
+#            derived PER RUN from the sessions the pipeline recorded there:
 #            independent when the reviewer held sessions of its own, NOT
 #            independent when it shared one with the review-fixer (the party
 #            fixing the code is then also the party judging it), and
@@ -60,6 +60,9 @@
 #            A recorded reviewing invocation says a review RAN; only a recorded
 #            session says it ran as a process apart from the maker's, and
 #            reading the first as the second is the collapse this file refuses.
+#            A branch reports its WEAKEST run, never the union: independence is
+#            a property of a run against specific bytes, and a branch is only
+#            whatever runs happened to touch it.
 #   model    the reviewing model differs from the making model.
 #   vendor   the reviewing model provider differs from the making one.
 #   pool     the reviewing model draws on a different credential pool - a
@@ -170,14 +173,23 @@ fm_independence_db() {
 # Echo one TSV row per agent-backed step the pipeline recorded for those bytes:
 #
 #   <step>\t<round>\t<purpose>\t<agent>\t<vendor>\t<model>\t<exit_status>
-#     \t<shared_sessions>\t<reviewer_sessions>
+#     \t<shared_sessions>\t<reviewer_sessions>\t<run>
+#
+# EVERY SESSION FACT IS THAT ROW'S OWN RUN'S, never a total over the branch.
+# Independence is a property of a RUN against specific bytes: a branch is
+# whatever runs happened to touch it, so summing the session evidence over them
+# answers a different question and answers it reassuringly - one run that
+# recorded no reviewer session disappears behind a sibling run that did. The
+# run id is carried so the fold below can count RUNS rather than rows and report
+# the weakest one.
 #
 # <shared_sessions> is the count of distinct sessions the reviewer and the
-# review-fixer shared on that run and <reviewer_sessions> the count the reviewer
-# held at all. Both are needed: the first is what makes the process dimension
-# observably absent, and the second is what makes it observable in the first
-# place, so "no session was recorded" cannot read as "no session was shared".
-# An absent value is the empty string and is never filled in.
+# review-fixer shared on that row's run and <reviewer_sessions> the count the
+# reviewer held at all there. Both are needed: the first is what makes the
+# process dimension observably absent, and the second is what makes it
+# observable in the first place, so "no session was recorded" cannot read as
+# "no session was shared". An absent value is the empty string and is never
+# filled in.
 #
 # Returns non-zero when the database, python3, or the repo/branch join is
 # unavailable - all of which are could-not-observe at the caller, never an empty
@@ -225,13 +237,13 @@ try:
         sys.exit(0)
 
     # The reviewer and the review-fixer sharing one session on a run means the
-    # party judging the code is the party changing it. Counted per run here so
-    # the process dimension is derived from a record rather than assumed. The
-    # reviewer's own session count is carried beside it because a run that
-    # recorded no reviewer session has nothing to share, and an empty overlap
+    # party judging the code is the party changing it. Held PER RUN, never
+    # totalled: a total cannot be un-summed afterwards, so a run with no
+    # reviewer session would be indistinguishable from one whose sessions were
+    # merely disjoint. The reviewer's own session count rides beside it because
+    # a run that recorded no session has nothing to share, and an empty overlap
     # read as a pass would be exactly the could-not-observe collapse.
-    shared = 0
-    reviewer_sessions = 0
+    sessions = {}
     for run_id in run_ids:
         roles = {}
         for role, session_id in conn.execute(
@@ -240,24 +252,28 @@ try:
         ):
             roles.setdefault(role, set()).add(session_id)
         reviewer = roles.get("reviewer", set())
-        reviewer_sessions += len(reviewer)
-        shared += len(reviewer & roles.get("review-fixer", set()))
+        sessions[run_id] = (
+            len(reviewer & roles.get("review-fixer", set())),
+            len(reviewer),
+        )
 
     rows = []
     for run_id in run_ids:
         rows.extend(
-            conn.execute(
+            (run_id,) + tuple(r)
+            for r in conn.execute(
                 "select step_name, round, purpose, agent, model_provider, model,"
                 " exit_status from agent_invocations where run_id = ?"
                 " order by started_at",
                 (run_id,),
-            ).fetchall()
+            )
         )
     conn.close()
 except Exception:
     sys.exit(1)
 
-for step, rnd, purpose, agent, provider, model, exit_status in rows:
+for run_id, step, rnd, purpose, agent, provider, model, exit_status in rows:
+    shared, reviewer_sessions = sessions.get(run_id, (0, 0))
     print(
         "\t".join(
             (
@@ -270,6 +286,7 @@ for step, rnd, purpose, agent, provider, model, exit_status in rows:
                 str(exit_status or ""),
                 str(shared),
                 str(reviewer_sessions),
+                str(run_id or ""),
             )
         )
     )
@@ -334,22 +351,39 @@ fm_independence_collapse() {
 }
 
 # fm_independence_critic <steps>
-# Echo "<vendor>\t<model>\t<count>\t<shared_sessions>\t<reviewer_sessions>" for
-# the reviewing invocations in a <steps> block, where count is how many reviewer
-# invocations were recorded at all. Returns non-zero when the block records no
-# reviewer, so the caller reports could-not-observe rather than an empty
-# agreement.
+# Echo
+#   "<vendor>\t<model>\t<count>\t<shared_runs>\t<unobserved_runs>\t<runs>"
+# for the reviewing invocations in a <steps> block, where count is how many
+# reviewer invocations were recorded at all. Returns non-zero when the block
+# records no reviewer, so the caller reports could-not-observe rather than an
+# empty agreement.
+#
+# The three run counts are counts of RUNS, folded by run id so a run that
+# reviewed twice is one run and not two. They are what let the caller report the
+# WEAKEST run rather than the union of them: a single run whose reviewer session
+# was never recorded is enough to make the branch unobservable, however many
+# sibling runs recorded theirs.
 fm_independence_critic() {  # <steps>
-  local steps=${1:-} critic vendor model count shared sessions
+  local steps=${1:-} critic vendor model count runs
   critic=$(printf '%s\n' "$steps" | awk -F'\t' -v p="$FM_INDEPENDENCE_CRITIC_PURPOSE" '$3 == p')
   [ -n "$critic" ] || return 1
   count=$(printf '%s\n' "$critic" | grep -c .)
   vendor=$(printf '%s\n' "$critic" | cut -f5 | fm_independence_collapse)
   model=$(printf '%s\n' "$critic" | cut -f6 | fm_independence_collapse)
-  # Every row of a block carries the same session counts; take the first.
-  shared=$(printf '%s\n' "$critic" | head -1 | cut -f8)
-  sessions=$(printf '%s\n' "$critic" | head -1 | cut -f9)
-  printf '%s\t%s\t%s\t%s\t%s' "$vendor" "$model" "$count" "${shared:-0}" "${sessions:-0}"
+  # An unrecorded session count is read as zero sessions, never as a count that
+  # happened not to be printed: the fail-closed direction is the only safe one
+  # for a field whose whole job is saying whether anything was observed.
+  runs=$(printf '%s\n' "$critic" | awk -F'\t' '
+    {
+      run = $10
+      if (run in seen) next
+      seen[run] = 1
+      total++
+      if (($8 + 0) > 0) shared++
+      if (($9 + 0) == 0) unobserved++
+    }
+    END { printf "%d\t%d\t%d", shared + 0, unobserved + 0, total + 0 }')
+  printf '%s\t%s\t%s\t%s' "$vendor" "$model" "$count" "$runs"
 }
 
 # --- the derived verdict ------------------------------------------------------
@@ -365,7 +399,7 @@ fm_independence_critic() {  # <steps>
 # declared routing config, which is what makes independence underivable by hand.
 fm_independence_dimensions() {  # <repo> <branch> <maker-harness> <maker-model>
   local repo=${1:-} branch=${2:-} mharness=${3:-} mmodel=${4:-}
-  local steps critic cvendor cmodel ccount cshared csessions
+  local steps critic cvendor cmodel ccount cshared cunobserved cruns
   local mkey mprovider mpool ckey cprovider cpool
   local process=NO_VERIFIER_RAN model=NO_VERIFIER_RAN vendor=NO_VERIFIER_RAN pool=NO_VERIFIER_RAN
   local process_why='' model_why='' vendor_why='' pool_why='' evidence overall
@@ -389,25 +423,29 @@ fm_independence_dimensions() {  # <repo> <branch> <maker-harness> <maker-model>
     cmodel=$(printf '%s' "$critic" | cut -f2)
     ccount=$(printf '%s' "$critic" | cut -f3)
     cshared=$(printf '%s' "$critic" | cut -f4)
-    csessions=$(printf '%s' "$critic" | cut -f5)
-    evidence="$evidence reviews=$ccount critic=${cvendor:-unrecorded}/${cmodel:-unrecorded}"
+    cunobserved=$(printf '%s' "$critic" | cut -f5)
+    cruns=$(printf '%s' "$critic" | cut -f6)
+    evidence="$evidence reviews=$ccount runs=$cruns critic=${cvendor:-unrecorded}/${cmodel:-unrecorded}"
 
     # PROCESS. The recorded SESSIONS are the evidence, not the invocation: an
     # invocation row says a review ran, and says nothing about whose process it
-    # ran in. Observed NOT independent when the pipeline recorded that reviewer
-    # sharing a session with the agent that rewrites the code in response to it,
-    # observed independent when the reviewer held sessions of its own, and
-    # could-not-observe when the run recorded no reviewer session at all - where
-    # the empty overlap is an absence of evidence rather than evidence of
-    # separation.
-    if [ "${cshared:-0}" -gt 0 ] 2>/dev/null; then
+    # ran in.
+    #
+    # Read PER RUN and reported as the WEAKEST run, in the same order this file
+    # folds the dimensions themselves: a run nobody observed dominates a run
+    # observed to have failed, because unmeasured and failing need different
+    # repairs and the first cannot be ruled out by the second. One run whose
+    # reviewer session was never recorded therefore makes the answer
+    # could-not-observe however many sibling runs recorded theirs - an empty
+    # overlap there is an absence of evidence, not evidence of separation.
+    if [ "${cunobserved:-0}" -gt 0 ] 2>/dev/null; then
+      process_why="$cunobserved of $cruns reviewing run(s) recorded no reviewer session; whose process reviewed is not observable there"
+    elif [ "${cshared:-0}" -gt 0 ] 2>/dev/null; then
       process=FAIL
-      process_why="the reviewer shared $cshared session(s) with the agent that fixes its findings"
-    elif [ "${csessions:-0}" -gt 0 ] 2>/dev/null; then
-      process=PASS
-      process_why="$ccount reviewing invocation(s) ran in $csessions session(s) of their own"
+      process_why="on $cshared of $cruns reviewing run(s) the reviewer shared a session with the agent that fixes its findings"
     else
-      process_why="the pipeline recorded $ccount reviewing invocation(s) but no reviewer session; whose process reviewed is not observable"
+      process=PASS
+      process_why="$ccount reviewing invocation(s) over $cruns run(s) each recorded reviewer session(s) of their own"
     fi
 
     # The maker's routed identity, and the critic's, both resolved through
@@ -493,12 +531,14 @@ fm_independence_overall() {
 # each as "<dimension>:<label>", so a refusal can NAME what could not be
 # established instead of reporting a generic failure.
 fm_independence_gaps() {
-  printf '%s\n' "${1:-}" | awk -F, '
+  printf '%s\n' "${1:-}" | awk -F, \
+    -v fail="$(fm_independence_label FAIL)" \
+    -v unobserved="$(fm_independence_label NO_VERIFIER_RAN)" '
     /^  independence-/ {
       dim = $1
       sub(/^  independence-/, "", dim)
       if (dim == "overall") next
       if ($2 == "PASS") next
-      print dim ":" ($2 == "FAIL" ? "not-independent" : "could-not-observe")
+      print dim ":" ($2 == "FAIL" ? fail : unobserved)
     }'
 }
