@@ -8,9 +8,11 @@
 # provably-working no-verb wakes absorbed (no exit, no queue entry, suppressor
 # advanced, beacon fresh), stopped-crew no-verb wakes surfaced (queue + exit),
 # provably-working stale panes absorbed-then-escalated past the threshold,
-# terminal-looking stale status lines overridden by an active run, the heartbeat
-# backstop fail-safe, and afk coherence (no double-triage while the away-mode
-# daemon owns supervision).
+# terminal-looking stale status lines overridden by an active run, the
+# unread-backlog throttle that distinguishes a repeat exit on an already-queued
+# signal from a fresh one and escalates a named alarm after N repeats, the
+# heartbeat backstop fail-safe, and afk coherence (no double-triage while the
+# away-mode daemon owns supervision).
 #
 # Daemon-side classification/injection lives in fm-daemon.test.sh; watcher/lock
 # liveness in fm-watcher-lock.test.sh; the durable-queue safety matrix in
@@ -431,6 +433,128 @@ test_actionable_signal_surfaced() {
   grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$status_file" >/dev/null || fail "actionable signal was not queued"
   [ -s "$state/.hb-surfaced-task" ] || fail "actionable signal did not record the surfaced marker"
   pass "captain-relevant signal is surfaced (queue + exit) and marked surfaced"
+}
+
+# --- unread-backlog throttle: a repeat exit on a signal already queued and
+# undrained from a prior cycle is not new information (issue: "supervision
+# looks stalled when it is actually thrashing on unread worker reports" -
+# armed 00:17:45, exited 00:18:17, eight consecutive cycles reason=
+# actionable-signal on the same undrained status files). These reproduce the
+# reported thrash - re-detecting and re-exiting on the exact same undrained
+# signal every cycle - then assert the fix distinguishes it from a fresh
+# signal, escalates a named alarm after N repeats, and never re-fires once the
+# queue is actually drained and nothing further changes. -------------------
+
+test_signal_batch_fully_unacked_classifier() {
+  local dir state
+  dir=$(make_case classify-fully-unacked); state="$dir/state"
+  printf 'a\n' > "$state/a.status"
+  printf 'b\n' > "$state/b.status"
+  append_wake "$state" signal a.status "signal: $state/a.status"
+  ( export FM_STATE_OVERRIDE="$state" FM_ROOT_OVERRIDE="$ROOT"
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-watch.sh"
+    signal_batch_fully_unacked "$state/a.status" "$state/b.status" \
+      && fail "a batch with one un-queued file was classified fully unacked"
+    signal_batch_fully_unacked "$state/a.status" \
+      || fail "a batch whose only file is already queued was not classified fully unacked"
+  ) || exit 1
+  pass "signal_batch_fully_unacked requires every file in the batch to already be undrained-queued"
+}
+
+test_repeat_exit_on_undrained_signal_is_tagged_unacked() {
+  local dir state fakebin out drain_out status_file pid
+  dir=$(make_case unacked-second-exit); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch1.out"; drain_out="$dir/drain.out"
+  status_file="$state/task.status"
+  printf 'working: setup\nneeds-decision: pick A or B\n' > "$status_file"
+
+  # Cycle 1: a fresh detection queues and exits, unannotated.
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher did not exit for the fresh actionable signal"
+  grep -Fx "signal: $status_file" "$out" >/dev/null \
+    || fail "first cycle was not reported as a plain fresh signal: $(cat "$out")"
+
+  # The operator never drains the queue: touch the file again (fresh mtime,
+  # same content - reproduces "each carrying the same status files" from the
+  # reported evidence) so the watcher re-detects it as pending on the next arm.
+  touch "$status_file"
+  out="$dir/watch2.out"
+  export FM_SIGNAL_UNACKED_ESCALATE_SECS=0
+  watch_bg "$state" "$fakebin" "$out"
+  unset FM_SIGNAL_UNACKED_ESCALATE_SECS
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher did not exit for the repeat undrained signal"
+  grep -F "signal:" "$out" | grep -Fq "unread backlog, not stalled" \
+    || fail "second exit on the SAME undrained signal was not distinguished from a fresh one: $(cat "$out")"
+  grep -Fq "SUPERVISION ALARM" "$out" \
+    && fail "a single repeat must not already read as the alarm: $(cat "$out")"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain failed"
+  pass "a repeat exit on an already-queued, undrained signal is tagged unacked, not fresh"
+}
+
+test_n_consecutive_unacked_exits_raise_named_alarm() {
+  local dir state fakebin out status_file pid n
+  dir=$(make_case unacked-alarm); state="$dir/state"; fakebin="$dir/fakebin"
+  status_file="$state/decide-me.status"
+  printf 'needs-decision: pick A or B\n' > "$status_file"
+
+  out="$dir/watch0.out"
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher did not exit for the fresh actionable signal"
+
+  # Leave the queue undrained and keep re-touching the same file across
+  # FM_SIGNAL_UNACKED_ALARM_COUNT repeats with zero cooldown, so every cycle
+  # escalates the same unacked counter instead of idling on the throttle.
+  export FM_SIGNAL_UNACKED_ESCALATE_SECS=0 FM_SIGNAL_UNACKED_ALARM_COUNT=3
+  n=1
+  while [ "$n" -le 3 ]; do
+    touch "$status_file"
+    out="$dir/watch$n.out"
+    watch_bg "$state" "$fakebin" "$out"
+    pid=$!
+    wait_for_exit "$pid" 40 || fail "watcher did not exit on unacked-escalation cycle $n"
+    if [ "$n" -lt 3 ]; then
+      grep -Fq "SUPERVISION ALARM" "$out" && fail "alarm fired before the configured count on cycle $n: $(cat "$out")"
+    else
+      grep -Fq "SUPERVISION ALARM" "$out" || fail "alarm did not fire at the configured count: $(cat "$out")"
+      grep -Fq "decide-me" "$out" || fail "alarm did not name the unread task id: $(cat "$out")"
+    fi
+    n=$((n + 1))
+  done
+  unset FM_SIGNAL_UNACKED_ESCALATE_SECS FM_SIGNAL_UNACKED_ALARM_COUNT
+  pass "N consecutive unacked exits on the same signal raise a named supervision alarm with task ids"
+}
+
+test_drained_unacked_queue_holds_lock_beyond_one_cycle() {
+  local dir state fakebin out drain_out status_file pid
+  dir=$(make_case unacked-drained); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch1.out"; drain_out="$dir/drain.out"
+  status_file="$state/task.status"
+  printf 'needs-decision: pick A or B\n' > "$status_file"
+
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher did not exit for the fresh actionable signal"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain failed"
+  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$status_file" >/dev/null \
+    || fail "the original signal was not queued for drain"
+
+  # Nothing touches the status file again after the drain: a healthy watcher
+  # must just block on the poll loop, not re-fire on stale bookkeeping this
+  # throttle introduced.
+  out="$dir/watch2.out"
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_live "$pid" 20 || fail "watcher exited instead of holding its lock after a drained, unchanged queue"
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  [ -s "$out" ] && fail "watcher printed a reason with nothing left to report: $(cat "$out")"
+  pass "an arm with a drained, unchanged queue holds its lock beyond one cycle"
 }
 
 test_terminal_stale_surfaced() {
@@ -1812,6 +1936,10 @@ test_turn_ended_provably_working_absorbed
 test_turn_ended_not_working_surfaced
 test_working_note_not_working_surfaced
 test_actionable_signal_surfaced
+test_signal_batch_fully_unacked_classifier
+test_repeat_exit_on_undrained_signal_is_tagged_unacked
+test_n_consecutive_unacked_exits_raise_named_alarm
+test_drained_unacked_queue_holds_lock_beyond_one_cycle
 test_terminal_stale_surfaced
 test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated

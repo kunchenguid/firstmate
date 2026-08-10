@@ -13,7 +13,22 @@
 # on every wake. Printed reason lines:
 #   signal: <file>...      status/turn-end signals, surfaced when a listed status
 #                          has a captain-relevant verb OR a no-verb signal's crew
-#                          is not provably working, unless afk is active
+#                          is not provably working, unless afk is active. When
+#                          every file in the batch is already queued and
+#                          undrained from a prior cycle (a report the operator
+#                          has not read yet, not one the watcher lost track
+#                          of), a repeat is throttled instead of re-exiting
+#                          every poll: it is absorbed until
+#                          FM_SIGNAL_UNACKED_ESCALATE_SECS have passed since
+#                          the last unacked report for that exact file set,
+#                          then surfaced again tagged "unread backlog, not
+#                          stalled" with an escalating count, and at
+#                          FM_SIGNAL_UNACKED_ALARM_COUNT consecutive repeats
+#                          the reason additionally carries a "SUPERVISION
+#                          ALARM" marker naming the exact unread task ids -
+#                          the reporting half of the fix for "supervision
+#                          looks stalled when it is actually thrashing on
+#                          unread worker reports", unless afk is active
 #   stale: <window>        a provably-working stale is ALWAYS absorbed (with a wedge
 #                          timer) regardless of what the status log says - an active
 #                          run-step or busy pane outranks even a captain-relevant log
@@ -459,6 +474,94 @@ scan_signals() {
   return 0
 }
 
+# Unread-backlog throttle (issue: "supervision looks stalled when it is
+# actually thrashing on unread worker reports"). An actionable signal batch
+# every file of which already sits queued and UNDRAINED from a prior cycle
+# (fm_wake_queued_keys is the durable acknowledgement authority - a key
+# appears there exactly while its record is queued and unconsumed, per
+# fm-wake-lib.sh) carries no new information: the operator has not read it
+# yet, the watcher has not lost track of it. Re-appending and re-exiting on it
+# every poll is indistinguishable from a fresh detection in both the printed
+# reason and the arm-layer cycle log, which is exactly what made a live
+# instance look permanently stalled while it was actually re-detecting the
+# same eight-file backlog every ~30s. FM_SIGNAL_UNACKED_ESCALATE_SECS/
+# FM_SIGNAL_UNACKED_ALARM_COUNT reuse STALE_ESCALATE_SECS/
+# FM_WEDGE_DEMAND_INSPECT_COUNT as defaults so the two throttles share one
+# operator-tuned cadence unless overridden independently.
+FM_SIGNAL_UNACKED_ESCALATE_SECS=${FM_SIGNAL_UNACKED_ESCALATE_SECS:-$STALE_ESCALATE_SECS}
+FM_SIGNAL_UNACKED_ALARM_COUNT=${FM_SIGNAL_UNACKED_ALARM_COUNT:-$FM_WEDGE_DEMAND_INSPECT_COUNT}
+
+# signal_batch_key: a stable identifier for a set of changed signal files,
+# order-independent so the same backlog always throttles under one key
+# regardless of scan order.
+signal_batch_key() {
+  printf '%s\n' "$@" | LC_ALL=C sort -u | tr '\n' ' ' | hash_pane
+}
+
+# signal_batch_fully_unacked: 0 (true) iff EVERY file in <files...> already has
+# an undrained record queued under kind=signal from a prior cycle. A batch that
+# mixes an already-queued file with a genuinely new one is treated as fresh
+# (the new file is real information), so this requires the whole batch to be a
+# pure repeat before anything is throttled.
+signal_batch_fully_unacked() {  # <files...>
+  local f base queued
+  queued=$(fm_wake_queued_keys signal)
+  [ -n "$queued" ] || return 1
+  for f in "$@"; do
+    base=$(basename "$f")
+    printf '%s\n' "$queued" | grep -Fxq "$base" || return 1
+  done
+  return 0
+}
+
+# signal_unacked_timer_check: report the FIRST sighting of a fully-unacked
+# batch immediately (tagged unacked, escalation 1) so it is never confused
+# with a fresh signal even on the very next arm - the literal reproduction of
+# the reported incident's "second exit". Only REPEATS of the identical file
+# set within FM_SIGNAL_UNACKED_ESCALATE_SECS of the last unacked report are
+# throttled (absorbed: no exit, no duplicate queue record - the original entry
+# is still undrained and delivers the same information on the next drain),
+# which is what turns the reported every-~30s thrash into a bounded cadence.
+# Never silently drops the report forever: once the cooldown elapses it always
+# exits again with an incremented count, and once that count reaches
+# FM_SIGNAL_UNACKED_ALARM_COUNT the reason is additionally tagged a
+# supervision alarm naming the exact unread task ids - the same "make the
+# reason itself force a closer look" idea as wedge_timer_check's
+# demand-deep-inspection marker.
+signal_unacked_timer_check() {  # <files...>
+  local key since_file count_file since age n reason task ids f base
+  key=$(signal_batch_key "$@")
+  since_file="$STATE/.signal-unacked-since-$key"
+  count_file="$STATE/.signal-unacked-count-$key"
+  since=$(cat "$since_file" 2>/dev/null || true)
+  case "$since" in
+    ''|*[!0-9]*) age=$FM_SIGNAL_UNACKED_ESCALATE_SECS ;;
+    *) age=$(( $(date +%s) - since )) ;;
+  esac
+  if [ "$age" -lt "$FM_SIGNAL_UNACKED_ESCALATE_SECS" ]; then
+    triage_log "absorbed unacked signal (already queued, awaiting drain, ${age}s): $*"
+    return 0
+  fi
+  n=$(( $(cat "$count_file" 2>/dev/null || echo 0) + 1 ))
+  echo "$n" > "$count_file"
+  date +%s > "$since_file"
+  ids=""
+  for f in "$@"; do
+    base=$(basename "$f")
+    task=${base%.status}
+    task=${task%.turn-ended}
+    case " $ids " in *" $task "*) ;; *) ids="$ids $task" ;; esac
+  done
+  reason="signal:$* (unread backlog, not stalled: unacknowledged for ${age}s, unacked-escalation $n - run bin/fm-wake-drain.sh and handle it)"
+  if [ "$n" -ge "$FM_SIGNAL_UNACKED_ALARM_COUNT" ]; then
+    reason="signal:$* (SUPERVISION ALARM: unread backlog stuck for $n consecutive checks - the watcher is thrashing on an unacknowledged report, not stalled; run bin/fm-wake-drain.sh and answer these workers now, tasks:$ids)"
+  fi
+  for f in "$@"; do
+    fm_wake_append signal "$(basename "$f")" "$reason" || exit 1
+  done
+  wake "$reason"
+}
+
 # Deliver a durably queued process-event result to firstmate. Publication is
 # owned by bin/fm-procevent.sh - by the runner at capture time and by reconcile's
 # re-announcement - so this decides only whether a queued check record has been
@@ -894,20 +997,39 @@ EOF
     # ordering evaluates it ONLY for a non-afk, no-captain-verb signal.
     # shellcheck disable=SC2086  # $files is a space-separated status-path list (ids carry no spaces)
     if afk_present || signal_reason_is_actionable $files || ! signal_crew_provably_working $files; then
-      while IFS=$(printf '\t') read -r sf sig f; do
-        [ -n "$sf" ] || continue
-        fm_wake_append signal "$(basename "$f")" "$reason" || exit 1
-      done <<EOF
+      # Unread-backlog guard: a batch every file of which is already sitting
+      # queued and undrained from a prior cycle is not new information - see
+      # signal_unacked_timer_check. afk mode keeps its unmodified contract
+      # (the daemon owns triage and must see every wake unthrottled).
+      # shellcheck disable=SC2086
+      if ! afk_present && signal_batch_fully_unacked $files; then
+        while IFS=$(printf '\t') read -r sf sig f; do
+          [ -n "$sf" ] || continue
+          printf '%s' "$sig" > "$sf"
+        done <<EOF
 $pending
 EOF
-      while IFS=$(printf '\t') read -r sf sig f; do
-        [ -n "$sf" ] || continue
-        printf '%s' "$sig" > "$sf"
-        mark_surfaced "$f"
-      done <<EOF
+        # shellcheck disable=SC2086
+        signal_unacked_timer_check $files
+      else
+        while IFS=$(printf '\t') read -r sf sig f; do
+          [ -n "$sf" ] || continue
+          fm_wake_append signal "$(basename "$f")" "$reason" || exit 1
+        done <<EOF
 $pending
 EOF
-      wake "$reason"
+        while IFS=$(printf '\t') read -r sf sig f; do
+          [ -n "$sf" ] || continue
+          printf '%s' "$sig" > "$sf"
+          mark_surfaced "$f"
+        done <<EOF
+$pending
+EOF
+        # shellcheck disable=SC2086  # $files is a space-separated status-path list (ids carry no spaces)
+        unacked_key=$(signal_batch_key $files)
+        rm -f "$STATE/.signal-unacked-since-$unacked_key" "$STATE/.signal-unacked-count-$unacked_key"
+        wake "$reason"
+      fi
     else
       while IFS=$(printf '\t') read -r sf sig f; do
         [ -n "$sf" ] || continue
