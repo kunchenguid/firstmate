@@ -69,6 +69,7 @@ It is not deterministic across the verified adapters: codex and grok resume only
    A ship or scout relaunch requires `--note`, because the replacement inherits the local copy but none of the conversation; the note is appended to the instructions it reads.
    A secondmate relaunch does not require one and never rewrites its standing charter.
 4. **Stop the old agent** through the `exit` verb, with its postcondition.
+   For Herdr, when the recorded pane is structurally `missing`, the relaunch owner proves the exact recorded workspace and task identity, replaces that one missing slot in place, and skips an exit against the already-gone endpoint.
 5. **Launch the replacement** through its single owner, `bin/fm-spawn.sh --relaunch`, which adopts the recorded endpoint and worktree instead of creating either, clears the previous harness's per-task wiring, and arms a fresh busy generation.
 
 Switching harness is therefore one ordinary relaunch rather than a separate mechanism.
@@ -99,6 +100,7 @@ Switching harness is therefore one ordinary relaunch rather than a separate mech
 - An ambiguous or unreadable endpoint state refuses.
   Only a positively classified state acts.
 - `fm-spawn --relaunch` independently refuses unless the recorded endpoint is positively agent-free and its shell is sitting in the recorded worktree, so a replacement can never join a live agent or start outside the copy holding the work.
+  The Herdr missing-slot recovery is the narrow exception: it replaces only the exact recorded missing tab in the recorded workspace, verifies the replacement before closing the husk, and uses the recorded worktree as its cwd.
 
 ## Capability matrix
 
