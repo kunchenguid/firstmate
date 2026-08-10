@@ -84,6 +84,9 @@ make_fake_root() {
   ln -s "$ROOT/bin/fm-landed-lib.sh" "$fake/bin/fm-landed-lib.sh"
   # fm-wake-lib.sh: teardown sources it for serialized secondmate lifecycle locks.
   ln -s "$ROOT/bin/fm-wake-lib.sh" "$fake/bin/fm-wake-lib.sh"
+  # fm-status-event-lib.sh: fm-wake-lib.sh sources this sibling, so it must be
+  # reachable in the fake bin/ too or the source aborts.
+  ln -s "$ROOT/bin/fm-status-event-lib.sh" "$fake/bin/fm-status-event-lib.sh"
   # fm-guard.sh: stub (teardown calls it with `|| true`).
   cat > "$fake/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash
@@ -169,6 +172,7 @@ test_teardown_skips_gracefully_without_tasktmp() {
   # worktree path does not exist), but the source line runs unconditionally.
   ln -s "$ROOT/bin/fm-landed-lib.sh" "$fake/bin/fm-landed-lib.sh"
   ln -s "$ROOT/bin/fm-wake-lib.sh" "$fake/bin/fm-wake-lib.sh"
+  ln -s "$ROOT/bin/fm-status-event-lib.sh" "$fake/bin/fm-status-event-lib.sh"
   cat > "$fake/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash
 exit 0

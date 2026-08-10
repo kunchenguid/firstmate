@@ -359,6 +359,40 @@ test_no_mistakes_dod_wording() {
   pass "fm-brief.sh: no-mistakes DOD keeps its apostrophe prose, now parse-safe"
 }
 
+# Every scaffold that can report status must teach the SAME typed envelope, and
+# must teach the one rule a worker cannot infer: the field it may not write.
+# A worker taught only the prose form keeps writing control facts as prose, which
+# is the input side of the boundary this increment converts - the format is only
+# retired once the thing producing it is told about the replacement.
+test_status_event_form_reaches_every_reporting_scaffold() {
+  local home brief variant
+  home="$TMP_ROOT/status-event-home"
+  mkdir -p "$home/data"
+  for variant in ship scout secondmate; do
+    case "$variant" in
+      ship) FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "se-$variant" some-proj --mode no-mistakes >/dev/null 2>&1 ;;
+      scout) FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "se-$variant" some-proj --scout >/dev/null 2>&1 ;;
+      secondmate) FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "se-$variant" some-proj --secondmate >/dev/null 2>&1 ;;
+    esac
+    brief="$home/data/se-$variant/brief.md"
+    assert_present "$brief" "$variant brief was not scaffolded"
+    assert_grep 'fm-status-event.v1 verb={state}' "$brief" \
+      "$variant brief does not teach the typed status-event form"
+    # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+    assert_grep '`summary=` comes last' "$brief" \
+      "$variant brief does not state that summary is the terminal field"
+    # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+    assert_grep 'never paste an artifact' "$brief" \
+      "$variant brief does not say evidence references point at artifacts rather than inlining them"
+    # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+    assert_grep 'an event carrying `blocking_on=` is refused whole' "$brief" \
+      "$variant brief does not tell the worker that blocking_on is derived and refused if written"
+    assert_grep 'still read while the fleet migrates' "$brief" \
+      "$variant brief does not record that the prose form remains readable during migration"
+  done
+  pass "fm-brief.sh: every reporting scaffold teaches the typed envelope and the derived-field rule"
+}
+
 test_ship_project_memory_wording() {
   local home id brief
   home="$TMP_ROOT/project-memory-home"
@@ -586,7 +620,8 @@ test_secondmate_marked_request_reporting_contract() {
     "secondmate charter lost declared external waits"
   assert_grep 'a captain decision, a real blocker, a failure, or work ready for review' "$brief" \
     "secondmate charter lost decisions, blockers, failures, or ready outcomes"
-  assert_grep 'States: working, needs-decision, blocked, paused, done, failed.' "$brief" \
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+  assert_grep 'States (`verb=`): working, needs-decision, blocked, paused, done, failed.' "$brief" \
     "secondmate charter changed the preserved status vocabulary"
   pass "fm-brief.sh: marked requests avoid generic acknowledgements and preserve material reporting"
 }
@@ -720,7 +755,8 @@ test_pause_verb_override_renders_all_brief_scaffolds() {
         ;;
     esac
     brief="$home/data/$id/brief.md"
-    assert_grep "States: working, needs-decision, blocked, awaiting, done, failed." "$brief" \
+    # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+    assert_grep 'States (`verb=`): working, needs-decision, blocked, awaiting, done, failed.' "$brief" \
       "$kind brief did not render the configured pause verb in its states list"
     # shellcheck disable=SC2016 # Literal backticks and braces must remain unexpanded.
     assert_grep 'Use `awaiting: {why}`' "$brief" \
@@ -1021,3 +1057,4 @@ test_scout_and_secondmate_scaffold
 test_standing_worker_rules_by_variant
 test_no_brief_makes_the_worker_its_own_retry_arbiter
 test_verification_discipline_is_the_type_rule
+test_status_event_form_reaches_every_reporting_scaffold

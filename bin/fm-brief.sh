@@ -317,6 +317,26 @@ Before trusting a success reported only by absence, run a negative control, watc
 EOF
 VERIFICATION_DISCIPLINE=${VERIFICATION_DISCIPLINE%$'\n'}
 
+# The typed status-event envelope, rendered identically into every scaffold's
+# status protocol so a crewmate, a scout, and a secondmate cannot be taught three
+# different wire formats. bin/fm-status-event-lib.sh owns the format itself; this
+# is the worker-facing instruction for writing it, and each scaffold keeps its own
+# surrounding rules about WHEN to report.
+#
+# The `blocking_on` sentence is not decoration. A worker told only "do not write
+# it" writes it anyway when it feels certain; a worker told that writing it makes
+# the whole event unreadable has a reason not to.
+IFS= read -r -d '' STATUS_EVENT_FORM <<EOF || true
+   \`echo "fm-status-event.v1 verb={state} phase={slug} evidence={ref} summary={one short line}" >> $STATUS_FILE\`
+   \`verb=\` is required and \`summary=\` comes last, taking the rest of the line as your one short human sentence.
+   \`phase=\` is one slug naming where you are in the work; \`evidence=\` may repeat, each one a path or URL that POINTS AT an artifact - never paste an artifact's contents into the line.
+   Add \`key={slug}\` to tie related events together, the typed form of the \`[key=<slug>]\` token.
+   Firstmate DERIVES what you are waiting on from your verb and your run's real state, so there is no field for it: an event carrying \`blocking_on=\` is refused whole and surfaced as malformed rather than believed.
+   The older \`{state}: {one short line}\` form is still read while the fleet migrates, so an existing habit is not an error.
+   Where the rest of this brief writes a state as \`{state}: {note}\`, it is naming WHICH state to report, not a second format: report it in the typed form above.
+EOF
+STATUS_EVENT_FORM=${STATUS_EVENT_FORM%$'\n'}
+
 IFS= read -r -d '' BRANCH_CONFLICT_RESOLUTION <<'EOF' || true
 # Branch conflict resolution
 Rebase and resolve branch/base conflicts yourself whenever intent is clear, at any file count: keep the base wherever this branch made no deliberate change, reapply this branch's contributions on top, and preserve every prior pipeline fix commit through the rebase.
@@ -383,9 +403,9 @@ A message with NO marker is the captain typing directly into your pane: treat it
 
 # Escalation to main firstmate
 Handle routine work yourself.
-Report only true captain-relevant outcomes or a declared external wait by appending one line:
-   \`echo "{state}: {one short line}" >> $STATUS_FILE\`
-States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
+Report only true captain-relevant outcomes or a declared external wait by appending one typed line:
+$STATUS_EVENT_FORM
+States (\`verb=\`): working, needs-decision, blocked, $PAUSED_VERB, done, failed.
 Use \`$PAUSED_VERB: {why}\` (distinct from \`blocked:\`) only when your domain is deliberately idling on a known external wait you expect to clear on its own; use \`blocked:\` when you are stuck and need firstmate to act.
 Use this only for material phase changes, a captain decision, a real blocker, a failure, or work ready for review.
 This is also how you return the answer to a marked from-firstmate request above.
@@ -541,9 +561,9 @@ The report is the only thing that survives, so anything worth keeping must be in
 1. Never push to any remote and never open a PR.
 2. Stay inside this worktree; the only files you may write outside it are the report and the status file below.
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations. Most of that is action - opening a pull request, commenting, listing issues - and an action has no observation type; when you are instead making an OBSERVATION whose answer you will act on, run it through \`$FM_ROOT/bin/fm-verify.sh\` (\`--list\` names the declared verifiers) rather than reading the tool's exit status.
-4. Report status by appending one line:
-   \`echo "{state}: {one short line}" >> $STATUS_FILE\`
-   States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
+4. Report status by appending one typed line:
+$STATUS_EVENT_FORM
+   States (\`verb=\`): working, needs-decision, blocked, $PAUSED_VERB, done, failed.
    Each append wakes firstmate, so report sparingly: only phase changes a supervisor
    would act on and the needs-decision/blocked/paused/done/failed states. No step-by-step
    FYI progress lines; firstmate reads your pane for that.
@@ -676,9 +696,9 @@ If the top-level path is the primary checkout or not the worktree you were launc
 $RULE1
 2. Stay inside this worktree; modify nothing outside it.
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations. Most of that is action - opening a pull request, commenting, listing issues - and an action has no observation type; when you are instead making an OBSERVATION whose answer you will act on, run it through \`$FM_ROOT/bin/fm-verify.sh\` (\`--list\` names the declared verifiers) rather than reading the tool's exit status.
-4. Report status by appending one line:
-   \`echo "{state}: {one short line}" >> $STATUS_FILE\`
-   States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
+4. Report status by appending one typed line:
+$STATUS_EVENT_FORM
+   States (\`verb=\`): working, needs-decision, blocked, $PAUSED_VERB, done, failed.
    Each append wakes firstmate, so report sparingly: only phase changes a supervisor
    would act on $RULE4_PHASES and the
    needs-decision/blocked/paused/done/failed states. No step-by-step FYI progress lines;

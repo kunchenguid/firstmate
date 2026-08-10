@@ -30,6 +30,14 @@
 # bin/ script (which sets its own SCRIPT_DIR) or directly by a test.
 _FM_CLASSIFY_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null)" || _FM_CLASSIFY_LIB_DIR="."
 
+# The typed status-event envelope (`fm-status-event.v1`). Sourced eagerly, unlike
+# fm-wake-lib.sh below, because it is PURE: it observes nothing and creates
+# nothing, so a strictly read-only consumer of this library keeps its read-only
+# behavior. bin/fm-status-event-lib.sh owns the wire format; this library owns
+# what the fields MEAN.
+# shellcheck source=bin/fm-status-event-lib.sh
+. "$_FM_CLASSIFY_LIB_DIR/fm-status-event-lib.sh"
+
 # The crew current-state reader used for the "provably working" decision.
 # Overridable so tests can stub the run-step/pane verdict without a real worktree
 # or no-mistakes install; absent, it points at the real sibling script.
@@ -38,15 +46,41 @@ FM_CREW_STATE_BIN="${FM_CREW_STATE_BIN:-$_FM_CLASSIFY_LIB_DIR/fm-crew-state.sh}"
 # Captain-relevant status verbs. A status line carrying any of these is work
 # firstmate must see. Lines without these verbs are no-verb signals: the watcher
 # absorbs them only with positive provably-working evidence, while the daemon uses
-# its away-mode classification. FM_CAPTAIN_RE overrides the whole set when a home
-# needs a custom verb vocabulary; absent, this default applies.
+# its away-mode classification.
+FM_CLASSIFY_CAPTAIN_TERMINAL_VERBS='done needs-decision blocked failed'
+
+# Nonterminal verbs: a crew declaring one of these is reporting progress or
+# closing its own bookkeeping, never work for firstmate to act on.
+FM_CLASSIFY_NONTERMINAL_VERBS='working resolved captain-held'
+
+# 0 if <verb> is one of them. The away-mode daemon keeps its own backstop against
+# a nonterminal verb reaching a terminal stale path, and reads the set here so
+# there is one vocabulary rather than two that can drift.
+status_verb_is_nonterminal() {  # <verb>
+  [ -n "${1:-}" ] || return 1
+  case " $FM_CLASSIFY_NONTERMINAL_VERBS " in
+    *" $1 "*) return 0 ;;
+  esac
+  return 1
+}
+
+# The default vocabulary as a regex, kept ONLY as the documented starting point a
+# home edits into FM_CAPTAIN_RE. The default classification path no longer runs a
+# regex at all, so this string is reachable only when a home has explicitly opted
+# into custom matching (see status_is_captain_relevant).
 #
-# Free-text tokens (PR ready, checks green, ready in branch, merged) exist only for
-# legacy lines that lack a standard terminal verb. status_is_captain_relevant is
-# verb-aware: a nonterminal working: or paused: line never becomes captain-relevant
-# merely because its prose contains one of those tokens (for example
-# "working: rebased onto merged #76").
-FM_CLASSIFY_CAPTAIN_RE_DEFAULT='done:|needs-decision:|blocked:|failed:|PR ready|checks green|ready in branch|merged'
+# The free-text arm this constant used to carry - `PR ready|checks green|ready in
+# branch|merged` - is RETIRED. Those tokens matched a crew's own prose, so a
+# nonterminal line became captain-relevant purely by mentioning one, and
+# "working: rebased onto merged #76" was escalated as a terminal event. That was
+# defended by a rule excluding nonterminal verbs, which is a guard around a
+# guess. Classification now reads the verb - a field on a typed event, the
+# leading word on a prose line - and never the note, so the collision class
+# cannot recur rather than being caught after the fact. The nonterminal-verb rule
+# survives below as declared policy rather than as that defence, and still
+# applies on the custom-regex path, where prose matching is what the home asked
+# for.
+FM_CLASSIFY_CAPTAIN_RE_DEFAULT='done:|needs-decision:|blocked:|failed:'
 
 # The deliberate-external-wait verb. A crew (or firstmate steering it) appends
 #   paused: <reason>
@@ -85,39 +119,54 @@ last_status_line() {
 }
 
 # 0 if the given (last) status line's leading verb is a real terminal captain verb
-# (done, needs-decision, blocked, failed). Free-text tokens alone never count here;
-# callers that need legacy free-text matching use status_is_captain_relevant.
+# (done, needs-decision, blocked, failed). The verb is all that counts here; the
+# only prose matching left anywhere is status_is_captain_relevant's opt-in
+# FM_CAPTAIN_RE arm.
 status_is_terminal_verb() {
   local line=$1 verb
   [ -n "$line" ] || return 1
   verb=$(status_line_verb "$line")
-  case "$verb" in
-    done|needs-decision|blocked|failed) return 0 ;;
-    *) return 1 ;;
+  case " $FM_CLASSIFY_CAPTAIN_TERMINAL_VERBS " in
+    *" $verb "*) return 0 ;;
   esac
+  return 1
 }
 
-# 0 if the given (last) status line matches a captain-relevant verb.
-# Verb-aware by default: terminal verbs always match; nonterminal progress verbs
-# (working, resolved, captain-held) and paused never match from free-text prose;
-# only lines without those leading verbs may still match free-text tokens for
-# legacy bare lines such as "merged" or "PR ready".
+# 0 if a status line is work firstmate must see.
+#
+# The decision is made on the VERB and nothing else: the field on a typed
+# fm-status-event.v1 line, the leading word on a prose line. The crew's note is
+# never consulted, so no wording a crew chooses can change how its event is
+# classified - which is the whole point of the retirement recorded on
+# FM_CLASSIFY_CAPTAIN_RE_DEFAULT above.
+#
+# A REFUSED typed event surfaces. A malformed event is a could-not-observe, and
+# an unobserved result cannot be absorbed into "nothing to see": firstmate must
+# be the one to look at it.
+#
+# FM_CAPTAIN_RE remains the escape hatch for a home whose crews use a custom verb
+# vocabulary. Setting it replaces the whole set and reinstates prose matching,
+# which is what that home asked for; the nonterminal-verb rule still applies
+# there, and a typed event is matched through its canonical prose projection so a
+# custom vocabulary keeps working across the migration.
 status_is_captain_relevant() {
   local line=$1 verb
   [ -n "$line" ] || return 1
+  if fm_status_event_is_typed "$line"; then
+    [ -z "$(fm_status_event_invalid_reason "$line")" ] || return 0
+  fi
   status_is_paused "$line" && return 1
   verb=$(status_line_verb "$line")
-  case "$verb" in
-    working|resolved|captain-held|"${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}")
-      return 1
-      ;;
+  case " $FM_CLASSIFY_NONTERMINAL_VERBS " in
+    *" $verb "*) return 1 ;;
   esac
   if [ -z "${FM_CAPTAIN_RE+x}" ]; then
-    case "$verb" in
-      done|needs-decision|blocked|failed) return 0 ;;
+    case " $FM_CLASSIFY_CAPTAIN_TERMINAL_VERBS " in
+      *" $verb "*) return 0 ;;
     esac
+    return 1
   fi
-  printf '%s' "$line" | grep -qiE "${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT}"
+  fm_status_event_prose "$line" | grep -qiE "${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT}"
 }
 
 # 0 if a status line's leading verb is the pause verb (paused: <reason>). A pure
@@ -392,23 +441,52 @@ status_verb_is_decision_closing() {  # <verb>
 #   resolved       [key=api-shape]: <how it was decided>
 # A line with no token uses the key "default", preserving the historical
 # one-open-decision-per-task behavior (a bare "resolved:" closes "default").
-# The three parsers are pure reads of a single line; the verb parser strips any
-# key token before the colon so the leading word is recovered cleanly.
+# A typed event carries the same key as its `key=` field.
+#
+# The three parsers below are pure reads of a single line; on a prose line the
+# verb parser strips any key token before the colon so the leading word is
+# recovered cleanly.
+# All three accept BOTH forms, which is the whole migration mechanism:
+# every consumer in bin/ already reads status lines through them, so teaching
+# them the envelope taught the fleet at once, and a home part-way through the
+# migration reads a mixed log correctly. A typed event answers from its fields; a
+# prose line answers from its text, unchanged. A REFUSED typed event answers with
+# the reserved invalid verb and an empty key/note rather than with prose salvaged
+# out of a line that failed validation.
 status_line_verb() {  # <status-line> -> leading verb word
+  local rc=0
+  fm_status_event_parse "${1-}" || rc=$?
+  case "$rc" in
+    0) printf '%s' "$FM_STATUS_EVENT_VERB"; return 0 ;;
+    1) printf '%s' "$FM_STATUS_EVENT_INVALID_VERB"; return 0 ;;
+  esac
   local v=${1%%:*}
   v=${v%%\[key=*}
   v=${v#"${v%%[![:space:]]*}"}
   v=${v%"${v##*[![:space:]]}"}
   printf '%s' "$v"
 }
-status_line_note() {  # <status-line> -> text after the first colon, trimmed
+status_line_note() {  # <status-line> -> the human note: a typed summary, or the
+                      # text after a prose line's first colon, trimmed
+  local rc=0
+  fm_status_event_parse "${1-}" || rc=$?
+  case "$rc" in
+    0) printf '%s' "$FM_STATUS_EVENT_SUMMARY"; return 0 ;;
+    1) printf '%s' "$FM_STATUS_EVENT_INVALID_REASON"; return 0 ;;
+  esac
   case "$1" in
     *:*) local n=${1#*:}; printf '%s' "${n#"${n%%[![:space:]]*}"}" ;;
     *) printf '%s' "$1" ;;
   esac
 }
 _fm_decision_key() {  # <status-line> -> key slug, or "default" when no token
-  local prefix=${1%%:*} k
+  local prefix k rc=0
+  fm_status_event_parse "${1-}" || rc=$?
+  case "$rc" in
+    0) printf '%s' "$FM_STATUS_EVENT_KEY"; return 0 ;;
+    1) return 1 ;;
+  esac
+  prefix=${1%%:*}
   case "$prefix" in
     *\[key=*\]*)
       k=${prefix#*\[key=}
@@ -496,6 +574,169 @@ $open
 EOF
   done
   return 0
+}
+
+# --- blocking_on: DERIVED, never declared ------------------------------------
+#
+# What a task is waiting on is the single most useful fact on this boundary and
+# the single one a worker cannot be trusted to report. A worker knows what it
+# just did; it does not know whether its own run is still advancing, whether the
+# question it asked was already answered, or whether firstmate escalated it. A
+# crew that wrote "blocked: waiting on the captain" and then resumed work leaves
+# that sentence sitting in the log as a control fact that is no longer true.
+#
+# So `blocking_on` is DERIVED here, from three inputs the worker does not own:
+# its declared VERB, its decision KEY folded against the whole durable stream,
+# and the authoritative crew state from bin/fm-crew-state.sh (CFVC-05). A worker
+# may not write the field at all - bin/fm-status-event-lib.sh refuses the whole
+# event rather than stripping the value, so there is no path by which a crew's
+# own words reach this answer.
+#
+# Declaring a verb is not the self-report this rule forbids. "I asked a question"
+# is something the worker genuinely observed; "I am currently blocked on the
+# captain" is a claim about the fleet around it. The verb is evidence, and the
+# derivation is free to overrule it: proof of work outranks any declaration.
+#
+# The vocabulary answers "whose move is it":
+#   nothing   - provably not waiting on anyone.
+#   self      - the worker's own move: a gate it must answer, a run to re-drive.
+#   firstmate - firstmate must act. Every crew escalation lands here first, even
+#               one destined for the captain, because a crewmate never addresses
+#               the captain directly - firstmate applies the authority contract
+#               and escalates if it must.
+#   captain   - the captain owes a ruling, proven by a verified captain-held
+#               transfer rather than by a crew saying so.
+#   external  - a declared wait on something outside the fleet.
+#   unknown   - could not be observed. Never narrowed into `nothing`: an
+#               unobserved answer is not an answer.
+FM_BLOCKING_ON_VOCABULARY='nothing self firstmate captain external unknown'
+
+# 0 if <value> is a member of that vocabulary.
+blocking_on_is_known() {  # <value>
+  [ -n "${1:-}" ] || return 1
+  case " $FM_BLOCKING_ON_VOCABULARY " in
+    *" $1 "*) return 0 ;;
+  esac
+  return 1
+}
+
+# The crew verdicts that DECIDE blocking_on on their own, outranking the event.
+# Prints the answer and returns 0 when one does; returns 1 when the verdict
+# leaves the question to the event. Total over FM_CREW_STATE_VOCABULARY for the
+# same reason crew_state_absorb_class is: 3 means this fleet declares a verdict
+# this function was never taught, and the coverage gate in
+# tests/fm-watch-triage.test.sh fails on it.
+_fm_blocking_on_decisive() {  # <state> <source>
+  case "${1:-}" in
+    # Only run-step and pane are POSITIVE evidence of work in flight, the same
+    # rule crew_state_absorb_class applies. A `working` recovered from the status
+    # log is the crew's own claim, and this is exactly the function that must not
+    # treat a claim as a verdict.
+    working)
+      case "${2:-}" in run-step|pane) printf 'nothing'; return 0 ;; esac
+      return 1
+      ;;
+    done) printf 'nothing'; return 0 ;;
+    # The three re-run verdicts. Each leaves work the CREW does next: a rejected
+    # run to fix, a superseded run whose custody it recovers, a broken pipeline
+    # to re-drive. None of them is owed by anyone above it.
+    failed|aborted|interrupted) printf 'self'; return 0 ;;
+    # A gate exists but the verdict alone does not say whose it is; the event
+    # answers, and _fm_blocking_on_floor keeps `nothing` off the table.
+    parked|blocked|paused) return 1 ;;
+    # No usable read of the crew at all, so the event stands alone.
+    idle|stale|unknown) return 1 ;;
+  esac
+  crew_state_is_known "${1:-}" && return 3
+  return 2
+}
+
+# The floor a crew verdict puts under the answer: the verdict proves a gate
+# exists, so `unknown` is no longer available even when the event declared
+# nothing. Prints the floor and returns 0, or returns 1 when the verdict imposes
+# none. Total over the vocabulary on the same terms as above.
+_fm_blocking_on_floor() {  # <state>
+  case "${1:-}" in
+    parked) printf 'self'; return 0 ;;
+    blocked) printf 'firstmate'; return 0 ;;
+    paused) printf 'external'; return 0 ;;
+    working|done|failed|aborted|interrupted|idle|stale|unknown) return 1 ;;
+  esac
+  crew_state_is_known "${1:-}" && return 3
+  return 2
+}
+
+# Who the EVENT declares is owed, before the crew state is allowed to overrule
+# it. Prints one of captain/firstmate/external, or returns 1 when the event
+# declares no one.
+#
+# The durable fold outranks the last line, for the reason status_open_decisions
+# exists: a later unrelated event never clears an open captain decision, so a
+# crew that asked a question and then appended `working:` is still owed an
+# answer. Reading the fold needs the task's log; without it, the line speaks for
+# itself.
+_fm_blocking_on_from_event() {  # <status-line> [task-id] [state-dir]
+  local line=$1 id=${2:-} dir=${3:-} verb
+  if [ -n "$id" ] && [ -n "$dir" ] && [ -n "$(status_open_decisions "$dir/$id.status")" ]; then
+    printf 'firstmate'
+    return 0
+  fi
+  verb=$(status_line_verb "$line")
+  if [ "$verb" = "${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}" ]; then
+    printf 'captain'
+    return 0
+  fi
+  if [ "$verb" = "${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}" ]; then
+    printf 'external'
+    return 0
+  fi
+  case "$verb" in
+    needs-decision|blocked) printf 'firstmate'; return 0 ;;
+  esac
+  return 1
+}
+
+# Derive what a task is waiting on. Prints exactly one member of
+# FM_BLOCKING_ON_VOCABULARY.
+#
+# <crew-state> and <crew-source> are bin/fm-crew-state.sh's typed verdict, passed
+# in rather than read here: that reader may make a bounded no-mistakes call, so
+# the caller that already paid for it (bin/fm-fleet-snapshot.sh) does not pay
+# twice, and the per-wake triage path is never tempted to pay at all. An empty
+# state is an unread crew, which is could-not-observe and never `nothing`.
+#
+# <task-id> and <state-dir> are optional and enable the open-decision fold only.
+#
+# Precedence, highest first:
+#   1. a refused typed event                      -> unknown
+#   2. a decisive crew verdict                    -> nothing | self
+#   3. what the event declares, folded over the
+#      whole durable stream                       -> captain | firstmate | external
+#   4. the floor a gate verdict puts under it     -> self | firstmate | external
+#   5. otherwise                                  -> unknown
+# Step 2 above step 3 is what makes the derivation, not the crew, the decider: a
+# stale "blocked:" cannot survive proof that the run is advancing. Step 3 above
+# step 4 is what keeps an escalation addressed to firstmate from being demoted to
+# the worker's own gate.
+status_event_blocking_on() {  # <status-line> <crew-state> <crew-source> [task-id] [state-dir]
+  local line=${1-} state=${2-} source=${3-} id=${4-} dir=${5-} answer
+  if fm_status_event_is_typed "$line" && [ -n "$(fm_status_event_invalid_reason "$line")" ]; then
+    printf 'unknown'
+    return 0
+  fi
+  if answer=$(_fm_blocking_on_decisive "$state" "$source") && [ -n "$answer" ]; then
+    printf '%s' "$answer"
+    return 0
+  fi
+  if answer=$(_fm_blocking_on_from_event "$line" "$id" "$dir") && [ -n "$answer" ]; then
+    printf '%s' "$answer"
+    return 0
+  fi
+  if answer=$(_fm_blocking_on_floor "$state") && [ -n "$answer" ]; then
+    printf '%s' "$answer"
+    return 0
+  fi
+  printf 'unknown'
 }
 
 # Fold material routed-work phases in the same keyed event stream.
