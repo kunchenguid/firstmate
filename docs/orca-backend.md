@@ -56,7 +56,7 @@ The watcher has no native Orca busy signal, so each harness adapter's semantic l
 Grok alone retains its isolated rendered-tail fallback.
 
 Cleanup keeps all shared Firstmate safety checks.
-A scout still requires its report and completed decision inventory.
+A scout still requires its report and completed decision-hold inventory, including the product-idea attestation.
 A ship still refuses dirty or unlanded work.
 Before release, cleanup resolves the recorded Orca worktree id and verifies its path matches the recorded worktree path.
 A missing, unreadable, or mismatched identity preserves metadata and stops rather than deleting anything.

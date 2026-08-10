@@ -138,7 +138,7 @@ Two choices remain unresolved: the route and the sample access level.
 A separate recommendation is already resolved and requires no captain action.
 EOF
 
-  if run_decisions "$home" complete "$id" route access > "$home/early-complete.out" 2> "$home/early-complete.err"; then
+  if run_decisions "$home" complete "$id" route access --no-ideas > "$home/early-complete.out" 2> "$home/early-complete.err"; then
     fail "completion succeeded before unresolved decisions had captain holds"
   fi
   assert_no_grep "decisions_reviewed=1" "$home/state/$id.meta" \
@@ -151,7 +151,7 @@ EOF
   run_decisions "$home" hold "$id" route \
     --title "Choose the sample route" --reason "captain route choice pending" --repo sample >/dev/null \
     || fail "idempotent hold retry failed"
-  if run_decisions "$home" complete "$id" route access > "$home/partial-complete.out" 2> "$home/partial-complete.err"; then
+  if run_decisions "$home" complete "$id" route access --no-ideas > "$home/partial-complete.out" 2> "$home/partial-complete.err"; then
     fail "completion succeeded while one of two distinct decisions lacked a hold"
   fi
   access_hold=$(run_decisions "$home" hold "$id" access \
@@ -163,10 +163,15 @@ EOF
   [ "$(grep -cE "^- \[ \] $access_hold -" "$home/data/backlog.md")" = 1 ] \
     || fail "second decision did not retain one distinct backlog identity"
 
-  run_decisions "$home" complete "$id" route access >/dev/null \
+  run_decisions "$home" complete "$id" route access --no-ideas >/dev/null \
     || fail "shared investigation completion gate failed"
   assert_grep "decisions_reviewed=1" "$home/state/$id.meta" "completion attestation missing"
   assert_grep "decision_keys=access,route" "$home/state/$id.meta" "decision inventory was not deterministic"
+  assert_grep "ideas_reviewed=1" "$home/state/$id.meta" "no-idea attestation missing"
+  run_decisions "$home" complete "$id" route --no-ideas >/dev/null \
+    || fail "idempotent completion retry failed"
+  [ "$(grep '^decision_keys=' "$home/state/$id.meta" | tail -1)" = "decision_keys=access,route" ] \
+    || fail "completion retry did not preserve the unioned decision inventory"
   open=$(bash -c '. "$1"; status_open_decisions "$2"' _ \
     "$ROOT/bin/fm-classify-lib.sh" "$home/state/$id.status")
   [ -z "$open" ] || fail "captain-held transfer did not close duplicate live status decisions: $open"
@@ -310,7 +315,7 @@ test_origin_slug_validation_precedes_path_construction() {
   home=$(make_home origin-validation)
   escaped="$home/escaped-origin.meta"
   printf 'sentinel=unchanged\n' > "$escaped"
-  if run_decisions "$home" complete ../escaped-origin --none \
+  if run_decisions "$home" complete ../escaped-origin --none --no-ideas \
     > "$home/invalid-complete.out" 2> "$home/invalid-complete.err"; then
     fail "completion accepted an origin path traversal"
   fi
@@ -332,7 +337,7 @@ test_visual_review_uses_shared_completion_owner() {
   write_origin_meta "$home" "$id"
   printf 'done: investigation complete\n' > "$home/state/$id.status"
   printf '# Sample board investigation\n\nThe initial findings need no captain choice.\n' > "$home/data/$id/report.md"
-  run_decisions "$home" complete "$id" --none >/dev/null \
+  run_decisions "$home" complete "$id" --none --no-ideas >/dev/null \
     || fail "initial investigation could not pass the shared completion owner"
   run_teardown "$home" "$id" >/dev/null 2> "$home/visual-teardown.err" \
     || fail "completed investigation teardown failed: $(cat "$home/visual-teardown.err")"
@@ -343,7 +348,7 @@ test_visual_review_uses_shared_completion_owner() {
   hold=$(run_decisions "$home" hold "$id" layout \
     --title "Choose the sample layout" --reason "captain layout choice pending" --repo sample) \
     || fail "post-teardown visual review could not use the shared hold owner"
-  run_decisions "$home" complete "$id" layout >/dev/null \
+  run_decisions "$home" complete "$id" layout --no-ideas >/dev/null \
     || fail "post-teardown visual review could not use the shared completion owner"
   [ "$hold" = "$id-decision-layout" ] || fail "visual review used a separate identity policy"
   json=$(run_bearings "$home") || fail "Bearings failed after the ended visual review"
@@ -370,7 +375,7 @@ test_none_inventory_and_resolved_prose_do_not_create_holds() {
 Decision record: the earlier choice is resolved.
 The recommendation is informational and needs no captain action.
 EOF
-  run_decisions "$home" complete "$id" --none >/dev/null \
+  run_decisions "$home" complete "$id" --none --no-ideas >/dev/null \
     || fail "explicit no-decision inventory failed"
   json=$(run_bearings "$home") || fail "Bearings failed for no-decision inventory"
   printf '%s' "$json" | jq -e '
@@ -392,7 +397,7 @@ test_terminal_single_owner_status_decision_does_not_block_empty_inventory() {
   open=$(bash -c '. "$1"; status_open_decisions "$2"' _ \
     "$ROOT/bin/fm-classify-lib.sh" "$home/state/$id.status")
   assert_contains "$open" "default" "fixture must retain the raw stale status decision"
-  run_decisions "$home" complete "$id" --none >/dev/null \
+  run_decisions "$home" complete "$id" --none --no-ideas >/dev/null \
     || fail "terminal single-owner stale status decision blocked empty inventory completion"
   run_decisions "$home" verify "$id" >/dev/null \
     || fail "terminal single-owner stale status decision blocked inventory verification"
@@ -403,7 +408,7 @@ test_terminal_single_owner_status_decision_does_not_block_empty_inventory() {
   write_origin_meta "$home" "$secondmate" secondmate
   printf 'needs-decision [key=route]: choose route A or route B\ndone: heartbeat complete\n' \
     > "$home/state/$secondmate.status"
-  if run_decisions "$home" complete "$secondmate" --none \
+  if run_decisions "$home" complete "$secondmate" --none --no-ideas \
     > "$home/secondmate-terminal.out" 2> "$home/secondmate-terminal.err"; then
     fail "secondmate terminal status decision was incorrectly cleared"
   fi
@@ -436,7 +441,7 @@ EOF
   hold=$(run_decisions "$mate" hold "$origin" release \
     --title "Choose the sample release" --reason "captain release choice pending" --repo sample) \
     || fail "secondmate-owned hold creation failed"
-  run_decisions "$mate" complete "$origin" release >/dev/null \
+  run_decisions "$mate" complete "$origin" release --no-ideas >/dev/null \
     || fail "secondmate-owned completion failed"
   run_teardown "$mate" "$origin" >/dev/null 2> "$mate/teardown.err" \
     || fail "secondmate investigation teardown failed: $(cat "$mate/teardown.err")"
@@ -550,6 +555,344 @@ test_resolve_matches_quoted_blocked_by_edges() {
   pass "resolve matches first/middle/last in quoted blocked_by and rejects a genuinely absent id"
 }
 
+test_product_idea_attestation_contract() {
+  local home origin grandfather absent wrong matching shapes private private_origin private_mode private_dir_mode
+  home=$(make_home idea-attestation)
+  origin=sample-idea-review
+  mkdir -p "$home/data/$origin"
+  write_origin_meta "$home" "$origin"
+  printf '# Sample idea review\n\n## Ideas\nA useful product idea.\n' > "$home/data/$origin/report.md"
+
+  if run_decisions "$home" complete "$origin" --none > "$home/missing.out" 2> "$home/missing.err"; then
+    fail "completion succeeded without the required idea attestation"
+  fi
+  assert_grep "idea attestation is required" "$home/missing.err" \
+    "missing idea attestation did not name the requirement"
+  if run_decisions "$home" complete "$origin" --none route --no-ideas \
+    > "$home/decision-combo.out" 2> "$home/decision-combo.err"; then
+    fail "--none combined with a decision key"
+  fi
+  assert_grep "--none cannot be combined" "$home/decision-combo.err" \
+    "invalid decision combination was not explained"
+  if run_decisions "$home" complete "$origin" --none --no-ideas PI-001 \
+    > "$home/idea-combo.out" 2> "$home/idea-combo.err"; then
+    fail "--no-ideas accepted an idea id"
+  fi
+  assert_grep "--no-ideas must follow" "$home/idea-combo.err" \
+    "invalid idea combination was not explained"
+  if run_decisions "$home" complete "$origin" --none --ideas \
+    > "$home/empty-ideas.out" 2> "$home/empty-ideas.err"; then
+    fail "--ideas accepted an empty id inventory"
+  fi
+  assert_grep "--ideas requires at least one" "$home/empty-ideas.err" \
+    "empty --ideas inventory was not explained"
+  if run_decisions "$home" complete "$origin" --none --ideas PI-001 --no-ideas \
+    > "$home/mixed-ideas.out" 2> "$home/mixed-ideas.err"; then
+    fail "--ideas combined with --no-ideas"
+  fi
+  assert_grep "--ideas cannot be combined with --no-ideas" "$home/mixed-ideas.err" \
+    "mixed idea attestations were not explained"
+
+  run_decisions "$home" complete "$origin" --none --no-ideas >/dev/null \
+    || fail "explicit no-idea attestation failed"
+  assert_present "$home/data/product-ideas.md" "no-idea completion did not create the ledger lazily"
+  assert_grep "Status: unscheduled | parked (captain <date>) | scheduled -> <task-id>" \
+    "$home/data/product-ideas.md" "lazy ledger template did not define the status contract"
+  assert_grep "ideas_reviewed=1" "$home/state/$origin.meta" "idea review marker was not persisted"
+  assert_grep "idea_ids=" "$home/state/$origin.meta" "empty idea id inventory was not persisted"
+  run_decisions "$home" verify "$origin" >/dev/null || fail "no-idea completion did not verify"
+
+  private=$(make_home private-idea-ledger)
+  private_origin='private-ledger-review'
+  rm -rf "$private/data"
+  write_origin_meta "$private" "$private_origin"
+  ( umask 000
+    run_decisions "$private" complete "$private_origin" --none --no-ideas >/dev/null
+  ) || fail "private ledger creation failed under a permissive caller umask"
+  # Platform-detect stat(1): GNU treats -f as --file-system and can emit a dump
+  # before failing, so never use the `stat -f || stat -c` fallback here.
+  if [ "$(uname)" = Darwin ]; then
+    private_mode=$(stat -f %Lp "$private/data/product-ideas.md")
+    private_dir_mode=$(stat -f %Lp "$private/data")
+  else
+    private_mode=$(stat -c %a "$private/data/product-ideas.md")
+    private_dir_mode=$(stat -c %a "$private/data")
+  fi
+  [ "$private_mode" = 600 ] \
+    || fail "lazy ledger was not private under permissive umask: $private_mode"
+  [ "$private_dir_mode" = 700 ] \
+    || fail "lazy data dir was not private under permissive umask: $private_dir_mode"
+
+  cat >> "$home/data/product-ideas.md" <<EOF
+| PI-001 | Add a sample route preview | unscheduled | data/$origin/report.md#Ideas |
+| PI-002 | Add a sample route comparison | parked (captain 2026-08-10) | data/$origin/report.md#Ideas |
+EOF
+  run_decisions "$home" complete "$origin" --none --ideas PI-001 >/dev/null \
+    || fail "matching idea row did not pass completion"
+  run_decisions "$home" complete "$origin" --none --ideas PI-002 >/dev/null \
+    || fail "idempotent idea re-completion failed"
+  [ "$(grep '^idea_ids=' "$home/state/$origin.meta" | tail -1)" = "idea_ids=PI-001,PI-002" ] \
+    || fail "idea re-completion did not preserve the unioned inventory"
+  run_decisions "$home" verify "$origin" >/dev/null || fail "persisted idea inventory did not verify"
+
+  absent=$(make_home absent-idea-ledger)
+  mkdir -p "$absent/data/$origin"
+  write_origin_meta "$absent" "$origin"
+  printf '# Report\n\n## Ideas\nMissing ledger.\n' > "$absent/data/$origin/report.md"
+  if run_decisions "$absent" complete "$origin" --none --ideas PI-001 \
+    > "$absent/absent.out" 2> "$absent/absent.err"; then
+    fail "named idea passed with no ledger"
+  fi
+  assert_grep "product idea ledger is absent" "$absent/absent.err" \
+    "absent ledger failure did not name the requirement"
+
+  matching=$(make_home missing-idea-row)
+  mkdir -p "$matching/data/$origin"
+  write_origin_meta "$matching" "$origin"
+  printf '# Report\n\n## Ideas\nMissing row.\n' > "$matching/data/$origin/report.md"
+  run_decisions "$matching" complete "$origin" --none --no-ideas >/dev/null
+  if run_decisions "$matching" complete "$origin" --none --ideas PI-009 \
+    > "$matching/missing-row.out" 2> "$matching/missing-row.err"; then
+    fail "named idea passed without its row"
+  fi
+  assert_grep "product idea PI-009 is missing" "$matching/missing-row.err" \
+    "missing idea row failure was not explicit"
+
+  wrong=$(make_home wrong-idea-source)
+  mkdir -p "$wrong/data/$origin"
+  write_origin_meta "$wrong" "$origin"
+  printf '# Report\n\n## Ideas\nWrong source.\n' > "$wrong/data/$origin/report.md"
+  run_decisions "$wrong" complete "$origin" --none --no-ideas >/dev/null
+  printf '| PI-001 | Wrongly sourced idea | unscheduled | data/another-review/report.md#Ideas |\n' \
+    >> "$wrong/data/product-ideas.md"
+  if run_decisions "$wrong" complete "$origin" --none --ideas PI-001 \
+    > "$wrong/wrong-source.out" 2> "$wrong/wrong-source.err"; then
+    fail "idea row citing another origin passed"
+  fi
+  assert_grep "must have one well-formed row whose Source cites data/$origin/report.md" "$wrong/wrong-source.err" \
+    "wrong idea source failure did not name the origin-bound requirement"
+
+  shapes=$(make_home invalid-idea-shapes)
+  mkdir -p "$shapes/data/$origin"
+  write_origin_meta "$shapes" "$origin"
+  printf '# Report\n\n## Ideas\nShape cases.\n' > "$shapes/data/$origin/report.md"
+  run_decisions "$shapes" complete "$origin" --none --no-ideas >/dev/null
+  cp "$shapes/data/product-ideas.md" "$shapes/ledger-template.md"
+  printf '| PI-001 |  | unscheduled | data/%s/report.md#Ideas |\n' "$origin" \
+    >> "$shapes/data/product-ideas.md"
+  if run_decisions "$shapes" complete "$origin" --none --ideas PI-001 \
+    > "$shapes/empty-idea.out" 2> "$shapes/empty-idea.err"; then
+    fail "empty idea text passed completion"
+  fi
+  assert_grep "must have one well-formed row" "$shapes/empty-idea.err" \
+    "empty idea text failure was not explicit"
+  cp "$shapes/ledger-template.md" "$shapes/data/product-ideas.md"
+  printf '| PI-001 | Idea with bad status | pending | data/%s/report.md#Ideas |\n' "$origin" \
+    >> "$shapes/data/product-ideas.md"
+  if run_decisions "$shapes" complete "$origin" --none --ideas PI-001 \
+    > "$shapes/bad-status.out" 2> "$shapes/bad-status.err"; then
+    fail "non-contract status passed completion"
+  fi
+  assert_grep "must have one well-formed row" "$shapes/bad-status.err" \
+    "invalid status failure was not explicit"
+  cp "$shapes/ledger-template.md" "$shapes/data/product-ideas.md"
+  printf '| PI-001 | Idea with spaced heading | unscheduled | data/%s/report.md# Ideas |\n' "$origin" \
+    >> "$shapes/data/product-ideas.md"
+  if run_decisions "$shapes" complete "$origin" --none --ideas PI-001 \
+    > "$shapes/bad-source.out" 2> "$shapes/bad-source.err"; then
+    fail "source with space after # passed completion"
+  fi
+  assert_grep "must have one well-formed row" "$shapes/bad-source.err" \
+    "invalid source shape failure was not explicit"
+  cp "$shapes/ledger-template.md" "$shapes/data/product-ideas.md"
+  printf '| PI-001 | Idea with GitHub line pointer | unscheduled | data/%s/report.md#L12 |\n' "$origin" \
+    >> "$shapes/data/product-ideas.md"
+  if run_decisions "$shapes" complete "$origin" --none --ideas PI-001 \
+    > "$shapes/line-source.out" 2> "$shapes/line-source.err"; then
+    fail "source with #L12 line pointer passed completion"
+  fi
+  assert_grep "must have one well-formed row" "$shapes/line-source.err" \
+    "line-number source failure was not explicit"
+  cp "$shapes/ledger-template.md" "$shapes/data/product-ideas.md"
+  printf '| PI-001 | Idea with bare numeric pointer | unscheduled | data/%s/report.md#12 |\n' "$origin" \
+    >> "$shapes/data/product-ideas.md"
+  if run_decisions "$shapes" complete "$origin" --none --ideas PI-001 \
+    > "$shapes/bare-line-source.out" 2> "$shapes/bare-line-source.err"; then
+    fail "source with bare #12 line pointer passed completion"
+  fi
+  assert_grep "must have one well-formed row" "$shapes/bare-line-source.err" \
+    "bare line-number source failure was not explicit"
+  cp "$shapes/ledger-template.md" "$shapes/data/product-ideas.md"
+  printf '| PI-001 | Idea with line range pointer | unscheduled | data/%s/report.md#L12-L20 |\n' "$origin" \
+    >> "$shapes/data/product-ideas.md"
+  if run_decisions "$shapes" complete "$origin" --none --ideas PI-001 \
+    > "$shapes/line-range-source.out" 2> "$shapes/line-range-source.err"; then
+    fail "source with #L12-L20 line range passed completion"
+  fi
+  assert_grep "must have one well-formed row" "$shapes/line-range-source.err" \
+    "line-range source failure was not explicit"
+  cp "$shapes/ledger-template.md" "$shapes/data/product-ideas.md"
+  printf '| PI-001 | Idea with terminal colon line pointer | unscheduled | data/%s/report.md#Ideas:12 |\n' "$origin" \
+    >> "$shapes/data/product-ideas.md"
+  if run_decisions "$shapes" complete "$origin" --none --ideas PI-001 \
+    > "$shapes/colon-line-source.out" 2> "$shapes/colon-line-source.err"; then
+    fail "source with terminal #Ideas:12 line pointer passed completion"
+  fi
+  assert_grep "must have one well-formed row" "$shapes/colon-line-source.err" \
+    "terminal colon line-number source failure was not explicit"
+  cp "$shapes/ledger-template.md" "$shapes/data/product-ideas.md"
+  printf '| PI-001 | Idea under quarterly heading | unscheduled | data/%s/report.md#Q2:2026-plan |\n' "$origin" \
+    >> "$shapes/data/product-ideas.md"
+  run_decisions "$shapes" complete "$origin" --none --ideas PI-001 >/dev/null \
+    || fail "origin-bound source with #Q2:2026-plan heading was refused"
+  cp "$shapes/ledger-template.md" "$shapes/data/product-ideas.md"
+  printf '| PI-001 | Idea under phased heading | unscheduled | data/%s/report.md#Phase:1-rollout |\n' "$origin" \
+    >> "$shapes/data/product-ideas.md"
+  run_decisions "$shapes" complete "$origin" --none --ideas PI-001 >/dev/null \
+    || fail "origin-bound source with #Phase:1-rollout heading was refused"
+  cp "$shapes/ledger-template.md" "$shapes/data/product-ideas.md"
+  printf '| PI-001 | Good target idea | unscheduled | data/%s/report.md#Ideas |\n' "$origin" \
+    >> "$shapes/data/product-ideas.md"
+  printf '| PI-002 | Sibling with bad status | pending | data/%s/report.md#Ideas |\n' "$origin" \
+    >> "$shapes/data/product-ideas.md"
+  if run_decisions "$shapes" complete "$origin" --none --ideas PI-001 \
+    > "$shapes/sibling-bad.out" 2> "$shapes/sibling-bad.err"; then
+    fail "well-formed target row hid a malformed sibling"
+  fi
+  assert_grep "must have one well-formed row" "$shapes/sibling-bad.err" \
+    "malformed sibling failure was not explicit"
+  cp "$shapes/ledger-template.md" "$shapes/data/product-ideas.md"
+  printf '| PI-001 | Good target idea | unscheduled | data/%s/report.md#Ideas |\n' "$origin" \
+    >> "$shapes/data/product-ideas.md"
+  printf 'not a table row\n' >> "$shapes/data/product-ideas.md"
+  if run_decisions "$shapes" complete "$origin" --none --ideas PI-001 \
+    > "$shapes/junk-line.out" 2> "$shapes/junk-line.err"; then
+    fail "well-formed target row hid non-table junk"
+  fi
+  assert_grep "must have one well-formed row" "$shapes/junk-line.err" \
+    "junk-line ledger failure was not explicit"
+  printf '# Product ideas\n\n| PI-001 | Headerless good idea | unscheduled | data/%s/report.md#Ideas |\n' \
+    "$origin" > "$shapes/data/product-ideas.md"
+  if run_decisions "$shapes" complete "$origin" --none --ideas PI-001 \
+    > "$shapes/headerless.out" 2> "$shapes/headerless.err"; then
+    fail "headerless ledger with a good target row passed completion"
+  fi
+  assert_grep "must have one well-formed row" "$shapes/headerless.err" \
+    "headerless ledger failure was not explicit"
+
+  grandfather=$(make_home grandfathered-idea-gate)
+  write_origin_meta "$grandfather" pre-upgrade-review
+  printf 'decisions_reviewed=1\ndecision_keys=\n' >> "$grandfather/state/pre-upgrade-review.meta"
+  run_decisions "$grandfather" verify pre-upgrade-review >/dev/null \
+    || fail "pre-upgrade decision completion was not grandfathered"
+  assert_absent "$grandfather/data/product-ideas.md" \
+    "grandfathered verification unexpectedly created a ledger"
+
+  pass "product idea attestations are origin-bound, persisted, idempotent, lazy, and grandfather-safe"
+}
+
+test_secondmate_idea_inventory_and_bearings_count() {
+  local main mate origin json template
+  main=$(make_home idea-count-main)
+  mate=$(make_home idea-count-mate)
+  printf '# Synthetic secondmate home\n' > "$mate/AGENTS.md"
+  printf 'sample-mate\n' > "$mate/.fm-secondmate-home"
+  origin=sample-mate-ideas
+  mkdir -p "$mate/data/$origin"
+  write_origin_meta "$mate" "$origin"
+  printf '# Mate report\n\n## Product ideas\nMate idea detail.\n' > "$mate/data/$origin/report.md"
+  run_decisions "$mate" complete "$origin" --none --no-ideas >/dev/null
+  printf '| PI-003 | Mate-only sample idea | unscheduled | data/%s/report.md#Product-ideas |\n' "$origin" \
+    >> "$mate/data/product-ideas.md"
+  run_decisions "$mate" complete "$origin" --none --ideas PI-003 >/dev/null \
+    || fail "secondmate-home idea did not verify against its own ledger"
+  assert_absent "$main/data/product-ideas.md" "secondmate idea leaked into the main ledger"
+
+  mkdir -p "$main/data/main-idea-review"
+  write_origin_meta "$main" main-idea-review
+  printf '# Main report\n\n## Ideas\nMain idea detail.\n' > "$main/data/main-idea-review/report.md"
+  run_decisions "$main" complete main-idea-review --none --no-ideas >/dev/null
+  printf '| PI-001 | Main sample idea | unscheduled | data/main-idea-review/report.md#Ideas |\n' \
+    >> "$main/data/product-ideas.md"
+  printf -- '- sample-mate - synthetic scope (home: %s; scope: sample reviews; projects: sample; added 2026-07-14)\n' \
+    "$mate" > "$main/data/secondmates.md"
+  fm_write_secondmate_meta "$main/state/sample-mate.meta" "$mate" \
+    "firstmate:fm-sample-mate" sample
+
+  json=$(run_bearings "$main") || fail "Bearings could not count home idea ledgers"
+  printf '%s' "$json" | jq -e '.ideas_unscheduled == 2 and (.ideas_warnings | length) == 0' >/dev/null \
+    || fail "Bearings did not combine readable home idea counts: $json"
+
+  template="$main/product-ideas-template.md"
+  cp "$main/data/product-ideas.md" "$template"
+  printf 'not a product idea ledger\n' > "$main/data/product-ideas.md"
+  json=$(run_bearings "$main") || fail "Bearings crashed on a malformed idea ledger"
+  printf '%s' "$json" | jq -e '
+    .ideas_unscheduled == 1
+      and (.ideas_warnings | any(.home == "(main)" and .reason == "ledger is malformed"))
+  ' >/dev/null || fail "Bearings silently counted a malformed ledger as zero: $json"
+
+  cp "$template" "$main/data/product-ideas.md"
+  chmod 000 "$mate/data/product-ideas.md"
+  json=$(run_bearings "$main") || fail "Bearings crashed on an unreadable idea ledger"
+  printf '%s' "$json" | jq -e '
+    .ideas_unscheduled == 1
+      and (.ideas_warnings | any(.home == "sample-mate" and .reason == "ledger is unreadable"))
+  ' >/dev/null || fail "Bearings silently counted an unreadable ledger as zero: $json"
+  chmod 600 "$mate/data/product-ideas.md"
+
+  chmod 000 "$main/data/secondmates.md"
+  json=$(run_bearings "$main") || fail "Bearings crashed when the secondmate registry was unreadable"
+  printf '%s' "$json" | jq -e '
+    (.ideas_warnings | any(.home == "(registry)" and (.reason | startswith("registry unavailable:"))))
+  ' >/dev/null || fail "Bearings hid an unavailable registry from ideas_warnings: $json"
+  chmod 600 "$main/data/secondmates.md"
+
+  printf -- '- sample-mate - synthetic scope (home: %s; scope: sample reviews; projects: sample; added 2026-07-14)\n' \
+    "$mate" > "$main/data/secondmates.md"
+  printf -- '- extra-mate - synthetic scope (home: %s; scope: more reviews; projects: sample; added 2026-07-14)\n' \
+    "$mate" >> "$main/data/secondmates.md"
+  json=$(FM_SNAPSHOT_REGISTRY_RECORDS=1 PATH="$main/fakebin:$PATH" FM_HOME="$main" \
+    FM_BEARINGS_NOW=2026-07-14T12:00:00Z "$BEARINGS" --json) \
+    || fail "Bearings crashed when registry records were truncated"
+  printf '%s' "$json" | jq -e '
+    (.ideas_warnings | any(.home == "(registry)" and .reason == "registry records were truncated"))
+  ' >/dev/null || fail "Bearings hid truncated registry records from ideas_warnings: $json"
+
+  json=$(FM_SNAPSHOT_REGISTRY_LINES=1 PATH="$main/fakebin:$PATH" FM_HOME="$main" \
+    FM_BEARINGS_NOW=2026-07-14T12:00:00Z "$BEARINGS" --json) \
+    || fail "Bearings crashed when registry input was truncated"
+  printf '%s' "$json" | jq -e '
+    (.ideas_warnings | any(.home == "(registry)" and .reason == "registry input was truncated"))
+  ' >/dev/null || fail "Bearings hid truncated registry input from ideas_warnings: $json"
+
+  override=$(make_home idea-data-override)
+  alt_data="$override/alt-data"
+  mkdir -p "$alt_data" "$override/data"
+  cat > "$alt_data/product-ideas.md" <<'EOF'
+# Product ideas
+
+| ID | Idea | Status | Source |
+| --- | --- | --- | --- |
+| PI-007 | Override-only idea | unscheduled | data/main-idea-review/report.md#Ideas |
+EOF
+  cat > "$override/data/product-ideas.md" <<'EOF'
+# Product ideas
+
+| ID | Idea | Status | Source |
+| --- | --- | --- | --- |
+| PI-008 | Default-path decoy | unscheduled | data/main-idea-review/report.md#Ideas |
+| PI-009 | Second default-path decoy | unscheduled | data/main-idea-review/report.md#Ideas |
+EOF
+  json=$(PATH="$override/fakebin:$PATH" FM_HOME="$override" FM_DATA_OVERRIDE="$alt_data" \
+    FM_BEARINGS_NOW=2026-07-14T12:00:00Z "$BEARINGS" --json) \
+    || fail "Bearings crashed with FM_DATA_OVERRIDE for the main idea ledger"
+  printf '%s' "$json" | jq -e '.ideas_unscheduled == 1' >/dev/null \
+    || fail "Bearings ignored roots.data for the main idea ledger: $json"
+
+  pass "secondmate ideas stay home-local and Bearings discloses complete and incomplete counts"
+}
+
 test_uninventoried_report_decision_refuses_completion
 
 test_scout_teardown_always_requires_inventory_verification
@@ -560,3 +903,5 @@ test_none_inventory_and_resolved_prose_do_not_create_holds
 test_terminal_single_owner_status_decision_does_not_block_empty_inventory
 test_secondmate_hold_stays_in_authoritative_home
 test_resolve_matches_quoted_blocked_by_edges
+test_product_idea_attestation_contract
+test_secondmate_idea_inventory_and_bearings_count

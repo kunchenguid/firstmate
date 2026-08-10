@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
-# fm-decision-hold.sh - deterministic mechanics for durable captain decisions.
+# fm-decision-hold.sh - deterministic mechanics for durable captain decisions and
+# product-idea completion attestation.
 #
 # The semantic policy is owned once by
 # .agents/skills/decision-hold-lifecycle/SKILL.md. This script never reads report,
-# visual-review, chat, or terminal prose to guess whether a decision exists.
-# The invoking agent inventories unresolved decisions, assigns stable keys, and
-# routes dependent work. This script supplies deterministic identities, creates
-# and verifies structured tasks-axi captain holds, records completion attestation
-# in the originating task's metadata, and closes a hold only after a durable
-# decision record has been linked to existing dependent work.
+# visual-review, chat, or terminal prose to guess whether a decision or idea exists.
+# The invoking agent inventories unresolved decisions and unscheduled product ideas,
+# assigns stable decision keys, appends idea ledger rows, and routes dependent work.
+# This script supplies deterministic identities, creates and verifies structured
+# tasks-axi captain holds, validates the active home's product-idea ledger, records
+# completion attestation in the originating task's metadata, and closes a hold only
+# after a durable decision record has been linked to existing dependent work.
 #
 # A hold identity is <origin-id>-decision-<decision-key>. Origin ids and decision
 # keys must already be privacy-safe slugs. Repeating `hold` with the same identity
@@ -20,16 +22,32 @@
 #   fm-decision-hold.sh id <origin-id> <decision-key>
 #   fm-decision-hold.sh hold <origin-id> <decision-key> \
 #     --title <title> --reason <reason> [--repo <repo>]
-#   fm-decision-hold.sh complete <origin-id> (--none | <decision-key>...)
+#   fm-decision-hold.sh complete <origin-id> (--none | <decision-key>...) \
+#     (--ideas <PI-id>... | --no-ideas)
 #   fm-decision-hold.sh verify <origin-id>
 #   fm-decision-hold.sh resolve <origin-id> <decision-key> \
 #     --decision-file <path> --routed-to <task-id> [--routed-to <task-id>...]
 #
 # `complete` is the shared investigation and visual-review completion gate.
 # `--none` is an explicit semantic attestation that the just-reviewed surface has
-# no unresolved captain decision. Later review passes may add keys; a live task's
-# metadata inventory is unioned idempotently. A post-teardown visual review can
-# complete against the surviving report and holds without recreating task state.
+# no unresolved captain decision and cannot be combined with decision keys.
+# Exactly one idea attestation is also required: `--ideas` takes one or more
+# home-local PI-NNN ids and cannot be combined with `--no-ideas`; `--no-ideas`
+# means this pass found no new ideas and does not erase an earlier idea inventory.
+# Decision keys and idea ids from later review passes are unioned idempotently.
+# `complete` validates the full active-home ledger grammar and every unioned idea
+# id against an origin-bound Source. `verify` grandfathers pre-upgrade metadata
+# that carries only the earlier completed decision attestation.
+# A post-teardown visual review can complete against the surviving report and
+# holds without recreating task state.
+#
+# The active home's data/product-ideas.md is created lazily by `--no-ideas` from
+# this template. Its columns are ID | Idea | Status | Source. Status is exactly
+# one of: unscheduled; parked (captain <date>); scheduled -> <task-id>;
+# shipped (was <task-id>); dropped (<reason>). Source is the home-relative report
+# path plus section heading as data/<origin-id>/report.md#<section-heading>, never
+# a line number. Ids are PI-NNN and home-local; cross-home displays qualify them
+# with the home id, for example sm-tv:PI-003.
 # `verify` is read-only and is called by scout teardown so teardown cannot erase a
 # source before this gate has succeeded.
 #
@@ -51,6 +69,9 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 # shellcheck source=bin/fm-tasks-axi-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
+# shellcheck source=bin/fm-product-idea-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-product-idea-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-wake-lib.sh"
@@ -151,6 +172,51 @@ sorted_key_union() {  # <comma-list> <newline-or-space-separated-new-keys>
 
 meta_value() {  # <meta> <key>
   grep "^$2=" "$1" 2>/dev/null | tail -1 | cut -d= -f2- || true
+}
+
+validate_idea_id() {  # <value>
+  case "$1" in
+    PI-[0-9][0-9][0-9]) : ;;
+    *) fail "product idea id must use the home-local PI-NNN form: $1" ;;
+  esac
+}
+
+create_idea_ledger() {
+  local ledger="$DATA/product-ideas.md"
+  if [ -e "$ledger" ]; then
+    [ -f "$ledger" ] || fail "product idea ledger path is not a regular file: $ledger"
+    return 0
+  fi
+  ( umask 077
+    mkdir -p "$DATA" || exit 1
+    cat > "$ledger" <<'EOF'
+# Product ideas
+
+<!-- Columns: ID | Idea | Status | Source. -->
+<!-- Status: unscheduled | parked (captain <date>) | scheduled -> <task-id> | shipped (was <task-id>) | dropped (<reason>). -->
+<!-- Source: data/<origin-id>/report.md#<section-heading>; use a report path plus section heading, never a line number. -->
+<!-- IDs are home-local PI-NNN values; qualify cross-home displays as <home-id>:PI-NNN, for example sm-tv:PI-003. -->
+
+| ID | Idea | Status | Source |
+| --- | --- | --- | --- |
+EOF
+  ) || fail "cannot create product idea ledger: $ledger"
+}
+
+verify_idea_row() {  # <origin-id> <idea-id>
+  local origin=$1 idea_id=$2 ledger="$DATA/product-ideas.md" rc
+  validate_idea_id "$idea_id"
+  [ -f "$ledger" ] \
+    || fail "product idea ledger is absent: $ledger; append $idea_id with a source citing data/$origin/report.md#<section-heading>"
+  if fm_product_idea_verify_row "$ledger" "$origin" "$idea_id"; then
+    return 0
+  else
+    rc=$?
+  fi
+  if [ "$rc" -eq 4 ]; then
+    fail "product idea $idea_id is missing from $ledger"
+  fi
+  fail "product idea $idea_id must have one well-formed row whose Source cites data/$origin/report.md#<section-heading> without a line number"
 }
 
 origin_open_decisions() {  # <origin-id>
@@ -289,6 +355,7 @@ command_hold() {
 
 command_complete() {
   local origin=${1:-} meta previous='' supplied='' keys='' key status_file open raw_open key_seen=0 has_meta=0
+  local decision_none=0 decision_seen=0 idea_attestation='' idea_supplied='' previous_ideas='' idea_keys='' idea_id
   [ "$#" -ge 2 ] || { usage >&2; exit 2; }
   validate_slug origin-id "$origin"
   shift
@@ -300,18 +367,49 @@ command_complete() {
     DECISION_META_LOCK_HELD=1
     [ -f "$meta" ] || fail "task metadata disappeared while recording completion"
   fi
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --none)
+        [ "$decision_none" -eq 0 ] || fail "--none may be supplied only once"
+        [ -z "$supplied" ] || fail "--none cannot be combined with decision keys"
+        decision_none=1
+        decision_seen=1
+        shift
+        ;;
+      --no-ideas)
+        [ -z "$idea_attestation" ] || fail "--no-ideas cannot be combined with --ideas or repeated"
+        idea_attestation=none
+        shift
+        [ "$#" -eq 0 ] || fail "--no-ideas must follow the decision inventory and cannot take values"
+        ;;
+      --ideas)
+        [ -z "$idea_attestation" ] || fail "--ideas cannot be combined with --no-ideas or repeated"
+        idea_attestation=ideas
+        shift
+        [ "$#" -gt 0 ] || fail "--ideas requires at least one PI-NNN id"
+        while [ "$#" -gt 0 ]; do
+          case "$1" in
+            --ideas|--no-ideas) fail "--ideas cannot be combined with --no-ideas or repeated" ;;
+            --none) fail "--ideas must follow the decision inventory" ;;
+          esac
+          validate_idea_id "$1"
+          idea_supplied="${idea_supplied}${idea_supplied:+ }$1"
+          shift
+        done
+        ;;
+      *)
+        [ "$decision_none" -eq 0 ] || fail "--none cannot be combined with decision keys"
+        validate_slug decision-key "$1"
+        supplied="${supplied}${supplied:+ }$1"
+        decision_seen=1
+        shift
+        ;;
+    esac
+  done
+  [ "$decision_seen" -eq 1 ] || fail "decision attestation is required: use --none or name decision keys"
+  [ -n "$idea_attestation" ] || fail "idea attestation is required: use --ideas <PI-id>... or --no-ideas"
   require_tasks_axi
   origin_exists_here "$origin" || fail "origin $origin is not owned by the active home $FM_HOME"
-  if [ "$#" -eq 1 ] && [ "$1" = --none ]; then
-    supplied=''
-  else
-    while [ "$#" -gt 0 ]; do
-      [ "$1" != --none ] || fail "--none cannot be combined with decision keys"
-      validate_slug decision-key "$1"
-      supplied="${supplied}${supplied:+ }$1"
-      shift
-    done
-  fi
   if [ "$has_meta" = 1 ]; then
     previous=$(meta_value "$meta" decision_keys)
   fi
@@ -322,6 +420,22 @@ command_complete() {
       verify_hold_durable "$(hold_id "$origin" "$key")"
     done <<EOF
 $(printf '%s\n' "$keys" | tr ',' '\n')
+EOF
+  fi
+
+  if [ "$has_meta" = 1 ]; then
+    previous_ideas=$(meta_value "$meta" idea_ids)
+  fi
+  idea_keys=$(sorted_key_union "$previous_ideas" "$idea_supplied")
+  if [ "$idea_attestation" = none ]; then
+    create_idea_ledger
+  fi
+  if [ -n "$idea_keys" ]; then
+    while IFS= read -r idea_id; do
+      [ -n "$idea_id" ] || continue
+      verify_idea_row "$origin" "$idea_id"
+    done <<EOF
+$(printf '%s\n' "$idea_keys" | tr ',' '\n')
 EOF
   fi
 
@@ -340,6 +454,9 @@ EOF
     if [ "$(meta_value "$meta" decisions_reviewed)" != 1 ] || [ "$previous" != "$keys" ]; then
       printf 'decisions_reviewed=1\ndecision_keys=%s\n' "$keys" >> "$meta"
     fi
+    if [ "$(meta_value "$meta" ideas_reviewed)" != 1 ] || [ "$previous_ideas" != "$idea_keys" ]; then
+      printf 'ideas_reviewed=1\nidea_ids=%s\n' "$idea_keys" >> "$meta"
+    fi
     fm_lock_release "$DECISION_META_LOCK"
     DECISION_META_LOCK_HELD=0
 
@@ -355,11 +472,12 @@ $raw_open
 EOF
   fi
   : "$key_seen"
-  printf 'complete: %s decision inventory reviewed%s\n' "$origin" "${keys:+ ($keys)}"
+  printf 'complete: %s decision and product-idea inventories reviewed%s%s\n' \
+    "$origin" "${keys:+; decisions=$keys}" "${idea_keys:+; ideas=$idea_keys}"
 }
 
 command_verify() {
-  local origin=${1:-} meta reviewed keys key open
+  local origin=${1:-} meta reviewed keys key open ideas_reviewed idea_keys idea_id
   [ "$#" -eq 1 ] || { usage >&2; exit 2; }
   validate_slug origin-id "$origin"
   meta="$STATE/$origin.meta"
@@ -385,6 +503,19 @@ EOF
   done <<EOF
 $open
 EOF
+  ideas_reviewed=$(meta_value "$meta" ideas_reviewed)
+  if [ -n "$ideas_reviewed" ]; then
+    [ "$ideas_reviewed" = 1 ] || fail "origin $origin has an invalid product-idea inventory attestation"
+    idea_keys=$(meta_value "$meta" idea_ids)
+    if [ -n "$idea_keys" ]; then
+      while IFS= read -r idea_id; do
+        [ -n "$idea_id" ] || continue
+        verify_idea_row "$origin" "$idea_id"
+      done <<EOF
+$(printf '%s\n' "$idea_keys" | tr ',' '\n')
+EOF
+    fi
+  fi
   printf 'verified: %s unresolved-decision inventory\n' "$origin"
 }
 

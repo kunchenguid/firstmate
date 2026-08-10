@@ -5,18 +5,23 @@ This document records the deterministic mechanism, structured surfaces, and priv
 
 ## Mechanism
 
-`bin/fm-decision-hold.sh` is the only lifecycle command for an investigation or visual review's unresolved captain decisions.
+`bin/fm-decision-hold.sh` is the only lifecycle command for an investigation or visual review's unresolved captain decisions and product-idea completion attestation.
 The command runs tasks-axi in the active `FM_HOME`, so the existing backlog remains the only durable work database and a secondmate-owned decision stays in the secondmate home.
 It never reads report bodies, review artifacts, terminal output, or chat.
+`bin/fm-product-idea-lib.sh` owns the shared product-idea ledger row and unscheduled-count grammar consumed by completion and Bearings.
 
 The `hold` subcommand maps an originating work id and stable decision key to `<origin-id>-decision-<decision-key>`.
 It creates a kind `captain` backlog item when absent and invokes `tasks-axi hold <id> --reason <reason> --kind captain` on every retry.
 It rejects an identity collision, a changed title, and attempts to reopen an already resolved identity.
 
-The `complete` subcommand unions the reviewed keys into `decision_keys=` and appends `decisions_reviewed=1` while originating task metadata is live.
+The `complete` subcommand requires both a decision inventory and an idea inventory attestation on every pass.
+It accepts `--none` or decision keys for the decision side, and exactly one of `--ideas <PI-id>...` or `--no-ideas` for the idea side, while rejecting invalid combinations.
+It unions reviewed decision keys and product-idea ids into origin metadata while the task metadata is live.
+It validates the full active-home ledger grammar and every unioned idea id, requiring each matching row's Source to cite the completing origin's report section without a line number, and rejects missing, malformed, mismatched, and line-number references.
+An explicit no-idea inventory creates the script-owned ledger template lazily.
+Post-upgrade completions persist `ideas_reviewed=1` with the unioned `idea_ids`, while `verify` grandfathers metadata that still carries only the earlier completed decision attestation.
 A post-teardown visual review can complete against the surviving report and durable holds without recreating volatile task metadata.
-It accepts `--none` as an explicit semantic inventory result, not as inferred absence.
-It verifies every listed identity against tasks-axi before recording completion.
+It verifies every listed decision identity against tasks-axi before recording completion.
 For an open keyed status decision, it appends a `captain-held [key=<key>]: ...` transfer event only after the matching backlog hold is durable.
 `bin/fm-classify-lib.sh` recognizes that transfer as closing the live status copy without claiming that the captain has answered it.
 
@@ -35,6 +40,7 @@ It resolves every repeated `blocked-by:` edge against structured Done records, k
 Its secondmate-home summary classifies an actionable captain hold as `captain_decision` and preserves blocked captain holds as queued work in the owning home.
 
 `bin/fm-bearings-snapshot.sh` projects actionable captain holds into `decisions_open` and leaves blocked captain holds in ordinary queued gates.
+It also counts unscheduled rows across the canonical main data root and readable registered secondmate ledgers; an absent ledger in a readable home counts as zero, while unreadable, malformed, unavailable, remote, or truncated ledgers and registries are disclosed in `ideas_warnings` instead of silently treating those incomplete cases as empty.
 It excludes completed kind `captain` records from Recently Landed.
 The projection remains read-only and does not inspect historical prose.
 
@@ -43,6 +49,7 @@ The projection remains read-only and does not inspect historical prose.
 Verification date: 2026-07-14.
 Additional quoted `blocked_by` regression verification date: 2026-07-17.
 Plural blocker-readiness and mixed-home projection verification date: 2026-07-22.
+Product-idea inventory and Bearings-count verification date: 2026-08-10.
 
 The focused end-to-end regression uses only synthetic `sample` identities and decision text.
 It begins with a completed investigation and visual review whose genuine unresolved choice exists only in the report.
@@ -62,6 +69,8 @@ ok - resolved findings and decision-like prose do not create false holds
 ok - terminal single-owner stale status decisions do not block empty inventory
 ok - main-home and secondmate-home captain holds remain correctly routed
 ok - resolve matches first/middle/last in quoted blocked_by and rejects a genuinely absent id
+ok - product idea attestations are origin-bound, persisted, idempotent, lazy, and grandfather-safe
+ok - secondmate ideas stay home-local and Bearings discloses complete and incomplete counts
 
 $ bash tests/fm-fleet-snapshot-view.test.sh
 ok - backlog normalization preserves strict roles and resolves every blocker compatibly
