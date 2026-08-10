@@ -37,6 +37,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 SECONDMATES_MD="$FM_HOME/data/secondmates.md"
 # shellcheck source=bin/fm-ff-lib.sh
 . "$SCRIPT_DIR/fm-ff-lib.sh"
+# shellcheck source=bin/fm-update-action-lib.sh
+. "$SCRIPT_DIR/fm-update-action-lib.sh"
 
 "$SCRIPT_DIR/fm-guard.sh" || true
 
@@ -48,8 +50,76 @@ if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
 fi
 [ $# -eq 0 ] || { usage; exit 1; }
 
+fm_update_action_enabled() {
+  [ -n "${FM_UPDATE_ACTION_DIR:-}" ]
+}
+
+fm_update_target_is_firstmate() {
+  [ "$(resolve_path "$1")" = "$(resolve_path "$FM_ROOT")" ]
+}
+
+fm_ff_before_fast_forward() {
+  local dir=$1 before=$2 after=$3 instructions=$4
+  fm_update_action_enabled || return 0
+  if fm_update_target_is_firstmate "$dir"; then
+    [ -n "$instructions" ] || return 0
+    fm_update_action_write_firstmate prepared "$FM_ROOT" "$before" "$after"
+    return
+  fi
+  [ -n "$FF_UPDATE_SECOND_MATE_ID" ] && [ -n "$FF_UPDATE_SECOND_MATE_WINDOW" ] \
+    || return 0
+  fm_update_action_write_secondmate prepared "$FF_UPDATE_SECOND_MATE_ID" \
+    "$FF_UPDATE_SECOND_MATE_HOME" "$before" "$after" 0 ""
+}
+
+fm_ff_after_fast_forward() {
+  local dir=$1 before=$2 after=$3 instructions=$4
+  fm_update_action_enabled || return 0
+  if fm_update_target_is_firstmate "$dir"; then
+    [ -n "$instructions" ] || return 0
+    fm_update_action_write_firstmate updated "$FM_ROOT" "$before" "$after"
+    return
+  fi
+  [ -n "$FF_UPDATE_SECOND_MATE_ID" ] && [ -n "$FF_UPDATE_SECOND_MATE_WINDOW" ] \
+    || return 0
+  fm_update_action_write_secondmate updated "$FF_UPDATE_SECOND_MATE_ID" \
+    "$FF_UPDATE_SECOND_MATE_HOME" "$before" "$after" 0 ""
+}
+
+fm_ff_abort_fast_forward() {
+  local dir=$1 instructions=$4
+  fm_update_action_enabled || return 0
+  if fm_update_target_is_firstmate "$dir"; then
+    [ -n "$instructions" ] || return 0
+    fm_update_action_remove_firstmate
+    return
+  fi
+  [ -n "$FF_UPDATE_SECOND_MATE_ID" ] && [ -n "$FF_UPDATE_SECOND_MATE_WINDOW" ] \
+    || return 0
+  fm_update_action_remove_secondmate "$FF_UPDATE_SECOND_MATE_ID"
+}
+
+remote_secondmate_action_required() {
+  local id=$1 home=$2 remote_host=$3 meta meta_kind meta_home meta_remote_host
+  meta="$STATE/$id.meta"
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
+  meta_kind=$(grep '^kind=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  [ "$meta_kind" = secondmate ] || return 1
+  meta_home=$(grep '^home=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  [ -n "$meta_home" ] || meta_home=$home
+  meta_remote_host=$(grep '^remote_host=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  [ "$meta_home" = "$home" ] && [ "$meta_remote_host" = "$remote_host" ]
+}
+
 run_update_locked() {
-  local reread_firstmate="no" id home line remote_out remote_result
+  local reread_firstmate="no" id home line remote_out remote_result remote_action
+
+  if fm_update_action_enabled; then
+    fm_update_action_dir_is_valid "$FM_UPDATE_ACTION_DIR" || {
+      echo "firstmate: skipped: update action journal is unavailable" >&2
+      return 1
+    }
+  fi
 
   # --- main firstmate repo ---------------------------------------------------
 
@@ -85,20 +155,47 @@ run_update_locked() {
       id=$SECONDMATE_REGISTRY_ID
       home=$SECONDMATE_REGISTRY_HOME
       if [ "$SECONDMATE_REGISTRY_REMOTE" -eq 1 ]; then
+        remote_action=0
+        if remote_secondmate_action_required "$id" "$home" "$SECONDMATE_REGISTRY_HOST"; then
+          remote_action=1
+          if fm_update_action_enabled \
+            && ! fm_update_action_write_secondmate prepared "$id" "$home" "" "" 1 \
+              "$SECONDMATE_REGISTRY_HOST"; then
+            echo "remote secondmate $id: skipped on $SECONDMATE_REGISTRY_HOST: update action journal is unavailable" >&2
+            continue
+          fi
+        fi
         if remote_out=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh update "$id" < /dev/null 2>&1); then
           remote_result=$(printf '%s\n' "$remote_out" | tail -1)
           case "$remote_result" in
             synced:*)
               echo "remote secondmate $id: updated on $SECONDMATE_REGISTRY_HOST (${remote_result#synced: })"
-              if [ -f "$STATE/$id.meta" ] && grep -qx 'kind=secondmate' "$STATE/$id.meta"; then
+              if [ "$remote_action" -eq 1 ]; then
+                if fm_update_action_enabled; then
+                  fm_update_action_write_secondmate updated "$id" "$home" "" "" 1 \
+                    "$SECONDMATE_REGISTRY_HOST" || FF_ACTION_JOURNAL_FAILED=1
+                fi
                 FF_NUDGE_WINDOWS="$FF_NUDGE_WINDOWS fm-$id"
               fi
               ;;
-            current:*) echo "remote secondmate $id: already current on $SECONDMATE_REGISTRY_HOST (${remote_result#current: })" ;;
-            *) echo "remote secondmate $id: skipped on $SECONDMATE_REGISTRY_HOST: malformed update result" >&2 ;;
+            current:*)
+              echo "remote secondmate $id: already current on $SECONDMATE_REGISTRY_HOST (${remote_result#current: })"
+              if [ "$remote_action" -eq 1 ] && fm_update_action_enabled; then
+                fm_update_action_remove_secondmate "$id" || FF_ACTION_JOURNAL_FAILED=1
+              fi
+              ;;
+            *)
+              echo "remote secondmate $id: skipped on $SECONDMATE_REGISTRY_HOST: malformed update result" >&2
+              if [ "$remote_action" -eq 1 ] && fm_update_action_enabled; then
+                FF_ACTION_JOURNAL_FAILED=1
+              fi
+              ;;
           esac
         else
           echo "remote secondmate $id: skipped on $SECONDMATE_REGISTRY_HOST: ${remote_out%%$'\n'*}" >&2
+          if [ "$remote_action" -eq 1 ] && fm_update_action_enabled; then
+            FF_ACTION_JOURNAL_FAILED=1
+          fi
         fi
       else
         process_secondmate "$id" "$home" "" origin no
@@ -110,6 +207,7 @@ run_update_locked() {
 
   echo "reread-firstmate: $reread_firstmate"
   echo "nudge-secondmates:${FF_NUDGE_WINDOWS:- none}"
+  ff_action_journal_succeeded
 }
 
 update_status=0

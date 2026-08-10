@@ -42,11 +42,14 @@ FIRSTMATE_UPDATE_RESULT=""
 HERDR_MANIFEST_URL=${FM_DEPS_HERDR_MANIFEST_URL:-https://herdr.dev/latest.json}
 NODE_INDEX_URL=${FM_DEPS_NODE_INDEX_URL:-https://nodejs.org/dist/index.json}
 _FM_DEPS_ACTION_LOCK_HELD=0
+_FM_DEPS_LOADED_SOURCE_ONLY=${FM_DEPS_SOURCE_ONLY:-0}
 
 # shellcheck source=bin/fm-secondmate-nudge-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-nudge-lib.sh"
 # shellcheck source=bin/fm-ff-lib.sh
 . "$SCRIPT_DIR/fm-ff-lib.sh"
+# shellcheck source=bin/fm-update-action-lib.sh
+. "$SCRIPT_DIR/fm-update-action-lib.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
 
@@ -686,6 +689,166 @@ record_secondmate_nudge_action() {
   }
 }
 
+firstmate_update_commit_is_valid() {
+  local commit=$1
+  case "${#commit}" in 40|64) ;; *) return 1 ;; esac
+  case "$commit" in *[!0-9A-Fa-f]*) return 1 ;; esac
+}
+
+firstmate_update_commit_state() {
+  local repo=$1 phase=$2 before=$3 after=$4 head
+  JOURNALED_FIRSTMATE_COMMIT=""
+  head=$(run_git_probe -C "$repo" rev-parse HEAD 2>/dev/null) || return 1
+  firstmate_update_commit_is_valid "$head" || return 1
+  if [ "$phase" = prepared ] && [ "$head" = "$before" ]; then
+    return 10
+  fi
+  if [ "$head" = "$after" ] \
+    || run_git_probe -C "$repo" merge-base --is-ancestor "$after" "$head" >/dev/null 2>&1; then
+    JOURNALED_FIRSTMATE_COMMIT=$head
+    return 0
+  fi
+  return 1
+}
+
+process_journaled_firstmate_reread() {
+  local marker=$1 action phase path before after commit_status=0
+  action=$(fm_update_action_value "$marker" action 2>/dev/null || true)
+  phase=$(fm_update_action_value "$marker" phase 2>/dev/null || true)
+  path=$(fm_update_action_value "$marker" path 2>/dev/null || true)
+  before=$(fm_update_action_value "$marker" before 2>/dev/null || true)
+  after=$(fm_update_action_value "$marker" after 2>/dev/null || true)
+  if [ "$action" != firstmate-update-reread ] \
+    || { [ "$phase" != prepared ] && [ "$phase" != updated ]; } \
+    || [ "$path" != "$FM_ROOT/AGENTS.md" ] \
+    || ! firstmate_update_commit_is_valid "$before" \
+    || ! firstmate_update_commit_is_valid "$after" \
+    || [ "$before" = "$after" ]; then
+    printf 'Firstmate update reread journal is invalid\n' >&2
+    return 2
+  fi
+  firstmate_update_commit_state "$FM_ROOT" "$phase" "$before" "$after" \
+    || commit_status=$?
+  if [ "$commit_status" -eq 10 ]; then
+    rm -f -- "$marker"
+    return
+  fi
+  if [ "$commit_status" -ne 0 ]; then
+    printf 'Firstmate update reread journal no longer matches the checkout\n' >&2
+    return 2
+  fi
+  printf 'REREAD_REQUIRED: %s/AGENTS.md changed\n' "$FM_ROOT"
+  confirm_firstmate_reread || return 2
+  rm -f -- "$marker" || {
+    printf 'Firstmate update reread journal could not be cleared\n' >&2
+    return 1
+  }
+}
+
+process_journaled_secondmate_update() {
+  local marker=$1 action phase id selector home before after remote remote_host
+  local expected state meta kind current_home current_remote_host active_home head=""
+  local instructions message write_status commit_status=0
+  action=$(fm_update_action_value "$marker" action 2>/dev/null || true)
+  phase=$(fm_update_action_value "$marker" phase 2>/dev/null || true)
+  id=$(fm_update_action_value "$marker" id 2>/dev/null || true)
+  selector=$(fm_update_action_value "$marker" selector 2>/dev/null || true)
+  home=$(fm_update_action_value "$marker" home 2>/dev/null || true)
+  before=$(fm_update_action_value "$marker" before 2>/dev/null || true)
+  after=$(fm_update_action_value "$marker" after 2>/dev/null || true)
+  remote=$(fm_update_action_value "$marker" remote 2>/dev/null || true)
+  remote_host=$(fm_update_action_value "$marker" remote_host 2>/dev/null || true)
+  expected=$(fm_update_action_secondmate_path "$id" 2>/dev/null || true)
+  if [ "$action" != firstmate-update-secondmate ] \
+    || { [ "$phase" != prepared ] && [ "$phase" != updated ]; } \
+    || [ "$marker" != "$expected" ] || [ "$selector" != "fm-$id" ] \
+    || [ -z "$home" ]; then
+    printf 'Firstmate secondmate update journal is invalid: %s\n' "$marker" >&2
+    return 2
+  fi
+  state=$(deps_state_dir) || return 1
+  meta="$state/$id.meta"
+  kind=$(pending_marker_value "$meta" kind 2>/dev/null || true)
+  current_home=$(current_secondmate_home "$id" "$meta" 2>/dev/null || true)
+  current_remote_host=$(pending_marker_value "$meta" remote_host 2>/dev/null || true)
+  active_home=$(deps_home_dir) || return 1
+  if [ "$kind" != secondmate ] || [ -z "$current_home" ]; then
+    printf 'Firstmate post-update nudge identity changed for %s\n' "$selector" >&2
+    return 1
+  fi
+  case "$remote" in
+    0)
+      if [ -n "$remote_host" ] || [ -n "$current_remote_host" ] \
+        || ! firstmate_update_commit_is_valid "$before" \
+        || ! firstmate_update_commit_is_valid "$after" \
+        || [ "$before" = "$after" ] \
+        || ! FM_HOME="$active_home" validate_secondmate_home "$id" "$current_home" \
+        || [ "$VALIDATED_HOME" != "$home" ]; then
+        printf 'Firstmate local secondmate update journal is invalid for %s\n' "$selector" >&2
+        return 2
+      fi
+      firstmate_update_commit_state "$home" "$phase" "$before" "$after" \
+        || commit_status=$?
+      if [ "$commit_status" -eq 10 ]; then
+        rm -f -- "$marker"
+        return
+      fi
+      if [ "$commit_status" -ne 0 ]; then
+        printf 'Firstmate post-update nudge commit changed for %s\n' "$selector" >&2
+        return 1
+      fi
+      head=$JOURNALED_FIRSTMATE_COMMIT
+      instructions=AGENTS.md
+      message=$FM_SECOND_MATE_NUDGE_MESSAGE
+      ;;
+    1)
+      if [ -n "$before" ] || [ -n "$after" ] || [ -z "$remote_host" ] \
+        || [ "$current_home" != "$home" ] \
+        || [ "$current_remote_host" != "$remote_host" ]; then
+        printf 'Firstmate remote secondmate update journal is invalid for %s\n' "$selector" >&2
+        return 2
+      fi
+      instructions=remote
+      message=$FM_REMOTE_SECOND_MATE_NUDGE_MESSAGE
+      ;;
+    *)
+      printf 'Firstmate secondmate update journal placement is invalid for %s\n' "$selector" >&2
+      return 2
+      ;;
+  esac
+  fm_secondmate_nudge_write "$state" "$id" "$home" "$head" \
+    "$instructions" "$message" "$remote" fm-deps "$remote_host" create
+  write_status=$?
+  if [ "$write_status" -ne 0 ]; then
+    [ "$write_status" -eq 2 ] \
+      && existing_secondmate_nudge_matches \
+        "$(fm_secondmate_nudge_marker_path "$state" "$id")" \
+        "$id" "$home" "$head" "$remote" "$remote_host" \
+      || return 1
+  fi
+  rm -f -- "$marker" || {
+    printf 'Firstmate secondmate update journal could not be cleared for %s\n' "$selector" >&2
+    return 1
+  }
+}
+
+process_firstmate_update_journal() {
+  local pending firstmate_marker marker status failed=0
+  pending=$(deps_pending_dir) || return 1
+  local FM_UPDATE_ACTION_DIR=$pending
+  firstmate_marker=$(fm_update_action_firstmate_path) || return 1
+  if [ -e "$firstmate_marker" ] || [ -L "$firstmate_marker" ]; then
+    process_journaled_firstmate_reread "$firstmate_marker" || return $?
+  fi
+  for marker in "$pending"/firstmate-update-secondmate-*.pending; do
+    [ -e "$marker" ] || [ -L "$marker" ] || continue
+    status=0
+    process_journaled_secondmate_update "$marker" || status=$?
+    [ "$status" -eq 0 ] || failed=1
+  done
+  [ "$failed" -eq 0 ]
+}
+
 identity_bound_nudge_claim_path() {
   local id=$1 pending
   case "$id" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
@@ -1003,6 +1166,11 @@ firstmate_update_actions_pending() {
   if [ -e "$marker" ] || [ -L "$marker" ]; then
     return 0
   fi
+  for marker in "$pending"/firstmate-update-*.pending; do
+    if [ -e "$marker" ] || [ -L "$marker" ]; then
+      return 0
+    fi
+  done
   for marker in "$pending"/secondmate-*.pending; do
     if [ -e "$marker" ] || [ -L "$marker" ]; then
       return 0
@@ -1025,7 +1193,7 @@ firstmate_update_actions_pending() {
 
 process_pending_firstmate_actions() {
   local pending manifest reread_marker action path marker targets selector failed_targets=""
-  local record_failed=0 send_failed=0
+  local record_failed=0 send_failed=0 journal_failed=0 journal_status=0
   validate_firstmate_action_storage || return 3
   pending=$(deps_pending_dir) || return 1
   if [ -e "$pending" ] || [ -L "$pending" ]; then
@@ -1035,6 +1203,15 @@ process_pending_firstmate_actions() {
     }
   else
     pending=""
+  fi
+
+  if [ -n "$pending" ]; then
+    process_firstmate_update_journal || journal_status=$?
+    if [ "$journal_status" -eq 2 ]; then
+      return 2
+    elif [ "$journal_status" -ne 0 ]; then
+      journal_failed=1
+    fi
   fi
 
   reread_marker=$(firstmate_reread_marker_path) || return 1
@@ -1104,11 +1281,28 @@ process_pending_firstmate_actions() {
   fi
 
   process_identity_bound_nudges || send_failed=1
-  [ "$record_failed" -eq 0 ] && [ "$send_failed" -eq 0 ]
+  [ "$journal_failed" -eq 0 ] && [ "$record_failed" -eq 0 ] && [ "$send_failed" -eq 0 ]
+}
+
+validate_firstmate_update_journal_summary() {
+  local reread=$1 targets=$2 pending marker selector id
+  pending=$(deps_pending_dir) || return 1
+  local FM_UPDATE_ACTION_DIR=$pending
+  if [ "$reread" = yes ]; then
+    marker=$(fm_update_action_firstmate_path) || return 1
+    [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+  fi
+  if [ "$targets" != none ]; then
+    for selector in $targets; do
+      id=${selector#fm-}
+      marker=$(fm_update_action_secondmate_path "$id") || return 1
+      [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+    done
+  fi
 }
 
 handle_firstmate_update_actions() {
-  local update_out=$1 reread_line nudge_line reread targets selector
+  local update_out=$1 journaled=${2:-no} reread_line nudge_line reread targets selector
   reread_line=$(printf '%s\n' "$update_out" | grep '^reread-firstmate: ' | tail -n 1)
   nudge_line=$(printf '%s\n' "$update_out" | grep '^nudge-secondmates:' | tail -n 1)
   if [ -z "$reread_line" ] || [ -z "$nudge_line" ]; then
@@ -1143,27 +1337,44 @@ handle_firstmate_update_actions() {
       esac
     done
   fi
-  persist_firstmate_update_actions "$reread" "$targets" || {
-    printf 'Firstmate post-update actions could not be recorded\n' >&2
-    return 1
-  }
+  if [ "$journaled" = yes ]; then
+    validate_firstmate_update_journal_summary "$reread" "$targets" || {
+      printf 'Firstmate updater did not journal its reported caller actions\n' >&2
+      return 1
+    }
+  else
+    persist_firstmate_update_actions "$reread" "$targets" || {
+      printf 'Firstmate post-update actions could not be recorded\n' >&2
+      return 1
+    }
+  fi
   process_pending_firstmate_actions
 }
 
 run_firstmate_upgrade_locked() {
   local firstmate_line update_out update_status update_tmp pending_status
+  local journal_dir="" journaled=no
   process_pending_firstmate_actions
   pending_status=$?
   if [ "$pending_status" -ne 0 ]; then
     printf 'Firstmate update deferred until prior post-update actions complete\n' >&2
     return "$pending_status"
   fi
+  if [ "$_FM_DEPS_LOADED_SOURCE_ONLY" != 1 ] \
+    || [ "${FM_DEPS_TEST_LEGACY_UPDATE_ACTIONS:-0}" != 1 ]; then
+    ensure_deps_pending_dir || {
+      printf 'Firstmate updater action journal could not be prepared\n' >&2
+      return 1
+    }
+    journal_dir=$(deps_pending_dir) || return 1
+    journaled=yes
+  fi
   update_tmp=$(mktemp "${TMPDIR:-/tmp}/fm-deps-update.XXXXXX" 2>/dev/null) || {
     printf 'Firstmate updater output could not be captured\n' >&2
     return 1
   }
   update_status=0
-  FM_DEPENDENCY_LOCK_PARENT_PID="${BASHPID:-$$}" \
+  FM_UPDATE_ACTION_DIR="$journal_dir" FM_DEPENDENCY_LOCK_PARENT_PID="${BASHPID:-$$}" \
     "$FM_ROOT/bin/fm-update.sh" >"$update_tmp" 2>&1 || update_status=$?
   update_out=$(< "$update_tmp")
   rm -f "$update_tmp"
@@ -1172,7 +1383,7 @@ run_firstmate_upgrade_locked() {
     return 1
   fi
   printf '%s\n' "$update_out"
-  handle_firstmate_update_actions "$update_out" || return 1
+  handle_firstmate_update_actions "$update_out" "$journaled" || return 1
   firstmate_line=$(printf '%s\n' "$update_out" | grep '^firstmate: ' || true)
   if [ -z "$firstmate_line" ] || [[ "$firstmate_line" == *$'\n'* ]]; then
     printf 'Firstmate updater returned an invalid primary outcome\n' >&2

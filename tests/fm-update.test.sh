@@ -129,6 +129,54 @@ test_updates_main_and_secondmate() {
   pass "T1 main + secondmate fast-forward (single-parent), reread + nudge signalled"
 }
 
+test_update_actions_are_journaled_before_fast_forward() {
+  local w fakebin journal out primary_marker secondmate_marker real_git
+  w=$(new_world action-journal)
+  add_sm "$w" sm1
+  bump_origin "$w" instr
+  fakebin=$(fm_fakebin "$w/action-journal-bin")
+  journal="$w/home/state/.fm-deps-pending"
+  primary_marker="$journal/firstmate-update-reread.pending"
+  secondmate_marker="$journal/firstmate-update-secondmate-sm1.pending"
+  real_git=$(command -v git)
+  mkdir -p "$journal"
+  chmod 700 "$journal"
+  # shellcheck disable=SC2016
+  printf '%s\n' '#!/usr/bin/env bash' \
+    'if [ "${1:-}" = -C ] && [ "${3:-}" = merge ]; then' \
+    '  if [ "$2" = "$FM_DEPS_TEST_PRIMARY" ]; then' \
+    '    grep -qx "phase=prepared" "$FM_DEPS_TEST_PRIMARY_MARKER" || exit 91' \
+    '    grep -qx "path=$FM_DEPS_TEST_PRIMARY/AGENTS.md" "$FM_DEPS_TEST_PRIMARY_MARKER" || exit 92' \
+    '  elif [ "$2" = "$FM_DEPS_TEST_SECOND_MATE" ]; then' \
+    '    grep -qx "phase=prepared" "$FM_DEPS_TEST_SECOND_MATE_MARKER" || exit 93' \
+    '    grep -qx "home=$FM_DEPS_TEST_SECOND_MATE" "$FM_DEPS_TEST_SECOND_MATE_MARKER" || exit 94' \
+    '  fi' \
+    'fi' \
+    'exec "$FM_DEPS_TEST_REAL_GIT" "$@"' > "$fakebin/git"
+  chmod +x "$fakebin/git"
+
+  out=$(PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
+    FM_DEPS_HOST_LOCK_DIR="$w/firstmate-deps-$UID" \
+    FM_UPDATE_ACTION_DIR="$journal" FM_DEPS_TEST_REAL_GIT="$real_git" \
+    FM_DEPS_TEST_PRIMARY="$w/main" FM_DEPS_TEST_SECOND_MATE="$w/sm1" \
+    FM_DEPS_TEST_PRIMARY_MARKER="$primary_marker" \
+    FM_DEPS_TEST_SECOND_MATE_MARKER="$secondmate_marker" "$UPDATE" 2>&1)
+
+  assert_contains "$out" "firstmate: updated " \
+    "journaled Firstmate update did not fast-forward"
+  assert_contains "$out" "secondmate sm1: updated " \
+    "journaled secondmate update did not fast-forward"
+  assert_grep 'phase=updated' "$primary_marker" \
+    "Firstmate update journal was not finalized"
+  assert_grep 'phase=updated' "$secondmate_marker" \
+    "secondmate update journal was not finalized"
+  assert_grep "home=$w/sm1" "$secondmate_marker" \
+    "secondmate journal omitted the selected home identity"
+  assert_grep "after=$(git -C "$w/sm1" rev-parse HEAD)" "$secondmate_marker" \
+    "secondmate journal omitted the advanced commit identity"
+  pass "update actions are journaled before each fast-forward"
+}
+
 # --- T3: README-only change does not trigger a reread ----------------------
 test_reread_gate_is_instruction_only() {
   local w out
@@ -359,6 +407,7 @@ test_dependency_lock_owner_delegates_update() {
 }
 
 test_updates_main_and_secondmate
+test_update_actions_are_journaled_before_fast_forward
 test_reread_gate_is_instruction_only
 test_dirty_secondmate_skipped
 test_diverged_secondmate_skipped

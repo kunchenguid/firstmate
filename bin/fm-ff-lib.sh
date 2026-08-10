@@ -272,6 +272,15 @@ live_secondmate_meta_records() {
 # dirty, diverged, or wrong-branch target and leave its work untouched.
 FF_STATUS=""
 FF_INSTR=""
+FF_ACTION_JOURNAL_FAILED=0
+FF_UPDATE_SECOND_MATE_ID=""
+FF_UPDATE_SECOND_MATE_HOME=""
+FF_UPDATE_SECOND_MATE_WINDOW=""
+
+ff_action_journal_succeeded() {
+  [ "$FF_ACTION_JOURNAL_FAILED" -eq 0 ]
+}
+
 ff_target_locked() {
   local dir=$1 label=$2 base_mode=$3 allow_detached=${4:-no} ignore_seed_marker=${5:-no}
   FF_STATUS="skipped"
@@ -347,13 +356,26 @@ ff_target_locked() {
 
   instr=$(changed_instr "$dir" "$base")
   before=$(git -C "$dir" rev-parse --short HEAD)
+  if type fm_ff_before_fast_forward >/dev/null 2>&1 \
+    && ! fm_ff_before_fast_forward "$dir" "$local_rev" "$base_rev" "$instr"; then
+    echo "$label: skipped: update action journal is unavailable"
+    return 0
+  fi
   if ! out=$(git -C "$dir" merge --ff-only "$base" 2>&1); then
+    if type fm_ff_abort_fast_forward >/dev/null 2>&1 \
+      && ! fm_ff_abort_fast_forward "$dir" "$local_rev" "$base_rev" "$instr"; then
+      FF_ACTION_JOURNAL_FAILED=1
+    fi
     echo "$label: skipped: fast-forward failed: $(first_line "$out")"
     return 0
   fi
   after=$(git -C "$dir" rev-parse --short HEAD)
   FF_STATUS="updated"
   FF_INSTR="$instr"
+  if type fm_ff_after_fast_forward >/dev/null 2>&1 \
+    && ! fm_ff_after_fast_forward "$dir" "$local_rev" "$base_rev" "$instr"; then
+    FF_ACTION_JOURNAL_FAILED=1
+  fi
   if [ -n "$instr" ]; then
     echo "$label: updated $before..$after (instructions changed: $instr)"
   else
@@ -393,6 +415,9 @@ FF_SEEN_HOMES=""
 # each resolved home is processed at most once.
 process_secondmate() {
   local id=$1 home=$2 window=${3:-} base_mode=$4 nudge_requires_instr=${5:-no} home_real fm_root_real
+  local saved_update_id=$FF_UPDATE_SECOND_MATE_ID
+  local saved_update_home=$FF_UPDATE_SECOND_MATE_HOME
+  local saved_update_window=$FF_UPDATE_SECOND_MATE_WINDOW
   [ -n "$id" ] || return 0
   [ -n "$home" ] || return 0
   fm_root_real=$(resolve_path "$FM_ROOT")
@@ -408,7 +433,13 @@ process_secondmate() {
   esac
   FF_SEEN_HOMES="$FF_SEEN_HOMES $home_real"
 
+  FF_UPDATE_SECOND_MATE_ID=$id
+  FF_UPDATE_SECOND_MATE_HOME=$home_real
+  FF_UPDATE_SECOND_MATE_WINDOW=$window
   ff_target "$home_real" "secondmate $id" "$base_mode" yes yes
+  FF_UPDATE_SECOND_MATE_ID=$saved_update_id
+  FF_UPDATE_SECOND_MATE_HOME=$saved_update_home
+  FF_UPDATE_SECOND_MATE_WINDOW=$saved_update_window
   if [ "$FF_STATUS" = "updated" ] && [ -n "$window" ]; then
     if [ "$nudge_requires_instr" = yes ] && [ -z "$FF_INSTR" ]; then
       return 0

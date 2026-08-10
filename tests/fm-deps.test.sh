@@ -13,6 +13,7 @@ TMP_ROOT=$(fm_test_tmproot fm-deps-tests)
 
 # shellcheck source=bin/fm-deps.sh
 FM_DEPS_SOURCE_ONLY=1 FM_ROOT_OVERRIDE="$ROOT" . "$DEPS"
+export FM_DEPS_TEST_LEGACY_UPDATE_ACTIONS=1
 
 create_firstmate_action_home() {
   local fixture=$1 id=$2 tag=${3:-$2} target
@@ -378,6 +379,69 @@ test_firstmate_action_publication_is_serialized() {
   pass "Firstmate action publication is serialized per home"
 }
 
+test_prepared_update_journal_recovers_without_rebinding() {
+  local fixture root pending before after out original replacement marker log status
+  fixture="$TMP_ROOT/firstmate-update-journal-recovery"
+  root="$fixture/root"
+  pending="$fixture/state/.fm-deps-pending"
+  log="$fixture/send.log"
+  mkdir -p "$root/bin" "$fixture/state" "$fixture/data"
+  printf 'v1\n' > "$root/AGENTS.md"
+  printf '#!/usr/bin/env bash\n' > "$root/bin/tool.sh"
+  git -C "$root" init -q
+  git -C "$root" config user.email test@example.com
+  git -C "$root" config user.name Test
+  git -C "$root" add AGENTS.md bin/tool.sh
+  git -C "$root" commit -qm seed
+  before=$(git -C "$root" rev-parse HEAD)
+  printf 'v2\n' > "$root/AGENTS.md"
+  git -C "$root" add AGENTS.md
+  git -C "$root" commit -qm update
+  after=$(git -C "$root" rev-parse HEAD)
+  git -C "$root" reset -q --hard "$before"
+  mkdir -p "$pending"
+  chmod 700 "$pending"
+
+  FM_UPDATE_ACTION_DIR="$pending" \
+    fm_update_action_write_firstmate prepared "$root" "$before" "$after"
+  git -C "$root" reset -q --hard "$after"
+  out=$(FM_ROOT="$root" FM_HOME="$fixture" FM_STATE_OVERRIDE="$fixture/state" \
+    FM_DEPS_SOURCE_ONLY=1 FM_DEPS_INTERACTIVE=1 CHECK_ONLY=0 \
+    process_pending_firstmate_actions <<<yes 2>&1)
+  assert_contains "$out" "REREAD_CONFIRMED: $root/AGENTS.md" \
+    "prepared Firstmate journal did not recover the interrupted reread"
+  assert_absent "$pending/firstmate-update-reread.pending" \
+    "completed recovered reread retained its update journal"
+
+  original=$(create_firstmate_action_home "$fixture" journal-original)
+  register_firstmate_action_target "$fixture" journal-original "$original"
+  before=$(git -C "$original" rev-parse HEAD)
+  printf 'updated\n' >> "$original/AGENTS.md"
+  git -C "$original" add AGENTS.md
+  git -C "$original" commit -qm update
+  after=$(git -C "$original" rev-parse HEAD)
+  FM_UPDATE_ACTION_DIR="$pending" \
+    fm_update_action_write_secondmate updated journal-original "$original" \
+      "$before" "$after" 0 ""
+  replacement=$(create_firstmate_action_home "$fixture" journal-original replacement)
+  register_firstmate_action_target "$fixture" journal-original "$replacement"
+  # shellcheck disable=SC2016
+  printf '%s\n' '#!/usr/bin/env bash' \
+    'printf '\''%s\n'\'' "$1" >> "$FM_DEPS_TEST_LOG"' > "$root/bin/fm-send.sh"
+  chmod +x "$root/bin/fm-send.sh"
+  marker="$pending/firstmate-update-secondmate-journal-original.pending"
+
+  out=$(FM_ROOT="$root" FM_HOME="$fixture" FM_STATE_OVERRIDE="$fixture/state" \
+    FM_DEPS_TEST_LOG="$log" process_pending_firstmate_actions 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "journaled action rebound to a replacement secondmate: $out"
+  assert_absent "$log" "journaled action was delivered to a replacement secondmate"
+  assert_present "$marker" "identity mismatch discarded the journaled update action"
+  assert_grep "home=$original" "$marker" \
+    "identity mismatch rewrote the journaled action to the replacement home"
+  pass "prepared update journals recover without rebinding identities"
+}
+
 test_dependency_check_lock_is_run_wide_and_bounded() {
   local fixture primary secondmate host_lock ready release events holder holder_status
   local out status started elapsed i
@@ -520,6 +584,32 @@ test_host_lock_override_rejects_unrelated_directory() {
 
   [ "$after" = "$before" ] || fail "dependency lock validation changed unrelated directory permissions"
   pass "host lock overrides reject unrelated existing directories unchanged"
+}
+
+test_host_lock_defaults_to_private_runtime() {
+  local fixture runtime expected actual
+  fixture="$TMP_ROOT/host-lock-runtime"
+  runtime="$fixture/runtime"
+  mkdir -p "$runtime"
+  chmod 700 "$runtime"
+  expected="$runtime/firstmate-deps-$UID"
+
+  actual=$(FM_DEPS_HOST_LOCK_DIR= XDG_RUNTIME_DIR="$runtime" TMPDIR= \
+    fm_dependency_host_lock_dir) \
+    || fail "private runtime directory did not produce a dependency lock path"
+  [ "$actual" = "$expected" ] \
+    || fail "dependency lock did not use the private runtime directory: $actual"
+  FM_DEPS_HOST_LOCK_DIR= XDG_RUNTIME_DIR="$runtime" TMPDIR= \
+    fm_dependency_ensure_host_lock_dir \
+    || fail "dependency lock directory was not created below the private runtime"
+  [ -d "$expected" ] || fail "private runtime dependency lock directory is absent"
+
+  chmod 755 "$runtime"
+  if FM_DEPS_HOST_LOCK_DIR= XDG_RUNTIME_DIR="$runtime" TMPDIR= \
+    fm_dependency_host_lock_dir >/dev/null 2>&1; then
+    fail "non-private XDG runtime directory was accepted"
+  fi
+  pass "host lock defaults to a verified private runtime directory"
 }
 
 test_host_lock_first_creation_race_is_revalidated() {
@@ -1088,9 +1178,11 @@ test_firstmate_update_actions_are_consumed
 test_firstmate_secondmate_only_actions_are_preserved
 test_firstmate_concurrent_update_preserves_actions
 test_firstmate_action_publication_is_serialized
+test_prepared_update_journal_recovers_without_rebinding
 test_dependency_check_lock_is_run_wide_and_bounded
 test_direct_checker_reexecutes_under_host_lock
 test_host_lock_override_rejects_unrelated_directory
+test_host_lock_defaults_to_private_runtime
 test_host_lock_first_creation_race_is_revalidated
 test_invalid_pending_action_directory_stops_run
 test_firstmate_actions_are_durable_and_retry_every_target

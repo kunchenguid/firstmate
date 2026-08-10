@@ -21,11 +21,76 @@ fm_dependency_host_lock_basename() {
   printf 'firstmate-deps-%s\n' "$UID"
 }
 
+fm_dependency_runtime_dir_is_valid() {
+  local dir=$1
+  case "$dir" in
+    /*) ;;
+    *) return 1 ;;
+  esac
+  case "$dir" in *$'\n'*|*$'\r'*) return 1 ;; esac
+  [ -d "$dir" ] && [ ! -L "$dir" ] && [ -O "$dir" ] || return 1
+  [ "$(fm_dependency_path_mode "$dir")" = 700 ]
+}
+
+fm_dependency_private_parent_is_valid() {
+  local dir=$1 mode numeric
+  case "$dir" in /*) ;; *) return 1 ;; esac
+  case "$dir" in *$'\n'*|*$'\r'*) return 1 ;; esac
+  [ -d "$dir" ] && [ ! -L "$dir" ] && [ -O "$dir" ] || return 1
+  mode=$(fm_dependency_path_mode "$dir") || return 1
+  case "$mode" in ''|*[!0-7]*) return 1 ;; esac
+  numeric=$((8#$mode))
+  [ $((numeric & 0022)) -eq 0 ]
+}
+
+fm_dependency_prepare_private_runtime_dir() {
+  local parent=$1 name=$2 dir
+  fm_dependency_private_parent_is_valid "$parent" || return 1
+  dir="$parent/$name"
+  if [ -e "$dir" ] || [ -L "$dir" ]; then
+    fm_dependency_runtime_dir_is_valid "$dir" || return 1
+  elif ! (umask 077; mkdir "$dir") 2>/dev/null; then
+    fm_dependency_runtime_dir_is_valid "$dir" || return 1
+  fi
+  fm_dependency_runtime_dir_is_valid "$dir" || return 1
+  printf '%s\n' "$dir"
+}
+
+fm_dependency_runtime_dir() {
+  local dir
+  if [ -n "${XDG_RUNTIME_DIR:-}" ]; then
+    dir=$XDG_RUNTIME_DIR
+    fm_dependency_runtime_dir_is_valid "$dir" || return 1
+    printf '%s\n' "$dir"
+    return
+  fi
+  dir="/run/user/$UID"
+  if [ -e "$dir" ] || [ -L "$dir" ]; then
+    fm_dependency_runtime_dir_is_valid "$dir" || return 1
+    printf '%s\n' "$dir"
+    return
+  fi
+  if [ -n "${TMPDIR:-}" ]; then
+    dir=${TMPDIR%/}
+    fm_dependency_runtime_dir_is_valid "$dir" || return 1
+    printf '%s\n' "$dir"
+    return
+  fi
+  if [ -n "${HOME:-}" ]; then
+    dir=$(fm_dependency_prepare_private_runtime_dir "$HOME" .firstmate) || return 1
+    fm_dependency_prepare_private_runtime_dir "$dir" runtime
+    return
+  fi
+  return 1
+}
+
 fm_dependency_host_lock_dir() {
+  local runtime
   if [ -n "${FM_DEPS_HOST_LOCK_DIR:-}" ]; then
     printf '%s\n' "$FM_DEPS_HOST_LOCK_DIR"
   else
-    printf '/tmp/%s\n' "$(fm_dependency_host_lock_basename)"
+    runtime=$(fm_dependency_runtime_dir) || return 1
+    printf '%s/%s\n' "$runtime" "$(fm_dependency_host_lock_basename)"
   fi
 }
 
