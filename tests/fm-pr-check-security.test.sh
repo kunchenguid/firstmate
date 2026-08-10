@@ -3291,13 +3291,18 @@ test_retirement_queue_failure_and_receipt_tampering() {
   state="$dir/home/state"
   write_poll_meta "$state" task-a https://github.com/o/r/pull/8
   seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/8
-  mkdir "$state/.wake-queue"
+  # Fail sequence publication without making the queue itself look non-empty:
+  # a directory at .wake-queue would now (correctly) trigger re-arm recovery
+  # before the poll runs, so it no longer exercises the terminal append path.
+  mkdir "$state/.wake-queue.seq"
   before=$(poll_artifact_snapshot "$state" task-a)
   set +e
-  FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
+  FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GH_STATE=MERGED \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail "watcher retired despite queue publication failure"
+  [ -s "$dir/gh.log" ] || fail "queue failure fixture did not reach the authenticated poll"
   [ "$(poll_artifact_snapshot "$state" task-a)" = "$before" ] || fail "queue failure changed poll artifacts"
   [ ! -e "$state/task-a.pr-poll-retirement" ] || fail "queue failure published a receipt"
 
