@@ -730,7 +730,7 @@ SH
 }
 
 test_raw_omp_launch_does_not_arm_unwired_semantic_busy() {
-  local rec id out status launch raw_omp probe
+  local rec id out status launch raw_omp wrapper probe
   id=profile-raw-omp-z8f
   rec=$(make_spawn_case profile-raw-omp claude "$id")
   read_case_record "$rec"
@@ -742,10 +742,13 @@ printf '%s\n' "\${OMPCODE:-unset}" > "$probe"
 exit 0
 SH
   chmod +x "$raw_omp"
+  wrapper="$CASE_DIR/start-omp.sh"
+  printf '%s\n' '#!/usr/bin/env bash' "exec \"$raw_omp\" --raw-flag" > "$wrapper"
+  chmod +x "$wrapper"
   rm -f "$FAKEBIN_DIR/omp"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$id" "$PROJ_DIR" "cd \"$CASE_DIR\" && nice ./omp --raw-flag")
+    "$id" "$PROJ_DIR" "bash \"$wrapper\"")
   status=$?
   expect_code 0 "$status" "a raw OMP launch command should spawn"
   assert_contains "$out" "spawned $id harness=raw-omp" "raw OMP launch was recorded as verified"
@@ -759,16 +762,24 @@ SH
 }
 
 test_raw_omp_dispatch_policy_handles_common_launchers() {
-  local policy=$ROOT/bin/fm-raw-launch-policy.mjs command result
+  local policy=$ROOT/bin/fm-raw-launch-policy.mjs command result omp_script agent_script
+  omp_script="$TMP_ROOT/raw-policy-start-omp.sh"
+  agent_script="$TMP_ROOT/raw-policy-agent.sh"
+  printf '%s\n' '#!/usr/bin/env bash' 'exec /tmp/omp --raw-flag' > "$omp_script"
+  printf '%s\n' '#!/usr/bin/env bash' 'printf agent' > "$agent_script"
   for command in \
     "setsid /tmp/omp --raw-flag" \
+    "nice -n10 /tmp/omp --raw-flag" \
+    "stdbuf -o0 /tmp/omp --raw-flag" \
     "time /tmp/omp --raw-flag" \
     "time -p /tmp/omp --raw-flag" \
-    "time -f %E /tmp/omp --raw-flag"; do
+    "time -f%E /tmp/omp --raw-flag" \
+    "bash $omp_script" \
+    ". $omp_script"; do
     result=$(node "$policy" --command "$command")
     [ "$result" = omp ] || fail "raw OMP dispatcher '$command' was classified as '$result'"
   done
-  for command in "setsid printf '%s\\n' omp" "time printf '%s\\n' omp"; do
+  for command in "setsid printf '%s\\n' omp" "time printf '%s\\n' omp" "bash $agent_script" ". $agent_script"; do
     result=$(node "$policy" --command "$command")
     [ "$result" = other ] || fail "non-OMP dispatcher '$command' was classified as '$result'"
   done
