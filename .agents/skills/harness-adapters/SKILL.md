@@ -326,7 +326,7 @@ When a secondmate is launched on Pi or pi-signed, `fm-spawn.sh --secondmate` lau
 
 | Fact | Value |
 |---|---|
-| Busy state | Per-task extension events: `agent_start` opens a run and `agent_end` closes it after `session_stop`; `agent_end` also publishes the turn-end notification. |
+| Busy state | Per-task extension events: `agent_start` opens a run; observed `session_stop` closes it and publishes the turn-end notification, with idempotent `agent_end` and `session_shutdown` fallbacks. |
 | Exit command | `/exit` |
 | Interrupt | single Escape; the cancelled tool reports `[Command cancelled]`, the agent returns idle, and the composer is empty. |
 | Autonomy | `--approval-mode yolo` |

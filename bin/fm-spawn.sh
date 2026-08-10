@@ -2512,9 +2512,8 @@ EOF
       ;;
     omp)
       # OMP exposes a verified semantic lifecycle extension API. agent_start
-      # brackets the submitted run; agent_end fires once after session_stop and
-      # the final turn, so it clears busy state and publishes the wake marker
-      # without the inner-turn false idle possible from turn_end.
+      # brackets the submitted run; session_stop is the observed terminal edge,
+      # while agent_end and session_shutdown remain idempotent fallbacks.
       cat > "$STATE/$ID.omp-ext.ts" <<EOF
 // Firstmate semantic busy-state events + turn-end notification; written by
 // fm-spawn under the contract owned by bin/fm-busy-lib.sh.
@@ -2526,15 +2525,25 @@ const busyEvent = (state: string, event: string) =>
       "--gen", "$BUSY_GEN", "--source", "omp-ext", "--event", event,
     ], () => resolve());
   });
-export default function (omp: any) {
-  omp.on("agent_start", () => busyEvent("busy", "agent-start"));
-  omp.on("agent_end", async () => {
-    await busyEvent("idle", "agent-end");
-    await new Promise<void>((resolve) => {
-      execFile("touch", ["$TURNEND"], () => resolve());
-    });
+const touchTurnEnd = () =>
+  new Promise<void>((resolve) => {
+    execFile("touch", ["$TURNEND"], () => resolve());
   });
-  omp.on("session_shutdown", () => busyEvent("idle", "session-shutdown"));
+let runSettled = false;
+const settleRun = async (event: string) => {
+  if (runSettled) return;
+  runSettled = true;
+  await busyEvent("idle", event);
+  await touchTurnEnd();
+};
+export default function (omp: any) {
+  omp.on("agent_start", () => {
+    runSettled = false;
+    return busyEvent("busy", "agent-start");
+  });
+  omp.on("session_stop", () => settleRun("session-stop"));
+  omp.on("agent_end", () => settleRun("agent-end"));
+  omp.on("session_shutdown", () => settleRun("session-shutdown"));
 }
 EOF
       ;;

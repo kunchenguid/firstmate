@@ -178,27 +178,35 @@ test_pi_extension_stale_incarnation_rejected() {
 }
 
 # drive_omp_ext <ext-path> <mode>: load the generated OMP extension in a plain
-# Node host and fire one lifecycle handler. Modes: agent-start, agent-end,
-# session-shutdown. OMP has no ctx.isIdle(): agent_end fires once after the
-# final turn, so it is the whole idle edge and it also publishes the turn-end
-# notification.
+# Node host and fire one lifecycle handler or one terminal event sequence.
 drive_omp_ext() {
   EXT_PATH="$1" MODE="$2" node --input-type=module 2>&1 <<'EOF'
 import { pathToFileURL } from "node:url";
 const mod = await import(pathToFileURL(process.env.EXT_PATH).href);
 const handlers = {};
 mod.default({ on: (name, fn) => { handlers[name] = fn; } });
+const fire = async (name) => {
+  const handler = handlers[name];
+  if (!handler) throw new Error("missing OMP handler " + name);
+  await handler({}, {});
+};
 switch (process.env.MODE) {
-  case "agent-start": await handlers["agent_start"]({}, {}); break;
-  case "agent-end": await handlers["agent_end"]({}, {}); break;
-  case "session-shutdown": await handlers["session_shutdown"]({}, {}); break;
+  case "agent-start": await fire("agent_start"); break;
+  case "agent-end": await fire("agent_end"); break;
+  case "session-stop": await fire("session_stop"); break;
+  case "session-shutdown": await fire("session_shutdown"); break;
+  case "session-stop-agent-end-shutdown":
+    await fire("session_stop");
+    await fire("agent_end");
+    await fire("session_shutdown");
+    break;
   default: throw new Error("unknown mode " + process.env.MODE);
 }
 EOF
 }
 
 test_omp_extension_semantic_lifecycle() {
-  local rec id=busy-omp-1 out state ext
+  local rec id=busy-omp-1 out state ext record
   rec=$(make_spawn_case omp-lifecycle omp "$id")
   read_case_record "$rec"
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
@@ -215,10 +223,13 @@ test_omp_extension_semantic_lifecycle() {
   [ "$out" = "busy omp-ext" ] || fail "agent_start must classify 'busy omp-ext', got '$out'"
 
   rm -f "$state/$id.turn-ended"
-  out=$(drive_omp_ext "$ext" agent-end) || fail "agent_end drive failed: $out"
+  out=$(drive_omp_ext "$ext" session-stop-agent-end-shutdown) || fail "OMP terminal lifecycle drive failed: $out"
   out=$(classify omp "$id" "$state")
-  [ "$out" = "idle omp-ext" ] || fail "agent_end must classify 'idle omp-ext', got '$out'"
-  [ -f "$state/$id.turn-ended" ] || fail "agent_end no longer publishes the turn-end notification marker"
+  [ "$out" = "idle omp-ext" ] || fail "session_stop must classify 'idle omp-ext', got '$out'"
+  record=$(fm_busy_record_read "$state" "$id")
+  [ "$record" = "idle omp-ext session-stop 3" ] \
+    || fail "session_stop/agent_end/shutdown must settle exactly once, got '$record'"
+  [ -f "$state/$id.turn-ended" ] || fail "session_stop no longer publishes the turn-end notification marker"
 
   out=$(drive_omp_ext "$ext" agent-start) || fail "second agent_start drive failed: $out"
   out=$(classify omp "$id" "$state")
@@ -227,7 +238,7 @@ test_omp_extension_semantic_lifecycle() {
   out=$(drive_omp_ext "$ext" session-shutdown) || fail "session_shutdown drive failed: $out"
   out=$(classify omp "$id" "$state")
   [ "$out" = "idle omp-ext" ] || fail "session_shutdown must settle the worker idle, got '$out'"
-  pass "omp extension opens busy on agent_start, settles idle on agent_end with the turn-end marker, and settles on shutdown"
+  pass "omp extension settles on observed session_stop with idempotent lifecycle fallbacks"
 }
 
 test_omp_extension_stale_incarnation_rejected() {
@@ -239,7 +250,7 @@ test_omp_extension_stale_incarnation_rejected() {
   state="$HOME_DIR/state"
   ext="$state/$id.omp-ext.ts"
   "$ROOT/bin/fm-busy-event.sh" arm "$state" "$id" >/dev/null
-  out=$(drive_omp_ext "$ext" agent-end) || fail "stale agent_end drive failed: $out"
+  out=$(drive_omp_ext "$ext" session-stop) || fail "stale session_stop drive failed: $out"
   out=$(classify omp "$id" "$state")
   [ "$out" = "busy fm-spawn" ] || fail "a stale extension event must not change state, got '$out'"
   pass "omp extension events from a superseded incarnation are rejected as stale"

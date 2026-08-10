@@ -191,7 +191,7 @@ Each pass polled `state/<id>.busy-state` while a real turn ran.
 
 OMP 17.2.12 was verified on 2026-08-09 with a live extension event probe and the tracked OMP primary entrypoints.
 The runtime emitted `agent_start`, `session_stop`, `turn_end`, and one final `agent_end` for a completed run, and emitted `session_switch` for same-process replacement.
-`tests/fm-busy-adapter-wiring.test.sh` loads the generated `omp-ext` extension in a plain Node host and pins that mapping through the real writer and classifier: `agent_start` to busy, `agent_end` to idle plus the turn-end marker, `session_shutdown` to idle, and a superseded generation's events rejected as stale.
+`tests/fm-busy-adapter-wiring.test.sh` loads the generated `omp-ext` extension in a plain Node host and pins that mapping through the real writer and classifier: `agent_start` to busy, observed `session_stop` to idle plus the turn-end marker, idempotent `agent_end` and `session_shutdown` fallbacks, and a superseded generation's events rejected as stale.
 `tests/fm-busy-state.test.sh` pins `omp-ext` source isolation and `tests/fm-secondmate-harness.test.sh` pins the launch that installs it.
 Codex was probed two ways, both refused:
 
