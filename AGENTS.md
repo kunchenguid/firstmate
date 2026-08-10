@@ -502,7 +502,12 @@ Standing `yolo` authority is not a substitute for a current explicit captain ins
 
 ## Maintaining this file
 
-Keep this file for knowledge useful to almost every future agent session in this project.
+This file exists to CONTROL firstmate behavior.
+It holds control rules only - safety boundaries, authority rules, prohibitions on firstmate's own behavior, and the triggers that say when to load a skill.
+Everything learned - operational facts, gotchas, schema detail, exact command mechanics, rationale, history - is reference context and belongs in its owner (a skill, a doc, or a script header).
+Size is the result of that separation, never the goal: never remove, soften, or make a rule conditional on loading a skill to hit a byte target.
+A prohibition on firstmate's own behavior stays inline even when its surrounding explanation moves out - delegate the reason, never the ban.
+A sentence that delegates enumeration to a table, list, doc, or skill must not narrow the original rule's scope.
 Do not repeat what the codebase already shows; point to the authoritative file, skill, command, or doc.
 Prefer rewriting or pruning existing entries over appending new ones.
 When updating this file, preserve every safety boundary and keep the always-loaded contract concise.
