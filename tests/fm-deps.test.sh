@@ -286,7 +286,8 @@ test_firstmate_concurrent_update_preserves_actions() {
 }
 
 test_firstmate_actions_are_durable_and_retry_every_target() {
-  local fixture log out status pending nudge one_home replacement before after
+  local fixture log out status pending nudge one_home one_commit replacement before after
+  local manifest_contents
   fixture="$TMP_ROOT/firstmate-durable-actions"
   log="$fixture/send.log"
   pending="$fixture/state/.fm-deps-pending"
@@ -314,21 +315,43 @@ test_firstmate_actions_are_durable_and_retry_every_target() {
     "declined reread left no durable action inventory"
   assert_grep "targets=fm-one fm-two" "$pending/firstmate-actions.pending" \
     "durable action inventory omitted an updated secondmate"
+  one_commit=$(git -C "$one_home" rev-parse HEAD)
+  manifest_contents=$(< "$pending/firstmate-actions.pending")
+  assert_contains "$manifest_contents" "target.one.home=$one_home" \
+    "durable action inventory omitted the original secondmate home"
+  assert_contains "$manifest_contents" "target.one.commit=$one_commit" \
+    "durable action inventory omitted the original instruction commit"
   assert_absent "$nudge/one.pending" \
     "secondmate identity was recorded before reread confirmation"
   assert_absent "$log" "secondmates were nudged before reread confirmation"
 
-  mkdir -p "$nudge/one.pending"
+  replacement=$(create_firstmate_action_home "$fixture" one replacement)
+  register_firstmate_action_target "$fixture" one "$replacement"
   out=$(FM_ROOT="$fixture" FM_HOME="$fixture" FM_DEPS_SOURCE_ONLY=1 \
     FM_DEPS_INTERACTIVE=1 CHECK_ONLY=0 FM_DEPS_TEST_LOG="$log" \
     process_pending_firstmate_actions <<<yes 2>&1)
   status=$?
-  [ "$status" -ne 0 ] || fail "corrupt first marker completed pending actions: $out"
+  [ "$status" -ne 0 ] || fail "reassigned target completed pending actions: $out"
+  assert_not_contains "$(< "$log")" "fm-one" \
+    "pending action was rebound to the replacement secondmate"
   assert_grep "fm-two" "$log" "later pending secondmate was skipped after a failure"
   assert_grep "targets=fm-one" "$pending/firstmate-actions.pending" \
-    "failed marker lost its target from the durable action inventory"
+    "identity mismatch lost its target from the durable action inventory"
+  manifest_contents=$(< "$pending/firstmate-actions.pending")
+  assert_contains "$manifest_contents" "target.one.home=$one_home" \
+    "identity mismatch rewrote the action to the replacement home"
   assert_absent "$nudge/two.pending" \
     "successful later secondmate nudge retained its retry marker"
+
+  register_firstmate_action_target "$fixture" one "$one_home"
+  mkdir -p "$nudge/one.pending"
+  out=$(FM_ROOT="$fixture" FM_HOME="$fixture" FM_DEPS_SOURCE_ONLY=1 \
+    FM_DEPS_INTERACTIVE=1 CHECK_ONLY=0 FM_DEPS_TEST_LOG="$log" \
+    process_pending_firstmate_actions 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "corrupt first marker completed pending actions: $out"
+  assert_grep "targets=fm-one" "$pending/firstmate-actions.pending" \
+    "failed marker lost its target from the durable action inventory"
 
   rmdir "$nudge/one.pending"
   out=$(FM_ROOT="$fixture" FM_HOME="$fixture" FM_DEPS_SOURCE_ONLY=1 \
@@ -342,7 +365,6 @@ test_firstmate_actions_are_durable_and_retry_every_target() {
     "fully identity-bound inventory was not retired"
 
   before=$(wc -l < "$log")
-  replacement=$(create_firstmate_action_home "$fixture" one replacement)
   register_firstmate_action_target "$fixture" one "$replacement"
   out=$(FM_ROOT="$fixture" FM_HOME="$fixture" FM_DEPS_SOURCE_ONLY=1 \
     FM_DEPS_INTERACTIVE=1 CHECK_ONLY=0 FM_DEPS_TEST_LOG="$log" \
@@ -380,6 +402,26 @@ test_remote_secondmate_actions_use_shared_retry_markers() {
   chmod +x "$fixture/bin/fm-send.sh"
 
   FM_ROOT="$fixture" FM_HOME="$fixture" persist_firstmate_update_actions no fm-remote
+  assert_grep "target.remote.remote-host=remote.example" \
+    "$fixture/state/.fm-deps-pending/firstmate-actions.pending" \
+    "remote action inventory omitted its original placement"
+  {
+    printf 'kind=secondmate\n'
+    printf 'home=/srv/firstmate-remote\n'
+    printf 'remote_host=replacement.example\n'
+  } > "$fixture/state/remote.meta"
+  out=$(FM_ROOT="$fixture" FM_HOME="$fixture" FM_DEPS_TEST_LOG="$log" \
+    process_pending_firstmate_actions 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "remote placement change rebound the pending action"
+  assert_absent "$log" "remote placement change delivered the pending action"
+  assert_present "$fixture/state/.fm-deps-pending/firstmate-actions.pending" \
+    "remote placement change discarded the original action inventory"
+  {
+    printf 'kind=secondmate\n'
+    printf 'home=/srv/firstmate-remote\n'
+    printf 'remote_host=remote.example\n'
+  } > "$fixture/state/remote.meta"
   out=$(FM_ROOT="$fixture" FM_HOME="$fixture" FM_DEPS_TEST_LOG="$log" \
     FM_DEPS_TEST_SEND_FAIL=1 process_pending_firstmate_actions 2>&1)
   status=$?
@@ -390,6 +432,8 @@ test_remote_secondmate_actions_use_shared_retry_markers() {
   assert_grep "owner=fm-deps" "$marker" \
     "dependency-checker retry marker lost its owner"
   assert_grep "remote=1" "$marker" "remote retry marker lost its placement identity"
+  assert_grep "remote_host=remote.example" "$marker" \
+    "remote retry marker lost its host identity"
   assert_grep "home=/srv/firstmate-remote" "$marker" \
     "remote retry marker lost its home identity"
 
@@ -403,6 +447,40 @@ test_remote_secondmate_actions_use_shared_retry_markers() {
   assert_grep "fm-remote|$FM_REMOTE_SECOND_MATE_NUDGE_MESSAGE" "$log" \
     "remote secondmate did not receive the shared reread message"
   pass "remote secondmate actions use the shared retry path"
+}
+
+test_nudge_delivery_preserves_concurrent_replacement() {
+  local fixture log marker claim home commit
+  fixture="$TMP_ROOT/firstmate-nudge-replacement"
+  log="$fixture/send.log"
+  marker="$fixture/state/.secondmate-nudge-pending/race.pending"
+  claim="$fixture/state/.fm-deps-pending/secondmate-nudge-race.claimed"
+  mkdir -p "$fixture/bin"
+  home=$(create_firstmate_action_home "$fixture" race)
+  register_firstmate_action_target "$fixture" race "$home"
+  commit=$(git -C "$home" rev-parse HEAD)
+  # shellcheck disable=SC2016
+  printf '%s\n' '#!/usr/bin/env bash' \
+    'printf '\''%s\n'\'' "$1" >> "$FM_DEPS_TEST_LOG"' \
+    'tmp="$FM_DEPS_TEST_MARKER.replacement"' \
+    'printf '\''%s\n'\'' '\''id=race'\'' '\''selector=fm-race'\'' \' \
+    '  "home=$FM_DEPS_TEST_HOME" "commit=$FM_DEPS_TEST_COMMIT" \' \
+    '  '\''instructions=AGENTS.md'\'' "message=$FM_DEPS_TEST_MESSAGE" \' \
+    '  '\''remote=0'\'' '\''owner=startup'\'' > "$tmp"' \
+    'mv -f -- "$tmp" "$FM_DEPS_TEST_MARKER"' > "$fixture/bin/fm-send.sh"
+  chmod +x "$fixture/bin/fm-send.sh"
+
+  FM_ROOT="$fixture" FM_HOME="$fixture" persist_firstmate_update_actions no fm-race
+  FM_ROOT="$fixture" FM_HOME="$fixture" FM_DEPS_TEST_LOG="$log" \
+    FM_DEPS_TEST_MARKER="$marker" FM_DEPS_TEST_HOME="$home" \
+    FM_DEPS_TEST_COMMIT="$commit" FM_DEPS_TEST_MESSAGE="$FM_SECOND_MATE_NUDGE_MESSAGE" \
+    process_pending_firstmate_actions
+  assert_present "$marker" "successful delivery erased a concurrent replacement action"
+  assert_grep "owner=startup" "$marker" \
+    "successful delivery retained the consumed action instead of its replacement"
+  assert_absent "$claim" "successful delivery retained its immutable claim"
+  assert_grep "fm-race" "$log" "race fixture did not deliver the claimed action"
+  pass "nudge delivery preserves concurrent retry replacements"
 }
 
 test_npm_upgrade_pins_version_and_retries_hooks() {
@@ -543,6 +621,19 @@ test_dependency_probes_are_bounded_and_git_is_noninteractive() {
   pass "dependency probes are bounded and Git credentials stay non-interactive"
 }
 
+test_zero_padded_probe_timeout_is_rejected() {
+  local fixture out status
+  fixture="$TMP_ROOT/zero-probe-timeout"
+  mkdir -p "$fixture"
+  out=$(FM_DEPS_PROBE_TIMEOUT=00 FM_ROOT_OVERRIDE="$fixture" \
+    bash "$DEPS" --check 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "zero-padded zero disabled the probe deadline"
+  assert_contains "$out" "FM_DEPS_PROBE_TIMEOUT must be a positive integer" \
+    "zero-padded zero timeout was not rejected before probing"
+  pass "probe timeout rejects every all-zero spelling"
+}
+
 test_unread_instructions_stop_dependency_mutations() {
   local fixture fakebin log out status
   fixture="$TMP_ROOT/unread-instructions"
@@ -677,6 +768,7 @@ test_firstmate_secondmate_only_actions_are_preserved
 test_firstmate_concurrent_update_preserves_actions
 test_firstmate_actions_are_durable_and_retry_every_target
 test_remote_secondmate_actions_use_shared_retry_markers
+test_nudge_delivery_preserves_concurrent_replacement
 test_firstmate_updated_outcome_counts_upgrade
 test_firstmate_current_outcome_is_success_without_upgrade
 test_firstmate_skipped_outcome_fails_without_upgrade
@@ -684,6 +776,7 @@ test_npm_upgrade_pins_version_and_retries_hooks
 test_pending_npm_hooks_supersede_changed_active_version
 test_npm_upgrade_rejects_active_version_mismatch
 test_dependency_probes_are_bounded_and_git_is_noninteractive
+test_zero_padded_probe_timeout_is_rejected
 test_unread_instructions_stop_dependency_mutations
 test_mixed_checkout_majors_report_repository_update
 

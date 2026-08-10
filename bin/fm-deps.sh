@@ -71,8 +71,9 @@ is_interactive() {
 
 probe_timeout_is_valid() {
   case "${FM_DEPS_PROBE_TIMEOUT:-30}" in
-    ''|*[!0-9]*|0) return 1 ;;
-    *) return 0 ;;
+    ''|*[!0-9]*) return 1 ;;
+    *[1-9]*) return 0 ;;
+    *) return 1 ;;
   esac
 }
 
@@ -398,15 +399,46 @@ deps_data_dir() {
   fi
 }
 
+declare -A PENDING_FIRSTMATE_BOUND=()
+declare -A PENDING_FIRSTMATE_HOME=()
+declare -A PENDING_FIRSTMATE_COMMIT=()
+declare -A PENDING_FIRSTMATE_REMOTE=()
+declare -A PENDING_FIRSTMATE_REMOTE_HOST=()
+
+reset_firstmate_action_inventory() {
+  PENDING_FIRSTMATE_BOUND=()
+  PENDING_FIRSTMATE_HOME=()
+  PENDING_FIRSTMATE_COMMIT=()
+  PENDING_FIRSTMATE_REMOTE=()
+  PENDING_FIRSTMATE_REMOTE_HOST=()
+}
+
 write_firstmate_action_manifest() {
-  local reread=$1 targets=$2 marker
+  local reread=$1 targets=$2 marker selector id bound
+  local -a lines=('action=firstmate-update' "reread=$reread" "targets=$targets")
   marker=$(firstmate_action_manifest_path) || return 1
-  write_deps_pending_marker "$marker" \
-    'action=firstmate-update' "reread=$reread" "targets=$targets"
+  if [ "$targets" != none ]; then
+    for selector in $targets; do
+      id=${selector#fm-}
+      bound=${PENDING_FIRSTMATE_BOUND[$id]:-}
+      case "$bound" in yes|no) ;; *) return 1 ;; esac
+      lines+=("target.$id.bound=$bound")
+      if [ "$bound" = yes ]; then
+        lines+=(
+          "target.$id.home=${PENDING_FIRSTMATE_HOME[$id]:-}"
+          "target.$id.commit=${PENDING_FIRSTMATE_COMMIT[$id]:-}"
+          "target.$id.remote=${PENDING_FIRSTMATE_REMOTE[$id]:-}"
+          "target.$id.remote-host=${PENDING_FIRSTMATE_REMOTE_HOST[$id]:-}"
+        )
+      fi
+    done
+  fi
+  write_deps_pending_marker "$marker" "${lines[@]}"
 }
 
 load_firstmate_action_manifest() {
-  local marker=$1 action selector
+  local marker=$1 action selector id bound home commit remote remote_host seen=""
+  reset_firstmate_action_inventory
   action=$(pending_marker_value "$marker" action 2>/dev/null || true)
   PENDING_FIRSTMATE_REREAD=$(pending_marker_value "$marker" reread 2>/dev/null || true)
   PENDING_FIRSTMATE_TARGETS=$(pending_marker_value "$marker" targets 2>/dev/null || true)
@@ -416,7 +448,35 @@ load_firstmate_action_manifest() {
   if [ "$PENDING_FIRSTMATE_TARGETS" != none ]; then
     for selector in $PENDING_FIRSTMATE_TARGETS; do
       case "$selector" in fm-*) ;; *) return 1 ;; esac
-      case "${selector#fm-}" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+      id=${selector#fm-}
+      case "$id" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+      case " $seen " in *" $id "*) return 1 ;; esac
+      seen="${seen}${seen:+ }$id"
+      bound=$(pending_marker_value "$marker" "target.$id.bound" 2>/dev/null || true)
+      case "$bound" in
+        no)
+          PENDING_FIRSTMATE_BOUND[$id]=no
+          ;;
+        yes)
+          home=$(pending_marker_value "$marker" "target.$id.home" 2>/dev/null) || return 1
+          commit=$(pending_marker_value "$marker" "target.$id.commit" 2>/dev/null) || return 1
+          remote=$(pending_marker_value "$marker" "target.$id.remote" 2>/dev/null) || return 1
+          remote_host=$(pending_marker_value "$marker" "target.$id.remote-host" 2>/dev/null) \
+            || return 1
+          [ -n "$home" ] || return 1
+          case "$remote" in
+            0) [ -n "$commit" ] && [ -z "$remote_host" ] || return 1 ;;
+            1) [ -z "$commit" ] && [ -n "$remote_host" ] || return 1 ;;
+            *) return 1 ;;
+          esac
+          PENDING_FIRSTMATE_BOUND[$id]=yes
+          PENDING_FIRSTMATE_HOME[$id]=$home
+          PENDING_FIRSTMATE_COMMIT[$id]=$commit
+          PENDING_FIRSTMATE_REMOTE[$id]=$remote
+          PENDING_FIRSTMATE_REMOTE_HOST[$id]=$remote_host
+          ;;
+        *) return 1 ;;
+      esac
     done
   fi
 }
@@ -432,8 +492,8 @@ current_secondmate_home() {
   printf '%s\n' "$home"
 }
 
-record_secondmate_nudge_action() {
-  local selector=$1 id state meta kind home remote_host active_home commit instructions message remote
+capture_secondmate_nudge_identity() {
+  local selector=$1 id state meta kind home remote_host active_home commit
   case "$selector" in fm-*) ;; *) return 1 ;; esac
   id=${selector#fm-}
   case "$id" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
@@ -445,9 +505,7 @@ record_secondmate_nudge_action() {
   remote_host=$(pending_marker_value "$meta" remote_host 2>/dev/null || true)
   if [ -n "$remote_host" ]; then
     commit=""
-    instructions=remote
-    message=$FM_REMOTE_SECOND_MATE_NUDGE_MESSAGE
-    remote=1
+    SECOND_MATE_IDENTITY_REMOTE=1
   else
     active_home=$(deps_home_dir) || return 1
     if ! FM_HOME="$active_home" validate_secondmate_home "$id" "$home"; then
@@ -456,24 +514,245 @@ record_secondmate_nudge_action() {
     home=$VALIDATED_HOME
     commit=$(run_git_probe -C "$home" rev-parse HEAD 2>/dev/null) || return 1
     [ -n "$commit" ] || return 1
-    instructions=AGENTS.md
-    message=$FM_SECOND_MATE_NUDGE_MESSAGE
-    remote=0
+    SECOND_MATE_IDENTITY_REMOTE=0
   fi
+  SECOND_MATE_IDENTITY_HOME=$home
+  SECOND_MATE_IDENTITY_COMMIT=$commit
+  SECOND_MATE_IDENTITY_REMOTE_HOST=$remote_host
+}
+
+capture_firstmate_action_inventory() {
+  local targets=$1 selector id seen=""
+  reset_firstmate_action_inventory
+  [ "$targets" != none ] || return 0
+  for selector in $targets; do
+    case "$selector" in fm-*) ;; *) return 1 ;; esac
+    id=${selector#fm-}
+    case "$id" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+    case " $seen " in *" $id "*) return 1 ;; esac
+    seen="${seen}${seen:+ }$id"
+    if capture_secondmate_nudge_identity "$selector"; then
+      PENDING_FIRSTMATE_BOUND[$id]=yes
+      PENDING_FIRSTMATE_HOME[$id]=$SECOND_MATE_IDENTITY_HOME
+      PENDING_FIRSTMATE_COMMIT[$id]=$SECOND_MATE_IDENTITY_COMMIT
+      PENDING_FIRSTMATE_REMOTE[$id]=$SECOND_MATE_IDENTITY_REMOTE
+      PENDING_FIRSTMATE_REMOTE_HOST[$id]=$SECOND_MATE_IDENTITY_REMOTE_HOST
+    else
+      PENDING_FIRSTMATE_BOUND[$id]=no
+    fi
+  done
+}
+
+existing_secondmate_nudge_matches() {
+  local marker=$1 id=$2 home=$3 commit=$4 remote=$5 remote_host=$6
+  local marker_selector marker_home marker_commit marker_remote marker_instructions
+  local marker_message marker_remote_host expected_instructions expected_message
+  [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+  marker_selector=$(pending_marker_value "$marker" selector 2>/dev/null || true)
+  marker_home=$(pending_marker_value "$marker" home 2>/dev/null || true)
+  marker_commit=$(pending_marker_value "$marker" commit 2>/dev/null || true)
+  marker_remote=$(pending_marker_value "$marker" remote 2>/dev/null || true)
+  marker_instructions=$(pending_marker_value "$marker" instructions 2>/dev/null || true)
+  marker_message=$(pending_marker_value "$marker" message 2>/dev/null || true)
+  marker_remote_host=$(pending_marker_value "$marker" remote_host 2>/dev/null || true)
+  if [ "$remote" = 1 ]; then
+    expected_instructions=remote
+    expected_message=$FM_REMOTE_SECOND_MATE_NUDGE_MESSAGE
+    [ "$marker_remote_host" = "$remote_host" ] || return 1
+  else
+    expected_instructions=AGENTS.md
+    expected_message=$FM_SECOND_MATE_NUDGE_MESSAGE
+    [ -z "$marker_remote_host" ] || return 1
+  fi
+  [ "$(pending_marker_value "$marker" id 2>/dev/null || true)" = "$id" ] \
+    && [ "$marker_selector" = "fm-$id" ] \
+    && [ "$marker_home" = "$home" ] \
+    && [ "$marker_commit" = "$commit" ] \
+    && [ "$marker_remote" = "$remote" ] \
+    && [ "$marker_instructions" = "$expected_instructions" ] \
+    && [ "$marker_message" = "$expected_message" ]
+}
+
+record_secondmate_nudge_action() {
+  local selector=$1 id state meta kind current_home current_remote_host active_home head
+  local home commit remote remote_host instructions message marker write_status
+  id=${selector#fm-}
+  [ "${PENDING_FIRSTMATE_BOUND[$id]:-}" = yes ] || return 1
+  home=${PENDING_FIRSTMATE_HOME[$id]:-}
+  commit=${PENDING_FIRSTMATE_COMMIT[$id]:-}
+  remote=${PENDING_FIRSTMATE_REMOTE[$id]:-}
+  remote_host=${PENDING_FIRSTMATE_REMOTE_HOST[$id]:-}
+  state=$(deps_state_dir) || return 1
+  meta="$state/$id.meta"
+  kind=$(pending_marker_value "$meta" kind 2>/dev/null || true)
+  [ "$kind" = secondmate ] || return 1
+  current_home=$(current_secondmate_home "$id" "$meta") || return 1
+  current_remote_host=$(pending_marker_value "$meta" remote_host 2>/dev/null || true)
+  active_home=$(deps_home_dir) || return 1
+  case "$remote" in
+    0)
+      [ -z "$current_remote_host" ] || return 1
+      FM_HOME="$active_home" validate_secondmate_home "$id" "$current_home" || return 1
+      [ "$VALIDATED_HOME" = "$home" ] || return 1
+      head=$(run_git_probe -C "$home" rev-parse HEAD 2>/dev/null || true)
+      [ -n "$head" ] && [ "$head" = "$commit" ] || return 1
+      instructions=AGENTS.md
+      message=$FM_SECOND_MATE_NUDGE_MESSAGE
+      ;;
+    1)
+      [ "$current_home" = "$home" ] && [ "$current_remote_host" = "$remote_host" ] || return 1
+      instructions=remote
+      message=$FM_REMOTE_SECOND_MATE_NUDGE_MESSAGE
+      ;;
+    *) return 1 ;;
+  esac
+  marker=$(fm_secondmate_nudge_marker_path "$state" "$id") || return 1
   fm_secondmate_nudge_write "$state" "$id" "$home" "$commit" \
-    "$instructions" "$message" "$remote" fm-deps
+    "$instructions" "$message" "$remote" fm-deps "$remote_host" create
+  write_status=$?
+  [ "$write_status" -eq 0 ] || {
+    [ "$write_status" -eq 2 ] \
+      && existing_secondmate_nudge_matches "$marker" "$id" "$home" "$commit" \
+        "$remote" "$remote_host"
+  }
+}
+
+identity_bound_nudge_claim_path() {
+  local id=$1 pending
+  case "$id" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  pending=$(deps_pending_dir) || return 1
+  printf '%s/secondmate-nudge-%s.claimed\n' "$pending" "$id"
+}
+
+restore_identity_bound_nudge_claim() {
+  local claim=$1 marker=$2
+  if [ -e "$marker" ] || [ -L "$marker" ]; then
+    rm -f -- "$claim"
+    return $?
+  fi
+  if ln -- "$claim" "$marker" 2>/dev/null; then
+    rm -f -- "$claim"
+    return $?
+  fi
+  if [ -e "$marker" ] || [ -L "$marker" ]; then
+    rm -f -- "$claim"
+    return $?
+  fi
+  return 1
+}
+
+process_identity_bound_nudge_claim() {
+  local claim=$1 marker=$2 state=$3 active_home=$4
+  local id selector home commit instructions message remote owner recorded_remote_host
+  local expected_marker meta kind current_home current_remote_host head
+  if [ ! -f "$claim" ] || [ -L "$claim" ]; then
+    printf 'Firstmate claimed secondmate nudge is invalid: %s\n' "$claim" >&2
+    return 1
+  fi
+  owner=$(pending_marker_value "$claim" owner 2>/dev/null || true)
+  if [ "$owner" != fm-deps ]; then
+    restore_identity_bound_nudge_claim "$claim" "$marker"
+    return $?
+  fi
+  id=$(pending_marker_value "$claim" id 2>/dev/null || true)
+  selector=$(pending_marker_value "$claim" selector 2>/dev/null || true)
+  home=$(pending_marker_value "$claim" home 2>/dev/null || true)
+  commit=$(pending_marker_value "$claim" commit 2>/dev/null || true)
+  instructions=$(pending_marker_value "$claim" instructions 2>/dev/null || true)
+  message=$(pending_marker_value "$claim" message 2>/dev/null || true)
+  remote=$(pending_marker_value "$claim" remote 2>/dev/null || true)
+  recorded_remote_host=$(pending_marker_value "$claim" remote_host 2>/dev/null || true)
+  expected_marker=$(fm_secondmate_nudge_marker_path "$state" "$id" 2>/dev/null || true)
+  if [ "$expected_marker" != "$marker" ] || [ "$selector" != "fm-$id" ] \
+    || [ -z "$home" ] || [ -z "$instructions" ]; then
+    printf 'Firstmate pending secondmate nudge is invalid: %s\n' "$claim" >&2
+    restore_identity_bound_nudge_claim "$claim" "$marker" || true
+    return 1
+  fi
+  meta="$state/$id.meta"
+  kind=$(pending_marker_value "$meta" kind 2>/dev/null || true)
+  current_home=$(current_secondmate_home "$id" "$meta" 2>/dev/null || true)
+  current_remote_host=$(pending_marker_value "$meta" remote_host 2>/dev/null || true)
+  if [ "$kind" != secondmate ] || [ -z "$current_home" ]; then
+    printf 'Firstmate post-update nudge target changed for %s\n' "$selector" >&2
+    restore_identity_bound_nudge_claim "$claim" "$marker" || true
+    return 1
+  fi
+  case "$remote" in
+    0)
+      if [ -n "$current_remote_host" ] || [ -n "$recorded_remote_host" ] \
+        || [ "$instructions" != AGENTS.md ] \
+        || [ "$message" != "$FM_SECOND_MATE_NUDGE_MESSAGE" ] \
+        || ! FM_HOME="$active_home" validate_secondmate_home "$id" "$current_home" \
+        || [ "$VALIDATED_HOME" != "$home" ]; then
+        printf 'Firstmate post-update nudge identity is invalid for %s\n' "$selector" >&2
+        restore_identity_bound_nudge_claim "$claim" "$marker" || true
+        return 1
+      fi
+      head=$(run_git_probe -C "$home" rev-parse HEAD 2>/dev/null || true)
+      if [ -z "$head" ] || [ "$head" != "$commit" ]; then
+        printf 'Firstmate post-update nudge commit changed for %s\n' "$selector" >&2
+        restore_identity_bound_nudge_claim "$claim" "$marker" || true
+        return 1
+      fi
+      ;;
+    1)
+      if [ -z "$recorded_remote_host" ] || [ "$current_home" != "$home" ] \
+        || [ "$current_remote_host" != "$recorded_remote_host" ] \
+        || [ -n "$commit" ] || [ "$instructions" != remote ] \
+        || [ "$message" != "$FM_REMOTE_SECOND_MATE_NUDGE_MESSAGE" ]; then
+        printf 'Firstmate post-update remote nudge identity is invalid for %s\n' "$selector" >&2
+        restore_identity_bound_nudge_claim "$claim" "$marker" || true
+        return 1
+      fi
+      ;;
+    *)
+      printf 'Firstmate pending secondmate nudge placement is invalid for %s\n' "$selector" >&2
+      restore_identity_bound_nudge_claim "$claim" "$marker" || true
+      return 1
+      ;;
+  esac
+  if FM_HOME="$active_home" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$state" \
+    "$FM_ROOT/bin/fm-send.sh" "$selector" "$message"; then
+    if ! rm -f -- "$claim"; then
+      printf 'Firstmate post-update nudge could not be cleared for %s\n' "$selector" >&2
+      return 1
+    fi
+    return 0
+  fi
+  printf 'Firstmate post-update nudge failed for %s\n' "$selector" >&2
+  restore_identity_bound_nudge_claim "$claim" "$marker" || {
+    printf 'Firstmate post-update nudge could not be restored for %s\n' "$selector" >&2
+  }
+  return 1
 }
 
 process_identity_bound_nudges() {
-  local state active_home pending marker id selector home commit instructions message remote owner
-  local expected_marker meta kind current_home remote_host head failed=0
+  local state active_home pending claims marker claim id owner processed_ids="" failed=0
   state=$(deps_state_dir) || return 1
   active_home=$(deps_home_dir) || return 1
   pending="$state/.secondmate-nudge-pending"
+  claims=$(deps_pending_dir) || return 1
+  if [ -e "$claims" ] || [ -L "$claims" ]; then
+    [ -d "$claims" ] && [ ! -L "$claims" ] || return 1
+  fi
+  if [ -d "$claims" ]; then
+    for claim in "$claims"/secondmate-nudge-*.claimed; do
+      [ -e "$claim" ] || [ -L "$claim" ] || continue
+      id=$(pending_marker_value "$claim" id 2>/dev/null || true)
+      [ -z "$id" ] || processed_ids="${processed_ids}${processed_ids:+ }$id"
+      marker=$(fm_secondmate_nudge_marker_path "$state" "$id" 2>/dev/null || true)
+      if [ -z "$marker" ] \
+        || ! process_identity_bound_nudge_claim "$claim" "$marker" "$state" "$active_home"; then
+        failed=1
+      fi
+    done
+  fi
   if [ -e "$pending" ] || [ -L "$pending" ]; then
     [ -d "$pending" ] && [ ! -L "$pending" ] || return 1
   else
-    return 0
+    [ "$failed" -eq 0 ]
+    return
   fi
   for marker in "$pending"/*.pending; do
     [ -e "$marker" ] || [ -L "$marker" ] || continue
@@ -485,66 +764,23 @@ process_identity_bound_nudges() {
     owner=$(pending_marker_value "$marker" owner 2>/dev/null || true)
     [ "$owner" = fm-deps ] || continue
     id=$(pending_marker_value "$marker" id 2>/dev/null || true)
-    selector=$(pending_marker_value "$marker" selector 2>/dev/null || true)
-    home=$(pending_marker_value "$marker" home 2>/dev/null || true)
-    commit=$(pending_marker_value "$marker" commit 2>/dev/null || true)
-    instructions=$(pending_marker_value "$marker" instructions 2>/dev/null || true)
-    message=$(pending_marker_value "$marker" message 2>/dev/null || true)
-    remote=$(pending_marker_value "$marker" remote 2>/dev/null || true)
-    expected_marker=$(fm_secondmate_nudge_marker_path "$state" "$id" 2>/dev/null || true)
-    if [ "$expected_marker" != "$marker" ] || [ "$selector" != "fm-$id" ] \
-      || [ -z "$home" ] || [ -z "$instructions" ]; then
-      printf 'Firstmate pending secondmate nudge is invalid: %s\n' "$marker" >&2
+    if [ -n "$id" ]; then
+      case " $processed_ids " in *" $id "*) continue ;; esac
+    fi
+    claim=$(identity_bound_nudge_claim_path "$id" 2>/dev/null || true)
+    if [ -z "$claim" ] || [ -e "$claim" ] || [ -L "$claim" ]; then
+      printf 'Firstmate post-update nudge could not be claimed for fm-%s\n' "${id:-unknown}" >&2
       failed=1
       continue
     fi
-    meta="$state/$id.meta"
-    kind=$(pending_marker_value "$meta" kind 2>/dev/null || true)
-    current_home=$(current_secondmate_home "$id" "$meta" 2>/dev/null || true)
-    remote_host=$(pending_marker_value "$meta" remote_host 2>/dev/null || true)
-    if [ "$kind" != secondmate ] || [ -z "$current_home" ]; then
-      printf 'Firstmate post-update nudge target changed for %s\n' "$selector" >&2
-      failed=1
-      continue
-    fi
-    case "$remote" in
-      0)
-        if [ -n "$remote_host" ] || [ "$message" != "$FM_SECOND_MATE_NUDGE_MESSAGE" ] \
-          || ! FM_HOME="$active_home" validate_secondmate_home "$id" "$current_home" \
-          || [ "$VALIDATED_HOME" != "$home" ]; then
-          printf 'Firstmate post-update nudge identity is invalid for %s\n' "$selector" >&2
-          failed=1
-          continue
-        fi
-        head=$(run_git_probe -C "$home" rev-parse HEAD 2>/dev/null || true)
-        if [ -z "$head" ] || [ "$head" != "$commit" ]; then
-          printf 'Firstmate post-update nudge commit changed for %s\n' "$selector" >&2
-          failed=1
-          continue
-        fi
-        ;;
-      1)
-        if [ -z "$remote_host" ] || [ "$current_home" != "$home" ] \
-          || [ "$message" != "$FM_REMOTE_SECOND_MATE_NUDGE_MESSAGE" ]; then
-          printf 'Firstmate post-update remote nudge identity is invalid for %s\n' "$selector" >&2
-          failed=1
-          continue
-        fi
-        ;;
-      *)
-        printf 'Firstmate pending secondmate nudge placement is invalid for %s\n' "$selector" >&2
-        failed=1
-        continue
-        ;;
-    esac
-    if FM_HOME="$active_home" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$state" \
-      "$FM_ROOT/bin/fm-send.sh" "$selector" "$message"; then
-      if ! rm -f -- "$marker"; then
-        printf 'Firstmate post-update nudge could not be cleared for %s\n' "$selector" >&2
+    if ! mv -- "$marker" "$claim" 2>/dev/null; then
+      if [ -e "$marker" ] || [ -L "$marker" ]; then
+        printf 'Firstmate post-update nudge could not be claimed for fm-%s\n' "$id" >&2
         failed=1
       fi
-    else
-      printf 'Firstmate post-update nudge failed for %s\n' "$selector" >&2
+      continue
+    fi
+    if ! process_identity_bound_nudge_claim "$claim" "$marker" "$state" "$active_home"; then
       failed=1
     fi
   done
@@ -681,7 +917,9 @@ confirm_firstmate_reread() {
 }
 
 persist_firstmate_update_actions() {
-  write_firstmate_action_manifest "$1" "$2"
+  local reread=$1 targets=$2
+  capture_firstmate_action_inventory "$targets" || return 1
+  write_firstmate_action_manifest "$reread" "$targets"
 }
 
 firstmate_update_actions_pending() {
@@ -696,6 +934,11 @@ firstmate_update_actions_pending() {
     return 0
   fi
   for marker in "$pending"/secondmate-*.pending; do
+    if [ -e "$marker" ] || [ -L "$marker" ]; then
+      return 0
+    fi
+  done
+  for marker in "$pending"/secondmate-nudge-*.claimed; do
     if [ -e "$marker" ] || [ -L "$marker" ]; then
       return 0
     fi
@@ -770,7 +1013,7 @@ process_pending_firstmate_actions() {
     if [ "$targets" != none ]; then
       for selector in $targets; do
         if ! record_secondmate_nudge_action "$selector"; then
-          printf 'Firstmate post-update nudge could not be identity-bound for %s\n' \
+          printf 'Firstmate post-update nudge identity no longer matches for %s\n' \
             "$selector" >&2
           failed_targets="${failed_targets}${failed_targets:+ }$selector"
           record_failed=1

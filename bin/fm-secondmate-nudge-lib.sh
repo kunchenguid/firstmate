@@ -40,11 +40,14 @@ fm_remote_inherit_generation_next() { # <state-dir> <id>
   printf '%s\n' "$next"
 }
 
-fm_secondmate_nudge_write() { # <state> <id> <home> <commit> <instructions> <message> <remote:0|1> [owner]
+fm_secondmate_nudge_write() { # <state> <id> <home> <commit> <instructions> <message> <remote:0|1> [owner] [remote-host] [replace|create]
   local state=$1 id=$2 home=$3 commit=$4 instructions=$5 message=$6 remote=$7
-  local owner=${8:-} marker parent tmp
+  local owner=${8:-} remote_host=${9:-} mode=${10:-replace} marker parent tmp
   case "$remote" in 0|1) ;; *) return 1 ;; esac
-  case "$home$commit$instructions$message$owner" in *$'\n'*|*$'\r'*) return 1 ;; esac
+  case "$mode" in replace|create) ;; *) return 1 ;; esac
+  case "$home$commit$instructions$message$owner$remote_host" in
+    *$'\n'*|*$'\r'*) return 1 ;;
+  esac
   marker=$(fm_secondmate_nudge_marker_path "$state" "$id") || return 1
   parent=${marker%/*}
   if [ -e "$parent" ] || [ -L "$parent" ]; then
@@ -54,6 +57,7 @@ fm_secondmate_nudge_write() { # <state> <id> <home> <commit> <instructions> <mes
   fi
   if [ -e "$marker" ] || [ -L "$marker" ]; then
     [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+    [ "$mode" != create ] || return 2
   fi
   tmp=$(umask 077; mktemp "$parent/.nudge.XXXXXX" 2>/dev/null) || return 1
   {
@@ -65,7 +69,17 @@ fm_secondmate_nudge_write() { # <state> <id> <home> <commit> <instructions> <mes
     printf 'message=%s\n' "$message"
     printf 'remote=%s\n' "$remote"
     [ -z "$owner" ] || printf 'owner=%s\n' "$owner"
+    [ -z "$remote_host" ] || printf 'remote_host=%s\n' "$remote_host"
   } > "$tmp" || { rm -f -- "$tmp"; return 1; }
   chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
-  mv -f -- "$tmp" "$marker" || { rm -f -- "$tmp"; return 1; }
+  if [ "$mode" = create ]; then
+    if ln -- "$tmp" "$marker" 2>/dev/null; then
+      rm -f -- "$tmp"
+    else
+      rm -f -- "$tmp"
+      return 2
+    fi
+  else
+    mv -f -- "$tmp" "$marker" || { rm -f -- "$tmp"; return 1; }
+  fi
 }
