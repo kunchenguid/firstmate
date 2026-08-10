@@ -434,7 +434,11 @@ test_selected_content_is_composer_scoped_and_wrap_normalized() {
   screen=$'╭────────────────────╮\n│ ❯ Type a message...│\n╰────────────────────╯'
   out=$(fm_composer_extract_selected_content "$CAPS_STYLED_NOID" "$screen")
   [ -z "$out" ] \
-    || fail "idle placeholders should be excluded from extracted user content, got '$out'"
+    || fail "agent-prompt idle placeholders should be excluded from extracted user content, got '$out'"
+  screen=$'╭────────────────────╮\n│ > Type a message...│\n╰────────────────────╯'
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED_NOID" "$screen")
+  [ -z "$out" ] \
+    || fail "shell-prompt idle placeholders should be excluded from boxed user content, got '$out'"
   screen=$'❯ a legitimately long steer that\nwraps across the next bare row\n\ntranscript below the break'
   out=$(fm_composer_extract_selected_content "$CAPS_STYLED_NOID" "$screen")
   [ "$out" = 'a legitimately long steer that wraps across the next bare row' ] \

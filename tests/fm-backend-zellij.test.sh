@@ -1073,10 +1073,10 @@ test_send_text_submit_accepts_wrapped_boxed_text() {
   local dir fb out
   dir="$TMP_ROOT/submit-wrapped-box"; mkdir -p "$dir/responses"
   zellij_pane_response "$dir" 1 7 3
-  printf '%s' $'╭────────────────────╮\n│ existing           │\n╰────────────────────╯' > "$dir/responses/2.out"
+  printf '%s' $'╭────────────────────╮\n│ > Type a message...│\n╰────────────────────╯' > "$dir/responses/2.out"
   zellij_pane_response "$dir" 3 7 3
   zellij_pane_response "$dir" 5 7 3
-  printf '%s' $'╭────────────────────╮\n│ existing hello     │\n│ captain            │\n╰────────────────────╯' > "$dir/responses/6.out"
+  printf '%s' $'╭────────────────────╮\n│ > hello            │\n│ captain            │\n╰────────────────────╯' > "$dir/responses/6.out"
   zellij_pane_response "$dir" 7 7 3
   zellij_pane_response "$dir" 9 7 3
   printf '%s' $'╭────────────────────╮\n│ ❯                  │\n╰────────────────────╯' > "$dir/responses/10.out"
@@ -1084,10 +1084,10 @@ test_send_text_submit_accepts_wrapped_boxed_text() {
   out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
     FM_ZELLIJ_SESSION_LIST="firstmate" \
     bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_send_text_submit firstmate:7 "hello captain" 2 0.01 0.01' "$ROOT" )
-  [ "$out" = empty ] || fail "wrapped text in the selected box should be observed and submitted, got '$out'"
+  [ "$out" = empty ] || fail "wrapped text replacing a shell-prompt placeholder should be observed and submitted, got '$out'"
   assert_contains "$(cat "$dir/log")" $'\x1f''send-keys' \
     "send_text_submit should send Enter after observing wrapped boxed text"
-  pass "fm_backend_zellij_send_text_submit: observes wrapped text inside the selected composer"
+  pass "fm_backend_zellij_send_text_submit: observes wrapped text replacing a shell-prompt placeholder"
 }
 
 test_send_text_submit_accepts_wrapped_bare_text() {

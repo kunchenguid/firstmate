@@ -978,7 +978,7 @@ EOF
         ;;
       leftbar) case "$content" in '┃'*) content=${content#┃} ;; esac ;;
       box)
-        if fm_composer_leading_agent_glyph_var glyph "$content"; then
+        if fm_composer_leading_prompt_glyph_var glyph "$content"; then
           content=${content#*"$glyph"}
         fi
         ;;
