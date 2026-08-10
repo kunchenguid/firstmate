@@ -68,7 +68,9 @@ The first fresh exhausted-failure epoch preserves its handoff without consuming 
 When none of those proofs appears, it re-blocks up to `FM_CLAUDE_TURNEND_BLOCK_BUDGET` times (default 3, below Claude's 8-block override).
 In Claude mode, positive watcher recovery clears the block budget, failure notice, and attended alarm together under the existing budget lock before either hook reports ordinary recovery.
 The one loud attended fail-open is available only when the auto-arm has recorded an exhausted failure, its one notice is already consumed, the block budget is exhausted, and a final check finds neither a healthy watcher nor an automatic continuation.
-Each epoch identity is accounted at most once under the budget lock.
+Each epoch identity is accounted at most once under the budget lock while the auto-arm demonstrably owns recovery for it, and at most once per guard run otherwise.
+An epoch that has stopped advancing is neither: the auto-arm is not claiming at all, so it cannot keep suppressing the count, which would otherwise pin the budget below its threshold and re-block on until Claude's own 8-block override ended the episode without the designed alarm.
+When the auto-arm has recorded that it cannot resolve its own session (`state/.claude-autoarm-unresolved-ancestry`), the blind-turn banner names that cause and says it will not recover on its own, instead of reporting only that nobody claimed.
 Whenever both coordination locks are needed, positive auto-arm recovery and the terminal check acquire the auto-arm owner lock before the budget lock.
 After that alarm, the Stop auto-arm suppresses further exit-2 continuations until positive watcher recovery, so the final fail-open remains reachable.
 The alarm cannot repeat during that failure episode, and a later unhealthy stop blocks again.

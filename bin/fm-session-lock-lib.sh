@@ -37,6 +37,32 @@ fm_harness_path_name() {  # <path>
   return 1
 }
 
+# Claude Code subcommands that are shared INFRASTRUCTURE, never a firstmate
+# session: the per-user daemon and the background worker processes it hosts.
+# They carry the same "claude" branding in argv[0] and in their install path, so
+# the harness-identity evidence below matches them exactly like a session - but
+# the daemon is one long-lived process shared by every session and every home,
+# and a bg-pty-host/bg-spare worker is a transient host for background work.
+# Treating either as a session owner is what lets one of them pin a home's
+# session lock forever, and lets an async hook hosted inside that worker chain
+# report a "harness ancestry" that provably excludes the session that fired it.
+FM_HARNESS_INFRA_SUBCOMMANDS='daemon bg-pty-host bg-spare'
+
+# True when full argument string $1 is one of those shared infrastructure
+# processes. Anchored on the FIRST argument after argv[0] so a real session can
+# never be misread as infrastructure because its prompt text happens to contain
+# one of these words - a crewmate launch brief is passed as argv.
+fm_harness_is_infra() {  # <args>
+  local args=$1 rest sub name
+  rest=${args#* }
+  [ "$rest" != "$args" ] || return 1
+  sub=${rest%% *}
+  for name in $FM_HARNESS_INFRA_SUBCOMMANDS; do
+    [ "$sub" = "$name" ] && return 0
+  done
+  return 1
+}
+
 # True when the process described by command name $1 and full argument string $2
 # is a verified harness. Sets FM_HARNESS_IS_CLAUDE for the ancestry walk.
 #
@@ -52,6 +78,7 @@ FM_HARNESS_IS_CLAUDE=0
 fm_harness_process_matches() {  # <comm> <args>
   local comm=$1 args=$2 base argv0 name
   FM_HARNESS_IS_CLAUDE=0
+  fm_harness_is_infra "$args" && return 1
   base=$(basename -- "$comm")
   if printf '%s' "$base" | grep -qE "$FM_HARNESS_RE"; then
     case "$base" in *claude*) FM_HARNESS_IS_CLAUDE=1 ;; esac

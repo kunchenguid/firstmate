@@ -1581,6 +1581,39 @@ test_hook_claude_mode_waits_for_late_claim() {
   pass "fm-turnend-guard --claude: bounded claim wait avoids a token-consuming forced continuation"
 }
 
+# When the auto-arm never claims, its epoch ledger stops advancing. The block
+# budget is keyed on epoch change, so a frozen ledger used to pin the count below
+# its threshold: the guard re-blocked on every turn, never reached its designed
+# attended fail-open, and the episode ended only when Claude Code's own
+# consecutive-block override stepped in - the backstop going quiet exactly while
+# the failure persisted. Consecutive unclaimed blocks must advance the budget.
+test_hook_claude_mode_frozen_epoch_still_advances_the_block_budget() {
+  local dir out status i count seen_terminal=0
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-frozen-epoch")
+  : > "$dir/state/task1.meta"
+  # A completed rewake epoch that then stopped advancing, exactly as an auto-arm
+  # that can no longer claim the home leaves it.
+  : > "$dir/state/.claude-autoarm-failure-notified"
+  printf 'epoch=2246 owner_pid=999 outcome=failed updated_at=1\n' > "$dir/state/.claude-autoarm-epoch"
+  touch -t 202001010000 "$dir/state/.claude-autoarm-epoch"
+
+  i=1
+  while [ "$i" -le 5 ]; do
+    out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" false); status=$?
+    count=$(sed -n '2s/^count=//p' "$dir/state/.turnend-claude-blocks" 2>/dev/null)
+    case "$out" in *"SUPERVISION IS GENUINELY DOWN"*) seen_terminal=1 ;; esac
+    [ "$status" = 0 ] || [ "$status" = 2 ]       || fail "unexpected guard status $status on unclaimed block $i"
+    [ "$i" -lt 2 ] || [ -n "$count" ] || fail "the block budget vanished on unclaimed block $i"
+    if [ "$i" -ge 2 ] && [ "$count" = 1 ] && [ "$seen_terminal" -eq 0 ] && [ "$i" -ge 5 ]; then
+      fail "the block budget stayed frozen at 1 across $i unclaimed blocks on a frozen epoch"
+    fi
+    [ "$seen_terminal" -eq 1 ] && break
+    i=$((i + 1))
+  done
+  [ "$seen_terminal" -eq 1 ]     || fail "a frozen epoch never reached the attended fail-open: budget stuck at count=$count after 5 unclaimed blocks"
+  pass "fm-turnend-guard --claude: a frozen auto-arm epoch still advances the bounded budget to its attended fail-open"
+}
+
 test_hook_claude_mode_secondmate_reblocks_like_primary() {
   local dir pid out status
   dir=$(make_secondmate_dir "$TMP_ROOT/hook-claude-sm-reblock")
@@ -1661,4 +1694,5 @@ test_hook_claude_mode_fail_open_requires_notice_and_failure_epoch
 test_hook_claude_mode_away_mode_never_uses_stop_autoarm_fail_open
 test_hook_claude_mode_allow_resets_budget
 test_hook_claude_mode_waits_for_late_claim
+test_hook_claude_mode_frozen_epoch_still_advances_the_block_budget
 test_hook_claude_mode_secondmate_reblocks_like_primary

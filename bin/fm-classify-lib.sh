@@ -144,6 +144,35 @@ status_is_paused_or_captain_held() {  # <status-line>
   [ "$verb" = "${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}" ]
 }
 
+# 0 when <status-file>'s durable fold still holds at least one OPEN keyed
+# captain decision. This is the THIRD declared-idle class, alongside the
+# external-wait pause and the verified captain-held transfer, and it is read
+# from the fold rather than the last line because a decision stays open until an
+# explicit resolution for its own key lands - a later unrelated working: or
+# done: line must not silently end it (see status_open_decisions above).
+#
+# A crew that appended needs-decision: or blocked: is parked awaiting FIRSTMATE's
+# own answer, which is the one wait firstmate is itself the blocker for. Its
+# endpoint is expected to sit still for as long as the answer takes, so the
+# stale path must not keep classifying that idle pane as a possible wedge.
+# Suppressing the WEDGE never suppresses the DECISION: the fleet-wide
+# scan_open_decisions fold surfaces the same open set on every wake drain, so an
+# open decision cannot rot quietly just because its pane went quiet.
+status_has_open_captain_decision() {  # <status-file>
+  [ -n "$(status_open_decisions "$1")" ]
+}
+
+# 0 when a task's CURRENT declarations put its idle endpoint on the bounded
+# pause cadence instead of the wedge timer: a declared external-wait pause, a
+# verified captain-held transfer, or a still-open keyed captain decision.
+# This is the ONE predicate the stale path asks; the three classes differ only
+# in what declared them, never in how a quiet endpoint is then paced.
+status_idle_is_declared() {  # <status-file>
+  local f=$1
+  status_is_paused_or_captain_held "$(last_status_line "$f")" && return 0
+  status_has_open_captain_decision "$f"
+}
+
 # --- durable keyed decisions ------------------------------------------------
 #
 # The status stream is an append-only EVENT log. Reading it last-event-wins

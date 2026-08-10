@@ -21,6 +21,8 @@ No-verb wakes, such as `working:` notes and bare turn-ended signals, are benign 
 A crew that declares `paused:` for a known external wait is separately absorbed while idle and re-surfaced only on the longer pause cadence, rather than being treated as a possible wedge.
 For an ordinary crew that has stopped, the normal-mode watcher first surfaces one stale wake, then applies that same cadence to an unchanged `paused:` or durable `captain-held` endpoint only when the backend confidently reports its agent dead.
 Live or inconclusive liveness remains fail-open at that initial surface, and the secondmate idle-endpoint exemption is unchanged.
+A crew holding a still-open keyed captain decision is the third case on that cadence, and it inverts only the liveness asymmetry: firstmate itself owes the answer, so a live parked endpoint is what the wait is supposed to look like and goes straight to the cadence, while a crew that died holding the decision is the anomaly that still gets its one surface.
+Because the decision is read from the durable open-decision fold rather than the last status line, a running validation step parked at its own gate no longer outranks it, and the same fold keeps that decision in the wake drain's fleet-wide `OPEN DECISIONS` section for as long as the endpoint is absorbed.
 Its initial normal-mode status signal still surfaces through the no-verb path, while away mode self-handles that routine signal and owns the later recheck.
 Fresh stale panes use the same current-state read before trusting the status log, so an active run or a proven busy worker outranks an old captain-relevant status-log line left behind before validation.
 No-change heartbeats are also benign.
