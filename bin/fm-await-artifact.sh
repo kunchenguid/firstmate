@@ -20,10 +20,17 @@
 #                  full sweep, and firing on stability alone would announce an
 #                  unmarked partial report, which is exactly what the sentinel
 #                  exists to prevent.
-# The check fires once. After it prints, it records that fact in
-# state/.<waiting-task-id>.await-artifact and stays silent on every later sweep;
-# the wake itself is durable in the wake queue. bin/fm-teardown.sh removes the
-# check, its trust binding, and that record with the task's other state.
+# The check fires once. It records that fact in
+# state/.<waiting-task-id>.await-artifact before printing, and stays silent on
+# every later sweep; the watcher queues the printed line as a durable wake right
+# after. Recording before printing is what makes the wake at-most-once, and it
+# leaves a bounded loss window: a watcher that dies between the record write and
+# the queue append drops that one wake, and no later sweep repeats it. That is
+# accepted rather than fixed, because the consumer waiting on the artifact is
+# sitting in a declared `paused:` state that resurfaces on its own past
+# FM_PAUSE_RESURFACE_SECS, so the dependency still comes back to firstmate.
+# bin/fm-teardown.sh removes the check, its trust binding, and that record with
+# the task's other state.
 #
 # Re-arming the same task replaces an existing await-artifact check (a consumer
 # waiting per-section arms one sentinel after another). Any other armed state
