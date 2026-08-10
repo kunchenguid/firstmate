@@ -1315,19 +1315,20 @@ families_for_changed_path() {
       printf '%s\n' secondmate
       printf '%s\n' session-bootstrap
       ;;
+    bin/fm-remote-lib.sh)
+      # Publish-remote resolution feeds self-update/clone refresh, the landed-work
+      # and review-base checks, and the changed-test base ref.
+      printf '%s\n' secondmate
+      printf '%s\n' session-bootstrap
+      printf '%s\n' pr-forge
+      printf '%s\n' pure-contract-unit
+      printf '%s\n' backend-dispatch
+      ;;
     bin/fm-secondmate*|bin/fm-remote*|bin/fm-on.sh|bin/fm-home-seed.sh|\
     bin/fm-backlog-handoff.sh|bin/fm-backlog-receive.sh|bin/fm-procevent-remote-reply.sh|\
     bin/fm-config-inherit-lib.sh|bin/fm-config-push.sh|bin/fm-shared*|\
     bin/fm-stow-cascade.sh)
       printf '%s\n' secondmate
-      ;;
-    bin/fm-remote-lib.sh)
-      # Publish-remote resolution feeds self-update/clone refresh, the landed-work
-      # and review-base checks, and the changed-test base ref.
-      printf '%s\n' session-bootstrap
-      printf '%s\n' pr-forge
-      printf '%s\n' pure-contract-unit
-      printf '%s\n' backend-dispatch
       ;;
     bin/fm-session-start.sh|bin/fm-bootstrap.sh|bin/fm-fleet-sync.sh|\
     bin/fm-sessionstart-nudge.sh|bin/fm-startup-network.sh|bin/fm-tangle*|bin/fm-update.sh|\

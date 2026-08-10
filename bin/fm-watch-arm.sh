@@ -314,6 +314,9 @@ close_unobserved_cycle() {
     return 0
   fi
   fail_unexplained_cycle
+  return 1
+}
+
 # Session-owner fence (bin/fm-session-lock-lib.sh): an arm whose process does
 # not descend from the harness session holding this home's state/.lock must not
 # start, restart, or stay attached to supervision here. This is what stops an
