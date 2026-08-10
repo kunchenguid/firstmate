@@ -170,7 +170,8 @@ status_is_paused_or_captain_held() {  # <status-line>
 # line}" shape naturally puts the token at the head of the note. Accepting one
 # placement only silently folds every line of the other shape onto "default",
 # colliding unrelated decisions and re-surfacing answered ones.
-# A line with no token uses the key "default", preserving the historical
+# A line with no token - or one whose slug is malformed, which is not a token
+# this grammar recognises - uses the key "default", preserving the historical
 # one-open-decision-per-task behavior (a bare "resolved:" closes "default").
 # The three parsers are pure reads of a single line; the verb parser strips any
 # key token before the colon so the leading word is recovered cleanly, and the
@@ -184,15 +185,20 @@ status_line_verb() {  # <status-line> -> leading verb word
   v=${v%"${v##*[![:space:]]}"}
   printf '%s' "$v"
 }
-# <text> -> the raw slug of a leading "[key=<slug>]" token, unvalidated; 1 when
-# the text carries no such token. The ONE place the post-colon token's shape is
-# recognised, shared by the note and key parsers so they cannot disagree about
-# what counts as a token.
+# <text> -> sets _FM_KEY_TOKEN to the raw slug of a leading "[key=<slug>]" token,
+# unvalidated; returns 1 when the text carries no such token. The ONE place the
+# post-colon token's shape is recognised, shared by the note and key parsers so
+# they cannot disagree about what counts as a token. It reports through a caller
+# read variable rather than stdout because both callers run once per status line
+# over the whole stream, where a command substitution's fork is a real cost;
+# every caller declares _FM_KEY_TOKEN local, so nothing escapes the call.
 _fm_leading_key_token() {  # <text>
-  local t=$1 k
-  case "$t" in
-    \[key=*\]*) k=${t#\[key=}; printf '%s' "${k%%\]*}" ;;
-    *) return 1 ;;
+  case "$1" in
+    \[key=*\]*)
+      _FM_KEY_TOKEN=${1#\[key=}
+      _FM_KEY_TOKEN=${_FM_KEY_TOKEN%%\]*}
+      ;;
+    *) _FM_KEY_TOKEN=''; return 1 ;;
   esac
 }
 # 0 when <slug> is a usable decision key.
@@ -205,17 +211,24 @@ _fm_decision_key_is_valid() {  # <slug>
 # <status-line> -> text after the first colon, trimmed, minus a leading
 # "[key=<slug>]" token so the note is the same text under either key placement.
 status_line_note() {
-  local n=$1 k
+  local n=$1 _FM_KEY_TOKEN=''
   case "$n" in *:*) n=${n#*:} ;; esac
   n=${n#"${n%%[![:space:]]*}"}
-  if k=$(_fm_leading_key_token "$n") && _fm_decision_key_is_valid "$k"; then
+  if _fm_leading_key_token "$n" && _fm_decision_key_is_valid "$_FM_KEY_TOKEN"; then
     n=${n#*\]}
     n=${n#"${n%%[![:space:]]*}"}
   fi
   printf '%s' "$n"
 }
-_fm_decision_key() {  # <status-line> -> key slug, or "default" when no token
-  local prefix=${1%%:*} rest k
+# <status-line> -> key slug, or "default" when the line carries no usable token.
+# A malformed slug falls back to "default" exactly as a missing token does, under
+# BOTH placements: this parser is the gate on whether a line is a decision
+# transition at all, so returning a failure here would make a typo'd key silently
+# delete a needs-decision from the open set - the one thing the fold above must
+# never do. Falling back also keeps this parser agreeing with status_line_note,
+# which leaves an unrecognised token in the note as ordinary text.
+_fm_decision_key() {
+  local prefix=${1%%:*} rest k _FM_KEY_TOKEN=''
   case "$prefix" in
     *\[key=*\]*)
       k=${prefix#*\[key=}
@@ -226,10 +239,11 @@ _fm_decision_key() {  # <status-line> -> key slug, or "default" when no token
       # puts it at the head of the note instead.
       case "$1" in *:*) rest=${1#*:} ;; *) printf 'default'; return 0 ;; esac
       rest=${rest#"${rest%%[![:space:]]*}"}
-      k=$(_fm_leading_key_token "$rest") || { printf 'default'; return 0; }
+      _fm_leading_key_token "$rest" || { printf 'default'; return 0; }
+      k=$_FM_KEY_TOKEN
       ;;
   esac
-  _fm_decision_key_is_valid "$k" || return 1
+  _fm_decision_key_is_valid "$k" || { printf 'default'; return 0; }
   printf '%s' "$k"
 }
 # Drop the record for <key> from a newline-terminated "<key>\t<verb>\t<note>" set.
@@ -295,12 +309,12 @@ _fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb
   stripped=${line//[[:space:]]/}
   [ -n "$stripped" ] || { printf '%s' "$open"; return 0; }
   verb=$(status_line_verb "$line")
-  key=$(_fm_decision_key "$line") || { printf '%s' "$open"; return 0; }
-  _fm_decision_key_transition_allowed "$key" "$(status_line_note "$line")" \
+  key=$(_fm_decision_key "$line")
+  note=$(status_line_note "$line")
+  _fm_decision_key_transition_allowed "$key" "$note" \
     || { printf '%s' "$open"; return 0; }
   case "$verb" in
     needs-decision|blocked)
-      note=$(status_line_note "$line")
       open=$(_fm_decision_drop "$open" "$key")
       [ -n "$open" ] && open="${open}"$'\n'
       open="${open}${key}"$'\t'"${verb}"$'\t'"${note}"$'\n'
@@ -422,7 +436,7 @@ _fm_open_decisions_cursor_path() {  # <status-file>
   printf '%s/.%s.open-decisions-cursor' "$dir" "${base%.status}"
 }
 
-FM_OPEN_DECISIONS_FOLD_VERSION=3
+FM_OPEN_DECISIONS_FOLD_VERSION=4
 
 # Portable device:inode identity for the rotation/recreation check below.
 _fm_open_decisions_file_ident() {  # <file> -> "dev:inode", empty on I/O failure

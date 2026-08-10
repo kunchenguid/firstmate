@@ -163,6 +163,39 @@ test_reserved_key_namespace_holds_after_the_colon() {
   pass "the reserved-key rule applies identically to a post-colon key token"
 }
 
+test_malformed_key_slug_still_surfaces_under_default() {
+  local dir state out
+  dir=$(make_case malformed-key-slug)
+  state="$dir/state"
+  out="$dir/drain.out"
+  # A typo'd slug is not a key this grammar recognises, under either placement.
+  # It must degrade to the historical unkeyed decision, never make the line stop
+  # being a decision at all - a lost needs-decision is the one failure the whole
+  # open-decision fold exists to prevent.
+  printf 'needs-decision: [key=oauth token] pick one\n' > "$state/taskD.status"
+  printf 'working: continuing other work\n' >> "$state/taskD.status"
+  printf 'needs-decision [key=payment/refund]: waiting on refunds\n' > "$state/taskE.status"
+  printf 'done: unrelated later milestone\n' >> "$state/taskE.status"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed on a malformed key slug"
+
+  grep -F 'OPEN DECISIONS' "$out" >/dev/null \
+    || fail "a malformed key slug suppressed the whole OPEN DECISIONS section: $(cat "$out")"
+  grep -F 'taskD' "$out" | grep -F 'pick one' >/dev/null \
+    || fail "a post-colon malformed slug made the decision vanish: $(cat "$out")"
+  grep -F 'taskE' "$out" | grep -F 'waiting on refunds' >/dev/null \
+    || fail "a pre-colon malformed slug made the decision vanish: $(cat "$out")"
+
+  # And it stays closable the way an unkeyed decision always was.
+  printf 'resolved: answered it\n' >> "$state/taskD.status"
+  printf 'resolved: answered it\n' >> "$state/taskE.status"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed after resolving a malformed-key decision"
+  if grep -F 'OPEN DECISIONS' "$out" >/dev/null; then
+    fail "a bare resolution did not close a malformed-key decision: $(cat "$out")"
+  fi
+  pass "a malformed key slug falls back to the default key instead of dropping the decision"
+}
+
 test_later_unrelated_terminal_line_does_not_close_it() {
   local dir state out
   dir=$(make_case unrelated-terminal)
@@ -299,6 +332,7 @@ test_explicit_resolution_closes_it
 test_key_after_the_colon_names_the_same_decision
 test_both_key_placements_pair_open_and_resolved
 test_reserved_key_namespace_holds_after_the_colon
+test_malformed_key_slug_still_surfaces_under_default
 test_later_unrelated_terminal_line_does_not_close_it
 test_reserved_key_namespace_is_owned_by_its_library
 test_no_open_decisions_prints_nothing
