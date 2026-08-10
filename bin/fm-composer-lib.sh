@@ -996,7 +996,7 @@ _fm_composer_select_cursorless() {
 
 fm_composer_extract_selected_content() {  # <caps> <screen>
   local caps=$1 screen=$2 styled=0 kv plain row raw content glyph joined= footer_re prompt_row=-1
-  local leading_blank=1 placeholder_position=0
+  local leading_blank=1 placeholder_position=0 prompt_is_shell=0
   footer_re=${FM_COMPOSER_LEFTBAR_FOOTER_RE:-$FM_COMPOSER_LEFTBAR_FOOTER_RE_DEFAULT}
   while IFS= read -r kv; do
     [ "$kv" = styled=1 ] && styled=1
@@ -1035,6 +1035,9 @@ EOF
            && fm_composer_leading_prompt_glyph_var glyph "$content"; then
           prompt_row=$row
           placeholder_position=1
+          if _fm_composer_is_prompt_glyph "$glyph" "$FM_COMPOSER_SHELL_PROMPT_GLYPHS"; then
+            prompt_is_shell=1
+          fi
           content=${content#*"$glyph"}
         elif [ "$prompt_row" -lt 0 ]; then
           placeholder_position=1
@@ -1043,8 +1046,17 @@ EOF
     esac
     fm_composer_normalize_spaces_var content
     fm_composer_normalize_trim_var content
+    # A styled agent-glyph placeholder disappears above when ghost stripping
+    # proves it is furniture. If the same placeholder-looking bytes survive
+    # styling, they are real user input and must remain in the extracted content
+    # (the zellij paste proof depends on observing exactly what was typed).
+    # OpenCode's left-bar hint and legacy shell-glyph boxed placeholders have no
+    # such styling proof, so their structurally fixed positions remain the two
+    # idle-regex exceptions here.
     if [ -z "$content" ] \
-       || { [ "$placeholder_position" = 1 ] \
+       || { { [ "$FM_COMPOSER_SELECTED_KIND" = leftbar ] \
+              || { [ "$FM_COMPOSER_SELECTED_KIND" = box ] && [ "$prompt_is_shell" = 1 ]; }; } \
+            && [ "$placeholder_position" = 1 ] \
             && fm_composer_idle_matches "$content" "${FM_COMPOSER_IDLE_RE:-$FM_COMPOSER_IDLE_RE_DEFAULT}" insensitive; } \
        || { [ "$FM_COMPOSER_SELECTED_KIND" = leftbar ] \
             && [ "$row" -eq "$FM_COMPOSER_SELECTED_LAST" ] \
