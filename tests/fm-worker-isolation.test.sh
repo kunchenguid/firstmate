@@ -102,6 +102,15 @@ start_declared_agent_with_inherited_home() {
   printf '%s\n' "$pid"
 }
 
+make_secondmate_identity_fixture() {
+  local id=$1 home="$TMP_ROOT/secondmate-home-$1" owner
+  owner=$home
+  mkdir -p "$home/data" "$home/state" "$home/config" "$home/projects" "$home/bin"
+  printf '# agents\n' > "$home/AGENTS.md"
+  printf '%s\n' "$id" > "$home/.fm-secondmate-home"
+  printf '%s|%s\n' "$owner" "$home"
+}
+
 require_procfs() {
   [ -d /proc ] && [ -L "/proc/$$/cwd" ]
 }
@@ -127,7 +136,7 @@ test_secondmate_declaration_pins_only_its_own_home() {
 }
 
 test_incomplete_worker_identity_refuses_primary_operations() {
-  local out status
+  local out status fixture owner home
   out=$(FM_AGENT_TASK=partial-task bash -c '. "$1"; fm_worker_refuse_primary_operation operation' _ "$ROOT/bin/fm-worker-isolation-lib.sh" 2>&1)
   status=$?
   expect_code 1 "$status" "a task without a role must be refused"
@@ -138,10 +147,24 @@ test_incomplete_worker_identity_refuses_primary_operations() {
   out=$(FM_AGENT_ROLE=unknown FM_AGENT_TASK=bad bash -c '. "$1"; fm_worker_refuse_primary_operation operation' _ "$ROOT/bin/fm-worker-isolation-lib.sh" 2>&1)
   status=$?
   expect_code 1 "$status" "an unknown role must be refused"
-  out=$(FM_AGENT_ROLE=secondmate FM_AGENT_TASK=dom-b2 FM_AGENT_OWNER_HOME=/homes/dom FM_HOME=/homes/dom \
-    bash -c '. "$1"; fm_worker_refuse_primary_operation operation; printf primary' _ \
+  fixture=$(make_secondmate_identity_fixture dom-b2)
+  IFS='|' read -r owner home <<EOF
+$fixture
+EOF
+  out=$(FM_AGENT_ROLE=secondmate FM_AGENT_TASK=dom-b2 FM_AGENT_OWNER_HOME="$owner" FM_HOME="$home" \
+    bash -c 'bash -c '\''. "$1"; fm_worker_refuse_primary_operation operation; printf primary'\'' _ "$0"; status=$?; :; exit "$status"' \
     "$ROOT/bin/fm-worker-isolation-lib.sh")
   [ "$out" = primary ] || fail "a complete secondmate identity must remain primary in its own home"
+  if out=$(FM_AGENT_ROLE=crewmate FM_AGENT_TASK=dom-b2 FM_AGENT_OWNER_HOME="$owner" FM_HOME="$home" \
+    bash -c 'FM_AGENT_ROLE=secondmate FM_AGENT_TASK="$FM_AGENT_TASK" FM_AGENT_OWNER_HOME="$FM_AGENT_OWNER_HOME" FM_HOME="$FM_HOME" \
+      bash -c '\''. "$1"; fm_worker_refuse_primary_operation forged-secondmate'\'' _ "$0"; status=$?; :; exit "$status"' \
+    "$ROOT/bin/fm-worker-isolation-lib.sh" 2>&1); then
+    status=0
+  else
+    status=$?
+  fi
+  expect_code 1 "$status" "a crewmate ancestry must not be accepted as a secondmate"
+  assert_contains "$out" "task worker" "forged secondmate ancestry lost the worker refusal"
   out=$(FM_AGENT_ROLE=secondmate FM_AGENT_TASK=dom-b2 FM_AGENT_OWNER_HOME=/homes/dom FM_HOME=/primary \
     bash -c '. "$1"; fm_worker_refuse_primary_operation operation' _ \
     "$ROOT/bin/fm-worker-isolation-lib.sh" 2>&1)

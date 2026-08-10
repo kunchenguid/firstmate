@@ -249,6 +249,14 @@ SPAWN_HOME_LOCK_HELD=0
 SPAWN_WORKTREE_PATH=
 SPAWN_WORKTREE_LEASE_PROOF=
 SPAWN_ARTIFACTS_CLEAN=0
+SPAWN_CLAUDE_HOOK_CREATED=0
+SPAWN_OPENCODE_HOOK_CREATED=0
+SPAWN_PI_EXT_CREATED=0
+SPAWN_TURNEND_CREATED=0
+SPAWN_GROK_POINTER_CREATED=0
+SPAWN_GROK_TOKEN_CREATED=0
+SPAWN_GROK_AUTH_CREATED=0
+SPAWN_GROK_AUTH_FILE=
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -355,6 +363,14 @@ spawn_release_task_lock() {
   return 1
 }
 
+spawn_require_new_artifact() {
+  local path=$1
+  [ ! -e "$path" ] && [ ! -L "$path" ] || {
+    echo "error: spawn artifact already exists and is not owned by this spawn: $path" >&2
+    return 1
+  }
+}
+
 spawn_acquire_home_lock() {
   local lock_home=$1 lock_path
   [ -d "$lock_home" ] || return 1
@@ -367,19 +383,33 @@ spawn_acquire_home_lock() {
 spawn_abort_artifacts_cleanup() {
   local rc=0 token auth_dir auth_file owner_file
   [ -n "${ID:-}" ] || return 0
-  if [ -n "${WT:-}" ] && [ -d "$WT" ]; then
+  if [ "${SPAWN_CLAUDE_HOOK_CREATED:-0}" = 1 ] && [ -n "${WT:-}" ] && [ -d "$WT" ]; then
     rm -f "$WT/.claude/settings.local.json" \
-      "$WT/.opencode/plugins/fm-turn-end.js" "$WT/.fm-grok-turnend" || rc=1
+      || rc=1
   fi
-  rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.pi-ext.ts" || rc=1
-  if [ -n "${STATE:-}" ] && [ -f "$STATE/$ID.grok-turnend-token" ]; then
+  if [ "${SPAWN_OPENCODE_HOOK_CREATED:-0}" = 1 ] && [ -n "${WT:-}" ] && [ -d "$WT" ]; then
+    rm -f "$WT/.opencode/plugins/fm-turn-end.js" || rc=1
+  fi
+  if [ "${SPAWN_GROK_POINTER_CREATED:-0}" = 1 ] && [ -n "${WT:-}" ] && [ -d "$WT" ]; then
+    rm -f "$WT/.fm-grok-turnend" || rc=1
+  fi
+  if [ "${SPAWN_TURNEND_CREATED:-0}" = 1 ]; then
+    rm -f "$STATE/$ID.turn-ended" || rc=1
+  fi
+  if [ "${SPAWN_PI_EXT_CREATED:-0}" = 1 ]; then
+    rm -f "$STATE/$ID.pi-ext.ts" || rc=1
+  fi
+  if [ "${SPAWN_GROK_AUTH_CREATED:-0}" = 1 ] && [ -n "${SPAWN_GROK_AUTH_FILE:-}" ]; then
+    rm -f "$SPAWN_GROK_AUTH_FILE" || rc=1
+  fi
+  if [ "${SPAWN_GROK_TOKEN_CREATED:-0}" = 1 ] && [ -n "${STATE:-}" ] && [ -f "$STATE/$ID.grok-turnend-token" ]; then
     token=$(cat "$STATE/$ID.grok-turnend-token" 2>/dev/null || true)
     case "$token" in
       fm.????????????)
         case "$token" in *[!A-Za-z0-9._-]*) rc=1 ;; *)
           auth_dir="${GROK_HOME:-$HOME/.grok}/hooks/fm-turn-end.d"
           auth_file="$auth_dir/$token"
-          rm -f "$auth_file" || rc=1
+          [ "${SPAWN_GROK_AUTH_CREATED:-0}" = 1 ] || rm -f "$auth_file" || rc=1
           rm -f "$STATE/$ID.grok-turnend-token" || rc=1
           ;;
         esac
@@ -1679,9 +1709,13 @@ exclude_path() {
   grep -qxF "$rel" "$EXCL" 2>/dev/null || echo "$rel" >> "$EXCL"
 }
 if [ "$KIND" != secondmate ]; then
+  spawn_require_new_artifact "$TURNEND"
+  SPAWN_TURNEND_CREATED=1
   case "$HARNESS" in
     claude*)
       mkdir -p "$WT/.claude"
+      spawn_require_new_artifact "$WT/.claude/settings.local.json"
+      SPAWN_CLAUDE_HOOK_CREATED=1
       cat > "$WT/.claude/settings.local.json" <<EOF
 {"hooks":{"Stop":[{"hooks":[{"type":"command","command":"touch '$TURNEND'"}]}]}}
 EOF
@@ -1689,6 +1723,8 @@ EOF
       ;;
     opencode*)
       mkdir -p "$WT/.opencode/plugins"
+      spawn_require_new_artifact "$WT/.opencode/plugins/fm-turn-end.js"
+      SPAWN_OPENCODE_HOOK_CREATED=1
       cat > "$WT/.opencode/plugins/fm-turn-end.js" <<EOF
 export const FmTurnEnd = async ({ \$ }) => ({
   event: async ({ event }) => {
@@ -1702,6 +1738,8 @@ EOF
       # Written OUTSIDE the worktree: pi's project-trust gate fires on any extension
       # loaded from inside the project (verified live), but an explicit -e path
       # elsewhere loads without a dialog. Lives in state/, cleaned by teardown.
+      spawn_require_new_artifact "$STATE/$ID.pi-ext.ts"
+      SPAWN_PI_EXT_CREATED=1
       cat > "$STATE/$ID.pi-ext.ts" <<EOF
 // Firstmate turn-end signal; written by fm-spawn.
 // Use "turn_end" (fires after each turn the agent finishes), not "agent_end"
@@ -1738,8 +1776,12 @@ EOF
       old_umask=$(umask)
       umask 077
       auth_file=$(mktemp "$GROK_AUTH_DIR/fm.XXXXXXXXXXXX")
+      SPAWN_GROK_AUTH_FILE=$auth_file
+      SPAWN_GROK_AUTH_CREATED=1
       umask "$old_umask"
       printf '%s\n' "$TURNEND" > "$auth_file"
+      spawn_require_new_artifact "$STATE/$ID.grok-turnend-token"
+      SPAWN_GROK_TOKEN_CREATED=1
       printf '%s\n' "${auth_file##*/}" > "$STATE/$ID.grok-turnend-token"
       sq_grok_auth_dir=$(shell_quote "$GROK_AUTH_DIR")
       cat > "$GROK_HOOKS_DIR/fm-turn-end.sh" <<EOF
@@ -1763,6 +1805,8 @@ EOF
       chmod +x "$GROK_HOOKS_DIR/fm-turn-end.sh"
       hook_command=$(json_escape "bash $(shell_quote "$GROK_HOOKS_DIR/fm-turn-end.sh")")
       printf '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"%s"}]}]}}\n' "$hook_command" > "$GROK_HOOKS_DIR/fm-turn-end.json"
+      spawn_require_new_artifact "$WT/.fm-grok-turnend"
+      SPAWN_GROK_POINTER_CREATED=1
       printf 'token=%s\n' "${auth_file##*/}" > "$WT/.fm-grok-turnend"
       exclude_path '.fm-grok-turnend'
       ;;

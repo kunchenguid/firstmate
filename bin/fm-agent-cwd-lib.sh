@@ -57,6 +57,13 @@ fm_agent_pid_is_numeric() {  # <pid>
   return 0
 }
 
+fm_agent_ps_pid_exists() {
+  local pid=$1 found
+  fm_agent_pid_is_numeric "$pid" || return 1
+  found=$(ps -p "$pid" -o pid= 2>/dev/null | awk '{print $1; exit}')
+  [ "$found" = "$pid" ]
+}
+
 # fm_agent_ppid <pid>: the parent pid, from procfs where available and `ps`
 # otherwise. /proc/<pid>/status is preferred over /proc/<pid>/stat because a
 # process comm containing spaces or parentheses makes stat field offsets unsafe.
@@ -105,8 +112,13 @@ fm_agent_proc_cwd() {
 fm_agent_environ() {
   local pid=$1 dump
   fm_agent_pid_is_numeric "$pid" || return 1
-  [ -r "/proc/$pid/environ" ] || return 1
-  dump=$( { tr '\0' '\n' < "/proc/$pid/environ"; } 2>/dev/null ) || return 1
+  if [ -r "/proc/$pid/environ" ]; then
+    dump=$( { tr '\0' '\n' < "/proc/$pid/environ"; } 2>/dev/null ) || return 1
+  else
+    command -v ps >/dev/null 2>&1 || return 1
+    dump=$(ps eww -p "$pid" -o command= 2>/dev/null) || return 1
+    dump=$(printf '%s\n' "$dump" | tr ' ' '\n')
+  fi
   [ -n "$dump" ] || return 1
   printf '%s' "$dump"
 }
@@ -216,9 +228,31 @@ fm_agent_worker_home_contract_matches() {
 # Returns 2 when the process scan is incomplete; a complete scan returns 0,
 # including when no live process declares a task.
 fm_agent_task_pid_index() {
-  local entry pid env task start home role proc_uid current_uid uncertain=0
-  [ -d /proc ] || return 2
+  local entry pid env task start home role proc_uid current_uid uncertain=0 rows rest
   current_uid=$(id -u 2>/dev/null) || return 2
+  if [ ! -d /proc ]; then
+    rows=$(ps -axo uid=,pid= 2>/dev/null) || return 2
+    while read -r proc_uid pid rest; do
+      [ -n "$proc_uid" ] || continue
+      if ! fm_agent_pid_is_numeric "$proc_uid" || ! fm_agent_pid_is_numeric "$pid"; then
+        uncertain=1
+        continue
+      fi
+      [ "$proc_uid" = "$current_uid" ] || continue
+      if ! env=$(fm_agent_environ "$pid"); then
+        fm_agent_ps_pid_exists "$pid" && uncertain=1
+        continue
+      fi
+      task=$(printf '%s\n' "$env" | sed -n 's/^FM_AGENT_TASK=//p' | head -1)
+      [ -n "$task" ] || continue
+      start=$(fm_agent_proc_start_time "$pid" 2>/dev/null || true)
+      home=$(printf '%s\n' "$env" | sed -n 's/^FM_AGENT_OWNER_HOME=//p' | head -1)
+      role=$(printf '%s\n' "$env" | sed -n 's/^FM_AGENT_ROLE=//p' | head -1)
+      printf '%s\t%s\t%s\t%s\t%s\n' "$task" "$pid" "$start" "$home" "$role"
+    done <<< "$rows"
+    [ "$uncertain" -eq 0 ] && return 0
+    return 2
+  fi
   for entry in /proc/[0-9]*; do
     [ -d "$entry" ] || continue
     pid=${entry#/proc/}
@@ -268,11 +302,35 @@ EOF
 }
 
 fm_agent_worktree_process_census() {
-  local wt=$1 wt_real entry pid cwd cwd_real task proc_uid current_uid
+  local wt=$1 wt_real entry pid cwd cwd_real task proc_uid current_uid rows rest
   local found=1 uncertain=0
   wt_real=$(fm_agent_canonical_dir "$wt") || return 2
-  [ -d /proc ] || return 2
   current_uid=$(id -u 2>/dev/null) || return 2
+  if [ ! -d /proc ]; then
+    rows=$(ps -axo uid=,pid= 2>/dev/null) || return 2
+    while read -r proc_uid pid rest; do
+      [ -n "$proc_uid" ] || continue
+      if ! fm_agent_pid_is_numeric "$proc_uid" || ! fm_agent_pid_is_numeric "$pid"; then
+        uncertain=1
+        continue
+      fi
+      [ "$proc_uid" = "$current_uid" ] || continue
+      cwd=$(fm_agent_proc_cwd "$pid" 2>/dev/null || true)
+      if [ -z "$cwd" ]; then
+        fm_agent_ps_pid_exists "$pid" && uncertain=1
+        continue
+      fi
+      cwd_real=$(fm_agent_canonical_dir "$cwd" 2>/dev/null || true)
+      [ -n "$cwd_real" ] || { uncertain=1; continue; }
+      fm_agent_path_within "$wt_real" "$cwd_real" || continue
+      task=$(fm_agent_proc_env "$pid" FM_AGENT_TASK 2>/dev/null || true)
+      printf '%s\n' "${task:-unidentified-process-$pid}"
+      found=0
+    done <<< "$rows"
+    [ "$found" -eq 0 ] && return 0
+    [ "$uncertain" -eq 1 ] && return 2
+    return 1
+  fi
   for entry in /proc/[0-9]*; do
     [ -d "$entry" ] || continue
     pid=${entry#/proc/}
@@ -328,7 +386,11 @@ $index
 EOF
     return "$found"
   fi
-  [ -d /proc ] || return 1
+  if [ ! -d /proc ]; then
+    index=$(fm_agent_task_pid_index) || return 1
+    fm_agent_pids_for_task "$id" "$index" "$expected_home"
+    return $?
+  fi
   for entry in /proc/[0-9]*; do
     [ -d "$entry" ] || continue
     pid=${entry#/proc/}

@@ -145,6 +145,85 @@ fm_worker_paths_same() {
   [ -n "$left_real" ] && [ "$left_real" = "$right_real" ]
 }
 
+fm_worker_process_environ() {
+  local pid=$1 dump
+  case "$pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  if [ -r "/proc/$pid/environ" ]; then
+    dump=$( { tr '\0' '\n' < "/proc/$pid/environ"; } 2>/dev/null ) || return 1
+  else
+    command -v ps >/dev/null 2>&1 || return 1
+    dump=$(ps eww -p "$pid" -o command= 2>/dev/null) || return 1
+    dump=$(printf '%s\n' "$dump" | tr ' ' '\n')
+  fi
+  [ -n "$dump" ] || return 1
+  printf '%s' "$dump"
+}
+
+fm_worker_process_ppid() {
+  local pid=$1 ppid
+  case "$pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  if [ -r "/proc/$pid/status" ]; then
+    ppid=$(awk '/^PPid:/ {print $2; exit}' "/proc/$pid/status" 2>/dev/null)
+  else
+    ppid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d '[:space:]')
+  fi
+  case "$ppid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  printf '%s' "$ppid"
+}
+
+fm_worker_secondmate_home_proven() {
+  local task owner home owner_real home_real marker
+  task=${_FM_WORKER_INITIAL_AGENT_TASK:-}
+  owner=${_FM_WORKER_INITIAL_AGENT_OWNER_HOME:-}
+  home=${_FM_WORKER_INITIAL_FM_HOME:-}
+  owner_real=$(fm_worker_canonical_path "$owner") || return 1
+  home_real=$(fm_worker_canonical_path "$home") || return 1
+  [ "$owner_real" = "$home_real" ] || return 1
+  [ -f "$home_real/.fm-secondmate-home" ] || return 1
+  [ ! -L "$home_real/.fm-secondmate-home" ] || return 1
+  marker=$(cat "$home_real/.fm-secondmate-home" 2>/dev/null || true)
+  [ "$marker" = "$task" ] || return 1
+  [ -f "$home_real/AGENTS.md" ] || return 1
+  [ -d "$home_real/bin" ] || return 1
+  [ -d "$home_real/data" ] && [ -d "$home_real/state" ] || return 1
+  [ -d "$home_real/config" ] && [ -d "$home_real/projects" ] || return 1
+  return 0
+}
+
+fm_worker_secondmate_ancestry_proven() {
+  local pid=${PPID:-} ppid env role task owner home found=0 depth=0
+  case "$pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  while [ "$pid" -gt 1 ] && [ "$depth" -lt 256 ]; do
+    env=$(fm_worker_process_environ "$pid") || return 1
+    role=$(printf '%s\n' "$env" | sed -n 's/^FM_AGENT_ROLE=//p' | head -1)
+    case "$role" in
+      crewmate) return 1 ;;
+      secondmate)
+        task=$(printf '%s\n' "$env" | sed -n 's/^FM_AGENT_TASK=//p' | head -1)
+        owner=$(printf '%s\n' "$env" | sed -n 's/^FM_AGENT_OWNER_HOME=//p' | head -1)
+        home=$(printf '%s\n' "$env" | sed -n 's/^FM_HOME=//p' | head -1)
+        [ "$task" = "${_FM_WORKER_INITIAL_AGENT_TASK:-}" ] || return 1
+        fm_worker_paths_same "$owner" "${_FM_WORKER_INITIAL_AGENT_OWNER_HOME:-}" || return 1
+        fm_worker_paths_same "$home" "${_FM_WORKER_INITIAL_FM_HOME:-}" || return 1
+        found=1
+        ;;
+    esac
+    ppid=$(fm_worker_process_ppid "$pid") || return 1
+    [ "$ppid" != "$pid" ] || return 1
+    pid=$ppid
+    depth=$((depth + 1))
+  done
+  [ "$found" -eq 1 ] && [ "$pid" -le 1 ]
+}
+
 fm_worker_primary_ancestry_clear() {
   local pid=$$ ppid env depth=0
   while [ "$pid" -gt 1 ] && [ "$depth" -lt 256 ]; do
@@ -272,7 +351,9 @@ fm_worker_identity_is_complete() {
 # identity or a proven primary origin.
 fm_worker_is_task_worker() {
   if [ "${_FM_WORKER_INITIAL_AGENT_ROLE:-}" = secondmate ] \
-    && fm_worker_identity_is_complete; then
+    && fm_worker_identity_is_complete \
+    && fm_worker_secondmate_home_proven \
+    && fm_worker_secondmate_ancestry_proven; then
     return 1
   fi
   if fm_worker_primary_origin_proven; then

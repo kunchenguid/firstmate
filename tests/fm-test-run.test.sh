@@ -98,6 +98,7 @@ init_changed_fixture_repo() {
     fm-captain-translation-contract.test.sh \
     fm-cd-pretool-check.test.sh \
     fm-daemon.test.sh \
+    fm-no-mistakes-required-workflow.test.sh \
     fm-backend-herdr-smoke.test.sh \
     fm-secondmate-safety.test.sh \
     fm-session-start.test.sh \
@@ -123,6 +124,8 @@ init_changed_fixture_repo() {
     >>"$repo/tests/fm-cd-pretool-check.test.sh"
   printf '# .pi/extensions/fm-primary-pi-watch.ts\n' >>"$repo/tests/fm-pi-watch-extension.test.sh"
   mkdir -p "$repo/.agents/skills/example" "$repo/.claude" "$repo/.pi/extensions" "$repo/src"
+  mkdir -p "$repo/.github/workflows"
+  printf 'baseline\n' > "$repo/.github/workflows/no-mistakes-required.yml"
   : >"$repo/.agents/skills/example/SKILL.md"
   : >"$repo/.claude/settings.json"
   : >"$repo/.pi/extensions/fm-primary-pi-watch.ts"
@@ -161,6 +164,13 @@ test_changed_dependency_selection_and_unmapped_failure() {
   assert_contains "$listed" "tests/fm-afk-return.test.sh" "supervisor target selects afk coverage"
   git -C "$repo" add bin/fm-supervisor-target-lib.sh
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm supervisor-change
+
+  printf 'changed\n' >>"$repo/.github/workflows/no-mistakes-required.yml"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-no-mistakes-required-workflow.test.sh" \
+    "required workflow changes must select semantic workflow replay"
+  git -C "$repo" add .github/workflows/no-mistakes-required.yml
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm workflow-change
 
   printf '\n' >>"$repo/.agents/skills/example/SKILL.md"
   printf '\n' >>"$repo/.claude/settings.json"

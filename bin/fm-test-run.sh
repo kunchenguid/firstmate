@@ -103,7 +103,7 @@ family_for_basename() {
     fm-dispatch-select.test.sh|fm-ensure-agents-md.test.sh|fm-grok-harness.test.sh|\
     fm-herdr-lab.test.sh|fm-instruction-owners.test.sh|fm-lint.test.sh|\
     fm-install-herdr.test.sh|fm-nm-test-contract.test.sh|fm-no-mistakes-ownership.test.sh|\
-    fm-pi-primary-types.test.sh|\
+    fm-pi-primary-types.test.sh|fm-no-mistakes-required-workflow.test.sh|\
     fm-send-popup-settle.test.sh|fm-send-settle.test.sh|fm-stow-contract.test.sh|\
     fm-scope-contract.test.sh|fm-evaluate-idea-fit-contract.test.sh|\
     fm-supervision-instructions.test.sh|fm-tmux-submit-busy.test.sh|fm-transition-lib.test.sh|\
