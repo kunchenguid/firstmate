@@ -418,6 +418,10 @@ test_selected_content_is_composer_scoped_and_wrap_normalized() {
   out=$(fm_composer_extract_selected_content "$CAPS_STYLED_NOID" "$screen")
   [ -z "$out" ] \
     || fail "idle placeholders should be excluded from extracted user content, got '$out'"
+  screen=$'❯ a legitimately long steer that\nwraps across the next bare row\n\ntranscript below the break'
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED_NOID" "$screen")
+  [ "$out" = 'a legitimately long steer that wraps across the next bare row' ] \
+    || fail "bare extraction should include only its contiguous wrap region, got '$out'"
   pass "fm_composer_extract_selected_content: scopes user content and excludes furniture"
 }
 

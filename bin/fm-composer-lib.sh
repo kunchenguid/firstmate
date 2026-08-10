@@ -921,7 +921,7 @@ _fm_composer_select_cursorless() {
 }
 
 fm_composer_extract_selected_content() {  # <caps> <screen>
-  local caps=$1 screen=$2 styled=0 kv plain row raw content glyph joined= footer_re
+  local caps=$1 screen=$2 styled=0 kv plain row raw content glyph joined= footer_re next trimmed
   footer_re=${FM_COMPOSER_LEFTBAR_FOOTER_RE:-$FM_COMPOSER_LEFTBAR_FOOTER_RE_DEFAULT}
   while IFS= read -r kv; do
     [ "$kv" = styled=1 ] && styled=1
@@ -931,6 +931,18 @@ EOF
   plain=$(printf '%s\n' "$screen" | fm_composer_strip_ansi)
   _fm_composer_scan_screen "$plain" ''
   _fm_composer_select_cursorless || return 1
+  if [ "$FM_COMPOSER_SELECTED_KIND" = bare ]; then
+    next=$((FM_COMPOSER_SELECTED_LAST + 1))
+    while :; do
+      raw=$(_fm_composer_screen_row "$next" "$plain")
+      trimmed=$raw
+      fm_composer_normalize_trim_var trimmed
+      [ -n "$trimmed" ] || break
+      fm_composer_row_has_edge "$trimmed" && break
+      FM_COMPOSER_SELECTED_LAST=$next
+      next=$((next + 1))
+    done
+  fi
   row=$FM_COMPOSER_SELECTED_FIRST
   while [ "$row" -le "$FM_COMPOSER_SELECTED_LAST" ]; do
     raw=$(_fm_composer_screen_row "$row" "$screen")

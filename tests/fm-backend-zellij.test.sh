@@ -1090,6 +1090,28 @@ test_send_text_submit_accepts_wrapped_boxed_text() {
   pass "fm_backend_zellij_send_text_submit: observes wrapped text inside the selected composer"
 }
 
+test_send_text_submit_accepts_wrapped_bare_text() {
+  local dir fb out text
+  dir="$TMP_ROOT/submit-wrapped-bare"; mkdir -p "$dir/responses"
+  text='this deliberately long steer wraps across a bare continuation row'
+  zellij_pane_response "$dir" 1 7 3
+  printf '%s' $'❯ ' > "$dir/responses/2.out"
+  zellij_pane_response "$dir" 3 7 3
+  zellij_pane_response "$dir" 5 7 3
+  printf '%s' $'❯ this deliberately long steer\nwraps across a bare continuation row' > "$dir/responses/6.out"
+  zellij_pane_response "$dir" 7 7 3
+  zellij_pane_response "$dir" 9 7 3
+  printf '%s' $'this deliberately long steer wraps across a bare continuation row\n❯ ' > "$dir/responses/10.out"
+  fb=$(make_zellij_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST="firstmate" \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_send_text_submit firstmate:7 "$1" 2 0.01 0.01' "$ROOT" "$text" )
+  [ "$out" = empty ] || fail "wrapped text in a bare composer should be observed and submitted, got '$out'"
+  assert_contains "$(cat "$dir/log")" $'\x1f''send-keys' \
+    "send_text_submit should send Enter after observing wrapped bare text"
+  pass "fm_backend_zellij_send_text_submit: observes wrapped text in a bare composer"
+}
+
 test_composer_state_reads_styled_dump() {
   local dir fb out
   dir="$TMP_ROOT/composer-styled"; mkdir -p "$dir/responses"
@@ -1289,6 +1311,7 @@ test_send_text_submit_rejects_transcript_echo_with_unrelated_draft
 test_send_text_submit_rejects_existing_intended_text_after_noop_paste
 test_send_text_submit_rejects_furniture_match_after_noop_paste
 test_send_text_submit_accepts_wrapped_boxed_text
+test_send_text_submit_accepts_wrapped_bare_text
 test_composer_state_reads_styled_dump
 test_composer_state_dead_pane_is_unknown
 test_send_text_submit_send_failed_when_session_absent
