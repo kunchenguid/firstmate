@@ -316,6 +316,7 @@ fm_config_reread_changed_items() {
 fm_config_inherit_lock_path() {
   local dest_home=$1
   [ -n "$dest_home" ] || return 1
+  dest_home=$(cd "$dest_home" 2>/dev/null && pwd -P) || return 1
   printf '%s/%s\n' "$dest_home" "$FM_CONFIG_INHERIT_LOCK_REL"
 }
 

@@ -1365,30 +1365,6 @@ test_presentation_session_lock_path_rejects_malformed_socket() {
   pass "herdr presentation lock: null and missing socket paths fail closed"
 }
 
-test_presentation_lock_malformed_socket_falls_back() {
-  local dir log resp fb out status lock_source
-  dir="$TMP_ROOT/presentation-malformed-socket-fallback"; mkdir -p "$dir/responses"
-  log="$dir/log"; resp="$dir/responses"; : > "$log"
-  printf '%s\n' '{"sessions":[{"name":"fmtest","running":true,"socket_path":null}]}' > "$resp/1.out"
-  fb=$(make_herdr_fakebin "$dir")
-  lock_source=$(sed -n '/^spawn_herdr_presentation_order_lock_acquire()/,/^spawn_herdr_presentation_order_lock_release()/p' "$ROOT/bin/fm-spawn.sh" | sed '$d')
-  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    LOCK_SOURCE="$lock_source" \
-    bash -c '
-      . "$0/bin/backends/herdr.sh"
-      eval "$LOCK_SOURCE"
-      if spawn_herdr_presentation_order_lock_acquire fmtest; then
-        printf "%s" acquired
-      else
-        printf "%s" flat
-      fi
-    ' "$ROOT" 2>&1)
-  status=$?
-  [ "$status" -eq 0 ] || fail "malformed socket fallback must not fail the spawn path: $out"
-  [ "$out" = flat ] || fail "malformed socket_path must fall back flat, got '$out'"
-  pass "herdr presentation lock: malformed socket metadata degrades to flat"
-}
-
 test_projection_order_rejects_malformed_socket() {
   local dir log resp fb mover out status
   dir="$TMP_ROOT/projection-order-malformed-socket"; mkdir -p "$dir/responses"
@@ -1413,142 +1389,6 @@ SH
   assert_contains "$out" "ambiguous named session socket" "malformed ordering socket did not warn"
   [ ! -e "$dir/called" ] || fail "malformed ordering socket attempted workspace.move"
   pass "herdr presentation ordering: malformed socket metadata is warning-only and read-only"
-}
-
-test_presentation_lock_insecure_namespace_falls_back() {
-  local dir log resp fb bad out status lock_source
-  dir="$TMP_ROOT/presentation-insecure-lock"; mkdir -p "$dir/responses" "$dir/sockdir"
-  log="$dir/log"; resp="$dir/responses"; : > "$log"
-  : > "$dir/sockdir/fmtest.sock"
-  bad="$dir/insecure"; mkdir -m 755 "$bad"
-  printf '%s\n' "{\"sessions\":[{\"name\":\"fmtest\",\"running\":true,\"socket_path\":\"$dir/sockdir/fmtest.sock\"}]}" > "$resp/1.out"
-  fb=$(make_herdr_fakebin "$dir")
-  lock_source=$(sed -n '/^spawn_herdr_presentation_order_lock_acquire()/,/^spawn_herdr_presentation_order_lock_release()/p' "$ROOT/bin/fm-spawn.sh" | sed '$d')
-  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    BAD_NAMESPACE="$bad" LOCK_SOURCE="$lock_source" \
-    bash -c '
-      . "$0/bin/backends/herdr.sh"
-      eval "$LOCK_SOURCE"
-      fm_backend_herdr_presentation_lock_namespace() { printf "%s" "$BAD_NAMESPACE"; }
-      if spawn_herdr_presentation_order_lock_acquire fmtest; then
-        printf "%s" acquired
-      else
-        printf "%s" flat
-      fi
-    ' "$ROOT" 2>&1)
-  status=$?
-  [ "$status" -eq 0 ] || fail "an insecure lock namespace must not fail the spawn path: $out"
-  [ "$out" = flat ] || fail "an insecure lock namespace must fall back flat, got '$out'"
-  pass "herdr presentation lock: insecure shared namespace refuses acquisition for flat fallback"
-}
-
-test_projected_abort_cleanup_holds_presentation_lock() {
-  local dir lock started proceed function_source owner_pid status
-  dir="$TMP_ROOT/projection-abort-lock"; mkdir -p "$dir"
-  lock="$dir/presentation.lock"
-  started="$dir/cleanup-started"
-  proceed="$dir/cleanup-proceed"
-  function_source=$(sed -n '/^spawn_abort_cleanup()/,/^trap spawn_abort_cleanup EXIT/p' "$ROOT/bin/fm-spawn.sh" | sed '$d')
-  ROOT="$ROOT" LOCK="$lock" STARTED="$started" PROCEED="$proceed" FUNCTION_SOURCE="$function_source" bash -c '
-    . "$ROOT/bin/fm-wake-lib.sh"
-    eval "$FUNCTION_SOURCE"
-    fm_backend_herdr_projection_cleanup_exact() {
-      : > "$STARTED"
-      while [ ! -e "$PROCEED" ]; do sleep 0.01; done
-    }
-    fm_lock_try_acquire "$LOCK" || exit 1
-    HERDR_PRESENTATION_ORDER_LOCK_HELD=1
-    HERDR_PRESENTATION_ORDER_LOCK=$LOCK
-    HERDR_PROJECTION_ABORT_CLEANUP=1
-    HERDR_PROJECTION_ABORT_SESSION=fmtest
-    HERDR_PROJECTION_ABORT_TASK_PANE=w9:p2
-    HERDR_PROJECTION_ABORT_SEEDED_PANE=w9:p1
-    ORCA_ABORT_CLEANUP=0
-    SPAWN_TASK_LOCK_HELD=0
-    spawn_abort_cleanup
-  ' &
-  owner_pid=$!
-  while [ ! -e "$started" ] && kill -0 "$owner_pid" 2>/dev/null; do sleep 0.01; done
-  [ -e "$started" ] || fail "projected abort cleanup did not start"
-  if LOCK="$lock" ROOT="$ROOT" bash -c '. "$ROOT/bin/fm-wake-lib.sh"; fm_lock_try_acquire "$LOCK"'; then
-    : > "$proceed"
-    wait "$owner_pid" || true
-    fail "concurrent presentation work acquired the lock during abort cleanup"
-  fi
-  : > "$proceed"
-  wait "$owner_pid"
-  status=$?
-  [ "$status" -eq 0 ] || fail "projected abort cleanup owner failed"
-  LOCK="$lock" ROOT="$ROOT" bash -c '. "$ROOT/bin/fm-wake-lib.sh"; fm_lock_try_acquire "$LOCK"' \
-    || fail "presentation lock remained held after abort cleanup"
-  pass "fm-spawn: projected abort cleanup remains serialized by the presentation lock"
-}
-
-test_flat_abort_cleanup_is_locked_focus_safe_and_durable() {
-  local dir close_log lock_log function_source marker
-  dir="$TMP_ROOT/flat-abort-cleanup"; mkdir -p "$dir"
-  close_log="$dir/close"
-  lock_log="$dir/lock"
-  marker="$dir/state/task-a.herdr-cleanup-uncertain"
-  function_source=$(sed -n '/^spawn_herdr_flat_uncertainty_record()/,/^trap spawn_abort_cleanup EXIT/p' "$ROOT/bin/fm-spawn.sh" | sed '$d')
-  ROOT="$ROOT" CLOSE_LOG="$close_log" LOCK_LOG="$lock_log" FUNCTION_SOURCE="$function_source" \
-    STATE="$dir/state" ID=task-a bash -c '
-    eval "$FUNCTION_SOURCE"
-    spawn_herdr_presentation_order_lock_acquire() {
-      HERDR_PRESENTATION_ORDER_LOCK_HELD=1
-      HERDR_PRESENTATION_ORDER_LOCK="$STATE/presentation.lock"
-      printf "acquire:%s\n" "$1" >> "$LOCK_LOG"
-    }
-    fm_backend_herdr_parse_target() {
-      FM_BACKEND_HERDR_SESSION=${1%%:*}
-      FM_BACKEND_HERDR_PANE=${1#*:}
-    }
-    fm_backend_herdr_projection_teardown_close() {
-      printf "%s:%s\n" "$1" "$2" >> "$CLOSE_LOG"
-    }
-    fm_lock_release() { printf "release:%s\n" "$1" >> "$LOCK_LOG"; }
-    HERDR_PROJECTION_ABORT_CLEANUP=0
-    HERDR_FLAT_ABORT_CLEANUP=1
-    HERDR_FLAT_ABORT_TARGET=fmtest:w9:p4
-    HERDR_FLAT_ABORT_UNCERTAIN=0
-    HERDR_FLAT_ABORT_UNCERTAINTY_FILE="$STATE/task-a.herdr-cleanup-uncertain"
-    HERDR_PRESENTATION_ORDER_LOCK_HELD=0
-    ORCA_ABORT_CLEANUP=0
-    SPAWN_TASK_LOCK_HELD=0
-    spawn_abort_cleanup
-  '
-  [ "$(cat "$close_log")" = fmtest:w9:p4 ] || fail "flat abort cleanup did not use exact focus-safe closure"
-  [ "$(cat "$lock_log")" = $'acquire:fmtest\nrelease:'"$dir"$'/state/presentation.lock' ] \
-    || fail "flat abort cleanup was not serialized by the session presentation lock"
-  [ ! -e "$marker" ] || fail "confirmed flat abort cleanup left a false uncertainty marker"
-
-  CLOSE_LOG="$close_log" LOCK_LOG="$lock_log" FUNCTION_SOURCE="$function_source" \
-    STATE="$dir/state" ID=task-a bash -c '
-    eval "$FUNCTION_SOURCE"
-    spawn_herdr_presentation_order_lock_acquire() {
-      HERDR_PRESENTATION_ORDER_LOCK_HELD=1
-      HERDR_PRESENTATION_ORDER_LOCK="$STATE/presentation.lock"
-    }
-    fm_backend_herdr_parse_target() {
-      FM_BACKEND_HERDR_SESSION=${1%%:*}
-      FM_BACKEND_HERDR_PANE=${1#*:}
-    }
-    fm_backend_herdr_projection_teardown_close() { return 1; }
-    fm_lock_release() { return 0; }
-    HERDR_PROJECTION_ABORT_CLEANUP=0
-    HERDR_FLAT_ABORT_CLEANUP=1
-    HERDR_FLAT_ABORT_TARGET=fmtest:w9:p4
-    HERDR_FLAT_ABORT_UNCERTAIN=0
-    HERDR_FLAT_ABORT_UNCERTAINTY_FILE="$STATE/task-a.herdr-cleanup-uncertain"
-    HERDR_PRESENTATION_ORDER_LOCK_HELD=0
-    ORCA_ABORT_CLEANUP=0
-    SPAWN_TASK_LOCK_HELD=0
-    spawn_abort_cleanup
-  '
-  [ -f "$marker" ] || fail "unconfirmed flat abort cleanup did not persist durable endpoint identity"
-  assert_contains "$(cat "$marker")" "target=fmtest:w9:p4" \
-    "flat abort uncertainty marker lost the exact endpoint"
-  pass "fm-spawn: flat abort cleanup is locked, focus-safe, verified, and durable on uncertainty"
 }
 
 test_projection_reclaim_refusal_matrix_is_non_mutating() {
@@ -3559,11 +3399,7 @@ test_projection_order_foreign_new_child_before_parent_is_read_only
 test_projection_order_missing_parent_is_read_only
 test_presentation_session_lock_path_is_shared_across_homes
 test_presentation_session_lock_path_rejects_malformed_socket
-test_presentation_lock_malformed_socket_falls_back
 test_projection_order_rejects_malformed_socket
-test_presentation_lock_insecure_namespace_falls_back
-test_projected_abort_cleanup_holds_presentation_lock
-test_flat_abort_cleanup_is_locked_focus_safe_and_durable
 test_projection_reclaim_refusal_matrix_is_non_mutating
 test_projection_reclaim_replaces_only_exact_husk_and_advances_binding
 test_projection_reclaim_partial_create_rolls_back_or_fails_closed

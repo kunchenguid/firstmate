@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Behavior tests for per-task GOTMPDIR support (fm-gotmp).
 #
-# fm-spawn gives each task a temp root /tmp/fm-<id>/ with Go's build temp nested at
-# gotmp/, exports GOTMPDIR into the crewmate pane, and records tasktmp= in the task's
-# meta. fm-teardown reads tasktmp= and removes the whole root on cleanup.
+# fm-spawn gives each task a private temp root with Go's build temp nested at gotmp/,
+# exports GOTMPDIR into the crewmate pane, and records tasktmp= in the task's meta.
+# fm-teardown reads tasktmp= and removes the whole root on cleanup.
 #
 # These tests exercise behavior directly: fm-teardown is run as a subprocess against a
 # fake FM_ROOT (built so the real script resolves into it), with stub helper scripts.
@@ -53,7 +53,9 @@ SH
 make_fake_root() {
   local id=$1 tasktmp=$2
   local fake="$TMP_ROOT/$id"
-  mkdir -p "$fake/bin/backends" "$fake/state"
+  mkdir -p "$fake/bin/backends" "$fake/state" "$fake/data" "$fake/config" "$fake/projects"
+  printf '%s\n' '# fixture' > "$fake/AGENTS.md"
+  git -C "$fake" init -q
   install_fake_tmux "$fake"
   # Symlink the REAL teardown so the test exercises actual code, not a copy.
   ln -s "$TEARDOWN" "$fake/bin/fm-teardown.sh"
@@ -64,8 +66,11 @@ make_fake_root() {
   ln -s "$ROOT/bin/fm-tool-path-lib.sh" "$fake/bin/fm-tool-path-lib.sh"
   ln -s "$ROOT/bin/fm-pr-lib.sh" "$fake/bin/fm-pr-lib.sh"
   : > "$fake/bin/fm-pending-reply-lib.sh"
-  cp "$ROOT/bin/fm-gate-refuse-lib.sh" "$fake/bin/fm-gate-refuse-lib.sh"
+  cat > "$fake/bin/fm-gate-refuse-lib.sh" <<'SH'
+fm_refuse_if_gate_agent() { return 0; }
+SH
   ln -s "$ROOT/bin/fm-wake-lib.sh" "$fake/bin/fm-wake-lib.sh"
+  ln -s "$ROOT/bin/fm-config-inherit-lib.sh" "$fake/bin/fm-config-inherit-lib.sh"
   ln -s "$ROOT/bin/fm-slot-owner-lib.sh" "$fake/bin/fm-slot-owner-lib.sh"
   ln -s "$ROOT/bin/fm-agent-cwd-lib.sh" "$fake/bin/fm-agent-cwd-lib.sh"
   ln -s "$ROOT/bin/fm-session-lock-lib.sh" "$fake/bin/fm-session-lock-lib.sh"
@@ -110,18 +115,21 @@ META
 
 test_teardown_removes_tasktmp_dir() {
   local id=td-rm-z2
-  local task_tmp="/tmp/fm-$id"
+  local task_tmp
+  task_tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-$id.XXXXXX") || fail "could not create task temp fixture"
   TASK_TMP_ROOT="$task_tmp"
   rm -rf -- "$task_tmp"
   mkdir -p "$task_tmp/gotmp"
   printf 'leftover\n' > "$task_tmp/gotmp/build-artifact"
+  printf 'task=%s\npath=%s\n' "$id" "$task_tmp" > "$task_tmp/.fm-tasktmp-owner"
   local fake
   fake=$(make_fake_root "$id" "$task_tmp")
   # Sanity: dir + contents exist before teardown.
   [ -d "$task_tmp/gotmp" ] || fail "precondition: gotmp missing before teardown"
   # Run the REAL teardown against the fake root.
-  PATH="$fake/bin:$PATH" FM_HOME="$fake" FM_ROOT_OVERRIDE="$fake" FM_STATE_OVERRIDE="$fake/state" \
+  (cd "$fake" && PATH="$fake/bin:$PATH" FM_HOME="$fake" FM_ROOT_OVERRIDE="$fake" FM_STATE_OVERRIDE="$fake/state" \
     bash "$fake/bin/fm-teardown.sh" "$id" >/dev/null 2>&1 \
+  ) \
     || fail "teardown exited non-zero with a valid tasktmp"
   [ ! -e "$task_tmp" ] \
     || fail "teardown did not remove the tasktmp dir ($task_tmp still exists)"
@@ -133,7 +141,9 @@ test_teardown_skips_gracefully_without_tasktmp() {
   # not error and must not remove anything.
   local id=td-absent-z3
   local fake="$TMP_ROOT/$id-root"
-  mkdir -p "$fake/bin/backends" "$fake/state"
+  mkdir -p "$fake/bin/backends" "$fake/state" "$fake/data" "$fake/config" "$fake/projects"
+  printf '%s\n' '# fixture' > "$fake/AGENTS.md"
+  git -C "$fake" init -q
   install_fake_tmux "$fake"
   ln -s "$TEARDOWN" "$fake/bin/fm-teardown.sh"
   ln -s "$ROOT/bin/fm-backend.sh" "$fake/bin/fm-backend.sh"
@@ -142,8 +152,11 @@ test_teardown_skips_gracefully_without_tasktmp() {
   ln -s "$ROOT/bin/fm-tool-path-lib.sh" "$fake/bin/fm-tool-path-lib.sh"
   ln -s "$ROOT/bin/fm-pr-lib.sh" "$fake/bin/fm-pr-lib.sh"
   : > "$fake/bin/fm-pending-reply-lib.sh"
-  cp "$ROOT/bin/fm-gate-refuse-lib.sh" "$fake/bin/fm-gate-refuse-lib.sh"
+  cat > "$fake/bin/fm-gate-refuse-lib.sh" <<'SH'
+fm_refuse_if_gate_agent() { return 0; }
+SH
   ln -s "$ROOT/bin/fm-wake-lib.sh" "$fake/bin/fm-wake-lib.sh"
+  ln -s "$ROOT/bin/fm-config-inherit-lib.sh" "$fake/bin/fm-config-inherit-lib.sh"
   ln -s "$ROOT/bin/fm-slot-owner-lib.sh" "$fake/bin/fm-slot-owner-lib.sh"
   ln -s "$ROOT/bin/fm-agent-cwd-lib.sh" "$fake/bin/fm-agent-cwd-lib.sh"
   ln -s "$ROOT/bin/fm-session-lock-lib.sh" "$fake/bin/fm-session-lock-lib.sh"
@@ -174,8 +187,9 @@ kind=ship
 mode=no-mistakes
 yolo=off
 META
-  PATH="$fake/bin:$PATH" FM_HOME="$fake" FM_ROOT_OVERRIDE="$fake" FM_STATE_OVERRIDE="$fake/state" \
+  (cd "$fake" && PATH="$fake/bin:$PATH" FM_HOME="$fake" FM_ROOT_OVERRIDE="$fake" FM_STATE_OVERRIDE="$fake/state" \
     bash "$fake/bin/fm-teardown.sh" "$id" >/dev/null 2>&1 \
+  ) \
     || fail "teardown exited non-zero when tasktmp= was absent"
   pass "fm-teardown skips gracefully when tasktmp= is absent (backward compat)"
 }
@@ -183,15 +197,16 @@ META
 test_teardown_skips_gracefully_when_dir_missing() {
   # tasktmp= points to a path that does not exist. Teardown must not error.
   local id=td-missing-z4
-  local task_tmp="/tmp/fm-$id"
+  local task_tmp="$TMP_ROOT/fm-$id.ABC123"
   TASK_TMP_ROOT="$task_tmp"
   rm -rf -- "$task_tmp"
   # Intentionally do NOT create $task_tmp.
   [ ! -e "$task_tmp" ] || fail "precondition: task_tmp should not exist yet"
   local fake
   fake=$(make_fake_root "$id" "$task_tmp")
-  PATH="$fake/bin:$PATH" FM_HOME="$fake" FM_ROOT_OVERRIDE="$fake" FM_STATE_OVERRIDE="$fake/state" \
+  (cd "$fake" && PATH="$fake/bin:$PATH" FM_HOME="$fake" FM_ROOT_OVERRIDE="$fake" FM_STATE_OVERRIDE="$fake/state" \
     bash "$fake/bin/fm-teardown.sh" "$id" >/dev/null 2>&1 \
+  ) \
     || fail "teardown exited non-zero when tasktmp dir was missing"
   [ ! -e "$task_tmp" ] || fail "teardown created/left the tasktmp dir unexpectedly"
   pass "fm-teardown skips gracefully when tasktmp= points to a nonexistent dir"

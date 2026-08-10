@@ -93,6 +93,8 @@ fm_normalize_tool_path
 . "$SCRIPT_DIR/fm-task-identity-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-config-inherit-lib.sh
+. "$SCRIPT_DIR/fm-config-inherit-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-pr-lib.sh
@@ -120,12 +122,12 @@ BACKEND=$(fm_backend_of_meta "$META")
 fm_backend_validate "$BACKEND" || exit 1
 HOME_PATH=$(grep '^home=' "$META" | cut -d= -f2- || true)
 PR_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
-# tasktmp is recorded by fm-spawn for tasks that set up a per-task temp root
-# (/tmp/fm-<id>/); absent for tasks spawned before that change, so tolerate empty.
+# tasktmp is recorded by fm-spawn for tasks that set up a per-task temp root;
+# absent for tasks spawned before that change, so tolerate empty.
 TASK_TMP=$(grep '^tasktmp=' "$META" | cut -d= -f2- || true)
 
 validated_task_tmp_cleanup_path() {
-  local recorded=$1 expected
+  local recorded=$1 expected parent base suffix marker expected_marker marker_content
   [ -n "$recorded" ] || return 0
   case "$ID" in
     ''|*[!A-Za-z0-9._-]*)
@@ -133,10 +135,57 @@ validated_task_tmp_cleanup_path() {
       return 1
       ;;
   esac
-  expected="/tmp/fm-$ID"
+  case "$recorded" in
+    /*) ;;
+    *)
+      echo "REFUSED: unsafe tasktmp $recorded for task $ID" >&2
+      return 1
+      ;;
+  esac
+  parent=${recorded%/*}
+  base=${recorded##*/}
+  [ -n "$parent" ] && [ "$parent" != "$recorded" ] || {
+    echo "REFUSED: unsafe tasktmp $recorded for task $ID" >&2
+    return 1
+  }
+  case "$base" in
+    "fm-$ID".*) suffix=${base#"fm-$ID".} ;;
+    *)
+      echo "REFUSED: unsafe tasktmp $recorded for task $ID" >&2
+      return 1
+      ;;
+  esac
+  case "$suffix" in
+    ''|*[!A-Za-z0-9_-]*)
+      echo "REFUSED: unsafe tasktmp $recorded for task $ID" >&2
+      return 1
+      ;;
+  esac
+  parent=$(cd "$parent" 2>/dev/null && pwd -P) || {
+    echo "REFUSED: unsafe tasktmp $recorded for task $ID" >&2
+    return 1
+  }
+  expected="$parent/$base"
   if [ "$recorded" != "$expected" ]; then
     echo "REFUSED: unsafe tasktmp $recorded for task $ID (expected $expected)" >&2
     return 1
+  fi
+  if [ -e "$expected" ] || [ -L "$expected" ]; then
+    [ -d "$expected" ] && [ ! -L "$expected" ] && [ -O "$expected" ] || {
+      echo "REFUSED: unsafe tasktmp $recorded for task $ID" >&2
+      return 1
+    }
+    marker="$expected/.fm-tasktmp-owner"
+    [ -f "$marker" ] && [ ! -L "$marker" ] && [ -O "$marker" ] || {
+      echo "REFUSED: tasktmp ownership marker is missing for $ID" >&2
+      return 1
+    }
+    expected_marker=$(printf 'task=%s\npath=%s' "$ID" "$expected")
+    marker_content=$(cat "$marker" 2>/dev/null || true)
+    [ "$marker_content" = "$expected_marker" ] || {
+      echo "REFUSED: tasktmp ownership marker does not match $ID" >&2
+      return 1
+    }
   fi
   printf '%s\n' "$expected"
 }
@@ -146,6 +195,29 @@ KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
 MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 [ -n "$MODE" ] || MODE=no-mistakes
 TASK_TMP_CLEANUP=$(validated_task_tmp_cleanup_path "$TASK_TMP") || exit 1
+HOME_CHILD_LOCK_HELD=0
+HOME_CHILD_LOCK_PATH=
+teardown_release_home_child_lock() {
+  if [ "$HOME_CHILD_LOCK_HELD" = 1 ]; then
+    fm_lock_release "$HOME_CHILD_LOCK_PATH" || return 1
+    HOME_CHILD_LOCK_HELD=0
+  fi
+}
+if [ "$KIND" = secondmate ]; then
+  [ -n "$HOME_PATH" ] || HOME_PATH=$WT
+  if [ -d "$HOME_PATH" ]; then
+    HOME_CHILD_LOCK_PATH=$(fm_config_inherit_lock_path "$HOME_PATH") || {
+      echo "error: could not resolve the per-home teardown lock for $ID" >&2
+      exit 1
+    }
+    if ! fm_lock_acquire_wait "$HOME_CHILD_LOCK_PATH"; then
+      echo "error: could not acquire the per-home teardown lock for $ID" >&2
+      exit 1
+    fi
+    HOME_CHILD_LOCK_HELD=1
+  fi
+fi
+trap 'teardown_release_home_child_lock || true' EXIT
 
 validate_direct_pr_state_cleanup() {
   local artifact mode
@@ -393,12 +465,12 @@ teardown_meta_backup_discard() {
 }
 
 teardown_cleanup_returned_slot() {
-  local wt=$1 id=$2 lock_path
+  local wt=$1 id=$2 expected_home=${3:-$FM_HOME} lock_path
   [ -e "$wt" ] || [ -L "$wt" ] || return 0
   fm_slot_stamp_path "$wt" >/dev/null 2>&1 || return 0
   fm_slot_lock_acquire "$wt" || return 1
   lock_path=$FM_SLOT_LOCK_PATH
-  if ! fm_slot_stamp_clear_after_return "$wt" "$id"; then
+  if ! fm_slot_stamp_clear_after_return "$wt" "$id" "$expected_home"; then
     fm_slot_lock_release "$lock_path" || true
     return 1
   fi
@@ -965,7 +1037,7 @@ remove_firstmate_home() {  # <home> <label> [expected-id] [state-dir] [home-scop
     return 1
   fi
   if [ "$(meta_value "$meta_path" slot_returned)" = 1 ]; then
-    teardown_cleanup_returned_slot "$home" "${expected_id:-$ID}" || {
+    teardown_cleanup_returned_slot "$home" "${expected_id:-$ID}" "$home" || {
       echo "error: could not clear the ownership stamp for returned $label $home; preserving task state" >&2
       return 1
     }
@@ -1021,7 +1093,7 @@ remove_firstmate_home() {  # <home> <label> [expected-id] [state-dir] [home-scop
       teardown_slot_returning_recovery_line "$meta_path" "$abs_home_path" "${expected_id:-$ID}"
       return 1
     }
-    fm_slot_stamp_clear_after_return "$abs_home_path" "${expected_id:-$ID}" || {
+    fm_slot_stamp_clear_after_return "$abs_home_path" "${expected_id:-$ID}" "$abs_home_path" || {
       fm_slot_lock_release "$lock_path" || true
       echo "error: could not clear the ownership stamp for $label $abs_home_path; preserving task state" >&2
       return 1
@@ -1161,7 +1233,7 @@ cleanup_firstmate_home_children() {
       child_home=$(meta_value "$child_meta" home)
       [ -n "$child_home" ] || child_home=$child_wt
       if [ "$child_slot_returned" = 1 ] && [ -n "$child_home" ]; then
-        teardown_cleanup_returned_slot "$child_home" "$child_id" || return 1
+        teardown_cleanup_returned_slot "$child_home" "$child_id" "$child_home" || return 1
       elif [ -n "$child_home" ] && [ -d "$child_home" ]; then
         cleanup_firstmate_home_children "$child_home" || return 1
         # Nested homes belong to their immediate parent home's state and stamp
@@ -1177,7 +1249,7 @@ cleanup_firstmate_home_children() {
       fi
     elif [ -n "$child_wt" ]; then
       if [ "$child_slot_returned" = 1 ]; then
-        teardown_cleanup_returned_slot "$child_wt" "$child_id" || {
+        teardown_cleanup_returned_slot "$child_wt" "$child_id" "$home" || {
           echo "error: could not clear the ownership stamp for returned child $child_id; preserving child state" >&2
           return 1
         }
@@ -1214,7 +1286,7 @@ cleanup_firstmate_home_children() {
             teardown_slot_returning_recovery_line "$child_meta" "$child_wt" "$child_id"
             return 1
           }
-          fm_slot_stamp_clear_after_return "$child_wt" "$child_id" || {
+          fm_slot_stamp_clear_after_return "$child_wt" "$child_id" "$home" || {
             fm_slot_lock_release "$child_slot_lock_path" || true
             echo "error: could not clear the ownership stamp for child worktree $child_wt; preserving child state" >&2
             return 1
@@ -1433,7 +1505,7 @@ teardown_release_top_slot_lock() {
     TOP_SLOT_LOCK_HELD=0
   fi
 }
-trap 'teardown_release_top_slot_lock || true' EXIT
+trap 'teardown_release_top_slot_lock || true; teardown_release_home_child_lock || true' EXIT
 if [ "$KIND" != secondmate ]; then
   if [ "$TOP_SLOT_RETURNED" = 1 ]; then
     if fm_slot_stamp_path "$WT" >/dev/null 2>&1; then
@@ -1528,7 +1600,7 @@ fi
 if [ "$KIND" != secondmate ] \
    && [ "$TOP_SLOT_RELEASE_AUTHORIZED" -eq 1 ]; then
   if [ "$TOP_SLOT_RETURNED" = 1 ]; then
-    fm_slot_stamp_clear_after_return "$WT" "$ID" || {
+    fm_slot_stamp_clear_after_return "$WT" "$ID" "$FM_HOME" || {
       echo "error: could not clear the ownership stamp for returned worktree $WT; preserving task state" >&2
       exit 1
     }
@@ -1552,7 +1624,7 @@ if [ "$KIND" != secondmate ] \
     }
     TOP_SLOT_RETURNED=1
     teardown_retire_task_branch "$WT" "$PROJ" "$TOP_TASK_BRANCH"
-    fm_slot_stamp_clear_after_return "$WT" "$ID" || {
+    fm_slot_stamp_clear_after_return "$WT" "$ID" "$FM_HOME" || {
       echo "error: could not clear the ownership stamp for worktree $WT; preserving task state" >&2
       exit 1
     }
@@ -1571,7 +1643,7 @@ if [ "$KIND" = secondmate ]; then
   remove_secondmate_registry_entry "$ID"
 fi
 remove_grok_turnend_auth "$STATE" "$ID"
-# Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.
+# Remove the per-task temp root recorded by spawn.
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
 [ -n "$TASK_TMP_CLEANUP" ] && rm -rf -- "$TASK_TMP_CLEANUP"
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1

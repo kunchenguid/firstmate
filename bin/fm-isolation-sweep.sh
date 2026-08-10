@@ -122,6 +122,19 @@ for meta in "$STATE"/*.meta; do
     endpoint_state=$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || true)
     case "$endpoint_state" in
       missing|dead|no-agent)
+        occupants=
+        if occupants=$(fm_agent_worktree_process_census "$recorded" 2>/dev/null); then
+          echo "ISOLATION: task $id endpoint is ${endpoint_state}, but live process(es) remain in its recorded worktree; block mutation until ownership is re-established"
+          sweep_status=1
+          continue
+        else
+          census_status=$?
+        fi
+        if [ "$census_status" -ne 1 ]; then
+          echo "ISOLATION: task $id endpoint is ${endpoint_state}, but its recorded worktree process census is incomplete; block mutation until ownership is re-established"
+          sweep_status=1
+          continue
+        fi
         if [ "${FM_ISOLATION_VERBOSE:-0}" = 1 ]; then
           echo "BOOTSTRAP_INFO: isolation for $id is unproven but its endpoint ${target:-<none>} is ${endpoint_state}, not live: no worker can be acting on this record; reconcile or tear it down"
         fi

@@ -244,6 +244,8 @@ SPAWN_META_PUBLISHED=0
 SPAWN_SLOT_STAMPED=0
 SPAWN_SLOT_LOCK_HELD=0
 SPAWN_SLOT_LOCK_PATH=
+SPAWN_HOME_LOCK=
+SPAWN_HOME_LOCK_HELD=0
 SPAWN_WORKTREE_PATH=
 SPAWN_WORKTREE_LEASE_PROOF=
 
@@ -325,6 +327,24 @@ spawn_slot_stamp_owned() {
   fm_slot_same_path "$FM_SLOT_STAMP_HOME" "$(real_path_or_raw "$FM_HOME")"
 }
 
+spawn_release_label_lock() {
+  [ "${HERDR_LABEL_LOCK_HELD:-0}" = 1 ] || return 0
+  if fm_lock_release "$HERDR_LABEL_LOCK"; then
+    HERDR_LABEL_LOCK_HELD=0
+    return 0
+  fi
+  return 1
+}
+
+spawn_release_home_lock() {
+  [ "${SPAWN_HOME_LOCK_HELD:-0}" = 1 ] || return 0
+  if fm_lock_release "$SPAWN_HOME_LOCK"; then
+    SPAWN_HOME_LOCK_HELD=0
+    return 0
+  fi
+  return 1
+}
+
 spawn_abort_cleanup() {
   local status=$? cleanup_session endpoint_cleanup_status=1 slot_returned=0
   if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ] \
@@ -371,6 +391,9 @@ spawn_abort_cleanup() {
   if [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" = 1 ]; then
     HERDR_PRESENTATION_ORDER_LOCK_HELD=0
     fm_lock_release "$HERDR_PRESENTATION_ORDER_LOCK" || true
+  fi
+  if [ "${HERDR_LABEL_LOCK_HELD:-0}" = 1 ]; then
+    spawn_release_label_lock || true
   fi
   if [ "$ORCA_ABORT_CLEANUP" = 1 ]; then
     ORCA_ABORT_CLEANUP=0
@@ -433,7 +456,7 @@ spawn_abort_cleanup() {
      && [ -n "${PROJ_ABS:-}" ] \
      && spawn_slot_stamp_owned; then
     if ( cd "$PROJ_ABS" && treehouse return --force "$WT" ) >/dev/null 2>&1; then
-      if fm_slot_stamp_clear_after_return "$WT" "$ID"; then
+      if fm_slot_stamp_clear_after_return "$WT" "$ID" "$(real_path_or_raw "$FM_HOME")"; then
         slot_returned=1
         if [ "${SPAWN_META_PUBLISHED:-0}" = 1 ]; then
           rm -f "$STATE/$ID.meta" || slot_returned=0
@@ -471,6 +494,9 @@ spawn_abort_cleanup() {
   if [ "$SPAWN_SLOT_LOCK_HELD" = 1 ]; then
     SPAWN_SLOT_LOCK_HELD=0
     fm_slot_lock_release "$SPAWN_SLOT_LOCK_PATH" || true
+  fi
+  if [ "${SPAWN_HOME_LOCK_HELD:-0}" = 1 ]; then
+    spawn_release_home_lock || true
   fi
   return "$status"
 }
@@ -552,6 +578,18 @@ if [ "$DISPLAY_TITLE_SET" -eq 0 ] && [ -e "$DATA/$ID/display-title" ]; then
   DISPLAY_TITLE=$(cat "$DATA/$ID/display-title")
 fi
 SPAWN_TASK_LOCK="$STATE/.spawn-$ID.lock"
+if [ -f "$FM_HOME/$SUB_HOME_MARKER" ]; then
+  mkdir -p "$STATE" || exit 1
+  SPAWN_HOME_LOCK=$(fm_config_inherit_lock_path "$FM_HOME") || {
+    echo "error: could not resolve the per-home spawn lock for $ID" >&2
+    exit 1
+  }
+  if ! fm_lock_acquire_wait "$SPAWN_HOME_LOCK"; then
+    echo "error: could not acquire the per-home spawn lock for $ID" >&2
+    exit 1
+  fi
+  SPAWN_HOME_LOCK_HELD=1
+fi
 if ! fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
   echo "error: another spawn is already creating task $ID" >&2
   exit 1
@@ -1548,13 +1586,17 @@ if [ "$KIND" != secondmate ]; then
   validate_spawn_worktree "treehouse get" "$T"
 fi
 
-# Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
-# create GOTMPDIR, so mkdir before it is used; fm-teardown removes the whole root.
-# Nested (not a bare /tmp/fm-<id>/gotmp) so other per-task temp can live alongside
-# later, and teardown cleans one deterministic path. GOTMPDIR (not TMPDIR) is the
-# targeted knob: TMPDIR is too broad (affects every program's temp, not just Go's).
-TASK_TMP="/tmp/fm-$ID"
-mkdir -p "$TASK_TMP/gotmp"
+# Per-task temp root with Go's build temp nested at gotmp/.
+TASK_TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-$ID.XXXXXX") || exit 1
+chmod 700 "$TASK_TMP" || { rm -rf -- "$TASK_TMP"; exit 1; }
+TASK_TMP_OWNER="$TASK_TMP/.fm-tasktmp-owner"
+printf 'task=%s\npath=%s\n' "$ID" "$TASK_TMP" > "$TASK_TMP_OWNER" || {
+  rm -rf -- "$TASK_TMP"
+  exit 1
+}
+chmod 600 "$TASK_TMP_OWNER" || { rm -rf -- "$TASK_TMP"; exit 1; }
+mkdir "$TASK_TMP/gotmp" || { rm -rf -- "$TASK_TMP"; exit 1; }
+chmod 700 "$TASK_TMP/gotmp" || { rm -rf -- "$TASK_TMP"; exit 1; }
 
 # Per-harness turn-end hook: a file that touches state/<id>.turn-ended when the
 # agent finishes a turn. Worktree-resident hooks are kept out of git's view so
@@ -1753,8 +1795,7 @@ SPAWN_META_PUBLISHED=1
 if [ "$BACKEND" = herdr ]; then
   rm -f "$HERDR_LABEL_JOURNAL"
   if [ "$HERDR_LABEL_LOCK_HELD" = 1 ]; then
-    HERDR_LABEL_LOCK_HELD=0
-    fm_lock_release "$HERDR_LABEL_LOCK" || exit 1
+    spawn_release_label_lock || echo "warning: $ID launched but its Herdr label lock $HERDR_LABEL_LOCK could not be released; the exit cleanup will retry" >&2
   fi
 fi
 
@@ -1822,6 +1863,12 @@ fm_backend_send_key "$BACKEND" "$WID" Enter
     fm_slot_lock_release "$SPAWN_SLOT_LOCK_PATH" \
       || echo "warning: $ID launched but its pooled-slot ownership lock $SPAWN_SLOT_LOCK_PATH could not be released; clear the stale lock file manually" >&2
   fi
-trap - EXIT
+if [ "$SPAWN_HOME_LOCK_HELD" = 1 ]; then
+  spawn_release_home_lock \
+    || echo "warning: $ID launched but its per-home spawn lock $SPAWN_HOME_LOCK could not be released; the exit cleanup will retry" >&2
+fi
+if [ "$HERDR_LABEL_LOCK_HELD" = 0 ] && [ "$SPAWN_HOME_LOCK_HELD" = 0 ]; then
+  trap - EXIT
+fi
 
 echo "spawned $ID harness=$HARNESS kind=$KIND mode=$MODE yolo=$YOLO window=$T worktree=$WT"

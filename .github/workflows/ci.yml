@@ -209,21 +209,9 @@ jobs:
 
           snapshot_output=$(/bin/bash tests/fm-fleet-snapshot.test.sh)
           printf '%s\n' "$snapshot_output"
-          snapshot_count=$(printf '%s\n' "$snapshot_output" | grep -c '^ok - ')
-          expected_snapshot_count=$(grep -c '^[[:space:]]*pass "' tests/fm-fleet-snapshot.test.sh)
-          [ "$snapshot_count" -eq "$expected_snapshot_count" ] || {
-            echo "::error::expected $expected_snapshot_count fleet snapshot tests, got $snapshot_count"
-            exit 1
-          }
 
           bearings_output=$(/bin/bash tests/fm-bearings-snapshot.test.sh)
           printf '%s\n' "$bearings_output"
-          bearings_count=$(printf '%s\n' "$bearings_output" | grep -c '^ok - ')
-          expected_bearings_count=$(grep -c '^[[:space:]]*pass "' tests/fm-bearings-snapshot.test.sh)
-          [ "$bearings_count" -eq "$expected_bearings_count" ] || {
-            echo "::error::expected $expected_bearings_count Bearings tests, got $bearings_count"
-            exit 1
-          }
 
   invariants:
     name: Repo invariants

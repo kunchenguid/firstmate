@@ -190,7 +190,7 @@ fm_slot_lock_release() {
 }
 
 fm_slot_stamp_clear_after_return() {
-  local wt=$1 task=$2 path
+  local wt=$1 task=$2 expected_home=${3:-} path
   if [ ! -e "$wt" ] && [ ! -L "$wt" ]; then
     return 0
   fi
@@ -200,6 +200,8 @@ fm_slot_stamp_clear_after_return() {
   fi
   fm_slot_stamp_record "$wt" || return 1
   [ "$FM_SLOT_STAMP_TASK" = "$task" ] || return 0
+  [ -n "$expected_home" ] || return 1
+  fm_slot_same_path "$FM_SLOT_STAMP_HOME" "$expected_home" || return 1
   fm_slot_stamp_clear "$wt"
 }
 
