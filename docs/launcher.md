@@ -94,6 +94,13 @@ The lock is held from that check until the new session's launch command has been
 A leftover tab whose agent is gone is not a running session and is replaced normally.
 The guarantee is scoped to launches made through this launcher: it does not police a primary started by other means, though once such a session's agent is registered, the reattach check sees it like any other.
 
+## Launching without a keyboard
+
+`--entry <id>` takes the preset entry with that `id` instead of prompting, and `--detach` starts the session without attaching to it.
+An unknown or unavailable id refuses with the reason rather than falling back to a default, and neither flag relaxes anything above: the backend check, the Herdr gate, the launch lock, and the one-primary-per-home guard still decide every launch.
+Without a terminal that guard has nothing to offer a reattach to, so a home that already has a primary refuses instead.
+The one caller in this repository is the unattended session path, which an OS timer arms; [docs/configuration.md](configuration.md) is its operator-facing owner.
+
 ## When something goes wrong
 
 Every refusal is one or two lines: what happened, and the one thing that fixes it.

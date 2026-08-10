@@ -60,6 +60,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-launch-lib.sh`       | Single owner of every verified harness launch command for crewmate, scout, secondmate, and primary sessions |
 | `fm-launch.sh`           | The captain's front door: probe the harness menu, then start and attach to one primary session in this home (docs/launcher.md) |
 | `fm-wsl-entry.sh`        | Enter the fleet launcher deterministically from the repository-root Windows batch bridge |
+| `fm-unattended-session.sh` | Own the queued-trigger-to-session-start path and the durable record that makes such a session attributable (docs/configuration.md) |
 | `fm-backend.sh`          | Runtime-backend selection, meta helpers, selector resolution, and operation dispatch |
 | `fm-backend-hometag-lib.sh` | Shared per-installation home-tag derivation for zellij tab and cmux workspace titles |
 | `fm-composer-lib.sh`     | Single fleet-wide owner of composer-content classification for all backends          |
