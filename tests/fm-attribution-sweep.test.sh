@@ -401,6 +401,24 @@ else
   fail "no GitHub calls were recorded, so the read-only assertion checked nothing"
 fi
 
+# --- the permanent known-positives are labelled where a triager stands ------
+# The probe artifacts are reported by every run whose window covers them, and an
+# unlabelled permanent known-positive gets investigated as a real finding every
+# time. The pointer therefore has to be in the output someone is holding, not
+# only in a document they would have to know to open.
+run_sweep candidate "1\n$(comment_record 900008 42 2026-02-02T10:00:00Z false OWNER none)" \
+  --repo acme/widgets --kind comments
+if out | grep -q 'docs/model-write-attribution.md'; then
+  pass "the summary points a triager at the retained-probe table"
+else
+  fail "no pointer to the probe table in the summary: $(out)"
+fi
+if out | grep -q '2026-08-02'; then
+  pass "the summary names the date whose candidates are known permanent ones"
+else
+  fail "the summary does not name the probe date: $(out)"
+fi
+
 # --- the convention is reachable from the tool itself ----------------------
 TOKEN=$(PATH="$BIN:$PATH" "$SWEEP" --token)
 if [ "$TOKEN" = "SOL-AI:" ]; then

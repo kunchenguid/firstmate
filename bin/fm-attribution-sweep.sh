@@ -455,6 +455,12 @@ undeclared model session and the captain's own hand-typed comment look like in
 every field GitHub exposes. The evidence on each line is a signal, not an
 attribution; the captain judges.
 
+Some candidates are known permanent ones. A capability probe on 2026-08-02 left
+five deliberately unprefixed writes in place as this sweep's only real-world red
+control, and reporting them is correct behaviour rather than a finding. Before
+investigating any candidate dated 2026-08-02, check it against the table in
+docs/model-write-attribution.md under "The retained probe writes".
+
 This run covered ${WINDOW_DESCRIPTION}, and writes outside it
 were not examined at all - a clean result says nothing about them. Widen the
 window with --since <iso8601> or FM_SWEEP_WINDOW_DAYS=<days>, and raise --budget

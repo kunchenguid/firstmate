@@ -143,8 +143,14 @@ A candidate that fails all four checks is not a probe artifact and should be jud
 They are what a browser model session produced on 2026-08-02 when it was asked to prove it could comment, review, and push a commit.
 That measurement is the evidence the whole convention rests on: every one of them recorded the account owner with `author_association: OWNER` and no bot marker, which is why write-time enforcement was ruled impossible and detection after the fact was chosen instead.
 Independent evidence is preserved outside this repository at `data/sol-capability-probe/github-evidence.md`.
-That note enumerates only four artifacts, omitting scaffolding commit `3e05033a95a1`, which appears there as a parent SHA rather than as a swept write.
+That note agrees with this section: it records the decision to keep the artifacts, calls them a deliberate permanent known-positive, states that a sweep reporting them is working correctly, and leaves the question of how to recognise them to this page.
+It enumerates only four artifacts, omitting scaffolding commit `3e05033a95a1`, which appears there as a parent SHA rather than as a swept write.
 The table above supersedes it on the set, and every entry was verified against the live API rather than copied from the note.
+
+Those two documents agreeing that the artifacts still exist is what keeps this section usable, and they have already disagreed once.
+The note previously opened by saying the artifacts had been deleted, which would lead a reader here to conclude that any candidate dated 2026-08-02 must be genuine - the exact inversion this section exists to prevent.
+No test can catch a repeat, because the note is private to the operator's home and absent from every clone and CI run, so a check asserting agreement would pass without reading anything.
+Whoever edits either document reconciles both by hand.
 
 ### Why they were not deleted
 
