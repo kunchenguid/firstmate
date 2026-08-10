@@ -17,9 +17,18 @@ make_guard_case() {
   dir="$TMP_ROOT/$name"
   home="$dir/home"
   root="$dir/root"
-  mkdir -p "$home/state" "$home/config" "$root"
+  mkdir -p "$home/state" "$home/data" "$home/config" "$root"
   fm_write_meta "$home/state/task.meta" "window=firstmate:fm-task" "kind=ship"
   printf '%s\n' "$dir"
+}
+
+register_local_secondmate() {  # <dir> <id> <mate-home>
+  local dir=$1 id=$2 mate_home=$3 home
+  home=$(case_home "$dir")
+  mkdir -p "$mate_home/state"
+  printf '%s\n' \
+    "- $id - Test secondmate (home: $mate_home; scope: test work; projects: test; added 2026-08-10)" \
+    > "$home/data/secondmates.md"
 }
 
 case_home() {
@@ -373,6 +382,35 @@ test_persistent_no_watcher_episode_survives_beacon_touch() {
   pass "fm-guard stale banner: a no-watcher episode survives a beacon mtime change"
 }
 
+test_parent_guard_names_stale_secondmate_watcher() {
+  local dir home mate out pid back
+  dir=$(make_guard_case secondmate-watcher-stale)
+  home=$(case_home "$dir")
+  mate="$dir/secondmate-home"
+  register_local_secondmate "$dir" agentepos "$mate"
+  touch "$mate/state/.last-watcher-beat"
+  back=$(( $(date +%s) - 901 ))
+  if [ "$(uname)" = Darwin ]; then
+    touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$mate/state/.last-watcher-beat"
+  else
+    touch -m -d "@$back" "$mate/state/.last-watcher-beat"
+  fi
+
+  sleep 60 &
+  pid=$!
+  record_live_watcher "$dir" "$pid" || fail "could not record healthy parent watcher"
+  touch "$home/state/.last-watcher-beat"
+  out=$(run_guard_case "$dir")
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+
+  assert_contains "$out" "SECONDMATE WATCHER STALE - agentepos" \
+    "parent guard did not name the stale registered secondmate"
+  assert_not_contains "$out" "WATCHER DOWN - SUPERVISION IS OFF" \
+    "healthy parent watcher was misclassified while reporting its secondmate"
+  pass "fm-guard surfaces a parent-side alarm naming a stale registered secondmate watcher"
+}
+
 test_first_stale_call_prints_full_banner
 test_repeated_same_episode_prints_reminder_only
 test_autoarm_fresh_beacon_without_watcher_is_healthy
@@ -380,6 +418,7 @@ test_autoarm_stale_beacon_alarms_with_correct_reason
 test_autoarm_stale_episode_is_stable
 test_persistent_no_watcher_banner_names_missing_process
 test_persistent_no_watcher_episode_survives_beacon_touch
+test_parent_guard_names_stale_secondmate_watcher
 test_fresh_beacon_without_live_watcher_stays_alarm
 test_x_mode_without_live_watcher_stays_alarm
 test_healthy_recovery_rearms_next_stale_episode

@@ -30,9 +30,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 WATCH="$SCRIPT_DIR/fm-watch.sh"
 GRACE=${FM_GUARD_GRACE:-300}
+SECOND_MATE_WATCHER_GRACE=${FM_SECOND_MATE_WATCHER_GRACE:-900}
+case "$SECOND_MATE_WATCHER_GRACE" in ''|*[!0-9]*|0) SECOND_MATE_WATCHER_GRACE=900 ;; esac
 queue_pending=false
 READ_ONLY=${FM_GUARD_READ_ONLY:-0}
 case "$READ_ONLY" in 1|true|TRUE|yes|YES) READ_ONLY=1 ;; *) READ_ONLY=0 ;; esac
@@ -117,6 +120,27 @@ fm_guard_clear_stale_banner() {
   rm -f "$STALE_BANNER_MARKER" 2>/dev/null || true
 }
 
+fm_guard_report_secondmate_watchers() {
+  local id status age _token
+  while IFS=$(printf '\t') read -r id status age _token; do
+    [ -n "$id" ] || continue
+    case "$status" in
+      stale)
+        printf '●  SUPERVISION ALARM - SECONDMATE WATCHER STALE - %s: last beat %ss ago (threshold %ss).\n' \
+          "$id" "$age" "$SECOND_MATE_WATCHER_GRACE"
+        ;;
+      missing)
+        printf '●  SUPERVISION ALARM - SECONDMATE WATCHER MISSING - %s: no heartbeat exists (threshold %ss).\n' \
+          "$id" "$SECOND_MATE_WATCHER_GRACE"
+        ;;
+      unreadable)
+        printf '●  SUPERVISION ALARM - SECONDMATE WATCHER UNREADABLE - %s: heartbeat age is unavailable (threshold %ss).\n' \
+          "$id" "$SECOND_MATE_WATCHER_GRACE"
+        ;;
+    esac
+  done < <(fm_secondmate_watcher_statuses "$DATA/secondmates.md" "$SECOND_MATE_WATCHER_GRACE")
+}
+
 # Worktree-tangle alarm, checked FIRST and independent of in-flight tasks: the
 # firstmate PRIMARY checkout (FM_ROOT) must stay on its default branch. If a
 # crewmate's branch/commits landed here instead of in its own isolated worktree,
@@ -147,6 +171,7 @@ fi
 # Compute supervision need and watcher-beacon freshness via the shared
 # grace-based predicate (bin/fm-supervision-lib.sh). Act when work, an event
 # source, or an X-mode relay poll needs supervision.
+fm_guard_report_secondmate_watchers >&2
 fm_supervision_status "$STATE" "$GRACE"
 in_flight=$FM_SUP_IN_FLIGHT
 sources=$FM_SUP_SOURCES

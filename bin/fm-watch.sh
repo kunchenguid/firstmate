@@ -46,6 +46,9 @@
 #                          and has not been surfaced yet; reported once per
 #                          captured generation, never again while that record
 #                          stays queued and never once it is acknowledged
+#   check: secondmate watcher <state>: <id> (...)
+#                          a registered local secondmate's watcher heartbeat is
+#                          stale, missing, or unreadable; one wake per lapse
 #   check: rejected unauthenticated state checks: <paths>
 #                          unsafe state checks were refused without execution
 #   check: rejected unauthenticated PR poll retirement receipts: <paths>
@@ -62,6 +65,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 mkdir -p "$STATE"
 
 # The native event fast-path and only its true dependencies have one narrow
@@ -85,6 +89,10 @@ mkdir -p "$STATE"
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$SCRIPT_DIR/fm-busy-lib.sh"
+# Shared registered-secondmate heartbeat scan. This is independent of ordinary
+# worker status/pane classification and performs no remote/network probes.
+# shellcheck source=bin/fm-supervision-lib.sh
+. "$SCRIPT_DIR/fm-supervision-lib.sh"
 
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
@@ -117,6 +125,8 @@ HEARTBEAT=${FM_HEARTBEAT:-600}        # base seconds between heartbeat scans
 HEARTBEAT_MAX=${FM_HEARTBEAT_MAX:-7200}  # heartbeat backoff cap
 CHECK_INTERVAL=${FM_CHECK_INTERVAL:-300}  # seconds between *.check.sh sweeps
 CHECK_TIMEOUT=${FM_CHECK_TIMEOUT:-30}     # seconds allowed per *.check.sh
+SECOND_MATE_WATCHER_GRACE=${FM_SECOND_MATE_WATCHER_GRACE:-900}
+case "$SECOND_MATE_WATCHER_GRACE" in ''|*[!0-9]*|0) SECOND_MATE_WATCHER_GRACE=900 ;; esac
 SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trailing
                                       # signals (a status write, then the same turn's
                                       # turn-end hook) coalesce into one wake
@@ -513,6 +523,42 @@ procevent_surface_queued() {
   wake "$reason"
 }
 
+# Parent-side liveness for persistent local secondmates. A .seen-* marker keeps
+# one unchanged stale/missing episode from making every re-arm exit immediately;
+# a fresh heartbeat clears it so the next lapse surfaces again. Enqueue precedes
+# suppression, preserving the watcher rule that a crash may duplicate an alarm
+# but cannot silently lose it. Remote homes remain on their existing registered
+# status/reply and startup-network paths because this poll is strictly local.
+scan_secondmate_watchers() {
+  local id status age token marker seen reason
+  while IFS=$(printf '\t') read -r id status age token; do
+    [ -n "$id" ] || continue
+    marker="$STATE/.seen-secondmate-watcher-$id"
+    if [ "$status" = fresh ] || [ "$status" = starting ]; then
+      rm -f "$marker" 2>/dev/null || true
+      continue
+    fi
+    seen=$(cat "$marker" 2>/dev/null || true)
+    [ "$seen" != "$token" ] || continue
+    case "$status" in
+      stale)
+        reason="check: secondmate watcher stale: $id (last beat ${age}s ago; threshold ${SECOND_MATE_WATCHER_GRACE}s)"
+        ;;
+      missing)
+        reason="check: secondmate watcher missing: $id (no heartbeat for ${age}s; threshold ${SECOND_MATE_WATCHER_GRACE}s)"
+        ;;
+      unreadable)
+        reason="check: secondmate watcher unreadable: $id (heartbeat age unavailable; threshold ${SECOND_MATE_WATCHER_GRACE}s)"
+        ;;
+      *) continue ;;
+    esac
+    fm_wake_append check "secondmate-watcher:$id" "$reason" || exit 1
+    printf '%s\n' "$token" > "$marker" 2>/dev/null \
+      || triage_log "could not record secondmate watcher alarm suppression for $id"
+    wake "$reason"
+  done < <(fm_secondmate_watcher_statuses "$DATA/secondmates.md" "$SECOND_MATE_WATCHER_GRACE")
+}
+
 run_check_process() {
   local c=$1
   shift
@@ -834,6 +880,11 @@ while :; do
   # Liveness beacon for fm-guard.sh: a fresh mtime here means a watcher is
   # alive. Supervision scripts warn when this goes stale with tasks in flight.
   touch "$STATE/.last-watcher-beat"
+
+  # A persistent secondmate can remain process-alive while its own watcher has
+  # stopped. Its local heartbeat is the parent-visible supervision signal; this
+  # check is separate from and does not alter ordinary worker classification.
+  scan_secondmate_watchers
 
   # Parent-owned secondmate pending-reply reconciliation: resolve correlated
   # parent reports, observe backend busy/idle turn completion, send one recovery

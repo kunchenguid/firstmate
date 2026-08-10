@@ -1448,6 +1448,111 @@ SH
   pass "triage log capping handles wc byte counts with leading spaces"
 }
 
+# --- registered secondmate watcher liveness ---------------------------------
+
+write_local_secondmate_registry() {  # <data-dir> <id> <home>
+  local data=$1 id=$2 home=$3
+  mkdir -p "$data"
+  printf '%s\n' \
+    "- $id - Test secondmate (home: $home; scope: test work; projects: test; added 2026-08-10)" \
+    > "$data/secondmates.md"
+}
+
+start_secondmate_liveness_watch() {  # <dir> <out>
+  local dir=$1 out=$2
+  PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" \
+    FM_DATA_OVERRIDE="$dir/data" FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
+    FM_SECOND_MATE_WATCHER_GRACE=900 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+}
+
+# Current main drains a delivered wake in one call. PR #2055 retains it until
+# the generation-bound acknowledgement printed by that drain. Honor either
+# contract so this regression composes with the open recovery work instead of
+# bypassing its durable queue boundary.
+settle_secondmate_liveness_cycle() {  # <dir>
+  local dir=$1 err sequence generation
+  err="$dir/secondmate-liveness-drain.err"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" FM_DATA_OVERRIDE="$dir/data" \
+    "$DRAIN" >/dev/null 2> "$err" || return 1
+  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$err" | tail -1)
+  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err" | tail -1)
+  rm -f "$err"
+  if [ -n "$sequence" ] || [ -n "$generation" ]; then
+    [ -n "$sequence" ] && [ -n "$generation" ] || return 1
+    FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" FM_DATA_OVERRIDE="$dir/data" \
+      "$DRAIN" --ack-through "$sequence" --recovery-generation "$generation" >/dev/null
+  fi
+}
+
+test_stale_secondmate_watcher_surfaces_once_and_rearms_after_recovery() {
+  local dir state mate out pid back marker i
+  dir=$(make_case secondmate-watcher-stale); state="$dir/state"; mate="$dir/mate"
+  out="$dir/watch.out"
+  mkdir -p "$mate/state"
+  write_local_secondmate_registry "$dir/data" agentepos "$mate"
+  touch "$mate/state/.last-watcher-beat"
+  back=$(( $(date +%s) - 901 ))
+  set_mtime "$back" "$mate/state/.last-watcher-beat"
+
+  start_secondmate_liveness_watch "$dir" "$out"
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "stale registered secondmate watcher did not surface"
+  grep -F 'check: secondmate watcher stale: agentepos' "$out" >/dev/null \
+    || fail "stale secondmate wake did not name agentepos: $(cat "$out")"
+  grep "$(printf '\tcheck\tsecondmate-watcher:agentepos\t')" "$state/.wake-queue" >/dev/null \
+    || fail "stale secondmate watcher alarm was not queued with its own check key"
+  marker="$state/.seen-secondmate-watcher-agentepos"
+  [ -s "$marker" ] || fail "stale secondmate watcher alarm did not record episode suppression"
+
+  settle_secondmate_liveness_cycle "$dir" || fail "could not settle the first secondmate watcher alarm"
+  : > "$out"
+  start_secondmate_liveness_watch "$dir" "$out"
+  pid=$!
+  wait_live "$pid" 20 || fail "unchanged stale secondmate watcher re-fired immediately: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "unchanged stale secondmate watcher queued a duplicate alarm"; }
+
+  touch "$mate/state/.last-watcher-beat"
+  i=0
+  while [ "$i" -lt 30 ] && [ -e "$marker" ]; do sleep 0.1; i=$((i + 1)); done
+  [ ! -e "$marker" ] || { reap "$pid"; fail "fresh secondmate heartbeat did not clear stale-episode suppression"; }
+
+  back=$(( $(date +%s) - 901 ))
+  set_mtime "$back" "$mate/state/.last-watcher-beat"
+  wait_for_exit "$pid" 40 || fail "second secondmate watcher lapse did not re-arm after recovery"
+  grep -F 'check: secondmate watcher stale: agentepos' "$out" >/dev/null \
+    || fail "re-armed secondmate watcher alarm did not name agentepos"
+  pass "registered stale secondmate watcher surfaces once per lapse and re-arms after recovery"
+}
+
+test_missing_secondmate_watcher_heartbeat_surfaces_by_name() {
+  local dir state mate out pid back
+  dir=$(make_case secondmate-watcher-missing); state="$dir/state"; mate="$dir/mate"
+  out="$dir/watch.out"
+  mkdir -p "$mate/state"
+  printf '%s\n' docs-mate > "$mate/.fm-secondmate-home"
+  write_local_secondmate_registry "$dir/data" docs-mate "$mate"
+
+  start_secondmate_liveness_watch "$dir" "$out"
+  pid=$!
+  wait_live "$pid" 20 || fail "newly seeded secondmate alarmed before its first-heartbeat grace elapsed: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "newly seeded secondmate queued a premature missing-heartbeat alarm"; }
+  reap "$pid"
+  settle_secondmate_liveness_cycle "$dir" || fail "could not settle the intentionally stopped startup-grace watcher"
+
+  back=$(( $(date +%s) - 901 ))
+  set_mtime "$back" "$mate/.fm-secondmate-home"
+  : > "$out"
+  start_secondmate_liveness_watch "$dir" "$out"
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "registered secondmate with no watcher heartbeat did not surface"
+  grep -F 'check: secondmate watcher missing: docs-mate' "$out" >/dev/null \
+    || fail "missing secondmate watcher heartbeat alarm did not name docs-mate: $(cat "$out")"
+  grep "$(printf '\tcheck\tsecondmate-watcher:docs-mate\t')" "$state/.wake-queue" >/dev/null \
+    || fail "missing secondmate watcher heartbeat was not queued as a check"
+  pass "registered secondmate with no watcher heartbeat surfaces by name"
+}
+
 # --- process-event delivery -------------------------------------------------
 # A durably captured process-event result publishes an ordinary `check` wake on
 # the durable queue. The watcher must deliver that queued wake proactively -
@@ -1880,6 +1985,8 @@ test_nonterminal_paused_rechecks_authoritative_state
 test_paused_authoritative_working_preserves_wedge_timer
 test_nonterminal_stale_repairs_missing_or_corrupt_timer
 test_triage_log_size_cap_accepts_spaced_wc_counts
+test_stale_secondmate_watcher_surfaces_once_and_rearms_after_recovery
+test_missing_secondmate_watcher_heartbeat_surfaces_by_name
 test_procevent_captured_result_surfaces_proactively
 test_procevent_unacknowledged_result_redrains_until_handled
 test_procevent_marker_keys_are_injective

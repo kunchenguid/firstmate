@@ -1,5 +1,5 @@
 # shellcheck shell=bash
-# Shared "supervision missing" predicate.
+# Shared home and registered-secondmate watcher-liveness predicates.
 # Usage: . bin/fm-supervision-lib.sh
 #
 # Reports whether a firstmate home needs supervision because it has in-flight
@@ -13,6 +13,11 @@
 # with no live watcher is healthy; under persistent-watcher harnesses a live
 # identity-matched watcher is still required. The status fields here retain the
 # beacon-age details used in their messages.
+
+FM_SUPERVISION_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# shellcheck source=bin/fm-secondmate-registry-lib.sh
+. "$FM_SUPERVISION_LIB_DIR/fm-secondmate-registry-lib.sh"
 
 # Portable mtime; Linux stat lacks -f, macOS stat lacks -c.
 fm_sup_stat_mtime() {
@@ -89,4 +94,67 @@ fm_supervision_needed() {
 fm_supervision_unhealthy() {
   fm_supervision_status "$@"
   [ "$FM_SUP_NEEDED" = true ] && [ "$FM_SUP_WATCHER_FRESH" = false ]
+}
+
+# fm_secondmate_watcher_statuses <registry> [grace-seconds]
+# Prints one tab-separated row for each registered LOCAL secondmate:
+#   <id><TAB><fresh|starting|stale|missing|unreadable><TAB><age|unknown><TAB><episode-token>
+# Remote homes are deliberately skipped: watcher/session-start liveness checks
+# stay local and never add an SSH/network call to the supervision loop or the
+# session-start blocking path. Invalid registry records are already diagnosed by
+# bootstrap's registry validation and cannot safely name a home, so they are
+# skipped here rather than guessed around. The default grace is 900 seconds.
+fm_secondmate_watcher_statuses() {
+  local registry=$1 grace=${2:-${FM_SECOND_MATE_WATCHER_GRACE:-900}}
+  local now line id home beat reference m age
+
+  case "$grace" in ''|*[!0-9]*|0) grace=900 ;; esac
+  [ -f "$registry" ] && [ ! -L "$registry" ] || return 0
+  now=$(date +%s)
+
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in '- '*) ;; *) continue ;; esac
+    secondmate_registry_parse_line "$line" || continue
+    [ "$SECONDMATE_REGISTRY_REMOTE" -eq 0 ] || continue
+    id=$SECONDMATE_REGISTRY_ID
+    home=$SECONDMATE_REGISTRY_HOME
+    case "$home" in /*) ;; *) continue ;; esac
+
+    beat="$home/state/.last-watcher-beat"
+    if [ ! -e "$beat" ]; then
+      reference="$home/.fm-secondmate-home"
+      if [ ! -f "$reference" ] || [ -L "$reference" ]; then
+        reference=$registry
+      fi
+      m=$(fm_sup_stat_mtime "$reference")
+      case "$m" in
+        ''|*[!0-9]*)
+          printf '%s\tunreadable\tunknown\tunreadable\n' "$id"
+          continue
+          ;;
+      esac
+      age=$((now - m))
+      [ "$age" -ge 0 ] || age=0
+      if [ "$age" -ge "$grace" ]; then
+        printf '%s\tmissing\t%s\tmissing-%s\n' "$id" "$age" "$m"
+      else
+        printf '%s\tstarting\t%s\tmissing-%s\n' "$id" "$age" "$m"
+      fi
+      continue
+    fi
+    m=$(fm_sup_stat_mtime "$beat")
+    case "$m" in
+      ''|*[!0-9]*)
+        printf '%s\tunreadable\tunknown\tunreadable\n' "$id"
+        continue
+        ;;
+    esac
+    age=$((now - m))
+    [ "$age" -ge 0 ] || age=0
+    if [ "$age" -ge "$grace" ]; then
+      printf '%s\tstale\t%s\tmtime-%s\n' "$id" "$age" "$m"
+    else
+      printf '%s\tfresh\t%s\tmtime-%s\n' "$id" "$age" "$m"
+    fi
+  done < "$registry"
 }
