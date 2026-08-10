@@ -88,6 +88,23 @@ Grok's project hook requires the checkout to be trusted with `/hooks-trust` or l
 If a passive adapter cannot invoke its SDK, or the Grok legacy fallback cannot find `grok` or a session id, the next pull-based `fm-guard.sh` call reports the problem.
 That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it always points to the active harness protocol rather than embedding another repair command.
 
+## Captain-request follow-through
+
+A second, independent turn-boundary predicate answers a different question: whether this turn would leave an explicit captain request unfinished.
+`bin/fm-captain-commitment.sh` is its single owner and its header states the record format, the lifecycle, and the outstanding predicate in full.
+It deliberately shares no state with the supervision predicate above, so neither one can corrupt the other's budget or latch, and `bin/fm-turnend-guard.sh` is unchanged by it.
+
+The core script is harness-neutral, stores no captain message text, and keeps `tasks-axi` as the only owner of actual work.
+When a record exists, every primary gets its durable surface, because `bin/fm-wake-drain.sh` prints `fm-captain-commitment.sh pending` on both the drained and the empty-queue path, which puts it in the session-start digest, on every wake-handling turn, and on the away-mode return path through `bin/fm-afk-return.sh`.
+`bin/fm-session-start.sh` marks a surviving record deferred before that drain, because a session that ended without dispositioning its record is itself the interruption.
+
+Automatic detection at the turn boundary is currently a Pi-only integration, and this is the whole of that boundary.
+`.pi/extensions/fm-primary-turnend-guard.ts` opens a record from `before_agent_start` when `bin/fm-operational-input.sh classify` does not recognise the raw submitted prompt, passes the classified kind to `defer` when it does or defers unconditionally when `session_compact` fires, and injects one bounded `turn-end-guard` follow-up from `agent_settled` when `fm-captain-commitment.sh check` returns 2.
+The extension classifies but never decides: which kinds actually displace a captain request is policy the owner script holds, so a startup nudge and the guard's own follow-up leave the record alone while everything else defers.
+Supervision keeps precedence in that handler, and the commitment check carries its own latch so the guard predicate still runs exactly once per logical agent run.
+Every other verified primary remains behaviorally unchanged and is explicitly unsupported for automatic detection: the durable record and its informational surfaces work when a record exists, but automatic open, operational defer, compaction defer, and turn-boundary refusal are absent.
+Extending one means adding the same two structural signals from that harness's own submitted-prompt hook and turn-end hook, for example Claude's `UserPromptSubmit`, and never inferring a captain message from body prose.
+
 ## Compatibility limits
 
 - Child crewmate and scout worktrees are outside scope.
@@ -102,11 +119,14 @@ That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it alwa
 - If `jq` is removed after installation, the hook remains silent and exits 0, turn-end wakes stop, and Kimi crews fall back to idle detection.
 - Unreadable hook input remains fail-open.
 - No harness adapter uses a shell ampersand to manufacture supervision.
+- Automatic captain-request follow-through detection is Pi-only; every other primary can surface an existing record but does not automatically create, defer, or refuse on one.
+- `fm-captain-commitment.sh` is inert outside a genuine primary home and silent while away mode is active.
 
 ## Regression coverage
 
 `tests/fm-turnend-guard.test.sh` covers the predicate, main and secondmate primary scope, child-worktree exclusion, `FM_HOME` and `FM_STATE_OVERRIDE` precedence, the live-lock and fresh-beacon guard predicate, the cooperative `--claude` claim wait, monotonic failed-epoch progression, bounded attended fail-open, post-alarm continuation suppression, positive recovery reset, Pi logical-run latching, missing-`jq` behavior, all five primary registrations, Grok native and legacy selection, typed field precedence, malformed input, and exactly-one-path safety.
 `tests/fm-guard-stale-banner.test.sh` covers the pull-guard predicate, including the persistent-model fresh-leftover-beacon negative control, the auto-arm model's healthy fresh-beacon-without-a-watcher case and its stale-beacon alarm, the true-reason banner wording, and the reason-keyed episode dedup surviving a beacon mtime change.
+`tests/fm-captain-commitment.test.sh` covers the follow-through owner and its integrations: an operational injection creating no commitment, a deferred request becoming one durable actionable item without storing its message, `track` refusing an absent, Done, or bodyless item, restart and compaction recovery retaining exactly one record, completion clearing the reminder, a same-turn completed request staying clean, a declared external wait staying quiet across repeated turns, away-mode and non-primary inertness, and the Pi handler's classification and latch behavior.
 `tests/fm-kimi-harness.test.sh` covers the separate Kimi crew hook's format preservation, idempotence, refusal cases, token guard, spawn registration, and teardown cleanup.
 `tests/fm-supervision-instructions.test.sh` covers recovery-line ownership and pi-signed's identity-preserving reuse of Pi's protocol.
 `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh` is the opt-in isolated Pi path.

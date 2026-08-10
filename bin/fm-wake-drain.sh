@@ -79,6 +79,16 @@ EOF
   fi
 }
 
+# Print the outstanding-captain-request surface. Same placement rationale as the
+# decisions section above: it runs on every drain including the empty-queue fast
+# path, because an explicit captain request left behind by operational work stays
+# outstanding whether or not anything new was queued for it this turn.
+# bin/fm-captain-commitment.sh owns the predicate and the byte bounds, prints
+# nothing in the common case, and is inert outside a genuine primary home.
+print_captain_commitment_section() {
+  "$SCRIPT_DIR/fm-captain-commitment.sh" pending 2>/dev/null || true
+}
+
 # shellcheck disable=SC2317,SC2329 # Invoked by trap handlers below.
 cleanup() {
   local status=$?
@@ -103,6 +113,7 @@ if [ ! -s "$FM_WAKE_QUEUE" ]; then
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   DRAIN_LOCK_HELD=false
   (print_open_decisions_section) || true
+  (print_captain_commitment_section) || true
   assert_watcher_liveness
   exit 0
 fi
@@ -132,5 +143,6 @@ DRAIN_LOCK_HELD=false
 # best-effort and cannot restore, duplicate, hide, or fail the consumed rows.
 (fm_wake_print_annotations "$RAW_ROWS") || true
 (print_open_decisions_section) || true
+(print_captain_commitment_section) || true
 assert_watcher_liveness
 exit 0

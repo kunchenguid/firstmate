@@ -309,6 +309,13 @@ if [ "$READ_ONLY" -eq 1 ]; then
   GUARD_OUT=$(FM_GUARD_READ_ONLY=1 "$SCRIPT_DIR/fm-guard.sh" 2>&1)
   [ -n "$GUARD_OUT" ] && printf '%s\n' "$GUARD_OUT"
 else
+  # A session that ended without dispositioning its captain-request record IS the
+  # interruption the record exists to survive, so mark it before the drain prints
+  # the surface. Idempotent by construction: at most one record exists, and it is
+  # never replaced, so repeated session starts cannot duplicate or reset it. The
+  # read-only branch above deliberately skips this along with the drain, because a
+  # lock-refused session has no mutation authority.
+  "$SCRIPT_DIR/fm-captain-commitment.sh" defer >/dev/null 2>&1 || true
   DRAIN_OUT=$("$SCRIPT_DIR/fm-wake-drain.sh" 2>&1)
   if [ -n "$DRAIN_OUT" ]; then
     printf '%s\n' "$DRAIN_OUT"

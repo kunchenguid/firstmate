@@ -4,9 +4,13 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { encodeFirstmateOperationalInput } from "./lib/fm-operational-input.ts";
+import {
+  classifyFirstmateOperationalText,
+  encodeFirstmateOperationalInput,
+} from "./lib/fm-operational-input.ts";
 
 let guardFollowupActive = false;
+let commitmentFollowupActive = false;
 
 type LockOwnership = "owned" | "missing" | "other";
 
@@ -76,6 +80,25 @@ function runGuard(): Promise<{ code: number; stderr: string }> {
   });
 }
 
+// Captain-request follow-through (bin/fm-captain-commitment.sh, docs/turnend-guard.md).
+// The owner script holds the durable record and every policy decision, is inert
+// outside a genuine primary home, and stores no captain text. This extension only
+// supplies the two structural signals Pi can see and nothing else can: which
+// prompts are real captain messages, and when a logical run has settled.
+function runCommitment(...argv: string[]): Promise<{ code: number; stderr: string }> {
+  return new Promise((resolveResult) => {
+    const child = spawn(`${root}/bin/fm-captain-commitment.sh`, argv, {
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+    let stderr = "";
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+    child.on("error", () => resolveResult({ code: 0, stderr: "" }));
+    child.on("close", (code) => resolveResult({ code: code ?? 0, stderr }));
+  });
+}
+
 // PreToolUse seatbelts (bin/fm-arm-pretool-check.sh, docs/arm-pretool-check.md;
 // bin/fm-cd-pretool-check.sh, docs/cd-guard.md). Both piggyback on this same
 // extension file rather than separate ones so no extra Pi -e flag is needed at
@@ -122,6 +145,26 @@ export default function (pi: ExtensionAPI) {
     }
   });
 
+  // The only place a real captain message is structurally distinguishable from an
+  // operational injection is the raw submitted prompt, so classification happens
+  // here and never from body prose later. Operational input arriving while a
+  // record is open is exactly the interruption that lost the original request.
+  // The kind is passed through rather than decided here: which kinds actually
+  // displace a captain request is policy, and the owner script holds all of it.
+  pi.on?.("before_agent_start", async (event) => {
+    const prompt = String((event as { prompt?: unknown }).prompt ?? "");
+    if (!prompt) return {};
+    const operationalKind = classifyFirstmateOperationalText(prompt);
+    await runCommitment(...(operationalKind ? ["defer", operationalKind] : ["open"]));
+    return {};
+  });
+
+  // Compaction can drop the captain's words out of context entirely, which is the
+  // second way the original request went missing. The durable record survives it.
+  pi.on?.("session_compact", async () => {
+    await runCommitment("defer");
+  });
+
   pi.on("tool_call", async (event) => {
     if (event.type !== "tool_call" || event.toolName !== "bash") return {};
     const command = String((event.input as { command?: unknown })?.command ?? "");
@@ -135,26 +178,48 @@ export default function (pi: ExtensionAPI) {
     return { block: true, reason: result.stderr.trim() || "denied by the watcher-arm PreToolUse seatbelt" };
   });
 
+  // A generated commitment follow-up's own settle ends the logical run. A generated
+  // supervision follow-up's settle continues to the commitment predicate without
+  // re-running supervision, which keeps precedence without losing the deferred check.
   pi.on("agent_settled", async () => {
     if (guardFollowupActive) {
       guardFollowupActive = false;
+    } else if (commitmentFollowupActive) {
+      commitmentFollowupActive = false;
       return;
+    } else {
+      const result = await runGuard();
+      if (result.code === 2) {
+        guardFollowupActive = true;
+        try {
+          const content = encodeFirstmateOperationalInput(
+            "turn-end-guard",
+            "TURN WOULD END BLIND - supervision is off. " +
+              "The watcher cycle is missing, failed, or unhealthy. Follow the harness recovery instruction below before ending the turn.\n\n" +
+              result.stderr,
+          );
+          await pi.sendUserMessage(content, { deliverAs: "followUp" });
+        } catch {
+          guardFollowupActive = false;
+        }
+        return;
+      }
     }
 
-    const result = await runGuard();
-    if (result.code !== 2) return;
+    const commitment = await runCommitment("check");
+    if (commitment.code !== 2) return;
 
-    guardFollowupActive = true;
+    commitmentFollowupActive = true;
     try {
       const content = encodeFirstmateOperationalInput(
         "turn-end-guard",
-        "TURN WOULD END BLIND - supervision is off. " +
-          "The watcher cycle is missing, failed, or unhealthy. Follow the harness recovery instruction below before ending the turn.\n\n" +
-          result.stderr,
+        "TURN WOULD LEAVE A CAPTAIN REQUEST UNFINISHED. " +
+          "Complete it now, or file it as backlog work carrying its own next action and completion criterion, before ending the turn.\n\n" +
+          commitment.stderr,
       );
       await pi.sendUserMessage(content, { deliverAs: "followUp" });
     } catch {
-      guardFollowupActive = false;
+      commitmentFollowupActive = false;
     }
   });
 

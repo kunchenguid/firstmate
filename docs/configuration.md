@@ -494,6 +494,19 @@ The session-start digest separately prints an "Public commitments awaiting deliv
 `FM_PF_RETRY_BACKOFF_SECS` (default 900) sets the next-attempt time recorded with a retryable delivery error.
 See [verification/public-followup.md](verification/public-followup.md) for the current maintainer evidence behind the restart end-to-end and the relay-disabled zero-overhead guarantee.
 
+## Unfinished captain requests (state/captain-commitment)
+
+Once recorded, an explicit captain request that is interrupted or deferred survives the interruption, a compaction, and a restart until it is finished or filed as tracked work.
+`bin/fm-captain-commitment.sh` owns that; run `bin/fm-captain-commitment.sh --help` for the record format, the lifecycle, and the outstanding predicate.
+
+Its private state under `state/captain-commitment/` holds at most one `open` record plus one empty marker per linked backlog item.
+The record carries a schema tag, an open timestamp, and a deferred flag, and nothing else: no captain message text, no hash of it, no transcript, and no secret.
+`tasks-axi` remains the only owner of actual work, so the linked markers are names and every question about state, holds, blocks, and completion is answered by reading the backlog.
+On Pi the directory is created on the first captain turn in a genuine primary home; on another harness it appears only if an integration or operator invokes `open`, and it never appears in a crewmate or scout worktree.
+
+When a record exists, `bin/fm-wake-drain.sh` prints the bounded surface on every drain, which puts it in the session-start digest, on every wake-handling turn, and on the away-mode return path on every primary harness.
+[`turnend-guard.md`](turnend-guard.md) owns which primaries additionally detect it automatically at the turn boundary and what the others still get.
+
 ## Process-to-event sources (state/procevent)
 
 A long-polling external process is registered as a *source* through its adapter, whose header and `--help` own the commands and flags.
