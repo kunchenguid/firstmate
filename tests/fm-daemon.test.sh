@@ -955,17 +955,16 @@ test_tmux_composer_state_requires_matching_box_borders() {
   pass "fm_tmux_composer_state: only matching edge borders form a composer box"
 }
 
-test_pane_input_pending_honors_idle_override_after_border_strip() {
-  local dir state fakebin capture
+test_pane_input_pending_preserves_bright_placeholder_like_draft() {
+  local dir fakebin capture
   dir=$(make_supercase pending-custom-idle)
-  state="$dir/state"
   fakebin="$dir/fakebin"
   capture="$dir/pane.txt"
   printf '╭────────────────╮\n│ custom idle>   │\n╰────────────────╯\n' > "$capture"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURSOR_Y=1 \
     FM_COMPOSER_IDLE_RE='^custom idle>$' pane_input_pending "fakepane" \
-    && fail "FM_COMPOSER_IDLE_RE was not applied after border stripping"
-  pass "pane_input_pending honors FM_COMPOSER_IDLE_RE after border stripping"
+    || fail "bright placeholder-like input must remain pending in a styled capture"
+  pass "pane_input_pending preserves bright placeholder-like drafts in styled captures"
 }
 
 test_classify_signal_dedup_against_scan() {
@@ -1882,7 +1881,7 @@ test_pane_input_pending_requires_proven_empty_prompt
 test_tmux_composer_state_bare_shell_is_unknown
 test_tmux_composer_state_bordered_and_agent_rows_are_empty
 test_tmux_composer_state_requires_matching_box_borders
-test_pane_input_pending_honors_idle_override_after_border_strip
+test_pane_input_pending_preserves_bright_placeholder_like_draft
 test_classify_signal_dedup_against_scan
 test_classify_stale_dedup_against_signal
 test_afk_nonterminal_working_merged_keeps_wedge_aging
