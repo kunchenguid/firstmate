@@ -66,8 +66,11 @@ parsed=$(awk -v n="$NAME" '
     match($0, /^[ \t]*-[ \t]+/);
     line = substr($0, RSTART + RLENGTH);
     name = line;
-    if (match(name, / \[/)) name = substr(name, 1, RSTART - 1);
-    else if (match(name, / - /)) name = substr(name, 1, RSTART - 1);
+    bpos = 0; dpos = 0;
+    if (match(name, / \[/)) bpos = RSTART;
+    if (match(name, / - /)) dpos = RSTART;
+    if (bpos > 0 && (dpos == 0 || bpos < dpos)) name = substr(name, 1, bpos - 1);
+    else if (dpos > 0) name = substr(name, 1, dpos - 1);
     if (name != n) next;
     mode="no-mistakes"; yolo="off";
     rest = substr(line, length(name) + 1);

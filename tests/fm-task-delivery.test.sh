@@ -285,6 +285,7 @@ test_project_mode_matches_multi_word_names() {
 - 048. Blast- Lease summary drafter [local-only] - BLAST lease summary drafter (added 2026-08-08)
 - ARI eDiscovery Development - fixture (added 2026-01-01)
 - Foo Bar Baz [local-only +yolo] - fixture (added 2026-01-01)
+- Acme Corp - Redesign the [checkout] flow (added 2026-01-01)
 EOF
 
   out=$(FM_HOME="$home" "$PROJECT_MODE" "048. Blast- Lease summary drafter" 2>/dev/null)
@@ -297,6 +298,14 @@ EOF
 
   out=$(FM_HOME="$home" "$PROJECT_MODE" "Foo Bar Baz" 2>/dev/null)
   [ "$out" = "local-only on" ] || fail "a multi-word name with a mode annotation and +yolo was not matched (got '$out')"
+
+  # A "[" that appears in the free-text description (not as a mode
+  # annotation) must not be preferred over an earlier " - " delimiter: the
+  # name span ends at whichever delimiter occurs first in the line.
+  out=$(FM_HOME="$home" "$PROJECT_MODE" "Acme Corp" 2>/dev/null)
+  [ "$out" = "no-mistakes off" ] || fail "a name followed by a '-' description containing a later '[' was not matched (got '$out')"
+  err=$(FM_HOME="$home" "$PROJECT_MODE" "Acme Corp" 2>&1 >/dev/null)
+  [ -z "$err" ] || fail "a registered project with a bracketed description word still warned as not in the registry: $err"
 
   # A genuine registry miss, including a bare prefix of a multi-word name,
   # must still fall through to the loud not-in-registry warning.
