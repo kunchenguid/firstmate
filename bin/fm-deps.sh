@@ -42,6 +42,8 @@ NODE_INDEX_URL=${FM_DEPS_NODE_INDEX_URL:-https://nodejs.org/dist/index.json}
 
 # shellcheck source=bin/fm-secondmate-nudge-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-nudge-lib.sh"
+# shellcheck source=bin/fm-ff-lib.sh
+. "$SCRIPT_DIR/fm-ff-lib.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
 
@@ -343,7 +345,9 @@ write_deps_pending_marker() {
   ensure_deps_pending_dir || return 1
   parent=$(deps_pending_dir) || return 1
   case "$marker" in "$parent"/*.pending) ;; *) return 1 ;; esac
-  [ ! -L "$marker" ] || return 1
+  if [ -e "$marker" ] || [ -L "$marker" ]; then
+    [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+  fi
   tmp=$(umask 077; mktemp "$parent/.action.XXXXXX" 2>/dev/null) || return 1
   for line in "$@"; do
     case "$line" in *$'\n'*|*$'\r'*) rm -f -- "$tmp"; return 1 ;; esac
@@ -374,13 +378,177 @@ firstmate_reread_marker_path() {
   printf '%s/firstmate-reread.pending\n' "$pending"
 }
 
-secondmate_nudge_marker_path() {
-  local selector=$1 id pending
+firstmate_action_manifest_path() {
+  local pending
+  pending=$(deps_pending_dir) || return 1
+  printf '%s/firstmate-actions.pending\n' "$pending"
+}
+
+deps_home_dir() {
+  printf '%s\n' "${FM_HOME:-$FM_ROOT}"
+}
+
+deps_data_dir() {
+  local home
+  if [ -n "${FM_DATA_OVERRIDE:-}" ]; then
+    printf '%s\n' "$FM_DATA_OVERRIDE"
+  else
+    home=$(deps_home_dir) || return 1
+    printf '%s/data\n' "$home"
+  fi
+}
+
+write_firstmate_action_manifest() {
+  local reread=$1 targets=$2 marker
+  marker=$(firstmate_action_manifest_path) || return 1
+  write_deps_pending_marker "$marker" \
+    'action=firstmate-update' "reread=$reread" "targets=$targets"
+}
+
+load_firstmate_action_manifest() {
+  local marker=$1 action selector
+  action=$(pending_marker_value "$marker" action 2>/dev/null || true)
+  PENDING_FIRSTMATE_REREAD=$(pending_marker_value "$marker" reread 2>/dev/null || true)
+  PENDING_FIRSTMATE_TARGETS=$(pending_marker_value "$marker" targets 2>/dev/null || true)
+  [ "$action" = firstmate-update ] || return 1
+  case "$PENDING_FIRSTMATE_REREAD" in yes|no) ;; *) return 1 ;; esac
+  [ -n "$PENDING_FIRSTMATE_TARGETS" ] || return 1
+  if [ "$PENDING_FIRSTMATE_TARGETS" != none ]; then
+    for selector in $PENDING_FIRSTMATE_TARGETS; do
+      case "$selector" in fm-*) ;; *) return 1 ;; esac
+      case "${selector#fm-}" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+    done
+  fi
+}
+
+current_secondmate_home() {
+  local id=$1 meta=$2 data home
+  home=$(pending_marker_value "$meta" home 2>/dev/null || true)
+  if [ -z "$home" ]; then
+    data=$(deps_data_dir) || return 1
+    home=$(secondmate_registry_field "$data/secondmates.md" "$id" home 2>/dev/null || true)
+  fi
+  [ -n "$home" ] || return 1
+  printf '%s\n' "$home"
+}
+
+record_secondmate_nudge_action() {
+  local selector=$1 id state meta kind home remote_host active_home commit instructions message remote
   case "$selector" in fm-*) ;; *) return 1 ;; esac
   id=${selector#fm-}
   case "$id" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
-  pending=$(deps_pending_dir) || return 1
-  printf '%s/secondmate-%s.pending\n' "$pending" "$id"
+  state=$(deps_state_dir) || return 1
+  meta="$state/$id.meta"
+  kind=$(pending_marker_value "$meta" kind 2>/dev/null || true)
+  [ "$kind" = secondmate ] || return 1
+  home=$(current_secondmate_home "$id" "$meta") || return 1
+  remote_host=$(pending_marker_value "$meta" remote_host 2>/dev/null || true)
+  if [ -n "$remote_host" ]; then
+    commit=""
+    instructions=remote
+    message=$FM_REMOTE_SECOND_MATE_NUDGE_MESSAGE
+    remote=1
+  else
+    active_home=$(deps_home_dir) || return 1
+    if ! FM_HOME="$active_home" validate_secondmate_home "$id" "$home"; then
+      return 1
+    fi
+    home=$VALIDATED_HOME
+    commit=$(run_git_probe -C "$home" rev-parse HEAD 2>/dev/null) || return 1
+    [ -n "$commit" ] || return 1
+    instructions=AGENTS.md
+    message=$FM_SECOND_MATE_NUDGE_MESSAGE
+    remote=0
+  fi
+  fm_secondmate_nudge_write "$state" "$id" "$home" "$commit" \
+    "$instructions" "$message" "$remote" fm-deps
+}
+
+process_identity_bound_nudges() {
+  local state active_home pending marker id selector home commit instructions message remote owner
+  local expected_marker meta kind current_home remote_host head failed=0
+  state=$(deps_state_dir) || return 1
+  active_home=$(deps_home_dir) || return 1
+  pending="$state/.secondmate-nudge-pending"
+  if [ -e "$pending" ] || [ -L "$pending" ]; then
+    [ -d "$pending" ] && [ ! -L "$pending" ] || return 1
+  else
+    return 0
+  fi
+  for marker in "$pending"/*.pending; do
+    [ -e "$marker" ] || [ -L "$marker" ] || continue
+    if [ ! -f "$marker" ] || [ -L "$marker" ]; then
+      printf 'Firstmate pending secondmate nudge is invalid: %s\n' "$marker" >&2
+      failed=1
+      continue
+    fi
+    owner=$(pending_marker_value "$marker" owner 2>/dev/null || true)
+    [ "$owner" = fm-deps ] || continue
+    id=$(pending_marker_value "$marker" id 2>/dev/null || true)
+    selector=$(pending_marker_value "$marker" selector 2>/dev/null || true)
+    home=$(pending_marker_value "$marker" home 2>/dev/null || true)
+    commit=$(pending_marker_value "$marker" commit 2>/dev/null || true)
+    instructions=$(pending_marker_value "$marker" instructions 2>/dev/null || true)
+    message=$(pending_marker_value "$marker" message 2>/dev/null || true)
+    remote=$(pending_marker_value "$marker" remote 2>/dev/null || true)
+    expected_marker=$(fm_secondmate_nudge_marker_path "$state" "$id" 2>/dev/null || true)
+    if [ "$expected_marker" != "$marker" ] || [ "$selector" != "fm-$id" ] \
+      || [ -z "$home" ] || [ -z "$instructions" ]; then
+      printf 'Firstmate pending secondmate nudge is invalid: %s\n' "$marker" >&2
+      failed=1
+      continue
+    fi
+    meta="$state/$id.meta"
+    kind=$(pending_marker_value "$meta" kind 2>/dev/null || true)
+    current_home=$(current_secondmate_home "$id" "$meta" 2>/dev/null || true)
+    remote_host=$(pending_marker_value "$meta" remote_host 2>/dev/null || true)
+    if [ "$kind" != secondmate ] || [ -z "$current_home" ]; then
+      printf 'Firstmate post-update nudge target changed for %s\n' "$selector" >&2
+      failed=1
+      continue
+    fi
+    case "$remote" in
+      0)
+        if [ -n "$remote_host" ] || [ "$message" != "$FM_SECOND_MATE_NUDGE_MESSAGE" ] \
+          || ! FM_HOME="$active_home" validate_secondmate_home "$id" "$current_home" \
+          || [ "$VALIDATED_HOME" != "$home" ]; then
+          printf 'Firstmate post-update nudge identity is invalid for %s\n' "$selector" >&2
+          failed=1
+          continue
+        fi
+        head=$(run_git_probe -C "$home" rev-parse HEAD 2>/dev/null || true)
+        if [ -z "$head" ] || [ "$head" != "$commit" ]; then
+          printf 'Firstmate post-update nudge commit changed for %s\n' "$selector" >&2
+          failed=1
+          continue
+        fi
+        ;;
+      1)
+        if [ -z "$remote_host" ] || [ "$current_home" != "$home" ] \
+          || [ "$message" != "$FM_REMOTE_SECOND_MATE_NUDGE_MESSAGE" ]; then
+          printf 'Firstmate post-update remote nudge identity is invalid for %s\n' "$selector" >&2
+          failed=1
+          continue
+        fi
+        ;;
+      *)
+        printf 'Firstmate pending secondmate nudge placement is invalid for %s\n' "$selector" >&2
+        failed=1
+        continue
+        ;;
+    esac
+    if FM_HOME="$active_home" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$state" \
+      "$FM_ROOT/bin/fm-send.sh" "$selector" "$message"; then
+      if ! rm -f -- "$marker"; then
+        printf 'Firstmate post-update nudge could not be cleared for %s\n' "$selector" >&2
+        failed=1
+      fi
+    else
+      printf 'Firstmate post-update nudge failed for %s\n' "$selector" >&2
+      failed=1
+    fi
+  done
+  [ "$failed" -eq 0 ]
 }
 
 npm_hook_marker_path() {
@@ -449,7 +617,8 @@ run_npm_upgrade() {
 }
 
 retry_pending_npm_hook() {
-  local id=$1 label=$2 command_name=$3 installed=$4 marker action tool version reply
+  local id=$1 label=$2 command_name=$3 installed=$4 latest=$5 marker action tool version reply
+  local supersede=0
   marker=$(npm_hook_marker_path "$id") || return 0
   [ -e "$marker" ] || [ -L "$marker" ] || return 0
   action=$(pending_marker_value "$marker" action 2>/dev/null || true)
@@ -460,15 +629,25 @@ retry_pending_npm_hook() {
     return 1
   fi
   if ! versions_match "$installed" "$version"; then
-    printf 'PENDING: %s hook setup requires version %s but active version is %s\n' \
-      "$label" "$version" "$installed" >&2
-    return 1
+    if ! versions_match "$installed" "$latest"; then
+      printf 'PENDING: %s hook setup requires version %s but active version is %s\n' \
+        "$label" "$version" "$installed" >&2
+      return 1
+    fi
+    printf 'PENDING: %s hook setup for %s is superseded by active approved version %s\n' \
+      "$label" "$version" "$installed"
+    supersede=1
+  else
+    printf 'PENDING: %s %s hook setup is incomplete\n' "$label" "$version"
   fi
-  printf 'PENDING: %s %s hook setup is incomplete\n' "$label" "$version"
   [ "$CHECK_ONLY" -eq 0 ] && is_interactive || return 1
   printf 'Complete pending %s hook setup now? [y/N] ' "$label"
   IFS= read -r reply || reply=""
   case "$reply" in y|Y|yes|YES|Yes) ;; *) return 1 ;; esac
+  if [ "$supersede" -eq 1 ] && ! persist_npm_hook_action "$id" "$installed"; then
+    printf 'Cannot supersede pending %s hook setup\n' "$label" >&2
+    return 1
+  fi
   if ! "$command_name" setup hooks; then
     printf 'Pending %s hook setup failed\n' "$label" >&2
     return 1
@@ -502,25 +681,16 @@ confirm_firstmate_reread() {
 }
 
 persist_firstmate_update_actions() {
-  local reread=$1 targets=$2 selector marker
-  if [ "$reread" = yes ]; then
-    marker=$(firstmate_reread_marker_path) || return 1
-    write_deps_pending_marker "$marker" \
-      'action=firstmate-reread' "path=$FM_ROOT/AGENTS.md" || return 1
-  fi
-  if [ "$targets" != none ]; then
-    for selector in $targets; do
-      marker=$(secondmate_nudge_marker_path "$selector") || return 1
-      write_deps_pending_marker "$marker" \
-        'action=secondmate-nudge' "selector=$selector" \
-        "message=$FM_SECOND_MATE_NUDGE_MESSAGE" || return 1
-    done
-  fi
+  write_firstmate_action_manifest "$1" "$2"
 }
 
 firstmate_update_actions_pending() {
-  local pending marker
+  local pending marker state
   pending=$(deps_pending_dir) || return 1
+  marker=$(firstmate_action_manifest_path) || return 1
+  if [ -e "$marker" ] || [ -L "$marker" ]; then
+    return 0
+  fi
   marker=$(firstmate_reread_marker_path) || return 1
   if [ -e "$marker" ] || [ -L "$marker" ]; then
     return 0
@@ -530,11 +700,18 @@ firstmate_update_actions_pending() {
       return 0
     fi
   done
+  state=$(deps_state_dir) || return 1
+  for marker in "$state/.secondmate-nudge-pending"/*.pending; do
+    if [ -e "$marker" ] || [ -L "$marker" ]; then
+      return 0
+    fi
+  done
   return 1
 }
 
 process_pending_firstmate_actions() {
-  local pending reread_marker action path marker selector message expected_marker failed=0
+  local pending manifest reread_marker action path marker targets selector failed_targets=""
+  local record_failed=0 send_failed=0
   pending=$(deps_pending_dir) || return 1
   if [ -e "$pending" ] || [ -L "$pending" ]; then
     [ -d "$pending" ] && [ ! -L "$pending" ] || {
@@ -542,7 +719,7 @@ process_pending_firstmate_actions() {
       return 1
     }
   else
-    return 0
+    pending=""
   fi
 
   reread_marker=$(firstmate_reread_marker_path) || return 1
@@ -551,7 +728,7 @@ process_pending_firstmate_actions() {
     path=$(pending_marker_value "$reread_marker" path 2>/dev/null || true)
     if [ "$action" != firstmate-reread ] || [ "$path" != "$FM_ROOT/AGENTS.md" ]; then
       printf 'Firstmate pending reread action is invalid\n' >&2
-      return 1
+      return 2
     fi
     printf 'REREAD_REQUIRED: %s/AGENTS.md changed\n' "$FM_ROOT"
     if confirm_firstmate_reread; then
@@ -560,35 +737,59 @@ process_pending_firstmate_actions() {
         return 1
       }
     else
+      return 2
+    fi
+  fi
+
+  if [ -n "$pending" ]; then
+    for marker in "$pending"/secondmate-*.pending; do
+      if [ -e "$marker" ] || [ -L "$marker" ]; then
+        printf 'Firstmate pending selector-only nudge is unsafe: %s\n' "$marker" >&2
+        return 2
+      fi
+    done
+  fi
+
+  manifest=$(firstmate_action_manifest_path) || return 1
+  if [ -e "$manifest" ] || [ -L "$manifest" ]; then
+    if ! load_firstmate_action_manifest "$manifest"; then
+      printf 'Firstmate pending action inventory is invalid\n' >&2
+      return 2
+    fi
+    targets=$PENDING_FIRSTMATE_TARGETS
+    if [ "$PENDING_FIRSTMATE_REREAD" = yes ]; then
+      printf 'REREAD_REQUIRED: %s/AGENTS.md changed\n' "$FM_ROOT"
+      if ! confirm_firstmate_reread; then
+        return 2
+      fi
+      if ! write_firstmate_action_manifest no "$targets"; then
+        printf 'Firstmate pending reread action could not be cleared\n' >&2
+        return 2
+      fi
+    fi
+    if [ "$targets" != none ]; then
+      for selector in $targets; do
+        if ! record_secondmate_nudge_action "$selector"; then
+          printf 'Firstmate post-update nudge could not be identity-bound for %s\n' \
+            "$selector" >&2
+          failed_targets="${failed_targets}${failed_targets:+ }$selector"
+          record_failed=1
+        fi
+      done
+    fi
+    if [ "$record_failed" -eq 1 ]; then
+      if ! write_firstmate_action_manifest no "$failed_targets"; then
+        printf 'Firstmate pending action inventory could not be narrowed safely\n' >&2
+        return 1
+      fi
+    elif ! rm -f -- "$manifest"; then
+      printf 'Firstmate pending action inventory could not be cleared\n' >&2
       return 1
     fi
   fi
 
-  for marker in "$pending"/secondmate-*.pending; do
-    [ -e "$marker" ] || [ -L "$marker" ] || continue
-    action=$(pending_marker_value "$marker" action 2>/dev/null || true)
-    selector=$(pending_marker_value "$marker" selector 2>/dev/null || true)
-    message=$(pending_marker_value "$marker" message 2>/dev/null || true)
-    expected_marker=$(secondmate_nudge_marker_path "$selector" 2>/dev/null || true)
-    if [ "$action" != secondmate-nudge ] \
-      || [ "$message" != "$FM_SECOND_MATE_NUDGE_MESSAGE" ] \
-      || [ "$expected_marker" != "$marker" ]; then
-      printf 'Firstmate pending secondmate nudge is invalid: %s\n' "$marker" >&2
-      failed=1
-      continue
-    fi
-    if FM_HOME="${FM_HOME:-$FM_ROOT}" FM_ROOT_OVERRIDE="$FM_ROOT" \
-      "$FM_ROOT/bin/fm-send.sh" "$selector" "$message"; then
-      if ! rm -f -- "$marker"; then
-        printf 'Firstmate post-update nudge could not be cleared for %s\n' "$selector" >&2
-        failed=1
-      fi
-    else
-      printf 'Firstmate post-update nudge failed for %s\n' "$selector" >&2
-      failed=1
-    fi
-  done
-  [ "$failed" -eq 0 ]
+  process_identity_bound_nudges || send_failed=1
+  [ "$record_failed" -eq 0 ] && [ "$send_failed" -eq 0 ]
 }
 
 handle_firstmate_update_actions() {
@@ -728,17 +929,14 @@ check_npm_tool() {
     printf 'MISSING: %s (%s)\n' "$label" "$command_name"
     return 0
   fi
-  if npm_hook_marker_path "$id" >/dev/null 2>&1 \
-    && ! retry_pending_npm_hook "$id" "$label" "$command_name" "$installed"; then
-    hook_incomplete=1
-  fi
   if ! latest=$(npm_latest "$id") || [ -z "$latest" ]; then
     printf 'UNKNOWN: %s %s; npm registry check failed\n' "$label" "$installed"
     FAILURES=$((FAILURES + 1))
-    if [ "$hook_incomplete" -eq 1 ] && npm_hook_action_pending "$id"; then
-      FAILURES=$((FAILURES + 1))
-    fi
     return 0
+  fi
+  if npm_hook_marker_path "$id" >/dev/null 2>&1 \
+    && ! retry_pending_npm_hook "$id" "$label" "$command_name" "$installed" "$latest"; then
+    hook_incomplete=1
   fi
   offer_update "$id" "$label" "$installed" "$latest" normal
   if [ "$hook_incomplete" -eq 1 ] && npm_hook_action_pending "$id"; then
@@ -957,7 +1155,12 @@ fi
 printf 'AI workspace dependency check (Linux)\n'
 printf '%s\n' '----------------------------------------'
 
-if ! process_pending_firstmate_actions; then
+process_pending_firstmate_actions
+pending_action_status=$?
+if [ "$pending_action_status" -eq 2 ]; then
+  printf 'FAILED: required Firstmate instruction reread remains incomplete\n' >&2
+  exit 1
+elif [ "$pending_action_status" -ne 0 ]; then
   printf 'FAILED: Firstmate post-update actions remain incomplete\n' >&2
   FAILURES=$((FAILURES + 1))
 fi

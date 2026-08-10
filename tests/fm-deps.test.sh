@@ -13,6 +13,36 @@ TMP_ROOT=$(fm_test_tmproot fm-deps-tests)
 # shellcheck source=bin/fm-deps.sh
 FM_DEPS_SOURCE_ONLY=1 FM_ROOT_OVERRIDE="$ROOT" . "$DEPS"
 
+create_firstmate_action_home() {
+  local fixture=$1 id=$2 tag=${3:-$2} target
+  target="$TMP_ROOT/${fixture##*/}-$tag"
+  mkdir -p "$target/bin"
+  printf '%s\n' "$id" > "$target/.fm-secondmate-home"
+  printf 'instructions\n' > "$target/AGENTS.md"
+  printf '#!/usr/bin/env bash\n' > "$target/bin/tool.sh"
+  git -C "$target" init -q
+  git -C "$target" config user.email test@example.com
+  git -C "$target" config user.name Test
+  git -C "$target" add AGENTS.md bin/tool.sh .fm-secondmate-home
+  git -C "$target" commit -qm seed
+  printf '%s\n' "$target"
+}
+
+register_firstmate_action_target() {
+  local fixture=$1 id=$2 target=$3
+  mkdir -p "$fixture/state" "$fixture/data"
+  {
+    printf 'kind=secondmate\n'
+    printf 'home=%s\n' "$target"
+  } > "$fixture/state/$id.meta"
+}
+
+prepare_firstmate_action_target() {
+  local fixture=$1 id=$2 target
+  target=$(create_firstmate_action_home "$fixture" "$id") || return 1
+  register_firstmate_action_target "$fixture" "$id" "$target"
+}
+
 test_version_ordering() {
   version_is_older 1.2.3 1.2.4 || fail "semver patch update was not detected"
   version_is_older 3.7a 3.7b || fail "lettered patch update was not detected"
@@ -169,6 +199,8 @@ test_firstmate_update_actions_are_consumed() {
   fixture="$TMP_ROOT/firstmate-update"
   log="$fixture/send.log"
   mkdir -p "$fixture/bin"
+  prepare_firstmate_action_target "$fixture" one
+  prepare_firstmate_action_target "$fixture" two
   # shellcheck disable=SC2016
   printf '%s\n' '#!/usr/bin/env bash' \
     'printf '\''firstmate: updated old..new\n'\''' \
@@ -205,6 +237,7 @@ test_firstmate_secondmate_only_actions_are_preserved() {
   fixture="$TMP_ROOT/firstmate-secondmate-only"
   log="$fixture/send.log"
   mkdir -p "$fixture/bin"
+  prepare_firstmate_action_target "$fixture" only
   printf '%s\n' '#!/usr/bin/env bash' \
     'printf '\''firstmate: already current\n'\''' \
     'printf '\''reread-firstmate: no\n'\''' \
@@ -230,6 +263,7 @@ test_firstmate_concurrent_update_preserves_actions() {
   fakebin=$(fm_fakebin "$fixture")
   log="$fixture/send.log"
   mkdir -p "$fixture/bin"
+  prepare_firstmate_action_target "$fixture" concurrent
   printf '%s\n' '#!/usr/bin/env bash' \
     'printf '\''firstmate: already current\n'\''' \
     'printf '\''reread-firstmate: yes\n'\''' \
@@ -252,11 +286,15 @@ test_firstmate_concurrent_update_preserves_actions() {
 }
 
 test_firstmate_actions_are_durable_and_retry_every_target() {
-  local fixture log out status pending
+  local fixture log out status pending nudge one_home replacement before after
   fixture="$TMP_ROOT/firstmate-durable-actions"
   log="$fixture/send.log"
   pending="$fixture/state/.fm-deps-pending"
+  nudge="$fixture/state/.secondmate-nudge-pending"
   mkdir -p "$fixture/bin"
+  one_home=$(create_firstmate_action_home "$fixture" one)
+  register_firstmate_action_target "$fixture" one "$one_home"
+  prepare_firstmate_action_target "$fixture" two
   printf '%s\n' '#!/usr/bin/env bash' \
     'printf '\''firstmate: updated old..new\n'\''' \
     'printf '\''reread-firstmate: yes\n'\''' \
@@ -271,33 +309,100 @@ test_firstmate_actions_are_durable_and_retry_every_target() {
     FM_DEPS_INTERACTIVE=1 CHECK_ONLY=0 FM_DEPS_TEST_LOG="$log" \
     run_upgrade firstmate <<<no 2>&1)
   status=$?
-  [ "$status" -ne 0 ] || fail "declined reread completed Firstmate post-update actions"
-  assert_present "$pending/firstmate-reread.pending" \
-    "declined reread left no durable action"
-  assert_present "$pending/secondmate-one.pending" \
-    "first secondmate nudge was not recorded before reread"
-  assert_present "$pending/secondmate-two.pending" \
-    "second secondmate nudge was not recorded before reread"
+  [ "$status" -ne 0 ] || fail "declined reread completed Firstmate post-update actions: $out"
+  assert_present "$pending/firstmate-actions.pending" \
+    "declined reread left no durable action inventory"
+  assert_grep "targets=fm-one fm-two" "$pending/firstmate-actions.pending" \
+    "durable action inventory omitted an updated secondmate"
+  assert_absent "$nudge/one.pending" \
+    "secondmate identity was recorded before reread confirmation"
   assert_absent "$log" "secondmates were nudged before reread confirmation"
 
+  mkdir -p "$nudge/one.pending"
   out=$(FM_ROOT="$fixture" FM_HOME="$fixture" FM_DEPS_SOURCE_ONLY=1 \
     FM_DEPS_INTERACTIVE=1 CHECK_ONLY=0 FM_DEPS_TEST_LOG="$log" \
-    FM_DEPS_TEST_FAIL_SELECTOR=fm-one process_pending_firstmate_actions <<<yes 2>&1)
+    process_pending_firstmate_actions <<<yes 2>&1)
   status=$?
-  [ "$status" -ne 0 ] || fail "failed secondmate nudge completed pending actions"
-  assert_grep "fm-one" "$log" "first pending secondmate was not attempted"
+  [ "$status" -ne 0 ] || fail "corrupt first marker completed pending actions: $out"
   assert_grep "fm-two" "$log" "later pending secondmate was skipped after a failure"
-  assert_present "$pending/secondmate-one.pending" \
-    "failed secondmate nudge lost its retry action"
-  assert_absent "$pending/secondmate-two.pending" \
-    "successful secondmate nudge retained its retry action"
+  assert_grep "targets=fm-one" "$pending/firstmate-actions.pending" \
+    "failed marker lost its target from the durable action inventory"
+  assert_absent "$nudge/two.pending" \
+    "successful later secondmate nudge retained its retry marker"
 
-  FM_ROOT="$fixture" FM_HOME="$fixture" FM_DEPS_SOURCE_ONLY=1 \
+  rmdir "$nudge/one.pending"
+  out=$(FM_ROOT="$fixture" FM_HOME="$fixture" FM_DEPS_SOURCE_ONLY=1 \
     FM_DEPS_INTERACTIVE=1 CHECK_ONLY=0 FM_DEPS_TEST_LOG="$log" \
+    FM_DEPS_TEST_FAIL_SELECTOR=fm-one process_pending_firstmate_actions 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "failed remaining nudge completed pending actions: $out"
+  assert_present "$nudge/one.pending" \
+    "failed remaining nudge lost its identity-bound retry marker"
+  assert_absent "$pending/firstmate-actions.pending" \
+    "fully identity-bound inventory was not retired"
+
+  before=$(wc -l < "$log")
+  replacement=$(create_firstmate_action_home "$fixture" one replacement)
+  register_firstmate_action_target "$fixture" one "$replacement"
+  out=$(FM_ROOT="$fixture" FM_HOME="$fixture" FM_DEPS_SOURCE_ONLY=1 \
+    FM_DEPS_INTERACTIVE=1 CHECK_ONLY=0 FM_DEPS_TEST_LOG="$log" \
+    process_pending_firstmate_actions 2>&1)
+  status=$?
+  after=$(wc -l < "$log")
+  [ "$status" -ne 0 ] || fail "reassigned selector accepted a stale nudge identity: $out"
+  [ "$after" -eq "$before" ] || fail "stale nudge was delivered to a reassigned selector"
+  assert_present "$nudge/one.pending" \
+    "identity mismatch discarded the original pending nudge"
+  pass "Firstmate actions persist completely and bind retry identity"
+}
+
+test_remote_secondmate_actions_use_shared_retry_markers() {
+  local fixture log marker startup_marker startup_home startup_commit out status
+  fixture="$TMP_ROOT/firstmate-remote-action"
+  log="$fixture/send.log"
+  marker="$fixture/state/.secondmate-nudge-pending/remote.pending"
+  startup_marker="$fixture/state/.secondmate-nudge-pending/startup.pending"
+  mkdir -p "$fixture/bin" "$fixture/state" "$fixture/data"
+  {
+    printf 'kind=secondmate\n'
+    printf 'home=/srv/firstmate-remote\n'
+    printf 'remote_host=remote.example\n'
+  } > "$fixture/state/remote.meta"
+  startup_home=$(create_firstmate_action_home "$fixture" startup)
+  register_firstmate_action_target "$fixture" startup "$startup_home"
+  startup_commit=$(git -C "$startup_home" rev-parse HEAD)
+  fm_secondmate_nudge_write "$fixture/state" startup "$startup_home" "$startup_commit" \
+    AGENTS.md "$FM_SECOND_MATE_NUDGE_MESSAGE" 0
+  # shellcheck disable=SC2016
+  printf '%s\n' '#!/usr/bin/env bash' \
+    'printf '\''%s|%s\n'\'' "$1" "$2" >> "$FM_DEPS_TEST_LOG"' \
+    '[ "${FM_DEPS_TEST_SEND_FAIL:-0}" -eq 0 ]' > "$fixture/bin/fm-send.sh"
+  chmod +x "$fixture/bin/fm-send.sh"
+
+  FM_ROOT="$fixture" FM_HOME="$fixture" persist_firstmate_update_actions no fm-remote
+  out=$(FM_ROOT="$fixture" FM_HOME="$fixture" FM_DEPS_TEST_LOG="$log" \
+    FM_DEPS_TEST_SEND_FAIL=1 process_pending_firstmate_actions 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "failed remote nudge completed pending actions"
+  assert_contains "$out" "Firstmate post-update nudge failed for fm-remote" \
+    "failed remote nudge was not reported"
+  assert_present "$marker" "failed remote nudge left no shared retry marker"
+  assert_grep "owner=fm-deps" "$marker" \
+    "dependency-checker retry marker lost its owner"
+  assert_grep "remote=1" "$marker" "remote retry marker lost its placement identity"
+  assert_grep "home=/srv/firstmate-remote" "$marker" \
+    "remote retry marker lost its home identity"
+
+  FM_ROOT="$fixture" FM_HOME="$fixture" FM_DEPS_TEST_LOG="$log" \
     process_pending_firstmate_actions
-  assert_absent "$pending/secondmate-one.pending" \
-    "later run did not complete the remaining secondmate nudge"
-  pass "Firstmate post-update actions persist and retry every target"
+  assert_absent "$marker" "successful remote nudge retained its shared retry marker"
+  assert_present "$startup_marker" \
+    "dependency checker consumed a retry marker owned by startup"
+  assert_not_contains "$(< "$log")" "fm-startup" \
+    "dependency checker delivered a retry marker owned by startup"
+  assert_grep "fm-remote|$FM_REMOTE_SECOND_MATE_NUDGE_MESSAGE" "$log" \
+    "remote secondmate did not receive the shared reread message"
+  pass "remote secondmate actions use the shared retry path"
 }
 
 test_npm_upgrade_pins_version_and_retries_hooks() {
@@ -343,6 +448,53 @@ test_npm_upgrade_pins_version_and_retries_hooks() {
     "later dependency check did not retry pending hook setup"
   assert_absent "$marker" "successful hook retry retained its pending action"
   pass "npm upgrades pin approved versions and retry hook setup"
+}
+
+test_pending_npm_hooks_supersede_changed_active_version() {
+  local fixture fakebin hook_log marker out status version
+  fixture="$TMP_ROOT/npm-hook-supersede"
+  fakebin=$(fm_fakebin "$fixture")
+  hook_log="$fixture/hooks.log"
+  marker="$fixture/state/.fm-deps-pending/npm-hooks-gh-axi.pending"
+  # shellcheck disable=SC2016
+  printf '%s\n' '#!/usr/bin/env bash' \
+    'case "$1" in' \
+    '  view) printf '\''%s\n'\'' "$FM_DEPS_TEST_LATEST" ;;' \
+    '  *) exit 1 ;;' \
+    'esac' > "$fakebin/npm"
+  # shellcheck disable=SC2016
+  printf '%s\n' '#!/usr/bin/env bash' \
+    'case "$1" in' \
+    '  --version) printf '\''gh-axi %s\n'\'' "$FM_DEPS_TEST_TOOL_VERSION" ;;' \
+    '  setup)' \
+    '    printf '\''%s\n'\'' "$*" >> "$FM_DEPS_TEST_HOOK_LOG"' \
+    '    [ "${FM_DEPS_TEST_HOOK_FAIL:-0}" -eq 0 ]' \
+    '    ;;' \
+    '  *) exit 1 ;;' \
+    'esac' > "$fakebin/gh-axi"
+  chmod +x "$fakebin/npm" "$fakebin/gh-axi"
+
+  FM_STATE_OVERRIDE="$fixture/state" persist_npm_hook_action gh-axi 1.2.3
+  out=$(PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$fixture/state" \
+    FM_DEPS_SOURCE_ONLY=1 FM_DEPS_INTERACTIVE=1 CHECK_ONLY=0 \
+    FM_DEPS_TEST_LATEST=1.3.0 FM_DEPS_TEST_TOOL_VERSION=1.3.0 \
+    FM_DEPS_TEST_HOOK_LOG="$hook_log" FM_DEPS_TEST_HOOK_FAIL=1 \
+    check_npm_tool gh-axi gh-axi gh-axi <<<yes 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] || fail "failed superseding hook check did not finish its report: $out"
+  assert_contains "$out" "superseded by active approved version 1.3.0" \
+    "changed active version did not supersede the stale hook action"
+  version=$(pending_marker_value "$marker" version)
+  [ "$version" = 1.3.0 ] || fail "failed hook retry retained stale version $version"
+
+  out=$(PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$fixture/state" \
+    FM_DEPS_SOURCE_ONLY=1 FM_DEPS_INTERACTIVE=1 CHECK_ONLY=0 \
+    FM_DEPS_TEST_LATEST=1.3.0 FM_DEPS_TEST_TOOL_VERSION=1.3.0 \
+    FM_DEPS_TEST_HOOK_LOG="$hook_log" check_npm_tool gh-axi gh-axi gh-axi <<<yes 2>&1)
+  assert_contains "$out" "COMPLETED: gh-axi hook setup" \
+    "superseded hook action was not recoverable on the next run"
+  assert_absent "$marker" "successful superseded hook retry retained its marker"
+  pass "pending npm hooks safely follow an approved active version"
 }
 
 test_npm_upgrade_rejects_active_version_mismatch() {
@@ -391,11 +543,40 @@ test_dependency_probes_are_bounded_and_git_is_noninteractive() {
   pass "dependency probes are bounded and Git credentials stay non-interactive"
 }
 
+test_unread_instructions_stop_dependency_mutations() {
+  local fixture fakebin log out status
+  fixture="$TMP_ROOT/unread-instructions"
+  fakebin=$(fm_fakebin "$fixture")
+  log="$fixture/probes.log"
+  mkdir -p "$fixture/state/.fm-deps-pending" "$fixture/bin"
+  printf '%s\n' 'action=firstmate-update' 'reread=invalid' 'targets=none' \
+    > "$fixture/state/.fm-deps-pending/firstmate-actions.pending"
+  # shellcheck disable=SC2016
+  printf '%s\n' '#!/usr/bin/env bash' \
+    'printf '\''called\n'\'' >> "$FM_DEPS_TEST_PROBE_LOG"' > "$fakebin/codex"
+  chmod +x "$fakebin/codex"
+
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$fixture" FM_ROOT_OVERRIDE="$fixture" \
+    FM_STATE_OVERRIDE="$fixture/state" FM_DEPS_SOURCE_ONLY=0 \
+    FM_DEPS_TEST_PROBE_LOG="$log" bash "$DEPS" --check 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "invalid pending reread allowed the checker to continue"
+  assert_contains "$out" "required Firstmate instruction reread remains incomplete" \
+    "blocked mutation path did not report the unread instructions"
+  assert_absent "$log" "dependency probes ran before the required reread cleared"
+  pass "required instruction rereads stop later dependency mutations"
+}
+
 run_firstmate_outcome_case() {
-  local fixture=$1 status=$2 nudge=$3 fakebin out_file
+  local fixture=$1 status=$2 nudge=$3 fakebin out_file selector
   fakebin=$(fm_fakebin "$fixture")
   out_file="$fixture/output"
   mkdir -p "$fixture/bin"
+  if [ "$nudge" != none ]; then
+    for selector in $nudge; do
+      prepare_firstmate_action_target "$fixture" "${selector#fm-}"
+    done
+  fi
   # shellcheck disable=SC2016
   printf '%s\n' '#!/usr/bin/env bash' \
     'printf '\''firstmate: %s\n'\'' "$FM_DEPS_TEST_FIRSTMATE_STATUS"' \
@@ -495,12 +676,15 @@ test_firstmate_update_actions_are_consumed
 test_firstmate_secondmate_only_actions_are_preserved
 test_firstmate_concurrent_update_preserves_actions
 test_firstmate_actions_are_durable_and_retry_every_target
+test_remote_secondmate_actions_use_shared_retry_markers
 test_firstmate_updated_outcome_counts_upgrade
 test_firstmate_current_outcome_is_success_without_upgrade
 test_firstmate_skipped_outcome_fails_without_upgrade
 test_npm_upgrade_pins_version_and_retries_hooks
+test_pending_npm_hooks_supersede_changed_active_version
 test_npm_upgrade_rejects_active_version_mismatch
 test_dependency_probes_are_bounded_and_git_is_noninteractive
+test_unread_instructions_stop_dependency_mutations
 test_mixed_checkout_majors_report_repository_update
 
 echo "# all fm-deps tests passed"
