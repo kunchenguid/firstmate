@@ -244,6 +244,20 @@ fm_remote_job_worker_identity_matches "$REMOTE_ROOT" "$ACCOUNT_HOME" \
   || fail "the replacement worker did not publish the current code identity"
 pass "ensure replaces a live worker after its code changes"
 
+LIVE_WORKER_PID=$NEW_WORKER_PID
+kill -STOP "$LIVE_WORKER_PID" 2>/dev/null || fail "the stale-heartbeat fixture could not stop the worker"
+touch -t 200001010000 "$STATE_ROOT/worker.ready"
+if fm_remote_job_probe "$ACCOUNT_HOME"; then
+  kill -CONT "$LIVE_WORKER_PID" 2>/dev/null || true
+  fail "the stale-heartbeat fixture still reported ready"
+fi
+if ! fm_remote_job_worker_owned_alive "$REMOTE_ROOT" "$ACCOUNT_HOME"; then
+  kill -CONT "$LIVE_WORKER_PID" 2>/dev/null || true
+  fail "an exact live worker owner was hidden by its stale heartbeat"
+fi
+kill -CONT "$LIVE_WORKER_PID" 2>/dev/null || fail "the stale-heartbeat fixture could not resume the worker"
+pass "exact worker ownership remains discoverable across a stale heartbeat"
+
 RELOCATED_ROOT="$TMP_ROOT/relocated-root"
 cp -R "$REMOTE_ROOT" "$RELOCATED_ROOT"
 OLD_WORKER_PID=$NEW_WORKER_PID
