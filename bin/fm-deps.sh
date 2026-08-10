@@ -323,15 +323,21 @@ deps_pending_dir() {
   printf '%s/.fm-deps-pending\n' "$state"
 }
 
+ensure_deps_state_dir() {
+  local state
+  state=$(deps_state_dir) || return 1
+  if [ -e "$state" ] || [ -L "$state" ]; then
+    [ -d "$state" ] && [ ! -L "$state" ]
+  else
+    mkdir -p "$state"
+  fi
+}
+
 ensure_deps_pending_dir() {
   local state pending
   state=$(deps_state_dir) || return 1
   pending=$(deps_pending_dir) || return 1
-  if [ -e "$state" ] || [ -L "$state" ]; then
-    [ -d "$state" ] && [ ! -L "$state" ] || return 1
-  else
-    mkdir -p "$state" || return 1
-  fi
+  ensure_deps_state_dir || return 1
   if [ -e "$pending" ] || [ -L "$pending" ]; then
     [ -d "$pending" ] && [ ! -L "$pending" ] || return 1
   else
@@ -397,6 +403,27 @@ deps_data_dir() {
     home=$(deps_home_dir) || return 1
     printf '%s/data\n' "$home"
   fi
+}
+
+with_firstmate_action_lock() {
+  local callback=$1 state lock action_root action_home rc=0
+  shift
+  state=$(deps_state_dir) || return 1
+  action_root=$FM_ROOT
+  action_home=$(deps_home_dir) || return 1
+  ensure_deps_state_dir || return 1
+  local FM_ROOT_OVERRIDE FM_ROOT FM_HOME STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
+  FM_ROOT_OVERRIDE=$action_root
+  FM_ROOT=$action_root
+  FM_HOME=$action_home
+  STATE=$state
+  lock="$state/.fm-deps-actions.lock"
+  # shellcheck source=bin/fm-wake-lib.sh
+  . "$SCRIPT_DIR/fm-wake-lib.sh"
+  fm_lock_acquire_wait "$lock" || return 1
+  "$callback" "$@" || rc=$?
+  fm_lock_release "$lock"
+  return "$rc"
 }
 
 declare -A PENDING_FIRSTMATE_BOUND=()
@@ -1078,8 +1105,38 @@ handle_firstmate_update_actions() {
   process_pending_firstmate_actions
 }
 
+run_firstmate_upgrade_locked() {
+  local firstmate_line update_out pending_status
+  process_pending_firstmate_actions
+  pending_status=$?
+  if [ "$pending_status" -ne 0 ]; then
+    printf 'Firstmate update deferred until prior post-update actions complete\n' >&2
+    return "$pending_status"
+  fi
+  if ! update_out=$("$FM_ROOT/bin/fm-update.sh" 2>&1); then
+    printf '%s\n' "$update_out"
+    return 1
+  fi
+  printf '%s\n' "$update_out"
+  handle_firstmate_update_actions "$update_out" || return 1
+  firstmate_line=$(printf '%s\n' "$update_out" | grep '^firstmate: ' || true)
+  if [ -z "$firstmate_line" ] || [[ "$firstmate_line" == *$'\n'* ]]; then
+    printf 'Firstmate updater returned an invalid primary outcome\n' >&2
+    return 1
+  fi
+  case "$firstmate_line" in
+    'firstmate: updated '*) FIRSTMATE_UPDATE_RESULT=updated ;;
+    'firstmate: already current') FIRSTMATE_UPDATE_RESULT=current ;;
+    'firstmate: skipped:'*) FIRSTMATE_UPDATE_RESULT=skipped; return 1 ;;
+    *)
+      printf 'Firstmate updater returned an invalid primary outcome: %s\n' "$firstmate_line" >&2
+      return 1
+      ;;
+  esac
+}
+
 run_upgrade() {
-  local id=$1 installed=${2:-} latest=${3:-} firstmate_line update_out
+  local id=$1 installed=${2:-} latest=${3:-}
   case "$id" in
     codex) codex update ;;
     github-cli) run_apt_upgrade gh ;;
@@ -1099,26 +1156,7 @@ run_upgrade() {
     github-actions) return 1 ;;
     firstmate)
       FIRSTMATE_UPDATE_RESULT=""
-      if ! update_out=$("$FM_ROOT/bin/fm-update.sh" 2>&1); then
-        printf '%s\n' "$update_out"
-        return 1
-      fi
-      printf '%s\n' "$update_out"
-      handle_firstmate_update_actions "$update_out" || return 1
-      firstmate_line=$(printf '%s\n' "$update_out" | grep '^firstmate: ' || true)
-      if [ -z "$firstmate_line" ] || [[ "$firstmate_line" == *$'\n'* ]]; then
-        printf 'Firstmate updater returned an invalid primary outcome\n' >&2
-        return 1
-      fi
-      case "$firstmate_line" in
-        'firstmate: updated '*) FIRSTMATE_UPDATE_RESULT=updated ;;
-        'firstmate: already current') FIRSTMATE_UPDATE_RESULT=current ;;
-        'firstmate: skipped:'*) FIRSTMATE_UPDATE_RESULT=skipped; return 1 ;;
-        *)
-          printf 'Firstmate updater returned an invalid primary outcome: %s\n' "$firstmate_line" >&2
-          return 1
-          ;;
-      esac
+      with_firstmate_action_lock run_firstmate_upgrade_locked
       ;;
     *) return 1 ;;
   esac
@@ -1398,8 +1436,11 @@ fi
 printf 'AI workspace dependency check (Linux)\n'
 printf '%s\n' '----------------------------------------'
 
-process_pending_firstmate_actions
-pending_action_status=$?
+pending_action_status=0
+if firstmate_update_actions_pending; then
+  with_firstmate_action_lock process_pending_firstmate_actions
+  pending_action_status=$?
+fi
 if [ "$pending_action_status" -eq 2 ]; then
   printf 'FAILED: required Firstmate instruction reread remains incomplete\n' >&2
   exit 1

@@ -285,6 +285,98 @@ test_firstmate_concurrent_update_preserves_actions() {
   pass "concurrent Firstmate updates preserve every emitted action"
 }
 
+test_firstmate_action_publication_is_serialized() {
+  local fixture events ready release started holder waiter holder_status waiter_status
+  local entered_before_release=0 out i
+  fixture="$TMP_ROOT/firstmate-action-serialization"
+  events="$fixture/events.log"
+  ready="$fixture/holder.ready"
+  release="$fixture/holder.release"
+  started="$fixture/waiter.started"
+  mkdir -p "$fixture/bin"
+  prepare_firstmate_action_target "$fixture" serialized
+  # shellcheck disable=SC2016
+  printf '%s\n' '#!/usr/bin/env bash' \
+    'printf '\''update\n'\'' >> "$FM_DEPS_TEST_EVENTS"' \
+    'printf '\''firstmate: already current\n'\''' \
+    'printf '\''reread-firstmate: no\n'\''' \
+    'printf '\''nudge-secondmates: none\n'\''' > "$fixture/bin/fm-update.sh"
+  # shellcheck disable=SC2016
+  printf '%s\n' '#!/usr/bin/env bash' \
+    'printf '\''send:%s\n'\'' "$1" >> "$FM_DEPS_TEST_EVENTS"' \
+    > "$fixture/bin/fm-send.sh"
+  chmod +x "$fixture/bin/fm-update.sh" "$fixture/bin/fm-send.sh"
+
+  FM_ROOT_OVERRIDE="$fixture" FM_HOME="$fixture" FM_STATE_OVERRIDE="$fixture/state" \
+    FM_DEPS_SOURCE_ONLY=1 FM_DEPS_TEST_EVENTS="$events" bash -c '
+      deps=$1
+      ready=$2
+      release=$3
+      set --
+      . "$deps"
+      hold_firstmate_publication() {
+        persist_firstmate_update_actions no fm-serialized || return 1
+        printf "published\n" >> "$FM_DEPS_TEST_EVENTS"
+        : > "$ready"
+        while [ ! -e "$release" ]; do
+          sleep 0.02
+        done
+      }
+      with_firstmate_action_lock hold_firstmate_publication
+    ' _ "$DEPS" "$ready" "$release" &
+  holder=$!
+  for ((i = 0; i < 100; i++)); do
+    [ -e "$ready" ] && break
+    kill -0 "$holder" 2>/dev/null || break
+    sleep 0.02
+  done
+  if [ ! -e "$ready" ]; then
+    wait "$holder" 2>/dev/null || true
+    fail "Firstmate action serialization holder did not publish its inventory"
+  fi
+
+  FM_ROOT_OVERRIDE="$fixture" FM_HOME="$fixture" FM_STATE_OVERRIDE="$fixture/state" \
+    FM_DEPS_SOURCE_ONLY=1 FM_DEPS_TEST_EVENTS="$events" bash -c '
+      deps=$1
+      started=$2
+      set --
+      . "$deps"
+      : > "$started"
+      run_upgrade firstmate
+    ' _ "$DEPS" "$started" > "$fixture/waiter.out" 2>&1 &
+  waiter=$!
+  for ((i = 0; i < 100; i++)); do
+    [ -e "$started" ] && break
+    kill -0 "$waiter" 2>/dev/null || break
+    sleep 0.02
+  done
+  for ((i = 0; i < 50; i++)); do
+    if grep -Eq '^(send:|update$)' "$events" 2>/dev/null; then
+      entered_before_release=1
+      break
+    fi
+    sleep 0.02
+  done
+  printf 'release\n' >> "$events"
+  : > "$release"
+  wait "$holder"
+  holder_status=$?
+  wait "$waiter"
+  waiter_status=$?
+  out=$(< "$events")
+
+  [ "$holder_status" -eq 0 ] || fail "Firstmate action serialization holder failed"
+  [ "$waiter_status" -eq 0 ] \
+    || fail "serialized Firstmate updater failed: $(< "$fixture/waiter.out")"
+  [ "$entered_before_release" -eq 0 ] \
+    || fail "a concurrent Firstmate updater entered before publication completed"
+  [ "$out" = $'published\nrelease\nsend:fm-serialized\nupdate' ] \
+    || fail "serialized Firstmate actions ran out of order: $out"
+  assert_absent "$fixture/state/.fm-deps-pending/firstmate-actions.pending" \
+    "serialized Firstmate update retained a completed action inventory"
+  pass "Firstmate action publication is serialized per home"
+}
+
 test_firstmate_actions_are_durable_and_retry_every_target() {
   local fixture log out status pending nudge one_home one_commit replacement before after
   local manifest_contents
@@ -766,6 +858,7 @@ test_node_requires_active_nvm_provenance
 test_firstmate_update_actions_are_consumed
 test_firstmate_secondmate_only_actions_are_preserved
 test_firstmate_concurrent_update_preserves_actions
+test_firstmate_action_publication_is_serialized
 test_firstmate_actions_are_durable_and_retry_every_target
 test_remote_secondmate_actions_use_shared_retry_markers
 test_nudge_delivery_preserves_concurrent_replacement
