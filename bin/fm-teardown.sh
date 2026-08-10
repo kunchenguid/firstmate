@@ -1511,6 +1511,7 @@ if [ "$KIND" != secondmate ] \
    && [ "$TOP_SLOT_RELEASE_AUTHORIZED" -eq 1 ]; then
   if ! slot_release_allowed "$STATE" "$ID" "$WT" "$FM_HOME" \
     "worktree" retire closed "" "" "$FM_HOME" crewmate; then
+    TOP_SLOT_RETAIN_VERDICT=$TEARDOWN_SLOT_RETAIN_VERDICT
     TOP_SLOT_RELEASE_AUTHORIZED=0
   fi
 fi
