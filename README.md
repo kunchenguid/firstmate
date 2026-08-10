@@ -112,7 +112,7 @@ omp
 
 For Grok, `--trust` is needed once per clone so project hooks and the turn-end guard load; `/hooks-trust` inside Grok works too.
 For Pi, approve the project trust prompt once per clone on first launch so the tracked `.pi/extensions/*.ts` files auto-load.
-OMP auto-loads the tracked `.omp/extensions/*.ts` files and uses `OMPCODE=1` to keep its identity distinct from inherited foreign harness markers.
+OMP auto-loads the tracked `.omp/extensions/*.ts` files. Firstmate-launched OMP workers carry `OMPCODE=1`; primary OMP sessions are also identified by their exact Bun `/omp` script ancestry, which takes precedence over inherited foreign harness markers.
 Pi's `/calm` toggle hides supported transcript chrome, including canonically classified Firstmate operational user rows, and uses a Calm-only animated working boat during active runs while preserving all model context and session data.
 The hidden operational inputs remain ordinary user-role messages with unchanged delivery, ordering, authority, persistence, and exports.
 The preference persists for the effective Firstmate home, and toggling it off restores ordinary rendering.

@@ -119,9 +119,10 @@ for harness in claude codex opencode pi pi-signed omp grok kimi muse; do
   CHECKED=$((CHECKED + 1))
 done
 
-# OMP's verified adapter identity has two independent vendor-controlled surfaces:
-# the positive child-process marker and exact Bun-script ancestry used for the
-# home lock. Probe from inside the real OMP process so a stub cannot restate them.
+# OMP's verified primary identity has an exact Bun-script ancestry surface. The
+# installed release may omit OMPCODE and inherit a foreign CLAUDECODE marker, so
+# probe from inside the real OMP process with both conditions present; a stub
+# cannot restate the process shape or the home-lock owner.
 if omp_path=$(resolve_harness_binary omp); then
   omp_version=$("$omp_path" --version 2>/dev/null | head -1 | tr -d '\r') || omp_version=
   [ -n "$omp_version" ] || omp_version=unknown
@@ -141,24 +142,23 @@ export default function (pi: { on?: (event: string, handler: () => void) => void
       `OMP_IDENTITY marker=${process.env.OMPCODE || ""} ` +
       `harness=${harness} lock=${lock} process=${process.pid}\n`;
     const ok =
-      process.env.OMPCODE === "1" &&
       harness === "omp" &&
       lock === String(process.pid);
     process.stdout.write(line, () => process.exit(ok ? 0 : 1));
   });
 }
 TS
-  omp_out=$(FM_LIVE_ROOT="$ROOT" "$omp_path" -p --no-session --no-tools \
+  omp_out=$(OMPCODE= CLAUDECODE=1 FM_LIVE_ROOT="$ROOT" "$omp_path" -p --no-session --no-tools \
     -e "$LAB/omp-session-identity.ts" probe 2>&1)
   omp_status=$?
   [ "$omp_status" -eq 0 ] || fail \
-    "OMP SESSION-IDENTITY DRIFT: $omp_version no longer exports OMPCODE=1, selects the OMP adapter, and resolves its Bun process as the session-lock owner. Observed: $omp_out"
+    "OMP SESSION-IDENTITY DRIFT: $omp_version did not select the OMP adapter and its Bun process as the session-lock owner under an inherited Claude marker. Observed: $omp_out"
   case "$omp_out" in
-    *"OMP_IDENTITY marker=1 harness=omp "*) ;;
+    *"OMP_IDENTITY marker="*" harness=omp lock="*) ;;
     *) fail "OMP session-identity probe returned an unrecognized success payload: $omp_out" ;;
   esac
   note "OMP $omp_version: $omp_out"
-  pass "OMP session identity: $omp_version selects the verified adapter and owns the lock"
+  pass "OMP session identity: $omp_version selects the adapter and owns the lock under an inherited marker"
 else
   note "skip: OMP is not installed on this machine, so its primary session identity is unverified here"
 fi

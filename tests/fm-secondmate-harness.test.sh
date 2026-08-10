@@ -51,9 +51,9 @@ set -u
 . "$ROOT/bin/fm-config-inherit-lib.sh"
 
 # The harness-detection cases below fake `ps` so process ancestry is fully
-# controlled, but bin/fm-harness.sh checks environment markers before ancestry.
-# A suite run from inside a harness inherits its marker, and the highest-
-# precedence one wins over everything these cases set up. Drop all ambient
+# controlled. bin/fm-harness.sh checks verified environment markers before
+# general ancestry, while exact OMP ancestry also outranks an inherited Claude
+# marker because a live primary OMP release may omit OMPCODE. Drop all ambient
 # markers, including OMP's lock-only identity marker, so every case states the
 # marker it means to test.
 unset OMPCODE CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT
@@ -233,9 +233,9 @@ SH
   got=$(OMPCODE=1 CLAUDECODE=1 PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-harness.sh")
   [ "$got" = omp ] \
     || fail "OMP under an inherited Claude marker selected '$got', expected omp"
-  got=$(FM_TEST_OMP_SHAPE=omp PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-harness.sh")
+  got=$(FM_TEST_OMP_SHAPE=omp CLAUDECODE=1 PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-harness.sh")
   [ "$got" = omp ] \
-    || fail "exact Bun/OMP ancestry selected '$got', expected omp"
+    || fail "exact Bun/OMP ancestry under an inherited Claude marker selected '$got', expected omp"
   got=$(FM_TEST_OMP_SHAPE=unrelated CLAUDECODE=1 PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-harness.sh")
   [ "$got" = claude ] \
     || fail "an unrelated Bun process suppressed the verified Claude marker, got '$got'"
@@ -266,7 +266,7 @@ SH
     fail "session-lock liveness accepted an unrelated Bun process that merely mentioned OMP"
   fi
 
-  pass "OMP identity: positive marker and exact Bun script select the verified adapter and session-lock owner"
+  pass "OMP identity: positive marker and exact Bun script defeat inherited foreign markers"
 }
 
 test_dash_leading_process_names_are_basename_operands() {
