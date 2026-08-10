@@ -71,7 +71,7 @@ Detection after the fact is what converts an unenforceable rule into a detectabl
 
 **It reports candidates, not authors.**
 A write under this account without the token is exactly what an undeclared model session and a comment the captain typed by hand both look like in every field GitHub exposes.
-The sweep prints the evidence available for each candidate - author association, the app that performed the write when GitHub records one, and a commit's signature state, committer, and branch - and says in its own output that the captain judges.
+The sweep prints the evidence available for each candidate - author association, the app that performed the write when GitHub records one, and a commit's signature state, committer, and the branch or pull request it was found through - and says in its own output that the captain judges.
 
 **A clean run is distinguishable from a run that could not look.**
 Every scope ends in exactly one of observed-clean, candidates, or could-not-observe.

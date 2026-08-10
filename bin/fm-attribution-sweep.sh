@@ -47,7 +47,10 @@
 #                        timestamps, so any other spelling is refused outright
 #                        rather than sorting below every record and quietly
 #                        examining nothing.
-#   --branch <name>      restrict the commits kind to this branch (repeatable)
+#   --branch <name>      restrict the commits kind to this branch (repeatable).
+#                        Naming a branch also skips the pull request head pass,
+#                        so a commit whose branch was deleted when its pull
+#                        request closed is not reached by that run.
 #   --budget <n>         maximum GitHub requests for the whole run (default 300).
 #                        There is no unlimited value: 0 permits no request at
 #                        all, and every scope then reports could-not-observe
