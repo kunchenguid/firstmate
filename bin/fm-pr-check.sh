@@ -14,6 +14,12 @@
 # of the request itself. An existing landing record must be valid and name the
 # requested URL before any forge read or poll mutation. A request the forge
 # cannot resolve refuses instead.
+#
+# A request whose venue contradicts the task's recorded contribution_venue= is
+# refused before anything is armed, because on a fork layout a pull request
+# raised at the wrong trunk contributes every commit the two trunks do not
+# share. A task that recorded no venue is reported as unchecked and still armed;
+# the absence of a record is never read as agreement.
 # Usage: fm-pr-check.sh <task-id> <pr-url>
 set -eu
 
@@ -86,6 +92,33 @@ if [ "$RECORD" = "$STATE/$ID.landing" ]; then
     echo "error: task landing record names $RECORD_URL, but $URL was requested" >&2
     exit 1
   fi
+fi
+
+# VENUE GUARD - the recorded contribution venue against the venue this pull
+# request is actually at. bin/fm-spawn.sh derives the record from the task's
+# contribution target (bin/fm-task-base-lib.sh owns that derivation), so this
+# refuses the case that keeps recurring on a fork layout: work based on one
+# trunk raised as a pull request against the other, which contributes every
+# commit the two trunks do not share.
+#
+# Three-valued on purpose, and only a CONTRADICTION refuses. A task with no
+# recorded venue - one spawned before this record existed, or a durable landing
+# record, which carries only landing identity - is UNEVALUABLE, and an
+# unevaluable venue is reported rather than read as agreement. Nothing here
+# infers a venue from the pull request itself; that would make the guard agree
+# with whatever it was shown.
+VENUE=$(grep '^contribution_venue=' "$RECORD" | tail -1 | cut -d= -f2- || true)
+PR_VENUE=$(printf '%s/%s' "$FM_PR_HOST" "$FM_PR_PATH" | tr '[:upper:]' '[:lower:]')
+if [ -z "$VENUE" ]; then
+  printf 'venue: unchecked (task %s records no contribution venue)\n' "$ID"
+elif [ "$VENUE" = unresolved ]; then
+  printf 'venue: unchecked (task %s recorded its contribution venue as unresolved)\n' "$ID"
+elif [ "$VENUE" != "$PR_VENUE" ]; then
+  echo "error: $URL is at $PR_VENUE, but task $ID records its contribution venue as $VENUE" >&2
+  echo "This task was based on $VENUE, so raising its pull request at $PR_VENUE would contribute every commit those two repositories do not share. Reopen the pull request at $VENUE, or re-dispatch the task against the venue you meant." >&2
+  exit 1
+else
+  printf 'venue: %s matches the recorded contribution venue\n' "$PR_VENUE"
 fi
 
 # A prior exact merged result may have queued its durable wake immediately

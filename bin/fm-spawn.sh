@@ -211,6 +211,11 @@
 # (coincident|distinct|unresolved|read-only), so which commit a task read and which it
 # contributed to stays inspectable after the fact. A scout cuts no branch, so it records
 # base_state=read-only and takes no --contribution-target.
+# A ship also records contribution_venue= - the forge identity "host/owner/repo" that its
+# contribution target names, or the literal "unresolved" - plus contribution_venue_url=,
+# the remote URL that identity came from. Both are resolved AFTER any --slot-base or
+# --contribution-target override, so a retargeted task records the venue it was actually
+# retargeted to; bin/fm-pr-check.sh refuses a pull request that contradicts it.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -1524,6 +1529,8 @@ fi
 SLOT_BASE=
 CONTRIB_TARGET=
 BASE_STATE=
+CONTRIB_VENUE=
+CONTRIB_VENUE_URL=
 if [ "$KIND" != secondmate ]; then
   if task_base_resolve "$PROJ_ABS"; then
     SLOT_BASE=$TASK_BASE_SLOT
@@ -1568,6 +1575,22 @@ if [ "$KIND" != secondmate ]; then
   if [ "$KIND" = scout ] && [ -n "$SLOT_BASE" ]; then
     CONTRIB_TARGET=n/a
     BASE_STATE=read-only
+  fi
+  # The venue the finalized contribution target names, resolved LAST so it
+  # follows every override above rather than the derivation they replaced. A
+  # task retargeted onto fork-only material has to land at the fork, and that is
+  # only knowable from the target this spawn actually settled on.
+  # A scout opens no pull request, so it has no venue to be right or wrong about.
+  if [ "$KIND" != scout ] && [ -n "$CONTRIB_TARGET" ] && [ "$CONTRIB_TARGET" != n/a ]; then
+    if task_base_venue "$PROJ_ABS" "$CONTRIB_TARGET"; then
+      CONTRIB_VENUE=$TASK_BASE_VENUE
+      CONTRIB_VENUE_URL=$TASK_BASE_VENUE_URL
+    else
+      # Recorded as unresolved rather than omitted: a venue nothing derived is a
+      # venue no later guard may quietly treat as agreeing with whatever it sees.
+      CONTRIB_VENUE=unresolved
+      echo "warning: $ID contribution venue unresolved for $PROJ_ABS ($TASK_BASE_ERROR); a pull request for this task cannot be venue-checked" >&2
+    fi
   fi
 fi
 
@@ -2535,6 +2558,13 @@ fi
   [ -z "$SLOT_BASE" ] || echo "slot_base=$SLOT_BASE"
   [ -z "$BASE_STATE" ] || echo "contribution_target=${CONTRIB_TARGET:-unresolved}"
   [ -z "$BASE_STATE" ] || echo "base_state=$BASE_STATE"
+  # The venue that target names, so a pull request raised somewhere else is
+  # refusable against a durable record instead of against recollection.
+  # contribution_venue is the comparable forge identity bin/fm-pr-check.sh
+  # checks; contribution_venue_url keeps the remote URL it came from, which a
+  # non-forge venue has when the identity is empty.
+  [ -z "$CONTRIB_VENUE" ] || echo "contribution_venue=$CONTRIB_VENUE"
+  [ -z "$CONTRIB_VENUE_URL" ] || echo "contribution_venue_url=$CONTRIB_VENUE_URL"
   # Agent-justification record. Written for every task dispatch; a --secondmate
   # spawn provisions a home rather than dispatching a task and carries none.
   [ -z "$REASONING_REQUIRED" ] || echo "reasoning_required=$REASONING_REQUIRED"

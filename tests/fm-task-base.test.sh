@@ -541,6 +541,224 @@ test_batch_forwards_explicit_base_overrides() {
   pass "fm-spawn: batch dispatch forwards both explicit base overrides"
 }
 
+# The same diverged fork topology, but addressed by forge URLs so the venue has
+# a real "host/owner/repo" identity to resolve. The repo is built against local
+# paths first so the fetches actually happen, then the remote is re-pointed:
+# the remote-tracking refs stay, and only the URLs the venue is read from change.
+make_forge_fork_repo() {  # <name> <fleet-commits>
+  local name=$1 fleet=$2 repo
+  repo=$(make_fork_repo "$name" "$fleet")
+  git -C "$repo" remote set-url origin "https://github.com/fixture-up/$name.git"
+  git -C "$repo" remote set-url --push origin "https://github.com/fixture-fork/$name.git"
+  printf '%s\n' "$repo"
+}
+
+# The upstream direction. A branch cut from the upstream trunk is an upstream
+# contribution, so its pull request belongs at the upstream repository.
+test_venue_follows_an_upstream_contribution_target() {
+  local repo contrib
+  repo=$(make_forge_fork_repo venue-up 3)
+  contrib=$(git -C "$repo" rev-parse origin/main)
+  task_base_venue "$repo" "$contrib" \
+    || fail "venue-up: venue resolution failed: $TASK_BASE_ERROR"
+  [ "$TASK_BASE_VENUE" = 'github.com/fixture-up/venue-up' ] \
+    || fail "venue-up: an upstream target must name the upstream venue, got '$TASK_BASE_VENUE'"
+  pass "fm-task-base: a contribution target on the upstream trunk names the upstream venue"
+}
+
+# The fork direction, in the SAME repository as the upstream direction above.
+# That is the whole point: the venue is a property of the TASK, not a per-project
+# constant, so the identical checkout resolves two different venues depending
+# only on which trunk the task was based on.
+test_venue_follows_a_fork_contribution_target() {
+  local repo contrib upstream_venue
+  repo=$(make_forge_fork_repo venue-fork 3)
+  # Retargeted onto fork-only material: both bases become the fleet trunk.
+  contrib=$(git -C "$repo" rev-parse main)
+  task_base_venue "$repo" "$contrib" \
+    || fail "venue-fork: venue resolution failed: $TASK_BASE_ERROR"
+  [ "$TASK_BASE_VENUE" = 'github.com/fixture-fork/venue-fork' ] \
+    || fail "venue-fork: a fork target must name the fork venue, got '$TASK_BASE_VENUE'"
+  # The same repo must still answer "upstream" for an upstream target, or this
+  # proves only that the venue moved, not that it follows the task.
+  task_base_venue "$repo" "$(git -C "$repo" rev-parse origin/main)" \
+    || fail "venue-fork: upstream resolution failed: $TASK_BASE_ERROR"
+  upstream_venue=$TASK_BASE_VENUE
+  [ "$upstream_venue" = 'github.com/fixture-up/venue-fork' ] \
+    || fail "venue-fork: the same repo must still resolve upstream for an upstream target, got '$upstream_venue'"
+  pass "fm-task-base: one repository resolves the fork venue and the upstream venue from the target alone"
+}
+
+# THE inversion, constructed rather than inferred. A branch carrying fork-only
+# commits must never resolve the upstream venue, because a pull request from it
+# raised upstream contributes every commit the two trunks do not share.
+test_a_fork_only_target_never_resolves_the_upstream_venue() {
+  local repo fork_target upstream_target rc
+  repo=$(make_forge_fork_repo venue-inversion 3)
+  fork_target=$(git -C "$repo" rev-parse main)
+  upstream_target=$(git -C "$repo" rev-parse origin/main)
+  # Proves the fixture really is the inversion case: the fork trunk is
+  # unreachable from the upstream trunk, so nothing here can pass by accident.
+  git -C "$repo" merge-base --is-ancestor "$fork_target" "$upstream_target" \
+    && fail "venue-inversion: fixture fork trunk is already upstream; it proves nothing"
+  # A branch carrying fork-only work, cut from the fork trunk it belongs to.
+  git_q "$repo" checkout -q -b fm/fork-work main
+  commit_in "$repo" task-work
+
+  task_base_venue "$repo" "$fork_target" \
+    || fail "venue-inversion: venue resolution failed: $TASK_BASE_ERROR"
+  [ "$TASK_BASE_VENUE" = 'github.com/fixture-fork/venue-inversion' ] \
+    || fail "venue-inversion: fork-only work resolved venue '$TASK_BASE_VENUE'"
+  [ "$TASK_BASE_VENUE" != 'github.com/fixture-up/venue-inversion' ] \
+    || fail "venue-inversion: fork-only work must never resolve the upstream venue"
+  # And the branch guard independently refuses that same branch against the
+  # upstream target, so both halves of the inversion are closed: the venue never
+  # points upstream, and the branch is refused if something still aims it there.
+  rc=0; task_base_verify_branch "$repo" "$upstream_target" fm/fork-work || rc=$?
+  [ "$rc" -eq 1 ] \
+    || fail "venue-inversion: the branch guard must still refuse fork work aimed upstream (rc=$rc)"
+  # The positive control, so the refusal above is a verdict and not a blanket no.
+  rc=0; task_base_verify_branch "$repo" "$fork_target" fm/fork-work || rc=$?
+  [ "$rc" -eq 0 ] \
+    || fail "venue-inversion: the same branch must pass against its own fork target (rc=$rc)"
+  pass "fm-task-base: fork-only work resolves the fork venue and is refused against the upstream target"
+}
+
+# No fetch/push split: one venue for every task, and the derivation must not
+# invent a second one.
+test_venue_is_single_when_there_is_no_fetch_push_split() {
+  local dir
+  dir="$TMP_ROOT/venue-single/repo"
+  mkdir -p "$dir"
+  git -C "$dir" init -q
+  git -C "$dir" symbolic-ref HEAD refs/heads/main
+  commit_in "$dir" base
+  git -C "$dir" remote add origin 'https://github.com/solo-owner/solo-repo.git'
+  task_base_venue "$dir" "$(git -C "$dir" rev-parse main)" \
+    || fail "venue-single: venue resolution failed: $TASK_BASE_ERROR"
+  [ "$TASK_BASE_VENUE" = 'github.com/solo-owner/solo-repo' ] \
+    || fail "venue-single: got '$TASK_BASE_VENUE'"
+  pass "fm-task-base: a project with no fetch/push split resolves one venue"
+}
+
+# A target on neither trunk is could-not-observe, not a venue to guess at.
+test_venue_refuses_a_target_on_neither_trunk() {
+  local repo orphan rc
+  repo=$(make_forge_fork_repo venue-orphan 2)
+  orphan=$(git_q "$repo" commit-tree -m orphan "$(git -C "$repo" rev-parse 'main^{tree}')")
+  rc=0; task_base_venue "$repo" "$orphan" || rc=$?
+  [ "$rc" -eq 2 ] \
+    || fail "venue-orphan: an underivable venue must be refused, got rc=$rc"
+  [ -z "$TASK_BASE_VENUE" ] \
+    || fail "venue-orphan: a venue must not be invented (got '$TASK_BASE_VENUE')"
+  assert_contains "$TASK_BASE_ERROR" "neither the upstream trunk" \
+    "venue-orphan: the reason must name what could not be derived"
+  pass "fm-task-base: a contribution target on neither trunk refuses instead of guessing a venue"
+}
+
+# Transports differ; identity does not. A venue recorded from one URL shape must
+# compare equal to the same repository addressed another way, or the guard would
+# refuse correct pull requests.
+test_venue_identity_is_transport_and_case_insensitive() {
+  local want='github.com/owner/repo' got url
+  for url in \
+    'https://github.com/owner/repo.git' \
+    'https://github.com/owner/repo' \
+    'https://github.com/Owner/Repo.git' \
+    'https://GitHub.com/owner/repo/' \
+    'ssh://git@github.com/owner/repo.git' \
+    'ssh://git@github.com:22/owner/repo.git' \
+    'git@github.com:owner/repo.git' \
+    'git://github.com/owner/repo.git'; do
+    got=$(task_base_venue_identity "$url") \
+      || fail "identity: '$url' yielded no identity"
+    [ "$got" = "$want" ] || fail "identity: '$url' -> '$got', want '$want'"
+  done
+  # A venue this cannot name must return nothing rather than a wrong identity.
+  for url in '/srv/git/repo.git' 'file:///srv/git/repo.git' '' 'https://github.com'; do
+    task_base_venue_identity "$url" >/dev/null \
+      && fail "identity: '$url' must not yield a forge identity"
+  done
+  # Different repositories must not collapse onto one identity.
+  [ "$(task_base_venue_identity 'https://github.com/up/proj.git')" \
+    != "$(task_base_venue_identity 'https://github.com/fork/proj.git')" ] \
+    || fail "identity: two different repositories collapsed to one identity"
+  # bin/fm-pr-check.sh guards GitLab merge requests too, and a GitLab path
+  # nests, so the identity must keep every segment rather than only the last two.
+  got=$(task_base_venue_identity 'https://gitlab.example.com/group/sub/proj.git') \
+    || fail "identity: a nested GitLab path yielded no identity"
+  [ "$got" = 'gitlab.example.com/group/sub/proj' ] \
+    || fail "identity: nested GitLab path -> '$got'"
+  pass "fm-task-base: venue identity ignores transport, port, case and .git but never the repository"
+}
+
+# End to end through the spawn that records it: the same project, dispatched two
+# ways, must record two different venues.
+test_spawn_records_the_venue_its_contribution_target_names() {
+  local repo wt home fakebin id out status slot contrib
+  repo=$(make_forge_fork_repo venue-spawn 3)
+  wt="$TMP_ROOT/venue-spawn/wt"
+  home="$TMP_ROOT/venue-spawn/home"
+  fakebin=$(make_spawn_fakebin "$TMP_ROOT/venue-spawn/fake")
+  mkdir -p "$home/data" "$home/state" "$home/config" "$home/projects"
+  printf 'codex\n' > "$home/config/crew-harness"
+  touch "$home/state/.last-watcher-beat"
+  slot=$(git -C "$repo" rev-parse main)
+  contrib=$(git -C "$repo" rev-parse origin/main)
+  git -C "$repo" worktree add --quiet --detach "$wt" "$slot"
+
+  id='venue-spawn-a1'
+  FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" \
+    "$BRIEF" "$id" fixture --mode no-mistakes --slot-base "$slot" --contribution-target "$contrib" >/dev/null \
+    || fail "venue-spawn: brief scaffold failed"
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" FM_FAKE_PANE_PATH="$wt" \
+    PATH="$fakebin:$PATH" \
+    "$SPAWN" "$id" "$repo" --mode no-mistakes --yolo off --reason-code NL_RULE_CLASSIFICATION 2>&1); status=$?
+  expect_code 0 "$status" "venue-spawn: spawn should succeed (got: $out)"
+  assert_grep 'contribution_venue=github.com/fixture-up/venue-spawn' "$home/state/$id.meta" \
+    "venue-spawn: an upstream-targeted task must record the upstream venue"
+  assert_no_grep 'contribution_venue=github.com/fixture-fork/venue-spawn' "$home/state/$id.meta" \
+    "venue-spawn: an upstream-targeted task must not record the fork venue"
+  pass "fm-spawn: an upstream-targeted task records the upstream contribution venue"
+}
+
+# The retarget case, which is the one that keeps going wrong: firstmate declares
+# the fork trunk as the contribution target because the task edits fork-only
+# material, and the recorded venue has to move with it.
+test_spawn_records_the_fork_venue_for_a_retargeted_task() {
+  local repo wt home fakebin id out status slot
+  repo=$(make_forge_fork_repo venue-retarget 3)
+  wt="$TMP_ROOT/venue-retarget/wt"
+  home="$TMP_ROOT/venue-retarget/home"
+  fakebin=$(make_spawn_fakebin "$TMP_ROOT/venue-retarget/fake")
+  mkdir -p "$home/data" "$home/state" "$home/config" "$home/projects"
+  printf 'codex\n' > "$home/config/crew-harness"
+  touch "$home/state/.last-watcher-beat"
+  slot=$(git -C "$repo" rev-parse main)
+  git -C "$repo" worktree add --quiet --detach "$wt" "$slot"
+
+  id='venue-retarget-a1'
+  FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" \
+    "$BRIEF" "$id" fixture --mode no-mistakes --slot-base "$slot" --contribution-target "$slot" >/dev/null \
+    || fail "venue-retarget: brief scaffold failed"
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" FM_FAKE_PANE_PATH="$wt" \
+    PATH="$fakebin:$PATH" \
+    "$SPAWN" "$id" "$repo" --mode no-mistakes --yolo off --reason-code NL_RULE_CLASSIFICATION \
+    --slot-base "$slot" --contribution-target "$slot" 2>&1); status=$?
+  expect_code 0 "$status" "venue-retarget: spawn should succeed (got: $out)"
+  assert_grep 'contribution_venue=github.com/fixture-fork/venue-retarget' "$home/state/$id.meta" \
+    "venue-retarget: a task retargeted onto the fork trunk must record the fork venue"
+  assert_no_grep 'contribution_venue=github.com/fixture-up/venue-retarget' "$home/state/$id.meta" \
+    "venue-retarget: the retargeted task must not keep the upstream venue"
+  pass "fm-spawn: a task retargeted onto the fork trunk records the fork venue"
+}
+
 test_resolves_two_distinct_references_on_a_fork
 test_coincident_when_there_is_no_distinct_upstream
 test_unresolved_when_the_upstream_trunk_is_unreadable
@@ -558,3 +776,11 @@ test_local_only_spawn_uses_the_local_trunk_as_its_contribution_target
 test_ship_without_a_required_base_contract_is_refused
 test_scout_refuses_a_mismatched_base_contract
 test_batch_forwards_explicit_base_overrides
+test_venue_follows_an_upstream_contribution_target
+test_venue_follows_a_fork_contribution_target
+test_a_fork_only_target_never_resolves_the_upstream_venue
+test_venue_is_single_when_there_is_no_fetch_push_split
+test_venue_refuses_a_target_on_neither_trunk
+test_venue_identity_is_transport_and_case_insensitive
+test_spawn_records_the_venue_its_contribution_target_names
+test_spawn_records_the_fork_venue_for_a_retargeted_task

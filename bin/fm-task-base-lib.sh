@@ -40,9 +40,24 @@
 #   unresolved  an upstream relationship exists but its trunk cannot be read
 #               locally. Refused rather than guessed, because silently falling
 #               back to the slot base is exactly the pollution above.
+#
+# THE VENUE IS THE THIRD PROPERTY OF THE SAME CONTRACT
+# A contribution target names a commit; it also, implicitly, names the repository
+# that commit's trunk belongs to. That repository is where the task's pull
+# request has to be raised, and it is NOT a per-project constant on a fork
+# layout: a task cut from the upstream trunk belongs upstream, and a task cut
+# from the fork trunk belongs at the fork. Deriving it from the target rather
+# than from a fixed per-project setting is what makes the venue follow the task.
+#
+# task_base_venue derives it, and derives it from the target VALUE rather than
+# from TASK_BASE_STATE, because the target can be overridden after resolution -
+# retargeting a task onto fork-only material is exactly that override, and the
+# venue has to move with it.
 
 # shellcheck disable=SC2034 # The resolution outputs are read by callers (fm-spawn.sh) and tests, not by this lib.
 TASK_BASE_SLOT='' TASK_BASE_SLOT_REF='' TASK_BASE_CONTRIB='' TASK_BASE_CONTRIB_REF='' TASK_BASE_STATE='' TASK_BASE_ERROR=''
+# shellcheck disable=SC2034 # Same: consumed by fm-spawn.sh (records them) and tests.
+TASK_BASE_VENUE='' TASK_BASE_VENUE_URL=''
 
 # shellcheck source=bin/fm-landed-lib.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-landed-lib.sh"
@@ -143,4 +158,110 @@ task_base_verify_branch() {  # <repo-dir> <contribution-target> <branch-ref>
   extra=$(git -C "$dir" rev-list --count "$target_sha..$branch_sha" 2>/dev/null || echo '?')
   TASK_BASE_ERROR="branch '$branch' does not descend from contribution target '$target'; it carries $extra commit(s) absent from that target, so a PR from it would contribute work the target never had"
   return 1
+}
+
+# A remote URL reduced to the forge identity "host/owner/repo", so a recorded
+# venue can be compared against a pull request URL without either side keeping a
+# second URL parser. Deliberately NOT a general URL parser: it recognizes the
+# transports git uses to address a forge and refuses everything else, because a
+# venue this cannot name is a venue no guard may claim to have checked.
+# Lowercased, since forge hosts and GitHub/GitLab paths are case-insensitive and
+# a case difference must never read as a different venue.
+# Prints the identity, or returns 1 when the URL names no forge (a local path, a
+# file: URL, or any shape without a host and a path).
+task_base_venue_identity() {  # <url>
+  local url=${1-} rest host path
+  case $url in
+    '' | /* | file://*) return 1 ;;
+  esac
+  case $url in
+    *[[:space:]]* | *[[:cntrl:]]*) return 1 ;;
+  esac
+
+  case $url in
+    https://* | http://* | ssh://* | git://*)
+      rest=${url#*://}
+      host=${rest%%/*}
+      path=${rest#*/}
+      [ "$path" != "$rest" ] || return 1
+      host=${host##*@}
+      # A port is addressing, not identity, so two URLs differing only by port
+      # are the same venue. A bracketed IPv6 literal keeps its brackets.
+      case $host in
+        '['*']':*) host=${host%:*} ;;
+        '['*']') ;;
+        *:*) host=${host%%:*} ;;
+      esac
+      ;;
+    *:*)
+      # scp-like [user@]host:path, which has no scheme to strip.
+      rest=${url##*@}
+      host=${rest%%:*}
+      path=${rest#*:}
+      case $host in
+        *'/'*) return 1 ;;
+      esac
+      ;;
+    *) return 1 ;;
+  esac
+
+  path=${path%/}
+  path=${path%.git}
+  path=${path#/}
+  [ -n "$host" ] && [ -n "$path" ] || return 1
+  printf '%s/%s\n' "$host" "$path" | tr '[:upper:]' '[:lower:]'
+}
+
+# The venue a contribution target names, set into TASK_BASE_VENUE_URL (the
+# remote URL) and TASK_BASE_VENUE (its comparable forge identity, empty when the
+# URL names no forge).
+#
+# The ordering below is the safety property, not a preference. Upstream is
+# tested FIRST, so a target the upstream trunk already reaches resolves upstream
+# and a target it does not reach can never resolve there. Fork-only commits are
+# by definition unreachable from the upstream trunk, so no fork-only target can
+# be assigned the upstream venue - which is the inversion that turns a five
+# commit contribution into a thirty two commit one.
+#
+# 0 with the venue set, 2 when it could not be derived. There is no "probably";
+# an underivable venue is reported so a caller can refuse rather than guess.
+task_base_venue() {  # <repo-dir> <contribution-target>
+  local dir=$1 target=${2-} fetch_url push_url name target_sha
+  TASK_BASE_VENUE=
+  TASK_BASE_VENUE_URL=
+  TASK_BASE_ERROR=
+
+  target_sha=$(git --no-optional-locks -C "$dir" rev-parse --verify --quiet "$target^{commit}" 2>/dev/null) || {
+    TASK_BASE_ERROR="contribution target '$target' is not a readable commit"
+    return 2
+  }
+  fetch_url=$(git --no-optional-locks -C "$dir" remote get-url origin 2>/dev/null) || {
+    TASK_BASE_ERROR="no origin remote in $dir, so no venue can be named"
+    return 2
+  }
+
+  # No fetch/push split: the project has one venue and every target names it.
+  if ! push_url=$(fm_landed_push_url "$dir"); then
+    TASK_BASE_VENUE_URL=$fetch_url
+    TASK_BASE_VENUE=$(task_base_venue_identity "$fetch_url" || true)
+    return 0
+  fi
+
+  name=$(default_branch "$dir" 2>/dev/null) || {
+    TASK_BASE_ERROR="no default branch in $dir, so neither trunk can be named"
+    return 2
+  }
+
+  if git --no-optional-locks -C "$dir" merge-base --is-ancestor \
+    "$target_sha" "refs/remotes/origin/$name" 2>/dev/null; then
+    TASK_BASE_VENUE_URL=$fetch_url
+  elif git --no-optional-locks -C "$dir" merge-base --is-ancestor \
+    "$target_sha" "refs/heads/$name" 2>/dev/null; then
+    TASK_BASE_VENUE_URL=$push_url
+  else
+    TASK_BASE_ERROR="contribution target '$target' is on neither the upstream trunk (origin/$name) nor the fork trunk ($name), so the venue it names cannot be derived"
+    return 2
+  fi
+  TASK_BASE_VENUE=$(task_base_venue_identity "$TASK_BASE_VENUE_URL" || true)
+  return 0
 }
