@@ -658,6 +658,7 @@ RELAUNCH_REPLACEMENT_HARNESS=
 RELAUNCH_REPLACEMENT_STATE=
 RELAUNCH_REPLACEMENT_WT=
 CURSOR_WIRING_PENDING=0
+CURSOR_WIRING_RESTORE_READY=0
 CURSOR_WIRING_BUSY_GEN=
 CURSOR_WIRING_STATE=
 CURSOR_WIRING_WT=
@@ -692,12 +693,15 @@ spawn_abort_cleanup() {
   fi
   if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ]; then
     RELAUNCH_REPLACEMENT_PENDING=0
-    if ! clear_relaunch_harness_wiring \
-        "$RELAUNCH_REPLACEMENT_HARNESS" \
-        "$RELAUNCH_REPLACEMENT_WT" \
-        "$RELAUNCH_REPLACEMENT_STATE" \
-        "$ID"; then
-      echo "warning: could not remove replacement wiring after aborted relaunch of $ID" >&2
+    if [ "$RELAUNCH_REPLACEMENT_HARNESS" = cursor ] \
+       && [ "$CURSOR_WIRING_RESTORE_READY" != 1 ]; then
+      fm_control_cursor_hooks_forget "$RELAUNCH_REPLACEMENT_STATE" "$ID" || true
+    elif ! clear_relaunch_harness_wiring \
+          "$RELAUNCH_REPLACEMENT_HARNESS" \
+          "$RELAUNCH_REPLACEMENT_WT" \
+          "$RELAUNCH_REPLACEMENT_STATE" \
+          "$ID"; then
+        echo "warning: could not remove replacement wiring after aborted relaunch of $ID" >&2
     fi
     if [ -n "$RELAUNCH_REPLACEMENT_BUSY_GEN" ]; then
       if ! "$FM_ROOT/bin/fm-busy-event.sh" retire \
@@ -709,10 +713,11 @@ spawn_abort_cleanup() {
   fi
   if [ "$CURSOR_WIRING_PENDING" = 1 ]; then
     CURSOR_WIRING_PENDING=0
-    if ! fm_control_cursor_hooks_restore "$CURSOR_WIRING_WT" "$CURSOR_WIRING_STATE" "$ID"; then
+    if [ "$CURSOR_WIRING_RESTORE_READY" != 1 ]; then
+      fm_control_cursor_hooks_forget "$CURSOR_WIRING_STATE" "$ID" || true
+    elif ! fm_control_cursor_hooks_restore "$CURSOR_WIRING_WT" "$CURSOR_WIRING_STATE" "$ID"; then
       echo "warning: could not restore Cursor hooks after aborted spawn of $ID" >&2
     fi
-    fm_control_cursor_hooks_forget "$CURSOR_WIRING_STATE" "$ID" || true
     if [ -n "$CURSOR_WIRING_BUSY_GEN" ]; then
       if ! "$FM_ROOT/bin/fm-busy-event.sh" retire \
           "$CURSOR_WIRING_STATE" "$ID" --gen "$CURSOR_WIRING_BUSY_GEN"; then
@@ -2452,6 +2457,7 @@ EOF
         echo "error: could not record the Cursor hook transaction" >&2
         exit 1
       }
+      CURSOR_WIRING_RESTORE_READY=1
       mkdir -p "$WT/.cursor/hooks"
       mv -f -- "$cursor_hook_script_tmp" "$WT/.cursor/hooks/fm-busy-turnend.sh"
       mv -f -- "$cursor_hooks_tmp" "$WT/.cursor/hooks.json"

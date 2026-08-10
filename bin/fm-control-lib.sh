@@ -292,14 +292,21 @@ fm_control_cursor_hooks_restore() {  # <worktree> <state-dir> <id>
     fi
     installed="$state/$id.cursor-$(basename "$path").installed"
     [ ! -e "$backup" ] || { [ -f "$backup" ] && [ ! -L "$backup" ]; } || return 1
-    [ ! -e "$installed" ] || { [ -f "$installed" ] && [ ! -L "$installed" ]; } || return 1
+    [ -f "$installed" ] && [ ! -L "$installed" ] || return 1
+  done
+  for path in "$wt/.cursor/hooks.json" "$wt/.cursor/hooks/fm-busy-turnend.sh"; do
+    if [ "$(basename "$path")" = hooks.json ]; then
+      backup="$state/$id.cursor-hooks.json"
+    else
+      backup="$state/$id.cursor-fm-busy-turnend.sh"
+    fi
+    installed="$state/$id.cursor-$(basename "$path").installed"
     if [ -f "$installed" ] && [ -f "$path" ] && cmp -s "$path" "$installed"; then
       if [ -e "$backup" ]; then
         cp -p -- "$backup" "$path" || return 1
       else
         rm -f -- "$path" || return 1
       fi
-      rm -f -- "$backup" "$installed" || return 1
     elif [ "$(basename "$path")" = hooks.json ] && [ -f "$path" ]; then
       python3 - "$path" "$backup" <<'PY' || return 1
 import json
@@ -358,8 +365,8 @@ if changed:
     os.replace(temporary, path)
 PY
     fi
-    rm -f -- "$backup" "$installed" || return 1
   done
+  fm_control_cursor_hooks_forget "$state" "$id"
 }
 
 # The firstmate-owned global turn-end registry entry a harness mints per task.

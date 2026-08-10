@@ -42,6 +42,11 @@ case "${1:-}" in
       if [ "$prev" = -l ]; then
         printf '%s\n' "$arg" >> "$FM_FAKE_LAUNCH_LOG"
         if [ "${FM_FAKE_LAUNCH_FAIL:-0}" = 1 ] && [[ "$arg" = *cursor-agent* ]]; then
+          if [ "${FM_FAKE_CURSOR_RESTORE_FAIL:-0}" = 1 ]; then
+            rm -f -- "$FM_FAKE_PANE_PATH/.cursor/hooks/fm-busy-turnend.sh"
+            ln -s "$FM_FAKE_PANE_PATH/unsafe-hook" \
+              "$FM_FAKE_PANE_PATH/.cursor/hooks/fm-busy-turnend.sh"
+          fi
           exit 70
         fi
         bash -c "$arg"
@@ -334,13 +339,15 @@ PY
 }
 
 test_cursor_hook_backup_is_atomic() {
-  local rec case_dir home proj wt fakebin id out status
+  local rec case_dir home proj wt fakebin id out status expected_hooks
   rec=$(make_spawn_case atomic-backup)
   IFS='|' read -r case_dir home proj wt fakebin id <<EOF
 $rec
 EOF
   mkdir -p "$wt/.cursor/hooks"
-  printf '%s\n' '{"version":1,"hooks":{}}' > "$wt/.cursor/hooks.json"
+  printf '%s\n' '{"version":1,"hooks":{"beforeSubmitPrompt":[{"command":".cursor/hooks/fm-busy-turnend.sh busy"}]}}' > "$wt/.cursor/hooks.json"
+  expected_hooks="$case_dir/expected-hooks.json"
+  cp "$wt/.cursor/hooks.json" "$expected_hooks"
   ln -s "$case_dir/unsafe-hook" "$wt/.cursor/hooks/fm-busy-turnend.sh"
   out=$(run_cursor_spawn "$home" "$proj" "$wt" "$fakebin" "$id" 2>&1)
   status=$?
@@ -351,9 +358,44 @@ EOF
     "failed Cursor backup left a partial hook-script sidecar"
   assert_absent "$home/state/$id.busy-gen" \
     "failed Cursor backup left its busy generation armed"
+  cmp -s "$expected_hooks" "$wt/.cursor/hooks.json" \
+    || fail "failed Cursor backup modified pre-existing matching user hooks"
   [ -L "$wt/.cursor/hooks/fm-busy-turnend.sh" ] \
     || fail "failed Cursor backup modified the unsafe user hook path"
   pass "Cursor hook backup validates atomically and abort cleanup retires busy state"
+}
+
+test_spawn_abort_retains_cursor_backups_when_restore_fails() {
+  local rec case_dir home proj wt fakebin id out status expected_hooks expected_script
+  rec=$(make_spawn_case failed-restore)
+  IFS='|' read -r case_dir home proj wt fakebin id <<EOF
+$rec
+EOF
+  mkdir -p "$wt/.cursor/hooks"
+  printf '%s\n' '{"version":1,"hooks":{"user":[{"command":"keep"}]}}' > "$wt/.cursor/hooks.json"
+  printf '%s\n' 'user hook' > "$wt/.cursor/hooks/fm-busy-turnend.sh"
+  expected_hooks="$case_dir/expected-hooks.json"
+  expected_script="$case_dir/expected-hook.sh"
+  cp "$wt/.cursor/hooks.json" "$expected_hooks"
+  cp "$wt/.cursor/hooks/fm-busy-turnend.sh" "$expected_script"
+  out=$(FM_FAKE_LAUNCH_FAIL=1 FM_FAKE_CURSOR_RESTORE_FAIL=1 \
+    run_cursor_spawn "$home" "$proj" "$wt" "$fakebin" "$id" \
+      --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn restore-failure injection unexpectedly succeeded"
+  cmp -s "$expected_hooks" "$home/state/$id.cursor-hooks.json" \
+    || fail "failed restore discarded the original hooks.json backup"
+  cmp -s "$expected_script" "$home/state/$id.cursor-fm-busy-turnend.sh" \
+    || fail "failed restore discarded the original hook-script backup"
+  assert_present "$home/state/$id.cursor-hooks.json.installed" \
+    "failed restore discarded the installed hooks snapshot"
+  assert_present "$home/state/$id.cursor-fm-busy-turnend.sh.installed" \
+    "failed restore discarded the installed hook-script snapshot"
+  assert_absent "$home/state/$id.busy-gen" \
+    "failed restore left its busy generation armed"
+  [ -L "$wt/.cursor/hooks/fm-busy-turnend.sh" ] \
+    || fail "restore-failure injection did not leave the unsafe path in place"
+  pass "aborted Cursor spawn retains recovery sidecars when restoration fails"
 }
 
 test_same_cursor_relaunch_preserves_preexisting_hook_script() {
@@ -473,6 +515,7 @@ test_cursor_composer_placeholder_requires_cursor_glyph
 test_cursor_hooks_restore_existing_files
 test_cursor_hook_restore_preserves_user_hook_edits
 test_cursor_hook_backup_is_atomic
+test_spawn_abort_retains_cursor_backups_when_restore_fails
 test_same_cursor_relaunch_preserves_preexisting_hook_script
 test_spawn_abort_restores_cursor_hooks
 test_cursor_hooks_reject_parent_symlinks
