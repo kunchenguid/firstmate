@@ -40,7 +40,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-dispatch-select.sh`  | Resolve a dispatch rule/default to one profile, owning quota-aware arrays and random fallback |
 | `fm-quota-alert.sh`      | Read the custom quota sources declared on launch identities and report exhausted lanes with switch candidates; never consulted by dispatch |
 | `fm-backend.sh`          | Runtime-backend selection, meta helpers, selector resolution, and operation dispatch |
-| `fm-backend-hometag-lib.sh` | Shared per-installation home-tag derivation for zellij tab and cmux workspace titles |
+| `fm-backend-hometag-lib.sh` | Shared home-tag derivation for zellij tab and cmux workspace titles, and the tmux same-basename session fallback |
 | `fm-composer-lib.sh`     | Single fleet-wide owner of composer-content classification for all backends          |
 | `backends/tmux.sh`       | Verified tmux session-provider adapter                                               |
 | `backends/herdr.sh`      | Experimental herdr session-provider adapter                                          |

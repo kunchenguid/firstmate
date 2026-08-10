@@ -47,9 +47,18 @@ supervisor_home_physical() {
 # supervisor_target_default: the tmux fallback target, SCOPED to this home. On a
 # shared tmux server a bare "firstmate:0" resolves to whichever home owns that
 # name, which is exactly how one home's away daemon injected into another home's
-# pane. Naming the fallback session after FM_HOME's basename - the SAME session
-# name a31df6e's fm_backend_tmux_container_ensure uses - keeps the fallback inside
-# this home. Falls back to the legacy literal only when FM_HOME is unresolvable.
+# pane. Naming the fallback session after FM_HOME's basename - a31df6e's crew
+# session name - keeps the fallback inside this home. Falls back to the legacy
+# literal only when FM_HOME is unresolvable.
+#
+# This stays a basename GUESS on purpose, and does not follow
+# fm_backend_tmux_container_ensure's collision fallback into the home-tag name.
+# It is the LAST resort, reached only when firstmate is not running in a tmux
+# pane at all ($TMUX_PANE unset) and nothing was configured, so for a home whose
+# basename is owned by another home the guess was already wrong before that
+# fallback existed and supervisor_target_home_ok refused it - unchanged either
+# way. Resolving the real container here would mean creating a session as a
+# side effect of merely discovering a target, which this must not do.
 supervisor_target_default() {
   local home base
   home=$(supervisor_home_physical) || { printf '%s' "$FM_SUPERVISOR_TARGET_DEFAULT"; return; }

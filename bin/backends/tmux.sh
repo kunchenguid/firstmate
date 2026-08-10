@@ -26,6 +26,13 @@
 # shellcheck source=bin/fm-tmux-lib.sh
 . "$FM_BACKEND_LIB_DIR/fm-tmux-lib.sh"
 
+# Shared home-tag derivation, used ONLY by the container's collision fallback
+# below (fm_backend_tmux_container_ensure). Same file zellij and cmux use for
+# their shared-namespace tab/workspace titles; see its header for why tmux
+# passes FM_HOME rather than FM_ROOT as the discriminating path.
+# shellcheck source=bin/fm-backend-hometag-lib.sh
+. "$FM_BACKEND_LIB_DIR/fm-backend-hometag-lib.sh"
+
 # fm_backend_tmux_resolve_bare_selector: the live-window-listing fallback for a
 # selector that is neither an explicit target nor a task selector routed
 # through meta - an ad hoc window name with no recorded task. Mirrors the
@@ -59,38 +66,140 @@ fm_backend_tmux_send_text_submit() {  # <target> <text> <retries> <enter-sleep> 
   fm_tmux_submit_core "$@"
 }
 
-# fm_backend_tmux_container_ensure: ensure the session named after FM_HOME's
-# basename, claim an existing unstamped session for compatibility, and refuse
-# a session already stamped with another physical FM_HOME. The readable name
-# keeps `tmux attach -t <home-basename>` practical while the stamp makes equal
-# basenames under different parent directories fail closed. Prints the
-# resolved session name.
+FM_BACKEND_TMUX_HOME_OPT=@firstmate-home
+
+# fm_backend_tmux_session_owner: the @firstmate-home stamp of <session>, or
+# empty when the session has no stamp or cannot be read.
+fm_backend_tmux_session_owner() {  # <session>
+  fm_tmux show-options -t "$1" -v "$FM_BACKEND_TMUX_HOME_OPT" 2>/dev/null
+}
+
+# fm_backend_tmux_session_exists: is <session> a live session on the fleet
+# socket? Exact-match, so "firstmate" never matches "firstmate-life".
+fm_backend_tmux_session_exists() {  # <session>
+  fm_tmux list-sessions -F '#{session_name}' 2>/dev/null | grep -Fqx "$1"
+}
+
+# fm_backend_tmux_claim_session: try to make <session> THIS home's container.
+# Creates it when absent, claims it when present but unstamped (the historical
+# unstamped `firstmate` session and its existing windows stay valid), and
+# leaves an already-stamped session untouched - a session stamped by another
+# home is never restamped, renamed, or reused. Returns:
+#   0 - the session is now stamped for <home>; use it.
+#   1 - another home owns it; its stamp is printed on stdout.
+#   2 - it could not be created, or exists but could not be stamped; nothing
+#       is printed. Distinct from 1 so the caller does not report a tmux
+#       failure as if some other home were holding the name.
+fm_backend_tmux_claim_session() {  # <session> <home>
+  local session=$1 home=$2 owner
+  if ! fm_backend_tmux_session_exists "$session"; then
+    # Creation keeps a31df6e's exact shape: a successful new-session is taken
+    # at its word, and the re-listing is the tie-break for a LOST race (another
+    # process created the same name first, so new-session returns non-zero but
+    # the session is there and claimable). Re-listing unconditionally instead
+    # would add a second failure mode to a path that has none today.
+    fm_tmux new-session -d -s "$session" 2>/dev/null \
+      || fm_backend_tmux_session_exists "$session" \
+      || return 2
+  fi
+  owner=$(fm_backend_tmux_session_owner "$session") || owner=
+  if [ -z "$owner" ]; then
+    fm_tmux set-option -o -t "$session" "$FM_BACKEND_TMUX_HOME_OPT" "$home" 2>/dev/null || true
+    owner=$(fm_backend_tmux_session_owner "$session") || owner=
+  fi
+  [ "$owner" = "$home" ] && return 0
+  [ -n "$owner" ] || return 2
+  printf '%s' "$owner"
+  return 1
+}
+
+# fm_backend_tmux_container_ensure: resolve THIS home's tmux session, creating
+# it when needed, and print its name. Two candidate names are tried in order:
+#
+#   1. FM_HOME's basename - the readable default that keeps
+#      `tmux attach -t <home-basename>` practical, and the ONLY name any home
+#      used before this fallback existed.
+#   2. The shared home tag (bin/fm-backend-hometag-lib.sh): "firstmate-<hash>"
+#      for a primary home, "2ndmate-<id>-<hash>" for a secondmate home, hashed
+#      over the resolved FM_HOME so it is unique per home and stable across
+#      callers.
+#
+# Candidate 2 exists because equal basenames are not a corner case: a
+# secondmate home leased from the firstmate repo (a treehouse lease, say
+# ~/.treehouse/firstmate-<x>/3/firstmate) ALWAYS has basename "firstmate", the
+# same basename the primary home usually has, so under candidate 1 alone such
+# a home could never open a session at all and could never dispatch. Every
+# home leased that way hits it.
+#
+# The @firstmate-home stamp still decides ownership and still refuses: a
+# candidate stamped with a DIFFERENT physical FM_HOME is skipped, never
+# reused, never renamed, and never restamped - the fallback moves THIS home
+# aside, it does not move the other home's session. With both candidates
+# blocked, this fails closed with both owners named.
+#
+# An already-stamped-ours session is adopted before any new one is created
+# (the first loop), so a home that once fell back to candidate 2 keeps using
+# that session even if candidate 1 later frees up; otherwise a home's live
+# crew windows would be stranded in a session nothing addresses any more.
 fm_backend_tmux_container_ensure() {
-  local home session owner option=@firstmate-home
+  local home basename_session tag_session candidate owner rc reason
+  local candidates=() blocked=()
   home=$(cd "$FM_HOME" 2>/dev/null && pwd -P) || {
     echo "error: tmux backend cannot resolve FM_HOME '$FM_HOME'" >&2
     return 1
   }
-  session=${home##*/}
-  if [ -z "$session" ]; then
+  basename_session=${home##*/}
+  if [ -z "$basename_session" ]; then
     echo "error: tmux backend cannot derive a session name from FM_HOME '$home'" >&2
     return 1
   fi
-  if ! fm_tmux list-sessions -F '#{session_name}' 2>/dev/null | grep -Fqx "$session"; then
-    fm_tmux new-session -d -s "$session" 2>/dev/null \
-      || fm_tmux list-sessions -F '#{session_name}' 2>/dev/null | grep -Fqx "$session" \
-      || return 1
+  candidates=("$basename_session")
+  # tmux rewrites '.' and ':' in a session name to '_' rather than refusing the
+  # name, so a tag built from a secondmate id containing either would be printed
+  # under a name that does not exist (verified, tmux 3.3a: `new-session -s a.b`
+  # and `-s a:b` both produce the session `a_b`, while space, '/', '@' and '%'
+  # pass through unchanged). Apply the same mapping up front so the name this
+  # prints is always the name tmux actually created.
+  tag_session=$(fm_backend_hometag_for "$home" "$home" | tr '.:' '__')
+  # Equal only if a home's basename already looks like its own tag; keep the
+  # list deduplicated so the error below cannot name the same session twice.
+  if [ -n "$tag_session" ] && [ "$tag_session" != "$basename_session" ]; then
+    candidates+=("$tag_session")
   fi
-  owner=$(fm_tmux show-options -t "$session" -v "$option" 2>/dev/null) || owner=
-  if [ -z "$owner" ]; then
-    fm_tmux set-option -o -t "$session" "$option" "$home" 2>/dev/null || true
-    owner=$(fm_tmux show-options -t "$session" -v "$option" 2>/dev/null) || owner=
-  fi
-  if [ "$owner" != "$home" ]; then
-    echo "error: tmux session '$session' belongs to FM_HOME '${owner:-unknown}', not '$home'; refusing to reuse it" >&2
-    return 1
-  fi
-  printf '%s' "$session"
+
+  for candidate in "${candidates[@]}"; do
+    if fm_backend_tmux_session_exists "$candidate" \
+      && [ "$(fm_backend_tmux_session_owner "$candidate")" = "$home" ]; then
+      printf '%s' "$candidate"
+      return 0
+    fi
+  done
+
+  for candidate in "${candidates[@]}"; do
+    owner=$(fm_backend_tmux_claim_session "$candidate" "$home")
+    rc=$?
+    case "$rc" in
+      0)
+        printf '%s' "$candidate"
+        return 0
+        ;;
+      1)
+        blocked+=("'$candidate' belongs to FM_HOME '$owner', not '$home'; refusing to reuse it")
+        ;;
+      *)
+        blocked+=("'$candidate' could not be created or stamped on the fleet's tmux server")
+        ;;
+    esac
+  done
+
+  {
+    printf "error: tmux backend cannot open a session for FM_HOME '%s'" "$home"
+    for reason in "${blocked[@]}"; do
+      printf '\n  tmux session %s' "$reason"
+    done
+    printf '\n'
+  } >&2
+  return 1
 }
 
 # fm_backend_tmux_create_task: create the task's window in <proj-abs>,

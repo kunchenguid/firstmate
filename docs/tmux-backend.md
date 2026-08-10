@@ -31,8 +31,23 @@ The first crewmate spawn creates whatever tmux session and window it needs.
 Every firstmate home uses the tmux session named after that home's directory basename, whether the harness runs inside or outside tmux.
 For example, `~/orca/firstmate` uses `firstmate`, while `~/orca/firstmate-life` uses `firstmate-life`.
 Each session carries an `@firstmate-home` option containing the physical `FM_HOME` path.
-If another home with the same basename tries to reuse that session, firstmate reports the conflicting owner and refuses the spawn.
 An existing unstamped session is stamped on its first reuse so the historical `firstmate` session and all of its existing windows and task records remain valid.
+
+### When two homes have the same basename
+
+A home whose basename is already owned by a *different* home falls back to a second session name instead of failing.
+The fallback is the shared home tag from [`bin/fm-backend-hometag-lib.sh`](../bin/fm-backend-hometag-lib.sh) - `firstmate-<hash>` for a primary home, `2ndmate-<id>-<hash>` for a secondmate home carrying `.fm-secondmate-home` - hashed over the resolved `FM_HOME`.
+
+This is not a corner case.
+A secondmate home leased from the firstmate repo itself always has the basename `firstmate`, the same basename the primary home usually has, so under basename-only naming such a home could never open a session and could never dispatch a single crewmate.
+
+The `@firstmate-home` stamp still decides ownership and still refuses.
+A session stamped with a different physical `FM_HOME` is stepped around, never reused, never renamed, and never restamped: the fallback moves the *new* home aside, it does not move the existing home's session.
+When both candidate names are owned by other homes, the spawn stops with both owners named rather than inventing a third name.
+
+Resolution is stable rather than per-spawn.
+A session already stamped for this home is adopted before any new one is created, so a home that once fell back to the tag name keeps using it even after its basename frees up, and recorded `window=` handles are never stranded in an abandoned session.
+The tag hashes `FM_HOME`, not `FM_ROOT`, so the primary home resolves a secondmate's session to the same name the secondmate resolves for itself - the two callers differ in `FM_ROOT` but not in `FM_HOME`.
 
 ## Crew panes cannot reach the fleet's tmux server
 
@@ -94,6 +109,13 @@ Attach to the session named after the active firstmate home:
 tmux attach -t <home-basename>
 ```
 
+If that home's basename is owned by another home, its session carries the fallback name instead.
+List the sessions with their owners to find it:
+
+```sh
+tmux list-sessions -F '#{session_name}  #{@firstmate-home}'
+```
+
 ## Watching and typing into crew windows
 
 Once attached, each crewmate is its own window named `fm-<id>`:
@@ -103,7 +125,7 @@ tmux list-windows -t <session-name>          # see every crew window
 tmux select-window -t <session-name>:fm-<id> # jump to one, or use ctrl-b <n>
 ```
 
-Use the firstmate home basename as the session name.
+Use the firstmate home basename as the session name, or the fallback name listed above when another home owns that basename.
 Typing directly into an attached window is authoritative direct intervention - the first mate treats it the same as any other captain instruction and reconciles at the next heartbeat.
 You do not need to attach at all for routine supervision: from an active firstmate session, the first mate reads crew windows itself with `bin/fm-peek.sh fm-<id>` (a bounded, read-only capture) and steers a crew with `FM_HOME=<this-firstmate-home> bin/fm-send.sh fm-<id> "<text>"` unless `FM_HOME` is already set to the active firstmate home.
 
@@ -128,6 +150,94 @@ ok - real tmux: an existing unstamped basename session is claimed without distur
 ```
 
 The test creates `firstmate` and `firstmate-life`, creates one task window in each, reads both ownership stamps, attempts a conflicting second `firstmate` home, and confirms a legacy unstamped session keeps its existing window while being claimed.
+
+The middle line is superseded by the record below: a basename collision now opens the home's own fallback session instead of stopping.
+Refusal is still what happens when *every* candidate name is owned elsewhere.
+
+### Same-basename fallback verification, 2026-08-10
+
+Verified with tmux 3.3a on Linux (`5.15.120.bsk.3-amd64`, x86_64) by the same `tests/fm-backend-tmux-smoke.test.sh` on a private tmux socket:
+
+```text
+ok - real tmux: two FM_HOME basenames create separate stamped sessions and task windows
+ok - real tmux: a home whose basename is owned by another home opens its own home-tagged session (firstmate-4240bf6b)
+ok - real tmux: the foreign-stamped session keeps its name, stamp, and windows - it is stepped around, never reused
+ok - real tmux: the fallback session name is stable across repeated container ensures
+ok - real tmux: a secondmate-marked colliding home gets a readable 2ndmate-<id> session, identical from either caller's FM_ROOT (2ndmate-upstream-sync-5c4008a5)
+ok - real tmux: a secondmate id with '.'/':' resolves to the name tmux really created (2ndmate-up_sync_v2-0917396c)
+ok - real tmux: an existing session already stamped for this home is adopted before any new one is created
+ok - real tmux: both candidates owned elsewhere still errors and stops, naming both owners and restamping neither
+ok - real tmux: an existing unstamped basename session is claimed without disturbing its windows
+```
+
+The hashes vary per run because each run builds its homes under a fresh `mktemp -d`; the tag *shape* and the stability/adoption assertions are what the test pins.
+
+#### Session names tmux rewrites
+
+tmux does not refuse a session name containing `.` or `:` - it silently rewrites both to `_`.
+Verified on tmux 3.3a, so the fallback applies the same mapping before printing a name and cannot report a session that does not exist:
+
+```text
+asked=[a.b] -> got=[a_b]
+asked=[a:b] -> got=[a_b]
+asked=[a b] -> got=[a b]
+asked=[a/b] -> got=[a/b]
+asked=[a@b] -> got=[a@b]
+asked=[a%b] -> got=[a%b]
+```
+
+Nothing validates a secondmate id's character set upstream, so an id like `up.sync:v2` is reachable.
+The basename candidate has the same exposure and always has: a home directory literally named `my.home` gets the session `my_home`.
+That pre-dates this fallback and is not changed here.
+
+#### Against a real fleet, not only the private socket
+
+The same day, on the live fleet socket `/tmp/tmux-1001/default`, where the session `firstmate` was already owned by `/data00/home/haozhenfei/Documents/firstmate` and held seven live crew windows.
+
+Before the change, a real secondmate home leased from the firstmate repo could not open any session:
+
+```text
+$ FM_HOME=/data00/home/haozhenfei/.treehouse/firstmate-fe3465/3/firstmate fm_backend_tmux_container_ensure
+error: tmux session 'firstmate' belongs to FM_HOME '/data00/home/haozhenfei/Documents/firstmate', not '/data00/home/haozhenfei/.treehouse/firstmate-fe3465/3/firstmate'; refusing to reuse it
+rc=1
+```
+
+After the change, the same home resolves a session, and resolves the *same* session whether its own root or the primary's root is on `FM_ROOT`:
+
+```text
+$ FM_HOME=<lease> FM_ROOT=<lease>            fm_backend_tmux_container_ensure
+2ndmate-upstream-sync-d4279681 rc=0
+$ FM_HOME=<lease> FM_ROOT=<primary firstmate> fm_backend_tmux_container_ensure
+2ndmate-upstream-sync-d4279681 rc=0
+```
+
+The primary's session was unchanged across that run - same name, same stamp, same seven windows with their window ids and live agents:
+
+```text
+firstmate  windows=7  @firstmate-home=/data00/home/haozhenfei/Documents/firstmate
+0 @87 fm-upstream-sync claude
+1 @105 fm-topic-tracker-http-endpoints-live claude
+2 @108 fm-fm-tmux-session-name-collision claude
+3 @109 fm-coze-plugins-lifecycle-docs claude
+4 @43 fm-coze-cr-guard claude
+8 @96 fm-panel-gateway-mcp-handlers claude
+10 @100 fm-coze-fe-test-skill-scout claude
+```
+
+A second live home on the same server gave the disconfirming check.
+A scratch `FM_HOME` whose basename was `coze-cr-guard` - the session name a *different*, running home owns - was stepped around rather than reused, and that home's stamp and all four of its crew windows were untouched:
+
+```text
+live 'coze-cr-guard' session stamp = /data00/home/haozhenfei/fm-homes/coze-cr-guard
+resolved session = firstmate-641268c0   (must NOT be 'coze-cr-guard')
+live 'coze-cr-guard' stamp AFTER  = /data00/home/haozhenfei/fm-homes/coze-cr-guard
+  1 @55 fm-cr-biz-ctx-rules claude          (before and after, unchanged)
+  2 @63 fm-cr-tick-20260731-space claude
+  3 @66 fm-cr-tick-20260801-space claude
+  4 @65 fm-cr-tick-20260731-rest claude
+```
+
+Both scratch sessions this verification created were empty (a bare shell only) and were removed afterwards, leaving the fleet as found.
 
 ## Endpoint existence: why `display-message` cannot answer it
 

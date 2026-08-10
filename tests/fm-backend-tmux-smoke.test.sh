@@ -104,15 +104,134 @@ fm_backend_tmux_create_task "$life_session" fm-life-home-task "$HOME_LIFE" >/dev
   || fail "real tmux: life-home task did not land in session 'firstmate-life'"
 pass "real tmux: two FM_HOME basenames create separate stamped sessions and task windows"
 
-collision_error="$SHIM_DIR/collision-error"
-if FM_HOME="$HOME_COLLISION" fm_backend_tmux_container_ensure > /dev/null 2>"$collision_error"; then
-  fail "real tmux: an equal basename under another parent reused the stamped session"
-fi
-grep -Fq "belongs to FM_HOME '$HOME_MAIN', not '$HOME_COLLISION'; refusing to reuse it" "$collision_error" \
-  || fail "real tmux: basename collision did not report both the owner and rejected FM_HOME"
+# --- basename collision: the colliding home gets its OWN session --------------
+# A secondmate home leased from the firstmate repo always has basename
+# "firstmate", so before the home-tag fallback such a home could not open a
+# session at all. HOME_COLLISION reproduces exactly that: same basename as
+# HOME_MAIN, different parent, and HOME_MAIN already owns the "firstmate"
+# session created above.
+
+collision_session=$(FM_HOME="$HOME_COLLISION" fm_backend_tmux_container_ensure) \
+  || fail "real tmux: an equal basename under another parent could not open any session"
+[ "$collision_session" != firstmate ] \
+  || fail "real tmux: the colliding home was handed the OTHER home's 'firstmate' session"
+expected_tag=$(fm_backend_hometag_for "$HOME_COLLISION" "$HOME_COLLISION")
+[ "$collision_session" = "$expected_tag" ] \
+  || fail "real tmux: colliding home resolved '$collision_session', expected the home tag '$expected_tag'"
+[ "$(tmux show-options -t "$collision_session" -v @firstmate-home)" = "$HOME_COLLISION" ] \
+  || fail "real tmux: the fallback session is not stamped with the colliding home's FM_HOME"
+fm_backend_tmux_create_task "$collision_session" fm-collision-home-task "$HOME_COLLISION" >/dev/null \
+  || fail "real tmux: colliding home could not create a task window in its fallback session"
+[ "$(tmux list-windows -t "$collision_session" -F '#{window_name}' | grep -cx fm-collision-home-task)" -eq 1 ] \
+  || fail "real tmux: colliding home's task did not land in its own fallback session"
+pass "real tmux: a home whose basename is owned by another home opens its own home-tagged session ($collision_session)"
+
+# RED: the other home's session must be untouched - not reused, not renamed,
+# not restamped, and none of its windows moved or lost.
 [ "$(tmux show-options -t firstmate -v @firstmate-home)" = "$HOME_MAIN" ] \
-  || fail "real tmux: rejected collision changed the existing session ownership stamp"
-pass "real tmux: a basename collision with a mismatched ownership stamp errors and stops"
+  || fail "real tmux: the fallback changed the other home's ownership stamp"
+tmux list-sessions -F '#{session_name}' | grep -Fqx firstmate \
+  || fail "real tmux: the fallback renamed the other home's session out of the way"
+[ "$(tmux list-windows -t firstmate -F '#{window_name}' | grep -cx fm-main-home-task)" -eq 1 ] \
+  || fail "real tmux: the other home's existing task window did not survive the fallback"
+tmux list-windows -t firstmate -F '#{window_name}' | grep -qx fm-collision-home-task \
+  && fail "real tmux: the colliding home's window landed in the OTHER home's session"
+pass "real tmux: the foreign-stamped session keeps its name, stamp, and windows - it is stepped around, never reused"
+
+# The resolution is STABLE: a second ensure for the same home returns the same
+# session rather than drifting to a new name each spawn.
+collision_again=$(FM_HOME="$HOME_COLLISION" fm_backend_tmux_container_ensure) \
+  || fail "real tmux: second ensure for the colliding home failed"
+[ "$collision_again" = "$collision_session" ] \
+  || fail "real tmux: colliding home is not stable across ensures ('$collision_session' then '$collision_again')"
+pass "real tmux: the fallback session name is stable across repeated container ensures"
+
+# The production shape of the collision: a secondmate home leased from the
+# firstmate repo, carrying .fm-secondmate-home, whose basename is "firstmate".
+# Its session must be identifiable at a glance in `tmux ls`, and must NOT depend
+# on which home's scripts resolved it - the primary steering a secondmate runs
+# the PRIMARY's FM_ROOT with the SECONDMATE's FM_HOME, and both callers have to
+# name the same session.
+SM_HOME="$SHIM_DIR/treehouse/lease/firstmate"
+mkdir -p "$SM_HOME"
+SM_HOME=$(cd "$SM_HOME" && pwd -P)
+printf 'upstream-sync\n' > "$SM_HOME/.fm-secondmate-home"
+sm_session=$(FM_HOME="$SM_HOME" FM_ROOT="$SM_HOME" fm_backend_tmux_container_ensure) \
+  || fail "real tmux: secondmate-marked colliding home could not open a session"
+case "$sm_session" in
+  2ndmate-upstream-sync-*) : ;;
+  *) fail "real tmux: secondmate home resolved '$sm_session', expected a 2ndmate-upstream-sync-* session" ;;
+esac
+[ "$(tmux show-options -t "$sm_session" -v @firstmate-home)" = "$SM_HOME" ] \
+  || fail "real tmux: the secondmate's session is not stamped with its own FM_HOME"
+sm_from_primary=$(FM_HOME="$SM_HOME" FM_ROOT="$HOME_MAIN" fm_backend_tmux_container_ensure) \
+  || fail "real tmux: resolving the secondmate's session from the primary's root failed"
+[ "$sm_from_primary" = "$sm_session" ] \
+  || fail "real tmux: the same home resolved '$sm_session' from its own root but '$sm_from_primary' from the primary's; the session name must not depend on FM_ROOT"
+pass "real tmux: a secondmate-marked colliding home gets a readable 2ndmate-<id> session, identical from either caller's FM_ROOT ($sm_session)"
+
+# tmux rewrites '.' and ':' in a session name to '_', so a secondmate id
+# carrying either must not make ensure print a session name that does not
+# exist. Nothing validates that id's charset upstream, so this is reachable.
+DOTTY_HOME="$SHIM_DIR/dotty/firstmate"
+mkdir -p "$DOTTY_HOME"
+DOTTY_HOME=$(cd "$DOTTY_HOME" && pwd -P)
+printf 'up.sync:v2\n' > "$DOTTY_HOME/.fm-secondmate-home"
+dotty_session=$(FM_HOME="$DOTTY_HOME" fm_backend_tmux_container_ensure) \
+  || fail "real tmux: a secondmate id containing '.' or ':' could not open a session"
+case "$dotty_session" in
+  *.*|*:*) fail "real tmux: ensure returned '$dotty_session', a name tmux cannot create verbatim" ;;
+esac
+tmux list-sessions -F '#{session_name}' | grep -Fqx "$dotty_session" \
+  || fail "real tmux: ensure printed '$dotty_session' but no such session exists"
+[ "$(tmux show-options -t "$dotty_session" -v @firstmate-home)" = "$DOTTY_HOME" ] \
+  || fail "real tmux: the sanitized session is not stamped with its home"
+pass "real tmux: a secondmate id with '.'/':' resolves to the name tmux really created ($dotty_session)"
+
+# Adoption beats creation: with its home-tag session already stamped and
+# holding a live window, the home keeps using it even once the basename frees
+# up, so recorded window= handles are never stranded in an abandoned session.
+tmux kill-session -t firstmate-adopt-probe 2>/dev/null || true
+ADOPT_HOME="$SHIM_DIR/adopt/firstmate-adopt-probe"
+mkdir -p "$ADOPT_HOME"
+ADOPT_HOME=$(cd "$ADOPT_HOME" && pwd -P)
+adopt_tag=$(fm_backend_hometag_for "$ADOPT_HOME" "$ADOPT_HOME")
+tmux new-session -d -s "$adopt_tag" || fail "real tmux: adoption-probe session setup failed"
+tmux set-option -t "$adopt_tag" @firstmate-home "$ADOPT_HOME" \
+  || fail "real tmux: adoption-probe stamp setup failed"
+adopted=$(FM_HOME="$ADOPT_HOME" fm_backend_tmux_container_ensure) \
+  || fail "real tmux: adoption-probe ensure failed"
+[ "$adopted" = "$adopt_tag" ] \
+  || fail "real tmux: an existing own-stamped home-tag session was abandoned for a fresh basename session ('$adopted')"
+tmux list-sessions -F '#{session_name}' | grep -Fqx firstmate-adopt-probe \
+  && fail "real tmux: ensure created a redundant basename session while its own tagged session was live"
+pass "real tmux: an existing session already stamped for this home is adopted before any new one is created"
+
+# RED: with BOTH candidate names owned by other homes, it must still refuse
+# rather than invent a third name or steal one.
+BLOCKED_HOME="$SHIM_DIR/blocked/firstmate"
+mkdir -p "$BLOCKED_HOME"
+BLOCKED_HOME=$(cd "$BLOCKED_HOME" && pwd -P)
+blocked_tag=$(fm_backend_hometag_for "$BLOCKED_HOME" "$BLOCKED_HOME")
+FOREIGN_HOME="$SHIM_DIR/foreign-owner"
+mkdir -p "$FOREIGN_HOME"
+FOREIGN_HOME=$(cd "$FOREIGN_HOME" && pwd -P)
+tmux new-session -d -s "$blocked_tag" || fail "real tmux: forged-stamp session setup failed"
+tmux set-option -t "$blocked_tag" @firstmate-home "$FOREIGN_HOME" \
+  || fail "real tmux: forged-stamp setup failed"
+blocked_error="$SHIM_DIR/blocked-error"
+if FM_HOME="$BLOCKED_HOME" fm_backend_tmux_container_ensure > /dev/null 2>"$blocked_error"; then
+  fail "real tmux: with both candidate sessions owned by other homes, ensure did not refuse"
+fi
+grep -Fq "tmux session 'firstmate' belongs to FM_HOME '$HOME_MAIN', not '$BLOCKED_HOME'" "$blocked_error" \
+  || fail "real tmux: refusal did not name the basename candidate's owner"$'\n'"$(cat "$blocked_error")"
+grep -Fq "tmux session '$blocked_tag' belongs to FM_HOME '$FOREIGN_HOME', not '$BLOCKED_HOME'" "$blocked_error" \
+  || fail "real tmux: refusal did not name the home-tag candidate's owner"$'\n'"$(cat "$blocked_error")"
+[ "$(tmux show-options -t "$blocked_tag" -v @firstmate-home)" = "$FOREIGN_HOME" ] \
+  || fail "real tmux: a refused ensure restamped the foreign-owned session"
+[ "$(tmux show-options -t firstmate -v @firstmate-home)" = "$HOME_MAIN" ] \
+  || fail "real tmux: a refused ensure restamped the basename session"
+pass "real tmux: both candidates owned elsewhere still errors and stops, naming both owners and restamping neither"
 
 LEGACY_HOME="$SHIM_DIR/legacy/legacy-home"
 mkdir -p "$LEGACY_HOME"
