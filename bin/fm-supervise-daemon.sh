@@ -427,7 +427,7 @@ classify_unknown() {  # <reason>
 
 # --- stale marker + escalation buffer (stateful, but via explicit state dir) -
 # Marker:   state/.subsuper-stale-<key>   contains the epoch first seen idle.
-# Buffer:   state/.subsuper-escalations    one distilled line per escalation.
+# Buffer:   state/.subsuper-escalations    one internal record per escalation.
 # Seen:     state/.subsuper-seen-status-<task>  last status line the scan
 #           escalated, so the catch-all does not re-fire the same terminal.
 
@@ -632,11 +632,33 @@ stale_window_is_busy() {  # <window> <state>
   [ "${verdict%% *}" = busy ]
 }
 
-escalate_add() {  # <state> <distilled-item>
-  local state=$1 item=$2 buf
+escalate_add() {  # <state> <distilled-item> [wake-id]
+  local state=$1 item=$2 wake_id=${3:-} buf tmp was_empty=0
   buf="$state/.subsuper-escalations"
+  if [ -n "$wake_id" ]; then
+    case "$wake_id" in *[!0-9-]*|*-*-*|-*|*-) return 2 ;; esac
+    if awk -F '\t' -v id="@wake:$wake_id" '$1 == id { found = 1 } END { exit !found }' "$buf" 2>/dev/null; then
+      [ -r "${buf}.since" ] || _now > "${buf}.since"
+      return $?
+    fi
+    [ -s "$buf" ] || was_empty=1
+    tmp="$buf.queue.${BASHPID:-$$}"
+    {
+      [ ! -e "$buf" ] || cat "$buf"
+      printf '@wake:%s\t%s\n' "$wake_id" "$item"
+    } > "$tmp" && mv "$tmp" "$buf" || {
+      rm -f "$tmp" 2>/dev/null || true
+      return 1
+    }
+    [ "$was_empty" -eq 0 ] || _now > "${buf}.since"
+    return $?
+  fi
   [ -s "$buf" ] || _now > "${buf}.since"
   printf '%s\n' "$item" >> "$buf"
+}
+
+escalate_buffer_items() {  # <buffer>
+  awk '{ sub(/^@wake:[0-9]+-[0-9]+\t/, ""); print }' "$1" 2>/dev/null
 }
 
 # Flush the escalation buffer as ONE batched, single-line digest to the
@@ -648,7 +670,7 @@ escalate_flush() {  # <state>
   [ -s "$buf" ] || return 0
   n=$(wc -l < "$buf" 2>/dev/null || echo 0)
   # Join buffered items with the literal " | " separator into one digest line.
-  msg=$(awk 'NR>1{printf " | "} {printf "%s",$0} END{print ""}' "$buf" 2>/dev/null)
+  msg=$(escalate_buffer_items "$buf" | awk 'NR>1{printf " | "} {printf "%s",$0} END{print ""}')
   # Single-line wrapper: no embedded newlines (inject_msg also collapses as a
   # safety net, but keeping the source single-line makes the intent explicit).
   msg=$(printf 'Supervisor escalate (%s event(s)): %s (pre-read; re-arm not needed — watcher daemon-managed)' "$n" "$msg")
@@ -912,7 +934,7 @@ inject_wedge_alarm() {  # <state> <age-seconds>
   {
     printf 'fm away-mode inject WEDGED: %ss undelivered as of %s\n' "$age" "$(date '+%Y-%m-%dT%H:%M:%S%z')"
     printf 'The supervisor pane could not accept an escalation. Buffered items:\n'
-    cat "$state/.subsuper-escalations" 2>/dev/null
+    escalate_buffer_items "$state/.subsuper-escalations"
   } 2>/dev/null > "$marker" || true
   target="${FM_SUPERVISOR_TARGET:-$FM_SUPERVISOR_TARGET_DEFAULT}"
   backend="${FM_SUPERVISOR_BACKEND:-$FM_SUPERVISOR_BACKEND_DEFAULT}"
@@ -1203,12 +1225,12 @@ is_wake_reason() {  # <reason>
 
 # --- dispatch one wake reason to self-handle or escalate --------------------
 # Side effects: logging, marker records, escalation buffer appends.
-handle_wake() {  # <reason> <state>
-  local reason=$1 state=$2 decision action distilled task last stale_detail
+handle_wake() {  # <reason> <state> [wake-id]
+  local reason=$1 state=$2 wake_id=${3:-} decision action distilled task last stale_detail
   local kind="" arg=""
   if should_force_self "$reason"; then
     log "wake force-self (FM_INJECT_SKIP): $reason"
-    return
+    return 0
   fi
   case "$reason" in
     signal:*) kind=signal; arg="${reason#signal: }"
@@ -1230,12 +1252,14 @@ handle_wake() {  # <reason> <state>
   case "$action" in
     escalate)
       log "escalate: $reason -> $distilled"
-      escalate_add "$state" "$distilled"
+      escalate_add "$state" "$distilled" "$wake_id" || return 1
       # A terminal-stale escalate must not leave a persistence marker behind, or
       # housekeeping re-escalates the same pane as a false wedge later.
       [ "$kind" = "stale" ] && stale_marker_remove "$arg" "$state"
       mark_escalated_seen "$kind" "$arg" "$state"
-      [ "${FM_ESCALATE_BATCH_SECS:-$ESCALATE_BATCH_SECS_DEFAULT}" -le 0 ] && { escalate_flush "$state" || true; }
+      if [ -z "$wake_id" ] && [ "${FM_ESCALATE_BATCH_SECS:-$ESCALATE_BATCH_SECS_DEFAULT}" -le 0 ]; then
+        escalate_flush "$state" || true
+      fi
       ;;
     pause)
       # Declared external-wait pause: record a pause marker (long re-surface
@@ -1280,26 +1304,106 @@ handle_wake() {  # <reason> <state>
       log "self-handle: $reason -> $distilled"
       ;;
   esac
+  return 0
+}
+
+QUEUED_WAKE_CLASSIFICATION_ACTIVE=0
+
+queued_wake_cursor_advance() {  # <cursor-file> <seq>
+  local cursor_file=$1 seq=$2 current tmp
+  current=$(cat "$cursor_file" 2>/dev/null || echo 0)
+  case "$current" in ''|*[!0-9]*) current=0 ;; esac
+  [ "$current" -lt "$seq" ] || return 0
+  tmp="$cursor_file.${BASHPID:-$$}"
+  if ! printf '%s\n' "$seq" > "$tmp" || ! mv "$tmp" "$cursor_file"; then
+    rm -f "$tmp" 2>/dev/null || true
+    return 1
+  fi
+}
+
+queued_wake_check_is_duplicate() {  # <state> <key> <payload>
+  local state=$1 key=$2 payload=$3 ledger seen_epoch seen_seq seen_key seen_payload
+  ledger="$state/.subsuper-seen-wake-checks"
+  [ -r "$ledger" ] || return 1
+  while IFS="$(printf '\t')" read -r seen_epoch seen_seq seen_key seen_payload; do
+    [ "$seen_key" = "$key" ] || continue
+    [ "$seen_payload" = "$payload" ] || return 1
+    fm_wake_record_seq_present "$seen_seq" && return 0
+    escalate_buffer_items "$state/.subsuper-escalations" | grep -F -x -- "$payload" >/dev/null 2>&1
+    return $?
+  done < "$ledger"
+  return 1
+}
+
+queued_wake_check_store() {  # <state> <epoch> <seq> <key> <payload>
+  local state=$1 epoch=$2 seq=$3 key=$4 payload=$5 ledger tmp seen_epoch seen_seq seen_key seen_payload
+  ledger="$state/.subsuper-seen-wake-checks"
+  tmp="$ledger.${BASHPID:-$$}"
+  : > "$tmp" || return 1
+  if [ -r "$ledger" ]; then
+    while IFS="$(printf '\t')" read -r seen_epoch seen_seq seen_key seen_payload; do
+      [ "$seen_key" = "$key" ] && continue
+      printf '%s\t%s\t%s\t%s\n' "$seen_epoch" "$seen_seq" "$seen_key" "$seen_payload" >> "$tmp" || {
+        rm -f "$tmp" 2>/dev/null || true
+        return 1
+      }
+    done < "$ledger"
+  fi
+  printf '%s\t%s\t%s\t%s\n' "$epoch" "$seq" "$key" "$payload" >> "$tmp" \
+    && mv "$tmp" "$ledger" || {
+      rm -f "$tmp" 2>/dev/null || true
+      return 1
+    }
+}
+
+classify_pending_queued_wake() {  # <state> <pending-file> <cursor-file>
+  local state=$1 pending_file=$2 cursor_file=$3 epoch seq kind key payload extra
+  IFS="$(printf '\t')" read -r epoch seq kind key payload extra < "$pending_file" || return 1
+  case "$epoch" in ''|*[!0-9]*) return 1 ;; esac
+  case "$seq" in ''|*[!0-9]*) return 1 ;; esac
+  case "$kind" in signal|stale|check|heartbeat) ;; *) return 1 ;; esac
+  [ -n "$key" ] && [ -n "$payload" ] && [ -z "$extra" ] || return 1
+  queued_wake_cursor_advance "$cursor_file" "$seq" || return 1
+  if [ "$kind" = check ] && queued_wake_check_is_duplicate "$state" "$key" "$payload"; then
+    queued_wake_check_store "$state" "$epoch" "$seq" "$key" "$payload" || return 1
+    rm -f "$pending_file"
+    return $?
+  fi
+  handle_wake "$payload" "$state" "$epoch-$seq" || return 1
+  if [ "$kind" = check ]; then
+    queued_wake_check_store "$state" "$epoch" "$seq" "$key" "$payload" || return 1
+  fi
+  rm -f "$pending_file"
 }
 
 classify_queued_wakes() {  # <state>
-  local state=$1 cursor_file seen rows epoch seq kind key payload tmp
+  local state=$1 cursor_file pending_file seen rows epoch seq kind key payload tmp
   afk_active "$state" || return 0
   type fm_wake_records_after_seq >/dev/null 2>&1 || return 0
   cursor_file="$state/.subsuper-seen-wake-seq"
+  pending_file="$state/.subsuper-pending-wake"
+  QUEUED_WAKE_CLASSIFICATION_ACTIVE=1
+  if [ -e "$pending_file" ]; then
+    classify_pending_queued_wake "$state" "$pending_file" "$cursor_file" || return 1
+  fi
   seen=$(cat "$cursor_file" 2>/dev/null || echo 0)
   case "$seen" in ''|*[!0-9]*) seen=0 ;; esac
   rows=$(fm_wake_records_after_seq "$seen") || return 1
-  [ -n "$rows" ] || return 0
+  if [ -z "$rows" ]; then
+    QUEUED_WAKE_CLASSIFICATION_ACTIVE=0
+    return 0
+  fi
   while IFS="$(printf '\t')" read -r epoch seq kind key payload; do
     [ -n "$seq" ] || continue
-    handle_wake "$payload" "$state"
-    tmp="$cursor_file.${BASHPID:-$$}"
-    if ! printf '%s\n' "$seq" > "$tmp" || ! mv "$tmp" "$cursor_file"; then
+    tmp="$pending_file.${BASHPID:-$$}"
+    if ! printf '%s\t%s\t%s\t%s\t%s\n' "$epoch" "$seq" "$kind" "$key" "$payload" > "$tmp" \
+      || ! mv "$tmp" "$pending_file"; then
       rm -f "$tmp" 2>/dev/null || true
       return 1
     fi
+    classify_pending_queued_wake "$state" "$pending_file" "$cursor_file" || return 1
   done <<< "$rows"
+  QUEUED_WAKE_CLASSIFICATION_ACTIVE=0
 }
 
 # --- log --------------------------------------------------------------------
@@ -1440,7 +1544,7 @@ fm_super_main() {
   cleanup() {
     trap - TERM INT
     wedge_alarm_stop_active_notifier
-    escalate_flush "$STATE" 2>/dev/null || true
+    [ "$QUEUED_WAKE_CLASSIFICATION_ACTIVE" -eq 1 ] || escalate_flush "$STATE" 2>/dev/null || true
     if [ -n "${WATCHER_PID:-}" ]; then
       kill "$WATCHER_PID" 2>/dev/null || true
       wait "$WATCHER_PID" 2>/dev/null || true

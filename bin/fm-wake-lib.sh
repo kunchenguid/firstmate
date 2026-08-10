@@ -983,9 +983,10 @@ fm_wake_queued_keys_locked() {
 }
 
 # fm_wake_records_after_seq <seq>
-# Print complete, valid records whose sequence is newer than <seq>. The append
-# lock makes the snapshot indivisible with appends and drains; callers may then
-# classify the captured rows without consuming the durable queue.
+# Print the newest complete, valid record per logical wake whose sequence is
+# newer than <seq>. The append lock makes the snapshot indivisible with appends
+# and drains; callers may then classify the captured rows without consuming the
+# durable queue.
 fm_wake_records_after_seq() {
   local seen=$1 status=0
   case "$seen" in
@@ -995,8 +996,35 @@ fm_wake_records_after_seq() {
   awk -F '\t' -v seen="$seen" '
     NF == 5 && $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ &&
       ($3 == "signal" || $3 == "stale" || $3 == "check" || $3 == "heartbeat") &&
-      $4 != "" && $5 != "" && ($2 + 0) > seen { print }
+      $4 != "" && $5 != "" && ($2 + 0) > seen {
+        dedupe = $3 SUBSEP $4
+        if ($3 == "heartbeat") dedupe = "heartbeat"
+        count++
+        row[count] = $0
+        row_dedupe[count] = dedupe
+        row_seq[count] = $2 + 0
+        latest[dedupe] = $2 + 0
+      }
+    END {
+      for (i = 1; i <= count; i++) {
+        if (row_seq[i] == latest[row_dedupe[i]]) print row[i]
+      }
+    }
   ' "$FM_WAKE_QUEUE" 2>/dev/null || status=$?
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+  return "$status"
+}
+
+fm_wake_record_seq_present() {
+  local seq=$1 status=1
+  case "$seq" in
+    ''|*[!0-9]*) return 2 ;;
+  esac
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1
+  if awk -F '\t' -v seq="$seq" 'NF == 5 && ($2 + 0) == seq { found = 1 } END { exit !found }' \
+    "$FM_WAKE_QUEUE" 2>/dev/null; then
+    status=0
+  fi
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   return "$status"
 }

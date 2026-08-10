@@ -24,7 +24,8 @@ install_pi_watch_extension_fixture() {
   cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$repo/.pi/extensions/lib/fm-operational-input.ts"
   mkdir -p "$repo/bin"
   cp "$ROOT/bin/fm-operational-input.sh" "$repo/bin/fm-operational-input.sh"
-  chmod +x "$repo/bin/fm-operational-input.sh"
+  cp "$ROOT/bin/fm-pi-arm-tree-retire.sh" "$repo/bin/fm-pi-arm-tree-retire.sh"
+  chmod +x "$repo/bin/fm-operational-input.sh" "$repo/bin/fm-pi-arm-tree-retire.sh"
   cat > "$repo/node_modules/@earendil-works/pi-coding-agent/package.json" <<'JSON'
 {"name":"@earendil-works/pi-coding-agent","type":"module","exports":"./index.js"}
 JSON
@@ -246,6 +247,107 @@ EOF
   expect_code 0 "$status" "Pi AFK lifecycle must stand down, yield its exact child, absorb watcher input, and resume once"
   [ -z "$out" ] || fail "Pi AFK handoff test printed output: $out"
   pass "Pi AFK handoff yields the exact arm and resumes one cycle across repeated entry and return"
+}
+
+test_pi_afk_windows_handoff_retires_exact_tree() {
+  local repo home plugin fakebin log watcher_file taskkill_log out status
+  repo="$TMP_ROOT/pi-afk-windows-tree-root"
+  home="$TMP_ROOT/pi-afk-windows-tree-home"
+  fakebin="$TMP_ROOT/pi-afk-windows-tree-bin"
+  log="$TMP_ROOT/pi-afk-windows-tree.log"
+  watcher_file="$TMP_ROOT/pi-afk-windows-tree-watcher"
+  taskkill_log="$TMP_ROOT/pi-afk-windows-taskkill.log"
+  mkdir -p "$repo/bin" "$home/state" "$home/config" "$fakebin"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+sleep 300 &
+watcher=$!
+printf '%s\n' "$watcher" > "${FM_FAKE_WATCHER_FILE:?}"
+printf 'start=%s watcher=%s\n' "$$" "$watcher" >> "${FM_ARM_LOG:?}"
+trap 'kill -TERM "$watcher" 2>/dev/null || true; wait "$watcher" 2>/dev/null || true; exit 0' TERM INT
+wait "$watcher"
+SH
+  cat > "$fakebin/taskkill.exe" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_FAKE_TASKKILL_LOG:?}"
+pid=
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = /PID ] && [ "$#" -ge 2 ]; then pid=$2; shift 2; continue; fi
+  shift
+done
+case "$pid" in ''|*[!0-9]*) exit 2 ;; esac
+watcher=$(cat "${FM_FAKE_WATCHER_FILE:?}")
+kill -TERM "$watcher" 2>/dev/null || true
+kill -TERM "$pid" 2>/dev/null || true
+exit 0
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh" "$fakebin/taskkill.exe"
+  out=$(PATH="$fakebin:$PATH" PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" \
+    FM_FAKE_WATCHER_FILE="$watcher_file" FM_FAKE_TASKKILL_LOG="$taskkill_log" FM_PI_AFK_HANDOFF_POLL_MS=5 \
+    node --input-type=module 2>&1 <<'EOF'
+import { spawn, spawnSync } from "node:child_process";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+Object.defineProperty(process, "platform", { value: "win32" });
+const handlers = new Map();
+let tool = null;
+const pi = {
+  on(event, handler) { handlers.set(event, handler); },
+  registerCommand() {},
+  registerTool(candidate) { if (candidate.name === "fm_watch_arm_pi") tool = candidate; },
+  sendUserMessage: async () => { throw new Error("Windows AFK handoff injected a Pi prompt"); },
+  events: { on() {} },
+};
+const state = `${process.env.FM_HOME}/state`;
+const identity = (pid) => spawnSync("ps", ["-p", String(pid), "-o", "ppid=,lstart=,args="], { encoding: "utf8" }).stdout.trim();
+const waitFor = async (predicate, label) => {
+  for (let i = 0; i < 500; i += 1) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`timeout waiting for ${label}`);
+};
+
+writeFileSync(`${state}/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, {});
+await tool.execute("arm", {}, undefined, undefined, {});
+await waitFor(() => existsSync(process.env.FM_ARM_LOG) && existsSync(process.env.FM_FAKE_WATCHER_FILE), "arm tree");
+const row = readFileSync(process.env.FM_ARM_LOG, "utf8").trim();
+const match = row.match(/^start=(\d+) watcher=(\d+)$/);
+if (!match) throw new Error(`invalid arm identities: ${row}`);
+const wrapperPid = Number(match[1]);
+const watcherPid = Number(match[2]);
+const wrapperIdentity = identity(wrapperPid);
+const watcherIdentity = identity(watcherPid);
+if (!wrapperIdentity || !watcherIdentity) throw new Error("arm tree identities were not live before handoff");
+const sibling = spawn("sleep", ["300"], { stdio: "ignore" });
+let siblingIdentity = "";
+await waitFor(() => {
+  siblingIdentity = identity(sibling.pid);
+  return Boolean(siblingIdentity);
+}, "unrelated sibling identity");
+try {
+  writeFileSync(`${state}/.afk`, "away\n");
+  await waitFor(() => existsSync(process.env.FM_FAKE_TASKKILL_LOG), "Windows tree retirement");
+  await waitFor(() => identity(wrapperPid) !== wrapperIdentity && identity(watcherPid) !== watcherIdentity, "retired wrapper and watcher identities");
+  const taskkill = readFileSync(process.env.FM_FAKE_TASKKILL_LOG, "utf8").trim();
+  if (taskkill !== `/PID ${wrapperPid} /T /F`) throw new Error(`wrong rooted taskkill: ${taskkill}`);
+  if (identity(sibling.pid) !== siblingIdentity) throw new Error("Windows tree retirement changed an unrelated sibling identity");
+} finally {
+  sibling.kill("SIGTERM");
+  await handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "quit" }, {});
+}
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi Windows AFK handoff must retire the exact wrapper and watcher identities"
+  [ -z "$out" ] || fail "Pi Windows AFK tree-retirement test printed output: $out"
+  pass "Pi Windows AFK handoff retires one identity-bounded arm tree"
 }
 
 test_pi_afk_handoff_is_home_scoped() {
@@ -2334,6 +2436,7 @@ EOF
 
 test_pi_extension_reports_external_healthy_watcher
 test_pi_afk_handoff_yields_and_resumes_exact_cycle
+test_pi_afk_windows_handoff_retires_exact_tree
 test_pi_afk_handoff_is_home_scoped
 test_pi_tool_returns_agent_tool_result
 test_pi_redundant_tool_call_is_owned_noop

@@ -659,7 +659,7 @@ test_handle_wake_routes_self_and_escalate() {
 }
 
 test_away_queue_handoff_classifies_once_without_consuming() {
-  local dir state drain_out
+  local dir state drain_out latest
   dir=$(make_supercase away-queue-handoff)
   state="$dir/state"
   drain_out="$dir/drain.out"
@@ -667,6 +667,9 @@ test_away_queue_handoff_classifies_once_without_consuming() {
   printf 'done: PR https://example.test/pr/afk-handoff\n' > "$state/handoff-done.status"
   append_wake "$state" heartbeat heartbeat heartbeat
   append_wake "$state" signal handoff-done "signal: $state/handoff-done.status"
+  append_wake "$state" signal handoff-done "signal: $state/handoff-done.status"
+  append_wake "$state" check handoff-review "check: review ready"
+  append_wake "$state" check handoff-review "check: review ready"
 
   FM_STATE_OVERRIDE="$state" bash -c '
     . "$1"
@@ -675,12 +678,12 @@ test_away_queue_handoff_classifies_once_without_consuming() {
   ' _ "$DAEMON" "$ROOT/bin/fm-wake-lib.sh" "$state" \
     || fail "away daemon could not classify the handoff queue snapshot"
 
-  [ "$(wc -l < "$state/.wake-queue" | tr -d ' ')" -eq 2 ] \
+  [ "$(wc -l < "$state/.wake-queue" | tr -d ' ')" -eq 5 ] \
     || fail "away queue classifier consumed or lost durable records"
-  [ "$(cat "$state/.subsuper-seen-wake-seq")" = 2 ] \
+  [ "$(cat "$state/.subsuper-seen-wake-seq")" = 5 ] \
     || fail "away queue classifier did not advance its session cursor"
-  [ "$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')" -eq 1 ] \
-    || fail "heartbeat absorption plus actionable classification did not buffer exactly one escalation"
+  [ "$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')" -eq 2 ] \
+    || fail "handoff duplicates were not compacted before escalation side effects"
 
   FM_STATE_OVERRIDE="$state" bash -c '
     . "$1"
@@ -688,13 +691,64 @@ test_away_queue_handoff_classifies_once_without_consuming() {
     classify_queued_wakes "$3"
   ' _ "$DAEMON" "$ROOT/bin/fm-wake-lib.sh" "$state" \
     || fail "away daemon could not repeat its queue classification idempotently"
-  [ "$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')" -eq 1 ] \
+  [ "$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')" -eq 2 ] \
     || fail "away queue cursor delivered an actionable event twice"
+
+  append_wake "$state" check handoff-review "check: review ready"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    . "$2"
+    classify_queued_wakes "$3"
+  ' _ "$DAEMON" "$ROOT/bin/fm-wake-lib.sh" "$state" \
+    || fail "away daemon could not classify a later handoff duplicate"
+  [ "$(cat "$state/.subsuper-seen-wake-seq")" = 6 ] \
+    || fail "away queue classifier did not advance past a later logical duplicate"
+  [ "$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')" -eq 2 ] \
+    || fail "a handoff duplicate appended after the first snapshot was delivered twice"
+
+  latest=$(awk -F '\t' '$3 == "check" && $4 == "handoff-review" { row = $0 } END { print row }' "$state/.wake-queue")
+  printf '%s\n' "$latest" > "$state/.subsuper-pending-wake"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    . "$2"
+    classify_queued_wakes "$3"
+  ' _ "$DAEMON" "$ROOT/bin/fm-wake-lib.sh" "$state" \
+    || fail "away daemon could not recover a crash after buffering before pending cleanup"
+  [ "$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')" -eq 2 ] \
+    || fail "crash replay duplicated an already-buffered escalation"
+
+  append_wake "$state" check handoff-blocker "check: credentials required"
+  latest=$(awk -F '\t' '$3 == "check" && $4 == "handoff-blocker" { row = $0 } END { print row }' "$state/.wake-queue")
+  printf '%s\n' "$latest" > "$state/.subsuper-pending-wake"
+  printf '7\n' > "$state/.subsuper-seen-wake-seq"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    . "$2"
+    classify_queued_wakes "$3"
+  ' _ "$DAEMON" "$ROOT/bin/fm-wake-lib.sh" "$state" \
+    || fail "away daemon could not recover a crash after cursor commit before escalation"
+  [ "$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')" -eq 3 ] \
+    || fail "cursor-first crash recovery lost or duplicated its pending escalation"
+  [ ! -e "$state/.subsuper-pending-wake" ] \
+    || fail "crash recovery left its durable pending wake behind"
+
+  awk -F '\t' '$3 != "handoff-blocker" { print }' "$state/.subsuper-seen-wake-checks" \
+    > "$state/.subsuper-seen-wake-checks.tmp"
+  mv "$state/.subsuper-seen-wake-checks.tmp" "$state/.subsuper-seen-wake-checks"
+  printf '%s\n' "$latest" > "$state/.subsuper-pending-wake"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    . "$2"
+    classify_queued_wakes "$3"
+  ' _ "$DAEMON" "$ROOT/bin/fm-wake-lib.sh" "$state" \
+    || fail "away daemon could not recover a crash after escalation before logical commit"
+  [ "$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')" -eq 3 ] \
+    || fail "effect-first crash replay duplicated its buffered escalation"
 
   FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-wake-drain.sh" > "$drain_out" \
     || fail "handoff queue could not be consumed by its sole drain owner"
-  [ "$(grep -c $'\theartbeat\t\|\tsignal\t' "$drain_out")" -eq 2 ] \
-    || fail "handoff queue drain did not preserve both routine and actionable records"
+  [ "$(grep -c $'\theartbeat\t\|\tsignal\t\|\tcheck\t' "$drain_out")" -eq 4 ] \
+    || fail "handoff queue drain did not preserve each logical routine and actionable record"
   [ ! -s "$state/.wake-queue" ] || fail "handoff drain left consumed records in the queue"
   pass "away handoff classifies routine/actionable queue rows once without consuming or duplicating them"
 }

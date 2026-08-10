@@ -9,7 +9,7 @@
 // quit leaves the final generation stopped so late callbacks cannot rearm. Stale
 // callbacks from a prior generation are no-ops against the active replacement.
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -89,6 +89,7 @@ const fmRoot = process.env.FM_ROOT_OVERRIDE || root;
 const state = process.env.FM_STATE_OVERRIDE || `${fmHome}/state`;
 const config = process.env.FM_CONFIG_OVERRIDE || `${fmHome}/config`;
 const armScript = `${fmRoot}/bin/fm-watch-arm.sh`;
+const armTreeRetireScript = `${fmRoot}/bin/fm-pi-arm-tree-retire.sh`;
 const marker = `${state}/.pi-watch-extension-loaded`;
 const extensionVersion = `sha256:${createHash("sha256").update(readFileSync(extensionFile)).digest("hex")}`;
 const retryBaseMs = positiveInteger("FM_WATCH_REARM_RETRY_BASE_MS", 250);
@@ -112,6 +113,7 @@ let activeGeneration: SessionGeneration | null = null;
 const armReadiness = new WeakMap<ChildProcess, Promise<boolean>>();
 const armClose = new WeakMap<ChildProcess, Promise<void>>();
 const armRecovery = new WeakMap<ChildProcess, { generation: string; watcherPid: string }>();
+const armTreeTokens = new WeakMap<ChildProcess, string>();
 const awayYieldedArms = new WeakSet<ChildProcess>();
 
 function positiveInteger(name: string, fallback: number): number {
@@ -158,6 +160,16 @@ function awayModeActive(): boolean {
 
 function terminateArmTree(armChild: ChildProcess): boolean {
   const pid = armChild.pid;
+  if (process.platform === "win32" && pid) {
+    if (armChild.exitCode !== null || armChild.signalCode !== null) return true;
+    const token = armTreeTokens.get(armChild);
+    if (!token) return false;
+    const result = spawnSync("bash", [armTreeRetireScript, String(pid), token], {
+      stdio: "ignore",
+      windowsHide: true,
+    });
+    return result.status === 0;
+  }
   if (process.platform !== "win32" && pid) {
     try {
       // The arm is spawned as a dedicated process-group leader below. Signal
@@ -283,12 +295,11 @@ export default function (pi: ExtensionAPI) {
     owner.retryTimer = null;
     const armChild = owner.child;
     if (!armChild || awayYieldedArms.has(armChild)) return;
-    awayYieldedArms.add(armChild);
     owner.awayResumePredecessor = String(armChild.pid ?? owner.awayResumePredecessor);
     // This exact ChildProcess is the extension's home-scoped arm. The arm owns
     // and retires its watcher child on TERM, so no process scan or broad kill is
     // needed and another Firstmate home cannot be affected.
-    terminateArmTree(armChild);
+    if (terminateArmTree(armChild)) awayYieldedArms.add(armChild);
   }
 
   function resumeAfterAway(owner: SessionGeneration): void {
@@ -493,6 +504,7 @@ export default function (pi: ExtensionAPI) {
       };
     }
     const id = ++owner.seq;
+    const armTreeToken = randomBytes(24).toString("hex");
     const env = {
       ...process.env,
       FM_HOME: fmHome,
@@ -500,6 +512,7 @@ export default function (pi: ExtensionAPI) {
       FM_CONFIG_OVERRIDE: config,
       FM_WATCH_ARM_SCRIPT: armScript,
       FM_WATCH_PREDECESSOR_ARM_PID: predecessorArmPid,
+      FM_PI_ARM_TREE_TOKEN: armTreeToken,
     };
     const armChild = spawn("bash", ["-lc", "config_dir=\"${FM_CONFIG_OVERRIDE:-$FM_HOME/config}\"; [ -f \"$config_dir/x-mode.env\" ] && . \"$config_dir/x-mode.env\"; exec \"$FM_WATCH_ARM_SCRIPT\" --restart"], {
       cwd: fmRoot,
@@ -507,6 +520,7 @@ export default function (pi: ExtensionAPI) {
       detached: process.platform !== "win32",
       stdio: ["ignore", "pipe", "pipe"],
     });
+    armTreeTokens.set(armChild, armTreeToken);
     owner.child = armChild;
     let stdout = "";
     let stderr = "";
