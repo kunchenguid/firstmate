@@ -76,13 +76,19 @@ EOF
 
 # make_fake_ci_gh <dir>: a gh double whose `pr checks` read is forbidden while the
 # pull-request and workflow-runs APIs remain readable with the same ambient token.
-# FM_TEST_WORKFLOW_PAGES and FM_TEST_STALE_PAGES are outer arrays because real
-# `gh api --paginate --slurp` presents that shape to its --jq expression.
+# FM_TEST_WORKFLOW_PAGES and FM_TEST_STALE_PAGES are outer arrays holding the
+# response pages in order; the double streams them one page at a time, because
+# real `gh api --paginate` applies a --jq expression to each page on its own.
+# It reproduces GitHub CLI 2.92.0's refusal of `--slurp` alongside `--jq`, and
+# sorts result keys the way gh's own encoder does.
 make_fake_ci_gh() {
   local dir=$1
   mkdir -p "$dir"
   cat > "$dir/gh" << 'EOF'
 #!/usr/bin/env bash
+# pipefail keeps an unreadable page fixture a failed api call, the way a real
+# failed workflow-runs read is, instead of a silent empty page sequence.
+set -o pipefail
 printf 'argv:%s\n' "$*" >> "$FAKE_GH_LOG"
 printf 'token:%s\n' "${GITHUB_TOKEN:-<none>}" >> "$FAKE_GH_LOG"
 
@@ -113,13 +119,21 @@ fi
 if [ "${1:-}" = api ]; then
   endpoint=
   query=
+  slurp=0
+  jq_given=0
   while [ "$#" -gt 0 ]; do
     case "$1" in
       repos/*) endpoint=$1; shift ;;
-      --jq) query=$2; shift 2 ;;
+      --jq) query=$2; jq_given=1; shift 2 ;;
+      --template) jq_given=1; shift 2 ;;
+      --slurp) slurp=1; shift ;;
       *) shift ;;
     esac
   done
+  if [ "$slurp" = 1 ] && [ "$jq_given" = 1 ]; then
+    echo 'the `--slurp` option is not supported with `--jq` or `--template`' >&2
+    exit 1
+  fi
   case "$endpoint" in
     "repos/o/r/pulls/7")
       pull_calls=$(grep -c 'argv:api -X GET repos/o/r/pulls/7' "$FAKE_GH_LOG")
@@ -131,12 +145,12 @@ if [ "${1:-}" = api ]; then
       exit 0
       ;;
     "repos/o/r/actions/runs?head_sha=$FM_TEST_PR_HEAD&per_page=100")
-      "$FM_TEST_JQ" -c "$query" "$FM_TEST_WORKFLOW_PAGES"
-      exit 0
+      "$FM_TEST_JQ" -c '.[]' "$FM_TEST_WORKFLOW_PAGES" | "$FM_TEST_JQ" -S -c "$query"
+      exit $?
       ;;
     repos/o/r/actions/runs*)
-      "$FM_TEST_JQ" -c "$query" "$FM_TEST_STALE_PAGES"
-      exit 0
+      "$FM_TEST_JQ" -c '.[]' "$FM_TEST_STALE_PAGES" | "$FM_TEST_JQ" -S -c "$query"
+      exit $?
       ;;
   esac
 fi
@@ -145,6 +159,21 @@ echo "unexpected fake gh invocation: $*" >&2
 exit 2
 EOF
   chmod +x "$dir/gh"
+}
+
+# assert_run_field <jq> <output> <run-name> <field> <expected> <message>: read the
+# emitted check array as JSON and assert one named run's field, so the assertions
+# depend on the documented check shape rather than on key order or spacing.
+assert_run_field() {
+  local jq_bin=$1 out=$2 name=$3 field=$4 expected=$5 message=$6 json actual
+  json=$(printf '%s\n' "$out" | grep -E '^\[' | tail -1)
+  [ -n "$json" ] || fail "$message (no JSON check array in the output)"
+  # shellcheck disable=SC2016 # A literal jq program; its $ names belong to jq.
+  actual=$(printf '%s' "$json" | "$jq_bin" -r --arg n "$name" --arg f "$field" \
+    'map(select(.name == $n)) | if length == 0 then "<absent>" else (.[0][$f] // "<null>") end') ||
+    fail "$message (the emitted check output is not valid JSON)"
+  [ "$actual" = "$expected" ] ||
+    fail "$message (expected $name.$field=$expected, got $actual)"
 }
 
 write_ci_pages() {
@@ -232,11 +261,9 @@ test_ci_403_falls_back_to_exact_head_green_without_privileged_token() {
     gh pr checks 7 --repo o/r --json name,state,bucket,completedAt 2>&1) || status=$?
 
   expect_code 0 "$status" "exact-head workflow fallback green verdict"
-  assert_contains "$out" '"name":"exact-head"' \
-    "fallback did not report the workflow run belonging to the exact PR head"
-  assert_contains "$out" '"bucket":"pass"' \
+  assert_run_field "$jq_bin" "$out" exact-head bucket pass \
     "successful exact-head workflow run did not become a green check"
-  assert_grep "argv:api -X GET repos/o/r/actions/runs?head_sha=$head&per_page=100 --paginate --slurp" \
+  assert_grep "argv:api -X GET repos/o/r/actions/runs?head_sha=$head&per_page=100 --paginate --jq" \
     "$case_dir/gh.calls" \
     "fallback did not filter workflow runs by the exact PR head SHA"
   assert_no_grep 'token:pr-capable-token' "$case_dir/gh.calls" \
@@ -267,11 +294,9 @@ test_ci_deeper_denial_path_falls_back_to_exact_head_green() {
     gh pr checks 7 --repo o/r --json name,state,bucket,completedAt 2>&1) || status=$?
 
   expect_code 0 "$status" "deeper denial path exact-head workflow fallback"
-  assert_contains "$out" '"name":"exact-head"' \
-    "a deeper denial path did not reach the workflow run belonging to the exact PR head"
-  assert_contains "$out" '"bucket":"pass"' \
+  assert_run_field "$jq_bin" "$out" exact-head bucket pass \
     "a deeper denial path did not reach the green exact-head workflow verdict"
-  assert_grep "argv:api -X GET repos/o/r/actions/runs?head_sha=$head&per_page=100 --paginate --slurp" \
+  assert_grep "argv:api -X GET repos/o/r/actions/runs?head_sha=$head&per_page=100 --paginate --jq" \
     "$case_dir/gh.calls" \
     "a deeper denial path did not filter workflow runs by the exact PR head SHA"
   pass "a denial naming statusCheckRollup deeper in its path still reaches the exact-head verdict"
@@ -297,11 +322,12 @@ test_ci_403_falls_back_to_exact_head_red() {
     gh pr checks 7 --repo o/r --json name,state,bucket,completedAt,link 2>&1) || status=$?
 
   expect_code 0 "$status" "exact-head workflow fallback red verdict transport"
-  assert_contains "$out" '"state":"failure"' \
+  assert_run_field "$jq_bin" "$out" failing-workflow state failure \
     "failed exact-head workflow run lost its provider conclusion"
-  assert_contains "$out" '"bucket":"fail"' \
+  assert_run_field "$jq_bin" "$out" failing-workflow bucket fail \
     "failed exact-head workflow run did not become a red check"
-  assert_contains "$out" '"link":"https://github.com/o/r/actions/runs/123"' \
+  assert_run_field "$jq_bin" "$out" failing-workflow link \
+    "https://github.com/o/r/actions/runs/123" \
     "failed workflow result did not retain its Actions run link"
   pass "a check-runs 403 reaches a red exact-head workflow verdict"
 }
@@ -326,10 +352,8 @@ test_ci_zero_exact_head_runs_stays_pending() {
     gh pr checks 7 --repo o/r --json name,state,bucket,completedAt 2>&1) || status=$?
 
   expect_code 0 "$status" "empty exact-head workflow fallback transport"
-  assert_contains "$out" '"name":"GitHub Actions workflows"' \
-    "empty exact-head workflow evidence did not emit a placeholder check"
-  assert_contains "$out" '"bucket":"pending"' \
-    "empty exact-head workflow evidence did not remain non-green"
+  assert_run_field "$jq_bin" "$out" "GitHub Actions workflows" bucket pending \
+    "empty exact-head workflow evidence did not emit a pending placeholder check"
   assert_not_contains "$out" '"bucket":"pass"' \
     "empty exact-head workflow evidence incorrectly certified green"
   pass "zero exact-head workflow runs remain explicitly pending"
@@ -355,13 +379,88 @@ test_ci_maps_cancel_skipping_and_pending_across_pages() {
     gh pr checks 7 --repo o/r --json name,state,bucket,completedAt,link 2>&1) || status=$?
 
   expect_code 0 "$status" "multi-page exact-head workflow fallback transport"
-  assert_contains "$out" '"name":"cancelled-workflow","state":"cancelled","bucket":"cancel"' \
+  assert_run_field "$jq_bin" "$out" cancelled-workflow bucket cancel \
     "completed cancellation did not map to the cancellation bucket"
-  assert_contains "$out" '"name":"skipped-workflow","state":"skipped","bucket":"skipping"' \
+  assert_run_field "$jq_bin" "$out" cancelled-workflow state cancelled \
+    "completed cancellation lost its provider conclusion"
+  assert_run_field "$jq_bin" "$out" skipped-workflow bucket skipping \
     "completed skip did not map to the skipping bucket"
-  assert_contains "$out" '"name":"queued-workflow","state":"queued","bucket":"pending"' \
+  assert_run_field "$jq_bin" "$out" queued-workflow bucket pending \
     "queued workflow did not remain pending"
+  assert_run_field "$jq_bin" "$out" queued-workflow state queued \
+    "queued workflow lost its provider status"
   pass "paginated exact-head runs map cancellation, skipping, and pending buckets"
+}
+
+test_ci_pagination_avoids_the_rejected_slurp_and_jq_combination() {
+  local case_dir real_dir head out status jq_bin probe_out probe_status
+  case_dir="$TMP_ROOT/ci-slurp-rejecting-gh"
+  real_dir="$case_dir/real"
+  head=3434343434343434343434343434343434343434
+  jq_bin=$(command -v jq) || fail "jq is required to exercise gh's built-in --jq contract"
+  make_fake_ci_gh "$real_dir"
+  write_multi_bucket_ci_pages "$case_dir/exact.json"
+  write_ci_pages "$case_dir/stale.json" stale-head completed '"success"'
+
+  # Prove the double actually refuses the combination first, so a fallback that
+  # regressed to `--paginate --slurp --jq` could never pass this case silently.
+  probe_status=0
+  probe_out=$(FAKE_GH_LOG="$case_dir/probe.calls" FM_TEST_PR_HEAD="$head" \
+    FM_TEST_WORKFLOW_PAGES="$case_dir/exact.json" FM_TEST_STALE_PAGES="$case_dir/stale.json" \
+    FM_TEST_JQ="$jq_bin" \
+    "$real_dir/gh" api -X GET "repos/o/r/actions/runs?head_sha=$head&per_page=100" \
+    --paginate --slurp --jq '.[]' 2>&1) || probe_status=$?
+  expect_code 1 "$probe_status" "the gh double accepted --slurp together with --jq"
+  # shellcheck disable=SC2016 # GitHub CLI's own message quotes its flags in backticks.
+  assert_contains "$probe_out" 'the `--slurp` option is not supported with `--jq` or `--template`' \
+    "the gh double did not reproduce GitHub CLI 2.92.0's flag refusal"
+
+  status=0
+  out=$(FAKE_GH_LOG="$case_dir/gh.calls" FM_TEST_PR_HEAD="$head" \
+    FM_TEST_WORKFLOW_PAGES="$case_dir/exact.json" FM_TEST_STALE_PAGES="$case_dir/stale.json" \
+    FM_TEST_JQ="$jq_bin" GITHUB_TOKEN=narrow-ci-token \
+    "$CI_FALLBACK" "$real_dir/gh" pr checks 7 --repo o/r \
+    --json name,state,bucket,completedAt,link 2>&1) || status=$?
+
+  expect_code 0 "$status" "exact-head workflow fallback against a gh that rejects --slurp with --jq"
+  assert_run_field "$jq_bin" "$out" cancelled-workflow bucket cancel \
+    "the first page's run was lost against a gh that rejects --slurp with --jq"
+  assert_run_field "$jq_bin" "$out" queued-workflow bucket pending \
+    "a later page's run was lost against a gh that rejects --slurp with --jq"
+  assert_no_grep 'slurp' "$case_dir/gh.calls" \
+    "the fallback still asked gh for --slurp alongside --jq"
+  assert_grep "argv:api -X GET repos/o/r/actions/runs?head_sha=$head&per_page=100 --paginate --jq" \
+    "$case_dir/gh.calls" \
+    "the fallback stopped paginating the exact-head workflow-runs read"
+  pass "exact-head pagination reaches a verdict on a gh that rejects --slurp with --jq"
+}
+
+test_ci_workflow_runs_failure_preserves_the_gh_error() {
+  local case_dir real_dir head out status jq_bin
+  case_dir="$TMP_ROOT/ci-runs-error"
+  real_dir="$case_dir/real"
+  head=5656565656565656565656565656565656565656
+  jq_bin=$(command -v jq) || fail "jq is required to exercise gh's built-in --jq contract"
+  make_fake_ci_gh "$real_dir"
+  write_ci_pages "$case_dir/stale.json" stale-head completed '"success"'
+
+  # No FM_TEST_WORKFLOW_PAGES fixture exists, so the workflow-runs read fails the
+  # way any broken gh invocation would, and its own stderr must survive.
+  status=0
+  out=$(FAKE_GH_LOG="$case_dir/gh.calls" FM_TEST_PR_HEAD="$head" \
+    FM_TEST_WORKFLOW_PAGES="$case_dir/missing.json" FM_TEST_STALE_PAGES="$case_dir/stale.json" \
+    FM_TEST_JQ="$jq_bin" GITHUB_TOKEN=narrow-ci-token \
+    "$CI_FALLBACK" "$real_dir/gh" pr checks 7 --repo o/r \
+    --json name,state,bucket,completedAt 2>&1) || status=$?
+
+  expect_code 1 "$status" "workflow-runs read failure"
+  assert_contains "$out" "exact-head workflow-runs lookup failed" \
+    "a failed workflow-runs read did not report the fallback's own refusal"
+  assert_contains "$out" "$case_dir/missing.json" \
+    "a failed workflow-runs read suppressed the underlying gh error"
+  assert_contains "$out" "GraphQL: Resource not accessible by personal access token (node.statusCheckRollup.nodes.0.commit.statusCheckRollup)" \
+    "a failed workflow-runs read did not preserve the original gh pr checks failure"
+  pass "a failed workflow-runs read keeps the real gh error visible"
 }
 
 test_ci_pr_head_drift_refuses_stale_verdict() {
@@ -903,6 +1002,8 @@ test_ci_deeper_denial_path_falls_back_to_exact_head_green
 test_ci_403_falls_back_to_exact_head_red
 test_ci_zero_exact_head_runs_stays_pending
 test_ci_maps_cancel_skipping_and_pending_across_pages
+test_ci_pagination_avoids_the_rejected_slurp_and_jq_combination
+test_ci_workflow_runs_failure_preserves_the_gh_error
 test_ci_pr_head_drift_refuses_stale_verdict
 test_ci_unrelated_failures_preserve_original_result
 test_ci_unsupported_shapes_exec_real_gh_directly

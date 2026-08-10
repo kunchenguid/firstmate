@@ -27,6 +27,9 @@
 # HEAD can certify green. All exact-head workflow runs are paginated, then mapped
 # into the JSON check shape no-mistakes already consumes. An empty run list emits
 # one pending placeholder, so absence of workflow evidence can never certify green.
+# Pagination deliberately avoids `--slurp`, which GitHub CLI rejects whenever
+# `--jq` or `--template` is present; every page is filtered on its own and this
+# script concatenates the resulting per-run objects into the single JSON array.
 # The PR head is read again after pagination and any drift refuses the fallback
 # result, so a verdict can never describe a head that is no longer current.
 # This evidence covers GitHub Actions only; it cannot reconstruct third-party
@@ -86,9 +89,10 @@ shift
 ORIGINAL_OUT=$(mktemp "${TMPDIR:-/tmp}/fm-gh-ci-original-out.XXXXXX")
 ORIGINAL_ERR=$(mktemp "${TMPDIR:-/tmp}/fm-gh-ci-original-err.XXXXXX")
 FALLBACK_OUT=$(mktemp "${TMPDIR:-/tmp}/fm-gh-ci-fallback-out.XXXXXX")
+FALLBACK_ERR=$(mktemp "${TMPDIR:-/tmp}/fm-gh-ci-fallback-err.XXXXXX")
 # shellcheck disable=SC2329 # Registered by the EXIT trap below.
 cleanup() {
-  rm -f -- "$ORIGINAL_OUT" "$ORIGINAL_ERR" "$FALLBACK_OUT"
+  rm -f -- "$ORIGINAL_OUT" "$ORIGINAL_ERR" "$FALLBACK_OUT" "$FALLBACK_ERR"
 }
 trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
@@ -135,13 +139,13 @@ if ! PR_HEAD=$(read_exact_pr_head); then
   replay_original
 fi
 
-# gh's built-in jq evaluator applies this after --paginate --slurp has wrapped
-# every Actions response page in one outer array. Producing one object per
-# workflow run lets the existing no-mistakes classifier reach green, red,
-# cancelled, skipped, and pending verdicts without any upstream patch.
+# gh's built-in jq evaluator applies this to each Actions response page on its
+# own, because `--paginate` may not be combined with `--slurp` while `--jq` is
+# present. Producing one object per workflow run lets the existing no-mistakes
+# classifier reach green, red, cancelled, skipped, and pending verdicts without
+# any upstream patch, and keeps every page's runs in the aggregated result.
 # shellcheck disable=SC2016 # This is a literal jq program; its $ names belong to jq.
-RUNS_JQ='[
-  .[].workflow_runs[]
+RUNS_JQ='.workflow_runs[]
   | .status as $status
   | .conclusion as $conclusion
   | {
@@ -158,30 +162,49 @@ RUNS_JQ='[
       ),
       completedAt: (if $status == "completed" then (.updated_at // "") else "" end),
       link: (.html_url // "")
+    }'
+
+# Emitted in place of an aggregated result when the exact head has no workflow
+# run at all, so absent evidence stays visibly pending instead of certifying green.
+PENDING_PLACEHOLDER='{"name":"GitHub Actions workflows","state":"pending","bucket":"pending","completedAt":"","link":""}'
+
+# gh prints one compact JSON value per line for every result its --jq expression
+# yields, across all pages, so joining the non-empty lines rebuilds the single
+# JSON array `gh pr checks --json` returns.
+emit_checks_array() {
+  awk -v placeholder="$PENDING_PLACEHOLDER" '
+    BEGIN { printf "[" }
+    {
+      sub(/\r$/, "")
+      if ($0 == "") next
+      if (runs++) printf ","
+      printf "%s", $0
     }
-] | if length == 0 then [{
-  name: "GitHub Actions workflows",
-  state: "pending",
-  bucket: "pending",
-  completedAt: "",
-  link: ""
-}] else . end'
+    END {
+      if (runs == 0) printf "%s", placeholder
+      printf "]\n"
+    }
+  ' "$FALLBACK_OUT"
+}
 
 RUNS_ENDPOINT="repos/$REPO/actions/runs?head_sha=$PR_HEAD&per_page=100"
-if "$REAL_GH" api -X GET "$RUNS_ENDPOINT" --paginate --slurp --jq "$RUNS_JQ" \
-  > "$FALLBACK_OUT" 2>/dev/null; then
-  PR_HEAD_AFTER=
-  if ! PR_HEAD_AFTER=$(read_exact_pr_head); then
-    echo "fm-gh-ci-fallback: exact PR head recheck failed; preserving the original gh pr checks failure" >&2
-    replay_original
-  fi
-  if [ "$PR_HEAD_AFTER" != "$PR_HEAD" ]; then
-    echo "fm-gh-ci-fallback: PR head changed during workflow-runs lookup; preserving the original gh pr checks failure" >&2
-    replay_original
-  fi
-  cat "$FALLBACK_OUT"
-  exit 0
+RUNS_STATUS=0
+"$REAL_GH" api -X GET "$RUNS_ENDPOINT" --paginate --jq "$RUNS_JQ" \
+  > "$FALLBACK_OUT" 2> "$FALLBACK_ERR" || RUNS_STATUS=$?
+if [ "$RUNS_STATUS" -ne 0 ]; then
+  echo "fm-gh-ci-fallback: exact-head workflow-runs lookup failed; preserving the original gh pr checks failure" >&2
+  cat "$FALLBACK_ERR" >&2
+  replay_original
 fi
 
-echo "fm-gh-ci-fallback: exact-head workflow-runs lookup failed; preserving the original gh pr checks failure" >&2
-replay_original
+PR_HEAD_AFTER=
+if ! PR_HEAD_AFTER=$(read_exact_pr_head); then
+  echo "fm-gh-ci-fallback: exact PR head recheck failed; preserving the original gh pr checks failure" >&2
+  replay_original
+fi
+if [ "$PR_HEAD_AFTER" != "$PR_HEAD" ]; then
+  echo "fm-gh-ci-fallback: PR head changed during workflow-runs lookup; preserving the original gh pr checks failure" >&2
+  replay_original
+fi
+emit_checks_array
+exit 0
