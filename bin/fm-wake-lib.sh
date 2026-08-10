@@ -494,14 +494,10 @@ _fm_recovery_marker_arm_check() {
   line=$FM_RECOVERY_MARKER_TOKEN
   case "$line" in
     pending:handling:*)
-      if [ -s "$FM_WAKE_QUEUE" ]; then
-        FM_RECOVERY_MARKER_ACTION='recover'
-      else
-        FM_RECOVERY_MARKER_ACTION='wait'
-        fm_lock_release "$lock"
-        fm_lock_release "$FM_WAKE_QUEUE_LOCK"
-        return 0
-      fi
+      FM_RECOVERY_MARKER_ACTION='wait'
+      fm_lock_release "$lock"
+      fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+      return 0
       ;;
     pending:downtime:*) FM_RECOVERY_MARKER_ACTION='recover' ;;
     acked:*)

@@ -174,6 +174,21 @@ if [ ! -s "$FM_WAKE_QUEUE" ]; then
   exit 0
 fi
 
+fm_recovery_marker_snapshot "$RECOVERY_MARKER" || true
+RECOVERY_MARKER_TOKEN=$FM_RECOVERY_MARKER_TOKEN
+if [ -z "$RECOVERY_MARKER_TOKEN" ]; then
+  if [ -e "$RECOVERY_MARKER" ] || [ -L "$RECOVERY_MARKER" ]; then
+    echo "wake drain: durable wakes have invalid recovery state" >&2
+    exit 1
+  fi
+  fm_recovery_marker_publish "$RECOVERY_MARKER" downtime || {
+    echo "wake drain: legacy durable wakes could not be adopted safely" >&2
+    exit 1
+  }
+  fm_recovery_marker_snapshot "$RECOVERY_MARKER" || exit 1
+  RECOVERY_MARKER_TOKEN=$FM_RECOVERY_MARKER_TOKEN
+fi
+
 RAW_ROWS=$(fm_wake_print_deduped "$FM_WAKE_QUEUE") || exit "$?"
 ACK_THROUGH=$(awk -F '\t' '$2 ~ /^[0-9]+$/ && $2 > max { max=$2 } END { print max + 0 }' "$FM_WAKE_QUEUE") || exit 1
 case "${FM_WAKE_DRAIN_TEST_DELAY_BEFORE_COMMIT:-0}" in

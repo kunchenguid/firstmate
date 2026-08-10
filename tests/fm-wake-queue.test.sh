@@ -450,6 +450,39 @@ SH
   pass "wake append publishes atomic recovery evidence before durable rows"
 }
 
+test_legacy_generationless_wake_is_adopted() {
+  local dir state row sequence generation
+  dir=$(make_case legacy-generationless-wake)
+  state="$dir/state"
+  row=$(printf '1700000000\t7\tcheck\tlegacy-process-event\tcheck: legacy process-event')
+  printf '%s\n' "$row" > "$state/.wake-queue"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/first.out" 2> "$dir/first.err" \
+    || fail "generation-less legacy wake could not be adopted"
+  grep -F "$row" "$dir/first.out" >/dev/null \
+    || fail "adopted legacy wake was not presented"
+  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$dir/first.err")
+  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$dir/first.err")
+  [ "$sequence" = 7 ] && [ -n "$generation" ] \
+    || fail "legacy wake adoption omitted its generation-bound acknowledgement"
+  [ "$(cat "$state/.watcher-down" 2>/dev/null || true)" = "pending:downtime:$generation" ] \
+    || fail "legacy wake was not adopted into durable downtime recovery"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/replay.out" 2> "$dir/replay.err" \
+    || fail "unacknowledged adopted wake could not be re-drained"
+  grep -F "$row" "$dir/replay.out" >/dev/null \
+    || fail "unacknowledged adopted wake was lost"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" \
+    --recovery-generation "$generation" \
+    || fail "adopted legacy wake could not be acknowledged"
+  [ ! -s "$state/.wake-queue" ] || fail "acknowledged legacy wake remained queued"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/after-ack.out" 2> "$dir/after-ack.err" \
+    || fail "post-acknowledgement legacy drain failed"
+  ! grep -F "$row" "$dir/after-ack.out" >/dev/null \
+    || fail "acknowledged legacy wake was consumed more than once"
+  pass "wake drain: generation-less legacy wakes are adopted and acknowledged"
+}
+
 test_stale_recovery_generation_is_rejected() {
   local dir state first_err replay_err sequence generation newer_marker newer_sequence newer_generation rc
   dir=$(make_case stale-recovery-generation)
@@ -605,6 +638,7 @@ test_structural_signal_enrichment_preserves_raw_rows
 test_enrichment_caps_and_status_file_failures
 test_slow_annotation_does_not_block_append_and_deleted_file_fails_open
 test_wake_publish_requires_atomic_recovery_evidence
+test_legacy_generationless_wake_is_adopted
 test_stale_recovery_generation_is_rejected
 test_recovery_ack_failure_is_reported
 test_interruption_before_and_after_raw_commit

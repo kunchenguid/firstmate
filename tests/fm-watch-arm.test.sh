@@ -440,10 +440,23 @@ test_interrupted_handling_is_redrained_on_rearm() {
   grep "$(printf '\tsignal\tinterrupted.status\t')" "$state/.wake-queue" >/dev/null \
     || fail "interrupted handling removed the unacknowledged durable wake"
 
+  start_rearm_arm "$home" "$state" "$fakebin" "$dir/handling-successor-arm.out"
+  is_live_non_zombie "$ARM_PID" \
+    || fail "expected pre-handling successor looped on the pending durable wake"
+  ! grep -F 'check: rearm-resurface' "$dir/handling-successor-arm.out" >/dev/null \
+    || fail "expected pre-handling successor emitted a recursive recovery wake"
+
+  kill -TERM "$ARM_PID" 2>/dev/null || fail "could not interrupt the pre-handling successor"
+  wait "$ARM_PID" 2>/dev/null || true
+  case "$(cat "$state/.watcher-down" 2>/dev/null || true)" in
+    pending:downtime:*) ;;
+    *) fail "interrupted pre-handling successor did not persist downtime recovery" ;;
+  esac
+
   start_rearm_arm "$home" "$state" "$fakebin" "$dir/recovery-arm.out"
-  wait_for_exit "$ARM_PID" 80 || fail "successor did not re-surface the interrupted handling wake"
+  wait_for_exit "$ARM_PID" 80 || fail "successor after interruption did not re-surface the pending wake"
   grep -F 'check: rearm-resurface' "$dir/recovery-arm.out" >/dev/null \
-    || fail "successor did not emit recovery after interrupted handling"
+    || fail "successor after interruption did not emit durable recovery"
   FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/replay-drain.out" \
     2> "$dir/replay-drain.err" || fail "successor could not re-drain the interrupted wake"
   grep "$(printf '\tsignal\tinterrupted.status\t')" "$dir/replay-drain.out" >/dev/null \
