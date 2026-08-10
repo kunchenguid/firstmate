@@ -292,11 +292,17 @@ effort_flag_for_harness() {
       esac
       ;;
     codex)
-      # The installed codex config schema uses model_reasoning_effort, and the
-      # bundled model catalog advertises low|medium|high|xhigh. Omit max rather
-      # than passing an unsupported value.
+      # The installed codex config schema uses model_reasoning_effort. Verified
+      # 2026-08-10 on codex-cli 0.146.0: the model catalog advertises max for
+      # gpt-5.6-luna, gpt-5.6-sol, gpt-5.6-sol-wm, gpt-5.6-terra, and
+      # codex-auto-review, and a real max run was accepted (rollout
+      # 019feb90-c855). Which levels a given model accepts is a routing concern,
+      # not this flag's: max on a model that lacks it is refused with a visible
+      # 400 unsupported_value, which is the right failure rather than the silent
+      # downgrade this case used to produce. ultra stays out until sol and terra
+      # have their own evidence.
       case "$effort" in
-        low|medium|high|xhigh) printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")" ;;
+        low|medium|high|xhigh|max) printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")" ;;
       esac
       ;;
     grok)
