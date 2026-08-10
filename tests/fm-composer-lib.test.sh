@@ -290,6 +290,7 @@ test_matrix_grok_titled_bottom_border() {
   titled=$'  ╭──────────────────────────────────────╮\n  │ ❯                                    │\n  ╰──────────────────── Grok 4.5 (high) ─╯'
   plain_border=$'  ╭──────────────────────────────────────╮\n  │ ❯                                    │\n  ╰──────────────────────────────────────╯'
   assert_screen "grok titled on tmux" empty "$CAPS_TMUX" "$titled" 1
+  assert_screen "grok titled on tmux bottom-border cursor" empty "$CAPS_TMUX" "$titled" 2
   assert_screen "grok titled on herdr" empty "$CAPS_STYLED" "$titled"
   assert_screen "grok titled on cmux/orca" empty "$CAPS_PLAIN" "$titled"
   assert_screen "grok titled on zellij" empty "$CAPS_STYLED_NOID" "$titled"
@@ -477,13 +478,13 @@ test_titled_bottom_requires_matching_width() {
   pass "fm_composer_classify_screen: titled bottoms retain full box geometry"
 }
 
-test_cursor_on_box_bottom_is_unknown() {
+test_cursor_on_proven_box_bottom_classifies_content() {
   local screen out
   screen=$'╭────────────────────────╮\n│ ❯                      │\n╰────────────────────────╯'
   out=$(fm_composer_classify_screen "$CAPS_TMUX" "$screen" 2)
-  [ "$out" = unknown ] \
-    || fail "a cursor on a box bottom border must be unknown, got '$out'"
-  pass "fm_composer_classify_screen: a box bottom border is never an input row"
+  [ "$out" = empty ] \
+    || fail "a cursor on a proven box bottom must classify its content, got '$out'"
+  pass "fm_composer_classify_screen: a proven box tolerates a bottom-border cursor"
 }
 
 test_selected_content_is_composer_scoped_and_wrap_normalized() {
@@ -553,5 +554,5 @@ test_cursorless_container_rejects_contiguous_lower_activity
 test_bottom_most_candidate_wins
 test_incomplete_lower_box_invalidates_stale_candidate
 test_titled_bottom_requires_matching_width
-test_cursor_on_box_bottom_is_unknown
+test_cursor_on_proven_box_bottom_classifies_content
 test_selected_content_is_composer_scoped_and_wrap_normalized

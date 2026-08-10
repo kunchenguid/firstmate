@@ -611,7 +611,7 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
           fi
         fi
         if [ -n "$cy" ]; then
-          if [ "$top" -lt "$cy" ] && [ "$cy" -lt "$row" ]; then
+          if [ "$top" -lt "$cy" ] && [ "$cy" -le "$row" ]; then
             FM_COMPOSER_SCAN_BOX_TOP=$top
             FM_COMPOSER_SCAN_BOX_BOTTOM=$row
             FM_COMPOSER_SCAN_BOX_AMBIG=$geometry_ambiguous

@@ -334,17 +334,17 @@ EOF
   pass "fm_tmux_composer_state: a message wrapped across three rows is pending"
 }
 
-test_bottom_border_cursor_is_unknown() {
+test_proven_box_bottom_border_cursor_classifies_content() {
   local dir fb capture out
   dir="$TMP_ROOT/bottom-border-ghost"; mkdir -p "$dir"
   fb=$(make_fake_tmux "$dir")
   capture="$dir/styled.txt"
-  printf '╭────────────────────────╮\n│ ❯ \033[38;2;50;47;70mType a message...\033[0m    │\n╰────────────────────────╯\n' > "$capture"
+  printf '╭────────────────────────╮\n│ ❯ \033[38;2;50;47;70mType a message...\033[0m    │\n╰──────── Grok 4.5 ──────╯\n' > "$capture"
   out=$(PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=2 \
     fm_tmux_composer_state "fakepane")
-  [ "$out" = unknown ] \
-    || fail "a cursor on a structural bottom border must be unknown, got '$out'"
-  pass "fm_tmux_composer_state: a box bottom border is never an input row"
+  [ "$out" = empty ] \
+    || fail "a cursor on a proven titled box bottom must classify its content, got '$out'"
+  pass "fm_tmux_composer_state: a proven titled box tolerates a bottom-border cursor"
 }
 
 test_pi_identity_requires_readable_busy_state() (
@@ -692,7 +692,7 @@ test_dark_truecolor_bare_shell_prompt_is_unknown
 test_real_text_with_trailing_ghost_is_pending
 test_two_row_composer_reads_text_above_empty_cursor_row
 test_wrapped_composer_reads_all_content_rows
-test_bottom_border_cursor_is_unknown
+test_proven_box_bottom_border_cursor_classifies_content
 test_pi_identity_requires_readable_busy_state
 test_bordered_busy_signatures_are_pending
 test_non_bordered_busy_footer_is_unknown_strict
