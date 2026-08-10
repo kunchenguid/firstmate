@@ -179,6 +179,10 @@ fm_worker_primary_attestation_matches() {
   [ "$content" = "$(printf 'root=%s\ntoken=%s' "$expected_root" "$token")" ]
 }
 
+fm_worker_primary_attestation_refresh() {
+  _FM_WORKER_INITIAL_PRIMARY_ATTESTATION=${FM_PRIMARY_ATTESTATION:-}
+}
+
 fm_worker_secondmate_home_proven() {
   local task owner home owner_real home_real marker
   task=${_FM_WORKER_INITIAL_AGENT_TASK:-}
@@ -239,9 +243,9 @@ fm_worker_primary_ancestry_clear() {
   [ "$pid" -le 1 ]
 }
 
-fm_worker_primary_origin_proven() {
+fm_worker_primary_bootstrap_proven() {
   local root home state root_real home_real state_real git_dir git_common
-  local var value expected
+  local var value expected parent parent_real
   case "${_FM_WORKER_INITIAL_AGENT_ROLE:-}" in
     "") ;;
     *) return 1 ;;
@@ -253,18 +257,25 @@ fm_worker_primary_origin_proven() {
   state=${_FM_WORKER_INITIAL_FM_STATE_OVERRIDE:-$home/state}
   root_real=$(fm_worker_canonical_path "$root") || return 1
   home_real=$(fm_worker_canonical_path "$home") || return 1
-  state_real=$(fm_worker_canonical_path "$state") || return 1
+  case "$state" in
+    /*) ;;
+    *) return 1 ;;
+  esac
+  if [ -d "$state" ]; then
+    state_real=$(fm_worker_canonical_path "$state") || return 1
+  else
+    [ ! -e "$state" ] && [ ! -L "$state" ] || return 1
+    state_real="$home_real/state"
+  fi
   [ "$state_real" = "$home_real/state" ] || return 1
   [ "$(pwd -P 2>/dev/null || true)" = "$root_real" ] || return 1
   [ ! -e "$root_real/.fm-secondmate-home" ] || return 1
   [ ! -L "$root_real/.fm-secondmate-home" ] || return 1
-  fm_worker_primary_attestation_matches "$root_real" || return 1
   git_dir=$(git -C "$root_real" rev-parse --git-dir 2>/dev/null) || return 1
   git_common=$(git -C "$root_real" rev-parse --git-common-dir 2>/dev/null) || return 1
   [ "$git_dir" = "$git_common" ] || return 1
   [ -f "$root_real/AGENTS.md" ] || return 1
   [ -d "$root_real/bin" ] || return 1
-  [ -d "$home_real/state" ] || return 1
   [ -d "$home_real/data" ] || return 1
   [ -d "$home_real/config" ] || return 1
   fm_worker_primary_ancestry_clear "$root_real" || return 1
@@ -291,12 +302,31 @@ fm_worker_primary_origin_proven() {
       STATE) value=${_FM_WORKER_INITIAL_STATE:-} ;;
     esac
     if [ -n "$value" ]; then
+      case "$var" in
+        FM_STATE_OVERRIDE|STATE)
+          if [ ! -e "$value" ] && [ ! -L "$value" ]; then
+            parent=${value%/*}
+            [ "${value##*/}" = state ] || return 1
+            parent_real=$(fm_worker_canonical_path "$parent") || return 1
+            [ "$parent_real" = "$home_real" ] || return 1
+            continue
+          fi
+          ;;
+      esac
       fm_worker_paths_same "$value" "$expected" || return 1
     elif [ "$home_real" = "$root_real" ]; then
       continue
     fi
   done
   return 0
+}
+
+fm_worker_primary_origin_proven() {
+  local root root_real
+  fm_worker_primary_bootstrap_proven || return 1
+  root=${_FM_WORKER_INITIAL_FM_ROOT_OVERRIDE:-$(cd "$_FM_WORKER_ISOLATION_LIB_DIR/.." && pwd)}
+  root_real=$(fm_worker_canonical_path "$root") || return 1
+  fm_worker_primary_attestation_matches "$root_real"
 }
 
 fm_worker_identity_is_complete() {

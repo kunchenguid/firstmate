@@ -13,6 +13,8 @@ set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_WATCH_SESSION_DEFAULT_ROOT=${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}
+FM_ROOT="${FM_ROOT_OVERRIDE:-$FM_WATCH_SESSION_DEFAULT_ROOT}"
+FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 FM_WATCH_SESSION_ATTEST_STATE=${FM_STATE_OVERRIDE:-${FM_HOME:-$FM_WATCH_SESSION_DEFAULT_ROOT}/state}
 if [ -z "${FM_PRIMARY_ATTESTATION:-}" ] \
   && [ -f "$FM_WATCH_SESSION_ATTEST_STATE/.primary-attestation" ] \
@@ -23,18 +25,7 @@ if [ -z "${FM_PRIMARY_ATTESTATION:-}" ] \
 fi
 # shellcheck source=bin/fm-worker-isolation-lib.sh
 . "$SCRIPT_DIR/fm-worker-isolation-lib.sh"
-fm_worker_refuse_primary_operation "watch session" || exit 1
-# shellcheck source=bin/fm-wake-lib.sh
-. "$SCRIPT_DIR/fm-wake-lib.sh"
-# shellcheck source=bin/fm-detach-lib.sh
-. "$SCRIPT_DIR/fm-detach-lib.sh"
-
-refuse_grok_primary() {
-  [ "${GROK_AGENT:-}" = "1" ] || return 0
-  [ "${FM_ALLOW_WATCH_SESSION_WITH_GROK:-}" = "1" ] && return 0
-  echo "watch-session: refusing Grok primary; Grok's tracked background arm must own the watcher wait (set FM_ALLOW_WATCH_SESSION_WITH_GROK=1 only for emergency fallback)" >&2
-  return 1
-}
+STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 write_primary_attestation() {
   local file="$STATE/.primary-attestation" token token_file tmp root_real content
@@ -60,6 +51,33 @@ write_primary_attestation() {
   fi
   FM_PRIMARY_ATTESTATION=$token
   export FM_PRIMARY_ATTESTATION
+  fm_worker_primary_attestation_refresh
+}
+
+case "${1:-start}" in
+  start|--start|restart|--restart)
+    if ! fm_worker_primary_bootstrap_proven; then
+      fm_worker_refuse_primary_operation "watch session" || exit 1
+      echo "watch-session: FAILED - primary bootstrap provenance is unproven" >&2
+      exit 1
+    fi
+    write_primary_attestation || {
+      echo "watch-session: FAILED - could not establish the primary launch attestation" >&2
+      exit 1
+    }
+    ;;
+esac
+fm_worker_refuse_primary_operation "watch session" || exit 1
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-detach-lib.sh
+. "$SCRIPT_DIR/fm-detach-lib.sh"
+
+refuse_grok_primary() {
+  [ "${GROK_AGENT:-}" = "1" ] || return 0
+  [ "${FM_ALLOW_WATCH_SESSION_WITH_GROK:-}" = "1" ] && return 0
+  echo "watch-session: refusing Grok primary; Grok's tracked background arm must own the watcher wait (set FM_ALLOW_WATCH_SESSION_WITH_GROK=1 only for emergency fallback)" >&2
+  return 1
 }
 
 SESSION_NAME=${FM_WATCH_SESSION_TMUX_SESSION:-firstmate-watch}

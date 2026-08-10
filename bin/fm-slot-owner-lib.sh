@@ -355,7 +355,8 @@ fm_slot_endpoint_occupant_tasks() {
   fm_agent_pid_start_matches "$pid" "$start" || return 2
   fm_agent_path_within "$wt_real" "$cwd" || return 1
   if [ "$task" = "$self" ] && [ "$role" = "$self_role" ] \
-     && fm_slot_same_path "$home" "$self_home"; then
+     && fm_slot_same_path "$home" "$self_home" \
+     && fm_agent_worker_identity_matches "$pid" "$self" "$self_home"; then
     return 1
   fi
   printf '%s\n' "${task:-unidentified-process-$pid}"

@@ -7,14 +7,22 @@ set -u
 
 WATCH_SESSION="$ROOT/bin/fm-watch-session.sh"
 TMP_ROOT=$(fm_test_tmproot fm-watch-session-tests)
-FM_ROOT_OVERRIDE="$ROOT"
+PRIMARY_ROOT="$TMP_ROOT/primary-root"
+mkdir -p "$PRIMARY_ROOT"
+git -C "$PRIMARY_ROOT" init -q
+printf '# agents\n' > "$PRIMARY_ROOT/AGENTS.md"
+ln -s "$ROOT/bin" "$PRIMARY_ROOT/bin"
+git -C "$PRIMARY_ROOT" add AGENTS.md bin
+git -C "$PRIMARY_ROOT" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial
+FM_ROOT_OVERRIDE="$PRIMARY_ROOT"
 export FM_ROOT_OVERRIDE
+cd "$PRIMARY_ROOT" || exit 1
 
 prepare_watch_home() {
   local home=$1 token
   mkdir -p "$home/state" "$home/data" "$home/config"
   token="watch-$(basename "$home")"
-  printf 'root=%s\ntoken=%s\n' "$ROOT" "$token" > "$home/state/.primary-attestation"
+  printf 'root=%s\ntoken=%s\n' "$FM_ROOT_OVERRIDE" "$token" > "$home/state/.primary-attestation"
   chmod 600 "$home/state/.primary-attestation"
 }
 
@@ -102,6 +110,22 @@ esac
 SH
   chmod +x "$fakebin/tmux"
   printf '%s\n' "$fakebin"
+}
+
+test_watch_session_bootstraps_missing_attestation() {
+  local dir fakebin attestation
+  dir=$(make_case session-primary-attestation-bootstrap)
+  fakebin=$(install_fake_tmux "$dir")
+  prepare_watch_home "$dir/home"
+  attestation="$dir/home/state/.primary-attestation"
+  rm -rf "$dir/home/state"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_LOG="$dir/tmux.log" FM_FAKE_TMUX_ROOT="$dir/tmux-state" \
+    FM_HOME="$dir/home" "$WATCH_SESSION" start >/dev/null \
+    || fail "watch-session did not bootstrap a missing primary attestation"
+  [ -f "$attestation" ] || fail "watch-session did not create the primary attestation"
+  grep -F "root=$FM_ROOT_OVERRIDE" "$attestation" >/dev/null \
+    || fail "watch-session wrote an attestation for the wrong primary root"
+  pass "watch-session bootstraps a missing primary attestation before its guard"
 }
 
 test_watch_session_start_status_stop_are_home_scoped() {
@@ -333,6 +357,7 @@ test_watch_session_grok_emergency_override_allows_fallback() {
   pass "watch-session emergency override remains available for Grok fallback"
 }
 
+test_watch_session_bootstraps_missing_attestation
 test_watch_session_start_status_stop_are_home_scoped
 test_watch_session_stop_waits_for_starting_watcher
 test_watch_session_stop_fails_for_unpinned_legacy_watcher

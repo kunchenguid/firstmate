@@ -388,7 +388,7 @@ test_primary_origin_requires_state_attestation() {
 }
 
 test_process_environment_fallback_preserves_spaces() {
-  local fakebin env
+  local fakebin env status
   fakebin=$(fm_fakebin "$TMP_ROOT/ps-environ")
   cat > "$fakebin/ps" <<'SH'
 #!/usr/bin/env bash
@@ -398,13 +398,12 @@ case "$*" in
 esac
 SH
   chmod +x "$fakebin/ps"
+  env= status=0
   env=$(PATH="$fakebin:$PATH" bash -c '. "$1"; fm_worker_process_environ 999' _ \
-    "$ROOT/bin/fm-worker-isolation-lib.sh")
-  printf '%s\n' "$env" | grep -Fx 'FM_AGENT_OWNER_HOME=/tmp/owner home' >/dev/null \
-    || fail "the macOS process fallback split an owner home containing spaces"
-  printf '%s\n' "$env" | grep -Fx 'FM_HOME=/tmp/owner home' >/dev/null \
-    || fail "the macOS process fallback split FM_HOME containing spaces"
-  pass "the process-environment fallback preserves spaces in home paths"
+    "$ROOT/bin/fm-worker-isolation-lib.sh") || status=$?
+  [ "$status" -ne 0 ] || fail "the process-environment fallback trusted a command-line marker"
+  [ -z "$env" ] || fail "the process-environment fallback emitted forgeable marker data"
+  pass "the process-environment fallback fails closed without procfs"
 }
 
 test_unreadable_task_start_proof_remains_contested() {

@@ -100,6 +100,36 @@ case "$verdict" in
   *) fail "a foreign endpoint-bound occupant did not retain the slot: $verdict" ;;
 esac
 pass "a foreign endpoint-bound occupant retains the durable lease"
+kill "$ENDPOINT_PID" 2>/dev/null || true
+wait "$ENDPOINT_PID" 2>/dev/null || true
+
+OTHER_HOME="$TMP_ROOT/other-home"
+mkdir -p "$OTHER_HOME"
+(
+  cd "$WORKTREE" || exit 1
+  exec env FM_AGENT_TASK=task-a FM_AGENT_OWNER_HOME="$HOME_DIR" \
+    FM_AGENT_ROLE=crewmate FM_HOME="$OTHER_HOME" sleep 300
+) >/dev/null 2>&1 &
+CONTRACT_PID=$!
+BG_PIDS+=("$CONTRACT_PID")
+for _ in $(seq 1 50); do
+  [ "$(readlink "/proc/$CONTRACT_PID/cwd" 2>/dev/null || true)" = "$WORKTREE" ] && break
+  sleep 0.02
+done
+ENDPOINT_PID=$CONTRACT_PID
+fm_backend_foreground_process_pid() {
+  [ "$1" = herdr ] && [ "$2" = lab:pane-a ] || return 1
+  printf '%s' "$ENDPOINT_PID"
+}
+verdict=$(fm_slot_disposal_verdict "$HOME_DIR/state" task-a "$WORKTREE" \
+  "$HOME_DIR" "$HOME_DIR" crewmate live herdr lab:pane-a)
+case "$verdict" in
+  "retain: the endpoint-bound process for task(s) task-a is running in the slot"*) ;;
+  *) fail "a self-labeled worker with a foreign home override released the slot: $verdict" ;;
+esac
+pass "an incomplete self-owner home contract retains the durable lease"
+kill "$CONTRACT_PID" 2>/dev/null || true
+wait "$CONTRACT_PID" 2>/dev/null || true
 
 fm_backend_foreground_process_pid() { return 1; }
 verdict=$(fm_slot_disposal_verdict "$HOME_DIR/state" task-a "$WORKTREE" \
@@ -133,8 +163,6 @@ esac
 pass "an undeclared process retains a closed endpoint lease"
 kill "$LEGACY_PID" 2>/dev/null || true
 wait "$LEGACY_PID" 2>/dev/null || true
-OTHER_HOME="$TMP_ROOT/other-home"
-mkdir -p "$OTHER_HOME"
 (
   cd "$WORKTREE" || exit 1
   exec env FM_AGENT_TASK=legacy-reparented FM_AGENT_OWNER_HOME="$OTHER_HOME" \
