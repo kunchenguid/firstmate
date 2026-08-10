@@ -155,13 +155,12 @@ fm_worker_primary_ancestry_clear() {
 
 fm_worker_primary_origin_proven() {
   local root home state root_real home_real state_real git_dir git_common
-  local branch default role var value expected
+  local var value expected
   case "${FM_AGENT_ROLE:-}" in
-    ""|primary) ;;
+    "") ;;
     *) return 1 ;;
   esac
   [ -z "${FM_AGENT_TASK:-}" ] && [ -z "${FM_AGENT_OWNER_HOME:-}" ] || return 1
-  role=${FM_AGENT_ROLE:-}
   root=${FM_ROOT_OVERRIDE:-$(cd "$_FM_WORKER_ISOLATION_LIB_DIR/.." && pwd)}
   home=${FM_HOME:-$root}
   state=${FM_STATE_OVERRIDE:-$home/state}
@@ -174,16 +173,7 @@ fm_worker_primary_origin_proven() {
   [ ! -L "$root_real/.fm-secondmate-home" ] || return 1
   git_dir=$(git -C "$root_real" rev-parse --git-dir 2>/dev/null) || return 1
   git_common=$(git -C "$root_real" rev-parse --git-common-dir 2>/dev/null) || return 1
-  if [ "$git_dir" != "$git_common" ]; then
-    [ "$role" = primary ] || return 1
-  fi
-  branch=$(git -C "$root_real" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
-  if [ -n "$branch" ]; then
-    default=$(fm_worker_primary_default_branch "$root_real") || return 1
-    [ "$branch" = "$default" ] || [ "$role" = primary ] || return 1
-  else
-    [ "$role" = primary ] || return 1
-  fi
+  [ "$git_dir" = "$git_common" ] || return 1
   [ -f "$root_real/AGENTS.md" ] || return 1
   [ -d "$root_real/bin" ] || return 1
   [ -d "$home_real/state" ] || return 1
@@ -204,7 +194,7 @@ fm_worker_primary_origin_proven() {
     eval "value=\${$var:-}"
     if [ -n "$value" ]; then
       fm_worker_paths_same "$value" "$expected" || return 1
-    elif [ -z "$role" ] && [ "$home_real" = "$root_real" ]; then
+    elif [ "$home_real" = "$root_real" ]; then
       continue
     fi
   done

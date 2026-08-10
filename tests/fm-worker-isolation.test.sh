@@ -185,7 +185,8 @@ test_markerless_worker_is_refused_before_primary_state_resolution() {
   home=$(make_primary_home "$TMP_ROOT/markerless-worker-home")
   mkdir -p "$TMP_ROOT/markerless-worker-cwd"
   for script in "$LOCK" "$ROOT/bin/fm-send.sh" "$ROOT/bin/fm-watch.sh" \
-    "$ROOT/bin/fm-watch-arm.sh" "$ROOT/bin/fm-watch-session.sh" "$ROOT/bin/fm-wake-drain.sh"; do
+    "$ROOT/bin/fm-watch-arm.sh" "$ROOT/bin/fm-watch-session.sh" \
+    "$ROOT/bin/fm-wake-drain.sh" "$ROOT/bin/fm-update.sh"; do
     name=$(basename "$script")
     if out=$(cd "$TMP_ROOT/markerless-worker-cwd" && env \
       -u FM_AGENT_ROLE -u FM_AGENT_TASK -u FM_AGENT_OWNER_HOME \
@@ -227,7 +228,7 @@ test_markerless_worker_is_refused_at_primary_cwd() {
 }
 
 test_forged_primary_role_is_refused_from_worker_ancestry() {
-  local out status
+  local out status primary_home
   if out=$(cd "$ROOT" && \
     FM_AGENT_ROLE=crewmate FM_AGENT_TASK=forged-primary-parent \
     FM_AGENT_OWNER_HOME="$TMP_ROOT/worker-parent" \
@@ -244,7 +245,19 @@ test_forged_primary_role_is_refused_from_worker_ancestry() {
   fi
   expect_code 1 "$status" "a forged primary role must be refused from worker ancestry"
   assert_contains "$out" "task worker" "the forged primary role refusal lost its worker diagnostic"
-  pass "explicit primary roles still require clean worker ancestry"
+  primary_home=$(make_primary_home "$TMP_ROOT/forged-primary-clean")
+  if out=$(cd "$primary_home" && env \
+    FM_AGENT_ROLE=primary FM_ROOT_OVERRIDE="$primary_home" FM_HOME="$primary_home" \
+    FM_STATE_OVERRIDE="$primary_home/state" \
+    bash -c '. "$1"; fm_worker_refuse_primary_operation forged-primary-clean' _ \
+    "$ROOT/bin/fm-worker-isolation-lib.sh" 2>&1); then
+    status=0
+  else
+    status=$?
+  fi
+  expect_code 1 "$status" "an explicit primary role without origin proof must be refused"
+  assert_contains "$out" "task worker" "the clean explicit primary refusal lost its worker diagnostic"
+  pass "explicit primary roles require non-forgeable origin proof"
 }
 
 test_unreadable_task_start_proof_remains_contested() {
@@ -346,24 +359,37 @@ SH
   printf '%s\n' "$fakebin"
 }
 
+make_primary_root() {
+  local dir=$1
+  mkdir -p "$dir"
+  git -C "$dir" init -q
+  git -C "$dir" symbolic-ref HEAD refs/heads/main
+  printf '# agents\n' > "$dir/AGENTS.md"
+  ln -s "$ROOT/bin" "$dir/bin"
+  git -C "$dir" add AGENTS.md bin
+  git -C "$dir" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial
+}
+
 make_launch_case() {
-  local name=$1 id=$2 case_dir home proj wt fakebin
+  local name=$1 id=$2 case_dir home proj wt fakebin primary
   case_dir="$TMP_ROOT/$name"
   home="$case_dir/home"
   proj="$case_dir/project"
   wt="$case_dir/wt"
   fakebin=$(make_launch_fakebin "$case_dir/fake")
+  primary="$case_dir/primary-root"
   mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
+  make_primary_root "$primary"
   printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
   fm_git_worktree "$proj" "$wt" "wt-$name"
   touch "$home/state/.last-watcher-beat"
   : > "$case_dir/tmux-window-name"
   : > "$case_dir/launch.log"
-  printf '%s\n' "$case_dir|$home|$proj|$wt|$fakebin"
+  printf '%s\n' "$case_dir|$home|$proj|$wt|$fakebin|$primary"
 }
 
 read_launch_record() {
-  IFS='|' read -r CASE_DIR HOME_DIR PROJ_DIR WT_DIR FAKEBIN_DIR <<EOF
+  IFS='|' read -r CASE_DIR HOME_DIR PROJ_DIR WT_DIR FAKEBIN_DIR PRIMARY_ROOT <<EOF
 $1
 EOF
 }
@@ -375,8 +401,8 @@ test_every_verified_harness_launches_with_its_home_declaration() {
     rec=$(make_launch_case "launch-$harness" "$id")
     read_launch_record "$rec"
     pid=$(start_declared_agent "$WT_DIR" "$id-shell" "$HOME_DIR")
-    out=$(HOME="$HOME_DIR" GROK_HOME="$HOME_DIR/.grok" FM_AGENT_ROLE=primary \
-      FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+    out=$(cd "$PRIMARY_ROOT" && HOME="$HOME_DIR" GROK_HOME="$HOME_DIR/.grok" \
+      FM_ROOT_OVERRIDE="$PRIMARY_ROOT" FM_HOME="$HOME_DIR" \
       FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
       FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
       FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" FM_FAKE_PANE_PATH="$WT_DIR" FM_FAKE_PANE_PID="$pid" \
@@ -730,7 +756,7 @@ test_spawn_settles_on_proc_evidence_over_a_lying_pane_path() {
   fm_git_init_commit "$lying"
   pid=$(start_declared_agent "$WT_DIR" "$id-shell" "$HOME_DIR")
 
-  out=$(FM_AGENT_ROLE=primary FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+  out=$(cd "$PRIMARY_ROOT" && FM_ROOT_OVERRIDE="$PRIMARY_ROOT" FM_HOME="$HOME_DIR" \
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
@@ -753,7 +779,7 @@ test_spawn_does_not_promote_an_unproven_pane_path() {
   id="settle-hint-d4-$RUN_TAG"
   rec=$(make_launch_case settle-hint "$id")
   read_launch_record "$rec"
-  out=$(FM_AGENT_ROLE=primary FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+  out=$(cd "$PRIMARY_ROOT" && FM_ROOT_OVERRIDE="$PRIMARY_ROOT" FM_HOME="$HOME_DIR" \
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_SPAWN_NO_GUARD=1 FM_SPAWN_WT_WAIT_SECS=1 TMUX="fake,1,0" \
@@ -784,6 +810,7 @@ make_slot_world() {
   wt="$world/wt"
   other="$world/wt-other"
   mkdir -p "$world/home/state" "$world/home/data" "$world/home/config"
+  make_primary_root "$world/primary-root"
   fm_git_worktree "$proj" "$wt" "slot-$name"
   git -C "$proj" worktree add --quiet -b "slot-$name-other" "$other"
   printf '%s\n' "$world|$proj|$wt|$other"
@@ -1045,7 +1072,7 @@ SH
     && fm_slot_stamp_write "$WT_DIR" task-e6 "$WORLD/home" ) \
     || fail "the contested-slot fixture could not be stamped"
 
-  out=$(FM_AGENT_ROLE=primary FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$WORLD/home" \
+  out=$(cd "$WORLD/primary-root" && FM_ROOT_OVERRIDE="$WORLD/primary-root" FM_HOME="$WORLD/home" \
     FM_STATE_OVERRIDE="$WORLD/home/state" FM_DATA_OVERRIDE="$WORLD/home/data" \
     FM_CONFIG_OVERRIDE="$WORLD/home/config" \
     FM_FAKE_TREEHOUSE_LOG="$WORLD/treehouse.log" \

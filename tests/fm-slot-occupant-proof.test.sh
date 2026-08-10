@@ -22,6 +22,7 @@ cleanup() {
 trap cleanup EXIT
 
 mkdir -p "$HOME_DIR/state"
+: > "$HOME_DIR/AGENTS.md"
 fm_git_worktree "$PROJECT" "$WORKTREE" slot-occupant-proof
 fm_slot_stamp_write "$WORKTREE" task-a "$HOME_DIR" \
   || fail "could not stamp focused slot fixture"
@@ -178,6 +179,12 @@ esac
 pass "registered ordinary task homes retain a pooled slot"
 rm -f "$ORDINARY_HOME/state/ordinary-paused.meta" "$HOME_DIR/AGENTS.md"
 
+verdict=$(fm_slot_disposal_verdict "$HOME_DIR/state" task-a "$WORKTREE" \
+  "$HOME_DIR" "$HOME_DIR" crewmate closed herdr lab:pane-a)
+[ "$verdict" = "retain: all-home slot metadata evidence is unavailable" ] \
+  || fail "missing home registry did not retain the closed endpoint: $verdict"
+pass "missing home registry retains a closed endpoint lease"
+: > "$HOME_DIR/AGENTS.md"
 verdict=$(fm_slot_disposal_verdict "$HOME_DIR/state" task-a "$WORKTREE" \
   "$HOME_DIR" "$HOME_DIR" crewmate closed herdr lab:pane-a)
 [ "$verdict" = dispose ] \

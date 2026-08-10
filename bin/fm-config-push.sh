@@ -50,6 +50,9 @@ case "${1:-}" in
 esac
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/fm-worker-isolation-lib.sh
+. "$SCRIPT_DIR/fm-worker-isolation-lib.sh"
+fm_worker_refuse_primary_operation "config propagation" || exit 1
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
@@ -57,7 +60,7 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="$FM_HOME/data"
 SECONDMATES_MD="$DATA/secondmates.md"
 
-[ -n "${FM_CONFIG_PUSH_NO_GUARD:-}" ] || "$SCRIPT_DIR/fm-guard.sh" || true
+"$SCRIPT_DIR/fm-guard.sh"
 
 # shellcheck source=bin/fm-ff-lib.sh
 . "$SCRIPT_DIR/fm-ff-lib.sh"

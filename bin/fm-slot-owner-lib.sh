@@ -211,7 +211,7 @@ fm_slot_meta_worktree() {
 
 fm_slot_registry_homes() {
   local file=$1 line candidate section=all
-  [ -e "$file" ] || return 0
+  [ -e "$file" ] || [ -L "$file" ] || return 2
   [ -f "$file" ] && [ -r "$file" ] || return 2
   case "$file" in
     */AGENTS.md|*/data/backlog.md) section=none ;;
@@ -250,7 +250,7 @@ fm_slot_same_path() {
 # separated.
 fm_slot_meta_referencing_tasks() {
   local state=$1 self=$2 wt=$3 current_home home home_real meta id other
-  local meta_state registry registry_homes line candidate worktrees found=1 i
+  local meta_state registry registry_homes line candidate worktrees found=1 i current_registry_found=0
   local -a homes=()
   local -A seen=()
   [ -d "$state" ] || return 1
@@ -295,6 +295,10 @@ fm_slot_meta_referencing_tasks() {
     done
     for registry in "$home_real/data/secondmates.md" \
       "$home_real/data/backlog.md" "$home_real/AGENTS.md"; do
+      if [ "$home_real" = "$current_home" ] && { [ -e "$registry" ] || [ -L "$registry" ]; }; then
+        current_registry_found=1
+      fi
+      [ -e "$registry" ] || [ -L "$registry" ] || continue
       registry_homes=$(fm_slot_registry_homes "$registry") || return 2
       while IFS= read -r candidate; do
         case "$candidate" in
@@ -303,6 +307,7 @@ fm_slot_meta_referencing_tasks() {
       done <<< "$registry_homes"
     done
   done
+  [ "$current_registry_found" -eq 1 ] || return 2
   return "$found"
 }
 
