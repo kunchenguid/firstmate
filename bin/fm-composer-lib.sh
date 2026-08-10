@@ -356,6 +356,21 @@ EOF
   return 1
 }
 
+fm_composer_leading_shell_glyph_var() {  # <out-varname> <content>
+  local __fmsg_out=$1 __fmsg_text=$2 __fmsg_glyph
+  __fmsg_text="${__fmsg_text#"${__fmsg_text%%[![:space:]]*}"}"
+  while IFS= read -r __fmsg_glyph; do
+    [ -n "$__fmsg_glyph" ] || continue
+    case "$__fmsg_text" in
+      "$__fmsg_glyph"*) printf -v "$__fmsg_out" '%s' "$__fmsg_glyph"; return 0 ;;
+    esac
+  done <<EOF
+$FM_COMPOSER_SHELL_PROMPT_GLYPHS
+EOF
+  printf -v "$__fmsg_out" '%s' ''
+  return 1
+}
+
 fm_composer_idle_matches() {
   local content=$1 idle_re=$2 idle_case=$3
   [ -n "$idle_re" ] || return 1
@@ -481,6 +496,7 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty>
   FM_COMPOSER_SCAN_UNSAFE=0
   FM_COMPOSER_SCAN_CURSOR_EDGE=0
   FM_COMPOSER_SCAN_BARE_ROW=-1
+  FM_COMPOSER_SCAN_SHELL_ROW=-1
   FM_COMPOSER_SCAN_LEFTBAR_START=-1
   FM_COMPOSER_SCAN_LEFTBAR_END=-1
   FM_COMPOSER_SCAN_PI_PAIR_FOUND=0
@@ -541,9 +557,12 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty>
       *) leftbar_start=-1 ;;
     esac
     # Bare agent-glyph rows: the glyph itself is the container proof. Bare
-    # shell glyphs are deliberately not candidates (dead-shell rule).
+    # shell glyphs are deliberately not candidates (dead-shell rule). Keep
+    # lower shell prompts as staleness evidence for cursorless selection.
     if fm_composer_leading_agent_glyph_var glyph "$trimmed"; then
       FM_COMPOSER_SCAN_BARE_ROW=$row
+    elif [ "$top" -lt 0 ] && fm_composer_leading_shell_glyph_var glyph "$trimmed"; then
+      FM_COMPOSER_SCAN_SHELL_ROW=$row
     fi
     # Cursor safety: a cursor sitting on a structural edge row is never an
     # input row.
@@ -907,13 +926,17 @@ _fm_composer_select_cursorless() {
   if [ "$FM_COMPOSER_SCAN_PI_PAIR_FOUND" = 1 ] \
      && [ "$FM_COMPOSER_SCAN_PI_CLOSE" -gt "$generic" ] \
      && [ "$generic" -lt "$FM_COMPOSER_SCAN_PI_OPEN" ]; then
+    generic=$FM_COMPOSER_SCAN_PI_CLOSE
     FM_COMPOSER_SELECTED_KIND=pi
     FM_COMPOSER_SELECTED_FIRST=$((FM_COMPOSER_SCAN_PI_OPEN + 1))
     FM_COMPOSER_SELECTED_LAST=$((FM_COMPOSER_SCAN_PI_CLOSE - 1))
-    return 0
   fi
   if [ "$FM_COMPOSER_SCAN_PI_PAIR_FOUND" = 0 ] \
      && [ "$FM_COMPOSER_SCAN_PI_LAST_SEPARATOR" -gt "$generic" ]; then
+    FM_COMPOSER_SELECTED_KIND=
+    return 1
+  fi
+  if [ "$FM_COMPOSER_SCAN_SHELL_ROW" -gt "$generic" ]; then
     FM_COMPOSER_SELECTED_KIND=
     return 1
   fi

@@ -365,6 +365,23 @@ test_bare_wrap_region_classifies() {
   pass "fm_composer_classify_screen: the bare composer's wrap region stays identified; structure breaks it"
 }
 
+test_lower_dead_shell_invalidates_cursorless_candidate() {
+  local stale live out
+  stale=$'old transcript\n❯\nprocess exited\n$'
+  assert_screen "stale composer above dead shell on herdr" unknown "$CAPS_STYLED" "$stale"
+  assert_screen "stale composer above dead shell on zellij" unknown "$CAPS_STYLED_NOID" "$stale"
+  assert_screen "stale composer above dead shell on cmux/orca" unknown "$CAPS_PLAIN" "$stale"
+  out=$(fm_composer_classify_screen "$CAPS_TMUX" "$stale" 1)
+  [ "$out" = empty ] \
+    || fail "cursor mode must keep the cursor-anchored composer verdict, got '$out'"
+
+  live=$'transcript shell snippet\n$ echo old output\nmore transcript\n❯'
+  assert_screen "shell transcript above live composer on herdr" empty "$CAPS_STYLED" "$live"
+  assert_screen "shell transcript above live composer on zellij" empty "$CAPS_STYLED_NOID" "$live"
+  assert_screen "shell transcript above live composer on cmux/orca" empty "$CAPS_PLAIN" "$live"
+  pass "fm_composer_classify_screen: a lower dead shell invalidates only cursorless stale composers"
+}
+
 test_bottom_most_candidate_wins() {
   # The one ranking rule: the live composer is bottom-anchored, so a stale
   # decorative box (codex's startup banner) can never outrank the real row
@@ -444,6 +461,7 @@ test_matrix_kimi_bordered_shell_glyph_box
 test_matrix_claude_inside_zellij_ansi_dump
 test_strict_blank_row_divergence
 test_bare_wrap_region_classifies
+test_lower_dead_shell_invalidates_cursorless_candidate
 test_bottom_most_candidate_wins
 test_incomplete_lower_box_invalidates_stale_candidate
 test_titled_bottom_requires_matching_width
