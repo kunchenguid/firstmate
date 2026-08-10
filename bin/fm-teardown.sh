@@ -1506,6 +1506,15 @@ elif [ "$TOP_SLOT_RETURNED" != 1 ] && [ "$BACKEND" != orca ]; then
   fi
 fi
 
+if [ "$KIND" != secondmate ] \
+   && [ "$TOP_SLOT_RETURNED" != 1 ] \
+   && [ "$TOP_SLOT_RELEASE_AUTHORIZED" -eq 1 ]; then
+  if ! slot_release_allowed "$STATE" "$ID" "$WT" "$FM_HOME" \
+    "worktree" retire closed "" "" "$FM_HOME" crewmate; then
+    TOP_SLOT_RELEASE_AUTHORIZED=0
+  fi
+fi
+
 if [ "$KIND" = secondmate ] && [ "$FORCE" = "--force" ]; then
   if ! cleanup_firstmate_home_children "$HOME_PATH"; then
     echo "REFUSED: child cleanup failed for secondmate $ID; preserving parent state and home" >&2

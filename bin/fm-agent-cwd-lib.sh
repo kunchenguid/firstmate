@@ -216,11 +216,21 @@ fm_agent_worker_home_contract_matches() {
 # Returns 2 when the process scan is incomplete; a complete scan returns 0,
 # including when no live process declares a task.
 fm_agent_task_pid_index() {
-  local entry pid env task start home role uncertain=0
+  local entry pid env task start home role proc_uid current_uid uncertain=0
   [ -d /proc ] || return 2
+  current_uid=$(id -u 2>/dev/null) || return 2
   for entry in /proc/[0-9]*; do
     [ -d "$entry" ] || continue
     pid=${entry#/proc/}
+    if ! proc_uid=$(stat -c '%u' "$entry" 2>/dev/null); then
+      [ -d "$entry" ] && uncertain=1
+      continue
+    fi
+    if [ -z "$proc_uid" ]; then
+      [ -d "$entry" ] && uncertain=1
+      continue
+    fi
+    [ "$proc_uid" = "$current_uid" ] || continue
     if ! env=$(fm_agent_environ "$pid"); then
       [ -d "$entry" ] && uncertain=1
       continue

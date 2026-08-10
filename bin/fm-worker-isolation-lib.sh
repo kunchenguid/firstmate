@@ -138,7 +138,7 @@ fm_worker_primary_ancestry_clear() {
   while [ "$pid" -gt 1 ] && [ "$depth" -lt 256 ]; do
     if [ -r "/proc/$pid/environ" ]; then
       env=$( { tr '\0' '\n' < "/proc/$pid/environ"; } 2>/dev/null ) || return 1
-      printf '%s\n' "$env" | grep -Eq '^FM_AGENT_ROLE=(crewmate|secondmate)$' && return 1
+      printf '%s\n' "$env" | grep -Eq '^(FM_AGENT_ROLE|FM_AGENT_TASK|FM_AGENT_OWNER_HOME)=.+$' && return 1
       ppid=$(awk '/^PPid:/ {print $2; exit}' "/proc/$pid/status" 2>/dev/null)
     else
       return 1

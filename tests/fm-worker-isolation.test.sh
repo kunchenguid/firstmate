@@ -280,6 +280,22 @@ test_primary_ancestry_refuses_unreadable_process_environment() {
   pass "primary proof refuses unreadable process environments"
 }
 
+test_primary_ancestry_refuses_any_inherited_worker_marker() {
+  local out status
+  if out=$(FM_AGENT_TASK=marker-only-parent bash -c '
+    env -u FM_AGENT_ROLE -u FM_AGENT_TASK -u FM_AGENT_OWNER_HOME \
+      bash -c '\''
+        . "$1"; fm_worker_primary_ancestry_clear
+      '\'' _ "$1"
+  ' _ "$ROOT/bin/fm-worker-isolation-lib.sh" 2>&1); then
+    status=0
+  else
+    status=$?
+  fi
+  expect_code 1 "$status" "an inherited task marker must block primary ancestry proof"
+  pass "primary proof refuses any inherited worker declaration marker"
+}
+
 test_unreadable_task_start_proof_remains_contested() {
   local out status
   if out=$(bash -c '
@@ -322,6 +338,44 @@ test_task_pid_index_distinguishes_complete_empty_from_incomplete_scan() {
   expect_code 2 "$status" "an unreadable process scan must remain incomplete"
   [ -z "$out" ] || fail "an incomplete process index emitted entries: $out"
   pass "the process index separates a proven empty scan from incomplete evidence"
+}
+
+test_task_pid_index_ignores_foreign_uid_processes() {
+  local status foreign_uid
+  foreign_uid=$(( $(id -u) + 1 ))
+  if bash -c '
+    . "$1"
+    foreign_uid=$2
+    stat() { printf "%s" "$foreign_uid"; }
+    fm_agent_environ() { return 1; }
+    fm_agent_task_pid_index
+  ' _ "$ROOT/bin/fm-agent-cwd-lib.sh" "$foreign_uid"; then
+    status=0
+  else
+    status=$?
+  fi
+  expect_code 0 "$status" "foreign uid processes must not make the task scan incomplete"
+  pass "the task process index ignores foreign uid environments"
+}
+
+test_worker_cannot_register_custom_check() {
+  local home out status
+  home="$TMP_ROOT/check-register-worker"
+  mkdir -p "$home/state"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$home/state/check-a1.check.sh"
+  chmod 700 "$home/state/check-a1.check.sh"
+  if out=$(env FM_AGENT_ROLE=crewmate FM_AGENT_TASK=check-a1 \
+    FM_AGENT_OWNER_HOME="$home" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-check-register.sh" check-a1 2>&1); then
+    status=0
+  else
+    status=$?
+  fi
+  expect_code 1 "$status" "a task worker must not register a custom check"
+  assert_contains "$out" "task worker" "custom check registration lost the worker refusal"
+  [ ! -e "$home/state/check-a1.check-trust" ] \
+    || fail "a task worker created a custom check trust record"
+  pass "task workers cannot mutate custom check trust state"
 }
 
 test_declaration_refuses_rather_than_emitting_a_partial_prefix() {
@@ -1382,8 +1436,11 @@ test_markerless_worker_is_refused_before_primary_state_resolution
 test_markerless_worker_is_refused_at_primary_cwd
 test_forged_primary_role_is_refused_from_worker_ancestry
 test_primary_ancestry_refuses_unreadable_process_environment
+test_primary_ancestry_refuses_any_inherited_worker_marker
 test_unreadable_task_start_proof_remains_contested
 test_task_pid_index_distinguishes_complete_empty_from_incomplete_scan
+test_task_pid_index_ignores_foreign_uid_processes
+test_worker_cannot_register_custom_check
 test_every_verified_harness_launches_with_its_home_declaration
 test_secondmate_child_receives_only_its_own_home
 test_primary_scope_requires_authoritative_primary_proof
