@@ -622,6 +622,7 @@ spawn_remote_secondmate() {
 }
 
 BACKEND=
+TMUX_ABORT_CLEANUP=0
 ORCA_ABORT_CLEANUP=0
 ORCA_WORKTREE_ID=
 ORCA_TERMINAL=
@@ -710,6 +711,10 @@ spawn_abort_cleanup() {
   if [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" = 1 ]; then
     HERDR_PRESENTATION_ORDER_LOCK_HELD=0
     fm_lock_release "$HERDR_PRESENTATION_ORDER_LOCK" || true
+  fi
+  if [ "$TMUX_ABORT_CLEANUP" = 1 ]; then
+    TMUX_ABORT_CLEANUP=0
+    fm_backend_kill tmux "$T" 2>/dev/null || true
   fi
   if [ "$ORCA_ABORT_CLEANUP" = 1 ]; then
     ORCA_ABORT_CLEANUP=0
@@ -1747,6 +1752,7 @@ case "$BACKEND" in
     # rename-critical worktree-detection steps below; the persisted window= handle
     # stays $T (the name form), which is safe now that rename is disabled.
     WID=$(fm_backend_tmux_create_task "$SES" "$W" "$PROJ_ABS") || exit 1
+    TMUX_ABORT_CLEANUP=1
     WT_TARGET="$WID"
     ;;
   herdr)
@@ -2546,6 +2552,7 @@ if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
   SPAWN_TASK_SET_LOCK_HELD=0
   fm_lock_release "$SPAWN_TASK_SET_LOCK"
 fi
+[ "$BACKEND" = tmux ] && TMUX_ABORT_CLEANUP=0
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
 sq_brief=$(shell_quote "$BRIEF")
