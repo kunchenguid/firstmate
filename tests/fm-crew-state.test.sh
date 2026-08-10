@@ -19,6 +19,9 @@
 #   (h) dead pane: no run -> unknown/none; with a run -> run-step (not the shell)
 #   (i) kind=scout skips the run lookup                           -> pane/status-log
 #   (j) torn-down worktree / missing meta                         -> unknown/none
+#   (j2) a pipeline that OWNS the branch and rebased it: the pipeline's head,
+#       not the local one, selects the current run - and a `passed` outcome
+#       never claims a PR merge this helper never read
 #   (k) crew_is_provably_working end-to-end over the REAL helper (not a canned
 #       fake fm-crew-state.sh verdict): cross-branch attribution via the runs
 #       list -> absorbed; genuinely no run anywhere + idle pane -> surfaced.
@@ -340,6 +343,66 @@ run:
     push,completed,0,0
     ci,fixing,0,0
 EOF
+}
+
+# An active run PLUS the `branch_sync:` object `axi status` appends when branch
+# synchronization is relevant. Shape copied from the real object (no-mistakes
+# v1.41.2, whose `axi sync --check` prints the same one standalone): a top-level
+# TOON key, `state:` at 2 spaces, and the `pipeline:` sub-object's fields at 4.
+run_running_with_branch_sync() {  # <branch> <sync-state> <pipeline-head> <local-head>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: running
+  head: "$3"
+  pr: ""
+  findings: none
+  steps[2]{step,status,findings,duration_ms}:
+    intent,completed,0,0
+    review,running,0,0
+branch_sync:
+  state: $2
+  changed: false
+  local:
+    branch: $1
+    head: "$4"
+    clean: true
+  pipeline:
+    run: "01RUN"
+    status: running
+    phase: review
+    submitted_head: "$4"
+    current_head: "$3"
+    pushed_head: "$3"
+  relation: diverged
+  safety: blocked_pipeline_owned
+EOF
+}
+
+# Build the exact divergence a pipeline rebase produces: the branch's real tip
+# (the pipeline's) is rewritten history, so it is neither equal to nor a
+# descendant of the head this worktree is checked out at. Sets LOCAL_HEAD /
+# LOCAL_SHORT / PIPELINE_HEAD / PIPELINE_SHORT in the caller (not echoed, so a
+# divergence that failed to materialize aborts the run here rather than in a
+# command-substitution subshell) and FAILS if the two heads coincide - a case
+# where they are equal proves nothing these tests are for.
+make_diverged_pipeline_head() {  # <worktree> <branch>
+  local wt=$1 branch=$2
+  LOCAL_HEAD=$(git -C "$wt" rev-parse HEAD)
+  git -C "$wt" checkout -q --orphan pipeline-rebased
+  git -C "$wt" commit -q --allow-empty -m 'pipeline rebase head'
+  PIPELINE_HEAD=$(git -C "$wt" rev-parse HEAD)
+  git -C "$wt" checkout -q "$branch"
+  [ "$(git -C "$wt" rev-parse HEAD)" = "$LOCAL_HEAD" ] \
+    || fail "worktree did not return to its own head"
+  [ "$LOCAL_HEAD" != "$PIPELINE_HEAD" ] \
+    || fail "pipeline head must differ from the local head"
+  if git -C "$wt" merge-base --is-ancestor "$LOCAL_HEAD" "$PIPELINE_HEAD" 2>/dev/null; then
+    fail "pipeline head must be diverged from the local head, not a descendant"
+  fi
+  LOCAL_SHORT=$(git -C "$wt" rev-parse --short=8 "$LOCAL_HEAD")
+  PIPELINE_SHORT=$(git -C "$wt" rev-parse --short=8 "$PIPELINE_HEAD")
 }
 
 # ---------------------------------------------------------------------------
@@ -1290,6 +1353,81 @@ test_local_advanced_past_run_head_invalidates() {
   pass "local work advanced past run head invalidates attribution"
 }
 
+# Head-binding: while the PIPELINE owns the branch it may rebase it, so the
+# branch's real tip is a head this worktree never checks out. Matching on the
+# local head alone then re-attributes the OLDER run that validated that head -
+# which is how a finished-and-failed run was reported as the current state of a
+# live, healthy pipeline (observed 2026-08-10 on a crew whose `axi status` said
+# `status: running`, `branch_sync.state: pipeline_owned`, local head != the
+# pipeline's `current_head`). Two costs, both real: restart-time recovery reads
+# `failed` and can relaunch on top of a live run, and the watcher cannot absorb
+# any wake for the crew because `failed` classifies as must-surface.
+test_pipeline_owned_head_beats_superseded_local_head_run() {
+  reset_fakes
+  local d out
+  d=$(new_case pipeline-owned-rebase)
+  make_repo_on_branch "$d/wt" fm/feat-po
+  make_diverged_pipeline_head "$d/wt" fm/feat-po
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/po.meta" "window=fm:fm-po" "worktree=$d/wt" "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS="$(run_running_with_branch_sync fm/feat-po pipeline_owned "$PIPELINE_HEAD" "$LOCAL_HEAD")"
+  # Real `no-mistakes runs` order (newest first): the live pipeline-owned run on
+  # top, and beneath it the older terminal run that validated the local head.
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/feat-po ${PIPELINE_SHORT}  2026-08-10 09:20
+  failed     fm/feat-po ${LOCAL_SHORT}  2026-08-10 08:05
+EOF
+)"
+  out=$(run_crew_state "$d" po)
+  assert_contains "$out" "state: working" "pipeline-owned rebased head keeps the live run current"
+  assert_contains "$out" "source: run-step" "pipeline-owned run remains run-step sourced"
+  assert_contains "$out" "validating (running)" "pipeline-owned run reports its own step"
+  assert_not_contains "$out" "failed" "the superseded run matching the local head must not be attributed"
+  pass "pipeline-owned rebased head is preferred over a superseded local-head run"
+}
+
+# The pipeline head is authoritative ONLY while branch_sync says the pipeline
+# owns the branch. Same divergence, any other sync state: the local head keeps
+# sole authority, so the diverged run is not attributed and the branch's own
+# terminal run for the local code still answers.
+test_non_pipeline_owned_branch_sync_keeps_local_head_authority() {
+  reset_fakes
+  local d out
+  d=$(new_case branch-sync-not-owned)
+  make_repo_on_branch "$d/wt" fm/feat-ns
+  make_diverged_pipeline_head "$d/wt" fm/feat-ns
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/ns.meta" "window=fm:fm-ns" "worktree=$d/wt" "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS="$(run_running_with_branch_sync fm/feat-ns in_sync "$PIPELINE_HEAD" "$LOCAL_HEAD")"
+  FM_FAKE_RUNS_LIST="  failed     fm/feat-ns ${LOCAL_SHORT}  2026-08-10 08:05"
+  out=$(run_crew_state "$d" ns)
+  assert_contains "$out" "state: failed" "without pipeline ownership the local head still selects its own run"
+  assert_contains "$out" "run failed" "the local head's terminal run is reported"
+  assert_not_contains "$out" "state: working" "a diverged head must not be attributed on a non-owned branch"
+  pass "branch_sync without pipeline ownership leaves local-head authority intact"
+}
+
+# `outcome: passed` is the pipeline's successful terminal outcome and says
+# nothing about the PR. This helper makes no forge call, so it must not claim
+# one merged: verified live 2026-08-10, where a `passed` run was reported as
+# "PR merged/closed" while the PR was open and unmerged. A check-free repo, or
+# any run with `--skip ci`, reaches `passed` with the PR still open every time.
+test_passed_outcome_does_not_claim_a_merge() {
+  reset_fakes
+  local d out
+  d=$(new_case passed-no-merge-claim)
+  make_repo_on_branch "$d/wt" fm/feat-passed-open
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/passedopen.meta" "window=fm:fm-passedopen" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_passed fm/feat-passed-open)"
+  out=$(run_crew_state "$d" passedopen)
+  assert_contains "$out" "state: done" "a passed run is still terminal done"
+  assert_contains "$out" "run passed" "the detail names the pipeline result"
+  assert_not_contains "$out" "merged" "passed must not assert a merge this helper never read"
+  assert_not_contains "$out" "closed" "passed must not assert a close this helper never read"
+  pass "passed outcome does not claim an unverified merge"
+}
+
 test_missing_run_head_falls_back_to_current_state() {
   reset_fakes
   local d out
@@ -1357,6 +1495,9 @@ test_usage_error
 test_historical_same_branch_rewritten_head_not_current
 test_active_run_descendant_fix_head_remains_current
 test_local_advanced_past_run_head_invalidates
+test_pipeline_owned_head_beats_superseded_local_head_run
+test_non_pipeline_owned_branch_sync_keeps_local_head_authority
+test_passed_outcome_does_not_claim_a_merge
 test_missing_run_head_falls_back_to_current_state
 
 echo "all fm-crew-state tests passed"

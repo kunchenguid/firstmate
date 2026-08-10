@@ -27,7 +27,10 @@
 #      A run matches when its head equals the worktree HEAD, or the worktree HEAD
 #      is an ancestor of the run head (pipeline fix commits advanced the run on
 #      the same line of history). Local work that advanced past the run head, or
-#      diverged from it, invalidates attribution.
+#      diverged from it, invalidates attribution. A run head equal to the head
+#      `axi status`'s branch_sync object reports the PIPELINE owns also matches,
+#      because a pipeline that owns the branch can rebase it to a head the
+#      worktree never checks out (see nm_pipeline_owned_head).
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
 #      passed/checks-passed -> done, failed/cancelled -> failed. EXCEPT: while
@@ -46,6 +49,14 @@
 #   5. Missing meta or torn-down worktree: report unknown · none. If no run is
 #      attributed to this crew, a dead endpoint also reports unknown · none rather
 #      than trusting a stale status log.
+#
+# This helper reports only what its sources actually say. It never contacts a
+# forge, so it never reports a PR's state: an `outcome: passed` says the pipeline
+# reached its successful terminal outcome, NOT that the PR merged (a check-free
+# repo, or a run with `--skip ci`, reaches `passed` with the PR still open). The
+# deliberate choice is to stay a fast local read - firstmate already learns real
+# PR state from bin/fm-pr-check.sh's armed merge poll, and every heartbeat paying
+# for a forge round-trip here would buy a fact that path already owns.
 #
 # Read-only and side-effect free. Always exits 0 on a successful read regardless
 # of state; exit 2 only on a usage error (no id).
@@ -277,8 +288,10 @@ nm_effective_ci_step_status() {
 # Root cause of the PR #252 incident (2026-07): for a repo where merge is left
 # to the captain, no-mistakes' ci step (and therefore top-level status/outcome)
 # stays "running" for the ENTIRE CI-monitor phase, including long after GitHub
-# reports every check green - it only reaches outcome=passed once the PR is
-# actually merged (or failed/cancelled if closed). `axi status`'s steps[] table
+# reports every check green - it only leaves that phase once the PR is actually
+# merged or closed. (A run that never enters the phase at all - a check-free
+# repo, or `--skip ci` - reports outcome=passed with the PR still open, which is
+# why `passed` is not read as a merge anywhere here.) `axi status`'s steps[] table
 # never distinguishes "still waiting on checks" from "checks green, waiting on
 # merge": both read as plain `ci,running,...`. The only place that transition is
 # recorded is the ci step's own log text, e.g. "all CI checks passed - still
@@ -365,20 +378,80 @@ nm_runs_status_for_branch() {  # <branch>
 # scratch worktree); with no branch there is no run to attribute to this crew.
 CREW_BRANCH=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
 
-# 0 if the active axi-status run's head field matches this worktree's code
-# identity. Branch match is a precondition (caller). Rule owned by
-# fm_nm_head_matches_worktree in bin/fm-nm-run-lib.sh.
+# --- pipeline branch ownership (branch_sync) --------------------------------
+# `axi status` appends a `branch_sync:` object describing the CURRENT BRANCH of
+# the directory it ran in (this crew's worktree) whenever it is relevant. Its
+# shape, verified against the installed no-mistakes v1.41.2 - `axi sync --check`
+# prints the same object standalone, which is how it is inspected without an
+# owning run:
+#
+#   branch_sync:
+#     state: pipeline_owned
+#     local:
+#       branch: fm/feat
+#       head: <full sha>
+#     pipeline:
+#       run: "01..."
+#       submitted_head: <sha the run started from>
+#       current_head: <sha the pipeline has the branch at now>
+#     ...
+#
+# Why this matters here: while the pipeline OWNS the branch it may rebase it, so
+# the branch's real tip moves to a commit this worktree never checks out and may
+# never even fetch. The local HEAD then still names the code some EARLIER,
+# already-terminal run validated, and matching on it alone re-attributes that
+# superseded run - reporting a finished-and-failed run as the current state of a
+# live, healthy pipeline (observed 2026-08-10). The pipeline's own current_head
+# is the missing identity.
+PIPELINE_HEAD=""
+
+# Lines of the branch_sync object, empty when absent. TOON nests by indent, so
+# the object runs from its `branch_sync:` header to the next column-0 key.
+nm_branch_sync_block() {
+  printf '%s\n' "$RUN_OUT" | awk '
+    /^branch_sync:[[:space:]]*$/ { in_block = 1; next }
+    in_block && /^[^[:space:]]/ { in_block = 0 }
+    in_block { print }
+  '
+}
+
+# The head the pipeline currently has this branch at, and empty unless
+# branch_sync reports the pipeline owns the branch - no other state may move the
+# branch out from under the worktree. `current_head` occurs once in the object
+# (under `pipeline:`), so reading it needs no indent-sensitive descent.
+nm_pipeline_owned_head() {
+  local block state
+  block=$(nm_branch_sync_block)
+  [ -n "$block" ] || return 0
+  state=$(strip_quotes "$(printf '%s\n' "$block" | sed -n 's/^[[:space:]]*state:[[:space:]]*\(.*\)/\1/p' | head -1)")
+  [ "$state" = pipeline_owned ] || return 0
+  strip_quotes "$(printf '%s\n' "$block" | sed -n 's/^[[:space:]]*current_head:[[:space:]]*\(.*\)/\1/p' | head -1)"
+}
+
+# 0 if <head> names this crew's current code identity, under either authority:
+#   1. the head the pipeline owns, compared by commit id alone because that
+#      commit is often absent from this worktree's object store (fm_nm_same_commit_id);
+#   2. the worktree HEAD, under fm_nm_head_matches_worktree's equal-or-ancestor
+#      rule in bin/fm-nm-run-lib.sh.
+# Both, not one instead of the other: a pipeline-owned run still reports its
+# submitted head in some states, and that is the local head.
+nm_head_is_current() {  # <head>
+  [ -n "$PIPELINE_HEAD" ] && fm_nm_same_commit_id "$1" "$PIPELINE_HEAD" && return 0
+  fm_nm_head_matches_worktree "$WT" "$1"
+}
+
+# 0 if the active axi-status run's head field is this crew's current code
+# identity. Branch match is a precondition (caller).
 nm_run_head_matches_worktree() {
   local run_head
   run_head=$(strip_quotes "$(nm_field head)")
-  fm_nm_head_matches_worktree "$WT" "$run_head"
+  nm_head_is_current "$run_head"
 }
 
 # Coarse runs-list rows are "<status> <branch> <short-sha> ...". 0 if the short
-# sha for this branch row matches the worktree head under the same rules as
-# nm_run_head_matches_worktree (equal, or local is ancestor of run tip).
+# sha for this branch row is current under the same rules.
 nm_coarse_head_matches_worktree() {  # <short-sha>
-  fm_nm_head_matches_worktree "$WT" "$1"
+  nm_head_is_current "$1"
 }
 
 HAVE_RUN=0
@@ -393,6 +466,8 @@ COARSE_STATUS=""
 if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/null 2>&1; then
   RUN_OUT=$(nm_run axi status)
   if [ -n "$RUN_OUT" ]; then
+    # Before any head comparison, since it can supply the authoritative head.
+    PIPELINE_HEAD=$(nm_pipeline_owned_head)
     run_branch=$(strip_quotes "$(nm_field branch)")
     if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] && nm_run_head_matches_worktree; then
       HAVE_RUN=1
@@ -447,7 +522,10 @@ if [ "$HAVE_RUN" = 1 ]; then
 
     if [ -n "$outcome" ]; then
       case "$outcome" in
-        passed)        RUN_STATE="done"; RUN_DETAIL="run passed: PR merged/closed" ;;
+        # `passed` is the pipeline's successful terminal outcome, and nothing
+        # more: this helper never reads the PR, and a check-free repo or a
+        # `--skip ci` run reaches `passed` with the PR still open (see header).
+        passed)        RUN_STATE="done"; RUN_DETAIL="run passed: pipeline complete (PR state not checked)" ;;
         checks-passed) RUN_STATE="done"; RUN_DETAIL="checks green: PR ready for review" ;;
         failed)        RUN_STATE=failed; RUN_DETAIL="run failed" ;;
         cancelled)     RUN_STATE=failed; RUN_DETAIL="run cancelled" ;;

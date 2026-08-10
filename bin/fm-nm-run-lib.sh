@@ -71,3 +71,21 @@ fm_nm_head_matches_worktree() {  # <worktree> <run_head>
   [ "$run_full" = "$local_full" ] && return 0
   git -C "$wt" merge-base --is-ancestor "$local_full" "$run_full" 2>/dev/null
 }
+
+# 0 when two commit ids name the same commit by TEXT alone: both are hex, one is
+# a prefix of the other, and the shorter is at least 7 characters (git's own
+# minimum abbreviation). Deliberately git-free, for the one case the rule above
+# cannot answer: a head the pipeline created and pushed but this worktree never
+# fetched is absent from the local object store, so `git rev-parse` rejects it
+# and only the reported ids can be compared.
+fm_nm_same_commit_id() {  # <id_a> <id_b>
+  local a=$1 b=$2 short long
+  case "$a" in ''|*[!0-9a-fA-F]*) return 1 ;; esac
+  case "$b" in ''|*[!0-9a-fA-F]*) return 1 ;; esac
+  a=$(printf '%s' "$a" | tr 'A-F' 'a-f')
+  b=$(printf '%s' "$b" | tr 'A-F' 'a-f')
+  if [ "${#a}" -le "${#b}" ]; then short=$a; long=$b; else short=$b; long=$a; fi
+  [ "${#short}" -ge 7 ] || return 1
+  case "$long" in "$short"*) return 0 ;; esac
+  return 1
+}
