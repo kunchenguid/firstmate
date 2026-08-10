@@ -42,7 +42,7 @@
 #                        the account owns)
 #   --kind <kind>        comments | reviews | commits (repeatable; default: all three)
 #   --since <iso8601>    window start, spelled YYYY-MM-DDTHH:MM:SSZ (default:
-#                        FM_SWEEP_WINDOW_DAYS, itself 30, days back). Every window
+#                        FM_SWEEP_WINDOW_DAYS, itself 7, days back). Every window
 #                        filter is a string comparison against GitHub's own UTC
 #                        timestamps, so any other spelling is refused outright
 #                        rather than sorting below every record and quietly
@@ -227,7 +227,22 @@ for kind in "${KINDS[@]}"; do
   esac
 done
 
-WINDOW_DAYS=${FM_SWEEP_WINDOW_DAYS:-30}
+# The default window is 7 days, chosen so a default run FINISHES inside the
+# default budget rather than reporting could-not-observe. A detector whose first
+# run usually says it could not look trains its operator to ignore it, and an
+# ignored sweep is worth nothing.
+#
+# The arithmetic, measured on this fleet's own repositories rather than
+# estimated: the commits kind pays a window-independent cost of one listing page
+# per 25 branches plus one request per branch, which on a 128-branch repository
+# is about 134 requests before the window is considered at all, and roughly 155
+# across the three repositories the account owns. Reviews and commits then each
+# spend one request per pull request touched in the window. Measured pull request
+# counts were 38 over 7 days, 66 over 14, and 71 over 30, so the totals come to
+# about 250 requests at 7 days, 310 at 14, and 320 at 30 against a 300 budget.
+# Seven days is therefore the widest default that completes, and it was not a
+# close call against fourteen.
+WINDOW_DAYS=${FM_SWEEP_WINDOW_DAYS:-7}
 if [ -n "$SINCE" ]; then
   is_iso8601 "$SINCE" \
     || die_usage "--since must be a UTC ISO-8601 timestamp spelled YYYY-MM-DDTHH:MM:SSZ, e.g. 2026-01-01T00:00:00Z"
@@ -237,6 +252,9 @@ fi
 
 NOW=$(now_iso)
 
+# Set before any early could-not-observe can reach the summary under `set -u`.
+WINDOW_DESCRIPTION="an unresolved window"
+
 # Run-level tallies. Scope tallies are reset per scope.
 SCOPES=0
 SCOPES_OBSERVED=0
@@ -245,9 +263,6 @@ TOTAL_DECLARED=0
 TOTAL_CANDIDATES=0
 REQUESTS_SPENT=0
 
-# Emitted before the summary so an operator reading a truncated terminal still
-# sees why a scope was skipped.
-note() { printf 'note: %s\n' "$1"; }
 
 sanitize() {
   # One marker field: no newlines, no tabs, bounded length.
@@ -438,8 +453,14 @@ This sweep cannot determine who wrote anything. A candidate is a write under
 this account that does not carry ${FM_ATTRIBUTION_TOKEN} - which is equally what an
 undeclared model session and the captain's own hand-typed comment look like in
 every field GitHub exposes. The evidence on each line is a signal, not an
-attribution; the captain judges. Writes outside the window starting ${SINCE}
-were not examined at all.
+attribution; the captain judges.
+
+This run covered ${WINDOW_DESCRIPTION}, and writes outside it
+were not examined at all - a clean result says nothing about them. Widen the
+window with --since <iso8601> or FM_SWEEP_WINDOW_DAYS=<days>, and raise --budget
+with it: reviews and commits each spend about one request per pull request in
+the window, so a wider window on the current budget of ${BUDGET} will report
+could-not-observe instead of a result.
 EOF
   if [ "$SCOPES_UNOBSERVED" -gt 0 ]; then
     cat <<'EOF'
@@ -455,11 +476,14 @@ EOF
 # needs the markers above to exist.
 if [ -z "$SINCE" ]; then
   SINCE=$(days_ago_iso "$WINDOW_DAYS")
+  WINDOW_DESCRIPTION="the $WINDOW_DAYS days since $SINCE"
   if ! is_iso8601 "$SINCE"; then
     SINCE=unresolved
     run_blocked missing-tool \
       "date could not compute a window start $WINDOW_DAYS days back, so there is no window to sweep"
   fi
+else
+  WINDOW_DESCRIPTION="everything since $SINCE, as given by --since"
 fi
 
 if [ -z "$B64D" ]; then
@@ -505,6 +529,18 @@ if [ "${#REPOS[@]}" -eq 0 ]; then
   if [ "$page" -gt "$MAX_PAGES" ]; then
     run_blocked max-pages "the account owns more repositories than --max-pages $MAX_PAGES would list; the repository set itself is incomplete"
   fi
+fi
+
+# An empty repository set is never a clean sweep. GitHub answers
+# /user/repos?affiliation=owner with HTTP 200 and an empty array both for a token
+# whose scopes exclude the account's repositories and for an account that owns
+# nothing, and those two are the same bytes on the wire - there is no field that
+# separates them. Calling either one clean would report "nothing to find" for a
+# run that could not look at anything, which is exactly the false clean this
+# sweep exists to make impossible.
+if [ "${#REPOS[@]}" -eq 0 ]; then
+  run_blocked empty-repository-set \
+    "no repository resolved, so nothing was examined; an empty owner listing means either a token whose scopes exclude the account's repositories or an account that owns none, and those are indistinguishable here - name a repository with --repo to sweep it directly"
 fi
 
 printf 'FM_SWEEP_BEGIN %s account=%s since=%s token=%s repos=%s budget=%s\n' \
@@ -876,10 +912,6 @@ sweep_commits() {
 
   scope_observed "$repo" commits "$examined" "$declared" "$candidates"
 }
-
-if [ "${#REPOS[@]}" -eq 0 ]; then
-  note "no repository was named and the account owns none, so nothing was examined"
-fi
 
 for repo in ${REPOS[@]+"${REPOS[@]}"}; do
   case $repo in

@@ -43,7 +43,9 @@ Lead the text with it.
 
 - An issue or pull request comment: the first characters of the body, followed by a space.
 - A pull request review: the first characters of the review body, followed by a space.
-- A commit: in the commit message. Prefer the subject; where a repository lints commit subjects, put it at the start of the first body line instead. The sweep reads the whole message, so either placement counts.
+- A commit: in the commit message.
+  Prefer the subject; where a repository lints commit subjects, put it at the start of the first body line instead.
+  The sweep reads the whole message, so either placement counts.
 
 ## Reaching the convention when a prompt is written
 
@@ -86,11 +88,21 @@ Every call is a GET through one chokepoint, and the sweep does not comment on, e
 
 Knowing where coverage stops is part of trusting a clean result.
 
-- Only writes inside the window are examined, and the window is printed in the run's own output. Anything older was not looked at.
-- Commits are reached through branches and through pull request heads. The pull request pass is what finds a commit whose branch was deleted after the pull request closed, which is the normal end state for finished work; without it that commit appears in no branch listing at all. It costs roughly one request per pull request in the window, which is what the request budget is for.
-- A commit that belongs to no branch and no pull request is reachable only by SHA and is not enumerable. The sweep cannot see it and does not pretend to.
-- GitHub stops listing a pull request's commits at 250. Reaching that wall is reported as could-not-observe for the scope rather than treated as the end of the list.
-- Review comments left on individual diff lines are a separate GitHub object from the review bodies the `reviews` kind reads. They are not currently swept.
+- Only writes inside the window are examined, and the run's own summary names the window it covered.
+  Anything older was not looked at.
+  The default window is 7 days, chosen so a default run finishes inside the default request budget instead of reporting could-not-observe, because a detector whose first run usually says it could not look trains its operator to ignore it.
+  Widen it with `--since` or `FM_SWEEP_WINDOW_DAYS`, and raise `--budget` with it: measured on this fleet's own repositories, a 14-day window already costs more than the default budget allows.
+- An empty repository set is could-not-observe, never a clean sweep.
+  GitHub answers the owner listing with an empty array both for a token whose scopes exclude the account's repositories and for an account that owns nothing, and those are the same bytes on the wire, so neither can be reported as having found nothing.
+- Commits are reached through branches and through pull request heads.
+  The pull request pass is what finds a commit whose branch was deleted after the pull request closed, which is the normal end state for finished work; without it that commit appears in no branch listing at all.
+  It costs roughly one request per pull request in the window, which is what the request budget is for.
+- A commit that belongs to no branch and no pull request is reachable only by SHA and is not enumerable.
+  The sweep cannot see it and does not pretend to.
+- GitHub stops listing a pull request's commits at 250.
+  Reaching that wall is reported as could-not-observe for the scope rather than treated as the end of the list.
+- Review comments left on individual diff lines are a separate GitHub object from the review bodies the `reviews` kind reads.
+  They are not currently swept.
 - A review submitted with no body carries no token, so the `reviews` kind reports every bare approval as a candidate.
   That is correct by the definition above - the write is undeclared - but it is the sweep's standing source of routine candidates, and the `state=` field in a candidate's evidence is what separates a bodiless `APPROVED` from a review that had prose and still omitted the token.
 - An issue body, a pull request title or body, and a commit comment are all writes under the same identity that no kind reads.

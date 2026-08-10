@@ -81,6 +81,13 @@ case $path in
     printf 'api_response:\n  body: testcaptain\n  truncated: false\n'
     exit 0
     ;;
+  /user/repos*)
+    # Exactly what GitHub returns for a token whose scopes exclude the account's
+    # repositories: HTTP 200 with an empty array. Identical bytes to an account
+    # that owns nothing.
+    printf 'api_response:\n  body: "%s"\n  truncated: false\n' "${FM_FAKE_REPOS:-0}"
+    exit 0
+    ;;
 esac
 
 # The commits scope walks branches, then pull request heads. Each listing gets
@@ -319,6 +326,47 @@ if grep -q '/repos/acme/widgets/pulls/24/commits' "$FM_FAKE_LOG"; then
   pass "the commits scope actually asks GitHub for the pull request's commits"
 else
   fail "the pull request commit listing was never requested"
+fi
+
+# --- an empty repository set is could-not-observe, never a clean sweep -------
+# A token whose scopes exclude the account's repositories gets HTTP 200 with an
+# empty array - the same bytes as an account that genuinely owns none. Neither
+# can be called clean, because a run that looked at nothing has found nothing.
+# No --repo is passed here, so the sweep must resolve the set itself.
+: >"$FM_FAKE_LOG"
+FM_FAKE_SCENARIO=clean FM_FAKE_BODY='' FM_FAKE_REPOS="0" PATH="$BIN:$PATH" \
+  "$SWEEP" --account testcaptain --since 2026-01-01T00:00:00Z \
+  >"$WORK/out" 2>"$WORK/err"
+printf '%s' $? >"$WORK/rc"
+
+if out | grep -q 'outcome=could-not-observe reason=empty-repository-set'; then
+  pass "an empty owner listing is reported as could-not-observe"
+else
+  fail "empty repository set was not could-not-observe: $(out)"
+fi
+if out | grep -q 'outcome=clean'; then
+  fail "an empty repository set printed a clean outcome"
+else
+  pass "an empty repository set never prints a clean outcome"
+fi
+if [ "$(rc)" = "20" ]; then
+  pass "an empty repository set exits 20"
+else
+  fail "expected exit 20 for an empty repository set, got $(rc)"
+fi
+# A resolvable repository set must still sweep normally, or the check above
+# would pass simply by refusing every run.
+: >"$FM_FAKE_LOG"
+FM_FAKE_SCENARIO=candidate \
+FM_FAKE_BODY="1\n$(comment_record 900007 42 2026-02-02T10:00:00Z false OWNER none)" \
+FM_FAKE_REPOS="1\n$(b64 acme/widgets)" PATH="$BIN:$PATH" \
+  "$SWEEP" --account testcaptain --since 2026-01-01T00:00:00Z --kind comments \
+  >"$WORK/out" 2>"$WORK/err"
+printf '%s' $? >"$WORK/rc"
+if out | grep -q 'FM_SWEEP_CANDIDATE .*repo=acme/widgets .*ref=900007'; then
+  pass "a resolved repository set is still swept normally"
+else
+  fail "self-resolved repository set was not swept: $(out)"
 fi
 
 # --- 4. the sweep is read-only ---------------------------------------------
