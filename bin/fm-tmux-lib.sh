@@ -171,7 +171,7 @@ fm_tmux_composer_caps() {
 # Prints "pi<TAB>idle" or "pi<TAB>working"; exits 1 when the pane is not a
 # live pi.
 fm_tmux_composer_identity() {  # <target>
-  local target=$1 tty pgid tpgid comm found=0
+  local target=$1 tty pgid tpgid comm found=0 status
   tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || tty=
   case "$tty" in
     /dev/*)
@@ -193,11 +193,12 @@ EOF
     esac
   fi
   [ "$found" -eq 1 ] || return 1
-  if fm_pane_is_busy "$target" pi; then
-    printf 'pi\tworking'
-  else
-    printf 'pi\tidle'
-  fi
+  status=$(fm_pane_busy_state "$target" pi)
+  case "$status" in
+    busy) printf 'pi\tworking' ;;
+    idle) printf 'pi\tidle' ;;
+    *) return 1 ;;
+  esac
 }
 
 # fm_tmux_composer_state: the tmux composer verdict - a thin adapter over the

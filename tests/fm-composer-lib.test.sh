@@ -273,7 +273,9 @@ test_matrix_opencode_leftbar_signals() {
   typed=$'┃\n┃  refactor the parser please\n┃\n┃  Build · GPT-5.5 Fast OpenAI · high\n╹▀▀▀▀'
   assert_screen "opencode typed on tmux" pending "$CAPS_TMUX" "$typed" 1
   assert_screen "opencode typed on plain backends" unknown "$CAPS_PLAIN" "$typed"
-  pass "matrix: opencode's left-bar composer reads empty everywhere, with either idle signal alone"
+  typed=$'┃  refactor the parser please\n┃\n┃  Build · GPT-5.5 Fast OpenAI · high'
+  assert_screen "opencode multiline draft above blank cursor row" pending "$CAPS_TMUX" "$typed" 1
+  pass "matrix: opencode's left-bar composer reads empty everywhere and scans the full active run"
 }
 
 test_matrix_grok_titled_bottom_border() {

@@ -334,7 +334,7 @@ EOF
   pass "fm_tmux_composer_state: a message wrapped across three rows is pending"
 }
 
-test_bottom_border_cursor_reads_ghost_only_box_as_empty() {
+test_bottom_border_cursor_is_unknown() {
   local dir fb capture out
   dir="$TMP_ROOT/bottom-border-ghost"; mkdir -p "$dir"
   fb=$(make_fake_tmux "$dir")
@@ -342,9 +342,30 @@ test_bottom_border_cursor_reads_ghost_only_box_as_empty() {
   printf '╭────────────────────────╮\n│ ❯ \033[38;2;50;47;70mType a message...\033[0m    │\n╰────────────────────────╯\n' > "$capture"
   out=$(PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=2 \
     fm_tmux_composer_state "fakepane")
-  [ "$out" = empty ] \
-    || fail "a ghost-only box with the cursor on its bottom border should be empty, got '$out'"
-  pass "fm_tmux_composer_state: Grok's bottom-border cursor quirk reads an empty box structurally"
+  [ "$out" = unknown ] \
+    || fail "a cursor on a structural bottom border must be unknown, got '$out'"
+  pass "fm_tmux_composer_state: a box bottom border is never an input row"
+}
+
+test_pi_identity_requires_readable_busy_state() {
+  local out
+  if out=$(
+    tmux() {
+      local arg
+      for arg in "$@"; do
+        case "$arg" in
+          *pane_tty*) printf '\n'; return 0 ;;
+          *pane_current_command*) printf 'pi\n'; return 0 ;;
+        esac
+      done
+      return 1
+    }
+    fm_pane_busy_state() { printf 'unknown'; }
+    fm_tmux_composer_identity fakepane
+  ); then
+    fail "a live Pi process with unreadable busy state must not produce identity, got '$out'"
+  fi
+  pass "fm_tmux_composer_identity: unknown busy state cannot become idle identity"
 }
 
 test_bordered_busy_signatures_are_pending() {
@@ -669,7 +690,8 @@ test_dark_truecolor_bare_shell_prompt_is_unknown
 test_real_text_with_trailing_ghost_is_pending
 test_two_row_composer_reads_text_above_empty_cursor_row
 test_wrapped_composer_reads_all_content_rows
-test_bottom_border_cursor_reads_ghost_only_box_as_empty
+test_bottom_border_cursor_is_unknown
+test_pi_identity_requires_readable_busy_state
 test_bordered_busy_signatures_are_pending
 test_non_bordered_busy_footer_is_unknown_strict
 test_clipped_bordered_box_is_unknown
