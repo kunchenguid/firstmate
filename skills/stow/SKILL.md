@@ -69,24 +69,17 @@ Everything files to a local destination by default; an external system such as a
 
 7. **Curate every memory file this pass has open, not only the one a finding routes to.**
    Evaluate each dated entry against its tier clock per the tier contract below, refreshing what current evidence re-validates and archiving what stays stale.
-   Judge retention by likelihood of informing a future session: keep current safety and authority boundaries, genuine user preferences, fleet-wide rules, and frequently relevant facts in always-loaded memory; move current but conditional, narrow, project-specific, or context-specific facts to a live on-demand owner; and archive stale, superseded, or low-recurrence facts to the recoverable cold tier.
    Archive what is no longer current, including completed chronology, stale versions and paths, transient task state, resolved alternatives, old metrics, and report-sized procedures; merge or remove only superseded claims and duplicates whose facts are preserved elsewhere.
    Prefer one concise current rule, or a pointer to the authoritative source, over duplicate prose.
    Never plainly remove a unique current fact: every such exit must archive it with provenance in the recoverable cold tier or relocate it to a live on-demand owner or a consolidation merge that preserves the fact.
-   When the host defines an applicable startup-memory budget, hard-enforce it before the safe-to-end verdict: after decay and consolidation, archive every eligible stale, superseded, or low-utility non-pinned entry, autonomously relocate every eligible non-pinned conditional entry whose allowed on-demand or owning destination is already live, then archive eligible dated `aging` entries oldest-reinforced-first if doing so can reach the budget.
-   A proposal, a destination that still needs to be created or shipped, and an accepted exception are never budget relief.
-   Never automatically archive, evict, or offload a pinned safety or authority boundary or genuine user preference, and never bypass any legacy-grace cycle; a pinned entry can move only after the user explicitly approves that named item, and it remains in place until its destination is live.
-   If archiving every eligible dated non-pinned `aging` entry could not reach the budget, archive none merely to feign a solution, name the protected pinned floor and shortfall, and ask the user for one concrete choice: raise the budget, or explicitly approve trimming or offloading a named pinned entry.
-   Do not end an applicable over-budget pass as an accepted exception.
    This is an accuracy discipline, not a length target - a stale entry misleads the next session; a current one earns its place.
-   A `.stow-notes.md` note has exactly five exits: promotion into a shared, tracked file the user approves; folding into a discovered user-level memory file; archiving to the local, never-loaded archive file; autonomous relocation of a non-pinned conditional note to an already-live on-demand owner, or a user-approved relocation of a named pinned note through the user's own change process; or deletion of a duplicate already preserved by a stronger owner - do not invent another.
+   A `.stow-notes.md` note has exactly five exits: promotion into a shared, tracked file the user approves; folding into a discovered user-level memory file; archiving to the local, never-loaded archive file; a user-approved move into an on-demand-loaded home (a skill or scoped instruction file), executed through the user's own change process rather than by this skill; or deletion of a duplicate already preserved by a stronger owner - do not invent another.
 
 8. **Finish with an honest safe-to-end verdict and a resume pointer for the next session.**
    Report one action per file this sweep touched or considered: `unchanged`, `added`, `rewritten`, `pruned`, `archived` (an entry moved to the local archive), or `routed` (the finding went to a different owner).
    Name any proposed moves into an on-demand home still awaiting the user's approval, so they are not mistaken for finished work.
    Then tell the user, in plain language, what was captured and where, what could not be captured (and why), and whether the conversation is now safe to end or reset - that is, whether every durable finding from this sweep now lives on disk or in an explicitly requested tracker rather than only in this chat.
-   When an applicable startup-memory budget exists, include the before and after total and budget decision when one remains open, and report the conversation safe only when the final total is within budget with no unresolved budget decision.
-   If something could not be captured yet, or an applicable budget remains over its limit, say so explicitly instead of reporting the session fully safe.
+   If something could not be captured yet, say so explicitly instead of reporting the session fully safe.
    If anything landed in `.stow-notes.md`, say so - note that it is private and confined to this project, and name its promotion exit from step 7 if the user wants it more widely visible.
    In a git repo, report the ignore protection as it actually happened: either the `.gitignore` line was added and awaits the user's own commit, or the write failed and the user must ignore `.stow-notes.md` manually before relying on git to hide it.
    If the fallback was blocked because `.stow-notes.md` was already tracked, say that no private fallback was written and the session is not fully safe to reset until the user chooses another destination or accepts that tracked file.
@@ -111,7 +104,7 @@ Markers are compact trailing HTML comments, deliberately cheap because marker by
 
 The tier names say what this skill does with an entry:
 
-- `pinned` - never decays and is never automatically dropped, archived, evicted, or offloaded to shorten a file; it changes only when the user or reality changes it, except for an explicit per-item user-approved move to a live owner.
+- `pinned` - never decays and is never dropped to shorten a file; it changes only when the user or reality changes it.
 - `aging` - must re-prove itself: an entry whose age is greater than or equal to 30 days since its last-reinforced date is stale, and a stale entry is re-validated (date refreshed) or archived, never kept by inertia alone.
 - `perishable` - written to be thrown out: an entry whose age is greater than or equal to 7 days since its last-reinforced date is stale, and its text must name a checkable expiry condition, such as a ticket, a version, or a dated expectation.
   An entry that cannot name a checkable condition is `aging`, not `perishable`.
@@ -137,9 +130,8 @@ Rules:
 - In a file whose default tier carries a clock, the first pass stamps each unmarked entry it can confirm with its compact dated marker; otherwise it adds `<!--g-->`, which carries no date, to persist one grace cycle without treating presence as reinforcement.
   On the next pass, current evidence replaces that marker with the normal dated tier marker; without such evidence, archive the entry with a `legacy-unvalidated` note.
   The same persisted transition applies to an entry a hand edit later leaves unmarked in a file whose default tier carries a clock.
-- When an always-loaded memory file exceeds an applicable budget, this skill makes the offload and cold-archive sweep its default response rather than preserving a silent excess.
-  It autonomously moves an eligible non-pinned durable entry that matters only in a nameable situation only when an allowed on-demand-loaded or owning home is already live, while a pinned entry still requires explicit per-item user approval.
-  This skill never creates the new home, and a destination that still needs to be created or shipped does not count as relief; every entry stays in memory until its destination is live.
+- When an always-loaded memory file has grown past what every session should pay for, this skill may propose - never execute - moving a durable entry that matters only in a nameable situation into an on-demand-loaded home, such as a skill or scoped instruction file the user's agent loads only when that situation arises.
+  The user approves each move, the new home is created through the user's own change process rather than by this skill, and the entry leaves the memory file only once the new home exists.
   No unique current fact is ever removed or archived during this flow before the on-demand home is live.
 
 ## What this skill does not do
