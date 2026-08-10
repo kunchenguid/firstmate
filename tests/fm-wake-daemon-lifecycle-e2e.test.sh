@@ -48,14 +48,24 @@ run_watcher_once() {
   wait_for_exit "$!" 50
 }
 
+ack_handled_wakes() {  # <state> <drain-stderr>
+  local state=$1 drain_err=$2 sequence generation
+  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$drain_err")
+  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$drain_err")
+  [ -n "$sequence" ] && [ -n "$generation" ] || return 1
+  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" \
+    --recovery-generation "$generation"
+}
+
 # --- Phase 1: routine self-handled, queued; terminal caught after restart ---
 test_routine_then_terminal_after_restart() {
-  local dir state fakebin out drain_out status_file
+  local dir state fakebin out drain_out drain_err status_file
   dir=$(make_supercase wd-lifecycle)
   state="$dir/state"
   fakebin="$dir/fakebin"
   out="$dir/watch.out"
   drain_out="$dir/drain.out"
+  drain_err="$dir/drain.err"
   status_file="$state/task-w1.status"
 
   # A routine status fires a signal; the watcher queues it and exits.
@@ -64,10 +74,12 @@ test_routine_then_terminal_after_restart() {
   grep -F "signal: $status_file" "$out" >/dev/null || fail "watcher did not report the routine signal"
 
   # Drain it and route through the daemon: a routine status self-handles.
-  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" || fail "drain after routine signal failed"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2> "$drain_err" \
+    || fail "drain after routine signal failed"
   grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$status_file" >/dev/null \
     || fail "routine signal was not queued"
   FM_STATE_OVERRIDE="$state" handle_wake "signal: $status_file" "$state"
+  ack_handled_wakes "$state" "$drain_err" || fail "routine wake acknowledgement failed"
   [ ! -s "$state/.subsuper-escalations" ] || fail "routine status was escalated by the daemon"
 
   # The watcher is now DOWN (one-shot exit). A terminal status lands while it is
@@ -79,8 +91,10 @@ test_routine_then_terminal_after_restart() {
 
   # Drain and route the terminal: exactly ONE digest is buffered.
   : > "$drain_out"
-  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" || fail "drain after terminal signal failed"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2> "$drain_err" \
+    || fail "drain after terminal signal failed"
   FM_STATE_OVERRIDE="$state" handle_wake "signal: $status_file" "$state"
+  ack_handled_wakes "$state" "$drain_err" || fail "terminal wake acknowledgement failed"
   [ -s "$state/.subsuper-escalations" ] || fail "captain-relevant terminal status was not buffered"
   [ "$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')" -eq 1 ] \
     || fail "expected exactly one buffered digest after the terminal signal"
