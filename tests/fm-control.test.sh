@@ -266,7 +266,7 @@ test_interrupt_sends_each_harness_verified_key() {
 test_harness_family_resolution() {
   local pair recorded want got
   for pair in claude:claude claude-latest:claude codex:codex codex-cli:codex \
-      opencode:opencode omp:omp omp-17:omp omp-17.2.12:omp grok:grok grok-2:grok kimi:kimi cursor:cursor \
+      opencode:opencode omp:omp grok:grok grok-2:grok kimi:kimi cursor:cursor \
       cursor-agent:cursor muse:muse muse-bin-0.1.0:muse pi:pi \
       pi-signed:pi-signed; do
     recorded=${pair%%:*}
@@ -279,8 +279,10 @@ test_harness_family_resolution() {
     && fail "an unrecognized launch command must not be guessed into an adapter family"
   fm_control_harness_family ompiler \
     && fail "an arbitrary omp-prefixed launch command must not be guessed into OMP mechanics"
-  fm_control_harness_family omp-17evil \
-    && fail "an unversioned omp-prefixed launch command must not be guessed into OMP mechanics"
+  for recorded in omp-17 omp-17.2.12 omp-17evil; do
+    fm_control_harness_family "$recorded" \
+      && fail "an unsupported versioned OMP launch command '$recorded' must not be guessed into OMP mechanics"
+  done
   fm_control_harness_family '' \
     && fail "an empty harness must not resolve to an adapter family"
   # The signed adapter is a distinct launch profile, not a pi variant.
@@ -351,7 +353,17 @@ test_unverified_harness_is_refused() {
     "an arbitrary omp-prefixed raw harness refusal should name the missing verification"
   [ -z "$(literals "$dir")" ] \
     || fail "an arbitrary omp-prefixed raw harness must receive no bytes"
-  pass "fm-control: unverified and arbitrary omp-prefixed harnesses are refused"
+
+  dir=$(new_case raw-omp-versioned)
+  add_task "$dir" t1 omp-17.2.12
+  alive_as "$dir" omp-17.2.12
+  out=$(run_control "$dir" t1 interrupt); rc=$?
+  expect_code 1 "$rc" "a versioned raw OMP alias should refuse"
+  assert_contains "$out" "no verified control mechanics" \
+    "a versioned raw OMP alias refusal should name the missing verification"
+  [ -z "$(literals "$dir")" ] \
+    || fail "a versioned raw OMP alias must receive no bytes"
+  pass "fm-control: arbitrary and versioned OMP aliases are refused"
 }
 
 # --- 2. backend capability matrix -------------------------------------------
