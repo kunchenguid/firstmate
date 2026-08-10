@@ -432,7 +432,7 @@ secondmate_sync() {
   }
 
   secondmate_recover_sync_journal_with_transaction_lock() {
-    local journal=$1 id expected lock lock_status result=0
+    local journal=$1 id expected lock result=0
     id=$(fm_secondmate_nudge_value "$journal" id 2>/dev/null || true)
     expected=$(secondmate_sync_journal_path "$id" 2>/dev/null || true)
     if [ "$journal" != "$expected" ]; then
@@ -444,37 +444,44 @@ secondmate_sync() {
       echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: send failed: transaction lock failed"
       return 1
     fi
-    fm_dependency_acquire_lock "$lock"
-    lock_status=$?
-    case "$lock_status" in
-      0) ;;
-      75)
-        echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: deferred: transaction lock is busy"
-        return 75
-        ;;
-      *)
-        echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: send failed: transaction lock failed"
-        return 1
-        ;;
-    esac
+    if ! fm_lock_try_acquire "$lock"; then
+      echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: deferred: transaction lock is busy"
+      return 75
+    fi
     secondmate_recover_sync_journal_locked "$journal" || result=$?
     fm_lock_release "$lock" || result=1
     return "$result"
   }
 
+  secondmate_sync_journal_store_is_valid() {
+    [ -d "$SECOND_MATE_SYNC_PENDING_DIR" ] \
+      && [ ! -L "$SECOND_MATE_SYNC_PENDING_DIR" ]
+  }
+
+  secondmate_report_invalid_sync_journal_store() {
+    echo "NUDGE_SECONDMATES: secondmate unknown: send failed: update journal storage is invalid"
+  }
+
   secondmate_recover_pending_sync_journals_under_host_lock() {
     local journal
-    [ -d "$SECOND_MATE_SYNC_PENDING_DIR" ] || return 0
+    if ! secondmate_sync_journal_store_is_valid; then
+      secondmate_report_invalid_sync_journal_store
+      return 0
+    fi
     for journal in "$SECOND_MATE_SYNC_PENDING_DIR"/*.pending; do
-      [ -f "$journal" ] || continue
+      [ -f "$journal" ] && [ ! -L "$journal" ] || continue
       secondmate_recover_sync_journal_with_transaction_lock "$journal" || true
     done
   }
 
   secondmate_report_sync_journal_host_lock_failure() {
     local reason=$1 journal id
+    if ! secondmate_sync_journal_store_is_valid; then
+      secondmate_report_invalid_sync_journal_store
+      return
+    fi
     for journal in "$SECOND_MATE_SYNC_PENDING_DIR"/*.pending; do
-      [ -f "$journal" ] || continue
+      [ -f "$journal" ] && [ ! -L "$journal" ] || continue
       id=$(fm_secondmate_nudge_value "$journal" id 2>/dev/null || true)
       echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: $reason"
     done
@@ -482,7 +489,11 @@ secondmate_sync() {
 
   secondmate_pending_sync_journals_exist() {
     local journal
-    [ -d "$SECOND_MATE_SYNC_PENDING_DIR" ] || return 1
+    if [ ! -e "$SECOND_MATE_SYNC_PENDING_DIR" ] \
+      && [ ! -L "$SECOND_MATE_SYNC_PENDING_DIR" ]; then
+      return 1
+    fi
+    secondmate_sync_journal_store_is_valid || return 2
     for journal in "$SECOND_MATE_SYNC_PENDING_DIR"/*.pending; do
       [ -f "$journal" ] && [ ! -L "$journal" ] && return 0
     done
@@ -490,7 +501,17 @@ secondmate_sync() {
   }
 
   secondmate_retry_pending_sync_journals() {
-    secondmate_pending_sync_journals_exist || return 0
+    local pending_status
+    secondmate_pending_sync_journals_exist
+    pending_status=$?
+    case "$pending_status" in
+      0) ;;
+      1) return 0 ;;
+      *)
+        secondmate_report_invalid_sync_journal_store
+        return 0
+        ;;
+    esac
     fm_dependency_with_host_lock \
       secondmate_recover_pending_sync_journals_under_host_lock || true
     case "$FM_DEPENDENCY_LOCK_OUTCOME" in
@@ -507,7 +528,7 @@ secondmate_sync() {
   }
 
   fm_ff_before_fast_forward() {
-    local _dir=$1 before=$2 after=$3 instr=$4 id home marker journal lock lock_status
+    local _dir=$1 before=$2 after=$3 instr=$4 id home marker journal lock
     local marker_commit marker_instr journal_phase journal_home journal_before journal_after
     update_nudge_lock=""
     update_nudge_id=""
@@ -526,19 +547,10 @@ secondmate_sync() {
       echo "NUDGE_SECONDMATES: secondmate $id: send failed: unsafe transaction lock"
       return 1
     }
-    fm_dependency_acquire_lock "$lock"
-    lock_status=$?
-    case "$lock_status" in
-      0) ;;
-      75)
-        echo "NUDGE_SECONDMATES: secondmate $id: deferred: transaction lock is busy"
-        return 1
-        ;;
-      *)
-        echo "NUDGE_SECONDMATES: secondmate $id: send failed: transaction lock failed"
-        return 1
-        ;;
-    esac
+    if ! fm_lock_try_acquire "$lock"; then
+      echo "NUDGE_SECONDMATES: secondmate $id: deferred: transaction lock is busy"
+      return 1
+    fi
     if [ -e "$marker" ] || [ -L "$marker" ]; then
       if fm_secondmate_local_nudge_matches "$marker" "$id" "$home" "$after"; then
         :

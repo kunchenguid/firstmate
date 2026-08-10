@@ -867,6 +867,115 @@ test_bootstrap_empty_sync_queue_skips_host_lock() {
   pass "T8l empty sync journal queues do not acquire the host lock"
 }
 
+test_bootstrap_rejects_symlinked_sync_queue() {
+  local w c1 c2 fakebin external_state journal marker out
+  w=$(new_world nudge-journal-symlink)
+  c1=$(head_of "$w/main")
+  add_sm_worktree "$w" sm-instr "$c1"
+  bump_primary "$w" instr
+  c2=$(head_of "$w/main")
+  git -C "$w/sm-instr" merge -q --ff-only "$c2"
+  external_state="$w/external-state"
+  FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" bash -c '
+    . "$1"
+    fm_secondmate_sync_journal_write "$2" updated sm-instr "$3" "$4" "$5" create
+  ' _ "$ROOT/bin/fm-secondmate-nudge-lib.sh" "$external_state" "$w/sm-instr" "$c1" "$c2" \
+    || fail "could not prepare external sync journal"
+  ln -s "$external_state/.secondmate-sync-pending" \
+    "$w/home/state/.secondmate-sync-pending"
+  journal="$external_state/.secondmate-sync-pending/sm-instr.pending"
+  marker="$w/home/state/.secondmate-nudge-pending/sm-instr.pending"
+  fakebin=$(make_fake_toolchain "$w")
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_SEND_SETTLE=0 "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+
+  assert_contains "$out" \
+    "NUDGE_SECONDMATES: secondmate unknown: send failed: update journal storage is invalid" \
+    "symlinked sync journal storage was not rejected"
+  [ -L "$w/home/state/.secondmate-sync-pending" ] \
+    || fail "symlinked sync journal storage was replaced"
+  assert_present "$journal" "symlinked sync journal storage was traversed"
+  assert_absent "$marker" "symlinked sync journal storage published a retry marker"
+  pass "T8m symlinked sync journal storage is rejected"
+}
+
+test_bootstrap_sync_journal_recovery_does_not_wait_on_transactions() {
+  local w c1 c2 fakebin journal marker lock_one lock_two ready release holder
+  local out out2 id i started elapsed
+  w=$(new_world nudge-journal-transaction-lock)
+  c1=$(head_of "$w/main")
+  add_sm_worktree "$w" sm-one "$c1"
+  add_sm_worktree "$w" sm-two "$c1"
+  bump_primary "$w" instr
+  c2=$(head_of "$w/main")
+  for id in sm-one sm-two; do
+    git -C "$w/$id" merge -q --ff-only "$c2"
+    FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" bash -c '
+      . "$1"
+      fm_secondmate_sync_journal_write "$2" updated "$3" "$4" "$5" "$6" create
+    ' _ "$ROOT/bin/fm-secondmate-nudge-lib.sh" "$w/home/state" "$id" "$w/$id" "$c1" "$c2" \
+      || fail "could not prepare transaction-locked sync journal for $id"
+  done
+  fakebin=$(make_fake_toolchain "$w")
+  lock_one="$w/home/state/.remote-inherit-sm-one.lock"
+  lock_two="$w/home/state/.remote-inherit-sm-two.lock"
+  ready="$w/lock.ready"
+  release="$w/lock.release"
+
+  FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
+    FM_STATE_OVERRIDE="$w/home/state" bash -c '
+      . "$1"
+      fm_lock_acquire_wait "$2"
+      fm_lock_acquire_wait "$3"
+      : > "$4"
+      while [ ! -e "$5" ]; do sleep 0.02; done
+      fm_lock_release "$3"
+      fm_lock_release "$2"
+    ' _ "$ROOT/bin/fm-wake-lib.sh" "$lock_one" "$lock_two" "$ready" "$release" \
+    > "$w/lock-holder.out" 2>&1 &
+  holder=$!
+  for ((i = 0; i < 100; i++)); do
+    [ -e "$ready" ] && break
+    kill -0 "$holder" 2>/dev/null || break
+    sleep 0.02
+  done
+  if [ ! -e "$ready" ]; then
+    wait "$holder" 2>/dev/null || true
+    fail "sync journal transaction lock holder did not start"
+  fi
+
+  started=$(date +%s)
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_DEPS_LOCK_TIMEOUT=4 FM_SEND_SETTLE=0 \
+    "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+  elapsed=$(( $(date +%s) - started ))
+  [ "$elapsed" -le 2 ] || fail "sync journal recovery waited on nested transaction locks"
+  for id in sm-one sm-two; do
+    journal="$w/home/state/.secondmate-sync-pending/$id.pending"
+    marker="$w/home/state/.secondmate-nudge-pending/$id.pending"
+    assert_contains "$out" \
+      "NUDGE_SECONDMATES: secondmate $id: deferred: transaction lock is busy" \
+      "busy transaction did not defer $id sync journal recovery"
+    assert_present "$journal" "busy transaction consumed the $id sync journal"
+    assert_absent "$marker" "busy transaction published a $id retry marker"
+  done
+
+  : > "$release"
+  wait "$holder" || fail "sync journal transaction lock holder failed"
+  out2=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_SEND_SETTLE=0 "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+  for id in sm-one sm-two; do
+    journal="$w/home/state/.secondmate-sync-pending/$id.pending"
+    marker="$w/home/state/.secondmate-nudge-pending/$id.pending"
+    assert_contains "$out2" "BOOTSTRAP_INFO: nudged fm-$id with" \
+      "released transaction did not reconcile the $id sync journal"
+    assert_absent "$journal" "reconciled $id sync journal remained pending"
+    assert_absent "$marker" "reconciled $id sync journal retained its delivered marker"
+  done
+  pass "T8n sync journal recovery defers busy transactions without waiting"
+}
+
 test_bootstrap_retires_obsolete_sync_journals() {
   local w c1 c2 fakebin journal marker retired replacement out retired_record retired_nudge
   w=$(new_world nudge-journal-retired)
@@ -1270,6 +1379,8 @@ test_bootstrap_preserves_prior_nudge_before_new_update
 test_bootstrap_supersedes_interrupted_update_journals
 test_bootstrap_sync_journal_recovery_uses_host_lock
 test_bootstrap_empty_sync_queue_skips_host_lock
+test_bootstrap_rejects_symlinked_sync_queue
+test_bootstrap_sync_journal_recovery_does_not_wait_on_transactions
 test_bootstrap_retires_obsolete_sync_journals
 test_bootstrap_nudge_retry_refuses_changed_home
 test_nudge_retry_uses_fresh_herdr_endpoint_after_respawn
