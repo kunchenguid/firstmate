@@ -830,14 +830,15 @@ clear_relaunch_harness_wiring() {
   if [ -n "$auth_path" ]; then
     rm -f -- "$auth_path" || return 1
   fi
-  while IFS= read -r path; do
-    [ -n "$path" ] || continue
-    rm -f -- "$path" || return 1
-  done <<EOF
-$(fm_control_harness_wiring_paths "$harness" "$wt" "$state" "$id")
-EOF
   if [ "$harness" = cursor ]; then
     fm_control_cursor_hooks_restore "$wt" "$state" "$id" || return 1
+  else
+    while IFS= read -r path; do
+      [ -n "$path" ] || continue
+      rm -f -- "$path" || return 1
+    done <<EOF
+$(fm_control_harness_wiring_paths "$harness" "$wt" "$state" "$id")
+EOF
   fi
 }
 
@@ -2414,6 +2415,12 @@ with open(destination, "w", encoding="utf-8") as handle:
     json.dump(document, handle, separators=(",", ":"))
     handle.write("\n")
 PY
+      if [ "$RELAUNCH" -ne 1 ]; then
+        CURSOR_WIRING_PENDING=1
+        CURSOR_WIRING_BUSY_GEN=$BUSY_GEN
+        CURSOR_WIRING_STATE=$STATE_REAL
+        CURSOR_WIRING_WT=$WT
+      fi
       fm_control_cursor_hooks_backup "$WT" "$STATE_REAL" "$ID" || {
         echo "error: existing Cursor hooks.json is not a safe regular file" >&2
         exit 1
@@ -2444,12 +2451,6 @@ EOF
         "$cursor_hooks_tmp" "$cursor_hook_script_tmp" || {
         echo "error: could not record the Cursor hook transaction" >&2
         exit 1
-      }
-      [ "$RELAUNCH" -eq 1 ] || {
-        CURSOR_WIRING_PENDING=1
-        CURSOR_WIRING_BUSY_GEN=$BUSY_GEN
-        CURSOR_WIRING_STATE=$STATE_REAL
-        CURSOR_WIRING_WT=$WT
       }
       mkdir -p "$WT/.cursor/hooks"
       mv -f -- "$cursor_hook_script_tmp" "$WT/.cursor/hooks/fm-busy-turnend.sh"

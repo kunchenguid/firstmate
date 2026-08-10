@@ -218,9 +218,6 @@ fm_control_harness_wiring_paths() {  # <harness> <worktree> <state-dir> <id>
       printf '%s\n' "$state/$id.muse-session"
       printf '%s\n' "$state/$id.muse-session-current"
       ;;
-    cursor)
-      printf '%s\n' "$wt/.cursor/hooks/fm-busy-turnend.sh"
-      ;;
   esac
 }
 
@@ -233,13 +230,18 @@ fm_control_cursor_hooks_backup() {  # <worktree> <state-dir> <id>
     if [ -L "$path" ] || { [ -e "$path" ] && [ ! -f "$path" ]; }; then
       return 1
     fi
-    if [ -e "$path" ]; then
-      backup="$state/$id.cursor-$(basename "$path")"
-      [ ! -e "$backup" ] || return 1
-      cp -p -- "$path" "$backup"
-    fi
+    backup="$state/$id.cursor-$(basename "$path")"
+    [ ! -e "$backup" ] && [ ! -L "$backup" ] || return 1
     installed="$state/$id.cursor-$(basename "$path").installed"
     [ ! -e "$installed" ] && [ ! -L "$installed" ] || return 1
+  done
+  for path in "$wt/.cursor/hooks.json" "$wt/.cursor/hooks/fm-busy-turnend.sh"; do
+    [ -e "$path" ] || continue
+    backup="$state/$id.cursor-$(basename "$path")"
+    cp -p -- "$path" "$backup" || {
+      rm -f -- "$state/$id.cursor-hooks.json" "$state/$id.cursor-fm-busy-turnend.sh"
+      return 1
+    }
   done
 }
 
@@ -262,6 +264,18 @@ fm_control_cursor_hooks_forget() {  # <state-dir> <id>
   local state=$1 id=$2
   rm -f -- "$state/$id.cursor-hooks.json" "$state/$id.cursor-fm-busy-turnend.sh" \
     "$state/$id.cursor-hooks.json.installed" "$state/$id.cursor-fm-busy-turnend.sh.installed"
+}
+
+fm_control_cursor_hook_path_matches_installed() {  # <worktree> <state-dir> <id> <relative-path>
+  local wt=$1 state=$2 id=$3 relative=$4 installed
+  case "$relative" in
+    .cursor/hooks.json|.cursor/hooks/fm-busy-turnend.sh) ;;
+    *) return 1 ;;
+  esac
+  installed="$state/$id.cursor-$(basename "$relative").installed"
+  [ -f "$installed" ] && [ ! -L "$installed" ] \
+    && [ -f "$wt/$relative" ] && [ ! -L "$wt/$relative" ] \
+    && cmp -s "$wt/$relative" "$installed"
 }
 
 fm_control_cursor_hooks_restore() {  # <worktree> <state-dir> <id>
@@ -287,33 +301,54 @@ fm_control_cursor_hooks_restore() {  # <worktree> <state-dir> <id>
       fi
       rm -f -- "$backup" "$installed" || return 1
     elif [ "$(basename "$path")" = hooks.json ] && [ -f "$path" ]; then
-      python3 - "$path" <<'PY' || return 1
+      python3 - "$path" "$backup" <<'PY' || return 1
 import json
 import os
 import sys
 import tempfile
 
-path = sys.argv[1]
-commands = {
-    ".cursor/hooks/fm-busy-turnend.sh busy",
-    ".cursor/hooks/fm-busy-turnend.sh idle-stop",
-    ".cursor/hooks/fm-busy-turnend.sh idle-session-end",
+path, backup_path = sys.argv[1:]
+expected = {
+    "beforeSubmitPrompt": ".cursor/hooks/fm-busy-turnend.sh busy",
+    "stop": ".cursor/hooks/fm-busy-turnend.sh idle-stop",
+    "sessionEnd": ".cursor/hooks/fm-busy-turnend.sh idle-session-end",
 }
 with open(path, encoding="utf-8") as handle:
     document = json.load(handle)
 hooks = document.get("hooks")
 if not isinstance(hooks, dict):
     raise SystemExit("Cursor hooks must be a JSON object")
-changed = False
+backup_hooks = {}
+if os.path.exists(backup_path):
+    with open(backup_path, encoding="utf-8") as handle:
+        backup = json.load(handle)
+    backup_hooks = backup.get("hooks")
+    if not isinstance(backup_hooks, dict):
+        raise SystemExit("Backed-up Cursor hooks must be a JSON object")
 for event, entries in hooks.items():
     if not isinstance(entries, list):
         raise SystemExit(f"Cursor {event} hooks must be arrays")
-    retained = [entry for entry in entries if not (
-        isinstance(entry, dict) and entry.get("command") in commands
-    )]
-    if len(retained) != len(entries):
-        hooks[event] = retained
-        changed = True
+changed = False
+for event, command in expected.items():
+    entries = hooks.get(event, [])
+    if not isinstance(entries, list):
+        raise SystemExit(f"Cursor {event} hooks must be arrays")
+    original_entries = backup_hooks.get(event, [])
+    if not isinstance(original_entries, list):
+        raise SystemExit(f"Backed-up Cursor {event} hooks must be arrays")
+    original_count = sum(
+        isinstance(entry, dict) and entry.get("command") == command
+        for entry in original_entries
+    )
+    seen = 0
+    for index, entry in enumerate(entries):
+        if not (isinstance(entry, dict) and entry.get("command") == command):
+            continue
+        if seen == original_count:
+            del entries[index]
+            changed = True
+            break
+        seen += 1
 if changed:
     directory = os.path.dirname(path)
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=directory, delete=False) as handle:
@@ -323,6 +358,7 @@ if changed:
     os.replace(temporary, path)
 PY
     fi
+    rm -f -- "$backup" "$installed" || return 1
   done
 }
 

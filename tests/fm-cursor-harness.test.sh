@@ -29,10 +29,12 @@ make_spawn_fakebin() {
 set -u
 case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+  *"#{pane_current_command}"*) printf '%s\n' zsh; exit 0 ;;
+  *"#{pane_tty}"*) exit 0 ;;
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
-  list-windows) exit 0 ;;
+  list-windows) [ -z "${FM_FAKE_WINDOW:-}" ] || printf '%s\n' "$FM_FAKE_WINDOW"; exit 0 ;;
   has-session|new-session|new-window|kill-window) exit 0 ;;
   send-keys)
     prev=
@@ -91,6 +93,19 @@ run_cursor_spawn() {  # <home> <proj> <wt> <fakebin> <id> [extra args...]
     FM_FAKE_CURSOR_ARGS_LOG="$home/cursor-agent.log" \
     PATH="$fakebin:$PATH" \
     "$SPAWN" "$id" "$proj" cursor "$@" 2>&1
+}
+
+run_cursor_relaunch() {  # <home> <wt> <fakebin> <id>
+  local home=$1 wt=$2 fakebin=$3 id=$4
+  FM_ROOT_OVERRIDE='' FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
+    FM_FAKE_LAUNCH_LOG="$home/launch.log" \
+    FM_FAKE_CURSOR_ARGS_LOG="$home/cursor-agent.log" \
+    FM_FAKE_WINDOW="fm-$id" \
+    PATH="$fakebin:$PATH" \
+    "$SPAWN" "$id" --relaunch 2>&1
 }
 
 test_detects_cursor_agent_marker() {
@@ -266,7 +281,7 @@ PY
 test_cursor_hook_restore_preserves_user_hook_edits() {
   local dir="$TMP_ROOT/preserve-hook-edits" wt="$TMP_ROOT/preserve-hook-edits/wt" state="$TMP_ROOT/preserve-hook-edits/state"
   mkdir -p "$wt/.cursor/hooks" "$state"
-  printf '%s\n' '{"version":1,"hooks":{"user":[{"command":"keep"}]}}' > "$wt/.cursor/hooks.json"
+  printf '%s\n' '{"version":1,"hooks":{"user":[{"command":"keep"}],"beforeSubmitPrompt":[{"command":".cursor/hooks/fm-busy-turnend.sh busy"}]}}' > "$wt/.cursor/hooks.json"
   fm_control_cursor_hooks_backup "$wt" "$state" preserve
   python3 - "$wt/.cursor/hooks.json" <<'PY'
 import json
@@ -275,11 +290,12 @@ import sys
 path = sys.argv[1]
 with open(path, encoding="utf-8") as handle:
     document = json.load(handle)
-document["hooks"].update({
-    "beforeSubmitPrompt": [{"command": ".cursor/hooks/fm-busy-turnend.sh busy"}],
-    "stop": [{"command": ".cursor/hooks/fm-busy-turnend.sh idle-stop"}],
-    "sessionEnd": [{"command": ".cursor/hooks/fm-busy-turnend.sh idle-session-end"}],
-})
+for event, command in (
+    ("beforeSubmitPrompt", ".cursor/hooks/fm-busy-turnend.sh busy"),
+    ("stop", ".cursor/hooks/fm-busy-turnend.sh idle-stop"),
+    ("sessionEnd", ".cursor/hooks/fm-busy-turnend.sh idle-session-end"),
+):
+    document["hooks"].setdefault(event, []).append({"command": command})
 with open(path, "w", encoding="utf-8") as handle:
     json.dump(document, handle, separators=(",", ":"))
     handle.write("\n")
@@ -306,12 +322,63 @@ import sys
 
 hooks = json.load(open(sys.argv[1]))["hooks"]
 assert hooks["user"] == [{"command": "keep"}, {"command": "user-later"}], hooks
-for event in ("beforeSubmitPrompt", "stop", "sessionEnd"):
-    assert not hooks[event], hooks
+assert hooks["beforeSubmitPrompt"] == [
+    {"command": ".cursor/hooks/fm-busy-turnend.sh busy"}
+], hooks
+for event in ("stop", "sessionEnd"):
+    assert hooks[event] == [], hooks
 PY
   assert_absent "$wt/.cursor/hooks/fm-busy-turnend.sh" \
     "Cursor hook restore left its generated script after preserving user edits"
   pass "Cursor hook restoration preserves user edits while removing Firstmate entries"
+}
+
+test_cursor_hook_backup_is_atomic() {
+  local rec case_dir home proj wt fakebin id out status
+  rec=$(make_spawn_case atomic-backup)
+  IFS='|' read -r case_dir home proj wt fakebin id <<EOF
+$rec
+EOF
+  mkdir -p "$wt/.cursor/hooks"
+  printf '%s\n' '{"version":1,"hooks":{}}' > "$wt/.cursor/hooks.json"
+  ln -s "$case_dir/unsafe-hook" "$wt/.cursor/hooks/fm-busy-turnend.sh"
+  out=$(run_cursor_spawn "$home" "$proj" "$wt" "$fakebin" "$id" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "unsafe Cursor hook script was accepted"
+  assert_absent "$home/state/$id.cursor-hooks.json" \
+    "failed Cursor backup left a partial hooks.json sidecar"
+  assert_absent "$home/state/$id.cursor-fm-busy-turnend.sh" \
+    "failed Cursor backup left a partial hook-script sidecar"
+  assert_absent "$home/state/$id.busy-gen" \
+    "failed Cursor backup left its busy generation armed"
+  [ -L "$wt/.cursor/hooks/fm-busy-turnend.sh" ] \
+    || fail "failed Cursor backup modified the unsafe user hook path"
+  pass "Cursor hook backup validates atomically and abort cleanup retires busy state"
+}
+
+test_same_cursor_relaunch_preserves_preexisting_hook_script() {
+  local rec case_dir home proj wt fakebin id out status expected_script
+  rec=$(make_spawn_case cursor-relaunch)
+  IFS='|' read -r case_dir home proj wt fakebin id <<EOF
+$rec
+EOF
+  mkdir -p "$wt/.cursor/hooks"
+  printf '%s\n' '{"version":1,"hooks":{}}' > "$wt/.cursor/hooks.json"
+  printf '%s\n' 'pre-existing user hook' > "$wt/.cursor/hooks/fm-busy-turnend.sh"
+  expected_script="$case_dir/expected-hook.sh"
+  cp "$wt/.cursor/hooks/fm-busy-turnend.sh" "$expected_script"
+  out=$(run_cursor_spawn "$home" "$proj" "$wt" "$fakebin" "$id" \
+    --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  expect_code 0 "$status" "initial Cursor spawn should succeed: $out"
+  out=$(run_cursor_relaunch "$home" "$wt" "$fakebin" "$id" 2>&1)
+  status=$?
+  expect_code 0 "$status" "same-Cursor relaunch should succeed: $out"
+  cmp -s "$expected_script" "$home/state/$id.cursor-fm-busy-turnend.sh" \
+    || fail "same-Cursor relaunch did not preserve the pre-existing hook script as its new backup"
+  assert_present "$wt/.cursor/hooks/fm-busy-turnend.sh" \
+    "same-Cursor relaunch failed to install its replacement hook script"
+  pass "same-Cursor relaunch restores before replacing hook wiring"
 }
 
 test_spawn_abort_restores_cursor_hooks() {
@@ -405,6 +472,8 @@ test_cursor_family_is_exact
 test_cursor_composer_placeholder_requires_cursor_glyph
 test_cursor_hooks_restore_existing_files
 test_cursor_hook_restore_preserves_user_hook_edits
+test_cursor_hook_backup_is_atomic
+test_same_cursor_relaunch_preserves_preexisting_hook_script
 test_spawn_abort_restores_cursor_hooks
 test_cursor_hooks_reject_parent_symlinks
 test_cursor_malformed_hooks_fail_before_writing

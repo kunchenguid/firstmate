@@ -1133,7 +1133,7 @@ teardown_treehouse_return() {
 }
 
 validate_worktree_teardown_safety() {
-  local dirty_raw dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch
+  local dirty_raw dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch line path
   [ -d "$WT" ] || return 0
   [ "$FORCE" != "--force" ] || return 0
   case "$KIND" in
@@ -1148,7 +1148,23 @@ validate_worktree_teardown_safety() {
     echo "Restore the git index state, or get the captain's explicit OK to discard, then --force." >&2
     return 1
   fi
-  dirty=$(printf '%s\n' "$dirty_raw" | grep -vE '^\?\? (\.claude/|\.fm-(grok|kimi)-turnend$)' | head -1 || true)
+  dirty=
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    case "$line" in
+      '?? .claude/'*|'?? .fm-grok-turnend'|'?? .fm-kimi-turnend') continue ;;
+    esac
+    path=${line:3}
+    if [ "${line:0:2}" = ' M' ] \
+       && [ "$(fm_control_harness_family "$(meta_value "$META" harness)" 2>/dev/null || true)" = cursor ] \
+       && fm_control_cursor_hook_path_matches_installed "$WT" "$STATE" "$ID" "$path"; then
+      continue
+    fi
+    dirty=$line
+    break
+  done <<EOF
+$dirty_raw
+EOF
 
   if ! unpushed_raw=$(git -C "$WT" log --oneline HEAD --not --remotes -- 2>/dev/null); then
     if worktree_safety_blocked_by_lock "commits not on a remote"; then
@@ -2357,13 +2373,6 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] &&
   ORCA_PATH_MATCH_VERIFIED=1
 fi
 
-if [ "$(fm_control_harness_family "$(meta_value "$META" harness)" 2>/dev/null || true)" = cursor ]; then
-  fm_control_cursor_hooks_restore "$WT" "$STATE" "$ID" || {
-    echo "error: could not restore Cursor hooks for $ID; teardown aborted" >&2
-    exit 1
-  }
-fi
-
 if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
   if validate_worktree_teardown_safety; then
     :
@@ -2388,6 +2397,13 @@ fi
 if [ "$KIND" != secondmate ]; then
   conclude_task_no_mistakes_run "$WT"
   reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
+fi
+
+if [ "$(fm_control_harness_family "$(meta_value "$META" harness)" 2>/dev/null || true)" = cursor ]; then
+  fm_control_cursor_hooks_restore "$WT" "$STATE" "$ID" || {
+    echo "error: could not restore Cursor hooks for $ID; teardown aborted" >&2
+    exit 1
+  }
 fi
 
 # Fix 3 (see script header): sweep remote job workers abandoned by an already
