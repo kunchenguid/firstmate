@@ -1007,6 +1007,41 @@ test_send_text_submit_rejects_unobserved_paste() {
   pass "fm_backend_zellij_send_text_submit: refuses confirmation when paste exits successfully without typing"
 }
 
+test_send_text_submit_rejects_transcript_echo_with_unrelated_draft() {
+  local dir fb out
+  dir="$TMP_ROOT/submit-transcript-echo"; mkdir -p "$dir/responses"
+  zellij_pane_response "$dir" 1 7 3
+  zellij_pane_response "$dir" 3 7 3
+  printf '%s' $'hello captain\n❯ unrelated draft' > "$dir/responses/4.out"
+  fb=$(make_zellij_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST="firstmate" \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_send_text_submit firstmate:7 "hello captain" 2 0.01 0.01' "$ROOT" )
+  [ "$out" = send-failed ] || fail "a transcript echo outside an unrelated draft should report send-failed, got '$out'"
+  assert_not_contains "$(cat "$dir/log")" $'\x1f''send-keys' \
+    "send_text_submit should not send Enter when only a transcript echo matches the intended text"
+  pass "fm_backend_zellij_send_text_submit: transcript echoes outside the selected composer cannot prove typing"
+}
+
+test_send_text_submit_accepts_wrapped_boxed_text() {
+  local dir fb out
+  dir="$TMP_ROOT/submit-wrapped-box"; mkdir -p "$dir/responses"
+  zellij_pane_response "$dir" 1 7 3
+  zellij_pane_response "$dir" 3 7 3
+  printf '%s' $'╭────────────────────╮\n│ hello              │\n│ captain            │\n╰────────────────────╯' > "$dir/responses/4.out"
+  zellij_pane_response "$dir" 5 7 3
+  zellij_pane_response "$dir" 7 7 3
+  printf '%s' $'╭────────────────────╮\n│ ❯                  │\n╰────────────────────╯' > "$dir/responses/8.out"
+  fb=$(make_zellij_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST="firstmate" \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_send_text_submit firstmate:7 "hello captain" 2 0.01 0.01' "$ROOT" )
+  [ "$out" = empty ] || fail "wrapped text in the selected box should be observed and submitted, got '$out'"
+  assert_contains "$(cat "$dir/log")" $'\x1f''send-keys' \
+    "send_text_submit should send Enter after observing wrapped boxed text"
+  pass "fm_backend_zellij_send_text_submit: observes wrapped text inside the selected composer"
+}
+
 test_composer_state_reads_styled_dump() {
   local dir fb out
   dir="$TMP_ROOT/composer-styled"; mkdir -p "$dir/responses"
@@ -1202,6 +1237,8 @@ test_send_text_submit_detects_landed_send
 test_send_text_submit_detects_swallowed_enter
 test_send_text_submit_unrelated_change_is_not_delivery
 test_send_text_submit_rejects_unobserved_paste
+test_send_text_submit_rejects_transcript_echo_with_unrelated_draft
+test_send_text_submit_accepts_wrapped_boxed_text
 test_composer_state_reads_styled_dump
 test_composer_state_dead_pane_is_unknown
 test_send_text_submit_send_failed_when_session_absent

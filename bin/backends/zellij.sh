@@ -537,19 +537,19 @@ fm_backend_zellij_composer_state() {  # <target> [expected-label] -> empty|pendi
 }
 
 fm_backend_zellij_composer_observed_text() {  # <target> <text> [expected-label]
-  local target=$1 text=$2 expected_label=${3:-} cap caps verdict plain needle
+  local target=$1 text=$2 expected_label=${3:-} cap caps verdict candidate needle
   [ -n "$text" ] || return 1
   cap=$(fm_backend_zellij_composer_capture "$target" "$expected_label") || return 1
   caps=$(printf 'styled=1\ncursor=0\nidentity=0\nrows=%s' "$FM_COMPOSER_CAPTURE_LINES")
   verdict=$(fm_composer_classify_screen "$caps" "$cap")
   case "$verdict" in pending|pending-unproven) ;; *) return 1 ;; esac
-  plain=$(printf '%s' "$cap" | fm_composer_strip_ansi)
-  fm_composer_normalize_spaces_var plain
+  candidate=$(fm_composer_extract_selected_content "$caps" "$cap") || return 1
+  fm_composer_normalize_spaces_var candidate
   fm_composer_normalize_spaces_var text
-  plain=${plain//[$' \t\r\n\v\f']/}
+  candidate=${candidate//[$' \t\r\n\v\f']/}
   needle=${text//[$' \t\r\n\v\f']/}
   [ -n "$needle" ] || return 1
-  case "$plain" in *"$needle"*) return 0 ;; *) return 1 ;; esac
+  case "$candidate" in *"$needle"*) return 0 ;; *) return 1 ;; esac
 }
 
 # fm_backend_zellij_send_text_submit: type <text> into <target> once (raw,

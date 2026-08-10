@@ -404,6 +404,19 @@ test_cursor_on_box_bottom_is_unknown() {
   pass "fm_composer_classify_screen: a box bottom border is never an input row"
 }
 
+test_selected_content_is_composer_scoped_and_wrap_normalized() {
+  local screen out
+  screen=$'hello captain in transcript\n╭────────────────────╮\n│ unrelated          │\n│ draft               │\n╰────────────────────╯'
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED_NOID" "$screen")
+  [ "$out" = 'unrelated draft' ] \
+    || fail "box extraction should contain only normalized selected composer rows, got '$out'"
+  screen=$'hello captain in transcript\n┃ hello\n┃ captain\n┃ Build · GPT-5.5 Fast OpenAI · high'
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED_NOID" "$screen")
+  [ "$out" = 'hello captain Build · GPT-5.5 Fast OpenAI · high' ] \
+    || fail "left-bar extraction should join the selected wrapped rows, got '$out'"
+  pass "fm_composer_extract_selected_content: scopes and normalizes wrapped composer content"
+}
+
 test_bare_shell_glyphs_are_unknown
 test_stripped_unbordered_content_uses_plain_content
 test_bare_shell_prompt_with_command_is_not_empty
@@ -427,3 +440,4 @@ test_bottom_most_candidate_wins
 test_incomplete_lower_box_invalidates_stale_candidate
 test_titled_bottom_requires_matching_width
 test_cursor_on_box_bottom_is_unknown
+test_selected_content_is_composer_scoped_and_wrap_normalized

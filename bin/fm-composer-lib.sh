@@ -875,10 +875,84 @@ _fm_composer_classify_leftbar() {  # <screen> <styled> <first-row> <last-row>
   fi
 }
 
+_fm_composer_select_cursorless() {
+  local generic=-1
+  FM_COMPOSER_SELECTED_KIND=
+  FM_COMPOSER_SELECTED_FIRST=-1
+  FM_COMPOSER_SELECTED_LAST=-1
+  FM_COMPOSER_SELECTED_AMBIG=0
+  if [ "$FM_COMPOSER_SCAN_BOX_BOTTOM" -ge 0 ]; then
+    generic=$FM_COMPOSER_SCAN_BOX_BOTTOM
+    FM_COMPOSER_SELECTED_KIND=box
+    FM_COMPOSER_SELECTED_FIRST=$((FM_COMPOSER_SCAN_BOX_TOP + 1))
+    FM_COMPOSER_SELECTED_LAST=$((FM_COMPOSER_SCAN_BOX_BOTTOM - 1))
+    FM_COMPOSER_SELECTED_AMBIG=$FM_COMPOSER_SCAN_BOX_AMBIG
+  fi
+  if [ "$FM_COMPOSER_SCAN_BARE_ROW" -gt "$generic" ]; then
+    generic=$FM_COMPOSER_SCAN_BARE_ROW
+    FM_COMPOSER_SELECTED_KIND=bare
+    FM_COMPOSER_SELECTED_FIRST=$FM_COMPOSER_SCAN_BARE_ROW
+    FM_COMPOSER_SELECTED_LAST=$FM_COMPOSER_SCAN_BARE_ROW
+  fi
+  if [ "$FM_COMPOSER_SCAN_LEFTBAR_END" -gt "$generic" ]; then
+    generic=$FM_COMPOSER_SCAN_LEFTBAR_END
+    FM_COMPOSER_SELECTED_KIND=leftbar
+    FM_COMPOSER_SELECTED_FIRST=$FM_COMPOSER_SCAN_LEFTBAR_START
+    FM_COMPOSER_SELECTED_LAST=$FM_COMPOSER_SCAN_LEFTBAR_END
+  fi
+  if [ "$FM_COMPOSER_SCAN_INCOMPLETE_BOX_FROM" -gt "$generic" ]; then
+    FM_COMPOSER_SELECTED_KIND=
+    return 1
+  fi
+  if [ "$FM_COMPOSER_SCAN_PI_PAIR_FOUND" = 1 ] \
+     && [ "$FM_COMPOSER_SCAN_PI_CLOSE" -gt "$generic" ] \
+     && [ "$generic" -lt "$FM_COMPOSER_SCAN_PI_OPEN" ]; then
+    FM_COMPOSER_SELECTED_KIND=pi
+    FM_COMPOSER_SELECTED_FIRST=$((FM_COMPOSER_SCAN_PI_OPEN + 1))
+    FM_COMPOSER_SELECTED_LAST=$((FM_COMPOSER_SCAN_PI_CLOSE - 1))
+    return 0
+  fi
+  if [ "$FM_COMPOSER_SCAN_PI_PAIR_FOUND" = 0 ] \
+     && [ "$FM_COMPOSER_SCAN_PI_LAST_SEPARATOR" -gt "$generic" ]; then
+    FM_COMPOSER_SELECTED_KIND=
+    return 1
+  fi
+  [ -n "$FM_COMPOSER_SELECTED_KIND" ]
+}
+
+fm_composer_extract_selected_content() {  # <caps> <screen>
+  local caps=$1 screen=$2 styled=0 kv plain row raw content glyph joined=
+  while IFS= read -r kv; do
+    [ "$kv" = styled=1 ] && styled=1
+  done <<EOF
+$caps
+EOF
+  plain=$(printf '%s\n' "$screen" | fm_composer_strip_ansi)
+  _fm_composer_scan_screen "$plain" ''
+  _fm_composer_select_cursorless || return 1
+  row=$FM_COMPOSER_SELECTED_FIRST
+  while [ "$row" -le "$FM_COMPOSER_SELECTED_LAST" ]; do
+    raw=$(_fm_composer_screen_row "$row" "$screen")
+    content=$(_fm_composer_row_content "$raw" "$styled")
+    case "$FM_COMPOSER_SELECTED_KIND" in
+      bare)
+        if fm_composer_leading_agent_glyph_var glyph "$content"; then
+          content=${content#*"$glyph"}
+        fi
+        ;;
+      leftbar) case "$content" in '┃'*) content=${content#┃} ;; esac ;;
+    esac
+    fm_composer_normalize_spaces_var content
+    fm_composer_normalize_trim_var content
+    [ -z "$content" ] || joined="${joined}${joined:+ }$content"
+    row=$((row + 1))
+  done
+  printf '%s\n' "$joined" | LC_ALL=C awk '{$1=$1; printf "%s", $0}'
+}
+
 fm_composer_classify_screen() {  # <caps> <screen> [cursor_row] [identity]
   local caps=$1 screen=$2 cy=${3:-} identity=${4:-}
   local styled=0 cursor=0 has_identity=0 kv plain
-  local generic=-1 winner=''
   while IFS= read -r kv; do
     case "$kv" in
       styled=1) styled=1 ;;
@@ -951,41 +1025,17 @@ EOF
   # No cursor: the bottom-most shape wins, with the pi-separator staleness
   # rules layered on (a live pi composer pair below the generic candidate
   # proves that candidate stale).
-  generic=-1
-  winner=''
-  if [ "$FM_COMPOSER_SCAN_BOX_BOTTOM" -ge 0 ]; then
-    generic=$FM_COMPOSER_SCAN_BOX_BOTTOM
-    winner=box
-  fi
-  if [ "$FM_COMPOSER_SCAN_BARE_ROW" -gt "$generic" ]; then
-    generic=$FM_COMPOSER_SCAN_BARE_ROW
-    winner=bare
-  fi
-  if [ "$FM_COMPOSER_SCAN_LEFTBAR_END" -gt "$generic" ]; then
-    generic=$FM_COMPOSER_SCAN_LEFTBAR_END
-    winner=leftbar
-  fi
-  if [ "$FM_COMPOSER_SCAN_INCOMPLETE_BOX_FROM" -gt "$generic" ]; then
+  if ! _fm_composer_select_cursorless; then
     printf 'unknown'
     return 0
   fi
-  if [ "$FM_COMPOSER_SCAN_PI_PAIR_FOUND" = 1 ] \
-     && [ "$FM_COMPOSER_SCAN_PI_CLOSE" -gt "$generic" ] \
-     && [ "$generic" -lt "$FM_COMPOSER_SCAN_PI_OPEN" ]; then
-    _fm_composer_pi_verdict "$screen" "$styled" "$has_identity" "$identity"
-    return 0
-  fi
-  if [ "$FM_COMPOSER_SCAN_PI_PAIR_FOUND" = 0 ] \
-     && [ "$FM_COMPOSER_SCAN_PI_LAST_SEPARATOR" -gt "$generic" ]; then
-    # A lower unmatched separator proves the generic candidate is stale, but
-    # does not provide the complete pi composer structure.
-    printf 'unknown'
-    return 0
-  fi
-  case "$winner" in
+  case "$FM_COMPOSER_SELECTED_KIND" in
+    pi)
+      _fm_composer_pi_verdict "$screen" "$styled" "$has_identity" "$identity"
+      ;;
     box)
-      _fm_composer_classify_rows "$screen" "$styled" "$FM_COMPOSER_SCAN_BOX_AMBIG" \
-        "$((FM_COMPOSER_SCAN_BOX_TOP + 1))" "$((FM_COMPOSER_SCAN_BOX_BOTTOM - 1))"
+      _fm_composer_classify_rows "$screen" "$styled" "$FM_COMPOSER_SELECTED_AMBIG" \
+        "$FM_COMPOSER_SELECTED_FIRST" "$FM_COMPOSER_SELECTED_LAST"
       ;;
     bare)
       if [ "$FM_COMPOSER_SCAN_PI_PAIR_FOUND" = 1 ] \
@@ -999,10 +1049,7 @@ EOF
       ;;
     leftbar)
       _fm_composer_classify_leftbar "$screen" "$styled" \
-        "$FM_COMPOSER_SCAN_LEFTBAR_START" "$FM_COMPOSER_SCAN_LEFTBAR_END"
-      ;;
-    *)
-      printf 'unknown'
+        "$FM_COMPOSER_SELECTED_FIRST" "$FM_COMPOSER_SELECTED_LAST"
       ;;
   esac
 }
