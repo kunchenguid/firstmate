@@ -650,6 +650,7 @@ SPAWN_META_TMP=
 SPAWN_META_LOCK=
 SPAWN_META_LOCK_HELD=0
 SPAWN_META_PUBLISH_STARTED=0
+SPAWN_META_PUBLISHED=0
 SPAWN_TASK_SET_LOCK=
 SPAWN_TASK_SET_LOCK_HELD=0
 RELAUNCH_REPLACEMENT_PENDING=0
@@ -660,6 +661,7 @@ RELAUNCH_REPLACEMENT_WT=
 RELAUNCH_PRIOR_CURSOR=0
 CURSOR_WIRING_PENDING=0
 CURSOR_WIRING_RESTORE_READY=0
+CURSOR_WIRING_OWNS_TRANSACTION=0
 CURSOR_WIRING_BUSY_GEN=
 CURSOR_WIRING_STATE=
 CURSOR_WIRING_WT=
@@ -696,7 +698,7 @@ spawn_abort_cleanup() {
     RELAUNCH_REPLACEMENT_PENDING=0
     if [ "$RELAUNCH_REPLACEMENT_HARNESS" = cursor ] \
        && [ "$CURSOR_WIRING_RESTORE_READY" != 1 ]; then
-      [ "$RELAUNCH_PRIOR_CURSOR" = 1 ] \
+      [ "$CURSOR_WIRING_OWNS_TRANSACTION" != 1 ] \
         || fm_control_cursor_hooks_forget "$RELAUNCH_REPLACEMENT_STATE" "$ID" || true
     elif ! clear_relaunch_harness_wiring \
           "$RELAUNCH_REPLACEMENT_HARNESS" \
@@ -705,7 +707,7 @@ spawn_abort_cleanup() {
           "$ID"; then
       echo "warning: could not remove replacement wiring after aborted relaunch of $ID" >&2
     elif [ "$RELAUNCH_REPLACEMENT_HARNESS" = cursor ] \
-         && [ "$RELAUNCH_PRIOR_CURSOR" != 1 ]; then
+         && [ "$CURSOR_WIRING_OWNS_TRANSACTION" = 1 ]; then
       fm_control_cursor_hooks_forget "$RELAUNCH_REPLACEMENT_STATE" "$ID" || true
     fi
     if [ -n "$RELAUNCH_REPLACEMENT_BUSY_GEN" ]; then
@@ -719,9 +721,13 @@ spawn_abort_cleanup() {
   if [ "$CURSOR_WIRING_PENDING" = 1 ]; then
     CURSOR_WIRING_PENDING=0
     if [ "$CURSOR_WIRING_RESTORE_READY" != 1 ]; then
-      fm_control_cursor_hooks_forget "$CURSOR_WIRING_STATE" "$ID" || true
+      [ "$CURSOR_WIRING_OWNS_TRANSACTION" != 1 ] \
+        || fm_control_cursor_hooks_forget "$CURSOR_WIRING_STATE" "$ID" || true
     elif fm_control_cursor_hooks_restore "$CURSOR_WIRING_WT" "$CURSOR_WIRING_STATE" "$ID"; then
-      fm_control_cursor_hooks_forget "$CURSOR_WIRING_STATE" "$ID" || true
+      if [ "$CURSOR_WIRING_OWNS_TRANSACTION" = 1 ] \
+         && [ "$SPAWN_META_PUBLISHED" != 1 ]; then
+        fm_control_cursor_hooks_forget "$CURSOR_WIRING_STATE" "$ID" || true
+      fi
     else
       echo "warning: could not restore Cursor hooks after aborted spawn of $ID" >&2
     fi
@@ -2438,6 +2444,9 @@ with open(destination, "w", encoding="utf-8") as handle:
 PY
       cursor_backup_mode=
       [ "$RELAUNCH_PRIOR_CURSOR" = 1 ] && cursor_backup_mode=reuse
+      if ! fm_control_cursor_hooks_transaction_present "$STATE_REAL" "$ID"; then
+        CURSOR_WIRING_OWNS_TRANSACTION=1
+      fi
       fm_control_cursor_hooks_backup "$WT" "$STATE_REAL" "$ID" "$cursor_backup_mode" || {
         echo "error: existing Cursor hooks.json is not a safe regular file" >&2
         exit 1
@@ -2473,8 +2482,10 @@ EOF
       mkdir -p "$WT/.cursor/hooks"
       mv -f -- "$cursor_hook_script_tmp" "$WT/.cursor/hooks/fm-busy-turnend.sh"
       mv -f -- "$cursor_hooks_tmp" "$WT/.cursor/hooks.json"
-      exclude_path '.cursor/hooks.json'
-      exclude_path '.cursor/hooks/fm-busy-turnend.sh'
+      if [ ! -e "$STATE_REAL/$ID.cursor-fm-busy-turnend.sh" ] \
+         && [ ! -L "$STATE_REAL/$ID.cursor-fm-busy-turnend.sh" ]; then
+        exclude_path '.cursor/hooks/fm-busy-turnend.sh'
+      fi
       ;;
     opencode*)
       mkdir -p "$WT/.opencode/plugins"
@@ -2781,6 +2792,7 @@ preserve_relaunch_meta() {
 if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_META_PUBLISH_STARTED=1
   mv -f "$SPAWN_META_TMP" "$STATE/$ID.meta"
+  SPAWN_META_PUBLISHED=1
   if [ "$RELAUNCH_PRIOR_CURSOR" = 1 ] \
      && [ "$(fm_control_harness_family "$HARNESS" 2>/dev/null || true)" != cursor ]; then
     fm_control_cursor_hooks_forget "$STATE_REAL" "$ID" || exit 1
@@ -2790,6 +2802,8 @@ if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_META_TMP=
   fm_lock_release "$SPAWN_META_LOCK"
   SPAWN_META_LOCK_HELD=0
+else
+  SPAWN_META_PUBLISHED=1
 fi
 if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
   # The record is published, so this task is now part of the set a teardown

@@ -298,6 +298,18 @@ fm_control_cursor_hooks_record_installed() {  # <worktree> <state-dir> <id> <hoo
   done
 }
 
+fm_control_cursor_hooks_transaction_present() {  # <state-dir> <id>
+  local state=$1 id=$2 path
+  for path in \
+    "$state/$id.cursor-hooks.json" \
+    "$state/$id.cursor-fm-busy-turnend.sh" \
+    "$state/$id.cursor-hooks.json.installed" \
+    "$state/$id.cursor-fm-busy-turnend.sh.installed"; do
+    [ ! -e "$path" ] && [ ! -L "$path" ] || return 0
+  done
+  return 1
+}
+
 fm_control_cursor_hooks_forget() {  # <state-dir> <id>
   local state=$1 id=$2
   rm -f -- "$state/$id.cursor-hooks.json" "$state/$id.cursor-fm-busy-turnend.sh" \
@@ -320,6 +332,29 @@ fm_control_cursor_hook_path_matches_installed() {  # <worktree> <state-dir> <id>
     git -C "$wt" show ":$relative" | cmp -s "$backup" -
   else
     [ ! -e "$backup" ] && [ ! -L "$backup" ]
+  fi
+}
+
+fm_control_cursor_hook_path_is_teardown_safe() {  # <worktree> <state-dir> <id> <relative-path>
+  local wt=$1 state=$2 id=$3 relative=$4 installed backup
+  case "$relative" in
+    .cursor/hooks.json|.cursor/hooks/fm-busy-turnend.sh) ;;
+    *) return 1 ;;
+  esac
+  installed="$state/$id.cursor-$(basename "$relative").installed"
+  [ -f "$installed" ] && [ ! -L "$installed" ] || return 1
+  if fm_control_cursor_hook_path_matches_installed "$wt" "$state" "$id" "$relative"; then
+    return 0
+  fi
+  backup="$state/$id.cursor-$(basename "$relative")"
+  if git -C "$wt" ls-files --error-unmatch -- "$relative" >/dev/null 2>&1; then
+    [ -f "$backup" ] && [ ! -L "$backup" ] \
+      && [ -f "$wt/$relative" ] && [ ! -L "$wt/$relative" ] \
+      && git -C "$wt" show ":$relative" | cmp -s "$backup" - \
+      && cmp -s "$wt/$relative" "$backup"
+  else
+    [ ! -e "$backup" ] && [ ! -L "$backup" ] \
+      && [ ! -e "$wt/$relative" ] && [ ! -L "$wt/$relative" ]
   fi
 }
 

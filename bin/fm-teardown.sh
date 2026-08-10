@@ -1133,14 +1133,14 @@ teardown_treehouse_return() {
 }
 
 validate_worktree_teardown_safety() {
-  local dirty_raw dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch line path
+  local dirty_raw dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch line path cursor_harness
   [ -d "$WT" ] || return 0
   [ "$FORCE" != "--force" ] || return 0
   case "$KIND" in
     secondmate|scout) return 0 ;;
   esac
 
-  if ! dirty_raw=$(git -C "$WT" status --porcelain 2>/dev/null); then
+  if ! dirty_raw=$(git -C "$WT" status --porcelain --untracked-files=all 2>/dev/null); then
     if worktree_safety_blocked_by_lock "uncommitted changes"; then
       return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
     fi
@@ -1149,22 +1149,34 @@ validate_worktree_teardown_safety() {
     return 1
   fi
   dirty=
-  while IFS= read -r line; do
-    [ -n "$line" ] || continue
-    case "$line" in
-      '?? .claude/'*|'?? .fm-grok-turnend'|'?? .fm-kimi-turnend') continue ;;
-    esac
-    path=${line:3}
-    if [ "${line:0:2}" = ' M' ] \
-       && [ "$(fm_control_harness_family "$(meta_value "$META" harness)" 2>/dev/null || true)" = cursor ] \
-       && fm_control_cursor_hook_path_matches_installed "$WT" "$STATE" "$ID" "$path"; then
-      continue
-    fi
-    dirty=$line
-    break
-  done <<EOF
+  cursor_harness=$(fm_control_harness_family "$(meta_value "$META" harness)" 2>/dev/null || true)
+  if [ "$cursor_harness" = cursor ] \
+     && fm_control_cursor_hooks_transaction_present "$STATE" "$ID"; then
+    for path in .cursor/hooks.json .cursor/hooks/fm-busy-turnend.sh; do
+      if ! fm_control_cursor_hook_path_is_teardown_safe "$WT" "$STATE" "$ID" "$path"; then
+        dirty=" M $path"
+        break
+      fi
+    done
+  fi
+  if [ -z "$dirty" ]; then
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      case "$line" in
+        '?? .claude/'*|'?? .fm-grok-turnend'|'?? .fm-kimi-turnend') continue ;;
+      esac
+      path=${line:3}
+      if [ "${line:0:2}" = ' M' ] \
+         && [ "$cursor_harness" = cursor ] \
+         && fm_control_cursor_hook_path_matches_installed "$WT" "$STATE" "$ID" "$path"; then
+        continue
+      fi
+      dirty=$line
+      break
+    done <<EOF
 $dirty_raw
 EOF
+  fi
 
   if ! unpushed_raw=$(git -C "$WT" log --oneline HEAD --not --remotes -- 2>/dev/null); then
     if worktree_safety_blocked_by_lock "commits not on a remote"; then
@@ -2387,6 +2399,15 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
   fi
 fi
 
+TEARDOWN_HERDR_SESSION=
+TEARDOWN_HERDR_PANE=
+if [ "$BACKEND" = herdr ]; then
+  teardown_herdr_preflight_target "$T" "$ID" || exit 1
+  fm_backend_herdr_parse_target "$T" || exit 1
+  TEARDOWN_HERDR_SESSION=$FM_BACKEND_HERDR_SESSION
+  TEARDOWN_HERDR_PANE=$FM_BACKEND_HERDR_PANE
+fi
+
 # Every landed/discard-work refusal above has now passed (or --force skipped
 # them). Fix 1 and Fix 2 (see script header) run here, unconditionally on
 # --force, and before ANY destructive step below - a still-parked run or a
@@ -2417,15 +2438,6 @@ fi
 # every durable record, and the endpoint are all still intact for a plain
 # rerun. An unresolvable lock path (for example an unreachable server) also
 # refuses before any destructive step.
-TEARDOWN_HERDR_SESSION=
-TEARDOWN_HERDR_PANE=
-if [ "$BACKEND" = herdr ]; then
-  teardown_herdr_preflight_target "$T" "$ID" || exit 1
-  fm_backend_herdr_parse_target "$T" || exit 1
-  TEARDOWN_HERDR_SESSION=$FM_BACKEND_HERDR_SESSION
-  TEARDOWN_HERDR_PANE=$FM_BACKEND_HERDR_PANE
-fi
-
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   if [ "$ORCA_PATH_MATCH_VERIFIED" != 1 ]; then

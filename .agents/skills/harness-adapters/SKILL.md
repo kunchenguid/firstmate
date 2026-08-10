@@ -492,5 +492,6 @@ Cursor Agent CLI is a CREWMATE and SCOUT adapter only.
 | Effort | No standalone `--effort` flag; see the launch-profile table. |
 | Resume | `--resume [chatId]` / `--continue` exist on the CLI; firstmate has no verified pane-resume contract for cursor yet. |
 
-`fm-spawn.sh` installs gitignored project hooks at `.cursor/hooks.json` and `.cursor/hooks/fm-busy-turnend.sh` that arm busy/idle events and touch the turn-ended marker on `stop`.
+`fm-spawn.sh` installs project hooks at `.cursor/hooks.json` and `.cursor/hooks/fm-busy-turnend.sh` that arm busy/idle events and touch the turn-ended marker on `stop`.
+The generated script is excluded through git info/exclude only when Firstmate created that path, while pre-existing hook files stay visible to Git safety checks.
 [`docs/verification/cursor.md`](../../../docs/verification/cursor.md) owns the dated live evidence and the opt-in refresh command.

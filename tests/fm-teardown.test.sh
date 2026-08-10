@@ -1031,6 +1031,51 @@ PY
   pass "dirty teardown refusal leaves live Cursor supervision hooks armed"
 }
 
+test_cursor_untracked_hook_edit_refuses_teardown() {
+  local case_dir hook_script installed_hooks rc
+  case_dir=$(make_case cursor-untracked-hook-edit)
+  write_meta "$case_dir" local-only ship
+  printf '%s\n' 'harness=cursor' >> "$case_dir/state/task-x1.meta"
+  mkdir -p "$case_dir/wt/.cursor/hooks"
+  fm_control_cursor_hooks_backup "$case_dir/wt" "$case_dir/state" task-x1
+  printf '%s\n' '{"version":1,"hooks":{"beforeSubmitPrompt":[{"command":".cursor/hooks/fm-busy-turnend.sh busy"}],"stop":[{"command":".cursor/hooks/fm-busy-turnend.sh idle-stop"}],"sessionEnd":[{"command":".cursor/hooks/fm-busy-turnend.sh idle-session-end"}]}}' \
+    > "$case_dir/wt/.cursor/hooks.json"
+  hook_script="$case_dir/wt/.cursor/hooks/fm-busy-turnend.sh"
+  printf '%s\n' 'firstmate hook script' > "$hook_script"
+  fm_control_cursor_hooks_record_installed "$case_dir/wt" "$case_dir/state" task-x1 \
+    "$case_dir/wt/.cursor/hooks.json" "$hook_script"
+  printf '%s\n' '.cursor/hooks.json' '.cursor/hooks/fm-busy-turnend.sh' \
+    >> "$(git -C "$case_dir/wt" rev-parse --git-path info/exclude)"
+  python3 - "$case_dir/wt/.cursor/hooks.json" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    document = json.load(handle)
+document["hooks"]["user-during-task"] = [{"command": "keep-this-edit"}]
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(document, handle, separators=(",", ":"))
+    handle.write("\n")
+PY
+  installed_hooks="$case_dir/edited-hooks.json"
+  cp "$case_dir/wt/.cursor/hooks.json" "$installed_hooks"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "untracked Cursor hook edits must refuse teardown"
+  assert_grep "uncommitted changes present" "$case_dir/stderr" \
+    "untracked Cursor hook edit was not reported"
+  cmp -s "$installed_hooks" "$case_dir/wt/.cursor/hooks.json" \
+    || fail "untracked hook refusal discarded the user edit"
+  assert_present "$case_dir/state/task-x1.cursor-hooks.json.installed" \
+    "untracked hook refusal discarded transaction ownership"
+  pass "teardown detects edits to untracked Cursor hook configuration"
+}
+
 test_cursor_relaunch_dirty_baseline_refuses_teardown() {
   local case_dir hook_script installed_hooks rc
   case_dir=$(make_case cursor-relaunch-dirty-baseline)
@@ -1800,6 +1845,12 @@ test_cursor_herdr_teardown_retry_retains_hook_ownership() {
     "failed Cursor Herdr teardown discarded the script snapshot"
   assert_present "$case_dir/state/task-x1.meta" \
     "failed Cursor Herdr teardown discarded task metadata"
+  cmp -s "$case_dir/state/task-x1.cursor-hooks.json.installed" \
+    "$case_dir/wt/.cursor/hooks.json" \
+    || fail "failed Cursor Herdr preflight removed live hooks.json wiring"
+  cmp -s "$case_dir/state/task-x1.cursor-fm-busy-turnend.sh.installed" \
+    "$case_dir/wt/.cursor/hooks/fm-busy-turnend.sh" \
+    || fail "failed Cursor Herdr preflight removed the live hook script"
 
   FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" \
     FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS=1 \
@@ -2849,6 +2900,7 @@ test_content_fallback_refreshes_stale_origin_ref
 test_dirty_worktree_refuses
 test_cursor_hook_transaction_is_normalized_before_safety_check
 test_cursor_dirty_refusal_keeps_live_hook_transaction
+test_cursor_untracked_hook_edit_refuses_teardown
 test_cursor_relaunch_dirty_baseline_refuses_teardown
 test_gh_error_and_content_absent_refuses
 test_stale_index_lock_cleared_and_teardown_succeeds

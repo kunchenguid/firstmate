@@ -220,6 +220,10 @@ PY
   assert_present "$wt/.cursor/hooks/fm-busy-turnend.sh" "cursor spawn did not write busy/turnend hook"
   [ -x "$wt/.cursor/hooks/fm-busy-turnend.sh" ] \
     || fail "cursor busy/turnend hook must be executable"
+  git -C "$wt" check-ignore -q -- .cursor/hooks.json \
+    && fail "cursor spawn permanently ignored the user-owned hooks.json"
+  git -C "$wt" check-ignore -q -- .cursor/hooks/fm-busy-turnend.sh \
+    || fail "cursor spawn did not ignore its generated hook script"
   python3 - "$wt/.cursor/hooks.json" <<'PY' || fail "cursor hooks JSON does not expose the required events"
 import json, sys
 hooks = json.load(open(sys.argv[1]))["hooks"]
@@ -500,6 +504,8 @@ EOF
     --mode no-mistakes --yolo off 2>&1)
   status=$?
   expect_code 0 "$status" "initial Cursor spawn should succeed: $out"
+  git -C "$wt" check-ignore -q -- .cursor/hooks/fm-busy-turnend.sh \
+    && fail "cursor spawn ignored a pre-existing user hook script"
   printf '%s\n' 'divergent live hook' > "$wt/.cursor/hooks/fm-busy-turnend.sh"
   out=$(run_cursor_relaunch "$home" "$wt" "$fakebin" "$id" 2>&1)
   status=$?
@@ -561,7 +567,7 @@ test_cursor_restore_recreates_removed_preexisting_hook_script() {
   pass "Cursor restoration recreates a removed pre-existing hook script"
 }
 
-test_spawn_abort_restores_cursor_hooks() {
+test_spawn_abort_preserves_cursor_recovery_for_durable_task() {
   local rec case_dir home proj wt fakebin id out status expected_hooks expected_script
   rec=$(make_spawn_case abort-hooks)
   IFS='|' read -r case_dir home proj wt fakebin id <<EOF
@@ -584,11 +590,52 @@ EOF
     || fail "aborted Cursor spawn did not restore the pre-existing hook script"
   assert_absent "$home/state/$id.busy-gen" \
     "aborted Cursor spawn left its busy generation armed"
-  assert_absent "$home/state/$id.cursor-hooks.json" \
-    "aborted Cursor spawn left its hook backup behind"
-  assert_absent "$home/state/$id.cursor-hooks.json.installed" \
-    "aborted Cursor spawn left its hook transaction snapshot behind"
-  pass "aborted Cursor spawn restores its hook transaction"
+  assert_present "$home/state/$id.meta" \
+    "aborted Cursor spawn did not leave its durable task record"
+  assert_present "$home/state/$id.cursor-hooks.json.installed" \
+    "aborted Cursor spawn discarded recovery needed by its durable task"
+  assert_present "$home/state/$id.cursor-fm-busy-turnend.sh.installed" \
+    "aborted Cursor spawn discarded its generated-script snapshot"
+  out=$(run_cursor_relaunch "$home" "$wt" "$fakebin" "$id" 2>&1)
+  status=$?
+  expect_code 0 "$status" "durable Cursor task could not relaunch after spawn abort: $out"
+  assert_present "$wt/.cursor/hooks/fm-busy-turnend.sh" \
+    "Cursor relaunch did not re-arm the retained hook transaction"
+  pass "aborted Cursor spawn retains recovery for its durable task"
+}
+
+test_spawn_retry_preserves_preexisting_cursor_recovery() {
+  local rec case_dir home proj wt fakebin id out status expected
+  rec=$(make_spawn_case preexisting-recovery)
+  IFS='|' read -r case_dir home proj wt fakebin id <<EOF
+$rec
+EOF
+  mkdir -p "$wt/.cursor/hooks"
+  printf '%s\n' '{"version":1,"hooks":{}}' > "$wt/.cursor/hooks.json"
+  printf '%s\n' 'original hooks recovery' > "$home/state/$id.cursor-hooks.json"
+  printf '%s\n' 'original script recovery' > "$home/state/$id.cursor-fm-busy-turnend.sh"
+  printf '%s\n' 'installed hooks recovery' > "$home/state/$id.cursor-hooks.json.installed"
+  printf '%s\n' 'installed script recovery' > "$home/state/$id.cursor-fm-busy-turnend.sh.installed"
+  expected="$case_dir/expected-state"
+  mkdir -p "$expected"
+  cp "$home/state/$id.cursor-hooks.json" "$expected/hooks"
+  cp "$home/state/$id.cursor-fm-busy-turnend.sh" "$expected/script"
+  cp "$home/state/$id.cursor-hooks.json.installed" "$expected/hooks-installed"
+  cp "$home/state/$id.cursor-fm-busy-turnend.sh.installed" "$expected/script-installed"
+  out=$(run_cursor_spawn "$home" "$proj" "$wt" "$fakebin" "$id" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn retry unexpectedly replaced pre-existing recovery"
+  cmp -s "$expected/hooks" "$home/state/$id.cursor-hooks.json" \
+    || fail "spawn retry replaced the retained hooks backup"
+  cmp -s "$expected/script" "$home/state/$id.cursor-fm-busy-turnend.sh" \
+    || fail "spawn retry replaced the retained script backup"
+  cmp -s "$expected/hooks-installed" "$home/state/$id.cursor-hooks.json.installed" \
+    || fail "spawn retry deleted the retained installed hooks snapshot"
+  cmp -s "$expected/script-installed" "$home/state/$id.cursor-fm-busy-turnend.sh.installed" \
+    || fail "spawn retry deleted the retained installed script snapshot"
+  assert_absent "$home/state/$id.busy-gen" \
+    "refused spawn retry left its busy generation armed"
+  pass "Cursor spawn retry preserves recovery it does not own"
 }
 
 test_cursor_hooks_reject_parent_symlinks() {
@@ -662,7 +709,8 @@ test_spawn_abort_retains_cursor_backups_when_restore_fails
 test_same_cursor_relaunch_preserves_preexisting_hook_script
 test_failed_same_cursor_relaunch_remains_retryable
 test_cursor_restore_recreates_removed_preexisting_hook_script
-test_spawn_abort_restores_cursor_hooks
+test_spawn_abort_preserves_cursor_recovery_for_durable_task
+test_spawn_retry_preserves_preexisting_cursor_recovery
 test_cursor_hooks_reject_parent_symlinks
 test_cursor_malformed_hooks_fail_before_writing
 test_tmux_classifies_cursor_agent_only

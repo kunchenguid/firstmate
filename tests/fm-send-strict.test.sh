@@ -33,6 +33,9 @@ case "${1:-}" in
       esac
     done
     printf 'send-keys target=%s literal=%s arg=%s\n' "$target" "$literal" "${1:-}" >> "$FM_TMUX_LOG"
+    if [ "$literal" = 1 ] && [ "${FM_FAKE_TMUX_SEND_TEXT_FAIL:-0}" = 1 ]; then
+      exit 1
+    fi
     # FM_FAKE_TMUX_SEND_KEY_FAIL names one key whose delivery fails, so the
     # --key exit contract can be driven both ways from the same stub.
     if [ "$literal" = 0 ] && [ -n "${FM_FAKE_TMUX_SEND_KEY_FAIL:-}" ] \
@@ -242,6 +245,24 @@ test_cursor_idle_placeholders_are_exact_and_scoped() {
   pass "fm-send: Cursor idle placeholders are exact and harness-scoped"
 }
 
+test_cursor_backend_failure_uses_actionable_send_error() {
+  local dir fb home err log rc
+  dir="$TMP_ROOT/cursor-send-fail"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); home=$(setup_home cursorfail); err="$dir/send.err"
+  log="$dir/tmux.log"; : > "$log"
+  fm_write_meta "$home/state/cursor-send-fail.meta" \
+    "window=sess:fm-cursor-send-fail" "kind=ship" "harness=cursor"
+
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    FM_TMUX_LOG="$log" FM_FAKE_TMUX_SEND_TEXT_FAIL=1 FM_SEND_SETTLE=0 \
+    "$SEND" cursor-send-fail "deliver this text" >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "Cursor backend failure reported successful delivery"
+  assert_contains "$(cat "$err")" \
+    "text not sent to sess:fm-cursor-send-fail (tmux send failed" \
+    "Cursor backend failure bypassed the actionable send error"
+  pass "fm-send routes Cursor backend failures through send error handling"
+}
+
 # A --key send is how firstmate interrupts a worker, so its exit status is the
 # only signal that the interrupt actually landed.
 # Reporting success for a key that was never delivered would leave supervision
@@ -279,3 +300,4 @@ test_unmatched_single_colon_target_must_exist
 test_fm_prefixed_herdr_session_is_an_explicit_target
 test_healthy_fm_id_send_still_works
 test_cursor_idle_placeholders_are_exact_and_scoped
+test_cursor_backend_failure_uses_actionable_send_error
