@@ -144,6 +144,7 @@ Routing precedence is an explicit per-task captain override, then the best-fit c
 Firstmate alone resolves a matched profile array against a single `quota-axi --json` snapshot taken at that intake.
 Account for every candidate with the catalog evidence, provider relationship, applicable quota and authentication facts, remaining uncertainty, fit and reasoning class, and the headroom, runway, and later pace or reserve evidence used in selection; never omit a candidate, guess, fall back silently, or call the result quota-informed without them.
 Disclosed uncertainty - missing model-level quota, a missing authentication source, unmeasurable headroom, or unmodeled authentication - keeps a candidate eligible and is never a credential or login escalation; only concrete contradictory evidence blocks a candidate.
+Never infer a credential store, provider family, or quota mapping from a harness, model, or source name, and never launch another harness's CLI to judge a candidate.
 Preserve malformed profile configuration as an actionable error rather than selecting around it.
 When every candidate is tight, preserve the captain's strongest-reasoning class rather than silently downgrading it solely to conserve quota; stop and report the tight choice if that class cannot proceed.
 Break genuine evidence ties without array-order or harness bias.
