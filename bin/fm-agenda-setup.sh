@@ -38,7 +38,11 @@ agenda_setup_dir() {
 
 agenda_setup_canonical_dir() {
   local dir=$1 label=$2
-  CDPATH='' cd -- "$dir" 2>/dev/null && pwd -P \
+  if ! CDPATH='' cd -- "$dir" 2>/dev/null; then
+    agenda_setup_error "could not resolve $label directory: $dir"
+    return 1
+  fi
+  pwd -P \
     || { agenda_setup_error "could not resolve $label directory: $dir"; return 1; }
 }
 
@@ -51,16 +55,16 @@ agenda_wrapper_content() {
     "export FM_DATA_OVERRIDE=$(printf '%q' "$DATA")" \
     "export FM_STATE_OVERRIDE=$(printf '%q' "$STATE")" \
     "export FM_AGENDA_REGISTRY=$(printf '%q' "$REGISTRY")" \
-    'CHECK_TIMEOUT=${FM_CHECK_TIMEOUT:-30}' \
+    "CHECK_TIMEOUT=\${FM_CHECK_TIMEOUT:-30}" \
     "case \"\$CHECK_TIMEOUT\" in ''|*[!0-9]*|0) printf '%s\\n' 'agenda-check-error: invalid FM_CHECK_TIMEOUT'; exit 2 ;; esac" \
     "trap 'printf \"%s\\n\" \"agenda-check-error: scanner interrupted\"; exit 124' HUP INT TERM" \
     ". $(printf '%q' "$FM_ROOT/bin/fm-timeout-lib.sh")" \
     "fm_run_timed \"\$CHECK_TIMEOUT\" $(printf '%q' "$FM_ROOT/bin/fm-agenda-scan.sh")" \
     'rc=$?' \
-    'if [ "$rc" -ne 0 ]; then' \
+    "if [ \"\$rc\" -ne 0 ]; then" \
     "  printf '%s\\n' \"agenda-check-error: scanner exited \$rc\"" \
     'fi' \
-    'exit "$rc"'
+    "exit \"\$rc\""
 }
 
 [ "$#" -eq 0 ] || { agenda_setup_error 'usage: fm-agenda-setup.sh'; exit 2; }
