@@ -690,7 +690,7 @@ secondmate_liveness_one() {  # <meta> <id>
     echo "SECONDMATE_LIVENESS: secondmate $id: skipped: recorded harness '$harness' is unverified for recovery (backend=$backend)"
     return 0
   fi
-  agent_state=$(fm_backend_agent_state "$backend" "$target" 2>/dev/null) || agent_state=unreadable
+  agent_state=$(fm_backend_agent_state "$backend" "$target" "$harness" 2>/dev/null) || agent_state=unreadable
   case "$harness" in
     claude|codex|opencode|pi|pi-signed|omp|grok|kimi) ;;
     *)

@@ -71,6 +71,8 @@
 FM_BACKEND_HERDR_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-${FM_ROOT:-$FM_BACKEND_HERDR_ROOT}}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$FM_BACKEND_HERDR_ROOT/bin/fm-session-lock-lib.sh"
 
 # Shared composer-content classifier (empty|pending|unknown, and the fleet-wide
 # dead-shell-vs-agent-composer rule). Owned by bin/fm-composer-lib.sh, reused by
@@ -837,8 +839,8 @@ fm_backend_herdr_projection_focus_restore() {  # <session> <snapshot> <operation
 # pane-death path. The exact-tab restore below remains the backstop, and any
 # ambiguity falls back to the plain explicit close, which the backstop masks
 # exactly as before this hardening.
-fm_backend_herdr_projection_close_pane_focus_preserving() {  # <session> <pane-id> [required-agent-state]
-  local session=$1 pane_id=$2 required_agent_state=${3:-}
+fm_backend_herdr_projection_close_pane_focus_preserving() {  # <session> <pane-id> [required-agent-state] [recorded-harness]
+  local session=$1 pane_id=$2 required_agent_state=${3:-} recorded_harness=${4:-}
   local before active_tab info target_pane target_tab target_ws close_status state plan plan_shell_pid plan_move_record workspace_presence
   FM_BACKEND_HERDR_PROJECTION_CLOSE_AGENT_STATE=""
   [ -n "$pane_id" ] || return 0
@@ -863,7 +865,7 @@ fm_backend_herdr_projection_close_pane_focus_preserving() {  # <session> <pane-i
     return 1
   fi
   if [ -n "$required_agent_state" ]; then
-    state=$(fm_backend_herdr_pane_agent_state "$session" "$pane_id")
+    state=$(fm_backend_herdr_pane_agent_state "$session" "$pane_id" "$recorded_harness")
     FM_BACKEND_HERDR_PROJECTION_CLOSE_AGENT_STATE=$state
     [ "$state" = "$required_agent_state" ] || return 1
   fi
@@ -1896,8 +1898,12 @@ fm_backend_herdr_omp_exited_to_shell() {  # <session> <pane-id>
 #              change as "the pane exists"). The caller must fail safe toward
 #              refusal here, never toward closing - this is the conservative
 #              backstop the husk check depends on.
-fm_backend_herdr_pane_agent_state() {  # <session> <pane_id>
-  local session=$1 pane_id=$2 out code presence status agent
+fm_backend_herdr_pane_agent_state() {  # <session> <pane_id> [recorded-harness]
+  local session=$1 pane_id=$2 recorded_harness=${3:-} out code presence status agent
+  if [ "$recorded_harness" = raw-omp ] || ! fm_harness_omp_attribution_allowed; then
+    printf 'unknown'
+    return 0
+  fi
   presence=$(fm_backend_herdr_pane_presence_state "$session" "$pane_id")
   if [ "$presence" != present ]; then
     case "$presence" in
@@ -1933,8 +1939,8 @@ fm_backend_herdr_pane_agent_state() {  # <session> <pane_id>
 # confirm; live and unknown both refuse (1), so an inconclusive read never
 # licenses closing anything. Restored-layout recovery depends on this
 # fail-safe-toward-refusal behavior.
-fm_backend_herdr_tab_is_husk() {  # <session> <pane_id>
-  case "$(fm_backend_herdr_pane_agent_state "$1" "$2")" in
+fm_backend_herdr_tab_is_husk() {  # <session> <pane_id> [recorded-harness]
+  case "$(fm_backend_herdr_pane_agent_state "$1" "$2" "${3:-}")" in
     dead|no-agent) return 0 ;;
     *) return 1 ;;
   esac
@@ -1945,10 +1951,11 @@ fm_backend_herdr_tab_is_husk() {  # <session> <pane_id>
 # creating a second Herdr state machine: a structurally gone pane is `missing`,
 # a confirmed agent-less pane is `dead`, a registered agent is `alive`, and an
 # unexpected or failed API read is `unreadable`.
-fm_backend_herdr_agent_state() {  # <target>
-  local target=$1
+fm_backend_herdr_agent_state() {  # <target> [recorded-harness]
+  local target=$1 recorded_harness=${2:-}
+  [ "$recorded_harness" = raw-omp ] && { printf 'unverified'; return 0; }
   fm_backend_herdr_parse_target "$target" || { printf 'unreadable'; return 0; }
-  case "$(fm_backend_herdr_pane_agent_state "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")" in
+  case "$(fm_backend_herdr_pane_agent_state "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" "$recorded_harness")" in
     dead) printf 'missing' ;;
     no-agent) printf 'dead' ;;
     live) printf 'alive' ;;
@@ -1958,8 +1965,8 @@ fm_backend_herdr_agent_state() {  # <target>
 
 # Backward-compatible three-state view for callers that only need a yes/no
 # agent verdict. The detailed state contract is owned by fm_backend_agent_state.
-fm_backend_herdr_agent_alive() {  # <target>
-  case "$(fm_backend_herdr_agent_state "$1")" in
+fm_backend_herdr_agent_alive() {  # <target> [recorded-harness]
+  case "$(fm_backend_herdr_agent_state "$1" "${2:-}")" in
     alive) printf 'alive' ;;
     dead|missing) printf 'dead' ;;
     *) printf 'unknown' ;;
@@ -2293,9 +2300,10 @@ fm_backend_herdr_projection_reclaim_rollback() {  # <session> <new-pane>
 # Return 0 means exact reclaim, 2 means non-mutating or exactly rolled-back
 # refusal with flat fallback permitted, and 1 means a live/unknown or
 # post-mutation uncertainty that must refuse the launch.
-fm_backend_herdr_projection_reclaim_task() {  # <session> <journal> <task-id> <home> <meta-workspace> <meta-tab> <meta-pane> <parent-label> <task-label> <cwd>
+fm_backend_herdr_projection_reclaim_task() {  # <session> <journal> <task-id> <home> <meta-workspace> <meta-tab> <meta-pane> <parent-label> <task-label> <cwd> [recorded-harness]
   local session=$1 journal=$2 id=$3 home=$4 meta_workspace=$5 meta_tab=$6 meta_pane=$7
-  local parent_label=$8 task_label=$9 cwd=${10} canonical_home state focus_before active_tab out new_tab new_pane info close_status
+  local parent_label=$8 task_label=$9 cwd=${10} recorded_harness=${11:-}
+  local canonical_home state focus_before active_tab out new_tab new_pane info close_status
   FM_BACKEND_HERDR_PROJECTION_TAB_ID=""
   FM_BACKEND_HERDR_PROJECTION_PANE_ID=""
   fm_backend_herdr_projection_journal_snapshot "$journal" "$id" || return 1
@@ -2325,7 +2333,7 @@ fm_backend_herdr_projection_reclaim_task() {  # <session> <journal> <task-id> <h
     echo "warning: herdr presentation binding for $id has an ambiguous, renamed, foreign, or non-nested live shape; spawning flat" >&2
     return 2
   fi
-  state=$(fm_backend_herdr_pane_agent_state "$session" "$meta_pane")
+  state=$(fm_backend_herdr_pane_agent_state "$session" "$meta_pane" "$recorded_harness")
   case "$state" in
     no-agent) ;;
     dead)
@@ -2378,7 +2386,7 @@ fm_backend_herdr_projection_reclaim_task() {  # <session> <journal> <task-id> <h
     echo "warning: herdr presentation reclaim for $id could not verify its replacement pane; spawning flat" >&2
     return 2
   fi
-  state=$(fm_backend_herdr_pane_agent_state "$session" "$meta_pane")
+  state=$(fm_backend_herdr_pane_agent_state "$session" "$meta_pane" "$recorded_harness")
   case "$state" in
     no-agent) ;;
     live|unknown)
@@ -2392,7 +2400,7 @@ fm_backend_herdr_projection_reclaim_task() {  # <session> <journal> <task-id> <h
       return 2
       ;;
   esac
-  if fm_backend_herdr_projection_close_pane_focus_preserving "$session" "$meta_pane" no-agent; then
+  if fm_backend_herdr_projection_close_pane_focus_preserving "$session" "$meta_pane" no-agent "$recorded_harness"; then
     close_status=0
   else
     close_status=$?
@@ -2412,7 +2420,7 @@ fm_backend_herdr_projection_reclaim_task() {  # <session> <journal> <task-id> <h
     echo "warning: herdr presentation reclaim for $id could not close the exact old husk; spawning flat" >&2
     return 2
   fi
-  if [ "$(fm_backend_herdr_pane_agent_state "$session" "$meta_pane")" != dead ]; then
+  if [ "$(fm_backend_herdr_pane_agent_state "$session" "$meta_pane" "$recorded_harness")" != dead ]; then
     fm_backend_herdr_projection_reclaim_rollback "$session" "$new_pane" || return 1
     return 1
   fi
@@ -2442,8 +2450,9 @@ fm_backend_herdr_projection_reclaim_task() {  # <session> <journal> <task-id> <h
 # Missing matches safely degrade to the normal flat workspace.
 # One or more matches allow flat fallback only when every pane is positively
 # dead or agent-free; a live or unknown pane refuses a duplicate launch.
-fm_backend_herdr_projection_recovery_allows_flat() {  # <session> <journal> <task-id>
-  local session=$1 journal=$2 id=$3 token list wsids count wsid panes pane_ids pane state
+fm_backend_herdr_projection_recovery_allows_flat() {  # <session> <journal> <task-id> [recorded-harness]
+  local session=$1 journal=$2 id=$3 recorded_harness=${4:-}
+  local token list wsids count wsid panes pane_ids pane state
   token=$(fm_backend_herdr_projection_journal_token "$journal" "$id") || {
     echo "error: malformed herdr presentation journal for $id; refusing duplicate launch" >&2
     return 1
@@ -2483,7 +2492,7 @@ fm_backend_herdr_projection_recovery_allows_flat() {  # <session> <journal> <tas
     pane_ids=$(printf '%s' "$panes" | jq -r '.result.panes[]? | .pane_id' 2>/dev/null)
     while IFS= read -r pane; do
       [ -n "$pane" ] || continue
-      state=$(fm_backend_herdr_pane_agent_state "$session" "$pane")
+      state=$(fm_backend_herdr_pane_agent_state "$session" "$pane" "$recorded_harness")
       case "$state" in
         dead|no-agent) : ;;
         live|unknown)
@@ -2660,8 +2669,9 @@ fm_backend_herdr_composer_identity() {  # <target> -> "<agent>\t<status>"
 # only when the classifier reports the verdict depends on it (a pi separator
 # pair below every other candidate), preserving this adapter's original
 # consult-only-when-needed behavior.
-fm_backend_herdr_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
-  local target=$1 cap caps verdict identity
+fm_backend_herdr_composer_state() {  # <target> [recorded-harness] -> empty|pending|pending-unproven|unknown
+  local target=$1 recorded_harness=${2:-} cap caps verdict identity
+  [ "$recorded_harness" = raw-omp ] && { printf 'unknown'; return 0; }
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
   if cap=$(fm_backend_herdr_capture_ansi "$target" "$FM_COMPOSER_CAPTURE_LINES" 2>/dev/null); then
     caps=$(printf 'styled=1\ncursor=0\nidentity=1\nrows=%s' "$FM_COMPOSER_CAPTURE_LINES")

@@ -161,6 +161,10 @@ fm_backend_tmux_classify_process_name() {  # <path> [argv0] -> agent|shell|other
   local path=$1 argv0=${2:-} base
   base=${path##*/}
   base=${base#-}
+  if [ "$base" = omp ] && ! fm_harness_omp_attribution_allowed; then
+    printf 'other'
+    return 0
+  fi
   if fm_harness_omp_script_matches "$path" || fm_harness_omp_script_matches "$argv0"; then
     printf 'agent'
     return 0

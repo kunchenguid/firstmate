@@ -47,13 +47,19 @@ fm_harness_path_name() {  # <path>
   return 1
 }
 
+fm_harness_omp_attribution_allowed() {
+  [ "${FM_HARNESS_UNVERIFIED:-}" != raw-omp ]
+}
+
 fm_harness_omp_script_matches() {  # <path>
   local path=$1
+  fm_harness_omp_attribution_allowed || return 1
   [ -n "$path" ] && [ "${path##*/}" = omp ]
 }
 
 fm_harness_omp_path_component() {  # <path>
   local path=$1
+  fm_harness_omp_attribution_allowed || return 1
   case "/$path/" in
     */omp/*) return 0 ;;
   esac
@@ -62,6 +68,7 @@ fm_harness_omp_path_component() {  # <path>
 
 fm_harness_omp_process_matches() {  # <comm> <args>
   local comm=$1 args=$2 script
+  fm_harness_omp_attribution_allowed || return 1
   case "$(basename -- "$comm")" in
     omp) return 0 ;;
     bun)
@@ -93,6 +100,7 @@ fm_harness_process_matches() {  # <comm> <args>
   local comm=$1 args=$2 base argv0 name script
   FM_HARNESS_IS_CLAUDE=0
   base=$(basename -- "$comm")
+  [ "$base" = omp ] && ! fm_harness_omp_attribution_allowed && return 1
   if printf '%s' "$base" | grep -qE "$FM_HARNESS_RE"; then
     case "$base" in *claude*) FM_HARNESS_IS_CLAUDE=1 ;; esac
     return 0

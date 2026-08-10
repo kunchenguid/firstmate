@@ -1007,7 +1007,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
     echo "error: backend '$BACKEND' has no recovery-grade agent-state classifier, so a relaunch cannot prove the previous agent exited; refusing rather than risking two agents in one endpoint" >&2
     exit 1
   }
-  RELAUNCH_STATE=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET")
+  RELAUNCH_STATE=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET" "$(fm_meta_get "$RELAUNCH_META" harness)")
   [ "$RELAUNCH_STATE" = dead ] || {
     echo "error: task $ID's endpoint reads '$RELAUNCH_STATE'; a relaunch requires a positively agent-free endpoint (stop the agent first with bin/fm-control.sh $ID exit)" >&2
     exit 1
@@ -1829,12 +1829,15 @@ herdr_projection_meta_field_exact() {  # <meta> <key>
 # dead or agent-free endpoint before token inspection may allow flat fallback.
 # Exact Herdr fields are retained for the narrower version 2 reclaim path.
 herdr_projection_existing_meta_allows_flat() {  # <meta>
-  local meta=$1 old_backend old_target old_session old_pane old_state target_session target_pane
+  local meta=$1 old_backend old_target old_session old_pane old_state old_harness target_session target_pane
   HERDR_RECOVERY_BACKEND=""
+  HERDR_RECOVERY_HARNESS=""
   HERDR_RECOVERY_WORKSPACE_ID=""
   HERDR_RECOVERY_TAB_ID=""
   HERDR_RECOVERY_PANE_ID=""
   old_backend=$(fm_backend_of_meta "$meta")
+  old_harness=$(fm_meta_get "$meta" harness)
+  HERDR_RECOVERY_HARNESS=$old_harness
   old_target=$(fm_backend_target_of_meta "$meta")
   [ -n "$old_target" ] || {
     echo "error: existing metadata for $ID has no endpoint; refusing duplicate launch while its herdr presentation journal is quarantined" >&2
@@ -1873,7 +1876,7 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
       echo "error: existing herdr endpoint for $ID could not be inspected; refusing duplicate launch" >&2
       return 1
     }
-    old_state=$(fm_backend_herdr_pane_agent_state "$old_session" "$old_pane")
+    old_state=$(fm_backend_herdr_pane_agent_state "$old_session" "$old_pane" "$old_harness")
     case "$old_state" in
       dead|no-agent) return 0 ;;
       live|unknown)
@@ -1882,7 +1885,7 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
         ;;
     esac
   fi
-  old_state=$(fm_backend_agent_alive "$old_backend" "$old_target")
+  old_state=$(fm_backend_agent_alive "$old_backend" "$old_target" "$old_harness")
   case "$old_state" in
     dead) return 0 ;;
     alive|unknown)
@@ -1945,6 +1948,7 @@ case "$BACKEND" in
     fi
     HERDR_PRESENTATION_JOURNAL=$(fm_backend_herdr_projection_journal_path "$STATE" "$ID")
     HERDR_PROJECTED=0
+    HERDR_RECOVERY_HARNESS=""
     if [ "$KIND" != secondmate ] && fm_backend_herdr_presentation_enabled "$CONFIG" "$STATE"; then
       HERDR_SES=$(fm_backend_herdr_session)
       HERDR_PARENT_LABEL=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_workspace_label)
@@ -1961,13 +1965,13 @@ case "$BACKEND" in
           herdr_projection_existing_meta_allows_flat "$STATE/$ID.meta" || exit 1
         fi
         fm_backend_herdr_projection_recovery_allows_flat \
-          "$HERDR_SES" "$HERDR_PRESENTATION_JOURNAL" "$ID" || exit 1
+          "$HERDR_SES" "$HERDR_PRESENTATION_JOURNAL" "$ID" "$HERDR_RECOVERY_HARNESS" || exit 1
         if [ "${HERDR_RECOVERY_BACKEND:-}" = herdr ]; then
           set +e
           FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_projection_reclaim_task \
             "$HERDR_SES" "$HERDR_PRESENTATION_JOURNAL" "$ID" "$HERDR_LABEL_HOME" \
             "$HERDR_RECOVERY_WORKSPACE_ID" "$HERDR_RECOVERY_TAB_ID" "$HERDR_RECOVERY_PANE_ID" \
-            "$HERDR_PARENT_LABEL" "$W" "$PROJ_ABS"
+            "$HERDR_PARENT_LABEL" "$W" "$PROJ_ABS" "$HERDR_RECOVERY_HARNESS"
           HERDR_RECLAIM_STATUS=$?
           set -e
           case "$HERDR_RECLAIM_STATUS" in
@@ -2855,13 +2859,16 @@ fi
 # boundary. Keep the shell statement so raw escape-hatch forms remain runnable.
 case "$HARNESS" in
   omp)
-    LAUNCH="unset CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS FM_PRIMARY_HARNESS GROK_AGENT GROK_HOOK_EVENT; export OMPCODE=1; $LAUNCH"
+    LAUNCH="unset FM_HARNESS_UNVERIFIED CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS FM_PRIMARY_HARNESS GROK_AGENT GROK_HOOK_EVENT; export OMPCODE=1; $LAUNCH"
+    ;;
+  raw-omp)
+    LAUNCH="unset FM_HARNESS_UNVERIFIED OMPCODE CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS FM_PRIMARY_HARNESS GROK_AGENT GROK_HOOK_EVENT; export FM_HARNESS_UNVERIFIED=raw-omp; $LAUNCH"
     ;;
   pi|pi-signed)
-    LAUNCH="unset OMPCODE CLAUDECODE FM_PRIMARY_HARNESS GROK_AGENT GROK_HOOK_EVENT; $LAUNCH"
+    LAUNCH="unset FM_HARNESS_UNVERIFIED OMPCODE CLAUDECODE FM_PRIMARY_HARNESS GROK_AGENT GROK_HOOK_EVENT; $LAUNCH"
     ;;
   *)
-    LAUNCH="unset OMPCODE CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS FM_PRIMARY_HARNESS GROK_AGENT GROK_HOOK_EVENT; $LAUNCH"
+    LAUNCH="unset FM_HARNESS_UNVERIFIED OMPCODE CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS FM_PRIMARY_HARNESS GROK_AGENT GROK_HOOK_EVENT; $LAUNCH"
     ;;
 esac
 if [ -z "$SPAWN_TRACEPARENT" ] && [ "$RELAUNCH" -eq 1 ]; then

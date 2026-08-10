@@ -46,6 +46,7 @@ fm_harness_omp_ancestry_matches() {
 
 
 detect_own() {
+  [ "${FM_HARNESS_UNVERIFIED:-}" = raw-omp ] && { echo unknown; return; }
   # OMP workers launched by Firstmate carry OMPCODE=1. A primary OMP 17.2.12
   # session may omit it, so its exact Bun executable/script ancestry must also
   # outrank an inherited foreign Claude marker.

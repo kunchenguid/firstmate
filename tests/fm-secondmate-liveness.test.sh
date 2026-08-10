@@ -190,12 +190,17 @@ test_agent_state_dispatcher_and_compatibility() {
   out=$(bash -c '. "$0/bin/fm-backend.sh"; fm_backend_source herdr; fm_backend_herdr_pane_agent_state() { printf "live"; }; fm_backend_agent_state herdr sess:p1' "$ROOT")
   [ "$out" = alive ] || fail "detailed dispatcher should route Herdr, got '$out'"
 
+  out=$(PATH="$fb:$BASE_PATH" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state tmux sess:win raw-omp' "$ROOT")
+  [ "$out" = unverified ] || fail "raw-omp metadata should stop the shared liveness dispatcher, got '$out'"
+  out=$(bash -c '. "$0/bin/backends/herdr.sh"; FM_HARNESS_UNVERIFIED=raw-omp fm_backend_herdr_pane_agent_state sess:p1' "$ROOT")
+  [ "$out" = unknown ] || fail "raw-omp marker should stop direct Herdr attribution, got '$out'"
+
   out=$(bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state zellij sess:7' "$ROOT")
   [ "$out" = unverified ] || fail "Zellij should remain unverified, got '$out'"
   out=$(bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_alive zellij sess:7' "$ROOT")
   [ "$out" = unknown ] || fail "the compatibility dispatcher should map unverified to unknown, got '$out'"
 
-  pass "fm_backend_agent_state: routes tmux/Herdr and keeps Zellij unverified"
+  pass "fm_backend_agent_state: gates raw-omp and routes tmux/Herdr safely"
 }
 
 # --- sweep level: bin/fm-bootstrap.sh's secondmate_liveness_sweep -----------
