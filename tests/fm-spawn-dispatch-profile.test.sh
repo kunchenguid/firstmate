@@ -687,6 +687,51 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
   pass "active crew-dispatch profile does not block secondmate launches"
 }
 
+# A secondmate launch is the other place a firstmate PRIMARY session is started,
+# so it clears the same inheritable overrides the launcher does. FM_SESSION_ORIGIN_ID
+# belongs on that list: the pane's shell descends from a runtime server that an
+# unattended start may have booted, and nothing on this path owns an origin
+# record. A secondmate primary that inherited the id would announce itself
+# unattended, fail to claim a record that is not its own, and halt a freshly
+# provisioned home on a phantom anomaly.
+test_secondmate_launch_never_inherits_an_unattended_origin_id() {
+  local rec id sm out status launch probe origin
+  id=profile-secondmate-origin-z21
+  rec=$(make_spawn_case profile-secondmate-origin codex "$id")
+  read_case_record "$rec"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+
+  # The spawning process itself carries an origin id, exactly as it would after an
+  # unattended start left one in the environment its runtime server inherited.
+  out=$(FM_SESSION_ORIGIN_ID=u-leaked-from-the-server \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  expect_code 0 "$status" "the secondmate spawn must succeed: $out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch" "u-leaked-from-the-server" \
+    "the spawning process's origin id reached the secondmate's launch line"
+
+  # Run the composed launch line the way the pane's shell does, with the leaked
+  # value already in that shell's environment, and read what the harness received.
+  probe="$CASE_DIR/probe"
+  mkdir -p "$probe"
+  cat > "$probe/codex" <<'SH'
+#!/usr/bin/env bash
+printf 'origin=%s\n' "${FM_SESSION_ORIGIN_ID:-none}" >> "${FM_PROBE_ENV_LOG:?}"
+exit 0
+SH
+  chmod +x "$probe/codex"
+  origin="$CASE_DIR/harness-env.log"
+  ( cd "$CASE_DIR" && env PATH="$probe:/usr/bin:/bin" \
+      FM_SESSION_ORIGIN_ID=u-leaked-from-the-server FM_PROBE_ENV_LOG="$origin" \
+      bash -c "$launch" ) || fail "the composed secondmate launch line did not run"
+  assert_grep "origin=none" "$origin" \
+    "a leaked origin id survived into a secondmate session that owns no origin record"
+
+  pass "a secondmate primary never inherits an unattended origin id from the spawning process"
+}
+
 test_no_profile_keeps_claude_profile_defaults
 test_relative_home_overrides_launch_with_absolute_cross_process_paths
 test_home_defaults_preserve_absolute_or_resolve_relative_paths
@@ -713,5 +758,6 @@ test_claude_forwards_firstmate_config_dir_when_set
 test_claude_omits_config_dir_prefix_when_unset
 test_non_claude_harness_ignores_config_dir
 test_active_dispatch_profile_does_not_block_secondmate_launch
+test_secondmate_launch_never_inherits_an_unattended_origin_id
 
 echo "# all fm-spawn-dispatch-profile tests passed"

@@ -367,19 +367,26 @@ cmd_start() {
   # (c) Away mode owns supervision through its own daemon while that daemon is
   # ALIVE. Observed alive refuses; observed dead allows and says so; could not
   # observe refuses under its own token, so the two refusals never read alike.
+  # Only the explicit dead verdict reaches the allow branch: an unrecognized
+  # verdict is a reading this gate does not understand, and the ruling's stated
+  # cost of guessing in the permissive direction is a session started beside a
+  # live away supervisor, so the catch-all refuses as could-not-observe.
   if [ -e "$STATE/.afk" ]; then
     away_observe_supervisor
     case "$AWAY_VERDICT" in
       alive)
         refuse refuse_away_mode "away mode is active and its daemon owns supervision here (pid $AWAY_PID)"
         ;;
+      dead)
+        away_dead_note=$(away_dead_detail)
+        printf 'UNATTENDED_AWAY_SUPERVISOR_DEAD %s\n' "$away_dead_note"
+        printf 'away mode is flagged here but its supervisor is not alive, so this start proceeds in its place\n'
+        ;;
       unknown)
         refuse refuse_away_liveness_unknown "away mode is active and its daemon's liveness could not be determined: $AWAY_REASON"
         ;;
       *)
-        away_dead_note=$(away_dead_detail)
-        printf 'UNATTENDED_AWAY_SUPERVISOR_DEAD %s\n' "$away_dead_note"
-        printf 'away mode is flagged here but its supervisor is not alive, so this start proceeds in its place\n'
+        refuse refuse_away_liveness_unknown "away mode is active and its daemon's liveness could not be determined: the liveness reader returned no verdict this gate recognizes ('$AWAY_VERDICT')"
         ;;
     esac
   fi
