@@ -1084,6 +1084,72 @@ EOF
   pass ".pi primary extension: delivery failure resets the logical-run latch"
 }
 
+test_pi_extension_suppresses_guard_turns_while_afk() {
+  local repo home ext log out status
+  repo="$TMP_ROOT/pi-afk-guard-root"
+  home="$TMP_ROOT/pi-afk-guard-home"
+  ext="$repo/.pi/extensions/fm-primary-turnend-guard.ts"
+  log="$TMP_ROOT/pi-afk-guard.log"
+  mkdir -p "$repo/.pi/extensions/lib" "$repo/bin" "$home/state"
+  cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$ext"
+  cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$repo/.pi/extensions/lib/fm-operational-input.ts"
+  cp "$ROOT/bin/fm-operational-input.sh" "$repo/bin/fm-operational-input.sh"
+  cat > "$repo/bin/fm-turnend-guard.sh" <<'SH'
+#!/usr/bin/env bash
+cat >/dev/null
+printf 'guard\n' >> "${FM_GUARD_LOG:?}"
+printf 'AFK guard probe\n' >&2
+exit 2
+SH
+  cat > "$repo/bin/fm-arm-pretool-check.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$repo/bin/fm-turnend-guard.sh" "$repo/bin/fm-arm-pretool-check.sh" "$repo/bin/fm-operational-input.sh"
+  out=$(PLUGIN="$ext" FM_HOME="$home" FM_GUARD_LOG="$log" node --input-type=module 2>&1 <<'EOF'
+import { existsSync, rmSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+const handlers = new Map();
+let prompts = 0;
+const pi = {
+  on(event, handler) { handlers.set(event, handler); },
+  sendUserMessage: async () => { prompts += 1; },
+};
+const afk = `${process.env.FM_HOME}/state/.afk`;
+writeFileSync(afk, "away\n");
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+const input = handlers.get("input");
+if (!input) throw new Error("turn-end input boundary was not registered");
+const guardInput = input({
+  type: "input",
+  source: "extension",
+  text: "\u2063FIRSTMATE_OP: v1 turn-end-guard: routine repair",
+});
+if (guardInput?.action !== "handled") throw new Error(`AFK guard input was not absorbed: ${JSON.stringify(guardInput)}`);
+const awayInput = input({
+  type: "input",
+  source: "extension",
+  text: "\u2063FIRSTMATE_OP: v1 away-supervisor: actionable result",
+});
+if (awayInput?.action !== "continue") throw new Error(`actionable away input was blocked: ${JSON.stringify(awayInput)}`);
+await handlers.get("agent_settled")?.({ type: "agent_settled" }, {});
+if (existsSync(process.env.FM_GUARD_LOG) || prompts !== 0) {
+  throw new Error(`AFK agent settlement ran guard=${existsSync(process.env.FM_GUARD_LOG)} prompts=${prompts}`);
+}
+rmSync(afk);
+await handlers.get("agent_settled")?.({ type: "agent_settled" }, {});
+if (!existsSync(process.env.FM_GUARD_LOG) || prompts !== 1) {
+  throw new Error(`attended guard did not resume: guard=${existsSync(process.env.FM_GUARD_LOG)} prompts=${prompts}`);
+}
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi turn-end guard must remain tokenless during AFK and resume after return"
+  [ -z "$out" ] || fail "Pi AFK turn-end guard test printed output: $out"
+  pass ".pi primary extension: AFK absorbs guard turns while actionable away delivery stays live"
+}
+
 # --- --claude cooperative mode -----------------------------------------------
 # In --claude mode the guard ignores stop_hook_active (Claude marks every stop
 # after ANY stop-hook continuation true, including asyncRewake rewake turns) and
@@ -1647,6 +1713,7 @@ test_codex_hook_ignores_nested_git_root_guard
 test_opencode_plugin_anchors_guard_to_worktree
 test_pi_extension_injects_once_per_logical_agent_run
 test_pi_extension_retries_after_followup_delivery_failure
+test_pi_extension_suppresses_guard_turns_while_afk
 test_hook_claude_mode_reblocks_stop_hook_active_when_unhealthy
 test_hook_claude_mode_reblocks_x_mode_without_tasks
 test_hook_claude_mode_allows_when_autoarm_owner_alive

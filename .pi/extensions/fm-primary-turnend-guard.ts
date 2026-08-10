@@ -226,7 +226,21 @@ export default function (pi: ExtensionAPI) {
     return { block: true, reason: result.stderr.trim() || "denied by the watcher-arm PreToolUse seatbelt" };
   });
 
+  // A guard follow-up queued just before AFK entry must not become an away-mode
+  // model turn. Actionable away-supervisor messages carry a different kind and
+  // remain deliverable.
+  pi.on("input", (event) => {
+    if (event.source !== "extension" || !existsSync(`${state}/.afk`)) return { action: "continue" };
+    return classifyFirstmateCurrentOperationalText(event.text)?.trim() === "turn-end-guard"
+      ? { action: "handled" }
+      : { action: "continue" };
+  });
+
   pi.on("agent_settled", async () => {
+    if (existsSync(`${state}/.afk`)) {
+      guardFollowupActive = false;
+      return;
+    }
     if (guardFollowupActive) {
       guardFollowupActive = false;
       return;

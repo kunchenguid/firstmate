@@ -982,6 +982,25 @@ fm_wake_queued_keys_locked() {
     "$FM_WAKE_QUEUE" 2>/dev/null || true
 }
 
+# fm_wake_records_after_seq <seq>
+# Print complete, valid records whose sequence is newer than <seq>. The append
+# lock makes the snapshot indivisible with appends and drains; callers may then
+# classify the captured rows without consuming the durable queue.
+fm_wake_records_after_seq() {
+  local seen=$1 status=0
+  case "$seen" in
+    ''|*[!0-9]*) printf 'fm_wake_records_after_seq: invalid sequence: %s\n' "$seen" >&2; return 2 ;;
+  esac
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1
+  awk -F '\t' -v seen="$seen" '
+    NF == 5 && $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ &&
+      ($3 == "signal" || $3 == "stale" || $3 == "check" || $3 == "heartbeat") &&
+      $4 != "" && $5 != "" && ($2 + 0) > seen { print }
+  ' "$FM_WAKE_QUEUE" 2>/dev/null || status=$?
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+  return "$status"
+}
+
 fm_wake_restore_queue() {
   local drained=$1 restore
   restore="$STATE/.wake-queue.restore.$(fm_current_pid)"

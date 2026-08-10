@@ -180,7 +180,7 @@ family_for_basename() {
     fm-tangle-guard.test.sh|fm-update.test.sh)
       printf '%s\n' session-bootstrap
       ;;
-    fm-afk-pi-herdr-return-e2e.test.sh|\
+    fm-afk-pi-herdr-return-e2e.test.sh|fm-pi-afk-handoff-live-e2e.test.sh|\
     fm-cmux-claude-composer-live-e2e.test.sh|\
     fm-composer-matrix-live-e2e.test.sh|\
     fm-codex-continuity-live-e2e.test.sh|fm-grok-continuity-live-e2e.test.sh|\
@@ -377,6 +377,7 @@ portable_serial_weight_hints() {
   cat <<'EOF'
 tests/fm-afk-inject-e2e.test.sh 34019
 tests/fm-afk-pi-herdr-return-e2e.test.sh 42
+tests/fm-pi-afk-handoff-live-e2e.test.sh 30
 tests/fm-afk-return.test.sh 1105
 tests/fm-ask-user-authority.test.sh 68
 tests/fm-backend-cmux-smoke.test.sh 29

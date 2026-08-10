@@ -658,6 +658,47 @@ test_handle_wake_routes_self_and_escalate() {
   pass "handle_wake routes routine->self and captain->escalate"
 }
 
+test_away_queue_handoff_classifies_once_without_consuming() {
+  local dir state drain_out
+  dir=$(make_supercase away-queue-handoff)
+  state="$dir/state"
+  drain_out="$dir/drain.out"
+  : > "$state/.afk"
+  printf 'done: PR https://example.test/pr/afk-handoff\n' > "$state/handoff-done.status"
+  append_wake "$state" heartbeat heartbeat heartbeat
+  append_wake "$state" signal handoff-done "signal: $state/handoff-done.status"
+
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    . "$2"
+    classify_queued_wakes "$3"
+  ' _ "$DAEMON" "$ROOT/bin/fm-wake-lib.sh" "$state" \
+    || fail "away daemon could not classify the handoff queue snapshot"
+
+  [ "$(wc -l < "$state/.wake-queue" | tr -d ' ')" -eq 2 ] \
+    || fail "away queue classifier consumed or lost durable records"
+  [ "$(cat "$state/.subsuper-seen-wake-seq")" = 2 ] \
+    || fail "away queue classifier did not advance its session cursor"
+  [ "$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')" -eq 1 ] \
+    || fail "heartbeat absorption plus actionable classification did not buffer exactly one escalation"
+
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    . "$2"
+    classify_queued_wakes "$3"
+  ' _ "$DAEMON" "$ROOT/bin/fm-wake-lib.sh" "$state" \
+    || fail "away daemon could not repeat its queue classification idempotently"
+  [ "$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')" -eq 1 ] \
+    || fail "away queue cursor delivered an actionable event twice"
+
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-wake-drain.sh" > "$drain_out" \
+    || fail "handoff queue could not be consumed by its sole drain owner"
+  [ "$(grep -c $'\theartbeat\t\|\tsignal\t' "$drain_out")" -eq 2 ] \
+    || fail "handoff queue drain did not preserve both routine and actionable records"
+  [ ! -s "$state/.wake-queue" ] || fail "handoff drain left consumed records in the queue"
+  pass "away handoff classifies routine/actionable queue rows once without consuming or duplicating them"
+}
+
 test_inject_skip_forces_self() {
   local dir state
   dir=$(make_supercase skip)
@@ -1864,6 +1905,7 @@ test_escalate_batches_into_one_digest
 test_escalate_batch_age_uses_first_append
 test_heartbeat_scan_dedup
 test_handle_wake_routes_self_and_escalate
+test_away_queue_handoff_classifies_once_without_consuming
 test_inject_skip_forces_self
 test_is_wake_reason_distinguishes_status_stdout
 test_terminal_stale_escalate_leaves_no_marker

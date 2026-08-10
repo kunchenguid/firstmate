@@ -10,7 +10,7 @@
 // callbacks from a prior generation are no-ops against the active replacement.
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
@@ -21,7 +21,10 @@ import {
   calmTranscriptClassIsVisible,
   FIRSTMATE_CALM_PRESENTATION_EVENT,
 } from "./lib/fm-calm-visibility.ts";
-import { encodeFirstmateOperationalInput } from "./lib/fm-operational-input.ts";
+import {
+  classifyFirstmateCurrentOperationalText,
+  encodeFirstmateOperationalInput,
+} from "./lib/fm-operational-input.ts";
 
 type ArmResult = {
   ok: boolean;
@@ -51,6 +54,9 @@ type SessionGeneration = {
   stopping: boolean;
   child: ChildProcess | null;
   retryTimer: ReturnType<typeof setTimeout> | null;
+  awayMonitor: ReturnType<typeof setInterval> | null;
+  awayResumePending: boolean;
+  awayResumePredecessor: string;
   retryFailures: number;
   restoring: boolean;
   seq: number;
@@ -88,6 +94,7 @@ const extensionVersion = `sha256:${createHash("sha256").update(readFileSync(exte
 const retryBaseMs = positiveInteger("FM_WATCH_REARM_RETRY_BASE_MS", 250);
 const retryMaxMs = positiveInteger("FM_WATCH_REARM_RETRY_MAX_MS", 4000);
 const retryLimit = positiveInteger("FM_WATCH_REARM_RETRY_LIMIT", 5);
+const awayHandoffPollMs = positiveInteger("FM_PI_AFK_HANDOFF_POLL_MS", 50);
 // 35s on Windows so the budget stays above arm's MSYS confirm default (30s in
 // bin/fm-watch-arm.sh): a slow but successful Git Bash cold start must not be
 // SIGTERMed mid-confirmation. Conditioned on win32 so other platforms keep 12s.
@@ -98,12 +105,14 @@ const armReadyTimeoutMs = positiveInteger(
 const armRetireTimeoutMs = positiveInteger("FM_WATCH_ARM_RETIRE_TIMEOUT_MS", 1000);
 const repairOnlyHint = "call fm_watch_arm_pi again only after a later notification says the cycle is missing, failed, or unhealthy";
 const shuttingDownMessage = "watcher: not armed - Pi session is shutting down";
+const awayModeMessage = "watcher: stood down - away mode owns supervision; Pi will resume automatically when away mode ends";
 
 let nextGenerationId = 0;
 let activeGeneration: SessionGeneration | null = null;
 const armReadiness = new WeakMap<ChildProcess, Promise<boolean>>();
 const armClose = new WeakMap<ChildProcess, Promise<void>>();
 const armRecovery = new WeakMap<ChildProcess, { generation: string; watcherPid: string }>();
+const awayYieldedArms = new WeakSet<ChildProcess>();
 
 function positiveInteger(name: string, fallback: number): number {
   const value = Number(process.env[name]);
@@ -141,6 +150,27 @@ function lockOwnership(): LockOwnership {
     if (!pid || pid === "1") break;
   }
   return pidAlive(lockPid) ? "other" : "missing";
+}
+
+function awayModeActive(): boolean {
+  return existsSync(`${state}/.afk`);
+}
+
+function terminateArmTree(armChild: ChildProcess): boolean {
+  const pid = armChild.pid;
+  if (process.platform !== "win32" && pid) {
+    try {
+      // The arm is spawned as a dedicated process-group leader below. Signal
+      // only that exact group so bash's trap and its watcher child retire
+      // together, without scanning processes or reaching a sibling home.
+      process.kill(-pid, "SIGTERM");
+      return true;
+    } catch {
+      // If the group already disappeared, ChildProcess.kill provides the
+      // ordinary exact-child result and preserves the existing race behavior.
+    }
+  }
+  return armChild.kill("SIGTERM");
 }
 
 function markLoaded(): void {
@@ -191,6 +221,9 @@ function createGeneration(): SessionGeneration {
     stopping: false,
     child: null,
     retryTimer: null,
+    awayMonitor: null,
+    awayResumePending: false,
+    awayResumePredecessor: "",
     retryFailures: 0,
     restoring: false,
     seq: 0,
@@ -209,7 +242,11 @@ function stopGeneration(generation: SessionGeneration): void {
   generation.stopping = true;
   if (generation.retryTimer) clearTimeout(generation.retryTimer);
   generation.retryTimer = null;
-  if (generation.child) generation.child.kill("SIGTERM");
+  if (generation.awayMonitor) clearInterval(generation.awayMonitor);
+  generation.awayMonitor = null;
+  generation.awayResumePending = false;
+  generation.awayResumePredecessor = "";
+  if (generation.child) terminateArmTree(generation.child);
   generation.child = null;
 }
 
@@ -238,16 +275,70 @@ export default function (pi: ExtensionAPI) {
     !calmPresentation.stockExportRendering &&
     !calmTranscriptClassIsVisible(itemClass);
 
+  function yieldToAway(owner: SessionGeneration, predecessorArmPid = ""): void {
+    if (!generationIsLive(owner)) return;
+    owner.awayResumePending = true;
+    if (predecessorArmPid) owner.awayResumePredecessor = predecessorArmPid;
+    if (owner.retryTimer) clearTimeout(owner.retryTimer);
+    owner.retryTimer = null;
+    const armChild = owner.child;
+    if (!armChild || awayYieldedArms.has(armChild)) return;
+    awayYieldedArms.add(armChild);
+    owner.awayResumePredecessor = String(armChild.pid ?? owner.awayResumePredecessor);
+    // This exact ChildProcess is the extension's home-scoped arm. The arm owns
+    // and retires its watcher child on TERM, so no process scan or broad kill is
+    // needed and another Firstmate home cannot be affected.
+    terminateArmTree(armChild);
+  }
+
+  function resumeAfterAway(owner: SessionGeneration): void {
+    if (!generationIsLive(owner) || awayModeActive() || !owner.awayResumePending) return;
+    if (owner.child || owner.retryTimer || owner.restoring) return;
+    const predecessor = owner.awayResumePredecessor;
+    owner.awayResumePending = false;
+    owner.awayResumePredecessor = "";
+    const result = startArm(owner, predecessor);
+    if (result.message === awayModeMessage) return;
+    if (!result.ok) {
+      scheduleRetry(owner, `watcher: FAILED - Pi extension could not resume continuity after away mode\n${result.message}`, predecessor);
+    }
+  }
+
+  function reconcileAwayOwnership(owner: SessionGeneration): void {
+    if (!generationIsLive(owner)) return;
+    if (awayModeActive()) {
+      yieldToAway(owner);
+      return;
+    }
+    resumeAfterAway(owner);
+  }
+
+  function startAwayMonitor(owner: SessionGeneration): void {
+    if (!generationIsLive(owner) || owner.awayMonitor) return;
+    reconcileAwayOwnership(owner);
+    const monitor = setInterval(() => reconcileAwayOwnership(owner), awayHandoffPollMs);
+    monitor.unref();
+    owner.awayMonitor = monitor;
+  }
+
   async function sendWake(
     owner: SessionGeneration,
     message: string,
     recovery?: { generation: string; watcherPid: string },
   ): Promise<void> {
     if (!generationIsLive(owner)) return;
+    if (awayModeActive()) {
+      yieldToAway(owner);
+      return;
+    }
     const content = encodeFirstmateOperationalInput(
       "watcher",
       `FIRSTMATE WATCHER WAKE: ${message}\n\nRun bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.`,
     );
+    if (awayModeActive()) {
+      yieldToAway(owner);
+      return;
+    }
     await pi.sendUserMessage(content, { deliverAs: "followUp" });
     if (recovery) {
       const result = spawnSync(
@@ -294,7 +385,7 @@ export default function (pi: ExtensionAPI) {
 
   async function retireArm(armChild: ChildProcess | null): Promise<boolean> {
     if (!armChild) return true;
-    armChild.kill("SIGTERM");
+    terminateArmTree(armChild);
     const closed = armClose.get(armChild);
     if (!closed) return false;
     return new Promise((resolveRetired) => {
@@ -314,6 +405,10 @@ export default function (pi: ExtensionAPI) {
     let failure = "";
     for (let attempt = 0; attempt <= retryLimit; attempt += 1) {
       if (!generationIsLive(owner)) return { failure: "" };
+      if (awayModeActive()) {
+        yieldToAway(owner, predecessorArmPid);
+        return { failure: "" };
+      }
       const replacement = startArm(owner, predecessorArmPid);
       const successorChild = owner.child;
       if (replacement.ok && successorChild && await waitForReadiness(successorChild)) {
@@ -340,6 +435,10 @@ export default function (pi: ExtensionAPI) {
 
   function scheduleRetry(owner: SessionGeneration, message: string, predecessorArmPid: string): void {
     if (!generationIsLive(owner) || owner.child || owner.retryTimer) return;
+    if (awayModeActive()) {
+      yieldToAway(owner, predecessorArmPid);
+      return;
+    }
     const ownership = lockOwnership();
     if (ownership !== "owned") {
       surfaceFailure(owner, `watcher: FAILED - Pi extension cannot restore continuity because this session no longer owns the lock\n${message}`);
@@ -353,6 +452,10 @@ export default function (pi: ExtensionAPI) {
     const timer = setTimeout(() => {
       if (owner.retryTimer === timer) owner.retryTimer = null;
       if (!generationIsLive(owner)) return;
+      if (awayModeActive()) {
+        yieldToAway(owner, predecessorArmPid);
+        return;
+      }
       const result = startArm(owner, predecessorArmPid);
       if (!result.ok) {
         surfaceFailure(owner, `watcher: FAILED - Pi extension could not launch a continuity retry\n${result.message}`);
@@ -364,6 +467,10 @@ export default function (pi: ExtensionAPI) {
 
   function startArm(owner: SessionGeneration, predecessorArmPid = ""): ArmResult {
     if (!generationIsLive(owner)) return { ok: false, message: shuttingDownMessage };
+    if (awayModeActive()) {
+      yieldToAway(owner, predecessorArmPid);
+      return { ok: true, message: awayModeMessage };
+    }
     const ownership = lockOwnership();
     if (ownership === "other") return { ok: false, message: "watcher: read-only - session lock is held by another firstmate session" };
     if (ownership === "missing") {
@@ -397,6 +504,7 @@ export default function (pi: ExtensionAPI) {
     const armChild = spawn("bash", ["-lc", "config_dir=\"${FM_CONFIG_OVERRIDE:-$FM_HOME/config}\"; [ -f \"$config_dir/x-mode.env\" ] && . \"$config_dir/x-mode.env\"; exec \"$FM_WATCH_ARM_SCRIPT\" --restart"], {
       cwd: fmRoot,
       env,
+      detached: process.platform !== "win32",
       stdio: ["ignore", "pipe", "pipe"],
     });
     owner.child = armChild;
@@ -443,10 +551,20 @@ export default function (pi: ExtensionAPI) {
       settled = true;
       resolveClosed();
       settleReadiness(false);
+      const yieldedToAway = awayYieldedArms.delete(armChild);
       releaseChild();
       if (!generationIsLive(owner)) return;
       const classification = classifyClose(stdout, stderr, code, signal);
       const predecessor = String(armChild.pid ?? "");
+      if (yieldedToAway || awayModeActive()) {
+        owner.retryFailures = 0;
+        owner.restoring = false;
+        owner.awayResumePending = true;
+        owner.awayResumePredecessor = predecessor;
+        if (awayModeActive()) yieldToAway(owner, predecessor);
+        else resumeAfterAway(owner);
+        return;
+      }
       if (classification.kind === "actionable") {
         owner.retryFailures = 0;
         owner.restoring = true;
@@ -454,6 +572,10 @@ export default function (pi: ExtensionAPI) {
           const restoration = await restoreAfterActionableClose(owner, predecessor);
           if (generationIsLive(owner)) owner.restoring = false;
           if (!generationIsLive(owner)) return;
+          if (awayModeActive() || owner.awayResumePending) {
+            yieldToAway(owner, predecessor);
+            return;
+          }
           const message = restoration.failure ? `${classification.message}\n\n${restoration.failure}` : classification.message;
           await sendWake(owner, message, restoration.recovery);
         })().catch(() => {
@@ -470,6 +592,15 @@ export default function (pi: ExtensionAPI) {
       settleReadiness(false);
       releaseChild();
       if (!generationIsLive(owner)) return;
+      if (awayYieldedArms.delete(armChild) || awayModeActive()) {
+        owner.retryFailures = 0;
+        owner.restoring = false;
+        owner.awayResumePending = true;
+        owner.awayResumePredecessor = String(armChild.pid ?? "");
+        if (awayModeActive()) yieldToAway(owner, owner.awayResumePredecessor);
+        else resumeAfterAway(owner);
+        return;
+      }
       if (owner.restoring) return;
       scheduleRetry(owner, `watcher: FAILED - Pi extension arm child ${id} failed: ${error.message}`, String(armChild.pid ?? ""));
     });
@@ -483,9 +614,21 @@ export default function (pi: ExtensionAPI) {
     if (generation.stopping) generation = createGeneration();
     activateGeneration(generation);
     markLoaded();
+    startAwayMonitor(generation);
   });
   pi.on?.("session_shutdown", () => {
     stopGeneration(generation);
+  });
+
+  // A watcher follow-up can already be queued in Pi when AFK is entered. Pi's
+  // input event is the last public pre-agent boundary, so handle that typed
+  // extension message without starting a model turn. Marked away-supervisor
+  // escalations are a different operational kind and continue normally.
+  pi.on?.("input", (event) => {
+    if (event.source !== "extension" || !awayModeActive()) return { action: "continue" };
+    if (classifyFirstmateCurrentOperationalText(event.text)?.trim() !== "watcher") return { action: "continue" };
+    yieldToAway(generation);
+    return { action: "handled" };
   });
 
   pi.registerCommand?.("fm-watch-arm-pi", {

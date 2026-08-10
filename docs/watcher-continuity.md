@@ -9,6 +9,10 @@ Pi's `.pi/extensions/fm-primary-pi-watch.ts` and OpenCode's `.opencode/plugins/f
 Each adapter starts the next arm before delivering the wake prompt, checks current session-lock ownership at launch, preserves one child or scheduled retry at a time, and applies bounded exponential retry after an unexpected or failed close.
 A failed follow-up never cancels continuity restoration.
 Pi same-process session replacement follows the generation-owner contract in `.pi/extensions/fm-primary-pi-watch.ts`.
+Pi away-mode transfer follows that same generation owner.
+When `state/.afk` is present at session start or appears during a live arm, the extension cancels pending retries and retires its exact arm process group so the attached wrapper and watcher close together without a process scan or sibling-home signal.
+The loaded extension then suppresses its typed watcher and turn-end-guard inputs while AFK remains active, but leaves typed `away-supervisor` escalations deliverable.
+When the flag clears, the same generation automatically restores one extension-owned cycle; repeated entry and return converge without another model arm command.
 Cursor's `.cursor/hooks.json` `stop` hook (`bin/fm-turnend-guard-cursor.sh`) owns routine tokenless re-arm for a Cursor primary by parking that awaited hook on `bin/fm-watch-arm.sh` and returning an actionable close as one follow-up; [`turnend-guard.md`](turnend-guard.md#harness-integrations) owns its loop bounds and supersession baton.
 Claude's `.claude/settings.json` Stop `asyncRewake` hook (`bin/fm-claude-stop-autoarm.sh`) owns routine tokenless re-arm.
 The hook fires on every Stop, and an eligible primary with supervision need admits one home-scoped owner that foregrounds `bin/fm-watch-arm.sh` inside the hook-owned process tree.
@@ -28,6 +32,10 @@ If the unready arm does not retire within that bound, the adapter keeps ownershi
 When that retained arm later closes, its actual close is classified as a new supervised event without replaying the earlier fallback.
 After the configured retry bound is exhausted, it delivers the original wake with a typed continuity-restoration failure even if every successor arm hung without reporting readiness.
 This is deliberate Option B ordering: the fleet is protected before the model handles the wake whenever restoration succeeds, but the model is never left blind when it does not.
+
+During Pi-to-AFK transfer, the daemon classifies every unseen durable queue record without consuming it.
+Its away-session sequence cursor prevents repeated classification, while `bin/fm-wake-drain.sh` remains the sole consumer and retains its logical wake deduplication.
+This closes the interval in which the retiring extension-owned watcher can enqueue after `.afk` appears but before the daemon's own watcher acquires the singleton lock.
 
 Claude's Stop hook starts the successor arm at the next Stop after the handling turn, rather than before notification as Pi and OpenCode do.
 The durable wake queue preserves actionable events during the residual active-turn window, and the bounded turn-end guard enforces recovery at Stop when no watcher or auto-arm claim is present.
@@ -76,6 +84,7 @@ Only the watcher process touches `state/.last-watcher-beat`; no helper process c
 ## Regression coverage
 
 `tests/fm-pi-watch-extension.test.sh` checks Pi's first-cycle-or-explicit-repair tool metadata and ownership-based redundant-call no-ops, then simulates actionable and empty child closes against the actual Pi and OpenCode close handlers, blocks prompt delivery to prove the successor launches first, verifies single-flight behavior, changes the session lock before close to prove ownership is rechecked, and hangs each successor arm to prove bounded fallback delivery includes the typed restoration failure.
+It also covers startup while already away, live exact-child yield, routine input absorption, actionable away input pass-through, automatic return, repeated convergence, and sibling-home isolation.
 The same suite covers ordinary same-process session replacement for `/new`, `/resume`, and `/fork`, same-instance shutdown-plus-start, stale prior-generation callbacks, repeated transitions with exactly one live cycle, disappearance of the shutting-down refusal after a valid replacement activates, and terminal quit still refusing late rearm.
 `tests/fm-watch-arm.test.sh` covers durable queue replay, real remote parent-replies ingestion into the authoritative status log, decision-only OPEN DECISIONS recovery, interrupted handling replay, generation-bound acknowledgement, a persistent live successor after recovery, a watcher close inside the handling window that must leave the printed acknowledgement valid, and the self-healing moved-generation acknowledgement that consumes its handled rows and names its remedy.
 `tests/fm-watcher-lock.test.sh` covers verified-successor attach, recovery publication before stale-lock removal, the typed self-eviction failure, bounded and successor-linked lifecycle rows, and a SIGSTOP counterfactual that distinguishes a live PID from a stale beacon before classifying termination.
@@ -83,6 +92,8 @@ The same suite covers ordinary same-process session replacement for `/new`, `/re
 `tests/fm-claude-stop-autoarm.test.sh` covers the auto-arm's scope, stale and live session owners, unchanged AFK and need boundaries, single-flight, bounded failure retries, benign live-watcher cycle ends, one-notice failure episodes, and exit-2 translation.
 `FM_CLAUDE_LIVE_E2E=1 tests/fm-claude-stop-autoarm-live-e2e.test.sh` starts with the reproduced stale-lock state, runs session start first, completes two tokenless cycles, and checks the competing-live-owner negative control.
 `tests/fm-turnend-guard.test.sh` covers the cooperative `--claude` guard, including monotonic failed-epoch progression, the integrated bounded fail-open, post-alarm continuation suppression, and positive recovery reset.
+`tests/fm-daemon.test.sh` covers non-consuming queue classification, routine absorption, actionable escalation, and cursor idempotence.
+`FM_PI_AFK_HANDOFF_LIVE_E2E=1 tests/fm-pi-afk-handoff-live-e2e.test.sh` drives a real installed Pi extension through a named isolated Herdr session and throwaway Firstmate home.
 
 ## Active limits and verification
 

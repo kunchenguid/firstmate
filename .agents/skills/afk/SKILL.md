@@ -51,6 +51,9 @@ batched digest rather than per-wake injections.
 
 3. **Do not separately arm `fm-watch.sh`.** The daemon manages the watcher as
    its child; the singleton lock no-ops a stray arm harmlessly.
+   On Pi and pi-signed, the loaded watcher extension observes the durable flag,
+   yields its exact attached arm cycle, and resumes one ordinary cycle after
+   return; no watcher command or Pi restart belongs in this lifecycle.
 
 4. **Acknowledge** in `AGENTS.md` section 9 language: "Captain, away mode is active; I will batch routine updates and surface only decisions, failures, credentials, or review-ready work until you return."
 
@@ -151,6 +154,7 @@ It self-handles the routine majority without consuming a firstmate turn.
 Captain-relevant events, plus a bounded recheck of a declared external wait that remains idle, escalate to firstmate's context as one pre-read, single-line, batched digest.
 The classification predicates (the captain-relevant verb set, declared-pause vocabulary, signal/stale tests, and fleet-scan) live in the shared `bin/fm-classify-lib.sh`, the same library the always-on watcher uses for its own triage when afk is off, so the two modes apply one identical policy.
 While `state/.afk` exists the daemon owns the watcher, so the watcher reverts to one-shot and lets the daemon do the triage - the two never run their triage at the same time.
+The daemon classifies unseen durable queue rows through its away-session cursor without consuming them, closing the Pi handoff interval while preserving `bin/fm-wake-drain.sh` as the sole queue consumer.
 
 Classify each wake this way:
 
