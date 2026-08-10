@@ -173,14 +173,15 @@ test_matrix_claude_bare_nbsp_row() {
   # Real idle claude: `❯` + U+00A0, borderless, between horizontal rules.
   # The audit's headline defect: this row read `pending` under LC_ALL=C
   # (issue #1988), deferring every away-mode escalation in daemon contexts.
-  local screen typed
+  local screen typed claude_idle
   screen=$'transcript line\n────────────────────────\n❯'"$NBSP"$'\n────────────────────────\n  bypass permissions'
-  assert_screen "claude idle on tmux" empty "$CAPS_TMUX" "$screen" 2
-  assert_screen "claude idle on herdr" empty "$CAPS_STYLED" "$screen"
+  claude_idle=$(printf 'claude\tidle')
+  assert_screen "claude idle on tmux" empty "$CAPS_TMUX" "$screen" 2 "$claude_idle"
+  assert_screen "claude idle on herdr" empty "$CAPS_STYLED" "$screen" '' "$claude_idle"
   assert_screen "claude idle on zellij" empty "$CAPS_STYLED_NOID" "$screen"
   assert_screen "claude idle on cmux/orca" empty "$CAPS_PLAIN" "$screen"
   typed=$'────────────────────────\n❯ fix the login bug\n────────────────────────'
-  assert_screen "claude typed on tmux" pending "$CAPS_TMUX" "$typed" 1
+  assert_screen "claude typed on tmux" pending "$CAPS_TMUX" "$typed" 1 "$claude_idle"
   # Plain capture cannot tell typed text from claude's rotating suggestion:
   # the styled=0 degradation defers instead of fabricating pending.
   assert_screen "claude typed on plain backends" unknown "$CAPS_PLAIN" "$typed"
@@ -197,10 +198,7 @@ test_matrix_codex_dim_hint_row() {
   assert_screen "codex idle on tmux" empty "$CAPS_TMUX" "$styled" 1
   assert_screen "codex idle on herdr" empty "$CAPS_STYLED" "$styled"
   assert_screen "codex idle on zellij" empty "$CAPS_STYLED_NOID" "$styled"
-  local out
-  out=$(fm_composer_classify_screen "$CAPS_PLAIN" "$plain")
-  [ "$out" != pending ] || fail "codex's plain-captured hint must never read pending (false unsent text)"
-  [ "$out" = unknown ] || fail "codex idle on plain backends should defer as unknown, got '$out'"
+  assert_screen "codex idle on plain backends" unknown "$CAPS_PLAIN" "$plain"
   pass "matrix: codex's dim hint is empty when styling proves it, unknown (never pending) when it cannot"
 }
 
@@ -216,6 +214,7 @@ test_matrix_muse_truecolor_glyph_survives_signal_loss() {
   plain=$'── Voice input (⌥ + v to start) ─────\n⟩'
   assert_screen "muse idle on tmux" empty "$CAPS_TMUX" "$screen" 1
   assert_screen "muse idle on herdr" empty "$CAPS_STYLED" "$screen"
+  assert_screen "muse idle on zellij" empty "$CAPS_STYLED_NOID" "$screen"
   assert_screen "muse idle on cmux/orca" empty "$CAPS_PLAIN" "$plain"
   out=$(FM_COMPOSER_GHOST_LUMA_MAX=200 fm_composer_classify_screen "$CAPS_STYLED" "$screen")
   [ "$out" = empty ] || fail "muse must stay empty when the ghost strip eats its glyph (plain-row signal), got '$out'"
@@ -232,6 +231,7 @@ test_matrix_pi_separated_needs_identity() {
   pi_idle=$(printf 'pi\tidle'); pi_working=$(printf 'pi\tworking'); none=$(printf 'zsh\t')
   assert_screen "pi idle with identity" empty "$CAPS_STYLED" "$screen" '' "$pi_idle"
   assert_screen "pi idle on tmux with identity" empty "$CAPS_TMUX" "$screen" 2 "$pi_idle"
+  assert_screen "pi idle on zellij" unknown "$CAPS_STYLED_NOID" "$screen"
   # Identity-capable but unfetched: the adapter is asked to probe lazily.
   [ "$(fm_composer_classify_screen "$CAPS_STYLED" "$screen")" = need-identity ] \
     || fail "an identity-capable profile should request the lazy identity probe"
@@ -245,6 +245,12 @@ test_matrix_pi_separated_needs_identity() {
   assert_screen "sleep-pane counterexample" unknown "$CAPS_TMUX" "$screen" 2 "$none"
   typed=$'────────────────────────\nfix the flaky test\n────────────────────────'
   assert_screen "pi typed" pending "$CAPS_STYLED" "$typed" '' "$pi_idle"
+  typed=$'────────────────────────\n❯\n────────────────────────'
+  assert_screen "pi lone-glyph draft with identity" pending "$CAPS_STYLED" "$typed" '' "$pi_idle"
+  assert_screen "pi lone-glyph draft on tmux" pending "$CAPS_TMUX" "$typed" 1 "$pi_idle"
+  assert_screen "lone glyph without identity capability" empty "$CAPS_STYLED_NOID" "$typed"
+  assert_screen "lone glyph on plain backend" empty "$CAPS_PLAIN" "$typed"
+  assert_screen "lone glyph with non-pi identity" empty "$CAPS_STYLED" "$typed" '' "$none"
   pass "matrix: pi's separated composer needs identity + structure; the blank row alone never proves it"
 }
 
@@ -297,15 +303,20 @@ test_matrix_kimi_bordered_shell_glyph_box() {
   assert_screen "kimi idle on tmux" empty "$CAPS_TMUX" "$screen" 1
   assert_screen "kimi idle on cmux/orca" empty "$CAPS_PLAIN" "$screen"
   assert_screen "kimi idle on herdr" empty "$CAPS_STYLED" "$screen"
+  assert_screen "kimi idle on zellij" empty "$CAPS_STYLED_NOID" "$screen"
   pass "matrix: kimi's bordered shell-glyph box reads empty through the shared owner (spawn's fourth copy retired)"
 }
 
 test_matrix_claude_inside_zellij_ansi_dump() {
   # Real claude captured through `zellij action dump-screen --ansi`
   # (capability established by the audit): `ESC[m` `❯` U+00A0.
-  local screen
+  local screen plain
   screen=$'zellij pane transcript\n'"${ESC}[m❯${NBSP}"
-  assert_screen "claude-in-zellij" empty "$CAPS_STYLED_NOID" "$screen"
+  plain=$'zellij pane transcript\n❯'"$NBSP"
+  assert_screen "claude-in-zellij on tmux" empty "$CAPS_TMUX" "$screen" 1
+  assert_screen "claude-in-zellij on herdr" empty "$CAPS_STYLED" "$screen"
+  assert_screen "claude-in-zellij on zellij" empty "$CAPS_STYLED_NOID" "$screen"
+  assert_screen "claude-in-zellij on plain backends" empty "$CAPS_PLAIN" "$plain"
   pass "matrix: the real claude-in-zellij --ansi dump reads empty in both locales"
 }
 

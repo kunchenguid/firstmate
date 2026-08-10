@@ -897,7 +897,13 @@ EOF
       return 0
     fi
     if [ "$FM_COMPOSER_SCAN_BARE_ROW" -ge 0 ] && [ "$cy" -eq "$FM_COMPOSER_SCAN_BARE_ROW" ]; then
-      _fm_composer_classify_bare_row "$screen" "$styled" "$cy"
+      if [ "$FM_COMPOSER_SCAN_PI_PAIR_FOUND" = 1 ] \
+         && [ "$cy" -gt "$FM_COMPOSER_SCAN_PI_OPEN" ] \
+         && [ "$cy" -lt "$FM_COMPOSER_SCAN_PI_CLOSE" ]; then
+        _fm_composer_classify_bare_pi_overlap "$screen" "$styled" "$has_identity" "$identity" "$cy"
+      else
+        _fm_composer_classify_bare_row "$screen" "$styled" "$cy"
+      fi
       return 0
     fi
     # A bare composer's WRAP region: long typed input wraps below the glyph
@@ -963,7 +969,14 @@ EOF
         "$((FM_COMPOSER_SCAN_BOX_TOP + 1))" "$((FM_COMPOSER_SCAN_BOX_BOTTOM - 1))"
       ;;
     bare)
-      _fm_composer_classify_bare_row "$screen" "$styled" "$FM_COMPOSER_SCAN_BARE_ROW"
+      if [ "$FM_COMPOSER_SCAN_PI_PAIR_FOUND" = 1 ] \
+         && [ "$FM_COMPOSER_SCAN_BARE_ROW" -gt "$FM_COMPOSER_SCAN_PI_OPEN" ] \
+         && [ "$FM_COMPOSER_SCAN_BARE_ROW" -lt "$FM_COMPOSER_SCAN_PI_CLOSE" ]; then
+        _fm_composer_classify_bare_pi_overlap "$screen" "$styled" "$has_identity" "$identity" \
+          "$FM_COMPOSER_SCAN_BARE_ROW"
+      else
+        _fm_composer_classify_bare_row "$screen" "$styled" "$FM_COMPOSER_SCAN_BARE_ROW"
+      fi
       ;;
     leftbar)
       _fm_composer_classify_leftbar "$screen" "$styled" \
@@ -1003,12 +1016,47 @@ fm_composer_submit_retry_core() {  # <send-key-fn> <state-fn> <target> <retries>
   done
 }
 
+_fm_composer_classify_pi_rows() {  # <screen> <styled>
+  local screen=$1 styled=$2 row raw content
+  row=$((FM_COMPOSER_SCAN_PI_OPEN + 1))
+  while [ "$row" -lt "$FM_COMPOSER_SCAN_PI_CLOSE" ]; do
+    raw=$(_fm_composer_screen_row "$row" "$screen")
+    content=$(_fm_composer_row_content "$raw" "$styled")
+    fm_composer_normalize_trim_var content
+    if [ -n "$content" ]; then
+      printf 'pending'
+      return 0
+    fi
+    row=$((row + 1))
+  done
+  printf 'empty'
+}
+
+_fm_composer_classify_bare_pi_overlap() {  # <screen> <styled> <has-identity> <identity> <bare-row>
+  local screen=$1 styled=$2 has_identity=$3 identity=$4 row=$5 agent
+  if [ "$has_identity" != 1 ]; then
+    _fm_composer_classify_bare_row "$screen" "$styled" "$row"
+    return 0
+  fi
+  if [ -z "$identity" ]; then
+    printf 'need-identity'
+    return 0
+  fi
+  agent=${identity%%$'\t'*}
+  if [ "$agent" = pi ]; then
+    _fm_composer_pi_verdict "$screen" "$styled" "$has_identity" "$identity"
+  else
+    _fm_composer_classify_bare_row "$screen" "$styled" "$row"
+  fi
+}
+
 # The pi separated-shape verdict: identity + structure conjunction (herdr's
 # rule, now fleet-wide). A missing identity capability keeps the shape
 # unknown; an unfetched identity on an identity-capable backend asks the
-# adapter to probe (lazily) and re-call; a working or unreadable pi defers.
+# adapter to probe (lazily) and re-call. Proven input remains pending for every
+# live pi state, while only an idle/done/blocked pi proves an empty composer.
 _fm_composer_pi_verdict() {  # <screen> <styled> <has_identity> <identity>
-  local screen=$1 styled=$2 has_identity=$3 identity=$4 agent agent_status
+  local screen=$1 styled=$2 has_identity=$3 identity=$4 agent agent_status state
   if [ "$has_identity" != 1 ]; then
     printf 'unknown'
     return 0
@@ -1019,20 +1067,17 @@ _fm_composer_pi_verdict() {  # <screen> <styled> <has_identity> <identity>
   fi
   agent=${identity%%$'\t'*}
   agent_status=${identity#*$'\t'}
-  case "$agent:$agent_status" in
-    pi:idle|pi:done|pi:blocked)
-      if [ "$FM_COMPOSER_SCAN_PI_PAIR_VALID" = 1 ]; then
-        _fm_composer_classify_rows "$screen" "$styled" 0 \
-          "$((FM_COMPOSER_SCAN_PI_OPEN + 1))" "$((FM_COMPOSER_SCAN_PI_CLOSE - 1))"
-      else
-        printf 'unknown'
-      fi
-      ;;
-    *)
-      # A working pi, an unreadable identity, or a non-pi agent whose pane
-      # nevertheless shows a separator pair below every other shape: none can
-      # authorize injection into the blank separated region.
-      printf 'unknown'
-      ;;
+  if [ "$agent" != pi ] || [ "$FM_COMPOSER_SCAN_PI_PAIR_VALID" != 1 ]; then
+    printf 'unknown'
+    return 0
+  fi
+  state=$(_fm_composer_classify_pi_rows "$screen" "$styled")
+  if [ "$state" = pending ]; then
+    printf 'pending'
+    return 0
+  fi
+  case "$agent_status" in
+    idle|done|blocked) printf 'empty' ;;
+    *) printf 'unknown' ;;
   esac
 }
