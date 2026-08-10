@@ -386,26 +386,33 @@ for event, entries in hooks.items():
     if not isinstance(entries, list):
         raise SystemExit(f"Cursor {event} hooks must be arrays")
 changed = False
-for event, command in expected.items():
-    entries = hooks.get(event, [])
-    if not isinstance(entries, list):
-        raise SystemExit(f"Cursor {event} hooks must be arrays")
+expected_event = {command: event for event, command in expected.items()}
+removals = {}
+for event, entries in hooks.items():
     original_entries = backup_hooks.get(event, [])
     if not isinstance(original_entries, list):
         raise SystemExit(f"Backed-up Cursor {event} hooks must be arrays")
     unmatched_original = list(original_entries)
-    surplus_index = None
     for index, entry in enumerate(entries):
         try:
             original_index = unmatched_original.index(entry)
         except ValueError:
-            if surplus_index is None and entry == {"command": command}:
-                surplus_index = index
+            if not isinstance(entry, dict):
+                continue
+            command = entry.get("command")
+            owner_event = expected_event.get(command)
+            if owner_event is None:
+                continue
+            if event != owner_event or entry != {"command": command}:
+                raise SystemExit(f"Cannot safely reconcile generated Cursor {event} hook")
+            removals.setdefault(event, []).append(index)
         else:
             del unmatched_original[original_index]
-    if surplus_index is not None:
-        del entries[surplus_index]
-        changed = True
+for event, indices in removals.items():
+    if len(indices) != 1:
+        raise SystemExit(f"Cannot safely reconcile generated Cursor {event} hook")
+    del hooks[event][indices[0]]
+    changed = True
 if changed:
     directory = os.path.dirname(path)
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=directory, delete=False) as handle:

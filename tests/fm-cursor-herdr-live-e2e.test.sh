@@ -51,7 +51,8 @@ trap cleanup EXIT
 
 mkdir -p "$HOME_DIR/state" "$HOME_DIR/data/$ID" "$HOME_DIR/projects" \
   "$HOME_DIR/config" "$PROJECT"
-printf 'Reply with exactly HERDRCURSORREADY.\n' > "$HOME_DIR/data/$ID/brief.md"
+printf 'Reply only: HERDRCURSORREADY\n' \
+  > "$HOME_DIR/data/$ID/brief.md"
 git -C "$PROJECT" init -q
 printf '# Cursor Herdr live test\n' > "$PROJECT/README.md"
 git -C "$PROJECT" add README.md
@@ -73,18 +74,21 @@ PANE=$(grep '^herdr_pane_id=' "$META" | cut -d= -f2-)
 [ -n "$PANE" ] || fail "spawn metadata did not record a Herdr pane"
 
 lab() { "$ROOT/bin/fm-herdr-lab.sh" run "$SESSION" "$@"; }
-wait_for_output() {
-  local needle=$1 output
+wait_for_exact_response() {
+  local expected=$1 output
   for _ in $(seq 1 60); do
     output=$(lab pane read "$PANE" 2>/dev/null || true)
-    if printf '%s' "$output" | grep -F "$needle" >/dev/null 2>&1; then
+    if printf '%s\n' "$output" \
+      | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' \
+      | grep -Fx "$expected" >/dev/null 2>&1; then
       return 0
     fi
     sleep 2
   done
+  printf '%s\n' "$output" >&2
   return 1
 }
-wait_for_output HERDRCURSORREADY \
+wait_for_exact_response HERDRCURSORREADY \
   || fail "Cursor Agent did not produce the Herdr launch response"
 
 FM_GATE_REFUSE_BYPASS=1 FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" \
@@ -92,10 +96,11 @@ FM_GATE_REFUSE_BYPASS=1 FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" \
   FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
   HERDR_SESSION="$SESSION" FM_SEND_SETTLE=0 \
   "$ROOT/bin/fm-send.sh" "$ID" \
-  "Reply with exactly HERDRCURSORSEND." >/dev/null 2>"$TMP_ROOT/send.err" \
+  "Reply only: HERDRCURSORSEND" \
+  >/dev/null 2>"$TMP_ROOT/send.err" \
   || fail "Cursor Agent Herdr send failed"$'\n'"$(cat "$TMP_ROOT/send.err")"
 
-wait_for_output HERDRCURSORSEND \
+wait_for_exact_response HERDRCURSORSEND \
   || fail "Cursor Agent did not receive the Herdr delivery"
 
 VERSION=$(cursor-agent --version 2>/dev/null | head -1)

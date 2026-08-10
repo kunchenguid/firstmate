@@ -140,6 +140,28 @@ test_detects_exact_cursor_agent_ancestor() {
   pass "cursor is detected through exact cursor-agent ancestry"
 }
 
+test_detects_cursor_node_wrapper_argv0() {
+  local dir="$TMP_ROOT/detect-node-wrapper" node out
+  node=$(command -v node) || fail "node is required for Cursor wrapper detection"
+  mkdir -p "$dir/bin"
+  cat > "$dir/probe.js" <<'JS'
+const { spawnSync } = require("node:child_process");
+const result = spawnSync(process.env.FM_TEST_HARNESS, [], {
+  encoding: "utf8",
+  env: process.env,
+});
+process.stdout.write(result.stdout || "");
+process.stderr.write(result.stderr || "");
+process.exit(result.status === null ? 1 : result.status);
+JS
+  out=$(env -u CURSOR_AGENT -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    FM_TEST_HARNESS="$HARNESS" bash -c 'exec -a "$1" "$2" "$3"' \
+    _ "$dir/bin/cursor-agent" "$node" "$dir/probe.js")
+  [ "$out" = cursor ] \
+    || fail "full-path cursor-agent argv0 under Node reported '$out'"
+  pass "cursor is detected through the real Node wrapper process shape"
+}
+
 test_detection_is_anchored() {
   local dir bin out session
   dir="$TMP_ROOT/detect-neg"
@@ -350,6 +372,57 @@ PY
   assert_absent "$wt/.cursor/hooks/fm-busy-turnend.sh" \
     "Cursor hook restore left its generated script after preserving user edits"
   pass "Cursor hook restoration preserves user edits while removing Firstmate entries"
+}
+
+test_cursor_hook_restore_refuses_edited_generated_entry() {
+  local wt="$TMP_ROOT/refuse-edited-hook/wt" state="$TMP_ROOT/refuse-edited-hook/state"
+  local expected="$TMP_ROOT/refuse-edited-hook/expected.json"
+  mkdir -p "$wt/.cursor/hooks" "$state"
+  printf '%s\n' '{"version":1,"hooks":{}}' > "$wt/.cursor/hooks.json"
+  fm_control_cursor_hooks_backup "$wt" "$state" edited
+  python3 - "$wt/.cursor/hooks.json" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    document = json.load(handle)
+for event, command in (
+    ("beforeSubmitPrompt", ".cursor/hooks/fm-busy-turnend.sh busy"),
+    ("stop", ".cursor/hooks/fm-busy-turnend.sh idle-stop"),
+    ("sessionEnd", ".cursor/hooks/fm-busy-turnend.sh idle-session-end"),
+):
+    document["hooks"][event] = [{"command": command}]
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(document, handle, separators=(",", ":"))
+    handle.write("\n")
+PY
+  printf '%s\n' 'firstmate script' > "$wt/.cursor/hooks/fm-busy-turnend.sh"
+  fm_control_cursor_hooks_record_installed "$wt" "$state" edited \
+    "$wt/.cursor/hooks.json" "$wt/.cursor/hooks/fm-busy-turnend.sh"
+  python3 - "$wt/.cursor/hooks.json" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    document = json.load(handle)
+document["hooks"]["beforeSubmitPrompt"][0]["matcher"] = "edited-during-task"
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(document, handle, separators=(",", ":"))
+    handle.write("\n")
+PY
+  cp "$wt/.cursor/hooks.json" "$expected"
+  if fm_control_cursor_hooks_restore "$wt" "$state" edited; then
+    fail "Cursor restore accepted an edited generated hook entry"
+  fi
+  cmp -s "$expected" "$wt/.cursor/hooks.json" \
+    || fail "failed Cursor reconciliation partially rewrote hooks.json"
+  assert_present "$wt/.cursor/hooks/fm-busy-turnend.sh" \
+    "failed Cursor reconciliation removed the installed hook script"
+  assert_present "$state/edited.cursor-hooks.json.installed" \
+    "failed Cursor reconciliation discarded recovery ownership"
+  pass "Cursor restore fails closed on edited generated hook entries"
 }
 
 test_cursor_hook_backup_is_atomic() {
@@ -574,6 +647,7 @@ test_tmux_classifies_cursor_agent_only() {
 test_detects_cursor_agent_marker
 test_static_crew_harness_resolution
 test_detects_exact_cursor_agent_ancestor
+test_detects_cursor_node_wrapper_argv0
 test_detection_is_anchored
 test_spawn_launch_shape
 test_spawn_refuses_secondmate
@@ -582,6 +656,7 @@ test_cursor_family_is_exact
 test_cursor_composer_placeholder_requires_cursor_glyph
 test_cursor_hooks_restore_existing_files
 test_cursor_hook_restore_preserves_user_hook_edits
+test_cursor_hook_restore_refuses_edited_generated_entry
 test_cursor_hook_backup_is_atomic
 test_spawn_abort_retains_cursor_backups_when_restore_fails
 test_same_cursor_relaunch_preserves_preexisting_hook_script

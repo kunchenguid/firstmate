@@ -24,6 +24,7 @@ pass() { printf 'ok - %s\n' "$1"; }
 
 command -v tmux >/dev/null 2>&1 || { echo "skip: tmux not found"; exit 0; }
 SLEEP_BIN=$(command -v sleep) || { echo "skip: sleep not found"; exit 0; }
+NODE_BIN=$(command -v node) || { echo "skip: node not found"; exit 0; }
 
 REAL_TMUX=$(command -v tmux)
 SOCKET="fm-liveness-$$"
@@ -76,6 +77,19 @@ cat > "$LAB/bin/agent-launcher" <<SH
 wait
 SH
 chmod +x "$LAB/bin/agent-launcher"
+
+cat > "$LAB/cursor-wait.js" <<'JS'
+setInterval(() => {}, 1000);
+JS
+cat > "$LAB/bin/cursor-wrapper" <<SH
+#!/usr/bin/env bash
+exec -a "$LAB/bin/cursor-agent" "$NODE_BIN" "$LAB/cursor-wait.js"
+SH
+cat > "$LAB/bin/cursor-wrapper-decoy" <<SH
+#!/usr/bin/env bash
+exec -a "$LAB/bin/not-cursor-agent" "$NODE_BIN" "$LAB/cursor-wait.js"
+SH
+chmod +x "$LAB/bin/cursor-wrapper" "$LAB/bin/cursor-wrapper-decoy"
 
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-backend.sh"
@@ -171,6 +185,16 @@ for decoy in musescore amuse muse-binary muse-bind; do
     || fail "'$decoy' merely contains 'muse' and must not classify as a live agent pane"
 done
 pass "tmux liveness: unrelated muse-containing command names stay ambiguous"
+
+new_window cursor-wrapper "$LAB/bin/cursor-wrapper"
+wait_for_state "$SESSION:cursor-wrapper" alive \
+  || fail "Cursor's Node wrapper with a full-path cursor-agent argv0 must classify alive"
+pass "tmux liveness: Cursor's Node wrapper process shape classifies alive"
+
+new_window cursor-wrapper-decoy "$LAB/bin/cursor-wrapper-decoy"
+wait_for_state "$SESSION:cursor-wrapper-decoy" ambiguous \
+  || fail "a non-Cursor Node argv0 merely containing cursor-agent must stay ambiguous"
+pass "tmux liveness: a cursor-agent substring in Node argv0 stays ambiguous"
 
 # --- a version name blinds one source ---------------------------------------
 # Giving a genuine harness-named executable the version-string argv[0] that

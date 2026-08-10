@@ -25,8 +25,9 @@ Portable regressions: `tests/fm-cursor-harness.test.sh`.
 
 ### Process identity
 
-The launcher is a bash wrapper that `exec -a "$0"`s the bundled Node binary, so the live process basename remains `cursor-agent`.
-Exact `cursor-agent` ancestry is the guaranteed detection signal.
+The launcher is a bash wrapper that `exec -a "$0"`s the bundled Node binary.
+The macOS live process reports `cursor-agent` directly, while Linux procps can report `node` in `comm` and retain the full `cursor-agent` launcher path only in `argv[0]`.
+Firstmate therefore accepts either the exact process name or an exact `cursor-agent` executable-path component in ancestry.
 The adapter also accepts `CURSOR_AGENT=1` as an optional fast path, but the verified CLI does not export that environment marker itself.
 A bare `cursor` basename is deliberately rejected so IDE helpers cannot be misread as this adapter.
 [`runtime-backends.md`](runtime-backends.md#agent-liveness-name-sources) owns the resulting tmux liveness verdict and its portable regression.
@@ -88,7 +89,7 @@ There is no `docs/supervision-protocols/cursor.md`, so a primary detected as cur
 | Backend | Applicability | Evidence |
 |---|---|---|
 | tmux | Supported | Live TUI probes and process classification of exact `cursor-agent` |
-| herdr | Supported | Real Cursor-Agent Herdr spawn/send passed in the opt-in live guard below |
+| herdr | Verification pending | The corrected opt-in guard requires exact response-only rows and must pass before support is claimed |
 | zellij | Unverified / out of scope | No Cursor-specific live spawn, send, or composer evidence |
 | cmux | Unverified / out of scope | No Cursor-specific live spawn, send, or composer evidence |
 | orca | Interrupt-capable only | Orca can deliver `C-c` and Enter; Escape-only harnesses remain refused |
@@ -96,7 +97,8 @@ There is no `docs/supervision-protocols/cursor.md`, so a primary detected as cur
 ### Herdr live guard
 
 Command: FM_CURSOR_HERDR_LIVE=1 bin/fm-test-run.sh tests/fm-cursor-herdr-live-e2e.test.sh.
-On 2026-08-10, this passed with Cursor Agent 2026.08.04-aaa8809, proving real Herdr spawn and fm-send.sh delivery of a follow-up prompt.
+The guard requires exact assistant response rows for both the launch brief and the follow-up, so echoed prompt text cannot satisfy it.
+The 2026-08-10 run used substring matching and does not support the Herdr compatibility claim; rerun the corrected guard before marking Herdr supported.
 
 ## Still unproven / out of scope
 
