@@ -1036,6 +1036,10 @@ if [ "$RELAUNCH" -eq 1 ]; then
   RELAUNCH_PRIOR_HARNESS=$(fm_meta_get "$RELAUNCH_META" harness)
   if [ "$(fm_control_harness_family "$RELAUNCH_PRIOR_HARNESS" 2>/dev/null || true)" = cursor ]; then
     RELAUNCH_PRIOR_CURSOR=1
+    [ -z "$(fm_meta_get "$RELAUNCH_META" cursor_hooks_restored)" ] || {
+      echo "error: task $ID has a prepared Cursor teardown; finish teardown before relaunching it" >&2
+      exit 1
+    }
   fi
   KIND=$(fm_meta_get "$RELAUNCH_META" kind)
   [ -n "$KIND" ] || KIND=ship

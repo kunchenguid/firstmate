@@ -28,7 +28,7 @@ Portable regressions: `tests/fm-cursor-harness.test.sh`.
 The launcher is a bash wrapper that `exec -a "$0"`s the bundled Node binary.
 The macOS live process reports `cursor-agent` directly, while Linux procps can report `node` in `comm` and retain the full `cursor-agent` launcher path only in `argv[0]`.
 Firstmate therefore accepts either the exact process name or an exact `cursor-agent` executable-path component in ancestry.
-The adapter also accepts `CURSOR_AGENT=1` as an optional fast path, but the verified CLI does not export that environment marker itself.
+The adapter does not use `CURSOR_AGENT` as identity evidence because the verified CLI does not export it and an inherited value can outlive the process that set it.
 A bare `cursor` basename is deliberately rejected so IDE helpers cannot be misread as this adapter.
 [`runtime-backends.md`](runtime-backends.md#agent-liveness-name-sources) owns the resulting tmux liveness verdict and its portable regression.
 

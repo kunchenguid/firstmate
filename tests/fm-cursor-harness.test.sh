@@ -113,11 +113,18 @@ run_cursor_relaunch() {  # <home> <wt> <fakebin> <id>
     "$SPAWN" "$id" --relaunch 2>&1
 }
 
-test_detects_cursor_agent_marker() {
-  local out
-  out=$(CURSOR_AGENT=1 env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT "$HARNESS")
-  [ "$out" = cursor ] || fail "CURSOR_AGENT=1 should detect cursor, got '$out'"
-  pass "cursor is detected through CURSOR_AGENT=1"
+test_cursor_marker_does_not_override_non_cursor_ancestry() {
+  local dir bin out
+  dir="$TMP_ROOT/contaminated-cursor-marker"
+  mkdir -p "$dir"
+  for bin in codex opencode kimi; do
+    cp "$(command -v bash)" "$dir/$bin"
+    out=$(CURSOR_AGENT=1 env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+      "$dir/$bin" -c "r=\$(\"$HARNESS\"); printf '%s' \"\$r\"")
+    [ "$out" = "$bin" ] \
+      || fail "CURSOR_AGENT=1 contaminated $bin ancestry as '$out'"
+  done
+  pass "inherited Cursor marker cannot override non-Cursor ancestry"
 }
 
 test_static_crew_harness_resolution() {
@@ -706,7 +713,7 @@ test_tmux_classifies_cursor_agent_only() {
   pass "tmux liveness classifies exact cursor-agent only"
 }
 
-test_detects_cursor_agent_marker
+test_cursor_marker_does_not_override_non_cursor_ancestry
 test_static_crew_harness_resolution
 test_detects_exact_cursor_agent_ancestor
 test_detects_cursor_node_wrapper_argv0

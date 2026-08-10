@@ -433,6 +433,7 @@ BACKEND=$FM_BACKEND_VALIDATED_BACKEND
 T=$FM_BACKEND_VALIDATED_TARGET
 WT=$(fm_meta_get "$META" worktree)
 PROJ=$(fm_meta_get "$META" project)
+HARNESS_FAMILY=$(fm_control_harness_family "$(fm_meta_get "$META" harness)" 2>/dev/null || true)
 T_ORCA=
 [ "$BACKEND" != orca ] || T_ORCA=$T
 if [ "${FM_TEARDOWN_GUARD_DONE:-0}" != 1 ]; then
@@ -613,6 +614,29 @@ default_branch() {
 meta_value() {
   local meta=$1 key=$2
   fm_meta_get "$meta" "$key"
+}
+
+cursor_teardown_restore_hooks() {
+  local marker_count marker tmp
+  marker_count=$(grep -c '^cursor_hooks_restored=' "$META" 2>/dev/null || true)
+  case "$marker_count" in
+    0)
+      fm_control_cursor_hooks_restore "$WT" "$STATE" "$ID" || return 1
+      tmp="$STATE/.$ID.meta.cursor-hooks-restored.${BASHPID:-$$}"
+      [ ! -e "$tmp" ] && [ ! -L "$tmp" ] || return 1
+      if ! cp -p -- "$META" "$tmp" \
+         || ! printf '%s\n' 'cursor_hooks_restored=1' >> "$tmp" \
+         || ! mv -f -- "$tmp" "$META"; then
+        rm -f -- "$tmp" 2>/dev/null || true
+        return 1
+      fi
+      ;;
+    1)
+      marker=$(meta_value "$META" cursor_hooks_restored)
+      [ "$marker" = 1 ] || return 1
+      ;;
+    *) return 1 ;;
+  esac
 }
 
 require_orca_worktree_id() {
@@ -1376,6 +1400,16 @@ task_pid_list_contains() {  # <pid-list> <pid>
   printf '%s\n' "$1" | grep -Fxq "$2"
 }
 
+task_backend_reap_unproven() {
+  local message=$1
+  echo "warning: $message" >&2
+  if [ "$BACKEND" = tmux ] && [ "$HARNESS_FAMILY" = cursor ]; then
+    echo "REFUSED: Cursor endpoint termination is unproven for $ID; preserving its busy and turn-end hooks." >&2
+    return 1
+  fi
+  return 0
+}
+
 task_pids_under_roots() {  # <dir>...
   TASK_PIDS=
   TASK_PIDS_FAILED_DIR=
@@ -1395,45 +1429,61 @@ $dir_pids"
 reap_task_backend_process_group() {  # <label>
   local label=$1 leader leader_start pgid current_pgid own_pgid
   if [ "$BACKEND" != tmux ]; then
-    echo "warning: lsof is unavailable; cannot resolve a process-group fallback for $BACKEND task $ID" >&2
-    return 0
+    task_backend_reap_unproven "lsof is unavailable; cannot resolve a process-group fallback for $BACKEND task $ID"
+    return $?
   fi
   leader=$(tmux display-message -p -t "$T" '#{pane_pid}' 2>/dev/null) || leader=""
   case "$leader" in ''|*[!0-9]*)
-    echo "warning: lsof is unavailable; cannot resolve the tmux pane process group for $ID" >&2
-    return 0
+    task_backend_reap_unproven "lsof is unavailable; cannot resolve the tmux pane process group for $ID"
+    return $?
     ;;
   esac
   leader_start=$(task_process_identity "$leader") || {
-    echo "warning: lsof is unavailable; cannot identify the tmux pane process group for $ID" >&2
-    return 0
+    task_backend_reap_unproven "lsof is unavailable; cannot identify the tmux pane process group for $ID"
+    return $?
   }
   pgid=$(ps -o pgid= -p "$leader" 2>/dev/null) || pgid=""
   pgid=$(printf '%s' "$pgid" | tr -d '[:space:]')
   case "$pgid" in ''|*[!0-9]*|0|1)
-    echo "warning: lsof is unavailable; cannot resolve the tmux pane process group for $ID" >&2
-    return 0
+    task_backend_reap_unproven "lsof is unavailable; cannot resolve the tmux pane process group for $ID"
+    return $?
     ;;
   esac
   own_pgid=$(ps -o pgid= -p "$$" 2>/dev/null) || own_pgid=""
   own_pgid=$(printf '%s' "$own_pgid" | tr -d '[:space:]')
   if [ "$pgid" = "$own_pgid" ]; then
-    echo "warning: lsof is unavailable; refusing to signal teardown's own process group for $ID" >&2
+    task_backend_reap_unproven "lsof is unavailable; refusing to signal teardown's own process group for $ID"
+    return $?
+  fi
+  if ! task_process_identity_matches "$leader" "$leader_start"; then
+    if kill -0 -- "-$pgid" 2>/dev/null; then
+      task_backend_reap_unproven "lsof is unavailable and the tmux pane leader changed while process group $pgid remains live for $ID"
+      return $?
+    fi
     return 0
   fi
-  task_process_identity_matches "$leader" "$leader_start" || return 0
   current_pgid=$(ps -o pgid= -p "$leader" 2>/dev/null) || current_pgid=""
   current_pgid=$(printf '%s' "$current_pgid" | tr -d '[:space:]')
-  [ "$current_pgid" = "$pgid" ] || return 0
+  if [ "$current_pgid" != "$pgid" ]; then
+    if kill -0 -- "-$pgid" 2>/dev/null; then
+      task_backend_reap_unproven "lsof is unavailable and the tmux pane leader left process group $pgid while it remains live for $ID"
+      return $?
+    fi
+    return 0
+  fi
   echo "teardown: reaping leaked $label process group for $ID: $pgid" >&2
   kill -TERM -- "-$pgid" 2>/dev/null || true
   sleep 1
-  if task_process_identity_matches "$leader" "$leader_start" \
-     && [ "$(ps -o pgid= -p "$leader" 2>/dev/null | tr -d '[:space:]')" = "$pgid" ] \
-     && kill -0 -- "-$pgid" 2>/dev/null; then
+  if kill -0 -- "-$pgid" 2>/dev/null; then
     echo "teardown: force-killing leaked $label process group for $ID: $pgid" >&2
     kill -KILL -- "-$pgid" 2>/dev/null || true
   fi
+  sleep 0.2
+  if kill -0 -- "-$pgid" 2>/dev/null; then
+    task_backend_reap_unproven "lsof is unavailable and tmux process group $pgid is still live for $ID"
+    return $?
+  fi
+  return 0
 }
 
 # Reap every process rooted (by cwd) under this task's own worktree or tasktmp
@@ -1448,7 +1498,7 @@ reap_task_worktree_processes() {  # <label> <dir>...
   shift
   if ! command -v lsof >/dev/null 2>&1; then
     reap_task_backend_process_group "$label"
-    return 0
+    return $?
   fi
   while [ "$pass" -le "$max_passes" ]; do
     if ! task_pids_under_roots "$@"; then
@@ -2490,11 +2540,20 @@ if [ "$BACKEND" = herdr ]; then
   fi
 fi
 
-if [ "$(fm_control_harness_family "$(meta_value "$META" harness)" 2>/dev/null || true)" = cursor ]; then
-  fm_control_cursor_hooks_restore "$WT" "$STATE" "$ID" || {
+CURSOR_TEARDOWN_PREPARED=0
+if [ "$HARNESS_FAMILY" = cursor ]; then
+  cursor_teardown_restore_hooks || {
     echo "error: could not restore Cursor hooks for $ID; teardown aborted" >&2
     exit 1
   }
+  remove_grok_turnend_auth "$STATE" "$ID" || exit 1
+  remove_kimi_turnend_auth "$STATE" "$ID" || exit 1
+  fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
+  [ -z "$TASK_TMP" ] || rm -rf "$TASK_TMP"
+  remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
+  retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
+  fm_control_cursor_hooks_forget "$STATE" "$ID" || exit 1
+  CURSOR_TEARDOWN_PREPARED=1
 fi
 
 # Fix 3 (see script header): sweep remote job workers abandoned by an already
@@ -2552,15 +2611,15 @@ if [ "$KIND" = secondmate ]; then
   remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID" || exit $?
   remove_secondmate_registry_entry "$ID"
 fi
-remove_grok_turnend_auth "$STATE" "$ID" || exit 1
-remove_kimi_turnend_auth "$STATE" "$ID" || exit 1
-fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
-# Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.
-# Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
-[ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
-remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
-retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
-fm_control_cursor_hooks_forget "$STATE" "$ID" || exit 1
+if [ "$CURSOR_TEARDOWN_PREPARED" != 1 ]; then
+  remove_grok_turnend_auth "$STATE" "$ID" || exit 1
+  remove_kimi_turnend_auth "$STATE" "$ID" || exit 1
+  fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
+  [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
+  remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
+  retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
+  fm_control_cursor_hooks_forget "$STATE" "$ID" || exit 1
+fi
 rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" \
   "$STATE/$ID.kimi-turnend-token" "$STATE/$ID.muse-session" \

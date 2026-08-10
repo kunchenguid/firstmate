@@ -130,11 +130,21 @@ tmux send-keys -t "$SESSION" Enter
 sleep 4
 tmux capture-pane -t "$SESSION" -p | grep -qi 'ctrl+c to stop' \
   || fail "busy footer 'ctrl+c to stop' missing mid-turn"
+interrupt_log_lines=$(wc -l < "$PROBE_LOG" | tr -d '[:space:]')
 tmux send-keys -t "$SESSION" C-c
 sleep 2
 tmux capture-pane -t "$SESSION" -p | grep -qi 'Cancelled' \
   || fail "Ctrl+C did not cancel the in-flight shell"$'\n'"$(tmux capture-pane -t "$SESSION" -p | tail -40)"
-grep -Eq 'stop (aborted|error|completed)' "$PROBE_LOG" \
+saw_interrupt_stop=0
+for _ in $(seq 1 15); do
+  if tail -n "+$((interrupt_log_lines + 1))" "$PROBE_LOG" \
+      | grep -Eq '^stop (aborted|error|completed)$'; then
+    saw_interrupt_stop=1
+    break
+  fi
+  sleep 1
+done
+[ "$saw_interrupt_stop" = 1 ] \
   || fail "stop hook did not fire after interrupt"$'\n'"$(cat "$PROBE_LOG" 2>/dev/null)"
 
 # Exit path.

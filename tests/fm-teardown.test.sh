@@ -1924,11 +1924,12 @@ test_cursor_herdr_teardown_retry_retains_hook_ownership() {
 }
 
 test_cursor_herdr_closes_before_restore_and_worktree_return() {
-  local case_dir log closed hook_script attempt observed rc
+  local case_dir log closed hook_script attempt observed busy_gen rc
   case_dir=$(make_case cursor-herdr-commit-order)
   write_meta "$case_dir" local-only ship
   configure_flat_herdr_teardown_case "$case_dir"
-  printf '%s\n' 'harness=cursor' >> "$case_dir/state/task-x1.meta"
+  busy_gen=$("$ROOT/bin/fm-busy-event.sh" arm "$case_dir/state" task-x1)
+  printf '%s\n' 'harness=cursor' "busy_gen=$busy_gen" >> "$case_dir/state/task-x1.meta"
   log="$case_dir/herdr.log"; : > "$log"
   closed="$case_dir/closed"
   attempt="$case_dir/treehouse-attempt"
@@ -1947,8 +1948,9 @@ count=0
 [ ! -f "$attempt" ] || count=\$(cat "$attempt")
 count=\$((count + 1))
 printf '%s\n' "\$count" > "$attempt"
-if [ -e "$closed" ] && [ ! -e "$case_dir/wt/.cursor/hooks.json" ] && [ ! -e "$hook_script" ]; then
-  printf '%s\n' 'endpoint-gone-hooks-restored' > "$observed"
+if [ -e "$closed" ] && [ ! -e "$case_dir/wt/.cursor/hooks.json" ] \
+   && [ ! -e "$hook_script" ] && [ ! -e "$case_dir/state/task-x1.busy-gen" ]; then
+  printf '%s\n' 'endpoint-gone-hooks-restored-busy-retired' > "$observed"
 fi
 [ "\$count" -ne 1 ] || { echo 'injected treehouse return failure' >&2; exit 70; }
 exit 0
@@ -1960,12 +1962,22 @@ SH
     FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS=1 \
     run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
   [ "$rc" -ne 0 ] || fail "injected treehouse failure unexpectedly completed teardown"
-  assert_grep "endpoint-gone-hooks-restored" "$observed" \
-    "treehouse return ran before Cursor endpoint shutdown and hook restoration"
-  assert_present "$case_dir/state/task-x1.cursor-hooks.json.installed" \
-    "failed worktree return discarded Cursor recovery ownership"
+  assert_grep "endpoint-gone-hooks-restored-busy-retired" "$observed" \
+    "treehouse return ran before Cursor endpoint, hooks, and busy state were prepared"
+  assert_absent "$case_dir/state/task-x1.cursor-hooks.json.installed" \
+    "failed worktree return retained consumed Cursor recovery ownership"
+  assert_absent "$case_dir/state/task-x1.cursor-fm-busy-turnend.sh.installed" \
+    "failed worktree return retained the consumed Cursor script snapshot"
+  assert_absent "$case_dir/state/task-x1.busy-gen" \
+    "failed worktree return preceded Cursor busy-state retirement"
   assert_present "$case_dir/state/task-x1.meta" \
     "failed worktree return discarded task metadata"
+  assert_grep 'cursor_hooks_restored=1' "$case_dir/state/task-x1.meta" \
+    "failed worktree return did not preserve its durable Cursor restore marker"
+
+  mkdir -p "$case_dir/wt/.cursor/hooks"
+  printf '%s\n' 'retry-owned hooks' > "$case_dir/wt/.cursor/hooks.json"
+  printf '%s\n' 'retry-owned script' > "$hook_script"
 
   FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" \
     FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS=1 \
@@ -1975,7 +1987,11 @@ SH
     "successful Cursor Herdr retry retained hook ownership"
   assert_absent "$case_dir/state/task-x1.meta" \
     "successful Cursor Herdr retry retained task metadata"
-  pass "Cursor Herdr teardown commits endpoint, hooks, then worktree"
+  assert_grep 'retry-owned hooks' "$case_dir/wt/.cursor/hooks.json" \
+    "Cursor retry restored hooks against an already prepared checkout"
+  assert_grep 'retry-owned script' "$hook_script" \
+    "Cursor retry restored its script against an already prepared checkout"
+  pass "Cursor Herdr teardown commits endpoint, hooks, state, then worktree"
 }
 
 configure_secondmate_with_herdr_child() {  # <case-dir>
@@ -2687,6 +2703,45 @@ EOF
   pass "missing lsof falls back to reaping the tmux pane process group"
 }
 
+test_cursor_lsof_absent_refuses_unproven_tmux_reap() {
+  local case_dir hook_script path_without_lsof rc
+  case_dir=$(make_case cursor-lsof-absent-unproven-reap)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'harness=cursor' >> "$case_dir/state/task-x1.meta"
+  path_without_lsof=$(make_path_without_lsof "$case_dir")
+  mkdir -p "$case_dir/wt/.cursor/hooks"
+  fm_control_cursor_hooks_backup "$case_dir/wt" "$case_dir/state" task-x1
+  printf '%s\n' '{"version":1,"hooks":{"beforeSubmitPrompt":[{"command":".cursor/hooks/fm-busy-turnend.sh busy"}],"stop":[{"command":".cursor/hooks/fm-busy-turnend.sh idle-stop"}],"sessionEnd":[{"command":".cursor/hooks/fm-busy-turnend.sh idle-session-end"}]}}' \
+    > "$case_dir/wt/.cursor/hooks.json"
+  hook_script="$case_dir/wt/.cursor/hooks/fm-busy-turnend.sh"
+  printf '%s\n' 'firstmate hook script' > "$hook_script"
+  fm_control_cursor_hooks_record_installed "$case_dir/wt" "$case_dir/state" task-x1 \
+    "$case_dir/wt/.cursor/hooks.json" "$hook_script"
+  cat > "$case_dir/fakebin/treehouse" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' return >> "$case_dir/treehouse.log"
+EOF
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  rc=0
+  FM_TEARDOWN_TEST_PATH="$path_without_lsof" \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 1 "$rc" "cursor-lsof-absent: teardown should refuse an unproven tmux reap"
+  assert_absent "$case_dir/treehouse.log" \
+    "cursor-lsof-absent: teardown returned a worktree with an unproven live endpoint"
+  assert_present "$case_dir/state/task-x1.cursor-hooks.json.installed" \
+    "cursor-lsof-absent: refusal discarded Cursor hook ownership"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "cursor-lsof-absent: refusal discarded task metadata"
+  cmp -s "$case_dir/state/task-x1.cursor-hooks.json.installed" \
+    "$case_dir/wt/.cursor/hooks.json" \
+    || fail "cursor-lsof-absent: refusal removed live hooks.json wiring"
+  cmp -s "$case_dir/state/task-x1.cursor-fm-busy-turnend.sh.installed" "$hook_script" \
+    || fail "cursor-lsof-absent: refusal removed the live hook script"
+  pass "Cursor teardown refuses an unproven tmux process-group reap"
+}
+
 test_lsof_error_refuses_before_removal() {
   local case_dir rc
   case_dir=$(make_case lsof-error-refusal)
@@ -3041,6 +3096,7 @@ test_own_autonomous_run_is_left_alone
 test_leaked_worktree_process_is_reaped
 test_leaked_tasktmp_process_is_reaped
 test_lsof_absent_reaps_tmux_process_group
+test_cursor_lsof_absent_refuses_unproven_tmux_reap
 test_lsof_error_refuses_before_removal
 test_reused_pid_identity_is_not_force_killed
 test_exec_changed_process_is_still_reaped

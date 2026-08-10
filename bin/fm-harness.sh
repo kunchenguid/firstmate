@@ -52,11 +52,6 @@ detect_own() {
   # identified, and any rule that must be RELIABLE under grok has to test the hook
   # markers too (see .claude/settings.json Stop entries, docs/turnend-guard.md).
   [ "${GROK_AGENT:-}" = "1" ] && { echo grok; return; }
-  # CURSOR_AGENT=1 remains an accepted explicit fast path, but the verified
-  # cursor-agent CLI does not export it itself. Exact cursor-agent ancestry is
-  # the guarantee; preserving this input keeps externally managed launches
-  # compatible without mistaking it for vendor-provided evidence.
-  [ "${CURSOR_AGENT:-}" = "1" ] && { echo cursor; return; }
   # muse (Muse Code) publishes no harness-identity marker of its own. The only
   # MUSE_* variable it is documented to hand a child is MUSE_CURRENT_SESSION_LOG,
   # a per-session log PATH rather than an identity, and its export to tool
