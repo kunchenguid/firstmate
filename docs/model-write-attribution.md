@@ -110,6 +110,57 @@ Knowing where coverage stops is part of trusting a clean result.
 - A commit is matched to the window by the later of its committer and author dates, because a rebase or cherry-pick carries an author date from before the window onto a commit pushed inside it.
   A commit whose branch and pull request were both touched entirely before the window is outside it and was not examined.
 
+## The retained probe writes, and how to recognise them
+
+Five writes in `sbracewell64/firstmate` are unprefixed, tied to the 2026-08-02 capability probe, and **deliberately kept**.
+They are the sweep's only real-world red control, and they will be reported as candidates by every run whose window covers 2026-08-02.
+
+If you are looking at a candidate and wondering whether to act on it, check this list first.
+
+| Kind | Identifier | How it identifies itself |
+|---|---|---|
+| Issue comment | `5158866063` | body is the nonce |
+| Review | `4838962417` | body carries the nonce |
+| Review | `4838972180` | body carries the nonce |
+| Commit | `c73f62d045e8` | empty commit, message `test: verify browser commit capability` |
+| Commit | `3e05033a95a1` | added `docs/sol-probe.md`, which carries the nonce |
+
+Four independent ways to confirm one, in order of how quickly you can check.
+
+- The identifier appears in the table above.
+- The timestamp falls on 2026-08-02 between 15:17Z and 15:31Z, a span of about thirteen minutes that holds all five.
+- A commit candidate carries `pr=24` in its evidence, because branch `probe/sol-capability` was deleted and only the pull request pass can still reach these two commits.
+- Opening one of the three text writes shows the nonce `SOLPROBE-AIBQQE4JCTMV`, which appears nowhere else.
+
+The nonce is a reliable marker for the comment and the two reviews only.
+Commit `c73f62d045e8` is the one the browser session pushed, and it changes no files at all, so neither the nonce nor any other content marker appears in it; its message and its emptiness are what identify it.
+Commit `3e05033a95a1` is the probe scaffolding that planted the nonce for the session to read, so it carries the nonce in its diff rather than in its message.
+
+A candidate that fails all four checks is not a probe artifact and should be judged on its own merits.
+
+### Why they exist
+
+They are what a browser model session produced on 2026-08-02 when it was asked to prove it could comment, review, and push a commit.
+That measurement is the evidence the whole convention rests on: every one of them recorded the account owner with `author_association: OWNER` and no bot marker, which is why write-time enforcement was ruled impossible and detection after the fact was chosen instead.
+Independent evidence is preserved outside this repository at `data/sol-capability-probe/github-evidence.md`.
+
+### Why they were not deleted
+
+Deletion was proposed, investigated, and declined on measured grounds.
+
+It is only partly possible in the first place: a pull request cannot be deleted, only closed, and the commit survives because the pull request retains it.
+Removing the comment while the reviews and commit stayed would have left a half-removed control, which is worse than either keeping or removing the whole thing.
+
+The stronger reason is that a red control which exists in the real world, on the real account, is worth more than tidiness.
+Every other control this detector has is synthetic, and a synthetic control can only confirm the assumption already written into it.
+These four already earned their keep: proving the sweep against them is what exposed a real defect, an early filter that skipped app-performed writes and would therefore have hidden comment `5158866063` - the single most representative example of what the sweep exists to catch.
+
+### Why they are not filtered out
+
+The sweep does not special-case them, and it should not.
+A known-positive that stops being reported has stopped being a control, and a suppression list is exactly the mechanism that lets a detector quietly stop working.
+Labelling them belongs here, in prose a reader consults, not in a filter that removes them from the output.
+
 ## The residual exposure
 
 A missing token is indistinguishable from the captain's own writing until a sweep runs.
