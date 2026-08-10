@@ -97,6 +97,9 @@ jobs:
           tab_id=""
           pane_id=""
           worktree_stub="$RUNNER_TEMP/fm-herdr-worktree-stub-${GITHUB_RUN_ATTEMPT}"
+          primitive_marker="FM_WINDOWS_PRIMITIVE_${GITHUB_RUN_ID}"
+          ansi_marker="FM_WINDOWS_ANSI_${GITHUB_RUN_ID}"
+          e2e_marker="FM_WINDOWS_E2E_ACK_${GITHUB_RUN_ID}"
 
           clean_detail() {
             printf '%s' "$1" | tr '\r\n|' '   ' | sed 's/[[:space:]][[:space:]]*/ /g'
@@ -128,8 +131,8 @@ jobs:
           {
             echo '## Windows Herdr automation measurement'
             echo
-            echo "- Runner: \\`$RUNNER_OS\\` / \\`$RUNNER_ARCH\\`"
-            echo "- Session: \\`$session\\`"
+            printf '%s\n' "- Runner: \`${RUNNER_OS:-unknown}\` / \`${RUNNER_ARCH:-unknown}\`"
+            printf '%s\n' "- Session: \`$session\`"
             echo '- Scope: a throwaway, named Herdr session on this GitHub-hosted runner.'
             echo
             echo '| Subsystem | Result | Measured detail |'
@@ -191,7 +194,7 @@ jobs:
               workspace_id=$(printf '%s' "$workspace_json" | "$JQ" -r '.result.workspace.workspace_id // empty' 2>/dev/null || true)
               root_pane=$(printf '%s' "$workspace_json" | "$JQ" -r '.result.root_pane.pane_id // empty' 2>/dev/null || true)
               if [ -n "$workspace_id" ] && [ -n "$root_pane" ]; then
-                tab_json=$(herdr_call tab create --workspace "$workspace_id" --cwd "$repo_cwd" --label fm-windows-spike-task --no-focus 2>>"$details" || true)
+                tab_json=$(herdr_call tab create --workspace "$workspace_id" --cwd "$repo_cwd" --label fm-windows-spike-task --env "FM_WINDOWS_PRIMITIVE_MARKER=$primitive_marker" --env "FM_WINDOWS_ANSI_MARKER=$ansi_marker" --env "FM_WINDOWS_E2E_MARKER=$e2e_marker" --no-focus 2>>"$details" || true)
                 tab_id=$(printf '%s' "$tab_json" | "$JQ" -r '.result.tab.tab_id // empty' 2>/dev/null || true)
                 pane_id=$(printf '%s' "$tab_json" | "$JQ" -r '.result.root_pane.pane_id // empty' 2>/dev/null || true)
                 if [ -n "$tab_id" ] && [ -n "$pane_id" ]; then
@@ -213,8 +216,7 @@ jobs:
               fi
 
               if [ -n "$pane_id" ]; then
-                primitive_marker="FM_WINDOWS_PRIMITIVE_${GITHUB_RUN_ID}"
-                if herdr_call pane send-text "$pane_id" "echo $primitive_marker" >>"$details" 2>&1 &&
+                if herdr_call pane send-text "$pane_id" 'Write-Output $env:FM_WINDOWS_PRIMITIVE_MARKER' >>"$details" 2>&1 &&
                   herdr_call pane send-keys "$pane_id" enter >>"$details" 2>&1 &&
                   herdr_call pane wait-output "$pane_id" --match "$primitive_marker" --timeout 10000 >>"$details" 2>&1; then
                   capture=$(herdr_call pane read "$pane_id" --source recent --lines 200 2>>"$details" || true)
@@ -308,13 +310,13 @@ jobs:
                   limit 'The stubbed isolated-copy step could not be prepared.'
                 fi
 
-                ansi_command="powershell -NoProfile -Command \"[Console]::Write([char]27 + '[31mFM_WINDOWS_ANSI_RED' + [char]27 + '[0m' + [Environment]::NewLine)\""
+                ansi_command="powershell -NoProfile -Command \"[Console]::Write([char]27 + '[31m' + \$env:FM_WINDOWS_ANSI_MARKER + [char]27 + '[0m' + [Environment]::NewLine)\""
                 if herdr_call pane run "$pane_id" "$ansi_command" >>"$details" 2>&1 &&
-                  herdr_call pane wait-output "$pane_id" --match FM_WINDOWS_ANSI_RED --timeout 10000 >>"$details" 2>&1; then
+                  herdr_call pane wait-output "$pane_id" --match "$ansi_marker" --timeout 10000 >>"$details" 2>&1; then
                   ansi_capture=$(herdr_call pane read "$pane_id" --source recent --lines 200 --format ansi 2>>"$details" || true)
-                  if printf '%s' "$ansi_capture" | grep -Fq $'\033[31mFM_WINDOWS_ANSI_RED'; then
+                  if printf '%s' "$ansi_capture" | grep -Fq $'\033[31m'"$ansi_marker"; then
                     record 'ANSI capture fidelity' PASS 'pane read --format ansi preserved the injected red SGR sequence'
-                  elif printf '%s' "$ansi_capture" | grep -Fq FM_WINDOWS_ANSI_RED; then
+                  elif printf '%s' "$ansi_capture" | grep -Fq "$ansi_marker"; then
                     record 'ANSI capture fidelity' DEGRADED 'pane text was captured, but pane read --format ansi did not preserve the injected SGR sequence'
                   else
                     record 'ANSI capture fidelity' FAIL 'the ANSI marker was not observable through pane read --format ansi'
@@ -325,8 +327,7 @@ jobs:
                   limit 'ANSI capture could not be measured.'
                 fi
 
-                e2e_marker="FM_WINDOWS_E2E_ACK_${GITHUB_RUN_ID}"
-                if herdr_call pane send-text "$pane_id" "echo $e2e_marker" >>"$details" 2>&1 &&
+                if herdr_call pane send-text "$pane_id" 'Write-Output $env:FM_WINDOWS_E2E_MARKER' >>"$details" 2>&1 &&
                   herdr_call pane send-keys "$pane_id" enter >>"$details" 2>&1 &&
                   herdr_call pane wait-output "$pane_id" --match "$e2e_marker" --timeout 10000 >>"$details" 2>&1; then
                   e2e_capture=$(herdr_call pane read "$pane_id" --source recent --lines 200 2>>"$details" || true)
