@@ -503,10 +503,40 @@ expect_code 2 "$RC" 'a missing required argument must be could-not-observe'
 assert_contains "$OUT" 'missing required --validated-base' 'the missing argument must be named'
 pass 'a missing required argument is could-not-observe, not a pass'
 
-run_check "$REPO" "$V" "$V" "$V"
+# The candidate must differ from the validated head here, or the comparison
+# would be refused as vacuous before the contribution is ever measured.
+run_check "$REPO" "$V" "$V" "$B"
 expect_code 2 "$RC" 'an empty validated contribution must be could-not-observe'
 assert_contains "$OUT" 'validated contribution is empty' 'an empty contribution must say so'
 pass 'an empty validated contribution refuses instead of passing vacuously'
+
+# --- the fail-open holes: a verdict reached without comparing anything -------
+#
+# Each of these produced a confident verdict before the guards existed: the
+# vacuous case printed PASS in a form indistinguishable from a real comparison,
+# and the empty remote silently resolved the validated head as an ordinary
+# local ref. Both are the "passes without looking" outcome this check exists to
+# make impossible, so both must refuse.
+
+run_check "$REPO" "$B" "$V" "$V"
+expect_code 2 "$RC" 'a head compared against itself must be could-not-observe'
+assert_contains "$OUT" 'resolve to the same commit' 'the vacuous comparison must name why nothing was compared'
+assert_not_contains "$OUT" 'PASS' 'a vacuous comparison must never read as a pass'
+pass 'a head compared against itself refuses instead of passing vacuously'
+
+RC=0
+OUT=$("$CHECK" --repo "$REPO" --validated-base "$B" --validated-head "$V" \
+  --validated-remote "" --candidate-head "$B" 2>&1) || RC=$?
+expect_code 2 "$RC" 'an explicitly empty flag value must be could-not-observe'
+assert_contains "$OUT" 'empty value' 'the empty flag value must be named'
+pass 'an explicitly empty flag value refuses instead of silently falling back'
+
+RC=0
+OUT=$("$CHECK" --repo "$REPO" --validated-head "$V" \
+  --candidate-pr https://github.com/example/example/pull/1 2>&1) || RC=$?
+expect_code 2 "$RC" 'a forge candidate without an authoritative validated head must refuse'
+assert_contains "$OUT" '--validated-remote' 'the missing authoritative source must be named'
+pass 'a forge candidate is never compared against a local validated ref'
 
 # --- could-not-observe: a binary path that changed --------------------------
 
@@ -562,32 +592,42 @@ git_do "$SRC" push -q "$FORGE" \
 
 # --no-local: a local clone hardlinks the whole object store, which would hand
 # the worker the pushed heads for free and hide whether the fetch ran.
+# The validated head lives only in a stand-in for the pipeline's gate
+# repository, exactly as a run's own fix commits do. Pairing a forge candidate
+# with a local validated ref is the defect this check was rebuilt to remove, so
+# the fixture makes BOTH sides authoritative and the check must fetch each.
+git_do "$SRC" checkout -q -b validated "$B"
+printf 'alpha\nbravo\ncharlie\nvalidated line\n' > "$SRC/core.sh"
+V=$(commit_all "$SRC" 'validated: one addition')
+GATE="$TMP_ROOT/gate.git"
+git init -q --bare -b main "$GATE"
+git_do "$SRC" push -q "$GATE" "$V:refs/heads/fm/work"
+
 WORKER="$TMP_ROOT/worker"
 git clone -q --no-local "$FORGE" "$WORKER"
-git_do "$WORKER" checkout -q -b work "$B"
-printf 'alpha\nbravo\ncharlie\nvalidated line\n' > "$WORKER/core.sh"
-V=$(commit_all "$WORKER" 'validated: one addition')
 
-if git -C "$WORKER" cat-file -e "$D^{commit}" 2>/dev/null; then
-  fail 'the fixture must not already hold the candidate head locally'
-fi
+for absent in "$D" "$V"; do
+  if git -C "$WORKER" cat-file -e "$absent^{commit}" 2>/dev/null; then
+    fail 'the fixture must not already hold a head the check is meant to fetch'
+  fi
+done
 
-run_check_pr "$WORKER" "$B" "$V" 7 --candidate-base origin/main
+run_check_pr "$WORKER" "$B" "$V" 7 --candidate-base origin/main --validated-remote "$GATE"
 expect_code 3 "$RC" 'a dropping candidate fetched from the forge must be refused'
 assert_contains "$OUT" 'dropped-content' 'the fetched candidate must be compared, not skipped'
 assert_contains "$OUT" 'core.sh' 'the losing path must be named'
 pass 'a head that exists only on the forge is fetched and refused'
 
-run_check_pr "$WORKER" "$B" "$V" 8 --candidate-base origin/main
+run_check_pr "$WORKER" "$B" "$V" 8 --candidate-base origin/main --validated-remote "$GATE"
 expect_code 0 "$RC" 'a faithful candidate fetched from the forge must pass'
 pass 'a faithful head fetched from the forge still passes'
 
-run_check_pr "$WORKER" "$B" "$V" 9 --candidate-base origin/main
+run_check_pr "$WORKER" "$B" "$V" 9 --candidate-base origin/main --validated-remote "$GATE"
 expect_code 2 "$RC" 'an unfetchable request must be could-not-observe'
 assert_contains "$OUT" 'cannot fetch the candidate head' 'the unreachable candidate must say so'
 pass 'a candidate that cannot be fetched refuses instead of passing'
 
-run_check_pr "$WORKER" "$B" "$V" 'not-a-request' --candidate-base origin/main
+run_check_pr "$WORKER" "$B" "$V" 'not-a-request' --candidate-base origin/main --validated-remote "$GATE"
 expect_code 2 "$RC" 'an unparseable request must be could-not-observe'
 pass 'a request that is neither a URL nor a number is could-not-observe'
 
@@ -611,7 +651,7 @@ printf 'alpha\nbravo\ncharlie\nvalidated line\n' > "$COLLIDE_WORKER/core.sh"
 CV=$(commit_all "$COLLIDE_WORKER" 'validated: one addition')
 
 run_check_pr "$COLLIDE_WORKER" "$B" "$CV" \
-  'https://127.0.0.1/group/project/-/merge_requests/7' --candidate-base origin/main
+  'https://127.0.0.1/group/project/-/merge_requests/7' --candidate-base origin/main --validated-remote "$GATE"
 expect_code 2 "$RC" 'a request must never be answered by a repository it does not name'
 assert_not_contains "$OUT" 'REBASE-EQUIVALENCE: PASS' \
   'a colliding request number must not clear the comparison'
@@ -620,7 +660,7 @@ assert_not_contains "$OUT" 'REBASE-EQUIVALENCE: DROPPED' \
 pass 'a remote that does not name the request repository is never used for it'
 
 run_check_pr "$WORKER" "$B" "$V" 'https://github.com/example/project/pull/8' \
-  --candidate-remote "$FORGE" --candidate-base origin/main
+  --candidate-remote "$FORGE" --candidate-base origin/main --validated-remote "$GATE"
 expect_code 2 "$RC" 'a remote that names another repository must be refused'
 assert_contains "$OUT" 'not github.com/example/project' \
   'the mismatch must name the repository the request URL identifies'
@@ -646,26 +686,26 @@ export PATH
 git -C "$WORKER" config "url.$FORGE.insteadOf" 'https://github.com/example/project.git'
 
 RC=0
-OUT=$("$CHECK" --repo "$WORKER" --validated-head "$V" \
+OUT=$("$CHECK" --repo "$WORKER" --validated-head "$V" --validated-remote "$GATE" \
   --candidate-pr 'https://github.com/example/project/pull/8' 2>&1) || RC=$?
 expect_code 0 "$RC" 'a faithful candidate resolved wholly from the request must pass'
 assert_contains "$OUT" 'REBASE-EQUIVALENCE: PASS' 'the request-resolved comparison must report PASS'
 pass 'the request URL alone resolves the head, the trunk, and the validated base'
 
 RC=0
-OUT=$("$CHECK" --repo "$WORKER" --validated-head "$V" \
+OUT=$("$CHECK" --repo "$WORKER" --validated-head "$V" --validated-remote "$GATE" \
   --candidate-pr 'https://github.com/example/project/pull/7' 2>&1) || RC=$?
 expect_code 3 "$RC" 'a dropping candidate resolved wholly from the request must be refused'
 assert_contains "$OUT" 'core.sh' 'the losing path must be named'
 pass 'a request-resolved comparison still refuses a dropping rebase'
 
 RC=0
-OUT=$(FM_FAKE_GH_FAIL=1 "$CHECK" --repo "$WORKER" --validated-head "$V" \
+OUT=$(FM_FAKE_GH_FAIL=1 "$CHECK" --repo "$WORKER" --validated-head "$V" --validated-remote "$GATE" \
   --candidate-pr 'https://github.com/example/project/pull/8' 2>&1) || RC=$?
 expect_code 2 "$RC" 'a base the forge cannot report must be could-not-observe'
 assert_contains "$OUT" 'cannot read the base branch' 'the unreadable base must say so'
 RC=0
-OUT=$(FM_FAKE_GH_BASE=no-such-branch "$CHECK" --repo "$WORKER" --validated-head "$V" \
+OUT=$(FM_FAKE_GH_BASE=no-such-branch "$CHECK" --repo "$WORKER" --validated-head "$V" --validated-remote "$GATE" \
   --candidate-pr 'https://github.com/example/project/pull/8' 2>&1) || RC=$?
 expect_code 2 "$RC" 'a base branch that cannot be fetched must be could-not-observe'
 run_check_pr "$WORKER" "$B" "$V" 8
@@ -697,6 +737,11 @@ git -C "$STALE_WORKER" config "url.$STALE_FORGE.insteadOf" 'https://github.com/e
 git_do "$STALE_WORKER" checkout -q -b work "$SB"
 printf 'alpha\nbravo\n' > "$STALE_WORKER/core.sh"
 SV=$(commit_all "$STALE_WORKER" 'validated: drop the guard')
+# The validated head must come from an authoritative source here too, so it is
+# published to a stand-in gate rather than read off the worker's own branch.
+STALE_GATE="$TMP_ROOT/stale-gate.git"
+git init -q --bare -b main "$STALE_GATE"
+git_do "$STALE_WORKER" push -q "$STALE_GATE" "$SV:refs/heads/fm/work"
 
 printf 'alpha\nguard\nbravo\ndelta\nguard\n' > "$STALE_SRC/core.sh"
 ST=$(commit_all "$STALE_SRC" 'trunk: a later block that also ends in guard')
@@ -705,12 +750,12 @@ SC=$(commit_all "$STALE_SRC" 'candidate: the validated removal reapplied on the 
 git_do "$STALE_SRC" push -q "$STALE_FORGE" "$ST:refs/heads/main" "$SC:refs/pull/5/head"
 
 RC=0
-OUT=$("$CHECK" --repo "$STALE_WORKER" --validated-head "$SV" \
+OUT=$("$CHECK" --repo "$STALE_WORKER" --validated-head "$SV" --validated-remote "$STALE_GATE" \
   --candidate-pr 'https://github.com/example/stale/pull/5' 2>&1) || RC=$?
 expect_code 0 "$RC" 'the base fetched from the request must clear a faithful rebase'
 assert_contains "$OUT" 'REBASE-EQUIVALENCE: PASS' 'the request-fetched base must report PASS'
 run_check "$STALE_WORKER" "$SB" "$SV" 'refs/fm-rebase-equivalence/candidate/5' \
-  --candidate-base origin/main
+  --candidate-base origin/main --validated-remote "$GATE"
 expect_code 3 "$RC" 'the same comparison against the stale local trunk must diverge'
 pass 'the candidate base comes from the request, so a stale local trunk cannot refuse a faithful rebase'
 
@@ -760,10 +805,16 @@ if git -C "$PIPE_WORKER" cat-file -e "$PV^{commit}" 2>/dev/null; then
   fail 'the fixture must not already hold the validated head locally'
 fi
 
+# Reading the validated side from this clone is the defect itself: the run's
+# fix commits are not here, so the pipeline's own accepted rewrite would read as
+# dropped content. It is no longer merely wrong, it is refused outright, which
+# is what makes the false refusal impossible rather than less likely.
 run_check_pr "$PIPE_WORKER" "$PB" "$PW" 3 --candidate-base origin/main
-expect_code 3 "$RC" "this clone's own head must report the pipeline's fix as a drop"
-assert_contains "$OUT" 'dropped-content' \
-  "the defect must be present when the validated side is read from this clone"
+expect_code 2 "$RC" "a forge candidate must refuse a validated head read from this clone"
+assert_contains "$OUT" '--validated-remote' \
+  'the refusal must name the authoritative source it requires'
+assert_not_contains "$OUT" 'dropped-content' \
+  'the local validated head must never reach the comparison at all'
 
 RC=0
 OUT=$("$CHECK" --repo "$PIPE_WORKER" --validated-base "$PB" --validated-head "$PV" \
@@ -777,14 +828,14 @@ pass 'the validated head is taken from the pipeline, so its own fixes are not re
 
 RC=0
 OUT=$("$CHECK" --repo "$PIPE_WORKER" --validated-base "$PB" --validated-head HEAD \
-  --validated-remote "$PIPE" --candidate-pr 3 --candidate-base origin/main 2>&1) || RC=$?
+  --validated-remote "$PIPE" --candidate-pr 3 --candidate-base origin/main --validated-remote "$GATE" 2>&1) || RC=$?
 expect_code 2 "$RC" 'a symbolic validated head cannot name a commit on the pipeline side'
 assert_contains "$OUT" 'full commit id' 'the refusal must say what the run record supplies'
 
 ABSENT_OID=$(printf '%s' "$PW" | tr '0-9a-f' '1-9a-f0')
 RC=0
 OUT=$("$CHECK" --repo "$PIPE_WORKER" --validated-base "$PB" --validated-head "$ABSENT_OID" \
-  --validated-remote "$PIPE" --candidate-pr 3 --candidate-base origin/main 2>&1) || RC=$?
+  --validated-remote "$PIPE" --candidate-pr 3 --candidate-base origin/main --validated-remote "$GATE" 2>&1) || RC=$?
 expect_code 2 "$RC" 'a validated head no side holds must be could-not-observe'
 assert_contains "$OUT" 'cannot fetch the validated head' 'the unfetchable validated head must say so'
 assert_not_contains "$OUT" 'REBASE-EQUIVALENCE: PASS' \
@@ -822,10 +873,17 @@ B=$(git -C "$REPO" rev-parse HEAD)
 printf 'alpha\nbravo\ncharlie\nvalidated line\n' > "$REPO/core.sh"
 V=$(commit_all "$REPO" 'validated: one addition')
 
+# The passing scenario needs a candidate that is a DIFFERENT commit carrying
+# the validated content. Comparing the validated head against itself is refused
+# as vacuous, so it can no longer stand in for a real pass here.
+git_do "$REPO" checkout -q -b verdict-trunk "$B"
+printf 'alpha\nbravo\ncharlie\nvalidated line\ntrunk epilogue\n' > "$REPO/core.sh"
+VC=$(commit_all "$REPO" 'candidate: validated line carried, trunk moved too')
+
 for scenario in 3 0 2; do
   case "$scenario" in
     3) run_check "$REPO" "$B" "$V" "$B" ;;
-    0) run_check "$REPO" "$B" "$V" "$V" ;;
+    0) run_check "$REPO" "$B" "$V" "$VC" ;;
     2) run_check "$REPO" "$B" "$V" 'nope' ;;
   esac
   assert_contains "$OUT" 'REBASE-EQUIVALENCE:' 'every run must print a verdict line'

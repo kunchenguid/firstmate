@@ -199,16 +199,30 @@ tip-to-tip diff nor a merge-result comparison.
 EOF
 }
 
+# An explicitly empty value is refused rather than stored. A wrapper that
+# builds `--validated-remote "$REMOTE"` with REMOTE unset would otherwise pass
+# the presence guard below and silently resolve the validated head as an
+# ordinary local ref, which is the exact fallback this flag exists to remove.
+# The check is inline because cannot_observe inside a command substitution
+# would have its verdict captured into the variable instead of printed.
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --repo) REPO=${2:-}; shift 2 || cannot_observe "--repo needs a value" ;;
-    --validated-base) VALIDATED_BASE=${2:-}; shift 2 || cannot_observe "--validated-base needs a value" ;;
-    --validated-head) VALIDATED_HEAD=${2:-}; shift 2 || cannot_observe "--validated-head needs a value" ;;
-    --validated-remote) VALIDATED_REMOTE=${2:-}; shift 2 || cannot_observe "--validated-remote needs a value" ;;
-    --candidate-head) CANDIDATE_HEAD=${2:-}; shift 2 || cannot_observe "--candidate-head needs a value" ;;
-    --candidate-pr) CANDIDATE_PR=${2:-}; shift 2 || cannot_observe "--candidate-pr needs a value" ;;
-    --candidate-remote) CANDIDATE_REMOTE=${2:-}; shift 2 || cannot_observe "--candidate-remote needs a value" ;;
-    --candidate-base) CANDIDATE_BASE=${2:-}; shift 2 || cannot_observe "--candidate-base needs a value" ;;
+    --repo|--validated-base|--validated-head|--validated-remote|\
+    --candidate-head|--candidate-pr|--candidate-remote|--candidate-base)
+      [ "$#" -ge 2 ] || cannot_observe "$1 needs a value"
+      [ -n "$2" ] || cannot_observe "$1 was given an empty value, which is never a valid input"
+      case "$1" in
+        --repo) REPO=$2 ;;
+        --validated-base) VALIDATED_BASE=$2 ;;
+        --validated-head) VALIDATED_HEAD=$2 ;;
+        --validated-remote) VALIDATED_REMOTE=$2 ;;
+        --candidate-head) CANDIDATE_HEAD=$2 ;;
+        --candidate-pr) CANDIDATE_PR=$2 ;;
+        --candidate-remote) CANDIDATE_REMOTE=$2 ;;
+        --candidate-base) CANDIDATE_BASE=$2 ;;
+      esac
+      shift 2
+      ;;
     -h|--help) usage; exit 0 ;;
     *) cannot_observe "unrecognized argument: $1" ;;
   esac
@@ -228,6 +242,14 @@ if [ -z "$CANDIDATE_HEAD" ] && [ -z "$CANDIDATE_PR" ]; then
 fi
 if [ -n "$CANDIDATE_REMOTE" ] && [ -z "$CANDIDATE_PR" ]; then
   cannot_observe "--candidate-remote only applies to --candidate-pr"
+fi
+# A candidate taken from the forge must be compared against a validated head
+# taken from the pipeline, never against a local ref. The caller that cannot
+# name the run's own head is the caller whose head is the OLDER content,
+# because a run's fix commits stay in its gate repository, so a local ref here
+# reports the pipeline's own accepted fixes as content the push dropped.
+if [ -n "$CANDIDATE_PR" ] && [ -z "$VALIDATED_REMOTE" ]; then
+  cannot_observe "--candidate-pr needs --validated-remote so the validated head comes from the pipeline rather than a local ref"
 fi
 
 [ -d "$REPO" ] || cannot_observe "repository directory is unavailable: $REPO"
@@ -414,6 +436,14 @@ VH=$(resolve "$VALIDATED_HEAD") \
   || cannot_observe "cannot resolve --validated-head: $VALIDATED_HEAD"
 CH=$(resolve "$CANDIDATE_HEAD") \
   || cannot_observe "cannot resolve --candidate-head: $CANDIDATE_HEAD"
+
+# A head compared against itself is not a comparison. Every path's counts match
+# by construction, so the run would print PASS in a form indistinguishable from
+# a real one - the "passes without looking" outcome this check exists to make
+# impossible. It is refused here rather than reported, because the caller's
+# idea of which commit is which is what went wrong.
+[ "$VH" != "$CH" ] || cannot_observe \
+  "the validated head and the candidate resolve to the same commit $VH, so nothing would be compared"
 
 # Both bases are fork points off the same trunk ref, found with merge-base, so
 # a trunk that has moved past the commit either head sits on still names them
