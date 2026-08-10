@@ -1,9 +1,11 @@
 # shellcheck shell=bash disable=SC2034
-# Durable secondmate reread-nudge marker helpers. Source only.
+# Durable secondmate update-journal and reread-nudge helpers. Source only.
 #
-# Both local tracked-file convergence and remote inherited-material transfer
-# publish the same bounded record before delivery. A failed send leaves the
-# record for the locked bootstrap retry; a successful send removes it.
+# Local tracked-file convergence journals a running home's instruction advance
+# before mutation, then publishes its bounded reread record. Remote convergence
+# and inherited-material transfer publish the placement-bound reread record
+# before delivery. Failed sends remain for locked bootstrap retry; completed
+# actions retire their records.
 
 FM_SECOND_MATE_NUDGE_MESSAGE='firstmate was updated to the latest - please re-read your AGENTS.md to pick up the new instructions.'
 FM_REMOTE_SECOND_MATE_NUDGE_MESSAGE='Firstmate instructions or inherited config changed on this host. Re-read AGENTS.md and the inherited config files before further work.'

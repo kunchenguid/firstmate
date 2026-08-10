@@ -26,6 +26,8 @@
 # state/*.meta remains reserved for workers the secondmate supervises.
 # Retirement closes only this secondmate's panes or workspace and never
 # stops fm-remote or removes a sibling secondmate's workspace or panes.
+# Tracked checkout sync and update operations use the shared ownership contract
+# in bin/fm-dependency-lock-lib.sh rather than racing a dependency check.
 #
 # The optional launch traceparent is the per-task W3C trace-context carrier the
 # PARENT home resolved for this secondmate; this host only delivers it to the

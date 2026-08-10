@@ -31,6 +31,9 @@
 #          and message sent; a failed send leaves an idempotent retry marker
 #          under state/.secondmate-nudge-pending/ and prints an actionable
 #          NUDGE_SECONDMATES line.
+#          A running local home's instruction advance is journaled before its
+#          fast-forward so interrupted publication of that retry marker is
+#          recovered before a later advance.
 #          Already-current or no-instruction-change homes are silently left alone.
 #          The secondmate sweep also propagates declared inherited local material
 #          into each validated live secondmate home.

@@ -307,6 +307,8 @@ The refresh also prunes local branches whose remote is gone and that no worktree
 For a remote route, the configured code root updates from its own origin on that host before the persistent home fast-forwards to the code-root commit.
 The update is fast-forward only: dirty, diverged, offline, and off-default targets are reported and left untouched.
 Local homes share the guarded fast-forward helper, while remote updates delegate the same safety decision to the configured host through the generic transport.
+All Firstmate and secondmate checkout advances share per-account, per-host ownership with the Linux dependency checker, so a concurrent audit defers checkout mutation instead of changing the checker or its targets underneath a run.
+Startup convergence records a live home's required instruction reread before advancing it, while a dependency-checker self-update journals its Firstmate reread and secondmate nudges; later runs reconcile those records before another advance.
 The mechanics are owned by the `/updatefirstmate` skill and firstmate's operating manual in [`AGENTS.md`](../AGENTS.md) (self-update).
 
 ## Restart-proof

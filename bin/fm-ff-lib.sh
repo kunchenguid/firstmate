@@ -23,6 +23,9 @@
 # Homes are leased at a detached HEAD on the
 # default branch, so the fast-forward advances HEAD only and never moves the
 # shared default branch or any other worktree's checkout.
+# Every target advance uses the shared ownership contract in
+# bin/fm-dependency-lock-lib.sh and stays untouched when that ownership cannot
+# be acquired.
 
 SUB_HOME_MARKER="${SUB_HOME_MARKER:-.fm-secondmate-home}"
 # shellcheck source=bin/fm-dependency-lock-lib.sh

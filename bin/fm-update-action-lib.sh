@@ -1,4 +1,7 @@
 # shellcheck shell=bash
+# Crash-recoverable caller-action journals for fm-update.sh. Source only.
+# The journal records instruction rereads and live-secondmate nudges around a
+# guarded checkout advance; the coordinating caller owns delivery and cleanup.
 
 fm_update_action_dir() {
   [ -n "${FM_UPDATE_ACTION_DIR:-}" ] || return 1

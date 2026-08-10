@@ -21,6 +21,9 @@
 # This command explicitly disables agent forwarding, forwarding setup, and
 # configured SendEnv patterns. The remote entrypoint executes the selected
 # command under an empty environment with only its fixed runtime values.
+# An internal caller may pin the complete host, code-root, and home placement
+# with the FM_ON_EXPECTED_HOST, FM_ON_EXPECTED_ROOT, and FM_ON_EXPECTED_HOME
+# tuple; any registry change before execution is then refused.
 #
 # ServerAliveInterval/ServerAliveCountMax arm dead-peer detection so a vanished
 # peer (a reboot, a dropped link) becomes a bounded ssh failure (exit 255)

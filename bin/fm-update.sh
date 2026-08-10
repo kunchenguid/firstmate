@@ -26,6 +26,10 @@
 #   - one status line per target (updated/already current/skipped)
 #   - reread-firstmate: yes|no    (did the running firstmate's instructions change)
 #   - nudge-secondmates: fm-<id>...|none   (updated live secondmates to nudge)
+# Checkout ownership is coordinated with dependency checks by
+# bin/fm-dependency-lock-lib.sh. When a coordinating caller supplies
+# FM_UPDATE_ACTION_DIR, prepared and completed action records make its required
+# reread and nudge follow-ups recoverable across interruption.
 #
 # Usage: fm-update.sh [--help]
 set -eu

@@ -9,6 +9,10 @@
 # processes/sessions are active. Firstmate updates use fm-update.sh's guarded,
 # fast-forward-only path and run last so this script cannot change underneath
 # the remaining checks.
+# Dependency checks and Firstmate checkout advances share the host ownership
+# contract in fm-dependency-lock-lib.sh. A Firstmate update started here also
+# journals its required instruction reread and secondmate nudges so an
+# interrupted run must complete those actions before a later update proceeds.
 #
 # Linux package policy:
 #   - Debian/Ubuntu packages are compared with the locally cached APT candidate
