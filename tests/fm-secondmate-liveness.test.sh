@@ -190,6 +190,9 @@ test_agent_state_dispatcher_and_compatibility() {
   out=$(bash -c '. "$0/bin/fm-backend.sh"; fm_backend_source herdr; fm_backend_herdr_pane_agent_state() { printf "live"; }; fm_backend_agent_state herdr sess:p1' "$ROOT")
   [ "$out" = alive ] || fail "detailed dispatcher should route Herdr, got '$out'"
 
+  out=$(bash -c '. "$0/bin/fm-backend.sh"; fm_backend_source herdr; fm_backend_herdr_pane_agent_state() { printf "no-agent"; }; fm_backend_agent_state herdr sess:p1 bash 1' "$ROOT")
+  [ "$out" = unverified ] || fail "wrapped raw OMP metadata must prevent Herdr no-agent from becoming recoverable dead, got '$out'"
+
   out=$(PATH="$fb:$BASE_PATH" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state tmux sess:win raw-omp' "$ROOT")
   [ "$out" = unverified ] || fail "raw-omp metadata should stop the shared liveness dispatcher, got '$out'"
   fb=$(make_probe_tmux "$TMP_ROOT/tmux-raw-launch-omp" omp)

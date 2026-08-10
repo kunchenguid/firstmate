@@ -898,8 +898,8 @@ fm_backend_agent_state() {  # <backend> <target> [recorded-harness] [raw-launch]
   [ "$recorded_harness" = raw-omp ] && { printf 'unverified'; return 0; }
   fm_backend_source "$backend" || { printf 'unverified'; return 0; }
   case "$backend" in
-    tmux) fm_backend_tmux_agent_state "$target" ;;
-    herdr) fm_backend_herdr_agent_state "$target" ;;
+    tmux) fm_backend_tmux_agent_state "$target" "$raw_launch" ;;
+    herdr) fm_backend_herdr_agent_state "$target" "$recorded_harness" "$raw_launch" ;;
     *) printf 'unverified' ;;
   esac
 }

@@ -1906,7 +1906,7 @@ fm_backend_herdr_pane_agent_state() {  # <session> <pane_id> [recorded-harness] 
   local inherited_unverified=${FM_HARNESS_UNVERIFIED:-}
   local FM_HARNESS_UNVERIFIED=$inherited_unverified
   [ "$raw_launch" = 1 ] && FM_HARNESS_UNVERIFIED=raw-launch
-  if [ "$recorded_harness" = raw-omp ]; then
+  if [ "$recorded_harness" = raw-omp ] || [ "$raw_launch" = 1 ] || [ -n "$FM_HARNESS_UNVERIFIED" ]; then
     printf 'unknown'
     return 0
   fi
@@ -1966,7 +1966,10 @@ fm_backend_herdr_agent_state() {  # <target> [recorded-harness] [raw-launch]
   local inherited_unverified=${FM_HARNESS_UNVERIFIED:-}
   local FM_HARNESS_UNVERIFIED=$inherited_unverified
   [ "$raw_launch" = 1 ] && FM_HARNESS_UNVERIFIED=raw-launch
-  [ "$recorded_harness" = raw-omp ] && { printf 'unverified'; return 0; }
+  if [ "$recorded_harness" = raw-omp ] || [ "$raw_launch" = 1 ] || [ -n "$FM_HARNESS_UNVERIFIED" ]; then
+    printf 'unverified'
+    return 0
+  fi
   fm_backend_herdr_parse_target "$target" || { printf 'unreadable'; return 0; }
   case "$(fm_backend_herdr_pane_agent_state "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" "$recorded_harness" "$raw_launch")" in
     dead) printf 'missing' ;;
