@@ -233,6 +233,37 @@ test_ff_inflight_feature_branch() {
   pass "T5 in-flight: a home on a feature branch is skipped, its work preserved"
 }
 
+# --- T5b: a target that is not a work-tree root never advances its encloser ---
+# Git repository discovery walks UPWARD, so a directory that merely sits INSIDE a
+# repository resolves to that enclosing repository. Without the clone-root guard
+# ff_target fast-forwards the ENCLOSING worktree under the target's label, which is
+# how a plain container directory silently moves a home that was never named.
+# The container lives under the gitignored projects/ dir on purpose: an untracked
+# path would report the enclosing worktree dirty, and the skip would then prove
+# nothing because the dirty guard would have stopped the advance anyway.
+test_ff_non_root_target_never_advances_enclosing_repo() {
+  local w c1 base before
+  w=$(new_world ff-clone-root)
+  c1=$(head_of "$w/main")
+  git -C "$w/main" worktree add -q --detach "$w/sm" "$c1"
+  mkdir -p "$w/sm/projects/pool"
+  bump_primary "$w" instr
+  base=$(primary_head_commit "$w/main")
+  before=$(head_of "$w/sm")
+  [ "$before" != "$base" ] || fail "fixture is vacuous: the home is already at the base"
+  [ -z "$(git -C "$w/sm" status --porcelain 2>/dev/null | head -1)" ] \
+    || fail "fixture is vacuous: the enclosing worktree is dirty, so the dirty guard would skip anyway"
+
+  run_ff "$w/sm/projects/pool" "$base"
+
+  [ "$FF_STATUS" = skipped ] || fail "FF_STATUS: expected skipped, got '$FF_STATUS'"
+  assert_contains "$FF_OUT" "secondmate sm: skipped: not a clone root" \
+    "a target that is not a work-tree root is skipped as such"
+  [ "$(head_of "$w/sm")" = "$before" ] \
+    || fail "the enclosing worktree was fast-forwarded under a non-root target's label"
+  pass "T5b clone root: a non-root target is skipped and never advances its enclosing repo"
+}
+
 # --- T6: no origin fetch happens in the local-HEAD sync path -----------------
 # A bare `git fetch` would need the network; the sync must never reach for it.
 # Shadow git with a wrapper that records any `fetch` invocation, then drive the
@@ -855,6 +886,7 @@ test_ff_current
 test_ff_dirty
 test_ff_diverged
 test_ff_inflight_feature_branch
+test_ff_non_root_target_never_advances_enclosing_repo
 test_no_fetch_in_local_path
 test_sweep_nudge_requires_instruction_change
 test_bootstrap_sweep_nudges_only_instruction_change

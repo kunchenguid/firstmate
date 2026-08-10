@@ -279,8 +279,21 @@ ff_target() {
     echo "$label: skipped: not a directory"
     return 0
   fi
-  if ! git -C "$dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  # Git repository discovery walks UPWARD, so --is-inside-work-tree is true for a
+  # target that merely SITS INSIDE a repository, and every command below would then
+  # fast-forward or prune that enclosing repository under this target's label.
+  # Every ff_target caller passes a work-tree root (a clone, a linked worktree, or a
+  # secondmate home), so require the root itself and skip anything else benignly.
+  local dir_real dir_toplevel dir_toplevel_real
+  dir_real=$(CDPATH='' cd -P -- "$dir" 2>/dev/null && pwd -P) || dir_real=$dir
+  dir_toplevel=$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null) || dir_toplevel=
+  if [ -z "$dir_toplevel" ]; then
     echo "$label: skipped: not a git repo"
+    return 0
+  fi
+  dir_toplevel_real=$(CDPATH='' cd -P -- "$dir_toplevel" 2>/dev/null && pwd -P) || dir_toplevel_real=$dir_toplevel
+  if [ "$dir_toplevel_real" != "$dir_real" ]; then
+    echo "$label: skipped: not a clone root (inside $dir_toplevel)"
     return 0
   fi
 
