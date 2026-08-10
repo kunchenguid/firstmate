@@ -23,6 +23,7 @@
 #
 # Test seams:
 #   FM_DEPS_INTERACTIVE=1|0 overrides terminal detection when source-only.
+#   FM_DEPS_PROBE_TIMEOUT bounds each read-only dependency probe.
 #   FM_ROOT_OVERRIDE points at an isolated Firstmate fixture.
 #   FM_DEPS_HERDR_MANIFEST_URL and FM_DEPS_NODE_INDEX_URL override release data.
 #   FM_DEPS_NVM_DIR points at an isolated NVM fixture.
@@ -41,6 +42,8 @@ NODE_INDEX_URL=${FM_DEPS_NODE_INDEX_URL:-https://nodejs.org/dist/index.json}
 
 # shellcheck source=bin/fm-secondmate-nudge-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-nudge-lib.sh"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$SCRIPT_DIR/fm-timeout-lib.sh"
 
 usage() {
   echo "usage: fm-deps.sh [--check]" >&2
@@ -64,6 +67,23 @@ is_interactive() {
   [ -t 0 ] && [ -t 1 ]
 }
 
+probe_timeout_is_valid() {
+  case "${FM_DEPS_PROBE_TIMEOUT:-30}" in
+    ''|*[!0-9]*|0) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+run_probe() {
+  local bound=${FM_DEPS_PROBE_TIMEOUT:-30}
+  probe_timeout_is_valid || return 124
+  fm_run_timed "$bound" "$@"
+}
+
+run_git_probe() {
+  run_probe env GIT_TERMINAL_PROMPT=0 git "$@"
+}
+
 first_version() {
   sed -nE 's/^[^0-9]*[vV]?([0-9]+([.][0-9A-Za-z]+)+).*/\1/p' | head -n 1
 }
@@ -83,17 +103,20 @@ version_is_older() {
 command_version() {
   local command_name=$1 out
   command -v "$command_name" >/dev/null 2>&1 || return 1
-  out=$("$command_name" --version 2>&1) || return 1
+  out=$(run_probe "$command_name" --version 2>&1) || return 1
   printf '%s\n' "$out" | first_version
 }
 
 apt_package_versions() {
-  local package=$1 installed candidate
+  local package=$1 installed candidate installed_out candidate_out
   command -v dpkg-query >/dev/null 2>&1 || return 1
   command -v apt-cache >/dev/null 2>&1 || return 1
-  installed=$(dpkg-query -W -f='${Status}\t${Version}\n' "$package" 2>/dev/null \
+  installed_out=$(run_probe dpkg-query -W -f='${Status}\t${Version}\n' "$package" 2>/dev/null) \
+    || return 1
+  installed=$(printf '%s\n' "$installed_out" \
     | awk -F '\t' '$1 == "install ok installed" {print $2; exit}')
-  candidate=$(apt-cache policy "$package" 2>/dev/null \
+  candidate_out=$(run_probe apt-cache policy "$package" 2>/dev/null) || return 1
+  candidate=$(printf '%s\n' "$candidate_out" \
     | sed -nE 's/^[[:space:]]*Candidate:[[:space:]]*([^[:space:]]+).*/\1/p' \
     | head -n 1)
   [ "$candidate" != '(none)' ] || candidate=""
@@ -101,14 +124,17 @@ apt_package_versions() {
 }
 
 npm_latest() {
+  local out
   command -v npm >/dev/null 2>&1 || return 1
-  npm view "$1" version 2>/dev/null | head -n 1
+  out=$(run_probe npm view "$1" version 2>/dev/null) || return 1
+  printf '%s\n' "$out" | head -n 1
 }
 
 release_latest() {
   local repo=$1 out
   command -v gh-axi >/dev/null 2>&1 || return 1
-  out=$(gh-axi release list --repo "$repo" --exclude-drafts --exclude-pre-releases --limit 1 2>/dev/null) || return 1
+  out=$(run_probe gh-axi release list --repo "$repo" --exclude-drafts \
+    --exclude-pre-releases --limit 1 2>/dev/null) || return 1
   printf '%s\n' "$out" \
     | sed -nE 's/^[[:space:]]+([^,[:space:]]+),.*/\1/p' \
     | head -n 1 \
@@ -117,20 +143,24 @@ release_latest() {
 
 json_url() {
   command -v curl >/dev/null 2>&1 || return 1
-  curl -fsSL --connect-timeout 10 --max-time 30 "$1"
+  run_probe curl -fsSL --connect-timeout 10 --max-time 30 "$1"
 }
 
 herdr_latest() {
+  local out
   command -v jq >/dev/null 2>&1 || return 1
-  json_url "$HERDR_MANIFEST_URL" | jq -er '.version | select(type == "string" and length > 0)' 2>/dev/null
+  out=$(json_url "$HERDR_MANIFEST_URL") || return 1
+  printf '%s\n' "$out" \
+    | jq -er '.version | select(type == "string" and length > 0)' 2>/dev/null
 }
 
 node_latest_same_major() {
-  local installed=$1 major
+  local installed=$1 major out
   command -v jq >/dev/null 2>&1 || return 1
   major=${installed#v}
   major=${major%%.*}
-  json_url "$NODE_INDEX_URL" | jq -er --arg major "$major" '
+  out=$(json_url "$NODE_INDEX_URL") || return 1
+  printf '%s\n' "$out" | jq -er --arg major "$major" '
     first(
       .[]
       | select(.lts != false)
@@ -151,7 +181,7 @@ prompt_yes() {
 process_active() {
   local status
   command -v pgrep >/dev/null 2>&1 || return 2
-  pgrep -x "$1" >/dev/null 2>&1
+  run_probe pgrep -x "$1" >/dev/null 2>&1
   status=$?
   case "$status" in
     0|1) return "$status" ;;
@@ -182,7 +212,7 @@ quiet_window_blocker() {
         printf 'Cannot confirm quiet window because Herdr inspection is unavailable'
         return 2
       fi
-      out=$(herdr session list --json 2>/dev/null)
+      out=$(run_probe herdr session list --json 2>/dev/null)
       status=$?
       if [ "$status" -ne 0 ] || [ -z "$out" ] \
         || ! printf '%s\n' "$out" | jq -e '
@@ -216,7 +246,7 @@ quiet_window_blocker() {
         printf 'Cannot confirm quiet window because tmux inspection is unavailable'
         return 2
       fi
-      out=$(LC_ALL=C tmux list-sessions 2>&1)
+      out=$(run_probe env LC_ALL=C tmux list-sessions 2>&1)
       status=$?
       if [ "$status" -eq 0 ]; then
         printf 'tmux session is running; finish tmux-backed work and rerun'
@@ -274,6 +304,182 @@ nvm_manages_active_node() {
   [ "${relative#*/}" = bin/node ]
 }
 
+deps_state_dir() {
+  if [ -n "${FM_STATE_OVERRIDE:-}" ]; then
+    printf '%s\n' "$FM_STATE_OVERRIDE"
+  elif [ -n "${FM_HOME:-}" ]; then
+    printf '%s/state\n' "$FM_HOME"
+  else
+    printf '%s/state\n' "$FM_ROOT"
+  fi
+}
+
+deps_pending_dir() {
+  local state
+  state=$(deps_state_dir) || return 1
+  printf '%s/.fm-deps-pending\n' "$state"
+}
+
+ensure_deps_pending_dir() {
+  local state pending
+  state=$(deps_state_dir) || return 1
+  pending=$(deps_pending_dir) || return 1
+  if [ -e "$state" ] || [ -L "$state" ]; then
+    [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  else
+    mkdir -p "$state" || return 1
+  fi
+  if [ -e "$pending" ] || [ -L "$pending" ]; then
+    [ -d "$pending" ] && [ ! -L "$pending" ] || return 1
+  else
+    mkdir "$pending" || return 1
+    chmod 700 "$pending" || return 1
+  fi
+}
+
+write_deps_pending_marker() {
+  local marker=$1 parent tmp line
+  shift
+  ensure_deps_pending_dir || return 1
+  parent=$(deps_pending_dir) || return 1
+  case "$marker" in "$parent"/*.pending) ;; *) return 1 ;; esac
+  [ ! -L "$marker" ] || return 1
+  tmp=$(umask 077; mktemp "$parent/.action.XXXXXX" 2>/dev/null) || return 1
+  for line in "$@"; do
+    case "$line" in *$'\n'*|*$'\r'*) rm -f -- "$tmp"; return 1 ;; esac
+    printf '%s\n' "$line" >> "$tmp" || { rm -f -- "$tmp"; return 1; }
+  done
+  chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
+  mv -f -- "$tmp" "$marker" || { rm -f -- "$tmp"; return 1; }
+}
+
+pending_marker_value() {
+  local marker=$1 key=$2
+  [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+  awk -v key="$key" '
+    index($0, key "=") == 1 {
+      count += 1
+      value = substr($0, length(key) + 2)
+    }
+    END {
+      if (count != 1) exit 1
+      print value
+    }
+  ' "$marker"
+}
+
+firstmate_reread_marker_path() {
+  local pending
+  pending=$(deps_pending_dir) || return 1
+  printf '%s/firstmate-reread.pending\n' "$pending"
+}
+
+secondmate_nudge_marker_path() {
+  local selector=$1 id pending
+  case "$selector" in fm-*) ;; *) return 1 ;; esac
+  id=${selector#fm-}
+  case "$id" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  pending=$(deps_pending_dir) || return 1
+  printf '%s/secondmate-%s.pending\n' "$pending" "$id"
+}
+
+npm_hook_marker_path() {
+  local id=$1 pending
+  case "$id" in gh-axi|chrome-devtools-axi|lavish-axi) ;; *) return 1 ;; esac
+  pending=$(deps_pending_dir) || return 1
+  printf '%s/npm-hooks-%s.pending\n' "$pending" "$id"
+}
+
+versions_match() {
+  local left right
+  left=$(printf '%s\n' "$1" | normalize_version)
+  right=$(printf '%s\n' "$2" | normalize_version)
+  [ -n "$left" ] && [ "$left" = "$right" ]
+}
+
+npm_hook_action_pending() {
+  local marker
+  marker=$(npm_hook_marker_path "$1") || return 1
+  [ -e "$marker" ] || [ -L "$marker" ]
+}
+
+persist_npm_hook_action() {
+  local id=$1 version=$2 marker
+  marker=$(npm_hook_marker_path "$id") || return 1
+  write_deps_pending_marker "$marker" \
+    'action=npm-hook-setup' "tool=$id" "version=$version"
+}
+
+clear_npm_hook_action() {
+  local marker
+  marker=$(npm_hook_marker_path "$1") || return 1
+  rm -f -- "$marker"
+}
+
+verify_npm_tool_version() {
+  local command_name=$1 expected=$2 actual
+  if ! actual=$(command_version "$command_name") || [ -z "$actual" ]; then
+    printf 'Installed %s cannot be resolved from the active PATH\n' "$command_name" >&2
+    return 1
+  fi
+  if ! versions_match "$actual" "$expected"; then
+    printf 'Installed %s resolved to %s instead of approved version %s\n' \
+      "$command_name" "$actual" "$expected" >&2
+    return 1
+  fi
+}
+
+run_npm_upgrade() {
+  local id=$1 latest=$2
+  if npm_hook_marker_path "$id" >/dev/null 2>&1; then
+    persist_npm_hook_action "$id" "$latest" || {
+      printf 'Cannot record pending %s hook setup\n' "$id" >&2
+      return 1
+    }
+  fi
+  npm install -g "$id@$latest" || return 1
+  verify_npm_tool_version "$id" "$latest" || return 1
+  if npm_hook_marker_path "$id" >/dev/null 2>&1; then
+    "$id" setup hooks || return 1
+    clear_npm_hook_action "$id" || {
+      printf 'Cannot clear completed %s hook setup\n' "$id" >&2
+      return 1
+    }
+  fi
+}
+
+retry_pending_npm_hook() {
+  local id=$1 label=$2 command_name=$3 installed=$4 marker action tool version reply
+  marker=$(npm_hook_marker_path "$id") || return 0
+  [ -e "$marker" ] || [ -L "$marker" ] || return 0
+  action=$(pending_marker_value "$marker" action 2>/dev/null || true)
+  tool=$(pending_marker_value "$marker" tool 2>/dev/null || true)
+  version=$(pending_marker_value "$marker" version 2>/dev/null || true)
+  if [ "$action" != npm-hook-setup ] || [ "$tool" != "$id" ] || [ -z "$version" ]; then
+    printf 'PENDING: %s hook setup record is invalid\n' "$label" >&2
+    return 1
+  fi
+  if ! versions_match "$installed" "$version"; then
+    printf 'PENDING: %s hook setup requires version %s but active version is %s\n' \
+      "$label" "$version" "$installed" >&2
+    return 1
+  fi
+  printf 'PENDING: %s %s hook setup is incomplete\n' "$label" "$version"
+  [ "$CHECK_ONLY" -eq 0 ] && is_interactive || return 1
+  printf 'Complete pending %s hook setup now? [y/N] ' "$label"
+  IFS= read -r reply || reply=""
+  case "$reply" in y|Y|yes|YES|Yes) ;; *) return 1 ;; esac
+  if ! "$command_name" setup hooks; then
+    printf 'Pending %s hook setup failed\n' "$label" >&2
+    return 1
+  fi
+  clear_npm_hook_action "$id" || {
+    printf 'Cannot clear completed %s hook setup\n' "$label" >&2
+    return 1
+  }
+  printf 'COMPLETED: %s hook setup\n' "$label"
+}
+
 confirm_firstmate_reread() {
   local reply
   if [ "$CHECK_ONLY" -ne 0 ] || ! is_interactive; then
@@ -293,6 +499,96 @@ confirm_firstmate_reread() {
       return 1
       ;;
   esac
+}
+
+persist_firstmate_update_actions() {
+  local reread=$1 targets=$2 selector marker
+  if [ "$reread" = yes ]; then
+    marker=$(firstmate_reread_marker_path) || return 1
+    write_deps_pending_marker "$marker" \
+      'action=firstmate-reread' "path=$FM_ROOT/AGENTS.md" || return 1
+  fi
+  if [ "$targets" != none ]; then
+    for selector in $targets; do
+      marker=$(secondmate_nudge_marker_path "$selector") || return 1
+      write_deps_pending_marker "$marker" \
+        'action=secondmate-nudge' "selector=$selector" \
+        "message=$FM_SECOND_MATE_NUDGE_MESSAGE" || return 1
+    done
+  fi
+}
+
+firstmate_update_actions_pending() {
+  local pending marker
+  pending=$(deps_pending_dir) || return 1
+  marker=$(firstmate_reread_marker_path) || return 1
+  if [ -e "$marker" ] || [ -L "$marker" ]; then
+    return 0
+  fi
+  for marker in "$pending"/secondmate-*.pending; do
+    if [ -e "$marker" ] || [ -L "$marker" ]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+process_pending_firstmate_actions() {
+  local pending reread_marker action path marker selector message expected_marker failed=0
+  pending=$(deps_pending_dir) || return 1
+  if [ -e "$pending" ] || [ -L "$pending" ]; then
+    [ -d "$pending" ] && [ ! -L "$pending" ] || {
+      printf 'Firstmate pending action directory is invalid\n' >&2
+      return 1
+    }
+  else
+    return 0
+  fi
+
+  reread_marker=$(firstmate_reread_marker_path) || return 1
+  if [ -e "$reread_marker" ] || [ -L "$reread_marker" ]; then
+    action=$(pending_marker_value "$reread_marker" action 2>/dev/null || true)
+    path=$(pending_marker_value "$reread_marker" path 2>/dev/null || true)
+    if [ "$action" != firstmate-reread ] || [ "$path" != "$FM_ROOT/AGENTS.md" ]; then
+      printf 'Firstmate pending reread action is invalid\n' >&2
+      return 1
+    fi
+    printf 'REREAD_REQUIRED: %s/AGENTS.md changed\n' "$FM_ROOT"
+    if confirm_firstmate_reread; then
+      rm -f -- "$reread_marker" || {
+        printf 'Firstmate pending reread action could not be cleared\n' >&2
+        return 1
+      }
+    else
+      return 1
+    fi
+  fi
+
+  for marker in "$pending"/secondmate-*.pending; do
+    [ -e "$marker" ] || [ -L "$marker" ] || continue
+    action=$(pending_marker_value "$marker" action 2>/dev/null || true)
+    selector=$(pending_marker_value "$marker" selector 2>/dev/null || true)
+    message=$(pending_marker_value "$marker" message 2>/dev/null || true)
+    expected_marker=$(secondmate_nudge_marker_path "$selector" 2>/dev/null || true)
+    if [ "$action" != secondmate-nudge ] \
+      || [ "$message" != "$FM_SECOND_MATE_NUDGE_MESSAGE" ] \
+      || [ "$expected_marker" != "$marker" ]; then
+      printf 'Firstmate pending secondmate nudge is invalid: %s\n' "$marker" >&2
+      failed=1
+      continue
+    fi
+    if FM_HOME="${FM_HOME:-$FM_ROOT}" FM_ROOT_OVERRIDE="$FM_ROOT" \
+      "$FM_ROOT/bin/fm-send.sh" "$selector" "$message"; then
+      if ! rm -f -- "$marker"; then
+        printf 'Firstmate post-update nudge could not be cleared for %s\n' "$selector" >&2
+        failed=1
+      fi
+    else
+      printf 'Firstmate post-update nudge failed for %s\n' "$selector" >&2
+      failed=1
+    fi
+  done
+  [ "$failed" -eq 0 ]
 }
 
 handle_firstmate_update_actions() {
@@ -331,19 +627,11 @@ handle_firstmate_update_actions() {
       esac
     done
   fi
-  if [ "$reread" = yes ]; then
-    printf 'REREAD_REQUIRED: %s/AGENTS.md changed\n' "$FM_ROOT"
-    confirm_firstmate_reread || return 1
-  fi
-  if [ "$targets" != none ]; then
-    for selector in $targets; do
-      if ! FM_HOME="${FM_HOME:-$FM_ROOT}" FM_ROOT_OVERRIDE="$FM_ROOT" \
-        "$FM_ROOT/bin/fm-send.sh" "$selector" "$FM_SECOND_MATE_NUDGE_MESSAGE"; then
-        printf 'Firstmate post-update nudge failed for %s\n' "$selector" >&2
-        return 1
-      fi
-    done
-  fi
+  persist_firstmate_update_actions "$reread" "$targets" || {
+    printf 'Firstmate post-update actions could not be recorded\n' >&2
+    return 1
+  }
+  process_pending_firstmate_actions
 }
 
 run_upgrade() {
@@ -351,11 +639,9 @@ run_upgrade() {
   case "$id" in
     codex) codex update ;;
     github-cli) run_apt_upgrade gh ;;
-    gh-axi) npm install -g gh-axi@latest && gh-axi setup hooks ;;
-    chrome-devtools-axi) npm install -g chrome-devtools-axi@latest && chrome-devtools-axi setup hooks ;;
-    lavish-axi) npm install -g lavish-axi@latest && lavish-axi setup hooks ;;
-    quota-axi) npm install -g quota-axi@latest ;;
-    tasks-axi) npm install -g tasks-axi@latest ;;
+    gh-axi|chrome-devtools-axi|lavish-axi|quota-axi|tasks-axi)
+      run_npm_upgrade "$id" "$latest"
+      ;;
     treehouse) treehouse update ;;
     no-mistakes) no-mistakes update ;;
     herdr) herdr update ;;
@@ -437,17 +723,27 @@ offer_update() {
 }
 
 check_npm_tool() {
-  local id=$1 label=$2 command_name=$3 installed latest
+  local id=$1 label=$2 command_name=$3 installed latest hook_incomplete=0
   if ! installed=$(command_version "$command_name") || [ -z "$installed" ]; then
     printf 'MISSING: %s (%s)\n' "$label" "$command_name"
     return 0
   fi
+  if npm_hook_marker_path "$id" >/dev/null 2>&1 \
+    && ! retry_pending_npm_hook "$id" "$label" "$command_name" "$installed"; then
+    hook_incomplete=1
+  fi
   if ! latest=$(npm_latest "$id") || [ -z "$latest" ]; then
     printf 'UNKNOWN: %s %s; npm registry check failed\n' "$label" "$installed"
     FAILURES=$((FAILURES + 1))
+    if [ "$hook_incomplete" -eq 1 ] && npm_hook_action_pending "$id"; then
+      FAILURES=$((FAILURES + 1))
+    fi
     return 0
   fi
   offer_update "$id" "$label" "$installed" "$latest" normal
+  if [ "$hook_incomplete" -eq 1 ] && npm_hook_action_pending "$id"; then
+    FAILURES=$((FAILURES + 1))
+  fi
 }
 
 check_apt_package() {
@@ -534,7 +830,8 @@ check_zellij() {
 
 check_shellcheck_pin() {
   local installed required
-  required=$("$FM_ROOT/bin/fm-lint.sh" --required-version 2>/dev/null || printf '0.11.0')
+  required=$(run_probe "$FM_ROOT/bin/fm-lint.sh" --required-version 2>/dev/null \
+    || printf '0.11.0')
   if ! installed=$(command_version shellcheck) || [ -z "$installed" ]; then
     printf 'MISSING: ShellCheck (repository requires %s)\n' "$required"
   elif [ "$installed" = "$required" ]; then
@@ -565,15 +862,21 @@ check_github_actions() {
 }
 
 check_firstmate() {
-  local branch local_sha remote_sha
-  branch=$(git -C "$FM_ROOT" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##')
+  local branch branch_out local_sha remote_sha status_out
+  if branch_out=$(run_git_probe -C "$FM_ROOT" symbolic-ref --short \
+    refs/remotes/origin/HEAD 2>/dev/null); then
+    branch=${branch_out#origin/}
+  else
+    branch=main
+  fi
   [ -n "$branch" ] || branch=main
-  if ! local_sha=$(git -C "$FM_ROOT" rev-parse HEAD 2>/dev/null); then
+  if ! local_sha=$(run_git_probe -C "$FM_ROOT" rev-parse HEAD 2>/dev/null); then
     printf 'UNKNOWN: Firstmate checkout is not a Git repository\n'
     FAILURES=$((FAILURES + 1))
     return 0
   fi
-  remote_sha=$(git -C "$FM_ROOT" ls-remote origin "refs/heads/$branch" 2>/dev/null | awk 'NR == 1 {print $1}')
+  remote_sha=$(run_git_probe -C "$FM_ROOT" ls-remote origin "refs/heads/$branch" \
+    2>/dev/null | awk 'NR == 1 {print $1}')
   if [ -z "$remote_sha" ]; then
     printf 'UNKNOWN: Firstmate %s; origin/%s check failed\n' "$(printf '%.12s' "$local_sha")" "$branch"
     FAILURES=$((FAILURES + 1))
@@ -583,12 +886,22 @@ check_firstmate() {
     printf 'UPDATE: Firstmate %s -> origin/%s %s [guarded fast-forward]\n' \
       "$(printf '%.12s' "$local_sha")" "$branch" "$(printf '%.12s' "$remote_sha")"
     AVAILABLE=$((AVAILABLE + 1))
-    if [ -n "$(git -C "$FM_ROOT" status --porcelain 2>/dev/null)" ]; then
+    if firstmate_update_actions_pending; then
+      printf 'DEFER: Firstmate - previous post-update actions remain incomplete; complete them and rerun\n'
+      DEFERRED=$((DEFERRED + 1))
+      return 0
+    fi
+    if ! status_out=$(run_git_probe -C "$FM_ROOT" status --porcelain 2>/dev/null); then
+      printf 'DEFER: Firstmate - checkout status inspection failed; rerun when Git is responsive\n'
+      DEFERRED=$((DEFERRED + 1))
+      return 0
+    fi
+    if [ -n "$status_out" ]; then
       printf 'DEFER: Firstmate - working tree is not clean; commit or remove local changes, then rerun\n'
       DEFERRED=$((DEFERRED + 1))
       return 0
     fi
-    if [ "$(git -C "$FM_ROOT" symbolic-ref --short HEAD 2>/dev/null || true)" != "$branch" ]; then
+    if [ "$(run_git_probe -C "$FM_ROOT" symbolic-ref --short HEAD 2>/dev/null || true)" != "$branch" ]; then
       printf 'DEFER: Firstmate - checkout is not on %s; switch back safely, then rerun\n' "$branch"
       DEFERRED=$((DEFERRED + 1))
       return 0
@@ -626,6 +939,10 @@ if [ "$(uname -s)" != Linux ]; then
   printf 'fm-deps.sh: this variant supports Linux only\n' >&2
   exit 1
 fi
+if ! probe_timeout_is_valid; then
+  printf 'fm-deps.sh: FM_DEPS_PROBE_TIMEOUT must be a positive integer\n' >&2
+  exit 1
+fi
 for required_command in dpkg dpkg-query apt-cache; do
   if ! command -v "$required_command" >/dev/null 2>&1; then
     printf 'fm-deps.sh: Debian/Ubuntu command %s is required\n' "$required_command" >&2
@@ -639,6 +956,11 @@ fi
 
 printf 'AI workspace dependency check (Linux)\n'
 printf '%s\n' '----------------------------------------'
+
+if ! process_pending_firstmate_actions; then
+  printf 'FAILED: Firstmate post-update actions remain incomplete\n' >&2
+  FAILURES=$((FAILURES + 1))
+fi
 
 check_release_tool codex Codex codex openai/codex quiet
 check_apt_package github-cli 'GitHub CLI' gh normal

@@ -251,6 +251,146 @@ test_firstmate_concurrent_update_preserves_actions() {
   pass "concurrent Firstmate updates preserve every emitted action"
 }
 
+test_firstmate_actions_are_durable_and_retry_every_target() {
+  local fixture log out status pending
+  fixture="$TMP_ROOT/firstmate-durable-actions"
+  log="$fixture/send.log"
+  pending="$fixture/state/.fm-deps-pending"
+  mkdir -p "$fixture/bin"
+  printf '%s\n' '#!/usr/bin/env bash' \
+    'printf '\''firstmate: updated old..new\n'\''' \
+    'printf '\''reread-firstmate: yes\n'\''' \
+    'printf '\''nudge-secondmates: fm-one fm-two\n'\''' > "$fixture/bin/fm-update.sh"
+  # shellcheck disable=SC2016
+  printf '%s\n' '#!/usr/bin/env bash' \
+    'printf '\''%s\n'\'' "$1" >> "$FM_DEPS_TEST_LOG"' \
+    '[ "$1" != "${FM_DEPS_TEST_FAIL_SELECTOR:-}" ]' > "$fixture/bin/fm-send.sh"
+  chmod +x "$fixture/bin/fm-update.sh" "$fixture/bin/fm-send.sh"
+
+  out=$(FM_ROOT="$fixture" FM_HOME="$fixture" FM_DEPS_SOURCE_ONLY=1 \
+    FM_DEPS_INTERACTIVE=1 CHECK_ONLY=0 FM_DEPS_TEST_LOG="$log" \
+    run_upgrade firstmate <<<no 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "declined reread completed Firstmate post-update actions"
+  assert_present "$pending/firstmate-reread.pending" \
+    "declined reread left no durable action"
+  assert_present "$pending/secondmate-one.pending" \
+    "first secondmate nudge was not recorded before reread"
+  assert_present "$pending/secondmate-two.pending" \
+    "second secondmate nudge was not recorded before reread"
+  assert_absent "$log" "secondmates were nudged before reread confirmation"
+
+  out=$(FM_ROOT="$fixture" FM_HOME="$fixture" FM_DEPS_SOURCE_ONLY=1 \
+    FM_DEPS_INTERACTIVE=1 CHECK_ONLY=0 FM_DEPS_TEST_LOG="$log" \
+    FM_DEPS_TEST_FAIL_SELECTOR=fm-one process_pending_firstmate_actions <<<yes 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "failed secondmate nudge completed pending actions"
+  assert_grep "fm-one" "$log" "first pending secondmate was not attempted"
+  assert_grep "fm-two" "$log" "later pending secondmate was skipped after a failure"
+  assert_present "$pending/secondmate-one.pending" \
+    "failed secondmate nudge lost its retry action"
+  assert_absent "$pending/secondmate-two.pending" \
+    "successful secondmate nudge retained its retry action"
+
+  FM_ROOT="$fixture" FM_HOME="$fixture" FM_DEPS_SOURCE_ONLY=1 \
+    FM_DEPS_INTERACTIVE=1 CHECK_ONLY=0 FM_DEPS_TEST_LOG="$log" \
+    process_pending_firstmate_actions
+  assert_absent "$pending/secondmate-one.pending" \
+    "later run did not complete the remaining secondmate nudge"
+  pass "Firstmate post-update actions persist and retry every target"
+}
+
+test_npm_upgrade_pins_version_and_retries_hooks() {
+  local fixture fakebin npm_log hook_log marker out status
+  fixture="$TMP_ROOT/npm-hook-retry"
+  fakebin=$(fm_fakebin "$fixture")
+  npm_log="$fixture/npm.log"
+  hook_log="$fixture/hooks.log"
+  marker="$fixture/state/.fm-deps-pending/npm-hooks-gh-axi.pending"
+  # shellcheck disable=SC2016
+  printf '%s\n' '#!/usr/bin/env bash' \
+    'case "$1" in' \
+    '  install) printf '\''%s\n'\'' "$*" >> "$FM_DEPS_TEST_NPM_LOG" ;;' \
+    '  view) printf '\''1.2.3\n'\'' ;;' \
+    '  *) exit 1 ;;' \
+    'esac' > "$fakebin/npm"
+  # shellcheck disable=SC2016
+  printf '%s\n' '#!/usr/bin/env bash' \
+    'case "$1" in' \
+    '  --version) printf '\''gh-axi 1.2.3\n'\'' ;;' \
+    '  setup)' \
+    '    printf '\''%s\n'\'' "$*" >> "$FM_DEPS_TEST_HOOK_LOG"' \
+    '    [ "${FM_DEPS_TEST_HOOK_FAIL:-0}" -eq 0 ]' \
+    '    ;;' \
+    '  *) exit 1 ;;' \
+    'esac' > "$fakebin/gh-axi"
+  chmod +x "$fakebin/npm" "$fakebin/gh-axi"
+
+  out=$(PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$fixture/state" \
+    FM_DEPS_TEST_NPM_LOG="$npm_log" FM_DEPS_TEST_HOOK_LOG="$hook_log" \
+    FM_DEPS_TEST_HOOK_FAIL=1 run_upgrade gh-axi 1.0.0 1.2.3 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "failed hook setup completed the npm upgrade"
+  assert_grep "install -g gh-axi@1.2.3" "$npm_log" \
+    "npm upgrade did not install the approved version"
+  assert_present "$marker" "failed hook setup left no durable retry action"
+
+  out=$(PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$fixture/state" \
+    FM_DEPS_SOURCE_ONLY=1 FM_DEPS_INTERACTIVE=1 CHECK_ONLY=0 \
+    FM_DEPS_TEST_NPM_LOG="$npm_log" FM_DEPS_TEST_HOOK_LOG="$hook_log" \
+    check_npm_tool gh-axi gh-axi gh-axi <<<yes 2>&1)
+  assert_contains "$out" "COMPLETED: gh-axi hook setup" \
+    "later dependency check did not retry pending hook setup"
+  assert_absent "$marker" "successful hook retry retained its pending action"
+  pass "npm upgrades pin approved versions and retry hook setup"
+}
+
+test_npm_upgrade_rejects_active_version_mismatch() {
+  local fixture fakebin npm_log out status
+  fixture="$TMP_ROOT/npm-version-mismatch"
+  fakebin=$(fm_fakebin "$fixture")
+  npm_log="$fixture/npm.log"
+  # shellcheck disable=SC2016
+  printf '%s\n' '#!/usr/bin/env bash' \
+    'printf '\''%s\n'\'' "$*" >> "$FM_DEPS_TEST_NPM_LOG"' > "$fakebin/npm"
+  printf '%s\n' '#!/usr/bin/env bash' \
+    'printf '\''tasks-axi 1.2.2\n'\''' > "$fakebin/tasks-axi"
+  chmod +x "$fakebin/npm" "$fakebin/tasks-axi"
+
+  out=$(PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$fixture/state" \
+    FM_DEPS_TEST_NPM_LOG="$npm_log" run_upgrade tasks-axi 1.0.0 1.2.3 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "mismatched active npm executable was accepted"
+  assert_grep "install -g tasks-axi@1.2.3" "$npm_log" \
+    "npm mismatch case did not install the approved version"
+  assert_contains "$out" "resolved to 1.2.2 instead of approved version 1.2.3" \
+    "active npm executable mismatch was not reported"
+  pass "npm upgrades verify the active executable version"
+}
+
+test_dependency_probes_are_bounded_and_git_is_noninteractive() {
+  local fixture fakebin out status started elapsed
+  fixture="$TMP_ROOT/bounded-probes"
+  fakebin=$(fm_fakebin "$fixture")
+  printf '%s\n' '#!/usr/bin/env bash' 'sleep 5' > "$fakebin/npm"
+  # shellcheck disable=SC2016
+  printf '%s\n' '#!/usr/bin/env bash' \
+    '[ "${GIT_TERMINAL_PROMPT:-}" = 0 ] || exit 9' \
+    'printf '\''remote-sha\n'\''' > "$fakebin/git"
+  chmod +x "$fakebin/npm" "$fakebin/git"
+
+  started=$(date +%s)
+  out=$(PATH="$fakebin:$PATH" FM_DEPS_PROBE_TIMEOUT=1 npm_latest example 2>&1)
+  status=$?
+  elapsed=$(( $(date +%s) - started ))
+  [ "$status" -ne 0 ] || fail "hung npm probe was treated as successful: $out"
+  [ "$elapsed" -le 3 ] || fail "npm probe exceeded its configured bound"
+  out=$(PATH="$fakebin:$PATH" FM_DEPS_PROBE_TIMEOUT=1 \
+    run_git_probe ls-remote origin refs/heads/main)
+  [ "$out" = remote-sha ] || fail "Git probe allowed an interactive credential path"
+  pass "dependency probes are bounded and Git credentials stay non-interactive"
+}
+
 run_firstmate_outcome_case() {
   local fixture=$1 status=$2 nudge=$3 fakebin out_file
   fakebin=$(fm_fakebin "$fixture")
@@ -354,9 +494,13 @@ test_node_requires_active_nvm_provenance
 test_firstmate_update_actions_are_consumed
 test_firstmate_secondmate_only_actions_are_preserved
 test_firstmate_concurrent_update_preserves_actions
+test_firstmate_actions_are_durable_and_retry_every_target
 test_firstmate_updated_outcome_counts_upgrade
 test_firstmate_current_outcome_is_success_without_upgrade
 test_firstmate_skipped_outcome_fails_without_upgrade
+test_npm_upgrade_pins_version_and_retries_hooks
+test_npm_upgrade_rejects_active_version_mismatch
+test_dependency_probes_are_bounded_and_git_is_noninteractive
 test_mixed_checkout_majors_report_repository_update
 
 echo "# all fm-deps tests passed"
