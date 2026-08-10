@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
-#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
-#        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--placement <host|docker-sandbox>] [--executor <local|crabbox>] [--execution-profile <profile>]
+#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--placement <host|docker-sandbox>] [--executor <local|crabbox>] [--execution-profile <profile>]
+#        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--placement <host|docker-sandbox>] [--executor <local|crabbox>] [--execution-profile <profile>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
 #   per task at intake (AGENTS.md section 7); data/projects.md holds the captain's
@@ -249,6 +249,14 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-trace-context-lib.sh"
 # shellcheck source=bin/fm-remote-readiness-lib.sh
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
+# shellcheck source=bin/fm-workspace-execution-config.sh
+. "$SCRIPT_DIR/fm-workspace-execution-config.sh"
+# shellcheck source=bin/fm-workspace-placement.sh
+. "$SCRIPT_DIR/fm-workspace-placement.sh"
+# shellcheck source=bin/fm-sandbox-bridge-lib.sh
+. "$SCRIPT_DIR/fm-sandbox-bridge-lib.sh"
+# shellcheck source=bin/fm-command-execution.sh
+. "$SCRIPT_DIR/fm-command-execution.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -261,6 +269,9 @@ HARNESS_ARG=
 MODEL=
 EFFORT=
 BACKEND_ARG=
+PLACEMENT_ARG=
+EXECUTOR_ARG=
+EXECUTION_PROFILE_ARG=
 MODE=
 YOLO=
 TRACEPARENT_ARG=
@@ -268,6 +279,9 @@ HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
 BACKEND_SET=0
+PLACEMENT_SET=0
+EXECUTOR_SET=0
+EXECUTION_PROFILE_SET=0
 MODE_SET=0
 YOLO_SET=0
 TRACEPARENT_SET=0
@@ -284,10 +298,12 @@ for a in "$@"; do
       model) MODEL=$a; MODEL_SET=1 ;;
       effort) EFFORT=$a; EFFORT_SET=1 ;;
       backend) BACKEND_ARG=$a; BACKEND_SET=1 ;;
+      placement) PLACEMENT_ARG=$a; PLACEMENT_SET=1 ;;
+      executor) EXECUTOR_ARG=$a; EXECUTOR_SET=1 ;;
+      execution-profile) EXECUTION_PROFILE_ARG=$a; EXECUTION_PROFILE_SET=1 ;;
       mode) MODE=$a; MODE_SET=1 ;;
       yolo) YOLO=$a; YOLO_SET=1 ;;
       traceparent) TRACEPARENT_ARG=$a; TRACEPARENT_SET=1 ;;
-      *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
     continue
@@ -304,12 +320,16 @@ for a in "$@"; do
     --effort=*) EFFORT=${a#--effort=}; EFFORT_SET=1 ;;
     --backend) want_value=backend ;;
     --backend=*) BACKEND_ARG=${a#--backend=}; BACKEND_SET=1 ;;
+    --placement) want_value=placement ;;
+    --placement=*) PLACEMENT_ARG=${a#--placement=}; PLACEMENT_SET=1 ;;
+    --executor) want_value=executor ;;
+    --executor=*) EXECUTOR_ARG=${a#--executor=}; EXECUTOR_SET=1 ;;
+    --execution-profile) want_value=execution-profile ;;
+    --execution-profile=*) EXECUTION_PROFILE_ARG=${a#--execution-profile=}; EXECUTION_PROFILE_SET=1 ;;
     --mode) want_value=mode ;;
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
     --yolo) want_value=yolo ;;
     --yolo=*) YOLO=${a#--yolo=}; YOLO_SET=1 ;;
-    --traceparent) want_value=traceparent ;;
-    --traceparent=*) TRACEPARENT_ARG=${a#--traceparent=}; TRACEPARENT_SET=1 ;;
     *) POS+=("$a") ;;
   esac
 done
@@ -318,12 +338,12 @@ done
 [ "$MODEL_SET" -eq 0 ] || [ -n "$MODEL" ] || { echo "error: --model requires a non-empty value" >&2; exit 1; }
 [ "$EFFORT_SET" -eq 0 ] || [ -n "$EFFORT" ] || { echo "error: --effort requires a non-empty value" >&2; exit 1; }
 [ "$BACKEND_SET" -eq 0 ] || [ -n "$BACKEND_ARG" ] || { echo "error: --backend requires a non-empty value" >&2; exit 1; }
+[ "$PLACEMENT_SET" -eq 0 ] || [ -n "$PLACEMENT_ARG" ] || { echo "error: --placement requires a non-empty value" >&2; exit 1; }
+[ "$EXECUTOR_SET" -eq 0 ] || [ -n "$EXECUTOR_ARG" ] || { echo "error: --executor requires a non-empty value" >&2; exit 1; }
+[ "$EXECUTION_PROFILE_SET" -eq 0 ] || [ -n "$EXECUTION_PROFILE_ARG" ] || { echo "error: --execution-profile requires a non-empty value" >&2; exit 1; }
 [ "$MODE_SET" -eq 0 ] || [ -n "$MODE" ] || { echo "error: --mode requires a non-empty value" >&2; exit 1; }
 [ "$YOLO_SET" -eq 0 ] || [ -n "$YOLO" ] || { echo "error: --yolo requires a non-empty value" >&2; exit 1; }
 [ "$TRACEPARENT_SET" -eq 0 ] || [ -n "$TRACEPARENT_ARG" ] || { echo "error: --traceparent requires a non-empty value" >&2; exit 1; }
-# A parent-delivered carrier replaces this home's own resolution, so it is
-# refused unless it is a secondmate spawn carrying a strictly valid W3C value.
-# Nothing else may reach the pane's TRACEPARENT export.
 if [ "$TRACEPARENT_SET" -eq 1 ]; then
   [ "$KIND" = secondmate ] || {
     echo "error: --traceparent applies only to --secondmate spawns; every other spawn resolves its own carrier from this home's frozen trace-context decision" >&2
@@ -339,20 +359,16 @@ case "$EFFORT" in
   *) echo "error: --effort must be one of low, medium, high, xhigh, max" >&2; exit 1 ;;
 esac
 
-# --relaunch reuses an existing task's endpoint, worktree, project, and kind,
-# so every axis this block resolves for a fresh spawn instead comes from that
-# task's own durable record below. Contradicting it on the command line is a
-# refusal rather than a silently-ignored flag.
+# --relaunch reuses every durable execution identity.
 if [ "$RELAUNCH" -eq 1 ]; then
   [ "$BACKEND_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded backend; --backend cannot override it" >&2; exit 1; }
+  [ "$PLACEMENT_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded placement; --placement cannot override it" >&2; exit 1; }
+  [ "$EXECUTOR_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded executor; --executor cannot override it" >&2; exit 1; }
+  [ "$EXECUTION_PROFILE_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded execution profile; --execution-profile cannot override it" >&2; exit 1; }
   [ "$KIND_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded kind; --scout/--secondmate cannot override it" >&2; exit 1; }
   [ "$MODE_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded delivery mode; --mode cannot override it" >&2; exit 1; }
   [ "$YOLO_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded yolo posture; --yolo cannot override it" >&2; exit 1; }
 else
-  # Delivery contract (AGENTS.md section 7). A ship task's mode and yolo are
-  # firstmate's per-task decision, so they are required and closed-set validated
-  # here rather than resolved from the project registry. Scouts deliver a report
-  # and record no delivery posture; secondmate spawns hardcode theirs.
   if [ "$KIND" = ship ]; then
     [ "$MODE_SET" -eq 1 ] || {
       echo "error: ship spawns require --mode <no-mistakes|direct-PR|local-only>; resolve it at intake from the captain's instruction and the project's registered posture in data/projects.md" >&2
@@ -647,6 +663,15 @@ SPAWN_TASK_LOCK=
 SPAWN_TASK_LOCK_HELD=0
 SPAWN_CONTROL_LOCK=
 SPAWN_CONTROL_LOCK_HELD=0
+PLACEMENT=host
+PLACEMENT_MODE=direct
+PLACEMENT_HANDLE=
+PLACEMENT_BRIDGE=
+PLACEMENT_ABORT_CLEANUP=0
+PLACEMENT_KITS=()
+EXECUTOR=local
+EXECUTION_PROFILE=
+SANDBOX_PRESET=
 SPAWN_CONTROL_PARENT=0
 SPAWN_META_TMP=
 SPAWN_META_LOCK=
@@ -681,6 +706,17 @@ parse_orca_worktree_result() {
 
 spawn_abort_cleanup() {
   local status=$?
+  if [ "$PLACEMENT_ABORT_CLEANUP" = 1 ]; then
+    PLACEMENT_ABORT_CLEANUP=0
+    if [ -n "$PLACEMENT_HANDLE" ]; then
+      fm_workspace_placement_release "$PLACEMENT" "$PLACEMENT_HANDLE" force || \
+        echo "warning: could not release unpublished placement for $ID" >&2
+    fi
+    if [ -n "$PLACEMENT_BRIDGE" ]; then
+      fm_sandbox_bridge_remove "$PLACEMENT_BRIDGE" "$STATE" "$ID" "$WT" || \
+        echo "warning: could not remove verified unpublished sandbox bridge for $ID" >&2
+    fi
+  fi
   if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ] \
      && [ "$SPAWN_META_PUBLISH_STARTED" = 1 ] \
      && [ -n "$SPAWN_META_TMP" ] \
@@ -852,6 +888,9 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   [ -z "$MODEL" ] || shared_args+=(--model "$MODEL")
   [ -z "$EFFORT" ] || shared_args+=(--effort "$EFFORT")
   [ -z "$BACKEND_ARG" ] || shared_args+=(--backend "$BACKEND_ARG")
+  [ "$PLACEMENT_SET" -eq 0 ] || shared_args+=(--placement "$PLACEMENT_ARG")
+  [ "$EXECUTOR_SET" -eq 0 ] || shared_args+=(--executor "$EXECUTOR_ARG")
+  [ "$EXECUTION_PROFILE_SET" -eq 0 ] || shared_args+=(--execution-profile "$EXECUTION_PROFILE_ARG")
   # One delivery contract applies to every pair in a batch, exactly like the shared
   # harness. Each pair still re-validates it against its own brief, so a batch
   # spanning several modes is two invocations rather than a silent mixed dispatch.
@@ -1056,6 +1095,68 @@ else
   ARG3=${POS[2]:-}
 fi
 [ -z "$HARNESS_ARG" ] || ARG3=$HARNESS_ARG
+# Placement and executor are fresh-spawn policy axes.  Load configuration in
+# this shell - command substitution would discard the resolved FM_* globals.
+if [ "$RELAUNCH" -eq 1 ]; then
+  PLACEMENT=$(fm_meta_get "$RELAUNCH_META" placement)
+  [ -n "$PLACEMENT" ] || PLACEMENT=host
+  RELAUNCH_PLACEMENT_MODE=$(fm_meta_get "$RELAUNCH_META" placement_mode)
+  if [ "$PLACEMENT" = host ]; then
+    PLACEMENT_MODE=${RELAUNCH_PLACEMENT_MODE:-direct}
+  else
+    [ -n "$RELAUNCH_PLACEMENT_MODE" ] || {
+      echo "error: task $ID's non-default placement has no recorded placement mode; refusing to relaunch" >&2
+      exit 1
+    }
+    PLACEMENT_MODE=$RELAUNCH_PLACEMENT_MODE
+  fi
+  PLACEMENT_HANDLE=$(fm_meta_get "$RELAUNCH_META" placement_handle)
+  PLACEMENT_BRIDGE=$(fm_meta_get "$RELAUNCH_META" placement_bridge)
+  EXECUTOR=$(fm_meta_get "$RELAUNCH_META" executor)
+  [ -n "$EXECUTOR" ] || EXECUTOR=local
+  EXECUTION_PROFILE=$(fm_meta_get "$RELAUNCH_META" executor_profile)
+else
+  fm_workspace_execution_config_load "$CONFIG" || exit 1
+  if [ "$KIND" = secondmate ]; then
+    PLACEMENT=${PLACEMENT_ARG:-$FM_SECONDMATE_PLACEMENT_ADAPTER}
+    PLACEMENT_MODE=$FM_SECONDMATE_PLACEMENT_WORKSPACE_MODE
+    if [ "${FM_SECONDMATE_PLACEMENT_KITS[0]+set}" = set ]; then
+      PLACEMENT_KITS=("${FM_SECONDMATE_PLACEMENT_KITS[@]}")
+    else
+      PLACEMENT_KITS=()
+    fi
+  else
+    PLACEMENT=${PLACEMENT_ARG:-$FM_WORKER_PLACEMENT_ADAPTER}
+    PLACEMENT_MODE=$FM_WORKER_PLACEMENT_WORKSPACE_MODE
+    if [ "${FM_WORKER_PLACEMENT_KITS[0]+set}" = set ]; then
+      PLACEMENT_KITS=("${FM_WORKER_PLACEMENT_KITS[@]}")
+    else
+      PLACEMENT_KITS=()
+    fi
+  fi
+  EXECUTOR=${EXECUTOR_ARG:-$FM_COMMAND_EXECUTION_ADAPTER}
+  EXECUTION_PROFILE=${EXECUTION_PROFILE_ARG:-$FM_COMMAND_EXECUTION_PROFILE}
+fi
+fm_workspace_placement_validate "$PLACEMENT" || exit 1
+if [ "$RELAUNCH" -eq 0 ] && [ "$PLACEMENT" = host ] && [ "${PLACEMENT_KITS[0]+set}" = set ]; then
+  echo "error: host placement does not accept Docker Sandbox kits" >&2
+  exit 1
+fi
+case "$PLACEMENT_MODE" in
+  direct) ;;
+  *) echo "error: supervised placement mode '$PLACEMENT_MODE' is unsupported; only direct is allowed" >&2; exit 1 ;;
+esac
+case "$EXECUTOR" in
+  local)
+    [ -z "$EXECUTION_PROFILE" ] || { echo "error: local executor must not have an execution profile" >&2; exit 1; }
+    ;;
+  crabbox)
+    [ -n "$EXECUTION_PROFILE" ] || { echo "error: crabbox executor requires a non-empty execution profile" >&2; exit 1; }
+    ;;
+  *) echo "error: unknown executor '$EXECUTOR' (expected local or crabbox)" >&2; exit 1 ;;
+esac
+fm_command_execution_check "$EXECUTOR" || exit 1
+fm_command_execution_prepare "$EXECUTOR" "$EXECUTION_PROFILE" || exit 1
 
 shell_quote() {
   printf "'"
@@ -1218,6 +1319,20 @@ if [ "$KIND" = secondmate ] && [ "$HARNESS" = muse ]; then
   exit 1
 fi
 
+# pi-signed is an explicitly selected executable identity, not an alias that may
+# silently fall back to pi. Resolve it from PATH before creating an endpoint and
+# retain the literal name in the launch command and task metadata.
+if [ "$HARNESS" = pi-signed ] && ! command -v pi-signed >/dev/null 2>&1; then
+  echo "error: pi-signed executable not found on PATH; install the signed Pi wrapper or select a different verified harness" >&2
+  exit 1
+fi
+if [ "$PLACEMENT" = docker-sandbox ]; then
+  case "$HARNESS" in
+    claude|codex|opencode) SANDBOX_PRESET=$HARNESS ;;
+    *) echo "error: docker-sandbox placement supports only the official claude, codex, or opencode presets; resolved harness '${HARNESS:-raw command}' is unsupported" >&2; exit 1 ;;
+  esac
+  fm_workspace_placement_check "$PLACEMENT" || exit 1
+fi
 # config/secondmate-harness may carry optional model/effort tokens alongside the
 # harness ("<harness> [<model>] [<effort>]"). They apply only when this is a
 # --secondmate spawn and no explicit per-spawn harness/raw launch was supplied, so
@@ -2236,7 +2351,45 @@ mkdir -p "$TASK_TMP/gotmp"
 # check or leak into a commit.
 mkdir -p "$STATE"
 STATE_REAL=$(cd "$STATE" && pwd -P)
+if [ "$PLACEMENT" = docker-sandbox ]; then
+  if [ "$RELAUNCH" -eq 1 ]; then
+    [ -n "$PLACEMENT_HANDLE" ] || {
+      echo "error: task $ID records docker-sandbox placement without a handle; refusing to recreate it during relaunch" >&2
+      exit 1
+    }
+    fm_workspace_placement_inspect "$PLACEMENT" "$PLACEMENT_HANDLE" || {
+      echo "error: task $ID's recorded Docker Sandbox is absent or cannot be inspected; refusing to relaunch" >&2
+      exit 1
+    }
+    [ "$FM_WORKSPACE_PLACEMENT_PRESENT" = 1 ] || {
+      echo "error: task $ID's recorded Docker Sandbox is absent; refusing to relaunch" >&2
+      exit 1
+    }
+    [ -n "$PLACEMENT_BRIDGE" ] || {
+      echo "error: task $ID's Docker Sandbox bridge is missing; refusing to relaunch" >&2
+      exit 1
+    }
+    fm_sandbox_bridge_validate "$PLACEMENT_BRIDGE" "$STATE_REAL" "$ID" "$WT" || exit 1
+    BRIEF="$PLACEMENT_BRIDGE/runtime-brief.md"
+  else
+    fm_sandbox_bridge_create "$STATE_REAL" "$ID" "$WT" "$BRIEF" "$FM_ROOT/bin/fm-operational-input.sh" || exit 1
+    PLACEMENT_BRIDGE=$FM_SANDBOX_BRIDGE_PATH
+    PLACEMENT_ABORT_CLEANUP=1
+    if [ "${PLACEMENT_KITS[0]+set}" = set ]; then
+      fm_workspace_placement_prepare "$PLACEMENT" direct "$ID" "$WT" "$SANDBOX_PRESET" "$PLACEMENT_BRIDGE" "${PLACEMENT_KITS[@]}" || exit 1
+    else
+      fm_workspace_placement_prepare "$PLACEMENT" direct "$ID" "$WT" "$SANDBOX_PRESET" "$PLACEMENT_BRIDGE" || exit 1
+    fi
+    BRIEF="$PLACEMENT_BRIDGE/runtime-brief.md"
+    PLACEMENT_HANDLE=$FM_WORKSPACE_PLACEMENT_HANDLE
+  fi
+fi
+BRIEF_DIR_REAL=$(cd "$(dirname "$BRIEF")" && pwd -P)
+BRIEF_REAL="$BRIEF_DIR_REAL/$(basename "$BRIEF")"
 TURNEND="$STATE_REAL/$ID.turn-ended"
+if [ "$PLACEMENT" = docker-sandbox ]; then
+  TURNEND="$PLACEMENT_BRIDGE/turn-ended"
+fi
 exclude_path() {
   local rel=$1 EXCL
   EXCL=$(git -C "$WT" rev-parse --git-path info/exclude 2>/dev/null || true)
@@ -2259,7 +2412,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   RELAUNCH_REPLACEMENT_STATE=$STATE_REAL
   RELAUNCH_REPLACEMENT_WT=$WT
 fi
-if [ "$KIND" != secondmate ]; then
+if [ "$KIND" != secondmate ] && [ "$PLACEMENT" != docker-sandbox ]; then
   # Arm the semantic busy-state contract (bin/fm-busy-lib.sh) for every
   # adapter with a verified semantic source. The launch brief sent below IS a
   # submitted turn, so the seed record is busy/fm-spawn. The minted gen is
@@ -2508,6 +2661,37 @@ EOF
       ;;
   esac
 fi
+if [ "$KIND" != secondmate ] && [ "$PLACEMENT" = docker-sandbox ]; then
+  # A sandbox cannot safely reach host semantic-busy state.  Keep only its
+  # notification path inside the mounted task bridge; it never declares idle.
+  case "$HARNESS" in
+    claude)
+      mkdir -p "$WT/.claude"
+      sandbox_stop=$(json_escape "touch $(shell_quote "$TURNEND")")
+      cat > "$WT/.claude/settings.local.json" <<EOF
+{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"$sandbox_stop"}]}]}}
+EOF
+      exclude_path '.claude/settings.local.json'
+      ;;
+    opencode)
+      mkdir -p "$WT/.opencode/plugins"
+      cat > "$WT/.opencode/plugins/fm-sandbox-turnend.js" <<EOF
+import { execFile } from "node:child_process";
+export const FmSandboxTurnEnd = async () => ({
+  event: async ({ event }) => {
+    if (event.type === "session.idle") {
+      await new Promise((resolve) => execFile("touch", ["$TURNEND"], () => resolve()));
+    }
+  },
+});
+EOF
+      exclude_path '.opencode/plugins/fm-sandbox-turnend.js'
+      ;;
+    codex)
+      # Codex retains its launch-template notify placeholder.
+      ;;
+  esac
+fi
 
 # Delivery posture recorded in meta so fm-teardown's safety check and the
 # validate/merge stages can branch on it. A ship task carries the explicit
@@ -2567,7 +2751,7 @@ fi
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects placement placement_mode placement_handle placement_bridge executor executor_profile control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -2615,6 +2799,16 @@ preserve_relaunch_meta() {
     echo "home=$PROJ_ABS"
     echo "projects=$SECONDMATE_PROJECTS"
   fi
+  if [ "$PLACEMENT" != host ]; then
+    echo "placement=$PLACEMENT"
+    echo "placement_mode=$PLACEMENT_MODE"
+    echo "placement_handle=$PLACEMENT_HANDLE"
+    [ -z "$PLACEMENT_BRIDGE" ] || echo "placement_bridge=$PLACEMENT_BRIDGE"
+  fi
+  if [ "$EXECUTOR" != local ]; then
+    echo "executor=$EXECUTOR"
+    echo "executor_profile=$EXECUTION_PROFILE"
+  fi
   if [ "$RELAUNCH" -eq 1 ]; then
     preserve_relaunch_meta
   fi
@@ -2639,13 +2833,18 @@ if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
   fm_lock_release "$SPAWN_TASK_SET_LOCK"
 fi
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
+[ "$PLACEMENT" = docker-sandbox ] && PLACEMENT_ABORT_CLEANUP=0
 
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")
 sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
 sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts")
 sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
-sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
+OPINPUT_PATH="$FM_ROOT/bin/fm-operational-input.sh"
+if [ "$PLACEMENT" = docker-sandbox ]; then
+  OPINPUT_PATH="$PLACEMENT_BRIDGE/fm-operational-input.sh"
+fi
+sq_opinput=$(shell_quote "$OPINPUT_PATH")
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
@@ -2708,28 +2907,58 @@ spawn_record_traceparent() {
   return "$status"
 }
 
-# Export GOTMPDIR into the crewmate's pane shell so the agent and every child
-# process (go build, go test, ...) inherit it. Sent before the launch command so
-# the env is set when the agent starts; the brief sleep lets the export land.
-spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
-# Send through the exact channel that already ships GOTMPDIR, so every backend
-# and harness - ship, scout, and secondmate - gets it before launch. Skipped
-# entirely when trace context is off.
-if [ -n "$SPAWN_TRACEPARENT" ]; then
-  if spawn_send_text_line "$T" "export TRACEPARENT=$SPAWN_TRACEPARENT"; then
-    if ! spawn_record_traceparent; then
+
+# Docker Sandbox commands are executed by sbx exec, not by this pane's shell.
+# Build their Go temp directory and trace environment in the inner shell so no
+# host-side export is assumed to cross that boundary.
+if [ "$PLACEMENT" = docker-sandbox ]; then
+  SANDBOX_TRACEPARENT=
+  if [ -n "$SPAWN_TRACEPARENT" ]; then
+    if spawn_record_traceparent; then
+      SANDBOX_TRACEPARENT=$SPAWN_TRACEPARENT
+    else
       LAUNCH="unset TRACEPARENT; $LAUNCH"
     fi
-  else
-    TRACE_SEND_STATUS=$?
-    if [ "$TRACE_SEND_STATUS" -eq 2 ]; then
-      echo "error: trace-context input could not be cleared for $W; refusing to append the launch command" >&2
-      exit 1
+  fi
+else
+  # Export GOTMPDIR into the crewmate's pane shell so the agent and every child
+  # process (go build, go test, ...) inherit it. Sent before the launch command so
+  # the env is set when the agent starts; the brief sleep lets the export land.
+  spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
+  # Send through the exact channel that already ships GOTMPDIR, so every backend
+  # and harness - ship, scout, and secondmate - gets it before launch. Skipped
+  # entirely when trace context is off.
+  if [ -n "$SPAWN_TRACEPARENT" ]; then
+    if spawn_send_text_line "$T" "export TRACEPARENT=$SPAWN_TRACEPARENT"; then
+      if ! spawn_record_traceparent; then
+        LAUNCH="unset TRACEPARENT; $LAUNCH"
+      fi
+    else
+      TRACE_SEND_STATUS=$?
+      if [ "$TRACE_SEND_STATUS" -eq 2 ]; then
+        echo "error: trace-context input could not be cleared for $W; refusing to append the launch command" >&2
+        exit 1
+      fi
+      LAUNCH="unset TRACEPARENT; $LAUNCH"
     fi
-    LAUNCH="unset TRACEPARENT; $LAUNCH"
   fi
 fi
-sleep 0.3
+if [ "$PLACEMENT" = docker-sandbox ]; then
+  sandbox_gotmp=$(shell_quote "$TASK_TMP/gotmp")
+  SANDBOX_INNER="mkdir -p $sandbox_gotmp || exit \$?; export GOTMPDIR=$sandbox_gotmp; "
+  if [ -n "$SANDBOX_TRACEPARENT" ]; then
+    SANDBOX_INNER="${SANDBOX_INNER}export TRACEPARENT=$(shell_quote "$SANDBOX_TRACEPARENT"); "
+  else
+    SANDBOX_INNER="${SANDBOX_INNER}unset TRACEPARENT; "
+  fi
+  SANDBOX_INNER="${SANDBOX_INNER}$LAUNCH"
+  fm_workspace_placement_wrap_launch "$PLACEMENT" "$PLACEMENT_HANDLE" "$WT" bash -lc "$SANDBOX_INNER" || exit 1
+  SANDBOX_LAUNCH=
+  for SANDBOX_ARG in "${FM_WORKSPACE_PLACEMENT_LAUNCH[@]}"; do
+    SANDBOX_LAUNCH="${SANDBOX_LAUNCH:+$SANDBOX_LAUNCH }$(shell_quote "$SANDBOX_ARG")"
+  done
+  LAUNCH=$SANDBOX_LAUNCH
+fi
 spawn_send_literal "$T" "$LAUNCH"
 sleep 0.3
 if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
@@ -2773,4 +3002,7 @@ fi
 
 SPAWN_DELIVERY=
 [ -z "$MODE" ] || SPAWN_DELIVERY=" mode=$MODE yolo=$YOLO"
-echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY window=$META_WINDOW worktree=$WT"
+SPAWN_RUNTIME=
+[ "$PLACEMENT" = host ] || SPAWN_RUNTIME="$SPAWN_RUNTIME placement=$PLACEMENT placement_mode=$PLACEMENT_MODE placement_handle=$PLACEMENT_HANDLE"
+[ "$EXECUTOR" = local ] || SPAWN_RUNTIME="$SPAWN_RUNTIME executor=$EXECUTOR executor_profile=$EXECUTION_PROFILE"
+echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY$SPAWN_RUNTIME window=$META_WINDOW worktree=$WT"

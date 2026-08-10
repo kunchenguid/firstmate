@@ -13,6 +13,8 @@
 # the same unconfigured default, so the generic absence mirror below converges
 # a secondmate without deciding the release-dependent floor; explicit "on" and
 # "off" preferences propagate as files. Primary
+# config/workspace-execution.json carries the same explicit worker placement,
+# secondmate placement, and command-execution defaults to each secondmate.
 # config/trace-context is copied at the launch convergence point as part of the
 # default-off W3C trace-context setup, while live convergence leaves it unchanged.
 # The primary passes its frozen home-session decision into a newly launched
@@ -37,10 +39,11 @@
 #
 # Extensible by design: FM_INHERITABLE_CONFIG is the single declared list of
 # config-dir-relative items the primary propagates. Add an item there and every
-# convergence point inherits it - no other change needed. config/secondmate-harness
-# is deliberately NOT in the list: it is the primary's own setting for launching
-# secondmates, and a secondmate never spawns secondmates, so it must not flow
-# downstream.
+# convergence point inherits it - no other change needed. For example,
+# workspace-execution.json gives each secondmate the primary's explicit placement
+# and command-execution defaults. config/secondmate-harness is deliberately NOT
+# in the list: it is the primary's own setting for launching secondmates, and a
+# secondmate never spawns secondmates, so it must not flow downstream.
 #
 # That single declaration is also the ONE owner of the inherited-material
 # allowlist for remote routes: bin/fm-remote-inherit-push.sh (sender) and
@@ -63,7 +66,7 @@ FM_SHARED_CAPTAIN_MODE="444"
 # The declared inheritable set (space-separated, config-dir-relative item paths).
 # Extend here to inherit more of the primary's local config; override via the
 # environment only in tests. Items must not contain whitespace.
-FM_INHERITABLE_CONFIG="${FM_INHERITABLE_CONFIG:-crew-dispatch.json crew-harness backlog-backend backend herdr-presentation-spaces startup-memory-budget trace-context}"
+FM_INHERITABLE_CONFIG="${FM_INHERITABLE_CONFIG:-crew-dispatch.json crew-harness backlog-backend backend herdr-presentation-spaces startup-memory-budget trace-context workspace-execution.json}"
 
 # Items whose value is a home-SESSION enablement decision rather than durable
 # local configuration. They are inherited at the launch convergence point, where

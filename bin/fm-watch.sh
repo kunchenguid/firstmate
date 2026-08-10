@@ -88,6 +88,8 @@ mkdir -p "$STATE"
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$SCRIPT_DIR/fm-busy-lib.sh"
+# shellcheck source=bin/fm-sandbox-bridge-lib.sh
+. "$SCRIPT_DIR/fm-sandbox-bridge-lib.sh"
 
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
@@ -259,6 +261,72 @@ recorded_windows() {
     esac
     seen="$seen|$w|"
     printf '%s\n' "$w"
+  done
+}
+
+# Read an optional metadata key only when its representation is unambiguous.
+watch_meta_value() {  # <meta> <key>
+  local meta=$1 key=$2 count
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
+  count=$(grep -c "^${key}=" "$meta" 2>/dev/null || true)
+  case "$count" in
+    0) return 0 ;;
+    1) sed -n "s/^${key}=//p" "$meta" ;;
+    *) return 1 ;;
+  esac
+}
+
+# Sync every recorded Docker bridge before any check or signal reads canonical
+# state.  A failure is a task-state failure, never a reason to adopt or recreate
+# a bridge from the sandbox-facing directory.  A lifecycle action owns a task's
+# metadata lock while it replaces or removes the bridge, so a busy lock defers
+# that task until the next watcher cycle rather than reporting a false failure.
+watch_sync_sandbox_bridge() {  # <meta> <task>
+  local meta=$1 task=$2 meta_lock placement bridge worktree endpoint rc=0
+
+  meta_lock=$(fm_meta_lock_path "$meta") || return 1
+  fm_lock_try_acquire "$meta_lock" || return 0
+
+  # Teardown may have removed the metadata between the glob and lock acquisition.
+  # It no longer represents a bridge to synchronize once the lock is ours.
+  if [ ! -e "$meta" ]; then
+    fm_lock_release "$meta_lock" || return 1
+    return 0
+  fi
+
+  placement=$(watch_meta_value "$meta" placement) || rc=1
+  if [ "$rc" -eq 0 ] && [ "$placement" = docker-sandbox ]; then
+    endpoint=$(watch_meta_value "$meta" endpoint_task_id) || rc=1
+    bridge=$(watch_meta_value "$meta" placement_bridge) || rc=1
+    worktree=$(watch_meta_value "$meta" worktree) || rc=1
+    if [ "$rc" -eq 0 ] \
+      && { [ "$endpoint" != "$task" ] || [ -z "$bridge" ] || [ -z "$worktree" ]; }; then
+      rc=1
+    fi
+    if [ "$rc" -eq 0 ]; then
+      fm_sandbox_bridge_validate "$bridge" "$STATE" "$task" "$worktree" \
+        && fm_sandbox_bridge_sync "$bridge" "$STATE" "$task" "$worktree" || rc=1
+    fi
+  fi
+
+  fm_lock_release "$meta_lock" || rc=1
+  return "$rc"
+}
+
+# Sync every recorded Docker bridge while its canonical metadata remains stable.
+watch_sync_sandbox_bridges() {
+  local meta task placement
+  WATCH_SANDBOX_BRIDGE_TASK=
+  for meta in "$STATE"/*.meta; do
+    [ -e "$meta" ] || continue
+    task=$(basename "$meta" .meta)
+    fm_sandbox_bridge_task_id_valid "$task" || continue
+    placement=$(watch_meta_value "$meta" placement) || continue
+    [ "$placement" = docker-sandbox ] || continue
+    watch_sync_sandbox_bridge "$meta" "$task" || {
+      WATCH_SANDBOX_BRIDGE_TASK=$task
+      return 1
+    }
   done
 }
 
@@ -837,6 +905,17 @@ while :; do
   # Liveness beacon for fm-guard.sh: a fresh mtime here means a watcher is
   # alive. Supervision scripts warn when this goes stale with tasks in flight.
   touch "$STATE/.last-watcher-beat"
+
+  # Docker Sandboxes write status and turn-end only through their recorded
+  # bridges. Synchronize those exact identities before any check or signal scan
+  # consumes canonical state. A failed sync is actionable and exits by the same
+  # durable wake path as every internal check.
+  if ! watch_sync_sandbox_bridges; then
+    reason="check: sandbox bridge sync failed for ${WATCH_SANDBOX_BRIDGE_TASK:-unknown}; recorded Docker Sandbox state must be inspected and repaired before retry"
+    fm_wake_append check "sandbox-bridge-${WATCH_SANDBOX_BRIDGE_TASK:-unknown}" "$reason" || exit 1
+    touch "$STATE/.last-check"
+    wake "$reason"
+  fi
 
   # Parent-owned secondmate pending-reply reconciliation: resolve correlated
   # parent reports, observe backend busy/idle turn completion, send one recovery

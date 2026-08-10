@@ -141,6 +141,8 @@ Seeding also writes a durable `.fm-secondmate-parent` record next to the home's 
 The promised-public-reply subsystem is same-filesystem by construction, so a remote route can never carry a delegated public-reply promise; `bin/fm-teardown.sh`'s cleanup gate reads this record to treat a remote parent as out of scope rather than an unresolved binding.
 
 Local secondmates keep the existing route form and need no migration.
+Inherited primary `config/workspace-execution.json` still governs that remote home's own worker and secondmate placement defaults and command-execution defaults once the home is live on the configured host; whole-home remote placement remains SSH/Herdr routing and is not Docker Sandbox or Crabbox by itself.
+Docker Sandbox and Crabbox remain optional host-local adapters inside a home; see [configuration.md](configuration.md#workspace-placement-and-command-execution-configworkspace-executionjson) and [architecture.md](architecture.md#optional-docker-sandbox-placement).
 A fleet may contain local and remote routes together.
 Use `bin/fm-home-seed.sh validate` to validate either form.
 

@@ -8,7 +8,7 @@
 #          Lines: "MISSING: <tool> (install: <command>)",
 #                 "MISSING_MANUAL: <tool> (instructions: <url>)", "NEEDS_GH_AUTH",
 #                 "BACKEND_INVALID: <name> (known: <names>)",
-#                 "STARTUP_MEMORY_BUDGET: invalid config/startup-memory-budget - <reason>",
+#                 "WORKSPACE_EXECUTION: invalid config/workspace-execution.json - <reason>",
 #                 "CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>",
 #                 "FLEET_SYNC: <repo>: skipped|recovered|STUCK: <detail>",
 #                 "PR_CHECK_MIGRATION: <private remediation>",
@@ -144,6 +144,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-secondmate-nudge-lib.sh"
 # shellcheck source=bin/fm-startup-memory-budget-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-startup-memory-budget-lib.sh"
+# shellcheck source=bin/fm-workspace-execution-config.sh disable=SC1091
+. "$SCRIPT_DIR/fm-workspace-execution-config.sh"
 # shellcheck source=bin/fm-x-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-x-lib.sh"
 # shellcheck source=bin/fm-backend.sh disable=SC1091
@@ -763,6 +765,8 @@ install_cmd() {
 manual_install_url() {
   case "$1" in
     herdr) echo "https://herdr.dev" ;;
+    sbx) echo "https://docs.docker.com/ai/sandboxes/" ;;
+    crabbox) echo "https://github.com/openclaw/crabbox" ;;
     *) return 1 ;;
   esac
 }
@@ -1082,6 +1086,31 @@ crew_dispatch_validate() {
   fi
 }
 
+workspace_execution_detect_tools() {
+  local error error_file
+
+  if error_file=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-workspace-execution.XXXXXX" 2>/dev/null); then
+    if ! fm_workspace_execution_config_load "$CONFIG" 2>"$error_file"; then
+      error=$(<"$error_file")
+      rm -f -- "$error_file"
+      error=${error#workspace-execution config: }
+      echo "WORKSPACE_EXECUTION: invalid config/workspace-execution.json - $error"
+      return 0
+    fi
+    rm -f -- "$error_file"
+  elif ! fm_workspace_execution_config_load "$CONFIG" 2>/dev/null; then
+    echo "WORKSPACE_EXECUTION: invalid config/workspace-execution.json - could not capture configuration error"
+    return 0
+  fi
+  if [ "$FM_WORKER_PLACEMENT_ADAPTER" = docker-sandbox ] \
+    || [ "$FM_SECONDMATE_PLACEMENT_ADAPTER" = docker-sandbox ]; then
+    command -v sbx >/dev/null 2>&1 || missing_tool_diagnostic sbx
+  fi
+  if [ "$FM_COMMAND_EXECUTION_ADAPTER" = crabbox ]; then
+    command -v crabbox >/dev/null 2>&1 || missing_tool_diagnostic crabbox
+  fi
+}
+
 startup_memory_budget_setup() {
   # Primary bootstrap owns default publication. A secondmate is deliberately
   # passive here because its setting must converge from the primary through the
@@ -1176,6 +1205,7 @@ detect_local_config() {
     echo "BOOTSTRAP_INFO: crew harness override active: $crew"
   fi
   crew_dispatch_validate
+  workspace_execution_detect_tools
   if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] \
     && ! fm_backlog_backend_manual "$CONFIG" && fm_tasks_axi_compatible; then
     echo "BOOTSTRAP_INFO: tasks-axi available"

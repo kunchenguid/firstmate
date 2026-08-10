@@ -146,7 +146,9 @@ family_for_basename() {
     fm-supervision-instructions.test.sh|fm-task-delivery.test.sh|\
     fm-tmux-submit-busy.test.sh|fm-trace-context-lib.test.sh|\
     fm-transition-lib.test.sh|\
-    fm-test-run.test.sh|fm-test-isolation-proof.test.sh)
+    fm-test-run.test.sh|fm-test-isolation-proof.test.sh|\
+    fm-sandbox-bridge-lib.test.sh|fm-workspace-placement.test.sh|\
+    fm-workspace-execution-config.test.sh|fm-command-execution.test.sh)
       printf '%s\n' pure-contract-unit
       ;;
     fm-daemon.test.sh|fm-guard-stale-banner.test.sh|fm-pi-watch-extension.test.sh|\
@@ -853,6 +855,18 @@ families_for_changed_path() {
     bin/fm-test-run.sh|bin/fm-test-isolation-proof.sh)
       printf '%s\n' pure-contract-unit
       ;;
+    bin/fm-workspace-execution-config.sh|\
+    bin/fm-command-execution.sh|bin/fm-exec.sh|bin/executors/*)
+      printf '%s\n' pure-contract-unit
+      ;;
+    bin/fm-workspace-placement.sh|bin/placements/*)
+      printf '%s\n' pure-contract-unit
+      printf '%s\n' secondmate
+      ;;
+    bin/fm-sandbox-bridge-lib.sh)
+      printf '%s\n' pure-contract-unit
+      printf '%s\n' secondmate
+      ;;
     bin/backends/herdr*|bin/fm-herdr-lab.sh|tests/herdr-test-safety.sh)
       printf '%s\n' real-herdr-gated
       printf '%s\n' backend-dispatch
@@ -866,6 +880,10 @@ families_for_changed_path() {
     bin/backends/zellij*|tests/zellij-test-safety.sh)
       printf '%s\n' zellij
       printf '%s\n' backend-dispatch
+      ;;
+    bin/fm-watch.sh)
+      printf '%s\n' watcher-wake-lock
+      printf '%s\n' pure-contract-unit
       ;;
     bin/backends/cmux*|tests/cmux-test-safety.sh)
       printf '%s\n' cmux
@@ -897,9 +915,13 @@ families_for_changed_path() {
       printf '%s\n' secondmate
       printf '%s\n' session-bootstrap
       ;;
+    bin/fm-config-inherit-lib.sh)
+      printf '%s\n' secondmate
+      printf '%s\n' pure-contract-unit
+      ;;
     bin/fm-secondmate*|bin/fm-remote*|bin/fm-on.sh|bin/fm-home-seed.sh|\
     bin/fm-backlog-handoff.sh|bin/fm-backlog-receive.sh|bin/fm-procevent-remote-reply.sh|\
-    bin/fm-config-inherit-lib.sh|bin/fm-config-push.sh|bin/fm-shared*|\
+    bin/fm-config-push.sh|bin/fm-shared*|\
     bin/fm-stow-cascade.sh)
       printf '%s\n' secondmate
       ;;
@@ -924,7 +946,12 @@ families_for_changed_path() {
       printf '%s\n' pure-contract-unit
       printf '%s\n' secondmate
       ;;
-    bin/fm-pr-*|bin/fm-merge-local.sh|bin/fm-teardown.sh|bin/fm-review-diff.sh|\
+    bin/fm-teardown.sh)
+      printf '%s\n' pr-forge
+      printf '%s\n' pure-contract-unit
+      printf '%s\n' secondmate
+      ;;
+    bin/fm-pr-*|bin/fm-merge-local.sh|bin/fm-review-diff.sh|\
     bin/fm-x-*|bin/fm-check*)
       printf '%s\n' pr-forge
       ;;
@@ -943,7 +970,12 @@ families_for_changed_path() {
       printf '%s\n' pure-contract-unit
       printf '%s\n' live-harness-optin
       ;;
-    bin/fm-spawn.sh|bin/fm-send.sh|bin/fm-harness.sh|\
+    bin/fm-spawn.sh)
+      printf '%s\n' backend-dispatch
+      printf '%s\n' pure-contract-unit
+      printf '%s\n' secondmate
+      ;;
+    bin/fm-send.sh|bin/fm-harness.sh|\
     bin/fm-peek.sh|bin/fm-composer*)
       printf '%s\n' backend-dispatch
       printf '%s\n' pure-contract-unit

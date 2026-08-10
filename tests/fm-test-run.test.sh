@@ -90,19 +90,22 @@ test_changed_file_selection_is_conservative() {
 
 init_changed_fixture_repo() {
   local repo=$1 script
-  mkdir -p "$repo/bin" "$repo/tests"
+  mkdir -p "$repo/bin/placements" "$repo/bin/executors" "$repo/tests"
   cp "$RUNNER" "$repo/bin/fm-test-run.sh"
   chmod +x "$repo/bin/fm-test-run.sh"
   for script in \
     fm-brief.test.sh \
-    fm-ask-user-authority.test.sh \
+    fm-sandbox-bridge-lib.test.sh \
+    fm-workspace-placement.test.sh \
+    fm-workspace-execution-config.test.sh \
+    fm-command-execution.test.sh \
     fm-cd-pretool-check.test.sh \
     fm-daemon.test.sh \
     fm-backend-herdr-smoke.test.sh \
     fm-secondmate-safety.test.sh \
     fm-session-start.test.sh \
     fm-afk-pi-herdr-return-e2e.test.sh \
-    fm-backend.test.sh \
+    fm-secondmate-lifecycle-e2e.test.sh \
     fm-pr-merge.test.sh \
     fm-pi-watch-extension.test.sh \
     fm-afk-return.test.sh \
@@ -116,6 +119,24 @@ init_changed_fixture_repo() {
   : >"$repo/tests/lib.sh"
   : >"$repo/tests/fm-backend-herdr-eventwait.test.py"
   : >"$repo/bin/fm-supervisor-target-lib.sh"
+  for source in \
+    fm-workspace-execution-config.sh \
+    fm-workspace-placement.sh \
+    fm-command-execution.sh \
+    fm-exec.sh \
+    fm-sandbox-bridge-lib.sh \
+    fm-spawn.sh \
+    fm-teardown.sh \
+    fm-watch.sh \
+    fm-watch-arm.sh \
+    fm-watch-checkpoint.sh \
+    fm-config-inherit-lib.sh; do
+    : >"$repo/bin/$source"
+  done
+  : >"$repo/bin/placements/host.sh"
+  : >"$repo/bin/placements/docker-sandbox.sh"
+  : >"$repo/bin/executors/local.sh"
+  : >"$repo/bin/executors/crabbox.sh"
   : >"$repo/bin/unmapped-source.sh"
   printf '# .claude/settings.json\n# .pi/extensions/fm-primary-turnend-guard.ts\n' \
     >>"$repo/tests/fm-cd-pretool-check.test.sh"
@@ -169,6 +190,78 @@ test_changed_dependency_selection_and_unmapped_failure() {
   assert_contains "$listed" "tests/fm-pi-watch-extension.test.sh" "Pi source selects watcher coverage"
   git -C "$repo" add .agents .claude .pi
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm non-bin-source-change
+
+  changed_source_selects() {
+    local source=$1 label=$2 expected
+    shift 2
+    printf '\n' >>"$repo/$source"
+    listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+    for expected in "$@"; do
+      assert_contains "$listed" "$expected" "$label"
+    done
+    git -C "$repo" add "$source"
+    git -C "$repo" -c user.name=test -c user.email=test@example.invalid \
+      commit -qm "changed-$source"
+  }
+
+  changed_source_selects \
+    bin/fm-workspace-execution-config.sh \
+    "workspace execution config selects its pure contract test" \
+    tests/fm-workspace-execution-config.test.sh
+  changed_source_selects \
+    bin/fm-workspace-placement.sh \
+    "workspace placement selects pure and secondmate coverage" \
+    tests/fm-workspace-placement.test.sh tests/fm-secondmate-lifecycle-e2e.test.sh
+  changed_source_selects \
+    bin/placements/docker-sandbox.sh \
+    "Docker Sandbox placement adapter selects placement coverage" \
+    tests/fm-workspace-placement.test.sh
+  changed_source_selects \
+    bin/placements/host.sh \
+    "host placement adapter selects placement coverage" \
+    tests/fm-workspace-placement.test.sh
+  changed_source_selects \
+    bin/fm-command-execution.sh \
+    "command execution selects its pure contract test" \
+    tests/fm-command-execution.test.sh
+  changed_source_selects \
+    bin/fm-exec.sh \
+    "fm-exec selects command execution coverage" \
+    tests/fm-command-execution.test.sh
+  changed_source_selects \
+    bin/executors/local.sh \
+    "local executor selects command execution coverage" \
+    tests/fm-command-execution.test.sh
+  changed_source_selects \
+    bin/executors/crabbox.sh \
+    "Crabbox executor selects command execution coverage" \
+    tests/fm-command-execution.test.sh
+  changed_source_selects \
+    bin/fm-sandbox-bridge-lib.sh \
+    "sandbox bridge selects pure and secondmate coverage" \
+    tests/fm-sandbox-bridge-lib.test.sh tests/fm-secondmate-lifecycle-e2e.test.sh
+  changed_source_selects \
+    bin/fm-spawn.sh \
+    "spawn selects existing backend, pure, and secondmate coverage" \
+    tests/fm-backend.test.sh tests/fm-ask-user-authority.test.sh \
+    tests/fm-secondmate-lifecycle-e2e.test.sh
+  changed_source_selects \
+    bin/fm-teardown.sh \
+    "teardown selects existing forge, pure, and secondmate coverage" \
+    tests/fm-pr-merge.test.sh tests/fm-ask-user-authority.test.sh \
+    tests/fm-secondmate-lifecycle-e2e.test.sh
+  changed_source_selects \
+    bin/fm-watch.sh \
+    "watcher bridge sync selects watcher and pure coverage" \
+    tests/fm-daemon.test.sh tests/fm-ask-user-authority.test.sh
+  changed_source_selects \
+    bin/fm-watch-arm.sh \
+    "watch arm retains watcher coverage without broadening" \
+    tests/fm-daemon.test.sh
+  changed_source_selects \
+    bin/fm-config-inherit-lib.sh \
+    "config inheritance selects existing secondmate and pure coverage" \
+    tests/fm-secondmate-safety.test.sh tests/fm-ask-user-authority.test.sh
 
   printf '\n' >>"$repo/src/unmapped.ts"
   set +e

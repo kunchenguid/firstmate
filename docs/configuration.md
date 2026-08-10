@@ -95,6 +95,42 @@ The caller-facing label remains `fm-<id>`, but the actual cmux workspace title i
 Test cleanup must use the guarded path in [`docs/cmux-backend.md`](cmux-backend.md#current-operation-and-safety), never enumerate-and-close every workspace.
 `config/backend` is inherited into secondmate homes under the primary-authoritative contract owned by [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md).
 
+## Workspace placement and command execution (config/workspace-execution.json)
+
+Optional local gitignored `config/workspace-execution.json` is the sole owner of default workspace placement and task command-execution adapters.
+It is not a runtime session backend and never replaces `config/backend`, `FM_BACKEND`, or the session-provider layer.
+An absent file keeps the established defaults: worker placement `host`/`direct`, secondmate placement `host`/`direct`, and command execution `local` with profile `null`.
+When the file exists it must be a regular non-symlink JSON object with exactly these top-level keys:
+
+```json
+{
+  "workerPlacement": {"adapter": "host|docker-sandbox", "workspaceMode": "direct", "kits": []},
+  "secondmatePlacement": {"adapter": "host|docker-sandbox", "workspaceMode": "direct", "kits": []},
+  "commandExecution": {"adapter": "local|crabbox", "profile": null}
+}
+```
+
+`workerPlacement.adapter` and `secondmatePlacement.adapter` accept only `host` or `docker-sandbox`.
+Both `workspaceMode` values must be the string `direct`; any other mode is rejected.
+Optional `kits` on each placement object is an array of nonempty strings with no CR, LF, or TAB; omit it or use `[]` to default to no kits.
+`host` placement rejects a nonempty `kits` array.
+`docker-sandbox` placement passes each kit reference through verbatim as a repeated `sbx create --kit <ref>` flag so kits can install Firstmate-required CLIs and declare network or credential policy inside the sandbox.
+Without a suitable kit, an opt-in sandbox may lack tools such as no-mistakes or gh-axi and the network access those tools need.
+Docker kit shape and packaging are owned by the official [Docker Sandbox kits](https://docs.docker.com/ai/sandboxes/customize/kits/) docs.
+`commandExecution.adapter` accepts only `local` or `crabbox`.
+`commandExecution.profile` must be JSON `null` when the adapter is `local`, and a nonempty string when the adapter is `crabbox`.
+Unknown keys, missing required keys, symlinked config paths, and malformed JSON fail closed.
+Bootstrap reports `WORKSPACE_EXECUTION: invalid config/workspace-execution.json - <reason>` for an invalid present file, and surfaces optional `MISSING_MANUAL:` diagnostics for `sbx` or `crabbox` only when the resolved defaults select Docker Sandbox placement or Crabbox execution.
+Install readiness points at the official [Docker Sandboxes](https://docs.docker.com/ai/sandboxes/) docs for `sbx` and the [Crabbox](https://github.com/openclaw/crabbox) repository for `crabbox`.
+
+Fresh-spawn precedence for each axis is an explicit `fm-spawn.sh` flag for that exact task, then this file's matching default, then the host/local defaults above.
+`--placement` overrides only placement for that spawn; workers read `workerPlacement` and secondmates read `secondmatePlacement`.
+`--executor` and `--execution-profile` override command execution for that spawn; `local` refuses any profile, and `crabbox` requires one nonempty profile.
+Control-plane relaunch reuses the task's recorded placement, placement mode, placement handle, bridge, executor, and executor profile exactly and refuses flag overrides of those axes.
+`config/workspace-execution.json` is inherited into secondmate homes under the primary-authoritative contract owned by [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md).
+`bin/fm-workspace-execution-config.sh` owns load and validation; `bin/fm-spawn.sh`, `bin/fm-exec.sh`, `bin/fm-workspace-placement.sh`, and `bin/fm-command-execution.sh` own the runtime mechanics.
+Composition and lifecycle invariants live in [`architecture.md`](architecture.md#optional-docker-sandbox-placement) and [`architecture.md`](architecture.md#task-scoped-command-execution).
+
 ## Away-mode supervisor backend (FM_SUPERVISOR_BACKEND / FM_SUPERVISOR_TARGET)
 
 The `/afk` sub-supervisor injects escalation digests into firstmate's own pane independently of where new task endpoints are spawned.

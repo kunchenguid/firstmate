@@ -101,6 +101,10 @@ Text for a worker to read and commands that drive a worker's process are separat
 `bin/fm-control.sh` is the control plane: an allowlisted `interrupt`, `exit`, and transactional `relaunch` addressed to an exact task id, with per-harness mechanics owned by `bin/fm-control-lib.sh`, a verified postcondition per verb, and no arbitrary-text or raw-key entry point.
 [`docs/agent-control.md`](agent-control.md) owns the verb contract, the capability matrix, the relaunch transaction, and the fail-closed boundaries.
 
+Task-scoped command execution is a third plane from both of those.
+`bin/fm-exec.sh` runs explicit check, run, inspect, logs, and release verbs against the executor recorded on `state/<id>.meta`, defaulting to host-local execution when no executor is recorded.
+It never replaces `fm-send`, `fm-control`, or a runtime session backend.
+
 ## Busy state is semantic, per adapter
 
 `bin/fm-busy-lib.sh` is the single owner of what "this worker is busy" means, and `bin/fm-busy-event.sh` is the only writer of the per-task records it reads.
@@ -161,6 +165,41 @@ Only a named non-default branch checked out in `FM_ROOT` is a worktree tangle.
 `fm-guard.sh` prints the repair command on the next mutable fleet action, while `bin/fm-session-start.sh` reports the same condition through bootstrap as a `TANGLE:` line at session start.
 If another live session holds the fleet lock, both surfaces keep the alarm but switch to read-only wording with no repair command.
 Ship briefs also tell the crewmate to verify `pwd -P` and `git rev-parse --show-toplevel` before creating `fm/<id>`, then stop with a blocked status if it landed in the primary checkout.
+
+## Optional Docker Sandbox placement
+
+Workspace placement is independent of the runtime session backend.
+Defaults remain host-direct: the agent process runs against the selected worktree or secondmate home on the host.
+Optional Docker Sandbox placement is selected per spawn from `config/workspace-execution.json` or an explicit `--placement docker-sandbox` for that exact task; see [configuration.md](configuration.md#workspace-placement-and-command-execution-configworkspace-executionjson) for schema and precedence.
+
+Supported sandbox agent presets are only the official `claude`, `codex`, and `opencode` Docker Sandbox presets, matched to the resolved harness.
+Other harnesses and raw launch commands are refused rather than rewritten onto an unsupported preset.
+Current placement mode is direct only: the selected worker worktree or secondmate home is mounted into the sandbox together with a recorded host bridge directory, so host filesystem trust and the Docker Sandbox isolation boundary both apply.
+Optional placement `kits` from `config/workspace-execution.json` are passed through as repeated Docker `--kit` refs at sandbox create time; use them to install Firstmate-required CLIs and to declare network or credential policy, because a kit-less sandbox may lack no-mistakes, gh-axi, and required network access.
+Host placement rejects nonempty kits, and missing kits default to none.
+Official Docker Sandbox behavior, security defaults, and kits are documented at [Docker Sandboxes](https://docs.docker.com/ai/sandboxes/) and [Docker Sandbox kits](https://docs.docker.com/ai/sandboxes/customize/kits/).
+
+For ordinary workers and secondmates, firstmate records an exact placement handle bound to the task identity, creates `state/sandbox-bridge/<id>/` as the only mounted status and turn-end surface, and keeps the append cursor host-private under `state/sandbox-bridge-cursor/<id>`.
+The watcher exposes bridge sync status and performs one-shot turn-end consumption into canonical `state/<id>.status` and `state/<id>.turn-ended`; a failed bridge sync becomes an actionable check wake rather than silent host fallback.
+Control-plane relaunch reuses the exact recorded placement, handle, and bridge and refuses to recreate a missing sandbox.
+Teardown releases only that exact recorded direct-placement handle after validating the bridge binding, then removes only the verified bridge and cursor; ambiguous or failed release preserves the worktree or home, bridge, endpoint, and task records.
+
+## Task-scoped command execution
+
+Command execution is task-scoped and explicit.
+Defaults remain local on the host with no provider profile.
+Optional Crabbox execution is selected from `config/workspace-execution.json` or per-spawn `--executor crabbox --execution-profile <profile>`; see [configuration.md](configuration.md#workspace-placement-and-command-execution-configworkspace-executionjson).
+
+`bin/fm-exec.sh <task-id> check|run|inspect|logs|release` is the operator and maintainer interface.
+`check` probes the recorded executor.
+`run [--lease <opaque-id>] -- <argv...>` streams command output and preserves exit status while appending ordered private journal events under `state/<id>.execution`.
+Crabbox routing requires exactly one nonempty axis: the task's recorded profile, or a caller-supplied opaque lease for that run.
+Local routing refuses both profile and lease.
+`inspect` stores only validated provider JSON at `state/<id>.execution-provider.json` and leaves cost and expiry authority with the provider.
+`logs` streams one opaque run id.
+`release` stops only the task's current unreleased Crabbox lease, or no-ops for local execution; empty Crabbox release is refused.
+Warm Crabbox preparation is unavailable until the provider exposes a machine-readable prewarm lease handle, so firstmate never creates an unrecordable warm lease.
+Official Crabbox ownership and CLI behavior live in the [Crabbox repository](https://github.com/openclaw/crabbox).
 
 ## No-mistakes gate authority boundary
 

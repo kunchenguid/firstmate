@@ -75,6 +75,7 @@ config/herdr-presentation-spaces  optional "off" opt-out from, or "on" opt-in to
 config/trace-context  optional presence flag enabling default-off native W3C trace-context propagation to spawned agents; LOCAL, gitignored; inherited by secondmate homes; see docs/configuration.md "Trace context propagation" and docs/trace-context.md
 config/cmux-socket-password  optional cmux control-socket password; LOCAL, gitignored; read fresh on every cmux CLI call and passed through without ever overriding an operator's own ambient CMUX_SOCKET_PASSWORD when absent (docs/cmux-backend.md "Setup")
 config/wedge-alarm  optional away-mode wedge-alarm active-alert directives; LOCAL, gitignored; absent means auto (macOS Notification Center when available); see docs/wedge-alarm.md
+config/workspace-execution.json  optional worker/secondmate placement and command-execution defaults; LOCAL, gitignored; absent = host/direct workers, host/direct secondmates, local commands; inherited by secondmate homes (docs/configuration.md "Workspace placement and command execution")
 config/x-mode.env    generated Relay watcher cadence; LOCAL, gitignored; source before arming watcher when present
 data/                personal fleet records; LOCAL, gitignored as a whole
   backlog.md         task queue, dependencies, history
@@ -94,6 +95,10 @@ state/               runtime records and signals; gitignored
   <id>.muse-session  muse busy-source binding (sessions root plus task worktree) written by fm-spawn; removed by teardown
   <id>.meta          task metadata; each producer script's header owns its exact fields and mutation contract, with docs/configuration.md routing operator-facing backend and trace-context details
   <id>.herdr-presentation  quarantinable attempt and restart-binding journal for Herdr's optional visual projection; never task or endpoint authority; see docs/herdr-backend.md "Presentation spaces"
+  <id>.execution  private ordered task command-execution journal (schema fm-execution-record.v1); written only by bin/fm-exec.sh; excludes argv, env, credentials, and command output
+  <id>.execution-provider.json  private last validated Crabbox provider JSON snapshot from fm-exec inspect; provider remains authority for cost and expiry
+  sandbox-bridge/  per-task Docker Sandbox host bridge directories under <task-id>/; mounted into the sandbox for status and turn-end only; removed by teardown after exact placement release
+  sandbox-bridge-cursor/  host-private per-task append cursors for sandbox bridge status sync; never mounted into the sandbox
   <id>.check.sh      authenticated slow poll; the watcher dispatches validated PR data and the byte-identified Relay shim through trusted repository scripts, runs registered custom checks from hash-validated private snapshots, and rejects every other state check without execution
   <id>.check-trust   private content binding created by fm-check-register.sh for an intentional custom check
   <id>.pr-poll       private validated data sidecar for the byte-static PR merge poll

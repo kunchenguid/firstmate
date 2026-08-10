@@ -54,6 +54,12 @@
 # the retired home. Removing a leased home releases its durable treehouse lease so the pool slot is freed,
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
+# Docker Sandbox placement cleanup runs only after every landed-work, report,
+# and secondmate-child refusal has passed. It synchronizes an ordinary task's
+# verified bridge before releasing only the recorded direct-placement handle;
+# a failed or ambiguous release retains the worktree/home, bridge, endpoint,
+# and metadata for retry. The bridge is removed only after release and the
+# existing endpoint-closure gate complete.
 # Usage: fm-teardown.sh <task-id> [--force]
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
@@ -166,6 +172,10 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
+# shellcheck source=bin/fm-workspace-placement.sh
+. "$SCRIPT_DIR/fm-workspace-placement.sh"
+# shellcheck source=bin/fm-sandbox-bridge-lib.sh
+. "$SCRIPT_DIR/fm-sandbox-bridge-lib.sh"
 if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
   echo "error: invalid teardown request" >&2
   exit 2
@@ -453,6 +463,55 @@ ORCA_PATH_MATCH_VERIFIED=0
 KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
 [ -n "$KIND" ] || KIND=ship
 MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
+PLACEMENT=$(fm_meta_get "$META" placement)
+PLACEMENT_MODE=$(fm_meta_get "$META" placement_mode)
+PLACEMENT_HANDLE=$(fm_meta_get "$META" placement_handle)
+PLACEMENT_BRIDGE=$(fm_meta_get "$META" placement_bridge)
+DOCKER_SANDBOX=0
+PLACEMENT_RELEASED=0
+validate_docker_sandbox_teardown_placement() {
+  [ "$PLACEMENT_MODE" = direct ] || {
+    echo "REFUSED: Docker Sandbox placement for $ID is not direct; preserving task state." >&2
+    return 1
+  }
+  [ -n "$PLACEMENT_HANDLE" ] || {
+    echo "REFUSED: Docker Sandbox placement for $ID has no recorded handle; preserving task state." >&2
+    return 1
+  }
+  # inspect validates the opaque handle against the recorded provider identity.
+  # A verified absence is releasable on retry, but an unreadable/invalid handle
+  # is never allowed to reach unrelated destructive cleanup.
+  fm_workspace_placement_inspect "$PLACEMENT" "$PLACEMENT_HANDLE" || true
+  case "${FM_WORKSPACE_PLACEMENT_PRESENT:-}" in
+    0|1) ;;
+    *)
+      echo "REFUSED: Docker Sandbox placement for $ID has an invalid or uninspectable recorded handle; preserving task state." >&2
+      return 1
+      ;;
+  esac
+  case "$PLACEMENT_BRIDGE" in
+    /*) ;;
+    *)
+      echo "REFUSED: Docker Sandbox placement for $ID has no absolute bridge path; preserving task state." >&2
+      return 1
+      ;;
+  esac
+  fm_sandbox_bridge_validate "$PLACEMENT_BRIDGE" "$STATE" "$ID" "$WT" || {
+    echo "REFUSED: Docker Sandbox bridge for $ID does not match its task state and worktree; preserving task state." >&2
+    return 1
+  }
+}
+case "$PLACEMENT" in
+  '') ;;
+  docker-sandbox)
+    validate_docker_sandbox_teardown_placement || exit 1
+    DOCKER_SANDBOX=1
+    ;;
+  *)
+    echo "REFUSED: unknown placement '$PLACEMENT' for $ID; preserving task state." >&2
+    exit 1
+    ;;
+esac
 [ -n "$MODE" ] || MODE=no-mistakes
 PUBLIC_FOLLOWUP_HOME=$FM_HOME
 PUBLIC_FOLLOWUP_STATE=$STATE
@@ -2370,6 +2429,13 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
     fi
   fi
 fi
+if [ "$DOCKER_SANDBOX" = 1 ]; then
+  fm_sandbox_bridge_sync "$PLACEMENT_BRIDGE" "$STATE" "$ID" "$WT" || {
+    echo "REFUSED: could not synchronize Docker Sandbox bridge for $ID; preserving task state." >&2
+    exit 1
+  }
+fi
+
 
 # Every landed/discard-work refusal above has now passed (or --force skipped
 # them). Fix 1 and Fix 2 (see script header) run here, unconditionally on
@@ -2402,6 +2468,21 @@ if [ "$BACKEND" = herdr ]; then
   TEARDOWN_HERDR_SESSION=$FM_BACKEND_HERDR_SESSION
   TEARDOWN_HERDR_PANE=$FM_BACKEND_HERDR_PANE
 fi
+if [ "$DOCKER_SANDBOX" = 1 ]; then
+  if [ "$FORCE" = --force ]; then
+    fm_workspace_placement_release "$PLACEMENT" "$PLACEMENT_HANDLE" force || {
+      echo "error: could not release the recorded Docker Sandbox for $ID; preserving worktree/home, bridge, endpoint, and task records." >&2
+      exit 1
+    }
+  else
+    fm_workspace_placement_release "$PLACEMENT" "$PLACEMENT_HANDLE" || {
+      echo "error: could not release the recorded Docker Sandbox for $ID; preserving worktree/home, bridge, endpoint, and task records." >&2
+      exit 1
+    }
+  fi
+  PLACEMENT_RELEASED=1
+fi
+
 
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
@@ -2520,6 +2601,17 @@ if [ "$BACKEND" = herdr ]; then
     exit 1
   fi
 fi
+if [ "$DOCKER_SANDBOX" = 1 ]; then
+  [ "$PLACEMENT_RELEASED" = 1 ] || {
+    echo "error: Docker Sandbox release was not recorded for $ID; retaining task records." >&2
+    exit 1
+  }
+  fm_sandbox_bridge_remove "$PLACEMENT_BRIDGE" "$STATE" "$ID" "$WT" || {
+    echo "error: Docker Sandbox bridge cleanup failed for $ID; retaining task records for retry." >&2
+    exit 1
+  }
+fi
+
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
   remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID" || exit $?
