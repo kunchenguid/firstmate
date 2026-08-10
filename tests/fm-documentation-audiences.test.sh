@@ -58,6 +58,8 @@ test_repository_inventory_passes() {
     "audience check did not report exact surface coverage"
   assert_contains "$out" "local_links=" \
     "audience check did not report local-link validation"
+  assert_contains "$out" "vendored_skills=" \
+    "audience check did not report the vendored prose it excluded"
   pass "documentation inventory classifies every maintained prose surface exactly once"
 }
 
@@ -135,7 +137,47 @@ MD
   pass "local links resolve while dates, versions, commands, and incident prose remain semantically reviewed"
 }
 
+test_vendored_skills_are_out_of_inventory_scope() {
+  local repo="$TMP_ROOT/vendored" out
+  mkdir -p "$repo/docs" "$repo/.agents/skills/upstream-thing/rules"
+  git -C "$repo" init -q
+  printf '%s\n' '[Setup](docs/setup.md) [Policy](docs/policy.md)' > "$repo/README.md"
+  printf '%s\n' '# Setup' > "$repo/docs/setup.md"
+  printf '%s\n' '# Policy' > "$repo/docs/policy.md"
+  printf '%s\n' '# Evidence' > "$repo/docs/evidence.md"
+  write_fixture_inventory "$repo"
+  # Upstream prose this repository does not maintain, carrying the illustrative
+  # placeholder and absolute example links that upstream authors routinely use.
+  printf '%s\n' '# Upstream' 'See [the docs](url) and [the dashboard](/dashboard).' \
+    > "$repo/.agents/skills/upstream-thing/SKILL.md"
+  printf '%s\n' '# Rule' 'Load [the helper](helper.js).' \
+    > "$repo/.agents/skills/upstream-thing/rules/rule.md"
+  git -C "$repo" add -A
+
+  run_expect_failure "unclassified: .agents/skills/upstream-thing/SKILL.md" \
+    "$CHECK" --root "$repo"
+
+  printf '%s\n' \
+    '{"version": 1, "skills": {"upstream-thing": {"source": "acme/agent-skills"}}}' \
+    > "$repo/skills-lock.json"
+  out=$("$CHECK" --root "$repo") \
+    || fail "vendored skill prose was not excluded from the inventory scope"
+  assert_contains "$out" "vendored_skills=2" \
+    "check did not report how much vendored prose it excluded"
+
+  # A lock naming a skill outside .agents/skills/<name>/ must refuse rather than
+  # exclude an arbitrary tree from classification and link validation.
+  printf '%s\n' '{"version": 1, "skills": {"../../docs": {"source": "acme/x"}}}' \
+    > "$repo/skills-lock.json"
+  run_expect_failure "skills-lock.json has an unusable skill name" "$CHECK" --root "$repo"
+
+  printf '%s\n' 'not json' > "$repo/skills-lock.json"
+  run_expect_failure "skills-lock.json is unreadable" "$CHECK" --root "$repo"
+  pass "vendored third-party skill prose stays out of scope while a malformed lock refuses"
+}
+
 test_repository_inventory_passes
+test_vendored_skills_are_out_of_inventory_scope
 test_duplicate_and_setup_classification_fail
 test_required_pointer_fails
 test_local_links_and_no_keyword_heuristic

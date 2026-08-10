@@ -3,6 +3,7 @@
 [`documentation-audiences.json`](documentation-audiences.json) is the machine-consumed classification owner for every maintained prose surface.
 `bin/fm-doc-audience-check.sh` validates exact inventory coverage, README setup routing, required owner pointers, and local link targets.
 Audience metadata is centralized there rather than copied into front matter on every page.
+Prose inside a vendored third-party skill named by `skills-lock.json` is upstream material this repository does not maintain, so it is outside the inventory scope and carries no audience.
 
 The audience classes have one placement purpose each:
 

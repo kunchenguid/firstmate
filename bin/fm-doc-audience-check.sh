@@ -7,6 +7,11 @@
 #
 # The inventory owns classification and setup routing.
 # This check validates structure only and does not keyword-lint prose.
+#
+# Prose under a skill named by skills-lock.json is vendored third-party material
+# that this repository does not maintain, so it is outside the inventory scope
+# and is neither classified nor link-checked. The reported vendored_skills count
+# makes that exclusion visible on every run.
 set -eu
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -48,6 +53,25 @@ def git_tracked(root: Path, patterns: list[str]) -> list[str]:
         detail = proc.stderr.decode("utf-8", "replace").strip()
         fail(f"git ls-files failed: {detail or 'unknown error'}")
     return sorted(p for p in proc.stdout.decode("utf-8").split("\0") if p)
+
+
+def vendored_skill_prefixes(root: Path) -> list[str]:
+    lock_path = root / "skills-lock.json"
+    if not lock_path.exists():
+        return []
+    try:
+        data = json.loads(lock_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        fail(f"skills-lock.json is unreadable: {exc}")
+    skills = data.get("skills") if isinstance(data, dict) else None
+    if not isinstance(skills, dict):
+        fail("skills-lock.json must map installed skill names to their upstream source")
+    prefixes: list[str] = []
+    for name in skills:
+        if not isinstance(name, str) or not name or "/" in name or name in {".", ".."}:
+            fail(f"skills-lock.json has an unusable skill name: {name!r}")
+        prefixes.append(f".agents/skills/{name}/")
+    return sorted(prefixes)
 
 
 def load_inventory(path: Path) -> dict:
@@ -171,7 +195,14 @@ def validate(root: Path, inventory_path: Path) -> tuple[int, int]:
     if duplicates:
         fail("surfaces classified more than once: " + ", ".join(duplicates))
 
-    tracked = set(git_tracked(root, patterns))
+    vendored_prefixes = vendored_skill_prefixes(root)
+    all_tracked = git_tracked(root, patterns)
+    tracked = {
+        path
+        for path in all_tracked
+        if not any(path.startswith(prefix) for prefix in vendored_prefixes)
+    }
+    vendored_surfaces = len(all_tracked) - len(tracked)
     classified = set(paths)
     missing = sorted(tracked - classified)
     extra = sorted(classified - tracked)
@@ -243,7 +274,7 @@ def validate(root: Path, inventory_path: Path) -> tuple[int, int]:
                 if fragment not in anchors:
                     fail(f"unresolved local anchor in {path}: {raw}")
 
-    return len(tracked), checked_links
+    return len(tracked), checked_links, vendored_surfaces
 
 
 def main() -> int:
@@ -256,11 +287,14 @@ def main() -> int:
     if not inventory_path.is_absolute():
         inventory_path = root / inventory_path
     try:
-        surfaces, links = validate(root, inventory_path)
+        surfaces, links, vendored = validate(root, inventory_path)
     except CheckError as exc:
         print(f"fm-doc-audience-check: {exc}", file=sys.stderr)
         return 1
-    print(f"fm-doc-audience-check: ok surfaces={surfaces} local_links={links}")
+    print(
+        f"fm-doc-audience-check: ok surfaces={surfaces} local_links={links} "
+        f"vendored_skills={vendored}"
+    )
     return 0
 
 
