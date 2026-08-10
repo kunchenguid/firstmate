@@ -64,16 +64,48 @@ The routing mechanism is owned only by [`../no-mistakes-pr-credential.md`](../no
 `tests/fm-gh-shim.test.sh` drives the public shim and wrapper interfaces with local fakes, touching no network and no real `gh`.
 `tests/fm-pr-merge.test.sh` drives protected GitHub merge capture through the public merge interface both without the shim and with a symlink to this repository's shim prefixed on `PATH`, and proves both paths preserve the single GraphQL request and exact SHA-conditioned merge mutation.
 
-Eight CI cases reproduce the check-runs authorization boundary and exercise the fallback through the shim's public `gh` interface.
-The fake applies the helper's real jq expression to paginated raw workflow-run fixtures, so the assertions cover the same transformation `gh api --paginate --slurp --jq` performs.
+Ten CI cases reproduce the check-runs authorization boundary and exercise the fallback through the shim's public `gh` interface.
+The fake applies the helper's real jq expression to each raw workflow-run page in turn and sorts result keys, so the assertions cover the same transformation `gh api --paginate --jq` performs, and it refuses `--slurp` alongside `--jq` exactly as GitHub CLI 2.92.0 does.
 The green case provides a failed workflow under a stale SHA and a successful workflow under the PR head, then asserts that the only Actions endpoint called contains `head_sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa` and that the result is `bucket: pass`.
 It also configures a distinct PR-capable token and proves that every CI call retains only the ambient narrow token.
 The red case maps an exact-head workflow failure to `bucket: fail` and preserves its Actions link.
 The zero-run case emits a pending placeholder, and a multi-page case maps cancelled, skipped, and queued workflows to the cancellation, skipping, and pending buckets.
+The flag-compatibility case first proves the fake rejects `--paginate --slurp --jq` before asserting that the fallback reaches a verdict against it, keeps runs from every page, and never sends `--slurp`, so the case cannot pass vacuously.
+The workflow-runs failure case proves the underlying `gh` error text reaches stderr next to the fallback's own refusal line instead of being replaced by it.
 The moving-head case refuses a verdict when the PR advances during pagination.
 The deeper-denial-path case drives `(node.statusCheckRollup.nodes.0.commit.statusCheckRollup.contexts.nodes.0)`, the denial GitHub returns today, and reaches the same exact-head green verdict the shorter historical path reaches.
 The unrelated-failure case proves generic HTTP 403 responses, denials for other APIs, a denial whose path only begins with those characters (`node.statusCheckRollupSummary.nodes.0`), and non-403 failures never reach the fallback API, while the unsupported-shape case proves only the two literal no-mistakes argument vectors enter the capturing helper.
 These fixtures establish GitHub Actions behavior only; the workflow-runs API cannot reproduce third-party check-provider evidence hidden behind check-runs.
+
+## GitHub CLI 2.92.0 rejects `--slurp` whenever `--jq` is present
+
+This is why the exact-head read paginates without `--slurp` and aggregates the per-page results itself.
+
+```console
+$ E="repos/quinnbot-ai/ff-manager/actions/runs?head_sha=083549b141e8edb460d6e46be222b52f1cd054a5&per_page=100"
+
+$ gh api -X GET "$E" --paginate --slurp --jq '.[]'
+the `--slurp` option is not supported with `--jq` or `--template`
+
+$ gh api -X GET "$E" --paginate --jq '.workflow_runs[] | {name: .name, status: .status}'
+{"name":"CI","status":"completed"}
+```
+
+The second form shows the two properties the aggregation relies on: `gh` applies the expression to each page separately, and prints one compact JSON value per line with its object keys sorted.
+Forcing a page break with `per_page=1` against a head carrying two runs shows every page still reaching the output:
+
+```console
+$ gh api -X GET "repos/quinnbot-ai/ff-manager/actions/runs?head_sha=0a451abe383794e563b60e6b2f8d64fdb2e58f91&per_page=1" --paginate --jq '.workflow_runs[] | {name: .name, id: .id}'
+{"id":31343233713,"name":"CI"}
+{"id":31343206757,"name":"CI"}
+```
+
+The same `gh` and the same ambient credential reach a terminal green verdict through the helper's supported invocation:
+
+```console
+$ bin/fm-gh-ci-fallback.sh "$(command -v gh)" pr checks 14 --repo quinnbot-ai/ff-manager --json name,state,bucket,completedAt,link
+[{"bucket":"pass","completedAt":"2026-08-09T23:13:37Z","link":"https://github.com/quinnbot-ai/ff-manager/actions/runs/31341360264","name":"CI","state":"success"}]
+```
 
 One case is a legacy-shell regression and self-skips where no bash 3.2 exists.
 Under `set -u`, bash 3.2 rejects an empty array's `"${arr[@]}"` expansion as an unbound variable, which broke the unconfigured pass-through path that every home without `config/gh-credential` takes; the observed failure was `bin/fm-gh.sh: line 81: PREFIX[@]: unbound variable` on GNU bash 3.2.57, the system bash macOS 26.5 ships.
@@ -90,6 +122,8 @@ ok - a denial naming statusCheckRollup deeper in its path still reaches the exac
 ok - a check-runs 403 reaches a red exact-head workflow verdict
 ok - zero exact-head workflow runs remain explicitly pending
 ok - paginated exact-head runs map cancellation, skipping, and pending buckets
+ok - exact-head pagination reaches a verdict on a gh that rejects --slurp with --jq
+ok - a failed workflow-runs read keeps the real gh error visible
 ok - a moving PR head cannot emit a stale workflow verdict
 ok - unrelated check failures are preserved without an API fallback
 ok - unsupported gh pr checks shapes exec the real gh directly
