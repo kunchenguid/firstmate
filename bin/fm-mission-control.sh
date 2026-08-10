@@ -12,8 +12,9 @@
 # secondmate current state keep exactly one owner. Three concerns come from
 # outside the snapshot because the snapshot does not own them: data/projects.md
 # is the delivery-posture registry; the local Token Dashboard API owns richer
-# allowance history, pace, and balancing with `quota-axi --json` as the live-only
-# fallback; each project card's last-change time comes from that project's own
+# allowance history, pace, and balancing, while `quota-axi --json` is the live-only
+# fallback and supplies Grok only when that normalized source has no Grok window;
+# each project card's last-change time comes from that project's own
 # clone or, for a second mate, from when it last reported; and the narrow,
 # forward-only autonomous-actions record supplies the recent action feed.
 #
@@ -365,7 +366,9 @@ sanitize_token_dashboard() {
       latest: (if (.latest | type) == "object" then {
         capturedAt: .latest.capturedAt,
         windows: [(.latest.windows // [])[] | {
-          key, provider, providerLabel, id, label, shortLabel,
+          key, provider, providerLabel, id,
+          label: (if .provider == "grok" and .id == "credits" then "Credits" else .label end),
+          shortLabel: (if .provider == "grok" and .id == "credits" then "Credits" else .shortLabel end),
           percentUsed, percentRemaining, resetsAt, windowSeconds,
           pace: {status: .pace.status, elapsedPercent: .pace.elapsedPercent,
                  reservePercentPoints: .pace.reservePercentPoints,
@@ -397,10 +400,35 @@ sanitize_token_dashboard() {
   '
 }
 
+# Token Dashboard has the normalized record whenever it knows Grok.
+# When it has not collected Grok yet, narrow only its live windows onto that
+# same display contract; its prepaid credits balance has no percentage meaning.
+sanitize_grok_quota() {
+  jq -c '
+    if type != "object" then empty else
+    [(.providers // [])[] | select(.provider == "grok") | . as $provider | {
+      label: $provider.label,
+      state: {status: $provider.state.status, error: $provider.state.error},
+      windows: [($provider.windows // [])[] | {
+        key: ("grok:" + (.id | tostring)), provider: "grok", providerLabel: ($provider.label // "Grok"),
+        id, label: (if .id == "credits" then "Credits" else .label end),
+        shortLabel: (if .id == "credits" then "Credits" else .label end), percentUsed, percentRemaining, resetsAt,
+        windowSeconds: .pace.cycleSeconds,
+        pace: {status: .pace.status, elapsedPercent: .pace.elapsedPercent,
+               reservePercentPoints: .pace.reservePercentPoints,
+               burnMultiple: .pace.burnMultiple,
+               projectedExhaustedAt: .pace.projectedExhaustedAt}
+      }]
+    }] | first // null
+    end
+  '
+}
+
 TOKEN_DASH='null'
 TOKEN_DASH_NOTE="not requested"
 QUOTA='null'
 QUOTA_NOTE="not requested"
+GROK_QUOTA='null'
 if [ "$WITH_QUOTA" = 1 ]; then
   token_raw=""
   token_candidate=""
@@ -461,7 +489,27 @@ if [ "$WITH_QUOTA" = 1 ]; then
 
   # The richer service may be absent or may not have its first successful
   # snapshot yet. Preserve the old direct allowance view in either case.
-  if ! printf '%s' "$TOKEN_DASH" | jq -e '.latest | type == "object"' >/dev/null 2>&1; then
+  # A successful dashboard read stays authoritative, except that a live Grok
+  # read fills only its absent provider until Token Dashboard collects it.
+  token_has_latest=0
+  token_has_grok=0
+  if printf '%s' "$TOKEN_DASH" | jq -e '.latest | type == "object"' >/dev/null 2>&1; then
+    token_has_latest=1
+    if printf '%s' "$TOKEN_DASH" | jq -e '[.latest.windows[]? | select(.provider == "grok")] | length > 0' >/dev/null 2>&1; then
+      token_has_grok=1
+    fi
+  fi
+
+  read_quota=0
+  if [ "$token_has_latest" = 0 ]; then
+    read_quota=1
+  elif [ "$token_has_grok" = 0 ] && { [ -z "${FM_MISSION_CONTROL_TOKEN_JSON:-}" ] || [ -n "${FM_MISSION_CONTROL_QUOTA_JSON:-}" ]; }; then
+    # Captured dashboard fixtures remain deterministic unless they explicitly
+    # provide the matching captured quota payload.
+    read_quota=1
+  fi
+
+  if [ "$read_quota" = 1 ]; then
     quota_raw=""
     if [ -n "${FM_MISSION_CONTROL_QUOTA_JSON:-}" ]; then
       if [ -r "$FM_MISSION_CONTROL_QUOTA_JSON" ]; then
@@ -479,6 +527,7 @@ if [ "$WITH_QUOTA" = 1 ]; then
     if [ -n "$quota_raw" ] && printf '%s' "$quota_raw" | jq -e 'type == "object"' >/dev/null 2>&1; then
       QUOTA=$quota_raw
       QUOTA_NOTE=""
+      GROK_QUOTA=$(printf '%s' "$quota_raw" | sanitize_grok_quota 2>/dev/null) || GROK_QUOTA='null'
     fi
   fi
 fi
@@ -513,6 +562,7 @@ render_html() {
   printf '%s' "$SNAPSHOT" | jq -L "$SCRIPT_DIR" -r \
     --argjson quota "$QUOTA" \
     --arg quota_note "$QUOTA_NOTE" \
+    --argjson grok_quota "$GROK_QUOTA" \
     --argjson token_dash "$TOKEN_DASH" \
     --arg token_dash_note "$TOKEN_DASH_NOTE" \
     --argjson now "$NOW" \
@@ -1758,34 +1808,48 @@ def gauge($label; $pct; $note):
      <div class=\"gnote\">\($note)</div>
    </div>");
 
+def grok_unmeasured:
+  if ($grok_quota | type) != "object"
+     or ([($grok_quota.windows // [])[]? | select((.percentRemaining // null) | type == "number")] | length) > 0 then ""
+  else "<ul class=\"unmeasured\">"
+    + (@html "<li><span>\($grok_quota.label // "Grok")</span><span class=\"gval\">\($grok_quota.state.error // $grok_quota.state.status // "no window reported")</span></li>")
+    + "</ul>" end;
+
 def quota_fallback:
   if $quota == null then
     (([$token_dash_note, $quota_note] | map(select(. != "" and . != "not requested")) | unique | join("; ")) // "") as $reason |
     (@html "<p class=\"quiet\">Allowance unavailable\(if $reason == "" then "." else " - \($reason)." end)</p>")
   else
-    (($quota.providers // []) | map(. as $p |
+    (($quota.providers // []) | map(select(.provider != "grok") | . as $p |
       $p + {wins: (($p.windows // []) | map(select((.percentRemaining // null) != null)))})) as $providers |
     ($providers | map(select((.wins | length) > 0))) as $measured |
     ($providers | map(select((.wins | length) == 0))) as $unmeasured |
-    (@html "<p class=\"qfallback\">Live allowance only. Pace history, projected runway, and balancing activity are unavailable - \(if $token_dash_note == "" then "local token history has no successful reading" else $token_dash_note end).</p>")
+    ([($grok_quota.windows // [])[]? |
+      select((.percentRemaining // null) | type == "number")]) as $grok_windows |
+    (@html "<p class=\"qfallback\">Live allowance only. Saved history and balancing activity are unavailable.\(if ($grok_windows | length) > 0 then " Grok pace and projected runway appear when supplied." else " Pace and projected runway are unavailable." end) - \(if $token_dash_note == "" then "local token history has no successful reading" else $token_dash_note end).</p>")
     # A provider with no readable window is a sign-in or reporting gap, not an
     # exhausted allowance, so it never renders as an empty zero gauge.
     + (($measured | map(. as $p |
       ($p.wins | map(gauge(("\($p.label // $p.provider) / \(.label // .id)");
                            (.percentRemaining | floor);
                            ("resets \(.resetsAt // "-")"))) | add)) | add) // "")
+    + (if ($grok_windows | length) == 0 then ""
+       else "<div class=\"quota-grid\">" + (($grok_windows | map(token_window) | add) // "") + "</div>" end)
+    + grok_unmeasured
     + (if ($unmeasured | length) == 0 then ""
        else "<ul class=\"unmeasured\">"
          + (($unmeasured | map(. as $p |
              (@html "<li><span>\($p.label // $p.provider)</span><span class=\"gval\">\($p.state.error // $p.state.status // "no window reported")</span></li>")) | add) // "")
          + "</ul>" end)
-    + (if ($providers | length) == 0 then "<p class=\"quiet\">No allowance providers reported.</p>" else "" end)
+    + (if ($providers | length) == 0 and ($grok_quota | type) != "object"
+       then "<p class=\"quiet\">No allowance providers reported.</p>" else "" end)
   end;
 
 def quota_block:
   if ($token_dash.latest | type) != "object" then quota_fallback
   else
-    ($token_dash.latest.windows // []) as $windows |
+    (($token_dash.latest.windows // []) + [($grok_quota.windows // [])[]? |
+      select((.percentRemaining // null) | type == "number")]) as $windows |
     (($token_dash.historyCount // ($token_dash.history | length)) |
       if type == "number" then floor else 0 end) as $history_count |
     token_age as $age |
@@ -1795,7 +1859,7 @@ def quota_block:
     + (if $age == null then
          "<p class=\"qalert\">Allowance freshness is unavailable.</p>"
        elif token_is_stale then
-         "<p class=\"qalert\">Allowance data is stale - the last successful reading was "
+         "<p class=\"qalert\">Token Dashboard allowance data is stale - the last successful reading was "
          + (@html "\(age_copy($age))") + ".</p>"
        elif ($token_dash.lastError | type) == "object" then
          "<p class=\"qalert\">The latest local collection failed; showing the last successful reading.</p>"
@@ -1803,6 +1867,7 @@ def quota_block:
     + (if ($windows | length) == 0 then
          "<p class=\"quiet\">No allowance windows were reported by the local token dashboard.</p>"
        else "<div class=\"quota-grid\">" + (($windows | map(token_window) | add) // "") + "</div>" end)
+    + grok_unmeasured
     + (if ([$windows[]? | select(.key == "claude:five_hour" or .key == "claude:seven_day" or .key == "codex:weekly")] | length) < 3
        then "<p class=\"qmissing\">One or more primary allowance windows are unavailable.</p>" else "" end)
     + balancing_block

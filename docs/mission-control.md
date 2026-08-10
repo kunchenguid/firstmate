@@ -84,9 +84,10 @@ The stage itself is derived by the snapshot rather than by the board; see `bin/f
 - **Allowance & pace** integrates the local Token Dashboard into the System view rather than repeating its numbers in a separate dashboard-shaped panel.
   Each primary allowance window leads with current remaining allowance, then keeps pace against the reset, observed cycle history, and projected runway or exhaustion in one compact card.
   Recent automatic balancing is a quiet collapsed shelf under those cards, so its activity remains visible without becoming another monitoring feed.
-  Mission Control consumes only normalized allowance windows, bounded history, pace thresholds, and the safe balancing summary from the Token Dashboard API.
+  Mission Control consumes normalized allowance windows, bounded history, pace thresholds, and the safe balancing summary from the Token Dashboard API, adding a narrowed live Grok window set from `quota-axi` only while that source has no Grok windows.
   Session rows, credentials, action reasons, action details, and unknown payload fields are discarded before rendering.
-  An old successful reading is labelled stale, a failed latest collection is stated, and an absent Token Dashboard falls back to the original live `quota-axi` gauges with history, runway, and balancing explicitly unavailable.
+  An old successful Token Dashboard reading is labelled stale, a failed latest collection is stated, and an absent dashboard keeps existing providers on the original live `quota-axi` gauges while Grok uses compact cards with supplied pace, reset, and runway; saved history and balancing remain explicitly unavailable.
+  Missing Grok measurements use the existing unavailable, unmeasurable, or sign-in-required state instead of zero, and the separate prepaid credits balance is never treated as a percentage.
   The renderer only reads the standalone service and never refreshes, changes, stops, or replaces it.
 
 An idle second mate is healthy and is rendered as such, never as an alarm.
