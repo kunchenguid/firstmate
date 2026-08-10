@@ -183,7 +183,8 @@ Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, and Muse share that backend 
 ## Composer classification matrix
 
 The shared composer classifier (`bin/fm-composer-lib.sh`, `fm_composer_classify_screen`) owns every composer shape fleet-wide; each backend contributes only a capture and a capability descriptor.
-The live half of that guarantee was verified on 2026-08-09 against every installed harness on tmux 3.6a, macOS arm64, on an isolated private socket, with no prompt submitted to any harness.
+The live half of that guarantee was verified on 2026-08-10 from an already-trusted checkout at the branch's final validated head, against every installed harness on tmux 3.6a, macOS arm64, on an isolated private socket, with no prompt submitted to any harness.
+An earlier gate-worktree run could not verify claude, grok, or muse because the pipeline's isolated worktree is untrusted and their first-launch trust dialogs are a real unreadable-composer state the guard refuses to confirm; this trusted-checkout rerun covers all three, and the hardened zellij probe additionally observed its typed text before Enter and accepted only a non-delivery classifier verdict.
 
 ```sh
 FM_COMPOSER_MATRIX_LIVE=1 tests/fm-composer-matrix-live-e2e.test.sh
