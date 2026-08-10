@@ -27,7 +27,8 @@ make_case() {
   local name=$1 case_dir repo base head
   case_dir="$TMP_ROOT/$name"
   repo="$case_dir/repo"
-  mkdir -p "$repo/tests" "$case_dir/state" "$case_dir/data" \
+  mkdir -p "$repo/tests" "$repo/apps/web-app/src" \
+    "$case_dir/state" "$case_dir/data" \
     "$case_dir/author-home" "$case_dir/reviewer-home" "$case_dir/pi-home" \
     "$case_dir/fakebin"
   # Real Codex homes always carry tokens.account_id; the independence gate
@@ -52,6 +53,18 @@ make_case() {
   printf '#!/usr/bin/env bash\ngrep -qx fixed app.txt\n' > "$repo/tests/helper.sh"
   printf '#!/usr/bin/env bash\n. tests/helper.sh\n' > "$repo/tests/support.test.sh"
   printf '#!/usr/bin/env bash\ngrep -qx fixed app.txt\n' > "$repo/shared-test.sh"
+  cat > "$repo/apps/web-app/package.json" <<'JSON'
+{"scripts":{"test":"jest"},"engines":{"node":"20.x"},"devDependencies":{"jest":"29.7.0"}}
+JSON
+  cat > "$repo/apps/web-app/package-lock.json" <<'JSON'
+{"name":"crosscheck-fixture","lockfileVersion":3,"packages":{"":{"devDependencies":{"jest":"29.7.0"}},"node_modules/import-local":{"version":"3.1.0","resolved":"https://registry.npmjs.org/import-local/-/import-local-3.1.0.tgz","integrity":"sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==","dev":true},"node_modules/jest":{"version":"29.7.0","resolved":"https://registry.npmjs.org/jest/-/jest-29.7.0.tgz","integrity":"sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==","dev":true,"dependencies":{"import-local":"^3.0.2","jest-cli":"^29.7.0"}},"node_modules/jest-cli":{"version":"29.7.0","resolved":"https://registry.npmjs.org/jest-cli/-/jest-cli-29.7.0.tgz","integrity":"sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==","dev":true}}}
+JSON
+  printf 'export const previewScope = "fixed";\n' \
+    > "$repo/apps/web-app/src/preview.ts"
+  printf '// ADEQUATE_PREVIEW_SCOPE_TEST\n' \
+    > "$repo/apps/web-app/src/preview.test.ts"
+  printf '// INADEQUATE_PREVIEW_SCOPE_TEST\n' \
+    > "$repo/apps/web-app/src/preview-inadequate.test.ts"
   ln -s ../shared-test.sh "$repo/tests/symlink.test.sh"
   printf '#!/usr/bin/env bash\n# def test_app_is_fixed()\ngrep -qx fixed app.txt\n' \
     > "$repo/tests/nodeid.test.sh"
@@ -67,8 +80,10 @@ make_case() {
     "$repo/tests/readable-state.test.sh" "$repo/tests/support.test.sh" \
     "$repo/tests/nodeid.test.sh" "$repo/tests/vacuous.test.sh" \
     "$repo/tests/pathdep.test.sh" "$repo/real-tests/linked.test.sh"
-  git -C "$repo" add app.txt other.txt shared-test.sh tests/regression.test.sh \
-    tests/helper.sh tests/readable-state.test.sh tests/stateful.test.sh \
+  git -C "$repo" add app.txt other.txt shared-test.sh \
+    apps/web-app/package.json apps/web-app/package-lock.json apps/web-app/src/preview.ts \
+    apps/web-app/src/preview.test.ts apps/web-app/src/preview-inadequate.test.ts \
+    tests/regression.test.sh tests/helper.sh tests/readable-state.test.sh tests/stateful.test.sh \
     tests/support.test.sh tests/symlink.test.sh tests/nodeid.test.sh \
     tests/vacuous.test.sh tests/pathdep.test.sh real-tests/linked.test.sh \
     tests/linked
@@ -100,6 +115,7 @@ EOF
   install_pi_fake "$case_dir"
   install_sandbox_fake "$case_dir"
   install_pytest_fake "$case_dir"
+  install_jest_package_manager_fake "$case_dir/pathbin"
   install_path_helper "$case_dir"
   printf '%s\t%s\t%s\n' "$case_dir" "$base" "$head"
 }
@@ -112,6 +128,58 @@ install_path_helper() {
   printf '#!/usr/bin/env bash\ngrep -qx fixed app.txt\n' \
     > "$case_dir/pathbin/fm-test-helper"
   chmod +x "$case_dir/pathbin/fm-test-helper"
+}
+
+install_jest_package_manager_fake() {
+  local node_bin=$1
+  mkdir -p "$node_bin"
+  cat > "$node_bin/node" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = --version ] || exit 92
+printf 'v20.11.0\n'
+SH
+  cat > "$node_bin/npm" <<'SH'
+#!/usr/bin/env bash
+set -u
+[ "${1:-}" = ci ] || exit 93
+mkdir -p node_modules/.bin node_modules/import-local node_modules/jest/bin node_modules/jest-cli
+cat > node_modules/jest/package.json <<'JSON'
+{"name":"jest","version":"29.7.0","bin":"./bin/jest.js","dependencies":{"import-local":"^3.0.2","jest-cli":"^29.7.0"}}
+JSON
+cat > node_modules/import-local/package.json <<'JSON'
+{"name":"import-local","version":"3.1.0"}
+JSON
+cat > node_modules/jest-cli/package.json <<'JSON'
+{"name":"jest-cli","version":"29.7.0"}
+JSON
+cat > node_modules/jest/bin/jest.js <<'JEST'
+#!/usr/bin/env bash
+set -u
+[ "$(node --version)" = v20.11.0 ] || exit 94
+test_path=
+for argument in "$@"; do
+  case "$argument" in
+    --*) ;;
+    *) test_path=$argument ;;
+  esac
+done
+[ -n "$test_path" ] && [ -f "$test_path" ] || exit 4
+status=0
+if ! grep -q 'INADEQUATE_PREVIEW_SCOPE_TEST' "$test_path" \
+  && ! grep -q 'previewScope = "fixed"' src/preview.ts; then
+  status=1
+fi
+if [ "$status" -eq 0 ]; then
+  printf '%s\n' '{"numTotalTests":1,"numFailedTests":0,"success":true}'
+else
+  printf '%s\n' '{"numTotalTests":1,"numFailedTests":1,"success":false}'
+fi
+exit "$status"
+JEST
+chmod +x node_modules/jest/bin/jest.js
+ln -s ../jest/bin/jest.js node_modules/.bin/jest
+SH
+  chmod +x "$node_bin/node" "$node_bin/npm"
 }
 
 # A node-id runner standing in for pytest. It reproduces the three outcomes the
@@ -185,7 +253,17 @@ for selector in "${targets[@]}"; do
 done
 exit "$status"
 SH
-  chmod +x "$case_dir/pathbin/pytest"
+  cat > "$case_dir/pathbin/python3" <<SH
+#!/usr/bin/env bash
+# Keep this fixture on the plain-pytest rung even when the developer machine's
+# ambient Python happens to have pytest installed, without breaking reviewer
+# doubles that invoke Python for their own protocol work.
+if [ "\${1:-}" = -m ] && [ "\${2:-}" = pytest ]; then
+  exit 1
+fi
+exec "$CROSSCHECK_PYTHON" "\$@"
+SH
+  chmod +x "$case_dir/pathbin/pytest" "$case_dir/pathbin/python3"
 }
 
 install_gh_axi_fake() {
@@ -586,6 +664,37 @@ elif scenario == "new-finding":
         },
     }]
 elif scenario in {
+    "verified-fixed-jest",
+    "inadequate-jest",
+    "no-route-jest",
+}:
+    patch = protocol / "mutations" / "preview-revert.patch"
+    patch.parent.mkdir(parents=True, exist_ok=True)
+    patch.write_text("""diff --git a/apps/web-app/src/preview.ts b/apps/web-app/src/preview.ts
+--- a/apps/web-app/src/preview.ts
++++ b/apps/web-app/src/preview.ts
+@@ -1 +1 @@
+-export const previewScope = \"fixed\";
++export const previewScope = \"broken\";
+""")
+    test_path = (
+        "apps/web-app/src/preview-inadequate.test.ts"
+        if scenario == "inadequate-jest"
+        else "apps/web-app/src/preview.test.ts"
+    )
+    base["finding_updates"] = [{
+        "id": "cc-aaaaaaaaaaaa",
+        "status": "verified-fixed",
+        "note": "The package-governed Jest regression detects a reverted preview fix.",
+        "reproduction": None,
+        "mutation_proof": {
+            "test_path": test_path,
+            "test_invocation": {"runner": "jest", "arguments": []},
+            "mutation_patch_path": ".crosscheck/mutations/preview-revert.patch",
+        },
+        "equivalent_to": None,
+    }]
+elif scenario in {
     "verified-fixed",
     "missing-proof",
     "forged-command",
@@ -937,6 +1046,34 @@ seed_open_ledger() {
 JSON
 }
 
+seed_javascript_open_ledger() {
+  local case_dir=$1 head=$2
+  mkdir -p "$case_dir/data/task-x1"
+  cat > "$case_dir/data/task-x1/crosscheck-ledger.json" <<JSON
+{
+  "schema": "firstmate.crosscheck-ledger.v2",
+  "task_id": "task-x1",
+  "pull_request": "https://github.com/ruby-dlee/firstmate/pull/72",
+  "findings": [{
+    "id": "cc-aaaaaaaaaaaa",
+    "lifecycle": "open",
+    "title": "Prior TypeScript blocker",
+    "severity": "blocking",
+    "description": "A durable reproduced TypeScript blocker.",
+    "citations": [{"path": "apps/web-app/src/preview.ts", "line": 1}],
+    "history": [{
+      "at": "2026-08-02T00:00:00Z",
+      "head_sha": "$head",
+      "status": "open",
+      "note": "Seeded reproduced TypeScript blocker.",
+      "proof": null
+    }]
+  }],
+  "runs": []
+}
+JSON
+}
+
 # A ledger recorded before mutation proofs had to be argument-free. It must
 # still load - the durable findings in it are not disposable - while the proof
 # itself no longer certifies anything.
@@ -1138,6 +1275,145 @@ same_account = expect_refused(claude_author, "proven-separate account")
 print(f"REFUSED shared-account: {same_account}")
 PY
   pass "all reviewer profiles validate while model and account independence still fail closed"
+}
+
+test_same_model_relaxation_requires_proven_separate_account() {
+  "$CROSSCHECK_PYTHON" - "$CROSSCHECK_PY" "$TMP_ROOT" <<'PY' \
+    || fail "same-model relaxation weakened account separation or its safe default"
+import importlib.util
+import json
+import os
+from pathlib import Path
+import sys
+
+spec = importlib.util.spec_from_file_location("fm_crosscheck", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(module)
+
+home = Path(sys.argv[2]) / "same-model-relaxation-policy"
+home.mkdir()
+(home / "config").mkdir()
+config_path = home / "reviewer.json"
+os.environ["FM_CROSSCHECK_REVIEWER_CONFIG"] = str(config_path)
+
+
+def pi_home(name, account_id):
+    account_home = home / name
+    account_home.mkdir()
+    (account_home / "auth.json").write_text(
+        json.dumps(
+            {
+                "openai-codex-5": {
+                    "type": "oauth",
+                    "access": "a",
+                    "refresh": "r",
+                    "accountId": account_id,
+                    "expires": 1,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    return account_home
+
+
+def codex_home(name, account_id):
+    account_home = home / name
+    account_home.mkdir()
+    if account_id is not None:
+        (account_home / "auth.json").write_text(
+            json.dumps({"tokens": {"account_id": account_id}}),
+            encoding="utf-8",
+        )
+    return account_home
+
+
+author = pi_home("pi-author", "openai-account-B")
+aliased = codex_home("codex-same-account", "openai-account-A")
+distinct = codex_home("codex-distinct-account", "openai-account-B")
+opaque = codex_home("codex-unreadable-account", None)
+meta = {
+    "harness": "pi",
+    "model": "openai-codex-5/gpt-5.5",
+    "author_account_identity": "openai-account-A",
+}
+os.environ["PI_CODING_AGENT_DIR"] = str(author)
+mode_path = home / "config" / "crosscheck-same-model"
+
+
+def write_reviewer(account_home):
+    config_path.write_text(
+        json.dumps(
+            {
+                "reviewers": [
+                    {
+                        "harness": "codex",
+                        "model": "gpt-5.6-sol",
+                        "effort": "xhigh",
+                        "account_home": str(account_home),
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def expect_refused(account_home, expected, label):
+    write_reviewer(account_home)
+    try:
+        module.reviewer_candidates(home, meta)
+    except module.CrosscheckError as exc:
+        assert expected in str(exc), str(exc)
+        print(f"REFUSED {label}")
+        return
+    raise AssertionError(f"{label} was accepted")
+
+
+def expect_refused_exact(account_home, expected, label):
+    write_reviewer(account_home)
+    try:
+        module.reviewer_candidates(home, meta)
+    except module.CrosscheckError as exc:
+        assert str(exc) == expected, str(exc)
+        print(f"REFUSED {label}")
+        return
+    raise AssertionError(f"{label} was accepted")
+
+
+# Absent and explicit-off configuration preserve the shipped cross-model rule.
+expect_refused(distinct, "different model", "same-model-default-off")
+mode_path.write_text("off\n", encoding="utf-8")
+expect_refused(distinct, "different model", "same-model-explicit-off")
+
+meta["model"] = "openai-codex-5/gpt-5.6-sol"
+mode_path.write_text("on\n", encoding="utf-8")
+expect_refused(aliased, "proven-separate account", "same-upstream-account")
+expect_refused(opaque, "proven-separate account", "unreadable-reviewer-account")
+
+recorded_identity = meta.pop("author_account_identity")
+expect_refused_exact(
+    distinct,
+    "AUTHOR IDENTITY UNKNOWABLE: same-model review for a structurally unrouted "
+    "Pi author requires launch-bound author_account_identity metadata; this "
+    "missing launch-bound metadata is an author-proof failure, not a "
+    "reviewer-roster failure",
+    "missing-launch-identity",
+)
+meta["author_account_identity"] = recorded_identity
+
+write_reviewer(distinct)
+selected = module.reviewer_candidates(home, meta)[0]
+assert selected["account_home"] == str(distinct.resolve()), selected
+assert selected["author_account_identity"] == "openai-account-A", selected
+assert selected["model_independence"] == "same-model", selected
+print("SELECTED same-model-distinct-account")
+
+mode_path.write_text("enabled\n", encoding="utf-8")
+expect_refused(distinct, "must contain exactly 'on' or 'off'", "invalid-mode")
+PY
+  pass "same-model opt-in preserves mandatory executing-account separation"
 }
 
 test_openai_backed_reviewer_proves_account_separation() {
@@ -1887,7 +2163,67 @@ test_clear_review_uses_policy_contract() {
     "PR claims were not delimited as untrusted data"
   assert_grep 'Do not spend this bounded independent-review run repeating the full suite' "$case_dir/prompt.log" \
     "reviewer was not directed toward focused evidence"
+  assert_no_grep 'SAME-MODEL REVIEW' "$case_dir/prompt.log" \
+    "an ordinary cross-model review received the reduced-independence prompt"
   pass "clear review uses the observed policy-grade Codex invocation"
+}
+
+test_same_model_review_is_adversarial_and_durable() {
+  local record case_dir base head output
+  record=$(make_case same-model-adversarial-evidence)
+  IFS=$'\t' read -r case_dir base head <<< "$record"
+  mkdir -p "$case_dir/home/config"
+  printf 'on\n' > "$case_dir/home/config/crosscheck-same-model"
+  printf '%s\n' \
+    '{"openai-codex-5":{"type":"oauth","access":"test-access","refresh":"test-refresh","expires":4102444800000,"accountId":"test-author-account"}}' \
+    > "$case_dir/author-home/auth.json"
+  sed -i.bak \
+    -e 's/harness=codex/harness=pi/' \
+    -e 's#model=gpt-5.5#model=openai-codex-5/gpt-5.6-sol#' \
+    -e '/^account_home=/d' \
+    "$case_dir/state/task-x1.meta"
+  rm "$case_dir/state/task-x1.meta.bak"
+  printf 'author_account_identity=test-author-account\n' \
+    >> "$case_dir/state/task-x1.meta"
+
+  printf '%s\n' \
+    '{"openai-codex-5":{"type":"oauth","access":"test-access","refresh":"test-refresh","expires":4102444800000,"accountId":"test-reviewer-account"}}' \
+    > "$case_dir/pi-home/auth.json"
+  output=$(PI_CODING_AGENT_DIR="$case_dir/pi-home" run_case "$case_dir" "$base" "$head" clear run) \
+    || fail "same-model reviewer on a different account did not complete"
+  assert_contains "$output" 'crosscheck clear' \
+    "same-model reviewer did not produce a verdict"
+  assert_grep 'SAME-MODEL REVIEW - REDUCED MODEL INDEPENDENCE' \
+    "$case_dir/prompt.log" \
+    "same-model review did not visibly announce reduced model independence"
+  assert_grep "may share the author's blind spots and priors" \
+    "$case_dir/prompt.log" \
+    "same-model review did not name the shared-blind-spot risk"
+  assert_grep 'attack the change adversarially, try to falsify' \
+    "$case_dir/prompt.log" \
+    "same-model review was not directed to falsify the author"
+  assert_grep 'default to reporting a finding when uncertain' \
+    "$case_dir/prompt.log" \
+    "same-model review was not biased toward reporting uncertainty"
+  "$CROSSCHECK_PYTHON" - \
+    "$case_dir/data/task-x1/crosscheck-ledger.json" \
+    "$case_dir/data/task-x1/crosscheck.md" <<'PY' \
+    || fail "same-model evidence did not remain explicit in both durable surfaces"
+import json
+from pathlib import Path
+import sys
+
+ledger = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+run = ledger["runs"][-1]
+assert run["state"] == "clear", run
+assert run["reviewer"]["harness"] == "codex", run["reviewer"]
+assert run["reviewer"]["model"] == "gpt-5.6-sol", run["reviewer"]
+assert run["reviewer"]["model_independence"] == "same-model", run["reviewer"]
+report = Path(sys.argv[2]).read_text(encoding="utf-8")
+assert "Review mode: **SAME-MODEL**" in report, report
+assert "account separation remained mandatory" in report, report
+PY
+  pass "same-model review uses an adversarial prompt and records reduced independence"
 }
 
 test_empty_runtime_overrides_use_home_defaults() {
@@ -2377,6 +2713,260 @@ assert proof["mutated_files"] == ["app.txt"]
 ' "$case_dir/data/task-x1/crosscheck-ledger.json" \
     || fail "mutation proof execution was not durably recorded"
   pass "verified-fixed requires a passing named test that fails after implementation mutation"
+}
+
+test_typescript_jest_mutation_proof_can_clear() {
+  local record case_dir base head
+  record=$(make_case typescript-jest-clear)
+  IFS=$'\t' read -r case_dir base head <<< "$record"
+  seed_javascript_open_ledger "$case_dir" "$head"
+  run_case "$case_dir" "$base" "$head" verified-fixed-jest run \
+    > "$case_dir/out" 2> "$case_dir/err" \
+    || fail "adequately covered TypeScript mutation did not clear: $(cat "$case_dir/err")"
+  "$CROSSCHECK_PYTHON" - "$case_dir/data/task-x1/crosscheck-ledger.json" <<'PY' \
+    || fail "Jest mutation proof was not durably certified"
+import json
+from pathlib import Path
+import sys
+
+ledger = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+finding = ledger["findings"][0]
+proof = finding["history"][-1]["proof"]
+assert finding["lifecycle"] == "verified-fixed", finding
+assert proof["test_invocation"] == {"runner": "jest", "arguments": []}, proof
+assert proof["mutated_files"] == ["apps/web-app/src/preview.ts"], proof
+assert proof["baseline_exit"] == 0 and proof["mutated_exit"] == 1, proof
+assert '"numTotalTests":1' in proof["baseline_output"], proof
+assert '"numFailedTests":1' in proof["mutated_output"], proof
+assert ledger["runs"][-1]["state"] == "clear", ledger["runs"][-1]
+PY
+  pass "a package-governed Jest test can certify a TypeScript mutation"
+}
+
+test_preexisting_jest_runner_cannot_certify() {
+  local record case_dir base head rc
+  record=$(make_case preexisting-jest-runner)
+  IFS=$'\t' read -r case_dir base head <<< "$record"
+  mkdir -p "$case_dir/repo/apps/web-app/node_modules/.bin"
+  printf '#!/usr/bin/env bash\nprintf '\''%%s\\n'\'' '\''{"numTotalTests":1,"numFailedTests":0}'\''\n' \
+    > "$case_dir/repo/apps/web-app/node_modules/.bin/jest"
+  chmod +x "$case_dir/repo/apps/web-app/node_modules/.bin/jest"
+  git -C "$case_dir/repo" add -f apps/web-app/node_modules/.bin/jest
+  git -C "$case_dir/repo" commit -qm "commit forged Jest runner"
+  head=$(git -C "$case_dir/repo" rev-parse HEAD)
+  git -C "$case_dir/repo" update-ref refs/pull/72/head "$head"
+  seed_javascript_open_ledger "$case_dir" "$head"
+  set +e
+  run_case "$case_dir" "$base" "$head" verified-fixed-jest run \
+    > "$case_dir/out" 2> "$case_dir/err"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "preexisting Jest runner"
+  assert_grep 'CROSSCHECK CANNOT-CERTIFY:' "$case_dir/err" \
+    "a preexisting Jest runner was not classified as unavailable proof"
+  assert_grep 'Jest runner preexists lockfile materialization' "$case_dir/err" \
+    "the proof did not reject the committed Jest runner"
+  assert_no_grep 'crosscheck clear' "$case_dir/out" \
+    "a committed Jest-shaped output script certified the mutation"
+  pass "preexisting Jest runners never establish proof provenance"
+}
+
+test_local_fake_jest_package_cannot_certify() {
+  local record case_dir base head rc
+  record=$(make_case local-fake-jest-package)
+  IFS=$'\t' read -r case_dir base head <<< "$record"
+  cat > "$case_dir/repo/apps/web-app/package.json" <<'JSON'
+{"scripts":{"test":"jest"},"engines":{"node":"20.x"},"devDependencies":{"jest":"file:fake-jest"}}
+JSON
+  cat > "$case_dir/repo/apps/web-app/package-lock.json" <<'JSON'
+{"name":"crosscheck-fixture","lockfileVersion":3,"packages":{"":{"devDependencies":{"jest":"file:fake-jest"}},"node_modules/jest":{"resolved":"file:fake-jest","link":true},"fake-jest":{"version":"29.7.0"}}}
+JSON
+  git -C "$case_dir/repo" add apps/web-app/package.json apps/web-app/package-lock.json
+  git -C "$case_dir/repo" commit -qm "route Jest to local fake package"
+  head=$(git -C "$case_dir/repo" rev-parse HEAD)
+  git -C "$case_dir/repo" update-ref refs/pull/72/head "$head"
+  seed_javascript_open_ledger "$case_dir" "$head"
+  set +e
+  run_case "$case_dir" "$base" "$head" verified-fixed-jest run \
+    > "$case_dir/out" 2> "$case_dir/err"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "local fake Jest package"
+  assert_grep 'CROSSCHECK CANNOT-CERTIFY:' "$case_dir/err" \
+    "a local fake Jest package was not classified as unavailable proof"
+  assert_grep 'local, linked, workspace, Git, or URL source' "$case_dir/err" \
+    "the lockfile provenance check did not reject file: Jest"
+  assert_no_grep 'crosscheck clear' "$case_dir/out" \
+    "a local fake Jest package certified the mutation"
+  pass "local fake Jest packages cannot establish registry provenance"
+}
+
+test_local_transitive_jest_package_cannot_certify() {
+  local record case_dir base head rc
+  record=$(make_case local-transitive-jest-package)
+  IFS=$'\t' read -r case_dir base head <<< "$record"
+  cat > "$case_dir/repo/apps/web-app/package.json" <<'JSON'
+{"scripts":{"test":"jest"},"engines":{"node":"20.x"},"devDependencies":{"jest":"29.7.0","jest-cli":"file:fake-jest-cli"}}
+JSON
+  cat > "$case_dir/repo/apps/web-app/package-lock.json" <<'JSON'
+{"name":"crosscheck-fixture","lockfileVersion":3,"packages":{"":{"devDependencies":{"jest":"29.7.0","jest-cli":"file:fake-jest-cli"}},"node_modules/import-local":{"version":"3.1.0","resolved":"https://registry.npmjs.org/import-local/-/import-local-3.1.0.tgz","integrity":"sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==","dev":true},"node_modules/jest":{"version":"29.7.0","resolved":"https://registry.npmjs.org/jest/-/jest-29.7.0.tgz","integrity":"sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==","dev":true,"dependencies":{"import-local":"^3.0.2","jest-cli":"^29.7.0"}},"node_modules/jest-cli":{"version":"29.7.0","resolved":"file:fake-jest-cli","link":true,"dev":true}}}
+JSON
+  git -C "$case_dir/repo" add apps/web-app/package.json apps/web-app/package-lock.json
+  git -C "$case_dir/repo" commit -qm "substitute local Jest CLI dependency"
+  head=$(git -C "$case_dir/repo" rev-parse HEAD)
+  git -C "$case_dir/repo" update-ref refs/pull/72/head "$head"
+  seed_javascript_open_ledger "$case_dir" "$head"
+  set +e
+  run_case "$case_dir" "$base" "$head" verified-fixed-jest run \
+    > "$case_dir/out" 2> "$case_dir/err"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "local transitive Jest package"
+  assert_grep 'CROSSCHECK CANNOT-CERTIFY:' "$case_dir/err" \
+    "a local transitive Jest package was not unavailable proof"
+  assert_grep 'runtime package jest-cli is a local or linked lock entry' "$case_dir/err" \
+    "the authenticated closure did not reject local jest-cli"
+  assert_no_grep 'crosscheck clear' "$case_dir/out" \
+    "a local transitive Jest package forged mutation certification"
+  pass "local transitive Jest packages cannot enter the authenticated closure"
+}
+
+test_jest_runs_under_declared_node_major() {
+  local record case_dir base head node_home
+  record=$(make_case jest-declared-node-path)
+  IFS=$'\t' read -r case_dir base head <<< "$record"
+  cat > "$case_dir/pathbin/node" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = --version ] || exit 92
+printf 'v18.20.0\n'
+SH
+  chmod +x "$case_dir/pathbin/node"
+  node_home="$case_dir/node-home"
+  install_jest_package_manager_fake "$node_home/.nvm/versions/node/v20.11.0/bin"
+  seed_javascript_open_ledger "$case_dir" "$head"
+  HOME="$node_home" run_case "$case_dir" "$base" "$head" verified-fixed-jest run \
+    > "$case_dir/out" 2> "$case_dir/err" \
+    || fail "Jest lost the selected Node PATH after installation: $(cat "$case_dir/err")"
+  assert_grep 'crosscheck clear' "$case_dir/out" \
+    "declared-major Node did not reach baseline and mutated Jest runs"
+  pass "Jest preserves the selected Node path through both proof runs"
+}
+
+test_inadequate_typescript_jest_coverage_stays_blocking() {
+  local record case_dir base head rc
+  record=$(make_case typescript-jest-inadequate)
+  IFS=$'\t' read -r case_dir base head <<< "$record"
+  seed_javascript_open_ledger "$case_dir" "$head"
+  set +e
+  run_case "$case_dir" "$base" "$head" inadequate-jest run \
+    > "$case_dir/out" 2> "$case_dir/err"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "inadequate TypeScript Jest coverage"
+  assert_grep 'CROSSCHECK BLOCKING:' "$case_dir/err" \
+    "a passing mutated Jest test was not reported as blocking"
+  "$CROSSCHECK_PYTHON" - "$case_dir/data/task-x1/crosscheck-ledger.json" <<'PY' \
+    || fail "inadequate Jest coverage did not remain a durable blocker"
+import json
+from pathlib import Path
+import sys
+
+ledger = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+finding = ledger["findings"][0]
+event = finding["history"][-1]
+assert finding["lifecycle"] == "claimed-fixed", finding
+assert event["status"] == "claimed-fixed", event
+assert event["proof"]["mutated_exit"] == 0, event
+assert "named Jest test still passes" in event["note"], event
+assert ledger["runs"][-1]["state"] == "blocking", ledger["runs"][-1]
+PY
+  pass "a TypeScript test that misses the mutation remains blocking"
+}
+
+test_typescript_without_usable_route_is_cannot_certify() {
+  local record case_dir base head rc
+  record=$(make_case typescript-no-route)
+  IFS=$'\t' read -r case_dir base head <<< "$record"
+  cat > "$case_dir/repo/apps/web-app/package.json" <<'JSON'
+{"scripts":{"test":"vitest"},"devDependencies":{"vitest":"2.1.0"}}
+JSON
+  git -C "$case_dir/repo" add apps/web-app/package.json
+  git -C "$case_dir/repo" commit -qm "switch fixture to unsupported test route"
+  head=$(git -C "$case_dir/repo" rev-parse HEAD)
+  git -C "$case_dir/repo" update-ref refs/pull/72/head "$head"
+  seed_javascript_open_ledger "$case_dir" "$head"
+  set +e
+  run_case "$case_dir" "$base" "$head" no-route-jest run \
+    > "$case_dir/out" 2> "$case_dir/err"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "TypeScript mutation with no usable certification route"
+  assert_grep 'CROSSCHECK CANNOT-CERTIFY:' "$case_dir/err" \
+    "an unavailable governed route was mislabeled as a review verdict"
+  assert_no_grep 'crosscheck clear' "$case_dir/out" \
+    "a missing TypeScript certification route silently cleared"
+  "$CROSSCHECK_PYTHON" - \
+    "$case_dir/data/task-x1/crosscheck-ledger.json" \
+    "$case_dir/data/task-x1/crosscheck.md" <<'PY' \
+    || fail "cannot-certify outcome was not durable and explicit"
+import json
+from pathlib import Path
+import sys
+
+ledger = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+assert ledger["findings"][0]["lifecycle"] == "open", ledger["findings"][0]
+assert ledger["runs"][-1]["state"] == "cannot-certify", ledger["runs"][-1]
+report = Path(sys.argv[2]).read_text(encoding="utf-8")
+assert "State: **CANNOT-CERTIFY**" in report, report
+assert "no trustworthy mutation-certification route" in report, report
+PY
+  pass "an unavailable language-governed route reports CANNOT-CERTIFY and never clears"
+}
+
+test_python_mutation_proof_is_byte_exact() {
+  local record case_dir base head
+  record=$(make_case python-byte-exact)
+  IFS=$'\t' read -r case_dir base head <<< "$record"
+  seed_open_ledger "$case_dir" "$head"
+  run_case "$case_dir" "$base" "$head" verified-fixed run \
+    > "$case_dir/out" 2> "$case_dir/err" \
+    || fail "existing Python mutation proof changed outcome"
+  "$CROSSCHECK_PYTHON" - "$case_dir/data/task-x1/crosscheck-ledger.json" <<'PY' \
+    || fail "Python mutation evidence changed bytes"
+import json
+from pathlib import Path
+import re
+import sys
+
+ledger = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+proof = ledger["findings"][0]["history"][-1]["proof"]
+assert proof["baseline_output"] == proof["mutated_output"], proof
+proof["baseline_output"] = re.sub(
+    r"^configfile: .*/pytest[.]ini\n$",
+    "configfile: <gate>/pytest.ini\n",
+    proof["baseline_output"],
+)
+proof["mutated_output"] = re.sub(
+    r"^configfile: .*/pytest[.]ini\n$",
+    "configfile: <gate>/pytest.ini\n",
+    proof["mutated_output"],
+)
+expected = {
+    "test_path": "tests/regression.test.sh",
+    "test_invocation": {"runner": "pytest", "arguments": []},
+    "mutation_patch_sha256": "61164e8bd68046f78edc529f817059d06c9f4fb80ba7ca33dc242ba18634660c",
+    "mutated_files": ["app.txt"],
+    "baseline_exit": 0,
+    "mutated_exit": 1,
+    "baseline_output": "configfile: <gate>/pytest.ini\n",
+    "mutated_output": "configfile: <gate>/pytest.ini\n",
+}
+assert json.dumps(proof, sort_keys=True, separators=(",", ":")) == json.dumps(
+    expected, sort_keys=True, separators=(",", ":")
+), proof
+assert ledger["runs"][-1]["state"] == "clear", ledger["runs"][-1]
+PY
+  pass "Python mutation certification remains byte-for-byte unchanged"
 }
 
 test_node_id_selector_clears_a_passing_named_test() {
@@ -3241,22 +3831,88 @@ test_evidence_batch_item_limit_precedes_execution() {
 }
 
 test_evidence_batch_has_aggregate_deadline() {
-  local record case_dir base head rc started elapsed
-  record=$(make_case aggregate-evidence-deadline)
-  IFS=$'\t' read -r case_dir base head <<< "$record"
-  started=$(date +%s)
-  set +e
-  FM_CROSSCHECK_EVIDENCE_TIMEOUT_SECONDS=10 \
-  FM_CROSSCHECK_EVIDENCE_RUN_TIMEOUT_SECONDS=1 \
-    run_case "$case_dir" "$base" "$head" slow-reproduction run \
-      > "$case_dir/out" 2> "$case_dir/err"
-  rc=$?
-  set -e
-  elapsed=$(($(date +%s) - started))
-  expect_code 1 "$rc" "aggregate evidence deadline"
-  [ "$elapsed" -lt 10 ] || fail "aggregate evidence deadline took ${elapsed}s"
-  assert_grep 'timed out' "$case_dir/err" \
-    "aggregate evidence deadline did not block loudly"
+  local case_dir
+  case_dir="$TMP_ROOT/aggregate-evidence-deadline"
+  mkdir -p "$case_dir/.crosscheck/reproductions" "$case_dir/proofs"
+  printf '%s\n' 'receipt BASE HEAD EXECUTION-HOME ACCOUNT-HOME' \
+    > "$case_dir/.crosscheck/reproductions/receipt.txt"
+  "$CROSSCHECK_PYTHON" - "$CROSSCHECK_PY" "$case_dir" <<'PY' \
+    || fail "aggregate evidence deadline was not shared across executions"
+import importlib.util
+from pathlib import Path
+import sys
+
+spec = importlib.util.spec_from_file_location("fm_crosscheck", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(module)
+
+clock = [100.0]
+deadlines = []
+module.time.monotonic = lambda: clock[0]
+module.evidence_run_timeout = lambda: 1
+
+def execute_reproduction(_value, _review_dir, label, deadline):
+    deadlines.append(deadline)
+    if len(deadlines) == 1:
+        assert module.evidence_command_timeout(deadline, 10, label) == 1
+        clock[0] = deadline + 0.001
+        return {"executed": True}
+    module.evidence_command_timeout(deadline, 10, label)
+    raise AssertionError("expired aggregate deadline was accepted")
+
+module.execute_reproduction = execute_reproduction
+case_dir = Path(sys.argv[2])
+ledger = {
+    "findings": [{
+        "id": "cc-aaaaaaaaaaaa",
+        "lifecycle": "open",
+        "citations": [],
+        "history": [],
+    }],
+    "runs": [],
+}
+review = {
+    "executed_reproduction": {
+        "receipt_path": ".crosscheck/reproductions/receipt.txt",
+        "receipt_contains": "receipt",
+        "test_path": "tests/example.test.sh",
+        "command": "true",
+        "expected_exit": 0,
+        "output_contains": "ok",
+    },
+    "finding_updates": [{
+        "id": "cc-aaaaaaaaaaaa",
+        "status": "open",
+        "note": "still open",
+        "reproduction": {},
+        "mutation_proof": None,
+        "equivalent_to": None,
+    }],
+    "new_findings": [],
+    "suspicions": [],
+    "summary": "deadline test",
+    "citations": [],
+}
+snapshot = {
+    "base_sha": "BASE",
+    "head_sha": "HEAD",
+    "claims_sha256": "claims",
+}
+config = {
+    "execution_home": "EXECUTION-HOME",
+    "executing_account_home": "ACCOUNT-HOME",
+}
+try:
+    module.apply_review(ledger, review, case_dir, case_dir / "proofs", snapshot, config)
+except module.CrosscheckError as exc:
+    assert str(exc) == (
+        "evidence batch timed out before finding_updates[0].reproduction"
+    )
+else:
+    raise AssertionError("aggregate evidence deadline did not block")
+assert deadlines == [101.0, 101.0]
+PY
   pass "all reviewer evidence shares one bounded execution deadline"
 }
 
@@ -3823,7 +4479,8 @@ test_pytest_runner_resolves_through_a_uv_aware_ladder() {
   : > "$case_dir/mono/README.md"
   : > "$case_dir/plain/tests/test_thing.py"
   printf '#!/bin/bash\nexit 0\n' > "$case_dir/bin/pytest"
-  chmod +x "$case_dir/bin/pytest"
+  printf '#!/bin/bash\nexit 1\n' > "$case_dir/bin/python3"
+  chmod +x "$case_dir/bin/pytest" "$case_dir/bin/python3"
 
   PATH="$case_dir/bin:$PATH" "$CROSSCHECK_PYTHON" - "$CROSSCHECK_PY" "$case_dir" <<'PY' \
     || fail "the pytest runner ladder did not resolve as specified"
@@ -4044,6 +4701,7 @@ test_verify_rechecks_live_head_and_claims() {
 if [ -n "${FM_TEST_CASE:-}" ]; then
   case "$FM_TEST_CASE" in
     test_reviewer_policy_profiles_and_independence|\
+    test_same_model_relaxation_requires_proven_separate_account|\
     test_openai_backed_reviewer_proves_account_separation|\
     test_anthropic_backed_reviewer_proves_account_separation|\
     test_unrouted_lane_compares_provider_not_harness|\
@@ -4055,6 +4713,7 @@ if [ -n "${FM_TEST_CASE:-}" ]; then
     test_pi_reviewer_executes_bound_policy_profile|\
     test_pi_reviewer_failures_are_tool_failures|\
     test_clear_review_uses_policy_contract|\
+    test_same_model_review_is_adversarial_and_durable|\
     test_empty_runtime_overrides_use_home_defaults|\
     test_empty_environment_fallback_is_generic|\
     test_set_runtime_overrides_remain_authoritative|\
@@ -4066,12 +4725,21 @@ if [ -n "${FM_TEST_CASE:-}" ]; then
     test_reviewer_execution_home_drift_fails_closed|\
     test_unrouted_author_uses_cross_provider_independence|\
     test_unrouted_author_without_account_proof_fails_closed|\
+    test_account_less_known_provider_lane_is_reviewable|\
     test_missing_author_identity_is_a_named_tool_failure|\
     test_launcher_requires_supported_python|\
     test_completed_reviewer_suspicion_is_blocking|\
     test_reading_only_suspicion_is_a_tool_failure|\
     test_new_finding_requires_executed_reproduction|\
     test_silence_never_closes_prior_finding|\
+    test_typescript_jest_mutation_proof_can_clear|\
+    test_preexisting_jest_runner_cannot_certify|\
+    test_local_fake_jest_package_cannot_certify|\
+    test_local_transitive_jest_package_cannot_certify|\
+    test_jest_runs_under_declared_node_major|\
+    test_inadequate_typescript_jest_coverage_stays_blocking|\
+    test_typescript_without_usable_route_is_cannot_certify|\
+    test_python_mutation_proof_is_byte_exact|\
     test_baseline_readable_state_is_destroyed_before_mutation|\
     test_mutation_is_bound_to_cited_non_test_implementation|\
     test_reviewer_output_uses_separate_capture_limit|\
@@ -4110,6 +4778,28 @@ if [ -n "${FM_TEST_CASE:-}" ]; then
   esac
 fi
 
+if [ "${FM_TEST_FOCUSED:-}" = review-safety-findings ]; then
+  bash -n "$ROOT/bin/fm-spawn.sh" \
+    || fail "Pi launch identity capture introduced invalid spawn syntax"
+  FM_TEST_FOCUSED=pi-author-snapshot "$ROOT/tests/fm-spawn-dispatch-profile.test.sh" \
+    || fail "Pi launch identity snapshot regressions failed"
+  test_same_model_relaxation_requires_proven_separate_account
+  test_same_model_review_is_adversarial_and_durable
+  test_typescript_jest_mutation_proof_can_clear
+  test_preexisting_jest_runner_cannot_certify
+  test_local_fake_jest_package_cannot_certify
+  test_local_transitive_jest_package_cannot_certify
+  test_jest_runs_under_declared_node_major
+  test_inadequate_typescript_jest_coverage_stays_blocking
+  exit 0
+fi
+
+if [ "${FM_TEST_FOCUSED:-}" = review-jest-runtime-closure ]; then
+  test_typescript_jest_mutation_proof_can_clear
+  test_local_transitive_jest_package_cannot_certify
+  exit 0
+fi
+
 if [ "${FM_TEST_FOCUSED:-}" = review-round-3 ]; then
   test_verified_fix_executes_mutation_proof
   test_baseline_readable_state_is_destroyed_before_mutation
@@ -4124,6 +4814,7 @@ fi
 
 test_launcher_requires_supported_python
 test_reviewer_policy_profiles_and_independence
+test_same_model_relaxation_requires_proven_separate_account
 test_openai_backed_reviewer_proves_account_separation
 test_anthropic_backed_reviewer_proves_account_separation
 test_unrouted_lane_compares_provider_not_harness
@@ -4135,6 +4826,7 @@ test_pi_reviewer_pins_sibling_node_before_path
 test_pi_reviewer_executes_bound_policy_profile
 test_pi_reviewer_failures_are_tool_failures
 test_clear_review_uses_policy_contract
+test_same_model_review_is_adversarial_and_durable
 test_empty_runtime_overrides_use_home_defaults
 test_empty_environment_fallback_is_generic
 test_set_runtime_overrides_remain_authoritative
@@ -4151,6 +4843,14 @@ test_account_less_known_provider_lane_is_reviewable
 test_new_finding_requires_executed_reproduction
 test_silence_never_closes_prior_finding
 test_verified_fix_executes_mutation_proof
+test_typescript_jest_mutation_proof_can_clear
+test_preexisting_jest_runner_cannot_certify
+test_local_fake_jest_package_cannot_certify
+test_local_transitive_jest_package_cannot_certify
+test_jest_runs_under_declared_node_major
+test_inadequate_typescript_jest_coverage_stays_blocking
+test_typescript_without_usable_route_is_cannot_certify
+test_python_mutation_proof_is_byte_exact
 test_node_id_selector_clears_a_passing_named_test
 test_absent_runner_is_never_a_test_outcome
 test_unclassified_runner_cannot_clear_a_finding

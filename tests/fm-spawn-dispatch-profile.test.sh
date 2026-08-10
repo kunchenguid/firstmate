@@ -30,9 +30,18 @@ case "$*" in
     ;;
 esac
 case "${1:-}" in
-  has-session|display-message) printf 'firstmate\n'; exit 0 ;;
+  has-session)
+    if [ -n "${FM_FAKE_ENDPOINT_ABSENT_ONCE:-}" ] \
+      && [ -f "$FM_FAKE_ENDPOINT_ABSENT_ONCE" ]; then
+      rm -f "$FM_FAKE_ENDPOINT_ABSENT_ONCE"
+      exit 1
+    fi
+    printf 'firstmate\n'
+    exit 0
+    ;;
+  display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
-  has-session|new-session|new-window|kill-window) exit 0 ;;
+  new-session|new-window|kill-window) exit 0 ;;
   send-keys)
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
       prev=
@@ -67,7 +76,9 @@ case "${1:-}" in
     pool=${FM_FAKE_TREEHOUSE_POOL:?}
     target="$pool/$holder/project"
     mkdir -p "$(dirname "$target")"
-    git -C "$PWD" worktree add --quiet --detach "$target" HEAD || exit 1
+    if ! git -C "$target" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+      git -C "$PWD" worktree add --quiet --detach "$target" HEAD || exit 1
+    fi
     target=$(cd "$target" && pwd -P) || exit 1
     python3 - "$pool/treehouse-state.json" "$target" "$holder" <<'PY'
 import json
@@ -187,6 +198,16 @@ assert_meta_profile() {
   assert_grep "harness=$harness" "$meta" "meta missing harness=$harness"
   assert_grep "model=$model" "$meta" "meta missing model=$model"
   assert_grep "effort=$effort" "$meta" "meta missing effort=$effort"
+}
+
+make_pi_account_source() {
+  local source=$1 account_id=$2
+  mkdir -p "$source/extensions"
+  printf '%s\n' \
+    "{\"openai-codex-5\":{\"type\":\"oauth\",\"access\":\"a\",\"refresh\":\"r\",\"expires\":4102444800000,\"accountId\":\"$account_id\"}}" \
+    > "$source/auth.json"
+  printf '%s\n' '{"defaultProvider":"openai-codex-5"}' > "$source/settings.json"
+  printf '%s\n' 'export default {};' > "$source/extensions/provider.ts"
 }
 
 test_no_profile_resolves_claude_model_anchor() {
@@ -514,6 +535,74 @@ test_pi_secondmate_approves_without_excluding_tools() {
   pass "pi secondmate launches carry --approve but deliberately keep ask_question"
 }
 
+test_pi_author_account_snapshot_binds_launch_and_recovery() {
+  local rec id source out status launch meta tasktmp private count absent_marker
+  id=profile-pi-author-snapshot-z23
+  rec=$(make_spawn_case profile-pi-author-snapshot pi "$id")
+  read_case_record "$rec"
+  source="$CASE_DIR/pi-source"
+  make_pi_account_source "$source" account-A
+
+  out=$(PI_CODING_AGENT_DIR="$source" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$PROJ_DIR" --model openai-codex-5/gpt-5.6-sol --effort xhigh)
+  status=$?
+  expect_code 0 "$status" "Pi author snapshot spawn should succeed: $out"
+  meta="$HOME_DIR/state/$id.meta"
+  tasktmp=$(sed -n 's/^tasktmp=//p' "$meta")
+  private="$tasktmp/pi-author-agent"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "PI_CODING_AGENT_DIR='$private' pi --approve" \
+    "Pi launch did not bind the task-private author account"
+  assert_grep 'author_account_identity=account-A' "$meta" \
+    "Pi launch did not record the identity derived from its private snapshot"
+  python3 - "$private" account-A <<'PY' \
+    || fail "Pi task-private snapshot contents or permissions are invalid"
+import json
+from pathlib import Path
+import stat
+import sys
+
+root = Path(sys.argv[1])
+auth = root / "auth.json"
+assert stat.S_IMODE(root.stat().st_mode) == 0o700
+assert stat.S_IMODE(auth.stat().st_mode) == 0o600
+value = json.loads(auth.read_text(encoding="utf-8"))
+assert value["openai-codex-5"]["accountId"] == sys.argv[2]
+assert (root / "extensions" / "provider.ts").is_file()
+assert (root / "sessions").is_dir()
+PY
+
+  absent_marker="$CASE_DIR/endpoint-absent-once"
+  : > "$absent_marker"
+  out=$(FM_FAKE_ENDPOINT_ABSENT_ONCE="$absent_marker" PI_CODING_AGENT_DIR="$source" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$PROJ_DIR" --model openai-codex-5/gpt-5.6-sol --effort xhigh)
+  status=$?
+  expect_code 0 "$status" "Pi author snapshot recovery should succeed: $out"
+  count=$(grep -c '^author_account_identity=' "$meta" || true)
+  [ "$count" -eq 1 ] \
+    || fail "Pi metadata recovery did not preserve exactly one owned author identity"
+  assert_grep 'author_account_identity=account-A' "$meta" \
+    "Pi metadata recovery changed its launch-bound author identity"
+
+  make_pi_account_source "$source" account-B
+  : > "$absent_marker"
+  out=$(FM_FAKE_ENDPOINT_ABSENT_ONCE="$absent_marker" PI_CODING_AGENT_DIR="$source" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$PROJ_DIR" --model openai-codex-5/gpt-5.6-sol --effort xhigh)
+  status=$?
+  expect_code 0 "$status" "Pi account-change recovery should remain cross-provider-only: $out"
+  assert_no_grep 'author_account_identity=' "$meta" \
+    "a task spanning two Pi accounts retained same-provider eligibility"
+  tasktmp=$(sed -n 's/^tasktmp=//p' "$meta")
+  private="$tasktmp/pi-author-agent"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "PI_CODING_AGENT_DIR='$private' pi --approve" \
+    "Pi account-change recovery launched outside its private snapshot"
+  pass "Pi launches and recoveries bind one private author identity"
+}
+
 test_batch_forwards_shared_profile_flags() {
   local rec id1 id2 out status
   id1=profile-batch-a-z9
@@ -558,6 +647,11 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
   pass "active crew-dispatch profile does not block secondmate launches"
 }
 
+if [ "${FM_TEST_FOCUSED:-}" = pi-author-snapshot ]; then
+  test_pi_author_account_snapshot_binds_launch_and_recovery
+  exit 0
+fi
+
 test_no_profile_resolves_claude_model_anchor
 test_active_dispatch_profile_requires_explicit_harness_for_ship
 test_active_dispatch_profile_requires_explicit_harness_for_scout
@@ -575,6 +669,7 @@ test_opencode_threads_model_and_ignores_effort_axis
 test_pi_omits_invalid_max_effort
 test_pi_crewmate_carries_autonomy_flags
 test_pi_secondmate_approves_without_excluding_tools
+test_pi_author_account_snapshot_binds_launch_and_recovery
 test_batch_forwards_shared_profile_flags
 test_active_dispatch_profile_does_not_block_secondmate_launch
 

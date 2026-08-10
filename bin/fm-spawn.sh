@@ -2527,7 +2527,7 @@ launch_template() {
         # revisit this if pi ever ships a question tool that can park a secondmate -
         # fm-watch.sh skips stale-pane wakes for kind=secondmate, so a parked
         # secondmate would not trip stale detection.
-        printf '%s' 'pi --approve __MODELFLAG____EFFORTFLAG__-e __PITURNEND__ -e __PIWATCH__ "$(cat __BRIEF__)"'
+        printf '%s' '__AGENT__ --approve __MODELFLAG____EFFORTFLAG__-e __PITURNEND__ -e __PIWATCH__ "$(cat __BRIEF__)"'
       else
         # --exclude-tools is a plain denylist over built-in, extension, and custom
         # tool names (pi 0.84.0 filters it as a Set, ignoring names that are not
@@ -2535,7 +2535,7 @@ launch_template() {
         # crewmate's contract is to run autonomously and report through its status
         # file, so a tool that halts the run to ask a question nobody is watching is
         # never the right behavior here.
-        printf '%s' 'pi --approve --exclude-tools ask_question __MODELFLAG____EFFORTFLAG__-e __PIEXT__ "$(cat __BRIEF__)"'
+        printf '%s' '__AGENT__ --approve --exclude-tools ask_question __MODELFLAG____EFFORTFLAG__-e __PIEXT__ "$(cat __BRIEF__)"'
       fi
       ;;
     # grok (Grok Build TUI): a positional prompt starts the supervised interactive
@@ -3505,6 +3505,9 @@ finally:
   BRIEF=$CONTINUATION_PACKET
 fi
 
+PI_AUTHOR_ACCOUNT_IDENTITY=
+PI_AUTHOR_ACCOUNT_HOME=
+
 # prepare_launch_environment: every step the launch-command construction below
 # The PATH a crewmate's tool commands run with. A harness executes tool commands
 # through a NON-interactive shell, and on this class of host that shell reads only
@@ -3587,6 +3590,28 @@ persist_worktree_acquisition_phases || {
   echo "error: cannot durably record task temp creation for $ID" >&2
   exit 1
 }
+if [ "$HARNESS" = pi ] && [ "$RAW_LAUNCH" != 1 ]; then
+  PI_AUTHOR_SOURCE_HOME=${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}
+  PI_AUTHOR_ACCOUNT_HOME="$TASK_TMP/pi-author-agent"
+  if PI_CAPTURED_ACCOUNT_IDENTITY=$(
+    "$SCRIPT_DIR/fm-pi-author-snapshot.py" \
+      "${MODEL:-default}" "$PI_AUTHOR_SOURCE_HOME" "$PI_AUTHOR_ACCOUNT_HOME"
+  ); then
+    if [ "$SPAWN_META_PRESENT" = 1 ]; then
+      PI_RECORDED_ACCOUNT_IDENTITY=$(spawn_preflight_meta_value author_account_identity)
+      if [ -n "$PI_RECORDED_ACCOUNT_IDENTITY" ] \
+        && [ "$PI_RECORDED_ACCOUNT_IDENTITY" = "$PI_CAPTURED_ACCOUNT_IDENTITY" ]; then
+        PI_AUTHOR_ACCOUNT_IDENTITY=$PI_CAPTURED_ACCOUNT_IDENTITY
+      fi
+    else
+      PI_AUTHOR_ACCOUNT_IDENTITY=$PI_CAPTURED_ACCOUNT_IDENTITY
+    fi
+  else
+    PI_AUTHOR_ACCOUNT_HOME=
+    PI_AUTHOR_ACCOUNT_IDENTITY=
+    echo "WARNING: Pi author identity could not be bound to a task-private account; same-provider Crosscheck review will remain ineligible for $ID" >&2
+  fi
+fi
 # herdr sets GOTMPDIR natively at agent start. Every other backend exports it into
 # the pane shell just before the launch line, further down. CREW_PATH rides the same
 # two channels for the same reason.
@@ -3775,6 +3800,9 @@ if [ "$RESUME_ACCOUNT" = 1 ]; then
   esac
 fi
 AGENT_COMMAND=$HARNESS
+if [ "$HARNESS" = pi ] && [ -n "$PI_AUTHOR_ACCOUNT_HOME" ]; then
+  AGENT_COMMAND="PI_CODING_AGENT_DIR=$(shell_quote "$PI_AUTHOR_ACCOUNT_HOME") pi"
+fi
 if [ "$DIRECT_ACCOUNT_ROUTING" = 1 ] || [ "$DIRECT_ACCOUNT_SECONDMATE" = 1 ]; then
   # herdr delivers the account directory NATIVELY, as `agent start --env KEY=VALUE`
   # (HERDR_AGENT_ENV below), instead of as a command-scoped shell prefix. Verified
@@ -4165,6 +4193,7 @@ META_TMP=$(mktemp "$STATE/.$ID.meta.XXXXXX") || exit 1
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
   echo "generation_id=$SPAWN_GENERATION_ID"
+  [ -z "$PI_AUTHOR_ACCOUNT_IDENTITY" ] || echo "author_account_identity=$PI_AUTHOR_ACCOUNT_IDENTITY"
   [ -z "${PROVISION_SUMMARY:-}" ] || echo "provision=$PROVISION_SUMMARY"
   [ "$NO_ACCOUNT_ROUTING" != 1 ] || echo "account_routing_emergency_bypass=1"
   [ -z "$BACKLOG_ROW_EXEMPTION" ] || echo "backlog_row_exemption=$BACKLOG_ROW_EXEMPTION"
