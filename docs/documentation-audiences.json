@@ -203,6 +203,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/unattended-session/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/updatefirstmate/SKILL.md",
       "audience": "agent-runtime"
     },

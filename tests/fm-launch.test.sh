@@ -884,8 +884,8 @@ EOF
     "an unattended launch must hand the started session its origin id"
   assert_contains "$sent" "u-test-origin" "the origin id carried into the pane must be the one supplied"
 
-  # Control: absence keeps its meaning. A captain-started launch carries no
-  # marker at all, which is what makes an absent record mean captain-started.
+  # Control: absence keeps its meaning. A captain-started launch hands the pane
+  # no origin id, which is what makes an absent record mean captain-started.
   local h2 f2 s2 e2 l2 sent2
   { read -r h2; read -r f2; read -r s2; read -r e2; } <<EOF
 $(launch_case origin-id-control)
@@ -894,9 +894,80 @@ EOF
   run_launch_cli "$h2" "$f2" "$s2" "$e2" "$l2" -- --entry claude --detach >/dev/null
   sent2=$(grep 'pane send-text' "$l2" | head -1)
   assert_contains "$sent2" "--dangerously-skip-permissions" "the control launch must have reached the pane"
-  assert_not_contains "$sent2" "FM_SESSION_ORIGIN_ID" \
+  assert_not_contains "$sent2" "FM_SESSION_ORIGIN_ID=u-test-origin" \
     "a launch with no origin id must carry no unattended marker"
   pass "scripted: the origin id reaches the started session, and absence carries no marker"
+}
+
+# The pane's shell is a child of the herdr SERVER, and this launcher may be the
+# process that started that server - so an unattended launch's origin id can end
+# up in the server's environment and be inherited by every pane it creates
+# afterwards. A later captain-started session would then claim an origin record
+# and mislabel itself as unattended, which defeats the whole attribution
+# guarantee. This runs the composed launch line the way the pane's shell does,
+# with a leaked id already in that shell's environment, and reads what the
+# harness actually received.
+test_an_inherited_origin_id_never_reaches_a_launch_that_was_not_given_one() {
+  local home fb state execlog herdrlog sent command envlog probe
+  { read -r home; read -r fb; read -r state; read -r execlog; } <<EOF
+$(launch_case origin-id-leak)
+EOF
+  herdrlog="$home/herdr.log"
+  envlog="$home/harness-env.log"
+
+  # A harness stub that reports the origin id it was started with, standing in
+  # for the session that would read FM_SESSION_ORIGIN_ID and claim a record.
+  probe="$home/probe"
+  mkdir -p "$probe"
+  cat > "$probe/claude" <<'SH'
+#!/usr/bin/env bash
+printf 'origin=%s\n' "${FM_SESSION_ORIGIN_ID:-none}" >> "${FM_PROBE_ENV_LOG:?}"
+exit 0
+SH
+  chmod +x "$probe/claude"
+  cat > "$probe/clear" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$probe/clear"
+
+  # The launcher itself is given no origin id, exactly like a captain-started run.
+  run_launch_cli "$home" "$fb" "$state" "$execlog" "$herdrlog" -- --entry claude --detach >/dev/null
+  sent=$(grep 'pane send-text' "$herdrlog" | head -1)
+  command=${sent#herdr pane send-text }
+  command=${command#* }
+  [ -n "$command" ] || fail "the launch never reached the pane, so this case would be vacuous"
+
+  # The pane's shell, with the server's leaked id already in its environment.
+  ( cd "$home" && env PATH="$probe:/usr/bin:/bin" \
+      FM_SESSION_ORIGIN_ID=u-leaked-from-the-server \
+      FM_PROBE_ENV_LOG="$envlog" \
+      bash -c "$command" ) || fail "the composed launch line did not run"
+  assert_grep "origin=none" "$envlog" \
+    "a leaked origin id survived into a launch that was never given one"
+
+  # Control: the same pane shell, the same leaked value, and a launcher that WAS
+  # given an origin id - so the assertion above is about the clearing and not
+  # about a probe that could never have seen a value.
+  local h2 f2 s2 e2 l2 sent2 command2 envlog2
+  { read -r h2; read -r f2; read -r s2; read -r e2; } <<EOF
+$(launch_case origin-id-leak-control)
+EOF
+  l2="$h2/herdr.log"
+  envlog2="$h2/harness-env.log"
+  run_launch_cli "$h2" "$f2" "$s2" "$e2" "$l2" \
+    FM_SESSION_ORIGIN_ID=u-owned-by-this-launch -- --entry claude --detach >/dev/null
+  sent2=$(grep 'pane send-text' "$l2" | head -1)
+  command2=${sent2#herdr pane send-text }
+  command2=${command2#* }
+  ( cd "$h2" && env PATH="$probe:/usr/bin:/bin" \
+      FM_SESSION_ORIGIN_ID=u-leaked-from-the-server \
+      FM_PROBE_ENV_LOG="$envlog2" \
+      bash -c "$command2" ) || fail "the control launch line did not run"
+  assert_grep "origin=u-owned-by-this-launch" "$envlog2" \
+    "the launch that owns an origin id must still deliver it past the clearing"
+
+  pass "scripted: an origin id inherited from the herdr server never relabels a captain-started launch"
 }
 
 # --- run --------------------------------------------------------------------
@@ -936,3 +1007,4 @@ test_entry_flag_selects_by_stable_id_without_consulting_stdin
 test_detach_launches_without_attaching
 test_entry_flag_refuses_unknown_and_unavailable_ids
 test_unattended_origin_id_reaches_the_started_session
+test_an_inherited_origin_id_never_reaches_a_launch_that_was_not_given_one

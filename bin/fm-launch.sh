@@ -692,7 +692,7 @@ wait_for_prompt() {  # <target>
 
 launch_entry() {  # <record>
   local rec=$1 session container seeded ids tab pane
-  local template modelflag effortflag launch target
+  local template modelflag effortflag launch target origin_assign
   entry_split "$rec"
   entry_detail
 
@@ -741,19 +741,22 @@ launch_entry() {  # <record>
   # An unset flag placeholder leaves one trailing space (bin/fm-launch-lib.sh
   # header); cosmetic in a shell command, trimmed here.
   launch=${launch%"${launch##*[![:space:]]}"}
-  # The pane's shell is a child of the herdr SERVER, which this launcher may
-  # itself have started - so it can inherit this process's overrides. Clear them
-  # and pin FM_HOME explicitly, the same shape bin/fm-spawn.sh uses to launch a
-  # firstmate primary in a secondmate home.
-  launch="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME=$(shell_quote "$FM_HOME") $launch"
   # An unattended start hands the session the id of the origin record written for
   # it, which is the only way that session can prove which record is its own and
-  # claim it (bin/fm-unattended-session.sh). Absent - every captain-started
-  # session - this adds nothing, so an attended launch is byte-identical to
-  # before and absence keeps its meaning: no marker means captain-started.
+  # claim it (bin/fm-unattended-session.sh). It is set only for the launch that
+  # owns it, AFTER the clearing prefix below, so a value inherited from the herdr
+  # server can never survive into a launch that was not given one: absence keeps
+  # its meaning, and no marker means captain-started.
+  origin_assign=""
   if [ -n "${FM_SESSION_ORIGIN_ID:-}" ]; then
-    launch="FM_SESSION_ORIGIN_ID=$(shell_quote "$FM_SESSION_ORIGIN_ID") $launch"
+    origin_assign="FM_SESSION_ORIGIN_ID=$(shell_quote "$FM_SESSION_ORIGIN_ID") "
   fi
+  # The pane's shell is a child of the herdr SERVER, which this launcher may
+  # itself have started - so it can inherit this process's overrides, including
+  # the origin id of whichever launch happened to boot that server. Clear them
+  # and pin FM_HOME explicitly, the same shape bin/fm-spawn.sh uses to launch a
+  # firstmate primary in a secondmate home.
+  launch="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_SESSION_ORIGIN_ID= ${origin_assign}FM_HOME=$(shell_quote "$FM_HOME") $launch"
   vlog "launch: $launch"
 
   fm_backend_herdr_server_ensure "$session" \

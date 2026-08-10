@@ -122,6 +122,35 @@ arm_healthy_watcher() {
   printf '%s\n' "$pid"
 }
 
+# arm_away_supervisor <home>: away mode flagged, with a live process holding the
+# away daemon's single-instance lock under the PRODUCTION process identity, which
+# is the shape bin/fm-supervise-daemon.sh leaves behind. Liveness is decided by a
+# real kill -0 against a real process; only the daemon's name is a fixture.
+#
+# Sets AWAY_DAEMON_PID rather than echoing, for the same reason
+# start_live_harness does: fm_test_reap registers into this shell's arrays.
+AWAY_DAEMON_PID=
+arm_away_supervisor() {
+  local home=$1 state="$1/state" identity
+  mkdir -p "$state"
+  date '+%s' > "$state/.afk"
+  sleep 300 &
+  AWAY_DAEMON_PID=$!
+  fm_test_reap "$AWAY_DAEMON_PID"
+  identity=$(bash -c '. "$1"; fm_pid_identity "$2"' _ "$WAKE_LIB" "$AWAY_DAEMON_PID") \
+    || fail "could not read the fixture away daemon's process identity"
+  mkdir -p "$state/.supervise-daemon.lock"
+  printf '%s\n' "$AWAY_DAEMON_PID" > "$state/.supervise-daemon.lock/pid"
+  printf '%s\n' "$identity" > "$state/.supervise-daemon.lock/pid-identity"
+}
+
+# kill_and_reap <pid>: end a fixture process and wait for it, so the pid names no
+# process at all rather than an unreaped zombie that kill -0 still accepts.
+kill_and_reap() {
+  kill -KILL "$1" 2>/dev/null || true
+  wait "$1" 2>/dev/null || true
+}
+
 # fake_ps <fakebin> : a deterministic process table. The pid named in
 # $FM_FAKE_HARNESS_PID reports as a claude session and terminates the ancestry
 # walk; every other pid reports as an ordinary shell. Any pid listed in
@@ -243,23 +272,16 @@ EOF
   pass "(c) a healthy supervision cycle refuses a second one beside it"
 }
 
-test_start_refuses_under_away_mode_and_while_a_launch_is_in_flight() {
+test_start_refuses_while_a_launch_is_in_flight() {
   local home fakebin launcher log
   IFS='|' read -r home fakebin launcher log <<EOF
-$(new_home away-and-inflight)
+$(new_home inflight)
 EOF
   FM_TEST_LAUNCHER=$launcher FM_TEST_LAUNCH_LOG=$log
   queue_trigger "$home"
 
-  : > "$home/state/.afk"
   us_run "$home" "$fakebin" -- start
-  expect_code 1 "$CODE" "away mode must refuse the start"
-  assert_contains "$OUT" "refuse_away_mode" "the refusal must name away mode"
-  [ ! -s "$log" ] || fail "a start refused for away mode still invoked the launcher"
-
-  rm -f "$home/state/.afk"
-  us_run "$home" "$fakebin" -- start
-  expect_code 0 "$CODE" "clearing away mode must let the start proceed: $OUT"
+  expect_code 0 "$CODE" "the first start must proceed: $OUT"
 
   # The record that start just wrote is still pending, so a second timer firing
   # behind the first must not race it into a second session.
@@ -273,7 +295,126 @@ EOF
   us_run "$home" "$fakebin" FM_UNATTENDED_CLAIM_WINDOW=0 -- start
   expect_code 0 "$CODE" "an expired pending record must not block a later start: $OUT"
 
-  pass "(c) away mode and an in-flight launch each refuse a second session"
+  pass "(c) a launch already in flight refuses a second session"
+}
+
+# --- (c) away mode: three answers about the supervisor, never two ------------
+#
+# The captain ruled on 2026-08-10 that this gate reads the away supervisor's
+# LIVENESS, not the durable flag's presence: observed alive refuses, observed
+# dead allows and says the supervisor died, and could-not-observe refuses under
+# its own token. The three cases below hold those apart, because a gate that
+# answered the same way to all three would pass a presence-only implementation.
+
+test_away_mode_refuses_only_while_its_supervisor_is_alive() {
+  local home fakebin launcher log dead_pid
+  IFS='|' read -r home fakebin launcher log <<EOF
+$(new_home away-live)
+EOF
+  FM_TEST_LAUNCHER=$launcher FM_TEST_LAUNCH_LOG=$log
+  queue_trigger "$home"
+  arm_away_supervisor "$home"
+  dead_pid=$AWAY_DAEMON_PID
+
+  us_run "$home" "$fakebin" -- start
+  expect_code 1 "$CODE" "a live away supervisor must refuse the start"
+  assert_contains "$OUT" "refuse_away_mode" "the refusal must name away mode"
+  assert_contains "$OUT" "$dead_pid" "the refusal must name the supervisor it observed alive"
+  [ ! -s "$log" ] || fail "a start refused for a live away supervisor still invoked the launcher"
+
+  # Control: the flag stays set, the lock keeps naming the same pid and the same
+  # recorded identity, and only the PROCESS dies. The verdict must move with the
+  # process, because the flag is durable and outlives every supervisor that sets
+  # it - the away session that dies and stays down for days is the measured case.
+  kill_and_reap "$dead_pid"
+  [ -f "$home/state/.afk" ] || fail "the fixture cleared the away flag, so the control proves nothing"
+
+  us_run "$home" "$fakebin" -- start
+  expect_code 0 "$CODE" "a dead away supervisor must not refuse the start: $OUT"
+  assert_contains "$OUT" "UNATTENDED_AWAY_SUPERVISOR_DEAD" \
+    "a start that stepped past a dead away supervisor must surface it, not allow silently"
+  assert_contains "$OUT" "fm-supervise-daemon.sh" "the surfaced line must name the daemon that died"
+  assert_contains "$OUT" "pid=$dead_pid" "the surfaced line must name the dead supervisor's recorded pid"
+  assert_contains "$OUT" "last_activity=" "the surfaced line must carry a last-activity time or say it is unreadable"
+  assert_grep "away-supervisor-dead" "$home/state/unattended-sessions.log" \
+    "the dead supervisor left no attribution line, so it stops being attributable afterwards"
+  assert_grep "args=--entry claude --detach" "$log" "the allowed start did not reach the launcher"
+
+  pass "(c) away mode refuses while its supervisor is alive, and steps past it once it is dead"
+}
+
+test_away_supervisor_liveness_that_cannot_be_observed_refuses_distinctly() {
+  local home fakebin launcher log identity
+  IFS='|' read -r home fakebin launcher log <<EOF
+$(new_home away-unknown)
+EOF
+  FM_TEST_LAUNCHER=$launcher FM_TEST_LAUNCH_LOG=$log
+  queue_trigger "$home"
+  arm_away_supervisor "$home"
+  identity=$(cat "$home/state/.supervise-daemon.lock/pid-identity")
+
+  # A lock owner whose pid is live but whose recorded identity is missing: the
+  # daemon cannot be identified without falling back to a process-pattern search,
+  # which would match the wrong process. That is could-not-observe, and it must
+  # refuse under a token that says so rather than under the observed-alive one.
+  rm -f "$home/state/.supervise-daemon.lock/pid-identity"
+  us_run "$home" "$fakebin" -- start
+  expect_code 1 "$CODE" "an unobservable away supervisor must refuse the start"
+  assert_contains "$OUT" "refuse_away_liveness_unknown" \
+    "could-not-observe must refuse under its own token"
+  assert_not_contains "$OUT" "refuse_away_mode" \
+    "could-not-observe must not read as an observed-alive refusal"
+  assert_contains "$OUT" "identity" "the refusal must name what could not be determined"
+  [ ! -s "$log" ] || fail "an unobservable away supervisor still invoked the launcher"
+
+  # A lock owner whose pid is not a number names no process to ask about either.
+  printf 'not-a-pid\n' > "$home/state/.supervise-daemon.lock/pid"
+  us_run "$home" "$fakebin" -- start
+  expect_code 1 "$CODE" "a lock recording no readable pid must refuse the start"
+  assert_contains "$OUT" "refuse_away_liveness_unknown" \
+    "an unreadable pid must refuse as could-not-observe"
+  assert_not_contains "$OUT" "refuse_away_mode" \
+    "an unreadable pid must not be narrowed into observed-alive"
+
+  # Control: restore exactly what was removed - the same live pid and the
+  # identity it was recorded under - and the same call becomes observed-alive.
+  # Could-not-observe is therefore its own answer, not a relabelled one.
+  printf '%s\n' "$AWAY_DAEMON_PID" > "$home/state/.supervise-daemon.lock/pid"
+  printf '%s\n' "$identity" > "$home/state/.supervise-daemon.lock/pid-identity"
+  us_run "$home" "$fakebin" -- start
+  expect_code 1 "$CODE" "the restored live supervisor must still refuse"
+  assert_contains "$OUT" "refuse_away_mode" "a restored identity match must read as observed-alive"
+  assert_not_contains "$OUT" "refuse_away_liveness_unknown" \
+    "an observable live supervisor must not refuse as could-not-observe"
+  [ ! -s "$log" ] || fail "no away-mode case here may reach the launcher"
+
+  pass "(c) an away supervisor whose liveness cannot be observed refuses under its own token"
+}
+
+test_away_flag_with_no_supervisor_behind_it_does_not_wedge_the_home_shut() {
+  local home fakebin launcher log
+  IFS='|' read -r home fakebin launcher log <<EOF
+$(new_home away-flag-only)
+EOF
+  FM_TEST_LAUNCHER=$launcher FM_TEST_LAUNCH_LOG=$log
+  queue_trigger "$home"
+
+  # The durable flag with nothing holding the daemon's single-instance lock: the
+  # supervisor that set it is gone, and the flag alone must not refuse for ever.
+  date '+%s' > "$home/state/.afk"
+  [ ! -e "$home/state/.supervise-daemon.lock" ] || fail "the fixture left a daemon lock behind"
+
+  us_run "$home" "$fakebin" -- start
+  expect_code 0 "$CODE" "an away flag with no supervisor behind it must not refuse the start: $OUT"
+  assert_contains "$OUT" "UNATTENDED_AWAY_SUPERVISOR_DEAD" \
+    "the start must surface that away mode's supervisor is not alive"
+  assert_contains "$OUT" "last_activity=unreadable" \
+    "with no lock to read, the surfaced line must say the last-activity time is unreadable rather than invent one"
+  assert_grep "away-supervisor-dead" "$home/state/unattended-sessions.log" \
+    "the missing supervisor left no attribution line"
+  assert_grep "args=--entry claude --detach" "$log" "the allowed start did not reach the launcher"
+
+  pass "(c) a durable away flag with no live supervisor behind it never wedges unattended execution shut"
 }
 
 # --- (a) identifiable as unattended in its own records -----------------------
@@ -593,6 +734,38 @@ EOF
   pass "a start with no configured launch entry refuses rather than guessing a harness"
 }
 
+# The entry files are operator-authored, and this repo ships firstmate.bat and
+# docs/windows-launcher.md - so one of them saved with CRLF line endings is an
+# ordinary input. A carriage return that survived the read would fail the entry
+# id's charset check while still counting as a populated value, and the operator
+# would be told to name an entry in the file they had just populated.
+test_a_crlf_saved_entry_file_still_names_its_entry() {
+  local home fakebin launcher log
+  IFS='|' read -r home fakebin launcher log <<EOF
+$(new_home crlf-entry)
+EOF
+  FM_TEST_LAUNCHER=$launcher FM_TEST_LAUNCH_LOG=$log
+  queue_trigger "$home"
+
+  printf 'claude\r\n' > "$home/config/unattended-session"
+  us_run "$home" "$fakebin" -- start
+  expect_code 0 "$CODE" "a CRLF-saved config entry must be read as the entry it names: $OUT"
+  assert_grep "args=--entry claude --detach" "$log" \
+    "the entry the launcher received did not survive the CRLF line ending"
+
+  # The launcher's own last-used entry is written by the same kind of operator
+  # environment and has the same exposure.
+  rm -f "$home/config/unattended-session" "$home/state/.session-origin"
+  queue_trigger "$home"
+  printf 'codex\r\n' > "$home/state/.launch-last"
+  us_run "$home" "$fakebin" -- start
+  expect_code 0 "$CODE" "a CRLF-saved last-used entry must be read as the entry it names: $OUT"
+  assert_grep "args=--entry codex --detach" "$log" \
+    "the fallback entry did not survive the CRLF line ending"
+
+  pass "an entry file saved with CRLF line endings names its entry rather than refusing"
+}
+
 test_failed_launch_is_recorded_not_swallowed() {
   local home fakebin launcher log
   IFS='|' read -r home fakebin launcher log <<EOF
@@ -626,10 +799,14 @@ EOF
 test_start_refuses_without_a_queued_trigger
 test_start_refuses_beside_a_live_session
 test_start_refuses_beside_a_live_supervision_cycle
-test_start_refuses_under_away_mode_and_while_a_launch_is_in_flight
+test_start_refuses_while_a_launch_is_in_flight
+test_away_mode_refuses_only_while_its_supervisor_is_alive
+test_away_supervisor_liveness_that_cannot_be_observed_refuses_distinctly
+test_away_flag_with_no_supervisor_behind_it_does_not_wedge_the_home_shut
 test_start_and_claim_leave_an_attributable_record
 test_claim_is_the_only_write_and_it_needs_the_lock
 test_start_refuses_without_a_launch_entry
+test_a_crlf_saved_entry_file_still_names_its_entry
 test_failed_launch_is_recorded_not_swallowed
 test_start_refuses_unknown_arguments
 test_queued_trigger_starts_a_session_that_drains_and_acts

@@ -60,7 +60,9 @@ Two consequences worth knowing:
 ## Supervision
 
 This session supervises exactly like any other: one live cycle, following the emitted harness protocol.
-It never starts a second cycle beside a live one - `bin/fm-unattended-session.sh start` refuses to launch at all when a session, a healthy watcher, or away mode already owns supervision here, so if you are running, that check already passed.
+It never starts a second cycle beside a live one - `bin/fm-unattended-session.sh start` refuses to launch at all when a session, a healthy watcher, or a live away supervisor already owns supervision here, so if you are running, that check already passed.
+Away mode is judged on its supervisor's liveness, not on the presence of `state/.afk`, so a start is allowed past an away supervisor observed dead and refused when its liveness cannot be determined.
+If your session started with an `UNATTENDED_AWAY_SUPERVISOR_DEAD` line, away mode's supervisor crashed and you are running in its place; that is durably recorded, and the crashed supervisor is worth reporting to the captain when you park or finish.
 
 ## Ending
 

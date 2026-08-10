@@ -33,9 +33,13 @@
 #      unattended session therefore writes nothing at all; `session` still
 #      REPORTS it as unattended, because reporting is a read.
 #   c. never a second supervision cycle alongside a live one - `start` refuses on
-#      a live lock holder, on a healthy watcher, on away mode, and on a launch
-#      already in flight. The launcher's own launch lock and already-running
-#      refusal remain the second, independent owner of that boundary.
+#      a live lock holder, on a healthy watcher, on a live away supervisor, and
+#      on a launch already in flight. Every one of those gates verifies a LIVE
+#      PROCESS, away mode included: it reads the away daemon's own single-instance
+#      lock and answers alive, dead, or could-not-observe, refusing on the first
+#      and the third (see the away gate below for the captain's 2026-08-10
+#      ruling). The launcher's own launch lock and already-running refusal remain
+#      the second, independent owner of that boundary.
 #   d. starting itself is not licence to invent work - `start` refuses outright
 #      unless the durable queue already holds a record. It surveys nothing,
 #      reads no backlog and chooses no task; the drained queue and work already
@@ -68,7 +72,11 @@
 #       The append-only attribution log, oldest first.
 #
 # Exit status: 0 the command completed, 1 refused (one refuse_<token> line on
-# stderr), 2 usage error.
+# stderr), 2 usage error. refuse_away_mode means an away supervisor was observed
+# ALIVE; refuse_away_liveness_unknown means its liveness could not be determined
+# and names what could not be read. A start that steps past an away supervisor
+# observed DEAD prints one UNATTENDED_AWAY_SUPERVISOR_DEAD line and records an
+# away-supervisor-dead line in the attribution log.
 #
 # Which entry the launcher starts: config/unattended-session (one line, a launch
 # entry id), else state/.launch-last, else refuse. A harness is never guessed.
@@ -95,6 +103,15 @@ case "$CLAIM_WINDOW" in ''|*[!0-9]*) CLAIM_WINDOW=900 ;; esac
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-session-lock-lib.sh
 . "$SCRIPT_DIR/fm-session-lock-lib.sh"
+# The away supervisor's own lock helpers, so the away-mode gate below reads the
+# daemon's liveness through the code that owns that lock's shape rather than a
+# second copy of it. Sourcing this file enables errexit and nounset (its header
+# says so); this script is written for `set -u` alone, so errexit is restored
+# immediately, and FM_AFK_LOCK is repointed at this home's lock explicitly.
+# shellcheck source=bin/fm-afk-start.sh
+. "$SCRIPT_DIR/fm-afk-start.sh"
+set +e
+FM_AFK_LOCK="$STATE/.supervise-daemon.lock"
 
 die_usage() { printf 'error: %s\n' "$1" >&2; exit 2; }
 refuse() { printf '%s %s\n' "$1" "$2" >&2; exit 1; }
@@ -173,6 +190,106 @@ supervision_cycle_live() {
   fm_watcher_healthy "$STATE" "$SCRIPT_DIR/fm-watch.sh" "${FM_GUARD_GRACE:-300}" "$FM_HOME"
 }
 
+# Constraint (c), third owner: away mode. The captain ruled on 2026-08-10 that
+# this gate reads the away supervisor's LIVENESS with three answers rather than
+# the durable flag's presence with two. state/.afk is cleared only on the
+# captain's return, so a supervisor that died days ago would otherwise refuse
+# every later timer fire for as long as the flag persisted - disabling unattended
+# execution in precisely the away scenario the feature exists for. The presence
+# of the flag is never proof that anything is supervising.
+#
+# The three values are alive, dead and unknown, and unknown is never narrowed
+# into either of the others (AGENTS.md section 1 rule 5). The concrete cost of
+# collapsing unknown into dead is starting an unattended session beside a live
+# away supervisor, which is the two-supervisor failure this gate exists to
+# prevent; the cost of collapsing it into alive is the wedge above.
+#
+# Sets AWAY_VERDICT to alive|dead|unknown, AWAY_PID to the recorded pid (or
+# "none"), and AWAY_REASON to what could not be determined when unknown.
+AWAY_VERDICT=
+AWAY_PID=
+AWAY_REASON=
+away_observe_supervisor() {
+  local owner pid identity current
+  AWAY_VERDICT=
+  AWAY_PID=none
+  AWAY_REASON=
+
+  # Nothing holds the daemon's single-instance lock. That lock IS the daemon's
+  # liveness record, so its absence is an observation, not a gap: no away
+  # supervisor is running here.
+  owner=$(daemon_lock_owner 2>/dev/null) || owner=""
+  if [ -z "$owner" ]; then
+    AWAY_VERDICT=dead
+    return 0
+  fi
+
+  pid=$(cat "$owner/pid" 2>/dev/null || true)
+  # A lock owner naming no readable numeric pid names no process to ask about.
+  # Nothing here says alive and nothing says dead: could-not-observe.
+  case "$pid" in
+    ''|*[!0-9]*)
+      AWAY_VERDICT=unknown
+      AWAY_REASON="the away daemon lock $owner records no readable pid"
+      return 0
+      ;;
+  esac
+  AWAY_PID=$pid
+
+  # The recorded pid is not running, so the daemon that took the lock is gone.
+  if ! fm_pid_alive "$pid"; then
+    AWAY_VERDICT=dead
+    return 0
+  fi
+
+  identity=$(cat "$owner/pid-identity" 2>/dev/null || true)
+  # bin/fm-supervise-daemon.sh writes the identity immediately after acquiring
+  # the lock, so an absent one means a daemon killed inside that window - a live
+  # pid this gate cannot tie to the daemon. daemon_pid_matches would fall back to
+  # a `ps -o command=` PATTERN MATCH here; that fallback is deliberately not used,
+  # because a pattern occurring in a brief or in this caller's own command line
+  # matches the wrong process. An absent identity is could-not-observe.
+  if [ -z "$identity" ]; then
+    AWAY_VERDICT=unknown
+    AWAY_REASON="the away daemon lock $owner records no process identity for live pid $pid"
+    return 0
+  fi
+  current=$(fm_pid_identity "$pid" 2>/dev/null) || current=""
+  if [ -z "$current" ]; then
+    AWAY_VERDICT=unknown
+    AWAY_REASON="the process identity of live pid $pid could not be read"
+    return 0
+  fi
+  if [ "$current" = "$identity" ]; then
+    AWAY_VERDICT=alive
+    return 0
+  fi
+  # The pid is alive but is a DIFFERENT process: fm_pid_identity combines the
+  # boot-relative start time with the full command line, so a reused pid reads as
+  # a mismatch and the daemon that took the lock is gone.
+  AWAY_VERDICT=dead
+}
+
+# What a dead away supervisor is surfaced as, on stdout and in the attribution
+# log. A silent allow would hide a crashed supervisor, so the daemon, its
+# recorded pid, and the best available last-activity time all appear. When that
+# time cannot be read, the line says so rather than omitting or inventing it.
+away_dead_detail() {
+  local owner mtime
+  owner=$(daemon_lock_owner 2>/dev/null) || owner=""
+  mtime=""
+  [ -z "$owner" ] || mtime=$(fm_path_mtime "$owner" 2>/dev/null || true)
+  case "$mtime" in
+    ''|*[!0-9]*)
+      printf 'daemon=bin/fm-supervise-daemon.sh pid=%s last_activity=unreadable\n' "$AWAY_PID"
+      ;;
+    *)
+      printf 'daemon=bin/fm-supervise-daemon.sh pid=%s last_activity=%s (%ss ago)\n' \
+        "$AWAY_PID" "$mtime" "$(( $(now_epoch) - mtime ))"
+      ;;
+  esac
+}
+
 # A pending record younger than the claim window means a launch is already in
 # flight; starting a second one races it. An expired pending record is not a live
 # launch and never blocks a later start.
@@ -197,16 +314,25 @@ entry_id_ok() {  # <candidate>
   esac
 }
 
+# The first field of a one-line entry file. Carriage returns are stripped: an
+# operator file saved with CRLF line endings otherwise yields "claude\r", which
+# the charset check above rejects while still counting as a populated value - so
+# the operator would be told to name an entry in a file they already populated.
+# This repo ships firstmate.bat and docs/windows-launcher.md, so a CRLF-authored
+# config is a realistic input rather than a hypothetical one.
+read_entry_file() {  # <path>
+  local value=""
+  [ -r "$1" ] || return 1
+  IFS=$' \t\n' read -r value < "$1" || value=""
+  printf '%s\n' "${value//$'\r'/}"
+}
+
 # The launch entry, never guessed. config/unattended-session first, then the
 # launcher's own last-used entry, then refuse.
 resolve_entry() {
   local entry=""
-  if [ -r "$CONFIG/unattended-session" ]; then
-    IFS=$' \t\n' read -r entry < "$CONFIG/unattended-session" || entry=""
-  fi
-  if [ -z "$entry" ] && [ -r "$STATE/.launch-last" ]; then
-    IFS=$' \t\n' read -r entry < "$STATE/.launch-last" || entry=""
-  fi
+  entry=$(read_entry_file "$CONFIG/unattended-session") || entry=""
+  [ -n "$entry" ] || entry=$(read_entry_file "$STATE/.launch-last") || entry=""
   entry_id_ok "$entry" || return 1
   printf '%s\n' "$entry"
 }
@@ -215,6 +341,7 @@ resolve_entry() {
 
 cmd_start() {
   local trigger="-" entry="" dry_run=false queued origin_id live_pid launcher out rc
+  local away_dead_note=""
 
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -237,9 +364,25 @@ cmd_start() {
   [ "$queued" -gt 0 ] \
     || refuse refuse_no_queued_work "the durable wake queue is empty; an unattended session starts only for work already queued, never to look for some"
 
-  # (c) Away mode owns supervision through its own daemon while it is active.
-  [ ! -e "$STATE/.afk" ] \
-    || refuse refuse_away_mode "away mode is active and its daemon owns supervision here"
+  # (c) Away mode owns supervision through its own daemon while that daemon is
+  # ALIVE. Observed alive refuses; observed dead allows and says so; could not
+  # observe refuses under its own token, so the two refusals never read alike.
+  if [ -e "$STATE/.afk" ]; then
+    away_observe_supervisor
+    case "$AWAY_VERDICT" in
+      alive)
+        refuse refuse_away_mode "away mode is active and its daemon owns supervision here (pid $AWAY_PID)"
+        ;;
+      unknown)
+        refuse refuse_away_liveness_unknown "away mode is active and its daemon's liveness could not be determined: $AWAY_REASON"
+        ;;
+      *)
+        away_dead_note=$(away_dead_detail)
+        printf 'UNATTENDED_AWAY_SUPERVISOR_DEAD %s\n' "$away_dead_note"
+        printf 'away mode is flagged here but its supervisor is not alive, so this start proceeds in its place\n'
+        ;;
+    esac
+  fi
 
   # (c) A live session already owns this home.
   if live_pid=$(live_session_pid); then
@@ -285,6 +428,11 @@ cmd_start() {
   origin_write pending "$origin_id" "$trigger" "$(now_epoch)" "$entry" \
     || refuse refuse_state_unwritable "cannot write the session origin record $ORIGIN_RECORD"
   append_log declared "$origin_id" "$trigger" "entry=$entry queued=$queued" \
+    || refuse refuse_state_unwritable "cannot append to the attribution log $ORIGIN_LOG"
+  # A start that stepped past a dead away supervisor records that fact here, so
+  # the crashed supervisor stays attributable after the session it allowed.
+  [ -z "$away_dead_note" ] \
+    || append_log away-supervisor-dead "$origin_id" "$trigger" "$away_dead_note" \
     || refuse refuse_state_unwritable "cannot append to the attribution log $ORIGIN_LOG"
 
   launcher=${FM_UNATTENDED_LAUNCH_CMD:-$SCRIPT_DIR/fm-launch.sh}

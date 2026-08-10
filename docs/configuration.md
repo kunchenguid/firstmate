@@ -50,7 +50,11 @@ That ruling grants execution only, and widens no approval authority whatsoever; 
 
 Arm it with any OS timer - `cron`, a systemd user timer, Task Scheduler through the WSL bridge - running `bin/fm-unattended-session.sh start` with `FM_HOME` set to the home it should wake.
 Each run refuses unless the durable queue already holds a record, so a timer over an idle home starts nothing and costs one file read.
-It also refuses when away mode is active, when a live session holds the per-home session lock, when a healthy supervision cycle is already running, and when a previous start is still in flight, so a timer can never produce a second session or a second supervision cycle beside a live one.
+It also refuses when a live session holds the per-home session lock, when a healthy supervision cycle is already running, and when a previous start is still in flight, so a timer can never produce a second session or a second supervision cycle beside a live one.
+Away mode is gated on its supervisor's liveness rather than on the presence of the durable `state/.afk` flag, under the captain's 2026-08-10 ruling: the start reads the away daemon's own single-instance lock and answers alive, dead, or could-not-observe.
+An away supervisor observed alive refuses with `refuse_away_mode`, because it owns supervision here.
+An away supervisor observed dead allows the start and surfaces one `UNATTENDED_AWAY_SUPERVISOR_DEAD` line naming the daemon, its recorded pid, and its last activity, and records an `away-supervisor-dead` line in the attribution log, so a crashed supervisor is never allowed past silently.
+A supervisor whose liveness cannot be determined refuses with the distinct `refuse_away_liveness_unknown`, naming what could not be read, because starting beside a live away supervisor is the failure this gate exists to prevent.
 Every refusal prints one `refuse_<token>` line on stderr and exits 1; a timer that mails its output should expect these as the ordinary quiet outcomes.
 
 Which entry it launches comes from the local, gitignored `config/unattended-session`, holding one launch entry id from the fleet launcher menu above, and falls back to `state/.launch-last`.
