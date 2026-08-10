@@ -112,7 +112,7 @@ remote_secondmate_action_required() {
 }
 
 run_update_locked() {
-  local reread_firstmate="no" id home line remote_out remote_result remote_action
+  local reread_firstmate="no" id home line remote_out remote_result remote_action remote_commit
 
   if fm_update_action_enabled; then
     fm_update_action_dir_is_valid "$FM_UPDATE_ACTION_DIR" || {
@@ -169,17 +169,33 @@ run_update_locked() {
           remote_result=$(printf '%s\n' "$remote_out" | tail -1)
           case "$remote_result" in
             synced:*)
-              echo "remote secondmate $id: updated on $SECONDMATE_REGISTRY_HOST (${remote_result#synced: })"
+              remote_commit=${remote_result#synced: }
+              if ! fm_update_action_commit_is_valid "$remote_commit"; then
+                echo "remote secondmate $id: skipped on $SECONDMATE_REGISTRY_HOST: malformed update result" >&2
+                if [ "$remote_action" -eq 1 ] && fm_update_action_enabled; then
+                  FF_ACTION_JOURNAL_FAILED=1
+                fi
+                continue
+              fi
+              echo "remote secondmate $id: updated on $SECONDMATE_REGISTRY_HOST ($remote_commit)"
               if [ "$remote_action" -eq 1 ]; then
                 if fm_update_action_enabled; then
-                  fm_update_action_write_secondmate updated "$id" "$home" "" "" 1 \
+                  fm_update_action_write_secondmate updated "$id" "$home" "" "$remote_commit" 1 \
                     "$SECONDMATE_REGISTRY_HOST" || FF_ACTION_JOURNAL_FAILED=1
                 fi
                 FF_NUDGE_WINDOWS="$FF_NUDGE_WINDOWS fm-$id"
               fi
               ;;
             current:*)
-              echo "remote secondmate $id: already current on $SECONDMATE_REGISTRY_HOST (${remote_result#current: })"
+              remote_commit=${remote_result#current: }
+              if ! fm_update_action_commit_is_valid "$remote_commit"; then
+                echo "remote secondmate $id: skipped on $SECONDMATE_REGISTRY_HOST: malformed update result" >&2
+                if [ "$remote_action" -eq 1 ] && fm_update_action_enabled; then
+                  FF_ACTION_JOURNAL_FAILED=1
+                fi
+                continue
+              fi
+              echo "remote secondmate $id: already current on $SECONDMATE_REGISTRY_HOST ($remote_commit)"
               if [ "$remote_action" -eq 1 ] && fm_update_action_enabled; then
                 fm_update_action_remove_secondmate "$id" || FF_ACTION_JOURNAL_FAILED=1
               fi
@@ -219,7 +235,11 @@ if [ "$update_status" -eq 75 ]; then
   exit 0
 fi
 if [ "$update_status" -ne 0 ]; then
-  echo "firstmate: skipped: dependency lock is unavailable" >&2
+  if [ "$FM_DEPENDENCY_LOCK_OUTCOME" = callback-failed ]; then
+    echo "firstmate: skipped: checkout update or action journal failed" >&2
+  else
+    echo "firstmate: skipped: dependency lock is unavailable" >&2
+  fi
   echo "reread-firstmate: no"
   echo "nudge-secondmates: none"
   exit 1

@@ -4,6 +4,7 @@
 
 FM_DEPENDENCY_LOCK_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 _FM_DEPENDENCY_LOCK_HELD=${_FM_DEPENDENCY_LOCK_HELD:-0}
+FM_DEPENDENCY_LOCK_OUTCOME=
 
 fm_dependency_positive_integer_is_valid() {
   case "$1" in
@@ -56,32 +57,65 @@ fm_dependency_prepare_private_runtime_dir() {
   printf '%s\n' "$dir"
 }
 
-fm_dependency_runtime_dir() {
-  local dir
-  if [ -n "${XDG_RUNTIME_DIR:-}" ]; then
-    dir=$XDG_RUNTIME_DIR
-    fm_dependency_runtime_dir_is_valid "$dir" || return 1
-    printf '%s\n' "$dir"
-    return
+fm_dependency_system_runtime_dir() {
+  local dir="/run/user/$UID"
+  fm_dependency_runtime_dir_is_valid "$dir" || return 1
+  printf '%s\n' "$dir"
+}
+
+fm_dependency_account_home() {
+  local uid username entry candidate
+  uid=$(id -u 2>/dev/null) || return 1
+  username=$(id -un 2>/dev/null) || return 1
+  case "$uid" in ''|*[!0-9]*) return 1 ;; esac
+  case "$username" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+
+  if [ -r /etc/passwd ]; then
+    candidate=$(awk -F: -v uid="$uid" '$3 == uid { print $6; exit }' /etc/passwd 2>/dev/null || true)
+    if [ -n "$candidate" ] && fm_dependency_private_parent_is_valid "$candidate"; then
+      printf '%s\n' "$candidate"
+      return
+    fi
   fi
-  dir="/run/user/$UID"
-  if [ -e "$dir" ] || [ -L "$dir" ]; then
-    fm_dependency_runtime_dir_is_valid "$dir" || return 1
-    printf '%s\n' "$dir"
-    return
+  if command -v getent >/dev/null 2>&1; then
+    entry=$(getent passwd "$uid" 2>/dev/null || true)
+    candidate=$(printf '%s\n' "$entry" | awk -F: -v uid="$uid" '$3 == uid { print $6; exit }')
+    if [ -n "$candidate" ] && fm_dependency_private_parent_is_valid "$candidate"; then
+      printf '%s\n' "$candidate"
+      return
+    fi
   fi
-  if [ -n "${TMPDIR:-}" ]; then
-    dir=${TMPDIR%/}
-    fm_dependency_runtime_dir_is_valid "$dir" || return 1
-    printf '%s\n' "$dir"
-    return
-  fi
-  if [ -n "${HOME:-}" ]; then
-    dir=$(fm_dependency_prepare_private_runtime_dir "$HOME" .firstmate) || return 1
-    fm_dependency_prepare_private_runtime_dir "$dir" runtime
-    return
+  if command -v dscl >/dev/null 2>&1; then
+    entry=$(dscl . -read "/Users/$username" NFSHomeDirectory 2>/dev/null || true)
+    candidate=$(printf '%s\n' "$entry" | awk '$1 == "NFSHomeDirectory:" { print $2; exit }')
+    if [ -n "$candidate" ] && fm_dependency_private_parent_is_valid "$candidate"; then
+      printf '%s\n' "$candidate"
+      return
+    fi
   fi
   return 1
+}
+
+fm_dependency_host_key() {
+  local host
+  host=$(uname -n 2>/dev/null) || return 1
+  case "$host" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  printf '%s\n' "$host"
+}
+
+fm_dependency_runtime_dir() {
+  local dir account_home firstmate runtime hosts host
+  dir=$(fm_dependency_system_runtime_dir 2>/dev/null || true)
+  if [ -n "$dir" ]; then
+    printf '%s\n' "$dir"
+    return
+  fi
+  account_home=$(fm_dependency_account_home) || return 1
+  host=$(fm_dependency_host_key) || return 1
+  firstmate=$(fm_dependency_prepare_private_runtime_dir "$account_home" .firstmate) || return 1
+  runtime=$(fm_dependency_prepare_private_runtime_dir "$firstmate" runtime) || return 1
+  hosts=$(fm_dependency_prepare_private_runtime_dir "$runtime" hosts) || return 1
+  fm_dependency_prepare_private_runtime_dir "$hosts" "$host"
 }
 
 fm_dependency_host_lock_dir() {
@@ -189,17 +223,36 @@ fm_dependency_with_host_lock() {
   local context_wake_queue=${FM_WAKE_QUEUE:-}
   local context_wake_queue_lock=${FM_WAKE_QUEUE_LOCK:-}
   shift
+  FM_DEPENDENCY_LOCK_OUTCOME=
   if [ "$_FM_DEPENDENCY_LOCK_HELD" -eq 1 ]; then
-    "$callback" "$@"
-    return
+    if "$callback" "$@"; then
+      FM_DEPENDENCY_LOCK_OUTCOME=completed
+      return 0
+    else
+      rc=$?
+      FM_DEPENDENCY_LOCK_OUTCOME=callback-failed
+      return "$rc"
+    fi
   fi
   if fm_dependency_parent_owns_host_lock; then
     local _FM_DEPENDENCY_LOCK_HELD=1
-    "$callback" "$@"
-    return
+    if "$callback" "$@"; then
+      FM_DEPENDENCY_LOCK_OUTCOME=completed
+      return 0
+    else
+      rc=$?
+      FM_DEPENDENCY_LOCK_OUTCOME=callback-failed
+      return "$rc"
+    fi
   fi
-  fm_dependency_ensure_host_lock_dir || return 2
-  lock_dir=$(fm_dependency_host_lock_dir) || return 2
+  fm_dependency_ensure_host_lock_dir || {
+    FM_DEPENDENCY_LOCK_OUTCOME=unavailable
+    return 2
+  }
+  lock_dir=$(fm_dependency_host_lock_dir) || {
+    FM_DEPENDENCY_LOCK_OUTCOME=unavailable
+    return 2
+  }
   lock="$lock_dir/fm-deps.lock"
   local FM_ROOT_OVERRIDE FM_ROOT FM_HOME FM_STATE_OVERRIDE STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
   FM_ROOT_OVERRIDE=$context_root
@@ -211,7 +264,14 @@ fm_dependency_with_host_lock() {
   . "$FM_DEPENDENCY_LOCK_LIB_DIR/fm-wake-lib.sh"
   fm_dependency_acquire_lock "$lock"
   lock_status=$?
-  [ "$lock_status" -eq 0 ] || return "$lock_status"
+  if [ "$lock_status" -ne 0 ]; then
+    if [ "$lock_status" -eq 75 ]; then
+      FM_DEPENDENCY_LOCK_OUTCOME=busy
+    else
+      FM_DEPENDENCY_LOCK_OUTCOME=unavailable
+    fi
+    return "$lock_status"
+  fi
   FM_ROOT_OVERRIDE=$context_root_override
   FM_ROOT=$context_root
   FM_HOME=$context_home
@@ -222,6 +282,11 @@ fm_dependency_with_host_lock() {
   local _FM_DEPENDENCY_LOCK_HELD=1
   "$callback" "$@" || rc=$?
   fm_lock_release "$lock"
+  if [ "$rc" -eq 0 ]; then
+    FM_DEPENDENCY_LOCK_OUTCOME=completed
+  else
+    FM_DEPENDENCY_LOCK_OUTCOME=callback-failed
+  fi
   return "$rc"
 }
 
@@ -235,8 +300,15 @@ fm_dependency_resume_host_lock() {
   local context_wake_queue=${FM_WAKE_QUEUE:-}
   local context_wake_queue_lock=${FM_WAKE_QUEUE_LOCK:-}
   shift
-  fm_dependency_ensure_host_lock_dir || return 2
-  lock_dir=$(fm_dependency_host_lock_dir) || return 2
+  FM_DEPENDENCY_LOCK_OUTCOME=
+  fm_dependency_ensure_host_lock_dir || {
+    FM_DEPENDENCY_LOCK_OUTCOME=unavailable
+    return 2
+  }
+  lock_dir=$(fm_dependency_host_lock_dir) || {
+    FM_DEPENDENCY_LOCK_OUTCOME=unavailable
+    return 2
+  }
   lock="$lock_dir/fm-deps.lock"
   local FM_ROOT_OVERRIDE FM_ROOT FM_HOME FM_STATE_OVERRIDE STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
   FM_ROOT_OVERRIDE=$context_root
@@ -246,7 +318,10 @@ fm_dependency_resume_host_lock() {
   STATE=$lock_dir
   # shellcheck source=bin/fm-wake-lib.sh
   . "$FM_DEPENDENCY_LOCK_LIB_DIR/fm-wake-lib.sh"
-  fm_dependency_lock_is_owned_by_pid "$lock" "${BASHPID:-$$}" || return 2
+  fm_dependency_lock_is_owned_by_pid "$lock" "${BASHPID:-$$}" || {
+    FM_DEPENDENCY_LOCK_OUTCOME=unavailable
+    return 2
+  }
   FM_ROOT_OVERRIDE=$context_root_override
   FM_ROOT=$context_root
   FM_HOME=$context_home
@@ -257,5 +332,10 @@ fm_dependency_resume_host_lock() {
   local _FM_DEPENDENCY_LOCK_HELD=1
   "$callback" "$@" || rc=$?
   fm_lock_release "$lock"
+  if [ "$rc" -eq 0 ]; then
+    FM_DEPENDENCY_LOCK_OUTCOME=completed
+  else
+    FM_DEPENDENCY_LOCK_OUTCOME=callback-failed
+  fi
   return "$rc"
 }

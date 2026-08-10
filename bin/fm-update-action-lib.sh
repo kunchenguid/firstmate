@@ -64,6 +64,12 @@ fm_update_action_remove_firstmate() {
   rm -f -- "$marker"
 }
 
+fm_update_action_commit_is_valid() {
+  local commit=$1
+  case "${#commit}" in 40|64) ;; *) return 1 ;; esac
+  case "$commit" in *[!0-9A-Fa-f]*) return 1 ;; esac
+}
+
 fm_update_action_write_secondmate() {
   local phase=$1 id=$2 home=$3 before=$4 after=$5 remote=$6 remote_host=$7 marker
   case "$phase" in prepared|updated) ;; *) return 1 ;; esac
@@ -71,7 +77,13 @@ fm_update_action_write_secondmate() {
   [ -n "$home" ] || return 1
   case "$remote" in
     0) [ -n "$before" ] && [ -n "$after" ] && [ -z "$remote_host" ] || return 1 ;;
-    1) [ -z "$before" ] && [ -z "$after" ] && [ -n "$remote_host" ] || return 1 ;;
+    1)
+      [ -z "$before" ] && [ -n "$remote_host" ] || return 1
+      case "$phase" in
+        prepared) [ -z "$after" ] || return 1 ;;
+        updated) fm_update_action_commit_is_valid "$after" || return 1 ;;
+      esac
+      ;;
     *) return 1 ;;
   esac
   marker=$(fm_update_action_secondmate_path "$id") || return 1

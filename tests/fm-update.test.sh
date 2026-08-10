@@ -406,6 +406,25 @@ test_dependency_lock_owner_delegates_update() {
   pass "dependency lock owners delegate Firstmate updates to direct children"
 }
 
+test_update_failure_is_not_reported_as_lock_failure() {
+  local w journal out status
+  w=$(new_world update-failure-diagnostic)
+  journal="$w/home/state/.fm-deps-pending"
+  printf 'invalid\n' > "$journal"
+
+  out=$(FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
+    FM_DEPS_HOST_LOCK_DIR="$w/firstmate-deps-$UID" \
+    FM_UPDATE_ACTION_DIR="$journal" "$UPDATE" 2>&1)
+  status=$?
+
+  [ "$status" -ne 0 ] || fail "invalid update journal returned success: $out"
+  assert_contains "$out" "firstmate: skipped: checkout update or action journal failed" \
+    "callback failure did not identify the update or journal path"
+  assert_not_contains "$out" "firstmate: skipped: dependency lock is unavailable" \
+    "callback failure was mislabeled as lock unavailability"
+  pass "update failures remain distinct from lock failures"
+}
+
 test_updates_main_and_secondmate
 test_update_actions_are_journaled_before_fast_forward
 test_reread_gate_is_instruction_only
@@ -418,5 +437,6 @@ test_firstmate_detached_head_skipped
 test_unsafe_secondmate_home_skipped_before_git_update
 test_active_dependency_check_defers_update
 test_dependency_lock_owner_delegates_update
+test_update_failure_is_not_reported_as_lock_failure
 
 echo "# all fm-update tests passed"

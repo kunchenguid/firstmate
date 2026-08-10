@@ -586,30 +586,90 @@ test_host_lock_override_rejects_unrelated_directory() {
   pass "host lock overrides reject unrelated existing directories unchanged"
 }
 
-test_host_lock_defaults_to_private_runtime() {
-  local fixture runtime expected actual
+test_host_lock_defaults_to_stable_account_runtime() {
+  local fixture account expected first second host
   fixture="$TMP_ROOT/host-lock-runtime"
-  runtime="$fixture/runtime"
-  mkdir -p "$runtime"
-  chmod 700 "$runtime"
-  expected="$runtime/firstmate-deps-$UID"
+  account="$fixture/account"
+  mkdir -p "$account"
+  chmod 700 "$account"
+  host=$(fm_dependency_host_key) || fail "host identity could not be resolved"
+  expected="$account/.firstmate/runtime/hosts/$host/firstmate-deps-$UID"
 
-  actual=$(FM_DEPS_HOST_LOCK_DIR= XDG_RUNTIME_DIR="$runtime" TMPDIR= \
-    fm_dependency_host_lock_dir) \
-    || fail "private runtime directory did not produce a dependency lock path"
-  [ "$actual" = "$expected" ] \
-    || fail "dependency lock did not use the private runtime directory: $actual"
-  FM_DEPS_HOST_LOCK_DIR= XDG_RUNTIME_DIR="$runtime" TMPDIR= \
-    fm_dependency_ensure_host_lock_dir \
-    || fail "dependency lock directory was not created below the private runtime"
-  [ -d "$expected" ] || fail "private runtime dependency lock directory is absent"
+  (
+    fm_dependency_system_runtime_dir() { return 1; }
+    fm_dependency_account_home() { printf '%s\n' "$account"; }
+    first=$(FM_DEPS_HOST_LOCK_DIR= XDG_RUNTIME_DIR="$fixture/xdg-one" \
+      TMPDIR=/tmp HOME="$fixture/home-one" fm_dependency_host_lock_dir) || exit 1
+    second=$(FM_DEPS_HOST_LOCK_DIR= XDG_RUNTIME_DIR="$fixture/xdg-two" \
+      TMPDIR="$fixture/unsafe-tmp" HOME="$fixture/home-two" \
+      fm_dependency_host_lock_dir) || exit 1
+    [ "$first" = "$expected" ] && [ "$second" = "$expected" ] || exit 2
+    FM_DEPS_HOST_LOCK_DIR= fm_dependency_ensure_host_lock_dir || exit 3
+  ) || fail "caller-specific runtime variables changed the dependency lock path"
+  [ -d "$expected" ] || fail "stable account dependency lock directory is absent"
+  pass "host lock fallback is stable across caller environments"
+}
 
-  chmod 755 "$runtime"
-  if FM_DEPS_HOST_LOCK_DIR= XDG_RUNTIME_DIR="$runtime" TMPDIR= \
-    fm_dependency_host_lock_dir >/dev/null 2>&1; then
-    fail "non-private XDG runtime directory was accepted"
-  fi
-  pass "host lock defaults to a verified private runtime directory"
+test_prepared_remote_update_journal_retries_before_nudge() {
+  local fixture root pending marker log send_log commit out status calls
+  fixture="$TMP_ROOT/remote-update-journal-retry"
+  root="$fixture/root"
+  pending="$fixture/state/.fm-deps-pending"
+  marker="$pending/firstmate-update-secondmate-remote.pending"
+  log="$fixture/update.log"
+  send_log="$fixture/send.log"
+  commit=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  mkdir -p "$root/bin" "$pending" "$fixture/data"
+  chmod 700 "$pending"
+  {
+    printf 'kind=secondmate\n'
+    printf 'home=/srv/firstmate-remote\n'
+    printf 'remote_host=remote.example\n'
+  } > "$fixture/state/remote.meta"
+  printf '%s\n' '#!/usr/bin/env bash' \
+    '[ "$FM_ON_EXPECTED_HOST" = remote.example ] || exit 91' \
+    '[ "$FM_ON_EXPECTED_HOME" = /srv/firstmate-remote ] || exit 92' \
+    'printf "%s\n" retry >> "$FM_DEPS_TEST_UPDATE_LOG"' \
+    '[ "${FM_DEPS_TEST_REMOTE_FAIL:-0}" -eq 0 ] || exit 1' \
+    'printf "synced: %s\n" "$FM_DEPS_TEST_REMOTE_COMMIT"' \
+    > "$root/bin/fm-on.sh"
+  printf '%s\n' '#!/usr/bin/env bash' \
+    'printf "%s\n" "$1" >> "$FM_DEPS_TEST_SEND_LOG"' \
+    > "$root/bin/fm-send.sh"
+  chmod +x "$root/bin/fm-on.sh" "$root/bin/fm-send.sh"
+  FM_UPDATE_ACTION_DIR="$pending" \
+    fm_update_action_write_secondmate prepared remote /srv/firstmate-remote \
+      "" "" 1 remote.example
+
+  out=$(FM_ROOT="$root" FM_HOME="$fixture" FM_STATE_OVERRIDE="$fixture/state" \
+    FM_DEPS_TEST_UPDATE_LOG="$log" FM_DEPS_TEST_SEND_LOG="$send_log" \
+    FM_DEPS_TEST_REMOTE_COMMIT="$commit" FM_DEPS_TEST_REMOTE_FAIL=1 \
+    process_pending_firstmate_actions 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "failed remote retry completed its journal: $out"
+  assert_grep 'phase=prepared' "$marker" "failed remote retry finalized its journal"
+  assert_absent "$send_log" "failed remote retry sent a reread nudge"
+
+  out=$(
+    export FM_ROOT="$root" FM_HOME="$fixture" FM_STATE_OVERRIDE="$fixture/state"
+    export FM_DEPS_TEST_UPDATE_LOG="$log" FM_DEPS_TEST_SEND_LOG="$send_log"
+    export FM_DEPS_TEST_REMOTE_COMMIT="$commit" FM_DEPS_TEST_REMOTE_FAIL=0
+    fm_secondmate_nudge_write() { return 1; }
+    process_pending_firstmate_actions 2>&1
+  )
+  status=$?
+  [ "$status" -ne 0 ] || fail "forced nudge-record failure completed remote actions: $out"
+  assert_grep 'phase=updated' "$marker" "successful remote retry was not finalized"
+  assert_grep "after=$commit" "$marker" "remote retry omitted its verified commit"
+
+  FM_ROOT="$root" FM_HOME="$fixture" FM_STATE_OVERRIDE="$fixture/state" \
+    FM_DEPS_TEST_UPDATE_LOG="$log" FM_DEPS_TEST_SEND_LOG="$send_log" \
+    FM_DEPS_TEST_REMOTE_COMMIT="$commit" process_pending_firstmate_actions
+  calls=$(wc -l < "$log" | tr -d ' ')
+  [ "$calls" -eq 2 ] || fail "finalized remote journal retried the update $calls times"
+  assert_grep 'fm-remote' "$send_log" "verified remote update was not nudged"
+  assert_absent "$marker" "verified remote update retained its journal"
+  pass "prepared remote journals retry and persist verified outcomes"
 }
 
 test_host_lock_first_creation_race_is_revalidated() {
@@ -1182,11 +1242,12 @@ test_prepared_update_journal_recovers_without_rebinding
 test_dependency_check_lock_is_run_wide_and_bounded
 test_direct_checker_reexecutes_under_host_lock
 test_host_lock_override_rejects_unrelated_directory
-test_host_lock_defaults_to_private_runtime
+test_host_lock_defaults_to_stable_account_runtime
 test_host_lock_first_creation_race_is_revalidated
 test_invalid_pending_action_directory_stops_run
 test_firstmate_actions_are_durable_and_retry_every_target
 test_remote_secondmate_actions_use_shared_retry_markers
+test_prepared_remote_update_journal_retries_before_nudge
 test_nudge_delivery_preserves_concurrent_replacement
 test_firstmate_updated_outcome_counts_upgrade
 test_firstmate_current_outcome_is_success_without_upgrade

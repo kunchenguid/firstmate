@@ -98,6 +98,14 @@ ARGV_B64=$(printf '%s\0' "$COMMAND" "$@" | encode_base64)
 SSH_BIN=${FM_SSH_BIN:-ssh}
 ALIVE_INTERVAL=${FM_SSH_ALIVE_INTERVAL:-15}
 ALIVE_COUNT_MAX=${FM_SSH_ALIVE_COUNT_MAX:-3}
+EXPECTED_HOST=${FM_ON_EXPECTED_HOST:-}
+EXPECTED_HOME_PATH=${FM_ON_EXPECTED_HOME:-}
+if [ -n "$EXPECTED_HOST" ] || [ -n "$EXPECTED_HOME_PATH" ]; then
+  [ -n "$EXPECTED_HOST" ] && [ -n "$EXPECTED_HOME_PATH" ] \
+    || die "expected remote placement is incomplete"
+  [ "$HOST" = "$EXPECTED_HOST" ] && [ "$HOME_PATH" = "$EXPECTED_HOME_PATH" ] \
+    || die "remote secondmate placement changed before execution"
+fi
 case "$ALIVE_INTERVAL" in ''|*[!0-9]*) die "FM_SSH_ALIVE_INTERVAL must be a positive integer: $ALIVE_INTERVAL" ;; esac
 case "$ALIVE_COUNT_MAX" in ''|*[!0-9]*) die "FM_SSH_ALIVE_COUNT_MAX must be a positive integer: $ALIVE_COUNT_MAX" ;; esac
 [ "$ALIVE_INTERVAL" -gt 0 ] || die "FM_SSH_ALIVE_INTERVAL must be a positive integer: $ALIVE_INTERVAL"

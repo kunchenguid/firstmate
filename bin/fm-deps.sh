@@ -690,9 +690,7 @@ record_secondmate_nudge_action() {
 }
 
 firstmate_update_commit_is_valid() {
-  local commit=$1
-  case "${#commit}" in 40|64) ;; *) return 1 ;; esac
-  case "$commit" in *[!0-9A-Fa-f]*) return 1 ;; esac
+  fm_update_action_commit_is_valid "$1"
 }
 
 firstmate_update_commit_state() {
@@ -748,7 +746,7 @@ process_journaled_firstmate_reread() {
 process_journaled_secondmate_update() {
   local marker=$1 action phase id selector home before after remote remote_host
   local expected state meta kind current_home current_remote_host active_home head=""
-  local instructions message write_status commit_status=0
+  local instructions message write_status commit_status=0 remote_out remote_result remote_commit
   action=$(fm_update_action_value "$marker" action 2>/dev/null || true)
   phase=$(fm_update_action_value "$marker" phase 2>/dev/null || true)
   id=$(fm_update_action_value "$marker" id 2>/dev/null || true)
@@ -802,9 +800,40 @@ process_journaled_secondmate_update() {
       message=$FM_SECOND_MATE_NUDGE_MESSAGE
       ;;
     1)
-      if [ -n "$before" ] || [ -n "$after" ] || [ -z "$remote_host" ] \
+      if [ -n "$before" ] || [ -z "$remote_host" ] \
         || [ "$current_home" != "$home" ] \
         || [ "$current_remote_host" != "$remote_host" ]; then
+        printf 'Firstmate remote secondmate update journal is invalid for %s\n' "$selector" >&2
+        return 2
+      fi
+      if [ "$phase" = prepared ] || [ -z "$after" ]; then
+        if ! remote_out=$(FM_ON_EXPECTED_HOST="$remote_host" FM_ON_EXPECTED_HOME="$home" \
+          "$FM_ROOT/bin/fm-on.sh" "$id" fm-remote-secondmate-control.sh update "$id" \
+          < /dev/null 2>&1); then
+          printf 'Firstmate remote secondmate update retry failed for %s: %s\n' \
+            "$selector" "${remote_out%%$'\n'*}" >&2
+          return 1
+        fi
+        remote_result=$(printf '%s\n' "$remote_out" | tail -1)
+        case "$remote_result" in
+          synced:*) remote_commit=${remote_result#synced: } ;;
+          current:*) remote_commit=${remote_result#current: } ;;
+          *)
+            printf 'Firstmate remote secondmate update retry was invalid for %s\n' "$selector" >&2
+            return 1
+            ;;
+        esac
+        if ! firstmate_update_commit_is_valid "$remote_commit" \
+          || ! fm_update_action_write_secondmate updated "$id" "$home" "" \
+            "$remote_commit" 1 "$remote_host"; then
+          printf 'Firstmate remote secondmate update retry could not be recorded for %s\n' \
+            "$selector" >&2
+          return 1
+        fi
+        phase=updated
+        after=$remote_commit
+      fi
+      if [ "$phase" != updated ] || ! firstmate_update_commit_is_valid "$after"; then
         printf 'Firstmate remote secondmate update journal is invalid for %s\n' "$selector" >&2
         return 2
       fi
