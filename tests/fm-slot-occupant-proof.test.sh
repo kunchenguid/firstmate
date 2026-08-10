@@ -144,6 +144,21 @@ unset -f stat
 pass "an unreadable process census retains uncertainty"
 
 fm_agent_worktree_process_census() { return 1; }
+FOREIGN_HOME="$TMP_ROOT/foreign-home"
+mkdir -p "$FOREIGN_HOME/state" "$HOME_DIR/data"
+fm_write_meta "$FOREIGN_HOME/state/foreign-paused.meta" \
+  "window=firstmate:fm-foreign-paused" "worktree=$WORKTREE" \
+  "project=$PROJECT" "kind=ship" "mode=no-mistakes" "home=$FOREIGN_HOME"
+printf '%s\n' "- foreign-paused - paused task (home: $FOREIGN_HOME; scope: alpha; projects: alpha; added 2026-08-10)" \
+  > "$HOME_DIR/data/secondmates.md"
+verdict=$(fm_slot_disposal_verdict "$HOME_DIR/state" task-a "$WORKTREE" \
+  "$HOME_DIR" "$HOME_DIR" crewmate closed herdr lab:pane-a)
+case "$verdict" in
+  "retain: slot is also recorded by task(s) foreign-paused"*) : ;;
+  *) fail "a paused task in another home did not retain the slot: $verdict" ;;
+esac
+pass "cross-home paused metadata retains a pooled slot"
+rm -f "$FOREIGN_HOME/state/foreign-paused.meta" "$HOME_DIR/data/secondmates.md"
 verdict=$(fm_slot_disposal_verdict "$HOME_DIR/state" task-a "$WORKTREE" \
   "$HOME_DIR" "$HOME_DIR" crewmate closed herdr lab:pane-a)
 [ "$verdict" = dispose ] \

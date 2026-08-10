@@ -42,7 +42,7 @@
 # Every operational-home variable a firstmate script reads. Extend here, not at
 # a call site, when a new home override is introduced.
 _FM_WORKER_ISOLATION_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-FM_WORKER_ISOLATION_HOME_VARS="FM_HOME FM_ROOT FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE FM_PENDING_REPLY_DIR_OVERRIDE"
+FM_WORKER_ISOLATION_HOME_VARS="FM_HOME FM_ROOT FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE FM_PENDING_REPLY_DIR_OVERRIDE STATE"
 
 fm_worker_shell_quote() {  # <text>
   printf "'"
@@ -101,12 +101,129 @@ fm_worker_declaration_present() {
   [ -n "${FM_AGENT_ROLE:-}" ] || [ -n "${FM_AGENT_TASK:-}" ] || [ -n "${FM_AGENT_OWNER_HOME:-}" ]
 }
 
+fm_worker_canonical_path() {
+  local path=${1:-}
+  [ -n "$path" ] && [ -d "$path" ] || return 1
+  ( cd "$path" 2>/dev/null && pwd -P )
+}
+
+fm_worker_primary_default_branch() {
+  local root ref branch
+  root=$1
+  ref=$(git -C "$root" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
+  if [ -n "$ref" ]; then
+    printf '%s' "${ref#origin/}"
+    return 0
+  fi
+  for branch in main master; do
+    if git -C "$root" show-ref --verify --quiet "refs/heads/$branch"; then
+      printf '%s' "$branch"
+      return 0
+    fi
+  done
+  return 1
+}
+
+fm_worker_paths_same() {
+  local left=${1:-} right=${2:-} left_real right_real
+  [ -n "$left" ] && [ -n "$right" ] || return 1
+  [ "$left" = "$right" ] && return 0
+  left_real=$(fm_worker_canonical_path "$left" 2>/dev/null || true)
+  right_real=$(fm_worker_canonical_path "$right" 2>/dev/null || true)
+  [ -n "$left_real" ] && [ "$left_real" = "$right_real" ]
+}
+
+fm_worker_primary_ancestry_clear() {
+  local pid=$$ ppid env
+  while [ "$pid" -gt 1 ]; do
+    if [ -r "/proc/$pid/environ" ]; then
+      env=$( { tr '\0' '\n' < "/proc/$pid/environ"; } 2>/dev/null ) || return 1
+      printf '%s\n' "$env" | grep -Eq '^FM_AGENT_ROLE=(crewmate|secondmate)$' && return 1
+      ppid=$(awk '/^PPid:/ {print $2; exit}' "/proc/$pid/status" 2>/dev/null)
+    else
+      ppid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d '[:space:]')
+    fi
+    case "$ppid" in
+      ''|*[!0-9]*) return 1 ;;
+    esac
+    [ "$ppid" -lt "$pid" ] || return 1
+    pid=$ppid
+  done
+  return 0
+}
+
+fm_worker_primary_origin_proven() {
+  local root home state root_real home_real state_real git_dir git_common
+  local branch default role var value expected
+  case "${FM_AGENT_ROLE:-}" in
+    ""|primary) ;;
+    *) return 1 ;;
+  esac
+  [ -z "${FM_AGENT_TASK:-}" ] && [ -z "${FM_AGENT_OWNER_HOME:-}" ] || return 1
+  role=${FM_AGENT_ROLE:-}
+  root=${FM_ROOT_OVERRIDE:-$(cd "$_FM_WORKER_ISOLATION_LIB_DIR/.." && pwd)}
+  home=${FM_HOME:-$root}
+  state=${FM_STATE_OVERRIDE:-$home/state}
+  root_real=$(fm_worker_canonical_path "$root") || return 1
+  home_real=$(fm_worker_canonical_path "$home") || return 1
+  state_real=$(fm_worker_canonical_path "$state") || return 1
+  [ "$state_real" = "$home_real/state" ] || return 1
+  [ "$(pwd -P 2>/dev/null || true)" = "$root_real" ] || return 1
+  [ ! -e "$root_real/.fm-secondmate-home" ] || return 1
+  [ ! -L "$root_real/.fm-secondmate-home" ] || return 1
+  git_dir=$(git -C "$root_real" rev-parse --git-dir 2>/dev/null) || return 1
+  git_common=$(git -C "$root_real" rev-parse --git-common-dir 2>/dev/null) || return 1
+  if [ "$git_dir" != "$git_common" ]; then
+    [ "$role" = primary ] || return 1
+  fi
+  branch=$(git -C "$root_real" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+  if [ -n "$branch" ]; then
+    default=$(fm_worker_primary_default_branch "$root_real") || return 1
+    [ "$branch" = "$default" ] || [ "$role" = primary ] || return 1
+  else
+    [ "$role" = primary ] || return 1
+  fi
+  [ -f "$root_real/AGENTS.md" ] || return 1
+  [ -d "$root_real/bin" ] || return 1
+  [ -d "$home_real/state" ] || return 1
+  [ -d "$home_real/data" ] || return 1
+  [ -d "$home_real/config" ] || return 1
+  if [ -z "$role" ]; then
+    if [ "$home_real" = "$root_real" ]; then
+      for var in $FM_WORKER_ISOLATION_HOME_VARS STATE; do
+        eval "value=\${$var:-}"
+        [ -z "$value" ] || return 1
+      done
+    fi
+    fm_worker_primary_ancestry_clear || return 1
+  fi
+  for var in $FM_WORKER_ISOLATION_HOME_VARS STATE; do
+    case "$var" in
+      FM_HOME) expected=$home_real ;;
+      FM_ROOT|FM_ROOT_OVERRIDE) expected=$root_real ;;
+      FM_STATE_OVERRIDE|STATE) expected=$home_real/state ;;
+      FM_DATA_OVERRIDE) expected=$home_real/data ;;
+      FM_PROJECTS_OVERRIDE) expected=$home_real/projects ;;
+      FM_CONFIG_OVERRIDE) expected=$home_real/config ;;
+      FM_PENDING_REPLY_DIR_OVERRIDE) expected=$home_real/state/pending-replies ;;
+      *) continue ;;
+    esac
+    eval "value=\${$var:-}"
+    if [ -n "$value" ]; then
+      fm_worker_paths_same "$value" "$expected" || return 1
+    elif [ -z "$role" ] && [ "$home_real" = "$root_real" ]; then
+      continue
+    fi
+  done
+  return 0
+}
+
 fm_worker_identity_is_complete() {
   local effective_home owner var value expected
   case "${FM_AGENT_ROLE:-}" in
     crewmate) ;;
     secondmate)
-      effective_home=${FM_HOME:-${FM_ROOT_OVERRIDE:-${FM_ROOT:-}}}
+      effective_home=${FM_HOME:-}
       [ -n "$effective_home" ] || return 1
       [ "$effective_home" = "${FM_AGENT_OWNER_HOME:-}" ] || return 1
       owner=${FM_AGENT_OWNER_HOME:-}
@@ -118,6 +235,7 @@ fm_worker_identity_is_complete() {
           FM_PROJECTS_OVERRIDE) expected=$owner/projects ;;
           FM_CONFIG_OVERRIDE) expected=$owner/config ;;
           FM_PENDING_REPLY_DIR_OVERRIDE) expected=$owner/state/pending-replies ;;
+          STATE) expected=$owner/state ;;
           *) continue ;;
         esac
         case "$var" in
@@ -129,6 +247,7 @@ fm_worker_identity_is_complete() {
           FM_PROJECTS_OVERRIDE) value=${FM_PROJECTS_OVERRIDE:-} ;;
           FM_CONFIG_OVERRIDE) value=${FM_CONFIG_OVERRIDE:-} ;;
           FM_PENDING_REPLY_DIR_OVERRIDE) value=${FM_PENDING_REPLY_DIR_OVERRIDE:-} ;;
+          STATE) value=${STATE:-} ;;
         esac
         [ -z "$value" ] || [ "$value" = "$expected" ] || return 1
       done
@@ -144,9 +263,12 @@ fm_worker_identity_is_complete() {
 }
 
 # fm_worker_is_task_worker: 0 unless this process has a complete secondmate
-# identity.
+# identity or a proven primary origin.
 fm_worker_is_task_worker() {
   if [ "${FM_AGENT_ROLE:-}" = secondmate ] && fm_worker_identity_is_complete; then
+    return 1
+  fi
+  if fm_worker_primary_origin_proven; then
     return 1
   fi
   return 0

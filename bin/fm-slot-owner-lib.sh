@@ -12,8 +12,9 @@
 # So disposal is gated on POSITIVE evidence of a conflict, in three independent
 # forms, any one of which retains the lease:
 #
-#   1. another task recorded in the same home names the same physical slot -
-#      the observed incident, and it needs no cooperation from the occupant;
+#   1. another task recorded in a discoverable home names the same physical
+#      slot - the observed incident, and it needs no cooperation from the
+#      occupant;
 #   2. the slot's ownership stamp names a different task or home - the metadata
 #      being trusted is positively stale because the slot was reissued;
 #   3. a declared worker process is running inside the slot, whether or not its
@@ -221,19 +222,63 @@ fm_slot_same_path() {
 }
 
 # fm_slot_meta_referencing_tasks <state-dir> <task-id> <worktree>: other task
-# ids in this home whose metadata names the same slot, newline separated.
+# ids in every discoverable home whose metadata names the same slot, newline
+# separated.
 fm_slot_meta_referencing_tasks() {
-  local state=$1 self=$2 wt=$3 meta id other found=1
+  local state=$1 self=$2 wt=$3 current_home home home_real meta id other
+  local meta_state registry line candidate worktrees found=1 i
+  local -a homes=()
+  local -A seen=()
   [ -d "$state" ] || return 1
-  for meta in "$state"/*.meta; do
-    [ -f "$meta" ] || continue
-    id=$(basename "$meta" .meta)
-    [ "$id" != "$self" ] || continue
-    other=$(fm_slot_meta_worktree "$meta")
-    [ -n "$other" ] || continue
-    fm_slot_same_path "$other" "$wt" || continue
-    printf '%s\n' "$id"
-    found=0
+  current_home=$(cd "${state%/}/.." 2>/dev/null && pwd -P) || return 2
+  homes+=("$current_home")
+  worktrees=$(git -C "$wt" worktree list --porcelain 2>/dev/null) || return 2
+  while IFS= read -r line; do
+    case "$line" in
+      worktree\ *) homes+=("${line#worktree }") ;;
+    esac
+  done <<< "$worktrees"
+  for ((i=0; i<${#homes[@]}; i++)); do
+    home=${homes[i]}
+    if [ -e "$home" ] || [ -L "$home" ]; then
+      home_real=$(fm_agent_canonical_dir "$home" 2>/dev/null) || return 2
+    else
+      continue
+    fi
+    [ -n "${seen[$home_real]+seen}" ] && continue
+    seen[$home_real]=1
+    meta_state="$home_real/state"
+    if [ -e "$meta_state" ] && [ ! -d "$meta_state" ]; then
+      return 2
+    fi
+    if [ -d "$meta_state" ] && [ ! -r "$meta_state" ]; then
+      return 2
+    fi
+    for meta in "$meta_state"/*.meta; do
+      [ -f "$meta" ] || continue
+      [ -r "$meta" ] || return 2
+      id=$(basename "$meta" .meta)
+      [ "$home_real" = "$current_home" ] && [ "$id" = "$self" ] && continue
+      other=$(fm_slot_meta_worktree "$meta")
+      [ -n "$other" ] || continue
+      fm_slot_same_path "$other" "$wt" || continue
+      printf '%s\n' "$id"
+      found=0
+      candidate=$(grep '^home=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+      case "$candidate" in
+        /*) homes+=("$candidate") ;;
+      esac
+    done
+    registry="$home_real/data/secondmates.md"
+    if [ -e "$registry" ]; then
+      [ -f "$registry" ] && [ -r "$registry" ] || return 2
+      while IFS= read -r line; do
+        candidate=$(printf '%s\n' "$line" | sed -n 's/.*(home:[[:space:]]*\([^;)]*\);.*/\1/p' | sed 's/[[:space:]]*$//')
+        case "$candidate" in
+          /*) homes+=("$candidate") ;;
+        esac
+      done < "$registry"
+    fi
   done
   return "$found"
 }
@@ -291,7 +336,10 @@ fm_slot_disposal_verdict() {
     return 0
   fi
   if refs=$(fm_slot_meta_referencing_tasks "$state" "$self" "$wt"); then
-    printf '%s%s in this home' "$FM_SLOT_RETAIN_META_PREFIX" "$(fm_slot_join_ids "$refs")"
+    printf '%s%s' "$FM_SLOT_RETAIN_META_PREFIX" "$(fm_slot_join_ids "$refs")"
+    return 0
+  elif [ "$?" -eq 2 ]; then
+    printf 'retain: all-home slot metadata evidence is unavailable'
     return 0
   fi
   stamp_path=$(fm_slot_stamp_path "$wt" 2>/dev/null || true)

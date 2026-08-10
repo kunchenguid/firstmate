@@ -84,6 +84,24 @@ start_declared_agent() {
   printf '%s\n' "$pid"
 }
 
+start_declared_agent_with_inherited_home() {
+  local cwd=$1 id=$2 owner=$3 inherited=$4 pid
+  ( cd "$cwd" \
+    && FM_AGENT_ROLE=crewmate FM_AGENT_TASK="$id" FM_AGENT_OWNER_HOME="$owner" \
+       FM_HOME="$inherited" FM_STATE_OVERRIDE="$inherited/state" \
+       FM_AGENT_TEST_RUN="$RUN_TAG" \
+       exec sleep 300 ) >/dev/null 2>&1 </dev/null &
+  pid=$!
+  BG_PIDS+=($pid)
+  local i=0
+  while [ "$i" -lt 50 ]; do
+    [ -e "/proc/$pid/cwd" ] && break
+    sleep 0.05
+    i=$((i + 1))
+  done
+  printf '%s\n' "$pid"
+}
+
 require_procfs() {
   [ -d /proc ] && [ -L "/proc/$$/cwd" ]
 }
@@ -94,7 +112,7 @@ test_crewmate_declaration_clears_every_inherited_home() {
   local prefix
   prefix=$( . "$ROOT/bin/fm-worker-isolation-lib.sh" \
     && fm_worker_launch_env_prefix crewmate task-a1 /home/cap/firstmate )
-  [ "$prefix" = "FM_HOME= FM_ROOT= FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PENDING_REPLY_DIR_OVERRIDE= FM_AGENT_ROLE=crewmate FM_AGENT_TASK='task-a1' FM_AGENT_OWNER_HOME='/home/cap/firstmate' " ] \
+  [ "$prefix" = "FM_HOME= FM_ROOT= FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PENDING_REPLY_DIR_OVERRIDE= STATE= FM_AGENT_ROLE=crewmate FM_AGENT_TASK='task-a1' FM_AGENT_OWNER_HOME='/home/cap/firstmate' " ] \
     || fail "crewmate declaration changed: $prefix"
   pass "a crewmate declaration clears every operational-home variable and names its owner"
 }
@@ -103,7 +121,7 @@ test_secondmate_declaration_pins_only_its_own_home() {
   local prefix
   prefix=$( . "$ROOT/bin/fm-worker-isolation-lib.sh" \
     && fm_worker_launch_env_prefix secondmate dom-b2 /home/cap/homes/dom )
-  [ "$prefix" = "FM_HOME='/home/cap/homes/dom' FM_ROOT= FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PENDING_REPLY_DIR_OVERRIDE= FM_AGENT_ROLE=secondmate FM_AGENT_TASK='dom-b2' FM_AGENT_OWNER_HOME='/home/cap/homes/dom' " ] \
+  [ "$prefix" = "FM_HOME='/home/cap/homes/dom' FM_ROOT= FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PENDING_REPLY_DIR_OVERRIDE= STATE= FM_AGENT_ROLE=secondmate FM_AGENT_TASK='dom-b2' FM_AGENT_OWNER_HOME='/home/cap/homes/dom' " ] \
     || fail "secondmate declaration changed: $prefix"
   pass "a secondmate declaration pins its own home and clears every inherited override"
 }
@@ -136,6 +154,12 @@ test_incomplete_worker_identity_refuses_primary_operations() {
   status=$?
   expect_code 1 "$status" "a secondmate without an owner home must be refused normally"
   assert_contains "$out" "task worker" "missing-owner secondmate refusal lost its worker diagnostic"
+  out=$(FM_AGENT_ROLE=secondmate FM_AGENT_TASK=dom-b2 FM_AGENT_OWNER_HOME=/homes/dom \
+    FM_ROOT=/homes/dom env -u FM_HOME bash -c '. "$1"; fm_worker_refuse_primary_operation operation' _ \
+    "$ROOT/bin/fm-worker-isolation-lib.sh" 2>&1)
+  status=$?
+  expect_code 1 "$status" "a secondmate without explicit FM_HOME must be refused"
+  assert_contains "$out" "task worker" "FM_ROOT-only secondmate refusal lost its worker diagnostic"
   out=$(FM_AGENT_ROLE=secondmate FM_AGENT_TASK=dom-b2 FM_AGENT_OWNER_HOME=/homes/dom FM_ROOT=/primary \
     bash -c '. "$1"; fm_worker_refuse_primary_operation operation' _ \
     "$ROOT/bin/fm-worker-isolation-lib.sh" 2>&1)
@@ -328,7 +352,7 @@ test_every_verified_harness_launches_with_its_home_declaration() {
     rec=$(make_launch_case "launch-$harness" "$id")
     read_launch_record "$rec"
     pid=$(start_declared_agent "$WT_DIR" "$id-shell" "$HOME_DIR")
-    out=$(HOME="$HOME_DIR" GROK_HOME="$HOME_DIR/.grok" \
+    out=$(HOME="$HOME_DIR" GROK_HOME="$HOME_DIR/.grok" FM_AGENT_ROLE=primary \
       FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
       FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
       FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
@@ -373,20 +397,25 @@ make_primary_home() {
   printf '%s\n' "$dir"
 }
 
-test_declared_worker_is_never_a_primary_scope_match() {
+test_primary_scope_requires_authoritative_primary_proof() {
   # Named primary_home, not home: the sourced libraries carry their own `home`
   # local, and reusing the name here makes shellcheck read the two as one.
   local primary_home out
   primary_home=$(make_primary_home "$TMP_ROOT/scope-home")
   out=$( . "$ROOT/bin/fm-primary-scope-lib.sh" \
     && fm_primary_scope_matches "$primary_home" "$primary_home/state" && printf 'primary' || printf 'not-primary' )
-  [ "$out" = not-primary ] || fail "a markerless process matched primary scope"
+  [ "$out" = not-primary ] || fail "a markerless process without primary proof matched primary scope"
+  out=$( FM_AGENT_ROLE=primary FM_ROOT_OVERRIDE="$primary_home" FM_HOME="$primary_home" \
+    FM_STATE_OVERRIDE="$primary_home/state" \
+    . "$ROOT/bin/fm-primary-scope-lib.sh" \
+    && fm_primary_scope_matches "$primary_home" "$primary_home/state" && printf 'primary' || printf 'not-primary' )
+  [ "$out" = primary ] || fail "an explicitly proven primary did not match primary scope"
   out=$( export FM_AGENT_ROLE=crewmate FM_AGENT_TASK=w1 FM_AGENT_OWNER_HOME="$primary_home"
     . "$ROOT/bin/fm-primary-scope-lib.sh" \
     && fm_primary_scope_matches "$primary_home" "$primary_home/state" && printf 'primary' || printf 'not-primary' )
   [ "$out" = not-primary ] \
     || fail "a declared crewmate matched primary scope inside a genuine primary checkout"
-  pass "markerless and declared workers are never primary-scope matches"
+  pass "primary scope requires primary proof and excludes declared workers"
 }
 
 test_project_local_startup_adapter_stays_inert_for_a_worker() {
@@ -630,7 +659,7 @@ test_tmux_fallback_requires_complete_worker_identity() {
 }
 
 test_agent_lookup_is_home_scoped_and_rejects_reused_pids() {
-  local dir_a dir_b id index out status home_a home_b
+  local dir_a dir_b id index out status home_a home_b inherited_id primary_home
   require_procfs || { pass "skip: this host has no readable procfs for home-scoped lookup"; return 0; }
   dir_a="$TMP_ROOT/proc-home-a"
   dir_b="$TMP_ROOT/proc-home-b"
@@ -646,6 +675,17 @@ test_agent_lookup_is_home_scoped_and_rejects_reused_pids() {
   case "$out" in
     proc*"$(cd "$dir_a" && pwd -P)") : ;;
     *) fail "duplicate task ids crossed owner homes: $out" ;;
+  esac
+  primary_home="$TMP_ROOT/inherited-primary-home"
+  mkdir -p "$primary_home/state"
+  inherited_id="inherited-home-$RUN_TAG"
+  start_declared_agent_with_inherited_home "$dir_a" "$inherited_id" "$home_a" "$primary_home" >/dev/null
+  index=$( . "$ROOT/bin/fm-agent-cwd-lib.sh" && fm_agent_task_pid_index )
+  out=$( . "$ROOT/bin/fm-agent-cwd-lib.sh" \
+    && fm_agent_cwd_verdict "$inherited_id" '' '' "$index" "$home_a" )
+  case "$out" in
+    unverified*) : ;;
+    *) fail "a worker carrying the primary home environment was accepted: $out" ;;
   esac
   out=$( . "$ROOT/bin/fm-agent-cwd-lib.sh" \
     && fm_agent_pids_for_task reused-task $'reused-task\t'"$$"$'\t0\t'"$home_a"$'\tcrewmate' )
@@ -665,7 +705,7 @@ test_spawn_settles_on_proc_evidence_over_a_lying_pane_path() {
   fm_git_init_commit "$lying"
   pid=$(start_declared_agent "$WT_DIR" "$id-shell" "$HOME_DIR")
 
-  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+  out=$(FM_AGENT_ROLE=primary FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
@@ -688,7 +728,7 @@ test_spawn_does_not_promote_an_unproven_pane_path() {
   id="settle-hint-d4-$RUN_TAG"
   rec=$(make_launch_case settle-hint "$id")
   read_launch_record "$rec"
-  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+  out=$(FM_AGENT_ROLE=primary FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_SPAWN_NO_GUARD=1 FM_SPAWN_WT_WAIT_SECS=1 TMUX="fake,1,0" \
@@ -980,7 +1020,7 @@ SH
     && fm_slot_stamp_write "$WT_DIR" task-e6 "$WORLD/home" ) \
     || fail "the contested-slot fixture could not be stamped"
 
-  out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$WORLD/home" \
+  out=$(FM_AGENT_ROLE=primary FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$WORLD/home" \
     FM_STATE_OVERRIDE="$WORLD/home/state" FM_DATA_OVERRIDE="$WORLD/home/data" \
     FM_CONFIG_OVERRIDE="$WORLD/home/config" \
     FM_FAKE_TREEHOUSE_LOG="$WORLD/treehouse.log" \
@@ -1219,7 +1259,7 @@ test_markerless_worker_is_refused_at_primary_cwd
 test_unreadable_task_start_proof_remains_contested
 test_every_verified_harness_launches_with_its_home_declaration
 test_secondmate_child_receives_only_its_own_home
-test_declared_worker_is_never_a_primary_scope_match
+test_primary_scope_requires_authoritative_primary_proof
 test_project_local_startup_adapter_stays_inert_for_a_worker
 test_worker_cannot_take_the_session_owner_record
 test_worker_cannot_spawn_or_tear_down

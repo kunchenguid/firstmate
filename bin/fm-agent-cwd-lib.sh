@@ -45,6 +45,8 @@ _FM_AGENT_CWD_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # FM_HARNESS_RE and the harness-identity contract have one owner.
 # shellcheck source=bin/fm-session-lock-lib.sh
 . "$_FM_AGENT_CWD_LIB_DIR/fm-session-lock-lib.sh"
+# shellcheck source=bin/fm-worker-isolation-lib.sh
+. "$_FM_AGENT_CWD_LIB_DIR/fm-worker-isolation-lib.sh"
 
 FM_AGENT_CWD_MAX_DESCEND=16
 
@@ -135,7 +137,8 @@ fm_agent_worker_identity_matches() {
     /*) ;;
     *) return 1 ;;
   esac
-  [ -z "$expected_home" ] || fm_agent_paths_same "$owner" "$expected_home"
+  [ -z "$expected_home" ] || fm_agent_paths_same "$owner" "$expected_home" || return 1
+  fm_agent_worker_home_contract_matches "$pid" "$role" "$owner"
 }
 
 fm_agent_proc_start_time() {
@@ -166,6 +169,40 @@ fm_agent_paths_same() {
   left_real=$(fm_agent_canonical_dir "$left" 2>/dev/null || printf '%s' "$left")
   right_real=$(fm_agent_canonical_dir "$right" 2>/dev/null || printf '%s' "$right")
   [ "$left_real" = "$right_real" ]
+}
+
+fm_agent_worker_home_contract_matches() {
+  local pid=$1 role=$2 owner=$3 var value expected
+  case "$role" in
+    crewmate)
+      for var in $FM_WORKER_ISOLATION_HOME_VARS STATE; do
+        value=$(fm_agent_proc_env "$pid" "$var" 2>/dev/null || true)
+        [ -z "$value" ] || return 1
+      done
+      return 0
+      ;;
+    secondmate)
+      value=$(fm_agent_proc_env "$pid" FM_HOME 2>/dev/null || true)
+      [ -n "$value" ] && fm_agent_paths_same "$value" "$owner" || return 1
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+  for var in $FM_WORKER_ISOLATION_HOME_VARS STATE; do
+    case "$var" in
+      FM_HOME|FM_ROOT|FM_ROOT_OVERRIDE) expected=$owner ;;
+      FM_STATE_OVERRIDE|STATE) expected=$owner/state ;;
+      FM_DATA_OVERRIDE) expected=$owner/data ;;
+      FM_PROJECTS_OVERRIDE) expected=$owner/projects ;;
+      FM_CONFIG_OVERRIDE) expected=$owner/config ;;
+      FM_PENDING_REPLY_DIR_OVERRIDE) expected=$owner/state/pending-replies ;;
+      *) continue ;;
+    esac
+    value=$(fm_agent_proc_env "$pid" "$var" 2>/dev/null || true)
+    [ -z "$value" ] || fm_agent_paths_same "$value" "$expected" || return 1
+  done
+  return 0
 }
 
 # fm_agent_task_pid_index: one `<task-id>\t<pid>\t<start>\t<home>\t<role>` line per live process that
