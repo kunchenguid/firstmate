@@ -2058,7 +2058,7 @@ EOF
 # FM_BACKEND_HERDR_RELAUNCH_* globals contain the authoritative exact ids.
 fm_backend_herdr_relaunch_missing_task() {  # <session> <workspace> <tab> <pane> <label> <cwd>
   local session=$1 workspace=$2 recorded_tab=$3 recorded_pane=$4 label=$5 cwd=$6
-  local tabs panes tab_count label_count exact_count old_pane old_pane_count recorded_pane_count
+  local tabs panes tab_count label_count exact_count old_pane old_pane_count recorded_pane_count recorded_pane_tab
   local out new_tab new_pane remaining old_present new_present new_pane_count
   FM_BACKEND_HERDR_RELAUNCH_SESSION=""
   FM_BACKEND_HERDR_RELAUNCH_WORKSPACE_ID=""
@@ -2119,12 +2119,15 @@ fm_backend_herdr_relaunch_missing_task() {  # <session> <workspace> <tab> <pane>
   }
   old_pane_count=$(printf '%s' "$panes" | jq -r --arg tab "$recorded_tab" '[.result.panes[] | select(.tab_id == $tab)] | length' 2>/dev/null)
   recorded_pane_count=$(printf '%s' "$panes" | jq -r --arg pane "$recorded_pane" '[.result.panes[] | select(.pane_id == $pane)] | length' 2>/dev/null)
+  recorded_pane_tab=$(printf '%s' "$panes" | jq -r --arg pane "$recorded_pane" '[.result.panes[] | select(.pane_id == $pane) | .tab_id][0] // empty' 2>/dev/null)
   case "$old_pane_count:$recorded_pane_count" in :|:*|*:|*[!0-9:]*)
     echo "error: recorded Herdr tab '$recorded_tab' returned an unparseable pane count; refusing recovery" >&2
     return 1
     ;;
   esac
-  if [ "$exact_count" -eq 0 ] && [ "$recorded_pane_count" != 0 ]; then
+  if [ "$recorded_pane_count" -gt 1 ] || {
+    [ "$recorded_pane_count" -eq 1 ] && [ "$recorded_pane_tab" != "$recorded_tab" ];
+  }; then
     echo "error: recorded Herdr pane '$recorded_pane' is attached to another tab; refusing recovery" >&2
     return 1
   fi
@@ -2165,6 +2168,7 @@ fm_backend_herdr_relaunch_missing_task() {  # <session> <workspace> <tab> <pane>
   new_tab=$(printf '%s' "$out" | jq -r '.result.tab.tab_id // empty' 2>/dev/null)
   new_pane=$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id // empty' 2>/dev/null)
   [ -n "$new_tab" ] && [ -n "$new_pane" ] && [ "$new_tab" != "$recorded_tab" ] || {
+    [ -n "$new_tab" ] && fm_backend_herdr_cli "$session" tab close "$new_tab" >/dev/null 2>&1 || true
     echo "error: replacement Herdr tab response was missing or conflicting; refusing recovery" >&2
     return 1
   }
@@ -2180,6 +2184,7 @@ fm_backend_herdr_relaunch_missing_task() {  # <session> <workspace> <tab> <pane>
     fi
   fi
   tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$workspace" 2>/dev/null) || {
+    fm_backend_herdr_cli "$session" tab close "$new_tab" >/dev/null 2>&1 || true
     echo "error: could not verify replacement Herdr tab '$new_tab'; refusing recovery" >&2
     return 1
   }
@@ -2187,16 +2192,19 @@ fm_backend_herdr_relaunch_missing_task() {  # <session> <workspace> <tab> <pane>
     '[.result.tabs[]? | select(.label == $label and .tab_id != $replacement)] | length' 2>/dev/null)
   new_present=$(printf '%s' "$tabs" | jq -r --arg tab "$new_tab" '[.result.tabs[]? | select(.tab_id == $tab)] | length' 2>/dev/null)
   [ "$remaining" = 0 ] && [ "$new_present" = 1 ] || {
+    fm_backend_herdr_cli "$session" tab close "$new_tab" >/dev/null 2>&1 || true
     echo "error: replacement Herdr tab '$new_tab' did not leave exactly one task tab; refusing recovery" >&2
     return 1
   }
   panes=$(fm_backend_herdr_cli "$session" pane list --workspace "$workspace" 2>/dev/null) || {
+    fm_backend_herdr_cli "$session" tab close "$new_tab" >/dev/null 2>&1 || true
     echo "error: could not verify replacement Herdr pane '$new_pane'; refusing recovery" >&2
     return 1
   }
   new_pane_count=$(printf '%s' "$panes" | jq -r --arg tab "$new_tab" --arg pane "$new_pane" \
     '[.result.panes[]? | select(.tab_id == $tab and .pane_id == $pane)] | length' 2>/dev/null)
   [ "$new_pane_count" = 1 ] || {
+    fm_backend_herdr_cli "$session" tab close "$new_tab" >/dev/null 2>&1 || true
     echo "error: replacement Herdr pane '$new_pane' did not bind exactly to tab '$new_tab'; refusing recovery" >&2
     return 1
   }
