@@ -310,7 +310,7 @@ jobs:
                   limit 'The stubbed isolated-copy step could not be prepared.'
                 fi
 
-                ansi_command="powershell -NoProfile -Command \"[Console]::Write([char]27 + '[31m' + \$env:FM_WINDOWS_ANSI_MARKER + [char]27 + '[0m' + [Environment]::NewLine)\""
+                ansi_command="[Console]::Write([char]27 + '[31m' + \$env:FM_WINDOWS_ANSI_MARKER + [char]27 + '[0m' + [Environment]::NewLine)"
                 if herdr_call pane run "$pane_id" "$ansi_command" >>"$details" 2>&1 &&
                   herdr_call pane wait-output "$pane_id" --match "$ansi_marker" --timeout 10000 >>"$details" 2>&1; then
                   ansi_capture=$(herdr_call pane read "$pane_id" --source recent --lines 200 --format ansi 2>>"$details" || true)
