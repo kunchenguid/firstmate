@@ -257,8 +257,8 @@ test_cursor_composer_placeholder_requires_cursor_glyph() {
   [ "$(FM_COMPOSER_IDLE_RE='^(Type a message\.\.\.|Add a follow-up)$' \
     fm_tmux_composer_row_state '│ → Add a follow-up │' 1 0)" = empty ] \
     || fail "Cursor's idle Add a follow-up placeholder was not recognized"
-  [ "$(fm_tmux_composer_row_state '→' 0 0)" = empty ] \
-    || fail "cursor's empty prompt glyph was not recognized"
+  [ "$(fm_tmux_composer_row_state '→' 0 0)" = unknown ] \
+    || fail "bare Cursor arrow weakened dead-shell injection safety"
   pass "cursor placeholder classification requires the prompt glyph"
 }
 
@@ -273,6 +273,9 @@ test_cursor_hooks_restore_existing_files() {
   printf '%s\n' 'firstmate script' > "$wt/.cursor/hooks/fm-busy-turnend.sh"
   fm_control_cursor_hooks_record_installed "$wt" "$state" restore \
     "$wt/.cursor/hooks.json" "$wt/.cursor/hooks/fm-busy-turnend.sh"
+  fm_control_cursor_hooks_restore "$wt" "$state" restore
+  assert_present "$state/restore.cursor-hooks.json.installed" \
+    "Cursor restore discarded ownership needed by a later retry"
   fm_control_cursor_hooks_restore "$wt" "$state" restore
   python3 - "$wt/.cursor/hooks.json" <<'PY' || fail "existing Cursor hooks.json was not restored semantically"
 import json, sys
@@ -424,6 +427,36 @@ EOF
   pass "same-Cursor relaunch restores before replacing hook wiring"
 }
 
+test_failed_same_cursor_relaunch_remains_retryable() {
+  local rec case_dir home proj wt fakebin id out status
+  rec=$(make_spawn_case cursor-relaunch-retry)
+  IFS='|' read -r case_dir home proj wt fakebin id <<EOF
+$rec
+EOF
+  mkdir -p "$wt/.cursor/hooks"
+  printf '%s\n' '{"version":1,"hooks":{"user":[{"command":"keep"}]}}' > "$wt/.cursor/hooks.json"
+  printf '%s\n' 'pre-existing user hook' > "$wt/.cursor/hooks/fm-busy-turnend.sh"
+  out=$(run_cursor_spawn "$home" "$proj" "$wt" "$fakebin" "$id" \
+    --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  expect_code 0 "$status" "initial Cursor spawn should succeed: $out"
+
+  out=$(FM_FAKE_LAUNCH_FAIL=1 run_cursor_relaunch "$home" "$wt" "$fakebin" "$id" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "same-Cursor relaunch failure injection unexpectedly succeeded"
+  assert_present "$home/state/$id.cursor-hooks.json.installed" \
+    "failed same-Cursor relaunch discarded retry ownership"
+  assert_present "$home/state/$id.cursor-fm-busy-turnend.sh.installed" \
+    "failed same-Cursor relaunch discarded the script snapshot"
+
+  out=$(run_cursor_relaunch "$home" "$wt" "$fakebin" "$id" 2>&1)
+  status=$?
+  expect_code 0 "$status" "same-Cursor relaunch retry should succeed: $out"
+  assert_present "$wt/.cursor/hooks/fm-busy-turnend.sh" \
+    "same-Cursor relaunch retry did not install replacement wiring"
+  pass "failed same-Cursor relaunch retains ownership for retry"
+}
+
 test_cursor_restore_recreates_removed_preexisting_hook_script() {
   local dir="$TMP_ROOT/restore-removed-script" wt="$TMP_ROOT/restore-removed-script/wt"
   local state="$TMP_ROOT/restore-removed-script/state"
@@ -540,6 +573,7 @@ test_cursor_hook_restore_preserves_user_hook_edits
 test_cursor_hook_backup_is_atomic
 test_spawn_abort_retains_cursor_backups_when_restore_fails
 test_same_cursor_relaunch_preserves_preexisting_hook_script
+test_failed_same_cursor_relaunch_remains_retryable
 test_cursor_restore_recreates_removed_preexisting_hook_script
 test_spawn_abort_restores_cursor_hooks
 test_cursor_hooks_reject_parent_symlinks

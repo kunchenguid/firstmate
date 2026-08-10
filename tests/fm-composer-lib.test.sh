@@ -10,7 +10,7 @@
 #   2. The SAME shell glyph INSIDE a bordered composer box is the harness's own
 #      prompt and still reads `empty` (existing behavior preserved).
 #   3. The AGENT prompt glyphs `❯` (claude), `›` (codex), and `⟩` (muse) are a genuine empty
-#      agent composer either way, bordered or bare.
+#      agent composer either way, while Cursor's `→` requires a border.
 #   4. Real unsubmitted text reads `pending`; a known idle placeholder reads
 #      `empty`.
 set -u
@@ -85,6 +85,21 @@ test_agent_glyphs_are_empty_bordered_and_bare() {
   out=$(classify 0 '⟩'); [ "$out" = empty ] || fail "bare muse '⟩' should read empty, got '$out'"
   out=$(classify 1 '⟩'); [ "$out" = empty ] || fail "bordered muse '⟩' should read empty, got '$out'"
   pass "fm_composer_classify_content: agent prompt glyphs (❯ claude, › codex, ⟩ muse) read empty bordered or bare"
+}
+
+test_cursor_arrow_requires_structure() {
+  local out
+  out=$(classify 0 '→'); [ "$out" = unknown ] \
+    || fail "bare Cursor arrow must remain unsafe for shell injection, got '$out'"
+  out=$(classify 0 '→ Add a follow-up' '^(Add a follow-up)$'); [ "$out" = pending ] \
+    || fail "unbordered Cursor placeholder must remain pending, got '$out'"
+  out=$(classify 0 '→ Add a follow-up' '^(→ Add a follow-up)$'); [ "$out" = pending ] \
+    || fail "an idle override must not authorize an unbordered Cursor arrow, got '$out'"
+  out=$(classify 1 '→'); [ "$out" = empty ] \
+    || fail "bordered Cursor arrow should read empty, got '$out'"
+  out=$(classify 1 '→ Add a follow-up' '^(Add a follow-up)$'); [ "$out" = empty ] \
+    || fail "bordered Cursor placeholder should read empty, got '$out'"
+  pass "fm_composer_classify_content: Cursor arrow requires composer structure"
 }
 
 # --- Empty content and idle placeholder -------------------------------------
@@ -536,6 +551,7 @@ test_stripped_unbordered_content_uses_plain_content
 test_bare_shell_prompt_with_command_is_not_empty
 test_bordered_shell_glyph_is_empty
 test_agent_glyphs_are_empty_bordered_and_bare
+test_cursor_arrow_requires_structure
 test_empty_content_is_empty
 test_idle_placeholder_is_empty
 test_idle_placeholder_case_mode_is_explicit

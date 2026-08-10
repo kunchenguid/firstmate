@@ -657,6 +657,7 @@ RELAUNCH_REPLACEMENT_BUSY_GEN=
 RELAUNCH_REPLACEMENT_HARNESS=
 RELAUNCH_REPLACEMENT_STATE=
 RELAUNCH_REPLACEMENT_WT=
+RELAUNCH_PRIOR_CURSOR=0
 CURSOR_WIRING_PENDING=0
 CURSOR_WIRING_RESTORE_READY=0
 CURSOR_WIRING_BUSY_GEN=
@@ -695,13 +696,17 @@ spawn_abort_cleanup() {
     RELAUNCH_REPLACEMENT_PENDING=0
     if [ "$RELAUNCH_REPLACEMENT_HARNESS" = cursor ] \
        && [ "$CURSOR_WIRING_RESTORE_READY" != 1 ]; then
-      fm_control_cursor_hooks_forget "$RELAUNCH_REPLACEMENT_STATE" "$ID" || true
+      [ "$RELAUNCH_PRIOR_CURSOR" = 1 ] \
+        || fm_control_cursor_hooks_forget "$RELAUNCH_REPLACEMENT_STATE" "$ID" || true
     elif ! clear_relaunch_harness_wiring \
           "$RELAUNCH_REPLACEMENT_HARNESS" \
           "$RELAUNCH_REPLACEMENT_WT" \
           "$RELAUNCH_REPLACEMENT_STATE" \
           "$ID"; then
-        echo "warning: could not remove replacement wiring after aborted relaunch of $ID" >&2
+      echo "warning: could not remove replacement wiring after aborted relaunch of $ID" >&2
+    elif [ "$RELAUNCH_REPLACEMENT_HARNESS" = cursor ] \
+         && [ "$RELAUNCH_PRIOR_CURSOR" != 1 ]; then
+      fm_control_cursor_hooks_forget "$RELAUNCH_REPLACEMENT_STATE" "$ID" || true
     fi
     if [ -n "$RELAUNCH_REPLACEMENT_BUSY_GEN" ]; then
       if ! "$FM_ROOT/bin/fm-busy-event.sh" retire \
@@ -715,7 +720,9 @@ spawn_abort_cleanup() {
     CURSOR_WIRING_PENDING=0
     if [ "$CURSOR_WIRING_RESTORE_READY" != 1 ]; then
       fm_control_cursor_hooks_forget "$CURSOR_WIRING_STATE" "$ID" || true
-    elif ! fm_control_cursor_hooks_restore "$CURSOR_WIRING_WT" "$CURSOR_WIRING_STATE" "$ID"; then
+    elif fm_control_cursor_hooks_restore "$CURSOR_WIRING_WT" "$CURSOR_WIRING_STATE" "$ID"; then
+      fm_control_cursor_hooks_forget "$CURSOR_WIRING_STATE" "$ID" || true
+    else
       echo "warning: could not restore Cursor hooks after aborted spawn of $ID" >&2
     fi
     if [ -n "$CURSOR_WIRING_BUSY_GEN" ]; then
@@ -1021,6 +1028,9 @@ if [ "$RELAUNCH" -eq 1 ]; then
     exit 1
   }
   RELAUNCH_PRIOR_HARNESS=$(fm_meta_get "$RELAUNCH_META" harness)
+  if [ "$(fm_control_harness_family "$RELAUNCH_PRIOR_HARNESS" 2>/dev/null || true)" = cursor ]; then
+    RELAUNCH_PRIOR_CURSOR=1
+  fi
   KIND=$(fm_meta_get "$RELAUNCH_META" kind)
   [ -n "$KIND" ] || KIND=ship
   MODE=$(fm_meta_get "$RELAUNCH_META" mode)
@@ -2426,7 +2436,9 @@ with open(destination, "w", encoding="utf-8") as handle:
     json.dump(document, handle, separators=(",", ":"))
     handle.write("\n")
 PY
-      fm_control_cursor_hooks_backup "$WT" "$STATE_REAL" "$ID" || {
+      cursor_backup_mode=
+      [ "$RELAUNCH_PRIOR_CURSOR" = 1 ] && cursor_backup_mode=reuse
+      fm_control_cursor_hooks_backup "$WT" "$STATE_REAL" "$ID" "$cursor_backup_mode" || {
         echo "error: existing Cursor hooks.json is not a safe regular file" >&2
         exit 1
       }
@@ -2769,6 +2781,10 @@ preserve_relaunch_meta() {
 if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_META_PUBLISH_STARTED=1
   mv -f "$SPAWN_META_TMP" "$STATE/$ID.meta"
+  if [ "$RELAUNCH_PRIOR_CURSOR" = 1 ] \
+     && [ "$(fm_control_harness_family "$HARNESS" 2>/dev/null || true)" != cursor ]; then
+    fm_control_cursor_hooks_forget "$STATE_REAL" "$ID" || exit 1
+  fi
   RELAUNCH_REPLACEMENT_PENDING=0
   SPAWN_META_PUBLISH_STARTED=0
   SPAWN_META_TMP=

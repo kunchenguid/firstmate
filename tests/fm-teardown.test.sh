@@ -1687,6 +1687,47 @@ test_herdr_flat_teardown_preflight_refuses_before_changes() {
   pass "herdr flat teardown preflight refuses before every destructive change"
 }
 
+test_cursor_herdr_teardown_retry_retains_hook_ownership() {
+  local case_dir log closed hook_script rc
+  case_dir=$(make_case cursor-herdr-retry)
+  write_meta "$case_dir" local-only ship
+  configure_flat_herdr_teardown_case "$case_dir"
+  printf '%s\n' 'harness=cursor' >> "$case_dir/state/task-x1.meta"
+  log="$case_dir/herdr.log"; : > "$log"
+  closed="$case_dir/closed"
+  mkdir -p "$case_dir/wt/.cursor/hooks"
+  printf '%s\n' '{"version":1,"hooks":{}}' > "$case_dir/wt/.cursor/hooks.json"
+  fm_control_cursor_hooks_backup "$case_dir/wt" "$case_dir/state" task-x1
+  printf '%s\n' '{"version":1,"hooks":{"beforeSubmitPrompt":[{"command":".cursor/hooks/fm-busy-turnend.sh busy"}],"stop":[{"command":".cursor/hooks/fm-busy-turnend.sh idle-stop"}],"sessionEnd":[{"command":".cursor/hooks/fm-busy-turnend.sh idle-session-end"}]}}' \
+    > "$case_dir/wt/.cursor/hooks.json"
+  hook_script="$case_dir/wt/.cursor/hooks/fm-busy-turnend.sh"
+  printf '%s\n' 'firstmate hook script' > "$hook_script"
+  fm_control_cursor_hooks_record_installed "$case_dir/wt" "$case_dir/state" task-x1 \
+    "$case_dir/wt/.cursor/hooks.json" "$hook_script"
+
+  rc=0
+  FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" \
+    FM_FAKE_HERDR_SESSION_LIST_GARBAGE=1 \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  [ "$rc" -ne 0 ] || fail "Cursor Herdr teardown crossed an unavailable preflight"
+  assert_present "$case_dir/state/task-x1.cursor-hooks.json.installed" \
+    "failed Cursor Herdr teardown discarded retry ownership"
+  assert_present "$case_dir/state/task-x1.cursor-fm-busy-turnend.sh.installed" \
+    "failed Cursor Herdr teardown discarded the script snapshot"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "failed Cursor Herdr teardown discarded task metadata"
+
+  FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" \
+    FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS=1 \
+    run_teardown "$case_dir" --force > "$case_dir/stdout2" 2> "$case_dir/stderr2" \
+    || fail "Cursor Herdr teardown retry failed: $(cat "$case_dir/stderr2")"
+  assert_absent "$case_dir/state/task-x1.cursor-hooks.json.installed" \
+    "successful Cursor Herdr teardown retained hook ownership"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "successful Cursor Herdr teardown retained task metadata"
+  pass "Cursor Herdr teardown retains hook ownership until retry commits"
+}
+
 configure_secondmate_with_herdr_child() {  # <case-dir>
   local case_dir=$1 home="$1/secondmate-home"
   mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects"
@@ -2704,6 +2745,7 @@ test_herdr_teardown_clears_escalation_marker
 test_herdr_flat_teardown_refuses_orphaning_records_then_retry_completes
 test_herdr_flat_teardown_refuses_records_on_unparseable_presence
 test_herdr_flat_teardown_preflight_refuses_before_changes
+test_cursor_herdr_teardown_retry_retains_hook_ownership
 test_forced_secondmate_herdr_child_preflight_refuses_before_changes
 test_forced_secondmate_teardown_holds_descendant_lifecycle_locks
 test_forced_secondmate_herdr_child_retains_records_when_close_unconfirmed

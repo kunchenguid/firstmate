@@ -221,8 +221,8 @@ fm_control_harness_wiring_paths() {  # <harness> <worktree> <state-dir> <id>
   esac
 }
 
-fm_control_cursor_hooks_backup() {  # <worktree> <state-dir> <id>
-  local wt=$1 state=$2 id=$3 path backup installed cursor_dir="$1/.cursor" hooks_dir="$1/.cursor/hooks"
+fm_control_cursor_hooks_backup() {  # <worktree> <state-dir> <id> [reuse]
+  local wt=$1 state=$2 id=$3 reuse=${4:-} path backup installed next retained=0 cursor_dir="$1/.cursor" hooks_dir="$1/.cursor/hooks"
   [ ! -L "$cursor_dir" ] && [ ! -L "$hooks_dir" ] || return 1
   [ ! -e "$cursor_dir" ] || [ -d "$cursor_dir" ] || return 1
   [ ! -e "$hooks_dir" ] || [ -d "$hooks_dir" ] || return 1
@@ -231,10 +231,46 @@ fm_control_cursor_hooks_backup() {  # <worktree> <state-dir> <id>
       return 1
     fi
     backup="$state/$id.cursor-$(basename "$path")"
-    [ ! -e "$backup" ] && [ ! -L "$backup" ] || return 1
+    if [ -e "$backup" ] || [ -L "$backup" ]; then
+      [ -f "$backup" ] && [ ! -L "$backup" ] || return 1
+      retained=1
+    fi
     installed="$state/$id.cursor-$(basename "$path").installed"
-    [ ! -e "$installed" ] && [ ! -L "$installed" ] || return 1
+    if [ -e "$installed" ] || [ -L "$installed" ]; then
+      [ -f "$installed" ] && [ ! -L "$installed" ] || return 1
+      retained=1
+    fi
   done
+  if [ "$retained" -eq 1 ]; then
+    [ "$reuse" = reuse ] || return 1
+    for path in "$wt/.cursor/hooks.json" "$wt/.cursor/hooks/fm-busy-turnend.sh"; do
+      installed="$state/$id.cursor-$(basename "$path").installed"
+      [ -f "$installed" ] && [ ! -L "$installed" ] || return 1
+      backup="$state/$id.cursor-$(basename "$path")"
+      next="$backup.next.$$"
+      [ ! -e "$next" ] && [ ! -L "$next" ] || return 1
+    done
+    for path in "$wt/.cursor/hooks.json" "$wt/.cursor/hooks/fm-busy-turnend.sh"; do
+      [ -e "$path" ] || continue
+      backup="$state/$id.cursor-$(basename "$path")"
+      next="$backup.next.$$"
+      cp -p -- "$path" "$next" || {
+        rm -f -- "$state/$id.cursor-hooks.json.next.$$" \
+          "$state/$id.cursor-fm-busy-turnend.sh.next.$$"
+        return 1
+      }
+    done
+    for path in "$wt/.cursor/hooks.json" "$wt/.cursor/hooks/fm-busy-turnend.sh"; do
+      backup="$state/$id.cursor-$(basename "$path")"
+      next="$backup.next.$$"
+      if [ -e "$path" ]; then
+        mv -f -- "$next" "$backup" || return 1
+      else
+        rm -f -- "$backup" || return 1
+      fi
+    done
+    return 0
+  fi
   for path in "$wt/.cursor/hooks.json" "$wt/.cursor/hooks/fm-busy-turnend.sh"; do
     [ -e "$path" ] || continue
     backup="$state/$id.cursor-$(basename "$path")"
@@ -255,7 +291,9 @@ fm_control_cursor_hooks_record_installed() {  # <worktree> <state-dir> <id> <hoo
     esac
     [ -f "$source" ] && [ ! -L "$source" ] || return 1
     installed="$state/$id.cursor-$(basename "$path").installed"
-    [ ! -e "$installed" ] && [ ! -L "$installed" ] || return 1
+    if [ -e "$installed" ] || [ -L "$installed" ]; then
+      [ -f "$installed" ] && [ ! -L "$installed" ] || return 1
+    fi
     cp -p -- "$source" "$installed" || return 1
   done
 }
@@ -377,7 +415,6 @@ PY
       fi
     fi
   done
-  fm_control_cursor_hooks_forget "$state" "$id"
 }
 
 # The firstmate-owned global turn-end registry entry a harness mints per task.
