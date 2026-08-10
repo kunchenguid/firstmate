@@ -143,7 +143,7 @@ tmux -L "$SOCKET" kill-window -t "$SESSION:strictblank" 2>/dev/null || true
 # --- 3. zellij: real classifier + the false-positive regression -------------
 if command -v zellij >/dev/null 2>&1; then
   zj_version=$(zellij --version 2>/dev/null | head -1)
-  [ -n "$zj_version" ] || zj_version=version-unknown
+  [ -n "$zj_version" ] || zj_version='version-unknown'
   export FM_ROOT_OVERRIDE="$ROOT"
   # shellcheck source=/dev/null
   . "$ROOT/bin/fm-backend.sh"

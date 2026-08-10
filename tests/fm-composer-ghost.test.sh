@@ -350,6 +350,7 @@ test_bottom_border_cursor_is_unknown() {
 test_pi_identity_requires_readable_busy_state() {
   local out
   if out=$(
+    # shellcheck disable=SC2329 # Mock invoked indirectly by the sourced adapter.
     tmux() {
       local arg
       for arg in "$@"; do
@@ -360,6 +361,7 @@ test_pi_identity_requires_readable_busy_state() {
       done
       return 1
     }
+    # shellcheck disable=SC2329 # Mock invoked indirectly by the sourced adapter.
     fm_pane_busy_state() { printf 'unknown'; }
     fm_tmux_composer_identity fakepane
   ); then
