@@ -12,8 +12,10 @@ WORKTREE="$TMP_ROOT/worktree"
 BRIEF="$TMP_ROOT/brief.md"
 ENCODER="$TMP_ROOT/encoder.sh"
 TASK_ID='bridge-task'
+REAL_MV=$(command -v mv)
+FAILBIN="$TMP_ROOT/failbin"
 
-mkdir -p "$STATE" "$WORKTREE"
+mkdir -p "$STATE" "$WORKTREE" "$FAILBIN"
 printf '# Bridge fixture\n' > "$BRIEF"
 chmod 600 "$BRIEF"
 cat > "$ENCODER" <<'SH'
@@ -21,6 +23,17 @@ cat > "$ENCODER" <<'SH'
 printf '%s\n' "$*"
 SH
 chmod 700 "$ENCODER"
+cat > "$FAILBIN/mv" <<SH
+#!/usr/bin/env bash
+if [ "\${FM_TEST_FAIL_MV_ONCE:-0}" = 1 ] && [ ! -e "$TMP_ROOT/mv-failed" ]; then
+  : > "$TMP_ROOT/mv-failed"
+  exit 1
+fi
+exec "$REAL_MV" "\$@"
+SH
+chmod 700 "$FAILBIN/mv"
+PATH="$FAILBIN:$PATH"
+export PATH
 
 # shellcheck source=/dev/null
 . "$BRIDGE_LIB"
@@ -72,18 +85,29 @@ expect_mode "$cursor" 0600
 [ "$(fm_sandbox_bridge_read_cursor "$cursor")" = 0 ] || fail "new bridge cursor was not zero"
 
 printf 'working: first delta\n' >> "$bridge/status"
+export FM_TEST_FAIL_MV_ONCE=1
 status=0
 fm_sandbox_bridge_sync "$bridge" "$STATE" "$TASK_ID" "$WORKTREE" || status=$?
-expect_code 0 "$status" "first bridge status sync"
+expect_code 1 "$status" "cursor failure after first bridge append"
 first_size=$(wc -c < "$bridge/status" | tr -d ' ')
+[ "$(fm_sandbox_bridge_read_cursor "$cursor")" = 0 ] \
+  || fail "failed cursor write changed the host-private cursor"
+canonical_status="$state_real/$TASK_ID.status"
+[ "$(cat "$canonical_status")" = 'working: first delta' ] \
+  || fail "first bridge append was not committed before cursor failure"
+export FM_TEST_FAIL_MV_ONCE=0
+status=0
+fm_sandbox_bridge_sync "$bridge" "$STATE" "$TASK_ID" "$WORKTREE" || status=$?
+expect_code 0 "$status" "retry after cursor failure"
+[ "$(cat "$canonical_status")" = 'working: first delta' ] \
+  || fail "retry duplicated the already committed bridge delta"
 [ "$(fm_sandbox_bridge_read_cursor "$cursor")" = "$first_size" ] \
-  || fail "first sync did not advance the host-private cursor"
+  || fail "retry did not advance the host-private cursor"
 
 printf 'done: second delta\n' >> "$bridge/status"
 status=0
 fm_sandbox_bridge_sync "$bridge" "$STATE" "$TASK_ID" "$WORKTREE" || status=$?
 expect_code 0 "$status" "second bridge status sync"
-canonical_status="$state_real/$TASK_ID.status"
 [ "$(cat "$canonical_status")" = $'working: first delta\ndone: second delta' ] \
   || fail "canonical status did not contain each delta exactly once"
 [ "$(fm_sandbox_bridge_read_cursor "$cursor")" = "$(wc -c < "$bridge/status" | tr -d ' ')" ] \

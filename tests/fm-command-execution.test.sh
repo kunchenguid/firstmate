@@ -27,6 +27,13 @@ case "${1:-}" in
     printf 'crabbox-ready\n'
     ;;
   run)
+    case "${2:-}" in
+      --profile|--id) ;;
+      *)
+        printf 'unsupported Crabbox run routing\n' >&2
+        exit 64
+        ;;
+    esac
     printf 'crabbox-stdout\n'
     printf 'crabbox-stderr\n' >&2
     exit "${CRABBOX_RUN_STATUS:-0}"
@@ -145,7 +152,7 @@ run_function fm_command_execution_run crabbox "$WORKTREE" profile-a '' printf pr
 expect_code 0 "$RUN_STATUS" 'Crabbox profile command succeeds'
 assert_contains "$RUN_STDOUT" 'crabbox-stdout' 'Crabbox profile command streams stdout'
 assert_contains "$RUN_STDERR" 'crabbox-stderr' 'Crabbox profile command streams stderr'
-assert_grep 'argv: run --job profile-a -- printf profile-command' "$CRABBOX_LOG" 'Crabbox profile form is exact'
+assert_grep 'argv: run --profile profile-a -- printf profile-command' "$CRABBOX_LOG" 'Crabbox profile form is exact'
 run_function fm_command_execution_run crabbox "$WORKTREE" '' lease-direct printf lease-command
 expect_code 0 "$RUN_STATUS" 'Crabbox lease command succeeds'
 assert_grep 'argv: run --id lease-direct -- printf lease-command' "$CRABBOX_LOG" 'Crabbox lease form is exact'
@@ -173,7 +180,7 @@ expect_code 0 "$RUN_STATUS" 'Crabbox task check succeeds through fake CLI'
 assert_contains "$RUN_STDOUT" 'crabbox-ready' 'Crabbox task check streams provider readiness'
 run_cli profile-task run -- printf profile-task-command
 expect_code 0 "$RUN_STATUS" 'profile-routed task command succeeds'
-assert_grep 'argv: run --job profile-a -- printf profile-task-command' "$CRABBOX_LOG" 'fm-exec emits profile command form'
+assert_grep 'argv: run --profile profile-a -- printf profile-task-command' "$CRABBOX_LOG" 'fm-exec emits profile command form'
 journal_has profile-task '.[0].profile == "profile-a" and .[0].lease == null and .[1].exit_code == 0'
 run_cli profile-task logs explicit-run-id
 expect_code 0 "$RUN_STATUS" 'explicit task run logs succeed'

@@ -240,20 +240,64 @@ fm_sandbox_bridge_copy_delta() {  # <bridge-status> <cursor> <host-private tmp>
   ' "$1" "$2" "$3"
 }
 
-fm_sandbox_bridge_append_delta() {  # <host-private delta> <canonical-status>
+fm_sandbox_bridge_delta_state() {  # <host-private delta> <canonical-status> <cursor>
   perl -MFcntl=':DEFAULT,O_NOFOLLOW' -e '
-    my ($delta, $status) = @ARGV;
+    my ($delta, $status, $cursor) = @ARGV;
+    exit 1 unless $cursor =~ /\A[0-9]+\z/;
     sysopen(my $in, $delta, O_RDONLY | O_NOFOLLOW) or exit 1;
     my @d = stat($in); exit 1 unless -f $in && $d[4] == $< && !($d[2] & 0077);
+    my $delta_size = $d[7]; exit 1 if $delta_size > 65536;
+    my $status_size = 0;
+    my $out;
+    if (-e $status || -l $status) {
+      sysopen($out, $status, O_RDONLY | O_NOFOLLOW) or exit 1;
+      my @s = stat($out); exit 1 unless -f $out && $s[4] == $< && !($s[2] & 0022);
+      $status_size = $s[7];
+    }
+    exit 1 if $status_size < $cursor;
+    my $overlap = $status_size - $cursor;
+    $overlap = $delta_size if $overlap > $delta_size;
+    if ($overlap) {
+      seek($in, 0, 0) or exit 1;
+      seek($out, $cursor, 0) or exit 1;
+      my $left = $overlap;
+      while ($left) {
+        my $want = $left > 8192 ? 8192 : $left;
+        my $n = sysread($in, my $delta_buf, $want);
+        my $m = sysread($out, my $status_buf, $want);
+        exit 1 unless defined $n && $n == $want && defined $m && $m == $want && $delta_buf eq $status_buf;
+        $left -= $want;
+      }
+    }
+    if ($overlap == $delta_size) {
+      print "committed";
+    } else {
+      print $overlap;
+    }
+  ' "$1" "$2" "$3"
+}
+
+fm_sandbox_bridge_append_delta() {  # <host-private delta> <canonical-status> <offset>
+  perl -MFcntl=':DEFAULT,O_NOFOLLOW' -e '
+    my ($delta, $status, $offset) = @ARGV;
+    exit 1 unless $offset =~ /\A[0-9]+\z/;
+    sysopen(my $in, $delta, O_RDONLY | O_NOFOLLOW) or exit 1;
+    my @d = stat($in); exit 1 unless -f $in && $d[4] == $< && !($d[2] & 0077);
+    exit 1 if $d[7] > 65536 || $offset > $d[7];
     sysopen(my $out, $status, O_WRONLY | O_CREAT | O_APPEND | O_NOFOLLOW, 0600) or exit 1;
     my @s = stat($out); exit 1 unless -f $out && $s[4] == $< && !($s[2] & 0022);
+    seek($in, $offset, 0) or exit 1;
+    my $left = $d[7] - $offset;
     while (1) {
-      my $n = sysread($in, my $buf, 8192);
+      last unless $left;
+      my $want = $left > 8192 ? 8192 : $left;
+      my $n = sysread($in, my $buf, $want);
       exit 1 unless defined $n;
-      last unless $n;
+      exit 1 unless $n == $want;
       print {$out} $buf or exit 1;
+      $left -= $n;
     }
-  ' "$1" "$2"
+  ' "$1" "$2" "$3"
 }
 
 fm_sandbox_bridge_write_cursor() {  # <host-private cursor> <size>
@@ -280,7 +324,7 @@ fm_sandbox_bridge_touch_turnend() {  # <canonical turn-ended>
 
 # fm_sandbox_bridge_sync: append a bounded unseen delta and consume turn-ended once.
 fm_sandbox_bridge_sync() {  # <bridge> <state> <task-id> <worktree>
-  local bridge=$1 state=$2 task_id=$3 worktree=$4 cursor size tmp state_real canonical_status canonical_turnend
+  local bridge=$1 state=$2 task_id=$3 worktree=$4 cursor size delta_state tmp state_real canonical_status canonical_turnend
   [ "$#" -eq 4 ] || { fm_sandbox_bridge_error 'usage: fm_sandbox_bridge_sync <bridge> <state> <task-id> <worktree>'; return 2; }
   fm_sandbox_bridge_validate "$bridge" "$state" "$task_id" "$worktree" || return 1
   cursor=$(fm_sandbox_bridge_read_cursor "$FM_SANDBOX_BRIDGE_CURSOR") || {
@@ -297,11 +341,26 @@ fm_sandbox_bridge_sync() {  # <bridge> <state> <task-id> <worktree>
     return 1
   }
   if [ "$size" -gt "$cursor" ]; then
-    fm_sandbox_bridge_append_delta "$tmp" "$canonical_status" || {
+    delta_state=$(fm_sandbox_bridge_delta_state "$tmp" "$canonical_status" "$cursor") || {
       rm -f -- "$tmp"
-      fm_sandbox_bridge_error "could not append bridge status to canonical state for $task_id"
+      fm_sandbox_bridge_error "could not reconcile bridge status with canonical state for $task_id"
       return 1
     }
+    case "$delta_state" in
+      committed) ;;
+      ''|*[!0-9]*)
+        rm -f -- "$tmp"
+        fm_sandbox_bridge_error "could not reconcile bridge status with canonical state for $task_id"
+        return 1
+        ;;
+      *)
+        fm_sandbox_bridge_append_delta "$tmp" "$canonical_status" "$delta_state" || {
+          rm -f -- "$tmp"
+          fm_sandbox_bridge_error "could not append bridge status to canonical state for $task_id"
+          return 1
+        }
+        ;;
+    esac
     fm_sandbox_bridge_write_cursor "$FM_SANDBOX_BRIDGE_CURSOR" "$size" || {
       rm -f -- "$tmp"
       fm_sandbox_bridge_error "could not transactionally advance sandbox bridge cursor for $task_id"

@@ -10,7 +10,7 @@
 #
 # crabbox prewarm <profile> has no documented machine-readable lease-handle
 # result. Preparing it would create an unrecordable, expiring resource, so
-# prepare fails safely until that CLI surface exists; run-by-job remains usable.
+# prepare fails safely until that CLI surface exists; run-by-profile remains usable.
 
 fm_executor_crabbox_tool_check() {
   command -v crabbox >/dev/null 2>&1 || {
@@ -46,7 +46,7 @@ fm_executor_crabbox_run() {  # <cwd> <profile> <lease> <argv...>
   if [ -n "$lease" ]; then
     crabbox run --id "$lease" -- "$@"
   else
-    crabbox run --job "$profile" -- "$@"
+    crabbox run --profile "$profile" -- "$@"
   fi
 }
 
