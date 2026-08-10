@@ -413,10 +413,24 @@ if [ "$count" -eq 1 ]; then
   printf 'signal: synthetic wake\n'
   exit 0
 fi
+# The hung successor contract: stay alive (never emit the ready line) yet exit
+# promptly on SIGTERM. Node's interval keeps the event loop alive - a script
+# with no pending handles would exit immediately; the 1000 ms period is
+# arbitrary and process.exit(0) in the handler bypasses pending timers. The
+# handler is installed at startup, and an early SIGTERM (before the handler)
+# still terminates via Node's default action, so retirement is safe either way.
 exec node --input-type=module -e 'process.on("SIGTERM", () => process.exit(0)); setInterval(() => {}, 1000);'
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
-  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_PI_ARM_READY_TIMEOUT_MS=250 FM_WATCH_ARM_RETIRE_TIMEOUT_MS=250 FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node --input-type=module 2>&1 <<'EOF'
+  # The successor never becomes ready, so these budgets only pace the retry
+  # loop and must carry real scheduling slack. Under CI contention the spawned
+  # `bash -lc` successor can take hundreds of ms just to start (login profile
+  # sourcing on a starved runner), and SIGTERM-to-close observation can exceed
+  # 250 ms; both races reproduced under throttled CPU and match the CI failure
+  # signature (see data/firstmate-pr1726-ci-failure-check/report.md). 750 ms
+  # keeps the loop at ~2.5 s while giving ~5x margin over the observed CI
+  # per-attempt latency.
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_PI_ARM_READY_TIMEOUT_MS=750 FM_WATCH_ARM_RETIRE_TIMEOUT_MS=750 FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node --input-type=module 2>&1 <<'EOF'
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
@@ -446,10 +460,13 @@ const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
 await tool.execute("tool-call-hung-successor", {}, undefined, undefined, {});
 let promptTimeout;
+// Fail-loud cap, not a budget: the paced flow alone can approach 5 s worst
+// case (3 x ~0.75 s readiness plus retirement slack), so the cap must clear
+// that before it can mask a genuinely lost wake.
 await Promise.race([
   promptDelivered,
   new Promise((resolve) => {
-    promptTimeout = setTimeout(resolve, 5000);
+    promptTimeout = setTimeout(resolve, 10000);
   }),
 ]);
 clearTimeout(promptTimeout);
@@ -460,14 +477,21 @@ if (rows.length !== 4) throw new Error(`expected one successor plus two retries,
 if (rowsAtPrompt !== 4) throw new Error(`wake arrived before restoration exhausted (${rowsAtPrompt} arm rows)`);
 if (!prompt.includes("signal: synthetic wake")) throw new Error(`original wake was lost: ${prompt}`);
 if (!prompt.includes("could not restore watcher continuity after 2 retries")) throw new Error(`missing typed restoration failure: ${prompt}`);
-await new Promise((resolve) => setImmediate(resolve));
+// Single-flight proof: wait a bounded window covering the configured retry
+// delay (base 5 ms, max 10 ms) with 10x margin, so a delayed retry arm cannot
+// slip past an event-loop-only yield.
+await new Promise((resolve) => setTimeout(resolve, 100));
 const stableRows = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n");
 if (stableRows.length !== 4) throw new Error(`single-flight recovery launched ${stableRows.length} arms`);
 EOF
 )
   status=$?
-  expect_code 0 "$status" "Pi must deliver the actionable wake after bounded hung-successor recovery"
-  [ -z "$out" ] || fail "Pi hung-successor test printed output: $out"
+  # Surface the inner Node error on failure: the captured output is the only
+  # evidence of which recovery branch went wrong (arm rows, prompt content,
+  # retirement timeout, single-flight violation).
+  if [ "$status" -ne 0 ] || [ -n "$out" ]; then
+    fail "Pi must deliver the actionable wake after bounded hung-successor recovery (node exit ${status:-0}): $out"
+  fi
   pass "Pi hung successor falls back to one typed actionable wake"
 }
 
@@ -498,7 +522,11 @@ printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
 while [ ! -e "$FM_RELEASE_FILE" ]; do sleep 0.1; done
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
-  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_RELEASE_FILE="$release" FM_PI_ARM_READY_TIMEOUT_MS=250 FM_WATCH_ARM_RETIRE_TIMEOUT_MS=20 FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node --input-type=module 2>&1 <<'EOF'
+  # Readiness carries the same scheduling slack as the hung-successor case so
+  # the unretired successor's row is present when the fallback wake fires;
+  # retirement stays deliberately tiny (20 ms) because this fixture IGNORES
+  # TERM and the test proves the unretired fallback path.
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_RELEASE_FILE="$release" FM_PI_ARM_READY_TIMEOUT_MS=750 FM_WATCH_ARM_RETIRE_TIMEOUT_MS=20 FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node --input-type=module 2>&1 <<'EOF'
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
@@ -537,8 +565,9 @@ await new Promise((resolve) => setTimeout(resolve, 80));
 EOF
 )
   status=$?
-  expect_code 0 "$status" "Pi must fall back without overlapping an unretired successor"
-  [ -z "$out" ] || fail "Pi unretired-successor test printed output: $out"
+  if [ "$status" -ne 0 ] || [ -n "$out" ]; then
+    fail "Pi must fall back without overlapping an unretired successor (node exit ${status:-0}): $out"
+  fi
   pass "Pi unretired successor falls back without an overlapping retry"
 }
 
@@ -1588,7 +1617,10 @@ trap 'exit 0' TERM INT
 while :; do sleep 0.02; done
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
-  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_OPENCODE_ARM_READY_TIMEOUT_MS=250 FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node 2>&1 <<'EOF'
+  # Same readiness slack as the Pi hung-successor case: the spawned successor
+  # must be given time to start under CI scheduling contention before it is
+  # retired; retirement keeps the production default (1000 ms).
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_OPENCODE_ARM_READY_TIMEOUT_MS=750 FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node 2>&1 <<'EOF'
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
@@ -1622,14 +1654,17 @@ if (rows.length !== 4) throw new Error(`expected one successor plus two retries,
 if (rowsAtPrompt !== 4) throw new Error(`wake arrived before restoration exhausted (${rowsAtPrompt} arm rows)`);
 if (!prompt.includes("signal: synthetic wake")) throw new Error(`original wake was lost: ${prompt}`);
 if (!prompt.includes("could not restore watcher continuity after 2 retries")) throw new Error(`missing typed restoration failure: ${prompt}`);
+// Bounded single-flight window covering the retry delay (max 10 ms) with
+// margin, matching the Pi hung-successor case.
 await new Promise((resolve) => setTimeout(resolve, 100));
 const stableRows = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n");
 if (stableRows.length !== 4) throw new Error(`single-flight recovery launched ${stableRows.length} arms`);
 EOF
 )
   status=$?
-  expect_code 0 "$status" "OpenCode must deliver the actionable wake after bounded hung-successor recovery"
-  [ -z "$out" ] || fail "OpenCode hung-successor test printed output: $out"
+  if [ "$status" -ne 0 ] || [ -n "$out" ]; then
+    fail "OpenCode must deliver the actionable wake after bounded hung-successor recovery (node exit ${status:-0}): $out"
+  fi
   pass "OpenCode hung successor falls back to one typed actionable wake"
 }
 
@@ -1662,7 +1697,9 @@ printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
 while [ ! -e "$FM_RELEASE_FILE" ]; do sleep 0.1; done
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
-  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_RELEASE_FILE="$release" FM_OPENCODE_ARM_READY_TIMEOUT_MS=250 FM_WATCH_ARM_RETIRE_TIMEOUT_MS=20 FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node 2>&1 <<'EOF'
+  # Same readiness slack as the Pi unretired-successor case; the 20 ms
+  # retirement budget is deliberate (this fixture ignores TERM).
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_RELEASE_FILE="$release" FM_OPENCODE_ARM_READY_TIMEOUT_MS=750 FM_WATCH_ARM_RETIRE_TIMEOUT_MS=20 FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node 2>&1 <<'EOF'
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
@@ -1701,8 +1738,9 @@ await new Promise((resolve) => setTimeout(resolve, 80));
 EOF
 )
   status=$?
-  expect_code 0 "$status" "OpenCode must fall back without overlapping an unretired successor"
-  [ -z "$out" ] || fail "OpenCode unretired-successor test printed output: $out"
+  if [ "$status" -ne 0 ] || [ -n "$out" ]; then
+    fail "OpenCode must fall back without overlapping an unretired successor (node exit ${status:-0}): $out"
+  fi
   pass "OpenCode unretired successor falls back without an overlapping retry"
 }
 
@@ -2128,8 +2166,9 @@ if (!promptBody.includes("TURN WOULD END BLIND")) {
 EOF
 )
   status=$?
-  expect_code 0 "$status" "OpenCode watch plugin must not treat external healthy output as an owned arm"
-  [ -z "$out" ] || fail "OpenCode external-healthy test printed output: $out"
+  if [ "$status" -ne 0 ] || [ -n "$out" ]; then
+    fail "OpenCode watch plugin must not treat external healthy output as an owned arm (node exit ${status:-0}): $out"
+  fi
   pass "OpenCode healthy arm output does not suppress the turn-end guard"
 }
 
