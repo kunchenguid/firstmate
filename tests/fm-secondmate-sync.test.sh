@@ -585,6 +585,61 @@ test_bootstrap_nudge_retry_is_idempotent() {
   pass "T8d bootstrap nudge retry is idempotent after success"
 }
 
+test_bootstrap_nudge_retry_defers_on_busy_transaction() {
+  local w c1 fakebin marker lock ready release holder out started elapsed i
+  w=$(new_world nudge-retry-lock-busy)
+  c1=$(head_of "$w/main")
+  add_sm_worktree "$w" sm-instr "$c1"
+  bump_primary "$w" instr
+  fakebin=$(make_fake_toolchain "$w")
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_SEND_SETTLE=0 FM_FAKE_TMUX_FAIL_LITERAL=1 \
+    "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+  assert_contains "$out" "NUDGE_SECONDMATES: secondmate sm-instr: send failed:" \
+    "precondition: first nudge should fail"
+  marker="$w/home/state/.secondmate-nudge-pending/sm-instr.pending"
+  assert_present "$marker" "precondition: failed nudge should leave marker"
+  lock="$w/home/state/.remote-inherit-sm-instr.lock"
+  ready="$w/lock.ready"
+  release="$w/lock.release"
+
+  FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
+    FM_STATE_OVERRIDE="$w/home/state" bash -c '
+      . "$1"
+      fm_lock_acquire_wait "$2"
+      : > "$3"
+      while [ ! -e "$4" ]; do sleep 0.02; done
+      fm_lock_release "$2"
+    ' _ "$ROOT/bin/fm-wake-lib.sh" "$lock" "$ready" "$release" \
+    > "$w/lock-holder.out" 2>&1 &
+  holder=$!
+  for ((i = 0; i < 100; i++)); do
+    [ -e "$ready" ] && break
+    kill -0 "$holder" 2>/dev/null || break
+    sleep 0.02
+  done
+  if [ ! -e "$ready" ]; then
+    wait "$holder" 2>/dev/null || true
+    fail "bootstrap nudge lock holder did not start"
+  fi
+
+  started=$(date +%s)
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_DEPS_LOCK_TIMEOUT=1 FM_SEND_SETTLE=0 \
+    "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+  elapsed=$(( $(date +%s) - started ))
+  : > "$release"
+  wait "$holder" || fail "bootstrap nudge lock holder failed"
+
+  [ "$elapsed" -le 4 ] || fail "busy bootstrap nudge lock exceeded its acquisition bound"
+  assert_contains "$out" \
+    "NUDGE_SECONDMATES: secondmate sm-instr: deferred: transaction lock is busy" \
+    "busy bootstrap nudge lock was not reported as deferred"
+  assert_present "$marker" "busy bootstrap nudge retry discarded its marker"
+  pass "T8g bootstrap bounds and defers busy nudge retries"
+}
+
 test_bootstrap_nudge_retry_refuses_changed_home() {
   local w c1 fakebin marker out other
   w=$(new_world nudge-retry-home-change)
@@ -913,6 +968,7 @@ test_bootstrap_nudge_send_uses_state_override
 test_bootstrap_nudge_retry_rejects_malformed_marker_id
 test_bootstrap_nudge_failure_records_retry_marker
 test_bootstrap_nudge_retry_is_idempotent
+test_bootstrap_nudge_retry_defers_on_busy_transaction
 test_bootstrap_nudge_retry_refuses_changed_home
 test_nudge_retry_uses_fresh_herdr_endpoint_after_respawn
 test_bootstrap_sweep_surfaces_skipped_home

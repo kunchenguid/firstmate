@@ -310,7 +310,7 @@ secondmate_sync() {
   }
 
   secondmate_send_nudge() {
-    local id=$1 home=$2 commit=$3 instr=$4 selector marker lock out
+    local id=$1 home=$2 commit=$3 instr=$4 selector marker lock out lock_status
     selector="fm-$id"
     marker=$(secondmate_nudge_marker_path "$id") || {
       echo "NUDGE_SECONDMATES: secondmate $id: send failed: unsafe id"
@@ -320,10 +320,19 @@ secondmate_sync() {
       echo "NUDGE_SECONDMATES: secondmate $id: send failed: unsafe transaction lock"
       return 0
     }
-    if ! fm_lock_acquire_wait "$lock"; then
-      echo "NUDGE_SECONDMATES: secondmate $id: send failed: transaction lock failed"
-      return 0
-    fi
+    fm_dependency_acquire_lock "$lock"
+    lock_status=$?
+    case "$lock_status" in
+      0) ;;
+      75)
+        echo "NUDGE_SECONDMATES: secondmate $id: deferred: transaction lock is busy"
+        return 0
+        ;;
+      *)
+        echo "NUDGE_SECONDMATES: secondmate $id: send failed: transaction lock failed"
+        return 0
+        ;;
+    esac
     if ! secondmate_write_nudge_marker "$id" "$home" "$commit" "$instr"; then
       echo "NUDGE_SECONDMATES: secondmate $id: send failed: cannot record retry marker"
       fm_lock_release "$lock" || true
@@ -411,7 +420,7 @@ secondmate_sync() {
   }
 
   secondmate_retry_pending_nudges() {
-    local marker id expected_marker lock
+    local marker id expected_marker lock lock_status
     [ -d "$SECOND_MATE_NUDGE_PENDING_DIR" ] || return 0
     for marker in "$SECOND_MATE_NUDGE_PENDING_DIR"/*.pending; do
       [ -f "$marker" ] || continue
@@ -425,10 +434,23 @@ secondmate_sync() {
         continue
       fi
       lock=$(fm_secondmate_nudge_transaction_lock_path "$STATE" "$id" 2>/dev/null || true)
-      if [ -z "$lock" ] || ! fm_lock_acquire_wait "$lock"; then
+      if [ -z "$lock" ]; then
         echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: send failed: transaction lock failed"
         continue
       fi
+      fm_dependency_acquire_lock "$lock"
+      lock_status=$?
+      case "$lock_status" in
+        0) ;;
+        75)
+          echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: deferred: transaction lock is busy"
+          continue
+          ;;
+        *)
+          echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: send failed: transaction lock failed"
+          continue
+          ;;
+      esac
       secondmate_retry_pending_nudge_locked "$marker"
       fm_lock_release "$lock" || true
     done

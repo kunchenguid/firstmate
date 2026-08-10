@@ -56,7 +56,7 @@ test_version_ordering() {
 }
 
 test_apt_metadata() {
-  local fakebin out
+  local fakebin out status
   fakebin=$(fm_fakebin "$TMP_ROOT/apt")
   printf '%s\n' '#!/usr/bin/env bash' \
     "printf 'install ok installed\\t2.45.0-1ubuntu0.2\\n'" > "$fakebin/dpkg-query"
@@ -67,7 +67,17 @@ test_apt_metadata() {
   out=$(PATH="$fakebin:$PATH" apt_package_versions gh)
   [ "$out" = $'2.45.0-1ubuntu0.2\t2.45.0-1ubuntu0.3' ] \
     || fail "APT versions were parsed incorrectly: $out"
-  pass "APT installed and candidate versions are parsed without refreshing indexes"
+
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 1' > "$fakebin/dpkg-query"
+  out=$(PATH="$fakebin:$PATH" apt_package_versions gh)
+  [ "$out" = $'\t2.45.0-1ubuntu0.3' ] \
+    || fail "never-installed APT package did not retain its candidate: $out"
+
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 2' > "$fakebin/dpkg-query"
+  out=$(PATH="$fakebin:$PATH" apt_package_versions gh 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "unexpected dpkg-query failure was treated as absence: $out"
+  pass "APT versions distinguish absent packages from probe failures"
 }
 
 test_quiet_window_defers() {
@@ -1020,6 +1030,77 @@ test_nudge_publication_waits_for_sender_transaction() {
   pass "nudge publication waits for the shared sender transaction"
 }
 
+test_nudge_lock_contention_defers_dependency_checks() {
+  local fixture home commit marker lock ready release events holder out status started elapsed i
+  fixture="$TMP_ROOT/nudge-lock-contention"
+  ready="$fixture/lock.ready"
+  release="$fixture/lock.release"
+  events="$fixture/events.log"
+  home=$(create_firstmate_action_home "$fixture" one)
+  register_firstmate_action_target "$fixture" one "$home"
+  commit=$(git -C "$home" rev-parse HEAD)
+  fm_secondmate_nudge_write "$fixture/state" one "$home" "$commit" AGENTS.md \
+    "$FM_SECOND_MATE_NUDGE_MESSAGE" 0 fm-deps
+  marker="$fixture/state/.secondmate-nudge-pending/one.pending"
+  lock=$(fm_secondmate_nudge_transaction_lock_path "$fixture/state" one)
+
+  FM_ROOT_OVERRIDE="$fixture" FM_HOME="$fixture" \
+    FM_STATE_OVERRIDE="$fixture/state" bash -c '
+      . "$1"
+      fm_lock_acquire_wait "$2"
+      : > "$3"
+      while [ ! -e "$4" ]; do sleep 0.02; done
+      fm_lock_release "$2"
+    ' _ "$ROOT/bin/fm-wake-lib.sh" "$lock" "$ready" "$release" \
+    > "$fixture/holder.out" 2>&1 &
+  holder=$!
+  for ((i = 0; i < 100; i++)); do
+    [ -e "$ready" ] && break
+    kill -0 "$holder" 2>/dev/null || break
+    sleep 0.02
+  done
+  if [ ! -e "$ready" ]; then
+    wait "$holder" 2>/dev/null || true
+    fail "nudge transaction lock holder did not start"
+  fi
+
+  started=$(date +%s)
+  out=$(FM_ROOT_OVERRIDE="$fixture" FM_HOME="$fixture" \
+    FM_STATE_OVERRIDE="$fixture/state" FM_DEPS_SOURCE_ONLY=1 \
+    FM_DEPS_INTERACTIVE=0 FM_DEPS_LOCK_TIMEOUT=1 FM_DEPS_TEST_EVENTS="$events" \
+    bash -c '
+      deps=$1
+      set --
+      . "$deps"
+      check_release_tool() { printf "entered\n" >> "$FM_DEPS_TEST_EVENTS"; }
+      check_apt_package() { :; }
+      check_npm_tool() { :; }
+      check_herdr() { :; }
+      check_node() { :; }
+      check_zellij() { :; }
+      check_shellcheck_pin() { :; }
+      check_github_actions() { :; }
+      check_firstmate() { :; }
+      run_dependency_check_body
+    ' _ "$DEPS" 2>&1)
+  status=$?
+  elapsed=$(( $(date +%s) - started ))
+  : > "$release"
+  wait "$holder" || fail "nudge transaction lock holder failed"
+
+  [ "$status" -eq 0 ] || fail "busy nudge lock did not defer dependency checks: $out"
+  [ "$elapsed" -le 4 ] || fail "busy nudge lock exceeded its acquisition bound"
+  assert_contains "$out" \
+    "DEFER: dependency check - Firstmate actions are being processed; retry later" \
+    "busy nudge lock did not use the pending-action deferral path"
+  assert_contains "$out" \
+    "SUMMARY: 0 update(s) available; 0 completed; 1 deferred; 0 check/upgrade failure(s)" \
+    "busy nudge lock did not produce a deferred summary"
+  assert_absent "$events" "busy nudge lock allowed later dependency checks"
+  assert_present "$marker" "busy nudge lock discarded its durable action"
+  pass "nudge lock contention defers dependency checks without losing actions"
+}
+
 test_firstmate_actions_are_durable_and_retry_every_target() {
   local fixture log out status pending nudge one_home one_commit replacement before after
   local manifest_contents
@@ -1552,6 +1633,7 @@ test_check_only_reports_actions_without_processing_them
 test_stale_ownerless_nudges_do_not_block_or_collide
 test_stale_owned_nudges_are_quarantined
 test_nudge_publication_waits_for_sender_transaction
+test_nudge_lock_contention_defers_dependency_checks
 test_firstmate_actions_are_durable_and_retry_every_target
 test_remote_secondmate_actions_use_shared_retry_markers
 test_prepared_remote_update_journal_retries_before_nudge

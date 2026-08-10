@@ -121,11 +121,16 @@ command_version() {
 }
 
 apt_package_versions() {
-  local package=$1 installed candidate installed_out candidate_out
+  local package=$1 installed candidate installed_out candidate_out installed_status=0
   command -v dpkg-query >/dev/null 2>&1 || return 1
   command -v apt-cache >/dev/null 2>&1 || return 1
   installed_out=$(run_probe dpkg-query -W -f='${Status}\t${Version}\n' "$package" 2>/dev/null) \
-    || return 1
+    || installed_status=$?
+  case "$installed_status" in
+    0) ;;
+    1) installed_out="" ;;
+    *) return 1 ;;
+  esac
   installed=$(printf '%s\n' "$installed_out" \
     | awk -F '\t' '$1 == "install ok installed" {print $2; exit}')
   candidate_out=$(run_probe apt-cache policy "$package" 2>/dev/null) || return 1
@@ -845,6 +850,7 @@ process_journaled_secondmate_update() {
   local marker=$1 action phase id selector home before after remote remote_host remote_root
   local expected state meta kind current_home current_remote_host current_remote_root active_home head=""
   local instructions message commit_status=0 remote_out remote_result remote_commit
+  local publish_status
   action=$(fm_update_action_value "$marker" action 2>/dev/null || true)
   phase=$(fm_update_action_value "$marker" phase 2>/dev/null || true)
   id=$(fm_update_action_value "$marker" id 2>/dev/null || true)
@@ -949,7 +955,9 @@ process_journaled_secondmate_update() {
       ;;
   esac
   publish_secondmate_nudge_action "$state" "$id" "$home" "$head" \
-    "$instructions" "$message" "$remote" "$remote_host" "$remote_root" || return 1
+    "$instructions" "$message" "$remote" "$remote_host" "$remote_root"
+  publish_status=$?
+  [ "$publish_status" -eq 0 ] || return "$publish_status"
   rm -f -- "$marker" || {
     printf 'Firstmate secondmate update journal could not be cleared for %s\n' "$selector" >&2
     return 1
@@ -968,7 +976,11 @@ process_firstmate_update_journal() {
     [ -e "$marker" ] || [ -L "$marker" ] || continue
     status=0
     process_journaled_secondmate_update "$marker" || status=$?
-    [ "$status" -eq 0 ] || failed=1
+    case "$status" in
+      0) ;;
+      75) return 75 ;;
+      *) failed=1 ;;
+    esac
   done
   [ "$failed" -eq 0 ]
 }
@@ -1131,9 +1143,11 @@ process_identity_bound_nudges() {
       with_secondmate_nudge_lock "$state" "$id" process_identity_bound_nudge_claim \
         "$claim" "$marker" "$state" "$active_home"
       lock_status=$?
-      if [ "$lock_status" -ne 0 ]; then
-        failed=1
-      fi
+      case "$lock_status" in
+        0) ;;
+        75) return 75 ;;
+        *) failed=1 ;;
+      esac
     done
   fi
   if [ -e "$pending" ] || [ -L "$pending" ]; then
@@ -1164,10 +1178,14 @@ process_identity_bound_nudges() {
     with_secondmate_nudge_lock "$state" "$id" process_identity_bound_nudge_marker_locked \
       "$marker" "$claim" "$state" "$active_home"
     lock_status=$?
-    if [ "$lock_status" -ne 0 ]; then
-      printf 'Firstmate post-update nudge could not be processed for fm-%s\n' "$id" >&2
-      failed=1
-    fi
+    case "$lock_status" in
+      0) ;;
+      75) return 75 ;;
+      *)
+        printf 'Firstmate post-update nudge could not be processed for fm-%s\n' "$id" >&2
+        failed=1
+        ;;
+    esac
   done
   [ "$failed" -eq 0 ]
 }
@@ -1388,7 +1406,12 @@ cleanup_stale_secondmate_nudges() {
     with_secondmate_nudge_lock "$state" "$id" cleanup_stale_secondmate_nudge_locked \
       "$marker" "$state" "$active_home" "$id"
     status=$?
-    case "$status" in 0) ;; 2) return 2 ;; *) failed=1 ;; esac
+    case "$status" in
+      0) ;;
+      2) return 2 ;;
+      75) return 75 ;;
+      *) failed=1 ;;
+    esac
   done
   [ "$failed" -eq 0 ]
 }
@@ -1455,6 +1478,7 @@ firstmate_update_actions_pending() {
 process_pending_firstmate_actions() {
   local pending manifest reread_marker action path marker targets selector failed_targets=""
   local record_failed=0 send_failed=0 journal_failed=0 journal_status=0
+  local record_status send_status
   validate_firstmate_action_storage || return 3
   pending=$(deps_pending_dir) || return 1
   if [ -e "$pending" ] || [ -L "$pending" ]; then
@@ -1470,7 +1494,9 @@ process_pending_firstmate_actions() {
 
   if [ -n "$pending" ]; then
     process_firstmate_update_journal || journal_status=$?
-    if [ "$journal_status" -eq 2 ]; then
+    if [ "$journal_status" -eq 75 ]; then
+      return 75
+    elif [ "$journal_status" -eq 2 ]; then
       return 2
     elif [ "$journal_status" -ne 0 ]; then
       journal_failed=1
@@ -1524,7 +1550,11 @@ process_pending_firstmate_actions() {
     fi
     if [ "$targets" != none ]; then
       for selector in $targets; do
-        if ! record_secondmate_nudge_action "$selector"; then
+        record_status=0
+        record_secondmate_nudge_action "$selector" || record_status=$?
+        if [ "$record_status" -eq 75 ]; then
+          return 75
+        elif [ "$record_status" -ne 0 ]; then
           printf 'Firstmate post-update nudge identity no longer matches for %s\n' \
             "$selector" >&2
           failed_targets="${failed_targets}${failed_targets:+ }$selector"
@@ -1543,7 +1573,13 @@ process_pending_firstmate_actions() {
     fi
   fi
 
-  process_identity_bound_nudges || send_failed=1
+  process_identity_bound_nudges
+  send_status=$?
+  if [ "$send_status" -eq 75 ]; then
+    return 75
+  elif [ "$send_status" -ne 0 ]; then
+    send_failed=1
+  fi
   [ "$journal_failed" -eq 0 ] && [ "$record_failed" -eq 0 ] && [ "$send_failed" -eq 0 ]
 }
 
