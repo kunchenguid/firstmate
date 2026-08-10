@@ -75,10 +75,13 @@ Three tasks were armed, two against the fixture and one against the placeholder 
 
 ```
 $ fm-pr-check.sh e1 https://gitlab.com/KarotKris/gitlab-merge-watch-fixture/-/merge_requests/1
+venue: unchecked (task e1 records no contribution venue)
 armed: state/e1.check.sh
 $ fm-pr-check.sh e2 https://gitlab.com/KarotKris/gitlab-merge-watch-fixture/-/merge_requests/2
+venue: unchecked (task e2 records no contribution venue)
 armed: state/e2.check.sh
 $ fm-pr-check.sh e3 https://gitlab.example/group/subgroup/project/-/merge_requests/7
+venue: unchecked (task e3 records no contribution venue)
 armed: state/e3.check.sh
 ```
 
@@ -159,6 +162,7 @@ A GitHub task is unaffected by a missing `glab`:
 
 ```
 $ PATH="$noglab" fm-pr-check.sh e6 https://github.com/kunchenguid/firstmate/pull/750
+venue: unchecked (task e6 records no contribution venue)
 armed: state/e6.check.sh
 ```
 
