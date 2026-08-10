@@ -85,6 +85,11 @@ The `resolve` subcommand requires a decision file and at least one existing depe
 It records the decision digest and routed task identities as a retry identity in the hold body, clears each dependency edge through tasks-axi, and marks the hold Done only after those writes succeed.
 An exact retry can finish a partial routing operation, while a changed decision or routed-task set is rejected.
 A failed intermediate step leaves the hold open.
+`resolve-board <hold-id> --answer-file <path>` is the board-answer entry point used by firstmate after a durable board-reply wake.
+It accepts the parser's compact answer object, validates structured fact keys and required values against the filed schema, derives the recorded origin, decision key, and dependent routes, then delegates to `resolve` without changing its ordering.
+It records fact values and the optional overflow note as JSON in the existing captain-decision field, so applying a fact answer never re-parses prose.
+The resolution record retains the hold identity and filed fact schema so an exact board-answer replay can reconstruct and validate its request after Done retention moves the hold into the archive.
+A malformed, stale, or unapplyable answer leaves the captured request available and does not change the decision state, so firstmate can report or retry it.
 
 ## Structural readiness
 

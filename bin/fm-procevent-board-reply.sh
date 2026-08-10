@@ -9,6 +9,7 @@
 #   fm-procevent-board-reply.sh board-path <source-id>
 #   fm-procevent-board-reply.sh source <board.html>
 #   fm-procevent-board-reply.sh requests <result-file>
+#   fm-procevent-board-reply.sh apply <result-file>
 #   fm-procevent-board-reply.sh classify <result-file>
 #   fm-procevent-board-reply.sh terminal <result-file>
 #   fm-procevent-board-reply.sh source-id <board.html>
@@ -53,6 +54,14 @@
 #            turn; the runner exists to hold it outside one.
 # requests   Normalize a captured result into one JSON record per line, through
 #            bin/fm-board-request-parse.pl.
+# apply      Firstmate's answer collector. It reads a durably captured result,
+#            preserves each validated answer as compact structured JSON, and
+#            invokes fm-decision-hold.sh resolve-board for the named captain
+#            hold. The board service never calls this command. A malformed,
+#            stale, remotely-owned, or unapplyable answer returns a clear failure
+#            without acknowledging its process-event result or changing the
+#            decision state, so it remains available for firstmate to report and
+#            retry.
 #
 # AUTHORITY: none. A board control performs no action; it records a request.
 # Every record this adapter emits is captain INTENT for firstmate to adjudicate
@@ -102,9 +111,12 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-procevent-lib.sh
 . "$SCRIPT_DIR/fm-procevent-lib.sh"
+# shellcheck source=bin/fm-secondmate-registry-lib.sh
+. "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
 
 PARSER="$SCRIPT_DIR/fm-board-request-parse.pl"
 SERVER="$SCRIPT_DIR/fm-board-reply-server.py"
+DECISION_HOLD="$SCRIPT_DIR/fm-decision-hold.sh"
 REQUEST_DIR="$STATE/board-reply"
 DEFAULT_PORT=${FM_BOARD_REPLY_PORT:-4321}
 WAIT_SECONDS=${FM_BOARD_REPLY_WAIT_SECONDS:-0}
@@ -568,6 +580,86 @@ delta_field() {  # <result-file> <field>
   ' "$1"
 }
 
+answer_home() {  # <board-home>
+  local id=$1 marker
+  if [ "$id" = main ]; then
+    printf '%s\n' "$FM_HOME"
+    return 0
+  fi
+  fm_procevent_source_id_valid "$id" || return 1
+  secondmate_registry_validate_bindings "$FM_HOME/data/secondmates.md" secondmate_registry_path_key "$id" \
+    || return 1
+  [ "$SECONDMATE_REGISTRY_MATCH_REMOTE" = 0 ] || return 1
+  [ -d "$SECONDMATE_REGISTRY_MATCH_HOME" ] || return 1
+  [ -f "$SECONDMATE_REGISTRY_MATCH_HOME/.fm-secondmate-home" ] \
+    && [ ! -L "$SECONDMATE_REGISTRY_MATCH_HOME/.fm-secondmate-home" ] || return 1
+  marker=$(sed -n '1p' "$SECONDMATE_REGISTRY_MATCH_HOME/.fm-secondmate-home" 2>/dev/null)
+  [ "$marker" = "$id" ] || return 1
+  printf '%s\n' "$SECONDMATE_REGISTRY_MATCH_HOME"
+}
+
+cmd_apply() {
+  local file=${1-} records record kind intent home id target_home reason staged applied=0 failed=0
+  [ "$#" -eq 1 ] || usage
+  [ -f "$file" ] || die "result file does not exist: $file"
+  [ -f "$PARSER" ] || die "request validator not found: $PARSER"
+  [ -f "$DECISION_HOLD" ] || die "decision lifecycle command not found: $DECISION_HOLD"
+  command -v jq >/dev/null 2>&1 || die "jq is required"
+  ensure_request_dir
+  records=$(cmd_requests "$file") || die "could not parse board reply result"
+  while IFS= read -r record; do
+    [ -n "$record" ] || continue
+    kind=$(printf '%s' "$record" | jq -r '.kind // ""' 2>/dev/null) || {
+      printf 'unapplyable board record: parser output was not JSON\n' >&2
+      failed=$((failed + 1))
+      continue
+    }
+    case "$kind" in
+      contract|message|reply) continue ;;
+      unrecognized)
+        reason=$(printf '%s' "$record" | jq -r '.reason // "the request was refused"')
+        printf 'unapplyable board answer: %s\n' "$reason" >&2
+        failed=$((failed + 1))
+        continue
+        ;;
+      request) ;;
+      *)
+        printf 'unapplyable board record: unknown parsed record kind\n' >&2
+        failed=$((failed + 1))
+        continue
+        ;;
+    esac
+    intent=$(printf '%s' "$record" | jq -r '.intent // ""')
+    [ "$intent" = answer ] || continue
+    home=$(printf '%s' "$record" | jq -r '.home // ""')
+    id=$(printf '%s' "$record" | jq -r '.id // ""')
+    target_home=$(answer_home "$home") || {
+      printf 'unapplyable board answer for %s/%s: the owning home is unavailable or not local\n' "$home" "$id" >&2
+      failed=$((failed + 1))
+      continue
+    }
+    staged=$(umask 077; mktemp "$REQUEST_DIR/.answer.XXXXXX") || die "could not stage board answer"
+    if ! printf '%s' "$record" | jq -cS '{v:"1", intent, note, facts, required_keys} | with_entries(select(.value != null))' > "$staged"; then
+      rm -f -- "$staged"
+      printf 'unapplyable board answer for %s: could not preserve its structured payload\n' "$id" >&2
+      failed=$((failed + 1))
+      continue
+    fi
+    if FM_HOME="$target_home" FM_STATE_OVERRIDE="$target_home/state" \
+      FM_DATA_OVERRIDE="$target_home/data" "$DECISION_HOLD" resolve-board "$id" --answer-file "$staged"; then
+      applied=$((applied + 1))
+    else
+      printf 'unapplyable board answer for %s: decision remains open\n' "$id" >&2
+      failed=$((failed + 1))
+    fi
+    rm -f -- "$staged"
+  done <<EOF
+$records
+EOF
+  [ "$failed" -eq 0 ] || return 1
+  printf 'applied board answers: %s\n' "$applied"
+}
+
 cmd_classify() {
   local file=${1-} schema status count
   [ -n "$file" ] || usage
@@ -604,6 +696,7 @@ case "${1-}" in
   board-path) shift; cmd_board_path "$@" ;;
   source)    shift; cmd_source "$@" ;;
   requests)  shift; cmd_requests "$@" ;;
+  apply)     shift; cmd_apply "$@" ;;
   classify)  shift; cmd_classify "$@" ;;
   terminal)  shift; cmd_terminal "$@" ;;
   source-id) shift; cmd_source_id "$@" ;;

@@ -1360,4 +1360,121 @@ done
 stop_service
 pass "the 50-message bound is applied after filtering and merging the conversation"
 
+# ------------------------------------------------------------------ answers --
+# The board service records intent only. This exercises the missing consuming
+# half through the public adapter command against a fresh home: the captured
+# request survives before application, then the existing decision lifecycle
+# records it, clears the dependency, and closes the hold in its usual order.
+test_answer_collection_uses_the_decision_lifecycle() {
+  local home origin route_hold fact_one fact_two malformed_hold result route_result fact_result before show
+  home="$TMP_ROOT/answer-home"
+  origin='answer-origin'
+  mkdir -p "$home/data" "$home/state" "$home/config" "$home/projects"
+  cp "$ROOT/.tasks.toml" "$home/.tasks.toml"
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+
+## Done
+EOF
+  printf 'kind=scout\n' > "$home/state/$origin.meta"
+
+  decision() {  # <key> <title> [extra hold flags...]
+    local key=$1 title=$2
+    shift 2
+    FM_HOME="$home" "$ROOT/bin/fm-decision-hold.sh" hold "$origin" "$key" \
+      --title "$title" --reason "A board answer is needed" --question "Which route should apply?" \
+      --option "Tuesday morning" --option "Thursday evening" --why "The dependent work is waiting." \
+      --affects "The sample delivery." --recommendation "Use Tuesday morning." \
+      --no-surface "No separate decision aid applies." "$@"
+  }
+  task() { (cd "$home" && FM_HOME="$home" tasks-axi "$@"); }
+  apply() { FM_HOME="$home" "$ADAPTER" apply "$1"; }
+  captured() {  # <path> <wire>
+    {
+      printf 'schema=fm-board-delta.v1\nstatus=delta\nsource=board-answer-fixture\nfrom_offset=0\nto_offset=1\n'
+      printf 'prompts[1]{received,attempt,prompt}:\n'
+      printf '  "2026-08-11T00:00:00Z","fm-board:answer",%s\n' \
+        "$(jq -Rn --arg prompt "$2" '$prompt')"
+      printf 'board-delta-end=1\n'
+    } > "$1"
+  }
+
+  route_hold=$(decision route "Choose the route") || fail "could not file the choice decision"
+  task add route-dependent "Apply the selected route" --kind ship --repo sample --blocked-by "$route_hold" >/dev/null \
+    || fail "could not create the choice dependent"
+  result="$home/state/procevent-inbox/board-answer-fixture.1.result"
+  route_result=$result
+  mkdir -p "${result%/*}"
+  captured "$result" 'FM-BOARD-REQUEST {"v":"1","intent":"answer","home":"main","id":"answer-origin-decision-route","note":"Tuesday morning"}'
+  before=$(shasum -a 256 "$result" | awk '{print $1}')
+  apply "$result" >/dev/null || fail "a recorded choice answer did not apply"
+  [ "$before" = "$(shasum -a 256 "$result" | awk '{print $1}')" ] \
+    || fail "applying an answer rewrote the durable captured request"
+  show=$(task show "$route_hold" --full)
+  assert_contains "$show" '\"note\":\"Tuesday morning\"' "the choice answer was not recorded as structured data"
+  assert_contains "$show" 'state: done' "the choice decision did not close through resolve"
+  assert_contains "$(task show route-dependent --full)" 'blocked: no' \
+    "the decision lifecycle did not clear the dependent route"
+  apply "$result" >/dev/null || fail "a replayed captured answer was not idempotent"
+
+  fact_one=$(decision fact-one "Supply first account facts" --kind fact --expects "account and date" \
+    --fact-fields '[{"label":"Account","key":"account","type":"text","required":true},{"label":"Statement date","key":"statement_date","type":"date","required":true}]' --group account-facts) \
+    || fail "could not file the first fact decision"
+  fact_two=$(decision fact-two "Supply second account facts" --kind fact --expects "account and date" \
+    --fact-fields '[{"label":"Account","key":"account","type":"text","required":true},{"label":"Statement date","key":"statement_date","type":"date","required":true}]' --group account-facts) \
+    || fail "could not file the second fact decision"
+  task add fact-one-dependent "Apply first account facts" --kind ship --repo sample --blocked-by "$fact_one" >/dev/null \
+    || fail "could not create the first fact dependent"
+  task add fact-two-dependent "Apply second account facts" --kind ship --repo sample --blocked-by "$fact_two" >/dev/null \
+    || fail "could not create the second fact dependent"
+  result="$home/state/procevent-inbox/board-answer-fixture.2.result"
+  fact_result=$result
+  captured "$result" 'FM-BOARD-REQUEST {"v":"1","intent":"answer","home":"main","id":"answer-origin-decision-fact-one","facts":{"account":"Harbour Fund","statement_date":"2026-08-10"},"required_keys":["account","statement_date"],"note":"Renamed last quarter."}'
+  apply "$result" >/dev/null || fail "a structured fact answer did not apply"
+  show=$(task show "$fact_one" --full)
+  assert_contains "$show" '\"facts\":{\"account\":\"Harbour Fund\",\"statement_date\":\"2026-08-10\"}' \
+    "the fact values did not round-trip as structured data"
+  assert_contains "$show" '\"note\":\"Renamed last quarter.\"' \
+    "the fact overflow note did not round-trip"
+  apply "$fact_result" >/dev/null || fail "an exact structured fact replay was not idempotent"
+  task prune --keep 0 --state 'done' >/dev/null || fail "could not apply Done retention to resolved board decisions"
+  apply "$route_result" >/dev/null || fail "a retained choice answer could not replay from the archive"
+  apply "$fact_result" >/dev/null || fail "a retained structured fact answer could not replay from the archive"
+  assert_contains "$(cat "$home/data/done-archive.md")" "Decision fact fields:" \
+    "Done retention lost the structured fact schema needed for exact replay"
+  assert_contains "$(task show "$fact_two" --full)" 'state: queued' \
+    "a partial fact group closed an unanswered sibling"
+  assert_contains "$(task show fact-two-dependent --full)" 'blocked: yes' \
+    "a partial fact group released work for the unanswered sibling"
+
+  malformed_hold=$(decision malformed "Supply complete account facts" --kind fact --expects "account and date" \
+    --fact-fields '[{"label":"Account","key":"account","type":"text","required":true},{"label":"Statement date","key":"statement_date","type":"date","required":true}]') \
+    || fail "could not file the malformed-answer decision"
+  task add malformed-dependent "Wait for complete facts" --kind ship --repo sample --blocked-by "$malformed_hold" >/dev/null \
+    || fail "could not create the malformed-answer dependent"
+  result="$home/state/procevent-inbox/board-answer-fixture.3.result"
+  captured "$result" 'FM-BOARD-REQUEST {"v":"1","intent":"answer","home":"main","id":"answer-origin-decision-malformed","facts":{"account":"Harbour Fund"},"required_keys":["account"]}'
+  if apply "$result" > "$home/malformed.out" 2> "$home/malformed.err"; then
+    fail "an unapplyable fact answer closed a decision"
+  fi
+  assert_contains "$(cat "$home/malformed.err")" 'does not satisfy the filed required fact fields' \
+    "an unapplyable fact answer was not clearly reported"
+  [ -f "$result" ] || fail "an unapplyable answer was not preserved for retry"
+  assert_contains "$(task show "$malformed_hold" --full)" 'state: queued' \
+    "an unapplyable fact answer closed its decision"
+
+  result="$home/state/procevent-inbox/board-answer-fixture.4.result"
+  captured "$result" 'FM-BOARD-REQUEST {"v":"1","intent":"answer","home":"main","id":"answer-origin-decision-fact-two","facts":{"account":"North Fund","statement_date":"2026-08-11"},"required_keys":["account","statement_date"]}'
+  # A new adapter process is the restart boundary. The durable capture exists
+  # before it starts, so no in-memory board state is required to finish it.
+  apply "$result" >/dev/null || fail "a restart lost a durable recorded answer"
+  assert_contains "$(task show "$fact_two" --full)" 'state: done' \
+    "the restart-applied answer did not resolve its decision"
+  pass "recorded board answers resolve through the lifecycle, keep fact structure, preserve failures, and survive restart"
+}
+
+test_answer_collection_uses_the_decision_lifecycle
+
 printf '\nall board reply transport tests passed\n'

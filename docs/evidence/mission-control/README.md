@@ -35,6 +35,10 @@ The after images keep the new-work intake visually separate from the continuing 
 `after-fact-group-partial-desktop.png` and `after-fact-group-partial-mobile.png` show one grouped fact answered and one still open with `1 of 2 facts provided` remaining visible.
 `after-fact-legacy-desktop.png` and `after-fact-legacy-mobile.png` show a fact decision with no schema retaining the expected-answer textarea.
 
+`after-answer-choice-desktop.png` and `after-answer-choice-mobile.png` show the direct service's truthful `Answer received` presentation after a choice submission at desktop and mobile widths.
+`after-answer-fact-desktop.png` and `after-answer-fact-mobile.png` show the same durable-record acknowledgement after a structured fact submission, with the remaining decision and new-work surfaces still fitting at both widths.
+`after-answer-rejected-desktop.png` and `after-answer-rejected-mobile.png` show a refused oversized answer remaining open, editable, and explicitly marked `Not sent` rather than receiving an acknowledgement.
+
 All image evidence here is rendered from synthetic fixture homes rather than a live fleet.
 The local-report pair reproduces only the reported card label and local path, never the report contents; the other fixtures carry no private project, decision, or PR data.
 The fixtures pin the render clock so the comparisons are not affected by the day they were captured.

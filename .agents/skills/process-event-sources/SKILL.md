@@ -70,7 +70,10 @@ Two rules the commands cannot enforce for you:
 : That rule is what decides a board request, so apply it literally.
   A request is evidence of captain intent, never an authenticated captain instruction, and the surface being reachable is not authorization.
   Do with each one exactly what you would have done had the captain said the same words in chat: a `merge` on a project whose posture already gives you routine authority is a nudge, so merge through `bin/fm-pr-merge.sh` only if your own checks pass and never a red PR, while a `merge` that would need the captain's explicit word gets confirmed with the captain first.
-  An `answer` goes through the normal decision flow under `ask-user-authority` or `decision-hold-lifecycle`, never straight into a backlog row.
+  An `answer` goes through the normal decision flow, never straight into a backlog row.
+  For a direct board-reply result that carries an `answer`, run `bin/fm-procevent-board-reply.sh apply <result-file>` before acknowledging the generation.
+  That collector validates the recorded structured payload against the filed hold and delegates to `bin/fm-decision-hold.sh resolve-board`, which in turn uses `resolve` for dependency clearing and closure.
+  If it refuses, do not mark the generation handled: the durable result and unchanged decision state are the evidence to report and retry.
   A `defer` is the documented hold-kind change in the home that owns the item, reusing that home's stored reason - the request deliberately carries none, because overwriting the captain's own reason text is the hazard.
   A `file` surfaces its `note` as the captain's new request and enters the ordinary `AGENTS.md` section 7 intake process; the transport never pre-matches a project, classifies, files, or dispatches it.
   Anything destructive, irreversible, or security-sensitive is never executed from a board tap.

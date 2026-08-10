@@ -195,6 +195,7 @@ They bridge an in-progress edit or the interval between submission and the next 
 On every regeneration, the generator reads the direct reply service's append-only request log and marks a still-actionable Answer by the same owning-home, item, decision-key, and intent identity.
 That durable signal makes a fresh board agree across devices, supplies the answered-row ordering, and never claims the underlying decision was resolved.
 The direct request log is the source of truth for recorded Answer requests; browser storage is not fleet truth.
+Once the board-reply wake is armed, firstmate collects its captured Answer records through the decision lifecycle rather than treating a banner as proof of closure.
 
 [`bin/fm-procevent-board-reply.sh`](../bin/fm-procevent-board-reply.sh) owns the reply service, arming the wake, posting firstmate's replies into the board conversation, and turning what was recorded into validated requests.
 [`bin/fm-board-request-parse.pl`](../bin/fm-board-request-parse.pl) is the single owner of the board message vocabulary in both directions and of every fail-closed rule, shared by both transports, and the service validates a message at its door with that same program over the same bytes it is about to store.
@@ -231,6 +232,9 @@ A launch agent or unit that inherits no `FM_HOME` resolves them against the trac
 Arming has no precondition and is safe in any order: the request log is append-only and never consumed, so requests accepted while nothing is armed are picked up whole by a later arm.
 A request recorded by the service becomes an ordinary durable `check` wake through the same `state/procevent/` framework every other source uses, so firstmate's normal wake drain picks it up with no second notification path.
 At that wake, a validated `file` record surfaces its `note` unchanged for firstmate's ordinary `AGENTS.md` intake process.
+For an `answer`, firstmate runs `bin/fm-procevent-board-reply.sh apply <result-file>` before acknowledging the captured generation.
+The collector preserves the parser's field values and overflow note as compact JSON, validates them against the filed decision, and delegates closure to `bin/fm-decision-hold.sh resolve-board` and its existing `resolve` ordering.
+A refusal leaves the captured request available and does not change the decision state, so firstmate can report the reason and retry without losing the answer.
 The transport does no automatic backlog filing, project matching, task classification, or dispatch.
 
 `bin/fm-procevent-board-reply.sh say-source <source-id> <text>|-` is how firstmate answers a board-reply wake into its originating board's conversation, while `say <board.html> <text>|-` is the board-path form and `reply-log-path <board.html>` prints where that conversation is kept.
@@ -330,6 +334,8 @@ It also proves that a quick answer and a typed answer emit the same validated `a
 
 `tests/fm-board-reply.test.sh` covers the direct transport with no Lavish anywhere.
 It re-proves every fail-closed rule at the service door and again at wake time, refuses a cross-site write and a non-loopback bind, holds captain text that looks like the wire format inside its own field, and pins the properties the cursor design rests on: a delta discarded before capture is re-derived byte for byte, a capture truncated before its end sentinel records no cursor and loses nothing, a captured delta advances the cursor so nothing is announced twice, a request accepted before arming survives to the next arm, one retried attempt is recorded once, and a broken cursor escalates exactly once with rebase as the recovery.
+It applies captured choice and structured fact answers through the decision lifecycle, proves exact replays remain idempotent before and after Done retention, and keeps grouped siblings independently blocked until their own answers arrive.
+It also proves a malformed fact answer leaves both its captured result and decision open, and that a fresh adapter process can apply a request captured before it started.
 It also pins that the service reports an unarmed board as uncollected, at its probe, in the answer to a recorded request, and in its own startup output.
 Its real-browser case serves the board through the service itself and drives a genuine Answer and Start something new request through to their confirmations, checks that each confirmation is a full-width banner rather than a label, that persistent presentation survives a reload and fits a 390 by 844 viewport, and that killing the service leaves the next control open, editable, retryable, and unacknowledged.
 A second browser case retires the wake and proves that a request recorded while nothing is collecting is confirmed as recorded with the amber needs-you treatment and explicitly not collected.

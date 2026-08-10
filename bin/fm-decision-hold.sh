@@ -93,6 +93,7 @@
 #   fm-decision-hold.sh retract <origin-id> <decision-key> --superseded-by <decision-key>
 #   fm-decision-hold.sh resolve <origin-id> <decision-key> \
 #     --decision-file <path> --routed-to <task-id> [--routed-to <task-id>...]
+#   fm-decision-hold.sh resolve-board <hold-id> --answer-file <path>
 #
 # `hold-item` applies that same bar to a backlog item that ALREADY EXISTS, whatever
 # its own kind. It is the supported replacement for a bare
@@ -151,6 +152,14 @@
 # It writes the captain decision and routed identities into the hold body, clears
 # those dependency edges, and only then marks the hold Done. A failure before the
 # final step leaves the captain hold open.
+#
+# `resolve-board` is the board-answer entry point that firstmate calls after it
+# has read a durably captured board request. It accepts only the parser's
+# structured answer shape, validates fact keys against the filed decision schema,
+# derives the hold's recorded origin, key, and dependent routes, then delegates
+# to `resolve`. It never reads prose to recover facts and never changes the
+# resolution ordering. A refusal leaves the captured board request available and
+# does not change the decision state, so firstmate can report and retry it.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -1004,8 +1013,133 @@ EOF
   printf 'retracted: %s superseded by %s\n' "$id" "$surviving_id"
 }
 
+board_answer_valid_for_hold() {  # <answer-file> <decision-kind> <fact-fields>
+  local answer_file=$1 fact_kind=$2 fact_fields=$3
+  [ -f "$answer_file" ] && [ ! -L "$answer_file" ] \
+    || fail "board answer file does not exist or is unsafe: $answer_file"
+  command -v jq >/dev/null 2>&1 || fail "jq is required"
+  jq -e '
+    type == "object"
+    and .v == "1"
+    and .intent == "answer"
+    and ([keys[] | select(. != "v" and . != "intent" and . != "note" and . != "facts" and . != "required_keys")] | length == 0)
+    and (if has("note") then (.note | type == "string") else true end)
+    and (if has("facts") then
+      (.facts | type == "object" and all(to_entries[]; (.key | test("^[A-Za-z][A-Za-z0-9_-]{0,63}$")) and (.value | type == "string")))
+      and (.required_keys | type == "array")
+      else (has("required_keys") | not)
+      end)
+  ' "$answer_file" >/dev/null 2>&1 \
+    || fail "board answer is not the validated structured answer shape"
+  if [ "$fact_kind" = fact ] && [ -n "$fact_fields" ]; then
+    printf '%s' "$fact_fields" | jq -R -s -e -L "$SCRIPT_DIR" \
+      'include "fm-decision-readiness"; decision_fact_fields_valid' >/dev/null 2>&1 \
+      || fail "captain hold has an invalid fact-field schema"
+    jq -e --argjson fields "$fact_fields" '
+      . as $answer
+      | ($answer.facts | type == "object")
+      and ([$answer.facts | keys[]] - [$fields[].key] | length == 0)
+      and ([$fields[] | select(.required == true) | .key] as $required
+           | all($required[]; ($answer.facts[.] // "") | test("\\S")))
+    ' "$answer_file" >/dev/null 2>&1 \
+      || fail "board answer does not satisfy the filed required fact fields"
+  elif [ "$fact_kind" = fact ]; then
+    jq -e 'has("facts") | not' "$answer_file" >/dev/null 2>&1 \
+      || fail "legacy fact decision cannot accept unfiled structured fact keys"
+  else
+    jq -e 'has("facts") | not' "$answer_file" >/dev/null 2>&1 \
+      || fail "choice decision cannot accept structured fact keys"
+  fi
+}
+
+board_answer_routes() {  # <hold-id> <hold-body>
+  local id=$1 body=$2 recorded routes='' candidate show blocked
+  recorded=$(get_body_field "$body" "Routed identities")
+  if [ -n "$recorded" ]; then
+    printf '%s' "$recorded" | tr ',' '\n' | while IFS= read -r candidate || [ -n "$candidate" ]; do
+      validate_slug routed-task "$candidate"
+      printf '%s\n' "$candidate"
+    done
+    return 0
+  fi
+  while IFS= read -r candidate; do
+    [ -n "$candidate" ] || continue
+    validate_slug routed-task "$candidate"
+    show=$(task_show "$candidate") || continue
+    blocked=$(show_field "$show" blocked_by | tr -d '[:space:]')
+    blocked=${blocked#\"}
+    blocked=${blocked%\"}
+    case ",$blocked," in
+      *",$id,"*) routes="${routes}${routes:+ }$candidate" ;;
+    esac
+  done < <(tasks_axi list --blocked --limit 1000000 2>/dev/null \
+    | awk -F, '/^  / {id=$1; sub(/^[[:space:]]+/, "", id); sub(/[[:space:]]+$/, "", id); if (id ~ /^[A-Za-z0-9._-]+$/) print id}')
+  [ -n "$routes" ] || fail "captain hold $id has no blocked dependent work to route"
+  printf '%s\n' "$routes" | tr ' ' '\n' | LC_ALL=C sort -u
+}
+
+command_resolve_board() {
+  local id=${1:-} answer_file='' show body archived_record origin key expected_id routes route decision_file fact_kind fact_fields
+  local -a route_args=()
+  [ "$#" -ge 1 ] || { usage >&2; exit 2; }
+  shift
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --answer-file) shift; answer_file=${1:-} ;;
+      *) usage >&2; exit 2 ;;
+    esac
+    shift
+  done
+  validate_slug hold-id "$id"
+  [ -n "$answer_file" ] || fail "--answer-file is required"
+  require_tasks_axi
+  if show=$(task_show "$id"); then
+    body=$(show_body "$show") || fail "could not read captain hold $id body"
+    origin=$(get_body_field "$body" "Origin")
+    key=$(get_body_field "$body" "Decision key")
+    fact_kind=$(get_body_field "$body" "Decision kind")
+    fact_fields=$(get_body_field "$body" "Decision fact fields")
+    routes=$(board_answer_routes "$id" "$body")
+  else
+    [ "$(archive_hold_status "$id")" = resolved ] \
+      || fail "captain hold $id disappeared before its board answer was applied"
+    archived_record=$(archive_record "$id") \
+      || fail "could not read archived captain hold $id"
+    origin=$(archive_record_field "$archived_record" "Origin")
+    key=$(archive_record_field "$archived_record" "Decision key")
+    fact_kind=$(archive_record_field "$archived_record" "Decision kind")
+    fact_fields=$(archive_record_field "$archived_record" "Decision fact fields")
+    routes=$(archive_record_field "$archived_record" "Routed identities" | tr ',' '\n')
+  fi
+  validate_slug origin-id "$origin"
+  validate_slug decision-key "$key"
+  expected_id=$(hold_id "$origin" "$key")
+  [ "$id" = "$expected_id" ] \
+    || fail "board answer target $id does not match its recorded decision identity"
+  board_answer_valid_for_hold "$answer_file" "$fact_kind" "$fact_fields"
+  while IFS= read -r route; do
+    [ -n "$route" ] || continue
+    route_args+=(--routed-to "$route")
+  done <<EOF
+$routes
+EOF
+  [ "${#route_args[@]}" -gt 0 ] || fail "captain hold $id has no routes for its board answer"
+  decision_file=$(mktemp "${TMPDIR:-/tmp}/fm-board-answer.XXXXXX") \
+    || fail "could not stage board answer for resolution"
+  if ! jq -cS . "$answer_file" > "$decision_file"; then
+    rm -f -- "$decision_file"
+    fail "could not stage board answer for resolution"
+  fi
+  if ! command_resolve "$origin" "$key" --decision-file "$decision_file" "${route_args[@]}"; then
+    rm -f -- "$decision_file"
+    fail "could not apply board answer to captain hold $id"
+  fi
+  rm -f -- "$decision_file"
+  printf 'resolved-board: %s\n' "$id"
+}
+
 command_resolve() {
-  local origin=${1:-} key=${2:-} decision_file='' id='' decision='' decision_digest='' body='' routed='' routed_csv='' dep show blocked state hold_show hold_body archived_record resolution_recorded=0
+  local origin=${1:-} key=${2:-} decision_file='' id='' decision='' decision_digest='' body='' routed='' routed_csv='' dep show blocked state hold_show hold_body hold_schema_body archived_record resolution_recorded=0 decision_kind fact_fields
   [ "$#" -ge 2 ] || { usage >&2; exit 2; }
   shift 2
   while [ "$#" -gt 0 ]; do
@@ -1052,6 +1186,7 @@ command_resolve() {
   verify_hold_active "$id"
   hold_show=$(task_show "$id")
   hold_body=$(show_field "$hold_show" body)
+  hold_schema_body=$(show_body "$hold_show") || fail "could not read captain hold $id body"
   case "$hold_body" in
     *"Resolution recorded by fm-decision-hold."*)
       verify_resolution_identity "$id" "$hold_body" "$decision_digest" "$routed_csv"
@@ -1083,6 +1218,13 @@ command_resolve() {
   for dep in $routed; do
     body="${body}- ${dep}"$'\n'
   done
+  # Preserve the established hold identity beside the durable resolution record
+  # so a replayed external answer can re-enter this same idempotent resolve path.
+  body="${body}Origin: ${origin}"$'\n'"Decision key: ${key}"
+  decision_kind=$(get_body_field "$hold_schema_body" "Decision kind")
+  fact_fields=$(get_body_field "$hold_schema_body" "Decision fact fields")
+  [ -z "$decision_kind" ] || body="${body}"$'\n'"Decision kind: ${decision_kind}"
+  [ -z "$fact_fields" ] || body="${body}"$'\n'"Decision fact fields: ${fact_fields}"
   tasks_axi update "$id" --body "$body" >/dev/null \
     || fail "could not record the captain decision on $id"
   for dep in $routed; do
@@ -1191,6 +1333,7 @@ case "${1:-}" in
   verify) shift; command_verify "$@" ;;
   retract) shift; command_retract "$@" ;;
   resolve) shift; command_resolve "$@" ;;
+  resolve-board) shift; command_resolve_board "$@" ;;
   -h|--help) usage ;;
   *) usage >&2; exit 2 ;;
 esac
