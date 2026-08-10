@@ -16,7 +16,9 @@ import type { Model, Usage } from "@earendil-works/pi-ai";
 const COMPACTION_MODELS = {
   provider: "openai-codex",
   primary: "gpt-5.6-luna",
-  fallback: "gpt-5.6-sol",
+  primaryLabel: "Luna",
+  fallback: "gpt-5.6-terra",
+  fallbackLabel: "Terra",
 } as const;
 
 const COMPACTION_SAFETY_POLICY = {
@@ -24,6 +26,7 @@ const COMPACTION_SAFETY_POLICY = {
   minimumUsageFraction: 0.5,
   outputCeilingFraction: 0.98,
   requestOverheadTokens: 2048,
+  saturationMarginTokens: 1024,
   requiredHeadings: [
     "## Goal",
     "## Constraints & Preferences",
@@ -45,8 +48,12 @@ type CompactionAttempt = {
   model: Model<any>;
 };
 
+// Both token counts come from the same estimate today but bound the request from opposite
+// sides: envelopeInputTokens is the ceiling a model must be able to receive, and
+// expectedInputTokens is the floor a returned result must show it actually received.
+// Keeping them separate stops a later change to one from silently moving the other.
 type RequestSegment = {
-  inputBoundTokens: number;
+  envelopeInputTokens: number;
   expectedInputTokens: number;
   outputTokens: number;
 };
@@ -74,18 +81,21 @@ function maximumOutputTokens(model: Model<any>, preparation: CompactionPreparati
   return Math.min(Math.floor(fraction * preparation.settings.reserveTokens), modelLimit);
 }
 
-function inputMeasurements(parts: readonly string[]): Pick<RequestSegment, "inputBoundTokens" | "expectedInputTokens"> {
-  const bytes = parts.reduce((total, part) => total + encodedBytes(part), 0);
+// model.contextWindow is denominated in tokens, so every quantity compared against it must be
+// too. Pi sizes its own compaction requests with the same chars/4 heuristic, and measuring
+// UTF-8 bytes rather than UTF-16 code units keeps multibyte text on the conservative side of it.
+function inputMeasurements(parts: readonly string[]): Pick<RequestSegment, "envelopeInputTokens" | "expectedInputTokens"> {
+  const estimated = parts.reduce((total, part) => total + estimatedTokens(part), 0);
   return {
-    inputBoundTokens: bytes + COMPACTION_SAFETY_POLICY.requestOverheadTokens,
-    expectedInputTokens: Math.ceil(bytes / 4),
+    envelopeInputTokens: estimated + COMPACTION_SAFETY_POLICY.requestOverheadTokens,
+    expectedInputTokens: estimated,
   };
 }
 
 function historyInputMeasurements(
   preparation: CompactionPreparation,
   customInstructions?: string,
-): Pick<RequestSegment, "inputBoundTokens" | "expectedInputTokens"> {
+): Pick<RequestSegment, "envelopeInputTokens" | "expectedInputTokens"> {
   return inputMeasurements([
     serializedText(preparation.messagesToSummarize),
     preparation.previousSummary ?? "",
@@ -93,6 +103,9 @@ function historyInputMeasurements(
   ]);
 }
 
+// Pi sends one request per segment, so each is preflighted against the whole window on its own.
+// The segments returned here must stay index-aligned with summarySegments(), which is how
+// usageSuggestsTruncation() pairs a returned summary part with the budget it was generated under.
 function requestSegments(
   model: Model<any>,
   preparation: CompactionPreparation,
@@ -124,7 +137,27 @@ function modelCanReceivePreparation(
   customInstructions?: string,
 ): boolean {
   return requestSegments(model, preparation, customInstructions)
-    .every((segment) => segment.inputBoundTokens + segment.outputTokens <= model.contextWindow);
+    .every((segment) => segment.envelopeInputTokens + segment.outputTokens <= model.contextWindow);
+}
+
+// Summarizing a session into a model that cannot hold it is how history goes missing quietly, so
+// a compaction model narrower than the conversation itself is refused before it is ever called.
+// Pi reports no conversation model in some sessions; refusing on an unknown window would cancel
+// every compaction, so those fall back to the absolute envelope check alone.
+function preflightRejection(
+  model: Model<any>,
+  label: string,
+  conversationModel: Model<any> | undefined,
+  preparation: CompactionPreparation,
+  customInstructions?: string,
+): string | undefined {
+  if (conversationModel && model.contextWindow < conversationModel.contextWindow) {
+    return `${label}'s context window is smaller than the conversation's own model`;
+  }
+  if (!modelCanReceivePreparation(model, preparation, customInstructions)) {
+    return `the prepared request exceeds ${label}'s supported context/output envelope`;
+  }
+  return undefined;
 }
 
 function headingMatches(text: string, heading: string): RegExpMatchArray[] {
@@ -226,12 +259,33 @@ function usageSuggestsTruncation(
     * COMPACTION_SAFETY_POLICY.outputCeilingFraction);
 }
 
+function receivedInputTokens(usage: Usage): number {
+  return usage.input + usage.cacheRead + usage.cacheWrite;
+}
+
 function usageSuggestsLostInput(usage: Usage | undefined, envelopes: readonly RequestSegment[]): boolean {
   if (!usage) return true;
-  const receivedInputTokens = usage.input + usage.cacheRead + usage.cacheWrite;
-  if (receivedInputTokens <= 0) return true;
+  const received = receivedInputTokens(usage);
+  if (received <= 0) return true;
   const preparedTokens = envelopes.reduce((total, segment) => total + segment.expectedInputTokens, 0);
-  return receivedInputTokens < preparedTokens * COMPACTION_SAFETY_POLICY.minimumUsageFraction;
+  return received < preparedTokens * COMPACTION_SAFETY_POLICY.minimumUsageFraction;
+}
+
+// The estimate above can understate a request's real token cost, so a request that passed
+// preflight may still have overrun the window. An endpoint that clips instead of erroring would
+// leave usage looking complete against that understated estimate, so this compares the reported
+// input against the ceiling a clipped segment lands on instead. Pi sums usage across a split
+// turn's requests, and a clipped segment alone pushes that sum to at least the smallest
+// per-segment ceiling. Comparing against the smallest ceiling therefore catches a clipped
+// segment, and can also reject a genuinely near-ceiling request, which is the safe direction.
+function usageSuggestsSaturatedRequest(
+  usage: Usage | undefined,
+  model: Model<any>,
+  envelopes: readonly RequestSegment[],
+): boolean {
+  if (!usage || envelopes.length === 0) return false;
+  const ceiling = Math.min(...envelopes.map((segment) => model.contextWindow - segment.outputTokens));
+  return receivedInputTokens(usage) >= ceiling - COMPACTION_SAFETY_POLICY.saturationMarginTokens;
 }
 
 function safeResult(
@@ -252,6 +306,9 @@ function safeResult(
   const envelopes = requestSegments(model, preparation, customInstructions);
   if (usageSuggestsTruncation(result.usage, segments, envelopes)) return "the summary reached its output limit";
   if (usageSuggestsLostInput(result.usage, envelopes)) return "usage indicates the request received too little prepared history";
+  if (usageSuggestsSaturatedRequest(result.usage, model, envelopes)) {
+    return "the request filled the model's context window, so prepared history may have been dropped";
+  }
   return undefined;
 }
 
@@ -285,8 +342,9 @@ function requestHeaders(headers: Record<string, string | null> | undefined): Rec
   return Object.fromEntries(Object.entries(headers).filter((entry): entry is [string, string] => entry[1] !== null));
 }
 
-function failureMessage(lunaReason: string, solReason: string): string {
-  return `Safe compaction failed: Luna was rejected because ${lunaReason}; Sol was rejected because ${solReason}.`;
+function failureMessage(primaryReason: string, fallbackReason: string): string {
+  return `Safe compaction failed: ${COMPACTION_MODELS.primaryLabel} was rejected because ${primaryReason}; `
+    + `${COMPACTION_MODELS.fallbackLabel} was rejected because ${fallbackReason}.`;
 }
 
 function cancelWithError(ctx: { ui: { notify(message: string, type?: "info" | "warning" | "error"): void } }, message: string) {
@@ -298,49 +356,65 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_before_compact", async (event, ctx) => {
     if (process.env.FM_PI_LUNA_COMPACTION === COMPACTION_SAFETY_POLICY.disabledValue) return;
 
-    const luna = ctx.modelRegistry.find(COMPACTION_MODELS.provider, COMPACTION_MODELS.primary);
-    const sol = ctx.modelRegistry.find(COMPACTION_MODELS.provider, COMPACTION_MODELS.fallback);
-    if (!luna || !sol) {
-      return cancelWithError(ctx, "Safe compaction requires both openai-codex/gpt-5.6-luna and openai-codex/gpt-5.6-sol.");
+    const primary = ctx.modelRegistry.find(COMPACTION_MODELS.provider, COMPACTION_MODELS.primary);
+    const fallback = ctx.modelRegistry.find(COMPACTION_MODELS.provider, COMPACTION_MODELS.fallback);
+    if (!primary || !fallback) {
+      return cancelWithError(
+        ctx,
+        `Safe compaction requires both ${COMPACTION_MODELS.provider}/${COMPACTION_MODELS.primary} `
+          + `and ${COMPACTION_MODELS.provider}/${COMPACTION_MODELS.fallback}.`,
+      );
     }
 
-    let lunaReason = "Luna could not safely compact this session";
-    if (modelCanReceivePreparation(luna, event.preparation, event.customInstructions)) {
+    let primaryReason = `${COMPACTION_MODELS.primaryLabel} could not safely compact this session`;
+    const primaryRejection = preflightRejection(
+      primary,
+      COMPACTION_MODELS.primaryLabel,
+      ctx.model,
+      event.preparation,
+      event.customInstructions,
+    );
+    if (primaryRejection) {
+      primaryReason = primaryRejection;
+    } else {
       try {
-        const lunaAttempt = await runCompaction(
+        const attempt = await runCompaction(
           event.preparation,
-          luna,
+          primary,
           event.customInstructions,
           event.signal,
           ctx.modelRegistry,
         );
-        const rejected = safeResult(lunaAttempt.result, lunaAttempt.model, event.preparation, event.customInstructions);
-        if (!rejected) return { compaction: lunaAttempt.result };
-        lunaReason = rejected;
+        const rejected = safeResult(attempt.result, attempt.model, event.preparation, event.customInstructions);
+        if (!rejected) return { compaction: attempt.result };
+        primaryReason = rejected;
       } catch (error) {
-        lunaReason = error instanceof Error ? error.message : String(error);
+        primaryReason = error instanceof Error ? error.message : String(error);
       }
-    } else {
-      lunaReason = "the prepared request exceeds Luna's supported context/output envelope";
     }
 
     try {
-      if (!modelCanReceivePreparation(sol, event.preparation, event.customInstructions)) {
-        throw new Error("the prepared request exceeds Sol's supported context/output envelope");
-      }
-      const solAttempt = await runCompaction(
+      const fallbackRejection = preflightRejection(
+        fallback,
+        COMPACTION_MODELS.fallbackLabel,
+        ctx.model,
         event.preparation,
-        sol,
+        event.customInstructions,
+      );
+      if (fallbackRejection) throw new Error(fallbackRejection);
+      const attempt = await runCompaction(
+        event.preparation,
+        fallback,
         event.customInstructions,
         event.signal,
         ctx.modelRegistry,
       );
-      const rejected = safeResult(solAttempt.result, solAttempt.model, event.preparation, event.customInstructions);
-      if (!rejected) return { compaction: solAttempt.result };
+      const rejected = safeResult(attempt.result, attempt.model, event.preparation, event.customInstructions);
+      if (!rejected) return { compaction: attempt.result };
       throw new Error(rejected);
     } catch (error) {
-      const solReason = error instanceof Error ? error.message : String(error);
-      return cancelWithError(ctx, failureMessage(lunaReason, solReason));
+      const fallbackReason = error instanceof Error ? error.message : String(error);
+      return cancelWithError(ctx, failureMessage(primaryReason, fallbackReason));
     }
   });
 }

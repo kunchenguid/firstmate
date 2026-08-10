@@ -51,7 +51,7 @@ const valid = (nextDetails = details) => `${historySummary()}${fileSuffix(nextDe
 const malformed = "## Goal\nmissing the native summary structure";
 const models = {
   luna: { provider: "openai-codex", id: "gpt-5.6-luna", contextWindow: 272000, maxTokens: 128000, reasoning: true },
-  sol: { provider: "openai-codex", id: "gpt-5.6-sol", contextWindow: 272000, maxTokens: 128000, reasoning: true },
+  terra: { provider: "openai-codex", id: "gpt-5.6-terra", contextWindow: 272000, maxTokens: 128000, reasoning: true },
 };
 function preparation(overrides = {}) {
   return {
@@ -65,14 +65,16 @@ function preparation(overrides = {}) {
     ...overrides,
   };
 }
-function context(prep, conversationModel = { ...models.sol }) {
+// `null` models a session where Pi reports no conversation model, which is distinct from
+// omitting the argument and taking the same-window default.
+function context(prep, conversationModel = { ...models.terra }) {
   const notifications = [];
   return {
-    model: conversationModel,
+    model: conversationModel === null ? undefined : conversationModel,
     notifications,
     ui: { notify(message, type) { notifications.push({ message, type }); } },
     modelRegistry: {
-      find(_provider, id) { return id === models.luna.id ? models.luna : id === models.sol.id ? models.sol : undefined; },
+      find(_provider, id) { return id === models.luna.id ? models.luna : id === models.terra.id ? models.terra : undefined; },
       async getApiKeyAndHeaders() { return { ok: true, apiKey: "test", headers: { "x-test": "yes" }, env: { TEST: "1" } }; },
     },
   };
@@ -92,13 +94,13 @@ async function invoke({ prep = preparation(), plan, signal = new AbortController
     return { error, calls, notifications: ctx.notifications };
   }
 }
-function result(summary = valid(), nextUsage = usage, nextDetails = details) {
-  return { summary, firstKeptEntryId: "kept", tokensBefore: 999, usage: nextUsage, details: nextDetails };
+function result(summary = valid(), nextUsage = usage, nextDetails = details, tokensBefore = 999) {
+  return { summary, firstKeptEntryId: "kept", tokensBefore, usage: nextUsage, details: nextDetails };
 }
 
 // Luna is the only nested model selected on a safe result. The session model is read-only.
 {
-  const original = { ...models.sol, id: "captain-selected-model", contextWindow: 1000000 };
+  const original = { ...models.terra, id: "captain-selected-model" };
   const run = await invoke({ conversationModel: original, plan: { [models.luna.id]: result() } });
   if (run.error || run.calls.map((call) => call.model.id).join() !== models.luna.id) throw new Error("safe Luna compaction did not select Luna exactly once");
   if (run.result.compaction.usage !== usage || run.result.compaction.details !== details) throw new Error("native usage or details were not preserved");
@@ -117,12 +119,12 @@ for (const [name, fileOps, nextDetails] of [
   if (run.error || run.calls.length !== 1 || !run.result.compaction) throw new Error(`${name} native file tracking was rejected`);
 }
 
-// Luna's smaller envelope never receives a request; Sol gets the one fallback attempt.
+// Luna's smaller envelope never receives a request; Terra gets the one fallback attempt.
 {
   models.luna.contextWindow = 1000;
-  const run = await invoke({ plan: { [models.sol.id]: result() } });
+  const run = await invoke({ conversationModel: { ...models.terra, contextWindow: 1000 }, plan: { [models.terra.id]: result() } });
   models.luna.contextWindow = 272000;
-  if (run.error || run.calls.map((call) => call.model.id).join() !== models.sol.id) throw new Error("oversize Luna preflight did not use only Sol");
+  if (run.error || run.calls.map((call) => call.model.id).join() !== models.terra.id) throw new Error("oversize Luna preflight did not use only Terra");
 }
 
 for (const [name, luna] of [
@@ -135,8 +137,8 @@ for (const [name, luna] of [
   ["partial usage", result(valid(), { ...usage, input: 10 })],
   ["nested failure", new Error("provider failed")],
 ]) {
-  const run = await invoke({ plan: { [models.luna.id]: luna, [models.sol.id]: result() } });
-  if (run.error || run.calls.map((call) => call.model.id).join() !== "gpt-5.6-luna,gpt-5.6-sol") throw new Error(`${name} did not fall back to Sol exactly once`);
+  const run = await invoke({ plan: { [models.luna.id]: luna, [models.terra.id]: result() } });
+  if (run.error || run.calls.map((call) => call.model.id).join() !== "gpt-5.6-luna,gpt-5.6-terra") throw new Error(`${name} did not fall back to Terra exactly once`);
 }
 
 // Cached prompt tokens count as received input and do not trigger a false partial-result fallback.
@@ -146,18 +148,123 @@ for (const [name, luna] of [
   if (run.error || run.calls.length !== 1 || run.calls[0].model.id !== models.luna.id) throw new Error("complete cached input was treated as partial");
 }
 
-// UTF-8 byte density bounds high-token-density prepared input before Luna is called.
+// Multibyte input is measured by UTF-8 length, not UTF-16 code units. 2000 emoji are 8000 UTF-8
+// bytes but 4000 code units, so the window below is one a code-unit measure would wrongly accept.
 {
   const dense = preparation({ messagesToSummarize: [{ role: "user", content: "😀".repeat(2000) }] });
-  models.luna.contextWindow = 20000;
-  const run = await invoke({ prep: dense, plan: { [models.sol.id]: result() } });
+  models.luna.contextWindow = 16500;
+  const run = await invoke({ prep: dense, conversationModel: { ...models.terra, contextWindow: 16500 }, plan: { [models.terra.id]: result() } });
   models.luna.contextWindow = 272000;
-  if (run.error || run.calls.map((call) => call.model.id).join() !== models.sol.id) throw new Error("dense oversize Luna input passed preflight");
+  if (run.error || run.calls.map((call) => call.model.id).join() !== models.terra.id) throw new Error("multibyte input was measured by code units instead of UTF-8 bytes");
 }
 
-// A rejected Luna followed by rejected Sol cancels and reports the full reason, preventing Pi's default fallback.
+// A deployed-scale prose session is measured in tokens, not bytes. This is the reported failure:
+// 944212 serialized bytes cost 180422 real input tokens and fit the 272000 window with room to
+// spare, but a byte-denominated bound reads them as 946260 and cancels every compaction.
 {
-  const run = await invoke({ plan: { [models.luna.id]: result(malformed), [models.sol.id]: result(malformed) } });
+  const noFiles = { readFiles: [], modifiedFiles: [] };
+  const deployed = preparation({
+    isSplitTurn: true,
+    messagesToSummarize: [{ role: "user", content: "x".repeat(944212) }],
+    turnPrefixMessages: [{ role: "user", content: "y".repeat(3069) }],
+    tokensBefore: 257005,
+    fileOps: { read: new Set(), written: new Set(), edited: new Set() },
+  });
+  const splitSummary = `${historySummary()}\n\n---\n\n**Turn Context (split turn):**\n\n## Original Request\nrequest\n## Early Progress\n- progress\n## Context for Suffix\n- suffix`;
+  const deployedUsage = { ...usage, input: 180422, output: 4000 };
+  const run = await invoke({ prep: deployed, plan: { [models.luna.id]: result(splitSummary, deployedUsage, noFiles, 257005) } });
+  if (run.error || run.calls.map((call) => call.model.id).join() !== models.luna.id) throw new Error("deployed-scale prose compaction was rejected by a byte-denominated envelope");
+  if (run.result.compaction.summary !== splitSummary) throw new Error("deployed-scale split summary was altered");
+}
+
+// The tool-heavy shape that used to pass by coincidence still passes, and its real input cost of
+// 95154 tokens against a 58386-token estimate is why a returned result is checked for saturation.
+{
+  const noFiles = { readFiles: [], modifiedFiles: [] };
+  const toolHeavy = preparation({
+    isSplitTurn: true,
+    messagesToSummarize: [{ role: "user", content: "x".repeat(233542) }],
+    turnPrefixMessages: [{ role: "user", content: "y".repeat(2227) }],
+    tokensBefore: 258035,
+    fileOps: { read: new Set(), written: new Set(), edited: new Set() },
+  });
+  const splitSummary = `${historySummary()}\n\n---\n\n**Turn Context (split turn):**\n\n## Original Request\nrequest\n## Early Progress\n- progress\n## Context for Suffix\n- suffix`;
+  const run = await invoke({ prep: toolHeavy, plan: { [models.luna.id]: result(splitSummary, { ...usage, input: 95154, output: 4000 }, noFiles, 258035) } });
+  if (run.error || run.calls.map((call) => call.model.id).join() !== models.luna.id) throw new Error("deployed-scale tool-heavy compaction regressed");
+}
+
+// A session that overshoots the earlier 239232-token trigger by 20000 tokens still fits, at the
+// worst measured prose density and against the larger output budget a 32768-token reserve buys.
+{
+  const noFiles = { readFiles: [], modifiedFiles: [] };
+  const overshoot = preparation({
+    isSplitTurn: true,
+    messagesToSummarize: [{ role: "user", content: "x".repeat(952420) }],
+    turnPrefixMessages: [{ role: "user", content: "y".repeat(3069) }],
+    tokensBefore: 259232,
+    fileOps: { read: new Set(), written: new Set(), edited: new Set() },
+    settings: { enabled: true, reserveTokens: 32768, keepRecentTokens: 20000 },
+  });
+  const splitSummary = `${historySummary()}\n\n---\n\n**Turn Context (split turn):**\n\n## Original Request\nrequest\n## Early Progress\n- progress\n## Context for Suffix\n- suffix`;
+  const run = await invoke({ prep: overshoot, plan: { [models.luna.id]: result(splitSummary, { ...usage, input: 182004, output: 4000 }, noFiles, 259232) } });
+  if (run.error || run.calls.map((call) => call.model.id).join() !== models.luna.id) throw new Error("realistic threshold overshoot was rejected at the configured reserve");
+}
+
+// A compaction model narrower than the session cannot hold it, however small this one request is.
+// A 65536-token local model clears the absolute envelope below and is still refused.
+{
+  const [window, maxTokens] = [models.luna.contextWindow, models.luna.maxTokens];
+  models.luna.contextWindow = 65536;
+  models.luna.maxTokens = 4096;
+  const run = await invoke({ plan: { [models.terra.id]: result() } });
+  models.luna.contextWindow = window;
+  models.luna.maxTokens = maxTokens;
+  if (run.error || run.calls.map((call) => call.model.id).join() !== models.terra.id) throw new Error("a compaction model smaller than the session was used");
+}
+
+// When neither compaction model can hold the session, compaction stops instead of summarizing
+// into a window too small for it, and the error names both models and the concrete reason.
+{
+  const run = await invoke({ conversationModel: { ...models.terra, id: "wide-model", contextWindow: 1000000 }, plan: {} });
+  if (run.error || run.result?.cancel !== true || run.calls.length !== 0) throw new Error("a session wider than both compaction models was compacted anyway");
+  const [notification] = run.notifications;
+  if (run.notifications.length !== 1 || notification.type !== "error") throw new Error("the refusal was not surfaced as one error");
+  for (const expected of ["Safe compaction failed", "Luna", "Terra", "smaller than the conversation's own model"]) {
+    if (!notification.message.includes(expected)) throw new Error(`the refusal did not report ${expected}`);
+  }
+}
+
+// Pi does not always report a conversation model; an unknown window uses the absolute envelope
+// alone rather than cancelling every compaction.
+{
+  const run = await invoke({ conversationModel: null, plan: { [models.luna.id]: result() } });
+  if (run.error || run.calls.map((call) => call.model.id).join() !== models.luna.id) throw new Error("an unreported conversation model blocked compaction");
+}
+
+// The estimate can understate real tokens, so a result whose reported input reaches the window
+// ceiling is rejected: prepared history may have been dropped to make the request fit.
+{
+  const run = await invoke({ plan: { [models.luna.id]: result(valid(), { ...usage, input: 258893 }), [models.terra.id]: result() } });
+  if (run.error || run.calls.map((call) => call.model.id).join() !== "gpt-5.6-luna,gpt-5.6-terra") throw new Error("a request that filled the context window was accepted");
+}
+{
+  const run = await invoke({ plan: { [models.luna.id]: result(valid(), { ...usage, input: 200000 }) } });
+  if (run.error || run.calls.map((call) => call.model.id).join() !== models.luna.id) throw new Error("a large but unsaturated request was rejected");
+}
+
+// Sparse input costs fewer real tokens than the estimate, which must not read as lost history.
+// 400000 bytes estimate 100000 tokens; at 7 bytes per token the request really costs 57000.
+{
+  const sparse = preparation({ messagesToSummarize: [{ role: "user", content: "x".repeat(400000) }] });
+  const complete = await invoke({ prep: sparse, plan: { [models.luna.id]: result(valid(), { ...usage, input: 57000 }) } });
+  if (complete.error || complete.calls.map((call) => call.model.id).join() !== models.luna.id) throw new Error("sparse but complete input was treated as lost history");
+  const lost = await invoke({ prep: sparse, plan: { [models.luna.id]: result(valid(), { ...usage, input: 40000 }), [models.terra.id]: result() } });
+  if (lost.error || lost.calls.map((call) => call.model.id).join() !== "gpt-5.6-luna,gpt-5.6-terra") throw new Error("genuinely lost input was accepted");
+}
+
+// A rejected Luna followed by rejected Terra cancels and reports the full reason, preventing Pi's default fallback.
+{
+  const run = await invoke({ plan: { [models.luna.id]: result(malformed), [models.terra.id]: result(malformed) } });
   if (run.error || run.result?.cancel !== true || run.calls.length !== 2) throw new Error("double failure did not cancel compaction");
   if (run.notifications.length !== 1 || run.notifications[0].type !== "error" || !run.notifications[0].message.includes("Safe compaction failed")) throw new Error("double failure was not surfaced clearly");
 }
@@ -166,7 +273,7 @@ for (const [name, luna] of [
 {
   const controller = new AbortController();
   controller.abort();
-  const run = await invoke({ signal: controller.signal, plan: { [models.luna.id]: result(), [models.sol.id]: result() } });
+  const run = await invoke({ signal: controller.signal, plan: { [models.luna.id]: result(), [models.terra.id]: result() } });
   if (run.error || run.result?.cancel !== true || run.calls.length !== 0 || !run.notifications[0]?.message.includes("Safe compaction failed")) throw new Error("cancelled compaction was accepted or called a model");
 }
 
@@ -185,7 +292,7 @@ for (const [name, luna] of [
   const split = preparation({ isSplitTurn: true, turnPrefixMessages: [{ role: "user", content: "prefix" }], fileOps: { read: new Set(), written: new Set(), edited: new Set() } });
   const splitSummary = `${historySummary()}\n\n---\n\n**Turn Context (split turn):**\n\n## Original Request\nrequest\n## Early Progress\n- progress\n## Context for Suffix\n- suffix`;
   models.luna.contextWindow = 18000;
-  const run = await invoke({ prep: split, plan: { [models.luna.id]: result(splitSummary, usage, noFiles) } });
+  const run = await invoke({ prep: split, conversationModel: { ...models.terra, contextWindow: 18000 }, plan: { [models.luna.id]: result(splitSummary, usage, noFiles) } });
   models.luna.contextWindow = 272000;
   if (run.error || run.calls.length !== 1 || run.calls[0].model.id !== models.luna.id) throw new Error("independently safe split requests failed preflight");
 }
@@ -195,8 +302,8 @@ for (const [name, luna] of [
   const noFiles = { readFiles: [], modifiedFiles: [] };
   const split = preparation({ isSplitTurn: true, turnPrefixMessages: [{ role: "user", content: "prefix" }], fileOps: { read: new Set(), written: new Set(), edited: new Set() } });
   const truncatedHistory = `${historySummary()}...\n\n---\n\n**Turn Context (split turn):**\n\n## Original Request\nrequest\n## Early Progress\n- progress\n## Context for Suffix\n- suffix`;
-  const run = await invoke({ prep: split, plan: { [models.luna.id]: result(truncatedHistory, usage, noFiles), [models.sol.id]: result(`${historySummary()}\n\n---\n\n**Turn Context (split turn):**\n\n## Original Request\nrequest\n## Early Progress\n- progress\n## Context for Suffix\n- suffix`, usage, noFiles) } });
-  if (run.error || run.calls.map((call) => call.model.id).join() !== "gpt-5.6-luna,gpt-5.6-sol") throw new Error("hidden split-segment truncation was accepted");
+  const run = await invoke({ prep: split, plan: { [models.luna.id]: result(truncatedHistory, usage, noFiles), [models.terra.id]: result(`${historySummary()}\n\n---\n\n**Turn Context (split turn):**\n\n## Original Request\nrequest\n## Early Progress\n- progress\n## Context for Suffix\n- suffix`, usage, noFiles) } });
+  if (run.error || run.calls.map((call) => call.model.id).join() !== "gpt-5.6-luna,gpt-5.6-terra") throw new Error("hidden split-segment truncation was accepted");
 }
 
 console.log("ok");
@@ -205,7 +312,7 @@ JS
   out=$(<"$output_file")
   [ "$status" -eq 0 ] || fail "Pi Luna compaction regression failed: $out"
   [ "$out" = "ok" ] || fail "Pi Luna compaction regression emitted unexpected output: $out"
-  pass "Pi Luna compaction safely selects Luna, preserves native results, and falls back to Sol"
+  pass "Pi Luna compaction sizes requests in tokens, preserves native results, and falls back to Terra"
 }
 
 run_cases

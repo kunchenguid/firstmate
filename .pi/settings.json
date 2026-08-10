@@ -1,0 +1,5 @@
+{
+  "compaction": {
+    "reserveTokens": 32768
+  }
+}
