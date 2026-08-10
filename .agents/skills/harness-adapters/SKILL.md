@@ -334,9 +334,9 @@ When a secondmate is launched on Pi or pi-signed, `fm-spawn.sh --secondmate` lau
 | Skill invocation | No separate verified command; use natural language. |
 
 OMP is distributed as a Bun script.
-Detection accepts only the positive `OMPCODE=1` marker, the exact `omp` executable, or Bun whose script argv is an exact `omp` path component; later prompt text never counts.
+Detection accepts only the positive `OMPCODE=1` marker, the exact `omp` executable, or Bun whose script argv has the exact `omp` basename; later prompt text never counts.
 A Firstmate-launched OMP worker inherited `CLAUDECODE`, so `OMPCODE=1` must precede foreign markers and the launch template removes known foreign harness markers.
-Because that precedence outranks every other marker, the reciprocal also holds: `fm-spawn.sh` prefixes `unset OMPCODE;` to every launch whose resolved harness is not `omp`, raw escape-hatch commands included, so no other adapter's worker can report `omp` against its own recorded harness.
+The shared `fm-spawn.sh` launch boundary clears the known primary markers before the resolved worker starts, then restores only the selected OMP or Pi-family marker where that adapter requires one, including raw escape-hatch commands.
 Launch keeps the encoded brief as one positional message, loads one per-task extension from `state/`, and starts with no observed trust or permission dialog.
 Herdr reports native `working` and `idle` states for OMP.
 OMP 17.2.12 leaves its Herdr registration at `idle` after `/exit` returns to the nested worktree shell, so the Herdr backend treats only the separately proven one-process shell shape as agent-free.

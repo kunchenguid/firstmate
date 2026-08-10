@@ -27,29 +27,8 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
-# shellcheck source=bin/fm-cursor-lib.sh
-. "$SCRIPT_DIR/fm-cursor-lib.sh"
-
-fm_harness_omp_process_matches() {  # <comm> <args>
-  local comm=$1 args=$2 script
-  case "$(basename -- "$comm")" in
-    omp) return 0 ;;
-    bun*)
-      # OMP is distributed as a Bun script. Match only argv[1]'s exact `omp`
-      # path component; later prompt arguments may mention OMP and are not
-      # process identity. A bare `bun` with no script argument is not OMP even
-      # when its own install path has an `omp` component, so the guard below
-      # mirrors bin/fm-session-lock-lib.sh: judge only a real argv[1].
-      script=${args#* }
-      if [ "$script" != "$args" ]; then
-        script=${script%% *}
-        case "/$script/" in
-          */omp/*) return 0 ;;
-        esac
-      fi ;;
-  esac
-  return 1
-}
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$SCRIPT_DIR/fm-session-lock-lib.sh"
 
 fm_harness_omp_ancestry_matches() {
   local pid=$$ comm args
@@ -68,8 +47,8 @@ fm_harness_omp_ancestry_matches() {
 
 detect_own() {
   # OMP workers launched by Firstmate carry OMPCODE=1. A primary OMP 17.2.12
-  # session may omit it, so its exact Bun ancestry must also outrank an
-  # inherited foreign Claude marker.
+  # session may omit it, so its exact Bun executable/script ancestry must also
+  # outrank an inherited foreign Claude marker.
   [ "${OMPCODE:-}" = "1" ] && { echo omp; return; }
   if [ "${CLAUDECODE:-}" = "1" ] && fm_harness_omp_ancestry_matches; then
     echo omp

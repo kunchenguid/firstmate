@@ -21,9 +21,11 @@
 FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$|^omp$'
 
 # Exact executable names for the stricter path evidence below. Keep in sync
-# with FM_HARNESS_RE. The exact-component check avoids treating ordinary
+# with the non-interpreter names in FM_HARNESS_RE. The exact-component check
+# avoids treating ordinary
 # firstmate paths such as bin/fm-claude-stop-autoarm.sh as harness processes.
-FM_HARNESS_NAMES=(claude codex opencode grok kimi pi-signed pi omp)
+# OMP's Bun shape is matched by its exact executable or script basename below.
+FM_HARNESS_NAMES=(claude codex opencode grok kimi pi-signed pi)
 
 # Print the exact harness name carried by executable path $1 - its own basename
 # or any directory component - or return 1.
@@ -45,6 +47,34 @@ fm_harness_path_name() {  # <path>
   return 1
 }
 
+fm_harness_omp_script_matches() {  # <path>
+  local path=$1
+  [ -n "$path" ] && [ "${path##*/}" = omp ]
+}
+
+fm_harness_omp_path_component() {  # <path>
+  local path=$1
+  case "/$path/" in
+    */omp/*) return 0 ;;
+  esac
+  return 1
+}
+
+fm_harness_omp_process_matches() {  # <comm> <args>
+  local comm=$1 args=$2 script
+  case "$(basename -- "$comm")" in
+    omp) return 0 ;;
+    bun*)
+      script=${args#* }
+      if [ "$script" != "$args" ]; then
+        script=${script%% *}
+        fm_harness_omp_script_matches "$script" && return 0
+      fi
+      ;;
+  esac
+  return 1
+}
+
 # True when the process described by command name $1 and full argument string $2
 # is a verified harness. Sets FM_HARNESS_IS_CLAUDE for the ancestry walk.
 #
@@ -60,32 +90,29 @@ fm_harness_path_name() {  # <path>
 #   3. a bare interpreter (node, python, bun) running a harness script path.
 FM_HARNESS_IS_CLAUDE=0
 fm_harness_process_matches() {  # <comm> <args>
-  local comm=$1 args=$2 base argv0 name
+  local comm=$1 args=$2 base argv0 name script
   FM_HARNESS_IS_CLAUDE=0
   base=$(basename -- "$comm")
   if printf '%s' "$base" | grep -qE "$FM_HARNESS_RE"; then
     case "$base" in *claude*) FM_HARNESS_IS_CLAUDE=1 ;; esac
     return 0
   fi
+  if fm_harness_omp_process_matches "$comm" "$args"; then
+    return 0
+  fi
+  case "$base" in
+    bun*)
+      script=${args#* }
+      if [ "$script" = "$args" ] && fm_harness_omp_path_component "$comm"; then
+        return 0
+      fi
+      ;;
+  esac
   argv0=${args%% *}
   if name=$(fm_harness_path_name "$comm") || name=$(fm_harness_path_name "$argv0"); then
     case "$name" in claude) FM_HARNESS_IS_CLAUDE=1 ;; esac
     return 0
   fi
-  # OMP is distributed as a Bun script. Require its script argv to be the exact
-  # `omp` path component; matching arbitrary Bun arguments would let an unrelated
-  # process whose prompt merely mentions OMP claim a firstmate home.
-  case "$comm" in
-    *bun*)
-      local script=${args#* }
-      if [ "$script" != "$args" ]; then
-        script=${script%% *}
-        if name=$(fm_harness_path_name "$script") && [ "$name" = omp ]; then
-          return 0
-        fi
-      fi
-      ;;
-  esac
   # Bare Node or Python interpreter: match the harness name in its script path.
   case "$comm" in
     *node*|*python*)

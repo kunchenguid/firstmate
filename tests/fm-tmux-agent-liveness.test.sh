@@ -169,17 +169,17 @@ pass "tmux liveness: an exact OMP process classifies alive"
 # decoy pins the same anchoring rule the muse cases pin: a script path that
 # merely contains "omp" is a different program.
 
-mkdir -p "$LAB/bunroot" "$LAB/decoyroot"
+mkdir -p "$LAB/bunroot" "$LAB/decoyroot/omp"
 ln -s "$SH_BIN" "$LAB/bin/bun"
 cat > "$LAB/bunroot/omp" <<SH
 #!/bin/sh
 "$SLEEP_BIN" 900
 SH
-cat > "$LAB/decoyroot/ompanion" <<SH
+cat > "$LAB/decoyroot/omp/compiler.js" <<SH
 #!/bin/sh
 "$SLEEP_BIN" 900
 SH
-chmod +x "$LAB/bunroot/omp" "$LAB/decoyroot/ompanion"
+chmod +x "$LAB/bunroot/omp" "$LAB/decoyroot/omp/compiler.js"
 
 new_window ompbun "$LAB/bin/bun" "$LAB/bunroot/omp"
 wait_for_state "$SESSION:ompbun" alive \
@@ -188,7 +188,7 @@ title_classifies_agent "$SESSION:ompbun" \
   && fail "the Bun case went vacuous: the process name alone already named a harness"
 pass "tmux liveness: a Bun process whose script argument is the exact omp path classifies alive"
 
-new_window ompbun-decoy "$LAB/bin/bun" "$LAB/decoyroot/ompanion"
+new_window ompbun-decoy "$LAB/bin/bun" "$LAB/decoyroot/omp/compiler.js"
 wait_for_state "$SESSION:ompbun-decoy" ambiguous \
   || fail "a Bun script path that merely contains 'omp' must not classify as a live agent pane"
 pass "tmux liveness: a Bun script path that only contains 'omp' stays ambiguous"

@@ -66,6 +66,7 @@ test_omp_watcher_entrypoint_selects_omp_contract() {
   mkdir -p "$repo/bin" "$repo/.omp/extensions" "$home/state" "$home/config"
   install_pi_watch_extension_fixture "$repo"
   cp "$ROOT/.omp/extensions/fm-primary-omp-watch.ts" "$repo/.omp/extensions/fm-primary-omp-watch.ts"
+  cp "$ROOT/.omp/extensions/fm-primary-omp-watch.manifest" "$repo/.omp/extensions/fm-primary-omp-watch.manifest"
   plugin="$repo/.omp/extensions/fm-primary-omp-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash

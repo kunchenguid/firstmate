@@ -23,15 +23,25 @@ let primaryHarness: PrimaryHarness = "pi";
 let marker = `${state}/.pi-turnend-extension-loaded`;
 let extensionVersion = `sha256:${createHash("sha256").update(readFileSync(extensionFile)).digest("hex")}`;
 
+function manifestFiles(manifest: string): string[] {
+  const entries = readFileSync(manifest, "utf8")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (entries.some((entry) => entry.startsWith("/") || entry.split("/").includes(".."))) {
+    throw new Error(`invalid extension dependency manifest ${manifest}`);
+  }
+  return [manifest, ...entries.map((entry) => resolve(root, entry))];
+}
+
 function selectPrimaryHarness(harness: PrimaryHarness): void {
   primaryHarness = harness;
   marker = `${state}/.${harness}-turnend-extension-loaded`;
-  // The entrypoint alone is a thin re-export, so its bytes never move when the
-  // shared implementation below it changes. Hash the whole load chain, in the
-  // same order bin/fm-session-start.sh hashes it, or a stale in-memory guard
-  // would keep reporting itself current.
+  // The OMP manifest owns the local load chain, in the same order
+  // bin/fm-session-start.sh hashes it, so a stale in-memory guard cannot keep
+  // reporting itself current.
   const identityFiles = harness === "omp"
-    ? [`${root}/.omp/extensions/fm-primary-turnend-guard.ts`, extensionFile]
+    ? manifestFiles(`${root}/.omp/extensions/fm-primary-turnend-guard.manifest`)
     : [extensionFile];
   const digest = createHash("sha256");
   for (const file of identityFiles) digest.update(readFileSync(file));

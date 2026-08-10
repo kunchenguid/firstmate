@@ -1184,7 +1184,8 @@ launch_template() {
     # plugin engine is off in the default build, so firstmate folds muse's own
     # session event log instead (bin/fm-busy-lib.sh), bound by the sidecar
     # written below. Nothing to place in the template for it.
-    # codex, opencode, and kimi are also markerless and share this inherited-marker hazard; changing their verified launch boundaries belongs in follow-up work.
+    # The shared launch boundary below clears inherited primary markers for
+    # every resolved worker identity.
     muse) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS XDG_CONFIG_HOME=__MUSECONFIG__ XDG_DATA_HOME=__MUSEDATA__ MUSE_EXPERIMENTAL_FOREIGN_PERSONAL_CONTEXT_KILL=on __MUSEBIN__ --yolo __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     *) return 1 ;;
   esac
@@ -2834,17 +2835,19 @@ if [ "$KIND" = secondmate ]; then
   # injected carrier and this on/off snapshot are guaranteed to agree.
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$sq_primary_home FM_HOME=$sq_home FM_TRACE_CONTEXT=$SPAWN_TRACE_EFFECTIVE FM_SUPERVISION_MODEL=$supervision_model $LAUNCH"
 fi
-# OMPCODE is OMP's own positive identity marker and bin/fm-harness.sh detect_own
-# reads it ahead of every other marker, so a worker that is not OMP must not
-# inherit one from the session or multiplexer daemon that launched it: it would
-# report a harness its own task meta contradicts. This binds to the RESOLVED
-# harness, not to the launch kind, because a raw escape-hatch command names its
-# adapter too. It is a pane-shell statement rather than an `env` prefix so that
-# the escape hatch keeps accepting the shell forms it exists for - `cd x && ...`,
-# a sourced launcher, a shell function - which an `env` prefix would break.
-if [ "$HARNESS" != omp ]; then
-  LAUNCH="unset OMPCODE; $LAUNCH"
-fi
+# The resolved harness owns the worker's identity at this shared pane-shell
+# boundary. Keep the shell statement so raw escape-hatch forms remain runnable.
+case "$HARNESS" in
+  omp)
+    LAUNCH="unset CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT GROK_HOOK_EVENT; export OMPCODE=1; $LAUNCH"
+    ;;
+  pi|pi-signed)
+    LAUNCH="unset OMPCODE CLAUDECODE GROK_AGENT GROK_HOOK_EVENT; $LAUNCH"
+    ;;
+  *)
+    LAUNCH="unset OMPCODE CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT GROK_HOOK_EVENT; $LAUNCH"
+    ;;
+esac
 if [ -z "$SPAWN_TRACEPARENT" ] && [ "$RELAUNCH" -eq 1 ]; then
   LAUNCH="unset TRACEPARENT; $LAUNCH"
 fi

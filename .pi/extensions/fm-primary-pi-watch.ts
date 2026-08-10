@@ -91,6 +91,17 @@ let watchCommandName = "fm-watch-arm-pi";
 let marker = `${state}/.pi-watch-extension-loaded`;
 let extensionVersion = `sha256:${createHash("sha256").update(readFileSync(extensionFile)).digest("hex")}`;
 
+function manifestFiles(manifest: string): string[] {
+  const entries = readFileSync(manifest, "utf8")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (entries.some((entry) => entry.startsWith("/") || entry.split("/").includes(".."))) {
+    throw new Error(`invalid extension dependency manifest ${manifest}`);
+  }
+  return [manifest, ...entries.map((entry) => resolve(root, entry))];
+}
+
 function selectPrimaryHarness(harness: PrimaryHarness): void {
   primaryHarnessSlug = harness;
   primaryHarnessLabel = harness === "omp" ? "OMP" : "Pi";
@@ -99,12 +110,11 @@ function selectPrimaryHarness(harness: PrimaryHarness): void {
   repairOnlyHint = `call ${watchToolName} again only after a later notification says the cycle is missing, failed, or unhealthy`;
   shuttingDownMessage = `watcher: not armed - ${primaryHarnessLabel} session is shutting down`;
   marker = `${state}/.${harness}-watch-extension-loaded`;
-  // The entrypoint alone is a thin re-export, so its bytes never move when the
-  // shared implementation below it changes. Hash the whole load chain, in the
-  // same order bin/fm-session-start.sh hashes it, or a stale in-memory watcher
-  // would keep reporting itself current.
+  // The OMP manifest owns the local load chain, in the same order
+  // bin/fm-session-start.sh hashes it, so a stale in-memory watcher cannot keep
+  // reporting itself current.
   const identityFiles = harness === "omp"
-    ? [`${root}/.omp/extensions/fm-primary-omp-watch.ts`, extensionFile]
+    ? manifestFiles(`${root}/.omp/extensions/fm-primary-omp-watch.manifest`)
     : [extensionFile];
   const digest = createHash("sha256");
   for (const file of identityFiles) digest.update(readFileSync(file));

@@ -161,6 +161,10 @@ fm_backend_tmux_classify_process_name() {  # <path> [argv0] -> agent|shell|other
   local path=$1 argv0=${2:-} base
   base=${path##*/}
   base=${base#-}
+  if fm_harness_omp_script_matches "$path" || fm_harness_omp_script_matches "$argv0"; then
+    printf 'agent'
+    return 0
+  fi
   case "$base" in
     # muse is anchored rather than globbed like its neighbours: its installed
     # binary is muse-bin-<version> (the launcher execs it, so the version is the
@@ -170,7 +174,7 @@ fm_backend_tmux_classify_process_name() {  # <path> [argv0] -> agent|shell|other
     # cannot carry it either: ~/.local/bin/muse-bin-<version> has no `muse` path
     # COMPONENT, so the fm_harness_path_name fallback below never fires for it.
     muse|muse-bin-*) printf 'agent' ;;
-    *claude*|*codex*|*opencode*|*grok*|*kimi*|pi|pi-signed|pi-launcher|Pi) printf 'agent' ;;
+    *claude*|*codex*|*opencode*|*grok*|*kimi*|omp|pi|pi-signed|pi-launcher|Pi) printf 'agent' ;;
     zsh|bash|sh|dash|ash|ksh|mksh|tcsh|csh|fish) printf 'shell' ;;
     *)
       if fm_harness_path_name "$path" >/dev/null || fm_harness_path_name "$argv0" >/dev/null; then
@@ -243,14 +247,14 @@ fm_backend_tmux_foreground_argv0s() {  # <target>
         args=${args#"${args%%[![:space:]]*}"}
         argv0=${args%%[[:space:]]*}
         [ -n "$argv0" ] && printf '%s\n' "$argv0"
-        # OMP's long-lived process is Bun with the exact `omp` script as argv[1].
+        # OMP's long-lived process is Bun with the exact `omp` script basename as argv[1].
         # Export that one verified identity candidate, never later prompt text.
         case "${comm##*/}" in
           bun)
             rest=${args#"$argv0"}
             rest=${rest#"${rest%%[![:space:]]*}"}
             script=${rest%%[[:space:]]*}
-            if [ "$(fm_harness_path_name "$script" 2>/dev/null || true)" = omp ]; then
+            if fm_harness_omp_process_matches "$comm" "$args"; then
               printf '%s\n' "$script"
             fi
             ;;

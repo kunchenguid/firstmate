@@ -165,7 +165,7 @@ test_no_profile_keeps_claude_profile_defaults() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
 
   launch=$(cat "$LAUNCH_LOG")
-  expected="unset OMPCODE; env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
+  expected="unset OMPCODE CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT GROK_HOOK_EVENT; env -u OMPCODE -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
   [ "$launch" = "$expected" ] || fail "no-profile claude launch did not use the canonical launch kind"$'\n'"expected: $expected"$'\n'"actual:   $launch"
   pass "no --model/--effort records defaults and types the claude launch instructions"
 }
@@ -414,7 +414,7 @@ test_active_dispatch_profile_allows_raw_launch_command() {
   assert_contains "$out" "spawned $id harness=custom-agent" "spawn did not report raw command harness"
   assert_meta_profile "$HOME_DIR/state/$id.meta" custom-agent default default
   launch=$(cat "$LAUNCH_LOG")
-  [ "$launch" = "unset OMPCODE; custom-agent --flag" ] || fail "raw launch command changed"$'\n'"actual: $launch"
+  [ "$launch" = "unset OMPCODE CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT GROK_HOOK_EVENT; custom-agent --flag" ] || fail "raw launch command changed"$'\n'"actual: $launch"
   pass "active crew-dispatch profile allows the raw launch-command escape hatch"
 }
 
@@ -836,7 +836,7 @@ test_claude_forwards_firstmate_config_dir_when_set() {
   status=$?
   expect_code 0 "$status" "claude spawn with CLAUDE_CONFIG_DIR set should succeed"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "unset OMPCODE; CLAUDE_CONFIG_DIR='/opt/test/claude-work' env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude" \
+  assert_contains "$launch" "unset OMPCODE CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT GROK_HOOK_EVENT; CLAUDE_CONFIG_DIR='/opt/test/claude-work' env -u OMPCODE -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude" \
     "claude launch did not forward firstmate's CLAUDE_CONFIG_DIR to the crewmate pane"
   pass "claude forwards firstmate's CLAUDE_CONFIG_DIR so the crewmate uses the same credential store"
 }
@@ -892,6 +892,31 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
   pass "active crew-dispatch profile does not block secondmate launches"
 }
 
+test_selected_harness_clears_foreign_primary_markers() {
+  local rec id out status launch probe
+  id=profile-identity-boundary-z8f
+  rec=$(make_spawn_case profile-identity-boundary codex "$id")
+  read_case_record "$rec"
+  probe="$CASE_DIR/identity-probe"
+  cat > "$FAKEBIN_DIR/codex" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${OMPCODE-unset}|${CLAUDECODE-unset}|${PI_CODING_AGENT-unset}|${FM_PI_HARNESS-unset}|${GROK_AGENT-unset}|${GROK_HOOK_EVENT-unset}" > "$FM_IDENTITY_PROBE"
+SH
+  chmod +x "$FAKEBIN_DIR/codex"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness codex)
+  status=$?
+  expect_code 0 "$status" "a selected codex worker should spawn from a marked primary"
+  launch=$(cat "$LAUNCH_LOG")
+  FM_IDENTITY_PROBE="$probe" \
+    OMPCODE=1 CLAUDECODE=1 PI_CODING_AGENT=true FM_PI_HARNESS=pi-signed \
+    GROK_AGENT=1 GROK_HOOK_EVENT=stop PATH="$FAKEBIN_DIR:$PATH" bash -c "$launch"
+  [ "$(cat "$probe")" = "unset|unset|unset|unset|unset|unset" ] \
+    || fail "selected codex worker retained a foreign primary marker: $(cat "$probe")"
+  pass "selected worker launches clear foreign primary identity markers"
+}
+
 test_no_profile_keeps_claude_profile_defaults
 test_non_cursor_launch_clears_inherited_cursor_markers
 test_relative_home_overrides_launch_with_absolute_cross_process_paths
@@ -905,6 +930,7 @@ test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
+test_selected_harness_clears_foreign_primary_markers
 test_codex_omits_invalid_max_effort
 test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort

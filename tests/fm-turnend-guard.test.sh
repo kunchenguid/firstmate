@@ -1043,6 +1043,7 @@ test_omp_extension_uses_agent_end_for_logical_runs() {
   log="$TMP_ROOT/omp-logical-run-guard.log"
   mkdir -p "$repo/.omp/extensions" "$repo/.pi/extensions/lib" "$repo/bin" "$home/state"
   cp "$ROOT/.omp/extensions/fm-primary-turnend-guard.ts" "$ext"
+  cp "$ROOT/.omp/extensions/fm-primary-turnend-guard.manifest" "$repo/.omp/extensions/fm-primary-turnend-guard.manifest"
   cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$repo/.pi/extensions/fm-primary-turnend-guard.ts"
   cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$repo/.pi/extensions/lib/fm-operational-input.ts"
   cp "$ROOT/bin/fm-operational-input.sh" "$repo/bin/fm-operational-input.sh"
@@ -1100,8 +1101,8 @@ EOF
 # The loaded marker is what bin/fm-session-start.sh reads to decide whether the
 # running session carries current guard code. OMP replaces a session in the same
 # process with session_switch, so that path has to restore the marker the way
-# session_start does, and the recorded version has to cover the shared core the
-# thin .omp entrypoint re-exports - otherwise a core-only update stays invisible.
+# session_start does, and the recorded version has to cover the manifest-owned
+# local load chain - otherwise a dependency update stays invisible.
 test_omp_session_switch_restores_a_current_loaded_marker() {
   local repo home ext out status
   repo="$TMP_ROOT/omp-switch-marker-root"
@@ -1109,6 +1110,7 @@ test_omp_session_switch_restores_a_current_loaded_marker() {
   ext="$repo/.omp/extensions/fm-primary-turnend-guard.ts"
   mkdir -p "$repo/.omp/extensions" "$repo/.pi/extensions/lib" "$repo/bin" "$home/state"
   cp "$ROOT/.omp/extensions/fm-primary-turnend-guard.ts" "$ext"
+  cp "$ROOT/.omp/extensions/fm-primary-turnend-guard.manifest" "$repo/.omp/extensions/fm-primary-turnend-guard.manifest"
   cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$repo/.pi/extensions/fm-primary-turnend-guard.ts"
   cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$repo/.pi/extensions/lib/fm-operational-input.ts"
   out=$(OMPCODE=1 PLUGIN="$ext" FM_HOME="$home" node --input-type=module 2>&1 <<'EOF'
@@ -1119,12 +1121,14 @@ import { pathToFileURL } from "node:url";
 
 const entrypoint = process.env.PLUGIN;
 const repo = resolve(dirname(entrypoint), "../..");
-const shared = `${repo}/.pi/extensions/fm-primary-turnend-guard.ts`;
+const manifest = `${repo}/.omp/extensions/fm-primary-turnend-guard.manifest`;
 const marker = `${process.env.FM_HOME}/state/.omp-turnend-extension-loaded`;
-const expected = `sha256:${createHash("sha256")
-  .update(readFileSync(entrypoint))
-  .update(readFileSync(shared))
-  .digest("hex")}`;
+const digest = createHash("sha256");
+digest.update(readFileSync(manifest));
+for (const relative of readFileSync(manifest, "utf8").split(/\r?\n/).map((line) => line.trim()).filter(Boolean)) {
+  digest.update(readFileSync(resolve(repo, relative)));
+}
+const expected = `sha256:${digest.digest("hex")}`;
 
 const handlers = new Map();
 const pi = { on(event, handler) { handlers.set(event, handler); } };

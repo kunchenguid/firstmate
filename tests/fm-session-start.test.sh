@@ -707,6 +707,18 @@ hash_file_for_test() {
   fi
 }
 
+hash_manifest_for_test() {
+  local manifest=$1 root=$2 line
+  local -a files=("$manifest")
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    [ -n "$line" ] || continue
+    files+=("$root/$line")
+  done < "$manifest"
+  hash_file_for_test "${files[@]}"
+}
+
 install_pi_turnend_extension_fixture() {
   local root=$1
   mkdir -p "$root/.pi/extensions"
@@ -742,19 +754,22 @@ install_omp_extensions_fixture() {
   mkdir -p "$root/.omp/extensions"
   cp "$ROOT/.omp/extensions/fm-primary-omp-watch.ts" "$root/.omp/extensions/fm-primary-omp-watch.ts"
   cp "$ROOT/.omp/extensions/fm-primary-turnend-guard.ts" "$root/.omp/extensions/fm-primary-turnend-guard.ts"
+  cp "$ROOT/.omp/extensions/fm-primary-omp-watch.manifest" "$root/.omp/extensions/fm-primary-omp-watch.manifest"
+  cp "$ROOT/.omp/extensions/fm-primary-turnend-guard.manifest" "$root/.omp/extensions/fm-primary-turnend-guard.manifest"
   install_pi_watch_extension_fixture "$root"
   install_pi_turnend_extension_fixture "$root"
+  mkdir -p "$root/.pi/extensions/lib"
+  cp "$ROOT/.pi/extensions/lib/fm-calm-visibility.ts" "$root/.pi/extensions/lib/fm-calm-visibility.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$root/.pi/extensions/lib/fm-operational-input.ts"
 }
 
-# The OMP entrypoints only re-export the shared Pi-family implementation, so a
-# loaded marker records the digest of the whole load chain, entrypoint first.
+# The OMP manifests list each tracked file in the corresponding local load
+# chain, with the manifest itself included in the digest.
 write_omp_loaded_markers() {
   local home=$1 root=$2 pid=$3 version
-  version=$(hash_file_for_test "$root/.omp/extensions/fm-primary-omp-watch.ts" \
-    "$root/.pi/extensions/fm-primary-pi-watch.ts")
+  version=$(hash_manifest_for_test "$root/.omp/extensions/fm-primary-omp-watch.manifest" "$root")
   printf '%s\n%s\n' "$version" "$pid" > "$home/state/.omp-watch-extension-loaded"
-  version=$(hash_file_for_test "$root/.omp/extensions/fm-primary-turnend-guard.ts" \
-    "$root/.pi/extensions/fm-primary-turnend-guard.ts")
+  version=$(hash_manifest_for_test "$root/.omp/extensions/fm-primary-turnend-guard.manifest" "$root")
   printf '%s\n%s\n' "$version" "$pid" > "$home/state/.omp-turnend-extension-loaded"
 }
 
@@ -2431,6 +2446,31 @@ EOF
   pass "session start reports OMP extensions stale when only the shared core changed"
 }
 
+test_omp_diagnostic_rejects_transitive_dependency_drift() {
+  local rec root home fakebin out holder_pid
+  rec=$(new_world omp-transitive-dependency-drift)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+
+  sleep 300 &
+  holder_pid=$!
+  make_fake_ps_omp_holder "$fakebin" "$holder_pid"
+  install_omp_extensions_fixture "$root"
+  write_omp_loaded_markers "$home" "$root" "$holder_pid"
+  printf '\n// transitive shared-library update delivered after this session loaded it\n' \
+    >> "$root/.pi/extensions/lib/fm-operational-input.ts"
+  out=$(FM_FAKE_HARNESS=omp run_session_start "$home" "$root" "$fakebin:$BASE_PATH" omp)
+  kill "$holder_pid" 2>/dev/null || true
+  wait "$holder_pid" 2>/dev/null || true
+
+  assert_contains "$out" "OMP_WATCH_EXTENSION: not loaded" \
+    "an imported OMP extension library update left the session reporting itself current"
+
+  pass "session start reports OMP extensions stale when a transitive library changes"
+}
+
 test_pi_diagnostic_rejects_stale_loaded_marker() {
   local rec root home fakebin out marker holder_pid
   rec=$(new_world pi-stale-loaded-marker)
@@ -2571,6 +2611,7 @@ test_pi_signed_primary_uses_pi_extensions_without_identity_normalization
 test_omp_primary_uses_verified_supervision_extensions
 test_omp_diagnostic_accepts_current_loaded_markers
 test_omp_diagnostic_rejects_shared_core_drift
+test_omp_diagnostic_rejects_transitive_dependency_drift
 test_pi_diagnostic_rejects_stale_loaded_marker
 test_pi_diagnostic_accepts_prelock_loaded_marker
 test_pi_diagnostic_rejects_missing_turnend_guard_marker

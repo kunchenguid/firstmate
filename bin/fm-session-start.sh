@@ -600,10 +600,11 @@ EOF
   fi
 }
 
-# One version token over an extension's whole load chain, in argument order:
-# an entrypoint that only re-exports a shared implementation cannot prove the
+# One version token over an extension's whole load chain, in argument order.
+# An entrypoint that only re-exports a shared implementation cannot prove the
 # loaded code is current on its own bytes. The extensions hash the same files
 # in the same order, so a single-file call still matches a plain file digest.
+# OMP resolves its canonical tracked dependency manifest before hashing.
 hash_file() {
   local file
   for file in "$@"; do
@@ -616,6 +617,34 @@ hash_file() {
   else
     cat -- "$@" | cksum | awk '{print "cksum:" $1 ":" $2}'
   fi
+}
+
+hash_manifest() {
+  local manifest=$1 root=$2 line
+  local -a files=("$manifest")
+  [ -f "$manifest" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    [ -n "$line" ] || continue
+    case "$line" in
+      /*|../*|*/../*|*/..)
+        return 1
+        ;;
+    esac
+    files+=("$root/$line")
+  done < "$manifest"
+  hash_file "${files[@]}"
+}
+
+pi_extension_loaded() {
+  local marker=$1 expected_version=$2 lock=$3 marker_version marker_pid lock_pid
+  [ -f "$marker" ] && [ -f "$lock" ] && [ -n "$expected_version" ] || return 1
+  marker_version=$(sed -n '1p' "$marker")
+  marker_pid=$(sed -n '2p' "$marker")
+  lock_pid=$(sed -n '1p' "$lock")
+  [ -n "$marker_pid" ] || return 1
+  [ "$marker_version" = "$expected_version" ] && [ "$marker_pid" = "$lock_pid" ]
 }
 
 AGENTS_START_HASH=
@@ -766,8 +795,8 @@ elif [ "$PRIMARY_HARNESS" = omp ]; then
   OMP_WATCH_MARKER="$STATE/.omp-watch-extension-loaded"
   OMP_TURNEND_MARKER="$STATE/.omp-turnend-extension-loaded"
   OMP_LOCK="$STATE/.lock"
-  OMP_WATCH_VERSION=$(hash_file "$OMP_EXT" "$FM_ROOT/.pi/extensions/fm-primary-pi-watch.ts" || printf '')
-  OMP_TURNEND_VERSION=$(hash_file "$OMP_TURNEND_EXT" "$FM_ROOT/.pi/extensions/fm-primary-turnend-guard.ts" || printf '')
+  OMP_WATCH_VERSION=$(hash_manifest "$FM_ROOT/.omp/extensions/fm-primary-omp-watch.manifest" "$FM_ROOT" || printf '')
+  OMP_TURNEND_VERSION=$(hash_manifest "$FM_ROOT/.omp/extensions/fm-primary-turnend-guard.manifest" "$FM_ROOT" || printf '')
   if ! pi_extension_loaded "$OMP_WATCH_MARKER" "$OMP_WATCH_VERSION" "$OMP_LOCK" \
     || ! pi_extension_loaded "$OMP_TURNEND_MARKER" "$OMP_TURNEND_VERSION" "$OMP_LOCK"; then
     printf 'OMP_WATCH_EXTENSION: not loaded - restart OMP so %s and %s auto-load for turn-end guard and background wake coverage; use -e %s -e %s as an explicit fallback\n' "$OMP_TURNEND_EXT" "$OMP_EXT" "$OMP_TURNEND_EXT" "$OMP_EXT"

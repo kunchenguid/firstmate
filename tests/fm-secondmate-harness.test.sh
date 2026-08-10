@@ -248,7 +248,7 @@ case "$field:${FM_TEST_OMP_SHAPE:-omp}" in
   comm=:bare) printf '%s\n' '/opt/omp/bin/bun' ;;
   comm=:*) printf '%s\n' '/opt/homebrew/bin/bun' ;;
   args=:omp) printf '%s\n' 'bun /Users/u/.bun/bin/omp --model openai/test' ;;
-  args=:unrelated) printf '%s\n' 'bun /opt/tools/compiler.js --prompt omp' ;;
+  args=:unrelated) printf '%s\n' 'bun /opt/omp/tools/compiler.js --prompt omp' ;;
   args=:bare) printf '%s\n' '/opt/omp/bin/bun' ;;
   ppid=:*) printf '%s\n' 1 ;;
 esac
@@ -265,8 +265,8 @@ SH
   [ "$got" = claude ] \
     || fail "an unrelated Bun process suppressed the verified Claude marker, got '$got'"
   # No marker at all, so this reaches the Bun ancestry branch itself: a script
-  # path that merely MENTIONS omp in a later argument is not an identity, and
-  # widening the anchored argv[1] match has to fail here.
+  # whose directory merely contains an omp component and whose later argument
+  # mentions omp is not an identity.
   got=$(FM_TEST_OMP_SHAPE=unrelated PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-harness.sh")
   [ "$got" = unknown ] \
     || fail "an unrelated Bun script whose later argument mentions omp resolved '$got', expected unknown"
