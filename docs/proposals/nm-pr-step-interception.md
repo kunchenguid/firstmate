@@ -1,11 +1,11 @@
-# Upstream proposal: a supported credential seam for the GitHub PR step
+# Upstream proposal: supported GitHub credentials and CI verification
 
 This is a proposal for `kunchenguid/no-mistakes`, written to be turned into an upstream issue or pull request.
-It is not a description of firstmate behavior; [`../no-mistakes-pr-credential.md`](../no-mistakes-pr-credential.md) owns the local mitigation and the reason one was needed.
+It is not a description of firstmate behavior; [`../no-mistakes-pr-credential.md`](../no-mistakes-pr-credential.md) owns the local mitigations and the reasons they were needed.
 
 Evidence below was read from the upstream source at release 1.46.0, commit `20892e6`, and cross-checked against the installed binary at v1.41.2.
 
-## Problem
+## PR credential problem
 
 The PR step cannot open a pull request when the daemon's environment carries a GitHub credential that is not authorized for pull-request creation, and there is no supported way to give that step a different credential.
 
@@ -42,7 +42,7 @@ No new execution machinery is required.
 The gap is only that nothing populates the field outside tests.
 `internal/pipeline/pipeline.go` declares it as `Env []string // extra environment variables for subprocesses (used in tests)`, and the executor's `StepContext` literal never sets it.
 
-## Proposal
+## Credential proposal
 
 Add a supported credential input that populates `StepContext.Env` for forge calls, so an operator can give GitHub subprocesses a credential without exposing it through ambient `GH_TOKEN` or `GITHUB_TOKEN` to every daemon subprocess.
 
@@ -90,3 +90,58 @@ Option B additionally removes the need for any out-of-band `PATH` interception.
 Independently of the knob, the PR step's skip conditions could detect this class of failure earlier.
 `gh auth status` proves authentication but not authorization for pull-request creation, so a run can pass every gate and fail on its last step.
 Checking the credential's authorization for the mutation during the PR step's precondition phase would move the failure to where it can be acted on.
+
+## CI verification problem
+
+The same fine-grained personal access token can read pull requests and GitHub Actions workflow runs while GitHub denies the `statusCheckRollup` selection behind `gh pr checks`.
+The verified response is a GraphQL 403 whose error path contains a whole `statusCheckRollup` component, including the currently observed deeper path `repository.pullRequest.statusCheckRollup.nodes.0.commit.statusCheckRollup.contexts.nodes.0`.
+No-mistakes currently treats that command failure as unreadable CI state and polls again, even when Actions already has terminal evidence for the exact pull-request head.
+The existing `statusCheckRollup` path is more complete because it can include third-party check providers and remains the required primary path.
+The Actions workflow-runs API is a proven least-privilege fallback for repositories whose relevant required evidence is entirely in GitHub Actions.
+
+The observed 3.3-hour cost of this gap came from diagnosing the authorization boundary and implementing and verifying a local fail-closed workaround.
+
+## CI verification proposal
+
+Keep the current `statusCheckRollup` read unchanged as the primary CI source.
+Enter the Actions fallback only when that read fails with GitHub's exact personal-token authorization sentence and its GraphQL error path contains a whole `statusCheckRollup` component.
+Replay every other error unchanged, including unrelated 403 responses, similar component names, and non-authorization failures.
+
+The fallback must derive its evidence from the repository and pull-request number already owned by the CI step, then apply all of these bindings before it may report green:
+
+- Read the current pull-request head SHA from the exact repository and pull-request number.
+- Paginate the active Actions workflow inventory and the workflow-runs endpoint filtered by that exact head SHA.
+- Accept only `pull_request` or `pull_request_target` runs whose repository full name, pull-request association number, association head SHA, and run head SHA all match the requested repository, pull request, and current head.
+- Require one relevant run for every active workflow because this credential cannot read branch-protection required checks or repository rulesets; an upstream implementation may narrow that conservative set only when it has an exact readable required-workflow authority.
+- Collapse reruns by run identity, retain only the highest published `run_attempt`, and reject conflicting records for that latest attempt or multiple equally current runs as ambiguous.
+- Paginate each selected run's jobs with `filter=all`, retain only jobs for the selected latest attempt and exact head SHA, and require a non-empty unambiguous job set.
+- Re-read the pull-request head after all pages are collected and discard the result if it changed.
+
+A workflow is green only when its selected run is completed with conclusion `success` and every retained exact-attempt job is completed with conclusion `success`.
+A queued or in-progress run or job is pending.
+A failed, timed-out, action-required, startup-failed, cancelled, unexpectedly skipped, neutral, or stale run or job is terminal and not green.
+An absent workflow, absent job set, unrelated run, stale or wrong-head run, malformed record, duplicate conflict, or selection tie is missing or ambiguous evidence and not green.
+Any unreadable head, workflow, run, jobs, or head-recheck API response is a typed terminal API failure that preserves the underlying GitHub diagnostic.
+
+Pending, missing, and ambiguous evidence must have a persisted deadline keyed by repository, pull-request number, and head SHA.
+Before the deadline the CI step may continue polling with a typed actionable reason.
+At the deadline it must return a typed failed check, reset the deadline when the head changes or evidence becomes terminal, and never warn indefinitely.
+The returned checks must preserve the public JSON fields no-mistakes already consumes so the monitor can distinguish pass, pending, failure, cancellation, skipping, API failure, head drift, and evidence timeout without parsing prose.
+
+This fallback cannot recover third-party provider checks hidden behind the forbidden Checks API.
+If a repository requires such a provider and no exact required-check authority is readable, the monitor must fail closed rather than treating Actions-only evidence as complete.
+
+## CI verification acceptance matrix
+
+Exercise the behavior through the public CI-step command boundary, not only through internal helpers:
+
+- Primary success returns the existing `statusCheckRollup` result and never calls the Actions fallback.
+- Exact-repository, exact-PR, exact-head Actions success returns green after the primary read receives the verified denial.
+- Queued and in-progress runs or jobs return pending, while concrete failed, cancelled, skipped, neutral, stale, timed-out, action-required, and startup-failed states never return green.
+- Missing active-workflow runs, missing jobs, malformed evidence, conflicting latest attempts, and equally current runs remain non-green and become typed failures at the deadline.
+- Unrelated, wrong-repository, wrong-PR, wrong-head, stale, and non-PR-triggered runs cannot certify the pull request.
+- Multi-page workflow, run, and job responses are complete; a later-page failure is decisive.
+- A later successful rerun supersedes its older failed attempt, while jobs from older attempts cannot affect or certify the selected attempt.
+- A pull-request head change during collection produces typed head drift rather than a stale verdict.
+- Every API failure produces a typed failed check, preserves the underlying error, and cannot become another indefinitely repeated unreadable poll.
+- Repositories with required third-party checks remain closed unless an exact required-check authority proves the Actions evidence complete.

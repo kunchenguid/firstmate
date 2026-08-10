@@ -126,5 +126,5 @@ Installing the shim into a directory already present on the daemon's cached `PAT
 The shim is a local mitigation, not an upstream fix.
 It intercepts commands the pipeline did not offer to let anyone configure, so no-mistakes cannot validate the interception itself.
 The durable fix is a supported per-repository or global configuration knob that populates the step-scoped environment the executor already understands, described in [`proposals/nm-pr-step-interception.md`](proposals/nm-pr-step-interception.md).
-The parallel upstream CI-fallback proposal remains outside this repository's scope.
+That private upstream proposal also records the verified `statusCheckRollup` limitation and the fail-closed workflow-runs fallback needed by the CI monitor.
 Retire each local route once no-mistakes ships its corresponding supported behavior.
