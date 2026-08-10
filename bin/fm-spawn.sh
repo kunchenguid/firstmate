@@ -1290,7 +1290,7 @@ fi
 
 # OMP is an exact executable identity. Resolve it before endpoint creation so a
 # configured adapter cannot fall through to a shell error in an unattended pane.
-if [ "$HARNESS" = omp ] && ! command -v omp >/dev/null 2>&1; then
+if [ "$RAW_LAUNCH" -eq 0 ] && [ "$HARNESS" = omp ] && ! command -v omp >/dev/null 2>&1; then
   echo "error: omp executable not found on PATH; install OMP or select a different verified harness" >&2
   exit 1
 fi

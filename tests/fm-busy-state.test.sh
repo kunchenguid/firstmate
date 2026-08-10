@@ -227,7 +227,10 @@ test_omp_source_isolation() {
   "$EV" apply "$state" t1 idle --gen "$gen" --source omp-ext --event agent-end
   out=$(fm_busy_classify tmux w1 omp t1 "$state")
   [ "$out" = "idle omp-ext" ] || fail "OMP agent-end must classify idle, got '$out'"
-  pass "OMP trusts only its per-task extension lifecycle source"
+  out=$(fm_busy_classify tmux w1 omp-17.2.12 t1 "$state")
+  [ "$out" = "unknown source-mismatch" ] \
+    || fail "an unsupported versioned OMP alias must not trust omp-ext, got '$out'"
+  pass "OMP trusts only its exact per-task extension lifecycle source"
 }
 
 test_converted_adapters_ignore_footer_text() {
