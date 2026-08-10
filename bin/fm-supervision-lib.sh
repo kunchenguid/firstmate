@@ -14,11 +14,6 @@
 # identity-matched watcher is still required. The status fields here retain the
 # beacon-age details used in their messages.
 
-FM_SUPERVISION_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
-# shellcheck source=bin/fm-secondmate-registry-lib.sh
-. "$FM_SUPERVISION_LIB_DIR/fm-secondmate-registry-lib.sh"
-
 # Portable mtime; Linux stat lacks -f, macOS stat lacks -c.
 fm_sup_stat_mtime() {
   if [ "$(uname)" = Darwin ]; then
@@ -106,10 +101,13 @@ fm_supervision_unhealthy() {
 # skipped here rather than guessed around. The default grace is 900 seconds.
 fm_secondmate_watcher_statuses() {
   local registry=$1 grace=${2:-${FM_SECOND_MATE_WATCHER_GRACE:-900}}
-  local now line id home beat reference m age
+  local supervision_lib_dir now line id home beat reference m age
 
   case "$grace" in ''|*[!0-9]*|0) grace=900 ;; esac
   [ -f "$registry" ] && [ ! -L "$registry" ] || return 0
+  supervision_lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  # shellcheck source=bin/fm-secondmate-registry-lib.sh
+  . "$supervision_lib_dir/fm-secondmate-registry-lib.sh"
   now=$(date +%s)
 
   while IFS= read -r line || [ -n "$line" ]; do
