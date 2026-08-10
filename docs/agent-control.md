@@ -4,6 +4,11 @@ Firstmate talks to a running agent two ways, and they are not the same channel.
 
 The **data plane** is [`bin/fm-send.sh`](../bin/fm-send.sh): conversational text for the agent to read.
 For a `kind=secondmate` target it always prepends the from-firstmate routing marker, because a secondmate is itself a firstmate and its reply must come back through the status path rather than a chat nobody reads.
+An unconfirmed `pending` verdict can still mean that the message landed while the target was mid-turn, so capture the target before deciding what to do and never resend the same steer.
+Use an explicit `FM_HOME=<home>` when invoking `fm-send.sh`; without it the command fails closed rather than risking delivery through another home.
+If `--resolve-key` refuses, treat that as a keyed-decision contract failure rather than a typo in the answer.
+The valid close form is `resolved [key=<slug>]:`, with the recorded key between the status verb and its colon, and `resolved: [key=<slug>]` does not close the record.
+The classifier's `status_open_decisions` read returns the durable keys currently open for that status file.
 
 The **control plane** is [`bin/fm-control.sh`](../bin/fm-control.sh): allowlisted lifecycle verbs addressed to an exact task id.
 

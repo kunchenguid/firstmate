@@ -19,6 +19,7 @@ It accepts `--none` as an explicit semantic inventory result, not as inferred ab
 It verifies every listed identity against tasks-axi before recording completion.
 For an open keyed status decision, it appends a `captain-held [key=<key>]: ...` transfer event only after the matching backlog hold is durable.
 `bin/fm-classify-lib.sh` recognizes that transfer as closing the live status copy without claiming that the captain has answered it.
+An open `blocked:` or `needs-decision:` record remains open through later `paused:`, `working:`, or `done:` events until a matching keyed `resolved` or `captain-held` event closes it.
 
 Scout teardown calls the script's read-only `verify` subcommand after checking for the report and before removing any source state.
 The `--force` path remains the explicit captain-approved discard escape hatch.

@@ -75,6 +75,14 @@ The alarm cannot repeat during that failure episode, and a later unhealthy stop 
 A positively verified healthy watcher clears the failure notice, alarm, and block budget for a future independent episode.
 A Claude failure notice describes the automatic mechanism as broken and does not direct a routine manual background arm.
 
+### Diagnosing a suppressed auto-arm
+
+The Claude Stop auto-arm can record `outcome=failed-suppressed`, which means the home has no verified watcher while live work still needs supervision.
+The tell is an empty `Stop hook feedback` message.
+Read `state/.claude-autoarm-epoch`, `state/.last-watcher-beat`, and `state/.watch.lock` instead of trusting the notice or a process-name match.
+A beacon older than 300 seconds means the watcher is stale, an absent lock means no watcher owns the home, and an `fm-watch` process from another home is not evidence for this one.
+Do not hand-arm the watcher on your own initiative; the bounded Stop-owned recovery path may recover on its next cycle.
+
 OpenCode, Pi, and pi-signed expose passive callbacks for this purpose.
 Their adapters fail open at the hook boundary to protect the user session but schedule one bounded follow-up when the predicate blocks.
 The generated prompts use the canonical `turn-end-guard` kind after the U+2063 `FIRSTMATE_OP: ` prefix, so Ahoy does not treat them as captain messages.

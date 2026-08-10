@@ -234,6 +234,10 @@ Always enter through `bin/fm-afk-launch.sh`, which clears prior-session artifact
 Always exit through `bin/fm-afk-launch.sh stop`, which keeps `state/.afk` present through the daemon's shutdown flush and clears it last.
 `docs/herdr-backend.md` "Away-mode supervisor support" owns the current mechanism, and `docs/verification/runtime-backends.md` "Away-mode transport" owns active evidence.
 
+If `state/.afk` remains present after the daemon dies, away mode has suppressed the normal watcher without a daemon owning supervision.
+This has occurred when firstmate was not itself inside a tmux pane, as shown by an empty `$TMUX_PANE`, and when the harness background session hosting the daemon was terminated.
+Run `bin/fm-afk-launch.sh stop` to clear the stale lifecycle, or restart the away-mode daemon and verify that its process and lock are present before relying on away mode again.
+
 ## Reliability properties
 
 These properties must hold:

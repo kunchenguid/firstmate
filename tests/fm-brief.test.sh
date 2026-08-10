@@ -665,6 +665,10 @@ test_pause_verb_override_renders_all_brief_scaffolds() {
       "$kind brief still instructs the default paused status"
     assert_grep 'a blocker or wait clears' "$brief" \
       "$kind brief did not require durable resolution when a blocker clears"
+    assert_grep 'resolved [key=<slug>]: {how it cleared}' "$brief" \
+      "$kind brief did not put a keyed resolution token before the colon"
+    assert_no_grep 'resolved: {how it cleared}.*key=<slug>' "$brief" \
+      "$kind brief still taught the keyed resolution token after the colon"
     assert_grep 'even when the answer is what started that work' "$brief" \
       "$kind brief did not warn that an answer-started done/working never closes a decision"
   done

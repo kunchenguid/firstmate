@@ -29,6 +29,16 @@ GitHub Actions and Dependabot are exempt so their automation keeps working, but 
    Follow the installed no-mistakes version's SKILL.md and live `axi` help for gate mechanics.
 7. Once the pipeline passes, it pushes the branch to your fork and opens the PR against the parent repo for you.
 
+### Inspecting a no-mistakes run
+
+Run `(cd <crew-worktree> && no-mistakes axi status)` against the worktree whose run you are inspecting.
+`axi status` resolves by repository, so only one run can own a repository and a second concurrent task can finish without having driven the pipeline.
+A pipeline step that spawns its own agent flushes that step's log in one batch at step end, so sample the spawned process's CPU time before treating an unchanged step display as stuck.
+The Review block is a timeline rather than a current verdict, and `⚠️` means that the run had findings; read its `findings:` count and entries.
+A worker can commit and report `done:` without having driven the pipeline, so confirm that a PR exists before treating a ship task as finished.
+A broken pipe from a long blocking `axi respond` is a dropped connection, not proof that the run died.
+A run can die with the daemon while retaining custody of its commits, so follow the structured `branch_sync.next_action` and leave recovery to the worker that owns the branch.
+
 See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/start-here/quick-start/) for the full first-run walkthrough.
 
 ## Repo conventions
@@ -67,6 +77,10 @@ Firstmate's wrapper still matters: crewmates route every `ask-user` finding to f
 Local `.no-mistakes/` state and test evidence stay out of this repo; `.no-mistakes.yaml` keeps evidence in a temp directory and pins the gate's lint command to `bin/fm-lint.sh`, matching the Linux CI lint job.
 Local no-mistakes Test is intent-targeted and must not re-run every `tests/*.test.sh`; `.github/workflows/ci.yml` owns the broad behavior suite plus platform-specific compatibility lanes.
 That is firstmate-specific; do not commit `.no-mistakes/evidence/` here even when another no-mistakes-managed target project keeps committed PR evidence.
+
+Treehouse worktree pools hand out the first available slot, so a respawn can land in a different slot while the original branch remains checked out in the old one.
+`treehouse return` resets tracked content but keeps the branch ref and untracked files.
+A teardown refusal about leaked worktree processes often clears on a plain retry after those processes exit.
 
 Check and test the toolbelt before pushing:
 
