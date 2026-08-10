@@ -29,6 +29,12 @@
 # loop that never stays up only burns CPU and grows its log without bound. A
 # child that stays up for FM_REMOTE_JOB_SUPERVISOR_HEALTHY_SECONDS clears that
 # count. fm-on's ensure path restarts a worker that gave up.
+#
+# The worker enters its own FM_ROOT at startup and never keeps the directory it
+# was launched from. An inherited cwd would hold a returned pooled or gate
+# worktree in use for the worker's whole life, which the abandoned-root stop
+# above cannot detect because it judges only the configured FM_ROOT. Entering
+# the code root also gives every job child a deterministic working directory.
 set -u
 
 # A non-numeric override falls back to the default rather than crashing the
@@ -64,6 +70,13 @@ worker_account_home() {
   fi
   unset HOME
   CDPATH='' cd ~ 2>/dev/null && pwd -P
+}
+
+# The startup cwd contract in this script's header: never keep the launcher's
+# working directory, so a returned pooled or gate worktree cannot stay pinned.
+worker_enter_code_root() {
+  CDPATH='' cd "$FM_ROOT" 2>/dev/null ||
+    { worker_error "cannot enter configured FM_ROOT $FM_ROOT"; return 1; }
 }
 
 worker_write_heartbeat() {
@@ -672,6 +685,7 @@ main() {
   account_home=$(worker_account_home) || { worker_error "cannot resolve account home"; exit 1; }
   FM_ROOT=$(fm_remote_job_canonical_existing_dir "$FM_ROOT") || { worker_error "configured FM_ROOT is unsafe"; exit 1; }
   [ -f "$FM_ROOT/AGENTS.md" ] && [ ! -L "$FM_ROOT/AGENTS.md" ] || { worker_error "FM_ROOT is not a Firstmate checkout"; exit 1; }
+  worker_enter_code_root || exit 1
   fm_remote_job_prepare_state "$account_home" || { worker_error "$FM_REMOTE_JOB_ERROR"; exit 1; }
   WORKER_LOCK=$(fm_remote_job_worker_lock_path)
   trap worker_exit_cleanup EXIT
@@ -738,6 +752,7 @@ worker_supervise_linux() {
   account_home=$(worker_account_home) || { worker_error "cannot resolve account home"; return 1; }
   FM_ROOT=$(fm_remote_job_canonical_existing_dir "$FM_ROOT") || { worker_error "configured FM_ROOT is unsafe"; return 1; }
   [ -f "$FM_ROOT/AGENTS.md" ] && [ ! -L "$FM_ROOT/AGENTS.md" ] || { worker_error "FM_ROOT is not a Firstmate checkout"; return 1; }
+  worker_enter_code_root || return 1
   fm_remote_job_prepare_state "$account_home" || { worker_error "$FM_REMOTE_JOB_ERROR"; return 1; }
   trap worker_supervisor_shutdown HUP INT TERM
   while :; do

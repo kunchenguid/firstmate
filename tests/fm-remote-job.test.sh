@@ -18,6 +18,7 @@ FAKE_PERL_LOG="$TMP_ROOT/perl.log"
 REAL_GIT=$(command -v git)
 OTHER_PID=
 RECOVERY_WORKER_PID=
+CWD_WORKER_PID=
 mkdir -p "$REMOTE_ROOT/bin" "$REMOTE_HOME" "$ACCOUNT_HOME" "$RUNTIME_BIN"
 # worker.pid records the serving child, not its restart supervisor, so stopping
 # that pid alone leaves the supervisor to respawn - the leak
@@ -25,6 +26,7 @@ mkdir -p "$REMOTE_ROOT/bin" "$REMOTE_HOME" "$ACCOUNT_HOME" "$RUNTIME_BIN"
 cleanup_remote_job_fixture() {
   [ -z "$OTHER_PID" ] || kill "$OTHER_PID" 2>/dev/null || true
   [ -z "$RECOVERY_WORKER_PID" ] || kill "$RECOVERY_WORKER_PID" 2>/dev/null || true
+  [ -z "$CWD_WORKER_PID" ] || kill "$CWD_WORKER_PID" 2>/dev/null || true
   if [ -f "$STATE_ROOT/worker.pid" ]; then
     fm_remote_job_stop_worker_tree "$(cat "$STATE_ROOT/worker.pid")" || true
   fi
@@ -619,5 +621,50 @@ kill -TERM "$RECOVERY_WORKER_PID"
 wait "$RECOVERY_WORKER_PID" 2>/dev/null || true
 RECOVERY_WORKER_PID=
 pass "quarantine clears only after recorded execution has stopped"
+
+# A worker must not keep the directory it was launched from. That inherited cwd,
+# not FM_ROOT, is what holds a pooled or gate worktree in use, and the
+# abandoned-root stop cannot see it because that judges only FM_ROOT.
+CWD_ACCOUNT="$TMP_ROOT/cwd-account"
+CWD_STATE="$TMP_ROOT/cwd-jobs"
+CWD_LAUNCH_DIR="$TMP_ROOT/pool-slot"
+mkdir -p "$CWD_ACCOUNT" "$CWD_LAUNCH_DIR"
+CWD_LAUNCH_DIR=$(cd "$CWD_LAUNCH_DIR" && pwd -P)
+CWD_EXPECTED=$(cd "$REMOTE_ROOT" && pwd -P)
+
+process_cwd() { # <pid>
+  if [ "$(uname)" = Darwin ]; then
+    lsof -a -p "$1" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1
+  else
+    readlink "/proc/$1/cwd" 2>/dev/null
+  fi
+}
+
+( cd "$CWD_LAUNCH_DIR" &&
+  HOME="$CWD_ACCOUNT" FM_ROOT_OVERRIDE="$REMOTE_ROOT" \
+    FM_REMOTE_JOB_STATE_ROOT="$CWD_STATE" FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux \
+    exec "$REMOTE_ROOT/bin/fm-remote-job-worker.sh" ) \
+  > "$TMP_ROOT/cwd-worker.out" 2> "$TMP_ROOT/cwd-worker.err" &
+CWD_WORKER_PID=$!
+for _ in $(seq 1 300); do
+  [ -f "$CWD_STATE/worker.ready" ] && break
+  sleep 0.05
+done
+assert_present "$CWD_STATE/worker.ready" "a worker launched from a pool slot never became ready"
+CWD_SERVE_PID=$(cat "$CWD_STATE/worker.pid")
+for CWD_SUBJECT in "restart supervisor:$CWD_WORKER_PID" "serving child:$CWD_SERVE_PID"; do
+  CWD_LABEL=${CWD_SUBJECT%%:*}
+  CWD_OBSERVED=$(process_cwd "${CWD_SUBJECT##*:}")
+  [ -n "$CWD_OBSERVED" ] ||
+    fail "could not read the $CWD_LABEL working directory, so the cwd guarantee went unchecked"
+  [ "$CWD_OBSERVED" != "$CWD_LAUNCH_DIR" ] ||
+    fail "the $CWD_LABEL kept its launch directory and would pin that worktree in use"
+  [ "$CWD_OBSERVED" = "$CWD_EXPECTED" ] ||
+    fail "the $CWD_LABEL working directory is $CWD_OBSERVED, not its code root $CWD_EXPECTED"
+done
+kill -TERM "$CWD_WORKER_PID"
+wait "$CWD_WORKER_PID" 2>/dev/null || true
+CWD_WORKER_PID=
+pass "a started worker enters its code root instead of pinning its launch directory"
 
 echo "ALL TESTS PASSED"
