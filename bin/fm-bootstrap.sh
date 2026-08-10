@@ -359,11 +359,10 @@ secondmate_sync() {
       echo "NUDGE_SECONDMATES: secondmate $id: send failed: cannot clear update journal"
       return 1
     fi
-    secondmate_deliver_nudge_locked "$id" "$marker"
   }
 
   secondmate_recover_sync_journal_locked() {
-    local journal=$1 id phase home before after expected meta meta_home home_real head
+    local journal=$1 id phase home before after expected meta meta_home registry_home home_real head
     id=$(fm_secondmate_nudge_value "$journal" id 2>/dev/null || true)
     phase=$(fm_secondmate_nudge_value "$journal" phase 2>/dev/null || true)
     home=$(fm_secondmate_nudge_value "$journal" home 2>/dev/null || true)
@@ -379,6 +378,14 @@ secondmate_sync() {
     fi
     meta="$STATE/$id.meta"
     [ -f "$meta" ] && [ "$(fm_meta_get "$meta" kind)" = secondmate ] || {
+      registry_home=$(secondmate_registry_field "$DATA/secondmates.md" "$id" home || true)
+      if [ -z "$registry_home" ] && [ ! -e "$home" ] && [ ! -L "$home" ]; then
+        if fm_secondmate_sync_journal_quarantine "$STATE" "$id"; then
+          return 0
+        fi
+        echo "NUDGE_SECONDMATES: secondmate $id: send failed: cannot retire obsolete update journal"
+        return 1
+      fi
       echo "NUDGE_SECONDMATES: secondmate $id: send failed: update target has no live secondmate metadata"
       return 1
     }
@@ -390,7 +397,10 @@ secondmate_sync() {
     fi
     home_real=$VALIDATED_HOME
     [ "$home_real" = "$home" ] || {
-      echo "NUDGE_SECONDMATES: secondmate $id: send failed: update target home changed"
+      if fm_secondmate_sync_journal_quarantine "$STATE" "$id"; then
+        return 0
+      fi
+      echo "NUDGE_SECONDMATES: secondmate $id: send failed: cannot retire reassigned update journal"
       return 1
     }
     head=$(git -C "$home" rev-parse HEAD 2>/dev/null || true)
@@ -419,37 +429,55 @@ secondmate_sync() {
     secondmate_publish_sync_nudge_locked "$id" "$home" "$head" "$journal"
   }
 
+  secondmate_recover_sync_journal_with_transaction_lock() {
+    local journal=$1 id expected lock lock_status result=0
+    id=$(fm_secondmate_nudge_value "$journal" id 2>/dev/null || true)
+    expected=$(secondmate_sync_journal_path "$id" 2>/dev/null || true)
+    if [ "$journal" != "$expected" ]; then
+      echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: send failed: update journal filename mismatch"
+      return 1
+    fi
+    lock=$(fm_secondmate_nudge_transaction_lock_path "$STATE" "$id" 2>/dev/null || true)
+    if [ -z "$lock" ]; then
+      echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: send failed: transaction lock failed"
+      return 1
+    fi
+    fm_dependency_acquire_lock "$lock"
+    lock_status=$?
+    case "$lock_status" in
+      0) ;;
+      75)
+        echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: deferred: transaction lock is busy"
+        return 75
+        ;;
+      *)
+        echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: send failed: transaction lock failed"
+        return 1
+        ;;
+    esac
+    secondmate_recover_sync_journal_locked "$journal" || result=$?
+    fm_lock_release "$lock" || result=1
+    return "$result"
+  }
+
   secondmate_retry_pending_sync_journals() {
-    local journal id expected lock lock_status
+    local journal id
     [ -d "$SECOND_MATE_SYNC_PENDING_DIR" ] || return 0
     for journal in "$SECOND_MATE_SYNC_PENDING_DIR"/*.pending; do
       [ -f "$journal" ] || continue
       id=$(fm_secondmate_nudge_value "$journal" id 2>/dev/null || true)
-      expected=$(secondmate_sync_journal_path "$id" 2>/dev/null || true)
-      if [ "$journal" != "$expected" ]; then
-        echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: send failed: update journal filename mismatch"
-        continue
-      fi
-      lock=$(fm_secondmate_nudge_transaction_lock_path "$STATE" "$id" 2>/dev/null || true)
-      if [ -z "$lock" ]; then
-        echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: send failed: transaction lock failed"
-        continue
-      fi
-      fm_dependency_acquire_lock "$lock"
-      lock_status=$?
-      case "$lock_status" in
-        0) ;;
-        75)
-          echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: deferred: transaction lock is busy"
-          continue
+      fm_dependency_with_host_lock \
+        secondmate_recover_sync_journal_with_transaction_lock "$journal" \
+        || true
+      case "$FM_DEPENDENCY_LOCK_OUTCOME" in
+        busy)
+          echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: deferred: dependency lock is busy"
           ;;
-        *)
-          echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: send failed: transaction lock failed"
-          continue
+        unavailable)
+          echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: send failed: dependency lock is unavailable"
           ;;
+        *) ;;
       esac
-      secondmate_recover_sync_journal_locked "$journal"
-      fm_lock_release "$lock" || true
     done
   }
 
@@ -547,10 +575,13 @@ secondmate_sync() {
     update_sync_after=$after
   }
 
-  fm_ff_after_instruction_update() {
-    local result=0
+  fm_ff_after_fast_forward() {
+    local _dir=$1 before=$2 after=$3 _instr=$4 result=0
     [ -n "$update_nudge_lock" ] || return 0
-    if ! secondmate_write_sync_journal updated "$update_nudge_id" "$update_sync_home" \
+    if [ "$before" != "$update_sync_before" ] || [ "$after" != "$update_sync_after" ]; then
+      echo "NUDGE_SECONDMATES: secondmate $update_nudge_id: send failed: update journal no longer matches checkout"
+      result=1
+    elif ! secondmate_write_sync_journal updated "$update_nudge_id" "$update_sync_home" \
       "$update_sync_before" "$update_sync_after"; then
       echo "NUDGE_SECONDMATES: secondmate $update_nudge_id: send failed: cannot finalize update journal"
       result=1
@@ -565,6 +596,29 @@ secondmate_sync() {
     update_sync_home=""
     update_sync_before=""
     update_sync_after=""
+    return "$result"
+  }
+
+  fm_ff_after_instruction_update() {
+    local id=$1 marker lock lock_status result=0
+    marker=$(secondmate_nudge_marker_path "$id") || return 1
+    [ -f "$marker" ] || return 0
+    lock=$(fm_secondmate_nudge_transaction_lock_path "$STATE" "$id") || return 1
+    fm_dependency_acquire_lock "$lock"
+    lock_status=$?
+    case "$lock_status" in
+      0) ;;
+      75)
+        echo "NUDGE_SECONDMATES: secondmate $id: deferred: transaction lock is busy"
+        return 75
+        ;;
+      *)
+        echo "NUDGE_SECONDMATES: secondmate $id: send failed: transaction lock failed"
+        return 1
+        ;;
+    esac
+    secondmate_retry_pending_nudge_locked "$marker" || result=$?
+    fm_lock_release "$lock" || result=1
     return "$result"
   }
 
@@ -699,7 +753,8 @@ secondmate_sync() {
     esac
   done < "$tmp"
   rm -f "$tmp"
-  unset -f fm_ff_before_fast_forward fm_ff_after_instruction_update fm_ff_abort_fast_forward
+  unset -f fm_ff_before_fast_forward fm_ff_after_fast_forward \
+    fm_ff_after_instruction_update fm_ff_abort_fast_forward
   # Inheritance propagation: push the primary-authoritative local inheritance
   # surface into every VALIDATED live secondmate home swept above.
   # FF_SEEN_HOMES is exactly that set, and fm-config-inherit-lib.sh owns the

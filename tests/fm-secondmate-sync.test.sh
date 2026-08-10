@@ -754,6 +754,125 @@ test_bootstrap_supersedes_interrupted_update_journals() {
   pass "T8i bootstrap supersedes interrupted update journals"
 }
 
+test_bootstrap_sync_journal_recovery_uses_host_lock() {
+  local w c1 c2 fakebin journal marker ready release holder out out2 i
+  w=$(new_world nudge-journal-host-lock)
+  c1=$(head_of "$w/main")
+  add_sm_worktree "$w" sm-instr "$c1"
+  bump_primary "$w" instr
+  c2=$(head_of "$w/main")
+  git -C "$w/sm-instr" merge -q --ff-only "$c2"
+  journal="$w/home/state/.secondmate-sync-pending/sm-instr.pending"
+  marker="$w/home/state/.secondmate-nudge-pending/sm-instr.pending"
+  FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" bash -c '
+    . "$1"
+    fm_secondmate_sync_journal_write "$2" updated sm-instr "$3" "$4" "$5" create
+  ' _ "$ROOT/bin/fm-secondmate-nudge-lib.sh" "$w/home/state" "$w/sm-instr" "$c1" "$c2" \
+    || fail "could not prepare updated sync journal"
+  fakebin=$(make_fake_toolchain "$w")
+  ready="$w/lock.ready"
+  release="$w/lock.release"
+
+  bash -c '
+    . "$1"
+    hold_dependency_lock() {
+      : > "$1"
+      while [ ! -e "$2" ]; do sleep 0.02; done
+    }
+    fm_dependency_with_host_lock hold_dependency_lock "$2" "$3"
+  ' _ "$ROOT/bin/fm-dependency-lock-lib.sh" "$ready" "$release" \
+    > "$w/lock-holder.out" 2>&1 &
+  holder=$!
+  for ((i = 0; i < 100; i++)); do
+    [ -e "$ready" ] && break
+    kill -0 "$holder" 2>/dev/null || break
+    sleep 0.02
+  done
+  if [ ! -e "$ready" ]; then
+    wait "$holder" 2>/dev/null || true
+    fail "sync journal host-lock holder did not start"
+  fi
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_DEPS_LOCK_TIMEOUT=1 FM_SEND_SETTLE=0 \
+    "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+  assert_contains "$out" \
+    "NUDGE_SECONDMATES: secondmate sm-instr: deferred: dependency lock is busy" \
+    "sync journal recovery did not defer on the host checkout lock"
+  assert_present "$journal" "host-lock contention consumed the sync journal"
+  assert_absent "$marker" "host-lock contention published a retry marker"
+
+  : > "$release"
+  wait "$holder" || fail "sync journal host-lock holder failed"
+  out2=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_SEND_SETTLE=0 "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+  assert_contains "$out2" "BOOTSTRAP_INFO: nudged fm-sm-instr with" \
+    "released host lock did not reconcile the sync journal"
+  assert_absent "$journal" "reconciled sync journal remained pending"
+  assert_absent "$marker" "reconciled sync journal retained its delivered marker"
+  pass "T8j sync journal recovery is serialized by the host checkout lock"
+}
+
+test_bootstrap_retires_obsolete_sync_journals() {
+  local w c1 c2 fakebin journal retired replacement out retired_record
+  w=$(new_world nudge-journal-retired)
+  c1=$(head_of "$w/main")
+  add_sm_worktree "$w" sm-instr "$c1"
+  bump_primary "$w" instr
+  c2=$(head_of "$w/main")
+  journal="$w/home/state/.secondmate-sync-pending/sm-instr.pending"
+  FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" bash -c '
+    . "$1"
+    fm_secondmate_sync_journal_write "$2" prepared sm-instr "$3" "$4" "$5" create
+  ' _ "$ROOT/bin/fm-secondmate-nudge-lib.sh" "$w/home/state" "$w/sm-instr" "$c1" "$c2" \
+    || fail "could not prepare retired sync journal"
+  git -C "$w/main" worktree remove --force "$w/sm-instr"
+  rm -f "$w/home/state/sm-instr.meta"
+  fakebin=$(make_fake_toolchain "$w")
+
+  PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_SEND_SETTLE=0 "$ROOT/bin/fm-bootstrap.sh" >/dev/null 2>&1
+  retired="$w/home/state/.secondmate-sync-retired"
+  assert_absent "$journal" "retired secondmate retained its sync journal"
+  retired_record=$(find "$retired" -type f -name action.pending -print 2>/dev/null)
+  [ -n "$retired_record" ] || fail "retired secondmate sync journal was not quarantined"
+  assert_grep "home=$w/sm-instr" "$retired_record" \
+    "retired journal quarantine lost the original home identity"
+
+  w=$(new_world nudge-journal-reassigned)
+  c1=$(head_of "$w/main")
+  add_sm_worktree "$w" sm-instr "$c1"
+  bump_primary "$w" instr
+  c2=$(head_of "$w/main")
+  journal="$w/home/state/.secondmate-sync-pending/sm-instr.pending"
+  FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" bash -c '
+    . "$1"
+    fm_secondmate_sync_journal_write "$2" prepared sm-instr "$3" "$4" "$5" create
+  ' _ "$ROOT/bin/fm-secondmate-nudge-lib.sh" "$w/home/state" "$w/sm-instr" "$c1" "$c2" \
+    || fail "could not prepare reassigned sync journal"
+  replacement="$w/sm-replacement"
+  git -C "$w/main" worktree add -q --detach "$replacement" "$c1"
+  printf '%s\n' sm-instr > "$replacement/.fm-secondmate-home"
+  sed -i.bak "s|^home=.*|home=$replacement|" "$w/home/state/sm-instr.meta" 2>/dev/null || \
+    sed -i "s|^home=.*|home=$replacement|" "$w/home/state/sm-instr.meta"
+  rm -f "$w/home/state/sm-instr.meta.bak"
+  fakebin=$(make_fake_toolchain "$w")
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_SEND_SETTLE=0 "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+  assert_contains "$out" "BOOTSTRAP_INFO: nudged fm-sm-instr with" \
+    "reassigned secondmate did not converge after retiring the old journal"
+  assert_absent "$journal" "reassigned secondmate retained the old sync journal"
+  [ "$(head_of "$replacement")" = "$c2" ] \
+    || fail "reassigned secondmate did not advance to the primary commit"
+  retired_record=$(find "$w/home/state/.secondmate-sync-retired" \
+    -type f -name action.pending -print 2>/dev/null)
+  [ -n "$retired_record" ] || fail "reassigned sync journal was not quarantined"
+  assert_grep "home=$w/sm-instr" "$retired_record" \
+    "reassigned journal quarantine lost the former home identity"
+  pass "T8k retired and reassigned identities quarantine obsolete sync journals"
+}
+
 test_bootstrap_nudge_retry_refuses_changed_home() {
   local w c1 fakebin marker out other
   w=$(new_world nudge-retry-home-change)
@@ -1085,6 +1204,8 @@ test_bootstrap_nudge_retry_is_idempotent
 test_bootstrap_nudge_retry_defers_on_busy_transaction
 test_bootstrap_preserves_prior_nudge_before_new_update
 test_bootstrap_supersedes_interrupted_update_journals
+test_bootstrap_sync_journal_recovery_uses_host_lock
+test_bootstrap_retires_obsolete_sync_journals
 test_bootstrap_nudge_retry_refuses_changed_home
 test_nudge_retry_uses_fresh_herdr_endpoint_after_respawn
 test_bootstrap_sweep_surfaces_skipped_home

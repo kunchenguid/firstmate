@@ -30,6 +30,24 @@ fm_secondmate_sync_journal_path() {
   printf '%s/.secondmate-sync-pending/%s.pending\n' "$state" "$id"
 }
 
+fm_secondmate_sync_journal_quarantine() {
+  local state=$1 id=$2 journal retired slot
+  journal=$(fm_secondmate_sync_journal_path "$state" "$id") || return 1
+  [ -e "$journal" ] || [ -L "$journal" ] || return 0
+  [ -f "$journal" ] && [ ! -L "$journal" ] || return 1
+  retired="$state/.secondmate-sync-retired"
+  if [ -e "$retired" ] || [ -L "$retired" ]; then
+    [ -d "$retired" ] && [ ! -L "$retired" ] || return 1
+  elif ! (umask 077; mkdir "$retired") 2>/dev/null; then
+    [ -d "$retired" ] && [ ! -L "$retired" ] || return 1
+  fi
+  slot=$(umask 077; mktemp -d "$retired/$id.XXXXXX" 2>/dev/null) || return 1
+  if ! mv -- "$journal" "$slot/action.pending"; then
+    rmdir "$slot" 2>/dev/null || true
+    return 1
+  fi
+}
+
 fm_secondmate_sync_commit_is_valid() {
   local commit=$1
   case "${#commit}" in 40|64) ;; *) return 1 ;; esac
