@@ -30,7 +30,17 @@ case "${1:-}" in
       case "$a" in *cursor_y*) printf '1\n'; exit 0 ;; esac
     done
     exit 0 ;;
-  capture-pane) cat "$COMPOSER" 2>/dev/null; exit 0 ;;
+  capture-pane)
+    if [ -n "${FM_FAKE_CAPTURE_COUNT:-}" ]; then
+      count=0
+      [ ! -f "$FM_FAKE_CAPTURE_COUNT" ] || count=$(cat "$FM_FAKE_CAPTURE_COUNT")
+      count=$((count + 1))
+      printf '%s\n' "$count" > "$FM_FAKE_CAPTURE_COUNT"
+      if [ "${FM_FAKE_FAIL_FIRST_CAPTURE:-0}" = 1 ] && [ "$count" -eq 1 ]; then
+        exit 1
+      fi
+    fi
+    cat "$COMPOSER" 2>/dev/null; exit 0 ;;
   send-keys)
     shift; is_enter=0
     while [ "$#" -gt 0 ]; do
@@ -40,6 +50,7 @@ case "${1:-}" in
       [ -z "${FM_FAKE_SENT:-}" ] || printf 'Enter\n' >> "$FM_FAKE_SENT"
       if [ -n "${FM_FAKE_SWALLOW:-}" ] && [ -f "$FM_FAKE_SWALLOW" ]; then
         [ "${FM_FAKE_PERSIST_SWALLOW:-0}" = 1 ] || rm -f "$FM_FAKE_SWALLOW"
+        [ "${FM_FAKE_APPEND_BUSY:-0}" != 1 ] || printf '✻ Working…\n' >> "$COMPOSER"
       else
         printf '╭─────╮\n│ >   │\n╰─────╯\n' > "$COMPOSER"
       fi
@@ -137,6 +148,25 @@ test_busy_pane_unknown_stays_unknown() {
   [ "$(cat "$vfile")" = unknown ] \
     || fail "a busy pane must not convert an unsafe composer to empty, got '$(cat "$vfile")'"
   pass "fm_tmux_submit_enter_core: busy conversion is limited to proven pending input"
+}
+
+test_failed_baseline_capture_keeps_busy_unknown_unconfirmed() {
+  local dir fakebin composer vfile
+  dir="$TMP_ROOT/failed-baseline"
+  fakebin=$(make_submit_mock "$dir")
+  composer="$dir/composer"
+  vfile="$dir/verdict"
+  printf '│ > unbounded\n' > "$composer"
+  touch "$dir/.swallow"
+  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" \
+    FM_FAKE_CAPTURE_COUNT="$dir/captures" FM_FAKE_FAIL_FIRST_CAPTURE=1 \
+    FM_FAKE_SWALLOW="$dir/.swallow" FM_FAKE_PERSIST_SWALLOW=1 FM_FAKE_APPEND_BUSY=1 \
+    fm_tmux_submit_core "win" "fix" 3 0.05 0.05 > "$vfile" 2>/dev/null
+  [ "$(cat "$vfile")" = unknown ] \
+    || fail "a failed idle-baseline capture must not let a later busy footer confirm delivery, got '$(cat "$vfile")'"
+  grep -q 'Working' "$composer" \
+    || fail "failed-baseline regression did not render the post-Enter busy footer"
+  pass "fm_tmux_submit_core: failed baseline capture disables busy unknown conversion"
 }
 
 test_busy_pane_ambiguous_pending_retries_without_conversion() {
@@ -262,6 +292,7 @@ test_idle_pane_pending_returns_pending
 test_busy_pane_composer_clears_first_try
 test_idle_pane_composer_clears_first_try
 test_busy_pane_unknown_stays_unknown
+test_failed_baseline_capture_keeps_busy_unknown_unconfirmed
 test_busy_pane_ambiguous_pending_retries_without_conversion
 test_unrecognized_state_skips_busy_conversion
 test_claude_busy_signature_uses_real_capture_shapes

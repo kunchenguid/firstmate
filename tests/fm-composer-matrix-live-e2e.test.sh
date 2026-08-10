@@ -48,6 +48,7 @@ note() { printf '# %s\n' "$1"; }
 
 cleanup() {
   tmux -L "$SOCKET" kill-server 2>/dev/null || true
+  [ -z "${ZJ_BG:-}" ] || kill "$ZJ_BG" 2>/dev/null || true
   if command -v zellij >/dev/null 2>&1; then
     zellij delete-session --force "$ZELLIJ_SESSION" >/dev/null 2>&1 || true
   fi
@@ -142,36 +143,54 @@ tmux -L "$SOCKET" kill-window -t "$SESSION:strictblank" 2>/dev/null || true
 # --- 3. zellij: real classifier + the false-positive regression -------------
 if command -v zellij >/dev/null 2>&1; then
   zj_version=$(zellij --version 2>/dev/null | head -1)
-  # 3a. The content-diff false positive (audit 3.5, live-reproduced there): a
-  # pane whose content changes every second for reasons unrelated to
-  # submission must never confirm a delivery.
-  zellij delete-session --force "$ZELLIJ_SESSION" >/dev/null 2>&1 || true
-  zellij --session "$ZELLIJ_SESSION" options --default-shell bash >/dev/null 2>&1 &
-  ZJ_BG=$!
-  sleep 2
-  pane_id=$(zellij --session "$ZELLIJ_SESSION" action list-clients 2>/dev/null | awk 'NR==2 {print $2}')
-  # Drive through the backend adapter exactly as fm-send does.
+  [ -n "$zj_version" ] || zj_version=version-unknown
   export FM_ROOT_OVERRIDE="$ROOT"
   # shellcheck source=/dev/null
   . "$ROOT/bin/fm-backend.sh"
-  if fm_backend_source zellij 2>/dev/null; then
-    # Start a clock loop in the pane, then attempt a probe send.
-    zellij --session "$ZELLIJ_SESSION" action write-chars 'while sleep 1; do date; done' >/dev/null 2>&1 || true
-    zellij --session "$ZELLIJ_SESSION" action write 13 >/dev/null 2>&1 || true
-    sleep 2
-    target="$ZELLIJ_SESSION:${pane_id:-0}"
-    verdict=$(fm_backend_zellij_send_text_submit "$target" '# audit-probe-never-submitted' 2 0.5 0.5 2>/dev/null)
-    if [ "$verdict" = empty ]; then
-      FAILED=1
-      printf 'not ok - zellij (%s): an unrelated pane change was reported as a delivered send (the content-diff false positive is back)\n' "$zj_version" >&2
-    else
+  fm_backend_source zellij 2>/dev/null \
+    || fail "zellij ($zj_version): adapter source failed"
+
+  zellij delete-session --force "$ZELLIJ_SESSION" >/dev/null 2>&1 || true
+  zellij --session "$ZELLIJ_SESSION" options --default-shell bash >/dev/null 2>&1 &
+  ZJ_BG=$!
+  i=0
+  while [ "$i" -lt 10 ] && ! fm_backend_zellij_session_exists "$ZELLIJ_SESSION"; do
+    i=$((i + 1))
+    sleep 0.5
+  done
+  fm_backend_zellij_session_exists "$ZELLIJ_SESSION" \
+    || fail "zellij ($zj_version): probe session setup failed"
+  panes=$(fm_backend_zellij_cli "$ZELLIJ_SESSION" action list-panes --json 2>/dev/null) \
+    || fail "zellij ($zj_version): pane discovery command failed"
+  pane_id=$(printf '%s' "$panes" | jq -r '.[]? | select(.is_plugin == false) | .id' 2>/dev/null | head -1)
+  case "$pane_id" in
+    ''|*[!0-9]*) fail "zellij ($zj_version): pane discovery returned no terminal pane" ;;
+  esac
+  target="$ZELLIJ_SESSION:$pane_id"
+
+  fm_backend_zellij_send_literal "$target" 'while sleep 1; do date; done' \
+    || fail "zellij ($zj_version): clock probe setup write failed"
+  fm_backend_zellij_send_key "$target" Enter \
+    || fail "zellij ($zj_version): clock probe setup submit failed"
+  sleep 2
+  verdict=$(fm_backend_zellij_send_text_submit "$target" '# audit-probe-never-submitted' 2 0.5 0.5 2>/dev/null)
+  case "$verdict" in
+    pending|unknown)
       CHECKED=$((CHECKED + 1))
-      pass "zellij ($zj_version): unrelated pane change never confirms delivery (verdict: ${verdict:-none})"
-    fi
-  else
-    note "zellij adapter did not source; false-positive probe not verified"
-  fi
+      pass "zellij ($zj_version): unrelated pane change never confirms delivery (verdict: $verdict)"
+      ;;
+    send-failed)
+      FAILED=1
+      printf 'not ok - zellij (%s): false-positive probe text was not typed (send-failed)\n' "$zj_version" >&2
+      ;;
+    *)
+      FAILED=1
+      printf 'not ok - zellij (%s): false-positive probe returned unexpected verdict %s (expected pending or unknown)\n' \
+        "$zj_version" "${verdict:-none}" >&2
+      ;;
+  esac
   kill "$ZJ_BG" 2>/dev/null || true
+  ZJ_BG=
   zellij delete-session --force "$ZELLIJ_SESSION" >/dev/null 2>&1 || true
 else
   note "harness absent, not verified here: zellij (false-positive regression not exercised)"

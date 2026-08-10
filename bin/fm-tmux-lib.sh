@@ -231,11 +231,21 @@ fm_pane_input_pending() {  # <target>
 
 # fm_pane_is_busy: 0 if the pane's last few non-blank lines show a busy footer
 # (an agent mid-turn). Scans a 40-line tail like fm-watch.sh.
+fm_pane_busy_state() {  # <target> [harness] -> busy|idle|unknown
+  local win=$1 harness=${2:-} tail40 visible
+  tail40=$(tmux capture-pane -p -t "$win" -S -40 2>/dev/null) \
+    || { printf 'unknown'; return 0; }
+  visible=$(printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -12)
+  [ -n "$visible" ] || { printf 'unknown'; return 0; }
+  if printf '%s' "$visible" | fm_busy_lines_match "$harness"; then
+    printf 'busy'
+  else
+    printf 'idle'
+  fi
+}
+
 fm_pane_is_busy() {  # <target> [harness]
-  local win=$1 harness=${2:-} tail40
-  tail40=$(tmux capture-pane -p -t "$win" -S -40 2>/dev/null) || return 1
-  printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -12 \
-    | fm_busy_lines_match "$harness"
+  [ "$(fm_pane_busy_state "$1" "${2:-}")" = busy ]
 }
 
 # fm_tmux_submit_core: type <text> into <target> ONCE, then submit with Enter,
@@ -308,11 +318,12 @@ fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [baseline-idle
 }
 
 fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle>
-  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 baseline_idle=1
+  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 baseline_idle= baseline_state
   # The turn-started baseline must predate our own typing: a pane already
   # busy before the text lands can turn "busy" for reasons unrelated to our
   # Enter, so only a clean idle-to-busy transition may confirm a submit.
-  if fm_pane_is_busy "$target"; then baseline_idle=0; fi
+  baseline_state=$(fm_pane_busy_state "$target")
+  [ "$baseline_state" = idle ] && baseline_idle=1
   tmux send-keys -t "$target" -l "$text" 2>/dev/null || { printf 'send-failed'; return 0; }
   sleep "$settle"
   fm_tmux_submit_enter_core "$target" "$retries" "$sleep_s" "$baseline_idle"
