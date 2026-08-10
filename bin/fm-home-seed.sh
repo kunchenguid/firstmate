@@ -621,10 +621,28 @@ EOF
       echo "error: seeded project $project at $dst has origin $dst_url; expected $url" >&2
       return 1
     }
+    # A pre-existing clone converges too, so re-seeding a home repairs a clone
+    # that predates pool isolation instead of leaving it on the shared pool.
+    pool_isolate_clone "$project" "$dst" "$home" || return 1
     return 0
   fi
   url=$(source_origin_url "$project" "$mode" "$src") || return 1
   git clone --quiet "$url" "$dst"
+  pool_isolate_clone "$project" "$dst" "$home" || return 1
+}
+
+# Give a seeded clone the secondmate home's OWN treehouse worktree pool.
+# Without it this clone and the parent home's clone of the same repo share one
+# $HOME-keyed pool, and `treehouse get` can hand this home a worktree of the
+# parent's clone. bin/fm-project-pool.sh owns the whole contract; the home is
+# passed explicitly because this runs in the PARENT's process, whose own FM_HOME
+# is not the home that will own the clone.
+pool_isolate_clone() {
+  local project=$1 dst=$2 home=$3
+  "$FM_ROOT/bin/fm-project-pool.sh" apply "$dst" --home "$home" || {
+    echo "error: could not give seeded project $project at $dst its own worktree pool" >&2
+    return 1
+  }
 }
 
 validate_seed_project() {

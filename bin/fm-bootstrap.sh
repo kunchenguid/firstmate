@@ -17,6 +17,7 @@
 #                 "NM_ORPHAN: no-mistakes ... run parked ... - no live task in this home owns it ...",
 #                 "NM_UNWATCHED: <id>: <pr-url> has no CI monitoring - <reason> ...",
 #                 "BACKLOG_ORPHAN: <id> is In flight in data/backlog.md but has no state/<id>.meta ...",
+#                 "PROJECT_POOL: <clone> ... shares one worktree pool ...",
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
 #                 "NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>",
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
@@ -838,6 +839,18 @@ backlog_orphan_rows() {
   done < <(fm_backlog_inflight_ids "$backlog")
 }
 
+# Shared-worktree-pool check. treehouse keys its pool by ($HOME, origin URL) with
+# no home dimension, so two firstmate homes on one machine holding the same repo
+# draw worktrees from ONE pool and either can be handed a worktree of the other's
+# clone. bin/fm-spawn.sh applies the per-home pool config on every spawn, so a
+# clone repairs itself the first time it is used; this reports the ones that have
+# not been used yet, and the ones firstmate must not repair on its own (a project
+# that commits its own treehouse.toml). Detect-only, local, and cheap: it reads
+# files and asks git about them, and changes nothing.
+project_pool_check() {
+  "$FM_ROOT/bin/fm-project-pool.sh" check --home "$FM_HOME" --all 2>/dev/null || true
+}
+
 # A no-mistakes run that parks with no live task left to answer it (a direct-PR
 # task cancelled or torn down while its watch run stayed parked) wakes nobody:
 # the reminder cascade re-sends into silence. bin/fm-nm-orphan-scan.sh closes
@@ -1281,6 +1294,7 @@ fi
 crew_dispatch_validate && crew_dispatch_launch_validate
 harness_overrides_validate
 backlog_orphan_rows
+project_pool_check
 if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] \
   && ! fm_backlog_backend_manual "$CONFIG" && fm_tasks_axi_compatible; then
   echo "BOOTSTRAP_INFO: tasks-axi available"

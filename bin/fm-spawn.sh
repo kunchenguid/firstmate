@@ -1329,8 +1329,33 @@ spawn_remote_preflight_or_block() {
   esac
   return 0
 }
+
+# Make sure this project clone draws worktrees from THIS home's own treehouse
+# pool before the pane runs `treehouse get`. treehouse keys its pool by
+# ($HOME, origin URL) with no home dimension, so without this two homes holding
+# the same repo share one pool and one can be handed a worktree of the other's
+# clone - the exact condition spawn_worktree_isolated refuses below.
+# bin/fm-project-pool.sh owns the contract; it is idempotent, so every spawn
+# converges a clone that predates pool isolation or arrived by hand.
+#
+# Best-effort on purpose. The failure cases are a project that commits its own
+# treehouse.toml and an unwritable clone; refusing there would make the project
+# undispatchable to buy nothing, because failing to write the config leaves
+# exactly today's behavior, and spawn_worktree_isolated still refuses a worktree
+# belonging to another home's clone. So warn loudly and let the guard do its job.
+spawn_pool_isolate_project() {
+  local out
+  # --home is passed rather than derived: the home that must not collide is the
+  # one dispatching this task, and PROJ_ABS is not always under its projects/.
+  if out=$("$SCRIPT_DIR/fm-project-pool.sh" apply "$PROJ_ABS" --home "$FM_HOME" 2>&1); then
+    return 0
+  fi
+  echo "warning: could not give $PROJ_ABS this home's own treehouse worktree pool, so it still shares one pool with any other firstmate home holding this repo: ${out:-unknown error}" >&2
+  return 0
+}
 if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   spawn_remote_preflight_or_block
+  spawn_pool_isolate_project
 fi
 
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
