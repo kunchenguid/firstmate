@@ -49,8 +49,10 @@ batched digest rather than per-wake injections.
    The daemon is **presence-gated**: it injects escalations only while
    `state/.afk` exists, and stays quiet otherwise.
 
-3. **Do not separately arm `fm-watch.sh`.** The daemon manages the watcher as
-   its child; the singleton lock no-ops a stray arm harmlessly.
+3. **Do not separately arm `fm-watch.sh`.**
+   The daemon manages the watcher as its child, and `bin/fm-watch-arm.sh` parks while `state/.afk` exists instead of competing for the singleton, then resumes from the same tracked process after return.
+   The primary adapters that re-arm automatically (Pi's watcher extension, OpenCode's watcher plugin) suppress ordinary delivery, park an owner-scoped resume, and re-arm after away mode ends.
+   `docs/watcher-continuity.md` "Away-mode parking" owns that contract.
 
 4. **Acknowledge** in `AGENTS.md` section 9 language: "Captain, away mode is active; I will batch routine updates and surface only decisions, failures, credentials, or review-ready work until you return."
 
@@ -152,6 +154,7 @@ firstmate turn.
 Captain-relevant events, plus a bounded recheck of a declared external wait that remains idle, escalate to firstmate's context as one pre-read, single-line, batched digest.
 The classification predicates (the captain-relevant verb set, declared-pause vocabulary, signal/stale tests, and fleet-scan) live in the shared `bin/fm-classify-lib.sh`, the same library the always-on watcher uses for its own triage when afk is off, so the two modes apply one identical policy.
 While `state/.afk` exists the daemon owns the watcher, so the watcher reverts to one-shot and lets the daemon do the triage - the two never run their triage at the same time.
+That is also why the arm layer and every automatic primary adapter park ordinary supervision while away mode is on: an adapter that kept the singleton would send those same one-shot wakes straight to the primary pane, defeating the classification above (`docs/watcher-continuity.md` "Away-mode parking").
 
 Classify each wake this way:
 
@@ -230,7 +233,7 @@ the operational prefix lets firstmate distinguish it from a real captain message
 
 ## Stale-artifact lifecycle
 
-Treat `state/.subsuper-escalations`, its `.since` sidecar, and `state/.subsuper-inject-wedged` as session-scoped delivery artifacts, not as the durable work record.
+Treat `state/.subsuper-escalations`, its `.since` sidecar, `state/.subsuper-inject-wedged`, and `state/.subsuper-seen-wake-seq` as session-scoped delivery and queue-classification artifacts, not as the durable work record.
 Always enter through `bin/fm-afk-launch.sh`, which clears prior-session artifacts only for a fresh entry and preserves the current session's buffer on refresh.
 Always exit through `bin/fm-afk-launch.sh stop`, which keeps `state/.afk` present through the daemon's shutdown flush and clears it last.
 `docs/herdr-backend.md` "Away-mode supervisor support" owns the current mechanism, and `docs/verification/runtime-backends.md` "Away-mode transport" owns active evidence.
@@ -239,8 +242,7 @@ Always exit through `bin/fm-afk-launch.sh stop`, which keeps `state/.afk` presen
 
 These properties must hold:
 
-- Nothing is lost. The durable queue plus `fm-wake-drain.sh` recover any missed
-  or crashed injection.
+- Nothing is lost. Housekeeping classifies each unseen durable queue record without consuming it, and `fm-wake-drain.sh` remains the sole consumer and recovery path.
 - Wedge detection is bounded-latency, not lossy.
 - Declared external waits are rechecked on a separate, bounded cadence rather than being mislabeled as wedges.
 - The catch-all scan backs up the keyword classifier.

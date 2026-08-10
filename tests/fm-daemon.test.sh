@@ -645,6 +645,35 @@ test_heartbeat_scan_dedup() {
   pass "catch-all scan escalates a missed terminal once, not twice"
 }
 
+test_housekeeping_classifies_unseen_durable_wakes() {
+  local dir state before
+  dir=$(make_supercase queued-wake-catchup)
+  state="$dir/state"
+  printf '%s\t1\tcheck\tadapter-transition\tcheck: adapter transition: needs-decision: choose route\n' "$(date +%s)" \
+    > "$state/.wake-queue"
+  before=$(cat "$state/.wake-queue")
+  FM_STATE_OVERRIDE="$state" FM_ESCALATE_BATCH_SECS=999999 housekeeping "$state"
+  [ ! -e "$state/.subsuper-seen-wake-seq" ] && [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "housekeeping classified a durable wake while away mode was inactive"
+  afk_enter "$state"
+  FM_STATE_OVERRIDE="$state" FM_ESCALATE_BATCH_SECS=999999 FM_MAX_DEFER_SECS=999999 \
+    housekeeping "$state"
+  grep -F 'check: adapter transition: needs-decision: choose route' "$state/.subsuper-escalations" >/dev/null \
+    || fail "housekeeping did not escalate the queued captain-relevant wake"
+  [ "$(cat "$state/.wake-queue")" = "$before" ] \
+    || fail "housekeeping consumed or changed the durable wake queue"
+  FM_STATE_OVERRIDE="$state" FM_ESCALATE_BATCH_SECS=999999 FM_MAX_DEFER_SECS=999999 \
+    housekeeping "$state"
+  [ "$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')" = 1 ] \
+    || fail "housekeeping classified the same queued wake more than once"
+  printf '%s\t2\theartbeat\theartbeat\theartbeat\n' "$(date +%s)" >> "$state/.wake-queue"
+  FM_STATE_OVERRIDE="$state" FM_ESCALATE_BATCH_SECS=999999 FM_MAX_DEFER_SECS=999999 \
+    housekeeping "$state"
+  [ "$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')" = 1 ] \
+    || fail "housekeeping escalated a routine queued heartbeat"
+  pass "housekeeping classifies unseen queued wakes without consuming or duplicating them"
+}
+
 test_handle_wake_routes_self_and_escalate() {
   local dir state
   dir=$(make_supercase handle)
@@ -1858,6 +1887,7 @@ test_housekeeping_orca_persistent_stale_resolves_terminal
 test_escalate_batches_into_one_digest
 test_escalate_batch_age_uses_first_append
 test_heartbeat_scan_dedup
+test_housekeeping_classifies_unseen_durable_wakes
 test_handle_wake_routes_self_and_escalate
 test_inject_skip_forces_self
 test_is_wake_reason_distinguishes_status_stdout

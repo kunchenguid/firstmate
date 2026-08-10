@@ -44,6 +44,22 @@
 # so the failure is loud. A live cycle already present means re-arm attaches - do
 # not start a second watcher.
 #
+# AWAY MODE. While state/.afk exists this script arms nothing. A process that
+# reaches an arming gate parks without watcher ownership until the flag clears,
+# then re-arms from the same tracked process. A live cycle that reaches a
+# wake-return boundary instead exits successfully with watcher: stood-down. The
+# away-mode daemon (bin/fm-supervise-daemon.sh) runs its own bin/fm-watch.sh child
+# and owns triage there, so a second arm here would take the watcher singleton
+# away from the daemon - and --restart would kill the daemon's watcher outright. With the
+# singleton stolen, every away-mode wake surfaces to the primary pane instead of
+# being classified in bash, which is exactly the firstmate turn the daemon exists
+# to save. Parking is the deterministic half of the contract; the primary
+# adapters that own automatic re-arm (.pi/extensions/fm-primary-pi-watch.ts,
+# .opencode/plugins/fm-primary-watch-arm.js) additionally stand down before
+# spawning and never deliver an ordinary wake to the primary while away mode is
+# active. docs/watcher-continuity.md "Away-mode parking" owns the full
+# cross-harness contract.
+#
 # Every observed watcher cycle appends one tab-separated lifecycle record to
 # state/.watch-cycle-exits.log. The arm layer owns that bounded ledger; it records
 # arm/watcher identities, timestamps, exit/signal classification, beacon age,
@@ -67,6 +83,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WATCH="$SCRIPT_DIR/fm-watch.sh"
 WATCH_LOCK="$STATE/.watch.lock"
 BEAT="$STATE/.last-watcher-beat"
+# Primary watcher adapters classify this single status as a benign,
+# non-actionable close rather than a wake or failure.
+AFK_STAND_DOWN_LINE="watcher: stood-down - away mode owns supervision; the away-mode daemon runs the watcher"
+stand_down_if_away() {
+  [ -e "$STATE/.afk" ] || return 1
+  printf '%s\n' "$AFK_STAND_DOWN_LINE"
+  return 0
+}
 # "Fresh" reuses the guard's threshold so there is one definition of liveness.
 GRACE=${FM_GUARD_GRACE:-300}
 # How long to wait for a freshly forked watcher to acquire the lock and beat.
@@ -79,6 +103,7 @@ esac
 CONFIRM_TIMEOUT=${FM_ARM_CONFIRM_TIMEOUT:-$ARM_CONFIRM_DEFAULT}
 # Poll interval while attached to an existing healthy watcher.
 ATTACH_POLL=${FM_ARM_ATTACH_POLL:-0.5}
+AFK_POLL=${FM_ARM_AFK_POLL:-0.5}
 CYCLE_LOG="$STATE/.watch-cycle-exits.log"
 CYCLE_LOG_LOCK="$STATE/.watch-cycle-exits.lock"
 CYCLE_LOG_MAX_BYTES=${FM_WATCH_CYCLE_LOG_MAX_BYTES:-262144}
@@ -223,10 +248,13 @@ cycle_mark_predecessor_successor() {
 }
 
 clear_stale_recorded_watcher_lock() {
-  local lock_home lock_path lock_identity
+  local expected_pid=$1 expected_identity=$2 lock_pid lock_home lock_path lock_identity
+  lock_pid=$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)
   lock_home=$(cat "$WATCH_LOCK/fm-home" 2>/dev/null || true)
   lock_path=$(cat "$WATCH_LOCK/watcher-path" 2>/dev/null || true)
   lock_identity=$(cat "$WATCH_LOCK/pid-identity" 2>/dev/null || true)
+  [ "$lock_pid" = "$expected_pid" ] || return 0
+  [ "$lock_identity" = "$expected_identity" ] || return 0
   [ "$lock_home" = "$FM_HOME" ] || return 0
   [ "$lock_path" = "$WATCH" ] || return 0
   [ -n "$lock_identity" ] || return 0
@@ -277,6 +305,7 @@ fail_unexplained_cycle() {
 # Close a cycle whose reason line this arm could not read against the bounded
 # terminal-delivery ledger the watcher publishes before releasing its lock.
 close_unobserved_cycle() {
+  local cycle_exit=$1 cycle_signal=$2 delivered_reason=$3 undelivered_reason=$4
   local i reason clean_identity record_pid record_identity record_reason
   clean_identity=$(printf '%s' "$cycle_watcher_identity" | tr '\t\r\n' '   ')
   i=0
@@ -298,9 +327,14 @@ close_unobserved_cycle() {
   fi
   fm_lock_release "$WATCH_DELIVERY_LOCK"
   if [ -n "$reason" ]; then
+    cycle_log_append "$cycle_exit" "$cycle_signal" "$delivered_reason" none
+    # An attached or capture-less owned arm has the same adapterless return
+    # boundary as owned_child_finished. The durable queue still carries the wake.
+    stand_down_if_away && return 0
     printf '%s\n' "$reason"
     return 0
   fi
+  cycle_log_append "$cycle_exit" "$cycle_signal" "$undelivered_reason" none
   fail_unexplained_cycle
   return 1
 }
@@ -329,11 +363,9 @@ attach_and_wait() {
       report_attached
       continue
     fi
-    if close_unobserved_cycle; then
-      cycle_log_append unknown unknown attached-delivered-wake none
+    if close_unobserved_cycle unknown unknown attached-delivered-wake attached-cycle-ended; then
       return 0
     fi
-    cycle_log_append unknown unknown attached-cycle-ended none
     return 1
   done
 }
@@ -379,31 +411,51 @@ case "${1:-}" in
   *) echo "usage: $(basename "$0") [--restart]" >&2; exit 2 ;;
 esac
 
+park_while_away() {
+  local rearm_arg=--arm
+  [ -e "$STATE/.afk" ] || return 0
+  [ "$mode" != restart ] || rearm_arg=--restart
+  while [ -e "$STATE/.afk" ]; do
+    sleep "$AFK_POLL"
+  done
+  exec "$SCRIPT_DIR/fm-watch-arm.sh" "$rearm_arg"
+}
+
+park_while_away
+
 if [ "$mode" = restart ]; then
   # Home-scoped stop: only the watcher pid recorded in THIS home's lock.
   lock_pid=$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)
+  lock_identity=$(cat "$WATCH_LOCK/pid-identity" 2>/dev/null || true)
   if fm_pid_alive "$lock_pid"; then
     if fm_watcher_lock_matches_pid "$STATE" "$WATCH" "$lock_pid" "$FM_HOME"; then
-      kill -TERM "$lock_pid" 2>/dev/null || true
-      # Wait for it to actually exit before relaunching, so the fresh watcher
-      # either takes a released lock or reclaims a now-dead-pid stale lock instead
-      # of seeing the dying one as a live holder and no-opping.
-      i=0
-      while [ "$i" -lt 50 ] && fm_pid_alive "$lock_pid"; do
-        sleep 0.1
-        i=$((i + 1))
-      done
+      park_while_away
+      if fm_watcher_lock_matches_pid "$STATE" "$WATCH" "$lock_pid" "$FM_HOME"; then
+        kill -TERM "$lock_pid" 2>/dev/null || true
+        # Wait for it to actually exit before relaunching, so the fresh watcher
+        # either takes a released lock or reclaims a now-dead-pid stale lock instead
+        # of seeing the dying one as a live holder and no-opping.
+        i=0
+        while [ "$i" -lt 50 ] && fm_pid_alive "$lock_pid"; do
+          sleep 0.1
+          i=$((i + 1))
+        done
+      fi
     else
-      clear_stale_recorded_watcher_lock
+      park_while_away
+      clear_stale_recorded_watcher_lock "$lock_pid" "$lock_identity"
     fi
   fi
 fi
+
+park_while_away
 
 # If a genuinely live+fresh watcher already holds the lock, do not start a second
 # one - attach to that cycle and wait until it ends so the harness notify fires
 # then, not as an immediate empty wake. (--restart skips this: it just stopped
 # this home's watcher and wants a fresh one.)
 if [ "$mode" = arm ] && healthy_watcher; then
+  park_while_away
   cycle_mark_predecessor_successor "attached:$HEALTHY_PID"
   cycle_begin "$HEALTHY_PID" attached "$HEALTHY_IDENTITY"
   report_attached
@@ -447,6 +499,11 @@ child_out=$(mktemp "$STATE/.watch-arm-output.XXXXXX") || {
   echo "watcher: FAILED - no live watcher with a fresh beacon"
   exit 1
 }
+if [ -e "$STATE/.afk" ]; then
+  cleanup_child
+  child_out=
+  park_while_away
+fi
 "$WATCH" >"$child_out" &
 child=$!
 cycle_begin "$child" started "$(fm_pid_identity "$child" 2>/dev/null || true)"
@@ -458,6 +515,14 @@ owned_child_finished() {
   if [ "$rc" -eq 0 ] && watch_output_has_wake "$child_out"; then
     reason_type=$(watch_output_reason_type "$child_out")
     cycle_log_append "$rc" "$signal" "$reason_type" none
+    # Returning the reason is itself a wake for adapterless callers such as a
+    # Grok tracked task, so close benignly while the durable queue keeps the wake.
+    if stand_down_if_away; then
+      rm -f "$child_out" 2>/dev/null || true
+      child=
+      child_out=
+      return 0
+    fi
     print_watch_output "$child_out"
     rm -f "$child_out" 2>/dev/null || true
     child=
@@ -482,11 +547,9 @@ owned_child_finished() {
     rm -f "$child_out" 2>/dev/null || true
     child=
     child_out=
-    if close_unobserved_cycle; then
-      cycle_log_append "$rc" "$signal" clean-exit-delivered-wake none
+    if close_unobserved_cycle "$rc" "$signal" clean-exit-delivered-wake unexpected-clean-exit; then
       return 0
     fi
-    cycle_log_append "$rc" "$signal" unexpected-clean-exit none
     return 1
   fi
 
