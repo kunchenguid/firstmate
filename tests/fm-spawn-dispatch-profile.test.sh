@@ -20,12 +20,39 @@ make_spawn_fakebin() {
 #!/usr/bin/env bash
 set -u
 case "$*" in
-  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+  *"#{pane_current_path}"*)
+    # A real batch lands each pair in its own pooled worktree, so honour a
+    # per-window worktree map when set: extract the -t target (the window id
+    # this fake mints below encodes the fm-<id> name) and return that task's
+    # slot. With no map the single shared FM_FAKE_PANE_PATH is returned, which
+    # keeps every single-spawn case unchanged.
+    target=; prev=
+    for a in "$@"; do
+      [ "$prev" = "-t" ] && target=$a
+      prev=$a
+    done
+    if [ -n "${FM_FAKE_WT_MAP:-}" ] && [ -n "$target" ]; then
+      name=${target#@}; id=${name#fm-}
+      if [ -d "$FM_FAKE_WT_MAP/$id" ]; then
+        printf '%s\n' "$FM_FAKE_WT_MAP/$id"; exit 0
+      fi
+    fi
+    printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
-  has-session|new-session|new-window|kill-window) exit 0 ;;
+  new-window)
+    # Mint a deterministic window id encoding the requested name so the
+    # pane_current_path read above can resolve a per-task worktree slot.
+    wname=; prev=
+    for a in "$@"; do
+      [ "$prev" = "-n" ] && wname=$a
+      prev=$a
+    done
+    [ -n "$wname" ] && printf '@%s\n' "$wname"
+    exit 0 ;;
+  has-session|new-session|kill-window) exit 0 ;;
   send-keys)
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
       prev=
@@ -164,12 +191,17 @@ test_relative_home_overrides_launch_with_absolute_cross_process_paths() {
 }
 
 test_home_defaults_preserve_absolute_or_resolve_relative_paths() {
-  local rec relative_id absolute_id out status launch home_real linked_home
+  local rec relative_id absolute_id out status launch home_real linked_home wt_absolute
   relative_id=profile-relative-home-defaults-z1c
   absolute_id=profile-absolute-home-defaults-z1d
   rec=$(make_spawn_case profile-home-defaults pi "$relative_id" "$absolute_id")
   read_case_record "$rec"
   home_real=$(cd "$HOME_DIR" && pwd -P)
+  # Each spawn represents a distinct live task, so give the second one its own
+  # pooled worktree slot. Reusing one slot would trip the pool-path collision
+  # guard the moment the first task's meta records the shared canonical path.
+  wt_absolute="$CASE_DIR/wt-absolute"
+  git -C "$PROJ_DIR" worktree add --quiet -b wt-profile-home-defaults-absolute "$wt_absolute"
 
   : > "$LAUNCH_LOG"
   out=$(
@@ -197,7 +229,7 @@ test_home_defaults_preserve_absolute_or_resolve_relative_paths() {
     FM_ROOT_OVERRIDE='' FM_HOME="$linked_home" \
       FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' \
       FM_PROJECTS_OVERRIDE="$linked_home/projects" FM_CONFIG_OVERRIDE="$linked_home/config" \
-      FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
+      FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt_absolute" TMUX="fake,1,0" \
       CLAUDE_CONFIG_DIR='' FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" \
       GROK_HOME="$linked_home/grok-home" PATH="$FAKEBIN_DIR:$PATH" \
       "$SPAWN" "$absolute_id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1
@@ -589,16 +621,26 @@ test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity() {
 }
 
 test_batch_forwards_shared_profile_flags() {
-  local rec id1 id2 out status
+  local rec id1 id2 out status wt_map
   id1=profile-batch-a-z9
   id2=profile-batch-b-z10
   rec=$(make_spawn_case profile-batch claude "$id1" "$id2")
   read_case_record "$rec"
   enable_dispatch_profile "$HOME_DIR"
 
+  # Each batch pair takes its own pooled worktree slot in production, so give
+  # every task a distinct worktree keyed by its window name. Reusing one slot
+  # would trip the pool-path collision guard once the first pair records it.
+  wt_map="$CASE_DIR/wt-pool"
+  mkdir -p "$wt_map"
+  git -C "$PROJ_DIR" worktree add --quiet -b wt-profile-batch-a "$wt_map/$id1"
+  git -C "$PROJ_DIR" worktree add --quiet -b wt-profile-batch-b "$wt_map/$id2"
+
+  export FM_FAKE_WT_MAP="$wt_map"
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
     "$id1=$PROJ_DIR" "$id2=$PROJ_DIR" --harness codex --model gpt-5 --effort high)
   status=$?
+  unset FM_FAKE_WT_MAP
   expect_code 0 "$status" "batch spawn with shared profile flags should succeed"
   assert_contains "$out" "spawned $id1 harness=codex" "first batch task did not use shared harness"
   assert_contains "$out" "spawned $id2 harness=codex" "second batch task did not use shared harness"

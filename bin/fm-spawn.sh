@@ -2136,10 +2136,24 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # Relaunch is exempt (covered by the existing task's control lock). This
   # guard is the first defence; fm-teardown's symmetric guard handles recovery
   # from any collision that slips through before this check was wired in.
+  #
+  # A stale meta alone must NOT wall off the slot: treehouse only hands a pooled
+  # copy back out once its previous holder is gone, so a completed/failed
+  # worker's lingering record points at a copy that is genuinely free again.
+  # Only a still-LIVE agent on the recorded endpoint is a real collision - it
+  # could clobber the copy this task is about to occupy - so confirm the owner's
+  # agent is actually running before refusing. A dead, missing, or unverifiable
+  # endpoint is legitimate pool reuse and proceeds.
   _spawn_wt_real=$(CDPATH='' cd -- "$WT" 2>/dev/null && pwd -P) || _spawn_wt_real="$WT"
   if fm_backend_worktree_canonical_owner "$STATE" "$_spawn_wt_real" "$ID"; then
-    echo "error: worktree $WT (resolved $_spawn_wt_real) is already recorded by task $FM_WORKTREE_COLLISION_OWNER; refusing to deliver instructions to a path owned by another task - inspect or tear down $FM_WORKTREE_COLLISION_OWNER before spawning $ID" >&2
-    exit 1
+    _spawn_owner_meta="$STATE/$FM_WORKTREE_COLLISION_OWNER.meta"
+    _spawn_owner_backend=$(fm_backend_of_meta "$_spawn_owner_meta")
+    _spawn_owner_target=$(fm_backend_target_of_meta "$_spawn_owner_meta")
+    if [ -n "$_spawn_owner_target" ] && \
+      [ "$(fm_backend_agent_alive "$_spawn_owner_backend" "$_spawn_owner_target")" = alive ]; then
+      echo "error: worktree $WT (resolved $_spawn_wt_real) is already recorded by live task $FM_WORKTREE_COLLISION_OWNER; refusing to deliver instructions to a path owned by another task - inspect or tear down $FM_WORKTREE_COLLISION_OWNER before spawning $ID" >&2
+      exit 1
+    fi
   fi
 fi
 
