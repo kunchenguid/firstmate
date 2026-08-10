@@ -922,11 +922,13 @@ test_send_text_submit_detects_landed_send() {
   local dir fb out
   dir="$TMP_ROOT/submit-ok"; mkdir -p "$dir/responses"
   zellij_pane_response "$dir" 1 7 3
+  printf '%s' $'❯ ' > "$dir/responses/2.out"
   zellij_pane_response "$dir" 3 7 3
-  printf '%s' $'❯ hello captain' > "$dir/responses/4.out"
   zellij_pane_response "$dir" 5 7 3
+  printf '%s' $'❯ hello captain' > "$dir/responses/6.out"
   zellij_pane_response "$dir" 7 7 3
-  printf '%s' $'hello captain\n❯ ' > "$dir/responses/8.out"
+  zellij_pane_response "$dir" 9 7 3
+  printf '%s' $'hello captain\n❯ ' > "$dir/responses/10.out"
   fb=$(make_zellij_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
     FM_ZELLIJ_SESSION_LIST="firstmate" \
@@ -946,14 +948,16 @@ test_send_text_submit_detects_swallowed_enter() {
   local dir fb out
   dir="$TMP_ROOT/submit-swallow"; mkdir -p "$dir/responses"
   zellij_pane_response "$dir" 1 7 3
+  printf '%s' $'❯ ' > "$dir/responses/2.out"
   zellij_pane_response "$dir" 3 7 3
-  printf '%s' $'❯ hello captain' > "$dir/responses/4.out"
   zellij_pane_response "$dir" 5 7 3
+  printf '%s' $'❯ hello captain' > "$dir/responses/6.out"
   zellij_pane_response "$dir" 7 7 3
-  printf '%s' $'❯ hello captain' > "$dir/responses/8.out"
   zellij_pane_response "$dir" 9 7 3
+  printf '%s' $'❯ hello captain' > "$dir/responses/10.out"
   zellij_pane_response "$dir" 11 7 3
-  printf '%s' $'❯ hello captain' > "$dir/responses/12.out"
+  zellij_pane_response "$dir" 13 7 3
+  printf '%s' $'❯ hello captain' > "$dir/responses/14.out"
   fb=$(make_zellij_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
     FM_ZELLIJ_SESSION_LIST="firstmate" \
@@ -974,14 +978,16 @@ test_send_text_submit_unrelated_change_is_not_delivery() {
   local dir fb out
   dir="$TMP_ROOT/submit-false-positive"; mkdir -p "$dir/responses"
   zellij_pane_response "$dir" 1 7 3
+  printf '%s' $'clock 11:59:59\n❯ ' > "$dir/responses/2.out"
   zellij_pane_response "$dir" 3 7 3
-  printf '%s' $'clock 12:00:00\n❯ hello captain' > "$dir/responses/4.out"
   zellij_pane_response "$dir" 5 7 3
+  printf '%s' $'clock 12:00:00\n❯ hello captain' > "$dir/responses/6.out"
   zellij_pane_response "$dir" 7 7 3
-  printf '%s' $'clock 12:00:01\n❯ hello captain' > "$dir/responses/8.out"
   zellij_pane_response "$dir" 9 7 3
+  printf '%s' $'clock 12:00:01\n❯ hello captain' > "$dir/responses/10.out"
   zellij_pane_response "$dir" 11 7 3
-  printf '%s' $'clock 12:00:02\n❯ hello captain' > "$dir/responses/12.out"
+  zellij_pane_response "$dir" 13 7 3
+  printf '%s' $'clock 12:00:02\n❯ hello captain' > "$dir/responses/14.out"
   fb=$(make_zellij_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
     FM_ZELLIJ_SESSION_LIST="firstmate" \
@@ -995,8 +1001,10 @@ test_send_text_submit_rejects_unobserved_paste() {
   local dir fb out
   dir="$TMP_ROOT/submit-unobserved"; mkdir -p "$dir/responses"
   zellij_pane_response "$dir" 1 7 3
+  printf '%s' $'transcript line\n❯ ' > "$dir/responses/2.out"
   zellij_pane_response "$dir" 3 7 3
-  printf '%s' $'transcript line\n❯ ' > "$dir/responses/4.out"
+  zellij_pane_response "$dir" 5 7 3
+  printf '%s' $'transcript line\n❯ ' > "$dir/responses/6.out"
   fb=$(make_zellij_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
     FM_ZELLIJ_SESSION_LIST="firstmate" \
@@ -1011,8 +1019,10 @@ test_send_text_submit_rejects_transcript_echo_with_unrelated_draft() {
   local dir fb out
   dir="$TMP_ROOT/submit-transcript-echo"; mkdir -p "$dir/responses"
   zellij_pane_response "$dir" 1 7 3
+  printf '%s' $'hello captain\n❯ unrelated draft' > "$dir/responses/2.out"
   zellij_pane_response "$dir" 3 7 3
-  printf '%s' $'hello captain\n❯ unrelated draft' > "$dir/responses/4.out"
+  zellij_pane_response "$dir" 5 7 3
+  printf '%s' $'hello captain\n❯ unrelated draft' > "$dir/responses/6.out"
   fb=$(make_zellij_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
     FM_ZELLIJ_SESSION_LIST="firstmate" \
@@ -1023,15 +1033,53 @@ test_send_text_submit_rejects_transcript_echo_with_unrelated_draft() {
   pass "fm_backend_zellij_send_text_submit: transcript echoes outside the selected composer cannot prove typing"
 }
 
+test_send_text_submit_rejects_existing_intended_text_after_noop_paste() {
+  local dir fb out
+  dir="$TMP_ROOT/submit-existing-text-noop"; mkdir -p "$dir/responses"
+  zellij_pane_response "$dir" 1 7 3
+  printf '%s' $'❯ hello captain' > "$dir/responses/2.out"
+  zellij_pane_response "$dir" 3 7 3
+  zellij_pane_response "$dir" 5 7 3
+  printf '%s' $'❯ hello captain' > "$dir/responses/6.out"
+  fb=$(make_zellij_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST="firstmate" \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_send_text_submit firstmate:7 "hello captain" 2 0.01 0.01' "$ROOT" )
+  [ "$out" = send-failed ] || fail "pre-existing intended text after a no-op paste should report send-failed, got '$out'"
+  assert_not_contains "$(cat "$dir/log")" $'\x1f''send-keys' \
+    "send_text_submit should not send Enter without an observed composer delta"
+  pass "fm_backend_zellij_send_text_submit: pre-existing text cannot prove a no-op paste landed"
+}
+
+test_send_text_submit_rejects_furniture_match_after_noop_paste() {
+  local dir fb out
+  dir="$TMP_ROOT/submit-furniture-noop"; mkdir -p "$dir/responses"
+  zellij_pane_response "$dir" 1 7 3
+  printf '%s' $'┃ unrelated draft\n┃ Build · GPT-5.5 Fast OpenAI · high' > "$dir/responses/2.out"
+  zellij_pane_response "$dir" 3 7 3
+  zellij_pane_response "$dir" 5 7 3
+  printf '%s' $'┃ unrelated draft\n┃ Build · GPT-5.5 Fast OpenAI · high' > "$dir/responses/6.out"
+  fb=$(make_zellij_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST="firstmate" \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_send_text_submit firstmate:7 "high" 2 0.01 0.01' "$ROOT" )
+  [ "$out" = send-failed ] || fail "footer furniture matching a short steer should report send-failed, got '$out'"
+  assert_not_contains "$(cat "$dir/log")" $'\x1f''send-keys' \
+    "send_text_submit should not send Enter when only furniture matches the steer"
+  pass "fm_backend_zellij_send_text_submit: unrelated drafts and furniture cannot prove typing"
+}
+
 test_send_text_submit_accepts_wrapped_boxed_text() {
   local dir fb out
   dir="$TMP_ROOT/submit-wrapped-box"; mkdir -p "$dir/responses"
   zellij_pane_response "$dir" 1 7 3
+  printf '%s' $'╭────────────────────╮\n│ existing           │\n╰────────────────────╯' > "$dir/responses/2.out"
   zellij_pane_response "$dir" 3 7 3
-  printf '%s' $'╭────────────────────╮\n│ hello              │\n│ captain            │\n╰────────────────────╯' > "$dir/responses/4.out"
   zellij_pane_response "$dir" 5 7 3
+  printf '%s' $'╭────────────────────╮\n│ existing hello     │\n│ captain            │\n╰────────────────────╯' > "$dir/responses/6.out"
   zellij_pane_response "$dir" 7 7 3
-  printf '%s' $'╭────────────────────╮\n│ ❯                  │\n╰────────────────────╯' > "$dir/responses/8.out"
+  zellij_pane_response "$dir" 9 7 3
+  printf '%s' $'╭────────────────────╮\n│ ❯                  │\n╰────────────────────╯' > "$dir/responses/10.out"
   fb=$(make_zellij_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
     FM_ZELLIJ_SESSION_LIST="firstmate" \
@@ -1238,6 +1286,8 @@ test_send_text_submit_detects_swallowed_enter
 test_send_text_submit_unrelated_change_is_not_delivery
 test_send_text_submit_rejects_unobserved_paste
 test_send_text_submit_rejects_transcript_echo_with_unrelated_draft
+test_send_text_submit_rejects_existing_intended_text_after_noop_paste
+test_send_text_submit_rejects_furniture_match_after_noop_paste
 test_send_text_submit_accepts_wrapped_boxed_text
 test_composer_state_reads_styled_dump
 test_composer_state_dead_pane_is_unknown

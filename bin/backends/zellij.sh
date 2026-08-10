@@ -536,20 +536,30 @@ fm_backend_zellij_composer_state() {  # <target> [expected-label] -> empty|pendi
   printf '%s' "$verdict"
 }
 
-fm_backend_zellij_composer_observed_text() {  # <target> <text> [expected-label]
-  local target=$1 text=$2 expected_label=${3:-} cap caps verdict candidate needle
+fm_backend_zellij_composer_content() {  # <target> [expected-label]
+  local target=$1 expected_label=${2:-} cap caps
+  cap=$(fm_backend_zellij_composer_capture "$target" "$expected_label") || return 1
+  caps=$(printf 'styled=1\ncursor=0\nidentity=0\nrows=%s' "$FM_COMPOSER_CAPTURE_LINES")
+  fm_composer_extract_selected_content "$caps" "$cap"
+}
+
+fm_backend_zellij_composer_observed_append() {  # <target> <before> <text> [expected-label]
+  local target=$1 before=$2 text=$3 expected_label=${4:-} cap caps verdict after expected
   [ -n "$text" ] || return 1
   cap=$(fm_backend_zellij_composer_capture "$target" "$expected_label") || return 1
   caps=$(printf 'styled=1\ncursor=0\nidentity=0\nrows=%s' "$FM_COMPOSER_CAPTURE_LINES")
   verdict=$(fm_composer_classify_screen "$caps" "$cap")
   case "$verdict" in pending|pending-unproven) ;; *) return 1 ;; esac
-  candidate=$(fm_composer_extract_selected_content "$caps" "$cap") || return 1
-  fm_composer_normalize_spaces_var candidate
+  after=$(fm_composer_extract_selected_content "$caps" "$cap") || return 1
+  fm_composer_normalize_spaces_var before
   fm_composer_normalize_spaces_var text
-  candidate=${candidate//[$' \t\r\n\v\f']/}
-  needle=${text//[$' \t\r\n\v\f']/}
-  [ -n "$needle" ] || return 1
-  case "$candidate" in *"$needle"*) return 0 ;; *) return 1 ;; esac
+  fm_composer_normalize_spaces_var after
+  before=${before//[$' \t\r\n\v\f']/}
+  text=${text//[$' \t\r\n\v\f']/}
+  after=${after//[$' \t\r\n\v\f']/}
+  [ -n "$text" ] || return 1
+  expected=$before$text
+  [ "$after" = "$expected" ]
 }
 
 # fm_backend_zellij_send_text_submit: type <text> into <target> once (raw,
@@ -560,10 +570,12 @@ fm_backend_zellij_composer_observed_text() {  # <target> <text> [expected-label]
 # empty composer confirms delivery - a pane that merely CHANGED does not, so
 # the old heuristic's false "delivery confirmed" cannot recur.
 fm_backend_zellij_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle> [expected-label]
-  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 expected_label=${6:-}
+  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 expected_label=${6:-} before
+  before=$(fm_backend_zellij_composer_content "$target" "$expected_label") \
+    || { printf 'send-failed'; return 0; }
   fm_backend_zellij_send_literal "$target" "$text" "$expected_label" || { printf 'send-failed'; return 0; }
   sleep "$settle"
-  fm_backend_zellij_composer_observed_text "$target" "$text" "$expected_label" \
+  fm_backend_zellij_composer_observed_append "$target" "$before" "$text" "$expected_label" \
     || { printf 'send-failed'; return 0; }
   fm_composer_submit_retry_core fm_backend_zellij_send_key fm_backend_zellij_composer_state \
     "$target" "$retries" "$sleep_s" "$expected_label"

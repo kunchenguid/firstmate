@@ -412,9 +412,13 @@ test_selected_content_is_composer_scoped_and_wrap_normalized() {
     || fail "box extraction should contain only normalized selected composer rows, got '$out'"
   screen=$'hello captain in transcript\n┃ hello\n┃ captain\n┃ Build · GPT-5.5 Fast OpenAI · high'
   out=$(fm_composer_extract_selected_content "$CAPS_STYLED_NOID" "$screen")
-  [ "$out" = 'hello captain Build · GPT-5.5 Fast OpenAI · high' ] \
-    || fail "left-bar extraction should join the selected wrapped rows, got '$out'"
-  pass "fm_composer_extract_selected_content: scopes and normalizes wrapped composer content"
+  [ "$out" = 'hello captain' ] \
+    || fail "left-bar extraction should join user rows without footer furniture, got '$out'"
+  screen=$'╭────────────────────╮\n│ ❯ Type a message...│\n╰────────────────────╯'
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED_NOID" "$screen")
+  [ -z "$out" ] \
+    || fail "idle placeholders should be excluded from extracted user content, got '$out'"
+  pass "fm_composer_extract_selected_content: scopes user content and excludes furniture"
 }
 
 test_bare_shell_glyphs_are_unknown

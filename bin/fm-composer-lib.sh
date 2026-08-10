@@ -921,7 +921,8 @@ _fm_composer_select_cursorless() {
 }
 
 fm_composer_extract_selected_content() {  # <caps> <screen>
-  local caps=$1 screen=$2 styled=0 kv plain row raw content glyph joined=
+  local caps=$1 screen=$2 styled=0 kv plain row raw content glyph joined= footer_re
+  footer_re=${FM_COMPOSER_LEFTBAR_FOOTER_RE:-$FM_COMPOSER_LEFTBAR_FOOTER_RE_DEFAULT}
   while IFS= read -r kv; do
     [ "$kv" = styled=1 ] && styled=1
   done <<EOF
@@ -941,10 +942,23 @@ EOF
         fi
         ;;
       leftbar) case "$content" in '┃'*) content=${content#┃} ;; esac ;;
+      box)
+        if fm_composer_leading_agent_glyph_var glyph "$content"; then
+          content=${content#*"$glyph"}
+        fi
+        ;;
     esac
     fm_composer_normalize_spaces_var content
     fm_composer_normalize_trim_var content
-    [ -z "$content" ] || joined="${joined}${joined:+ }$content"
+    if [ -z "$content" ] \
+       || fm_composer_idle_matches "$content" "${FM_COMPOSER_IDLE_RE:-$FM_COMPOSER_IDLE_RE_DEFAULT}" insensitive \
+       || { [ "$FM_COMPOSER_SELECTED_KIND" = leftbar ] \
+            && [ "$row" -eq "$FM_COMPOSER_SELECTED_LAST" ] \
+            && fm_composer_idle_matches "$content" "$footer_re" sensitive; }; then
+      row=$((row + 1))
+      continue
+    fi
+    joined="${joined}${joined:+ }$content"
     row=$((row + 1))
   done
   printf '%s\n' "$joined" | LC_ALL=C awk '{$1=$1; printf "%s", $0}'
