@@ -47,6 +47,7 @@ cleanup() {
       FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET="$PRIMARY_TARGET" \
       "$ROOT/bin/fm-afk-launch.sh" stop >/dev/null 2>&1 || rc=1
   fi
+  "$HERDR_LAB_HELPER" teardown "$HERDR_LAB_SESSION" || rc=1
   rm -rf "$TMP_ROOT"
   exit "$rc"
 }
