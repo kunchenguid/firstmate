@@ -284,7 +284,7 @@ test_branch_flag_validation_rejects_unsafe_values() {
     assert_contains "$out" "$expect" "$label: refusal did not explain the contract"
     assert_absent "$home/data/brief-branch-invalid-$id/brief.md" "$label: refused scaffold still wrote a brief"
   done <<'ROWS'
-empty value|--branch requires a non-empty value
+empty value||--branch requires a non-empty value
 leading dash|-oops|must not start with '-'
 embedded whitespace|feat/with space|must not contain whitespace
 embedded single quote|feat/with'quote|must not contain a single quote
