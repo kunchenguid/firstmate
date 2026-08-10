@@ -508,8 +508,14 @@ UNCERTAIN="$WORK/uncertain"
 : > "$DROPS"
 : > "$UNCERTAIN"
 
+# Presence is read from the TREE, not from the object store. `cat-file -e` on a
+# gitlink fails, because a superproject does not hold the submodule's commit, so
+# a submodule the validated change added or bumped would read as absent on both
+# sides and be silently recorded as carried - a pass reached without comparing.
 blob_exists() {  # <commit> <path>
-  git -C "$REPO" cat-file -e "$1:$2" 2>/dev/null
+  local entry
+  entry=$(git -C "$REPO" ls-tree "$1" -- ":(literal)$2" 2>/dev/null) || return 1
+  [ -n "$entry" ]
 }
 
 # The file mode a commit records for a path, empty when the path is absent

@@ -54,6 +54,14 @@ _fm_run_record_py() {
   cat <<'PY'
 import re, sys
 
+def db_uri(path):
+    # sqlite3 takes a URI here, so the path must be percent-encoded. An
+    # unescaped '?', '#' or space silently reparses into a different - and
+    # unreadable - database, which would refuse every read on this machine.
+    from urllib.parse import quote
+    return 'file:%s?mode=ro' % quote(path)
+
+
 def identity(url):
     if not url:
         return None
@@ -87,16 +95,18 @@ target = identity(os.environ['FM_RR_URL'])
 if target is None:
     sys.exit(2)   # unresolvable request identity is never 'no record'
 try:
-    con = sqlite3.connect('file:%s?mode=ro' % os.environ['FM_RR_DB'], uri=True)
-    rows = con.execute('SELECT id, pr_url, last_pushed_sha FROM runs '
-                       'WHERE pr_url IS NOT NULL AND pr_url <> \"\" '
-                       'ORDER BY created_at DESC').fetchall()
+    con = sqlite3.connect(db_uri(os.environ['FM_RR_DB']), uri=True)
+    rows = con.execute(\"SELECT id, pr_url, last_pushed_sha FROM runs \"
+                       \"WHERE pr_url IS NOT NULL AND pr_url <> '' \"
+                       \"ORDER BY created_at DESC\").fetchall()
 except Exception:
     sys.exit(2)
+# Keep scanning past a matching run that has not pushed. Stopping at the first
+# match would report 'nothing recorded' whenever a RE-RUN is in flight for the
+# same request, so a request that genuinely was produced by a pipeline push
+# would be treated as one that never had a run at all.
 for run_id, pr_url, pushed in rows:
-    if identity(pr_url) == target:
-        if not pushed:
-            sys.exit(1)   # recorded but never pushed: nothing to compare
+    if identity(pr_url) == target and pushed:
         print('run=%s pushed=%s' % (run_id, pushed))
         sys.exit(0)
 sys.exit(1)
@@ -111,20 +121,29 @@ sys.exit(1)
 # seen while the validated content still existed. Best effort by design - a
 # missed snapshot must surface later as could-not-observe, never be invented.
 fm_run_snapshot_tick() {  # <state-dir>
-  local state=$1 dir now run head tmp
+  local state=$1 dir now window run head tmp
   [ -n "$state" ] || return 0
   command -v python3 >/dev/null 2>&1 || return 0
   [ -f "$FM_RUN_RECORD_DB" ] || return 0
   dir="$state/run-snapshot"
   mkdir -p "$dir" 2>/dev/null || return 0
   now=$(date +%s 2>/dev/null) || return 0
-  FM_RR_DB="$FM_RUN_RECORD_DB" python3 -c "
-import os, sqlite3, sys
+  window=$(( now - ${FM_RUN_SNAPSHOT_WINDOW:-172800} ))
+  [ "$window" -ge 0 ] || window=0
+  FM_RR_DB="$FM_RUN_RECORD_DB" FM_RR_WINDOW="$window" python3 -c "
+$(_fm_run_record_py)
+import os, sqlite3
 try:
-    con = sqlite3.connect('file:%s?mode=ro' % os.environ['FM_RR_DB'], uri=True)
-    rows = con.execute('SELECT id, head_sha FROM runs '
-                       'WHERE (last_pushed_sha IS NULL OR last_pushed_sha = \"\") '
-                       'AND head_sha IS NOT NULL AND head_sha <> \"\"').fetchall()
+    con = sqlite3.connect(db_uri(os.environ['FM_RR_DB']), uri=True)
+    # Bounded to runs touched recently. Every never-pushed run ever recorded
+    # otherwise qualifies forever - 48 of 116 in a real database - and each
+    # would be rewritten on every watcher cycle.
+    cutoff = int(os.environ.get('FM_RR_WINDOW', '0'))
+    rows = con.execute(\"SELECT id, head_sha FROM runs \"
+                       \"WHERE (last_pushed_sha IS NULL OR last_pushed_sha = '') \"
+                       \"AND head_sha IS NOT NULL AND head_sha <> '' \"
+                       \"AND COALESCE(updated_at, created_at, 0) >= ?\",
+                       (cutoff,)).fetchall()
 except Exception:
     sys.exit(0)
 for run_id, head in rows:
@@ -133,6 +152,9 @@ for run_id, head in rows:
 " 2>/dev/null | while read -r run head; do
     case "$run" in ''|*[!A-Za-z0-9._-]*) continue ;; esac
     case "$head" in ''|*[!0-9a-fA-F]*) continue ;; esac
+    # An unchanged head needs no write: rewriting every tracked run on every
+    # cycle is pure churn in a directory nothing prunes.
+    [ "$(sed -n 's/^head=//p' "$dir/$run" 2>/dev/null | head -1)" = "$head" ] && continue
     tmp="$dir/.$run.tmp.$$"
     {
       printf 'run=%s\n' "$run"

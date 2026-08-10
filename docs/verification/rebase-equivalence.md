@@ -1,7 +1,30 @@
 # Rebase-equivalence verification
 
-Repeatable evidence that [`../../bin/fm-rebase-equivalence.sh`](../../bin/fm-rebase-equivalence.sh) refuses a rebase that drops validated content and clears one that does not.
+Repeatable evidence that [`../../bin/fm-rebase-equivalence.sh`](../../bin/fm-rebase-equivalence.sh) detects a rebase that drops validated content and clears one that does not.
 The predicate, its verdict vocabulary, and why it is neither a tip-to-tip diff nor a merge-result comparison are owned by that script's header and `--help`; this page records evidence only.
+
+> ## THE DEFECT THIS PAGE IS ABOUT IS STILL OPEN
+>
+> A validation pipeline's push-time rebase can silently drop content the pipeline already validated, so an opened request can misrepresent what was judged.
+> That happened twice on 2026-08-09 and **nothing in this repository prevents it happening again.**
+>
+> What ships here is a **diagnostic**, invoked deliberately by firstmate. It reports; it does not gate.
+> No automatic check refuses, blocks, or delays a request on this, and neither `bin/fm-pr-check.sh` nor `bin/fm-pr-merge.sh` can fail because of it.
+>
+> **What the diagnostic detects,** when it is given both heads: content the validated head carried that the pushed head does not, per path and with the direction of the loss, including whole paths, hunks inside surviving paths, undone deletions, and dropped file modes.
+>
+> **What it does not prevent:** anything. It is not in the delivery path. A dropping rebase reaches a reviewer exactly as it did before unless somebody runs the diagnostic.
+>
+> **Why an automatic gate was withdrawn rather than fixed.** It needs the validated head, and that head is destroyed at push: the pipeline overwrites `head_sha` with the pushed head in **68 of 68 pushed runs**, with no exceptions, so after a push no retained record holds it.
+> Three sources were tried and each failed differently, all measured rather than argued.
+> The worker's own head is older content, because a run commits its fixes onto its copy of the branch.
+> `submitted_head_sha` predates the run's own fix commits, so an accepted fix that rewrote a line reads as that line being dropped - it refuses 6 paths on a real run whose review fix legitimately rewrote them, and 62 of 69 pushed runs are exposed to it.
+> A watcher snapshot taken before the push narrows that to one poll interval rather than eliminating it, and a stale snapshot refuses a good push with a false accusation indistinguishable from a true one; worse, a missing snapshot refused intake, and because `bin/fm-pr-merge.sh` routes through `bin/fm-pr-check.sh` the request then became permanently unmergeable with no recovery path.
+> A safety mechanism that can silently and permanently destroy delivery is worse than the defect it was built to prevent.
+>
+> **What would actually close this:** the pipeline retaining its pre-push head, so the content it validated remains nameable after the push.
+> That is a change in the validation tool, not in this repository, and until it exists the defect stays open.
+> This is recorded in firstmate's unenforced-commitment register so that shipping a diagnostic does not make the defect read as closed.
 
 Date: 2026-08-10.
 Git: 2.53.0.
@@ -259,9 +282,10 @@ $ git merge-tree --write-tree 74230fc eabefe42  # trunk vs the REBASED head
 The two results are not comparable, so a merge-result equality check would refuse every rebase it was meant to screen.
 Diffing each head against its own base measures only what that head contributes, which is the quantity a rebase must carry over.
 
-## The gate runs at pull-request intake
+## The gate that was built here, and withdrawn
 
-The comparison is made where both facts are readable and where the authority to land actually sits.
+This section is kept because the reasons it failed are the reasons no gate ships, and someone will otherwise propose it again.
+The comparison was made where both facts are readable and where the authority to land sits.
 A worker cannot see the validated bytes: they are in the pipeline's gate repository, not its clone.
 Three separate defects reduced to that one structural fact, and the third of them left the check able to report `PASS` without ever comparing, so the gate moved to `bin/fm-pr-check.sh` rather than being patched a fourth time.
 

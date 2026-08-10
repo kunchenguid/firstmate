@@ -80,68 +80,17 @@ if [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/d
   fi
 fi
 
-# A validation pipeline rebases a branch onto its target immediately before
-# pushing it, and a rebase that drops content opens a request that misrepresents
-# the code the pipeline actually judged. Twice that shipped with no signal from
-# the run at all. Intake is where the comparison belongs: the party being
-# checked cannot see the validated bytes, while this side reads the pipeline's
-# own record and the forge's copy of what would land.
-#
-# The validated head comes from the watcher's snapshot, NOT from
-# submitted_head_sha. That column predates the run's own fix commits, so an
-# accepted fix that rewrote a line the branch added would read as that line
-# having been dropped - measured, it refuses 6 paths on a real run and 62 of 69
-# pushed runs would be exposed to it.
-#
-# Three-valued, and only a comparison that ran and matched arms the watch. A
-# request with no recorded run was never produced by a pipeline rebase and is
-# not this gate's business. Anything else - a missing snapshot, an unreadable
-# record, an unresolvable request identity, a comparison that could not be made -
-# refuses to arm and exits non-zero, because a warning followed by an armed
-# watch and a zero exit is a pass to every consumer that reads this.
-# shellcheck source=bin/fm-run-record-lib.sh
-. "$SCRIPT_DIR/fm-run-record-lib.sh"
-
-rebase_equivalence_refuse() {  # <reason>
-  echo "REBASE-EQUIVALENCE: CANNOT-OBSERVE $1" >&2
-  echo "error: the pushed content was NOT checked against what the pipeline validated, so this request is not cleared to be watched or merged" >&2
-  exit 1
-}
-
-run_record=$(fm_run_record_for_pr "$URL") && run_record_status=0 || run_record_status=$?
-case "$run_record_status" in
-  0)
-    run_id=${run_record%% *}; run_id=${run_id#run=}
-    snapshot=$(fm_run_snapshot_read "$STATE" "$run_id") && snapshot_status=0 || snapshot_status=$?
-    case "$snapshot_status" in
-      0) ;;
-      1) rebase_equivalence_refuse "no validated-head snapshot was recorded for run $run_id before it pushed; snapshots are never back-filled" ;;
-      *) rebase_equivalence_refuse "the validated-head snapshot for run $run_id could not be read" ;;
-    esac
-    validated_head=${snapshot%% *}; validated_head=${validated_head#head=}
-    [ -n "$WT" ] && [ -d "$WT" ] \
-      || rebase_equivalence_refuse "no local checkout is recorded for this task to compare from"
-    gate_remote=$(fm_run_record_gate_remote "$WT") \
-      || rebase_equivalence_refuse "this checkout has no pipeline gate remote to read the validated head from"
-    equivalence_out=$("$SCRIPT_DIR/fm-rebase-equivalence.sh" --repo "$WT" \
-      --validated-head "$validated_head" --validated-remote "$gate_remote" \
-      --candidate-pr "$URL" 2>&1) && equivalence_status=0 || equivalence_status=$?
-    case "$equivalence_status" in
-      0) ;;
-      3)
-        printf '%s\n' "$equivalence_out" >&2
-        echo "error: the pushed request does not carry the content this run validated; it is not shippable as it stands" >&2
-        exit 1
-        ;;
-      *)
-        printf '%s\n' "$equivalence_out" >&2
-        rebase_equivalence_refuse "the comparison could not be completed"
-        ;;
-    esac
-    ;;
-  1) ;;  # no recorded pipeline run for this request; nothing to compare
-  *) rebase_equivalence_refuse "the pipeline run record could not be read" ;;
-esac
+# Head comparison deliberately does NOT run here, and must not be reintroduced.
+# An automatic gate on it was built and withdrawn on evidence: it could only
+# refuse, brick, or lie. The validated head is destroyed at push - the pipeline
+# overwrites its pre-push head in 68 of 68 pushed runs - so every attempt to
+# recover it afterwards failed differently. A stale snapshot refuses a good push
+# with a false accusation indistinguishable from a true one; a missing snapshot
+# refused intake, and because bin/fm-pr-merge.sh routes through this script that
+# made the request permanently unmergeable with no recovery path. Comparison is
+# available as a firstmate-invoked diagnostic (bin/fm-rebase-equivalence.sh)
+# which reports and never gates. docs/verification/rebase-equivalence.md records
+# the underlying defect as still OPEN.
 
 META_TMP=
 META_LOCK=
