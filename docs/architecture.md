@@ -307,8 +307,8 @@ The refresh also prunes local branches whose remote is gone and that no worktree
 For a remote route, the configured code root updates from its own origin on that host before the persistent home fast-forwards to the code-root commit.
 The update is fast-forward only: dirty, diverged, offline, and off-default targets are reported and left untouched.
 Local homes share the guarded fast-forward helper, while remote updates delegate the same safety decision to the configured host through the generic transport.
-That shared helper, on the origin pull and the local secondmate sync alike, advances a target only when the target directory is itself the work-tree root, because git repository discovery walks upward: a directory merely nested inside a repository resolves to that enclosing repository, which would then be fast-forwarded or pruned under the target's label.
-A non-root target is reported as a benign skip instead.
+That shared helper serves the origin pull and the local secondmate sync alike, and it also requires each target directory to be the work-tree root itself, skipping anything else the same way.
+The root requirement exists because git repository discovery walks upward: a directory merely nested inside a repository resolves to that enclosing repository, which the helper would otherwise fast-forward or prune under the target's label.
 The mechanics are owned by the `/updatefirstmate` skill and firstmate's operating manual in [`AGENTS.md`](../AGENTS.md) (self-update).
 
 ## Restart-proof
