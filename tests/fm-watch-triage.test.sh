@@ -180,6 +180,10 @@ test_classifier_primitives() {
   status_is_captain_relevant "merged" || fail "legacy bare merged free-text not captain-relevant"
   status_is_captain_relevant "PR ready https://x/pull/2" \
     || fail "legacy bare PR ready free-text not captain-relevant"
+  status_line_is_parseable "working [key=phase7] [corr=0123456789abcdef]: Phase 7 started" \
+    || fail "status grammar rejected multiple bracket groups"
+  status_line_is_parseable "not a status event" \
+    && fail "status grammar accepted a line without a verb delimiter"
   [ "$(window_to_task "sess:fm-fix-login-k3")" = "fix-login-k3" ] || fail "window_to_task did not strip session+fm- prefix"
   fm_write_meta "$state/herdr-task.meta" "window=default:w1:p2" "backend=herdr"
   [ "$(window_to_task "default:w1:p2" "$state")" = "herdr-task" ] || fail "window_to_task did not resolve opaque backend target through metadata"

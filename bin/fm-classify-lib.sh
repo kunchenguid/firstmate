@@ -161,8 +161,13 @@ status_is_paused_or_captain_held() {  # <status-line>
 #   resolved       [key=api-shape]: <how it was decided>
 # A line with no token uses the key "default", preserving the historical
 # one-open-decision-per-task behavior (a bare "resolved:" closes "default").
-# The three parsers are pure reads of a single line; the verb parser strips any
-# key token before the colon so the leading word is recovered cleanly.
+# The parsers are pure reads of a single line. The validation parser accepts any
+# number of bracketed metadata groups before the colon; the verb parser strips
+# the first key token so the leading word is recovered cleanly.
+status_line_is_parseable() {  # <status-line> -> 0 when it matches the shared grammar
+  local line=$1 re='^[[:lower:]][[:lower:]-]*([[:space:]]+\[[^][]+\])*:[[:space:]]+.+$'
+  [[ "$line" =~ $re ]]
+}
 status_line_verb() {  # <status-line> -> leading verb word
   local v=${1%%:*}
   v=${v%%\[key=*}
