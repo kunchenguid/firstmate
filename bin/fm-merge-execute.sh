@@ -22,7 +22,10 @@ MERGE_EXECUTE_ARGS=("$@")
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 
+RECURSION_EXIT=70
+
 die() { echo "error: $*" >&2; exit 1; }
+die_recursion() { echo "fm-merge-execute: $*" >&2; exit "$RECURSION_EXIT"; }
 
 meta_value() {
   local key=$1 values count
@@ -74,10 +77,16 @@ require_repository_state() {
 }
 
 ensure_repository_lock() {
-  local common lock_path
+  local common lock_path depth
   common=$(git_common "$PROJECT") || die "cannot resolve repository lock path"
   lock_path="$common/firstmate-merge.lock"
+  depth=${FM_MERGE_EXECUTE_DEPTH:-0}
+  case "$depth" in
+    '' | *[!0-9]*) die_recursion "invalid merge-execution depth; refusing recursive entry" ;;
+  esac
   if [ -n "${FM_MERGE_LOCK_FD:-}" ]; then
+    [ "$depth" -eq 1 ] \
+      || die_recursion "inherited repository lock has contradictory merge-execution depth; retry from a stable Firstmate home"
     python3 - "$FM_MERGE_LOCK_FD" "$lock_path" <<'PY' || die "repository merge lock is invalid"
 import fcntl
 import os
@@ -92,8 +101,11 @@ if (held.st_dev, held.st_ino) != (current.st_dev, current.st_ino):
     raise SystemExit(1)
 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
 PY
+    export FM_MERGE_EXECUTE_DEPTH=2
     return
   fi
+  [ "$depth" -eq 0 ] \
+    || die_recursion "merge execution re-entered without its repository lock; retry from a stable Firstmate home"
   python3 - "$lock_path" "$SCRIPT_DIR/fm-merge-execute.sh" "${MERGE_EXECUTE_ARGS[@]}" <<'PY'
 import fcntl
 import os
@@ -106,6 +118,7 @@ fcntl.flock(fd, fcntl.LOCK_EX)
 os.set_inheritable(fd, True)
 environment = os.environ.copy()
 environment["FM_MERGE_LOCK_FD"] = str(fd)
+environment["FM_MERGE_EXECUTE_DEPTH"] = "1"
 result = subprocess.run([script, *args], env=environment, pass_fds=(fd,))
 raise SystemExit(result.returncode)
 PY
@@ -165,7 +178,7 @@ capture_resolve_path() {
 # the genuine gh executable, never this repository's PATH-installed shim, or the
 # shim will rediscover the temporary wrapper and recurse.
 capture_find_real_gh() {
-  local shim_real entry candidate
+  local shim_real entry candidate probe
   shim_real=$(capture_resolve_path "$SCRIPT_DIR/fm-gh-shim.sh")
   local IFS=:
   for entry in $PATH; do
@@ -173,6 +186,11 @@ capture_find_real_gh() {
     candidate="$entry/gh"
     [ -f "$candidate" ] && [ -x "$candidate" ] || continue
     [ "$(capture_resolve_path "$candidate")" = "$shim_real" ] && continue
+    probe=
+    if probe=$(FM_GH_SHIM_PROBE=1 "$candidate" --firstmate-gh-shim-probe 2> /dev/null) \
+      && [ "$probe" = firstmate-gh-shim-v1 ]; then
+      continue
+    fi
     printf '%s\n' "$candidate"
     return 0
   done
@@ -194,6 +212,13 @@ capture_github_graphql() {
   if ! cat > "$capture_shim" <<'SH'
 #!/usr/bin/env bash
 set -o pipefail
+case "${FM_GITHUB_CAPTURE_WRAPPER_DEPTH:-0}" in
+  0) export FM_GITHUB_CAPTURE_WRAPPER_DEPTH=1 ;;
+  *)
+    echo "fm-merge-execute: GitHub capture wrapper recursion detected; selected gh re-entered PATH instead of executing the captured command" >&2
+    exit 70
+    ;;
+esac
 "$FM_GITHUB_CAPTURE_GH" "$@" | tee "$FM_GITHUB_CAPTURE_BODY"
 SH
   then
@@ -216,6 +241,14 @@ SH
   [ "$rc" -eq 0 ] || return "$rc"
   GITHUB_GRAPHQL_PAYLOAD=$output
   GITHUB_GRAPHQL_RAW=$raw
+}
+
+require_github_capture() {
+  local query=$1 failure=$2 rc
+  capture_github_graphql "$query" && return 0
+  rc=$?
+  [ "$rc" -ne "$RECURSION_EXIT" ] || exit "$rc"
+  die "$failure"
 }
 
 decode_github_pull() {
@@ -635,7 +668,7 @@ execute_github() {
   recorded_head=$(meta_optional_value pr_head)
   [ "$recorded_pr" = "$URL" ] || die "task PR metadata does not match the requested PR"
   query="{repository(owner:\"$PR_OWNER\",name:\"$PR_REPO\"){pullRequest(number:$PR_NUMBER){headRefOid baseRefOid baseRefName headRefName state isDraft merged headRepository{nameWithOwner} baseRef{branchProtectionRule{requiresStrictStatusChecks isAdminEnforced}}}}}"
-  capture_github_graphql "$query" || die "cannot read the exact GitHub merge candidate"
+  require_github_capture "$query" "cannot read the exact GitHub merge candidate"
   payload=$GITHUB_GRAPHQL_PAYLOAD
   raw_values=$(decode_github_pull "$GITHUB_GRAPHQL_RAW") \
     || die "GitHub response contained malformed or ambiguous pull request data"
@@ -685,7 +718,7 @@ execute_github() {
   git -C "$WORKTREE" cat-file -e "$base^{commit}" 2>/dev/null || git -C "$WORKTREE" fetch --quiet "https://github.com/$PR_OWNER/$PR_REPO.git" "$base"
   git -C "$WORKTREE" merge-base --is-ancestor "$base" "$head" || die "GitHub PR head does not contain the current base; update the branch and retry"
   "$SCRIPT_DIR/fm-test-inventory.sh" merge-check "$WORKTREE" "$head" "$base"
-  capture_github_graphql "$query" || die "cannot confirm the exact GitHub merge candidate"
+  require_github_capture "$query" "cannot confirm the exact GitHub merge candidate"
   confirm_raw_values=$(decode_github_pull "$GITHUB_GRAPHQL_RAW") \
     || die "GitHub response contained malformed or ambiguous pull request data"
   [ "$(printf '%s\n' "$confirm_raw_values" | sed -n '1p')" = unprotected ] \

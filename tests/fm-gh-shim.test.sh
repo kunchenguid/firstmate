@@ -58,6 +58,55 @@ make_git_checkout() {
   [ -z "$origin" ] || git -C "$dir" remote add origin "$origin"
 }
 
+# make_nm_gate_fixture <dir> <upstream-url> <canonical-url> [fork-url]: create
+# the registered checkout, bare gate repository, live gate worktree, and database
+# record that no-mistakes uses to distinguish delivery from upstream.
+make_nm_gate_fixture() {
+  local dir=$1 upstream_url=$2 canonical_url=$3 fork_url=${4:-}
+  local repo_id=0123456789ab source gate_home gate worktree db_fork
+  source="$dir/source"
+  gate_home="$dir/no-mistakes"
+  gate="$gate_home/repos/$repo_id.git"
+  worktree="$gate_home/worktrees/$repo_id/run"
+
+  mkdir -p "$source" "$gate_home/repos" "$(dirname "$worktree")"
+  git init -q "$source"
+  git -C "$source" config user.name Test
+  git -C "$source" config user.email test@example.com
+  printf 'fixture\n' > "$source/README"
+  git -C "$source" add README
+  git -C "$source" commit -qm fixture
+  git -C "$source" remote add origin "$upstream_url"
+  if [ -n "$fork_url" ]; then
+    git -C "$source" remote add fork "$canonical_url"
+  fi
+
+  git init --bare -q "$gate"
+  git -C "$source" push -q "$gate" HEAD:refs/heads/main
+  git --git-dir="$gate" symbolic-ref HEAD refs/heads/main
+  git --git-dir="$gate" remote add origin "$upstream_url"
+  git -C "$source" remote add no-mistakes "$gate"
+  git --git-dir="$gate" worktree add -q --detach "$worktree" main
+
+  db_fork=NULL
+  [ -z "$fork_url" ] || db_fork="'$canonical_url'"
+  sqlite3 "$gate_home/state.sqlite" << EOF
+CREATE TABLE repos (
+  id TEXT PRIMARY KEY,
+  working_path TEXT NOT NULL UNIQUE,
+  upstream_url TEXT NOT NULL,
+  fork_url TEXT,
+  default_branch TEXT NOT NULL DEFAULT 'main',
+  created_at INTEGER NOT NULL
+);
+INSERT INTO repos VALUES (
+  '$repo_id', '$source', '$upstream_url', $db_fork, 'main', 0
+);
+EOF
+
+  printf '%s\n' "$worktree"
+}
+
 # make_fake_cred <dir>: a credential runner that injects a known token then execs the
 # rest of its arguments, which is the shape config/gh-credential must satisfy.
 make_fake_cred() {
@@ -569,49 +618,64 @@ EOF
   pass "unsupported gh pr checks shapes exec the real gh directly"
 }
 
-test_pr_create_without_repo_injects_origin_target() {
+test_pr_create_without_repo_uses_registered_fork_target() {
   local case_dir real_dir shim_dir home checkout out
-  case_dir="$TMP_ROOT/route"
+  case_dir="$TMP_ROOT/divergent-gate-route"
   real_dir="$case_dir/real"
   shim_dir="$case_dir/shim"
   home="$case_dir/home"
-  checkout="$case_dir/checkout"
   make_fake_gh "$real_dir"
   make_fake_cred "$case_dir/tools"
   make_home "$home" "$case_dir/tools/fakecred pr-capable-token --"
-  make_git_checkout "$checkout" "git@github.com:fork-owner/fork-repo.git"
+  checkout=$(make_nm_gate_fixture "$case_dir/fixture" \
+    "https://github.com/kunchenguid/firstmate.git" \
+    "https://github.com/quinnbot-ai/firstmate.git" fork)
+  [ "$(git -C "$checkout" remote get-url origin)" = \
+    "https://github.com/kunchenguid/firstmate.git" ] || \
+    fail "divergent fixture did not retain upstream as the gate checkout's origin"
   mkdir -p "$shim_dir"
   ln -sf "$SHIM" "$shim_dir/gh"
 
-  local out
   out=$(
     cd "$checkout" || exit 1
     FAKE_GH_LOG="$case_dir/gh.calls" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
       PATH="$shim_dir:$real_dir:$PATH" gh pr create --head feature --base main --title T \
       < /dev/null 2>&1
   )
+  (
+    cd "$checkout" || exit 1
+    FAKE_GH_LOG="$case_dir/gh.calls" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+      PATH="$shim_dir:$real_dir:$PATH" gh pr edit 7 --title Updated \
+      < /dev/null > /dev/null 2>&1
+  )
 
   assert_contains "$out" "https://github.com/o/r/pull/1" \
     "routed pr create did not return the real gh's output"
-  assert_grep 'argv:pr create --repo fork-owner/fork-repo --head feature --base main --title T' \
+  assert_grep 'argv:pr create --repo quinnbot-ai/firstmate --head feature --base main --title T' \
     "$case_dir/gh.calls" \
-    "routed pr create did not receive the fork origin as an explicit --repo target"
+    "routed pr create did not receive the registered canonical fork target"
+  assert_grep 'argv:pr edit --repo quinnbot-ai/firstmate 7 --title Updated' \
+    "$case_dir/gh.calls" \
+    "routed pr edit did not receive the registered canonical fork target"
+  assert_no_grep 'kunchenguid/firstmate' "$case_dir/gh.calls" \
+    "routed pr create leaked the gate repository's upstream origin target"
   assert_grep 'token:pr-capable-token' "$case_dir/gh.calls" \
     "routed pr create did not receive the credential injected by config/gh-credential"
-  pass "gh pr create without --repo injects its checkout origin into the credential route"
+  pass "gh pr create without --repo uses the registered canonical fork target"
 }
 
-test_pr_option_values_cannot_mask_origin_target() {
+test_normal_canonical_origin_and_option_values_route_safely() {
   local case_dir real_dir shim_dir home checkout
-  case_dir="$TMP_ROOT/repo-like-option-value"
+  case_dir="$TMP_ROOT/canonical-origin"
   real_dir="$case_dir/real"
   shim_dir="$case_dir/shim"
   home="$case_dir/home"
-  checkout="$case_dir/checkout"
   make_fake_gh "$real_dir"
   make_fake_cred "$case_dir/tools"
   make_home "$home" "$case_dir/tools/fakecred pr-capable-token --"
-  make_git_checkout "$checkout" "https://github.com/fork-owner/fork-repo.git"
+  checkout=$(make_nm_gate_fixture "$case_dir/fixture" \
+    "https://github.com/fork-owner/fork-repo.git" \
+    "https://github.com/fork-owner/fork-repo.git")
   mkdir -p "$shim_dir"
   ln -sf "$SHIM" "$shim_dir/gh"
 
@@ -624,7 +688,7 @@ test_pr_option_values_cannot_mask_origin_target() {
 
   assert_grep 'argv:pr create --repo fork-owner/fork-repo --body-file -Rnotes.md --title T' \
     "$case_dir/gh.calls" \
-    "a repository-like body-file value suppressed the explicit origin target"
+    "a repository-like body-file value suppressed the canonical target"
 
   (
     cd "$checkout" || exit 1
@@ -635,8 +699,8 @@ test_pr_option_values_cannot_mask_origin_target() {
 
   assert_grep 'argv:pr edit --repo fork-owner/fork-repo 7 --add-assignee=Ruser' \
     "$case_dir/gh.calls" \
-    "an attached long-option value suppressed the explicit origin target"
-  pass "repository-like option values cannot suppress origin targeting"
+    "an attached long-option value suppressed the canonical target"
+  pass "a normal canonical origin routes safely despite repository-like option values"
 }
 
 test_pr_create_with_repo_preserves_caller_target() {
@@ -669,10 +733,10 @@ test_pr_create_with_repo_preserves_caller_target() {
     "a clustered caller-supplied -R did not reach real gh unchanged"
   assert_contains "$out" "https://github.com/o/r/pull/1" \
     "a clustered caller-supplied -R did not complete the credential route"
-  pass "caller-supplied --repo and -R always win over the checkout origin"
+  pass "caller-supplied --repo and -R are preserved exactly"
 }
 
-test_pr_edit_without_origin_refuses_before_credential_route() {
+test_pr_edit_without_canonical_registration_refuses_before_credential_route() {
   local case_dir real_dir shim_dir home checkout out status
   case_dir="$TMP_ROOT/no-origin"
   real_dir="$case_dir/real"
@@ -691,12 +755,106 @@ test_pr_edit_without_origin_refuses_before_credential_route() {
     FM_ROOT_OVERRIDE="$ROOT" PATH="$shim_dir:$real_dir:$PATH" \
     gh pr edit 7 --title T < /dev/null 2>&1) || status=$?
 
-  expect_code 1 "$status" "credential-routed pr edit with no origin"
+  expect_code 1 "$status" "credential-routed pr edit without canonical registration"
   assert_contains "$out" "refusing credential-routed gh pr edit without --repo" \
-    "a no-origin credential route did not fail loudly"
+    "a missing-registration credential route did not fail loudly"
+  assert_contains "$out" "not backed by a canonical no-mistakes" \
+    "a missing-registration credential route did not explain how target proof failed"
   assert_absent "$case_dir/gh.calls" \
-    "a no-origin credential route delegated to real gh and let it guess the repository"
-  pass "credential-routed pr edit without --repo refuses when origin is unavailable"
+    "a missing-registration credential route delegated to real gh"
+  pass "credential-routed pr edit refuses without a canonical registration"
+}
+
+test_missing_database_record_refuses_before_credential_route() {
+  local case_dir real_dir shim_dir home checkout out status
+  case_dir="$TMP_ROOT/missing-record"
+  real_dir="$case_dir/real"
+  shim_dir="$case_dir/shim"
+  home="$case_dir/home"
+  make_fake_gh "$real_dir"
+  make_fake_cred "$case_dir/tools"
+  make_home "$home" "$case_dir/tools/fakecred pr-capable-token --"
+  checkout=$(make_nm_gate_fixture "$case_dir/fixture" \
+    "https://github.com/fork-owner/fork-repo.git" \
+    "https://github.com/fork-owner/fork-repo.git")
+  sqlite3 "$case_dir/fixture/no-mistakes/state.sqlite" \
+    "DELETE FROM repos WHERE id = '0123456789ab';"
+  mkdir -p "$shim_dir"
+  ln -sf "$SHIM" "$shim_dir/gh"
+
+  status=0
+  out=$(cd "$checkout" && FAKE_GH_LOG="$case_dir/gh.calls" FM_HOME="$home" \
+    FM_ROOT_OVERRIDE="$ROOT" PATH="$shim_dir:$real_dir:$PATH" \
+    gh pr create --title T < /dev/null 2>&1) || status=$?
+
+  expect_code 1 "$status" "credential-routed pr create with a missing database row"
+  assert_contains "$out" "has no repository registration" \
+    "a missing registration did not produce an actionable diagnostic"
+  assert_absent "$case_dir/gh.calls" \
+    "a missing registration delegated to real gh"
+  pass "missing canonical target evidence fails closed"
+}
+
+test_contradictory_registered_remote_refuses_before_credential_route() {
+  local case_dir real_dir shim_dir home checkout out status
+  case_dir="$TMP_ROOT/contradictory-target"
+  real_dir="$case_dir/real"
+  shim_dir="$case_dir/shim"
+  home="$case_dir/home"
+  make_fake_gh "$real_dir"
+  make_fake_cred "$case_dir/tools"
+  make_home "$home" "$case_dir/tools/fakecred pr-capable-token --"
+  checkout=$(make_nm_gate_fixture "$case_dir/fixture" \
+    "https://github.com/kunchenguid/firstmate.git" \
+    "https://github.com/quinnbot-ai/firstmate.git" fork)
+  git -C "$case_dir/fixture/source" remote set-url fork \
+    "https://github.com/other-owner/firstmate.git"
+  mkdir -p "$shim_dir"
+  ln -sf "$SHIM" "$shim_dir/gh"
+
+  status=0
+  out=$(cd "$checkout" && FAKE_GH_LOG="$case_dir/gh.calls" FM_HOME="$home" \
+    FM_ROOT_OVERRIDE="$ROOT" PATH="$shim_dir:$real_dir:$PATH" \
+    gh pr edit 7 --title T < /dev/null 2>&1) || status=$?
+
+  expect_code 1 "$status" "credential-routed pr edit with contradictory evidence"
+  assert_contains "$out" "registered canonical target 'quinnbot-ai/firstmate' is absent" \
+    "contradictory canonical evidence did not identify the unproven target"
+  assert_absent "$case_dir/gh.calls" \
+    "contradictory canonical evidence delegated to real gh"
+  pass "contradictory canonical target evidence fails closed"
+}
+
+test_malformed_and_non_github_targets_refuse_before_credential_route() {
+  local kind target case_dir real_dir shim_dir home checkout out status
+  for kind in malformed non-github; do
+    case "$kind" in
+      malformed) target=not-a-repository-url ;;
+      non-github) target=https://gitlab.com/fork-owner/fork-repo.git ;;
+    esac
+    case_dir="$TMP_ROOT/$kind-target"
+    real_dir="$case_dir/real"
+    shim_dir="$case_dir/shim"
+    home="$case_dir/home"
+    make_fake_gh "$real_dir"
+    make_fake_cred "$case_dir/tools"
+    make_home "$home" "$case_dir/tools/fakecred pr-capable-token --"
+    checkout=$(make_nm_gate_fixture "$case_dir/fixture" "$target" "$target")
+    mkdir -p "$shim_dir"
+    ln -sf "$SHIM" "$shim_dir/gh"
+
+    status=0
+    out=$(cd "$checkout" && FAKE_GH_LOG="$case_dir/gh.calls" FM_HOME="$home" \
+      FM_ROOT_OVERRIDE="$ROOT" PATH="$shim_dir:$real_dir:$PATH" \
+      gh pr create --title T < /dev/null 2>&1) || status=$?
+
+    expect_code 1 "$status" "credential-routed pr create with $kind target"
+    assert_contains "$out" "not an unambiguous github.com repository URL" \
+      "$kind canonical evidence did not produce a specific diagnostic"
+    assert_absent "$case_dir/gh.calls" \
+      "$kind canonical evidence delegated to real gh"
+  done
+  pass "malformed and non-GitHub canonical targets fail closed"
 }
 
 test_non_pr_invocations_pass_through_untouched() {
@@ -853,7 +1011,7 @@ EOF
     FAKE_GH_LOG="$case_dir/gh.calls" \
       FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
       PATH="$shim_dir:$real_dir:$PATH" \
-      gh pr create --title T < /dev/null 2>&1
+      gh pr create --repo caller-owner/caller-repo --title T < /dev/null 2>&1
   )
 
   assert_contains "$out" "https://github.com/o/r/pull/1" \
@@ -862,6 +1020,83 @@ EOF
   calls=$(grep -c '^argv:' "$case_dir/gh.calls")
   [ "$calls" = "1" ] || fail "expected exactly one real gh invocation, got $calls"
   pass "the shim routes at most once even when the credential re-resolves gh from PATH"
+}
+
+test_shim_bounds_reentrant_real_gh() {
+  local case_dir real_dir shim_dir rc count
+  case_dir="$TMP_ROOT/shim-reentrant-real"
+  real_dir="$case_dir/real"
+  shim_dir="$case_dir/shim"
+  mkdir -p "$real_dir" "$shim_dir"
+  ln -sf "$SHIM" "$shim_dir/gh"
+  cat > "$real_dir/gh" <<'SH'
+#!/usr/bin/env bash
+set -u
+count=0
+[ ! -f "$FM_TEST_REENTRANT_COUNT" ] || count=$(cat "$FM_TEST_REENTRANT_COUNT")
+count=$((count + 1))
+printf '%s\n' "$count" > "$FM_TEST_REENTRANT_COUNT"
+if [ "$count" -gt 4 ]; then
+  echo "fixture safety cap: reentrant real gh exceeded four invocations" >&2
+  exit 99
+fi
+exec gh "$@"
+SH
+  chmod +x "$real_dir/gh"
+
+  set +e
+  FM_TEST_REENTRANT_COUNT="$case_dir/reentrant.count" PATH="$shim_dir:$real_dir:$PATH" \
+    gh api user >"$case_dir/out" 2>"$case_dir/err"
+  rc=$?
+  set -e
+  expect_code 70 "$rc" "a real-gh candidate that re-enters the shim must fail typed"
+  count=$(cat "$case_dir/reentrant.count")
+  [ "$count" -eq 2 ] || fail "shim recursion invoked the reentrant real gh $count times instead of twice"
+  assert_grep 'fm-gh-shim: recursion detected after two shim entries' "$case_dir/err" \
+    "shim recursion failure was not actionable"
+  assert_no_grep 'fixture safety cap' "$case_dir/err" \
+    "shim recursion reached the fixture safety cap"
+  pass "the gh shim bounds repeated PATH resolution to two real-gh invocations"
+}
+
+test_wrapper_bounds_recursive_credential_prefix() {
+  local case_dir real_dir home tools rc count
+  case_dir="$TMP_ROOT/wrapper-recursive-prefix"
+  real_dir="$case_dir/real"
+  home="$case_dir/home"
+  tools="$case_dir/tools"
+  make_fake_gh "$real_dir"
+  mkdir -p "$tools"
+  cat > "$tools/reentrant-credential" <<'SH'
+#!/usr/bin/env bash
+set -u
+count=0
+[ ! -f "$FM_TEST_REENTRANT_COUNT" ] || count=$(cat "$FM_TEST_REENTRANT_COUNT")
+count=$((count + 1))
+printf '%s\n' "$count" > "$FM_TEST_REENTRANT_COUNT"
+if [ "$count" -gt 4 ]; then
+  echo "fixture safety cap: credential prefix exceeded four invocations" >&2
+  exit 99
+fi
+exec "$FM_TEST_GH_WRAPPER" "$@"
+SH
+  chmod +x "$tools/reentrant-credential"
+  make_home "$home" "$tools/reentrant-credential"
+
+  set +e
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_TEST_GH_WRAPPER="$WRAPPER" \
+    FM_TEST_REENTRANT_COUNT="$case_dir/reentrant.count" \
+    "$WRAPPER" "$real_dir/gh" api user >"$case_dir/out" 2>"$case_dir/err"
+  rc=$?
+  set -e
+  expect_code 70 "$rc" "a recursive credential prefix must fail typed"
+  count=$(cat "$case_dir/reentrant.count")
+  [ "$count" -eq 1 ] || fail "recursive credential prefix ran $count times instead of once"
+  assert_grep 'fm-gh: credential-wrapper recursion detected' "$case_dir/err" \
+    "credential-wrapper recursion failure was not actionable"
+  assert_no_grep 'fixture safety cap' "$case_dir/err" \
+    "credential-wrapper recursion reached the fixture safety cap"
+  pass "the credential wrapper bounds a recursive configured prefix to one invocation"
 }
 
 # find_bash32: echo the path of an available bash 3.2, or nothing. macOS still ships
@@ -993,10 +1228,13 @@ test_installer_refuses_to_replace_a_foreign_symlink() {
   pass "the installer refuses a foreign gh symlink and leaves it intact"
 }
 
-test_pr_create_without_repo_injects_origin_target
-test_pr_option_values_cannot_mask_origin_target
+test_pr_create_without_repo_uses_registered_fork_target
+test_normal_canonical_origin_and_option_values_route_safely
 test_pr_create_with_repo_preserves_caller_target
-test_pr_edit_without_origin_refuses_before_credential_route
+test_pr_edit_without_canonical_registration_refuses_before_credential_route
+test_missing_database_record_refuses_before_credential_route
+test_contradictory_registered_remote_refuses_before_credential_route
+test_malformed_and_non_github_targets_refuse_before_credential_route
 test_ci_403_falls_back_to_exact_head_green_without_privileged_token
 test_ci_deeper_denial_path_falls_back_to_exact_head_green
 test_ci_403_falls_back_to_exact_head_red
@@ -1013,6 +1251,8 @@ test_configured_wrapper_replaces_ambient_tokens
 test_wrapper_ignores_comments_and_blank_lines
 test_wrapper_ignores_indented_comments
 test_shim_does_not_recurse_when_credential_resolves_gh_through_it
+test_shim_bounds_reentrant_real_gh
+test_wrapper_bounds_recursive_credential_prefix
 test_bash32_runs_both_credential_paths
 test_installer_reports_and_enforces_precedence
 test_installer_refuses_to_replace_a_foreign_gh

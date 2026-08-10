@@ -17,6 +17,9 @@ The evidence below comes from the installed binary at v1.41.2 and the upstream s
 
 - The pipeline runs nine steps in order: `intent`, `rebase`, `review`, `test`, `document`, `lint`, `push`, `pr`, `ci`.
 - The `pr` step runs inside the no-mistakes daemon, not in the task worktree, and reaches GitHub through `internal/scm/github`, which builds `gh` command vectors and executes them by the bare name `gh`.
+- The repository registration stores `working_path`, `upstream_url`, and optional `fork_url` in the no-mistakes state database.
+  `Repo.PushURL()` is the pipeline's canonical delivery-target rule: use `fork_url` when configured, otherwise use `upstream_url`.
+  The push step follows that rule even though the bare gate repository's own `origin` is initialized from the upstream URL.
 - The `ci` step reaches GitHub through the same bare `gh` path and polls `gh pr checks <number-or-url> --repo <owner/repo> --json name,state,bucket,completedAt` in v1.41.2, with `link` added to that field set in current upstream releases.
 - Neither the global `~/.no-mistakes/config.yaml` nor the per-repo `.no-mistakes.yaml` exposes a GitHub credential, a `gh` binary path, or a PR-step command override.
   `agent_path_override` overrides agent binaries only, and `commands.*` covers lint, test, and format commands rather than the forge calls.
@@ -37,16 +40,23 @@ Because no supported configuration seam exists, firstmate intercepts `gh` on the
 - `bin/fm-gh.sh` runs one command with this home's PR-capable credential injected, reading the command prefix from `config/gh-credential`.
   When configured, it removes ambient `GH_TOKEN` and `GITHUB_TOKEN` before starting that prefix because `gh` gives `GH_TOKEN` precedence, so a daemon's inherited token cannot override the injected credential.
   With no such file it execs the command unchanged, so an unconfigured home behaves exactly as before.
+  A credential prefix may execute its trailing command once; recursive wrapper entry fails with exit 70 and names the invalid prefix contract.
 - `bin/fm-gh-shim.sh` is installed as a symlink named `gh`.
   It routes `gh pr create` and `gh pr edit` through `fm-gh.sh`.
   On either credential-routed mutation, a caller-supplied `--repo` or `-R` wins unchanged.
-  Otherwise, the shim derives `owner/name` from the working checkout's `origin` remote and appends `--repo <owner/name>` before invoking `gh`.
-  If that remote cannot be resolved to an owner/name pair, it refuses the mutation rather than letting `gh` infer a fork's parent repository.
+  Otherwise, the shim identifies the current `repos/<id>.git` gate, reads that exact repository's no-mistakes registration, applies the same fork-first rule as `Repo.PushURL()`, and appends the resulting GitHub `owner/name` as `--repo <owner/name>` before invoking `gh`.
+  The registered checkout's `no-mistakes` remote must point back to the same gate and one of its GitHub remotes must corroborate the selected target.
+  A missing registration, unavailable checkout, gate mismatch, contradictory remote, malformed URL, non-GitHub URL, or unavailable `sqlite3` refuses the mutation with a repair-oriented diagnostic rather than letting `gh` infer a repository.
+  The shim never rewrites the gate's remotes and never selects a target from remote ordering, account identity, or the gate's upstream relationship.
   It sends only no-mistakes' JSON `gh pr checks` shape through the bounded CI fallback, and execs the real `gh` directly for every other call.
+  Credential routing may re-enter the shim once when a valid prefix resolves `gh` from `PATH`; a third shim entry fails with exit 70 and identifies the credential or installed-target loop.
 - `bin/fm-gh-ci-fallback.sh` first runs the real `gh pr checks` with the ambient narrow token.
   Only the personal-token denial whose GraphQL error path names a `statusCheckRollup` component, at whatever depth GitHub currently reports it, causes it to resolve the PR's exact head SHA and read every workflow run filtered by that SHA with the same token; it never calls `fm-gh.sh` or exposes `config/gh-credential` to CI reads.
   Successful, failed, cancelled, skipped, and pending workflow conclusions are returned in the JSON check shape no-mistakes already consumes, while no exact-head workflow runs emits an explicit pending placeholder rather than a false green verdict.
-- The GitHub merge boundary resolves the genuine `gh` binary itself, so its raw GraphQL capture remains valid when the shim is installed on `PATH`.
+- The GitHub merge boundary resolves the genuine `gh` binary itself, so its raw GraphQL capture remains valid when a same-home or current foreign-home shim is installed on `PATH`.
+  A side-effect-free identity probe lets it skip current shims independent of their home path.
+  The generated capture wrapper independently stops a stale, unrecognized, or mid-update executable that re-enters `PATH`, preserving exit 70 rather than allowing a wrapper-shim process tree to grow.
+  The merge operator's repository-lock handoff is also depth-bound to its one intentional child entry, so losing or contradicting that lock across a mid-flight home update fails before merge verification or mutation.
 - `bin/fm-gh-shim-install.sh` installs, removes, and verifies that symlink, and reports whether the install directory actually precedes the real `gh` on the evaluated `PATH`.
 
 Nothing installs the shim automatically.
@@ -69,6 +79,7 @@ bin/fm-gh-shim-install.sh --check --dir <dir-on-path>
 
 Run the check from a login shell.
 The daemon resolves its environment from the login shell, so a precedence verdict from an unusual shell can differ from what the daemon actually has.
+The credential route also requires `sqlite3` on that resolved `PATH`, because the no-mistakes repository registration is the target authority.
 
 ## Limits worth knowing before installing
 
@@ -76,6 +87,7 @@ The shim is scoped to a `PATH`, never to a repository, a task, or a worktree.
 A worktree-scoped shim is not possible: the PR step executes in the daemon process, whose environment is fixed at daemon startup, so nothing placed inside a task worktree is on the `PATH` that resolves `gh`.
 Every process that resolves `gh` through the install directory is therefore affected, including interactive shells and unrelated tools.
 The shim keeps that blast radius bounded by changing only `pr create`, `pr edit`, and the exact JSON `pr checks` shapes no-mistakes uses.
+An implicit repository target for `pr create` or `pr edit` is accepted only from a registered no-mistakes gate checkout; callers elsewhere must pass `--repo` or `-R` explicitly.
 Interactive `pr checks` output, every failure outside that `statusCheckRollup` permission denial, and every other invocation remain the real `gh` behavior.
 The fallback can observe GitHub Actions workflow runs only; it is not equivalent to readable check-runs for repositories whose merge gate depends on a third-party check provider.
 

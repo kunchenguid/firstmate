@@ -321,6 +321,24 @@ run_github_merge() {
     "$PR_MERGE" task-x1 https://github.com/example/repo/pull/9 -- "--$method"
 }
 
+run_github_execute() {
+  local case_dir=$1 head=$2 api_head=$3 base=$4 method=${5:-merge} path_prefix=${6:-}
+  FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+    FM_TEST_GH_HEAD="$head" FM_TEST_GH_API_HEAD="$api_head" FM_TEST_GH_BASE="$base" \
+    FM_TEST_GH_API_HEAD_AFTER="${FM_TEST_GH_API_HEAD_AFTER:-}" \
+    FM_TEST_GH_BASE_AFTER="${FM_TEST_GH_BASE_AFTER:-}" \
+    FM_TEST_GH_PROTECTION="${FM_TEST_GH_PROTECTION:-protected}" \
+    FM_TEST_GH_PROTECTION_AFTER="${FM_TEST_GH_PROTECTION_AFTER:-}" \
+    FM_TEST_GH_BASE_AT_MUTATION="${FM_TEST_GH_BASE_AT_MUTATION:-}" \
+    FM_TEST_GH_MERGE_SHA=9999999999999999999999999999999999999999 \
+    FM_TEST_GH_MERGED="${FM_TEST_GH_MERGED:-true}" \
+    FM_TEST_GH_METHOD="$method" \
+    FM_TEST_GH_REBASE_AHEAD="${FM_TEST_GH_REBASE_AHEAD:-}" \
+    FM_TEST_GH_REBASE_FIRST="${FM_TEST_GH_REBASE_FIRST:-}" \
+    FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" PATH="$path_prefix$case_dir/fakebin:$PATH" \
+    "$MERGE_EXECUTE" github task-x1 https://github.com/example/repo/pull/9 -- "--$method"
+}
+
 test_exact_literal_receipt_lands_candidate() {
   local values case_dir base candidate
   values=$(make_case exact)
@@ -545,6 +563,144 @@ test_github_merge_capture_bypasses_installed_shim() {
   grep -qxF "api PUT /repos/example/repo/pulls/9/merge --field sha=$candidate --field merge_method=merge" "$case_dir/gh-axi.log" \
     || fail "installed shim capture did not preserve the exact conditional mutation"
   pass "GitHub capture bypasses the installed shim and reaches the genuine gh"
+}
+
+test_github_merge_capture_bypasses_foreign_current_shim() {
+  local values case_dir base candidate foreign_bin
+  values=$(make_case github-capture-foreign-current-shim)
+  case_dir=$(printf '%s\n' "$values" | sed -n '1p')
+  base=$(printf '%s\n' "$values" | sed -n '2p')
+  candidate=$(printf '%s\n' "$values" | sed -n '3p')
+  fm_write_meta "$case_dir/state/task-x1.meta" "window=fm-task-x1" "worktree=$case_dir/wt" "project=$case_dir/project" "kind=ship" "mode=no-mistakes"
+  add_github_mocks "$case_dir"
+  foreign_bin="$case_dir/foreign-home/bin"
+  mkdir -p "$foreign_bin"
+  cp "$ROOT/bin/fm-gh-shim.sh" "$foreign_bin/fm-gh-shim.sh"
+  chmod +x "$foreign_bin/fm-gh-shim.sh"
+  ln -s "$foreign_bin/fm-gh-shim.sh" "$foreign_bin/gh"
+  run_github_merge "$case_dir" "$candidate" "$candidate" "$base" merge "$foreign_bin:" >/dev/null \
+    || fail "GitHub boundary could not bypass a current shim from another Firstmate home"
+  [ "$(grep -c '^api POST ' "$case_dir/gh-axi.log")" -eq 1 ] \
+    || fail "foreign current shim caused the GraphQL capture to recurse or repeat"
+  grep -qxF "api PUT /repos/example/repo/pulls/9/merge --field sha=$candidate --field merge_method=merge" "$case_dir/gh-axi.log" \
+    || fail "foreign current shim changed the exact conditional mutation"
+  pass "GitHub capture recognizes a current shim from another home and stays one-pass"
+}
+
+test_github_merge_capture_bounds_reentrant_gh() {
+  local values case_dir base candidate reentrant_dir rc count
+  values=$(make_case github-capture-reentrant)
+  case_dir=$(printf '%s\n' "$values" | sed -n '1p')
+  base=$(printf '%s\n' "$values" | sed -n '2p')
+  candidate=$(printf '%s\n' "$values" | sed -n '3p')
+  fm_write_meta "$case_dir/state/task-x1.meta" "window=fm-task-x1" "worktree=$case_dir/wt" "project=$case_dir/project" "kind=ship" "mode=no-mistakes" \
+    "pr=https://github.com/example/repo/pull/9"
+  add_github_mocks "$case_dir"
+  reentrant_dir="$case_dir/reentrant"
+  mkdir -p "$reentrant_dir"
+  cat > "$reentrant_dir/gh" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${FM_GH_SHIM_PROBE:-}" = 1 ] && [ "${1:-}" = --firstmate-gh-shim-probe ]; then
+  echo not-a-firstmate-shim
+  exit 0
+fi
+count=0
+[ ! -f "$FM_TEST_REENTRANT_COUNT" ] || count=$(cat "$FM_TEST_REENTRANT_COUNT")
+count=$((count + 1))
+printf '%s\n' "$count" > "$FM_TEST_REENTRANT_COUNT"
+if [ "$count" -gt 4 ]; then
+  echo "fixture safety cap: reentrant gh exceeded four invocations" >&2
+  exit 99
+fi
+exec gh "$@"
+SH
+  chmod +x "$reentrant_dir/gh"
+  set +e
+  FM_TEST_REENTRANT_COUNT="$case_dir/reentrant.count" \
+    run_github_execute "$case_dir" "$candidate" "$candidate" "$base" merge "$reentrant_dir:" \
+      >"$case_dir/out" 2>"$case_dir/err"
+  rc=$?
+  set -e
+  expect_code 70 "$rc" "capture-wrapper re-entry must retain its typed recursion failure"
+  count=$(cat "$case_dir/reentrant.count")
+  [ "$count" -eq 1 ] || fail "capture recursion reached the reentrant gh $count times instead of once"
+  assert_grep 'fm-merge-execute: GitHub capture wrapper recursion detected' "$case_dir/err" \
+    "capture-wrapper recursion failure was not actionable"
+  assert_no_grep 'fixture safety cap' "$case_dir/err" \
+    "product recursion guard did not stop before the fixture safety cap"
+  [ "$(grep -c '^api POST ' "$case_dir/gh-axi.log")" -eq 1 ] \
+    || fail "capture recursion repeated the GraphQL request"
+  assert_no_grep '^api PUT ' "$case_dir/gh-axi.log" \
+    "capture recursion reached the merge mutation"
+  pass "GitHub capture fails typed and bounded when its selected gh re-enters PATH"
+}
+
+test_merge_execute_bounds_inherited_lock_reentry() {
+  local values case_dir base candidate reentrant_dir rc count
+  values=$(make_case merge-inherited-lock-reentry)
+  case_dir=$(printf '%s\n' "$values" | sed -n '1p')
+  base=$(printf '%s\n' "$values" | sed -n '2p')
+  candidate=$(printf '%s\n' "$values" | sed -n '3p')
+  fm_write_meta "$case_dir/state/task-x1.meta" "window=fm-task-x1" "worktree=$case_dir/wt" "project=$case_dir/project" "kind=ship" "mode=no-mistakes" \
+    "pr=https://github.com/example/repo/pull/9"
+  add_github_mocks "$case_dir"
+  reentrant_dir="$case_dir/reentrant"
+  mkdir -p "$reentrant_dir"
+  cat > "$reentrant_dir/gh" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${FM_GH_SHIM_PROBE:-}" = 1 ] && [ "${1:-}" = --firstmate-gh-shim-probe ]; then
+  echo not-a-firstmate-shim
+  exit 0
+fi
+count=0
+[ ! -f "$FM_TEST_REENTRANT_COUNT" ] || count=$(cat "$FM_TEST_REENTRANT_COUNT")
+count=$((count + 1))
+printf '%s\n' "$count" > "$FM_TEST_REENTRANT_COUNT"
+if [ "$count" -gt 4 ]; then
+  echo "fixture safety cap: merge execution exceeded four inherited-lock reentries" >&2
+  exit 99
+fi
+exec "$FM_TEST_MERGE_EXECUTE" github task-x1 https://github.com/example/repo/pull/9 -- --merge
+SH
+  chmod +x "$reentrant_dir/gh"
+  set +e
+  FM_TEST_REENTRANT_COUNT="$case_dir/reentrant.count" FM_TEST_MERGE_EXECUTE="$MERGE_EXECUTE" \
+    run_github_execute "$case_dir" "$candidate" "$candidate" "$base" merge "$reentrant_dir:" \
+      >"$case_dir/out" 2>"$case_dir/err"
+  rc=$?
+  set -e
+  expect_code 70 "$rc" "merge re-entry with the inherited lock must fail typed"
+  count=$(cat "$case_dir/reentrant.count")
+  [ "$count" -eq 1 ] || fail "inherited-lock recursion reached the reentrant gh $count times instead of once"
+  assert_grep 'inherited repository lock has contradictory merge-execution depth' "$case_dir/err" \
+    "inherited-lock recursion failure did not identify the repeated handoff"
+  assert_no_grep 'fixture safety cap' "$case_dir/err" \
+    "merge recursion reached the fixture safety cap"
+  [ "$(grep -c '^api POST ' "$case_dir/gh-axi.log")" -eq 1 ] \
+    || fail "inherited-lock recursion repeated the GraphQL request"
+  assert_no_grep '^api PUT ' "$case_dir/gh-axi.log" \
+    "inherited-lock recursion reached the merge mutation"
+  pass "merge execution bounds inherited-lock re-entry after one valid handoff"
+}
+
+test_merge_execute_reentry_without_lock_fails_typed() {
+  local values case_dir base rc
+  values=$(make_case merge-reentry-without-lock)
+  case_dir=$(printf '%s\n' "$values" | sed -n '1p')
+  base=$(printf '%s\n' "$values" | sed -n '2p')
+  set +e
+  FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" FM_MERGE_EXECUTE_DEPTH=1 \
+    "$MERGE_EXECUTE" local task-x1 >"$case_dir/out" 2>"$case_dir/err"
+  rc=$?
+  set -e
+  expect_code 70 "$rc" "merge re-entry without the inherited lock must fail typed"
+  assert_grep 'merge execution re-entered without its repository lock' "$case_dir/err" \
+    "merge re-entry refusal did not identify its lost lock"
+  [ "$(git -C "$case_dir/project" rev-parse main)" = "$base" ] \
+    || fail "merge re-entry without a lock advanced the project"
+  pass "merge execution permits one lock handoff and refuses any unlocked re-entry"
 }
 
 test_unprotected_github_merge_uses_verified_exact_sha() {
@@ -835,6 +991,10 @@ test_wrong_branch_transaction_is_refused
 test_github_merge_uses_verified_exact_sha
 test_github_merge_capture_without_shim_preserves_request_sequence
 test_github_merge_capture_bypasses_installed_shim
+test_github_merge_capture_bypasses_foreign_current_shim
+test_github_merge_capture_bounds_reentrant_gh
+test_merge_execute_bounds_inherited_lock_reentry
+test_merge_execute_reentry_without_lock_fails_typed
 test_unprotected_github_merge_uses_verified_exact_sha
 test_github_merge_refuses_changed_remote_head
 test_unprotected_github_merge_refuses_changed_remote_base

@@ -14,9 +14,11 @@
 # fine-grained token is forbidden from and the pipeline's PR step makes both:
 #   gh pr create ...
 #   gh pr edit ...
-# When either omits --repo/-R, the shim derives owner/name from the working
-# checkout's origin remote and appends --repo; an unresolved origin refuses the
-# mutation so gh cannot infer a fork's parent repository.
+# When either omits --repo/-R, the shim resolves the current no-mistakes gate to
+# its registered repository record and appends that record's canonical push target:
+# fork_url when configured, otherwise upstream_url. The registered checkout and its
+# no-mistakes remote must corroborate the record. Missing, malformed, or contradictory
+# evidence refuses the mutation so gh cannot infer a fork's parent repository.
 # The CI monitor's exact `gh pr checks ... --json name,state,bucket,completedAt[,link]`
 # vectors first try the real gh with the ambient narrow token. Only the known HTTP
 # GraphQL personal-token denial for statusCheckRollup reaches fm-gh-ci-fallback.sh, which uses
@@ -25,9 +27,30 @@
 # invocation execs the real gh unchanged, so the shim's default remains current behavior.
 set -eu
 
-# FM_GH_SHIM_ACTIVE is a hard recursion stop: if fm-gh.sh's credential prefix itself
-# resolves gh through this shim, the second entry passes straight through rather than
-# routing again.
+# The merge capture boundary uses this side-effect-free probe to skip a shim from any
+# Firstmate home, not only the source-relative copy it happens to be running from.
+if [ "${FM_GH_SHIM_PROBE:-}" = 1 ] && [ "$#" -eq 1 ] \
+  && [ "$1" = --firstmate-gh-shim-probe ]; then
+  echo firstmate-gh-shim-v1
+  exit 0
+fi
+
+# FM_GH_SHIM_ACTIVE keeps credential routing one-shot when the configured prefix
+# resolves gh through this shim once more. A separate depth bound fails loudly if a
+# stale shim, capture wrapper, or credential helper continues resolving gh recursively.
+SHIM_DEPTH=${FM_GH_SHIM_DEPTH:-0}
+case "$SHIM_DEPTH" in
+  '' | *[!0-9]*)
+    echo "fm-gh-shim: invalid recursion depth; refusing gh dispatch" >&2
+    exit 70
+    ;;
+esac
+if [ "$SHIM_DEPTH" -ge 2 ]; then
+  echo "fm-gh-shim: recursion detected after two shim entries; inspect the credential prefix and installed gh targets" >&2
+  exit 70
+fi
+export FM_GH_SHIM_DEPTH=$((SHIM_DEPTH + 1))
+
 ROUTE=passthrough
 if [ "${FM_GH_SHIM_ACTIVE:-}" != "1" ] && [ "${1:-}" = "pr" ]; then
   case "${2:-}" in
@@ -167,20 +190,15 @@ has_explicit_repo() {
   return 1
 }
 
-# origin_repo_slug: print the GitHub owner/name from the current checkout's origin.
-# The credential route must never leave repository selection to gh: in a fork,
-# gh otherwise prefers the parent repository and can create an upstream PR.
-origin_repo_slug() {
-  local origin path
-  origin=$(git remote get-url origin 2> /dev/null) || return 1
-  [ -n "$origin" ] || return 1
-
-  case "$origin" in
-    *://*)
-      path=${origin#*://}
+# github_repo_slug <url>: print owner/name only for an unambiguous github.com URL.
+github_repo_slug() {
+  local url=$1 path
+  case "$url" in
+    https://github.com/* | http://github.com/* | ssh://git@github.com/*)
+      path=${url#*://}
       path=${path#*/}
       ;;
-    *@*:*) path=${origin#*:} ;;
+    git@github.com:*) path=${url#git@github.com:} ;;
     *) return 1 ;;
   esac
   path=${path%/}
@@ -189,12 +207,124 @@ origin_repo_slug() {
   printf '%s\n' "$path"
 }
 
+target_error() {
+  printf 'fm-gh-shim: refusing credential-routed gh pr %s without --repo: %s\n' \
+    "${2:-<unknown>}" "$1" >&2
+}
+
+# canonical_repo_slug: resolve the canonical GitHub push target from no-mistakes'
+# repository registration. The database choice mirrors Repo.PushURL(): a configured
+# fork_url wins, otherwise upstream_url is the delivery target. The gate identity and
+# registered checkout corroborate that record; no remote name or ordering selects it.
+canonical_repo_slug() {
+  local git_common gate_dir gate_parent repo_id nm_home db record rest
+  local working_path upstream_url fork_url canonical_url canonical_slug
+  local registered_gate remote remote_url remote_slug found=0 action=${2:-}
+
+  git_common=$(git rev-parse --git-common-dir 2> /dev/null) || {
+    target_error "the current directory is not a no-mistakes gate checkout" "$action"
+    return 1
+  }
+  case "$git_common" in
+    /*) ;;
+    *)
+      git_common="$(git rev-parse --show-toplevel 2> /dev/null)/$git_common" || {
+        target_error "cannot resolve the current checkout's common Git directory" "$action"
+        return 1
+      }
+      ;;
+  esac
+  gate_dir=$(resolve_path "$git_common")
+  gate_parent=$(dirname "$gate_dir")
+  repo_id=$(basename "$gate_dir" .git)
+  if [ "$(basename "$gate_parent")" != repos ] || \
+    [ "$(basename "$gate_dir")" != "$repo_id.git" ] || \
+    ! [[ "$repo_id" =~ ^[0-9a-f]{12}$ ]]; then
+    target_error "the current checkout is not backed by a canonical no-mistakes repos/<id>.git gate" "$action"
+    return 1
+  fi
+
+  nm_home=$(dirname "$gate_parent")
+  db="$nm_home/state.sqlite"
+  command -v sqlite3 > /dev/null 2>&1 || {
+    target_error "sqlite3 is required to read the no-mistakes repository registration" "$action"
+    return 1
+  }
+  [ -r "$db" ] || {
+    target_error "no readable no-mistakes registration database at $db; run no-mistakes init from the registered checkout" "$action"
+    return 1
+  }
+  record=$(sqlite3 -readonly -separator '|' "$db" \
+    "SELECT working_path, upstream_url, COALESCE(fork_url, '') FROM repos WHERE id = '$repo_id';" 2> /dev/null) || {
+    target_error "cannot read repository $repo_id from $db; run no-mistakes doctor" "$action"
+    return 1
+  }
+  [ -n "$record" ] || {
+    target_error "gate $gate_dir has no repository registration in $db; run no-mistakes init from the registered checkout" "$action"
+    return 1
+  }
+  case "$record" in
+    *$'\n'* | *'|'*'|'*'|'*)
+      target_error "repository $repo_id has contradictory or malformed canonical target evidence in $db" "$action"
+      return 1
+      ;;
+  esac
+  working_path=${record%%|*}
+  rest=${record#*|}
+  upstream_url=${rest%%|*}
+  fork_url=${rest#*|}
+  [ -n "$working_path" ] && [ -n "$upstream_url" ] || {
+    target_error "repository $repo_id has incomplete canonical target evidence in $db" "$action"
+    return 1
+  }
+  canonical_url=$upstream_url
+  [ -z "$fork_url" ] || canonical_url=$fork_url
+  canonical_slug=$(github_repo_slug "$canonical_url") || {
+    target_error "registered canonical target '$canonical_url' is not an unambiguous github.com repository URL" "$action"
+    return 1
+  }
+
+  if [ ! -d "$working_path" ] || \
+    ! git -C "$working_path" rev-parse --git-dir > /dev/null 2>&1; then
+    target_error "registered checkout $working_path is unavailable; repair the no-mistakes repository registration" "$action"
+    return 1
+  fi
+  registered_gate=$(git -C "$working_path" remote get-url no-mistakes 2> /dev/null) || {
+    target_error "registered checkout $working_path has no no-mistakes remote proving gate $repo_id; run no-mistakes init" "$action"
+    return 1
+  }
+  case "$registered_gate" in
+    /*) ;;
+    file://*) registered_gate=${registered_gate#file://} ;;
+    *)
+      target_error "registered checkout $working_path has a non-absolute no-mistakes remote; run no-mistakes init" "$action"
+      return 1
+      ;;
+  esac
+  if [ "$(resolve_path "$registered_gate")" != "$gate_dir" ]; then
+    target_error "registered checkout $working_path points at a different no-mistakes gate than $gate_dir" "$action"
+    return 1
+  fi
+
+  for remote in $(git -C "$working_path" remote 2> /dev/null); do
+    while IFS= read -r remote_url; do
+      remote_slug=$(github_repo_slug "$remote_url" 2> /dev/null) || continue
+      [ "$remote_slug" = "$canonical_slug" ] && found=1
+    done << EOF
+$(git -C "$working_path" remote get-url --all "$remote" 2> /dev/null)
+EOF
+  done
+  if [ "$found" -ne 1 ]; then
+    target_error "registered canonical target '$canonical_slug' is absent from $working_path remotes; refresh the no-mistakes registration" "$action"
+    return 1
+  fi
+
+  printf '%s\n' "$canonical_slug"
+}
+
 if [ "$ROUTE" = credential ]; then
   if ! has_explicit_repo "$@"; then
-    REPO=$(origin_repo_slug) || {
-      echo "fm-gh-shim: refusing credential-routed gh pr ${2:-<unknown>} without --repo: cannot resolve owner/name from origin" >&2
-      exit 1
-    }
+    REPO=$(canonical_repo_slug "$@") || exit 1
     PR_COMMAND=$1
     PR_ACTION=$2
     shift 2

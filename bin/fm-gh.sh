@@ -37,6 +37,19 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 CREDENTIAL_FILE="$CONFIG/gh-credential"
 
+WRAPPER_DEPTH=${FM_GH_WRAPPER_DEPTH:-0}
+case "$WRAPPER_DEPTH" in
+  0) export FM_GH_WRAPPER_DEPTH=1 ;;
+  '' | *[!0-9]*)
+    echo "fm-gh: invalid credential-wrapper depth; refusing command execution" >&2
+    exit 70
+    ;;
+  *)
+    echo "fm-gh: credential-wrapper recursion detected; the configured prefix must execute its trailing command exactly once" >&2
+    exit 70
+    ;;
+esac
+
 # read_prefix: echo the configured prefix line, or nothing when unconfigured.
 read_prefix() {
   [ -f "$CREDENTIAL_FILE" ] || return 0
