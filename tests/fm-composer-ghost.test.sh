@@ -347,28 +347,28 @@ test_bottom_border_cursor_is_unknown() {
   pass "fm_tmux_composer_state: a box bottom border is never an input row"
 }
 
-test_pi_identity_requires_readable_busy_state() {
+test_pi_identity_requires_readable_busy_state() (
   local out
-  if out=$(
-    # shellcheck disable=SC2329 # Mock invoked indirectly by the sourced adapter.
-    tmux() {
-      local arg
-      for arg in "$@"; do
-        case "$arg" in
-          *pane_tty*) printf '\n'; return 0 ;;
-          *pane_current_command*) printf 'pi\n'; return 0 ;;
-        esac
-      done
-      return 1
-    }
-    # shellcheck disable=SC2329 # Mock invoked indirectly by the sourced adapter.
-    fm_pane_busy_state() { printf 'unknown'; }
-    fm_tmux_composer_identity fakepane
-  ); then
+  # Keep the mocks in this subshell so they cannot affect later tests. Defining
+  # functions directly inside a command substitution does not parse in Bash 3.2.
+  # shellcheck disable=SC2329 # Mock invoked indirectly by the sourced adapter.
+  tmux() {
+    local arg
+    for arg in "$@"; do
+      case "$arg" in
+        *pane_tty*) printf '\n'; return 0 ;;
+        *pane_current_command*) printf 'pi\n'; return 0 ;;
+      esac
+    done
+    return 1
+  }
+  # shellcheck disable=SC2329 # Mock invoked indirectly by the sourced adapter.
+  fm_pane_busy_state() { printf 'unknown'; }
+  if out=$(fm_tmux_composer_identity fakepane); then
     fail "a live Pi process with unreadable busy state must not produce identity, got '$out'"
   fi
   pass "fm_tmux_composer_identity: unknown busy state cannot become idle identity"
-}
+)
 
 test_bordered_busy_signatures_are_pending() {
   local dir fb capture out signature
