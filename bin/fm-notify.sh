@@ -26,7 +26,7 @@
 #   done: / failed: / needs-decision: / blocked: -> attention
 #   anything else -> silent
 #
-# Manual smoke - run each to hear its tag:
+# Manual smoke - run each to hear its spoken tag:
 #   bin/fm-notify.sh pr-merged "firstmate: PR merged"           "smoke test"
 #   bin/fm-notify.sh pr-ready  "firstmate: PR ready for review" "smoke test"
 #   bin/fm-notify.sh attention "firstmate: decision needed"     "smoke test"
@@ -44,36 +44,62 @@
 #
 # Config: config/notify (local, gitignored), one `key=value` per non-empty,
 # non-comment line, last assignment wins. An absent file means the three
-# classes above are ON with their default sounds.
+# classes below speak their default phrase in the default voice.
 #
-#   enabled=off              global kill switch (on|off, default on)
-#   channel=<channel>        default channel for every class (default auto)
+#   enabled=off                     global kill switch (on|off, default on)
+#   channel=<channel>               default channel for every class (default auto)
+#   voice=<name>                    macOS speech voice for every class (default Zoe)
 #   pr-merged=<sound>[,<channel>]   per-class overrides; the bare value `off`
 #   pr-ready=<sound>[,<channel>]    disables that one class. A leading comma
-#   attention=<sound>[,<channel>]   (`,herdr`) keeps the default sound.
+#   attention=<sound>[,<channel>]   (`,herdr`) keeps the default sound or phrase.
+#   pr-merged=speak[,<channel>]     the literal value `speak` switches that class
+#   pr-ready=speak[,<channel>]      from a named sound to a spoken phrase - this
+#   attention=speak[,<channel>]     is also the default when the class is unset.
+#   pr-merged-phrase=<text>         the phrase spoken for that class; unset means
+#   pr-ready-phrase=<text>          the captain-chosen default phrase for that
+#   attention-phrase=<text>         class (see notify_default_phrase below).
 #
 # Channels: auto (default), macos, herdr, both, none. FM_NOTIFY_CHANNEL
 # overrides every configured channel with one directive.
 #   auto resolves to macos when osascript is available, else herdr when the
 #   herdr CLI is available, else nothing. macOS Notification Center is
-#   preferred even inside herdr because named system sounds are what make the
-#   three classes audibly distinct; herdr offers only none|done|request. Set
-#   `channel=both` for the herdr toast alongside the macOS sound, or
-#   `channel=herdr` to keep every tag inside the herdr UI.
+#   preferred even inside herdr because a spoken phrase or a named system sound
+#   is what makes the three classes audibly distinct; herdr offers only
+#   none|done|request. Set `channel=both` for the herdr toast alongside the
+#   macOS tag, or `channel=herdr` to keep every tag inside the herdr UI.
 #
 # Sounds. macOS sounds are named system sounds (Glass, Ping, Sosumi, Basso,
 # Hero, Submarine, Funk, Tink, ...); an unrecognized name is refused and the
 # class default is used. Herdr sounds are fixed per class because the CLI
 # accepts only three values.
 #
-#   class      macOS default   herdr sound
-#   pr-merged  Glass           done
-#   pr-ready   Ping            done
-#   attention  Sosumi          request
+#   class      macOS default sound   herdr sound
+#   pr-merged  Glass                 done
+#   pr-ready   Ping                  done
+#   attention  Sosumi                request
+#
+# Speech. When a class resolves to speak mode (the default, or an explicit
+# `speak` value), the macOS leg runs `say -v <voice> <phrase>` instead of
+# playing a named sound; herdr keeps its fixed sound regardless, since its CLI
+# has no speech mode. The captain-chosen default phrase per class embeds its
+# own lead-in and trailing silence as macOS speech commands
+# (`[[slnc <ms>]]`), because the audio device is still waking on the first
+# syllable and a short phrase clips at the end without them; a reworded phrase
+# in config/notify should keep that same lead-in/trailing-silence shape. A
+# configured voice or phrase with characters outside a safe plain-text set is
+# refused and the default is used, the same as an unrecognized sound name.
+# Speech never blocks the caller: `say` runs detached in the background under
+# the same FM_NOTIFY_TIMEOUT_SECS bound as every other channel call, so a hung
+# process cannot accumulate and a merge or supervision cycle never waits on it.
+# Fail-soft applies throughout: no `say` binary, an unrecognized or
+# not-installed voice, or a background launch failure for any reason all fall
+# back to that class's named-sound behavior rather than going silent.
 #
 # Test seam: FM_NOTIFY_EXEC replaces every real channel. The special value
 # `discard` fires nothing; any other value is run as
-# `<cmd> <channel> <sound> <title> <body>`. Unset means production.
+# `<cmd> <channel> <sound-or-speak-spec> <title> <body>`, where a speak-mode
+# call passes `speak:<voice>:<phrase>` in the sound slot. Unset means
+# production.
 #
 # See docs/configuration.md "Producer-tag notifications (config/notify)" for
 # the captain-facing reference, and bin/fm-supervise-daemon.sh for the separate
@@ -129,6 +155,19 @@ notify_default_sound() {  # <class>
   esac
 }
 
+# The captain's own chosen phrasing (verified by ear), embedding its own
+# lead-in and trailing silence as macOS speech commands. Only a fallback: a
+# reworded phrase belongs in config/notify's <class>-phrase key, never here.
+notify_default_phrase() {  # <class>
+  case "$1" in
+    pr-merged) printf '%s' '[[rate 170]][[slnc 700]] [[emph +]]Another[[emph -]] one down! [[slnc 1200]]' ;;
+    pr-ready) printf '%s' '[[slnc 700]] Ready for review [[slnc 1200]]' ;;
+    attention) printf '%s' '[[slnc 700]] Hey - [[slnc 200]] take a look [[slnc 1200]]' ;;
+  esac
+}
+
+NOTIFY_DEFAULT_VOICE=Zoe
+
 # Herdr's CLI accepts only none|done|request, so the class-to-sound map is fixed
 # rather than configurable: there is nothing to tune between three values.
 notify_herdr_sound() {  # <class>
@@ -182,12 +221,34 @@ notify_sound_valid() {  # <sound>
   esac
 }
 
-# Resolve <class> against the config into NOTIFY_SOUND and NOTIFY_CHANNEL.
-# Returns 1 when the class is switched off.
+# A macOS voice name has the same safe shape as a sound name.
+notify_voice_valid() {  # <voice>
+  notify_sound_valid "$1"
+}
+
+# A speech phrase is interpolated into no shell string (it travels as a plain
+# argv item to `say`), but it is still untrusted config content, so it is held
+# to a plain-text allow-list that also covers macOS's `[[cmd ...]]` embedded
+# speech commands rather than a free-form string.
+notify_phrase_valid() {  # <phrase>
+  case "$1" in
+    '') return 1 ;;
+    *[!][A-Za-z0-9\ .,!?\':+-]*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+# Resolve <class> against the config into NOTIFY_SOUND, NOTIFY_CHANNEL,
+# NOTIFY_MODE (sound|speak), and NOTIFY_PHRASE (set only when speaking).
+# Returns 1 when the class is switched off. An unconfigured class defaults to
+# speak mode; an explicit sound name keeps the pre-speech sound behavior
+# unchanged, and the literal value `speak` opts a class into speech.
 NOTIFY_SOUND=
 NOTIFY_CHANNEL=
+NOTIFY_MODE=
+NOTIFY_PHRASE=
 notify_resolve_class() {  # <class>
-  local class=$1 raw sound='' channel=''
+  local class=$1 raw sound='' channel='' mode=sound phrase=''
   raw=$(notify_config_lookup "$class")
   if [ -n "$raw" ]; then
     notify_is_off "$raw" && return 1
@@ -198,12 +259,24 @@ notify_resolve_class() {  # <class>
     # `off` in either position silences the class, so a captain who writes
     # `pr-ready=off,herdr` gets silence rather than a sound literally named off.
     { notify_is_off "$sound" || notify_is_off "$channel"; } && return 1
+    case "$sound" in
+      speak|Speak|SPEAK) mode=speak; sound='' ;;
+    esac
+  else
+    mode=speak
   fi
-  if [ -n "$sound" ] && ! notify_sound_valid "$sound"; then
+  if [ "$mode" = speak ]; then
+    phrase=$(notify_config_lookup "${class}-phrase")
+    if [ -n "$phrase" ] && ! notify_phrase_valid "$phrase"; then
+      notify_log "ignoring unusable phrase for $class; using the default phrase"
+      phrase=
+    fi
+    [ -n "$phrase" ] || phrase=$(notify_default_phrase "$class")
+  elif [ -n "$sound" ] && ! notify_sound_valid "$sound"; then
     notify_log "ignoring unusable sound name for $class; using the default"
     sound=
   fi
-  [ -n "$sound" ] || sound=$(notify_default_sound "$class")
+  [ -n "$sound" ] || [ "$mode" = speak ] || sound=$(notify_default_sound "$class")
   # FM_NOTIFY_CHANNEL wins over every configured channel, matching how
   # FM_WEDGE_ALARM_CHANNEL overrides config/wedge-alarm.
   [ -z "${FM_NOTIFY_CHANNEL:-}" ] || channel=$FM_NOTIFY_CHANNEL
@@ -211,7 +284,24 @@ notify_resolve_class() {  # <class>
   [ -n "$channel" ] || channel=auto
   NOTIFY_SOUND=$sound
   NOTIFY_CHANNEL=$channel
+  NOTIFY_MODE=$mode
+  NOTIFY_PHRASE=$phrase
   return 0
+}
+
+# Resolve the global speech voice into NOTIFY_VOICE, once per class emission
+# that actually speaks. An unset or unusable configured voice falls back to
+# the captain-chosen default voice, the same fallback shape as a sound name.
+NOTIFY_VOICE=
+notify_resolve_voice() {
+  local v
+  v=$(notify_config_lookup voice)
+  if [ -n "$v" ] && notify_voice_valid "$v"; then
+    NOTIFY_VOICE=$v
+    return 0
+  fi
+  [ -z "$v" ] || notify_log "ignoring unusable voice name; using the default voice"
+  NOTIFY_VOICE=$NOTIFY_DEFAULT_VOICE
 }
 
 # Map a configured channel directive onto a concrete channel: macos, herdr,
@@ -295,6 +385,46 @@ notify_via_herdr() {  # <sound> <title> <body>
   return 1
 }
 
+# 0 when <voice> appears as an installed macOS voice name. Bounded the same as
+# every other channel call, so a wedged `say -v '?'` cannot hang the caller.
+notify_voice_installed() {  # <voice>
+  local voice=$1 list
+  command -v say >/dev/null 2>&1 || return 1
+  if command -v timeout >/dev/null 2>&1; then
+    list=$(timeout "$NOTIFY_TIMEOUT_SECS" say -v '?' 2>/dev/null)
+  elif command -v gtimeout >/dev/null 2>&1; then
+    list=$(gtimeout "$NOTIFY_TIMEOUT_SECS" say -v '?' 2>/dev/null)
+  else
+    list=$(say -v '?' 2>/dev/null)
+  fi
+  printf '%s\n' "$list" | awk '{print $1}' | grep -Fxq "$voice"
+}
+
+# Speak <phrase> in <voice> for <class>, falling back to that class's named
+# sound when `say` is missing, the voice is not installed, or the exec-override
+# test seam reports failure. The real `say` call is launched detached in a
+# subshell so this function - and therefore the caller - returns immediately;
+# notify_run_bounded still applies FM_NOTIFY_TIMEOUT_SECS to the detached
+# process so a hung `say` cannot accumulate.
+notify_via_macos_speech() {  # <voice> <phrase> <class> <title> <body>
+  local voice=$1 phrase=$2 class=$3 title=$4 body=$5 rc
+  notify_exec_override macos "speak:$voice:$phrase" "$title" "$body"
+  rc=$?
+  [ "$rc" -eq 2 ] || return "$rc"
+  command -v say >/dev/null 2>&1 || {
+    notify_log "say is unavailable; falling back to the $class sound"
+    notify_via_macos "$(notify_default_sound "$class")" "$title" "$body"
+    return $?
+  }
+  notify_voice_installed "$voice" || {
+    notify_log "voice '$voice' is not installed; falling back to the $class sound"
+    notify_via_macos "$(notify_default_sound "$class")" "$title" "$body"
+    return $?
+  }
+  ( notify_run_bounded say -v "$voice" "$phrase" & )
+  return 0
+}
+
 notify_once_marker() {  # <key>
   printf '%s/.notify-once-%s' "$STATE" "$(printf '%s' "$1" | LC_ALL=C tr -c 'A-Za-z0-9._-' '_')"
 }
@@ -322,6 +452,19 @@ notify_scope_ok() {
   fm_primary_scope_matches "$FM_HOME" "$STATE"
 }
 
+# The macOS leg for one class: speaks when the class resolved to speak mode,
+# otherwise plays its resolved named sound. Shared by the `macos` and `both`
+# channel cases below so the two never drift apart.
+notify_macos_leg() {  # <class> <title> <body>
+  local class=$1 title=$2 body=$3
+  if [ "$NOTIFY_MODE" = speak ]; then
+    notify_resolve_voice
+    notify_via_macos_speech "$NOTIFY_VOICE" "$NOTIFY_PHRASE" "$class" "$title" "$body" || true
+  else
+    notify_via_macos "$NOTIFY_SOUND" "$title" "$body" || true
+  fi
+}
+
 notify_emit() {  # <class> <title> <body>
   local class=$1 title=$2 body=$3 channel
   notify_class_valid "$class" || {
@@ -332,10 +475,10 @@ notify_emit() {  # <class> <title> <body>
   notify_resolve_class "$class" || return 0
   channel=$(notify_channel_resolve "$NOTIFY_CHANNEL")
   case "$channel" in
-    macos) notify_via_macos "$NOTIFY_SOUND" "$title" "$body" || true ;;
+    macos) notify_macos_leg "$class" "$title" "$body" ;;
     herdr) notify_via_herdr "$(notify_herdr_sound "$class")" "$title" "$body" || true ;;
     both)
-      notify_via_macos "$NOTIFY_SOUND" "$title" "$body" || true
+      notify_macos_leg "$class" "$title" "$body"
       notify_via_herdr "$(notify_herdr_sound "$class")" "$title" "$body" || true
       ;;
     none) notify_log "no notification channel available on this machine" ;;

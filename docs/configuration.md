@@ -126,21 +126,33 @@ The tag fires only from a genuine primary firstmate home whose state directory i
 Notification is always best-effort: the script exits 0 whatever happens, because the underlying event is already recorded durably and a missing binary or refused channel must never break a merge or a supervision cycle.
 
 `config/notify` (local, gitignored) holds one `key=value` per non-empty, non-comment line, last assignment wins.
-An absent file means all three classes are on with their default sounds.
+An absent file means all three classes are on and speak their default phrase in the default voice - a spoken word carries across a room in a way a system bleep does not.
 
 ```
 enabled=off                     # global kill switch (on|off, default on)
 channel=<channel>               # default channel for every class (default auto)
+voice=<name>                    # macOS speech voice for every class (default Zoe)
 pr-merged=<sound>[,<channel>]   # per-class sound and optional channel override,
-pr-ready=<sound>[,<channel>]    # or the bare value `off` to silence that class
-attention=<sound>[,<channel>]
+pr-ready=<sound>[,<channel>]    # or the bare value `off` to silence that class,
+attention=<sound>[,<channel>]   # or the bare value `speak` to switch that class
+                                 # from a named sound to a spoken phrase (the
+                                 # default when the class is unset)
+pr-merged-phrase=<text>         # the phrase spoken for that class; unset means
+pr-ready-phrase=<text>          # its captain-chosen default phrase
+attention-phrase=<text>
 ```
 
 Channels are `auto` (default), `macos`, `herdr`, `both`, and `none`, and `FM_NOTIFY_CHANNEL` overrides every configured channel with one directive.
 `auto` resolves to the macOS Notification Center when `osascript` is available, else a herdr UI notification when the herdr CLI is available, else nothing.
-macOS wins even inside herdr because named system sounds are what make the three classes audibly distinct, while `herdr notification show` offers only `none`, `done`, and `request`; set `channel=both` for the herdr toast alongside the macOS sound.
+macOS wins even inside herdr because a spoken phrase or a named system sound is what makes the three classes audibly distinct, while `herdr notification show` offers only `none`, `done`, and `request`; set `channel=both` for the herdr toast alongside the macOS tag.
 Sounds are named macOS system sounds and default to `Glass` for `pr-merged`, `Ping` for `pr-ready`, and `Sosumi` for `attention`; a value that is not a plain sound name is refused and the default is used.
-Herdr sounds are fixed per class (`done`, `done`, `request`) because the CLI accepts only three values.
+Herdr sounds are fixed per class (`done`, `done`, `request`) because the CLI accepts only three values, and herdr never speaks.
+
+By default (or with the explicit value `speak`), the macOS leg speaks a phrase with `say` instead of playing a named sound; a class explicitly configured with a sound name keeps that pre-speech behavior unchanged.
+Each class's default phrase embeds its own lead-in and trailing silence as macOS speech commands (`[[slnc <ms>]]`), because the audio device is still waking on the first syllable and a short phrase clips at the end without them; a reworded phrase in `<class>-phrase` should keep that same shape.
+A configured voice or phrase with characters outside a safe plain-text set is refused and the default is used, the same as an unrecognized sound name.
+Speech never blocks the caller - `say` runs detached in the background - and falls back to that class's named-sound behavior whenever `say` is missing, the configured voice is not installed, or the background launch fails for any reason.
+See `bin/fm-notify.sh`'s header for the exact speech mechanics, the execution-seam contract, and the manual smoke commands.
 
 This is separate from the away-mode wedge alarm ([`wedge-alarm.md`](wedge-alarm.md)), which stays a louder, rate-limited alert for a supervision channel that has genuinely wedged.
 
