@@ -2387,6 +2387,31 @@ EOF
   pass "session start emits exactly one detected harness block and reports Pi extension load state"
 }
 
+test_pi_primary_target_overrides_inherited_omp_marker() {
+  local rec root home fakebin out
+  rec=$(new_world pi-target-with-omp-marker)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_harness "$fakebin" omp
+
+  out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    OMPCODE=1 FM_PRIMARY_HARNESS=pi FM_FAKE_HARNESS=omp \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$fakebin:$BASE_PATH" \
+    "$SESSION_START")
+
+  assert_contains "$out" "SUPERVISION OPERATING INSTRUCTIONS - primary harness: pi" \
+    "an inherited OMP marker relabeled a target-authoritative Pi session"
+  assert_contains "$out" "PI_WATCH_EXTENSION: not loaded" \
+    "target-authoritative Pi session skipped Pi extension validation"
+  assert_not_contains "$out" "SUPERVISION OPERATING INSTRUCTIONS - primary harness: omp" \
+    "target-authoritative Pi session rendered OMP supervision instructions"
+  assert_not_contains "$out" "OMP_WATCH_EXTENSION: not loaded" \
+    "target-authoritative Pi session rendered OMP extension diagnostics"
+  pass "session start honors the Pi entrypoint over an inherited OMP marker"
+}
+
 test_pi_signed_primary_uses_pi_extensions_without_identity_normalization() {
   local rec root home fakebin out
   rec=$(new_world pi-signed-supervision-block)
@@ -2672,6 +2697,7 @@ test_fleet_digest_empty_fleet
 test_next_step_sources_x_mode_cadence
 test_next_step_afk_delegates_to_daemon
 test_supervision_block_exactly_one_and_pi_diagnostic
+test_pi_primary_target_overrides_inherited_omp_marker
 test_pi_signed_primary_uses_pi_extensions_without_identity_normalization
 test_omp_primary_uses_verified_supervision_extensions
 test_omp_diagnostic_accepts_current_loaded_markers

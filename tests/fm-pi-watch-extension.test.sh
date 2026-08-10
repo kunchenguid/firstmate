@@ -99,6 +99,9 @@ const pi = {
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
+if (process.env.FM_PRIMARY_HARNESS !== "omp") {
+  throw new Error(`OMP watcher selected ${process.env.FM_PRIMARY_HARNESS ?? "no"} primary harness`);
+}
 for (const name of ["session_start", "session_switch", "session_shutdown"]) {
   if (!events.has(name)) throw new Error(`OMP watcher omitted ${name}`);
 }
@@ -159,6 +162,9 @@ const pi = {
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
+if (process.env.FM_PRIMARY_HARNESS !== "pi") {
+  throw new Error(`Pi watcher selected ${process.env.FM_PRIMARY_HARNESS ?? "no"} primary harness`);
+}
 if (events.has("session_switch")) {
   throw new Error("the Pi entrypoint bound OMP's session_switch under an inherited marker");
 }

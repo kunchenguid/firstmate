@@ -38,7 +38,7 @@ export FM_GATE_REFUSE_BYPASS=1
 # OMP primary session. OMP-specific cases set OMPCODE=1 explicitly; every other
 # fixture would otherwise be misidentified before its deterministic fake
 # ancestry is consulted.
-unset OMPCODE
+unset OMPCODE FM_PRIMARY_HARNESS
 
 # Resolve the repo root from this library's own location. Consumed by sourcing
 # test files, not by this library, so it reads as "unused" here.

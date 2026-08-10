@@ -1092,6 +1092,7 @@ const pi = {
 };
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
+if (process.env.FM_PRIMARY_HARNESS !== "omp") throw new Error(`OMP entrypoint did not publish its target harness: ${process.env.FM_PRIMARY_HARNESS}`);
 if (handlers.has("agent_settled")) throw new Error("OMP registered Pi's agent_settled event");
 const ended = handlers.get("agent_end");
 if (!ended) throw new Error("OMP agent_end handler was not registered");
@@ -1211,6 +1212,7 @@ const pi = {
 };
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
+if (process.env.FM_PRIMARY_HARNESS !== "pi") throw new Error(`Pi entrypoint did not publish its target harness: ${process.env.FM_PRIMARY_HARNESS}`);
 if (handlers.has("agent_end")) {
   throw new Error("the Pi entrypoint bound OMP's agent_end under an inherited marker");
 }

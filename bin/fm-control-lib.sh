@@ -87,7 +87,13 @@ fm_control_harness_family() {  # <recorded-harness>
     kimi*) printf 'kimi' ;;
     cursor*) printf 'cursor' ;;
     muse*) printf 'muse' ;;
-    omp*) printf 'omp' ;;
+    omp) printf 'omp' ;;
+    omp-*)
+      case "${1#omp-}" in
+        ''|*[!0-9.]*|.*|*.|*..*) return 1 ;;
+        *) printf 'omp' ;;
+      esac
+      ;;
     *) return 1 ;;
   esac
 }

@@ -37,6 +37,7 @@ function manifestFiles(manifest: string): string[] {
 
 function selectPrimaryHarness(harness: PrimaryHarness): void {
   primaryHarness = harness;
+  process.env.FM_PRIMARY_HARNESS = harness;
   marker = `${state}/.${harness}-turnend-extension-loaded`;
   // The OMP manifest owns the local load chain, in the same order
   // bin/fm-session-start.sh hashes it, so a stale in-memory guard cannot keep

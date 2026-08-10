@@ -104,6 +104,7 @@ function manifestFiles(manifest: string): string[] {
 
 function selectPrimaryHarness(harness: PrimaryHarness): void {
   primaryHarnessSlug = harness;
+  process.env.FM_PRIMARY_HARNESS = harness;
   primaryHarnessLabel = harness === "omp" ? "OMP" : "Pi";
   watchToolName = `fm_watch_arm_${harness}`;
   watchCommandName = `fm-watch-arm-${harness}`;
