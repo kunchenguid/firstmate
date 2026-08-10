@@ -35,7 +35,7 @@ mkdir -p "$TMP_ROOT"
 TMP_ROOT=$(cd "$TMP_ROOT" && pwd)
 trap 'rm -rf "$TMP_ROOT"' EXIT
 
-VERIFIED_HARNESSES="claude codex opencode pi pi-signed grok kimi muse"
+VERIFIED_HARNESSES="claude codex opencode pi pi-signed grok kimi muse cursor"
 
 # The expectation table, written out independently of the implementation so a
 # silent change to either side shows up here. The fourth field is the composer
@@ -51,6 +51,7 @@ verified_adapter_contract() {  # <harness> -> exit command, interrupt key, repea
     grok) printf '/exit\tC-c\t1\t\n' ;;
     kimi) printf '/exit\tEscape\t1\t\n' ;;
     muse) printf '/exit\tEscape\t1\tC-u\n' ;;
+    cursor) printf '/exit\tC-c\t1\t\n' ;;
     *) return 1 ;;
   esac
 }
@@ -216,11 +217,13 @@ keys_sent() {  # <case-dir>
 # --- 1. adapter contract across every verified harness -----------------------
 
 test_exit_types_each_harness_verified_command() {
-  local dir out rc harness expected key repeat clear
+  local dir out rc harness expected key repeat clear alive_name
   for harness in $VERIFIED_HARNESSES; do
     dir=$(new_case "exit-$harness")
     add_task "$dir" t1 "$harness"
-    alive_as "$dir" "$harness"
+    alive_name=$harness
+    [ "$harness" = cursor ] && alive_name=cursor-agent
+    alive_as "$dir" "$alive_name"
     out=$(run_control "$dir" t1 exit); rc=$?
     expect_code 0 "$rc" "exit on $harness should succeed"$'\n'"$out"
     IFS=$'\t' read -r expected key repeat clear <<< "$(verified_adapter_contract "$harness")"
@@ -232,11 +235,13 @@ test_exit_types_each_harness_verified_command() {
 }
 
 test_interrupt_sends_each_harness_verified_key() {
-  local dir out rc harness expected key repeat clear got want
+  local dir out rc harness expected key repeat clear got want alive_name
   for harness in $VERIFIED_HARNESSES; do
     dir=$(new_case "int-$harness")
     add_task "$dir" t1 "$harness"
-    alive_as "$dir" "$harness"
+    alive_name=$harness
+    [ "$harness" = cursor ] && alive_name=cursor-agent
+    alive_as "$dir" "$alive_name"
     out=$(run_control "$dir" t1 interrupt); rc=$?
     expect_code 0 "$rc" "interrupt on $harness should succeed"$'\n'"$out"
     IFS=$'\t' read -r expected key repeat clear <<< "$(verified_adapter_contract "$harness")"
@@ -257,7 +262,7 @@ test_harness_family_resolution() {
   local pair recorded want got
   for pair in claude:claude claude-latest:claude codex:codex codex-cli:codex \
       opencode:opencode grok:grok grok-2:grok kimi:kimi muse:muse \
-      muse-bin-0.1.0:muse pi:pi pi-signed:pi-signed; do
+      muse-bin-0.1.0:muse cursor:cursor cursor-agent:cursor pi:pi pi-signed:pi-signed; do
     recorded=${pair%%:*}
     want=${pair#*:}
     got=$(fm_control_harness_family "$recorded") \
@@ -365,6 +370,8 @@ test_harness_kind_capability() {
   done
   fm_control_harness_supports_kind muse secondmate \
     && fail "muse has no primary supervision protocol and must not claim a secondmate"
+  fm_control_harness_supports_kind cursor secondmate \
+    && fail "cursor has no primary supervision protocol and must not claim a secondmate"
   for harness in claude codex opencode pi pi-signed grok kimi; do
     fm_control_harness_supports_kind "$harness" secondmate \
       || fail "$harness should be able to run a secondmate"

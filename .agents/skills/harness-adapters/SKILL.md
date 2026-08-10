@@ -1,6 +1,6 @@
 ---
 name: harness-adapters
-description: Agent-only reference for firstmate harness operations. Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter. Contains verified facts for claude, codex, opencode, pi, pi-signed, grok, kimi, and muse.
+description: Agent-only reference for firstmate harness operations. Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter. Contains verified facts for claude, codex, opencode, pi, pi-signed, grok, kimi, muse, and cursor.
 user-invocable: false
 metadata:
   internal: true
@@ -126,6 +126,7 @@ The supported launch-profile flags below are verified locally; each row records 
 | opencode | `--model <provider/model>` | none for firstmate's interactive launch | Verified on opencode 1.17.6. `opencode run` has `--variant`, but firstmate launches the interactive `opencode --prompt` path, which has no verified effort flag. |
 | kimi | `--model <model>` | none | Verified 2026-07-25 on Kimi Code CLI 0.29.1. |
 | muse | `--model <model>` | `--reasoning-effort <low\|medium\|high\|xhigh>`, and `ultra` only for an explicit `max` | Verified 2026-08-05 on Muse Code 0.1.0-R708.1. The flag accepts `none\|minimal\|low\|medium\|high\|xhigh\|ultra` and defaults to `high`. `ultra` is muse's max-class level, so it is reachable only through an explicit captain `max`, never from the generic fallback; `none` and `minimal` sit below the shared vocabulary and stay unreachable. |
+| cursor | `--model <model>` | none | Verified 2026-08-10 on cursor-agent 2026.08.04-aaa8809. No standalone `--effort` flag; effort is encoded in catalog model ids. Help documents bracket overrides, but the live model list rejected them for this account, so requested effort stays in task metadata only. |
 
 The concrete `harness` field owns adapter identity independently of the model provider: `harness=pi` with `model=xai/grok-*` is Pi using xAI, not `harness=grok`, and does not require Grok CLI login; `harness=grok` remains the standalone Grok Build CLI adapter.
 No script resolves that split for you: establish which credential store a tuple reads from the discovery surfaces below plus `quota-axi auth --json`'s per-provider sources, and show that reasoning rather than inferring it from a harness, model, or source name.
@@ -143,6 +144,8 @@ Use the discovery surface in the current authenticated environment because suppo
 | pi / pi-signed | Run the selected executable as `<executable> --list-models [search]`; Pi's installed `docs/models.md` owns how built-in, extension-registered, and custom provider/model entries reach that list. |
 | grok | Run `grok models`, which lists the models available to the current Grok installation and account. |
 | kimi | Run `kimi provider list --json`, which lists the current provider and model configuration. |
+| muse | Open the interactive session's model picker, or consult Muse's published model list for the installed build. |
+| cursor | Run `cursor-agent --list-models` or `cursor-agent models`, which list available model ids for the current account. |
 
 For an unfamiliar harness or model namespace, establish support and provider identity from that harness's authoritative CLI help, model listing, or current documentation rather than guessing from a name or prefix.
 A listing that reaches the account and does not contain the model is concrete evidence the model is unsupported: block that candidate and quote the result.
@@ -162,6 +165,8 @@ Natural language is acceptable if uncertain.
 - pi and pi-signed: no separate verified skill invocation beyond normal command behavior; use natural language if the exact skill command is uncertain.
 - grok: `/<skill>`, for example `/no-mistakes` (same form as claude). Verified end to end: grok discovers the user-level `no-mistakes` skill, `/no-mistakes` invokes it, and grok drives a real `no-mistakes axi run`. Like codex's `$`/`/` popups, typing `/<skill>` opens grok's slash-autocomplete, so a too-fast Enter selects the popup entry instead of sending, and for an argument-taking command (like `/no-mistakes`'s optional task-first argument) that first Enter only expands the popup selection into an argument-hint placeholder rather than submitting - a genuine second Enter is required (see the grok section below for the 2026-07-03 incident and fix). `fm_tmux_submit_core`'s retried Enter (used by `fm-send` on the tmux backend) handles this through the shared structural composer classifier; the herdr backend needed a dedicated fix (`fm_backend_herdr_composer_state`, docs/herdr-backend.md) because its prior delta-based verification false-positived on that same popup-close content change.
 - kimi: `/<skill>`, for example `/no-mistakes`.
+- muse: `/<skill>`, the claude/grok form.
+- cursor: `/<skill>`, for example `/no-mistakes`; slash autocomplete may require the shared submit settle.
 
 ## Submission acknowledgement hazards
 
@@ -465,3 +470,27 @@ A teardown refusal naming muse scratch is therefore correct behavior: inspect it
 muse is a day-0 `0.1.0` beta whose launcher polls a release channel hourly and can replace the running binary underneath the fleet, changing the process name with it.
 The captain accepted that risk, so firstmate does NOT set `MUSE_NO_AUTO_UPDATE=1`; a fleet that later wants stability can set it in the launch environment without any adapter change.
 Its plugin/hook engine reports `plugins are not available in this build` unless `MUSE_EXPERIMENTAL_PLUGINS=on`, which is why the busy source reads the session log instead of installing a hook.
+
+## cursor (VERIFIED 2026-08-10, cursor-agent 2026.08.04-aaa8809)
+
+Cursor Agent CLI is a CREWMATE and SCOUT adapter only.
+`bin/fm-spawn.sh` refuses `--secondmate` on cursor, and cursor has no supervision protocol under `docs/supervision-protocols/`, so a firstmate primary detected as cursor falls back to the `unknown` protocol.
+
+| Fact | Value |
+|---|---|
+| Binary | Executable `cursor-agent` from PATH; spawning refuses if it is absent. |
+| Launch | Positional prompt with `--yolo --trust`. |
+| Models | `--model <model>`; discover with `cursor-agent --list-models` or `cursor-agent models`. |
+| Busy state | Project hooks: `beforeSubmitPrompt` opens a turn; `stop` closes it for `completed`, `aborted`, and `error` (including Ctrl+C interrupt); `sessionEnd` closes on exit. Source name: `cursor-hook`. |
+| Exit command | `/exit` (slash popup also lists `/quit`). |
+| Interrupt | Single `Ctrl+C` (footer shows `ctrl+c to stop` mid-turn). |
+| Skill invocation | `/<skill>`, for example `/no-mistakes`. |
+| Autonomy | `--yolo` (alias of `--force`; footer shows `Run Everything`). |
+| Trust dialog | `--trust` skips the workspace trust prompt on a fresh worktree. |
+| Environment marker | `CURSOR_AGENT=1` on the live process; detection also matches exact `cursor-agent` ancestry (never `*cursor*`). |
+| Composer | Idle placeholder `→ Add a follow-up` (U+2192), plain text with no dark-truecolor ghost styling observed. |
+| Effort | No standalone `--effort` flag; see the launch-profile table. |
+| Resume | `--resume [chatId]` / `--continue` exist on the CLI; firstmate has no verified pane-resume contract for cursor yet. |
+
+`fm-spawn.sh` installs gitignored project hooks at `.cursor/hooks.json` and `.cursor/hooks/fm-busy-turnend.sh` that arm busy/idle events and touch the turn-ended marker on `stop`.
+[`docs/verification/cursor.md`](../../../docs/verification/cursor.md) owns the dated live evidence and the opt-in refresh command.

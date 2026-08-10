@@ -104,7 +104,7 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|muse)
+#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|muse|cursor)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters. For pi and pi-signed, fm-spawn resolves the selected executable
@@ -1033,7 +1033,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   }
 elif [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|muse)
+    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|muse|cursor)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -1149,7 +1149,18 @@ launch_template() {
     # session event log instead (bin/fm-busy-lib.sh), bound by the sidecar
     # written below. Nothing to place in the template for it.
     # codex, opencode, and kimi are also markerless and share this inherited-marker hazard; changing their verified launch boundaries belongs in follow-up work.
-    muse) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS XDG_CONFIG_HOME=__MUSECONFIG__ XDG_DATA_HOME=__MUSEDATA__ MUSE_EXPERIMENTAL_FOREIGN_PERSONAL_CONTEXT_KILL=on __MUSEBIN__ --yolo __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    muse) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u CURSOR_AGENT XDG_CONFIG_HOME=__MUSECONFIG__ XDG_DATA_HOME=__MUSEDATA__ MUSE_EXPERIMENTAL_FOREIGN_PERSONAL_CONTEXT_KILL=on __MUSEBIN__ --yolo __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    # cursor (Cursor Agent CLI, binary cursor-agent): a positional prompt starts
+    # the supervised interactive session. --yolo (alias of --force) is the Run
+    # Everything autonomy mode; --trust skips the workspace trust prompt on a
+    # fresh per-task worktree (verified 2026-08-10 on cursor-agent
+    # 2026.08.04-aaa8809). Foreign primary markers are cleared because cursor
+    # sets CURSOR_AGENT=1 itself and otherwise inherits the multiplexer's stored
+    # environment the same way muse does. There is no standalone --effort flag;
+    # effort is selected through the model id catalog (or documented bracket
+    # overrides on parameterized models), so __EFFORTFLAG__ is intentionally
+    # absent. Turn-end and busy ride project-local .cursor hooks installed below.
+    cursor) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS __CURSORBIN__ --yolo --trust __MODELFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     *) return 1 ;;
   esac
 }
@@ -1205,14 +1216,13 @@ case "$HARNESS" in
     ;;
 esac
 
-# muse is verified as a CREWMATE/SCOUT adapter only. A secondmate is a firstmate
-# instance, so it needs a primary supervision protocol; muse has none, and its
-# Claude-compatible hook dialect explicitly rejects the model-reawakening and
-# asyncRewake handlers that firstmate's primary turn-end supervision is built on
-# (muse 0.1.0-R708.1). Refusing here keeps that gap loud instead of standing up a
-# secondmate whose supervision cycle could never be armed.
-if [ "$KIND" = secondmate ] && [ "$HARNESS" = muse ]; then
-  echo "error: muse is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
+# muse and cursor are verified as CREWMATE/SCOUT adapters only. A secondmate is
+# a firstmate instance, so it needs a primary supervision protocol; neither
+# adapter has one under docs/supervision-protocols/, and both fall through to
+# the unknown primary protocol. Refusing here keeps that gap loud instead of
+# standing up a secondmate whose supervision cycle could never be armed.
+if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = cursor ]; }; then
+  echo "error: $HARNESS is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
   exit 1
 fi
 
@@ -1285,6 +1295,25 @@ resolve_muse_binary() {
   return 1
 }
 
+resolve_cursor_binary() {
+  local candidate dir
+  candidate=$(command -v cursor-agent 2>/dev/null || true)
+  if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+    case "$candidate" in
+      /*) printf '%s\n' "$candidate"; return 0 ;;
+      *)
+        dir=$(cd "$(dirname "$candidate")" 2>/dev/null && pwd -P) || dir=
+        if [ -n "$dir" ]; then
+          printf '%s/%s\n' "$dir" "$(basename "$candidate")"
+          return 0
+        fi
+        ;;
+    esac
+  fi
+  echo "error: cursor-agent executable not found on PATH; install the Cursor Agent CLI or select a different verified harness" >&2
+  return 1
+}
+
 # muse_credential_present: 0 when a launched muse pane can reach its provider
 # without an interactive login. muse offers exactly two credential paths
 # (verified, muse 0.1.0-R708.1): the META_API_KEY environment variable, which
@@ -1319,7 +1348,7 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|muse)
+    claude|codex|opencode|pi|pi-signed|grok|kimi|muse|cursor)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
@@ -1377,6 +1406,10 @@ effort_flag_for_harness() {
     # to a different, non-interactive launch mode, so fm-spawn does not pass it.
     # kimi likewise has no reasoning-effort flag; the requested axis stays in
     # task metadata but never reaches the launch command.
+    # cursor-agent has no standalone --effort flag (verified 2026-08-10): effort
+    # is encoded in catalog model ids, and help-documented bracket overrides were
+    # rejected by the live model list for this account. Recorded effort stays in
+    # meta only.
   esac
 }
 
@@ -1410,6 +1443,13 @@ case "$LAUNCH" in
         exit 1
       }
     fi
+    ;;
+esac
+
+case "$LAUNCH" in
+  *__CURSORBIN__*)
+    CURSOR_BIN=$(resolve_cursor_binary) || exit 1
+    LAUNCH=${LAUNCH//__CURSORBIN__/$(shell_quote "$CURSOR_BIN")}
     ;;
 esac
 
@@ -2275,7 +2315,7 @@ if [ "$KIND" != secondmate ]; then
       ;;
   esac
   case "$HARNESS" in
-    claude*|opencode*|pi|pi-signed)
+    claude*|opencode*|pi|pi-signed|cursor*)
       BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || {
         echo "error: failed to arm the busy-state contract for $ID" >&2
         exit 1
@@ -2315,6 +2355,42 @@ if [ "$KIND" != secondmate ]; then
 {"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"$j_submit"}]}],"Stop":[{"hooks":[{"type":"command","command":"$j_stop"}]}],"StopFailure":[{"hooks":[{"type":"command","command":"$j_stopfail"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"$j_sessionend"}]}]}}
 EOF
       exclude_path '.claude/settings.local.json'
+      ;;
+    cursor*)
+      # Cursor Agent project hooks (verified 2026-08-10 on cursor-agent
+      # 2026.08.04-aaa8809): beforeSubmitPrompt opens a turn (fires for both
+      # positional launch briefs and interactive submits), stop closes it for
+      # completed/aborted/error (including Ctrl+C interrupt), and sessionEnd
+      # closes on /exit. stop also touches the turn-ended notification. Hook
+      # commands must consume stdin JSON and print {} - the small script below
+      # owns that shape so hooks.json stays declarative.
+      mkdir -p "$WT/.cursor/hooks"
+      cat > "$WT/.cursor/hooks/fm-busy-turnend.sh" <<EOF
+#!/usr/bin/env bash
+# Firstmate cursor busy-state + turn-end; written by fm-spawn.
+set -u
+event=\${1:-}
+cat >/dev/null
+case "\$event" in
+  busy)
+    $(shell_quote "$FM_ROOT/bin/fm-busy-event.sh") apply $(shell_quote "$STATE_REAL") $(shell_quote "$ID") busy --gen $(shell_quote "$BUSY_GEN") --source cursor-hook --event before-submit-prompt 2>/dev/null || true
+    ;;
+  idle-stop)
+    touch $(shell_quote "$TURNEND")
+    $(shell_quote "$FM_ROOT/bin/fm-busy-event.sh") apply $(shell_quote "$STATE_REAL") $(shell_quote "$ID") idle --gen $(shell_quote "$BUSY_GEN") --source cursor-hook --event stop 2>/dev/null || true
+    ;;
+  idle-session-end)
+    $(shell_quote "$FM_ROOT/bin/fm-busy-event.sh") apply $(shell_quote "$STATE_REAL") $(shell_quote "$ID") idle --gen $(shell_quote "$BUSY_GEN") --source cursor-hook --event session-end 2>/dev/null || true
+    ;;
+esac
+printf '{}\\n'
+EOF
+      chmod 700 "$WT/.cursor/hooks/fm-busy-turnend.sh"
+      cat > "$WT/.cursor/hooks.json" <<EOF
+{"version":1,"hooks":{"beforeSubmitPrompt":[{"command":".cursor/hooks/fm-busy-turnend.sh busy"}],"stop":[{"command":".cursor/hooks/fm-busy-turnend.sh idle-stop"}],"sessionEnd":[{"command":".cursor/hooks/fm-busy-turnend.sh idle-session-end"}]}}
+EOF
+      exclude_path '.cursor/hooks.json'
+      exclude_path '.cursor/hooks/fm-busy-turnend.sh'
       ;;
     opencode*)
       mkdir -p "$WT/.opencode/plugins"

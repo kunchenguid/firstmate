@@ -55,9 +55,9 @@
 #                writes its model name there); a titled bottom border that
 #                still starts and ends with the family's rule glyph is
 #                tolerated, not ambiguity.
-#   bare       - an agent prompt glyph row with no border at all (claude `❯`,
-#                codex `›`, muse `⟩`). The agent glyph is itself the container
-#                proof; a bare SHELL glyph (`>` `$` `%` `#`) never is.
+#   bare       - an unrestricted agent prompt glyph row with no border at all
+#                (claude `❯`, codex `›`, muse `⟩`). The glyph is itself the
+#                container proof; a container-only glyph never is.
 #   left-bar   - opencode: rows prefixed by a heavy left bar `┃` with no
 #                closing border, holding the idle hint, blank rows, and a
 #                mode/model footer line.
@@ -68,13 +68,13 @@
 #                region between two transcript rules is otherwise exactly the
 #                strict rule's unidentifiable blank row.
 #
-# THE SAFETY RULE for glyphs: a bare shell prompt glyph (`>` `$` `%` `#`) -
-# what a pane shows once its agent has exited to a plain login shell - is a
-# genuine empty agent composer ONLY inside a bordered container. On a bare row
-# it is a dead-shell prompt and classifies `unknown` (never a safe injection
-# target). The AGENT glyphs `❯` (claude), `›` (codex), and `⟩` (U+27E9, muse)
-# are a genuine empty agent composer either way. Both glyph sets are declared
-# exactly once below; every decision reaches them through the declarations.
+# THE SAFETY RULE for glyphs: shell prompt glyphs (`>` `$` `%` `#`) and
+# Cursor's `→` (U+2192) are genuine empty agent composers ONLY inside a
+# bordered container. On a bare row they classify `unknown` (never a safe
+# injection target), because a dead shell can use the same glyph. The
+# unrestricted agent glyphs `❯` (claude), `›` (codex), and `⟩` (U+27E9, muse)
+# are genuine empty agent composers either way. Every glyph set is declared
+# exactly once below; every decision reaches it through those declarations.
 #
 # GHOST/PLACEHOLDER TEXT (task afk-herdr-false-pending): a harness fills an
 # otherwise-empty composer with de-emphasized ghost text - claude's rotating
@@ -274,12 +274,16 @@ fm_composer_strip_ghost() {
 
 # The prompt glyphs, each declared exactly once (see THE SAFETY RULE above).
 # AGENT glyphs are a genuine empty agent composer on any row, bordered or bare.
-# SHELL glyphs are one only INSIDE a composer container; on a bare row they are
-# a dead-shell prompt and must never read `empty`. Newline-separated and
-# consumed by `read` rather than word splitting, so `$`, `%`, and `#` stay
-# literal and no entry is ever exposed to pathname expansion.
+# CONTAINER-ONLY glyphs are one only INSIDE a composer container; on a bare row
+# they must never read `empty`. Shell glyphs are kept separately from Cursor's
+# arrow so each semantic family remains explicit. All lists are newline-
+# separated and consumed by `read` rather than word splitting, so `$`, `%`, and
+# `#` stay literal and no entry is ever exposed to pathname expansion.
 FM_COMPOSER_AGENT_PROMPT_GLYPHS=$(printf '%s\n' '❯' '›' '⟩')
 FM_COMPOSER_SHELL_PROMPT_GLYPHS=$(printf '%s\n' '>' '$' '%' '#')
+FM_COMPOSER_STRUCTURE_PROMPT_GLYPHS=$(printf '%s\n' '→')
+FM_COMPOSER_CONTAINER_PROMPT_GLYPHS=$(printf '%s\n%s\n' \
+  "$FM_COMPOSER_SHELL_PROMPT_GLYPHS" "$FM_COMPOSER_STRUCTURE_PROMPT_GLYPHS")
 
 # The ONE fleet-wide idle-placeholder set: composer text a harness renders in
 # an EMPTY composer that a plain capture cannot tell from typed text. Grok's
@@ -333,14 +337,14 @@ fm_composer_leading_prompt_glyph_var() {  # <out-varname> <content>
     esac
   done <<EOF
 $FM_COMPOSER_AGENT_PROMPT_GLYPHS
-$FM_COMPOSER_SHELL_PROMPT_GLYPHS
+$FM_COMPOSER_CONTAINER_PROMPT_GLYPHS
 EOF
   printf -v "$__fmpg_out" '%s' ''
   return 1
 }
 
 # fm_composer_leading_agent_glyph_var: like the above but AGENT glyphs only.
-# The bare-row shape must never be anchored by a shell glyph (dead-shell rule).
+# The bare-row shape must never be anchored by a container-only glyph.
 fm_composer_leading_agent_glyph_var() {  # <out-varname> <content>
   local __fmag_out=$1 __fmag_text=$2 __fmag_glyph
   __fmag_text="${__fmag_text#"${__fmag_text%%[![:space:]]*}"}"
@@ -356,7 +360,7 @@ EOF
   return 1
 }
 
-fm_composer_leading_shell_glyph_var() {  # <out-varname> <content>
+fm_composer_leading_container_glyph_var() {  # <out-varname> <content>
   local __fmsg_out=$1 __fmsg_text=$2 __fmsg_glyph
   __fmsg_text="${__fmsg_text#"${__fmsg_text%%[![:space:]]*}"}"
   while IFS= read -r __fmsg_glyph; do
@@ -365,7 +369,7 @@ fm_composer_leading_shell_glyph_var() {  # <out-varname> <content>
       "$__fmsg_glyph"*) printf -v "$__fmsg_out" '%s' "$__fmsg_glyph"; return 0 ;;
     esac
   done <<EOF
-$FM_COMPOSER_SHELL_PROMPT_GLYPHS
+$FM_COMPOSER_CONTAINER_PROMPT_GLYPHS
 EOF
   printf -v "$__fmsg_out" '%s' ''
   return 1
@@ -414,7 +418,7 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
   if _fm_composer_is_prompt_glyph "$content" "$FM_COMPOSER_AGENT_PROMPT_GLYPHS"; then
     printf 'empty'; return 0
   fi
-  if _fm_composer_is_prompt_glyph "$content" "$FM_COMPOSER_SHELL_PROMPT_GLYPHS"; then
+  if _fm_composer_is_prompt_glyph "$content" "$FM_COMPOSER_CONTAINER_PROMPT_GLYPHS"; then
     if [ "$bordered" = 1 ]; then printf 'empty'; else printf 'unknown'; fi
     return 0
   fi
@@ -551,9 +555,9 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
       *) leftbar_start=-1 ;;
     esac
     # Bare agent-glyph rows: the glyph itself is the container proof. Bare
-    # shell glyphs are deliberately not candidates (dead-shell rule). Keep
-    # lower shell prompts as staleness evidence for cursorless selection.
-    if [ "$top" -lt 0 ] && fm_composer_leading_shell_glyph_var glyph "$trimmed"; then
+    # Container-only glyphs are deliberately not bare candidates. Keep lower
+    # occurrences as staleness evidence for cursorless selection.
+    if [ "$top" -lt 0 ] && fm_composer_leading_container_glyph_var glyph "$trimmed"; then
       FM_COMPOSER_SCAN_SHELL_ROW=$row
     elif fm_composer_leading_agent_glyph_var glyph "$trimmed"; then
       FM_COMPOSER_SCAN_BARE_ROW=$row
@@ -823,7 +827,7 @@ _fm_composer_wrap_region_ok() {  # <plain-screen> <glyph-row> <cursor-row>
     fm_composer_normalize_trim_var trimmed
     [ -n "$trimmed" ] || return 1
     if fm_composer_row_has_edge "$trimmed"; then return 1; fi
-    if fm_composer_leading_shell_glyph_var glyph "$trimmed"; then return 1; fi
+    if fm_composer_leading_container_glyph_var glyph "$trimmed"; then return 1; fi
     row=$((row + 1))
   done
   return 0
@@ -991,7 +995,7 @@ _fm_composer_select_cursorless() {
 
 fm_composer_extract_selected_content() {  # <caps> <screen>
   local caps=$1 screen=$2 styled=0 kv plain row raw content glyph joined='' footer_re prompt_row=-1
-  local leading_blank=1 placeholder_position=0 prompt_is_shell=0
+  local leading_blank=1 placeholder_position=0 prompt_is_container_only=0
   footer_re=${FM_COMPOSER_LEFTBAR_FOOTER_RE:-$FM_COMPOSER_LEFTBAR_FOOTER_RE_DEFAULT}
   while IFS= read -r kv; do
     [ "$kv" = styled=1 ] && styled=1
@@ -1030,8 +1034,8 @@ EOF
            && fm_composer_leading_prompt_glyph_var glyph "$content"; then
           prompt_row=$row
           placeholder_position=1
-          if _fm_composer_is_prompt_glyph "$glyph" "$FM_COMPOSER_SHELL_PROMPT_GLYPHS"; then
-            prompt_is_shell=1
+          if _fm_composer_is_prompt_glyph "$glyph" "$FM_COMPOSER_CONTAINER_PROMPT_GLYPHS"; then
+            prompt_is_container_only=1
           fi
           content=${content#*"$glyph"}
         elif [ "$prompt_row" -lt 0 ]; then
@@ -1050,7 +1054,7 @@ EOF
     # idle-regex exceptions here.
     if [ -z "$content" ] \
        || { { [ "$FM_COMPOSER_SELECTED_KIND" = leftbar ] \
-              || { [ "$FM_COMPOSER_SELECTED_KIND" = box ] && [ "$prompt_is_shell" = 1 ]; }; } \
+              || { [ "$FM_COMPOSER_SELECTED_KIND" = box ] && [ "$prompt_is_container_only" = 1 ]; }; } \
             && [ "$placeholder_position" = 1 ] \
             && fm_composer_idle_matches "$content" "${FM_COMPOSER_IDLE_RE:-$FM_COMPOSER_IDLE_RE_DEFAULT}" insensitive; } \
        || { [ "$FM_COMPOSER_SELECTED_KIND" = leftbar ] \

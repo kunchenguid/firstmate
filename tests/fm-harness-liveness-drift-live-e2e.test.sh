@@ -64,8 +64,10 @@ fm_backend_source tmux || fail "fm_backend_source tmux failed"
 # Kimi is not required to be on PATH; mirror bin/fm-spawn.sh's own resolution
 # order so this guard covers the same binary firstmate would actually launch.
 resolve_harness_binary() {  # <harness>
-  local harness=$1 candidate
-  candidate=$(command -v "$harness" 2>/dev/null || true)
+  local harness=$1 candidate name
+  name=$harness
+  [ "$harness" = cursor ] && name=cursor-agent
+  candidate=$(command -v "$name" 2>/dev/null || true)
   if [ -n "$candidate" ] && [ -x "$candidate" ]; then
     printf '%s\n' "$candidate"
     return 0
@@ -86,7 +88,8 @@ SKIPPED=
 # so the live process name changes on every auto-update and its install path
 # carries no `muse` component to fall back on. That is precisely the drift this
 # guard exists to catch, and only a real muse release can produce it.
-for harness in claude codex opencode pi pi-signed grok kimi muse; do
+# cursor launches as cursor-agent (exact name); resolve_harness_binary maps it.
+for harness in claude codex opencode pi pi-signed grok kimi muse cursor; do
   if ! bin_path=$(resolve_harness_binary "$harness"); then
     SKIPPED="$SKIPPED $harness"
     note "skip: $harness is not installed on this machine, so its classification is unverified here"
