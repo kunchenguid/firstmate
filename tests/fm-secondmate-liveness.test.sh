@@ -483,6 +483,21 @@ test_sweep_never_acts_on_unverified_harness_dead_reading() {
   pass "sweep: an unverified harness blocks recovery with a concrete diagnostic"
 }
 
+test_sweep_never_uses_raw_omp_liveness() {
+  local w fb tmuxfb log out
+  w=$(new_world sweep-raw-omp)
+  add_sm_home "$w" sm1 firstmate:fm-sm1 raw-omp
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" omp "$log")
+
+  assert_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1: skipped: recorded harness 'raw-omp' is unverified for recovery" \
+    "a raw OMP harness must not enter verified liveness handling"
+  [ ! -s "$log" ] || fail "a raw OMP harness must never trigger kill or relaunch: $(cat "$log")"
+  pass "sweep: a raw OMP harness is excluded from verified liveness handling"
+}
+
 test_sweep_converges_no_retouch_once_alive() {
   local w fb tmuxfb log out1 out2
   w=$(new_world sweep-idempotent)
@@ -552,6 +567,7 @@ test_sweep_never_acts_on_ambiguous_existing_process
 test_sweep_never_acts_on_transient_unreadability
 test_sweep_reports_missing_endpoint_relaunch_failure
 test_sweep_never_acts_on_unverified_harness_dead_reading
+test_sweep_never_uses_raw_omp_liveness
 test_sweep_converges_no_retouch_once_alive
 test_sweep_skipped_under_detect_only
 test_sweep_noop_with_no_secondmate_meta

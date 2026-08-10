@@ -730,13 +730,15 @@ SH
 }
 
 test_raw_omp_launch_does_not_arm_unwired_semantic_busy() {
-  local rec id out status launch raw_omp
+  local rec id out status launch raw_omp probe
   id=profile-raw-omp-z8f
   rec=$(make_spawn_case profile-raw-omp claude "$id")
   read_case_record "$rec"
   raw_omp="$CASE_DIR/omp"
-  cat > "$raw_omp" <<'SH'
+  probe="$CASE_DIR/raw-omp-env"
+  cat > "$raw_omp" <<SH
 #!/usr/bin/env bash
+printf '%s\n' "\${OMPCODE:-unset}" > "$probe"
 exit 0
 SH
   chmod +x "$raw_omp"
@@ -746,11 +748,13 @@ SH
     "$id" "$PROJ_DIR" "$raw_omp --raw-flag")
   status=$?
   expect_code 0 "$status" "a raw OMP launch command should spawn"
-  assert_contains "$out" "spawned $id harness=omp" "raw OMP launch did not record its harness identity"
+  assert_contains "$out" "spawned $id harness=raw-omp" "raw OMP launch was recorded as verified"
+  assert_grep "harness=raw-omp" "$HOME_DIR/state/$id.meta" "raw OMP launch meta was recorded as verified"
   assert_absent "$HOME_DIR/state/$id.busy-gen" "raw OMP launch armed semantic busy without loading the generated extension"
   assert_absent "$HOME_DIR/state/$id.busy-state" "raw OMP launch seeded busy state without loading the generated extension"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "$raw_omp --raw-flag" "raw OMP launch command was not preserved"
+  OMPCODE=1 PI_CODING_AGENT=true PATH="$FAKEBIN_DIR:$PATH" bash -c "$launch"
+  [ "$(cat "$probe")" = unset ] || fail "raw OMP launch retained inherited OMP identity"
   pass "raw OMP launches remain unverified without semantic busy wiring"
 }
 

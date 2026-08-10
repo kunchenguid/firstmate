@@ -815,7 +815,8 @@ clear_relaunch_harness_wiring() {
   local harness=$1 wt=$2 state=$3 id=$4 token_path token auth_path path
   # The wiring arms above match on harness PREFIXES, because a task launched
   # from a raw command records that command's basename rather than the exact
-  # adapter name. The retirement tables are keyed by the exact adapter, so the
+  # adapter name, except raw `omp`, which is recorded as `raw-omp`. The
+  # retirement tables are keyed by the exact adapter, so the
   # recorded value is resolved to its adapter first; otherwise a task recorded
   # as, say, `grok-2` would have wiring armed and never retired. An
   # unrecognized value resolves to no adapter, which is also the case in which
@@ -1228,6 +1229,10 @@ case "$ARG3" in
     LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: unknown harness '$HARNESS'; pass a raw launch command to use an unverified adapter" >&2; exit 1; }
     ;;
 esac
+
+if [ "$RAW_LAUNCH" -eq 1 ] && [ "$HARNESS" = omp ]; then
+  HARNESS=raw-omp
+fi
 
 # FM_PI_HARNESS is the identity the worker reports back through
 # bin/fm-harness.sh detect_own, which cannot tell pi-signed from pi without it.

@@ -354,6 +354,16 @@ test_unverified_harness_is_refused() {
   [ -z "$(literals "$dir")" ] \
     || fail "an arbitrary omp-prefixed raw harness must receive no bytes"
 
+  dir=$(new_case raw-omp-exact)
+  add_task "$dir" t1 raw-omp
+  alive_as "$dir" omp
+  out=$(run_control "$dir" t1 interrupt); rc=$?
+  expect_code 1 "$rc" "a raw exact OMP harness should refuse"
+  assert_contains "$out" "no verified control mechanics" \
+    "a raw exact OMP harness refusal should name the missing verification"
+  [ -z "$(literals "$dir")" ] \
+    || fail "a raw exact OMP harness must receive no bytes"
+
   dir=$(new_case raw-omp-versioned)
   add_task "$dir" t1 omp-17.2.12
   alive_as "$dir" omp-17.2.12
@@ -363,7 +373,7 @@ test_unverified_harness_is_refused() {
     "a versioned raw OMP alias refusal should name the missing verification"
   [ -z "$(literals "$dir")" ] \
     || fail "a versioned raw OMP alias must receive no bytes"
-  pass "fm-control: arbitrary and versioned OMP aliases are refused"
+  pass "fm-control: raw OMP aliases are refused"
 }
 
 # --- 2. backend capability matrix -------------------------------------------
