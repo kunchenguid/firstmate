@@ -489,10 +489,14 @@ test_selected_content_is_composer_scoped_and_wrap_normalized() {
   out=$(fm_composer_extract_selected_content "$CAPS_STYLED_NOID" "$screen")
   [ "$out" = 'a legitimately long steer that wraps across the next bare row' ] \
     || fail "bare extraction should include only its contiguous wrap region, got '$out'"
-  screen=$'❯ wrapped user content\n# preserves its leading glyph'
+  screen=$'❯ wrapped user content\n❯ preserves its leading glyph'
   out=$(fm_composer_extract_selected_content "$CAPS_STYLED_NOID" "$screen")
-  [ "$out" = 'wrapped user content # preserves its leading glyph' ] \
-    || fail "bare extraction should preserve prompt-like glyphs on continuation rows, got '$out'"
+  [ "$out" = 'wrapped user content ❯ preserves its leading glyph' ] \
+    || fail "bare extraction should preserve agent glyphs on continuation rows, got '$out'"
+  screen=$'❯ stale composer\n$ live shell'
+  if out=$(fm_composer_extract_selected_content "$CAPS_STYLED_NOID" "$screen"); then
+    fail "a lower live shell must invalidate composer extraction, got '$out'"
+  fi
   screen=$'╭──────────────────────────────╮\n│ > wrapped user content       │\n│ ❯ preserves its leading glyph│\n╰──────────────────────────────╯'
   out=$(fm_composer_extract_selected_content "$CAPS_STYLED_NOID" "$screen")
   [ "$out" = 'wrapped user content ❯ preserves its leading glyph' ] \

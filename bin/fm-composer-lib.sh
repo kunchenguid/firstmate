@@ -568,8 +568,7 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
           bare_start=$row
           FM_COMPOSER_SCAN_BARE_ROW=$row
         fi
-      elif [ "$bare_start" -lt 0 ] \
-           && [ "$top" -lt 0 ] \
+      elif [ "$top" -lt 0 ] \
            && fm_composer_leading_shell_glyph_var glyph "$trimmed"; then
         FM_COMPOSER_SCAN_SHELL_ROW=$row
       fi
