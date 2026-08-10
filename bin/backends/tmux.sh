@@ -271,10 +271,16 @@ fm_backend_tmux_raw_omp_identity() {  # <target>
   (
     unset FM_HARNESS_UNVERIFIED
     while IFS= read -r name; do
-      [ "${name##*/}" = omp ] && exit 0
+      case "$name" in
+        omp) exit 0 ;;
+        */*) fm_harness_omp_script_matches "$name" && exit 0 ;;
+      esac
     done < <(fm_backend_tmux_foreground_comms "$target")
     while IFS= read -r name; do
-      [ "${name##*/}" = omp ] && exit 0
+      case "$name" in
+        omp) exit 0 ;;
+        */*) fm_harness_omp_script_matches "$name" && exit 0 ;;
+      esac
     done < <(fm_backend_tmux_foreground_argv0s "$target")
     [ "$(fm_backend_tmux_current_command "$target")" = omp ]
   )
@@ -296,8 +302,12 @@ fm_backend_tmux_raw_omp_identity() {  # <target>
 # live worktree, while the foreground process group - when it is readable - is
 # authoritative for the negative verdicts, since it is the only source that can
 # distinguish a truly idle pane from a rewritten process title.
-fm_backend_tmux_agent_state() {  # <target> [raw-launch]
-  local target=$1 raw_launch=${2:-} comm session window windows inventory_status
+fm_backend_tmux_agent_state() {  # <target> [recorded-harness] [raw-launch]
+  local target=$1 recorded_harness=${2:-} raw_launch=${3:-} comm session window windows inventory_status
+  if [ "$recorded_harness" = 1 ] && [ -z "$raw_launch" ]; then
+    raw_launch=1
+    recorded_harness=
+  fi
   local inherited_unverified=${FM_HARNESS_UNVERIFIED:-}
   local FM_HARNESS_UNVERIFIED=$inherited_unverified
   [ "$raw_launch" = 1 ] && FM_HARNESS_UNVERIFIED=raw-launch
@@ -327,6 +337,12 @@ fm_backend_tmux_agent_state() {  # <target> [raw-launch]
   fi
   if ! printf '%s\n' "$windows" | grep -Fqx "$window"; then
     printf 'missing'
+    return 0
+  fi
+  if [ "$recorded_harness" = omp ] && [ "$raw_launch" != 1 ] \
+    && [ -z "${FM_HARNESS_UNVERIFIED:-}" ] \
+    && ! fm_backend_tmux_raw_omp_identity "$target"; then
+    printf 'ambiguous'
     return 0
   fi
 
@@ -385,8 +401,8 @@ EOF
 
 # Backward-compatible three-state view for callers that only need a yes/no
 # agent verdict. The detailed state contract is owned by fm_backend_agent_state.
-fm_backend_tmux_agent_alive() {  # <target> [raw-launch]
-  case "$(fm_backend_tmux_agent_state "$1" "${2:-}")" in
+fm_backend_tmux_agent_alive() {  # <target> [recorded-harness] [raw-launch]
+  case "$(fm_backend_tmux_agent_state "$1" "${2:-}" "${3:-}")" in
     alive) printf 'alive' ;;
     dead|missing) printf 'dead' ;;
     *) printf 'unknown' ;;

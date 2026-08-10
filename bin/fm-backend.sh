@@ -662,6 +662,20 @@ fm_backend_raw_omp_identity() {  # <backend> <target> [recorded-harness] [raw-la
   esac
 }
 
+fm_backend_current_omp_identity() {  # <backend> <target>
+  local backend=$1 target=$2
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    herdr)
+      fm_backend_herdr_parse_target "$target" || return 1
+      [ "$(fm_backend_herdr_omp_process_identity \
+        "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")" = omp ]
+      ;;
+    tmux) fm_backend_tmux_raw_omp_identity "$target" ;;
+    *) return 1 ;;
+  esac
+}
+
 # fm_backend_resolve_selector: resolve a raw fm-send.sh/fm-peek.sh style
 # selector to a live session-provider target. Four forms, in order:
 #   target with ":"   used as-is (the escape hatch for a window/pane outside
@@ -743,6 +757,11 @@ fm_backend_send_key() {  # <backend> <target> <key> [expected-label] [recorded-h
     && fm_backend_raw_omp_identity "$backend" "$target" "$recorded_harness" "$raw_launch"; then
     return 1
   fi
+  if [ "$backend" != herdr ] && [ "$recorded_harness" = omp ] \
+    && [ "$raw_launch" != 1 ] && [ -z "${FM_HARNESS_UNVERIFIED:-}" ] \
+    && ! fm_backend_current_omp_identity "$backend" "$target"; then
+    return 1
+  fi
   case "$backend" in
     tmux) fm_backend_tmux_send_key "$@" ;;
     herdr)
@@ -768,6 +787,12 @@ fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sl
   fm_backend_source "$backend" || return 1
   if [ "$backend" != herdr ] \
     && fm_backend_raw_omp_identity "$backend" "$target" "$recorded_harness" "$raw_launch"; then
+    printf 'unknown'
+    return 0
+  fi
+  if [ "$backend" != herdr ] && [ "$recorded_harness" = omp ] \
+    && [ "$raw_launch" != 1 ] && [ -z "${FM_HARNESS_UNVERIFIED:-}" ] \
+    && ! fm_backend_current_omp_identity "$backend" "$target"; then
     printf 'unknown'
     return 0
   fi
@@ -939,7 +964,7 @@ fm_backend_agent_state() {  # <backend> <target> [recorded-harness] [raw-launch]
     return 0
   fi
   case "$backend" in
-    tmux) fm_backend_tmux_agent_state "$target" "$raw_launch" ;;
+    tmux) fm_backend_tmux_agent_state "$target" "$recorded_harness" "$raw_launch" ;;
     herdr) fm_backend_herdr_agent_state "$target" "$recorded_harness" "$raw_launch" ;;
     *) printf 'unverified' ;;
   esac

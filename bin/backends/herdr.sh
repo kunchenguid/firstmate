@@ -1923,7 +1923,7 @@ fm_backend_herdr_omp_exited_to_shell() {  # <session> <pane-id>
 #              refusal here, never toward closing - this is the conservative
 #              backstop the husk check depends on.
 fm_backend_herdr_pane_agent_state() {  # <session> <pane_id> [recorded-harness] [raw-launch]
-  local session=$1 pane_id=$2 recorded_harness=${3:-} raw_launch=${4:-} out code presence status agent
+  local session=$1 pane_id=$2 recorded_harness=${3:-} raw_launch=${4:-} out code presence status agent process_identity
   local inherited_unverified=${FM_HARNESS_UNVERIFIED:-}
   local FM_HARNESS_UNVERIFIED=$inherited_unverified
   [ "$raw_launch" = 1 ] && FM_HARNESS_UNVERIFIED=raw-launch
@@ -1943,6 +1943,15 @@ fm_backend_herdr_pane_agent_state() {  # <session> <pane_id> [recorded-harness] 
       dead|unknown) printf '%s' "$presence" ;;
       *) printf 'unknown' ;;
     esac
+    return 0
+  fi
+  if [ "$recorded_harness" = omp ] && [ "$raw_launch" != 1 ]; then
+    process_identity=$(fm_backend_herdr_omp_process_identity "$session" "$pane_id")
+    [ "$process_identity" = omp ] || {
+      printf 'unknown'
+      return 0
+    }
+    printf 'live'
     return 0
   fi
   out=$(fm_backend_herdr_cli "$session" agent get "$pane_id" 2>&1)
@@ -2732,7 +2741,7 @@ fm_backend_herdr_omp_process_state() {  # <session> <pane> -> stale|live|unknown
   esac
 }
 
-fm_backend_herdr_omp_process_identity() {  # <session> <pane> -> omp|other|unknown
+fm_backend_herdr_omp_process_identity() {  # <session> <pane> [any] -> omp|other|unknown
   local session=$1 pane=$2 info rows name args omp_count=0 other_count=0
   info=$(fm_backend_herdr_cli "$session" pane process-info --pane "$pane" 2>/dev/null) || {
     printf 'unknown'
@@ -2781,7 +2790,7 @@ fm_backend_herdr_omp_process_identity() {  # <session> <pane> -> omp|other|unkno
   done <<EOF
 $rows
 EOF
-  if [ "$omp_count" -gt 0 ] && [ "$other_count" -eq 0 ]; then
+  if [ "$omp_count" -gt 0 ] && { [ "$other_count" -eq 0 ] || [ "${3:-}" = any ]; }; then
     printf 'omp'
   elif [ "$omp_count" -eq 0 ] && [ "$other_count" -gt 0 ]; then
     printf 'other'
@@ -2793,7 +2802,7 @@ EOF
 fm_backend_herdr_raw_omp_process_identity() {  # <session> <pane> -> true for OMP
   (
     unset FM_HARNESS_UNVERIFIED
-    [ "$(fm_backend_herdr_omp_process_identity "$1" "$2")" = omp ]
+    [ "$(fm_backend_herdr_omp_process_identity "$1" "$2" any)" = omp ]
   )
 }
 
@@ -2856,14 +2865,18 @@ EOF
     case "$process_state" in
       stale) return 1 ;;
       live)
-        if [ -z "$recorded_harness" ] || [ "$recorded_harness" = unknown ]; then
-          process_identity=$(fm_backend_herdr_omp_process_identity "$session" "$pane")
-          [ "$process_identity" = omp ] || return 2
-        else
-          fm_backend_herdr_identity_matches "$recorded_harness" "$agent" "$raw_launch" || return 2
-        fi
+        process_identity=$(fm_backend_herdr_omp_process_identity "$session" "$pane")
+        [ "$process_identity" = omp ] || return 2
         return 0
         ;;
+      *) return 2 ;;
+    esac
+  fi
+  if [ "$raw_launch" = 1 ]; then
+    process_identity=$(unset FM_HARNESS_UNVERIFIED; fm_backend_herdr_omp_process_identity "$session" "$pane" any)
+    case "$process_identity" in
+      omp) return 1 ;;
+      other) : ;;
       *) return 2 ;;
     esac
   fi

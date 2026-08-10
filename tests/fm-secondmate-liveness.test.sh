@@ -157,6 +157,39 @@ SH
   pass "fm_backend_tmux_agent_state: rejects malformed targets before probing tmux"
 }
 
+test_tmux_canonical_omp_rejects_stale_endpoint() {
+  local fb out
+  fb=$(make_probe_tmux "$TMP_ROOT/tmux-canonical-omp-stale" claude)
+  out=$(PATH="$fb:$BASE_PATH" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state tmux sess:win omp' "$ROOT")
+  [ "$out" = ambiguous ] || fail "a canonical OMP endpoint relaunching as Claude must not remain alive, got '$out'"
+  pass "tmux liveness: canonical OMP rejects a same-pane non-OMP relaunch"
+}
+
+test_tmux_canonical_omp_accepts_current_endpoint() {
+  local fb out
+  fb=$(make_probe_tmux "$TMP_ROOT/tmux-canonical-omp-live" omp)
+  out=$(PATH="$fb:$BASE_PATH" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state tmux sess:win omp' "$ROOT")
+  [ "$out" = alive ] || fail "a current canonical OMP endpoint must remain alive, got '$out'"
+  pass "tmux liveness: current canonical OMP identity remains live"
+}
+
+test_tmux_raw_non_omp_preserves_liveness() {
+  local fb out
+  fb=$(make_probe_tmux "$TMP_ROOT/tmux-raw-non-omp" bash)
+  out=$(PATH="$fb:$BASE_PATH" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state tmux sess:win bash 1' "$ROOT")
+  [ "$out" = dead ] || fail "raw non-OMP tmux endpoints must retain ordinary shell recovery, got '$out'"
+  pass "tmux liveness: raw non-OMP endpoints preserve shell recovery"
+}
+
+test_tmux_control_rejects_stale_canonical_omp() {
+  local fb status
+  fb=$(make_probe_tmux "$TMP_ROOT/tmux-control-canonical-omp-stale" claude)
+  PATH="$fb:$BASE_PATH" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_send_key tmux sess:win Escape label omp' "$ROOT" >/dev/null 2>&1
+  status=$?
+  [ "$status" -ne 0 ] || fail "tmux control must reject a canonical OMP endpoint relaunching as Claude"
+  pass "tmux control: stale canonical OMP identity blocks lifecycle keys"
+}
+
 # --- unit level: fm_backend_herdr_agent_state -------------------------------
 
 test_herdr_agent_state_preserves_husk_classifier() {
@@ -583,6 +616,10 @@ test_sweep_noop_with_no_secondmate_meta() {
 
 test_tmux_agent_state_classifies
 test_tmux_agent_state_rejects_malformed_targets_before_probe
+test_tmux_canonical_omp_rejects_stale_endpoint
+test_tmux_canonical_omp_accepts_current_endpoint
+test_tmux_raw_non_omp_preserves_liveness
+test_tmux_control_rejects_stale_canonical_omp
 test_herdr_agent_state_preserves_husk_classifier
 test_agent_state_dispatcher_and_compatibility
 test_raw_marker_gates_busy_and_control

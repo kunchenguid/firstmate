@@ -3083,6 +3083,22 @@ test_dispatch_rejects_unregistered_raw_omp_before_recovery() {
   pass "Herdr liveness: unregistered wrapped raw OMP is unverified before recovery"
 }
 
+test_dispatch_rejects_raw_omp_descendant_before_recovery() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/raw-omp-descendant"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  fb=$(make_herdr_fakebin "$dir")
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$fb/omp"
+  chmod +x "$fb/omp"
+  herdr_mixed_bun_process_info "$fb/omp" > "$resp/1.out"
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state herdr lab:w1:p2 bash 1' "$ROOT" )
+  [ "$out" = unverified ] || fail "a raw wrapper process group containing OMP must stop recovery, got '$out'"
+  if grep -q $'\x1fpane\x1fget' "$log" || grep -q $'\x1fagent\x1fget' "$log"; then
+    fail "a raw OMP descendant must be rejected before pane or agent recovery reads"
+  fi
+  pass "Herdr liveness: a mixed raw wrapper/OMP process group is quarantined"
+}
+
 test_dispatch_preserves_unrelated_raw_bun_recovery() {
   local dir log resp fb out
   dir="$TMP_ROOT/raw-unrelated-bun"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -3358,6 +3374,22 @@ test_herdr_input_rejects_stale_omp_after_non_omp_relaunch() {
   pass "Herdr input: stale OMP registration cannot authorize a non-OMP relaunch"
 }
 
+test_herdr_input_rejects_canonical_omp_after_non_omp_relaunch() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/input-canonical-omp-relaunch"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s\n' '{"result":{"agent":{"agent":"omp","agent_status":"idle"}}}' > "$resp/identity.out"
+  herdr_other_process_info > "$resp/1.out"
+  herdr_other_process_info > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_send_text_submit herdr lab:w1:p2 "hello" 1 0 0 label omp' "$ROOT" )
+  [ "$out" = unknown ] || fail "canonical OMP input must reject a same-pane non-OMP relaunch, got '$out'"
+  if grep -q $'\x1fpane\x1fsend-text' "$log" || grep -q $'\x1fpane\x1fsend-keys' "$log"; then
+    fail "canonical OMP input must be rejected before sending to a relaunch"
+  fi
+  pass "Herdr input: canonical OMP identity requires current OMP process proof"
+}
+
 test_herdr_key_rejects_stale_omp_after_non_omp_relaunch() {
   local dir log resp fb status
   dir="$TMP_ROOT/key-stale-omp-relaunch"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -3408,14 +3440,33 @@ test_herdr_input_allows_wrapped_non_omp_identity() {
   local dir log resp fb out
   dir="$TMP_ROOT/input-wrapped-non-omp"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   printf '%s\n' '{"result":{"agent":{"agent":"claude","agent_status":"idle"}}}' > "$resp/identity.out"
-  printf '%s\n' '{"result":{"agent":{"agent_status":"idle"}}}' > "$resp/2.out"
-  printf '%s\n' '{"result":{"agent":{"agent_status":"working"}}}' > "$resp/4.out"
+  herdr_other_process_info > "$resp/1.out"
+  printf '%s\n' '{"result":{"agent":{"agent_status":"idle"}}}' > "$resp/3.out"
+  herdr_other_process_info > "$resp/4.out"
+  printf '%s\n' '{"result":{"agent":{"agent_status":"working"}}}' > "$resp/6.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
     bash -c '. "$0/bin/fm-backend.sh"; fm_backend_send_text_submit herdr lab:w1:p2 "hello" 1 0.01 0.01 label bash 1' "$ROOT" )
   [ "$out" = empty ] || fail "a positively corroborated raw wrapper must preserve non-OMP Herdr input, got '$out'"
   assert_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''send-text'$'\x1f''w1:p2'$'\x1f''hello' "wrapped non-OMP identity did not reach Herdr text input"
   pass "Herdr input: raw wrapper metadata preserves current non-OMP input"
+}
+
+test_herdr_input_rejects_raw_non_omp_stale_registration_over_omp() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/input-raw-stale-non-omp"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s\n' '{"result":{"agent":{"agent":"claude","agent_status":"idle"}}}' > "$resp/identity.out"
+  fb=$(make_herdr_fakebin "$dir")
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$fb/omp"
+  chmod +x "$fb/omp"
+  herdr_bun_process_info "$fb/omp" > "$resp/1.out"
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_send_text_submit herdr lab:w1:p2 "hello" 1 0 0 label bash 1' "$ROOT" )
+  [ "$out" = unknown ] || fail "raw non-OMP metadata must not authorize input to a current OMP process, got '$out'"
+  if grep -q $'\x1fpane\x1fsend-text' "$log" || grep -q $'\x1fpane\x1fsend-keys' "$log"; then
+    fail "raw non-OMP stale registration must be rejected before input"
+  fi
+  pass "Herdr input: raw non-OMP metadata requires current non-OMP corroboration"
 }
 
 test_herdr_input_rejects_no_metadata_omp_over_non_omp_process() {
@@ -3432,6 +3483,19 @@ test_herdr_input_rejects_no_metadata_omp_over_non_omp_process() {
     fail "a metadata-free stale OMP registration must be denied before input"
   fi
   pass "Herdr input: metadata-free OMP identity requires a verified OMP process"
+}
+
+test_herdr_liveness_rejects_canonical_omp_after_non_omp_relaunch() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/liveness-canonical-omp-relaunch"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s\n' '{"result":{"pane":{"pane_id":"w1:p2"}}}' > "$resp/1.out"
+  printf '%s\n' '{"result":{"agent":{"agent":"omp","agent_status":"working"}}}' > "$resp/identity.out"
+  herdr_other_process_info > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state herdr lab:w1:p2 omp' "$ROOT" )
+  [ "$out" = unreadable ] || fail "canonical OMP liveness must reject a same-pane non-OMP relaunch, got '$out'"
+  pass "Herdr liveness: canonical OMP does not remain live after a non-OMP relaunch"
 }
 
 # --- OMP's stale idle agent registration after /exit ------------------------
@@ -3497,6 +3561,11 @@ herdr_bun_process_info() {
 herdr_other_process_info() {
   local pane=${1:-w1:p2}
   printf '%s' '{"result":{"type":"pane_process_info","process_info":{"pane_id":"'"$pane"'","shell_pid":4242,"foreground_process_group_id":5150,"foreground_processes":[{"pid":5150,"name":"claude","argv0":"claude"}]}}}'
+}
+
+herdr_mixed_bun_process_info() {
+  local script=$1 pane=${2:-w1:p2}
+  printf '%s' '{"result":{"type":"pane_process_info","process_info":{"pane_id":"'"$pane"'","shell_pid":4242,"foreground_process_group_id":5150,"foreground_processes":[{"pid":5150,"name":"bash","argv0":"bash"},{"pid":5151,"name":"bun","argv0":"bun","argv":["bun","'"$script"'"]}]}}}'
 }
 
 test_composer_state_rejects_exited_omp_husk() {
@@ -4937,6 +5006,7 @@ test_busy_state_done_and_blocked_map_to_idle
 test_busy_state_unknown_on_no_agent
 test_raw_non_omp_agent_state_preserves_liveness_and_recovery
 test_dispatch_rejects_unregistered_raw_omp_before_recovery
+test_dispatch_rejects_raw_omp_descendant_before_recovery
 test_dispatch_preserves_unrelated_raw_bun_recovery
 test_raw_omp_busy_gate_preserves_non_omp_native_busy
 test_composer_state_bare_prompt_is_empty
@@ -4953,11 +5023,14 @@ test_send_text_submit_rejects_no_metadata_exited_omp_husk
 test_herdr_input_rejects_identity_read_failure_before_text
 test_herdr_input_rejects_ambiguous_omp_process_before_text
 test_herdr_input_rejects_stale_omp_after_non_omp_relaunch
+test_herdr_input_rejects_canonical_omp_after_non_omp_relaunch
 test_herdr_key_rejects_stale_omp_after_non_omp_relaunch
 test_herdr_input_allows_current_non_omp_identity
 test_send_text_submit_rejects_exit_between_text_and_enter
 test_herdr_input_allows_wrapped_non_omp_identity
+test_herdr_input_rejects_raw_non_omp_stale_registration_over_omp
 test_herdr_input_rejects_no_metadata_omp_over_non_omp_process
+test_herdr_liveness_rejects_canonical_omp_after_non_omp_relaunch
 test_composer_state_rejects_exited_omp_husk
 test_omp_idle_registration_over_a_lone_shell_is_no_agent
 test_omp_idle_registration_over_a_running_bun_stays_live
