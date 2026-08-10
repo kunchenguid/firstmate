@@ -51,10 +51,13 @@ TMP_ROOT=$(fm_test_tmproot fm-teardown-tests)
 #   $CASE/wt/           - a worktree of the project (the task worktree)
 # Echoes the case dir.
 make_case() {
-  local name=$1 case_dir fakebin
+  local name=$1 case_dir fakebin token
   case_dir="$TMP_ROOT/$name"
   fakebin="$case_dir/fakebin"
-  mkdir -p "$case_dir/state" "$case_dir/config" "$fakebin"
+  mkdir -p "$case_dir/state" "$case_dir/config" "$case_dir/data" "$fakebin"
+  token="teardown-$name"
+  printf 'root=%s\ntoken=%s\n' "$ROOT" "$token" > "$case_dir/state/.primary-attestation"
+  chmod 600 "$case_dir/state/.primary-attestation"
 
   # Mocks for the post-check teardown steps. Refuse logic exits before these
   # run; the ALLOW cases need them so the script can complete cleanly.
@@ -144,7 +147,7 @@ SH
 
 # Write a meta file for the task. Args: case_dir mode kind
 write_meta() {
-  local case_dir=$1 mode=$2 kind=$3 stamp_home=${FM_HOME:-$ROOT} state=${FM_STATE_OVERRIDE:-$case_dir/state}
+  local case_dir=$1 mode=$2 kind=$3 stamp_home=${FM_HOME:-$case_dir} state=${FM_STATE_OVERRIDE:-$case_dir/state}
   mkdir -p "$state"
   fm_write_meta "$state/task-x1.meta" \
     "window=firstmate:fm-task-x1" \
@@ -282,10 +285,13 @@ SH
 
 # Run teardown with PATH mocking. Args: case_dir [extra args...]
 run_teardown() {
-  local case_dir=$1; shift
+  local case_dir=$1 token
+  shift
+  token=$(awk -F= '$1 == "token" {print substr($0, index($0, "=") + 1); exit}' \
+    "$case_dir/state/.primary-attestation" 2>/dev/null || true)
   FM_ROOT_OVERRIDE="${FM_ROOT_OVERRIDE:-$ROOT}" \
-  FM_HOME="${FM_HOME:-$ROOT}" \
-  FM_PRIMARY_ATTESTATION="${FM_PRIMARY_ATTESTATION:-}" \
+  FM_HOME="${FM_HOME:-$case_dir}" \
+  FM_PRIMARY_ATTESTATION="${FM_PRIMARY_ATTESTATION:-$token}" \
   FM_STATE_OVERRIDE="${FM_STATE_OVERRIDE:-$case_dir/state}" \
   FM_CONFIG_OVERRIDE="${FM_CONFIG_OVERRIDE:-$case_dir/config}" \
   FM_FAKE_TMUX_REPLACE_META="${FM_FAKE_TMUX_REPLACE_META:-}" \

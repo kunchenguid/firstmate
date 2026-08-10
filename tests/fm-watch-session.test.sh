@@ -11,8 +11,16 @@ FM_ROOT_OVERRIDE="$ROOT"
 export FM_ROOT_OVERRIDE
 
 prepare_watch_home() {
-  local home=$1
+  local home=$1 token
   mkdir -p "$home/state" "$home/data" "$home/config"
+  token="watch-$(basename "$home")"
+  printf 'root=%s\ntoken=%s\n' "$ROOT" "$token" > "$home/state/.primary-attestation"
+  chmod 600 "$home/state/.primary-attestation"
+}
+
+watch_attestation_token() {
+  awk -F= '$1 == "token" {print substr($0, index($0, "=") + 1); exit}' \
+    "$1/state/.primary-attestation"
 }
 
 install_fake_tmux() {
@@ -124,9 +132,13 @@ test_watch_session_start_status_stop_are_home_scoped() {
 
   sleep 300 &
   live=$!
-  identity=$(FM_HOME="$dir/home-a" FM_STATE_OVERRIDE="$state_a" bash -c '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$live") \
+  identity=$(FM_HOME="$dir/home-a" FM_STATE_OVERRIDE="$state_a" \
+    FM_PRIMARY_ATTESTATION="$(watch_attestation_token "$dir/home-a")" \
+    bash -c '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$live") \
     || fail "could not identify the home A watcher"
-  start=$(FM_HOME="$dir/home-a" FM_STATE_OVERRIDE="$state_a" bash -c '. "$1"; fm_pid_start "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$live") \
+  start=$(FM_HOME="$dir/home-a" FM_STATE_OVERRIDE="$state_a" \
+    FM_PRIMARY_ATTESTATION="$(watch_attestation_token "$dir/home-a")" \
+    bash -c '. "$1"; fm_pid_start "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$live") \
     || fail "could not pin the home A watcher start"
   mkdir "$state_a/.watch.lock"
   printf '%s\n' "$live" > "$state_a/.watch.lock/pid"
@@ -165,9 +177,13 @@ test_watch_session_stop_waits_for_starting_watcher() {
 
   sleep 300 &
   live=$!
-  identity=$(FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$live") \
+  identity=$(FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" \
+    FM_PRIMARY_ATTESTATION="$(watch_attestation_token "$dir/home")" \
+    bash -c '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$live") \
     || fail "could not identify the starting home watcher"
-  start=$(FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_start "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$live") \
+  start=$(FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" \
+    FM_PRIMARY_ATTESTATION="$(watch_attestation_token "$dir/home")" \
+    bash -c '. "$1"; fm_pid_start "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$live") \
     || fail "could not pin the starting home watcher"
   (
     sleep 0.2
@@ -200,7 +216,9 @@ test_watch_session_stop_fails_for_unpinned_legacy_watcher() {
 
   sleep 300 &
   live=$!
-  identity=$(FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$live") \
+  identity=$(FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" \
+    FM_PRIMARY_ATTESTATION="$(watch_attestation_token "$dir/home")" \
+    bash -c '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$live") \
     || fail "could not identify the legacy watcher"
   mkdir "$state/.watch.lock"
   printf '%s\n' "$live" > "$state/.watch.lock/pid"

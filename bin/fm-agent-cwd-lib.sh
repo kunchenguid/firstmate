@@ -42,6 +42,7 @@
 # This file is sourced by scripts and has no side effects on source.
 
 _FM_AGENT_CWD_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$_FM_AGENT_CWD_LIB_DIR/fm-process-environ-lib.sh"
 # FM_HARNESS_RE and the harness-identity contract have one owner.
 # shellcheck source=bin/fm-session-lock-lib.sh
 . "$_FM_AGENT_CWD_LIB_DIR/fm-session-lock-lib.sh"
@@ -110,17 +111,9 @@ fm_agent_proc_cwd() {
 # applied left to right, so a trailing `2>/dev/null` on the same command is set
 # up only AFTER the input redirect has already failed and printed to stderr.
 fm_agent_environ() {
-  local pid=$1 dump
+  local pid=$1
   fm_agent_pid_is_numeric "$pid" || return 1
-  if [ -r "/proc/$pid/environ" ]; then
-    dump=$( { tr '\0' '\n' < "/proc/$pid/environ"; } 2>/dev/null ) || return 1
-  else
-    command -v ps >/dev/null 2>&1 || return 1
-    dump=$(ps eww -p "$pid" -o command= 2>/dev/null) || return 1
-    dump=$(printf '%s\n' "$dump" | tr ' ' '\n')
-  fi
-  [ -n "$dump" ] || return 1
-  printf '%s' "$dump"
+  fm_process_environ "$pid"
 }
 
 # fm_agent_proc_env <pid> <var>: one environment value of a live process, or 1

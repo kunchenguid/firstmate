@@ -365,6 +365,48 @@ test_reparented_markerless_worker_is_refused() {
   pass "a reparented markerless worker is refused without a primary launch attestation"
 }
 
+test_primary_origin_requires_state_attestation() {
+  local primary_home token out
+  primary_home=$(make_primary_home "$TMP_ROOT/attestation-required")
+  out=$(cd "$primary_home" && env \
+    -u FM_AGENT_ROLE -u FM_AGENT_TASK -u FM_AGENT_OWNER_HOME \
+    -u FM_ROOT -u FM_ROOT_OVERRIDE -u FM_HOME -u FM_STATE_OVERRIDE \
+    -u FM_DATA_OVERRIDE -u FM_PROJECTS_OVERRIDE -u FM_CONFIG_OVERRIDE \
+    -u FM_PENDING_REPLY_DIR_OVERRIDE -u STATE -u FM_PRIMARY_ATTESTATION \
+    bash -c '. "$1"; fm_worker_primary_origin_proven && printf allowed || printf refused' _ \
+    "$ROOT/bin/fm-worker-isolation-lib.sh")
+  [ "$out" = refused ] || fail "a primary without a state attestation was accepted"
+  token="attested-$RUN_TAG"
+  printf 'root=%s\ntoken=%s\n' "$primary_home" "$token" > "$primary_home/state/.primary-attestation"
+  chmod 600 "$primary_home/state/.primary-attestation"
+  out=$(cd "$primary_home" && FM_HOME="$primary_home" FM_ROOT_OVERRIDE="$primary_home" \
+    FM_STATE_OVERRIDE="$primary_home/state" FM_PRIMARY_ATTESTATION="$token" \
+    bash -c '. "$1"; fm_worker_primary_origin_proven && printf allowed || printf refused' _ \
+    "$ROOT/bin/fm-worker-isolation-lib.sh")
+  [ "$out" = allowed ] || fail "a matching state attestation rejected a genuine primary"
+  pass "primary origin requires a matching state-bound launch attestation"
+}
+
+test_process_environment_fallback_preserves_spaces() {
+  local fakebin env
+  fakebin=$(fm_fakebin "$TMP_ROOT/ps-environ")
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *eww*) printf '%s\n' 'shell FM_AGENT_OWNER_HOME=/tmp/owner home FM_HOME=/tmp/owner home FM_AGENT_TASK=task-space FM_AGENT_ROLE=secondmate' ;;
+  *) printf '%s\n' '1' ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  env=$(PATH="$fakebin:$PATH" bash -c '. "$1"; fm_worker_process_environ 999' _ \
+    "$ROOT/bin/fm-worker-isolation-lib.sh")
+  printf '%s\n' "$env" | grep -Fx 'FM_AGENT_OWNER_HOME=/tmp/owner home' >/dev/null \
+    || fail "the macOS process fallback split an owner home containing spaces"
+  printf '%s\n' "$env" | grep -Fx 'FM_HOME=/tmp/owner home' >/dev/null \
+    || fail "the macOS process fallback split FM_HOME containing spaces"
+  pass "the process-environment fallback preserves spaces in home paths"
+}
+
 test_unreadable_task_start_proof_remains_contested() {
   local out status
   if out=$(bash -c '
@@ -542,7 +584,7 @@ make_primary_root() {
 }
 
 make_launch_case() {
-  local name=$1 id=$2 case_dir home proj wt fakebin primary
+  local name=$1 id=$2 case_dir home proj wt fakebin primary token
   case_dir="$TMP_ROOT/$name"
   home="$case_dir/home"
   proj="$case_dir/project"
@@ -551,6 +593,9 @@ make_launch_case() {
   primary="$case_dir/primary-root"
   mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
   make_primary_root "$primary"
+  token="launch-$id"
+  printf 'root=%s\ntoken=%s\n' "$primary" "$token" > "$home/state/.primary-attestation"
+  chmod 600 "$home/state/.primary-attestation"
   printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
   fm_git_worktree "$proj" "$wt" "wt-$name"
   touch "$home/state/.last-watcher-beat"
@@ -563,6 +608,8 @@ read_launch_record() {
   IFS='|' read -r CASE_DIR HOME_DIR PROJ_DIR WT_DIR FAKEBIN_DIR PRIMARY_ROOT <<EOF
 $1
 EOF
+  PRIMARY_ATTESTATION=$(awk -F= '$1 == "token" {print substr($0, index($0, "=") + 1); exit}' \
+    "$HOME_DIR/state/.primary-attestation")
 }
 
 test_every_verified_harness_launches_with_its_home_declaration() {
@@ -574,6 +621,7 @@ test_every_verified_harness_launches_with_its_home_declaration() {
     pid=$(start_declared_agent "$WT_DIR" "$id-shell" "$HOME_DIR")
     out=$(cd "$PRIMARY_ROOT" && HOME="$HOME_DIR" GROK_HOME="$HOME_DIR/.grok" \
       FM_ROOT_OVERRIDE="$PRIMARY_ROOT" FM_HOME="$HOME_DIR" \
+      FM_PRIMARY_ATTESTATION="$PRIMARY_ATTESTATION" \
       FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
       FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
       FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" FM_FAKE_PANE_PATH="$WT_DIR" FM_FAKE_PANE_PID="$pid" \
@@ -620,15 +668,18 @@ make_primary_home() {
 test_primary_scope_requires_authoritative_primary_proof() {
   # Named primary_home, not home: the sourced libraries carry their own `home`
   # local, and reusing the name here makes shellcheck read the two as one.
-  local primary_home out
+  local primary_home out token
   primary_home=$(make_primary_home "$TMP_ROOT/scope-home")
   out=$( . "$ROOT/bin/fm-primary-scope-lib.sh" \
     && fm_primary_scope_matches "$primary_home" "$primary_home/state" && printf 'primary' || printf 'not-primary' )
   [ "$out" = not-primary ] || fail "a markerless process without primary proof matched primary scope"
+  token="scope-$RUN_TAG"
+  printf 'root=%s\ntoken=%s\n' "$primary_home" "$token" > "$primary_home/state/.primary-attestation"
+  chmod 600 "$primary_home/state/.primary-attestation"
   out=$(cd "$primary_home" && env \
     -u FM_AGENT_ROLE -u FM_AGENT_TASK -u FM_AGENT_OWNER_HOME -u FM_ROOT \
     FM_ROOT_OVERRIDE="$primary_home" FM_HOME="$primary_home" \
-    FM_STATE_OVERRIDE="$primary_home/state" \
+    FM_STATE_OVERRIDE="$primary_home/state" FM_PRIMARY_ATTESTATION="$token" \
     bash -c '. "$1" && fm_primary_scope_matches "$2" "$2/state" && printf primary || printf not-primary' _ \
     "$ROOT/bin/fm-primary-scope-lib.sh" "$primary_home")
   [ "$out" = primary ] || fail "a normalized markerless primary did not match primary scope"
@@ -928,6 +979,7 @@ test_spawn_settles_on_proc_evidence_over_a_lying_pane_path() {
   pid=$(start_declared_agent "$WT_DIR" "$id-shell" "$HOME_DIR")
 
   out=$(cd "$PRIMARY_ROOT" && FM_ROOT_OVERRIDE="$PRIMARY_ROOT" FM_HOME="$HOME_DIR" \
+    FM_PRIMARY_ATTESTATION="$PRIMARY_ATTESTATION" \
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
@@ -951,6 +1003,7 @@ test_spawn_does_not_promote_an_unproven_pane_path() {
   rec=$(make_launch_case settle-hint "$id")
   read_launch_record "$rec"
   out=$(cd "$PRIMARY_ROOT" && FM_ROOT_OVERRIDE="$PRIMARY_ROOT" FM_HOME="$HOME_DIR" \
+    FM_PRIMARY_ATTESTATION="$PRIMARY_ATTESTATION" \
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_SPAWN_NO_GUARD=1 FM_SPAWN_WT_WAIT_SECS=1 TMUX="fake,1,0" \
@@ -1507,6 +1560,8 @@ test_forged_primary_role_is_refused_from_worker_ancestry
 test_primary_ancestry_refuses_unreadable_process_environment
 test_primary_ancestry_refuses_any_inherited_worker_marker
 test_reparented_markerless_worker_is_refused
+test_primary_origin_requires_state_attestation
+test_process_environment_fallback_preserves_spaces
 test_unreadable_task_start_proof_remains_contested
 test_task_pid_index_distinguishes_complete_empty_from_incomplete_scan
 test_task_pid_index_ignores_foreign_uid_processes

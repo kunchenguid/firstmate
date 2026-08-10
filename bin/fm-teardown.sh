@@ -1224,6 +1224,18 @@ validate_child_backend() {
   printf '%s\n' "$child_backend"
 }
 
+teardown_remove_child_home_locked() {
+  local child_home=$1 child_id=$2 state_scope=$3 home_scope=$4 lock_path
+  lock_path=$(fm_config_inherit_lock_path "$child_home") || return 1
+  fm_lock_acquire_wait "$lock_path" || return 1
+  (
+    trap 'fm_lock_release "$lock_path" || true' EXIT
+    cleanup_firstmate_home_children "$child_home" || exit 1
+    remove_firstmate_home "$child_home" "child firstmate home" "$child_id" \
+      "$state_scope" "$home_scope" || exit 1
+  )
+}
+
 cleanup_firstmate_home_children() {
   local home=$1 sub_state child_meta child_id child_backend child_t child_wt child_proj child_kind child_home
   local child_retire_staged child_retire_source child_resolved_handoff child_slot_retain_verdict
@@ -1293,11 +1305,9 @@ cleanup_firstmate_home_children() {
       if [ "$child_slot_returned" = 1 ] && [ -n "$child_home" ]; then
         teardown_cleanup_returned_slot "$child_home" "$child_id" "$home" || return 1
       elif [ -n "$child_home" ] && [ -d "$child_home" ]; then
-        cleanup_firstmate_home_children "$child_home" || return 1
         # Nested homes belong to their immediate parent home's state and stamp
         # scope, not to the top-level primary.
-        remove_firstmate_home "$child_home" "child firstmate home" "$child_id" \
-          "$sub_state" "$home" || return 1
+        teardown_remove_child_home_locked "$child_home" "$child_id" "$sub_state" "$home" || return 1
       fi
       if [ "$child_retire_staged" = 1 ] \
          && ! fm_pending_reply_finalize_force_retire_task \

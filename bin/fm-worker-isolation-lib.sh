@@ -42,6 +42,7 @@
 # Every operational-home variable a firstmate script reads. Extend here, not at
 # a call site, when a new home override is introduced.
 _FM_WORKER_ISOLATION_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$_FM_WORKER_ISOLATION_LIB_DIR/fm-process-environ-lib.sh"
 FM_WORKER_ISOLATION_HOME_VARS="FM_HOME FM_ROOT FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE FM_PENDING_REPLY_DIR_OVERRIDE STATE"
 if [ "${_FM_WORKER_ISOLATION_SNAPSHOT_READY:-0}" != 1 ]; then
   _FM_WORKER_ISOLATION_SNAPSHOT_READY=1
@@ -148,19 +149,7 @@ fm_worker_paths_same() {
 }
 
 fm_worker_process_environ() {
-  local pid=$1 dump
-  case "$pid" in
-    ''|*[!0-9]*) return 1 ;;
-  esac
-  if [ -r "/proc/$pid/environ" ]; then
-    dump=$( { tr '\0' '\n' < "/proc/$pid/environ"; } 2>/dev/null ) || return 1
-  else
-    command -v ps >/dev/null 2>&1 || return 1
-    dump=$(ps eww -p "$pid" -o command= 2>/dev/null) || return 1
-    dump=$(printf '%s\n' "$dump" | tr ' ' '\n')
-  fi
-  [ -n "$dump" ] || return 1
-  printf '%s' "$dump"
+  fm_process_environ "$1"
 }
 
 fm_worker_process_ppid() {
@@ -269,10 +258,7 @@ fm_worker_primary_origin_proven() {
   [ "$(pwd -P 2>/dev/null || true)" = "$root_real" ] || return 1
   [ ! -e "$root_real/.fm-secondmate-home" ] || return 1
   [ ! -L "$root_real/.fm-secondmate-home" ] || return 1
-  if [ "$home_real" = "$root_real" ] \
-    && { [ -e "$state_real/.primary-attestation" ] || [ -L "$state_real/.primary-attestation" ]; }; then
-    fm_worker_primary_attestation_matches "$root_real" || return 1
-  fi
+  fm_worker_primary_attestation_matches "$root_real" || return 1
   git_dir=$(git -C "$root_real" rev-parse --git-dir 2>/dev/null) || return 1
   git_common=$(git -C "$root_real" rev-parse --git-common-dir 2>/dev/null) || return 1
   [ "$git_dir" = "$git_common" ] || return 1
