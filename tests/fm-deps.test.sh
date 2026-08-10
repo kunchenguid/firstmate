@@ -875,6 +875,44 @@ test_check_only_reports_actions_without_processing_them() {
   pass "check-only mode reports pending actions without processing them"
 }
 
+test_stale_ownerless_nudges_do_not_block_or_collide() {
+  local fixture marker claim old_home old_commit replacement log status
+  fixture="$TMP_ROOT/stale-ownerless-nudge"
+  marker="$fixture/state/.secondmate-nudge-pending/one.pending"
+  claim="$fixture/state/.fm-deps-pending/secondmate-nudge-one.claimed"
+  log="$fixture/send.log"
+  mkdir -p "$fixture/bin"
+  old_home=$(create_firstmate_action_home "$fixture" one old)
+  old_commit=$(git -C "$old_home" rev-parse HEAD)
+  register_firstmate_action_target "$fixture" one "$old_home"
+  fm_secondmate_nudge_write "$fixture/state" one "$old_home" "$old_commit" \
+    AGENTS.md "$FM_SECOND_MATE_NUDGE_MESSAGE" 0
+
+  FM_ROOT="$fixture" FM_HOME="$fixture" firstmate_update_actions_pending
+  status=$?
+  [ "$status" -eq 0 ] || fail "live ownerless nudge was not treated as actionable"
+  rm -f "$fixture/state/one.meta"
+  FM_ROOT="$fixture" FM_HOME="$fixture" firstmate_update_actions_pending
+  status=$?
+  [ "$status" -eq 1 ] || fail "retired ownerless nudge still blocked Firstmate updates"
+  assert_present "$marker" "read-only stale detection removed the ownerless nudge"
+
+  replacement=$(create_firstmate_action_home "$fixture" one replacement)
+  register_firstmate_action_target "$fixture" one "$replacement"
+  printf '%s\n' '#!/usr/bin/env bash' \
+    'printf '\''%s\n'\'' "$1" >> "$FM_DEPS_TEST_LOG"' > "$fixture/bin/fm-send.sh"
+  chmod +x "$fixture/bin/fm-send.sh"
+  FM_ROOT="$fixture" FM_HOME="$fixture" persist_firstmate_update_actions no fm-one
+  FM_ROOT="$fixture" FM_HOME="$fixture" FM_DEPS_TEST_LOG="$log" \
+    process_pending_firstmate_actions
+  assert_grep 'fm-one' "$log" "reassigned secondmate did not receive its new post-update nudge"
+  assert_absent "$marker" "successful replacement nudge retained the shared marker"
+  assert_absent "$claim" "stale ownerless nudge retirement retained its claim"
+  assert_absent "$fixture/state/.fm-deps-pending/firstmate-actions.pending" \
+    "stale ownerless nudge collision retained the action inventory"
+  pass "stale ownerless nudges neither block updates nor collide with reassignment"
+}
+
 test_firstmate_actions_are_durable_and_retry_every_target() {
   local fixture log out status pending nudge one_home one_commit replacement before after
   local manifest_contents
@@ -1399,6 +1437,7 @@ test_host_lock_identity_probes_are_bounded
 test_host_lock_first_creation_race_is_revalidated
 test_invalid_pending_action_directory_stops_run
 test_check_only_reports_actions_without_processing_them
+test_stale_ownerless_nudges_do_not_block_or_collide
 test_firstmate_actions_are_durable_and_retry_every_target
 test_remote_secondmate_actions_use_shared_retry_markers
 test_prepared_remote_update_journal_retries_before_nudge
