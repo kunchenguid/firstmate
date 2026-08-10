@@ -85,6 +85,8 @@ test_return_gate_orders_catchup_before_bearings() {
   printf 'repair-task.status: blocked synthetic dependency\n' > "$dir/home/state/.subsuper-escalations"
   printf 'fm away-mode inject WEDGED: 4555s undelivered\n' > "$dir/home/state/.subsuper-inject-wedged"
   printf '2\n' > "$dir/home/state/.subsuper-seen-wake-seq"
+  printf '1784074271\t2\tcheck\trepair-check\tcheck: repair required\n' > "$dir/home/state/.subsuper-pending-wake"
+  printf '1784074271\t2\trepair-check\tcheck: repair required\n' > "$dir/home/state/.subsuper-seen-wake-checks"
   {
     printf '1784074271\t2\tsignal\trepair-task.status\tsignal: synthetic status\n'
     printf 'wake annotation: latest wake-EVENT observed at drain, not current state: repair-task.status: blocked synthetic dependency\n'
@@ -106,6 +108,8 @@ test_return_gate_orders_catchup_before_bearings() {
   [ "$(wc -l < "$dir/home/stop.log" | tr -d ' ')" -eq 1 ] || fail "return begin did not stop away mode exactly once"
   [ -s "$dir/home/state/.fake-drain" ] || fail "blocked return acknowledged its emitted wake before handling completed"
   [ ! -e "$dir/home/state/.fake-drain-acks" ] || fail "blocked return crossed the post-handling acknowledgement boundary"
+  [ -e "$dir/home/state/.subsuper-pending-wake" ] || fail "blocked return cleared the pending-wake journal before catch-up succeeded"
+  [ -e "$dir/home/state/.subsuper-seen-wake-checks" ] || fail "blocked return cleared the check dedupe ledger before catch-up succeeded"
 
   # The exact incident regression: Bearings is an ordinary request and must
   # refuse before reading/rendering while this shared gate remains open.
@@ -143,6 +147,8 @@ test_return_gate_orders_catchup_before_bearings() {
   [ "$(cat "$dir/home/state/.fake-drain-acks" 2>/dev/null || true)" = 2 ] \
     || fail "explicit post-handling acknowledgement used the wrong wake sequence"
   [ ! -e "$dir/home/state/.subsuper-seen-wake-seq" ] || fail "successful check left the away queue cursor behind"
+  [ ! -e "$dir/home/state/.subsuper-pending-wake" ] || fail "successful check left the pending-wake journal behind"
+  [ ! -e "$dir/home/state/.subsuper-seen-wake-checks" ] || fail "successful check left the check dedupe ledger behind"
 
   out=$(run_return "$dir" check) || fail "an already-clear repeated check should be idempotent: $out"
   [ ! -e "$gate" ] || fail "idempotent clear check recreated a gate"

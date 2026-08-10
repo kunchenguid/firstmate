@@ -125,7 +125,9 @@ clear_delivery_artifacts() {
     "$STATE/.subsuper-escalations" \
     "$STATE/.subsuper-escalations.since" \
     "$STATE/.subsuper-inject-wedged" \
-    "$STATE/.subsuper-seen-wake-seq"
+    "$STATE/.subsuper-seen-wake-seq" \
+    "$STATE/.subsuper-pending-wake" \
+    "$STATE/.subsuper-seen-wake-checks"
 }
 
 return_guard() {
@@ -205,8 +207,8 @@ return_reconcile() {
     return 3
   fi
 
-  rm -f "$GATE"
-  clear_delivery_artifacts
+  clear_delivery_artifacts || { rm -f "$evidence" "$blockers" "$drain_err"; return 1; }
+  rm -f "$GATE" || { rm -f "$evidence" "$blockers" "$drain_err"; return 1; }
   rm -f "$evidence" "$blockers" "$drain_err"
   printf 'fm-afk-return: catch-up clear; ordinary captain work may proceed\n'
   return 0

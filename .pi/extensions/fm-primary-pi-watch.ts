@@ -89,6 +89,7 @@ const fmRoot = process.env.FM_ROOT_OVERRIDE || root;
 const state = process.env.FM_STATE_OVERRIDE || `${fmHome}/state`;
 const config = process.env.FM_CONFIG_OVERRIDE || `${fmHome}/config`;
 const armScript = `${fmRoot}/bin/fm-watch-arm.sh`;
+const watchScript = `${fmRoot}/bin/fm-watch.sh`;
 const armTreeRetireScript = `${fmRoot}/bin/fm-pi-arm-tree-retire.sh`;
 const marker = `${state}/.pi-watch-extension-loaded`;
 const extensionVersion = `sha256:${createHash("sha256").update(readFileSync(extensionFile)).digest("hex")}`;
@@ -164,7 +165,7 @@ function terminateArmTree(armChild: ChildProcess): boolean {
     if (armChild.exitCode !== null || armChild.signalCode !== null) return true;
     const token = armTreeTokens.get(armChild);
     if (!token) return false;
-    const result = spawnSync("bash", [armTreeRetireScript, String(pid), token], {
+    const result = spawnSync("bash", [armTreeRetireScript, String(pid), token, state, watchScript, fmHome], {
       stdio: "ignore",
       windowsHide: true,
     });

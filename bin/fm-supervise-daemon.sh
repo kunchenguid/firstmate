@@ -1322,13 +1322,13 @@ queued_wake_cursor_advance() {  # <cursor-file> <seq>
 }
 
 queued_wake_check_is_duplicate() {  # <state> <key> <payload>
-  local state=$1 key=$2 payload=$3 ledger seen_epoch seen_seq seen_key seen_payload
+  local state=$1 key=$2 payload=$3 ledger _seen_epoch seen_seq seen_key seen_payload
   ledger="$state/.subsuper-seen-wake-checks"
   [ -r "$ledger" ] || return 1
-  while IFS="$(printf '\t')" read -r seen_epoch seen_seq seen_key seen_payload; do
+  while IFS="$(printf '\t')" read -r _seen_epoch seen_seq seen_key seen_payload; do
     [ "$seen_key" = "$key" ] || continue
-    [ "$seen_payload" = "$payload" ] || return 1
     fm_wake_record_seq_present "$seen_seq" && return 0
+    [ "$seen_payload" = "$payload" ] || return 1
     escalate_buffer_items "$state/.subsuper-escalations" | grep -F -x -- "$payload" >/dev/null 2>&1
     return $?
   done < "$ledger"

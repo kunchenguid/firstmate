@@ -25,7 +25,8 @@ install_pi_watch_extension_fixture() {
   mkdir -p "$repo/bin"
   cp "$ROOT/bin/fm-operational-input.sh" "$repo/bin/fm-operational-input.sh"
   cp "$ROOT/bin/fm-pi-arm-tree-retire.sh" "$repo/bin/fm-pi-arm-tree-retire.sh"
-  chmod +x "$repo/bin/fm-operational-input.sh" "$repo/bin/fm-pi-arm-tree-retire.sh"
+  cp "$ROOT/bin/fm-wake-lib.sh" "$repo/bin/fm-wake-lib.sh"
+  chmod +x "$repo/bin/fm-operational-input.sh" "$repo/bin/fm-pi-arm-tree-retire.sh" "$repo/bin/fm-wake-lib.sh"
   cat > "$repo/node_modules/@earendil-works/pi-coding-agent/package.json" <<'JSON'
 {"name":"@earendil-works/pi-coding-agent","type":"module","exports":"./index.js"}
 JSON
@@ -262,8 +263,14 @@ test_pi_afk_windows_handoff_retires_exact_tree() {
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
+. "$(dirname "$0")/fm-wake-lib.sh"
 sleep 300 &
 watcher=$!
+mkdir -p "$STATE/.watch.lock"
+printf '%s\n' "$watcher" > "$STATE/.watch.lock/pid"
+printf '%s\n' "$FM_HOME" > "$STATE/.watch.lock/fm-home"
+printf '%s\n' "$(dirname "$0")/fm-watch.sh" > "$STATE/.watch.lock/watcher-path"
+fm_pid_identity "$watcher" > "$STATE/.watch.lock/pid-identity"
 printf '%s\n' "$watcher" > "${FM_FAKE_WATCHER_FILE:?}"
 printf 'start=%s watcher=%s\n' "$$" "$watcher" >> "${FM_ARM_LOG:?}"
 trap 'kill -TERM "$watcher" 2>/dev/null || true; wait "$watcher" 2>/dev/null || true; exit 0' TERM INT
@@ -348,6 +355,64 @@ EOF
   expect_code 0 "$status" "Pi Windows AFK handoff must retire the exact wrapper and watcher identities"
   [ -z "$out" ] || fail "Pi Windows AFK tree-retirement test printed output: $out"
   pass "Pi Windows AFK handoff retires one identity-bounded arm tree"
+}
+
+test_pi_afk_windows_partial_tree_retirement_fails_closed() {
+  local dir home state fakebin ready token watch_path wrapper watcher expected current out status
+  dir="$TMP_ROOT/pi-afk-windows-partial-tree"
+  home="$dir/home"
+  state="$home/state"
+  fakebin="$dir/bin"
+  ready="$dir/ready"
+  token=0123456789abcdef0123456789abcdef
+  watch_path="$dir/fm-watch.sh"
+  mkdir -p "$state" "$fakebin"
+  cat > "$fakebin/taskkill.exe" <<'SH'
+#!/usr/bin/env bash
+pid=
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = /PID ] && [ "$#" -ge 2 ]; then pid=$2; shift 2; continue; fi
+  shift
+done
+case "$pid" in ''|*[!0-9]*) exit 2 ;; esac
+kill -KILL "$pid" 2>/dev/null || true
+exit 0
+SH
+  chmod +x "$fakebin/taskkill.exe"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_PI_ARM_TREE_TOKEN="$token" FM_READY_FILE="$ready" FM_WATCH_PATH="$watch_path" \
+    bash -c '
+      . "$1"
+      sleep 300 &
+      watcher=$!
+      mkdir -p "$STATE/.watch.lock"
+      printf "%s\n" "$watcher" > "$STATE/.watch.lock/pid"
+      printf "%s\n" "$FM_HOME" > "$STATE/.watch.lock/fm-home"
+      printf "%s\n" "$FM_WATCH_PATH" > "$STATE/.watch.lock/watcher-path"
+      fm_pid_identity "$watcher" > "$STATE/.watch.lock/pid-identity"
+      {
+        printf "%s\n" "$watcher"
+        cat "$STATE/.watch.lock/pid-identity"
+      } > "$FM_READY_FILE"
+      wait "$watcher"
+    ' _ "$ROOT/bin/fm-wake-lib.sh" &
+  wrapper=$!
+  for _ in $(seq 1 300); do [ -s "$ready" ] && break; sleep 0.01; done
+  [ -s "$ready" ] || fail "partial Windows retirement fixture did not publish watcher identity"
+  watcher=$(head -1 "$ready")
+  expected=$(tail -n +2 "$ready")
+  set +e
+  out=$(PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-pi-arm-tree-retire.sh" "$wrapper" "$token" "$state" "$watch_path" "$home" 2>&1)
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "partial Windows tree kill was accepted despite a surviving watcher identity"
+  current=$(FM_HOME="$home" FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' \
+    _ "$ROOT/bin/fm-wake-lib.sh" "$watcher" 2>/dev/null || true)
+  [ "$current" = "$expected" ] || fail "partial Windows fixture did not retain the recorded watcher identity"
+  kill -TERM "$watcher" 2>/dev/null || true
+  wait "$wrapper" 2>/dev/null || true
+  [ -z "$out" ] || fail "partial Windows tree retirement printed output: $out"
+  pass "Pi Windows AFK retirement rejects a surviving recorded watcher"
 }
 
 test_pi_afk_handoff_is_home_scoped() {
@@ -2437,6 +2502,7 @@ EOF
 test_pi_extension_reports_external_healthy_watcher
 test_pi_afk_handoff_yields_and_resumes_exact_cycle
 test_pi_afk_windows_handoff_retires_exact_tree
+test_pi_afk_windows_partial_tree_retirement_fails_closed
 test_pi_afk_handoff_is_home_scoped
 test_pi_tool_returns_agent_tool_result
 test_pi_redundant_tool_call_is_owned_noop

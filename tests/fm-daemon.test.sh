@@ -694,7 +694,7 @@ test_away_queue_handoff_classifies_once_without_consuming() {
   [ "$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')" -eq 2 ] \
     || fail "away queue cursor delivered an actionable event twice"
 
-  append_wake "$state" check handoff-review "check: review ready"
+  append_wake "$state" check handoff-review "check: review ready with newer diagnostics"
   FM_STATE_OVERRIDE="$state" bash -c '
     . "$1"
     . "$2"
@@ -704,7 +704,7 @@ test_away_queue_handoff_classifies_once_without_consuming() {
   [ "$(cat "$state/.subsuper-seen-wake-seq")" = 6 ] \
     || fail "away queue classifier did not advance past a later logical duplicate"
   [ "$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')" -eq 2 ] \
-    || fail "a handoff duplicate appended after the first snapshot was delivered twice"
+    || fail "a same-key handoff observation with changed diagnostics was delivered twice"
 
   latest=$(awk -F '\t' '$3 == "check" && $4 == "handoff-review" { row = $0 } END { print row }' "$state/.wake-queue")
   printf '%s\n' "$latest" > "$state/.subsuper-pending-wake"
