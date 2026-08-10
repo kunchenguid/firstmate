@@ -231,7 +231,7 @@ test_attached_arm_still_fails_on_a_wake_it_did_not_deliver() {
 }
 
 test_rearm_resurfaces_durable_queue_and_remote_open_decision() {
-  local dir home state fakebin result armout drainout status watcher_pid sequence generation
+  local dir home state fakebin result armout drainout status watcher_pid sequence generation decision_successor
   dir=$(make_case rearm-resurface)
   home="$dir/home"
   state="$dir/state"
@@ -316,6 +316,9 @@ test_rearm_resurfaces_durable_queue_and_remote_open_decision() {
   wait "$ARM_PID" 2>/dev/null || true
   start_rearm_arm "$home" "$state" "$fakebin" "$dir/decision-only-arm.out"
   wait_for_exit "$ARM_PID" 80 || fail "decision-only re-arm did not surface the open decision"
+  start_rearm_arm "$home" "$state" "$fakebin" "$dir/decision-handling-successor.out"
+  is_live_non_zombie "$ARM_PID" || fail "decision handling successor re-triggered before the drain"
+  decision_successor=$ARM_PID
   FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/decision-only-drain.out" \
     2> "$dir/decision-only-drain.err" || fail "decision-only drain after re-arm recovery failed"
   grep -F 'ios [key=remote-signoff] needs-decision: remote secondmate is held for captain sign-off' \
@@ -325,7 +328,13 @@ test_rearm_resurfaces_durable_queue_and_remote_open_decision() {
   generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$dir/decision-only-drain.err")
   [ "$sequence" = 0 ] && [ -n "$generation" ] \
     || fail "decision-only recovery did not require generation-bound post-handling acknowledgement"
+  is_live_non_zombie "$decision_successor" \
+    || fail "decision-only drain spuriously re-triggered its live handling successor"
+  ! grep -F 'check: rearm-resurface' "$dir/decision-handling-successor.out" >/dev/null \
+    || fail "decision-only handling successor emitted recursive recovery"
 
+  kill -TERM "$decision_successor" 2>/dev/null || fail "could not interrupt decision handling successor"
+  wait "$decision_successor" 2>/dev/null || true
   start_rearm_arm "$home" "$state" "$fakebin" "$dir/interrupted-decision-arm.out"
   wait_for_exit "$ARM_PID" 80 || fail "interrupted decision handling was not recovered on successor re-arm"
   grep -F 'check: rearm-resurface' "$dir/interrupted-decision-arm.out" >/dev/null \
@@ -433,20 +442,27 @@ test_interrupted_handling_is_redrained_on_rearm() {
   grep "$(printf '\tsignal\tinterrupted.status\t')" "$state/.wake-queue" >/dev/null \
     || fail "delivered wake was not durable before handling"
 
+  start_rearm_arm "$home" "$state" "$fakebin" "$dir/crash-gap-recovery-arm.out"
+  wait_for_exit "$ARM_PID" 80 || fail "re-arm after a pre-successor crash stranded the durable wake"
+  grep -F 'check: rearm-resurface' "$dir/crash-gap-recovery-arm.out" >/dev/null \
+    || fail "re-arm after a pre-successor crash did not re-surface the durable wake"
+  grep "$(printf '\tsignal\tinterrupted.status\t')" "$state/.wake-queue" >/dev/null \
+    || fail "pre-successor crash recovery removed the unacknowledged durable wake"
+
+  start_rearm_arm "$home" "$state" "$fakebin" "$dir/handling-successor-arm.out"
+  is_live_non_zombie "$ARM_PID" \
+    || fail "expected handling successor looped on the pending durable wake"
+  ! grep -F 'check: rearm-resurface' "$dir/handling-successor-arm.out" >/dev/null \
+    || fail "expected handling successor emitted a recursive recovery wake"
   FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/interrupted-drain.out" \
     2> "$dir/interrupted-drain.err" || fail "handling drain did not expose the durable wake"
   grep "$(printf '\tsignal\tinterrupted.status\t')" "$dir/interrupted-drain.out" >/dev/null \
     || fail "handling drain did not present the durable wake"
   grep "$(printf '\tsignal\tinterrupted.status\t')" "$state/.wake-queue" >/dev/null \
     || fail "interrupted handling removed the unacknowledged durable wake"
+  is_live_non_zombie "$ARM_PID" || fail "handling drain stopped its live successor"
 
-  start_rearm_arm "$home" "$state" "$fakebin" "$dir/handling-successor-arm.out"
-  is_live_non_zombie "$ARM_PID" \
-    || fail "expected pre-handling successor looped on the pending durable wake"
-  ! grep -F 'check: rearm-resurface' "$dir/handling-successor-arm.out" >/dev/null \
-    || fail "expected pre-handling successor emitted a recursive recovery wake"
-
-  kill -TERM "$ARM_PID" 2>/dev/null || fail "could not interrupt the pre-handling successor"
+  kill -TERM "$ARM_PID" 2>/dev/null || fail "could not interrupt the handling successor"
   wait "$ARM_PID" 2>/dev/null || true
   case "$(cat "$state/.watcher-down" 2>/dev/null || true)" in
     pending:downtime:*) ;;

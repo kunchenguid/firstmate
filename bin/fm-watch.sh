@@ -743,16 +743,19 @@ if ! fm_recovery_marker_arm_check "$WATCHER_DOWNTIME_MARKER"; then
 fi
 [ "$FM_RECOVERY_MARKER_ACTION" = recover ] && WATCHER_RECOVERY_PENDING=1
 watcher_cleanup() {
-  local cleanup_status=0 marker_kind=downtime owns_lock=0
+  local cleanup_status=0 owns_lock=0 transition=release-lock
   if [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)" = "${WATCHER_PID:-}" ]; then
     owns_lock=1
-    [ -z "${FM_WATCH_DELIVERED_REASON:-}" ] || marker_kind=handling
+    if [ "${WATCHER_RECOVERY_PENDING:-0}" -eq 1 ] \
+      && [ "${FM_WATCH_DELIVERED_REASON:-}" = "check: rearm-resurface" ]; then
+      transition=release-lock-existing
+    fi
   fi
   fm_active_check_stop || cleanup_status=1
   fm_check_output_cleanup
   fm_custom_check_snapshot_cleanup
   if [ "$owns_lock" -eq 1 ] \
-    && ! fm_recovery_transition "$WATCHER_DOWNTIME_MARKER" release-lock "$WATCH_LOCK" "$marker_kind"; then
+    && ! fm_recovery_transition "$WATCHER_DOWNTIME_MARKER" "$transition" "$WATCH_LOCK" downtime; then
     echo "watcher: recovery state could not be persisted; retaining stale lock evidence" >&2
     cleanup_status=1
   fi
@@ -782,6 +785,11 @@ if ! fm_pr_poll_retirement_recover_all "$STATE" "$SCRIPT_DIR/fm-pr-poll.sh"; the
   wake "$reason"
 fi
 
+recovery_surface_after_output() {
+  [ "$1" -eq 0 ] || return 0
+  fm_recovery_marker_begin_handling "$WATCHER_DOWNTIME_MARKER"
+}
+
 resurface_after_downtime() {
   if [ "$WATCHER_RECOVERY_PENDING" -ne 1 ]; then
     if ! fm_recovery_marker_arm_check "$WATCHER_DOWNTIME_MARKER"; then
@@ -790,6 +798,7 @@ resurface_after_downtime() {
     fi
     [ "$FM_RECOVERY_MARKER_ACTION" = recover ] || return 0
   fi
+  FM_WAKE_POST_OUTPUT_ACTION=recovery_surface_after_output
   wake "check: rearm-resurface"
 }
 

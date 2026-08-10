@@ -403,8 +403,21 @@ _fm_atomic_replace() {
   mv -f -- "$1" "$2"
 }
 
+_fm_recovery_marker_write_locked() {
+  local marker=$1 kind=$2 generation=${3:-} tmp
+  case "$kind" in handling|downtime) ;; *) return 1 ;; esac
+  tmp=$(mktemp "${marker}.tmp.XXXXXX") || return 1
+  [ -n "$generation" ] || generation="$(fm_current_pid).$(date +%s).${tmp##*.}"
+  if ! printf 'pending:%s:%s\n' "$kind" "$generation" > "$tmp" \
+    || ! chmod 0600 "$tmp" \
+    || ! _fm_atomic_replace "$tmp" "$marker"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+}
+
 _fm_recovery_marker_publish() {
-  local marker=$1 kind=${2:-downtime} lock tmp token
+  local marker=$1 kind=${2:-downtime} lock
   case "$kind" in handling|downtime) ;; *) return 1 ;; esac
   lock="${marker}.lock"
   fm_lock_acquire_wait "$lock" || return 1
@@ -412,15 +425,34 @@ _fm_recovery_marker_publish() {
     fm_lock_release "$lock"
     return 1
   fi
-  tmp=$(mktemp "${marker}.tmp.XXXXXX") || { fm_lock_release "$lock"; return 1; }
-  token="$(fm_current_pid).$(date +%s).${tmp##*.}"
-  if ! printf 'pending:%s:%s\n' "$kind" "$token" > "$tmp" \
-    || ! chmod 0600 "$tmp" \
-    || ! _fm_atomic_replace "$tmp" "$marker"; then
-    rm -f -- "$tmp"
+  if ! _fm_recovery_marker_write_locked "$marker" "$kind"; then
     fm_lock_release "$lock"
     return 1
   fi
+  fm_lock_release "$lock"
+}
+
+_fm_recovery_marker_begin_handling() {
+  local marker=$1 lock line generation
+  lock="${marker}.lock"
+  fm_lock_acquire_wait "$lock" || return 1
+  if ! fm_recovery_marker_read "$marker"; then
+    fm_lock_release "$lock"
+    return 1
+  fi
+  line=$FM_RECOVERY_MARKER_TOKEN
+  case "$line" in
+    pending:handling:*) ;;
+    pending:downtime:*)
+      generation=${line##*:}
+      if ! _fm_recovery_marker_write_locked "$marker" handling "$generation"; then
+        fm_lock_release "$lock"
+        return 1
+      fi
+      FM_RECOVERY_MARKER_TOKEN="pending:handling:$generation"
+      ;;
+    *) fm_lock_release "$lock"; return 1 ;;
+  esac
   fm_lock_release "$lock"
 }
 
@@ -480,7 +512,8 @@ _fm_recovery_marker_arm_check() {
         fm_lock_release "$FM_WAKE_QUEUE_LOCK"
         return 1
       }
-    if ! mv -- "$marker" "$quarantine/marker"; then
+    if ! mv -- "$marker" "$quarantine/marker" \
+      || ! _fm_recovery_marker_write_locked "$marker" downtime; then
       rmdir "$quarantine" 2>/dev/null || true
       fm_lock_release "$lock"
       fm_lock_release "$FM_WAKE_QUEUE_LOCK"
@@ -502,7 +535,11 @@ _fm_recovery_marker_arm_check() {
     pending:downtime:*) FM_RECOVERY_MARKER_ACTION='recover' ;;
     acked:*)
       if [ -s "$FM_WAKE_QUEUE" ]; then
-        # shellcheck disable=SC2034 # Read by sourcing callers after the arm check.
+        if ! _fm_recovery_marker_write_locked "$marker" downtime; then
+          fm_lock_release "$lock"
+          fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+          return 1
+        fi
         FM_RECOVERY_MARKER_ACTION='recover'
       fi
       ;;
@@ -528,6 +565,17 @@ fm_recovery_transition() {
       _fm_recovery_marker_publish "$marker" "${value:-downtime}" || return 1
       fm_lock_release "$target"
       ;;
+    release-lock-existing)
+      [ -n "$target" ] || return 1
+      local lock="${marker}.lock"
+      fm_lock_acquire_wait "$lock" || return 1
+      if ! fm_recovery_marker_read "$marker"; then
+        fm_lock_release "$lock"
+        return 1
+      fi
+      fm_lock_release "$target"
+      fm_lock_release "$lock"
+      ;;
     clear-stale-lock)
       [ -n "$target" ] || return 1
       _fm_recovery_marker_publish "$marker" "${value:-downtime}" || return 1
@@ -543,6 +591,10 @@ fm_recovery_marker_publish() {
 
 fm_recovery_marker_ack() {
   fm_recovery_transition "$1" acknowledge "$2"
+}
+
+fm_recovery_marker_begin_handling() {
+  _fm_recovery_marker_begin_handling "$1"
 }
 
 fm_recovery_marker_arm_check() {

@@ -153,16 +153,15 @@ if [ ! -s "$FM_WAKE_QUEUE" ]; then
   fm_recovery_marker_snapshot "$RECOVERY_MARKER" || true
   RECOVERY_MARKER_TOKEN=$FM_RECOVERY_MARKER_TOKEN
   case "$RECOVERY_MARKER_TOKEN" in
-    pending:handling:*)
-      fm_recovery_marker_publish "$RECOVERY_MARKER" downtime || {
-        echo "wake drain: decision recovery could not remain durable through handling" >&2
+    pending:downtime:*)
+      fm_recovery_marker_begin_handling "$RECOVERY_MARKER" || {
+        echo "wake drain: decision recovery could not begin handling safely" >&2
         exit 1
       }
-      fm_recovery_marker_snapshot "$RECOVERY_MARKER" || exit 1
       RECOVERY_MARKER_TOKEN=$FM_RECOVERY_MARKER_TOKEN
       RECOVERY_ACK_REQUIRED=true
       ;;
-    pending:*) RECOVERY_ACK_REQUIRED=true ;;
+    pending:handling:*) RECOVERY_ACK_REQUIRED=true ;;
   esac
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   DRAIN_LOCK_HELD=false
@@ -185,9 +184,17 @@ if [ -z "$RECOVERY_MARKER_TOKEN" ]; then
     echo "wake drain: legacy durable wakes could not be adopted safely" >&2
     exit 1
   }
-  fm_recovery_marker_snapshot "$RECOVERY_MARKER" || exit 1
-  RECOVERY_MARKER_TOKEN=$FM_RECOVERY_MARKER_TOKEN
+elif [ "${RECOVERY_MARKER_TOKEN%%:*}" = acked ]; then
+  fm_recovery_marker_publish "$RECOVERY_MARKER" downtime || {
+    echo "wake drain: durable wakes could not enter a fresh recovery generation" >&2
+    exit 1
+  }
 fi
+fm_recovery_marker_begin_handling "$RECOVERY_MARKER" || {
+  echo "wake drain: durable wakes could not begin handling safely" >&2
+  exit 1
+}
+RECOVERY_MARKER_TOKEN=$FM_RECOVERY_MARKER_TOKEN
 
 RAW_ROWS=$(fm_wake_print_deduped "$FM_WAKE_QUEUE") || exit "$?"
 ACK_THROUGH=$(awk -F '\t' '$2 ~ /^[0-9]+$/ && $2 > max { max=$2 } END { print max + 0 }' "$FM_WAKE_QUEUE") || exit 1
