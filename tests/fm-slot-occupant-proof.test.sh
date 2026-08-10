@@ -159,6 +159,25 @@ case "$verdict" in
 esac
 pass "cross-home paused metadata retains a pooled slot"
 rm -f "$FOREIGN_HOME/state/foreign-paused.meta" "$HOME_DIR/data/secondmates.md"
+
+ORDINARY_HOME="$TMP_ROOT/ordinary-home"
+mkdir -p "$ORDINARY_HOME/state"
+fm_write_meta "$ORDINARY_HOME/state/ordinary-paused.meta" \
+  "window=firstmate:fm-ordinary-paused" "worktree=$WORKTREE" \
+  "project=$PROJECT" "kind=ship" "mode=no-mistakes" "home=$ORDINARY_HOME"
+printf '%s\n' \
+  "## Secondmate Backlogs" \
+  "- ordinary-paused - paused task (home: $ORDINARY_HOME; scope: alpha; projects: alpha; added 2026-08-10)" \
+  > "$HOME_DIR/AGENTS.md"
+verdict=$(fm_slot_disposal_verdict "$HOME_DIR/state" task-a "$WORKTREE" \
+  "$HOME_DIR" "$HOME_DIR" crewmate closed herdr lab:pane-a)
+case "$verdict" in
+  "retain: slot is also recorded by task(s) ordinary-paused"*) : ;;
+  *) fail "an ordinary registered task home did not retain the slot: $verdict" ;;
+esac
+pass "registered ordinary task homes retain a pooled slot"
+rm -f "$ORDINARY_HOME/state/ordinary-paused.meta" "$HOME_DIR/AGENTS.md"
+
 verdict=$(fm_slot_disposal_verdict "$HOME_DIR/state" task-a "$WORKTREE" \
   "$HOME_DIR" "$HOME_DIR" crewmate closed herdr lab:pane-a)
 [ "$verdict" = dispose ] \

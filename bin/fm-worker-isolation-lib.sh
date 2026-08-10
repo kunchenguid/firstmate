@@ -134,8 +134,8 @@ fm_worker_paths_same() {
 }
 
 fm_worker_primary_ancestry_clear() {
-  local pid=$$ ppid env
-  while [ "$pid" -gt 1 ]; do
+  local pid=$$ ppid env depth=0
+  while [ "$pid" -gt 1 ] && [ "$depth" -lt 256 ]; do
     if [ -r "/proc/$pid/environ" ]; then
       env=$( { tr '\0' '\n' < "/proc/$pid/environ"; } 2>/dev/null ) || return 1
       printf '%s\n' "$env" | grep -Eq '^FM_AGENT_ROLE=(crewmate|secondmate)$' && return 1
@@ -146,10 +146,11 @@ fm_worker_primary_ancestry_clear() {
     case "$ppid" in
       ''|*[!0-9]*) return 1 ;;
     esac
-    [ "$ppid" -lt "$pid" ] || return 1
+    [ "$ppid" != "$pid" ] || return 1
     pid=$ppid
+    depth=$((depth + 1))
   done
-  return 0
+  [ "$pid" -le 1 ]
 }
 
 fm_worker_primary_origin_proven() {
@@ -188,15 +189,7 @@ fm_worker_primary_origin_proven() {
   [ -d "$home_real/state" ] || return 1
   [ -d "$home_real/data" ] || return 1
   [ -d "$home_real/config" ] || return 1
-  if [ -z "$role" ]; then
-    if [ "$home_real" = "$root_real" ]; then
-      for var in $FM_WORKER_ISOLATION_HOME_VARS STATE; do
-        eval "value=\${$var:-}"
-        [ -z "$value" ] || return 1
-      done
-    fi
-    fm_worker_primary_ancestry_clear || return 1
-  fi
+  fm_worker_primary_ancestry_clear || return 1
   for var in $FM_WORKER_ISOLATION_HOME_VARS STATE; do
     case "$var" in
       FM_HOME) expected=$home_real ;;

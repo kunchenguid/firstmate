@@ -209,6 +209,30 @@ fm_slot_meta_worktree() {
   grep '^worktree=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true
 }
 
+fm_slot_registry_homes() {
+  local file=$1 line candidate section=all
+  [ -e "$file" ] || return 0
+  [ -f "$file" ] && [ -r "$file" ] || return 2
+  case "$file" in
+    */AGENTS.md|*/data/backlog.md) section=none ;;
+  esac
+  while IFS= read -r line; do
+    if [ "$section" = none ]; then
+      case "$line" in
+        '## Secondmate Backlogs') section=all ;;
+        '## '*) section=none ;;
+        *) continue ;;
+      esac
+    fi
+    candidate=$(printf '%s\n' "$line" \
+      | sed -n 's/.*(home:[[:space:]]*\([^;)]*\);.*/\1/p' \
+      | sed 's/[[:space:]]*$//')
+    case "$candidate" in
+      /*) printf '%s\n' "$candidate" ;;
+    esac
+  done < "$file"
+}
+
 # fm_slot_same_path <a> <b>: physical comparison where both paths exist, exact
 # string comparison otherwise, so a recorded slot whose directory is already
 # gone is still recognized as the same reference.
@@ -226,7 +250,7 @@ fm_slot_same_path() {
 # separated.
 fm_slot_meta_referencing_tasks() {
   local state=$1 self=$2 wt=$3 current_home home home_real meta id other
-  local meta_state registry line candidate worktrees found=1 i
+  local meta_state registry registry_homes line candidate worktrees found=1 i
   local -a homes=()
   local -A seen=()
   [ -d "$state" ] || return 1
@@ -269,16 +293,15 @@ fm_slot_meta_referencing_tasks() {
         /*) homes+=("$candidate") ;;
       esac
     done
-    registry="$home_real/data/secondmates.md"
-    if [ -e "$registry" ]; then
-      [ -f "$registry" ] && [ -r "$registry" ] || return 2
-      while IFS= read -r line; do
-        candidate=$(printf '%s\n' "$line" | sed -n 's/.*(home:[[:space:]]*\([^;)]*\);.*/\1/p' | sed 's/[[:space:]]*$//')
+    for registry in "$home_real/data/secondmates.md" \
+      "$home_real/data/backlog.md" "$home_real/AGENTS.md"; do
+      registry_homes=$(fm_slot_registry_homes "$registry") || return 2
+      while IFS= read -r candidate; do
         case "$candidate" in
           /*) homes+=("$candidate") ;;
         esac
-      done < "$registry"
-    fi
+      done <<< "$registry_homes"
+    done
   done
   return "$found"
 }

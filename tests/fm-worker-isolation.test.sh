@@ -208,20 +208,43 @@ test_markerless_worker_is_refused_before_primary_state_resolution() {
 
 test_markerless_worker_is_refused_at_primary_cwd() {
   local out status
-  if out=$(cd "$ROOT" && env \
-    -u FM_AGENT_ROLE -u FM_AGENT_TASK -u FM_AGENT_OWNER_HOME \
-    -u FM_ROOT -u FM_ROOT_OVERRIDE -u FM_STATE_OVERRIDE -u FM_DATA_OVERRIDE \
-    -u FM_PROJECTS_OVERRIDE -u FM_CONFIG_OVERRIDE -u FM_PENDING_REPLY_DIR_OVERRIDE \
-    FM_HOME="$ROOT" FM_ROOT_OVERRIDE="$ROOT" \
-    bash -c '. "$1"; fm_worker_refuse_primary_operation markerless-root' _ \
-    "$ROOT/bin/fm-worker-isolation-lib.sh" 2>&1); then
+  if out=$(cd "$ROOT" && \
+    FM_AGENT_ROLE=crewmate FM_AGENT_TASK=markerless-root-parent \
+    FM_AGENT_OWNER_HOME="$TMP_ROOT/worker-parent" \
+    bash -c 'env -u FM_AGENT_ROLE -u FM_AGENT_TASK -u FM_AGENT_OWNER_HOME \
+      -u FM_ROOT -u FM_ROOT_OVERRIDE -u FM_STATE_OVERRIDE -u FM_DATA_OVERRIDE \
+      -u FM_PROJECTS_OVERRIDE -u FM_CONFIG_OVERRIDE -u FM_PENDING_REPLY_DIR_OVERRIDE \
+      -u STATE FM_HOME="$1" FM_ROOT_OVERRIDE="$1" bash -c '\''
+        . "$2"; fm_worker_refuse_primary_operation markerless-root
+      '\'' _ "$1" "$2"' _ "$ROOT" "$ROOT/bin/fm-worker-isolation-lib.sh" 2>&1); then
     status=0
   else
     status=$?
   fi
   expect_code 1 "$status" "a markerless worker at the primary cwd must be refused"
   assert_contains "$out" "task worker" "the primary-cwd markerless worker refusal lost its reason"
-  pass "markerless workers are refused even at the primary checkout root"
+  pass "markerless workers with worker ancestry are refused at the primary checkout root"
+}
+
+test_forged_primary_role_is_refused_from_worker_ancestry() {
+  local out status
+  if out=$(cd "$ROOT" && \
+    FM_AGENT_ROLE=crewmate FM_AGENT_TASK=forged-primary-parent \
+    FM_AGENT_OWNER_HOME="$TMP_ROOT/worker-parent" \
+    bash -c 'env -u FM_AGENT_ROLE -u FM_AGENT_TASK -u FM_AGENT_OWNER_HOME \
+      -u FM_ROOT -u FM_ROOT_OVERRIDE -u FM_STATE_OVERRIDE -u FM_DATA_OVERRIDE \
+      -u FM_PROJECTS_OVERRIDE -u FM_CONFIG_OVERRIDE -u FM_PENDING_REPLY_DIR_OVERRIDE \
+      -u STATE FM_AGENT_ROLE=primary FM_HOME="$1" FM_ROOT_OVERRIDE="$1" \
+      bash -c '\''
+        . "$2"; fm_worker_refuse_primary_operation forged-primary
+      '\'' _ "$1" "$2"' _ "$ROOT" "$ROOT/bin/fm-worker-isolation-lib.sh" 2>&1); then
+    status=0
+  else
+    status=$?
+  fi
+  expect_code 1 "$status" "a forged primary role must be refused from worker ancestry"
+  assert_contains "$out" "task worker" "the forged primary role refusal lost its worker diagnostic"
+  pass "explicit primary roles still require clean worker ancestry"
 }
 
 test_unreadable_task_start_proof_remains_contested() {
@@ -405,11 +428,13 @@ test_primary_scope_requires_authoritative_primary_proof() {
   out=$( . "$ROOT/bin/fm-primary-scope-lib.sh" \
     && fm_primary_scope_matches "$primary_home" "$primary_home/state" && printf 'primary' || printf 'not-primary' )
   [ "$out" = not-primary ] || fail "a markerless process without primary proof matched primary scope"
-  out=$( FM_AGENT_ROLE=primary FM_ROOT_OVERRIDE="$primary_home" FM_HOME="$primary_home" \
+  out=$(cd "$primary_home" && env \
+    -u FM_AGENT_ROLE -u FM_AGENT_TASK -u FM_AGENT_OWNER_HOME -u FM_ROOT \
+    FM_ROOT_OVERRIDE="$primary_home" FM_HOME="$primary_home" \
     FM_STATE_OVERRIDE="$primary_home/state" \
-    . "$ROOT/bin/fm-primary-scope-lib.sh" \
-    && fm_primary_scope_matches "$primary_home" "$primary_home/state" && printf 'primary' || printf 'not-primary' )
-  [ "$out" = primary ] || fail "an explicitly proven primary did not match primary scope"
+    bash -c '. "$1" && fm_primary_scope_matches "$2" "$2/state" && printf primary || printf not-primary' _ \
+    "$ROOT/bin/fm-primary-scope-lib.sh" "$primary_home")
+  [ "$out" = primary ] || fail "a normalized markerless primary did not match primary scope"
   out=$( export FM_AGENT_ROLE=crewmate FM_AGENT_TASK=w1 FM_AGENT_OWNER_HOME="$primary_home"
     . "$ROOT/bin/fm-primary-scope-lib.sh" \
     && fm_primary_scope_matches "$primary_home" "$primary_home/state" && printf 'primary' || printf 'not-primary' )
@@ -1256,6 +1281,7 @@ test_declaration_refuses_rather_than_emitting_a_partial_prefix
 test_incomplete_worker_identity_refuses_primary_operations
 test_markerless_worker_is_refused_before_primary_state_resolution
 test_markerless_worker_is_refused_at_primary_cwd
+test_forged_primary_role_is_refused_from_worker_ancestry
 test_unreadable_task_start_proof_remains_contested
 test_every_verified_harness_launches_with_its_home_declaration
 test_secondmate_child_receives_only_its_own_home
