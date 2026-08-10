@@ -335,6 +335,62 @@ Malformed JSON, an empty or malformed rule/default array, an unverified harness,
 While the file remains present, no crewmate or scout spawn may proceed without an explicit resolved harness; malformed configuration must be reported and corrected rather than selected around.
 Secondmate homes inherit this file from the primary, so a secondmate's own crewmates apply the same dispatch profile behavior.
 
+### Routed pools (optional)
+
+A rule may additionally carry a `route` id and an ordered `pool`, which turns that rule into a route the shell scripts enforce.
+This is the one part of this file the scripts read as policy rather than as prose, so it is opt-in per home: a config with no `pool` anywhere behaves exactly as the section above describes, and so does a home with no config at all.
+
+```json
+{
+  "_floors": {
+    "<floor name>": { "effort_floor": "<band|WAIVED - why>", "context_ceiling": 0,
+                      "tool_loop": "<verified-agentic|required|not-required>",
+                      "selectable_by_crew_rule": true }
+  },
+  "_models": {
+    "<provider>/<model-id>": { "smart_zone": 0, "effort_expressible": ["<band>"],
+                               "tool_loop": "<verified-agentic|required|not-required>" }
+  },
+  "rules": [
+    { "when": "...", "route": "<ROUTE-ID>", "floor": "<floor name>",
+      "use": { "harness": "<adapter>", "model": "<name>", "effort": "<band>" },
+      "pool": ["<provider>/<model-id>"], "promotion_target": "<ROUTE-ID|NONE - terminal rung>" }
+  ]
+}
+```
+
+A route id is defined by a rule; `default` names which route is the default and carries its profile, so a default pointing at an existing rule is not a second definition.
+The same id on two rules is refused, because every check against it would be meaningless.
+Pool entries and `_models` keys always use the fully qualified `provider/model-id` form; a bare model name resolves against the pool by its model half and is refused when it matches more than one entry.
+Pool order is the failover order, and `promotion_target` names the route a promotion escalates to; neither is traversed automatically.
+
+`_floors` values may stay free-form strings, in which case there is nothing to check.
+An object value declares the three axes a check can mechanically test against `_models`: `effort_floor` as a minimum band that a higher band satisfies and a provider default never establishes, `context_ceiling` as the minimum `smart_zone` a candidate must carry, and `tool_loop` as the minimum recorded loop evidence.
+An `effort_floor` string beginning `WAIVED` waives the effort axis outright, and `selectable_by_crew_rule: false` puts the floor out of reach of every rule.
+A candidate the config lists in a pool but records no evidence for is refused as unverifiable rather than admitted, because unmeasured is not the same as met.
+
+`bin/fm-route-lib.sh` owns these rules, `bin/fm-route.sh` reads them, and `fm-spawn.sh` enforces them at the chokepoint: a ship or scout dispatch in a home with routed pools must name the route it claims with `--route` - or an explicit `--capability-floor` naming exactly one route - and a dispatch outside that route's pool or below its floor is refused naming the route, the exact JSON config path, the configured value and the observed one.
+The route and a digest of the enforced policy surface land in `state/<id>.meta` as `route=` and `route_policy_digest=`, and the recorded `capability_floor=` becomes the route's own.
+Enforcement applies to the next dispatch only; work already under way keeps the record it was dispatched under.
+
+### Model availability record (state/model-health.json)
+
+A private, gitignored, mode-0600 record of which models and providers the fleet currently cannot reach.
+`bin/fm-route-lib.sh` is its only writer, through `bin/fm-route.sh availability hold|release`, and it writes availability alone: a model that keeps failing is recorded unavailable, never demoted, because demotion is a policy change that belongs in the routing config under review.
+
+```json
+{
+  "schema": "fm-model-health.v1",
+  "models":    { "<provider>/<model-id>": { "state": "<state>", "until": 0, "recorded_at": 0, "evidence": "<text>" } },
+  "providers": { "<provider>":            { "state": "<state>", "until": null, "recorded_at": 0, "evidence": "<text>" } }
+}
+```
+
+The state vocabulary is closed to the states the routing config's own failover conditions set: `degraded`, `rate_limited`, `model_unavailable`, `provider_unavailable`, `auth_failure`, `subscription_quota_exhausted`, `daily_quota_exhausted`, and `admin_disabled`.
+A hold with a numeric `until` stops binding on read once that epoch passes, so nothing has to run to forget it; a `null` `until` holds until released explicitly, which is what an authentication failure needs.
+An absent file means no remembered cooldown and never that a model is healthy, while a file that exists and cannot be parsed refuses rather than reading as an empty one.
+Eligibility reads this record and never probes: a route's ordered pool costs nothing to resolve on the happy path, and probing belongs to failure handling.
+
 ## Model registry (config/models.json)
 
 `config/models.json` is an optional local, gitignored registry of the models this home is allowed to route work to, and the enforced copy of its zero-budget rule.

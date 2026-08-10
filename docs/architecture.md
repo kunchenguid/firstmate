@@ -236,6 +236,11 @@ Secondmate launches are exempt because they resolve the secondmate harness and a
 Unsupported effort values are still recorded in task meta when passed to `fm-spawn.sh`, but the launch template omits any effort flag that the selected harness does not accept.
 That keeps spawn launch compatible across claude, codex, opencode, pi, pi-signed, grok, kimi, and muse while preserving the requested profile for later audit.
 
+A home may go further and give a rule a route id with an ordered pool, which is the one part of that file the scripts read as policy.
+Which route a task belongs to stays firstmate's judgment; what the scripts then enforce is the claim, at the spawn chokepoint: the model must be inside that route's pool and must meet the route's floor on the axes the config records evidence for, a substitute after a failure comes only from the same pool in pool order, and a route whose candidates are all ineligible stops and reports rather than degrading below its floor.
+`bin/fm-route-lib.sh` owns those rules, `bin/fm-route.sh` reads them, and `state/model-health.json` is the narrow availability record failover writes ([configuration.md](configuration.md#routed-pools-optional)).
+Enforcement is per dispatch, so activating it never re-checks work already under way.
+
 ## Optional fleet admission control
 
 The same `config/crew-dispatch.json` can carry an optional `_scheduling.admission_control` policy, and firstmate ships with it inert.
