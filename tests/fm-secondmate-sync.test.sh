@@ -755,20 +755,20 @@ test_bootstrap_supersedes_interrupted_update_journals() {
 }
 
 test_bootstrap_sync_journal_recovery_uses_host_lock() {
-  local w c1 c2 fakebin journal marker ready release holder out out2 i
+  local w c1 c2 fakebin journal marker ready release holder out out2 id i started elapsed
   w=$(new_world nudge-journal-host-lock)
   c1=$(head_of "$w/main")
   add_sm_worktree "$w" sm-instr "$c1"
   bump_primary "$w" instr
   c2=$(head_of "$w/main")
   git -C "$w/sm-instr" merge -q --ff-only "$c2"
-  journal="$w/home/state/.secondmate-sync-pending/sm-instr.pending"
-  marker="$w/home/state/.secondmate-nudge-pending/sm-instr.pending"
-  FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" bash -c '
-    . "$1"
-    fm_secondmate_sync_journal_write "$2" updated sm-instr "$3" "$4" "$5" create
-  ' _ "$ROOT/bin/fm-secondmate-nudge-lib.sh" "$w/home/state" "$w/sm-instr" "$c1" "$c2" \
-    || fail "could not prepare updated sync journal"
+  for id in sm-instr sm-two sm-three sm-four sm-five sm-six; do
+    FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" bash -c '
+      . "$1"
+      fm_secondmate_sync_journal_write "$2" updated "$3" "$4" "$5" "$6" create
+    ' _ "$ROOT/bin/fm-secondmate-nudge-lib.sh" "$w/home/state" "$id" "$w/$id" "$c1" "$c2" \
+      || fail "could not prepare updated sync journal for $id"
+  done
   fakebin=$(make_fake_toolchain "$w")
   ready="$w/lock.ready"
   release="$w/lock.release"
@@ -793,28 +793,40 @@ test_bootstrap_sync_journal_recovery_uses_host_lock() {
     fail "sync journal host-lock holder did not start"
   fi
 
+  started=$(date +%s)
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
     FM_DEPS_LOCK_TIMEOUT=1 FM_SEND_SETTLE=0 \
     "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
-  assert_contains "$out" \
-    "NUDGE_SECONDMATES: secondmate sm-instr: deferred: dependency lock is busy" \
-    "sync journal recovery did not defer on the host checkout lock"
-  assert_present "$journal" "host-lock contention consumed the sync journal"
-  assert_absent "$marker" "host-lock contention published a retry marker"
+  elapsed=$(( $(date +%s) - started ))
+  [ "$elapsed" -le 3 ] || fail "sync journal batch repeated the host-lock timeout"
+  for id in sm-instr sm-two sm-three sm-four sm-five sm-six; do
+    journal="$w/home/state/.secondmate-sync-pending/$id.pending"
+    marker="$w/home/state/.secondmate-nudge-pending/$id.pending"
+    assert_contains "$out" \
+      "NUDGE_SECONDMATES: secondmate $id: deferred: dependency lock is busy" \
+      "sync journal recovery did not defer $id on the host checkout lock"
+    assert_present "$journal" "host-lock contention consumed the $id sync journal"
+    assert_absent "$marker" "host-lock contention published a $id retry marker"
+  done
 
+  for id in sm-two sm-three sm-four sm-five sm-six; do
+    rm -f "$w/home/state/.secondmate-sync-pending/$id.pending"
+  done
   : > "$release"
   wait "$holder" || fail "sync journal host-lock holder failed"
   out2=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
     FM_SEND_SETTLE=0 "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+  journal="$w/home/state/.secondmate-sync-pending/sm-instr.pending"
+  marker="$w/home/state/.secondmate-nudge-pending/sm-instr.pending"
   assert_contains "$out2" "BOOTSTRAP_INFO: nudged fm-sm-instr with" \
     "released host lock did not reconcile the sync journal"
   assert_absent "$journal" "reconciled sync journal remained pending"
   assert_absent "$marker" "reconciled sync journal retained its delivered marker"
-  pass "T8j sync journal recovery is serialized by the host checkout lock"
+  pass "T8j sync journal recovery batches under one host checkout lock"
 }
 
 test_bootstrap_retires_obsolete_sync_journals() {
-  local w c1 c2 fakebin journal retired replacement out retired_record
+  local w c1 c2 fakebin journal marker retired replacement out retired_record retired_nudge
   w=$(new_world nudge-journal-retired)
   c1=$(head_of "$w/main")
   add_sm_worktree "$w" sm-instr "$c1"
@@ -844,12 +856,16 @@ test_bootstrap_retires_obsolete_sync_journals() {
   add_sm_worktree "$w" sm-instr "$c1"
   bump_primary "$w" instr
   c2=$(head_of "$w/main")
+  git -C "$w/sm-instr" merge -q --ff-only "$c2"
   journal="$w/home/state/.secondmate-sync-pending/sm-instr.pending"
+  marker="$w/home/state/.secondmate-nudge-pending/sm-instr.pending"
   FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" bash -c '
     . "$1"
-    fm_secondmate_sync_journal_write "$2" prepared sm-instr "$3" "$4" "$5" create
+    fm_secondmate_sync_journal_write "$2" updated sm-instr "$3" "$4" "$5" create
+    fm_secondmate_nudge_write "$2" sm-instr "$3" "$5" AGENTS.md \
+      "$FM_SECOND_MATE_NUDGE_MESSAGE" 0 "" "" "" create
   ' _ "$ROOT/bin/fm-secondmate-nudge-lib.sh" "$w/home/state" "$w/sm-instr" "$c1" "$c2" \
-    || fail "could not prepare reassigned sync journal"
+    || fail "could not prepare reassigned sync records"
   replacement="$w/sm-replacement"
   git -C "$w/main" worktree add -q --detach "$replacement" "$c1"
   printf '%s\n' sm-instr > "$replacement/.fm-secondmate-home"
@@ -863,6 +879,7 @@ test_bootstrap_retires_obsolete_sync_journals() {
   assert_contains "$out" "BOOTSTRAP_INFO: nudged fm-sm-instr with" \
     "reassigned secondmate did not converge after retiring the old journal"
   assert_absent "$journal" "reassigned secondmate retained the old sync journal"
+  assert_absent "$marker" "reassigned secondmate retained a stale retry marker"
   [ "$(head_of "$replacement")" = "$c2" ] \
     || fail "reassigned secondmate did not advance to the primary commit"
   retired_record=$(find "$w/home/state/.secondmate-sync-retired" \
@@ -870,7 +887,12 @@ test_bootstrap_retires_obsolete_sync_journals() {
   [ -n "$retired_record" ] || fail "reassigned sync journal was not quarantined"
   assert_grep "home=$w/sm-instr" "$retired_record" \
     "reassigned journal quarantine lost the former home identity"
-  pass "T8k retired and reassigned identities quarantine obsolete sync journals"
+  retired_nudge=$(find "$w/home/state/.secondmate-sync-retired" \
+    -type f -name nudge.pending -print 2>/dev/null)
+  [ -n "$retired_nudge" ] || fail "reassigned companion nudge was not quarantined"
+  assert_grep "home=$w/sm-instr" "$retired_nudge" \
+    "reassigned nudge quarantine lost the former home identity"
+  pass "T8k obsolete sync journals retire matching stale nudges"
 }
 
 test_bootstrap_nudge_retry_refuses_changed_home() {

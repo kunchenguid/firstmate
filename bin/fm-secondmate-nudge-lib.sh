@@ -31,10 +31,20 @@ fm_secondmate_sync_journal_path() {
 }
 
 fm_secondmate_sync_journal_quarantine() {
-  local state=$1 id=$2 journal retired slot
+  local state=$1 id=$2 home=$3 message=$4 journal marker marker_commit retired slot
+  local quarantine_marker=0
   journal=$(fm_secondmate_sync_journal_path "$state" "$id") || return 1
   [ -e "$journal" ] || [ -L "$journal" ] || return 0
   [ -f "$journal" ] && [ ! -L "$journal" ] || return 1
+  marker=$(fm_secondmate_nudge_marker_path "$state" "$id") || return 1
+  if [ -e "$marker" ] || [ -L "$marker" ]; then
+    marker_commit=$(fm_secondmate_nudge_value "$marker" commit 2>/dev/null || true)
+    if fm_secondmate_sync_commit_is_valid "$marker_commit" \
+      && fm_secondmate_local_nudge_record_matches "$marker" "$id" "$home" \
+        "$marker_commit" AGENTS.md "$message"; then
+      quarantine_marker=1
+    fi
+  fi
   retired="$state/.secondmate-sync-retired"
   if [ -e "$retired" ] || [ -L "$retired" ]; then
     [ -d "$retired" ] && [ ! -L "$retired" ] || return 1
@@ -42,8 +52,13 @@ fm_secondmate_sync_journal_quarantine() {
     [ -d "$retired" ] && [ ! -L "$retired" ] || return 1
   fi
   slot=$(umask 077; mktemp -d "$retired/$id.XXXXXX" 2>/dev/null) || return 1
-  if ! mv -- "$journal" "$slot/action.pending"; then
+  if [ "$quarantine_marker" -eq 1 ] \
+    && ! mv -- "$marker" "$slot/nudge.pending"; then
     rmdir "$slot" 2>/dev/null || true
+    return 1
+  fi
+  if ! mv -- "$journal" "$slot/action.pending"; then
+    [ "$quarantine_marker" -eq 1 ] || rmdir "$slot" 2>/dev/null || true
     return 1
   fi
 }

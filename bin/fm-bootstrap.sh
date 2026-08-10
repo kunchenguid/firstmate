@@ -380,7 +380,8 @@ secondmate_sync() {
     [ -f "$meta" ] && [ "$(fm_meta_get "$meta" kind)" = secondmate ] || {
       registry_home=$(secondmate_registry_field "$DATA/secondmates.md" "$id" home || true)
       if [ -z "$registry_home" ] && [ ! -e "$home" ] && [ ! -L "$home" ]; then
-        if fm_secondmate_sync_journal_quarantine "$STATE" "$id"; then
+        if fm_secondmate_sync_journal_quarantine "$STATE" "$id" "$home" \
+          "$SECOND_MATE_NUDGE_MESSAGE"; then
           return 0
         fi
         echo "NUDGE_SECONDMATES: secondmate $id: send failed: cannot retire obsolete update journal"
@@ -397,7 +398,8 @@ secondmate_sync() {
     fi
     home_real=$VALIDATED_HOME
     [ "$home_real" = "$home" ] || {
-      if fm_secondmate_sync_journal_quarantine "$STATE" "$id"; then
+      if fm_secondmate_sync_journal_quarantine "$STATE" "$id" "$home" \
+        "$SECOND_MATE_NUDGE_MESSAGE"; then
         return 0
       fi
       echo "NUDGE_SECONDMATES: secondmate $id: send failed: cannot retire reassigned update journal"
@@ -460,25 +462,39 @@ secondmate_sync() {
     return "$result"
   }
 
-  secondmate_retry_pending_sync_journals() {
-    local journal id
+  secondmate_recover_pending_sync_journals_under_host_lock() {
+    local journal
     [ -d "$SECOND_MATE_SYNC_PENDING_DIR" ] || return 0
     for journal in "$SECOND_MATE_SYNC_PENDING_DIR"/*.pending; do
       [ -f "$journal" ] || continue
-      id=$(fm_secondmate_nudge_value "$journal" id 2>/dev/null || true)
-      fm_dependency_with_host_lock \
-        secondmate_recover_sync_journal_with_transaction_lock "$journal" \
-        || true
-      case "$FM_DEPENDENCY_LOCK_OUTCOME" in
-        busy)
-          echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: deferred: dependency lock is busy"
-          ;;
-        unavailable)
-          echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: send failed: dependency lock is unavailable"
-          ;;
-        *) ;;
-      esac
+      secondmate_recover_sync_journal_with_transaction_lock "$journal" || true
     done
+  }
+
+  secondmate_report_sync_journal_host_lock_failure() {
+    local reason=$1 journal id
+    for journal in "$SECOND_MATE_SYNC_PENDING_DIR"/*.pending; do
+      [ -f "$journal" ] || continue
+      id=$(fm_secondmate_nudge_value "$journal" id 2>/dev/null || true)
+      echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: $reason"
+    done
+  }
+
+  secondmate_retry_pending_sync_journals() {
+    [ -d "$SECOND_MATE_SYNC_PENDING_DIR" ] || return 0
+    fm_dependency_with_host_lock \
+      secondmate_recover_pending_sync_journals_under_host_lock || true
+    case "$FM_DEPENDENCY_LOCK_OUTCOME" in
+      busy)
+        secondmate_report_sync_journal_host_lock_failure \
+          "deferred: dependency lock is busy"
+        ;;
+      unavailable)
+        secondmate_report_sync_journal_host_lock_failure \
+          "send failed: dependency lock is unavailable"
+        ;;
+      *) ;;
+    esac
   }
 
   fm_ff_before_fast_forward() {
