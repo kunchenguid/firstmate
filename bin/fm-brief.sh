@@ -178,6 +178,13 @@ shell_quote() {
 
 STATUS_FILE=$(shell_quote "$STATE/$ID.status")
 
+IFS= read -r -d '' NO_MISTAKES_ANOMALY_RULE <<'EOF' || true
+   Before appending `blocked:` for a no-mistakes pipeline anomaly that is not a real code defect or shared-daemon error, check the current project's own `AGENTS.md` for an exact, approved, worker-safe bypass that does not touch the shared no-mistakes daemon, edit product code, or require captain authorization.
+   If one exists, apply it directly and independently verify the expected outcome (for example with `gh-axi` or `gh pr checks`) before continuing.
+   Never invent a bypass; if the symptom is not already documented there, append `blocked: {the anomaly}` and stop.
+EOF
+NO_MISTAKES_ANOMALY_RULE=${NO_MISTAKES_ANOMALY_RULE%$'\n'}
+
 if [ "$KIND" = secondmate ]; then
 SECONDMATE_PROJECTS=""
 idx=1
@@ -335,6 +342,7 @@ The report is the only thing that survives, so anything worth keeping must be in
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+$NO_MISTAKES_ANOMALY_RULE
 
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
@@ -451,6 +459,7 @@ $RULE1
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+$NO_MISTAKES_ANOMALY_RULE
 
 # Project memory
 If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.
