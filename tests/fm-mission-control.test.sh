@@ -3440,6 +3440,143 @@ test_control_targets_are_escaped() {
 }
 
 
+# A fielded fact pack stays structured from its filed schema through the board
+# wire, while every older or unusable shape keeps the proven textarea path.
+test_schema_driven_fact_forms() {
+  local snap state board log chrome
+  snap=$TMP_ROOT/schema-facts.json
+  state=$TMP_ROOT/schema-facts-state
+  board=$TMP_ROOT/schema-facts.html
+  mkdir -p "$state"
+  snapshot_json '[
+    {"state":"queued","id":"field-one","captain_actionable":true,"title":"Supply portfolio identity facts",
+     "hold_reason":"The reconciliation needs identity facts","repo":"sample","decision_kind":"fact",
+     "decision_expects":"account identity, statement date, and valuation facts",
+     "decision_group":"portfolio-reconciliation","decision_fact_fields":[
+       {"label":"Account name","key":"account_name","type":"text","required":true,"hint":"Use the statement heading."},
+       {"label":"Statement date","key":"statement_date","type":"date","required":true},
+       {"label":"Units held","key":"units_held","type":"number","required":false,"unit":"shares"},
+       {"label":"Market value","key":"market_value","type":"money","required":true,"unit":"GBP","example":"125000.50"},
+       {"label":"Custodian","key":"custodian","type":"enum","required":false,"enum_options":["North Bank","South Bank","Other"]},
+       {"label":"Reconciliation detail","key":"detail","type":"longtext","required":false}]},
+    {"state":"queued","id":"field-two","captain_actionable":true,"title":"Supply portfolio source facts",
+     "hold_reason":"The reconciliation needs source facts","repo":"sample","decision_kind":"fact",
+     "decision_expects":"source account, date, and valuation facts","decision_group":"portfolio-reconciliation",
+     "decision_fact_fields":[
+       {"label":"Account name","key":"account_name","type":"text","required":true,"hint":"Use the statement heading."},
+       {"label":"Statement date","key":"statement_date","type":"date","required":true},
+       {"label":"Units held","key":"units_held","type":"number","required":false,"unit":"shares"},
+       {"label":"Market value","key":"market_value","type":"money","required":true,"unit":"GBP","example":"125000.50"},
+       {"label":"Custodian","key":"custodian","type":"enum","required":false,"enum_options":["North Bank","South Bank","Other"]},
+       {"label":"Reconciliation detail","key":"detail","type":"longtext","required":false}]},
+    {"state":"queued","id":"legacy-fact","captain_actionable":true,"title":"Supply the legacy fact",
+     "hold_reason":"This predates field schemas","repo":"sample","decision_kind":"fact","decision_expects":"one source name"},
+    {"state":"queued","id":"longtext-fact","captain_actionable":true,"title":"Explain the exceptional fact",
+     "hold_reason":"This answer is inherently prose","repo":"sample","decision_kind":"fact","decision_expects":"a short explanation",
+     "decision_fact_fields":[{"label":"Explanation","key":"explanation","type":"longtext","required":true}]},
+    {"state":"queued","id":"malformed-fact","captain_actionable":true,"title":"Supply the malformed-schema fact",
+     "hold_reason":"A hand-built snapshot is malformed","repo":"sample","decision_kind":"fact","decision_expects":"one safe fallback answer",
+     "decision_fact_fields":[{"label":"Grid","key":"grid","type":"spreadsheet","required":true}]},
+    {"state":"queued","id":"prose-only","captain_actionable":true,"title":"FACTS appear only in prose",
+     "hold_reason":"Do not infer intake from words","repo":"sample"},
+    {"state":"queued","id":"already-answered","captain_actionable":true,"title":"Supply an already recorded fact",
+     "hold_reason":"This answer should sink","repo":"sample","decision_kind":"fact","decision_expects":"one code"}
+  ]' '[]' | jq --arg state "$state" '.roots.state = $state' > "$snap"
+
+  "$BOARD" --snapshot "$snap" --no-quota --controls --refresh 300 --out "$board" >/dev/null \
+    || fail "the schema fact fixture must render"
+  log=$(FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-procevent-board-reply.sh" log-path "$board") \
+    || fail "the schema fact request log path must resolve"
+  mkdir -p "$(dirname "$log")"
+  cat > "$log" <<'EOF'
+  "2026-08-10T00:00:01Z","fm-board:field-one","FM-BOARD-REQUEST {\"v\":1,\"intent\":\"answer\",\"home\":\"main\",\"id\":\"field-one\",\"facts\":{\"account_name\":\"Harbour Fund\",\"statement_date\":\"2026-08-09\",\"market_value\":\"125000.50\"},\"required_keys\":[\"account_name\",\"statement_date\",\"market_value\"]}"
+  "2026-08-10T00:00:02Z","fm-board:already","FM-BOARD-REQUEST {\"v\":1,\"intent\":\"answer\",\"home\":\"main\",\"id\":\"already-answered\",\"note\":\"ABC\"}"
+EOF
+  "$BOARD" --snapshot "$snap" --no-quota --controls --refresh 300 --out "$board" >/dev/null \
+    || fail "the partially answered fact group must render"
+
+  [ "$(grep -o 'class=\"rc-f rc-fact-form\"' "$board" | wc -l | tr -d ' ')" = 2 ] \
+    || fail "only the two valid non-longtext schemas should render fielded forms"
+  assert_grep '1 of 2 facts provided' "$board" \
+    "a partially answered fact group did not show fact progress"
+  assert_grep 'data-fact-key="market_value"' "$board" \
+    "a valid money field did not reach the form"
+  assert_grep 'data-fact-key="custodian"' "$board" \
+    "a valid enum field did not reach the form"
+  assert_grep 'Expected answer: one source name' "$board" \
+    "a legacy fact lost its expected-answer textarea fallback"
+  assert_grep 'Expected answer: a short explanation' "$board" \
+    "a longtext-only schema did not keep the textarea fallback"
+  assert_grep 'Expected answer: one safe fallback answer' "$board" \
+    "a malformed schema did not fail safely to the textarea"
+
+  command -v node >/dev/null 2>&1 || {
+    printf 'skip: node not found for schema fact-form browser regression\n'; return 0; }
+  chrome=$(find_chrome) || {
+    printf 'skip: Chrome or Chromium not found for schema fact-form browser regression\n'; return 0; }
+  node - "$chrome" "$board" <<'JS' \
+    || fail "schema fact form rendering and structured submission failed in a real browser"
+const {spawn}=require("node:child_process"); const {pathToFileURL}=require("node:url");
+const [chromePath,boardPath]=process.argv.slice(2);
+const chrome=spawn(chromePath,["--headless=new","--disable-gpu","--no-sandbox","--remote-debugging-pipe",
+  `--user-data-dir=${boardPath}.facts-profile`],{stdio:["ignore","ignore","ignore","pipe","pipe"]});
+let buffer="",nextId=0;const pending=new Map();
+function send(method,params={},sessionId){return new Promise(resolve=>{const id=++nextId;pending.set(id,resolve);
+  chrome.stdio[3].write(`${JSON.stringify({id,method,params,...(sessionId?{sessionId}:{})})}\0`);});}
+chrome.stdio[4].on("data",chunk=>{buffer+=chunk;let at;while((at=buffer.indexOf("\0"))>=0){const raw=buffer.slice(0,at);
+  buffer=buffer.slice(at+1);if(!raw)continue;const message=JSON.parse(raw);const resolve=pending.get(message.id);
+  if(resolve){pending.delete(message.id);resolve(message);}}});
+const delay=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+async function evaluate(sid,expression){const result=await send("Runtime.evaluate",{expression,returnByValue:true,awaitPromise:true},sid);
+  if(result.result.exceptionDetails)throw new Error(result.result.exceptionDetails.text);return result.result.result.value;}
+function assert(ok,message){if(!ok)throw new Error(message);}
+(async()=>{const created=await send("Target.createTarget",{url:"about:blank"});const attached=await send("Target.attachToTarget",
+  {targetId:created.result.targetId,flatten:true});const sid=attached.result.sessionId;await send("Page.enable",{},sid);await send("Runtime.enable",{},sid);
+  await send("Page.addScriptToEvaluateOnNewDocument",{source:`window.lavish={queuePrompt:function(prompt){
+    localStorage.setItem('fact-wire',prompt);return true;},sendQueuedPrompts:function(){return true;}};`},sid);
+  await send("Page.navigate",{url:pathToFileURL(boardPath).href},sid);for(let i=0;i<100;i++){
+    if(await evaluate(sid,"document.readyState") === "complete")break;await delay(20);}await delay(150);
+  const shape=await evaluate(sid,`(()=>{function block(id){return [...document.querySelectorAll('.rc')].find(x=>x.dataset.id===id);}
+    const schema=block('field-two'),legacy=block('legacy-fact'),longtext=block('longtext-fact'),malformed=block('malformed-fact'),prose=block('prose-only');
+    const group=schema.closest('.decision-group'),answered=block('already-answered').closest('.need-wrap');
+    return {types:[...schema.querySelectorAll('[data-fact-key]')].map(x=>x.tagName+':'+x.type),
+      legacy:!!legacy.querySelector('form[data-intent=answer]>.rc-t'),longtext:!!longtext.querySelector('form[data-intent=answer]>.rc-t'),
+      malformed:!!malformed.querySelector('form[data-intent=answer]>.rc-t'),prose:prose.querySelectorAll('.rc-fact,.rc-fact-form').length,
+      progress:group.querySelector('.decision-group-count').textContent,
+      partialBeforeAnswered:[...document.querySelector('.needs').children].indexOf(group)<[...document.querySelector('.needs').children].indexOf(answered)};})()`);
+  assert(shape.types.includes('INPUT:text')&&shape.types.includes('INPUT:date')&&shape.types.includes('INPUT:number')
+    &&shape.types.includes('SELECT:select-one')&&shape.types.includes('TEXTAREA:textarea'),"field types did not map to real controls: "+JSON.stringify(shape));
+  assert(shape.legacy&&shape.longtext&&shape.malformed&&shape.prose===0,"legacy fallback or no-inference behavior failed: "+JSON.stringify(shape));
+  assert(shape.progress==="1 of 2 facts provided"&&shape.partialBeforeAnswered,"partial fact group read as complete: "+JSON.stringify(shape));
+  const wide=await evaluate(sid,`(()=>{const b=[...document.querySelectorAll('.rc')].find(x=>x.dataset.id==='field-two');
+    b.querySelector('[data-open=answer]').click();const f=b.querySelector('.rc-fact-form');f.scrollIntoView({block:'center'});
+    const r=f.getBoundingClientRect();return {left:r.left,right:r.right,overflow:document.documentElement.scrollWidth>innerWidth};})()`);
+  assert(wide.left>=0&&wide.right<=1280&&!wide.overflow,"fact form overflowed at desktop width: "+JSON.stringify(wide));
+  await send("Emulation.setDeviceMetricsOverride",{width:390,height:844,deviceScaleFactor:1,mobile:true},sid);await delay(100);
+  const mobile=await evaluate(sid,`(()=>{const f=[...document.querySelectorAll('.rc')].find(x=>x.dataset.id==='field-two').querySelector('.rc-fact-form');
+    const fields=[...f.querySelectorAll('.rc-field-input')].map(x=>x.getBoundingClientRect());const submit=f.querySelector('.rc-go');
+    submit.scrollIntoView({block:'center'});const s=submit.getBoundingClientRect();return {lefts:fields.map(r=>Math.round(r.left)),
+      within:fields.every(r=>r.left>=0&&r.right<=390),submit:{left:s.left,right:s.right,top:s.top,bottom:s.bottom},
+      progress:f.closest('.decision-group').querySelector('.decision-group-count').textContent,
+      overflow:document.documentElement.scrollWidth>390};})()`);
+  assert(mobile.within&&!mobile.overflow&&new Set(mobile.lefts).size===1&&mobile.submit.left>=0&&mobile.submit.right<=390
+    &&mobile.submit.top>=0&&mobile.submit.bottom<=844&&mobile.progress==="1 of 2 facts provided",
+    "mobile field stack or submit/progress failed: "+JSON.stringify(mobile));
+  const sent=await evaluate(sid,`(async()=>{const b=[...document.querySelectorAll('.rc')].find(x=>x.dataset.id==='field-two');const f=b.querySelector('.rc-fact-form');
+    f.querySelector('[data-fact-key=account_name]').value='Harbour Fund';f.querySelector('[data-fact-key=statement_date]').value='2026-08-09';
+    f.querySelector('[data-fact-key=units_held]').value='250';f.querySelector('[data-fact-key=market_value]').value='125000.50';
+    f.querySelector('[data-fact-key=custodian]').value='North Bank';f.querySelector('[data-fact-key=detail]').value='Matched by account code.';
+    f.querySelector('.rc-overflow').open=true;f.querySelector('.rc-overflow-note').value='Renamed last quarter.';f.requestSubmit();
+    await new Promise(r=>setTimeout(r,30));return JSON.parse(localStorage.getItem('fact-wire').slice('FM-BOARD-REQUEST '.length));})()`);
+  assert(sent.intent==='answer'&&sent.facts.account_name==='Harbour Fund'&&sent.facts.market_value==='125000.50'
+    &&sent.facts.detail==='Matched by account code.'&&sent.note==='Renamed last quarter.'
+    &&JSON.stringify(sent.required_keys)===JSON.stringify(['account_name','statement_date','market_value']),
+    "field submission lost structured facts or overflow note: "+JSON.stringify(sent));
+})().finally(()=>chrome.kill()).catch(error=>{console.error(error.message);process.exitCode=1;});
+JS
+  pass "schema fact forms render, fall back safely, submit structured values, and fit mobile"
+}
+
 # A decision the captain cannot act on is worse than no decision: it sits in
 # Captain's Call looking answerable. Fleet health is where the board already
 # reports what needs attention, so an incomplete decision surfaces there with the
@@ -3559,4 +3696,5 @@ test_recorded_answers_persist_across_devices_and_sink
 test_control_targets_are_escaped
 test_decision_context_links_and_submission_state_in_a_browser
 test_live_fleet_mobile_refresh_keeps_reading_position
+test_schema_driven_fact_forms
 test_incomplete_decision_reaches_fleet_health

@@ -30,6 +30,11 @@ The after view keeps fleet health distinct, presents each primary allowance wind
 `before-new-work-intake-mobile.png` and `after-new-work-intake-mobile.png` show the same comparison at exactly 390px by 844px.
 The after images keep the new-work intake visually separate from the continuing Ask-firstmate conversation through its labelled slate treatment, larger heading, explanatory copy, and deliberate space between the two cards.
 
+`after-fact-form-desktop.png` and `after-fact-form-mobile.png` show the schema-driven portfolio fact form at 1280px and 390px.
+`after-fact-validation-desktop.png` and `after-fact-validation-mobile.png` show every missing required field by its human label beside the still-reachable submit control.
+`after-fact-group-partial-desktop.png` and `after-fact-group-partial-mobile.png` show one grouped fact answered and one still open with `1 of 2 facts provided` remaining visible.
+`after-fact-legacy-desktop.png` and `after-fact-legacy-mobile.png` show a fact decision with no schema retaining the expected-answer textarea.
+
 All image evidence here is rendered from synthetic fixture homes rather than a live fleet.
 The local-report pair reproduces only the reported card label and local path, never the report contents; the other fixtures carry no private project, decision, or PR data.
 The fixtures pin the render clock so the comparisons are not affected by the day they were captured.
@@ -61,6 +66,11 @@ The new-work intake evidence was verified on 2026-08-09 with Chrome and `chrome-
 The browser inspection used `chrome-devtools-axi emulate --viewport '1280x844x1'` and `chrome-devtools-axi emulate --viewport '390x844x3,mobile,touch'`.
 The 390px inspection returned `{"w":390,"h":844,"overflow":false}`, and the real-browser regressions in `tests/fm-mission-control.test.sh` and `tests/fm-board-reply.test.sh` confirmed that both composers fit without horizontal overflow, remain visually distinct, and submit through separate intents.
 
-`bin/fm-evidence-check.sh --local docs/evidence/mission-control` returned `fm-evidence-check: ok pairs_checked=12 identical_opted_out=0`.
+The fact-intake evidence was verified on 2026-08-10 with Chrome and `chrome-devtools-axi 0.1.27` against a synthetic grouped portfolio reconciliation.
+The browser inspection used `chrome-devtools-axi emulate --viewport '1280x900x1'` and `chrome-devtools-axi emulate --viewport '390x844x3,mobile,touch'`.
+The 390px inspection returned five aligned field controls from 47px to 343px, a full-width 320px by 44px submit control, the grouped progress label, and `overflow: false`.
+Submitting the blank form returned a required-facts refusal from the direct reply service and displayed `answer needs required facts: Account name, Statement date, Market value` immediately above that submit control; stable field keys remain internal.
+
+`bin/fm-evidence-check.sh --local docs/evidence/mission-control` returned `fm-evidence-check: ok pairs_checked=14 identical_opted_out=0`.
 
 See [`docs/mission-control.md`](../../mission-control.md) for what the board shows and where each value comes from.

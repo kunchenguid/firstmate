@@ -576,6 +576,7 @@ render_html() {
     --argjson refresh "$REFRESH" -f /dev/fd/3 3<<'FM_MISSION_CONTROL_JQ'
 
 include "fm-web-url";
+include "fm-decision-readiness";
 
 # --------------------------------------------------------------------------
 # Escaping rule: every value that came from fleet state, the registry, or the
@@ -734,6 +735,7 @@ def yolo_for($repo): ($registry_by_name[$repo // ""].yolo // false);
   options: (.decision_options // null),
   decision_kind: (.decision_kind // null),
   expects: (.decision_expects // null),
+  fact_fields: (.decision_fact_fields // null),
   group: (.decision_group // null),
   decision_url: (.decision_url // null),
   why: (.decision_why // null),
@@ -785,6 +787,7 @@ def yolo_for($repo): ($registry_by_name[$repo // ""].yolo // false);
     options: (.options // null),
     decision_kind: (.kind // null),
     expects: (.expects // null),
+    fact_fields: (.fact_fields // null),
     group: (.group // null),
     decision_url: (.decision_url // null),
     why: (.why // null),
@@ -1357,6 +1360,53 @@ def rc_form($intent; $question; $framing; $note_label; $placeholder; $send_label
   + "<p class=\"rc-hold\">The board holds its refresh while this is open.</p>"
   + "</form>";
 
+# The readiness module owns the fact-field shape. The renderer only adds the
+# presentation rule that an all-longtext schema stays on the legacy textarea,
+# because one or more large prose boxes would not be structured fact intake.
+def fact_fields($w):
+  ($w.fact_fields // null) as $fields |
+  if ($w.decision_kind // "") != "fact" or ($fields | type) != "array"
+     or (($fields | tojson | decision_fact_fields_valid) | not)
+     or (any($fields[]; .type != "longtext") | not)
+  then [] else $fields end;
+
+def fact_field_control($field):
+  (($field.example // "") | tostring) as $example |
+  (@html "<label class=\"rc-field\"><span class=\"rc-field-head\"><span class=\"rc-field-label\">\($field.label)</span><span class=\"rc-field-status\">\(if $field.required then "Required" else "Optional" end)</span></span>")
+  + (if ($field.unit // "") == "" then ""
+     else (@html "<span class=\"rc-field-unit\">Unit: \($field.unit)</span>") end)
+  + (if $field.type == "enum" then
+       (@html "<select class=\"rc-field-input\" data-fact-key=\"\($field.key)\" data-fact-required=\"\($field.required)\" aria-required=\"\($field.required)\"><option value=\"\">Choose one</option>")
+       + (($field.enum_options | map(@html "<option value=\"\(.)\">\(.)</option>") | add) // "")
+       + "</select>"
+     elif $field.type == "longtext" then
+       (@html "<textarea class=\"rc-field-input rc-field-long\" rows=\"3\" maxlength=\"2000\" data-fact-key=\"\($field.key)\" data-fact-required=\"\($field.required)\" aria-required=\"\($field.required)\" placeholder=\"\($example)\"></textarea>")
+     elif $field.type == "number" then
+       (@html "<input class=\"rc-field-input\" type=\"number\" step=\"any\" inputmode=\"decimal\" data-fact-key=\"\($field.key)\" data-fact-required=\"\($field.required)\" aria-required=\"\($field.required)\" placeholder=\"\($example)\">")
+     elif $field.type == "date" then
+       (@html "<input class=\"rc-field-input\" type=\"date\" data-fact-key=\"\($field.key)\" data-fact-required=\"\($field.required)\" aria-required=\"\($field.required)\">")
+     elif $field.type == "money" then
+       (@html "<input class=\"rc-field-input\" type=\"text\" inputmode=\"decimal\" maxlength=\"500\" data-fact-key=\"\($field.key)\" data-fact-required=\"\($field.required)\" aria-required=\"\($field.required)\" placeholder=\"\($example)\">")
+     else
+       (@html "<input class=\"rc-field-input\" type=\"text\" maxlength=\"500\" data-fact-key=\"\($field.key)\" data-fact-required=\"\($field.required)\" aria-required=\"\($field.required)\" placeholder=\"\($example)\">")
+     end)
+  + (if ($field.hint // "") == "" then ""
+     else (@html "<span class=\"rc-field-hint\">\($field.hint)</span>") end)
+  + "</label>";
+
+def rc_fact_form($w; $fields):
+  "<form class=\"rc-f rc-fact-form\" data-toggle data-intent=\"answer\" hidden>"
+  + "<p class=\"rc-q\">Supply the requested facts. Each value stays attached to its field key.</p>"
+  + "<div class=\"rc-field-stack\">"
+  + (($fields | map(fact_field_control(.)) | add) // "")
+  + "</div>"
+  + "<details class=\"rc-overflow\"><summary>Add context that does not fit a field</summary>"
+  + (@html "<textarea class=\"rc-t rc-overflow-note\" rows=\"3\" maxlength=\"2000\" aria-label=\"Additional context\" placeholder=\"Optional context only - required facts still need their own fields\"></textarea>")
+  + "</details><p class=\"rc-form-error\" hidden role=\"alert\"></p>"
+  + "<div class=\"rc-row\"><button type=\"submit\" class=\"rc-go\">Send facts</button>"
+  + "<button type=\"button\" class=\"rc-x\">Cancel</button></div>"
+  + "<p class=\"rc-hold\">The board holds its refresh while this is open.</p></form>";
+
 # Fact intake keeps the existing free-text control but labels what the captain is
 # being asked to supply. Only the explicit structured marker can create this
 # framing; recommendation prose is never inspected for it.
@@ -1387,7 +1437,8 @@ def answer_prompt($w):
 def controls_for:
   . as $w |
   ($w.ctl // null) as $c |
-  answer_options($w) as $options |
+  fact_fields($w) as $fields |
+  (if ($fields | length) > 0 then [] else answer_options($w) end) as $options |
   if ($controls | not) or $c == null then "" else
     (@html "<div class=\"rc\" data-home=\"\($c.home)\" data-id=\"\($c.id)\" data-key=\"\($c.key)\" data-what=\"\($w.title)\" data-recorded-answer=\"\(if $w.answered == true then "true" else "false" end)\">")
     + "<div class=\"rc-acts\">"
@@ -1416,9 +1467,11 @@ def controls_for:
         elif . == "reply" then rc_form("reply";
              "Send firstmate a note about this. It carries no approval on its own.";
              ""; "Your note"; "Your note"; "Send to firstmate")
-        elif . == "answer" then rc_form("answer";
+        elif . == "answer" then
+          if ($fields | length) > 0 then rc_fact_form($w; $fields)
+          else rc_form("answer";
              "Your answer goes to firstmate, which applies it through its normal decision flow.";
-             fact_intake($w); "Your answer"; answer_prompt($w); "Send answer")
+             fact_intake($w); "Your answer"; answer_prompt($w); "Send answer") end
         elif . == "defer" then rc_form("defer";
              "Set this aside? It leaves this list for the Deferred shelf, and your original reason is kept unchanged.";
              ""; ""; ""; "Set aside")
@@ -1481,11 +1534,12 @@ def decision_group_card:
   . as $unit |
   ($unit.items | length) as $total |
   ([ $unit.items[] | select(.answered == true) ] | length) as $answered |
+  (all($unit.items[]; .decision_kind == "fact")) as $fact_group |
   (@html "<section class=\"decision-group\" data-decision-group=\"\($unit.group)\">")
   + "<header class=\"decision-group-head\"><div>"
   + (@html "<span class=\"decision-group-kicker\">Related decisions</span><h3>\(readable_group_label($unit.group))</h3>")
   + "</div>"
-  + (@html "<span class=\"decision-group-count\">\($answered) of \($total) answered</span>")
+  + (@html "<span class=\"decision-group-count\">\($answered) of \($total) \(if $fact_group then "facts provided" else "answered" end)</span>")
   + "</header><div class=\"decision-group-items\">"
   + (([range(0; $total) as $position
       | ($unit.items[$position] + {subquestion_label:("Question \($position + 1) of \($total)")} | need_item)]
@@ -1914,7 +1968,7 @@ body.board-reply .rc-b.rc-choice{display:inline-block;}
 .rc-b.rc-ask-about:hover{color:var(--ink);background:var(--slate-soft);border-style:solid;}
 .rc-b:disabled,.rc-go:disabled{opacity:.66;cursor:default;}
 .rc-b.rc-submitted{color:var(--green);background:var(--green-soft);border-color:#cfe7da;}
-.rc-b:focus-visible,.rc-go:focus-visible,.rc-x:focus-visible{outline:2px solid var(--amber);outline-offset:1px;}
+.rc-b:focus-visible,.rc-go:focus-visible,.rc-x:focus-visible,.rc-field-input:focus-visible{outline:2px solid var(--amber);outline-offset:1px;}
 .rc-f{margin:11px 0 0;display:flex;flex-direction:column;gap:9px;}
 /* An explicit display beats the [hidden] default, so a closed form needs this
    or every control on the board stands open at once. */
@@ -1925,6 +1979,24 @@ body.board-reply .rc-b.rc-choice{display:inline-block;}
   overflow-wrap:anywhere;}
 .rc-fact-l{color:#724b10;font-size:11px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;}
 .rc-fact-v{color:var(--ink);font-size:13px;font-weight:600;}
+.rc-field-stack{display:grid;grid-template-columns:minmax(0,1fr);gap:11px;}
+.rc-field{display:flex;flex-direction:column;gap:5px;padding:11px;border:1px solid var(--line);
+  border-radius:11px;background:var(--panel);min-width:0;}
+.rc-field-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px;min-width:0;}
+.rc-field-label{color:var(--ink);font-size:13px;font-weight:700;overflow-wrap:anywhere;}
+.rc-field-status{flex:none;color:var(--faint);font-size:10px;font-weight:750;letter-spacing:.06em;text-transform:uppercase;}
+.rc-field-unit{color:#724b10;font-size:11.5px;font-weight:650;}
+.rc-field-input{font:inherit;font-size:13.5px;color:var(--ink);background:#fbfcfe;border:1px solid #cfd6e0;
+  border-radius:9px;padding:9px 10px;width:100%;min-width:0;}
+.rc-field-long{resize:vertical;}
+.rc-field-hint{color:var(--muted);font-size:11.5px;line-height:1.4;overflow-wrap:anywhere;}
+.rc-overflow{border:1px dashed #cfd6e0;border-radius:10px;background:var(--slate-soft);}
+.rc-overflow summary{cursor:pointer;color:var(--slate);font-size:12px;font-weight:650;padding:9px 11px;}
+.rc-overflow[open] summary{padding-bottom:5px;}
+.rc-overflow .rc-t{margin:0 10px 10px;width:calc(100% - 20px);background:var(--panel);}
+.rc-form-error{margin:0;padding:9px 11px;border:1px solid #efc8c5;border-left:4px solid var(--red);
+  border-radius:9px;background:var(--red-soft);color:var(--red);font-size:12px;font-weight:650;overflow-wrap:anywhere;}
+.rc-form-error[hidden]{display:none;}
 .rc-t{font:inherit;font-size:13.5px;color:var(--ink);background:var(--panel);border:1px solid var(--line);
   border-radius:10px;padding:9px 11px;resize:vertical;width:100%;}
 .rc-t:focus-visible{outline:2px solid var(--amber);outline-offset:-1px;}
@@ -2368,7 +2440,7 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
   .wrap{padding:28px 18px 48px}
   .need{align-items:flex-start;flex-wrap:wrap;padding:14px 16px;gap:10px}
   .decision-group-head{align-items:flex-start;padding:13px 16px;gap:10px}
-  .decision-group-count{max-width:110px}
+  .decision-group-count{max-width:130px}
   .decision-subquestion{padding:10px 16px 0 29px}
   .need-main{align-items:flex-start;flex:1 1 calc(100% - 18px);gap:10px}
   .tag{width:auto}
@@ -2401,6 +2473,11 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
    this width the label sits under the glyph rather than beside it. */
 @media(max-width:520px){
   .js .tabs{gap:3px;padding:4px}
+  .rc-field{padding:10px}
+  .rc-field-head{align-items:flex-start;flex-direction:column;gap:2px}
+  .rc-fact-form .rc-row{align-items:stretch;flex-direction:column;gap:3px}
+  .rc-fact-form .rc-go{width:100%;min-height:44px}
+  .rc-fact-form .rc-x{align-self:center;min-height:38px}
   .tab{flex-direction:column;gap:3px;padding:8px 4px;font-size:11.5px;letter-spacing:-.01em}
 }
 " + controls_css + "</style>
@@ -3106,12 +3183,20 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
     });
   }
 
+  function clearFactError(form) {
+    var local = form && form.querySelector(\".rc-form-error\");
+    if (local) { local.hidden = true; local.textContent = \"\"; }
+  }
+
   function say(block, message, bad) {
     var sent = block.querySelector(\".rc-sent\");
     if (!sent) { return; }
     sent.hidden = false;
     sent.textContent = message;
     if (bad) { sent.classList.add(\"rc-bad\"); } else { sent.classList.remove(\"rc-bad\"); }
+    var openFact = block.querySelector(\".rc-fact-form:not([hidden])\");
+    var local = openFact && openFact.querySelector(\".rc-form-error\");
+    if (local) { local.textContent = bad ? message : \"\"; local.hidden = !bad; }
   }
 
   /* Keep the outcome readable to anything reading the text of this row without adding
@@ -3175,6 +3260,45 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
       block.getAttribute(\"data-id\") || \"\", block.getAttribute(\"data-key\") || \"\", intent]
       .map(encodeURIComponent).join(\":\");
   }
+  function factValues(form) {
+    var values = {};
+    Array.prototype.forEach.call(form.querySelectorAll(\"[data-fact-key]\"), function (field) {
+      values[field.getAttribute(\"data-fact-key\")] = (field.value || \"\").replace(/^\\s+|\\s+$/g, \"\");
+    });
+    return values;
+  }
+  function requiredFactKeys(form) {
+    return Array.prototype.map.call(form.querySelectorAll('[data-fact-required=\"true\"]'),
+      function (field) { return field.getAttribute(\"data-fact-key\"); });
+  }
+  function labelFactRefusal(form, message) {
+    var prefix = [\"answer needs required fact: \", \"answer needs required facts: \"].find(function (candidate) {
+      return typeof message === \"string\" && message.indexOf(candidate) === 0;
+    });
+    if (!form || !prefix) { return message; }
+    var labels = {};
+    Array.prototype.forEach.call(form.querySelectorAll(\"[data-fact-key]\"), function (field) {
+      var key = field.getAttribute(\"data-fact-key\");
+      var label = field.closest(\".rc-field\");
+      label = label && label.querySelector(\".rc-field-label\");
+      if (key && label) { labels[key] = label.textContent.replace(/^\\s+|\\s+$/g, \"\"); }
+    });
+    return prefix + message.slice(prefix.length).split(/,\\s*/).map(function (key) {
+      return labels[key] || \"a required field\";
+    }).join(\", \");
+  }
+  function restoreFactValues(form, values) {
+    if (!values || typeof values !== \"object\" || Array.isArray(values)) { return; }
+    Array.prototype.forEach.call(form.querySelectorAll(\"[data-fact-key]\"), function (field) {
+      var key = field.getAttribute(\"data-fact-key\");
+      if (typeof values[key] === \"string\") { field.value = values[key]; }
+    });
+  }
+  function clearFactValues(form) {
+    Array.prototype.forEach.call(form.querySelectorAll(\"[data-fact-key]\"), function (field) {
+      field.value = \"\";
+    });
+  }
   function storedDrafts() {
     var records = [];
     try { records = JSON.parse(window.sessionStorage.getItem(draftKey) || \"[]\"); }
@@ -3194,10 +3318,12 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
         var area = form.querySelector(\".rc-t\");
         var note = area ? area.value : \"\";
         var open = form.hasAttribute(\"data-toggle\") ? !form.hidden : note !== \"\";
+        var facts = factValues(form);
+        var hasFacts = Object.keys(facts).some(function (key) { return facts[key] !== \"\"; });
         var pending = requestState[identity];
         var retry = records[identity] && records[identity].retry;
-        if (!open && !note) { delete records[identity]; return; }
-        records[identity] = {identity:identity,open:open,note:note};
+        if (!open && !note && !hasFacts) { delete records[identity]; return; }
+        records[identity] = {identity:identity,open:open,note:note,facts:facts};
         if (retry && typeof retry.payload === \"string\"
             && typeof retry.attempt === \"string\" && retry.attempt) {
           records[identity].retry = {payload:retry.payload,attempt:retry.attempt};
@@ -3252,6 +3378,7 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
         if (opener && opener.disabled) { return true; }
         var area = form.querySelector(\".rc-t\");
         if (area && typeof record.note === \"string\") { area.value = record.note; }
+        restoreFactValues(form, record.facts);
         if (record.open && form.hasAttribute(\"data-toggle\")) { shut(block); form.hidden = false; }
         if (record.queued && typeof record.queued.payload === \"string\"
             && typeof record.queued.note === \"string\"
@@ -3352,6 +3479,9 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
     var close = form.querySelector(\".rc-x\");
     var submit = form.querySelector(\".rc-go\");
     if (area) { area.value = state.note || \"\"; area.disabled = true; }
+    Array.prototype.forEach.call(form.querySelectorAll(\"[data-fact-key]\"), function (field) {
+      field.disabled = true;
+    });
     if (close) { close.disabled = true; }
     if (submit) { submit.disabled = true; }
     if (form.getAttribute(\"data-intent\") === \"answer\") {
@@ -3366,6 +3496,9 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
     var close = form.querySelector(\".rc-x\");
     var submit = form.querySelector(\".rc-go\");
     if (area) { area.disabled = false; }
+    Array.prototype.forEach.call(form.querySelectorAll(\"[data-fact-key]\"), function (field) {
+      field.disabled = false;
+    });
     if (close) { close.disabled = false; }
     if (submit) { submit.disabled = false; }
     if (form.getAttribute(\"data-intent\") === \"answer\") {
@@ -3481,6 +3614,7 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
         }
         var area = form && form.querySelector(\".rc-t\");
         if (area) { area.value = \"\"; }
+        if (form) { clearFactValues(form); clearFactError(form); }
         shut(owner);
         saveDrafts();
       }
@@ -3496,7 +3630,8 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
 
     var area = form.querySelector(\".rc-t\");
     var note = area ? area.value.replace(/^\\s+|\\s+$/g, \"\") : \"\";
-    if (area && !note) { area.focus(); return; }
+    var fieldedFacts = form.classList.contains(\"rc-fact-form\");
+    if (area && !note && !fieldedFacts) { area.focus(); return; }
 
     var request = {
       v: 1,
@@ -3508,6 +3643,10 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
     if (id) { request.id = id; }
     if (key) { request.key = key; }
     if (note) { request.note = note; }
+    if (fieldedFacts) {
+      request.facts = factValues(form);
+      request.required_keys = requiredFactKeys(form);
+    }
 
     var persistent = request.intent !== \"ask\";
     var identity = persistent ? ackKey(block, request.intent) : \"\";
@@ -3547,6 +3686,7 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
       if (!recorded) {
         if (definiteRefusal) { rememberRetry(requestIdentity, null); }
         releasePayload(form);
+        refused = labelFactRefusal(form, refused);
         say(block, \"Not sent - \" + (refused || \"the board could not reach firstmate\")
           + \". Try again.\", true);
         saveDrafts();
@@ -3555,6 +3695,7 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
       rememberRetry(requestIdentity, null);
       releasePayload(form);
       if (area) { area.value = \"\"; }
+      clearFactValues(form);
       noteCollecting(recorded.armed !== false);
       var uncollected = collecting ? \"\" : UNCOLLECTED;
       if (persistent) {
@@ -3629,6 +3770,7 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
       return;
     }
     if (area) { area.value = \"\"; }
+    clearFactValues(form);
     releasePayload(form);
     if (persistent) {
       try { window.localStorage.setItem(identity, delivery); } catch (e) { /* page state still prevents a duplicate */ }
@@ -3673,7 +3815,10 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
         catch (e) { /* acknowledgement memory unavailable */ }
       }
     }
-    if (area.classList && area.classList.contains(\"rc-t\")) { saveDrafts(); }
+    if (area.classList && (area.classList.contains(\"rc-t\") || area.hasAttribute(\"data-fact-key\"))) {
+      clearFactError(form);
+      saveDrafts();
+    }
   });
   window.addEventListener(\"pagehide\", saveDrafts);
 

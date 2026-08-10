@@ -35,7 +35,8 @@
 #
 # What it emits, one compact JSON object per line:
 #   {"kind":"contract",...}      always first; states that nothing below is authority
-#   {"kind":"request",...}       a validated captain request: intent, home, id, key, note
+#   {"kind":"request",...}       a validated captain request: intent, home, id, key, note,
+#                                  and structured facts when the answer carries them
 #   {"kind":"reply",...}         a validated firstmate board reply: intent, note. Display only.
 #   {"kind":"message",...}       prose carrying no board marker at all
 #   {"kind":"unrecognized",...}  anything else, with a reason. Never acted on.
@@ -57,8 +58,8 @@
 # allowed set for that intent, an over-long field, an id or home outside the safe
 # character set, more than one envelope marker of the leading direction in one
 # prompt, an envelope that is not at the start of the prompt, trailing envelope
-# content, duplicate object keys, and a record whose quoted field never
-# terminates - which is what a result truncated at
+# content, duplicate object keys, malformed or incomplete structured facts, and
+# a record whose quoted field never terminates - which is what a result truncated at
 # FM_PROCEVENT_MAX_OUTPUT_BYTES looks like. A `defer` carrying note text is
 # refused outright, because the hold reason is the captain's own stored text and
 # a request must never rewrite it. An intent from the other direction's
@@ -76,6 +77,8 @@ use bytes ();
 my $MARK = "FM-BOARD-REQUEST";
 my $REPLY_MARK = "FM-BOARD-REPLY";
 my $MAX_NOTE = 2000;
+my $MAX_FACT_VALUE = 2000;
+my $MAX_FACT_TOTAL = 6000;
 my $MAX_TEXT = 4000;
 
 my $json = JSON::PP->new->canonical->allow_nonref->utf8;
@@ -192,7 +195,7 @@ my $SAFE_ID = qr/\A[A-Za-z0-9._-]{1,120}\z/;
 my %SPEC = (
   merge  => {need => ["id"],         allow => ["id"]},
   reply  => {need => ["id", "note"], allow => ["id", "note"]},
-  answer => {need => ["note"],       allow => ["id", "key", "note"], either => ["id", "key"]},
+  answer => {need => [],             allow => ["id", "key", "note", "facts", "required_keys"], either => ["id", "key"]},
   defer  => {need => ["id"],         allow => ["id", "key"]},
   ask    => {need => ["note"],       allow => ["note"]},
   file   => {need => ["note"],       allow => ["note"]},
@@ -292,6 +295,63 @@ for my $line (@records) {
     if (length($note) > $MAX_NOTE) { $bad->("note is longer than $MAX_NOTE characters"); next; }
     if ($note =~ /[\x00-\x08\x0b\x0c\x0e-\x1f]/) { $bad->("note carries control characters"); next; }
     $out{note} = $note;
+  }
+
+  # A fielded fact answer stays on the existing `answer` intent. Its facts are
+  # key/value data, while required_keys carries the form's required-key contract
+  # so this one vocabulary owner performs the only completeness validation.
+  if ($direction eq "request" && $intent eq "answer") {
+    my $structured = exists($obj->{facts}) || exists($obj->{required_keys});
+    if ($structured) {
+      if (ref($obj->{facts}) ne "HASH") { $bad->("structured answer facts must be an object"); next; }
+      if (ref($obj->{required_keys}) ne "ARRAY") { $bad->("structured answer required_keys must be an array"); next; }
+      my @fact_keys = sort keys %{$obj->{facts}};
+      if (@fact_keys > 8) { $bad->("structured answer carries more than 8 fact keys"); next; }
+      my $total = 0;
+      my $facts_ok = 1;
+      for my $key (@fact_keys) {
+        my $value = $obj->{facts}{$key};
+        if ($key !~ /\A[A-Za-z][A-Za-z0-9_-]{0,63}\z/ || !defined($value) || ref($value)) {
+          $facts_ok = 0; last;
+        }
+        if (length($value) > $MAX_FACT_VALUE || $value =~ /[\x00-\x08\x0b\x0c\x0e-\x1f]/) {
+          $facts_ok = 0; last;
+        }
+        $total += length($value);
+      }
+      if (!$facts_ok) { $bad->("structured answer has an unsafe fact key or value"); next; }
+      if ($total > $MAX_FACT_TOTAL) { $bad->("structured answer fact values are too long"); next; }
+      my %required_seen;
+      my @required;
+      my $required_ok = 1;
+      for my $key (@{$obj->{required_keys}}) {
+        if (!defined($key) || ref($key) || $key !~ /\A[A-Za-z][A-Za-z0-9_-]{0,63}\z/
+            || $required_seen{$key}++) {
+          $required_ok = 0; last;
+        }
+        push @required, $key;
+      }
+      if (!$required_ok || @required > 8) {
+        $bad->("structured answer required_keys are unsafe or duplicated"); next;
+      }
+      my @missing_facts = grep {
+        !exists($obj->{facts}{$_}) || $obj->{facts}{$_} !~ /\S/
+      } @required;
+      if (@missing_facts) {
+        $bad->("answer needs required fact" . (@missing_facts == 1 ? ": " : "s: ")
+               . join(", ", @missing_facts));
+        next;
+      }
+      my $has_fact = grep { defined($_) && /\S/ } values %{$obj->{facts}};
+      my $has_note = exists($out{note}) && $out{note} =~ /\S/;
+      if (!$has_fact && !$has_note) {
+        $bad->("structured answer needs at least one fact or an overflow note"); next;
+      }
+      $out{facts} = $obj->{facts};
+      $out{required_keys} = $obj->{required_keys};
+    } elsif (!exists($out{note})) {
+      $bad->("intent answer needs: note"); next;
+    }
   }
 
   my @missing = grep { !exists $out{$_} } @{$spec->{need}};

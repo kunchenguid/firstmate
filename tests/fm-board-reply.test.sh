@@ -65,7 +65,14 @@ cat > "$SNAP" <<'JSON'
    {"state":"queued","id":"d2","captain_actionable":true,"title":"Choose the cache shape",
     "hold_reason":"Two shapes compete","repo":"alpha"},
    {"state":"queued","id":"d3","captain_actionable":true,"title":"Choose the fallback region",
-    "hold_reason":"Two regions compete","repo":"alpha"}]}}
+    "hold_reason":"Two regions compete","repo":"alpha"},
+   {"state":"queued","id":"d4","captain_actionable":true,"title":"Supply portfolio identity facts",
+    "hold_reason":"The reconciliation needs identity facts","repo":"alpha","decision_kind":"fact",
+    "decision_expects":"account identity, statement date, and valuation facts","decision_fact_fields":[
+      {"label":"Account name","key":"account_name","type":"text","required":true},
+      {"label":"Statement date","key":"statement_date","type":"date","required":true},
+      {"label":"Market value","key":"market_value","type":"money","required":true,"unit":"GBP"}]}
+ ]}}
 JSON
 
 BOARD="$TMP_ROOT/mission-control.html"
@@ -801,6 +808,43 @@ const revealState = `({body:document.body.className,
   const textAnswer = requestWires().find((request) => request.note === "Keep this attempt across response loss.");
   assert(textAnswer && textAnswer.intent === "answer" && textAnswer.home === "main" && textAnswer.id === "d2",
     "free text did not reach the same validated Answer path as the option button: " + JSON.stringify(requestWires()));
+
+  const factRefusal = await evaluate(sid, `(async()=>{
+    var b=[...document.querySelectorAll('.rc')].find(x=>x.dataset.id==='d4');
+    b.querySelector('[data-open=answer]').click();
+    var f=b.querySelector('.rc-fact-form');f.requestSubmit();
+    for(var i=0;i<200;i++){if(!f.querySelector('.rc-form-error').hidden)break;
+      await new Promise(r=>setTimeout(r,25));}
+    return {message:f.querySelector('.rc-form-error').textContent,open:!f.hidden,
+      editable:[...f.querySelectorAll('[data-fact-key]')].every(x=>!x.disabled)};
+  })()`);
+  assert(factRefusal.message === "Not sent - answer needs required facts: Account name, Statement date, Market value. Try again."
+    && factRefusal.open && factRefusal.editable,
+    "a required-fact refusal did not use the form's human labels: " + JSON.stringify(factRefusal));
+  assert(!factRefusal.message.includes("account_name") && !factRefusal.message.includes("statement_date")
+    && !factRefusal.message.includes("market_value"),
+    "a required-fact refusal exposed internal field keys: " + JSON.stringify(factRefusal));
+  assert(logLines() === before + 3, "a refused fact answer was recorded");
+
+  const singleFactRefusal = await evaluate(sid, `(async()=>{
+    var b=[...document.querySelectorAll('.rc')].find(x=>x.dataset.id==='d4');
+    var f=b.querySelector('.rc-fact-form');
+    f.querySelector('[data-fact-key=account_name]').value='Primary account';
+    f.querySelector('[data-fact-key=statement_date]').value='2026-08-10';
+    f.requestSubmit();
+    for(var i=0;i<200;i++){
+      if(f.querySelector('.rc-form-error').textContent.includes('required fact: Market value'))break;
+      await new Promise(r=>setTimeout(r,25));
+    }
+    return {message:f.querySelector('.rc-form-error').textContent,open:!f.hidden,
+      editable:[...f.querySelectorAll('[data-fact-key]')].every(x=>!x.disabled)};
+  })()`);
+  assert(singleFactRefusal.message === "Not sent - answer needs required fact: Market value. Try again."
+    && singleFactRefusal.open && singleFactRefusal.editable,
+    "a single required-fact refusal did not use its human label: " + JSON.stringify(singleFactRefusal));
+  assert(!singleFactRefusal.message.includes("market_value"),
+    "a single required-fact refusal exposed its internal field key: " + JSON.stringify(singleFactRefusal));
+  assert(logLines() === before + 3, "a refused single-fact answer was recorded");
 
   // The service dies with the page already open. A tap must then say so and stay
   // retryable rather than showing a confirmation nothing recorded.

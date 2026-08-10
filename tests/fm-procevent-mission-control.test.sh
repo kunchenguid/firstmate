@@ -112,6 +112,35 @@ durable_req=$(only "$out" request)
   || fail "durable answer identities must preserve exact home, item, key, and intent: $durable_req"
 pass "durable answer-log records preserve exact cross-home decision identities"
 
+FACTS="$TMP_ROOT/facts.txt"
+facts_body=$(jq -cn '{v:1,intent:"answer",home:"main",id:"portfolio-facts",
+  facts:{account_name:"Harbour Fund",statement_date:"2026-08-09",market_value:"125000.50",custodian:"North Bank"},
+  required_keys:["account_name","statement_date","market_value"],
+  note:"The custodian renamed this account last quarter."}')
+result_file "$FACTS" "$(record 1 "$(envelope "$facts_body")")"
+out=$(requests "$FACTS")
+fact_req=$(only "$out" request)
+printf '%s' "$fact_req" | jq -e '
+  .intent == "answer"
+  and .facts == {account_name:"Harbour Fund",statement_date:"2026-08-09",
+    market_value:"125000.50",custodian:"North Bank"}
+  and .required_keys == ["account_name","statement_date","market_value"]
+  and .note == "The custodian renamed this account last quarter."
+' >/dev/null || fail "a structured fact answer or its overflow note did not survive intact: $out"
+pass "a fielded fact answer keeps structured key/value data and its overflow note"
+
+INCOMPLETE_FACTS="$TMP_ROOT/incomplete-facts.txt"
+incomplete_body=$(jq -cn '{v:1,intent:"answer",home:"main",id:"portfolio-facts",
+  facts:{account_name:"Harbour Fund",statement_date:""},
+  required_keys:["account_name","statement_date"]}')
+result_file "$INCOMPLETE_FACTS" "$(record 1 "$(envelope "$incomplete_body")")"
+out=$(requests "$INCOMPLETE_FACTS")
+[ -z "$(only "$out" request)" ] \
+  || fail "an incomplete required fact set produced an answer request: $out"
+assert_contains "$(only "$out" unrecognized)" "answer needs required fact: statement_date" \
+  "required-key validation did not clearly name the missing fact"
+pass "the shared board vocabulary rejects an incomplete required fact set in one place"
+
 # Captured verbatim from the new board-level Start something new composer through
 # the same browser and Lavish send shape. It has no target because it originates
 # work rather than resolving a row already on the board.

@@ -13,8 +13,8 @@ def decision_trim: gsub("^[[:space:]]+|[[:space:]]+$"; "");
 
 def decision_structured_labels:
   ["Decision question", "Decision options", "Decision kind", "Decision expects",
-   "Decision group", "Why now", "What it affects", "Recommendation",
-   "Decision URL", "No decision surface"];
+   "Decision fact fields", "Decision group", "Why now", "What it affects",
+   "Recommendation", "Decision URL", "No decision surface"];
 
 # Leading whitespace is removed before matching so a caller may pass a body
 # however it reads it: rendered backlog lines arrive indented, and an in-memory
@@ -55,6 +55,40 @@ def decision_options_valid:
       and ($parsed | (unique | length) == length)
     end;
 
+# The optional fact-field schema is stored as one compact JSON body field.
+# This is its one shape definition, shared by filing validation and every read
+# projection, so a malformed hand-built value can safely degrade to free text.
+def decision_fact_field_text_valid($max):
+  type == "string" and length > 0 and utf8bytelength <= $max
+  and . == decision_trim;
+
+def decision_fact_fields_valid:
+  (try fromjson catch null) as $fields
+  | if ($fields | type) != "array" or ($fields | length) < 1 or ($fields | length) > 8
+    then false
+    else
+      ($fields | all(.[];
+        type == "object"
+        and ((keys_unsorted - ["label", "key", "type", "required", "hint",
+              "example", "unit", "enum_options"]) | length) == 0
+        and (.label | decision_fact_field_text_valid(120))
+        and (.key | type == "string" and test("^[A-Za-z][A-Za-z0-9_-]{0,63}$"))
+        and (.type as $type
+             | ($type | type) == "string"
+             and (["text", "number", "date", "money", "enum", "longtext"] | index($type) != null))
+        and (.required | type == "boolean")
+        and ((has("hint") | not) or (.hint | decision_fact_field_text_valid(240)))
+        and ((has("example") | not) or (.example | decision_fact_field_text_valid(240)))
+        and ((has("unit") | not) or (.unit | decision_fact_field_text_valid(40)))
+        and (if .type == "enum" then
+               has("enum_options")
+               and (.enum_options | type == "array" and length >= 2 and length <= 20
+                    and all(.[]; decision_fact_field_text_valid(120))
+                    and ((unique | length) == length))
+             else (has("enum_options") | not) end)))
+      and (($fields | map(.key) | unique | length) == ($fields | length))
+    end;
+
 def decision_readiness:
   . as $lines
   | if ($lines | decision_structured | not)
@@ -88,7 +122,18 @@ def decision_readiness:
               and (($lines | decision_field_present("Decision expects")) | not)
          then { check: "expects", flag: "--expects",
                 detail: "it asks the captain for a fact without saying what answer shape it expects" }
-         else empty end)
+         else empty end),
+
+        (($lines | decision_body_field("Decision fact fields")) as $fields
+         | ($lines | decision_body_field("Decision kind")) as $kind
+         | if $fields == null then empty
+           elif $kind != "fact" then
+             { check: "fact-fields-kind", flag: "--kind fact",
+               detail: "it records fact fields without marking the decision as fact intake" }
+           elif ($fields | decision_fact_fields_valid) then empty
+           else { check: "fact-fields", flag: "--fact-fields",
+                  detail: "the fact-field schema is malformed or unsupported" }
+           end)
       ] as $gaps
       | { structured: true, ready: (($gaps | length) == 0), gaps: $gaps }
     end;

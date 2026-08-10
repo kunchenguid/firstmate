@@ -39,12 +39,13 @@ The stage itself is derived by the snapshot rather than by the board; see `bin/f
   When controls are enabled and the direct board-reply service proves it is available, a decision with two to four explicitly recorded option labels shows them as quick-answer buttons and keeps a `Write your own answer` control beside them.
   The superseded Lavish transport remains Answer-only.
   No prose is parsed to invent options, so a decision without that field keeps the original free-text-only Answer control.
-  A decision explicitly marked as fact intake keeps that same free-text Answer control but labels it `Fact needed` and shows the recorded expected-answer hint beside it when present.
-  A decision without that marker renders its Answer control exactly as before, and the board never infers the marker from its question or recommendation.
+  A decision explicitly marked as fact intake and carrying a valid non-longtext-only `fact_fields` schema renders an ordered single-column form with the recorded labels, hints, examples, units, required status, and type-appropriate controls.
+  A legacy fact with no schema, a malformed or unsupported schema, and a longtext-only schema keep the original `Fact needed` textarea and recorded expected-answer hint.
+  A decision without the explicit fact marker renders its Answer control exactly as before, and the board never infers the marker or fields from its question or recommendation.
   [`docs/decision-hold-lifecycle.md`](decision-hold-lifecycle.md) owns the fields themselves and which of them a filing must supply.
   Two or more open decisions carrying the same non-null group key render inside one consolidated card whose readable heading comes from that key.
   Each member remains a complete labelled sub-question with its original context, dependency line, decision aid, Answer control, any available Set aside control, quick answers or fact framing, acknowledgement banner, and Ask-firstmate entry point.
-  The wrapper reports how many sub-questions have recorded answers, but it does not merge their identities or answering paths.
+  The wrapper reports how many sub-questions have recorded answers, using `N of M facts provided` when every member is fact intake, but it does not merge their identities or answering paths.
   A unique group key and an absent group key both keep the standalone decision rendering, so visible grouping begins only when at least two open decisions share the key.
   A partially answered group stays at unanswered priority and keeps each answered member's existing quiet acknowledgement treatment, while a group moves below unanswered decisions only after every member has a recorded Answer request.
   Grouping is confined to the waiting list and never changes the Deferred shelf.
@@ -143,8 +144,11 @@ Neither is nested in a decision or project card.
 A decision belonging to a second mate carries the home it came from and is applied in that home, never in the main one.
 An Answer form uses the exact structured question when one was recorded, otherwise it uses the decision title and reason as a concise reminder, and only falls back to `Your answer` when no useful context exists.
 On the direct board-reply transport, an option button puts its recorded label through that same Answer form and submits the same `answer` request as free text; it creates no new wire intent or execution path.
-Fact intake adds a prominent expected-shape line above that textarea and no structured, tabular, spreadsheet-like, or multi-field data-entry widget.
-The textarea retains `Your answer` as its accessible label in every case, including a decision that also offers quick answers or fact-intake framing.
+Fact intake with a usable schema replaces that decision's textarea with real text, number, date, money, enum, and long-text controls in the schema's recorded order.
+The form stays a single-column stack at phone width and ends with a full-width submit control, while the grouped-card progress remains visible in its header.
+A collapsed `Add context that does not fit a field` note carries optional overflow context beside the structured values and never satisfies a required field.
+A legacy fact with no usable schema keeps the prominent expected-shape line and `Your answer` textarea exactly as before.
+The board never parses prose to invent fact intake or fields and does not provide a repeater, spreadsheet, or grid editor.
 Each decision also offers `Ask a question about this`, which focuses the one shared Ask-firstmate composer and pre-fills a quoted reference to that decision's title.
 It never creates a per-decision conversation or another transport.
 Setting a decision aside carries no reason text at all: the stored reason is the captain's own, and firstmate reads it from the owning home rather than letting a request overwrite it.
@@ -195,6 +199,10 @@ The direct request log is the source of truth for recorded Answer requests; brow
 [`bin/fm-procevent-board-reply.sh`](../bin/fm-procevent-board-reply.sh) owns the reply service, arming the wake, posting firstmate's replies into the board conversation, and turning what was recorded into validated requests.
 [`bin/fm-board-request-parse.pl`](../bin/fm-board-request-parse.pl) is the single owner of the board message vocabulary in both directions and of every fail-closed rule, shared by both transports, and the service validates a message at its door with that same program over the same bytes it is about to store.
 Its captain-to-firstmate intents are `merge`, `reply`, `answer`, `defer`, `ask`, and `file`.
+A legacy `answer` carries its free-text `note` unchanged.
+A fielded fact `answer` keeps that same intent and carries a `facts` object keyed by the stable field keys, the form's `required_keys`, and an optional overflow `note`.
+The shared parser is the only required-key validator and rejects an incomplete structured answer by its stable keys, while the fielded form translates that refusal back to the recorded human labels before showing it to the captain.
+It emits the accepted values as structure so firstmate does not re-parse prose.
 The `file` intent carries only the captain's free-text `note` plus the common home and envelope fields, because it originates work with no existing item or decision target.
 
 The legacy Lavish-bridged surface in [`bin/fm-procevent-mission-control.sh`](../bin/fm-procevent-mission-control.sh) remains supported for the shared captain-request vocabulary but gains no new transport behavior.
@@ -308,15 +316,15 @@ The generator does not serve it; how the file is exposed is decided outside it.
 The deferred cases pin the awaiting count and the section count to literal numbers rather than to the absence of a title, because dropping a decision from the list while still counting it and counting it while still listing it fail separately.
 The decision-context case renders a structured and an old-style decision from one fixture home and pins the count of rendered context blocks, so leaving the old-style decision alone is proven rather than inferred from it happening to look bare.
 The dependency case adds a titled dependent, an unavailable secondmate-dependent title, and a decision with no dependents, then pins the titled line, id fallback, and absence of an extra line.
-The control-enabled half also proves that only the structured option set renders quick-answer buttons, that only the explicit fact marker renders expected-answer framing, and that the free-text affordance remains for both.
+The control-enabled half also proves that only the structured option set renders quick-answer buttons, that only an explicit valid fact schema renders the fielded form, and that legacy, malformed, and longtext-only fact schemas retain the expected-answer textarea.
 The recorded-answer case renders a partially answered group, a fully answered group, a unique group key, an absent group key, and two deferred rows carrying a shared key.
 It proves that each grouped sub-question keeps its independent content and controls, only the fully answered group sinks, standalone rows stay standalone, and Deferred remains an ordinary shelf.
-It then measures the rendered page in a real browser at 1280px and 390px, because markup alone cannot show that grouped cards, context and dependency lines, option buttons, or fact-intake hints fit without pushing the board sideways; that measurement self-skips when Chrome or Node is absent.
+It then measures the rendered page in a real browser at 1280px and 390px, because markup alone cannot show that grouped cards, context and dependency lines, option buttons, fact-field stacks, submit controls, progress labels, or fallback hints fit without pushing the board sideways; that measurement self-skips when Chrome or Node is absent.
 It also pins a fixed current time and commits its fixture clones at explicit epochs, so the last-change wording, its three degrade-to-dash paths, and the promise that no clone is written to are all checked against times the test chose.
 
 The reply layer is covered in the same suite: that the default board is unchanged by its existence, that each row offers only the controls it can resolve, that the one-shot new-work composer stays visually distinct from the continuing Ask-firstmate conversation at 1280px and 390px, that a control names no host, port, or absolute endpoint and derives its target from the URL the document was loaded from, that it stays hidden until a transport is proved, and that the confirmation banner ships hidden with an empty outcome heading.
 Fleet prose is checked to stay escaped inside the attributes a control carries.
-A real-browser regression also covers exact and fallback Answer prompts, explicit quick answers beside the free-text path, labelled fact intake with its expected-answer hint, the per-decision entry into the one shared Ask-firstmate composer, main-home and secondmate decision links, malformed and hostile inputs, successful and failed sends, duplicate prevention, acknowledgement restoration and retirement, active-tab restoration, stable reading anchors, explicit-navigation precedence, and disappeared-anchor fallback.
+A real-browser regression also covers exact and fallback Answer prompts, explicit quick answers beside the free-text path, fielded fact intake and its fallback cases, structured submission with overflow context, the per-decision entry into the one shared Ask-firstmate composer, main-home and secondmate decision links, malformed and hostile inputs, successful and failed sends, duplicate prevention, acknowledgement restoration and retirement, active-tab restoration, stable reading anchors, explicit-navigation precedence, and disappeared-anchor fallback.
 It renders two fresh board copies from one durable request log and measures the recorded quiet banners, answered-row ordering, shared composer, Deferred shelf, exact cross-home identity, and quick-answer controls at 1280px and 390px.
 It also proves that a quick answer and a typed answer emit the same validated `answer` intent with only their note text differing.
 
@@ -330,7 +338,7 @@ The Ask-firstmate conversation is covered in the same suite: a real thread of ca
 A firstmate reply never reaches the wake source, is held to the same fail-closed rules as a captain request, and stays a quotation when it quotes the wire format; a forged or malformed conversation line is never rendered, and a partial read says so.
 A third browser case proves the conversation is absent from a statically served copy, that both sides appear in order on the served board, that a reply posted from the command line reaches the board while its refresh is held by an open composer, that the conversation contains no control of any kind, and that it fits a 390 by 844 viewport.
 With `FM_MISSION_CONTROL_LIVE_HOME` set to an active home, the same suite generates a fresh board directly from that fleet and uses Chrome at 390 by 844 to verify a meaningful reading anchor remains fixed through regeneration, a full reload, and the early refresh frames without printing fleet records.
-`tests/fm-procevent-mission-control.test.sh` pins the request normalizer against bytes captured from real Answer and Start something new sends through a real browser, and drives every fail-closed path - a forged envelope, an out-of-vocabulary intent, a truncated capture, a defer carrying reason text, and a new-work request carrying a disallowed target - to a refusal rather than a plausible request.
+`tests/fm-procevent-mission-control.test.sh` pins the request normalizer against bytes captured from real Answer and Start something new sends through a real browser, proves structured fact values and overflow context survive unchanged, proves missing required keys are named, and drives every fail-closed path - a forged envelope, an out-of-vocabulary intent, a truncated capture, a defer carrying reason text, and a new-work request carrying a disallowed target - to a refusal rather than a plausible request.
 
 `tests/fm-fleet-snapshot-view.test.sh` pins lifecycle-stage derivation and its conservative fallbacks, secondmate Setup liveness, and the captain-hold classification itself: captain holds on ship and scout work are actionable when unblocked, parked captain holds are deferred regardless of the row's own kind, a held row with an unresolved blocker stays blocked rather than deferred, and a deferred row never reaches the secondmate home summary's holds.
 It also pins empty and populated reverse dependency lists, retention after a blocker is Done, and preservation through the secondmate summary.

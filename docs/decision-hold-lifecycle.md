@@ -16,13 +16,20 @@ It rejects an identity collision, a changed title, attempts to reopen an already
 
 ## Structured decision context
 
-A captain decision records its context as separate structured body fields rather than as one free-text hold reason: a required `Decision question`, optional `Decision options`, optional `Decision kind` with a required `Decision expects` when that kind is `fact`, optional `Decision group`, required `Why now`, `What it affects`, and `Recommendation`, and exactly one of `Decision URL` or `No decision surface`.
+A captain decision records its context as separate structured body fields rather than as one free-text hold reason: a required `Decision question`, optional `Decision options`, optional `Decision kind` with a required `Decision expects` and optional `Decision fact fields` when that kind is `fact`, optional `Decision group`, required `Why now`, `What it affects`, and `Recommendation`, and exactly one of `Decision URL` or `No decision surface`.
 `Decision options` is an explicit ordered set of two to four distinct labels, each at most 80 bytes, for a decision whose useful answers are already a clean small pick.
 It is absent rather than inferred when the decision needs free text or when no options were filed.
 `Decision kind` currently accepts only `fact`, which marks a decision that asks the captain to supply a specific fact or classification rather than choose a course.
-`Decision expects` is a 160-byte hint for the useful free-text answer shape, is valid only with that explicit kind, and is required once that kind is set.
+`Decision expects` is a 160-byte hint for the useful answer shape and the free-text fallback, is valid only with that explicit kind, and is required once that kind is set.
 A fact request the captain cannot answer in the expected shape is not answerable, so the hint travels with the kind rather than being optional beside it.
-Neither field is inferred from the question, recommendation, or other prose.
+`Decision fact fields` is an optional ordered JSON array supplied with `--fact-fields` for a fact request that is better answered as discrete values than as prose.
+Each entry has a display `label`, stable `key`, `type` from `text`, `number`, `date`, `money`, `enum`, or `longtext`, and boolean `required`, plus optional `hint`, `example`, and `unit` strings.
+An `enum` entry also carries two to twenty distinct `enum_options`.
+Keys begin with a letter, contain only letters, digits, underscores, or hyphens, are at most 64 characters, and are distinct within the array.
+The schema accepts one to eight fields, while filings should normally use roughly three to eight fields for one sub-question.
+A fact pack that needs repeated rows is split into separate grouped decisions in v1 rather than encoded as a repeater or grid.
+[`bin/fm-decision-readiness.jq`](../bin/fm-decision-readiness.jq) owns the exact bounds and shape validation used by both the filing command and read projections.
+None of the fact-intake fields is inferred from the question, recommendation, or other prose.
 `Decision group` is an optional privacy-safe slug of at most 80 bytes that the filer assigns when separate captain decisions share one originating investigation or report.
 It changes only Mission Control presentation, never the durable identity, resolution, dependency, inventory, or Answer path of any member.
 Omitting `--group` preserves a stored group on retry, supplying it later adds or replaces that field, and a decision with no group remains unchanged.
@@ -35,8 +42,8 @@ A first filing therefore cannot omit one, while the idempotent retry that `hold`
 The two surface fields are one choice, so recording either clears the other and an item can never claim a built surface and no built surface at once; `link` clears a recorded `No decision surface` for the same reason.
 The schema is additive: an old-style hold that carries only a plain hold reason keeps that reason and renders unchanged, while a hold that already records the earlier optional question or URL keeps those fields too.
 Supplying options on a later idempotent filing replaces that one structured set, while a retry that supplies none preserves whatever was already recorded.
-Supplying `fact` or its expected-answer hint on a later filing likewise replaces that field, while omission preserves it; a hint-only retry is valid once the stored kind is already `fact`.
-Options, fact intake, and grouping are independent, so any can be present without the others and none changes a decision that carries none.
+Supplying `fact`, its expected-answer hint, or its fact-field schema on a later filing likewise replaces that field, while omission preserves it; a hint-only or schema-only retry is valid once the stored kind is already `fact`.
+Options and grouping remain optional independently, while a field schema always requires explicit fact intake and none of these additions changes a decision that carries none.
 `resolve`, `complete`, `verify`, `retract`, and `link` are untouched on such a hold.
 Re-arming one with `hold` does require the full bar, because the presence check reads the stored body and finds nothing there; that is the going-forward contract rather than a compatibility gap, and it converts an old hold into a complete one at the moment it is next touched.
 Structured context currently reaches the captain through Mission Control only.
@@ -90,8 +97,9 @@ A decision carrying structured context is ready when all of the following hold:
 - Exactly one of `Decision URL` or `No decision surface` is recorded, never both and never neither.
 - `Decision options`, when present, is two to four distinct non-empty labels of at most 80 bytes each.
 - `Decision expects` is present and non-empty whenever `Decision kind` is `fact`.
+- `Decision fact fields`, when present, carries the supported schema shape and accompanies `Decision kind: fact`.
 
-Options and fact intake are validated only when present, because both remain optional.
+Options, fact intake, and fact fields are validated only when present, because they remain optional.
 A hold carrying only a free-text reason predates structured context, carries none of these fields, and is deliberately outside the checklist, so it is never reported as incomplete.
 The checklist judges presence and shape only.
 Whether the question is clear, the recommendation sound, or the linked surface genuinely built stays the semantic judgement the skill owns.
@@ -105,14 +113,14 @@ Nobody has to remember to run it, because the same verdict travels on the snapsh
 ## Structured read surfaces
 
 `bin/fm-fleet-snapshot.sh` parses canonical tasks-axi `(hold: ...)` and `(hold-kind: captain)` metadata alongside existing backlog fields, preserving internal commas in the free-text hold reason while short metadata fields remain comma-delimited.
-It also parses every structured decision-context field written by `bin/fm-decision-hold.sh`, including the ordered option labels, fact-intake framing, and shared group key, then carries them through the main-home record and secondmate-home decision projection.
+It also parses every structured decision-context field written by `bin/fm-decision-hold.sh`, including the ordered option labels, fact-intake framing, ordered fact fields, and shared group key, then carries them through the main-home record and secondmate-home decision projection.
 It reads them for any row whose hold kind is `captain` or `parked`, not only a row whose own kind is `captain`, because a captain hold can gate an item of any kind and setting one aside changes only its hold kind.
 `bin/fm-mission-control.sh` renders the context fields it finds on the decision card and falls back to the plain hold reason for a decision that carries none.
 Each such row also carries `decision_readiness`, the structural verdict as `{structured, ready, gaps}`, where every gap names its failed check and the flag that fixes it, so no reader restates the checklist.
 A record from a home that predates the field carries no verdict, which reads as unrecorded rather than as ready.
 The verdict is scoped to the home whose backlog the snapshot reads, so a decision owned by a secondmate home carries none and never reaches this home's fleet health; that home runs its own sweep over its own backlog.
 Once the direct board-reply service proves it is available, a valid option set becomes quick-answer buttons without replacing the free-text Answer path; the legacy Lavish transport remains Answer-only.
-An explicit `fact` kind labels that same free-text Answer form as fact intake and shows its expected-answer hint when present; it adds no structured or multi-field input widget.
+An explicit `fact` kind with a valid non-longtext-only field schema renders a fielded Answer form in Mission Control, while a fact with no usable schema keeps the free-text Answer form and expected-answer hint.
 [`docs/mission-control.md`](mission-control.md#sections) owns when the visual wrapper appears, how grouped answered ordering works, and which sections remain unchanged.
 An open captain decision the checklist reports as incomplete appears in the board's fleet health section with the specific gaps as its hint, and counts toward fleet health, so an unanswerable decision is visible without running a separate command.
 It resolves every repeated `blocked-by:` edge against structured Done records, keeps missing blockers unresolved, and classifies any unblocked row with hold kind `captain` and a non-empty hold reason as actionable regardless of the row's own kind.
@@ -128,6 +136,7 @@ Verification date: 2026-07-14.
 Additional quoted `blocked_by` regression verification date: 2026-07-17.
 Plural blocker-readiness and mixed-home projection verification date: 2026-07-22.
 Archived resolved decision lookup verification date: 2026-08-05.
+Fact-field schema verification date: 2026-08-10.
 Duplicate decision key retraction verification date: 2026-08-08.
 Decision-context field and HTTPS-link verification date: 2026-08-08.
 Structured decision context and one filing bar verification date: 2026-08-09.

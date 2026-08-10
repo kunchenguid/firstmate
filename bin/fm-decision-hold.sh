@@ -19,18 +19,23 @@
 # Every captain decision filed here carries its context as SEPARATE structured
 # body fields rather than one free-text reason, so no dimension can be skipped
 # inside a blob: an optional exact question, an optional set of two to four short
-# answer labels, an optional `fact` intake kind carrying its expected-answer hint,
-# an optional shared-group slug, a required "Why now", "What it affects", and
+# answer labels, an optional `fact` intake kind carrying its expected-answer hint
+# and optional JSON fact-field schema, an optional shared-group slug, a required
+# "Why now", "What it affects", and
 # "Recommendation", and a required
 # conscious choice between a private decision-aid URL and an explicit "no built
 # surface applies" acknowledgment. Each is required only when the item does not
 # already record it, so a first filing can never omit one while an idempotent retry
 # never has to retype what is already stored. Repeating --option supplies the
 # complete ordered set: two to four distinct labels of at most 80 bytes each.
-# --kind accepts only `fact`; --expects describes the expected free-text shape,
-# is valid only for that kind, and is REQUIRED once that kind is set, because a
-# fact request the captain cannot answer in the expected shape is not answerable.
-# --group accepts one privacy-safe slug of at most 80
+# --kind accepts only `fact`; --expects describes the expected answer shape and
+# free-text fallback, is valid only for that kind, and is REQUIRED once that kind
+# is set, because a fact request the captain cannot answer in the expected shape
+# is not answerable.
+# --fact-fields accepts an optional compact JSON array for that kind. The schema
+# shape is owned by bin/fm-decision-readiness.jq; use roughly three to eight
+# fields for one sub-question, and file separate grouped decisions rather than a
+# repeating row editor. --group accepts one privacy-safe slug of at most 80
 # bytes and marks decisions that share one origin without changing their separate
 # identities. Supplying an optional field later replaces that
 # stored field, while omitting its flag preserves it. This script
@@ -50,9 +55,10 @@
 # when it records a question and a recommendation, makes exactly one surface
 # choice, keeps any option set to two to four distinct short labels, and pairs a
 # `fact` kind with an expected-answer hint. Both filing paths refuse an
-# incomplete filing, reporting every gap at once. A hold carrying only a
-# free-text reason predates structured context and is deliberately outside the
-# checklist, so it is never reported as incomplete. The checklist judges presence
+# incomplete filing, reporting every gap at once. An optional fact-field schema
+# must match the shared supported shape and accompany that fact kind. A hold
+# carrying only a free-text reason predates structured context and is deliberately
+# outside the checklist, so it is never reported as incomplete. The checklist judges presence
 # and shape only; whether the question is clear or the recommendation sound stays
 # the semantic judgement above.
 #
@@ -70,13 +76,13 @@
 #   fm-decision-hold.sh hold <origin-id> <decision-key> \
 #     --title <title> --reason <reason> [--repo <repo>] \
 #     [--question <exact-question>] [--option <short-label> --option <short-label> ...] \
-#     [--kind fact [--expects <short-hint>]] [--group <short-slug>] \
+#     [--kind fact [--expects <short-hint>] [--fact-fields <json-array>]] [--group <short-slug>] \
 #     --why <why-now> --affects <what-it-affects> \
 #     --recommendation <recommendation> \
 #     (--decision-url <https-url> | --no-surface <why-none-applies>)
 #   fm-decision-hold.sh hold-item <task-id> --reason <reason> \
 #     [--question <exact-question>] [--option <short-label> --option <short-label> ...] \
-#     [--kind fact [--expects <short-hint>]] [--group <short-slug>] \
+#     [--kind fact [--expects <short-hint>] [--fact-fields <json-array>]] [--group <short-slug>] \
 #     --why <why-now> --affects <what-it-affects> \
 #     --recommendation <recommendation> \
 #     (--decision-url <https-url> | --no-surface <why-none-applies>)
@@ -248,8 +254,12 @@ validate_decision_group() {  # <short-slug>
     || fail "group exceeds 80 bytes"
 }
 
-validate_decision_intake_flags() {  # <kind> <expects>
-  local kind=$1 expects=$2 trimmed
+encode_decision_fact_fields() {  # <json-array>
+  printf '%s' "$1" | jq -R -s -c 'fromjson'
+}
+
+validate_decision_intake_flags() {  # <kind> <expects> <fact-fields-json>
+  local kind=$1 expects=$2 fact_fields=$3 trimmed
   if [ -n "$kind" ] && [ "$kind" != fact ]; then
     fail "--kind supports only fact"
   fi
@@ -261,16 +271,25 @@ validate_decision_intake_flags() {  # <kind> <expects>
     [ "$(printf '%s' "$expects" | LC_ALL=C wc -c | tr -d ' ')" -le 160 ] \
       || fail "expects exceeds 160 bytes"
   fi
+  if [ -n "$fact_fields" ]; then
+    command -v jq >/dev/null 2>&1 || fail "jq is required"
+    printf '%s' "$fact_fields" | jq -R -s -e -L "$SCRIPT_DIR" \
+      'include "fm-decision-readiness"; decision_fact_fields_valid' >/dev/null 2>&1 \
+      || fail "--fact-fields must be a supported JSON fact-field array"
+  fi
 }
 
 # An expected-answer hint is meaningful only for an explicitly fact-shaped
 # decision. The stored value counts so a later retry can add or replace only the
 # hint without retyping --kind fact.
-require_decision_intake_kind() {  # <body> <kind> <expects>
-  local body=$1 kind=$2 expects=$3 stored_kind
+require_decision_intake_kind() {  # <body> <kind> <expects> <fact-fields-json>
+  local body=$1 kind=$2 expects=$3 fact_fields=$4 stored_kind
   stored_kind=$(get_body_field "$body" "Decision kind")
   if [ -n "$expects" ] && [ "${kind:-$stored_kind}" != fact ]; then
     fail "--expects requires --kind fact or an existing fact decision"
+  fi
+  if [ -n "$fact_fields" ] && [ "${kind:-$stored_kind}" != fact ]; then
+    fail "--fact-fields requires --kind fact or an existing fact decision"
   fi
 }
 
@@ -430,13 +449,14 @@ validate_decision_context_flags() {  # <question> <why> <affects> <recommendatio
 }
 
 # Prints the body with every supplied dimension merged in.
-write_decision_context() {  # <body> <question> <options-json> <decision-kind> <expects> <group> <why> <affects> <recommendation> <decision-url> <no-surface>
-  local body=$1 question=$2 options_json=$3 decision_kind=$4 expects=$5 group=$6
-  local why=$7 affects=$8 recommendation=$9 decision_url=${10} no_surface=${11}
+write_decision_context() {  # <body> <question> <options-json> <decision-kind> <expects> <fact-fields-json> <group> <why> <affects> <recommendation> <decision-url> <no-surface>
+  local body=$1 question=$2 options_json=$3 decision_kind=$4 expects=$5 fact_fields=$6 group=$7
+  local why=$8 affects=$9 recommendation=${10} decision_url=${11} no_surface=${12}
   [ -z "$question" ] || body=$(set_body_field "$body" "Decision question" "$question")
   [ -z "$options_json" ] || body=$(set_body_field "$body" "Decision options" "$options_json")
   [ -z "$decision_kind" ] || body=$(set_body_field "$body" "Decision kind" "$decision_kind")
   [ -z "$expects" ] || body=$(set_body_field "$body" "Decision expects" "$expects")
+  [ -z "$fact_fields" ] || body=$(set_body_field "$body" "Decision fact fields" "$fact_fields")
   [ -z "$group" ] || body=$(set_body_field "$body" "Decision group" "$group")
   [ -z "$why" ] || body=$(set_body_field "$body" "Why now" "$why")
   [ -z "$affects" ] || body=$(set_body_field "$body" "What it affects" "$affects")
@@ -643,7 +663,7 @@ command_id() {
 
 command_hold() {
   local origin=${1:-} key=${2:-} title='' reason='' repo='' question='' decision_url='' no_surface=''
-  local why='' affects='' recommendation='' options_json='' decision_kind='' expects='' group=''
+  local why='' affects='' recommendation='' options_json='' decision_kind='' expects='' fact_fields='' group=''
   local options=()
   local id show state kind existing_title body updated exists=0
   [ "$#" -ge 2 ] || { usage >&2; exit 2; }
@@ -657,6 +677,7 @@ command_hold() {
       --option) shift; options+=("${1:-}") ;;
       --kind) shift; decision_kind=${1:-} ;;
       --expects) shift; expects=${1:-} ;;
+      --fact-fields) shift; fact_fields=${1:-} ;;
       --group) shift; group=${1:-} ;;
       --why) shift; why=${1:-} ;;
       --affects) shift; affects=${1:-} ;;
@@ -672,7 +693,9 @@ command_hold() {
   validate_one_line title "$title"
   validate_one_line reason "$reason"
   validate_decision_context_flags "$question" "$why" "$affects" "$recommendation" "$decision_url" "$no_surface"
-  validate_decision_intake_flags "$decision_kind" "$expects"
+  validate_decision_intake_flags "$decision_kind" "$expects" "$fact_fields"
+  [ -z "$fact_fields" ] || fact_fields=$(encode_decision_fact_fields "$fact_fields") \
+    || fail "could not normalize --fact-fields"
   [ -z "$group" ] || validate_decision_group "$group"
   if [ "${#options[@]}" -gt 0 ]; then
     validate_decision_options "${options[@]}"
@@ -704,9 +727,9 @@ command_hold() {
   # Refuse before anything is created or held, so an incomplete filing leaves no
   # half-made backlog identity behind for the next attempt to trip over.
   require_decision_context "$id" "$body" "$why" "$affects"
-  require_decision_intake_kind "$body" "$decision_kind" "$expects"
+  require_decision_intake_kind "$body" "$decision_kind" "$expects" "$fact_fields"
   updated=$(write_decision_context "$body" "$question" "$options_json" \
-    "$decision_kind" "$expects" "$group" "$why" "$affects" "$recommendation" "$decision_url" "$no_surface")
+    "$decision_kind" "$expects" "$fact_fields" "$group" "$why" "$affects" "$recommendation" "$decision_url" "$no_surface")
   require_decision_readiness "$id" "$updated"
   if [ "$exists" = 1 ]; then
     if [ "$updated" != "$body" ]; then
@@ -728,7 +751,7 @@ command_hold() {
 # being the one decision that skipped the bar.
 command_hold_item() {
   local id=${1:-} reason='' question='' decision_url='' no_surface='' show state body updated
-  local why='' affects='' recommendation='' options_json='' decision_kind='' expects='' group=''
+  local why='' affects='' recommendation='' options_json='' decision_kind='' expects='' fact_fields='' group=''
   local options=()
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   shift
@@ -739,6 +762,7 @@ command_hold_item() {
       --option) shift; options+=("${1:-}") ;;
       --kind) shift; decision_kind=${1:-} ;;
       --expects) shift; expects=${1:-} ;;
+      --fact-fields) shift; fact_fields=${1:-} ;;
       --group) shift; group=${1:-} ;;
       --why) shift; why=${1:-} ;;
       --affects) shift; affects=${1:-} ;;
@@ -752,7 +776,9 @@ command_hold_item() {
   validate_slug task-id "$id"
   validate_one_line reason "$reason"
   validate_decision_context_flags "$question" "$why" "$affects" "$recommendation" "$decision_url" "$no_surface"
-  validate_decision_intake_flags "$decision_kind" "$expects"
+  validate_decision_intake_flags "$decision_kind" "$expects" "$fact_fields"
+  [ -z "$fact_fields" ] || fact_fields=$(encode_decision_fact_fields "$fact_fields") \
+    || fail "could not normalize --fact-fields"
   [ -z "$group" ] || validate_decision_group "$group"
   if [ "${#options[@]}" -gt 0 ]; then
     validate_decision_options "${options[@]}"
@@ -767,9 +793,9 @@ command_hold_item() {
     || fail "backlog item $id is $state, and a captain hold leaves it there; only a queued captain hold is classified as an actionable decision, so gate work already under way with the hold subcommand under its own decision identity"
   body=$(show_body "$show") || fail "could not read backlog item $id body"
   require_decision_context "$id" "$body" "$why" "$affects"
-  require_decision_intake_kind "$body" "$decision_kind" "$expects"
+  require_decision_intake_kind "$body" "$decision_kind" "$expects" "$fact_fields"
   updated=$(write_decision_context "$body" "$question" "$options_json" \
-    "$decision_kind" "$expects" "$group" "$why" "$affects" "$recommendation" "$decision_url" "$no_surface")
+    "$decision_kind" "$expects" "$fact_fields" "$group" "$why" "$affects" "$recommendation" "$decision_url" "$no_surface")
   require_decision_readiness "$id" "$updated"
   if [ "$updated" != "$body" ]; then
     tasks_axi update "$id" --body "$updated" >/dev/null \

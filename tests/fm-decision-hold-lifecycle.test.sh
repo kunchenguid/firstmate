@@ -935,7 +935,7 @@ EOF
 }
 
 test_decision_question_and_private_link_use_the_supported_hold_interface() {
-  local home origin hold fact_hold out question summary show bad_url good_url
+  local home origin hold fact_hold portfolio_hold fact_fields out question summary show bad_url good_url
   home=$(make_home decision-context)
   origin=sample-context-review
   mkdir -p "$home/data/$origin"
@@ -998,6 +998,36 @@ test_decision_question_and_private_link_use_the_supported_hold_interface() {
       and .expects == "one number in GBP as printed on the statement"
       and .options == null
   ' >/dev/null || fail "fact intake did not reach the secondmate-home projection: $summary"
+
+  fact_fields=$(jq -n '[
+    {label:"Account name",key:"account_name",type:"text",required:true,hint:"Use the statement heading."},
+    {label:"Statement date",key:"statement_date",type:"date",required:true},
+    {label:"Market value",key:"market_value",type:"money",required:true,unit:"GBP",example:"125000.50"},
+    {label:"Custodian",key:"custodian",type:"enum",required:false,
+      enum_options:["North Bank","South Bank","Other"]}
+  ]')
+  portfolio_hold=$(run_decisions "$home" hold "$origin" portfolio-facts \
+    --title "Supply the sample portfolio facts" \
+    --reason "captain portfolio facts needed" \
+    --question "Which statement facts should the sample portfolio use?" \
+    --kind fact --expects "the account, date, value, and custodian shown on the statement" \
+    --fact-fields "$fact_fields" \
+    --why "The sample reconciliation needs source facts before it can continue." \
+    --affects "The sample portfolio balance and reconciliation status." \
+    --recommendation "Copy the values from the latest custodian statement." \
+    --decision-url "https://sample.tailnet.invalid/portfolio-facts" \
+    --repo sample) || fail "the supported hold interface could not record a fact-field schema"
+  out=$(PATH="$home/fakebin:$PATH" FM_HOME="$home" "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+  printf '%s' "$out" | jq -e --arg hold "$portfolio_hold" --argjson fields "$fact_fields" '
+    .backlog.records[] | select(.id == $hold)
+    | .decision_kind == "fact" and .decision_fact_fields == $fields
+      and .decision_url == "https://sample.tailnet.invalid/portfolio-facts"
+  ' >/dev/null || fail "the ordered fact fields did not reach the canonical snapshot: $out"
+  summary=$(PATH="$home/fakebin:$PATH" FM_HOME="$home" "$ROOT/bin/fm-fleet-snapshot.sh" --secondmate-home-summary)
+  printf '%s' "$summary" | jq -e --arg hold "$portfolio_hold" --argjson fields "$fact_fields" '
+    .decisions_open[] | select(.id == $hold)
+    | .kind == "fact" and .fact_fields == $fields
+  ' >/dev/null || fail "the ordered fact fields did not survive secondmate projection: $summary"
 
   run_decisions "$home" hold "$origin" cost-basis \
     --title "Supply the sample cost basis" --reason "captain cost basis needed" --repo sample \
@@ -1166,6 +1196,24 @@ test_structured_context_is_required_and_stored_separately() {
   fi
   assert_grep "privacy-safe slug" "$home/bad-group.err" \
     "the group-key refusal did not state the supported shape"
+  if run_decisions "$home" "${base[@]}" --fact-fields \
+    '[{"label":"Account","key":"account","type":"spreadsheet","required":true}]' \
+    --kind fact --expects "one account" \
+    --why "w" --affects "a" --recommendation "r" --no-surface "none applies" \
+    > "$home/bad-fact-fields.out" 2> "$home/bad-fact-fields.err"; then
+    fail "an unsupported fact-field type was accepted"
+  fi
+  assert_grep "supported JSON fact-field array" "$home/bad-fact-fields.err" \
+    "the fact-field refusal did not name the schema flag"
+  if run_decisions "$home" "${base[@]}" --fact-fields \
+    '[{"label":"Account","key":"account","type":"text","required":true}]' \
+    --expects "one account" \
+    --why "w" --affects "a" --recommendation "r" --no-surface "none applies" \
+    > "$home/orphan-fact-fields.out" 2> "$home/orphan-fact-fields.err"; then
+    fail "fact fields without explicit fact intake were accepted"
+  fi
+  assert_grep "requires --kind fact" "$home/orphan-fact-fields.err" \
+    "the fact-field refusal did not explain its decision-kind dependency"
 
   # Options are optional as a set, but a supplied set must be a genuinely small
   # choice rather than a lone shortcut, duplicates, or a board-sized menu.

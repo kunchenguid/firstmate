@@ -19,7 +19,8 @@
 #     hold_reason when tasks-axi emits it. A captain hold filed through
 #     fm-decision-hold also carries its decision context as separate structured
 #     body fields: decision_question, optional decision_options, optional
-#     decision_kind and decision_expects, optional decision_group, decision_why, decision_affects,
+#     decision_kind, decision_expects, and decision_fact_fields, optional
+#     decision_group, decision_why, decision_affects,
 #     decision_recommendation, and exactly one of decision_url or
 #     decision_no_surface. Each is null on a hold filed before that schema
 #     existed, which is what keeps an older hold rendering from hold_reason alone.
@@ -381,6 +382,10 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
       | if $kind == "fact" and type == "string" and length > 0
            and utf8bytelength <= 160 and . == trim
         then . else null end;
+    def decision_fact_fields($lines; $kind):
+      body_field($lines; "Decision fact fields") as $raw
+      | if $kind == "fact" and $raw != null and ($raw | decision_fact_fields_valid)
+        then ($raw | fromjson) else null end;
     def decision_group($lines):
       body_field($lines; "Decision group")
       | if type == "string" and length > 0 and utf8bytelength <= 80
@@ -496,6 +501,7 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
             | .decision_options = decision_options(.body_lines)
             | .decision_kind = $decision_kind
             | .decision_expects = decision_expects(.body_lines; $decision_kind)
+            | .decision_fact_fields = decision_fact_fields(.body_lines; $decision_kind)
             | .decision_group = decision_group(.body_lines)
             | .decision_url = body_field(.body_lines; "Decision URL")
             | .decision_why = body_field(.body_lines; "Why now")
@@ -829,6 +835,7 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
             options:(.decision_options // null),
             kind:(.decision_kind // null),
             expects:((.decision_expects // null) | if . == null then null else trunc(160) end),
+            fact_fields:(.decision_fact_fields // null),
             group:((.decision_group // null) | if . == null then null else trunc(80) end),
             decision_url:((.decision_url // null) | if . == null then null else trunc(2000) end),
             why:((.decision_why // null) | if . == null then null else trunc(2000) end),
@@ -950,6 +957,7 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
           decision_options:(.decision_options // null),
           decision_kind:(.decision_kind // null),
           decision_expects:((.decision_expects // null) | if . == null then null else trunc(160) end),
+          decision_fact_fields:(.decision_fact_fields // null),
           decision_group:((.decision_group // null) | if . == null then null else trunc(80) end),
           decision_url:((.decision_url // null) | if . == null then null else trunc(2000) end),
           decision_why:((.decision_why // null) | if . == null then null else trunc(2000) end),
