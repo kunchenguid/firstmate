@@ -225,7 +225,10 @@ fm_control_harness_wiring_paths() {  # <harness> <worktree> <state-dir> <id>
 }
 
 fm_control_cursor_hooks_backup() {  # <worktree> <state-dir> <id>
-  local wt=$1 state=$2 id=$3 path backup
+  local wt=$1 state=$2 id=$3 path backup cursor_dir="$1/.cursor" hooks_dir="$1/.cursor/hooks"
+  [ ! -L "$cursor_dir" ] && [ ! -L "$hooks_dir" ] || return 1
+  [ ! -e "$cursor_dir" ] || [ -d "$cursor_dir" ] || return 1
+  [ ! -e "$hooks_dir" ] || [ -d "$hooks_dir" ] || return 1
   for path in "$wt/.cursor/hooks.json" "$wt/.cursor/hooks/fm-busy-turnend.sh"; do
     if [ -L "$path" ] || { [ -e "$path" ] && [ ! -f "$path" ]; }; then
       return 1
@@ -239,7 +242,10 @@ fm_control_cursor_hooks_backup() {  # <worktree> <state-dir> <id>
 }
 
 fm_control_cursor_hooks_restore() {  # <worktree> <state-dir> <id>
-  local wt=$1 state=$2 id=$3 path backup
+  local wt=$1 state=$2 id=$3 path backup cursor_dir="$1/.cursor" hooks_dir="$1/.cursor/hooks"
+  [ ! -L "$cursor_dir" ] && [ ! -L "$hooks_dir" ] || return 1
+  [ ! -e "$cursor_dir" ] || [ -d "$cursor_dir" ] || return 1
+  [ ! -e "$hooks_dir" ] || [ -d "$hooks_dir" ] || return 1
   for path in "$wt/.cursor/hooks.json" "$wt/.cursor/hooks/fm-busy-turnend.sh"; do
     [ ! -L "$path" ] || return 1
     if [ "$(basename "$path")" = hooks.json ]; then

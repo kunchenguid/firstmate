@@ -231,6 +231,8 @@ test_cursor_composer_placeholder_requires_cursor_glyph() {
   . "$ROOT/bin/fm-tmux-lib.sh"
   [ "$(fm_tmux_composer_row_state '│ Add a follow-up │' 1 0)" = pending ] \
     || fail "ordinary Add a follow-up text was treated as an empty composer"
+  [ "$(fm_tmux_composer_row_state '│ → Add a follow-up │' 1 0)" = empty ] \
+    || fail "Cursor's idle Add a follow-up placeholder was not recognized"
   [ "$(fm_tmux_composer_row_state '→' 0 0)" = empty ] \
     || fail "cursor's empty prompt glyph was not recognized"
   pass "cursor placeholder classification requires the prompt glyph"
@@ -248,6 +250,15 @@ test_cursor_hooks_restore_existing_files() {
   assert_grep '"keep"' "$wt/.cursor/hooks.json" "existing Cursor hooks.json was not restored"
   assert_grep 'user hook' "$wt/.cursor/hooks/fm-busy-turnend.sh" "existing Cursor hook script was not restored"
   pass "Cursor wiring restores pre-existing hook files"
+}
+
+test_cursor_hooks_reject_parent_symlinks() {
+  local dir="$TMP_ROOT/reject-hook-symlink" wt="$TMP_ROOT/reject-hook-symlink/wt" state="$TMP_ROOT/reject-hook-symlink/state"
+  mkdir -p "$wt" "$state" "$dir/real-cursor"
+  ln -s "$dir/real-cursor" "$wt/.cursor"
+  fm_control_cursor_hooks_backup "$wt" "$state" symlink \
+    && fail "Cursor hook backup followed a symlinked .cursor directory"
+  pass "Cursor hook setup rejects symlinked parent directories"
 }
 
 test_cursor_family_is_exact() {
@@ -282,4 +293,5 @@ test_control_tables
 test_cursor_family_is_exact
 test_cursor_composer_placeholder_requires_cursor_glyph
 test_cursor_hooks_restore_existing_files
+test_cursor_hooks_reject_parent_symlinks
 test_tmux_classifies_cursor_agent_only
