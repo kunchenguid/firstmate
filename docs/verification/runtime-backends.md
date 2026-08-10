@@ -178,7 +178,7 @@ ok - fm-teardown: dedicated-socket invalid cleanup preserves target/control and 
 The dedicated tmux cell removed ambient tmux variables, required a socket-bound wrapper, kept one target and one independent control window, and proved the wrapper was not called for invalid metadata or a direct empty target.
 Valid cleanup removed only the exact task-bound target and left the control window live.
 The metadata-only validation covers tmux, Herdr, Zellij, Orca, and cmux before backend dispatch.
-Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, and Muse share that backend cleanup boundary; their harness-specific hook files, tokens, and session-log sidecars are cleaned only after it, so no harness needs a separate endpoint parser.
+Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, Muse, and Herdr-only TraeX share that backend cleanup boundary; their harness-specific hook files, tokens, session-log sidecars, and semantic records are cleaned only after it, so no harness needs a separate endpoint parser.
 
 ## Herdr
 
@@ -217,6 +217,52 @@ The CLI matrix was checked directly:
 
 All destructive verification used `bin/fm-herdr-lab.sh` with a non-default `fm-lab-` name and a byte-identical default-session tripwire.
 No ambient `herdr server stop` command is a supported test operation.
+
+### TraeX ordinary-worker lifecycle
+
+TraeX `traecli 0.200.19(internal edition)` was verified on 2026-08-08 against Herdr 0.8.0's bundled TraeX manifest in a fresh git worktree under a guarded named lab.
+The launch used one positional instruction, `-y`, an exact selected model, and `-c 'model_reasoning_effort="high"'` with the Firstmate-only `FM_TRAEX_HARNESS=traex` marker.
+
+Before acceptance, `agent get` returned `agent=traex`, `agent_status=blocked`, and both cwd fields equal to the exact disposable worktree.
+`agent explain` returned:
+
+```text
+agent: traex
+state: blocked
+manifest: bundled 2026.08.08.2
+rule: directory_trust_prompt (region=whole_recent priority=1000)
+```
+
+The visible chooser had `1. Yes, continue` preselected and `2. No, quit` below it.
+One Enter was sent only after all structural checks agreed.
+The native sequence then moved `blocked -> working -> idle`; while working, TraeX ran `sleep 3`, and the settled pane contained the exact requested `TRAE_LAB_OK` response.
+That postcondition distinguishes a genuine instruction start from a successful key transport.
+The guarded teardown restored the byte-identical default-session tripwire.
+
+A second 2026-08-10 probe exercised the complete ordinary `fm-spawn.sh` and `fm-send.sh` path while a command wrapper forced every Herdr operation through the guarded helper and named lab.
+The standard Herdr task pane retained immutable creation `cwd` at the exact disposable source project, while `foreground_cwd` followed `treehouse get` into the exact isolated task root where the trust chooser appeared; the adapter accepted that narrow provenance pair, observed `working`, and the first turn settled with the requested response.
+Three later instructions on the same pane each traversed working to idle, produced their exact requested response, advanced the bound semantic record, and emitted a turn notification without duplicate idle-level notifications.
+A live Escape probe established that TraeX restores the interrupted instruction as real composer input; the verified `C-u` clear returned the pane to native idle, and a following instruction completed on the same session and isolated copy.
+The probe copy remained clean, the named lab was deleted through the guarded helper, and the default-session tripwire was byte-identical.
+The current drift guard is refreshed with:
+
+```sh
+FM_TRAEX_HERDR_LIVE=1 bin/fm-test-run.sh tests/fm-traex-harness-live-e2e.test.sh
+```
+
+The 2026-08-10 run reported:
+
+```text
+ok - real TraeX fresh-copy trust reached native working through the guarded Herdr lab
+ok - real TraeX initial instructions completed with a durable semantic transition
+ok - real TraeX repeated send cycles preserved busy, idle, and completion semantics
+ok - real TraeX interrupt cleared restored input and the same task resumed
+traex=traecli 0.200.19(internal edition)
+herdr=herdr 0.8.0
+ok - TraeX/Herdr live drift guard completed
+```
+
+Portable coverage pins the exact trust refusal matrix, launch rendering, scoped detection marker, Herdr-only/ordinary-role boundary, native lifecycle writer, completion dedupe, interrupt composer clear, model/effort mapping, and existing-adapter non-regression.
 
 ### Prune and respawn
 

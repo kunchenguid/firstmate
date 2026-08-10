@@ -73,6 +73,7 @@ All three have verified turn-end guard paths when launched with their documented
 Pick whichever one matches your subscription and workflow.
 
 Codex and OpenCode are also verified and supported as primary harnesses; Codex uses bounded foreground checkpoints, and OpenCode uses a TUI plugin, so both carry more harness-specific supervision tradeoffs than the three co-primaries.
+TraeX is available only as an ordinary isolated worker or scout on the Herdr backend; it is not a primary or secondmate harness.
 
 ### Install and launch
 

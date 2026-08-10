@@ -225,6 +225,18 @@ Herdr's native agent state can read idle while a harness waits on its own long f
 The shared crew-state path therefore accepts a native `busy` as evidence of activity but never a native `idle` as evidence that a worker has stopped; the task's own semantic busy state (`bin/fm-busy-lib.sh`) decides that.
 A human-blocked permission dialog has no busy banner and still surfaces.
 
+TraeX is the narrow exception that turns Herdr's native transition stream into its task-owned semantic record.
+`fm-spawn.sh` supports TraeX only for ordinary workers/scouts on Herdr, requires the event capability before endpoint creation, arms one generation, and publishes `traex_ready=1` only after the initial task instructions are observed in native `working`.
+Working, blocked, idle, and done transitions are then persisted as source `herdr-traex`; only busy-to-idle/done touches the ordinary turn-ended notification, so reconnect level reconciliation can recover one missed completion without repeating every idle level.
+No other harness inherits that trust in native idle.
+
+A fresh isolated TraeX task copy may stop at `directory_trust_prompt` even under `-y`.
+The adapter sends one Enter only after `agent explain` names that exact bundled rule, `agent get` identifies TraeX in the exact task pane, live `foreground_cwd` equals the isolated git worktree root, immutable pane-creation `cwd` equals either that root or the exact source project from which `treehouse get` entered it, and the capture shows `1. Yes, continue` preselected over `2. No, quit`.
+It then requires a native working observation; the key-send result alone is never launch success.
+An already-trusted task path skips the key but keeps the same working postcondition.
+Firstmate does not edit TraeX's global trust/config files or accept an arbitrary blocked screen.
+A TraeX Escape interrupt restores the interrupted instruction as real composer input, so `fm-send.sh` follows that key with the verified `C-u` clear before another steer; the following native transition settles the semantic record.
+
 ## Composer and injection safety
 
 Herdr has no direct cursor-row primitive.
@@ -265,6 +277,7 @@ Protocol 16 can subscribe to `pane.agent_status_changed` over one bounded Unix-s
 `bin/fm-transition-lib.sh` owns the backend-neutral transition vocabulary and policy.
 The Herdr adapter subscribes before reconciling current levels, buffers edges during reconciliation, and returns fresh blocked transitions for this home's panes.
 The watcher maps the pane back to the task and skips secondmate endpoints and declared `paused:` waits.
+For an exact ready TraeX task only, the same stream also updates its armed semantic lifecycle and durable turn-ended notification before the shared blocked/defer policy runs; every other harness remains byte-for-byte on the existing policy.
 
 The push path only shortens latency.
 Polling runs every cycle and remains the permanent fallback when protocol 16, the event schema, Python, connection, subscription, or repeated reader execution is unavailable.

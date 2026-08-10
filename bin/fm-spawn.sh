@@ -86,8 +86,9 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|muse)
-#   overrides it for this spawn (either kind). A non-flag string containing
+#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|muse|traex)
+#   overrides it for this spawn. TraeX and muse are ordinary crewmate/scout
+#   adapters only. A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters. pi-signed launches that exact executable name from PATH and
 #   refuses before endpoint creation when it is unavailable; it never falls back to pi.
@@ -139,6 +140,8 @@
 # muse installs no hook at all - its plugin engine is off in the default build - so
 # it writes state/<id>.muse-session to bind the pane to muse's own session event
 # log; muse is crewmate/scout only and is refused for --secondmate.
+# TraeX is likewise crewmate/scout only and currently Herdr-only. Herdr's native
+# TraeX transition stream writes its semantic state and turn-end notification.
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> [mode=<mode> yolo=<on|off>] window=<backend-target> worktree=<path>
 # A ship task records the explicit mode/yolo it was passed; a secondmate spawn records
 # mode=secondmate, yolo=off, home=, and projects=; a scout records neither, and both the
@@ -789,7 +792,7 @@ FIRSTMATE_HOME=
 
 if [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|muse)
+    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|muse|traex)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -877,16 +880,27 @@ launch_template() {
     # written below. Nothing to place in the template for it.
     # codex, opencode, and kimi are also markerless and share this inherited-marker hazard; changing their verified launch boundaries belongs in follow-up work.
     muse) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS XDG_CONFIG_HOME=__MUSECONFIG__ XDG_DATA_HOME=__MUSEDATA__ MUSE_EXPERIMENTAL_FOREIGN_PERSONAL_CONTEXT_KILL=on __MUSEBIN__ --yolo __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    # TraeX is a Herdr-only ordinary worker/scout adapter. The private marker
+    # scopes fm-harness detection to this exact Firstmate launch. -y is the
+    # installed CLI's full-access autonomous mode; fresh-directory trust is a
+    # separate structurally verified post-launch step below.
+    traex) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS FM_TRAEX_HARNESS=traex traex -y __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     *) return 1 ;;
   esac
 }
 
+RAW_LAUNCH=0
+RAW_TRAEX=0
 case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
+    RAW_LAUNCH=1
     LAUNCH=$ARG3
     HARNESS=""
     for word in $LAUNCH; do
-      case "$word" in [A-Za-z_]*=*) continue ;; *) HARNESS=$(basename "$word"); break ;; esac
+      case "$word" in traex|*/traex) RAW_TRAEX=1 ;; esac
+      if [ -z "$HARNESS" ]; then
+        case "$word" in [A-Za-z_]*=*) continue ;; *) HARNESS=$(basename "$word") ;; esac
+      fi
     done
     ;;
   '')
@@ -930,6 +944,38 @@ esac
 if [ "$KIND" = secondmate ] && [ "$HARNESS" = muse ]; then
   echo "error: muse is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
   exit 1
+fi
+
+# TraeX is deliberately narrower: current verification covers only ordinary
+# isolated workers/scouts on Herdr, whose native TraeX manifest supplies exact
+# trust-dialog, liveness, state-transition, and submit evidence. Refuse every
+# other role/backend before creating an endpoint rather than silently degrading
+# to a transport with no equivalent structural launch postcondition.
+if [ "$RAW_LAUNCH" -eq 1 ] && [ "$RAW_TRAEX" -eq 1 ]; then
+  echo "error: TraeX must use Firstmate's verified launch template; raw TraeX launch commands remain unverified" >&2
+  exit 1
+fi
+if [ "$HARNESS" = traex ]; then
+  if [ "$RAW_LAUNCH" -eq 1 ]; then
+    echo "error: TraeX must use Firstmate's verified launch template; raw TraeX launch commands remain unverified" >&2
+    exit 1
+  fi
+  if [ "$KIND" = secondmate ]; then
+    echo "error: traex is a verified crewmate/scout adapter only and cannot run a secondmate or primary supervision role" >&2
+    exit 1
+  fi
+  if [ "$BACKEND" != herdr ]; then
+    echo "error: traex workers are verified only on backend=herdr; backend=$BACKEND has no proven structural trust and launch postcondition" >&2
+    exit 1
+  fi
+  if ! command -v traex >/dev/null 2>&1; then
+    echo "error: traex executable not found on PATH; install TraeX or select a different verified harness" >&2
+    exit 1
+  fi
+  if ! fm_backend_herdr_events_capable "$(fm_backend_herdr_session)"; then
+    echo "error: traex requires Herdr's pane.agent_status_changed event surface for durable worker lifecycle; update Herdr and ensure python3 is available" >&2
+    exit 1
+  fi
 fi
 
 # pi-signed is an explicitly selected executable identity, not an alias that may
@@ -1049,7 +1095,7 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|muse)
+    claude|codex|opencode|pi|pi-signed|grok|kimi|muse|traex)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
@@ -1068,6 +1114,14 @@ effort_flag_for_harness() {
       # The installed codex config schema uses model_reasoning_effort, and the
       # bundled model catalog advertises low|medium|high|xhigh. Omit max rather
       # than passing an unsupported value.
+      case "$effort" in
+        low|medium|high|xhigh) printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")" ;;
+      esac
+      ;;
+    traex)
+      # TraeX exposes the same config key on its interactive root command.
+      # The installed model picker advertises low..xhigh; max is omitted rather
+      # than remapped onto an unverified provider-specific level.
       case "$effort" in
         low|medium|high|xhigh) printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")" ;;
       esac
@@ -1908,7 +1962,7 @@ if [ "$KIND" != secondmate ]; then
       ;;
   esac
   case "$HARNESS" in
-    claude*|opencode*|pi|pi-signed)
+    claude*|opencode*|pi|pi-signed|traex)
       BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || {
         echo "error: failed to arm the busy-state contract for $ID" >&2
         exit 1
@@ -2198,6 +2252,7 @@ META_WINDOW=$T
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
+  [ "$HARNESS" != traex ] || echo "traex_ready=pending"
   # Default-off writes no traceparent= line (meta stays byte-identical).
   # backend= is written only for a non-default (non-tmux) backend, so the
   # default path's meta stays byte-identical (absent backend= means tmux;
@@ -2228,6 +2283,40 @@ META_WINDOW=$T
   fi
 } > "$STATE/$ID.meta"
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
+
+spawn_traex_readiness_set() {  # <expected> <new>
+  local expected=$1 new=$2 meta="$STATE/$ID.meta" count tmp
+  count=$(grep -c '^traex_ready=' "$meta" 2>/dev/null || true)
+  [ "$count" = 1 ] && grep -qxF "traex_ready=$expected" "$meta" || return 1
+  tmp="$meta.traex.$$"
+  awk -v old="traex_ready=$expected" -v replacement="traex_ready=$new" \
+    '{ if ($0 == old) print replacement; else print }' "$meta" > "$tmp" || {
+      rm -f "$tmp"
+      return 1
+    }
+  chmod 0600 "$tmp" 2>/dev/null || {
+    rm -f "$tmp"
+    return 1
+  }
+  mv -f "$tmp" "$meta" || {
+    rm -f "$tmp"
+    return 1
+  }
+}
+
+traex_spawn_fail() {  # <detail>
+  local detail=$1
+  spawn_traex_readiness_set pending failed 2>/dev/null \
+    || spawn_traex_readiness_set 1 failed 2>/dev/null \
+    || true
+  if [ -n "${BUSY_GEN:-}" ]; then
+    "$FM_ROOT/bin/fm-busy-event.sh" apply "$STATE_REAL" "$ID" idle \
+      --gen "$BUSY_GEN" --source fm-recovery --event launch-failed \
+      >/dev/null 2>&1 || true
+  fi
+  printf 'failed: %s\n' "$detail" >> "$STATE/$ID.status"
+  echo "error: $detail; inspect window $T" >&2
+}
 
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")
@@ -2299,6 +2388,31 @@ if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   spawn_herdr_presentation_order_lock_release
 fi
 spawn_send_key "$T" Enter
+if [ "$HARNESS" = traex ]; then
+  # A key send proves nothing by itself. On a fresh task copy, Herdr must either
+  # observe the initial prompt enter working directly or identify the exact
+  # TraeX directory-trust chooser, whose preselected Yes is accepted once,
+  # followed by working. Only then publish lifecycle readiness for the watcher.
+  if ! fm_backend_herdr_traex_wait_started "$T" "$WT" "$PROJ_ABS"; then
+    traex_spawn_fail "TraeX task instructions did not begin processing through the verified Herdr launch path"
+    exit 1
+  fi
+  if ! "$FM_ROOT/bin/fm-busy-event.sh" apply "$STATE_REAL" "$ID" busy \
+      --gen "$BUSY_GEN" --source herdr-traex --event launch-working; then
+    traex_spawn_fail "TraeX began processing, but its semantic lifecycle could not be bound to this task"
+    exit 1
+  fi
+  if ! spawn_traex_readiness_set pending 1; then
+    traex_spawn_fail "TraeX began processing, but lifecycle readiness could not be published"
+    exit 1
+  fi
+  if ! fm_backend_herdr_parse_target "$T" \
+      || ! fm_backend_herdr_traex_reconcile_current \
+        "$STATE_REAL" "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE"; then
+    traex_spawn_fail "TraeX began processing, but its current Herdr lifecycle could not be reconciled"
+    exit 1
+  fi
+fi
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then
     kimi_spawn_fail "kimi did not show a verified ready signal before brief delivery"

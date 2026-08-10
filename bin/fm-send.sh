@@ -118,13 +118,15 @@ fm_send_id_from_meta() {  # <meta-file>
 # it and submits both as one garbled message. Ctrl-U clears the composer
 # (verified), so the interrupt is not complete until it has been sent. A failed
 # clear is loud rather than silent, because the alternative is a corrupted steer.
+# Muse and TraeX both restore the interrupted prompt into their composer after
+# Escape; clear only those empirically verified adapters before another steer.
 fm_send_clear_after_interrupt() {  # <key>
   local key=$1
   [ "$key" = Escape ] || return 0
-  case "$TARGET_HARNESS" in muse*) : ;; *) return 0 ;; esac
+  case "$TARGET_HARNESS" in muse*|traex) : ;; *) return 0 ;; esac
   [ "$TARGET_BACKEND" != remote ] || return 0
   if ! fm_backend_send_key "$TARGET_BACKEND" "$T" C-u "$EXPECTED_LABEL"; then
-    echo "error: Escape reached $T, but the muse composer could not be cleared; it still holds the restored prompt. Clear it before sending the next message." >&2
+    echo "error: Escape reached $T, but the worker composer could not be cleared; it still holds the restored prompt. Clear it before sending the next message." >&2
     return 1
   fi
 }

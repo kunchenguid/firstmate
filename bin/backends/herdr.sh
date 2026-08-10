@@ -85,6 +85,10 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # through fm_transition_policy - it never re-encodes the mapping.
 # shellcheck source=bin/fm-transition-lib.sh
 . "$FM_BACKEND_HERDR_ROOT/bin/fm-transition-lib.sh"
+# TraeX-on-Herdr persists native lifecycle transitions through the fleet-wide
+# semantic busy-state contract rather than inventing a rendered-state reader.
+# shellcheck source=bin/fm-busy-lib.sh
+. "$FM_BACKEND_HERDR_ROOT/bin/fm-busy-lib.sh"
 
 FM_BACKEND_HERDR_MIN_PROTOCOL=14
 # events.subscribe (the native pane.agent_status_changed push stream) and its
@@ -2758,6 +2762,129 @@ $cap
 EOF
 }
 
+# TraeX starts every fresh isolated task copy behind its own directory-trust
+# chooser even under -y. The verified Herdr 0.8.0 TraeX manifest identifies
+# that screen structurally as directory_trust_prompt and the chooser defaults
+# to "1. Yes, continue". Firstmate accepts it only after the registered agent,
+# exact pane, live foreground cwd, exact source-root launch provenance, git
+# worktree root, manifest rule, and visible default selection all agree. The
+# one Enter is followed by a required
+# native working observation; a successful key send alone is never launch
+# success. An already-trusted path takes the same working postcondition without
+# sending a key. This helper is deliberately Herdr-only: another backend lacks
+# the structural agent rule and cannot claim the same proof.
+FM_BACKEND_HERDR_TRAEX_START_POLLS=${FM_BACKEND_HERDR_TRAEX_START_POLLS:-180}
+FM_BACKEND_HERDR_TRAEX_START_INTERVAL=${FM_BACKEND_HERDR_TRAEX_START_INTERVAL:-0.1}
+
+fm_backend_herdr_text_has_exact_line() {  # <text> <line>
+  printf '%s\n' "$1" | grep -Fqx -- "$2"
+}
+
+fm_backend_herdr_traex_trust_dialog_exact() {  # <target>
+  local target=$1 explain capture
+  fm_backend_herdr_parse_target "$target" || return 1
+  explain=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" agent explain "$FM_BACKEND_HERDR_PANE" 2>/dev/null) || return 1
+  fm_backend_herdr_text_has_exact_line "$explain" 'agent: traex' || return 1
+  fm_backend_herdr_text_has_exact_line "$explain" 'state: blocked' || return 1
+  fm_backend_herdr_text_has_exact_line "$explain" \
+    'rule: directory_trust_prompt (region=whole_recent priority=1000)' || return 1
+  capture=$(fm_backend_herdr_capture "$target" 80 2>/dev/null) || return 1
+  case "$capture" in *'Do you trust the contents of this directory?'*) : ;; *) return 1 ;; esac
+  case "$capture" in *'❯ 1. Yes, continue'*) : ;; *) return 1 ;; esac
+  case "$capture" in *'  2. No, quit'*) : ;; *) return 1 ;; esac
+  case "$capture" in *'Press enter to continue'*) : ;; *) return 1 ;; esac
+  return 0
+}
+
+fm_backend_herdr_traex_wait_started() {  # <target> <expected-worktree> <source-project>
+  local target=$1 expected=$2 source=$3 expected_real source_real git_top git_real
+  local out agent status cwd foreground pane cwd_real foreground_real
+  local accepted=0 saw_agent=0 i=0 polls interval
+  fm_backend_herdr_parse_target "$target" || {
+    echo "error: TraeX launch target '$target' is not a valid Herdr pane" >&2
+    return 1
+  }
+  expected_real=$(CDPATH='' cd -- "$expected" 2>/dev/null && pwd -P) || {
+    echo "error: TraeX launch expected worktree '$expected' is unreadable" >&2
+    return 1
+  }
+  source_real=$(CDPATH='' cd -- "$source" 2>/dev/null && pwd -P) || {
+    echo "error: TraeX launch source project '$source' is unreadable" >&2
+    return 1
+  }
+  if [ "$source_real" = "$expected_real" ]; then
+    echo "error: TraeX launch expected an isolated task worktree but resolved the source project itself: '$expected_real'" >&2
+    return 1
+  fi
+  git_top=$(git -C "$expected_real" rev-parse --show-toplevel 2>/dev/null) || {
+    echo "error: TraeX launch expected worktree '$expected_real' is not a git worktree root" >&2
+    return 1
+  }
+  git_real=$(CDPATH='' cd -- "$git_top" 2>/dev/null && pwd -P) || return 1
+  if [ "$git_real" != "$expected_real" ]; then
+    echo "error: TraeX trust acceptance is limited to the exact isolated task worktree; expected '$expected_real', git root '$git_real'" >&2
+    return 1
+  fi
+  polls=$FM_BACKEND_HERDR_TRAEX_START_POLLS
+  interval=$FM_BACKEND_HERDR_TRAEX_START_INTERVAL
+  case "$polls" in ''|*[!0-9]*|0) polls=180 ;; esac
+  while [ "$i" -lt "$polls" ]; do
+    out=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" agent get "$FM_BACKEND_HERDR_PANE" 2>/dev/null || true)
+    agent=$(printf '%s' "$out" | jq -r '.result.agent.agent // empty' 2>/dev/null)
+    status=$(printf '%s' "$out" | jq -r '.result.agent.agent_status // empty' 2>/dev/null)
+    if [ -n "$agent" ]; then
+      saw_agent=1
+      pane=$(printf '%s' "$out" | jq -r '.result.agent.pane_id // empty' 2>/dev/null)
+      cwd=$(printf '%s' "$out" | jq -r '.result.agent.cwd // empty' 2>/dev/null)
+      foreground=$(printf '%s' "$out" | jq -r '.result.agent.foreground_cwd // empty' 2>/dev/null)
+      if [ "$agent" != traex ] || [ "$pane" != "$FM_BACKEND_HERDR_PANE" ]; then
+        echo "error: TraeX launch registered unexpected Herdr identity agent='${agent:-missing}' pane='${pane:-missing}'" >&2
+        return 1
+      fi
+      cwd_real=$(CDPATH='' cd -- "$cwd" 2>/dev/null && pwd -P) || cwd_real=
+      foreground_real=$(CDPATH='' cd -- "$foreground" 2>/dev/null && pwd -P) || foreground_real=
+      # Herdr's agent.cwd is immutable pane-creation provenance. Ordinary
+      # Firstmate Herdr tasks create the pane at the exact source project and
+      # then treehouse get enters the isolated copy before TraeX starts, so the
+      # live foreground_cwd is the directory whose trust chooser is visible.
+      # A direct worktree-created pane may report the worktree in both fields.
+      if { [ "$cwd_real" != "$source_real" ] && [ "$cwd_real" != "$expected_real" ]; } \
+         || [ "$foreground_real" != "$expected_real" ]; then
+        echo "error: TraeX launch identity does not belong to the isolated task worktree (expected '$expected_real', source '$source_real', cwd='${cwd_real:-unreadable}', foreground_cwd='${foreground_real:-unreadable}')" >&2
+        return 1
+      fi
+      case "$status" in
+        working)
+          return 0
+          ;;
+        blocked)
+          if [ "$accepted" -eq 0 ]; then
+            if ! fm_backend_herdr_traex_trust_dialog_exact "$target"; then
+              echo "error: TraeX is blocked, but Herdr did not identify the exact directory-trust dialog and its preselected Yes option; refusing to send a key" >&2
+              return 1
+            fi
+            fm_backend_herdr_send_key "$target" Enter || {
+              echo "error: TraeX directory-trust dialog was verified, but its preselected Yes option could not be submitted" >&2
+              return 1
+            }
+            accepted=1
+          fi
+          ;;
+      esac
+    fi
+    i=$((i + 1))
+    [ "$i" -ge "$polls" ] || sleep "$interval"
+  done
+  if [ "$accepted" -eq 1 ]; then
+    echo "error: TraeX directory trust was accepted, but Herdr never observed the task instructions begin processing" >&2
+  elif [ "$saw_agent" -eq 1 ]; then
+    echo "error: TraeX registered in Herdr, but the task instructions never reached a working state" >&2
+  else
+    echo "error: Herdr never registered the launched TraeX worker" >&2
+  fi
+  return 1
+}
+
 fm_backend_herdr_agent_identity_raw() {  # <session> <pane> -> <agent>\t<status>
   local out
   out=$(fm_backend_herdr_cli "$1" agent get "$2" 2>/dev/null) || return 1
@@ -3287,10 +3414,10 @@ fm_backend_herdr_events_capable() {  # <session>
   if [ -z "${FM_BACKEND_HERDR_EVENT_READER:-}" ]; then
     command -v python3 >/dev/null 2>&1 || return 1
   fi
-  protocol=$(herdr status --json 2>/dev/null | jq -r '.client.protocol // empty' 2>/dev/null)
+  protocol=$(fm_backend_herdr_cli "$session" status --json 2>/dev/null | jq -r '.client.protocol // empty' 2>/dev/null)
   case "$protocol" in ''|*[!0-9]*) return 1 ;; esac
   [ "$protocol" -ge "$FM_BACKEND_HERDR_MIN_EVENTS_PROTOCOL" ] || return 1
-  schema=$(herdr api schema --json 2>/dev/null) || return 1
+  schema=$(fm_backend_herdr_cli "$session" api schema --json 2>/dev/null) || return 1
   printf '%s' "$schema" | grep -Fq 'events.subscribe' || return 1
   printf '%s' "$schema" | grep -Fq 'pane.agent_status_changed' || return 1
   return 0
@@ -3331,6 +3458,116 @@ fm_backend_herdr_escalation_marker() {  # <state_dir> <window>
   printf '%s/%s%s' "$state" "$FM_BACKEND_HERDR_ESCALATED_PREFIX" "$key"
 }
 
+# Resolve a transition only through the exact ordinary-task metadata that binds
+# this Herdr pane to the TraeX adapter. The readiness field is published as
+# pending before launch and becomes 1 only after fm-spawn observes native
+# working, so a startup idle level can never masquerade as turn completion.
+# Sets FM_BACKEND_HERDR_TRAEX_ID/READY/GEN on success.
+fm_backend_herdr_traex_transition_meta() {  # <state-dir> <session> <pane>
+  local state=$1 session=$2 pane=$3 target meta='' candidate candidate_window binding
+  local backend harness kind recorded_session recorded_pane
+  FM_BACKEND_HERDR_TRAEX_ID=""
+  FM_BACKEND_HERDR_TRAEX_READY=""
+  FM_BACKEND_HERDR_TRAEX_GEN=""
+  declare -F fm_backend_meta_exact_value >/dev/null 2>&1 || return 1
+  target="$session:$pane"
+  for candidate in "$state"/*.meta; do
+    [ -f "$candidate" ] && [ ! -L "$candidate" ] || continue
+    candidate_window=$(fm_backend_meta_exact_value "$candidate" window 2>/dev/null) || continue
+    [ "$candidate_window" = "$target" ] || continue
+    [ -z "$meta" ] || return 1
+    meta=$candidate
+  done
+  [ -n "$meta" ] || return 1
+  backend=$(fm_backend_meta_exact_value "$meta" backend 2>/dev/null) || return 1
+  harness=$(fm_backend_meta_exact_value "$meta" harness 2>/dev/null) || return 1
+  kind=$(fm_backend_meta_exact_value "$meta" kind 2>/dev/null) || return 1
+  recorded_session=$(fm_backend_meta_exact_value "$meta" herdr_session 2>/dev/null) || return 1
+  recorded_pane=$(fm_backend_meta_exact_value "$meta" herdr_pane_id 2>/dev/null) || return 1
+  [ "$backend" = herdr ] && [ "$harness" = traex ] || return 1
+  case "$kind" in ship|scout) ;; *) return 1 ;; esac
+  [ "$recorded_session" = "$session" ] && [ "$recorded_pane" = "$pane" ] || return 1
+  FM_BACKEND_HERDR_TRAEX_READY=$(fm_backend_meta_exact_value "$meta" traex_ready 2>/dev/null) || return 1
+  FM_BACKEND_HERDR_TRAEX_GEN=$(fm_backend_meta_exact_value "$meta" busy_gen 2>/dev/null) || return 1
+  FM_BACKEND_HERDR_TRAEX_ID=${meta##*/}
+  FM_BACKEND_HERDR_TRAEX_ID=${FM_BACKEND_HERDR_TRAEX_ID%.meta}
+  case "$FM_BACKEND_HERDR_TRAEX_ID" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  binding=$(fm_backend_meta_exact_value "$meta" endpoint_task_id 2>/dev/null) || return 1
+  [ "$binding" = "$FM_BACKEND_HERDR_TRAEX_ID" ] || return 1
+  return 0
+}
+
+# Persist TraeX's native Herdr transitions through the existing semantic-state
+# writer. A working edge opens/continues a turn; blocked records an inactive
+# human wait (the shared blocked policy separately wakes); idle/done closes only
+# a record that was busy, then touches the ordinary durable turn notification.
+# Reconnect level reconciliation runs this same fold, so an idle edge that fell
+# between bounded subscriptions still closes exactly once.
+fm_backend_herdr_traex_observe_transition() {  # <state-dir> <session> <record>
+  local state=$1 session=$2 record=$3 pane to agent current current_state current_rest current_source event
+  pane=$(fm_transition_pane_id "$record")
+  to=$(fm_transition_to_status "$record")
+  agent=$(fm_transition_agent "$record")
+  [ -n "$pane" ] || return 0
+  if ! fm_backend_herdr_traex_transition_meta "$state" "$session" "$pane"; then
+    return 0
+  fi
+  [ "$FM_BACKEND_HERDR_TRAEX_READY" = 1 ] || return 0
+  if [ -n "$agent" ] && [ "$agent" != traex ]; then
+    echo "warning: Herdr transition for TraeX task $FM_BACKEND_HERDR_TRAEX_ID reported agent '$agent'; refusing the lifecycle update" >&2
+    return 1
+  fi
+  current=$(fm_busy_record_read "$state" "$FM_BACKEND_HERDR_TRAEX_ID" 2>/dev/null) || {
+    echo "warning: TraeX task $FM_BACKEND_HERDR_TRAEX_ID has no valid armed lifecycle record; refusing the Herdr transition" >&2
+    return 1
+  }
+  current_state=${current%% *}
+  current_rest=${current#* }
+  current_source=${current_rest%% *}
+  event="agent-$to"
+  case "$to" in
+    working)
+      [ "$current_state" = busy ] && [ "$current_source" = herdr-traex ] && return 0
+      "$FM_BACKEND_HERDR_ROOT/bin/fm-busy-event.sh" apply \
+        "$state" "$FM_BACKEND_HERDR_TRAEX_ID" busy \
+        --gen "$FM_BACKEND_HERDR_TRAEX_GEN" --source herdr-traex --event "$event"
+      ;;
+    blocked)
+      [ "$current_state" = busy ] || return 0
+      "$FM_BACKEND_HERDR_ROOT/bin/fm-busy-event.sh" apply \
+        "$state" "$FM_BACKEND_HERDR_TRAEX_ID" idle \
+        --gen "$FM_BACKEND_HERDR_TRAEX_GEN" --source herdr-traex --event "$event"
+      ;;
+    idle|done)
+      [ "$current_state" = busy ] || return 0
+      "$FM_BACKEND_HERDR_ROOT/bin/fm-busy-event.sh" apply \
+        "$state" "$FM_BACKEND_HERDR_TRAEX_ID" idle \
+        --gen "$FM_BACKEND_HERDR_TRAEX_GEN" --source herdr-traex --event "$event" || return 1
+      if ! touch "$state/$FM_BACKEND_HERDR_TRAEX_ID.turn-ended"; then
+        "$FM_BACKEND_HERDR_ROOT/bin/fm-busy-event.sh" apply \
+          "$state" "$FM_BACKEND_HERDR_TRAEX_ID" busy \
+          --gen "$FM_BACKEND_HERDR_TRAEX_GEN" --source herdr-traex --event notify-retry \
+          >/dev/null 2>&1 || true
+        return 1
+      fi
+      ;;
+  esac
+}
+
+# Close the narrow launch-publication race: after readiness becomes durable,
+# fold the pane's current native level once. If an exceptionally short first
+# turn already became idle before readiness publication, this emits its one
+# completion notification instead of waiting for a future reconnect.
+fm_backend_herdr_traex_reconcile_current() {  # <state-dir> <session> <pane>
+  local state=$1 session=$2 pane=$3 identity agent status record
+  identity=$(fm_backend_herdr_agent_identity_raw "$session" "$pane" 2>/dev/null) || return 1
+  agent=$(printf '%s' "$identity" | cut -f1)
+  status=$(printf '%s' "$identity" | cut -f2)
+  [ -n "$status" ] || return 1
+  record=$(fm_backend_herdr_normalize_event "$pane" "" "$status" "$agent")
+  fm_backend_herdr_traex_observe_transition "$state" "$session" "$record"
+}
+
 # fm_backend_herdr_apply_transition: route one normalized record through the
 # shared policy table, maintaining the per-pane dedupe marker under <state_dir>.
 # On a fresh `actionable` (blocked) edge - policy actionable AND no marker yet -
@@ -3350,6 +3587,13 @@ fm_backend_herdr_apply_transition() {  # <state_dir> <session> <record>
   marker=$(fm_backend_herdr_escalation_marker "$state" "$window")
   case "$action" in
     actionable)
+      # TraeX launch owns its one fresh-worktree trust prompt. Suppress only
+      # while exact metadata still says pending; a failed launch changes that
+      # field, so any persistent/other blocker becomes actionable next cycle.
+      if fm_backend_herdr_traex_transition_meta "$state" "$session" "$pane_id" \
+         && [ "$FM_BACKEND_HERDR_TRAEX_READY" = pending ]; then
+        return 1
+      fi
       if [ ! -e "$marker" ]; then
         printf '%s' "$record"
         return 0
@@ -3419,7 +3663,7 @@ fm_backend_herdr_wait_transition() {  # <session> <timeout_secs> <state_dir> <pa
   done < <(fm_backend_herdr_event_reader_cmd)
   [ "${#reader[@]}" -gt 0 ] || return 2
 
-  local fifo_dir fifo reader_pid line ws status agent raw record hit rc=1 reader_rc=0
+  local fifo_dir fifo reader_pid line ws status agent identity record hit rc=1 reader_rc=0
   fifo_dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-herdr-eventwait.XXXXXX") || return 2
   fifo="$fifo_dir/events"
   if ! mkfifo "$fifo" 2>/dev/null; then
@@ -3448,9 +3692,17 @@ fm_backend_herdr_wait_transition() {  # <session> <timeout_secs> <state_dir> <pa
       if [ -z "$pane_id" ] || [ "$pane_id" = "$w" ]; then
         continue
       fi
-      raw=$(fm_backend_herdr_agent_status_raw "$session" "$pane_id")
-      [ -n "$raw" ] || continue
-      record=$(fm_backend_herdr_normalize_event "$pane_id" "" "$raw" "")
+      identity=$(fm_backend_herdr_agent_identity_raw "$session" "$pane_id" 2>/dev/null || true)
+      # A missing agent is an empty first field. TAB is IFS whitespace, so
+      # `read` would collapse it and shift status left; cut preserves empties.
+      agent=$(printf '%s' "$identity" | cut -f1)
+      status=$(printf '%s' "$identity" | cut -f2)
+      [ -n "$status" ] || continue
+      record=$(fm_backend_herdr_normalize_event "$pane_id" "" "$status" "$agent")
+      if ! fm_backend_herdr_traex_observe_transition "$state" "$session" "$record"; then
+        rc=2
+        break
+      fi
       if hit=$(fm_backend_herdr_apply_transition "$state" "$session" "$record"); then
         printf '%s' "$hit"
         rc=0
@@ -3474,6 +3726,10 @@ fm_backend_herdr_wait_transition() {  # <session> <timeout_secs> <state_dir> <pa
     agent=$(printf '%s' "$line" | cut -f4)
     [ -n "$pane_id" ] || continue
     record=$(fm_backend_herdr_normalize_event "$pane_id" "$ws" "$status" "$agent")
+    if ! fm_backend_herdr_traex_observe_transition "$state" "$session" "$record"; then
+      rc=2
+      break
+    fi
     if hit=$(fm_backend_herdr_apply_transition "$state" "$session" "$record"); then
       printf '%s' "$hit"
       rc=0
