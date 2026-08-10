@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Watcher liveness and worktree-tangle guard, called by supervision scripts, by
-# fm-wake-drain.sh after it empties queued wakes, and by fm-session-start.sh in
-# read-only advisory mode whenever session-lock ownership was not verified.
+# Primary and registered-local-secondmate watcher liveness plus worktree-tangle
+# guard, called by supervision scripts, by fm-wake-drain.sh after it empties
+# queued wakes, and by fm-session-start.sh in read-only advisory mode whenever
+# session-lock ownership was not verified.
 # First, always warn if the firstmate primary checkout (FM_ROOT) is on a named
 # non-default branch, because that means firstmate-on-itself work landed in the
 # primary instead of an isolated worktree.
@@ -21,9 +22,12 @@
 # later guarded commands in the same episode print a one-line reminder instead.
 # Episode state lives only under state/.guard-watcher-stale-banner (volatile,
 # bounded). Independent alarms (queued wakes, worktree tangle) are never
-# suppressed by that dedup. Normal wake handling (watcher briefly down between a
-# wake and the next supervision resume) stays inside the grace window and stays
-# silent. Always exits 0: the guard warns, it never blocks.
+# suppressed by that dedup. Registered local secondmate homes are also scanned
+# for a stale, missing, or unreadable watcher beat under their separate grace;
+# remote routes are skipped so this guard remains network-free. Normal wake
+# handling (watcher briefly down between a wake and the next supervision resume)
+# stays inside the grace window and stays silent. Always exits 0: the guard
+# warns, it never blocks.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

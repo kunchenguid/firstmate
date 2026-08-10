@@ -38,11 +38,12 @@ esac
 # every wake-handling and recovery turn, so assert supervision health here too. A
 # lapsed supervision chain then surfaces on a plain drain-and-handle turn, not
 # only when a guarded supervision script (fm-peek/fm-send/...) happens to run.
-# Reuse fm-guard.sh's model-aware alarm and FM_GUARD_GRACE instead of duplicating
-# its supervision verdict. Under Claude's between-turns auto-arm model, a normal
-# fire leaves a recent beacon well inside grace and stays silent mid-turn. Under
-# persistent-watcher models, the guard also requires the live identity-matched
-# watcher. Never let a guard hiccup change the drain's exit status.
+# Reuse fm-guard.sh's model-aware primary verdict and registered-secondmate
+# liveness scan instead of duplicating either predicate. Under Claude's
+# between-turns auto-arm model, a normal fire leaves a recent primary beacon well
+# inside FM_GUARD_GRACE and stays silent mid-turn. Under persistent-watcher
+# models, the primary verdict also requires the live identity-matched watcher.
+# Never let a guard hiccup change the drain's exit status.
 assert_watcher_liveness() {
   "$SCRIPT_DIR/fm-guard.sh" || true
 }

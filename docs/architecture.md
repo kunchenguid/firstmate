@@ -21,6 +21,10 @@ No-verb wakes, such as `working:` notes and bare turn-ended signals, are benign 
 A crew that declares `paused:` for a known external wait is separately absorbed while idle and re-surfaced only on the longer pause cadence, rather than being treated as a possible wedge.
 For an ordinary crew that has stopped, the normal-mode watcher first surfaces one stale wake, then applies that same cadence to an unchanged `paused:` or durable `captain-held` endpoint only when the backend confidently reports its agent dead.
 Live or inconclusive liveness remains fail-open at that initial surface, and the secondmate idle-endpoint exemption is unchanged.
+Independently of ordinary worker and idle-secondmate pane classification, the parent watcher scans each registered local secondmate home's `state/.last-watcher-beat`.
+Newly seeded homes receive a 900-second first-heartbeat grace, existing beats become stale at the same threshold, and an unreadable heartbeat age alarms instead of being treated as fresh.
+The watcher queues one named `check: secondmate watcher ...` wake per unchanged lapse, clears that suppression after a fresh or startup-grace state, and skips remote routes so the local poll never performs network I/O.
+The pull guard runs the shared scan during locked wake drain and read-only session start, printing the current named alarm independently of ordinary primary-watcher health.
 Its initial normal-mode status signal still surfaces through the no-verb path, while away mode self-handles that routine signal and owns the later recheck.
 Fresh stale panes use the same current-state read before trusting the status log, so an active run or a proven busy worker outranks an old captain-relevant status-log line left behind before validation.
 No-change heartbeats are also benign.
@@ -67,7 +71,7 @@ It suppresses failed-looking closes when the same identity-matched watcher is he
 [`watcher-continuity.md`](watcher-continuity.md) owns Claude's residual active-turn coverage and watcher-status command-gating boundary.
 The existing turn-end guard remains the final backstop for all five harness-engine protocols, with pi-signed sharing Pi's protocol and the `--claude` mode cooperating with the auto-arm claim.
 Its `--restart` mode signals only the watcher recorded in the current home's `state/.watch.lock`, so restarting one home cannot kill sibling secondmate watchers.
-A pull-based guard (`bin/fm-guard.sh`) warns through supervision tool output if the primary checkout is tangled, if work, process-event sources, or Relay polling has an unhealthy model-aware supervision verdict, or if queued wakes are waiting to be drained.
+A pull-based guard (`bin/fm-guard.sh`) warns through supervision tool output if the primary checkout is tangled, if work, process-event sources, or Relay polling has an unhealthy model-aware supervision verdict, if a registered local secondmate watcher is unhealthy, or if queued wakes are waiting to be drained.
 The drain script calls that guard after presenting the queue; records remain durable, and may keep the queued-wakes warning visible, until the exact generation-bound acknowledgement printed by the drain succeeds after handling.
 It leads with a prominent bordered tangle banner, while `bin/fm-guard.sh` owns the watcher-down banner and reminder policy so repeated guarded commands stay noisy without reprinting the full banner in the same episode.
 On every verified primary harness, tracked hook integration gives the primary session a push-based backstop: when work, a process-event source, or Relay polling needs supervision and no identity-matched watcher lock with a fresh beacon is live, direct Stop hooks block and passive turn-end hooks force one bounded follow-up.

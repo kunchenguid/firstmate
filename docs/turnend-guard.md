@@ -12,6 +12,7 @@ Do not infer this guard's scope, loop safety, or compatibility tradeoffs for tho
 ## Current invariant
 
 `bin/fm-guard.sh` is a pull-based warning that runs only when another supervision command invokes it.
+Separately from the primary turn-end predicate, that pull guard also prints registered-local-secondmate watcher alarms through locked wake drain and read-only session start; [`architecture.md`](architecture.md#event-driven-supervision) owns the shared scan contract, and [`configuration.md`](configuration.md#environment-variables) owns its separate grace setting.
 The turn-end guard closes the remaining gap at the primary's own turn boundary.
 When work, a process-event source, or Relay polling needs supervision at that boundary and no identity-matched watcher has a fresh beacon, the harness integration must either block the turn end or force one bounded follow-up that uses the recovery instruction from the emitted session-start protocol.
 The mid-turn pull warning uses the model-aware supervision verdict described below, while the turn-end guard keeps the PID-strict watcher predicate.
@@ -97,6 +98,7 @@ That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it alwa
 
 - Child crewmate and scout worktrees are outside scope.
 - A valid secondmate home is in scope; an idle secondmate endpoint with no Relay poll remains healthy because it has no supervision need.
+- That endpoint-idle verdict does not suppress the parent home's separate registered-local watcher scan; [`architecture.md`](architecture.md#event-driven-supervision) owns that boundary.
 - The direct-blocking and bounded passive-follow-up split is limited to the primary integrations listed above.
 - OpenCode headless mode and untrusted Grok project hooks remain fail-open at the host boundary.
 - Kimi Code CLI 0.29.1 exposes only global `[[hooks]]` configuration in `~/.kimi-code/config.toml`, including a `Stop` event with snake_case payload fields `hook_event_name`, `session_id`, `cwd`, and `stop_hook_active`.
@@ -111,7 +113,7 @@ That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it alwa
 ## Regression coverage
 
 `tests/fm-turnend-guard.test.sh` covers the predicate, main and secondmate primary scope, child-worktree exclusion, `FM_HOME` and `FM_STATE_OVERRIDE` precedence, the live-lock and fresh-beacon guard predicate, the cooperative `--claude` claim wait, monotonic failed-epoch progression, bounded attended fail-open, post-alarm continuation suppression, positive recovery reset, Pi logical-run latching, missing-`jq` behavior, all five primary registrations, Grok native and legacy selection, typed field precedence, malformed input, and exactly-one-path safety.
-`tests/fm-guard-stale-banner.test.sh` covers the pull-guard predicate, including the persistent-model fresh-leftover-beacon negative control, the auto-arm model's healthy fresh-beacon-without-a-watcher case and its stale-beacon alarm, the true-reason banner wording, and the reason-keyed episode dedup surviving a beacon mtime change.
+`tests/fm-guard-stale-banner.test.sh` covers the pull-guard predicate, including the persistent-model fresh-leftover-beacon negative control, the auto-arm model's healthy fresh-beacon-without-a-watcher case and its stale-beacon alarm, the true-reason banner wording, the reason-keyed episode dedup surviving a beacon mtime change, and a named stale registered-secondmate alarm that does not misclassify the healthy parent watcher.
 `tests/fm-kimi-harness.test.sh` covers the separate Kimi crew hook's format preservation, idempotence, refusal cases, token guard, spawn registration, and teardown cleanup.
 `tests/fm-supervision-instructions.test.sh` covers recovery-line ownership and pi-signed's identity-preserving reuse of Pi's protocol.
 `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh` is the opt-in isolated Pi path.
