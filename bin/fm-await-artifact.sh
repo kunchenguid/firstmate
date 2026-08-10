@@ -30,6 +30,19 @@
 # check for that task - a PR merge poll above all - is refused rather than
 # clobbered, because those carry their own registration and retirement records.
 #
+# Arming publishes the check and binds it immediately afterwards, the
+# write-then-register contract bin/fm-check-register.sh already offers. That
+# leaves a bounded window - one mv plus one fm-check-register.sh run, tens of
+# milliseconds against the 300s FM_CHECK_INTERVAL sweep - in which
+# state/<id>.check.sh carries no trust binding, or on a re-arm the previous
+# arming's hash. A sweep landing inside that window rejects the freshly armed
+# check, skips its wake for that sweep, and reports
+# "rejected unauthenticated state checks", which is indistinguishable from a
+# real edited-check alarm. The next sweep recovers. The ordering is deliberate:
+# binding before publishing would instead let an interruption leave a waiting
+# consumer with nothing armed at all, and a rare false alarm is preferable to
+# an unwatched dependency.
+#
 # An empty or malformed regex, a relative path, a missing task, or an
 # unwritable state directory refuses here. Arming is the only point where a bad
 # watch can be reported at all: the check is silent on every error by design, so

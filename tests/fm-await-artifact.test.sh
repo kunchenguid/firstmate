@@ -56,6 +56,8 @@ test_help_includes_entire_header() {
   assert_contains "$out" "Usage: fm-await-artifact.sh" "help must print the usage line"
   assert_contains "$out" "mtime/size signature" "help must document the default readiness rule"
   assert_contains "$out" "REPLACES the stability heuristic" "help must document sentinel semantics"
+  assert_contains "$out" "rejected unauthenticated state checks" \
+    "help must document the accepted window between publishing a check and binding it"
   [ -z "$(bash -n "$AWAIT" 2>&1)" ] || fail "bash -n bin/fm-await-artifact.sh emitted output"
   pass "fm-await-artifact.sh: --help prints the header and the script parses"
 }
