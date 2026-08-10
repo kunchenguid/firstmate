@@ -538,7 +538,7 @@ test_watch_restart_rejects_reused_pid() {
 }
 
 test_watch_restart_reclaims_aliased_reused_pid_lock() {
-  local dir canonical_home alias_home state fakebin out live pid i lock_pid
+  local dir canonical_home alias_home state fakebin out live pid i
   dir=$(make_case restart-aliased-reused-pid)
   canonical_home="$dir/GitHub/firstmate"
   alias_home="$dir/github/firstmate"
@@ -562,20 +562,21 @@ test_watch_restart_reclaims_aliased_reused_pid_lock() {
   PATH="$fakebin:$PATH" FM_HOME="$alias_home" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" --restart > "$out" &
   pid=$!
   i=0
-  while [ "$i" -lt 80 ]; do
-    grep -qF 'watcher: started pid=' "$out" 2>/dev/null && break
+  while [ "$i" -lt 80 ] && is_live_non_zombie "$pid"; do
     sleep 0.1
     i=$((i + 1))
   done
-  lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
-  { [ -n "$lock_pid" ] && [ "$lock_pid" != "$live" ] && kill -0 "$lock_pid" 2>/dev/null; } \
-    || fail "restart did not replace aliased reused-pid lock with a live watcher (got '$lock_pid')"
-  grep -F "watcher: started pid=$lock_pid" "$out" >/dev/null || fail "restart did not report the fresh watcher it confirmed"
-  is_live_non_zombie "$live" || fail "restart killed a reused unrelated pid through an owner alias"
-  kill "$pid" "$lock_pid" "$live" 2>/dev/null || true
+  is_live_non_zombie "$pid" \
+    && fail "restart did not surface recovery after replacing an aliased reused-pid lock"
   wait "$pid" 2>/dev/null || true
+  grep -F 'check: rearm-resurface' "$out" >/dev/null \
+    || fail "restart replaced aliased reused-pid lock without surfacing recovery: $(cat "$out")"
+  { [ ! -e "$state/.watch.lock" ] && [ ! -L "$state/.watch.lock" ]; } \
+    || fail "restart retained an aliased reused-pid lock after surfacing recovery"
+  is_live_non_zombie "$live" || fail "restart killed a reused unrelated pid through an owner alias"
+  kill "$live" 2>/dev/null || true
   wait "$live" 2>/dev/null || true
-  pass "watch restart reclaims an aliased reused-pid lock without signaling its pid"
+  pass "watch restart preserves recovery for an aliased reused-pid lock without signaling its pid"
 }
 
 test_watch_restart_attaches_to_healthy_peer() {
