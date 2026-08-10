@@ -3112,7 +3112,7 @@ test_composer_state_omp_separator_idle_is_empty() {
 # 5150, the Bun runtime a live OMP worker keeps in its pane.
 omp_agent_state_verdict() {  # <dir> <agent> <status> <process-info> [ps-rows]
   local dir=$1 agent=$2 status=$3 info=$4 rows=${5:-'1 0
-4242 1'} log resp fb
+4242 1'} stat=${6:-S+} log resp fb
   mkdir -p "$dir/responses"
   log="$dir/log"; resp="$dir/responses"; : > "$log"
   printf '%s\n' '{"result":{"pane":{"pane_id":"w1:p1","tab_id":"w1:t1","workspace_id":"w1"}}}' > "$resp/1.out"
@@ -3122,9 +3122,10 @@ omp_agent_state_verdict() {  # <dir> <agent> <status> <process-info> [ps-rows]
   cat > "$dir/ps" <<'SH'
 #!/usr/bin/env bash
 set -u
-case "$*" in
-  "-axo pid=,ppid=") cat "${FM_FAKE_PS_ROWS:?}" ;;
-  *"-o comm=")
+  case "$*" in
+    "-axo pid=,ppid=") cat "${FM_FAKE_PS_ROWS:?}" ;;
+    *"-o stat=") printf '%s\n' "${FM_FAKE_PS_STAT:-S+}" ;;
+    *"-o comm=")
     pid=
     while [ "$#" -gt 0 ]; do
       case "$1" in -p) pid=$2; shift 2 ;; *) shift ;; esac
@@ -3141,7 +3142,7 @@ SH
   chmod +x "$dir/ps"
   fb=$(make_herdr_fakebin "$dir")
   PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_PS_BIN="$dir/ps" \
-    FM_FAKE_PS_ROWS="$dir/ps-rows" \
+    FM_FAKE_PS_ROWS="$dir/ps-rows" FM_FAKE_PS_STAT="$stat" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pane_agent_state lab w1:p1' "$ROOT"
 }
 
@@ -3182,6 +3183,24 @@ test_omp_idle_registration_over_a_shell_with_a_child_stays_live() {
   [ "$out" = live ] \
     || fail "a pane shell that still has a child process must not be declared agent-free, got '$out'"
   pass "herdr agent state: a pane shell with a surviving child stays live rather than reclaimable"
+}
+
+test_omp_idle_registration_with_mismatched_shell_pid_stays_live() {
+  local out info
+  info='{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p1","shell_pid":5150,"foreground_process_group_id":4242,"foreground_processes":[{"pid":4242,"name":"zsh","argv0":"zsh"}]}}}'
+  out=$(omp_agent_state_verdict "$TMP_ROOT/omp-shell-pid-mismatch" omp idle "$info")
+  [ "$out" = live ] \
+    || fail "an OMP husk proof must reject a foreground process that is not the reported shell pid, got '$out'"
+  pass "herdr agent state: a mismatched shell pid stays live rather than reclaimable"
+}
+
+test_omp_idle_registration_over_a_running_childless_shell_stays_live() {
+  local out
+  out=$(omp_agent_state_verdict "$TMP_ROOT/omp-running-shell" omp idle "$(omp_lone_shell_process_info 4242)" '1 0
+4242 1' 'R+')
+  [ "$out" = live ] \
+    || fail "a running childless shell must not be declared an OMP husk, got '$out'"
+  pass "herdr agent state: a running childless shell stays live rather than reclaimable"
 }
 
 test_omp_husk_proof_does_not_widen_to_other_adapters() {
@@ -4548,6 +4567,8 @@ test_composer_state_omp_separator_idle_is_empty
 test_omp_idle_registration_over_a_lone_shell_is_no_agent
 test_omp_idle_registration_over_a_running_bun_stays_live
 test_omp_idle_registration_over_a_shell_with_a_child_stays_live
+test_omp_idle_registration_with_mismatched_shell_pid_stays_live
+test_omp_idle_registration_over_a_running_childless_shell_stays_live
 test_omp_husk_proof_does_not_widen_to_other_adapters
 test_composer_state_pi_separator_real_text_is_pending
 test_composer_state_pi_incomplete_separator_below_stale_generic_is_unknown

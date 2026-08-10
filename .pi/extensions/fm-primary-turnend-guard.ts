@@ -243,11 +243,17 @@ function sessionSource(reason: string): string | undefined {
   }
 }
 
+function advanceSessionGeneration(): void {
+  sessionGeneration += 1;
+  guardFollowupGeneration = undefined;
+}
+
 type CrossHarnessEvent = "session_switch" | "agent_end";
 type CrossHarnessOn = (event: CrossHarnessEvent, handler: (event: unknown) => unknown) => void;
 
 function registerPrimaryTurnendGuard(pi: ExtensionAPI): void {
   pi.on?.("session_start", async (event, ctx) => {
+    advanceSessionGeneration();
     const reason = sessionReason(event);
     const source = primaryHarness === "omp"
       ? "startup"
@@ -258,13 +264,13 @@ function registerPrimaryTurnendGuard(pi: ExtensionAPI): void {
     if (!source) return;
     await injectSessionstart(pi, source);
   });
+  pi.on?.("session_shutdown", advanceSessionGeneration);
 
   if (primaryHarness === "omp") {
     // OMP's API is a strict event superset of the legacy Pi ExtensionAPI type.
     const onCrossHarnessEvent = pi.on as unknown as CrossHarnessOn;
     onCrossHarnessEvent.call(pi, "session_switch", async (event) => {
-      sessionGeneration += 1;
-      guardFollowupGeneration = undefined;
+      advanceSessionGeneration();
       const source = sessionSource(sessionReason(event));
       markLoaded();
       if (source) await injectSessionstart(pi, source);

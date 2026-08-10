@@ -996,6 +996,7 @@ import { pathToFileURL } from "node:url";
 
 const handlers = new Map();
 let prompts = 0;
+let replaced = false;
 const pi = {
   on(event, handler) {
     handlers.set(event, handler);
@@ -1007,6 +1008,11 @@ const pi = {
     if (!message.includes("watcher cycle is missing, failed, or unhealthy")) throw new Error(`guard prompt omitted recovery-only state: ${message}`);
     if (message.includes("Resume supervision according to the session-start operating block")) throw new Error(`guard prompt used ordinary continuity: ${message}`);
     if (options?.deliverAs !== "followUp") throw new Error("guard prompt was not a follow-up");
+    if (!replaced) {
+      replaced = true;
+      await handlers.get("session_shutdown")?.({ type: "session_shutdown" }, {});
+      await handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, {});
+    }
     await handlers.get("agent_settled")?.({ type: "agent_settled" }, {});
   },
 };
@@ -1017,22 +1023,22 @@ const settled = handlers.get("agent_settled");
 if (!settled) throw new Error("agent_settled handler was not registered");
 
 await settled({ type: "agent_settled" }, {});
-if (prompts !== 1) throw new Error(`no-tool run injected ${prompts} follow-ups`);
+if (prompts !== 2) throw new Error(`Pi session replacement injected ${prompts} follow-ups`);
 
 for (let i = 0; i < 3; i += 1) {
   await handlers.get("turn_end")?.({ type: "turn_end", turnIndex: i }, {});
 }
 await settled({ type: "agent_settled" }, {});
-if (prompts !== 2) throw new Error(`multi-tool run produced ${prompts - 1} follow-ups`);
+if (prompts !== 3) throw new Error(`multi-tool run produced ${prompts - 2} follow-ups`);
 
 const guardRuns = readFileSync(process.env.FM_GUARD_LOG, "utf8").trim().split("\n").length;
-if (guardRuns !== 2) throw new Error(`guard predicate ran ${guardRuns} times for two logical runs`);
+if (guardRuns !== 3) throw new Error(`guard predicate ran ${guardRuns} times across a replacement and logical run`);
 EOF
 )
   status=$?
   expect_code 0 "$status" "Pi guard must inject once for no-tool and multi-tool logical runs"
   [ -z "$out" ] || fail "Pi logical-run guard test printed output: $out"
-  pass ".pi primary extension: no-tool and multi-tool runs each inject exactly one guard follow-up"
+  pass ".pi primary extension: session replacement and logical runs each guard once"
 }
 
 test_omp_extension_uses_agent_end_for_logical_runs() {

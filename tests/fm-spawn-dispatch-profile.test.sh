@@ -59,7 +59,7 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse
+  fm_fake_exit0 "$fakebin" treehouse pi-signed omp
   cat > "$fakebin/timeout" <<'SH'
 #!/usr/bin/env bash
 shift
@@ -729,6 +729,24 @@ SH
   pass "a raw launch worker self-identifies as its recorded harness even under an inherited OMP marker"
 }
 
+test_raw_omp_launch_does_not_arm_unwired_semantic_busy() {
+  local rec id out status launch
+  id=profile-raw-omp-z8f
+  rec=$(make_spawn_case profile-raw-omp claude "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "omp --raw-flag")
+  status=$?
+  expect_code 0 "$status" "a raw OMP launch command should spawn"
+  assert_contains "$out" "spawned $id harness=omp" "raw OMP launch did not record its harness identity"
+  assert_absent "$HOME_DIR/state/$id.busy-gen" "raw OMP launch armed semantic busy without loading the generated extension"
+  assert_absent "$HOME_DIR/state/$id.busy-state" "raw OMP launch seeded busy state without loading the generated extension"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "omp --raw-flag" "raw OMP launch command was not preserved"
+  pass "raw OMP launches remain unverified without semantic busy wiring"
+}
+
 # The raw path is the escape hatch for verifying a new adapter, so it has to keep
 # accepting the shell forms an experimental launcher takes. A command-prefix
 # strip (`env -u OMPCODE cd sub && agent`) would make this pane die at the first
@@ -943,6 +961,7 @@ test_pi_threads_model_and_max_effort
 test_pi_tui_mode_probe_is_safe_for_old_and_new_pi
 test_pi_signed_threads_shared_pi_profile_and_preserves_identity
 test_raw_launch_worker_identity_matches_its_recorded_harness
+test_raw_omp_launch_does_not_arm_unwired_semantic_busy
 test_raw_launch_preserves_compound_shell_command_forms
 test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata
 test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity

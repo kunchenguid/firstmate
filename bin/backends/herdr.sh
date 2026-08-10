@@ -1862,40 +1862,7 @@ fm_backend_herdr_explicit_close_pane_confirmed() {  # <session> <pane_id>
 # shell, and the OS process has no child. Any transient prompt helper or
 # unreadable field keeps the registration live/unknown for the next poll.
 fm_backend_herdr_omp_exited_to_shell() {  # <session> <pane-id>
-  local session=$1 pane=$2 info pid pgid name argv0 shell rows ps_bin
-  info=$(fm_backend_herdr_cli "$session" pane process-info --pane "$pane" 2>/dev/null) || return 1
-  printf '%s' "$info" | jq -e --arg pane "$pane" '
-    .result.type == "pane_process_info"
-    and .result.process_info.pane_id == $pane
-    and (.result.process_info.foreground_processes | type) == "array"
-    and (.result.process_info.foreground_processes | length) == 1
-  ' >/dev/null 2>&1 || return 1
-  pid=$(printf '%s' "$info" | jq -er \
-    '.result.process_info.foreground_processes[0].pid | select(type == "number" and . > 1) | floor' 2>/dev/null) || return 1
-  pgid=$(printf '%s' "$info" | jq -er \
-    '.result.process_info.foreground_process_group_id | select(type == "number" and . > 1) | floor' 2>/dev/null) || return 1
-  [ "$pid" = "$pgid" ] || return 1
-  name=$(printf '%s' "$info" | jq -er \
-    '.result.process_info.foreground_processes[0].name | select(type == "string" and length > 0)' 2>/dev/null) || return 1
-  argv0=$(printf '%s' "$info" | jq -er '
-    .result.process_info.foreground_processes[0] as $process
-    | ($process.argv0 // $process.argv[0])
-    | select(type == "string" and length > 0)
-  ' 2>/dev/null) || return 1
-  shell=${name##*/}
-  argv0=${argv0#-}
-  argv0=${argv0##*/}
-  [ "$argv0" = "$shell" ] || return 1
-  case "$shell" in sh|bash|zsh|dash|ksh|fish) ;; *) return 1 ;; esac
-  ps_bin=${FM_HERDR_PS_BIN:-ps}
-  command -v "$ps_bin" >/dev/null 2>&1 || return 1
-  fm_backend_herdr_pid_is_bare_shell "$ps_bin" "$pid" || return 1
-  rows=$("$ps_bin" -axo pid=,ppid= 2>/dev/null) || return 1
-  printf '%s\n' "$rows" | awk -v shell="$pid" '
-    $1 == shell { found++ }
-    $2 == shell { child++ }
-    END { exit(found == 1 && child == 0 ? 0 : 1) }
-  ' || return 1
+  fm_backend_herdr_pane_idle_shell_sample "$1" "$2" >/dev/null
 }
 
 # fm_backend_herdr_pane_agent_state: classify <pane_id> in <session> as one of
