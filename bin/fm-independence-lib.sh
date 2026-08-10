@@ -181,16 +181,22 @@ fm_independence_label() {  # <PASS|FAIL|NO_VERIFIER_RAN> [unobserved-word]
   esac
 }
 
-# Echo how strongly a result must survive a fold, so every fold in this file
-# ranks the three values the same way and the asymmetry is stated once rather
-# than re-derived at each site. An observed dependence outranks everything: it
-# is a positive finding, and letting an unobserved sibling erase it would turn a
-# known problem into an unknown one.
+# Set FM_INDEPENDENCE_RANK to how strongly a result must survive a fold, so
+# every fold in this file ranks the three values the same way and the asymmetry
+# is stated once rather than re-derived at each site. An observed dependence
+# outranks everything: it is a positive finding, and letting an unobserved
+# sibling erase it would turn a known problem into an unknown one.
+#
+# It ASSIGNS rather than echoes because the fold below runs it once per
+# dimension per run, and bin/fm-wake-ledger.sh runs that fold on a teardown's
+# critical path where this library promises never to delay one. A command
+# substitution here would be a fork per comparison for a three-way case.
+FM_INDEPENDENCE_RANK=0
 fm_independence_rank() {  # <PASS|FAIL|NO_VERIFIER_RAN>
   case "${1:-}" in
-    FAIL) printf 2 ;;
-    PASS) printf 0 ;;
-    *) printf 1 ;;
+    FAIL) FM_INDEPENDENCE_RANK=2 ;;
+    PASS) FM_INDEPENDENCE_RANK=0 ;;
+    *) FM_INDEPENDENCE_RANK=1 ;;
   esac
 }
 
@@ -418,10 +424,27 @@ fm_independence_critic() {  # <steps>
   printf '%s\t%s\t%s\t%s' "$vendor" "$model" "$count" "$runs"
 }
 
-# fm_independence_runs <steps>
-# Echo one row per reviewing RUN, in the order the pipeline recorded them:
+# The field separator for the per-run rows below. It is the ASCII unit
+# separator and NOT a tab, and that is load-bearing rather than tidy.
 #
-#   <run>\t<vendor>\t<model>\t<shared_sessions>\t<reviewer_sessions>\t<reviews>
+# Tab is one of bash's three IFS WHITESPACE characters, so `read` with IFS set
+# to a tab collapses a run of them into one delimiter instead of yielding the
+# empty fields between them. A run whose reviewing invocations recorded no
+# vendor and no model emits two empty identity fields, and under a tab the
+# numeric columns after them would each shift left - landing the review count in
+# the shared-session slot and reporting "the reviewer shared a session with the
+# agent that fixes its findings" for a run that recorded no session at all.
+# That is a FABRICATED observation of dependence, built out of an absence of
+# evidence, and it is the most durable value in this file: the asymmetry above
+# makes an observed dependence survive every fold downstream. A non-whitespace
+# separator preserves empty fields, so an unrecorded identity stays unrecorded.
+FM_INDEPENDENCE_FS=$'\037'
+
+# fm_independence_runs <steps>
+# Echo one row per reviewing RUN, in the order the pipeline recorded them, with
+# FM_INDEPENDENCE_FS between the fields:
+#
+#   <run><FS><vendor><FS><model><FS><shared_sessions><FS><reviewer_sessions><FS><reviews>
 #
 # This is the unit every dimension is judged on. The vendor and model are
 # collapsed WITHIN the run only, so a branch whose runs used different reviewers
@@ -429,7 +452,7 @@ fm_independence_critic() {  # <steps>
 # answers, not an absence of answers. Only a run whose own reviewing invocations
 # disagree can be mixed, and that is a genuine ambiguity in one run's record.
 fm_independence_runs() {  # <steps>
-  printf '%s\n' "${1:-}" | awk -F'\t' -v p="$FM_INDEPENDENCE_CRITIC_PURPOSE" '
+  printf '%s\n' "${1:-}" | awk -F'\t' -v p="$FM_INDEPENDENCE_CRITIC_PURPOSE" -v fs="$FM_INDEPENDENCE_FS" '
     $3 == p {
       run = $10
       if (!(run in seen)) {
@@ -445,7 +468,8 @@ fm_independence_runs() {  # <steps>
     END {
       for (i = 1; i <= n; i++) {
         r = order[i]
-        printf "%s\t%s\t%s\t%d\t%d\t%d\n", r, vendor[r], model[r], shared[r], sess[r], reviews[r]
+        printf "%s%s%s%s%s%s%d%s%d%s%d\n", r, fs, vendor[r], fs, model[r], fs,
+          shared[r], fs, sess[r], fs, reviews[r]
       }
     }'
 }
@@ -465,11 +489,12 @@ fm_independence_dimensions() {  # <repo> <branch> <maker-harness> <maker-model>
   local repo=${1:-} branch=${2:-} mharness=${3:-} mmodel=${4:-}
   local steps critic cvendor cmodel ccount cruns
   local mkey mprovider mpool ckey cprovider cpool ckey_for=''
-  local run rvendor rmodel rshared rsess rreviews
+  local run rvendor rmodel rshared rsess rreviews r_rank
   local r_process r_model r_vendor r_pool
   local r_process_why r_model_why r_vendor_why r_pool_why
   local process=NO_VERIFIER_RAN model=NO_VERIFIER_RAN vendor=NO_VERIFIER_RAN pool=NO_VERIFIER_RAN
   local process_n=0 model_n=0 vendor_n=0 pool_n=0
+  local process_rank=-1 model_rank=-1 vendor_rank=-1 pool_rank=-1
   local process_why='' model_why='' vendor_why='' pool_why='' evidence overall
 
   evidence="branch=${branch:-unknown}"
@@ -500,7 +525,7 @@ fm_independence_dimensions() {  # <repo> <branch> <maker-harness> <maker-model>
     mpool=$(fm_model_pool_of "$mkey")
 
     process='' model='' vendor='' pool=''
-    while IFS='	' read -r run rvendor rmodel rshared rsess rreviews; do
+    while IFS="$FM_INDEPENDENCE_FS" read -r run rvendor rmodel rshared rsess rreviews; do
       [ -n "$run" ] || continue
 
       # PROCESS. The recorded SESSIONS are the evidence, not the invocation: an
@@ -578,24 +603,29 @@ fm_independence_dimensions() {  # <repo> <branch> <maker-harness> <maker-model>
 
       # Fold this run into the branch view, weakest run winning. A run that
       # merely repeats the standing answer only raises its count, so the reason
-      # keeps naming the run that decided the verdict.
-      if [ -z "$process" ] || [ "$(fm_independence_rank "$r_process")" -gt "$(fm_independence_rank "$process")" ]; then
-        process=$r_process process_why=$r_process_why process_n=1
+      # keeps naming the run that decided the verdict. The standing rank is
+      # carried rather than recomputed: it only moves when the answer does.
+      fm_independence_rank "$r_process"; r_rank=$FM_INDEPENDENCE_RANK
+      if [ "$r_rank" -gt "$process_rank" ]; then
+        process=$r_process process_why=$r_process_why process_n=1 process_rank=$r_rank
       elif [ "$r_process" = "$process" ]; then
         process_n=$((process_n + 1))
       fi
-      if [ -z "$model" ] || [ "$(fm_independence_rank "$r_model")" -gt "$(fm_independence_rank "$model")" ]; then
-        model=$r_model model_why=$r_model_why model_n=1
+      fm_independence_rank "$r_model"; r_rank=$FM_INDEPENDENCE_RANK
+      if [ "$r_rank" -gt "$model_rank" ]; then
+        model=$r_model model_why=$r_model_why model_n=1 model_rank=$r_rank
       elif [ "$r_model" = "$model" ]; then
         model_n=$((model_n + 1))
       fi
-      if [ -z "$vendor" ] || [ "$(fm_independence_rank "$r_vendor")" -gt "$(fm_independence_rank "$vendor")" ]; then
-        vendor=$r_vendor vendor_why=$r_vendor_why vendor_n=1
+      fm_independence_rank "$r_vendor"; r_rank=$FM_INDEPENDENCE_RANK
+      if [ "$r_rank" -gt "$vendor_rank" ]; then
+        vendor=$r_vendor vendor_why=$r_vendor_why vendor_n=1 vendor_rank=$r_rank
       elif [ "$r_vendor" = "$vendor" ]; then
         vendor_n=$((vendor_n + 1))
       fi
-      if [ -z "$pool" ] || [ "$(fm_independence_rank "$r_pool")" -gt "$(fm_independence_rank "$pool")" ]; then
-        pool=$r_pool pool_why=$r_pool_why pool_n=1
+      fm_independence_rank "$r_pool"; r_rank=$FM_INDEPENDENCE_RANK
+      if [ "$r_rank" -gt "$pool_rank" ]; then
+        pool=$r_pool pool_why=$r_pool_why pool_n=1 pool_rank=$r_rank
       elif [ "$r_pool" = "$pool" ]; then
         pool_n=$((pool_n + 1))
       fi

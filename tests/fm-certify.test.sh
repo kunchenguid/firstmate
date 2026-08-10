@@ -183,6 +183,51 @@ test_one_unobserved_run_is_not_masked_by_a_sibling_that_recorded_one() {
   pass "a run whose session was never recorded is not masked by a sibling run that recorded one"
 }
 
+test_an_absent_reviewing_identity_never_becomes_evidence() {
+  local sessioned unsessioned out
+  # A reviewing invocation the pipeline recorded with NEITHER a provider NOR a
+  # model. Both identity fields are empty, and everything the run is judged on
+  # is carried in the fields AFTER them, so a separator that swallows an empty
+  # field would slide the session counts across and read a review count as a
+  # shared session. An absence of evidence must never become evidence, and least
+  # of all evidence of DEPENDENCE - the one value the folds above let survive
+  # everything downstream.
+  sessioned=$(make_case absent-identity yes yes)
+  fm_test_pipeline_db "$sessioned/pipeline.sqlite" "$sessioned/repo" "fm/alpha||" \
+    || { pass "SKIP (python3 unavailable): an absent identity never fabricates a dependence"; return; }
+
+  out=$(certify "$sessioned" --repo "$sessioned/repo" --branch fm/alpha \
+    --maker-harness claude --maker-model opus --mode local-only || true)
+  case "$(squeezed "$out")" in
+    *"process not-independent"*)
+      fail "absent identity: a dependence was fabricated from an unrecorded identity:"$'\n'"$out" ;;
+  esac
+  # This run DID record its sessions, so process is observable and reads
+  # independent; only the identity dimensions are unobservable.
+  assert_contains "$(squeezed "$out")" "process independent" \
+    "absent identity: a recorded session stopped being observable"
+  assert_contains "$out" "model:could-not-observe" \
+    "absent identity: an unrecorded model did not read could-not-observe"
+  assert_contains "$out" "vendor:could-not-observe" \
+    "absent identity: an unrecorded vendor did not read could-not-observe"
+
+  # The same absent identity on the shape the pipeline actually holds today: no
+  # session rows either. Every judged field is empty or zero, and the answer is
+  # could-not-observe on every dimension - never a dependence.
+  unsessioned=$(make_case absent-identity-unsessioned yes yes)
+  fm_test_pipeline_db "$unsessioned/pipeline.sqlite" "$unsessioned/repo" "fm/alpha||||none" \
+    || fail "absent identity: the unsessioned fixture failed"
+  out=$(certify "$unsessioned" --repo "$unsessioned/repo" --branch fm/alpha \
+    --maker-harness claude --maker-model opus --mode local-only || true)
+  case "$(squeezed "$out")" in
+    *"not-independent"*)
+      fail "absent identity: a run with no identity and no session reported a dependence:"$'\n'"$out" ;;
+  esac
+  assert_contains "$out" "process:could-not-observe" \
+    "absent identity: a run with no recorded session was not could-not-observe"
+  pass "absent reviewing identity never fabricates a dependence"
+}
+
 # --- an unmet predicate says what was unmet, and by which predicate ----------
 
 test_an_observed_attestation_failure_is_not_labelled_not_independent() {
@@ -399,6 +444,7 @@ test_a_shared_pool_refuses_and_names_the_dimension
 test_missing_verifier_identity_refuses_as_unobserved
 test_a_review_with_no_recorded_session_is_could_not_observe
 test_one_unobserved_run_is_not_masked_by_a_sibling_that_recorded_one
+test_an_absent_reviewing_identity_never_becomes_evidence
 test_an_observed_attestation_failure_is_not_labelled_not_independent
 test_an_unreadable_repository_is_could_not_observe_not_a_refusal
 test_an_observed_failure_is_never_softened_by_an_unobservable_sibling
