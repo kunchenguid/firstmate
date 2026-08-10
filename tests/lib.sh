@@ -228,46 +228,109 @@ fm_git_worktree() {
 
 # --- validation-pipeline state database -------------------------------------
 
-# fm_test_pipeline_db <db> <repo working path> <review>...: build a stand-in for
-# the validation pipeline's state database, holding exactly the tables and
-# columns the wake ledger's critic resolver joins. Each <review> is
-# "<branch>|<provider>|<model>"; an empty provider or model writes SQL NULL, the
-# shape the real database uses when it recorded no such fact. Returns nonzero
-# when python3 is unavailable, which callers report as a skipped case.
+# fm_test_pipeline_db <db> <repo working path> <invocation>...: build a stand-in
+# for the validation pipeline's state database, holding exactly the tables and
+# columns the independence derivation joins.
+#
+# Each <invocation> is "<branch>|<provider>|<model>[|<purpose>[|<shared>]]".
+# An empty provider or model writes SQL NULL, the shape the real database uses
+# when it recorded no such fact. <purpose> defaults to review, the reviewing
+# invocation; pass review-fix for the agent that rewrites code in response,
+# which is maker-side and must never be read as the critic. <shared> set to 1
+# makes the reviewer and the review-fixer share one session on that run, the
+# recorded shape that makes process independence observably absent.
+#
+# Returns nonzero when python3 is unavailable, which callers report as a
+# skipped case.
 fm_test_pipeline_db() {
   local db=$1 repo=$2
   shift 2
   command -v python3 >/dev/null 2>&1 || return 1
-  python3 - "$db" "$repo" "$@" <<'PY'
+  python3 - "$db" "$repo" "$@" <<'PYDB'
 import sqlite3
 import sys
 
-db, repo, reviews = sys.argv[1], sys.argv[2], sys.argv[3:]
+db, repo, specs = sys.argv[1], sys.argv[2], sys.argv[3:]
 conn = sqlite3.connect(db)
 conn.executescript(
     "create table repos (id text primary key, working_path text);"
     "create table runs (id text primary key, repo_id text, branch text);"
     "create table agent_invocations ("
-    "  id text primary key, run_id text, step_name text,"
-    "  agent text, model_provider text, model text);"
+    "  id text primary key, run_id text, step_name text, round integer,"
+    "  purpose text, agent text, model_provider text, model text,"
+    "  started_at integer, exit_status text);"
+    "create table run_agent_sessions ("
+    "  run_id text, role text, agent text, session_id text);"
 )
 conn.execute("insert into repos values ('r1', ?)", (repo,))
-for n, spec in enumerate(reviews):
-    branch, provider, model = spec.split("|")
+for n, spec in enumerate(specs):
+    parts = spec.split("|")
+    branch, provider, model = parts[0], parts[1], parts[2]
+    purpose = parts[3] if len(parts) > 3 and parts[3] else "review"
+    shared = parts[4] if len(parts) > 4 else ""
     run = "run%d" % n
     conn.execute("insert into runs values (?, 'r1', ?)", (run, branch))
     conn.execute(
-        "insert into agent_invocations values (?, ?, 'review', 'codex', ?, ?)",
-        ("inv%d" % n, run, provider or None, model or None),
+        "insert into agent_invocations"
+        " values (?, ?, 'review', 1, ?, 'codex', ?, ?, ?, 'success')",
+        ("inv%d" % n, run, purpose, provider or None, model or None, n),
     )
-# A non-review invocation on the same run must never be read as a review.
+    # The reviewer and the review-fixer are distinct sessions unless the spec
+    # deliberately collapses them.
+    fixer = "s-review-%d" % n if shared == "1" else "s-fix-%d" % n
+    conn.execute(
+        "insert into run_agent_sessions values (?, 'reviewer', 'codex', ?)",
+        (run, "s-review-%d" % n),
+    )
+    conn.execute(
+        "insert into run_agent_sessions values (?, 'review-fixer', 'codex', ?)",
+        (run, fixer),
+    )
+# A non-review step on the same run must never be read as a review.
 conn.execute(
     "insert into agent_invocations"
-    " values ('other', 'run0', 'test', 'codex', 'nobody', 'no-model')"
+    " values ('other', 'run0', 'test', 1, 'test', 'codex', 'nobody', 'no-model', 99, 'success')"
 )
 conn.commit()
 conn.close()
-PY
+PYDB
+}
+
+# fm_test_model_registry <file> [yes|no]: write a config/models.json holding two
+# providers on two credential pools, optionally declaring the mapping from the
+# validation pipeline's own vocabulary onto this fleet's. Without that
+# declaration the vendor and pool dimensions are could-not-observe, which is the
+# honest reading and the one this fleet actually has today.
+fm_test_model_registry() {
+  local file=$1 declare_map=${2:-yes}
+  local anthropic='' openai='' opus='' fable='' sol=''
+  if [ "$declare_map" = yes ]; then
+    anthropic='"pipeline_providers": ["anthropic"],'
+    openai='"pipeline_providers": ["openai"],'
+    opus='"pipeline_model_ids": ["claude-opus-5"],'
+    fable='"pipeline_model_ids": ["claude-fable-5"],'
+    sol='"pipeline_model_ids": ["gpt-5.6-sol"],'
+  fi
+  cat > "$file" <<JSON
+{
+  "schema": "fm-model-registry.v1",
+  "providers": {
+    "claude": {$anthropic "access_class": "A", "cost_posture": "subscription-flat", "status": "active"},
+    "openai-codex": {$openai "access_class": "A", "cost_posture": "subscription-flat", "status": "active"}
+  },
+  "models": {
+    "claude/opus": {"provider": "claude", "model_id": "opus", "harness": "claude",
+      $opus "cost_class": "subscription-flat", "status": "approved-primary",
+      "limits": {"shared_quota_pool": "claude-max"}},
+    "claude/fable": {"provider": "claude", "model_id": "fable", "harness": "claude",
+      $fable "cost_class": "subscription-flat", "status": "approved-specialist",
+      "limits": {"shared_quota_pool": "claude-max"}},
+    "openai-codex/gpt-5.6-sol": {"provider": "openai-codex", "model_id": "gpt-5.6-sol",
+      "harness": "pi", $sol "cost_class": "subscription-flat", "status": "approved-primary",
+      "limits": {"shared_quota_pool": "openai-codex-oauth"}}
+  }
+}
+JSON
 }
 
 # --- state/<id>.meta writers ------------------------------------------------

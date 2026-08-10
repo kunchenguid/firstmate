@@ -47,7 +47,7 @@
 #            `sweep` for a task that declared failure and was never torn down.
 #            Fields: task, harness, model, effort, mode, role, deliverable,
 #            project, backend, outcome, outcome_source, route, escalated,
-#            findings, critic_process, critic_vendor, critic_model, pr.
+#            findings, critic_vendor, critic_model, critic_independence, pr.
 #            role and deliverable are the task identity axes; a
 #            record written before that split carries the retired single kind
 #            field instead and is never rewritten, because this ledger is
@@ -107,38 +107,47 @@
 # `reconcile` counts the records that join nothing so a silent corruption
 # becomes a number a session start can report.
 #
-# THE CRITIC FIELDS: harness/model/effort describe the MAKER. critic_process,
-# critic_vendor and critic_model describe the independent verifier that reviewed
-# that task, so "was the checker independent of the maker, and on whose model?"
+# THE CRITIC FIELDS: harness/model/effort describe the MAKER. critic_vendor,
+# critic_model and critic_independence describe the checker that reviewed those
+# bytes, so "was the checker independent of the maker, and on which dimensions?"
 # is answerable from the record instead of by archaeology through pipeline
-# history. Their source is the validation pipeline's own run records - the same
-# place data/loop-ld-control-safety/report.md section B.3 had to measure by hand
-# - and this reads them rather than introducing a second accounting store.
+# history.
 #
-#   critic_process   separate  a pipeline-spawned reviewer invocation exists for
-#                              this task's branch, so the review ran in its own
-#                              agent process rather than the maker's
-#                    same      only a caller can state this: the pipeline's
-#                              record can witness separation, never its absence
-#                    unknown   no reviewer invocation is resolvable
-#   critic_vendor    the model provider that reviewed (e.g. anthropic, openai)
-#   critic_model     the reviewing model (e.g. claude-opus-5, gpt-5.6-sol)
+#   critic_vendor         the model provider that reviewed (anthropic, openai)
+#   critic_model          the reviewing model (claude-opus-5, gpt-5.6-sol)
+#   critic_independence   the DERIVED per-dimension verdict, as
+#                         process:<v>+model:<v>+vendor:<v>+pool:<v>, each one
+#                         independent, not-independent, or unknown
+#
+# INDEPENDENCE IS DERIVED AND UNWRITABLE. bin/fm-independence-lib.sh computes it
+# from the pipeline's own invocation records and this fleet's declared routing
+# config; this script only records what that owner returns. There is deliberately
+# no argument here that states a reviewing identity or an independence result,
+# because a claim anyone can write is one that will eventually be written
+# wrongly - and an independence claim that is merely asserted is worth nothing.
+# bin/fm-certify.sh refuses certification on the same derivation, so the record
+# and the refusal can never disagree.
+#
+# WHY FOUR DIMENSIONS AND NOT ONE WORD. It is measured in this fleet that the
+# pipeline's reviewers consume one shared subscription window regardless of which
+# runtime the worker used, so a different harness does not imply an independent
+# verifier. "Independent model, same billing account" and "independent vendor
+# entirely" are different facts, and a single boolean would destroy exactly the
+# distinction a reader needs.
 #
 # A review the pipeline recorded without a vendor or model contributes no such
 # fact and therefore never makes a field "mixed": absence is not evidence of a
 # second vendor. A field is "mixed" only when two reviews of that task recorded
 # genuinely different values.
 #
-# All three record "unknown" when they cannot be resolved, and "mixed" when the
-# task's reviews genuinely disagree - never a guess, and never omitted, because
-# a field that appears only on the happy path would make the vendor question
-# look answerable while under-reporting it. "unknown" means NOT RESOLVABLE, not
-# "no reviewer ran": the same record's mode field says whether a task took a
-# pipeline-validated path at all, so that fact is never serialized twice.
-#
-# Whether the critic's vendor differed from the maker's is deliberately NOT
-# stored: harness, model and the three critic fields sit on the same line, so a
-# consumer joins them without a derived field that could drift.
+# All fields record "unknown" when they cannot be resolved - never a guess, and
+# never omitted, because a field that appears only on the happy path would make
+# the vendor question look answerable while under-reporting it. "unknown" means
+# NOT RESOLVABLE, not "no reviewer ran": the same record's mode field says
+# whether a task took a pipeline-validated path at all, so that fact is never
+# serialized twice. Records written before these fields existed are NEVER
+# backfilled: a guessed identity is indistinguishable from an observed one
+# afterwards, which is the corruption this ledger already suffered once.
 #
 # The wake half is written deterministically and the outcome half by the
 # coordinator ON PURPOSE. A single coordinator-written line would make measured
@@ -193,14 +202,14 @@
 #                     [--role R] [--deliverable D] [--project P]
 #                     [--backend B] [--pr URL]
 #                     [--route R] [--escalated yes|no] [--findings N]
-#                     [--critic-process separate|same] [--critic-vendor V]
-#                     [--critic-model M] [--critic-repo PATH] [--critic-branch B]
+#                     [--critic-repo PATH] [--critic-branch B]
 #       Append one terminal task record. Absent facts record as unknown rather
 #       than being guessed, and an absent --source records assumed rather than
 #       implying evidence nobody produced. Called by teardown, which supplies
 #       them from the task metadata it is about to delete. --critic-repo with
-#       --critic-branch resolves the reviewing configuration from the pipeline's
-#       own records; an explicit --critic-* value wins over what that resolves.
+#       --critic-branch names WHICH BYTES the reviewing identity is resolved for;
+#       neither can assert what was found there, and there is no argument that
+#       can.
 #   fm-wake-ledger.sh derive <status-file>
 #       Print "<outcome> <outcome_source>" for a task's status log: the LAST
 #       `done:` or `failed:` line decides, and a log with neither prints
@@ -368,87 +377,43 @@ ledger_task_for_key() {  # <kind> <key>
 
 # --- critic independence ----------------------------------------------------
 
-# The validation pipeline's own state database, the only place the reviewing
-# configuration exists. FM_PIPELINE_STATE_DB overrides the full path.
-ledger_pipeline_db() {
-  printf '%s' "${FM_PIPELINE_STATE_DB:-$HOME/.no-mistakes/state.sqlite}"
-}
+# bin/fm-independence-lib.sh owns verifier identity capture and the derived
+# independence verdict. Sourced rather than restated so this ledger records the
+# same derivation the certification predicate refuses on: two copies of that
+# rule would drift the moment only one was edited.
+# shellcheck source=bin/fm-independence-lib.sh
+. "$SCRIPT_DIR/fm-independence-lib.sh"
 
-# Echo "<process>\t<vendor>\t<model>" for the reviews the pipeline recorded
-# against <repo>'s <branch>: the single distinct value where the reviews agree,
-# "mixed" where they genuinely disagree, and "unknown" where the pipeline
-# recorded nothing. Returns nonzero when nothing is resolvable at all, which the
-# caller records as three unknowns.
+# Echo "<vendor>\t<model>\t<independence>" for the reviews the pipeline recorded
+# against <repo>'s <branch>, where independence is the DERIVED per-dimension
+# summary and never a value any caller supplied. Returns nonzero when nothing is
+# resolvable at all, which the caller records as unknown.
 #
 # Reading the pipeline's tables is a deliberate soft coupling: an absent
 # database, a schema that moves, or a host without python3 resolves to unknown
 # and can never fail a teardown. The read is read-only and takes no lock.
-ledger_resolve_critic() {  # <repo> <branch>
-  local repo=$1 branch=$2 db out
-  [ -n "$repo" ] && [ -n "$branch" ] || return 1
-  db=$(ledger_pipeline_db)
-  [ -f "$db" ] || return 1
-  command -v python3 >/dev/null 2>&1 || return 1
-  out=$(
-    python3 - "$db" "$repo" "$branch" 2>/dev/null <<'PY'
-import os
-import sqlite3
-import sys
-import urllib.parse
-
-db, repo, branch = sys.argv[1], sys.argv[2], sys.argv[3]
-
-
-def collapse(values):
-    seen = {v.strip() for v in values if v and v.strip()}
-    if not seen:
-        return "unknown"
-    if len(seen) > 1:
-        return "mixed"
-    return seen.pop()
-
-
-try:
-    uri = "file:%s?mode=ro" % urllib.parse.quote(db)
-    conn = sqlite3.connect(uri, uri=True, timeout=2)
-    # Match the repository on the resolved path: a symlinked or differently
-    # spelled project path is the same repository, and reading it as a
-    # different one would silently record unknown.
-    wanted = os.path.realpath(repo)
-    repo_ids = [
-        r[0]
-        for r in conn.execute("select id, working_path from repos")
-        if r[1] and os.path.realpath(r[1]) == wanted
-    ]
-    rows = []
-    for repo_id in repo_ids:
-        rows.extend(
-            conn.execute(
-                "select ai.model_provider, ai.model "
-                "from agent_invocations ai "
-                "join runs r on r.id = ai.run_id "
-                "where r.repo_id = ? and r.branch = ? and ai.step_name = 'review'",
-                (repo_id, branch),
-            ).fetchall()
-        )
-    conn.close()
-except Exception:
-    sys.exit(1)
-
-if not rows:
-    # The database was readable and holds no review for this branch. That is a
-    # resolved absence, but it cannot tell "no reviewer ran" from "this branch
-    # was never validated here", so it stays unknown rather than claiming none.
-    print("unknown\tunknown\tunknown")
-    sys.exit(0)
-
-# A recorded review invocation is itself the evidence of process separation: the
-# pipeline spawns its reviewer as its own agent process, never the maker's.
-print("separate\t%s\t%s" % (collapse(r[0] for r in rows), collapse(r[1] for r in rows)))
-PY
-  ) || return 1
-  [ -n "$out" ] || return 1
-  printf '%s' "$out"
+ledger_resolve_critic() {  # <repo> <branch> <maker-harness> <maker-model>
+  local repo=${1:-} branch=${2:-} mharness=${3:-} mmodel=${4:-}
+  local steps critic vendor model dims summary
+  steps=$(fm_independence_steps "$repo" "$branch") || return 1
+  [ -n "$steps" ] || return 1
+  critic=$(fm_independence_critic "$steps") || return 1
+  vendor=$(printf '%s' "$critic" | cut -f1)
+  model=$(printf '%s' "$critic" | cut -f2)
+  dims=$(fm_independence_dimensions "$repo" "$branch" "$mharness" "$mmodel")
+  # One compact field per dimension, so the record answers "independent on
+  # WHICH dimensions" rather than collapsing four different facts into one
+  # word. bin/fm-certify.sh refuses certification on the same derivation.
+  summary=$(printf '%s\n' "$dims" | awk -F, '
+    /^  independence-/ {
+      dim = $1
+      sub(/^  independence-/, "", dim)
+      if (dim == "overall") next
+      label = ($2 == "PASS" ? "independent" : ($2 == "FAIL" ? "not-independent" : "unknown"))
+      out = out (out == "" ? "" : "+") dim ":" label
+    }
+    END { print out }')
+  printf '%s\t%s\t%s' "${vendor:-unknown}" "${model:-unknown}" "${summary:-unknown}"
 }
 
 # --- subcommands ------------------------------------------------------------
@@ -696,13 +661,10 @@ cmd_task() {
   local harness=unknown model=unknown effort=unknown mode=unknown
   local role=unknown deliverable=unknown
   local project=unknown backend=unknown pr='' now
-  local critic_process='' critic_vendor='' critic_model=''
+  local critic_vendor='' critic_model='' critic_independence=''
   local critic_repo='' critic_branch='' resolved
   while [ "$#" -gt 0 ]; do
     case "$1" in
-      --critic-process) [ "$#" -ge 2 ] || die "--critic-process needs a value"; critic_process=$2; shift 2 ;;
-      --critic-vendor) [ "$#" -ge 2 ] || die "--critic-vendor needs a value"; critic_vendor=$2; shift 2 ;;
-      --critic-model) [ "$#" -ge 2 ] || die "--critic-model needs a value"; critic_model=$2; shift 2 ;;
       --critic-repo) [ "$#" -ge 2 ] || die "--critic-repo needs a value"; critic_repo=$2; shift 2 ;;
       --critic-branch) [ "$#" -ge 2 ] || die "--critic-branch needs a value"; critic_branch=$2; shift 2 ;;
       --outcome) [ "$#" -ge 2 ] || die "--outcome needs a value"; outcome=$2; shift 2 ;;
@@ -745,24 +707,21 @@ cmd_task() {
     unknown|'') findings=unknown ;;
     *[!0-9]*) die "--findings must be a count or unknown: $findings" ;;
   esac
-  case "$critic_process" in
-    ''|separate|same|unknown) ;;
-    *) die "--critic-process must be separate, same, or unknown: $critic_process" ;;
-  esac
-
-  # Resolve only what the caller did not state. An explicit value always wins,
-  # and anything still unresolved records unknown rather than a guess.
-  if [ -z "$critic_process" ] || [ -z "$critic_vendor" ] || [ -z "$critic_model" ]; then
-    if resolved=$(ledger_resolve_critic "$critic_repo" "$critic_branch"); then
-      [ -n "$critic_process" ] || critic_process=${resolved%%"$TAB"*}
-      resolved=${resolved#*"$TAB"}
-      [ -n "$critic_vendor" ] || critic_vendor=${resolved%%"$TAB"*}
-      [ -n "$critic_model" ] || critic_model=${resolved#*"$TAB"}
-    fi
+  # THE REVIEWING IDENTITY IS ONLY EVER RESOLVED, NEVER STATED. There is
+  # deliberately no --critic-process, --critic-vendor, --critic-model or
+  # --critic-independence argument: an independence claim anyone can write is a
+  # claim that will eventually be written wrongly, and this record exists to be
+  # believed. --critic-repo and --critic-branch name WHICH BYTES to look at and
+  # cannot assert what was found there.
+  if resolved=$(ledger_resolve_critic "$critic_repo" "$critic_branch" "$harness" "$model"); then
+    critic_vendor=${resolved%%"$TAB"*}
+    resolved=${resolved#*"$TAB"}
+    critic_model=${resolved%%"$TAB"*}
+    critic_independence=${resolved#*"$TAB"}
   fi
-  [ -n "$critic_process" ] || critic_process=unknown
   [ -n "$critic_vendor" ] || critic_vendor=unknown
   [ -n "$critic_model" ] || critic_model=unknown
+  [ -n "$critic_independence" ] || critic_independence=unknown
 
   # A project path never enters the ledger; only its basename identifies it.
   project=$(basename "$project")
@@ -783,9 +742,9 @@ cmd_task() {
     "route=$(ledger_sanitize "${route:-unknown}" "$LEDGER_SHORT_MAX")" \
     "escalated=$escalated" \
     "findings=$findings" \
-    "critic_process=$critic_process" \
     "critic_vendor=$(ledger_sanitize "$critic_vendor" "$LEDGER_SHORT_MAX")" \
-    "critic_model=$(ledger_sanitize "$critic_model" "$LEDGER_KEY_MAX")"
+    "critic_model=$(ledger_sanitize "$critic_model" "$LEDGER_KEY_MAX")" \
+    "critic_independence=$(ledger_sanitize "$critic_independence" "$LEDGER_KEY_MAX")"
   [ -z "$pr" ] || set -- "$@" "pr=$(ledger_sanitize "$pr" "$LEDGER_KEY_MAX")"
   ledger_append "$now" task "$@" || {
     printf 'error: could not append terminal record for task %s to %s\n' "$id" "$LEDGER" >&2
@@ -974,7 +933,8 @@ cmd_report() {
     -v schema="$LEDGER_SCHEMA" \
     -v cutoff="$cutoff" \
     -v top="$LEDGER_REPORT_TOP" \
-    -v latfile="$tmp/lat" '
+    -v latfile="$tmp/lat" \
+    -v dimensions="$FM_INDEPENDENCE_DIMENSIONS" '
     function fieldset(   i, p) {
       split("", f)
       for (i = 4; i <= NF; i++) {
@@ -1036,9 +996,9 @@ cmd_report() {
       maker[t] = f["harness"] == "" ? "unknown" : f["harness"]
       # A record written before the critic fields existed carries none of them,
       # and reads exactly like one that could not resolve them: unknown.
-      cproc[t] = f["critic_process"] == "" ? "unknown" : f["critic_process"]
       cvendor[t] = f["critic_vendor"] == "" ? "unknown" : f["critic_vendor"]
       cmodel[t] = f["critic_model"] == "" ? "unknown" : f["critic_model"]
+      cind[t] = f["critic_independence"] == "" ? "unknown" : f["critic_independence"]
       next
     }
     END {
@@ -1119,20 +1079,34 @@ cmd_report() {
       }
 
       if (tasks > 0) {
-        printf "\ncritic independence (which process, vendor and model reviewed the task):\n"
+        printf "\ncritic independence (DERIVED; unknown means could not observe, never independent):\n"
         for (t in terminal) {
-          n_process[cproc[t]]++
           n_vendor[cvendor[t]]++
           n_model[cmodel[t]]++
+          # Count each dimension separately. Collapsing them would destroy the
+          # distinction between "independent model, same billing account" and
+          # "independent vendor entirely", which is the whole point of storing
+          # four dimensions rather than one word.
+          if (cind[t] == "unknown") {
+            # A record from before this field existed, or one whose reviewing
+            # identity never resolved. Every dimension is unknown, and none of
+            # them may be counted as independent.
+            # The dimension list comes from its owner, so a dimension added
+            # there is counted here rather than silently dropped.
+            d = split(dimensions, every, " ")
+            for (i = 1; i <= d; i++) n_dim[every[i] ":unknown"]++
+          } else {
+            n = split(cind[t], dims, "+")
+            for (i = 1; i <= n; i++) n_dim[dims[i]]++
+          }
           pairing[maker[t] " maker -> " cvendor[t] " critic"]++
         }
-        printf "  process:"
-        for (k in n_process) printf "  %s %d", k, n_process[k]
-        printf "\n  vendor: "
+        printf "  vendor: "
         for (k in n_vendor) printf "  %s %d", k, n_vendor[k]
         printf "\n  model:  "
         for (k in n_model) printf "  %s %d", k, n_model[k]
         printf "\n"
+        for (k in n_dim) printf "  %-52s %d\n", k, n_dim[k]
         for (k in pairing) printf "  %-52s %d\n", k, pairing[k]
       }
 
