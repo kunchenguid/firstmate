@@ -117,12 +117,17 @@ A board request is evidence of the captain's intent, not an authenticated captai
 Firstmate does with it exactly what it would have done had the captain said the same words in chat, under its own contract in `AGENTS.md`: an approval that needs the captain's explicit word still gets confirmed with the captain first, a merge still happens only if firstmate's own checks pass, and nothing destructive, irreversible, or security-sensitive is ever executed from a tap.
 The surface is reachable by anything that can reach the service serving it, so being able to reach it is never treated as authorization for any of that.
 
-There are five request types, and each row offers only what it can actually resolve:
+There are six controls, and each row offers only what it can actually resolve:
 
 - **Approve merge** and **Reply**, on a PR awaiting the captain.
 - **Answer** and **Set aside**, on a decision the captain holds in a backlog.
 - **Answer** alone on a task-level open decision, because there is no backlog row behind it and therefore no hold kind to change.
-- **Ask firstmate**, for something new, and the only control that carries a conversation rather than resolving in a single action.
+- **Start something new**, as a board-level one-shot request for something to look into or build.
+- **Ask firstmate**, as the board-level continuing conversation for a question or follow-up.
+
+Start something new and Ask firstmate are deliberately separate surfaces.
+The new-work composer is a visually distinct intake card, while Ask firstmate retains the conversation and its replies.
+Neither is nested in a decision or project card.
 
 A decision belonging to a second mate carries the home it came from and is applied in that home, never in the main one.
 An Answer form uses the exact structured question when one was recorded, otherwise it uses the decision title and reason as a concise reminder, and only falls back to `Your answer` when no useful context exists.
@@ -157,6 +162,8 @@ A confirmation restored on load is corrected as soon as the probe answers, so th
 
 Ask firstmate is the one control that continues past its acknowledgement.
 Firstmate posts a reply into that board's own conversation, the board shows the captain's messages and firstmate's replies together in order under the composer, and the captain answers there instead of switching to chat.
+A Start something new request never joins that thread and receives the same persistent recorded confirmation as the other one-shot controls.
+Beginning a distinct new-work draft retires that earlier presentation state without changing the durable request already recorded.
 Each physical board has one continuing conversation rather than a new sub-thread for every Ask-firstmate message.
 The conversation is display and nothing else: a firstmate message carries no control, no target, and no intent, it opens no execution path, and what reaches firstmate is still only ever a captain request.
 It ships hidden and empty for the same reason the banner does, so a copy served as a static file or opened from disk shows no conversation at all.
@@ -175,8 +182,10 @@ The direct request log is the source of truth for recorded Answer requests; brow
 
 [`bin/fm-procevent-board-reply.sh`](../bin/fm-procevent-board-reply.sh) owns the reply service, arming the wake, posting firstmate's replies into the board conversation, and turning what was recorded into validated requests.
 [`bin/fm-board-request-parse.pl`](../bin/fm-board-request-parse.pl) is the single owner of the board message vocabulary in both directions and of every fail-closed rule, shared by both transports, and the service validates a message at its door with that same program over the same bytes it is about to store.
+Its captain-to-firstmate intents are `merge`, `reply`, `answer`, `defer`, `ask`, and `file`.
+The `file` intent carries only the captain's free-text `note` plus the common home and envelope fields, because it originates work with no existing item or decision target.
 
-The legacy Lavish-bridged surface in [`bin/fm-procevent-mission-control.sh`](../bin/fm-procevent-mission-control.sh) remains supported and is not extended.
+The legacy Lavish-bridged surface in [`bin/fm-procevent-mission-control.sh`](../bin/fm-procevent-mission-control.sh) remains supported for the shared captain-request vocabulary but gains no new transport behavior.
 It is superseded because Lavish's own annotate review mode defaults on and cannot be configured off, and while it is on a real tap on a board control reaches Lavish's annotation prompt instead of the button.
 That surface also lasts only as long as the review session behind it: ending the session delivers the request in hand and then retires it, and arming before the session is open retires it before it ever works.
 
@@ -201,6 +210,8 @@ A launch agent or unit that inherits no `FM_HOME` resolves them against the trac
 
 Arming has no precondition and is safe in any order: the request log is append-only and never consumed, so requests accepted while nothing is armed are picked up whole by a later arm.
 A request recorded by the service becomes an ordinary durable `check` wake through the same `state/procevent/` framework every other source uses, so firstmate's normal wake drain picks it up with no second notification path.
+At that wake, a validated `file` record surfaces its `note` unchanged for firstmate's ordinary `AGENTS.md` intake process.
+The transport does no automatic backlog filing, project matching, task classification, or dispatch.
 
 `bin/fm-procevent-board-reply.sh say-source <source-id> <text>|-` is how firstmate answers a board-reply wake into its originating board's conversation, while `say <board.html> <text>|-` is the board-path form and `reply-log-path <board.html>` prints where that conversation is kept.
 A reply is validated by the same program over the same bytes, under its own marker and its own single permitted intent, and direction is taken from the leading marker so neither side can claim the other's.
@@ -289,7 +300,7 @@ The control-enabled half also proves that only the structured option set renders
 It then measures the rendered page in a real browser at 1280px and 390px, because markup alone cannot show that the context or dependency line sits outside the row link or that the option buttons fit without pushing the board sideways; that measurement self-skips when Chrome or Node is absent.
 It also pins a fixed current time and commits its fixture clones at explicit epochs, so the last-change wording, its three degrade-to-dash paths, and the promise that no clone is written to are all checked against times the test chose.
 
-The reply layer is covered in the same suite: that the default board is unchanged by its existence, that each row offers only the controls it can resolve, that a control names no host, port, or absolute endpoint and derives its target from the URL the document was loaded from, that it stays hidden until a transport is proved, and that the confirmation banner ships hidden with an empty outcome heading.
+The reply layer is covered in the same suite: that the default board is unchanged by its existence, that each row offers only the controls it can resolve, that the one-shot new-work composer stays visually distinct from the continuing Ask-firstmate conversation at 1280px and 390px, that a control names no host, port, or absolute endpoint and derives its target from the URL the document was loaded from, that it stays hidden until a transport is proved, and that the confirmation banner ships hidden with an empty outcome heading.
 Fleet prose is checked to stay escaped inside the attributes a control carries.
 A real-browser regression also covers exact and fallback Answer prompts, explicit quick answers beside the free-text path, the per-decision entry into the one shared Ask-firstmate composer, main-home and secondmate decision links, malformed and hostile inputs, successful and failed sends, duplicate prevention, acknowledgement restoration and retirement, active-tab restoration, stable reading anchors, explicit-navigation precedence, and disappeared-anchor fallback.
 It renders two fresh board copies from one durable request log and measures the recorded quiet banners, answered-row ordering, shared composer, Deferred shelf, exact cross-home identity, and quick-answer controls at 1280px and 390px.
@@ -298,14 +309,14 @@ It also proves that a quick answer and a typed answer emit the same validated `a
 `tests/fm-board-reply.test.sh` covers the direct transport with no Lavish anywhere.
 It re-proves every fail-closed rule at the service door and again at wake time, refuses a cross-site write and a non-loopback bind, holds captain text that looks like the wire format inside its own field, and pins the properties the cursor design rests on: a delta discarded before capture is re-derived byte for byte, a capture truncated before its end sentinel records no cursor and loses nothing, a captured delta advances the cursor so nothing is announced twice, a request accepted before arming survives to the next arm, one retried attempt is recorded once, and a broken cursor escalates exactly once with rebase as the recovery.
 It also pins that the service reports an unarmed board as uncollected, at its probe, in the answer to a recorded request, and in its own startup output.
-Its real-browser case serves the board through the service itself and drives a genuine Answer through to its quiet no-action-needed confirmation, checks that the confirmation is a full-width banner rather than a label, that it survives a reload and fits a 390 by 844 viewport, and that killing the service leaves the next control open, editable, retryable, and unacknowledged.
+Its real-browser case serves the board through the service itself and drives a genuine Answer and Start something new request through to their confirmations, checks that each confirmation is a full-width banner rather than a label, that persistent presentation survives a reload and fits a 390 by 844 viewport, and that killing the service leaves the next control open, editable, retryable, and unacknowledged.
 A second browser case retires the wake and proves that a request recorded while nothing is collecting is confirmed as recorded with the amber needs-you treatment and explicitly not collected.
 That regression rewrites the served HTML file repeatedly while an Answer composer contains unsent text, then performs full document reloads and verifies the exact draft, control identity, tab, and anchored reading offset survive both replacements.
 The Ask-firstmate conversation is covered in the same suite: a real thread of captain message, firstmate reply, and the captain's reply to that reply reads back in order, while the single-message flow is unchanged when no reply is ever posted.
 A firstmate reply never reaches the wake source, is held to the same fail-closed rules as a captain request, and stays a quotation when it quotes the wire format; a forged or malformed conversation line is never rendered, and a partial read says so.
 A third browser case proves the conversation is absent from a statically served copy, that both sides appear in order on the served board, that a reply posted from the command line reaches the board while its refresh is held by an open composer, that the conversation contains no control of any kind, and that it fits a 390 by 844 viewport.
 With `FM_MISSION_CONTROL_LIVE_HOME` set to an active home, the same suite generates a fresh board directly from that fleet and uses Chrome at 390 by 844 to verify a meaningful reading anchor remains fixed through regeneration, a full reload, and the early refresh frames without printing fleet records.
-`tests/fm-procevent-mission-control.test.sh` pins the request normalizer against bytes captured from a real send through a real browser, and drives every fail-closed path - a forged envelope, an out-of-vocabulary intent, a truncated capture, a defer carrying reason text - to a refusal rather than a plausible request.
+`tests/fm-procevent-mission-control.test.sh` pins the request normalizer against bytes captured from real Answer and Start something new sends through a real browser, and drives every fail-closed path - a forged envelope, an out-of-vocabulary intent, a truncated capture, a defer carrying reason text, and a new-work request carrying a disallowed target - to a refusal rather than a plausible request.
 
 `tests/fm-fleet-snapshot-view.test.sh` pins lifecycle-stage derivation and its conservative fallbacks, secondmate Setup liveness, and the captain-hold classification itself: captain holds on ship and scout work are actionable when unblocked, parked captain holds are deferred regardless of the row's own kind, a held row with an unresolved blocker stays blocked rather than deferred, and a deferred row never reaches the secondmate home summary's holds.
 It also pins empty and populated reverse dependency lists, retention after a blocker is Done, and preservation through the secondmate summary.

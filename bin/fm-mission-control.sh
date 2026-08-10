@@ -92,8 +92,9 @@
 #   A request travels to THIS DOCUMENT'S OWN URL, so the board needs no endpoint
 #   and no knowledge of how it is served or proxied. bin/fm-procevent-board-reply.sh
 #   owns that service, arming the wake, and normalizing what comes back. The legacy
-#   Lavish bridge remains supported for a board served through Lavish and is not
-#   extended; see docs/mission-control.md for both and for their limits.
+#   Lavish bridge remains supported for the shared captain-request vocabulary but
+#   gains no new transport behavior; see docs/mission-control.md for both and for
+#   their limits.
 #
 #   The layer is hidden by CSS and revealed only after a script PROVES a transport
 #   that can reach firstmate, so the same file served statically or opened from
@@ -1211,10 +1212,11 @@ def recent_action_row:
 
 # ------------------------------------------------------- reply controls ----
 # Every control below queues ONE request and performs nothing. The markup holds
-# no endpoint, no token, and no action; the only thing a tap reaches is the
-# Lavish bridge, and the only thing that travels is captain intent for firstmate
-# to adjudicate. With $controls false every def here yields the empty string, so
-# the default board is byte-identical to the one rendered without the flag.
+# no endpoint, no token, and no action; the only thing a tap reaches is a proved
+# board transport, and the only thing that travels is captain intent for
+# firstmate to adjudicate. With $controls false every def here yields the empty
+# string, so the default board is byte-identical to the one rendered without the
+# flag.
 def rc_button($intent; $label):
   (@html "<button type=\"button\" class=\"rc-b rc-\($intent)\" data-open=\"\($intent)\">\($label)</button>");
 
@@ -1357,13 +1359,32 @@ def need_item:
   + ($w | controls_for)
   + "</div>";
 
+# A board-level one-shot intake for work that has no existing target. It stays
+# separate from Ask firstmate because that composer owns the continuing board
+# conversation, while this request enters ordinary firstmate intake exactly once.
+def file_block:
+  if ($controls | not) then "" else
+    "<section class=\"rc rc-compose rc-file\" data-home=\"main\" data-id=\"\" data-key=\"\" data-what=\"New work\">"
+    + "<div class=\"rc-file-head\"><span class=\"rc-file-kicker\">New work</span>"
+    + "<h2>Start something new</h2>"
+    + "<p>Describe something you want looked into or built. This records one request for firstmate to pick up, just like a request sent in chat.</p></div>"
+    + "<form class=\"rc-f\" data-intent=\"file\">"
+    + "<textarea class=\"rc-t\" rows=\"3\" maxlength=\"2000\" aria-label=\"Describe the new work\" placeholder=\"What should firstmate look into or build?\"></textarea>"
+    + "<div class=\"rc-row\"><button type=\"submit\" class=\"rc-go\">Record new work</button>"
+    + "<span class=\"rc-sent\" hidden></span>"
+    + rc_confirm("file")
+    + "</div>"
+    + "<p class=\"rc-hold\">The board holds its refresh while there is text here.</p>"
+    + "</form></section>"
+  end;
+
 def ask_block:
   if ($controls | not) then "" else
-    "<div class=\"rc rc-ask\" id=\"ask-firstmate-composer\" data-home=\"main\" data-id=\"\" data-key=\"\" data-what=\"\">"
+    "<div class=\"rc rc-compose rc-ask\" id=\"ask-firstmate-composer\" data-home=\"main\" data-id=\"\" data-key=\"\" data-what=\"Board conversation\">"
     + "<form class=\"rc-f\" data-intent=\"ask\">"
-    + "<p class=\"rc-q\">Ask firstmate for something new, or say what you want changed.</p>"
-    + "<textarea class=\"rc-t\" rows=\"3\" maxlength=\"2000\" aria-label=\"Ask firstmate\"></textarea>"
-    + "<div class=\"rc-row\"><button type=\"submit\" class=\"rc-go\">Send to firstmate</button>"
+    + "<p class=\"rc-q\"><strong>Ask firstmate</strong><span>Use the continuing board conversation for a question or follow-up.</span></p>"
+    + "<textarea class=\"rc-t\" rows=\"3\" maxlength=\"2000\" aria-label=\"Ask firstmate\" placeholder=\"Write a message to firstmate\"></textarea>"
+    + "<div class=\"rc-row\"><button type=\"submit\" class=\"rc-go\">Send message</button>"
     + "<span class=\"rc-sent\" hidden></span>"
     + rc_confirm("ask")
     + "</div>"
@@ -1712,7 +1733,17 @@ def controls_css:
 body.board-reply .rc,body.lavish .rc{display:block;border-top:1px solid var(--line);
   background:#fbfcfe;padding:4px 22px 13px;}
 body.board-reply .rc-ask,body.lavish .rc-ask{border:1px solid var(--line);border-radius:16px;
-  background:var(--panel);box-shadow:var(--shadow);margin-top:14px;padding:15px 22px 17px;}
+  background:var(--panel);box-shadow:var(--shadow);margin-top:28px;padding:15px 22px 17px;}
+body.board-reply .rc-file,body.lavish .rc-file{border:1px solid #cfd6e0;border-left:5px solid var(--slate);
+  border-radius:16px;background:linear-gradient(135deg,var(--slate-soft),#fbfcfe 72%);
+  box-shadow:var(--shadow);margin-top:18px;padding:18px 22px 17px;}
+.rc-file-head{display:grid;grid-template-columns:auto 1fr;column-gap:10px;align-items:baseline;}
+.rc-file-kicker{grid-row:1 / span 2;align-self:start;color:#fff;background:var(--slate);border-radius:999px;
+  font-size:10.5px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;padding:4px 9px;margin-top:2px;}
+.rc-file-head h2{margin:0;font-size:18px;letter-spacing:-.01em;}
+.rc-file-head p{grid-column:2;margin:4px 0 0;color:var(--muted);font-size:13px;line-height:1.45;}
+.rc-ask .rc-q{display:flex;flex-direction:column;gap:3px;}
+.rc-ask .rc-q strong{color:var(--ink);font-size:14px;}
 .rc-acts{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:8px 0 0;}
 .rc-b{appearance:none;-webkit-appearance:none;border:1px solid var(--line);background:var(--panel);
   color:var(--slate);font:inherit;font-size:12.5px;font-weight:600;padding:6px 13px;min-height:34px;
@@ -1791,7 +1822,11 @@ body.board-reply .rc-b.rc-choice{display:inline-block;}
 .thr-more[hidden]{display:none;}
 @media(max-width:720px){
   body.board-reply .rc,body.lavish .rc,
-  body.board-reply .rc-ask,body.lavish .rc-ask{padding-left:16px;padding-right:16px;}
+  body.board-reply .rc-ask,body.lavish .rc-ask,
+  body.board-reply .rc-file,body.lavish .rc-file{padding-left:16px;padding-right:16px;}
+  .rc-file-head{grid-template-columns:1fr;}
+  .rc-file-kicker{grid-row:auto;justify-self:start;margin:0 0 7px;}
+  .rc-file-head p{grid-column:1;}
   .rc-b,.rc-go{min-height:44px;padding-top:9px;padding-bottom:9px;}
   .thr{padding-left:16px;padding-right:16px;}
 }
@@ -2312,6 +2347,7 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
      + (($waiting_notices | map(need_item) | add) // "")
      + (($waiting_calls | map(need_item) | add) // "")
      + (($waiting_prs | map(need_item) | add) // "") + "</div>" end)
++ file_block
 + ask_block
 + thread_block
 + (if $deferred_count == 0 then ""
@@ -2950,7 +2986,8 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
     if (intent === \"defer\")  { return \"From the board - set aside: \" + what; }
     if (intent === \"answer\") { return \"From the board - answer on: \" + what; }
     if (intent === \"reply\")  { return \"From the board - note on: \" + what; }
-    return \"From the board - a new ask\";
+    if (intent === \"file\")   { return \"From the board - start something new\"; }
+    return \"From the board - a conversation message\";
   }
 
   var ackPrefix = \"fm-mission-control-ack-v1:\" + window.__fmBoardScope + \":\";
@@ -3072,6 +3109,7 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
     if (intent === \"answer\") { return \"Answer \" + verb; }
     if (intent === \"reply\") { return \"Reply \" + verb; }
     if (intent === \"defer\") { return \"Set-aside request \" + verb; }
+    if (intent === \"file\") { return \"New work request \" + verb; }
     return \"Request \" + verb;
   }
   function ackSentence(label, delivery) {
@@ -3445,15 +3483,24 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
       saveDrafts();
       return;
     }
-    var ask = area.closest(\".rc-ask\");
-    if (ask) {
-      var submit = ask.querySelector(\".rc-go\");
-      if (submit) { submit.disabled = false; submit.textContent = \"Send to firstmate\"; }
-      var sent = ask.querySelector(\".rc-sent\");
+    var composer = area.closest(\".rc-compose\");
+    if (composer) {
+      var intent = form.getAttribute(\"data-intent\") || \"\";
+      var submit = composer.querySelector(\".rc-go\");
+      if (submit) {
+        submit.disabled = false;
+        submit.textContent = intent === \"file\" ? \"Record new work\" : \"Send message\";
+      }
+      var sent = composer.querySelector(\".rc-sent\");
       if (sent) { sent.hidden = true; }
-      /* A new ask is a new request, so the previous confirmation stops standing
-         over text that has not been sent. */
-      hideConfirm(ask, \"ask\");
+      /* A typed draft is a new request, so the previous confirmation stops
+         standing over text that has not been sent. A one-shot work request keeps
+         its confirmation across reloads until the captain begins the next one. */
+      hideConfirm(composer, intent);
+      if (intent === \"file\") {
+        try { window.localStorage.removeItem(ackKey(composer, intent)); }
+        catch (e) { /* acknowledgement memory unavailable */ }
+      }
     }
     if (area.classList && area.classList.contains(\"rc-t\")) { saveDrafts(); }
   });

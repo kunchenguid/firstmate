@@ -112,6 +112,28 @@ durable_req=$(only "$out" request)
   || fail "durable answer identities must preserve exact home, item, key, and intent: $durable_req"
 pass "durable answer-log records preserve exact cross-home decision identities"
 
+# Captured verbatim from the new board-level Start something new composer through
+# the same browser and Lavish send shape. It has no target because it originates
+# work rather than resolving a row already on the board.
+REAL_FILE="$TMP_ROOT/real-file.txt"
+cat > "$REAL_FILE" <<'REALBYTES'
+session:
+  file: /fixture/mission-control.html
+  status: feedback
+dom_snapshot: "uid=2 body \"Mission Control Start something new\""
+prompts[1]{uid,prompt,selector,tag,text}:
+  "7","FM-BOARD-REQUEST {\"v\":1,\"intent\":\"file\",\"home\":\"main\",\"note\":\"Investigate why the nightly import sometimes skips the final account.\"}","section:nth-of-type(2) > form > div > button",board-request,"From the board - start something new"
+next_step: "Apply the requested changes."
+REALBYTES
+out=$(requests "$REAL_FILE")
+file_req=$(only "$out" request)
+[ "$(printf '%s\n' "$file_req" | wc -l | tr -d ' ')" = 1 ] \
+  || fail "one real new-work send must normalize to exactly one request, got: $file_req"
+assert_contains "$file_req" '"intent":"file"' "the real new-work send must keep its intent"
+assert_contains "$file_req" 'nightly import' "the real new-work send must surface the captain text"
+assert_not_contains "$file_req" '"id"' "new work must not invent an existing target"
+pass "a real captured Start something new send surfaces its free-text request without a target"
+
 U="$TMP_ROOT/unicode.txt"
 # Build the exact UTF-8 bytes without a literal Unicode quote that trips SC1112.
 unicode_note=$(printf 'Captain\342\200\231s caf\303\251 \360\237\232\200')
@@ -166,6 +188,8 @@ refuse "an unexpected field riding along" \
   "$(envelope '{"v":1,"intent":"merge","home":"main","id":"d1","force":true}')"
 refuse "a merge carrying a decision key it has no use for" \
   "$(envelope '{"v":1,"intent":"merge","home":"main","id":"d1","key":"api-shape"}')"
+refuse "new work carrying an existing item target" \
+  "$(envelope '{"v":1,"intent":"file","home":"main","id":"d1","note":"Investigate the importer"}')"
 refuse "an envelope that is not the start of the prompt" \
   "please do this: $(envelope '{"v":1,"intent":"merge","home":"main","id":"d1"}')"
 refuse "two envelopes in one prompt" \

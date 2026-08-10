@@ -26,6 +26,10 @@ The after image identifies `data/local-lane-bakeoff-v2-powered/report.md` as loc
 `before-token-integration-mobile.png` and `after-token-integration-mobile.png` show the same comparison at the captain's 390px viewport.
 The after view keeps fleet health distinct, presents each primary allowance window once, and leaves automatic balancing collapsed.
 
+`before-new-work-intake-desktop.png` and `after-new-work-intake-desktop.png` show the Decisions view before and after the board gained its one-shot Start something new composer at 1280px by 844px.
+`before-new-work-intake-mobile.png` and `after-new-work-intake-mobile.png` show the same comparison at exactly 390px by 844px.
+The after images keep the new-work intake visually separate from the continuing Ask-firstmate conversation through its labelled slate treatment, larger heading, explanatory copy, and deliberate space between the two cards.
+
 All image evidence here is rendered from synthetic fixture homes rather than a live fleet.
 The local-report pair reproduces only the reported card label and local path, never the report contents; the other fixtures carry no private project, decision, or PR data.
 The fixtures pin the render clock so the comparisons are not affected by the day they were captured.
@@ -52,6 +56,10 @@ The real-browser regression submits one option and one typed answer through the 
 
 The local-report evidence was verified on 2026-08-08 with `chrome-devtools-axi 0.1.27` at exactly 390px by 844px.
 Chrome's accessibility snapshot exposed the before card as a link to the nonexistent local file route, while the after card exposed the same path only as static text.
+
+The new-work intake evidence was verified on 2026-08-09 with Chrome and `chrome-devtools-axi 0.1.27` against the same synthetic fixture before and after the change.
+The browser inspection used `chrome-devtools-axi emulate --viewport '1280x844x1'` and `chrome-devtools-axi emulate --viewport '390x844x3,mobile,touch'`.
+The 390px inspection returned `{"w":390,"h":844,"overflow":false}`, and the real-browser regressions in `tests/fm-mission-control.test.sh` and `tests/fm-board-reply.test.sh` confirmed that both composers fit without horizontal overflow, remain visually distinct, and submit through separate intents.
 
 `bin/fm-evidence-check.sh --local docs/evidence/mission-control` returned `fm-evidence-check: ok pairs_checked=12 identical_opted_out=0`.
 

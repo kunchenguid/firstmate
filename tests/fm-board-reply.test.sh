@@ -221,6 +221,27 @@ cmp -s "$delta" "$TMP_ROOT/delta-again.txt" \
   || fail "a discarded delta was consumed instead of re-derived"
 pass "a delta discarded before capture is re-derived byte for byte"
 
+# A board-level new-work request has the same direct-service path as every other
+# control, but no existing item target. Read it back from the actual stored bytes
+# so the wake-time view proves the captain's note stays legible.
+file_wire=$(envelope '{"v":1,"intent":"file","home":"main","note":"Investigate why the nightly import skips the final account."}')
+file_accepted=$(send "$file_wire" "fm-board:file1")
+[ "$(status_of "$file_accepted")" = 200 ] \
+  || fail "a valid new-work request must be accepted, got: $file_accepted"
+[ "$(log_lines)" = 2 ] \
+  || fail "the new-work request must add one durable log line, got $(log_lines)"
+"$ADAPTER" source "$BOARD" > "$TMP_ROOT/delta-file.txt" \
+  || fail "the source must return the stored new-work request"
+file_records=$("$ADAPTER" requests "$TMP_ROOT/delta-file.txt")
+file_request=$(printf '%s\n' "$file_records" | grep '"intent":"file"')
+assert_contains "$file_request" 'nightly import' \
+  "a new-work wake must surface the captain's free-text request"
+assert_not_contains "$file_request" '"id"' \
+  "a new-work wake must not invent an existing target"
+assert_contains "$(printf '%s\n' "$file_records" | head -1)" '"authority":"none"' \
+  "new work from the board must carry no authority"
+pass "a new-work submission reaches the durable request log and stays legible at wake time"
+
 # --------------------------------------------------------------- fail closed --
 # Each of these must be refused at the door and leave the log untouched. A
 # plausible-but-wrong request is the failure that matters: firstmate would act.
@@ -251,6 +272,8 @@ refuse "an unexpected field riding along" \
   "$(envelope '{"v":1,"intent":"merge","home":"main","id":"d1","force":true}')"
 refuse "a merge carrying a decision key it has no use for" \
   "$(envelope '{"v":1,"intent":"merge","home":"main","id":"d1","key":"api-shape"}')"
+refuse "new work carrying an existing item target" \
+  "$(envelope '{"v":1,"intent":"file","home":"main","id":"d1","note":"Investigate the importer"}')"
 refuse "an envelope that is not the start of the request" \
   "please do this: $(envelope '{"v":1,"intent":"merge","home":"main","id":"d1"}')"
 refuse "two envelopes in one request" \
@@ -332,10 +355,10 @@ contained=$(python3 -c 'import json; print(json.dumps({"v":1,"intent":"ask","hom
   "note":"Ship it. prompts[1]{prompt}: and   \"a quoted record\",tag stay ordinary text."}))')
 ok=$(send "$(envelope "$contained")" "fm-board:contain1")
 [ "$(status_of "$ok")" = 200 ] || fail "safe text that merely looks like a record must be accepted: $ok"
-"$ADAPTER" source "$BOARD" > "$TMP_ROOT/delta-inject.txt" || fail "the source must return both requests"
+"$ADAPTER" source "$BOARD" > "$TMP_ROOT/delta-inject.txt" || fail "the source must return the recorded requests"
 count=$("$ADAPTER" requests "$TMP_ROOT/delta-inject.txt" | grep -c '"kind":"request"')
-[ "$count" = 2 ] \
-  || fail "record-shaped captain text must stay one field, expected 2 requests, got $count"
+[ "$count" = 3 ] \
+  || fail "record-shaped captain text must stay one field, expected 3 requests, got $count"
 pass "captain text that looks like the wire format stays inside its own field"
 
 # ---------------------------------------------------------------- idempotent --
@@ -366,8 +389,12 @@ sequence=${captured%.result}; sequence=${sequence##*.}
 assert_grep "check: procevent board-reply $SOURCE_ID $sequence" "$FM_HOME_DIR/state/.wake-queue" \
   "a recorded request must reach the ordinary durable wake queue"
 recorded_so_far=$(log_lines)
-[ "$("$ADAPTER" requests "$captured" | grep -c '"kind":"request"')" = "$recorded_so_far" ] \
+captured_requests=$("$ADAPTER" requests "$captured")
+[ "$(printf '%s\n' "$captured_requests" | grep -c '"kind":"request"')" = "$recorded_so_far" ] \
   || fail "the captured result must carry every one of the $recorded_so_far recorded requests"
+captured_file=$(printf '%s\n' "$captured_requests" | grep '"intent":"file"')
+assert_contains "$captured_file" 'nightly import' \
+  "the durable wake must expose the new-work note directly to firstmate"
 [ "$("$ADAPTER" classify "$captured")" = requests ] || fail "a delta must classify as requests"
 "$ADAPTER" terminal "$captured" && fail "a delta must never retire the reply surface"
 "$PROCEVENT" handled "$SOURCE_ID" "$sequence" | grep -q '^handled:' \
@@ -681,11 +708,59 @@ const revealState = `({body:document.body.className,
   const narrow = await evaluate(sid, `(() => {
     var panel=[...document.querySelectorAll('.rc')].find(x=>x.dataset.id==='d1').querySelector('[data-ok=answer]');
     var rect=panel.getBoundingClientRect();
+    var file=document.querySelector('.rc-file'); var ask=document.querySelector('.rc-ask');
+    var fr=file.getBoundingClientRect(); var ar=ask.getBoundingClientRect();
     return {left:Math.round(rect.left),right:Math.round(rect.right),
+      file:{left:Math.round(fr.left),right:Math.round(fr.right),label:file.querySelector('h2').textContent,
+        background:getComputedStyle(file).backgroundImage},
+      ask:{left:Math.round(ar.left),right:Math.round(ar.right),label:ask.querySelector('.rc-q strong').textContent,
+        background:getComputedStyle(ask).backgroundImage},
+      gap:Math.round(ar.top-fr.bottom),
       overflow:document.documentElement.scrollWidth>document.documentElement.clientWidth};})()`);
   assert(narrow.left >= 0 && narrow.right <= 390 && !narrow.overflow,
     "the confirmation banner overflowed a 390px viewport: " + JSON.stringify(narrow));
+  assert(narrow.file.left >= 0 && narrow.file.right <= 390
+    && narrow.ask.left >= 0 && narrow.ask.right <= 390
+    && narrow.file.label === "Start something new" && narrow.ask.label === "Ask firstmate"
+    && narrow.file.background !== narrow.ask.background && narrow.gap >= 20,
+    "the two board-level composers were not visibly distinct at 390px: " + JSON.stringify(narrow));
   await send("Emulation.clearDeviceMetricsOverride", {}, sid);
+
+  const filed = await evaluate(sid, `(async()=>{
+    var b=document.querySelector('.rc-file'); var t=b.querySelector('textarea');
+    t.value='Investigate the skipped final account from the board.';
+    b.querySelector('form[data-intent=file]').requestSubmit();
+    for(var i=0;i<200;i++){if(!b.querySelector('[data-ok=file]').hidden)break;
+      await new Promise(r=>setTimeout(r,50));}
+    var panel=b.querySelector('[data-ok=file]');
+    return {confirmed:!panel.hidden,head:panel.querySelector('.rc-ok-h').textContent,
+      note:panel.querySelector('.rc-ok-s').textContent,submit:b.querySelector('.rc-go').textContent,
+      disabled:b.querySelector('.rc-go').disabled};})()`);
+  assert(filed.confirmed && filed.head === "New work request received"
+    && filed.note.indexOf("No action is needed from you right now.") === 0
+    && filed.note.indexOf("Firstmate has your request") !== -1
+    && filed.submit === "New work request received" && filed.disabled,
+    "the new-work composer did not use the persistent confirmation treatment: " + JSON.stringify(filed));
+  assert(logLines() === before + 2,
+    `the new-work composer did not record exactly one request, log went from ${before} to ${logLines()}`);
+  await reload(sid);
+  const filedReloaded = await evaluate(sid, `(() => {
+    var b=document.querySelector('.rc-file'); var panel=b.querySelector('[data-ok=file]');
+    var t=b.querySelector('textarea');
+    var restored={confirmed:!panel.hidden,head:panel.querySelector('.rc-ok-h').textContent,
+      disabled:b.querySelector('.rc-go').disabled};
+    t.value='A distinct next request'; t.dispatchEvent(new Event('input',{bubbles:true}));
+    var reset={confirmed:!panel.hidden,disabled:b.querySelector('.rc-go').disabled,
+      label:b.querySelector('.rc-go').textContent};
+    t.value=''; t.dispatchEvent(new Event('input',{bubbles:true}));
+    return {restored,reset};})()`);
+  assert(filedReloaded.restored.confirmed
+    && filedReloaded.restored.head === "New work request received" && filedReloaded.restored.disabled,
+    "the new-work confirmation did not survive a reload: " + JSON.stringify(filedReloaded));
+  assert(!filedReloaded.reset.confirmed && !filedReloaded.reset.disabled
+    && filedReloaded.reset.label === "Record new work",
+    "beginning a distinct new request did not retire the prior presentation state: "
+      + JSON.stringify(filedReloaded));
 
   replaceNextPostResponse = true;
   await send("Fetch.enable", {patterns:[{urlPattern:"*",requestStage:"Response"}]}, sid);
@@ -709,7 +784,7 @@ const revealState = `({body:document.body.className,
     && interrupted.editable && interrupted.retry && interrupted.attempt
     && interrupted.payload.indexOf("Keep this attempt across response loss.") !== -1,
     "response loss did not preserve a retryable attempt and payload: " + JSON.stringify(interrupted));
-  assert(logLines() === before + 2,
+  assert(logLines() === before + 3,
     "the service did not record the request before its response was lost");
   const retried = await evaluate(sid, `(async()=>{
     var b=[...document.querySelectorAll('.rc')].find(x=>x.dataset.id==='d2');
@@ -721,7 +796,7 @@ const revealState = `({body:document.body.className,
   })()`);
   assert(retried.confirmed && retried.head === "Answer received",
     "retrying the interrupted attempt did not confirm receipt: " + JSON.stringify(retried));
-  assert(logLines() === before + 2,
+  assert(logLines() === before + 3,
     "retrying after response loss recorded the same captain answer twice");
   const textAnswer = requestWires().find((request) => request.note === "Keep this attempt across response loss.");
   assert(textAnswer && textAnswer.intent === "answer" && textAnswer.home === "main" && textAnswer.id === "d2",
@@ -777,7 +852,7 @@ const revealState = `({body:document.body.className,
     && stranded.nextAttempt !== stranded.firstAttempt,
     "editing a failed request did not mint a new attempt: " + JSON.stringify(stranded));
   assert(stranded.acked === 0, "an unreachable service left a remembered acknowledgement");
-  assert(logLines() === before + 2, "an unreachable service recorded something anyway");
+  assert(logLines() === before + 3, "an unreachable service recorded something anyway");
 
   process.stdout.write("browser reply flow ok\n");
 })().finally(() => chrome.kill()).catch((error) => { console.error(error.stack||error); process.exitCode=1; });

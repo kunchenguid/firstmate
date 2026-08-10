@@ -195,6 +195,7 @@ my %SPEC = (
   answer => {need => ["note"],       allow => ["id", "key", "note"], either => ["id", "key"]},
   defer  => {need => ["id"],         allow => ["id", "key"]},
   ask    => {need => ["note"],       allow => ["note"]},
+  file   => {need => ["note"],       allow => ["note"]},
 );
 
 # Firstmate speaking back to the board carries its words and nothing else. There
