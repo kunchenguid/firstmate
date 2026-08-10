@@ -1405,6 +1405,8 @@ SH
 test_projection_journal_retires_before_worktree_return() {
   local case_dir rc journal token
   case_dir=$(make_case projection-journal-order)
+  mkdir -p "$case_dir/data"
+  printf '%s\n' '# Backlog' > "$case_dir/data/backlog.md"
   write_meta "$case_dir" local-only ship
   sed -i 's/^window=.*/window=fmtest:w9:p2/' "$case_dir/state/task-x1.meta"
   printf '%s\n' \
@@ -1427,6 +1429,7 @@ test_projection_journal_retires_before_worktree_return() {
   printf '%s\n' absent > "$case_dir/treehouse-journal"
   cat > "$case_dir/fakebin/treehouse" <<SH
 #!/usr/bin/env bash
+printf '%s\n' called > "$case_dir/treehouse-called"
 if [ -e "$journal" ] || [ -L "$journal" ]; then
   printf '%s\n' present > "$case_dir/treehouse-journal"
 else
@@ -1447,6 +1450,8 @@ SH
   set -e
 
   expect_code 1 "$rc" "projection-journal-order: a failed worktree return must fail closed"
+  assert_present "$case_dir/treehouse-called" \
+    "projection-journal-order: fake treehouse return was not invoked"
   [ "$(cat "$case_dir/treehouse-journal")" = absent ] \
     || fail "projection-journal-order: worktree return ran before journal retirement"
   assert_absent "$journal" "projection-journal-order: retired projection journal survived return failure"

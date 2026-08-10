@@ -1059,7 +1059,7 @@ test_projection_label_builder_uses_corner_and_strips_owner_prefixes() {
 }
 
 test_projection_order_moves_only_exact_new_workspace_and_preserves_relative_order() {
-  local dir log resp fb mover mover_log out status jq_real
+  local dir log resp fb mover mover_log out status
   dir="$TMP_ROOT/projection-order"; mkdir -p "$dir/responses"
   log="$dir/log"; resp="$dir/responses"; mover="$dir/mover"; mover_log="$dir/mover.log"
   : > "$log"; : > "$mover_log"
@@ -1075,27 +1075,7 @@ printf '%s\n' '{"id":"fm-workspace-move","result":{"type":"workspace_list","work
 SH
   chmod +x "$mover"
   fb=$(make_herdr_fakebin "$dir")
-  jq_real=$(command -v jq)
-  cat > "$fb/jq" <<'SH'
-#!/usr/bin/env bash
-set -u
-args=("$@")
-for ((i = 0; i < ${#args[@]}; i++)); do
-  case "${args[$i]}" in
-    --arg|--argjson)
-      case "${args[$((i + 1))]:-}" in
-        and|as|catch|def|elif|else|end|foreach|if|import|include|label|module|or|reduce|then|try)
-          exit 97
-          ;;
-      esac
-      ;;
-  esac
-done
-exec "$FM_REAL_JQ" "$@"
-SH
-  chmod +x "$fb/jq"
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 \
-    FM_REAL_JQ="$jq_real" \
     FM_BACKEND_HERDR_WORKSPACE_MOVER="$mover" FM_FAKE_MOVER_LOG="$mover_log" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_focus_snapshot() { printf "w4\tw4:t2"; }; fm_backend_herdr_projection_focus_restore() { return 0; }; fm_backend_herdr_projection_order_best_effort fmtest w5 firstmate' "$ROOT" 2>&1)
   status=$?
@@ -1793,7 +1773,7 @@ test_projection_recovery_is_read_only_and_refuses_live_duplicate_risk() {
 # --- workspace_find: scoped to THIS home's own label, not just any match ----
 
 test_workspace_find_matches_only_this_homes_own_label() {
-  local dir log resp fb out home
+  local dir log resp fb out home jq_real
   dir="$TMP_ROOT/find-scoped"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   home="$TMP_ROOT/find-scoped-home"; mkdir -p "$home"; printf 'bravo-b2\n' > "$home/.fm-secondmate-home"
   # A workspace list carrying BOTH the primary's "firstmate" space and this
@@ -1802,7 +1782,27 @@ test_workspace_find_matches_only_this_homes_own_label() {
   # home's own label, never the primary's or a sibling secondmate's.
   printf '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate"},{"workspace_id":"w2","label":"2ndmate-bravo-b2"},{"workspace_id":"w3","label":"2ndmate-alpha-a1"}]}}\n' > "$resp/1.out"
   fb=$(make_herdr_fakebin "$dir")
+  jq_real=$(command -v jq)
+  cat > "$fb/jq" <<'SH'
+#!/usr/bin/env bash
+set -u
+args=("$@")
+for ((i = 0; i < ${#args[@]}; i++)); do
+  case "${args[$i]}" in
+    --arg|--argjson)
+      case "${args[$((i + 1))]:-}" in
+        and|as|catch|def|elif|else|end|foreach|if|import|include|label|module|or|reduce|then|try)
+          exit 97
+          ;;
+      esac
+      ;;
+  esac
+done
+exec "$FM_REAL_JQ" "$@"
+SH
+  chmod +x "$fb/jq"
   out=$( PATH="$fb:$PATH" FM_HOME="$home" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_REAL_JQ="$jq_real" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_find fmtest' "$ROOT" )
   [ "$out" = "w2" ] || fail "workspace_find should have matched this home's own label (2ndmate-bravo-b2 -> w2), got '$out'"
   pass "fm_backend_herdr_workspace_find: matches only THIS home's own label among several coexisting workspaces"
