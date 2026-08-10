@@ -30,10 +30,11 @@
 # check for that task - a PR merge poll above all - is refused rather than
 # clobbered, because those carry their own registration and retirement records.
 #
-# A malformed regex, a relative path, a missing task, or an unwritable state
-# directory refuses here. Arming is the only point where a bad watch can be
-# reported at all: the check is silent on every error by design, so a watch that
-# could never match would be indistinguishable from an artifact that never lands.
+# An empty or malformed regex, a relative path, a missing task, or an
+# unwritable state directory refuses here. Arming is the only point where a bad
+# watch can be reported at all: the check is silent on every error by design, so
+# a watch that could never match would be indistinguishable from an artifact
+# that never lands.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -58,17 +59,19 @@ esac
 
 MARKER='# fm-await-artifact-v1'
 SENTINEL=
+SENTINEL_SET=
 PATHS=()
 want_value=
 for a in "$@"; do
   if [ -n "$want_value" ]; then
     SENTINEL=$a
+    SENTINEL_SET=1
     want_value=
     continue
   fi
   case "$a" in
     --sentinel) want_value=sentinel ;;
-    --sentinel=*) SENTINEL=${a#--sentinel=} ;;
+    --sentinel=*) SENTINEL=${a#--sentinel=}; SENTINEL_SET=1 ;;
     --*) echo "error: unknown option $a" >&2; exit 2 ;;
     *) PATHS+=("$a") ;;
   esac
@@ -89,7 +92,10 @@ for p in "${PATHS[@]}"; do
     *$'\n'*) echo "error: dependency path must not contain a newline" >&2; exit 2 ;;
   esac
 done
-if [ -n "$SENTINEL" ]; then
+if [ -n "$SENTINEL_SET" ]; then
+  # An empty sentinel would silently select the stability rule instead, arming a
+  # whole-file wake the operator believes is a per-section one.
+  [ -n "$SENTINEL" ] || { echo "error: --sentinel requires a value" >&2; exit 2; }
   case "$SENTINEL" in
     *$'\n'*) echo "error: --sentinel must not contain a newline" >&2; exit 2 ;;
   esac
@@ -152,9 +158,9 @@ paths=($QUOTED_PATHS)
 
 file_signature() {
   if [ "\$(uname)" = Darwin ]; then
-    stat -f '%m/%z' "\$1" 2>/dev/null
+    stat -L -f '%m/%z' "\$1" 2>/dev/null
   else
-    stat -c '%Y/%s' "\$1" 2>/dev/null
+    stat -L -c '%Y/%s' "\$1" 2>/dev/null
   fi
 }
 

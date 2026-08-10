@@ -90,6 +90,28 @@ test_silent_until_present_stable_then_fires_exactly_once() {
   pass "artifact wake stays silent until every path is present and stable, then fires exactly once"
 }
 
+# The existence and non-empty gates follow a symlink, so the signature must too.
+# A link's own mtime and size never move while its target grows, which would
+# announce a half-written report on the very next sweep.
+test_symlinked_dependency_is_judged_by_its_target() {
+  local home out
+  home=$(make_home symlink)
+  ln -s "$home/artifacts/report.md" "$home/artifacts/link.md"
+  arm "$home" wait-1 "$home/artifacts/link.md" >/dev/null || fail "symlink: arming failed"
+
+  printf 'partial' > "$home/artifacts/report.md"
+  out=$(sweep "$home")
+  [ -z "$out" ] || fail "symlink: check spoke on first sight of the artifact (got: $out)"
+
+  printf ' and more' >> "$home/artifacts/report.md"
+  out=$(sweep "$home")
+  [ -z "$out" ] || fail "symlink: check spoke while the linked artifact was still growing (got: $out)"
+
+  out=$(sweep "$home")
+  assert_contains "$out" "artifact ready:" "symlink: check must fire once the linked artifact is stable"
+  pass "a symlinked dependency is judged by its target's signature, not the link's"
+}
+
 test_empty_file_is_not_ready() {
   local home out
   home=$(make_home empty-file)
@@ -274,6 +296,20 @@ test_refuses_input_that_would_arm_a_watch_that_can_never_match() {
   set -e
   expect_code 2 "$rc" "refusals: --sentinel with no value must be refused"
 
+  # An empty sentinel must not quietly downgrade a per-section wake into a
+  # whole-file stability wake, which fires on an unmarked partial report.
+  set +e
+  out=$(arm "$home" wait-1 "$home/artifacts/report.md" --sentinel '' 2>&1); rc=$?
+  set -e
+  expect_code 2 "$rc" "refusals: an empty sentinel must be refused"
+  assert_contains "$out" "--sentinel requires a value" \
+    "refusals: empty sentinel error must say why"
+
+  set +e
+  out=$(arm "$home" wait-1 "$home/artifacts/report.md" --sentinel= 2>&1); rc=$?
+  set -e
+  expect_code 2 "$rc" "refusals: an empty --sentinel= must be refused"
+
   set +e
   out=$(arm "$home" wait-1 2>&1); rc=$?
   set -e
@@ -313,6 +349,7 @@ test_never_clobbers_another_owner_s_state_check() {
 
 test_help_includes_entire_header
 test_silent_until_present_stable_then_fires_exactly_once
+test_symlinked_dependency_is_judged_by_its_target
 test_empty_file_is_not_ready
 test_every_path_must_be_ready
 test_sentinel_fires_on_the_marker_and_not_on_stability
