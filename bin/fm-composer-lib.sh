@@ -482,7 +482,7 @@ _fm_composer_pi_separator_row() {  # <trimmed-row>
 # Row-scan results are returned through FM_COMPOSER_SCAN_* globals (bash 3.2
 # has no nameref); they are internal to this owner.
 _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
-  local pane=$1 cy=${2:-} extract_wrap=${3:-0}
+  local pane=$1 cy=${2:-}
   local line indent left_stripped trimmed kind family side_family
   local top_inner top_spaces='' geometry_check=0 geometry_ambiguous=0
   local content_inner content_spaces bottom_inner bottom_spaces glyph
@@ -559,23 +559,16 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
     # Bare agent-glyph rows: the glyph itself is the container proof. Bare
     # shell glyphs are deliberately not candidates (dead-shell rule). Keep
     # lower shell prompts as staleness evidence for cursorless selection.
-    if [ "$extract_wrap" = 1 ]; then
-      if [ -z "$trimmed" ] || fm_composer_row_has_edge "$trimmed"; then
-        bare_start=-1
-      fi
-      if fm_composer_leading_agent_glyph_var glyph "$trimmed"; then
-        if [ "$bare_start" -lt 0 ]; then
-          bare_start=$row
-          FM_COMPOSER_SCAN_BARE_ROW=$row
-        fi
-      elif [ "$top" -lt 0 ] \
-           && fm_composer_leading_shell_glyph_var glyph "$trimmed"; then
-        FM_COMPOSER_SCAN_SHELL_ROW=$row
-      fi
-    elif fm_composer_leading_agent_glyph_var glyph "$trimmed"; then
-      FM_COMPOSER_SCAN_BARE_ROW=$row
-    elif [ "$top" -lt 0 ] && fm_composer_leading_shell_glyph_var glyph "$trimmed"; then
+    if [ -z "$trimmed" ] || fm_composer_row_has_edge "$trimmed"; then
+      bare_start=-1
+    fi
+    if [ "$top" -lt 0 ] && fm_composer_leading_shell_glyph_var glyph "$trimmed"; then
       FM_COMPOSER_SCAN_SHELL_ROW=$row
+      bare_start=-1
+    elif fm_composer_leading_agent_glyph_var glyph "$trimmed" \
+         && [ "$bare_start" -lt 0 ]; then
+      bare_start=$row
+      FM_COMPOSER_SCAN_BARE_ROW=$row
     fi
     # Cursor safety: a cursor sitting on a structural edge row is never an
     # input row.
@@ -834,7 +827,7 @@ _fm_composer_classify_bare_row() {  # <screen> <styled> <row>
 # contiguity proof that those rows are the bare composer's wrapped input
 # rather than unrelated screen content.
 _fm_composer_wrap_region_ok() {  # <plain-screen> <glyph-row> <cursor-row>
-  local plain=$1 g=$2 cy=$3 row line trimmed
+  local plain=$1 g=$2 cy=$3 row line trimmed glyph
   row=$((g + 1))
   while [ "$row" -le "$cy" ]; do
     line=$(_fm_composer_screen_row "$row" "$plain")
@@ -842,6 +835,7 @@ _fm_composer_wrap_region_ok() {  # <plain-screen> <glyph-row> <cursor-row>
     fm_composer_normalize_trim_var trimmed
     [ -n "$trimmed" ] || return 1
     if fm_composer_row_has_edge "$trimmed"; then return 1; fi
+    if fm_composer_leading_shell_glyph_var glyph "$trimmed"; then return 1; fi
     row=$((row + 1))
   done
   return 0

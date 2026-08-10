@@ -356,12 +356,16 @@ test_bare_wrap_region_classifies() {
   local wrapped ghost_wrapped out
   wrapped=$'❯ a very long steer message that\nwraps onto the following line'
   assert_screen "wrapped typed input" pending "$CAPS_TMUX" "$wrapped" 1
+  wrapped=$'❯ wrapped typed input\n❯'
+  assert_screen "agent-glyph-leading wrapped input" pending "$CAPS_TMUX" "$wrapped" 1
   ghost_wrapped=$'❯ '"${ESC}[2ma long rotating suggestion that${ESC}[0m"$'\n'"${ESC}[2mwraps onto the next line${ESC}[0m"
   out=$(fm_composer_classify_screen "$CAPS_TMUX" "$ghost_wrapped" 1)
   [ "$out" = empty ] || fail "a wrapped ghost suggestion should still prove empty, got '$out'"
   # A structural row between the glyph and the cursor breaks the wrap claim.
   out=$(fm_composer_classify_screen "$CAPS_TMUX" $'❯ text\n────────────────\nbelow the rule' 2)
   [ "$out" = unknown ] || fail "a rule between glyph and cursor must break the wrap region, got '$out'"
+  out=$(fm_composer_classify_screen "$CAPS_TMUX" $'❯ text\n$ live shell' 1)
+  [ "$out" = unknown ] || fail "a shell prompt below a glyph row must not become wrapped input, got '$out'"
   pass "fm_composer_classify_screen: the bare composer's wrap region stays identified; structure breaks it"
 }
 
@@ -437,6 +441,8 @@ test_bottom_most_candidate_wins() {
   assert_screen "banner above live claude row" empty "$CAPS_PLAIN" "$screen"
   out=$(fm_composer_classify_screen "$CAPS_PLAIN" $'╭────────────────────────╮\n│ permissions: YOLO mode │\n╰────────────────────────╯\n› Use /skills to list available skills')
   [ "$out" != pending ] || fail "a stale banner must never classify as pending composer text"
+  screen=$'❯ old draft\n\n❯'
+  assert_screen "blank-separated newer bare composer" empty "$CAPS_STYLED_NOID" "$screen"
   pass "fm_composer_classify_screen: the bottom-most candidate wins; stale banners cannot"
 }
 
