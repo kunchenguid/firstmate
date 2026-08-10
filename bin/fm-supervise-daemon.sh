@@ -93,6 +93,8 @@
 #                                   digests; 0 = flush immediately (default 90)
 #          FM_HEARTBEAT_SCAN_SECS   cadence for the catch-all status scan
 #                                   (default 300)
+#          FM_REFILL_RESURFACE_SECS  seconds before unchanged actionable refill
+#                                   evidence is surfaced again (default 3600)
 #          FM_HOUSEKEEPING_TICK     seconds between housekeeping passes while
 #                                   the watcher is mid-cycle (default 15)
 #          FM_BUSY_REGEX            optional rendered busy-signature override
@@ -192,6 +194,7 @@ INJECT_SKIP_DEFAULT="heartbeat"
 STALE_ESCALATE_SECS_DEFAULT=240
 ESCALATE_BATCH_SECS_DEFAULT=90
 HEARTBEAT_SCAN_SECS_DEFAULT=300
+REFILL_RESURFACE_SECS_DEFAULT=3600
 HOUSEKEEPING_TICK_DEFAULT=15
 # Max time a buffered escalation may sit undelivered before the daemon retries
 # the normal flush path and, if that cannot confirm a submit, raises a loud wedge
@@ -443,6 +446,96 @@ classify_unknown() {  # <reason>
 # Buffer:   state/.subsuper-escalations    one distilled line per escalation.
 # Seen:     state/.subsuper-seen-status-<task>  last status line the scan
 #           escalated, so the catch-all does not re-fire the same terminal.
+# Refill:   state/.subsuper-refill-escalation  last actionable refill identity
+#           and its escalation epoch. This is durable across daemon and primary
+#           restarts, unlike the session-scoped delivery buffer.
+
+refill_fingerprint() {  # <heartbeat payload> -> stable live/id-set identity
+  local payload=$1 line rest ready live ids canonical
+  case "$payload" in 'heartbeat refill: '*) ;; *) return 1 ;; esac
+  line=${payload#heartbeat }
+  case "$line" in 'refill: ready='*' live='*' ids='*) ;; *) return 1 ;; esac
+  rest=${line#refill: ready=}
+  ready=${rest%% live=*}
+  rest=${rest#* live=}
+  live=${rest%% ids=*}
+  ids=${rest#* ids=}
+  case "$ready" in ''|*[!0-9]*) return 1 ;; esac
+  case "$live" in ''|*[!0-9]*) return 1 ;; esac
+  case "$ids" in *[!A-Za-z0-9._,-]*|,*|*,|*,,*) return 1 ;; esac
+  if [ -n "$ids" ]; then
+    canonical=$(printf '%s\n' "$ids" | tr ',' '\n' | LC_ALL=C sort -u | paste -sd, -) || return 1
+  else
+    canonical=
+  fi
+  printf 'live=%s;ids=%s' "$live" "$canonical"
+}
+
+# The refill state is deliberately separate from the session-scoped escalation
+# buffer. A valid v1 record is exactly three lines, written through a same-
+# directory temporary then rename, so a crash leaves either the prior record or
+# a complete successor. Invalid, future-dated, or stale records fail open.
+refill_dedupe_read() {  # <state> -> REFILL_DEDUPE_FINGERPRINT/TIMESTAMP
+  local state=$1 file version fingerprint timestamp extra stored_live stored_ids
+  file="$state/.subsuper-refill-escalation"
+  [ -r "$file" ] || return 1
+  {
+    IFS= read -r version || return 1
+    IFS= read -r fingerprint || return 1
+    IFS= read -r timestamp || return 1
+    IFS= read -r extra && return 1
+  } < "$file"
+  [ "$version" = v1 ] || return 1
+  case "$fingerprint" in live=*';ids='*) ;; *) return 1 ;; esac
+  stored_live=${fingerprint#live=}
+  stored_live=${stored_live%%;ids=*}
+  stored_ids=${fingerprint#*;ids=}
+  case "$stored_live" in ''|*[!0-9]*) return 1 ;; esac
+  case "$stored_ids" in *[!A-Za-z0-9._,-]*|,*|*,|*,,*) return 1 ;; esac
+  case "$timestamp" in ''|*[!0-9]*) return 1 ;; esac
+  REFILL_DEDUPE_FINGERPRINT=$fingerprint
+  REFILL_DEDUPE_TIMESTAMP=$timestamp
+}
+
+refill_dedupe_resurface_secs() {
+  local secs=${FM_REFILL_RESURFACE_SECS:-$REFILL_RESURFACE_SECS_DEFAULT}
+  case "$secs" in ''|0|*[!0-9]*) secs=$REFILL_RESURFACE_SECS_DEFAULT ;; esac
+  printf '%s' "$secs"
+}
+
+refill_dedupe_should_escalate() {  # <state> <fingerprint>
+  local state=$1 fingerprint=$2 now age secs
+  refill_dedupe_read "$state" || return 0
+  [ "$REFILL_DEDUPE_FINGERPRINT" = "$fingerprint" ] || return 0
+  now=$(_now)
+  [ "$now" -ge "$REFILL_DEDUPE_TIMESTAMP" ] || return 0
+  age=$(( now - REFILL_DEDUPE_TIMESTAMP ))
+  secs=$(refill_dedupe_resurface_secs)
+  [ "$age" -ge "$secs" ]
+}
+
+refill_dedupe_record() {  # <state> <fingerprint>
+  local state=$1 fingerprint=$2 tmp old_umask
+  mkdir -p "$state" || return 1
+  old_umask=$(umask)
+  umask 077
+  tmp=$(mktemp "$state/.subsuper-refill-escalation.tmp.XXXXXX") || { umask "$old_umask"; return 1; }
+  umask "$old_umask"
+  if ! { printf 'v1\n%s\n%s\n' "$fingerprint" "$(_now)" > "$tmp" && mv -f "$tmp" "$state/.subsuper-refill-escalation"; }; then
+    rm -f "$tmp"
+    return 1
+  fi
+}
+
+# A well-formed but no-longer-actionable refill observation ends the current
+# refill episode. The next actionable transition must therefore surface even if
+# its id set and live count match the earlier episode exactly.
+refill_dedupe_forget_if_inactive() {  # <state> <heartbeat payload>
+  local state=$1 payload=$2 fingerprint
+  fingerprint=$(refill_fingerprint "$payload") || return 0
+  heartbeat_payload_is_actionable "$payload" && return 0
+  rm -f "$state/.subsuper-refill-escalation"
+}
 
 _stale_key() { printf '%s' "$1" | tr ':/.' '___'; }
 
@@ -1213,13 +1306,18 @@ is_wake_reason() {  # <reason>
 # --- dispatch one wake reason to self-handle or escalate --------------------
 # Side effects: logging, marker records, escalation buffer appends.
 handle_wake() {  # <reason> <state> [durable-payload]
-  local reason=$1 state=$2 payload=${3:-} decision action distilled task last stale_detail
+  local reason=$1 state=$2 payload=${3:-} decision action distilled task last stale_detail refill_fingerprint_value
   local kind="" arg=""
   if should_force_self "$reason"; then
     case "$reason" in
       heartbeat|heartbeat:*)
         decision=$(classify_heartbeat "$payload")
-        case "$decision" in escalate\|*) ;; *) log "wake force-self (FM_INJECT_SKIP): $reason"; return ;; esac
+        case "$decision" in
+          escalate\|*) ;;
+          *) refill_dedupe_forget_if_inactive "$state" "$payload"
+             log "wake force-self (FM_INJECT_SKIP): $reason"
+             return ;;
+        esac
         ;;
       *) log "wake force-self (FM_INJECT_SKIP): $reason"; return ;;
     esac
@@ -1243,6 +1341,24 @@ handle_wake() {  # <reason> <state> [durable-payload]
   [ "$kind" = signal ] && sync_pause_markers_from_signal "$state" "$arg"
   case "$action" in
     escalate)
+      # Refill evidence is the only captain-relevant heartbeat path. Its state
+      # transition is owned here, beside the existing away escalation dedupe,
+      # rather than by a second watcher or refill-policy subsystem.
+      if [ "$reason" = heartbeat ] || [ "${reason#heartbeat:}" != "$reason" ]; then
+        refill_fingerprint_value=$(refill_fingerprint "$payload" 2>/dev/null || true)
+        if [ -n "$refill_fingerprint_value" ]; then
+          if ! refill_dedupe_should_escalate "$state" "$refill_fingerprint_value"; then
+            log "self-handle: unchanged actionable refill evidence"
+            return
+          fi
+          log "escalate: $reason -> $distilled"
+          escalate_add "$state" "$distilled"
+          refill_dedupe_record "$state" "$refill_fingerprint_value" \
+            || log "ERROR: could not persist refill escalation dedupe state; next evidence will fail open"
+          [ "${FM_ESCALATE_BATCH_SECS:-$ESCALATE_BATCH_SECS_DEFAULT}" -le 0 ] && { escalate_flush "$state" || true; }
+          return
+        fi
+      fi
       log "escalate: $reason -> $distilled"
       escalate_add "$state" "$distilled"
       # A terminal-stale escalate must not leave a persistence marker behind, or
@@ -1263,6 +1379,7 @@ handle_wake() {  # <reason> <state> [durable-payload]
       log "self-handle (paused): $reason -> $distilled"
       ;;
     *)
+      case "$reason" in heartbeat|heartbeat:*) refill_dedupe_forget_if_inactive "$state" "$payload" ;; esac
       # Transient (non-terminal) stale: record/refresh the wedge marker so
       # housekeeping can age it, and drop any pause marker (a crew that left its
       # pause reverts to normal wedge aging). The persistence recheck, not this

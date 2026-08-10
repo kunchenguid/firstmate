@@ -43,7 +43,7 @@ run_watcher_once() {
   local state=$1 fakebin=$2 out=$3
   mkdir -p "$state"
   date '+%s' > "$state/.afk"
-  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   wait_for_exit "$!" 50
 }
@@ -153,5 +153,58 @@ test_stale_pane_transient_persistent_resume() {
   pass "lifecycle: stale pane transient self-handles, persistent escalates once and clears, resumed clears quietly"
 }
 
+# This deliberately drives the executable producer path instead of constructing
+# a heartbeat payload. It is the regression for the overnight refill loop:
+# watcher -> fm-refill -> durable queue -> away-supervisor routing.
+test_refill_heartbeat_dedupes_after_real_producer_path() {
+  local dir state fakebin out payload
+  dir=$(make_supercase wd-refill-dedupe)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  mkdir -p "$dir/config" "$dir/data"
+  printf '# Backlog\n' > "$dir/data/backlog.md"
+  cat > "$fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  --version|-v|-V) printf 'tasks-axi 0.2.5\n' ;;
+  update) printf '%s\n' '--archive-body' ;;
+  mv) printf '%s\n' '[<id>...]' ;;
+  ready) printf 'count: 2\nready[2]{id,state,kind,repo,title}:\n  beta,queued,task,"-",beta\n  alpha,queued,task,"-",alpha\n' ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$fakebin/tasks-axi"
+
+  # A first real watcher pass produces the refill evidence and the supervisor
+  # surfaces it once.
+  date '+%s' > "$state/.afk"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 "$WATCH" > "$out" &
+  wait_for_exit "$!" 50 || fail "first refill heartbeat watcher pass did not exit"
+  payload=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_wake_latest_payload heartbeat heartbeat' \
+    _ "$ROOT/bin/fm-wake-lib.sh")
+  case "$payload" in 'heartbeat refill: ready=2 live=0 ids='*) ;; *) fail "real refill producer did not queue evidence: $payload" ;; esac
+  FM_STATE_OVERRIDE="$state" FM_INJECT_SKIP=heartbeat handle_wake heartbeat "$state" "$payload"
+  [ "$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')" -eq 1 ] \
+    || fail "first real refill heartbeat did not reach one escalation"
+
+  # Force the next scheduled heartbeat without changing fleet evidence. The
+  # durable refill state survives the watcher restart and suppresses its digest.
+  : > "$state/.subsuper-escalations"
+  rm -f "$state/.last-heartbeat"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 "$WATCH" > "$out" &
+  wait_for_exit "$!" 50 || fail "second refill heartbeat watcher pass did not exit"
+  payload=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_wake_latest_payload heartbeat heartbeat' \
+    _ "$ROOT/bin/fm-wake-lib.sh")
+  FM_STATE_OVERRIDE="$state" FM_INJECT_SKIP=heartbeat handle_wake heartbeat "$state" "$payload"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "unchanged real refill heartbeat created a second away digest"
+  pass "lifecycle: real refill heartbeat surfaces once and suppresses unchanged repeats"
+}
+
 test_routine_then_terminal_after_restart
 test_stale_pane_transient_persistent_resume
+test_refill_heartbeat_dedupes_after_real_producer_path

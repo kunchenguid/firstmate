@@ -213,6 +213,9 @@ the operational prefix lets firstmate distinguish it from a real captain message
   (`fm-wake-lib.sh`) instead of `flock`, which is absent on macOS.
 - **Dedupe across signal/stale/scan** - `classify_signal` and terminal `classify_stale` paths check the seen-status marker before escalating, so a captain-relevant status escalated by one path is not re-escalated by another in the same digest.
   The marker does not clear or suppress possible-wedge aging for a nonterminal progress line.
+- **Refill re-surface** - actionable heartbeat refill evidence is deduped by its canonically sorted ready-id set and live-worker count in the current `FM_HOME` only.
+  A changed identity surfaces immediately, while an unchanged identity re-surfaces after `FM_REFILL_RESURFACE_SECS` (default 3600 seconds).
+  A valid non-actionable heartbeat ends the refill episode, and malformed, stale, or future-dated dedupe state fails open.
 - **Auto-discovered supervisor pane** - the daemon resolves its own BACKEND
   (tmux vs herdr) and TARGET independently, mirroring
   `bin/fm-backend.sh`'s own runtime auto-detection. Backend: `FM_SUPERVISOR_BACKEND`

@@ -29,6 +29,11 @@ That turns refilling a drained fleet into part of ordinary wake handling instead
 The probe fails open and never delays, suppresses, or breaks a heartbeat: a `manual` backlog backend, an absent or incompatible `tasks-axi`, or any probe error simply omits the line, and the printed reason line stays exactly `heartbeat` for the arm and checkpoint layers that match it.
 `bin/fm-refill.sh` owns the probe, its bound, and the exact line format.
 In away mode, the sub-supervisor reads but does not consume the latest durable heartbeat payload, routes the same actionable refill condition through its existing escalation digest even though evidence-free heartbeats remain force-self-handled, and leaves all away-mode authority boundaries unchanged.
+The daemon canonically sorts the ready-id set and combines it with the live-worker count for the home-scoped durable refill-escalation identity.
+It immediately surfaces a new actionable identity, suppresses an unchanged identity, and re-surfaces unchanged evidence after `FM_REFILL_RESURFACE_SECS` (default 3600 seconds).
+A valid but non-actionable heartbeat ends that refill episode, so empty-to-nonempty and capacity-recovery-to-drained transitions surface promptly even when they return to an earlier identity.
+The record is atomically replaced under `state/.subsuper-refill-escalation`, while the daemon's existing per-home singleton lock serializes concurrent cycles.
+Malformed, stale, or future-dated state fails open, and refill suppression never affects typed failures or other buffered captain-relevant events.
 Absorbed wakes advance their suppression markers, log to `state/.watch-triage.log`, and keep the watcher blocking without a queue record or LLM turn.
 After each drain, `fm-wake-drain.sh` runs the same liveness guard as the supervision scripts, so a lapsed watcher chain surfaces even on a turn that only drains and handles queued wakes.
 Routine watcher polling, supervision no-ops, elapsed waiting time, and absorbed benign wakes stay silent.

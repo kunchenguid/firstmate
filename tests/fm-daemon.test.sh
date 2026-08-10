@@ -681,6 +681,91 @@ test_heartbeat_refill_evidence_routes_through_away_escalation() {
   pass "away heartbeat refill evidence escalates while a bare heartbeat self-handles"
 }
 
+test_heartbeat_refill_escalation_dedupe() {
+  local dir state other payload reordered changed empty future now
+  dir=$(make_supercase heartbeat-refill-dedupe)
+  state="$dir/state"
+  other="$dir/other-state"
+  mkdir -p "$other"
+  payload="heartbeat refill: ready=2 live=0 ids=beta,alpha"
+  reordered="heartbeat refill: ready=2 live=0 ids=alpha,beta"
+  changed="heartbeat refill: ready=2 live=0 ids=alpha,gamma"
+  empty="heartbeat refill: ready=0 live=0 ids="
+
+  # This is the public away-heartbeat path that previously appended one refill
+  # digest on every housekeeping wake. Source it in a fresh process for each
+  # observation so the durable record, not primary-session memory, is the
+  # restart boundary under test.
+  FM_TEST_DAEMON_SOURCED=1 FM_STATE_OVERRIDE="$state" FM_INJECT_SKIP=heartbeat \
+    bash -c '. "$1"; handle_wake heartbeat "$2" "$3"' _ "$DAEMON" "$state" "$payload"
+  [ "$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')" -eq 1 ] \
+    || fail "new refill evidence did not escalate exactly once"
+  refill_dedupe_read "$state" || fail "new refill evidence did not persist dedupe state"
+  [ "$REFILL_DEDUPE_FINGERPRINT" = "live=0;ids=alpha,beta" ] \
+    || fail "refill fingerprint was not canonically sorted: $REFILL_DEDUPE_FINGERPRINT"
+
+  # Simulate successful delivery, then a fresh daemon process observes the same
+  # durable heartbeat payload in a different id order.
+  : > "$state/.subsuper-escalations"
+  FM_TEST_DAEMON_SOURCED=1 FM_STATE_OVERRIDE="$state" FM_INJECT_SKIP=heartbeat \
+    bash -c '. "$1"; handle_wake heartbeat "$2" "$3"' _ "$DAEMON" "$state" "$reordered"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "unchanged refill evidence consumed another away-supervisor turn"
+
+  FM_STATE_OVERRIDE="$state" FM_INJECT_SKIP=heartbeat handle_wake heartbeat "$state" "$changed"
+  [ "$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')" -eq 1 ] \
+    || fail "a changed ready-id set was suppressed"
+  : > "$state/.subsuper-escalations"
+  FM_STATE_OVERRIDE="$state" FM_INJECT_SKIP=heartbeat FM_REFILL_MIN_LIVE=2 handle_wake heartbeat "$state" \
+    "heartbeat refill: ready=2 live=1 ids=alpha,gamma"
+  [ "$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')" -eq 1 ] \
+    || fail "a changed live-worker count was suppressed"
+
+  # The state is home-scoped, so an independent FM_HOME cannot inherit another
+  # fleet's suppression marker.
+  FM_STATE_OVERRIDE="$other" FM_INJECT_SKIP=heartbeat handle_wake heartbeat "$other" "$payload"
+  [ -s "$other/.subsuper-escalations" ] \
+    || fail "a refill marker crossed state-home boundaries"
+
+  # A non-actionable empty observation closes the current episode. Returning to
+  # the same nonempty set must surface immediately, not wait an hour.
+  : > "$state/.subsuper-escalations"
+  FM_STATE_OVERRIDE="$state" FM_INJECT_SKIP=heartbeat handle_wake heartbeat "$state" "$empty"
+  [ ! -e "$state/.subsuper-refill-escalation" ] \
+    || fail "empty refill evidence did not end the prior refill episode"
+  FM_STATE_OVERRIDE="$state" FM_INJECT_SKIP=heartbeat handle_wake heartbeat "$state" "$payload"
+  [ -s "$state/.subsuper-escalations" ] \
+    || fail "empty-to-nonempty refill transition was suppressed"
+
+  # Malformed and stale records fail open, while a future timestamp also avoids
+  # an unbounded suppression window after a backward wall-clock move.
+  : > "$state/.subsuper-escalations"
+  printf 'broken\n' > "$state/.subsuper-refill-escalation"
+  FM_STATE_OVERRIDE="$state" FM_INJECT_SKIP=heartbeat handle_wake heartbeat "$state" "$payload"
+  [ -s "$state/.subsuper-escalations" ] || fail "malformed refill dedupe state suppressed evidence"
+  : > "$state/.subsuper-escalations"
+  now=$(date +%s)
+  printf 'v1\nlive=0;ids=alpha,beta\n%s\n' $((now - 3601)) > "$state/.subsuper-refill-escalation"
+  FM_STATE_OVERRIDE="$state" FM_INJECT_SKIP=heartbeat handle_wake heartbeat "$state" "$payload"
+  [ -s "$state/.subsuper-escalations" ] || fail "stale refill dedupe state did not re-surface evidence"
+  : > "$state/.subsuper-escalations"
+  future=$((now + 3601))
+  printf 'v1\nlive=0;ids=alpha,beta\n%s\n' "$future" > "$state/.subsuper-refill-escalation"
+  FM_STATE_OVERRIDE="$state" FM_INJECT_SKIP=heartbeat handle_wake heartbeat "$state" "$payload"
+  [ -s "$state/.subsuper-escalations" ] || fail "backward clock movement suppressed refill evidence indefinitely"
+
+  # Suppressing a refill must not drop another captain-relevant buffered event.
+  : > "$state/.subsuper-escalations"
+  refill_dedupe_record "$state" "live=0;ids=alpha,beta"
+  escalate_add "$state" "typed failure: retain this event"
+  FM_STATE_OVERRIDE="$state" FM_INJECT_SKIP=heartbeat handle_wake heartbeat "$state" "$payload"
+  [ "$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')" -eq 1 ] \
+    || fail "refill suppression changed a neighboring captain-relevant batch"
+  grep -F "typed failure: retain this event" "$state/.subsuper-escalations" >/dev/null \
+    || fail "refill suppression dropped a typed failure"
+  pass "away refill escalation dedupes stable state, re-surfaces safely, and preserves other events"
+}
+
 test_inject_skip_forces_self() {
   local dir state
   dir=$(make_supercase skip)
@@ -1883,6 +1968,7 @@ test_escalate_batch_age_uses_first_append
 test_heartbeat_scan_dedup
 test_handle_wake_routes_self_and_escalate
 test_heartbeat_refill_evidence_routes_through_away_escalation
+test_heartbeat_refill_escalation_dedupe
 test_inject_skip_forces_self
 test_is_wake_reason_distinguishes_status_stdout
 test_terminal_stale_escalate_leaves_no_marker
