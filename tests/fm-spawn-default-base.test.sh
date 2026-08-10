@@ -74,7 +74,7 @@ run_spawn() {
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_TMUX_LOG="$tmux_log" \
     FM_FAKE_TREEHOUSE_LOG="$treehouse_log" TMUX="fake,1,0" \
-    PATH="$fakebin:$PATH" "$SPAWN" "$id" "$proj" claude 2>&1
+    PATH="$fakebin:$PATH" "$SPAWN" "$id" "$proj" --mode no-mistakes --yolo off claude 2>&1
 }
 
 test_remote_head_overrides_stale_cached_ref() {
@@ -126,7 +126,7 @@ SH
   assert_absent "$home/state/$id.meta" "spawn wrote task metadata after the default-branch fetch failed"
   assert_contains "$(cat "$treehouse_log")" "return --force $wt" \
     "spawn did not return the leased worktree after the default-branch fetch failed"
-  assert_contains "$(cat "$tmux_log")" "kill-window -t firstmate:fm-$id" \
+  assert_contains "$(cat "$tmux_log")" "kill-window -t =firstmate:=fm-$id" \
     "spawn did not kill the backend task after the default-branch fetch failed"
   pass "spawn refuses launch when the remote default cannot be fetched"
 }
