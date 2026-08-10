@@ -144,7 +144,7 @@ Nothing placed inside a task worktree is on the `PATH` that resolves `gh` for th
 
 The routing mechanism is owned only by [`../no-mistakes-pr-credential.md`](../no-mistakes-pr-credential.md); this section records its empirical verification.
 
-`tests/fm-gh-shim.test.sh` drives the public shim and wrapper interfaces with local fakes and disposable Git repositories, touching no network and no real `gh`.
+`tests/fm-gh-shim.test.sh` drives the public shim and wrapper interfaces with local fakes and disposable Git repositories, and builds a fixture against the pinned no-mistakes v1.41.2 module to exercise its public CI consumer without a real daemon or real `gh`.
 The fork-target fixture creates a complete no-mistakes repository registration, bare gate, and linked worktree, so the implicit target is exercised from the same divergent topology as the incident.
 Additional adversarial cases cover a normal canonical origin, exact explicit repository preservation, an unregistered checkout, a missing database record, a registered target contradicted by the source checkout's remotes, a malformed target, and a non-GitHub target.
 `tests/fm-pr-merge.test.sh` drives protected GitHub merge capture through the public merge interface without a shim, through a same-home shim, and through a current shim copied into a distinct Firstmate-home path.
@@ -154,10 +154,11 @@ The same suite proves the merge operator's inherited-lock handoff is the only ac
 
 The CI cases reproduce the check-runs authorization boundary and exercise the fallback through the shim's public `gh` interface.
 The fake applies the helper's real jq expressions to each raw workflow, run, and job page in turn and sorts result keys, so the assertions cover the same transformation `gh api --paginate --jq` performs, and it refuses `--slurp` alongside `--jq` exactly as GitHub CLI 2.92.0 does.
-The primary-path case proves a readable `gh pr checks` result bypasses every Actions API.
+The primary-path case proves a readable `gh pr checks` result bypasses every Actions API and clears any saved fallback deadline for that pull request.
+The state-identity case proves GitHub's case-insensitive repository identity resolves to one canonical deadline path while distinct owner and repository component boundaries cannot collide.
 The green fallback case provides a failed workflow under a stale SHA, a successful workflow associated with the current PR head, and explicit Actions-only authority for the exact repository, then asserts that the Actions endpoint contains `head_sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa` and that the result is `bucket: pass`.
 It also configures a distinct PR-capable token and proves that every CI call retains only the ambient narrow token.
-The red cases map every terminal non-success Actions conclusion to `bucket: fail`, preserve each provider conclusion in `state`, and apply the no-mistakes consumer's public bucket interpretation to prove none can certify green.
+The red cases map every terminal non-success Actions conclusion to `bucket: fail`, preserve each provider conclusion in `state`, and feed the emitted JSON through the pinned no-mistakes consumer to prove none can certify green.
 The zero-run case emits a pending placeholder, and separate cases prove an unrelated run, a wrong-head run, and one successful run beside a missing active workflow cannot certify green.
 The rerun case keeps only the latest attempt, while conflicting latest-attempt records remain explicit ambiguous evidence.
 A paginated-jobs case puts a skipped job on the second page and proves workflow-level success cannot certify green over it.
@@ -166,7 +167,7 @@ A multi-page case maps cancelled and skipped workflows to failure while retainin
 The flag-compatibility case first proves the fake rejects `--paginate --slurp --jq` before asserting that the fallback reaches a verdict against it, keeps runs from every page, and never sends `--slurp`, so the case cannot pass vacuously.
 The dependency case proves an unavailable Python runtime emits typed terminal JSON instead of becoming an unreadable poll result.
 The API-failure cases prove the underlying `gh` diagnostics for workflow-runs and both PR-head reads reach stderr beside typed synthetic failed checks.
-Those terminal failures and the moving-head case all clear the repository-and-PR-keyed pending deadline before returning.
+Those terminal failures and the moving-head case all clear the canonical repository-and-PR-keyed pending deadline before returning.
 The deeper-denial-path case drives `(node.statusCheckRollup.nodes.0.commit.statusCheckRollup.contexts.nodes.0)`, the denial GitHub returns today, and reaches the same exact-head green verdict the shorter historical path reaches.
 The unrelated-failure case proves generic HTTP 403 responses, denials for other APIs, a denial whose path only begins with those characters (`node.statusCheckRollupSummary.nodes.0`), and non-403 failures never reach the fallback API, while the unsupported-shape case proves only the two literal no-mistakes argument vectors enter the capturing helper.
 The completeness case proves green Actions evidence fails closed without exact repository-level Actions-only authority, because the workflow-runs API cannot reproduce third-party check-provider evidence hidden behind check-runs.

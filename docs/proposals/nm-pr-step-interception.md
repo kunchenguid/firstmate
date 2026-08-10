@@ -123,9 +123,9 @@ A failed, timed-out, action-required, startup-failed, cancelled, unexpectedly sk
 An absent workflow, absent job set, unrelated run, stale or wrong-head run, malformed record, duplicate conflict, or selection tie is missing or ambiguous evidence and not green.
 Any unreadable head, workflow, run, jobs, or head-recheck API response is a typed terminal API failure that preserves the underlying GitHub diagnostic.
 
-Pending, missing, and ambiguous evidence must have a persisted deadline keyed by repository, pull-request number, and head SHA.
+Pending, missing, and ambiguous evidence must have a persisted deadline keyed without collisions by canonical repository identity and pull-request number, with the current head SHA stored in that record.
 Before the deadline the CI step may continue polling with a typed actionable reason.
-At the deadline it must return a typed failed check, reset the deadline when the head changes or evidence becomes terminal, and never warn indefinitely.
+At the deadline it must return a typed failed check, reset the deadline when the primary source becomes readable, the head changes, or fallback evidence becomes terminal, and never warn indefinitely.
 The returned checks must preserve the public JSON fields no-mistakes already consumes so the monitor can distinguish pass, pending, failure, cancellation, skipping, API failure, head drift, and evidence timeout without parsing prose.
 
 This fallback cannot recover third-party provider checks hidden behind the forbidden Checks API.
@@ -135,7 +135,7 @@ If a repository requires such a provider and no exact required-check authority i
 
 Exercise the behavior through the public CI-step command boundary, not only through internal helpers:
 
-- Primary success returns the existing `statusCheckRollup` result and never calls the Actions fallback.
+- Primary success returns the existing `statusCheckRollup` result, clears saved fallback deadline state for that pull request, and never calls the Actions fallback.
 - Exact-repository, exact-PR, exact-head Actions success returns green after the primary read receives the verified denial.
 - Queued and in-progress runs or jobs return pending, while concrete failed, cancelled, skipped, neutral, stale, timed-out, action-required, and startup-failed states never return green.
 - Missing active-workflow runs, missing jobs, malformed evidence, conflicting latest attempts, and equally current runs remain non-green and become typed failures at the deadline.

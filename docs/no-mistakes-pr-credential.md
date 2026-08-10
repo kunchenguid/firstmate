@@ -87,6 +87,7 @@ Run the check from a login shell.
 The daemon resolves its environment from the login shell, so a precedence verdict from an unusual shell can differ from what the daemon actually has.
 The credential route also requires `sqlite3` on that resolved `PATH`, because the no-mistakes repository registration is the target authority.
 Pending, missing, or ambiguous fallback evidence has a one-hour deadline by default.
+Its saved deadline is isolated by canonical repository and pull-request identity, and a readable primary result or terminal fallback verdict clears it so stale state cannot affect a later poll.
 `FM_GH_CI_MAX_PENDING_SECONDS` changes that deadline, and `FM_GH_CI_STATE_ROOT` changes the machine-local deadline record root whose default is `$XDG_STATE_HOME/firstmate/gh-ci-fallback`.
 `FM_GH_CI_ACTIONS_ONLY_REPOS` is a comma-separated allowlist of exact `owner/repository` names whose required merge evidence is explicitly known to come entirely from GitHub Actions.
 An otherwise green fallback result becomes a typed terminal failure unless its repository is present in that allowlist.
