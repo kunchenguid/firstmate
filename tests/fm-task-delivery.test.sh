@@ -272,6 +272,41 @@ EOF
   pass "fm-project-mode: the conditional policy is accepted, mapped for mechanical callers, and readable raw"
 }
 
+# The registry name is free text, not a single token, so the parser must
+# recover the whole span up to its " [" or " - " delimiter rather than
+# comparing a fixed field. A field-keyed match (issue: $2==n) silently drops
+# every multi-word name to the not-in-registry warning and its no-mistakes-off
+# default, which is a silent posture downgrade for a project that IS registered.
+test_project_mode_matches_multi_word_names() {
+  local home out err
+  home="$TMP_ROOT/project-mode-spaces/home"
+  mkdir -p "$home/data"
+  cat > "$home/data/projects.md" <<'EOF'
+- 048. Blast- Lease summary drafter [local-only] - BLAST lease summary drafter (added 2026-08-08)
+- ARI eDiscovery Development - fixture (added 2026-01-01)
+- Foo Bar Baz [local-only +yolo] - fixture (added 2026-01-01)
+EOF
+
+  out=$(FM_HOME="$home" "$PROJECT_MODE" "048. Blast- Lease summary drafter" 2>/dev/null)
+  [ "$out" = "local-only off" ] || fail "a multi-word registry name with a mode annotation was not matched (got '$out')"
+  err=$(FM_HOME="$home" "$PROJECT_MODE" "048. Blast- Lease summary drafter" 2>&1 >/dev/null)
+  [ -z "$err" ] || fail "a registered multi-word project still warned as not in the registry: $err"
+
+  out=$(FM_HOME="$home" "$PROJECT_MODE" "ARI eDiscovery Development" 2>/dev/null)
+  [ "$out" = "no-mistakes off" ] || fail "a multi-word legacy-default registry name was not matched (got '$out')"
+
+  out=$(FM_HOME="$home" "$PROJECT_MODE" "Foo Bar Baz" 2>/dev/null)
+  [ "$out" = "local-only on" ] || fail "a multi-word name with a mode annotation and +yolo was not matched (got '$out')"
+
+  # A genuine registry miss, including a bare prefix of a multi-word name,
+  # must still fall through to the loud not-in-registry warning.
+  out=$(FM_HOME="$home" "$PROJECT_MODE" "048." 2>/dev/null)
+  [ "$out" = "no-mistakes off" ] || fail "an unregistered prefix of a multi-word name unexpectedly matched (got '$out')"
+  err=$(FM_HOME="$home" "$PROJECT_MODE" "048." 2>&1 >/dev/null)
+  assert_contains "$err" "not in registry" "a genuine registry miss stopped warning loudly"
+  pass "fm-project-mode: multi-word registry names match on their full free-text span"
+}
+
 test_ship_spawn_requires_a_valid_delivery_contract
 test_scout_and_secondmate_refuse_delivery_flags
 test_spawn_refuses_a_brief_mode_mismatch
@@ -279,4 +314,5 @@ test_spawn_notices_a_rigor_downgrade_against_the_registry
 test_scout_records_no_delivery_posture
 test_promote_requires_and_records_the_delivery_contract
 test_project_mode_maps_the_conditional_policy
+test_project_mode_matches_multi_word_names
 echo "# all fm-task-delivery tests passed"

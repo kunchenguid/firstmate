@@ -56,14 +56,25 @@ if [ ! -f "$REG" ]; then
   exit 0
 fi
 
+# The name is a free-text span, not a single token, so it is recovered from
+# the leading "- " up to the first " [" (mode annotation) or " - "
+# (description) delimiter rather than compared field-by-field; matching on
+# a fixed field (e.g. $2==n) silently drops every multi-word project name.
 # awk emits "<mode> <yolo>" (one line) or nothing if the project is absent.
 parsed=$(awk -v n="$NAME" '
-  $1=="-" && $2==n {
+  $1=="-" {
+    match($0, /^[ \t]*-[ \t]+/);
+    line = substr($0, RSTART + RLENGTH);
+    name = line;
+    if (match(name, / \[/)) name = substr(name, 1, RSTART - 1);
+    else if (match(name, / - /)) name = substr(name, 1, RSTART - 1);
+    if (name != n) next;
     mode="no-mistakes"; yolo="off";
-    if ($3 ~ /^\[/) {
-      s="";
-      for (i=3; i<=NF; i++) { s = s (s==""?"":" ") $i; if ($i ~ /\]$/) break }
-      gsub(/^\[|\]$/, "", s);           # strip the surrounding brackets
+    rest = substr(line, length(name) + 1);
+    if (rest ~ /^ \[/) {
+      sub(/^ \[/, "", rest);
+      close_pos = index(rest, "]");
+      s = (close_pos > 0) ? substr(rest, 1, close_pos - 1) : rest;
       k = split(s, a, " ");
       if (a[1] != "" && a[1] != "+yolo") mode = a[1];
       for (j=1; j<=k; j++) if (a[j]=="+yolo") yolo="on";
