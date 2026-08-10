@@ -19,6 +19,7 @@ REAL_GIT=$(command -v git)
 OTHER_PID=
 RECOVERY_WORKER_PID=
 CWD_WORKER_PID=
+CWD_SERVE_ONLY_PID=
 mkdir -p "$REMOTE_ROOT/bin" "$REMOTE_HOME" "$ACCOUNT_HOME" "$RUNTIME_BIN"
 # worker.pid records the serving child, not its restart supervisor, so stopping
 # that pid alone leaves the supervisor to respawn - the leak
@@ -27,6 +28,7 @@ cleanup_remote_job_fixture() {
   [ -z "$OTHER_PID" ] || kill "$OTHER_PID" 2>/dev/null || true
   [ -z "$RECOVERY_WORKER_PID" ] || kill "$RECOVERY_WORKER_PID" 2>/dev/null || true
   [ -z "$CWD_WORKER_PID" ] || kill "$CWD_WORKER_PID" 2>/dev/null || true
+  [ -z "$CWD_SERVE_ONLY_PID" ] || kill "$CWD_SERVE_ONLY_PID" 2>/dev/null || true
   if [ -f "$STATE_ROOT/worker.pid" ]; then
     fm_remote_job_stop_worker_tree "$(cat "$STATE_ROOT/worker.pid")" || true
   fi
@@ -666,5 +668,36 @@ kill -TERM "$CWD_WORKER_PID"
 wait "$CWD_WORKER_PID" 2>/dev/null || true
 CWD_WORKER_PID=
 pass "a started worker enters its code root instead of pinning its launch directory"
+
+# The serving path must enter the code root on its own account.
+# Above, the serving child only inherits the directory its restart supervisor
+# already entered, so that assertion alone would still hold if the serving path
+# stopped entering it. macOS runs no supervisor - the LaunchAgent worker is the
+# serving path - so this launches one with no supervisor above it.
+CWD_SERVE_ACCOUNT="$TMP_ROOT/cwd-serve-account"
+CWD_SERVE_STATE="$TMP_ROOT/cwd-serve-jobs"
+mkdir -p "$CWD_SERVE_ACCOUNT"
+( cd "$CWD_LAUNCH_DIR" &&
+  HOME="$CWD_SERVE_ACCOUNT" FM_ROOT_OVERRIDE="$REMOTE_ROOT" \
+    FM_REMOTE_JOB_STATE_ROOT="$CWD_SERVE_STATE" FM_REMOTE_JOB_PLATFORM_OVERRIDE=Darwin \
+    exec "$REMOTE_ROOT/bin/fm-remote-job-worker.sh" ) \
+  > "$TMP_ROOT/cwd-serve-worker.out" 2> "$TMP_ROOT/cwd-serve-worker.err" &
+CWD_SERVE_ONLY_PID=$!
+for _ in $(seq 1 300); do
+  [ -f "$CWD_SERVE_STATE/worker.ready" ] && break
+  sleep 0.05
+done
+assert_present "$CWD_SERVE_STATE/worker.ready" "an unsupervised serving worker never became ready"
+CWD_OBSERVED=$(process_cwd "$CWD_SERVE_ONLY_PID")
+[ -n "$CWD_OBSERVED" ] ||
+  fail "could not read the unsupervised serving worker working directory, so the cwd guarantee went unchecked"
+[ "$CWD_OBSERVED" != "$CWD_LAUNCH_DIR" ] ||
+  fail "the unsupervised serving worker kept its launch directory and would pin that worktree in use"
+[ "$CWD_OBSERVED" = "$CWD_EXPECTED" ] ||
+  fail "the unsupervised serving worker working directory is $CWD_OBSERVED, not its code root $CWD_EXPECTED"
+kill -TERM "$CWD_SERVE_ONLY_PID"
+wait "$CWD_SERVE_ONLY_PID" 2>/dev/null || true
+CWD_SERVE_ONLY_PID=
+pass "the serving path enters its code root with no supervisor to enter it first"
 
 echo "ALL TESTS PASSED"

@@ -36,6 +36,8 @@ The worker runs one staged job at a time and preempts a running reply long-poll 
 `bin/fm-remote-job-lib.sh` owns that preemption contract, and a preempted poll is indistinguishable from one whose wait window closed with no data, so the re-armed poll loses nothing.
 Linux uses the same queue and worker protocol without the Aqua-session requirement.
 A worker stops itself once its configured code root stops being a Firstmate checkout, so a worker started from a worktree cannot outlive that worktree, and `bin/fm-remote-job-reap-orphans.sh` clears any worker already left behind that way without ever touching one whose checkout still exists.
+That stop judges only the configured code root, so the worker also enters that root at startup instead of keeping the directory it was launched from, and a worker launched from inside a pooled or gate worktree never holds that directory in use.
+Every job child inherits the code root as its working directory, so a relayed command resolves relative paths there rather than against whatever directory happened to start the worker.
 The remote account must provide the required toolchain, the selected worker runtime, the selected session backend, and credentials that work on that host.
 The origin URL named for each project must be reachable from the remote account because projects are cloned on that host rather than copied from the primary.
 
