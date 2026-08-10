@@ -39,6 +39,7 @@ PRIMARY_PANE=
 PRIMARY_TARGET=
 DAEMON_STARTED=0
 
+# shellcheck disable=SC2329 # invoked indirectly through the EXIT trap below
 cleanup() {
   local rc=$?
   trap - EXIT
