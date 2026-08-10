@@ -103,7 +103,9 @@ for p in "${PATHS[@]}"; do
     *) echo "error: dependency path must be absolute: $p" >&2; exit 2 ;;
   esac
   case "$p" in
-    *$'\n'*) echo "error: dependency path must not contain a newline" >&2; exit 2 ;;
+    *[[:cntrl:]]*)
+      echo "error: dependency path must not contain a line ending or control character" >&2
+      exit 2 ;;
   esac
 done
 if [ -n "$SENTINEL_SET" ]; then

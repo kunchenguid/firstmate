@@ -190,10 +190,14 @@ if [ "${#DEPENDS[@]}" -gt 0 ]; then
       /*) ;;
       *) echo "error: --depends-on requires an absolute path (got '$dep')" >&2; exit 1 ;;
     esac
-    # The stanza renders each path as a markdown list item, so an embedded
-    # newline would write arbitrary instructions into an agent-facing brief.
+    # The stanza renders each path as a markdown list item, so any byte that can
+    # end a line - bare CR as much as LF - would write arbitrary instructions
+    # into an agent-facing brief. Refusing the whole control class closes that
+    # off rather than naming the two members of it that are known to render.
     case "$dep" in
-      *$'\n'*) echo "error: --depends-on must not contain a newline" >&2; exit 1 ;;
+      *[[:cntrl:]]*)
+        echo "error: --depends-on must not contain a line ending or control character" >&2
+        exit 1 ;;
     esac
   done
 fi

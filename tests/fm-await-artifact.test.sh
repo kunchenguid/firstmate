@@ -286,6 +286,24 @@ test_refuses_input_that_would_arm_a_watch_that_can_never_match() {
   expect_code 2 "$rc" "refusals: a relative dependency path must be refused"
   assert_contains "$out" "must be absolute" "refusals: relative path error must say why"
 
+  # The path is interpolated into hash-bound shell source, so it is held to the
+  # same control-character rule as the sibling --depends-on guard.
+  local label sep
+  for label in LF CR CRLF TAB; do
+    case $label in
+      LF) sep=$'\n' ;;
+      CR) sep=$'\r' ;;
+      CRLF) sep=$'\r\n' ;;
+      TAB) sep=$'\t' ;;
+    esac
+    set +e
+    out=$(arm "$home" wait-1 "$home/artifacts/re${sep}port.md" 2>&1); rc=$?
+    set -e
+    expect_code 2 "$rc" "refusals: a dependency path containing $label must be refused"
+    assert_contains "$out" "must not contain a line ending or control character" \
+      "refusals: the $label path error must say why"
+  done
+
   set +e
   out=$(arm "$home" wait-1 "$home/artifacts/report.md" --sentinel 'a[' 2>&1); rc=$?
   set -e
