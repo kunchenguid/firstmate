@@ -399,7 +399,22 @@ Two firstmate-specific rules layer on top of that guidance:
   When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
 - Avoid \`--yes\`: it would silently bypass firstmate's authority check and any required captain escalation.
 
-After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
+Before you report the PR, confirm the push did not silently change what was validated.
+The pipeline rebases your branch onto its target immediately before pushing, and a rebase that drops content opens a PR misrepresenting the code the pipeline actually judged.
+That has happened twice, and no pipeline signal reported it either time.
+Take the pushed head from the PR, then run:
+
+    $FM_ROOT/bin/fm-rebase-equivalence.sh --repo . \\
+      --validated-base "\$(git merge-base HEAD origin/HEAD 2>/dev/null || git merge-base HEAD main)" \\
+      --validated-head HEAD \\
+      --candidate-head <the PR head commit>
+
+Your local branch never moved during the run, so its head is the content you are entitled to see in the PR; work the pipeline added afterwards is growth, which this check does not refuse.
+Only \`REBASE-EQUIVALENCE: PASS\` clears the PR to be reported.
+On \`DROPPED\`, append \`blocked: the pushed PR dropped validated content in {paths it named}\` and stop.
+On \`CANNOT-OBSERVE\`, append \`blocked: {what it could not compare}\` and stop; that is never a pass.
+
+After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge) AND that check passes, append \`done: PR {url} checks green\` and stop. You are finished.
 EOF
     ;;
 esac
