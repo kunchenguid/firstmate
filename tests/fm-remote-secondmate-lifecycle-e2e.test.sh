@@ -883,6 +883,54 @@ phase=$(grep '^phase=' "$PARENT/state/pending-replies/$CORR" | cut -d= -f2-)
 pass "marked send and routed reply complete through the existing parent correlation owner"
 rm -f "$PARENT/state/.wake-queue"
 
+NUDGE_MARKER="$PARENT/state/.secondmate-nudge-pending/ios.pending"
+mkdir -p "${NUDGE_MARKER%/*}"
+write_legacy_remote_nudge_marker() {
+  cat > "$NUDGE_MARKER" <<EOF
+id=ios
+selector=fm-ios
+home=$REMOTE_HOME
+commit=
+instructions=remote
+message=Firstmate instructions or inherited config changed on this host. Re-read AGENTS.md and the inherited config files before further work.
+remote=1
+EOF
+}
+write_legacy_remote_nudge_marker
+touch "$TMP_ROOT/herdr-send-fail"
+if remote_env "$ROOT/bin/fm-config-push.sh" > "$TMP_ROOT/config-legacy-fail.out" 2>&1; then
+  fail "legacy remote reread marker claimed a successful failed delivery"
+fi
+assert_grep "remote_host=remote-mac" "$NUDGE_MARKER" "legacy reread marker was not bound to the converged host"
+assert_grep "remote_root=$REMOTE_ROOT" "$NUDGE_MARKER" "legacy reread marker was not bound to the converged root"
+rm -f "$TMP_ROOT/herdr-send-fail"
+remote_env "$ROOT/bin/fm-config-push.sh" > "$TMP_ROOT/config-legacy-retry.out" \
+  || fail "migrated legacy remote reread marker did not retry"
+assert_absent "$NUDGE_MARKER" "successful legacy remote reread retry left its marker"
+LEGACY_CONFIG_CORR=$(grep -Eo 'corr=[a-f0-9]{16}' "$HERDR_LOG" | tail -1 | cut -d= -f2-)
+[ -n "$LEGACY_CONFIG_CORR" ] || fail "legacy remote config reread did not carry a correlation token"
+printf 'done [corr=%s]: legacy inherited config re-read\n' "$LEGACY_CONFIG_CORR" >> "$REMOTE_HOME/state/parent-replies.status"
+remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" >/dev/null \
+  || fail "remote reply source did not capture the legacy config reread acknowledgement"
+LEGACY_CONFIG_RESULT="$PARENT/state/procevent-inbox/$SID.2.result"
+remote_env "$ROOT/bin/fm-procevent-remote-reply.sh" handle ios 2 "$LEGACY_CONFIG_RESULT" >/dev/null \
+  || fail "legacy remote config reread acknowledgement was not ingested"
+pass "config push migrates legacy remote reread markers after placement convergence"
+
+write_legacy_remote_nudge_marker
+remote_env env FM_BOOTSTRAP_NETWORK=only "$ROOT/bin/fm-bootstrap.sh" > "$TMP_ROOT/bootstrap-legacy.out" \
+  || fail "bootstrap did not migrate a legacy remote reread marker"
+assert_absent "$NUDGE_MARKER" "bootstrap left a migrated legacy remote reread marker"
+LEGACY_BOOTSTRAP_CORR=$(grep -Eo 'corr=[a-f0-9]{16}' "$HERDR_LOG" | tail -1 | cut -d= -f2-)
+[ -n "$LEGACY_BOOTSTRAP_CORR" ] || fail "bootstrap legacy remote reread did not carry a correlation token"
+printf 'done [corr=%s]: bootstrap legacy inherited config re-read\n' "$LEGACY_BOOTSTRAP_CORR" >> "$REMOTE_HOME/state/parent-replies.status"
+remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" >/dev/null \
+  || fail "remote reply source did not capture the bootstrap legacy reread acknowledgement"
+LEGACY_BOOTSTRAP_RESULT="$PARENT/state/procevent-inbox/$SID.3.result"
+remote_env "$ROOT/bin/fm-procevent-remote-reply.sh" handle ios 3 "$LEGACY_BOOTSTRAP_RESULT" >/dev/null \
+  || fail "bootstrap legacy remote reread acknowledgement was not ingested"
+pass "bootstrap migrates legacy remote reread markers after placement convergence"
+
 printf '{"revision":2}\n' > "$PARENT/config/crew-dispatch.json"
 printf 'grok\n' > "$PARENT/config/crew-harness"
 set +e
@@ -909,8 +957,8 @@ PARTIAL_CONFIG_CORR=$(grep -Eo 'corr=[a-f0-9]{16}' "$HERDR_LOG" | tail -1 | cut 
 printf 'done [corr=%s]: converged inherited config re-read\n' "$PARTIAL_CONFIG_CORR" >> "$REMOTE_HOME/state/parent-replies.status"
 remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" >/dev/null \
   || fail "remote reply source did not capture the converged config acknowledgment"
-PARTIAL_CONFIG_RESULT="$PARENT/state/procevent-inbox/$SID.2.result"
-remote_env "$ROOT/bin/fm-procevent-remote-reply.sh" handle ios 2 "$PARTIAL_CONFIG_RESULT" >/dev/null \
+PARTIAL_CONFIG_RESULT="$PARENT/state/procevent-inbox/$SID.4.result"
+remote_env "$ROOT/bin/fm-procevent-remote-reply.sh" handle ios 4 "$PARTIAL_CONFIG_RESULT" >/dev/null \
   || fail "converged remote config acknowledgment was not ingested"
 pass "partial remote inheritance retains reread intent through bootstrap convergence"
 
@@ -975,8 +1023,8 @@ CONFIG_CORR=$(grep -Eo 'corr=[a-f0-9]{16}' "$HERDR_LOG" | tail -1 | cut -d= -f2-
 printf 'done [corr=%s]: inherited config re-read\n' "$CONFIG_CORR" >> "$REMOTE_HOME/state/parent-replies.status"
 remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" >/dev/null \
   || fail "remote reply source did not capture the config reread acknowledgement"
-CONFIG_RESULT="$PARENT/state/procevent-inbox/$SID.3.result"
-remote_env "$ROOT/bin/fm-procevent-remote-reply.sh" handle ios 3 "$CONFIG_RESULT" >/dev/null \
+CONFIG_RESULT="$PARENT/state/procevent-inbox/$SID.5.result"
+remote_env "$ROOT/bin/fm-procevent-remote-reply.sh" handle ios 5 "$CONFIG_RESULT" >/dev/null \
   || fail "remote config reread acknowledgement was not ingested"
 pass "remote inherited config retains and retries a failed live reread nudge"
 

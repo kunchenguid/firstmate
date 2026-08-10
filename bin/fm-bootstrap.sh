@@ -494,7 +494,7 @@ secondmate_sync() {
   # "move on to the next secondmate".
   secondmate_sync_remote_one() {  # <id> <home> <remote-host> <remote-root>
     local id=$1 _home=$2 remote_host=$3 remote_root=$4
-    local sync_out inherit_out nudge_needed remote_marker remote_pending converged out remote_lock remote_generation
+    local sync_out inherit_out nudge_needed remote_marker remote_pending remote_legacy_pending converged out remote_lock remote_generation
     remote_lock=$(fm_remote_inherit_transaction_lock_path "$STATE" "$id" 2>/dev/null || true)
     if [ -z "$remote_lock" ] || ! fm_lock_acquire_wait "$remote_lock"; then
       echo "NUDGE_SECONDMATES: secondmate $id: send failed: cannot lock remote inheritance transaction"
@@ -511,17 +511,23 @@ secondmate_sync() {
     fi
     remote_marker=$(secondmate_nudge_marker_path "$id" 2>/dev/null || true)
     remote_pending=0
+    remote_legacy_pending=0
     if [ -e "$remote_marker" ] || [ -L "$remote_marker" ]; then
-      if ! fm_secondmate_remote_nudge_matches "$remote_marker" "$id" "$_home" \
+      if fm_secondmate_remote_nudge_matches "$remote_marker" "$id" "$_home" \
         "$remote_host" "$remote_root"; then
+        :
+      elif fm_secondmate_legacy_remote_nudge_matches "$remote_marker" "$id" "$_home"; then
+        remote_legacy_pending=1
+      else
         echo "NUDGE_SECONDMATES: secondmate $id: send failed: pending remote placement changed"
         fm_lock_release "$remote_lock" || true
         return 0
       fi
       remote_pending=1
     fi
-    if ! secondmate_write_nudge_marker "$id" "$_home" "" remote \
-      "$REMOTE_SECOND_MATE_NUDGE_MESSAGE" 1 "$remote_host" "$remote_root"; then
+    if [ "$remote_legacy_pending" -eq 0 ] && \
+      ! secondmate_write_nudge_marker "$id" "$_home" "" remote \
+        "$REMOTE_SECOND_MATE_NUDGE_MESSAGE" 1 "$remote_host" "$remote_root"; then
       echo "NUDGE_SECONDMATES: secondmate $id: send failed: cannot record remote retry marker"
       fm_lock_release "$remote_lock" || true
       return 0
@@ -546,6 +552,13 @@ secondmate_sync() {
     fi
     [ "$remote_pending" -eq 0 ] || nudge_needed=1
     if [ "$converged" -eq 1 ] && [ "$nudge_needed" -eq 1 ]; then
+      if [ "$remote_legacy_pending" -eq 1 ] && \
+        ! secondmate_write_nudge_marker "$id" "$_home" "" remote \
+          "$REMOTE_SECOND_MATE_NUDGE_MESSAGE" 1 "$remote_host" "$remote_root"; then
+        echo "NUDGE_SECONDMATES: secondmate $id: send failed: cannot migrate remote retry marker"
+        fm_lock_release "$remote_lock" || true
+        return 0
+      fi
       if out=$(FM_ON_EXPECTED_HOST="$remote_host" FM_ON_EXPECTED_ROOT="$remote_root" \
         FM_ON_EXPECTED_HOME="$_home" FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" \
         FM_STATE_OVERRIDE="$STATE" \

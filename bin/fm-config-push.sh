@@ -143,9 +143,14 @@ while IFS='|' read -r id home _window meta; do
     fi
     remote_marker=$(fm_secondmate_nudge_marker_path "$STATE" "$id" 2>/dev/null || true)
     remote_pending=0
+    remote_legacy_pending=0
     if [ -e "$remote_marker" ] || [ -L "$remote_marker" ]; then
-      if ! fm_secondmate_remote_nudge_matches "$remote_marker" "$id" "$home" \
+      if fm_secondmate_remote_nudge_matches "$remote_marker" "$id" "$home" \
         "$remote_host" "$remote_root"; then
+        :
+      elif fm_secondmate_legacy_remote_nudge_matches "$remote_marker" "$id" "$home"; then
+        remote_legacy_pending=1
+      else
         echo "  config-reread: pending remote placement changed"
         errors=1
         fm_lock_release "$remote_lock" || true
@@ -153,8 +158,9 @@ while IFS='|' read -r id home _window meta; do
       fi
       remote_pending=1
     fi
-    if ! fm_secondmate_nudge_write "$STATE" "$id" "$home" "" remote \
-      "$FM_REMOTE_SECOND_MATE_NUDGE_MESSAGE" 1 "" "$remote_host" "$remote_root"; then
+    if [ "$remote_legacy_pending" -eq 0 ] && \
+      ! fm_secondmate_nudge_write "$STATE" "$id" "$home" "" remote \
+        "$FM_REMOTE_SECOND_MATE_NUDGE_MESSAGE" 1 "" "$remote_host" "$remote_root"; then
       echo "  config-reread: retry marker failed"
       errors=1
       fm_lock_release "$remote_lock" || true
@@ -168,6 +174,14 @@ while IFS='|' read -r id home _window meta; do
       if printf '%s\n' "$remote_out" | grep -Eq '^(pushed|removed):'; then remote_nudge=1; fi
       [ "$remote_pending" -eq 0 ] || remote_nudge=1
       if [ "$remote_nudge" -eq 1 ]; then
+        if [ "$remote_legacy_pending" -eq 1 ] && \
+          ! fm_secondmate_nudge_write "$STATE" "$id" "$home" "" remote \
+            "$FM_REMOTE_SECOND_MATE_NUDGE_MESSAGE" 1 "" "$remote_host" "$remote_root"; then
+          echo "  config-reread: legacy retry marker migration failed"
+          errors=1
+          fm_lock_release "$remote_lock" || true
+          continue
+        fi
         if FM_ON_EXPECTED_HOST="$remote_host" FM_ON_EXPECTED_ROOT="$remote_root" \
           FM_ON_EXPECTED_HOME="$home" FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" \
           FM_STATE_OVERRIDE="$STATE" \

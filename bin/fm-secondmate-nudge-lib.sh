@@ -55,6 +55,26 @@ fm_secondmate_nudge_value() {
   ' "$marker"
 }
 
+fm_secondmate_legacy_remote_nudge_matches() {
+  local marker=$1 id=$2 home=$3 value lines
+  value=$(fm_secondmate_nudge_value "$marker" id 2>/dev/null) || return 1
+  [ "$value" = "$id" ] || return 1
+  value=$(fm_secondmate_nudge_value "$marker" selector 2>/dev/null) || return 1
+  [ "$value" = "fm-$id" ] || return 1
+  value=$(fm_secondmate_nudge_value "$marker" home 2>/dev/null) || return 1
+  [ "$value" = "$home" ] || return 1
+  value=$(fm_secondmate_nudge_value "$marker" commit 2>/dev/null) || return 1
+  [ -z "$value" ] || return 1
+  value=$(fm_secondmate_nudge_value "$marker" instructions 2>/dev/null) || return 1
+  [ "$value" = remote ] || return 1
+  value=$(fm_secondmate_nudge_value "$marker" message 2>/dev/null) || return 1
+  [ "$value" = "$FM_REMOTE_SECOND_MATE_NUDGE_MESSAGE" ] || return 1
+  value=$(fm_secondmate_nudge_value "$marker" remote 2>/dev/null) || return 1
+  [ "$value" = 1 ] || return 1
+  lines=$(awk 'END { print NR }' "$marker" 2>/dev/null) || return 1
+  [ "$lines" = 7 ]
+}
+
 fm_secondmate_remote_nudge_matches() {
   local marker=$1 id=$2 home=$3 remote_host=$4 remote_root=$5 owner=${6:-} value
   value=$(fm_secondmate_nudge_value "$marker" id 2>/dev/null) || return 1
