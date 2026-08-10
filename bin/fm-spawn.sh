@@ -1044,6 +1044,10 @@ spawn_abort_cleanup() {
     CONFIG_INHERIT_LOCK_HELD=0
     fm_lock_release "$CONFIG_INHERIT_LOCK" || true
   fi
+  if [ -n "${BATCH_ADMISSION_SNAPSHOT:-}" ]; then
+    rm -f "$BATCH_ADMISSION_SNAPSHOT"
+    BATCH_ADMISSION_SNAPSHOT=
+  fi
   return "$status"
 }
 trap spawn_abort_cleanup EXIT
@@ -1229,22 +1233,32 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   # census serially, which is N censuses to answer one fleet-wide question. The
   # snapshot carries its own generation time and fm-admission.sh still ages it
   # against the configured freshness limit, so the census-integrity signal is
-  # unchanged - a batch slow enough to stale the census is refused exactly as a
-  # stale one always was. Taken only where a home has an active admission policy;
-  # bin/fm-admission-lib.sh owns that question, and an inert home pays nothing.
-  batch_snapshot=
+  # bounded exactly as before: a batch slow enough to stale the census is refused
+  # exactly as a stale one always was.
+  #
+  # What a shared census CANNOT bound is saturation. `active_workers.count` and
+  # `admission_queue_pressure.load_hold_depth` are measured once, before the
+  # loop, so pair N is weighed against a fleet that does not yet contain pairs
+  # 1..N-1. Today that cannot move the band: both ship `enforce: false` and
+  # `enforcement_mode: "safety-only"` makes numeric enforcement unreachable. When
+  # an evidence-gated mode makes either enforce, this sharing has to be revisited
+  # - a per-pair census, or an in-loop headcount, is what that mode would need.
+  BATCH_ADMISSION_SNAPSHOT=
   # shellcheck source=bin/fm-admission-lib.sh
   . "$SCRIPT_DIR/fm-admission-lib.sh"
   if [ "$(fm_admission_state "$(fm_admission_config_file "$CONFIG")")" = active ] \
     && [ -x "$FM_ROOT/bin/fm-fleet-snapshot.sh" ]; then
-    batch_snapshot=$(mktemp "${TMPDIR:-/tmp}/fm-spawn-admission-snapshot.XXXXXX") || batch_snapshot=
-    if [ -n "$batch_snapshot" ] \
-      && ! "$FM_ROOT/bin/fm-fleet-snapshot.sh" --json > "$batch_snapshot" 2>/dev/null; then
-      # A census that could not be taken is not a shared census. Drop it and let
-      # each pair ask for its own, so a batch never admits on a snapshot the
-      # fleet snapshot owner refused to produce.
-      rm -f "$batch_snapshot"
-      batch_snapshot=
+    BATCH_ADMISSION_SNAPSHOT=$(mktemp "${TMPDIR:-/tmp}/fm-spawn-admission-snapshot.XXXXXX") \
+      || BATCH_ADMISSION_SNAPSHOT=
+    if [ -n "$BATCH_ADMISSION_SNAPSHOT" ]; then
+      chmod 600 "$BATCH_ADMISSION_SNAPSHOT" 2>/dev/null || true
+      if ! "$FM_ROOT/bin/fm-fleet-snapshot.sh" --json > "$BATCH_ADMISSION_SNAPSHOT" 2>/dev/null; then
+        # A census that could not be taken is not a shared census. Drop it and
+        # let each pair ask for its own, so a batch never admits on a snapshot
+        # the fleet snapshot owner refused to produce.
+        rm -f "$BATCH_ADMISSION_SNAPSHOT"
+        BATCH_ADMISSION_SNAPSHOT=
+      fi
     fi
   fi
   for pair in "${POS[@]}"; do
@@ -1257,12 +1271,15 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
       rc=2
       continue
     elif [ "$KIND" = scout ]; then
-      if FM_SPAWN_NO_GUARD=1 FM_SPAWN_ADMISSION_SNAPSHOT="$batch_snapshot" "$FM_ROOT/bin/fm-spawn.sh" "${pair%%=*}" "${pair#*=}" "${shared_args[@]+"${shared_args[@]}"}" --scout; then :; else echo "batch: FAILED to spawn ${pair%%=*} (${pair#*=})" >&2; rc=1; fi
+      if FM_SPAWN_NO_GUARD=1 FM_SPAWN_ADMISSION_SNAPSHOT="$BATCH_ADMISSION_SNAPSHOT" "$FM_ROOT/bin/fm-spawn.sh" "${pair%%=*}" "${pair#*=}" "${shared_args[@]+"${shared_args[@]}"}" --scout; then :; else echo "batch: FAILED to spawn ${pair%%=*} (${pair#*=})" >&2; rc=1; fi
     else
-      if FM_SPAWN_NO_GUARD=1 FM_SPAWN_ADMISSION_SNAPSHOT="$batch_snapshot" "$FM_ROOT/bin/fm-spawn.sh" "${pair%%=*}" "${pair#*=}" "${shared_args[@]+"${shared_args[@]}"}"; then :; else echo "batch: FAILED to spawn ${pair%%=*} (${pair#*=})" >&2; rc=1; fi
+      if FM_SPAWN_NO_GUARD=1 FM_SPAWN_ADMISSION_SNAPSHOT="$BATCH_ADMISSION_SNAPSHOT" "$FM_ROOT/bin/fm-spawn.sh" "${pair%%=*}" "${pair#*=}" "${shared_args[@]+"${shared_args[@]}"}"; then :; else echo "batch: FAILED to spawn ${pair%%=*} (${pair#*=})" >&2; rc=1; fi
     fi
   done
-  [ -z "$batch_snapshot" ] || rm -f "$batch_snapshot"
+  if [ -n "$BATCH_ADMISSION_SNAPSHOT" ]; then
+    rm -f "$BATCH_ADMISSION_SNAPSHOT"
+    BATCH_ADMISSION_SNAPSHOT=
+  fi
   exit "$rc"
 fi
 ID=${POS[0]}
@@ -1562,17 +1579,20 @@ fi
 # `hold_kind` names, which is the whole queue substrate -
 # .agents/skills/fleet-admission/SKILL.md owns that procedure and admission never
 # opens a second queue - and both name the controlling condition, because a band
-# without the condition that must clear is something nobody can act on. A hold
-# that cannot be placed softens neither answer: the spawn stops either way and
-# the failure is said out loud, so a request can never be silently dropped
-# instead of queued.
+# without the condition that must clear is something nobody can act on. What the
+# hold PROMISES comes from the band's own `auto_reconsider`: a band that records
+# no automatic reconsideration gets a hold that waits for an explicit release,
+# because promising a retake that will not happen is how a queued request is
+# quietly lost. A hold that cannot be placed softens neither answer: the spawn
+# stops either way and the failure is said out loud, so a request can never be
+# silently dropped instead of queued.
 #
 # A batch parent may take one fleet census for the whole batch and hand it down
 # through FM_SPAWN_ADMISSION_SNAPSHOT; admission still ages that snapshot against
 # its own configured freshness limit, so sharing it cannot smuggle a stale census
 # past the census-integrity signal.
 spawn_admission_gate() {
-  local record band action hold_kind rc reason controlling token headline
+  local record band action hold_kind auto_reconsider rc reason controlling token headline
   [ -x "$FM_ROOT/bin/fm-admission.sh" ] || return 0
   if [ -n "${FM_SPAWN_ADMISSION_SNAPSHOT:-}" ] && [ -f "${FM_SPAWN_ADMISSION_SNAPSHOT:-}" ]; then
     record=$("$FM_ROOT/bin/fm-admission.sh" --json --snapshot "$FM_SPAWN_ADMISSION_SNAPSHOT" 2>/dev/null)
@@ -1602,6 +1622,7 @@ spawn_admission_gate() {
   action=$(printf '%s' "$record" | jq -r '.action // empty' 2>/dev/null)
   hold_kind=$(printf '%s' "$record" | jq -r '.hold_kind // empty' 2>/dev/null)
   [ -n "$hold_kind" ] || hold_kind=load
+  auto_reconsider=$(printf '%s' "$record" | jq -r '.auto_reconsider // empty' 2>/dev/null)
   case "$action" in
     queue)
       token=FM_SPAWN_ADMISSION_DEFERRED
@@ -1615,7 +1636,11 @@ spawn_admission_gate() {
   echo "error: $token: $headline - $reason" >&2
   if fm_tasks_axi_backend_available "$CONFIG" \
     && tasks-axi hold "$ID" --file "$DATA/backlog.md" --kind "$hold_kind" --reason "$reason" >/dev/null 2>&1; then
-    echo "queued $ID for reconsideration at the next successful cleanup or session start" >&2
+    if [ "$auto_reconsider" = true ]; then
+      echo "queued $ID for reconsideration at the next successful cleanup or session start" >&2
+    else
+      echo "queued $ID as a $hold_kind hold; this band records no automatic reconsideration, so the hold waits for an explicit release" >&2
+    fi
   else
     echo "warning: could not queue $ID; record the hold by hand so this request is not lost" >&2
   fi
@@ -3282,7 +3307,7 @@ if [ "$KIND" = secondmate ]; then
   # not enable them across the launch boundary (bin/fm-trace-context-lib.sh header).
   # Reuse the single frozen decision from the carrier resolution above so the
   # injected carrier and this on/off snapshot are guaranteed to agree.
-  LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$sq_primary_home FM_HOME=$sq_home FM_TRACE_CONTEXT=$SPAWN_TRACE_EFFECTIVE FM_SUPERVISION_MODEL=$supervision_model $LAUNCH"
+  LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_SPAWN_ADMISSION_SNAPSHOT= FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$sq_primary_home FM_HOME=$sq_home FM_TRACE_CONTEXT=$SPAWN_TRACE_EFFECTIVE FM_SUPERVISION_MODEL=$supervision_model $LAUNCH"
 fi
 if [ -z "$SPAWN_TRACEPARENT" ] && [ "$RELAUNCH" -eq 1 ]; then
   LAUNCH="unset TRACEPARENT; $LAUNCH"

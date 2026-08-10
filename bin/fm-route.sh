@@ -199,9 +199,11 @@ case "$CMD" in
       | ([ $rules[] | .id ]) as $rule_ids
       | ($rules + [ $all[] | select(.source == "default")
                     | . as $e | select(($rule_ids | index($e.id)) == null) ])[]
+      | (profiles(if (.rule.use? != null) then .rule.use else .rule end)[0]? // {}) as $p
       | .id + "  floor=" + (.rule.floor // "-")
-        + "  primary=" + ((profiles(.rule.use)[0]?.model) // "-")
-        + "  effort=" + ((profiles(.rule.use)[0]?.effort) // "-")
+        + "  harness=" + ($p.harness // "-")
+        + "  primary=" + ($p.model // "-")
+        + "  effort=" + ($p.effort // "-")
         + "  pool=" + ((.rule.pool // []) | join(","))
         + "  promotes_to=" + (.rule.promotion_target // "-")
         + "  defined_at=" + .path

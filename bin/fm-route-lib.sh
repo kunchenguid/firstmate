@@ -447,7 +447,7 @@ fm_route_unreadable_refusal() {  # <config-dir>
 # availability records, and then the refusal and the recorded floor no longer
 # describe the same decision.
 fm_route_refusal_from_decision() {
-  local cfg=$1 route=$2 model=${3:-} decision=$4 state=${5:-} known dup resolution count held
+  local cfg=$1 route=$2 model=${3:-} decision=$4 state=${5:-} known dup resolution count held substitutes
   known=$(printf '%s' "$decision" | jq -r '.route_known')
   if [ "$known" != true ]; then
     printf '%s: route %s is not defined by %s/crew-dispatch.json. Defined: %s\n' \
@@ -487,9 +487,17 @@ fm_route_refusal_from_decision() {
          else " until it is released explicitly" end)
       + (if ((.evidence // "") | length) > 0 then " (" + .evidence + ")" else "" end)')
   if [ -n "$held" ]; then
-    printf '%s: route %s: %s in %s, so it is not an eligible candidate. Fail over to the next eligible model inside this pool (%s) rather than dispatching a held one; never substitute outside it and never lower the floor\n' \
-      "$FM_ROUTE_TOKEN_HELD" "$route" "$held" "$(fm_route_health_path "$state")" \
-      "$(printf '%s' "$decision" | jq -r '.pool | join(", ")')"
+    # The substitutes are the candidates the decision already found ELIGIBLE,
+    # never the whole pool: offering the model that was just refused as its own
+    # replacement is advice an operator cannot act on.
+    substitutes=$(printf '%s' "$decision" | jq -r '[ .candidates[]? | select(.eligible) | .model ] | join(", ")')
+    if [ -n "$substitutes" ]; then
+      printf '%s: route %s: %s in %s, so it is not an eligible candidate. Fail over to the next eligible model inside this route pool, in pool order (%s), rather than dispatching a held one; never substitute outside it and never lower the floor\n' \
+        "$FM_ROUTE_TOKEN_HELD" "$route" "$held" "$(fm_route_health_path "$state")" "$substitutes"
+    else
+      printf '%s: route %s: %s in %s, and no other candidate in this route pool is eligible either, so there is nothing to fail over to. Run fm-route.sh eligible --route %s for the terminal report naming every candidate and why, then stop and escalate: do not substitute outside this pool and do not lower the floor\n' \
+        "$FM_ROUTE_TOKEN_HELD" "$route" "$held" "$(fm_route_health_path "$state")" "$route"
+    fi
     return 1
   fi
   return 0

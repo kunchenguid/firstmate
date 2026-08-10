@@ -326,7 +326,11 @@ test_held_model_is_refused_at_the_chokepoint_and_check_agrees_with_eligible() {
   assert_contains "$out" "provider_unavailable" "the held state is not named"
   assert_contains "$out" "model vendor/large" "the held scope and subject are not named"
   assert_contains "$out" "until epoch" "the recorded expiry is not named"
-  assert_contains "$out" "vendor/large, other/small" "the pool failover must stay inside is not named"
+  # The substitute offered has to be one an operator can actually dispatch. The
+  # refused model is never its own replacement, so the list is the ELIGIBLE
+  # candidates and not the whole pool.
+  assert_contains "$out" "in pool order (other/small)" "the failover advice does not name the eligible substitute"
+  assert_not_contains "$out" "(vendor/large, other/small)" "the refused model is offered as its own substitute"
   # The two commands must never give opposite answers about the same model.
   out=$(run_route "$HOME_DIR" eligible --route R-MED)
   assert_not_contains "$out" "vendor/large" "eligible must agree with check that a held model is out"
@@ -338,6 +342,17 @@ test_held_model_is_refused_at_the_chokepoint_and_check_agrees_with_eligible() {
   expect_code 1 "$rc" "a held model must not be dispatched at the spawn chokepoint"
   assert_contains "$out" "FM_SPAWN_ROUTE_MODEL_HELD" "the stable refusal token is missing at the chokepoint"
   assert_absent "$HOME_DIR/state/heldtask.meta" "a held model must leave no task metadata"
+  # With every candidate held there is nothing to fail over TO, and saying so is
+  # the honest answer: an empty substitute list would read as "substitute
+  # something" with no name attached.
+  run_route "$HOME_DIR" availability hold other/small --state auth_failure >/dev/null
+  out=$(run_route "$HOME_DIR" check --route R-MED --model vendor/large --effort medium); rc=$?
+  expect_code 1 "$rc" "a held model must stay refused when the whole pool is held"
+  assert_contains "$out" "no other candidate in this route pool is eligible" \
+    "an exhausted pool must be stated plainly rather than printing an empty substitute list"
+  assert_contains "$out" "fm-route.sh eligible --route R-MED" "the terminal report is not pointed at"
+  assert_contains "$out" "do not lower the floor" "the refusal must forbid degrading"
+  run_route "$HOME_DIR" availability release other/small >/dev/null
   # A hold on the substitute is not a hold on the primary: releasing restores it.
   run_route "$HOME_DIR" availability release vendor/large >/dev/null
   out=$(run_route "$HOME_DIR" check --route R-MED --model vendor/large --effort medium); rc=$?
@@ -360,6 +375,11 @@ JSON
   out=$(run_route "$HOME_DIR" routes)
   assert_contains "$out" "R-DEF" "a route defined only under default must be listed by routes"
   assert_contains "$out" "defined_at=/default" "the listing must say where a route is defined"
+  # A default entry IS the profile, so its columns must carry the real profile
+  # rather than the blanks a `use`-only reader produces.
+  assert_contains "$out" "harness=codex" "the listed route must show its real harness"
+  assert_contains "$out" "primary=vendor/large" "the listed route must show its real primary model"
+  assert_contains "$out" "effort=medium" "the listed route must show its real effort"
   out=$(run_route "$HOME_DIR" check --route R-DEF --model vendor/large --effort medium); rc=$?
   expect_code 0 "$rc" "check must accept a route defined only under default"
   # And the chokepoint must agree that this home is enforcing, rather than
@@ -673,6 +693,92 @@ test_soft_admission_band_defers_distinguishably_from_a_refusal() {
   pass "a soft admission band defers with its own token and prose, distinct from a hard refusal"
 }
 
+# A tasks-axi the queue substrate accepts, so the load hold is actually placed
+# and the prose the spawn prints about it can be asserted.
+write_fake_tasks_axi() {  # <fakebin>
+  cat > "$1/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "--version ") printf '%s\n' '0.2.4' ;;
+  "update --help") printf '%s\n' 'usage: tasks-axi update <id> [flags]' '  --archive-body' ;;
+  "mv --help") printf '%s\n' 'usage: tasks-axi mv <id> [<id>...] --to <path-or-dir>' ;;
+esac
+exit 0
+SH
+  chmod +x "$1/tasks-axi"
+}
+
+test_a_queued_hold_promises_reconsideration_only_when_the_band_records_it() {
+  local rec out
+  rec=$(make_refusal_home auto-reconsider); read_home_record "$rec"
+  write_admission_policy "$HOME_DIR" soft
+  write_fake_tasks_axi "$FAKEBIN"
+  write_brief "$HOME_DIR" recon1 no-mistakes
+  out=$(run_spawn "$HOME_DIR" "$FAKEBIN" recon1 "$PROJ_DIR" \
+    --mode no-mistakes --yolo off --reason-code NL_RULE_CLASSIFICATION \
+    --harness codex --route R-MED --model vendor/large --effort medium)
+  assert_contains "$out" "queued recon1" "the deferred request must be queued as a load hold"
+  assert_contains "$out" "at the next successful cleanup or session start" \
+    "a band that records auto_reconsider must promise the automatic retake"
+  # The same band with auto_reconsider off promises nothing automatic: a retake
+  # that will not happen is how a queued request is quietly lost.
+  jq '._scheduling.admission_control.bands.soft.auto_reconsider = false' \
+    "$HOME_DIR/config/crew-dispatch.json" > "$HOME_DIR/config/tmp.json"
+  mv "$HOME_DIR/config/tmp.json" "$HOME_DIR/config/crew-dispatch.json"
+  write_brief "$HOME_DIR" recon2 no-mistakes
+  out=$(run_spawn "$HOME_DIR" "$FAKEBIN" recon2 "$PROJ_DIR" \
+    --mode no-mistakes --yolo off --reason-code NL_RULE_CLASSIFICATION \
+    --harness codex --route R-MED --model vendor/large --effort medium)
+  assert_contains "$out" "queued recon2" "the request must still be queued as a load hold"
+  assert_contains "$out" "waits for an explicit release" \
+    "a band with no automatic reconsideration must say the hold waits for a release"
+  assert_not_contains "$out" "at the next successful cleanup or session start" \
+    "a band with auto_reconsider false must not promise an automatic retake"
+  pass "a queued hold promises automatic reconsideration only where the band records it"
+}
+
+test_an_interrupted_batch_leaves_no_fleet_state_snapshot_behind() {
+  local rec tmpdir marker pid leftover
+  rec=$(make_refusal_home batch-census); read_home_record "$rec"
+  write_admission_policy "$HOME_DIR"
+  write_brief "$HOME_DIR" bt1 no-mistakes
+  tmpdir="$TMP_ROOT/batch-census/tmp"
+  marker="$TMP_ROOT/batch-census/child-reached-the-queue"
+  mkdir -p "$tmpdir"
+  # The child stalls inside the refusal's queue probe, so the parent is reliably
+  # still mid-batch - holding the shared census - when the signal arrives.
+  cat > "$FAKEBIN/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  : > "$FM_FAKE_TASKS_AXI_MARKER"
+  sleep 5
+  printf '%s\n' '0.2.4'
+fi
+exit 0
+SH
+  chmod +x "$FAKEBIN/tasks-axi"
+  TMPDIR="$tmpdir" FM_FAKE_TASKS_AXI_MARKER="$marker" \
+    FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 FM_BACKEND=tmux HERDR_ENV='' PATH="$FAKEBIN:$PATH" \
+    "$SPAWN" "bt1=$PROJ_DIR" --mode no-mistakes --yolo off \
+      --reason-code NL_RULE_CLASSIFICATION --harness codex \
+      --route R-MED --model vendor/large --effort medium >/dev/null 2>&1 &
+  pid=$!
+  fm_test_wait_file "$marker" 60 "$pid" \
+    "the batch parent exited before any pair reached the queue substrate" \
+    "the batch parent never dispatched a pair, so this case proves nothing"
+  ls "$tmpdir"/fm-spawn-admission-snapshot.* >/dev/null 2>&1 \
+    || fail "the batch parent never took the shared census, so this case proves nothing"
+  kill -TERM "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  leftover=$(find "$tmpdir" -maxdepth 1 -name 'fm-spawn-admission-snapshot.*' | wc -l | tr -d ' ')
+  [ "$leftover" = 0 ] \
+    || fail "an interrupted batch left $leftover fleet-state snapshot(s) behind in TMPDIR"
+  pass "a batch interrupted by a signal leaves no fleet-state snapshot behind"
+}
+
 test_shipped_example_ships_admission_switched_off() {
   local rec out enabled
   # Downstream homes copy this file verbatim. An enabled admission policy bands
@@ -748,5 +854,7 @@ test_route_claim_is_refused_where_nothing_can_check_it
 test_spawn_records_the_route_and_the_policy_that_checked_it
 test_admission_hard_band_refuses_the_spawn_naming_the_condition
 test_soft_admission_band_defers_distinguishably_from_a_refusal
+test_a_queued_hold_promises_reconsideration_only_when_the_band_records_it
+test_an_interrupted_batch_leaves_no_fleet_state_snapshot_behind
 test_shipped_example_ships_admission_switched_off
 test_activation_does_not_recheck_work_already_dispatched
