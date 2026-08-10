@@ -1112,7 +1112,7 @@ test_send_text_submit_accepts_wrapped_bare_text() {
   pass "fm_backend_zellij_send_text_submit: observes wrapped text in a bare composer"
 }
 
-test_send_text_submit_preserves_agent_glyph_on_wrapped_continuation() {
+test_send_text_submit_preserves_agent_glyph_within_wrapped_content() {
   local dir fb out text
   dir="$TMP_ROOT/submit-wrapped-agent-glyph"; mkdir -p "$dir/responses"
   text='hello ❯ captain'
@@ -1120,7 +1120,7 @@ test_send_text_submit_preserves_agent_glyph_on_wrapped_continuation() {
   printf '%s' $'❯ ' > "$dir/responses/2.out"
   zellij_pane_response "$dir" 3 7 3
   zellij_pane_response "$dir" 5 7 3
-  printf '%s' $'❯ hello\n❯ captain' > "$dir/responses/6.out"
+  printf '%s' $'❯ hello ❯\ncaptain' > "$dir/responses/6.out"
   zellij_pane_response "$dir" 7 7 3
   zellij_pane_response "$dir" 9 7 3
   printf '%s' $'hello ❯ captain\n❯ ' > "$dir/responses/10.out"
@@ -1128,10 +1128,10 @@ test_send_text_submit_preserves_agent_glyph_on_wrapped_continuation() {
   out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
     FM_ZELLIJ_SESSION_LIST="firstmate" \
     bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_send_text_submit firstmate:7 "$1" 2 0.01 0.01' "$ROOT" "$text" )
-  [ "$out" = empty ] || fail "an agent glyph starting a wrapped continuation should remain user content, got '$out'"
+  [ "$out" = empty ] || fail "an agent glyph within wrapped content should remain user content, got '$out'"
   assert_contains "$(cat "$dir/log")" $'\x1f''send-keys' \
-    "send_text_submit should send Enter after preserving a continuation-row agent glyph"
-  pass "fm_backend_zellij_send_text_submit: preserves agent glyphs on wrapped continuation rows"
+    "send_text_submit should send Enter after preserving a mid-row agent glyph"
+  pass "fm_backend_zellij_send_text_submit: preserves agent glyphs within wrapped content"
 }
 
 test_send_text_submit_rejects_stale_composer_above_live_shell() {
@@ -1349,7 +1349,7 @@ test_send_text_submit_rejects_existing_intended_text_after_noop_paste
 test_send_text_submit_rejects_furniture_match_after_noop_paste
 test_send_text_submit_accepts_wrapped_boxed_text
 test_send_text_submit_accepts_wrapped_bare_text
-test_send_text_submit_preserves_agent_glyph_on_wrapped_continuation
+test_send_text_submit_preserves_agent_glyph_within_wrapped_content
 test_send_text_submit_rejects_stale_composer_above_live_shell
 test_composer_state_reads_styled_dump
 test_composer_state_dead_pane_is_unknown

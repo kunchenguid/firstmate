@@ -996,7 +996,7 @@ _fm_composer_select_cursorless() {
 
 fm_composer_extract_selected_content() {  # <caps> <screen>
   local caps=$1 screen=$2 styled=0 kv plain row raw content glyph joined= footer_re prompt_row=-1
-  local had_prompt=0 leading_blank=1 placeholder_position=0
+  local leading_blank=1 placeholder_position=0
   footer_re=${FM_COMPOSER_LEFTBAR_FOOTER_RE:-$FM_COMPOSER_LEFTBAR_FOOTER_RE_DEFAULT}
   while IFS= read -r kv; do
     [ "$kv" = styled=1 ] && styled=1
@@ -1010,13 +1010,11 @@ EOF
   while [ "$row" -le "$FM_COMPOSER_SELECTED_LAST" ]; do
     raw=$(_fm_composer_screen_row "$row" "$screen")
     content=$(_fm_composer_row_content "$raw" "$styled")
-    had_prompt=0
     placeholder_position=0
     case "$FM_COMPOSER_SELECTED_KIND" in
       bare)
         if [ "$row" -eq "$FM_COMPOSER_SELECTED_FIRST" ] \
            && fm_composer_leading_agent_glyph_var glyph "$content"; then
-          had_prompt=1
           content=${content#*"$glyph"}
         fi
         ;;
@@ -1035,8 +1033,8 @@ EOF
       box)
         if [ "$prompt_row" -lt 0 ] \
            && fm_composer_leading_prompt_glyph_var glyph "$content"; then
-          had_prompt=1
           prompt_row=$row
+          placeholder_position=1
           content=${content#*"$glyph"}
         elif [ "$prompt_row" -lt 0 ]; then
           placeholder_position=1
@@ -1046,7 +1044,7 @@ EOF
     fm_composer_normalize_spaces_var content
     fm_composer_normalize_trim_var content
     if [ -z "$content" ] \
-       || { [ "$placeholder_position" = 1 ] && [ "$had_prompt" = 0 ] \
+       || { [ "$placeholder_position" = 1 ] \
             && fm_composer_idle_matches "$content" "${FM_COMPOSER_IDLE_RE:-$FM_COMPOSER_IDLE_RE_DEFAULT}" insensitive; } \
        || { [ "$FM_COMPOSER_SELECTED_KIND" = leftbar ] \
             && [ "$row" -eq "$FM_COMPOSER_SELECTED_LAST" ] \
