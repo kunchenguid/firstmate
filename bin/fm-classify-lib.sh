@@ -97,6 +97,22 @@ status_is_terminal_verb() {
   esac
 }
 
+# 0 if a status line's leading verb frees compute capacity and should enqueue
+# one advisory fleet refill wake (bin/fm-wake-lib.sh's fm_wake_enqueue_refill).
+# Covers completion and failure, blocked/paused/needs-decision, and decision
+# resolution. Working and other nonterminal progress never free capacity.
+# Distinct from status_is_captain_relevant: paused and resolved free capacity
+# without being captain-relevant signal verbs.
+status_frees_capacity() {
+  local line=$1 verb
+  [ -n "$line" ] || return 1
+  verb=$(status_line_verb "$line")
+  case "$verb" in
+    done|failed|blocked|paused|needs-decision|resolved) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # 0 if the given (last) status line matches a captain-relevant verb.
 # Verb-aware by default: terminal verbs always match; nonterminal progress verbs
 # (working, resolved, captain-held) and paused never match from free-text prose;

@@ -558,7 +558,7 @@ fm_wake_clean_field() {
 fm_wake_append() {
   local kind=$1 key=$2 payload=$3 clean_key clean_payload epoch seq seq_file status
   case "$kind" in
-    signal|stale|check|heartbeat) ;;
+    signal|stale|check|heartbeat|refill) ;;
     *) printf 'fm_wake_append: invalid wake kind: %s\n' "$kind" >&2; return 2 ;;
   esac
 
@@ -582,6 +582,19 @@ fm_wake_append() {
   return "$status"
 }
 
+# fm_wake_enqueue_refill
+# Enqueue one advisory fleet-refill wake after a capacity-freeing lifecycle
+# transition. Multiple transitions before drain collapse into ONE queued record
+# (dedupe by kind, like heartbeat). The payload tells firstmate to re-evaluate
+# ready work against free capacity using the structured fleet view; this helper
+# never selects, recommends, or spawns tasks. Provider-reset and Playbot-settled
+# triggers are deliberate follow-ups, not owned here.
+# Payload text is stable so drains and tests can match it exactly.
+FM_WAKE_REFILL_PAYLOAD='refill: re-evaluate ready work against free capacity'
+fm_wake_enqueue_refill() {
+  fm_wake_append refill refill "$FM_WAKE_REFILL_PAYLOAD"
+}
+
 # fm_wake_queued_keys <kind>
 # Print the distinct keys currently queued for <kind>, oldest first. Read under
 # the append lock so a concurrent append is never observed half-written. The
@@ -590,7 +603,7 @@ fm_wake_append() {
 fm_wake_queued_keys() {
   local kind=$1
   case "$kind" in
-    signal|stale|check|heartbeat) ;;
+    signal|stale|check|heartbeat|refill) ;;
     *) printf 'fm_wake_queued_keys: invalid wake kind: %s\n' "$kind" >&2; return 2 ;;
   esac
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
@@ -619,8 +632,10 @@ fm_wake_print_deduped() {
   awk -F '\t' '
     NF >= 5 {
       dedupe = $3 SUBSEP $4
-      if ($3 == "heartbeat") {
-        dedupe = "heartbeat"
+      # heartbeat and refill collapse by kind alone: many capacity-freeing
+      # transitions before drain must still leave exactly one refill record.
+      if ($3 == "heartbeat" || $3 == "refill") {
+        dedupe = $3
       }
       if (!(dedupe in seen)) {
         order[++count] = dedupe

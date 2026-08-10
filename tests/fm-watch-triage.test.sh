@@ -177,6 +177,15 @@ test_classifier_primitives() {
     || fail "done: not a terminal verb"
   status_is_terminal_verb "working: rebased onto merged #76" \
     && fail "working: wrongly classed as terminal verb"
+  # Capacity-freeing verbs for the Phase 2 refill wake: terminal + paused + resolved.
+  status_frees_capacity "done: ready in branch" || fail "done: does not free capacity"
+  status_frees_capacity "failed: tests red" || fail "failed: does not free capacity"
+  status_frees_capacity "blocked: needs credential" || fail "blocked: does not free capacity"
+  status_frees_capacity "paused: rate limit" || fail "paused: does not free capacity"
+  status_frees_capacity "needs-decision: pick A" || fail "needs-decision: does not free capacity"
+  status_frees_capacity "resolved [key=q1]: answered: use A" || fail "resolved: does not free capacity"
+  status_frees_capacity "working: implementing" && fail "working: wrongly frees capacity"
+  status_frees_capacity "captain-held [key=q1]: parked" && fail "captain-held: wrongly frees capacity"
   status_is_captain_relevant "merged" || fail "legacy bare merged free-text not captain-relevant"
   status_is_captain_relevant "PR ready https://x/pull/2" \
     || fail "legacy bare PR ready free-text not captain-relevant"
@@ -430,7 +439,105 @@ test_actionable_signal_surfaced() {
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the actionable signal failed"
   grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$status_file" >/dev/null || fail "actionable signal was not queued"
   [ -s "$state/.hb-surfaced-task" ] || fail "actionable signal did not record the surfaced marker"
+  # Capacity-freeing needs-decision also enqueues exactly one refill wake.
+  refill_n=$(awk -F '\t' '$3 == "refill" { n++ } END { print n + 0 }' "$drain_out")
+  [ "$refill_n" -eq 1 ] || fail "needs-decision signal should enqueue exactly one refill, got $refill_n"
   pass "captain-relevant signal is surfaced (queue + exit) and marked surfaced"
+}
+
+# Phase 2: capacity-freeing status transitions enqueue one refill; working does not.
+test_capacity_freeing_status_enqueues_refill() {
+  local dir state fakebin out drain_out status_file pid verb refill_n
+  # paused: is not captain-relevant; force not-provably-working so the path surfaces.
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · fake default'
+  for verb in 'done: ready' 'failed: boom' 'blocked: wait' 'paused: external'; do
+    dir=$(make_case "refill-${verb%%:*}"); state="$dir/state"; fakebin="$dir/fakebin"
+    out="$dir/watch.out"; drain_out="$dir/drain.out"
+    status_file="$state/task.status"
+    printf '%s\n' "$verb" > "$status_file"
+    watch_bg "$state" "$fakebin" "$out"
+    pid=$!
+    wait_for_exit "$pid" 40 || fail "watcher did not exit for capacity-freeing status: $verb"
+    FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null \
+      || fail "drain failed after capacity-freeing status: $verb"
+    refill_n=$(awk -F '\t' '$3 == "refill" { n++ } END { print n + 0 }' "$drain_out")
+    [ "$refill_n" -eq 1 ] || fail "expected one refill for '$verb', got $refill_n: $(cat "$drain_out")"
+    grep -F 'refill: re-evaluate ready work against free capacity' "$drain_out" >/dev/null \
+      || fail "refill payload missing for '$verb'"
+  done
+  unset FM_FAKE_CREW_STATE
+  pass "capacity-freeing status verbs enqueue exactly one refill each"
+}
+
+test_working_status_does_not_enqueue_refill() {
+  local dir state fakebin out drain_out status_file pid
+  dir=$(make_case refill-working); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"
+  status_file="$state/task.status"
+  printf 'working: implementing the fix\n' > "$status_file"
+  # Not provably working so the signal surfaces (not absorbed) - still no refill.
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · fake default'
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher did not exit for non-working working: note"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null \
+    || fail "drain after working: note failed"
+  if awk -F '\t' '$3 == "refill" { found=1 } END { exit found ? 0 : 1 }' "$drain_out"; then
+    fail "working: status must not enqueue a refill: $(cat "$drain_out")"
+  fi
+  unset FM_FAKE_CREW_STATE
+  pass "working status does not enqueue a refill wake"
+}
+
+test_resolved_while_working_enqueues_refill_only() {
+  local dir state fakebin out drain_out status_file pid refill_n signal_n
+  dir=$(make_case refill-resolved); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"
+  status_file="$state/task.status"
+  printf 'needs-decision [key=q1]: pick A\nresolved [key=q1]: answered: use A\n' > "$status_file"
+  # Crew is still working after the decision was closed - signal is absorbed,
+  # but refill must still surface so firstmate re-evaluates capacity.
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · running'
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher did not exit for resolved-while-working refill"
+  grep -F 'refill: re-evaluate ready work against free capacity' "$out" >/dev/null \
+    || fail "watcher did not print the refill reason for resolved-while-working"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null \
+    || fail "drain after resolved-while-working failed"
+  refill_n=$(awk -F '\t' '$3 == "refill" { n++ } END { print n + 0 }' "$drain_out")
+  [ "$refill_n" -eq 1 ] || fail "expected one refill for resolved-while-working, got $refill_n"
+  signal_n=$(awk -F '\t' '$3 == "signal" { n++ } END { print n + 0 }' "$drain_out")
+  [ "$signal_n" -eq 0 ] || fail "resolved-while-working should absorb signal and surface refill only, got $signal_n signals"
+  unset FM_FAKE_CREW_STATE
+  pass "resolved while working enqueues refill without a signal wake"
+}
+
+test_n_capacity_transitions_collapse_to_one_refill() {
+  local dir state fakebin out drain_out pid refill_n i
+  dir=$(make_case refill-collapse); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"
+  # Three tasks free capacity before any drain: watcher exits on the first, but
+  # append three refills directly then drain to pin the queue-side collapse.
+  # Behavioral watcher path: first done: wakes with signal+refill; remaining
+  # transitions are simulated via the production enqueue helper while the first
+  # refill is still queued.
+  printf 'done: first\n' > "$state/a.status"
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher did not exit for first capacity-freeing transition"
+  # Two more capacity-freeing transitions land before firstmate drains.
+  i=0
+  while [ "$i" -lt 2 ]; do
+    FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_wake_enqueue_refill' _ "$ROOT/bin/fm-wake-lib.sh" \
+      || fail "extra refill enqueue failed"
+    i=$((i + 1))
+  done
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null \
+    || fail "drain after N capacity transitions failed"
+  refill_n=$(awk -F '\t' '$3 == "refill" { n++ } END { print n + 0 }' "$drain_out")
+  [ "$refill_n" -eq 1 ] || fail "N transitions before drain must collapse to one refill, got $refill_n"
+  pass "N capacity-freeing transitions before drain collapse to one refill"
 }
 
 test_terminal_stale_surfaced() {
@@ -1812,6 +1919,10 @@ test_turn_ended_provably_working_absorbed
 test_turn_ended_not_working_surfaced
 test_working_note_not_working_surfaced
 test_actionable_signal_surfaced
+test_capacity_freeing_status_enqueues_refill
+test_working_status_does_not_enqueue_refill
+test_resolved_while_working_enqueues_refill_only
+test_n_capacity_transitions_collapse_to_one_refill
 test_terminal_stale_surfaced
 test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated

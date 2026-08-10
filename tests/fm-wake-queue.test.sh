@@ -168,6 +168,10 @@ SH
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" || fail "drain after check wake failed"
   grep "$(printf '\tcheck\t')" "$drain_out" | grep -F "$check_file" | grep -F 'merged: https://example.test/pr/1' >/dev/null || fail "check wake was not queued"
   [ -e "$state/.last-check" ] || fail "check cadence marker was not written after queue append"
+  # Custom checks are not PR-poll artifacts: only exact PR-poll "merged" enqueues refill.
+  if awk -F '\t' '$3 == "refill" { found=1 } END { exit found ? 0 : 1 }' "$drain_out"; then
+    fail "custom check must not enqueue a refill wake: $(cat "$drain_out")"
+  fi
   pass "registered custom check output is queued before cadence suppression"
 }
 
@@ -210,6 +214,65 @@ test_drain_dedupes_obvious_duplicates() {
   grep "$(printf '\theartbeat\theartbeat\theartbeat')" "$out" >/dev/null || fail "heartbeat was not preserved"
   grep "$(printf '\tsignal\ttask.status\t')" "$out" | grep -F "$state/task.turn-ended" >/dev/null || fail "latest signal payload was not preserved"
   pass "drain collapses obvious duplicate heartbeat and signal records"
+}
+
+# Phase 2 refill: N capacity-freeing transitions before drain collapse to ONE
+# refill record; drain clears it; refill never replaces or reorders other kinds.
+test_drain_dedupes_refill_by_kind() {
+  local dir state out count refill_count leftover
+  dir=$(make_case refill-dedupe)
+  state="$dir/state"
+  out="$dir/drain.out"
+  append_wake "$state" refill refill "refill: re-evaluate ready work against free capacity" \
+    || fail "first refill append failed"
+  append_wake "$state" signal task.status "signal: $state/task.status" \
+    || fail "signal append failed"
+  append_wake "$state" refill refill "refill: re-evaluate ready work against free capacity" \
+    || fail "second refill append failed"
+  append_wake "$state" refill refill "refill: re-evaluate ready work against free capacity" \
+    || fail "third refill append failed"
+  append_wake "$state" stale 's:fm-task' 'stale: s:fm-task' \
+    || fail "stale append failed"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "refill dedupe drain failed"
+  count=$(awk -F '\t' 'NF == 5 { count++ } END { print count + 0 }' "$out")
+  [ "$count" -eq 3 ] || fail "expected 3 records (signal, one refill, stale), got $count"
+  refill_count=$(awk -F '\t' '$3 == "refill" { n++ } END { print n + 0 }' "$out")
+  [ "$refill_count" -eq 1 ] || fail "expected exactly one refill after dedupe, got $refill_count"
+  grep "$(printf '\tsignal\ttask.status\t')" "$out" >/dev/null || fail "signal was dropped by refill dedupe"
+  grep "$(printf '\tstale\t')" "$out" >/dev/null || fail "stale was dropped by refill dedupe"
+  # First non-refill kinds keep their relative order; refill sits where first seen.
+  awk -F '\t' '
+    NF == 5 {
+      order[++n] = $3
+    }
+    END {
+      if (n != 3) exit 1
+      # order of first occurrence: refill, signal, stale
+      if (order[1] != "refill" || order[2] != "signal" || order[3] != "stale") exit 2
+    }
+  ' "$out" || fail "refill reordered or replaced other wake kinds: $(cat "$out")"
+  leftover=$(FM_STATE_OVERRIDE="$state" "$DRAIN" | awk -F '\t' 'NF == 5 { count++ } END { print count + 0 }')
+  [ "$leftover" -eq 0 ] || fail "queue was not empty after draining refill"
+  pass "drain collapses N refill records to one and preserves other kinds"
+}
+
+test_refill_enqueue_helper_is_valid_kind() {
+  local dir state out count
+  dir=$(make_case refill-helper)
+  state="$dir/state"
+  out="$dir/drain.out"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    # shellcheck disable=SC1090,SC1091
+    . "$1"
+    fm_wake_enqueue_refill
+    fm_wake_enqueue_refill
+  ' _ "$ROOT/bin/fm-wake-lib.sh" || fail "fm_wake_enqueue_refill failed"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain after helper failed"
+  count=$(awk -F '\t' '$3 == "refill" { n++ } END { print n + 0 }' "$out")
+  [ "$count" -eq 1 ] || fail "helper should leave one drained refill, got $count"
+  grep -F 'refill: re-evaluate ready work against free capacity' "$out" >/dev/null \
+    || fail "helper payload missing from drained refill"
+  pass "fm_wake_enqueue_refill is a valid kind and collapses on drain"
 }
 
 # The drain runs at the top of every wake-handling turn, so it also asserts
@@ -444,6 +507,8 @@ test_not_working_stale_enqueue_before_suppressor
 test_check_output_is_queued
 test_atomic_double_drain
 test_drain_dedupes_obvious_duplicates
+test_drain_dedupes_refill_by_kind
+test_refill_enqueue_helper_is_valid_kind
 test_drain_asserts_watcher_liveness
 test_structural_signal_enrichment_preserves_raw_rows
 test_enrichment_caps_and_status_file_failures
