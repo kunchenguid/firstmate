@@ -624,6 +624,76 @@ test_a_fork_only_target_never_resolves_the_upstream_venue() {
   pass "fm-task-base: fork-only work resolves the fork venue and is refused against the upstream target"
 }
 
+# The OTHER fork layout task_base_upstream_ref recognizes: origin is the fork,
+# and a separate `upstream` remote holds the upstream trunk. There is no
+# fetch/push split here at all, so a derivation that keys on that split alone
+# sees one venue and hands every task the fork.
+make_upstream_remote_repo() {  # <name> <fleet-commits>
+  local name=$1 fleet=$2 dir up fork seed scratch i
+  dir="$TMP_ROOT/$name"
+  up="$dir/upstream.git"; fork="$dir/fork.git"; seed="$dir/seed"; scratch="$dir/scratch"
+  mkdir -p "$seed"
+  git -C "$seed" init -q
+  git -C "$seed" symbolic-ref HEAD refs/heads/main
+  commit_in "$seed" base
+  git clone --quiet --bare "$seed" "$up"
+  git clone --quiet --bare "$seed" "$fork"
+  git clone --quiet "$up" "$scratch"
+  commit_in "$scratch" upstream-only
+  git -C "$scratch" push --quiet origin main
+  git clone --quiet "$fork" "$dir/repo"
+  git -C "$dir/repo" remote add upstream "$up"
+  i=0
+  while [ "$i" -lt "$fleet" ]; do
+    i=$((i + 1))
+    commit_in "$dir/repo" "fork-only-$i"
+  done
+  git -C "$dir/repo" fetch --quiet upstream
+  git -C "$dir/repo" remote set-url origin "https://github.com/fixture-fork/$name.git"
+  git -C "$dir/repo" remote set-url upstream "https://github.com/fixture-up/$name.git"
+  printf '%s\n' "$dir/repo"
+}
+
+# Both directions in that layout, in one checkout, for the same reason the
+# fetch/push-split pair above proves both: an upstream-cut task whose venue reads
+# "fork" has its correct pull request refused by bin/fm-pr-check.sh.
+test_venue_follows_the_target_with_a_separate_upstream_remote() {
+  local repo upstream_target fork_target
+  repo=$(make_upstream_remote_repo venue-upremote 3)
+  upstream_target=$(git -C "$repo" rev-parse upstream/main)
+  fork_target=$(git -C "$repo" rev-parse main)
+  git -C "$repo" merge-base --is-ancestor "$fork_target" "$upstream_target" \
+    && fail "venue-upremote: fixture fork trunk is already upstream; it proves nothing"
+  task_base_venue "$repo" "$upstream_target" \
+    || fail "venue-upremote: upstream resolution failed: $TASK_BASE_ERROR"
+  [ "$TASK_BASE_VENUE" = 'github.com/fixture-up/venue-upremote' ] \
+    || fail "venue-upremote: an upstream target must name the upstream venue, got '$TASK_BASE_VENUE'"
+  task_base_venue "$repo" "$fork_target" \
+    || fail "venue-upremote: fork resolution failed: $TASK_BASE_ERROR"
+  [ "$TASK_BASE_VENUE" = 'github.com/fixture-fork/venue-upremote' ] \
+    || fail "venue-upremote: a fork target must name the fork venue, got '$TASK_BASE_VENUE'"
+  pass "fm-task-base: a separate upstream remote resolves both venues from the target alone"
+}
+
+# The fork trunk advanced at the forge and the local branch has not caught up.
+# bin/fm-landed-lib.sh maintains refs/fm-landing/origin/<name> for exactly that
+# lag, so a target already on the fork trunk must resolve the fork venue rather
+# than degrade to unresolved and leave its pull request unchecked.
+test_venue_resolves_the_fork_trunk_when_the_local_branch_lags() {
+  local repo target
+  repo=$(make_forge_fork_repo venue-landing 2)
+  target=$(git_q "$repo" commit-tree -m fork-ahead \
+    -p "$(git -C "$repo" rev-parse main)" "$(git -C "$repo" rev-parse 'main^{tree}')")
+  git -C "$repo" update-ref refs/fm-landing/origin/main "$target"
+  git -C "$repo" merge-base --is-ancestor "$target" refs/heads/main \
+    && fail "venue-landing: fixture local branch already holds the fork trunk; it proves nothing"
+  task_base_venue "$repo" "$target" \
+    || fail "venue-landing: venue resolution failed: $TASK_BASE_ERROR"
+  [ "$TASK_BASE_VENUE" = 'github.com/fixture-fork/venue-landing' ] \
+    || fail "venue-landing: a target on the fork trunk must name the fork venue, got '$TASK_BASE_VENUE'"
+  pass "fm-task-base: the fork trunk is recognized through its landing ref when the local branch lags"
+}
+
 # No fetch/push split: one venue for every task, and the derivation must not
 # invent a second one.
 test_venue_is_single_when_there_is_no_fetch_push_split() {
@@ -779,6 +849,8 @@ test_batch_forwards_explicit_base_overrides
 test_venue_follows_an_upstream_contribution_target
 test_venue_follows_a_fork_contribution_target
 test_a_fork_only_target_never_resolves_the_upstream_venue
+test_venue_follows_the_target_with_a_separate_upstream_remote
+test_venue_resolves_the_fork_trunk_when_the_local_branch_lags
 test_venue_is_single_when_there_is_no_fetch_push_split
 test_venue_refuses_a_target_on_neither_trunk
 test_venue_identity_is_transport_and_case_insensitive

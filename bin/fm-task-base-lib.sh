@@ -21,8 +21,9 @@
 #
 # Sourced by bin/fm-spawn.sh (resolves and records them) and bin/fm-brief.sh
 # (states them to the worker). Depends on bin/fm-ff-lib.sh for default_branch
-# and primary_head_commit, and on bin/fm-landed-lib.sh for the one
-# fetch-url-versus-push-url comparison both libraries reason about.
+# and primary_head_commit, and on bin/fm-landed-lib.sh for the
+# fetch-url-versus-push-url comparison both libraries reason about and for the
+# name of the ref that holds the fork trunk when the local branch lags.
 #
 # task_base_resolve <repo-dir> sets, and clears first:
 #   TASK_BASE_SLOT          slot base commit SHA
@@ -216,6 +217,14 @@ task_base_venue_identity() {  # <url>
 # remote URL) and TASK_BASE_VENUE (its comparable forge identity, empty when the
 # URL names no forge).
 #
+# Both trunks are named by the SAME two-shape upstream resolution
+# task_base_upstream_ref performs, so every layout that has a distinct upstream
+# derives a venue from it: a separate `upstream` remote names the upstream side
+# directly and leaves origin as the fork, and an origin with a fetch/push split
+# fetches the upstream side and pushes the fork. Recognizing only the second
+# shape would record the fork venue for an upstream-cut task and refuse its
+# correct pull request.
+#
 # The ordering below is the safety property, not a preference. Upstream is
 # tested FIRST, so a target the upstream trunk already reaches resolves upstream
 # and a target it does not reach can never resolve there. Fork-only commits are
@@ -223,10 +232,17 @@ task_base_venue_identity() {  # <url>
 # be assigned the upstream venue - which is the inversion that turns a five
 # commit contribution into a thirty two commit one.
 #
+# The fork trunk is then tested against every ref that can hold it, because the
+# local branch is the fork trunk only while something keeps fast-forwarding it.
+# bin/fm-landed-lib.sh maintains refs/fm-landing/origin/<name> for exactly that
+# lag, so a target already on the fork trunk at the forge resolves the fork
+# venue instead of degrading to unresolved and leaving its request unchecked.
+#
 # 0 with the venue set, 2 when it could not be derived. There is no "probably";
 # an underivable venue is reported so a caller can refuse rather than guess.
 task_base_venue() {  # <repo-dir> <contribution-target>
-  local dir=$1 target=${2-} fetch_url push_url name target_sha
+  local dir=$1 target=${2-} fetch_url push_url upstream_url upstream_ref name target_sha ref landing_ref
+  local -a fork_refs
   TASK_BASE_VENUE=
   TASK_BASE_VENUE_URL=
   TASK_BASE_ERROR=
@@ -240,28 +256,43 @@ task_base_venue() {  # <repo-dir> <contribution-target>
     return 2
   }
 
-  # No fetch/push split: the project has one venue and every target names it.
-  if ! push_url=$(fm_landed_push_url "$dir"); then
+  # No distinct upstream: the project has one venue and every target names it.
+  if ! upstream_ref=$(task_base_upstream_ref "$dir"); then
     TASK_BASE_VENUE_URL=$fetch_url
     TASK_BASE_VENUE=$(task_base_venue_identity "$fetch_url" || true)
     return 0
   fi
 
-  name=$(default_branch "$dir" 2>/dev/null) || {
-    TASK_BASE_ERROR="no default branch in $dir, so neither trunk can be named"
-    return 2
-  }
+  # Which url is which follows the shape task_base_upstream_ref just resolved: a
+  # separate `upstream` remote names the upstream side, and otherwise origin
+  # FETCHES the upstream side and PUSHES the fork.
+  upstream_url=$(git --no-optional-locks -C "$dir" remote get-url upstream 2>/dev/null) || upstream_url=$fetch_url
+  push_url=$(fm_landed_push_url "$dir") || push_url=$fetch_url
 
   if git --no-optional-locks -C "$dir" merge-base --is-ancestor \
-    "$target_sha" "refs/remotes/origin/$name" 2>/dev/null; then
-    TASK_BASE_VENUE_URL=$fetch_url
-  elif git --no-optional-locks -C "$dir" merge-base --is-ancestor \
-    "$target_sha" "refs/heads/$name" 2>/dev/null; then
-    TASK_BASE_VENUE_URL=$push_url
-  else
-    TASK_BASE_ERROR="contribution target '$target' is on neither the upstream trunk (origin/$name) nor the fork trunk ($name), so the venue it names cannot be derived"
-    return 2
+    "$target_sha" "$upstream_ref" 2>/dev/null; then
+    TASK_BASE_VENUE_URL=$upstream_url
+    TASK_BASE_VENUE=$(task_base_venue_identity "$upstream_url" || true)
+    return 0
   fi
-  TASK_BASE_VENUE=$(task_base_venue_identity "$TASK_BASE_VENUE_URL" || true)
-  return 0
+
+  name=$(default_branch "$dir" 2>/dev/null) || {
+    TASK_BASE_ERROR="no default branch in $dir, so the fork trunk cannot be named"
+    return 2
+  }
+  fork_refs=("refs/heads/$name" "refs/remotes/origin/$name")
+  if landing_ref=$(fm_landed_push_target_ref "$dir" "$name"); then
+    fork_refs+=("$landing_ref")
+  fi
+  for ref in "${fork_refs[@]}"; do
+    if git --no-optional-locks -C "$dir" merge-base --is-ancestor \
+      "$target_sha" "$ref" 2>/dev/null; then
+      TASK_BASE_VENUE_URL=$push_url
+      TASK_BASE_VENUE=$(task_base_venue_identity "$push_url" || true)
+      return 0
+    fi
+  done
+
+  TASK_BASE_ERROR="contribution target '$target' is on neither the upstream trunk ($upstream_ref) nor the fork trunk ($name), so the venue it names cannot be derived"
+  return 2
 }

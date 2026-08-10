@@ -108,7 +108,7 @@ fi
 # infers a venue from the pull request itself; that would make the guard agree
 # with whatever it was shown.
 VENUE=$(grep '^contribution_venue=' "$RECORD" | tail -1 | cut -d= -f2- || true)
-PR_VENUE=$(printf '%s/%s' "$FM_PR_HOST" "$FM_PR_PATH" | tr '[:upper:]' '[:lower:]')
+PR_VENUE=$(printf '%s/%s' "$HOST" "$PROJECT_PATH" | tr '[:upper:]' '[:lower:]')
 if [ -z "$VENUE" ]; then
   printf 'venue: unchecked (task %s records no contribution venue)\n' "$ID"
 elif [ "$VENUE" = unresolved ]; then

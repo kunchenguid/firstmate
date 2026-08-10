@@ -996,6 +996,27 @@ test_venue_guard_reports_an_unrecorded_venue_as_unchecked() {
   pass "fm-pr-check: a task with no recorded venue is reported unchecked rather than assumed to match"
 }
 
+# The literal sentinel bin/fm-spawn.sh records when nothing could derive the
+# venue. It is a recorded non-answer, so it must read like the absent record
+# above rather than like a venue no pull request can ever equal - which would
+# hard-refuse exactly the tasks the sentinel exists to keep moving.
+test_venue_guard_reports_an_unresolved_venue_as_unchecked() {
+  local dir
+  dir=$(make_case venue-unresolved)
+  write_task_meta_with_venue "$dir" unresolved
+  FM_TEST_GH_HEAD=0123456789abcdef0123456789abcdef01234567 \
+    run_check_entry "$dir" task-a https://github.com/fixture-up/proj/pull/5 \
+    > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "venue-unresolved: an unresolved venue must not refuse: $(cat "$dir/stderr")"
+  assert_contains "$(cat "$dir/stdout")" 'venue: unchecked' \
+    "venue-unresolved: an unresolved venue must be reported as unchecked"
+  assert_not_contains "$(cat "$dir/stdout")" 'matches the recorded' \
+    "venue-unresolved: an unresolved venue must never be reported as a match"
+  assert_present "$dir/home/state/task-a.check.sh" \
+    "venue-unresolved: an unresolved venue must still arm its poll"
+  pass "fm-pr-check: a task recording an unresolved venue is reported unchecked and still armed"
+}
+
 test_migration_excludes_older_watcher_before_scan() {
   local dir state gate sentinel older_pid rc
   dir=$(make_case migration-pause-before-scan)
@@ -3797,3 +3818,4 @@ test_teardown_removes_poll_artifacts
 test_venue_guard_refuses_a_pull_request_at_the_wrong_venue
 test_venue_guard_accepts_a_pull_request_at_the_recorded_venue
 test_venue_guard_reports_an_unrecorded_venue_as_unchecked
+test_venue_guard_reports_an_unresolved_venue_as_unchecked
