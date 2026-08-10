@@ -894,6 +894,11 @@ families_for_changed_path() {
       printf '%s\n' secondmate
       printf '%s\n' session-bootstrap
       ;;
+    bin/fm-dependency-lock-lib.sh|bin/fm-deps.sh|bin/fm-update-action-lib.sh)
+      printf '%s\n' __script__:fm-deps.test.sh
+      printf '%s\n' session-bootstrap
+      printf '%s\n' secondmate
+      ;;
     bin/fm-secondmate*|bin/fm-remote*|bin/fm-on.sh|bin/fm-home-seed.sh|\
     bin/fm-backlog-handoff.sh|bin/fm-backlog-receive.sh|bin/fm-procevent-remote-reply.sh|\
     bin/fm-config-inherit-lib.sh|bin/fm-config-push.sh|bin/fm-shared*|\

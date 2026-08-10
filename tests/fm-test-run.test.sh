@@ -99,8 +99,11 @@ init_changed_fixture_repo() {
     fm-cd-pretool-check.test.sh \
     fm-daemon.test.sh \
     fm-backend-herdr-smoke.test.sh \
+    fm-deps.test.sh \
     fm-secondmate-safety.test.sh \
+    fm-secondmate-sync.test.sh \
     fm-session-start.test.sh \
+    fm-update.test.sh \
     fm-afk-pi-herdr-return-e2e.test.sh \
     fm-backend.test.sh \
     fm-pr-merge.test.sh \
@@ -115,7 +118,10 @@ init_changed_fixture_repo() {
   done
   : >"$repo/tests/lib.sh"
   : >"$repo/tests/fm-backend-herdr-eventwait.test.py"
+  : >"$repo/bin/fm-dependency-lock-lib.sh"
+  : >"$repo/bin/fm-deps.sh"
   : >"$repo/bin/fm-supervisor-target-lib.sh"
+  : >"$repo/bin/fm-update-action-lib.sh"
   : >"$repo/bin/unmapped-source.sh"
   printf '# .claude/settings.json\n# .pi/extensions/fm-primary-turnend-guard.ts\n' \
     >>"$repo/tests/fm-cd-pretool-check.test.sh"
@@ -132,10 +138,24 @@ init_changed_fixture_repo() {
 }
 
 test_changed_dependency_selection_and_unmapped_failure() {
-  local tmp repo listed rc
+  local tmp repo listed rc source
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-changed.XXXXXX")
   repo="$tmp/repo"
   init_changed_fixture_repo "$repo"
+
+  for source in fm-dependency-lock-lib.sh fm-deps.sh fm-update-action-lib.sh; do
+    printf '\n' >>"$repo/bin/$source"
+    listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+    assert_contains "$listed" "tests/fm-deps.test.sh" \
+      "$source selects focused dependency-checker coverage"
+    assert_contains "$listed" "tests/fm-update.test.sh" \
+      "$source selects updater integration coverage"
+    assert_contains "$listed" "tests/fm-secondmate-sync.test.sh" \
+      "$source selects secondmate integration coverage"
+    git -C "$repo" add "bin/$source"
+    git -C "$repo" -c user.name=test -c user.email=test@example.invalid \
+      commit -qm "$source change"
+  done
 
   printf '\n' >>"$repo/tests/lib.sh"
   listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
