@@ -445,7 +445,13 @@ fi
 # string comparison against GitHub's timestamps, so a plausible-looking "30d"
 # would sort below every record, examine nothing, and print a clean sweep. It has
 # to be refused before it is ever compared against anything.
-for bad_since in 30d 2026-01-01 "2026-01-01 00:00:00" 2026-01-01T00:00:00+05:00; do
+#
+# The impossible dates below are the same bug from the other side: they match the
+# shape a timestamp has, so a shape-only check would admit them, and they then
+# sort ABOVE every real timestamp and drop every record just as silently.
+for bad_since in 30d 2026-01-01 "2026-01-01 00:00:00" 2026-01-01T00:00:00+05:00 \
+  2026-13-01T00:00:00Z 2026-00-01T00:00:00Z 2026-01-32T00:00:00Z 2026-01-00T00:00:00Z \
+  2026-01-01T24:00:00Z 2026-01-01T00:00:69Z; do
   since_rc=0
   : >"$FM_FAKE_LOG"
   FM_FAKE_SCENARIO=clean FM_FAKE_BODY=0 PATH="$BIN:$PATH" \
@@ -457,6 +463,23 @@ for bad_since in 30d 2026-01-01 "2026-01-01 00:00:00" 2026-01-01T00:00:00+05:00;
     fail "--since '$bad_since' reached GitHub before it was refused"
   else
     pass "--since '$bad_since' is refused with exit 64 before any request"
+  fi
+done
+
+# A refusal that refuses everything would pass the loop above while making the
+# tool useless, so the edges of every accepted component are swept for real. The
+# leap second is one GitHub can print, and midnight and year end are the values a
+# hand-typed window most often carries.
+for good_since in 2026-01-01T00:00:00Z 2026-12-31T23:59:60Z 2026-08-09T09:08:07Z; do
+  good_rc=0
+  : >"$FM_FAKE_LOG"
+  FM_FAKE_SCENARIO=clean FM_FAKE_BODY=0 PATH="$BIN:$PATH" \
+    "$SWEEP" --account testcaptain --since "$good_since" --repo acme/widgets \
+    --kind comments >/dev/null 2>&1 || good_rc=$?
+  if [ "$good_rc" = "0" ] && [ -s "$FM_FAKE_LOG" ]; then
+    pass "--since '$good_since' is accepted and actually sweeps"
+  else
+    fail "a real timestamp was refused: --since '$good_since' exited $good_rc"
   fi
 done
 

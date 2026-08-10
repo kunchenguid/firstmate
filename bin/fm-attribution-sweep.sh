@@ -205,11 +205,32 @@ is_uint() {
 # real timestamp, so it would drop every record and report an observed-clean
 # sweep of nothing. The window start is therefore checked to be that spelling
 # before it is ever compared against anything.
+#
+# The shape alone is not the check. An impossible date that still matches the
+# shape - month 13, day 32, hour 24 - sorts ABOVE every real timestamp, which
+# drops every record and reports the same observed-clean sweep of nothing from
+# the other side. Each component is therefore range-checked against the calendar,
+# so a value that cannot order sensibly against GitHub's timestamps is refused
+# exactly like "30d" is.
 is_iso8601() {
-  case $1 in
-    [0-9][0-9][0-9][0-9]-[0-1][0-9]-[0-3][0-9]T[0-2][0-9]:[0-5][0-9]:[0-6][0-9]Z) return 0 ;;
+  local v=$1 month day hour minute second
+  case $v in
+    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z) ;;
     *) return 1 ;;
   esac
+  # Base 10 explicitly: "08" and "09" are not octal numbers.
+  month=$((10#${v:5:2}))
+  day=$((10#${v:8:2}))
+  hour=$((10#${v:11:2}))
+  minute=$((10#${v:14:2}))
+  second=$((10#${v:17:2}))
+  { [ "$month" -ge 1 ] && [ "$month" -le 12 ]; } || return 1
+  { [ "$day" -ge 1 ] && [ "$day" -le 31 ]; } || return 1
+  [ "$hour" -le 23 ] || return 1
+  [ "$minute" -le 59 ] || return 1
+  # A leap second is spelled :60 and GitHub can print one, so it is accepted.
+  [ "$second" -le 60 ] || return 1
+  return 0
 }
 
 is_uint "$BUDGET" || die_usage "--budget must be a non-negative integer"
@@ -368,6 +389,20 @@ gh_get() {
 # line, then one "|"-joined record of base64 fields per surviving element.
 JQ_ENVELOPE='| ([(.n|tostring)] + .r) | join("\n")'
 
+# The two halves of that envelope, read back through one pair of helpers rather
+# than open-coded at every listing. The count line drives pagination and the
+# record lines drive the tallies, so a caller that took one from a stale body and
+# the other from a fresh one would page on a length that never described the
+# records it counted. Both halves come from the same GH_BODY here by
+# construction.
+page_count() {
+  printf '%s\n' "$GH_BODY" | head -1
+}
+
+page_records() {
+  printf '%s\n' "$GH_BODY" | tail -n +2
+}
+
 # Percent-encode a value going into a request path or query. A branch named
 # "feat/a&b" would otherwise end the query early, and the sweep would report a
 # branch it never actually asked about as observed - a silent wrong answer of
@@ -523,12 +558,12 @@ if [ "${#REPOS[@]}" -eq 0 ]; then
     if [ "$GH_STATUS" != "ok" ]; then
       run_blocked "$GH_STATUS" "could not enumerate the account's repositories: $GH_DETAIL"
     fi
-    raw=$(printf '%s\n' "$GH_BODY" | head -1)
+    raw=$(page_count)
     is_uint "$raw" || run_blocked unparsable "repository listing page $page was not parsable"
     while IFS= read -r line; do
       [ -n "$line" ] || continue
       REPOS+=("$(b64d "$line")")
-    done < <(printf '%s\n' "$GH_BODY" | tail -n +2)
+    done < <(page_records)
     [ "$raw" -eq "$PER_PAGE" ] || break
     page=$((page + 1))
   done
@@ -587,7 +622,7 @@ sweep_comments() {
       scope_unobserved "$repo" comments "$GH_STATUS" "$GH_DETAIL" "$declared" "$candidates"
       return
     fi
-    raw=$(printf '%s\n' "$GH_BODY" | head -1)
+    raw=$(page_count)
     if ! is_uint "$raw"; then
       scope_unobserved "$repo" comments unparsable "comment page $page was not parsable" "$declared" "$candidates"
       return
@@ -605,7 +640,7 @@ sweep_comments() {
       emit_candidate "$repo" comment "$id" "$(b64d "$when")" \
         "https://github.com/$repo/issues/$issue#issuecomment-$id" \
         "assoc=$(b64d "$assoc"),via_app=$(b64d "$app"),token=absent"
-    done < <(printf '%s\n' "$GH_BODY" | tail -n +2)
+    done < <(page_records)
     [ "$raw" -eq "$PER_PAGE" ] || break
     page=$((page + 1))
   done
@@ -671,7 +706,7 @@ collect_prs_uncached() {
       PR_DETAIL=$GH_DETAIL
       return 1
     fi
-    raw=$(printf '%s\n' "$GH_BODY" | head -1)
+    raw=$(page_count)
     if ! is_uint "$raw"; then
       PR_STATUS=unparsable
       PR_DETAIL="pull request page $page was not parsable"
@@ -685,7 +720,7 @@ collect_prs_uncached() {
         continue
       fi
       PR_NUMBERS+=("$(b64d "$number")")
-    done < <(printf '%s\n' "$GH_BODY" | tail -n +2)
+    done < <(page_records)
     [ "$exhausted" -eq 0 ] || break
     [ "$raw" -eq "$PER_PAGE" ] || break
     page=$((page + 1))
@@ -736,7 +771,7 @@ sweep_reviews() {
         scope_unobserved "$repo" reviews "$GH_STATUS" "pull request $number: $GH_DETAIL" "$declared" "$candidates"
         return
       fi
-      raw=$(printf '%s\n' "$GH_BODY" | head -1)
+      raw=$(page_count)
       if ! is_uint "$raw"; then
         scope_unobserved "$repo" reviews unparsable "reviews of pull request $number were not parsable" "$declared" "$candidates"
         return
@@ -753,7 +788,7 @@ sweep_reviews() {
         emit_candidate "$repo" review "$id" "$(b64d "$when")" \
           "https://github.com/$repo/pull/$number#pullrequestreview-$id" \
           "assoc=$(b64d "$assoc"),state=$(b64d "$state"),pr=$number,token=absent"
-      done < <(printf '%s\n' "$GH_BODY" | tail -n +2)
+      done < <(page_records)
       [ "$raw" -eq "$PER_PAGE" ] || break
       page=$((page + 1))
     done
@@ -797,7 +832,7 @@ sweep_commits() {
         scope_unobserved "$repo" commits "$GH_STATUS" "$GH_DETAIL" "$declared" "$candidates"
         return
       fi
-      raw=$(printf '%s\n' "$GH_BODY" | head -1)
+      raw=$(page_count)
       if ! is_uint "$raw"; then
         scope_unobserved "$repo" commits unparsable "branch page $page was not parsable" "$declared" "$candidates"
         return
@@ -805,7 +840,7 @@ sweep_commits() {
       while IFS= read -r name; do
         [ -n "$name" ] || continue
         branches+=("$(b64d "$name")")
-      done < <(printf '%s\n' "$GH_BODY" | tail -n +2)
+      done < <(page_records)
       [ "$raw" -eq "$PER_PAGE" ] || break
       page=$((page + 1))
     done
@@ -871,7 +906,7 @@ sweep_commits() {
         scope_unobserved "$repo" commits "$GH_STATUS" "$label: $GH_DETAIL" "$declared" "$candidates"
         return
       fi
-      raw=$(printf '%s\n' "$GH_BODY" | head -1)
+      raw=$(page_count)
       if ! is_uint "$raw"; then
         scope_unobserved "$repo" commits unparsable "commits of $label were not parsable" "$declared" "$candidates"
         return
@@ -893,7 +928,7 @@ sweep_commits() {
         emit_candidate "$repo" commit "$sha" "$(b64d "$when")" \
           "https://github.com/$repo/commit/$sha" \
           "$label,signed=$(b64d "$verified"),committer=$(b64d "$committer"),token=absent"
-      done < <(printf '%s\n' "$GH_BODY" | tail -n +2)
+      done < <(page_records)
       [ "$raw" -eq "$PER_PAGE" ] || break
       page=$((page + 1))
     done
