@@ -622,13 +622,14 @@ task_window_harness() {  # <window> <state>
 # working: unknown semantic state never becomes busy and never becomes a
 # silent idle, so a stale pane whose state cannot be proven surfaces.
 stale_window_is_busy() {  # <window> <state>
-  local win=$1 state=$2 backend harness label task tail40 verdict
+  local win=$1 state=$2 backend harness label task tail40 verdict raw_launch
   backend=$(task_window_backend "$win" "$state")
   harness=$(task_window_harness "$win" "$state")
   task=$(window_to_task "$win" "$state")
+  raw_launch=$(fm_meta_get "$state/$task.meta" raw_launch 2>/dev/null || true)
   label="fm-$task"
   tail40=$(fm_backend_capture "$backend" "$win" 40 "$label" 2>/dev/null) || return 2
-  verdict=$(fm_busy_classify "$backend" "$win" "$harness" "$task" "$state" "$tail40")
+  verdict=$(fm_busy_classify "$backend" "$win" "$harness" "$task" "$state" "$tail40" "$raw_launch")
   [ "${verdict%% *}" = busy ]
 }
 

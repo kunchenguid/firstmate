@@ -2680,6 +2680,30 @@ fm_backend_herdr_composer_identity() {  # <target> -> "<agent>\t<status>"
   fm_backend_herdr_agent_identity_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE"
 }
 
+fm_backend_herdr_omp_input_safe() {  # <session> <pane> [recorded-harness] [raw-launch]
+  local session=$1 pane=$2 recorded_harness=${3:-} raw_launch=${4:-} identity agent agent_status
+  local inherited_unverified=${FM_HARNESS_UNVERIFIED:-}
+  local FM_HARNESS_UNVERIFIED=$inherited_unverified
+  [ "$raw_launch" = 1 ] && FM_HARNESS_UNVERIFIED=raw-launch
+  [ "$recorded_harness" = raw-omp ] && return 1
+  if [ "$recorded_harness" = omp ] && ! fm_harness_omp_attribution_allowed; then
+    return 1
+  fi
+  if [ "$raw_launch" = 1 ]; then
+    [ "$recorded_harness" = omp ] && return 1
+    identity=$(fm_backend_herdr_agent_identity_raw "$session" "$pane" 2>/dev/null || true)
+    IFS=$'\t' read -r agent agent_status <<EOF
+$identity
+EOF
+    [ "$agent" = omp ] && return 1
+  fi
+  if [ "$recorded_harness" = omp ] \
+    && fm_backend_herdr_omp_exited_to_shell "$session" "$pane"; then
+    return 1
+  fi
+  return 0
+}
+
 # fm_backend_herdr_composer_state: thin adapter - capture plus capabilities
 # in, shared verdict out. The ANSI capture is preferred (styled=1 lets the
 # shared classifier strip ghost/placeholder text); when it fails on an older
@@ -2688,10 +2712,16 @@ fm_backend_herdr_composer_identity() {  # <target> -> "<agent>\t<status>"
 # only when the classifier reports the verdict depends on it (a pi separator
 # pair below every other candidate), preserving this adapter's original
 # consult-only-when-needed behavior.
-fm_backend_herdr_composer_state() {  # <target> [recorded-harness] -> empty|pending|pending-unproven|unknown
-  local target=$1 recorded_harness=${2:-} cap caps verdict identity
+fm_backend_herdr_composer_state() {  # <target> [recorded-harness] [raw-launch] -> empty|pending|pending-unproven|unknown
+  local target=$1 recorded_harness=${2:-} raw_launch=${3:-} session pane cap caps verdict identity
   [ "$recorded_harness" = raw-omp ] && { printf 'unknown'; return 0; }
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
+  session=$FM_BACKEND_HERDR_SESSION
+  pane=$FM_BACKEND_HERDR_PANE
+  if ! fm_backend_herdr_omp_input_safe "$session" "$pane" "$recorded_harness" "$raw_launch"; then
+    printf 'unknown'
+    return 0
+  fi
   if cap=$(fm_backend_herdr_capture_ansi "$target" "$FM_COMPOSER_CAPTURE_LINES" 2>/dev/null); then
     caps=$(printf 'styled=1\ncursor=0\nidentity=1\nrows=%s' "$FM_COMPOSER_CAPTURE_LINES")
   elif cap=$(fm_backend_herdr_capture "$target" "$FM_COMPOSER_CAPTURE_LINES"); then
@@ -2815,10 +2845,16 @@ fm_backend_herdr_rendered_busy_state() {  # <target> [harness] -> busy|idle|unkn
 # submit vocabulary. Empty means confirmed submitted for every backend; how
 # each backend confirms it is an internal decision, and herdr's is no longer
 # literally "the composer read empty".
-fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle>
-  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 i=0 verdict baseline confirm_sleep
+fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle> [expected-label] [recorded-harness] [raw-launch]
+  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 expected_label=${6-} recorded_harness=${7-} raw_launch=${8-}
+  local i=0 verdict baseline confirm_sleep
   local raw_status footer_baseline=''
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
+  if ! fm_backend_herdr_omp_input_safe "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" \
+    "$recorded_harness" "$raw_launch"; then
+    printf 'unknown'
+    return 0
+  fi
   fm_backend_herdr_send_literal "$target" "$text" || { printf 'send-failed'; return 0; }
   sleep "$settle"
   raw_status=$(fm_backend_herdr_agent_status_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")
@@ -2834,7 +2870,7 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
         "$confirm_sleep" "$FM_BACKEND_HERDR_SUBMIT_POLLS")
     else
       sleep "$sleep_s"
-      verdict=$(fm_backend_herdr_composer_state "$target")
+      verdict=$(fm_backend_herdr_composer_state "$target" "$recorded_harness" "$raw_launch")
       if [ "$verdict" = pending ] && [ "$raw_status" != working ] \
         && [ "$footer_baseline" = idle ] \
         && [ "$(fm_backend_herdr_rendered_busy_state "$target")" = busy ]; then

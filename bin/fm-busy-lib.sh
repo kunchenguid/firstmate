@@ -839,9 +839,12 @@ fm_busy_grok_tail_busy() {
 # process state. <tail40> is optional pre-captured plain output used only by
 # the Grok arm; when absent the Grok arm captures through fm_backend_capture
 # if available, else reports unknown capture-failed.
-fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
-  local backend=$1 target=$2 harness=$3 id=$4 state=$5 tail40=${6-}
+fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40] [raw-launch]
+  local backend=$1 target=$2 harness=$3 id=$4 state=$5 tail40=${6-} raw_launch=${7-}
+  local inherited_unverified=${FM_HARNESS_UNVERIFIED:-}
+  local FM_HARNESS_UNVERIFIED=$inherited_unverified
   local out rc r_state r_source native log
+  [ "$raw_launch" = 1 ] && FM_HARNESS_UNVERIFIED=raw-launch
   if [ "$harness" = raw-omp ] || { [ "$harness" = omp ] && [ -n "${FM_HARNESS_UNVERIFIED:-}" ]; }; then
     printf 'unknown raw-unverified'
     return 0
@@ -900,12 +903,19 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
   # for BUSY (streaming means a turn is running); native idle is narrower
   # than turn state (a long foreground tool call reads idle) and stays
   # unknown here.
-  if [ "$backend" = herdr ] && command -v fm_backend_busy_state >/dev/null 2>&1; then
+  if [ "$backend" = herdr ] && [ -z "${FM_HARNESS_UNVERIFIED:-}" ] \
+    && command -v fm_backend_busy_state >/dev/null 2>&1; then
     native=$(fm_backend_busy_state "$backend" "$target" 2>/dev/null || true)
     if [ "$native" = busy ]; then
       printf 'busy herdr-native'
       return 0
     fi
+  fi
+  if [ "$backend" = herdr ] && [ -n "${FM_HARNESS_UNVERIFIED:-}" ]; then
+    case "$harness" in
+      grok*|muse*) : ;;
+      *) printf 'unknown raw-unverified'; return 0 ;;
+    esac
   fi
   case "$harness" in
     muse*)
@@ -963,7 +973,7 @@ fm_busy_classify_live() {  # <backend> <target> <harness> <id> <state-dir> [expe
     printf 'dead endpoint-gone'
     return 0
   fi
-  fm_busy_classify "$backend" "$target" "$harness" "$id" "$state"
+  fm_busy_classify "$backend" "$target" "$harness" "$id" "$state" '' "$raw_launch"
 }
 
 # fm_busy_classify_meta: classify a task from its recorded metadata, so every
@@ -977,17 +987,11 @@ fm_busy_classify_meta() {  # <meta-file> <id> <state-dir> [tail40]
   target=$(fm_backend_target_of_meta "$meta")
   harness=$(fm_meta_get "$meta" harness)
   raw_launch=$(fm_meta_get "$meta" raw_launch)
-  if [ "$raw_launch" = 1 ]; then
-    local inherited_unverified=${FM_HARNESS_UNVERIFIED:-}
-    local FM_HARNESS_UNVERIFIED=$inherited_unverified
-    FM_HARNESS_UNVERIFIED=raw-launch
-    [ "$harness" = omp ] && { printf 'unknown raw-unverified'; return 0; }
-  fi
   if [ -z "$target" ]; then
     printf 'unknown no-target'
     return 0
   fi
-  fm_busy_classify "$backend" "$target" "$harness" "$id" "$state" "$tail40"
+  fm_busy_classify "$backend" "$target" "$harness" "$id" "$state" "$tail40" "$raw_launch"
 }
 
 # fm_busy_is_busy: boolean view for callers that only gate on provable

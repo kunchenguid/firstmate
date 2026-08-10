@@ -198,14 +198,15 @@ hash_pane() {
 # <tail40> is the same bounded capture already read for hashing and is
 # consumed only by the Grok-scoped fallback inside the contract.
 window_is_busy() {  # <window> <tail40>
-  local w=$1 tail40=$2 task meta verdict
+  local w=$1 tail40=$2 task meta verdict raw_launch
   task=$(window_to_task "$w" "$STATE")
   meta="$STATE/$task.meta"
+  raw_launch=$(fm_meta_get "$meta" raw_launch 2>/dev/null || true)
   if [ -n "$task" ] && [ -f "$meta" ]; then
     verdict=$(fm_busy_classify_meta "$meta" "$task" "$STATE" "$tail40")
   else
     verdict=$(fm_busy_classify "$(window_backend "$w")" "$w" "$(window_harness "$w")" \
-      "${task:-unknown}" "$STATE" "$tail40")
+      "${task:-unknown}" "$STATE" "$tail40" "$raw_launch")
   fi
   [ "${verdict%% *}" = busy ]
 }

@@ -189,6 +189,7 @@ fm_send_resolve_target() {  # <raw-target>
   RESOLVED_TARGET=""
   TARGET_BACKEND=""
   TARGET_HARNESS=""
+  TARGET_RAW_LAUNCH=""
   EXPECTED_LABEL=""
   TARGET_META=""
   TARGET_SELECTOR=""
@@ -288,6 +289,9 @@ fm_send_resolve_target() {  # <raw-target>
 RAW_TARGET=$1
 fm_send_resolve_target "$RAW_TARGET" || exit 1
 T=$RESOLVED_TARGET
+if [ -n "$TARGET_META" ]; then
+  TARGET_RAW_LAUNCH=$(fm_meta_get "$TARGET_META" raw_launch 2>/dev/null || true)
+fi
 shift
 
 # Collect --resolve-key flags (answerer-closes; see the header contract). They
@@ -488,7 +492,7 @@ else
       send_rc=$?
       verdict=send-failed
     fi
-  elif verdict=$(fm_backend_send_text_submit "$TARGET_BACKEND" "$T" "$MESSAGE" "$retries" "$sleep_s" "$settle" "$EXPECTED_LABEL"); then
+  elif verdict=$(fm_backend_send_text_submit "$TARGET_BACKEND" "$T" "$MESSAGE" "$retries" "$sleep_s" "$settle" "$EXPECTED_LABEL" "$TARGET_HARNESS" "$TARGET_RAW_LAUNCH"); then
     :
   else
     send_rc=$?

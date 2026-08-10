@@ -3095,6 +3095,36 @@ test_composer_state_omp_separator_idle_is_empty() {
   pass "fm_backend_herdr_composer_state: a native idle OMP separator composer reads empty"
 }
 
+test_composer_state_rejects_wrapped_raw_omp_identity() {
+  local dir log resp fb out calls
+  dir="$TMP_ROOT/composer-raw-omp-wrapper"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"agent":{"agent":"omp","agent_status":"idle"}}}\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_composer_state herdr lab:w1:p2 bash 1' "$ROOT" )
+  [ "$out" = unknown ] || fail "a wrapped raw OMP composer must be unverified, got '$out'"
+  calls=$(grep -c $'\x1f''agent\x1f''get' "$log")
+  [ "$calls" -eq 1 ] || fail "wrapped raw OMP composer must corroborate the registered identity once, made $calls calls"
+  if grep -q $'\x1f''pane\x1f''read' "$log"; then
+    fail "wrapped raw OMP composer must be rejected before reading composer content"
+  fi
+  pass "fm_backend_composer_state (herdr): wrapped raw OMP identity is rejected before composer authorization"
+}
+
+test_send_text_submit_rejects_wrapped_raw_omp_before_typing() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/submit-raw-omp-wrapper"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"agent":{"agent":"omp","agent_status":"idle"}}}\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_send_text_submit herdr lab:w1:p2 "hello" 1 0 0 label bash 1' "$ROOT" )
+  [ "$out" = unknown ] || fail "the normal submit path must reject wrapped raw OMP, got '$out'"
+  if grep -q $'\x1f''pane\x1f''send-text' "$log" || grep -q $'\x1f''pane\x1f''send-keys' "$log"; then
+    fail "wrapped raw OMP submit must be rejected before typing or submitting"
+  fi
+  pass "fm_backend_send_text_submit (herdr): wrapped raw OMP metadata reaches the send boundary before input"
+}
+
 # --- OMP's stale idle agent registration after /exit ------------------------
 #
 # OMP 17.2.12 leaves its Herdr agent registration at `idle` once /exit has
@@ -3148,6 +3178,29 @@ SH
 
 omp_lone_shell_process_info() {  # <pid>
   printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p1","shell_pid":%s,"foreground_process_group_id":%s,"foreground_processes":[{"pid":%s,"name":"zsh","argv0":"zsh"}]}}}' "$1" "$1" "$1"
+}
+
+test_composer_state_rejects_exited_omp_husk() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-omp-husk"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  omp_lone_shell_process_info 4242 > "$resp/1.out"
+  printf '1 0\n4242 1\n' > "$dir/ps-rows"
+  cat > "$dir/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$*" in
+  "-axo pid=,ppid=") cat "${FM_FAKE_PS_ROWS:?}" ;;
+  *"-o stat="*) printf 'S+\n' ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$dir/ps"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_HERDR_PS_BIN="$dir/ps" FM_FAKE_PS_ROWS="$dir/ps-rows" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state lab:w1:p1 omp' "$ROOT" )
+  [ "$out" = unknown ] || fail "an exited OMP husk must not authorize composer input, got '$out'"
+  pass "fm_backend_herdr_composer_state: an exited OMP husk is rejected by the strict shell proof"
 }
 
 test_omp_idle_registration_over_a_lone_shell_is_no_agent() {
@@ -4564,6 +4617,9 @@ test_composer_state_unknown_on_capture_failure
 test_composer_state_unknown_when_no_composer_row_found
 test_composer_state_pi_separator_idle_is_empty
 test_composer_state_omp_separator_idle_is_empty
+test_composer_state_rejects_wrapped_raw_omp_identity
+test_send_text_submit_rejects_wrapped_raw_omp_before_typing
+test_composer_state_rejects_exited_omp_husk
 test_omp_idle_registration_over_a_lone_shell_is_no_agent
 test_omp_idle_registration_over_a_running_bun_stays_live
 test_omp_idle_registration_over_a_shell_with_a_child_stays_live
