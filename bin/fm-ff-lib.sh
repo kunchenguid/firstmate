@@ -266,8 +266,9 @@ live_secondmate_meta_records() {
 #                  already exist in the target's object store, which it always does
 #                  for a worktree of this same repo; a standalone clone that lacks
 #                  it is skipped rather than fetched.
-# Guards are identical in both modes: ff-only (never force/merge/stash); skip a
-# dirty, diverged, or wrong-branch target and leave its work untouched.
+# Guards are identical in both modes: ff-only (never force/merge/stash); the target
+# must be the work-tree root itself (see the clone-root check below); skip a dirty,
+# diverged, or wrong-branch target and leave its work untouched.
 FF_STATUS=""
 FF_INSTR=""
 ff_target() {
