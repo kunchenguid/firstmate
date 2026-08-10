@@ -233,6 +233,10 @@ test_omp_primary_and_worker_identity() {
   local dir fakebin got
   dir="$TMP_ROOT/omp-primary-worker-identity"
   fakebin=$(fm_fakebin "$dir")
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$fakebin/omp"
+  chmod +x "$fakebin/omp"
+  ln -s "$fakebin/omp" "$dir/omp-link"
+  export FM_TEST_OMP_SCRIPT="$fakebin/omp" FM_TEST_OMP_LINK="$dir/omp-link"
   cat > "$fakebin/ps" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -248,7 +252,9 @@ case "$field:${FM_TEST_OMP_SHAPE:-omp}" in
   comm=:bare) printf '%s\n' '/opt/omp/bin/bun' ;;
   comm=:bunx) printf '%s\n' '/opt/homebrew/bin/bunx' ;;
   comm=:*) printf '%s\n' '/opt/homebrew/bin/bun' ;;
-  args=:omp) printf '%s\n' 'bun /Users/u/.bun/bin/omp --model openai/test' ;;
+  args=:omp) printf 'bun %s --model openai/test\n' "$FM_TEST_OMP_SCRIPT" ;;
+  args=:link) printf 'bun %s --model openai/test\n' "$FM_TEST_OMP_LINK" ;;
+  args=:tmp) printf '%s\n' 'bun /tmp/omp --model openai/test' ;;
   args=:unrelated) printf '%s\n' 'bun /opt/omp/tools/compiler.js --prompt omp' ;;
   args=:bunx) printf '%s\n' 'bunx /Users/u/.bun/bin/omp --model openai/test' ;;
   args=:bare) printf '%s\n' '/opt/omp/bin/bun' ;;
@@ -263,6 +269,9 @@ SH
   got=$(FM_TEST_OMP_SHAPE=omp CLAUDECODE=1 PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-harness.sh")
   [ "$got" = omp ] \
     || fail "exact Bun/OMP ancestry under an inherited Claude marker selected '$got', expected omp"
+  got=$(FM_TEST_OMP_SHAPE=link CLAUDECODE=1 PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-harness.sh")
+  [ "$got" = omp ] \
+    || fail "a symlink to the canonical OMP script under an inherited Claude marker selected '$got', expected omp"
   got=$(FM_PI_HARNESS=pi FM_PRIMARY_HARNESS=omp PI_CODING_AGENT=true PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-harness.sh")
   [ "$got" = omp ] \
     || fail "explicit OMP primary authority under an inherited Pi marker selected '$got', expected omp"
@@ -275,12 +284,18 @@ SH
   got=$(FM_TEST_OMP_SHAPE=unrelated CLAUDECODE=1 PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-harness.sh")
   [ "$got" = claude ] \
     || fail "an unrelated Bun process suppressed the verified Claude marker, got '$got'"
+  got=$(FM_TEST_OMP_SHAPE=tmp CLAUDECODE=1 PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-harness.sh")
+  [ "$got" = claude ] \
+    || fail "Bun running /tmp/omp suppressed the verified Claude marker, got '$got'"
   # No marker at all, so this reaches the Bun ancestry branch itself: a script
   # whose directory merely contains an omp component and whose later argument
   # mentions omp is not an identity.
   got=$(FM_TEST_OMP_SHAPE=unrelated PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-harness.sh")
   [ "$got" = unknown ] \
     || fail "an unrelated Bun script whose later argument mentions omp resolved '$got', expected unknown"
+  got=$(FM_TEST_OMP_SHAPE=tmp PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-harness.sh")
+  [ "$got" = unknown ] \
+    || fail "Bun running /tmp/omp resolved '$got', expected unknown"
   # detect_own attributes an ancestor by process NAME only - it has no install-
   # path rule - so a bare Bun with no script argument must stay unattributed
   # even when Bun's own path carries an omp component. The identity Bun can

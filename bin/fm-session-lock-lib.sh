@@ -24,7 +24,7 @@ FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$|^omp$'
 # with the non-interpreter names in FM_HARNESS_RE. The exact-component check
 # avoids treating ordinary
 # firstmate paths such as bin/fm-claude-stop-autoarm.sh as harness processes.
-# OMP's Bun shape is matched by its exact executable or script basename below.
+# OMP's Bun shape is matched by its canonical executable or script path below.
 FM_HARNESS_NAMES=(claude codex opencode grok kimi pi-signed pi)
 
 # Print the exact harness name carried by executable path $1 - its own basename
@@ -51,10 +51,46 @@ fm_harness_omp_attribution_allowed() {
   [ -z "${FM_HARNESS_UNVERIFIED:-}" ]
 }
 
+fm_harness_omp_resolve_path() {  # <path>
+  local path=$1 target dir base
+  [ -n "$path" ] || return 1
+  dir=${path%/*}
+  [ "$dir" != "$path" ] || dir=.
+  [ -n "$dir" ] || dir=/
+  base=${path##*/}
+  path=$(CDPATH='' cd -- "$dir" 2>/dev/null && printf '%s/%s' "$(pwd -P)" "$base") || return 1
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
+    if [ ! -L "$path" ]; then
+      [ -x "$path" ] || return 1
+      printf '%s' "$path"
+      return 0
+    fi
+    target=$(readlink "$path" 2>/dev/null) || return 1
+    case "$target" in
+      /*) path=$target ;;
+      *) path="${path%/*}/$target" ;;
+    esac
+    dir=${path%/*}
+    [ "$dir" != "$path" ] || dir=.
+    [ -n "$dir" ] || dir=/
+    base=${path##*/}
+    path=$(CDPATH='' cd -- "$dir" 2>/dev/null && printf '%s/%s' "$(pwd -P)" "$base") || return 1
+  done
+  return 1
+}
+
+fm_harness_omp_command_path() {
+  local command_path
+  command_path=$(command -v omp 2>/dev/null) || return 1
+  fm_harness_omp_resolve_path "$command_path"
+}
+
 fm_harness_omp_script_matches() {  # <path>
-  local path=$1
+  local path=$1 expected actual
   fm_harness_omp_attribution_allowed || return 1
-  [ -n "$path" ] && [ "${path##*/}" = omp ]
+  expected=$(fm_harness_omp_command_path) || return 1
+  actual=$(fm_harness_omp_resolve_path "$path") || return 1
+  [ "$actual" = "$expected" ]
 }
 
 fm_harness_omp_process_matches() {  # <comm> <args>

@@ -1932,6 +1932,11 @@ fm_backend_herdr_pane_agent_state() {  # <session> <pane_id> [recorded-harness] 
     printf 'unknown'
     return 0
   fi
+  if [ "$raw_launch" = 1 ] \
+    && fm_backend_herdr_raw_omp_process_identity "$session" "$pane_id"; then
+    printf 'unknown'
+    return 0
+  fi
   presence=$(fm_backend_herdr_pane_presence_state "$session" "$pane_id")
   if [ "$presence" != present ]; then
     case "$presence" in
@@ -2707,14 +2712,10 @@ fm_backend_herdr_composer_identity() {  # <target> -> "<agent>\t<status>"
 }
 
 fm_backend_herdr_raw_omp_identity() {  # <target>
-  local target=$1 identity agent agent_status
+  local target=$1
   fm_backend_herdr_parse_target "$target" || return 1
-  identity=$(fm_backend_herdr_agent_identity_raw \
-    "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" 2>/dev/null || true)
-  IFS=$'\t' read -r agent agent_status <<EOF
-$identity
-EOF
-  [ "$agent" = omp ]
+  fm_backend_herdr_raw_omp_process_identity \
+    "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE"
 }
 
 fm_backend_herdr_omp_process_state() {  # <session> <pane> -> stale|live|unknown
@@ -2787,6 +2788,13 @@ EOF
   else
     printf 'unknown'
   fi
+}
+
+fm_backend_herdr_raw_omp_process_identity() {  # <session> <pane> -> true for OMP
+  (
+    unset FM_HARNESS_UNVERIFIED
+    [ "$(fm_backend_herdr_omp_process_identity "$1" "$2")" = omp ]
+  )
 }
 
 fm_backend_herdr_identity_matches() {  # <recorded-harness> <registered-agent>
