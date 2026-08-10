@@ -59,6 +59,29 @@ verdict=$(fm_slot_disposal_verdict "$HOME_DIR/state" task-a "$WORKTREE" \
   || fail "an unrelated unreadable process blocked exact endpoint proof: $verdict"
 pass "slot disposal scopes live-process proof to the exact backend endpoint"
 
+REAL_PROC_START_TIME=$(declare -f fm_agent_proc_start_time | sed '1s/fm_agent_proc_start_time/_fm_real_agent_proc_start_time/')
+eval "$REAL_PROC_START_TIME"
+START_TIME_SENTINEL="$TMP_ROOT/start-time-sentinel"
+rm -f "$START_TIME_SENTINEL"
+fm_agent_proc_start_time() {
+  if [ "$1" = "$ENDPOINT_PID" ] && [ -e "$START_TIME_SENTINEL" ]; then
+    printf 'reused-start-time'
+    return 0
+  fi
+  if [ "$1" = "$ENDPOINT_PID" ]; then
+    : > "$START_TIME_SENTINEL"
+  fi
+  _fm_real_agent_proc_start_time "$1"
+}
+verdict=$(fm_slot_disposal_verdict "$HOME_DIR/state" task-a "$WORKTREE" \
+  "$HOME_DIR" "$HOME_DIR" crewmate live herdr lab:pane-a)
+[ "$verdict" = "retain: authoritative endpoint-occupant evidence is unavailable" ] \
+  || fail "a reused endpoint PID did not retain the durable lease: $verdict"
+pass "a reused endpoint PID retains the durable lease"
+fm_agent_proc_start_time() {
+  _fm_real_agent_proc_start_time "$1"
+}
+
 (
   cd "$WORKTREE" || exit 1
   exec env FM_AGENT_TASK=foreign-task FM_AGENT_OWNER_HOME="$HOME_DIR" \

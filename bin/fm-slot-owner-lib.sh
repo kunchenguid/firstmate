@@ -322,20 +322,34 @@ fm_slot_meta_referencing_tasks() {
 # and 2 when the endpoint-bound process cannot be proved stably.
 fm_slot_endpoint_occupant_tasks() {
   local wt=$1 self=$2 self_home=$3 self_role=$4 backend=$5 target=$6
-  local wt_real pid current cwd env task home role
+  local wt_real pid start current cwd cwd_again env env_again task task_again home home_again role role_again
   wt_real=$(fm_agent_canonical_dir "$wt") || return 2
   command -v fm_backend_foreground_process_pid >/dev/null 2>&1 || return 2
   pid=$(fm_backend_foreground_process_pid "$backend" "$target") || return 2
   fm_agent_pid_is_numeric "$pid" || return 2
+  start=$(fm_agent_proc_start_time "$pid") || return 2
   cwd=$(fm_agent_proc_cwd "$pid") || return 2
   cwd=$(fm_agent_canonical_dir "$cwd") || return 2
-  env=$(fm_agent_environ "$pid" 2>/dev/null || true)
+  env=$(fm_agent_environ "$pid" 2>/dev/null) || return 2
   current=$(fm_backend_foreground_process_pid "$backend" "$target") || return 2
   [ "$current" = "$pid" ] || return 2
-  fm_agent_path_within "$wt_real" "$cwd" || return 1
+  fm_agent_pid_start_matches "$pid" "$start" || return 2
+  cwd_again=$(fm_agent_proc_cwd "$pid") || return 2
+  cwd_again=$(fm_agent_canonical_dir "$cwd_again") || return 2
+  [ "$cwd_again" = "$cwd" ] || return 2
+  env_again=$(fm_agent_environ "$pid" 2>/dev/null) || return 2
   task=$(printf '%s\n' "$env" | sed -n 's/^FM_AGENT_TASK=//p' | head -1)
   home=$(printf '%s\n' "$env" | sed -n 's/^FM_AGENT_OWNER_HOME=//p' | head -1)
   role=$(printf '%s\n' "$env" | sed -n 's/^FM_AGENT_ROLE=//p' | head -1)
+  task_again=$(printf '%s\n' "$env_again" | sed -n 's/^FM_AGENT_TASK=//p' | head -1)
+  home_again=$(printf '%s\n' "$env_again" | sed -n 's/^FM_AGENT_OWNER_HOME=//p' | head -1)
+  role_again=$(printf '%s\n' "$env_again" | sed -n 's/^FM_AGENT_ROLE=//p' | head -1)
+  [ "$task_again" = "$task" ] && [ "$home_again" = "$home" ] \
+    && [ "$role_again" = "$role" ] || return 2
+  current=$(fm_backend_foreground_process_pid "$backend" "$target") || return 2
+  [ "$current" = "$pid" ] || return 2
+  fm_agent_pid_start_matches "$pid" "$start" || return 2
+  fm_agent_path_within "$wt_real" "$cwd" || return 1
   if [ "$task" = "$self" ] && [ "$role" = "$self_role" ] \
      && fm_slot_same_path "$home" "$self_home"; then
     return 1
