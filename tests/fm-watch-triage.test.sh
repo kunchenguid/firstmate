@@ -229,9 +229,10 @@ test_classifier_primitives() {
     || fail "done: not a terminal verb"
   status_is_terminal_verb "working: rebased onto merged #76" \
     && fail "working: wrongly classed as terminal verb"
-  status_is_captain_relevant "merged" || fail "legacy bare merged free-text not captain-relevant"
+  status_is_captain_relevant "merged" \
+    && fail "retired free-text arm still classified a bare merged line"
   status_is_captain_relevant "PR ready https://x/pull/2" \
-    || fail "legacy bare PR ready free-text not captain-relevant"
+    && fail "retired free-text arm still classified a bare PR ready line"
   [ "$(window_to_task "sess:fm-fix-login-k3")" = "fix-login-k3" ] || fail "window_to_task did not strip session+fm- prefix"
   fm_write_meta "$state/herdr-task.meta" "window=default:w1:p2" "backend=herdr"
   [ "$(window_to_task "default:w1:p2" "$state")" = "herdr-task" ] || fail "window_to_task did not resolve opaque backend target through metadata"
@@ -274,6 +275,302 @@ EOF
   [ -z "$(status_open_activities "$state/legacy-activity.status")" ] \
     || fail "a legacy terminal event did not supersede the default working phase"
   pass "classifier primitives: keyed decisions and activity phases, captain relevance, window-to-task, and overrides"
+}
+
+# The retirement itself. FM_CLASSIFY_CAPTAIN_RE_DEFAULT used to carry a free-text
+# arm - `PR ready|checks green|ready in branch|merged` - that matched a crew's own
+# prose, so "working: rebased onto merged #76" escalated as a terminal event and
+# had to be defended by a rule excluding nonterminal verbs. Both the arm and that
+# defence are gone: classification reads the verb and never the note.
+#
+# The negative control is the point of this case. Asserting "these lines are not
+# captain-relevant" is trivially satisfiable by a broken classifier that says no
+# to everything, so every line below is first required to MATCH the retired arm
+# as a bare regex - the shape the arm actually had inside
+# FM_CLASSIFY_CAPTAIN_RE_DEFAULT - and only then required not to classify. The
+# control is run against the regex rather than through status_is_captain_relevant
+# because the nonterminal-verb rule would otherwise absorb the line first and
+# hide whether the arm was reachable at all.
+test_free_text_arm_retirement_is_red_capable() {
+  local retired='done:|needs-decision:|blocked:|failed:|PR ready|checks green|ready in branch|merged'
+  local line
+  local -a collisions=(
+    'working: stage 2 setup complete on PR #74 exact source branch rebased onto merged #76'
+    'working: PR ready checks green merged ready in branch'
+    'merged'
+    'PR ready https://x/pull/2'
+    'fm-status-event.v1 verb=working phase=impl summary=rebased onto merged #76, PR ready soon'
+  )
+  for line in "${collisions[@]}"; do
+    # Red against the retired regex: the collision this increment removes was
+    # genuinely reachable through that arm, so the assertion below is not vacuous.
+    printf '%s' "$line" | grep -qiE "$retired" \
+      || fail "negative control did not go red against the retired arm for: $line"
+    # Green after: no free-text token can reach the default classification.
+    status_is_captain_relevant "$line" \
+      && fail "retired free-text prose still classified captain-relevant: $line"
+  done
+  # The retirement must not weaken a genuine terminal verb, which is what makes
+  # this a retirement of the guessing path rather than of the policy.
+  status_is_captain_relevant "done: PR https://x/pull/76 checks green" \
+    || fail "a genuine done: line stopped being captain-relevant"
+  status_is_captain_relevant "fm-status-event.v1 verb=done evidence=https://x/pull/76 summary=checks green" \
+    || fail "a typed done event was not captain-relevant"
+  case "$FM_CLASSIFY_CAPTAIN_RE_DEFAULT" in
+    *'PR ready'*|*'checks green'*|*'ready in branch'*|*merged*)
+      fail "the free-text arm is still present in FM_CLASSIFY_CAPTAIN_RE_DEFAULT"
+      ;;
+  esac
+  pass "the free-text arm is retired and its collision class cannot recur"
+}
+
+# The typed envelope: fields in, classification out, with no regex fallback and
+# no path from a worker's words to a derived field.
+test_status_event_envelope() {
+  local dir state line
+  dir=$(make_case status-event); state="$dir/state"
+
+  # A typed event classifies from its verb field alone. FM_CAPTAIN_RE is left
+  # UNSET here, so any pass would have to come from the verb path; the companion
+  # assertion below proves the default really runs no regex.
+  status_is_captain_relevant "fm-status-event.v1 verb=needs-decision key=api summary=two options" \
+    || fail "a typed needs-decision event was not captain-relevant"
+  status_is_captain_relevant "fm-status-event.v1 verb=working phase=impl summary=still going" \
+    && fail "a typed working event was wrongly captain-relevant"
+  status_is_paused "fm-status-event.v1 verb=paused summary=upstream release pending" \
+    || fail "a typed paused event was not recognized as a declared wait"
+  status_is_terminal_verb "fm-status-event.v1 verb=failed summary=pipeline rejected it" \
+    || fail "a typed failed event was not a terminal verb"
+
+  # No regex fallback, executed rather than asserted: blank the default pattern
+  # to something that can match nothing. If the default path still consulted it,
+  # every line below would stop classifying. Both forms must survive it, because
+  # the prose form is classified by verb now too.
+  FM_CLASSIFY_CAPTAIN_RE_DEFAULT='(?!)x^' status_is_captain_relevant \
+    "fm-status-event.v1 verb=done summary=finished" \
+    || fail "a typed event still depends on the retired regex to classify"
+  FM_CLASSIFY_CAPTAIN_RE_DEFAULT='(?!)x^' status_is_captain_relevant "blocked: no access" \
+    || fail "a prose event still depends on the retired regex to classify"
+  FM_CLASSIFY_CAPTAIN_RE_DEFAULT='(?!)x^' status_is_captain_relevant "working: still going" \
+    && fail "a nonterminal event became captain-relevant once the regex was blanked"
+
+  # The shared parsers answer from the fields, which is what carries the typed
+  # form to every consumer in bin/ without changing any of them.
+  line='fm-status-event.v1 verb=blocked key=perm phase=setup evidence=data/x/report.md evidence=https://x/pull/3 summary=no access to the deploy key'
+  [ "$(status_line_verb "$line")" = blocked ] || fail "typed verb not recovered"
+  [ "$(status_line_note "$line")" = "no access to the deploy key" ] || fail "typed summary not recovered"
+  [ "$(fm_status_event_field "$line" key)" = perm ] || fail "typed key not recovered"
+  [ "$(fm_status_event_field "$line" phase)" = setup ] || fail "typed phase not recovered"
+  [ "$(fm_status_event_field "$line" evidence | grep -c .)" = 2 ] \
+    || fail "repeated evidence references not recovered"
+  fm_status_event_field "$line" evidence | grep -Fx 'https://x/pull/3' >/dev/null \
+    || fail "a repeated evidence reference lost its value"
+  [ "$(fm_status_event_prose "$line")" = "blocked [key=perm]: no access to the deploy key" ] \
+    || fail "canonical prose projection is wrong"
+
+  # A typed event folds into the durable keyed decision set exactly as its prose
+  # equivalent does, so a home part-way through the migration reads a MIXED log
+  # correctly - the whole compatibility claim, executed rather than asserted.
+  cat > "$state/mixed.status" <<'EOF'
+needs-decision [key=api]: prose form opened this
+fm-status-event.v1 verb=blocked key=perm summary=typed form opened this
+fm-status-event.v1 verb=resolved key=api summary=typed form closed the prose decision
+working: unrelated later event
+EOF
+  local open
+  open=$(status_open_decisions "$state/mixed.status")
+  printf '%s' "$open" | grep -F $'perm\tblocked\t' >/dev/null \
+    || fail "a typed event did not open a keyed decision"
+  printf '%s' "$open" | grep -F $'api\t' >/dev/null \
+    && fail "a typed resolved event did not close a decision opened in prose"
+  pass "the typed envelope classifies from its fields and folds beside prose"
+}
+
+# The certification: a worker cannot set blocking_on, and is refused rather than
+# silently overridden.
+test_worker_cannot_declare_blocking_on() {
+  local line reason
+  line='fm-status-event.v1 verb=blocked blocking_on=captain summary=I say the captain owes me'
+  reason=$(fm_status_event_invalid_reason "$line")
+  [ "$reason" = 'derived-field:blocking_on' ] \
+    || fail "a worker-written blocking_on was not refused with its own reason (got: ${reason:-none})"
+  # Refused WHOLE, not stripped: no field of a rejected event is readable, so
+  # there is no half-believed event carrying the worker's other claims.
+  fm_status_event_field "$line" verb >/dev/null 2>&1 \
+    && fail "fields were readable out of a refused event"
+  [ "$(status_line_verb "$line")" = "$FM_STATUS_EVENT_INVALID_VERB" ] \
+    || fail "a refused event did not classify as the reserved invalid verb"
+  # Refused loudly: a malformed event is could-not-observe, and an unobserved
+  # result must reach a supervisor rather than be absorbed as benign.
+  status_is_captain_relevant "$line" \
+    || fail "a refused event was absorbed instead of surfaced"
+  # And the derivation still refuses the worker's value even when the crew state
+  # would otherwise have produced a definite answer.
+  [ "$(status_event_blocking_on "$line" working run-step)" = unknown ] \
+    || fail "a refused event produced a blocking_on other than unknown"
+  # The one remaining route a worker might try: writing the field into its own
+  # sentence. summary is terminal, so everything after it is prose and nothing
+  # in it is ever read as a field.
+  line='fm-status-event.v1 verb=working summary=I am blocking_on=captain right now'
+  [ -z "$(fm_status_event_invalid_reason "$line")" ] \
+    || fail "a field-shaped token inside the human summary was treated as a field"
+  [ "$(status_event_blocking_on "$line" idle pane)" = unknown ] \
+    || fail "a worker's summary prose reached the derived answer"
+  pass "blocking_on cannot be written by a worker: refused whole, never overridden"
+}
+
+# The derivation itself: same event, different crew state, different answer.
+test_blocking_on_is_derived_from_crew_state() {
+  local dir state claim
+  dir=$(make_case blocking-on); state="$dir/state"
+
+  # The worker's claim is held CONSTANT across every case below, so any change in
+  # the answer is attributable to the crew state alone.
+  claim='blocked: waiting on the captain to rule'
+  [ "$(status_event_blocking_on "$claim" working run-step)" = nothing ] \
+    || fail "proof of an advancing run did not overrule a stale blocked claim"
+  [ "$(status_event_blocking_on "$claim" "done" run-step)" = nothing ] \
+    || fail "a finished crew did not overrule a stale blocked claim"
+  [ "$(status_event_blocking_on "$claim" blocked pane)" = firstmate ] \
+    || fail "a blocked crew did not derive firstmate"
+  [ "$(status_event_blocking_on "$claim" failed run-step)" = self ] \
+    || fail "a rejected run did not derive the worker's own move"
+  # `working` from the status log is the crew's own claim, not a verdict, so it
+  # must NOT clear the declaration the way run-step/pane evidence does.
+  [ "$(status_event_blocking_on "$claim" working status-log)" = firstmate ] \
+    || fail "a self-reported working state was treated as proof of work"
+
+  # A crew escalation is owed to firstmate even when the worker names the
+  # captain, because a crewmate never addresses the captain directly. Only a
+  # verified captain-held transfer derives captain.
+  [ "$(status_event_blocking_on 'needs-decision: two options' idle pane)" = firstmate ] \
+    || fail "a needs-decision did not derive firstmate"
+  [ "$(status_event_blocking_on 'captain-held: transferred to the backlog' idle pane)" = captain ] \
+    || fail "a verified captain-held transfer did not derive captain"
+  [ "$(status_event_blocking_on 'paused: upstream release' idle pane)" = external ] \
+    || fail "a declared wait did not derive external"
+
+  # Could-not-observe is never narrowed into "nothing owed".
+  [ "$(status_event_blocking_on 'working: implementing' idle pane)" = unknown ] \
+    || fail "an unobserved answer was narrowed to nothing"
+  [ "$(status_event_blocking_on 'working: implementing' '' '')" = unknown ] \
+    || fail "an unread crew produced a definite answer"
+
+  # A gate verdict puts a floor under the answer: an event declaring nobody
+  # cannot leave a crew the reader can SEE is parked reading as unknown.
+  [ "$(status_event_blocking_on 'working: implementing' parked run-step)" = self ] \
+    || fail "a parked crew did not floor the answer at its own gate"
+
+  # The durable fold outranks the last line, for the same reason
+  # status_open_decisions exists: a later unrelated event never clears an open
+  # decision, so the question asked earlier is still owed.
+  printf 'blocked [key=perm]: no access\nworking: carried on elsewhere\n' > "$state/t1.status"
+  [ "$(status_event_blocking_on 'working: carried on elsewhere' idle pane t1 "$state")" = firstmate ] \
+    || fail "a later unrelated event masked a still-open decision"
+  printf 'blocked [key=perm]: no access\nresolved [key=perm]: granted\nworking: carried on\n' > "$state/t2.status"
+  [ "$(status_event_blocking_on 'working: carried on' idle pane t2 "$state")" = unknown ] \
+    || fail "a resolved decision kept deriving an owner"
+
+  # Every answer is a member of the declared vocabulary; a typo would otherwise
+  # read as a novel state to every consumer.
+  local state_word source_word answer
+  for state_word in $FM_CREW_STATE_VOCABULARY; do
+    for source_word in run-step pane status-log none; do
+      answer=$(status_event_blocking_on "$claim" "$state_word" "$source_word")
+      blocking_on_is_known "$answer" \
+        || fail "blocking_on returned '$answer', outside FM_BLOCKING_ON_VOCABULARY, for $state_word/$source_word"
+    done
+  done
+  pass "blocking_on is derived from crew state and the durable fold, never declared"
+}
+
+# The coverage gate for the two derivation helpers, mirroring the one
+# crew_state_absorb_class already carries: exit 3 means this fleet DECLARES a
+# crew verdict the helper was never taught. A new verdict added to
+# FM_CREW_STATE_VOCABULARY must fail here until both helpers handle it, which is
+# the whole point - the previous shape of this defect was a default branch that
+# silently picked an answer for verdicts nobody had considered.
+test_blocking_on_helpers_cover_every_crew_verdict() {
+  local state_word rc
+  for state_word in $FM_CREW_STATE_VOCABULARY; do
+    rc=0; _fm_blocking_on_decisive "$state_word" run-step >/dev/null || rc=$?
+    [ "$rc" -ne 3 ] || fail "_fm_blocking_on_decisive was never taught the declared verdict '$state_word'"
+    rc=0; _fm_blocking_on_floor "$state_word" >/dev/null || rc=$?
+    [ "$rc" -ne 3 ] || fail "_fm_blocking_on_floor was never taught the declared verdict '$state_word'"
+  done
+  # And a verdict from OUTSIDE the vocabulary must be distinguishable from one
+  # inside it, or the gate above cannot tell a newer reader from a missing arm.
+  rc=0; _fm_blocking_on_decisive not-a-verdict run-step >/dev/null || rc=$?
+  [ "$rc" -eq 2 ] || fail "_fm_blocking_on_decisive did not report an unknown verdict as outside the vocabulary (got $rc)"
+  rc=0; _fm_blocking_on_floor not-a-verdict >/dev/null || rc=$?
+  [ "$rc" -eq 2 ] || fail "_fm_blocking_on_floor did not report an unknown verdict as outside the vocabulary (got $rc)"
+  pass "the blocking_on helpers are total over the declared crew-verdict vocabulary"
+}
+
+# Malformed envelopes: every refusal reason is reachable, and every one of them
+# fails closed rather than degrading into a believable event.
+test_malformed_envelopes_fail_closed() {
+  local line reason FM_TEST_TAB
+  FM_TEST_TAB=$'\t'
+  while IFS='|' read -r expect line; do
+    [ -n "$expect" ] || continue
+    reason=$(fm_status_event_invalid_reason "$line")
+    [ "$reason" = "$expect" ] \
+      || fail "expected refusal '$expect' but got '${reason:-none}' for: $line"
+    status_is_captain_relevant "$line" \
+      || fail "a refused event ($expect) was absorbed instead of surfaced"
+    [ "$(status_event_blocking_on "$line" working run-step)" = unknown ] \
+      || fail "a refused event ($expect) derived a definite blocking_on"
+  done <<EOF
+missing-field:verb|fm-status-event.v1 summary=no verb here
+missing-field:summary|fm-status-event.v1 verb=done phase=ci
+empty-field:summary|fm-status-event.v1 verb=done summary=
+malformed-field:verb|fm-status-event.v1 verb=bad/verb summary=x
+malformed-field:verb|fm-status-event.v1 verb= summary=x
+malformed-field:key|fm-status-event.v1 verb=done key=bad/key summary=x
+malformed-field:phase|fm-status-event.v1 verb=done phase=bad/phase summary=x
+duplicate-field:verb|fm-status-event.v1 verb=done verb=failed summary=x
+unknown-field:severity|fm-status-event.v1 verb=done severity=high summary=x
+not-a-field:oops|fm-status-event.v1 verb=done oops summary=x
+tab-in-event|fm-status-event.v1 verb=done summary=a${FM_TEST_TAB}b
+EOF
+  # A refused event must not open, close, or otherwise touch the durable
+  # decision fold: a malformed line silently closing a captain's open question
+  # is the expensive direction of this failure.
+  local dir state open
+  dir=$(make_case malformed-fold); state="$dir/state"
+  printf 'needs-decision [key=api]: real question\nfm-status-event.v1 verb=resolved key=api blocking_on=nothing summary=sneaky close\n' \
+    > "$state/m.status"
+  open=$(status_open_decisions "$state/m.status")
+  printf '%s' "$open" | grep -F $'api\t' >/dev/null \
+    || fail "a refused event closed a still-open captain decision"
+  pass "every malformed envelope is refused with a named reason and fails closed"
+}
+
+# The schema conformance gate for FM_STATUS_EVENT_FIELDS: the field set the
+# parser actually accepts IS the declared constant. Every name the constant
+# declares parses in a minimal well-formed event, and a name outside it is
+# refused by name, which is what makes the constant's "adding one here is the
+# only way to make it writable" claim executable rather than asserted.
+test_status_event_field_set_matches_declared_constant() {
+  local name line reason
+  for name in $FM_STATUS_EVENT_FIELDS; do
+    case "$name" in
+      verb|summary) line='fm-status-event.v1 verb=done summary=x' ;;
+      *) line="fm-status-event.v1 verb=done $name=v1 summary=x" ;;
+    esac
+    fm_status_event_parse "$line" \
+      || fail "declared field '$name' was refused by the parser: $line"
+  done
+  for name in confidence notes; do
+    case " $FM_STATUS_EVENT_FIELDS " in
+      *" $name "*) fail "probe field '$name' is unexpectedly declared in FM_STATUS_EVENT_FIELDS" ;;
+    esac
+    reason=$(fm_status_event_invalid_reason "fm-status-event.v1 verb=done $name=v summary=x")
+    [ "$reason" = "unknown-field:$name" ] \
+      || fail "undeclared field '$name' was not refused by name (got: ${reason:-none})"
+  done
+  pass "the parser's accepted field set equals FM_STATUS_EVENT_FIELDS"
 }
 
 # crew_is_provably_working: the absorb-only-when-provably-working predicate. It is
@@ -2608,3 +2905,10 @@ test_heartbeat_backstop_surfaces_unsurfaced_status
 test_beacon_stays_fresh_while_absorbing
 test_afk_present_reverts_watcher_to_one_shot
 test_afk_paused_changed_pane_hands_off_plain_stale
+test_free_text_arm_retirement_is_red_capable
+test_status_event_envelope
+test_worker_cannot_declare_blocking_on
+test_blocking_on_is_derived_from_crew_state
+test_blocking_on_helpers_cover_every_crew_verdict
+test_malformed_envelopes_fail_closed
+test_status_event_field_set_matches_declared_constant

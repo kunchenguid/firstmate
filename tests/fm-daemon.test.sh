@@ -122,14 +122,37 @@ test_classify_terminal_signal_escalates() {
   local dir state kw out
   dir=$(make_supercase classify-terminal)
   state="$dir/state"
+  # A terminal VERB escalates, in either form. The typed events carry no
+  # free-text token at all, so they can only be escalating through the verb.
   for kw in "done: PR https://x/y/pull/1" "needs-decision: pick A" "blocked: no perms" \
-            "failed: rc 2" "PR ready https://x/y/pull/2" "checks green" \
-            "ready in branch fm/t1" "merged"; do
+            "failed: rc 2" \
+            "fm-status-event.v1 verb=done evidence=https://x/y/pull/1 summary=opened it" \
+            "fm-status-event.v1 verb=needs-decision key=api summary=pick A" \
+            "fm-status-event.v1 verb=blocked summary=no perms" \
+            "fm-status-event.v1 verb=failed phase=ci summary=rc 2"; do
     printf 'working\n%s\n' "$kw" > "$state/t.status"
     out=$(FM_STATE_OVERRIDE="$state" classify_signal "$state/t.status" "$state")
     case "$out" in escalate\|*) ;; *) fail "captain verb did not escalate ($kw): $out" ;; esac
   done
-  pass "captain-relevant status verbs escalate"
+  # The retired free-text arm. These bare lines used to escalate purely because
+  # their prose matched a token, which is the guessing path CFVC-06 deletes; a
+  # line carrying no verb is now an ordinary no-verb signal the daemon handles
+  # itself. fm-classify-lib.sh owns the retirement and tests/fm-watch-triage.test.sh
+  # proves the collision class it removes.
+  for kw in "PR ready https://x/y/pull/2" "checks green" "ready in branch fm/t1" "merged"; do
+    printf 'working\n%s\n' "$kw" > "$state/t.status"
+    out=$(FM_STATE_OVERRIDE="$state" classify_signal "$state/t.status" "$state")
+    case "$out" in
+      self\|*) ;;
+      *) fail "retired free-text line still escalated ($kw): $out" ;;
+    esac
+  done
+  # A malformed typed event is could-not-observe, and an unobserved result must
+  # reach a supervisor rather than be handled away as routine.
+  printf 'working\nfm-status-event.v1 verb=working blocking_on=captain summary=x\n' > "$state/t.status"
+  out=$(FM_STATE_OVERRIDE="$state" classify_signal "$state/t.status" "$state")
+  case "$out" in escalate\|*) ;; *) fail "a refused typed event did not escalate: $out" ;; esac
+  pass "captain-relevant status verbs escalate; retired free-text prose does not"
 }
 
 test_classify_check_and_unknown_escalate() {

@@ -31,6 +31,15 @@
 #     single observation.
 #     paths.status_log.last_event is historical wake-event data only, never
 #     current state.
+#     last_event.envelope is the typed fm-status-event.v1 event's own fields
+#     (schema, key, phase, evidence[], invalid_reason), or null when the worker
+#     wrote the prose form; a non-null invalid_reason means that event was
+#     REFUSED and its state reads as invalid-status-event.
+#     last_event.blocking_on is DERIVED by fm-classify-lib.sh from the event's
+#     verb, its keyed open-decision fold, and current_state - never read off the
+#     event, which cannot carry the field at all. It is one of
+#     nothing/self/firstmate/captain/external/unknown, and `unknown` means the
+#     answer could not be observed rather than that nothing is owed.
 #     hints.open_decisions is the keyed open-decision set returned by
 #     fm-classify-lib.sh's authoritative status_open_decisions fold and reconciled
 #     against current_state; hints.pending_decision and hints.blocked_event are
@@ -295,21 +304,51 @@ crew_state_json() {  # <id>
           terminal_error:null,evidence_age_secs:null}'
 }
 
-status_event_json() {  # <status-log>
-  local log=$1 present=0 raw='' verb='' note=''
+status_event_json() {  # <status-log> <task-id> <crew-state> <crew-source>
+  local log=$1 id=${2:-} state=${3:-} source=${4:-}
+  local present=0 raw='' verb='' note='' schema='' key='' phase='' evidence='' invalid='' blocking_on=unknown
   if [ -f "$log" ]; then
     present=1
     raw=$(last_nonempty_line "$log" || true)
     verb=$(status_line_verb "$raw")
     note=$(status_line_note "$raw")
+    # The typed envelope's own fields, when the last event is one. A prose line
+    # leaves them null, which is how a consumer tells a migrated worker from one
+    # still writing prose without re-parsing the raw line itself.
+    if fm_status_event_is_typed "$raw"; then
+      schema=$FM_STATUS_EVENT_SCHEMA
+      invalid=$(fm_status_event_invalid_reason "$raw")
+      key=$(fm_status_event_field "$raw" key || true)
+      phase=$(fm_status_event_field "$raw" phase || true)
+      evidence=$(fm_status_event_field "$raw" evidence || true)
+    fi
+    # DERIVED here and never read off the event: fm-classify-lib.sh owns the rule,
+    # and this caller already holds the crew-state read the rule needs, so the
+    # derivation costs nothing extra. A worker cannot write this field.
+    blocking_on=$(status_event_blocking_on "$raw" "$state" "$source" "$id" "$STATE")
   fi
   jq -n \
     --arg path "$log" \
     --arg raw "$raw" \
     --arg verb "$verb" \
     --arg note "$note" \
+    --arg blocking_on "$blocking_on" \
+    --arg schema "$schema" \
+    --arg key "$key" \
+    --arg phase "$phase" \
+    --arg invalid "$invalid" \
+    --arg evidence "$evidence" \
     --argjson present "$(bool_json "$present")" \
-    '{path:$path,present:$present,kind:"event_history",last_event:{state:$verb,note:$note,raw:$raw}}'
+    '{path:$path,present:$present,kind:"event_history",
+      last_event:{state:$verb,note:$note,raw:$raw,
+        blocking_on:$blocking_on,
+        envelope:(if $schema == "" then null else {
+          schema:$schema,
+          key:(if $key == "" then null else $key end),
+          phase:(if $phase == "" then null else $phase end),
+          evidence:(if $evidence == "" then [] else ($evidence | split("\n")) end),
+          invalid_reason:(if $invalid == "" then null else $invalid end)
+        } end)}}'
 }
 
 first_pr_url_in_file() {  # <file>
@@ -524,9 +563,11 @@ task_json_lines() {
     fi
 
     current_json=$(crew_state_json "$id")
-    event_json=$(status_event_json "$status_log")
     current_state=$(printf '%s' "$current_json" | jq -r '.state // ""')
     current_source=$(printf '%s' "$current_json" | jq -r '.source // ""')
+    # After the crew read, never before: last_event.blocking_on is derived from
+    # that typed verdict, so the read must already have happened.
+    event_json=$(status_event_json "$status_log" "$id" "$current_state" "$current_source")
 
     # Durable keyed open-decision set: fold the WHOLE status stream
     # (fm-classify-lib.sh's status_open_decisions) so a later unrelated event can
