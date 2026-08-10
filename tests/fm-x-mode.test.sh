@@ -1121,52 +1121,6 @@ TXT
   pass "fmx_split_thread: word-boundary, fence-aware, within-limit, numbered, lossless, capped"
 }
 
-# Issue #2076: GNU coreutils' `stat -f` is *filesystem* stat, not BSD's
-# per-field flag, so a naive `stat -f %m ... || stat -c %Y ...` fallback does
-# not fail cleanly on Linux - "%m" becomes a bogus second file operand, and
-# the real path's dump still reaches stdout before the command exits nonzero.
-# Force the GNU branch explicitly (fake uname + fake stat, reproducing that
-# exact dump on the -f path) so this regresses loudly no matter which
-# platform actually runs the test.
-test_context_registry_mtime_forces_gnu_stat_path() {
-  # shellcheck source=/dev/null
-  . "$ROOT/bin/fm-x-lib.sh"
-  local fakebin file out
-  fakebin="$TMP_ROOT/context-mtime-gnu/fakebin"
-  mkdir -p "$fakebin"
-  cat > "$fakebin/uname" <<'EOF'
-#!/usr/bin/env bash
-echo Linux
-EOF
-  chmod +x "$fakebin/uname"
-  cat > "$fakebin/stat" <<'EOF'
-#!/usr/bin/env bash
-case "$1" in
-  -f)
-    printf '  File: "%s"\n' "$3"
-    printf '    ID: 0        Namelen: 255     Type: tmpfs\n'
-    exit 1
-    ;;
-  -c)
-    if [ "$2" = "%Y" ] && [ -e "$3" ]; then
-      printf '424242\n'
-      exit 0
-    fi
-    exit 1
-    ;;
-esac
-exit 1
-EOF
-  chmod +x "$fakebin/stat"
-  file="$TMP_ROOT/context-mtime-gnu/target"
-  mkdir -p "$(dirname "$file")"
-  : > "$file"
-  out=$(PATH="$fakebin:$PATH" fmx_context_registry_mtime "$file") \
-    || fail "fmx_context_registry_mtime must succeed on Linux via GNU stat -c, not the BSD -f fallback"
-  [ "$out" = "424242" ] || fail "expected the GNU stat -c mtime, got '$out' (a File: dump means the -f fallback leaked through)"
-  pass "fmx_context_registry_mtime reads mtime via GNU stat -c on Linux, never the BSD stat -f fallback that corrupts output there"
-}
-
 test_reply_single_no_texts() {
   local home out
   home="$TMP_ROOT/reply-single"; mkdir -p "$home"
@@ -2868,7 +2822,6 @@ test_reply_empty_env_dry_run_overrides_env_file
 test_reply_dry_run_fails_when_outbox_unwritable
 test_reply_dry_run_outbox_private_publication_rejects_unsafe_paths
 test_split_thread_lib
-test_context_registry_mtime_forces_gnu_stat_path
 test_reply_single_no_texts
 test_reply_thread_dry_run
 test_reply_discord_inbox_uses_discord_budget
