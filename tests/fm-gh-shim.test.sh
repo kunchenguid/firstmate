@@ -576,6 +576,38 @@ test_ci_normalizer_failure_becomes_a_typed_terminal_check() {
   pass "an unexpected normalizer failure becomes a typed terminal check"
 }
 
+test_ci_terminal_state_cleanup_failure_becomes_a_typed_check() {
+  local case_dir real_dir shim_dir state_dir state_path head out status jq_bin
+  case_dir="$TMP_ROOT/ci-terminal-state-cleanup"
+  real_dir="$case_dir/real"
+  shim_dir="$case_dir/shim"
+  state_dir="$case_dir/state"
+  state_path="$state_dir/o_r-pr-7.json"
+  head=bdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbd
+  jq_bin=$(command -v jq) || fail "jq is required to exercise gh's built-in --jq contract"
+  make_fake_ci_gh "$real_dir"
+  write_ci_pages "$case_dir/exact.json" CI completed '"success"' "$head"
+  write_ci_pages "$case_dir/stale.json" stale-head completed '"success"'
+  mkdir -p "$shim_dir" "$state_path"
+  ln -sf "$SHIM" "$shim_dir/gh"
+
+  status=0
+  out=$(FAKE_GH_LOG="$case_dir/gh.calls" FM_TEST_PR_HEAD="$head" \
+    FM_TEST_WORKFLOW_PAGES="$case_dir/exact.json" FM_TEST_STALE_PAGES="$case_dir/stale.json" \
+    FM_TEST_JQ="$jq_bin" FM_GH_CI_STATE_ROOT="$state_dir" GITHUB_TOKEN=narrow-ci-token \
+    PATH="$shim_dir:$real_dir:$PATH" \
+    gh pr checks 7 --repo o/r --json name,state,bucket,completedAt 2>&1) || status=$?
+
+  expect_code 0 "$status" "terminal state cleanup failure transport"
+  assert_contains "$out" "fm-gh-ci-fallback: state-error:" \
+    "an unreadable terminal-state cleanup did not emit a typed state diagnostic"
+  assert_run_field "$jq_bin" "$out" "Firstmate CI fallback - state evidence" bucket fail \
+    "an unreadable terminal-state cleanup did not become a failed check"
+  assert_not_contains "$out" '"bucket":"pass"' \
+    "an unreadable terminal-state cleanup incorrectly preserved a green verdict"
+  pass "a terminal state cleanup failure becomes a typed failed check"
+}
+
 test_ci_latest_rerun_attempt_supersedes_the_failed_attempt() {
   local case_dir real_dir shim_dir head out status jq_bin json
   case_dir="$TMP_ROOT/ci-rerun-attempt"
@@ -1715,6 +1747,7 @@ test_ci_403_falls_back_to_exact_head_red
 test_ci_zero_exact_head_runs_stays_pending
 test_ci_unrelated_exact_head_workflow_does_not_certify_green
 test_ci_normalizer_failure_becomes_a_typed_terminal_check
+test_ci_terminal_state_cleanup_failure_becomes_a_typed_check
 test_ci_latest_rerun_attempt_supersedes_the_failed_attempt
 test_ci_paginated_skipped_job_prevents_workflow_green
 test_ci_missing_active_workflow_does_not_certify_green

@@ -541,6 +541,9 @@ if evidence_kind == "terminal":
         os.unlink(state_path)
     except FileNotFoundError:
         pass
+    except OSError as error:
+        checks, reason = diagnostic("state", f"cannot clear terminal evidence state: {error}", bucket="fail")
+        print(f"fm-gh-ci-fallback: state-error: {reason}", file=sys.stderr)
 else:
     try:
         os.makedirs(state_root, mode=0o700, exist_ok=True)
