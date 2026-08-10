@@ -130,7 +130,7 @@ Four independent ways to confirm one, in order of how quickly you can check.
 - The identifier appears in the table above.
 - The timestamp falls on 2026-08-02 between 15:17Z and 15:31Z, a span of about thirteen minutes that holds all five.
 - A commit candidate carries `pr=24` in its evidence, because branch `probe/sol-capability` was deleted and only the pull request pass can still reach these two commits.
-- Opening one of the three text writes shows the nonce `SOLPROBE-AIBQQE4JCTMV`, which appears nowhere else.
+- Opening one of the three text writes shows the nonce `SOLPROBE-AIBQQE4JCTMV`, which was generated for this probe and appears in no other comment, review, or commit message.
 
 The nonce is a reliable marker for the comment and the two reviews only.
 Commit `c73f62d045e8` is the one the browser session pushed, and it changes no files at all, so neither the nonce nor any other content marker appears in it; its message and its emptiness are what identify it.
