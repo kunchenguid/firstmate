@@ -2689,13 +2689,18 @@ fm_backend_herdr_omp_input_safe() {  # <session> <pane> [recorded-harness] [raw-
   if [ "$recorded_harness" = omp ] && ! fm_harness_omp_attribution_allowed; then
     return 1
   fi
-  if [ "$raw_launch" = 1 ]; then
+  if [ "$raw_launch" = 1 ] || [ -z "$recorded_harness" ] || [ "$recorded_harness" = unknown ]; then
     [ "$recorded_harness" = omp ] && return 1
     identity=$(fm_backend_herdr_agent_identity_raw "$session" "$pane" 2>/dev/null || true)
     IFS=$'\t' read -r agent agent_status <<EOF
 $identity
 EOF
-    [ "$agent" = omp ] && return 1
+    if [ "$agent" = omp ]; then
+      fm_harness_omp_attribution_allowed || return 1
+      if fm_backend_herdr_omp_exited_to_shell "$session" "$pane"; then
+        return 1
+      fi
+    fi
   fi
   if [ "$recorded_harness" = omp ] \
     && fm_backend_herdr_omp_exited_to_shell "$session" "$pane"; then
@@ -2713,14 +2718,16 @@ EOF
 # pair below every other candidate), preserving this adapter's original
 # consult-only-when-needed behavior.
 fm_backend_herdr_composer_state() {  # <target> [recorded-harness] [raw-launch] -> empty|pending|pending-unproven|unknown
-  local target=$1 recorded_harness=${2:-} raw_launch=${3:-} session pane cap caps verdict identity
+  local target=$1 recorded_harness=${2:-} raw_launch=${3:-} session pane cap caps verdict identity identity_checked=0
   [ "$recorded_harness" = raw-omp ] && { printf 'unknown'; return 0; }
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
   session=$FM_BACKEND_HERDR_SESSION
   pane=$FM_BACKEND_HERDR_PANE
-  if ! fm_backend_herdr_omp_input_safe "$session" "$pane" "$recorded_harness" "$raw_launch"; then
-    printf 'unknown'
-    return 0
+  if [ "$raw_launch" = 1 ] || { [ -n "$recorded_harness" ] && [ "$recorded_harness" != unknown ]; }; then
+    if ! fm_backend_herdr_omp_input_safe "$session" "$pane" "$recorded_harness" "$raw_launch"; then
+      printf 'unknown'
+      return 0
+    fi
   fi
   if cap=$(fm_backend_herdr_capture_ansi "$target" "$FM_COMPOSER_CAPTURE_LINES" 2>/dev/null); then
     caps=$(printf 'styled=1\ncursor=0\nidentity=1\nrows=%s' "$FM_COMPOSER_CAPTURE_LINES")
@@ -2735,13 +2742,27 @@ fm_backend_herdr_composer_state() {  # <target> [recorded-harness] [raw-launch] 
     if ! identity=$(fm_backend_herdr_composer_identity "$target" 2>/dev/null) || [ -z "$identity" ]; then
       identity=probe-absent
     fi
+    identity_checked=1
     # OMP draws the same separated composer shape as Pi, while the shared
     # classifier keeps that verified shape under its original Pi name.
     case "$identity" in
-      omp$'\t'*) identity="pi${identity#omp}" ;;
+      omp$'\t'*)
+        if ! fm_harness_omp_attribution_allowed           || fm_backend_herdr_omp_exited_to_shell "$session" "$pane"; then
+          identity=omp-untrusted
+        else
+          identity="pi${identity#omp}"
+        fi
+        ;;
     esac
     verdict=$(fm_composer_classify_screen "$caps" "$cap" '' "$identity")
     [ "$verdict" != need-identity ] || verdict=unknown
+  fi
+  if [ "$identity_checked" -eq 0 ] \
+    && { [ -z "$recorded_harness" ] || [ "$recorded_harness" = unknown ]; } \
+    && [ "$verdict" != unknown ]; then
+    if ! fm_backend_herdr_omp_input_safe "$session" "$pane" "$recorded_harness" "$raw_launch"; then
+      verdict=unknown
+    fi
   fi
   printf '%s' "$verdict"
 }

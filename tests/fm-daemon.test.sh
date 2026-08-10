@@ -1723,6 +1723,22 @@ test_pane_input_pending_herdr_dispatch() {
   pass "pane_input_pending: dispatches through fm_backend_composer_state for backend=herdr"
 }
 
+test_pane_input_pending_passes_primary_harness_metadata() {
+  (
+    FM_DAEMON_PRIMARY_HARNESS=omp
+    fm_backend_composer_state() {
+      [ "$1" = herdr ] && [ "$2" = "default:w1:p2" ] || fail "unexpected composer_state target: $1 $2"
+      [ "$3" = omp ] || fail "pane_input_pending did not pass the primary harness: ${3:-missing}"
+      [ -z "${4:-}" ] || fail "pane_input_pending unexpectedly marked a verified primary raw"
+      printf empty
+    }
+    if pane_input_pending "default:w1:p2" herdr; then
+      fail "pane_input_pending should report an empty composer as not pending"
+    fi
+  ) || fail "pane_input_pending primary harness metadata subshell failed"
+  pass "pane_input_pending: passes the detected primary harness to the Herdr composer boundary"
+}
+
 test_inject_msg_herdr_busy_guard_defers() {
   local dir state
   dir=$(make_supercase inject-herdr-busy)
@@ -1791,6 +1807,32 @@ test_inject_msg_herdr_submits_through_backend_dispatch() {
       || fail "inject_msg should succeed when send_text_submit confirms empty"
   ) || fail "herdr successful-submit inject_msg subshell failed"
   pass "inject_msg: dispatches busy-guard/composer-guard/submit through the herdr backend and succeeds on a confirmed empty composer"
+}
+
+test_inject_msg_passes_primary_harness_metadata() {
+  local dir state
+  dir=$(make_supercase inject-herdr-primary-metadata)
+  state="$dir/state"
+  afk_enter "$state"
+  (
+    FM_DAEMON_PRIMARY_HARNESS=omp
+    fm_backend_target_exists() { return 0; }
+    pane_is_busy() { return 1; }
+    fm_backend_composer_state() {
+      [ "$3" = omp ] || fail "inject_msg did not pass the primary harness to composer_state: ${3:-missing}"
+      [ -z "${4:-}" ] || fail "inject_msg unexpectedly marked a verified primary raw for composer_state"
+      printf empty
+    }
+    fm_backend_send_text_submit() {
+      [ -z "${7:-}" ] || fail "inject_msg did not preserve the empty expected label: ${7:-missing}"
+      [ "$8" = omp ] || fail "inject_msg did not pass the primary harness to send_text_submit: ${8:-missing}"
+      [ -z "${9:-}" ] || fail "inject_msg unexpectedly marked a verified primary raw for send_text_submit"
+      printf empty
+    }
+    FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET="default:w1:p2" inject_msg "hello" "$state" \
+      || fail "inject_msg should succeed when the metadata-aware backend confirms the submit"
+  ) || fail "inject_msg primary harness metadata subshell failed"
+  pass "inject_msg: carries the detected primary harness through composer and submit authorization"
 }
 
 # Safety-critical (task fm-composer-shellglyph-safety): the away-mode injector
@@ -1925,9 +1967,11 @@ test_pane_is_busy_herdr_native_busy_state
 test_primary_busy_guard_is_harness_scoped
 test_pane_is_busy_defaults_to_tmux_when_backend_omitted
 test_pane_input_pending_herdr_dispatch
+test_pane_input_pending_passes_primary_harness_metadata
 test_inject_msg_herdr_busy_guard_defers
 test_inject_msg_herdr_composer_guard_defers
 test_inject_msg_herdr_pane_gone_defers
 test_inject_msg_herdr_submits_through_backend_dispatch
+test_inject_msg_passes_primary_harness_metadata
 test_inject_msg_defers_on_dead_shell_unknown
 test_inject_msg_defers_on_unrecognized_composer_state

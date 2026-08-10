@@ -598,8 +598,11 @@ pane_is_busy() {  # <target> [backend]
 # every verdict except exact empty as unsafe. inject_msg reads the full verdict
 # directly and applies the same positive-proof boundary.
 pane_input_pending() {  # <target> [backend]
-  local target=$1 backend=${2:-tmux}
-  [ "$(fm_backend_composer_state "$backend" "$target" 2>/dev/null)" != empty ]
+  local target=$1 backend=${2:-tmux} harness raw_launch=
+  harness=$(fm_daemon_primary_harness)
+  [ "$harness" = unknown ] && harness=
+  [ -n "${FM_HARNESS_UNVERIFIED:-}" ] && raw_launch=1
+  [ "$(fm_backend_composer_state "$backend" "$target" "$harness" "$raw_launch" 2>/dev/null)" != empty ]
 }
 
 task_window_backend() {  # <window> <state>
@@ -1115,7 +1118,7 @@ window_for_task() {  # <task-key> [state]
 #     line, or a previous injection's unsent text), defer entirely - injecting
 #     would merge with the human's text.
 inject_msg() {  # <message> [state]
-  local msg=$1 state target backend retries sleep_s verdict composer encoded
+  local msg=$1 state target backend retries sleep_s verdict composer encoded harness raw_launch=
   state="${2:-$(_state_root)}"
   # (1) Presence-gate: inject ONLY when afk is active. When afk is off, the
   # daemon self-handles and stays quiet; firstmate drives the normal always-on
@@ -1135,6 +1138,9 @@ inject_msg() {  # <message> [state]
   # when unset (sourced/test contexts that never ran fm_super_main's startup
   # discovery), matching this function's pre-existing default assumption.
   backend="${FM_SUPERVISOR_BACKEND:-tmux}"
+  harness=$(fm_daemon_primary_harness)
+  [ "$harness" = unknown ] && harness=
+  [ -n "${FM_HARNESS_UNVERIFIED:-}" ] && raw_launch=1
   fm_backend_target_exists "$backend" "$target" || return 1
   # (3) Busy-guard: never inject into an in-use supervisor pane.
   if pane_is_busy "$target" "$backend"; then
@@ -1150,7 +1156,7 @@ inject_msg() {  # <message> [state]
   #      target - typing the escalation into a shell could execute it - so defer
   #      on anything that is not affirmatively 'empty'. A deferred escalation
   #      stays buffered for the next cycle or the catch-up flush.
-  composer=$(fm_backend_composer_state "$backend" "$target" 2>/dev/null)
+  composer=$(fm_backend_composer_state "$backend" "$target" "$harness" "$raw_launch" 2>/dev/null)
   if [ "$composer" != empty ]; then
     log "inject deferred: supervisor composer not confirmed-empty (state=${composer:-unknown}: pending input, dead-shell prompt, or unreadable pane)"
     return 1
@@ -1164,7 +1170,7 @@ inject_msg() {  # <message> [state]
   # re-export of fm_tmux_submit_core - byte-identical to calling it directly.
   retries=${FM_INJECT_CONFIRM_RETRIES:-$INJECT_CONFIRM_RETRIES_DEFAULT}
   sleep_s=${FM_INJECT_CONFIRM_SLEEP:-$INJECT_CONFIRM_SLEEP_DEFAULT}
-  verdict=$(fm_backend_send_text_submit "$backend" "$target" "$msg" "$retries" "$sleep_s" "$sleep_s")
+  verdict=$(fm_backend_send_text_submit "$backend" "$target" "$msg" "$retries" "$sleep_s" "$sleep_s" "" "$harness" "$raw_launch")
   if [ "$verdict" = empty ]; then
     return 0  # Backend confirmed the submit.
   fi
