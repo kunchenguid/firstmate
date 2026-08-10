@@ -13,8 +13,12 @@
 #
 # This is the supported bridge for Herdr metadata created before
 # endpoint_task_id= became mandatory. It never closes a pane or tears down a
-# task. It acquires the task's spawn lock, requires a regular single-link meta
-# file on the state device, validates a candidate through
+# task. It acquires the task's spawn lock and then the shared per-task metadata
+# lock, holding both across the whole snapshot-through-publish span so a
+# concurrent pr-check, teardown, promotion, spawn, or decision-hold write can be
+# neither lost nor resurrected. It requires a regular single-link meta
+# file on the state device, refuses a task whose backend is not Herdr before any
+# Herdr-specific outcome, validates a candidate through
 # fm_backend_validate_task_endpoint, and then proves all of the following twice
 # against the explicitly recorded named Herdr session:
 #
@@ -88,13 +92,17 @@ META="$STATE/$ID.meta"
   || refuse "task $ID has no regular endpoint metadata at $META"
 
 TASK_LOCK="$STATE/.spawn-$ID.lock"
+META_LOCK=$(fm_meta_lock_path "$META") \
+  || refuse "could not resolve the task $ID metadata lock"
 LOCK_HELD=0
+META_LOCK_HELD=0
 META_SNAPSHOT=
 META_TMP=
 cleanup() {
   local status=$?
   [ -z "$META_SNAPSHOT" ] || rm -f -- "$META_SNAPSHOT"
   [ -z "$META_TMP" ] || rm -f -- "$META_TMP"
+  [ "$META_LOCK_HELD" -eq 0 ] || fm_lock_release "$META_LOCK" 2>/dev/null || true
   [ "$LOCK_HELD" -eq 0 ] || fm_lock_release "$TASK_LOCK" 2>/dev/null || true
   return "$status"
 }
@@ -102,15 +110,47 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
+# Lock ordering matches fm-spawn.sh: the task's spawn lock first, then the
+# shared per-task metadata lock every other metadata mutator holds
+# (fm-pr-check.sh, fm-teardown.sh, fm-promote.sh, fm-spawn.sh,
+# fm-decision-hold.sh). Holding the metadata lock across the whole
+# snapshot-through-publish span is what keeps this read-modify-write from
+# dropping a concurrent pr= write or resurrecting a record teardown removed.
+# Both locks refuse rather than wait: this is an operator-run migration whose
+# verification span includes live Herdr reads, so blocking other lifecycle work
+# behind it would be worse than asking the operator to retry.
 fm_lock_try_acquire "$TASK_LOCK" \
   || refuse "task $ID is being spawned or recovered; retry after its task lock is free"
 LOCK_HELD=1
+fm_lock_try_acquire "$META_LOCK" \
+  || refuse "task $ID metadata is being written by another lifecycle action; retry after its metadata lock is free"
+META_LOCK_HELD=1
+[ -f "$META" ] && [ ! -L "$META" ] \
+  || refuse "task $ID has no regular endpoint metadata at $META"
 
 STATE_DEVICE=$(fm_pr_file_device "$STATE") \
   || refuse "could not identify the task state device"
 [ "$(fm_pr_file_device "$META")" = "$STATE_DEVICE" ] \
   && [ "$(fm_pr_file_link_count "$META")" = 1 ] \
   || refuse "task $ID metadata is not a single-link file on the task state device"
+
+# The backend is resolved before any Herdr-specific outcome, including the
+# already-bound success, so a task this tool does not own can never be reported
+# as a bound Herdr endpoint. An absent backend= means tmux, the same default
+# fm_backend_validate_task_endpoint applies, so the refusal names the real
+# backend instead of calling the record ambiguous.
+BACKEND_COUNT=$(grep -c '^backend=' "$META" 2>/dev/null || true)
+case "$BACKEND_COUNT" in
+  ''|*[!0-9]*) refuse "could not read task $ID endpoint metadata" ;;
+esac
+if [ "$BACKEND_COUNT" -eq 0 ]; then
+  BACKEND=tmux
+else
+  BACKEND=$(fm_backend_meta_exact_value "$META" backend) \
+    || refuse "task $ID has missing or ambiguous backend metadata"
+fi
+[ "$BACKEND" = herdr ] \
+  || refuse "task $ID uses backend $BACKEND, not Herdr"
 
 BINDING_COUNT=$(grep -c '^endpoint_task_id=' "$META" 2>/dev/null || true)
 case "$BINDING_COUNT" in
@@ -123,11 +163,6 @@ if [ "$BINDING_COUNT" -ne 0 ]; then
   fi
   refuse "task $ID already has an invalid or ambiguous endpoint binding"
 fi
-
-BACKEND=$(fm_backend_meta_exact_value "$META" backend) \
-  || refuse "task $ID has missing or ambiguous backend metadata"
-[ "$BACKEND" = herdr ] \
-  || refuse "task $ID uses backend $BACKEND, not Herdr"
 
 META_SNAPSHOT=$(mktemp "$STATE/.fm-herdr-endpoint-snapshot.XXXXXX") \
   || refuse "could not snapshot task $ID metadata"
