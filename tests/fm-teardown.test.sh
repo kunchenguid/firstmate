@@ -1362,15 +1362,99 @@ SH
   pass "failed nested teardown keeps the staged reply active"
 }
 
+make_herdr_teardown_fake() {
+  local case_dir=$1
+  printf '%s\n' '{"workspaces":[{"workspace_id":"w1","label":"firstmate","focused":true,"active_tab_id":"w1:t1"},{"workspace_id":"w9","label":"PROJECTION_LABEL","focused":false,"active_tab_id":"w9:t2"}],"tabs":[{"tab_id":"w1:t1","workspace_id":"w1","focused":true},{"tab_id":"w9:t2","workspace_id":"w9","focused":false}],"panes":[{"pane_id":"w9:p2","tab_id":"w9:t2","workspace_id":"w9"}]}' > "$case_dir/herdr-state.json"
+  cat > "$case_dir/fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+state=${FM_FAKE_HERDR_STATE:?}
+log=${FM_HERDR_LOG:?}
+printf '%s\n' "$*" >> "$log"
+cmd=${1:-}; sub=${2:-}
+workspace=
+args=("$@")
+for ((i = 0; i < ${#args[@]}; i++)); do
+  if [ "${args[$i]}" = --workspace ]; then
+    workspace=${args[$((i + 1))]:-}
+  fi
+done
+case "$cmd $sub" in
+  "workspace list") jq '{result:{workspaces:.workspaces}}' "$state" ;;
+  "tab list") jq --arg workspace "$workspace" '{result:{tabs:[.tabs[] | select(.workspace_id == $workspace)]}}' "$state" ;;
+  "pane get")
+    pane=${3:-}
+    if jq -e --arg pane "$pane" '.panes[] | select(.pane_id == $pane)' "$state" >/dev/null; then
+      jq --arg pane "$pane" '{result:{pane:(.panes[] | select(.pane_id == $pane))}}' "$state"
+    else
+      printf '%s\n' '{"error":{"code":"pane_not_found"}}'
+    fi
+    ;;
+  "pane close")
+    pane=${3:-}; tmp="$state.tmp.$$"
+    jq --arg pane "$pane" '.panes |= [.[] | select(.pane_id != $pane)]' "$state" > "$tmp"
+    mv "$tmp" "$state"
+    ;;
+  "agent get") printf '%s\n' '{"error":{"code":"agent_not_found"}}' ;;
+  *) exit 0 ;;
+esac
+SH
+  chmod +x "$case_dir/fakebin/herdr"
+}
+
 test_projection_journal_retires_before_worktree_return() {
-  local retire_line return_line
-  retire_line=$(grep -n '^[[:space:]]*rm -f "$HERDR_PRESENTATION_JOURNAL"$' "$TEARDOWN" | cut -d: -f1)
-  return_line=$(grep -n '^[[:space:]]*teardown_treehouse_return "$WT"' "$TEARDOWN" | cut -d: -f1)
-  [ -n "$retire_line" ] && [ -n "$return_line" ] && [ "$retire_line" -lt "$return_line" ] \
-    || fail "confirmed projection journal retirement must precede the fallible worktree return"
-  grep -Fq 'teardown_backend_endpoint "$child_backend" "$child_t"' "$TEARDOWN" \
-    || fail "forced child Herdr teardown bypasses the shared focus-safe endpoint closer"
-  pass "confirmed projection journals retire before return failure and child teardown shares safe closure"
+  local case_dir rc journal token
+  case_dir=$(make_case projection-journal-order)
+  write_meta "$case_dir" local-only ship
+  sed -i 's/^window=.*/window=fmtest:w9:p2/' "$case_dir/state/task-x1.meta"
+  printf '%s\n' \
+    'backend=herdr' \
+    'herdr_session=fmtest' \
+    'herdr_workspace_id=w9' \
+    'herdr_pane_id=w9:p2' >> "$case_dir/state/task-x1.meta"
+  journal="$case_dir/state/task-x1.herdr-presentation"
+  token=$(FM_HOME="$case_dir" bash -c '
+    . "$0/bin/backends/herdr.sh"
+    token=$(fm_backend_herdr_projection_journal_create "$1" task-x1) || exit 1
+    label=$(fm_backend_herdr_projection_workspace_label task-x1 "$token")
+    fm_backend_herdr_projection_journal_bind \
+      "$1/task-x1.herdr-presentation" task-x1 "$2" fmtest w9 w9:t2 w9:p2 \
+      w1 firstmate "$label" fm-task-x1 || exit 1
+    printf "%s" "$token"
+  ' "$ROOT" "$case_dir/state" "$case_dir") || fail "could not create a valid projection journal fixture"
+  make_herdr_teardown_fake "$case_dir"
+  sed -i "s/PROJECTION_LABEL/└ task-x1 · p:$token/" "$case_dir/herdr-state.json"
+  printf '%s\n' absent > "$case_dir/treehouse-journal"
+  cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+if [ -e "$journal" ] || [ -L "$journal" ]; then
+  printf '%s\n' present > "$case_dir/treehouse-journal"
+else
+  printf '%s\n' absent > "$case_dir/treehouse-journal"
+fi
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+  : > "$case_dir/herdr.log"
+
+  set +e
+  (
+    export FM_HERDR_LOG="$case_dir/herdr.log"
+    export FM_FAKE_HERDR_STATE="$case_dir/herdr-state.json"
+    run_teardown "$case_dir" --force
+  ) > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "projection-journal-order: a failed worktree return must fail closed"
+  [ "$(cat "$case_dir/treehouse-journal")" = absent ] \
+    || fail "projection-journal-order: worktree return ran before journal retirement"
+  assert_absent "$journal" "projection-journal-order: retired projection journal survived return failure"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "projection-journal-order: task metadata was lost after return failure"
+  assert_contains "$(cat "$case_dir/herdr.log")" 'pane close w9:p2' \
+    "projection-journal-order: exact Herdr endpoint was not closed before return"
+  pass "projection journal retires after endpoint close and before a failed worktree return"
 }
 
 test_local_only_fork_remote_allows

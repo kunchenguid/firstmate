@@ -1059,7 +1059,7 @@ test_projection_label_builder_uses_corner_and_strips_owner_prefixes() {
 }
 
 test_projection_order_moves_only_exact_new_workspace_and_preserves_relative_order() {
-  local dir log resp fb mover mover_log out status
+  local dir log resp fb mover mover_log out status jq_real
   dir="$TMP_ROOT/projection-order"; mkdir -p "$dir/responses"
   log="$dir/log"; resp="$dir/responses"; mover="$dir/mover"; mover_log="$dir/mover.log"
   : > "$log"; : > "$mover_log"
@@ -1075,7 +1075,27 @@ printf '%s\n' '{"id":"fm-workspace-move","result":{"type":"workspace_list","work
 SH
   chmod +x "$mover"
   fb=$(make_herdr_fakebin "$dir")
+  jq_real=$(command -v jq)
+  cat > "$fb/jq" <<'SH'
+#!/usr/bin/env bash
+set -u
+args=("$@")
+for ((i = 0; i < ${#args[@]}; i++)); do
+  case "${args[$i]}" in
+    --arg|--argjson)
+      case "${args[$((i + 1))]:-}" in
+        and|as|catch|def|elif|else|end|foreach|if|import|include|label|module|or|reduce|then|try)
+          exit 97
+          ;;
+      esac
+      ;;
+  esac
+done
+exec "$FM_REAL_JQ" "$@"
+SH
+  chmod +x "$fb/jq"
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 \
+    FM_REAL_JQ="$jq_real" \
     FM_BACKEND_HERDR_WORKSPACE_MOVER="$mover" FM_FAKE_MOVER_LOG="$mover_log" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_focus_snapshot() { printf "w4\tw4:t2"; }; fm_backend_herdr_projection_focus_restore() { return 0; }; fm_backend_herdr_projection_order_best_effort fmtest w5 firstmate' "$ROOT" 2>&1)
   status=$?
@@ -3176,23 +3196,6 @@ EOF
   pass "fm_backend_herdr_workspace_prune_seeded_default_tab: refuses to close the seeded default tab when its pane reports a working agent (defense in depth)"
 }
 
-# test_no_jq_reserved_keyword_arg_names: regression guard for the
-# workspace-leak root cause (a jq `--arg`/`--argjson` named after a jq
-# reserved keyword, e.g. `label`, is a compile error on jq <= 1.6; this
-# adapter discards jq's stderr, so the error silently becomes an empty
-# result instead of a visible failure). Greps every bin/ script for the
-# pattern so a future filter reintroducing it fails loudly here instead of
-# silently misbehaving on an older jq.
-test_no_jq_reserved_keyword_arg_names() {
-  local reserved='and|as|catch|def|elif|else|end|foreach|if|import|include|label|module|or|reduce|then|try'
-  local hits
-  hits=$(grep -rnE -- "--arg(json)?[[:space:]]+($reserved)\b" "$ROOT/bin" 2>/dev/null)
-  if [ -n "$hits" ]; then
-    fail "a jq --arg/--argjson variable is named after a jq reserved keyword (compile error on jq <= 1.6, silently swallowed by 2>/dev/null):"$'\n'"$hits"
-  fi
-  pass "no bin/ jq filter names a --arg/--argjson variable after a jq reserved keyword"
-}
-
 # --- native event push: normalize / policy-routing / dedupe / wait ----------
 #
 # These exercise the herdr subscriber (fm_backend_herdr_wait_transition and its
@@ -3518,7 +3521,6 @@ test_repeated_cycles_reuse_one_workspace_no_orphans
 test_adopted_workspace_never_prunes_default_tab
 test_label_collision_startup_workspace_leaves_live_tab_alone
 test_prune_refuses_a_working_agent_pane_defense_in_depth
-test_no_jq_reserved_keyword_arg_names
 test_create_task_refuses_duplicate_label
 test_create_task_refuses_duplicate_label_when_agent_live
 test_create_task_refuses_when_any_duplicate_label_is_live
