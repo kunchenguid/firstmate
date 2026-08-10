@@ -37,7 +37,8 @@ Two things about plain `glab` were established by running it, because assuming e
 First, plain `glab` has no field selector.
 `gh` reads one field with `--json state -q .state`; `glab mr view` offers only `-F, --output string  Format output as: text, json`.
 Its JSON would need a JSON processor, and `jq` is not one of firstmate's common tools, so the state is read from glab's own field output instead.
-Only an exact `merged` wakes firstmate, so a changed output format produces no wake rather than a false merge.
+Only an exact `merged` or `closed` is treated as a positive read, so a changed output format produces no wake rather than a false merge or a false closed-unmerged report.
+A closed-unmerged merge request wakes firstmate the same way a merge does, but with a distinct result: [`docs/architecture.md`](architecture.md) owns that contract, established against the real fixture's merged and open merge requests below and verified hermetically (with a faked `closed` state) in `tests/fm-pr-check-security.test.sh`, since the public fixture project holds no closed-unmerged merge request to read live.
 
 Second, `glab` cannot take a merge request URL the way `gh pr view` can.
 That form shells out to git for the current repository, and the watcher runs in no repository:

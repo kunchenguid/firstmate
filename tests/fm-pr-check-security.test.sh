@@ -714,17 +714,23 @@ test_static_poll_contract() {
   dir=$(make_case poll-contract)
   make_poll_fixture "$dir"
 
-  for state in OPEN CLOSED EMPTY MALFORMED; do
+  for state in OPEN EMPTY MALFORMED; do
     case "$state" in
       EMPTY) value= ;;
       MALFORMED) value='not-a-state' ;;
       *) value=$state ;;
     esac
     out=$(FM_TEST_GH_STATE="$value" run_poll "$dir")
-    [ -z "$out" ] || fail "static poll emitted for non-merged state"
+    [ -z "$out" ] || fail "static poll emitted for non-terminal state"
   done
   out=$(FM_TEST_GH_STATE=MERGED run_poll "$dir")
   [ "$out" = merged ] || fail "static poll did not emit exactly one merged line"
+  # A PR closed without merging is a distinct terminal read from merged: it
+  # must still wake firstmate (regression for issue #1897, where a
+  # closed-unmerged PR left the poll silent forever), but it must never be
+  # mistaken for a merge by anything reading this output.
+  out=$(FM_TEST_GH_STATE=CLOSED run_poll "$dir")
+  [ "$out" = closed ] || fail "static poll did not emit exactly one closed line for a closed-unmerged PR"
   out=$(FM_TEST_GH_FAIL=1 run_poll "$dir")
   [ -z "$out" ] || fail "static poll emitted after gh failure"
 
@@ -2803,14 +2809,20 @@ gitlab.example
 group/subgroup/project
 7" ] || fail "published GitLab sidecar bytes were not exact"
 
-  # Only an exact merged state wakes firstmate. Every other reading, including
-  # an unreadable merge request and a changed output format, stays silent.
-  for value in opened closed locked '' not-a-state MERGED merged-but-not; do
+  # Only an exact merged or closed state wakes firstmate. Every other reading,
+  # including an unreadable merge request and a changed output format, stays
+  # silent.
+  for value in opened locked '' not-a-state MERGED merged-but-not closed-but-not; do
     out=$(FM_TEST_GLAB_STATE="$value" run_poll "$dir")
-    [ -z "$out" ] || fail "GitLab poll emitted for a non-merged state"
+    [ -z "$out" ] || fail "GitLab poll emitted for a non-terminal state"
   done
   out=$(FM_TEST_GLAB_STATE=merged run_poll "$dir")
   [ "$out" = merged ] || fail "GitLab poll did not emit exactly one merged line"
+  # A merge request closed without merging is a distinct terminal read from
+  # merged (regression for issue #1897's same pattern on the GitLab path): it
+  # must still wake firstmate, but never be mistaken for a merge.
+  out=$(FM_TEST_GLAB_STATE=closed run_poll "$dir")
+  [ "$out" = closed ] || fail "GitLab poll did not emit exactly one closed line for a closed-unmerged merge request"
   out=$(FM_TEST_GLAB_FAIL=1 run_poll "$dir")
   [ -z "$out" ] || fail "GitLab poll emitted after a glab failure"
 
@@ -3130,15 +3142,12 @@ test_external_merge_transition_retires_only_terminal_poll() {
   add_stop_custom_check "$dir"
   before=$(poll_artifact_snapshot "$state" task-a)
 
-  for label in open-green open-red closed-unmerged forge-error malformed; do
+  for label in open-green open-red forge-error malformed; do
     rm -f "$state/.last-check"
     set +e
     case "$label" in
       open-green|open-red)
         FM_TEST_GH_STATE=OPEN run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/$label.out" 2> "$dir/$label.err"
-        ;;
-      closed-unmerged)
-        FM_TEST_GH_STATE=CLOSED run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/$label.out" 2> "$dir/$label.err"
         ;;
       forge-error)
         FM_TEST_GH_FAIL=1 run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/$label.out" 2> "$dir/$label.err"
@@ -3154,6 +3163,21 @@ test_external_merge_transition_retires_only_terminal_poll() {
     [ "$(poll_artifact_snapshot "$state" task-a)" = "$before" ] || fail "$label changed the armed poll"
   done
 
+  # A closed-unmerged PR is the regression this test guards against for issue
+  # #1897: today's poll stayed silent forever on it, so the watcher never woke
+  # and the task sat in flight indefinitely. It must now wake firstmate with a
+  # result distinguishable from merged, and it must stay armed rather than
+  # being silently retired, since a closed-unmerged result alone does not
+  # prove the work landed elsewhere.
+  rm -f "$state/.last-check"
+  set +e
+  FM_TEST_GH_STATE=CLOSED run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/closed-unmerged.out" 2> "$dir/closed-unmerged.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "closed-unmerged watcher cycle failed: $(cat "$dir/closed-unmerged.err")"
+  case "$(cat "$dir/closed-unmerged.out")" in check:*task-a.check.sh:*closed) ;; *) fail "closed-unmerged PR did not wake the watcher with a distinct result" ;; esac
+  [ "$(poll_artifact_snapshot "$state" task-a)" = "$before" ] || fail "closed-unmerged result changed the armed poll"
+
   rm -f "$state/z-stop.check.sh" "$state/z-stop.check-trust" "$state/.last-check"
   set +e
   FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/merged.out" 2> "$dir/merged.err"
@@ -3162,7 +3186,7 @@ test_external_merge_transition_retires_only_terminal_poll() {
   [ "$rc" -eq 0 ] || fail "external merged transition failed: $(cat "$dir/merged.err")"
   case "$(cat "$dir/merged.out")" in check:*task-a.check.sh:*merged) ;; *) fail "external merge did not preserve its notification" ;; esac
   assert_poll_absent "$state" task-a
-  pass "open/red, closed-unmerged, malformed, and forge errors remain armed until an exact merged transition"
+  pass "open/red, closed-unmerged, malformed, and forge errors remain armed until an exact merged transition, and a closed-unmerged result wakes without retiring the poll"
 }
 
 test_retirement_refuses_replacement_and_nonterminal_results() {
@@ -3182,7 +3206,7 @@ test_retirement_refuses_replacement_and_nonterminal_results() {
   fm_pr_poll_artifacts_valid "$state" task-a "$POLL" || fail "replacement poll was not left canonical"
 
   fm_pr_poll_snapshot_capture "$state" task-a "$POLL" || fail "could not snapshot nonterminal fixture"
-  for result in OPEN CLOSED ERROR 'merged extra'; do
+  for result in OPEN CLOSED closed ERROR 'merged extra'; do
     fm_pr_poll_retirement_publish "$state" task-a "$POLL" "$result" \
       && fail "nonterminal result '$result' received retirement authority"
   done
