@@ -147,7 +147,7 @@ repair_line() {
 
   case "$HARNESS" in
     claude)
-      printf '%s%s\n' "$prefix" 'watcher supervision needs Stop-owned automatic recovery; inspect the hook registration and startup status before ending the turn.'
+      printf '%s%s\n' "$prefix" 'recover the watcher supervision the Stop-owned auto-arm did not claim by running bin/fm-watch-arm.sh as its own Claude Code background task, never shell &, then inspect the hook registration and startup status.'
       ;;
     codex)
       printf '%s%s%s%s\n' "$prefix" 'repair missing watcher supervision with a foreground checkpoint: bin/fm-watch-checkpoint.sh --seconds ' "$checkpoint_seconds" '.'

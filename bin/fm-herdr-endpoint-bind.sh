@@ -137,6 +137,10 @@ cp -- "$META" "$META_SNAPSHOT" \
   || refuse "could not snapshot task $ID metadata"
 cp -- "$META_SNAPSHOT" "$META_TMP" \
   || refuse "could not prepare task $ID metadata"
+if [ -s "$META_TMP" ] && [ "$(tail -c 1 -- "$META_TMP" | wc -l)" -eq 0 ]; then
+  printf '\n' >> "$META_TMP" \
+    || refuse "could not prepare task $ID endpoint binding"
+fi
 printf 'endpoint_task_id=%s\n' "$ID" >> "$META_TMP" \
   || refuse "could not prepare task $ID endpoint binding"
 chmod 0600 "$META_SNAPSHOT" "$META_TMP" \

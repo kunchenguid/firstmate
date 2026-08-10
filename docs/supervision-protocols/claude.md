@@ -10,8 +10,8 @@ When this session owns supervision and away mode is not active:
    Do not run `bin/fm-watch-arm.sh` after an ordinary wake; the next turn end re-arms automatically when supervision is still needed.
    Do not invent a wake from an attach-status line alone; drain and act only on real wake records, the drain's `OPEN DECISIONS` entries, or a real watcher reason line.
 4. On the one `Stop hook feedback` automatic-mechanism failure notice (`firstmate watcher auto-arm FAILED ...`), drain, inspect the automatic mechanism failure, and do not turn the notice into a repeating manual-arm loop.
-5. If the Stop hook does not claim the home or reports an exhausted failure, inspect its registration and watcher startup path before ending blind.
-   Keep the Stop-owned automatic mechanism as the only Claude arm owner.
+5. If the Stop hook does not claim the home or reports an exhausted failure, recover with one `bin/fm-watch-arm.sh` Claude Code background task, never shell `&`, then inspect its registration and watcher startup path rather than ending blind.
+   That manual arm is the confirmed-failure recovery only; the Stop-owned automatic mechanism stays the routine Claude arm owner.
 6. Treat `watcher: started ...` and `watcher: attached ...` inside automatic arm output as proof that one live cycle exists.
    On attach, the arm follows verified identity-matched successors instead of exiting when the first cycle ends.
 7. The durable wake queue preserves actionable events between a rewake and the next Stop-launched arm, while the bounded turn-end guard prevents a blind Stop when recovery did not start.
