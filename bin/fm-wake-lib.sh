@@ -835,7 +835,8 @@ fm_wake_append() {
 # Print the distinct keys currently queued for <kind>, oldest first. Read under
 # the append lock so a concurrent append is never observed half-written. The
 # durable queue stays the authority: a key appears here exactly while a record
-# for it is queued and unconsumed, and disappears when a drain consumes it.
+# for it is queued and unacknowledged, and disappears only after post-handling
+# acknowledgement consumes it.
 fm_wake_queued_keys() {
   local kind=$1
   case "$kind" in

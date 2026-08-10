@@ -2,9 +2,9 @@
 # fm-afk-return.sh - deterministic away-mode return catch-up gate.
 #
 # Usage:
-#   fm-afk-return.sh          Stop away mode, drain catch-up, and open/check gate.
+#   fm-afk-return.sh          Stop away mode, present catch-up, and open/check gate.
 #   fm-afk-return.sh begin    Same as the default command.
-#   fm-afk-return.sh check    Re-drain and close the gate only after blockers resolve.
+#   fm-afk-return.sh check    Re-present and close the gate only after blockers resolve.
 #   fm-afk-return.sh guard    Read-only refusal while away or catch-up is pending.
 #
 # `blocked:` is the crewmate protocol's firstmate-actionable verb. A live task's
@@ -15,9 +15,9 @@
 # gate; normal reporting routes it through the AGENTS.md section 7 contract.
 #
 # The durable state/.afk-return-catchup file is written BEFORE daemon shutdown,
-# so a crash between stopping, draining, and blocker handling fails closed. It
-# retains the drained wake, buffered-escalation, and wedge-marker evidence until
-# every live open blocker is closed and `check` succeeds. Repeated begin/check
+# so a crash between stopping, wake presentation, and blocker handling fails closed.
+# It retains the presented wake, buffered-escalation, and wedge-marker evidence
+# until every live open blocker is closed and `check` succeeds. Repeated begin/check
 # calls are idempotent. `guard` never mutates state and is suitable for ordinary
 # read entrypoints such as fm-bearings-snapshot.sh.
 set -u
