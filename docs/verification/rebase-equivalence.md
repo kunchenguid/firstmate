@@ -21,19 +21,34 @@ So this repository owns the comparison and the refusal, and the generated no-mis
 
 The worker's own branch head is not the validated content, and the check never falls back to it.
 A run commits its own fixes onto the pipeline's copy of the branch, so the worker's head is the OLDER content: a fix that rewrote a line the branch added, `foo(a)` becoming `foo(a, b)`, would read as that line having been dropped by the push.
-The pipeline names the commit it validated in the structured `branch_sync` object that `no-mistakes axi status` and `no-mistakes axi sync --check` return:
+The pipeline records what it submitted and what it pushed, per run, in its own database at `~/.no-mistakes/state.sqlite`, table `runs`.
+Those columns were established by reading real completed runs rather than from their names, because an earlier version of this page asserted the meaning and filed an all-empty schema block as its evidence, which proved nothing.
+
+Read across all 116 runs in a live database on 2026-08-10, and cross-checked against two pull requests whose heads were independently verified in git:
 
 ```
-pipeline:
-  run: ""
-  status: ""
-  phase: ""
-  submitted_head: ""
-  current_head: ""
-  pushed_head: ""
+$ python3 -c "...sqlite3 'file:~/.no-mistakes/state.sqlite?mode=ro'..."
+runs total 116; pushed 68; never-pushed 48
+  of pushed: head_sha == last_pushed_sha : 68
+  of pushed: head_sha != last_pushed_sha : 0
+  of never-pushed: head_sha == submitted : 20 of 48
 ```
 
-`pipeline.current_head` is the pipeline's own head for the run, which is the one that includes every fix commit; `submitted_head` is the head the worker handed over, before any of them.
+- `submitted_head_sha` is the head the worker submitted when the run started, and is never rewritten.
+- `head_sha` is the pipeline's LIVE head: it advances with the run's own fix commits, and at push time it is overwritten with the pushed head. 68 of 68 pushed runs have `head_sha == last_pushed_sha`, with no exceptions.
+- `last_pushed_sha` is the pushed, post-rebase head, and is empty until a push happens.
+
+The two verified rows, whose heads match the reproductions below exactly:
+
+```
+fm/cfvc-13-attempt-budget   submitted d459e942966f  head 352c56912080  last_pushed 352c56912080   pr 2010
+fm/fork-trunk-serial2-base-red submitted 646f2390494f head eabefe425ba3 last_pushed eabefe425ba3  pr 2009
+```
+
+**This bounds what the gate can prove, and the bound is stated rather than implied.**
+Because `head_sha` is overwritten at push time, the pre-rebase head carrying a run's own fix commits is not retained anywhere once the push completes.
+The comparison available after the fact is therefore `submitted_head_sha` against `last_pushed_sha`.
+That covers every change the branch already carried when the run began - which includes both measured incidents, verified below - but it cannot see content that a run's OWN fix commits created and that the same run's rebase then dropped, because no surviving column names that intermediate head.
 
 Those objects are reachable, because the pipeline's repository is an ordinary local-path remote in every initialized clone:
 
@@ -217,6 +232,61 @@ $ git merge-tree --write-tree 74230fc eabefe42  # trunk vs the REBASED head
 
 The two results are not comparable, so a merge-result equality check would refuse every rebase it was meant to screen.
 Diffing each head against its own base measures only what that head contributes, which is the quantity a rebase must carry over.
+
+## The gate runs at pull-request intake
+
+The comparison is made where both facts are readable and where the authority to land actually sits.
+A worker cannot see the validated bytes: they are in the pipeline's gate repository, not its clone.
+Three separate defects reduced to that one structural fact, and the third of them left the check able to report `PASS` without ever comparing, so the gate moved to `bin/fm-pr-check.sh` rather than being patched a fourth time.
+
+`bin/fm-run-record-lib.sh` reads the run record, `mode=ro` and deliberately without `immutable=1` since the pipeline writes that file concurrently.
+The outcome is three-valued, and only a genuine mismatch refuses:
+
+- bytes carried: intake proceeds and arms the merge watch as before;
+- bytes dropped: intake refuses, names the losing paths, and does NOT arm the watch;
+- no recorded run: not this gate's business, since the request was never produced by a pipeline rebase, so it passes through untouched - `direct-PR` delivery has no run row at all;
+- comparison unavailable: reported prominently, and never silently converted into a pass.
+
+Watched red before it was trusted green, against one reconstructed dropping rebase, with the gate the only difference between the two runs:
+
+```
+$ <pre-gate bin/fm-pr-check.sh> task-a https://github.com/o/r/pull/7
+armed: state/task-a.check.sh
+  (exit 0 - the merge watch was armed although the push had dropped the validated fix)
+
+$ bin/fm-pr-check.sh task-a https://github.com/o/r/pull/7
+REBASE-EQUIVALENCE: DROPPED 1 path(s) lost validated content
+  dropped-content      core.sh: 1 line(s) added by the validated change are absent from the candidate
+error: the pushed request does not carry the content this run validated; it is not shippable as it stands
+  (exit 1 - and state/task-a.check.sh does not exist)
+```
+
+Both measured incidents are refused using the pair the run record itself names, rather than a pair chosen by hand:
+
+```
+$ bin/fm-rebase-equivalence.sh --repo . --validated-base ed376cf \
+    --validated-head 646f2390 --candidate-head eabefe42        # PR 2009, as recorded
+REBASE-EQUIVALENCE: DROPPED 4 path(s) lost validated content
+  dropped-content      bin/fm-teardown.sh: 19 line(s) ...
+  dropped-content      tests/fm-teardown.test.sh: 57 line(s) ...
+  (exit 3)
+
+$ bin/fm-rebase-equivalence.sh --repo . --validated-base ed376cf \
+    --validated-head d459e94 --candidate-head 352c5691          # PR 2010, as recorded
+  (exit 3)
+```
+
+## The check cannot reach a verdict without comparing
+
+Three ways it could, each now refused, and each watched failing first against the head that preceded the guard:
+
+| Case | Before | After |
+| --- | --- | --- |
+| validated head resolves to the candidate | `PASS`, exit 0, indistinguishable from a real comparison | `CANNOT-OBSERVE`, exit 2 |
+| `--validated-remote ""` from a wrapper whose variable was unset | proceeded to a verdict, silently using a local ref | `CANNOT-OBSERVE`, exit 2, naming the empty value |
+| `--candidate-pr` with a local validated head | compared forge bytes against the worker's older head | `CANNOT-OBSERVE`, exit 2, naming the required source |
+
+None of that narrowed what the check can still answer: a faithful rebase over a moved trunk passes, and both reproductions are still refused.
 
 ## Regression coverage
 

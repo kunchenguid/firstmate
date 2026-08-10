@@ -399,27 +399,7 @@ Two firstmate-specific rules layer on top of that guidance:
   When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
 - Avoid \`--yes\`: it would silently bypass firstmate's authority check and any required captain escalation.
 
-Before you report the PR, confirm the push did not silently change what was validated.
-The pipeline rebases your branch onto its target immediately before pushing, and a rebase that drops content opens a PR misrepresenting the code the pipeline actually judged.
-That has happened twice, and no pipeline signal reported it either time.
-Both heads it compares come from the pipeline's side; neither is read from your clone.
-The pipeline builds the pushed head inside its own repository and those objects never reach your clone, so the check fetches that head, and the trunk it was rebased onto, from the forge by pull request URL rather than reading either from your clone.
-Do not substitute a local ref for them: your clone's trunk is whatever it last fetched, and by the time this matters the real trunk has moved.
-The validated head is not your own \`HEAD\` either, because the pipeline commits its fixes onto its copy of the branch and yours therefore holds older content; comparing yours would report a pipeline fix that rewrote one of your lines as content the push dropped.
-Read the commit the pipeline validated from the run record instead - the \`pipeline.current_head\` field of the structured \`branch_sync\` object that \`no-mistakes axi status\` and \`no-mistakes axi sync --check\` return - and let the check fetch it from the pipeline's own repository, which an initialized clone carries as the \`no-mistakes\` remote:
-
-    $FM_ROOT/bin/fm-rebase-equivalence.sh --repo . \\
-      --validated-head {branch_sync.pipeline.current_head} \\
-      --validated-remote no-mistakes \\
-      --candidate-pr {the PR url}
-
-If the run record names no validated head, append \`blocked: the run record names no validated head to compare\` and stop; never substitute your own \`HEAD\` for it.
-Work the pipeline added after that head is growth, which this check does not refuse.
-Only \`REBASE-EQUIVALENCE: PASS\` clears the PR to be reported.
-On \`DROPPED\`, append \`blocked: the pushed PR dropped validated content in {paths it named}\` and stop.
-On \`CANNOT-OBSERVE\`, append \`blocked: {what it could not compare}\` and stop; that is never a pass.
-
-After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge) AND that check passes, append \`done: PR {url} checks green\` and stop. You are finished.
+After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
 EOF
     ;;
 esac

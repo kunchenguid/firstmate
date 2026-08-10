@@ -365,33 +365,19 @@ test_no_mistakes_dod_pins_rebase_equivalence_gate() {
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
   assert_present "$brief" "brief was not scaffolded"
-  assert_grep "bin/fm-rebase-equivalence.sh" "$brief" \
-    "no-mistakes DOD lost the rebase-equivalence check"
-  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
-  assert_grep 'Only `REBASE-EQUIVALENCE: PASS` clears the PR to be reported.' "$brief" \
-    "no-mistakes DOD must make the pass verdict the only clearance"
-  assert_grep "--candidate-pr" "$brief" \
-    "no-mistakes DOD must fetch the candidate head from the forge"
-  assert_no_grep "--candidate-head" "$brief" \
-    "no-mistakes DOD must not name a pushed head the worker's clone cannot hold"
-  assert_no_grep "TRUNK=" "$brief" \
-    "no-mistakes DOD must not read the trunk from the worker's clone, which is whatever it last fetched"
-  # The validated side is the other half of the same rule: a run commits its
-  # own fixes, so the worker's head is older content and comparing it would
-  # report those fixes as a drop.
-  assert_grep "--validated-remote no-mistakes" "$brief" \
-    "no-mistakes DOD must take the validated head from the pipeline's own repository"
-  assert_grep "branch_sync" "$brief" \
-    "no-mistakes DOD must name the run record that reports the validated head"
-  assert_no_grep "--validated-head HEAD" "$brief" \
-    "no-mistakes DOD must not compare the worker's own head as the validated content"
-  assert_no_grep "Your local branch never moved during the run" "$brief" \
-    "no-mistakes DOD must not claim the local branch holds the validated content"
-  assert_grep "blocked: the pushed PR dropped validated content" "$brief" \
-    "no-mistakes DOD must block on a dropping rebase instead of reporting the PR"
-  assert_grep "that is never a pass" "$brief" \
-    "no-mistakes DOD must refuse to read could-not-observe as a clearance"
-  pass "fm-brief.sh: no-mistakes DOD pins the rebase-equivalence gate"
+  # The rebase-equivalence comparison is deliberately NOT a worker instruction.
+  # Three rounds of defects all reduced to one fact: a worker cannot see the
+  # validated bytes, because a run's fix commits live in the pipeline's gate
+  # repository and the pushed head never reaches the worker's clone. The gate
+  # therefore runs at pull-request intake, in bin/fm-pr-check.sh, where the run
+  # record and the forge are both readable. Reintroducing it here would
+  # reinstate a check that structurally cannot pass, so this pins its absence.
+  assert_no_grep "fm-rebase-equivalence.sh" "$brief" \
+    "the rebase-equivalence comparison belongs at intake, not in a worker brief"
+  assert_no_grep "REBASE-EQUIVALENCE" "$brief" \
+    "a worker must not be asked for a verdict it cannot obtain"
+  assert_no_grep "--validated-remote" "$brief" \
+    "the validated head is read at intake from the pipeline's own run record"
 }
 
 test_ship_project_memory_wording() {
