@@ -2,11 +2,6 @@ name: Windows Herdr automation spike
 
 on:
   workflow_dispatch:
-  # Temporary branch-validation trigger. The workflow_dispatch endpoint cannot
-  # resolve a newly added workflow until it reaches the default branch.
-  pull_request:
-    paths:
-      - .github/workflows/windows-herdr-spike.yml
 
 permissions:
   contents: read
