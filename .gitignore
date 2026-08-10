@@ -10,3 +10,5 @@ __pycache__/
 *.pyc
 .env
 config/
+.firecrawl/
+.agents/skills/last30days/assets/
