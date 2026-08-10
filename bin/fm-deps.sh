@@ -35,6 +35,7 @@ FAILURES=0
 UPDATES=0
 DEFERRED=0
 AVAILABLE=0
+FIRSTMATE_UPDATE_RESULT=""
 HERDR_MANIFEST_URL=${FM_DEPS_HERDR_MANIFEST_URL:-https://herdr.dev/latest.json}
 NODE_INDEX_URL=${FM_DEPS_NODE_INDEX_URL:-https://nodejs.org/dist/index.json}
 
@@ -346,7 +347,7 @@ handle_firstmate_update_actions() {
 }
 
 run_upgrade() {
-  local id=$1 installed=${2:-} latest=${3:-} update_out
+  local id=$1 installed=${2:-} latest=${3:-} firstmate_line update_out
   case "$id" in
     codex) codex update ;;
     github-cli) run_apt_upgrade gh ;;
@@ -367,12 +368,27 @@ run_upgrade() {
       ;;
     github-actions) return 1 ;;
     firstmate)
+      FIRSTMATE_UPDATE_RESULT=""
       if ! update_out=$("$FM_ROOT/bin/fm-update.sh" 2>&1); then
         printf '%s\n' "$update_out"
         return 1
       fi
       printf '%s\n' "$update_out"
-      handle_firstmate_update_actions "$update_out"
+      handle_firstmate_update_actions "$update_out" || return 1
+      firstmate_line=$(printf '%s\n' "$update_out" | grep '^firstmate: ' || true)
+      if [ -z "$firstmate_line" ] || [[ "$firstmate_line" == *$'\n'* ]]; then
+        printf 'Firstmate updater returned an invalid primary outcome\n' >&2
+        return 1
+      fi
+      case "$firstmate_line" in
+        'firstmate: updated '*) FIRSTMATE_UPDATE_RESULT=updated ;;
+        'firstmate: already current') FIRSTMATE_UPDATE_RESULT=current ;;
+        'firstmate: skipped:'*) FIRSTMATE_UPDATE_RESULT=skipped; return 1 ;;
+        *)
+          printf 'Firstmate updater returned an invalid primary outcome: %s\n' "$firstmate_line" >&2
+          return 1
+          ;;
+      esac
       ;;
     *) return 1 ;;
   esac
@@ -579,8 +595,20 @@ check_firstmate() {
     fi
     if prompt_yes Firstmate; then
       if run_upgrade firstmate; then
-        printf 'UPGRADED: Firstmate\n'
-        UPDATES=$((UPDATES + 1))
+        case "$FIRSTMATE_UPDATE_RESULT" in
+          updated)
+            printf 'UPGRADED: Firstmate\n'
+            UPDATES=$((UPDATES + 1))
+            ;;
+          current)
+            printf 'CURRENT: Firstmate became current before the guarded update completed\n'
+            AVAILABLE=$((AVAILABLE - 1))
+            ;;
+          *)
+            printf 'FAILED: Firstmate updater returned no successful outcome\n' >&2
+            FAILURES=$((FAILURES + 1))
+            ;;
+        esac
       else
         printf 'FAILED: Firstmate guarded update failed or was skipped\n' >&2
         FAILURES=$((FAILURES + 1))

@@ -251,6 +251,80 @@ test_firstmate_concurrent_update_preserves_actions() {
   pass "concurrent Firstmate updates preserve every emitted action"
 }
 
+run_firstmate_outcome_case() {
+  local fixture=$1 status=$2 nudge=$3 fakebin out_file
+  fakebin=$(fm_fakebin "$fixture")
+  out_file="$fixture/output"
+  mkdir -p "$fixture/bin"
+  # shellcheck disable=SC2016
+  printf '%s\n' '#!/usr/bin/env bash' \
+    'printf '\''firstmate: %s\n'\'' "$FM_DEPS_TEST_FIRSTMATE_STATUS"' \
+    'printf '\''reread-firstmate: no\n'\''' \
+    'printf '\''nudge-secondmates: %s\n'\'' "$FM_DEPS_TEST_FIRSTMATE_NUDGE"' \
+    > "$fixture/bin/fm-update.sh"
+  # shellcheck disable=SC2016
+  printf '%s\n' '#!/usr/bin/env bash' \
+    'printf '\''%s|%s\n'\'' "$1" "$2" >> "$FM_DEPS_TEST_LOG"' \
+    > "$fixture/bin/fm-send.sh"
+  # shellcheck disable=SC2016
+  printf '%s\n' '#!/usr/bin/env bash' \
+    'case "$*" in' \
+    '  *"symbolic-ref --short refs/remotes/origin/HEAD"*) printf '\''origin/main\n'\'' ;;' \
+    '  *"rev-parse HEAD"*) printf '\''local-sha\n'\'' ;;' \
+    '  *"ls-remote origin refs/heads/main"*) printf '\''remote-sha\trefs/heads/main\n'\'' ;;' \
+    '  *"status --porcelain"*) ;;' \
+    '  *"symbolic-ref --short HEAD"*) printf '\''main\n'\'' ;;' \
+    '  *) exit 1 ;;' \
+    'esac' > "$fakebin/git"
+  chmod +x "$fixture/bin/fm-update.sh" "$fixture/bin/fm-send.sh" "$fakebin/git"
+
+  AVAILABLE=0 UPDATES=0 FAILURES=0 DEFERRED=0
+  PATH="$fakebin:$PATH" FM_ROOT="$fixture" FM_HOME="$fixture" \
+    FM_DEPS_SOURCE_ONLY=1 FM_DEPS_INTERACTIVE=1 CHECK_ONLY=0 \
+    FM_DEPS_TEST_FIRSTMATE_STATUS="$status" FM_DEPS_TEST_FIRSTMATE_NUDGE="$nudge" \
+    FM_DEPS_TEST_LOG="$fixture/send.log" check_firstmate <<<yes > "$out_file" 2>&1
+  FIRSTMATE_OUTCOME_OUTPUT=$(< "$out_file")
+}
+
+test_firstmate_updated_outcome_counts_upgrade() {
+  run_firstmate_outcome_case "$TMP_ROOT/firstmate-outcome-updated" 'updated old..new' none
+  assert_contains "$FIRSTMATE_OUTCOME_OUTPUT" "UPGRADED: Firstmate" \
+    "updated Firstmate outcome was not reported as upgraded"
+  [ "$UPDATES" -eq 1 ] || fail "updated Firstmate outcome was not counted"
+  [ "$FAILURES" -eq 0 ] || fail "updated Firstmate outcome was counted as failed"
+  pass "updated Firstmate outcomes count one completed upgrade"
+}
+
+test_firstmate_current_outcome_is_success_without_upgrade() {
+  run_firstmate_outcome_case "$TMP_ROOT/firstmate-outcome-current" 'already current' none
+  assert_contains "$FIRSTMATE_OUTCOME_OUTPUT" \
+    "CURRENT: Firstmate became current before the guarded update completed" \
+    "concurrent already-current outcome was not accepted"
+  assert_not_contains "$FIRSTMATE_OUTCOME_OUTPUT" "UPGRADED: Firstmate" \
+    "concurrent already-current outcome was reported as upgraded"
+  [ "$UPDATES" -eq 0 ] || fail "concurrent already-current outcome was counted as upgraded"
+  [ "$AVAILABLE" -eq 0 ] || fail "concurrent already-current outcome remained available"
+  [ "$FAILURES" -eq 0 ] || fail "concurrent already-current outcome was counted as failed"
+  pass "already-current Firstmate outcomes complete without upgrade counts"
+}
+
+test_firstmate_skipped_outcome_fails_without_upgrade() {
+  local fixture="$TMP_ROOT/firstmate-outcome-skipped"
+  run_firstmate_outcome_case "$fixture" 'skipped: fetch failed' fm-skipped
+  assert_contains "$FIRSTMATE_OUTCOME_OUTPUT" "firstmate: skipped: fetch failed" \
+    "guarded skip reason was not retained"
+  assert_contains "$FIRSTMATE_OUTCOME_OUTPUT" \
+    "FAILED: Firstmate guarded update failed or was skipped" \
+    "guarded skipped outcome was not reported as failed"
+  assert_not_contains "$FIRSTMATE_OUTCOME_OUTPUT" "UPGRADED: Firstmate" \
+    "guarded skipped outcome was reported as upgraded"
+  assert_grep "fm-skipped|$FM_SECOND_MATE_NUDGE_MESSAGE" "$fixture/send.log" \
+    "guarded skipped outcome discarded a secondmate action"
+  [ "$UPDATES" -eq 0 ] || fail "guarded skipped outcome was counted as upgraded"
+  [ "$FAILURES" -eq 1 ] || fail "guarded skipped outcome was not counted as failed"
+  pass "skipped Firstmate outcomes fail without losing emitted actions"
+}
+
 test_mixed_checkout_majors_report_repository_update() {
   local fixture fakebin out
   fixture="$TMP_ROOT/checkout-majors"
@@ -280,6 +354,9 @@ test_node_requires_active_nvm_provenance
 test_firstmate_update_actions_are_consumed
 test_firstmate_secondmate_only_actions_are_preserved
 test_firstmate_concurrent_update_preserves_actions
+test_firstmate_updated_outcome_counts_upgrade
+test_firstmate_current_outcome_is_success_without_upgrade
+test_firstmate_skipped_outcome_fails_without_upgrade
 test_mixed_checkout_majors_report_repository_update
 
 echo "# all fm-deps tests passed"
