@@ -36,6 +36,12 @@
 # resolves the expectation. Set FM_PENDING_REPLY_EXISTING_CORR=<id> when
 # re-sending a recovery request for an already-open expectation so a second
 # record is not created. Direct unmarked captain input never creates one.
+# A submit verdict the backend cannot prove one way or the other (unknown,
+# pending-unproven, or any future non-proof verdict) preserves the record as
+# delivery-unknown rather than discarding it: the harness could not disprove
+# delivery, so the record must survive for reconciliation (see #2003). Only a
+# verdict that PROVES non-delivery - send-failed, or a proven "pending"
+# composer still holding the text after the full retry budget - discards it.
 #
 # Decision closure (answerer-closes): pass --resolve-key <key> (repeatable,
 # before the message) when this send answers an open keyed needs-decision: or
@@ -501,15 +507,33 @@ else
     empty)
       ;;
     send-failed)
+      # The literal text itself was never accepted by the backend: proven
+      # non-delivery, so the expectation is discarded outright.
       if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
         fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
       fi
       echo "error: text not sent to $T ($TARGET_BACKEND send failed; tried $RESOLUTION_TRIED)" >&2
       exit 1
       ;;
-    *)
+    pending)
+      # Every backend's submit core returns this exact value only after its
+      # own retry budget PROVES the composer still holds the text (a genuine
+      # swallow, not merely an unread or ambiguous state), so it is trusted
+      # as proof of non-delivery here too.
       if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
         fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
+      fi
+      echo "error: text not submitted to $T (delivery unconfirmed; verdict=pending; tried $RESOLUTION_TRIED)" >&2
+      exit 1
+      ;;
+    *)
+      # unknown, pending-unproven, or any other non-proof verdict: the
+      # backend could not confirm submission, but it could not disprove it
+      # either - the send may have actually landed (#2003). The exit code
+      # still refuses loudly (never treat this as success), but the durable
+      # expectation survives as delivery-unknown instead of being destroyed.
+      if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
+        fm_pending_reply_mark_delivery_unknown "$STATE" "$PENDING_REPLY_CORR" || true
       fi
       echo "error: text not submitted to $T (delivery unconfirmed; verdict=${verdict:-unknown}; tried $RESOLUTION_TRIED)" >&2
       exit 1
