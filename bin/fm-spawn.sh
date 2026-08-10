@@ -2367,35 +2367,14 @@ EOF
       # closes on /exit. stop also touches the turn-ended notification. Hook
       # commands must consume stdin JSON and print {} - the small script below
       # owns that shape so hooks.json stays declarative.
-      fm_control_cursor_hooks_backup "$WT" "$STATE_REAL" "$ID" || {
-        echo "error: existing Cursor hooks.json is not a safe regular file" >&2
-        exit 1
-      }
-      mkdir -p "$WT/.cursor/hooks"
-      cat > "$WT/.cursor/hooks/fm-busy-turnend.sh" <<EOF
-#!/usr/bin/env bash
-# Firstmate cursor busy-state + turn-end; written by fm-spawn.
-set -u
-event=\${1:-}
-cat >/dev/null
-case "\$event" in
-  busy)
-    $(shell_quote "$FM_ROOT/bin/fm-busy-event.sh") apply $(shell_quote "$STATE_REAL") $(shell_quote "$ID") busy --gen $(shell_quote "$BUSY_GEN") --source cursor-hook --event before-submit-prompt 2>/dev/null || true
-    ;;
-  idle-stop)
-    touch $(shell_quote "$TURNEND")
-    $(shell_quote "$FM_ROOT/bin/fm-busy-event.sh") apply $(shell_quote "$STATE_REAL") $(shell_quote "$ID") idle --gen $(shell_quote "$BUSY_GEN") --source cursor-hook --event stop 2>/dev/null || true
-    ;;
-  idle-session-end)
-    $(shell_quote "$FM_ROOT/bin/fm-busy-event.sh") apply $(shell_quote "$STATE_REAL") $(shell_quote "$ID") idle --gen $(shell_quote "$BUSY_GEN") --source cursor-hook --event session-end 2>/dev/null || true
-    ;;
-esac
-printf '{}\\n'
-EOF
-      chmod 700 "$WT/.cursor/hooks/fm-busy-turnend.sh"
       cursor_hooks_tmp="$TASK_TMP/cursor-hooks.json"
-      [ -e "$WT/.cursor/hooks.json" ] || printf '%s\n' '{"version":1,"hooks":{}}' > "$WT/.cursor/hooks.json"
-      python3 - "$WT/.cursor/hooks.json" "$cursor_hooks_tmp" \
+      cursor_hooks_source="$TASK_TMP/cursor-hooks-source.json"
+      if [ -e "$WT/.cursor/hooks.json" ]; then
+        cp -p -- "$WT/.cursor/hooks.json" "$cursor_hooks_source"
+      else
+        printf '%s\n' '{"version":1,"hooks":{}}' > "$cursor_hooks_source"
+      fi
+      python3 - "$cursor_hooks_source" "$cursor_hooks_tmp" \
         '.cursor/hooks/fm-busy-turnend.sh busy' \
         '.cursor/hooks/fm-busy-turnend.sh idle-stop' \
         '.cursor/hooks/fm-busy-turnend.sh idle-session-end' <<'PY'
@@ -2417,6 +2396,34 @@ with open(destination, "w", encoding="utf-8") as handle:
     json.dump(document, handle, separators=(",", ":"))
     handle.write("\n")
 PY
+      fm_control_cursor_hooks_backup "$WT" "$STATE_REAL" "$ID" || {
+        echo "error: existing Cursor hooks.json is not a safe regular file" >&2
+        exit 1
+      }
+      cursor_hook_script_tmp="$TASK_TMP/fm-busy-turnend.sh"
+      cat > "$cursor_hook_script_tmp" <<EOF
+#!/usr/bin/env bash
+# Firstmate cursor busy-state + turn-end; written by fm-spawn.
+set -u
+event=\${1:-}
+cat >/dev/null
+case "\$event" in
+  busy)
+    $(shell_quote "$FM_ROOT/bin/fm-busy-event.sh") apply $(shell_quote "$STATE_REAL") $(shell_quote "$ID") busy --gen $(shell_quote "$BUSY_GEN") --source cursor-hook --event before-submit-prompt 2>/dev/null || true
+    ;;
+  idle-stop)
+    touch $(shell_quote "$TURNEND")
+    $(shell_quote "$FM_ROOT/bin/fm-busy-event.sh") apply $(shell_quote "$STATE_REAL") $(shell_quote "$ID") idle --gen $(shell_quote "$BUSY_GEN") --source cursor-hook --event stop 2>/dev/null || true
+    ;;
+  idle-session-end)
+    $(shell_quote "$FM_ROOT/bin/fm-busy-event.sh") apply $(shell_quote "$STATE_REAL") $(shell_quote "$ID") idle --gen $(shell_quote "$BUSY_GEN") --source cursor-hook --event session-end 2>/dev/null || true
+    ;;
+esac
+printf '{}\\n'
+EOF
+      chmod 700 "$cursor_hook_script_tmp"
+      mkdir -p "$WT/.cursor/hooks"
+      mv -f -- "$cursor_hook_script_tmp" "$WT/.cursor/hooks/fm-busy-turnend.sh"
       mv -f -- "$cursor_hooks_tmp" "$WT/.cursor/hooks.json"
       exclude_path '.cursor/hooks.json'
       exclude_path '.cursor/hooks/fm-busy-turnend.sh'
