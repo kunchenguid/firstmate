@@ -49,6 +49,16 @@
 # declared-external-wait verb (FM_CLASSIFY_PAUSED_VERB, default "paused") from
 # "blocked:": pause for a known external wait expected to clear on its own,
 # blocked when firstmate must act.
+# Every generated ship brief names exactly ONE terminal condition, and "done:" is
+# reserved for that event alone, because firstmate acts on it as a reviewable
+# result. A no-mistakes brief therefore reports its finished implementation as
+# "working: implemented, ready for validation" and stops there for firstmate's
+# validation instruction - the single stop the ship status protocol's "never end a
+# turn on working:" rule exempts, named where that rule is stated. That redirect
+# replaced an instruction to append "done: {summary}" at the same point, which four
+# consecutive no-mistakes workers followed without ever starting the pipeline; the
+# status protocol now states the general rule rather than citing that episode,
+# since the instruction that produced it no longer exists to be corrected.
 # Ship tasks include a project-memory section so durable project-intrinsic
 # learnings can be committed to AGENTS.md through the project's delivery path;
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
@@ -359,7 +369,7 @@ case "$MODE" in
 # Definition of done
 Delivery contract: mode=direct-PR
 This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
-The task is complete only when committed on your branch.
+Its one terminal condition is the open PR; committed work alone is not done, and uncommitted work cannot ship.
 When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 EOF
@@ -371,7 +381,7 @@ EOF
 # Definition of done
 Delivery contract: mode=local-only
 This task ships **local-only**: no remote, no PR, no pipeline.
-The task is complete only when committed on your branch \`fm/$ID\`. Do NOT push, do NOT open a PR, do NOT merge.
+Its one terminal condition is your work committed on branch \`fm/$ID\` as a clean fast-forward. Do NOT push, do NOT open a PR, do NOT merge.
 Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
 When it is implemented and committed, append \`done: ready in branch fm/$ID\` to the status file and stop.
 The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path.
@@ -384,8 +394,8 @@ EOF
     IFS= read -r -d '' DOD <<EOF || true
 # Definition of done
 Delivery contract: mode=no-mistakes
-The task is complete only when committed on your branch.
-When you believe it is complete, append \`done: {summary}\` to the status file and stop.
+This task has exactly one terminal condition: a PR whose CI is green. Finishing the implementation is not it.
+When you believe the implementation is complete, commit it on your branch - uncommitted work cannot ship - then append \`working: implemented, ready for validation\` to the status file and stop there.
 Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
 
 You drive no-mistakes by responding to its gates, not by implementing fixes.
@@ -433,12 +443,16 @@ $RULE1
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
+   \`done:\` reports ONLY the one terminal condition named under Definition of done, never
+   that your code works: it tells firstmate a reviewable result exists. Report every
+   earlier phase, however finished the implementation feels, with \`working:\`.
    Each append wakes firstmate, so report sparingly: only phase changes a supervisor
    would act on (setup done, bug reproduced, fix implemented, validation passed) and the
    needs-decision/blocked/paused/done/failed states. No step-by-step FYI progress lines;
    firstmate reads your pane for that.
    A mid-task \`working:\` line (including setup complete) is nonterminal: do not end the
-   turn after it; continue the same stage until a defined \`done:\` gate under Definition of done.
+   turn after it, unless Definition of done names that exact line as a stop point; otherwise
+   continue the same stage until you reach its terminal condition.
    Use \`$PAUSED_VERB: {why}\` - distinct from \`blocked:\` - ONLY when you are deliberately idling on a
    known external wait you expect to clear on its own (an upstream release, a rate-limit reset,
    a scheduled window): firstmate then leaves your idle pane alone and rechecks it on a long

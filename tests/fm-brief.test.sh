@@ -354,6 +354,63 @@ test_no_mistakes_dod_wording() {
   pass "fm-brief.sh: no-mistakes DOD keeps its apostrophe prose, now parse-safe"
 }
 
+# Every generated brief must instruct exactly ONE `done:` append, and it must be
+# that delivery mode's real end state. The no-mistakes brief used to instruct a
+# `done: {summary}` on the finished implementation as well, and four consecutive
+# workers reported done with no pipeline run because nothing checked the generated
+# text. Counting the instructions is what makes a second terminal-sounding `done:`
+# fail here instead of in a worker's status file.
+test_brief_instructs_exactly_one_terminal_done() {
+  local home id brief kind flag terminal count
+  home="$TMP_ROOT/terminal-condition-home"
+  mkdir -p "$home/data"
+  while IFS='|' read -r kind flag terminal; do
+    [ -n "$kind" ] || continue
+    id="brief-terminal-$kind"
+    # shellcheck disable=SC2086  # flag is an intentional word-split arg list
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj $flag >/dev/null 2>&1 \
+      || fail "$kind: brief should scaffold"
+    brief="$home/data/$id/brief.md"
+    count=$(grep -c 'append `done' "$brief")
+    [ "$count" -eq 1 ] \
+      || fail "$kind: brief instructs $count \`done:\` appends; it must name exactly one terminal condition"
+    assert_grep "$terminal" "$brief" \
+      "$kind: the single \`done:\` instruction is not this mode's terminal condition"
+  done <<'ROWS'
+no-mistakes|--mode no-mistakes|append `done: PR {url} checks green`
+direct-PR|--mode direct-PR|append `done: PR {url}` to the status file
+local-only|--mode local-only|append `done: ready in branch fm/brief-terminal-local-only`
+scout|--scout|append `done: {one-line conclusion}` to the status file
+ROWS
+  pass "fm-brief.sh: every brief instructs exactly one terminal \`done:\` append"
+}
+
+# A rule that only forbids leaves the finished implementation with nowhere to go,
+# which is how the mislabelled `done:` arose. The no-mistakes brief must name the
+# non-terminal line explicitly, state that the green PR is the only terminal
+# condition, and exempt that one named stop from the "never end a turn on
+# `working:`" rule, or the worker is left with two contradictory instructions.
+test_no_mistakes_brief_redirects_the_finished_implementation() {
+  local home id brief
+  home="$TMP_ROOT/implementation-report-home"
+  mkdir -p "$home/data"
+  id="brief-impl-report-b2"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1 \
+    || fail "no-mistakes brief should scaffold"
+  brief="$home/data/$id/brief.md"
+  assert_grep "exactly one terminal condition: a PR whose CI is green" "$brief" \
+    "no-mistakes brief did not state the green PR as its only terminal condition"
+  assert_grep "append \`working: implemented, ready for validation\` to the status file and stop there" "$brief" \
+    "no-mistakes brief left the finished implementation with no non-terminal line to report"
+  assert_no_grep "append \`done: {summary}\`" "$brief" \
+    "no-mistakes brief reinstated a pre-validation \`done:\`"
+  assert_grep "\`done:\` reports ONLY the one terminal condition named under Definition of done" "$brief" \
+    "status protocol lost the meaning of \`done:\`"
+  assert_grep "unless Definition of done names that exact line as a stop point" "$brief" \
+    "status protocol forbids the very stop the no-mistakes definition of done requires"
+  pass "fm-brief.sh: the no-mistakes brief redirects a finished implementation to a non-terminal report"
+}
+
 test_ship_project_memory_wording() {
   local home id brief
   home="$TMP_ROOT/project-memory-home"
@@ -719,6 +776,8 @@ test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
+test_brief_instructs_exactly_one_terminal_done
+test_no_mistakes_brief_redirects_the_finished_implementation
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
