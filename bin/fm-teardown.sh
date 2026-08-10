@@ -481,7 +481,8 @@ recorded_pr_forge_reports_merged() {
     github)
       if ! out=$(cd "$WT" && fm_run_timed "$LANDED_REMOTE_TIMEOUT" \
           gh-axi pr view "$TEARDOWN_RECORDED_PR_NUMBER" \
-          --repo "$TEARDOWN_RECORDED_PR_PATH" 2>/dev/null); then
+          --repo "$TEARDOWN_RECORDED_PR_PATH" \
+          --hostname "$TEARDOWN_RECORDED_PR_HOST" 2>/dev/null); then
         TEARDOWN_LANDING_REFUSAL_DETAIL="Squash forge proof unavailable: the forge is unreachable for the recorded PR; restore forge access or prove equivalent content on a verified remote default branch."
         return 1
       fi

@@ -279,6 +279,34 @@ SH
   chmod +x "$case_dir/fakebin/gh-axi"
 }
 
+add_gh_axi_host_sensitive_pr_state() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+host=${GH_HOST:-github.com}
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --hostname)
+      host=${2:-}
+      shift 2
+      ;;
+    --hostname=*)
+      host=${1#--hostname=}
+      shift
+      ;;
+    *) shift ;;
+  esac
+done
+printf '%s\n' "$host" >> "${FM_TEST_GH_AXI_HOST_LOG:?}"
+if [ "$host" = github.com ]; then
+  printf '%s\n' 'pull_request:' '  number: 7' '  state: open'
+else
+  printf '%s\n' 'pull_request:' '  number: 7' '  state: merged'
+fi
+SH
+  chmod +x "$case_dir/fakebin/gh-axi"
+}
+
 add_gh_unreachable() {
   local case_dir=$1
   cat > "$case_dir/fakebin/gh" <<'SH'
@@ -944,6 +972,30 @@ test_unmerged_pr_with_matching_recorded_head_refuses() {
   assert_grep "recorded PR is not merged" "$case_dir/stderr" \
     "squash-unmerged: refusal did not identify the unmerged PR"
   pass "an exact recorded reviewed head does not authorize teardown while the PR is unmerged"
+}
+
+test_wrong_ambient_github_host_cannot_satisfy_squash_proof() {
+  local case_dir host_log rc
+  case_dir=$(make_case squash-wrong-ambient-host)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  append_pr_meta_for_current_head "$case_dir"
+  host_log="$case_dir/gh-axi-host.log"
+  add_gh_axi_host_sensitive_pr_state "$case_dir"
+  configure_origin_as_github_fixture "$case_dir"
+
+  set +e
+  GH_HOST=wrong-host.example FM_TEST_GH_AXI_HOST_LOG="$host_log" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "squash-wrong-ambient-host: teardown should refuse the unmerged canonical PR"
+  assert_grep "recorded PR is not merged" "$case_dir/stderr" \
+    "squash-wrong-ambient-host: refusal did not identify the canonical PR state"
+  grep -qxF github.com "$host_log" \
+    || fail "squash-wrong-ambient-host: forge proof did not pin the recorded GitHub host"
+  pass "an ambient wrong GitHub host cannot satisfy the squash landing proof"
 }
 
 test_content_fallback_allows_without_pr_and_with_unrelated_default_work() {
@@ -2150,6 +2202,7 @@ test_herdr_projection_teardown_retires_journal_only_after_confirmed_close
 test_herdr_projection_teardown_retains_journal_when_close_unconfirmed
 test_squash_merged_branch_deleted_allows
 test_unmerged_pr_with_matching_recorded_head_refuses
+test_wrong_ambient_github_host_cannot_satisfy_squash_proof
 test_content_fallback_allows_without_pr_and_with_unrelated_default_work
 test_squash_merged_pr_refuses_replayed_patch_without_exact_recorded_head
 test_merged_pr_with_later_local_commit_refuses
