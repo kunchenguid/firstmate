@@ -141,7 +141,7 @@ fm_worker_primary_ancestry_clear() {
       printf '%s\n' "$env" | grep -Eq '^FM_AGENT_ROLE=(crewmate|secondmate)$' && return 1
       ppid=$(awk '/^PPid:/ {print $2; exit}' "/proc/$pid/status" 2>/dev/null)
     else
-      ppid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d '[:space:]')
+      return 1
     fi
     case "$ppid" in
       ''|*[!0-9]*) return 1 ;;

@@ -260,6 +260,26 @@ test_forged_primary_role_is_refused_from_worker_ancestry() {
   pass "explicit primary roles require non-forgeable origin proof"
 }
 
+test_primary_ancestry_refuses_unreadable_process_environment() {
+  local status
+  if bash -c '
+    . "$1"
+    [() {
+      case "${1:-}|${2:-}" in
+        -r\|/proc/*/environ) return 1 ;;
+      esac
+      builtin [ "$@"
+    }
+    fm_worker_primary_ancestry_clear
+  ' _ "$ROOT/bin/fm-worker-isolation-lib.sh"; then
+    status=0
+  else
+    status=$?
+  fi
+  expect_code 1 "$status" "unreadable process environments must not permit ancestry-only primary proof"
+  pass "primary proof refuses unreadable process environments"
+}
+
 test_unreadable_task_start_proof_remains_contested() {
   local out status
   if out=$(bash -c '
@@ -274,6 +294,34 @@ test_unreadable_task_start_proof_remains_contested() {
   expect_code 0 "$status" "an indexed task with unreadable start proof must remain contested"
   [ "$out" = '<unknown>' ] || fail "unreadable task start proof was not contested: $out"
   pass "unreadable task start proof remains contested"
+}
+
+test_task_pid_index_distinguishes_complete_empty_from_incomplete_scan() {
+  local out status
+  if out=$(bash -c '
+    . "$1"
+    fm_agent_environ() { printf "PATH=/bin"; }
+    fm_agent_task_pid_index
+  ' _ "$ROOT/bin/fm-agent-cwd-lib.sh"); then
+    status=0
+  else
+    status=$?
+  fi
+  expect_code 0 "$status" "a complete scan with no task declarations must succeed"
+  [ -z "$out" ] || fail "a complete empty process index emitted entries: $out"
+
+  if out=$(bash -c '
+    . "$1"
+    fm_agent_environ() { return 1; }
+    fm_agent_task_pid_index
+  ' _ "$ROOT/bin/fm-agent-cwd-lib.sh"); then
+    status=0
+  else
+    status=$?
+  fi
+  expect_code 2 "$status" "an unreadable process scan must remain incomplete"
+  [ -z "$out" ] || fail "an incomplete process index emitted entries: $out"
+  pass "the process index separates a proven empty scan from incomplete evidence"
 }
 
 test_declaration_refuses_rather_than_emitting_a_partial_prefix() {
@@ -1187,6 +1235,29 @@ test_sweep_fails_closed_without_process_evidence() {
   pass "unproven process evidence blocks restore-time mutation without using a pane path"
 }
 
+test_sweep_blocks_on_incomplete_process_scan() {
+  local world out status path scanbin id
+  world=$(make_sweep_home sweep-incomplete-scan)
+  id="task-f3a-$RUN_TAG"
+  fm_write_meta "$world/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "worktree=$world/wt" "project=$world/project" \
+    "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
+  path=$(sweep_live_tmux "$world" fm-someone-else)
+  scanbin="$world/fakebin-incomplete-scan"
+  mkdir -p "$scanbin"
+  cat > "$scanbin/tr" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$scanbin/tr"
+  out=$(run_sweep "$world" "$scanbin:$path")
+  status=$?
+  expect_code 1 "$status" "an incomplete process scan must block restore-time mutation"
+  assert_contains "$out" "ISOLATION: task $id live process identity scan is incomplete" \
+    "the sweep treated an incomplete process scan as an empty owner index"
+  pass "the restore sweep blocks when its process identity scan is incomplete"
+}
+
 test_sweep_does_not_block_a_record_whose_endpoint_is_gone() {
   local world out status path
   world=$(make_sweep_home sweep-stale-endpoint)
@@ -1310,7 +1381,9 @@ test_incomplete_worker_identity_refuses_primary_operations
 test_markerless_worker_is_refused_before_primary_state_resolution
 test_markerless_worker_is_refused_at_primary_cwd
 test_forged_primary_role_is_refused_from_worker_ancestry
+test_primary_ancestry_refuses_unreadable_process_environment
 test_unreadable_task_start_proof_remains_contested
+test_task_pid_index_distinguishes_complete_empty_from_incomplete_scan
 test_every_verified_harness_launches_with_its_home_declaration
 test_secondmate_child_receives_only_its_own_home
 test_primary_scope_requires_authoritative_primary_proof
@@ -1342,6 +1415,7 @@ test_teardown_retires_a_contested_lease_even_with_force
 test_sweep_reports_a_worktree_that_collapsed_onto_the_primary_checkout
 test_sweep_is_silent_for_a_correctly_isolated_worker
 test_sweep_fails_closed_without_process_evidence
+test_sweep_blocks_on_incomplete_process_scan
 test_sweep_does_not_block_a_record_whose_endpoint_is_gone
 test_sweep_reports_a_foreign_process_even_when_its_endpoint_is_gone
 test_sweep_still_blocks_when_the_endpoint_cannot_be_read

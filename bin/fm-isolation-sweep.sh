@@ -63,7 +63,13 @@ ROOT_REAL=$(fm_agent_canonical_dir "$FM_ROOT") || ROOT_REAL=$FM_ROOT
 # environment reads on the session-start critical path, and the incident this
 # sweep exists for had 17 concurrent tasks. An empty index is a real answer (no
 # live process declares a task), not a missing one.
-PID_INDEX=$(fm_agent_task_pid_index) || PID_INDEX=
+PID_INDEX=
+pid_index_status=0
+if PID_INDEX=$(fm_agent_task_pid_index); then
+  pid_index_status=0
+else
+  pid_index_status=$?
+fi
 sweep_status=0
 
 for meta in "$STATE"/*.meta; do
@@ -71,6 +77,11 @@ for meta in "$STATE"/*.meta; do
   id=$(basename "$meta" .meta)
   recorded=$(fm_meta_get "$meta" worktree)
   [ -n "$recorded" ] || continue
+  if [ "$pid_index_status" -ne 0 ]; then
+    echo "ISOLATION: task $id live process identity scan is incomplete; stop it before it acts on this home's records"
+    sweep_status=1
+    continue
+  fi
   backend=$(fm_backend_of_meta "$meta")
   target=$(fm_backend_target_of_meta "$meta")
   kind=$(fm_meta_get "$meta" kind)

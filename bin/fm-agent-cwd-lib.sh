@@ -213,21 +213,27 @@ fm_agent_worker_home_contract_matches() {
 # the lookups below. Asking per task instead is O(tasks x processes), which the
 # resume sweep pays on the session-start critical path - and the incident it
 # exists for had 17 concurrent tasks.
-# Returns 1 when procfs is unavailable or no live process declares a task.
+# Returns 2 when the process scan is incomplete; a complete scan returns 0,
+# including when no live process declares a task.
 fm_agent_task_pid_index() {
-  local entry pid task start home role found=1
-  [ -d /proc ] || return 1
+  local entry pid env task start home role uncertain=0
+  [ -d /proc ] || return 2
   for entry in /proc/[0-9]*; do
     [ -d "$entry" ] || continue
     pid=${entry#/proc/}
-    task=$(fm_agent_proc_env "$pid" FM_AGENT_TASK) || continue
+    if ! env=$(fm_agent_environ "$pid"); then
+      [ -d "$entry" ] && uncertain=1
+      continue
+    fi
+    task=$(printf '%s\n' "$env" | sed -n 's/^FM_AGENT_TASK=//p' | head -1)
+    [ -n "$task" ] || continue
     start=$(fm_agent_proc_start_time "$pid" 2>/dev/null || true)
-    home=$(fm_agent_proc_env "$pid" FM_AGENT_OWNER_HOME 2>/dev/null || true)
-    role=$(fm_agent_proc_env "$pid" FM_AGENT_ROLE 2>/dev/null || true)
+    home=$(printf '%s\n' "$env" | sed -n 's/^FM_AGENT_OWNER_HOME=//p' | head -1)
+    role=$(printf '%s\n' "$env" | sed -n 's/^FM_AGENT_ROLE=//p' | head -1)
     printf '%s\t%s\t%s\t%s\t%s\n' "$task" "$pid" "$start" "$home" "$role"
-    found=0
   done
-  return "$found"
+  [ "$uncertain" -eq 0 ] && return 0
+  return 2
 }
 
 fm_agent_task_owner_conflict() {
