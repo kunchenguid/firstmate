@@ -3,11 +3,12 @@
 # exact-head workflow-runs CI fallback, and fm-gh.sh's credential-prefix contract.
 #
 # The routed invocation under test is the exact argument vector the no-mistakes PR
-# step builds for GitHub. Nothing here touches the real gh, the real daemon, or any
-# network: a fake gh records how it was called, and a fake credential runner stands in
-# for whatever the home configures. CI cases feed raw workflow-run pages through the
-# same jq expression the helper gives gh, so they exercise the public command contract
-# rather than asserting implementation bytes.
+# step builds for GitHub. Nothing here touches the real gh or the real daemon: a fake gh
+# records how it was called, and a fake credential runner stands in for whatever the
+# home configures. The pinned no-mistakes module is resolved for its public CI consumer
+# boundary. CI cases feed raw workflow-run pages through the same jq expression the
+# helper gives gh, so they exercise the public command contract rather than asserting
+# implementation bytes.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -17,8 +18,11 @@ SHIM="$ROOT/bin/fm-gh-shim.sh"
 WRAPPER="$ROOT/bin/fm-gh.sh"
 CI_FALLBACK="$ROOT/bin/fm-gh-ci-fallback.sh"
 INSTALLER="$ROOT/bin/fm-gh-shim-install.sh"
+NO_MISTAKES_CI_CONSUMER="$ROOT/tests/fixtures/no-mistakes-ci-consumer"
 assert_present "$CI_FALLBACK" "bin/fm-gh-ci-fallback.sh is missing"
 [ -x "$CI_FALLBACK" ] || fail "bin/fm-gh-ci-fallback.sh must be executable"
+assert_present "$NO_MISTAKES_CI_CONSUMER/main.go" "the no-mistakes CI consumer fixture is missing"
+assert_present "$NO_MISTAKES_CI_CONSUMER/go.mod" "the no-mistakes CI consumer module is missing"
 TMP_ROOT=$(fm_test_tmproot fm-gh-shim)
 # Create before normalizing, then normalize: $TMPDIR often carries a trailing slash and
 # these cases compare fixture paths against the installer's own `cd`-normalized output,
@@ -27,6 +31,8 @@ TMP_ROOT=$(fm_test_tmproot fm-gh-shim)
 # directory before it is ever used, which would make the normalizing `cd` fail.
 mkdir -p "$TMP_ROOT"
 TMP_ROOT=$(cd "$TMP_ROOT" && pwd)
+export FM_GH_CI_STATE_ROOT="$TMP_ROOT/ci-state"
+export FM_GH_CI_ACTIONS_ONLY_REPOS=o/r
 
 # make_fake_gh <dir>: a stand-in real gh that appends its argv and the credential the
 # environment handed it to <dir>/gh.calls.
@@ -143,6 +149,10 @@ printf 'token:%s\n' "${GITHUB_TOKEN:-<none>}" >> "$FAKE_GH_LOG"
 
 if [ "${1:-}" = pr ] && [ "${2:-}" = checks ]; then
   case "${FM_TEST_CHECKS_ERROR:-403}" in
+    success)
+      printf '%s\n' '[{"name":"native-check","state":"SUCCESS","bucket":"pass","completedAt":"2026-08-07T12:34:56Z"}]'
+      exit 0
+      ;;
     403)
       echo "GraphQL: Resource not accessible by personal access token (node.statusCheckRollup.nodes.0.commit.statusCheckRollup)" >&2
       ;;
@@ -187,11 +197,42 @@ if [ "${1:-}" = api ]; then
     "repos/o/r/pulls/7")
       pull_calls=$(grep -c 'argv:api -X GET repos/o/r/pulls/7' "$FAKE_GH_LOG")
       if [ "$pull_calls" -gt 1 ]; then
+        if [ -n "${FM_TEST_PR_HEAD_AFTER_ERROR:-}" ]; then
+          printf '%s\n' "$FM_TEST_PR_HEAD_AFTER_ERROR" >&2
+          exit 1
+        fi
         printf '%s\n' "${FM_TEST_PR_HEAD_AFTER:-$FM_TEST_PR_HEAD}"
       else
+        if [ -n "${FM_TEST_PR_HEAD_ERROR:-}" ]; then
+          printf '%s\n' "$FM_TEST_PR_HEAD_ERROR" >&2
+          exit 1
+        fi
         printf '%s\n' "$FM_TEST_PR_HEAD"
       fi
       exit 0
+      ;;
+    "repos/o/r/actions/workflows?per_page=100")
+      if [ -n "${FM_TEST_WORKFLOW_INVENTORY:-}" ]; then
+        "$FM_TEST_JQ" -c '.[]' "$FM_TEST_WORKFLOW_INVENTORY" | "$FM_TEST_JQ" -S -c "$query"
+      else
+        "$FM_TEST_JQ" -c \
+          '[.[] | {workflows: [.workflow_runs[] | select(.workflow_id != null) | {id: .workflow_id, name, path: (".github/workflows/" + (.workflow_id | tostring) + ".yml"), state: "active"}]}]' \
+          "$FM_TEST_WORKFLOW_PAGES" | "$FM_TEST_JQ" -c '.[]' | "$FM_TEST_JQ" -S -c "$query"
+      fi
+      exit $?
+      ;;
+    repos/o/r/actions/runs/*/jobs*)
+      run_id=${endpoint#repos/o/r/actions/runs/}
+      run_id=${run_id%%/*}
+      if [ -n "${FM_TEST_JOB_PAGES:-}" ]; then
+        "$FM_TEST_JQ" -c '.[]' "$FM_TEST_JOB_PAGES" | "$FM_TEST_JQ" -S -c "$query"
+      else
+        "$FM_TEST_JQ" -c '.[]' "$FM_TEST_WORKFLOW_PAGES" | \
+          "$FM_TEST_JQ" -c --argjson rid "$run_id" \
+            '{jobs: [.workflow_runs[] | select(.id == $rid) | {id: ((.id * 100) + .run_attempt), run_id: .id, run_attempt, name: (.name + " job"), head_sha, status, conclusion, started_at: .created_at, completed_at: .updated_at, html_url}]}' | \
+          "$FM_TEST_JQ" -S -c "$query"
+      fi
+      exit $?
       ;;
     "repos/o/r/actions/runs?head_sha=$FM_TEST_PR_HEAD&per_page=100")
       "$FM_TEST_JQ" -c '.[]' "$FM_TEST_WORKFLOW_PAGES" | "$FM_TEST_JQ" -S -c "$query"
@@ -225,18 +266,50 @@ assert_run_field() {
     fail "$message (expected $name.$field=$expected, got $actual)"
 }
 
+assert_no_mistakes_ci_consumer_rejects() {
+  local out=$1 message=$2 json consumer_dir consumer response verdict
+  json=$(printf '%s\n' "$out" | grep -E '^\[' | tail -1)
+  [ -n "$json" ] || fail "$message (no JSON check array in the output)"
+  consumer_dir="$TMP_ROOT/no-mistakes-ci-consumer"
+  consumer="$consumer_dir/consumer"
+  response="$consumer_dir/response.json"
+  if [ ! -x "$consumer" ]; then
+    command -v go >/dev/null 2>&1 || fail "$message (Go is required for the pinned no-mistakes consumer)"
+    mkdir -p "$consumer_dir"
+    cp "$NO_MISTAKES_CI_CONSUMER/main.go" "$NO_MISTAKES_CI_CONSUMER/go.mod" "$consumer_dir/"
+    (cd "$consumer_dir" && GOWORK=off go build -mod=mod -o "$consumer" .) ||
+      fail "$message (the pinned no-mistakes consumer did not build)"
+  fi
+  printf '%s\n' "$json" > "$response"
+  verdict=$("$consumer" "$response") || fail "$message (consumer verdict was $verdict)"
+  [ "$verdict" = rejected ] || fail "$message (consumer verdict was $verdict)"
+}
+
+ci_state_path() {
+  printf '%s/owner-o/repository-r/pr-7.json\n' "$1"
+}
+
 write_ci_pages() {
-  local path=$1 name=$2 status=$3 conclusion=$4
+  local path=$1 name=$2 status=$3 conclusion=$4 head=${5:-1111111111111111111111111111111111111111}
   cat > "$path" << EOF
 [
   {
     "workflow_runs": [
       {
+        "id": 123,
+        "workflow_id": 7001,
+        "run_number": 12,
+        "run_attempt": 1,
         "name": "$name",
+        "event": "pull_request",
+        "head_sha": "$head",
         "status": "$status",
         "conclusion": $conclusion,
+        "created_at": "2026-08-07T12:33:56Z",
         "updated_at": "2026-08-07T12:34:56Z",
-        "html_url": "https://github.com/o/r/actions/runs/123"
+        "html_url": "https://github.com/o/r/actions/runs/123",
+        "repository": {"full_name": "o/r"},
+        "pull_requests": [{"number": 7, "head": {"sha": "$head"}}]
       }
     ]
   }
@@ -250,40 +323,129 @@ write_empty_ci_pages() {
 }
 
 write_multi_bucket_ci_pages() {
-  local path=$1
-  cat > "$path" << 'EOF'
+  local path=$1 head=$2
+  cat > "$path" << EOF
 [
   {
     "workflow_runs": [
       {
+        "id": 201,
+        "workflow_id": 7201,
+        "run_number": 1,
+        "run_attempt": 1,
         "name": "cancelled-workflow",
+        "event": "pull_request",
+        "head_sha": "$head",
         "status": "completed",
         "conclusion": "cancelled",
+        "created_at": "2026-08-07T12:33:56Z",
         "updated_at": "2026-08-07T12:34:56Z",
-        "html_url": "https://github.com/o/r/actions/runs/201"
+        "html_url": "https://github.com/o/r/actions/runs/201",
+        "repository": {"full_name": "o/r"},
+        "pull_requests": [{"number": 7, "head": {"sha": "$head"}}]
       }
     ]
   },
   {
     "workflow_runs": [
       {
+        "id": 202,
+        "workflow_id": 7202,
+        "run_number": 1,
+        "run_attempt": 1,
         "name": "skipped-workflow",
+        "event": "pull_request",
+        "head_sha": "$head",
         "status": "completed",
         "conclusion": "skipped",
+        "created_at": "2026-08-07T12:34:56Z",
         "updated_at": "2026-08-07T12:35:56Z",
-        "html_url": "https://github.com/o/r/actions/runs/202"
+        "html_url": "https://github.com/o/r/actions/runs/202",
+        "repository": {"full_name": "o/r"},
+        "pull_requests": [{"number": 7, "head": {"sha": "$head"}}]
       },
       {
+        "id": 203,
+        "workflow_id": 7203,
+        "run_number": 1,
+        "run_attempt": 1,
         "name": "queued-workflow",
+        "event": "pull_request",
+        "head_sha": "$head",
         "status": "queued",
         "conclusion": null,
+        "created_at": "2026-08-07T12:35:56Z",
         "updated_at": "2026-08-07T12:36:56Z",
-        "html_url": "https://github.com/o/r/actions/runs/203"
+        "html_url": "https://github.com/o/r/actions/runs/203",
+        "repository": {"full_name": "o/r"},
+        "pull_requests": [{"number": 7, "head": {"sha": "$head"}}]
       }
     ]
   }
 ]
 EOF
+}
+
+test_ci_primary_checks_path_is_preserved_when_readable() {
+  local case_dir real_dir shim_dir state_dir state_path out status jq_bin
+  case_dir="$TMP_ROOT/ci-primary"
+  real_dir="$case_dir/real"
+  shim_dir="$case_dir/shim"
+  state_dir="$case_dir/state"
+  state_path=$(ci_state_path "$state_dir")
+  jq_bin=$(command -v jq) || fail "jq is required to inspect the primary check response"
+  make_fake_ci_gh "$real_dir"
+  mkdir -p "$shim_dir" "$(dirname "$state_path")"
+  printf '%s\n' '{"head":"old","first_seen":1}' > "$state_path"
+  ln -sf "$SHIM" "$shim_dir/gh"
+
+  status=0
+  out=$(FAKE_GH_LOG="$case_dir/gh.calls" FM_TEST_CHECKS_ERROR=success \
+    FM_GH_CI_STATE_ROOT="$state_dir" \
+    PATH="$shim_dir:$real_dir:$PATH" \
+    gh pr checks 7 --repo o/r --json name,state,bucket,completedAt 2>&1) || status=$?
+
+  expect_code 0 "$status" "readable primary gh pr checks path"
+  assert_run_field "$jq_bin" "$out" native-check bucket pass \
+    "the readable primary check result did not pass through unchanged"
+  assert_no_grep 'argv:api' "$case_dir/gh.calls" \
+    "the readable primary check result unnecessarily reached the Actions fallback"
+  assert_absent "$state_path" "a readable primary check result retained fallback deadline state"
+  pass "a readable primary status-check rollup bypasses the Actions fallback"
+}
+
+test_ci_state_identity_is_canonical_and_collision_free() {
+  local case_dir real_dir state_dir first_path second_path out status jq_bin
+  case_dir="$TMP_ROOT/ci-state-identity"
+  real_dir="$case_dir/real"
+  state_dir="$case_dir/state"
+  first_path="$state_dir/owner-foo/repository-bar_baz/pr-7.json"
+  second_path="$state_dir/owner-foo-bar/repository-baz/pr-7.json"
+  jq_bin=$(command -v jq) || fail "jq is required to inspect the primary check response"
+  make_fake_ci_gh "$real_dir"
+  mkdir -p "$(dirname "$first_path")" "$(dirname "$second_path")"
+  printf '%s\n' '{"head":"first","first_seen":1}' > "$first_path"
+  printf '%s\n' '{"head":"second","first_seen":1}' > "$second_path"
+
+  status=0
+  out=$(FAKE_GH_LOG="$case_dir/first.calls" FM_TEST_CHECKS_ERROR=success \
+    FM_GH_CI_STATE_ROOT="$state_dir" \
+    "$CI_FALLBACK" "$real_dir/gh" pr checks 7 --repo Foo/Bar_Baz \
+    --json name,state,bucket,completedAt 2>&1) || status=$?
+  expect_code 0 "$status" "canonical mixed-case primary state cleanup"
+  assert_run_field "$jq_bin" "$out" native-check bucket pass \
+    "canonical mixed-case state cleanup changed the primary result"
+  assert_absent "$first_path" "mixed-case repository identity did not clear its canonical state"
+  assert_present "$second_path" "one repository identity cleared another repository's state"
+
+  status=0
+  out=$(FAKE_GH_LOG="$case_dir/second.calls" FM_TEST_CHECKS_ERROR=success \
+    FM_GH_CI_STATE_ROOT="$state_dir" \
+    "$CI_FALLBACK" "$real_dir/gh" pr checks 7 --repo foo-bar/baz \
+    --json name,state,bucket,completedAt 2>&1) || status=$?
+  expect_code 0 "$status" "distinct repository primary state cleanup"
+  assert_absent "$second_path" "the distinct repository identity did not clear its own state"
+  pass "deadline state identity is canonical and collision-free"
 }
 
 test_ci_403_falls_back_to_exact_head_green_without_privileged_token() {
@@ -297,7 +459,7 @@ test_ci_403_falls_back_to_exact_head_green_without_privileged_token() {
   make_fake_ci_gh "$real_dir"
   make_fake_cred "$case_dir/tools"
   make_home "$home" "$case_dir/tools/fakecred pr-capable-token --"
-  write_ci_pages "$case_dir/exact.json" exact-head completed '"success"'
+  write_ci_pages "$case_dir/exact.json" exact-head completed '"success"' "$head"
   write_ci_pages "$case_dir/stale.json" stale-head completed '"failure"'
   mkdir -p "$shim_dir"
   ln -sf "$SHIM" "$shim_dir/gh"
@@ -330,7 +492,7 @@ test_ci_deeper_denial_path_falls_back_to_exact_head_green() {
   head=9999999999999999999999999999999999999999
   jq_bin=$(command -v jq) || fail "jq is required to exercise gh's built-in --jq contract"
   make_fake_ci_gh "$real_dir"
-  write_ci_pages "$case_dir/exact.json" exact-head completed '"success"'
+  write_ci_pages "$case_dir/exact.json" exact-head completed '"success"' "$head"
   write_ci_pages "$case_dir/stale.json" stale-head completed '"failure"'
   mkdir -p "$shim_dir"
   ln -sf "$SHIM" "$shim_dir/gh"
@@ -351,6 +513,141 @@ test_ci_deeper_denial_path_falls_back_to_exact_head_green() {
   pass "a denial naming statusCheckRollup deeper in its path still reaches the exact-head verdict"
 }
 
+test_ci_green_requires_actions_only_repository_authority() {
+  local case_dir real_dir shim_dir head state_dir state_path out status jq_bin
+  case_dir="$TMP_ROOT/ci-incomplete-authority"
+  real_dir="$case_dir/real"
+  shim_dir="$case_dir/shim"
+  state_dir="$case_dir/state"
+  state_path=$(ci_state_path "$state_dir")
+  head=9898989898989898989898989898989898989898
+  jq_bin=$(command -v jq) || fail "jq is required to exercise gh's built-in --jq contract"
+  make_fake_ci_gh "$real_dir"
+  write_ci_pages "$case_dir/exact.json" exact-head completed '"success"' "$head"
+  write_ci_pages "$case_dir/stale.json" stale-head completed '"failure"'
+  mkdir -p "$shim_dir" "$(dirname "$state_path")"
+  printf '%s\n' '{"head":"old","first_seen":1}' > "$state_path"
+  ln -sf "$SHIM" "$shim_dir/gh"
+
+  status=0
+  out=$(FAKE_GH_LOG="$case_dir/gh.calls" FM_TEST_PR_HEAD="$head" \
+    FM_TEST_WORKFLOW_PAGES="$case_dir/exact.json" FM_TEST_STALE_PAGES="$case_dir/stale.json" \
+    FM_TEST_JQ="$jq_bin" FM_GH_CI_STATE_ROOT="$state_dir" FM_GH_CI_ACTIONS_ONLY_REPOS='' \
+    GITHUB_TOKEN=narrow-ci-token PATH="$shim_dir:$real_dir:$PATH" \
+    gh pr checks 7 --repo o/r --json name,state,bucket,completedAt 2>&1) || status=$?
+
+  expect_code 0 "$status" "Actions-only evidence without completeness authority"
+  assert_run_field "$jq_bin" "$out" "Firstmate CI fallback - incomplete evidence" bucket fail \
+    "green Actions evidence certified a repository without Actions-only authority"
+  assert_no_mistakes_ci_consumer_rejects "$out" \
+    "the public CI consumer accepted incomplete Actions-only evidence"
+  assert_absent "$state_path" "terminal incomplete evidence retained a stale pending deadline"
+  pass "green Actions evidence requires exact repository-level completeness authority"
+}
+
+test_ci_terminal_actions_conclusions_fail_at_the_consumer_boundary() {
+  local case_dir real_dir shim_dir head conclusion out status jq_bin
+  case_dir="$TMP_ROOT/ci-terminal-conclusions"
+  real_dir="$case_dir/real"
+  shim_dir="$case_dir/shim"
+  head=9797979797979797979797979797979797979797
+  jq_bin=$(command -v jq) || fail "jq is required to exercise gh's built-in --jq contract"
+  make_fake_ci_gh "$real_dir"
+  write_ci_pages "$case_dir/stale.json" stale-head completed '"success"'
+  mkdir -p "$shim_dir"
+  ln -sf "$SHIM" "$shim_dir/gh"
+
+  for conclusion in failure timed_out action_required startup_failure cancelled skipped neutral stale; do
+    write_ci_pages "$case_dir/exact.json" "$conclusion-workflow" completed "\"$conclusion\"" "$head"
+    status=0
+    out=$(FAKE_GH_LOG="$case_dir/$conclusion.calls" FM_TEST_PR_HEAD="$head" \
+      FM_TEST_WORKFLOW_PAGES="$case_dir/exact.json" FM_TEST_STALE_PAGES="$case_dir/stale.json" \
+      FM_TEST_JQ="$jq_bin" FM_GH_CI_STATE_ROOT="$case_dir/state-$conclusion" \
+      GITHUB_TOKEN=narrow-ci-token PATH="$shim_dir:$real_dir:$PATH" \
+      gh pr checks 7 --repo o/r --json name,state,bucket,completedAt 2>&1) || status=$?
+    expect_code 0 "$status" "$conclusion workflow transport"
+    assert_run_field "$jq_bin" "$out" "$conclusion-workflow" state "$conclusion" \
+      "$conclusion workflow lost its provider conclusion"
+    assert_run_field "$jq_bin" "$out" "$conclusion-workflow" bucket fail \
+      "$conclusion workflow did not map to the consumer's failure bucket"
+    assert_no_mistakes_ci_consumer_rejects "$out" \
+      "the public CI consumer accepted a $conclusion workflow"
+  done
+  pass "every terminal non-success Actions conclusion fails at the CI consumer boundary"
+}
+
+test_ci_unavailable_python_emits_typed_failure_and_clears_state() {
+  local case_dir real_dir bad_bin state_dir state_path out status jq_bin
+  case_dir="$TMP_ROOT/ci-python-unavailable"
+  real_dir="$case_dir/real"
+  bad_bin="$case_dir/bad-bin"
+  state_dir="$case_dir/state"
+  state_path=$(ci_state_path "$state_dir")
+  jq_bin=$(command -v jq) || fail "jq is required to inspect the typed dependency failure"
+  make_fake_ci_gh "$real_dir"
+  mkdir -p "$bad_bin" "$(dirname "$state_path")"
+  printf '%s\n' '{"head":"old","first_seen":1}' > "$state_path"
+  cat > "$bad_bin/python3" <<'EOF'
+#!/bin/sh
+exit 127
+EOF
+  chmod +x "$bad_bin/python3"
+
+  status=0
+  out=$(FAKE_GH_LOG="$case_dir/gh.calls" FM_GH_CI_STATE_ROOT="$state_dir" \
+    GITHUB_TOKEN=narrow-ci-token PATH="$bad_bin:$real_dir:$PATH" \
+    "$CI_FALLBACK" "$real_dir/gh" pr checks 7 --repo o/r \
+    --json name,state,bucket,completedAt 2>&1) || status=$?
+
+  expect_code 0 "$status" "unavailable python3 fallback transport"
+  assert_contains "$out" "python3 is unavailable" \
+    "an unavailable python3 runtime lost its typed dependency diagnostic"
+  assert_run_field "$jq_bin" "$out" "Firstmate CI fallback - dependency error" bucket fail \
+    "an unavailable python3 runtime did not emit a typed failed check"
+  assert_absent "$state_path" "an unavailable python3 runtime retained stale pending state"
+  pass "an unavailable python3 runtime emits typed terminal JSON and clears state"
+}
+
+test_ci_head_lookup_errors_preserve_diagnostics_and_clear_state() {
+  local case_dir real_dir head phase state_dir state_path out status jq_bin
+  case_dir="$TMP_ROOT/ci-head-errors"
+  real_dir="$case_dir/real"
+  head=9696969696969696969696969696969696969696
+  jq_bin=$(command -v jq) || fail "jq is required to inspect typed head failures"
+  make_fake_ci_gh "$real_dir"
+  write_ci_pages "$case_dir/exact.json" exact-head completed '"success"' "$head"
+  write_ci_pages "$case_dir/stale.json" stale-head completed '"failure"'
+
+  for phase in initial recheck; do
+    state_dir="$case_dir/state-$phase"
+    state_path=$(ci_state_path "$state_dir")
+    mkdir -p "$(dirname "$state_path")"
+    printf '%s\n' '{"head":"old","first_seen":1}' > "$state_path"
+    status=0
+    if [ "$phase" = initial ]; then
+      out=$(FAKE_GH_LOG="$case_dir/$phase.calls" FM_TEST_PR_HEAD="$head" \
+        FM_TEST_PR_HEAD_ERROR="HTTP 403: initial head diagnostic" \
+        FM_GH_CI_STATE_ROOT="$state_dir" GITHUB_TOKEN=narrow-ci-token \
+        "$CI_FALLBACK" "$real_dir/gh" pr checks 7 --repo o/r \
+        --json name,state,bucket,completedAt 2>&1) || status=$?
+    else
+      out=$(FAKE_GH_LOG="$case_dir/$phase.calls" FM_TEST_PR_HEAD="$head" \
+        FM_TEST_PR_HEAD_AFTER_ERROR="HTTP 502: recheck head diagnostic" \
+        FM_TEST_WORKFLOW_PAGES="$case_dir/exact.json" FM_TEST_STALE_PAGES="$case_dir/stale.json" \
+        FM_TEST_JQ="$jq_bin" FM_GH_CI_STATE_ROOT="$state_dir" GITHUB_TOKEN=narrow-ci-token \
+        "$CI_FALLBACK" "$real_dir/gh" pr checks 7 --repo o/r \
+        --json name,state,bucket,completedAt 2>&1) || status=$?
+    fi
+    expect_code 0 "$status" "$phase PR-head failure transport"
+    assert_contains "$out" "$phase head diagnostic" \
+      "$phase PR-head failure suppressed the underlying GitHub diagnostic"
+    assert_run_field "$jq_bin" "$out" "Firstmate CI fallback - API error" bucket fail \
+      "$phase PR-head failure did not emit a typed failed check"
+    assert_absent "$state_path" "$phase PR-head failure retained stale pending state"
+  done
+  pass "both PR-head lookup failures preserve diagnostics and clear deadline state"
+}
+
 test_ci_403_falls_back_to_exact_head_red() {
   local case_dir real_dir shim_dir head out status jq_bin
   case_dir="$TMP_ROOT/ci-red"
@@ -359,7 +656,7 @@ test_ci_403_falls_back_to_exact_head_red() {
   head=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
   jq_bin=$(command -v jq) || fail "jq is required to exercise gh's built-in --jq contract"
   make_fake_ci_gh "$real_dir"
-  write_ci_pages "$case_dir/exact.json" failing-workflow completed '"failure"'
+  write_ci_pages "$case_dir/exact.json" failing-workflow completed '"failure"' "$head"
   write_ci_pages "$case_dir/stale.json" stale-head completed '"success"'
   mkdir -p "$shim_dir"
   ln -sf "$SHIM" "$shim_dir/gh"
@@ -401,14 +698,492 @@ test_ci_zero_exact_head_runs_stays_pending() {
     gh pr checks 7 --repo o/r --json name,state,bucket,completedAt 2>&1) || status=$?
 
   expect_code 0 "$status" "empty exact-head workflow fallback transport"
-  assert_run_field "$jq_bin" "$out" "GitHub Actions workflows" bucket pending \
+  assert_run_field "$jq_bin" "$out" "Firstmate CI fallback - missing evidence" bucket pending \
     "empty exact-head workflow evidence did not emit a pending placeholder check"
   assert_not_contains "$out" '"bucket":"pass"' \
     "empty exact-head workflow evidence incorrectly certified green"
   pass "zero exact-head workflow runs remain explicitly pending"
 }
 
-test_ci_maps_cancel_skipping_and_pending_across_pages() {
+test_ci_unrelated_exact_head_workflow_does_not_certify_green() {
+  local case_dir real_dir shim_dir head out status jq_bin json
+  case_dir="$TMP_ROOT/ci-unrelated-exact-head"
+  real_dir="$case_dir/real"
+  shim_dir="$case_dir/shim"
+  head=abababababababababababababababababababab
+  jq_bin=$(command -v jq) || fail "jq is required to exercise gh's built-in --jq contract"
+  make_fake_ci_gh "$real_dir"
+  cat > "$case_dir/exact.json" << EOF
+[
+  {
+    "workflow_runs": [
+      {
+        "id": 301,
+        "workflow_id": 901,
+        "run_number": 3,
+        "run_attempt": 1,
+        "name": "unrelated-push",
+        "event": "push",
+        "head_sha": "$head",
+        "status": "completed",
+        "conclusion": "success",
+        "created_at": "2026-08-07T12:34:56Z",
+        "updated_at": "2026-08-07T12:35:56Z",
+        "html_url": "https://github.com/o/r/actions/runs/301",
+        "repository": {"full_name": "o/r"},
+        "pull_requests": [{"number": 7, "head": {"sha": "$head"}}]
+      }
+    ]
+  }
+]
+EOF
+  write_ci_pages "$case_dir/stale.json" stale-head completed '"success"'
+  mkdir -p "$shim_dir"
+  ln -sf "$SHIM" "$shim_dir/gh"
+
+  status=0
+  out=$(FAKE_GH_LOG="$case_dir/gh.calls" FM_TEST_PR_HEAD="$head" \
+    FM_TEST_WORKFLOW_PAGES="$case_dir/exact.json" FM_TEST_STALE_PAGES="$case_dir/stale.json" \
+    FM_TEST_JQ="$jq_bin" GITHUB_TOKEN=narrow-ci-token PATH="$shim_dir:$real_dir:$PATH" \
+    gh pr checks 7 --repo o/r --json name,state,bucket,completedAt 2>&1) || status=$?
+
+  expect_code 0 "$status" "unrelated exact-head workflow fallback transport"
+  json=$(printf '%s\n' "$out" | grep -E '^\[' | tail -1)
+  [ -n "$json" ] || fail "unrelated exact-head workflow produced no JSON check array"
+  printf '%s' "$json" | "$jq_bin" -e 'all(.[]; .bucket != "pass")' >/dev/null ||
+    fail "an exact-head workflow unrelated to the PR incorrectly certified green"
+  pass "an unrelated exact-head workflow cannot certify the PR green"
+}
+
+test_ci_normalizer_failure_becomes_a_typed_terminal_check() {
+  local case_dir real_dir shim_dir head out status jq_bin
+  case_dir="$TMP_ROOT/ci-normalizer-failure"
+  real_dir="$case_dir/real"
+  shim_dir="$case_dir/shim"
+  head=bcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbc
+  jq_bin=$(command -v jq) || fail "jq is required to exercise gh's built-in --jq contract"
+  make_fake_ci_gh "$real_dir"
+  write_ci_pages "$case_dir/exact.json" CI completed '{"unexpected":"shape"}' "$head"
+  write_ci_pages "$case_dir/stale.json" stale-head completed '"success"'
+  mkdir -p "$shim_dir"
+  ln -sf "$SHIM" "$shim_dir/gh"
+
+  status=0
+  out=$(FAKE_GH_LOG="$case_dir/gh.calls" FM_TEST_PR_HEAD="$head" \
+    FM_TEST_WORKFLOW_PAGES="$case_dir/exact.json" FM_TEST_STALE_PAGES="$case_dir/stale.json" \
+    FM_TEST_JQ="$jq_bin" GITHUB_TOKEN=narrow-ci-token PATH="$shim_dir:$real_dir:$PATH" \
+    gh pr checks 7 --repo o/r --json name,state,bucket,completedAt 2>&1) || status=$?
+
+  expect_code 0 "$status" "normalizer failure transport"
+  assert_contains "$out" "fm-gh-ci-fallback: normalizer-error:" \
+    "an unexpected evidence shape did not emit a typed normalizer diagnostic"
+  assert_run_field "$jq_bin" "$out" "Firstmate CI fallback - normalizer error" bucket fail \
+    "an unexpected evidence shape did not become a terminal failed check"
+  assert_run_field "$jq_bin" "$out" "Firstmate CI fallback - normalizer error" state normalizer_error \
+    "an unexpected evidence shape lost its typed terminal state"
+  assert_not_contains "$out" '"bucket":"pass"' \
+    "an unexpected evidence shape incorrectly certified green"
+  pass "an unexpected normalizer failure becomes a typed terminal check"
+}
+
+test_ci_terminal_state_cleanup_failure_becomes_a_typed_check() {
+  local case_dir real_dir shim_dir state_dir state_path head out status jq_bin
+  case_dir="$TMP_ROOT/ci-terminal-state-cleanup"
+  real_dir="$case_dir/real"
+  shim_dir="$case_dir/shim"
+  state_dir="$case_dir/state"
+  state_path=$(ci_state_path "$state_dir")
+  head=bdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbd
+  jq_bin=$(command -v jq) || fail "jq is required to exercise gh's built-in --jq contract"
+  make_fake_ci_gh "$real_dir"
+  write_ci_pages "$case_dir/exact.json" CI completed '"success"' "$head"
+  write_ci_pages "$case_dir/stale.json" stale-head completed '"success"'
+  mkdir -p "$shim_dir" "$state_path"
+  ln -sf "$SHIM" "$shim_dir/gh"
+
+  status=0
+  out=$(FAKE_GH_LOG="$case_dir/gh.calls" FM_TEST_PR_HEAD="$head" \
+    FM_TEST_WORKFLOW_PAGES="$case_dir/exact.json" FM_TEST_STALE_PAGES="$case_dir/stale.json" \
+    FM_TEST_JQ="$jq_bin" FM_GH_CI_STATE_ROOT="$state_dir" GITHUB_TOKEN=narrow-ci-token \
+    PATH="$shim_dir:$real_dir:$PATH" \
+    gh pr checks 7 --repo o/r --json name,state,bucket,completedAt 2>&1) || status=$?
+
+  expect_code 0 "$status" "terminal state cleanup failure transport"
+  assert_contains "$out" "fm-gh-ci-fallback: state-error:" \
+    "an unreadable terminal-state cleanup did not emit a typed state diagnostic"
+  assert_run_field "$jq_bin" "$out" "Firstmate CI fallback - state evidence" bucket fail \
+    "an unreadable terminal-state cleanup did not become a failed check"
+  assert_not_contains "$out" '"bucket":"pass"' \
+    "an unreadable terminal-state cleanup incorrectly preserved a green verdict"
+  pass "a terminal state cleanup failure becomes a typed failed check"
+}
+
+test_ci_malformed_deadline_state_becomes_one_typed_check() {
+  local case_dir real_dir shim_dir head jq_bin state_case state_dir state_path
+  local out status json reference_json=
+  case_dir="$TMP_ROOT/ci-malformed-deadline-state"
+  real_dir="$case_dir/real"
+  shim_dir="$case_dir/shim"
+  head=bebebebebebebebebebebebebebebebebebebebe
+  jq_bin=$(command -v jq) || fail "jq is required to exercise gh's built-in --jq contract"
+  make_fake_ci_gh "$real_dir"
+  write_empty_ci_pages "$case_dir/exact.json"
+  write_ci_pages "$case_dir/stale.json" stale-head completed '"success"'
+  mkdir -p "$shim_dir"
+  ln -sf "$SHIM" "$shim_dir/gh"
+
+  for state_case in corrupt-encoding truncated wrong-shape wrong-types unwritable-root; do
+    state_dir="$case_dir/state-$state_case"
+    state_path=$(ci_state_path "$state_dir")
+    case "$state_case" in
+      corrupt-encoding)
+        mkdir -p "$(dirname "$state_path")"
+        printf '\xff' > "$state_path"
+        ;;
+      truncated)
+        mkdir -p "$(dirname "$state_path")"
+        printf '%s' '{"head":' > "$state_path"
+        ;;
+      wrong-shape)
+        mkdir -p "$(dirname "$state_path")"
+        printf '%s\n' '[]' > "$state_path"
+        ;;
+      wrong-types)
+        mkdir -p "$(dirname "$state_path")"
+        printf '%s\n' '{"head":7,"first_seen":"never"}' > "$state_path"
+        ;;
+      unwritable-root)
+        printf '%s\n' blocked > "$state_dir"
+        ;;
+    esac
+
+    status=0
+    out=$(FAKE_GH_LOG="$case_dir/gh.calls" FM_TEST_PR_HEAD="$head" \
+      FM_TEST_WORKFLOW_PAGES="$case_dir/exact.json" FM_TEST_STALE_PAGES="$case_dir/stale.json" \
+      FM_TEST_JQ="$jq_bin" FM_GH_CI_STATE_ROOT="$state_dir" GITHUB_TOKEN=narrow-ci-token \
+      PATH="$shim_dir:$real_dir:$PATH" \
+      gh pr checks 7 --repo o/r --json name,state,bucket,completedAt 2>&1) || status=$?
+
+    expect_code 0 "$status" "$state_case deadline-state failure transport"
+    assert_contains "$out" "fm-gh-ci-fallback: state-error:" \
+      "$state_case deadline state did not emit a typed state diagnostic"
+    assert_run_field "$jq_bin" "$out" "Firstmate CI fallback - state evidence" bucket fail \
+      "$state_case deadline state did not become a failed check"
+    assert_not_contains "$out" '"bucket":"pass"' \
+      "$state_case deadline state incorrectly certified green"
+    json=$(printf '%s\n' "$out" | grep -E '^\[' | tail -1)
+    [ -n "$json" ] || fail "$state_case deadline state produced no JSON check array"
+    if [ -z "$reference_json" ]; then
+      reference_json=$json
+    else
+      [ "$json" = "$reference_json" ] ||
+        fail "$state_case deadline state emitted a different typed JSON result"
+    fi
+  done
+  pass "malformed deadline states share one typed terminal result"
+}
+
+test_ci_latest_rerun_attempt_supersedes_the_failed_attempt() {
+  local case_dir real_dir shim_dir head out status jq_bin json
+  case_dir="$TMP_ROOT/ci-rerun-attempt"
+  real_dir="$case_dir/real"
+  shim_dir="$case_dir/shim"
+  head=cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd
+  jq_bin=$(command -v jq) || fail "jq is required to exercise gh's built-in --jq contract"
+  make_fake_ci_gh "$real_dir"
+  cat > "$case_dir/exact.json" << EOF
+[
+  {
+    "workflow_runs": [
+      {
+        "id": 401,
+        "workflow_id": 902,
+        "run_number": 8,
+        "run_attempt": 1,
+        "name": "CI",
+        "event": "pull_request",
+        "head_sha": "$head",
+        "status": "completed",
+        "conclusion": "failure",
+        "created_at": "2026-08-07T12:34:56Z",
+        "updated_at": "2026-08-07T12:35:56Z",
+        "html_url": "https://github.com/o/r/actions/runs/401/attempts/1",
+        "repository": {"full_name": "o/r"},
+        "pull_requests": [{"number": 7, "head": {"sha": "$head"}}]
+      },
+      {
+        "id": 401,
+        "workflow_id": 902,
+        "run_number": 8,
+        "run_attempt": 2,
+        "name": "CI",
+        "event": "pull_request",
+        "head_sha": "$head",
+        "status": "completed",
+        "conclusion": "success",
+        "created_at": "2026-08-07T12:34:56Z",
+        "updated_at": "2026-08-07T12:40:56Z",
+        "html_url": "https://github.com/o/r/actions/runs/401/attempts/2",
+        "repository": {"full_name": "o/r"},
+        "pull_requests": [{"number": 7, "head": {"sha": "$head"}}]
+      }
+    ]
+  }
+]
+EOF
+  write_ci_pages "$case_dir/stale.json" stale-head completed '"failure"'
+  mkdir -p "$shim_dir"
+  ln -sf "$SHIM" "$shim_dir/gh"
+
+  status=0
+  out=$(FAKE_GH_LOG="$case_dir/gh.calls" FM_TEST_PR_HEAD="$head" \
+    FM_TEST_WORKFLOW_PAGES="$case_dir/exact.json" FM_TEST_STALE_PAGES="$case_dir/stale.json" \
+    FM_TEST_JQ="$jq_bin" GITHUB_TOKEN=narrow-ci-token PATH="$shim_dir:$real_dir:$PATH" \
+    gh pr checks 7 --repo o/r --json name,state,bucket,completedAt,link 2>&1) || status=$?
+
+  expect_code 0 "$status" "latest rerun attempt fallback verdict"
+  json=$(printf '%s\n' "$out" | grep -E '^\[' | tail -1)
+  [ -n "$json" ] || fail "latest rerun attempt produced no JSON check array"
+  [ "$(printf '%s' "$json" | "$jq_bin" '[.[] | select(.name == "CI")] | length')" -eq 1 ] ||
+    fail "the fallback emitted more than one verdict for a rerun workflow"
+  assert_run_field "$jq_bin" "$out" CI bucket pass \
+    "the latest successful rerun attempt did not supersede its failed attempt"
+  pass "the latest rerun attempt supersedes an older failed attempt"
+}
+
+test_ci_paginated_skipped_job_prevents_workflow_green() {
+  local case_dir real_dir shim_dir head out status jq_bin
+  case_dir="$TMP_ROOT/ci-skipped-job"
+  real_dir="$case_dir/real"
+  shim_dir="$case_dir/shim"
+  head=dadadadadadadadadadadadadadadadadadadada
+  jq_bin=$(command -v jq) || fail "jq is required to exercise gh's built-in --jq contract"
+  make_fake_ci_gh "$real_dir"
+  write_ci_pages "$case_dir/exact.json" CI completed '"success"' "$head"
+  write_ci_pages "$case_dir/stale.json" stale-head completed '"failure"'
+  cat > "$case_dir/jobs.json" << EOF
+[
+  {
+    "jobs": [
+      {
+        "id": 6101,
+        "run_id": 123,
+        "run_attempt": 1,
+        "name": "unit",
+        "head_sha": "$head",
+        "status": "completed",
+        "conclusion": "success",
+        "started_at": "2026-08-07T12:33:56Z",
+        "completed_at": "2026-08-07T12:34:56Z",
+        "html_url": "https://github.com/o/r/actions/runs/123/jobs/6101"
+      }
+    ]
+  },
+  {
+    "jobs": [
+      {
+        "id": 6102,
+        "run_id": 123,
+        "run_attempt": 1,
+        "name": "required-audit",
+        "head_sha": "$head",
+        "status": "completed",
+        "conclusion": "skipped",
+        "started_at": "2026-08-07T12:33:56Z",
+        "completed_at": "2026-08-07T12:35:56Z",
+        "html_url": "https://github.com/o/r/actions/runs/123/jobs/6102"
+      }
+    ]
+  }
+]
+EOF
+  mkdir -p "$shim_dir"
+  ln -sf "$SHIM" "$shim_dir/gh"
+
+  status=0
+  out=$(FAKE_GH_LOG="$case_dir/gh.calls" FM_TEST_PR_HEAD="$head" \
+    FM_TEST_WORKFLOW_PAGES="$case_dir/exact.json" FM_TEST_STALE_PAGES="$case_dir/stale.json" \
+    FM_TEST_JOB_PAGES="$case_dir/jobs.json" FM_TEST_JQ="$jq_bin" \
+    GITHUB_TOKEN=narrow-ci-token PATH="$shim_dir:$real_dir:$PATH" \
+    gh pr checks 7 --repo o/r --json name,state,bucket,completedAt,link 2>&1) || status=$?
+
+  expect_code 0 "$status" "paginated workflow jobs fallback verdict"
+  assert_run_field "$jq_bin" "$out" CI bucket fail \
+    "a skipped job on a later page did not keep the successful workflow non-green"
+  assert_no_grep 'slurp' "$case_dir/gh.calls" \
+    "the jobs fallback asked gh for --slurp alongside --jq"
+  assert_grep 'argv:api -X GET repos/o/r/actions/runs/123/jobs?filter=all&per_page=100 --paginate --jq' \
+    "$case_dir/gh.calls" \
+    "the fallback did not paginate every attempt of the selected workflow run"
+  pass "a skipped job on a later page prevents workflow-level success"
+}
+
+test_ci_missing_active_workflow_does_not_certify_green() {
+  local case_dir real_dir shim_dir head out status jq_bin json
+  case_dir="$TMP_ROOT/ci-missing-active-workflow"
+  real_dir="$case_dir/real"
+  shim_dir="$case_dir/shim"
+  head=dededededededededededededededededededede
+  jq_bin=$(command -v jq) || fail "jq is required to exercise gh's built-in --jq contract"
+  make_fake_ci_gh "$real_dir"
+  write_ci_pages "$case_dir/exact.json" CI completed '"success"' "$head"
+  write_ci_pages "$case_dir/stale.json" stale-head completed '"success"'
+  printf '%s\n' \
+    '[{"workflows":[{"id":7001,"name":"CI","path":".github/workflows/ci.yml","state":"active"},{"id":7002,"name":"Required audit","path":".github/workflows/audit.yml","state":"active"}]}]' \
+    > "$case_dir/workflows.json"
+  mkdir -p "$shim_dir"
+  ln -sf "$SHIM" "$shim_dir/gh"
+
+  status=0
+  out=$(FAKE_GH_LOG="$case_dir/gh.calls" FM_TEST_PR_HEAD="$head" \
+    FM_TEST_WORKFLOW_PAGES="$case_dir/exact.json" FM_TEST_STALE_PAGES="$case_dir/stale.json" \
+    FM_TEST_WORKFLOW_INVENTORY="$case_dir/workflows.json" FM_TEST_JQ="$jq_bin" \
+    GITHUB_TOKEN=narrow-ci-token PATH="$shim_dir:$real_dir:$PATH" \
+    gh pr checks 7 --repo o/r --json name,state,bucket,completedAt 2>&1) || status=$?
+
+  expect_code 0 "$status" "missing active workflow fallback transport"
+  json=$(printf '%s\n' "$out" | grep -E '^\[' | tail -1)
+  [ -n "$json" ] || fail "missing active workflow produced no JSON check array"
+  printf '%s' "$json" | "$jq_bin" -e 'all(.[]; .bucket != "pass")' >/dev/null ||
+    fail "one successful workflow hid a missing active workflow"
+  assert_run_field "$jq_bin" "$out" "Firstmate CI fallback - missing evidence" bucket pending \
+    "a missing active workflow did not remain explicit pending evidence"
+  pass "one successful workflow cannot hide a missing active workflow"
+}
+
+test_ci_conflicting_latest_attempt_is_ambiguous() {
+  local case_dir real_dir shim_dir head out status jq_bin
+  case_dir="$TMP_ROOT/ci-ambiguous-attempt"
+  real_dir="$case_dir/real"
+  shim_dir="$case_dir/shim"
+  head=efefefefefefefefefefefefefefefefefefefef
+  jq_bin=$(command -v jq) || fail "jq is required to exercise gh's built-in --jq contract"
+  make_fake_ci_gh "$real_dir"
+  cat > "$case_dir/exact.json" << EOF
+[
+  {
+    "workflow_runs": [
+      {
+        "id": 501,
+        "workflow_id": 903,
+        "run_number": 9,
+        "run_attempt": 2,
+        "name": "CI",
+        "event": "pull_request",
+        "head_sha": "$head",
+        "status": "completed",
+        "conclusion": "failure",
+        "created_at": "2026-08-07T12:34:56Z",
+        "updated_at": "2026-08-07T12:40:56Z",
+        "html_url": "https://github.com/o/r/actions/runs/501",
+        "repository": {"full_name": "o/r"},
+        "pull_requests": [{"number": 7, "head": {"sha": "$head"}}]
+      },
+      {
+        "id": 501,
+        "workflow_id": 903,
+        "run_number": 9,
+        "run_attempt": 2,
+        "name": "CI",
+        "event": "pull_request",
+        "head_sha": "$head",
+        "status": "completed",
+        "conclusion": "success",
+        "created_at": "2026-08-07T12:34:56Z",
+        "updated_at": "2026-08-07T12:40:56Z",
+        "html_url": "https://github.com/o/r/actions/runs/501",
+        "repository": {"full_name": "o/r"},
+        "pull_requests": [{"number": 7, "head": {"sha": "$head"}}]
+      }
+    ]
+  }
+]
+EOF
+  write_ci_pages "$case_dir/stale.json" stale-head completed '"success"'
+  mkdir -p "$shim_dir"
+  ln -sf "$SHIM" "$shim_dir/gh"
+
+  status=0
+  out=$(FAKE_GH_LOG="$case_dir/gh.calls" FM_TEST_PR_HEAD="$head" \
+    FM_TEST_WORKFLOW_PAGES="$case_dir/exact.json" FM_TEST_STALE_PAGES="$case_dir/stale.json" \
+    FM_TEST_JQ="$jq_bin" GITHUB_TOKEN=narrow-ci-token PATH="$shim_dir:$real_dir:$PATH" \
+    gh pr checks 7 --repo o/r --json name,state,bucket,completedAt 2>&1) || status=$?
+
+  expect_code 0 "$status" "conflicting latest attempt fallback transport"
+  assert_run_field "$jq_bin" "$out" "Firstmate CI fallback - ambiguous evidence" bucket pending \
+    "conflicting latest-attempt evidence did not fail closed"
+  assert_not_contains "$out" '"bucket":"pass"' \
+    "conflicting latest-attempt evidence incorrectly certified green"
+  pass "conflicting latest-attempt evidence fails closed as ambiguous"
+}
+
+test_ci_wrong_head_run_is_rejected() {
+  local case_dir real_dir shim_dir head stale_head out status jq_bin
+  case_dir="$TMP_ROOT/ci-wrong-head-run"
+  real_dir="$case_dir/real"
+  shim_dir="$case_dir/shim"
+  head=2323232323232323232323232323232323232323
+  stale_head=2424242424242424242424242424242424242424
+  jq_bin=$(command -v jq) || fail "jq is required to exercise gh's built-in --jq contract"
+  make_fake_ci_gh "$real_dir"
+  write_ci_pages "$case_dir/exact.json" CI completed '"success"' "$stale_head"
+  write_ci_pages "$case_dir/stale.json" stale-head completed '"success"'
+  mkdir -p "$shim_dir"
+  ln -sf "$SHIM" "$shim_dir/gh"
+
+  status=0
+  out=$(FAKE_GH_LOG="$case_dir/gh.calls" FM_TEST_PR_HEAD="$head" \
+    FM_TEST_WORKFLOW_PAGES="$case_dir/exact.json" FM_TEST_STALE_PAGES="$case_dir/stale.json" \
+    FM_TEST_JQ="$jq_bin" GITHUB_TOKEN=narrow-ci-token PATH="$shim_dir:$real_dir:$PATH" \
+    gh pr checks 7 --repo o/r --json name,state,bucket,completedAt 2>&1) || status=$?
+
+  expect_code 0 "$status" "wrong-head workflow fallback transport"
+  assert_run_field "$jq_bin" "$out" "Firstmate CI fallback - missing evidence" bucket pending \
+    "a wrong-head workflow run did not leave the active workflow missing"
+  assert_not_contains "$out" '"bucket":"pass"' \
+    "a stale workflow run incorrectly certified the current head green"
+  pass "a stale workflow run cannot certify the current PR head"
+}
+
+test_ci_pending_evidence_has_a_hard_deadline() {
+  local case_dir real_dir shim_dir state_dir head first_out second_out status jq_bin
+  case_dir="$TMP_ROOT/ci-pending-deadline"
+  real_dir="$case_dir/real"
+  shim_dir="$case_dir/shim"
+  state_dir="$case_dir/state"
+  head=2525252525252525252525252525252525252525
+  jq_bin=$(command -v jq) || fail "jq is required to exercise gh's built-in --jq contract"
+  make_fake_ci_gh "$real_dir"
+  write_empty_ci_pages "$case_dir/exact.json"
+  write_ci_pages "$case_dir/stale.json" stale-head completed '"success"'
+  mkdir -p "$shim_dir"
+  ln -sf "$SHIM" "$shim_dir/gh"
+
+  status=0
+  first_out=$(FAKE_GH_LOG="$case_dir/gh.calls" FM_TEST_PR_HEAD="$head" \
+    FM_TEST_WORKFLOW_PAGES="$case_dir/exact.json" FM_TEST_STALE_PAGES="$case_dir/stale.json" \
+    FM_TEST_JQ="$jq_bin" FM_GH_CI_STATE_ROOT="$state_dir" FM_GH_CI_MAX_PENDING_SECONDS=60 \
+    FM_GH_CI_NOW_EPOCH=1000 PATH="$shim_dir:$real_dir:$PATH" \
+    gh pr checks 7 --repo o/r --json name,state,bucket,completedAt 2>&1) || status=$?
+  expect_code 0 "$status" "first missing-evidence poll"
+  assert_run_field "$jq_bin" "$first_out" "Firstmate CI fallback - missing evidence" bucket pending \
+    "the first missing-evidence poll did not remain pending"
+
+  status=0
+  second_out=$(FAKE_GH_LOG="$case_dir/gh.calls" FM_TEST_PR_HEAD="$head" \
+    FM_TEST_WORKFLOW_PAGES="$case_dir/exact.json" FM_TEST_STALE_PAGES="$case_dir/stale.json" \
+    FM_TEST_JQ="$jq_bin" FM_GH_CI_STATE_ROOT="$state_dir" FM_GH_CI_MAX_PENDING_SECONDS=60 \
+    FM_GH_CI_NOW_EPOCH=1060 PATH="$shim_dir:$real_dir:$PATH" \
+    gh pr checks 7 --repo o/r --json name,state,bucket,completedAt 2>&1) || status=$?
+  expect_code 0 "$status" "expired missing-evidence poll"
+  assert_contains "$second_out" "evidence-timeout" \
+    "the expired pending deadline did not surface a typed diagnostic"
+  assert_run_field "$jq_bin" "$second_out" "Firstmate CI fallback - missing evidence" bucket fail \
+    "the expired pending deadline did not become terminal"
+  pass "missing or pending fallback evidence stops at a hard deadline"
+}
+
+test_ci_maps_terminal_failures_and_pending_across_pages() {
   local case_dir real_dir shim_dir head out status jq_bin
   case_dir="$TMP_ROOT/ci-multi-bucket"
   real_dir="$case_dir/real"
@@ -416,7 +1191,7 @@ test_ci_maps_cancel_skipping_and_pending_across_pages() {
   head=1212121212121212121212121212121212121212
   jq_bin=$(command -v jq) || fail "jq is required to exercise gh's built-in --jq contract"
   make_fake_ci_gh "$real_dir"
-  write_multi_bucket_ci_pages "$case_dir/exact.json"
+  write_multi_bucket_ci_pages "$case_dir/exact.json" "$head"
   write_ci_pages "$case_dir/stale.json" stale-head completed '"success"'
   mkdir -p "$shim_dir"
   ln -sf "$SHIM" "$shim_dir/gh"
@@ -428,17 +1203,17 @@ test_ci_maps_cancel_skipping_and_pending_across_pages() {
     gh pr checks 7 --repo o/r --json name,state,bucket,completedAt,link 2>&1) || status=$?
 
   expect_code 0 "$status" "multi-page exact-head workflow fallback transport"
-  assert_run_field "$jq_bin" "$out" cancelled-workflow bucket cancel \
-    "completed cancellation did not map to the cancellation bucket"
+  assert_run_field "$jq_bin" "$out" cancelled-workflow bucket fail \
+    "completed cancellation did not map to the consumer's failure bucket"
   assert_run_field "$jq_bin" "$out" cancelled-workflow state cancelled \
     "completed cancellation lost its provider conclusion"
-  assert_run_field "$jq_bin" "$out" skipped-workflow bucket skipping \
-    "completed skip did not map to the skipping bucket"
+  assert_run_field "$jq_bin" "$out" skipped-workflow bucket fail \
+    "completed skip did not map to the consumer's failure bucket"
   assert_run_field "$jq_bin" "$out" queued-workflow bucket pending \
     "queued workflow did not remain pending"
   assert_run_field "$jq_bin" "$out" queued-workflow state queued \
     "queued workflow lost its provider status"
-  pass "paginated exact-head runs map cancellation, skipping, and pending buckets"
+  pass "paginated exact-head runs preserve terminal failure and pending semantics"
 }
 
 test_ci_pagination_avoids_the_rejected_slurp_and_jq_combination() {
@@ -448,7 +1223,7 @@ test_ci_pagination_avoids_the_rejected_slurp_and_jq_combination() {
   head=3434343434343434343434343434343434343434
   jq_bin=$(command -v jq) || fail "jq is required to exercise gh's built-in --jq contract"
   make_fake_ci_gh "$real_dir"
-  write_multi_bucket_ci_pages "$case_dir/exact.json"
+  write_multi_bucket_ci_pages "$case_dir/exact.json" "$head"
   write_ci_pages "$case_dir/stale.json" stale-head completed '"success"'
 
   # Prove the double actually refuses the combination first, so a fallback that
@@ -472,7 +1247,7 @@ test_ci_pagination_avoids_the_rejected_slurp_and_jq_combination() {
     --json name,state,bucket,completedAt,link 2>&1) || status=$?
 
   expect_code 0 "$status" "exact-head workflow fallback against a gh that rejects --slurp with --jq"
-  assert_run_field "$jq_bin" "$out" cancelled-workflow bucket cancel \
+  assert_run_field "$jq_bin" "$out" cancelled-workflow bucket fail \
     "the first page's run was lost against a gh that rejects --slurp with --jq"
   assert_run_field "$jq_bin" "$out" queued-workflow bucket pending \
     "a later page's run was lost against a gh that rejects --slurp with --jq"
@@ -485,31 +1260,41 @@ test_ci_pagination_avoids_the_rejected_slurp_and_jq_combination() {
 }
 
 test_ci_workflow_runs_failure_preserves_the_gh_error() {
-  local case_dir real_dir head out status jq_bin
+  local case_dir real_dir head state_dir state_path out status jq_bin
   case_dir="$TMP_ROOT/ci-runs-error"
   real_dir="$case_dir/real"
+  state_dir="$case_dir/state"
+  state_path=$(ci_state_path "$state_dir")
   head=5656565656565656565656565656565656565656
   jq_bin=$(command -v jq) || fail "jq is required to exercise gh's built-in --jq contract"
   make_fake_ci_gh "$real_dir"
   write_ci_pages "$case_dir/stale.json" stale-head completed '"success"'
+  printf '%s\n' '[{"workflows":[{"id":7001,"name":"CI","path":".github/workflows/ci.yml","state":"active"}]}]' \
+    > "$case_dir/workflows.json"
+  mkdir -p "$(dirname "$state_path")"
+  printf '%s\n' '{"head":"old","first_seen":1}' > "$state_path"
 
   # No FM_TEST_WORKFLOW_PAGES fixture exists, so the workflow-runs read fails the
   # way any broken gh invocation would, and its own stderr must survive.
   status=0
   out=$(FAKE_GH_LOG="$case_dir/gh.calls" FM_TEST_PR_HEAD="$head" \
     FM_TEST_WORKFLOW_PAGES="$case_dir/missing.json" FM_TEST_STALE_PAGES="$case_dir/stale.json" \
-    FM_TEST_JQ="$jq_bin" GITHUB_TOKEN=narrow-ci-token \
+    FM_TEST_WORKFLOW_INVENTORY="$case_dir/workflows.json" FM_TEST_JQ="$jq_bin" \
+    FM_GH_CI_STATE_ROOT="$state_dir" GITHUB_TOKEN=narrow-ci-token \
     "$CI_FALLBACK" "$real_dir/gh" pr checks 7 --repo o/r \
     --json name,state,bucket,completedAt 2>&1) || status=$?
 
-  expect_code 1 "$status" "workflow-runs read failure"
+  expect_code 0 "$status" "workflow-runs read failure transport"
   assert_contains "$out" "exact-head workflow-runs lookup failed" \
     "a failed workflow-runs read did not report the fallback's own refusal"
   assert_contains "$out" "$case_dir/missing.json" \
     "a failed workflow-runs read suppressed the underlying gh error"
   assert_contains "$out" "GraphQL: Resource not accessible by personal access token (node.statusCheckRollup.nodes.0.commit.statusCheckRollup)" \
     "a failed workflow-runs read did not preserve the original gh pr checks failure"
-  pass "a failed workflow-runs read keeps the real gh error visible"
+  assert_run_field "$jq_bin" "$out" "Firstmate CI fallback - API error" bucket fail \
+    "an unavailable workflow-runs API did not become a terminal typed check"
+  assert_absent "$state_path" "an unavailable workflow-runs API retained stale pending state"
+  pass "a failed workflow-runs read becomes a typed failure and keeps the real errors visible"
 }
 
 test_ci_pr_head_drift_refuses_stale_verdict() {
@@ -521,7 +1306,7 @@ test_ci_pr_head_drift_refuses_stale_verdict() {
   changed_head=ffffffffffffffffffffffffffffffffffffffff
   jq_bin=$(command -v jq) || fail "jq is required to exercise gh's built-in --jq contract"
   make_fake_ci_gh "$real_dir"
-  write_ci_pages "$case_dir/exact.json" superseded-head completed '"success"'
+  write_ci_pages "$case_dir/exact.json" superseded-head completed '"success"' "$head"
   write_ci_pages "$case_dir/stale.json" unrelated-head completed '"failure"'
   mkdir -p "$shim_dir"
   ln -sf "$SHIM" "$shim_dir/gh"
@@ -533,11 +1318,11 @@ test_ci_pr_head_drift_refuses_stale_verdict() {
     GITHUB_TOKEN=narrow-ci-token PATH="$shim_dir:$real_dir:$PATH" \
     gh pr checks 7 --repo o/r --json name,state,bucket,completedAt 2>&1) || status=$?
 
-  expect_code 1 "$status" "workflow fallback while the PR head advances"
+  expect_code 0 "$status" "workflow fallback while the PR head advances"
   assert_contains "$out" "PR head changed during workflow-runs lookup" \
     "head drift did not refuse the workflow fallback result"
-  assert_contains "$out" "GraphQL: Resource not accessible by personal access token (node.statusCheckRollup.nodes.0.commit.statusCheckRollup)" \
-    "head drift did not preserve the original gh pr checks failure"
+  assert_run_field "$jq_bin" "$out" "Firstmate CI fallback - head changed" bucket fail \
+    "head drift did not become a terminal typed check"
   assert_not_contains "$out" '"bucket":"pass"' \
     "a superseded head's green workflow verdict escaped the fallback"
   pass "a moving PR head cannot emit a stale workflow verdict"
@@ -551,7 +1336,7 @@ test_ci_unrelated_failures_preserve_original_result() {
   head=cccccccccccccccccccccccccccccccccccccccc
   jq_bin=$(command -v jq) || fail "jq is required to exercise gh's built-in --jq contract"
   make_fake_ci_gh "$real_dir"
-  write_ci_pages "$case_dir/exact.json" exact-head completed '"success"'
+  write_ci_pages "$case_dir/exact.json" exact-head completed '"success"' "$head"
   write_ci_pages "$case_dir/stale.json" stale-head completed '"success"'
   mkdir -p "$shim_dir"
   ln -sf "$SHIM" "$shim_dir/gh"
@@ -1235,11 +2020,27 @@ test_pr_edit_without_canonical_registration_refuses_before_credential_route
 test_missing_database_record_refuses_before_credential_route
 test_contradictory_registered_remote_refuses_before_credential_route
 test_malformed_and_non_github_targets_refuse_before_credential_route
+test_ci_primary_checks_path_is_preserved_when_readable
+test_ci_state_identity_is_canonical_and_collision_free
 test_ci_403_falls_back_to_exact_head_green_without_privileged_token
 test_ci_deeper_denial_path_falls_back_to_exact_head_green
+test_ci_green_requires_actions_only_repository_authority
+test_ci_terminal_actions_conclusions_fail_at_the_consumer_boundary
+test_ci_unavailable_python_emits_typed_failure_and_clears_state
+test_ci_head_lookup_errors_preserve_diagnostics_and_clear_state
 test_ci_403_falls_back_to_exact_head_red
 test_ci_zero_exact_head_runs_stays_pending
-test_ci_maps_cancel_skipping_and_pending_across_pages
+test_ci_unrelated_exact_head_workflow_does_not_certify_green
+test_ci_normalizer_failure_becomes_a_typed_terminal_check
+test_ci_terminal_state_cleanup_failure_becomes_a_typed_check
+test_ci_malformed_deadline_state_becomes_one_typed_check
+test_ci_latest_rerun_attempt_supersedes_the_failed_attempt
+test_ci_paginated_skipped_job_prevents_workflow_green
+test_ci_missing_active_workflow_does_not_certify_green
+test_ci_conflicting_latest_attempt_is_ambiguous
+test_ci_wrong_head_run_is_rejected
+test_ci_pending_evidence_has_a_hard_deadline
+test_ci_maps_terminal_failures_and_pending_across_pages
 test_ci_pagination_avoids_the_rejected_slurp_and_jq_combination
 test_ci_workflow_runs_failure_preserves_the_gh_error
 test_ci_pr_head_drift_refuses_stale_verdict

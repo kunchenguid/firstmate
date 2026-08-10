@@ -52,6 +52,43 @@ The installed v1.41.2 CI implementation calls `gh pr checks <selector> --repo <o
 Current upstream adds `link` to that exact JSON field set.
 Both implementations treat a nonzero check-runs read as unavailable CI state, so a persistent 403 cannot become a terminal verdict without a fallback.
 
+## The narrow credential exposes Actions evidence but not required-check policy
+
+The current public executable path reproduces the `statusCheckRollup` denial against pull request 14 while read-only REST calls with the same ambient credential resolve its exact head and workflow runs.
+
+```console
+$ npx -y gh-axi pr checks 14 --repo=quinnbot-ai/ff-manager
+error: "GraphQL: Resource not accessible by personal access token (repository.pullRequest.statusCheckRollup.nodes.0.commit.statusCheckRollup.contexts.nodes.0)"
+code: UNKNOWN
+
+$ npx -y gh-axi api repos/quinnbot-ai/ff-manager/pulls/14 --jq '{number: .number, head_sha: .head.sha, base: .base.ref, state: .state}'
+base: main
+head_sha: 7d05c902006bfbc3bca9f750f823a3a86c7a6a03
+number: 14
+state: open
+
+$ npx -y gh-axi api 'repos/quinnbot-ai/ff-manager/actions/runs?branch=feat%2Fdaily-browser-research&event=pull_request&per_page=5' --jq '{total_count: .total_count, runs: [.workflow_runs[] | {id, workflow_id, run_attempt, head_sha, status, conclusion, event, pull_requests: [.pull_requests[].number]}]}'
+runs[4]:
+  - conclusion: success
+    event: pull_request
+    head_sha: 7d05c902006bfbc3bca9f750f823a3a86c7a6a03
+    id: 31352872155
+    pull_requests[1]: 14
+    run_attempt: 1
+    status: completed
+    workflow_id: 314271020
+total_count: 4
+
+$ npx -y gh-axi api 'repos/quinnbot-ai/ff-manager/actions/runs/31352872155/jobs?filter=all&per_page=100' --jq '{total_count: .total_count, jobs: [.jobs[] | {id, run_id, run_attempt, name, head_sha, status, conclusion}]}'
+jobs[1]{conclusion,head_sha,id,name,run_attempt,run_id,status}:
+  success,7d05c902006bfbc3bca9f750f823a3a86c7a6a03,93346815543,offline-quality,1,31352872155,completed
+total_count: 1
+```
+
+The workflow inventory is readable and identifies one active workflow named `CI` at `.github/workflows/ci.yml`.
+Both the branch-protection required-status-check endpoint and the repository-rulesets endpoint return `FORBIDDEN: Insufficient permissions for this action` with the same credential.
+That boundary is why the local fallback conservatively requires every active Actions workflow, while the upstream proposal asks no-mistakes to obtain an exact required-check set before certifying green.
+
 ## Divergent gate repository diagnosis
 
 The trigger was a credential-routed `gh pr create` or `gh pr edit` invocation without an explicit `--repo` or `-R`.
@@ -107,7 +144,7 @@ Nothing placed inside a task worktree is on the `PATH` that resolves `gh` for th
 
 The routing mechanism is owned only by [`../no-mistakes-pr-credential.md`](../no-mistakes-pr-credential.md); this section records its empirical verification.
 
-`tests/fm-gh-shim.test.sh` drives the public shim and wrapper interfaces with local fakes and disposable Git repositories, touching no network and no real `gh`.
+`tests/fm-gh-shim.test.sh` drives the public shim and wrapper interfaces with local fakes and disposable Git repositories, and builds a fixture against the pinned no-mistakes v1.41.2 module to exercise its public CI consumer without a real daemon or real `gh`.
 The fork-target fixture creates a complete no-mistakes repository registration, bare gate, and linked worktree, so the implicit target is exercised from the same divergent topology as the incident.
 Additional adversarial cases cover a normal canonical origin, exact explicit repository preservation, an unregistered checkout, a missing database record, a registered target contradicted by the source checkout's remotes, a malformed target, and a non-GitHub target.
 `tests/fm-pr-merge.test.sh` drives protected GitHub merge capture through the public merge interface without a shim, through a same-home shim, and through a current shim copied into a distinct Firstmate-home path.
@@ -115,18 +152,25 @@ Those valid paths preserve the single GraphQL request and exact SHA-conditioned 
 Its reentrant executable fixture would reproduce the stale or mid-update loop but carries its own four-entry safety cap; the product guard now stops it at one selected-executable invocation with exit 70 before the cap can fire.
 The same suite proves the merge operator's inherited-lock handoff is the only accepted self-entry.
 
-Ten CI cases reproduce the check-runs authorization boundary and exercise the fallback through the shim's public `gh` interface.
-The fake applies the helper's real jq expression to each raw workflow-run page in turn and sorts result keys, so the assertions cover the same transformation `gh api --paginate --jq` performs, and it refuses `--slurp` alongside `--jq` exactly as GitHub CLI 2.92.0 does.
-The green case provides a failed workflow under a stale SHA and a successful workflow under the PR head, then asserts that the only Actions endpoint called contains `head_sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa` and that the result is `bucket: pass`.
+The CI cases reproduce the check-runs authorization boundary and exercise the fallback through the shim's public `gh` interface.
+The fake applies the helper's real jq expressions to each raw workflow, run, and job page in turn and sorts result keys, so the assertions cover the same transformation `gh api --paginate --jq` performs, and it refuses `--slurp` alongside `--jq` exactly as GitHub CLI 2.92.0 does.
+The primary-path case proves a readable `gh pr checks` result bypasses every Actions API and clears any saved fallback deadline for that pull request.
+The state-identity case proves GitHub's case-insensitive repository identity resolves to one canonical deadline path while distinct owner and repository component boundaries cannot collide.
+The green fallback case provides a failed workflow under a stale SHA, a successful workflow associated with the current PR head, and explicit Actions-only authority for the exact repository, then asserts that the Actions endpoint contains `head_sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa` and that the result is `bucket: pass`.
 It also configures a distinct PR-capable token and proves that every CI call retains only the ambient narrow token.
-The red case maps an exact-head workflow failure to `bucket: fail` and preserves its Actions link.
-The zero-run case emits a pending placeholder, and a multi-page case maps cancelled, skipped, and queued workflows to the cancellation, skipping, and pending buckets.
+The red cases map every terminal non-success Actions conclusion to `bucket: fail`, preserve each provider conclusion in `state`, and feed the emitted JSON through the pinned no-mistakes consumer to prove none can certify green.
+The zero-run case emits a pending placeholder, and separate cases prove an unrelated run, a wrong-head run, and one successful run beside a missing active workflow cannot certify green.
+The rerun case keeps only the latest attempt, while conflicting latest-attempt records remain explicit ambiguous evidence.
+A paginated-jobs case puts a skipped job on the second page and proves workflow-level success cannot certify green over it.
+A two-poll deadline case proves pending or missing evidence becomes a typed terminal failure at the configured bound.
+A multi-page case maps cancelled and skipped workflows to failure while retaining their provider states, and keeps a queued workflow pending.
 The flag-compatibility case first proves the fake rejects `--paginate --slurp --jq` before asserting that the fallback reaches a verdict against it, keeps runs from every page, and never sends `--slurp`, so the case cannot pass vacuously.
-The workflow-runs failure case proves the underlying `gh` error text reaches stderr next to the fallback's own refusal line instead of being replaced by it.
-The moving-head case refuses a verdict when the PR advances during pagination.
+The dependency case proves an unavailable Python runtime emits typed terminal JSON instead of becoming an unreadable poll result.
+The API-failure cases prove the underlying `gh` diagnostics for workflow-runs and both PR-head reads reach stderr beside typed synthetic failed checks.
+Those terminal failures and the moving-head case all clear the canonical repository-and-PR-keyed pending deadline before returning.
 The deeper-denial-path case drives `(node.statusCheckRollup.nodes.0.commit.statusCheckRollup.contexts.nodes.0)`, the denial GitHub returns today, and reaches the same exact-head green verdict the shorter historical path reaches.
 The unrelated-failure case proves generic HTTP 403 responses, denials for other APIs, a denial whose path only begins with those characters (`node.statusCheckRollupSummary.nodes.0`), and non-403 failures never reach the fallback API, while the unsupported-shape case proves only the two literal no-mistakes argument vectors enter the capturing helper.
-These fixtures establish GitHub Actions behavior only; the workflow-runs API cannot reproduce third-party check-provider evidence hidden behind check-runs.
+The completeness case proves green Actions evidence fails closed without exact repository-level Actions-only authority, because the workflow-runs API cannot reproduce third-party check-provider evidence hidden behind check-runs.
 
 ## GitHub CLI 2.92.0 rejects `--slurp` whenever `--jq` is present
 
@@ -171,13 +215,21 @@ ok - credential-routed pr edit refuses without a canonical registration
 ok - missing canonical target evidence fails closed
 ok - contradictory canonical target evidence fails closed
 ok - malformed and non-GitHub canonical targets fail closed
+ok - a readable primary status-check rollup bypasses the Actions fallback
 ok - a check-runs 403 reaches a green exact-head workflow verdict without the privileged token
 ok - a denial naming statusCheckRollup deeper in its path still reaches the exact-head verdict
 ok - a check-runs 403 reaches a red exact-head workflow verdict
 ok - zero exact-head workflow runs remain explicitly pending
+ok - an unrelated exact-head workflow cannot certify the PR green
+ok - the latest rerun attempt supersedes an older failed attempt
+ok - a skipped job on a later page prevents workflow-level success
+ok - one successful workflow cannot hide a missing active workflow
+ok - conflicting latest-attempt evidence fails closed as ambiguous
+ok - a stale workflow run cannot certify the current PR head
+ok - missing or pending fallback evidence stops at a hard deadline
 ok - paginated exact-head runs map cancellation, skipping, and pending buckets
 ok - exact-head pagination reaches a verdict on a gh that rejects --slurp with --jq
-ok - a failed workflow-runs read keeps the real gh error visible
+ok - a failed workflow-runs read becomes a typed failure and keeps the real errors visible
 ok - a moving PR head cannot emit a stale workflow verdict
 ok - unrelated check failures are preserved without an API fallback
 ok - unsupported gh pr checks shapes exec the real gh directly

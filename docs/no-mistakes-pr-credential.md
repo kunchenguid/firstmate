@@ -52,7 +52,13 @@ Because no supported configuration seam exists, firstmate intercepts `gh` on the
   Credential routing may re-enter the shim once when a valid prefix resolves `gh` from `PATH`; a third shim entry fails with exit 70 and identifies the credential or installed-target loop.
 - `bin/fm-gh-ci-fallback.sh` first runs the real `gh pr checks` with the ambient narrow token.
   Only the personal-token denial whose GraphQL error path names a `statusCheckRollup` component, at whatever depth GitHub currently reports it, causes it to resolve the PR's exact head SHA and read every workflow run filtered by that SHA with the same token; it never calls `fm-gh.sh` or exposes `config/gh-credential` to CI reads.
-  Successful, failed, cancelled, skipped, and pending workflow conclusions are returned in the JSON check shape no-mistakes already consumes, while no exact-head workflow runs emits an explicit pending placeholder rather than a false green verdict.
+  The fallback also paginates the repository's active-workflow inventory with that token and requires one unambiguous latest run for every active workflow.
+  A run counts only when the response binds it to the exact repository, current PR number, and current PR head SHA.
+  The latest published attempt of one run supersedes older attempts, while conflicting latest attempts, equally current runs, missing active workflows, wrong-head runs, and workflows unrelated to the PR remain non-green.
+  For a workflow that reports success, the fallback paginates that run's jobs with `filter=all`, retains only jobs from the selected latest attempt and exact head, and requires every returned job to complete successfully.
+  A missing job set or an unexpectedly skipped, cancelled, pending, or failed job therefore cannot hide behind workflow-level success.
+  Successful, failed, cancelled, skipped, and pending workflow conclusions are returned in the JSON check shape no-mistakes already consumes.
+  A readable concrete API or head-drift failure becomes a typed failed check, so no-mistakes cannot turn the known fallback path back into an indefinitely repeated unreadable-command warning.
 - The GitHub merge boundary resolves the genuine `gh` binary itself, so its raw GraphQL capture remains valid when a same-home or current foreign-home shim is installed on `PATH`.
   A side-effect-free identity probe lets it skip current shims independent of their home path.
   The generated capture wrapper independently stops a stale, unrecognized, or mid-update executable that re-enters `PATH`, preserving exit 70 rather than allowing a wrapper-shim process tree to grow.
@@ -80,6 +86,12 @@ bin/fm-gh-shim-install.sh --check --dir <dir-on-path>
 Run the check from a login shell.
 The daemon resolves its environment from the login shell, so a precedence verdict from an unusual shell can differ from what the daemon actually has.
 The credential route also requires `sqlite3` on that resolved `PATH`, because the no-mistakes repository registration is the target authority.
+Pending, missing, or ambiguous fallback evidence has a one-hour deadline by default.
+Its saved deadline is isolated by canonical repository and pull-request identity, and a readable primary result or terminal fallback verdict clears it so stale state cannot affect a later poll.
+`FM_GH_CI_MAX_PENDING_SECONDS` changes that deadline, and `FM_GH_CI_STATE_ROOT` changes the machine-local deadline record root whose default is `$XDG_STATE_HOME/firstmate/gh-ci-fallback`.
+`FM_GH_CI_ACTIONS_ONLY_REPOS` is a comma-separated allowlist of exact `owner/repository` names whose required merge evidence is explicitly known to come entirely from GitHub Actions.
+An otherwise green fallback result becomes a typed terminal failure unless its repository is present in that allowlist.
+The script header owns the exact environment and state mechanics.
 
 ## Limits worth knowing before installing
 
@@ -90,6 +102,9 @@ The shim keeps that blast radius bounded by changing only `pr create`, `pr edit`
 An implicit repository target for `pr create` or `pr edit` is accepted only from a registered no-mistakes gate checkout; callers elsewhere must pass `--repo` or `-R` explicitly.
 Interactive `pr checks` output, every failure outside that `statusCheckRollup` permission denial, and every other invocation remain the real `gh` behavior.
 The fallback can observe GitHub Actions workflow runs only; it is not equivalent to readable check-runs for repositories whose merge gate depends on a third-party check provider.
+The narrow credential also cannot read branch-protection required-check configuration or repository rulesets on the verified private repository.
+The fallback therefore uses every active Actions workflow as a conservative required set, never infers that an absent active workflow is optional, and requires the repository-level Actions-only authority before reporting green.
+This preserves fail-closed required-check semantics, but a repository with active scheduled, dispatch-only, deployment, or other non-PR workflows cannot reach green through the fallback until the credential boundary or upstream monitor supplies an exact readable required-workflow set.
 
 The daemon caches the `PATH` value it captured at startup, but `PATH` directories are scanned at exec time and `fm-gh.sh` reads `config/gh-credential` on every routed invocation.
 Installing the shim into a directory already present on the daemon's cached `PATH`, or changing the credential file, therefore takes effect on the next `gh` call; changing the `PATH` value itself requires a newly started daemon.
@@ -100,7 +115,7 @@ Installing the shim into a directory already present on the daemon's cached `PAT
   That would make check-runs readable, but it would expose a broader credential to every command and subprocess even though the narrow token can already read workflow runs.
   This was rejected in favor of least privilege.
 - **Keep the narrow token and translate a forbidden check-runs read into exact-head workflow runs.**
-  This is the chosen CI path because it adds no credential surface, activates only for the known authorization failure, and cannot certify a branch name or stale head.
+  This is the chosen CI path because it adds no credential surface, activates only for the known authorization failure, and cannot certify a branch name, stale head, unrelated run, missing active workflow, or superseded attempt.
 - **Skip the PR step** with `no-mistakes axi run --skip pr` and open the PR separately.
   This uses a supported flag, but it gives up the step's own behavior, and the CI step monitors the pull request the pipeline created, so the run also stops producing the "checks green" outcome firstmate's `no-mistakes` delivery mode depends on.
 - **Pre-create the pull request** so the step adopts it.
@@ -114,5 +129,5 @@ Installing the shim into a directory already present on the daemon's cached `PAT
 The shim is a local mitigation, not an upstream fix.
 It intercepts commands the pipeline did not offer to let anyone configure, so no-mistakes cannot validate the interception itself.
 The durable fix is a supported per-repository or global configuration knob that populates the step-scoped environment the executor already understands, described in [`proposals/nm-pr-step-interception.md`](proposals/nm-pr-step-interception.md).
-The parallel upstream CI-fallback proposal remains outside this repository's scope.
+That private upstream proposal also records the verified `statusCheckRollup` limitation and the fail-closed workflow-runs fallback needed by the CI monitor.
 Retire each local route once no-mistakes ships its corresponding supported behavior.
