@@ -108,6 +108,19 @@ run_cursor_spawn() {  # <home> <proj> <wt> <fakebin> <id> [extra args...]
     "$SPAWN" "$id" "$proj" cursor "$@" 2>&1
 }
 
+run_raw_cursor_spawn() {  # <home> <proj> <wt> <fakebin> <id> [extra args...]
+  local home=$1 proj=$2 wt=$3 fakebin=$4 id=$5
+  shift 5
+  FM_ROOT_OVERRIDE='' FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
+    FM_FAKE_LAUNCH_LOG="$home/launch.log" \
+    FM_FAKE_CURSOR_ARGS_LOG="$home/cursor-agent.log" \
+    PATH="$fakebin:${FM_CURSOR_TEST_PATH:-$PATH}" \
+    "$SPAWN" "$id" "$proj" 'cursor-agent --yolo --trust raw-brief' "$@" 2>&1
+}
+
 make_path_without_python3() {  # <case-dir>
   local case_dir=$1 path_dir="$1/path-without-python3" cmd resolved
   mkdir -p "$path_dir"
@@ -291,8 +304,38 @@ PY
   pass "cursor spawn launches with yolo+trust, omits effort flags, and wires project hooks"
 }
 
+test_raw_cursor_binary_uses_verified_adapter() {
+  local rec case_dir home proj wt fakebin id out status
+  rec=$(make_spawn_case raw-binary)
+  IFS='|' read -r case_dir home proj wt fakebin id <<EOF
+$rec
+EOF
+  out=$(run_raw_cursor_spawn "$home" "$proj" "$wt" "$fakebin" "$id" \
+    --mode local-only --yolo on)
+  status=$?
+  expect_code 0 "$status" "raw cursor-agent spawn should succeed: $out"
+  assert_contains "$out" "spawned $id harness=cursor" \
+    "raw cursor-agent was not normalized to the verified adapter"
+  assert_grep 'harness=cursor' "$home/state/$id.meta" \
+    "raw cursor-agent did not record the canonical harness family"
+  assert_present "$home/state/$id.cursor-hooks.json.installed" \
+    "raw cursor-agent did not establish hook transaction ownership"
+  assert_present "$wt/.cursor/hooks/fm-busy-turnend.sh" \
+    "raw cursor-agent did not install supervision hooks"
+  fm_control_cursor_hooks_restore "$wt" "$home/state" "$id" \
+    || fail "raw cursor-agent hook transaction could not be restored"
+  fm_control_cursor_hooks_restore "$wt" "$home/state" "$id" \
+    || fail "raw cursor-agent hook restoration was not retry-safe"
+  assert_absent "$wt/.cursor/hooks.json" \
+    "raw cursor-agent restoration left generated hooks.json"
+  assert_absent "$wt/.cursor/hooks/fm-busy-turnend.sh" \
+    "raw cursor-agent restoration left the generated hook script"
+  fm_control_cursor_hooks_forget "$home/state" "$id"
+  pass "raw cursor-agent uses the verified Cursor adapter lifecycle"
+}
+
 test_spawn_refuses_secondmate() {
-  local case_dir home fakebin id out status
+  local case_dir home fakebin id raw_id out status
   case_dir="$TMP_ROOT/secondmate"
   home="$case_dir/home"
   fakebin=$(make_spawn_fakebin "$case_dir/fake")
@@ -309,6 +352,19 @@ test_spawn_refuses_secondmate() {
   [ "$status" -ne 0 ] || fail "cursor was accepted as a secondmate harness"
   assert_contains "$out" "crewmate/scout adapter only" \
     "cursor secondmate refusal did not explain the boundary"
+  raw_id="cursor-raw-secondmate-x1"
+  mkdir -p "$home/data/$raw_id"
+  printf 'charter\n' > "$home/data/$raw_id/brief.md"
+  out=$(cd "$case_dir" && FM_ROOT_OVERRIDE='' FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
+    PATH="$fakebin:$PATH" \
+    "$SPAWN" "$raw_id" 'cursor-agent --yolo --trust raw-charter' --secondmate 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "raw cursor-agent was accepted as a secondmate harness"
+  assert_contains "$out" "crewmate/scout adapter only" \
+    "raw cursor-agent secondmate refusal did not explain the boundary"
   fm_control_harness_supports_kind cursor secondmate \
     && fail "control plane must also refuse cursor secondmate"
   pass "cursor is refused as a secondmate harness"
@@ -494,7 +550,31 @@ PY
     "failed command reconciliation removed the installed hook script"
   assert_present "$state/edited.cursor-hooks.json.installed" \
     "failed command reconciliation discarded recovery ownership"
-  pass "Cursor restore fails closed on edited generated hook entries and commands"
+  python3 - "$wt/.cursor/hooks.json" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    document = json.load(handle)
+document["hooks"]["beforeSubmitPrompt"][0] = {
+    "command": ".cursor/hooks/../hooks/fm-busy-turnend.sh busy"
+}
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(document, handle, separators=(",", ":"))
+    handle.write("\n")
+PY
+  cp "$wt/.cursor/hooks.json" "$expected"
+  if fm_control_cursor_hooks_restore "$wt" "$state" edited; then
+    fail "Cursor restore accepted an equivalent generated hook path"
+  fi
+  cmp -s "$expected" "$wt/.cursor/hooks.json" \
+    || fail "failed equivalent-path reconciliation partially rewrote hooks.json"
+  assert_present "$wt/.cursor/hooks/fm-busy-turnend.sh" \
+    "failed equivalent-path reconciliation removed the installed hook script"
+  assert_present "$state/edited.cursor-hooks.json.installed" \
+    "failed equivalent-path reconciliation discarded recovery ownership"
+  pass "Cursor restore fails closed on edited generated hook targets"
 }
 
 test_cursor_hook_backup_is_atomic() {
@@ -761,7 +841,22 @@ EOF
     "Cursor spawn wrote hook configuration before its Python preflight"
   assert_absent "$home/launch.log" \
     "Cursor spawn launched the harness before its Python preflight"
-  pass "Cursor spawn requires Python before task setup"
+  out=$(FM_CURSOR_TEST_PATH="$path_without_python3" \
+    run_raw_cursor_spawn "$home" "$proj" "$wt" "$fakebin" "$id" \
+      --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "raw cursor-agent without python3 unexpectedly succeeded"
+  assert_contains "$out" "Cursor hook setup requires python3" \
+    "raw cursor-agent did not report its missing runtime"
+  assert_absent "$home/state/$id.meta" \
+    "raw cursor-agent published durable task state before its Python preflight"
+  assert_absent "$home/state/$id.busy-gen" \
+    "raw cursor-agent armed busy state before its Python preflight"
+  assert_absent "$wt/.cursor/hooks.json" \
+    "raw cursor-agent wrote hook configuration before its Python preflight"
+  assert_absent "$home/launch.log" \
+    "raw cursor-agent launched before its Python preflight"
+  pass "Cursor templates and raw binaries require Python before setup"
 }
 
 test_cursor_family_is_exact() {
@@ -793,6 +888,7 @@ test_detects_exact_cursor_agent_ancestor
 test_detects_cursor_node_wrapper_argv0
 test_detection_is_anchored
 test_spawn_launch_shape
+test_raw_cursor_binary_uses_verified_adapter
 test_spawn_refuses_secondmate
 test_control_tables
 test_cursor_family_is_exact

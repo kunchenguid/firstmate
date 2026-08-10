@@ -1248,6 +1248,10 @@ case "$ARG3" in
     ;;
 esac
 
+if [ "$(fm_control_harness_family "$HARNESS" 2>/dev/null || true)" = cursor ]; then
+  HARNESS=cursor
+fi
+
 case "$HARNESS" in
   pi|pi-signed)
     PI_BIN=$(resolve_pi_executable "$HARNESS") || {
@@ -1493,13 +1497,14 @@ case "$LAUNCH" in
     ;;
 esac
 
+if [ "$HARNESS" = cursor ] && ! command -v python3 >/dev/null 2>&1; then
+  echo "error: Cursor hook setup requires python3; install Python 3 or select a different verified harness" >&2
+  exit 1
+fi
+
 case "$LAUNCH" in
   *__CURSORBIN__*)
     CURSOR_BIN=$(resolve_cursor_binary) || exit 1
-    if ! command -v python3 >/dev/null 2>&1; then
-      echo "error: Cursor hook setup requires python3; install Python 3 or select a different verified harness" >&2
-      exit 1
-    fi
     LAUNCH=${LAUNCH//__CURSORBIN__/$(shell_quote "$CURSOR_BIN")}
     ;;
 esac

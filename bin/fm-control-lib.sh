@@ -316,6 +316,25 @@ fm_control_cursor_hooks_forget() {  # <state-dir> <id>
     "$state/$id.cursor-hooks.json.installed" "$state/$id.cursor-fm-busy-turnend.sh.installed"
 }
 
+fm_control_cursor_hook_backup_matches_committed() {  # <worktree> <backup> <relative-path>
+  local wt=$1 backup=$2 relative=$3 backup_hash head_entry head_mode head_hash
+  [ -f "$backup" ] && [ ! -L "$backup" ] || return 1
+  git -C "$wt" diff --cached --quiet HEAD -- "$relative" || return 1
+  backup_hash=$(git -C "$wt" hash-object -- "$backup") || return 1
+  head_entry=$(git -C "$wt" ls-tree HEAD -- "$relative") || return 1
+  [ -n "$head_entry" ] || return 1
+  head_mode=${head_entry%% *}
+  head_hash=${head_entry#* }
+  head_hash=${head_hash#* }
+  head_hash=${head_hash%%[[:space:]]*}
+  [ "$backup_hash" = "$head_hash" ] || return 1
+  case "$head_mode" in
+    100644) [ ! -x "$backup" ] ;;
+    100755) [ -x "$backup" ] ;;
+    *) return 1 ;;
+  esac
+}
+
 fm_control_cursor_hook_path_matches_installed() {  # <worktree> <state-dir> <id> <relative-path>
   local wt=$1 state=$2 id=$3 relative=$4 installed backup
   case "$relative" in
@@ -328,8 +347,7 @@ fm_control_cursor_hook_path_matches_installed() {  # <worktree> <state-dir> <id>
     && cmp -s "$wt/$relative" "$installed" || return 1
   backup="$state/$id.cursor-$(basename "$relative")"
   if git -C "$wt" ls-files --error-unmatch -- "$relative" >/dev/null 2>&1; then
-    [ -f "$backup" ] && [ ! -L "$backup" ] || return 1
-    git -C "$wt" show ":$relative" | cmp -s "$backup" -
+    fm_control_cursor_hook_backup_matches_committed "$wt" "$backup" "$relative"
   else
     [ ! -e "$backup" ] && [ ! -L "$backup" ]
   fi
@@ -348,9 +366,8 @@ fm_control_cursor_hook_path_is_teardown_safe() {  # <worktree> <state-dir> <id> 
   fi
   backup="$state/$id.cursor-$(basename "$relative")"
   if git -C "$wt" ls-files --error-unmatch -- "$relative" >/dev/null 2>&1; then
-    [ -f "$backup" ] && [ ! -L "$backup" ] \
+    fm_control_cursor_hook_backup_matches_committed "$wt" "$backup" "$relative" \
       && [ -f "$wt/$relative" ] && [ ! -L "$wt/$relative" ] \
-      && git -C "$wt" show ":$relative" | cmp -s "$backup" - \
       && cmp -s "$wt/$relative" "$backup"
   else
     [ ! -e "$backup" ] && [ ! -L "$backup" ] \
@@ -409,7 +426,7 @@ expected = {
     "sessionEnd": f"{firstmate_script} idle-session-end",
 }
 firstmate_target = re.compile(
-    rf"(?<![A-Za-z0-9_.-]){re.escape(firstmate_script)}(?![A-Za-z0-9_./-])"
+    r"(?<![A-Za-z0-9_.-])fm-busy-turnend\.sh(?![A-Za-z0-9_.-])"
 )
 with open(path, encoding="utf-8") as handle:
     document = json.load(handle)

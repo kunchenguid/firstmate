@@ -1180,6 +1180,7 @@ with open(path, "w", encoding="utf-8") as handle:
     handle.write("\n")
 PY
   fm_control_cursor_hooks_restore "$case_dir/wt" "$case_dir/state" task-x1
+  git -C "$case_dir/wt" add .cursor/hooks.json
   fm_control_cursor_hooks_backup "$case_dir/wt" "$case_dir/state" task-x1 reuse
   python3 - "$case_dir/wt/.cursor/hooks.json" <<'PY'
 import json
@@ -1210,14 +1211,14 @@ PY
   rc=$?
   set -e
 
-  expect_code 1 "$rc" "Cursor relaunch must not hide a dirty hook baseline"
+  expect_code 1 "$rc" "Cursor relaunch must not hide a staged dirty hook baseline"
   assert_grep "uncommitted changes present" "$case_dir/stderr" \
     "dirty Cursor hook baseline was not reported"
   cmp -s "$installed_hooks" "$case_dir/wt/.cursor/hooks.json" \
     || fail "dirty baseline refusal removed live Cursor hook entries"
   assert_present "$case_dir/state/task-x1.cursor-hooks.json.installed" \
     "dirty baseline refusal discarded Cursor transaction ownership"
-  pass "same-Cursor relaunch cannot hide a dirty hook baseline"
+  pass "same-Cursor relaunch cannot hide a staged dirty hook baseline"
 }
 
 test_gh_error_and_content_absent_refuses() {
