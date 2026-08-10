@@ -19,6 +19,12 @@
 #  10. fm-send secondmate path embeds corr and creates durable pending records
 #  11. Backend busy/idle observation works through the shared busy abstraction
 #      used by Pi/Claude secondmate backends (no conversation scrape)
+#  12. A resolved record never counts as open, including immediately after
+#      resolution
+#  13. A tick prunes a resolved record once it ages past the retention
+#      window, keeps one that has not, never prunes one whose escalation
+#      close has not converged, and prunes only exactly those records that
+#      qualify
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -1039,6 +1045,150 @@ test_failed_send_discards_undelivered_expectation() {
   pass "failed transport discards undelivered expectation only"
 }
 
+test_resolved_record_excluded_from_open_count() {
+  local home state corr
+  home=$(setup_parent open-count)
+  state="$home/state"
+  export FM_PENDING_REPLY_NOW=10000
+  corr=$(fm_pending_reply_create "$home" "$state" "hibit" "still open")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+  fm_pending_reply_task_has_open "$state" "hibit" \
+    || fail "unresolved record should count as open"
+  printf 'done [corr=%s]: answered\n' "$corr" > "$state/hibit.status"
+  fm_pending_reply_try_resolve "$state" "$corr" || fail "reply should resolve"
+  if fm_pending_reply_task_has_open "$state" "hibit"; then
+    fail "resolved record must never count as open"
+  fi
+  pass "resolved record never counts as open, including right after resolution"
+}
+
+test_tick_prunes_resolved_record_past_retention() {
+  local home state corr rec
+  home=$(setup_parent prune-past-retention)
+  state="$home/state"
+  export FM_PENDING_REPLY_RETENTION_SECS=100
+  export FM_PENDING_REPLY_NOW=11000
+  corr=$(fm_pending_reply_create "$home" "$state" "hibit" "prune me")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+  printf 'done [corr=%s]: answered\n' "$corr" > "$state/hibit.status"
+  fm_pending_reply_try_resolve "$state" "$corr" || fail "reply should resolve"
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  [ -f "$rec" ] || fail "resolved record missing before its retention window elapses"
+  export FM_PENDING_REPLY_NOW=11200
+  fm_pending_reply_tick "$state"
+  [ ! -f "$rec" ] || fail "resolved record past its retention window should be pruned"
+  unset FM_PENDING_REPLY_RETENTION_SECS
+  pass "tick prunes a resolved record once it ages past the retention window"
+}
+
+test_tick_keeps_resolved_record_within_retention() {
+  local home state corr rec
+  home=$(setup_parent prune-within-retention)
+  state="$home/state"
+  export FM_PENDING_REPLY_RETENTION_SECS=1000
+  export FM_PENDING_REPLY_NOW=12000
+  corr=$(fm_pending_reply_create "$home" "$state" "hibit" "keep me")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+  printf 'done [corr=%s]: answered\n' "$corr" > "$state/hibit.status"
+  fm_pending_reply_try_resolve "$state" "$corr" || fail "reply should resolve"
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  export FM_PENDING_REPLY_NOW=12500
+  fm_pending_reply_tick "$state"
+  [ -f "$rec" ] || fail "resolved record younger than its retention window should survive a tick"
+  unset FM_PENDING_REPLY_RETENTION_SECS
+  pass "tick keeps a resolved record that has not yet aged past the retention window"
+}
+
+test_tick_never_prunes_unconverged_escalation_close() {
+  local home state corr rec
+  home=$(setup_parent prune-open-escalation)
+  state="$home/state"
+  export FM_PENDING_REPLY_RETENTION_SECS=1000
+  export FM_PENDING_REPLY_NOW=13000
+  corr=$(fm_pending_reply_create "$home" "$state" "hibit" "escalated then resolved")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  fm_pending_reply_set "$rec" phase resolved
+  fm_pending_reply_set "$rec" resolved_epoch 13000
+  fm_pending_reply_set "$rec" escalated_epoch 12000
+  # Simulate a close attempt that has not converged yet (e.g. a transient
+  # status-write failure): with no destination to append to, the escalation
+  # close can neither confirm nor record itself. Age it far past retention
+  # to prove age alone never substitutes for a converged close.
+  fm_pending_reply_set "$rec" parent_status ''
+  export FM_PENDING_REPLY_NOW=999999
+  fm_pending_reply_tick "$state"
+  [ -z "$(fm_pending_reply_get "$rec" escalation_closed_epoch)" ] \
+    || fail "test setup should have left the escalation close unconverged"
+  [ -f "$rec" ] \
+    || fail "a resolved record whose escalation close has not converged must never be pruned, however old"
+
+  # Restore the destination just after resolution, still within the
+  # retention window: the close should converge without being pruned yet.
+  export FM_PENDING_REPLY_NOW=13005
+  fm_pending_reply_set "$rec" parent_status "$state/hibit.status"
+  fm_pending_reply_tick "$state"
+  [ -n "$(fm_pending_reply_get "$rec" escalation_closed_epoch)" ] \
+    || fail "escalation close should converge once its status destination is restored"
+  [ -f "$rec" ] \
+    || fail "a freshly converged record still inside its retention window must not be pruned yet"
+
+  # Once it also ages past retention, a later tick prunes it.
+  export FM_PENDING_REPLY_NOW=$((13005 + 2000))
+  fm_pending_reply_tick "$state"
+  [ ! -f "$rec" ] \
+    || fail "resolved record should be pruned once its converged escalation ages past retention"
+  unset FM_PENDING_REPLY_RETENTION_SECS
+  pass "tick never prunes an unconverged escalation close, and prunes only once it converges and ages out"
+}
+
+test_tick_prune_removes_only_eligible_records() {
+  local home state
+  local corr_old corr_recent corr_unresolved corr_open_escalation
+  local rec_old rec_recent rec_unresolved rec_open_escalation
+  home=$(setup_parent prune-selectivity)
+  state="$home/state"
+  export FM_PENDING_REPLY_RETENTION_SECS=100
+
+  export FM_PENDING_REPLY_NOW=10000
+  corr_old=$(fm_pending_reply_create "$home" "$state" "hibit" "old resolved")
+  fm_pending_reply_mark_delivered "$state" "$corr_old"
+  printf 'done [corr=%s]: answered old\n' "$corr_old" > "$state/hibit.status"
+  fm_pending_reply_try_resolve "$state" "$corr_old" || fail "old record should resolve"
+  rec_old=$(fm_pending_reply_path "$state" "$corr_old")
+
+  corr_unresolved=$(fm_pending_reply_create "$home" "$state" "hibit" "still open")
+  fm_pending_reply_mark_delivered "$state" "$corr_unresolved"
+  rec_unresolved=$(fm_pending_reply_path "$state" "$corr_unresolved")
+
+  corr_open_escalation=$(fm_pending_reply_create "$home" "$state" "hibit" "escalation not converged")
+  fm_pending_reply_mark_delivered "$state" "$corr_open_escalation"
+  rec_open_escalation=$(fm_pending_reply_path "$state" "$corr_open_escalation")
+  fm_pending_reply_set "$rec_open_escalation" phase resolved
+  fm_pending_reply_set "$rec_open_escalation" resolved_epoch 10000
+  fm_pending_reply_set "$rec_open_escalation" escalated_epoch 9000
+  fm_pending_reply_set "$rec_open_escalation" parent_status ''
+
+  export FM_PENDING_REPLY_NOW=99980
+  corr_recent=$(fm_pending_reply_create "$home" "$state" "hibit" "recent resolved")
+  fm_pending_reply_mark_delivered "$state" "$corr_recent"
+  printf 'done [corr=%s]: answered recent\n' "$corr_recent" >> "$state/hibit.status"
+  fm_pending_reply_try_resolve "$state" "$corr_recent" || fail "recent record should resolve"
+  rec_recent=$(fm_pending_reply_path "$state" "$corr_recent")
+
+  export FM_PENDING_REPLY_NOW=100000
+  fm_pending_reply_tick "$state"
+
+  [ ! -f "$rec_old" ] || fail "resolved record past its retention window should have been pruned"
+  [ -f "$rec_recent" ] || fail "resolved record within its retention window should survive"
+  [ -f "$rec_unresolved" ] || fail "unresolved record should never be pruned"
+  [ -f "$rec_open_escalation" ] \
+    || fail "resolved record with an unconverged escalation close should never be pruned"
+
+  unset FM_PENDING_REPLY_RETENTION_SECS
+  pass "tick prunes only the resolved, retention-eligible record and nothing else"
+}
+
 # --- run --------------------------------------------------------------------
 
 test_normal_correlated_reply_resolves_once
@@ -1069,5 +1219,10 @@ test_tick_skips_terminal_and_reuses_target_observation
 test_correlations_reuse_only_for_matching_open_task
 test_tick_end_to_end_missed_then_escalate
 test_failed_send_discards_undelivered_expectation
+test_resolved_record_excluded_from_open_count
+test_tick_prunes_resolved_record_past_retention
+test_tick_keeps_resolved_record_within_retention
+test_tick_never_prunes_unconverged_escalation_close
+test_tick_prune_removes_only_eligible_records
 
 printf 'ok - all pending-reply tests passed\n'

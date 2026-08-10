@@ -66,11 +66,22 @@
 # or a remote mate's mirrored line - can take the key over or clear it; see the
 # reserved-key rule in bin/fm-classify-lib.sh.
 #
+# Retention: a resolved record is never open, so fm_pending_reply_task_has_open
+# already excludes it. fm_pending_reply_tick additionally prunes it from disk
+# once it has aged past the retention window AND its escalation (if any) is
+# closed. A resolved record whose escalation is still open is never pruned,
+# however old, because that close must still converge. An unresolved record of
+# any age or phase is never auto-deleted; that durable-retention contract is
+# unchanged.
+#
 # Sourced by bin/fm-send.sh, bin/fm-watch.sh, bin/fm-secondmate-report.sh, and
 # tests. No side effects on source. set -u / set -e safe.
 #
 # Tunables (env):
-#   FM_PENDING_REPLY_GRACE_SECS   default 120
+#   FM_PENDING_REPLY_GRACE_SECS     default 120
+#   FM_PENDING_REPLY_RETENTION_SECS default 3600; how long a resolved record
+#                                   with no open escalation stays on disk
+#                                   before fm_pending_reply_tick prunes it
 #   FM_PENDING_REPLY_DIR_OVERRIDE override the pending-replies directory (tests)
 #   FM_PENDING_REPLY_SEND_HOOK    optional command template for recovery delivery
 #                                 (tests); receives task_id and full message as args
@@ -90,6 +101,7 @@ _FM_PENDING_REPLY_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/n
 FM_PENDING_REPLY_SCHEMA='fm-pending-reply.v1'
 FM_PENDING_REPLY_CORR_RE='corr=[A-Fa-f0-9]{16}'
 FM_PENDING_REPLY_GRACE_DEFAULT=120
+FM_PENDING_REPLY_RETENTION_DEFAULT=3600
 
 fm_pending_reply_now() {
   if [ -n "${FM_PENDING_REPLY_NOW:-}" ]; then
@@ -105,6 +117,14 @@ fm_pending_reply_grace_secs() {
     ''|*[!0-9]*) g=$FM_PENDING_REPLY_GRACE_DEFAULT ;;
   esac
   printf '%s' "$g"
+}
+
+fm_pending_reply_retention_secs() {
+  local r=${FM_PENDING_REPLY_RETENTION_SECS:-$FM_PENDING_REPLY_RETENTION_DEFAULT}
+  case "$r" in
+    ''|*[!0-9]*) r=$FM_PENDING_REPLY_RETENTION_DEFAULT ;;
+  esac
+  printf '%s' "$r"
 }
 
 # Directory holding durable pending-reply records for <state-dir>.
@@ -417,6 +437,39 @@ fm_pending_reply_discard_undelivered() {  # <state-dir> <corr_id>
   [ -f "$rec" ] || return 0
   delivered=$(fm_pending_reply_get "$rec" delivered_epoch)
   [ -z "$delivered" ] || return 1
+  marker=$(fm_pending_reply_delivery_confirmation_path "$state" "$corr")
+  rm -f "$marker" 2>/dev/null || true
+  rm -f "$rec"
+}
+
+# True (0) when a resolved record may be pruned from disk: its escalation, if
+# any was opened, is already closed, and it has aged past the retention
+# window. A record with no resolved_epoch, or an open escalation, is never
+# eligible - it stays durable exactly like an unresolved record.
+fm_pending_reply_prune_eligible() {  # <record-path>
+  local rec=$1 phase escalated closed resolved now retention age
+  [ -f "$rec" ] || return 1
+  phase=$(fm_pending_reply_get "$rec" phase)
+  [ "$phase" = resolved ] || return 1
+  escalated=$(fm_pending_reply_get "$rec" escalated_epoch)
+  if [ -n "$escalated" ]; then
+    closed=$(fm_pending_reply_get "$rec" escalation_closed_epoch)
+    [ -n "$closed" ] || return 1
+  fi
+  resolved=$(fm_pending_reply_get "$rec" resolved_epoch)
+  case "$resolved" in ''|*[!0-9]*) return 1 ;; esac
+  now=$(fm_pending_reply_now)
+  retention=$(fm_pending_reply_retention_secs)
+  age=$((now - resolved))
+  [ "$age" -ge "$retention" ]
+}
+
+# Remove a resolved, retention-eligible record and its delivery marker.
+# A no-op (not an error) when the record does not yet qualify.
+fm_pending_reply_prune() {  # <state-dir> <corr_id>
+  local state=$1 corr=$2 rec marker
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  fm_pending_reply_prune_eligible "$rec" || return 0
   marker=$(fm_pending_reply_delivery_confirmation_path "$state" "$corr")
   rm -f "$marker" 2>/dev/null || true
   rm -f "$rec"
@@ -884,6 +937,14 @@ fm_pending_reply_escalation_line() {  # <status-file> <record-path> <corr_id>
 # only while that exact keyed decision is still open in
 # bin/fm-classify-lib.sh's fold. Records that never escalated are left untouched.
 fm_pending_reply_close_escalation() {  # <state-dir> <corr_id>
+  # Cheap pre-lock check: a resolved record with no escalation ever opened
+  # costs no lock at all, so a tick over many such records stays lock-free.
+  local state=$1 corr=$2 rec lock rc=0
+  local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  [ -f "$rec" ] || return 1
+  [ "$(fm_pending_reply_get "$rec" phase)" = resolved ] || return 0
+  [ -n "$(fm_pending_reply_get "$rec" escalated_epoch)" ] || return 0
   # Serialized per correlation so a resolution and an escalation cannot interleave.
   # bin/fm-wake-lib.sh owns the lock primitives but assigns its own globals when
   # sourced, so they are declared local here: that contains them to this call
@@ -891,8 +952,6 @@ fm_pending_reply_close_escalation() {  # <state-dir> <corr_id>
   # subshell that would make every later use of them read as a lost write.
   # The lock is released explicitly rather than from an EXIT trap, because a trap
   # in a plain function would clobber the caller's own.
-  local state=$1 corr=$2 lock rc=0
-  local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
   STATE=$state
   lock="$state/.pending-reply-$corr.lock"
   # shellcheck source=bin/fm-wake-lib.sh
@@ -1139,6 +1198,9 @@ fm_pending_reply_tick() {  # <state-dir>
       # Cheap no-op unless an escalation for this record is still open; this is
       # the retry that makes the close converge after a transient write failure.
       fm_pending_reply_close_escalation "$state" "$corr" || true
+      # Cheap no-op until the record ages past the retention window; never
+      # prunes an escalated record whose close has not converged yet.
+      fm_pending_reply_prune "$state" "$corr" || true
       continue
     fi
     fm_pending_reply_reconcile_delivery "$state" "$corr" || true
