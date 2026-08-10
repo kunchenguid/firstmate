@@ -194,12 +194,12 @@ test_cursor_submit_clears_to_idle_placeholder() {
   printf '╭────────────────────╮\n│ → Add a follow-up  │\n╰────────────────────╯\n' > "$composer"
   : > "$sent"
   PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_SENT="$sent" \
-    FM_FAKE_CURSOR_FLOW=1 FM_COMPOSER_IDLE_RE='^Type a message\.\.\.|^Add a follow-up$' \
+    FM_FAKE_CURSOR_FLOW=1 FM_COMPOSER_IDLE_RE='^(Type a message\.\.\.|Add a follow-up)$' \
     fm_tmux_submit_core "win" fix 2 0 0 > "$vfile" 2>/dev/null
   [ "$(cat "$vfile")" = empty ] \
     || fail "Cursor submit should confirm its idle placeholder, got '$(cat "$vfile")'"
   PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" \
-    FM_COMPOSER_IDLE_RE='^Type a message\.\.\.|^Add a follow-up$' \
+    FM_COMPOSER_IDLE_RE='^(Type a message\.\.\.|Add a follow-up)$' \
     fm_tmux_composer_state "win" > "$vfile" 2>/dev/null
   [ "$(cat "$vfile")" = empty ] \
     || fail "Cursor idle composer should remain structurally proven empty"

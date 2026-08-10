@@ -57,7 +57,11 @@ case "${1:-}" in
     printf '%%1\n'
     exit 0 ;;
   capture-pane)
-    printf '╭────╮\n│    │\n╰────╯\n'
+    if [ -n "${FM_FAKE_TMUX_CAPTURE_FILE:-}" ]; then
+      cat "$FM_FAKE_TMUX_CAPTURE_FILE"
+    else
+      printf '╭────╮\n│    │\n╰────╯\n'
+    fi
     exit 0 ;;
   list-windows)
     printf 'foreign:%s\n' "${FM_FAKE_TMUX_WINDOW:-fm-lost}"
@@ -197,6 +201,47 @@ test_healthy_fm_id_send_still_works() {
   pass "fm-send strict: healthy fm-<id> sends still type once and submit"
 }
 
+test_cursor_idle_placeholders_are_exact_and_scoped() {
+  local dir fb home err log capture rc enters
+  dir="$TMP_ROOT/cursor-idle"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); home=$(setup_home cursoridle); err="$dir/send.err"
+  log="$dir/tmux.log"; capture="$dir/capture"; : > "$log"
+  fm_write_meta "$home/state/codex-idle.meta" \
+    "window=sess:fm-codex-idle" "kind=ship" "harness=codex"
+  fm_write_meta "$home/state/cursor-idle.meta" \
+    "window=sess:fm-cursor-idle" "kind=ship" "harness=cursor"
+
+  printf '╭────────────────────╮\n│ Type a message...  │\n╰────────────────────╯\n' > "$capture"
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    FM_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE_FILE="$capture" \
+    FM_SEND_RETRIES=3 FM_SEND_SLEEP=0 FM_SEND_SETTLE=0 \
+    "$SEND" codex-idle "hold this text" >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "a non-Cursor worker accepted Cursor placeholder text as empty"
+  enters=$(grep -c 'literal=0 arg=Enter' "$log" 2>/dev/null || true)
+  [ "$enters" -eq 3 ] || fail "non-Cursor placeholder text did not consume the retry budget"
+
+  : > "$log"
+  printf '╭────────────────────╮\n│→ Type a message...x│\n╰────────────────────╯\n' > "$capture"
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    FM_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE_FILE="$capture" \
+    FM_SEND_RETRIES=3 FM_SEND_SLEEP=0 FM_SEND_SETTLE=0 \
+    "$SEND" cursor-idle "hold this text" >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "Cursor prefix text was accepted as a complete idle placeholder"
+  enters=$(grep -c 'literal=0 arg=Enter' "$log" 2>/dev/null || true)
+  [ "$enters" -eq 3 ] || fail "Cursor prefix text did not consume the retry budget"
+
+  : > "$log"
+  printf '╭────────────────────╮\n│ → Add a follow-up  │\n╰────────────────────╯\n' > "$capture"
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    FM_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE_FILE="$capture" \
+    FM_SEND_RETRIES=3 FM_SEND_SLEEP=0 FM_SEND_SETTLE=0 \
+    "$SEND" cursor-idle "deliver this text" >/dev/null 2>"$err"; rc=$?
+  expect_code 0 "$rc" "Cursor's exact idle placeholder should confirm delivery"
+  enters=$(grep -c 'literal=0 arg=Enter' "$log" 2>/dev/null || true)
+  [ "$enters" -eq 1 ] || fail "Cursor's exact placeholder should confirm on the first Enter"
+  pass "fm-send: Cursor idle placeholders are exact and harness-scoped"
+}
+
 # A --key send is how firstmate interrupts a worker, so its exit status is the
 # only signal that the interrupt actually landed.
 # Reporting success for a key that was never delivered would leave supervision
@@ -233,3 +278,4 @@ test_prefixless_herdr_pane_id_fails
 test_unmatched_single_colon_target_must_exist
 test_fm_prefixed_herdr_session_is_an_explicit_target
 test_healthy_fm_id_send_still_works
+test_cursor_idle_placeholders_are_exact_and_scoped

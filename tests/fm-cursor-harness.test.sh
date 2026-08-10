@@ -254,7 +254,7 @@ test_cursor_composer_placeholder_requires_cursor_glyph() {
   . "$ROOT/bin/fm-tmux-lib.sh"
   [ "$(fm_tmux_composer_row_state '│ Add a follow-up │' 1 0)" = pending ] \
     || fail "ordinary Add a follow-up text was treated as an empty composer"
-  [ "$(FM_COMPOSER_IDLE_RE='^Type a message\.\.\.|^Add a follow-up$' \
+  [ "$(FM_COMPOSER_IDLE_RE='^(Type a message\.\.\.|Add a follow-up)$' \
     fm_tmux_composer_row_state '│ → Add a follow-up │' 1 0)" = empty ] \
     || fail "Cursor's idle Add a follow-up placeholder was not recognized"
   [ "$(fm_tmux_composer_row_state '→' 0 0)" = empty ] \
