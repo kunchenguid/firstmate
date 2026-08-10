@@ -1,0 +1,196 @@
+# shellcheck shell=bash
+# Shared host-wide ownership for dependency mutations and Firstmate checkout updates.
+# Usage: . bin/fm-dependency-lock-lib.sh
+
+FM_DEPENDENCY_LOCK_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_FM_DEPENDENCY_LOCK_HELD=${_FM_DEPENDENCY_LOCK_HELD:-0}
+
+fm_dependency_positive_integer_is_valid() {
+  case "$1" in
+    ''|*[!0-9]*) return 1 ;;
+    *[1-9]*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+fm_dependency_lock_timeout_is_valid() {
+  fm_dependency_positive_integer_is_valid "${FM_DEPS_LOCK_TIMEOUT:-5}"
+}
+
+fm_dependency_host_lock_basename() {
+  printf 'firstmate-deps-%s\n' "$UID"
+}
+
+fm_dependency_host_lock_dir() {
+  if [ -n "${FM_DEPS_HOST_LOCK_DIR:-}" ]; then
+    printf '%s\n' "$FM_DEPS_HOST_LOCK_DIR"
+  else
+    printf '/tmp/%s\n' "$(fm_dependency_host_lock_basename)"
+  fi
+}
+
+fm_dependency_host_lock_dir_is_valid() {
+  local lock_dir=$1 expected
+  expected=$(fm_dependency_host_lock_basename) || return 1
+  case "$lock_dir" in
+    /*) ;;
+    *) return 1 ;;
+  esac
+  case "$lock_dir" in *$'\n'*|*$'\r'*) return 1 ;; esac
+  [ "${lock_dir##*/}" = "$expected" ] || return 1
+  [ -d "$lock_dir" ] && [ ! -L "$lock_dir" ] && [ -O "$lock_dir" ] || return 1
+  [ "$(fm_dependency_path_mode "$lock_dir")" = 700 ]
+}
+
+fm_dependency_path_mode() {
+  case "$(uname -s 2>/dev/null || true)" in
+    Darwin) stat -f '%Lp' "$1" 2>/dev/null ;;
+    *) stat -c '%a' "$1" 2>/dev/null ;;
+  esac
+}
+
+fm_dependency_ensure_host_lock_dir() {
+  local lock_dir parent
+  lock_dir=$(fm_dependency_host_lock_dir) || return 1
+  if [ -e "$lock_dir" ] || [ -L "$lock_dir" ]; then
+    fm_dependency_host_lock_dir_is_valid "$lock_dir"
+    return
+  fi
+  case "$lock_dir" in
+    /*) ;;
+    *) return 1 ;;
+  esac
+  case "$lock_dir" in *$'\n'*|*$'\r'*) return 1 ;; esac
+  [ "${lock_dir##*/}" = "$(fm_dependency_host_lock_basename)" ] || return 1
+  parent=${lock_dir%/*}
+  [ "$parent" != "$lock_dir" ] || parent=.
+  [ -d "$parent" ] || return 1
+  if ! (umask 077; mkdir "$lock_dir") 2>/dev/null; then
+    fm_dependency_host_lock_dir_is_valid "$lock_dir" || return 1
+  fi
+  fm_dependency_host_lock_dir_is_valid "$lock_dir"
+}
+
+fm_dependency_acquire_lock() {
+  local lock=$1 raw timeout started
+  raw=${FM_DEPS_LOCK_TIMEOUT:-5}
+  fm_dependency_lock_timeout_is_valid || return 2
+  timeout=$((10#$raw))
+  started=$SECONDS
+  while ! fm_lock_try_acquire "$lock"; do
+    [ $((SECONDS - started)) -lt "$timeout" ] || return 75
+    sleep 0.1
+  done
+}
+
+fm_dependency_lock_is_owned_by_pid() {
+  local lock=$1 expected_pid=$2 owner pid
+  [ -L "$lock" ] || return 1
+  owner=$(fm_lock_link_owner "$lock" 2>/dev/null) || return 1
+  case "$owner" in "$lock".owner.*) ;; *) return 1 ;; esac
+  [ -d "$owner" ] && [ ! -L "$owner" ] || return 1
+  fm_lock_points_to_owner "$lock" "$owner" || return 1
+  pid=$(cat "$owner/pid" 2>/dev/null || true)
+  [ "$pid" = "$expected_pid" ]
+}
+
+fm_dependency_parent_owns_host_lock() {
+  local expected=${FM_DEPENDENCY_LOCK_PARENT_PID:-} lock_dir lock
+  local context_root=${FM_ROOT:-$FM_DEPENDENCY_LOCK_LIB_DIR/..}
+  local context_home=${FM_HOME:-$context_root}
+  case "$expected" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$expected" = "$PPID" ] || return 1
+  fm_dependency_ensure_host_lock_dir || return 1
+  lock_dir=$(fm_dependency_host_lock_dir) || return 1
+  lock="$lock_dir/fm-deps.lock"
+  local FM_ROOT_OVERRIDE FM_ROOT FM_HOME FM_STATE_OVERRIDE STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
+  FM_ROOT_OVERRIDE=$context_root
+  FM_ROOT=$context_root
+  FM_HOME=$context_home
+  FM_STATE_OVERRIDE=
+  STATE=$lock_dir
+  # shellcheck source=bin/fm-wake-lib.sh
+  . "$FM_DEPENDENCY_LOCK_LIB_DIR/fm-wake-lib.sh"
+  fm_dependency_lock_is_owned_by_pid "$lock" "$expected"
+}
+
+fm_dependency_with_host_lock() {
+  local callback=$1 lock_dir lock lock_status
+  local context_root=${FM_ROOT:-$FM_DEPENDENCY_LOCK_LIB_DIR/..}
+  local context_home=${FM_HOME:-$context_root} rc=0
+  local context_root_override=${FM_ROOT_OVERRIDE:-}
+  local context_state_override=${FM_STATE_OVERRIDE:-}
+  local context_state=${STATE:-$context_home/state}
+  local context_wake_queue=${FM_WAKE_QUEUE:-}
+  local context_wake_queue_lock=${FM_WAKE_QUEUE_LOCK:-}
+  shift
+  if [ "$_FM_DEPENDENCY_LOCK_HELD" -eq 1 ]; then
+    "$callback" "$@"
+    return
+  fi
+  if fm_dependency_parent_owns_host_lock; then
+    local _FM_DEPENDENCY_LOCK_HELD=1
+    "$callback" "$@"
+    return
+  fi
+  fm_dependency_ensure_host_lock_dir || return 2
+  lock_dir=$(fm_dependency_host_lock_dir) || return 2
+  lock="$lock_dir/fm-deps.lock"
+  local FM_ROOT_OVERRIDE FM_ROOT FM_HOME FM_STATE_OVERRIDE STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
+  FM_ROOT_OVERRIDE=$context_root
+  FM_ROOT=$context_root
+  FM_HOME=$context_home
+  FM_STATE_OVERRIDE=
+  STATE=$lock_dir
+  # shellcheck source=bin/fm-wake-lib.sh
+  . "$FM_DEPENDENCY_LOCK_LIB_DIR/fm-wake-lib.sh"
+  fm_dependency_acquire_lock "$lock"
+  lock_status=$?
+  [ "$lock_status" -eq 0 ] || return "$lock_status"
+  FM_ROOT_OVERRIDE=$context_root_override
+  FM_ROOT=$context_root
+  FM_HOME=$context_home
+  FM_STATE_OVERRIDE=$context_state_override
+  STATE=$context_state
+  FM_WAKE_QUEUE=$context_wake_queue
+  FM_WAKE_QUEUE_LOCK=$context_wake_queue_lock
+  local _FM_DEPENDENCY_LOCK_HELD=1
+  "$callback" "$@" || rc=$?
+  fm_lock_release "$lock"
+  return "$rc"
+}
+
+fm_dependency_resume_host_lock() {
+  local callback=$1 lock_dir lock
+  local context_root=${FM_ROOT:-$FM_DEPENDENCY_LOCK_LIB_DIR/..}
+  local context_home=${FM_HOME:-$context_root} rc=0
+  local context_root_override=${FM_ROOT_OVERRIDE:-}
+  local context_state_override=${FM_STATE_OVERRIDE:-}
+  local context_state=${STATE:-$context_home/state}
+  local context_wake_queue=${FM_WAKE_QUEUE:-}
+  local context_wake_queue_lock=${FM_WAKE_QUEUE_LOCK:-}
+  shift
+  fm_dependency_ensure_host_lock_dir || return 2
+  lock_dir=$(fm_dependency_host_lock_dir) || return 2
+  lock="$lock_dir/fm-deps.lock"
+  local FM_ROOT_OVERRIDE FM_ROOT FM_HOME FM_STATE_OVERRIDE STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
+  FM_ROOT_OVERRIDE=$context_root
+  FM_ROOT=$context_root
+  FM_HOME=$context_home
+  FM_STATE_OVERRIDE=
+  STATE=$lock_dir
+  # shellcheck source=bin/fm-wake-lib.sh
+  . "$FM_DEPENDENCY_LOCK_LIB_DIR/fm-wake-lib.sh"
+  fm_dependency_lock_is_owned_by_pid "$lock" "${BASHPID:-$$}" || return 2
+  FM_ROOT_OVERRIDE=$context_root_override
+  FM_ROOT=$context_root
+  FM_HOME=$context_home
+  FM_STATE_OVERRIDE=$context_state_override
+  STATE=$context_state
+  FM_WAKE_QUEUE=$context_wake_queue
+  FM_WAKE_QUEUE_LOCK=$context_wake_queue_lock
+  local _FM_DEPENDENCY_LOCK_HELD=1
+  "$callback" "$@" || rc=$?
+  fm_lock_release "$lock"
+  return "$rc"
+}

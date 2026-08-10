@@ -25,6 +25,8 @@
 # shared default branch or any other worktree's checkout.
 
 SUB_HOME_MARKER="${SUB_HOME_MARKER:-.fm-secondmate-home}"
+# shellcheck source=bin/fm-dependency-lock-lib.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-dependency-lock-lib.sh"
 # shellcheck source=bin/fm-secondmate-registry-lib.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-secondmate-registry-lib.sh"
 
@@ -270,7 +272,7 @@ live_secondmate_meta_records() {
 # dirty, diverged, or wrong-branch target and leave its work untouched.
 FF_STATUS=""
 FF_INSTR=""
-ff_target() {
+ff_target_locked() {
   local dir=$1 label=$2 base_mode=$3 allow_detached=${4:-no} ignore_seed_marker=${5:-no}
   FF_STATUS="skipped"
   FF_INSTR=""
@@ -356,6 +358,20 @@ ff_target() {
     echo "$label: updated $before..$after (instructions changed: $instr)"
   else
     echo "$label: updated $before..$after"
+  fi
+  return 0
+}
+
+ff_target() {
+  local label=$2 lock_status=0
+  fm_dependency_with_host_lock ff_target_locked "$@" || lock_status=$?
+  [ "$lock_status" -eq 0 ] && return 0
+  FF_STATUS="skipped"
+  FF_INSTR=""
+  if [ "$lock_status" -eq 75 ]; then
+    echo "$label: skipped: dependency check is active"
+  else
+    echo "$label: skipped: dependency lock is unavailable"
   fi
   return 0
 }

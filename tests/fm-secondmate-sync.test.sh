@@ -34,6 +34,7 @@ BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 fm_git_identity fmtest fmtest@example.com
 
 TMP_ROOT=$(fm_test_tmproot fm-secondmate-sync)
+export FM_DEPS_HOST_LOCK_DIR="$TMP_ROOT/firstmate-deps-$UID"
 export FM_BACKEND=tmux
 
 # --- world builders --------------------------------------------------------
@@ -166,6 +167,55 @@ test_ff_current() {
   [ -z "$FF_INSTR" ] || fail "a no-op must not report instruction changes (would trigger a nudge)"
   [ "$(head_of "$w/sm")" = "$base" ] || fail "current home HEAD moved"
   pass "T2 current: an already-current home is a no-op and reports no instruction change"
+}
+
+test_ff_defers_while_dependency_check_is_active() {
+  local w c1 base before ready release holder previous_timeout i
+  w=$(new_world ff-dependency-lock)
+  c1=$(head_of "$w/main")
+  git -C "$w/main" worktree add -q --detach "$w/sm" "$c1"
+  bump_primary "$w" instr
+  base=$(primary_head_commit "$w/main")
+  before=$(head_of "$w/sm")
+  ready="$w/lock.ready"
+  release="$w/lock.release"
+
+  bash -c '
+    . "$1"
+    hold_dependency_lock() {
+      : > "$1"
+      while [ ! -e "$2" ]; do sleep 0.02; done
+    }
+    fm_dependency_with_host_lock hold_dependency_lock "$2" "$3"
+  ' _ "$ROOT/bin/fm-dependency-lock-lib.sh" "$ready" "$release" \
+    > "$w/lock-holder.out" 2>&1 &
+  holder=$!
+  for ((i = 0; i < 100; i++)); do
+    [ -e "$ready" ] && break
+    kill -0 "$holder" 2>/dev/null || break
+    sleep 0.02
+  done
+  if [ ! -e "$ready" ]; then
+    wait "$holder"
+    fail "dependency lock holder did not start: $(< "$w/lock-holder.out")"
+  fi
+
+  previous_timeout=${FM_DEPS_LOCK_TIMEOUT:-}
+  FM_DEPS_LOCK_TIMEOUT=1
+  run_ff "$w/sm" "$base"
+  if [ -n "$previous_timeout" ]; then
+    FM_DEPS_LOCK_TIMEOUT=$previous_timeout
+  else
+    unset FM_DEPS_LOCK_TIMEOUT
+  fi
+  : > "$release"
+  wait "$holder"
+
+  [ "$FF_STATUS" = skipped ] || fail "dependency-locked fast-forward was not skipped"
+  assert_contains "$FF_OUT" "secondmate sm: skipped: dependency check is active" \
+    "dependency-locked fast-forward did not report deferral"
+  [ "$(head_of "$w/sm")" = "$before" ] || fail "dependency-locked fast-forward changed the checkout"
+  pass "active dependency checks defer shared checkout fast-forwards"
 }
 
 # --- T3: dirty - a home with uncommitted edits is skipped, edit preserved ----
@@ -852,6 +902,7 @@ test_seed_marker_does_not_mask_real_dirt() {
 
 test_ff_updated
 test_ff_current
+test_ff_defers_while_dependency_check_is_active
 test_ff_dirty
 test_ff_diverged
 test_ff_inflight_feature_branch

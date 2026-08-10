@@ -8,6 +8,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 DEPS="$ROOT/bin/fm-deps.sh"
+LOCK_LIB="$ROOT/bin/fm-dependency-lock-lib.sh"
 TMP_ROOT=$(fm_test_tmproot fm-deps-tests)
 
 # shellcheck source=bin/fm-deps.sh
@@ -383,7 +384,7 @@ test_dependency_check_lock_is_run_wide_and_bounded() {
   fixture="$TMP_ROOT/dependency-check-run-lock"
   primary="$fixture/primary"
   secondmate="$fixture/secondmate"
-  host_lock="$fixture/host-lock"
+  host_lock="$fixture/firstmate-deps-$UID"
   ready="$fixture/holder.ready"
   release="$fixture/holder.release"
   events="$fixture/events.log"
@@ -470,7 +471,7 @@ test_dependency_check_lock_is_run_wide_and_bounded() {
 test_direct_checker_reexecutes_under_host_lock() {
   local fixture host_lock bash_env count_file observation out status
   fixture="$TMP_ROOT/dependency-check-reexec"
-  host_lock="$fixture/host-lock"
+  host_lock="$fixture/firstmate-deps-$UID"
   bash_env="$fixture/bash-env"
   count_file="$fixture/bash-count"
   observation="$fixture/reexec-lock"
@@ -505,6 +506,62 @@ test_direct_checker_reexecutes_under_host_lock() {
   pass "direct checker re-executes while retaining host lock ownership"
 }
 
+test_host_lock_override_rejects_unrelated_directory() {
+  local fixture before after
+  fixture="$TMP_ROOT/host-lock-unrelated"
+  mkdir -p "$fixture"
+  chmod 755 "$fixture"
+  before=$(fm_dependency_path_mode "$fixture")
+
+  if FM_DEPS_HOST_LOCK_DIR="$fixture" fm_dependency_ensure_host_lock_dir; then
+    fail "an unrelated existing directory was accepted as dependency lock storage"
+  fi
+  after=$(fm_dependency_path_mode "$fixture")
+
+  [ "$after" = "$before" ] || fail "dependency lock validation changed unrelated directory permissions"
+  pass "host lock overrides reject unrelated existing directories unchanged"
+}
+
+test_host_lock_first_creation_race_is_revalidated() {
+  local fixture fakebin barrier host_lock first second result
+  fixture="$TMP_ROOT/host-lock-create-race"
+  fakebin="$fixture/fakebin"
+  barrier="$fixture/barrier"
+  host_lock="$fixture/firstmate-deps-$UID"
+  mkdir -p "$fakebin" "$barrier"
+  printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    ': > "$FM_DEPENDENCY_TEST_BARRIER/$$"' \
+    'for _ in $(seq 1 100); do' \
+    '  count=$(ls -1 "$FM_DEPENDENCY_TEST_BARRIER" 2>/dev/null | wc -l | tr -d " ")' \
+    '  [ "$count" -ge 2 ] && break' \
+    '  sleep 0.01' \
+    'done' \
+    'exec /bin/mkdir "$@"' > "$fakebin/mkdir"
+  chmod +x "$fakebin/mkdir"
+
+  for result in first second; do
+    PATH="$fakebin:$PATH" FM_DEPENDENCY_TEST_BARRIER="$barrier" \
+      FM_DEPS_HOST_LOCK_DIR="$host_lock" bash -c '
+        . "$1"
+        if fm_dependency_ensure_host_lock_dir; then
+          printf "ok\n"
+        else
+          printf "failed\n"
+        fi
+      ' _ "$LOCK_LIB" > "$fixture/$result" &
+    if [ "$result" = first ]; then first=$!; else second=$!; fi
+  done
+  wait "$first"
+  wait "$second"
+
+  [ "$(< "$fixture/first")" = ok ] || fail "first lock-directory creator failed"
+  [ "$(< "$fixture/second")" = ok ] || fail "racing lock-directory creator failed"
+  FM_DEPS_HOST_LOCK_DIR="$host_lock" fm_dependency_host_lock_dir_is_valid "$host_lock" \
+    || fail "racing creators did not leave valid dependency lock storage"
+  pass "racing host lock directory creation revalidates the winner"
+}
+
 test_invalid_pending_action_directory_stops_run() {
   local kind fixture events out status
   for kind in symlink file; do
@@ -519,7 +576,8 @@ test_invalid_pending_action_directory_stops_run() {
 
     # shellcheck disable=SC2016
     out=$(FM_ROOT_OVERRIDE="$fixture" FM_HOME="$fixture" \
-      FM_STATE_OVERRIDE="$fixture/state" FM_DEPS_HOST_LOCK_DIR="$fixture/host-lock" \
+      FM_STATE_OVERRIDE="$fixture/state" \
+      FM_DEPS_HOST_LOCK_DIR="$fixture/firstmate-deps-$UID" \
       FM_DEPS_SOURCE_ONLY=1 \
       FM_DEPS_INTERACTIVE=0 FM_DEPS_TEST_EVENTS="$events" bash -c '
         deps=$1
@@ -911,7 +969,7 @@ test_unread_instructions_stop_dependency_mutations() {
 
   out=$(PATH="$fakebin:$PATH" FM_HOME="$fixture" FM_ROOT_OVERRIDE="$fixture" \
     FM_STATE_OVERRIDE="$fixture/state" FM_DEPS_SOURCE_ONLY=0 \
-    FM_DEPS_HOST_LOCK_DIR="$fixture/host-lock" FM_DEPS_TEST_PROBE_LOG="$log" \
+    FM_DEPS_HOST_LOCK_DIR="$fixture/firstmate-deps-$UID" FM_DEPS_TEST_PROBE_LOG="$log" \
     bash "$DEPS" --check 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "invalid pending reread allowed the checker to continue"
@@ -1032,6 +1090,8 @@ test_firstmate_concurrent_update_preserves_actions
 test_firstmate_action_publication_is_serialized
 test_dependency_check_lock_is_run_wide_and_bounded
 test_direct_checker_reexecutes_under_host_lock
+test_host_lock_override_rejects_unrelated_directory
+test_host_lock_first_creation_race_is_revalidated
 test_invalid_pending_action_directory_stops_run
 test_firstmate_actions_are_durable_and_retry_every_target
 test_remote_secondmate_actions_use_shared_retry_markers

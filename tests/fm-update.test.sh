@@ -89,7 +89,9 @@ bump_origin() {
 
 run_update() {
   local w=$1
-  FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" "$UPDATE" 2>/dev/null
+  FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
+    FM_DEPS_HOST_LOCK_DIR="$w/firstmate-deps-$UID" \
+    FM_DEPS_LOCK_TIMEOUT="${FM_DEPS_LOCK_TIMEOUT:-5}" "$UPDATE" 2>/dev/null
 }
 
 # --- T1: main + secondmate behind, instruction change; FF, not a merge ------
@@ -291,6 +293,71 @@ test_unsafe_secondmate_home_skipped_before_git_update() {
   pass "T11 unsafe secondmate home is not fast-forwarded"
 }
 
+test_active_dependency_check_defers_update() {
+  local w ready release holder out before i
+  w=$(new_world dependency-lock)
+  ready="$w/lock.ready"
+  release="$w/lock.release"
+  bump_origin "$w" instr
+  before=$(git -C "$w/main" rev-parse HEAD)
+
+  FM_DEPS_HOST_LOCK_DIR="$w/firstmate-deps-$UID" bash -c '
+    . "$1"
+    hold_dependency_lock() {
+      : > "$1"
+      while [ ! -e "$2" ]; do sleep 0.02; done
+    }
+    fm_dependency_with_host_lock hold_dependency_lock "$2" "$3"
+  ' _ "$ROOT/bin/fm-dependency-lock-lib.sh" "$ready" "$release" \
+    > "$w/lock-holder.out" 2>&1 &
+  holder=$!
+  for ((i = 0; i < 100; i++)); do
+    [ -e "$ready" ] && break
+    kill -0 "$holder" 2>/dev/null || break
+    sleep 0.02
+  done
+  if [ ! -e "$ready" ]; then
+    wait "$holder"
+    fail "dependency lock holder did not start: $(< "$w/lock-holder.out")"
+  fi
+
+  out=$(FM_DEPS_LOCK_TIMEOUT=1 run_update "$w")
+  : > "$release"
+  wait "$holder"
+
+  assert_contains "$out" "firstmate: skipped: dependency check is active" \
+    "standalone updater did not defer behind a dependency check"
+  assert_contains "$out" "reread-firstmate: no" \
+    "deferred updater reported a required reread"
+  assert_contains "$out" "nudge-secondmates: none" \
+    "deferred updater reported secondmate notifications"
+  [ "$(git -C "$w/main" rev-parse HEAD)" = "$before" ] \
+    || fail "deferred updater changed the Firstmate checkout"
+  pass "active dependency checks defer standalone Firstmate updates"
+}
+
+test_dependency_lock_owner_delegates_update() {
+  local w out
+  w=$(new_world dependency-lock-delegation)
+  out="$w/update.out"
+  bump_origin "$w" instr
+
+  FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
+    FM_DEPS_HOST_LOCK_DIR="$w/firstmate-deps-$UID" bash -c '
+      . "$1"
+      run_delegated_update() {
+        FM_DEPENDENCY_LOCK_PARENT_PID="${BASHPID:-$$}" "$1" > "$2" 2>&1
+      }
+      fm_dependency_with_host_lock run_delegated_update "$2" "$3"
+    ' _ "$ROOT/bin/fm-dependency-lock-lib.sh" "$UPDATE" "$out"
+
+  assert_grep 'firstmate: updated ' "$out" \
+    "dependency lock owner could not delegate its Firstmate update"
+  [ "$(git -C "$w/main" rev-parse HEAD)" = "$(git -C "$w/main" rev-parse origin/main)" ] \
+    || fail "delegated Firstmate update did not advance the checkout"
+  pass "dependency lock owners delegate Firstmate updates to direct children"
+}
+
 test_updates_main_and_secondmate
 test_reread_gate_is_instruction_only
 test_dirty_secondmate_skipped
@@ -300,5 +367,7 @@ test_registry_backstop_dedup_and_self_exclusion
 test_firstmate_wrong_branch_skipped
 test_firstmate_detached_head_skipped
 test_unsafe_secondmate_home_skipped_before_git_update
+test_active_dependency_check_defers_update
+test_dependency_lock_owner_delegates_update
 
 echo "# all fm-update tests passed"

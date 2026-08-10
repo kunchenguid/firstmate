@@ -46,6 +46,8 @@ REMOTE_HERDR_SESSION=fm-remote
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-pending-reply-lib.sh
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
+# shellcheck source=bin/fm-dependency-lock-lib.sh
+. "$SCRIPT_DIR/fm-dependency-lock-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 usage() { sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
@@ -218,7 +220,7 @@ cmd_observe() {
   printf '\n'
 }
 
-cmd_sync() {
+cmd_sync_locked() {
   local id=$1 target dirty head current
   validate_id "$id"
   validate_home "$id"
@@ -239,6 +241,15 @@ cmd_sync() {
   git -C "$target" merge-base --is-ancestor HEAD "$head" || die "remote secondmate checkout is not a fast-forward"
   git -C "$target" checkout --detach -q "$head" || die "remote secondmate fast-forward failed"
   printf 'synced: %s\n' "$head"
+}
+
+cmd_sync() {
+  local id=$1 lock_status=0
+  fm_dependency_with_host_lock cmd_sync_locked "$id" || lock_status=$?
+  if [ "$lock_status" -eq 75 ]; then
+    die "remote secondmate sync deferred because a dependency check is active"
+  fi
+  [ "$lock_status" -eq 0 ] || die "remote secondmate dependency lock is unavailable"
 }
 
 cmd_update() {

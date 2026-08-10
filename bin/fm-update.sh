@@ -48,63 +48,81 @@ if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
 fi
 [ $# -eq 0 ] || { usage; exit 1; }
 
-# --- main firstmate repo ---------------------------------------------------
+run_update_locked() {
+  local reread_firstmate="no" id home line remote_out remote_result
 
-reread_firstmate="no"
-ff_target "$FM_ROOT" "firstmate" origin no no
-if [ "$FF_STATUS" = "updated" ] && [ -n "$FF_INSTR" ]; then
-  reread_firstmate="yes"
-fi
+  # --- main firstmate repo ---------------------------------------------------
 
-# --- secondmates -----------------------------------------------------------
-# An updated live secondmate is nudged whenever it advanced (nudge_requires_instr
-# is "no" here): /updatefirstmate's nudge is a gentle re-read steer, kept on the
-# same condition it has always used.
+  ff_target "$FM_ROOT" "firstmate" origin no no
+  if [ "$FF_STATUS" = "updated" ] && [ -n "$FF_INSTR" ]; then
+    reread_firstmate="yes"
+  fi
 
-FF_NUDGE_WINDOWS=""
-FF_SEEN_HOMES=""
+  FF_NUDGE_WINDOWS=""
+  FF_SEEN_HOMES=""
 
-# Live direct reports first: state/<id>.meta with kind=secondmate carries the
-# authoritative home= path.
-sweep_live_secondmate_metas "$STATE" origin no
+  # --- secondmates -----------------------------------------------------------
+  # An updated live secondmate is nudged whenever it advanced (nudge_requires_instr
+  # is "no" here): /updatefirstmate's nudge is a gentle re-read steer, kept on the
+  # same condition it has always used.
 
-# Registry backstop: a secondmate registered in data/secondmates.md but without
-# a live meta (e.g. between restarts) is still its persistent on-disk home.
-if [ -f "$SECONDMATES_MD" ]; then
-  while IFS= read -r line || [ -n "$line" ]; do
-    case "$line" in
-      "- "*) ;;
-      *) continue ;;
-    esac
-    if ! secondmate_registry_parse_line "$line"; then
-      echo "secondmate registry: skipped malformed entry: $line" >&2
-      continue
-    fi
-    id=$SECONDMATE_REGISTRY_ID
-    home=$SECONDMATE_REGISTRY_HOME
-    if [ "$SECONDMATE_REGISTRY_REMOTE" -eq 1 ]; then
-      if remote_out=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh update "$id" < /dev/null 2>&1); then
-        remote_result=$(printf '%s\n' "$remote_out" | tail -1)
-        case "$remote_result" in
-          synced:*)
-            echo "remote secondmate $id: updated on $SECONDMATE_REGISTRY_HOST (${remote_result#synced: })"
-            if [ -f "$STATE/$id.meta" ] && grep -qx 'kind=secondmate' "$STATE/$id.meta"; then
-              FF_NUDGE_WINDOWS="$FF_NUDGE_WINDOWS fm-$id"
-            fi
-            ;;
-          current:*) echo "remote secondmate $id: already current on $SECONDMATE_REGISTRY_HOST (${remote_result#current: })" ;;
-          *) echo "remote secondmate $id: skipped on $SECONDMATE_REGISTRY_HOST: malformed update result" >&2 ;;
-        esac
-      else
-        echo "remote secondmate $id: skipped on $SECONDMATE_REGISTRY_HOST: ${remote_out%%$'\n'*}" >&2
+  # Live direct reports first: state/<id>.meta with kind=secondmate carries the
+  # authoritative home= path.
+  sweep_live_secondmate_metas "$STATE" origin no
+
+  # Registry backstop: a secondmate registered in data/secondmates.md but without
+  # a live meta (e.g. between restarts) is still its persistent on-disk home.
+  if [ -f "$SECONDMATES_MD" ]; then
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in
+        "- "*) ;;
+        *) continue ;;
+      esac
+      if ! secondmate_registry_parse_line "$line"; then
+        echo "secondmate registry: skipped malformed entry: $line" >&2
+        continue
       fi
-    else
-      process_secondmate "$id" "$home" "" origin no
-    fi
-  done < "$SECONDMATES_MD"
+      id=$SECONDMATE_REGISTRY_ID
+      home=$SECONDMATE_REGISTRY_HOME
+      if [ "$SECONDMATE_REGISTRY_REMOTE" -eq 1 ]; then
+        if remote_out=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh update "$id" < /dev/null 2>&1); then
+          remote_result=$(printf '%s\n' "$remote_out" | tail -1)
+          case "$remote_result" in
+            synced:*)
+              echo "remote secondmate $id: updated on $SECONDMATE_REGISTRY_HOST (${remote_result#synced: })"
+              if [ -f "$STATE/$id.meta" ] && grep -qx 'kind=secondmate' "$STATE/$id.meta"; then
+                FF_NUDGE_WINDOWS="$FF_NUDGE_WINDOWS fm-$id"
+              fi
+              ;;
+            current:*) echo "remote secondmate $id: already current on $SECONDMATE_REGISTRY_HOST (${remote_result#current: })" ;;
+            *) echo "remote secondmate $id: skipped on $SECONDMATE_REGISTRY_HOST: malformed update result" >&2 ;;
+          esac
+        else
+          echo "remote secondmate $id: skipped on $SECONDMATE_REGISTRY_HOST: ${remote_out%%$'\n'*}" >&2
+        fi
+      else
+        process_secondmate "$id" "$home" "" origin no
+      fi
+    done < "$SECONDMATES_MD"
+  fi
+
+  # --- caller action summary -------------------------------------------------
+
+  echo "reread-firstmate: $reread_firstmate"
+  echo "nudge-secondmates:${FF_NUDGE_WINDOWS:- none}"
+}
+
+update_status=0
+fm_dependency_with_host_lock run_update_locked || update_status=$?
+if [ "$update_status" -eq 75 ]; then
+  echo "firstmate: skipped: dependency check is active"
+  echo "reread-firstmate: no"
+  echo "nudge-secondmates: none"
+  exit 0
 fi
-
-# --- caller action summary -------------------------------------------------
-
-echo "reread-firstmate: $reread_firstmate"
-echo "nudge-secondmates:${FF_NUDGE_WINDOWS:- none}"
+if [ "$update_status" -ne 0 ]; then
+  echo "firstmate: skipped: dependency lock is unavailable" >&2
+  echo "reread-firstmate: no"
+  echo "nudge-secondmates: none"
+  exit 1
+fi
