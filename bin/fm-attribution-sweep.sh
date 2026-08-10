@@ -63,9 +63,9 @@
 #                        repository readable. Correctness never depends on the
 #                        value: an over-large page is refused, not silently cut.
 #
-# The window and every bound are printed in the begin and summary markers, and
-# hitting one is reported as could-not-observe rather than silently narrowing
-# what was examined.
+# The window and the request budget are printed in the begin marker and named
+# again in the summary; every other bound is named in the could-not-observe
+# detail when a run hits it, rather than silently narrowing what was examined.
 #
 # Output markers (stdout):
 #   FM_SWEEP_BEGIN <iso> account=<login> since=<iso> token=<token> repos=<n> budget=<n>
