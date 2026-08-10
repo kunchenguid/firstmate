@@ -374,6 +374,8 @@ test_no_mistakes_dod_pins_rebase_equivalence_gate() {
     "no-mistakes DOD must fetch the candidate head from the forge"
   assert_no_grep "--candidate-head" "$brief" \
     "no-mistakes DOD must not name a pushed head the worker's clone cannot hold"
+  assert_no_grep "TRUNK=" "$brief" \
+    "no-mistakes DOD must not read the trunk from the worker's clone, which is whatever it last fetched"
   assert_grep "blocked: the pushed PR dropped validated content" "$brief" \
     "no-mistakes DOD must block on a dropping rebase instead of reporting the PR"
   assert_grep "that is never a pass" "$brief" \

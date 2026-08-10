@@ -137,6 +137,28 @@ assert_contains "$OUT" 'dropped-content' 'the lost copies must be reported as dr
 assert_contains "$OUT" 'core.sh' 'the path holding the lost copies must be named'
 pass 'added copies of an already-present line are counted, not merely looked up'
 
+# The same failure with the counts the other way round: the file already held
+# MORE copies than the change added. Requiring only the net added count clears
+# this by mistake, because the copies that were always there already satisfy it.
+
+REPO=$(new_repo duplicate-line-partial-drop)
+printf 'alpha\nguard\nbravo\nguard\n' > "$REPO/core.sh"
+B=$(commit_all "$REPO" 'base: two guards already present')
+
+printf 'alpha\nguard\nbravo\nguard\nguard\n' > "$REPO/core.sh"
+V=$(commit_all "$REPO" 'validated: one more guard')
+
+git_do "$REPO" checkout -q -b trunk "$B"
+printf 'shared\ntrunk moved on\n' > "$REPO/README.md"
+T=$(commit_all "$REPO" 'trunk: unrelated movement')
+printf 'unrelated\n' > "$REPO/unrelated.txt"
+C=$(commit_all "$REPO" 'candidate: the guard hunk never landed')
+
+run_check "$REPO" "$B" "$V" "$C" --candidate-base "$T"
+expect_code 3 "$RC" 'a dropped hunk must be refused even when the file already held more copies'
+assert_contains "$OUT" 'dropped-content' 'the lost copy must be reported as dropped content'
+pass 'the candidate must carry what the validated head holds, not merely what the change added'
+
 # --- refusal: a deletion the validated change made comes back ---------------
 
 REPO=$(new_repo resurrected)
@@ -443,29 +465,151 @@ if git -C "$WORKER" cat-file -e "$D^{commit}" 2>/dev/null; then
   fail 'the fixture must not already hold the candidate head locally'
 fi
 
-run_check_pr "$WORKER" "$B" "$V" 7
+run_check_pr "$WORKER" "$B" "$V" 7 --candidate-base origin/main
 expect_code 3 "$RC" 'a dropping candidate fetched from the forge must be refused'
 assert_contains "$OUT" 'dropped-content' 'the fetched candidate must be compared, not skipped'
 assert_contains "$OUT" 'core.sh' 'the losing path must be named'
 pass 'a head that exists only on the forge is fetched and refused'
 
-run_check_pr "$WORKER" "$B" "$V" 8
+run_check_pr "$WORKER" "$B" "$V" 8 --candidate-base origin/main
 expect_code 0 "$RC" 'a faithful candidate fetched from the forge must pass'
 pass 'a faithful head fetched from the forge still passes'
 
-run_check_pr "$WORKER" "$B" "$V" 'https://github.com/example/project/pull/8' \
-  --candidate-remote "$FORGE"
-expect_code 0 "$RC" 'a request URL must resolve to the pull head namespace'
-pass 'a request URL names the number and the head namespace'
-
-run_check_pr "$WORKER" "$B" "$V" 9
+run_check_pr "$WORKER" "$B" "$V" 9 --candidate-base origin/main
 expect_code 2 "$RC" 'an unfetchable request must be could-not-observe'
 assert_contains "$OUT" 'cannot fetch the candidate head' 'the unreachable candidate must say so'
 pass 'a candidate that cannot be fetched refuses instead of passing'
 
-run_check_pr "$WORKER" "$B" "$V" 'not-a-request'
+run_check_pr "$WORKER" "$B" "$V" 'not-a-request' --candidate-base origin/main
 expect_code 2 "$RC" 'an unparseable request must be could-not-observe'
 pass 'a request that is neither a URL nor a number is could-not-observe'
+
+# --- only the repository the request URL names may answer for it ------------
+#
+# A request number is unique only within one repository and every forge
+# publishes the same head namespace for all of them, so a remote that is not
+# that repository answers with a DIFFERENT request carrying the same number.
+# This fixture is that collision: the worker's own origin holds a request 7 that
+# would clear the comparison, while the URL names a repository the worker cannot
+# reach at all. Answering from origin would be a confident verdict about code
+# nobody asked about, so the only sound outcome is could-not-observe.
+
+COLLIDE="$TMP_ROOT/collide.git"
+git init -q --bare -b main "$COLLIDE"
+git_do "$SRC" push -q "$COLLIDE" "$T:refs/heads/main" "$F:refs/merge-requests/7/head"
+COLLIDE_WORKER="$TMP_ROOT/collide-worker"
+git clone -q --no-local "$COLLIDE" "$COLLIDE_WORKER"
+git_do "$COLLIDE_WORKER" checkout -q -b work "$B"
+printf 'alpha\nbravo\ncharlie\nvalidated line\n' > "$COLLIDE_WORKER/core.sh"
+CV=$(commit_all "$COLLIDE_WORKER" 'validated: one addition')
+
+run_check_pr "$COLLIDE_WORKER" "$B" "$CV" \
+  'https://127.0.0.1/group/project/-/merge_requests/7' --candidate-base origin/main
+expect_code 2 "$RC" 'a request must never be answered by a repository it does not name'
+assert_not_contains "$OUT" 'REBASE-EQUIVALENCE: PASS' \
+  'a colliding request number must not clear the comparison'
+assert_not_contains "$OUT" 'REBASE-EQUIVALENCE: DROPPED' \
+  'a colliding request number must not fabricate a refusal'
+pass 'a remote that does not name the request repository is never used for it'
+
+run_check_pr "$WORKER" "$B" "$V" 'https://github.com/example/project/pull/8' \
+  --candidate-remote "$FORGE" --candidate-base origin/main
+expect_code 2 "$RC" 'a remote that names another repository must be refused'
+assert_contains "$OUT" 'not github.com/example/project' \
+  'the mismatch must name the repository the request URL identifies'
+pass 'a candidate remote is refused unless it is proven to be the request repository'
+
+# --- the request URL resolves the head, the base, and the validated base ----
+#
+# `url.<local>.insteadOf` lets the check reach the fixture forge through the
+# exact https URL it derives from the request, so the identity rule, the
+# request-derived base, and the fetches are all exercised offline. `gh` is
+# stubbed because the base BRANCH name is forge metadata, not a ref.
+
+FAKEBIN=$(fm_fakebin "$TMP_ROOT")
+cat > "$FAKEBIN/gh" <<'SH'
+#!/usr/bin/env bash
+[ "${FM_FAKE_GH_FAIL:-0}" = 0 ] || exit 1
+printf '%s\n' "${FM_FAKE_GH_BASE:-main}"
+SH
+chmod +x "$FAKEBIN/gh"
+PATH="$FAKEBIN:$PATH"
+export PATH
+
+git -C "$WORKER" config "url.$FORGE.insteadOf" 'https://github.com/example/project.git'
+
+RC=0
+OUT=$("$CHECK" --repo "$WORKER" --validated-head "$V" \
+  --candidate-pr 'https://github.com/example/project/pull/8' 2>&1) || RC=$?
+expect_code 0 "$RC" 'a faithful candidate resolved wholly from the request must pass'
+assert_contains "$OUT" 'REBASE-EQUIVALENCE: PASS' 'the request-resolved comparison must report PASS'
+pass 'the request URL alone resolves the head, the trunk, and the validated base'
+
+RC=0
+OUT=$("$CHECK" --repo "$WORKER" --validated-head "$V" \
+  --candidate-pr 'https://github.com/example/project/pull/7' 2>&1) || RC=$?
+expect_code 3 "$RC" 'a dropping candidate resolved wholly from the request must be refused'
+assert_contains "$OUT" 'core.sh' 'the losing path must be named'
+pass 'a request-resolved comparison still refuses a dropping rebase'
+
+RC=0
+OUT=$(FM_FAKE_GH_FAIL=1 "$CHECK" --repo "$WORKER" --validated-head "$V" \
+  --candidate-pr 'https://github.com/example/project/pull/8' 2>&1) || RC=$?
+expect_code 2 "$RC" 'a base the forge cannot report must be could-not-observe'
+assert_contains "$OUT" 'cannot read the base branch' 'the unreadable base must say so'
+RC=0
+OUT=$(FM_FAKE_GH_BASE=no-such-branch "$CHECK" --repo "$WORKER" --validated-head "$V" \
+  --candidate-pr 'https://github.com/example/project/pull/8' 2>&1) || RC=$?
+expect_code 2 "$RC" 'a base branch that cannot be fetched must be could-not-observe'
+run_check_pr "$WORKER" "$B" "$V" 8
+expect_code 2 "$RC" 'a bare request number cannot name a base, so it must be could-not-observe'
+pass 'a candidate base that cannot be read from the request never falls back to a local ref'
+
+# --- the request's base is fetched, never read from a stale local ref -------
+#
+# The trunk has moved by definition whenever this check matters, since
+# otherwise no rebase would have been needed. Here the trunk grew a block that
+# happens to contain the line the validated change deleted, and the candidate is
+# a faithful rebase onto it. Measured against the trunk the candidate really
+# sits on, that is carried; measured against the worker's stale origin/main, it
+# reads as a resurrected removal.
+
+STALE_SRC="$TMP_ROOT/stale-src"
+mkdir -p "$STALE_SRC"
+git -C "$STALE_SRC" init -q
+printf 'alpha\nguard\nbravo\n' > "$STALE_SRC/core.sh"
+SB=$(commit_all "$STALE_SRC" 'base: one guard')
+
+STALE_FORGE="$TMP_ROOT/stale-forge.git"
+git init -q --bare -b main "$STALE_FORGE"
+git_do "$STALE_SRC" push -q "$STALE_FORGE" "$SB:refs/heads/main"
+
+STALE_WORKER="$TMP_ROOT/stale-worker"
+git clone -q --no-local "$STALE_FORGE" "$STALE_WORKER"
+git -C "$STALE_WORKER" config "url.$STALE_FORGE.insteadOf" 'https://github.com/example/stale.git'
+git_do "$STALE_WORKER" checkout -q -b work "$SB"
+printf 'alpha\nbravo\n' > "$STALE_WORKER/core.sh"
+SV=$(commit_all "$STALE_WORKER" 'validated: drop the guard')
+
+printf 'alpha\nguard\nbravo\ndelta\nguard\n' > "$STALE_SRC/core.sh"
+ST=$(commit_all "$STALE_SRC" 'trunk: a later block that also ends in guard')
+printf 'alpha\nbravo\ndelta\nguard\n' > "$STALE_SRC/core.sh"
+SC=$(commit_all "$STALE_SRC" 'candidate: the validated removal reapplied on the moved trunk')
+git_do "$STALE_SRC" push -q "$STALE_FORGE" "$ST:refs/heads/main" "$SC:refs/pull/5/head"
+
+RC=0
+OUT=$("$CHECK" --repo "$STALE_WORKER" --validated-head "$SV" \
+  --candidate-pr 'https://github.com/example/stale/pull/5' 2>&1) || RC=$?
+expect_code 0 "$RC" 'the base fetched from the request must clear a faithful rebase'
+assert_contains "$OUT" 'REBASE-EQUIVALENCE: PASS' 'the request-fetched base must report PASS'
+run_check "$STALE_WORKER" "$SB" "$SV" 'refs/fm-rebase-equivalence/candidate/5' \
+  --candidate-base origin/main
+expect_code 3 "$RC" 'the same comparison against the stale local trunk must diverge'
+pass 'the candidate base comes from the request, so a stale local trunk cannot refuse a faithful rebase'
+
+assert_grep 'GIT_TERMINAL_PROMPT=0' "$CHECK" \
+  'every fetch must run non-interactively so a credential prompt cannot swallow the verdict'
+pass 'the fetch path is non-interactive by construction'
 
 RC=0
 OUT=$("$CHECK" --repo "$WORKER" --validated-base "$B" --validated-head "$V" 2>&1) || RC=$?
