@@ -294,6 +294,12 @@ assert_no_grep() {
   ! grep -F -- "$1" "$2" >/dev/null || fail "$3"
 }
 
+# assert_no_grep_re <ere> <file> <msg>: extended-regex grep must NOT match.
+# Use this, not assert_no_grep, when the guard needs regex metacharacters.
+assert_no_grep_re() {
+  ! grep -E -- "$1" "$2" >/dev/null || fail "$3"
+}
+
 # assert_absent <path> <msg>: path must not exist.
 assert_absent() {
   [ ! -e "$1" ] || fail "$2"
