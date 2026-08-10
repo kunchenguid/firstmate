@@ -57,15 +57,6 @@ fm_harness_omp_script_matches() {  # <path>
   [ -n "$path" ] && [ "${path##*/}" = omp ]
 }
 
-fm_harness_omp_path_component() {  # <path>
-  local path=$1
-  fm_harness_omp_attribution_allowed || return 1
-  case "/$path/" in
-    */omp/*) return 0 ;;
-  esac
-  return 1
-}
-
 fm_harness_omp_process_matches() {  # <comm> <args>
   local comm=$1 args=$2 script
   fm_harness_omp_attribution_allowed || return 1
@@ -92,12 +83,11 @@ fm_harness_omp_process_matches() {  # <comm> <args>
 #      argv[0] in `ps -o comm=`, while procps on Linux reports the kernel exec
 #      name and ignores argv[0] entirely, so a version-named Claude Code binary
 #      is identified by its install path on macOS and by argv[0] on Linux.
-#   3. a bare interpreter (node, python) running a harness script path.
+#   3. a bare interpreter (node, python, bun) running the exact harness script.
 #   4. Cursor's own structural identity, owned by bin/fm-cursor-lib.sh.
-#   3. a bare interpreter (node, python, bun) running a harness script path.
 FM_HARNESS_IS_CLAUDE=0
 fm_harness_process_matches() {  # <comm> <args>
-  local comm=$1 args=$2 base argv0 name script
+  local comm=$1 args=$2 base argv0 name
   FM_HARNESS_IS_CLAUDE=0
   base=$(basename -- "$comm")
   [ "$base" = omp ] && ! fm_harness_omp_attribution_allowed && return 1
@@ -108,14 +98,6 @@ fm_harness_process_matches() {  # <comm> <args>
   if fm_harness_omp_process_matches "$comm" "$args"; then
     return 0
   fi
-  case "$base" in
-    bun)
-      script=${args#* }
-      if [ "$script" = "$args" ] && fm_harness_omp_path_component "$comm"; then
-        return 0
-      fi
-      ;;
-  esac
   argv0=${args%% *}
   if name=$(fm_harness_path_name "$comm") || name=$(fm_harness_path_name "$argv0"); then
     case "$name" in claude) FM_HARNESS_IS_CLAUDE=1 ;; esac
@@ -136,6 +118,22 @@ fm_harness_process_matches() {  # <comm> <args>
   # fleet lock as read-only and the park can never arm.
   fm_cursor_process_matches "$comm" "$args" "$argv0" && return 0
   return 1
+}
+
+fm_harness_omp_bare_lock_matches() {  # <comm> <args>
+  local comm=$1 args=$2
+  fm_harness_omp_attribution_allowed || return 1
+  [ "$(basename -- "$comm")" = bun ] || return 1
+  [ "$args" = "$comm" ] || return 1
+  case "/$comm/" in
+    */omp/*) return 0 ;;
+  esac
+  return 1
+}
+
+fm_harness_lock_process_matches() {  # <comm> <args>
+  fm_harness_process_matches "$1" "$2" && return 0
+  fm_harness_omp_bare_lock_matches "$1" "$2"
 }
 
 # Walk the current process ancestry (up to 16 hops) and print this session's
@@ -161,7 +159,7 @@ fm_harness_ancestry_pids() {
   for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
     args=$(ps -o args= -p "$pid" 2>/dev/null)
-    if fm_harness_process_matches "$comm" "$args"; then
+    if fm_harness_lock_process_matches "$comm" "$args"; then
       printf '%s\n' "$pid"
       printed=1
       [ "$FM_HARNESS_IS_CLAUDE" -eq 1 ] || break
@@ -199,7 +197,7 @@ fm_harness_pid_alive() {
   kill -0 "$pid" 2>/dev/null || return 1
   comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
   args=$(ps -o args= -p "$pid" 2>/dev/null)
-  fm_harness_process_matches "$comm" "$args"
+  fm_harness_lock_process_matches "$comm" "$args"
 }
 
 # True when state dir $1 holds a session lock whose pid is ANY harness ancestor

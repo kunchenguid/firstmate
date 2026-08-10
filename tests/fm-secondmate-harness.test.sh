@@ -279,6 +279,10 @@ SH
   got=$(FM_TEST_OMP_SHAPE=bare PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-harness.sh")
   [ "$got" = unknown ] \
     || fail "a bare Bun installed under an omp path component resolved '$got', expected unknown"
+  if FM_TEST_OMP_SHAPE=bare PATH="$fakebin:$BASE_PATH" bash -c \
+    '. "$0/bin/fm-session-lock-lib.sh"; fm_harness_process_matches /opt/omp/bin/bun /opt/omp/bin/bun' "$ROOT"; then
+    fail "the strict harness matcher accepted a bare Bun from an omp path component"
+  fi
   got=$(FM_TEST_OMP_SHAPE=bunx CLAUDECODE=1 PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-harness.sh")
   [ "$got" = claude ] \
     || fail "bunx running the OMP script suppressed the verified Claude marker, got '$got'"
@@ -290,6 +294,11 @@ SH
     '. "$0/bin/fm-session-lock-lib.sh"; fm_harness_ancestry_pid' "$ROOT")
   case "$got" in
     ''|*[!0-9]*) fail "OMP session-lock ancestry returned nonnumeric identity '$got'" ;;
+  esac
+  got=$(FM_TEST_OMP_SHAPE=bare PATH="$fakebin:$BASE_PATH" bash -c \
+    '. "$0/bin/fm-session-lock-lib.sh"; fm_harness_ancestry_pid' "$ROOT")
+  case "$got" in
+    ''|*[!0-9]*) fail "the lock-only bare Bun fallback returned nonnumeric identity '$got'" ;;
   esac
   PATH="$fakebin:$BASE_PATH" bash -c \
     '. "$0/bin/fm-session-lock-lib.sh"; kill() { return 0; }; fm_harness_pid_alive 777' "$ROOT" \

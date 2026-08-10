@@ -16,6 +16,22 @@ function isOmpWord(word) {
   return Boolean(word && (!word.literal || basename(word.value) === "omp"));
 }
 
+function dispatcherTarget(position) {
+  if (basename(position.command?.value || "") !== "nice") return null;
+  let index = position.index + 1;
+  while (position.words[index]) {
+    const value = position.words[index].value;
+    if (value === "--") return position.words[index + 1] || null;
+    if (!value.startsWith("-") || value === "-") return position.words[index];
+    if (value === "-n" || value === "--adjustment") {
+      index += 2;
+      continue;
+    }
+    index += 1;
+  }
+  return null;
+}
+
 function containsOmpCommand(source, depth = 0) {
   if (depth > 12) return true;
   const lexed = new Lexer(source).tokenize();
@@ -33,6 +49,7 @@ function containsOmpCommand(source, depth = 0) {
     const position = commandPosition(node);
     if (!position.command) continue;
     if (isOmpWord(position.command)) return true;
+    if (isOmpWord(dispatcherTarget(position))) return true;
     for (const payload of position.wrapperPayloads) {
       if (containsOmpCommand(payload, depth + 1)) return true;
     }

@@ -745,7 +745,7 @@ SH
   rm -f "$FAKEBIN_DIR/omp"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$id" "$PROJ_DIR" "cd \"$CASE_DIR\" && ./omp --raw-flag")
+    "$id" "$PROJ_DIR" "cd \"$CASE_DIR\" && nice ./omp --raw-flag")
   status=$?
   expect_code 0 "$status" "a raw OMP launch command should spawn"
   assert_contains "$out" "spawned $id harness=raw-omp" "raw OMP launch was recorded as verified"
