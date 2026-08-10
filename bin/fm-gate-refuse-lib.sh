@@ -53,8 +53,11 @@
 # neutral-execution-context and the HEAD-continuity guard. The dedicated
 # tests/fm-gate-refuse.test.sh strips the bypass so it still verifies real refusal.
 #
-# Sourced by bin/fm-spawn.sh, bin/fm-send.sh, bin/fm-teardown.sh,
-# bin/fm-herdr-endpoint-bind.sh, bin/fm-sessionstart-nudge.sh, and the tests.
+# Sourced for a hard refusal (fm_refuse_if_gate_agent) by bin/fm-spawn.sh,
+# bin/fm-send.sh, bin/fm-control.sh, bin/fm-teardown.sh, and
+# bin/fm-herdr-endpoint-bind.sh; sourced for a silent status-0 skip
+# (fm_is_gate_agent) by bin/fm-sessionstart-nudge.sh and
+# bin/fm-sessionstart-run.sh; and sourced directly by the tests.
 # No side effects on source. set -u / set -e safe. The refusal is a hard exit,
 # not a return, because there is no safe way to continue a fleet mutation from a
 # gate context.
