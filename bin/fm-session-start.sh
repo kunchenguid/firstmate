@@ -606,17 +606,26 @@ EOF
 # in the same order, so a single-file call still matches a plain file digest.
 # OMP resolves its canonical tracked dependency manifest before hashing.
 hash_file() {
-  local file
+  local file digest
   for file in "$@"; do
     [ -f "$file" ] || return 1
   done
   if command -v shasum >/dev/null 2>&1; then
-    cat -- "$@" | shasum -a 256 | awk '{print "sha256:" $1}'
+    if ! digest=$(set -o pipefail; cat -- "$@" | shasum -a 256 | awk '{print $1}'); then
+      return 1
+    fi
+    [ -n "$digest" ] || return 1
+    printf 'sha256:%s\n' "$digest"
   elif command -v sha256sum >/dev/null 2>&1; then
-    cat -- "$@" | sha256sum | awk '{print "sha256:" $1}'
+    if ! digest=$(set -o pipefail; cat -- "$@" | sha256sum | awk '{print $1}'); then
+      return 1
+    fi
+    [ -n "$digest" ] || return 1
+    printf 'sha256:%s\n' "$digest"
   elif command -v openssl >/dev/null 2>&1; then
-    local digest
-    digest=$(cat -- "$@" | openssl dgst -sha256 2>/dev/null | awk -F'= ' 'NF == 2 {print $2}')
+    if ! digest=$(set -o pipefail; cat -- "$@" | openssl dgst -sha256 2>/dev/null | awk -F'= ' 'NF == 2 {print $2}'); then
+      return 1
+    fi
     [ -n "$digest" ] || return 1
     printf 'sha256:%s\n' "$digest"
   else

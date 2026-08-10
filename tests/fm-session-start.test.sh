@@ -2537,6 +2537,44 @@ EOF
   pass "session start reports OMP extensions stale when a transitive library changes"
 }
 
+test_omp_diagnostic_rejects_dependency_read_failure() {
+  local rec root home fakebin out holder_pid failed_file
+  rec=$(new_world omp-dependency-read-failure)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+
+  sleep 300 &
+  holder_pid=$!
+  make_fake_ps_omp_holder "$fakebin" "$holder_pid"
+  install_omp_extensions_fixture "$root"
+  write_omp_loaded_markers "$home" "$root" "$holder_pid"
+  failed_file="$root/.pi/extensions/lib/fm-operational-input.ts"
+  cat > "$fakebin/cat" <<'SH'
+#!/usr/bin/env bash
+set -u
+target=${FM_FAKE_CAT_FAIL_PATH:?}
+for arg in "$@"; do
+  [ "$arg" = "$target" ] || continue
+  /bin/cat "$@"
+  exit 42
+done
+exec /bin/cat "$@"
+SH
+  chmod +x "$fakebin/cat"
+
+  out=$(FM_FAKE_CAT_FAIL_PATH="$failed_file" FM_FAKE_HARNESS=omp \
+    run_session_start "$home" "$root" "$fakebin:$BASE_PATH" omp)
+  kill "$holder_pid" 2>/dev/null || true
+  wait "$holder_pid" 2>/dev/null || true
+
+  assert_contains "$out" "OMP_WATCH_EXTENSION: not loaded" \
+    "session start accepted a marker after the dependency producer failed"
+
+  pass "session start fails closed when hashing a dependency read fails"
+}
+
 test_omp_diagnostic_rejects_cksum_markers_without_sha_tools() {
   local rec root home fakebin out holder_pid
   rec=$(new_world omp-cksum-loaded-markers)
@@ -2703,6 +2741,7 @@ test_omp_primary_uses_verified_supervision_extensions
 test_omp_diagnostic_accepts_current_loaded_markers
 test_omp_diagnostic_rejects_shared_core_drift
 test_omp_diagnostic_rejects_transitive_dependency_drift
+test_omp_diagnostic_rejects_dependency_read_failure
 test_omp_diagnostic_rejects_cksum_markers_without_sha_tools
 test_pi_diagnostic_rejects_stale_loaded_marker
 test_pi_diagnostic_accepts_prelock_loaded_marker
