@@ -95,7 +95,7 @@ else
     || { agenda_setup_error 'could not create agenda registry'; exit 1; }
   cat > "$AGENDA_SETUP_TMP" <<'EOF'
 # Business agenda registry.
-# Format: - <id> | <cadence> | <owner> | <action> | <do|notify>
+# The bin/fm-agenda-scan.sh header owns the format and cadence reference.
 - seller-outreach-followup | daily | seller-outreach | draft the daily follow-up | notify
 - operations-monitoring | daily | monitoring | check active operational monitors | notify
 - business-processes-update | weekly:mon | business-processes | draft the weekly update | notify

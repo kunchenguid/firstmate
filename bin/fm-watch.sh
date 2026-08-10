@@ -872,7 +872,9 @@ while :; do
     triage_log "inactive-outcome reconciliation unavailable"
   fi
 
-  # Slow per-task checks (firstmate writes these, e.g. a merged-PR poll).
+  # Slow authenticated checks, including task PR polls and registered home-level
+  # custom checks such as the business agenda. Firstmate writes some of these,
+  # e.g. a merged-PR poll.
   # Time-based via .last-check mtime so the cadence survives watcher restarts.
   # Evaluated BEFORE the signal scan: wake() exits the cycle, so a check placed
   # after the signal scan would be starved whenever a chatty sibling crewmate

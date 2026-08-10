@@ -174,6 +174,29 @@ test_weekly_fires_only_on_matching_weekday() {
     || fail "weekly Monday item did not fire on the next Monday"
   pass "weekly items fire only on their matching weekday"
 }
+test_weekday_is_derived_from_captured_local_date() {
+  local home fakebin out
+  home=$(make_home midnight-boundary)
+  fakebin="$home/fakebin"
+  mkdir -p "$fakebin"
+  write_registry "$home" \
+    '- monday-item | weekly:mon | captain | review priorities | do'
+  cat > "$fakebin/date" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  '+%F') printf '%s\n' '2026-08-09' ;;
+  '+%u') printf '%s\n' '1' ;;
+  '-d 2026-08-09 +%u'|'-j -f %Y-%m-%d 2026-08-09 +%u') printf '%s\n' '7' ;;
+  *) exit 2 ;;
+esac
+SH
+  chmod 0755 "$fakebin/date"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$SCAN")
+  [ -z "$out" ] || fail "a Monday item fired against the captured Sunday date"
+  [ ! -e "$home/state/.agenda-fired" ] \
+    || fail "a clock change after date capture created Sunday fire state for a Monday item"
+  pass "weekly cadence uses one captured local date across midnight"
+}
 test_nothing_due_is_silent_and_does_not_create_fire_state() {
   local home out
   home=$(make_home silent)
@@ -216,6 +239,7 @@ test_setup_persists_canonical_path_overrides
 test_agenda_check_enforces_timeout
 test_daily_fires_once_per_local_day
 test_weekly_fires_only_on_matching_weekday
+test_weekday_is_derived_from_captured_local_date
 test_nothing_due_is_silent_and_does_not_create_fire_state
 test_fire_state_prevents_repeats_after_scan_restart
 test_duplicate_id_cannot_alternate_fired_cadences

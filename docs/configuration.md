@@ -10,8 +10,8 @@ The shared orchestrator behavior lives in [`AGENTS.md`](../AGENTS.md) - edit it 
 
 This section is the single owner of the top-level operational-home layout; producer script headers and their help own exact child-file fields and mutation contracts.
 The tracked code root contains the shared instruction, skill, documentation, workflow, and `bin/` surfaces, while each effective `FM_HOME` contains private operational directories.
-`data/` holds durable private fleet records such as the project and secondmate registries, the generated skill map, captain preferences, optional shared captain preferences, learnings, backlog, briefs, and scout reports.
-`state/` holds runtime (volatile) records such as task metadata, append-only status events, endpoint signals, watcher and wake-queue coordination, inactive terminal-outcome receipts under `state/terminal-outcomes/`, away-mode state, generated Relay artifacts, private secondmate config-reread generations with their retry and quarantine state, and parent-owned secondmate pending-reply records under `state/pending-replies/` (`bin/fm-pending-reply-lib.sh`).
+`data/` holds durable private fleet records such as the project and secondmate registries, the generated skill map, captain preferences, optional shared captain preferences, learnings, backlog, business agenda, briefs, and scout reports.
+`state/` holds runtime (volatile) records such as task metadata, append-only status events, endpoint signals, watcher and wake-queue coordination, inactive terminal-outcome receipts under `state/terminal-outcomes/`, business-agenda check state, away-mode state, generated Relay artifacts, private secondmate config-reread generations with their retry and quarantine state, and parent-owned secondmate pending-reply records under `state/pending-replies/` (`bin/fm-pending-reply-lib.sh`).
 `config/` holds local gitignored operating choices and generated per-home skill-composition overlays, and `projects/` holds the local project clones that Firstmate reads but changes only through the narrow guarded and concrete captain-approved exceptions in `AGENTS.md`.
 
 `bin/fm-spawn.sh` owns the base task-metadata fields it emits, while the runtime-backend section below owns backend-specific fields and selector interpretation.
@@ -23,6 +23,16 @@ Wake, watcher, away-mode, and Relay-specific state mechanics remain with their n
 `docs/sessionstart-nudge.md` owns the native session-open adapter tiers that run or nudge the digest command, and the source routing between them.
 `AGENTS.md` retains the run-once and read-once operator rules, lock-refusal safety, installation consent, and direct-report recovery boundaries because those facts apply at every session start.
 Ordinary dead-direct-report recovery is owned by `stuck-crewmate-recovery`, while persistent-secondmate recovery is owned by `secondmate-provisioning`.
+
+## Business agenda
+
+Locked primary bootstrap creates a private mode-`0600` `data/business-agenda.md` when it is absent, preserves an existing regular registry, and installs `state/agenda-scan.check.sh` as a registered single-link mode-`0700` custom check.
+The initial registry contains four active captain routines and two commented TODO placeholders.
+Edit that local registry to change routines; the header of [`bin/fm-agenda-scan.sh`](../bin/fm-agenda-scan.sh) is the single owner of the exact record schema, accepted cadence and delivery values, diagnostics, due-output shape, and `state/.agenda-fired` mechanics.
+The scanner captures one local date per run, records due emissions across restarts so an unchanged item does not fire twice on that date, and produces no due output when nothing is due.
+Because the check persists, an agenda-only primary home still requires the ordinary watcher supervision cycle, and each invocation remains bounded by `FM_CHECK_TIMEOUT`.
+Normal locked bootstrap provisions or repairs the wrapper and registration automatically; [`bin/fm-agenda-setup.sh`](../bin/fm-agenda-setup.sh) provides the same idempotent local setup without replacing an existing registry.
+The business agenda is entirely local and has no Google Calendar or `gws` integration, UI, daemon, per-item checks, outbound communication, credentials handling, or automatic agent dispatch; any calendar remains a separate human-facing mirror.
 
 ## Pi Calm preference (config/calm)
 

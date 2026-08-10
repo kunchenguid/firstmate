@@ -4,10 +4,15 @@
 #
 # Registry: data/business-agenda.md, one line per item in this shape:
 # - <id> | <cadence> | <owner> | <action> | <delivery>
-# Cadence is daily or weekly:mon through weekly:sun, and delivery is do, notify,
-# or notify-on-problem.
+# Cadence is daily or weekly:mon through weekly:sun.
+# Delivery is do, notify, or notify-on-problem.
+# IDs are unique and may contain letters, digits, underscores, colons, and dashes.
+# Blank lines and lines beginning with # are ignored; malformed or duplicate items
+# are diagnosed and ignored.
+# Each newly due item prints "agenda-due: <id> | <owner> | <action>".
+# When no item is due, the scanner produces no stdout.
 # Fire state is state/.agenda-fired with one private <id>|<cadence>|<date> line per item.
-# FM_AGENDA_DATE is a YYYY-MM-DD test override; normal runs use the local date command.
+# FM_AGENDA_DATE is a YYYY-MM-DD test override; normal runs capture one local date.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -55,13 +60,9 @@ case "$TODAY" in
   *) agenda_error "invalid agenda date: $TODAY"; exit 1 ;;
 esac
 
-if [ -n "${FM_AGENDA_DATE:-}" ]; then
-  WEEKDAY=$(date -d "$TODAY" +%u 2>/dev/null \
-    || date -j -f '%Y-%m-%d' "$TODAY" +%u 2>/dev/null) \
-    || { agenda_error "could not determine weekday for $TODAY"; exit 1; }
-else
-  WEEKDAY=$(date +%u) || { agenda_error 'could not determine local weekday'; exit 1; }
-fi
+WEEKDAY=$(date -d "$TODAY" +%u 2>/dev/null \
+  || date -j -f '%Y-%m-%d' "$TODAY" +%u 2>/dev/null) \
+  || { agenda_error "could not determine weekday for $TODAY"; exit 1; }
 
 case "$WEEKDAY" in
   1|2|3|4|5|6|7) ;;
