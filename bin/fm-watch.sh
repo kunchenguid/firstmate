@@ -686,8 +686,11 @@ event_wait_or_sleep() {
     return
   fi
 
-  rec=$(FM_BACKEND_EVENTS_CAPABILITY_CONFIRMED=1 fm_backend_wait_transition "$first_backend" "$first_session" "$POLL" "$STATE" "${windows[@]}")
-  rc=$?
+  if rec=$(FM_BACKEND_EVENTS_CAPABILITY_CONFIRMED=1 fm_backend_wait_transition "$first_backend" "$first_session" "$POLL" "$STATE" "${windows[@]}"); then
+    rc=0
+  else
+    rc=$?
+  fi
   case "$rc" in
     0)
       _event_cap_fails=0
@@ -701,10 +704,14 @@ event_wait_or_sleep() {
       [ "$_event_cap_fails" -ge "$EVENT_CAP_FAIL_MAX" ] && _event_cap_ok=0
       sleep "$POLL"
       ;;
-    *)
+    1)
       # 1: a clean full-budget wait with no actionable edge - the reader already
       # blocked ~POLL, so just continue; the next cycle re-scans.
       _event_cap_fails=0
+      ;;
+    *)
+      echo "watcher: FAILED - $first_backend event wait exited $rc" >&2
+      return 1
       ;;
   esac
 }
@@ -1204,4 +1211,6 @@ EOF
   # Terminal wait: a bounded native-event wait for push-capable homes (herdr),
   # else the blind poll sleep. See event_wait_or_sleep.
   event_wait_or_sleep
+  event_wait_rc=$?
+  [ "$event_wait_rc" -eq 0 ] || exit "$event_wait_rc"
 done

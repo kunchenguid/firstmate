@@ -4031,6 +4031,9 @@ cmd=${1:-}; sub=${2:-}
 case "$cmd $sub" in
   "status --json")
     printf '{"client":{"version":"0.7.3","protocol":16},"server":{"running":true}}\n' ;;
+  "api schema")
+    printf 'events.subscribe\npane.agent_status_changed\n'
+    awk 'BEGIN { for (i = 0; i < 200000; i++) print "padding" }' ;;
   "session list")
     printf '{"sessions":[{"name":"%s","running":true,"default":false,"socket_path":"%s"}]}\n' \
       "${FM_FAKE_SESSION_NAME:-default}" "${FM_FAKE_SOCKET:-/tmp/fm-fake.sock}" ;;
@@ -4170,6 +4173,17 @@ test_wait_transition_no_panes_returns_2() {
   bash -c '. "$0/bin/backends/herdr.sh"; FM_BACKEND_HERDR_EVENTS_FORCE=1 fm_backend_herdr_wait_transition default 1 /tmp/st' "$ROOT"; rc=$?
   [ "$rc" = 2 ] || fail "wait_transition with no pane windows must return 2 (fall back to sleep), got $rc"
   pass "fm_backend_herdr_wait_transition: a home with no herdr panes falls back to polling (rc 2)"
+}
+
+test_events_capable_survives_an_early_schema_consumer_close() {
+  local dir fb rc
+  dir="$TMP_ROOT/events-capable-pipe-safe"; mkdir -p "$dir"
+  fb=$(make_herdr_eventfake "$dir")
+  PATH="$fb:$PATH" FM_FAKE_SESSION_NAME=sess \
+    bash -c 'set -o pipefail; . "$0/bin/backends/herdr.sh"; fm_backend_herdr_events_capable sess' "$ROOT"
+  rc=$?
+  [ "$rc" = 0 ] || fail "events capability must survive grep closing a large schema pipe early, got $rc"
+  pass "fm_backend_herdr_events_capable: an early schema consumer close cannot turn capability detection into SIGPIPE failure"
 }
 
 test_wait_transition_not_capable_returns_2() {
@@ -4480,6 +4494,7 @@ test_apply_transition_blocked_requires_commit_to_dedupe
 test_apply_transition_working_clears_marker
 test_clear_transition_removes_task_marker
 test_apply_transition_defer_and_fallback_are_noops
+test_events_capable_survives_an_early_schema_consumer_close
 test_wait_transition_no_panes_returns_2
 test_wait_transition_not_capable_returns_2
 test_wait_transition_reconcile_blocked_returns_record

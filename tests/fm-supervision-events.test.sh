@@ -112,6 +112,43 @@ event_wait_or_sleep
 [ "$CAP_CALLS" = 1 ] || fail "capability probe must be memoized across waits, got $CAP_CALLS calls"
 pass "event_wait_or_sleep: one cached capability probe owns validation across bounded waits"
 
+# --- event_wait_or_sleep: inherited errexit cannot pre-empt rc classification -
+
+reset_state
+fm_write_meta "$STATE_DIR/tk3.meta" "window=default:wG:pQ" "backend=herdr" "kind=ship"
+ERREXIT_SURVIVED="$TMP/errexit-survived"
+rm -f "$ERREXIT_SURVIVED"
+FM_EVENT_TEST_ROOT="$ROOT" FM_EVENT_TEST_STATE="$STATE_DIR" FM_EVENT_TEST_SURVIVED="$ERREXIT_SURVIVED" \
+  /bin/bash -c '
+    set -e
+    export FM_ROOT_OVERRIDE="$FM_EVENT_TEST_ROOT" FM_STATE_OVERRIDE="$FM_EVENT_TEST_STATE"
+    . "$FM_EVENT_TEST_ROOT/bin/fm-watch.sh"
+    sleep() { :; }
+    fm_backend_events_capable() { return 0; }
+    fm_backend_wait_transition() { return 1; }
+    event_wait_or_sleep
+    : > "$FM_EVENT_TEST_SURVIVED"
+  '
+ERREXIT_RC=$?
+[ "$ERREXIT_RC" = 0 ] && [ -e "$ERREXIT_SURVIVED" ] \
+  || fail "an inherited errexit shell must survive a clean event-wait timeout, got rc $ERREXIT_RC"
+pass "event_wait_or_sleep: a clean event timeout is classified before inherited errexit can end the watcher"
+
+reset_state
+fm_write_meta "$STATE_DIR/tk3.meta" "window=default:wG:pQ" "backend=herdr" "kind=ship"
+# shellcheck disable=SC2329 # Runtime override called by the isolated watcher.
+fm_backend_events_capable() { return 0; }
+# shellcheck disable=SC2329 # Runtime override called by the isolated watcher.
+fm_backend_wait_transition() { return 7; }
+UNEXPECTED_OUT=$(event_wait_or_sleep 2>&1)
+UNEXPECTED_RC=$?
+[ "$UNEXPECTED_RC" -ne 0 ] || fail "an unexpected event-wait failure must fail the watcher cycle"
+case "$UNEXPECTED_OUT" in
+  *"watcher: FAILED - herdr event wait exited 7"*) : ;;
+  *) fail "an unexpected event-wait failure must emit a typed watcher failure, got '$UNEXPECTED_OUT'" ;;
+esac
+pass "event_wait_or_sleep: an unexpected event-path failure is loud and nonzero"
+
 # --- event_wait_or_sleep: a tmux-only home never runs the event path ----------
 
 reset_state
