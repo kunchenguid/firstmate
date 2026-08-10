@@ -174,14 +174,6 @@ return_reconcile() {
   fi
 
   scan_open_blockers > "$blockers"
-  if [ "$lifecycle_ok" -eq 1 ] && [ ! -s "$blockers" ] && [ -n "$wake_ack_through" ]; then
-    if [ -z "$wake_ack_generation" ] \
-      || ! "$SCRIPT_DIR/fm-wake-drain.sh" --ack-through "$wake_ack_through" \
-        --recovery-generation "$wake_ack_generation"; then
-      append_evidence lifecycle 'durable wake acknowledgement failed; retry catch-up before ordinary work' "$evidence"
-      lifecycle_ok=0
-    fi
-  fi
   if [ "$lifecycle_ok" -ne 1 ] || [ -s "$blockers" ]; then
     write_gate "$evidence" "$blockers" || { rm -f "$evidence" "$blockers" "$drain_err"; return 1; }
     printf 'fm-afk-return: catch-up must finish before the captain request\n' >&2
@@ -192,7 +184,24 @@ return_reconcile() {
     return 3
   fi
 
-  print_evidence "$evidence"
+  if ! print_evidence "$evidence"; then
+    append_evidence lifecycle 'recovery evidence publication failed; retry catch-up before ordinary work' "$evidence"
+    write_gate "$evidence" "$blockers" || { rm -f "$evidence" "$blockers" "$drain_err"; return 1; }
+    printf 'fm-afk-return: recovery evidence could not be published; catch-up remains pending\n' >&2
+    rm -f "$evidence" "$blockers" "$drain_err"
+    return 3
+  fi
+
+  if [ -n "$wake_ack_through" ] && { [ -z "$wake_ack_generation" ] \
+    || ! "$SCRIPT_DIR/fm-wake-drain.sh" --ack-through "$wake_ack_through" \
+      --recovery-generation "$wake_ack_generation"; }; then
+    append_evidence lifecycle 'durable wake acknowledgement failed; retry catch-up before ordinary work' "$evidence"
+    write_gate "$evidence" "$blockers" || { rm -f "$evidence" "$blockers" "$drain_err"; return 1; }
+    printf 'fm-afk-return: durable wake acknowledgement failed; catch-up remains pending\n' >&2
+    rm -f "$evidence" "$blockers" "$drain_err"
+    return 3
+  fi
+
   rm -f "$GATE"
   clear_delivery_artifacts
   rm -f "$evidence" "$blockers" "$drain_err"

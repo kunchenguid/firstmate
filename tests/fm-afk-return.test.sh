@@ -183,6 +183,34 @@ EOF
   pass "needs-decision remains reportable without masquerading as a firstmate-actionable blocker"
 }
 
+test_evidence_publication_failure_preserves_wake_for_redrain() {
+  local dir out rc gate
+  dir="$TMP_ROOT/evidence-publication-failure"
+  install_runner "$dir"
+  gate="$dir/home/state/.afk-return-catchup"
+  printf '1784074271\t7\tsignal\trecovery-task.status\tsignal: recover after output failure\n' \
+    > "$dir/home/state/.fake-drain"
+  : > "$dir/read-only-output"
+
+  set +e
+  FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" \
+    "$dir/bin/fm-afk-return.sh" begin 3< "$dir/read-only-output" >&3 2> "$dir/failed.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 3 ] || fail "evidence publication failure should retain catch-up (rc=$rc)"
+  [ -s "$dir/home/state/.fake-drain" ] || fail "publication failure removed the unhandled durable wake"
+  [ ! -e "$dir/home/state/.fake-drain-acks" ] || fail "publication failure acknowledged the wake before delivery"
+  [ -s "$gate" ] || fail "publication failure did not retain the catch-up gate"
+
+  out=$(run_return "$dir" check) || fail "publication retry did not complete catch-up: $out"
+  assert_contains "$out" 'catch-up wake: 1784074271' "publication retry did not re-drain the durable wake"
+  [ ! -s "$dir/home/state/.fake-drain" ] || fail "successful publication retry left the handled wake queued"
+  [ "$(cat "$dir/home/state/.fake-drain-acks" 2>/dev/null || true)" = 7 ] \
+    || fail "successful publication retry did not acknowledge the re-drained wake"
+  [ ! -e "$gate" ] || fail "successful publication retry left the catch-up gate pending"
+  pass "evidence publication failure preserves durable wakes for re-drain"
+}
+
 test_away_reentry_refuses_pending_return_gate() {
   local dir out rc
   dir="$TMP_ROOT/reentry"
@@ -226,5 +254,6 @@ test_check_retries_recorded_terminal_teardown() {
 test_return_gate_orders_catchup_before_bearings
 test_explicit_reclassification_requires_durable_reason
 test_captain_decision_does_not_masquerade_as_firstmate_blocker
+test_evidence_publication_failure_preserves_wake_for_redrain
 test_away_reentry_refuses_pending_return_gate
 test_check_retries_recorded_terminal_teardown
