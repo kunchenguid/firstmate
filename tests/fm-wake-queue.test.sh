@@ -465,8 +465,8 @@ test_legacy_generationless_wake_is_adopted() {
   generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$dir/first.err")
   [ "$sequence" = 7 ] && [ -n "$generation" ] \
     || fail "legacy wake adoption omitted its generation-bound acknowledgement"
-  [ "$(cat "$state/.watcher-down" 2>/dev/null || true)" = "pending:downtime:$generation" ] \
-    || fail "legacy wake was not adopted into durable downtime recovery"
+  [ "$(cat "$state/.watcher-down" 2>/dev/null || true)" = "pending:handling:$generation" ] \
+    || fail "legacy wake was not adopted into durable handling recovery"
 
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/replay.out" 2> "$dir/replay.err" \
     || fail "unacknowledged adopted wake could not be re-drained"
@@ -559,13 +559,13 @@ SH
   [ "$rc" -ne 0 ] || fail "recovery acknowledgement failure was reported as success"
   grep -F 'recovery generation is stale or could not be acknowledged safely' "$dir/drain.err" >/dev/null \
     || fail "recovery acknowledgement failure had no explicit diagnostic"
-  [ "$(cat "$state/.watcher-down")" = "pending:downtime:$generation" ] \
+  [ "$(cat "$state/.watcher-down")" = "pending:handling:$generation" ] \
     || fail "failed acknowledgement corrupted the pending recovery marker"
 
   FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through 0 --recovery-generation "$generation" \
     > "$dir/retry.out" 2> "$dir/retry.err" \
     || fail "recovery acknowledgement did not succeed on retry"
-  [ "$(cat "$state/.watcher-down")" = "acked:downtime:$generation" ] \
+  [ "$(cat "$state/.watcher-down")" = "acked:handling:$generation" ] \
     || fail "successful retry did not acknowledge pending recovery state"
   pass "wake drain: recovery acknowledgement failures are explicit and retryable"
 }
