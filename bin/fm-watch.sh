@@ -85,6 +85,8 @@ mkdir -p "$STATE"
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$SCRIPT_DIR/fm-busy-lib.sh"
+# shellcheck source=bin/fm-run-record-lib.sh
+. "$SCRIPT_DIR/fm-run-record-lib.sh"
 
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
@@ -834,6 +836,18 @@ while :; do
   # Liveness beacon for fm-guard.sh: a fresh mtime here means a watcher is
   # alive. Supervision scripts warn when this goes stale with tasks in flight.
   touch "$STATE/.last-watcher-beat"
+
+  # Snapshot the head each in-flight validation run has NOT yet pushed, so the
+  # content a run validated is recorded while it still exists. The pipeline
+  # overwrites that head with the pushed one at push time, so nothing can
+  # recover it afterwards and the intake comparison would otherwise have no
+  # sound validated side. A tail rather than a trigger: poll timing cannot
+  # reliably catch the exact pre-push boundary, so the last unpushed head seen
+  # is kept. Firstmate takes this, not the worker, because the party being
+  # checked must not supply the evidence; it is a mechanical copy of the
+  # pipeline's own record about its own run, never a judgement. A run this
+  # misses stays missing and surfaces as could-not-observe at intake.
+  fm_run_snapshot_tick "$STATE" || true
 
   # Parent-owned secondmate pending-reply reconciliation: resolve correlated
   # parent reports, observe backend busy/idle turn completion, send one recovery

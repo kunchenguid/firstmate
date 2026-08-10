@@ -89,6 +89,7 @@ projects/            cloned repos; gitignored; read-only except under hard rule 
 state/               volatile runtime signals; gitignored
   <id>.status        appended by crewmates: "<state>: <note>" wake-event lines, not current-state truth
   <id>.turn-ended    touched by turn-end hooks
+  run-snapshot/    firstmate-owned record of the head each validation run held while it had NOT yet pushed, keyed by run id with its observation time; the pipeline overwrites that head at push, so the intake content comparison has no sound validated side without it, and a missing snapshot is could-not-observe rather than a pass. Written only by the watcher and never back-filled (bin/fm-run-record-lib.sh)
   <id>.grok-turnend-token   firstmate-owned grok hook registry token for the task; removed by teardown
   <id>.kimi-turnend-token   firstmate-owned Kimi hook registry token for the task; removed by teardown
   <id>.muse-session  muse busy-source binding (sessions root plus task worktree) written by fm-spawn; removed by teardown

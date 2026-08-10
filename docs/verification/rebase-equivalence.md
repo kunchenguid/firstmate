@@ -15,7 +15,7 @@ Neither loss was reported by any pipeline signal; both were caught only by compa
 
 The push step itself is not reachable from this repository.
 `no-mistakes` is a single compiled binary (`~/.no-mistakes/bin/no-mistakes`, 24 MB, v1.40.3 at the date above), and its configuration schema exposes agent selection, timeouts, per-step `auto_fix` counts (including `rebase`), intent extraction, and test-evidence storage - no custom step, pre-push hook, or validation plugin.
-So this repository owns the comparison and the refusal, and the generated no-mistakes ship brief requires a worker to run it before reporting its PR.
+So this repository owns the comparison and the refusal, and it runs at pull-request intake in `bin/fm-pr-check.sh` rather than being asked of the worker.
 
 ## Where the validated head comes from
 
@@ -47,8 +47,34 @@ fm/fork-trunk-serial2-base-red submitted 646f2390494f head eabefe425ba3 last_pus
 
 **This bounds what the gate can prove, and the bound is stated rather than implied.**
 Because `head_sha` is overwritten at push time, the pre-rebase head carrying a run's own fix commits is not retained anywhere once the push completes.
-The comparison available after the fact is therefore `submitted_head_sha` against `last_pushed_sha`.
-That covers every change the branch already carried when the run began - which includes both measured incidents, verified below - but it cannot see content that a run's OWN fix commits created and that the same run's rebase then dropped, because no surviving column names that intermediate head.
+So after a push, NO retained column is the validated head.
+
+### `submitted_head_sha` is not the validated side, and was measured to prove it
+
+It is the obvious candidate, and the field name is exactly what it sounds like, so this is recorded explicitly to stop it being proposed again.
+It predates the run's own fix commits, so an accepted fix that REWRITES a line the branch added reads as that line having been dropped by the push.
+
+```
+$ bin/fm-rebase-equivalence.sh --repo . --validated-base ed376cf \
+    --validated-head a2952d0 --candidate-head 352c5691    # submitted vs pushed
+REBASE-EQUIVALENCE: DROPPED 6 path(s) lost validated content
+```
+
+That run's own accepted review fix legitimately rewrote those lines, and 62 of 69 pushed runs have `submitted_head_sha` differing from `last_pushed_sha`, so this refuses the common case rather than an edge.
+A gate that refuses the common case gets switched off, and then it protects nothing.
+
+Driven end to end through intake on a wholly faithful push - the run's accepted fix rewrote `foo(a)` into `foo(a, b)` and the push carried the fixed line - the two sources diverge completely:
+
+```
+submitted_head_sha source : exit 1, "DROPPED 1 path(s) lost validated content", watch NOT armed
+snapshot source           : exit 0, "armed: state/task-a.check.sh"
+```
+
+### The validated head is snapshot while it still exists
+
+Firstmate's watcher records the last `head_sha` each run had while it had NOT yet pushed, keyed by run id, with the observation time - a tail rather than a trigger, because poll timing cannot reliably catch the exact pre-push boundary.
+Firstmate takes it rather than the worker, because the party being checked must not supply the evidence; it is a mechanical copy of the pipeline's own record about its own run.
+A run with no snapshot is could-not-observe: intake refuses and arms nothing, and snapshots are never back-filled, since a fabricated record is indistinguishable from a real one afterwards.
 
 Those objects are reachable, because the pipeline's repository is an ordinary local-path remote in every initialized clone:
 
@@ -313,4 +339,6 @@ A binary path whose blob is identical is still a sound observation and passes.
 One case pins that every fetch is issued with `GIT_TERMINAL_PROMPT=0`, since a credential prompt would hang with no verdict line rather than refuse.
 A final case asserts every outcome prints a verdict line and exits with that verdict's own status, so a caller can tell "compared and passed" from "never ran".
 
-`tests/fm-brief.test.sh` pins the gate in the generated no-mistakes brief: the script's path, the pass verdict as the only clearance, the `--candidate-pr` and `--validated-remote` forms, the run-record field that names the validated head, both `blocked:` reports, and the absence of any instruction to name a pushed head, a trunk, or a validated head from the worker's own clone.
+`tests/fm-brief.test.sh` pins the gate's ABSENCE from the generated no-mistakes brief.
+Asking a worker for this verdict was tried and retired: it cannot obtain either head, so the instruction could only ever report could-not-observe.
+`tests/fm-pr-intake-equivalence.test.sh` pins the intake gate instead - the snapshot tail, a missing snapshot refusing and arming nothing, a dropping push refused with its path named, a faithful push armed, an unrecorded request passing through, and could-not-observe refusing rather than arming.

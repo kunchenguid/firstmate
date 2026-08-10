@@ -822,8 +822,15 @@ OUT=$("$CHECK" --repo "$PIPE_WORKER" --validated-base "$PB" --validated-head "$P
 expect_code 0 "$RC" 'the head the run record names must clear a faithful push'
 assert_contains "$OUT" 'REBASE-EQUIVALENCE: PASS' \
   'a pipeline fix that rewrote a validated line must not read as dropped content'
-git -C "$PIPE_WORKER" rev-parse --verify --quiet "refs/fm-rebase-equivalence/validated/$PV" >/dev/null \
-  || fail 'the validated head must be fetched into its own private ref'
+# The fetched object must be present, since the comparison above used it, but
+# the ref that carried it must NOT persist: one ref per validated commit would
+# accumulate forever in what is a SHARED object store for a gate worktree, and
+# each would pin its objects against gc.
+git -C "$PIPE_WORKER" cat-file -e "$PV^{commit}" 2>/dev/null \
+  || fail 'the validated head must actually be fetched, not merely named'
+if git -C "$PIPE_WORKER" rev-parse --verify --quiet "refs/fm-rebase-equivalence/validated/$PV" >/dev/null; then
+  fail 'the fetched validated ref must be released once the head resolves'
+fi
 pass 'the validated head is taken from the pipeline, so its own fixes are not read as loss'
 
 RC=0

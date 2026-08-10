@@ -85,43 +85,62 @@ fi
 # the code the pipeline actually judged. Twice that shipped with no signal from
 # the run at all. Intake is where the comparison belongs: the party being
 # checked cannot see the validated bytes, while this side reads the pipeline's
-# own record of what it submitted and the forge's copy of what would land.
+# own record and the forge's copy of what would land.
 #
-# Three-valued, and only a genuine mismatch refuses. A request with no recorded
-# run was never produced by a pipeline rebase and is not this gate's business,
-# so it passes through untouched; a comparison that cannot be made is reported
-# loudly and does not quietly become a pass.
+# The validated head comes from the watcher's snapshot, NOT from
+# submitted_head_sha. That column predates the run's own fix commits, so an
+# accepted fix that rewrote a line the branch added would read as that line
+# having been dropped - measured, it refuses 6 paths on a real run and 62 of 69
+# pushed runs would be exposed to it.
+#
+# Three-valued, and only a comparison that ran and matched arms the watch. A
+# request with no recorded run was never produced by a pipeline rebase and is
+# not this gate's business. Anything else - a missing snapshot, an unreadable
+# record, an unresolvable request identity, a comparison that could not be made -
+# refuses to arm and exits non-zero, because a warning followed by an armed
+# watch and a zero exit is a pass to every consumer that reads this.
 # shellcheck source=bin/fm-run-record-lib.sh
 . "$SCRIPT_DIR/fm-run-record-lib.sh"
+
+rebase_equivalence_refuse() {  # <reason>
+  echo "REBASE-EQUIVALENCE: CANNOT-OBSERVE $1" >&2
+  echo "error: the pushed content was NOT checked against what the pipeline validated, so this request is not cleared to be watched or merged" >&2
+  exit 1
+}
+
 run_record=$(fm_run_record_for_pr "$URL") && run_record_status=0 || run_record_status=$?
 case "$run_record_status" in
   0)
-    submitted_head=${run_record%% *}; submitted_head=${submitted_head#submitted=}
-    gate_remote=$(fm_run_record_gate_remote "${WT:-$FM_ROOT}" || true)
-    if [ -z "$WT" ] || [ ! -d "$WT" ] || [ -z "$gate_remote" ]; then
-      echo "REBASE-EQUIVALENCE: CANNOT-OBSERVE no local checkout or pipeline gate remote to compare from; the pushed content was NOT checked against what was validated" >&2
-    else
-      equivalence_out=$("$SCRIPT_DIR/fm-rebase-equivalence.sh" --repo "$WT" \
-        --validated-head "$submitted_head" --validated-remote "$gate_remote" \
-        --candidate-pr "$URL" 2>&1) && equivalence_status=0 || equivalence_status=$?
-      case "$equivalence_status" in
-        0) ;;
-        3)
-          printf '%s\n' "$equivalence_out" >&2
-          echo "error: the pushed request does not carry the content this run validated; it is not shippable as it stands" >&2
-          exit 1
-          ;;
-        *)
-          printf '%s\n' "$equivalence_out" >&2
-          echo "REBASE-EQUIVALENCE: the pushed content was NOT checked against what was validated" >&2
-          ;;
-      esac
-    fi
+    run_id=${run_record%% *}; run_id=${run_id#run=}
+    snapshot=$(fm_run_snapshot_read "$STATE" "$run_id") && snapshot_status=0 || snapshot_status=$?
+    case "$snapshot_status" in
+      0) ;;
+      1) rebase_equivalence_refuse "no validated-head snapshot was recorded for run $run_id before it pushed; snapshots are never back-filled" ;;
+      *) rebase_equivalence_refuse "the validated-head snapshot for run $run_id could not be read" ;;
+    esac
+    validated_head=${snapshot%% *}; validated_head=${validated_head#head=}
+    [ -n "$WT" ] && [ -d "$WT" ] \
+      || rebase_equivalence_refuse "no local checkout is recorded for this task to compare from"
+    gate_remote=$(fm_run_record_gate_remote "$WT") \
+      || rebase_equivalence_refuse "this checkout has no pipeline gate remote to read the validated head from"
+    equivalence_out=$("$SCRIPT_DIR/fm-rebase-equivalence.sh" --repo "$WT" \
+      --validated-head "$validated_head" --validated-remote "$gate_remote" \
+      --candidate-pr "$URL" 2>&1) && equivalence_status=0 || equivalence_status=$?
+    case "$equivalence_status" in
+      0) ;;
+      3)
+        printf '%s\n' "$equivalence_out" >&2
+        echo "error: the pushed request does not carry the content this run validated; it is not shippable as it stands" >&2
+        exit 1
+        ;;
+      *)
+        printf '%s\n' "$equivalence_out" >&2
+        rebase_equivalence_refuse "the comparison could not be completed"
+        ;;
+    esac
     ;;
   1) ;;  # no recorded pipeline run for this request; nothing to compare
-  *)
-    echo "REBASE-EQUIVALENCE: CANNOT-OBSERVE the pipeline run record could not be read; the pushed content was NOT checked against what was validated" >&2
-    ;;
+  *) rebase_equivalence_refuse "the pipeline run record could not be read" ;;
 esac
 
 META_TMP=

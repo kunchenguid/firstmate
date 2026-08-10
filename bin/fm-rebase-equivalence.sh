@@ -432,8 +432,19 @@ resolve() {  # <ref>
   printf '%s' "$out"
 }
 
+# The fetched ref has served its purpose the moment the object id resolves, and
+# the objects stay reachable for the rest of this run. Keeping one ref per
+# validated commit would accumulate forever in what is, for a gate worktree, the
+# SHARED object store, pinning every fetched object against gc.
+_release_validated_ref() {
+  [ -n "${VALIDATED_REF:-}" ] || return 0
+  git -C "$REPO" update-ref -d "$VALIDATED_REF" 2>/dev/null || true
+  VALIDATED_REF=
+}
+
 VH=$(resolve "$VALIDATED_HEAD") \
-  || cannot_observe "cannot resolve --validated-head: $VALIDATED_HEAD"
+  || { _release_validated_ref; cannot_observe "cannot resolve --validated-head: $VALIDATED_HEAD"; }
+_release_validated_ref
 CH=$(resolve "$CANDIDATE_HEAD") \
   || cannot_observe "cannot resolve --candidate-head: $CANDIDATE_HEAD"
 
