@@ -122,6 +122,90 @@ SH
   chmod +x "$fb/sleep"
 }
 
+# make_herdr_relaunch_stub models only the public relaunch calls needed by the
+# missing-slot path. It records exact Herdr requests and keeps workspace, tab,
+# pane, and agent identity in a JSON fixture so tests never touch a live server.
+make_herdr_relaunch_stub() {  # <case-dir>
+  local fb="$1/fakebin"
+  mkdir -p "$fb"
+  cat > "$fb/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+STATE=${FM_FAKE_HERDR_STATE:?}
+LOG=${FM_FAKE_HERDR_LOG:?}
+{
+  printf 'HERDR_SESSION=%s' "${HERDR_SESSION:-}"
+  for arg in "$@"; do printf '\x1f%s' "$arg"; done
+  printf '\n'
+} >> "$LOG"
+get_arg() {
+  local want=$1 arg next=0
+  shift
+  for arg in "$@"; do
+    if [ "$next" = 1 ]; then printf '%s' "$arg"; return 0; fi
+    [ "$arg" = "$want" ] && next=1
+  done
+}
+save() { local tmp="$STATE.tmp.$$"; cat > "$tmp" && mv "$tmp" "$STATE"; }
+cmd=${1:-}; sub=${2:-}
+workspace=$(get_arg --workspace "$@" || true)
+label=$(get_arg --label "$@" || true)
+case "$cmd $sub" in
+  'status --json')
+    printf '%s\n' '{"client":{"protocol":14,"version":"0.7.3"},"server":{"running":true}}' ;;
+  'session list')
+    jq -c '{sessions:[.sessions[]?]}' "$STATE" ;;
+  'workspace list')
+    jq -c '{result:{workspaces:.workspaces}}' "$STATE" ;;
+  'tab list')
+    jq -c --arg workspace "$workspace" '{result:{tabs:[.tabs[]? | select(.workspace_id == $workspace)]}}' "$STATE" ;;
+  'pane list')
+    jq -c --arg workspace "$workspace" '{result:{panes:[.tabs[]? | select(.workspace_id == $workspace and .pane_id != null) | {pane_id,tab_id}]}}' "$STATE" ;;
+  'pane get')
+    pane=${3:-}
+    if jq -e --arg pane "$pane" '.tabs[]? | select(.pane_id == $pane)' "$STATE" >/dev/null 2>&1; then
+      jq -c --arg pane "$pane" --arg cwd "$(jq -r '.cwd' "$STATE")" \
+        '.tabs[] | select(.pane_id == $pane) | {result:{pane:{pane_id,tab_id,workspace_id,foreground_cwd:$cwd}}}' "$STATE"
+    else
+      printf '%s\n' '{"error":{"code":"pane_not_found"}}'
+    fi
+    ;;
+  'agent get')
+    pane=${3:-}
+    status=$(jq -r --arg pane "$pane" '.agents[$pane] // empty' "$STATE")
+    if [ -n "$status" ]; then
+      printf '{"result":{"agent":{"agent_status":"%s"}}}\n' "$status"
+    else
+      printf '%s\n' '{"error":{"code":"agent_not_found"}}'
+    fi
+    ;;
+  'tab create')
+    next_tab=$(jq -r '.next_tab' "$STATE")
+    next_pane=$(jq -r '.next_pane' "$STATE")
+    jq -c --arg tab "$next_tab" --arg pane "$next_pane" --arg workspace "$workspace" --arg label "$label" \
+      '.tabs += [{tab_id:$tab,label:$label,workspace_id:$workspace,pane_id:$pane}]' "$STATE" \
+      | jq --arg tab "$next_tab" --arg pane "$next_pane" '.next_tab="t-replacement" | .next_pane="wK:p-replacement"' \
+      | save
+    printf '%s\n' '{"result":{"tab":{"tab_id":"t-replacement"},"root_pane":{"pane_id":"wK:p-replacement"}}}'
+    ;;
+  'tab close')
+    tab=${3:-}
+    jq -c --arg tab "$tab" '.tabs |= [.[] | select(.tab_id != $tab)]' "$STATE" | save
+    ;;
+  'pane run'|'pane send-text') : ;;
+  'pane send-keys')
+    pane=${3:-}
+    key=${4:-}
+    if [ "$pane" = 'wK:p-replacement' ] && [ "$key" = enter ]; then
+      jq -c '.agents["wK:p-replacement"] = "idle"' "$STATE" | save
+    fi
+    ;;
+  *) : ;;
+esac
+SH
+  chmod +x "$fb/herdr"
+}
+
 # new_case <name> [id] -> echoes a case dir with a live claude ship task.
 new_case() {
   local id=${2:-t1} dir="$TMP_ROOT/$1-$RANDOM"
@@ -160,6 +244,48 @@ add_ship_task() {
   TASK_TMPS+=("/tmp/fm-$id")
 }
 
+add_herdr_scout_task() {  # <case-dir> <id> <fixture-shape>
+  local dir=$1 id=$2 shape=$3 home="$1/home" proj="$1/proj" wt="$1/wt"
+  fm_git_worktree "$proj" "$wt" "task-$id"
+  mkdir -p "$home/data/$id"
+  printf '# scout brief\n' > "$home/data/$id/brief.md"
+  {
+    echo "window=default:wK:p2"
+    echo "endpoint_task_id=$id"
+    echo "worktree=$wt"
+    echo "project=$proj"
+    echo 'harness=pi'
+    echo 'kind=scout'
+    echo 'backend=herdr'
+    echo 'herdr_session=default'
+    echo 'herdr_workspace_id=wK'
+    echo 'herdr_tab_id=t-old'
+    echo 'herdr_pane_id=wK:p2'
+  } > "$home/state/$id.meta"
+  case "$shape" in
+    missing-slot)
+      printf '{"cwd":%s,"sessions":[{"name":"default","default":true,"running":true,"socket_path":"/tmp/default.sock"}],"workspaces":[{"workspace_id":"wK","label":"firstmate"}],"tabs":[{"tab_id":"t-old","label":"fm-%s","workspace_id":"wK","pane_id":null}],"agents":{},"next_tab":"t-replacement","next_pane":"wK:p-replacement"}\n' \
+        "$(printf '%s' "$wt" | jq -Rs .)" "$id" > "$dir/herdr-state.json"
+      ;;
+    missing-workspace)
+      printf '{"cwd":%s,"sessions":[{"name":"default","default":true,"running":true,"socket_path":"/tmp/default.sock"}],"workspaces":[],"tabs":[],"agents":{},"next_tab":"t-replacement","next_pane":"wK:p-replacement"}\n' \
+        "$(printf '%s' "$wt" | jq -Rs .)" > "$dir/herdr-state.json"
+      ;;
+    conflicting-label)
+      printf '{"cwd":%s,"sessions":[{"name":"default","default":true,"running":true,"socket_path":"/tmp/default.sock"}],"workspaces":[{"workspace_id":"wK","label":"firstmate"}],"tabs":[{"tab_id":"t-other","label":"fm-%s","workspace_id":"wK","pane_id":"wK:p-other"}],"agents":{},"next_tab":"t-replacement","next_pane":"wK:p-replacement"}\n' \
+        "$(printf '%s' "$wt" | jq -Rs .)" "$id" > "$dir/herdr-state.json"
+      ;;
+    live)
+      printf '{"cwd":%s,"sessions":[{"name":"default","default":true,"running":true,"socket_path":"/tmp/default.sock"}],"workspaces":[{"workspace_id":"wK","label":"firstmate"}],"tabs":[{"tab_id":"t-old","label":"fm-%s","workspace_id":"wK","pane_id":"wK:p2"}],"agents":{"wK:p2":"working"},"next_tab":"t-replacement","next_pane":"wK:p-replacement"}\n' \
+        "$(printf '%s' "$wt" | jq -Rs .)" "$id" > "$dir/herdr-state.json"
+      ;;
+    *) fail "unknown Herdr fixture shape: $shape" ;;
+  esac
+  : > "$dir/herdr.log"
+  make_herdr_relaunch_stub "$dir"
+  TASK_TMPS+=("/tmp/fm-$id")
+}
+
 run_control() {  # <case-dir> <args...>
   local dir=$1; shift
   env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
@@ -171,12 +297,14 @@ run_control() {  # <case-dir> <args...>
     FM_FAKE_TRACE_PREPARE="${FM_FAKE_TRACE_PREPARE:-}" \
     FM_FAKE_META_WRITER_READY="${FM_FAKE_META_WRITER_READY:-}" \
     FM_FAKE_TRACE_EXPORTED="${FM_FAKE_TRACE_EXPORTED:-}" \
+    FM_FAKE_HERDR_STATE="${FM_FAKE_HERDR_STATE:-}" FM_FAKE_HERDR_LOG="${FM_FAKE_HERDR_LOG:-}" \
     "$CONTROL" "$@" 2>&1
 }
 
 run_spawn() {  # <case-dir> <args...>
   local dir=$1; shift
   env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
+    FM_FAKE_HERDR_STATE="${FM_FAKE_HERDR_STATE:-}" FM_FAKE_HERDR_LOG="${FM_FAKE_HERDR_LOG:-}" \
     FM_SPAWN_NO_GUARD=1 GROK_HOME="$dir/grokhome" \
     "$SPAWN" "$@" 2>&1
 }
@@ -1299,6 +1427,115 @@ test_spawn_relaunch_refuses_a_pane_outside_the_worktree() {
   pass "fm-spawn --relaunch: refuses to start a replacement outside the copy holding the work"
 }
 
+test_spawn_relaunch_replaces_a_missing_herdr_slot_in_place() {
+  local dir out rc meta tab_count worktree_before
+  dir=$(new_case herdr-missing hm1)
+  add_herdr_scout_task "$dir" hm1 missing-slot
+  worktree_before=$(meta_field "$dir" hm1 worktree)
+  export FM_FAKE_HERDR_STATE="$dir/herdr-state.json" FM_FAKE_HERDR_LOG="$dir/herdr.log"
+  out=$(run_spawn "$dir" hm1 --relaunch --harness pi --model luna); rc=$?
+  unset FM_FAKE_HERDR_STATE FM_FAKE_HERDR_LOG
+  expect_code 0 "$rc" "a missing Herdr slot should relaunch through the public spawn interface"$'\n'"$out"
+  assert_contains "$out" "spawned hm1 harness=pi kind=scout window=default:wK:p-replacement" \
+    "the relaunch should report the exact replacement endpoint"
+  meta="$dir/home/state/hm1.meta"
+  [ "$(meta_field "$dir" hm1 worktree)" = "$worktree_before" ] \
+    || fail "missing-slot recovery must preserve the recorded isolated copy"
+  [ "$(meta_field "$dir" hm1 herdr_workspace_id)" = wK ] \
+    || fail "missing-slot recovery must stay in the recorded Herdr workspace"
+  [ "$(meta_field "$dir" hm1 herdr_tab_id)" = t-replacement ] \
+    || fail "missing-slot recovery must publish the replacement tab id"
+  [ "$(meta_field "$dir" hm1 herdr_pane_id)" = wK:p-replacement ] \
+    || fail "missing-slot recovery must publish the replacement pane id"
+  tab_count=$(jq -r '[.tabs[] | select(.label == "fm-hm1")] | length' "$dir/herdr-state.json")
+  [ "$tab_count" = 1 ] || fail "missing-slot recovery must leave exactly one task tab, got $tab_count"
+  assert_grep $'\x1ftab\x1fcreate' "$dir/herdr.log" "recovery should create one replacement tab"
+  assert_no_grep $'\x1fworkspace\x1fcreate' "$dir/herdr.log" "recovery must not create a replacement workspace"
+  assert_no_grep $'\x1ftreehouse\x1fget' "$dir/herdr.log" "recovery must not reacquire or move the preserved worktree"
+  [ "$(find "$dir/home/state" -maxdepth 1 -name '*.meta' -type f | wc -l | tr -d ' ')" = 1 ] \
+    || fail "missing-slot recovery must not create a duplicate task record"
+  pass "fm-spawn --relaunch: replaces one missing Herdr slot in the recorded workspace and copy"
+}
+
+test_control_relaunch_recovers_a_missing_herdr_slot() {
+  local dir out rc
+  dir=$(new_case herdr-supervised hm6)
+  add_herdr_scout_task "$dir" hm6 missing-slot
+  export FM_FAKE_HERDR_STATE="$dir/herdr-state.json" FM_FAKE_HERDR_LOG="$dir/herdr.log"
+  out=$(run_control "$dir" hm6 relaunch --harness pi --model luna --note "resume the preserved analysis"); rc=$?
+  unset FM_FAKE_HERDR_STATE FM_FAKE_HERDR_LOG
+  expect_code 0 "$rc" "supervised relaunch should recover a missing Herdr slot"$'\n'"$out"
+  assert_contains "$out" "relaunched hm6 harness=pi" \
+    "the supervised outcome should name the recovered task"
+  assert_contains "$out" "endpoint=default:wK:p-replacement" \
+    "the supervised outcome should use the replacement endpoint"
+  assert_grep 'luna' "$dir/herdr.log" "the configured Luna model should reach the Pi replacement launch"
+  [ "$(meta_field "$dir" hm6 worktree)" = "$dir/wt" ] \
+    || fail "supervised recovery must preserve the existing isolated copy"
+  [ "$(meta_field "$dir" hm6 herdr_pane_id)" = wK:p-replacement ] \
+    || fail "supervised recovery must wait on the newly published exact pane"
+  [ "$(meta_field "$dir" hm6 control_relaunch_tx)" != "" ] \
+    || fail "supervised recovery must retain the transaction binding"
+  pass "fm-control relaunch: recovers a missing Herdr slot and waits on its exact replacement"
+}
+
+test_spawn_relaunch_refuses_missing_herdr_workspace() {
+  local dir out rc
+  dir=$(new_case herdr-workspace-missing hm2)
+  add_herdr_scout_task "$dir" hm2 missing-workspace
+  export FM_FAKE_HERDR_STATE="$dir/herdr-state.json" FM_FAKE_HERDR_LOG="$dir/herdr.log"
+  out=$(run_spawn "$dir" hm2 --relaunch --harness pi); rc=$?
+  unset FM_FAKE_HERDR_STATE FM_FAKE_HERDR_LOG
+  expect_code 1 "$rc" "a missing recorded Herdr workspace should refuse"
+  assert_contains "$out" "workspace 'wK' is missing or ambiguous" \
+    "the refusal should name the missing exact workspace"
+  assert_no_grep $'\x1ftab\x1fcreate' "$dir/herdr.log" "a missing workspace must not create a guessed replacement"
+  pass "fm-spawn --relaunch: refuses when the recorded Herdr workspace is missing"
+}
+
+test_spawn_relaunch_refuses_a_conflicting_herdr_task_label() {
+  local dir out rc
+  dir=$(new_case herdr-conflict hm3)
+  add_herdr_scout_task "$dir" hm3 conflicting-label
+  export FM_FAKE_HERDR_STATE="$dir/herdr-state.json" FM_FAKE_HERDR_LOG="$dir/herdr.log"
+  out=$(run_spawn "$dir" hm3 --relaunch --harness pi); rc=$?
+  unset FM_FAKE_HERDR_STATE FM_FAKE_HERDR_LOG
+  expect_code 1 "$rc" "a conflicting Herdr task label should refuse"
+  assert_contains "$out" "another Herdr tab already carries task label" \
+    "the refusal should identify the conflicting task label"
+  assert_no_grep $'\x1ftab\x1fcreate' "$dir/herdr.log" "a conflicting label must not create a duplicate tab"
+  pass "fm-spawn --relaunch: refuses an ambiguous same-label Herdr record"
+}
+
+test_spawn_relaunch_refuses_a_live_herdr_slot() {
+  local dir out rc
+  dir=$(new_case herdr-live hm4)
+  add_herdr_scout_task "$dir" hm4 live
+  export FM_FAKE_HERDR_STATE="$dir/herdr-state.json" FM_FAKE_HERDR_LOG="$dir/herdr.log"
+  out=$(run_spawn "$dir" hm4 --relaunch --harness pi); rc=$?
+  unset FM_FAKE_HERDR_STATE FM_FAKE_HERDR_LOG
+  expect_code 1 "$rc" "a live Herdr slot should refuse"
+  assert_contains "$out" "positively agent-free endpoint" \
+    "the live-slot refusal should retain the lifecycle safety boundary"
+  assert_no_grep $'\x1ftab\x1fcreate' "$dir/herdr.log" "a live slot must not create a replacement tab"
+  pass "fm-spawn --relaunch: refuses a live Herdr slot"
+}
+
+test_spawn_relaunch_refuses_malformed_herdr_identity() {
+  local dir out rc
+  dir=$(new_case herdr-malformed hm5)
+  add_herdr_scout_task "$dir" hm5 missing-slot
+  printf 'herdr_tab_id=t-extra\n' >> "$dir/home/state/hm5.meta"
+  export FM_FAKE_HERDR_STATE="$dir/herdr-state.json" FM_FAKE_HERDR_LOG="$dir/herdr.log"
+  out=$(run_spawn "$dir" hm5 --relaunch --harness pi); rc=$?
+  unset FM_FAKE_HERDR_STATE FM_FAKE_HERDR_LOG
+  expect_code 1 "$rc" "ambiguous Herdr metadata should refuse"
+  assert_contains "$out" "malformed or inconsistent" \
+    "the refusal should identify malformed Herdr endpoint metadata"
+  assert_no_grep $'\x1ftab\x1fcreate' "$dir/herdr.log" "malformed metadata must not create a replacement tab"
+  pass "fm-spawn --relaunch: refuses malformed Herdr endpoint identity"
+}
+
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_preserves_durable_task_metadata
 test_relaunch_serializes_concurrent_durable_metadata_publication
@@ -1344,3 +1581,9 @@ test_spawn_relaunch_refuses_a_live_agent
 test_spawn_relaunch_refuses_contradicting_flags
 test_spawn_relaunch_refuses_an_unrecorded_task
 test_spawn_relaunch_refuses_a_pane_outside_the_worktree
+test_spawn_relaunch_replaces_a_missing_herdr_slot_in_place
+test_control_relaunch_recovers_a_missing_herdr_slot
+test_spawn_relaunch_refuses_missing_herdr_workspace
+test_spawn_relaunch_refuses_a_conflicting_herdr_task_label
+test_spawn_relaunch_refuses_a_live_herdr_slot
+test_spawn_relaunch_refuses_malformed_herdr_identity

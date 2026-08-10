@@ -643,6 +643,9 @@ SPAWN_META_PUBLISH_STARTED=0
 SPAWN_TASK_SET_LOCK=
 SPAWN_TASK_SET_LOCK_HELD=0
 RELAUNCH_REPLACEMENT_PENDING=0
+RELAUNCH_REPLACEMENT_ENDPOINT_PENDING=0
+RELAUNCH_REPLACEMENT_ENDPOINT_BACKEND=
+RELAUNCH_REPLACEMENT_ENDPOINT_TARGET=
 RELAUNCH_REPLACEMENT_BUSY_GEN=
 RELAUNCH_REPLACEMENT_HARNESS=
 RELAUNCH_REPLACEMENT_STATE=
@@ -691,6 +694,13 @@ spawn_abort_cleanup() {
           --gen "$RELAUNCH_REPLACEMENT_BUSY_GEN"; then
         echo "warning: could not retire replacement busy generation after aborted relaunch of $ID" >&2
       fi
+    fi
+  fi
+  if [ "$RELAUNCH_REPLACEMENT_ENDPOINT_PENDING" = 1 ]; then
+    RELAUNCH_REPLACEMENT_ENDPOINT_PENDING=0
+    if ! fm_backend_kill "$RELAUNCH_REPLACEMENT_ENDPOINT_BACKEND" \
+        "$RELAUNCH_REPLACEMENT_ENDPOINT_TARGET"; then
+      echo "warning: could not remove the unrecorded replacement endpoint for $ID" >&2
     fi
   fi
   if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ] \
@@ -979,11 +989,6 @@ if [ "$RELAUNCH" -eq 1 ]; then
     echo "error: backend '$BACKEND' has no recovery-grade agent-state classifier, so a relaunch cannot prove the previous agent exited; refusing rather than risking two agents in one endpoint" >&2
     exit 1
   }
-  RELAUNCH_STATE=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET")
-  [ "$RELAUNCH_STATE" = dead ] || {
-    echo "error: task $ID's endpoint reads '$RELAUNCH_STATE'; a relaunch requires a positively agent-free endpoint (stop the agent first with bin/fm-control.sh $ID exit)" >&2
-    exit 1
-  }
   RELAUNCH_PRIOR_HARNESS=$(fm_meta_get "$RELAUNCH_META" harness)
   KIND=$(fm_meta_get "$RELAUNCH_META" kind)
   [ -n "$KIND" ] || KIND=ship
@@ -1010,6 +1015,31 @@ if [ "$RELAUNCH" -eq 1 ]; then
     HERDR_TAB_ID=$(fm_meta_get "$RELAUNCH_META" herdr_tab_id)
     HERDR_PANE_ID=$(fm_meta_get "$RELAUNCH_META" herdr_pane_id)
   fi
+  RELAUNCH_STATE=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET")
+  if [ "$RELAUNCH_STATE" = missing ] && [ "$BACKEND" = herdr ]; then
+    if fm_backend_herdr_relaunch_missing_task \
+      "$HERDR_SES" "$HERDR_WORKSPACE_ID" "$HERDR_TAB_ID" "$HERDR_PANE_ID" \
+      "fm-$ID" "$RELAUNCH_WT"; then
+      RELAUNCH_TARGET="$FM_BACKEND_HERDR_RELAUNCH_SESSION:$FM_BACKEND_HERDR_RELAUNCH_PANE_ID"
+      HERDR_SES=$FM_BACKEND_HERDR_RELAUNCH_SESSION
+      HERDR_WORKSPACE_ID=$FM_BACKEND_HERDR_RELAUNCH_WORKSPACE_ID
+      HERDR_TAB_ID=$FM_BACKEND_HERDR_RELAUNCH_TAB_ID
+      HERDR_PANE_ID=$FM_BACKEND_HERDR_RELAUNCH_PANE_ID
+      RELAUNCH_STATE=dead
+      RELAUNCH_REPLACEMENT_ENDPOINT_PENDING=1
+      RELAUNCH_REPLACEMENT_ENDPOINT_BACKEND=herdr
+      RELAUNCH_REPLACEMENT_ENDPOINT_TARGET=$RELAUNCH_TARGET
+    else
+      recovery_status=$?
+      [ "$recovery_status" -eq 2 ] || exit 1
+      RELAUNCH_TARGET="$HERDR_SES:$HERDR_PANE_ID"
+      RELAUNCH_STATE=dead
+    fi
+  fi
+  [ "$RELAUNCH_STATE" = dead ] || {
+    echo "error: task $ID's endpoint reads '$RELAUNCH_STATE'; a relaunch requires a positively agent-free endpoint (stop the agent first with bin/fm-control.sh $ID exit)" >&2
+    exit 1
+  }
   # With no explicit harness, a relaunch reuses the harness already recorded
   # for this task. It must NOT fall through to the fresh-spawn config
   # resolution, which would silently move an existing task onto whatever the
@@ -2534,6 +2564,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_META_PUBLISH_STARTED=1
   mv -f "$SPAWN_META_TMP" "$STATE/$ID.meta"
   RELAUNCH_REPLACEMENT_PENDING=0
+  RELAUNCH_REPLACEMENT_ENDPOINT_PENDING=0
   SPAWN_META_PUBLISH_STARTED=0
   SPAWN_META_TMP=
   fm_lock_release "$SPAWN_META_LOCK"

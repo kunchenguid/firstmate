@@ -804,7 +804,16 @@ do_relaunch() {
   journal_write noted "${CHECKPOINT_LINES[@]}" "$note_line"
 
   journal_write stopping "${CHECKPOINT_LINES[@]}" "$note_line"
-  exit_result=$(do_exit)
+  # Herdr can lose the recorded pane while leaving the task's durable copy and
+  # identity intact; the launch owner has an exact missing-slot recovery path.
+  # Do not turn this into a generic missing-endpoint exemption for other
+  # backends, whose relaunch must still stop a positively identified agent.
+  state=$(agent_state)
+  if [ "$BACKEND" = herdr ] && [ "$state" = missing ]; then
+    exit_result=already-stopped
+  else
+    exit_result=$(do_exit)
+  fi
   journal_write exited "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
 
   # The launch owner (fm-spawn --relaunch) clears the previous incarnation's
@@ -822,6 +831,11 @@ do_relaunch() {
       || RELAUNCH_META_PUBLISHED=1
     die "the replacement agent for $ID could not be launched on $TARGET_HARNESS"
   fi
+  fm_backend_validate_task_endpoint "$META" "$ID" || \
+    die "the replacement agent for $ID published an invalid endpoint record; refusing to wait on an unverified target"
+  [ "$FM_BACKEND_VALIDATED_BACKEND" = "$BACKEND" ] || \
+    die "the replacement agent for $ID changed backend identity unexpectedly; refusing to wait on a conflicting target"
+  T=$FM_BACKEND_VALIDATED_TARGET
 
   state=$(wait_agent_state "$LAUNCH_WAIT" alive) || {
     die "the replacement agent for $ID did not come up within ${LAUNCH_WAIT}s (endpoint reads '$state')"

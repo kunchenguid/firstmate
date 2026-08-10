@@ -2047,6 +2047,170 @@ EOF
   printf '%s %s' "$tab_id" "$pane_id"
 }
 
+# fm_backend_herdr_relaunch_missing_task: replace one missing authoritative task
+# slot in the exact recorded workspace. This is narrower than create_task: it
+# never resolves a workspace by label, never adopts a different same-labeled
+# tab, and never creates a worktree. A recorded tab with no root pane is
+# replaced only after the new tab and pane exist; a tab that has reappeared with
+# no registered agent is returned to the ordinary relaunch path instead.
+# Return codes: 0 replacement created, 2 exact endpoint revived agent-free,
+# 1 refusal or failed/ambiguous Herdr response. On success or return 2, the
+# FM_BACKEND_HERDR_RELAUNCH_* globals contain the authoritative exact ids.
+fm_backend_herdr_relaunch_missing_task() {  # <session> <workspace> <tab> <pane> <label> <cwd>
+  local session=$1 workspace=$2 recorded_tab=$3 recorded_pane=$4 label=$5 cwd=$6
+  local tabs panes tab_count label_count exact_count old_pane old_pane_count recorded_pane_count
+  local out new_tab new_pane remaining old_present new_present new_pane_count
+  FM_BACKEND_HERDR_RELAUNCH_SESSION=""
+  FM_BACKEND_HERDR_RELAUNCH_WORKSPACE_ID=""
+  FM_BACKEND_HERDR_RELAUNCH_TAB_ID=""
+  FM_BACKEND_HERDR_RELAUNCH_PANE_ID=""
+  [ -n "$session" ] && [ -n "$workspace" ] && [ -n "$recorded_tab" ] \
+    && [ -n "$recorded_pane" ] && [ -n "$label" ] && [ -d "$cwd" ] || {
+    echo "error: missing Herdr relaunch has an incomplete exact identity or worktree; refusing recovery" >&2
+    return 1
+  }
+  [ "$(fm_backend_herdr_workspace_presence_state "$session" "$workspace")" = present ] || {
+    echo "error: recorded Herdr workspace '$workspace' is missing or ambiguous in session '$session'; refusing recovery" >&2
+    return 1
+  }
+  tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$workspace" 2>/dev/null) || {
+    echo "error: could not inspect recorded Herdr workspace '$workspace'; refusing recovery" >&2
+    return 1
+  }
+  printf '%s' "$tabs" | jq -e '(.result.tabs | type) == "array"' >/dev/null 2>&1 || {
+    echo "error: recorded Herdr workspace '$workspace' returned an ambiguous tab list; refusing recovery" >&2
+    return 1
+  }
+  tab_count=$(printf '%s' "$tabs" | jq -r '.result.tabs | length' 2>/dev/null)
+  label_count=$(printf '%s' "$tabs" | jq -r --arg label "$label" '[.result.tabs[] | select(.label == $label)] | length' 2>/dev/null)
+  exact_count=$(printf '%s' "$tabs" | jq -r --arg tab "$recorded_tab" '[.result.tabs[] | select(.tab_id == $tab)] | length' 2>/dev/null)
+  case "$tab_count:$label_count:$exact_count" in
+    *[!0-9:]*|*::*)
+      echo "error: recorded Herdr workspace '$workspace' returned unparseable tab counts; refusing recovery" >&2
+      return 1
+      ;;
+  esac
+  [ "$exact_count" -le 1 ] || {
+    echo "error: recorded Herdr tab '$recorded_tab' is duplicated in workspace '$workspace'; refusing recovery" >&2
+    return 1
+  }
+  if [ "$exact_count" -eq 1 ]; then
+    [ "$label_count" = 1 ] || {
+      echo "error: recorded Herdr task label '$label' is duplicated or absent around tab '$recorded_tab'; refusing recovery" >&2
+      return 1
+    }
+    if ! printf '%s' "$tabs" | jq -e --arg tab "$recorded_tab" --arg label "$label" \
+      '[.result.tabs[] | select(.tab_id == $tab and .label == $label)] | length == 1' >/dev/null 2>&1; then
+      echo "error: recorded Herdr tab '$recorded_tab' has a conflicting label; refusing recovery" >&2
+      return 1
+    fi
+  elif [ "$label_count" != 0 ]; then
+    echo "error: another Herdr tab already carries task label '$label' in workspace '$workspace'; refusing recovery" >&2
+    return 1
+  fi
+
+  panes=$(fm_backend_herdr_cli "$session" pane list --workspace "$workspace" 2>/dev/null) || {
+    echo "error: could not inspect panes in recorded Herdr workspace '$workspace'; refusing recovery" >&2
+    return 1
+  }
+  printf '%s' "$panes" | jq -e '(.result.panes | type) == "array"' >/dev/null 2>&1 || {
+    echo "error: recorded Herdr workspace '$workspace' returned an ambiguous pane list; refusing recovery" >&2
+    return 1
+  }
+  old_pane_count=$(printf '%s' "$panes" | jq -r --arg tab "$recorded_tab" '[.result.panes[] | select(.tab_id == $tab)] | length' 2>/dev/null)
+  recorded_pane_count=$(printf '%s' "$panes" | jq -r --arg pane "$recorded_pane" '[.result.panes[] | select(.pane_id == $pane)] | length' 2>/dev/null)
+  case "$old_pane_count:$recorded_pane_count" in :|:*|*:|*[!0-9:]*)
+    echo "error: recorded Herdr tab '$recorded_tab' returned an unparseable pane count; refusing recovery" >&2
+    return 1
+    ;;
+  esac
+  if [ "$exact_count" -eq 0 ] && [ "$recorded_pane_count" != 0 ]; then
+    echo "error: recorded Herdr pane '$recorded_pane' is attached to another tab; refusing recovery" >&2
+    return 1
+  fi
+  case "$old_pane_count" in ''|*[!0-9]*)
+    echo "error: recorded Herdr tab '$recorded_tab' returned an unparseable pane count; refusing recovery" >&2
+    return 1
+    ;;
+  esac
+  if [ "$exact_count" -eq 1 ] && [ "$old_pane_count" -gt 0 ]; then
+    [ "$old_pane_count" = 1 ] || {
+      echo "error: recorded Herdr tab '$recorded_tab' has multiple root panes; refusing recovery" >&2
+      return 1
+    }
+    old_pane=$(printf '%s' "$panes" | jq -r --arg tab "$recorded_tab" '.result.panes[] | select(.tab_id == $tab) | .pane_id' 2>/dev/null)
+    [ "$old_pane" = "$recorded_pane" ] || {
+      echo "error: recorded Herdr tab '$recorded_tab' is bound to pane '${old_pane:-missing}', not '$recorded_pane'; refusing recovery" >&2
+      return 1
+    }
+    case "$(fm_backend_herdr_pane_agent_state "$session" "$old_pane")" in
+      no-agent)
+        FM_BACKEND_HERDR_RELAUNCH_SESSION=$session
+        FM_BACKEND_HERDR_RELAUNCH_WORKSPACE_ID=$workspace
+        FM_BACKEND_HERDR_RELAUNCH_TAB_ID=$recorded_tab
+        FM_BACKEND_HERDR_RELAUNCH_PANE_ID=$old_pane
+        return 2
+        ;;
+      live|unknown|dead)
+        echo "error: recorded Herdr pane '$old_pane' is live or ambiguous after the missing-slot check; refusing recovery" >&2
+        return 1
+        ;;
+    esac
+  fi
+
+  out=$(fm_backend_herdr_cli "$session" tab create --workspace "$workspace" --cwd "$cwd" --label "$label" --no-focus 2>/dev/null) || {
+    echo "error: could not create a replacement Herdr tab for '$label' in recorded workspace '$workspace'" >&2
+    return 1
+  }
+  new_tab=$(printf '%s' "$out" | jq -r '.result.tab.tab_id // empty' 2>/dev/null)
+  new_pane=$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id // empty' 2>/dev/null)
+  [ -n "$new_tab" ] && [ -n "$new_pane" ] && [ "$new_tab" != "$recorded_tab" ] || {
+    echo "error: replacement Herdr tab response was missing or conflicting; refusing recovery" >&2
+    return 1
+  }
+  if [ "$exact_count" -eq 1 ]; then
+    if ! fm_backend_herdr_cli "$session" tab close "$recorded_tab" >/dev/null 2>&1; then
+      old_present=$(fm_backend_herdr_cli "$session" tab list --workspace "$workspace" 2>/dev/null \
+        | jq -r --arg tab "$recorded_tab" '[.result.tabs[]? | select(.tab_id == $tab)] | length' 2>/dev/null || true)
+      if [ "$old_present" != 0 ]; then
+        fm_backend_herdr_cli "$session" tab close "$new_tab" >/dev/null 2>&1 || true
+        echo "error: could not close the missing Herdr tab '$recorded_tab'; refusing recovery" >&2
+        return 1
+      fi
+    fi
+  fi
+  tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$workspace" 2>/dev/null) || {
+    echo "error: could not verify replacement Herdr tab '$new_tab'; refusing recovery" >&2
+    return 1
+  }
+  remaining=$(printf '%s' "$tabs" | jq -r --arg label "$label" --arg replacement "$new_tab" \
+    '[.result.tabs[]? | select(.label == $label and .tab_id != $replacement)] | length' 2>/dev/null)
+  new_present=$(printf '%s' "$tabs" | jq -r --arg tab "$new_tab" '[.result.tabs[]? | select(.tab_id == $tab)] | length' 2>/dev/null)
+  [ "$remaining" = 0 ] && [ "$new_present" = 1 ] || {
+    echo "error: replacement Herdr tab '$new_tab' did not leave exactly one task tab; refusing recovery" >&2
+    return 1
+  }
+  panes=$(fm_backend_herdr_cli "$session" pane list --workspace "$workspace" 2>/dev/null) || {
+    echo "error: could not verify replacement Herdr pane '$new_pane'; refusing recovery" >&2
+    return 1
+  }
+  new_pane_count=$(printf '%s' "$panes" | jq -r --arg tab "$new_tab" --arg pane "$new_pane" \
+    '[.result.panes[]? | select(.tab_id == $tab and .pane_id == $pane)] | length' 2>/dev/null)
+  [ "$new_pane_count" = 1 ] || {
+    echo "error: replacement Herdr pane '$new_pane' did not bind exactly to tab '$new_tab'; refusing recovery" >&2
+    return 1
+  }
+  # shellcheck disable=SC2034 # callers consume these same-process output globals
+  FM_BACKEND_HERDR_RELAUNCH_SESSION=$session
+  # shellcheck disable=SC2034 # callers consume these same-process output globals
+  FM_BACKEND_HERDR_RELAUNCH_WORKSPACE_ID=$workspace
+  # shellcheck disable=SC2034 # callers consume these same-process output globals
+  FM_BACKEND_HERDR_RELAUNCH_TAB_ID=$new_tab
+  # shellcheck disable=SC2034 # callers consume these same-process output globals
+  FM_BACKEND_HERDR_RELAUNCH_PANE_ID=$new_pane
+  return 0
+}
+
 # fm_backend_herdr_projection_create_task: create one disposable presentation
 # workspace and its normal fm-<id> task tab without looking up, adopting, or
 # reusing any existing workspace.

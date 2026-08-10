@@ -255,6 +255,8 @@ This prevents closing the workspace's last tab before a replacement exists.
 The generic Herdr agent-liveness probe reuses the same classifier.
 A structurally gone pane becomes `missing`, a restored agent-less shell becomes `dead`, a registered agent becomes `alive`, and an unexpected read becomes `unreadable`.
 Unlike tmux process-name inspection, native registration can classify Pi without guessing from a generic interpreter name.
+A supervised relaunch whose recorded pane is `missing` may replace exactly that task tab in its recorded workspace, using the recorded isolated copy as the new pane cwd and publishing the new tab and pane ids in the existing task record.
+The recovery refuses a missing or ambiguous workspace, a conflicting task label or tab binding, a live or unreadable pane, or any malformed identity, and never resolves a workspace by label or acquires a new worktree.
 
 The session-start sweep uses this probe.
 Mid-session secondmate liveness is not implemented because idle secondmates are deliberately exempt from stale-pane escalation and need a separate periodic identity signal.
