@@ -558,8 +558,8 @@ run_teardown() {
 make_path_without_lsof() {  # <case-dir>
   local case_dir=$1 path_dir="$1/path-without-lsof" cmd resolved
   mkdir -p "$path_dir"
-  for cmd in awk bash basename cat chmod cp cut date dirname env find git grep head hostname id ln \
-    mkdir mktemp mv perl ps readlink realpath rm sed sh sleep sort stat tail timeout tr uname wc xargs; do
+  for cmd in awk bash basename cat chmod cmp cp cut date dirname env find git grep head hostname id jq ln \
+    mkdir mktemp mv perl ps python3 readlink realpath rm sed sh sha256sum shasum sleep sort stat tail timeout tr uname wc xargs; do
     resolved=$(command -v "$cmd" 2>/dev/null) || continue
     case "$resolved" in /*) ln -sf "$resolved" "$path_dir/$cmd" ;; esac
   done
@@ -1924,7 +1924,7 @@ test_cursor_herdr_teardown_retry_retains_hook_ownership() {
 }
 
 test_cursor_herdr_closes_before_restore_and_worktree_return() {
-  local case_dir log closed hook_script attempt observed busy_gen rc
+  local case_dir log closed hook_script attempt observed busy_gen path_without_lsof rc
   case_dir=$(make_case cursor-herdr-commit-order)
   write_meta "$case_dir" local-only ship
   configure_flat_herdr_teardown_case "$case_dir"
@@ -1934,6 +1934,9 @@ test_cursor_herdr_closes_before_restore_and_worktree_return() {
   closed="$case_dir/closed"
   attempt="$case_dir/treehouse-attempt"
   observed="$case_dir/treehouse-observed"
+  path_without_lsof=$(make_path_without_lsof "$case_dir")
+  PATH="$path_without_lsof" command -v lsof >/dev/null 2>&1 \
+    && fail "cursor-herdr-commit-order: fixture path unexpectedly exposes lsof"
   mkdir -p "$case_dir/wt/.cursor/hooks"
   fm_control_cursor_hooks_backup "$case_dir/wt" "$case_dir/state" task-x1
   printf '%s\n' '{"version":1,"hooks":{"beforeSubmitPrompt":[{"command":".cursor/hooks/fm-busy-turnend.sh busy"}],"stop":[{"command":".cursor/hooks/fm-busy-turnend.sh idle-stop"}],"sessionEnd":[{"command":".cursor/hooks/fm-busy-turnend.sh idle-session-end"}]}}' \
@@ -1960,10 +1963,11 @@ SH
   rc=0
   FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" \
     FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS=1 \
+    FM_TEARDOWN_TEST_PATH="$path_without_lsof" \
     run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
   [ "$rc" -ne 0 ] || fail "injected treehouse failure unexpectedly completed teardown"
   assert_grep "endpoint-gone-hooks-restored-busy-retired" "$observed" \
-    "treehouse return ran before Cursor endpoint, hooks, and busy state were prepared"
+    "treehouse return ran before Cursor endpoint, hooks, and busy state were prepared: $(cat "$case_dir/stderr")"
   assert_absent "$case_dir/state/task-x1.cursor-hooks.json.installed" \
     "failed worktree return retained consumed Cursor recovery ownership"
   assert_absent "$case_dir/state/task-x1.cursor-fm-busy-turnend.sh.installed" \
@@ -1981,6 +1985,7 @@ SH
 
   FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" \
     FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS=1 \
+    FM_TEARDOWN_TEST_PATH="$path_without_lsof" \
     run_teardown "$case_dir" --force > "$case_dir/stdout2" 2> "$case_dir/stderr2" \
     || fail "Cursor Herdr teardown retry after worktree failure failed: $(cat "$case_dir/stderr2")"
   assert_absent "$case_dir/state/task-x1.cursor-hooks.json.installed" \
@@ -2742,6 +2747,59 @@ EOF
   pass "Cursor teardown refuses an unproven tmux process-group reap"
 }
 
+test_cursor_lsof_absent_refuses_unproven_nonherdr_reaps() {
+  local backend case_dir hook_script path_without_lsof rc window
+  for backend in zellij cmux orca; do
+    case_dir=$(make_case "cursor-lsof-absent-$backend")
+    write_meta "$case_dir" no-mistakes ship
+    printf '%s\n' 'harness=cursor' >> "$case_dir/state/task-x1.meta"
+    case "$backend" in
+      zellij)
+        window='fixture-session:7'
+        printf '%s\n' 'backend=zellij' 'zellij_session=fixture-session' \
+          'zellij_tab_id=3' 'zellij_pane_id=7' >> "$case_dir/state/task-x1.meta"
+        ;;
+      cmux)
+        window='fixture-workspace:fixture-surface'
+        printf '%s\n' 'backend=cmux' 'cmux_workspace_id=fixture-workspace' \
+          'cmux_surface_id=fixture-surface' >> "$case_dir/state/task-x1.meta"
+        ;;
+      orca)
+        window='fm-task-x1'
+        printf '%s\n' 'backend=orca' 'terminal=fixture-terminal' \
+          'orca_worktree_id=fixture-worktree' >> "$case_dir/state/task-x1.meta"
+        ;;
+    esac
+    sed -i.bak "s|^window=.*|window=$window|" "$case_dir/state/task-x1.meta"
+    rm -f "$case_dir/state/task-x1.meta.bak"
+    path_without_lsof=$(make_path_without_lsof "$case_dir")
+    mkdir -p "$case_dir/wt/.cursor/hooks"
+    fm_control_cursor_hooks_backup "$case_dir/wt" "$case_dir/state" task-x1
+    printf '%s\n' '{"version":1,"hooks":{"beforeSubmitPrompt":[{"command":".cursor/hooks/fm-busy-turnend.sh busy"}],"stop":[{"command":".cursor/hooks/fm-busy-turnend.sh idle-stop"}],"sessionEnd":[{"command":".cursor/hooks/fm-busy-turnend.sh idle-session-end"}]}}' \
+      > "$case_dir/wt/.cursor/hooks.json"
+    hook_script="$case_dir/wt/.cursor/hooks/fm-busy-turnend.sh"
+    printf '%s\n' 'firstmate hook script' > "$hook_script"
+    fm_control_cursor_hooks_record_installed "$case_dir/wt" "$case_dir/state" task-x1 \
+      "$case_dir/wt/.cursor/hooks.json" "$hook_script"
+
+    rc=0
+    FM_TEARDOWN_TEST_PATH="$path_without_lsof" \
+      run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+    expect_code 1 "$rc" "cursor-lsof-absent-$backend: teardown should refuse an unproven reap"
+    assert_present "$case_dir/state/task-x1.meta" \
+      "cursor-lsof-absent-$backend: refusal discarded task metadata"
+    assert_present "$case_dir/state/task-x1.cursor-hooks.json.installed" \
+      "cursor-lsof-absent-$backend: refusal discarded Cursor hook ownership"
+    cmp -s "$case_dir/state/task-x1.cursor-hooks.json.installed" \
+      "$case_dir/wt/.cursor/hooks.json" \
+      || fail "cursor-lsof-absent-$backend: refusal removed live hooks.json wiring"
+    cmp -s "$case_dir/state/task-x1.cursor-fm-busy-turnend.sh.installed" "$hook_script" \
+      || fail "cursor-lsof-absent-$backend: refusal removed the live hook script"
+  done
+  pass "Cursor teardown refuses unproven non-Herdr backend reaps"
+}
+
 test_lsof_error_refuses_before_removal() {
   local case_dir rc
   case_dir=$(make_case lsof-error-refusal)
@@ -3097,6 +3155,7 @@ test_leaked_worktree_process_is_reaped
 test_leaked_tasktmp_process_is_reaped
 test_lsof_absent_reaps_tmux_process_group
 test_cursor_lsof_absent_refuses_unproven_tmux_reap
+test_cursor_lsof_absent_refuses_unproven_nonherdr_reaps
 test_lsof_error_refuses_before_removal
 test_reused_pid_identity_is_not_force_killed
 test_exec_changed_process_is_still_reaped

@@ -1403,7 +1403,7 @@ task_pid_list_contains() {  # <pid-list> <pid>
 task_backend_reap_unproven() {
   local message=$1
   echo "warning: $message" >&2
-  if [ "$BACKEND" = tmux ] && [ "$HARNESS_FAMILY" = cursor ]; then
+  if [ "$HARNESS_FAMILY" = cursor ] && [ "$BACKEND" != herdr ]; then
     echo "REFUSED: Cursor endpoint termination is unproven for $ID; preserving its busy and turn-end hooks." >&2
     return 1
   fi

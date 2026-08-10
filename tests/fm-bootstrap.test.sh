@@ -90,6 +90,17 @@ SH
   printf '%s\n' "$fakebin"
 }
 
+make_path_without_python3() {  # <case-dir>
+  local case_dir=$1 path_dir="$1/path-without-python3" cmd resolved
+  mkdir -p "$path_dir"
+  for cmd in awk bash basename cat chmod cp cut date dirname env find git grep head hostname id ln \
+    mkdir mktemp mv perl ps readlink realpath rm sed sh sleep sort stat tail timeout tr uname wc xargs; do
+    resolved=$(command -v "$cmd" 2>/dev/null) || continue
+    case "$resolved" in /*) ln -sf "$resolved" "$path_dir/$cmd" ;; esac
+  done
+  printf '%s\n' "$path_dir"
+}
+
 add_quota_axi() {
   local fakebin=$1
   cat > "$fakebin/quota-axi" <<'SH'
@@ -1147,6 +1158,44 @@ ROWS
   pass "bootstrap validates crew-dispatch.json and reports malformed or unverified configs"
 }
 
+test_cursor_python_runtime_diagnostic() {
+  local case_dir fakebin path_without_python3 out
+  case_dir="$TMP_ROOT/cursor-python-runtime"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  add_real_jq "$fakebin"
+  path_without_python3=$(make_path_without_python3 "$case_dir")
+  PATH="$fakebin:$path_without_python3" command -v python3 >/dev/null 2>&1 \
+    && fail "Cursor Python diagnostic fixture unexpectedly exposes python3"
+
+  printf '%s\n' cursor > "$case_dir/home/config/crew-harness"
+  out=$(PATH="$fakebin:$path_without_python3" FM_HOME="$case_dir/home" \
+    FM_ROOT_OVERRIDE="$case_dir/home" FM_BOOTSTRAP_DETECT_ONLY=1 FM_BOOTSTRAP_NETWORK=skip \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" \
+    "MISSING: python3 (install: brew install python  # or install the platform's python3 package)" \
+    "static Cursor configuration did not diagnose its Python runtime"
+
+  printf '%s\n' codex > "$case_dir/home/config/crew-harness"
+  out=$(PATH="$fakebin:$path_without_python3" FM_HOME="$case_dir/home" \
+    FM_ROOT_OVERRIDE="$case_dir/home" FM_BOOTSTRAP_DETECT_ONLY=1 FM_BOOTSTRAP_NETWORK=skip \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_not_contains "$out" "MISSING: python3" \
+    "a non-Cursor static configuration inherited Cursor's Python requirement"
+
+  rm -f "$case_dir/home/config/crew-harness"
+  printf '%s\n' '{"rules":[{"when":"cursor work","use":{"harness":"cursor"}}],"default":{"harness":"codex"}}' \
+    > "$case_dir/home/config/crew-dispatch.json"
+  out=$(PATH="$fakebin:$path_without_python3" FM_HOME="$case_dir/home" \
+    FM_ROOT_OVERRIDE="$case_dir/home" FM_BOOTSTRAP_DETECT_ONLY=1 FM_BOOTSTRAP_NETWORK=skip \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" \
+    "MISSING: python3 (install: brew install python  # or install the platform's python3 package)" \
+    "Cursor dispatch configuration did not diagnose its Python runtime"
+  pass "bootstrap diagnoses Cursor's Python runtime for static and dispatch configuration"
+}
+
 test_bootstrap_reporting
 test_no_mistakes_min_version
 test_gh_axi_min_version
@@ -1175,3 +1224,4 @@ test_network_phases_record_per_step_elapsed_times
 test_tasks_axi_verdict_handoff_is_consumed_once
 test_crew_dispatch_active_rules_are_verbose_bootstrap_info
 test_crew_dispatch_validation
+test_cursor_python_runtime_diagnostic

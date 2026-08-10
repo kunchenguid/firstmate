@@ -1496,6 +1496,10 @@ esac
 case "$LAUNCH" in
   *__CURSORBIN__*)
     CURSOR_BIN=$(resolve_cursor_binary) || exit 1
+    if ! command -v python3 >/dev/null 2>&1; then
+      echo "error: Cursor hook setup requires python3; install Python 3 or select a different verified harness" >&2
+      exit 1
+    fi
     LAUNCH=${LAUNCH//__CURSORBIN__/$(shell_quote "$CURSOR_BIN")}
     ;;
 esac

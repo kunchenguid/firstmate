@@ -220,6 +220,44 @@ SH
   pass "session-lock: a live version-named session holding the lock is not mistaken for a stale owner"
 }
 
+test_cursor_worker_cannot_acquire_primary_session_lock() {
+  local dir fakebin out rc
+  dir="$TMP_ROOT/cursor-worker-lock"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state" "$dir/config"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$field" in
+  comm=) printf '%s\n' cursor-agent ;;
+  args=) printf '%s\n' cursor-agent ;;
+  ppid=) printf '%s\n' 1 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$dir" FM_CONFIG_OVERRIDE="$dir/config" \
+    "$ROOT/bin/fm-harness.sh")
+  [ "$out" = cursor ] || fail "Cursor worker identity was lost at the shared process boundary: $out"
+
+  rc=0
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" \
+    "$ROOT/bin/fm-lock.sh" > "$dir/lock.out" 2> "$dir/lock.err" || rc=$?
+  expect_code 1 "$rc" "a Cursor worker must not acquire the primary session lock"
+  assert_absent "$dir/state/.lock" "Cursor worker published a primary session lock"
+  assert_grep 'cannot locate harness process in ancestry' "$dir/lock.err" \
+    "Cursor primary-lock refusal was not actionable"
+  pass "session-lock: Cursor worker identity is ineligible for primary ownership"
+}
+
 # --- end-to-end layer: the real Stop auto-arm in real process trees ----------
 
 install_autoarm_scripts() {
@@ -358,6 +396,7 @@ test_version_named_session_is_identified_on_both_platforms
 test_ordinary_paths_are_never_harness_processes
 test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live
+test_cursor_worker_cannot_acquire_primary_session_lock
 test_e2e_version_named_session_claims_the_home
 test_e2e_daemon_parented_session_claims_the_home
 test_e2e_daemon_parented_version_named_session_keeps_its_lock

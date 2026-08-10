@@ -64,6 +64,7 @@ Busy source name: `cursor-hook`.
 Unlike Claude, Cursor's `stop` hook fires on interrupt.
 Firstmate merges its hook entries with existing regular files, backs both files up before replacement, and restores their original contents at teardown or a failed spawn.
 Symlinked or malformed hook paths fail closed before Firstmate writes anything.
+The transactional hook merge and divergent restore require `python3`; bootstrap reports the missing runtime when Cursor is selected by static or dispatch configuration, and spawn refuses before task setup if it is unavailable.
 
 ### Interrupt and exit
 

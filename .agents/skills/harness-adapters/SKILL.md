@@ -494,4 +494,5 @@ Cursor Agent CLI is a CREWMATE and SCOUT adapter only.
 
 `fm-spawn.sh` installs project hooks at `.cursor/hooks.json` and `.cursor/hooks/fm-busy-turnend.sh` that arm busy/idle events and touch the turn-ended marker on `stop`.
 Both paths remain visible to Git, and teardown exempts only exact transaction-owned generated snapshots.
+Firstmate requires `python3` for the transactional hook merge and divergent restore, diagnoses it during bootstrap when Cursor is statically or dispatch-configured, and refuses spawn before task setup when it is absent.
 [`docs/verification/cursor.md`](../../../docs/verification/cursor.md) owns the dated live evidence and the opt-in refresh command.

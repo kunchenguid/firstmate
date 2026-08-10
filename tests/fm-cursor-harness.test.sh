@@ -96,8 +96,19 @@ run_cursor_spawn() {  # <home> <proj> <wt> <fakebin> <id> [extra args...]
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
     FM_FAKE_LAUNCH_LOG="$home/launch.log" \
     FM_FAKE_CURSOR_ARGS_LOG="$home/cursor-agent.log" \
-    PATH="$fakebin:$PATH" \
+    PATH="$fakebin:${FM_CURSOR_TEST_PATH:-$PATH}" \
     "$SPAWN" "$id" "$proj" cursor "$@" 2>&1
+}
+
+make_path_without_python3() {  # <case-dir>
+  local case_dir=$1 path_dir="$1/path-without-python3" cmd resolved
+  mkdir -p "$path_dir"
+  for cmd in awk bash basename cat chmod cp cut date dirname env find git grep head hostname id ln \
+    mkdir mktemp mv perl ps readlink realpath rm sed sh sleep sort stat tail timeout touch tr uname wc xargs; do
+    resolved=$(command -v "$cmd" 2>/dev/null) || continue
+    case "$resolved" in /*) ln -sf "$resolved" "$path_dir/$cmd" ;; esac
+  done
+  printf '%s\n' "$path_dir"
 }
 
 run_cursor_relaunch() {  # <home> <wt> <fakebin> <id>
@@ -690,6 +701,34 @@ EOF
   pass "malformed Cursor hooks fail before writing artifacts"
 }
 
+test_cursor_spawn_requires_python_before_setup() {
+  local rec case_dir home proj wt fakebin id path_without_python3 out status
+  rec=$(make_spawn_case missing-python)
+  IFS='|' read -r case_dir home proj wt fakebin id <<EOF
+$rec
+EOF
+  path_without_python3=$(make_path_without_python3 "$case_dir")
+  PATH="$fakebin:$path_without_python3" command -v python3 >/dev/null 2>&1 \
+    && fail "Cursor spawn runtime fixture unexpectedly exposes python3"
+
+  out=$(FM_CURSOR_TEST_PATH="$path_without_python3" \
+    run_cursor_spawn "$home" "$proj" "$wt" "$fakebin" "$id" \
+      --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "Cursor spawn without python3 unexpectedly succeeded"
+  assert_contains "$out" "Cursor hook setup requires python3" \
+    "Cursor spawn did not report its missing runtime"
+  assert_absent "$home/state/$id.meta" \
+    "Cursor spawn published durable task state before its Python preflight"
+  assert_absent "$home/state/$id.busy-gen" \
+    "Cursor spawn armed busy state before its Python preflight"
+  assert_absent "$wt/.cursor/hooks.json" \
+    "Cursor spawn wrote hook configuration before its Python preflight"
+  assert_absent "$home/launch.log" \
+    "Cursor spawn launched the harness before its Python preflight"
+  pass "Cursor spawn requires Python before task setup"
+}
+
 test_cursor_family_is_exact() {
   [ "$(fm_control_harness_family cursor-ide 2>/dev/null || true)" != cursor ] \
     || fail "unverified cursor-ide basename was accepted as cursor"
@@ -735,4 +774,5 @@ test_spawn_abort_preserves_cursor_recovery_for_durable_task
 test_spawn_retry_preserves_preexisting_cursor_recovery
 test_cursor_hooks_reject_parent_symlinks
 test_cursor_malformed_hooks_fail_before_writing
+test_cursor_spawn_requires_python_before_setup
 test_tmux_classifies_cursor_agent_only

@@ -751,6 +751,7 @@ secondmate_handoff_detect() {
 install_cmd() {
   case "$1" in
     tmux|node|git|gh|curl|jq|orca|zellij) echo "brew install $1  # or the platform's package manager" ;;
+    python3) echo "brew install python  # or install the platform's python3 package" ;;
     cmux) echo "brew install --cask cmux  # or see https://cmux.com" ;;
     treehouse) echo "curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh" ;;
     no-mistakes) echo "curl -fsSL https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh | sh" ;;
@@ -986,6 +987,7 @@ EOF
 
 crew_dispatch_validate() {
   local file err
+  CREW_DISPATCH_USES_CURSOR=0
   file="$CONFIG/crew-dispatch.json"
   [ -f "$file" ] || return 0
   if ! command -v jq >/dev/null 2>&1; then
@@ -1060,6 +1062,18 @@ crew_dispatch_validate() {
   if [ -n "$err" ]; then
     echo "CREW_DISPATCH: invalid config/crew-dispatch.json - $err"
     return 0
+  fi
+  if jq -e '
+    def profiles($value):
+      if ($value | type) == "array" then $value
+      elif ($value | type) == "object" then [$value]
+      else []
+      end;
+    ([(.rules // [])[]? | profiles(.use?)[]?]
+      + (if has("default") then [profiles(.default)[]?] else [] end))
+    | any(.[]; .harness? == "cursor")
+  ' "$file" >/dev/null 2>&1; then
+    CREW_DISPATCH_USES_CURSOR=1
   fi
   if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ]; then
     jq -r '
@@ -1176,6 +1190,10 @@ detect_local_config() {
     echo "BOOTSTRAP_INFO: crew harness override active: $crew"
   fi
   crew_dispatch_validate
+  if { [ "$crew" = cursor ] || [ "${CREW_DISPATCH_USES_CURSOR:-0}" = 1 ]; } \
+     && ! command -v python3 >/dev/null 2>&1; then
+    echo "MISSING: python3 (install: $(install_cmd python3))"
+  fi
   if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] \
     && ! fm_backlog_backend_manual "$CONFIG" && fm_tasks_axi_compatible; then
     echo "BOOTSTRAP_INFO: tasks-axi available"
