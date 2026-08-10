@@ -230,6 +230,11 @@ test_omp_source_isolation() {
   out=$(fm_busy_classify tmux w1 omp-17.2.12 t1 "$state")
   [ "$out" = "unknown source-mismatch" ] \
     || fail "an unsupported versioned OMP alias must not trust omp-ext, got '$out'"
+  fm_backend_target_exists() { return 0; }
+  out=$(fm_busy_classify_live tmux w1 omp t1 "$state" '' 1)
+  unset -f fm_backend_target_exists
+  [ "$out" = "unknown raw-unverified" ] \
+    || fail "a raw OMP live classifier must reject omp-ext, got '$out'"
   pass "OMP trusts only its exact per-task extension lifecycle source"
 }
 
