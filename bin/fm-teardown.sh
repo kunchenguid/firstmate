@@ -10,19 +10,18 @@
 # upstream-contribution PRs pushed to a fork satisfy this in any mode), OR - for a
 # normal ship task whose commits are not so reachable - when a fresh fetch verifies
 # HEAD is reachable from a configured remote's default branch (or the explicit
-# FM_TEARDOWN_LANDED_REMOTE override), its PR is merged and GitHub reports a PR head
-# that contains the current local work, or its content is already present in the
-# up-to-date source default branch. This recognizes foreign-repository landings and
-# the common squash-merge-then-delete-branch flow, where the branch's own commits
-# live nowhere on a remote yet the change is fully in main.
-# The PR itself is resolved from the task's recorded pr= when present, or - when
-# no pr= was ever recorded (e.g. a yolo-authorized merge on a repo with no PR CI,
-# where the usual "checks green" fm-pr-check.sh trigger never fires) - by looking
-# up a merged PR whose head branch matches the worktree's branch, fetching its head
-# via refs/pull/<n>/head when the branch itself was deleted. So a missing pr= never
-# by itself causes a false refusal of landed work.
-# A gh lookup error falls back to the content check; if that is also inconclusive,
-# teardown refuses rather than risk discarding unlanded work.
+# FM_TEARDOWN_LANDED_REMOTE override), its recorded PR is merged and its recorded
+# pr_head exactly equals the worktree's current HEAD, or its cumulative branch diff
+# is already present in that freshly verified remote default branch. This recognizes
+# foreign-repository landings and the common squash-merge-then-delete-branch flow,
+# where the branch's own commits live nowhere on a remote yet the change is fully in
+# the default branch under a different commit.
+# Forge proof uses only the canonical recorded pr= identity and exact recorded
+# pr_head= value. The PR must belong to the freshly verified landing remote, and the
+# provider's supported CLI must report it merged. A missing or mismatched recorded
+# head, an unreachable forge, or an unmerged PR is inconclusive and falls through to
+# the cumulative content proof. If that is also inconclusive, teardown refuses rather
+# than risk discarding unlanded work.
 # Uncommitted changes are never landed.
 # local-only projects additionally accept work merged into the local default
 # branch (firstmate performs that merge after configured approval) as a fallback
@@ -388,127 +387,128 @@ remove_pr_poll_artifacts() {
   fi
 }
 
-# Resolve the PR number for a worktree branch via gh-axi. Echoes the number on a
-# single match and returns 0; returns non-zero on no match or any lookup failure,
-# so the caller treats it as "no PR found" (fail-safe).
-pr_number_from_branch() {
-  local branch=$1 out n
-  [ -n "$branch" ] && [ "$branch" != HEAD ] || return 1
-  out=$( cd "$WT" && gh-axi pr list --state all --head "$branch" --limit 1 2>/dev/null ) || return 1
-  n=$(printf '%s\n' "$out" | sed -n 's/^[[:space:]]*\([0-9][0-9]*\),.*/\1/p' | head -1)
-  [ -n "$n" ] || return 1
-  printf '%s' "$n"
-}
+TEARDOWN_LANDING_REFUSAL_DETAIL=
+TEARDOWN_RECORDED_PR_READY=0
+TEARDOWN_RECORDED_PR_PROVIDER=
+TEARDOWN_RECORDED_PR_HOST=
+TEARDOWN_RECORDED_PR_PATH=
+TEARDOWN_RECORDED_PR_NUMBER=
 
-pr_number_from_target() {
-  local target=$1 n
-  case "$target" in
-    '' ) return 1 ;;
-    *"/pull/"*)
-      n=${target##*/pull/}
-      n=${n%%[!0-9]*}
-      ;;
-    [0-9]*)
-      n=${target%%[!0-9]*}
-      ;;
-    *) return 1 ;;
-  esac
-  [ -n "$n" ] || return 1
-  printf '%s' "$n"
-}
-
-ensure_commit_object() {
-  local target=$1 commit=$2 n
-  git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null && return 0
-  n=$(pr_number_from_target "$target") || return 1
-  git -C "$WT" remote get-url origin >/dev/null 2>&1 || return 1
-  git -C "$WT" fetch --quiet origin "refs/pull/$n/head" >/dev/null 2>&1 || return 1
-  git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null
-}
-
-patch_id_for_commit() {
-  local commit=$1
-  git -C "$WT" show --pretty=medium --no-ext-diff "$commit" 2>/dev/null \
-    | git patch-id --stable 2>/dev/null \
-    | awk 'NR == 1 { print $1 }'
-}
-
-unpushed_patches_are_in_pr_head() {
-  local pr_head=$1 current base pr_patch_ids commit patch_id unpushed
-  current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
-  base=$(git -C "$WT" merge-base "$current" "$pr_head" 2>/dev/null) || return 1
-  pr_patch_ids=$(
-    git -C "$WT" log --format=%H "$base..$pr_head" -- 2>/dev/null \
-      | while IFS= read -r commit; do
-          patch_id_for_commit "$commit"
-        done \
-      | sed '/^$/d' \
-      | sort -u
-  ) || return 1
-  [ -n "$pr_patch_ids" ] || return 1
-  unpushed=$(git -C "$WT" log --format=%H HEAD --not --remotes -- 2>/dev/null) || return 1
-  [ -n "$unpushed" ] || return 1
-  while IFS= read -r commit; do
-    [ -n "$commit" ] || continue
-    patch_id=$(patch_id_for_commit "$commit") || return 1
-    [ -n "$patch_id" ] || return 1
-    printf '%s\n' "$pr_patch_ids" | grep -qxF "$patch_id" || return 1
-  done <<EOF
-$unpushed
-EOF
-}
-
-# Is the worktree's PR merged for local work contained in that PR? Resolves the
-# PR from the recorded pr= URL first, then from the branch name, and asks GitHub
-# for both the PR state and head. Returns non-zero when the PR is not merged, the
-# current work is not contained in the PR head, no PR is found, or any gh error
-# occurs - the caller then falls back to the content check.
-pr_is_merged() {
-  local branch=$1 target view state head current
-  if [ -n "$PR_URL" ]; then
-    target=$PR_URL
-  else
-    target=$(pr_number_from_branch "$branch") || return 1
-  fi
-  [ -n "$target" ] || return 1
-  view=$(cd "$WT" && gh pr view "$target" --json state,headRefOid -q '.state + "\t" + .headRefOid' 2>/dev/null) || return 1
-  state=${view%%$'\t'*}
-  head=${view#*$'\t'}
-  [ "$state" != "$view" ] || return 1
-  case "$state" in
-    MERGED|merged) ;;
-    *) return 1 ;;
-  esac
-  [ -n "$head" ] || return 1
-  ensure_commit_object "$target" "$head" || return 1
-  current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
-  git -C "$WT" merge-base --is-ancestor "$current" "$head" 2>/dev/null && return 0
-  unpushed_patches_are_in_pr_head "$head"
-}
-
-# Is the branch's content already present in the up-to-date default branch? Fetches
-# first, then 3-way merges the default branch with HEAD: when HEAD introduces nothing
-# the default branch does not already contain (e.g. its change landed via squash) the
-# merged tree equals the default branch's tree. This isolates branch-only changes, so
-# unrelated commits the default branch gained past the merge-base do not count as
-# "added". Returns non-zero when inconclusive (no default ref, or a merge conflict),
-# so the caller refuses rather than guesses.
-content_in_default() {
-  local name ref default_tree merged_tree
-  name=$(default_branch) || return 1
-  if git -C "$WT" remote get-url origin >/dev/null 2>&1; then
-    git -C "$WT" fetch --quiet origin "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1 || return 1
-    ref="refs/remotes/origin/$name"
-  elif git -C "$WT" rev-parse --quiet --verify "refs/heads/$name" >/dev/null 2>&1; then
-    ref="refs/heads/$name"
-  else
+prepare_recorded_pr_squash_proof() {
+  local current recorded_head head_count
+  TEARDOWN_RECORDED_PR_READY=0
+  if [ -z "$PR_URL" ]; then
+    TEARDOWN_LANDING_REFUSAL_DETAIL="Squash forge proof unavailable: recorded pr is missing; record the reviewed PR or prove equivalent content on a verified remote default branch."
     return 1
   fi
-  default_tree=$(git -C "$WT" rev-parse --quiet --verify "$ref^{tree}" 2>/dev/null) || return 1
-  [ -n "$default_tree" ] || return 1
-  merged_tree=$(git -C "$WT" merge-tree --write-tree "$ref" HEAD 2>/dev/null) || return 1
-  merged_tree=$(printf '%s\n' "$merged_tree" | head -1)
-  [ "$merged_tree" = "$default_tree" ]
+  if ! fm_pr_metadata_identity_parse "$META"; then
+    TEARDOWN_LANDING_REFUSAL_DETAIL="Squash forge proof unavailable: recorded PR metadata is invalid; repair pr and pr_head metadata or prove equivalent content on a verified remote default branch."
+    return 1
+  fi
+  head_count=$(grep -c '^pr_head=' "$META" 2>/dev/null || true)
+  if [ "$head_count" -ne 1 ]; then
+    TEARDOWN_LANDING_REFUSAL_DETAIL="Squash forge proof unavailable: recorded pr_head is missing or ambiguous; record the exact reviewed head or prove equivalent content on a verified remote default branch."
+    return 1
+  fi
+  recorded_head=$(grep '^pr_head=' "$META" | cut -d= -f2-)
+  if ! fm_pr_head_valid "$recorded_head"; then
+    TEARDOWN_LANDING_REFUSAL_DETAIL="Squash forge proof unavailable: recorded pr_head is invalid; repair the metadata or prove equivalent content on a verified remote default branch."
+    return 1
+  fi
+  current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || {
+    TEARDOWN_LANDING_REFUSAL_DETAIL="Squash forge proof unavailable: current HEAD cannot be read; restore the worktree before teardown."
+    return 1
+  }
+  if [ "$recorded_head" != "$current" ]; then
+    TEARDOWN_LANDING_REFUSAL_DETAIL="Squash forge proof refused: recorded pr_head $recorded_head does not match current HEAD $current; review and record the current HEAD or restore the exact reviewed commit."
+    return 1
+  fi
+  TEARDOWN_RECORDED_PR_PROVIDER=$FM_PR_META_PROVIDER
+  TEARDOWN_RECORDED_PR_HOST=$FM_PR_META_HOST
+  TEARDOWN_RECORDED_PR_PATH=$FM_PR_META_PATH
+  TEARDOWN_RECORDED_PR_NUMBER=$FM_PR_META_NUMBER
+  TEARDOWN_RECORDED_PR_READY=1
+}
+
+forge_remote_url_parse() {
+  local raw=$1 rest host path
+  TEARDOWN_REMOTE_FORGE_HOST=
+  TEARDOWN_REMOTE_FORGE_PATH=
+  case "$raw" in
+    https://*|http://*|ssh://*|git://*)
+      rest=${raw#*://}
+      rest=${rest#*@}
+      host=${rest%%/*}
+      [ "$host" != "$rest" ] || return 1
+      path=${rest#*/}
+      ;;
+    *@*:*)
+      rest=${raw#*@}
+      host=${rest%%:*}
+      path=${rest#*:}
+      ;;
+    *) return 1 ;;
+  esac
+  case "$host$path" in *'?'*|*'#'*|*$'\t'*|*$'\n'*) return 1 ;; esac
+  path=${path#/}
+  path=${path%/}
+  path=${path%.git}
+  [ -n "$host" ] && [ -n "$path" ] || return 1
+  TEARDOWN_REMOTE_FORGE_HOST=${host,,}
+  TEARDOWN_REMOTE_FORGE_PATH=$path
+}
+
+recorded_pr_identity_matches_url() {
+  local candidate=$1 expected_path=$TEARDOWN_RECORDED_PR_PATH actual_path
+  forge_remote_url_parse "$candidate" || return 1
+  [ "$TEARDOWN_REMOTE_FORGE_HOST" = "$TEARDOWN_RECORDED_PR_HOST" ] || return 1
+  if [ "$TEARDOWN_RECORDED_PR_PROVIDER" = github ]; then
+    actual_path=${TEARDOWN_REMOTE_FORGE_PATH,,}
+    expected_path=${expected_path,,}
+    [ "$actual_path" = "$expected_path" ]
+  else
+    [ "$TEARDOWN_REMOTE_FORGE_PATH" = "$expected_path" ]
+  fi
+}
+
+verified_remote_matches_recorded_pr() {
+  recorded_pr_identity_matches_url "$1"
+}
+
+recorded_pr_forge_reports_merged() {
+  local out state
+  case "$TEARDOWN_RECORDED_PR_PROVIDER" in
+    github)
+      if ! out=$(cd "$WT" && fm_run_timed "$LANDED_REMOTE_TIMEOUT" \
+          gh-axi pr view "$TEARDOWN_RECORDED_PR_NUMBER" \
+          --repo "$TEARDOWN_RECORDED_PR_PATH" 2>/dev/null); then
+        TEARDOWN_LANDING_REFUSAL_DETAIL="Squash forge proof unavailable: the forge is unreachable for the recorded PR; restore forge access or prove equivalent content on a verified remote default branch."
+        return 1
+      fi
+      state=$(printf '%s\n' "$out" | sed -n 's/^[[:space:]]*state:[[:space:]]*//p' | head -1)
+      ;;
+    gitlab)
+      if ! out=$(fm_run_timed "$LANDED_REMOTE_TIMEOUT" glab mr view \
+          "$TEARDOWN_RECORDED_PR_NUMBER" \
+          -R "https://$TEARDOWN_RECORDED_PR_HOST/$TEARDOWN_RECORDED_PR_PATH" 2>/dev/null); then
+        TEARDOWN_LANDING_REFUSAL_DETAIL="Squash forge proof unavailable: the forge is unreachable for the recorded merge request; restore forge access or prove equivalent content on a verified remote default branch."
+        return 1
+      fi
+      state=$(printf '%s\n' "$out" | sed -n 's/^state:[[:space:]]*//p' | head -1)
+      ;;
+    *)
+      TEARDOWN_LANDING_REFUSAL_DETAIL="Squash forge proof unavailable: the recorded forge provider is unsupported; prove equivalent content on a verified remote default branch."
+      return 1
+      ;;
+  esac
+  if [ "$state" != merged ] && [ "$state" != MERGED ]; then
+    if [ -n "$state" ]; then
+      TEARDOWN_LANDING_REFUSAL_DETAIL="Squash forge proof refused: the recorded PR is not merged; merge it or prove equivalent content on a verified remote default branch."
+    else
+      TEARDOWN_LANDING_REFUSAL_DETAIL="Squash forge proof unavailable: the forge did not return an unambiguous merge state; retry with working forge access or prove equivalent content on a verified remote default branch."
+    fi
+    return 1
+  fi
 }
 
 # Print each configured fetch or push URL, plus the explicitly supplied landing
@@ -527,13 +527,12 @@ landed_remote_command() {
   fm_run_timed "$LANDED_REMOTE_TIMEOUT" git -C "$WT" "$@"
 }
 
-# Does candidate remote's currently advertised default branch contain HEAD? This
-# needs two independent remote observations: ls-remote identifies HEAD and its
-# branch ref, then fetch retrieves that exact advertised commit for the ancestry
-# test. A ref-name-only answer, stale tracking ref, failed fetch, or remote change
-# between observations is insufficient evidence and fails closed.
-head_is_landed_on_verified_remote() {  # <remote-url-or-name>
-  local remote=$1 advertised default_ref confirmation confirmed fetched post_fetch post_fetch_ref post_fetch_head current
+# Freshly verify and fetch a candidate remote's currently advertised default branch.
+# A ref-name-only answer, stale tracking ref, failed fetch, or remote change between
+# observations is insufficient evidence and fails closed.
+verify_landing_remote_default() {  # <remote-url-or-name>
+  local remote=$1 advertised default_ref confirmation confirmed fetched post_fetch post_fetch_ref post_fetch_head
+  TEARDOWN_VERIFIED_DEFAULT_COMMIT=
   [ -n "$remote" ] || return 1
   advertised=$(landed_remote_command ls-remote --symref "$remote" HEAD 2>/dev/null) || return 1
   default_ref=$(printf '%s\n' "$advertised" | awk '$1 == "ref:" && $3 == "HEAD" { print $2; exit }')
@@ -554,8 +553,16 @@ head_is_landed_on_verified_remote() {  # <remote-url-or-name>
   [ "$post_fetch_head" = "$advertised" ] || return 1
   fetched=$(git -C "$WT" rev-parse --verify 'FETCH_HEAD^{commit}' 2>/dev/null) || return 1
   [ "$fetched" = "$confirmed" ] || return 1
+  TEARDOWN_VERIFIED_DEFAULT_COMMIT=$fetched
+}
+
+# Does the freshly verified remote default branch contain the exact worktree HEAD?
+head_is_landed_on_verified_remote() {  # <remote-url-or-name>
+  local remote=$1 current
+  verify_landing_remote_default "$remote" || return 1
   current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
-  git -C "$WT" merge-base --is-ancestor "$current" "$fetched" 2>/dev/null
+  git -C "$WT" merge-base --is-ancestor \
+    "$current" "$TEARDOWN_VERIFIED_DEFAULT_COMMIT" 2>/dev/null
 }
 
 # Is HEAD provably contained in the default branch of an explicit or configured
@@ -569,17 +576,64 @@ head_is_landed_on_any_verified_remote() {
   return 1
 }
 
+# Does applying the branch's cumulative diff from its merge-base add nothing to the
+# freshly verified default tree? This proves tree equivalence after a squash while
+# allowing unrelated default-branch commits beyond the merge-base.
+content_matches_verified_default() {
+  local current=$1 default_commit=$2 base default_tree merged_tree
+  base=$(git -C "$WT" merge-base "$current" "$default_commit" 2>/dev/null) || return 1
+  default_tree=$(git -C "$WT" rev-parse --verify "$default_commit^{tree}" 2>/dev/null) || return 1
+  merged_tree=$(git -C "$WT" merge-tree --write-tree --merge-base "$base" \
+    "$default_commit" "$current" 2>/dev/null) || return 1
+  merged_tree=$(printf '%s\n' "$merged_tree" | head -1)
+  [ -n "$merged_tree" ] && [ "$merged_tree" = "$default_tree" ]
+}
+
 # Has the worktree's committed work actually LANDED, though its commits are not
-# reachable from any remote-tracking branch? True when a verified remote default
-# branch contains HEAD, a merged PR proves the current local work is contained in
-# the PR head, OR the content is already in the source default branch (fallback,
-# which also covers the no-PR and gh-error paths). False only for genuinely
-# unlanded work.
+# reachable from any remote-tracking branch? Each candidate default branch is
+# freshly corroborated before exact ancestry, forge, or cumulative-content proof.
 work_is_landed() {
-  local branch=$1
-  head_is_landed_on_any_verified_remote && return 0
-  pr_is_merged "$branch" && return 0
-  content_in_default
+  local remote current verified_count=0 pr_identity_count=0 pr_checked=0
+  TEARDOWN_LANDING_REFUSAL_DETAIL=
+  prepare_recorded_pr_squash_proof || true
+  current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || {
+    TEARDOWN_LANDING_REFUSAL_DETAIL="Landing proof unavailable: current HEAD cannot be read; restore the worktree before teardown."
+    return 1
+  }
+  while IFS= read -r remote; do
+    [ -n "$remote" ] || continue
+    verify_landing_remote_default "$remote" || continue
+    verified_count=$((verified_count + 1))
+    if git -C "$WT" merge-base --is-ancestor \
+        "$current" "$TEARDOWN_VERIFIED_DEFAULT_COMMIT" 2>/dev/null; then
+      return 0
+    fi
+    if [ "$TEARDOWN_RECORDED_PR_READY" = 1 ] \
+      && verified_remote_matches_recorded_pr "$remote"; then
+      pr_identity_count=$((pr_identity_count + 1))
+      if [ "$pr_checked" -eq 0 ]; then
+        pr_checked=1
+        recorded_pr_forge_reports_merged && return 0
+      fi
+    fi
+    content_matches_verified_default \
+      "$current" "$TEARDOWN_VERIFIED_DEFAULT_COMMIT" && return 0
+  done < <(landing_remote_candidates | awk 'NF && !seen[$0]++')
+  if [ "$verified_count" -eq 0 ]; then
+    TEARDOWN_LANDING_REFUSAL_DETAIL="Landing proof unavailable: no configured landing remote default branch could be freshly verified; restore remote access or configure FM_TEARDOWN_LANDED_REMOTE."
+  else
+    if [ "$TEARDOWN_RECORDED_PR_READY" = 1 ] \
+      && [ "$pr_identity_count" -eq 0 ]; then
+      TEARDOWN_LANDING_REFUSAL_DETAIL="Squash forge proof refused: the recorded PR does not match a freshly verified landing remote; repair the remote or PR metadata."
+    fi
+    if [ -n "$TEARDOWN_LANDING_REFUSAL_DETAIL" ]; then
+      TEARDOWN_LANDING_REFUSAL_DETAIL="$TEARDOWN_LANDING_REFUSAL_DETAIL
+Content proof refused: the cumulative branch diff is not equivalent to any freshly verified remote default branch."
+    else
+      TEARDOWN_LANDING_REFUSAL_DETAIL="Content proof refused: the cumulative branch diff is not equivalent to any freshly verified remote default branch."
+    fi
+  fi
+  return 1
 }
 
 backlog_refresh_reminder() {
@@ -890,6 +944,8 @@ validate_worktree_teardown_safety() {
     if ! work_is_landed "$branch"; then
       echo "REFUSED: worktree $WT has work not on any remote and not landed." >&2
       printf 'unpushed commits:\n%s\n' "$unpushed" >&2
+      [ -z "$TEARDOWN_LANDING_REFUSAL_DETAIL" ] \
+        || printf '%s\n' "$TEARDOWN_LANDING_REFUSAL_DETAIL" >&2
       echo "Push the branch, land its PR, or add the verified landing remote (or set FM_TEARDOWN_LANDED_REMOTE), or get the captain's explicit OK to discard, then --force." >&2
       return 1
     fi
