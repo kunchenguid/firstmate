@@ -41,7 +41,12 @@
 #   --repo <owner/name>  repository to sweep (repeatable; default: every repository
 #                        the account owns)
 #   --kind <kind>        comments | reviews | commits (repeatable; default: all three)
-#   --since <iso8601>    window start (default: FM_SWEEP_WINDOW_DAYS, itself 30, days back)
+#   --since <iso8601>    window start, spelled YYYY-MM-DDTHH:MM:SSZ (default:
+#                        FM_SWEEP_WINDOW_DAYS, itself 30, days back). Every window
+#                        filter is a string comparison against GitHub's own UTC
+#                        timestamps, so any other spelling is refused outright
+#                        rather than sorting below every record and quietly
+#                        examining nothing.
 #   --branch <name>      restrict the commits kind to this branch (repeatable)
 #   --budget <n>         maximum GitHub requests for the whole run (default 300).
 #                        There is no unlimited value: 0 permits no request at
@@ -64,7 +69,11 @@
 #   FM_SWEEP_SCOPE repo=<owner/name> kind=<kind> outcome=observed examined=<n> declared=<n> candidates=<n>
 #   FM_SWEEP_SCOPE repo=<owner/name> kind=<kind> outcome=could-not-observe reason=<slug> detail=<text>
 #   FM_SWEEP_CANDIDATE repo=<owner/name> kind=<kind> ref=<id> when=<iso> url=<url> evidence=<k=v,...>
-#   FM_SWEEP_SUMMARY scopes=<n> observed=<n> could_not_observe=<n> declared=<n> candidates=<n> outcome=<clean|candidates|could-not-observe>
+#   FM_SWEEP_SUMMARY scopes=<n> observed=<n> could_not_observe=<n> declared=<n> candidates=<n> requests=<n> outcome=<clean|candidates|could-not-observe>
+#
+# examined counts the records that survived the account and window filters, the
+# same way for all three kinds, so examined always equals declared plus
+# candidates and a gap between them is a bug rather than a reading of the field.
 #
 # Exit status:
 #   0   every scope was observed and no candidate was found
@@ -187,6 +196,19 @@ is_uint() {
   esac
 }
 
+# Every window filter - the pull request walk here and the jq selects sent to
+# GitHub - is a lexicographic comparison against GitHub's own UTC timestamps.
+# That is only sound for one exact spelling: a value like "30d" sorts below every
+# real timestamp, so it would drop every record and report an observed-clean
+# sweep of nothing. The window start is therefore checked to be that spelling
+# before it is ever compared against anything.
+is_iso8601() {
+  case $1 in
+    [0-9][0-9][0-9][0-9]-[0-1][0-9]-[0-3][0-9]T[0-2][0-9]:[0-5][0-9]:[0-6][0-9]Z) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 is_uint "$BUDGET" || die_usage "--budget must be a non-negative integer"
 is_uint "$MAX_PAGES" || die_usage "--max-pages must be a non-negative integer"
 is_uint "$PER_PAGE" || die_usage "--per-page must be a non-negative integer"
@@ -203,9 +225,11 @@ for kind in "${KINDS[@]}"; do
 done
 
 WINDOW_DAYS=${FM_SWEEP_WINDOW_DAYS:-30}
-if [ -z "$SINCE" ]; then
+if [ -n "$SINCE" ]; then
+  is_iso8601 "$SINCE" \
+    || die_usage "--since must be a UTC ISO-8601 timestamp spelled YYYY-MM-DDTHH:MM:SSZ, e.g. 2026-01-01T00:00:00Z"
+else
   is_uint "$WINDOW_DAYS" || die_usage "FM_SWEEP_WINDOW_DAYS must be a non-negative integer"
-  SINCE=$(days_ago_iso "$WINDOW_DAYS")
 fi
 
 NOW=$(now_iso)
@@ -330,10 +354,12 @@ JQ_ENVELOPE='| ([(.n|tostring)] + .r) | join("\n")'
 # "feat/a&b" would otherwise end the query early, and the sweep would report a
 # branch it never actually asked about as observed - a silent wrong answer of
 # exactly the kind this tool exists to prevent. Byte-wise under LC_ALL=C so a
-# non-ASCII name encodes correctly rather than per rendered character.
+# non-ASCII name encodes correctly rather than per rendered character. LC_ALL is
+# local so that byte-wise view stays inside this function: leaking it would
+# silently make sanitize's character bound a byte bound and change the collation
+# every other comparison in the script relies on.
 urlq() {
-  local s=$1 out='' i c
-  LC_ALL=C
+  local s=$1 out='' i c LC_ALL=C
   for ((i = 0; i < ${#s}; i++)); do
     c=${s:i:1}
     case $c in
@@ -419,6 +445,19 @@ unobserved scopes were not searched, so nothing is known about them either way.
 EOF
   fi
 }
+
+# The derived window start is resolved here rather than beside the other
+# argument checks because a system whose date understands neither form yields no
+# window at all. That is a could-not-observe, not a usage error, and reporting it
+# needs the markers above to exist.
+if [ -z "$SINCE" ]; then
+  SINCE=$(days_ago_iso "$WINDOW_DAYS")
+  if ! is_iso8601 "$SINCE"; then
+    SINCE=unresolved
+    run_blocked missing-tool \
+      "date could not compute a window start $WINDOW_DAYS days back, so there is no window to sweep"
+  fi
+fi
 
 if [ -z "$B64D" ]; then
   run_blocked missing-tool "base64 cannot decode on this system; no response could be read"
@@ -508,9 +547,9 @@ sweep_comments() {
       scope_unobserved "$repo" comments unparsable "comment page $page was not parsable" "$declared" "$candidates"
       return
     fi
-    examined=$((examined + raw))
     while IFS='|' read -r id issue when has_token assoc app; do
       [ -n "$id" ] || continue
+      examined=$((examined + 1))
       if [ "$(b64d "$has_token")" = "true" ]; then
         declared=$((declared + 1))
         continue
@@ -657,9 +696,9 @@ sweep_reviews() {
         scope_unobserved "$repo" reviews unparsable "reviews of pull request $number were not parsable" "$declared" "$candidates"
         return
       fi
-      examined=$((examined + raw))
       while IFS='|' read -r id when has_token assoc state; do
         [ -n "$id" ] || continue
+        examined=$((examined + 1))
         if [ "$(b64d "$has_token")" = "true" ]; then
           declared=$((declared + 1))
           continue
@@ -754,11 +793,21 @@ sweep_commits() {
   # filter, so the window and the account are applied here for every source.
   # The raw page count stays unfiltered above this, so pagination still ends on
   # the real page length rather than on how many records survived.
+  #
+  # The window is compared against the LATER of the committer and author dates.
+  # GitHub's own since= filters a branch listing on committer date, while a
+  # rebase or cherry-pick - the fleet's routine lane workflow - keeps an author
+  # date from before the window on a commit pushed inside it. Filtering on author
+  # date alone would let the API return such a commit and then silently drop it
+  # here, which is a write made invisible by a scope that still reads observed.
   commit_jq="{n: length, r: [ .[]
     | select(((.author.login) // \"\") == $ACCOUNT_JQ)
-    | select((((.commit.author.date) // \"\")) >= $SINCE_JQ)
+    | (((.commit.committer.date) // \"\")) as \$committed
+    | (((.commit.author.date) // \"\")) as \$authored
+    | (if \$committed >= \$authored then \$committed else \$authored end) as \$when
+    | select(\$when >= $SINCE_JQ)
     | [ (.sha|@base64),
-        (((.commit.author.date) // \"\")|@base64),
+        (\$when|@base64),
         (((((.commit.message) // \"\")|contains($TOKEN_JQ)))|tostring|@base64),
         ((((.commit.verification.verified) // false)|tostring)|@base64),
         (((.committer.login) // \"none\")|@base64) ]

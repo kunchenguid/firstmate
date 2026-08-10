@@ -375,4 +375,23 @@ else
   fail "expected exit 64 for an unknown kind, got $usage_rc"
 fi
 
+# The worst window bug is the one that still exits 0. Every window filter is a
+# string comparison against GitHub's timestamps, so a plausible-looking "30d"
+# would sort below every record, examine nothing, and print a clean sweep. It has
+# to be refused before it is ever compared against anything.
+for bad_since in 30d 2026-01-01 "2026-01-01 00:00:00" 2026-01-01T00:00:00+05:00; do
+  since_rc=0
+  : >"$FM_FAKE_LOG"
+  FM_FAKE_SCENARIO=clean FM_FAKE_BODY=0 PATH="$BIN:$PATH" \
+    "$SWEEP" --account testcaptain --since "$bad_since" --repo acme/widgets \
+    >/dev/null 2>&1 || since_rc=$?
+  if [ "$since_rc" != "64" ]; then
+    fail "expected exit 64 for --since '$bad_since', got $since_rc"
+  elif [ -s "$FM_FAKE_LOG" ]; then
+    fail "--since '$bad_since' reached GitHub before it was refused"
+  else
+    pass "--since '$bad_since' is refused with exit 64 before any request"
+  fi
+done
+
 exit "$FAILED"
