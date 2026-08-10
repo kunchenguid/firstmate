@@ -895,7 +895,7 @@ _fm_composer_classify_leftbar() {  # <screen> <styled> <first-row> <last-row>
 }
 
 _fm_composer_select_cursorless() {
-  local generic=-1
+  local plain=$1 generic=-1 next raw trimmed
   FM_COMPOSER_SELECTED_KIND=
   FM_COMPOSER_SELECTED_FIRST=-1
   FM_COMPOSER_SELECTED_LAST=-1
@@ -940,20 +940,6 @@ _fm_composer_select_cursorless() {
     FM_COMPOSER_SELECTED_KIND=
     return 1
   fi
-  [ -n "$FM_COMPOSER_SELECTED_KIND" ]
-}
-
-fm_composer_extract_selected_content() {  # <caps> <screen>
-  local caps=$1 screen=$2 styled=0 kv plain row raw content glyph joined= footer_re next trimmed
-  footer_re=${FM_COMPOSER_LEFTBAR_FOOTER_RE:-$FM_COMPOSER_LEFTBAR_FOOTER_RE_DEFAULT}
-  while IFS= read -r kv; do
-    [ "$kv" = styled=1 ] && styled=1
-  done <<EOF
-$caps
-EOF
-  plain=$(printf '%s\n' "$screen" | fm_composer_strip_ansi)
-  _fm_composer_scan_screen "$plain" ''
-  _fm_composer_select_cursorless || return 1
   if [ "$FM_COMPOSER_SELECTED_KIND" = bare ]; then
     next=$((FM_COMPOSER_SELECTED_LAST + 1))
     while :; do
@@ -966,6 +952,20 @@ EOF
       next=$((next + 1))
     done
   fi
+  [ -n "$FM_COMPOSER_SELECTED_KIND" ]
+}
+
+fm_composer_extract_selected_content() {  # <caps> <screen>
+  local caps=$1 screen=$2 styled=0 kv plain row raw content glyph joined= footer_re
+  footer_re=${FM_COMPOSER_LEFTBAR_FOOTER_RE:-$FM_COMPOSER_LEFTBAR_FOOTER_RE_DEFAULT}
+  while IFS= read -r kv; do
+    [ "$kv" = styled=1 ] && styled=1
+  done <<EOF
+$caps
+EOF
+  plain=$(printf '%s\n' "$screen" | fm_composer_strip_ansi)
+  _fm_composer_scan_screen "$plain" ''
+  _fm_composer_select_cursorless "$plain" || return 1
   row=$FM_COMPOSER_SELECTED_FIRST
   while [ "$row" -le "$FM_COMPOSER_SELECTED_LAST" ]; do
     raw=$(_fm_composer_screen_row "$row" "$screen")
@@ -1074,7 +1074,7 @@ EOF
   # No cursor: the bottom-most shape wins, with the pi-separator staleness
   # rules layered on (a live pi composer pair below the generic candidate
   # proves that candidate stale).
-  if ! _fm_composer_select_cursorless; then
+  if ! _fm_composer_select_cursorless "$plain"; then
     printf 'unknown'
     return 0
   fi
@@ -1087,7 +1087,10 @@ EOF
         "$FM_COMPOSER_SELECTED_FIRST" "$FM_COMPOSER_SELECTED_LAST"
       ;;
     bare)
-      if [ "$FM_COMPOSER_SCAN_PI_PAIR_FOUND" = 1 ] \
+      if [ "$FM_COMPOSER_SELECTED_LAST" -gt "$FM_COMPOSER_SELECTED_FIRST" ]; then
+        _fm_composer_classify_bare_wrap "$screen" "$styled" \
+          "$FM_COMPOSER_SELECTED_FIRST" "$FM_COMPOSER_SELECTED_LAST"
+      elif [ "$FM_COMPOSER_SCAN_PI_PAIR_FOUND" = 1 ] \
          && [ "$FM_COMPOSER_SCAN_BARE_ROW" -gt "$FM_COMPOSER_SCAN_PI_OPEN" ] \
          && [ "$FM_COMPOSER_SCAN_BARE_ROW" -lt "$FM_COMPOSER_SCAN_PI_CLOSE" ]; then
         _fm_composer_classify_bare_pi_overlap "$screen" "$styled" "$has_identity" "$identity" \

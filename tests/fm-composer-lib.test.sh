@@ -382,6 +382,31 @@ test_lower_dead_shell_invalidates_cursorless_candidate() {
   pass "fm_composer_classify_screen: a lower dead shell invalidates only cursorless stale composers"
 }
 
+test_cursorless_bare_wrap_region_classifies() {
+  local activity status bounded ghost out
+  activity=$'❯\nWorking on request...'
+  assert_screen "cursorless activity below bare row on herdr" pending "$CAPS_STYLED" "$activity"
+  assert_screen "cursorless activity below bare row on zellij" pending "$CAPS_STYLED_NOID" "$activity"
+  assert_screen "cursorless activity below bare row on cmux/orca" unknown "$CAPS_PLAIN" "$activity"
+
+  status=$'›\n\ncodex status line'
+  assert_screen "blank-separated codex status on herdr" empty "$CAPS_STYLED" "$status"
+  assert_screen "blank-separated codex status on zellij" empty "$CAPS_STYLED_NOID" "$status"
+  assert_screen "blank-separated codex status on cmux/orca" empty "$CAPS_PLAIN" "$status"
+
+  bounded=$'────────────────────────\n❯\n────────────────────────\nClaude 4.1'
+  assert_screen "rule-bounded claude footer on herdr" empty "$CAPS_STYLED" "$bounded" '' probe-absent
+  assert_screen "rule-bounded claude footer on zellij" empty "$CAPS_STYLED_NOID" "$bounded"
+  assert_screen "rule-bounded claude footer on cmux/orca" empty "$CAPS_PLAIN" "$bounded"
+
+  ghost=$'❯ '"${ESC}[2ma long rotating suggestion that${ESC}[0m"$'\n'"${ESC}[2mwraps onto the next line${ESC}[0m"
+  out=$(fm_composer_classify_screen "$CAPS_STYLED" "$ghost")
+  [ "$out" = empty ] || fail "cursorless ghost wrap on herdr should be empty, got '$out'"
+  out=$(fm_composer_classify_screen "$CAPS_STYLED_NOID" "$ghost")
+  [ "$out" = empty ] || fail "cursorless ghost wrap on zellij should be empty, got '$out'"
+  pass "fm_composer_classify_screen: cursorless bare wrap regions participate in verdicts"
+}
+
 test_bottom_most_candidate_wins() {
   # The one ranking rule: the live composer is bottom-anchored, so a stale
   # decorative box (codex's startup banner) can never outrank the real row
@@ -466,6 +491,7 @@ test_matrix_claude_inside_zellij_ansi_dump
 test_strict_blank_row_divergence
 test_bare_wrap_region_classifies
 test_lower_dead_shell_invalidates_cursorless_candidate
+test_cursorless_bare_wrap_region_classifies
 test_bottom_most_candidate_wins
 test_incomplete_lower_box_invalidates_stale_candidate
 test_titled_bottom_requires_matching_width
