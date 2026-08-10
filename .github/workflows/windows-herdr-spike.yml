@@ -414,8 +414,9 @@ jobs:
             if [ -n "$first_limit" ]; then
               echo "First observed headless boundary: $first_limit"
             else
-              echo 'No hard headless boundary was observed in this bounded shell-stand-in cycle.'
+              echo 'No hard boundary was observed in this bounded shell-stand-in cycle.'
             fi
+            echo 'A passing automation core does not authorize an unattended fleet: any FAIL or DEGRADED custody row remains an operational boundary until it is closed.'
             echo 'A headless CI runner proves the AUTOMATION primitives, not the interactive desktop experience.'
           } >>"$results"
 
