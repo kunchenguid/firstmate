@@ -173,7 +173,18 @@ if command -v zellij >/dev/null 2>&1; then
   fm_backend_zellij_send_key "$target" Enter \
     || fail "zellij ($zj_version): clock probe setup submit failed"
   sleep 2
-  verdict=$(fm_backend_zellij_send_text_submit "$target" '# audit-probe-never-submitted' 2 0.5 0.5 2>/dev/null)
+  probe='# audit-probe-never-submitted'
+  fm_backend_zellij_send_literal "$target" "$probe" \
+    || fail "zellij ($zj_version): false-positive probe write failed"
+  sleep 0.5
+  probe_capture=$(fm_backend_zellij_capture "$target" 40 2>/dev/null) \
+    || fail "zellij ($zj_version): false-positive probe capture failed"
+  case "$probe_capture" in
+    *"$probe"*) ;;
+    *) fail "zellij ($zj_version): false-positive probe text was not visible after typing" ;;
+  esac
+  verdict=$(fm_composer_submit_retry_core fm_backend_zellij_send_key fm_backend_zellij_composer_state \
+    "$target" 2 0.5 2>/dev/null)
   case "$verdict" in
     pending|unknown)
       CHECKED=$((CHECKED + 1))
