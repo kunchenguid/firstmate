@@ -14,7 +14,7 @@
 # daemon keeps its escalation-digest seen-markers; the watcher keeps its .seen-*
 # signatures).
 #
-# There are three documented exceptions. task_hold_kind reads the backlog
+# There are four documented exceptions. task_hold_kind reads the backlog
 # through its own tool; see its own comment for the callers' cost contract.
 # The absorb classification
 # (crew_absorb_class and its working/paused wrappers) is NOT a pure status-file
@@ -27,7 +27,9 @@
 # open-decisions fold" below) also writes: it persists a per-status-file byte
 # cursor and folded open-set as a side effect, so a per-drain fleet-wide scan
 # stays bounded by new appends instead of re-reading each task's whole lifetime
-# log every time.
+# log every time. decision_close_refused is the registered-probe gate this fold
+# consults before accepting a resolution; its own comment owns that cost
+# contract.
 
 # Directory of this library, used to locate the sibling fm-crew-state.sh reader.
 # Resolved at source time from BASH_SOURCE so it works whether sourced by a
@@ -507,6 +509,71 @@ _fm_decision_key() {  # <status-line> -> key slug, or "default" when no token
     *) printf 'default' ;;
   esac
 }
+# --- the registered-probe gate on decision closure ---------------------------
+#
+# Captain ruling 2026-08-10 (data/captain-rulings-2026-08-10/ruled-criterion-must-carry-a-probe.md):
+# a ruling that directs `fix` must carry a probe, and a `resolved` event for a
+# decision key that HAS a registered probe is not accepted as resolved until that
+# probe passes. Applied is an action the pipeline observes; met is a predicate
+# nobody was evaluating, and four ruled criteria in one day were reported applied
+# while not being met. Until the probe passes, the fold below keeps showing the
+# decision. That is the fail-closed step, and it lives here - inside the existing
+# keyed open/resolved fold - rather than as a second surface.
+#
+# COST CONTRACT, and the third exception to this library's pure-read rule (the
+# other two are task_hold_kind and the absorb classification). A key with no
+# registered probe costs two syscalls: the per-task decision directory usually
+# does not exist, and a decision file usually carries no probe block. Only a
+# `resolved` line whose key has a real probe block spends a bounded subprocess,
+# and only once per such line. Every decision ruled before the format existed
+# therefore folds exactly as it always did - the ruling forbids back-filling them
+# with invented probes, so they have no registered probe to gate on.
+FM_CLASSIFY_COMMITMENT_BIN="${FM_CLASSIFY_COMMITMENT_BIN:-$_FM_CLASSIFY_LIB_DIR/fm-commitment-register.sh}"
+
+# 0 when a registered probe REFUSES this closure, printing why on stdout; 1 when
+# the closure may be accepted (no probe registered, the probe passed, or the
+# criterion is attested rather than probed).
+#
+# A probe that cannot run refuses the closure: could-not-observe is never a pass,
+# and accepting a resolution on an unobserved criterion is the exact failure the
+# ruling closes.
+decision_close_refused() {  # <task-id> <key> [home]
+  local task=$1 key=$2 home=${3:-${FM_HOME:-}} bin=$FM_CLASSIFY_COMMITMENT_BIN out rc
+  [ -n "$task" ] && [ -n "$key" ] || return 1
+  [ -n "$home" ] || return 1
+  # Cheap gate first: no decision file, no registered probe, no cost.
+  [ -f "$home/data/$task/decision-$key.md" ] || return 1
+  [ -x "$bin" ] || return 1
+  out=$(FM_HOME="$home" "$bin" --closes "$task" "$key" 2>/dev/null)
+  rc=$?
+  [ "$rc" -eq 0 ] && return 1
+  # The refusal becomes the note field of a TAB-separated fold record, and it
+  # carries text read out of a decision file, so a stray tab or newline there
+  # would corrupt the record rather than the note.
+  printf '%s' "${out:-a registered probe for this criterion did not pass}" | tr '\n\t' '  '
+  return 0
+}
+
+# The verb currently recorded for <key>, or empty when the key is not open. Used
+# by the closure gate so a refused resolution keeps the decision's own opening
+# verb rather than being relabelled by the refusal.
+_fm_decision_verb() {  # <open-set> <key>
+  local set=$1 key=$2 line rest
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    case "$line" in
+      "$key"$'\t'*)
+        rest=${line#*$'\t'}
+        printf '%s' "${rest%%$'\t'*}"
+        return 0
+        ;;
+    esac
+  done <<EOF
+$set
+EOF
+  return 0
+}
+
 # Drop the record for <key> from a newline-terminated "<key>\t<verb>\t<note>" set.
 # Portable (no associative arrays) so the fold runs on bash 3.2 as well as 4+.
 _fm_decision_drop() {  # <open-set> <key>
@@ -524,11 +591,14 @@ EOF
 }
 # Fold ONE status line into an existing "<key>\t<verb>\t<note>\n"-per-line open
 # set, applying the same needs-decision/blocked-opens, resolved/captain-held-closes
-# rule status_open_decisions documents above. Pure text transform, no file I/O.
+# rule status_open_decisions documents above.
 # This is the ONE place the per-line open/resolved rule is written; both the
 # whole-file fold (status_open_decisions) and the incremental cursor-backed fold
 # (status_open_decisions_incremental) below call this instead of re-deriving the
 # rule, so the two consumption strategies can never drift apart on semantics.
+# It is a pure text transform EXCEPT on the resolve arm, where the registered-
+# probe gate (decision_close_refused) reads the key's decision file; a caller
+# that omits <task-id>/<home> gets the ungated rule unchanged.
 # Reserved decision-key namespaces, and the rule that makes them mean something.
 #
 # A key like `pending-reply-<id>` names a decision that one library raises and is
@@ -565,8 +635,9 @@ _fm_decision_key_transition_allowed() {  # <key> <note>
   return 0
 }
 
-_fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb>
-  local open=$1 line=$2 resolve=$3 held=$4 verb key note stripped
+_fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb> [<task-id>] [<home>]
+  local open=$1 line=$2 resolve=$3 held=$4 task=${5:-} home=${6:-}
+  local verb key note stripped refusal prior
   stripped=${line//[[:space:]]/}
   [ -n "$stripped" ] || { printf '%s' "$open"; return 0; }
   verb=$(status_line_verb "$line")
@@ -580,7 +651,26 @@ _fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb
       [ -n "$open" ] && open="${open}"$'\n'
       open="${open}${key}"$'\t'"${verb}"$'\t'"${note}"$'\n'
       ;;
-    "$resolve"|"$held")
+    "$resolve")
+      # A resolution is a CLAIM that the criterion is met. When the key carries
+      # a registered probe, the claim is checked and only a pass closes it; the
+      # decision keeps showing until then, carrying the reason it did not close.
+      # A key with no registered probe closes exactly as it always did.
+      if refusal=$(decision_close_refused "$task" "$key" "$home"); then
+        prior=$(_fm_decision_verb "$open" "$key")
+        open=$(_fm_decision_drop "$open" "$key")
+        [ -n "$open" ] && open="${open}"$'\n'
+        open="${open}${key}"$'\t'"${prior:-needs-decision}"$'\t'"${refusal}"$'\n'
+      else
+        open=$(_fm_decision_drop "$open" "$key")
+        [ -n "$open" ] && open="${open}"$'\n'
+      fi
+      ;;
+    "$held")
+      # A captain-held transfer moves the decision to the backlog; it never
+      # claims the criterion was met, so the probe gate deliberately does not
+      # apply to it. Gating a legitimate transfer would strand the decision in
+      # both places at once.
       open=$(_fm_decision_drop "$open" "$key")
       [ -n "$open" ] && open="${open}"$'\n'
       ;;
@@ -601,12 +691,21 @@ _fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb
 # subprocess read, which exists for that function's much narrower payload-driven
 # path resolution rather than this directory-local glob.
 status_open_decisions() {  # <status-file>
-  local f=$1 line resolve held open=''
+  local f=$1 line resolve held open='' task home
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
   resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
   held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
+  task=${f##*/}; task=${task%.status}
+  # The home this status file belongs to, for the registered-probe gate below.
+  # FM_HOME when the caller set it, otherwise the parent of the state directory,
+  # which is the layout every home uses.
+  home=${FM_HOME:-}
+  if [ -z "$home" ]; then
+    home=${f%/*}
+    home=${home%/*}
+  fi
   while IFS= read -r line || [ -n "$line" ]; do
-    open=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held")
+    open=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held" "$task" "$home")
   done < "$f"
   printf '%s' "$open"
 }
@@ -697,7 +796,7 @@ _fm_open_decisions_cursor_path() {  # <status-file>
   printf '%s/.%s.open-decisions-cursor' "$dir" "${base%.status}"
 }
 
-FM_OPEN_DECISIONS_FOLD_VERSION=2
+FM_OPEN_DECISIONS_FOLD_VERSION=3
 
 # Portable device:inode identity for the rotation/recreation check below.
 _fm_open_decisions_file_ident() {  # <file> -> "dev:inode", empty on I/O failure
@@ -712,7 +811,16 @@ _fm_open_decisions_file_ident() {  # <file> -> "dev:inode", empty on I/O failure
 status_open_decisions_incremental() {  # <status-file>
   local f=$1 cf offset ident open='' trusted_open='' cursor_data first rest offset_line ident_line
   local version='' size cur_ident resolve held chunk_file chunk_size line cursor_dirty=0
+  local task home
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
+  task=${f##*/}; task=${task%.status}
+  # The home this status file belongs to, for the registered-probe gate, resolved
+  # exactly as status_open_decisions resolves it.
+  home=${FM_HOME:-}
+  if [ -z "$home" ]; then
+    home=${f%/*}
+    home=${home%/*}
+  fi
   cf=$(_fm_open_decisions_cursor_path "$f")
   offset=0
   ident=''
@@ -792,7 +900,7 @@ status_open_decisions_incremental() {  # <status-file>
     resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
     held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
     while IFS= read -r line || [ -n "$line" ]; do
-      open=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held")
+      open=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held" "$task" "$home")
     done < "$chunk_file"
     rm -f "$chunk_file"
     offset=$size

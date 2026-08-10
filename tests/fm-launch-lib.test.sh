@@ -407,3 +407,53 @@ test_effort_flag_is_empty_when_unset_or_default
 test_flags_are_shell_quoted
 test_fm_spawn_takes_its_launch_decision_from_the_library
 test_fm_spawn_cannot_launch_without_the_library
+
+# launch_permission_posture publishes the CONSUMER OBLIGATION in the header as a
+# value, so a commitment about launched agents' permission posture can be probed
+# without grepping for a vendor flag string - a grep would go quietly vacuous the
+# day an adapter renames its flag.
+#
+# The property that matters is that the function CAN say all three things, and
+# that it never invents "enforced" for an adapter whose posture this repo has not
+# recorded. An unknown posture narrowed into enforced would be protection that
+# protects nothing, which is exactly what the register exists to refuse.
+test_permission_posture_is_declared_for_every_launchable_harness() {
+  local h posture listed
+  for h in "${HARNESSES[@]}"; do
+    posture=$(launch_permission_posture "$h") \
+      || fail "launch_permission_posture refused a harness the library can launch: $h"
+    case "$posture" in
+      unrestricted|enforced|unknown) ;;
+      *) fail "$h reported an out-of-vocabulary posture: $posture" ;;
+    esac
+    listed=$(launch_permission_posture | awk -v h="$h" '$1 == h { print $2 }')
+    [ "$listed" = "$posture" ] \
+      || fail "$h: the roster says '$listed' but the single read says '$posture'"
+  done
+  [ "$(launch_permission_posture | wc -l)" -eq "${#HARNESSES[@]}" ] \
+    || fail "the posture roster does not cover every harness exactly once"
+  pass "every launchable harness declares a posture, and the roster matches the single read"
+}
+
+test_permission_posture_never_invents_enforcement() {
+  local h posture unknown=0
+  for h in "${HARNESSES[@]}"; do
+    posture=$(launch_permission_posture "$h")
+    [ "$posture" != enforced ] \
+      || fail "$h claims enforced permissions; no adapter in this repo does, so this is a fabricated posture"
+    [ "$posture" != unknown ] || unknown=$((unknown + 1))
+  done
+  # kimi is the recorded unknown: the header accounts for six adapters and kimi
+  # is not one of them. Pinning that it stays UNKNOWN rather than drifting to
+  # enforced is the point - an unverified posture must never read as protection.
+  [ "$(launch_permission_posture kimi)" = unknown ] \
+    || fail "kimi's posture is not recorded anywhere in this repo, so it must read unknown"
+  [ "$unknown" -ge 1 ] \
+    || fail "no posture is unknown, so the third value is untested and could be unreachable"
+  launch_permission_posture no-such-harness >/dev/null 2>&1 \
+    && fail "an unverified adapter must be refused, not given a posture"
+  pass "an unrecorded posture stays unknown and an unverified adapter is refused"
+}
+
+test_permission_posture_is_declared_for_every_launchable_harness
+test_permission_posture_never_invents_enforcement

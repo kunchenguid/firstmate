@@ -2,7 +2,7 @@
 name: bootstrap-diagnostics
 description: >-
   Agent-only handling playbook for session-start bootstrap diagnostics.
-  Use whenever the session-start digest's bootstrap or network-checks section prints an actionable diagnostic line - MISSING, MISSING_MANUAL, BACKEND_INVALID, NEEDS_GH_AUTH, TANGLE, STARTUP_MEMORY_BUDGET, CREW_DISPATCH invalid, MODEL_REGISTRY, MODEL_PRICE, MODEL_VERIFY, ADMISSION_CONTROL, WAKE_LEDGER, TASK_AXIS_BACKFILL, FLEET_SYNC, NETWORK_CHECKS, PR_CHECK_MIGRATION, VALIDATION_DAEMON, SECONDMATE_SYNC, SECONDMATE_LIVENESS, SECONDMATE_HANDOFF, NUDGE_SECONDMATES, or FMX - or when a standalone bin/fm-bootstrap.sh or bin/fm-startup-network.sh run prints one of those lines.
+  Use whenever the session-start digest's bootstrap or network-checks section prints an actionable diagnostic line - MISSING, MISSING_MANUAL, BACKEND_INVALID, NEEDS_GH_AUTH, TANGLE, STARTUP_MEMORY_BUDGET, CREW_DISPATCH invalid, MODEL_REGISTRY, MODEL_PRICE, MODEL_VERIFY, ADMISSION_CONTROL, WAKE_LEDGER, TASK_AXIS_BACKFILL, FLEET_SYNC, NETWORK_CHECKS, PR_CHECK_MIGRATION, VALIDATION_DAEMON, COMMITMENT, SECONDMATE_SYNC, SECONDMATE_LIVENESS, SECONDMATE_HANDOFF, NUDGE_SECONDMATES, or FMX - or when a standalone bin/fm-bootstrap.sh or bin/fm-startup-network.sh run prints one of those lines.
   A silent bootstrap section, or a BOOTSTRAP_INFO fact, means no skill load.
 user-invocable: false
 metadata:
@@ -82,6 +82,15 @@ When any diagnostic needs captain attention, report the plain consequence and re
   Report the stall and any measured outage length to the captain under `AGENTS.md` section 9 before dispatching work that depends on validation.
 - `VALIDATION_DAEMON: unknown - cannot read a pid from <path>` - the daemon's pid file is present but no pid can be read out of it, so liveness is genuinely unmeasured.
   Do not treat this as down and do not treat it as alive: inspect the named path, and settle the daemon's actual state before either alarming the captain or dispatching validation-dependent work.
+- `COMMITMENT: <id> UNMET (<label>) - <evidence>` - something was recorded as a commitment, and the probe registered for it says it is not real yet.
+  The line is not a reminder to re-file the commitment; it is the evidence that the thing the record promises is not happening.
+  Read the named evidence, decide with the captain whether closing it is work worth dispatching now, and record that decision - but never edit or delete the entry to quiet the line, because the entry retires by itself the moment its probe passes, and one removed by hand takes the gap with it.
+  This is deliberately not suppressed by age, count, or rate: a quieter question hides a genuine unmet commitment along with the noise.
+- `COMMITMENT: <id> COULD-NOT-OBSERVE - <evidence>` - the probe reached no verdict, or the entry is inadmissible, or it is an attested criterion that cannot execute.
+  This is the third value and it is never read as enforced: the commitment may or may not be real, and until the probe can answer, no one may say it is.
+  Repair whatever stopped the observation - an entry the interpreter refuses names its own defect in the evidence - rather than treating the absence of a failure as a pass.
+- `COMMITMENT: register unreadable - <reason>` - the commitment register itself could not be read, so no commitment was checked at all.
+  Treat it as the register failing rather than as an empty register, and repair it before trusting any session-start silence about recorded commitments.
 - `SECONDMATE_SYNC: secondmate <id>: skipped: <reason>` - secondmate convergence left a live home on its existing checkout because the home was dirty, diverged, unsafe, on the wrong branch, missing its placement-specific target commit, unreachable, or otherwise not fast-forwardable, or because inherited local-material propagation failed; bootstrap continued, but inspect the reason because the secondmate's tracked instructions, inherited settings, or shared captain preferences may be stale after a primary update.
 - `SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed after <cause>: <reason>` - the session-start liveness sweep could not guarantee that the registered secondmate is running a real agent process.
   Investigate the reason because that secondmate is not guaranteed live.

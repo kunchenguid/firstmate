@@ -1,0 +1,111 @@
+{
+  "commitment_schema_version": 1,
+  "description": "Canonical field contract for one RECORDED-BUT-NOT-YET-REAL commitment. bin/fm-commitment-register.sh is the only interpreter; its header and --help own the mechanics. An entry answers one question and only that question: what was committed, and what would have to be observably true for that commitment to be real. It is not a ticket, a plan, a decision hold, or a backlog item - those record intent, and recorded intent reading as protection is exactly what this register refuses.",
+  "why": "A commitment recorded with no enforcement probe reads as protection while protecting nothing. The probe is the load-bearing field: an entry whose state is asserted rather than observed is the defect, not the record of it.",
+  "entry_classes": {
+    "ruling_not_enforced": "A ruling or standing rule is recorded and nothing enforces it. Probe: whatever would be observably true once it is enforced.",
+    "authorisation_not_owned": "Authorised work has no owner. Probe: whether a live task, branch, or backlog record owns the identity.",
+    "ruled_finding_not_met": "A review finding was ruled, a fix was reported APPLIED, and nothing establishes that the ruled criterion is MET. Applied is an action; met is a predicate, and a pipeline only ever knows the action happened. This class is NOT registered here: the captain ruling of 2026-08-10 pins its probe into the decision file firstmate already writes at data/<task-id>/decision-<key>.md, and bin/fm-commitment-register.sh discovers it there. One producer per class, so what firstmate writes and what the register reads cannot drift."
+  },
+  "assurance_tiers": {
+    "executable": "The probe runs directly and its result is the answer.",
+    "cited-control": "The probe confirms a named test exists and passes NOW, while the watched-it-fail observation is cited as a named artifact rather than a claim. This is the DEFAULT, because it is the strongest routinely achievable form. control is a NAME, as the ruling pins it: the register surfaces it and marks it when it also resolves on disk, and deliberately does not gate on resolution, because a legitimate citation need not be a path. What no mechanism can confirm is that the cited artifact records a real red observation - that is why the tier is \"cited\" rather than \"verified\".",
+    "attested": "For a criterion that genuinely cannot execute, such as a comment being accurate. This tier exists because forcing a probe where none is possible would recreate the same failure one level up. It is always MARKED and VISIBLE and never read as verified: an attested entry never reaches SATISFIED."
+  },
+  "not_a_replacement_for_diligence": "Every instance this register was built from was caught by a worker re-checking its own work. The probe is a floor beneath that diligence, never a substitute for it, and nothing here licenses skipping a self-check because an entry is green.",
+  "required": {
+    "commitment_schema_version": "must equal this file's commitment_schema_version",
+    "id": "stable slug, unique across the tracked register and the home overlay; must match the file basename",
+    "recorded": "one sentence: what was committed",
+    "authority": "where the authoritative record lives - a ruling file, a captain authorisation, a decision hold, a config exception",
+    "unmet_state": "the label to report while the criterion is not established (RULED-NOT-ENFORCED, AUTHORISED-NOT-OWNED, RULED-NOT-MET, ...)",
+    "satisfied_when": "one sentence: what a probe PASS means, so a reader can judge whether the probe actually answers the commitment",
+    "assurance": "one of assurance_tiers"
+  },
+  "required_by_assurance": {
+    "executable": [
+      "probe"
+    ],
+    "cited-control": [
+      "probe",
+      "control"
+    ],
+    "attested": [
+      "reason"
+    ]
+  },
+  "forbidden_by_assurance": {
+    "attested": [
+      "probe"
+    ]
+  },
+  "optional": {
+    "probe": "one probe object; see probe_kinds",
+    "control": "name of the test or artifact watched to fail first, as the 2026-08-10 ruling pins it. Required by cited-control. Surfaced, and marked when it also resolves on disk.",
+    "reason": "why no probe is possible. Required by attested, and never treated as verification.",
+    "deadline": "ISO date (YYYY-MM-DD). An entry still unmet after it is reported overdue. It never turns an unmet entry into a met one, and it never suppresses one.",
+    "note": "free prose for a reader; never consumed"
+  },
+  "refused_keys": [
+    "state",
+    "status",
+    "current_state",
+    "derived_state",
+    "satisfied",
+    "enforced",
+    "verdict",
+    "result",
+    "applied"
+  ],
+  "refused_keys_why": "A hand-written status word must not be able to satisfy an entry. The interpreter refuses an entry carrying any of these keys outright rather than ignoring them, because an ignored field still reads to a human as the answer. \"applied\" is refused for the same reason it is the name of this failure: applying a fix is an action, and an action is not the predicate.",
+  "probe_kinds": {
+    "launch_permission_enforced": {
+      "args": {},
+      "pass_when": "every harness bin/fm-launch-lib.sh can launch composes a session whose permission enforcement is active",
+      "fail_when": "at least one harness composes a session with permission enforcement disabled",
+      "could_not_observe_when": "no harness is unrestricted but at least one posture is unknown, or the launch library cannot be read"
+    },
+    "command_answers": {
+      "args": {
+        "command": "path relative to the firstmate code root",
+        "args": "optional array of literal arguments; never a shell string"
+      },
+      "pass_when": "the command exists, is executable, exits 0, and prints something",
+      "fail_when": "the command is absent, is not executable, or exits non-zero - an owner that does not exist is observed, not unobservable",
+      "could_not_observe_when": "the command exits 0 printing nothing, or is stopped by the probe timeout"
+    },
+    "test_passes": {
+      "args": {
+        "test": "path to the test, relative to the code root",
+        "args": "optional array of literal arguments"
+      },
+      "pass_when": "the named test exists and passes now",
+      "fail_when": "the named test is absent or fails - a ruled criterion whose test does not exist was never established",
+      "could_not_observe_when": "the test is stopped by the probe timeout, or no timeout tool is available to bound it"
+    },
+    "symbol_called": {
+      "args": {
+        "symbol": "shell function name",
+        "defined_in": "path relative to the code root that defines it"
+      },
+      "pass_when": "at least one file under bin/ other than defined_in references the symbol",
+      "fail_when": "no file under bin/ other than defined_in references it - a guard with no runtime caller",
+      "could_not_observe_when": "defined_in or bin/ cannot be read, so a definition cannot be told from a call"
+    },
+    "work_owned": {
+      "args": {
+        "work_id": "the work identity the authorisation would be dispatched under"
+      },
+      "pass_when": "a live task record, a local fm/<work_id> branch, or a backlog record that is in flight or done owns the identity",
+      "fail_when": "every consulted source answered, and none of them owns it",
+      "could_not_observe_when": "a source that could have owned it could not answer - no readable backlog backend, or no git"
+    }
+  },
+  "derived_never_written": {
+    "state": "SATISFIED | UNMET | UNOBSERVED - computed on every read, never stored",
+    "SATISFIED": "the probe passed. The entry retires: it stops being surfaced, with no hand edit.",
+    "UNMET": "the probe reached a verdict and the commitment is not real yet. Surfaced at every session start.",
+    "UNOBSERVED": "the probe did not reach a verdict, the entry is inadmissible, or the entry is attested rather than probed. Surfaced at every session start, and never read as enforced."
+  },
+  "assurance_tiers_owner": "data/captain-rulings-2026-08-10/ruled-criterion-must-carry-a-probe.md pins these three tier names and the decision-file block format. They are restated here only as the enum this register validates against."
+}

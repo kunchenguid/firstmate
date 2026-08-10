@@ -176,6 +176,19 @@ Fleet-local operational facts and gotchas live locally in `data/learnings.md`; i
 The file is created lazily on first learning and follows the internal [`stow` skill's](../.agents/skills/stow/SKILL.md) aging-tier and cold-archive contract: inspect the current file first and curate it instead of appending forever.
 There is no shared learnings file by captain decision.
 
+## Home-private commitments (data/commitments/)
+
+The tracked `commitments/` registry holds commitments about firstmate's own shared code and ships to every home.
+`data/commitments/` is an optional, gitignored overlay for commitments that are private to one home - a captain authorisation, a local exception - which must not reach a shared template repo.
+Entries use the same field contract, validated against the tracked `commitments/schema.json`, and an id must be unique across the two sources.
+
+The two sources differ deliberately in what their absence means.
+An absent tracked registry is could-not-observe and is reported, because that directory ships with `bin/`, so a missing one means the register itself is not working.
+An absent overlay is silent, because most homes have no private commitments.
+
+`bin/fm-commitment-register.sh` is the only interpreter, and its header and `--help` own the mechanics.
+Every state it prints is computed from that entry's probe on the spot and is never stored, so an entry retires by itself when its commitment becomes real, and no hand-written status word can satisfy one.
+
 ## Startup memory budget (config/startup-memory-budget)
 
 `config/startup-memory-budget` is the primary-authoritative per-home allowance for the startup prompt-memory surface: `data/captain.md`, `data/captain-shared.md`, and `data/learnings.md` together.

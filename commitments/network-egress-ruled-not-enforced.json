@@ -1,0 +1,13 @@
+{
+  "commitment_schema_version": 1,
+  "id": "network-egress-ruled-not-enforced",
+  "recorded": "A bound agent receives no unrestricted or raw network egress; network is a typed capability the agent may request, Runtime decides, and the capability host enforces.",
+  "authority": "data/captain-rulings-2026-08-06/capability-host-network-egress.md (captain ruling, 2026-08-06)",
+  "unmet_state": "RULED-NOT-ENFORCED",
+  "satisfied_when": "Every harness firstmate can launch composes a session whose permission enforcement is active, so a launched agent no longer holds unrestricted egress by construction.",
+  "assurance": "executable",
+  "probe": {
+    "kind": "launch_permission_enforced"
+  },
+  "note": "The ruling has two halves and only one of them has landed code to probe today. This entry probes the landed half: every worker launches with permission enforcement disabled, so the prohibition is recorded and not enforced. The other half - the capability catalog's network.request row carrying no owner and no verifier - has no landed artifact to observe, because that catalog exists as a proposal in data/cfvc-harness-and-capability/report.md section 6.3 rather than as tracked code. Naming a not-yet-decided owner path here would produce a probe that can never pass on its own, which is the hand-maintained register this mechanism exists to replace. Closing the gap is staged separately and this entry authorises none of it: retiring a bypass flag before bindings and adapters are proven would disarm every lane and enforce nothing."
+}

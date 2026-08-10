@@ -1,0 +1,14 @@
+{
+  "commitment_schema_version": 1,
+  "id": "network-egress-enforcement-staged-work",
+  "recorded": "The captain authorised closing the network-egress enforcement gap in stages once the gap itself was made visible, so the authorisation is owed an owner rather than a note.",
+  "authority": "captain authorisation 2026-08-10 (\"make the gap visible now, close it in stages\"), staged under work identity network-egress-enforcement-visible-then-staged",
+  "unmet_state": "AUTHORISED-NOT-OWNED",
+  "satisfied_when": "A live task record, a local branch, or a backlog record that is in flight or done owns the identity network-egress-enforcement-visible-then-staged.",
+  "assurance": "executable",
+  "probe": {
+    "kind": "work_owned",
+    "work_id": "network-egress-enforcement-visible-then-staged"
+  },
+  "note": "An authorisation is a commitment like any other, and an unowned one decays into prose exactly the way a dated exception does. This entry deliberately probes ownership rather than completion: it retires the moment the staged work is picked up, and the work's own completion is then owned by network-egress-ruled-not-enforced, whose probe answers whether enforcement actually became real."
+}

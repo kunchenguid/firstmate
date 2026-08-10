@@ -43,6 +43,17 @@ export FM_GATE_REFUSE_BYPASS=1
 # Same hermeticity discipline as pinning PATH: the tests decide the inputs.
 export NM_HOME="${TMPDIR:-/tmp}/fm-test-absent-nm-home"
 
+# Point every suite's session-start commitment read (bootstrap's COMMITMENT
+# check) at an EMPTY register, for the same reason and by the same discipline:
+# whether the shipped register currently carries an unmet commitment must not leak
+# into a suite that asserts exact bootstrap output. It is an empty register rather
+# than an absent one on purpose - an absent register is could-not-observe and
+# prints, which is the behavior tests/fm-commitment-register.test.sh owns. Cases
+# that exercise the register set FM_COMMITMENT_DIR per invocation, which wins.
+FM_TEST_EMPTY_COMMITMENT_DIR="${TMPDIR:-/tmp}/fm-test-empty-commitment-register"
+mkdir -p "$FM_TEST_EMPTY_COMMITMENT_DIR" 2>/dev/null || true
+export FM_COMMITMENT_DIR="$FM_TEST_EMPTY_COMMITMENT_DIR"
+
 # Resolve the repo root from this library's own location. Consumed by sourcing
 # test files, not by this library, so it reads as "unused" here.
 # shellcheck disable=SC2034

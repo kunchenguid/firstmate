@@ -33,6 +33,34 @@ The concise standing authority boundary remains always loaded in `AGENTS.md` sec
 The implementation worker never decides or answers its own ask-user finding.
 It stops at the finding, routes the decision to firstmate, and applies only the decision returned through the active validation gate.
 
+## A decision that directs a fix must carry a probe
+
+Captain ruling, 2026-08-10.
+Four times in one day a ruled criterion was reported APPLIED while not being MET, every one caught by a worker re-checking its own work rather than by any mechanism, and firstmate had made the criterion explicit in writing before the fourth.
+Applied is an action the pipeline observes; met is a predicate nobody was evaluating, so the ruling and the fix were never bound together.
+
+Every `data/<task-id>/decision-<key>.md` you write that directs a fix carries exactly one fenced `probe` block, in this pinned format:
+
+````
+```probe
+tier: executable | cited-control | attested
+run: <command, run from the task worktree; exit 0 means the criterion is met>
+control: <name of the test or artifact that was watched to fail first>
+reason: <required for tier attested only - why no probe is possible>
+```
+````
+
+`run` is required for `executable` and `cited-control`; `control` is required for `cited-control`; `reason` is required for `attested`, which carries no `run`.
+Exit 0 means met, non-zero means not met, and a probe that cannot execute is could-not-observe and never a pass.
+
+Choose `cited-control` by default: it is the strongest routinely achievable form, confirming the named test passes now while citing the watched-it-fail observation as a named artifact rather than as a claim.
+Use `attested` only where the criterion genuinely cannot execute, such as a comment reading accurately; that tier stays marked and visible and is never read as verified.
+Forcing a probe where none is possible would manufacture a fake one and recreate this same failure one level up.
+
+`bin/fm-commitment-register.sh` reads these blocks, and `bin/fm-classify-lib.sh`'s open-decision fold consults it, so a `resolved` event for a key with a registered probe is not accepted as resolved until that probe passes.
+Do not back-fill a decision ruled before 2026-08-10 with an invented probe: it correctly reads could-not-observe, on the same principle that forbids back-filling historical verifier identities, because a fabricated record is indistinguishable from a real one afterwards.
+None of this replaces a worker re-checking its own work; the probe is a floor beneath that diligence, never a substitute for it.
+
 ## Captain-facing escalation
 
 State all five of these elements in one concise, evidence-first escalation:

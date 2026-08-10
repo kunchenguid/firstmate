@@ -118,6 +118,40 @@ shell_quote() {
 # Pi's first-run project trust dialog (SKILL.md:286) is folder trust, not a
 # permission prompt, and is a separate concern that neither satisfies nor softens
 # this obligation.
+#
+# launch_permission_posture publishes that same list as a value a caller can act
+# on, so the obligation above stops being prose only. It exists because a
+# commitment about the permission posture of launched agents needs a probe that
+# reads THIS file's own decision rather than grepping for a vendor flag string:
+# a grep would go quietly vacuous the day an adapter renames its flag, which is
+# the exact shape of failure the commitment register was built to refuse.
+# It is not a harness-dependent check in the sense the firstmate-coding-guidelines
+# skill governs: it reports a posture this repo chose and encoded in the
+# templates below, and reads no vendor process, output, or rendered surface.
+launch_permission_posture() {  # [<harness>] -> "<posture>" | "<harness> <posture>" lines
+  local harness=${1:-}
+  if [ -z "$harness" ]; then
+    local h
+    for h in claude codex opencode pi pi-signed grok kimi; do
+      printf '%s %s\n' "$h" "$(launch_permission_posture "$h")"
+    done
+    return 0
+  fi
+  case "$harness" in
+    # The four explicit bypasses and the two structurally-autonomous pi arms,
+    # exactly as the CONSUMER OBLIGATION above enumerates them.
+    claude|codex|opencode|grok|pi|pi-signed) printf 'unrestricted' ;;
+    # kimi is deliberately NOT called enforced. The obligation above accounts for
+    # six adapters and kimi is not one of them: no record in this repo or in
+    # .agents/skills/harness-adapters/SKILL.md states what `--auto` does to kimi's
+    # permission gate. Unknown is the honest third value, and it must never be
+    # narrowed into "enforced" - an unverified posture reading as protection is
+    # the failure this function was added to make impossible.
+    kimi) printf 'unknown' ;;
+    *) return 1 ;;
+  esac
+}
+
 launch_template() {
   local harness=$1 kind=${2:-ship}
   # shellcheck disable=SC2016  # single quotes are deliberate: $(cat ...) expands in the crewmate pane, not here
