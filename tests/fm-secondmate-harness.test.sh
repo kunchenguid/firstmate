@@ -263,6 +263,15 @@ SH
   got=$(FM_TEST_OMP_SHAPE=omp CLAUDECODE=1 PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-harness.sh")
   [ "$got" = omp ] \
     || fail "exact Bun/OMP ancestry under an inherited Claude marker selected '$got', expected omp"
+  got=$(FM_PI_HARNESS=pi FM_PRIMARY_HARNESS=omp PI_CODING_AGENT=true PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-harness.sh")
+  [ "$got" = omp ] \
+    || fail "explicit OMP primary authority under an inherited Pi marker selected '$got', expected omp"
+  got=$(FM_PI_HARNESS=pi-signed FM_PRIMARY_HARNESS=pi-signed OMPCODE=1 PI_CODING_AGENT=true PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-harness.sh")
+  [ "$got" = pi-signed ] \
+    || fail "explicit pi-signed primary authority under an OMP marker selected '$got', expected pi-signed"
+  got=$(FM_PI_HARNESS=pi-signed OMPCODE=1 PI_CODING_AGENT=true PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-harness.sh")
+  [ "$got" = pi-signed ] \
+    || fail "Pi's family marker under an OMP marker selected '$got', expected pi-signed"
   got=$(FM_TEST_OMP_SHAPE=unrelated CLAUDECODE=1 PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-harness.sh")
   [ "$got" = claude ] \
     || fail "an unrelated Bun process suppressed the verified Claude marker, got '$got'"
