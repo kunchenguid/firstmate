@@ -86,10 +86,7 @@ fm_control_harness_family() {  # <recorded-harness>
     grok*) printf 'grok' ;;
     kimi*) printf 'kimi' ;;
     muse*) printf 'muse' ;;
-    # cursor-agent is the binary basename a raw launch records; cursor* covers
-    # both the verified adapter id and that basename without matching unrelated
-    # "cursor" IDE helpers that are not this CLI.
-    cursor*) printf 'cursor' ;;
+    cursor|cursor-agent) printf 'cursor' ;;
     *) return 1 ;;
   esac
 }

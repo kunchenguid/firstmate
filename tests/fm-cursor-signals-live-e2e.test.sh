@@ -5,7 +5,7 @@
 # Ctrl+C interrupt, /exit, project stop-hook turn-end, and busy-hook open/close.
 #
 # Usage: FM_CURSOR_SIGNALS_LIVE=1 bin/fm-test-run.sh tests/fm-cursor-signals-live-e2e.test.sh
-# Skips (exit 0) when the env gate is unset or cursor-agent is absent.
+# Skips (exit 0) when the env gate is unset.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -17,8 +17,7 @@ if [ "${FM_CURSOR_SIGNALS_LIVE:-}" != 1 ]; then
 fi
 
 if ! command -v cursor-agent >/dev/null 2>&1; then
-  echo "skip: cursor-agent not installed"
-  exit 0
+  fail "cursor-agent not installed; live cursor verification checked nothing"
 fi
 
 if ! command -v tmux >/dev/null 2>&1; then

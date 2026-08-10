@@ -39,6 +39,7 @@ case "${1:-}" in
     for arg in "$@"; do
       if [ "$prev" = -l ]; then
         printf '%s\n' "$arg" >> "$FM_FAKE_LAUNCH_LOG"
+        bash -c "$arg"
         break
       fi
       prev=$arg
@@ -52,6 +53,8 @@ SH
   cat > "$fakebin/cursor-agent" <<'SH'
 #!/usr/bin/env bash
 set -u
+printf 'arg=%s\n' "$@" >> "$FM_FAKE_CURSOR_ARGS_LOG"
+printf 'cursor_agent=%s\n' "${CURSOR_AGENT:-}" >> "$FM_FAKE_CURSOR_ARGS_LOG"
 exit 0
 SH
   chmod +x "$fakebin/cursor-agent"
@@ -82,6 +85,7 @@ run_cursor_spawn() {  # <home> <proj> <wt> <fakebin> <id> [extra args...]
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
     FM_FAKE_LAUNCH_LOG="$home/launch.log" \
+    FM_FAKE_CURSOR_ARGS_LOG="$home/cursor-agent.log" \
     PATH="$fakebin:$PATH" \
     "$SPAWN" "$id" "$proj" cursor "$@" 2>&1
 }
@@ -131,7 +135,7 @@ test_detection_is_anchored() {
 }
 
 test_spawn_launch_shape() {
-  local rec case_dir home proj wt fakebin id out status launch trusted
+  local rec case_dir home proj wt fakebin id out status trusted
   rec=$(make_spawn_case launch)
   IFS='|' read -r case_dir home proj wt fakebin id <<EOF
 $rec
@@ -142,14 +146,15 @@ EOF
   expect_code 0 "$status" "cursor spawn should succeed: $out"
   assert_contains "$out" "spawned $id harness=cursor" "cursor spawn did not report success"
 
-  launch=$(cat "$home/launch.log")
-  assert_contains "$launch" ' --yolo ' "cursor launch omitted --yolo"
-  assert_contains "$launch" ' --trust ' "cursor launch omitted --trust"
-  assert_contains "$launch" "--model 'composer-2.5-fast'" "cursor launch omitted --model"
-  assert_not_contains "$launch" '--effort' "cursor launch passed a standalone --effort flag"
-  assert_not_contains "$launch" 'reasoning-effort' "cursor launch passed a reasoning-effort flag"
-  assert_contains "$launch" 'encode launch-brief' "cursor launch did not deliver the brief positionally"
-  assert_contains "$launch" 'env -u CLAUDECODE' "cursor launch did not clear foreign CLAUDECODE"
+  python3 - "$home/cursor-agent.log" <<'PY' || fail "fake cursor-agent did not observe the expected launch contract"
+import sys
+args = open(sys.argv[1]).read().splitlines()
+for item in ("arg=--yolo", "arg=--trust", "arg=--model", "arg=composer-2.5-fast"):
+    assert item in args, (item, args)
+assert any(item.startswith("arg=\u2063FIRSTMATE_OP: v1 launch-brief:") for item in args), args
+assert "arg=--effort" not in args, args
+assert "arg=reasoning-effort" not in args, args
+PY
   assert_grep 'harness=cursor' "$home/state/$id.meta" "cursor harness was not recorded in meta"
   assert_grep 'effort=low' "$home/state/$id.meta" "requested effort was not retained in meta"
   assert_grep 'model=composer-2.5-fast' "$home/state/$id.meta" "model was not recorded in meta"
@@ -158,10 +163,15 @@ EOF
   assert_present "$wt/.cursor/hooks/fm-busy-turnend.sh" "cursor spawn did not write busy/turnend hook"
   [ -x "$wt/.cursor/hooks/fm-busy-turnend.sh" ] \
     || fail "cursor busy/turnend hook must be executable"
-  assert_grep 'beforeSubmitPrompt' "$wt/.cursor/hooks.json" \
-    "hooks.json missing beforeSubmitPrompt"
-  assert_grep 'idle-stop' "$wt/.cursor/hooks.json" "hooks.json missing stop handler"
-  assert_grep 'sessionEnd' "$wt/.cursor/hooks.json" "hooks.json missing sessionEnd"
+  python3 - "$wt/.cursor/hooks.json" <<'PY' || fail "cursor hooks JSON does not expose the required events"
+import json, sys
+hooks = json.load(open(sys.argv[1]))["hooks"]
+assert hooks["beforeSubmitPrompt"], hooks
+assert hooks["stop"], hooks
+assert hooks["sessionEnd"], hooks
+assert hooks["stop"][0]["command"].endswith("fm-busy-turnend.sh idle-stop"), hooks
+assert hooks["sessionEnd"][0]["command"].endswith("fm-busy-turnend.sh idle-session-end"), hooks
+PY
 
   trusted=$(fm_busy_sources_for_harness cursor)
   case " $trusted " in
@@ -210,6 +220,22 @@ test_control_tables() {
   pass "cursor control-plane interrupt/exit tables"
 }
 
+test_cursor_composer_placeholder_requires_cursor_glyph() {
+  # shellcheck source=bin/fm-tmux-lib.sh
+  . "$ROOT/bin/fm-tmux-lib.sh"
+  [ "$(fm_tmux_composer_row_state '│ Add a follow-up │' 1 0)" = pending ] \
+    || fail "ordinary Add a follow-up text was treated as an empty composer"
+  [ "$(fm_tmux_composer_row_state '→' 0 0)" = empty ] \
+    || fail "cursor's empty prompt glyph was not recognized"
+  pass "cursor placeholder classification requires the prompt glyph"
+}
+
+test_cursor_family_is_exact() {
+  [ "$(fm_control_harness_family cursor-ide 2>/dev/null || true)" != cursor ] \
+    || fail "unverified cursor-ide basename was accepted as cursor"
+  pass "cursor control-plane family matching is exact"
+}
+
 test_tmux_classifies_cursor_agent_only() {
   # Exercise the classifier through fm-backend.sh's source path rather than
   # sourcing backends/tmux.sh directly (that file requires FM_BACKEND_LIB_DIR).
@@ -233,4 +259,6 @@ test_detection_is_anchored
 test_spawn_launch_shape
 test_spawn_refuses_secondmate
 test_control_tables
+test_cursor_family_is_exact
+test_cursor_composer_placeholder_requires_cursor_glyph
 test_tmux_classifies_cursor_agent_only
