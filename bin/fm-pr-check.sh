@@ -5,6 +5,10 @@
 # live only in a private sidecar and are never interpolated into shell source.
 # A GitHub pull request URL and a GitLab merge request URL are both accepted,
 # including a merge request on a self-hosted GitLab instance.
+# Publishing replaces whatever state check the task already had. When that was
+# an artifact wake from bin/fm-await-artifact.sh that had not fired yet, it
+# prints "replaced: unfired artifact wake state/<id>.check.sh" before "armed:"
+# so the retired wake is named rather than silently lost.
 # Usage: fm-pr-check.sh <task-id> <pr-url>
 set -eu
 
