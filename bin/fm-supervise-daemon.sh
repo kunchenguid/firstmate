@@ -475,14 +475,14 @@ refill_fingerprint() {  # <heartbeat payload> -> producer's complete refill iden
 # directory temporary then rename, so a crash leaves either the prior record or
 # a complete successor. Invalid, future-dated, or stale records fail open.
 refill_dedupe_read() {  # <state> -> REFILL_DEDUPE_FINGERPRINT/TIMESTAMP
-  local state=$1 file version fingerprint timestamp extra stored_hash
+  local state=$1 file version fingerprint timestamp stored_hash
   file="$state/.subsuper-refill-escalation"
   [ -r "$file" ] || return 1
   {
     IFS= read -r version || return 1
     IFS= read -r fingerprint || return 1
     IFS= read -r timestamp || return 1
-    IFS= read -r extra && return 1
+    IFS= read -r && return 1
   } < "$file"
   [ "$version" = v2 ] || return 1
   case "$fingerprint" in sha256=*) ;; *) return 1 ;; esac

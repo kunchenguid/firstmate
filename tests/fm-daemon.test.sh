@@ -89,6 +89,7 @@ test_daemon_singleton_serializes_concurrent_cycles() {
     printf '╭─────╮\n│ >   │\n╰─────╯\n' > "$dir/pane.txt"
 
     first_pid=
+    # shellcheck disable=SC2329  # Invoked indirectly by the EXIT trap below.
     cleanup_concurrent_daemon() {
       [ -z "$first_pid" ] || ! kill -0 "$first_pid" 2>/dev/null \
         || { kill "$first_pid" 2>/dev/null || true; wait "$first_pid" 2>/dev/null || true; }
