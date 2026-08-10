@@ -382,3 +382,19 @@ jobs:
             printf '%s\n' "$tracked"
             exit 1
           fi
+      - name: AGENTS.md must stay under its size budget
+        run: |
+          set -eu
+          # AGENTS.md is loaded in full by every session of every fleet member,
+          # so its byte cost is paid unconditionally, unlike a skill that only
+          # the sessions that load it pay for. This ceiling is CI-enforced
+          # because the advisory size discipline in
+          # .agents/skills/firstmate-coding-guidelines lost 66-to-10 to inline
+          # growth over three cycles. Raising it is a deliberate decision, not a
+          # routine fix for a failing build - see that skill's "Size budget".
+          ceiling=56000
+          bytes=$(wc -c < AGENTS.md)
+          if [ "$bytes" -gt "$ceiling" ]; then
+            echo "::error::AGENTS.md is $bytes bytes, over the $ceiling-byte budget. Do not raise the ceiling to make this pass. Route conditional, reference, or schema detail to its owning skill or doc and leave a one-line trigger inline - see the knowledge-placement decision tree in .agents/skills/firstmate-coding-guidelines/SKILL.md."
+            exit 1
+          fi

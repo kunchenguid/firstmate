@@ -63,6 +63,12 @@ If an addition needs more than a few lines of conditional detail (detail that ma
 A skill's cost is paid only by the sessions that actually load it.
 When in doubt, write the fact into the skill or doc first by patching that owner's existing language, and add only the one-line trigger to `AGENTS.md`.
 
+### Size budget
+
+The `AGENTS.md` ceiling is now CI-enforced: the `invariants` job in `.github/workflows/ci.yml` fails when `wc -c AGENTS.md` exceeds a single literal byte number, and that number and the reason it exists live in a comment right beside it.
+The build failing on this budget is the signal to apply the decision tree above, not to raise the number.
+Raising the ceiling is a deliberate decision the reviewer must weigh, never a routine fix for a red build; make the case that the addition genuinely belongs inline first.
+
 ## Trigger hygiene
 
 A new skill is dead weight if nothing loads it.
