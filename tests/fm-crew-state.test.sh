@@ -13,6 +13,10 @@
 #   (b) needs-decision/blocked log + resumed run = SUPERSEDED     -> run-step
 #   (c) genuine parked run + needs-decision log = NOT superseded  -> run-step
 #   (d) terminal run-step (passed/failed) is authoritative        -> run-step
+#   (d2) a step killed by the provider quota limit is told apart from a genuine
+#       failure, and names its reset time; every ambiguous kill signal (bare
+#       exit 1, bare SIGTERM, transient rate limits, deliberate cancellation)
+#       still fails loudly
 #   (e) cross-branch attribution: this branch's own run found via list lookup
 #   (f) no run + semantic busy                                    -> pane
 #   (g) no run + semantic idle falls to the status-log verb       -> status-log
@@ -71,7 +75,16 @@ case "${1:-}" in
         if [ "${1:-}" = --run ]; then printf '%s\n' "${FM_FAKE_AXI_STATUS_RUN:-}"
         else printf '%s\n' "${FM_FAKE_AXI_STATUS:-}"; fi ;;
       logs)
-        printf '%s\n' "${FM_FAKE_CI_LOGS:-}" ;;
+        shift
+        nm_step=""
+        while [ $# -gt 0 ]; do
+          case "$1" in
+            --step) nm_step="${2:-}"; shift 2 || shift ;;
+            *) shift ;;
+          esac
+        done
+        if [ "$nm_step" = ci ]; then printf '%s\n' "${FM_FAKE_CI_LOGS:-}"
+        else printf '%s\n' "${FM_FAKE_STEP_LOGS:-}"; fi ;;
     esac
     ;;
   runs)
@@ -170,8 +183,9 @@ reset_fakes() {
   FM_FAKE_HERDR_MISSING=0
   FM_FAKE_HERDR_AGENT_STATUS=""
   FM_FAKE_CI_LOGS=""
+  FM_FAKE_STEP_LOGS=""
   export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING
-  export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS
+  export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS FM_FAKE_STEP_LOGS
 }
 
 # --- run-object fixtures (TOON, as `no-mistakes axi status` emits) -----------
@@ -288,6 +302,42 @@ run:
   pr: ""
   findings: none
 outcome: failed
+EOF
+}
+
+# A failed run whose steps table names which step failed - the shape the quota-
+# kill classifier reads before consulting that step's own log.
+run_failed_at_step() {  # <branch> <failed-step>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: completed
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: ""
+  findings: none
+  steps[3]{step,status,findings,duration_ms}:
+    intent,completed,0,0
+    review,completed,0,0
+    $2,failed,0,0
+outcome: failed
+EOF
+}
+
+# Same shape, but the run was deliberately cancelled rather than failing.
+run_cancelled_at_step() {  # <branch> <step>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: completed
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: ""
+  findings: none
+  steps[2]{step,status,findings,duration_ms}:
+    intent,completed,0,0
+    $2,failed,0,0
+outcome: cancelled
 EOF
 }
 
@@ -682,6 +732,124 @@ test_terminal_failed() {
   assert_contains "$out" "state: failed" "failed run -> failed"
   assert_contains "$out" "source: run-step" "failed -> run-step source"
   pass "terminal failed run is authoritative"
+}
+
+# (d2) provider quota kill vs genuine failure.
+#
+# Measured 2026-08-09 (data/fm-quota-burn/report.md section 3): a step agent
+# killed by the account's session/weekly limit exits 1 with EMPTY stderr, so
+# no-mistakes records a bare `claude exited: exit status 1:` and marks the step
+# failed - identical, from `axi status`, to a step that failed on a real defect.
+# The only distinguishing evidence is the provider's banner in that step's log.
+# These four cases pin both directions: the banner reclassifies, and every
+# ambiguous kill signal keeps failing loudly.
+
+# The exact step-log shape from the report's test.log evidence.
+quota_killed_step_log() {  # [reset-phrase]
+  cat <<EOF
+no test command configured, asking agent to run tests...
+claude started pid=22552
+I'll start by understanding the change and the repo state.
+You've hit your session limit${1:+ · resets $1}
+claude exited pid=22552 error=claude exited: exit status 1:
+error: agent run tests: claude exited: exit status 1:
+EOF
+}
+
+test_quota_killed_step_is_distinguished_from_failure() {
+  reset_fakes
+  local d; d=$(new_case quotakill)
+  make_repo_on_branch "$d/wt" fm/feat-quota
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-quota.meta" "window=fm:fm-feat-quota" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_failed_at_step fm/feat-quota test)"
+  FM_FAKE_STEP_LOGS="$(quota_killed_step_log "7:40pm (Europe/Paris)")"
+  local out; out=$(run_crew_state "$d" feat-quota)
+  assert_contains "$out" "state: blocked" "quota-killed step must not read as a plain failure"
+  assert_contains "$out" "source: run-step" "quota kill stays run-step sourced"
+  assert_contains "$out" "quota limit" "quota kill must name the quota limit"
+  assert_contains "$out" "during test" "quota kill must name the step that was killed"
+  assert_contains "$out" "resets 7:40pm (Europe/Paris)" "quota kill must surface the reset time"
+  assert_not_contains "$out" "state: failed" "quota kill is not a genuine failure"
+  pass "quota-killed step is distinguished from a genuine failure, with its reset time"
+}
+
+test_quota_kill_without_reset_time_still_classified() {
+  reset_fakes
+  local d; d=$(new_case quotakillnoreset)
+  make_repo_on_branch "$d/wt" fm/feat-quota2
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-quota2.meta" "window=fm:fm-feat-quota2" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_failed_at_step fm/feat-quota2 review)"
+  # Banner present, but this one carries no "resets ..." clause.
+  FM_FAKE_STEP_LOGS="$(quota_killed_step_log)"
+  local out; out=$(run_crew_state "$d" feat-quota2)
+  assert_contains "$out" "state: blocked" "a banner with no reset time is still a quota kill"
+  assert_contains "$out" "during review" "names the killed step"
+  assert_contains "$out" "no reset time reported" "says plainly that no reset time was reported"
+  pass "quota kill without a reset time is still classified, and says so"
+}
+
+# Requirement: do not weaken any other failure path. A step that failed with the
+# same bare exit-1 signature but NO provider banner is a genuine defect and must
+# keep failing loudly. Exit 143/SIGTERM is deliberately included here: a
+# deliberate abort and the daemon's run-worktree reaping produce the same code,
+# so on its own it is ambiguous and must never be read as a quota park.
+test_genuine_failure_still_fails() {
+  reset_fakes
+  local d out; d=$(new_case genuinefail)
+  make_repo_on_branch "$d/wt" fm/feat-genuine
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-genuine.meta" "window=fm:fm-feat-genuine" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_failed_at_step fm/feat-genuine test)"
+
+  FM_FAKE_STEP_LOGS="$(cat <<'EOF'
+running tests...
+claude started pid=31337
+FAIL TestThing (0.01s): expected 3, got 4
+claude exited pid=31337 error=claude exited: exit status 1:
+error: agent run tests: claude exited: exit status 1:
+EOF
+)"
+  out=$(run_crew_state "$d" feat-genuine)
+  assert_contains "$out" "state: failed" "a real defect with no banner must still fail"
+  assert_not_contains "$out" "quota" "a real defect must not be labelled a quota kill"
+
+  # SIGTERM alone - ambiguous, must NOT be absorbed as a quota park.
+  FM_FAKE_STEP_LOGS="$(cat <<'EOF'
+reviewing changes...
+claude started pid=4242
+claude exited pid=4242 error=claude exited: exit status 143:
+error: agent review: claude exited: exit status 143:
+EOF
+)"
+  out=$(run_crew_state "$d" feat-genuine)
+  assert_contains "$out" "state: failed" "bare SIGTERM is ambiguous and must still fail"
+  assert_not_contains "$out" "quota" "bare SIGTERM must not be labelled a quota kill"
+
+  # A transient rate-limit error is retried inside no-mistakes; not a quota park.
+  FM_FAKE_STEP_LOGS='error: agent review: rate_limit_error (429)'
+  out=$(run_crew_state "$d" feat-genuine)
+  assert_contains "$out" "state: failed" "a transient rate_limit_error must still fail"
+  assert_not_contains "$out" "quota" "a transient rate_limit_error is not a quota park"
+  pass "genuine failures, bare SIGTERM, and transient rate limits all still fail loudly"
+}
+
+# Cancellation is deliberate. Even if a banner is sitting in the step log from
+# an earlier attempt, a cancelled run must not be re-read as a quota park.
+test_cancelled_run_is_not_a_quota_kill() {
+  reset_fakes
+  local d; d=$(new_case quotacancelled)
+  make_repo_on_branch "$d/wt" fm/feat-cancel
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cancel.meta" "window=fm:fm-feat-cancel" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_cancelled_at_step fm/feat-cancel test)"
+  FM_FAKE_STEP_LOGS="$(quota_killed_step_log "7:40pm (Europe/Paris)")"
+  local out; out=$(run_crew_state "$d" feat-cancel)
+  assert_contains "$out" "state: failed" "a cancelled run stays failed"
+  assert_contains "$out" "run cancelled" "a cancelled run keeps its cancelled detail"
+  assert_not_contains "$out" "quota" "deliberate cancellation is not a quota kill"
+  pass "deliberate cancellation is never reclassified as a quota kill"
 }
 
 # (e) cross-branch attribution: `axi status` returns ANOTHER branch's run (the
@@ -1329,6 +1497,10 @@ test_top_level_fixing_ci_running_after_green_stays_working
 test_top_level_fixing_done_log_stays_working
 test_terminal_passed
 test_terminal_failed
+test_quota_killed_step_is_distinguished_from_failure
+test_quota_kill_without_reset_time_still_classified
+test_genuine_failure_still_fails
+test_cancelled_run_is_not_a_quota_kill
 test_cross_branch_attribution_via_runs_list
 test_cross_branch_attribution_picks_most_recent_row
 test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status

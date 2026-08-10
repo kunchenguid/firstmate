@@ -35,6 +35,12 @@
 #      checks" from "checks green, waiting on merge" (see nm_ci_checks_state) -
 #      a ci-step log-tail check overrides working -> done once checks read
 #      green, so a green PR is never silently read as still-validating.
+#      A run that reads `failed` gets one further log-tail check: when the
+#      failing step's log carries the provider's own session/weekly limit banner
+#      the agent was killed by quota rather than by a defect, and the state is
+#      reported as `blocked` naming the reset time instead of a bare `failed`
+#      (see the provider quota-kill block below for the deliberately narrow
+#      evidence rule - everything unmatched still reports `failed`).
 #   3. Reconcile the status log: if its last line says needs-decision/blocked but
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
@@ -304,6 +310,96 @@ nm_ci_checks_state() {
     *) printf 'unknown' ;;
   esac
 }
+# --- provider quota-kill classification -------------------------------------
+# Measured 2026-08-09 (data/fm-quota-burn/report.md section 3): when the account
+# hits its provider session/weekly limit, whichever step agents are mid-step get
+# killed. The provider CLI prints its limit banner to STDOUT and exits 1 with an
+# EMPTY stderr, so no-mistakes records a bare `claude exited: exit status 1:` and
+# marks the step failed. From `axi status` alone that is indistinguishable from a
+# step that failed on a real defect, so firstmate could not tell the two apart
+# without a human reading pane output - several stalls went unnoticed for ~20
+# minutes each on 2026-08-09 for exactly that reason.
+#
+# The distinguishing evidence sits in the failed step's own log, one line above
+# the blank error:
+#   You've hit your session limit · resets 7:40pm (Europe/Paris)
+#   You've hit your weekly limit · resets Jul 9 at 9pm (America/Chicago)
+# Read exactly the way nm_ci_checks_state reads the ci step's log tail, and only
+# for a run that ALREADY reads failed, so the hot path costs nothing.
+#
+# SCOPE IS DELIBERATELY NARROW - a false pause would hide a real defect, so only
+# unambiguous evidence reclassifies:
+#   - ONLY the provider's own "hit your <window> limit" banner counts.
+#   - Exit 143/SIGTERM alone does NOT count: a deliberate `axi abort` and the
+#     daemon reaping lingering run-worktree processes (no-mistakes v1.47.0)
+#     produce the same code, so it is ambiguous on its face.
+#   - A bare `exit status 1` with no banner does NOT count - that is precisely
+#     the genuine-failure case this must never swallow.
+#   - `cancelled` runs are excluded: cancellation is deliberate, not a kill.
+#   - Transient `rate_limit_error`/HTTP 429 do NOT count: no-mistakes already
+#     retries those internally; they are not a session-quota exhaustion.
+#   - The coarse runs-list path carries no steps table and no log, so it keeps
+#     reporting plain `failed`.
+# Everything unmatched reports `failed` exactly as before.
+
+# Step names `axi logs --step` accepts (verified against `no-mistakes axi logs
+# --help`, v1.41.2). A parsed step outside this set is never passed to the CLI.
+NM_LOG_STEPS='intent rebase review test document lint push pr ci'
+
+# Name of the first step the run recorded as failed. Empty when the steps table
+# is absent or names no failed step.
+nm_failed_step_name() {
+  local row step
+  row=$(printf '%s\n' "$RUN_OUT" \
+    | grep -E '^[[:space:]]*[a-z]+,[[:space:]]*"?failed"?[[:space:]]*,' | head -1)
+  [ -n "$row" ] || return 0
+  row=$(trim "$row")
+  step=$(strip_quotes "$(trim "${row%%,*}")")
+  case " $NM_LOG_STEPS " in *" $step "*) printf '%s' "$step" ;; esac
+}
+
+# Reset phrase from the LAST provider limit banner in a failed step's log tail
+# (the log is append-only/chronological, so the last match is the operative
+# one). Prints the reset phrase when the banner carries one, the literal
+# `unknown` when a banner is present but reports no reset, and nothing at all
+# when there is no banner - the caller treats "nothing" as a genuine failure.
+nm_quota_reset_phrase() {  # <step>
+  local step=$1 run_id log_tail banner reset
+  run_id=$(strip_quotes "$(nm_field id)")
+  [ -n "$run_id" ] || return 0
+  log_tail=$(nm_run axi logs --step "$step" --run "$run_id") || true
+  [ -n "$log_tail" ] || return 0
+  banner=$(printf '%s\n' "$log_tail" | grep -iE 'hit your [a-z]+ limit' | tail -1)
+  [ -n "$banner" ] || return 0
+  reset=$(printf '%s\n' "$banner" | sed -n 's/.*[Rr]esets[[:space:]]\{1,\}\(.*\)$/\1/p' | head -1)
+  reset=$(trim "$reset")
+  [ -n "$reset" ] || reset=unknown
+  printf '%s' "$reset"
+}
+
+# Reclassify a failed run whose failing step was killed by the provider quota
+# limit. Reports `blocked`, NOT `paused`: the quota window clears on its own,
+# but the RUN does not - it is terminally failed and needs a re-run once quota
+# returns, which is firstmate action (AGENTS.md section 8's blocked-vs-paused
+# rule). Reporting `paused` would tell the watcher to sit quietly on a run that
+# will never resume by itself. Returns 1 (leave `failed` alone) unless the
+# banner is actually there. Mutates RUN_STATE/RUN_DETAIL in the caller's scope.
+maybe_quota_kill() {
+  local step reset
+  [ "$RUN_SOURCE" = full ] || return 1
+  step=$(nm_failed_step_name)
+  [ -n "$step" ] || return 1
+  reset=$(nm_quota_reset_phrase "$step")
+  [ -n "$reset" ] || return 1
+  RUN_STATE=blocked
+  if [ "$reset" = unknown ]; then
+    RUN_DETAIL="provider quota limit hit during $step (no reset time reported): run failed, needs re-run when quota returns"
+  else
+    RUN_DETAIL="provider quota limit hit during $step: resets $reset - run failed, needs re-run when quota returns"
+  fi
+  return 0
+}
+
 # Coarse fallback for cross-branch attribution. `no-mistakes axi status` (bare)
 # reports the active-or-most-recent run for the CURRENT branch when one
 # exists, else falls back to some other branch's run purely as informational
@@ -449,7 +545,7 @@ if [ "$HAVE_RUN" = 1 ]; then
       case "$outcome" in
         passed)        RUN_STATE="done"; RUN_DETAIL="run passed: PR merged/closed" ;;
         checks-passed) RUN_STATE="done"; RUN_DETAIL="checks green: PR ready for review" ;;
-        failed)        RUN_STATE=failed; RUN_DETAIL="run failed" ;;
+        failed)        RUN_STATE=failed; RUN_DETAIL="run failed"; maybe_quota_kill || true ;;
         cancelled)     RUN_STATE=failed; RUN_DETAIL="run cancelled" ;;
         *)             RUN_STATE=unknown; RUN_DETAIL="outcome: $outcome" ;;
       esac
@@ -473,7 +569,7 @@ if [ "$HAVE_RUN" = 1 ]; then
         ci)             RUN_STATE=working; RUN_DETAIL="ci running" ;;
         running|fixing) RUN_STATE=working; RUN_DETAIL="validating ($status)" ;;
         completed)      RUN_STATE="done"; RUN_DETAIL="run completed" ;;
-        failed)         RUN_STATE=failed;  RUN_DETAIL="run failed" ;;
+        failed)         RUN_STATE=failed;  RUN_DETAIL="run failed"; maybe_quota_kill || true ;;
         cancelled)      RUN_STATE=failed;  RUN_DETAIL="run cancelled" ;;
         "")             RUN_STATE=working; RUN_DETAIL="run active" ;;
         *)              RUN_STATE=working; RUN_DETAIL="run active ($status)" ;;
