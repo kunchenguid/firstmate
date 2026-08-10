@@ -74,8 +74,8 @@ PANE=$(grep '^herdr_pane_id=' "$META" | cut -d= -f2-)
 
 lab() { "$ROOT/bin/fm-herdr-lab.sh" run "$SESSION" "$@"; }
 wait_for_output() {
-  local needle=$1 attempt output
-  for attempt in $(seq 1 60); do
+  local needle=$1 output
+  for _ in $(seq 1 60); do
     output=$(lab pane read "$PANE" 2>/dev/null || true)
     if printf '%s' "$output" | grep -F "$needle" >/dev/null 2>&1; then
       return 0
