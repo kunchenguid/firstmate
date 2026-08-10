@@ -32,8 +32,12 @@
 # The landed section merges this home's Done with the canonical snapshot's
 # secondmate_landed roll-up (fm-fleet-snapshot.sh), so merges a secondmate managed -
 # recorded in ITS OWN backlog, never the main one - are visible. It stays bounded by
-# a per-home cap and an overall cap, with omitted[] disclosure of both and of any
-# secondmate home whose backlog was unreadable; no GitHub/network call is involved.
+# a per-home cap and an overall cap, with omitted[] disclosure of both; no
+# GitHub/network call is involved. Any registered secondmate whose own structured
+# home state could not be read - a missing home directory, an unusable one, or an
+# unreadable backlog - contributes nothing to landed, gates, and decisions, so
+# omitted[] names those homes and their reason instead of leaving the absence to
+# look like an empty baseline.
 # The default landed baseline is balanced across homes: each home keeps its internal
 # newest-first ordering, homes iterate in deterministic id order, sparse homes do not
 # waste capacity, and --all-landed switches back to the complete global newest-first
@@ -428,6 +432,9 @@ MODEL=$(printf '%s' "$SNAP" | jq \
           provenance:.provenance.selected,freshness:.freshness.status,
           age_seconds:.freshness.age_seconds,contradiction:(.contradiction // false),
           reason:(.current.reason // "-")} ]) as $secondmates_all
+  | ([ (.secondmate_current.records // [])[]
+       | select(.provenance.selected != "structured-home")
+       | {id, reason:((.current.reason // "state unavailable") | trunc(60))} ]) as $mates_unavailable
   | ([ .tasks[]
        | select(.kind != "secondmate")
        | select(.backlog.current_role != "program")
@@ -513,7 +520,12 @@ MODEL=$(printf '%s' "$SNAP" | jq \
         (if $all_queued == 1 then empty else {surface:"superseded queued items", reveal:"--all-queued"} end),
         (if $all_landed == 0 and ($per_home_capped | length) > ($done | length) then {surface:("landed showing \($done | length) of \($per_home_capped | length)" + (($done | map(.home_id) | unique | map(select(. != "(main)")) | length) as $k | if $k > 0 then " (incl. \($k) secondmate home(s))" else "" end)), reveal:"--all-landed"} else empty end),
         (if $all_landed == 0 and $home_cap_dropped > 0 then {surface:("landed per-home capped at \($landed_per_home_n) for \($home_cap_dropped) home(s)"), reveal:"--all-landed"} else empty end),
-        (if (($snap.secondmate_landed.unreadable // []) | length) > 0 then {surface:("secondmate home(s) with unreadable backlog: \(($snap.secondmate_landed.unreadable // []) | length)"), reveal:"inspect the listed secondmate home backlogs"} else empty end),
+        (if ($mates_unavailable | length) > 0 then
+           {surface:("secondmate home(s) unavailable, so their landed, queued, and decision work is excluded: "
+                     + ($mates_unavailable[:3] | map(.id + " (" + .reason + ")") | join("; "))
+                     + (if ($mates_unavailable | length) > 3 then "; +\(($mates_unavailable | length) - 3) more" else "" end)),
+            reveal:"inspect data/secondmates.md and those homes; re-seed or deregister an unavailable home"}
+         else empty end),
         (if $all_landed == 0 and (($snap.secondmate_landed.truncated // []) | length) > 0 then {surface:("secondmate home Done capped at the snapshot layer for \(($snap.secondmate_landed.truncated // []) | length) home(s)"), reveal:"--all-landed"} else empty end),
         ((($snap.main_inventory.orphan_in_flight // []) | length) as $n
          | if $n > 0 then {surface:("main in-flight backlog item(s) have no child metadata: \($n)"), reveal:"inspect main data/backlog.md In flight vs state/*.meta"} else empty end),

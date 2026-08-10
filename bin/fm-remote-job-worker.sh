@@ -294,6 +294,15 @@ worker_stop_active_execution() {
 worker_shutdown() {
   trap - HUP INT TERM
   worker_publish_quarantine || {
+    # State/lock already gone (fixture teardown, pruned worktree cleanup, or an
+    # external rm of the state root). Nothing remains to guard, and the poll
+    # loop can recreate an empty state root via reap_stale - so refusing to exit
+    # would leave a TERM-immune orphan. Die with SIGTERM status (143) so a Linux
+    # restart supervisor still treats this like a default TERM kill, not a clean
+    # voluntary stop (exit 0).
+    if [ ! -d "${WORKER_LOCK:-}" ]; then
+      exit 143
+    fi
     worker_error "cannot guard worker ownership for shutdown"
     trap worker_shutdown HUP INT TERM
     return 0

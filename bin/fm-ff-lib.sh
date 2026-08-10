@@ -126,7 +126,13 @@ validate_secondmate_home() {
   VALIDATED_HOME=""
   VALIDATION_ERROR=""
   abs_home=$(resolved_existing_dir "$home") || {
-    VALIDATION_ERROR="not a directory"
+    # A registered home that is simply gone is a different operator problem from
+    # a path that exists but is unusable, so callers can say which one happened.
+    if [ -e "$home" ]; then
+      VALIDATION_ERROR="not a directory"
+    else
+      VALIDATION_ERROR="registered home directory does not exist"
+    fi
     return 1
   }
   abs_active_home=$(resolved_existing_dir "$FM_HOME") || {

@@ -496,6 +496,56 @@ test_bad_secondmate_homes_never_revive_parent_work() {
   pass "missing, invalid, unreadable, malformed, and timed-out homes stay explicit unknowns"
 }
 
+# A registered home that no longer exists contributes zero landed, queued, and
+# decision work. That absence must arrive as a named warning, never as a baseline
+# that merely looks empty, and a present seeded home must not trip the warning.
+test_missing_registered_home_warns_instead_of_counting_zero() {
+  local home healthy fakebin json warning
+  home=$(make_home missing-home-warn)
+  : > "$home/data/secondmates.md"
+  printf '## In flight\n\n## Queued\n\n## Done\n' > "$home/data/backlog.md"
+
+  append_secondmate_registry "$home" gone "$TMP_ROOT/never-created-home"
+  healthy=$(make_landed_secondmate "$home" healthy)
+  append_landed_row "$healthy" mate-ship "Shipped from the healthy home" 2026-07-13
+
+  fakebin=$(make_fakebin "$home")
+  json=$(run "$home" "$fakebin" --json)
+
+  warning=$(printf '%s' "$json" | jq -r '
+    [.omitted[] | select(.surface | startswith("secondmate home(s) unavailable"))][0].surface // ""')
+  [ -n "$warning" ] || fail "a missing registered home produced no unavailable-home warning: $json"
+  case "$warning" in
+    *"gone (invalid home: registered home directory does not exist)"*) : ;;
+    *) fail "the warning must name the missing home and why it is unavailable, got: $warning" ;;
+  esac
+  case "$warning" in
+    *healthy*) fail "a present seeded home must not appear in the unavailable-home warning: $warning" ;;
+  esac
+  printf '%s' "$json" | jq -e '
+    (.landed | any(.[]; .id == "mate-ship" and .owner == "healthy"))
+      and (.secondmates | any(.[]; .id == "gone" and .state == "unknown"))
+  ' >/dev/null || fail "the readable home must still project its work beside the warning: $json"
+  pass "a missing registered home warns by name instead of silently counting zero"
+}
+
+test_present_empty_secondmate_home_raises_no_unavailable_warning() {
+  local home fakebin json
+  home=$(make_home idle-home-quiet)
+  : > "$home/data/secondmates.md"
+  printf '## In flight\n\n## Queued\n\n## Done\n' > "$home/data/backlog.md"
+  make_landed_secondmate "$home" idle >/dev/null
+
+  fakebin=$(make_fakebin "$home")
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    (.omitted | all(.surface | startswith("secondmate home(s) unavailable") | not))
+      and (.secondmates | any(.[]; .id == "idle" and .provenance == "structured-home"
+        and .state == "no_active_work"))
+  ' >/dev/null || fail "a present, seeded, empty home must stay valid idle without a warning: $json"
+  pass "a present empty secondmate home stays valid idle with no false alarm"
+}
+
 test_oversized_secondmate_summary_stays_strict_unknown() {
   local home mate fakebin json i
   home=$(make_home oversized-home)
@@ -1900,6 +1950,8 @@ test_parent_activity_evidence_is_bounded_and_disclosed
 test_active_child_overrides_old_parent_event
 test_structured_child_decision_reaches_captains_call
 test_bad_secondmate_homes_never_revive_parent_work
+test_missing_registered_home_warns_instead_of_counting_zero
+test_present_empty_secondmate_home_raises_no_unavailable_warning
 test_oversized_secondmate_summary_stays_strict_unknown
 test_secondmate_and_child_bounds_are_disclosed
 test_parent_decision_is_untrusted_contradiction_only
