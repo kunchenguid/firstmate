@@ -355,33 +355,45 @@ test_no_mistakes_dod_wording() {
 }
 
 test_docs_only_pipeline_guidance_is_no_mistakes_only() {
-  local home id brief
+  local home id brief fold_line skip_line definition_line help_line
   home="$TMP_ROOT/docs-only-guidance-home"
   mkdir -p "$home/data"
+
+  # Every fragment below is asserted present in the no-mistakes brief and absent
+  # from the other modes, so a negative assertion can never drift into a string
+  # the generator does not emit (a case-sensitive `grep -F` miss would otherwise
+  # pass vacuously).
+  fold_line="Prefer folding documentation-only follow-up changes into the next known code round"
+  # shellcheck disable=SC2016 # Literal backticks must stay unexpanded.
+  skip_line='use `--skip test` with `no-mistakes axi run` or top-level `no-mistakes`'
+  definition_line="Documentation-only means no change to any source, test, configuration, dependency, or build file"
+  # shellcheck disable=SC2016 # Literal backticks must stay unexpanded.
+  help_line='confirm the current flag and accepted step names with `no-mistakes axi run --help`'
 
   id="brief-docs-only-no-mistakes"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
-  assert_grep "Prefer folding documentation-only follow-up changes into the next known code round" "$brief" \
+  assert_grep "$fold_line" "$brief" \
     "no-mistakes brief lost the documentation-only folding guidance"
-  # shellcheck disable=SC2016 # Literal backticks must stay unexpanded.
-  assert_grep 'use `--skip test` with `no-mistakes axi run` or top-level `no-mistakes`' "$brief" \
+  assert_grep "$skip_line" "$brief" \
     "no-mistakes brief lost the verified pipeline skip guidance"
-  assert_grep "Documentation-only means no change to any source, test, configuration, dependency, or build file" "$brief" \
+  assert_grep "$definition_line" "$brief" \
     "no-mistakes brief lost the concrete documentation-only definition"
-  # shellcheck disable=SC2016 # Literal backticks must stay unexpanded.
-  assert_grep 'confirm the current flag and accepted step names with `no-mistakes axi run --help`' "$brief" \
+  assert_grep "$help_line" "$brief" \
     "no-mistakes brief lost the version-matched help instruction"
 
   for mode in direct-PR local-only; do
     id="brief-docs-only-$mode"
     FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" >/dev/null 2>&1
     brief="$home/data/$id/brief.md"
-    assert_no_grep "Prefer folding documentation-only follow-up changes" "$brief" \
+    assert_no_grep "$fold_line" "$brief" \
       "$mode brief unexpectedly gained no-mistakes documentation-only guidance"
-    # shellcheck disable=SC2016 # Literal backticks must stay unexpanded.
-    assert_no_grep 'Use `--skip test` with `no-mistakes axi run`' "$brief" \
+    assert_no_grep "$skip_line" "$brief" \
       "$mode brief unexpectedly gained the no-mistakes pipeline skip guidance"
+    assert_no_grep "$definition_line" "$brief" \
+      "$mode brief unexpectedly gained the documentation-only definition"
+    assert_no_grep "$help_line" "$brief" \
+      "$mode brief unexpectedly gained the version-matched help instruction"
   done
 
   pass "fm-brief.sh: documentation-only pipeline guidance is limited to no-mistakes briefs"
