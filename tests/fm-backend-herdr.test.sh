@@ -3429,6 +3429,68 @@ test_send_text_submit_detects_landed_send() {
   pass "fm_backend_herdr_send_text_submit: reports 'empty' once agent_status reports working after one Enter, without ever reading the composer"
 }
 
+test_send_text_submit_pi_idle_composer_confirms_landed_send() {
+  local dir out enters
+  dir="$TMP_ROOT/submit-pi-idle-composer"
+  mkdir -p "$dir"
+  : > "$dir/enters"
+  out=$(FM_TEST_ENTER_LOG="$dir/enters" bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_send_literal() { printf "%s\\n" "$2" >> "$FM_TEST_ENTER_LOG"; }
+    fm_backend_herdr_send_key() { printf "%s\\n" "$2" >> "$FM_TEST_ENTER_LOG"; }
+    fm_backend_herdr_agent_status_raw() { printf "idle"; }
+    fm_backend_herdr_wait_for_working() { printf "idle"; }
+    fm_backend_herdr_agent_identity_raw() { printf "pi\\tidle"; }
+    fm_backend_herdr_composer_state() { printf "empty"; }
+    fm_backend_herdr_send_text_submit default:w1:p2 "hello captain" 3 0.01 0.01
+  ' "$ROOT")
+  [ "$out" = empty ] || fail "an idle Pi whose composer is empty after Enter must confirm delivery, got $out"
+  enters=$(grep -c '^Enter$' "$dir/enters")
+  [ "$enters" -eq 1 ] || fail "a confirmed Pi delivery must submit exactly once, sent $enters Enters"
+  [ "$(grep -c '^hello captain$' "$dir/enters")" -eq 1 ] || fail "Pi confirmation must type the payload exactly once"
+  pass "fm_backend_herdr_send_text_submit: confirms one consumed Pi message when native Pi state stays idle"
+}
+
+test_send_text_submit_pi_swallowed_enter_stays_pending() {
+  local dir out enters
+  dir="$TMP_ROOT/submit-pi-swallowed"
+  mkdir -p "$dir"
+  : > "$dir/enters"
+  out=$(FM_TEST_ENTER_LOG="$dir/enters" bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_send_literal() { printf "%s\\n" "$2" >> "$FM_TEST_ENTER_LOG"; }
+    fm_backend_herdr_send_key() { printf "%s\\n" "$2" >> "$FM_TEST_ENTER_LOG"; }
+    fm_backend_herdr_agent_status_raw() { printf "idle"; }
+    fm_backend_herdr_wait_for_working() { printf "idle"; }
+    fm_backend_herdr_agent_identity_raw() { printf "pi\\tidle"; }
+    fm_backend_herdr_composer_state() { printf "pending"; }
+    fm_backend_herdr_send_text_submit default:w1:p2 "hello captain" 2 0.01 0.01
+  ' "$ROOT")
+  [ "$out" = pending ] || fail "a swallowed Pi Enter with pending composer text must remain pending, got $out"
+  enters=$(grep -c '^Enter$' "$dir/enters")
+  [ "$enters" -eq 2 ] || fail "a pending Pi delivery should retry Enter without retyping, sent $enters Enters"
+  [ "$(grep -c '^hello captain$' "$dir/enters")" -eq 1 ] || fail "a pending Pi delivery must retain type-once behavior"
+  pass "fm_backend_herdr_send_text_submit: preserves the buffer for a swallowed Pi Enter"
+}
+
+test_send_text_submit_native_idle_path_ignores_pi_fallback() {
+  local dir out
+  dir="$TMP_ROOT/submit-native-idle-unchanged"
+  mkdir -p "$dir"
+  out=$(bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_send_literal() { :; }
+    fm_backend_herdr_send_key() { :; }
+    fm_backend_herdr_agent_status_raw() { printf "idle"; }
+    fm_backend_herdr_wait_for_working() { printf "busy"; }
+    fm_backend_herdr_agent_identity_raw() { printf "claude\\tworking"; }
+    fm_backend_herdr_composer_state() { printf "pending"; }
+    fm_backend_herdr_send_text_submit default:w1:p2 "hello captain" 2 0.01 0.01
+  ' "$ROOT")
+  [ "$out" = empty ] || fail "native Herdr busy confirmation changed while adding Pi fallback, got $out"
+  pass "fm_backend_herdr_send_text_submit: native Herdr confirmation remains unchanged"
+}
+
 test_send_text_submit_detects_swallowed_enter() {
   local dir log resp fb out
   dir="$TMP_ROOT/submit-swallow"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -3436,7 +3498,9 @@ test_send_text_submit_detects_swallowed_enter() {
   # started a turn (swallowed), so wait_for_working never observes "busy".
   printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/2.out"
   printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/4.out"
+  printf '{"result":{"agent":{"agent":"claude","agent_status":"idle"}}}\n' > "$resp/5.out"
   printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/6.out"
+  printf '{"result":{"agent":{"agent":"claude","agent_status":"idle"}}}\n' > "$resp/7.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "hello captain" 2 0.01 0.01' "$ROOT" )
@@ -3459,9 +3523,10 @@ test_send_text_submit_popup_autocomplete_requires_second_enter() {
   # 4: agent get -> idle (not submitted yet)
   printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/2.out"
   printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/4.out"
-  # 5: send-keys enter (#2) - actually submits
-  # 6: agent get -> working (submitted)
-  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/6.out"
+  printf '{"result":{"agent":{"agent":"claude","agent_status":"idle"}}}\n' > "$resp/5.out"
+  # 6: send-keys enter (#2) - actually submits
+  # 7: agent get -> working (submitted)
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/7.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "/compact" 3 0.01 1.2' "$ROOT" )
@@ -4344,6 +4409,9 @@ test_wait_for_working_returns_idle_when_never_busy_but_readable
 test_wait_for_working_returns_unknown_when_never_readable
 test_wait_for_working_treats_blocked_as_submit_active
 test_send_text_submit_detects_landed_send
+test_send_text_submit_pi_idle_composer_confirms_landed_send
+test_send_text_submit_pi_swallowed_enter_stays_pending
+test_send_text_submit_native_idle_path_ignores_pi_fallback
 test_send_text_submit_detects_swallowed_enter
 test_send_text_submit_popup_autocomplete_requires_second_enter
 test_send_text_submit_confirms_blocked_after_enter

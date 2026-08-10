@@ -242,6 +242,25 @@ The CLI matrix was checked directly:
 All destructive verification used `bin/fm-herdr-lab.sh` with a non-default `fm-lab-` name and a byte-identical default-session tripwire.
 No ambient `herdr server stop` command is a supported test operation.
 
+### Pi idle-baseline submit acknowledgement - 2026-08-09
+
+A bounded end-to-end run used Pi 0.84.1 and Herdr 0.7.4 protocol 16 in the named `fix-afk-pi-herdr-ack` lab session.
+The real Pi pane remained native-idle after receiving the away digest, while the Herdr adapter confirmed the identity-corroborated empty Pi composer and cleared the buffer after one typed digest.
+A second real control left a human draft unsubmitted, and the adapter retained the new digest without merging into that draft.
+
+```sh
+FM_AFK_PI_HERDR_ACK_E2E=1 tests/fm-afk-pi-herdr-ack-e2e.test.sh
+```
+
+```text
+ok - real Pi/Herdr idle-native delivery clears the buffer after one typed digest
+ok - real Pi/Herdr unsubmitted input preserves the pending buffer
+evidence: pi=0.84.1 herdr=0.7.4 protocol=16 successful_send_texts=1
+```
+
+The focused adapter suite also covers a consumed idle Pi message, a swallowed Pi Enter, unchanged native Herdr confirmation, and type-once retry behavior.
+The change is confined to the Herdr submit owner, so Pi and pi-signed use the Pi-specific branch while Claude, Codex, OpenCode, Grok, Kimi, Muse, tmux, Zellij, Orca, and cmux retain their existing submit paths.
+
 ### Prune and respawn
 
 The real label-collision reproduction is owned by:

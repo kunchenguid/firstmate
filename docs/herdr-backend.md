@@ -213,6 +213,8 @@ Slash and dollar-prefixed input uses the shared harness-aware settle before the 
 Text is typed once; only Enter is retried.
 
 On an idle or done native baseline, submit confirmation waits for `working` or `blocked` across a bounded polling window.
+Pi is the narrow exception: if Herdr still reports the native Pi agent idle, the adapter requires the same Pi identity and a post-Enter structurally empty composer before confirming delivery.
+A pending or unreadable Pi composer remains unconfirmed and retains the buffer, while non-Pi native confirmation is unchanged.
 On an already active or unreadable baseline, it falls back to conservative composer clearance.
 A fully unreadable target stops retrying and reports unknown.
 The poll density bounds the residual possibility of an extremely fast complete turn; a missed transition can cause only a redundant Enter on an empty composer, never duplicate message text.
@@ -328,6 +330,7 @@ tests/fm-backend-herdr-eventwait-smoke.test.sh
 tests/fm-herdr-session-cleanup.test.sh
 tests/fm-herdr-session-cleanup-e2e.test.sh
 tests/fm-afk-inject-herdr-e2e.test.sh
+tests/fm-afk-pi-herdr-ack-e2e.test.sh
 tests/fm-afk-pi-herdr-return-e2e.test.sh
 ```
 
