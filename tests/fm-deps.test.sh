@@ -876,7 +876,7 @@ test_check_only_reports_actions_without_processing_them() {
 }
 
 test_stale_ownerless_nudges_do_not_block_or_collide() {
-  local fixture marker claim old_home old_commit replacement log status
+  local fixture marker claim old_home old_commit replacement log status retired_record
   fixture="$TMP_ROOT/stale-ownerless-nudge"
   marker="$fixture/state/.secondmate-nudge-pending/one.pending"
   claim="$fixture/state/.fm-deps-pending/secondmate-nudge-one.claimed"
@@ -908,9 +908,116 @@ test_stale_ownerless_nudges_do_not_block_or_collide() {
   assert_grep 'fm-one' "$log" "reassigned secondmate did not receive its new post-update nudge"
   assert_absent "$marker" "successful replacement nudge retained the shared marker"
   assert_absent "$claim" "stale ownerless nudge retirement retained its claim"
+  retired_record=$(find "$fixture/state/.secondmate-nudge-retired" -name action.pending \
+    -type f -print -quit)
+  assert_present "$retired_record" "stale ownerless nudge was not quarantined"
+  assert_grep "home=$old_home" "$retired_record" \
+    "quarantined ownerless nudge lost its original identity"
   assert_absent "$fixture/state/.fm-deps-pending/firstmate-actions.pending" \
     "stale ownerless nudge collision retained the action inventory"
   pass "stale ownerless nudges neither block updates nor collide with reassignment"
+}
+
+test_stale_owned_nudges_are_quarantined() {
+  local fixture marker claim retired_count status
+  fixture="$TMP_ROOT/stale-owned-nudge"
+  marker="$fixture/state/.secondmate-nudge-pending/remote.pending"
+  claim="$fixture/state/.fm-deps-pending/secondmate-nudge-remote.claimed"
+  mkdir -p "$fixture/state" "$fixture/data"
+  {
+    printf 'kind=secondmate\n'
+    printf 'home=/srv/firstmate-remote\n'
+    printf 'remote_host=remote.example\n'
+    printf 'remote_root=/srv/replacement-root\n'
+  } > "$fixture/state/remote.meta"
+  fm_secondmate_nudge_write "$fixture/state" remote /srv/firstmate-remote "" remote \
+    "$FM_REMOTE_SECOND_MATE_NUDGE_MESSAGE" 1 fm-deps remote.example /srv/original-root
+
+  FM_ROOT="$fixture" FM_HOME="$fixture" firstmate_update_actions_pending
+  status=$?
+  [ "$status" -eq 1 ] || fail "stale owned shared nudge still blocked Firstmate updates"
+  assert_present "$marker" "read-only stale detection removed an owned shared nudge"
+  FM_ROOT="$fixture" FM_HOME="$fixture" process_pending_firstmate_actions
+  assert_absent "$marker" "normal reconciliation retained a stale owned shared nudge"
+
+  fm_secondmate_nudge_write "$fixture/state" remote /srv/firstmate-remote "" remote \
+    "$FM_REMOTE_SECOND_MATE_NUDGE_MESSAGE" 1 fm-deps remote.example /srv/original-root
+  mkdir -p "$fixture/state/.fm-deps-pending"
+  chmod 700 "$fixture/state/.fm-deps-pending"
+  mv -- "$marker" "$claim"
+  FM_ROOT="$fixture" FM_HOME="$fixture" firstmate_update_actions_pending
+  status=$?
+  [ "$status" -eq 1 ] || fail "stale owned claim still blocked Firstmate updates"
+  assert_present "$claim" "read-only stale detection removed an owned claim"
+  FM_ROOT="$fixture" FM_HOME="$fixture" process_pending_firstmate_actions
+  assert_absent "$claim" "normal reconciliation retained a stale owned claim"
+  retired_count=$(find "$fixture/state/.secondmate-nudge-retired" -name action.pending \
+    -type f | wc -l | tr -d '[:space:]')
+  [ "$retired_count" -eq 2 ] || fail "stale owned nudge records were not both quarantined"
+  pass "stale owned nudges are classified and quarantined without blocking updates"
+}
+
+test_nudge_publication_waits_for_sender_transaction() {
+  local fixture marker old_home old_commit replacement replacement_commit lock
+  local acquired release result holder publisher i status
+  fixture="$TMP_ROOT/nudge-publication-lock"
+  marker="$fixture/state/.secondmate-nudge-pending/one.pending"
+  acquired="$fixture/lock-acquired"
+  release="$fixture/lock-release"
+  result="$fixture/publish-result"
+  old_home=$(create_firstmate_action_home "$fixture" one old)
+  old_commit=$(git -C "$old_home" rev-parse HEAD)
+  replacement=$(create_firstmate_action_home "$fixture" one replacement)
+  replacement_commit=$(git -C "$replacement" rev-parse HEAD)
+  register_firstmate_action_target "$fixture" one "$replacement"
+  fm_secondmate_nudge_write "$fixture/state" one "$old_home" "$old_commit" \
+    AGENTS.md "$FM_SECOND_MATE_NUDGE_MESSAGE" 0
+  lock=$(fm_secondmate_nudge_transaction_lock_path "$fixture/state" one)
+
+  (
+    FM_ROOT_OVERRIDE="$fixture"
+    FM_HOME="$fixture"
+    FM_STATE_OVERRIDE="$fixture/state"
+    . "$ROOT/bin/fm-wake-lib.sh"
+    fm_lock_acquire_wait "$lock"
+    : > "$acquired"
+    for i in {1..100}; do
+      [ -e "$release" ] && break
+      sleep 0.02
+    done
+    [ -e "$release" ] || exit 1
+    rm -f -- "$marker"
+    fm_lock_release "$lock"
+  ) &
+  holder=$!
+  for i in {1..100}; do
+    [ -e "$acquired" ] && break
+    sleep 0.02
+  done
+  [ -e "$acquired" ] || fail "sender transaction lock was not acquired"
+
+  (
+    FM_ROOT="$fixture"
+    FM_HOME="$fixture"
+    FM_DEPS_LOCK_TIMEOUT=3
+    publish_secondmate_nudge_action "$fixture/state" one "$replacement" \
+      "$replacement_commit" AGENTS.md "$FM_SECOND_MATE_NUDGE_MESSAGE" 0 "" ""
+    printf '%s\n' "$?" > "$result"
+  ) &
+  publisher=$!
+  sleep 0.1
+  assert_grep "home=$old_home" "$marker" \
+    "publication replaced a marker while its sender owned the transaction"
+  : > "$release"
+  wait "$holder" || fail "sender transaction fixture failed"
+  wait "$publisher" || fail "serialized nudge publication failed"
+  status=$(< "$result")
+  [ "$status" -eq 0 ] || fail "serialized nudge publication returned $status"
+  assert_grep "home=$replacement" "$marker" \
+    "new nudge was not published after the prior sender completed"
+  assert_grep 'owner=fm-deps' "$marker" \
+    "serialized publication lost dependency-checker ownership"
+  pass "nudge publication waits for the shared sender transaction"
 }
 
 test_firstmate_actions_are_durable_and_retry_every_target() {
@@ -999,10 +1106,13 @@ test_firstmate_actions_are_durable_and_retry_every_target() {
     process_pending_firstmate_actions 2>&1)
   status=$?
   after=$(wc -l < "$log")
-  [ "$status" -ne 0 ] || fail "reassigned selector accepted a stale nudge identity: $out"
+  [ "$status" -eq 0 ] || fail "reassigned selector did not retire a stale nudge identity: $out"
   [ "$after" -eq "$before" ] || fail "stale nudge was delivered to a reassigned selector"
-  assert_present "$nudge/one.pending" \
-    "identity mismatch discarded the original pending nudge"
+  assert_absent "$nudge/one.pending" \
+    "identity mismatch retained an obsolete pending nudge"
+  assert_grep 'owner=fm-deps' \
+    "$(find "$fixture/state/.secondmate-nudge-retired" -name action.pending -type f -print -quit)" \
+    "identity mismatch did not quarantine the obsolete pending nudge"
   pass "Firstmate actions persist completely and bind retry identity"
 }
 
@@ -1083,13 +1193,14 @@ test_remote_secondmate_actions_use_shared_retry_markers() {
     printf 'remote_host=remote.example\n'
     printf 'remote_root=/srv/replacement-root\n'
   } > "$fixture/state/remote.meta"
-  out=$(FM_ROOT="$fixture" FM_HOME="$fixture" FM_DEPS_TEST_LOG="$log" \
-    process_pending_firstmate_actions 2>&1)
-  status=$?
+  FM_ROOT="$fixture" FM_HOME="$fixture" FM_DEPS_TEST_LOG="$log" \
+    process_pending_firstmate_actions
   after=$(wc -l < "$log")
-  [ "$status" -ne 0 ] || fail "remote root change accepted a stale retry marker: $out"
   [ "$after" -eq "$before" ] || fail "stale remote retry was delivered through a replacement root"
-  assert_present "$marker" "remote root change discarded the original retry marker"
+  assert_absent "$marker" "remote root change retained an obsolete retry marker"
+  assert_grep 'owner=fm-deps' \
+    "$(find "$fixture/state/.secondmate-nudge-retired" -name action.pending -type f -print -quit)" \
+    "remote root change did not quarantine the obsolete retry marker"
   {
     printf 'kind=secondmate\n'
     printf 'home=/srv/firstmate-remote\n'
@@ -1097,6 +1208,7 @@ test_remote_secondmate_actions_use_shared_retry_markers() {
     printf 'remote_root=/srv/firstmate-root\n'
   } > "$fixture/state/remote.meta"
 
+  FM_ROOT="$fixture" FM_HOME="$fixture" persist_firstmate_update_actions no fm-remote
   FM_ROOT="$fixture" FM_HOME="$fixture" FM_DEPS_TEST_LOG="$log" \
     process_pending_firstmate_actions
   assert_absent "$marker" "successful remote nudge retained its shared retry marker"
@@ -1438,6 +1550,8 @@ test_host_lock_first_creation_race_is_revalidated
 test_invalid_pending_action_directory_stops_run
 test_check_only_reports_actions_without_processing_them
 test_stale_ownerless_nudges_do_not_block_or_collide
+test_stale_owned_nudges_are_quarantined
+test_nudge_publication_waits_for_sender_transaction
 test_firstmate_actions_are_durable_and_retry_every_target
 test_remote_secondmate_actions_use_shared_retry_markers
 test_prepared_remote_update_journal_retries_before_nudge

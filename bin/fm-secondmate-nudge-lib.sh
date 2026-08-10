@@ -14,10 +14,14 @@ fm_secondmate_nudge_marker_path() { # <state-dir> <id>
   printf '%s/.secondmate-nudge-pending/%s.pending\n' "$state" "$id"
 }
 
-fm_remote_inherit_transaction_lock_path() { # <state-dir> <id>
+fm_secondmate_nudge_transaction_lock_path() { # <state-dir> <id>
   local state=$1 id=$2
   case "$id" in *[!/A-Za-z0-9._-]*|''|*/*) return 1 ;; esac
   printf '%s/.remote-inherit-%s.lock\n' "$state" "$id"
+}
+
+fm_remote_inherit_transaction_lock_path() { # <state-dir> <id>
+  fm_secondmate_nudge_transaction_lock_path "$@"
 }
 
 fm_remote_inherit_generation_next() { # <state-dir> <id>

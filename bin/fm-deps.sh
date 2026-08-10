@@ -628,21 +628,10 @@ capture_firstmate_action_inventory() {
   done
 }
 
-existing_secondmate_nudge_matches() {
-  local marker=$1 id=$2 home=$3 commit=$4 remote=$5 remote_host=$6 remote_root=$7
-  if [ "$remote" = 1 ]; then
-    [ -z "$commit" ] || return 1
-    fm_secondmate_remote_nudge_matches "$marker" "$id" "$home" "$remote_host" \
-      "$remote_root" fm-deps
-    return
-  fi
-  fm_secondmate_local_nudge_matches "$marker" "$id" "$home" "$commit" fm-deps
-}
-
-ownerless_secondmate_nudge_record_is_valid() {
+secondmate_nudge_record_is_valid() {
   local marker=$1 id home commit remote remote_host remote_root owner
   owner=$(pending_marker_value "$marker" owner 2>/dev/null || true)
-  [ -z "$owner" ] || return 1
+  case "$owner" in ''|fm-deps) ;; *) return 1 ;; esac
   id=$(pending_marker_value "$marker" id 2>/dev/null || true)
   home=$(pending_marker_value "$marker" home 2>/dev/null || true)
   commit=$(pending_marker_value "$marker" commit 2>/dev/null || true)
@@ -651,13 +640,13 @@ ownerless_secondmate_nudge_record_is_valid() {
   remote_root=$(pending_marker_value "$marker" remote_root 2>/dev/null || true)
   case "$remote" in
     0)
-      fm_secondmate_local_nudge_matches "$marker" "$id" "$home" "$commit"
+      fm_secondmate_local_nudge_matches "$marker" "$id" "$home" "$commit" "$owner"
       ;;
     1)
       if [ -n "$remote_host" ] && [ -n "$remote_root" ]; then
         fm_secondmate_remote_nudge_matches "$marker" "$id" "$home" \
-          "$remote_host" "$remote_root"
-      elif [ -z "$remote_host" ] && [ -z "$remote_root" ]; then
+          "$remote_host" "$remote_root" "$owner"
+      elif [ -z "$owner" ] && [ -z "$remote_host" ] && [ -z "$remote_root" ]; then
         fm_secondmate_legacy_remote_nudge_matches "$marker" "$id" "$home"
       else
         return 1
@@ -667,66 +656,95 @@ ownerless_secondmate_nudge_record_is_valid() {
   esac
 }
 
-ownerless_secondmate_nudge_matches_identity() {
-  local marker=$1 id=$2 home=$3 commit=$4 remote=$5 remote_host=$6 remote_root=$7
+secondmate_nudge_matches_identity() {
+  local marker=$1 id=$2 home=$3 commit=$4 remote=$5 remote_host=$6 remote_root=$7 owner
+  owner=$(pending_marker_value "$marker" owner 2>/dev/null || true)
+  case "$owner" in ''|fm-deps) ;; *) return 1 ;; esac
   case "$remote" in
-    0) fm_secondmate_local_nudge_matches "$marker" "$id" "$home" "$commit" ;;
+    0) fm_secondmate_local_nudge_matches "$marker" "$id" "$home" "$commit" "$owner" ;;
     1)
       fm_secondmate_remote_nudge_matches "$marker" "$id" "$home" \
-        "$remote_host" "$remote_root" \
-        || fm_secondmate_legacy_remote_nudge_matches "$marker" "$id" "$home"
+        "$remote_host" "$remote_root" "$owner" \
+        || { [ -z "$owner" ] \
+          && fm_secondmate_legacy_remote_nudge_matches "$marker" "$id" "$home"; }
       ;;
     *) return 1 ;;
   esac
 }
 
-retire_stale_ownerless_secondmate_nudge() {
-  local marker=$1 id=$2 home=$3 commit=$4 remote=$5 remote_host=$6 remote_root=$7
-  local claim
-  claim=$(identity_bound_nudge_claim_path "$id") || return 1
-  [ ! -e "$claim" ] && [ ! -L "$claim" ] || return 1
-  mv -- "$marker" "$claim" 2>/dev/null || return 1
-  if ! ownerless_secondmate_nudge_record_is_valid "$claim"; then
-    restore_identity_bound_nudge_claim "$claim" "$marker" || true
-    return 1
+ensure_secondmate_nudge_retired_dir() {
+  local state=$1 retired
+  retired="$state/.secondmate-nudge-retired"
+  if [ -e "$retired" ] || [ -L "$retired" ]; then
+    [ -d "$retired" ] && [ ! -L "$retired" ] || return 1
+  else
+    mkdir "$retired" || return 1
+    chmod 700 "$retired" || return 1
   fi
-  if ownerless_secondmate_nudge_matches_identity "$claim" "$id" "$home" "$commit" \
-    "$remote" "$remote_host" "$remote_root"; then
-    restore_identity_bound_nudge_claim "$claim" "$marker" || return 1
-    return 2
-  fi
-  rm -f -- "$claim"
+  printf '%s\n' "$retired"
 }
 
-publish_secondmate_nudge_action() {
+quarantine_secondmate_nudge() {
+  local marker=$1 state=$2 id=$3 retired slot
+  retired=$(ensure_secondmate_nudge_retired_dir "$state") || return 1
+  slot=$(umask 077; mktemp -d "$retired/$id.XXXXXX" 2>/dev/null) || return 1
+  if mv -- "$marker" "$slot/action.pending" 2>/dev/null; then
+    return 0
+  fi
+  rmdir "$slot" 2>/dev/null || true
+  [ ! -e "$marker" ] && [ ! -L "$marker" ]
+}
+
+with_secondmate_nudge_lock() {
+  local state=$1 id=$2 callback=$3 lock root home lock_status rc=0
+  shift 3
+  lock=$(fm_secondmate_nudge_transaction_lock_path "$state" "$id") || return 1
+  root=$FM_ROOT
+  home=$(deps_home_dir) || return 1
+  local FM_ROOT_OVERRIDE FM_ROOT FM_HOME FM_STATE_OVERRIDE STATE FM_WAKE_QUEUE
+  local FM_WAKE_QUEUE_LOCK
+  FM_ROOT_OVERRIDE=$root
+  FM_ROOT=$root
+  FM_HOME=$home
+  FM_STATE_OVERRIDE=$state
+  STATE=$state
+  . "$SCRIPT_DIR/fm-wake-lib.sh"
+  fm_dependency_acquire_lock "$lock"
+  lock_status=$?
+  [ "$lock_status" -eq 0 ] || return "$lock_status"
+  "$callback" "$@" || rc=$?
+  fm_lock_release "$lock"
+  return "$rc"
+}
+
+publish_secondmate_nudge_action_locked() {
   local state=$1 id=$2 home=$3 commit=$4 instructions=$5 message=$6 remote=$7
-  local remote_host=$8 remote_root=$9 marker write_status
+  local remote_host=$8 remote_root=$9 marker write_status active_home marker_status
   marker=$(fm_secondmate_nudge_marker_path "$state" "$id") || return 1
   fm_secondmate_nudge_write "$state" "$id" "$home" "$commit" \
     "$instructions" "$message" "$remote" fm-deps "$remote_host" "$remote_root" create
   write_status=$?
   [ "$write_status" -eq 0 ] && return 0
   [ "$write_status" -eq 2 ] || return 1
-  if existing_secondmate_nudge_matches "$marker" "$id" "$home" "$commit" \
-      "$remote" "$remote_host" "$remote_root" \
-    || ownerless_secondmate_nudge_matches_identity "$marker" "$id" "$home" \
-      "$commit" "$remote" "$remote_host" "$remote_root"; then
+  if secondmate_nudge_matches_identity "$marker" "$id" "$home" "$commit" \
+    "$remote" "$remote_host" "$remote_root"; then
     return 0
   fi
-  retire_stale_ownerless_secondmate_nudge "$marker" "$id" "$home" "$commit" \
-    "$remote" "$remote_host" "$remote_root"
-  write_status=$?
-  case "$write_status" in
-    0)
-      fm_secondmate_nudge_write "$state" "$id" "$home" "$commit" \
-        "$instructions" "$message" "$remote" fm-deps "$remote_host" "$remote_root" create
-      ;;
-    2)
-      ownerless_secondmate_nudge_matches_identity "$marker" "$id" "$home" \
-        "$commit" "$remote" "$remote_host" "$remote_root"
-      ;;
+  active_home=$(deps_home_dir) || return 1
+  secondmate_nudge_is_actionable "$marker" "$state" "$active_home"
+  marker_status=$?
+  case "$marker_status" in
+    0) return 1 ;;
+    1) quarantine_secondmate_nudge "$marker" "$state" "$id" || return 1 ;;
     *) return 1 ;;
   esac
+  fm_secondmate_nudge_write "$state" "$id" "$home" "$commit" \
+    "$instructions" "$message" "$remote" fm-deps "$remote_host" "$remote_root" create
+}
+
+publish_secondmate_nudge_action() {
+  local state=$1 id=$2
+  with_secondmate_nudge_lock "$state" "$id" publish_secondmate_nudge_action_locked "$@"
 }
 
 record_secondmate_nudge_action() {
@@ -1073,8 +1091,26 @@ process_identity_bound_nudge_claim() {
   return 1
 }
 
+process_identity_bound_nudge_marker_locked() {
+  local marker=$1 claim=$2 state=$3 active_home=$4 id owner
+  [ -e "$marker" ] || [ -L "$marker" ] || return 0
+  [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+  owner=$(pending_marker_value "$marker" owner 2>/dev/null || true)
+  [ "$owner" = fm-deps ] || return 0
+  id=$(pending_marker_value "$marker" id 2>/dev/null || true)
+  [ "$marker" = "$(fm_secondmate_nudge_marker_path "$state" "$id" 2>/dev/null || true)" ] \
+    || return 1
+  [ ! -e "$claim" ] && [ ! -L "$claim" ] || return 1
+  mv -- "$marker" "$claim" 2>/dev/null || {
+    [ ! -e "$marker" ] && [ ! -L "$marker" ]
+    return
+  }
+  process_identity_bound_nudge_claim "$claim" "$marker" "$state" "$active_home"
+}
+
 process_identity_bound_nudges() {
   local state active_home pending claims marker claim id owner processed_ids="" failed=0
+  local lock_status
   state=$(deps_state_dir) || return 1
   active_home=$(deps_home_dir) || return 1
   pending="$state/.secondmate-nudge-pending"
@@ -1088,8 +1124,14 @@ process_identity_bound_nudges() {
       id=$(pending_marker_value "$claim" id 2>/dev/null || true)
       [ -z "$id" ] || processed_ids="${processed_ids}${processed_ids:+ }$id"
       marker=$(fm_secondmate_nudge_marker_path "$state" "$id" 2>/dev/null || true)
-      if [ -z "$marker" ] \
-        || ! process_identity_bound_nudge_claim "$claim" "$marker" "$state" "$active_home"; then
+      if [ -z "$marker" ]; then
+        failed=1
+        continue
+      fi
+      with_secondmate_nudge_lock "$state" "$id" process_identity_bound_nudge_claim \
+        "$claim" "$marker" "$state" "$active_home"
+      lock_status=$?
+      if [ "$lock_status" -ne 0 ]; then
         failed=1
       fi
     done
@@ -1114,19 +1156,16 @@ process_identity_bound_nudges() {
       case " $processed_ids " in *" $id "*) continue ;; esac
     fi
     claim=$(identity_bound_nudge_claim_path "$id" 2>/dev/null || true)
-    if [ -z "$claim" ] || [ -e "$claim" ] || [ -L "$claim" ]; then
+    if [ -z "$claim" ]; then
       printf 'Firstmate post-update nudge could not be claimed for fm-%s\n' "${id:-unknown}" >&2
       failed=1
       continue
     fi
-    if ! mv -- "$marker" "$claim" 2>/dev/null; then
-      if [ -e "$marker" ] || [ -L "$marker" ]; then
-        printf 'Firstmate post-update nudge could not be claimed for fm-%s\n' "$id" >&2
-        failed=1
-      fi
-      continue
-    fi
-    if ! process_identity_bound_nudge_claim "$claim" "$marker" "$state" "$active_home"; then
+    with_secondmate_nudge_lock "$state" "$id" process_identity_bound_nudge_marker_locked \
+      "$marker" "$claim" "$state" "$active_home"
+    lock_status=$?
+    if [ "$lock_status" -ne 0 ]; then
+      printf 'Firstmate post-update nudge could not be processed for fm-%s\n' "$id" >&2
       failed=1
     fi
   done
@@ -1268,16 +1307,14 @@ persist_firstmate_update_actions() {
   write_firstmate_action_manifest "$reread" "$targets"
 }
 
-shared_secondmate_nudge_is_actionable() {
-  local marker=$1 state=$2 active_home=$3 id expected_marker owner meta kind
+secondmate_nudge_is_actionable() {
+  local marker=$1 state=$2 active_home=$3 id owner meta kind
   local home current_home commit remote remote_host remote_root current_remote_host
   local current_remote_root head
   owner=$(pending_marker_value "$marker" owner 2>/dev/null || true)
-  [ -z "$owner" ] || return 0
-  ownerless_secondmate_nudge_record_is_valid "$marker" || return 2
+  case "$owner" in ''|fm-deps) ;; *) return 2 ;; esac
+  secondmate_nudge_record_is_valid "$marker" || return 2
   id=$(pending_marker_value "$marker" id 2>/dev/null || true)
-  expected_marker=$(fm_secondmate_nudge_marker_path "$state" "$id" 2>/dev/null || true)
-  [ "$expected_marker" = "$marker" ] || return 2
   meta="$state/$id.meta"
   kind=$(pending_marker_value "$meta" kind 2>/dev/null || true)
   [ "$kind" = secondmate ] || return 1
@@ -1293,10 +1330,11 @@ shared_secondmate_nudge_is_actionable() {
   case "$remote" in
     0)
       [ -z "$current_remote_host" ] && [ -z "$current_remote_root" ] || return 1
-      FM_HOME="$active_home" validate_secondmate_home "$id" "$current_home" || return 1
+      FM_HOME="$active_home" validate_secondmate_home "$id" "$current_home" || return 2
       [ "$VALIDATED_HOME" = "$home" ] || return 1
-      head=$(run_git_probe -C "$home" rev-parse HEAD 2>/dev/null || true)
-      [ -n "$head" ] && [ "$head" = "$commit" ] || return 1
+      head=$(run_git_probe -C "$home" rev-parse HEAD 2>/dev/null) || return 2
+      [ -n "$head" ] || return 2
+      [ "$head" = "$commit" ] || return 1
       ;;
     1)
       [ "$current_home" = "$home" ] || return 1
@@ -1310,13 +1348,53 @@ shared_secondmate_nudge_is_actionable() {
       ;;
     *) return 2 ;;
   esac
-  ownerless_secondmate_nudge_matches_identity "$marker" "$id" "$home" "$commit" \
+  secondmate_nudge_matches_identity "$marker" "$id" "$home" "$commit" \
     "$remote" "$remote_host" "$remote_root" || return 2
   return 0
 }
 
+cleanup_stale_secondmate_nudge_locked() {
+  local marker=$1 state=$2 active_home=$3 expected_id=$4 id marker_status
+  [ -e "$marker" ] || [ -L "$marker" ] || return 0
+  id=$(pending_marker_value "$marker" id 2>/dev/null || true)
+  [ "$id" = "$expected_id" ] || return 2
+  secondmate_nudge_is_actionable "$marker" "$state" "$active_home"
+  marker_status=$?
+  case "$marker_status" in
+    0) return 0 ;;
+    1) quarantine_secondmate_nudge "$marker" "$state" "$id" ;;
+    *) return 2 ;;
+  esac
+}
+
+cleanup_stale_secondmate_nudges() {
+  local state active_home pending shared marker id owner status failed=0
+  state=$(deps_state_dir) || return 1
+  active_home=$(deps_home_dir) || return 1
+  pending=$(deps_pending_dir) || return 1
+  shared="$state/.secondmate-nudge-pending"
+  for marker in "$pending"/secondmate-nudge-*.claimed "$shared"/*.pending; do
+    [ -e "$marker" ] || [ -L "$marker" ] || continue
+    id=$(pending_marker_value "$marker" id 2>/dev/null || true)
+    case "$id" in ''|*[!A-Za-z0-9._-]*) return 2 ;; esac
+    case "$marker" in
+      "$pending/secondmate-nudge-$id.claimed")
+        owner=$(pending_marker_value "$marker" owner 2>/dev/null || true)
+        [ "$owner" = fm-deps ] || return 2
+        ;;
+      "$shared/$id.pending") ;;
+      *) return 2 ;;
+    esac
+    with_secondmate_nudge_lock "$state" "$id" cleanup_stale_secondmate_nudge_locked \
+      "$marker" "$state" "$active_home" "$id"
+    status=$?
+    case "$status" in 0) ;; 2) return 2 ;; *) failed=1 ;; esac
+  done
+  [ "$failed" -eq 0 ]
+}
+
 firstmate_update_actions_pending() {
-  local pending marker state shared active_home marker_status
+  local pending marker state shared active_home marker_status id expected
   pending=$(deps_pending_dir) || return 1
   validate_firstmate_action_storage || return 2
   marker=$(firstmate_action_manifest_path) || return 1
@@ -1337,17 +1415,31 @@ firstmate_update_actions_pending() {
       return 0
     fi
   done
-  for marker in "$pending"/secondmate-nudge-*.claimed; do
-    if [ -e "$marker" ] || [ -L "$marker" ]; then
-      return 0
-    fi
-  done
   state=$(deps_state_dir) || return 1
   active_home=$(deps_home_dir) || return 2
+  for marker in "$pending"/secondmate-nudge-*.claimed; do
+    if [ -e "$marker" ] || [ -L "$marker" ]; then
+      id=$(pending_marker_value "$marker" id 2>/dev/null || true)
+      expected=$(identity_bound_nudge_claim_path "$id" 2>/dev/null || true)
+      [ "$expected" = "$marker" ] || return 2
+      [ "$(pending_marker_value "$marker" owner 2>/dev/null || true)" = fm-deps ] \
+        || return 2
+      secondmate_nudge_is_actionable "$marker" "$state" "$active_home"
+      marker_status=$?
+      case "$marker_status" in
+        0) return 0 ;;
+        1) ;;
+        *) return 2 ;;
+      esac
+    fi
+  done
   shared="$state/.secondmate-nudge-pending"
   for marker in "$shared"/*.pending; do
     if [ -e "$marker" ] || [ -L "$marker" ]; then
-      shared_secondmate_nudge_is_actionable "$marker" "$state" "$active_home"
+      id=$(pending_marker_value "$marker" id 2>/dev/null || true)
+      expected=$(fm_secondmate_nudge_marker_path "$state" "$id" 2>/dev/null || true)
+      [ "$expected" = "$marker" ] || return 2
+      secondmate_nudge_is_actionable "$marker" "$state" "$active_home"
       marker_status=$?
       case "$marker_status" in
         0) return 0 ;;
@@ -1373,6 +1465,8 @@ process_pending_firstmate_actions() {
   else
     pending=""
   fi
+
+  cleanup_stale_secondmate_nudges || return $?
 
   if [ -n "$pending" ]; then
     process_firstmate_update_journal || journal_status=$?

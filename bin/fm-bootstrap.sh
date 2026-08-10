@@ -310,14 +310,23 @@ secondmate_sync() {
   }
 
   secondmate_send_nudge() {
-    local id=$1 home=$2 commit=$3 instr=$4 selector marker out
+    local id=$1 home=$2 commit=$3 instr=$4 selector marker lock out
     selector="fm-$id"
     marker=$(secondmate_nudge_marker_path "$id") || {
       echo "NUDGE_SECONDMATES: secondmate $id: send failed: unsafe id"
       return 0
     }
+    lock=$(fm_secondmate_nudge_transaction_lock_path "$STATE" "$id") || {
+      echo "NUDGE_SECONDMATES: secondmate $id: send failed: unsafe transaction lock"
+      return 0
+    }
+    if ! fm_lock_acquire_wait "$lock"; then
+      echo "NUDGE_SECONDMATES: secondmate $id: send failed: transaction lock failed"
+      return 0
+    fi
     if ! secondmate_write_nudge_marker "$id" "$home" "$commit" "$instr"; then
       echo "NUDGE_SECONDMATES: secondmate $id: send failed: cannot record retry marker"
+      fm_lock_release "$lock" || true
       return 0
     fi
     if out=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-send.sh" "$selector" "$SECOND_MATE_NUDGE_MESSAGE" 2>&1); then
@@ -326,6 +335,7 @@ secondmate_sync() {
     else
       echo "NUDGE_SECONDMATES: secondmate $id: send failed: $(first_line "$out")"
     fi
+    fm_lock_release "$lock" || true
   }
 
   fm_ff_after_instruction_update() {
@@ -333,8 +343,75 @@ secondmate_sync() {
     secondmate_send_nudge "$id" "$home" "$primary_head" "$instr"
   }
 
-  secondmate_retry_pending_nudges() {
+  secondmate_retry_pending_nudge_locked() {
     local marker id selector home commit message remote expected_marker meta meta_home home_real head out
+    marker=$1
+    [ -f "$marker" ] || return 0
+    id=$(fm_meta_get "$marker" id)
+    if ! expected_marker=$(secondmate_nudge_marker_path "$id"); then
+      echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: send failed: retry marker has unsafe id"
+      return 0
+    fi
+    [ "$expected_marker" = "$marker" ] || {
+      echo "NUDGE_SECONDMATES: secondmate $id: send failed: retry marker filename mismatch"
+      return 0
+    }
+    selector=$(fm_meta_get "$marker" selector)
+    home=$(fm_meta_get "$marker" home)
+    commit=$(fm_meta_get "$marker" commit)
+    message=$(fm_meta_get "$marker" message)
+    remote=$(fm_meta_get "$marker" remote)
+    [ -n "$remote" ] || remote=0
+    [ "$selector" = "fm-$id" ] || {
+      echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: send failed: retry marker selector mismatch"
+      return 0
+    }
+    case "$remote" in
+      0) [ "$message" = "$SECOND_MATE_NUDGE_MESSAGE" ] || {
+        echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: send failed: retry marker message mismatch"
+        return 0
+      } ;;
+      1) [ "$message" = "$REMOTE_SECOND_MATE_NUDGE_MESSAGE" ] || {
+        echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: send failed: remote retry marker message mismatch"
+        return 0
+      } ;;
+      *)
+        echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: send failed: retry marker placement is invalid"
+        return 0
+        ;;
+    esac
+    [ "$remote" -ne 1 ] || return 0
+    meta="$STATE/$id.meta"
+    [ -f "$meta" ] && [ "$(fm_meta_get "$meta" kind)" = secondmate ] || {
+      echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: send failed: retry target has no live secondmate metadata"
+      return 0
+    }
+    meta_home=$(fm_meta_get "$meta" home)
+    [ -n "$meta_home" ] || meta_home=$(secondmate_registry_field "$DATA/secondmates.md" "$id" home || true)
+    if ! validate_secondmate_home "$id" "$meta_home"; then
+      echo "NUDGE_SECONDMATES: secondmate $id: send failed: retry target home unsafe: $VALIDATION_ERROR"
+      return 0
+    fi
+    home_real="$VALIDATED_HOME"
+    [ "$home_real" = "$home" ] || {
+      echo "NUDGE_SECONDMATES: secondmate $id: send failed: retry target home changed"
+      return 0
+    }
+    head=$(git -C "$home_real" rev-parse HEAD 2>/dev/null || true)
+    [ -n "$head" ] && [ "$head" = "$commit" ] || {
+      echo "NUDGE_SECONDMATES: secondmate $id: send failed: retry target is not at recorded instruction commit"
+      return 0
+    }
+    if out=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-send.sh" "$selector" "$SECOND_MATE_NUDGE_MESSAGE" 2>&1); then
+      rm -f "$marker"
+      echo "BOOTSTRAP_INFO: nudged $selector with '$SECOND_MATE_NUDGE_MESSAGE'"
+    else
+      echo "NUDGE_SECONDMATES: secondmate $id: send failed: $(first_line "$out")"
+    fi
+  }
+
+  secondmate_retry_pending_nudges() {
+    local marker id expected_marker lock
     [ -d "$SECOND_MATE_NUDGE_PENDING_DIR" ] || return 0
     for marker in "$SECOND_MATE_NUDGE_PENDING_DIR"/*.pending; do
       [ -f "$marker" ] || continue
@@ -343,62 +420,17 @@ secondmate_sync() {
         echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: send failed: retry marker has unsafe id"
         continue
       fi
-      [ "$expected_marker" = "$marker" ] || {
+      if [ "$expected_marker" != "$marker" ]; then
         echo "NUDGE_SECONDMATES: secondmate $id: send failed: retry marker filename mismatch"
         continue
-      }
-      selector=$(fm_meta_get "$marker" selector)
-      home=$(fm_meta_get "$marker" home)
-      commit=$(fm_meta_get "$marker" commit)
-      message=$(fm_meta_get "$marker" message)
-      remote=$(fm_meta_get "$marker" remote)
-      [ -n "$remote" ] || remote=0
-      [ "$selector" = "fm-$id" ] || {
-        echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: send failed: retry marker selector mismatch"
-        continue
-      }
-      case "$remote" in
-        0) [ "$message" = "$SECOND_MATE_NUDGE_MESSAGE" ] || {
-          echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: send failed: retry marker message mismatch"
-          continue
-        } ;;
-        1) [ "$message" = "$REMOTE_SECOND_MATE_NUDGE_MESSAGE" ] || {
-          echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: send failed: remote retry marker message mismatch"
-          continue
-        } ;;
-        *)
-          echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: send failed: retry marker placement is invalid"
-          continue
-          ;;
-      esac
-      [ "$remote" -ne 1 ] || continue
-      meta="$STATE/$id.meta"
-      [ -f "$meta" ] && [ "$(fm_meta_get "$meta" kind)" = secondmate ] || {
-        echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: send failed: retry target has no live secondmate metadata"
-        continue
-      }
-      meta_home=$(fm_meta_get "$meta" home)
-      [ -n "$meta_home" ] || meta_home=$(secondmate_registry_field "$DATA/secondmates.md" "$id" home || true)
-      if ! validate_secondmate_home "$id" "$meta_home"; then
-        echo "NUDGE_SECONDMATES: secondmate $id: send failed: retry target home unsafe: $VALIDATION_ERROR"
+      fi
+      lock=$(fm_secondmate_nudge_transaction_lock_path "$STATE" "$id" 2>/dev/null || true)
+      if [ -z "$lock" ] || ! fm_lock_acquire_wait "$lock"; then
+        echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: send failed: transaction lock failed"
         continue
       fi
-      home_real="$VALIDATED_HOME"
-      [ "$home_real" = "$home" ] || {
-        echo "NUDGE_SECONDMATES: secondmate $id: send failed: retry target home changed"
-        continue
-      }
-      head=$(git -C "$home_real" rev-parse HEAD 2>/dev/null || true)
-      [ -n "$head" ] && [ "$head" = "$commit" ] || {
-        echo "NUDGE_SECONDMATES: secondmate $id: send failed: retry target is not at recorded instruction commit"
-        continue
-      }
-      if out=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-send.sh" "$selector" "$SECOND_MATE_NUDGE_MESSAGE" 2>&1); then
-        rm -f "$marker"
-        echo "BOOTSTRAP_INFO: nudged $selector with '$SECOND_MATE_NUDGE_MESSAGE'"
-      else
-        echo "NUDGE_SECONDMATES: secondmate $id: send failed: $(first_line "$out")"
-      fi
+      secondmate_retry_pending_nudge_locked "$marker"
+      fm_lock_release "$lock" || true
     done
   }
 
