@@ -6,14 +6,15 @@
 # fm-pr-check.sh trigger never fires.
 #
 # Matrix:
-#   (a) merge records pr= and pr_head= before merging, and merges
-#   (b) merge is refused when gh-axi pr merge itself fails (no silent success)
-#   (c) extra gh-axi pr merge args are forwarded after number and --repo
-#   (d) merge is refused before gh-axi when task meta is missing
-#   (e) PR URL is parsed to number + --repo for gh-axi (defaults to --squash)
-#   (f) malformed PR URL fails fast without calling gh-axi
-#   (g) explicit merge method is not overridden by the default --squash
-#   (h) repo override args fail fast because the repo comes from the URL
+#   (a) a green, mergeable PR records pr= and pr_head= before merging
+#   (b) a non-green PR is refused unless --allow-red is explicit
+#   (c) merge is refused when gh-axi pr merge itself fails (no silent success)
+#   (d) extra gh-axi pr merge args are forwarded after number and --repo
+#   (e) merge is refused before gh-axi when task meta is missing
+#   (f) PR URL is parsed to number + --repo for gh-axi (defaults to --squash)
+#   (g) malformed PR URL fails fast without calling gh-axi
+#   (h) explicit merge method is not overridden by the default --squash
+#   (i) repo override args fail fast because the repo comes from the URL
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -49,6 +50,10 @@ add_gh_mocks() {
   cat > "$case_dir/fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
+case "${1:-} ${2:-}" in
+  "pr checks") printf 'summary: "%s"\n' "${FM_FAKE_GH_CHECKS_SUMMARY:-2 passed, 0 failed, 2 total}" ;;
+  api\ *) printf '%s\n' "${FM_FAKE_GH_MERGEABLE:-true}" ;;
+esac
 exit 0
 SH
   cat > "$case_dir/fakebin/gh" <<SH
@@ -74,6 +79,8 @@ add_gh_mocks_merge_fails() {
 printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
 case "${1:-} ${2:-}" in
   "pr merge") echo "error: pr merge failed" >&2 ; exit 1 ;;
+  "pr checks") printf 'summary: "%s"\n' "${FM_FAKE_GH_CHECKS_SUMMARY:-2 passed, 0 failed, 2 total}" ;;
+  api\ *) printf '%s\n' "${FM_FAKE_GH_MERGEABLE:-true}" ;;
 esac
 exit 0
 SH
@@ -120,6 +127,36 @@ test_records_pr_and_head_before_merging() {
   grep -qxF 'pr merge 9 --repo example/repo --squash' "$case_dir/gh-axi.log" \
     || fail "records-before-merge: gh-axi pr merge was not invoked with number, --repo, and default --squash"
   pass "fm-pr-merge records pr= and pr_head= before invoking gh-axi pr merge"
+}
+
+test_non_green_pr_requires_explicit_override() {
+  local case_dir rc
+  case_dir=$(make_case non-green)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  FM_FAKE_GH_CHECKS_SUMMARY='2 passed, 1 failed, 3 total' FM_FAKE_GH_MERGEABLE=false \
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/12 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "non-green: fm-pr-merge should refuse"
+  assert_grep 'error: refusing to merge non-green PR' "$case_dir/stderr" \
+    "non-green: refusal did not explain the safety guard"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "non-green: gh-axi pr merge was invoked"
+
+  : > "$case_dir/gh-axi.log"
+  FM_FAKE_GH_CHECKS_SUMMARY='2 passed, 1 failed, 3 total' FM_FAKE_GH_MERGEABLE=false \
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/12 --allow-red \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "non-green: explicit override did not permit the merge"
+  grep -qxF 'pr merge 12 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+    || fail "non-green: --allow-red was forwarded or merge did not run"
+  pass "fm-pr-merge refuses a non-green PR unless --allow-red is explicit"
 }
 
 test_merge_failure_propagates_after_recording() {
@@ -302,6 +339,7 @@ test_parses_pr_url_for_gh_axi() {
 }
 
 test_records_pr_and_head_before_merging
+test_non_green_pr_requires_explicit_override
 test_merge_failure_propagates_after_recording
 test_extra_merge_args_forwarded
 test_missing_meta_refuses_before_merge

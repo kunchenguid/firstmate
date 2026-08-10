@@ -168,10 +168,17 @@ test_safe_parser_rejects_ambiguous_and_unsafe_values() {
 test_budget_accounting_reports_all_three_files_and_safe_failure() {
   local home out rc outside
   home="$TMP_ROOT/accounting-home"
-  mkdir -p "$home/config" "$home/data"
+  mkdir -p "$home/config" "$home/data" "$home/state"
   printf '10\n' > "$home/config/startup-memory-budget"
   printf 'abc\n' > "$home/data/captain.md"
   printf 'abcdef\n' > "$home/data/captain-shared.md"
+  printf 'p\n' > "$home/data/projects.md"
+  printf 'sm\n' > "$home/data/secondmates.md"
+  printf '# Backlog\n\n## In flight\n- [ ] one\n- [ ] two\n' > "$home/data/backlog.md"
+  printf 'abc\n' > "$home/state/one.meta"
+  printf '12345\n' > "$home/state/two.meta"
+  printf '1\n2\n3\n4\n5\n6\n' > "$home/state/one.status"
+  printf 'x\n' > "$home/state/orphan.status"
 
   out=$(FM_HOME="$home" "$BUDGET" report)
   assert_contains "$out" 'estimator=ceil(UTF-8 bytes / 3) conservative-local-estimate' \
@@ -182,8 +189,20 @@ test_budget_accounting_reports_all_three_files_and_safe_failure() {
     "report did not account for shared memory"
   assert_contains "$out" 'file=data/learnings.md bytes=0 estimated_tokens=0 status=absent' \
     "report did not account for absent learnings"
+  assert_contains "$out" 'budget_scope=memory-files-only' \
+    "report did not label the three-file budget scope"
   assert_contains "$out" 'total_estimated_tokens=5' "report total was not the sum of all three files"
   assert_contains "$out" 'budget_status=within-budget' "report did not classify the initial total"
+  assert_contains "$out" 'digest_file=data/projects.md bytes=2 estimated_tokens=1 status=present' \
+    "report omitted the projects context component"
+  assert_contains "$out" 'digest_file=data/secondmates.md bytes=3 estimated_tokens=1 status=present' \
+    "report omitted the secondmates context component"
+  assert_contains "$out" 'digest_backlog_rows=2 limit=80' \
+    "report omitted the bounded backlog component"
+  assert_contains "$out" 'digest_meta_files=2 bytes=10 estimated_tokens=4' \
+    "report omitted task metadata bytes"
+  assert_contains "$out" 'digest_status_tail_files=2 lines_per_file=5 bytes=12 estimated_tokens=4' \
+    "report omitted bounded status-tail bytes"
 
   printf 'abcdefabcdefabcdefabcdef\n' > "$home/data/learnings.md"
   out=$(FM_HOME="$home" "$BUDGET" report)
@@ -201,7 +220,7 @@ test_budget_accounting_reports_all_three_files_and_safe_failure() {
   assert_contains "$out" 'memory file is not an ordinary regular file' \
     "accounting failure did not identify the unsafe memory file"
   [ "$(<"$outside")" = outside ] || fail "accounting failure changed a symlink target"
-  pass "budget accounting sums the three startup files and reports safe failures"
+  pass "budget accounting labels its three-file scope and reports whole-digest component sizes"
 }
 
 new_propagation_world() {

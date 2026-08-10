@@ -1214,22 +1214,36 @@ TELEMETRY_GATE_SOURCE=delivery
 TELEMETRY_GATE_RESULT=incomplete
 TELEMETRY_STEP_RERUNS=null
 TELEMETRY_GATE_RUN_ID=
+TELEMETRY_GATE_REFUSAL=
 telemetry_status_is_own_terminal_run() {  # <worktree> <axi-status-output>
   local wt=$1 out=$2 branch run_id run_branch run_head outcome
   TELEMETRY_GATE_RUN_ID=
-  branch=$(git -C "$wt" symbolic-ref --quiet --short HEAD 2>/dev/null) || return 1
+  TELEMETRY_GATE_REFUSAL=
+  if ! branch=$(git -C "$wt" symbolic-ref --quiet --short HEAD 2>/dev/null); then
+    TELEMETRY_GATE_REFUSAL='branch mismatch'
+    return 1
+  fi
   run_id=$(fm_nm_strip_quotes "$(fm_nm_field "$out" id)")
-  [ -n "$run_id" ] || return 1
+  if [ -z "$run_id" ]; then
+    TELEMETRY_GATE_REFUSAL='no run id'
+    return 1
+  fi
   run_branch=$(fm_nm_strip_quotes "$(fm_nm_field "$out" branch)")
-  [ "$run_branch" = "$branch" ] || return 1
+  if [ "$run_branch" != "$branch" ]; then
+    TELEMETRY_GATE_REFUSAL='branch mismatch'
+    return 1
+  fi
   run_head=$(fm_nm_strip_quotes "$(fm_nm_field "$out" head)")
-  fm_nm_head_matches_worktree "$wt" "$run_head" || return 1
+  if ! fm_nm_head_matches_worktree "$wt" "$run_head"; then
+    TELEMETRY_GATE_REFUSAL='head mismatch'
+    return 1
+  fi
   outcome=$(fm_nm_strip_quotes "$(fm_nm_field "$out" outcome)")
   case "$outcome" in
     passed|checks-passed) TELEMETRY_GATE_RESULT=green ;;
     failed) TELEMETRY_GATE_RESULT=failed ;;
     cancelled) TELEMETRY_GATE_RESULT=cancelled ;;
-    *) return 1 ;;
+    *) TELEMETRY_GATE_REFUSAL='unrecognized outcome'; return 1 ;;
   esac
   TELEMETRY_GATE_RUN_ID=$run_id
   return 0
@@ -1261,11 +1275,19 @@ observe_telemetry_gate_facts() {  # <worktree>
   TELEMETRY_GATE_RESULT=incomplete
   TELEMETRY_STEP_RERUNS=null
   TELEMETRY_GATE_RUN_ID=
+  TELEMETRY_GATE_REFUSAL=
   [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ] && [ -d "$wt" ] || return 0
-  command -v no-mistakes >/dev/null 2>&1 || return 0
-  out=$(fm_nm_run "$wt" "$NM_TEARDOWN_TIMEOUT" axi status)
-  telemetry_status_is_own_terminal_run "$wt" "$out" || return 0
-  TELEMETRY_GATE_SOURCE=no-mistakes
+  if ! command -v no-mistakes >/dev/null 2>&1; then
+    TELEMETRY_GATE_REFUSAL='no no-mistakes on PATH'
+  elif ! out=$(fm_nm_run_checked "$wt" "$NM_TEARDOWN_TIMEOUT" axi status); then
+    TELEMETRY_GATE_REFUSAL='status query failed'
+  elif telemetry_status_is_own_terminal_run "$wt" "$out"; then
+    TELEMETRY_GATE_SOURCE=no-mistakes
+  fi
+  if [ "$TELEMETRY_GATE_SOURCE" != no-mistakes ]; then
+    echo "teardown: no-mistakes gate facts unavailable for $ID: $TELEMETRY_GATE_REFUSAL" >&2
+    return 0
+  fi
   # An unreadable step table leaves the count unknown; it never demotes an
   # observed gate result, because the result and the count are separate facts.
   if reruns=$(telemetry_step_reruns_from_stats "$wt" "$TELEMETRY_GATE_RUN_ID"); then

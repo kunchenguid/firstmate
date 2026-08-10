@@ -5,8 +5,8 @@
 #   fm-startup-memory-budget.sh report
 #
 # `read` prints the one validated effective budget from
-# config/startup-memory-budget.  `report` prints the stable local estimate for
-# data/captain.md, data/captain-shared.md, and data/learnings.md together.
+# config/startup-memory-budget.  `report` labels that three-file budget scope
+# and also prints sizes for the other bounded session-start digest components.
 # Bootstrap owns default materialization; this command never creates or repairs
 # configuration, so an absent, malformed, symlinked, hardlinked, or otherwise
 # unsafe value is a concrete error rather than an inferred default.
@@ -17,6 +17,7 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 # shellcheck source=bin/fm-startup-memory-budget-lib.sh
 . "$SCRIPT_DIR/fm-startup-memory-budget-lib.sh"
@@ -38,7 +39,9 @@ read_budget() {
 }
 
 report() {
-  local budget bytes tokens presence total=0 shared_tokens=0 role=primary
+  local budget bytes tokens presence total=0 shared_tokens=0 role=primary file
+  local backlog_limit status_tail backlog_rows=0 meta_files=0 meta_bytes=0
+  local status_files=0 status_bytes=0 component_tokens
   if ! budget=$(read_budget); then
     return 2
   fi
@@ -50,6 +53,7 @@ report() {
   printf 'estimator=ceil(UTF-8 bytes / 3) conservative-local-estimate\n'
   printf 'role=%s\n' "$role"
   printf 'effective_budget_tokens=%s\n' "$budget"
+  printf 'budget_scope=memory-files-only\n'
   for file in captain.md captain-shared.md learnings.md; do
     if ! fm_startup_memory_measure_file "$DATA/$file" >/dev/null; then
       print_error "$FM_STARTUP_MEMORY_BUDGET_ERROR"
@@ -73,6 +77,48 @@ report() {
     && ! fm_startup_memory_decimal_le "$shared_tokens" "$budget"; then
     printf 'exception=primary-owned-shared-file-alone-exceeds-budget\n'
   fi
+
+  for file in projects.md secondmates.md; do
+    if ! fm_startup_memory_measure_file "$DATA/$file" >/dev/null; then
+      print_error "$FM_STARTUP_MEMORY_BUDGET_ERROR"
+      return 2
+    fi
+    printf 'digest_file=data/%s bytes=%s estimated_tokens=%s status=%s\n' \
+      "$file" "$FM_STARTUP_MEMORY_MEASURE_BYTES" \
+      "$FM_STARTUP_MEMORY_MEASURE_TOKENS" "$FM_STARTUP_MEMORY_MEASURE_PRESENCE"
+  done
+
+  backlog_limit=${FM_SESSION_START_BACKLOG_LIMIT:-80}
+  case "$backlog_limit" in ''|*[!0-9]*|0) backlog_limit=80 ;; esac
+  if [ -f "$DATA/backlog.md" ]; then
+    backlog_rows=$(awk -v max="$backlog_limit" '
+      /^[-*][[:space:]]+/ && rows < max { rows++ }
+      END { print rows + 0 }
+    ' "$DATA/backlog.md")
+  fi
+  printf 'digest_backlog_rows=%s limit=%s\n' "$backlog_rows" "$backlog_limit"
+
+  for file in "$STATE"/*.meta; do
+    [ -f "$file" ] || continue
+    meta_files=$((meta_files + 1))
+    bytes=$(wc -c < "$file" | tr -d '[:space:]')
+    meta_bytes=$((meta_bytes + bytes))
+  done
+  component_tokens=$(((meta_bytes + 2) / 3))
+  printf 'digest_meta_files=%s bytes=%s estimated_tokens=%s\n' \
+    "$meta_files" "$meta_bytes" "$component_tokens"
+
+  status_tail=${FM_SESSION_START_STATUS_TAIL:-5}
+  case "$status_tail" in ''|*[!0-9]*) status_tail=5 ;; esac
+  for file in "$STATE"/*.status; do
+    [ -f "$file" ] || continue
+    status_files=$((status_files + 1))
+    bytes=$(tail -n "$status_tail" "$file" | wc -c | tr -d '[:space:]')
+    status_bytes=$((status_bytes + bytes))
+  done
+  component_tokens=$(((status_bytes + 2) / 3))
+  printf 'digest_status_tail_files=%s lines_per_file=%s bytes=%s estimated_tokens=%s\n' \
+    "$status_files" "$status_tail" "$status_bytes" "$component_tokens"
 }
 
 case "${1:-}" in

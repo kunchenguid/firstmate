@@ -76,6 +76,10 @@ SH
   cat > "$fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
+case "${1:-} ${2:-}" in
+  "pr checks") printf '%s\n' 'summary: "2 passed, 0 failed, 2 total"' ;;
+  api\ *) printf '%s\n' true ;;
+esac
 exit "${FM_TEST_GH_AXI_RC:-0}"
 SH
   # Plain glab, reproducing the real CLI's contract: its field output on stdout

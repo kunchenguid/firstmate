@@ -7,7 +7,8 @@
 # Merge method defaults to --squash when the caller passes none of --squash,
 # --merge, --rebase, or --method after the optional -- separator. Extra args
 # must not include --repo or -R because the repository comes only from the URL.
-# Usage: fm-pr-merge.sh <task-id> <pr-url> [-- <extra gh-axi pr merge args>]
+# A non-green PR requires --allow-red before the optional -- separator.
+# Usage: fm-pr-merge.sh <task-id> <pr-url> [--allow-red] [-- <extra gh-axi pr merge args>]
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -37,6 +38,11 @@ PR_OWNER=$FM_PR_OWNER
 PR_REPO=$FM_PR_REPO
 PR_NUMBER=$FM_PR_NUMBER
 shift 2
+ALLOW_RED=0
+if [ "${1:-}" = "--allow-red" ]; then
+  ALLOW_RED=1
+  shift
+fi
 [ "${1:-}" = "--" ] && shift
 
 caller_has_merge_method() {
@@ -75,6 +81,30 @@ grep -qxF "pr=$URL" "$META" || {
   echo "error: PR metadata recording failed" >&2
   exit 1
 }
+
+CHECKS_OUTPUT=
+MERGEABLE_OUTPUT=
+CHECKS_GREEN=0
+MERGEABLE_GREEN=0
+if CHECKS_OUTPUT=$(gh-axi pr checks "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" 2>&1); then
+  if printf '%s\n' "$CHECKS_OUTPUT" \
+    | grep -Eq '^summary: "[0-9]+ passed, 0 failed(, [0-9]+ skipped)?, [1-9][0-9]* total"$'; then
+    CHECKS_GREEN=1
+  fi
+fi
+if MERGEABLE_OUTPUT=$(gh-axi api "/repos/$PR_OWNER/$PR_REPO/pulls/$PR_NUMBER" \
+  --jq '.mergeable == true and .mergeable_state == "clean"' 2>&1); then
+  if printf '%s\n' "$MERGEABLE_OUTPUT" | grep -qx true; then
+    MERGEABLE_GREEN=1
+  fi
+fi
+
+if { [ "$CHECKS_GREEN" -ne 1 ] || [ "$MERGEABLE_GREEN" -ne 1 ]; } \
+  && [ "$ALLOW_RED" -ne 1 ]; then
+  echo "error: refusing to merge non-green PR $URL; pass --allow-red only with captain authorization" >&2
+  printf '%s\n' "$CHECKS_OUTPUT" "$MERGEABLE_OUTPUT" >&2
+  exit 1
+fi
 
 merge_args=()
 if ! caller_has_merge_method "$@"; then

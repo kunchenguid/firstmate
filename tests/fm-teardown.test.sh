@@ -2555,6 +2555,28 @@ test_teardown_derives_quality_and_cost_from_observable_facts() {
   pass "teardown seals quality from gate facts, leaves cost absent, and says when a payload was superseded"
 }
 
+test_teardown_notes_gate_observation_branch_mismatch() {
+  local case_dir head rc
+  case_dir=$(make_case telemetry-branch-mismatch-note)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  seed_teardown_telemetry "$case_dir" || fail "could not seed branch-mismatch teardown telemetry"
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+
+  rc=0
+  FM_FAKE_AXI_STATUS="$(terminal_axi_status_toon fm/another-task "$head" passed)" \
+    FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "telemetry-branch-mismatch-note: teardown must remain non-blocking"
+  assert_grep 'teardown: no-mistakes gate facts unavailable for task-x1: branch mismatch' \
+    "$case_dir/stderr" "telemetry-branch-mismatch-note: missing refused-precondition note"
+  jq -e 'select(.eventType=="attempt-terminal" and .terminal.gateFacts=={source:"delivery",result:"incomplete",stepReruns:null})' \
+    "$case_dir/data/routing-outcomes.jsonl" >/dev/null \
+    || fail "telemetry-branch-mismatch-note: existing incomplete fallback changed"
+  pass "teardown names a branch mismatch without blocking its incomplete telemetry seal"
+}
+
 test_teardown_keeps_a_green_gate_accepted_and_a_cancelled_gate_distinct() {
   local case_dir ledger head sheet
   case_dir=$(make_case telemetry-green-without-step-rerun-counts)
@@ -2651,6 +2673,7 @@ test_forced_teardown_retains_nested_secondmate_home_when_grandchild_close_unconf
 test_herdr_projection_teardown_retires_journal_only_after_confirmed_close
 test_herdr_projection_teardown_retains_journal_when_close_unconfirmed
 test_teardown_derives_quality_and_cost_from_observable_facts
+test_teardown_notes_gate_observation_branch_mismatch
 test_teardown_keeps_a_green_gate_accepted_and_a_cancelled_gate_distinct
 test_teardown_seals_explicit_terminal_and_missing_as_incomplete
 test_forced_teardown_still_requires_ledger_repair
