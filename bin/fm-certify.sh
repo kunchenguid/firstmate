@@ -69,7 +69,9 @@
 #   2  usage error
 #   3  LANDED_WITH_VERIFICATION_GAP - an applicable predicate was OBSERVED unmet
 #   4  LANDED_WITH_VERIFICATION_GAP - an applicable predicate could not be
-#      observed at all, so certification may not be asserted
+#      observed at all and none was observed unmet, so certification may not be
+#      asserted. An observed failure outranks an unobservable one: 3 says what
+#      is known to be wrong, and 4 may never be used to soften it.
 #
 # Environment:
 #   FM_HOME                   operational home to read
@@ -304,14 +306,17 @@ while IFS='	' read -r name result reason route; do
     FAIL)
       GAPS="${GAPS:+$GAPS,}$name:unmet"
       CERT_STATE=$STATE_GAP
-      [ "$CERT_EXIT" = "$EXIT_UNOBSERVED" ] || CERT_EXIT=$EXIT_UNMET
+      # An observed unmet predicate DOMINATES. It is a positive finding, and a
+      # sibling predicate nobody could read must never launder it into
+      # "unmeasured": that reports a known failure as an unknown, which reads as
+      # the milder of the two while being strictly worse to act on.
+      CERT_EXIT=$EXIT_UNMET
       ;;
     *)
       GAPS="${GAPS:+$GAPS,}$name:could-not-observe"
       CERT_STATE=$STATE_GAP
-      # Could-not-observe dominates: a run holding both an observed failure and
-      # an unobservable predicate is not merely failing, it is unmeasured.
-      CERT_EXIT=$EXIT_UNOBSERVED
+      # Could-not-observe applies only while nothing has been observed unmet.
+      [ "$CERT_EXIT" = "$EXIT_UNMET" ] || CERT_EXIT=$EXIT_UNOBSERVED
       ;;
   esac
 done <<EOF

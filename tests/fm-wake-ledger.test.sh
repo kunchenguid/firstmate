@@ -555,6 +555,71 @@ test_critic_independence_is_recorded_per_dimension() {
   pass "independence is recorded per dimension, so a shared pool is never reported as plain independent"
 }
 
+test_identity_is_derived_per_run_and_the_branch_reports_its_weakest() {
+  local home file db repo ind
+  home=$(critic_home critic-per-run)
+  file=$(ledger_file "$home")
+  db="$home/pipeline.sqlite"
+  repo="$home/repo"
+  # ONE branch, TWO runs, two genuinely different reviewers: the first ran the
+  # maker's own model, the second ran another vendor's. That is two answers, not
+  # an absence of answers, so the branch reports its WEAKEST member. Folding the
+  # identity across runs first would manufacture "the reviews disagree" and hand
+  # back could-not-observe, which is an ambiguity the record does not contain.
+  fm_test_pipeline_db "$db" "$repo" \
+    "fm/alpha|anthropic|claude-opus-5" "fm/alpha|openai|gpt-5.6-sol" \
+    || { pass "SKIP (python3 unavailable): identity per run"; return; }
+
+  FM_CONFIG_OVERRIDE="$home/config" FM_PIPELINE_STATE_DB="$db" \
+    ledger "$home" task alpha --harness claude --model opus \
+    --critic-repo "$repo" --critic-branch fm/alpha \
+    || fail "critic per-run: terminal record failed"
+  ind=$(field_of "$file" task critic_independence)
+  case "$ind" in
+    *"model:not-independent"*) ;;
+    *) fail "critic per-run: the run that reran the maker's own model was not the weakest: '$ind'" ;;
+  esac
+  case "$ind" in
+    *"model:unknown"*)
+      fail "critic per-run: two different reviewers dissolved into could-not-observe: '$ind'" ;;
+  esac
+  case "$ind" in
+    *"pool:not-independent"*) ;;
+    *) fail "critic per-run: a run on the maker's own pool was not reported: '$ind'" ;;
+  esac
+  pass "identity computed per run, branch view reports weakest member"
+}
+
+test_an_observed_dependence_is_never_erased_by_an_unobserved_run() {
+  local home file db repo ind
+  home=$(critic_home critic-dependence-survives)
+  file=$(ledger_file "$home")
+  db="$home/pipeline.sqlite"
+  repo="$home/repo"
+  # One run whose reviewer demonstrably shared the fixer's session, and one run
+  # whose sessions were never recorded at all. What nobody looked at may weaken
+  # a claim of independence; it may NEVER erase a finding of dependence, or a
+  # gap launders a known problem into an unknown one.
+  fm_test_pipeline_db "$db" "$repo" \
+    "fm/alpha|openai|gpt-5.6-sol|review|1" "fm/alpha|openai|gpt-5.6-sol||none" \
+    || { pass "SKIP (python3 unavailable): observed dependence survives"; return; }
+
+  FM_CONFIG_OVERRIDE="$home/config" FM_PIPELINE_STATE_DB="$db" \
+    ledger "$home" task alpha --harness claude --model opus \
+    --critic-repo "$repo" --critic-branch fm/alpha \
+    || fail "critic survives: terminal record failed"
+  ind=$(field_of "$file" task critic_independence)
+  case "$ind" in
+    *"process:not-independent"*) ;;
+    *) fail "critic survives: an observed dependence was erased by an unobserved run: '$ind'" ;;
+  esac
+  case "$ind" in
+    *"process:unknown"*)
+      fail "critic survives: a known dependence was laundered into an unknown: '$ind'" ;;
+  esac
+  pass "observed dependence survives an unobserved sibling run"
+}
+
 test_undeclared_mapping_records_unknown_never_independent() {
   local home file db repo ind
   home=$(critic_home critic-undeclared no)
@@ -1029,6 +1094,8 @@ test_a_failure_that_is_never_torn_down_is_recorded_not_silent
 test_the_report_names_evidence_and_refuses_a_rate
 test_critic_fields_resolve_from_the_pipeline_record
 test_critic_independence_is_recorded_per_dimension
+test_identity_is_derived_per_run_and_the_branch_reports_its_weakest
+test_an_observed_dependence_is_never_erased_by_an_unobserved_run
 test_undeclared_mapping_records_unknown_never_independent
 test_critic_fields_record_unknown_for_what_is_unresolvable
 test_unresolvable_critic_records_unknown_and_never_inherits

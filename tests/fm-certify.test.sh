@@ -234,6 +234,42 @@ test_an_unreadable_repository_is_could_not_observe_not_a_refusal() {
   pass "a repository that cannot be entered is could-not-observe, never an observed refusal"
 }
 
+test_an_observed_failure_is_never_softened_by_an_unobservable_sibling() {
+  local dims certify_fold out rc
+  # What nobody could observe may weaken a claim of independence. It may never
+  # weaken a FINDING of dependence: reporting a known failure as unmeasured
+  # reads as the milder of the two while being strictly worse to act on.
+
+  # ONE: across DIMENSIONS. The reviewer demonstrably shared the fixer's
+  # session, and this home declares no vocabulary mapping so the identity
+  # dimensions cannot resolve at all. The observed dependence must survive.
+  dims=$(make_case observed-over-unobservable yes no)
+  fm_test_pipeline_db "$dims/pipeline.sqlite" "$dims/repo" "fm/alpha|openai|gpt-5.6-sol|review|1" \
+    || { pass "SKIP (python3 unavailable): an observed failure is never softened"; return; }
+  out=$(certify "$dims" --repo "$dims/repo" --branch fm/alpha \
+    --maker-harness claude --maker-model opus --mode local-only) && rc=0 || rc=$?
+  [ "$rc" = 3 ] || fail "asymmetry: an observed dependence was softened to unmeasured (rc=$rc):"$'\n'"$out"
+  assert_contains "$out" "process:not-independent" \
+    "asymmetry: the observed dependence was not named"
+  assert_contains "$out" "model:could-not-observe" \
+    "asymmetry: the unresolvable dimensions were dropped instead of reported beside it"
+
+  # TWO: across PREDICATES. An attestation observed unmet beside an
+  # independence nobody could establish must exit as observed-unmet.
+  certify_fold=$(make_case observed-over-unobservable-fold no yes)
+  printf '#!/bin/sh\necho "no note covers those bytes"\nexit 1\n' > "$certify_fold/attest"
+  chmod +x "$certify_fold/attest"
+  out=$(FM_CERTIFY_ATTEST="$certify_fold/attest" certify "$certify_fold" \
+    --repo "$certify_fold/repo" --branch fm/never-validated \
+    --maker-harness claude --maker-model opus --mode local-only --head deadbeef) && rc=0 || rc=$?
+  [ "$rc" = 3 ] || fail "asymmetry: an observed unmet predicate reported as unmeasured (rc=$rc):"$'\n'"$out"
+  assert_contains "$out" "attestation:unmet" \
+    "asymmetry: the observed unmet predicate was not named in the gap"
+  assert_contains "$out" "independence(" \
+    "asymmetry: the unobservable predicate was dropped from the gap"
+  pass "an observed failure outranks an unobservable sibling, and both are still named"
+}
+
 # --- the fourth, structural value --------------------------------------------
 
 test_not_applicable_is_carried_with_its_route() {
@@ -365,6 +401,7 @@ test_a_review_with_no_recorded_session_is_could_not_observe
 test_one_unobserved_run_is_not_masked_by_a_sibling_that_recorded_one
 test_an_observed_attestation_failure_is_not_labelled_not_independent
 test_an_unreadable_repository_is_could_not_observe_not_a_refusal
+test_an_observed_failure_is_never_softened_by_an_unobservable_sibling
 test_undeclared_mapping_refuses_rather_than_inferring
 test_not_applicable_is_carried_with_its_route
 test_not_applicable_is_distinct_from_unobserved_on_the_same_predicate
