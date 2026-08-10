@@ -552,6 +552,7 @@ _fm_recovery_marker_arm_check() {
           fm_lock_release "$FM_WAKE_QUEUE_LOCK"
           return 1
         fi
+        # shellcheck disable=SC2034 # Output read by callers after this function returns.
         FM_RECOVERY_MARKER_ACTION='recover'
       fi
       ;;
