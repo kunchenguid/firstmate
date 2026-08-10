@@ -2130,6 +2130,17 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   fi
 
   validate_spawn_worktree "treehouse get" "$T"
+  # Pool-path collision guard: refuse before writing meta if another live task
+  # already records this canonical physical path. Orca creates unique worktrees
+  # (not pool slots), so this check is scoped to treehouse-backed spawns only.
+  # Relaunch is exempt (covered by the existing task's control lock). This
+  # guard is the first defence; fm-teardown's symmetric guard handles recovery
+  # from any collision that slips through before this check was wired in.
+  _spawn_wt_real=$(CDPATH='' cd -- "$WT" 2>/dev/null && pwd -P) || _spawn_wt_real="$WT"
+  if fm_backend_worktree_canonical_owner "$STATE" "$_spawn_wt_real" "$ID"; then
+    echo "error: worktree $WT (resolved $_spawn_wt_real) is already recorded by task $FM_WORKTREE_COLLISION_OWNER; refusing to deliver instructions to a path owned by another task - inspect or tear down $FM_WORKTREE_COLLISION_OWNER before spawning $ID" >&2
+    exit 1
+  fi
 fi
 
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't

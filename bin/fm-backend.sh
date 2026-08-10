@@ -383,6 +383,34 @@ fm_backend_endpoint_atom_valid() {  # <value>
   esac
 }
 
+# fm_backend_worktree_canonical_owner: scan <state-dir>/*.meta for any task
+# other than <exclude-id> whose recorded worktree= resolves to the same
+# canonical physical path as <canonical-path>. Sets FM_WORKTREE_COLLISION_OWNER
+# to the first matching task id and returns 0 on a collision; returns 1 when no
+# other task owns the path. Only regular (non-symlink) meta files are checked.
+# Orca worktrees are created fresh per task and are never pooled, so callers
+# that already know the backend may skip this check for backend=orca.
+fm_backend_worktree_canonical_owner() {  # <state-dir> <canonical-path> <exclude-id>
+  local state=$1 canonical=$2 exclude_id=$3 meta id wt_raw wt_real
+  # shellcheck disable=SC2034 # Output globals are consumed by sourcing callers.
+  FM_WORKTREE_COLLISION_OWNER=
+  [ -d "$state" ] || return 1
+  for meta in "$state"/*.meta; do
+    [ -f "$meta" ] && [ ! -L "$meta" ] || continue
+    id=${meta##*/}
+    id=${id%.meta}
+    [ "$id" != "$exclude_id" ] || continue
+    wt_raw=$(grep '^worktree=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2-) || continue
+    [ -n "$wt_raw" ] || continue
+    wt_real=$(CDPATH='' cd -- "$wt_raw" 2>/dev/null && pwd -P) || continue
+    [ "$wt_real" = "$canonical" ] || continue
+    # shellcheck disable=SC2034 # Output globals are consumed by sourcing callers.
+    FM_WORKTREE_COLLISION_OWNER=$id
+    return 0
+  done
+  return 1
+}
+
 fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
   local meta=$1 id=$2 backend_count backend window worktree project binding_count binding
   local session pane recorded_session workspace tab terminal worktree_id surface

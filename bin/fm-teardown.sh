@@ -2347,6 +2347,29 @@ if [ "$FORCE" != "--force" ] \
   fi
 fi
 
+# Pool-path collision guard: detect whether another task's meta already records
+# the same canonical physical path for its worktree. When a collision is found:
+#   - Skip every operation that reads or mutates the worktree directory: Fix 1
+#     (no-mistakes run abort), Fix 2 (worktree process reap), dirty/unlanded
+#     checks, branch delete, hook removal, and treehouse return. Those steps
+#     would operate on the new owner's copy, not this stale task's.
+#   - Still run Fix 2 scoped to TASK_TMP (per-task /tmp/fm-<id>/, never shared).
+#   - Still kill this task's endpoint pane and remove its volatile-only records.
+# Orca worktrees are created fresh per task and are not pooled; the Orca path
+# match and worktree removal paths remain correct and are unchanged.
+# A force-discard does not override the collision guard: the path genuinely
+# belongs to the new owner, and neither force nor discard authority transfers it.
+WT_OWNED_BY_OTHER=
+if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] && [ -n "$WT" ]; then
+  _td_wt_real=$(CDPATH='' cd -- "$WT" 2>/dev/null && pwd -P) || _td_wt_real="$WT"
+  if fm_backend_worktree_canonical_owner "$STATE" "$_td_wt_real" "$ID"; then
+    WT_OWNED_BY_OTHER=$FM_WORKTREE_COLLISION_OWNER
+    echo "notice: worktree $WT (resolved $_td_wt_real) is now recorded by task $WT_OWNED_BY_OTHER; skipping worktree cleanup and process reaping for $ID to protect the new owner - retiring only the endpoint and task-local volatile state" >&2
+  fi
+fi
+
+if [ -z "$WT_OWNED_BY_OTHER" ]; then
+
 if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$FORCE" != "--force" ]; then
   if ! inspectable_git_worktree "$WT"; then
     echo "REFUSED: Orca ship task $ID has no inspectable git worktree at ${WT:-<missing>}." >&2
@@ -2371,16 +2394,27 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
   fi
 fi
 
+fi  # end of: if [ -z "$WT_OWNED_BY_OTHER" ] (worktree safety checks skipped when another task owns the path)
+
 # Every landed/discard-work refusal above has now passed (or --force skipped
-# them). Fix 1 and Fix 2 (see script header) run here, unconditionally on
-# --force, and before ANY destructive step below - a still-parked run or a
-# leaked process can own live work in this exact worktree. Not for
-# kind=secondmate: a secondmate home's own runtime lifecycle is owned by the
-# dedicated process-event and firstmate-home removal machinery further below,
-# not by task-worktree cleanup.
+# them, or the path is owned by another task and those checks were bypassed).
+# Fix 1 and Fix 2 (see script header) run here before ANY destructive step -
+# a still-parked run or a leaked process can own live work in this worktree.
+# When a collision is detected, Fix 1 and the worktree-scoped Fix 2 are
+# skipped: reading another task's worktree HEAD is wrong, and process-reaping
+# under a path now owned by another task would kill the new owner's workers.
+# TASK_TMP (/tmp/fm-<id>/) is unique per task id and is never shared, so its
+# reap is safe regardless of a path collision. Not for kind=secondmate: a
+# secondmate home's own runtime lifecycle is owned by the dedicated
+# process-event and firstmate-home removal machinery further below.
 if [ "$KIND" != secondmate ]; then
-  conclude_task_no_mistakes_run "$WT"
-  reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
+  if [ -z "$WT_OWNED_BY_OTHER" ]; then
+    conclude_task_no_mistakes_run "$WT"
+    reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
+  else
+    [ -z "$TASK_TMP" ] || [ ! -d "$TASK_TMP" ] || \
+      reap_task_worktree_processes tasktmp "$TASK_TMP"
+  fi
 fi
 
 # Fix 3 (see script header): sweep remote job workers abandoned by an already
@@ -2422,7 +2456,7 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   fi
   [ -z "$T_ORCA" ] || fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
   fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
-elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
+elif [ -z "$WT_OWNED_BY_OTHER" ] && [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
   if [ "$branch" != "HEAD" ]; then
     if git -C "$WT" checkout --detach -q 2>/dev/null; then
@@ -2436,6 +2470,8 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   # to pool. treehouse resolves the pool from the working directory, so run it from
   # the project. teardown_treehouse_return tolerates transient and stale git locks
   # left by a killed crew process; see the script header for retry and stale-lock proof.
+  # WT_OWNED_BY_OTHER is empty here (guarded by the elif condition), so this path
+  # only runs when no other current task has claimed this pool slot.
   post_lock_cleanup_check=
   if [ "$FORCE" != "--force" ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ]; then
     post_lock_cleanup_check=validate_worktree_teardown_safety

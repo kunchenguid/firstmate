@@ -288,6 +288,28 @@ fm_send_resolve_target "$RAW_TARGET" || exit 1
 T=$RESOLVED_TARGET
 shift
 
+# Terminal-task guard: refuse delivery when a task selector's status log ends
+# on a done: or failed: verb. A task at either of those verbs has exited and no
+# longer reads input; sending to it would be a no-op at best and a stale-endpoint
+# mutation at worst. needs-decision: and blocked: are deliberately excluded: those
+# states still expect a decision answer or blocker resolution from firstmate.
+# Only applies when the target is a task selector with a readable status log; an
+# explicit backend target (which has no local ledger) is left unchecked.
+if [ -n "$TARGET_SELECTOR" ] && [ -n "$TARGET_META" ]; then
+  _send_task_id=$(fm_send_id_from_meta "$TARGET_META")
+  _send_status_log="$STATE/$_send_task_id.status"
+  if [ -f "$_send_status_log" ]; then
+    _send_last_line=$(tail -1 "$_send_status_log" 2>/dev/null)
+    _send_last_verb=$(status_line_verb "$_send_last_line")
+    case "$_send_last_verb" in
+      done|failed)
+        echo "error: task $_send_task_id has already reported $_send_last_verb; refusing to deliver input to a terminal task - it is no longer reading messages" >&2
+        exit 1
+        ;;
+    esac
+  fi
+fi
+
 # Collect --resolve-key flags (answerer-closes; see the header contract). They
 # must precede --key or the message text; everything after the last flag is the
 # message exactly as before, so ordinary sends are byte-identical.
