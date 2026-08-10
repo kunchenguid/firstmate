@@ -148,7 +148,7 @@ export default function (pi: { on?: (event: string, handler: () => void) => void
   });
 }
 TS
-  omp_out=$(OMPCODE= CLAUDECODE=1 FM_LIVE_ROOT="$ROOT" "$omp_path" -p --no-session --no-tools \
+  omp_out=$(OMPCODE='' CLAUDECODE=1 FM_LIVE_ROOT="$ROOT" "$omp_path" -p --no-session --no-tools \
     -e "$LAB/omp-session-identity.ts" probe 2>&1)
   omp_status=$?
   [ "$omp_status" -eq 0 ] || fail \
