@@ -101,12 +101,13 @@ jq_state() { jq "$@" "$STATE"; }
 save() { local tmp="$STATE.tmp.$$"; cat > "$tmp" && mv "$tmp" "$STATE"; }
 
 cmd=${1:-}; sub=${2:-}
-ws=""; label=""
+ws=""; label=""; pane_arg=""
 args=("$@")
 for ((i=0; i<${#args[@]}; i++)); do
   case "${args[$i]}" in
     --workspace) ws=${args[$((i+1))]:-} ;;
     --label) label=${args[$((i+1))]:-} ;;
+    --pane) pane_arg=${args[$((i+1))]:-} ;;
   esac
 done
 
@@ -156,6 +157,15 @@ case "$cmd $sub" in
     else
       printf '{"error":{"code":"agent_not_found","message":"agent target %s not found"}}\n' "$pane"
     fi
+    ;;
+  "pane process-info")
+    # A freshly created task pane always reports as a healthy bare zsh - this
+    # fake never models an rc `exec` replacement (issue #1912's own hijacked
+    # case is covered by a dedicated non-stateful fixture instead). The pid is
+    # synthetic (never a real OS process) because
+    # fm_backend_herdr_created_pane_shell_intact only reads this JSON identity,
+    # never the OS process table.
+    printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"%s","shell_pid":999999,"foreground_process_group_id":999999,"foreground_processes":[{"pid":999999,"name":"zsh","argv0":"zsh"}]}}}\n' "$pane_arg"
     ;;
   *) : ;;
 esac
@@ -617,7 +627,9 @@ test_create_task_closes_and_replaces_dead_pane_husk() {
   printf '{"error":{"code":"pane_not_found","message":"pane w1:p2 not found"}}\n' > "$resp/3.out"
   # 4: tab create -> the replacement tab (created BEFORE the husk is closed)
   printf '{"result":{"tab":{"tab_id":"w1:t3"},"root_pane":{"pane_id":"w1:p3"}}}\n' > "$resp/4.out"
-  printf '{"result":{"tabs":[{"tab_id":"w1:t3","label":"fm-husk1","workspace_id":"w1"}]}}\n' > "$resp/6.out"
+  # 5: pane process-info -> the new pane's own shell (issue #1912 proof)
+  death_process_info_fixture w1:p3 999999 > "$resp/5.out"
+  printf '{"result":{"tabs":[{"tab_id":"w1:t3","label":"fm-husk1","workspace_id":"w1"}]}}\n' > "$resp/7.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-husk1 /tmp/proj' "$ROOT" ) \
@@ -645,7 +657,9 @@ test_create_task_closes_and_replaces_no_agent_husk() {
   printf '{"error":{"code":"agent_not_found","message":"agent target w1:p2 not found"}}\n' > "$resp/4.out"
   # 5: tab create -> the replacement tab (created BEFORE the husk is closed)
   printf '{"result":{"tab":{"tab_id":"w1:t3"},"root_pane":{"pane_id":"w1:p3"}}}\n' > "$resp/5.out"
-  printf '{"result":{"tabs":[{"tab_id":"w1:t3","label":"fm-husk2","workspace_id":"w1"}]}}\n' > "$resp/7.out"
+  # 6: pane process-info -> the new pane's own shell (issue #1912 proof)
+  death_process_info_fixture w1:p3 999999 > "$resp/6.out"
+  printf '{"result":{"tabs":[{"tab_id":"w1:t3","label":"fm-husk2","workspace_id":"w1"}]}}\n' > "$resp/8.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-husk2 /tmp/proj' "$ROOT" ) \
@@ -673,7 +687,9 @@ test_create_task_closes_all_duplicate_husks_after_replacement() {
   printf '{"result":{"pane":{"pane_id":"w1:p3"}}}\n' > "$resp/6.out"
   printf '{"error":{"code":"agent_not_found","message":"agent target w1:p3 not found"}}\n' > "$resp/7.out"
   printf '{"result":{"tab":{"tab_id":"w1:t4"},"root_pane":{"pane_id":"w1:p4"}}}\n' > "$resp/8.out"
-  printf '{"result":{"tabs":[{"tab_id":"w1:t4","label":"fm-husk-many","workspace_id":"w1"}]}}\n' > "$resp/11.out"
+  # 9: pane process-info -> the new pane's own shell (issue #1912 proof)
+  death_process_info_fixture w1:p4 999999 > "$resp/9.out"
+  printf '{"result":{"tabs":[{"tab_id":"w1:t4","label":"fm-husk-many","workspace_id":"w1"}]}}\n' > "$resp/12.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-husk-many /tmp/proj' "$ROOT" ) \
@@ -704,8 +720,10 @@ test_create_task_refuses_when_preexisting_husk_tab_remains() {
   printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/3.out"
   printf '{"error":{"code":"agent_not_found","message":"agent target w1:p2 not found"}}\n' > "$resp/4.out"
   printf '{"result":{"tab":{"tab_id":"w1:t3"},"root_pane":{"pane_id":"w1:p3"}}}\n' > "$resp/5.out"
-  printf '1\n' > "$resp/6.exit"
-  printf '{"result":{"tabs":[{"tab_id":"w1:t2","label":"fm-stale-husk","workspace_id":"w1"},{"tab_id":"w1:t3","label":"fm-stale-husk","workspace_id":"w1"}]}}\n' > "$resp/7.out"
+  # 6: pane process-info -> the new pane's own shell (issue #1912 proof)
+  death_process_info_fixture w1:p3 999999 > "$resp/6.out"
+  printf '1\n' > "$resp/7.exit"
+  printf '{"result":{"tabs":[{"tab_id":"w1:t2","label":"fm-stale-husk","workspace_id":"w1"},{"tab_id":"w1:t3","label":"fm-stale-husk","workspace_id":"w1"}]}}\n' > "$resp/8.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-stale-husk /tmp/proj' "$ROOT" 2>&1 )
@@ -753,7 +771,9 @@ test_create_task_husk_replacement_creates_before_closing() {
   printf '{"result":{"panes":[{"pane_id":"w1:p2","tab_id":"w1:t2"}]}}\n' > "$resp/2.out"
   printf '{"error":{"code":"pane_not_found","message":"pane w1:p2 not found"}}\n' > "$resp/3.out"
   printf '{"result":{"tab":{"tab_id":"w1:t3"},"root_pane":{"pane_id":"w1:p3"}}}\n' > "$resp/4.out"
-  printf '{"result":{"tabs":[{"tab_id":"w1:t3","label":"fm-order1","workspace_id":"w1"}]}}\n' > "$resp/6.out"
+  # 5: pane process-info -> the new pane's own shell (issue #1912 proof)
+  death_process_info_fixture w1:p3 999999 > "$resp/5.out"
+  printf '{"result":{"tabs":[{"tab_id":"w1:t3","label":"fm-order1","workspace_id":"w1"}]}}\n' > "$resp/7.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-order1 /tmp/proj' "$ROOT" ) \
@@ -771,6 +791,8 @@ test_create_task_creates_and_parses_ids() {
   dir="$TMP_ROOT/create-task"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   printf '{"result":{"tabs":[]}}\n' > "$resp/1.out"
   printf '{"result":{"tab":{"tab_id":"w1:t2"},"root_pane":{"pane_id":"w1:p2"}}}\n' > "$resp/2.out"
+  # 3: pane process-info -> the new pane's own shell (issue #1912 proof)
+  death_process_info_fixture w1:p2 999999 > "$resp/3.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-newtask /tmp/proj' "$ROOT" )
@@ -822,6 +844,8 @@ test_create_task_creates_with_no_focus_flag() {
   dir="$TMP_ROOT/create-task-no-focus"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   printf '{"result":{"tabs":[]}}\n' > "$resp/1.out"
   printf '{"result":{"tab":{"tab_id":"w1:t2"},"root_pane":{"pane_id":"w1:p2"}}}\n' > "$resp/2.out"
+  # 3: pane process-info -> the new pane's own shell (issue #1912 proof)
+  death_process_info_fixture w1:p2 999999 > "$resp/3.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-newtask /tmp/proj' "$ROOT" )
@@ -829,6 +853,96 @@ test_create_task_creates_with_no_focus_flag() {
   assert_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''create'$'\x1f''--workspace'$'\x1f''w1'$'\x1f''--cwd'$'\x1f''/tmp/proj'$'\x1f''--label'$'\x1f''fm-newtask'$'\x1f''--no-focus' \
     "create_task's tab create did not pass --no-focus"
   pass "fm_backend_herdr_create_task: tab create passes --no-focus"
+}
+
+# --- issue #1912: refuse a task pane whose shell was exec'd away ------------
+#
+# The herdr backend used to create the task pane as a bare interactive shell
+# and return immediately; fm-spawn.sh then TYPED the launch command into it
+# afterwards. If the operator's shell rc replaced that shell via `exec` (e.g.
+# an auto-attach `exec tmux new-session -A -s main`) before the typed text
+# arrived, the worker never started and the launch command landed in whatever
+# the replacement process was showing - on a host whose rc auto-attaches to a
+# shared session, that is the operator's own live session. `exec` keeps the
+# same pid, so only process IDENTITY (name/argv0), not pid, tells the two
+# states apart.
+
+# hijacked_process_info_fixture <pane> <pid> <name>: models a pane whose
+# tracked shell pid now runs <name> instead (an exec replacement), reusing
+# death_process_info_fixture's verified JSON shape with a non-shell name/argv0.
+hijacked_process_info_fixture() {  # <pane> <pid> <name>
+  printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"%s","shell_pid":%s,"foreground_process_group_id":%s,"foreground_processes":[{"pid":%s,"name":"%s","argv0":"%s"}]}}}\n' "$1" "$2" "$2" "$2" "$3" "$3"
+}
+
+test_create_task_refuses_when_pane_shell_was_exec_replaced() {
+  local dir log resp fb out status
+  dir="$TMP_ROOT/create-task-hijacked"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"tabs":[]}}\n' > "$resp/1.out"
+  printf '{"result":{"tab":{"tab_id":"w1:t2"},"root_pane":{"pane_id":"w1:p2"}}}\n' > "$resp/2.out"
+  # 3: pane process-info -> reproduces issue #1912: an rc `exec tmux
+  # new-session -A -s main` replaced the pane's shell before this fix's proof
+  # (and, before the fix existed at all, before the typed launch command)
+  # arrived. Same pid, but the foreground process is now "tmux".
+  hijacked_process_info_fixture w1:p2 4242 tmux > "$resp/3.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-hijacked /tmp/proj' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "create_task must refuse a pane whose shell has been exec'd away, got success: $out"
+  assert_contains "$out" "does not host a bare recognized shell" "create_task's refusal did not explain why"
+  assert_not_contains "$out" "w1:t2 w1:p2" "create_task must not echo tab/pane ids for a hijacked pane - a caller that missed the exit code must never mistake this for success"
+  pass "fm_backend_herdr_create_task: refuses (issue #1912) a pane whose shell was exec'd away right after creation, before any launch text is ever typed into it"
+}
+
+# --- fm_backend_herdr_verify_created_pane_shell: retry/no-retry semantics ---
+
+test_verify_created_pane_shell_refuses_a_confirmed_replacement_without_retrying() {
+  local dir log resp fb out status calls
+  dir="$TMP_ROOT/verify-shell-hijacked"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  hijacked_process_info_fixture w1:p2 4242 tmux > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_verify_created_pane_shell default w1:p2' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "verify_created_pane_shell must refuse a confirmed non-shell identity"
+  calls=$(grep -c $'pane\x1fprocess-info' "$log")
+  [ "$calls" -eq 1 ] || fail "a PROVEN identity change is irreversible - retrying cannot un-happen an exec, so this must sample exactly once, not poll the default budget; got $calls sample(s)"
+  pass "fm_backend_herdr_verify_created_pane_shell: refuses a confirmed exec replacement on the first sample, without wasting the retry budget"
+}
+
+test_verify_created_pane_shell_tolerates_a_transiently_busy_shell() {
+  local dir log resp fb status calls
+  dir="$TMP_ROOT/verify-shell-busy-then-ok"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # 1: the shell is momentarily not its own foreground process (e.g. rc
+  # sourcing forked a short-lived `command -v tmux`) - inconclusive, not proof
+  # of anything, so this must NOT read as a failure.
+  printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":999999,"foreground_process_group_id":555555,"foreground_processes":[{"pid":555555,"name":"command","argv0":"command"}]}}}\n' > "$resp/1.out"
+  # 2: the shell is back to being its own foreground process, and it is
+  # recognized - proven intact.
+  death_process_info_fixture w1:p2 999999 > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_verify_created_pane_shell default w1:p2' "$ROOT"
+  status=$?
+  [ "$status" -eq 0 ] || fail "verify_created_pane_shell should tolerate a transiently busy (not yet foreground) shell and succeed once it resolves"
+  calls=$(grep -c $'pane\x1fprocess-info' "$log")
+  [ "$calls" -eq 2 ] || fail "expected exactly 2 samples (one inconclusive, one proof), got $calls"
+  pass "fm_backend_herdr_verify_created_pane_shell: tolerates a transiently busy shell (rc still sourcing) instead of false-refusing it"
+}
+
+test_verify_created_pane_shell_gives_up_after_budget_exhausted() {
+  local dir log resp fb status calls
+  dir="$TMP_ROOT/verify-shell-never-resolves"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":999999,"foreground_process_group_id":555555,"foreground_processes":[{"pid":555555,"name":"command","argv0":"command"}]}}}\n' > "$resp/1.out"
+  cp "$resp/1.out" "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_CREATED_SHELL_PROOF_POLLS=2 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_verify_created_pane_shell default w1:p2' "$ROOT" >/dev/null 2>&1
+  status=$?
+  [ "$status" -ne 0 ] || fail "verify_created_pane_shell must refuse (fail-safe) if the shell never legibly proves intact within the budget"
+  calls=$(grep -c $'pane\x1fprocess-info' "$log")
+  [ "$calls" -eq 2 ] || fail "expected exactly the configured 2-sample budget to be spent, got $calls"
+  pass "fm_backend_herdr_verify_created_pane_shell: refuses (fail-safe) rather than guessing when the shell never legibly proves intact within the budget"
 }
 
 # --- default-on disposable presentation projection --------------------------
@@ -4243,6 +4357,10 @@ test_create_task_refuses_when_agent_state_ambiguous
 test_create_task_husk_replacement_creates_before_closing
 test_create_task_creates_and_parses_ids
 test_create_task_creates_with_no_focus_flag
+test_create_task_refuses_when_pane_shell_was_exec_replaced
+test_verify_created_pane_shell_refuses_a_confirmed_replacement_without_retrying
+test_verify_created_pane_shell_tolerates_a_transiently_busy_shell
+test_verify_created_pane_shell_gives_up_after_budget_exhausted
 test_presentation_defaults_on_at_or_above_the_floor
 test_presentation_default_falls_back_below_the_floor
 test_presentation_unreadable_release_falls_back

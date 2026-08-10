@@ -1189,7 +1189,8 @@ fm_backend_herdr_pid_is_bare_shell() {  # <ps-bin> <pid>
 # window and succeeds on the first fully clean one; a genuinely busy pane
 # fails every sample and still refuses.
 # This is the single owner of the idle-shell proof; the session-start
-# projection cleanup and every pane-death close path both rely on it.
+# projection cleanup, every pane-death close path, and the spawn-time
+# send-target proof below all rely on it.
 fm_backend_herdr_pane_idle_shell_pid() {  # <session> <pane-id>
   local attempt=0 max_attempts=${FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS:-10}
   while :; do
@@ -1248,6 +1249,92 @@ fm_backend_herdr_pane_idle_shell_sample() {  # <session> <pane-id>
   stat=$("$ps_bin" -p "$shell_pid" -o stat= 2>/dev/null | tr -d '[:space:]') || return 1
   case "$stat" in S*|I*) ;; *) return 1 ;; esac
   printf '%s\n' "$shell_pid"
+}
+
+# fm_backend_herdr_created_pane_shell_intact: one process-info sample of
+# <pane-id>'s tracked shell pid. Deliberately lighter than the idle-shell proof
+# above (no OS process-table cross-check, no requirement that the shell be the
+# pane's SOLE foreground process): a freshly created pane's shell may still be
+# legitimately busy sourcing rc files - forking short-lived helpers like
+# `command -v tmux` - and that must never read as a failure here.
+# Returns:
+#   0 - shell_pid IS currently the (a) foreground process and its name/argv0
+#       resolve to a recognized shell - proven intact this sample.
+#   1 - shell_pid IS currently the (a) foreground process but its name/argv0
+#       do NOT resolve to a recognized shell - proven REPLACED (e.g. by an rc
+#       `exec`). `exec` keeps the same pid, so identity, not pid, is what
+#       distinguishes this from an intact shell.
+#   2 - inconclusive (shell_pid is not currently a foreground process, or the
+#       pane could not be read this sample) - the caller should retry.
+fm_backend_herdr_created_pane_shell_intact() {  # <session> <pane-id>
+  local session=$1 pane=$2 info shell_pid name argv0 shell_name
+  info=$(fm_backend_herdr_cli "$session" pane process-info --pane "$pane" 2>/dev/null) || return 2
+  printf '%s' "$info" | jq -e --arg pane "$pane" '
+    .result.type == "pane_process_info"
+    and .result.process_info.pane_id == $pane
+  ' >/dev/null 2>&1 || return 2
+  shell_pid=$(printf '%s' "$info" | jq -er \
+    '.result.process_info.shell_pid | select(type == "number" and . > 1) | floor' 2>/dev/null) || return 2
+  name=$(printf '%s' "$info" | jq -er --argjson pid "$shell_pid" '
+    (.result.process_info.foreground_processes // []) | map(select(.pid == $pid)) | .[0].name
+    | select(type == "string" and length > 0)
+  ' 2>/dev/null) || return 2
+  argv0=$(printf '%s' "$info" | jq -er --argjson pid "$shell_pid" '
+    (.result.process_info.foreground_processes // []) | map(select(.pid == $pid)) | .[0] as $process
+    | ($process.argv0 // $process.argv[0])
+    | select(type == "string" and length > 0)
+  ' 2>/dev/null) || return 2
+  shell_name=${name##*/}
+  argv0=${argv0#-}
+  argv0=${argv0##*/}
+  [ "$argv0" = "$shell_name" ] || return 1
+  case "$shell_name" in sh|bash|zsh|dash|ksh|fish) return 0 ;; esac
+  return 1
+}
+
+# fm_backend_herdr_verify_created_pane_shell: refuse a freshly created task
+# pane unless fm_backend_herdr_created_pane_shell_intact proves it, retried
+# across a settle window so a still-initializing shell gets a fair chance to
+# reach a sample where it is legibly its own foreground process, while a
+# PROVEN identity change (return 1 above) stops retrying immediately - `exec`
+# is irreversible, so waiting longer cannot un-happen it. Called once by
+# fm_backend_herdr_create_task, immediately after tab create, before any typed
+# delivery is attempted against the new pane.
+#
+# Why this exists (issue #1912): fm_backend_herdr_create_task creates the task
+# pane as a bare interactive shell and returns immediately; fm-spawn.sh then
+# TYPES the launch command into it afterwards (fm_backend_herdr_send_text_line
+# / fm_backend_herdr_send_literal). If the operator's shell rc replaces that
+# shell via `exec` (e.g. an auto-attach `exec tmux new-session -A -s main`)
+# before the typed text arrives, the worker never starts and the text lands in
+# whatever the replacement process is showing - on a host whose rc
+# auto-attaches to a shared session, that is the operator's own live session.
+#
+# Deliberately NOT wired into fm_backend_herdr_send_text_line /
+# fm_backend_herdr_send_literal themselves: fm_backend_herdr_send_text_submit
+# reuses those same two functions to deliver ordinary steering text to an
+# established, already-running (non-shell) agent pane, where this proof would
+# always and incorrectly refuse - fm-send.sh's own comment above its send call
+# is explicit that herdr's target-readiness check is the only backend-
+# readiness gate on that shared path, and this must not add a second one.
+# Proving once here, right after creation and before the caller ever types
+# into the pane, closes the reported deterministic case (the rc's `exec` fires
+# at shell start, so it has already happened, or is about to, well before this
+# proof or the first typed command either way) without touching that shared,
+# steering-reachable delivery path at all.
+fm_backend_herdr_verify_created_pane_shell() {  # <session> <pane-id>
+  local session=$1 pane=$2 attempt=0 max_attempts=${FM_BACKEND_HERDR_CREATED_SHELL_PROOF_POLLS:-30} rc
+  while :; do
+    fm_backend_herdr_created_pane_shell_intact "$session" "$pane"
+    rc=$?
+    [ "$rc" -eq 0 ] && return 0
+    [ "$rc" -eq 1 ] && break
+    attempt=$((attempt + 1))
+    [ "$attempt" -lt "$max_attempts" ] || break
+    sleep 0.1
+  done
+  echo "error: herdr pane $pane (session $session) does not host a bare recognized shell right after creation - refusing to type into it (a shell startup file may have exec'd it away, e.g. an auto-attach into another session)" >&2
+  return 1
 }
 
 # fm_backend_herdr_projection_order_best_effort: place the exact workspace id
@@ -2020,6 +2107,11 @@ EOF
     echo "error: could not parse tab/pane id from herdr tab create output" >&2
     return 1
   fi
+  # issue #1912: refuse before anything is ever typed into this pane unless it
+  # still provably hosts the bare shell just created - see
+  # fm_backend_herdr_verify_created_pane_shell for why this lives here and not
+  # in the (steering-shared) send functions fm-spawn.sh calls afterwards.
+  fm_backend_herdr_verify_created_pane_shell "$session" "$pane_id" || return 1
   [ -z "$seeded_tab_id" ] || fm_backend_herdr_workspace_prune_seeded_default_tab "$session" "$wsid" "$seeded_tab_id"
   if [ -n "$dup_tab_ids" ]; then
     while IFS= read -r dup; do
@@ -2534,6 +2626,11 @@ fm_backend_herdr_current_path() {  # <target>
 # ATOMICALLY - mirrors tmux's `send-keys -t T text Enter`. Used for the fixed
 # spawn-time commands (treehouse get, the GOTMPDIR export). `pane run` types
 # the command and submits it in one call (verified).
+# Deliberately NOT given a bare-shell proof (issue #1912's fix lives in
+# fm_backend_herdr_create_task instead): fm_backend_herdr_send_text_submit
+# below reuses this same function to deliver ordinary steering text to an
+# already-running, non-shell agent pane, where a bare-shell requirement would
+# always and incorrectly refuse.
 fm_backend_herdr_send_text_line() {  # <target> <text>
   fm_backend_herdr_target_ready "$1" || return 1
   fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane run "$FM_BACKEND_HERDR_PANE" "$2" >/dev/null 2>&1
@@ -2543,6 +2640,8 @@ fm_backend_herdr_send_text_line() {  # <target> <text>
 # caller sends Enter separately. Mirrors tmux's `send-keys -t T -l text`.
 # Verified: `pane send-text` does NOT auto-submit (contrary to the addendum's
 # original guess); it behaves exactly like tmux's `-l` literal send.
+# Deliberately NOT given a bare-shell proof - see the note on
+# fm_backend_herdr_send_text_line above; the same sharing applies here.
 fm_backend_herdr_send_literal() {  # <target> <text>
   fm_backend_herdr_target_ready "$1" || return 1
   fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane send-text "$FM_BACKEND_HERDR_PANE" "$2" >/dev/null 2>&1
