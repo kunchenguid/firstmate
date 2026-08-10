@@ -7,6 +7,13 @@ set -u
 
 WATCH_SESSION="$ROOT/bin/fm-watch-session.sh"
 TMP_ROOT=$(fm_test_tmproot fm-watch-session-tests)
+FM_ROOT_OVERRIDE="$ROOT"
+export FM_ROOT_OVERRIDE
+
+prepare_watch_home() {
+  local home=$1
+  mkdir -p "$home/state" "$home/data" "$home/config"
+}
 
 install_fake_tmux() {
   local dir=$1 fakebin log root
@@ -93,6 +100,8 @@ test_watch_session_start_status_stop_are_home_scoped() {
   local dir fakebin state_a state_b out_a out_b status_a status_b after_stop log live identity start
   dir=$(make_case session-home-scope)
   fakebin=$(install_fake_tmux "$dir")
+  prepare_watch_home "$dir/home-a"
+  prepare_watch_home "$dir/home-b"
   log="$dir/tmux.log"
   state_a="$dir/home-a/state"
   state_b="$dir/home-b/state"
@@ -150,6 +159,7 @@ test_watch_session_stop_waits_for_starting_watcher() {
   local dir fakebin state live identity start racer
   dir=$(make_case session-stop-start-race)
   fakebin=$(install_fake_tmux "$dir")
+  prepare_watch_home "$dir/home"
   state="$dir/home/state"
   mkdir -p "$state"
 
@@ -183,6 +193,7 @@ test_watch_session_stop_fails_for_unpinned_legacy_watcher() {
   local dir fakebin state live identity out status
   dir=$(make_case session-stop-legacy-no-start)
   fakebin=$(install_fake_tmux "$dir")
+  prepare_watch_home "$dir/home"
   state="$dir/home/state"
   mkdir -p "$state"
   out="$dir/stop.out"
@@ -213,6 +224,7 @@ test_watch_session_status_reports_runner_not_inner_arm_health() {
   local dir fakebin state out status arm_out
   dir=$(make_case session-status-runner-contract)
   fakebin=$(install_fake_tmux "$dir")
+  prepare_watch_home "$dir/home"
   state="$dir/home/state"
   mkdir -p "$state"
   out="$dir/start.out"
@@ -239,6 +251,7 @@ test_watch_session_refuses_grok_primary_without_override() {
   local dir fakebin out status
   dir=$(make_case grok-primary-refusal)
   fakebin=$(install_fake_tmux "$dir")
+  prepare_watch_home "$dir/home"
   out="$dir/start.out"
 
   status=0
@@ -256,6 +269,7 @@ test_watch_session_refuses_grok_restart_without_stopping_fallback() {
   local dir fakebin state out status after_status log
   dir=$(make_case grok-primary-restart-refusal)
   fakebin=$(install_fake_tmux "$dir")
+  prepare_watch_home "$dir/home"
   state="$dir/home/state"
   out="$dir/restart.out"
   after_status="$dir/status.out"
@@ -290,6 +304,7 @@ test_watch_session_grok_emergency_override_allows_fallback() {
   local dir fakebin out
   dir=$(make_case grok-primary-override)
   fakebin=$(install_fake_tmux "$dir")
+  prepare_watch_home "$dir/home"
   out="$dir/start.out"
 
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_LOG="$dir/tmux.log" FM_FAKE_TMUX_ROOT="$dir/tmux-state" \

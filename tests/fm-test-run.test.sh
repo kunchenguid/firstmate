@@ -371,7 +371,7 @@ test_fail_on_any_gate_skip() {
 cat >"$skip_f" <<'SH'
 #!/usr/bin/env bash
 echo "diagnostic: preparing optional condition"
-echo "skip: optional condition"
+echo "ok - skip: optional condition"
 exit 0
 SH
   chmod +x "$skip_f"

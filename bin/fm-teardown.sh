@@ -113,6 +113,21 @@ FORCE=${2:-}
 FORCE_RETIRE_STAGED=0
 FORCE_RETIRE_SOURCE=
 
+TEARDOWN_TASK_LOCK="$STATE/.spawn-$ID.lock"
+TEARDOWN_TASK_LOCK_HELD=0
+teardown_release_task_lock() {
+  if [ "$TEARDOWN_TASK_LOCK_HELD" = 1 ]; then
+    fm_lock_release "$TEARDOWN_TASK_LOCK" || return 1
+    TEARDOWN_TASK_LOCK_HELD=0
+  fi
+}
+if ! fm_lock_acquire_wait "$TEARDOWN_TASK_LOCK"; then
+  echo "error: could not acquire the task lifecycle lock for $ID" >&2
+  exit 1
+fi
+TEARDOWN_TASK_LOCK_HELD=1
+trap 'teardown_release_task_lock || true' EXIT
+
 META="$STATE/$ID.meta"
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
 WT=$(grep '^worktree=' "$META" | cut -d= -f2-)
@@ -125,6 +140,26 @@ PR_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
 # tasktmp is recorded by fm-spawn for tasks that set up a per-task temp root;
 # absent for tasks spawned before that change, so tolerate empty.
 TASK_TMP=$(grep '^tasktmp=' "$META" | cut -d= -f2- || true)
+
+teardown_meta_identity() {
+  local meta=$1
+  if command -v shasum >/dev/null 2>&1; then
+    awk '!/^slot_(returned|returning)=/' "$meta" | shasum -a 256 | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    awk '!/^slot_(returned|returning)=/' "$meta" | sha256sum | awk '{print $1}'
+  else
+    return 1
+  fi
+}
+
+TEARDOWN_META_IDENTITY=$(teardown_meta_identity "$META") || {
+  echo "error: could not establish metadata identity for $ID" >&2
+  exit 1
+}
+teardown_meta_identity_matches() {
+  [ -f "$META" ] || return 1
+  [ "$(teardown_meta_identity "$META")" = "$TEARDOWN_META_IDENTITY" ]
+}
 
 validated_task_tmp_cleanup_path() {
   local recorded=$1 expected parent base suffix marker expected_marker marker_content
@@ -217,7 +252,7 @@ if [ "$KIND" = secondmate ]; then
     HOME_CHILD_LOCK_HELD=1
   fi
 fi
-trap 'teardown_release_home_child_lock || true' EXIT
+trap 'teardown_release_task_lock || true; teardown_release_home_child_lock || true' EXIT
 
 validate_direct_pr_state_cleanup() {
   local artifact mode
@@ -1530,7 +1565,7 @@ teardown_release_top_slot_lock() {
     TOP_SLOT_LOCK_HELD=0
   fi
 }
-trap 'teardown_release_top_slot_lock || true; teardown_release_home_child_lock || true; teardown_release_herdr_presentation_lock || true' EXIT
+trap 'teardown_release_task_lock || true; teardown_release_top_slot_lock || true; teardown_release_home_child_lock || true; teardown_release_herdr_presentation_lock || true' EXIT
 if [ "$TOP_SLOT_RETURNED" != 1 ] && [ "$BACKEND" = herdr ]; then
   teardown_acquire_herdr_presentation_lock "$T" || {
     echo "REFUSED: could not acquire the Herdr presentation lock for $ID; preserving task state and worktree" >&2
@@ -1648,6 +1683,10 @@ if [ "$KIND" != secondmate ] \
       teardown_slot_return_recover "$META" "$WT" "$ID" "worktree" || true
       exit 1
     }
+    teardown_meta_identity_matches || {
+      echo "error: task metadata changed during teardown for $ID; preserving task state" >&2
+      exit 1
+    }
     teardown_meta_mark_slot_returned "$META" || {
       echo "error: could not record successful return for worktree $WT; preserving task state" >&2
       teardown_slot_returning_recovery_line "$META" "$WT" "$ID"
@@ -1683,11 +1722,20 @@ cleanup_direct_pr_refs || {
   exit 1
 }
 if [ -n "$TOP_SLOT_RETAIN_VERDICT" ]; then
+  teardown_meta_identity_matches || {
+    echo "error: task metadata changed during teardown for $ID; preserving task state" >&2
+    exit 1
+  }
   teardown_meta_backup_create "$META" || {
     echo "error: could not preserve recovery metadata for $ID" >&2
     exit 1
   }
 fi
+teardown_meta_identity_matches || {
+  [ -z "${TEARDOWN_META_BACKUP:-}" ] || teardown_meta_backup_discard || true
+  echo "error: task metadata changed during teardown for $ID; preserving task state" >&2
+  exit 1
+}
 if ! rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" \
   "$STATE/$ID.direct-pr-lease" "$STATE/$ID.direct-pr-lease.tmp"; then

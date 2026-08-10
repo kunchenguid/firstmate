@@ -48,6 +48,7 @@ if [ "${_FM_WORKER_ISOLATION_SNAPSHOT_READY:-0}" != 1 ]; then
   _FM_WORKER_INITIAL_AGENT_ROLE=${FM_AGENT_ROLE:-}
   _FM_WORKER_INITIAL_AGENT_TASK=${FM_AGENT_TASK:-}
   _FM_WORKER_INITIAL_AGENT_OWNER_HOME=${FM_AGENT_OWNER_HOME:-}
+  _FM_WORKER_INITIAL_PRIMARY_ATTESTATION=${FM_PRIMARY_ATTESTATION:-}
   for _fm_worker_var in $FM_WORKER_ISOLATION_HOME_VARS; do
     printf -v "_FM_WORKER_INITIAL_${_fm_worker_var}" '%s' "${!_fm_worker_var-}"
   done
@@ -102,6 +103,7 @@ fm_worker_launch_env_prefix() {
       printf '%s= ' "$var"
     fi
   done
+  printf 'FM_PRIMARY_ATTESTATION= '
   printf 'FM_AGENT_ROLE=%s ' "$role"
   printf 'FM_AGENT_TASK=%s ' "$(fm_worker_shell_quote "$id")"
   printf 'FM_AGENT_OWNER_HOME=%s ' "$(fm_worker_shell_quote "$home")"
@@ -177,18 +179,15 @@ fm_worker_process_ppid() {
   printf '%s' "$ppid"
 }
 
-fm_worker_process_comm() {
-  local pid=$1 comm
-  case "$pid" in
-    ''|*[!0-9]*) return 1 ;;
-  esac
-  if [ -r "/proc/$pid/comm" ]; then
-    comm=$(cat "/proc/$pid/comm" 2>/dev/null) || return 1
-  else
-    comm=$(ps -o comm= -p "$pid" 2>/dev/null | tr -d '[:space:]')
-  fi
-  [ -n "$comm" ] || return 1
-  printf '%s' "$comm"
+fm_worker_primary_attestation_matches() {
+  local expected_root=$1 state file token content
+  token=${_FM_WORKER_INITIAL_PRIMARY_ATTESTATION:-}
+  [ -n "$token" ] || return 1
+  state=${_FM_WORKER_INITIAL_FM_STATE_OVERRIDE:-${_FM_WORKER_INITIAL_FM_HOME:-$expected_root}/state}
+  file="$state/.primary-attestation"
+  [ -f "$file" ] && [ ! -L "$file" ] && [ -O "$file" ] || return 1
+  content=$(cat "$file" 2>/dev/null) || return 1
+  [ "$content" = "$(printf 'root=%s\ntoken=%s' "$expected_root" "$token")" ]
 }
 
 fm_worker_secondmate_home_proven() {
@@ -239,19 +238,12 @@ fm_worker_secondmate_ancestry_proven() {
 }
 
 fm_worker_primary_ancestry_clear() {
-  local expected_root=${1:-} pid=${BASHPID:-$$} ppid env parent_comm depth=0
+  local pid=${BASHPID:-$$} ppid env depth=0
   while [ "$pid" -gt 1 ] && [ "$depth" -lt 256 ]; do
     env=$(fm_worker_process_environ "$pid") || return 1
     printf '%s\n' "$env" | grep -Eq '^(FM_AGENT_ROLE|FM_AGENT_TASK|FM_AGENT_OWNER_HOME)=.+$' && return 1
     ppid=$(fm_worker_process_ppid "$pid") || return 1
     [ "$ppid" != "$pid" ] || return 1
-    if [ "$depth" -eq 0 ] && [ -n "$expected_root" ]; then
-      [ "$ppid" -gt 1 ] || return 1
-      parent_comm=$(fm_worker_process_comm "$ppid") || return 1
-      case "$parent_comm" in
-        init|systemd|launchd|tini|runit|s6-svscan|supervisord) return 1 ;;
-      esac
-    fi
     pid=$ppid
     depth=$((depth + 1))
   done
@@ -277,6 +269,10 @@ fm_worker_primary_origin_proven() {
   [ "$(pwd -P 2>/dev/null || true)" = "$root_real" ] || return 1
   [ ! -e "$root_real/.fm-secondmate-home" ] || return 1
   [ ! -L "$root_real/.fm-secondmate-home" ] || return 1
+  if [ "$home_real" = "$root_real" ] \
+    && { [ -e "$state_real/.primary-attestation" ] || [ -L "$state_real/.primary-attestation" ]; }; then
+    fm_worker_primary_attestation_matches "$root_real" || return 1
+  fi
   git_dir=$(git -C "$root_real" rev-parse --git-dir 2>/dev/null) || return 1
   git_common=$(git -C "$root_real" rev-parse --git-common-dir 2>/dev/null) || return 1
   [ "$git_dir" = "$git_common" ] || return 1

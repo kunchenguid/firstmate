@@ -82,6 +82,9 @@ if [ "${1:-}" = display-message ]; then
   esac
   exit 0
 fi
+if [ "${1:-}" = kill-window ] && [ -n "${FM_FAKE_TMUX_REPLACE_META:-}" ]; then
+  printf '%s\n' 'generation=replacement' > "$FM_FAKE_TMUX_REPLACE_META"
+fi
 # tmux kill-window etc.: succeed silently.
 exit 0
 SH
@@ -141,8 +144,9 @@ SH
 
 # Write a meta file for the task. Args: case_dir mode kind
 write_meta() {
-  local case_dir=$1 mode=$2 kind=$3 stamp_home=${FM_HOME:-$ROOT}
-  fm_write_meta "$case_dir/state/task-x1.meta" \
+  local case_dir=$1 mode=$2 kind=$3 stamp_home=${FM_HOME:-$ROOT} state=${FM_STATE_OVERRIDE:-$case_dir/state}
+  mkdir -p "$state"
+  fm_write_meta "$state/task-x1.meta" \
     "window=firstmate:fm-task-x1" \
     "worktree=$case_dir/wt" \
     "project=$case_dir/project" \
@@ -279,9 +283,12 @@ SH
 # Run teardown with PATH mocking. Args: case_dir [extra args...]
 run_teardown() {
   local case_dir=$1; shift
-  FM_ROOT_OVERRIDE="$ROOT" \
-  FM_STATE_OVERRIDE="$case_dir/state" \
-  FM_CONFIG_OVERRIDE="$case_dir/config" \
+  FM_ROOT_OVERRIDE="${FM_ROOT_OVERRIDE:-$ROOT}" \
+  FM_HOME="${FM_HOME:-$ROOT}" \
+  FM_PRIMARY_ATTESTATION="${FM_PRIMARY_ATTESTATION:-}" \
+  FM_STATE_OVERRIDE="${FM_STATE_OVERRIDE:-$case_dir/state}" \
+  FM_CONFIG_OVERRIDE="${FM_CONFIG_OVERRIDE:-$case_dir/config}" \
+  FM_FAKE_TMUX_REPLACE_META="${FM_FAKE_TMUX_REPLACE_META:-}" \
   PATH="$case_dir/fakebin:$PATH" \
     "$TEARDOWN" task-x1 "$@"
 }
@@ -828,6 +835,43 @@ SH
   git -C "$case_dir/project" show-ref --verify --quiet refs/heads/fm/task-x1 \
     && fail "failed-return-retry: the task branch survived a proven return"
   pass "a failed return stays retryable and only retires the task branch once the return is proven"
+}
+
+test_teardown_preserves_replacement_metadata() {
+  local case_dir rc wt_head token replacement_meta
+  case_dir=$(make_case replacement-metadata)
+  mkdir -p "$case_dir/project/bin" "$case_dir/project/state" "$case_dir/project/data" "$case_dir/project/config"
+  printf '%s\n' '# agents' > "$case_dir/project/AGENTS.md"
+  printf '%s\n' '# secondmate registry' > "$case_dir/project/data/secondmates.md"
+  token="replacement-$RANDOM"
+  printf 'root=%s\ntoken=%s\n' "$case_dir/project" "$token" > "$case_dir/project/state/.primary-attestation"
+  chmod 600 "$case_dir/project/state/.primary-attestation"
+  FM_ROOT_OVERRIDE="$case_dir/project" FM_HOME="$case_dir/project" \
+    FM_STATE_OVERRIDE="$case_dir/project/state" write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "landed work before replacement"
+  wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" update-ref refs/heads/main "$wt_head"
+  replacement_meta="$case_dir/project/state/task-x1.meta"
+
+  set +e
+  (
+    cd "$case_dir/project"
+    FM_ROOT_OVERRIDE="$case_dir/project" FM_HOME="$case_dir/project" \
+      FM_PRIMARY_ATTESTATION="$token" \
+      FM_CONFIG_OVERRIDE="$case_dir/project/config" \
+      FM_STATE_OVERRIDE="$case_dir/project/state" \
+      FM_FAKE_TMUX_REPLACE_META="$replacement_meta" \
+      run_teardown "$case_dir" --force
+  ) > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "teardown must refuse to delete replacement metadata"
+  assert_present "$replacement_meta" \
+    "teardown removed metadata after the replacement was published"
+  assert_contains "$(cat "$replacement_meta")" "generation=replacement" \
+    "teardown deleted metadata published after the original generation"
+  pass "teardown preserves metadata replaced during lifecycle cleanup"
 }
 
 test_teardown_retries_transient_index_lock() {
@@ -1471,6 +1515,7 @@ test_teardown_refuses_unsafe_tasktmp
 test_teardown_refusal_on_incomplete_return_prints_recovery
 test_teardown_retires_an_unresolved_lease_record
 test_teardown_failed_return_stays_retryable_for_a_ship_task
+test_teardown_preserves_replacement_metadata
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
 test_no_mistakes_origin_remote_allows

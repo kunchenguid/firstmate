@@ -121,7 +121,7 @@ test_crewmate_declaration_clears_every_inherited_home() {
   local prefix
   prefix=$( . "$ROOT/bin/fm-worker-isolation-lib.sh" \
     && fm_worker_launch_env_prefix crewmate task-a1 /home/cap/firstmate )
-  [ "$prefix" = "FM_HOME= FM_ROOT= FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PENDING_REPLY_DIR_OVERRIDE= STATE= FM_AGENT_ROLE=crewmate FM_AGENT_TASK='task-a1' FM_AGENT_OWNER_HOME='/home/cap/firstmate' " ] \
+  [ "$prefix" = "FM_HOME= FM_ROOT= FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PENDING_REPLY_DIR_OVERRIDE= STATE= FM_PRIMARY_ATTESTATION= FM_AGENT_ROLE=crewmate FM_AGENT_TASK='task-a1' FM_AGENT_OWNER_HOME='/home/cap/firstmate' " ] \
     || fail "crewmate declaration changed: $prefix"
   pass "a crewmate declaration clears every operational-home variable and names its owner"
 }
@@ -130,7 +130,7 @@ test_secondmate_declaration_pins_only_its_own_home() {
   local prefix
   prefix=$( . "$ROOT/bin/fm-worker-isolation-lib.sh" \
     && fm_worker_launch_env_prefix secondmate dom-b2 /home/cap/homes/dom )
-  [ "$prefix" = "FM_HOME='/home/cap/homes/dom' FM_ROOT= FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PENDING_REPLY_DIR_OVERRIDE= STATE= FM_AGENT_ROLE=secondmate FM_AGENT_TASK='dom-b2' FM_AGENT_OWNER_HOME='/home/cap/homes/dom' " ] \
+  [ "$prefix" = "FM_HOME='/home/cap/homes/dom' FM_ROOT= FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PENDING_REPLY_DIR_OVERRIDE= STATE= FM_PRIMARY_ATTESTATION= FM_AGENT_ROLE=secondmate FM_AGENT_TASK='dom-b2' FM_AGENT_OWNER_HOME='/home/cap/homes/dom' " ] \
     || fail "secondmate declaration changed: $prefix"
   pass "a secondmate declaration pins its own home and clears every inherited override"
 }
@@ -321,17 +321,23 @@ test_primary_ancestry_refuses_any_inherited_worker_marker() {
 }
 
 test_reparented_markerless_worker_is_refused() {
-  local result="$TMP_ROOT/reparented-markerless.result" parent status out
+  local result="$TMP_ROOT/reparented-markerless.result" parent status out primary_home token
+  primary_home=$(make_primary_home "$TMP_ROOT/reparented-primary")
+  token="primary-$RUN_TAG"
+  printf 'root=%s\ntoken=%s\n' "$primary_home" "$token" > "$primary_home/state/.primary-attestation"
+  chmod 600 "$primary_home/state/.primary-attestation"
   (
     FM_AGENT_ROLE=crewmate FM_AGENT_TASK="reparented-$RUN_TAG" \
     FM_AGENT_OWNER_HOME="$TMP_ROOT/worker-parent" \
+    FM_PRIMARY_ATTESTATION="$token" \
     bash -c '
       (
         sleep 0.2
         exec env -u FM_AGENT_ROLE -u FM_AGENT_TASK -u FM_AGENT_OWNER_HOME \
           -u FM_HOME -u FM_ROOT -u FM_ROOT_OVERRIDE -u FM_STATE_OVERRIDE \
           -u FM_DATA_OVERRIDE -u FM_PROJECTS_OVERRIDE -u FM_CONFIG_OVERRIDE \
-          -u FM_PENDING_REPLY_DIR_OVERRIDE -u STATE FM_HOME="$1" FM_ROOT_OVERRIDE="$1" \
+          -u FM_PENDING_REPLY_DIR_OVERRIDE -u STATE -u FM_PRIMARY_ATTESTATION \
+          FM_HOME="$1" FM_ROOT_OVERRIDE="$1" FM_STATE_OVERRIDE="$1/state" \
           bash -c '\''
             . "$2"
             if fm_worker_refuse_primary_operation reparented-markerless; then
@@ -341,7 +347,7 @@ test_reparented_markerless_worker_is_refused() {
             fi
           '\'' _ "$1" "$2" "$3"
       ) >/dev/null 2>&1 &
-    ' _ "$ROOT" "$ROOT/bin/fm-worker-isolation-lib.sh" "$result"
+    ' _ "$primary_home" "$ROOT/bin/fm-worker-isolation-lib.sh" "$result"
   ) >/dev/null 2>&1 &
   parent=$!
   wait "$parent"

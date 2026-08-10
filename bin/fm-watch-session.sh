@@ -12,6 +12,15 @@
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FM_WATCH_SESSION_DEFAULT_ROOT=${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}
+FM_WATCH_SESSION_ATTEST_STATE=${FM_STATE_OVERRIDE:-${FM_HOME:-$FM_WATCH_SESSION_DEFAULT_ROOT}/state}
+if [ -z "${FM_PRIMARY_ATTESTATION:-}" ] \
+  && [ -f "$FM_WATCH_SESSION_ATTEST_STATE/.primary-attestation" ] \
+  && [ ! -L "$FM_WATCH_SESSION_ATTEST_STATE/.primary-attestation" ]; then
+  FM_PRIMARY_ATTESTATION=$(awk -F= '$1 == "token" {print substr($0, index($0, "=") + 1); exit}' \
+    "$FM_WATCH_SESSION_ATTEST_STATE/.primary-attestation" 2>/dev/null || true)
+  export FM_PRIMARY_ATTESTATION
+fi
 # shellcheck source=bin/fm-worker-isolation-lib.sh
 . "$SCRIPT_DIR/fm-worker-isolation-lib.sh"
 fm_worker_refuse_primary_operation "watch session" || exit 1
@@ -25,6 +34,32 @@ refuse_grok_primary() {
   [ "${FM_ALLOW_WATCH_SESSION_WITH_GROK:-}" = "1" ] && return 0
   echo "watch-session: refusing Grok primary; Grok's tracked background arm must own the watcher wait (set FM_ALLOW_WATCH_SESSION_WITH_GROK=1 only for emergency fallback)" >&2
   return 1
+}
+
+write_primary_attestation() {
+  local file="$STATE/.primary-attestation" token token_file tmp root_real content
+  mkdir -p "$STATE" || return 1
+  root_real=$(cd "$FM_ROOT" 2>/dev/null && pwd -P) || return 1
+  if [ -e "$file" ] || [ -L "$file" ]; then
+    [ -f "$file" ] && [ ! -L "$file" ] && [ -O "$file" ] || return 1
+    content=$(cat "$file" 2>/dev/null) || return 1
+    token=$(printf '%s\n' "$content" | awk -F= '$1 == "token" {print substr($0, index($0, "=") + 1); exit}')
+    [ -n "$token" ] || return 1
+    [ "$content" = "$(printf 'root=%s\ntoken=%s' "$root_real" "$token")" ] || return 1
+  else
+    token_file=$(mktemp "${TMPDIR:-/tmp}/fm-primary-attestation.XXXXXX") || return 1
+    token=${token_file##*/}
+    rm -f "$token_file"
+    tmp=$(mktemp "$STATE/.primary-attestation.XXXXXX") || return 1
+    chmod 600 "$tmp" || { rm -f "$tmp"; return 1; }
+    printf 'root=%s\ntoken=%s\n' "$root_real" "$token" > "$tmp" || {
+      rm -f "$tmp"
+      return 1
+    }
+    mv "$tmp" "$file" || { rm -f "$tmp"; return 1; }
+  fi
+  FM_PRIMARY_ATTESTATION=$token
+  export FM_PRIMARY_ATTESTATION
 }
 
 SESSION_NAME=${FM_WATCH_SESSION_TMUX_SESSION:-firstmate-watch}
@@ -62,6 +97,7 @@ write_runner_files() {
     printf 'export FM_HOME=%s\n' "$(shell_quote "$FM_HOME")"
     printf 'export FM_ROOT_OVERRIDE=%s\n' "$(shell_quote "$FM_ROOT")"
     printf 'export FM_STATE_OVERRIDE=%s\n' "$(shell_quote "$STATE")"
+    printf 'export FM_PRIMARY_ATTESTATION=%s\n' "$(shell_quote "$FM_PRIMARY_ATTESTATION")"
     printf 'export PATH=%s\n' "$(shell_quote "$PATH")"
   } > "$ENV_FILE"
   {
@@ -97,6 +133,10 @@ write_runner_files() {
 
 start_runner() {
   local command
+  write_primary_attestation || {
+    echo "watch-session: FAILED - could not establish the primary launch attestation" >&2
+    return 1
+  }
   if ! command -v tmux >/dev/null 2>&1; then
     echo "watch-session: FAILED - tmux not found" >&2
     return 1

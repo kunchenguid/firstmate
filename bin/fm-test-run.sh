@@ -466,7 +466,7 @@ select_changed() {
 
 detect_gate_skip() {
   local file=$1
-  grep -E -q '^skip:' "$file" 2>/dev/null
+  grep -E -q '^(ok - )?skip:' "$file" 2>/dev/null
 }
 
 # True when any output line contains "skip: <token>" (token may contain spaces).
