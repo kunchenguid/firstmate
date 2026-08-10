@@ -77,6 +77,61 @@ test_afk_start_reclaims_stale_daemon_lock_reused_pid() {
   pass "fm-afk-start.sh reclaims stale daemon locks whose live pid identity no longer matches"
 }
 
+test_daemon_singleton_serializes_concurrent_cycles() {
+  (
+    local dir state fakebin first_pid second_status i
+    dir=$(make_supercase daemon-singleton-concurrent)
+    state="$dir/state"
+    fakebin="$dir/fakebin"
+    mkdir -p "$dir/config" "$dir/data"
+    printf '# Backlog\n' > "$dir/data/backlog.md"
+    date '+%s' > "$state/.afk"
+    printf '╭─────╮\n│ >   │\n╰─────╯\n' > "$dir/pane.txt"
+
+    first_pid=
+    cleanup_concurrent_daemon() {
+      [ -z "$first_pid" ] || ! kill -0 "$first_pid" 2>/dev/null \
+        || { kill "$first_pid" 2>/dev/null || true; wait "$first_pid" 2>/dev/null || true; }
+    }
+    trap cleanup_concurrent_daemon EXIT
+    PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+      FM_SUPERVISOR_BACKEND=tmux FM_SUPERVISOR_TARGET=fakepane \
+      FM_FAKE_TMUX_CAPTURE="$dir/pane.txt" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+      "$DAEMON" > "$dir/first.out" 2> "$dir/first.err" &
+    first_pid=$!
+
+    i=0
+    while [ "$i" -lt 100 ] && [ ! -s "$state/.supervise-daemon.pid" ]; do
+      sleep 0.05
+      i=$((i + 1))
+    done
+    [ -s "$state/.supervise-daemon.pid" ] \
+      || fail "first concurrent daemon did not establish its singleton record: $(cat "$dir/first.err")"
+    kill -0 "$first_pid" 2>/dev/null \
+      || fail "first concurrent daemon exited before the competing cycle"
+
+    PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+      FM_SUPERVISOR_BACKEND=tmux FM_SUPERVISOR_TARGET=fakepane \
+      FM_FAKE_TMUX_CAPTURE="$dir/pane.txt" \
+      "$DAEMON" > "$dir/second.out" 2> "$dir/second.err"
+    second_status=$?
+
+    [ "$second_status" -ne 0 ] \
+      || fail "a second concurrent daemon entered the same home"
+    assert_contains "$(cat "$dir/second.err")" "another fm-supervise-daemon is already running" \
+      "a second concurrent daemon did not report singleton ownership"
+    kill -0 "$first_pid" 2>/dev/null \
+      || fail "the rejected concurrent cycle disrupted the owning daemon"
+
+    kill "$first_pid" 2>/dev/null || true
+    wait "$first_pid" 2>/dev/null || true
+    first_pid=
+    trap - EXIT
+  ) || fail "concurrent supervise-daemon singleton case failed"
+  pass "concurrent supervise-daemon cycles keep one per-home owner"
+}
+
 test_daemon_state_root_uses_fm_home() {
   local dir home override out
   dir=$(make_supercase daemon-fm-home)
@@ -1941,6 +1996,7 @@ test_inject_msg_defers_on_unrecognized_composer_state() {
 test_afk_start_refuses_when_flag_cannot_be_written
 test_afk_start_ignores_stale_pidfile_without_lock
 test_afk_start_reclaims_stale_daemon_lock_reused_pid
+test_daemon_singleton_serializes_concurrent_cycles
 test_daemon_state_root_uses_fm_home
 test_classify_routine_signal_self
 test_classify_terminal_signal_escalates

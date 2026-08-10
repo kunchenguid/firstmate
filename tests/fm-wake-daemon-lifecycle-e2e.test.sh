@@ -161,7 +161,8 @@ run_refill_cycle() {  # <home> <state> <fakebin> <out> <ready-case>
   rm -f "$state/.last-heartbeat"
   : > "$out"
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
-    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 FM_REFILL_IDS_MAX=2 FM_FAKE_READY_CASE="$ready_case" \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 FM_HEARTBEAT_MAX=1 FM_REFILL_IDS_MAX=2 \
+    FM_FAKE_READY_CASE="$ready_case" \
     "$WATCH" > "$out" &
   pid=$!
   wait_for_exit "$pid" 50 || fail "refill heartbeat watcher pass ($ready_case) did not exit"
