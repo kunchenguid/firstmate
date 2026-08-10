@@ -544,12 +544,10 @@ fm_backend_zellij_composer_content() {  # <target> [expected-label]
 }
 
 fm_backend_zellij_composer_observed_append() {  # <target> <before> <text> [expected-label]
-  local target=$1 before=$2 text=$3 expected_label=${4:-} cap caps verdict after expected
+  local target=$1 before=$2 text=$3 expected_label=${4:-} cap caps after expected
   [ -n "$text" ] || return 1
   cap=$(fm_backend_zellij_composer_capture "$target" "$expected_label") || return 1
   caps=$(printf 'styled=1\ncursor=0\nidentity=0\nrows=%s' "$FM_COMPOSER_CAPTURE_LINES")
-  verdict=$(fm_composer_classify_screen "$caps" "$cap")
-  case "$verdict" in pending|pending-unproven) ;; *) return 1 ;; esac
   after=$(fm_composer_extract_selected_content "$caps" "$cap") || return 1
   fm_composer_normalize_spaces_var before
   fm_composer_normalize_spaces_var text

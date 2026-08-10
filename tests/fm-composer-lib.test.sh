@@ -489,6 +489,14 @@ test_selected_content_is_composer_scoped_and_wrap_normalized() {
   out=$(fm_composer_extract_selected_content "$CAPS_STYLED_NOID" "$screen")
   [ "$out" = 'a legitimately long steer that wraps across the next bare row' ] \
     || fail "bare extraction should include only its contiguous wrap region, got '$out'"
+  screen=$'❯ wrapped user content\n# preserves its leading glyph'
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED_NOID" "$screen")
+  [ "$out" = 'wrapped user content # preserves its leading glyph' ] \
+    || fail "bare extraction should preserve prompt-like glyphs on continuation rows, got '$out'"
+  screen=$'╭──────────────────────────────╮\n│ > wrapped user content       │\n│ ❯ preserves its leading glyph│\n╰──────────────────────────────╯'
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED_NOID" "$screen")
+  [ "$out" = 'wrapped user content ❯ preserves its leading glyph' ] \
+    || fail "box extraction should strip only its actual prompt-row glyph, got '$out'"
   pass "fm_composer_extract_selected_content: scopes user content and excludes furniture"
 }
 

@@ -481,12 +481,12 @@ _fm_composer_pi_separator_row() {  # <trimmed-row>
 
 # Row-scan results are returned through FM_COMPOSER_SCAN_* globals (bash 3.2
 # has no nameref); they are internal to this owner.
-_fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty>
-  local pane=$1 cy=${2:-}
+_fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
+  local pane=$1 cy=${2:-} extract_wrap=${3:-0}
   local line indent left_stripped trimmed kind family side_family
   local top_inner top_spaces='' geometry_check=0 geometry_ambiguous=0
   local content_inner content_spaces bottom_inner bottom_spaces glyph
-  local current_indent='' current_family='' row=0 top=-1 valid=0 content_rows=0
+  local current_indent='' current_family='' row=0 top=-1 valid=0 content_rows=0 bare_start=-1
   # Complete-box results: the box containing the cursor (cursor mode) or the
   # bottom-most complete box (no cursor).
   FM_COMPOSER_SCAN_BOX_TOP=-1
@@ -559,7 +559,21 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty>
     # Bare agent-glyph rows: the glyph itself is the container proof. Bare
     # shell glyphs are deliberately not candidates (dead-shell rule). Keep
     # lower shell prompts as staleness evidence for cursorless selection.
-    if fm_composer_leading_agent_glyph_var glyph "$trimmed"; then
+    if [ "$extract_wrap" = 1 ]; then
+      if [ -z "$trimmed" ] || fm_composer_row_has_edge "$trimmed"; then
+        bare_start=-1
+      fi
+      if fm_composer_leading_agent_glyph_var glyph "$trimmed"; then
+        if [ "$bare_start" -lt 0 ]; then
+          bare_start=$row
+          FM_COMPOSER_SCAN_BARE_ROW=$row
+        fi
+      elif [ "$bare_start" -lt 0 ] \
+           && [ "$top" -lt 0 ] \
+           && fm_composer_leading_shell_glyph_var glyph "$trimmed"; then
+        FM_COMPOSER_SCAN_SHELL_ROW=$row
+      fi
+    elif fm_composer_leading_agent_glyph_var glyph "$trimmed"; then
       FM_COMPOSER_SCAN_BARE_ROW=$row
     elif [ "$top" -lt 0 ] && fm_composer_leading_shell_glyph_var glyph "$trimmed"; then
       FM_COMPOSER_SCAN_SHELL_ROW=$row
@@ -988,7 +1002,7 @@ _fm_composer_select_cursorless() {
 }
 
 fm_composer_extract_selected_content() {  # <caps> <screen>
-  local caps=$1 screen=$2 styled=0 kv plain row raw content glyph joined= footer_re
+  local caps=$1 screen=$2 styled=0 kv plain row raw content glyph joined= footer_re prompt_row=-1
   footer_re=${FM_COMPOSER_LEFTBAR_FOOTER_RE:-$FM_COMPOSER_LEFTBAR_FOOTER_RE_DEFAULT}
   while IFS= read -r kv; do
     [ "$kv" = styled=1 ] && styled=1
@@ -996,7 +1010,7 @@ fm_composer_extract_selected_content() {  # <caps> <screen>
 $caps
 EOF
   plain=$(printf '%s\n' "$screen" | fm_composer_strip_ansi)
-  _fm_composer_scan_screen "$plain" ''
+  _fm_composer_scan_screen "$plain" '' 1
   _fm_composer_select_cursorless "$plain" || return 1
   row=$FM_COMPOSER_SELECTED_FIRST
   while [ "$row" -le "$FM_COMPOSER_SELECTED_LAST" ]; do
@@ -1004,13 +1018,16 @@ EOF
     content=$(_fm_composer_row_content "$raw" "$styled")
     case "$FM_COMPOSER_SELECTED_KIND" in
       bare)
-        if fm_composer_leading_agent_glyph_var glyph "$content"; then
+        if [ "$row" -eq "$FM_COMPOSER_SELECTED_FIRST" ] \
+           && fm_composer_leading_agent_glyph_var glyph "$content"; then
           content=${content#*"$glyph"}
         fi
         ;;
       leftbar) case "$content" in '┃'*) content=${content#┃} ;; esac ;;
       box)
-        if fm_composer_leading_prompt_glyph_var glyph "$content"; then
+        if [ "$prompt_row" -lt 0 ] \
+           && fm_composer_leading_prompt_glyph_var glyph "$content"; then
+          prompt_row=$row
           content=${content#*"$glyph"}
         fi
         ;;
