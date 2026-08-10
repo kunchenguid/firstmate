@@ -713,6 +713,119 @@ test_spawn_releases_orca_resources_when_metadata_write_fails() {
   pass "fm-spawn.sh --backend orca: releases terminal and worktree on later aborts"
 }
 
+test_spawn_launches_omp_through_the_orca_backend() {
+  local proj wt data state config id out log fakebin
+  id="orcaompz1"
+  proj="$TMP_ROOT/omp-project"
+  wt="$TMP_ROOT/omp-wt"
+  data="$TMP_ROOT/omp-data"
+  state="$TMP_ROOT/omp-state"
+  config="$TMP_ROOT/omp-config"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  mkdir -p "$data/$id" "$state" "$config"
+  printf 'brief\n' > "$data/$id/brief.md"
+  touch "$state/.last-watcher-beat"
+  orca_case omp-spawn
+  log="$LOG"
+  fakebin="$FB"
+  # A stub omp answering only the pinned identity probe. The installed Oh My Pi
+  # asset is never executed and no omp session is ever started. The spawn also
+  # carries the explicit --model every omp launch requires; it is a structural
+  # fixture string, so no provider is contacted and no catalog is queried.
+  fm_fake_version_tool "$fakebin" omp FM_FAKE_OMP_VERSION omp/17.2.9
+  printf '1\n' > "$RESP/1.exit"
+  printf '{"ok":true,"result":{"repo":{"id":"repo-omp"}}}\n' > "$RESP/2.out"
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-omp","path":"%s"},"terminal":{"handle":"term-omp"}}}\n' "$wt" > "$RESP/3.out"
+  out=$( PATH="$fakebin:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-omp-projects" FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" --harness omp --model anthropic/claude-sonnet-4-5 \
+      --mode no-mistakes --yolo off --backend orca 2>&1 )
+  expect_code 0 $? "omp spawn on the Orca backend should succeed"$'\n'"$out"
+  assert_contains "$out" "spawned $id harness=omp kind=ship" "omp spawn did not report harness=omp"
+  # Orca stays the backend and the sole execution cockpit for omp.
+  assert_grep "harness=omp" "$state/$id.meta" "meta missing harness=omp"
+  assert_grep "backend=orca" "$state/$id.meta" "meta missing backend=orca"
+  assert_grep "terminal=term-omp" "$state/$id.meta" "meta missing Orca terminal handle"
+  assert_grep "orca_worktree_id=wt-omp" "$state/$id.meta" "meta missing Orca worktree id"
+  assert_no_grep "traceparent=" "$state/$id.meta" "omp must not enable trace propagation"
+  assert_contains "$(cat "$log")" "FM_OMP_HARNESS=1" \
+    "omp launch did not reach the Orca terminal with the firstmate-owned marker"
+  assert_contains "$(cat "$log")" "--approval-mode yolo --no-title --no-extensions --no-skills --tools read,write,edit,ls,grep,find,bash" \
+    "omp launch did not carry the contained argv through Orca"
+  rm -rf "/tmp/fm-$id"
+  pass "fm-spawn.sh --backend orca: launches the omp candidate harness with Orca as the backend"
+}
+
+test_teardown_removes_the_orca_omp_endpoint() {
+  local proj wt data state config id out rc neutral
+  id="orcaompz2"
+  proj="$TMP_ROOT/omp-teardown-project"
+  wt="$TMP_ROOT/omp-teardown-wt"
+  data="$TMP_ROOT/omp-teardown-data"
+  state="$TMP_ROOT/omp-teardown-state"
+  config="$TMP_ROOT/omp-teardown-config"
+  mkdir -p "$data/$id" "$state" "$config"
+  printf 'report\n' > "$data/$id/report.md"
+  touch "$state/.last-watcher-beat"
+  fm_write_meta "$state/$id.meta" \
+    "window=fm-$id" "endpoint_task_id=$id" "terminal=term-omp-td" "worktree=$wt" "project=$proj" \
+    "harness=omp" "kind=scout" "mode=no-mistakes" "yolo=off" \
+    "backend=orca" "orca_worktree_id=wt-omp-td" \
+    "decisions_reviewed=1" "decision_keys="
+  # The per-task extension fm-spawn writes for an omp worker. Teardown must
+  # remove it: a surviving file would leave live pilot state behind.
+  printf '// omp extension\n' > "$state/$id.omp-ext.ts"
+  # Seeded alongside it so the shared cleanup list is proven to still remove
+  # Pi's own per-task extension rather than having been narrowed to omp.
+  printf '// pi extension\n' > "$state/$id.pi-ext.ts"
+  orca_case omp-teardown
+  # A scout teardown runs the unresolved-decision completion gate, which needs a
+  # compatible tasks-axi. Stub it beside the orca stub, the same shape
+  # tests/fm-teardown.test.sh uses, so this case proves the omp cleanup itself
+  # rather than whether the host happens to have tasks-axi installed.
+  cat > "$FB/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' '0.2.4'
+  exit 0
+fi
+if [ "${1:-}" = update ] && [ "${2:-}" = --help ]; then
+  printf '%s\n' 'usage: tasks-axi update <id> [flags]'
+  printf '%s\n' '  --body-file <path>'
+  printf '%s\n' '  --archive-body'
+  exit 0
+fi
+if [ "${1:-}" = mv ] && [ "${2:-}" = --help ]; then
+  printf '%s\n' 'usage: tasks-axi mv <id> [<id>...] --to <path-or-dir>'
+  exit 0
+fi
+if [ "${1:-}" = hold ] && [ "${2:-}" = --help ]; then
+  printf '%s\n' 'usage: tasks-axi hold <id> --reason <text> [--kind captain]'
+  exit 0
+fi
+exit 0
+SH
+  chmod +x "$FB/tasks-axi"
+  neutral=$(neutral_fm_root "$CASE_DIR/neutral")
+  # Status is captured directly rather than through set +e/set -e: this suite
+  # runs under `set -u` only, so re-enabling errexit here would leak into every
+  # later expected-failure case and abort the run at the next non-zero command.
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    "$ROOT/bin/fm-teardown.sh" "$id" 2>&1 )
+  rc=$?
+  expect_code 0 "$rc" "Orca teardown of an omp task should release helpers"$'\n'"$out"
+  assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''close'$'\x1f''--terminal'$'\x1f''term-omp-td'$'\x1f''--json' \
+    "teardown did not close the exact Orca terminal for an omp task"
+  assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm'$'\x1f''--worktree'$'\x1f''id:wt-omp-td'$'\x1f''--force'$'\x1f''--json' \
+    "teardown did not remove the exact Orca worktree for an omp task"
+  assert_absent "$state/$id.meta" "teardown should remove the omp task metadata"
+  assert_absent "$state/$id.omp-ext.ts" "teardown must remove the omp per-task extension, leaving zero task state"
+  assert_absent "$state/$id.pi-ext.ts" "teardown must still remove Pi's per-task extension"
+  pass "fm-teardown.sh backend=orca: removes the exact endpoint and per-task extensions for an omp task"
+}
+
 test_peek_send_and_crew_state_route_through_orca_meta() {
   local wt state id out neutral
   id="orcaiopathz2"
@@ -1330,6 +1443,8 @@ test_spawn_refuses_orca_when_runtime_not_ready
 test_spawn_refuses_orca_nonisolated_worktree
 test_spawn_removes_orca_worktree_when_terminal_create_fails
 test_spawn_preserves_orca_metadata_when_abort_cleanup_fails
+test_spawn_launches_omp_through_the_orca_backend
+test_teardown_removes_the_orca_omp_endpoint
 test_spawn_releases_orca_resources_when_metadata_write_fails
 test_peek_send_and_crew_state_route_through_orca_meta
 test_peek_and_crew_state_fail_closed_on_orca_error_json
