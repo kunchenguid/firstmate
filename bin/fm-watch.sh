@@ -321,7 +321,10 @@ watch_sync_sandbox_bridges() {
     [ -e "$meta" ] || continue
     task=$(basename "$meta" .meta)
     fm_sandbox_bridge_task_id_valid "$task" || continue
-    placement=$(watch_meta_value "$meta" placement) || continue
+    placement=$(watch_meta_value "$meta" placement) || {
+      WATCH_SANDBOX_BRIDGE_TASK=$task
+      return 1
+    }
     [ "$placement" = docker-sandbox ] || continue
     watch_sync_sandbox_bridge "$meta" "$task" || {
       WATCH_SANDBOX_BRIDGE_TASK=$task

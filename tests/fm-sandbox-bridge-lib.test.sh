@@ -204,6 +204,20 @@ expect_code 1 "$status" "malformed bridge metadata rejection"
 assert_present "$watch_bridge" "malformed metadata removed the bridge"
 mv "$TMP_ROOT/watch-meta.good" "$watch_meta"
 
+cp "$watch_meta" "$TMP_ROOT/watch-meta.good"
+fm_write_meta "$watch_meta" \
+  "window=firstmate:fm-$WATCH_ID" "endpoint_task_id=$WATCH_ID" \
+  "worktree=$WORKTREE" "placement=docker-sandbox" \
+  "placement=docker-sandbox"
+chmod 600 "$watch_meta"
+status=0
+watch_sync_sandbox_bridges || status=$?
+expect_code 1 "$status" "duplicate placement metadata rejection"
+[ "$WATCH_SANDBOX_BRIDGE_TASK" = "$WATCH_ID" ] \
+  || fail "duplicate placement metadata was silently skipped by the watcher"
+assert_present "$watch_bridge" "duplicate placement metadata removed the bridge"
+mv "$TMP_ROOT/watch-meta.good" "$watch_meta"
+
 fm_write_meta "$watch_meta" \
   "window=firstmate:fm-$WATCH_ID" "endpoint_task_id=$WATCH_ID" \
   "worktree=$WORKTREE" "placement=docker-sandbox" \

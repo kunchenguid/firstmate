@@ -684,6 +684,7 @@ RELAUNCH_REPLACEMENT_BUSY_GEN=
 RELAUNCH_REPLACEMENT_HARNESS=
 RELAUNCH_REPLACEMENT_STATE=
 RELAUNCH_REPLACEMENT_WT=
+RELAUNCH_REPLACEMENT_PLACEMENT=
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
 
@@ -712,6 +713,10 @@ spawn_abort_cleanup() {
       fm_workspace_placement_release "$PLACEMENT" "$PLACEMENT_HANDLE" force || \
         echo "warning: could not release unpublished placement for $ID" >&2
     fi
+    if ! fm_control_remove_sandbox_turnend_hook \
+        "${HARNESS:-}" "${WT:-}" "${PLACEMENT:-host}"; then
+      echo "warning: could not remove unpublished Docker OpenCode turn-end hook for $ID" >&2
+    fi
     if [ -n "$PLACEMENT_BRIDGE" ]; then
       fm_sandbox_bridge_remove "$PLACEMENT_BRIDGE" "$STATE" "$ID" "$WT" || \
         echo "warning: could not remove verified unpublished sandbox bridge for $ID" >&2
@@ -730,7 +735,8 @@ spawn_abort_cleanup() {
         "$RELAUNCH_REPLACEMENT_HARNESS" \
         "$RELAUNCH_REPLACEMENT_WT" \
         "$RELAUNCH_REPLACEMENT_STATE" \
-        "$ID"; then
+        "$ID" \
+        "$RELAUNCH_REPLACEMENT_PLACEMENT"; then
       echo "warning: could not remove replacement wiring after aborted relaunch of $ID" >&2
     fi
     if [ -n "$RELAUNCH_REPLACEMENT_BUSY_GEN" ]; then
@@ -833,7 +839,7 @@ spawn_herdr_presentation_order_lock_acquire() {
 }
 
 clear_relaunch_harness_wiring() {
-  local harness=$1 wt=$2 state=$3 id=$4 token_path token auth_path path
+  local harness=$1 wt=$2 state=$3 id=$4 placement=${5:-host} token_path token auth_path path
   # The wiring arms above match on harness PREFIXES, because a task launched
   # from a raw command records that command's basename rather than the exact
   # adapter name. The retirement tables are keyed by the exact adapter, so the
@@ -855,7 +861,7 @@ clear_relaunch_harness_wiring() {
     [ -n "$path" ] || continue
     rm -f -- "$path" || return 1
   done <<EOF
-$(fm_control_harness_wiring_paths "$harness" "$wt" "$state" "$id")
+$(fm_control_harness_wiring_paths "$harness" "$wt" "$state" "$id" "$placement")
 EOF
 }
 
@@ -2403,7 +2409,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   # files and turn-end token registry entries behind, and even a same-harness
   # relaunch would orphan the retired busy generation's token
   # (bin/fm-control-lib.sh owns where those artifacts live).
-  clear_relaunch_harness_wiring "$RELAUNCH_PRIOR_HARNESS" "$WT" "$STATE_REAL" "$ID" || {
+  clear_relaunch_harness_wiring "$RELAUNCH_PRIOR_HARNESS" "$WT" "$STATE_REAL" "$ID" "$PLACEMENT" || {
     echo "error: could not retire $RELAUNCH_PRIOR_HARNESS wiring for task $ID; refusing to arm the replacement" >&2
     exit 1
   }
@@ -2411,6 +2417,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   RELAUNCH_REPLACEMENT_HARNESS=$HARNESS
   RELAUNCH_REPLACEMENT_STATE=$STATE_REAL
   RELAUNCH_REPLACEMENT_WT=$WT
+  RELAUNCH_REPLACEMENT_PLACEMENT=$PLACEMENT
 fi
 if [ "$KIND" != secondmate ] && [ "$PLACEMENT" != docker-sandbox ]; then
   # Arm the semantic busy-state contract (bin/fm-busy-lib.sh) for every

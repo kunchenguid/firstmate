@@ -602,6 +602,37 @@ test_turnend_auth_paths_are_owned_by_the_control_adapter() {
   pass "fm-control-lib: one owner resolves each harness's turn-end registry entry, and refuses a malformed token"
 }
 
+test_docker_opencode_turnend_hook_cleanup_is_placement_scoped() {
+  local dir state wt hook busy legacy docker_paths host_paths
+  dir="$TMP_ROOT/docker-opencode"
+  state="$dir/state"
+  wt="$dir/wt"
+  hook="$wt/.opencode/plugins/fm-sandbox-turnend.js"
+  busy="$wt/.opencode/plugins/fm-busy-state.js"
+  legacy="$wt/.opencode/plugins/fm-turn-end.js"
+  mkdir -p "$state" "${hook%/*}"
+  printf '{}\n' > "$hook"
+  printf '{}\n' > "$busy"
+  printf '{}\n' > "$legacy"
+  fm_control_remove_sandbox_turnend_hook opencode "$wt" host
+  [ -e "$hook" ] || fail "host cleanup removed the Docker-only OpenCode hook"
+  fm_control_remove_sandbox_turnend_hook opencode "$wt" docker-sandbox \
+    || fail "Docker OpenCode hook cleanup refused"
+  [ ! -e "$hook" ] || fail "Docker cleanup left the exact OpenCode hook"
+  [ -e "$busy" ] || fail "Docker cleanup removed the busy-state wiring"
+  [ -e "$legacy" ] || fail "Docker cleanup removed the legacy turn-end wiring"
+  docker_paths=$(fm_control_harness_wiring_paths opencode "$wt" "$state" task docker-sandbox)
+  case "$docker_paths" in
+    *"$hook"*) : ;;
+    *) fail "Docker relaunch wiring did not include the sandbox OpenCode hook" ;;
+  esac
+  host_paths=$(fm_control_harness_wiring_paths opencode "$wt" "$state" task host)
+  case "$host_paths" in
+    *"$hook"*) fail "host relaunch wiring included the Docker-only OpenCode hook" ;;
+  esac
+  pass "fm-control-lib: Docker OpenCode hook cleanup is exact and placement-scoped"
+}
+
 test_secondmate_relaunch_picks_up_the_configured_harness_pin() {
   local dir home out rc
   dir=$(new_case smpin sm3)
@@ -1315,6 +1346,7 @@ test_relaunch_onto_an_unverified_harness_is_refused
 test_prior_harness_turnend_registry_entry_is_cleared
 test_wiring_removal_failure_refuses_before_replacement_arm
 test_turnend_auth_paths_are_owned_by_the_control_adapter
+test_docker_opencode_turnend_hook_cleanup_is_placement_scoped
 test_secondmate_relaunch_picks_up_the_configured_harness_pin
 test_secondmate_relaunch_ignores_invalid_configured_effort_before_stop
 test_secondmate_relaunch_onto_a_crewmate_only_adapter_refuses_before_stop

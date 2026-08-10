@@ -187,16 +187,33 @@ fm_control_backend_state_verified() {  # <backend>
 
 # The per-task wiring artifacts a harness leaves behind, so a relaunch that
 # changes harness (or re-arms the same one with a fresh busy generation) can
+fm_control_harness_sandbox_turnend_path() {  # <harness> <worktree> <placement>
+  local harness=${1-} wt=${2-} placement=${3:-host}
+  [ "$harness" = opencode ] || return 1
+  [ "$placement" = docker-sandbox ] || return 1
+  [ -n "$wt" ] || return 1
+  printf '%s\n' "$wt/.opencode/plugins/fm-sandbox-turnend.js"
+}
+
+fm_control_remove_sandbox_turnend_hook() {  # <harness> <worktree> <placement>
+  local path
+  path=$(fm_control_harness_sandbox_turnend_path "${1-}" "${2-}" "${3:-host}") || return 0
+  rm -f -- "$path"
+}
+
 # clear the previous incarnation's wiring instead of leaving a stale hook
 # pointing at a retired generation. Prints zero or more absolute paths, one per
 # line: worktree-resident hook files and firstmate-owned state tokens only,
 # never a harness's own managed config.
-fm_control_harness_wiring_paths() {  # <harness> <worktree> <state-dir> <id>
-  local harness=${1-} wt=${2-} state=${3-} id=${4-}
+fm_control_harness_wiring_paths() {  # <harness> <worktree> <state-dir> <id> [placement]
+  local harness=${1-} wt=${2-} state=${3-} id=${4-} placement=${5:-host}
   [ -n "$wt" ] && [ -n "$state" ] && [ -n "$id" ] || return 1
   case "$harness" in
     claude) printf '%s\n' "$wt/.claude/settings.local.json" ;;
-    opencode) printf '%s\n' "$wt/.opencode/plugins/fm-busy-state.js" ;;
+    opencode)
+      printf '%s\n' "$wt/.opencode/plugins/fm-busy-state.js"
+      fm_control_harness_sandbox_turnend_path "$harness" "$wt" "$placement" || true
+      ;;
     pi|pi-signed) printf '%s\n' "$state/$id.pi-ext.ts" ;;
     grok)
       printf '%s\n' "$wt/.fm-grok-turnend"
