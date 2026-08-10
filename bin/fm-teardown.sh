@@ -16,12 +16,13 @@
 # foreign-repository landings and the common squash-merge-then-delete-branch flow,
 # where the branch's own commits live nowhere on a remote yet the change is fully in
 # the default branch under a different commit.
-# Forge proof uses only the canonical recorded pr= identity and exact recorded
-# pr_head= value. The PR must belong to the freshly verified landing remote, and the
-# provider's supported CLI must report it merged. A missing or mismatched recorded
-# head, an unreachable forge, or an unmerged PR is inconclusive and falls through to
-# the cumulative content proof. If that is also inconclusive, teardown refuses rather
-# than risk discarding unlanded work.
+# Forge proof uses only the canonical recorded pr= identity, including its provider
+# and host, and exact recorded pr_head= value. The PR must belong to the freshly
+# verified landing remote, and the provider's supported CLI must query that recorded
+# forge and report it merged. A missing or mismatched recorded head, an unreachable
+# forge, or an unmerged PR is inconclusive and falls through to the cumulative content
+# proof. If that is also inconclusive, teardown refuses rather than risk discarding
+# unlanded work.
 # Uncommitted changes are never landed.
 # local-only projects additionally accept work merged into the local default
 # branch (firstmate performs that merge after configured approval) as a fallback
