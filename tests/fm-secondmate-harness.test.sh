@@ -246,9 +246,11 @@ while [ "$#" -gt 0 ]; do
 done
 case "$field:${FM_TEST_OMP_SHAPE:-omp}" in
   comm=:bare) printf '%s\n' '/opt/omp/bin/bun' ;;
+  comm=:bunx) printf '%s\n' '/opt/homebrew/bin/bunx' ;;
   comm=:*) printf '%s\n' '/opt/homebrew/bin/bun' ;;
   args=:omp) printf '%s\n' 'bun /Users/u/.bun/bin/omp --model openai/test' ;;
   args=:unrelated) printf '%s\n' 'bun /opt/omp/tools/compiler.js --prompt omp' ;;
+  args=:bunx) printf '%s\n' 'bunx /Users/u/.bun/bin/omp --model openai/test' ;;
   args=:bare) printf '%s\n' '/opt/omp/bin/bun' ;;
   ppid=:*) printf '%s\n' 1 ;;
 esac
@@ -277,6 +279,12 @@ SH
   got=$(FM_TEST_OMP_SHAPE=bare PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-harness.sh")
   [ "$got" = unknown ] \
     || fail "a bare Bun installed under an omp path component resolved '$got', expected unknown"
+  got=$(FM_TEST_OMP_SHAPE=bunx CLAUDECODE=1 PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-harness.sh")
+  [ "$got" = claude ] \
+    || fail "bunx running the OMP script suppressed the verified Claude marker, got '$got'"
+  got=$(FM_TEST_OMP_SHAPE=bunx PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-harness.sh")
+  [ "$got" = unknown ] \
+    || fail "bunx running the OMP script resolved '$got', expected unknown"
 
   got=$(PATH="$fakebin:$BASE_PATH" bash -c \
     '. "$0/bin/fm-session-lock-lib.sh"; fm_harness_ancestry_pid' "$ROOT")
@@ -289,6 +297,10 @@ SH
   if FM_TEST_OMP_SHAPE=unrelated PATH="$fakebin:$BASE_PATH" bash -c \
     '. "$0/bin/fm-session-lock-lib.sh"; kill() { return 0; }; fm_harness_pid_alive 777' "$ROOT"; then
     fail "session-lock liveness accepted an unrelated Bun process that merely mentioned OMP"
+  fi
+  if FM_TEST_OMP_SHAPE=bunx PATH="$fakebin:$BASE_PATH" bash -c \
+    '. "$0/bin/fm-session-lock-lib.sh"; kill() { return 0; }; fm_harness_pid_alive 777' "$ROOT"; then
+    fail "session-lock liveness accepted bunx running the OMP script"
   fi
 
   pass "OMP identity: positive marker and exact Bun script defeat inherited foreign markers"

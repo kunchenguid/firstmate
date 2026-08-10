@@ -64,7 +64,7 @@ fm_harness_omp_process_matches() {  # <comm> <args>
   local comm=$1 args=$2 script
   case "$(basename -- "$comm")" in
     omp) return 0 ;;
-    bun*)
+    bun)
       script=${args#* }
       if [ "$script" != "$args" ]; then
         script=${script%% *}
@@ -101,7 +101,7 @@ fm_harness_process_matches() {  # <comm> <args>
     return 0
   fi
   case "$base" in
-    bun*)
+    bun)
       script=${args#* }
       if [ "$script" = "$args" ] && fm_harness_omp_path_component "$comm"; then
         return 0

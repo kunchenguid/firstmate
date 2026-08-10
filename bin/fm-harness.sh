@@ -121,7 +121,7 @@ detect_own() {
       muse|muse-bin-*) echo muse; return ;;
       pi-signed) echo pi; return ;;
       pi) echo pi; return ;;
-      omp|bun*)
+      omp|bun)
         args=$(ps -o args= -p "$pid" 2>/dev/null)
         fm_harness_omp_process_matches "$comm" "$args" && { echo omp; return; } ;;
       node*|python*)

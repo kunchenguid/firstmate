@@ -140,7 +140,7 @@ test_pi_watcher_entrypoint_ignores_an_inherited_omp_marker() {
 exit 0
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
-  out=$(OMPCODE=1 PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" node --input-type=module 2>&1 <<'EOF'
+  out=$(OMPCODE=1 FM_PI_HARNESS=pi-signed PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" node --input-type=module 2>&1 <<'EOF'
 import { existsSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
@@ -162,8 +162,8 @@ const pi = {
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
-if (process.env.FM_PRIMARY_HARNESS !== "pi") {
-  throw new Error(`Pi watcher selected ${process.env.FM_PRIMARY_HARNESS ?? "no"} primary harness`);
+if (process.env.FM_PRIMARY_HARNESS !== "pi-signed") {
+  throw new Error(`Pi watcher selected ${process.env.FM_PRIMARY_HARNESS ?? "no"} primary harness instead of pi-signed`);
 }
 if (events.has("session_switch")) {
   throw new Error("the Pi entrypoint bound OMP's session_switch under an inherited marker");
@@ -183,7 +183,7 @@ EOF
   status=$?
   expect_code 0 "$status" "an inherited OMPCODE must not switch the Pi entrypoint onto OMP's contract"
   [ -z "$out" ] || fail "Pi entrypoint inherited-marker test printed output: $out"
-  pass "Pi watcher entrypoint keeps Pi's lifecycle, tool, and marker under an inherited OMP marker"
+  pass "Pi watcher entrypoint preserves pi-signed identity under an inherited OMP marker"
 }
 
 test_pi_extension_reports_external_healthy_watcher() {
@@ -218,6 +218,10 @@ const pi = {
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
+if (process.env.FM_PRIMARY_HARNESS !== "pi") {
+  console.error(`Pi watcher selected ${process.env.FM_PRIMARY_HARNESS ?? "no"} primary harness`);
+  process.exit(1);
+}
 if (!handler) {
   console.error("Pi watch command was not registered");
   process.exit(1);

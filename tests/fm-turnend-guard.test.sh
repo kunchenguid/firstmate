@@ -1195,7 +1195,7 @@ SH
 exit 0
 SH
   chmod +x "$repo/bin/fm-turnend-guard.sh" "$repo/bin/fm-arm-pretool-check.sh"
-  out=$(OMPCODE=1 PLUGIN="$ext" FM_HOME="$home" FM_GUARD_LOG="$log" node --input-type=module 2>&1 <<'EOF'
+  out=$(OMPCODE=1 FM_PI_HARNESS=pi-signed PLUGIN="$ext" FM_HOME="$home" FM_GUARD_LOG="$log" node --input-type=module 2>&1 <<'EOF'
 import { existsSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
@@ -1212,7 +1212,7 @@ const pi = {
 };
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
-if (process.env.FM_PRIMARY_HARNESS !== "pi") throw new Error(`Pi entrypoint did not publish its target harness: ${process.env.FM_PRIMARY_HARNESS}`);
+if (process.env.FM_PRIMARY_HARNESS !== "pi-signed") throw new Error(`Pi entrypoint did not preserve its target harness: ${process.env.FM_PRIMARY_HARNESS}`);
 if (handlers.has("agent_end")) {
   throw new Error("the Pi entrypoint bound OMP's agent_end under an inherited marker");
 }
