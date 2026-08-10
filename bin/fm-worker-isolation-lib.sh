@@ -143,30 +143,10 @@ fm_worker_identity_is_complete() {
   return 0
 }
 
-fm_worker_primary_origin_proven() {
-  local root cwd
-  case "${FM_AGENT_ROLE:-}" in
-    ''|primary) ;;
-    *) return 1 ;;
-  esac
-  [ -z "${FM_AGENT_TASK:-}" ] || return 1
-  [ -z "${FM_AGENT_OWNER_HOME:-}" ] || return 1
-  root=$(cd "$_FM_WORKER_ISOLATION_LIB_DIR/.." 2>/dev/null && pwd -P) || return 1
-  cwd=$(pwd -P 2>/dev/null) || return 1
-  [ "$cwd" = "$root" ] || return 1
-  [ -f "$root/AGENTS.md" ] && [ -d "$root/bin" ] || return 1
-}
-
-# fm_worker_is_task_worker: 0 when this process is a declared task child or
-# cannot prove that it originated in the primary checkout.
+# fm_worker_is_task_worker: 0 unless this process has a complete secondmate
+# identity.
 fm_worker_is_task_worker() {
   if [ "${FM_AGENT_ROLE:-}" = secondmate ] && fm_worker_identity_is_complete; then
-    return 1
-  fi
-  if { [ -z "${FM_AGENT_ROLE:-}" ] || [ "${FM_AGENT_ROLE:-}" = primary ]; } \
-    && [ -z "${FM_AGENT_TASK:-}" ] \
-    && [ -z "${FM_AGENT_OWNER_HOME:-}" ] \
-    && fm_worker_primary_origin_proven; then
     return 1
   fi
   return 0

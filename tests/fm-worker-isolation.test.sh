@@ -182,6 +182,24 @@ test_markerless_worker_is_refused_before_primary_state_resolution() {
   pass "markerless workers are refused before lock, send, and watcher state resolution"
 }
 
+test_markerless_worker_is_refused_at_primary_cwd() {
+  local out status
+  if out=$(cd "$ROOT" && env \
+    -u FM_AGENT_ROLE -u FM_AGENT_TASK -u FM_AGENT_OWNER_HOME \
+    -u FM_ROOT -u FM_ROOT_OVERRIDE -u FM_STATE_OVERRIDE -u FM_DATA_OVERRIDE \
+    -u FM_PROJECTS_OVERRIDE -u FM_CONFIG_OVERRIDE -u FM_PENDING_REPLY_DIR_OVERRIDE \
+    FM_HOME="$ROOT" FM_ROOT_OVERRIDE="$ROOT" \
+    bash -c '. "$1"; fm_worker_refuse_primary_operation markerless-root' _ \
+    "$ROOT/bin/fm-worker-isolation-lib.sh" 2>&1); then
+    status=0
+  else
+    status=$?
+  fi
+  expect_code 1 "$status" "a markerless worker at the primary cwd must be refused"
+  assert_contains "$out" "task worker" "the primary-cwd markerless worker refusal lost its reason"
+  pass "markerless workers are refused even at the primary checkout root"
+}
+
 test_unreadable_task_start_proof_remains_contested() {
   local out status
   if out=$(bash -c '
@@ -362,13 +380,13 @@ test_declared_worker_is_never_a_primary_scope_match() {
   primary_home=$(make_primary_home "$TMP_ROOT/scope-home")
   out=$( . "$ROOT/bin/fm-primary-scope-lib.sh" \
     && fm_primary_scope_matches "$primary_home" "$primary_home/state" && printf 'primary' || printf 'not-primary' )
-  [ "$out" = primary ] || fail "the fixture is not recognized as a genuine primary at all"
+  [ "$out" = not-primary ] || fail "a markerless process matched primary scope"
   out=$( export FM_AGENT_ROLE=crewmate FM_AGENT_TASK=w1 FM_AGENT_OWNER_HOME="$primary_home"
     . "$ROOT/bin/fm-primary-scope-lib.sh" \
     && fm_primary_scope_matches "$primary_home" "$primary_home/state" && printf 'primary' || printf 'not-primary' )
   [ "$out" = not-primary ] \
     || fail "a declared crewmate matched primary scope inside a genuine primary checkout"
-  pass "a declared crewmate is never a primary-scope match, even in a real primary checkout"
+  pass "markerless and declared workers are never primary-scope matches"
 }
 
 test_project_local_startup_adapter_stays_inert_for_a_worker() {
@@ -1197,6 +1215,7 @@ test_secondmate_declaration_pins_only_its_own_home
 test_declaration_refuses_rather_than_emitting_a_partial_prefix
 test_incomplete_worker_identity_refuses_primary_operations
 test_markerless_worker_is_refused_before_primary_state_resolution
+test_markerless_worker_is_refused_at_primary_cwd
 test_unreadable_task_start_proof_remains_contested
 test_every_verified_harness_launches_with_its_home_declaration
 test_secondmate_child_receives_only_its_own_home
