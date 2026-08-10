@@ -1069,6 +1069,8 @@ EOF
     "every structured option must render as its own answer button"
   assert_contains "$route_block" 'data-open="answer" data-answer-custom>Answer</button>' \
     "quick answers must retain the legacy label until the direct reply service is proved"
+  assert_not_contains "$route_block" 'class="rc-fact"' \
+    "answer options without a decision kind must not gain fact-intake framing"
 
   # The conscious "nothing built applies" answer is shown too, because a decision
   # nobody prepared a surface for and one where none applies are not the same.
@@ -1086,6 +1088,8 @@ EOF
     "an old-style decision must not gain inferred answer buttons"
   assert_contains "$legacy_block" 'data-open="answer">Answer</button>' \
     "an old-style decision must keep the original free-text Answer control"
+  assert_not_contains "$legacy_block" 'class="rc-fact"' \
+    "an old-style decision must not gain inferred fact-intake framing"
   [ "$(grep -o 'class="need-ctx"' "$board" | wc -l | tr -d ' ')" = 1 ] \
     || fail "an old-style plain-reason decision must render no labelled context block"
   assert_grep '<div class="n">2</div><div class="l">Awaiting you</div>' \
@@ -2441,6 +2445,9 @@ test_decision_context_links_and_submission_state_in_a_browser() {
      "decision_url":"https://sample.tailnet.invalid/decision-aid","repo":"sample"},
     {"state":"queued","id":"d-fallback","captain_actionable":true,
      "title":"Choose the comparison layout","hold_reason":"Scanning speed trades off against explanation","repo":"sample"},
+    {"state":"queued","id":"d-fact","captain_actionable":true,
+     "title":"Supply the prototype cost basis","hold_reason":"The valuation needs its source figure",
+     "decision_kind":"fact","decision_expects":"one figure in GBP","repo":"sample"},
     {"state":"queued","id":"local-lane-bakeoff-v2-powered-decision-widen-bounded-judgment-rung",
      "captain_actionable":true,
      "title":"Widen bounded-judgment dispatch rung to include ollama/qwen3.6:35b-fm? data/local-lane-bakeoff-v2-powered/report.md",
@@ -2594,6 +2601,10 @@ function assert(ok, message) { if (!ok) throw new Error(message); }
       options:[...block('main','d-exact').querySelectorAll('[data-answer-choice]')].map(x=>({text:x.textContent,display:getComputedStyle(x).display})),
       custom:block('main','d-exact').querySelector('[data-open=answer]').innerText,
       legacyOptions:block('main','d-fallback').querySelectorAll('[data-answer-choice]').length,
+      fact:{labels:[...block('main','d-fact').querySelectorAll('.rc-fact-l,.rc-fact-v')].map(x=>x.textContent),
+        choices:block('main','d-fact').querySelectorAll('[data-answer-choice]').length,
+        prompt:answer('main','d-fact').placeholder},
+      legacyFact:block('main','d-fallback').querySelectorAll('.rc-fact').length,
       fallback:answer('main','d-fallback').placeholder,
       empty:answer('main','d-empty').placeholder,
       hostile:answer('main','d-hostile').placeholder,
@@ -2621,6 +2632,11 @@ function assert(ok, message) { if (!ok) throw new Error(message); }
       {text:"Lead with guidance",display:"none"},{text:"Lead with raw detail",display:"none"}])
     && dom.custom === "Answer" && dom.legacyOptions === 0,
     "Lavish did not preserve its legacy Answer-only view: " + JSON.stringify(dom));
+  assert(JSON.stringify(dom.fact.labels) === JSON.stringify(["Fact needed","Expected answer: one figure in GBP"])
+    && dom.fact.choices === 0 && dom.fact.prompt === "Supply the prototype cost basis - The valuation needs its source figure",
+    "fact intake was not explicitly labelled without inventing answer choices: " + JSON.stringify(dom.fact));
+  assert(dom.legacyFact === 0,
+    "a decision without kind gained inferred fact-intake framing: " + JSON.stringify(dom));
   assert(dom.fallback === "Choose the comparison layout - Scanning speed trades off against explanation", "decision context fallback was not specific");
   assert(dom.empty === "Your answer", "an empty decision invented context");
   assert(dom.hostile === 'Question " ><img src=x onerror=alert(1)> stays text?' && dom.injectedImages === 0, "hostile question escaped its text context");
@@ -2642,6 +2658,12 @@ function assert(ok, message) { if (!ok) throw new Error(message); }
     .map(x=>x.innerText)}))()`);
   assert(wideOptions.buttons.every(x=>x==="none") && wideOptions.answer.every(x=>x==="Answer"),
     "Lavish exposed direct-board answer controls at 1280px: "+JSON.stringify(wideOptions));
+  const wideFact = await evaluate(sid, `(() => {var b=[...document.querySelectorAll('.rc')].find(x=>x.dataset.id==='d-fact');
+    b.querySelector('[data-open=answer]').click();var hint=b.querySelector('.rc-fact');hint.scrollIntoView({block:'center'});
+    var r=hint.getBoundingClientRect();return {left:r.left,right:r.right,display:getComputedStyle(hint).display,
+      overflow:document.documentElement.scrollWidth>document.documentElement.clientWidth};})()`);
+  assert(wideFact.display === "flex" && wideFact.left >= 0 && wideFact.right <= 1280 && !wideFact.overflow,
+    "fact-intake hint was not legible at 1280px: "+JSON.stringify(wideFact));
 
   await send("Emulation.setDeviceMetricsOverride", {width:390,height:844,deviceScaleFactor:1,mobile:true}, sid);
   const narrowOptions = await evaluate(sid, `(() => ({buttons:[...document.querySelectorAll('[data-answer-choice]')]
@@ -2649,6 +2671,15 @@ function assert(ok, message) { if (!ok) throw new Error(message); }
     .map(x=>x.innerText)}))()`);
   assert(narrowOptions.buttons.every(x=>x==="none") && narrowOptions.answer.every(x=>x==="Answer"),
     "Lavish exposed direct-board answer controls at 390px: "+JSON.stringify(narrowOptions));
+  const narrowFact = await evaluate(sid, `(() => {var b=[...document.querySelectorAll('.rc')].find(x=>x.dataset.id==='d-fact');
+    var hint=b.querySelector('.rc-fact');hint.scrollIntoView({block:'center'});var r=hint.getBoundingClientRect();
+    return {left:r.left,right:r.right,label:hint.querySelector('.rc-fact-l').textContent,
+      expects:hint.querySelector('.rc-fact-v').textContent,
+      overflow:document.documentElement.scrollWidth>document.documentElement.clientWidth};})()`);
+  assert(narrowFact.left >= 0 && narrowFact.right <= 390 && !narrowFact.overflow
+    && narrowFact.label === "Fact needed" && narrowFact.expects === "Expected answer: one figure in GBP",
+    "fact-intake hint overflowed or became illegible at 390px: "+JSON.stringify(narrowFact));
+  await evaluate(sid, `var b=[...document.querySelectorAll('.rc')].find(x=>x.dataset.id==='d-fact');b.querySelector('.rc-x').click();`);
   await send("Emulation.setTouchEmulationEnabled", {enabled:true,maxTouchPoints:1}, sid);
   const mobileComposers = await evaluate(sid, `(() => {var file=document.querySelector('.rc-file');
     var ask=document.querySelector('.rc-ask');var fr=file.getBoundingClientRect();var ar=ask.getBoundingClientRect();

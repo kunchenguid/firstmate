@@ -682,6 +682,8 @@ def yolo_for($repo): ($registry_by_name[$repo // ""].yolo // false);
   detail: (.hold_reason // .blocked_reason // ""),
   question: (.decision_question // null),
   options: (.decision_options // null),
+  decision_kind: (.decision_kind // null),
+  expects: (.decision_expects // null),
   decision_url: (.decision_url // null),
   why: (.decision_why // null),
   affects: (.decision_affects // null),
@@ -730,6 +732,8 @@ def yolo_for($repo): ($registry_by_name[$repo // ""].yolo // false);
     detail: (.reason // ""),
     question: (.question // (if (.source // "") == "status" then (.summary // null) else null end)),
     options: (.options // null),
+    decision_kind: (.kind // null),
+    expects: (.expects // null),
     decision_url: (.decision_url // null),
     why: (.why // null),
     affects: (.affects // null),
@@ -1251,9 +1255,10 @@ def rc_confirm($intent):
   + "<span class=\"rc-ok-t\"><strong class=\"rc-ok-h\"></strong>"
   + "<span class=\"rc-ok-s\">No action is needed from you right now.</span></span></div>";
 
-def rc_form($intent; $question; $note_label; $placeholder; $send_label):
+def rc_form($intent; $question; $framing; $note_label; $placeholder; $send_label):
   (@html "<form class=\"rc-f\" data-toggle data-intent=\"\($intent)\" hidden>")
   + (@html "<p class=\"rc-q\">\($question)</p>")
+  + $framing
   + (if $note_label == "" then ""
      else (@html "<textarea class=\"rc-t\" rows=\"3\" maxlength=\"2000\" aria-label=\"\($note_label)\" placeholder=\"\($placeholder)\"></textarea>") end)
   + "<div class=\"rc-row\">"
@@ -1262,6 +1267,23 @@ def rc_form($intent; $question; $note_label; $placeholder; $send_label):
   + "</div>"
   + "<p class=\"rc-hold\">The board holds its refresh while this is open.</p>"
   + "</form>";
+
+# Fact intake keeps the existing free-text control but labels what the captain is
+# being asked to supply. Only the explicit structured marker can create this
+# framing; recommendation prose is never inspected for it.
+def fact_intake($w):
+  (($w.decision_kind // "") | if type == "string" then . else "" end) as $kind |
+  (($w.expects // "")
+    | if type == "string" and utf8bytelength <= 160
+         and . == gsub("^[[:space:]]+|[[:space:]]+$"; "")
+      then . else "" end) as $expects |
+  if $kind != "fact" then ""
+  else
+    "<div class=\"rc-fact\"><span class=\"rc-fact-l\">Fact needed</span>"
+    + (if $expects == "" then ""
+       else (@html "<span class=\"rc-fact-v\">Expected answer: \($expects)</span>") end)
+    + "</div>"
+  end;
 
 def answer_prompt($w):
   (($w.question // "") | if type == "string" then gsub("^[[:space:]]+|[[:space:]]+$"; "") else "" end) as $question |
@@ -1301,16 +1323,16 @@ def controls_for:
     + (($c.intents | map(
         if . == "merge" then rc_form("merge";
              "Ask firstmate to merge this? Firstmate runs its own checks first and merges only if they pass.";
-             ""; ""; "Send request")
+             ""; ""; ""; "Send request")
         elif . == "reply" then rc_form("reply";
              "Send firstmate a note about this. It carries no approval on its own.";
-             "Your note"; "Your note"; "Send to firstmate")
+             ""; "Your note"; "Your note"; "Send to firstmate")
         elif . == "answer" then rc_form("answer";
              "Your answer goes to firstmate, which applies it through its normal decision flow.";
-             "Your answer"; answer_prompt($w); "Send answer")
+             fact_intake($w); "Your answer"; answer_prompt($w); "Send answer")
         elif . == "defer" then rc_form("defer";
              "Set this aside? It leaves this list for the Deferred shelf, and your original reason is kept unchanged.";
-             ""; ""; "Set aside")
+             ""; ""; ""; "Set aside")
         else "" end)) | add // "")
     + "</div>"
   end;
@@ -1769,6 +1791,11 @@ body.board-reply .rc-b.rc-choice{display:inline-block;}
    or every control on the board stands open at once. */
 .rc-f[hidden]{display:none;}
 .rc-q{margin:0;color:var(--muted);font-size:13px;}
+.rc-fact{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;padding:9px 11px;
+  border:1px solid #ead7ae;border-left:4px solid var(--amber);border-radius:8px;background:var(--amber-soft);
+  overflow-wrap:anywhere;}
+.rc-fact-l{color:#724b10;font-size:11px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;}
+.rc-fact-v{color:var(--ink);font-size:13px;font-weight:600;}
 .rc-t{font:inherit;font-size:13.5px;color:var(--ink);background:var(--panel);border:1px solid var(--line);
   border-radius:10px;padding:9px 11px;resize:vertical;width:100%;}
 .rc-t:focus-visible{outline:2px solid var(--amber);outline-offset:-1px;}

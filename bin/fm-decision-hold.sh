@@ -19,14 +19,16 @@
 # Every captain decision filed here carries its context as SEPARATE structured
 # body fields rather than one free-text reason, so no dimension can be skipped
 # inside a blob: an optional exact question, an optional set of two to four short
-# answer labels, a required "Why now", "What it affects", and "Recommendation",
-# and a required conscious choice between a private decision-aid URL and an
-# explicit "no built surface applies"
-# acknowledgment. Each is required only when the item does not already record it,
-# so a first filing can never omit one while an idempotent retry never has to
-# retype what is already stored. Repeating --option supplies the complete ordered
-# set: two to four distinct labels of at most 80 bytes each. Supplying a set later
-# replaces the stored set, while omitting the flag preserves it. This script
+# answer labels, an optional `fact` intake kind with a short expected-answer hint,
+# a required "Why now", "What it affects", and "Recommendation", and a required
+# conscious choice between a private decision-aid URL and an explicit "no built
+# surface applies" acknowledgment. Each is required only when the item does not
+# already record it, so a first filing can never omit one while an idempotent retry
+# never has to retype what is already stored. Repeating --option supplies the
+# complete ordered set: two to four distinct labels of at most 80 bytes each.
+# --kind accepts only `fact`; --expects describes the expected free-text shape and
+# is valid only for that kind. Supplying an optional field later replaces that
+# stored field, while omitting its flag preserves it. This script
 # judges only that each dimension was addressed. Whether the prose is genuinely
 # clear and jargon-free is a semantic
 # judgement no script can make; the skill owns it, and data/captain-shared.md's
@@ -41,11 +43,13 @@
 #   fm-decision-hold.sh hold <origin-id> <decision-key> \
 #     --title <title> --reason <reason> [--repo <repo>] \
 #     [--question <exact-question>] [--option <short-label> --option <short-label> ...] \
+#     [--kind fact [--expects <short-hint>]] \
 #     --why <why-now> --affects <what-it-affects> \
 #     --recommendation <recommendation> \
 #     (--decision-url <https-url> | --no-surface <why-none-applies>)
 #   fm-decision-hold.sh hold-item <task-id> --reason <reason> \
 #     [--question <exact-question>] [--option <short-label> --option <short-label> ...] \
+#     [--kind fact [--expects <short-hint>]] \
 #     --why <why-now> --affects <what-it-affects> \
 #     --recommendation <recommendation> \
 #     (--decision-url <https-url> | --no-surface <why-none-applies>)
@@ -210,6 +214,32 @@ encode_decision_options() {  # <short-label>...
   jq -cn --args '$ARGS.positional' -- "$@"
 }
 
+validate_decision_intake_flags() {  # <kind> <expects>
+  local kind=$1 expects=$2 trimmed
+  if [ -n "$kind" ] && [ "$kind" != fact ]; then
+    fail "--kind supports only fact"
+  fi
+  if [ -n "$expects" ]; then
+    validate_one_line expects "$expects"
+    has_non_whitespace "$expects" || fail "--expects must describe the expected answer shape"
+    trimmed=$(printf '%s' "$expects" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+    [ "$expects" = "$trimmed" ] || fail "--expects must not have leading or trailing whitespace"
+    [ "$(printf '%s' "$expects" | LC_ALL=C wc -c | tr -d ' ')" -le 160 ] \
+      || fail "expects exceeds 160 bytes"
+  fi
+}
+
+# An expected-answer hint is meaningful only for an explicitly fact-shaped
+# decision. The stored value counts so a later retry can add or replace only the
+# hint without retyping --kind fact.
+require_decision_intake_kind() {  # <body> <kind> <expects>
+  local body=$1 kind=$2 expects=$3 stored_kind
+  stored_kind=$(get_body_field "$body" "Decision kind")
+  if [ -n "$expects" ] && [ "${kind:-$stored_kind}" != fact ]; then
+    fail "--expects requires --kind fact or an existing fact decision"
+  fi
+}
+
 validate_decision_url() {  # <url>
   local url=$1
   validate_one_line decision-url "$url"
@@ -351,10 +381,13 @@ validate_decision_context_flags() {  # <question> <why> <affects> <recommendatio
 # refusal above is what guarantees nothing is missing. The two surface fields are
 # one choice, so recording either clears the other and the item can never claim a
 # built surface and no built surface at the same time.
-write_decision_context() {  # <body> <question> <options-json> <why> <affects> <recommendation> <decision-url> <no-surface>
-  local body=$1 question=$2 options_json=$3 why=$4 affects=$5 recommendation=$6 decision_url=$7 no_surface=$8
+write_decision_context() {  # <body> <question> <options-json> <decision-kind> <expects> <why> <affects> <recommendation> <decision-url> <no-surface>
+  local body=$1 question=$2 options_json=$3 decision_kind=$4 expects=$5
+  local why=$6 affects=$7 recommendation=$8 decision_url=$9 no_surface=${10}
   [ -z "$question" ] || body=$(set_body_field "$body" "Decision question" "$question")
   [ -z "$options_json" ] || body=$(set_body_field "$body" "Decision options" "$options_json")
+  [ -z "$decision_kind" ] || body=$(set_body_field "$body" "Decision kind" "$decision_kind")
+  [ -z "$expects" ] || body=$(set_body_field "$body" "Decision expects" "$expects")
   [ -z "$why" ] || body=$(set_body_field "$body" "Why now" "$why")
   [ -z "$affects" ] || body=$(set_body_field "$body" "What it affects" "$affects")
   [ -z "$recommendation" ] || body=$(set_body_field "$body" "Recommendation" "$recommendation")
@@ -557,7 +590,7 @@ command_id() {
 
 command_hold() {
   local origin=${1:-} key=${2:-} title='' reason='' repo='' question='' decision_url='' no_surface=''
-  local why='' affects='' recommendation='' options_json=''
+  local why='' affects='' recommendation='' options_json='' decision_kind='' expects=''
   local options=()
   local id show state kind existing_title body updated exists=0
   [ "$#" -ge 2 ] || { usage >&2; exit 2; }
@@ -569,6 +602,8 @@ command_hold() {
       --repo) shift; repo=${1:-} ;;
       --question) shift; question=${1:-} ;;
       --option) shift; options+=("${1:-}") ;;
+      --kind) shift; decision_kind=${1:-} ;;
+      --expects) shift; expects=${1:-} ;;
       --why) shift; why=${1:-} ;;
       --affects) shift; affects=${1:-} ;;
       --recommendation) shift; recommendation=${1:-} ;;
@@ -583,6 +618,7 @@ command_hold() {
   validate_one_line title "$title"
   validate_one_line reason "$reason"
   validate_decision_context_flags "$question" "$why" "$affects" "$recommendation" "$decision_url" "$no_surface"
+  validate_decision_intake_flags "$decision_kind" "$expects"
   if [ "${#options[@]}" -gt 0 ]; then
     validate_decision_options "${options[@]}"
     options_json=$(encode_decision_options "${options[@]}")
@@ -614,8 +650,9 @@ command_hold() {
   # half-made backlog identity behind for the next attempt to trip over.
   require_decision_context "$id" "$body" \
     "$why" "$affects" "$recommendation" "$decision_url" "$no_surface"
+  require_decision_intake_kind "$body" "$decision_kind" "$expects"
   updated=$(write_decision_context "$body" "$question" "$options_json" \
-    "$why" "$affects" "$recommendation" "$decision_url" "$no_surface")
+    "$decision_kind" "$expects" "$why" "$affects" "$recommendation" "$decision_url" "$no_surface")
   if [ "$exists" = 1 ]; then
     if [ "$updated" != "$body" ]; then
       tasks_axi update "$id" --body "$updated" >/dev/null \
@@ -636,7 +673,7 @@ command_hold() {
 # being the one decision that skipped the bar.
 command_hold_item() {
   local id=${1:-} reason='' question='' decision_url='' no_surface='' show state body updated
-  local why='' affects='' recommendation='' options_json=''
+  local why='' affects='' recommendation='' options_json='' decision_kind='' expects=''
   local options=()
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   shift
@@ -645,6 +682,8 @@ command_hold_item() {
       --reason) shift; reason=${1:-} ;;
       --question) shift; question=${1:-} ;;
       --option) shift; options+=("${1:-}") ;;
+      --kind) shift; decision_kind=${1:-} ;;
+      --expects) shift; expects=${1:-} ;;
       --why) shift; why=${1:-} ;;
       --affects) shift; affects=${1:-} ;;
       --recommendation) shift; recommendation=${1:-} ;;
@@ -657,6 +696,7 @@ command_hold_item() {
   validate_slug task-id "$id"
   validate_one_line reason "$reason"
   validate_decision_context_flags "$question" "$why" "$affects" "$recommendation" "$decision_url" "$no_surface"
+  validate_decision_intake_flags "$decision_kind" "$expects"
   if [ "${#options[@]}" -gt 0 ]; then
     validate_decision_options "${options[@]}"
     options_json=$(encode_decision_options "${options[@]}")
@@ -671,8 +711,9 @@ command_hold_item() {
   body=$(show_body "$show") || fail "could not read backlog item $id body"
   require_decision_context "$id" "$body" \
     "$why" "$affects" "$recommendation" "$decision_url" "$no_surface"
+  require_decision_intake_kind "$body" "$decision_kind" "$expects"
   updated=$(write_decision_context "$body" "$question" "$options_json" \
-    "$why" "$affects" "$recommendation" "$decision_url" "$no_surface")
+    "$decision_kind" "$expects" "$why" "$affects" "$recommendation" "$decision_url" "$no_surface")
   if [ "$updated" != "$body" ]; then
     tasks_axi update "$id" --body "$updated" >/dev/null \
       || fail "could not record decision context on $id"

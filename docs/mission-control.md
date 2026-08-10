@@ -39,6 +39,8 @@ The stage itself is derived by the snapshot rather than by the board; see `bin/f
   When controls are enabled and the direct board-reply service proves it is available, a decision with two to four explicitly recorded option labels shows them as quick-answer buttons and keeps a `Write your own answer` control beside them.
   The superseded Lavish transport remains Answer-only.
   No prose is parsed to invent options, so a decision without that field keeps the original free-text-only Answer control.
+  A decision explicitly marked as fact intake keeps that same free-text Answer control but labels it `Fact needed` and shows the recorded expected-answer hint beside it when present.
+  A decision without that marker renders its Answer control exactly as before, and the board never infers the marker from its question or recommendation.
   [`docs/decision-hold-lifecycle.md`](decision-hold-lifecycle.md) owns the fields themselves and which of them a filing must supply.
   A structured HTTPS decision aid appears as its own readable link and remains on its recorded private host.
   Only valid HTTP or HTTPS references are clickable; a local report path such as `data/example/report.md` remains non-clickable context when no explicit served HTTPS aid exists, because the board does not serve fleet-local files.
@@ -132,7 +134,8 @@ Neither is nested in a decision or project card.
 A decision belonging to a second mate carries the home it came from and is applied in that home, never in the main one.
 An Answer form uses the exact structured question when one was recorded, otherwise it uses the decision title and reason as a concise reminder, and only falls back to `Your answer` when no useful context exists.
 On the direct board-reply transport, an option button puts its recorded label through that same Answer form and submits the same `answer` request as free text; it creates no new wire intent or execution path.
-The textarea retains `Your answer` as its accessible label in every case, including a decision that also offers quick answers.
+Fact intake adds a prominent expected-shape line above that textarea and no structured, tabular, spreadsheet-like, or multi-field data-entry widget.
+The textarea retains `Your answer` as its accessible label in every case, including a decision that also offers quick answers or fact-intake framing.
 Each decision also offers `Ask a question about this`, which focuses the one shared Ask-firstmate composer and pre-fills a quoted reference to that decision's title.
 It never creates a per-decision conversation or another transport.
 Setting a decision aside carries no reason text at all: the stored reason is the captain's own, and firstmate reads it from the owning home rather than letting a request overwrite it.
@@ -296,13 +299,13 @@ The generator does not serve it; how the file is exposed is decided outside it.
 The deferred cases pin the awaiting count and the section count to literal numbers rather than to the absence of a title, because dropping a decision from the list while still counting it and counting it while still listing it fail separately.
 The decision-context case renders a structured and an old-style decision from one fixture home and pins the count of rendered context blocks, so leaving the old-style decision alone is proven rather than inferred from it happening to look bare.
 The dependency case adds a titled dependent, an unavailable secondmate-dependent title, and a decision with no dependents, then pins the titled line, id fallback, and absence of an extra line.
-The control-enabled half also proves that only the structured option set renders quick-answer buttons and that the free-text affordance remains.
-It then measures the rendered page in a real browser at 1280px and 390px, because markup alone cannot show that the context or dependency line sits outside the row link or that the option buttons fit without pushing the board sideways; that measurement self-skips when Chrome or Node is absent.
+The control-enabled half also proves that only the structured option set renders quick-answer buttons, that only the explicit fact marker renders expected-answer framing, and that the free-text affordance remains for both.
+It then measures the rendered page in a real browser at 1280px and 390px, because markup alone cannot show that the context or dependency line sits outside the row link or that the option buttons and fact-intake hint fit without pushing the board sideways; that measurement self-skips when Chrome or Node is absent.
 It also pins a fixed current time and commits its fixture clones at explicit epochs, so the last-change wording, its three degrade-to-dash paths, and the promise that no clone is written to are all checked against times the test chose.
 
 The reply layer is covered in the same suite: that the default board is unchanged by its existence, that each row offers only the controls it can resolve, that the one-shot new-work composer stays visually distinct from the continuing Ask-firstmate conversation at 1280px and 390px, that a control names no host, port, or absolute endpoint and derives its target from the URL the document was loaded from, that it stays hidden until a transport is proved, and that the confirmation banner ships hidden with an empty outcome heading.
 Fleet prose is checked to stay escaped inside the attributes a control carries.
-A real-browser regression also covers exact and fallback Answer prompts, explicit quick answers beside the free-text path, the per-decision entry into the one shared Ask-firstmate composer, main-home and secondmate decision links, malformed and hostile inputs, successful and failed sends, duplicate prevention, acknowledgement restoration and retirement, active-tab restoration, stable reading anchors, explicit-navigation precedence, and disappeared-anchor fallback.
+A real-browser regression also covers exact and fallback Answer prompts, explicit quick answers beside the free-text path, labelled fact intake with its expected-answer hint, the per-decision entry into the one shared Ask-firstmate composer, main-home and secondmate decision links, malformed and hostile inputs, successful and failed sends, duplicate prevention, acknowledgement restoration and retirement, active-tab restoration, stable reading anchors, explicit-navigation precedence, and disappeared-anchor fallback.
 It renders two fresh board copies from one durable request log and measures the recorded quiet banners, answered-row ordering, shared composer, Deferred shelf, exact cross-home identity, and quick-answer controls at 1280px and 390px.
 It also proves that a quick answer and a typed answer emit the same validated `answer` intent with only their note text differing.
 

@@ -934,7 +934,7 @@ EOF
 }
 
 test_decision_question_and_private_link_use_the_supported_hold_interface() {
-  local home origin hold out question summary show bad_url good_url
+  local home origin hold fact_hold out question summary show bad_url good_url
   home=$(make_home decision-context)
   origin=sample-context-review
   mkdir -p "$home/data/$origin"
@@ -960,6 +960,7 @@ test_decision_question_and_private_link_use_the_supported_hold_interface() {
     .backlog.records[] | select(.id == $hold)
     | .decision_question == $question
       and .decision_options == ["Keep literal text", "Normalize escapes"]
+      and .decision_kind == null and .decision_expects == null
       and .decision_url == "https://sample.tailnet.invalid/decision-aid"
   ' >/dev/null || fail "main-home decision context did not reach the canonical snapshot: $out"
 
@@ -968,8 +969,49 @@ test_decision_question_and_private_link_use_the_supported_hold_interface() {
     .decisions_open[] | select(.id == $hold)
     | .question == $question
       and .options == ["Keep literal text", "Normalize escapes"]
+      and .kind == null and .expects == null
       and .decision_url == "https://sample.tailnet.invalid/decision-aid"
   ' >/dev/null || fail "decision context did not reach the secondmate-home projection: $summary"
+
+  fact_hold=$(run_decisions "$home" hold "$origin" cost-basis \
+    --title "Supply the sample cost basis" \
+    --reason "captain cost basis needed" \
+    --kind fact \
+    --why "The sample valuation cannot be calculated without its cost basis." \
+    --affects "The sample position valuation and tax estimate." \
+    --recommendation "Use the acquisition statement figure." \
+    --no-surface "The source statement is not available in this home." \
+    --repo sample) || fail "the supported hold interface could not record fact intake"
+  out=$(PATH="$home/fakebin:$PATH" FM_HOME="$home" "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+  printf '%s' "$out" | jq -e --arg hold "$fact_hold" '
+    .backlog.records[] | select(.id == $hold)
+    | .decision_kind == "fact" and .decision_expects == null
+      and .decision_options == null
+  ' >/dev/null || fail "fact intake did not reach the canonical snapshot: $out"
+  summary=$(PATH="$home/fakebin:$PATH" FM_HOME="$home" "$ROOT/bin/fm-fleet-snapshot.sh" --secondmate-home-summary)
+  printf '%s' "$summary" | jq -e --arg hold "$fact_hold" '
+    .decisions_open[] | select(.id == $hold)
+    | .kind == "fact" and .expects == null and .options == null
+  ' >/dev/null || fail "fact intake did not reach the secondmate-home projection: $summary"
+
+  run_decisions "$home" hold "$origin" cost-basis \
+    --title "Supply the sample cost basis" --reason "captain cost basis needed" --repo sample \
+    --expects "one number in GBP, without a currency symbol" >/dev/null \
+    || fail "an existing fact decision could not replace its expected-answer hint"
+  out=$(PATH="$home/fakebin:$PATH" FM_HOME="$home" "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+  printf '%s' "$out" | jq -e --arg hold "$fact_hold" '
+    .backlog.records[] | select(.id == $hold)
+    | .decision_kind == "fact"
+      and .decision_expects == "one number in GBP, without a currency symbol"
+      and .decision_options == null
+  ' >/dev/null || fail "a hint-only fact retry changed its kind or invented options"
+  summary=$(PATH="$home/fakebin:$PATH" FM_HOME="$home" "$ROOT/bin/fm-fleet-snapshot.sh" --secondmate-home-summary)
+  printf '%s' "$summary" | jq -e --arg hold "$fact_hold" '
+    .decisions_open[] | select(.id == $hold)
+    | .kind == "fact"
+      and .expects == "one number in GBP, without a currency symbol"
+      and .options == null
+  ' >/dev/null || fail "the expected-answer hint did not survive secondmate projection"
 
   run_decisions "$home" hold "$origin" emphasis \
     --title "Choose the sample emphasis" --reason "captain emphasis choice pending" --repo sample \
@@ -1096,6 +1138,23 @@ test_structured_context_is_required_and_stored_separately() {
   assert_grep "--no-surface" "$home/blank-no-surface.err" \
     "the whitespace refusal did not name the no-surface flag"
 
+  # The intake kind is also optional, but a supplied marker is explicit and a
+  # shape hint cannot float without the fact marker it describes.
+  if run_decisions "$home" "${base[@]}" --kind choice \
+    --why "w" --affects "a" --recommendation "r" --no-surface "none applies" \
+    > "$home/bad-kind.out" 2> "$home/bad-kind.err"; then
+    fail "an unsupported decision kind was accepted"
+  fi
+  assert_grep "only fact" "$home/bad-kind.err" \
+    "the decision-kind refusal did not name the supported marker"
+  if run_decisions "$home" "${base[@]}" --expects "one figure in GBP" \
+    --why "w" --affects "a" --recommendation "r" --no-surface "none applies" \
+    > "$home/orphan-expects.out" 2> "$home/orphan-expects.err"; then
+    fail "an expected-answer hint without fact intake was accepted"
+  fi
+  assert_grep "requires --kind fact" "$home/orphan-expects.err" \
+    "the expected-answer refusal did not explain its dependency"
+
   # Options are optional as a set, but a supplied set must be a genuinely small
   # choice rather than a lone shortcut, duplicates, or a board-sized menu.
   if run_decisions "$home" "${base[@]}" --option "Only choice" \
@@ -1151,6 +1210,7 @@ test_structured_context_is_required_and_stored_separately() {
       and .decision_recommendation == "Take the compact shape; it survives a narrow screen."
       and .decision_no_surface == "Both shapes are text-only, so there is nothing built to compare."
       and .decision_options == null
+      and .decision_kind == null and .decision_expects == null
       and .decision_url == null
       and .hold_reason == "captain shape choice pending"
   ' >/dev/null || fail "structured dimensions did not reach the snapshot as separate fields: $out"
@@ -1247,6 +1307,7 @@ test_hold_item_gates_an_existing_work_item_under_the_same_bar() {
   # The HOLD kind, never the kind the item carries itself, is what marks a
   # captain decision, so an ordinary queued ship gates the same way.
   run_decisions "$home" hold-item sample-queued-ship --reason "captain scope choice pending" \
+    --kind fact --expects "yes/no" \
     --why "The sample scope decides how much of the sample ships this week." \
     --affects "The sample checkout path." \
     --recommendation "Ship the narrow scope first." \
@@ -1263,11 +1324,14 @@ test_hold_item_gates_an_existing_work_item_under_the_same_bar() {
     ([ .backlog.records[] | select(.captain_actionable == true) ] | length) == 2
     and ([ .backlog.records[] | select(.id == "sample-queued-ship")
            | .kind == "ship"
+             and .decision_kind == "fact" and .decision_expects == "yes/no"
+             and .decision_options == null
              and .decision_why == "The sample scope decides how much of the sample ships this week."
              and .decision_no_surface == "Nothing is built yet; that is what the decision is about." ]
          | all)
     and ([ .backlog.records[] | select(.id == "sample-thread")
            | .decision_options == ["Keep current vendor", "Move to second vendor"]
+             and .decision_kind == null and .decision_expects == null
              and .decision_url == "https://sample.tailnet.invalid/vendor-aid" ] | all)
   ' >/dev/null || fail "a gated item of another kind did not reach the snapshot as a decision: $out"
 
