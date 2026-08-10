@@ -744,8 +744,8 @@ process_journaled_firstmate_reread() {
 }
 
 process_journaled_secondmate_update() {
-  local marker=$1 action phase id selector home before after remote remote_host
-  local expected state meta kind current_home current_remote_host active_home head=""
+  local marker=$1 action phase id selector home before after remote remote_host remote_root
+  local expected state meta kind current_home current_remote_host current_remote_root active_home head=""
   local instructions message write_status commit_status=0 remote_out remote_result remote_commit
   action=$(fm_update_action_value "$marker" action 2>/dev/null || true)
   phase=$(fm_update_action_value "$marker" phase 2>/dev/null || true)
@@ -756,6 +756,7 @@ process_journaled_secondmate_update() {
   after=$(fm_update_action_value "$marker" after 2>/dev/null || true)
   remote=$(fm_update_action_value "$marker" remote 2>/dev/null || true)
   remote_host=$(fm_update_action_value "$marker" remote_host 2>/dev/null || true)
+  remote_root=$(fm_update_action_value "$marker" remote_root 2>/dev/null || true)
   expected=$(fm_update_action_secondmate_path "$id" 2>/dev/null || true)
   if [ "$action" != firstmate-update-secondmate ] \
     || { [ "$phase" != prepared ] && [ "$phase" != updated ]; } \
@@ -769,6 +770,7 @@ process_journaled_secondmate_update() {
   kind=$(pending_marker_value "$meta" kind 2>/dev/null || true)
   current_home=$(current_secondmate_home "$id" "$meta" 2>/dev/null || true)
   current_remote_host=$(pending_marker_value "$meta" remote_host 2>/dev/null || true)
+  current_remote_root=$(pending_marker_value "$meta" remote_root 2>/dev/null || true)
   active_home=$(deps_home_dir) || return 1
   if [ "$kind" != secondmate ] || [ -z "$current_home" ]; then
     printf 'Firstmate post-update nudge identity changed for %s\n' "$selector" >&2
@@ -776,7 +778,8 @@ process_journaled_secondmate_update() {
   fi
   case "$remote" in
     0)
-      if [ -n "$remote_host" ] || [ -n "$current_remote_host" ] \
+      if [ -n "$remote_host" ] || [ -n "$remote_root" ] \
+        || [ -n "$current_remote_host" ] || [ -n "$current_remote_root" ] \
         || ! firstmate_update_commit_is_valid "$before" \
         || ! firstmate_update_commit_is_valid "$after" \
         || [ "$before" = "$after" ] \
@@ -800,14 +803,16 @@ process_journaled_secondmate_update() {
       message=$FM_SECOND_MATE_NUDGE_MESSAGE
       ;;
     1)
-      if [ -n "$before" ] || [ -z "$remote_host" ] \
+      if [ -n "$before" ] || [ -z "$remote_host" ] || [ -z "$remote_root" ] \
         || [ "$current_home" != "$home" ] \
-        || [ "$current_remote_host" != "$remote_host" ]; then
+        || [ "$current_remote_host" != "$remote_host" ] \
+        || [ "$current_remote_root" != "$remote_root" ]; then
         printf 'Firstmate remote secondmate update journal is invalid for %s\n' "$selector" >&2
         return 2
       fi
       if [ "$phase" = prepared ] || [ -z "$after" ]; then
-        if ! remote_out=$(FM_ON_EXPECTED_HOST="$remote_host" FM_ON_EXPECTED_HOME="$home" \
+        if ! remote_out=$(FM_ON_EXPECTED_HOST="$remote_host" \
+          FM_ON_EXPECTED_ROOT="$remote_root" FM_ON_EXPECTED_HOME="$home" \
           "$FM_ROOT/bin/fm-on.sh" "$id" fm-remote-secondmate-control.sh update "$id" \
           < /dev/null 2>&1); then
           printf 'Firstmate remote secondmate update retry failed for %s: %s\n' \
@@ -825,7 +830,7 @@ process_journaled_secondmate_update() {
         esac
         if ! firstmate_update_commit_is_valid "$remote_commit" \
           || ! fm_update_action_write_secondmate updated "$id" "$home" "" \
-            "$remote_commit" 1 "$remote_host"; then
+            "$remote_commit" 1 "$remote_host" "$remote_root"; then
           printf 'Firstmate remote secondmate update retry could not be recorded for %s\n' \
             "$selector" >&2
           return 1

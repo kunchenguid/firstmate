@@ -5,6 +5,8 @@
 FM_DEPENDENCY_LOCK_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 _FM_DEPENDENCY_LOCK_HELD=${_FM_DEPENDENCY_LOCK_HELD:-0}
 FM_DEPENDENCY_LOCK_OUTCOME=
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$FM_DEPENDENCY_LOCK_LIB_DIR/fm-timeout-lib.sh"
 
 fm_dependency_positive_integer_is_valid() {
   case "$1" in
@@ -16,6 +18,16 @@ fm_dependency_positive_integer_is_valid() {
 
 fm_dependency_lock_timeout_is_valid() {
   fm_dependency_positive_integer_is_valid "${FM_DEPS_LOCK_TIMEOUT:-5}"
+}
+
+fm_dependency_identity_timeout_is_valid() {
+  fm_dependency_positive_integer_is_valid "${FM_DEPS_IDENTITY_TIMEOUT:-3}"
+}
+
+fm_dependency_run_identity_probe() {
+  local raw=${FM_DEPS_IDENTITY_TIMEOUT:-3}
+  fm_dependency_identity_timeout_is_valid || return 124
+  fm_run_timed "$((10#$raw))" "$@"
 }
 
 fm_dependency_host_lock_basename() {
@@ -57,28 +69,23 @@ fm_dependency_prepare_private_runtime_dir() {
   printf '%s\n' "$dir"
 }
 
-fm_dependency_system_runtime_dir() {
-  local dir="/run/user/$UID"
-  fm_dependency_runtime_dir_is_valid "$dir" || return 1
-  printf '%s\n' "$dir"
+fm_dependency_passwd_home() {
+  local uid=$1
+  [ -r /etc/passwd ] || return 1
+  awk -F: -v uid="$uid" '$3 == uid { print $6; exit }' /etc/passwd 2>/dev/null
 }
 
 fm_dependency_account_home() {
-  local uid username entry candidate
-  uid=$(id -u 2>/dev/null) || return 1
-  username=$(id -un 2>/dev/null) || return 1
+  local uid=$UID username entry candidate
   case "$uid" in ''|*[!0-9]*) return 1 ;; esac
-  case "$username" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
 
-  if [ -r /etc/passwd ]; then
-    candidate=$(awk -F: -v uid="$uid" '$3 == uid { print $6; exit }' /etc/passwd 2>/dev/null || true)
-    if [ -n "$candidate" ] && fm_dependency_private_parent_is_valid "$candidate"; then
-      printf '%s\n' "$candidate"
-      return
-    fi
+  candidate=$(fm_dependency_passwd_home "$uid" 2>/dev/null || true)
+  if [ -n "$candidate" ] && fm_dependency_private_parent_is_valid "$candidate"; then
+    printf '%s\n' "$candidate"
+    return
   fi
   if command -v getent >/dev/null 2>&1; then
-    entry=$(getent passwd "$uid" 2>/dev/null || true)
+    entry=$(fm_dependency_run_identity_probe getent passwd "$uid" 2>/dev/null || true)
     candidate=$(printf '%s\n' "$entry" | awk -F: -v uid="$uid" '$3 == uid { print $6; exit }')
     if [ -n "$candidate" ] && fm_dependency_private_parent_is_valid "$candidate"; then
       printf '%s\n' "$candidate"
@@ -86,7 +93,10 @@ fm_dependency_account_home() {
     fi
   fi
   if command -v dscl >/dev/null 2>&1; then
-    entry=$(dscl . -read "/Users/$username" NFSHomeDirectory 2>/dev/null || true)
+    username=$(fm_dependency_run_identity_probe id -un 2>/dev/null || true)
+    case "$username" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+    entry=$(fm_dependency_run_identity_probe dscl . -read "/Users/$username" \
+      NFSHomeDirectory 2>/dev/null || true)
     candidate=$(printf '%s\n' "$entry" | awk '$1 == "NFSHomeDirectory:" { print $2; exit }')
     if [ -n "$candidate" ] && fm_dependency_private_parent_is_valid "$candidate"; then
       printf '%s\n' "$candidate"
@@ -104,12 +114,7 @@ fm_dependency_host_key() {
 }
 
 fm_dependency_runtime_dir() {
-  local dir account_home firstmate runtime hosts host
-  dir=$(fm_dependency_system_runtime_dir 2>/dev/null || true)
-  if [ -n "$dir" ]; then
-    printf '%s\n' "$dir"
-    return
-  fi
+  local account_home firstmate runtime hosts host
   account_home=$(fm_dependency_account_home) || return 1
   host=$(fm_dependency_host_key) || return 1
   firstmate=$(fm_dependency_prepare_private_runtime_dir "$account_home" .firstmate) || return 1

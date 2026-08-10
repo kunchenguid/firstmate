@@ -422,7 +422,7 @@ test_prepared_update_journal_recovers_without_rebinding() {
   after=$(git -C "$original" rev-parse HEAD)
   FM_UPDATE_ACTION_DIR="$pending" \
     fm_update_action_write_secondmate updated journal-original "$original" \
-      "$before" "$after" 0 ""
+      "$before" "$after" 0 "" ""
   replacement=$(create_firstmate_action_home "$fixture" journal-original replacement)
   register_firstmate_action_target "$fixture" journal-original "$replacement"
   # shellcheck disable=SC2016
@@ -596,7 +596,6 @@ test_host_lock_defaults_to_stable_account_runtime() {
   expected="$account/.firstmate/runtime/hosts/$host/firstmate-deps-$UID"
 
   (
-    fm_dependency_system_runtime_dir() { return 1; }
     fm_dependency_account_home() { printf '%s\n' "$account"; }
     first=$(FM_DEPS_HOST_LOCK_DIR= XDG_RUNTIME_DIR="$fixture/xdg-one" \
       TMPDIR=/tmp HOME="$fixture/home-one" fm_dependency_host_lock_dir) || exit 1
@@ -608,6 +607,37 @@ test_host_lock_defaults_to_stable_account_runtime() {
   ) || fail "caller-specific runtime variables changed the dependency lock path"
   [ -d "$expected" ] || fail "stable account dependency lock directory is absent"
   pass "host lock fallback is stable across caller environments"
+}
+
+test_host_lock_identity_probes_are_bounded() {
+  local fixture fakebin log started elapsed out status
+  fixture="$TMP_ROOT/host-lock-identity-timeout"
+  fakebin=$(fm_fakebin "$fixture")
+  log="$fixture/probes.log"
+  mkdir -p "$fixture/tmp"
+  printf '%s\n' '#!/usr/bin/env bash' \
+    'printf "getent\n" >> "$FM_DEPS_TEST_IDENTITY_LOG"' \
+    'sleep 10' > "$fakebin/getent"
+  printf '%s\n' '#!/usr/bin/env bash' \
+    'printf "test-user\n"' > "$fakebin/id"
+  printf '%s\n' '#!/usr/bin/env bash' \
+    'printf "dscl\n" >> "$FM_DEPS_TEST_IDENTITY_LOG"' \
+    'sleep 10' > "$fakebin/dscl"
+  chmod +x "$fakebin/getent" "$fakebin/id" "$fakebin/dscl"
+
+  started=$(date +%s)
+  out=$(
+    fm_dependency_passwd_home() { return 1; }
+    PATH="$fakebin:$PATH" TMPDIR="$fixture/tmp" FM_DEPS_IDENTITY_TIMEOUT=1 \
+      FM_DEPS_TEST_IDENTITY_LOG="$log" fm_dependency_account_home 2>&1
+  )
+  status=$?
+  elapsed=$(( $(date +%s) - started ))
+  [ "$status" -ne 0 ] || fail "timed-out identity probes returned a home: $out"
+  [ "$elapsed" -le 4 ] || fail "identity probes exceeded their bound (${elapsed}s)"
+  assert_grep getent "$log" "NSS account lookup was not exercised"
+  assert_grep dscl "$log" "directory-service account lookup was not exercised"
+  pass "host lock account lookups are bounded"
 }
 
 test_prepared_remote_update_journal_retries_before_nudge() {
@@ -625,10 +655,12 @@ test_prepared_remote_update_journal_retries_before_nudge() {
     printf 'kind=secondmate\n'
     printf 'home=/srv/firstmate-remote\n'
     printf 'remote_host=remote.example\n'
+    printf 'remote_root=/srv/firstmate-root\n'
   } > "$fixture/state/remote.meta"
   printf '%s\n' '#!/usr/bin/env bash' \
     '[ "$FM_ON_EXPECTED_HOST" = remote.example ] || exit 91' \
     '[ "$FM_ON_EXPECTED_HOME" = /srv/firstmate-remote ] || exit 92' \
+    '[ "$FM_ON_EXPECTED_ROOT" = /srv/firstmate-root ] || exit 93' \
     'printf "%s\n" retry >> "$FM_DEPS_TEST_UPDATE_LOG"' \
     '[ "${FM_DEPS_TEST_REMOTE_FAIL:-0}" -eq 0 ] || exit 1' \
     'printf "synced: %s\n" "$FM_DEPS_TEST_REMOTE_COMMIT"' \
@@ -639,7 +671,28 @@ test_prepared_remote_update_journal_retries_before_nudge() {
   chmod +x "$root/bin/fm-on.sh" "$root/bin/fm-send.sh"
   FM_UPDATE_ACTION_DIR="$pending" \
     fm_update_action_write_secondmate prepared remote /srv/firstmate-remote \
-      "" "" 1 remote.example
+      "" "" 1 remote.example /srv/firstmate-root
+
+  {
+    printf 'kind=secondmate\n'
+    printf 'home=/srv/firstmate-remote\n'
+    printf 'remote_host=remote.example\n'
+    printf 'remote_root=/srv/replacement-root\n'
+  } > "$fixture/state/remote.meta"
+  out=$(FM_ROOT="$root" FM_HOME="$fixture" FM_STATE_OVERRIDE="$fixture/state" \
+    FM_DEPS_TEST_UPDATE_LOG="$log" FM_DEPS_TEST_SEND_LOG="$send_log" \
+    FM_DEPS_TEST_REMOTE_COMMIT="$commit" process_pending_firstmate_actions 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "root-only reassignment completed the remote journal: $out"
+  assert_absent "$log" "root-only reassignment retried the remote update"
+  assert_grep 'remote_root=/srv/firstmate-root' "$marker" \
+    "root-only reassignment rebound the remote journal"
+  {
+    printf 'kind=secondmate\n'
+    printf 'home=/srv/firstmate-remote\n'
+    printf 'remote_host=remote.example\n'
+    printf 'remote_root=/srv/firstmate-root\n'
+  } > "$fixture/state/remote.meta"
 
   out=$(FM_ROOT="$root" FM_HOME="$fixture" FM_STATE_OVERRIDE="$fixture/state" \
     FM_DEPS_TEST_UPDATE_LOG="$log" FM_DEPS_TEST_SEND_LOG="$send_log" \
@@ -661,6 +714,8 @@ test_prepared_remote_update_journal_retries_before_nudge() {
   [ "$status" -ne 0 ] || fail "forced nudge-record failure completed remote actions: $out"
   assert_grep 'phase=updated' "$marker" "successful remote retry was not finalized"
   assert_grep "after=$commit" "$marker" "remote retry omitted its verified commit"
+  assert_grep 'remote_root=/srv/firstmate-root' "$marker" \
+    "remote retry omitted its root identity"
 
   FM_ROOT="$root" FM_HOME="$fixture" FM_STATE_OVERRIDE="$fixture/state" \
     FM_DEPS_TEST_UPDATE_LOG="$log" FM_DEPS_TEST_SEND_LOG="$send_log" \
@@ -1243,6 +1298,7 @@ test_dependency_check_lock_is_run_wide_and_bounded
 test_direct_checker_reexecutes_under_host_lock
 test_host_lock_override_rejects_unrelated_directory
 test_host_lock_defaults_to_stable_account_runtime
+test_host_lock_identity_probes_are_bounded
 test_host_lock_first_creation_race_is_revalidated
 test_invalid_pending_action_directory_stops_run
 test_firstmate_actions_are_durable_and_retry_every_target

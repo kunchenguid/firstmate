@@ -71,14 +71,17 @@ fm_update_action_commit_is_valid() {
 }
 
 fm_update_action_write_secondmate() {
-  local phase=$1 id=$2 home=$3 before=$4 after=$5 remote=$6 remote_host=$7 marker
+  local phase=$1 id=$2 home=$3 before=$4 after=$5 remote=$6 remote_host=$7 remote_root=$8 marker
   case "$phase" in prepared|updated) ;; *) return 1 ;; esac
   case "$id" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
   [ -n "$home" ] || return 1
   case "$remote" in
-    0) [ -n "$before" ] && [ -n "$after" ] && [ -z "$remote_host" ] || return 1 ;;
+    0)
+      [ -n "$before" ] && [ -n "$after" ] \
+        && [ -z "$remote_host" ] && [ -z "$remote_root" ] || return 1
+      ;;
     1)
-      [ -z "$before" ] && [ -n "$remote_host" ] || return 1
+      [ -z "$before" ] && [ -n "$remote_host" ] && [ -n "$remote_root" ] || return 1
       case "$phase" in
         prepared) [ -z "$after" ] || return 1 ;;
         updated) fm_update_action_commit_is_valid "$after" || return 1 ;;
@@ -90,7 +93,7 @@ fm_update_action_write_secondmate() {
   fm_update_action_write "$marker" \
     'action=firstmate-update-secondmate' "phase=$phase" "id=$id" \
     "selector=fm-$id" "home=$home" "before=$before" "after=$after" \
-    "remote=$remote" "remote_host=$remote_host"
+    "remote=$remote" "remote_host=$remote_host" "remote_root=$remote_root"
 }
 
 fm_update_action_remove_secondmate() {

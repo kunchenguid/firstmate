@@ -180,16 +180,25 @@ assert_contains "$INVALID_COUNT_OUT" 'FM_SSH_ALIVE_COUNT_MAX must be a positive 
 pass "fm-on rejects invalid dead-peer settings before launching ssh"
 
 SSH_CALLS_BEFORE_EXPECTATION=$(cat "$SSH_COUNT")
-FM_ON_EXPECTED_HOST=remote-mac FM_ON_EXPECTED_HOME="$REMOTE_HOME" \
+FM_ON_EXPECTED_HOST=remote-mac FM_ON_EXPECTED_ROOT="$REMOTE_ROOT" \
+  FM_ON_EXPECTED_HOME="$REMOTE_HOME" \
   fm_on ios fm-probe-two.sh >/dev/null
 set +e
 EXPECTED_ROUTE_OUT=$(FM_ON_EXPECTED_HOST=replacement-mac \
-  FM_ON_EXPECTED_HOME="$REMOTE_HOME" fm_on ios fm-probe-two.sh 2>&1)
+  FM_ON_EXPECTED_ROOT="$REMOTE_ROOT" FM_ON_EXPECTED_HOME="$REMOTE_HOME" \
+  fm_on ios fm-probe-two.sh 2>&1)
 EXPECTED_ROUTE_RC=$?
+EXPECTED_ROOT_OUT=$(FM_ON_EXPECTED_HOST=remote-mac \
+  FM_ON_EXPECTED_ROOT="$TMP_ROOT/replacement-root" FM_ON_EXPECTED_HOME="$REMOTE_HOME" \
+  fm_on ios fm-probe-two.sh 2>&1)
+EXPECTED_ROOT_RC=$?
 set -e
 [ "$EXPECTED_ROUTE_RC" -ne 0 ] || fail "a changed expected remote placement was accepted"
+[ "$EXPECTED_ROOT_RC" -ne 0 ] || fail "a changed expected remote root was accepted"
 assert_contains "$EXPECTED_ROUTE_OUT" 'remote secondmate placement changed before execution' \
   "changed expected placement was not identified"
+assert_contains "$EXPECTED_ROOT_OUT" 'remote secondmate placement changed before execution' \
+  "changed expected root was not identified"
 [ "$(cat "$SSH_COUNT")" -eq $((SSH_CALLS_BEFORE_EXPECTATION + 1)) ] \
   || fail "changed expected placement reached SSH"
 pass "fm-on binds execution to the caller's expected remote placement"

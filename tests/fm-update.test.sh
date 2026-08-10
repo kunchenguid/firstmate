@@ -406,6 +406,60 @@ test_dependency_lock_owner_delegates_update() {
   pass "dependency lock owners delegate Firstmate updates to direct children"
 }
 
+test_remote_update_binds_initial_placement() {
+  local w fakebin journal marker mutation ssh_log real_grep replacement_line out status
+  w=$(new_world remote-placement)
+  fakebin=$(fm_fakebin "$w/remote-placement-bin")
+  journal="$w/home/state/.fm-deps-pending"
+  marker="$journal/firstmate-update-secondmate-remote.pending"
+  mutation="$w/registry-mutated"
+  ssh_log="$w/ssh.log"
+  real_grep=$(command -v grep)
+  mkdir -p "$journal"
+  chmod 700 "$journal"
+  cp "$ROOT/bin/fm-remote-secondmate-control.sh" "$w/seed/bin/"
+  chmod +x "$w/seed/bin/fm-remote-secondmate-control.sh"
+  git -C "$w/seed" add bin/fm-remote-secondmate-control.sh
+  git -C "$w/seed" commit -qm remote-control
+  git -C "$w/seed" push -q origin main
+  printf -- '- remote - remote delivery (host: remote.example; root: /srv/original-root; home: /srv/remote-home; scope: remote work; projects: alpha; added 2026-08-10)\n' \
+    > "$w/home/data/secondmates.md"
+  {
+    printf 'kind=secondmate\n'
+    printf 'home=/srv/remote-home\n'
+    printf 'remote_host=remote.example\n'
+    printf 'remote_root=/srv/original-root\n'
+  } > "$w/home/state/remote.meta"
+  replacement_line='- remote - remote delivery (host: remote.example; root: /srv/replacement-root; home: /srv/remote-home; scope: remote work; projects: alpha; added 2026-08-10)'
+  printf '%s\n' '#!/usr/bin/env bash' \
+    'if [ "${1:-}" = "^kind=" ] && [ "${2:-}" = "$FM_DEPS_TEST_REMOTE_META" ] && [ ! -e "$FM_DEPS_TEST_MUTATION" ]; then' \
+    '  : > "$FM_DEPS_TEST_MUTATION"' \
+    '  printf "%s\n" "$FM_DEPS_TEST_REPLACEMENT_LINE" > "$FM_DEPS_TEST_REGISTRY"' \
+    'fi' \
+    'exec "$FM_DEPS_TEST_REAL_GREP" "$@"' > "$fakebin/grep"
+  printf '%s\n' '#!/usr/bin/env bash' \
+    'printf "called\n" >> "$FM_DEPS_TEST_SSH_LOG"' \
+    'exit 1' > "$fakebin/ssh"
+  chmod +x "$fakebin/grep" "$fakebin/ssh"
+
+  out=$(PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
+    FM_DEPS_HOST_LOCK_DIR="$w/firstmate-deps-$UID" FM_UPDATE_ACTION_DIR="$journal" \
+    FM_SSH_BIN="$fakebin/ssh" FM_DEPS_TEST_SSH_LOG="$ssh_log" \
+    FM_DEPS_TEST_REMOTE_META="$w/home/state/remote.meta" \
+    FM_DEPS_TEST_MUTATION="$mutation" FM_DEPS_TEST_REGISTRY="$w/home/data/secondmates.md" \
+    FM_DEPS_TEST_REPLACEMENT_LINE="$replacement_line" \
+    FM_DEPS_TEST_REAL_GREP="$real_grep" "$UPDATE" 2>&1)
+  status=$?
+
+  [ "$status" -ne 0 ] || fail "reassigned remote placement completed its update: $out"
+  assert_contains "$out" 'remote secondmate placement changed before execution' \
+    "initial remote update did not retain its selected placement"
+  assert_absent "$ssh_log" "reassigned remote placement reached SSH"
+  assert_grep 'remote_root=/srv/original-root' "$marker" \
+    "remote update journal rebound to the replacement root"
+  pass "initial remote updates bind the complete selected placement"
+}
+
 test_update_failure_is_not_reported_as_lock_failure() {
   local w journal out status
   w=$(new_world update-failure-diagnostic)
@@ -437,6 +491,7 @@ test_firstmate_detached_head_skipped
 test_unsafe_secondmate_home_skipped_before_git_update
 test_active_dependency_check_defers_update
 test_dependency_lock_owner_delegates_update
+test_remote_update_binds_initial_placement
 test_update_failure_is_not_reported_as_lock_failure
 
 echo "# all fm-update tests passed"

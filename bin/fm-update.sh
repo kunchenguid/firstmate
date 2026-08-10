@@ -69,7 +69,7 @@ fm_ff_before_fast_forward() {
   [ -n "$FF_UPDATE_SECOND_MATE_ID" ] && [ -n "$FF_UPDATE_SECOND_MATE_WINDOW" ] \
     || return 0
   fm_update_action_write_secondmate prepared "$FF_UPDATE_SECOND_MATE_ID" \
-    "$FF_UPDATE_SECOND_MATE_HOME" "$before" "$after" 0 ""
+    "$FF_UPDATE_SECOND_MATE_HOME" "$before" "$after" 0 "" ""
 }
 
 fm_ff_after_fast_forward() {
@@ -83,7 +83,7 @@ fm_ff_after_fast_forward() {
   [ -n "$FF_UPDATE_SECOND_MATE_ID" ] && [ -n "$FF_UPDATE_SECOND_MATE_WINDOW" ] \
     || return 0
   fm_update_action_write_secondmate updated "$FF_UPDATE_SECOND_MATE_ID" \
-    "$FF_UPDATE_SECOND_MATE_HOME" "$before" "$after" 0 ""
+    "$FF_UPDATE_SECOND_MATE_HOME" "$before" "$after" 0 "" ""
 }
 
 fm_ff_abort_fast_forward() {
@@ -100,7 +100,8 @@ fm_ff_abort_fast_forward() {
 }
 
 remote_secondmate_action_required() {
-  local id=$1 home=$2 remote_host=$3 meta meta_kind meta_home meta_remote_host
+  local id=$1 home=$2 remote_host=$3 remote_root=$4 meta meta_kind meta_home
+  local meta_remote_host meta_remote_root
   meta="$STATE/$id.meta"
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
   meta_kind=$(grep '^kind=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
@@ -108,11 +109,14 @@ remote_secondmate_action_required() {
   meta_home=$(grep '^home=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
   [ -n "$meta_home" ] || meta_home=$home
   meta_remote_host=$(grep '^remote_host=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
-  [ "$meta_home" = "$home" ] && [ "$meta_remote_host" = "$remote_host" ]
+  meta_remote_root=$(grep '^remote_root=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  [ "$meta_home" = "$home" ] && [ "$meta_remote_host" = "$remote_host" ] \
+    && [ "$meta_remote_root" = "$remote_root" ]
 }
 
 run_update_locked() {
   local reread_firstmate="no" id home line remote_out remote_result remote_action remote_commit
+  local remote_host remote_root
 
   if fm_update_action_enabled; then
     fm_update_action_dir_is_valid "$FM_UPDATE_ACTION_DIR" || {
@@ -155,33 +159,38 @@ run_update_locked() {
       id=$SECONDMATE_REGISTRY_ID
       home=$SECONDMATE_REGISTRY_HOME
       if [ "$SECONDMATE_REGISTRY_REMOTE" -eq 1 ]; then
+        remote_host=$SECONDMATE_REGISTRY_HOST
+        remote_root=$SECONDMATE_REGISTRY_ROOT
         remote_action=0
-        if remote_secondmate_action_required "$id" "$home" "$SECONDMATE_REGISTRY_HOST"; then
+        if remote_secondmate_action_required "$id" "$home" "$remote_host" "$remote_root"; then
           remote_action=1
           if fm_update_action_enabled \
             && ! fm_update_action_write_secondmate prepared "$id" "$home" "" "" 1 \
-              "$SECONDMATE_REGISTRY_HOST"; then
-            echo "remote secondmate $id: skipped on $SECONDMATE_REGISTRY_HOST: update action journal is unavailable" >&2
+              "$remote_host" "$remote_root"; then
+            echo "remote secondmate $id: skipped on $remote_host: update action journal is unavailable" >&2
             continue
           fi
         fi
-        if remote_out=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh update "$id" < /dev/null 2>&1); then
+        if remote_out=$(FM_ON_EXPECTED_HOST="$remote_host" \
+          FM_ON_EXPECTED_ROOT="$remote_root" FM_ON_EXPECTED_HOME="$home" \
+          "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh update "$id" \
+          < /dev/null 2>&1); then
           remote_result=$(printf '%s\n' "$remote_out" | tail -1)
           case "$remote_result" in
             synced:*)
               remote_commit=${remote_result#synced: }
               if ! fm_update_action_commit_is_valid "$remote_commit"; then
-                echo "remote secondmate $id: skipped on $SECONDMATE_REGISTRY_HOST: malformed update result" >&2
+                echo "remote secondmate $id: skipped on $remote_host: malformed update result" >&2
                 if [ "$remote_action" -eq 1 ] && fm_update_action_enabled; then
                   FF_ACTION_JOURNAL_FAILED=1
                 fi
                 continue
               fi
-              echo "remote secondmate $id: updated on $SECONDMATE_REGISTRY_HOST ($remote_commit)"
+              echo "remote secondmate $id: updated on $remote_host ($remote_commit)"
               if [ "$remote_action" -eq 1 ]; then
                 if fm_update_action_enabled; then
                   fm_update_action_write_secondmate updated "$id" "$home" "" "$remote_commit" 1 \
-                    "$SECONDMATE_REGISTRY_HOST" || FF_ACTION_JOURNAL_FAILED=1
+                    "$remote_host" "$remote_root" || FF_ACTION_JOURNAL_FAILED=1
                 fi
                 FF_NUDGE_WINDOWS="$FF_NUDGE_WINDOWS fm-$id"
               fi
@@ -189,26 +198,26 @@ run_update_locked() {
             current:*)
               remote_commit=${remote_result#current: }
               if ! fm_update_action_commit_is_valid "$remote_commit"; then
-                echo "remote secondmate $id: skipped on $SECONDMATE_REGISTRY_HOST: malformed update result" >&2
+                echo "remote secondmate $id: skipped on $remote_host: malformed update result" >&2
                 if [ "$remote_action" -eq 1 ] && fm_update_action_enabled; then
                   FF_ACTION_JOURNAL_FAILED=1
                 fi
                 continue
               fi
-              echo "remote secondmate $id: already current on $SECONDMATE_REGISTRY_HOST ($remote_commit)"
+              echo "remote secondmate $id: already current on $remote_host ($remote_commit)"
               if [ "$remote_action" -eq 1 ] && fm_update_action_enabled; then
                 fm_update_action_remove_secondmate "$id" || FF_ACTION_JOURNAL_FAILED=1
               fi
               ;;
             *)
-              echo "remote secondmate $id: skipped on $SECONDMATE_REGISTRY_HOST: malformed update result" >&2
+              echo "remote secondmate $id: skipped on $remote_host: malformed update result" >&2
               if [ "$remote_action" -eq 1 ] && fm_update_action_enabled; then
                 FF_ACTION_JOURNAL_FAILED=1
               fi
               ;;
           esac
         else
-          echo "remote secondmate $id: skipped on $SECONDMATE_REGISTRY_HOST: ${remote_out%%$'\n'*}" >&2
+          echo "remote secondmate $id: skipped on $remote_host: ${remote_out%%$'\n'*}" >&2
           if [ "$remote_action" -eq 1 ] && fm_update_action_enabled; then
             FF_ACTION_JOURNAL_FAILED=1
           fi
