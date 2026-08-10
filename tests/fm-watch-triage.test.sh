@@ -70,10 +70,43 @@ file_mtime() {
   if [ "$(uname)" = Darwin ]; then stat -f %m "$1" 2>/dev/null; else stat -c %Y "$1" 2>/dev/null; fi
 }
 
+# Set <file>'s mtime to exactly <epoch> seconds, for aging a busy-turn marker by
+# a precise amount (touch -t takes a local-time stamp, not an epoch, on both
+# platforms, so convert via BSD `date -r` or GNU `date -d @`).
+set_mtime() {  # <epoch> <file>
+  local epoch=$1 f=$2 stamp
+  if stamp=$(date -r "$epoch" +%Y%m%d%H%M.%S 2>/dev/null); then
+    touch -t "$stamp" "$f"
+  else
+    stamp=$(date -d "@$epoch" +%Y%m%d%H%M.%S)
+    touch -t "$stamp" "$f"
+  fi
+}
+
 # Signature a primed .seen-* marker must hold so the per-poll signal scan does not
 # fire on a pre-existing status (mirrors fm-watch.sh's stat_sig exactly).
 seen_sig() {
   if [ "$(uname)" = Darwin ]; then stat -f '%z:%Fm' "$1" 2>/dev/null; else stat -c '%s:%Y' "$1" 2>/dev/null; fi
+}
+
+# Prime <file>'s .seen-* suppressor to its CURRENT signature, so the per-poll
+# no-verb signal scan (which watches every *.turn-ended for a size:mtime change)
+# treats a just-created or just-backdated turn-ended marker as already seen.
+# Busy-turn-age fixtures create/backdate turn-ended directly (there is no real
+# harness touching it), so without this the marker's own first sighting would
+# fire an unrelated "signal:" wake and mask the busy-turn-age assertion under
+# test. Call again after any further touch/set_mtime on the same file.
+prime_turnend_seen() {  # <file>
+  local f=$1 base
+  base=$(basename "$f" | tr '.' '_')
+  printf '%s' "$(seen_sig "$f")" > "$(dirname "$f")/.seen-$base"
+}
+
+record_pi_busy() {  # <state-dir> <id>
+  local state=$1 id=$2 gen
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" "$id")
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" "$id" busy --gen "$gen" \
+    --source pi-ext --event agent-start
 }
 
 reap() { kill "$1" 2>/dev/null || true; wait "$1" 2>/dev/null || true; }
@@ -1055,6 +1088,255 @@ test_wedge_escalation_resets_when_pane_becomes_active() {
   pass "a pane becoming active again resets the consecutive wedge-escalation counter"
 }
 
+# --- busy pane duration bound: a completed-turn age gate on top of busy -----
+# 2026-07 hibit-agent-focus-nonsteal-r1 incident: a busy pane (herdr "working"
+# and/or the harness's rendered busy footer) is unconditional, unbounded proof
+# of liveness in every existing classifier, so a genuinely hung foreground tool
+# call behind a busy signature ran undetected for 25h. BUSY_TURN_MAX_SECS bounds
+# how long a busy pane may run with no completed turn (state/<id>.turn-ended, or
+# the task's spawn record before any turn completes); past the bound the SAME
+# wedge_timer_check already used for a provably-working non-busy stale takes
+# over, so escalation reuses the identical stale reason, escalation counter, and
+# demand-deep-inspection marker - never an automatic interrupt or restart.
+
+test_busy_pane_below_turn_age_bound_is_absorbed() {
+  local dir state fakebin out capture_file window key sig pid
+  dir=$(make_case busy-below-turn-age); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-busy-fresh"
+  printf 'Working... (12.3s)' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/busy-fresh.meta"
+  record_pi_busy "$state" busy-fresh
+  printf 'working: setup complete\n' > "$state/busy-fresh.status"
+  sig=$(seen_sig "$state/busy-fresh.status"); printf '%s' "$sig" > "$state/.seen-busy-fresh_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  touch "$state/busy-fresh.turn-ended"
+  prime_turnend_seen "$state/busy-fresh.turn-ended"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_BUSY_TURN_MAX_SECS=999 FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "a busy pane below the turn-age bound was escalated: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "a busy pane below the turn-age bound printed a wake reason"
+  [ ! -e "$state/.stale-since-$key" ] || fail "a busy pane below the turn-age bound started a wedge timer"
+  reap "$pid"
+  pass "a busy worker below the turn-age bound remains working with no escalation"
+}
+
+test_busy_pane_stable_hash_escalates_past_turn_age_bound() {
+  local dir state fakebin out capture_file window key pane_hash sig pid
+  dir=$(make_case busy-stable-hash-turn-age); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-busy-stable"
+  printf 'Working...' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/busy-stable.meta"
+  record_pi_busy "$state" busy-stable
+  printf 'working: setup complete\n' > "$state/busy-stable.status"
+  sig=$(seen_sig "$state/busy-stable.status"); printf '%s' "$sig" > "$state/.seen-busy-stable_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "Working...")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  # No completed turn ever recorded for this task: age the spawn record itself.
+  touch -t 200001010000 "$state/busy-stable.meta"
+
+  # Phase A: past the bound, the stable-hash busy pane is absorbed but starts
+  # the wedge timer (mirrors the existing provably-working-stale Phase A/B).
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "a stable-hash busy pane past the turn-age bound escalated before the wedge threshold: $(cat "$out")"
+  fi
+  [ -s "$state/.stale-since-$key" ] || fail "a stable-hash busy pane past the turn-age bound did not start a wedge timer"
+  reap "$pid"
+
+  # Phase B: backdate the wedge timer past the threshold; the next poll escalates.
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "a stable-hash busy pane did not wedge-escalate past the turn-age bound"
+  grep -F "stale: $window" "$out" >/dev/null || fail "busy turn-age escalation did not print the stale wake"
+  grep -F "possible wedge" "$out" >/dev/null || fail "busy turn-age escalation did not flag a possible wedge"
+  pass "a busy worker with a stable pane hash still escalates once its completed-turn age reaches the bound"
+}
+
+# Regression fixture for the incident's actual masking condition: Pi's rendered
+# elapsed-time footer changes every poll, so the pane hash never repeats and the
+# watcher always takes the "new hash" branch, never the stable-hash one above.
+test_busy_pane_changing_hash_escalates_past_turn_age_bound() {
+  local dir state fakebin out capture_file window key pid
+  dir=$(make_case busy-changing-hash-turn-age); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-busy-ticking"
+  printf 'Working... (3600.1s)' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/busy-ticking.meta"
+  record_pi_busy "$state" busy-ticking
+  printf 'working: setup complete\n' > "$state/busy-ticking.status"
+  sig=$(seen_sig "$state/busy-ticking.status"); printf '%s' "$sig" > "$state/.seen-busy-ticking_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  touch -t 200001010000 "$state/busy-ticking.meta"
+  # No pre-seeded .hash-<key>: with a real ticking elapsed footer, every poll
+  # lands here (h != prev) - the reproduction's actual masking condition.
+
+  # Phase A: first sight past the bound absorbs and starts the wedge timer,
+  # without ever needing the "genuinely stale" hash-match path.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "a changing-hash busy pane past the turn-age bound escalated before the wedge threshold: $(cat "$out")"
+  fi
+  [ -s "$state/.stale-since-$key" ] || fail "a changing-hash busy pane past the turn-age bound did not start a wedge timer"
+  reap "$pid"
+
+  # Phase B: another tick (still a fresh, never-before-seen hash) plus a
+  # backdated wedge timer escalates exactly as the stable-hash case does.
+  printf 'Working... (3601.2s)' > "$capture_file"
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "a changing-hash busy pane did not wedge-escalate past the turn-age bound"
+  grep -F "stale: $window" "$out" >/dev/null || fail "busy turn-age escalation (changing hash) did not print the stale wake"
+  grep -F "possible wedge" "$out" >/dev/null || fail "busy turn-age escalation (changing hash) did not flag a possible wedge"
+  pass "a busy worker whose pane hash changes every poll still escalates once its completed-turn age reaches the bound"
+}
+
+test_busy_pane_turn_end_touch_resets_age() {
+  local dir state fakebin out capture_file window key pane_hash sig pid
+  dir=$(make_case busy-turn-end-resets-age); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-busy-reset"
+  printf 'Working...' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/busy-reset.meta"
+  record_pi_busy "$state" busy-reset
+  printf 'working: setup complete\n' > "$state/busy-reset.status"
+  sig=$(seen_sig "$state/busy-reset.status"); printf '%s' "$sig" > "$state/.seen-busy-reset_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "Working...")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  # A wedge is already mid-escalation, as if several over-age polls already ran.
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  printf '1\n' > "$state/.wedge-escalations-$key"
+  # The worker's most recent turn just completed: touching turn-ended resets age.
+  touch "$state/busy-reset.turn-ended"
+  prime_turnend_seen "$state/busy-reset.turn-ended"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_BUSY_TURN_MAX_SECS=3600 FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "a freshly completed turn on a busy pane was still escalated: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "a freshly completed turn on a busy pane printed a wake reason"
+  [ ! -e "$state/.stale-since-$key" ] || fail "a freshly completed turn did not clear the wedge timer"
+  [ ! -e "$state/.wedge-escalations-$key" ] || fail "a freshly completed turn did not clear the escalation counter"
+  reap "$pid"
+  pass "touching a busy worker's completed-turn marker resets the age and prevents an old-age escalation"
+}
+
+test_busy_pane_repeated_escalation_reaches_demand_deep_inspection() {
+  local dir state fakebin out capture_file window key pane_hash sig pid n
+  dir=$(make_case busy-turn-age-demand-inspect); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-busy-demand-inspect"
+  printf 'Working...' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/busy-demand.meta"
+  record_pi_busy "$state" busy-demand
+  printf 'working: setup complete\n' > "$state/busy-demand.status"
+  sig=$(seen_sig "$state/busy-demand.status"); printf '%s' "$sig" > "$state/.seen-busy-demand_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "Working...")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  touch -t 200001010000 "$state/busy-demand.turn-ended"
+  prime_turnend_seen "$state/busy-demand.turn-ended"
+
+  # Priming round: first sighting past the turn-age bound absorbs and starts
+  # the wedge timer, mirroring the existing provably-working wedge tests.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "priming round for busy turn-age escalation was not absorbed: $(cat "$out")"
+  fi
+  reap "$pid"
+
+  n=1
+  while [ "$n" -le 3 ]; do
+    echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+    : > "$out"
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+      FM_STATE_OVERRIDE="$state" FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+    pid=$!
+    wait_for_exit "$pid" 40 || fail "busy turn-age escalation round $n did not escalate: $(cat "$out")"
+    grep -F "escalation $n" "$out" >/dev/null || fail "busy turn-age round $n did not report escalation count $n: $(cat "$out")"
+    if [ "$n" -lt 3 ]; then
+      grep -F "demand-deep-inspection" "$out" >/dev/null && fail "busy turn-age round $n escalated to demand-deep-inspection before the threshold: $(cat "$out")"
+    else
+      grep -F "demand-deep-inspection" "$out" >/dev/null || fail "busy turn-age round $n (threshold) did not demand deep inspection: $(cat "$out")"
+    fi
+    n=$((n + 1))
+  done
+  [ "$(cat "$state/.wedge-escalations-$key" 2>/dev/null || echo 0)" = 3 ] || fail "busy turn-age escalation counter did not persist across consecutive rounds"
+  pass "repeated busy turn-age escalations reuse the existing escalation counter and demand deep inspection at the threshold"
+}
+
+# Behavioral proof that the production default (no FM_BUSY_TURN_MAX_SECS override
+# anywhere in this env) is 3600s: a completed turn 5 minutes old must not start a
+# wedge timer, while one 66 minutes old must - bracketing the default around 3600
+# without waiting a literal hour.
+test_busy_pane_default_turn_age_bound_is_3600s() {
+  local dir state fakebin out capture_file window key pane_hash sig pid
+  dir=$(make_case busy-default-turn-age); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-busy-default"
+  printf 'Working...' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/busy-default.meta"
+  record_pi_busy "$state" busy-default
+  printf 'working: setup complete\n' > "$state/busy-default.status"
+  sig=$(seen_sig "$state/busy-default.status"); printf '%s' "$sig" > "$state/.seen-busy-default_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "Working...")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+
+  set_mtime $(( $(date +%s) - 300 )) "$state/busy-default.turn-ended"
+  prime_turnend_seen "$state/busy-default.turn-ended"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "a 5-minute-old completed turn tripped the default busy-turn-age bound: $(cat "$out")"
+  fi
+  [ ! -e "$state/.stale-since-$key" ] || fail "a 5-minute-old completed turn started a wedge timer under the default bound"
+  reap "$pid"
+
+  set_mtime $(( $(date +%s) - 4000 )) "$state/busy-default.turn-ended"
+  prime_turnend_seen "$state/busy-default.turn-ended"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "a 66-minute-old completed turn escalated before the wedge threshold under the default bound: $(cat "$out")"
+  fi
+  [ -s "$state/.stale-since-$key" ] || fail "a 66-minute-old completed turn did not start a wedge timer under the default bound (default is not 3600s)"
+  reap "$pid"
+  pass "the production default busy-turn-age bound is 3600s (5min under does not wedge, 66min over does)"
+}
+
 test_nonterminal_stale_repairs_missing_or_corrupt_timer() {
   local dir state fakebin out capture_file window key pane_hash sig pid since
   dir=$(make_case nonterminal-stale-timer-repair); state="$dir/state"; fakebin="$dir/fakebin"
@@ -1138,6 +1420,253 @@ SH
   [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "benign signal enqueued a wake while testing log capping"; }
   reap "$pid"
   pass "triage log capping handles wc byte counts with leading spaces"
+}
+
+# --- process-event delivery -------------------------------------------------
+# A durably captured process-event result publishes an ordinary `check` wake on
+# the durable queue. The watcher must deliver that queued wake proactively -
+# print an actionable reason and exit into the same rewake path every other
+# actionable wake uses - rather than leaving it to be found by a manual drain.
+
+# Run the runner against a case home. FM_ROOT_OVERRIDE (exported by the shared
+# wake harness to keep the drain's tangle check inert) would otherwise point the
+# runner at a root with no installed adapters, and the claim root must stay
+# inside the case so nothing here can observe a real home's source ownership.
+pe_case() {  # <dir> <command>...
+  local dir=$1
+  shift
+  (unset FM_ROOT_OVERRIDE
+   FM_PROCEVENT_CLAIM_ROOT="$dir/claims" FM_HOME="$dir" "$ROOT/bin/fm-procevent.sh" "$@")
+}
+
+# Capture one real process-event result into <dir>'s home, then retire the
+# source so the fixture holds exactly the reported end state: one durably
+# captured, unhandled, queued result and no remaining poll work.
+seed_captured_procevent_result() {  # <dir>
+  local dir=$1 i=0
+  pe_case "$dir" register lavish delivery-src -- \
+    /bin/sh -c 'printf "session:\n  file: /a.html\n  status: waiting\n"' >/dev/null || return 1
+  pe_case "$dir" reconcile >/dev/null || return 1
+  while [ "$i" -lt 100 ]; do
+    [ -s "$dir/state/.wake-queue" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  pe_case "$dir" retire delivery-src >/dev/null || return 1
+  [ -s "$dir/state/.wake-queue" ]
+}
+
+# The watcher, scoped by FM_HOME rather than FM_STATE_OVERRIDE, so the
+# per-cycle reconcile it launches resolves the same home's state.
+procevent_watch_bg() {  # <dir> <out>
+  local dir=$1 out=$2
+  PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_PROCEVENT_CLAIM_ROOT="$dir/claims" \
+    FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
+    FM_POLL=0.2 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+}
+
+test_procevent_captured_result_surfaces_proactively() {
+  local dir state out drain_out pid beacon_age
+  dir=$(make_case procevent-delivery); state="$dir/state"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"
+  seed_captured_procevent_result "$dir" || fail "the fixture captured no process-event result"
+  grep -F "procevent lavish delivery-src 1" "$state/.wake-queue" >/dev/null \
+    || fail "the captured result was never published to the durable queue"
+
+  procevent_watch_bg "$dir" "$out"
+  pid=$!
+  wait_for_exit "$pid" 100 \
+    || fail "a healthy watcher never surfaced a durably captured process-event result: $(cat "$out")"
+  grep -F "check:" "$out" >/dev/null \
+    || fail "the process-event wake was not reported as an actionable check: $(cat "$out")"
+  grep -F "procevent:delivery-src:1" "$out" >/dev/null \
+    || fail "the actionable reason did not name the queued result: $(cat "$out")"
+  beacon_age=$(FM_STATE_OVERRIDE="$state" bash -c \
+    '. "$1/bin/fm-wake-lib.sh"; fm_path_age "$2"' _ "$ROOT" "$state/.last-watcher-beat")
+  [ "$beacon_age" -lt 60 ] || fail "the surfacing watcher was not a healthy one (beacon age ${beacon_age}s)"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the process-event wake failed"
+  grep "$(printf '\tcheck\t')" "$drain_out" | grep -F "procevent lavish delivery-src 1" >/dev/null \
+    || fail "the process-event result was not queued for the drain that follows the wake"
+  pass "a captured process-event result wakes a healthy watcher proactively, with no manual drain"
+}
+
+test_procevent_surfaced_result_does_not_rewake() {
+  local dir state out pid before after
+  dir=$(make_case procevent-no-rewake); state="$dir/state"
+  out="$dir/watch.out"
+  seed_captured_procevent_result "$dir" || fail "the fixture captured no process-event result"
+
+  procevent_watch_bg "$dir" "$out"
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "the first proactive wake never happened: $(cat "$out")"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2>&1 || fail "drain after the first process-event wake failed"
+
+  # Still unhandled: the result stays eligible for re-announcement on the durable
+  # queue, but that must never produce a second proactive wake.
+  : > "$out"
+  procevent_watch_bg "$dir" "$out"
+  pid=$!
+  if ! wait_live "$pid" 40; then
+    fail "an already-surfaced process-event result woke the watcher again: $(cat "$out")"
+  fi
+  reap "$pid"
+  grep -F "procevent lavish delivery-src 1" "$state/.wake-queue" >/dev/null \
+    || fail "re-announcement of the unhandled result stopped when its wake was suppressed"
+
+  pe_case "$dir" handled delivery-src 1 >/dev/null || fail "could not acknowledge the captured result"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2>&1 || fail "drain before the handled control failed"
+  before=$(awk 'END { print NR + 0 }' "$state/.wake-queue" 2>/dev/null || echo 0)
+  : > "$out"
+  procevent_watch_bg "$dir" "$out"
+  pid=$!
+  if ! wait_live "$pid" 40; then
+    fail "a handled process-event result woke the watcher: $(cat "$out")"
+  fi
+  reap "$pid"
+  after=$(awk 'END { print NR + 0 }' "$state/.wake-queue" 2>/dev/null || echo 0)
+  [ "$after" = "$before" ] || fail "a handled result was announced again ($before -> $after queued records)"
+  pass "a process-event wake is delivered once: no duplicate wake while queued, and none once handled"
+}
+
+test_procevent_marker_keys_are_injective() {
+  local dir state out pid marker_count
+  dir=$(make_case procevent-marker-identity); state="$dir/state"; out="$dir/watch.out"
+  append_wake "$state" check "procevent:a.b:1" "check: procevent fixture a.b 1"
+  append_wake "$state" check "procevent:a_b:1" "check: procevent fixture a_b 1"
+  procevent_watch_bg "$dir" "$out"
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "colliding-looking process-event keys were not surfaced"
+  grep -F "procevent:a.b:1" "$out" >/dev/null || fail "the dotted queue key was suppressed"
+  grep -F "procevent:a_b:1" "$out" >/dev/null || fail "the underscored queue key was suppressed"
+  marker_count=$(find "$state" -maxdepth 1 -name '.seen-procevent-*' -type f | awk 'END { print NR + 0 }')
+  [ "$marker_count" = 2 ] || fail "distinct queue keys produced $marker_count seen markers"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2>&1 || fail "marker identity fixture drain failed"
+  pass "complete process-event queue keys map to distinct seen markers"
+}
+
+install_marker_mv_fault() {  # <dir>
+  local dir=$1
+  REAL_MV=$(command -v mv)
+  export REAL_MV
+  cat > "$dir/fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+dest=${!#}
+case "$dest" in
+  */.seen-procevent-*)
+    case "${FM_MARKER_MV_MODE:-}" in
+      pause)
+        printf '1\n' > "$FM_MARKER_MV_READY"
+        while [ ! -e "$FM_MARKER_MV_RELEASE" ]; do sleep 0.02; done
+        ;;
+      kill-before) kill -KILL "$PPID"; exit 1 ;;
+      kill-after) "$REAL_MV" "$@" || exit; kill -KILL "$PPID"; exit 1 ;;
+      fail) exit 1 ;;
+    esac
+    ;;
+esac
+exec "$REAL_MV" "$@"
+SH
+  chmod +x "$dir/fakebin/mv"
+}
+
+test_procevent_surface_serializes_with_drain() {
+  local dir state out drain_out ready release pid drain_pid
+  dir=$(make_case procevent-drain-race); state="$dir/state"; out="$dir/watch.out"
+  drain_out="$dir/drain.out"; ready="$dir/marker-ready"; release="$dir/marker-release"
+  append_wake "$state" check "procevent:drain-race:1" "check: procevent fixture drain-race 1"
+  install_marker_mv_fault "$dir"
+  FM_MARKER_MV_MODE=pause FM_MARKER_MV_READY="$ready" FM_MARKER_MV_RELEASE="$release" \
+    procevent_watch_bg "$dir" "$out"
+  pid=$!
+  wait_numeric_file "$ready" 100 || fail "the watcher never reached its marker commit boundary"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" &
+  drain_pid=$!
+  wait_live "$drain_pid" 10 || fail "a concurrent drain split the surfacing transition"
+  [ -s "$state/.wake-queue" ] || fail "the concurrent drain consumed the record before marker commit"
+  touch "$release"
+  wait "$pid" || fail "the paused watcher did not finish surfacing"
+  wait "$drain_pid" || fail "the concurrent drain failed after surfacing committed"
+  grep -F "procevent:drain-race:1" "$drain_out" >/dev/null \
+    || fail "the serialized drain lost the process-event record"
+  pass "queue revalidation, proactive output, and marker commit serialize with drain"
+}
+
+test_procevent_surface_crash_boundaries() {
+  local dir state out fifo pid reader marker exit_status
+  dir=$(make_case procevent-output-fail); state="$dir/state"; out="$dir/watch.out"; fifo="$dir/output.fifo"
+  append_wake "$state" check "procevent:output-fail:1" "check: procevent fixture output-fail 1"
+  mkfifo "$fifo"
+  sh -c ': < "$1"' _ "$fifo" & reader=$!
+  PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_PROCEVENT_CLAIM_ROOT="$dir/claims" \
+    FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" FM_POLL=0.2 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$fifo" &
+  pid=$!
+  wait "$reader" || true
+  wait_for_exit "$pid" 100
+  exit_status=$?
+  [ "$exit_status" -ne 124 ] || fail "the watcher survived a failed actionable output write"
+  marker=$(find "$state" -maxdepth 1 -name '.seen-procevent-*' -type f | head -1)
+  [ -z "$marker" ] || fail "failed output committed a suppression marker"
+  [ -s "$state/.wake-queue" ] || fail "failed output consumed the durable queue record"
+  procevent_watch_bg "$dir" "$out"; pid=$!
+  wait_for_exit "$pid" 100 || fail "the record was not replayable after output failure"
+  grep -F "procevent:output-fail:1" "$out" >/dev/null || fail "output failure lost proactive replay"
+
+  dir=$(make_case procevent-before-marker); state="$dir/state"; out="$dir/watch.out"
+  append_wake "$state" check "procevent:before-marker:1" "check: procevent fixture before-marker 1"
+  install_marker_mv_fault "$dir"
+  FM_MARKER_MV_MODE=kill-before procevent_watch_bg "$dir" "$out"; pid=$!
+  wait_for_exit "$pid" 100
+  exit_status=$?
+  [ "$exit_status" -ne 124 ] || fail "the watcher survived the injected pre-marker crash"
+  grep -F "procevent:before-marker:1" "$out" >/dev/null || fail "the pre-marker crash happened before output"
+  marker=$(find "$state" -maxdepth 1 -name '.seen-procevent-*' -type f | head -1)
+  [ -z "$marker" ] || fail "a pre-marker crash committed suppression"
+  procevent_watch_bg "$dir" "$out.replay"; pid=$!
+  wait_for_exit "$pid" 100 || fail "a pre-marker crash was not replayable"
+
+  dir=$(make_case procevent-after-marker); state="$dir/state"; out="$dir/watch.out"
+  append_wake "$state" check "procevent:after-marker:1" "check: procevent fixture after-marker 1"
+  install_marker_mv_fault "$dir"
+  FM_MARKER_MV_MODE=kill-after procevent_watch_bg "$dir" "$out"; pid=$!
+  wait_for_exit "$pid" 100
+  exit_status=$?
+  [ "$exit_status" -ne 124 ] || fail "the watcher survived the injected post-marker crash"
+  grep -F "procevent:after-marker:1" "$out" >/dev/null || fail "the post-marker crash lost actionable output"
+  marker=$(find "$state" -maxdepth 1 -name '.seen-procevent-*' -type f | head -1)
+  [ -n "$marker" ] || fail "the post-marker crash did not reach marker commit"
+  : > "$out.replay"
+  procevent_watch_bg "$dir" "$out.replay"; pid=$!
+  if ! wait_live "$pid" 40; then
+    fail "a delivered and durably marked record woke again: $(cat "$out.replay")"
+  fi
+  reap "$pid"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2>&1 || fail "post-marker fixture drain failed"
+  pass "surfacing failures replay before marker commit and suppress only after delivered output"
+}
+
+test_procevent_marker_failure_exits_and_replays() {
+  local dir state out pid marker output_count
+  dir=$(make_case procevent-marker-failure); state="$dir/state"; out="$dir/watch.out"
+  append_wake "$state" check "procevent:marker-failure:1" "check: procevent fixture marker-failure 1"
+  install_marker_mv_fault "$dir"
+  FM_MARKER_MV_MODE=fail procevent_watch_bg "$dir" "$out"
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "marker failure did not end the actionable watcher cycle successfully"
+  output_count=$(grep -Fc "procevent:marker-failure:1" "$out" || true)
+  [ "$output_count" = 1 ] || fail "marker failure printed the actionable reason $output_count times"
+  marker=$(find "$state" -maxdepth 1 -name '.seen-procevent-*' -type f | head -1)
+  [ -z "$marker" ] || fail "marker failure committed suppression"
+  [ ! -e "$state/.wake-queue.lock" ] && [ ! -L "$state/.wake-queue.lock" ] \
+    || fail "marker failure left the queue lock held"
+  procevent_watch_bg "$dir" "$out.replay"
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "marker failure did not leave the durable record replayable"
+  grep -F "procevent:marker-failure:1" "$out.replay" >/dev/null \
+    || fail "marker failure lost the later proactive replay"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2>&1 || fail "marker-failure fixture drain failed"
+  pass "marker failure exits through the shared wake owner, releases its lock, and replays later"
 }
 
 # --- heartbeat: no-change absorbed, backstop surfaces a missed status --------
@@ -1288,6 +1817,12 @@ test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active
+test_busy_pane_below_turn_age_bound_is_absorbed
+test_busy_pane_stable_hash_escalates_past_turn_age_bound
+test_busy_pane_changing_hash_escalates_past_turn_age_bound
+test_busy_pane_turn_end_touch_resets_age
+test_busy_pane_repeated_escalation_reaches_demand_deep_inspection
+test_busy_pane_default_turn_age_bound_is_3600s
 test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
@@ -1299,6 +1834,12 @@ test_nonterminal_paused_rechecks_authoritative_state
 test_paused_authoritative_working_preserves_wedge_timer
 test_nonterminal_stale_repairs_missing_or_corrupt_timer
 test_triage_log_size_cap_accepts_spaced_wc_counts
+test_procevent_captured_result_surfaces_proactively
+test_procevent_surfaced_result_does_not_rewake
+test_procevent_marker_keys_are_injective
+test_procevent_surface_serializes_with_drain
+test_procevent_surface_crash_boundaries
+test_procevent_marker_failure_exits_and_replays
 test_heartbeat_no_change_absorbed
 test_heartbeat_backstop_surfaces_unsurfaced_status
 test_beacon_stays_fresh_while_absorbing

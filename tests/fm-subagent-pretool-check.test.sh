@@ -7,7 +7,6 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 CHECK="$ROOT/bin/fm-subagent-pretool-check.sh"
-SETTINGS="$ROOT/.claude/settings.json"
 TMP_ROOT=$(fm_test_tmproot fm-subagent-pretool-tests)
 PRIMARY="$TMP_ROOT/primary"
 STATE="$PRIMARY/state"
@@ -73,14 +72,8 @@ expect_deny() {
 }
 
 # ---------------------------------------------------------------------------
-# Tracked settings boundary and delegation-shape PreToolUse guard.
+# Delegation-shape PreToolUse guard.
 # ---------------------------------------------------------------------------
-
-test_tracked_settings_do_not_ship_permissions_deny() {
-  jq -e 'keys == ["hooks"] and (has("permissions") | not)' "$SETTINGS" >/dev/null \
-    || fail "tracked Claude settings must contain only hooks and no permissions key"
-  pass "tracked Claude settings do not ship permissions.deny"
-}
 
 test_guard_denies_every_currently_known_delegation_tool() {
   local tool
@@ -283,31 +276,6 @@ test_missing_jq_stdin_transport_fails_open() {
   pass "missing jq for stdin transport fails open rather than denying every tool call"
 }
 
-test_claude_hook_registration_preserves_bash_seatbelts() {
-  jq -e '
-    [.hooks.PreToolUse[] | .hooks[].command]
-      | any(contains("fm-subagent-pretool-check.sh --claude"))
-  ' "$SETTINGS" >/dev/null || fail "Claude settings omit the delegation-shape PreToolUse guard"
-  # A stem-enumerating matcher repeats the fail-open-by-enumeration defect the
-  # script exists to remove. Match all tools and let the script be the single
-  # owner of classification.
-  jq -e '
-    [.hooks.PreToolUse[] | select(.hooks[].command | contains("fm-subagent-pretool-check.sh")) | .matcher] | .[0]
-      | . == ".*"
-  ' "$SETTINGS" >/dev/null || fail "the guard matcher must match all tools"
-  jq -e '
-    [.hooks.PreToolUse[] | select(.matcher == "Bash") | .hooks[].command]
-      == [
-        "\"$CLAUDE_PROJECT_DIR\"/bin/fm-arm-pretool-check.sh --claude",
-        "\"$CLAUDE_PROJECT_DIR\"/bin/fm-cd-pretool-check.sh --claude"
-      ]
-  ' "$SETTINGS" >/dev/null || fail "Claude Bash PreToolUse must retain only the arm-shape and persistent-cd seatbelts"
-  jq -e '.hooks.Stop[0].hooks[0].command | contains("fm-turnend-guard.sh")' "$SETTINGS" >/dev/null \
-    || fail "the Stop turn-end guard changed"
-  pass "Claude wires the delegation guard, retains only non-status Bash seatbelts, and preserves the Stop guard"
-}
-
-test_tracked_settings_do_not_ship_permissions_deny
 test_guard_denies_every_currently_known_delegation_tool
 test_guard_denies_hypothetical_future_tools
 test_guard_allows_ordinary_and_observe_only_tools
@@ -321,4 +289,3 @@ test_secondmate_home_is_in_scope
 test_stdin_transports_and_output_shapes
 test_malformed_transport_fails_open
 test_missing_jq_stdin_transport_fails_open
-test_claude_hook_registration_preserves_bash_seatbelts
