@@ -14,7 +14,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
-REGISTRY="${FM_AGENDA_REGISTRY:-$FM_HOME/data/business-agenda.md}"
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+REGISTRY="${FM_AGENDA_REGISTRY:-$DATA/business-agenda.md}"
 FIRED="$STATE/.agenda-fired"
 LOCK="$STATE/.agenda-fired.lock"
 AGENDA_TMP=
@@ -101,6 +102,14 @@ agenda_fired() {
   return 1
 }
 
+agenda_id_seen() {
+  local candidate=$1 seen_id
+  for seen_id in "${SEEN_IDS[@]}"; do
+    [ "$candidate" = "$seen_id" ] && return 0
+  done
+  return 1
+}
+
 agenda_id_fired_this_scan() {
   local candidate=$1 due_id
   for due_id in "${DUE_IDS[@]}"; do
@@ -109,6 +118,7 @@ agenda_id_fired_this_scan() {
   return 1
 }
 
+SEEN_IDS=()
 DUE_IDS=()
 DUE_RECORDS=()
 DUE_LINES=()
@@ -136,18 +146,20 @@ while IFS= read -r line || [ -n "$line" ]; do
     do|notify|notify-on-problem) ;;
     *) agenda_error "ignoring registry item with invalid delivery: $id"; continue ;;
   esac
-  if agenda_id_fired_this_scan "$id"; then
-    agenda_error "ignoring duplicate registry id: $id"
-    continue
-  fi
-
+  is_due=1
   case "$cadence" in
     daily) ;;
     weekly:mon|weekly:tue|weekly:wed|weekly:thu|weekly:fri|weekly:sat|weekly:sun)
-      [ "$(weekday_number "${cadence#weekly:}")" = "$WEEKDAY" ] || continue
+      [ "$(weekday_number "${cadence#weekly:}")" = "$WEEKDAY" ] || is_due=0
       ;;
     *) agenda_error "ignoring registry item with invalid cadence: $id"; continue ;;
   esac
+  if agenda_id_seen "$id"; then
+    agenda_error "ignoring duplicate registry id: $id"
+    continue
+  fi
+  SEEN_IDS+=("$id")
+  [ "$is_due" -eq 1 ] || continue
 
   fire_record="$id|$cadence|$TODAY"
   agenda_fired "$fire_record" && continue

@@ -78,8 +78,37 @@ EOF
   [ "$out" = "$expected" ] || fail "the provisioned agenda check did not run the seeded routines"
   pass "bootstrap seeds and arms the private business agenda"
 }
+test_setup_persists_canonical_path_overrides() {
+  local base home data state run_dir check out expected
+  base="$TMP_ROOT/path-overrides"
+  home="$base/home"
+  data="$base/private-data"
+  state="$base/private-state"
+  run_dir="$base/run"
+  mkdir -p "$home" "$run_dir"
+
+  (cd "$base" && FM_HOME=home FM_DATA_OVERRIDE=private-data \
+    FM_STATE_OVERRIDE=private-state FM_ROOT_OVERRIDE="$ROOT" "$SETUP") \
+    || fail "agenda setup rejected relative path overrides"
+  check="$state/agenda-scan.check.sh"
+  [ -f "$data/business-agenda.md" ] || fail "agenda setup ignored the data override"
+  [ -f "$check" ] || fail "agenda setup ignored the state override"
+
+  out=$(cd "$run_dir" && FM_AGENDA_DATE=2026-08-10 "$check")
+  expected=$(cat <<'EOF'
+agenda-due: seller-outreach-followup | seller-outreach | draft the daily follow-up
+agenda-due: operations-monitoring | monitoring | check active operational monitors
+agenda-due: business-processes-update | business-processes | draft the weekly update
+agenda-due: captain-priorities-review | captain | review weekly business priorities
+EOF
+)
+  [ "$out" = "$expected" ] || fail "agenda check did not retain its provisioned registry path"
+  [ -f "$state/.agenda-fired" ] || fail "agenda check did not retain its provisioned state path"
+  [ ! -e "$home/state/.agenda-fired" ] || fail "agenda check wrote fire state under the relative runtime cwd"
+  pass "agenda check retains canonical data and state overrides"
+}
 test_agenda_check_enforces_timeout() {
-  local home fake_root check rc marker
+  local home fake_root check out rc marker
   home=$(make_home timeout)
   fake_root="$TMP_ROOT/timeout-root"
   marker="$home/scanner-started"
@@ -95,12 +124,21 @@ SH
   FM_HOME="$home" FM_ROOT_OVERRIDE="$fake_root" "$SETUP" \
     || fail "agenda setup could not create the timeout fixture"
   check="$home/state/agenda-scan.check.sh"
-  FM_TEST_AGENDA_STARTED="$marker" FM_CHECK_TIMEOUT=1 FM_TIMEOUT_MECHANISM_OVERRIDE=bash \
-    "$check" >/dev/null 2>&1
+  out=$(FM_TEST_AGENDA_STARTED="$marker" FM_CHECK_TIMEOUT=1 FM_TIMEOUT_MECHANISM_OVERRIDE=bash \
+    "$check" 2>/dev/null)
   rc=$?
   [ "$rc" -eq 124 ] || fail "agenda check did not report its FM_CHECK_TIMEOUT deadline"
+  [ "$out" = 'agenda-check-error: scanner exited 124' ] \
+    || fail "agenda check timeout did not emit an actionable watcher wake"
   [ -f "$marker" ] || fail "timeout fixture never started the agenda scanner"
-  pass "agenda check bounds the scanner with FM_CHECK_TIMEOUT"
+
+  out=$(FM_CHECK_TIMEOUT=2 FM_TIMEOUT_MECHANISM_OVERRIDE=bash FM_TEST_AGENDA_STARTED="$marker" \
+    bash -c '. "$1"; fm_run_timed 1 "$2"' _ "$ROOT/bin/fm-timeout-lib.sh" "$check" 2>/dev/null)
+  rc=$?
+  [ "$rc" -eq 124 ] || fail "the watcher-style outer timeout did not stop the agenda check"
+  [ "$out" = 'agenda-check-error: scanner interrupted' ] \
+    || fail "an outer watcher timeout did not produce an actionable check line"
+  pass "agenda check bounds and reports scanner timeouts"
 }
 test_daily_fires_once_per_local_day() {
   local home out
@@ -158,9 +196,26 @@ test_fire_state_prevents_repeats_after_scan_restart() {
     || fail "durable fire state did not prevent a repeat after restart"
   pass "durable fire state prevents repeats"
 }
+test_duplicate_id_cannot_alternate_fired_cadences() {
+  local home first second
+  home=$(make_home duplicate-id)
+  write_registry "$home" \
+    '- shared-item | daily | monitoring | check the daily monitor | notify' \
+    '- shared-item | weekly:mon | captain | review the weekly monitor | do'
+  first=$(run_scan "$home" 2026-08-10 2>/dev/null)
+  second=$(run_scan "$home" 2026-08-10 2>/dev/null)
+  [ "$first" = 'agenda-due: shared-item | monitoring | check the daily monitor' ] \
+    || fail "the first duplicate-id record did not own the agenda id"
+  [ -z "$second" ] || fail "a duplicate id alternated cadences after its first firing"
+  [ "$(cat "$home/state/.agenda-fired")" = 'shared-item|daily|2026-08-10' ] \
+    || fail "a duplicate id replaced the first record's durable fire state"
+  pass "duplicate ids cannot alternate fired cadences"
+}
 test_bootstrap_seeds_and_arms_private_agenda
+test_setup_persists_canonical_path_overrides
 test_agenda_check_enforces_timeout
 test_daily_fires_once_per_local_day
 test_weekly_fires_only_on_matching_weekday
 test_nothing_due_is_silent_and_does_not_create_fire_state
 test_fire_state_prevents_repeats_after_scan_restart
+test_duplicate_id_cannot_alternate_fired_cadences
