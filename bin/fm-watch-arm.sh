@@ -372,6 +372,16 @@ print_watch_output() {
   [ -s "$out" ] && cat "$out"
 }
 
+establish_handling_successor() {
+  [ -n "${FM_WATCH_PREDECESSOR_ARM_PID:-}" ] || return 0
+  fm_recovery_marker_snapshot "$STATE/.watcher-down" || return 1
+  case "$FM_RECOVERY_MARKER_TOKEN" in
+    pending:downtime:*) fm_recovery_marker_begin_handling "$STATE/.watcher-down" ;;
+    pending:handling:*|acked:*|'') return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 mode=arm
 case "${1:-}" in
   ''|arm|--arm) mode=arm ;;
@@ -450,7 +460,11 @@ child_out=$(mktemp "$STATE/.watch-arm-output.XXXXXX") || {
   echo "watcher: FAILED - no live watcher with a fresh beacon"
   exit 1
 }
-"$WATCH" >"$child_out" &
+if [ -n "${FM_WATCH_PREDECESSOR_ARM_PID:-}" ]; then
+  FM_WATCH_HANDLING_SUCCESSOR=1 "$WATCH" >"$child_out" &
+else
+  "$WATCH" >"$child_out" &
+fi
 child=$!
 cycle_begin "$child" started "$(fm_pid_identity "$child" 2>/dev/null || true)"
 child_done=0
@@ -518,6 +532,13 @@ while :; do
   if healthy_watcher; then
     if [ "$HEALTHY_PID" = "$child" ]; then
       cycle_refresh_lock_before
+      if ! establish_handling_successor; then
+        cleanup_child
+        wait "$child" 2>/dev/null || true
+        cycle_log_append 1 none handling-handoff-failed none
+        echo "watcher: FAILED - established successor could not enter handling state"
+        exit 1
+      fi
       cycle_mark_predecessor_successor "started:$child"
       echo "watcher: started pid=$child (beacon fresh)"
       wait "$child"

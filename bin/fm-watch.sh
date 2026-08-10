@@ -741,7 +741,11 @@ if ! fm_recovery_marker_arm_check "$WATCHER_DOWNTIME_MARKER"; then
   echo "watcher: recovery state could not be consumed safely; retaining stale lock evidence" >&2
   exit 1
 fi
-[ "$FM_RECOVERY_MARKER_ACTION" = recover ] && WATCHER_RECOVERY_PENDING=1
+if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" = 1 ]; then
+  WATCHER_RECOVERY_PENDING=0
+elif [ "$FM_RECOVERY_MARKER_ACTION" = recover ]; then
+  WATCHER_RECOVERY_PENDING=1
+fi
 watcher_cleanup() {
   local cleanup_status=0 owns_lock=0 transition=release-lock
   if [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)" = "${WATCHER_PID:-}" ]; then
@@ -785,11 +789,6 @@ if ! fm_pr_poll_retirement_recover_all "$STATE" "$SCRIPT_DIR/fm-pr-poll.sh"; the
   wake "$reason"
 fi
 
-recovery_surface_after_output() {
-  [ "$1" -eq 0 ] || return 0
-  fm_recovery_marker_begin_handling "$WATCHER_DOWNTIME_MARKER"
-}
-
 resurface_after_downtime() {
   if [ "$WATCHER_RECOVERY_PENDING" -ne 1 ]; then
     if ! fm_recovery_marker_arm_check "$WATCHER_DOWNTIME_MARKER"; then
@@ -798,9 +797,23 @@ resurface_after_downtime() {
     fi
     [ "$FM_RECOVERY_MARKER_ACTION" = recover ] || return 0
   fi
-  FM_WAKE_POST_OUTPUT_ACTION=recovery_surface_after_output
   wake "check: rearm-resurface"
 }
+
+if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" = 1 ]; then
+  touch "$STATE/.last-watcher-beat"
+  handling_wait=0
+  while [ "$handling_wait" -lt 600 ]; do
+    fm_recovery_marker_snapshot "$WATCHER_DOWNTIME_MARKER" || true
+    case "$FM_RECOVERY_MARKER_TOKEN" in
+      pending:downtime:*) ;;
+      *) break ;;
+    esac
+    sleep 0.05
+    handling_wait=$((handling_wait + 1))
+  done
+  [ "$handling_wait" -lt 600 ] || WATCHER_RECOVERY_PENDING=1
+fi
 
 while :; do
   # Self-eviction: if the singleton lock no longer names this process, a second
