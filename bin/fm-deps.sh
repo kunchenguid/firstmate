@@ -24,7 +24,8 @@
 # Test seams:
 #   FM_DEPS_INTERACTIVE=1|0 overrides terminal detection when source-only.
 #   FM_DEPS_PROBE_TIMEOUT bounds each read-only dependency probe.
-#   FM_DEPS_LOCK_TIMEOUT bounds per-home checker ownership acquisition.
+#   FM_DEPS_LOCK_TIMEOUT bounds checker ownership acquisition.
+#   FM_DEPS_HOST_LOCK_DIR overrides the host-wide lock directory.
 #   FM_ROOT_OVERRIDE points at an isolated Firstmate fixture.
 #   FM_DEPS_HERDR_MANIFEST_URL and FM_DEPS_NODE_INDEX_URL override release data.
 #   FM_DEPS_NVM_DIR points at an isolated NVM fixture.
@@ -41,7 +42,7 @@ FIRSTMATE_UPDATE_RESULT=""
 HERDR_MANIFEST_URL=${FM_DEPS_HERDR_MANIFEST_URL:-https://herdr.dev/latest.json}
 NODE_INDEX_URL=${FM_DEPS_NODE_INDEX_URL:-https://nodejs.org/dist/index.json}
 _FM_DEPS_ACTION_LOCK_HELD=0
-_FM_DEPS_LOADED_REVISION=""
+_FM_DEPS_RUN_LOCK_HELD=0
 
 # shellcheck source=bin/fm-secondmate-nudge-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-nudge-lib.sh"
@@ -61,11 +62,6 @@ case "${1:-}" in
   *) usage; exit 1 ;;
 esac
 [ "$#" -le 1 ] || { usage; exit 1; }
-
-if [ "${FM_DEPS_SOURCE_ONLY:-0}" != 1 ]; then
-  _FM_DEPS_LOADED_REVISION=$(env GIT_TERMINAL_PROMPT=0 GIT_OPTIONAL_LOCKS=0 \
-    git -C "$FM_ROOT" rev-parse HEAD 2>/dev/null || true)
-fi
 
 is_interactive() {
   if [ "${FM_DEPS_SOURCE_ONLY:-0}" = 1 ]; then
@@ -89,7 +85,7 @@ probe_timeout_is_valid() {
   positive_integer_is_valid "${FM_DEPS_PROBE_TIMEOUT:-30}"
 }
 
-action_lock_timeout_is_valid() {
+dependency_lock_timeout_is_valid() {
   positive_integer_is_valid "${FM_DEPS_LOCK_TIMEOUT:-5}"
 }
 
@@ -446,10 +442,10 @@ deps_data_dir() {
   fi
 }
 
-acquire_firstmate_action_lock() {
+acquire_dependency_lock() {
   local lock=$1 raw timeout started
   raw=${FM_DEPS_LOCK_TIMEOUT:-5}
-  action_lock_timeout_is_valid || return 2
+  dependency_lock_timeout_is_valid || return 2
   timeout=$((10#$raw))
   started=$SECONDS
   while ! fm_lock_try_acquire "$lock"; do
@@ -459,7 +455,7 @@ acquire_firstmate_action_lock() {
 }
 
 with_firstmate_action_lock() {
-  local callback=$1 state lock action_root action_home lock_status current_revision rc=0
+  local callback=$1 state lock action_root action_home lock_status rc=0
   shift
   if [ "$_FM_DEPS_ACTION_LOCK_HELD" -eq 1 ]; then
     "$callback" "$@"
@@ -480,17 +476,107 @@ with_firstmate_action_lock() {
   lock="$state/.fm-deps-actions.lock"
   # shellcheck source=bin/fm-wake-lib.sh
   . "$SCRIPT_DIR/fm-wake-lib.sh"
-  acquire_firstmate_action_lock "$lock"
+  acquire_dependency_lock "$lock"
   lock_status=$?
   [ "$lock_status" -eq 0 ] || return "$lock_status"
-  if [ -n "$_FM_DEPS_LOADED_REVISION" ]; then
-    current_revision=$(run_git_probe -C "$action_root" rev-parse HEAD 2>/dev/null || true)
-    if [ -z "$current_revision" ] || [ "$current_revision" != "$_FM_DEPS_LOADED_REVISION" ]; then
-      fm_lock_release "$lock"
-      return 76
-    fi
-  fi
   local _FM_DEPS_ACTION_LOCK_HELD=1
+  "$callback" "$@" || rc=$?
+  fm_lock_release "$lock"
+  return "$rc"
+}
+
+dependency_host_lock_dir() {
+  if [ -n "${FM_DEPS_HOST_LOCK_DIR:-}" ]; then
+    printf '%s\n' "$FM_DEPS_HOST_LOCK_DIR"
+  else
+    printf '/tmp/firstmate-deps-%s\n' "$UID"
+  fi
+}
+
+ensure_dependency_host_lock_dir() {
+  local lock_dir parent
+  lock_dir=$(dependency_host_lock_dir) || return 1
+  case "$lock_dir" in
+    /*) ;;
+    *) return 1 ;;
+  esac
+  case "$lock_dir" in *$'\n'*|*$'\r'*) return 1 ;; esac
+  if [ -e "$lock_dir" ] || [ -L "$lock_dir" ]; then
+    [ -d "$lock_dir" ] && [ ! -L "$lock_dir" ] && [ -O "$lock_dir" ] || return 1
+  else
+    parent=${lock_dir%/*}
+    [ "$parent" != "$lock_dir" ] || parent=.
+    [ -d "$parent" ] && [ ! -L "$parent" ] || return 1
+    (umask 077; mkdir "$lock_dir") || return 1
+  fi
+  chmod 700 "$lock_dir"
+}
+
+dependency_run_lock_is_owned() {
+  local lock=$1 owner pid
+  [ -L "$lock" ] || return 1
+  owner=$(fm_lock_link_owner "$lock" 2>/dev/null) || return 1
+  case "$owner" in "$lock".owner.*) ;; *) return 1 ;; esac
+  [ -d "$owner" ] && [ ! -L "$owner" ] || return 1
+  fm_lock_points_to_owner "$lock" "$owner" || return 1
+  pid=$(cat "$owner/pid" 2>/dev/null || true)
+  [ "$pid" = "${BASHPID:-$$}" ]
+}
+
+with_dependency_run_lock() {
+  local callback=$1 lock_dir lock lock_status run_root=$FM_ROOT
+  local run_home=${FM_HOME:-$FM_ROOT} rc=0
+  shift
+  if [ "$_FM_DEPS_RUN_LOCK_HELD" -eq 1 ]; then
+    "$callback" "$@"
+    return
+  fi
+  ensure_dependency_host_lock_dir || {
+    printf 'fm-deps.sh: host dependency lock directory is invalid\n' >&2
+    return 2
+  }
+  lock_dir=$(dependency_host_lock_dir) || return 2
+  lock="$lock_dir/fm-deps.lock"
+  local FM_ROOT_OVERRIDE FM_ROOT FM_HOME FM_STATE_OVERRIDE STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
+  FM_ROOT_OVERRIDE=$run_root
+  FM_ROOT=$run_root
+  FM_HOME=$run_home
+  FM_STATE_OVERRIDE=
+  STATE=$lock_dir
+  # shellcheck source=bin/fm-wake-lib.sh
+  . "$SCRIPT_DIR/fm-wake-lib.sh"
+  acquire_dependency_lock "$lock"
+  lock_status=$?
+  [ "$lock_status" -eq 0 ] || return "$lock_status"
+  local _FM_DEPS_RUN_LOCK_HELD=1
+  "$callback" "$@" || rc=$?
+  fm_lock_release "$lock"
+  return "$rc"
+}
+
+resume_dependency_run_lock() {
+  local callback=$1 lock_dir lock run_root=$FM_ROOT
+  local run_home=${FM_HOME:-$FM_ROOT} rc=0
+  shift
+  ensure_dependency_host_lock_dir || {
+    printf 'fm-deps.sh: host dependency lock directory is invalid\n' >&2
+    return 2
+  }
+  lock_dir=$(dependency_host_lock_dir) || return 2
+  lock="$lock_dir/fm-deps.lock"
+  local FM_ROOT_OVERRIDE FM_ROOT FM_HOME FM_STATE_OVERRIDE STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
+  FM_ROOT_OVERRIDE=$run_root
+  FM_ROOT=$run_root
+  FM_HOME=$run_home
+  FM_STATE_OVERRIDE=
+  STATE=$lock_dir
+  # shellcheck source=bin/fm-wake-lib.sh
+  . "$SCRIPT_DIR/fm-wake-lib.sh"
+  if ! dependency_run_lock_is_owned "$lock"; then
+    printf 'fm-deps.sh: inherited dependency lock ownership is invalid\n' >&2
+    return 2
+  fi
+  local _FM_DEPS_RUN_LOCK_HELD=1
   "$callback" "$@" || rc=$?
   fm_lock_release "$lock"
   return "$rc"
@@ -1233,8 +1319,6 @@ run_upgrade() {
       lock_status=$?
       if [ "$lock_status" -eq 75 ]; then
         printf 'Firstmate update deferred because another dependency check is running\n' >&2
-      elif [ "$lock_status" -eq 76 ]; then
-        printf 'Firstmate update deferred because the loaded checkout changed\n' >&2
       fi
       return "$lock_status"
       ;;
@@ -1508,9 +1592,14 @@ run_dependency_check_body() {
   printf 'AI workspace dependency check (Linux)\n'
   printf '%s\n' '----------------------------------------'
 
-  process_pending_firstmate_actions
+  with_firstmate_action_lock process_pending_firstmate_actions
   pending_action_status=$?
-  if [ "$pending_action_status" -eq 2 ]; then
+  if [ "$pending_action_status" -eq 75 ]; then
+    printf 'DEFER: dependency check - Firstmate actions are being processed; retry later\n'
+    printf '%s\n' '----------------------------------------'
+    printf 'SUMMARY: 0 update(s) available; 0 completed; 1 deferred; 0 check/upgrade failure(s)\n'
+    return 0
+  elif [ "$pending_action_status" -eq 2 ]; then
     printf 'FAILED: required Firstmate instruction reread remains incomplete\n' >&2
     return 1
   elif [ "$pending_action_status" -eq 3 ]; then
@@ -1547,24 +1636,35 @@ run_dependency_check_body() {
 
 run_dependency_check() {
   local run_status
-  with_firstmate_action_lock run_dependency_check_body
+  if [ "${FM_DEPS_RUN_LOCKED:-0}" = 1 ] && [ "${FM_DEPS_SOURCE_ONLY:-0}" != 1 ]; then
+    resume_dependency_run_lock run_dependency_check_body
+  elif [ "${FM_DEPS_SOURCE_ONLY:-0}" = 1 ]; then
+    with_dependency_run_lock run_dependency_check_body
+  else
+    with_dependency_run_lock exec_current_dependency_checker
+  fi
   run_status=$?
-  if [ "$run_status" -eq 75 ] || [ "$run_status" -eq 76 ]; then
+  if [ "$run_status" -eq 75 ]; then
     if [ "$CHECK_ONLY" -eq 0 ] && ! is_interactive; then
       printf 'INFO: non-interactive shell detected; running checks without upgrade prompts\n'
     fi
     printf 'AI workspace dependency check (Linux)\n'
     printf '%s\n' '----------------------------------------'
-    if [ "$run_status" -eq 75 ]; then
-      printf 'DEFER: dependency check - another invocation is still running; retry later\n'
-    else
-      printf 'DEFER: dependency check - Firstmate changed while this invocation waited; rerun\n'
-    fi
+    printf 'DEFER: dependency check - another invocation is still running; retry later\n'
     printf '%s\n' '----------------------------------------'
     printf 'SUMMARY: 0 update(s) available; 0 completed; 1 deferred; 0 check/upgrade failure(s)\n'
     return 0
   fi
   return "$run_status"
+}
+
+exec_current_dependency_checker() {
+  export FM_DEPS_RUN_LOCKED=1
+  if [ "$CHECK_ONLY" -eq 1 ]; then
+    exec "$SCRIPT_DIR/fm-deps.sh" --check
+  else
+    exec "$SCRIPT_DIR/fm-deps.sh"
+  fi
 }
 
 if [ "${FM_DEPS_SOURCE_ONLY:-0}" = 1 ]; then
@@ -1580,7 +1680,7 @@ if ! probe_timeout_is_valid; then
   printf 'fm-deps.sh: FM_DEPS_PROBE_TIMEOUT must be a positive integer\n' >&2
   exit 1
 fi
-if ! action_lock_timeout_is_valid; then
+if ! dependency_lock_timeout_is_valid; then
   printf 'fm-deps.sh: FM_DEPS_LOCK_TIMEOUT must be a positive integer\n' >&2
   exit 1
 fi

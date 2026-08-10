@@ -378,16 +378,21 @@ test_firstmate_action_publication_is_serialized() {
 }
 
 test_dependency_check_lock_is_run_wide_and_bounded() {
-  local fixture ready release events holder holder_status out status started elapsed i
+  local fixture primary secondmate host_lock ready release events holder holder_status
+  local out status started elapsed i
   fixture="$TMP_ROOT/dependency-check-run-lock"
+  primary="$fixture/primary"
+  secondmate="$fixture/secondmate"
+  host_lock="$fixture/host-lock"
   ready="$fixture/holder.ready"
   release="$fixture/holder.release"
   events="$fixture/events.log"
-  mkdir -p "$fixture/state"
+  mkdir -p "$primary/state" "$secondmate/state"
 
   # shellcheck disable=SC2016
-  FM_ROOT_OVERRIDE="$fixture" FM_HOME="$fixture" FM_STATE_OVERRIDE="$fixture/state" \
-    FM_DEPS_SOURCE_ONLY=1 FM_DEPS_INTERACTIVE=0 FM_DEPS_LOCK_TIMEOUT=3 bash -c '
+  FM_ROOT_OVERRIDE="$primary" FM_HOME="$primary" FM_STATE_OVERRIDE="$primary/state" \
+    FM_DEPS_HOST_LOCK_DIR="$host_lock" FM_DEPS_SOURCE_ONLY=1 \
+    FM_DEPS_INTERACTIVE=0 FM_DEPS_LOCK_TIMEOUT=3 bash -c '
       deps=$1
       ready=$2
       release=$3
@@ -424,9 +429,10 @@ test_dependency_check_lock_is_run_wide_and_bounded() {
 
   started=$(date +%s)
   # shellcheck disable=SC2016
-  out=$(FM_ROOT_OVERRIDE="$fixture" FM_HOME="$fixture" \
-    FM_STATE_OVERRIDE="$fixture/state" FM_DEPS_SOURCE_ONLY=1 \
-    FM_DEPS_INTERACTIVE=0 FM_DEPS_LOCK_TIMEOUT=1 FM_DEPS_TEST_EVENTS="$events" \
+  out=$(FM_ROOT_OVERRIDE="$secondmate" FM_HOME="$secondmate" \
+    FM_STATE_OVERRIDE="$secondmate/state" FM_DEPS_HOST_LOCK_DIR="$host_lock" \
+    FM_DEPS_SOURCE_ONLY=1 FM_DEPS_INTERACTIVE=0 FM_DEPS_LOCK_TIMEOUT=1 \
+    FM_DEPS_TEST_EVENTS="$events" \
     bash -c '
       deps=$1
       set --
@@ -458,45 +464,45 @@ test_dependency_check_lock_is_run_wide_and_bounded() {
     "SUMMARY: 0 update(s) available; 0 completed; 1 deferred; 0 check/upgrade failure(s)" \
     "busy dependency check did not produce a deferred summary"
   assert_absent "$events" "concurrent dependency check entered an upgrade-capable check"
-  pass "dependency checker ownership is run-wide and bounded"
+  pass "dependency checker ownership is host-wide and bounded"
 }
 
-test_loaded_revision_change_defers_run() {
-  local fixture fakebin events out status
-  fixture="$TMP_ROOT/dependency-check-revision-change"
-  fakebin=$(fm_fakebin "$fixture")
-  events="$fixture/events.log"
+test_direct_checker_reexecutes_under_host_lock() {
+  local fixture host_lock bash_env count_file observation out status
+  fixture="$TMP_ROOT/dependency-check-reexec"
+  host_lock="$fixture/host-lock"
+  bash_env="$fixture/bash-env"
+  count_file="$fixture/bash-count"
+  observation="$fixture/reexec-lock"
   mkdir -p "$fixture/state"
-  printf '%s\n' '#!/usr/bin/env bash' 'printf '\''current-head\n'\''' > "$fakebin/git"
-  chmod +x "$fakebin/git"
+  printf 'invalid\n' > "$fixture/state/.fm-deps-pending"
+  printf '%s\n' \
+    'count=0' \
+    'if [ -f "$FM_DEPS_TEST_BASH_COUNT" ]; then read -r count < "$FM_DEPS_TEST_BASH_COUNT"; fi' \
+    'count=$((count + 1))' \
+    'printf "%s\n" "$count" > "$FM_DEPS_TEST_BASH_COUNT"' \
+    'if [ "$count" -eq 2 ]; then' \
+    '  owner=$(readlink "$FM_DEPS_HOST_LOCK_DIR/fm-deps.lock" 2>/dev/null || true)' \
+    '  if [ -n "$owner" ] && [ "$(< "$owner/pid")" = "${BASHPID:-$$}" ]; then' \
+    '    printf "locked\n" > "$FM_DEPS_TEST_REEXEC_LOCK"' \
+    '  else' \
+    '    printf "unlocked\n" > "$FM_DEPS_TEST_REEXEC_LOCK"' \
+    '  fi' \
+    'fi' > "$bash_env"
 
-  # shellcheck disable=SC2016
-  out=$(PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$fixture" FM_HOME="$fixture" \
-    FM_STATE_OVERRIDE="$fixture/state" FM_DEPS_SOURCE_ONLY=1 \
-    FM_DEPS_INTERACTIVE=0 FM_DEPS_TEST_EVENTS="$events" bash -c '
-      deps=$1
-      set --
-      . "$deps"
-      _FM_DEPS_LOADED_REVISION=loaded-head
-      check_release_tool() { printf "entered\n" >> "$FM_DEPS_TEST_EVENTS"; }
-      check_apt_package() { :; }
-      check_npm_tool() { :; }
-      check_herdr() { :; }
-      check_node() { :; }
-      check_zellij() { :; }
-      check_shellcheck_pin() { :; }
-      check_github_actions() { :; }
-      check_firstmate() { :; }
-      run_dependency_check
-    ' _ "$DEPS" 2>&1)
+  out=$(BASH_ENV="$bash_env" FM_DEPS_TEST_BASH_COUNT="$count_file" \
+    FM_DEPS_TEST_REEXEC_LOCK="$observation" FM_DEPS_HOST_LOCK_DIR="$host_lock" \
+    FM_ROOT_OVERRIDE="$fixture" FM_HOME="$fixture" FM_STATE_OVERRIDE="$fixture/state" \
+    bash "$DEPS" --check 2>&1)
   status=$?
 
-  [ "$status" -eq 0 ] || fail "changed loaded revision did not return a deferred result: $out"
-  assert_contains "$out" \
-    "DEFER: dependency check - Firstmate changed while this invocation waited; rerun" \
-    "changed loaded revision was not deferred"
-  assert_absent "$events" "changed loaded revision entered an upgrade-capable check"
-  pass "changed loaded revisions are deferred before checks"
+  [ "$status" -ne 0 ] || fail "direct checker accepted invalid pending action storage: $out"
+  [ "$(< "$count_file")" = 2 ] || fail "direct checker did not re-exec exactly once"
+  [ "$(< "$observation")" = locked ] || fail "checker re-exec did not inherit host lock ownership"
+  assert_contains "$out" "Firstmate pending action directory is invalid" \
+    "re-executed checker did not process pending action storage"
+  assert_absent "$host_lock/fm-deps.lock" "re-executed checker retained the host lock"
+  pass "direct checker re-executes while retaining host lock ownership"
 }
 
 test_invalid_pending_action_directory_stops_run() {
@@ -513,7 +519,8 @@ test_invalid_pending_action_directory_stops_run() {
 
     # shellcheck disable=SC2016
     out=$(FM_ROOT_OVERRIDE="$fixture" FM_HOME="$fixture" \
-      FM_STATE_OVERRIDE="$fixture/state" FM_DEPS_SOURCE_ONLY=1 \
+      FM_STATE_OVERRIDE="$fixture/state" FM_DEPS_HOST_LOCK_DIR="$fixture/host-lock" \
+      FM_DEPS_SOURCE_ONLY=1 \
       FM_DEPS_INTERACTIVE=0 FM_DEPS_TEST_EVENTS="$events" bash -c '
         deps=$1
         set --
@@ -904,7 +911,8 @@ test_unread_instructions_stop_dependency_mutations() {
 
   out=$(PATH="$fakebin:$PATH" FM_HOME="$fixture" FM_ROOT_OVERRIDE="$fixture" \
     FM_STATE_OVERRIDE="$fixture/state" FM_DEPS_SOURCE_ONLY=0 \
-    FM_DEPS_TEST_PROBE_LOG="$log" bash "$DEPS" --check 2>&1)
+    FM_DEPS_HOST_LOCK_DIR="$fixture/host-lock" FM_DEPS_TEST_PROBE_LOG="$log" \
+    bash "$DEPS" --check 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "invalid pending reread allowed the checker to continue"
   assert_contains "$out" "required Firstmate instruction reread remains incomplete" \
@@ -1023,7 +1031,7 @@ test_firstmate_secondmate_only_actions_are_preserved
 test_firstmate_concurrent_update_preserves_actions
 test_firstmate_action_publication_is_serialized
 test_dependency_check_lock_is_run_wide_and_bounded
-test_loaded_revision_change_defers_run
+test_direct_checker_reexecutes_under_host_lock
 test_invalid_pending_action_directory_stops_run
 test_firstmate_actions_are_durable_and_retry_every_target
 test_remote_secondmate_actions_use_shared_retry_markers
