@@ -167,7 +167,8 @@ These five already earned their keep: proving the sweep against them is what exp
 
 The sweep does not special-case them, and it should not.
 A known-positive that stops being reported has stopped being a control, and a suppression list is exactly the mechanism that lets a detector quietly stop working.
-Labelling them belongs here, in prose a reader consults, not in a filter that removes them from the output.
+Labelling them is what replaces filtering, and a label only reaches a triager where that person is already standing.
+The sweep's own summary therefore says that candidates dated 2026-08-02 may be known permanent ones and points at this page; the table above owns recognising them.
 
 ## The residual exposure
 

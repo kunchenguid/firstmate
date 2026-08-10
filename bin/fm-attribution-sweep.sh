@@ -46,7 +46,10 @@
 #                        filter is a string comparison against GitHub's own UTC
 #                        timestamps, so any other spelling is refused outright
 #                        rather than sorting below every record and quietly
-#                        examining nothing.
+#                        examining nothing. A component outside its range -
+#                        month 13, day 32, hour 24 - is refused for the same
+#                        reason from the other side: it matches the shape, then
+#                        sorts above every record and drops them all.
 #   --branch <name>      restrict the commits kind to this branch (repeatable).
 #                        Naming a branch also skips the pull request head pass,
 #                        so a commit whose branch was deleted when its pull
