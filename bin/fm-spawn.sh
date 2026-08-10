@@ -91,7 +91,11 @@
 #   focus-sensitive presentation mutation.
 #   Every single-task invocation holds one task-id-scoped lock across backend
 #   creation through metadata publication, so concurrent same-id spawns serialize
-#   even when they select different backends.
+#   even when they select different backends. Treehouse-backed spawns also hold
+#   one home-scoped worktree-ownership lock from endpoint creation through
+#   metadata publication. After treehouse selects a copy, the shared ownership
+#   check refuses a copy any other live task record still claims rather than
+#   publishing a second owner.
 #   Every local single-task launch also publishes a durable abort fence before
 #   endpoint creation. After an endpoint attempt, a later failure restores any
 #   previous task record only when the exact replacement endpoint is confirmed
@@ -247,6 +251,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-trace-context-lib.sh
 . "$SCRIPT_DIR/fm-trace-context-lib.sh"
+# shellcheck source=bin/fm-worktree-ownership-lib.sh
+. "$SCRIPT_DIR/fm-worktree-ownership-lib.sh"
 # shellcheck source=bin/fm-remote-readiness-lib.sh
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
@@ -735,6 +741,8 @@ CONFIG_INHERIT_LOCK_HELD=0
 SPAWN_REGISTRY_LOCK=
 SPAWN_REGISTRY_LOCK_HELD=0
 SPAWN_RESTART_HANDOFF=0
+WORKTREE_OWNERSHIP_LOCK=
+WORKTREE_OWNERSHIP_LOCK_HELD=0
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -949,6 +957,10 @@ spawn_abort_cleanup() {
     SPAWN_TASK_LOCK_HELD=0
     fm_lock_release "$SPAWN_TASK_LOCK" || true
   fi
+  if [ "$WORKTREE_OWNERSHIP_LOCK_HELD" = 1 ]; then
+    WORKTREE_OWNERSHIP_LOCK_HELD=0
+    fm_lock_release "$WORKTREE_OWNERSHIP_LOCK" || true
+  fi
   if [ "$CONFIG_INHERIT_LOCK_HELD" = 1 ]; then
     CONFIG_INHERIT_LOCK_HELD=0
     fm_lock_release "$CONFIG_INHERIT_LOCK" || true
@@ -1066,6 +1078,14 @@ else
     exit 1
   fi
   SPAWN_TASK_LOCK_HELD=1
+fi
+if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+  WORKTREE_OWNERSHIP_LOCK="$STATE/.worktree-ownership.lock"
+  if ! fm_lock_acquire_wait "$WORKTREE_OWNERSHIP_LOCK"; then
+    echo "error: could not acquire the worktree ownership lock; refusing allocation" >&2
+    exit 1
+  fi
+  WORKTREE_OWNERSHIP_LOCK_HELD=1
 fi
 LAUNCH_ABORT_FENCE="$STATE/.spawn-$ID.abort"
 if [ -e "$LAUNCH_ABORT_FENCE" ] || [ -L "$LAUNCH_ABORT_FENCE" ]; then
@@ -2150,6 +2170,19 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   fi
 fi
 
+if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+  if fm_worktree_claimed_by_other_task "$STATE" "$ID" "$WT"; then
+    echo "REFUSED: pooled worktree $WT is still claimed by task $FM_WORKTREE_OWNERSHIP_OWNER; preserve both task records and reconcile ownership before allocating it." >&2
+    exit 1
+  else
+    worktree_ownership_rc=$?
+    if [ "$worktree_ownership_rc" -ne 1 ]; then
+      echo "REFUSED: cannot prove pooled worktree $WT is unclaimed: $FM_WORKTREE_OWNERSHIP_REASON" >&2
+      exit 1
+    fi
+  fi
+fi
+
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
 # create GOTMPDIR, so mkdir before it is used; fm-teardown removes the whole root.
 # Nested (not a bare /tmp/fm-<id>/gotmp) so other per-task temp can live alongside
@@ -2494,6 +2527,13 @@ if ! spawn_record_publish "$META_RECORD" "$STATE/$ID.meta"; then
   exit 1
 fi
 LAUNCH_NEW_META_PUBLISHED=1
+if [ "$WORKTREE_OWNERSHIP_LOCK_HELD" = 1 ]; then
+  if ! fm_lock_release "$WORKTREE_OWNERSHIP_LOCK"; then
+    echo "error: could not release the worktree ownership lock after recording $ID" >&2
+    exit 1
+  fi
+  WORKTREE_OWNERSHIP_LOCK_HELD=0
+fi
 
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")

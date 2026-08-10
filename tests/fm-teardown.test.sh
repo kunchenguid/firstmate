@@ -674,6 +674,71 @@ test_no_mistakes_origin_remote_allows() {
   pass "no-mistakes worktree with HEAD on origin is torn down (no regression)"
 }
 
+test_worktree_claim_collision_refuses_cleanup() {
+  local case_dir rc
+  case_dir=$(make_case worktree-claim-collision)
+  write_meta "$case_dir" no-mistakes ship
+  fm_write_meta "$case_dir/state/task-y2.meta" \
+    "window=firstmate:fm-task-y2" \
+    "endpoint_task_id=task-y2" \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=no-mistakes"
+  printf '%s\n' 'unlanded work remains intact' > "$case_dir/wt/keep-me.txt"
+  cat > "$case_dir/fakebin/treehouse" <<EOF
+#!/usr/bin/env bash
+printf 'return\n' > "$case_dir/treehouse.log"
+exit 0
+EOF
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "worktree-claim-collision: teardown must refuse ambiguous ownership"
+  assert_grep 'also claimed by task task-y2' "$case_dir/stderr" \
+    "worktree-claim-collision: refusal did not identify the competing task record"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "worktree-claim-collision: teardown removed the original task record"
+  assert_present "$case_dir/state/task-y2.meta" \
+    "worktree-claim-collision: teardown removed the competing task record"
+  assert_present "$case_dir/wt/keep-me.txt" \
+    "worktree-claim-collision: teardown discarded unlanded work"
+  assert_absent "$case_dir/treehouse.log" \
+    "worktree-claim-collision: teardown returned the contested worktree"
+  pass "cleanup preserves both task records and unlanded work when a worktree has two claimants"
+}
+
+test_uncontested_worktree_cleanup_still_returns() {
+  local case_dir rc
+  case_dir=$(make_case worktree-claim-safe-cleanup)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  cat > "$case_dir/fakebin/treehouse" <<EOF
+#!/usr/bin/env bash
+printf 'return %s\n' "\$*" > "$case_dir/treehouse.log"
+exit 0
+EOF
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "worktree-claim-safe-cleanup: uncontested cleanup should succeed"
+  assert_present "$case_dir/treehouse.log" \
+    "worktree-claim-safe-cleanup: teardown did not return the uncontested worktree"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "worktree-claim-safe-cleanup: teardown retained the completed task record"
+  pass "ordinary uncontested cleanup still returns the worktree and removes its task record"
+}
+
 test_no_mistakes_truly_unpushed_refuses() {
   local case_dir rc
   case_dir=$(make_case nm-unpushed)
@@ -1689,6 +1754,97 @@ SH
   pass "forced secondmate teardown preflights every Herdr child before cleanup mutation"
 }
 
+test_forced_secondmate_child_collision_refuses_before_changes() {
+  local case_dir home rc
+  case_dir=$(make_case secondmate-child-worktree-collision)
+  write_meta "$case_dir" local-only secondmate
+  home="$case_dir/secondmate-home"
+  mkdir -p "$home/state-data" "$home/data" "$home/config" "$home/projects"
+  ln -s state-data "$home/state"
+  printf '%s\n' task-x1 > "$home/.fm-secondmate-home"
+  printf '%s\n' "home=$home" >> "$case_dir/state/task-x1.meta"
+  fm_write_meta "$home/state/child-a.meta" \
+    "window=firstmate:fm-child-a" \
+    "endpoint_task_id=child-a" \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=local-only"
+  fm_write_meta "$home/state/child-b.meta" \
+    "window=firstmate:fm-child-b" \
+    "endpoint_task_id=child-b" \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=local-only"
+  printf '%s\n' 'unlanded child work remains intact' > "$case_dir/wt/keep-child.txt"
+  cat > "$case_dir/fakebin/treehouse" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$case_dir/treehouse.log"
+exit 0
+EOF
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 1 "$rc" "secondmate-child-worktree-collision: teardown must refuse ambiguous child ownership"
+  assert_grep 'for child-a is also claimed by task child-b' "$case_dir/stderr" \
+    "secondmate-child-worktree-collision: refusal did not identify the competing child record"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "secondmate-child-worktree-collision: teardown removed the secondmate record"
+  assert_present "$home/state/child-a.meta" \
+    "secondmate-child-worktree-collision: teardown removed the first child record"
+  assert_present "$home/state/child-b.meta" \
+    "secondmate-child-worktree-collision: teardown removed the competing child record"
+  assert_present "$case_dir/wt/keep-child.txt" \
+    "secondmate-child-worktree-collision: teardown discarded unlanded child work"
+  assert_absent "$case_dir/treehouse.log" \
+    "secondmate-child-worktree-collision: teardown returned a contested child worktree"
+  pass "forced secondmate teardown preserves all child records and work on ownership collision"
+}
+
+test_forced_secondmate_recursive_state_refuses_before_changes() {
+  local case_dir home rc
+  case_dir=$(make_case secondmate-recursive-child-state)
+  write_meta "$case_dir" local-only secondmate
+  home="$case_dir/secondmate-home"
+  mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects"
+  printf '%s\n' task-x1 > "$home/.fm-secondmate-home"
+  printf '%s\n' "home=$home" >> "$case_dir/state/task-x1.meta"
+  fm_write_meta "$home/state/recursive-child.meta" \
+    "window=firstmate:fm-recursive-child" \
+    "endpoint_task_id=recursive-child" \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/project" \
+    "kind=secondmate" \
+    "mode=local-only" \
+    "home=$home"
+  printf '%s\n' 'recursive child work remains intact' > "$case_dir/wt/keep-recursive.txt"
+  cat > "$case_dir/fakebin/treehouse" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$case_dir/treehouse.log"
+exit 0
+EOF
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 1 "$rc" "secondmate-recursive-child-state: teardown must refuse recursive state"
+  assert_grep 'recursive child state directory' "$case_dir/stderr" \
+    "secondmate-recursive-child-state: refusal did not identify the recursive state directory"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "secondmate-recursive-child-state: teardown removed the secondmate record"
+  assert_present "$home/state/recursive-child.meta" \
+    "secondmate-recursive-child-state: teardown removed the recursive child record"
+  assert_present "$case_dir/wt/keep-recursive.txt" \
+    "secondmate-recursive-child-state: teardown discarded unlanded child work"
+  assert_absent "$case_dir/treehouse.log" \
+    "secondmate-recursive-child-state: teardown returned work before refusing recursion"
+  pass "forced secondmate teardown refuses recursive canonical child state before changes"
+}
+
 test_forced_secondmate_herdr_child_retains_records_when_close_unconfirmed() {
   local case_dir home log closed rc
   case_dir=$(make_case herdr-child-unconfirmed-close)
@@ -2503,6 +2659,8 @@ test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
 test_no_mistakes_origin_remote_allows
+test_worktree_claim_collision_refuses_cleanup
+test_uncontested_worktree_cleanup_still_returns
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
 test_teardown_missing_busy_sidecar_completes
@@ -2512,6 +2670,8 @@ test_herdr_flat_teardown_refuses_orphaning_records_then_retry_completes
 test_herdr_flat_teardown_refuses_records_on_unparseable_presence
 test_herdr_flat_teardown_preflight_refuses_before_changes
 test_forced_secondmate_herdr_child_preflight_refuses_before_changes
+test_forced_secondmate_child_collision_refuses_before_changes
+test_forced_secondmate_recursive_state_refuses_before_changes
 test_forced_secondmate_herdr_child_retains_records_when_close_unconfirmed
 test_forced_teardown_retains_nested_secondmate_home_when_grandchild_close_unconfirmed
 test_herdr_projection_teardown_retires_journal_only_after_confirmed_close

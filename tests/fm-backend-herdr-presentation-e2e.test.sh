@@ -1091,6 +1091,12 @@ teardown_task aflat "$SECOND_HOME_A" > "$TMP_ROOT/aflat-teardown.out" 2> "$TMP_R
   || fail "flat cross-home contention fixture teardown failed"
 pass "real Herdr lab: session lock contention from a secondmate home falls back flat with no journal"
 
+# The restart cases below deliberately stop the whole isolated session, which
+# retires the anchor endpoint too. Reconcile its synthetic record before asking
+# treehouse to allocate again; otherwise the pool may offer the anchor copy and
+# the ownership guard must refuse it.
+rm -f "$HOME_DIR/state/anchor.meta"
+
 # Same-identity recovery replaces only one exact agent-free husk in its
 # original projected workspace.
 # Exercise both the leading fm- identity style seen in Hi Bit work and the

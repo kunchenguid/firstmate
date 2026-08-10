@@ -141,7 +141,37 @@ test_already_settled_pane_costs_one_confirm_sleep() {
   pass "an already-settled pane confirms via the existing inter-poll sleep, not an extra full cycle"
 }
 
+test_claimed_pooled_worktree_is_not_reallocated() {
+  local rec id old_id out status
+  id=settle-new-task-z3
+  old_id=settle-old-task-z3
+  rec=$(make_settle_case settle-claimed-worktree "$id" 0)
+  read_settle_record "$rec"
+  fm_write_meta "$HOME_DIR/state/$old_id.meta" \
+    "window=firstmate:fm-$old_id" \
+    "endpoint_task_id=$old_id" \
+    "worktree=$WT_DIR" \
+    "project=$PROJ_DIR" \
+    "kind=ship" \
+    "mode=no-mistakes"
+
+  set +e
+  out=$(run_settle_spawn "$id")
+  status=$?
+  set -e
+
+  [ "$status" -ne 0 ] || fail "claimed-worktree: spawn allocated a worktree still claimed by $old_id"
+  assert_contains "$out" "still claimed by task $old_id" \
+    "claimed-worktree: spawn did not identify the existing owner"
+  assert_present "$HOME_DIR/state/$old_id.meta" \
+    "claimed-worktree: spawn changed the existing task record"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "claimed-worktree: spawn published a second owner for the pooled worktree"
+  pass "a pooled worktree claimed by another live task is refused before a new task record is published"
+}
+
 test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_sleep
+test_claimed_pooled_worktree_is_not_reallocated
 
 echo "# all fm-spawn-worktree-settle tests passed"
