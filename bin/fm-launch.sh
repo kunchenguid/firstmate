@@ -5,8 +5,18 @@
 # Usage:
 #   bin/fm-launch.sh                 render the menu, select, launch, attach
 #   bin/fm-launch.sh --print-menu    render the menu and exit 0 (no side effects)
+#   bin/fm-launch.sh --entry <id>    select that entry by id, no menu prompt
+#   bin/fm-launch.sh --detach        launch without attaching to the session
 #   bin/fm-launch.sh --verbose       add the launch mechanics on stderr
 #   bin/fm-launch.sh --help
+#
+# --entry and --detach exist for a scripted caller with no keyboard and no
+# terminal to attach to - bin/fm-unattended-session.sh is the one in the repo.
+# --entry names the entry by its STABLE id rather than its menu position, which
+# a preset edit would silently renumber, and refuses an unknown or unavailable
+# id exactly as a scripted digit does. Neither flag relaxes anything else: the
+# launch lock, the already-running refusal, the Herdr gate and the single-primary
+# guarantee are unchanged, so a scripted launch cannot produce a second primary.
 #
 # This launches a PRIMARY (a firstmate session: no task, no worktree, no brief),
 # never a crewmate. bin/fm-spawn.sh remains the only way to start a crewmate,
@@ -78,6 +88,8 @@ FM_LAUNCH_AUTONOMY_NOTICE="Sessions start without permission prompts."
 
 VERBOSE=0
 PRINT_MENU=0
+ENTRY_ID=""
+DETACH=0
 
 usage() {
   cat <<'USAGE'
@@ -87,6 +99,8 @@ primary session in this home, and attach to it.
 Usage:
   bin/fm-launch.sh                 render the menu, select, launch, attach
   bin/fm-launch.sh --print-menu    render the menu and exit 0 (no side effects)
+  bin/fm-launch.sh --entry <id>    select that entry by id, no menu prompt
+  bin/fm-launch.sh --detach        launch without attaching to the session
   bin/fm-launch.sh --verbose       add the launch mechanics on stderr
   bin/fm-launch.sh --help
 
@@ -99,6 +113,12 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --verbose|-v) VERBOSE=1 ;;
     --print-menu) PRINT_MENU=1 ;;
+    --detach) DETACH=1 ;;
+    --entry)
+      [ $# -gt 1 ] || { echo "fm-launch.sh: --entry requires an entry id" >&2; exit 2; }
+      ENTRY_ID=$2
+      shift
+      ;;
     -h|--help) usage; exit 0 ;;
     *) echo "fm-launch.sh: unknown option '$1' (try --help)" >&2; exit 2 ;;
   esac
@@ -535,6 +555,27 @@ select_entry_pipe() {
   SELECTED=$n
 }
 
+# select_entry_by_id: --entry, for a caller with no keyboard. It obeys the same
+# refuse-don't-reprompt law as the piped path - an unknown id and an unavailable
+# entry both refuse with the reason rather than falling back to a default - and
+# it reads no stdin at all, so a scripted launch can never be steered by whatever
+# happens to be on the caller's input.
+select_entry_by_id() {  # <id>
+  local want=$1 i
+  for i in "${!ENTRIES[@]}"; do
+    entry_split "${ENTRIES[$i]}"
+    if [ "$E_ID" = "$want" ]; then
+      if [ "${STATUSES[$i]}" != ok ]; then
+        refuse "$E_LABEL is not available: ${NOTES[$i]}."
+      fi
+      printf '› %s\n' "$E_LABEL"
+      SELECTED=$((i + 1))
+      return 0
+    fi
+  done
+  refuse "There is no menu entry with id '$want'."
+}
+
 # --- launch -----------------------------------------------------------------
 
 # remember_choice <id>: atomic temp + mv, so a launcher killed mid-write leaves
@@ -614,6 +655,16 @@ live_primary_pane() {  # <session>
 # launch lock is released explicitly first.
 attach() {  # <session>
   local session=$1
+  # --detach is the production form of "started it, nothing to attach to": a
+  # scripted caller has no terminal, and exec-ing the attach there would replace
+  # the caller with a client nobody is watching. FM_LAUNCH_NO_ATTACH remains the
+  # test seam and is deliberately separate, so a suite cannot pass by exercising
+  # a path production never takes.
+  if [ "$DETACH" -eq 1 ]; then
+    vlog "attach suppressed by --detach"
+    launch_lock_release
+    return 0
+  fi
   if [ -n "${FM_LAUNCH_NO_ATTACH:-}" ]; then
     vlog "attach suppressed by FM_LAUNCH_NO_ATTACH"
     return 0
@@ -695,6 +746,14 @@ launch_entry() {  # <record>
   # and pin FM_HOME explicitly, the same shape bin/fm-spawn.sh uses to launch a
   # firstmate primary in a secondmate home.
   launch="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME=$(shell_quote "$FM_HOME") $launch"
+  # An unattended start hands the session the id of the origin record written for
+  # it, which is the only way that session can prove which record is its own and
+  # claim it (bin/fm-unattended-session.sh). Absent - every captain-started
+  # session - this adds nothing, so an attended launch is byte-identical to
+  # before and absence keeps its meaning: no marker means captain-started.
+  if [ -n "${FM_SESSION_ORIGIN_ID:-}" ]; then
+    launch="FM_SESSION_ORIGIN_ID=$(shell_quote "$FM_SESSION_ORIGIN_ID") $launch"
+  fi
   vlog "launch: $launch"
 
   fm_backend_herdr_server_ensure "$session" \
@@ -764,7 +823,9 @@ render_menu
 
 [ "$PRINT_MENU" -eq 1 ] && exit 0
 
-if [ "$TTY" -eq 1 ]; then
+if [ -n "$ENTRY_ID" ]; then
+  select_entry_by_id "$ENTRY_ID"
+elif [ "$TTY" -eq 1 ]; then
   select_entry_tty
 else
   select_entry_pipe

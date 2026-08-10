@@ -162,6 +162,15 @@ launch_case() {  # <name>
   printf '%s\n%s\n%s\n%s\n' "$dir/home" "$fb" "$dir/state.json" "$dir/exec.log"
 }
 
+# FM_LAUNCH_HERMETIC_ENV: the herdr pane identity a real herdr pane injects into
+# every process it starts. It must be dropped for every launcher run, because
+# firstmate's own crewmates run inside herdr panes: with it present the launcher
+# treats the SUITE's pane as the launcher's parent workspace and refuses at
+# fm_backend_herdr_launcher_identity, so a full-launch case fails for a reason
+# that has nothing to do with the launcher. The suite decides its inputs.
+FM_LAUNCH_HERMETIC_ENV=(-u HERDR_PANE_ID -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID
+  -u HERDR_SOCKET_PATH -u HERDR_SESSION -u HERDR_ENV)
+
 # run_launch <home> <fakebin> <state> <execlog> <stdin> [env=val ...]
 # Runs the launcher with a PATH containing ONLY the fakebin and the system dirs
 # jq/git live in, so no real harness or herdr can ever be reached.
@@ -169,6 +178,7 @@ run_launch() {
   local home=$1 fb=$2 state=$3 execlog=$4 input=$5
   shift 5
   printf '%s' "$input" | env \
+    "${FM_LAUNCH_HERMETIC_ENV[@]}" \
     PATH="$fb:/usr/bin:/bin" \
     FM_HOME="$home" \
     FM_BACKEND= \
@@ -180,6 +190,32 @@ run_launch() {
     FM_LAUNCH_NO_ATTACH=1 \
     "$@" \
     bash "$LAUNCH" 2>&1
+}
+
+# run_launch_cli <home> <fb> <state> <execlog> <herdrlog> [VAR=val ...] -- <args...>
+# The scripted front door: flags instead of a keypress, and stdin closed, so a
+# case proves the caller's arguments alone chose the entry. FM_LAUNCH_NO_ATTACH
+# is deliberately NOT set here - --detach is the production form of "do not
+# attach", and a test that leaned on the seam would not exercise it.
+run_launch_cli() {
+  local home=$1 fb=$2 state=$3 execlog=$4 herdrlog=$5
+  shift 5
+  local -a envs=()
+  while [ "$#" -gt 0 ] && [ "$1" != -- ]; do envs+=("$1"); shift; done
+  shift
+  env \
+    "${FM_LAUNCH_HERMETIC_ENV[@]}" \
+    PATH="$fb:/usr/bin:/bin" \
+    FM_HOME="$home" \
+    FM_BACKEND= \
+    FM_LAUNCH_PI_AUTH="$home/pi-auth.json" \
+    FM_FAKE_HERDR_STATE="$state" \
+    FM_LAUNCH_EXEC_LOG="$execlog" \
+    FM_HERDR_LOG="$herdrlog" \
+    FM_LAUNCH_READY_ATTEMPTS=3 \
+    FM_LAUNCH_READY_SLEEP=0.01 \
+    ${envs[@]+"${envs[@]}"} \
+    bash "$LAUNCH" "$@" < /dev/null 2>&1
 }
 
 # render_menu_out <home> <fakebin> [env=val ...]: the menu only, never a launch.
@@ -767,6 +803,102 @@ JSON
   pass "presets: a custom file replaces the built-in five"
 }
 
+# --- scripted front door: --entry, --detach, unattended origin ---------------
+#
+# bin/fm-unattended-session.sh is the caller these exist for: a queued trigger
+# starts a session with no keyboard and no terminal to attach to. The properties
+# that matter are that the entry is chosen by its STABLE id rather than a menu
+# position a preset edit would renumber, that stdin is never consulted, and that
+# nothing about the single-primary guarantee is relaxed.
+
+test_entry_flag_selects_by_stable_id_without_consulting_stdin() {
+  local home fb state execlog herdrlog out sent
+  { read -r home; read -r fb; read -r state; read -r execlog; } <<EOF
+$(launch_case entry-flag)
+EOF
+  herdrlog="$home/herdr.log"
+  out=$(run_launch_cli "$home" "$fb" "$state" "$execlog" "$herdrlog" -- --entry claude --detach)
+  sent=$(grep 'pane send-text' "$herdrlog" | head -1)
+  assert_contains "$sent" "--dangerously-skip-permissions" "--entry did not launch the named entry"
+  assert_contains "$out" "Claude" "the scripted launch must still name what it started"
+  [ "$(jq -r '[.tabs[]|select(.label=="firstmate")]|length' "$state")" = 1 ] \
+    || fail "--entry must create exactly one primary tab"
+  pass "scripted: --entry selects by stable id with stdin closed"
+}
+
+test_detach_launches_without_attaching() {
+  local home fb state execlog herdrlog
+  { read -r home; read -r fb; read -r state; read -r execlog; } <<EOF
+$(launch_case detach)
+EOF
+  herdrlog="$home/herdr.log"
+  run_launch_cli "$home" "$fb" "$state" "$execlog" "$herdrlog" -- --entry claude --detach >/dev/null
+  assert_grep "pane send-text" "$herdrlog" "--detach must still start the session"
+  assert_no_grep "session attach" "$herdrlog" "--detach must not attach a client nobody is watching"
+
+  # Control: a second home, identical but for the flag, DOES attach - so the
+  # assertion above is about --detach and not about a launch that never got far
+  # enough to attach.
+  local h2 f2 s2 e2 l2
+  { read -r h2; read -r f2; read -r s2; read -r e2; } <<EOF
+$(launch_case detach-control)
+EOF
+  l2="$h2/herdr.log"
+  run_launch_cli "$h2" "$f2" "$s2" "$e2" "$l2" -- --entry claude >/dev/null
+  assert_grep "session attach" "$l2" "without --detach the launcher must attach as before"
+  pass "scripted: --detach starts the session and attaches nothing"
+}
+
+test_entry_flag_refuses_unknown_and_unavailable_ids() {
+  local home fb state execlog herdrlog out rc
+  { read -r home; read -r fb; read -r state; read -r execlog; } <<EOF
+$(launch_case entry-refusals)
+EOF
+  herdrlog="$home/herdr.log"
+  out=$(run_launch_cli "$home" "$fb" "$state" "$execlog" "$herdrlog" -- --entry nonesuch --detach) && rc=0 || rc=$?
+  [ "$rc" -ne 0 ] || fail "an unknown entry id must refuse"
+  assert_contains "$out" "no menu entry with id 'nonesuch'" "the refusal must name the id it could not find"
+  [ "$(jq -r '.tabs | length' "$state")" = 0 ] || fail "a refused scripted launch must create nothing"
+
+  rm -f "$fb/codex"
+  out=$(run_launch_cli "$home" "$fb" "$state" "$execlog" "$herdrlog" -- --entry codex --detach) && rc=0 || rc=$?
+  [ "$rc" -ne 0 ] || fail "an unavailable entry must refuse rather than falling back to a default"
+  assert_contains "$out" "is not available" "the refusal must say why the entry cannot start"
+  [ "$(jq -r '.tabs | length' "$state")" = 0 ] || fail "a refused scripted launch must create nothing"
+
+  out=$(run_launch_cli "$home" "$fb" "$state" "$execlog" "$herdrlog" -- --entry) && rc=0 || rc=$?
+  [ "$rc" = 2 ] || fail "--entry with no value must be a usage error, got exit $rc"
+  pass "scripted: an unknown, unavailable, or valueless --entry refuses and creates nothing"
+}
+
+test_unattended_origin_id_reaches_the_started_session() {
+  local home fb state execlog herdrlog sent
+  { read -r home; read -r fb; read -r state; read -r execlog; } <<EOF
+$(launch_case origin-id)
+EOF
+  herdrlog="$home/herdr.log"
+  run_launch_cli "$home" "$fb" "$state" "$execlog" "$herdrlog" \
+    FM_SESSION_ORIGIN_ID=u-test-origin -- --entry claude --detach >/dev/null
+  sent=$(grep 'pane send-text' "$herdrlog" | head -1)
+  assert_contains "$sent" "FM_SESSION_ORIGIN_ID=" \
+    "an unattended launch must hand the started session its origin id"
+  assert_contains "$sent" "u-test-origin" "the origin id carried into the pane must be the one supplied"
+
+  # Control: absence keeps its meaning. A captain-started launch carries no
+  # marker at all, which is what makes an absent record mean captain-started.
+  local h2 f2 s2 e2 l2 sent2
+  { read -r h2; read -r f2; read -r s2; read -r e2; } <<EOF
+$(launch_case origin-id-control)
+EOF
+  l2="$h2/herdr.log"
+  run_launch_cli "$h2" "$f2" "$s2" "$e2" "$l2" -- --entry claude --detach >/dev/null
+  sent2=$(grep 'pane send-text' "$l2" | head -1)
+  assert_contains "$sent2" "--dangerously-skip-permissions" "the control launch must have reached the pane"
+  assert_not_contains "$sent2" "FM_SESSION_ORIGIN_ID" \
+    "a launch with no origin id must carry no unattended marker"
+  pass "scripted: the origin id reaches the started session, and absence carries no marker"
+}
+
 # --- run --------------------------------------------------------------------
 
 command -v jq >/dev/null 2>&1 || { pass "fm-launch: skipped (jq is required by the herdr fake)"; exit 0; }
@@ -800,3 +932,7 @@ test_presets_beyond_one_keypress_refuse
 test_configured_non_herdr_backend_refuses_before_the_menu
 test_glob_characters_in_preset_fields_never_shift_the_record
 test_custom_presets_replace_the_builtin_menu
+test_entry_flag_selects_by_stable_id_without_consulting_stdin
+test_detach_launches_without_attaching
+test_entry_flag_refuses_unknown_and_unavailable_ids
+test_unattended_origin_id_reaches_the_started_session

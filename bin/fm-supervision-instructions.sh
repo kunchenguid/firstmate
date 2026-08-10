@@ -14,12 +14,13 @@ HARNESS=
 READ_ONLY=0
 AFK=0
 X_MODE=0
+UNATTENDED=0
 REPAIR_LINE=0
 QUEUE_PENDING=0
 
 usage() {
   cat <<'EOF'
-Usage: fm-supervision-instructions.sh [--harness <name>] [--read-only 0|1] [--afk 0|1] [--x-mode 0|1] [--repair-line] [--queue-pending 0|1]
+Usage: fm-supervision-instructions.sh [--harness <name>] [--read-only 0|1] [--afk 0|1] [--x-mode 0|1] [--unattended 0|1] [--repair-line] [--queue-pending 0|1]
 
 Print the current primary harness's supervision operating instructions.
 With --repair-line, print one concise repair instruction for guard and hook messages.
@@ -53,6 +54,11 @@ while [ "$#" -gt 0 ]; do
     --x-mode)
       [ "$#" -gt 1 ] || { echo "error: --x-mode requires 0 or 1" >&2; exit 2; }
       X_MODE=$(bool_value "$2")
+      shift 2
+      ;;
+    --unattended)
+      [ "$#" -gt 1 ] || { echo "error: --unattended requires 0 or 1" >&2; exit 2; }
+      UNATTENDED=$(bool_value "$2")
       shift 2
       ;;
     --queue-pending)
@@ -202,6 +208,11 @@ if [ "$X_MODE" -eq 1 ]; then
   printf '%s%s%s\n' '- X mode: active; source ' "$x_mode_env" ' before launching any watcher process so the 30s cadence is inherited.'
 else
   printf '%s\n' '- X mode: inactive; use the default watcher cadence.'
+fi
+if [ "$UNATTENDED" -eq 1 ]; then
+  printf '%s\n' '- Session origin: unattended - started by a queued trigger, not by the captain. Authority is unchanged: park anything needing the captain rather than widening your own permission, and act only on the drained queue and work already registered in this home. Load the unattended-session skill.'
+else
+  printf '%s\n' '- Session origin: captain-started.'
 fi
 ordinary_wake_line
 printf '\n'

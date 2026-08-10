@@ -82,6 +82,7 @@ config/herdr-presentation-spaces  optional "off" opt-out from, or "on" opt-in to
 config/trace-context  optional presence flag enabling default-off native W3C trace-context propagation to spawned agents; LOCAL, gitignored; inherited by secondmate homes; see docs/configuration.md "Trace context propagation" and docs/trace-context.md
 config/cmux-socket-password  optional cmux control-socket password; LOCAL, gitignored; read fresh on every cmux CLI call and passed through without ever overriding an operator's own ambient CMUX_SOCKET_PASSWORD when absent (docs/cmux-backend.md "Setup")
 config/wedge-alarm  optional away-mode wedge-alarm active-alert directives; LOCAL, gitignored; absent means auto (macOS Notification Center when available); see docs/wedge-alarm.md
+config/unattended-session  optional launch entry id an OS timer's unattended session start uses; LOCAL, gitignored; absent falls back to state/.launch-last, and neither present refuses rather than guessing a harness; see docs/configuration.md "Unattended session execution" (section 13)
 config/decision-surface-platform  optional path to the deterministic platform's AXI launcher, enabling the decision-surface platform probe; LOCAL, gitignored; absent means the platform seam is unconfigured and the fleet-side surface stands alone; see docs/configuration.md "Platform decision-surface seam"
 config/x-mode.env    generated Relay watcher cadence; LOCAL, gitignored; source before arming watcher when present
 data/                personal fleet records; LOCAL, gitignored as a whole
@@ -131,6 +132,7 @@ state/               volatile runtime signals; gitignored
   .wake-queue        durable queued wakes: epoch<TAB>seq<TAB>kind<TAB>key<TAB>payload
   .<id>.open-decisions-cursor  per-task byte cursor and folded open-decision set bounding the OPEN DECISIONS scan's cost to new status-log appends; written only by fm-classify-lib.sh's status_open_decisions_incremental, removed by teardown, safe to delete (forces one full re-fold)
   .afk               durable away-mode flag; present = sub-supervisor may inject escalations (set by /afk, cleared on user return)
+  .session-origin unattended-sessions.log  the current session's origin record and the append-only attribution log, written only by bin/fm-unattended-session.sh; absence means captain-started (section 13)
   .watch.lock .wake-queue.lock watcher singleton and queue serialization locks
   .claude-autoarm.lock .claude-autoarm-epoch .claude-autoarm-failure-notified .claude-autoarm-failure-alarmed .turnend-claude-blocks .turnend-claude-blocks.lock   Claude Stop auto-arm single-flight, epoch, failure-episode, attended-alarm, guard-budget, and budget-lock records; never touch
   .hash-* .count-* .stale-* .stale-since-* .paused-* .pr-dirty-* .settled-* .wedge-escalations-* .seen-* .hb-surfaced-* .last-* .heartbeat-streak   watcher internals; never touch
@@ -568,6 +570,8 @@ These skills are not captain-invocable; load them only at their precise triggers
 - `loopspec` - load before authoring or changing a LoopSpec, before selecting one for an event, before actuating or driving an iteration to a terminal state, and before describing any loop's status to the captain.
   A LoopSpec is temporal recurrence only; never build a private loop runner, never report a loop as live without production evidence that it ran, and never supply a verifier verdict yourself, because a success terminal requires a run of the spec's own bound verifier.
 - `firstmate-codexapp` - load before coordinating a visible Codex Desktop thread, evaluating a Codex App backend request, or reconciling Codex Desktop host-tool smoke evidence for Firstmate work.
+- `unattended-session` - load when the session-start digest announces an unattended session, one a queued trigger started rather than the captain, and before acting in one.
+  Such a session inherits exactly a captain-started session's authority and nothing more, so it parks whatever it cannot approve instead of widening its own permission, and it acts only on the drained queue and work already registered in this home.
 - `firstmate-coding-guidelines` - load before changing firstmate's shared, tracked material, as defined by section 1's list, whether editing directly or briefing a crewmate for a firstmate-repo task.
 
 ## 14. Relay

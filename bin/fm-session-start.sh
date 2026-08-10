@@ -28,6 +28,10 @@
 #
 #   1. lock          - acquire the per-home session lock FIRST, before any
 #                       mutating step runs.
+#   1b. session origin - announce a session started by a queued trigger rather
+#                       than by the captain, and claim its durable origin record
+#                       when (and only when) this session holds the lock.
+#                       bin/fm-unattended-session.sh owns both.
 #   2. bootstrap      - home-local stale Herdr projection cleanup runs only
 #                       when this session actually holds the lock. Detect-only
 #                       diagnostics always run. Bootstrap's MUTATING sweeps
@@ -574,6 +578,41 @@ if [ "$READ_ONLY" -eq 0 ]; then
     --locked "$NETWORK_STAGE_LOCKED" --harvest-pid $$ >/dev/null 2>&1 || true
 fi
 
+# --- 1b. session origin --------------------------------------------------
+# A session started by a queued trigger rather than by the captain must say so
+# in its own records, so anything it did stays attributable afterwards
+# (bin/fm-unattended-session.sh owns the record and this verdict). Reading the
+# verdict is safe on both paths; CLAIMING it is a write, so it happens only when
+# this session verifiably holds the lock. A lock-refused unattended session is
+# therefore still announced here and still writes nothing at all.
+SESSION_ORIGIN=$("$SCRIPT_DIR/fm-unattended-session.sh" session 2>/dev/null) \
+  || SESSION_ORIGIN='session_origin=attended'
+UNATTENDED=0
+case "$SESSION_ORIGIN" in
+  *session_origin=unattended*) UNATTENDED=1 ;;
+esac
+if [ "$UNATTENDED" -eq 1 ]; then
+  if [ "$READ_ONLY" -eq 0 ]; then
+    CLAIM_OUT=$("$SCRIPT_DIR/fm-unattended-session.sh" claim 2>&1) || true
+    [ -n "$CLAIM_OUT" ] && printf '%s\n' "$CLAIM_OUT"
+  fi
+  UBAR='◆━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
+  {
+    printf '%s\n' "$UBAR"
+    printf '◆  UNATTENDED SESSION - started by a queued trigger, not by the captain\n'
+    printf '◆  %s\n' "$SESSION_ORIGIN"
+    printf '◆  Authority is UNCHANGED: this session has exactly what a captain-started\n'
+    printf '◆  session has, and nothing more. Merges, ask-user findings, teardown of\n'
+    printf '◆  unlanded work, and destructive, irreversible or security-sensitive\n'
+    printf '◆  actions all still need the captain. Work that cannot proceed under those\n'
+    printf '◆  rules PARKS; never resolve a block by widening your own permission.\n'
+    printf '◆  Act on the drained queue below and on work already registered in this\n'
+    printf '◆  home. Do not survey, audit, or invent work: starting is not a licence.\n'
+    printf '◆  Load the unattended-session skill before acting.\n'
+    printf '%s\n' "$UBAR"
+  }
+fi
+
 # --- 2. bootstrap --------------------------------------------------------
 # FM_BOOTSTRAP_NETWORK=skip on every path: bootstrap's own network half is what
 # the deferred stage above is running right now, and running it twice would both
@@ -652,7 +691,8 @@ fi
   --harness "$PRIMARY_HARNESS" \
   --read-only "$READ_ONLY" \
   --afk "$AFK_PRESENT" \
-  --x-mode "$X_MODE_PRESENT"
+  --x-mode "$X_MODE_PRESENT" \
+  --unattended "$UNATTENDED"
 
 # --- 5. read-once contract -------------------------------------------------
 # Ahead of the two digests it governs, not after them: a truncated tail is

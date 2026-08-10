@@ -41,6 +41,27 @@ The launcher records the last successfully launched entry id in `state/.launch-l
 Neither file is part of secondmate inherited configuration: a secondmate home is provisioned and launched by the primary through `bin/fm-spawn.sh`, never through this front door, so there is no consumer for an inherited menu there.
 [docs/launcher.md](launcher.md) is the operator-facing owner of launcher behavior and setup.
 
+## Unattended session execution (config/unattended-session / state/.session-origin)
+
+Firstmate can start its own session for a trigger that was queued while nobody was home, under the captain's 2026-08-03 ruling recorded in `data/loop-lc-autonomy-substrate/captain-ruling-unattended-session-2026-08-03.md`.
+[`bin/fm-unattended-session.sh`](../bin/fm-unattended-session.sh) is the whole of that path, and its header owns the commands, the refusal tokens, and the record formats.
+It adds no watcher, no scheduler, and no queue: the durable wake queue is the trigger inbox, and any producer can append to it with no session live.
+That ruling grants execution only, and widens no approval authority whatsoever; an unattended session inherits exactly what a captain-started session has, and parks anything it cannot approve.
+
+Arm it with any OS timer - `cron`, a systemd user timer, Task Scheduler through the WSL bridge - running `bin/fm-unattended-session.sh start` with `FM_HOME` set to the home it should wake.
+Each run refuses unless the durable queue already holds a record, so a timer over an idle home starts nothing and costs one file read.
+It also refuses when away mode is active, when a live session holds the per-home session lock, when a healthy supervision cycle is already running, and when a previous start is still in flight, so a timer can never produce a second session or a second supervision cycle beside a live one.
+Every refusal prints one `refuse_<token>` line on stderr and exits 1; a timer that mails its output should expect these as the ordinary quiet outcomes.
+
+Which entry it launches comes from the local, gitignored `config/unattended-session`, holding one launch entry id from the fleet launcher menu above, and falls back to `state/.launch-last`.
+With neither present it refuses rather than guessing a harness.
+The launch itself goes through `bin/fm-launch.sh --entry <id> --detach`, so the launcher's Herdr gate, launch lock, and already-running refusal remain the single owner of every launch mechanic.
+
+Before launching, the path writes `state/.session-origin`, a flat `key=value` record naming the origin id, the trigger, and the declaring time, and appends a `declared` line to the append-only `state/unattended-sessions.log`.
+The started session receives that origin id as `FM_SESSION_ORIGIN_ID` and claims the record at session start, binding it to the session-lock holder and appending a `claimed` line, which is what makes the session's later actions attributable.
+Claiming is the only write the started session makes here, and it is refused unless that session verifiably owns the lock, so a lock-refused unattended session stays read-only exactly like any other while still being announced as unattended in its digest.
+`state/unattended-sessions.log` is durable evidence, never authority; `bin/fm-unattended-session.sh status`, `session`, and `log` read it and the record without mutating either.
+
 ## Backlog backend (.tasks.toml / config/backlog-backend)
 
 The tracked `.tasks.toml` pins the default `tasks-axi` markdown backend to `data/backlog.md`, with `done_keep = 10` and an archive at `data/done-archive.md`.
