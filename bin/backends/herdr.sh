@@ -2694,7 +2694,7 @@ fm_backend_herdr_capture_ansi() {  # <target> <lines>
 
 fm_backend_herdr_agent_identity_raw() {  # <session> <pane> -> <agent>\t<status>
   local out
-  out=$(fm_backend_herdr_cli "$1" agent get "$2" 2>/dev/null) || return 1
+  out=$(FM_BACKEND_HERDR_IDENTITY_READ=1 fm_backend_herdr_cli "$1" agent get "$2" 2>/dev/null) || return 1
   printf '%s' "$out" | jq -r '[.result.agent.agent // "", .result.agent.agent_status // ""] | @tsv' 2>/dev/null
 }
 
@@ -2731,8 +2731,72 @@ fm_backend_herdr_omp_process_state() {  # <session> <pane> -> stale|live|unknown
   esac
 }
 
+fm_backend_herdr_omp_process_identity() {  # <session> <pane> -> omp|other|unknown
+  local session=$1 pane=$2 info rows name args omp_count=0 other_count=0
+  info=$(fm_backend_herdr_cli "$session" pane process-info --pane "$pane" 2>/dev/null) || {
+    printf 'unknown'
+    return 0
+  }
+  printf '%s' "$info" | jq -e --arg pane "$pane" '
+    .result.type == "pane_process_info"
+    and .result.process_info.pane_id == $pane
+    and (.result.process_info.shell_pid | type == "number" and . > 1)
+    and (.result.process_info.foreground_process_group_id | type == "number" and . > 1)
+    and (.result.process_info.foreground_processes | type == "array" and length > 0)
+    and all(.result.process_info.foreground_processes[];
+      (.pid | type) == "number"
+      and (.name | type) == "string" and (.name | length) > 0
+      and ((.argv0 // .argv[0]) | type) == "string"
+      and ((.argv0 // .argv[0]) | length) > 0
+    )
+  ' >/dev/null 2>&1 || {
+    printf 'unknown'
+    return 0
+  }
+  rows=$(printf '%s' "$info" | jq -r '
+    .result.process_info.foreground_processes[]
+    | [
+        .name,
+        (if ((.argv | type) == "array" and (.argv | length) > 0)
+         then (.argv | join(" "))
+         else (.argv0 // .argv[0])
+         end)
+      ]
+    | @tsv
+  ' 2>/dev/null) || {
+    printf 'unknown'
+    return 0
+  }
+  [ -n "$rows" ] || {
+    printf 'unknown'
+    return 0
+  }
+  while IFS=$'\t' read -r name args; do
+    if fm_harness_omp_process_matches "$name" "$args"; then
+      omp_count=$((omp_count + 1))
+    else
+      other_count=$((other_count + 1))
+    fi
+  done <<EOF
+$rows
+EOF
+  if [ "$omp_count" -gt 0 ] && [ "$other_count" -eq 0 ]; then
+    printf 'omp'
+  elif [ "$omp_count" -eq 0 ] && [ "$other_count" -gt 0 ]; then
+    printf 'other'
+  else
+    printf 'unknown'
+  fi
+}
+
 fm_backend_herdr_identity_matches() {  # <recorded-harness> <registered-agent>
-  local recorded_harness=$1 agent=$2
+  local recorded_harness=$1 agent=$2 raw_launch=${3:-}
+  if [ "$raw_launch" = 1 ] && [ "$agent" != omp ]; then
+    case "$agent" in
+      claude|codex|opencode|grok|kimi|muse|pi|pi-signed) return 0 ;;
+      *) return 1 ;;
+    esac
+  fi
   case "$recorded_harness" in
     omp) [ "$agent" = omp ] ;;
     pi|pi-signed) case "$agent" in pi|pi-signed) return 0 ;; *) return 1 ;; esac ;;
@@ -2755,7 +2819,7 @@ fm_backend_herdr_identity_matches() {  # <recorded-harness> <registered-agent>
 # Return 0 for an authorized endpoint, 1 for a confirmed refusal, and 2 when
 # current-endpoint evidence is unknown.
 fm_backend_herdr_omp_input_safe() {  # <session> <pane> [recorded-harness] [raw-launch]
-  local session=$1 pane=$2 recorded_harness=${3:-} raw_launch=${4:-} identity agent agent_status process_state
+  local session=$1 pane=$2 recorded_harness=${3:-} raw_launch=${4:-} identity agent agent_status process_state process_identity
   local identity_supplied=${5+x}
   local inherited_unverified=${FM_HARNESS_UNVERIFIED:-}
   local FM_HARNESS_UNVERIFIED=$inherited_unverified
@@ -2780,15 +2844,22 @@ EOF
   if [ "$agent" = omp ]; then
     fm_harness_omp_attribution_allowed || return 1
     [ "$raw_launch" = 1 ] && return 1
-    fm_backend_herdr_identity_matches "$recorded_harness" "$agent" || return 2
     process_state=$(fm_backend_herdr_omp_process_state "$session" "$pane")
     case "$process_state" in
       stale) return 1 ;;
-      live) return 0 ;;
+      live)
+        if [ -z "$recorded_harness" ] || [ "$recorded_harness" = unknown ]; then
+          process_identity=$(fm_backend_herdr_omp_process_identity "$session" "$pane")
+          [ "$process_identity" = omp ] || return 2
+        else
+          fm_backend_herdr_identity_matches "$recorded_harness" "$agent" "$raw_launch" || return 2
+        fi
+        return 0
+        ;;
       *) return 2 ;;
     esac
   fi
-  fm_backend_herdr_identity_matches "$recorded_harness" "$agent" || return 2
+  fm_backend_herdr_identity_matches "$recorded_harness" "$agent" "$raw_launch" || return 2
   return 0
 }
 
@@ -2962,6 +3033,11 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
   # and before the first Enter is still a pre-submission baseline.
   [ "$baseline" = idle ] || footer_baseline=$(fm_backend_herdr_rendered_busy_state "$target")
   while :; do
+    if ! fm_backend_herdr_omp_input_safe "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" \
+      "$recorded_harness" "$raw_launch"; then
+      printf 'unknown'
+      return 0
+    fi
     fm_backend_herdr_send_key "$target" Enter || true
     if [ "$baseline" = idle ]; then
       verdict=$(fm_backend_herdr_wait_for_working "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" \
