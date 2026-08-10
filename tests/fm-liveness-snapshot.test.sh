@@ -257,8 +257,23 @@ run_real_process_case() {  # <dir> <empty-fleet|missing-cwd>
     E_DIR="$dir" E_WT="$dir/wt" "$LIVENESS" --json
 }
 
+restore_token_witness_gate() {  # <dir>
+  local dir=$1
+  cat > "$dir/bin/token-gated-process" <<SH
+#!/usr/bin/env bash
+output=\$(PATH="$dir/bin:\$PATH" E_REAL_PROCESS_SHAPE=empty-fleet E_WT="\${E_WT:?}" \
+  "$ROOT/bin/fm-liveness-process-snapshot.sh" "\$@") || exit
+printf '%s\\n' "\$output" | awk '
+  /FM_WORKER_TOKEN=[0-9a-f]{32}/ { token=1 }
+  /__FM_LIVENESS_OBSERVER__[[:space:]]+process-table-visible/ && !token { next }
+  { print }
+'
+SH
+  chmod +x "$dir/bin/token-gated-process"
+}
+
 test_real_empty_fleet_producer_witness_and_verdict() {
-  local dir producer json
+  local dir producer gated_producer gated_json
   dir=$(make_case real-empty-fleet claude); install_evidence "$dir"; install_real_process_shims "$dir" empty-fleet
   producer=$(PATH="$dir/bin:$PATH" E_REAL_PROCESS_SHAPE=empty-fleet E_WT="$dir/wt" \
     "$ROOT/bin/fm-liveness-process-snapshot.sh")
@@ -273,6 +288,17 @@ test_real_empty_fleet_producer_witness_and_verdict() {
     and .records[0].worker.presence == "verified_absent"
     and .records[0].evidence.grade == "task_bound_process"
   ' >/dev/null || fail "real zero-token producer did not preserve verified absence: $json"
+
+  restore_token_witness_gate "$dir"
+  gated_producer=$(PATH="$dir/bin:$PATH" E_WT="$dir/wt" "$dir/bin/token-gated-process")
+  printf '%s\n' "$gated_producer" | grep -F $'__FM_LIVENESS_OBSERVER__\tprocess-table-visible' >/dev/null \
+    && fail "restored token witness gate did not suppress the empty-fleet witness"
+  gated_json=$(PATH="$dir/bin:$PATH" FM_LIVENESS_PROCESS_SNAPSHOT_BIN="$dir/bin/token-gated-process" \
+    run_real_process_case "$dir" empty-fleet)
+  printf '%s' "$gated_json" | jq -e '
+    .records[0].worker.presence == "verified_absent"
+    and .records[0].evidence.grade == "task_bound_process"
+  ' >/dev/null && fail "restored token witness gate left the empty-fleet verdict green: $gated_json"
   pass "real zero-token producer emits the observer witness and proves verified absence"
 }
 
