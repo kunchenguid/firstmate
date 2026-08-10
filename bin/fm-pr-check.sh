@@ -17,6 +17,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-check-lib.sh
+. "$SCRIPT_DIR/fm-check-lib.sh"
 
 if [ "$#" -ne 2 ]; then
   echo "error: invalid PR check request" >&2
@@ -130,8 +132,18 @@ fm_pr_metadata_identity_parse "$META" || exit 1
 fm_lock_release "$META_LOCK"
 META_LOCK_HELD=0
 
+# Publishing overwrites whatever state check the task already had. A merge poll
+# is never blocked by an artifact wake, but replacing one that has not fired yet
+# retires a wake firstmate is still waiting on, so it is named rather than lost.
+AWAIT_WAKE_REPLACED=0
+if fm_await_artifact_wake_pending "$STATE" "$ID"; then
+  AWAIT_WAKE_REPLACED=1
+fi
+
 fm_pr_poll_publish_prepared || {
   echo "error: could not publish PR poll" >&2
   exit 1
 }
+[ "$AWAIT_WAKE_REPLACED" -eq 0 ] \
+  || printf 'replaced: unfired artifact wake state/%s.check.sh\n' "$ID"
 printf 'armed: state/%s.check.sh\n' "$ID"

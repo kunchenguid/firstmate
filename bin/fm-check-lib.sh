@@ -72,3 +72,35 @@ fm_custom_check_snapshot_cleanup() {
   [ -z "$FM_CUSTOM_CHECK_SNAPSHOT" ] || rm -f -- "$FM_CUSTOM_CHECK_SNAPSHOT"
   FM_CUSTOM_CHECK_SNAPSHOT=
 }
+
+# The first line bin/fm-await-artifact.sh writes into every check it generates.
+# It is the identity two owners agree on: the generator refuses to clobber a
+# check that lacks it, and bin/fm-pr-check.sh reports when it replaces one.
+FM_AWAIT_ARTIFACT_MARKER='# fm-await-artifact-v1'
+
+fm_await_artifact_check_owned() {
+  local state=$1 id=$2 check
+  fm_pr_task_id_valid "$id" || return 1
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  check="$state/$id.check.sh"
+  [ -f "$check" ] && [ ! -L "$check" ] || return 1
+  head -n 1 "$check" 2>/dev/null | grep -Fqx -- "$FM_AWAIT_ARTIFACT_MARKER"
+}
+
+# An armed artifact wake that has not yet announced its artifact. A record that
+# is absent or unreadable counts as pending: the wake is reported as lost rather
+# than silently discarded.
+fm_await_artifact_wake_pending() {
+  local state=$1 id=$2 record version status
+  fm_await_artifact_check_owned "$state" "$id" || return 1
+  record="$state/.$id.await-artifact"
+  [ -f "$record" ] && [ ! -L "$record" ] || return 0
+  version=
+  status=
+  { IFS= read -r version && IFS= read -r status; } < "$record" || true
+  [ "$version" = fm-await-artifact-v1 ] || return 0
+  if [ "$status" = fired ]; then
+    return 1
+  fi
+  return 0
+}

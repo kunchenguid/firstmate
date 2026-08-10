@@ -190,6 +190,11 @@ if [ "${#DEPENDS[@]}" -gt 0 ]; then
       /*) ;;
       *) echo "error: --depends-on requires an absolute path (got '$dep')" >&2; exit 1 ;;
     esac
+    # The stanza renders each path as a markdown list item, so an embedded
+    # newline would write arbitrary instructions into an agent-facing brief.
+    case "$dep" in
+      *$'\n'*) echo "error: --depends-on must not contain a newline" >&2; exit 1 ;;
+    esac
   done
 fi
 

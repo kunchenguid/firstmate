@@ -330,6 +330,52 @@ test_refuses_input_that_would_arm_a_watch_that_can_never_match() {
   pass "a wait that could never match is refused at arming, where it can still be reported"
 }
 
+# A task has one state check, so arming a merge poll on a task that is still
+# waiting on an artifact necessarily retires that wake. The poll always wins -
+# it is never blocked - but the replacement must be visible in the output.
+arm_pr_poll() {  # <home>
+  FM_HOME="$1" FM_GUARD_GRACE=999999 "$ROOT/bin/fm-pr-check.sh" \
+    wait-1 https://github.com/example/repo/pull/1 2>/dev/null
+}
+
+test_pr_poll_reports_the_artifact_wake_it_replaces() {
+  local home out rc
+  home=$(make_home pr-replaces)
+  arm "$home" wait-1 "$home/artifacts/report.md" >/dev/null || fail "replace: arming failed"
+
+  set +e
+  out=$(arm_pr_poll "$home"); rc=$?
+  set -e
+  expect_code 0 "$rc" "replace: a legitimate merge poll must never be blocked by an artifact wake"
+  assert_contains "$out" "replaced: unfired artifact wake state/wait-1.check.sh" \
+    "replace: the replaced artifact wake must be named in the output"
+  assert_contains "$out" "armed: state/wait-1.check.sh" "replace: the merge poll must still arm"
+  fm_pr_poll_artifacts_valid "$home/state" wait-1 "$ROOT/bin/fm-pr-poll.sh" \
+    || fail "replace: the merge poll did not actually take over the state check"
+  pass "arming a merge poll over an unfired artifact wake proceeds and names what it replaced"
+}
+
+test_pr_poll_reports_nothing_when_no_artifact_wake_is_pending() {
+  local home out
+
+  # A task whose artifact wake already fired has nothing left to lose.
+  home=$(make_home pr-fired)
+  arm "$home" wait-1 "$home/artifacts/report.md" >/dev/null || fail "fired: arming failed"
+  printf 'the finished artifact\n' > "$home/artifacts/report.md"
+  sweep "$home" >/dev/null
+  assert_contains "$(sweep "$home")" "artifact ready:" "fired: the wake must fire before this case"
+  out=$(arm_pr_poll "$home") || fail "fired: arming the merge poll failed"
+  assert_not_contains "$out" "replaced:" \
+    "fired: a spent artifact wake must not be reported as a lost wake"
+  assert_contains "$out" "armed: state/wait-1.check.sh" "fired: the merge poll must still arm"
+
+  # A task that never had an artifact wake at all.
+  home=$(make_home pr-none)
+  out=$(arm_pr_poll "$home") || fail "none: arming the merge poll failed"
+  assert_not_contains "$out" "replaced:" "none: a task with no artifact wake reported a replacement"
+  pass "a merge poll reports a replacement only when an unfired artifact wake is actually retired"
+}
+
 test_never_clobbers_another_owner_s_state_check() {
   local home out rc before after
   home=$(make_home foreign)
@@ -360,3 +406,5 @@ test_real_watcher_executes_the_armed_check_and_queues_the_wake
 test_finishes_well_inside_the_check_timeout
 test_refuses_input_that_would_arm_a_watch_that_can_never_match
 test_never_clobbers_another_owner_s_state_check
+test_pr_poll_reports_the_artifact_wake_it_replaces
+test_pr_poll_reports_nothing_when_no_artifact_wake_is_pending
