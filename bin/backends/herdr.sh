@@ -2172,17 +2172,6 @@ fm_backend_herdr_relaunch_missing_task() {  # <session> <workspace> <tab> <pane>
     echo "error: replacement Herdr tab response was missing or conflicting; refusing recovery" >&2
     return 1
   }
-  if [ "$exact_count" -eq 1 ]; then
-    if ! fm_backend_herdr_cli "$session" tab close "$recorded_tab" >/dev/null 2>&1; then
-      old_present=$(fm_backend_herdr_cli "$session" tab list --workspace "$workspace" 2>/dev/null \
-        | jq -r --arg tab "$recorded_tab" '[.result.tabs[]? | select(.tab_id == $tab)] | length' 2>/dev/null || true)
-      if [ "$old_present" != 0 ]; then
-        fm_backend_herdr_cli "$session" tab close "$new_tab" >/dev/null 2>&1 || true
-        echo "error: could not close the missing Herdr tab '$recorded_tab'; refusing recovery" >&2
-        return 1
-      fi
-    fi
-  fi
   tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$workspace" 2>/dev/null) || {
     fm_backend_herdr_cli "$session" tab close "$new_tab" >/dev/null 2>&1 || true
     echo "error: could not verify replacement Herdr tab '$new_tab'; refusing recovery" >&2
@@ -2191,7 +2180,13 @@ fm_backend_herdr_relaunch_missing_task() {  # <session> <workspace> <tab> <pane>
   remaining=$(printf '%s' "$tabs" | jq -r --arg label "$label" --arg replacement "$new_tab" \
     '[.result.tabs[]? | select(.label == $label and .tab_id != $replacement)] | length' 2>/dev/null)
   new_present=$(printf '%s' "$tabs" | jq -r --arg tab "$new_tab" '[.result.tabs[]? | select(.tab_id == $tab)] | length' 2>/dev/null)
-  [ "$remaining" = 0 ] && [ "$new_present" = 1 ] || {
+  if [ "$exact_count" -eq 1 ]; then
+    [ "$remaining" = 1 ] && printf '%s' "$tabs" | jq -e --arg label "$label" --arg tab "$recorded_tab" \
+      '[.result.tabs[]? | select(.label == $label and .tab_id == $tab)] | length == 1' >/dev/null 2>&1
+  else
+    [ "$remaining" = 0 ]
+  fi
+  [ "$?" -eq 0 ] && [ "$new_present" = 1 ] || {
     fm_backend_herdr_cli "$session" tab close "$new_tab" >/dev/null 2>&1 || true
     echo "error: replacement Herdr tab '$new_tab' did not leave exactly one task tab; refusing recovery" >&2
     return 1
@@ -2208,6 +2203,17 @@ fm_backend_herdr_relaunch_missing_task() {  # <session> <workspace> <tab> <pane>
     echo "error: replacement Herdr pane '$new_pane' did not bind exactly to tab '$new_tab'; refusing recovery" >&2
     return 1
   }
+  if [ "$exact_count" -eq 1 ]; then
+    if ! fm_backend_herdr_cli "$session" tab close "$recorded_tab" >/dev/null 2>&1; then
+      old_present=$(fm_backend_herdr_cli "$session" tab list --workspace "$workspace" 2>/dev/null \
+        | jq -r --arg tab "$recorded_tab" '[.result.tabs[]? | select(.tab_id == $tab)] | length' 2>/dev/null || true)
+      if [ "$old_present" != 0 ]; then
+        fm_backend_herdr_cli "$session" tab close "$new_tab" >/dev/null 2>&1 || true
+        echo "error: could not close the missing Herdr tab '$recorded_tab'; refusing recovery" >&2
+        return 1
+      fi
+    fi
+  fi
   # shellcheck disable=SC2034 # callers consume these same-process output globals
   FM_BACKEND_HERDR_RELAUNCH_SESSION=$session
   # shellcheck disable=SC2034 # callers consume these same-process output globals
