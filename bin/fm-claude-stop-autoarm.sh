@@ -4,8 +4,10 @@
 # Registered in tracked .claude/settings.json as a Stop command hook with
 # "asyncRewake": true and an explicit multi-hour timeout. Claude Code fires it
 # in the background on EVERY Stop of a Claude primary session, with no
-# deduplication across firings. It owns routine tokenless watcher continuity
-# for Claude primaries (main home and marked secondmate homes):
+# deduplication across firings. It is inert under Grok (env markers or harness
+# ancestry); Grok loads these Claude settings and must not foreground-arm.
+# It owns routine tokenless watcher continuity for Claude primaries (main home
+# and marked secondmate homes):
 #
 #   - Scope: only a genuine primary checkout (plain checkout or validly marked
 #     secondmate home) with AGENTS.md, bin/, and the effective state dir - the
@@ -68,6 +70,17 @@ AUTOARM_ATTEMPTS=${FM_CLAUDE_AUTOARM_ATTEMPTS:-2}
 case "$AUTOARM_ATTEMPTS" in
   1|2|3) : ;;
   *) AUTOARM_ATTEMPTS=2 ;;
+esac
+
+# Inert under Grok. Grok loads Claude-compatible project settings, but its Stop
+# hook environment often lacks GROK_AGENT (that marker is for tool children).
+# A live Claude auto-arm under Grok foregrounds fm-watch-arm.sh and freezes the
+# TUI. Skip on explicit Grok env, Grok workspace root, or harness ancestry.
+if [ -n "${GROK_AGENT:-}" ] || [ -n "${GROK_WORKSPACE_ROOT:-}" ]; then
+  exit 0
+fi
+case "$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || true)" in
+  grok) exit 0 ;;
 esac
 
 # shellcheck source=bin/fm-primary-scope-lib.sh

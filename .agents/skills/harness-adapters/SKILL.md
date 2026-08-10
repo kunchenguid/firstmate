@@ -353,7 +353,7 @@ Secondmate spawns skip the pointer (idle panes are healthy, no stale-pane detect
 The firstmate PRIMARY's own `.grok/hooks/fm-primary-turnend-guard.json` invokes `bin/fm-turnend-guard-grok.sh`.
 Grok 0.2.112 exposes native same-process Stop continuation in its running payload, while the genuine pre-native 0.2.73 payload omits that capability and still needs one guarded `grok --resume`.
 The exact adaptive and malformed-input contract is owned by `docs/turnend-guard.md`.
-The tracked Claude Stop hooks skip themselves under `GROK_AGENT`, because Grok also loads Claude-compatible project settings and otherwise creates a second blocking path.
+The tracked Claude Stop hooks skip themselves under Grok (`GROK_AGENT`, `GROK_WORKSPACE_ROOT`, or harness ancestry via `fm-harness.sh`), because Grok also loads Claude-compatible project settings and otherwise creates a second blocking path; Grok often omits `GROK_AGENT` on Stop hooks (that marker is for tool children), so ancestry is required.
 Project-local Grok hooks require folder trust, verified with launch-time `--trust`; if the primary firstmate checkout is not trusted for Grok hooks, this primary guard fails open and `fm-guard.sh` remains the next-command alarm.
 Grok's primary watcher protocol remains background-notify around `bin/fm-watch-arm.sh`; native Stop continuation does not provide Pi-like extension ownership.
 

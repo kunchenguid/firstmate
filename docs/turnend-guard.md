@@ -48,7 +48,8 @@ If `jq` is missing or hook stdin is empty, the guard exits 0 because it cannot s
 - OpenCode listens for `session.idle` in `.opencode/plugins/fm-primary-turnend-guard.js`, lets the watcher coordinator act first, and calls `client.session.promptAsync` once when the guard returns 2.
 - Pi listens for `agent_settled` in `.pi/extensions/fm-primary-turnend-guard.ts`, runs once per logical agent run, and calls `pi.sendUserMessage(..., { deliverAs: "followUp" })` once when the guard returns 2.
 - Grok registers a `Stop` hook in `.grok/hooks/fm-primary-turnend-guard.json` and delegates capability selection to `bin/fm-turnend-guard-grok.sh`.
-  The tracked Claude Stop entries are inert when `GROK_AGENT` is present, so Grok's Claude-compatible settings loading cannot create a second continuation path.
+  The tracked Claude Stop entries are inert under Grok: they skip when `GROK_AGENT` or `GROK_WORKSPACE_ROOT` is set, or when `bin/fm-harness.sh` detects a Grok ancestor (Grok often omits `GROK_AGENT` on Stop hooks; that marker is for tool children).
+  `bin/fm-claude-stop-autoarm.sh` and `bin/fm-turnend-guard.sh --claude` apply the same skip as defense in depth, so a missed settings guard cannot foreground-arm and freeze the Grok TUI.
 
 Claude and Codex can block a Stop directly with exit status 2 and stderr.
 Both payloads carry `stop_hook_active`.

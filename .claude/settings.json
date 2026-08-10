@@ -40,11 +40,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "[ -z \"${GROK_AGENT:-}\" ] || exit 0; exec \"$CLAUDE_PROJECT_DIR\"/bin/fm-turnend-guard.sh --claude"
+            "command": "if [ -n \"${GROK_AGENT:-}\" ] || [ -n \"${GROK_WORKSPACE_ROOT:-}\" ]; then exit 0; fi; case \"$(\"$CLAUDE_PROJECT_DIR\"/bin/fm-harness.sh 2>/dev/null || true)\" in grok) exit 0;; esac; exec \"$CLAUDE_PROJECT_DIR\"/bin/fm-turnend-guard.sh --claude"
           },
           {
             "type": "command",
-            "command": "[ -z \"${GROK_AGENT:-}\" ] || exit 0; exec \"$CLAUDE_PROJECT_DIR\"/bin/fm-claude-stop-autoarm.sh",
+            "command": "if [ -n \"${GROK_AGENT:-}\" ] || [ -n \"${GROK_WORKSPACE_ROOT:-}\" ]; then exit 0; fi; case \"$(\"$CLAUDE_PROJECT_DIR\"/bin/fm-harness.sh 2>/dev/null || true)\" in grok) exit 0;; esac; exec \"$CLAUDE_PROJECT_DIR\"/bin/fm-claude-stop-autoarm.sh",
             "asyncRewake": true,
             "timeout": 28800
           }

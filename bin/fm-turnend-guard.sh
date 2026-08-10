@@ -82,6 +82,18 @@ for arg in "$@"; do
   esac
 done
 
+# Claude-mode Stop hooks are inert under Grok (same contract as the skip in
+# .claude/settings.json). Grok owns turn-end via fm-turnend-guard-grok.sh; the
+# Claude cooperative path must never block a Grok primary.
+if [ "$CLAUDE_MODE" -eq 1 ]; then
+  if [ -n "${GROK_AGENT:-}" ] || [ -n "${GROK_WORKSPACE_ROOT:-}" ]; then
+    exit 0
+  fi
+  case "$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || true)" in
+    grok) exit 0 ;;
+  esac
+fi
+
 # shellcheck source=bin/fm-supervision-lib.sh
 . "$SCRIPT_DIR/fm-supervision-lib.sh"
 # shellcheck source=bin/fm-primary-scope-lib.sh

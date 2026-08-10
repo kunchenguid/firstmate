@@ -14,6 +14,10 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
+# Claude-path cases must not inherit Grok tool-child markers when this suite
+# runs under a Grok primary (GROK_AGENT is set for tool processes).
+unset GROK_AGENT GROK_WORKSPACE_ROOT || true
+
 TMP_ROOT=$(fm_test_tmproot fm-claude-stop-autoarm)
 fm_git_identity fmtest fmtest@example.invalid
 
@@ -27,12 +31,13 @@ install_autoarm_scripts() {
   local dir=$1
   mkdir -p "$dir/bin"
   cp "$ROOT/bin/fm-claude-stop-autoarm.sh" "$dir/bin/fm-claude-stop-autoarm.sh"
+  cp "$ROOT/bin/fm-harness.sh" "$dir/bin/fm-harness.sh"
   cp "$ROOT/bin/fm-primary-scope-lib.sh" "$dir/bin/fm-primary-scope-lib.sh"
   cp "$ROOT/bin/fm-supervision-lib.sh" "$dir/bin/fm-supervision-lib.sh"
   cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/fm-wake-lib.sh"
   cp "$ROOT/bin/fm-session-lock-lib.sh" "$dir/bin/fm-session-lock-lib.sh"
   cp "$ROOT/bin/fm-lock.sh" "$dir/bin/fm-lock.sh"
-  chmod +x "$dir/bin/fm-claude-stop-autoarm.sh" "$dir/bin/fm-lock.sh"
+  chmod +x "$dir/bin/fm-claude-stop-autoarm.sh" "$dir/bin/fm-harness.sh" "$dir/bin/fm-lock.sh"
 }
 
 make_primary_dir() {
@@ -68,8 +73,11 @@ make_crewmate_worktree_dir() {
 # before invocation. Captures stdout+stderr; exit code on stdout of the caller.
 run_autoarm() {
   local dir=$1 rc=0
+  # Strip Grok markers so Claude-path tests still arm when the suite runs as a
+  # Grok tool child (GROK_AGENT is set for tool processes, not only Stop hooks).
   printf '%s\n' '{"session_id":"sess-autoarm","stop_hook_active":false}' \
-    | FM_HOME="$dir" "$FAKE_CLAUDE" -c '
+    | FM_HOME="$dir" env -u GROK_AGENT -u GROK_WORKSPACE_ROOT \
+      "$FAKE_CLAUDE" -c '
         printf "%s\n" "$$" > "$FM_HOME/state/.lock"
         "$FM_HOME/bin/fm-claude-stop-autoarm.sh"
       ' 2>&1 || rc=$?
@@ -324,6 +332,37 @@ test_inert_when_fleet_idle() {
   assert_present "$dir/state/.claude-autoarm-failure-notified" "idle state without positive recovery reset the failure notice"
   assert_present "$dir/state/.claude-autoarm-failure-alarmed" "idle state without positive recovery reset the attended alarm"
   pass "auto-arm: inert with nothing in flight and no X-mode need"
+}
+
+test_inert_under_grok() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/grok-inert")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+
+  out=$(printf '%s\n' '{"session_id":"grok-agent"}' \
+    | FM_HOME="$dir" GROK_AGENT=1 bash "$dir/bin/fm-claude-stop-autoarm.sh" 2>&1); status=$?
+  expect_code 0 "$status" "hook must stay inert when GROK_AGENT is set"
+  [ ! -e "$dir/state/arm-ran" ] || fail "hook armed while GROK_AGENT was set"
+
+  rm -f "$dir/state/arm-ran"
+  out=$(printf '%s\n' '{"session_id":"grok-ws"}' \
+    | FM_HOME="$dir" GROK_WORKSPACE_ROOT="$dir" bash "$dir/bin/fm-claude-stop-autoarm.sh" 2>&1); status=$?
+  expect_code 0 "$status" "hook must stay inert when GROK_WORKSPACE_ROOT is set"
+  [ ! -e "$dir/state/arm-ran" ] || fail "hook armed while GROK_WORKSPACE_ROOT was set"
+
+  # Grok Stop often omits GROK_AGENT; ancestry via a process named grok must skip.
+  rm -f "$dir/state/arm-ran"
+  ln -sfn /bin/bash "$FAKEBIN/grok"
+  out=$(printf '%s\n' '{"session_id":"grok-ancestry"}' \
+    | FM_HOME="$dir" env -u GROK_AGENT -u GROK_WORKSPACE_ROOT -u CLAUDECODE \
+      "$FAKEBIN/grok" -c '
+        printf "%s\n" "$$" > "$FM_HOME/state/.lock"
+        "$FM_HOME/bin/fm-claude-stop-autoarm.sh"
+      ' 2>&1); status=$?
+  expect_code 0 "$status" "hook must stay inert under grok ancestry without GROK_AGENT"
+  [ ! -e "$dir/state/arm-ran" ] || fail "hook armed under a grok ancestor without GROK_AGENT"
+  pass "auto-arm: inert under Grok (GROK_AGENT, GROK_WORKSPACE_ROOT, harness ancestry)"
 }
 
 # --- the armed cycle ----------------------------------------------------------
@@ -583,6 +622,7 @@ test_inert_when_afk
 test_stale_lock_recovery_preserves_afk_and_need_gates
 test_resolves_outermost_claude_pid_in_nested_bgspare_chain
 test_inert_when_fleet_idle
+test_inert_under_grok
 test_actionable_close_rewakes_with_reason
 test_actionable_close_with_live_successor_rewakes_once
 test_failed_close_rewakes_with_failure_banner
