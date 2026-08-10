@@ -141,16 +141,8 @@ Tmux needs the exact `pi-launcher`, `pi-signed`, `pi`, and `Pi` process identiti
 Herdr uses native registered-agent state and needs no process-name branch.
 Zellij has no verified recovery-grade agent process probe, while Orca and cmux do not support secondmate spawns, so those three retain their existing generic ordinary-launch semantics without a new liveness matcher.
 
-The structural multi-row composer reader, Kimi pointer-delivery path, and OpenCode 1.18.4 busy-queue behavior are pinned by:
-
-```sh
-tests/fm-composer-ghost.test.sh
-tests/fm-kimi-harness.test.sh
-tests/fm-tmux-submit-busy.test.sh
-```
-
-Expected structural matrix: real text on any content row is pending; all-empty complete boxes are empty; unreadable, incomplete, or unsafe boxes are unknown; and non-bordered panes retain cursor-row compatibility.
-Expected submit matrix: proven pending plus busy is accepted as queued; proven pending plus idle remains pending; ambiguous pending is never converted by the busy exception; and only a proven empty composer succeeds directly.
+The current classifier matrix and its refresh guard are recorded in [Composer classification matrix](#composer-classification-matrix), with portable shape coverage in `tests/fm-composer-lib.test.sh` and `tests/fm-composer-ghost.test.sh`.
+Kimi pointer delivery and OpenCode 1.18.4 busy-queue behavior remain pinned by `tests/fm-kimi-harness.test.sh` and `tests/fm-tmux-submit-busy.test.sh`.
 
 ### Cleanup endpoint identity
 
@@ -183,8 +175,8 @@ Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, and Muse share that backend 
 ## Composer classification matrix
 
 The shared composer classifier (`bin/fm-composer-lib.sh`, `fm_composer_classify_screen`) owns every composer shape fleet-wide; each backend contributes only a capture and a capability descriptor.
-The live half of that guarantee was verified on 2026-08-10 from an already-trusted checkout at the branch's final validated head, against every installed harness on tmux 3.6a, macOS arm64, on an isolated private socket, with no prompt submitted to any harness.
-An earlier gate-worktree run could not verify claude, grok, or muse because the pipeline's isolated worktree is untrusted and their first-launch trust dialogs are a real unreadable-composer state the guard refuses to confirm; this trusted-checkout rerun covers all three, and the hardened zellij probe additionally observed its typed text before Enter and accepted only a non-delivery classifier verdict.
+The live half of that guarantee was verified on 2026-08-10 from an already-trusted checkout of the validated implementation, against every installed harness on tmux 3.6a, macOS arm64, on an isolated private socket, with no prompt submitted to any harness.
+An earlier untrusted-worktree run left Claude, Grok, and Muse unverified because the guard treats first-launch trust dialogs as an unreadable-composer state and never confirms them; this trusted-checkout rerun supersedes those missing results.
 
 ```sh
 FM_COMPOSER_MATRIX_LIVE=1 tests/fm-composer-matrix-live-e2e.test.sh
