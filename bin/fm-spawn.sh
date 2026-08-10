@@ -1163,7 +1163,7 @@ launch_template() {
     # effort is selected through the model id catalog (or documented bracket
     # overrides on parameterized models), so __EFFORTFLAG__ is intentionally
     # absent. Turn-end and busy ride project-local .cursor hooks installed below.
-    cursor) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS __CURSORBIN__ --yolo --trust __MODELFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    cursor) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u CURSOR_AGENT __CURSORBIN__ --yolo --trust __MODELFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     *) return 1 ;;
   esac
 }

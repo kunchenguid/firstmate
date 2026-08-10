@@ -153,6 +153,7 @@ import sys
 args = open(sys.argv[1]).read().splitlines()
 for item in ("arg=--yolo", "arg=--trust", "arg=--model", "arg=composer-2.5-fast"):
     assert item in args, (item, args)
+assert "cursor_agent=" in args, args
 assert any(item.startswith("arg=\u2063FIRSTMATE_OP: v1 launch-brief:") for item in args), args
 assert "arg=--effort" not in args, args
 assert "arg=reasoning-effort" not in args, args
