@@ -1154,6 +1154,13 @@ test_structured_context_is_required_and_stored_separately() {
   fi
   assert_grep "requires --kind fact" "$home/orphan-expects.err" \
     "the expected-answer refusal did not explain its dependency"
+  if run_decisions "$home" "${base[@]}" --group "not a slug" \
+    --why "w" --affects "a" --recommendation "r" --no-surface "none applies" \
+    > "$home/bad-group.out" 2> "$home/bad-group.err"; then
+    fail "an unsafe decision group key was accepted"
+  fi
+  assert_grep "privacy-safe slug" "$home/bad-group.err" \
+    "the group-key refusal did not state the supported shape"
 
   # Options are optional as a set, but a supplied set must be a genuinely small
   # choice rather than a lone shortcut, duplicates, or a board-sized menu.
@@ -1195,6 +1202,7 @@ test_structured_context_is_required_and_stored_separately() {
   fi
 
   run_decisions "$home" "${base[@]}" \
+    --group "sample-structure-review" \
     --why "The sample build stops until the shape is chosen." \
     --affects "The sample header and every sample card under it." \
     --recommendation "Take the compact shape; it survives a narrow screen." \
@@ -1211,6 +1219,7 @@ test_structured_context_is_required_and_stored_separately() {
       and .decision_no_surface == "Both shapes are text-only, so there is nothing built to compare."
       and .decision_options == null
       and .decision_kind == null and .decision_expects == null
+      and .decision_group == "sample-structure-review"
       and .decision_url == null
       and .hold_reason == "captain shape choice pending"
   ' >/dev/null || fail "structured dimensions did not reach the snapshot as separate fields: $out"
@@ -1222,6 +1231,8 @@ test_structured_context_is_required_and_stored_separately() {
   show=$(tasks_in "$home" show "$origin-decision-shape" --full)
   assert_contains "$show" 'Why now: The sample build stops until the shape is chosen.' \
     "an idempotent retry lost the recorded context"
+  assert_contains "$show" 'Decision group: sample-structure-review' \
+    "an idempotent retry lost the optional group key"
 
   tasks_in "$home" update "$origin-decision-shape" --body $'Why now:  \t\nWhat it affects: The sample header and every sample card under it.\nRecommendation: Take the compact shape; it survives a narrow screen.\nNo decision surface: Both shapes are text-only, so there is nothing built to compare.' >/dev/null
   if run_decisions "$home" "${base[@]}" \
@@ -1299,6 +1310,7 @@ test_hold_item_gates_an_existing_work_item_under_the_same_bar() {
 
   run_decisions "$home" hold-item sample-thread --reason "captain vendor choice pending" \
     --option "Keep current vendor" --option "Move to second vendor" \
+    --group "sample-vendor-review" \
     --why "The current vendor stops publishing on 2026-09-01." \
     --affects "Every sample quote and the sample nightly digest." \
     --recommendation "Move to the second vendor; the shapes already match." \
@@ -1332,6 +1344,7 @@ test_hold_item_gates_an_existing_work_item_under_the_same_bar() {
     and ([ .backlog.records[] | select(.id == "sample-thread")
            | .decision_options == ["Keep current vendor", "Move to second vendor"]
              and .decision_kind == null and .decision_expects == null
+             and .decision_group == "sample-vendor-review"
              and .decision_url == "https://sample.tailnet.invalid/vendor-aid" ] | all)
   ' >/dev/null || fail "a gated item of another kind did not reach the snapshot as a decision: $out"
 

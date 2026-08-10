@@ -3062,15 +3062,33 @@ test_recorded_answers_persist_across_devices_and_sink() {
   mkdir -p "$state"
   snapshot_json '[
     {"state":"queued","id":"alpha","captain_actionable":true,"captain_deferred":false,
-     "title":"Choose alpha path","hold_reason":"Alpha is still open","repo":"sample"},
-    {"state":"queued","id":"beta","captain_actionable":true,"captain_deferred":false,
-     "title":"Choose beta path","hold_reason":"Beta was answered","repo":"sample"},
+     "title":"Choose alpha path","hold_reason":"Alpha was answered","repo":"sample",
+     "decision_group":"portfolio-data-trust-scope","decision_options":["Keep alpha","Replace alpha"],
+     "decision_why":"The alpha source is incomplete.","decision_affects":"The alpha dashboard.",
+     "decision_recommendation":"Replace alpha.","blocks_ids":["alpha-build"]},
     {"state":"queued","id":"delta","captain_actionable":true,"captain_deferred":false,
      "title":"Choose delta path","hold_reason":"Delta is still open","repo":"sample"},
+    {"state":"queued","id":"beta","captain_actionable":true,"captain_deferred":false,
+     "title":"Choose beta path","hold_reason":"Beta is still open","repo":"sample",
+     "decision_group":"portfolio-data-trust-scope","decision_kind":"fact",
+     "decision_expects":"one beta source name","blocks_ids":["beta-build"]},
+    {"state":"queued","id":"gamma","captain_actionable":true,"captain_deferred":false,
+     "title":"Choose gamma path","hold_reason":"Gamma was answered","repo":"sample",
+     "decision_group":"release-readiness"},
+    {"state":"queued","id":"epsilon","captain_actionable":true,"captain_deferred":false,
+     "title":"Choose epsilon path","hold_reason":"Epsilon was answered","repo":"sample",
+     "decision_group":"release-readiness"},
+    {"state":"queued","id":"zeta","captain_actionable":true,"captain_deferred":false,
+     "title":"Choose zeta path","hold_reason":"Zeta is still open","repo":"sample",
+     "decision_group":"only-one"},
+    {"state":"queued","id":"alpha-build","captain_actionable":false,"captain_deferred":false,
+     "title":"Build alpha dashboard","repo":"sample"},
+    {"state":"queued","id":"beta-build","captain_actionable":false,"captain_deferred":false,
+     "title":"Build beta dashboard","repo":"sample"},
     {"state":"queued","id":"defer-one","captain_actionable":false,"captain_deferred":true,
-     "title":"Defer first","hold_reason":"First shelf row","repo":"sample"},
+     "title":"Defer first","hold_reason":"First shelf row","repo":"sample","decision_group":"deferred-pair"},
     {"state":"queued","id":"defer-two","captain_actionable":false,"captain_deferred":true,
-     "title":"Defer second","hold_reason":"Second shelf row","repo":"sample"}
+     "title":"Defer second","hold_reason":"Second shelf row","repo":"sample","decision_group":"deferred-pair"}
   ]' '[
     {"id":"ios","registered":true,"provenance":{"selected":"structured-home"},
      "current":{"state":"captain_decision"},"active_children":[],"holds":[],"queued":[],
@@ -3090,9 +3108,11 @@ test_recorded_answers_persist_across_devices_and_sink() {
     || fail "the board request log path must resolve"
   mkdir -p "$(dirname "$log")"
   cat > "$log" <<'EOF'
-  "2026-01-04T00:00:01Z","fm-board:beta","FM-BOARD-REQUEST {\"v\":1,\"intent\":\"answer\",\"home\":\"main\",\"id\":\"beta\",\"note\":\"Use beta.\"}"
-  "2026-01-04T00:00:02Z","fm-board:ios","FM-BOARD-REQUEST {\"v\":1,\"intent\":\"answer\",\"home\":\"ios\",\"id\":\"shared\",\"key\":\"route\",\"note\":\"Use the iOS route.\"}"
-  "2026-01-04T00:00:03Z","fm-board:deferred","FM-BOARD-REQUEST {\"v\":1,\"intent\":\"answer\",\"home\":\"main\",\"id\":\"defer-two\",\"note\":\"Keep this deferred.\"}"
+  "2026-01-04T00:00:01Z","fm-board:alpha","FM-BOARD-REQUEST {\"v\":1,\"intent\":\"answer\",\"home\":\"main\",\"id\":\"alpha\",\"note\":\"Use alpha.\"}"
+  "2026-01-04T00:00:02Z","fm-board:gamma","FM-BOARD-REQUEST {\"v\":1,\"intent\":\"answer\",\"home\":\"main\",\"id\":\"gamma\",\"note\":\"Use gamma.\"}"
+  "2026-01-04T00:00:03Z","fm-board:epsilon","FM-BOARD-REQUEST {\"v\":1,\"intent\":\"answer\",\"home\":\"main\",\"id\":\"epsilon\",\"note\":\"Use epsilon.\"}"
+  "2026-01-04T00:00:04Z","fm-board:ios","FM-BOARD-REQUEST {\"v\":1,\"intent\":\"answer\",\"home\":\"ios\",\"id\":\"shared\",\"key\":\"route\",\"note\":\"Use the iOS route.\"}"
+  "2026-01-04T00:00:05Z","fm-board:deferred","FM-BOARD-REQUEST {\"v\":1,\"intent\":\"answer\",\"home\":\"main\",\"id\":\"defer-two\",\"note\":\"Keep this deferred.\"}"
 EOF
 
   "$BOARD" --snapshot "$snap" --no-quota --controls --refresh 300 --out "$board" >/dev/null \
@@ -3102,8 +3122,20 @@ EOF
     || fail "the second durable-answer regeneration must render"
   cp "$board" "$device_two"
 
-  [ "$(grep -o 'data-recorded-answer="true"' "$device_one" | wc -l | tr -d ' ')" = 2 ] \
-    || fail "only the two still-actionable exact answer identities should be marked recorded"
+  [ "$(grep -o 'data-recorded-answer="true"' "$device_one" | wc -l | tr -d ' ')" = 4 ] \
+    || fail "only the four still-actionable exact answer identities should be marked recorded"
+  [ "$(grep -o 'class="decision-group"' "$device_one" | wc -l | tr -d ' ')" = 2 ] \
+    || fail "only shared non-null group keys should create consolidated cards"
+  assert_grep 'data-decision-group="portfolio-data-trust-scope"' "$device_one" \
+    "two decisions sharing an origin did not render in one group"
+  assert_grep '<h3>Portfolio data trust scope</h3>' "$device_one" \
+    "a grouped card did not turn its slug into a readable heading"
+  assert_no_grep 'data-decision-group="only-one"' "$device_one" \
+    "a lone group key created a single-item wrapper"
+  assert_no_grep 'data-decision-group="deferred-pair"' "$device_one" \
+    "the Deferred shelf was changed into grouped decision cards"
+  assert_grep '<div class="n">8</div><div class="l">Awaiting you</div>' "$device_one" \
+    "visual grouping changed the number of underlying decisions awaiting the captain"
   cmp -s "$device_one" "$device_two" \
     || fail "two regenerations over the same durable request log disagreed"
 
@@ -3144,17 +3176,37 @@ async function inspect(path,width,mobile){
     const blocks=[...document.querySelectorAll('.needs .rc[data-what]')];
     const answered=blocks.filter(block=>block.dataset.recordedAnswer==='true');
     const android=blocks.find(block=>block.dataset.home==='android');
-    const askButton=blocks.find(block=>block.dataset.id==='alpha').querySelector('[data-ask-about]');
+    const alpha=blocks.find(block=>block.dataset.id==='alpha');
+    const beta=blocks.find(block=>block.dataset.id==='beta');
+    const groups=[...document.querySelectorAll('.needs > .decision-group')];
+    const partial=groups.find(group=>group.dataset.decisionGroup==='portfolio-data-trust-scope');
+    const complete=groups.find(group=>group.dataset.decisionGroup==='release-readiness');
+    const askButton=alpha.querySelector('[data-ask-about]');
     askButton.scrollIntoView({block:'center'}); askButton.click();
     const composer=document.querySelector('#ask-firstmate-composer textarea');
     const composerValue=composer.value;
     composer.value='x'.repeat(1998); composer.dispatchEvent(new Event('input',{bubbles:true}));
     blocks.find(block=>block.dataset.id==='delta').querySelector('[data-ask-about]').click();
     const boundedComposerValue=composer.value;
-    const boxes=[askButton,...answered.map(block=>block.querySelector('[data-ok=answer]'))]
+    const boxes=[askButton,...groups,...answered.map(block=>block.querySelector('[data-ok=answer]'))]
       .map(element=>{const rect=element.getBoundingClientRect();return {left:rect.left,right:rect.right,width:rect.width};});
+    const topOrder=[...document.querySelector('.needs').children].map(unit=>unit.classList.contains('decision-group')
+      ? 'group:'+unit.dataset.decisionGroup : unit.querySelector('.rc[data-what]')?.dataset.what || 'notice');
     return {
-      order:blocks.map(block=>block.dataset.what), total:blocks.length,
+      order:blocks.map(block=>block.dataset.what), topOrder, total:blocks.length,
+      groups:groups.map(group=>({key:group.dataset.decisionGroup,
+        count:group.querySelector('.decision-group-count').textContent,
+        questions:[...group.querySelectorAll('.decision-subquestion')].map(label=>label.textContent),
+        ids:[...group.querySelectorAll('.rc[data-id]')].map(control=>control.dataset.id)})),
+      partialContent:{choices:alpha.querySelectorAll('[data-answer-choice]').length,
+        answer:alpha.querySelectorAll('[data-open=answer]').length,
+        ask:partial.querySelectorAll('[data-ask-about]').length,
+        contexts:partial.querySelectorAll('.need-ctx').length,
+        blocking:[...partial.querySelectorAll('.ctx-l')].filter(label=>label.textContent==='Blocking:').length,
+        fact:beta.querySelector('.rc-fact-v')?.textContent || '',
+        banners:partial.querySelectorAll('[data-ok=answer]').length},
+      standalone:{delta:!blocks.find(block=>block.dataset.id==='delta').closest('.decision-group'),
+        zeta:!blocks.find(block=>block.dataset.id==='zeta').closest('.decision-group')},
       answered:answered.map(block=>({home:block.dataset.home,id:block.dataset.id,
         head:block.querySelector('[data-ok=answer] .rc-ok-h').textContent,
         note:block.querySelector('[data-ok=answer] .rc-ok-s').textContent,
@@ -3163,6 +3215,7 @@ async function inspect(path,width,mobile){
       androidPending:android.dataset.recordedAnswer,
       deferred:[...document.querySelectorAll('#deferred-shelf .defer .ask')].map(row=>row.firstChild.textContent),
       deferredControls:document.querySelectorAll('#deferred-shelf .rc').length,
+      groupsOutsideWaiting:document.querySelectorAll('#panel-projects .decision-group, #panel-activity .decision-group, #panel-system .decision-group, #deferred-shelf .decision-group').length,
       composers:document.querySelectorAll('#ask-firstmate-composer').length,
       composerValue, boundedComposerValue, focused:document.activeElement===composer,
       boxes, documentWidth:document.documentElement.scrollWidth,
@@ -3173,18 +3226,37 @@ async function inspect(path,width,mobile){
   return seen;
 }
 (async()=>{
-  const expected=["Choose alpha path","Choose delta path","Choose Android shared route",
-    "Choose beta path","Choose iOS shared route"];
+  const expected=["Choose delta path","Choose alpha path","Choose beta path","Choose zeta path",
+    "Choose Android shared route","Choose gamma path","Choose epsilon path","Choose iOS shared route"];
+  const topExpected=["Choose delta path","group:portfolio-data-trust-scope","Choose zeta path",
+    "Choose Android shared route","group:release-readiness","Choose iOS shared route"];
   for(const path of boards){for(const [width,mobile] of [[1280,false],[390,true]]){
     const seen=await inspect(path,width,mobile);
-    assert(JSON.stringify(seen.order)===JSON.stringify(expected),`answered decisions did not sink at ${width}px: ${JSON.stringify(seen)}`);
-    assert(seen.total===5 && seen.answered.length===2 && seen.answered.every(row=>row.visible
+    assert(JSON.stringify(seen.order)===JSON.stringify(expected)
+      && JSON.stringify(seen.topOrder)===JSON.stringify(topExpected),
+      `partial or complete decision groups sorted incorrectly at ${width}px: ${JSON.stringify(seen)}`);
+    assert(seen.total===8 && seen.answered.length===4 && seen.answered.every(row=>row.visible
       && row.head==="Answer received" && row.note.startsWith("No action is needed from you right now.")
       && row.tone.includes("rc-quiet") && !row.tone.includes("rc-needs-you")),
       `durable collected banners were not quiet and reassuring at ${width}px: ${JSON.stringify(seen)}`);
+    assert(seen.groups.length===2
+      && seen.groups[0].key==='portfolio-data-trust-scope' && seen.groups[0].count==='1 of 2 answered'
+      && JSON.stringify(seen.groups[0].questions)===JSON.stringify(['Question 1 of 2','Question 2 of 2'])
+      && JSON.stringify(seen.groups[0].ids)===JSON.stringify(['alpha','beta'])
+      && seen.groups[1].key==='release-readiness' && seen.groups[1].count==='2 of 2 answered'
+      && JSON.stringify(seen.groups[1].ids)===JSON.stringify(['gamma','epsilon']),
+      `group wrappers lost their labels, progress, or independent identities at ${width}px: ${JSON.stringify(seen)}`);
+    assert(seen.partialContent.choices===2 && seen.partialContent.answer===1
+      && seen.partialContent.ask===2 && seen.partialContent.contexts===2
+      && seen.partialContent.blocking===2 && seen.partialContent.fact==='Expected answer: one beta source name'
+      && seen.partialContent.banners===2,
+      `a consolidated card simplified or merged existing sub-question content at ${width}px: ${JSON.stringify(seen)}`);
+    assert(seen.standalone.delta && seen.standalone.zeta,
+      `an absent or unique group key changed standalone rendering at ${width}px: ${JSON.stringify(seen)}`);
     assert(seen.androidPending==="false",`another home's matching id/key inherited the iOS answer: ${JSON.stringify(seen)}`);
     assert(JSON.stringify(seen.deferred)===JSON.stringify(["Defer first","Defer second"])
-      && seen.deferredControls===0,`the Deferred shelf was reordered or made actionable: ${JSON.stringify(seen)}`);
+      && seen.deferredControls===0 && seen.groupsOutsideWaiting===0,
+      `grouping changed Deferred or another board section: ${JSON.stringify(seen)}`);
     assert(seen.composers===1 && seen.focused && seen.composerValue==="About “Choose alpha path”:\n",
       `the per-decision question entry did not focus and prefill the one shared composer: ${JSON.stringify(seen)}`);
     assert(seen.boundedComposerValue.length<=2000
@@ -3195,7 +3267,7 @@ async function inspect(path,width,mobile){
   }}
 })().finally(()=>chrome.kill()).catch(error=>{console.error(error.stack||error);process.exitCode=1;});
 JS
-  pass "recorded answers survive independent regenerations, sink exactly, and share one question composer"
+  pass "grouped decisions retain independent cards, sink only when complete, and fit both breakpoints"
 }
 
 test_control_targets_are_escaped() {

@@ -684,6 +684,7 @@ def yolo_for($repo): ($registry_by_name[$repo // ""].yolo // false);
   options: (.decision_options // null),
   decision_kind: (.decision_kind // null),
   expects: (.decision_expects // null),
+  group: (.decision_group // null),
   decision_url: (.decision_url // null),
   why: (.decision_why // null),
   affects: (.decision_affects // null),
@@ -734,6 +735,7 @@ def yolo_for($repo): ($registry_by_name[$repo // ""].yolo // false);
     options: (.options // null),
     decision_kind: (.kind // null),
     expects: (.expects // null),
+    group: (.group // null),
     decision_url: (.decision_url // null),
     why: (.why // null),
     affects: (.affects // null),
@@ -833,13 +835,36 @@ def has_recorded_answer($w):
     and .key == ($c.key // ""))
   end;
 
+def valid_group_key($w):
+  ($w.group // null) as $group |
+  if ($group | type) == "string" and ($group | utf8bytelength) <= 80
+     and ($group | test("^[A-Za-z0-9._-]+$"))
+  then $group else null end;
+
 (($waiting_decisions + $waiting_secondmate)
-  | map(. + {answered: has_recorded_answer(.)})) as $waiting_calls_all |
-(($waiting_calls_all | map(select(.answered != true)))
-  + ($waiting_calls_all | map(select(.answered == true)))) as $waiting_calls |
-($waiting_calls + $waiting_prs) as $waiting |
+  | map(. + {answered: has_recorded_answer(.), group_key: valid_group_key(.)})) as $waiting_calls_all |
+(reduce $waiting_calls_all[] as $w ({};
+  ($w.group_key // "") as $group |
+  if $group == "" then . else .[$group] = ((.[$group] // 0) + 1) end)) as $group_counts |
+(reduce $waiting_calls_all[] as $w ({units:[],seen:{}};
+  ($w.group_key // "") as $group |
+  if $group != "" and ($group_counts[$group] // 0) >= 2 then
+    if .seen[$group] == true then .
+    elif $w.answered == true
+      and any($waiting_calls_all[] | select(.group_key == $group); .answered != true)
+    then .
+    else .seen[$group] = true
+      | .units += [{kind:"decision-group",group:$group,
+          answered:all($waiting_calls_all[] | select(.group_key == $group); .answered == true),
+          items:[$waiting_calls_all[] | select(.group_key == $group)]}]
+    end
+  else .units += [{kind:"decision-item",answered:$w.answered,item:$w}]
+  end) | .units) as $waiting_call_units_all |
+(($waiting_call_units_all | map(select(.answered != true)))
+  + ($waiting_call_units_all | map(select(.answered == true)))) as $waiting_call_units |
 ($waiting_secondmate_omitted + $waiting_secondmate_truncated + $waiting_secondmate_registry + $waiting_secondmate_unavailable + $waiting_backlog_unavailable) as $waiting_notices |
-(($waiting | length) + ($waiting_secondmate_omitted | map(.omitted_count) | add // 0)) as $waiting_count |
+(($waiting_calls_all | length) + ($waiting_prs | length)
+  + ($waiting_secondmate_omitted | map(.omitted_count) | add // 0)) as $waiting_count |
 ((($backlog_present | not)
   or $sm_truncated > 0
   or ($waiting_secondmate_omitted | length) > 0
@@ -1376,10 +1401,35 @@ def need_ctx:
 def need_item:
   . as $w |
   (@html "<div class=\"need-wrap\" data-scroll-anchor=\"call:\($w.home // "main"):\($w.id // ""):\($w.ctl.key // ""):\($w.kind // "")\">")
+  + (if ($w.subquestion_label // "") == "" then ""
+     else (@html "<div class=\"decision-subquestion\">\($w.subquestion_label)</div>") end)
   + ($w | need_row)
   + ($w | need_ctx)
   + ($w | controls_for)
   + "</div>";
+
+def readable_group_label($key):
+  ($key | gsub("[._-]+"; " ") | gsub("^[[:space:]]+|[[:space:]]+$"; "")) as $label |
+  if $label == "" then "Related decisions"
+  else (($label[0:1] | ascii_upcase) + $label[1:]) end;
+
+def decision_group_card:
+  . as $unit |
+  ($unit.items | length) as $total |
+  ([ $unit.items[] | select(.answered == true) ] | length) as $answered |
+  (@html "<section class=\"decision-group\" data-decision-group=\"\($unit.group)\">")
+  + "<header class=\"decision-group-head\"><div>"
+  + (@html "<span class=\"decision-group-kicker\">Related decisions</span><h3>\(readable_group_label($unit.group))</h3>")
+  + "</div>"
+  + (@html "<span class=\"decision-group-count\">\($answered) of \($total) answered</span>")
+  + "</header><div class=\"decision-group-items\">"
+  + (([range(0; $total) as $position
+      | ($unit.items[$position] + {subquestion_label:("Question \($position + 1) of \($total)")} | need_item)]
+      | add) // "")
+  + "</div></section>";
+
+def waiting_call_unit:
+  if .kind == "decision-group" then decision_group_card else (.item | need_item) end;
 
 # A board-level one-shot intake for work that has no existing target. It stays
 # separate from Ask firstmate because that composer owns the continuing board
@@ -2011,8 +2061,18 @@ section{margin-bottom:38px;}
 
 /* ---- awaiting your decision ---- */
 .needs{background:var(--panel);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow);overflow:hidden;}
-.need-wrap{border-top:1px solid var(--line);}
-.need-wrap:first-child{border-top:none;}
+.need-wrap,.decision-group{border-top:1px solid var(--line);}
+.need-wrap:first-child,.decision-group:first-child{border-top:none;}
+.decision-group-head{display:flex;align-items:center;justify-content:space-between;gap:16px;
+  padding:14px 22px;background:var(--amber-soft);}
+.decision-group-head h3{margin:2px 0 0;color:var(--ink);font-size:15px;font-weight:680;
+  overflow-wrap:anywhere;}
+.decision-group-kicker{color:#936218;font-size:10.5px;font-weight:760;letter-spacing:.07em;
+  text-transform:uppercase;}
+.decision-group-count{flex:none;color:var(--muted);font-size:12px;font-weight:620;text-align:right;}
+.decision-group-items{border-top:1px solid #ead7ae;}
+.decision-subquestion{padding:11px 22px 0 39px;color:var(--faint);font-size:10.5px;
+  font-weight:720;letter-spacing:.06em;text-transform:uppercase;}
 .need{display:flex;align-items:center;gap:14px;padding:15px 22px;}
 .need-main{display:flex;align-items:center;gap:14px;flex:1;min-width:0;}
 .band{width:3px;align-self:stretch;border-radius:3px;background:var(--amber);flex:none;}
@@ -2226,6 +2286,9 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
   .projects,.strip,.quota-grid{grid-template-columns:minmax(0,1fr)}
   .wrap{padding:28px 18px 48px}
   .need{align-items:flex-start;flex-wrap:wrap;padding:14px 16px;gap:10px}
+  .decision-group-head{align-items:flex-start;padding:13px 16px;gap:10px}
+  .decision-group-count{max-width:110px}
+  .decision-subquestion{padding:10px 16px 0 29px}
   .need-main{align-items:flex-start;flex:1 1 calc(100% - 18px);gap:10px}
   .tag{width:auto}
   .decision-aid{margin-left:13px;min-height:44px;display:inline-flex;align-items:center;white-space:normal}
@@ -2372,7 +2435,7 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
    then "<p class=\"quiet\">Nothing needs your decision right now.</p>"
    else "<div class=\"needs\">"
      + (($waiting_notices | map(need_item) | add) // "")
-     + (($waiting_calls | map(need_item) | add) // "")
+     + (($waiting_call_units | map(waiting_call_unit) | add) // "")
      + (($waiting_prs | map(need_item) | add) // "") + "</div>" end)
 + file_block
 + ask_block

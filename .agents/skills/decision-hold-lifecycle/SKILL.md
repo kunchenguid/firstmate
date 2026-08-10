@@ -26,7 +26,8 @@ What the script cannot judge is whether the prose is genuinely clear, jargon-fre
 When the captain's useful answers are a clean small pick, record two to four short explicit labels through the supported filing command; otherwise leave options absent and preserve the free-text decision rather than forcing nuance into misleading buttons.
 When the decision asks the captain to supply a specific fact or classification rather than choose a course, mark it `fact` and add a short expected-answer hint when that would clarify the useful shape.
 The marker changes only how the existing free-text Answer control is framed; never use it to imply that a richer data-entry surface exists.
-Never derive options, a fact marker, or an expected-answer hint from the recommendation or other prose.
+When two or more distinct decisions genuinely come from the same investigation or report, assign the same privacy-safe group slug to each so Mission Control can contain them visually without merging their identities or answer paths.
+Never group decisions merely because their subjects are similar, and never derive a group key, options, a fact marker, or an expected-answer hint from prose.
 That judgement is yours on every filing, and passing the script is not evidence you met it.
 
 Use `hold` when an investigation or visual review discovered the decision, so it gets its own durable decision identity under that origin.
@@ -52,7 +53,7 @@ Bearings reads the resulting structured state and must never compensate by scrap
 
 1. Read the complete investigation result and complete the visual review before declaring either complete.
 2. Inventory only genuine unresolved choices that require the captain.
-3. For each decision, choose a stable key and use the script's `hold` command with a concise title, reason, and repository, plus every context dimension the filing bar above requires, explicit option labels only when the choice is genuinely a clean small pick, and fact-intake framing only when the captain must supply a fact or classification.
+3. For each decision, choose a stable key and use the script's `hold` command with a concise title, reason, and repository, plus every context dimension the filing bar above requires, explicit option labels only when the choice is genuinely a clean small pick, fact-intake framing only when the captain must supply a fact or classification, and one shared group slug only for distinct decisions from the same origin.
    Read `data/captain-shared.md`'s decision-presentation section and judge the prose against it before filing; the script enforces that each dimension is present, never that it is clear.
    Where a built surface exists, link it; where the decision needs one that does not exist yet, build it before presenting the decision as ready rather than filing the acknowledgment that none applies.
 4. Run the script's `complete` command with the full unresolved-key inventory for that review pass.

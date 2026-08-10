@@ -42,6 +42,12 @@ The stage itself is derived by the snapshot rather than by the board; see `bin/f
   A decision explicitly marked as fact intake keeps that same free-text Answer control but labels it `Fact needed` and shows the recorded expected-answer hint beside it when present.
   A decision without that marker renders its Answer control exactly as before, and the board never infers the marker from its question or recommendation.
   [`docs/decision-hold-lifecycle.md`](decision-hold-lifecycle.md) owns the fields themselves and which of them a filing must supply.
+  Two or more open decisions carrying the same non-null group key render inside one consolidated card whose readable heading comes from that key.
+  Each member remains a complete labelled sub-question with its original context, dependency line, decision aid, Answer control, any available Set aside control, quick answers or fact framing, acknowledgement banner, and Ask-firstmate entry point.
+  The wrapper reports how many sub-questions have recorded answers, but it does not merge their identities or answering paths.
+  A unique group key and an absent group key both keep the standalone decision rendering, so visible grouping begins only when at least two open decisions share the key.
+  A partially answered group stays at unanswered priority and keeps each answered member's existing quiet acknowledgement treatment, while a group moves below unanswered decisions only after every member has a recorded Answer request.
+  Grouping is confined to the waiting list and never changes the Deferred shelf.
   A structured HTTPS decision aid appears as its own readable link and remains on its recorded private host.
   Only valid HTTP or HTTPS references are clickable; a local report path such as `data/example/report.md` remains non-clickable context when no explicit served HTTPS aid exists, because the board does not serve fleet-local files.
   URL validation runs in the required jq rendering path, so valid links do not disappear when optional browser tooling such as Node is unavailable.
@@ -300,7 +306,9 @@ The deferred cases pin the awaiting count and the section count to literal numbe
 The decision-context case renders a structured and an old-style decision from one fixture home and pins the count of rendered context blocks, so leaving the old-style decision alone is proven rather than inferred from it happening to look bare.
 The dependency case adds a titled dependent, an unavailable secondmate-dependent title, and a decision with no dependents, then pins the titled line, id fallback, and absence of an extra line.
 The control-enabled half also proves that only the structured option set renders quick-answer buttons, that only the explicit fact marker renders expected-answer framing, and that the free-text affordance remains for both.
-It then measures the rendered page in a real browser at 1280px and 390px, because markup alone cannot show that the context or dependency line sits outside the row link or that the option buttons and fact-intake hint fit without pushing the board sideways; that measurement self-skips when Chrome or Node is absent.
+The recorded-answer case renders a partially answered group, a fully answered group, a unique group key, an absent group key, and two deferred rows carrying a shared key.
+It proves that each grouped sub-question keeps its independent content and controls, only the fully answered group sinks, standalone rows stay standalone, and Deferred remains an ordinary shelf.
+It then measures the rendered page in a real browser at 1280px and 390px, because markup alone cannot show that grouped cards, context and dependency lines, option buttons, or fact-intake hints fit without pushing the board sideways; that measurement self-skips when Chrome or Node is absent.
 It also pins a fixed current time and commits its fixture clones at explicit epochs, so the last-change wording, its three degrade-to-dash paths, and the promise that no clone is written to are all checked against times the test chose.
 
 The reply layer is covered in the same suite: that the default board is unchanged by its existence, that each row offers only the controls it can resolve, that the one-shot new-work composer stays visually distinct from the continuing Ask-firstmate conversation at 1280px and 390px, that a control names no host, port, or absolute endpoint and derives its target from the URL the document was loaded from, that it stays hidden until a transport is proved, and that the confirmation banner ships hidden with an empty outcome heading.
