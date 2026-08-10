@@ -242,6 +242,8 @@ test_raw_omp_identity_is_unverified_for_direct_callers() {
   local state out
   state=$(new_state_dir raw-omp-identity)
   fm_backend_busy_state() { printf 'busy'; }
+  fm_backend_raw_omp_identity() { [ "${FAKE_RAW_OMP:-0}" = 1 ]; }
+  FAKE_RAW_OMP=1
   out=$(fm_busy_classify herdr s:p raw-omp t1 "$state")
   [ "$out" = "unknown raw-unverified" ] \
     || fail "Herdr must reject raw-omp before native busy classification, got '$out'"
@@ -254,10 +256,15 @@ test_raw_omp_identity_is_unverified_for_direct_callers() {
   out=$(fm_busy_classify herdr s:p bash t1 "$state" '' 1)
   [ "$out" = "unknown raw-unverified" ] \
     || fail "Herdr must reject a wrapped raw OMP busy caller before native busy, got '$out'"
+  FAKE_RAW_OMP=0
+  out=$(fm_busy_classify herdr s:p bash t1 "$state" '' 1)
+  [ "$out" = "busy herdr-native" ] \
+    || fail "Herdr must preserve native busy for a raw non-OMP caller, got '$out'"
   out=$(FM_HARNESS_UNVERIFIED=raw-launch fm_busy_classify tmux w1 omp t1 "$state")
   [ "$out" = "unknown raw-unverified" ] \
     || fail "tmux must reject the inherited raw-launch marker, got '$out'"
   unset -f fm_backend_busy_state
+  unset -f fm_backend_raw_omp_identity
   pass "direct Herdr and tmux busy callers reject raw OMP identities"
 }
 

@@ -266,6 +266,20 @@ fm_backend_tmux_foreground_argv0s() {  # <target>
       done
 }
 
+fm_backend_tmux_raw_omp_identity() {  # <target>
+  local target=$1 name
+  (
+    unset FM_HARNESS_UNVERIFIED
+    while IFS= read -r name; do
+      [ "${name##*/}" = omp ] && exit 0
+    done < <(fm_backend_tmux_foreground_comms "$target")
+    while IFS= read -r name; do
+      [ "${name##*/}" = omp ] && exit 0
+    done < <(fm_backend_tmux_foreground_argv0s "$target")
+    [ "$(fm_backend_tmux_current_command "$target")" = omp ]
+  )
+}
+
 # fm_backend_tmux_agent_state: recovery-grade harness-agent state for one
 # recorded target. See bin/fm-backend.sh's fm_backend_agent_state for the
 # shared state vocabulary and docs/tmux-backend.md "Agent liveness probe" for

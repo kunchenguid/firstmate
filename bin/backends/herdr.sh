@@ -1906,7 +1906,8 @@ fm_backend_herdr_pane_agent_state() {  # <session> <pane_id> [recorded-harness] 
   local inherited_unverified=${FM_HARNESS_UNVERIFIED:-}
   local FM_HARNESS_UNVERIFIED=$inherited_unverified
   [ "$raw_launch" = 1 ] && FM_HARNESS_UNVERIFIED=raw-launch
-  if [ "$recorded_harness" = raw-omp ] || [ "$raw_launch" = 1 ] || [ -n "$FM_HARNESS_UNVERIFIED" ]; then
+  if [ "$recorded_harness" = raw-omp ] \
+    || { [ -n "$inherited_unverified" ] && [ "$raw_launch" != 1 ]; }; then
     printf 'unknown'
     return 0
   fi
@@ -1966,7 +1967,8 @@ fm_backend_herdr_agent_state() {  # <target> [recorded-harness] [raw-launch]
   local inherited_unverified=${FM_HARNESS_UNVERIFIED:-}
   local FM_HARNESS_UNVERIFIED=$inherited_unverified
   [ "$raw_launch" = 1 ] && FM_HARNESS_UNVERIFIED=raw-launch
-  if [ "$recorded_harness" = raw-omp ] || [ "$raw_launch" = 1 ] || [ -n "$FM_HARNESS_UNVERIFIED" ]; then
+  if [ "$recorded_harness" = raw-omp ] \
+    || { [ -n "$inherited_unverified" ] && [ "$raw_launch" != 1 ]; }; then
     printf 'unverified'
     return 0
   fi
@@ -2681,6 +2683,17 @@ fm_backend_herdr_agent_identity_raw() {  # <session> <pane> -> <agent>\t<status>
 fm_backend_herdr_composer_identity() {  # <target> -> "<agent>\t<status>"
   fm_backend_herdr_parse_target "$1" || return 1
   fm_backend_herdr_agent_identity_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE"
+}
+
+fm_backend_herdr_raw_omp_identity() {  # <target>
+  local target=$1 identity agent agent_status
+  fm_backend_herdr_parse_target "$target" || return 1
+  identity=$(fm_backend_herdr_agent_identity_raw \
+    "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" 2>/dev/null || true)
+  IFS=$'\t' read -r agent agent_status <<EOF
+$identity
+EOF
+  [ "$agent" = omp ]
 }
 
 fm_backend_herdr_omp_input_safe() {  # <session> <pane> [recorded-harness] [raw-launch]

@@ -845,7 +845,11 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40] [
   local FM_HARNESS_UNVERIFIED=$inherited_unverified
   local out rc r_state r_source native log
   [ "$raw_launch" = 1 ] && FM_HARNESS_UNVERIFIED=raw-launch
-  if [ "$harness" = raw-omp ] || { [ "$harness" = omp ] && [ -n "${FM_HARNESS_UNVERIFIED:-}" ]; }; then
+  if [ "$harness" = raw-omp ] \
+    || { [ "$harness" = omp ] && [ -n "${FM_HARNESS_UNVERIFIED:-}" ]; } \
+    || { [ "$raw_launch" = 1 ] \
+      && command -v fm_backend_raw_omp_identity >/dev/null 2>&1 \
+      && fm_backend_raw_omp_identity "$backend" "$target" "$harness" "$raw_launch"; }; then
     printf 'unknown raw-unverified'
     return 0
   fi
@@ -903,7 +907,8 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40] [
   # for BUSY (streaming means a turn is running); native idle is narrower
   # than turn state (a long foreground tool call reads idle) and stays
   # unknown here.
-  if [ "$backend" = herdr ] && [ -z "${FM_HARNESS_UNVERIFIED:-}" ] \
+  if [ "$backend" = herdr ] \
+    && { [ -z "${FM_HARNESS_UNVERIFIED:-}" ] || [ "$raw_launch" = 1 ]; } \
     && command -v fm_backend_busy_state >/dev/null 2>&1; then
     native=$(fm_backend_busy_state "$backend" "$target" 2>/dev/null || true)
     if [ "$native" = busy ]; then
@@ -911,7 +916,9 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40] [
       return 0
     fi
   fi
-  if [ "$backend" = herdr ] && [ -n "${FM_HARNESS_UNVERIFIED:-}" ]; then
+  if [ "$backend" = herdr ] \
+    && [ -n "${FM_HARNESS_UNVERIFIED:-}" ] \
+    && [ "$raw_launch" != 1 ]; then
     case "$harness" in
       grok*|muse*) : ;;
       *) printf 'unknown raw-unverified'; return 0 ;;

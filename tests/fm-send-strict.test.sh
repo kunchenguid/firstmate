@@ -225,8 +225,55 @@ test_key_send_exit_status_follows_delivery() {
   pass "fm-send --key: exit status follows delivery, and an undelivered key never reports success"
 }
 
+test_recorded_raw_omp_rejects_text_and_key_before_adapter() {
+  local dir fb home err log rc
+  dir="$TMP_ROOT/raw-omp-input"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); home=$(setup_home rawomp); err="$dir/send.err"; log="$dir/tmux.log"; : > "$log"
+  fm_write_meta "$home/state/raw-omp.meta" \
+    "window=sess:fm-raw-omp" "kind=ship" "harness=raw-omp" "raw_launch=1"
+
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" FM_SEND_SETTLE=0 \
+    "$SEND" raw-omp "must not type" >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "recorded raw OMP text should be refused"
+  [ ! -s "$log" ] || fail "recorded raw OMP text reached the tmux adapter: $(cat "$log")"
+
+  : > "$log"
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" FM_SEND_SETTLE=0 \
+    "$SEND" raw-omp --key Enter >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "recorded raw OMP Enter should be refused"
+  [ ! -s "$log" ] || fail "recorded raw OMP Enter reached the tmux adapter: $(cat "$log")"
+  pass "fm-send: recorded raw OMP text and keys are rejected before adapter input"
+}
+
+test_raw_non_omp_input_remains_deliverable() {
+  local dir fb home err log rc got
+  dir="$TMP_ROOT/raw-non-omp-input"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); home=$(setup_home rawnonomp); err="$dir/send.err"; log="$dir/tmux.log"; : > "$log"
+  fm_write_meta "$home/state/raw-bash.meta" \
+    "window=sess:fm-raw-bash" "kind=ship" "harness=bash" "raw_launch=1"
+
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" FM_SEND_SETTLE=0 \
+    "$SEND" raw-bash "raw non-OMP text" >/dev/null 2>"$err"; rc=$?
+  expect_code 0 "$rc" "raw non-OMP text should retain backend delivery"
+  got=$(cat "$log")
+  assert_contains "$got" "target=sess:fm-raw-bash literal=1 arg=raw non-OMP text" \
+    "raw non-OMP text should reach the tmux adapter"
+  assert_contains "$got" "target=sess:fm-raw-bash literal=0 arg=Enter" \
+    "raw non-OMP text should still submit with Enter"
+
+  : > "$log"
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" FM_SEND_SETTLE=0 \
+    "$SEND" raw-bash --key Enter >/dev/null 2>"$err"; rc=$?
+  expect_code 0 "$rc" "raw non-OMP Enter should retain backend delivery"
+  assert_contains "$(cat "$log")" "target=sess:fm-raw-bash literal=0 arg=Enter" \
+    "raw non-OMP Enter should reach the tmux adapter"
+  pass "fm-send: raw non-OMP text and keys retain existing delivery"
+}
+
 test_exact_lane_id_send_still_works
 test_key_send_exit_status_follows_delivery
+test_recorded_raw_omp_rejects_text_and_key_before_adapter
+test_raw_non_omp_input_remains_deliverable
 test_unset_fm_home_fails
 test_unresolvable_target_does_not_tmux_fallback
 test_prefixless_herdr_pane_id_fails

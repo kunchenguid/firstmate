@@ -2982,6 +2982,66 @@ test_busy_state_unknown_on_no_agent() {
   pass "fm_backend_herdr_busy_state: unparseable/absent agent state reports unknown, the regex-fallback cue"
 }
 
+test_raw_non_omp_agent_state_preserves_liveness_and_recovery() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/raw-non-omp-agent"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s\n' '{"result":{"pane":{"pane_id":"w1:p2"}}}' > "$resp/1.out"
+  printf '%s\n' '{"result":{"agent":{"agent":"claude","agent_status":"working"}}}' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_agent_state lab:w1:p2 bash 1' "$ROOT" )
+  [ "$out" = alive ] || fail "raw non-OMP live Herdr agents must remain recoverable as alive, got '$out'"
+
+  dir="$TMP_ROOT/raw-non-omp-no-agent"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s\n' '{"result":{"pane":{"pane_id":"w1:p2"}}}' > "$resp/1.out"
+  printf '%s\n' '{"error":{"code":"agent_not_found"}}' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_agent_state lab:w1:p2 bash 1' "$ROOT" )
+  [ "$out" = dead ] || fail "raw non-OMP Herdr no-agent state must remain recoverable as dead, got '$out'"
+  pass "Herdr liveness: raw non-OMP agents retain live and no-agent recovery"
+}
+
+test_dispatch_rejects_corrob_raw_omp_before_recovery() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/raw-omp-dispatch"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s\n' '{"result":{"agent":{"agent":"omp","agent_status":"idle"}}}' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state herdr lab:w1:p2 bash 1' "$ROOT" )
+  [ "$out" = unverified ] || fail "corroborated wrapped raw OMP must stop recovery before state mapping, got '$out'"
+  [ "$(grep -c $'\x1fagent\x1fget' "$log")" -eq 1 ] \
+    || fail "wrapped raw OMP dispatch should corroborate identity once"
+  if grep -q $'\x1fpane\x1fget' "$log"; then
+    fail "wrapped raw OMP dispatch must stop before pane recovery reads"
+  fi
+  pass "Herdr liveness: corroborated wrapped raw OMP is unverified before recovery"
+}
+
+test_raw_omp_busy_gate_preserves_non_omp_native_busy() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/raw-omp-busy"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s\n' '{"result":{"agent":{"agent":"omp","agent_status":"working"}}}' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/fm-backend.sh"; . "$0/bin/fm-busy-lib.sh"; fm_busy_classify herdr lab:w1:p2 bash raw-omp-busy "$1" "" 1' "$ROOT" "$dir/state" )
+  [ "$out" = "unknown raw-unverified" ] \
+    || fail "corroborated wrapped raw OMP must not use Herdr native busy, got '$out'"
+  if grep -q $'\x1fstatus\x1f--json' "$log"; then
+    fail "raw OMP busy classification reached Herdr native busy"
+  fi
+
+  dir="$TMP_ROOT/raw-non-omp-busy"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s\n' '{"result":{"agent":{"agent":"claude","agent_status":"working"}}}' > "$resp/1.out"
+  printf '%s\n' '{"result":{"agent":{"agent":"claude","agent_status":"working"}}}' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/fm-backend.sh"; . "$0/bin/fm-busy-lib.sh"; fm_busy_classify herdr lab:w1:p2 bash raw-non-omp-busy "$1" "" 1' "$ROOT" "$dir/state" )
+  [ "$out" = "busy herdr-native" ] \
+    || fail "raw non-OMP Herdr must preserve native busy, got '$out'"
+  pass "Herdr busy: raw OMP is gated while raw non-OMP keeps native busy"
+}
+
 # --- composer_state: structural border-row classification --------------------
 
 test_composer_state_bare_prompt_is_empty() {
@@ -4642,6 +4702,9 @@ test_current_path_reads_cwd
 test_busy_state_working_maps_to_busy
 test_busy_state_done_and_blocked_map_to_idle
 test_busy_state_unknown_on_no_agent
+test_raw_non_omp_agent_state_preserves_liveness_and_recovery
+test_dispatch_rejects_corrob_raw_omp_before_recovery
+test_raw_omp_busy_gate_preserves_non_omp_native_busy
 test_composer_state_bare_prompt_is_empty
 test_composer_state_styled_placeholder_draft_is_pending
 test_composer_state_real_text_is_pending

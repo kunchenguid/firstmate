@@ -639,6 +639,29 @@ fm_backend_source() {  # <name>
   esac
 }
 
+fm_backend_raw_omp_identity() {  # <backend> <target> [recorded-harness] [raw-launch]
+  local backend=$1 target=$2 recorded_harness=${3:-} raw_launch=${4:-}
+  if [ "$recorded_harness" = raw-omp ] \
+    || { [ "$recorded_harness" = omp ] \
+      && { [ "$raw_launch" = 1 ] || [ -n "${FM_HARNESS_UNVERIFIED:-}" ]; }; }; then
+    return 0
+  fi
+  [ "$raw_launch" = 1 ] || return 1
+  case "$backend" in
+    herdr)
+      fm_backend_source herdr || return 1
+      fm_backend_herdr_raw_omp_identity "$target"
+      ;;
+    tmux)
+      fm_backend_source tmux || return 1
+      fm_backend_tmux_raw_omp_identity "$target"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 # fm_backend_resolve_selector: resolve a raw fm-send.sh/fm-peek.sh style
 # selector to a live session-provider target. Four forms, in order:
 #   target with ":"   used as-is (the escape hatch for a window/pane outside
@@ -712,10 +735,13 @@ fm_backend_capture() {  # <backend> <target> <lines> [expected-label]
 }
 
 # fm_backend_send_key: one backend-supported named special key.
-fm_backend_send_key() {  # <backend> <target> <key> [expected-label]
-  local backend=$1
+fm_backend_send_key() {  # <backend> <target> <key> [expected-label] [recorded-harness] [raw-launch]
+  local backend=$1 target=${2:-} recorded_harness=${5-} raw_launch=${6-}
   shift
   fm_backend_source "$backend" || return 1
+  if fm_backend_raw_omp_identity "$backend" "$target" "$recorded_harness" "$raw_launch"; then
+    return 1
+  fi
   case "$backend" in
     tmux) fm_backend_tmux_send_key "$@" ;;
     herdr) fm_backend_herdr_send_key "$@" ;;
@@ -730,9 +756,13 @@ fm_backend_send_key() {  # <backend> <target> <key> [expected-label]
 # retrying only the submission (never retyping). Echoes the backend's
 # proof-carrying verdict; callers require exact empty for confirmed delivery.
 fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sleep> <settle> [expected-label] [recorded-harness] [raw-launch]
-  local backend=$1
+  local backend=$1 target=${2:-} recorded_harness=${8-} raw_launch=${9-}
   shift
   fm_backend_source "$backend" || return 1
+  if fm_backend_raw_omp_identity "$backend" "$target" "$recorded_harness" "$raw_launch"; then
+    printf 'unknown'
+    return 0
+  fi
   case "$backend" in
     tmux) fm_backend_tmux_send_text_submit "$@" ;;
     herdr) fm_backend_herdr_send_text_submit "$@" ;;
@@ -895,8 +925,11 @@ fm_backend_agent_state() {  # <backend> <target> [recorded-harness] [raw-launch]
   local inherited_unverified=${FM_HARNESS_UNVERIFIED:-}
   local FM_HARNESS_UNVERIFIED=$inherited_unverified
   [ "$raw_launch" = 1 ] && FM_HARNESS_UNVERIFIED=raw-launch
-  [ "$recorded_harness" = raw-omp ] && { printf 'unverified'; return 0; }
   fm_backend_source "$backend" || { printf 'unverified'; return 0; }
+  if fm_backend_raw_omp_identity "$backend" "$target" "$recorded_harness" "$raw_launch"; then
+    printf 'unverified'
+    return 0
+  fi
   case "$backend" in
     tmux) fm_backend_tmux_agent_state "$target" "$raw_launch" ;;
     herdr) fm_backend_herdr_agent_state "$target" "$recorded_harness" "$raw_launch" ;;
