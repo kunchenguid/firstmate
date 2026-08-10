@@ -146,9 +146,87 @@ test_empty_fleet_json() {
       and .main_inventory.unstructured_current_count == 0
   ' >/dev/null \
     || fail "empty snapshot schema or absence markers wrong: $out"
+  printf '%s' "$out" | jq -e '
+    .project_registry.present == false
+      and .project_registry.available == true
+      and .project_registry.complete == true
+      and .project_registry.reason == null
+      and .project_registry.records == []
+      and .project_registry.total == 0
+      and .project_registry.shown == 0
+      and .project_registry.truncated == 0
+  ' >/dev/null || fail "project_registry must use an explicit present:false marker when data/projects.md is absent: $out"
   view=$(FM_HOME="$home" "$VIEW")
   assert_contains "$view" "No live task metadata found." "empty fleet view should say no live metadata"
   pass "empty fleet snapshot and view use explicit absence markers"
+}
+
+# fm-2007: a project registered in data/projects.md with no backlog history and
+# no live state/<id>.meta was completely invisible through the public snapshot,
+# blocking external project discovery. project_registry must expose its name
+# even though it has zero backlog rows and zero tasks anywhere else in the
+# snapshot.
+test_project_registry_exposes_backlogless_project() {
+  local home out
+  home=$(make_home project-registry)
+  cat > "$home/data/projects.md" <<'EOF'
+- silent-project [no-mistakes] - has no backlog history or live task (added 2026-07-01)
+EOF
+  out=$(FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    (.tasks | length) == 0
+      and (.backlog.present == false)
+  ' >/dev/null || fail "fixture must reproduce the reported gap: no tasks and no backlog for silent-project: $out"
+  printf '%s' "$out" | jq -e '
+    .project_registry.present == true
+      and .project_registry.available == true
+      and .project_registry.complete == true
+      and .project_registry.reason == null
+      and .project_registry.records == [{name:"silent-project"}]
+      and .project_registry.total == 1
+      and .project_registry.shown == 1
+      and .project_registry.truncated == 0
+  ' >/dev/null || fail "project_registry did not expose a backlog-less registered project: $out"
+  pass "project_registry exposes a registered project with no backlog history or live task"
+}
+
+# The projection must stay minimal: only the name, never the registered mode,
+# yolo posture, description, or registration date that data/projects.md carries.
+test_project_registry_omits_private_registry_detail() {
+  local home out
+  home=$(make_home project-registry-privacy)
+  cat > "$home/data/projects.md" <<'EOF'
+- alpha [local-only +yolo] - internal tooling, do not expose posture (added 2026-07-02)
+- beta - legacy default project (added 2026-07-03)
+EOF
+  out=$(FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    .project_registry.records == [{name:"alpha"},{name:"beta"}]
+      and (.project_registry.records | map(keys) | flatten | unique) == ["name"]
+  ' >/dev/null || fail "project_registry must expose names only, no mode/yolo/description/date: $out"
+  case "$out" in
+    *local-only*) fail "project_registry leaked delivery mode into the public snapshot: $out" ;;
+    *+yolo*) fail "project_registry leaked yolo posture into the public snapshot: $out" ;;
+    *"internal tooling"*) fail "project_registry leaked project description into the public snapshot: $out" ;;
+  esac
+  pass "project_registry exposes registered names only, never mode/yolo/description/date"
+}
+
+test_project_registry_unreadable_registry_discloses_reason() {
+  local home out
+  home=$(make_home project-registry-unreadable)
+  printf -- '- alpha - some project (added 2026-07-01)\n' > "$home/data/projects.md"
+  chmod 000 "$home/data/projects.md"
+  out=$(FM_HOME="$home" "$SNAPSHOT" --json)
+  chmod 644 "$home/data/projects.md"
+  printf '%s' "$out" | jq -e '
+    .project_registry.present == true
+      and .project_registry.available == false
+      and .project_registry.complete == false
+      and (.project_registry.reason | length) > 0
+      and .project_registry.records == []
+  ' >/dev/null || fail "an unreadable project registry must disclose unavailability with a reason, not fail silently: $out"
+  pass "project_registry discloses an unreadable registry file rather than silently omitting it"
 }
 
 test_fixture_snapshot_json() {
@@ -780,6 +858,9 @@ test_parked_scout_decision_stays_pending() {
 }
 
 test_empty_fleet_json
+test_project_registry_exposes_backlogless_project
+test_project_registry_omits_private_registry_detail
+test_project_registry_unreadable_registry_discloses_reason
 test_fixture_snapshot_json
 test_main_inventory_orphan_and_unstructured_disclosure
 test_normalized_roles_and_plural_blocker_readiness

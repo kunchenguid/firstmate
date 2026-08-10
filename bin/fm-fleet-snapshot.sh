@@ -52,6 +52,15 @@
 #     structured homes with an unknown current classification are partial, not
 #     unreadable, and retain independently trustworthy structured surfaces.
 #   secondmate_guidance: return-channel action note for renderers and bearings.
+#   project_registry: {present,available,complete,reason,records[],total,shown,
+#     truncated} - minimal public projection of data/projects.md: registered
+#     project NAMES only (records[].name), so a project with no backlog history
+#     and no live task can still be discovered. Never includes project paths,
+#     git remotes, descriptions, registration dates, or delivery mode/posture/
+#     yolo - those stay captain-private. present=false means no registry file
+#     (not an error); available=false means it exists but could not be read
+#     (permissions or timeout), with reason set. complete=false means the
+#     bounded read truncated before covering every registered project.
 #
 # Compatibility: JSON is the primary machine-readable surface.
 # Human views must render this output instead of parsing state files again.
@@ -161,9 +170,10 @@ FM_SNAPSHOT_TERMINAL_TIMEOUT and never becomes canonical current state.
 Parent activity evidence uses FM_SNAPSHOT_PARENT_ACTIVITY_LINES,
 FM_SNAPSHOT_PARENT_ACTIVITY_BYTES, FM_SNAPSHOT_PARENT_ACTIVITIES, and
 FM_SNAPSHOT_PARENT_ACTIVITY_TIMEOUT, with truncation disclosed in the result.
-The registered secondmate table uses FM_SNAPSHOT_REGISTRY_LINES,
-FM_SNAPSHOT_REGISTRY_BYTES, FM_SNAPSHOT_REGISTRY_RECORDS, and
-FM_SNAPSHOT_REGISTRY_TIMEOUT, with unavailability and truncation disclosed.
+The registered secondmate table and the project_registry projection of
+data/projects.md share FM_SNAPSHOT_REGISTRY_LINES, FM_SNAPSHOT_REGISTRY_BYTES,
+FM_SNAPSHOT_REGISTRY_RECORDS, and FM_SNAPSHOT_REGISTRY_TIMEOUT, with
+unavailability and truncation disclosed.
 EOF
 }
 
@@ -910,6 +920,99 @@ JQ
     '{present:true,available:false,complete:false,reason:$reason,provenance:"registered-table",path:$path,freshness:{status:"unavailable",observed_at:$observed},records:[],input_truncated:false,records_truncated:false,reasons:[$reason],lines_in_window:0,records_in_window:0}'
 }
 
+# Minimal public projection of data/projects.md: registered project NAMES only.
+# A project with no backlog history and no live state/<id>.meta is otherwise
+# invisible through this snapshot (issue #2007), which blocks external project
+# discovery. Deliberately excludes path, git remote, description, registration
+# date, and delivery mode/posture/yolo - those remain captain-private and are
+# never derived from this projection. Shares the registered-table bounded-read
+# shape (byte/line/record limits, timeout) with registry_secondmates_json.
+registry_projects_json() {
+  local reg="$DATA/projects.md" out rc reason mode script parse_filter
+  if [ ! -f "$reg" ]; then
+    jq -n --arg path "$reg" \
+      '{present:false,available:true,complete:true,reason:null,records:[],total:0,shown:0,truncated:0}'
+    return 0
+  fi
+  mode=$(file_mode_octal "$reg")
+  if [ -z "$mode" ] || [ $((8#$mode & 0444)) -eq 0 ]; then
+    jq -n --arg reason "project registry is unreadable" \
+      '{present:true,available:false,complete:false,reason:$reason,records:[],total:0,shown:0,truncated:0}'
+    return 0
+  fi
+  script=$(cat <<'BASH'
+    f=$1
+    max_lines=$2
+    max_bytes=$3
+    max_records=$4
+    parse_filter=$5
+    content=$(LC_ALL=C head -c "$((max_bytes + 1))" "$f" || exit 3; printf "\036") || exit 3
+    content=${content%$'\036'}
+    bytes=$(printf "%s" "$content" | LC_ALL=C wc -c | tr -d " ")
+    byte_truncated=false
+    if [ "$bytes" -gt "$max_bytes" ]; then
+      byte_truncated=true
+      content=$(printf "%s" "$content" | LC_ALL=C head -c "$max_bytes")
+      complete=${content%$'\n'*}
+      if [ "$complete" != "$content" ]; then
+        content=$complete
+      else
+        content=
+      fi
+    fi
+    if [ -n "$content" ]; then
+      lines=$(printf "%s\n" "$content" | awk "END {print NR}")
+    else
+      lines=0
+    fi
+    line_truncated=false
+    if [ "$lines" -gt "$max_lines" ]; then line_truncated=true; fi
+    window=$(printf "%s\n" "$content" | LC_ALL=C head -n "$max_lines") || exit 3
+    names=$(printf "%s\n" "$window" | jq -Rn "$parse_filter") || exit 3
+    total=$(printf "%s" "$names" | jq "length") || exit 3
+    records_truncated=false
+    if [ "$total" -gt "$max_records" ]; then records_truncated=true; fi
+    printf "%s" "$names" | jq \
+      --argjson byte_truncated "$byte_truncated" \
+      --argjson line_truncated "$line_truncated" \
+      --argjson records_truncated "$records_truncated" \
+      --argjson max_records "$max_records" '
+      {names:(if length > $max_records then .[:$max_records] else . end),
+       total:length,
+       byte_truncated:$byte_truncated,
+       line_truncated:$line_truncated,
+       records_truncated:$records_truncated}'
+BASH
+  )
+  parse_filter=$(cat <<'JQ'
+      [ inputs
+        | select(startswith("- "))
+        | (capture("^- (?<name>[^[:space:]]+)")?) as $m
+        | select($m != null)
+        | $m.name ]
+      | unique
+JQ
+  )
+  out=$(fm_run_timed "$FM_SNAPSHOT_REGISTRY_TIMEOUT" bash -c "$script" \
+    fm-project-registry "$reg" "$FM_SNAPSHOT_REGISTRY_LINES" "$FM_SNAPSHOT_REGISTRY_BYTES" \
+    "$FM_SNAPSHOT_REGISTRY_RECORDS" "$parse_filter" 2>/dev/null)
+  rc=$?
+  if [ "$rc" -eq 0 ] && printf '%s' "$out" | jq -e '(.names | type) == "array"' >/dev/null 2>&1; then
+    jq -n --argjson out "$out" '
+      {present:true,available:true,
+       complete:(($out.byte_truncated or $out.line_truncated or $out.records_truncated) | not),
+       reason:null,
+       records:[$out.names[] | {name:.}],
+       total:$out.total,
+       shown:($out.names | length),
+       truncated:($out.total - ($out.names | length))}'
+    return 0
+  fi
+  [ "$rc" -eq 124 ] && reason="project registry read timed out" || reason="project registry is unreadable"
+  jq -n --arg reason "$reason" \
+    '{present:true,available:false,complete:false,reason:$reason,records:[],total:0,shown:0,truncated:0}'
+}
+
 bounded_parent_activities_json() {  # <status-file>
   local f=$1 out rc reason script
   if [ ! -f "$f" ]; then
@@ -1361,6 +1464,8 @@ SECONDMATE_CURRENT_JSON=$(secondmate_current_json "$TASKS_JSON") \
   || { echo "fm-fleet-snapshot: registered secondmate aggregation failed" >&2; exit 1; }
 SECONDMATE_LANDED_JSON=$(secondmate_landed_from_current_json "$SECONDMATE_CURRENT_JSON") \
   || { echo "fm-fleet-snapshot: secondmate landed projection failed" >&2; exit 1; }
+PROJECT_REGISTRY_JSON=$(registry_projects_json) \
+  || { echo "fm-fleet-snapshot: project registry projection failed" >&2; exit 1; }
 
 jq -n \
   --arg generated "$SNAPSHOT_NOW" \
@@ -1376,6 +1481,7 @@ jq -n \
   --argjson scout_reports "$SCOUT_REPORTS_JSON" \
   --argjson secondmate_current "$SECONDMATE_CURRENT_JSON" \
   --argjson secondmate_landed "$SECONDMATE_LANDED_JSON" \
+  --argjson project_registry "$PROJECT_REGISTRY_JSON" \
   'def backlog_by_id($id): ($backlog.records[]? | select(.structured == true and .id == $id) | .) // null;
    def task_by_id($id): ($tasks[]? | select(.id == $id) | .) // null;
    def report_kind($id): (task_by_id($id).kind // backlog_by_id($id).kind // "scout");
@@ -1390,6 +1496,7 @@ jq -n \
      scout_reports:($scout_reports | map(. + {kind:report_kind(.id)})),
      secondmate_current:$secondmate_current,
      secondmate_landed:$secondmate_landed,
+     project_registry:$project_registry,
      secondmate_guidance:{
        note:"For kind=secondmate, bearings selects validated structured state from that registered home; parent events and bounded terminal evidence are fallback-only supplements and never current-state authority."
      }
