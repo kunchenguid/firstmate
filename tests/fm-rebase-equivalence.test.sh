@@ -34,6 +34,19 @@ commit_all() {  # <dir> <message>
   git -C "$1" rev-parse HEAD
 }
 
+# commit_mode <dir> <path> <+x|-x> <message>: commit with the path's recorded
+# file mode set explicitly, so a mode scenario means the same thing whatever
+# the checkout's umask or filesystem does with the executable bit.
+commit_mode() {  # <dir> <path> <+x|-x> <message>
+  # The on-disk bit is set as well as the recorded one, so the commit leaves a
+  # clean worktree whether or not the checkout honours core.filemode.
+  chmod "$3" "$1/$2"
+  git_do "$1" add -A
+  git_do "$1" update-index --chmod="$3" -- "$2"
+  git_do "$1" commit -qm "$4"
+  git -C "$1" rev-parse HEAD
+}
+
 # new_repo <name>: a repo whose single commit holds a small file the scenarios
 # then evolve along two independent lines.
 new_repo() {  # <name>
@@ -233,6 +246,65 @@ assert_contains "$OUT" 'dropped-path' 'a vanished binary path must be named with
 assert_contains "$OUT" 'blob.bin' 'the vanished binary path must be named'
 pass 'a binary path that vanished is a drop, not an inability to observe'
 
+# --- refusal: an executable bit the validated change set is lost ------------
+#
+# Every script in this repository must be executable, so a rebase that lands
+# one at 100644 has lost real validated content. A mode change emits only
+# `old mode`/`new mode` lines and no `@@` hunk, so a line-only comparison sees
+# nothing at all and records the path as carried.
+
+REPO=$(new_repo mode-drop)
+B=$(git -C "$REPO" rev-parse HEAD)
+
+printf '#!/usr/bin/env bash\necho new\n' > "$REPO/new.sh"
+V=$(commit_mode "$REPO" new.sh +x 'validated: add an executable script')
+
+git_do "$REPO" checkout -q -b trunk "$B"
+printf '#!/usr/bin/env bash\necho new\n' > "$REPO/new.sh"
+C=$(commit_mode "$REPO" new.sh -x 'candidate: the same script landed non-executable')
+
+run_check "$REPO" "$B" "$V" "$C"
+expect_code 3 "$RC" 'a dropped executable bit must be refused'
+assert_contains "$OUT" 'dropped-mode' 'a lost mode must be named with its own direction'
+assert_contains "$OUT" 'new.sh' 'the path whose mode was lost must be named'
+assert_contains "$OUT" '100755' 'the mode the validated change set must be named'
+pass 'an executable bit the validated change set is validated content'
+
+# The same loss with no content change at all: the validated change only ran
+# chmod, so there is not one line for a content comparison to look at.
+
+REPO=$(new_repo mode-only-drop)
+printf '#!/usr/bin/env bash\necho hi\n' > "$REPO/run.sh"
+B=$(commit_mode "$REPO" run.sh -x 'base: a script that is not executable yet')
+V=$(commit_mode "$REPO" run.sh +x 'validated: make it executable')
+
+git_do "$REPO" checkout -q -b trunk "$B"
+printf 'shared\ntrunk moved on\n' > "$REPO/README.md"
+C=$(commit_all "$REPO" 'candidate: the trunk moved and the chmod never landed')
+
+run_check "$REPO" "$B" "$V" "$C"
+expect_code 3 "$RC" 'a mode-only validated change that is lost must be refused'
+assert_contains "$OUT" 'dropped-mode' 'a mode-only loss must still be named'
+assert_contains "$OUT" 'run.sh' 'the path whose mode-only change was lost must be named'
+pass 'a validated change made entirely of a mode is not silently cleared'
+
+# --- pass: a mode the validated change never touched belongs to the trunk ---
+
+REPO=$(new_repo mode-trunk-owned)
+printf '#!/usr/bin/env bash\necho hi\n' > "$REPO/run.sh"
+B=$(commit_mode "$REPO" run.sh -x 'base: a script that is not executable yet')
+printf '#!/usr/bin/env bash\necho hi\nvalidated line\n' > "$REPO/run.sh"
+V=$(commit_all "$REPO" 'validated: one addition, mode untouched')
+
+git_do "$REPO" checkout -q -b trunk "$B"
+printf '#!/usr/bin/env bash\necho hi\nvalidated line\n' > "$REPO/run.sh"
+C=$(commit_mode "$REPO" run.sh +x 'candidate: the trunk made it executable')
+
+run_check "$REPO" "$B" "$V" "$C"
+expect_code 0 "$RC" 'a mode the validated change never set must not read as loss'
+assert_contains "$OUT" 'REBASE-EQUIVALENCE: PASS' 'a trunk-owned mode must still pass'
+pass 'only a mode the validated change set is required of the candidate'
+
 # --- pass: the trunk independently added a line the change had deleted ------
 #
 # Boilerplate makes this ordinary: the change deletes one `fi` while the trunk
@@ -303,7 +375,7 @@ V=$(commit_all "$REPO" 'validated: one addition')
 
 git_do "$REPO" checkout -q -b trunk "$B"
 printf 'trunk prologue\nalpha\nbravo\ncharlie\ntrunk epilogue\n' > "$REPO/core.sh"
-git_do "$REPO" commit -qam 'trunk: surround the region' || true
+commit_all "$REPO" 'trunk: surround the region' > /dev/null
 printf 'trunk prologue\nalpha\nbravo\ncharlie\nvalidated addition\ntrunk epilogue\n' > "$REPO/core.sh"
 C=$(commit_all "$REPO" 'candidate: validated addition reapplied in its new position')
 
@@ -311,6 +383,41 @@ run_check "$REPO" "$B" "$V" "$C"
 expect_code 0 "$RC" 'a faithful rebase over a moved trunk must pass'
 assert_contains "$OUT" 'REBASE-EQUIVALENCE: PASS' 'a faithful rebase must report PASS'
 pass 'a faithful rebase over a moved trunk still passes'
+
+# --- pass: the same trunk ref given to both base flags -----------------------
+#
+# Both flags take a TRUNK ref, so handing the same one to both must mean the
+# same thing on both sides. Used verbatim, a moved trunk turns every
+# trunk-only line into a removal the validated change never made, and the
+# faithful rebase that carries it is refused as resurrected content.
+
+REPO=$(new_repo shared-trunk-base)
+B=$(git -C "$REPO" rev-parse HEAD)
+
+printf 'alpha\nbravo\ncharlie\nvalidated line\n' > "$REPO/core.sh"
+V=$(commit_all "$REPO" 'validated: one addition')
+
+git_do "$REPO" checkout -q -b trunk "$B"
+printf 'alpha\nbravo\ncharlie\ntrunk only line\n' > "$REPO/core.sh"
+T=$(commit_all "$REPO" 'trunk: one addition of its own')
+printf 'alpha\nbravo\ncharlie\ntrunk only line\nvalidated line\n' > "$REPO/core.sh"
+C=$(commit_all "$REPO" 'candidate: the validated addition replayed onto the moved trunk')
+
+run_check "$REPO" "$T" "$V" "$C" --candidate-base "$T"
+expect_code 0 "$RC" 'the same trunk given to both base flags must mean the same thing'
+assert_contains "$OUT" 'REBASE-EQUIVALENCE: PASS' 'a moved trunk named as both bases must still pass'
+pass 'both base flags take a trunk ref and narrow it to their own head'
+
+# The validated base may then be omitted entirely, which is the form the
+# header documents: the validated head's own base is that same trunk narrowed
+# to the validated head.
+
+RC=0
+OUT=$("$CHECK" --repo "$REPO" --validated-head "$V" \
+  --candidate-head "$C" --candidate-base "$T" 2>&1) || RC=$?
+expect_code 0 "$RC" 'a candidate trunk alone must resolve the validated base too'
+assert_contains "$OUT" 'REBASE-EQUIVALENCE: PASS' 'the derived validated base must report PASS'
+pass 'the candidate trunk alone resolves both bases'
 
 # --- pass: the trunk landed the same content independently ------------------
 #
@@ -606,6 +713,85 @@ run_check "$STALE_WORKER" "$SB" "$SV" 'refs/fm-rebase-equivalence/candidate/5' \
   --candidate-base origin/main
 expect_code 3 "$RC" 'the same comparison against the stale local trunk must diverge'
 pass 'the candidate base comes from the request, so a stale local trunk cannot refuse a faithful rebase'
+
+# --- the validated head comes from the pipeline, never from this clone ------
+#
+# A run commits its own fixes onto its copy of the branch, so the worker's head
+# holds OLDER content. Here the pipeline's accepted fix rewrote a line the
+# branch added - foo(a) became foo(a, b) - and the push carried that faithfully.
+# Comparing the worker's own head reports the pipeline's own fix as dropped
+# content; comparing the head the run record names reports the truth. The
+# pipeline's repository keeps that commit only as a loose object with no ref
+# pointing at it, exactly as a gate whose branch has moved past it does.
+
+PIPE_SRC="$TMP_ROOT/pipeline-src"
+mkdir -p "$PIPE_SRC"
+git -C "$PIPE_SRC" init -q
+printf 'alpha\nbravo\ncharlie\n' > "$PIPE_SRC/core.sh"
+printf 'shared\n' > "$PIPE_SRC/README.md"
+PB=$(commit_all "$PIPE_SRC" 'base')
+printf 'alpha\nbravo\ncharlie\nfoo(a)\n' > "$PIPE_SRC/core.sh"
+commit_all "$PIPE_SRC" 'submitted: the branch as the worker handed it over' > /dev/null
+printf 'alpha\nbravo\ncharlie\nfoo(a, b)\n' > "$PIPE_SRC/core.sh"
+PV=$(commit_all "$PIPE_SRC" 'validated: the pipeline applied its own accepted fix')
+
+git_do "$PIPE_SRC" checkout -q -b pipe-trunk "$PB"
+printf 'shared\ntrunk moved on\n' > "$PIPE_SRC/README.md"
+PT=$(commit_all "$PIPE_SRC" 'trunk: moved on')
+printf 'alpha\nbravo\ncharlie\nfoo(a, b)\n' > "$PIPE_SRC/core.sh"
+PC=$(commit_all "$PIPE_SRC" 'candidate: the validated head replayed onto the moved trunk')
+
+PIPE="$TMP_ROOT/pipeline.git"
+git init -q --bare -b main "$PIPE"
+git_do "$PIPE_SRC" push -q "$PIPE" "$PV:refs/heads/parked" "$PC:refs/heads/fm/work"
+git --git-dir="$PIPE" update-ref -d refs/heads/parked
+
+PIPE_FORGE="$TMP_ROOT/pipeline-forge.git"
+git init -q --bare -b main "$PIPE_FORGE"
+git_do "$PIPE_SRC" push -q "$PIPE_FORGE" "$PT:refs/heads/main" "$PC:refs/pull/3/head"
+
+PIPE_WORKER="$TMP_ROOT/pipeline-worker"
+git clone -q --no-local "$PIPE_FORGE" "$PIPE_WORKER"
+git_do "$PIPE_WORKER" checkout -q -b work "$PB"
+printf 'alpha\nbravo\ncharlie\nfoo(a)\n' > "$PIPE_WORKER/core.sh"
+PW=$(commit_all "$PIPE_WORKER" 'local: the branch as this clone still holds it')
+
+if git -C "$PIPE_WORKER" cat-file -e "$PV^{commit}" 2>/dev/null; then
+  fail 'the fixture must not already hold the validated head locally'
+fi
+
+run_check_pr "$PIPE_WORKER" "$PB" "$PW" 3 --candidate-base origin/main
+expect_code 3 "$RC" "this clone's own head must report the pipeline's fix as a drop"
+assert_contains "$OUT" 'dropped-content' \
+  "the defect must be present when the validated side is read from this clone"
+
+RC=0
+OUT=$("$CHECK" --repo "$PIPE_WORKER" --validated-base "$PB" --validated-head "$PV" \
+  --validated-remote "$PIPE" --candidate-pr 3 --candidate-base origin/main 2>&1) || RC=$?
+expect_code 0 "$RC" 'the head the run record names must clear a faithful push'
+assert_contains "$OUT" 'REBASE-EQUIVALENCE: PASS' \
+  'a pipeline fix that rewrote a validated line must not read as dropped content'
+git -C "$PIPE_WORKER" rev-parse --verify --quiet "refs/fm-rebase-equivalence/validated/$PV" >/dev/null \
+  || fail 'the validated head must be fetched into its own private ref'
+pass 'the validated head is taken from the pipeline, so its own fixes are not read as loss'
+
+RC=0
+OUT=$("$CHECK" --repo "$PIPE_WORKER" --validated-base "$PB" --validated-head HEAD \
+  --validated-remote "$PIPE" --candidate-pr 3 --candidate-base origin/main 2>&1) || RC=$?
+expect_code 2 "$RC" 'a symbolic validated head cannot name a commit on the pipeline side'
+assert_contains "$OUT" 'full commit id' 'the refusal must say what the run record supplies'
+
+ABSENT_OID=$(printf '%s' "$PW" | tr '0-9a-f' '1-9a-f0')
+RC=0
+OUT=$("$CHECK" --repo "$PIPE_WORKER" --validated-base "$PB" --validated-head "$ABSENT_OID" \
+  --validated-remote "$PIPE" --candidate-pr 3 --candidate-base origin/main 2>&1) || RC=$?
+expect_code 2 "$RC" 'a validated head no side holds must be could-not-observe'
+assert_contains "$OUT" 'cannot fetch the validated head' 'the unfetchable validated head must say so'
+assert_not_contains "$OUT" 'REBASE-EQUIVALENCE: PASS' \
+  'an unfetchable validated head must never resolve to something else'
+assert_not_contains "$OUT" 'REBASE-EQUIVALENCE: DROPPED' \
+  'an unfetchable validated head must never resolve to something else'
+pass 'a validated head that cannot be obtained refuses instead of comparing anything'
 
 assert_grep 'GIT_TERMINAL_PROMPT=0' "$CHECK" \
   'every fetch must run non-interactively so a credential prompt cannot swallow the verdict'

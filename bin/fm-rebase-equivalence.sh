@@ -20,6 +20,20 @@
 # A fetch that cannot be made is CANNOT-OBSERVE, never a skip. --candidate-head
 # stays available wherever both heads are already local.
 #
+# WHERE THE VALIDATED HEAD COMES FROM
+# The validated side comes from the pipeline too, never from the worker's own
+# branch. A run commits its own fixes onto its copy of the branch, so the
+# worker's head holds OLDER content, and a fix that REWRITES a line the branch
+# added - foo(a) becoming foo(a, b) - would read as that line being dropped.
+# --validated-remote names the pipeline's repository, which every initialized
+# clone carries as an ordinary local-path remote, and --validated-head then
+# carries the exact commit id the run record names. The commit is fetched from
+# there by object id, which a local-path remote answers even once the branch ref
+# has moved off it. A validated head that cannot be named or fetched is
+# CANNOT-OBSERVE: there is deliberately no fallback to a local ref, because
+# quietly comparing the worker's own head is the defect this flag exists to
+# remove.
+#
 # ONLY FROM THE REPOSITORY THE REQUEST NAMES
 # A request number is unique only within one repository, and every forge
 # publishes the same head namespace for all of them, so a fork request number
@@ -39,6 +53,14 @@
 # CANNOT-OBSERVE. --candidate-base overrides it with a trunk ref for a run that
 # has no request to ask, and --validated-base may then be omitted, since the
 # validated head's own base is the same fork point measured off the same trunk.
+#
+# BOTH BASE FLAGS MEAN THE SAME THING
+# --validated-base and --candidate-base both take a TRUNK ref, and each head's
+# own base is that trunk narrowed to the head with `git merge-base`. Handing the
+# same trunk to both is therefore correct rather than a trap: an exact fork
+# point narrows to itself, so a caller who already knows the fork point loses
+# nothing, while a caller who names a trunk that has since moved is not told
+# that every trunk-only line is content the validated change removed.
 #
 # WHY EACH SIDE IS MEASURED AGAINST ITS OWN BASE
 # `git diff <trunk>..<head>` is the wrong shape: tip-to-tip also reports trunk
@@ -77,7 +99,13 @@
 #     so copies the TRUNK added are never mistaken for a resurrected removal.
 #     Without it, only a line the validated change removed from the path
 #     entirely is judged, because no other reappearance can be attributed to
-#     the rebase rather than to the trunk.
+#     the rebase rather than to the trunk;
+#   - a FILE MODE the validated change set must still be set. A mode is content
+#     too: a script that lands non-executable is broken in exactly the way a
+#     dropped hunk is, and a mode change emits `old mode`/`new mode` lines with
+#     no `@@` hunk at all, so the line comparison alone records it as carried. A
+#     mode the validated change did not touch is left to the trunk, so a chmod
+#     the trunk made on its own is never read as loss.
 #
 # Verdicts are three-valued and only PASS is a pass:
 #   0  PASS            every validated change is carried by the candidate
@@ -89,17 +117,16 @@
 # sees none knows the check did not run.
 #
 # Usage:
-#   fm-rebase-equivalence.sh --repo <dir> --validated-head <ref> \
+#   fm-rebase-equivalence.sh --repo <dir> --validated-head <commit> \
+#     --validated-remote <name-or-url> \
 #     --candidate-pr <url> [--candidate-remote <name-or-url>]
-#   fm-rebase-equivalence.sh --repo <dir> \
-#     --validated-base <ref> --validated-head <ref> \
-#     --candidate-head <ref> [--candidate-base <ref>]
+#   fm-rebase-equivalence.sh --repo <dir> --validated-head <ref> \
+#     --candidate-head <ref> [--validated-base <ref>] [--candidate-base <ref>]
 #
-# --candidate-base takes a trunk ref rather than an exact commit: each head's
-# own base is derived from it with `git merge-base`, so naming the trunk branch
-# still works after it has moved on. Every fetch runs non-interactively, so a
-# remote that wants credentials refuses instead of blocking an unattended
-# worker on a prompt with no verdict line.
+# Either --validated-base or --candidate-base must be given in the local form,
+# since a contribution cannot be measured without a trunk to measure it from.
+# Every fetch runs non-interactively, so a remote that wants credentials refuses
+# instead of blocking an unattended worker on a prompt with no verdict line.
 set -eu
 
 VERDICT_PASS=0
@@ -122,6 +149,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO=
 VALIDATED_BASE=
 VALIDATED_HEAD=
+VALIDATED_REMOTE=
 CANDIDATE_HEAD=
 CANDIDATE_PR=
 CANDIDATE_REMOTE=
@@ -136,11 +164,11 @@ head, each measured against its own base, and refuses when the candidate does
 not carry every content change the validated head made.
 
 Usage:
-  fm-rebase-equivalence.sh --repo <dir> --validated-head <ref> \
+  fm-rebase-equivalence.sh --repo <dir> --validated-head <commit> \
+    --validated-remote <name-or-url> \
     --candidate-pr <url> [--candidate-remote <name-or-url>]
-  fm-rebase-equivalence.sh --repo <dir> \
-    --validated-base <ref> --validated-head <ref> \
-    --candidate-head <ref> [--candidate-base <ref>]
+  fm-rebase-equivalence.sh --repo <dir> --validated-head <ref> \
+    --candidate-head <ref> [--validated-base <ref>] [--candidate-base <ref>]
 
 --candidate-pr fetches the request's head and its base branch from the forge,
 which is where a worker can reach a head the pipeline built and pushed from its
@@ -150,8 +178,16 @@ repository and refused when it is not, because a request number collides across
 repositories. With the base read from the request, --validated-base may be
 omitted and is measured off that same trunk.
 --candidate-remote names a remote or URL to prefer for those fetches.
+--validated-remote names the pipeline's own repository and takes the validated
+head from there rather than from this clone, because a run commits its own
+fixes and this clone's branch therefore holds older content. --validated-head
+must then be the full commit id the run record names, and a head that cannot be
+fetched is could-not-observe rather than a fallback to a local ref.
 --candidate-base names the trunk ref for a run with no request to ask, such as
 a comparison of two local heads.
+Both base flags take a TRUNK ref and narrow it to each head's own fork point
+with git merge-base, so the same trunk may be given to both. In the local form
+one of them is required.
 
 Verdicts (only PASS is a pass):
   0  PASS            every validated change is carried by the candidate
@@ -168,6 +204,7 @@ while [ "$#" -gt 0 ]; do
     --repo) REPO=${2:-}; shift 2 || cannot_observe "--repo needs a value" ;;
     --validated-base) VALIDATED_BASE=${2:-}; shift 2 || cannot_observe "--validated-base needs a value" ;;
     --validated-head) VALIDATED_HEAD=${2:-}; shift 2 || cannot_observe "--validated-head needs a value" ;;
+    --validated-remote) VALIDATED_REMOTE=${2:-}; shift 2 || cannot_observe "--validated-remote needs a value" ;;
     --candidate-head) CANDIDATE_HEAD=${2:-}; shift 2 || cannot_observe "--candidate-head needs a value" ;;
     --candidate-pr) CANDIDATE_PR=${2:-}; shift 2 || cannot_observe "--candidate-pr needs a value" ;;
     --candidate-remote) CANDIDATE_REMOTE=${2:-}; shift 2 || cannot_observe "--candidate-remote needs a value" ;;
@@ -180,7 +217,7 @@ done
 for pair in "repo:$REPO" "validated-head:$VALIDATED_HEAD"; do
   [ -n "${pair#*:}" ] || cannot_observe "missing required --${pair%%:*}"
 done
-if [ -z "$VALIDATED_BASE" ] && [ -z "$CANDIDATE_PR" ]; then
+if [ -z "$VALIDATED_BASE" ] && [ -z "$CANDIDATE_PR" ] && [ -z "$CANDIDATE_BASE" ]; then
   cannot_observe "missing required --validated-base"
 fi
 if [ -n "$CANDIDATE_HEAD" ] && [ -n "$CANDIDATE_PR" ]; then
@@ -227,6 +264,30 @@ repo_identity() {  # <url>
     *) return 1 ;;
   esac
 }
+
+# Fetch the validated head from the pipeline's own repository. A run commits
+# its own fixes onto its copy of the branch, so this clone's branch holds older
+# content and resolving the validated side here would report a fix that
+# REWROTE a validated line as that line being dropped. The caller names the
+# exact commit from the run record, this fetches it by object id, and a fetch
+# that cannot be made is CANNOT-OBSERVE with no fallback to a local ref.
+if [ -n "$VALIDATED_REMOTE" ]; then
+  # A symbolic name would resolve in this clone and hand back exactly the local
+  # head this flag exists to stop trusting, so only a full object id is taken.
+  # An object id is the content, so once that id resolves it names the run
+  # record's commit and nothing else, whether the fetch carried it here or this
+  # clone already held that exact object.
+  case "$VALIDATED_HEAD" in
+    *[!0-9a-fA-F]*)
+      cannot_observe "--validated-remote needs --validated-head to be the full commit id the run record names, not $VALIDATED_HEAD" ;;
+  esac
+  [ "${#VALIDATED_HEAD}" -ge 40 ] \
+    || cannot_observe "--validated-remote needs --validated-head to be the full commit id the run record names, not $VALIDATED_HEAD"
+  VALIDATED_REF="refs/fm-rebase-equivalence/validated/$VALIDATED_HEAD"
+  git_fetch "$VALIDATED_REMOTE" "+$VALIDATED_HEAD:$VALIDATED_REF" \
+    || cannot_observe "cannot fetch the validated head $VALIDATED_HEAD from $VALIDATED_REMOTE"
+  VALIDATED_HEAD=$VALIDATED_REF
+fi
 
 # Fetch the candidate head from the forge. The head the pipeline pushed exists
 # nowhere in the worker's clone, so a check that could only name a local commit
@@ -368,15 +429,24 @@ if [ -n "$CANDIDATE_BASE" ]; then
   [ -n "$CB" ] || cannot_observe "cannot find the candidate's own base under $CANDIDATE_BASE"
 fi
 
+# The validated base is narrowed exactly like the candidate's, so both flags
+# take one shape and the same trunk may be handed to both. Narrowing an exact
+# fork point returns that fork point, so a caller who already knows it is
+# unaffected; a caller who names a trunk that has since moved is spared having
+# every trunk-only line read as content the validated change removed.
+VB_TRUNK=
 if [ -n "$VALIDATED_BASE" ]; then
-  VB=$(resolve "$VALIDATED_BASE") \
+  VB_TRUNK=$(resolve "$VALIDATED_BASE") \
     || cannot_observe "cannot resolve --validated-base: $VALIDATED_BASE"
+  VB_NAME=$VALIDATED_BASE
 else
   [ -n "$CB_TRUNK" ] || cannot_observe "missing required --validated-base"
-  VB=$(git -C "$REPO" merge-base "$CB_TRUNK" "$VH" 2>/dev/null) \
-    || cannot_observe "cannot find the validated head's own base under the request's trunk"
-  [ -n "$VB" ] || cannot_observe "cannot find the validated head's own base under the request's trunk"
+  VB_TRUNK=$CB_TRUNK
+  VB_NAME="the candidate's trunk"
 fi
+VB=$(git -C "$REPO" merge-base "$VB_TRUNK" "$VH" 2>/dev/null) \
+  || cannot_observe "cannot find the validated head's own base under $VB_NAME"
+[ -n "$VB" ] || cannot_observe "cannot find the validated head's own base under $VB_NAME"
 
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/fm-rebase-equiv.XXXXXX") \
   || cannot_observe "cannot create a working directory"
@@ -399,6 +469,16 @@ UNCERTAIN="$WORK/uncertain"
 
 blob_exists() {  # <commit> <path>
   git -C "$REPO" cat-file -e "$1:$2" 2>/dev/null
+}
+
+# The file mode a commit records for a path, empty when the path is absent
+# there. Reports a git failure through its exit status so an unreadable tree is
+# never mistaken for an absent path.
+tree_mode() {  # <commit> <path>
+  local entry
+  entry=$(git -C "$REPO" ls-tree "$1" -- ":(literal)$2" 2>/dev/null) || return 1
+  [ -n "$entry" ] || return 0
+  printf '%s' "${entry%% *}"
 }
 
 # Materialize a blob, or an empty file when the path does not exist there. A
@@ -445,13 +525,32 @@ while IFS= read -r -d '' path; do
     continue
   fi
 
-  # Both sides hold the path. A binary one cannot be compared line by line;
-  # identical blobs are still a sound observation, anything else is reported
-  # rather than assumed carried.
+  # Both sides hold the path, so its mode can be judged. A mode is validated
+  # content: an executable bit the change set and the rebase lost leaves a
+  # script that cannot run, and a mode change emits `old mode`/`new mode` lines
+  # with no `@@` hunk at all, so the line comparison alone records it as
+  # carried. Only a mode the VALIDATED CHANGE set is required, so a chmod the
+  # trunk made on its own is never read as loss.
+  mode_drop=
+  if ! vb_mode=$(tree_mode "$VB" "$path") \
+    || ! vh_mode=$(tree_mode "$VH" "$path") \
+    || ! ch_mode=$(tree_mode "$CH" "$path"); then
+    printf '%s\tthe file mode of this path could not be read\n' "$path" >> "$UNCERTAIN"
+    continue
+  fi
+  if [ -n "$vh_mode" ] && [ "$vh_mode" != "$vb_mode" ] && [ "$ch_mode" != "$vh_mode" ]; then
+    mode_drop="the validated change set mode $vh_mode, the candidate has ${ch_mode:-none}"
+  fi
+
+  # A binary path cannot be compared line by line; identical blobs are still a
+  # sound observation, anything else is reported rather than assumed carried.
   if grep -q '^Binary files ' "$WORK/d" 2>/dev/null; then
     vh_blob=$(git -C "$REPO" rev-parse "$VH:$path" 2>/dev/null || true)
     ch_blob=$(git -C "$REPO" rev-parse "$CH:$path" 2>/dev/null || true)
     if [ -n "$vh_blob" ] && [ "$vh_blob" = "$ch_blob" ]; then
+      if [ -n "$mode_drop" ]; then
+        printf 'dropped-mode\t%s\t%s\n' "$path" "$mode_drop" >> "$DROPS"
+      fi
       continue
     fi
     printf '%s\tbinary path changed by the validated change cannot be compared line by line\n' "$path" >> "$UNCERTAIN"
@@ -560,6 +659,10 @@ while IFS= read -r -d '' path; do
   if [ "$back" -gt 0 ]; then
     printf 'resurrected-content\t%s\t%s line(s) removed by the validated change reappear in the candidate\n' \
       "$path" "$back" >> "$DROPS"
+    continue
+  fi
+  if [ -n "$mode_drop" ]; then
+    printf 'dropped-mode\t%s\t%s\n' "$path" "$mode_drop" >> "$DROPS"
     continue
   fi
 done < "$WORK/paths.z"

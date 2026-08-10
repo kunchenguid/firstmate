@@ -17,6 +17,42 @@ The push step itself is not reachable from this repository.
 `no-mistakes` is a single compiled binary (`~/.no-mistakes/bin/no-mistakes`, 24 MB, v1.40.3 at the date above), and its configuration schema exposes agent selection, timeouts, per-step `auto_fix` counts (including `rebase`), intent extraction, and test-evidence storage - no custom step, pre-push hook, or validation plugin.
 So this repository owns the comparison and the refusal, and the generated no-mistakes ship brief requires a worker to run it before reporting its PR.
 
+## Where the validated head comes from
+
+The worker's own branch head is not the validated content, and the check never falls back to it.
+A run commits its own fixes onto the pipeline's copy of the branch, so the worker's head is the OLDER content: a fix that rewrote a line the branch added, `foo(a)` becoming `foo(a, b)`, would read as that line having been dropped by the push.
+The pipeline names the commit it validated in the structured `branch_sync` object that `no-mistakes axi status` and `no-mistakes axi sync --check` return:
+
+```
+pipeline:
+  run: ""
+  status: ""
+  phase: ""
+  submitted_head: ""
+  current_head: ""
+  pushed_head: ""
+```
+
+`pipeline.current_head` is the pipeline's own head for the run, which is the one that includes every fix commit; `submitted_head` is the head the worker handed over, before any of them.
+
+Those objects are reachable, because the pipeline's repository is an ordinary local-path remote in every initialized clone:
+
+```
+$ git remote -v
+no-mistakes  /home/shane/.no-mistakes/repos/5f306883d81c.git (fetch)
+no-mistakes  /home/shane/.no-mistakes/repos/5f306883d81c.git (push)
+```
+
+`--validated-remote` fetches the named commit from there by object id into `refs/fm-rebase-equivalence/validated/<oid>`.
+A local-path remote answers a bare object id even when no ref points at the commit any more, which is what the gate looks like once its branch has moved past the validated head; the regression suite constructs exactly that state by pushing the validated head to a scratch ref in a bare fixture repository and then deleting the ref.
+Only a full commit id is accepted with that flag, because a symbolic name would resolve in the worker's clone and hand back the local head the flag exists to stop trusting.
+An object id is the content, so once it resolves it names the run record's commit and nothing else, whether the fetch carried it here or this clone already held that exact object; git's own fetch relies on the same identity and treats an already-present object id as satisfied without contacting the remote.
+A head that cannot be named or obtained at all is `CANNOT-OBSERVE`, and there is deliberately no fallback to a local ref.
+
+Sync-then-compare was rejected on evidence.
+`no-mistakes axi sync` moves the local branch TO the pipeline-pushed head with reset semantics, so after syncing the local head IS the candidate and the comparison would be a head compared against itself.
+That trades a false refusal for a structurally vacuous gate, which is worse, and the sync is guarded and legal only when `branch_sync.next_action` offers it, so it cannot be a precondition of a check at all.
+
 ## Where the candidate head comes from
 
 The pushed head is built inside the pipeline's own repository, never in the worker's clone.
@@ -48,7 +84,7 @@ The regression suite constructs that collision rather than reasoning about it: t
 The trunk comes from the request too, never from a local ref.
 Whenever this check matters the trunk HAS moved, since otherwise no rebase would have been needed, so `refs/remotes/origin/<default>` is short of the commit the candidate actually sits on and would measure the removal comparison against the wrong base.
 The base BRANCH is forge metadata rather than a ref, so `gh pr view <url> --json baseRefName` names it and its current tip is then fetched into `refs/fm-rebase-equivalence/base/<n>`; each head's own base is the `git merge-base` of that tip with that head, which is why the branch tip having moved on again does not matter.
-With the trunk in hand the validated head's own base is the same fork point off the same trunk, so `--validated-base` is optional in this form and the worker's instruction is a single command naming only its own `HEAD` and the PR URL.
+With the trunk in hand the validated head's own base is the same fork point off the same trunk, so `--validated-base` is optional in this form and the worker's instruction names only the validated head from the run record, the `no-mistakes` remote it lives on, and the PR URL.
 
 End to end against the live forge, from a scratch clone whose `origin` is a local path and holds no request refs at all:
 
@@ -152,6 +188,17 @@ Requiring only what the change NET ADDED fails open whenever the file already he
 The one relief is a copy the trunk itself removed, which a faithful replay onto that trunk could not have produced either, so with a base the requirement is the lesser of what the validated head holds and what a replay onto that base would produce.
 That relief is what keeps the deliberate clearances intact: content the trunk supplied independently is still content that landed, and a trunk that thinned out a boilerplate line does not read as loss.
 
+Both base flags take a TRUNK ref and narrow it to their own head's fork point with `git merge-base`, so handing the same trunk to both means the same thing on both sides.
+Used verbatim, a moved trunk turns every trunk-only line into a removal the validated change never made, and the faithful rebase that carries that line is then refused as resurrected content.
+Narrowing is idempotent for a caller who already knows the exact fork point, so the two shapes collapse into one without changing any correct invocation, and the validated base may be omitted whenever a candidate trunk is given.
+
+## File modes are content
+
+A mode change emits `old mode` and `new mode` lines with no `@@` hunk at all, so a line comparison alone sees nothing and records the path as carried.
+Every script in `bin/` must be executable and this repository tests file modes elsewhere, so a rebase that lands `bin/fm-new.sh` at 100644 has lost validated content as surely as a dropped hunk, and a chmod with no content edit beside it would otherwise report `PASS` on scripts that cannot run.
+Each footprint path's mode is therefore read from all three commits with `git ls-tree`, and a mode the VALIDATED CHANGE set - one that differs from the mode at its own base, which includes a file it added outright - must still be set at the candidate, reported as `dropped-mode` with both modes named.
+A mode the validated change never touched belongs to the trunk, so a chmod the trunk made on its own is not read as loss.
+
 ## Why the merge result is not the predicate
 
 Screening a landing with `git merge-tree --write-tree <trunk> <head>` is the right tool for asking what a branch does to a trunk, and its exit status is authoritative there.
@@ -173,12 +220,17 @@ Diffing each head against its own base measures only what that head contributes,
 
 ## Regression coverage
 
-`tests/fm-rebase-equivalence.test.sh` (35 assertions) builds every fixture commit by commit rather than running `git rebase`, so a scenario means exactly one thing.
+`tests/fm-rebase-equivalence.test.sh` builds every fixture commit by commit rather than running `git rebase`, so a scenario means exactly one thing, and every fixture commit is allowed to fail the suite rather than being folded silently into the next one.
 
-Refusals: a whole path present at the validated head and absent from the candidate; hunks lost inside a surviving path; a dropped hunk whose lines all already occur in the file, in both count directions; a validated line removal undone, both with and without a candidate base; a validated file deletion resurrected; a binary path the candidate lacks entirely.
+Refusals: a whole path present at the validated head and absent from the candidate; hunks lost inside a surviving path; a dropped hunk whose lines all already occur in the file, in both count directions; a validated line removal undone, both with and without a candidate base; a validated file deletion resurrected; a binary path the candidate lacks entirely; an executable bit the validated change set, both alongside a content change and as a validated change made entirely of a mode.
 Each asserts the exit status, the `DROPPED` verdict, the direction, and the naming of the losing path.
 
-Clearances: a faithful rebase whose validated lines all shifted position because the trunk edited around them; a hunk the trunk landed independently so the rebase had nothing left to apply; a line the trunk added that matches one the validated change deleted; a path whose tracked name globs onto its siblings; content added after validation; whitespace-only churn.
+Clearances: a faithful rebase whose validated lines all shifted position because the trunk edited around them; a hunk the trunk landed independently so the rebase had nothing left to apply; a line the trunk added that matches one the validated change deleted; a path whose tracked name globs onto its siblings; content added after validation; whitespace-only churn; a mode the trunk set on its own that the validated change never touched; the same moved trunk ref given to both base flags, and that trunk given as the candidate base alone with the validated base derived from it.
+
+The validated-head cases build a bare fixture repository standing in for the pipeline's own, holding the validated commit as a loose object with its ref deleted, beside a separate fixture forge that publishes the pushed head.
+The pipeline's accepted fix rewrote a line the branch added, so the same comparison is run twice: against this clone's own head, which reports the pipeline's fix as `dropped-content`, and against the head the run record names, which reports `PASS`.
+Running both is what makes the second one evidence rather than an absent refusal.
+A symbolic `--validated-head` is refused with `--validated-remote`, which is what keeps the worker's own `HEAD` from standing in for the validated content, and an object id no side holds is could-not-observe rather than a comparison of whatever was nearest.
 
 The forge cases keep each candidate only under a request head ref in a bare fixture repository, cloned with `--no-local` so the worker cannot hold those objects for free.
 Any verdict other than could-not-observe there is itself proof the fetch ran: a dropping candidate is refused and a faithful one passes.
@@ -191,4 +243,4 @@ A binary path whose blob is identical is still a sound observation and passes.
 One case pins that every fetch is issued with `GIT_TERMINAL_PROMPT=0`, since a credential prompt would hang with no verdict line rather than refuse.
 A final case asserts every outcome prints a verdict line and exits with that verdict's own status, so a caller can tell "compared and passed" from "never ran".
 
-`tests/fm-brief.test.sh` pins the gate in the generated no-mistakes brief: the script's path, the pass verdict as the only clearance, the `--candidate-pr` form, both `blocked:` reports, and the absence of any instruction to name a pushed head or a trunk from the worker's own clone.
+`tests/fm-brief.test.sh` pins the gate in the generated no-mistakes brief: the script's path, the pass verdict as the only clearance, the `--candidate-pr` and `--validated-remote` forms, the run-record field that names the validated head, both `blocked:` reports, and the absence of any instruction to name a pushed head, a trunk, or a validated head from the worker's own clone.

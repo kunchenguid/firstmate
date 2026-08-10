@@ -376,6 +376,17 @@ test_no_mistakes_dod_pins_rebase_equivalence_gate() {
     "no-mistakes DOD must not name a pushed head the worker's clone cannot hold"
   assert_no_grep "TRUNK=" "$brief" \
     "no-mistakes DOD must not read the trunk from the worker's clone, which is whatever it last fetched"
+  # The validated side is the other half of the same rule: a run commits its
+  # own fixes, so the worker's head is older content and comparing it would
+  # report those fixes as a drop.
+  assert_grep "--validated-remote no-mistakes" "$brief" \
+    "no-mistakes DOD must take the validated head from the pipeline's own repository"
+  assert_grep "branch_sync" "$brief" \
+    "no-mistakes DOD must name the run record that reports the validated head"
+  assert_no_grep "--validated-head HEAD" "$brief" \
+    "no-mistakes DOD must not compare the worker's own head as the validated content"
+  assert_no_grep "Your local branch never moved during the run" "$brief" \
+    "no-mistakes DOD must not claim the local branch holds the validated content"
   assert_grep "blocked: the pushed PR dropped validated content" "$brief" \
     "no-mistakes DOD must block on a dropping rebase instead of reporting the PR"
   assert_grep "that is never a pass" "$brief" \

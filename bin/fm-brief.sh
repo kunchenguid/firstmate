@@ -402,15 +402,19 @@ Two firstmate-specific rules layer on top of that guidance:
 Before you report the PR, confirm the push did not silently change what was validated.
 The pipeline rebases your branch onto its target immediately before pushing, and a rebase that drops content opens a PR misrepresenting the code the pipeline actually judged.
 That has happened twice, and no pipeline signal reported it either time.
+Both heads it compares come from the pipeline's side; neither is read from your clone.
 The pipeline builds the pushed head inside its own repository and those objects never reach your clone, so the check fetches that head, and the trunk it was rebased onto, from the forge by pull request URL rather than reading either from your clone.
 Do not substitute a local ref for them: your clone's trunk is whatever it last fetched, and by the time this matters the real trunk has moved.
-Run it with the PR's full URL:
+The validated head is not your own \`HEAD\` either, because the pipeline commits its fixes onto its copy of the branch and yours therefore holds older content; comparing yours would report a pipeline fix that rewrote one of your lines as content the push dropped.
+Read the commit the pipeline validated from the run record instead - the \`pipeline.current_head\` field of the structured \`branch_sync\` object that \`no-mistakes axi status\` and \`no-mistakes axi sync --check\` return - and let the check fetch it from the pipeline's own repository, which an initialized clone carries as the \`no-mistakes\` remote:
 
     $FM_ROOT/bin/fm-rebase-equivalence.sh --repo . \\
-      --validated-head HEAD \\
+      --validated-head {branch_sync.pipeline.current_head} \\
+      --validated-remote no-mistakes \\
       --candidate-pr {the PR url}
 
-Your local branch never moved during the run, so its head is the content you are entitled to see in the PR; work the pipeline added afterwards is growth, which this check does not refuse.
+If the run record names no validated head, append \`blocked: the run record names no validated head to compare\` and stop; never substitute your own \`HEAD\` for it.
+Work the pipeline added after that head is growth, which this check does not refuse.
 Only \`REBASE-EQUIVALENCE: PASS\` clears the PR to be reported.
 On \`DROPPED\`, append \`blocked: the pushed PR dropped validated content in {paths it named}\` and stop.
 On \`CANNOT-OBSERVE\`, append \`blocked: {what it could not compare}\` and stop; that is never a pass.
