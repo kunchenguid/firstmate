@@ -480,8 +480,17 @@ secondmate_sync() {
     done
   }
 
+  secondmate_pending_sync_journals_exist() {
+    local journal
+    [ -d "$SECOND_MATE_SYNC_PENDING_DIR" ] || return 1
+    for journal in "$SECOND_MATE_SYNC_PENDING_DIR"/*.pending; do
+      [ -f "$journal" ] && [ ! -L "$journal" ] && return 0
+    done
+    return 1
+  }
+
   secondmate_retry_pending_sync_journals() {
-    [ -d "$SECOND_MATE_SYNC_PENDING_DIR" ] || return 0
+    secondmate_pending_sync_journals_exist || return 0
     fm_dependency_with_host_lock \
       secondmate_recover_pending_sync_journals_under_host_lock || true
     case "$FM_DEPENDENCY_LOCK_OUTCOME" in

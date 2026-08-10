@@ -825,6 +825,48 @@ test_bootstrap_sync_journal_recovery_uses_host_lock() {
   pass "T8j sync journal recovery batches under one host checkout lock"
 }
 
+test_bootstrap_empty_sync_queue_skips_host_lock() {
+  local w fakebin ready release holder out i started elapsed
+  w=$(new_world nudge-journal-empty)
+  mkdir -p "$w/home/state/.secondmate-sync-pending"
+  fakebin=$(make_fake_toolchain "$w")
+  ready="$w/lock.ready"
+  release="$w/lock.release"
+
+  bash -c '
+    . "$1"
+    hold_dependency_lock() {
+      : > "$1"
+      while [ ! -e "$2" ]; do sleep 0.02; done
+    }
+    fm_dependency_with_host_lock hold_dependency_lock "$2" "$3"
+  ' _ "$ROOT/bin/fm-dependency-lock-lib.sh" "$ready" "$release" \
+    > "$w/lock-holder.out" 2>&1 &
+  holder=$!
+  for ((i = 0; i < 100; i++)); do
+    [ -e "$ready" ] && break
+    kill -0 "$holder" 2>/dev/null || break
+    sleep 0.02
+  done
+  if [ ! -e "$ready" ]; then
+    wait "$holder" 2>/dev/null || true
+    fail "empty sync queue host-lock holder did not start"
+  fi
+
+  started=$(date +%s)
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_DEPS_LOCK_TIMEOUT=4 FM_SEND_SETTLE=0 \
+    "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+  elapsed=$(( $(date +%s) - started ))
+  : > "$release"
+  wait "$holder" || fail "empty sync queue host-lock holder failed"
+
+  [ "$elapsed" -le 2 ] || fail "empty sync queue waited on the host lock"
+  assert_not_contains "$out" "NUDGE_SECONDMATES:" \
+    "empty sync queue reported lock contention"
+  pass "T8l empty sync journal queues do not acquire the host lock"
+}
+
 test_bootstrap_retires_obsolete_sync_journals() {
   local w c1 c2 fakebin journal marker retired replacement out retired_record retired_nudge
   w=$(new_world nudge-journal-retired)
@@ -1227,6 +1269,7 @@ test_bootstrap_nudge_retry_defers_on_busy_transaction
 test_bootstrap_preserves_prior_nudge_before_new_update
 test_bootstrap_supersedes_interrupted_update_journals
 test_bootstrap_sync_journal_recovery_uses_host_lock
+test_bootstrap_empty_sync_queue_skips_host_lock
 test_bootstrap_retires_obsolete_sync_journals
 test_bootstrap_nudge_retry_refuses_changed_home
 test_nudge_retry_uses_fresh_herdr_endpoint_after_respawn
