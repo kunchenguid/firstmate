@@ -42,15 +42,19 @@
 # under FM_GH_CI_STATE_ROOT (default
 # $XDG_STATE_HOME/firstmate/gh-ci-fallback, falling back to
 # $HOME/.local/state/firstmate/gh-ci-fallback). FM_GH_CI_NOW_EPOCH exists only
-# for deterministic boundary tests. A deadline, malformed evidence, API
+# for deterministic boundary tests. FM_GH_CI_ACTIONS_ONLY_REPOS is a
+# comma-separated allowlist of exact owner/repository names whose merge gates
+# are explicitly known to contain GitHub Actions checks only. A deadline,
+# malformed evidence, API
 # failure, or head drift becomes a typed synthetic failed check instead of an
 # unreadable command failure that no-mistakes can warn about indefinitely. The
 # state resets when the head changes or a terminal verdict is reached.
 #
 # The PR head is read again after pagination and any drift refuses the fallback
 # result, so a verdict can never describe a head that is no longer current.
-# This evidence covers GitHub Actions only; it cannot reconstruct third-party
-# check providers hidden behind the forbidden check-runs API.
+# This evidence covers GitHub Actions only; without exact repository membership
+# in FM_GH_CI_ACTIONS_ONLY_REPOS, an otherwise green Actions result fails closed
+# because it cannot reconstruct third-party providers hidden behind check-runs.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -112,10 +116,14 @@ WORKFLOWS_ERR=$(mktemp "${TMPDIR:-/tmp}/fm-gh-ci-workflows-err.XXXXXX")
 JOBS_OUT=$(mktemp "${TMPDIR:-/tmp}/fm-gh-ci-jobs-out.XXXXXX")
 JOBS_ERR=$(mktemp "${TMPDIR:-/tmp}/fm-gh-ci-jobs-err.XXXXXX")
 RUN_IDS=$(mktemp "${TMPDIR:-/tmp}/fm-gh-ci-run-ids.XXXXXX")
+HEAD_ERR=$(mktemp "${TMPDIR:-/tmp}/fm-gh-ci-head-err.XXXXXX")
+NORMALIZER_OUT=$(mktemp "${TMPDIR:-/tmp}/fm-gh-ci-normalizer-out.XXXXXX")
+NORMALIZER_ERR=$(mktemp "${TMPDIR:-/tmp}/fm-gh-ci-normalizer-err.XXXXXX")
 # shellcheck disable=SC2329 # Registered by the EXIT trap below.
 cleanup() {
   rm -f -- "$ORIGINAL_OUT" "$ORIGINAL_ERR" "$FALLBACK_OUT" "$FALLBACK_ERR" \
-    "$WORKFLOWS_OUT" "$WORKFLOWS_ERR" "$JOBS_OUT" "$JOBS_ERR" "$RUN_IDS"
+    "$WORKFLOWS_OUT" "$WORKFLOWS_ERR" "$JOBS_OUT" "$JOBS_ERR" "$RUN_IDS" \
+    "$HEAD_ERR" "$NORMALIZER_OUT" "$NORMALIZER_ERR"
 }
 trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
@@ -149,26 +157,50 @@ fallback_shape_parse "$@" || replay_original
 
 emit_typed_failure() {
   local label=$1 state=$2
-  python3 - "$JSON_FIELDS" "$label" "$state" <<'PY'
-import json
-import sys
+  if [ "$JSON_FIELDS" = name,state,bucket,completedAt,link ]; then
+    printf '[{"name":"Firstmate CI fallback - %s","state":"%s","bucket":"fail","completedAt":"","link":""}]\n' \
+      "$label" "$state"
+  else
+    printf '[{"name":"Firstmate CI fallback - %s","state":"%s","bucket":"fail","completedAt":""}]\n' \
+      "$label" "$state"
+  fi
+}
 
-fields, label, state = sys.argv[1:]
-check = {
-    "name": f"Firstmate CI fallback - {label}",
-    "state": state,
-    "bucket": "fail",
-    "completedAt": "",
+if [ -n "${FM_GH_CI_STATE_ROOT:-}" ]; then
+  STATE_ROOT=$FM_GH_CI_STATE_ROOT
+elif [ -n "${XDG_STATE_HOME:-}" ]; then
+  STATE_ROOT="$XDG_STATE_HOME/firstmate/gh-ci-fallback"
+elif [ -n "${HOME:-}" ]; then
+  STATE_ROOT="$HOME/.local/state/firstmate/gh-ci-fallback"
+else
+  echo "fm-gh-ci-fallback: configuration-error: no deadline state root is available" >&2
+  emit_typed_failure "configuration error" configuration_error
+  exit 0
+fi
+SAFE_REPO=${REPO//[^A-Za-z0-9_.-]/_}
+STATE_PATH="$STATE_ROOT/${SAFE_REPO}-pr-${NUMBER}.json"
+
+finish_terminal() {
+  local label=$1 state=$2
+  if ! rm -f -- "$STATE_PATH"; then
+    echo "fm-gh-ci-fallback: state-error: cannot clear terminal deadline state" >&2
+    label="state evidence"
+    state=state_error
+  fi
+  emit_typed_failure "$label" "$state"
+  exit 0
 }
-if fields.endswith(",link"):
-    check["link"] = ""
-print(json.dumps([check], separators=(",", ":")))
-PY
-}
+
+if ! command -v python3 >/dev/null 2>&1 || ! python3 -c '' >/dev/null 2>&1; then
+  echo "fm-gh-ci-fallback: dependency-error: python3 is unavailable" >&2
+  cat "$ORIGINAL_ERR" >&2
+  finish_terminal "dependency error" dependency_error
+fi
 
 read_exact_pr_head() {
-  local head
-  head=$("$REAL_GH" api -X GET "repos/$REPO/pulls/$NUMBER" --jq .head.sha 2>/dev/null) || return 1
+  local error_path=$1 head
+  : > "$error_path"
+  head=$("$REAL_GH" api -X GET "repos/$REPO/pulls/$NUMBER" --jq .head.sha 2> "$error_path") || return 1
   head=${head//$'\r'/}
   head=${head//$'\n'/}
   fm_pr_head_valid "$head" || return 1
@@ -176,11 +208,11 @@ read_exact_pr_head() {
 }
 
 PR_HEAD=
-if ! PR_HEAD=$(read_exact_pr_head); then
+if ! PR_HEAD=$(read_exact_pr_head "$HEAD_ERR"); then
   echo "fm-gh-ci-fallback: api-error: exact PR head lookup failed" >&2
+  cat "$HEAD_ERR" >&2
   cat "$ORIGINAL_ERR" >&2
-  emit_typed_failure "API error" api_error
-  exit 0
+  finish_terminal "API error" api_error
 fi
 
 # gh's built-in jq evaluator applies these expressions to each Actions response
@@ -232,8 +264,7 @@ if [ "$WORKFLOWS_STATUS" -ne 0 ]; then
   echo "fm-gh-ci-fallback: api-error: active workflow inventory lookup failed" >&2
   cat "$WORKFLOWS_ERR" >&2
   cat "$ORIGINAL_ERR" >&2
-  emit_typed_failure "API error" api_error
-  exit 0
+  finish_terminal "API error" api_error
 fi
 
 RUNS_ENDPOINT="repos/$REPO/actions/runs?head_sha=$PR_HEAD&per_page=100"
@@ -244,11 +275,11 @@ if [ "$RUNS_STATUS" -ne 0 ]; then
   echo "fm-gh-ci-fallback: api-error: exact-head workflow-runs lookup failed" >&2
   cat "$FALLBACK_ERR" >&2
   cat "$ORIGINAL_ERR" >&2
-  emit_typed_failure "API error" api_error
-  exit 0
+  finish_terminal "API error" api_error
 fi
 
-python3 - "$FALLBACK_OUT" > "$RUN_IDS" <<'PY'
+RUN_ID_STATUS=0
+python3 - "$FALLBACK_OUT" > "$RUN_IDS" 2> "$NORMALIZER_ERR" <<'PY' || RUN_ID_STATUS=$?
 import json
 import sys
 
@@ -264,6 +295,12 @@ with open(sys.argv[1], encoding="utf-8") as stream:
             seen.add(run_id)
             print(run_id)
 PY
+if [ "$RUN_ID_STATUS" -ne 0 ]; then
+  echo "fm-gh-ci-fallback: dependency-error: python3 run-id extraction failed" >&2
+  cat "$NORMALIZER_ERR" >&2
+  cat "$ORIGINAL_ERR" >&2
+  finish_terminal "dependency error" dependency_error
+fi
 
 JOBS_STATUS=0
 while IFS= read -r RUN_ID; do
@@ -281,45 +318,63 @@ if [ "$JOBS_STATUS" -ne 0 ]; then
   echo "fm-gh-ci-fallback: api-error: workflow jobs lookup failed" >&2
   cat "$JOBS_ERR" >&2
   cat "$ORIGINAL_ERR" >&2
-  emit_typed_failure "API error" api_error
-  exit 0
+  finish_terminal "API error" api_error
 fi
 
 PR_HEAD_AFTER=
-if ! PR_HEAD_AFTER=$(read_exact_pr_head); then
+if ! PR_HEAD_AFTER=$(read_exact_pr_head "$HEAD_ERR"); then
   echo "fm-gh-ci-fallback: api-error: exact PR head recheck failed" >&2
+  cat "$HEAD_ERR" >&2
   cat "$ORIGINAL_ERR" >&2
-  emit_typed_failure "API error" api_error
-  exit 0
+  finish_terminal "API error" api_error
 fi
 if [ "$PR_HEAD_AFTER" != "$PR_HEAD" ]; then
   echo "fm-gh-ci-fallback: head-drift: PR head changed during workflow-runs lookup" >&2
-  emit_typed_failure "head changed" head_drift
-  exit 0
+  finish_terminal "head changed" head_drift
 fi
 
 MAX_PENDING_SECONDS=${FM_GH_CI_MAX_PENDING_SECONDS:-3600}
-NOW_EPOCH=${FM_GH_CI_NOW_EPOCH:-$(date +%s)}
+if [ -n "${FM_GH_CI_NOW_EPOCH:-}" ]; then
+  NOW_EPOCH=$FM_GH_CI_NOW_EPOCH
+elif command -v date >/dev/null 2>&1 && NOW_EPOCH=$(date +%s); then
+  :
+else
+  echo "fm-gh-ci-fallback: dependency-error: date is unavailable" >&2
+  finish_terminal "dependency error" dependency_error
+fi
 case "$MAX_PENDING_SECONDS" in
-  '' | *[!0-9]*) echo "fm-gh-ci-fallback: invalid pending deadline configuration" >&2; exit 2 ;;
+  '' | *[!0-9]*)
+    echo "fm-gh-ci-fallback: invalid pending deadline configuration" >&2
+    finish_terminal "configuration error" configuration_error
+    ;;
 esac
 case "$NOW_EPOCH" in
-  '' | *[!0-9]*) echo "fm-gh-ci-fallback: invalid pending deadline configuration" >&2; exit 2 ;;
+  '' | *[!0-9]*)
+    echo "fm-gh-ci-fallback: invalid pending deadline configuration" >&2
+    finish_terminal "configuration error" configuration_error
+    ;;
 esac
-STATE_ROOT=${FM_GH_CI_STATE_ROOT:-${XDG_STATE_HOME:-$HOME/.local/state}/firstmate/gh-ci-fallback}
 
+ACTIONS_ONLY_AUTHORIZED=0
+case ",${FM_GH_CI_ACTIONS_ONLY_REPOS:-}," in
+  *",$REPO,"*) ACTIONS_ONLY_AUTHORIZED=1 ;;
+esac
+
+NORMALIZER_STATUS=0
 python3 - "$WORKFLOWS_OUT" "$FALLBACK_OUT" "$JOBS_OUT" "$REPO" "$NUMBER" "$PR_HEAD" \
-  "$STATE_ROOT" "$MAX_PENDING_SECONDS" "$NOW_EPOCH" "$JSON_FIELDS" <<'PY'
+  "$STATE_PATH" "$MAX_PENDING_SECONDS" "$NOW_EPOCH" "$JSON_FIELDS" "$ACTIONS_ONLY_AUTHORIZED" \
+  > "$NORMALIZER_OUT" 2> "$NORMALIZER_ERR" <<'PY' || NORMALIZER_STATUS=$?
 import json
 import os
-import re
 import sys
 
-workflows_path, runs_path, jobs_path, repo, number_raw, head, state_root, max_raw, now_raw, fields = sys.argv[1:]
+workflows_path, runs_path, jobs_path, repo, number_raw, head, state_path, max_raw, now_raw, fields, actions_only_raw = sys.argv[1:]
 number = int(number_raw)
 max_pending = int(max_raw)
 now = int(now_raw)
 include_link = fields.endswith(",link")
+actions_only_authorized = actions_only_raw == "1"
+state_root = os.path.dirname(state_path)
 
 
 class EvidenceError(Exception):
@@ -367,11 +422,7 @@ def classify(status, conclusion):
         return "pending", status or "pending"
     elif conclusion == "success":
         return "pass", conclusion
-    elif conclusion == "cancelled":
-        return "cancel", conclusion
-    elif conclusion in {"skipped", "neutral", "stale"}:
-        return "skipping", conclusion
-    elif conclusion in {"failure", "timed_out", "action_required", "startup_failure"}:
+    elif conclusion in {"failure", "timed_out", "action_required", "startup_failure", "cancelled", "skipped", "neutral", "stale"}:
         return "fail", conclusion
     return "pending", conclusion or "pending"
 
@@ -391,7 +442,7 @@ def map_run(workflow, run):
 
 
 def map_successful_run_jobs(workflow, run, jobs):
-    ranked = {"pass": 0, "pending": 1, "skipping": 2, "cancel": 3, "fail": 4}
+    ranked = {"pass": 0, "pending": 1, "fail": 2}
     mapped = []
     for job in jobs:
         bucket, state = classify(job["status"], job.get("conclusion"))
@@ -522,6 +573,12 @@ try:
 
     evidence_kind = "pending" if any(check["bucket"] == "pending" for check in checks) else "terminal"
     reason = "one or more exact PR-head workflow runs or jobs are still pending" if evidence_kind == "pending" else ""
+    if all(check["bucket"] == "pass" for check in checks) and not actions_only_authorized:
+        evidence_kind = "terminal"
+        reason = "no repository-level authority proves that required CI evidence is entirely in GitHub Actions"
+        checks, reason = diagnostic(
+            "incomplete", reason, bucket="fail", name="incomplete evidence", state="incomplete_evidence"
+        )
 except EvidenceError as error:
     evidence_kind = error.kind
     checks, reason = diagnostic(error.kind, str(error))
@@ -532,9 +589,6 @@ except Exception as error:
         "normalizer", reason, bucket="fail", name="normalizer error", state="normalizer_error"
     )
     print(f"fm-gh-ci-fallback: normalizer-error: {reason}", file=sys.stderr)
-
-safe_repo = re.sub(r"[^A-Za-z0-9_.-]+", "_", repo)
-state_path = os.path.join(state_root, f"{safe_repo}-pr-{number}.json")
 
 try:
     if evidence_kind == "terminal":
@@ -576,7 +630,23 @@ except Exception as error:
     reason = f"cannot manage deadline state: {type(error).__name__}: {error}"
     checks, reason = diagnostic("state", reason, bucket="fail")
     print(f"fm-gh-ci-fallback: state-error: {reason}", file=sys.stderr)
+    try:
+        os.unlink(state_path)
+    except FileNotFoundError:
+        pass
+    except Exception as cleanup_error:
+        reason = f"cannot clear terminal deadline state: {type(cleanup_error).__name__}: {cleanup_error}"
+        checks, reason = diagnostic("state", reason, bucket="fail")
+        print(f"fm-gh-ci-fallback: state-error: {reason}", file=sys.stderr)
 
 print(json.dumps(checks, separators=(",", ":")))
 PY
+if [ "$NORMALIZER_STATUS" -ne 0 ]; then
+  echo "fm-gh-ci-fallback: dependency-error: python3 normalizer failed" >&2
+  cat "$NORMALIZER_ERR" >&2
+  cat "$ORIGINAL_ERR" >&2
+  finish_terminal "dependency error" dependency_error
+fi
+cat "$NORMALIZER_ERR" >&2
+cat "$NORMALIZER_OUT"
 exit 0

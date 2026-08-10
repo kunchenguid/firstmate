@@ -88,6 +88,8 @@ The daemon resolves its environment from the login shell, so a precedence verdic
 The credential route also requires `sqlite3` on that resolved `PATH`, because the no-mistakes repository registration is the target authority.
 Pending, missing, or ambiguous fallback evidence has a one-hour deadline by default.
 `FM_GH_CI_MAX_PENDING_SECONDS` changes that deadline, and `FM_GH_CI_STATE_ROOT` changes the machine-local deadline record root whose default is `$XDG_STATE_HOME/firstmate/gh-ci-fallback`.
+`FM_GH_CI_ACTIONS_ONLY_REPOS` is a comma-separated allowlist of exact `owner/repository` names whose required merge evidence is explicitly known to come entirely from GitHub Actions.
+An otherwise green fallback result becomes a typed terminal failure unless its repository is present in that allowlist.
 The script header owns the exact environment and state mechanics.
 
 ## Limits worth knowing before installing
@@ -100,7 +102,7 @@ An implicit repository target for `pr create` or `pr edit` is accepted only from
 Interactive `pr checks` output, every failure outside that `statusCheckRollup` permission denial, and every other invocation remain the real `gh` behavior.
 The fallback can observe GitHub Actions workflow runs only; it is not equivalent to readable check-runs for repositories whose merge gate depends on a third-party check provider.
 The narrow credential also cannot read branch-protection required-check configuration or repository rulesets on the verified private repository.
-The fallback therefore uses every active Actions workflow as a conservative required set and never infers that an absent active workflow is optional.
+The fallback therefore uses every active Actions workflow as a conservative required set, never infers that an absent active workflow is optional, and requires the repository-level Actions-only authority before reporting green.
 This preserves fail-closed required-check semantics, but a repository with active scheduled, dispatch-only, deployment, or other non-PR workflows cannot reach green through the fallback until the credential boundary or upstream monitor supplies an exact readable required-workflow set.
 
 The daemon caches the `PATH` value it captured at startup, but `PATH` directories are scanned at exec time and `fm-gh.sh` reads `config/gh-credential` on every routed invocation.
