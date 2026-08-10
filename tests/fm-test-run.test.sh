@@ -95,6 +95,7 @@ init_changed_fixture_repo() {
   chmod +x "$repo/bin/fm-test-run.sh"
   for script in \
     fm-brief.test.sh \
+    fm-ask-user-authority.test.sh \
     fm-sandbox-bridge-lib.test.sh \
     fm-workspace-placement.test.sh \
     fm-workspace-execution-config.test.sh \
@@ -105,6 +106,7 @@ init_changed_fixture_repo() {
     fm-secondmate-safety.test.sh \
     fm-session-start.test.sh \
     fm-afk-pi-herdr-return-e2e.test.sh \
+    fm-backend.test.sh \
     fm-secondmate-lifecycle-e2e.test.sh \
     fm-pr-merge.test.sh \
     fm-pi-watch-extension.test.sh \
