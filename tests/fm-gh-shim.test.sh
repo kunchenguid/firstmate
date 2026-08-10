@@ -94,8 +94,14 @@ if [ "${1:-}" = pr ] && [ "${2:-}" = checks ]; then
     403-rate-limit)
       echo "HTTP 403: API rate limit exceeded (check-runs)" >&2
       ;;
+    403-deep-path)
+      echo "GraphQL: Resource not accessible by personal access token (node.statusCheckRollup.nodes.0.commit.statusCheckRollup.contexts.nodes.0)" >&2
+      ;;
     403-other-api)
       echo "GraphQL: Resource not accessible by personal access token (organization.t000)" >&2
+      ;;
+    403-lookalike)
+      echo "GraphQL: Resource not accessible by personal access token (node.statusCheckRollupSummary.nodes.0)" >&2
       ;;
     *)
       echo "HTTP ${FM_TEST_CHECKS_ERROR}: simulated non-authorization failure" >&2
@@ -240,6 +246,37 @@ test_ci_403_falls_back_to_exact_head_green_without_privileged_token() {
   pass "a check-runs 403 reaches a green exact-head workflow verdict without the privileged token"
 }
 
+test_ci_deeper_denial_path_falls_back_to_exact_head_green() {
+  local case_dir real_dir shim_dir head out status jq_bin
+  case_dir="$TMP_ROOT/ci-deep-path"
+  real_dir="$case_dir/real"
+  shim_dir="$case_dir/shim"
+  head=9999999999999999999999999999999999999999
+  jq_bin=$(command -v jq) || fail "jq is required to exercise gh's built-in --jq contract"
+  make_fake_ci_gh "$real_dir"
+  write_ci_pages "$case_dir/exact.json" exact-head completed '"success"'
+  write_ci_pages "$case_dir/stale.json" stale-head completed '"failure"'
+  mkdir -p "$shim_dir"
+  ln -sf "$SHIM" "$shim_dir/gh"
+
+  status=0
+  out=$(FAKE_GH_LOG="$case_dir/gh.calls" FM_TEST_PR_HEAD="$head" \
+    FM_TEST_CHECKS_ERROR=403-deep-path \
+    FM_TEST_WORKFLOW_PAGES="$case_dir/exact.json" FM_TEST_STALE_PAGES="$case_dir/stale.json" \
+    FM_TEST_JQ="$jq_bin" GITHUB_TOKEN=narrow-ci-token PATH="$shim_dir:$real_dir:$PATH" \
+    gh pr checks 7 --repo o/r --json name,state,bucket,completedAt 2>&1) || status=$?
+
+  expect_code 0 "$status" "deeper denial path exact-head workflow fallback"
+  assert_contains "$out" '"name":"exact-head"' \
+    "a deeper denial path did not reach the workflow run belonging to the exact PR head"
+  assert_contains "$out" '"bucket":"pass"' \
+    "a deeper denial path did not reach the green exact-head workflow verdict"
+  assert_grep "argv:api -X GET repos/o/r/actions/runs?head_sha=$head&per_page=100 --paginate --slurp" \
+    "$case_dir/gh.calls" \
+    "a deeper denial path did not filter workflow runs by the exact PR head SHA"
+  pass "a denial naming statusCheckRollup deeper in its path still reaches the exact-head verdict"
+}
+
 test_ci_403_falls_back_to_exact_head_red() {
   local case_dir real_dir shim_dir head out status jq_bin
   case_dir="$TMP_ROOT/ci-red"
@@ -371,11 +408,12 @@ test_ci_unrelated_failures_preserve_original_result() {
   mkdir -p "$shim_dir"
   ln -sf "$SHIM" "$shim_dir/gh"
 
-  for error in 500 403-rate-limit 403-other-api; do
+  for error in 500 403-rate-limit 403-other-api 403-lookalike; do
     case "$error" in
       500) expected="HTTP 500" ;;
       403-rate-limit) expected="HTTP 403: API rate limit exceeded" ;;
       403-other-api) expected="GraphQL: Resource not accessible by personal access token (organization.t000)" ;;
+      403-lookalike) expected="GraphQL: Resource not accessible by personal access token (node.statusCheckRollupSummary.nodes.0)" ;;
     esac
     status=0
     out=$(FAKE_GH_LOG="$case_dir/gh.calls" FM_TEST_PR_HEAD="$head" \
@@ -861,6 +899,7 @@ test_pr_option_values_cannot_mask_origin_target
 test_pr_create_with_repo_preserves_caller_target
 test_pr_edit_without_origin_refuses_before_credential_route
 test_ci_403_falls_back_to_exact_head_green_without_privileged_token
+test_ci_deeper_denial_path_falls_back_to_exact_head_green
 test_ci_403_falls_back_to_exact_head_red
 test_ci_zero_exact_head_runs_stays_pending
 test_ci_maps_cancel_skipping_and_pending_across_pages
