@@ -177,6 +177,20 @@ fm_worker_process_ppid() {
   printf '%s' "$ppid"
 }
 
+fm_worker_process_comm() {
+  local pid=$1 comm
+  case "$pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  if [ -r "/proc/$pid/comm" ]; then
+    comm=$(cat "/proc/$pid/comm" 2>/dev/null) || return 1
+  else
+    comm=$(ps -o comm= -p "$pid" 2>/dev/null | tr -d '[:space:]')
+  fi
+  [ -n "$comm" ] || return 1
+  printf '%s' "$comm"
+}
+
 fm_worker_secondmate_home_proven() {
   local task owner home owner_real home_real marker
   task=${_FM_WORKER_INITIAL_AGENT_TASK:-}
@@ -225,19 +239,19 @@ fm_worker_secondmate_ancestry_proven() {
 }
 
 fm_worker_primary_ancestry_clear() {
-  local pid=$$ ppid env depth=0
+  local expected_root=${1:-} pid=${BASHPID:-$$} ppid env parent_comm depth=0
   while [ "$pid" -gt 1 ] && [ "$depth" -lt 256 ]; do
-    if [ -r "/proc/$pid/environ" ]; then
-      env=$( { tr '\0' '\n' < "/proc/$pid/environ"; } 2>/dev/null ) || return 1
-      printf '%s\n' "$env" | grep -Eq '^(FM_AGENT_ROLE|FM_AGENT_TASK|FM_AGENT_OWNER_HOME)=.+$' && return 1
-      ppid=$(awk '/^PPid:/ {print $2; exit}' "/proc/$pid/status" 2>/dev/null)
-    else
-      return 1
-    fi
-    case "$ppid" in
-      ''|*[!0-9]*) return 1 ;;
-    esac
+    env=$(fm_worker_process_environ "$pid") || return 1
+    printf '%s\n' "$env" | grep -Eq '^(FM_AGENT_ROLE|FM_AGENT_TASK|FM_AGENT_OWNER_HOME)=.+$' && return 1
+    ppid=$(fm_worker_process_ppid "$pid") || return 1
     [ "$ppid" != "$pid" ] || return 1
+    if [ "$depth" -eq 0 ] && [ -n "$expected_root" ]; then
+      [ "$ppid" -gt 1 ] || return 1
+      parent_comm=$(fm_worker_process_comm "$ppid") || return 1
+      case "$parent_comm" in
+        init|systemd|launchd|tini|runit|s6-svscan|supervisord) return 1 ;;
+      esac
+    fi
     pid=$ppid
     depth=$((depth + 1))
   done
@@ -271,7 +285,7 @@ fm_worker_primary_origin_proven() {
   [ -d "$home_real/state" ] || return 1
   [ -d "$home_real/data" ] || return 1
   [ -d "$home_real/config" ] || return 1
-  fm_worker_primary_ancestry_clear || return 1
+  fm_worker_primary_ancestry_clear "$root_real" || return 1
   for var in $FM_WORKER_ISOLATION_HOME_VARS STATE; do
     case "$var" in
       FM_HOME) expected=$home_real ;;

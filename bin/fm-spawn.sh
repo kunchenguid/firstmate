@@ -246,6 +246,8 @@ SPAWN_SLOT_LOCK_HELD=0
 SPAWN_SLOT_LOCK_PATH=
 SPAWN_HOME_LOCK=
 SPAWN_HOME_LOCK_HELD=0
+SPAWN_PARENT_HOME_LOCK=
+SPAWN_PARENT_HOME_LOCK_HELD=0
 SPAWN_WORKTREE_PATH=
 SPAWN_WORKTREE_LEASE_PROOF=
 SPAWN_ARTIFACTS_CLEAN=0
@@ -354,6 +356,15 @@ spawn_release_home_lock() {
   return 1
 }
 
+spawn_release_parent_home_lock() {
+  [ "${SPAWN_PARENT_HOME_LOCK_HELD:-0}" = 1 ] || return 0
+  if fm_lock_release "$SPAWN_PARENT_HOME_LOCK"; then
+    SPAWN_PARENT_HOME_LOCK_HELD=0
+    return 0
+  fi
+  return 1
+}
+
 spawn_release_task_lock() {
   [ "${SPAWN_TASK_LOCK_HELD:-0}" = 1 ] || return 0
   if fm_lock_release "$SPAWN_TASK_LOCK"; then
@@ -378,6 +389,15 @@ spawn_acquire_home_lock() {
   fm_lock_acquire_wait "$lock_path" || return 1
   SPAWN_HOME_LOCK=$lock_path
   SPAWN_HOME_LOCK_HELD=1
+}
+
+spawn_acquire_parent_home_lock() {
+  local lock_home=$1 lock_path
+  [ -d "$lock_home" ] || return 1
+  lock_path=$(fm_config_inherit_lock_path "$lock_home") || return 1
+  fm_lock_acquire_wait "$lock_path" || return 1
+  SPAWN_PARENT_HOME_LOCK=$lock_path
+  SPAWN_PARENT_HOME_LOCK_HELD=1
 }
 
 spawn_abort_artifacts_cleanup() {
@@ -588,6 +608,9 @@ spawn_abort_cleanup() {
   fi
   if [ "${SPAWN_HOME_LOCK_HELD:-0}" = 1 ]; then
     spawn_release_home_lock || true
+  fi
+  if [ "${SPAWN_PARENT_HOME_LOCK_HELD:-0}" = 1 ]; then
+    spawn_release_parent_home_lock || true
   fi
   if [ "${SPAWN_TASK_LOCK_HELD:-0}" = 1 ]; then
     spawn_release_task_lock || true
@@ -1098,6 +1121,10 @@ if [ "$KIND" = secondmate ]; then
   [ -n "$FIRSTMATE_HOME" ] || { echo "error: no firstmate home supplied or registered for $ID" >&2; exit 1; }
   PROJ_ABS=$(validate_firstmate_home_for_spawn "$ID" "$FIRSTMATE_HOME")
   WT="$PROJ_ABS"
+  if ! spawn_acquire_parent_home_lock "$FM_HOME"; then
+    echo "error: could not acquire the parent-home spawn lock for $ID" >&2
+    exit 1
+  fi
   if ! spawn_acquire_home_lock "$PROJ_ABS"; then
     echo "error: could not acquire the per-home spawn lock for $ID" >&2
     exit 1
@@ -1980,6 +2007,10 @@ if [ "$SPAWN_HOME_LOCK_HELD" = 1 ]; then
   spawn_release_home_lock \
     || echo "warning: $ID launched but its per-home spawn lock $SPAWN_HOME_LOCK could not be released; the exit cleanup will retry" >&2
 fi
+if [ "$SPAWN_PARENT_HOME_LOCK_HELD" = 1 ]; then
+  spawn_release_parent_home_lock \
+    || echo "warning: $ID launched but its parent-home spawn lock $SPAWN_PARENT_HOME_LOCK could not be released; the exit cleanup will retry" >&2
+fi
 if [ "$SPAWN_TASK_LOCK_HELD" = 1 ]; then
   spawn_release_task_lock \
     || echo "warning: $ID launched but its task lock $SPAWN_TASK_LOCK could not be released; the exit cleanup will retry" >&2
@@ -1987,6 +2018,7 @@ fi
 if [ "$HERDR_LABEL_LOCK_HELD" = 0 ] \
    && [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" = 0 ] \
    && [ "$SPAWN_HOME_LOCK_HELD" = 0 ] \
+   && [ "$SPAWN_PARENT_HOME_LOCK_HELD" = 0 ] \
    && [ "$SPAWN_TASK_LOCK_HELD" = 0 ]; then
   trap - EXIT
 fi

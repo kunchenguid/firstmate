@@ -293,6 +293,7 @@ test_primary_ancestry_refuses_unreadable_process_environment() {
       esac
       builtin [ "$@"
     }
+    ps() { return 1; }
     fm_worker_primary_ancestry_clear
   ' _ "$ROOT/bin/fm-worker-isolation-lib.sh"; then
     status=0
@@ -317,6 +318,45 @@ test_primary_ancestry_refuses_any_inherited_worker_marker() {
   fi
   expect_code 1 "$status" "an inherited task marker must block primary ancestry proof"
   pass "primary proof refuses any inherited worker declaration marker"
+}
+
+test_reparented_markerless_worker_is_refused() {
+  local result="$TMP_ROOT/reparented-markerless.result" parent status out
+  (
+    FM_AGENT_ROLE=crewmate FM_AGENT_TASK="reparented-$RUN_TAG" \
+    FM_AGENT_OWNER_HOME="$TMP_ROOT/worker-parent" \
+    bash -c '
+      (
+        sleep 0.2
+        exec env -u FM_AGENT_ROLE -u FM_AGENT_TASK -u FM_AGENT_OWNER_HOME \
+          -u FM_HOME -u FM_ROOT -u FM_ROOT_OVERRIDE -u FM_STATE_OVERRIDE \
+          -u FM_DATA_OVERRIDE -u FM_PROJECTS_OVERRIDE -u FM_CONFIG_OVERRIDE \
+          -u FM_PENDING_REPLY_DIR_OVERRIDE -u STATE FM_HOME="$1" FM_ROOT_OVERRIDE="$1" \
+          bash -c '\''
+            . "$2"
+            if fm_worker_refuse_primary_operation reparented-markerless; then
+              echo allowed > "$3"
+            else
+              echo refused > "$3"
+            fi
+          '\'' _ "$1" "$2" "$3"
+      ) >/dev/null 2>&1 &
+    ' _ "$ROOT" "$ROOT/bin/fm-worker-isolation-lib.sh" "$result"
+  ) >/dev/null 2>&1 &
+  parent=$!
+  wait "$parent"
+  status=1
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    if [ -f "$result" ]; then
+      status=0
+      break
+    fi
+    sleep 0.1
+  done
+  [ "$status" -eq 0 ] || fail "the reparented markerless worker did not report a refusal"
+  out=$(cat "$result")
+  [ "$out" = refused ] || fail "a reparented markerless worker was accepted as primary"
+  pass "a reparented markerless worker is refused without a primary launch attestation"
 }
 
 test_unreadable_task_start_proof_remains_contested() {
@@ -1460,6 +1500,7 @@ test_markerless_worker_is_refused_at_primary_cwd
 test_forged_primary_role_is_refused_from_worker_ancestry
 test_primary_ancestry_refuses_unreadable_process_environment
 test_primary_ancestry_refuses_any_inherited_worker_marker
+test_reparented_markerless_worker_is_refused
 test_unreadable_task_start_proof_remains_contested
 test_task_pid_index_distinguishes_complete_empty_from_incomplete_scan
 test_task_pid_index_ignores_foreign_uid_processes
