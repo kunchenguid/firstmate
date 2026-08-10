@@ -413,6 +413,7 @@ EOF
     --mode no-mistakes --yolo off 2>&1)
   status=$?
   expect_code 0 "$status" "initial Cursor spawn should succeed: $out"
+  printf '%s\n' 'divergent live hook' > "$wt/.cursor/hooks/fm-busy-turnend.sh"
   out=$(run_cursor_relaunch "$home" "$wt" "$fakebin" "$id" 2>&1)
   status=$?
   expect_code 0 "$status" "same-Cursor relaunch should succeed: $out"
@@ -421,6 +422,26 @@ EOF
   assert_present "$wt/.cursor/hooks/fm-busy-turnend.sh" \
     "same-Cursor relaunch failed to install its replacement hook script"
   pass "same-Cursor relaunch restores before replacing hook wiring"
+}
+
+test_cursor_restore_recreates_removed_preexisting_hook_script() {
+  local dir="$TMP_ROOT/restore-removed-script" wt="$TMP_ROOT/restore-removed-script/wt"
+  local state="$TMP_ROOT/restore-removed-script/state"
+  mkdir -p "$wt/.cursor/hooks" "$state"
+  printf '%s\n' '{"version":1,"hooks":{}}' > "$wt/.cursor/hooks.json"
+  printf '%s\n' 'pre-existing user hook' > "$wt/.cursor/hooks/fm-busy-turnend.sh"
+  printf '%s\n' 'pre-existing user hook' > "$dir/expected-hook.sh"
+  fm_control_cursor_hooks_backup "$wt" "$state" removed
+  printf '%s\n' '{"version":1,"hooks":{"stop":[{"command":".cursor/hooks/fm-busy-turnend.sh idle-stop"}]}}' \
+    > "$wt/.cursor/hooks.json"
+  printf '%s\n' 'firstmate generated hook' > "$wt/.cursor/hooks/fm-busy-turnend.sh"
+  fm_control_cursor_hooks_record_installed "$wt" "$state" removed \
+    "$wt/.cursor/hooks.json" "$wt/.cursor/hooks/fm-busy-turnend.sh"
+  rm -f "$wt/.cursor/hooks/fm-busy-turnend.sh"
+  fm_control_cursor_hooks_restore "$wt" "$state" removed
+  cmp -s "$dir/expected-hook.sh" "$wt/.cursor/hooks/fm-busy-turnend.sh" \
+    || fail "Cursor restore did not recreate the removed pre-existing hook script"
+  pass "Cursor restoration recreates a removed pre-existing hook script"
 }
 
 test_spawn_abort_restores_cursor_hooks() {
@@ -478,6 +499,8 @@ EOF
   printf '%s\n' '{not-json' > "$case_dir/expected-hooks.json"
   cmp -s "$case_dir/expected-hooks.json" "$wt/.cursor/hooks.json" \
     || fail "malformed Cursor hooks.json was modified"
+  assert_absent "$home/state/$id.busy-gen" \
+    "malformed Cursor hooks.json left its busy generation armed"
   pass "malformed Cursor hooks fail before writing artifacts"
 }
 
@@ -517,6 +540,7 @@ test_cursor_hook_restore_preserves_user_hook_edits
 test_cursor_hook_backup_is_atomic
 test_spawn_abort_retains_cursor_backups_when_restore_fails
 test_same_cursor_relaunch_preserves_preexisting_hook_script
+test_cursor_restore_recreates_removed_preexisting_hook_script
 test_spawn_abort_restores_cursor_hooks
 test_cursor_hooks_reject_parent_symlinks
 test_cursor_malformed_hooks_fail_before_writing

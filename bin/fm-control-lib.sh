@@ -285,6 +285,7 @@ fm_control_cursor_hooks_restore() {  # <worktree> <state-dir> <id>
   [ ! -e "$hooks_dir" ] || [ -d "$hooks_dir" ] || return 1
   for path in "$wt/.cursor/hooks.json" "$wt/.cursor/hooks/fm-busy-turnend.sh"; do
     [ ! -L "$path" ] || return 1
+    [ ! -e "$path" ] || [ -f "$path" ] || return 1
     if [ "$(basename "$path")" = hooks.json ]; then
       backup="$state/$id.cursor-hooks.json"
     else
@@ -301,7 +302,11 @@ fm_control_cursor_hooks_restore() {  # <worktree> <state-dir> <id>
       backup="$state/$id.cursor-fm-busy-turnend.sh"
     fi
     installed="$state/$id.cursor-$(basename "$path").installed"
-    if [ -f "$installed" ] && [ -f "$path" ] && cmp -s "$path" "$installed"; then
+    if [ ! -e "$path" ]; then
+      if [ -e "$backup" ]; then
+        cp -p -- "$backup" "$path" || return 1
+      fi
+    elif cmp -s "$path" "$installed"; then
       if [ -e "$backup" ]; then
         cp -p -- "$backup" "$path" || return 1
       else
@@ -364,6 +369,12 @@ if changed:
         temporary = handle.name
     os.replace(temporary, path)
 PY
+    elif [ "$(basename "$path")" = fm-busy-turnend.sh ]; then
+      if [ -e "$backup" ]; then
+        cp -p -- "$backup" "$path" || return 1
+      else
+        return 1
+      fi
     fi
   done
   fm_control_cursor_hooks_forget "$state" "$id"

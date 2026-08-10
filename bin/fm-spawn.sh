@@ -2348,6 +2348,12 @@ if [ "$KIND" != secondmate ]; then
         exit 1
       }
       [ "$RELAUNCH" -ne 1 ] || RELAUNCH_REPLACEMENT_BUSY_GEN=$BUSY_GEN
+      if [ "$HARNESS" = cursor ] && [ "$RELAUNCH" -ne 1 ]; then
+        CURSOR_WIRING_PENDING=1
+        CURSOR_WIRING_BUSY_GEN=$BUSY_GEN
+        CURSOR_WIRING_STATE=$STATE_REAL
+        CURSOR_WIRING_WT=$WT
+      fi
       ;;
     kimi*)
       # Standalone Kimi stays unknown until fm_busy_kimi_verified opens on a
@@ -2420,12 +2426,6 @@ with open(destination, "w", encoding="utf-8") as handle:
     json.dump(document, handle, separators=(",", ":"))
     handle.write("\n")
 PY
-      if [ "$RELAUNCH" -ne 1 ]; then
-        CURSOR_WIRING_PENDING=1
-        CURSOR_WIRING_BUSY_GEN=$BUSY_GEN
-        CURSOR_WIRING_STATE=$STATE_REAL
-        CURSOR_WIRING_WT=$WT
-      fi
       fm_control_cursor_hooks_backup "$WT" "$STATE_REAL" "$ID" || {
         echo "error: existing Cursor hooks.json is not a safe regular file" >&2
         exit 1

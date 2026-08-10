@@ -42,15 +42,25 @@ case "${1:-}" in
     fi
     cat "$COMPOSER" 2>/dev/null; exit 0 ;;
   send-keys)
-    shift; is_enter=0
+    shift; is_enter=0; literal=
     while [ "$#" -gt 0 ]; do
-      case "$1" in -t) shift ;; -l) ;; Enter) is_enter=1 ;; esac; shift
+      case "$1" in
+        -t) shift ;;
+        -l) shift; literal=${1:-} ;;
+        Enter) is_enter=1 ;;
+      esac
+      shift
     done
+    if [ "${FM_FAKE_CURSOR_FLOW:-0}" = 1 ] && [ -n "$literal" ]; then
+      printf '╭────────────────────╮\n│ → fix              │\n╰────────────────────╯\n' > "$COMPOSER"
+    fi
     if [ "$is_enter" = 1 ]; then
       [ -z "${FM_FAKE_SENT:-}" ] || printf 'Enter\n' >> "$FM_FAKE_SENT"
       if [ -n "${FM_FAKE_SWALLOW:-}" ] && [ -f "$FM_FAKE_SWALLOW" ]; then
         [ "${FM_FAKE_PERSIST_SWALLOW:-0}" = 1 ] || rm -f "$FM_FAKE_SWALLOW"
         [ "${FM_FAKE_APPEND_BUSY:-0}" != 1 ] || printf '✻ Working…\n' >> "$COMPOSER"
+      elif [ "${FM_FAKE_CURSOR_FLOW:-0}" = 1 ]; then
+        printf '╭────────────────────╮\n│ → Add a follow-up  │\n╰────────────────────╯\n' > "$COMPOSER"
       else
         printf '╭─────╮\n│ >   │\n╰─────╯\n' > "$COMPOSER"
       fi
@@ -172,6 +182,30 @@ test_idle_pane_composer_clears_first_try() {
     fm_tmux_submit_enter_core "win" 3 0.05 > "$vfile" 2>/dev/null
   [ "$(cat "$vfile")" = empty ] || fail "idle-pane with cleared composer should return empty, got '$(cat "$vfile")'"
   pass "fm_tmux_submit_enter_core: idle pane clears composer on first Enter - returns empty as before"
+}
+
+test_cursor_submit_clears_to_idle_placeholder() {
+  local dir fakebin composer sent vfile
+  dir="$TMP_ROOT/cursor-clear"
+  fakebin=$(make_submit_mock "$dir")
+  composer="$dir/composer"
+  sent="$dir/sent.log"
+  vfile="$dir/verdict"
+  printf '╭────────────────────╮\n│ → Add a follow-up  │\n╰────────────────────╯\n' > "$composer"
+  : > "$sent"
+  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_SENT="$sent" \
+    FM_FAKE_CURSOR_FLOW=1 FM_COMPOSER_IDLE_RE='^Type a message\.\.\.|^Add a follow-up$' \
+    fm_tmux_submit_core "win" fix 2 0 0 > "$vfile" 2>/dev/null
+  [ "$(cat "$vfile")" = empty ] \
+    || fail "Cursor submit should confirm its idle placeholder, got '$(cat "$vfile")'"
+  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" \
+    FM_COMPOSER_IDLE_RE='^Type a message\.\.\.|^Add a follow-up$' \
+    fm_tmux_composer_state "win" > "$vfile" 2>/dev/null
+  [ "$(cat "$vfile")" = empty ] \
+    || fail "Cursor idle composer should remain structurally proven empty"
+  [ "$(grep -c '^Enter$' "$sent" 2>/dev/null || true)" -eq 1 ] \
+    || fail "Cursor submit should stop after the first acknowledged Enter"
+  pass "fm_tmux_submit_core: Cursor placeholder confirms cleared delivery"
 }
 
 test_busy_pane_unknown_stays_unknown() {
@@ -333,6 +367,7 @@ test_wrapped_continuation_retries_swallowed_enter
 test_placeholder_like_bare_input_retries_swallowed_enter
 test_busy_pane_composer_clears_first_try
 test_idle_pane_composer_clears_first_try
+test_cursor_submit_clears_to_idle_placeholder
 test_busy_pane_unknown_stays_unknown
 test_failed_baseline_capture_keeps_busy_unknown_unconfirmed
 test_busy_pane_ambiguous_pending_retries_without_conversion
