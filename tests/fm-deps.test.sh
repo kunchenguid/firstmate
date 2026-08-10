@@ -587,26 +587,39 @@ test_host_lock_override_rejects_unrelated_directory() {
 }
 
 test_host_lock_defaults_to_stable_account_runtime() {
-  local fixture account expected first second host
+  local fixture account expected first second host fakebin hostname_state
   fixture="$TMP_ROOT/host-lock-runtime"
   account="$fixture/account"
+  fakebin=$(fm_fakebin "$fixture")
+  hostname_state="$fixture/hostname"
   mkdir -p "$account"
   chmod 700 "$account"
   host=$(fm_dependency_host_key) || fail "host identity could not be resolved"
   expected="$account/.firstmate/runtime/hosts/$host/firstmate-deps-$UID"
+  printf '%s\n' '#!/usr/bin/env bash' \
+    'case "${1:-}" in' \
+    '  -s) printf "Linux\n" ;;' \
+    '  -n) cat "$FM_DEPS_TEST_HOSTNAME" ;;' \
+    '  *) exit 1 ;;' \
+    'esac' > "$fakebin/uname"
+  chmod +x "$fakebin/uname"
 
   (
     fm_dependency_account_home() { printf '%s\n' "$account"; }
-    first=$(FM_DEPS_HOST_LOCK_DIR= XDG_RUNTIME_DIR="$fixture/xdg-one" \
+    printf 'host-one\n' > "$hostname_state"
+    first=$(PATH="$fakebin:$PATH" FM_DEPS_TEST_HOSTNAME="$hostname_state" \
+      FM_DEPS_HOST_LOCK_DIR= XDG_RUNTIME_DIR="$fixture/xdg-one" \
       TMPDIR=/tmp HOME="$fixture/home-one" fm_dependency_host_lock_dir) || exit 1
-    second=$(FM_DEPS_HOST_LOCK_DIR= XDG_RUNTIME_DIR="$fixture/xdg-two" \
+    printf 'host-two\n' > "$hostname_state"
+    second=$(PATH="$fakebin:$PATH" FM_DEPS_TEST_HOSTNAME="$hostname_state" \
+      FM_DEPS_HOST_LOCK_DIR= XDG_RUNTIME_DIR="$fixture/xdg-two" \
       TMPDIR="$fixture/unsafe-tmp" HOME="$fixture/home-two" \
       fm_dependency_host_lock_dir) || exit 1
     [ "$first" = "$expected" ] && [ "$second" = "$expected" ] || exit 2
     FM_DEPS_HOST_LOCK_DIR= fm_dependency_ensure_host_lock_dir || exit 3
   ) || fail "caller-specific runtime variables changed the dependency lock path"
   [ -d "$expected" ] || fail "stable account dependency lock directory is absent"
-  pass "host lock fallback is stable across caller environments"
+  pass "host lock fallback is stable across hostnames and caller environments"
 }
 
 test_host_lock_identity_probes_are_bounded() {
@@ -666,6 +679,9 @@ test_prepared_remote_update_journal_retries_before_nudge() {
     'printf "synced: %s\n" "$FM_DEPS_TEST_REMOTE_COMMIT"' \
     > "$root/bin/fm-on.sh"
   printf '%s\n' '#!/usr/bin/env bash' \
+    '[ "$FM_ON_EXPECTED_HOST" = remote.example ] || exit 94' \
+    '[ "$FM_ON_EXPECTED_HOME" = /srv/firstmate-remote ] || exit 95' \
+    '[ "$FM_ON_EXPECTED_ROOT" = /srv/firstmate-root ] || exit 96' \
     'printf "%s\n" "$1" >> "$FM_DEPS_TEST_SEND_LOG"' \
     > "$root/bin/fm-send.sh"
   chmod +x "$root/bin/fm-on.sh" "$root/bin/fm-send.sh"
@@ -810,6 +826,55 @@ test_invalid_pending_action_directory_stops_run() {
   pass "invalid pending action directories stop dependency checks"
 }
 
+test_check_only_reports_actions_without_processing_them() {
+  local fixture pending marker events out
+  fixture="$TMP_ROOT/check-only-pending-actions"
+  pending="$fixture/state/.fm-deps-pending"
+  marker="$pending/firstmate-update-secondmate-remote.pending"
+  events="$fixture/events.log"
+  mkdir -p "$fixture/bin" "$pending"
+  chmod 700 "$pending"
+  FM_UPDATE_ACTION_DIR="$pending" \
+    fm_update_action_write_secondmate prepared remote /srv/firstmate-remote \
+      "" "" 1 remote.example /srv/firstmate-root
+  printf '%s\n' '#!/usr/bin/env bash' \
+    'printf "updated\n" >> "$FM_DEPS_TEST_EVENTS"' > "$fixture/bin/fm-on.sh"
+  printf '%s\n' '#!/usr/bin/env bash' \
+    'printf "sent\n" >> "$FM_DEPS_TEST_EVENTS"' > "$fixture/bin/fm-send.sh"
+  chmod +x "$fixture/bin/fm-on.sh" "$fixture/bin/fm-send.sh"
+
+  out=$(
+    FM_ROOT="$fixture"
+    FM_HOME="$fixture"
+    FM_STATE_OVERRIDE="$fixture/state"
+    FM_DEPS_TEST_EVENTS="$events"
+    CHECK_ONLY=1
+    FAILURES=0
+    UPDATES=0
+    DEFERRED=0
+    AVAILABLE=0
+    check_release_tool() { :; }
+    check_apt_package() { :; }
+    check_npm_tool() { :; }
+    check_herdr() { :; }
+    check_node() { :; }
+    check_zellij() { :; }
+    check_shellcheck_pin() { :; }
+    check_github_actions() { :; }
+    check_firstmate() { :; }
+    run_dependency_check_body
+  )
+  assert_contains "$out" \
+    "DEFER: dependency check - Firstmate post-update actions remain pending; rerun without --check" \
+    "check-only mode did not report pending Firstmate reconciliation"
+  assert_contains "$out" \
+    "SUMMARY: 0 update(s) available; 0 completed; 1 deferred; 0 check/upgrade failure(s)" \
+    "check-only pending reconciliation was not counted as deferred"
+  assert_present "$marker" "check-only mode cleared a pending remote update journal"
+  assert_absent "$events" "check-only mode executed pending remote work"
+  pass "check-only mode reports pending actions without processing them"
+}
+
 test_firstmate_actions_are_durable_and_retry_every_target() {
   local fixture log out status pending nudge one_home one_commit replacement before after
   local manifest_contents
@@ -904,7 +969,7 @@ test_firstmate_actions_are_durable_and_retry_every_target() {
 }
 
 test_remote_secondmate_actions_use_shared_retry_markers() {
-  local fixture log marker startup_marker startup_home startup_commit out status
+  local fixture log marker startup_marker startup_home startup_commit out status before after
   fixture="$TMP_ROOT/firstmate-remote-action"
   log="$fixture/send.log"
   marker="$fixture/state/.secondmate-nudge-pending/remote.pending"
@@ -914,6 +979,7 @@ test_remote_secondmate_actions_use_shared_retry_markers() {
     printf 'kind=secondmate\n'
     printf 'home=/srv/firstmate-remote\n'
     printf 'remote_host=remote.example\n'
+    printf 'remote_root=/srv/firstmate-root\n'
   } > "$fixture/state/remote.meta"
   startup_home=$(create_firstmate_action_home "$fixture" startup)
   register_firstmate_action_target "$fixture" startup "$startup_home"
@@ -922,6 +988,9 @@ test_remote_secondmate_actions_use_shared_retry_markers() {
     AGENTS.md "$FM_SECOND_MATE_NUDGE_MESSAGE" 0
   # shellcheck disable=SC2016
   printf '%s\n' '#!/usr/bin/env bash' \
+    '[ "$FM_ON_EXPECTED_HOST" = remote.example ] || exit 91' \
+    '[ "$FM_ON_EXPECTED_HOME" = /srv/firstmate-remote ] || exit 92' \
+    '[ "$FM_ON_EXPECTED_ROOT" = /srv/firstmate-root ] || exit 93' \
     'printf '\''%s|%s\n'\'' "$1" "$2" >> "$FM_DEPS_TEST_LOG"' \
     '[ "${FM_DEPS_TEST_SEND_FAIL:-0}" -eq 0 ]' > "$fixture/bin/fm-send.sh"
   chmod +x "$fixture/bin/fm-send.sh"
@@ -930,22 +999,27 @@ test_remote_secondmate_actions_use_shared_retry_markers() {
   assert_grep "target.remote.remote-host=remote.example" \
     "$fixture/state/.fm-deps-pending/firstmate-actions.pending" \
     "remote action inventory omitted its original placement"
+  assert_grep "target.remote.remote-root=/srv/firstmate-root" \
+    "$fixture/state/.fm-deps-pending/firstmate-actions.pending" \
+    "remote action inventory omitted its original root"
   {
     printf 'kind=secondmate\n'
     printf 'home=/srv/firstmate-remote\n'
-    printf 'remote_host=replacement.example\n'
+    printf 'remote_host=remote.example\n'
+    printf 'remote_root=/srv/replacement-root\n'
   } > "$fixture/state/remote.meta"
   out=$(FM_ROOT="$fixture" FM_HOME="$fixture" FM_DEPS_TEST_LOG="$log" \
     process_pending_firstmate_actions 2>&1)
   status=$?
-  [ "$status" -ne 0 ] || fail "remote placement change rebound the pending action"
-  assert_absent "$log" "remote placement change delivered the pending action"
+  [ "$status" -ne 0 ] || fail "remote root change rebound the pending action"
+  assert_absent "$log" "remote root change delivered the pending action"
   assert_present "$fixture/state/.fm-deps-pending/firstmate-actions.pending" \
     "remote placement change discarded the original action inventory"
   {
     printf 'kind=secondmate\n'
     printf 'home=/srv/firstmate-remote\n'
     printf 'remote_host=remote.example\n'
+    printf 'remote_root=/srv/firstmate-root\n'
   } > "$fixture/state/remote.meta"
   out=$(FM_ROOT="$fixture" FM_HOME="$fixture" FM_DEPS_TEST_LOG="$log" \
     FM_DEPS_TEST_SEND_FAIL=1 process_pending_firstmate_actions 2>&1)
@@ -959,8 +1033,31 @@ test_remote_secondmate_actions_use_shared_retry_markers() {
   assert_grep "remote=1" "$marker" "remote retry marker lost its placement identity"
   assert_grep "remote_host=remote.example" "$marker" \
     "remote retry marker lost its host identity"
+  assert_grep "remote_root=/srv/firstmate-root" "$marker" \
+    "remote retry marker lost its root identity"
   assert_grep "home=/srv/firstmate-remote" "$marker" \
     "remote retry marker lost its home identity"
+
+  before=$(wc -l < "$log")
+  {
+    printf 'kind=secondmate\n'
+    printf 'home=/srv/firstmate-remote\n'
+    printf 'remote_host=remote.example\n'
+    printf 'remote_root=/srv/replacement-root\n'
+  } > "$fixture/state/remote.meta"
+  out=$(FM_ROOT="$fixture" FM_HOME="$fixture" FM_DEPS_TEST_LOG="$log" \
+    process_pending_firstmate_actions 2>&1)
+  status=$?
+  after=$(wc -l < "$log")
+  [ "$status" -ne 0 ] || fail "remote root change accepted a stale retry marker: $out"
+  [ "$after" -eq "$before" ] || fail "stale remote retry was delivered through a replacement root"
+  assert_present "$marker" "remote root change discarded the original retry marker"
+  {
+    printf 'kind=secondmate\n'
+    printf 'home=/srv/firstmate-remote\n'
+    printf 'remote_host=remote.example\n'
+    printf 'remote_root=/srv/firstmate-root\n'
+  } > "$fixture/state/remote.meta"
 
   FM_ROOT="$fixture" FM_HOME="$fixture" FM_DEPS_TEST_LOG="$log" \
     process_pending_firstmate_actions
@@ -1175,7 +1272,7 @@ test_unread_instructions_stop_dependency_mutations() {
   out=$(PATH="$fakebin:$PATH" FM_HOME="$fixture" FM_ROOT_OVERRIDE="$fixture" \
     FM_STATE_OVERRIDE="$fixture/state" FM_DEPS_SOURCE_ONLY=0 \
     FM_DEPS_HOST_LOCK_DIR="$fixture/firstmate-deps-$UID" FM_DEPS_TEST_PROBE_LOG="$log" \
-    bash "$DEPS" --check 2>&1)
+    bash "$DEPS" 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "invalid pending reread allowed the checker to continue"
   assert_contains "$out" "required Firstmate instruction reread remains incomplete" \
@@ -1301,6 +1398,7 @@ test_host_lock_defaults_to_stable_account_runtime
 test_host_lock_identity_probes_are_bounded
 test_host_lock_first_creation_race_is_revalidated
 test_invalid_pending_action_directory_stops_run
+test_check_only_reports_actions_without_processing_them
 test_firstmate_actions_are_durable_and_retry_every_target
 test_remote_secondmate_actions_use_shared_retry_markers
 test_prepared_remote_update_journal_retries_before_nudge

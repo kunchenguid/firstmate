@@ -40,12 +40,60 @@ fm_remote_inherit_generation_next() { # <state-dir> <id>
   printf '%s\n' "$next"
 }
 
-fm_secondmate_nudge_write() { # <state> <id> <home> <commit> <instructions> <message> <remote:0|1> [owner] [remote-host] [replace|create]
+fm_secondmate_nudge_value() {
+  local marker=$1 key=$2
+  [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+  awk -v key="$key" '
+    index($0, key "=") == 1 {
+      count += 1
+      value = substr($0, length(key) + 2)
+    }
+    END {
+      if (count != 1) exit 1
+      print value
+    }
+  ' "$marker"
+}
+
+fm_secondmate_remote_nudge_matches() {
+  local marker=$1 id=$2 home=$3 remote_host=$4 remote_root=$5 owner=${6:-} value
+  value=$(fm_secondmate_nudge_value "$marker" id 2>/dev/null) || return 1
+  [ "$value" = "$id" ] || return 1
+  value=$(fm_secondmate_nudge_value "$marker" selector 2>/dev/null) || return 1
+  [ "$value" = "fm-$id" ] || return 1
+  value=$(fm_secondmate_nudge_value "$marker" home 2>/dev/null) || return 1
+  [ "$value" = "$home" ] || return 1
+  value=$(fm_secondmate_nudge_value "$marker" commit 2>/dev/null) || return 1
+  [ -z "$value" ] || return 1
+  value=$(fm_secondmate_nudge_value "$marker" instructions 2>/dev/null) || return 1
+  [ "$value" = remote ] || return 1
+  value=$(fm_secondmate_nudge_value "$marker" message 2>/dev/null) || return 1
+  [ "$value" = "$FM_REMOTE_SECOND_MATE_NUDGE_MESSAGE" ] || return 1
+  value=$(fm_secondmate_nudge_value "$marker" remote 2>/dev/null) || return 1
+  [ "$value" = 1 ] || return 1
+  if [ -n "$owner" ]; then
+    value=$(fm_secondmate_nudge_value "$marker" owner 2>/dev/null) || return 1
+    [ "$value" = "$owner" ] || return 1
+  elif grep -q '^owner=' "$marker" 2>/dev/null; then
+    return 1
+  fi
+  value=$(fm_secondmate_nudge_value "$marker" remote_host 2>/dev/null) || return 1
+  [ "$value" = "$remote_host" ] || return 1
+  value=$(fm_secondmate_nudge_value "$marker" remote_root 2>/dev/null) || return 1
+  [ "$value" = "$remote_root" ]
+}
+
+fm_secondmate_nudge_write() { # <state> <id> <home> <commit> <instructions> <message> <remote:0|1> [owner] [remote-host] [remote-root] [replace|create]
   local state=$1 id=$2 home=$3 commit=$4 instructions=$5 message=$6 remote=$7
-  local owner=${8:-} remote_host=${9:-} mode=${10:-replace} marker parent tmp
-  case "$remote" in 0|1) ;; *) return 1 ;; esac
+  local owner=${8:-} remote_host=${9:-} remote_root=${10:-} mode=${11:-replace}
+  local marker parent tmp
+  case "$remote" in
+    0) [ -z "$remote_host" ] && [ -z "$remote_root" ] || return 1 ;;
+    1) [ -n "$remote_host" ] && [ -n "$remote_root" ] || return 1 ;;
+    *) return 1 ;;
+  esac
   case "$mode" in replace|create) ;; *) return 1 ;; esac
-  case "$home$commit$instructions$message$owner$remote_host" in
+  case "$home$commit$instructions$message$owner$remote_host$remote_root" in
     *$'\n'*|*$'\r'*) return 1 ;;
   esac
   marker=$(fm_secondmate_nudge_marker_path "$state" "$id") || return 1
@@ -70,6 +118,7 @@ fm_secondmate_nudge_write() { # <state> <id> <home> <commit> <instructions> <mes
     printf 'remote=%s\n' "$remote"
     [ -z "$owner" ] || printf 'owner=%s\n' "$owner"
     [ -z "$remote_host" ] || printf 'remote_host=%s\n' "$remote_host"
+    [ -z "$remote_root" ] || printf 'remote_root=%s\n' "$remote_root"
   } > "$tmp" || { rm -f -- "$tmp"; return 1; }
   chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
   if [ "$mode" = create ]; then

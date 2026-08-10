@@ -106,11 +106,28 @@ fm_dependency_account_home() {
   return 1
 }
 
+fm_dependency_machine_identity() {
+  local path identity output
+  for path in /etc/machine-id /var/lib/dbus/machine-id; do
+    [ -r "$path" ] || continue
+    IFS= read -r identity < "$path" || continue
+    case "$identity" in ''|*[!A-Fa-f0-9]*) continue ;; esac
+    [ "${#identity}" -eq 32 ] || continue
+    printf '%s\n' "$identity"
+    return
+  done
+  command -v ioreg >/dev/null 2>&1 || return 1
+  output=$(fm_dependency_run_identity_probe ioreg -rd1 -c IOPlatformExpertDevice \
+    2>/dev/null) || return 1
+  identity=$(printf '%s\n' "$output" \
+    | awk -F'"' '/"IOPlatformUUID"/ { print $(NF - 1); exit }')
+  case "$identity" in ''|*[!A-Fa-f0-9-]*) return 1 ;; esac
+  [ "${#identity}" -eq 36 ] || return 1
+  printf '%s\n' "$identity"
+}
+
 fm_dependency_host_key() {
-  local host
-  host=$(uname -n 2>/dev/null) || return 1
-  case "$host" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
-  printf '%s\n' "$host"
+  fm_dependency_machine_identity
 }
 
 fm_dependency_runtime_dir() {

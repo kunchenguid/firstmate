@@ -303,8 +303,10 @@ secondmate_sync() {
   }
 
   secondmate_write_nudge_marker() {
-    local id=$1 home=$2 commit=$3 instr=$4 message=${5:-$SECOND_MATE_NUDGE_MESSAGE} remote=${6:-0}
-    fm_secondmate_nudge_write "$STATE" "$id" "$home" "$commit" "$instr" "$message" "$remote"
+    local id=$1 home=$2 commit=$3 instr=$4 message=${5:-$SECOND_MATE_NUDGE_MESSAGE}
+    local remote=${6:-0} remote_host=${7:-} remote_root=${8:-}
+    fm_secondmate_nudge_write "$STATE" "$id" "$home" "$commit" "$instr" "$message" \
+      "$remote" "" "$remote_host" "$remote_root"
   }
 
   secondmate_send_nudge() {
@@ -490,8 +492,8 @@ secondmate_sync() {
   # One remote secondmate's convergence, split out of the loop so each host is
   # individually timed; every `return` here was a `continue` and still means
   # "move on to the next secondmate".
-  secondmate_sync_remote_one() {  # <id> <home> <remote-host>
-    local id=$1 _home=$2 remote_host=$3
+  secondmate_sync_remote_one() {  # <id> <home> <remote-host> <remote-root>
+    local id=$1 _home=$2 remote_host=$3 remote_root=$4
     local sync_out inherit_out nudge_needed remote_marker remote_pending converged out remote_lock remote_generation
     remote_lock=$(fm_remote_inherit_transaction_lock_path "$STATE" "$id" 2>/dev/null || true)
     if [ -z "$remote_lock" ] || ! fm_lock_acquire_wait "$remote_lock"; then
@@ -509,22 +511,33 @@ secondmate_sync() {
     fi
     remote_marker=$(secondmate_nudge_marker_path "$id" 2>/dev/null || true)
     remote_pending=0
-    if [ -f "$remote_marker" ] && [ "$(fm_meta_get "$remote_marker" remote)" = 1 ]; then remote_pending=1; fi
+    if [ -e "$remote_marker" ] || [ -L "$remote_marker" ]; then
+      if ! fm_secondmate_remote_nudge_matches "$remote_marker" "$id" "$_home" \
+        "$remote_host" "$remote_root"; then
+        echo "NUDGE_SECONDMATES: secondmate $id: send failed: pending remote placement changed"
+        fm_lock_release "$remote_lock" || true
+        return 0
+      fi
+      remote_pending=1
+    fi
     if ! secondmate_write_nudge_marker "$id" "$_home" "" remote \
-      "$REMOTE_SECOND_MATE_NUDGE_MESSAGE" 1; then
+      "$REMOTE_SECOND_MATE_NUDGE_MESSAGE" 1 "$remote_host" "$remote_root"; then
       echo "NUDGE_SECONDMATES: secondmate $id: send failed: cannot record remote retry marker"
       fm_lock_release "$remote_lock" || true
       return 0
     fi
     nudge_needed=0
     converged=1
-    if sync_out=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh sync "$id" < /dev/null 2>&1); then
+    if sync_out=$(FM_ON_EXPECTED_HOST="$remote_host" FM_ON_EXPECTED_ROOT="$remote_root" \
+      FM_ON_EXPECTED_HOME="$_home" "$SCRIPT_DIR/fm-on.sh" "$id" \
+      fm-remote-secondmate-control.sh sync "$id" < /dev/null 2>&1); then
       case "$sync_out" in synced:*) nudge_needed=1 ;; esac
     else
       echo "SECONDMATE_SYNC: secondmate $id: skipped: remote tracked-file sync failed on $remote_host: $(first_line "$sync_out")"
       converged=0
     fi
-    if inherit_out=$(FM_CONFIG_INHERIT_LIVE=1 \
+    if inherit_out=$(FM_ON_EXPECTED_HOST="$remote_host" FM_ON_EXPECTED_ROOT="$remote_root" \
+      FM_ON_EXPECTED_HOME="$_home" FM_CONFIG_INHERIT_LIVE=1 \
       "$SCRIPT_DIR/fm-remote-inherit-push.sh" "$id" "$remote_generation" 2>&1); then
       if printf '%s\n' "$inherit_out" | grep -Eq '^(pushed|removed):'; then nudge_needed=1; fi
     else
@@ -533,7 +546,9 @@ secondmate_sync() {
     fi
     [ "$remote_pending" -eq 0 ] || nudge_needed=1
     if [ "$converged" -eq 1 ] && [ "$nudge_needed" -eq 1 ]; then
-      if out=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" \
+      if out=$(FM_ON_EXPECTED_HOST="$remote_host" FM_ON_EXPECTED_ROOT="$remote_root" \
+        FM_ON_EXPECTED_HOME="$_home" FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" \
+        FM_STATE_OVERRIDE="$STATE" \
         "$SCRIPT_DIR/fm-send.sh" "fm-$id" "$REMOTE_SECOND_MATE_NUDGE_MESSAGE" 2>&1); then
         rm -f "$remote_marker"
         [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" != 1 ] || echo "BOOTSTRAP_INFO: nudged remote fm-$id after convergence"
@@ -550,12 +565,17 @@ secondmate_sync() {
   # Remote routes converge through the generic transport. Their code root and
   # inherited files are authoritative on that host; no local path probe or
   # local fast-forward is attempted for them.
-  local remote_host __fm_timing_stamp
+  local remote_host remote_root __fm_timing_stamp
   while IFS='|' read -r id _home _window meta; do
     remote_host=$(fm_meta_get "$meta" remote_host)
     [ -n "$remote_host" ] || continue
+    remote_root=$(fm_meta_get "$meta" remote_root)
+    if [ -z "$remote_root" ]; then
+      echo "SECONDMATE_SYNC: secondmate $id: skipped: remote root is missing"
+      continue
+    fi
     __fm_timing_stamp=$(fm_timing_now_ms)
-    secondmate_sync_remote_one "$id" "$_home" "$remote_host"
+    secondmate_sync_remote_one "$id" "$_home" "$remote_host" "$remote_root"
     fm_timing_record secondmate convergence "$__fm_timing_stamp" "$id@$remote_host"
   done < <(live_secondmate_meta_records "$STATE" "$DATA/secondmates.md")
   return 0

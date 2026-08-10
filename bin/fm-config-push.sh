@@ -121,7 +121,13 @@ while IFS='|' read -r id home _window meta; do
   fi
   remote_host=$(fm_meta_get "$meta" remote_host)
   if [ -n "$remote_host" ]; then
+    remote_root=$(fm_meta_get "$meta" remote_root)
     printf 'secondmate %s (%s:%s):\n' "$id" "$remote_host" "$home"
+    if [ -z "$remote_root" ]; then
+      echo "  config-reread: remote root is missing"
+      errors=1
+      continue
+    fi
     remote_lock=$(fm_remote_inherit_transaction_lock_path "$STATE" "$id" 2>/dev/null || true)
     if [ -z "$remote_lock" ] || ! fm_lock_acquire_wait "$remote_lock"; then
       echo "  config-reread: transaction lock failed"
@@ -137,22 +143,34 @@ while IFS='|' read -r id home _window meta; do
     fi
     remote_marker=$(fm_secondmate_nudge_marker_path "$STATE" "$id" 2>/dev/null || true)
     remote_pending=0
-    if [ -f "$remote_marker" ] && [ "$(fm_meta_get "$remote_marker" remote)" = 1 ]; then remote_pending=1; fi
+    if [ -e "$remote_marker" ] || [ -L "$remote_marker" ]; then
+      if ! fm_secondmate_remote_nudge_matches "$remote_marker" "$id" "$home" \
+        "$remote_host" "$remote_root"; then
+        echo "  config-reread: pending remote placement changed"
+        errors=1
+        fm_lock_release "$remote_lock" || true
+        continue
+      fi
+      remote_pending=1
+    fi
     if ! fm_secondmate_nudge_write "$STATE" "$id" "$home" "" remote \
-      "$FM_REMOTE_SECOND_MATE_NUDGE_MESSAGE" 1; then
+      "$FM_REMOTE_SECOND_MATE_NUDGE_MESSAGE" 1 "" "$remote_host" "$remote_root"; then
       echo "  config-reread: retry marker failed"
       errors=1
       fm_lock_release "$remote_lock" || true
       continue
     fi
-    if remote_out=$(FM_CONFIG_INHERIT_LIVE=1 \
+    if remote_out=$(FM_ON_EXPECTED_HOST="$remote_host" FM_ON_EXPECTED_ROOT="$remote_root" \
+      FM_ON_EXPECTED_HOME="$home" FM_CONFIG_INHERIT_LIVE=1 \
       "$SCRIPT_DIR/fm-remote-inherit-push.sh" "$id" "$remote_generation" 2>&1); then
       printf '%s\n' "$remote_out" | sed 's/^/  /'
       remote_nudge=0
       if printf '%s\n' "$remote_out" | grep -Eq '^(pushed|removed):'; then remote_nudge=1; fi
       [ "$remote_pending" -eq 0 ] || remote_nudge=1
       if [ "$remote_nudge" -eq 1 ]; then
-        if FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" \
+        if FM_ON_EXPECTED_HOST="$remote_host" FM_ON_EXPECTED_ROOT="$remote_root" \
+          FM_ON_EXPECTED_HOME="$home" FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" \
+          FM_STATE_OVERRIDE="$STATE" \
           "$SCRIPT_DIR/fm-send.sh" "fm-$id" "$FM_REMOTE_SECOND_MATE_NUDGE_MESSAGE" >/dev/null 2>&1; then
           rm -f -- "$remote_marker"
           echo "  config-reread: sent"

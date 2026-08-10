@@ -896,6 +896,8 @@ assert_grep '"revision":2' "$REMOTE_HOME/config/crew-dispatch.json" "partial inh
   || fail "partial inheritance unexpectedly applied the failed file"
 NUDGE_MARKER="$PARENT/state/.secondmate-nudge-pending/ios.pending"
 assert_grep 'remote=1' "$NUDGE_MARKER" "partial inheritance left no durable remote reread marker"
+assert_grep "remote_host=remote-mac" "$NUDGE_MARKER" "partial inheritance marker lost its remote host"
+assert_grep "remote_root=$REMOTE_ROOT" "$NUDGE_MARKER" "partial inheritance marker lost its remote root"
 publish_healthy_watcher_identity "$PARENT/state" "$PARENT" "$REMOTE_ROOT/bin/fm-watch.sh"
 remote_env "$ROOT/bin/fm-bootstrap.sh" > "$TMP_ROOT/config-partial-retry.out" \
   || fail "bootstrap did not converge partial remote inheritance"
@@ -961,6 +963,8 @@ if [ ! -f "$NUDGE_MARKER" ]; then
   fail "failed remote config reread did not retain a retry marker"
 fi
 assert_grep 'remote=1' "$NUDGE_MARKER" "remote config reread marker lost its placement"
+assert_grep "remote_host=remote-mac" "$NUDGE_MARKER" "remote config reread marker lost its host identity"
+assert_grep "remote_root=$REMOTE_ROOT" "$NUDGE_MARKER" "remote config reread marker lost its root identity"
 rm -f "$TMP_ROOT/herdr-send-fail"
 remote_env "$ROOT/bin/fm-config-push.sh" > "$TMP_ROOT/config-push-retry.out" \
   || fail "unchanged remote config push did not retry its pending reread"

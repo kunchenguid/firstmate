@@ -476,6 +476,7 @@ declare -A PENDING_FIRSTMATE_HOME=()
 declare -A PENDING_FIRSTMATE_COMMIT=()
 declare -A PENDING_FIRSTMATE_REMOTE=()
 declare -A PENDING_FIRSTMATE_REMOTE_HOST=()
+declare -A PENDING_FIRSTMATE_REMOTE_ROOT=()
 
 reset_firstmate_action_inventory() {
   PENDING_FIRSTMATE_BOUND=()
@@ -483,6 +484,7 @@ reset_firstmate_action_inventory() {
   PENDING_FIRSTMATE_COMMIT=()
   PENDING_FIRSTMATE_REMOTE=()
   PENDING_FIRSTMATE_REMOTE_HOST=()
+  PENDING_FIRSTMATE_REMOTE_ROOT=()
 }
 
 write_firstmate_action_manifest() {
@@ -501,6 +503,7 @@ write_firstmate_action_manifest() {
           "target.$id.commit=${PENDING_FIRSTMATE_COMMIT[$id]:-}"
           "target.$id.remote=${PENDING_FIRSTMATE_REMOTE[$id]:-}"
           "target.$id.remote-host=${PENDING_FIRSTMATE_REMOTE_HOST[$id]:-}"
+          "target.$id.remote-root=${PENDING_FIRSTMATE_REMOTE_ROOT[$id]:-}"
         )
       fi
     done
@@ -509,7 +512,7 @@ write_firstmate_action_manifest() {
 }
 
 load_firstmate_action_manifest() {
-  local marker=$1 action selector id bound home commit remote remote_host seen=""
+  local marker=$1 action selector id bound home commit remote remote_host remote_root seen=""
   reset_firstmate_action_inventory
   action=$(pending_marker_value "$marker" action 2>/dev/null || true)
   PENDING_FIRSTMATE_REREAD=$(pending_marker_value "$marker" reread 2>/dev/null || true)
@@ -535,10 +538,14 @@ load_firstmate_action_manifest() {
           remote=$(pending_marker_value "$marker" "target.$id.remote" 2>/dev/null) || return 1
           remote_host=$(pending_marker_value "$marker" "target.$id.remote-host" 2>/dev/null) \
             || return 1
+          remote_root=$(pending_marker_value "$marker" "target.$id.remote-root" 2>/dev/null) \
+            || return 1
           [ -n "$home" ] || return 1
           case "$remote" in
-            0) [ -n "$commit" ] && [ -z "$remote_host" ] || return 1 ;;
-            1) [ -z "$commit" ] && [ -n "$remote_host" ] || return 1 ;;
+            0) [ -n "$commit" ] && [ -z "$remote_host" ] \
+              && [ -z "$remote_root" ] || return 1 ;;
+            1) [ -z "$commit" ] && [ -n "$remote_host" ] \
+              && [ -n "$remote_root" ] || return 1 ;;
             *) return 1 ;;
           esac
           PENDING_FIRSTMATE_BOUND[$id]=yes
@@ -546,6 +553,7 @@ load_firstmate_action_manifest() {
           PENDING_FIRSTMATE_COMMIT[$id]=$commit
           PENDING_FIRSTMATE_REMOTE[$id]=$remote
           PENDING_FIRSTMATE_REMOTE_HOST[$id]=$remote_host
+          PENDING_FIRSTMATE_REMOTE_ROOT[$id]=$remote_root
           ;;
         *) return 1 ;;
       esac
@@ -565,7 +573,7 @@ current_secondmate_home() {
 }
 
 capture_secondmate_nudge_identity() {
-  local selector=$1 id state meta kind home remote_host active_home commit
+  local selector=$1 id state meta kind home remote_host remote_root active_home commit
   case "$selector" in fm-*) ;; *) return 1 ;; esac
   id=${selector#fm-}
   case "$id" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
@@ -575,10 +583,13 @@ capture_secondmate_nudge_identity() {
   [ "$kind" = secondmate ] || return 1
   home=$(current_secondmate_home "$id" "$meta") || return 1
   remote_host=$(pending_marker_value "$meta" remote_host 2>/dev/null || true)
+  remote_root=$(pending_marker_value "$meta" remote_root 2>/dev/null || true)
   if [ -n "$remote_host" ]; then
+    [ -n "$remote_root" ] || return 1
     commit=""
     SECOND_MATE_IDENTITY_REMOTE=1
   else
+    [ -z "$remote_root" ] || return 1
     active_home=$(deps_home_dir) || return 1
     if ! FM_HOME="$active_home" validate_secondmate_home "$id" "$home"; then
       return 1
@@ -591,6 +602,7 @@ capture_secondmate_nudge_identity() {
   SECOND_MATE_IDENTITY_HOME=$home
   SECOND_MATE_IDENTITY_COMMIT=$commit
   SECOND_MATE_IDENTITY_REMOTE_HOST=$remote_host
+  SECOND_MATE_IDENTITY_REMOTE_ROOT=$remote_root
 }
 
 capture_firstmate_action_inventory() {
@@ -609,6 +621,7 @@ capture_firstmate_action_inventory() {
       PENDING_FIRSTMATE_COMMIT[$id]=$SECOND_MATE_IDENTITY_COMMIT
       PENDING_FIRSTMATE_REMOTE[$id]=$SECOND_MATE_IDENTITY_REMOTE
       PENDING_FIRSTMATE_REMOTE_HOST[$id]=$SECOND_MATE_IDENTITY_REMOTE_HOST
+      PENDING_FIRSTMATE_REMOTE_ROOT[$id]=$SECOND_MATE_IDENTITY_REMOTE_ROOT
     else
       PENDING_FIRSTMATE_BOUND[$id]=no
     fi
@@ -616,9 +629,15 @@ capture_firstmate_action_inventory() {
 }
 
 existing_secondmate_nudge_matches() {
-  local marker=$1 id=$2 home=$3 commit=$4 remote=$5 remote_host=$6
+  local marker=$1 id=$2 home=$3 commit=$4 remote=$5 remote_host=$6 remote_root=$7
   local marker_selector marker_home marker_commit marker_remote marker_instructions
-  local marker_message marker_remote_host expected_instructions expected_message
+  local marker_message marker_remote_host marker_remote_root expected_instructions expected_message
+  if [ "$remote" = 1 ]; then
+    [ -z "$commit" ] || return 1
+    fm_secondmate_remote_nudge_matches "$marker" "$id" "$home" "$remote_host" \
+      "$remote_root" fm-deps
+    return
+  fi
   [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
   marker_selector=$(pending_marker_value "$marker" selector 2>/dev/null || true)
   marker_home=$(pending_marker_value "$marker" home 2>/dev/null || true)
@@ -627,15 +646,11 @@ existing_secondmate_nudge_matches() {
   marker_instructions=$(pending_marker_value "$marker" instructions 2>/dev/null || true)
   marker_message=$(pending_marker_value "$marker" message 2>/dev/null || true)
   marker_remote_host=$(pending_marker_value "$marker" remote_host 2>/dev/null || true)
-  if [ "$remote" = 1 ]; then
-    expected_instructions=remote
-    expected_message=$FM_REMOTE_SECOND_MATE_NUDGE_MESSAGE
-    [ "$marker_remote_host" = "$remote_host" ] || return 1
-  else
-    expected_instructions=AGENTS.md
-    expected_message=$FM_SECOND_MATE_NUDGE_MESSAGE
-    [ -z "$marker_remote_host" ] || return 1
-  fi
+  marker_remote_root=$(pending_marker_value "$marker" remote_root 2>/dev/null || true)
+  expected_instructions=AGENTS.md
+  expected_message=$FM_SECOND_MATE_NUDGE_MESSAGE
+  [ -z "$marker_remote_host" ] || return 1
+  [ -z "$marker_remote_root" ] || return 1
   [ "$(pending_marker_value "$marker" id 2>/dev/null || true)" = "$id" ] \
     && [ "$marker_selector" = "fm-$id" ] \
     && [ "$marker_home" = "$home" ] \
@@ -646,24 +661,27 @@ existing_secondmate_nudge_matches() {
 }
 
 record_secondmate_nudge_action() {
-  local selector=$1 id state meta kind current_home current_remote_host active_home head
-  local home commit remote remote_host instructions message marker write_status
+  local selector=$1 id state meta kind current_home current_remote_host current_remote_root
+  local active_home head home commit remote remote_host remote_root instructions message
+  local marker write_status
   id=${selector#fm-}
   [ "${PENDING_FIRSTMATE_BOUND[$id]:-}" = yes ] || return 1
   home=${PENDING_FIRSTMATE_HOME[$id]:-}
   commit=${PENDING_FIRSTMATE_COMMIT[$id]:-}
   remote=${PENDING_FIRSTMATE_REMOTE[$id]:-}
   remote_host=${PENDING_FIRSTMATE_REMOTE_HOST[$id]:-}
+  remote_root=${PENDING_FIRSTMATE_REMOTE_ROOT[$id]:-}
   state=$(deps_state_dir) || return 1
   meta="$state/$id.meta"
   kind=$(pending_marker_value "$meta" kind 2>/dev/null || true)
   [ "$kind" = secondmate ] || return 1
   current_home=$(current_secondmate_home "$id" "$meta") || return 1
   current_remote_host=$(pending_marker_value "$meta" remote_host 2>/dev/null || true)
+  current_remote_root=$(pending_marker_value "$meta" remote_root 2>/dev/null || true)
   active_home=$(deps_home_dir) || return 1
   case "$remote" in
     0)
-      [ -z "$current_remote_host" ] || return 1
+      [ -z "$current_remote_host" ] && [ -z "$current_remote_root" ] || return 1
       FM_HOME="$active_home" validate_secondmate_home "$id" "$current_home" || return 1
       [ "$VALIDATED_HOME" = "$home" ] || return 1
       head=$(run_git_probe -C "$home" rev-parse HEAD 2>/dev/null || true)
@@ -672,7 +690,8 @@ record_secondmate_nudge_action() {
       message=$FM_SECOND_MATE_NUDGE_MESSAGE
       ;;
     1)
-      [ "$current_home" = "$home" ] && [ "$current_remote_host" = "$remote_host" ] || return 1
+      [ "$current_home" = "$home" ] && [ "$current_remote_host" = "$remote_host" ] \
+        && [ "$current_remote_root" = "$remote_root" ] || return 1
       instructions=remote
       message=$FM_REMOTE_SECOND_MATE_NUDGE_MESSAGE
       ;;
@@ -680,12 +699,12 @@ record_secondmate_nudge_action() {
   esac
   marker=$(fm_secondmate_nudge_marker_path "$state" "$id") || return 1
   fm_secondmate_nudge_write "$state" "$id" "$home" "$commit" \
-    "$instructions" "$message" "$remote" fm-deps "$remote_host" create
+    "$instructions" "$message" "$remote" fm-deps "$remote_host" "$remote_root" create
   write_status=$?
   [ "$write_status" -eq 0 ] || {
     [ "$write_status" -eq 2 ] \
       && existing_secondmate_nudge_matches "$marker" "$id" "$home" "$commit" \
-        "$remote" "$remote_host"
+        "$remote" "$remote_host" "$remote_root"
   }
 }
 
@@ -851,13 +870,13 @@ process_journaled_secondmate_update() {
       ;;
   esac
   fm_secondmate_nudge_write "$state" "$id" "$home" "$head" \
-    "$instructions" "$message" "$remote" fm-deps "$remote_host" create
+    "$instructions" "$message" "$remote" fm-deps "$remote_host" "$remote_root" create
   write_status=$?
   if [ "$write_status" -ne 0 ]; then
     [ "$write_status" -eq 2 ] \
       && existing_secondmate_nudge_matches \
         "$(fm_secondmate_nudge_marker_path "$state" "$id")" \
-        "$id" "$home" "$head" "$remote" "$remote_host" \
+        "$id" "$home" "$head" "$remote" "$remote_host" "$remote_root" \
       || return 1
   fi
   rm -f -- "$marker" || {
@@ -910,7 +929,8 @@ restore_identity_bound_nudge_claim() {
 process_identity_bound_nudge_claim() {
   local claim=$1 marker=$2 state=$3 active_home=$4
   local id selector home commit instructions message remote owner recorded_remote_host
-  local expected_marker meta kind current_home current_remote_host head
+  local recorded_remote_root expected_marker meta kind current_home current_remote_host
+  local current_remote_root head
   if [ ! -f "$claim" ] || [ -L "$claim" ]; then
     printf 'Firstmate claimed secondmate nudge is invalid: %s\n' "$claim" >&2
     return 1
@@ -928,6 +948,7 @@ process_identity_bound_nudge_claim() {
   message=$(pending_marker_value "$claim" message 2>/dev/null || true)
   remote=$(pending_marker_value "$claim" remote 2>/dev/null || true)
   recorded_remote_host=$(pending_marker_value "$claim" remote_host 2>/dev/null || true)
+  recorded_remote_root=$(pending_marker_value "$claim" remote_root 2>/dev/null || true)
   expected_marker=$(fm_secondmate_nudge_marker_path "$state" "$id" 2>/dev/null || true)
   if [ "$expected_marker" != "$marker" ] || [ "$selector" != "fm-$id" ] \
     || [ -z "$home" ] || [ -z "$instructions" ]; then
@@ -939,6 +960,7 @@ process_identity_bound_nudge_claim() {
   kind=$(pending_marker_value "$meta" kind 2>/dev/null || true)
   current_home=$(current_secondmate_home "$id" "$meta" 2>/dev/null || true)
   current_remote_host=$(pending_marker_value "$meta" remote_host 2>/dev/null || true)
+  current_remote_root=$(pending_marker_value "$meta" remote_root 2>/dev/null || true)
   if [ "$kind" != secondmate ] || [ -z "$current_home" ]; then
     printf 'Firstmate post-update nudge target changed for %s\n' "$selector" >&2
     restore_identity_bound_nudge_claim "$claim" "$marker" || true
@@ -946,7 +968,8 @@ process_identity_bound_nudge_claim() {
   fi
   case "$remote" in
     0)
-      if [ -n "$current_remote_host" ] || [ -n "$recorded_remote_host" ] \
+      if [ -n "$current_remote_host" ] || [ -n "$current_remote_root" ] \
+        || [ -n "$recorded_remote_host" ] || [ -n "$recorded_remote_root" ] \
         || [ "$instructions" != AGENTS.md ] \
         || [ "$message" != "$FM_SECOND_MATE_NUDGE_MESSAGE" ] \
         || ! FM_HOME="$active_home" validate_secondmate_home "$id" "$current_home" \
@@ -963,8 +986,10 @@ process_identity_bound_nudge_claim() {
       fi
       ;;
     1)
-      if [ -z "$recorded_remote_host" ] || [ "$current_home" != "$home" ] \
+      if [ -z "$recorded_remote_host" ] || [ -z "$recorded_remote_root" ] \
+        || [ "$current_home" != "$home" ] \
         || [ "$current_remote_host" != "$recorded_remote_host" ] \
+        || [ "$current_remote_root" != "$recorded_remote_root" ] \
         || [ -n "$commit" ] || [ "$instructions" != remote ] \
         || [ "$message" != "$FM_REMOTE_SECOND_MATE_NUDGE_MESSAGE" ]; then
         printf 'Firstmate post-update remote nudge identity is invalid for %s\n' "$selector" >&2
@@ -978,7 +1003,9 @@ process_identity_bound_nudge_claim() {
       return 1
       ;;
   esac
-  if FM_HOME="$active_home" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$state" \
+  if FM_ON_EXPECTED_HOST="$recorded_remote_host" \
+    FM_ON_EXPECTED_ROOT="$recorded_remote_root" FM_ON_EXPECTED_HOME="$home" \
+    FM_HOME="$active_home" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$state" \
     "$FM_ROOT/bin/fm-send.sh" "$selector" "$message"; then
     if ! rm -f -- "$claim"; then
       printf 'Firstmate post-update nudge could not be cleared for %s\n' "$selector" >&2
@@ -1732,22 +1759,37 @@ run_dependency_check_body() {
   printf 'AI workspace dependency check (Linux)\n'
   printf '%s\n' '----------------------------------------'
 
-  with_firstmate_action_lock process_pending_firstmate_actions
-  pending_action_status=$?
-  if [ "$pending_action_status" -eq 75 ]; then
-    printf 'DEFER: dependency check - Firstmate actions are being processed; retry later\n'
-    printf '%s\n' '----------------------------------------'
-    printf 'SUMMARY: 0 update(s) available; 0 completed; 1 deferred; 0 check/upgrade failure(s)\n'
-    return 0
-  elif [ "$pending_action_status" -eq 2 ]; then
-    printf 'FAILED: required Firstmate instruction reread remains incomplete\n' >&2
-    return 1
-  elif [ "$pending_action_status" -eq 3 ]; then
-    printf 'FAILED: Firstmate pending action storage is invalid\n' >&2
-    return 1
-  elif [ "$pending_action_status" -ne 0 ]; then
-    printf 'FAILED: Firstmate post-update actions remain incomplete\n' >&2
-    FAILURES=$((FAILURES + 1))
+  if [ "$CHECK_ONLY" -eq 1 ]; then
+    firstmate_update_actions_pending
+    pending_action_status=$?
+    if [ "$pending_action_status" -eq 0 ]; then
+      printf 'DEFER: dependency check - Firstmate post-update actions remain pending; rerun without --check\n'
+      DEFERRED=$((DEFERRED + 1))
+    elif [ "$pending_action_status" -eq 2 ]; then
+      printf 'FAILED: Firstmate pending action storage is invalid\n' >&2
+      return 1
+    elif [ "$pending_action_status" -ne 1 ]; then
+      printf 'FAILED: Firstmate pending actions could not be inspected\n' >&2
+      return 1
+    fi
+  else
+    with_firstmate_action_lock process_pending_firstmate_actions
+    pending_action_status=$?
+    if [ "$pending_action_status" -eq 75 ]; then
+      printf 'DEFER: dependency check - Firstmate actions are being processed; retry later\n'
+      printf '%s\n' '----------------------------------------'
+      printf 'SUMMARY: 0 update(s) available; 0 completed; 1 deferred; 0 check/upgrade failure(s)\n'
+      return 0
+    elif [ "$pending_action_status" -eq 2 ]; then
+      printf 'FAILED: required Firstmate instruction reread remains incomplete\n' >&2
+      return 1
+    elif [ "$pending_action_status" -eq 3 ]; then
+      printf 'FAILED: Firstmate pending action storage is invalid\n' >&2
+      return 1
+    elif [ "$pending_action_status" -ne 0 ]; then
+      printf 'FAILED: Firstmate post-update actions remain incomplete\n' >&2
+      FAILURES=$((FAILURES + 1))
+    fi
   fi
 
   check_release_tool codex Codex codex openai/codex quiet
