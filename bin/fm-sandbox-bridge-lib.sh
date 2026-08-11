@@ -88,9 +88,15 @@ fm_sandbox_bridge_read_cursor() {  # <host-private cursor>
 
 # fm_sandbox_bridge_validate_bridge: verify one bridge without requiring its cursor.
 fm_sandbox_bridge_validate_bridge() {  # <bridge> <state> <task-id> <worktree>
-  [ "$#" -eq 4 ] || { fm_sandbox_bridge_error 'usage: fm_sandbox_bridge_validate_bridge <bridge> <state> <task-id> <worktree>'; return 2; }
-  local bridge=$1 state=$2 task_id=$3 worktree=$4 expected cursor state_real worktree_real bridge_root cursor_root bridge_real
+  [ "$#" -eq 4 ] || {
+    [ "$#" -eq 5 ] && [ "$5" = allow-missing-worktree ] || {
+      fm_sandbox_bridge_error 'usage: fm_sandbox_bridge_validate_bridge <bridge> <state> <task-id> <worktree>'
+      return 2
+    }
+  }
+  local bridge=$1 state=$2 task_id=$3 worktree=$4 expected cursor state_real worktree_real bridge_root cursor_root bridge_real allow_missing_worktree=0 worktree_parent worktree_leaf worktree_parent_real
   local bound_task bound_state bound_worktree bound_bridge bound_cursor
+  [ "$#" -eq 5 ] && allow_missing_worktree=1
   expected=$(fm_sandbox_bridge_expected_path "$state" "$task_id") || {
     fm_sandbox_bridge_error 'sandbox bridge has an invalid state path or task identity'
     return 1
@@ -100,10 +106,33 @@ fm_sandbox_bridge_validate_bridge() {  # <bridge> <state> <task-id> <worktree>
     fm_sandbox_bridge_error "sandbox bridge state is not a real directory: $state"
     return 1
   }
-  worktree_real=$(fm_sandbox_bridge_real_dir "$worktree") || {
+  if worktree_real=$(fm_sandbox_bridge_real_dir "$worktree"); then
+    :
+  elif [ "$allow_missing_worktree" = 1 ]; then
+    case "$worktree" in
+      /*)
+        worktree_parent=${worktree%/*}
+        worktree_leaf=${worktree##*/}
+        [ -n "$worktree_parent" ] || worktree_parent=/
+        [ -n "$worktree_leaf" ] || {
+          fm_sandbox_bridge_error "sandbox bridge worktree is not a real directory: $worktree"
+          return 1
+        }
+        worktree_parent_real=$(CDPATH='' cd -- "$worktree_parent" 2>/dev/null && pwd -P) || {
+          fm_sandbox_bridge_error "sandbox bridge worktree is not a real directory: $worktree"
+          return 1
+        }
+        worktree_real=$worktree_parent_real/$worktree_leaf
+        ;;
+      *)
+        fm_sandbox_bridge_error "sandbox bridge worktree is not a real directory: $worktree"
+        return 1
+        ;;
+    esac
+  else
     fm_sandbox_bridge_error "sandbox bridge worktree is not a real directory: $worktree"
     return 1
-  }
+  fi
   [ "$bridge" = "$expected" ] || {
     fm_sandbox_bridge_error "sandbox bridge path does not match its task identity: $bridge"
     return 1
@@ -464,18 +493,27 @@ fm_sandbox_bridge_sync() {  # <bridge> <state> <task-id> <worktree>
 # fm_sandbox_bridge_remove: remove only a currently verified bridge and cursor.
 fm_sandbox_bridge_remove() {  # <bridge> <state> <task-id> <worktree>
   [ "$#" -eq 4 ] || { fm_sandbox_bridge_error 'usage: fm_sandbox_bridge_remove <bridge> <state> <task-id> <worktree>'; return 2; }
-  local bridge=$1 state=$2 task_id=$3 worktree=$4 expected cursor
+  local bridge=$1 state=$2 task_id=$3 worktree=$4 expected cursor worktree_is_dir=0
   expected=$(fm_sandbox_bridge_expected_path "$state" "$task_id") || return 1
   cursor=$(fm_sandbox_bridge_cursor_path "$state" "$task_id") || return 1
   [ "$bridge" = "$expected" ] || return 1
+  if [ -d "$worktree" ] && [ ! -L "$worktree" ]; then
+    worktree_is_dir=1
+  fi
   if [ ! -e "$bridge" ] && [ ! -L "$bridge" ] && [ ! -e "$cursor" ] && [ ! -L "$cursor" ]; then
     return 0
   fi
   if [ -e "$bridge" ] || [ -L "$bridge" ]; then
-    if [ -e "$cursor" ] || [ -L "$cursor" ]; then
+    if [ "$worktree_is_dir" = 1 ] && { [ -e "$cursor" ] || [ -L "$cursor" ]; }; then
       fm_sandbox_bridge_validate "$bridge" "$state" "$task_id" "$worktree" || return 1
-    else
+    elif [ "$worktree_is_dir" = 1 ]; then
       fm_sandbox_bridge_validate_bridge "$bridge" "$state" "$task_id" "$worktree" || return 1
+    else
+      fm_sandbox_bridge_validate_bridge "$bridge" "$state" "$task_id" "$worktree" allow-missing-worktree || return 1
+      if [ -e "$cursor" ] || [ -L "$cursor" ]; then
+        fm_sandbox_bridge_private_regular "$cursor" || return 1
+        fm_sandbox_bridge_read_cursor "$cursor" >/dev/null || return 1
+      fi
     fi
     rm -rf -- "$bridge" || return 1
   fi

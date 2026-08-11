@@ -266,6 +266,20 @@ expect_code 0 "$status" "bridge removal retry"
 assert_no_entry "$remove_bridge" "bridge removal retry left the bridge behind"
 assert_no_entry "$remove_cursor" "bridge removal retry left the cursor behind"
 
+MISSING_WORKTREE_ID='missing-worktree-task'
+mkdir -p "$TMP_ROOT/missing-worktree-source"
+status=0
+fm_sandbox_bridge_create "$STATE" "$MISSING_WORKTREE_ID" "$TMP_ROOT/missing-worktree-source" "$BRIEF" "$ENCODER" || status=$?
+expect_code 0 "$status" "bridge removal missing-worktree fixture creation"
+missing_bridge=$(fm_sandbox_bridge_expected_path "$STATE" "$MISSING_WORKTREE_ID") || fail "missing-worktree bridge path resolution failed"
+missing_cursor=$(fm_sandbox_bridge_cursor_path "$STATE" "$MISSING_WORKTREE_ID") || fail "missing-worktree cursor path resolution failed"
+rm -rf -- "$TMP_ROOT/missing-worktree-source"
+status=0
+fm_sandbox_bridge_remove "$missing_bridge" "$STATE" "$MISSING_WORKTREE_ID" "$TMP_ROOT/missing-worktree-source" || status=$?
+expect_code 0 "$status" "bridge removal with the acquired worktree already gone"
+assert_no_entry "$missing_bridge" "missing-worktree bridge removal left the bridge behind"
+assert_no_entry "$missing_cursor" "missing-worktree bridge removal left the cursor behind"
+
 PATH="$ORIGINAL_PATH"
 export PATH
 

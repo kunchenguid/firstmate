@@ -67,7 +67,11 @@ SH
 cat > "$fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = get ] && [ "${2:-}" = --help ]; then
-  printf '%s\n' 'Usage: treehouse get [--lease] [--lease-holder <holder>]'
+  if [ "${FM_FAKE_TREEHOUSE_MODE:-lease}" = legacy ]; then
+    printf '%s\n' 'Usage: treehouse get'
+  else
+    printf '%s\n' 'Usage: treehouse get [--lease] [--lease-holder <holder>]'
+  fi
   exit 0
 fi
 if [ "${1:-}" = get ] && [ "${2:-}" = --lease ]; then
@@ -116,6 +120,7 @@ EOF
 
 run_settle_spawn() {
   local id=$1
+  : > "$COUNTFILE.treehouse"
   FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
@@ -123,6 +128,7 @@ run_settle_spawn() {
     FM_FAKE_PANE_PATH="$WT_DIR" FM_FAKE_PANE_STALE="$STALE_DIR" \
     FM_FAKE_PANE_STALE_READS="$STALE_READS" FM_FAKE_PANE_COUNTFILE="$COUNTFILE" \
     FM_FAKE_PANE_PROJECT="$PROJ_DIR" FM_FAKE_PANE_PROJECT_AFTER="${FM_FAKE_PANE_PROJECT_AFTER:-0}" \
+    FM_FAKE_TREEHOUSE_MODE="${FM_FAKE_TREEHOUSE_MODE:-lease}" \
     FM_FAKE_SLEEP_NOOP="${FM_FAKE_SLEEP_NOOP:-0}" \
     FM_FAKE_TREEHOUSE_RETURN_FAIL="${FM_FAKE_TREEHOUSE_RETURN_FAIL:-0}" \
     PATH="$FAKEBIN_DIR:$PATH" \
@@ -191,8 +197,58 @@ test_timeout_retains_first_acquired_worktree_for_retry() {
   pass "worktree acquisition is recorded before settle and retained on timeout cleanup failure"
 }
 
+test_legacy_timeout_retains_non_destructive_observation() {
+  local rec id out status
+  id=settle-legacy-timeout-z4
+  rec=$(make_settle_case settle-legacy-timeout "$id" 0)
+  read_settle_record "$rec"
+
+  FM_FAKE_TREEHOUSE_MODE=legacy FM_FAKE_PANE_PROJECT_AFTER=1 FM_FAKE_SLEEP_NOOP=1 \
+    out=$(run_settle_spawn "$id")
+  status=$?
+  expect_code 1 "$status" "legacy treehouse settle timeout should fail"
+  assert_present "$HOME_DIR/state/.spawn-cleanup/$id.record" \
+    "legacy settle timeout did not retain a durable retry record"
+  assert_grep "worktree_cleanup=0" "$HOME_DIR/state/.spawn-cleanup/$id.record" \
+    "legacy settle timeout armed destructive worktree cleanup"
+  assert_grep "worktree_observed_path=$WT_DIR" "$HOME_DIR/state/.spawn-cleanup/$id.record" \
+    "legacy settle timeout lost the unverified observation"
+  if grep -q '^worktree_path=' "$HOME_DIR/state/.spawn-cleanup/$id.record"; then
+    fail "legacy settle timeout recorded an unvalidated destructive worktree handle"
+  fi
+  assert_no_grep $'treehouse\treturn\t--force' "$COUNTFILE.treehouse" \
+    "legacy settle timeout attempted destructive return of an unverified observation"
+  pass "legacy treehouse settle timeout retains only a non-destructive observation"
+}
+
+test_legacy_invalid_candidate_retains_non_destructive_observation() {
+  local rec id out status invalid_path
+  id=settle-legacy-invalid-z5
+  rec=$(make_settle_case settle-legacy-invalid "$id" 0)
+  read_settle_record "$rec"
+  invalid_path="$(dirname "$HOME_DIR")/not-a-worktree"
+  mkdir -p "$invalid_path"
+  WT_DIR=$invalid_path
+
+  FM_FAKE_TREEHOUSE_MODE=legacy FM_FAKE_SLEEP_NOOP=1 \
+    out=$(run_settle_spawn "$id")
+  status=$?
+  expect_code 1 "$status" "invalid legacy treehouse candidate should fail"
+  assert_present "$HOME_DIR/state/.spawn-cleanup/$id.record" \
+    "invalid legacy candidate did not retain a durable retry record"
+  assert_grep "worktree_cleanup=0" "$HOME_DIR/state/.spawn-cleanup/$id.record" \
+    "invalid legacy candidate armed destructive worktree cleanup"
+  assert_grep "worktree_observed_path=$invalid_path" "$HOME_DIR/state/.spawn-cleanup/$id.record" \
+    "invalid legacy candidate was not retained for inspection"
+  assert_no_grep $'treehouse\treturn\t--force' "$COUNTFILE.treehouse" \
+    "invalid legacy candidate attempted destructive return"
+  pass "invalid legacy treehouse candidate retains a non-destructive retry record"
+}
+
 test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_sleep
 test_timeout_retains_first_acquired_worktree_for_retry
+test_legacy_timeout_retains_non_destructive_observation
+test_legacy_invalid_candidate_retains_non_destructive_observation
 
 echo "# all fm-spawn-worktree-settle tests passed"

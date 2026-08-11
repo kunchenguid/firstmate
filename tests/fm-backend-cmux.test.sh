@@ -516,6 +516,44 @@ test_create_task_retains_pending_record_when_workspace_id_resolution_fails() {
   pass "fm_backend_cmux_create_task: retains an acquisition record when the new workspace id cannot be resolved"
 }
 
+test_spawn_recovers_pending_cmux_workspace_by_scoped_title() {
+  local dir home proj wt fakebin id title out status
+  dir="$TMP_ROOT/spawn-pending-recovery"
+  home="$dir/home"
+  proj="$dir/project"
+  wt="$dir/worktree"
+  id=cmux-pending-recover
+  mkdir -p "$dir/responses" "$home/data/$id" "$home/state" "$home/projects" "$home/config"
+  fm_git_worktree "$proj" "$wt" "cmux-$id"
+  printf 'brief\n' > "$home/data/$id/brief.md"
+  title=$(cmux_expected_scoped_title "fm-$id" "$home" "$ROOT")
+
+  printf '{"workspaces":[]}' > "$dir/responses/1.out"
+  cmux_workspace_list_response "$dir" 3
+  cmux_workspace_list_response "$dir" 4 "bbbbbbbb-1111-1111-1111-111111111111" "$title"
+  cmux_workspace_list_response "$dir" 5 "bbbbbbbb-1111-1111-1111-111111111111" "$title"
+  cmux_windows_response "$dir" 6 "eeeeeeee-0000-0000-0000-000000000000" 1
+  cmux_workspace_list_response "$dir" 7 "bbbbbbbb-1111-1111-1111-111111111111" "$title"
+  cmux_workspace_list_response "$dir" 10
+  fakebin=$(make_cmux_fakebin "$dir")
+  out=$( FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_SPAWN_NO_GUARD=1 FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    PATH="$fakebin:$PATH" \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" codex --backend cmux --mode no-mistakes --yolo off 2>&1 )
+  status=$?
+  expect_code 1 "$status" "spawn should fail after cmux leaves a pending acquisition"
+  assert_contains "$out" "retaining the acquisition record" \
+    "cmux pending acquisition failure did not report its retry record"
+  assert_absent "$home/state/.spawn-cleanup/$id.record" \
+    "cmux pending acquisition recovery left a cleanup record after exact release"
+  assert_contains "$(cat "$dir/log")" \
+    $'close-workspace\x1f--workspace\x1fbbbbbbbb-1111-1111-1111-111111111111' \
+    "cmux pending acquisition recovery did not close the resolved exact workspace"
+  pass "fm-spawn: resolves a pending cmux workspace by scoped title before exact cleanup"
+}
+
 # --- target_ready / capture ---------------------------------------------------
 
 test_target_ready_fails_when_target_absent() {
@@ -1151,6 +1189,7 @@ test_ensure_running_fails_fast_on_unauth_without_launching
 test_create_task_refuses_duplicate_label
 test_create_task_creates_and_parses_ids
 test_create_task_retains_pending_record_when_workspace_id_resolution_fails
+test_spawn_recovers_pending_cmux_workspace_by_scoped_title
 test_target_ready_fails_when_target_absent
 test_target_ready_checks_expected_label
 test_target_ready_rejects_label_mismatch

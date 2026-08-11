@@ -235,6 +235,7 @@ phase_sandbox_relaunch() {
 }
 
 phase_sandbox_teardown() {
+  rm -rf -- "$SANDBOX_BRIDGE"
   printf 'id-fm-unrelated\tfm-unrelated\tcodex\t\n' >> "$SBX_STATE"
   PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" \
     FM_FAKE_TMUX_LOG="$LOG" FM_FAKE_TMUX_CAPTURE="$PANE" \
@@ -247,6 +248,7 @@ phase_sandbox_teardown() {
   assert_absent "$SANDBOX_SUB" "sandbox teardown did not remove the secondmate home"
   assert_absent "$HOME_DIR/state/sandbox.meta" "sandbox teardown did not clear task metadata"
   assert_absent "$SANDBOX_BRIDGE" "sandbox teardown did not remove the verified bridge"
+  assert_absent "$HOME_DIR/state/sandbox-bridge-cursor/sandbox" "teardown did not remove the retained bridge cursor"
   assert_no_grep 'sbx stop id-fm-unrelated' "$SBX_LOG" "teardown stopped the unrelated sandbox"
   assert_no_grep 'sbx rm id-fm-unrelated' "$SBX_LOG" "teardown targeted the unrelated sandbox"
   assert_grep 'fm-unrelated' "$SBX_STATE" "teardown released a sandbox other than the recorded placement"

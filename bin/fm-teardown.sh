@@ -469,8 +469,8 @@ PLACEMENT_MODE=$(fm_meta_get "$META" placement_mode)
 PLACEMENT_HANDLE=$(fm_meta_get "$META" placement_handle)
 PLACEMENT_BRIDGE=$(fm_meta_get "$META" placement_bridge)
 DOCKER_SANDBOX=0
-PLACEMENT_RELEASED=0
 validate_docker_sandbox_teardown_placement() {
+  local bridge_cursor
   [ "$PLACEMENT_MODE" = direct ] || {
     echo "REFUSED: Docker Sandbox placement for $ID is not direct; preserving task state." >&2
     return 1
@@ -497,10 +497,28 @@ validate_docker_sandbox_teardown_placement() {
       return 1
       ;;
   esac
-  fm_sandbox_bridge_validate "$PLACEMENT_BRIDGE" "$STATE" "$ID" "$WT" || {
-    echo "REFUSED: Docker Sandbox bridge for $ID does not match its task state and worktree; preserving task state." >&2
+  bridge_cursor=$(fm_sandbox_bridge_cursor_path "$STATE" "$ID") || {
+    echo "REFUSED: Docker Sandbox bridge for $ID has no valid host-private cursor path; preserving task state." >&2
     return 1
   }
+  if [ -e "$PLACEMENT_BRIDGE" ] || [ -L "$PLACEMENT_BRIDGE" ]; then
+    if [ -d "$WT" ] && [ ! -L "$WT" ]; then
+      if [ -e "$bridge_cursor" ] || [ -L "$bridge_cursor" ]; then
+        fm_sandbox_bridge_validate "$PLACEMENT_BRIDGE" "$STATE" "$ID" "$WT" || return 1
+      else
+        fm_sandbox_bridge_validate_bridge "$PLACEMENT_BRIDGE" "$STATE" "$ID" "$WT" || return 1
+      fi
+    else
+      fm_sandbox_bridge_validate_bridge "$PLACEMENT_BRIDGE" "$STATE" "$ID" "$WT" allow-missing-worktree || return 1
+      if [ -e "$bridge_cursor" ] || [ -L "$bridge_cursor" ]; then
+        fm_sandbox_bridge_private_regular "$bridge_cursor" || return 1
+        fm_sandbox_bridge_read_cursor "$bridge_cursor" >/dev/null || return 1
+      fi
+    fi
+  elif [ -e "$bridge_cursor" ] || [ -L "$bridge_cursor" ]; then
+    fm_sandbox_bridge_private_regular "$bridge_cursor" || return 1
+    fm_sandbox_bridge_read_cursor "$bridge_cursor" >/dev/null || return 1
+  fi
 }
 case "$PLACEMENT" in
   '') ;;
@@ -2435,10 +2453,14 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
   fi
 fi
 if [ "$DOCKER_SANDBOX" = 1 ]; then
-  fm_sandbox_bridge_sync "$PLACEMENT_BRIDGE" "$STATE" "$ID" "$WT" || {
-    echo "REFUSED: could not synchronize Docker Sandbox bridge for $ID; preserving task state." >&2
-    exit 1
-  }
+  if [ -e "$PLACEMENT_BRIDGE" ] || [ -L "$PLACEMENT_BRIDGE" ]; then
+    if [ -d "$WT" ] && [ ! -L "$WT" ]; then
+      fm_sandbox_bridge_sync "$PLACEMENT_BRIDGE" "$STATE" "$ID" "$WT" || {
+        echo "REFUSED: could not synchronize Docker Sandbox bridge for $ID; preserving task state." >&2
+        exit 1
+      }
+    fi
+  fi
 fi
 
 
@@ -2485,7 +2507,10 @@ if [ "$DOCKER_SANDBOX" = 1 ]; then
       exit 1
     }
   fi
-  PLACEMENT_RELEASED=1
+  fm_sandbox_bridge_remove "$PLACEMENT_BRIDGE" "$STATE" "$ID" "$WT" || {
+    echo "error: Docker Sandbox bridge cleanup failed for $ID; retaining task records for retry." >&2
+    exit 1
+  }
 fi
 
 
@@ -2608,17 +2633,6 @@ if [ "$BACKEND" = herdr ]; then
     exit 1
   fi
 fi
-if [ "$DOCKER_SANDBOX" = 1 ]; then
-  [ "$PLACEMENT_RELEASED" = 1 ] || {
-    echo "error: Docker Sandbox release was not recorded for $ID; retaining task records." >&2
-    exit 1
-  }
-  fm_sandbox_bridge_remove "$PLACEMENT_BRIDGE" "$STATE" "$ID" "$WT" || {
-    echo "error: Docker Sandbox bridge cleanup failed for $ID; retaining task records for retry." >&2
-    exit 1
-  }
-fi
-
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
   remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID" || exit $?

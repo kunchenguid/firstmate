@@ -683,6 +683,10 @@ export FM_BACKEND_ACQUISITION_FILE
 SPAWN_WORKTREE_CLEANUP=0
 SPAWN_WORKTREE_PATH=
 SPAWN_WORKTREE_PROJECT=
+SPAWN_WORKTREE_OBSERVATION_PENDING=0
+SPAWN_WORKTREE_OBSERVED_PATH=
+SPAWN_WORKTREE_OBSERVED_PROJECT=
+SPAWN_WORKTREE_OBSERVATION_STATUS=
 SPAWN_BRIDGE_CLEANUP=0
 PLACEMENT_BRIDGE_ID=
 PLACEMENT_BRIDGE_CURSOR_ID=
@@ -737,7 +741,7 @@ spawn_prepare_endpoint_acquisition() {
 }
 
 spawn_register_endpoint_from_file() {
-  local file=${1:-$SPAWN_ENDPOINT_ACQUISITION_FILE} backend kind session workspace_id tab_id pane_id window_id surface_id label
+  local file=${1:-$SPAWN_ENDPOINT_ACQUISITION_FILE} backend kind session workspace_id tab_id pane_id window_id surface_id label workspace_title
   [ -n "$file" ] && [ -f "$file" ] && [ ! -L "$file" ] || return 1
   backend=$(spawn_acquisition_field "$file" backend) || return 1
   kind=$(spawn_acquisition_field "$file" kind) || return 1
@@ -762,6 +766,16 @@ spawn_register_endpoint_from_file() {
       ;;
     cmux:cmux-workspace)
       workspace_id=$(spawn_acquisition_field "$file" workspace_id) || return 1
+      spawn_register_endpoint cmux "$workspace_id" '' "$label" cmux-workspace
+      ;;
+    cmux:cmux-pending)
+      workspace_id=$(spawn_acquisition_field "$file" workspace_id) || return 1
+      workspace_title=$(spawn_acquisition_field "$file" workspace_title) || return 1
+      if [ -z "$workspace_id" ]; then
+        [ -n "$workspace_title" ] || return 1
+        workspace_id=$(fm_backend_cmux_workspace_id_for_label "$workspace_title") || return 1
+      fi
+      spawn_endpoint_result_token_valid "$workspace_id" || return 1
       spawn_register_endpoint cmux "$workspace_id" '' "$label" cmux-workspace
       ;;
     cmux:target)
@@ -867,6 +881,30 @@ spawn_register_worktree() {
   SPAWN_WORKTREE_CLEANUP=1
   SPAWN_WORKTREE_PATH=$1
   SPAWN_WORKTREE_PROJECT=$2
+  SPAWN_WORKTREE_OBSERVATION_PENDING=0
+  SPAWN_WORKTREE_OBSERVED_PATH=
+  SPAWN_WORKTREE_OBSERVED_PROJECT=
+  SPAWN_WORKTREE_OBSERVATION_STATUS=
+}
+
+spawn_note_worktree_observation() {
+  local path=${1:-} project=${2:-}
+  SPAWN_WORKTREE_OBSERVATION_PENDING=1
+  SPAWN_WORKTREE_OBSERVED_PROJECT=$project
+  case "$path" in
+    '')
+      SPAWN_WORKTREE_OBSERVED_PATH=
+      SPAWN_WORKTREE_OBSERVATION_STATUS=unresolved
+      ;;
+    *$'\n'*|*$'\r'*|*$'\t'*)
+      SPAWN_WORKTREE_OBSERVED_PATH=
+      SPAWN_WORKTREE_OBSERVATION_STATUS=invalid
+      ;;
+    *)
+      SPAWN_WORKTREE_OBSERVED_PATH=$path
+      SPAWN_WORKTREE_OBSERVATION_STATUS=unverified
+      ;;
+  esac
 }
 
 spawn_endpoint_acquisition_pending() {
@@ -919,6 +957,12 @@ spawn_cleanup_record_refresh() {
     lines+=("worktree_cleanup=1")
     lines+=("worktree_path=$SPAWN_WORKTREE_PATH")
     lines+=("worktree_project=$SPAWN_WORKTREE_PROJECT")
+  elif [ "$SPAWN_WORKTREE_OBSERVATION_PENDING" = 1 ]; then
+    pending=1
+    lines+=("worktree_cleanup=0")
+    lines+=("worktree_observation_status=${SPAWN_WORKTREE_OBSERVATION_STATUS:-unresolved}")
+    lines+=("worktree_observed_path=${SPAWN_WORKTREE_OBSERVED_PATH:-}")
+    lines+=("worktree_observed_project=${SPAWN_WORKTREE_OBSERVED_PROJECT:-}")
   fi
   if [ "$PLACEMENT_ABORT_CLEANUP" = 1 ] || [ -n "${FM_WORKSPACE_PLACEMENT_PENDING_NAME:-}" ]; then
     pending=1
@@ -973,7 +1017,9 @@ spawn_abort_cleanup() {
     [ -z "$SPAWN_ENDPOINT_ACQUISITION_FILE" ] || rm -f -- "$SPAWN_ENDPOINT_ACQUISITION_FILE" || \
       echo "warning: could not remove post-publication endpoint acquisition record for $ID" >&2
   else
-    spawn_register_endpoint_from_file || true
+    if [ "$SPAWN_ENDPOINT_CLEANUP" != 1 ]; then
+      spawn_register_endpoint_from_file || true
+    fi
     spawn_cleanup_record_refresh || echo "warning: could not persist unpublished cleanup record for ${ID:-task}" >&2
     if [ "$PLACEMENT_ABORT_CLEANUP" = 1 ]; then
     if [ -z "$PLACEMENT_HANDLE" ] && [ -n "${FM_WORKSPACE_PLACEMENT_ACQUIRED_HANDLE:-}" ]; then
@@ -2657,11 +2703,14 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
         ;;
     esac
     WT=$acquired_worktree
-    spawn_register_worktree "$WT" "$PROJ_ABS"
+    spawn_note_worktree_observation "$WT" "$PROJ_ABS"
     validate_spawn_worktree "treehouse get --lease" "$T"
+    spawn_register_worktree "$WT" "$PROJ_ABS"
     acquired_worktree_real=$(real_path_or_raw "$WT")
     spawn_send_text_line "$WT_TARGET" "cd $(shell_quote "$WT")"
   else
+    WT=
+    spawn_note_worktree_observation '' "$PROJ_ABS"
     spawn_send_text_line "$WT_TARGET" 'treehouse get'
   fi
 
@@ -2700,8 +2749,10 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
           candidate=""
         fi
       elif [ "$p_real" != "$PROJ_ABS_REAL" ]; then
+        spawn_note_worktree_observation "$p" "$PROJ_ABS"
         if [ -n "$candidate" ] && [ "$p_real" = "$candidate" ]; then
           WT="$p"
+          validate_spawn_worktree "treehouse get" "$T"
           spawn_register_worktree "$WT" "$PROJ_ABS"
           break
         fi
