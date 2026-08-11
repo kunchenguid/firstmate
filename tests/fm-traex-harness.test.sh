@@ -200,6 +200,21 @@ run_traex_spawn() {
       --model Doubao-Seed-2.1-Pro --effort "$effort" --mode no-mistakes --yolo off 2>&1
 }
 
+run_raw_spawn() {  # <command>
+  FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 FM_BACKEND_HERDR_EVENTS_FORCE=1 HERDR_SESSION=traex-test-session \
+    FM_FAKE_HERDR_STATE="$CASE_DIR/herdr.state" FM_FAKE_HERDR_LOG="$CASE_DIR/herdr.log" \
+    FM_FAKE_LAUNCH_LOG="$CASE_DIR/launch.log" FM_FAKE_PHASE_FILE="$CASE_DIR/phase" \
+    FM_FAKE_TRUST_COUNT="$CASE_DIR/trust-count" FM_FAKE_CWD_FILE="$CASE_DIR/cwd" \
+    FM_FAKE_PROJECT="$PROJECT_DIR" FM_FAKE_WORKTREE="$WT_DIR" \
+    PATH="$FAKEBIN_DIR:$PATH" \
+    env -u HERDR_PANE_ID -u HERDR_SOCKET_PATH -u HERDR_ENV -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID \
+    "$SPAWN" "$TASK_ID" "$PROJECT_DIR" "$1" --backend herdr \
+      --mode no-mistakes --yolo off 2>&1
+}
+
 run_traex_send() {  # <text>
   FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
@@ -227,6 +242,25 @@ run_traex_reconcile() {
     env -u HERDR_PANE_ID -u HERDR_SOCKET_PATH -u HERDR_ENV -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID \
     bash -c '. "$1/bin/fm-backend.sh"; fm_backend_source herdr; fm_backend_herdr_traex_reconcile_current "$2" "$3" "$4"' \
       _ "$ROOT" "$HOME_DIR/state" traex-test-session w1:p2
+}
+
+run_traex_poll_reconcile() {
+  FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" \
+    FM_BACKEND_HERDR_EVENTS_FORCE=1 HERDR_SESSION=traex-test-session \
+    FM_FAKE_HERDR_STATE="$CASE_DIR/herdr.state" FM_FAKE_HERDR_LOG="$CASE_DIR/herdr.log" \
+    FM_FAKE_LAUNCH_LOG="$CASE_DIR/launch.log" FM_FAKE_PHASE_FILE="$CASE_DIR/phase" \
+    FM_FAKE_TRUST_COUNT="$CASE_DIR/trust-count" FM_FAKE_CWD_FILE="$CASE_DIR/cwd" \
+    FM_FAKE_PROJECT="$PROJECT_DIR" FM_FAKE_WORKTREE="$WT_DIR" \
+    PATH="$FAKEBIN_DIR:$PATH" \
+    env -u HERDR_PANE_ID -u HERDR_SOCKET_PATH -u HERDR_ENV -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID \
+    bash -c '. "$1/bin/fm-backend.sh"; fm_backend_source herdr; fm_backend_herdr_reconcile_transitions "$2" "$3" "$3:$4"' \
+      _ "$ROOT" "$HOME_DIR/state" traex-test-session w1:p2
+}
+
+set_traex_readiness() {  # <expected> <new>
+  FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" \
+    bash -c '. "$1/bin/fm-backend.sh"; fm_backend_source herdr; fm_backend_herdr_traex_readiness_set "$2" "$3" "$4" "$5" "$6"' \
+      _ "$ROOT" "$HOME_DIR/state" traex-test-session w1:p2 "$1" "$2"
 }
 
 run_traex_observe() {  # <reported-status> <reported-agent>
@@ -272,7 +306,7 @@ test_marker_detection_is_scoped() {
 }
 
 test_spawn_accepts_only_exact_trust_then_observes_working() {
-  local rec out status launch meta verdict
+  local rec out status launch meta verdict lifecycle
   rec=$(make_spawn_case launch)
   read_spawn_case "$rec"
   out=$(run_traex_spawn)
@@ -295,6 +329,11 @@ test_spawn_accepts_only_exact_trust_then_observes_working() {
   assert_grep 'traex_ready=1' "$meta" "spawn published success without lifecycle readiness"
   verdict=$(fm_busy_classify herdr traex-test-session:w1:p2 traex "$TASK_ID" "$HOME_DIR/state")
   [ "$verdict" = 'busy herdr-traex' ] || fail "working launch did not bind semantic lifecycle, got '$verdict'"
+  lifecycle=$(fm_busy_record_read "$HOME_DIR/state" "$TASK_ID")
+  case "$lifecycle" in
+    'busy herdr-traex agent-working '*) ;;
+    *) fail "initial native working did not flow through the bound transition record: $lifecycle" ;;
+  esac
   pass "traex spawn accepts only the exact fresh-worktree trust chooser and requires native working"
 }
 
@@ -461,11 +500,59 @@ test_secondmate_and_raw_launch_refuse() {
       --mode no-mistakes --yolo off 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "a shell-obfuscated raw TraeX command bypassed admission"
-  assert_contains "$out" 'raw shell-wrapper' \
-    "shell-wrapped raw TraeX refusal did not name the fail-closed admission boundary"
+  assert_contains "$out" 'verified launch template' \
+    "shell-wrapped raw TraeX refusal did not name the verified boundary"
   [ ! -s "$CASE_DIR/herdr.log" ] || fail "a refused raw TraeX command queried or created Herdr state"
   assert_absent "$HOME_DIR/state/$TASK_ID.meta" "a refused raw TraeX command published task metadata"
   pass "traex refuses secondmate and raw-command promotion"
+}
+
+test_non_traex_raw_shell_launch_remains_supported() {
+  local rec out status launch
+  rec=$(make_spawn_case non-traex-raw)
+  read_spawn_case "$rec"
+  out=$(run_raw_spawn "sh -c 'echo ordinary-raw-ok'")
+  status=$?
+  expect_code 0 "$status" "ordinary raw shell launch should retain existing Herdr behavior: $out"
+  launch=$(cat "$CASE_DIR/launch.log")
+  [ "$launch" = "sh -c 'echo ordinary-raw-ok'" ] \
+    || fail "ordinary non-TraeX raw launch changed: $launch"
+  assert_grep 'harness=sh' "$HOME_DIR/state/$TASK_ID.meta" \
+    "ordinary raw shell launch did not retain its detected harness"
+  pass "non-traex raw shell launch behavior remains available"
+}
+
+test_send_refuses_unready_or_invalid_lifecycle_before_typing() {
+  local rec out status before after
+  rec=$(make_spawn_case send-readiness)
+  read_spawn_case "$rec"
+  out=$(run_traex_spawn)
+  status=$?
+  expect_code 0 "$status" "TraeX spawn for steering admission should succeed: $out"
+  before=$(wc -l < "$CASE_DIR/launch.log" | tr -d '[:space:]')
+
+  set_traex_readiness 1 pending || fail "could not install pending readiness fixture"
+  out=$(run_traex_send 'must not type while pending')
+  status=$?
+  [ "$status" -ne 0 ] || fail "TraeX steer accepted pending launch readiness"
+  after=$(wc -l < "$CASE_DIR/launch.log" | tr -d '[:space:]')
+  [ "$after" = "$before" ] || fail "pending TraeX steer typed before exact readiness validation"
+
+  set_traex_readiness pending failed || fail "could not install failed readiness fixture"
+  out=$(run_traex_send 'must not type after launch failure')
+  status=$?
+  [ "$status" -ne 0 ] || fail "TraeX steer accepted failed launch readiness"
+  after=$(wc -l < "$CASE_DIR/launch.log" | tr -d '[:space:]')
+  [ "$after" = "$before" ] || fail "failed TraeX steer typed before exact readiness validation"
+
+  set_traex_readiness failed 1 || fail "could not restore ready fixture"
+  printf 'malformed\n' > "$HOME_DIR/state/$TASK_ID.busy-state"
+  out=$(run_traex_send 'must not type with malformed lifecycle')
+  status=$?
+  [ "$status" -ne 0 ] || fail "TraeX steer accepted a malformed lifecycle record"
+  after=$(wc -l < "$CASE_DIR/launch.log" | tr -d '[:space:]')
+  [ "$after" = "$before" ] || fail "malformed-lifecycle TraeX steer typed before validation"
+  pass "traex steering validates exact readiness and lifecycle before typing"
 }
 
 test_send_persists_working_before_delivery_ack() {
@@ -538,6 +625,29 @@ test_stale_idle_cannot_close_a_new_working_turn() {
   assert_absent "$HOME_DIR/state/$TASK_ID.turn-ended" \
     "queued old idle emitted a false completion for the new turn"
   pass "traex transition folding revalidates native level before semantic mutation"
+}
+
+test_failed_and_orphaned_pending_launches_reconcile_terminal_level() {
+  local readiness rec out status verdict
+  for readiness in failed pending; do
+    rec=$(make_spawn_case "terminal-$readiness")
+    read_spawn_case "$rec"
+    out=$(run_traex_spawn)
+    status=$?
+    expect_code 0 "$status" "TraeX spawn for $readiness terminal recovery should succeed: $out"
+    set_traex_readiness 1 "$readiness" || fail "could not install $readiness readiness fixture"
+    rm -f "$HOME_DIR/state/$TASK_ID.turn-ended"
+    printf idle > "$CASE_DIR/phase"
+    run_traex_poll_reconcile || fail "$readiness TraeX lifecycle did not reconcile through polling"
+    verdict=$(fm_busy_classify herdr traex-test-session:w1:p2 traex "$TASK_ID" "$HOME_DIR/state")
+    [ "$verdict" = 'idle herdr-traex' ] \
+      || fail "$readiness TraeX launch remained busy after native idle: $verdict"
+    assert_present "$HOME_DIR/state/$TASK_ID.turn-ended" \
+      "$readiness TraeX launch emitted no recovered completion notification"
+    assert_grep 'traex_ready=failed' "$HOME_DIR/state/$TASK_ID.meta" \
+      "$readiness TraeX launch did not retain terminal recovery readiness"
+  done
+  pass "failed and orphaned pending TraeX launches reconcile terminal levels"
 }
 
 test_interrupted_spawn_clears_pending_readiness() {
@@ -642,9 +752,12 @@ test_post_ready_reconciliation_failure_preserves_bound_lifecycle
 test_max_effort_refuses_before_endpoint
 test_unsupported_tmux_refuses_before_endpoint
 test_secondmate_and_raw_launch_refuse
+test_non_traex_raw_shell_launch_remains_supported
+test_send_refuses_unready_or_invalid_lifecycle_before_typing
 test_send_persists_working_before_delivery_ack
 test_send_from_blocked_requires_native_working
 test_stale_idle_cannot_close_a_new_working_turn
+test_failed_and_orphaned_pending_launches_reconcile_terminal_level
 test_interrupted_spawn_clears_pending_readiness
 test_native_transition_fold_is_sparse_and_bound
 test_pending_trust_block_is_suppressed_only_until_launch_fails

@@ -226,8 +226,8 @@ The shared crew-state path therefore accepts a native `busy` as evidence of acti
 A human-blocked permission dialog has no busy banner and still surfaces.
 
 TraeX is the narrow exception that turns Herdr's native transition stream into its task-owned semantic record.
-`fm-spawn.sh` supports TraeX only for ordinary workers/scouts on Herdr, requires the event capability before endpoint creation, arms one generation, and publishes `traex_ready=1` only after the initial task instructions are observed in native `working`. Effort values `low` through `xhigh` use TraeX's verified reasoning configuration; unverified `max` is refused before endpoint creation.
-Working, blocked, idle, and done transitions are then persisted as source `herdr-traex`; submit confirmation persists its observed working level before acknowledging a steer, and only busy-to-idle/done touches the ordinary turn-ended notification, so reconnect level reconciliation can recover one missed completion without repeating every idle level.
+`fm-spawn.sh` supports TraeX only for ordinary workers/scouts on Herdr, requires the event capability before endpoint creation, arms one generation, routes the observed initial native `working` level through the metadata-bound transition writer, and only then publishes `traex_ready=1`. Effort values `low` through `xhigh` use TraeX's verified reasoning configuration; unverified `max` is refused before endpoint creation.
+Working, blocked, idle, and done transitions are then persisted as source `herdr-traex`; steering requires an exact ready binding and valid armed lifecycle before input is typed, submit confirmation persists its observed working level before acknowledging a steer, and only a native working-to-idle/done fold touches the ordinary turn-ended notification. If launch ownership disappears while readiness is pending, reconciliation marks it failed; pending or failed startup records that already persisted native working remain eligible for terminal-level reconciliation, so reconnect can recover one missed completion without repeating every idle level.
 No other harness inherits that trust in native idle.
 
 A fresh isolated TraeX task copy may stop at `directory_trust_prompt` even under `-y`.
@@ -277,11 +277,11 @@ Protocol 16 can subscribe to `pane.agent_status_changed` over one bounded Unix-s
 `bin/fm-transition-lib.sh` owns the backend-neutral transition vocabulary and policy.
 The Herdr adapter subscribes before reconciling current levels, buffers edges during reconciliation, and returns fresh blocked transitions for this home's panes.
 The watcher maps the pane back to the task and skips secondmate endpoints and declared `paused:` waits.
-For an exact ready TraeX task only, the same stream also updates its armed semantic lifecycle and durable turn-ended notification before the shared blocked/defer policy runs; every other harness remains byte-for-byte on the existing policy.
+For an exact ready TraeX task, the same stream also updates its armed semantic lifecycle and durable turn-ended notification before the shared blocked/defer policy runs. It also terminally reconciles an orphaned pending or failed launch only when the bound lifecycle proves native working was already persisted; every other harness remains byte-for-byte on the existing policy.
 
 The push path only shortens latency.
 Polling runs every cycle and remains the permanent fallback when protocol 16, the event schema, Python, connection, subscription, or repeated reader execution is unavailable.
-That fallback folds the current native level for each bound ready TraeX worker before sleeping, so disabling push does not disable lifecycle completion.
+That fallback folds the current native level for each bound TraeX worker before sleeping, including terminal recovery for an orphaned pending or failed launch, so disabling push does not disable lifecycle completion.
 There is still one watcher process; the event reader is a bounded child of that watcher.
 
 `tests/fm-backend-herdr-eventwait-smoke.test.sh`, `tests/fm-transition-lib.test.sh`, and `tests/fm-supervision-events.test.sh` cover capability, subscribe-then-reconcile ordering, dedupe, exemptions, and polling fallback.
