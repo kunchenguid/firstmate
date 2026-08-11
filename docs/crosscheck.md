@@ -7,6 +7,7 @@ No-mistakes remains the owner of that validation pipeline.
 By default, the review portion is intentionally close to "no-mistakes review with a fresh, different model."
 Most of its review-quality value comes from that cross-model independence.
 A home can explicitly accept reduced model independence for a proven-separate reviewer account, but the evidence always identifies that weaker mode.
+For exact pre-snapshot Pi work that genuinely cannot be replaced under a newly bound author lane, a last-resort local admission can acknowledge that historical author-account independence is unproven; it never turns current credentials into invented historical proof, and the evidence labels that weaker mode too.
 The separate mechanism earns its keep only through four contracts that no-mistakes does not currently own: durable finding lifecycle across runs, gate-executed reproduction evidence, gate-executed mutation proof for fixes, and an exact reviewed SHA passed atomically to GitHub at merge.
 If those contracts move into no-mistakes, the separate reviewer runner should be removed rather than defended as a parallel product.
 
@@ -40,13 +41,60 @@ The file is local and gitignored at `config/crosscheck-reviewer.json`.
 }
 ```
 
-Crosscheck resolves each configured account home and keeps every entry that satisfies the home's model policy and whose account is provably not the author's, in configured order.
+Crosscheck resolves each configured account home and keeps every entry that satisfies the home's model policy and either proves account separation or carries an exact legacy-author admission, in configured order.
 Model separation is mandatory by default.
 The optional local `config/crosscheck-same-model` file relaxes only that screen when it contains exactly `on`; an absent file or exactly `off` preserves the default, and any other value or unsafe file shape is refused.
 This setting is local and gitignored, is read fresh for each reviewer selection, and is not inferred from the reviewer roster or environment.
 It does not weaken account separation: the same upstream account and an unreadable identity remain ineligible even when the setting is on.
 A selected same-model reviewer receives a visible reduced-independence prompt that directs it to attack the change adversarially, falsify the author's claims instead of confirming them, and report a finding when uncertain.
 Its ledger reviewer record carries `model_independence: same-model`, and the readable report labels the run `SAME-MODEL` so the reduced independence cannot be mistaken for a cross-model review.
+
+The primary recovery for Pi work created before launch-bound identity snapshots is **replacement under a newly bound author lane**, not admission.
+Create a normal new Pi ship lane after the snapshot support landed, require its metadata to carry the launch-bound `author_account_identity`, have that lane inspect and take ownership of the complete intended change on a fresh base, revalidate it, and publish a replacement commit to the existing writable PR branch.
+Run Crosscheck for the replacement head with the new lane's task id.
+That gives the gate real author-account proof and keeps the ordinary separation rule intact.
+Copying an account id into old metadata is never part of this path, and merely relabeling the old task is not re-authorship.
+The old lane or worktree being gone is not by itself a reason for admission when the PR branch can still accept a replacement.
+
+`config/crosscheck-legacy-author-admissions.json` is the last-resort relaxation for a pre-snapshot Pi head that genuinely cannot be replaced under a newly bound lane, such as a PR branch the fleet cannot write or a head whose required provenance cannot be rewritten.
+It is local, gitignored, read fresh at reviewer preflight, and absent means no admission.
+There is no global on switch.
+Each entry admits exactly one task, canonical PR URL, and live head SHA, and must repeat the Pi harness and provider-slot-prefixed model recorded in task metadata.
+It also requires an exact UTC approval time, literal `legacy_author_provenance: pre-snapshot-pi`, literal `replacement_unavailable: true`, one printable-line `replacement_unavailable_reason`, and literal `admit_unproven_author_account: true` acknowledgement.
+The whole file is validated and unsafe shapes fail closed.
+
+```json
+{
+  "admissions": [
+    {
+      "task_id": "pause-vs-orphan-run-p6",
+      "pull_request": "https://github.com/ruby-dlee/firstmate/pull/116",
+      "head_sha": "0123456789abcdef0123456789abcdef01234567",
+      "author_harness": "pi",
+      "author_model": "openai-codex-5/gpt-5.6-sol",
+      "approved_at": "2026-08-10T12:00:00Z",
+      "legacy_author_provenance": "pre-snapshot-pi",
+      "replacement_unavailable": true,
+      "replacement_unavailable_reason": "PR branch is not writable by this fleet; exact-head replacement cannot be published.",
+      "admit_unproven_author_account": true
+    }
+  ]
+}
+```
+
+A matching entry is accepted only when task metadata still names an account-less Pi lane with no `author_account_identity` and no modern `author_identity_snapshot_epoch` marker.
+Every new Pi launch under snapshot-aware code records `author_identity_snapshot_epoch: launch-bound-v1` even when credential capture fails.
+Recovery preserves that marker only when the prior metadata already carried it, including after a later capture failure or account change, and never mints it for a legacy lane.
+The admission contributes the positive `pre-snapshot-pi` provenance assertion.
+It cannot downgrade routed work or a modern Pi snapshot, and a head change requires an explicitly renewed entry.
+The rule never populates metadata and never derives the old author from today's mutable provider-slot credential.
+It requires the selected reviewer to expose a readable executing account, hashes that identity at selection, and rechecks the hash against the launch-bound credential immediately before review.
+That binds who reviewed without pretending that reviewer differs from the unknowable historical author.
+The prompt says plainly that the reviewer may use the author's upstream account, removes the ordinary claim that the reviewer is account-independent, and demands disconfirming evidence.
+The ledger records `author_account_independence: unproven-legacy-admission`, the admission digest, approval time, pre-snapshot provenance, replacement-unavailable attestation and reason, historical harness/model, and reviewer-account digest.
+The readable report labels `LEGACY AUTHOR ACCOUNT UNPROVEN` and repeats the admission digest, time, provenance, historical harness/model, reviewer identity digest, and replacement-unavailable reason.
+When the same-model option also applies, both warnings and both evidence labels remain visible.
+
 Crosscheck then binds the provider's executing credential selector to that exact path and requires the verdict plus a Bash-created receipt to report the selector and actual private `HOME`.
 Account separation therefore depends on the executing credential source rather than a configuration label.
 Every reviewer disables reviewed-repository instruction discovery at launch: Codex sets `project_doc_max_bytes=0`, Claude uses `--safe-mode`, and Pi uses `--no-context-files`.
@@ -65,7 +113,8 @@ Failover is limited to faults that prevented a verdict: a launch failure, an unu
 A reviewer that reached the model and then declined clearance, returned no valid artifact, or returned a malformed one ends the run on the spot, because that is the reviewer's own conclusion and a second account must not be used to shop for a friendlier one.
 Each abandoned attempt is recorded as its own `tool-failure` run, so the ledger names every account that was tried and why it was left, and each attempt gets its own pristine exact-head checkout so no reviewer inherits an earlier reviewer's helpers or scratch state.
 Selection therefore makes the gate as available as the roster rather than as available as its first entry.
-Every candidate passed the configured model policy and the mandatory account-separation screen, and `run_reviewer` still re-proves account separation against the credential it actually binds.
+Every candidate passed the configured model policy and either the ordinary mandatory account-separation screen or an exact legacy admission.
+`run_reviewer` re-proves ordinary account separation against the credential it actually binds, while a legacy-admitted run re-proves only the selected reviewer's identity and preserves the explicit unproven-author label.
 
 One upstream account routinely exists behind several directories at once, so two different `account_home` paths can execute as the same account.
 Codex and Pi both authenticate against OpenAI, and a Claude config home that records no account of its own borrows whatever credential the environment supplies.
@@ -80,7 +129,7 @@ Requiring one, or an `account_routing_emergency_bypass=1` marker in its place, m
 A different supported provider proves account separation by namespace for any account-less author.
 A Pi author additionally records the exact selected provider slot in its model prefix, and `fm-spawn.sh` copies the selected Pi credential and configuration directory into restrictive task-private storage before launch.
 It derives the slot's `accountId` from that private copy, records it in task metadata, and binds the actual Pi launch to the same directory through `PI_CODING_AGENT_DIR` on every spawn backend.
-Same-provider eligibility requires that launch-bound recorded identity and never re-reads ambient Pi credentials as author proof; legacy or otherwise missing snapshots fail closed.
+Same-provider eligibility requires that launch-bound recorded identity and never re-reads ambient Pi credentials as author proof; a missing snapshot fails closed unless the exact task, PR, and head carry the explicit legacy admission above.
 Recovery takes a new private copy and preserves eligibility only when its identity matches the previously recorded identity exactly, while a changed account drops the recorded field instead of migrating the task's author identity.
 That identity lets a same-provider reviewer prove it executes as another OpenAI account without inventing an `account_home` for the author.
 A missing directory, unsafe or failed copy, malformed auth file, absent slot, or unreadable `accountId` proves nothing and leaves every same-provider reviewer ineligible.
@@ -89,7 +138,7 @@ Model identity compares the model itself, not the recorded string: Pi records `<
 That canonical identity is screened out by default and is what marks a selected review as same-model when the explicit relaxation is on.
 Provider is what the namespace fallback compares, not harness: Codex and Pi are both the OpenAI provider, while Anthropic is separate.
 The accepted profiles are Codex `gpt-5.6-sol` xhigh, Claude `claude-opus-5` xhigh, and Pi `gpt-5.6-sol` xhigh; no allowlist change is needed to enable the existing Codex profile.
-Absent reviewer configuration, unavailable credentials, model-policy mismatch, and unprovable account separation all produce `CROSSCHECK TOOL-FAILURE` and a nonzero exit before reviewer launch.
+Absent reviewer configuration, unavailable credentials, model-policy mismatch, and unprovable account separation without an exact legacy admission all produce `CROSSCHECK TOOL-FAILURE` and a nonzero exit before reviewer launch.
 
 Crosscheck requires Python 3.11 or newer and refuses to run on anything older.
 This is a safety floor rather than a style preference: the bounded-read layer rejects hostile JSON integers by relying on CPython's integer/string conversion limit, which first exists in 3.11, and on an older interpreter that rejection silently stops happening while every banner the gate prints reads exactly the same.
@@ -154,7 +203,8 @@ A `verified-fixed` lifecycle remains durable, but its proof clears only the exac
 
 Each run has one outcome class.
 A run that used the local same-model relaxation records `reviewer.model_independence` as `same-model`; older and ordinary cross-model runs omit that field.
-The readable report renders the same distinction before its summary.
+A legacy-admitted run separately records `reviewer.author_account_independence` as `unproven-legacy-admission` plus the exact admission and reviewer-identity digests.
+The readable report renders both distinctions before its summary.
 
 - `tool-failure` means environment, task metadata, reviewer configuration, exact-head fetch, executing-account binding, or required command-execution proof prevented a trustworthy verdict.
 - `cannot-certify` means a reviewer completed but the changed implementation's own test system had no trustworthy mutation-certification route the gate could execute.
@@ -335,6 +385,8 @@ The retained live runtime proof is the change receipt for this patch; the opt-in
 Its `test_pytest_runner_resolves_through_a_uv_aware_ladder` case is the named regression for runner-name resolution: it pins monorepo uv-project discovery, the skipped uv rung outside a project, the unchanged absent-runner refusal, and pytest's retained node-id support.
 Its `test_account_less_known_provider_lane_is_reviewable` case is the named regression for an account-less Pi lane whose provider-slot identity is unreadable: it requires a cross-provider reviewer to clear it and a same-provider reviewer to remain refused.
 Its `test_same_model_relaxation_requires_proven_separate_account` case provides a launch-recorded routed Pi identity and proves that default and explicit-off policy reject same-provider review, opt-in still rejects missing, same, or unreadable account proof, ambient credential drift cannot replace the snapshot, and only a recorded-distinct OpenAI account becomes eligible.
+Its `test_legacy_author_admission_is_exact_and_explicit` case proves that absent and stale admissions fail closed, replacement-unavailable acknowledgement is mandatory, a matching entry never synthesizes author identity, a modern snapshot cannot be downgraded, and an admitted reviewer still needs a readable executing account.
+Its `test_legacy_author_admission_is_visible_in_prompt_and_evidence` case proves that the weaker mode is explicit in the adversarial prompt, ledger, and readable report, including both same-model and unproven-author labels.
 Its `test_typescript_jest_mutation_proof_can_clear` and `test_inadequate_typescript_jest_coverage_stays_blocking` cases prove that package-governed Jest coverage can certify a TypeScript fix while a named Jest test that stays green under mutation keeps the finding blocking.
 Its `test_preexisting_jest_runner_cannot_certify` case proves that a committed Jest-shaped output script is refused before package-manager materialization, and `test_local_fake_jest_package_cannot_certify` proves a lockfile-routed local fake package cannot substitute for official registry provenance.
 Its `test_local_transitive_jest_package_cannot_certify` case keeps top-level Jest registry-authenticated while substituting a local `jest-cli`, and proves that every transitive runtime package must remain inside the authenticated closure.

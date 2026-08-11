@@ -53,6 +53,11 @@ MAX_LEDGER_BYTES = 16 * 1024 * 1024
 REVIEW_STATUS_MAX_BYTES = 4 * 1024 * 1024
 MAX_REVIEWER_CONFIG_BYTES = 64 * 1024
 MAX_SAME_MODEL_CONFIG_BYTES = 16
+MAX_LEGACY_AUTHOR_ADMISSION_CONFIG_BYTES = 64 * 1024
+MAX_LEGACY_AUTHOR_ADMISSIONS = 128
+LEGACY_AUTHOR_ADMISSION_MODE = "unproven-legacy-admission"
+PI_AUTHOR_IDENTITY_SNAPSHOT_EPOCH = "launch-bound-v1"
+LEGACY_AUTHOR_PROVENANCE = "pre-snapshot-pi"
 MAX_LEDGER_PROMPT_BYTES = 64_000
 MAX_PROJECTED_FINDINGS = 512
 MAX_PROJECTED_EVENTS = 8
@@ -236,6 +241,174 @@ def same_model_review_enabled(home: Path) -> bool:
         "config/crosscheck-same-model must contain exactly 'on' or 'off'",
     )
     return value == "on"
+
+
+def legacy_author_admission(
+    home: Path,
+    task_id: str,
+    url: str,
+    head_sha: str,
+    meta: dict[str, str],
+) -> dict[str, str] | None:
+    """Return one exact-head legacy admission without inventing author identity.
+
+    The file is a last-resort policy record for a pre-snapshot Pi lane after
+    replacement under a newly bound author lane was declared unavailable. It
+    never supplies an account id and never changes modern author-account checks.
+    """
+
+    path = home / "config" / "crosscheck-legacy-author-admissions.json"
+    if not path.exists() and not path.is_symlink():
+        return None
+    value = read_json(
+        path,
+        "legacy author admission configuration",
+        maximum_bytes=MAX_LEGACY_AUTHOR_ADMISSION_CONFIG_BYTES,
+        maximum_items=4096,
+    )
+    require(isinstance(value, dict), "legacy author admission configuration must be an object")
+    require_exact_keys(value, {"admissions"}, "legacy author admission configuration")
+    admissions = value.get("admissions")
+    require(
+        isinstance(admissions, list) and admissions,
+        "legacy author admission configuration.admissions must be a nonempty array",
+    )
+    require(
+        len(admissions) <= MAX_LEGACY_AUTHOR_ADMISSIONS,
+        "legacy author admission configuration has too many admissions",
+    )
+
+    normalized_url = url.rstrip("/")
+    seen: set[tuple[str, str, str]] = set()
+    scoped: list[dict[str, Any]] = []
+    exact: list[dict[str, Any]] = []
+    required_fields = {
+        "task_id",
+        "pull_request",
+        "head_sha",
+        "author_harness",
+        "author_model",
+        "approved_at",
+        "legacy_author_provenance",
+        "replacement_unavailable",
+        "replacement_unavailable_reason",
+        "admit_unproven_author_account",
+    }
+    for index, admission in enumerate(admissions):
+        label = f"legacy author admission configuration.admissions[{index}]"
+        require(isinstance(admission, dict), f"{label} must be an object")
+        require_exact_keys(admission, required_fields, label)
+        configured_task = require_string(admission.get("task_id"), f"{label}.task_id")
+        require(ID_RE.fullmatch(configured_task) is not None, f"{label}.task_id is invalid")
+        pull_request = require_string(
+            admission.get("pull_request"), f"{label}.pull_request"
+        )
+        parsed = urlsplit(pull_request)
+        path_parts = parsed.path.strip("/").split("/")
+        require(
+            parsed.scheme == "https"
+            and parsed.netloc == "github.com"
+            and not parsed.query
+            and not parsed.fragment
+            and len(path_parts) == 4
+            and path_parts[2] == "pull"
+            and path_parts[3].isdigit()
+            and int(path_parts[3]) > 0
+            and all(unquote(part) == part and part for part in path_parts)
+            and pull_request == pull_request.rstrip("/"),
+            f"{label}.pull_request must be a canonical https://github.com/OWNER/REPO/pull/NUMBER URL",
+        )
+        configured_head = require_string(admission.get("head_sha"), f"{label}.head_sha")
+        require(SHA_RE.fullmatch(configured_head) is not None, f"{label}.head_sha is invalid")
+        author_harness = require_string(
+            admission.get("author_harness"), f"{label}.author_harness"
+        )
+        require(author_harness == "pi", f"{label}.author_harness must equal pi")
+        author_model = require_string(
+            admission.get("author_model"), f"{label}.author_model"
+        )
+        provider_slot, separator, _model = author_model.partition("/")
+        require(
+            bool(separator)
+            and PI_OPENAI_PROVIDER_SLOT_RE.fullmatch(provider_slot) is not None,
+            f"{label}.author_model must name a routed Pi OpenAI provider slot and model",
+        )
+        approved_at = require_string(admission.get("approved_at"), f"{label}.approved_at")
+        try:
+            dt.datetime.strptime(approved_at, "%Y-%m-%dT%H:%M:%SZ")
+        except ValueError:
+            fail(f"{label}.approved_at must be an exact UTC timestamp like 2026-08-10T12:00:00Z")
+        require(
+            admission.get("legacy_author_provenance") == LEGACY_AUTHOR_PROVENANCE,
+            f"{label}.legacy_author_provenance must equal {LEGACY_AUTHOR_PROVENANCE}",
+        )
+        require(
+            admission.get("replacement_unavailable") is True,
+            f"{label}.replacement_unavailable must equal true",
+        )
+        replacement_reason = require_string(
+            admission.get("replacement_unavailable_reason"),
+            f"{label}.replacement_unavailable_reason",
+        )
+        require(
+            replacement_reason == replacement_reason.strip()
+            and "\n" not in replacement_reason
+            and "\r" not in replacement_reason
+            and all(character >= " " for character in replacement_reason),
+            f"{label}.replacement_unavailable_reason must be one trimmed printable line",
+        )
+        require(
+            len(replacement_reason.encode("utf-8")) <= 1000,
+            f"{label}.replacement_unavailable_reason must be at most 1000 UTF-8 bytes",
+        )
+        require(
+            admission.get("admit_unproven_author_account") is True,
+            f"{label}.admit_unproven_author_account must equal true",
+        )
+        scope = (configured_task, pull_request, configured_head)
+        require(scope not in seen, f"legacy author admission configuration duplicates {scope}")
+        seen.add(scope)
+        if configured_task == task_id and pull_request == normalized_url:
+            scoped.append(admission)
+            if configured_head == head_sha:
+                exact.append(admission)
+
+    if not scoped:
+        return None
+    require(
+        len(exact) == 1,
+        "legacy author admission exists for this task and pull request but not "
+        f"for live head {head_sha}; renew the explicit admission for the exact head",
+    )
+    admission = exact[0]
+    require(
+        meta.get("harness") == "pi"
+        and "account_home" not in meta
+        and "author_account_identity" not in meta
+        and "author_identity_snapshot_epoch" not in meta,
+        "legacy author admission applies only to a pre-snapshot account-less Pi lane; "
+        "it cannot downgrade a modern or routed author identity",
+    )
+    require(
+        admission["author_harness"] == meta["harness"]
+        and admission["author_model"] == meta["model"],
+        "legacy author admission author harness/model does not match task metadata",
+    )
+    digest_material = json.dumps(admission, sort_keys=True, separators=(",", ":"))
+    return {
+        "author_account_independence": LEGACY_AUTHOR_ADMISSION_MODE,
+        "legacy_admission_sha256": hashlib.sha256(
+            digest_material.encode("utf-8")
+        ).hexdigest(),
+        "legacy_admission_approved_at": admission["approved_at"],
+        "legacy_replacement_unavailable": "true",
+        "legacy_replacement_unavailable_reason": admission[
+            "replacement_unavailable_reason"
+        ],
+        "legacy_author_provenance": admission["legacy_author_provenance"],
+        "legacy_author_harness": admission["author_harness"],
+        "legacy_author_model": admission["author_model"],
+    }
 
 
 def claude_scoped_keychain_service(account_home: Path) -> str:
@@ -840,6 +1013,7 @@ def parse_meta(path: Path) -> dict[str, str]:
             "model",
             "account_home",
             "author_account_identity",
+            "author_identity_snapshot_epoch",
             "account_routing_emergency_bypass",
         }:
             require(
@@ -871,6 +1045,13 @@ def parse_meta(path: Path) -> dict[str, str]:
             and "/" in result["model"],
             f"task metadata at {path} records author_account_identity without "
             "a routed Pi OpenAI provider slot",
+        )
+    if "author_identity_snapshot_epoch" in result:
+        require(
+            result["author_identity_snapshot_epoch"]
+            == PI_AUTHOR_IDENTITY_SNAPSHOT_EPOCH
+            and result["harness"] == "pi",
+            f"task metadata at {path} has an invalid author identity snapshot epoch",
         )
     if "account_routing_emergency_bypass" in result:
         require(
@@ -2687,6 +2868,73 @@ def validate_ledger(value: Any, task_id: str, url: str) -> dict[str, Any]:
                 reviewer.get("model_independence") in {None, "same-model"},
                 f"{label}.reviewer.model_independence is invalid",
             )
+            author_account_mode = reviewer.get("author_account_independence")
+            require(
+                author_account_mode in {None, LEGACY_AUTHOR_ADMISSION_MODE},
+                f"{label}.reviewer.author_account_independence is invalid",
+            )
+            legacy_fields = {
+                "legacy_admission_sha256",
+                "legacy_admission_approved_at",
+                "legacy_replacement_unavailable",
+                "legacy_replacement_unavailable_reason",
+                "legacy_author_provenance",
+                "legacy_author_harness",
+                "legacy_author_model",
+                "reviewer_account_identity_sha256",
+            }
+            if author_account_mode == LEGACY_AUTHOR_ADMISSION_MODE:
+                for field in legacy_fields:
+                    require_string(reviewer.get(field), f"{label}.reviewer.{field}")
+                require(
+                    re.fullmatch(r"[0-9a-f]{64}", reviewer["legacy_admission_sha256"])
+                    is not None,
+                    f"{label}.reviewer.legacy_admission_sha256 is invalid",
+                )
+                require(
+                    re.fullmatch(
+                        r"[0-9a-f]{64}",
+                        reviewer["reviewer_account_identity_sha256"],
+                    )
+                    is not None,
+                    f"{label}.reviewer.reviewer_account_identity_sha256 is invalid",
+                )
+                require(
+                    reviewer["legacy_replacement_unavailable"] == "true",
+                    f"{label}.reviewer.legacy_replacement_unavailable must equal true",
+                )
+                require(
+                    reviewer["legacy_author_harness"] == "pi",
+                    f"{label}.reviewer.legacy_author_harness must equal pi",
+                )
+                require(
+                    reviewer["legacy_author_provenance"]
+                    == LEGACY_AUTHOR_PROVENANCE,
+                    f"{label}.reviewer.legacy_author_provenance is invalid",
+                )
+                provider_slot, separator, _model = reviewer[
+                    "legacy_author_model"
+                ].partition("/")
+                require(
+                    bool(separator)
+                    and PI_OPENAI_PROVIDER_SLOT_RE.fullmatch(provider_slot)
+                    is not None,
+                    f"{label}.reviewer.legacy_author_model is invalid",
+                )
+                try:
+                    dt.datetime.strptime(
+                        reviewer["legacy_admission_approved_at"],
+                        "%Y-%m-%dT%H:%M:%SZ",
+                    )
+                except ValueError:
+                    fail(
+                        f"{label}.reviewer.legacy_admission_approved_at is invalid"
+                    )
+            else:
+                require(
+                    not legacy_fields.intersection(reviewer),
+                    f"{label}.reviewer carries legacy admission evidence without its mode",
+                )
         if isinstance(reviewer, dict) and "execution_proof" in reviewer:
             execution_home = reviewer.get("execution_home")
             require(
@@ -2826,18 +3074,60 @@ def load_ledger(path: Path, task_id: str, url: str) -> dict[str, Any]:
     )
 
 
-def reviewer_candidates(home: Path, meta: dict[str, str]) -> list[dict[str, str]]:
-    """Return every independent reviewer for this author, in configured order.
+def reviewer_candidates(
+    home: Path,
+    meta: dict[str, str],
+    legacy_admission: dict[str, str] | None = None,
+) -> list[dict[str, str]]:
+    """Return every eligible reviewer for this author, in configured order.
 
     Selection screens the whole roster instead of stopping at the first match.
-    A single pick made the gate only as available as one account: a reviewer at
-    its usage limit, or one whose provider refused the launch, refused the merge
-    for the whole fleet even though other proven-independent accounts were
-    configured and idle. Every entry returned here has passed the configured
-    model policy and the mandatory account-separation screen, so failing over
-    between them cannot weaken account independence, and `run_reviewer` still
-    re-proves account separation against the credential it actually binds.
+    Ordinary entries still prove account separation. A narrowly scoped,
+    replacement-unavailable legacy admission can instead acknowledge that a
+    pre-snapshot Pi author's account is unknowable; it never synthesizes an
+    identity, and `run_reviewer` binds
+    the exact readable reviewer identity selected here before launch.
     """
+
+    require(
+        not (
+            meta.get("harness") == "pi"
+            and meta.get("author_identity_snapshot_epoch")
+            == PI_AUTHOR_IDENTITY_SNAPSHOT_EPOCH
+            and "author_account_identity" not in meta
+        ),
+        "AUTHOR IDENTITY CAPTURE FAILED: modern Pi task metadata records the "
+        "launch-bound identity snapshot epoch without author_account_identity; "
+        "failed modern capture is inadmissible",
+    )
+
+    if legacy_admission is not None:
+        expected_admission_keys = {
+            "author_account_independence",
+            "legacy_admission_sha256",
+            "legacy_admission_approved_at",
+            "legacy_replacement_unavailable",
+            "legacy_replacement_unavailable_reason",
+            "legacy_author_provenance",
+            "legacy_author_harness",
+            "legacy_author_model",
+        }
+        require_exact_keys(
+            legacy_admission, expected_admission_keys, "legacy author admission"
+        )
+        require(
+            legacy_admission.get("author_account_independence")
+            == LEGACY_AUTHOR_ADMISSION_MODE
+            and meta.get("harness") == "pi"
+            and "account_home" not in meta
+            and "author_account_identity" not in meta
+            and "author_identity_snapshot_epoch" not in meta
+            and legacy_admission.get("legacy_author_provenance")
+            == LEGACY_AUTHOR_PROVENANCE
+            and legacy_admission.get("legacy_author_harness") == meta.get("harness")
+            and legacy_admission.get("legacy_author_model") == meta.get("model"),
+            "legacy author admission cannot downgrade or mismatch task author metadata",
+        )
 
     allow_same_model = same_model_review_enabled(home)
     config_path = Path(
@@ -2848,7 +3138,7 @@ def reviewer_candidates(home: Path, meta: dict[str, str]) -> list[dict[str, str]
     )
     value = read_json(
         config_path,
-        "independent reviewer configuration",
+        "reviewer configuration",
         maximum_bytes=MAX_REVIEWER_CONFIG_BYTES,
         maximum_items=4096,
     )
@@ -2924,13 +3214,13 @@ def reviewer_candidates(home: Path, meta: dict[str, str]) -> list[dict[str, str]
     author_identity = author_account_identity(meta, author_home)
     author_provider_for_pairs = HARNESS_PROVIDERS.get(meta["harness"])
     author_model = model_identity(meta["model"])
-    independent: list[dict[str, str]] = []
+    eligible: list[dict[str, str]] = []
     for reviewer in validated:
         model_is_separate = model_identity(reviewer["model"]) != author_model
         model_is_eligible = model_is_separate or allow_same_model
         if author_home is not None:
-            account_is_separate = Path(reviewer["account_home"]) != author_home
-            if account_is_separate and (
+            account_is_eligible = Path(reviewer["account_home"]) != author_home
+            if account_is_eligible and (
                 author_provider_for_pairs is not None
                 and author_provider_for_pairs
                 == HARNESS_PROVIDERS.get(reviewer["harness"])
@@ -2948,9 +3238,9 @@ def reviewer_candidates(home: Path, meta: dict[str, str]) -> list[dict[str, str]
                     # separation: a home that names no account cannot be shown
                     # distinct from the author's, and path inequality is
                     # exactly the proof this branch exists to replace.
-                    account_is_separate = False
+                    account_is_eligible = False
                 else:
-                    account_is_separate = author_identity != reviewer_identity
+                    account_is_eligible = author_identity != reviewer_identity
         else:
             # Without account_home, a different provider proves separation by
             # namespace. A Pi lane additionally records its provider slot in
@@ -2964,7 +3254,7 @@ def reviewer_candidates(home: Path, meta: dict[str, str]) -> list[dict[str, str]
                 and reviewer_provider is not None
                 and author_provider != reviewer_provider
             ):
-                account_is_separate = True
+                account_is_eligible = True
             elif (
                 allow_same_model
                 and author_identity is not None
@@ -2973,13 +3263,30 @@ def reviewer_candidates(home: Path, meta: dict[str, str]) -> list[dict[str, str]
                 reviewer_identity = account_identity(
                     reviewer["harness"], Path(reviewer["account_home"])
                 )
-                account_is_separate = (
+                account_is_eligible = (
                     reviewer_identity is not None
                     and reviewer_identity != author_identity
                 )
+            elif (
+                legacy_admission is not None
+                and reviewer_provider == author_provider
+            ):
+                # This is admission, not proof of separation. The author account
+                # remains unknown. A readable reviewer identity is still bound
+                # now so the ledger can prove which account performed the review
+                # without claiming it differed from the historical author.
+                reviewer_identity = account_identity(
+                    reviewer["harness"], Path(reviewer["account_home"])
+                )
+                account_is_eligible = reviewer_identity is not None
+                if reviewer_identity is not None:
+                    reviewer.update(legacy_admission)
+                    reviewer["reviewer_account_identity_sha256"] = hashlib.sha256(
+                        reviewer_identity.encode("utf-8")
+                    ).hexdigest()
             else:
-                account_is_separate = False
-        if model_is_eligible and account_is_separate:
+                account_is_eligible = False
+        if model_is_eligible and account_is_eligible:
             if author_identity is not None and author_provider_for_pairs == (
                 HARNESS_PROVIDERS.get(reviewer["harness"])
             ):
@@ -2988,9 +3295,15 @@ def reviewer_candidates(home: Path, meta: dict[str, str]) -> list[dict[str, str]
                 reviewer["author_account_identity"] = author_identity
             if not model_is_separate:
                 reviewer["model_independence"] = "same-model"
-            independent.append(reviewer)
-    if independent:
-        return independent
+            eligible.append(reviewer)
+    if eligible:
+        return eligible
+    if legacy_admission is not None:
+        fail(
+            "explicit legacy author admission found no eligible reviewer with "
+            "a readable executing account identity and permitted model; the "
+            "author account remains unproven and was not synthesized"
+        )
     if (
         allow_same_model
         and meta["harness"] == "pi"
@@ -3250,8 +3563,19 @@ SAME-MODEL REVIEW - REDUCED MODEL INDEPENDENCE:
 You are using the same model as the author and may share the author's blind spots and priors.
 Compensate explicitly: attack the change adversarially, try to falsify the author's claims rather than confirm them, and default to reporting a finding when uncertain.
 """
-    return f"""You are the independent merge-gate reviewer for a pull request.
-{same_model_warning}Review exact head {snapshot_value['head_sha']} against exact base {snapshot_value['base_sha']}.
+    legacy_author_warning = ""
+    reviewer_role = "independent merge-gate reviewer"
+    if config.get("author_account_independence") == LEGACY_AUTHOR_ADMISSION_MODE:
+        reviewer_role = "exact-head merge-gate reviewer"
+        legacy_author_warning = f"""
+LEGACY AUTHOR ACCOUNT UNPROVEN - EXPLICIT LOCAL ADMISSION:
+This pre-snapshot Pi lane has no durable upstream author-account proof. The local admission does not synthesize one, so you may be executing under the same upstream account as the author and must not claim account independence.
+Admission digest: {config['legacy_admission_sha256']}.
+Replacement was declared unavailable because: {config['legacy_replacement_unavailable_reason']}.
+Compensate explicitly: challenge the change as if the author's assumptions are hostile, seek disconfirming evidence, and report uncertainty rather than converting it into clearance.
+"""
+    return f"""You are the {reviewer_role} for a pull request.
+{legacy_author_warning}{same_model_warning}Review exact head {snapshot_value['head_sha']} against exact base {snapshot_value['base_sha']}.
 Perform a rigorous release-readiness review of the full diff and the PR's own claims.
 Do not trust the PR description or a previous clean run.
 Do not change tracked files.
@@ -3635,6 +3959,22 @@ def run_reviewer(
                 f"{config['harness']} account home {account_home} executes as "
                 "the same upstream account as the author, so this reviewer is "
                 "not independent despite a different configured path"
+            )
+    elif config.get("author_account_independence") == LEGACY_AUTHOR_ADMISSION_MODE:
+        # The admission deliberately makes no author-account claim. It still
+        # binds the exact readable reviewer identity selected during preflight,
+        # so credential drift cannot silently change who performed the review.
+        executing_account = account_identity(config["harness"], account_home)
+        if executing_account is None:
+            tool_fail(
+                "legacy-admitted reviewer executing account became unreadable "
+                f"at {credential_identifier}; the author account remains unproven"
+            )
+        executing_digest = hashlib.sha256(executing_account.encode("utf-8")).hexdigest()
+        if executing_digest != config.get("reviewer_account_identity_sha256"):
+            tool_fail(
+                "legacy-admitted reviewer executing account changed after "
+                "selection; refusing rather than changing the audited reviewer identity"
             )
     schema_path = protocol_dir / "review-schema.json"
     schema_value = review_output_schema(
@@ -4220,10 +4560,44 @@ def render_report(ledger: dict[str, Any], run: dict[str, Any]) -> str:
         "",
     ]
     reviewer = run.get("reviewer")
-    if isinstance(reviewer, dict) and reviewer.get("model_independence") == "same-model":
+    legacy_author_admitted = (
+        isinstance(reviewer, dict)
+        and reviewer.get("author_account_independence")
+        == LEGACY_AUTHOR_ADMISSION_MODE
+    )
+    if legacy_author_admitted:
         lines.extend(
             [
-                "Review mode: **SAME-MODEL** (reduced model independence; account separation remained mandatory).",
+                "Review mode: **LEGACY AUTHOR ACCOUNT UNPROVEN** (explicit local admission; the reviewer may share the author's upstream account).",
+                "",
+                f"Admission digest: `{reviewer['legacy_admission_sha256']}`",
+                "",
+                f"Admission approved at: `{reviewer['legacy_admission_approved_at']}`",
+                "",
+                "Historical author provenance: "
+                f"`{reviewer['legacy_author_provenance']}`",
+                "",
+                f"Historical author harness: `{reviewer['legacy_author_harness']}`",
+                "",
+                f"Historical author model: `{reviewer['legacy_author_model']}`",
+                "",
+                "Reviewer account identity digest: "
+                f"`{reviewer['reviewer_account_identity_sha256']}`",
+                "",
+                "Replacement unavailable: "
+                f"{reviewer['legacy_replacement_unavailable_reason']}",
+                "",
+            ]
+        )
+    if isinstance(reviewer, dict) and reviewer.get("model_independence") == "same-model":
+        account_note = (
+            "author-account independence is also unproven under the legacy admission"
+            if legacy_author_admitted
+            else "account separation remained mandatory"
+        )
+        lines.extend(
+            [
+                f"Review mode: **SAME-MODEL** (reduced model independence; {account_note}).",
                 "",
             ]
         )
@@ -4498,7 +4872,10 @@ def run_crosscheck(root: Path, home: Path, task_id: str, url: str) -> int:
 
     try:
         try:
-            candidates = reviewer_candidates(home, meta)
+            admission = legacy_author_admission(
+                home, task_id, url, snapshot_value["head_sha"], meta
+            )
+            candidates = reviewer_candidates(home, meta, admission)
         except CrosscheckError as exc:
             tool_fail(f"reviewer preflight failed: {exc}")
         with tempfile.TemporaryDirectory(prefix=f".{task_id}.crosscheck.", dir=state) as temporary:
@@ -4506,7 +4883,7 @@ def run_crosscheck(root: Path, home: Path, task_id: str, url: str) -> int:
             write_neutral_runner_config(temp_root)
             # A reviewer whose account cannot produce a verdict is an
             # environment fault, not a verdict about the code, so the gate
-            # advances to the next independently-screened reviewer instead of
+            # advances to the next policy-screened reviewer instead of
             # refusing the merge. Only a completed reviewer's own conclusion
             # (blocking, or an invalid verdict artifact) ends the run. Each
             # abandoned reviewer is recorded, so the audit trail names every
@@ -4564,7 +4941,7 @@ def run_crosscheck(root: Path, home: Path, task_id: str, url: str) -> int:
                         ledger,
                         snapshot_value,
                         f"{exc} (reviewer {position + 1} of {len(candidates)}; "
-                        f"{remaining} independent reviewer(s) remaining)",
+                        f"{remaining} policy-screened reviewer(s) remaining)",
                         config,
                         "tool-failure",
                     )
@@ -4573,7 +4950,7 @@ def run_crosscheck(root: Path, home: Path, task_id: str, url: str) -> int:
                     print(
                         f"crosscheck: reviewer {config['harness']} at "
                         f"{config['account_home']} could not return a verdict "
-                        f"({exc}); trying the next independent reviewer",
+                        f"({exc}); trying the next policy-screened reviewer",
                         file=sys.stderr,
                     )
                     continue

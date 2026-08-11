@@ -1416,6 +1416,169 @@ PY
   pass "same-model opt-in preserves mandatory executing-account separation"
 }
 
+test_legacy_author_admission_is_exact_and_explicit() {
+  "$CROSSCHECK_PYTHON" - "$CROSSCHECK_PY" "$TMP_ROOT" <<'PY' \
+    || fail "legacy author admission was not exact, explicit, and fail closed"
+import importlib.util
+import json
+import os
+from pathlib import Path
+import sys
+
+spec = importlib.util.spec_from_file_location("fm_crosscheck", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(module)
+
+home = Path(sys.argv[2]) / "legacy-author-admission-policy"
+(home / "config").mkdir(parents=True)
+reviewer_home = home / "reviewer-home"
+reviewer_home.mkdir()
+(reviewer_home / "auth.json").write_text(
+    json.dumps({"tokens": {"account_id": "reviewer-account-A"}}),
+    encoding="utf-8",
+)
+reviewer_config = home / "reviewer.json"
+reviewer_config.write_text(
+    json.dumps(
+        {
+            "reviewers": [
+                {
+                    "harness": "codex",
+                    "model": "gpt-5.6-sol",
+                    "effort": "xhigh",
+                    "account_home": str(reviewer_home),
+                }
+            ]
+        }
+    ),
+    encoding="utf-8",
+)
+os.environ["FM_CROSSCHECK_REVIEWER_CONFIG"] = str(reviewer_config)
+(home / "config" / "crosscheck-same-model").write_text("on\n", encoding="utf-8")
+
+meta = {"harness": "pi", "model": "openai-codex-5/gpt-5.6-sol"}
+task_id = "legacy-task"
+url = "https://github.com/ruby-dlee/firstmate/pull/116"
+head = "a" * 40
+next_head = "b" * 40
+admission_path = home / "config" / "crosscheck-legacy-author-admissions.json"
+
+assert module.legacy_author_admission(home, task_id, url, head, meta) is None
+try:
+    module.reviewer_candidates(home, meta)
+except module.CrosscheckError as exc:
+    assert "AUTHOR IDENTITY UNKNOWABLE" in str(exc), str(exc)
+else:
+    raise AssertionError("pre-fix lane was admitted without an explicit record")
+
+entry = {
+    "task_id": task_id,
+    "pull_request": url,
+    "head_sha": head,
+    "author_harness": "pi",
+    "author_model": meta["model"],
+    "approved_at": "2026-08-10T12:00:00Z",
+    "legacy_author_provenance": "pre-snapshot-pi",
+    "replacement_unavailable": True,
+    "replacement_unavailable_reason": "PR branch is not writable by this fleet; exact-head replacement cannot be published.",
+    "admit_unproven_author_account": True,
+}
+admission_path.write_text(json.dumps({"admissions": [entry]}), encoding="utf-8")
+
+try:
+    module.legacy_author_admission(home, task_id, url, next_head, meta)
+except module.CrosscheckError as exc:
+    assert "renew the explicit admission for the exact head" in str(exc), str(exc)
+else:
+    raise AssertionError("legacy admission floated to a different PR head")
+
+admission = module.legacy_author_admission(home, task_id, url, head, meta)
+assert admission is not None, admission
+selected = module.reviewer_candidates(home, meta, admission)[0]
+assert selected["author_account_independence"] == "unproven-legacy-admission", selected
+assert "author_account_identity" not in selected, selected
+assert selected["legacy_author_model"] == meta["model"], selected
+assert len(selected["legacy_admission_sha256"]) == 64, selected
+assert len(selected["reviewer_account_identity_sha256"]) == 64, selected
+
+# The admission never downgrades a modern identity, even when that identity
+# proves the configured reviewer is the author's own upstream account.
+modern_meta = dict(meta, author_account_identity="reviewer-account-A")
+try:
+    module.legacy_author_admission(home, task_id, url, head, modern_meta)
+except module.CrosscheckError as exc:
+    assert "cannot downgrade a modern or routed author identity" in str(exc), str(exc)
+else:
+    raise AssertionError("legacy admission replaced a modern author snapshot")
+
+modern_failed_snapshot_meta = dict(
+    meta, author_identity_snapshot_epoch="launch-bound-v1"
+)
+try:
+    module.legacy_author_admission(
+        home, task_id, url, head, modern_failed_snapshot_meta
+    )
+except module.CrosscheckError as exc:
+    assert "cannot downgrade a modern or routed author identity" in str(exc), str(exc)
+else:
+    raise AssertionError("legacy admission replaced a modern failed snapshot")
+try:
+    module.reviewer_candidates(home, modern_failed_snapshot_meta)
+except module.CrosscheckError as exc:
+    assert "AUTHOR IDENTITY CAPTURE FAILED" in str(exc), str(exc)
+    assert "failed modern capture is inadmissible" in str(exc), str(exc)
+else:
+    raise AssertionError("cross-provider review admitted a failed modern snapshot")
+try:
+    module.reviewer_candidates(home, modern_meta, admission)
+except module.CrosscheckError as exc:
+    assert "cannot downgrade or mismatch" in str(exc), str(exc)
+else:
+    raise AssertionError("direct legacy admission bypassed modern same-account refusal")
+try:
+    module.reviewer_candidates(home, modern_failed_snapshot_meta, admission)
+except module.CrosscheckError as exc:
+    assert "AUTHOR IDENTITY CAPTURE FAILED" in str(exc), str(exc)
+else:
+    raise AssertionError("direct legacy admission bypassed the modern snapshot epoch")
+
+# Even an admitted lane needs a readable, launch-bound reviewer account.
+(reviewer_home / "auth.json").write_text("{}\n", encoding="utf-8")
+try:
+    module.reviewer_candidates(home, meta, admission)
+except module.CrosscheckError as exc:
+    assert "readable executing account identity" in str(exc), str(exc)
+else:
+    raise AssertionError("legacy admission accepted an unreadable reviewer account")
+
+# Admission is a last resort, never the ordinary pre-fix recovery path.
+not_last_resort = dict(entry, replacement_unavailable=False)
+admission_path.write_text(
+    json.dumps({"admissions": [not_last_resort]}), encoding="utf-8"
+)
+try:
+    module.legacy_author_admission(home, task_id, url, head, meta)
+except module.CrosscheckError as exc:
+    assert "replacement_unavailable must equal true" in str(exc), str(exc)
+else:
+    raise AssertionError("legacy admission did not require failed replacement attestation")
+
+# The whole local file is validated, not only a matching record.
+malformed = dict(entry, unexpected=True)
+admission_path.write_text(json.dumps({"admissions": [malformed]}), encoding="utf-8")
+try:
+    module.legacy_author_admission(home, task_id, url, head, meta)
+except module.CrosscheckError as exc:
+    assert "unknown fields: unexpected" in str(exc), str(exc)
+else:
+    raise AssertionError("malformed legacy admission configuration was accepted")
+
+print("LEGACY ADMISSION exact-head explicit-unproven")
+PY
+  pass "legacy admission is exact-head, cannot downgrade modern proof, and never synthesizes author identity"
+}
+
 test_openai_backed_reviewer_proves_account_separation() {
   "$CROSSCHECK_PYTHON" - "$CROSSCHECK_PY" "$TMP_ROOT" <<'PY' \
     || fail "OpenAI-backed account separation regressed to a path comparison"
@@ -2224,6 +2387,80 @@ assert "Review mode: **SAME-MODEL**" in report, report
 assert "account separation remained mandatory" in report, report
 PY
   pass "same-model review uses an adversarial prompt and records reduced independence"
+}
+
+test_legacy_author_admission_is_visible_in_prompt_and_evidence() {
+  local record case_dir base head output verified
+  record=$(make_case legacy-author-admission-evidence)
+  IFS=$'\t' read -r case_dir base head <<< "$record"
+  mkdir -p "$case_dir/home/config"
+  printf 'on\n' > "$case_dir/home/config/crosscheck-same-model"
+  sed -i.bak \
+    -e 's/harness=codex/harness=pi/' \
+    -e 's#model=gpt-5.5#model=openai-codex-5/gpt-5.6-sol#' \
+    -e '/^account_home=/d' \
+    "$case_dir/state/task-x1.meta"
+  rm "$case_dir/state/task-x1.meta.bak"
+  cat > "$case_dir/home/config/crosscheck-legacy-author-admissions.json" <<EOF
+{"admissions":[{"task_id":"task-x1","pull_request":"$PR_URL","head_sha":"$head","author_harness":"pi","author_model":"openai-codex-5/gpt-5.6-sol","approved_at":"2026-08-10T12:00:00Z","legacy_author_provenance":"pre-snapshot-pi","replacement_unavailable":true,"replacement_unavailable_reason":"PR branch is not writable by this fleet; exact-head replacement cannot be published.","admit_unproven_author_account":true}]}
+EOF
+
+  output=$(run_case "$case_dir" "$base" "$head" clear run) \
+    || fail "explicit legacy author admission did not complete"
+  assert_contains "$output" 'crosscheck clear' \
+    "legacy-admitted reviewer did not produce a verdict"
+  assert_grep 'LEGACY AUTHOR ACCOUNT UNPROVEN - EXPLICIT LOCAL ADMISSION' \
+    "$case_dir/prompt.log" \
+    "legacy admission was not visible in the reviewer prompt"
+  assert_grep 'may be executing under the same upstream account as the author' \
+    "$case_dir/prompt.log" \
+    "legacy prompt pretended historical account separation"
+  assert_grep 'must not claim account independence' "$case_dir/prompt.log" \
+    "legacy prompt did not prohibit a false independence claim"
+  assert_no_grep 'You are the independent merge-gate reviewer' "$case_dir/prompt.log" \
+    "legacy prompt still introduced the reviewer as account-independent"
+  verified=$(run_case "$case_dir" "$base" "$head" clear verify) \
+    || fail "verify rejected the durable legacy-admission evidence"
+  [ "$verified" = "$head" ] \
+    || fail "legacy-admission verify did not return the reviewed exact head"
+  "$CROSSCHECK_PYTHON" - \
+    "$case_dir/data/task-x1/crosscheck-ledger.json" \
+    "$case_dir/data/task-x1/crosscheck.md" <<'PY' \
+    || fail "legacy admission was not durable in both evidence surfaces"
+import hashlib
+import json
+from pathlib import Path
+import sys
+
+ledger = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+run = ledger["runs"][-1]
+reviewer = run["reviewer"]
+assert run["state"] == "clear", run
+assert reviewer["author_account_independence"] == "unproven-legacy-admission", reviewer
+assert reviewer["legacy_author_harness"] == "pi", reviewer
+assert reviewer["legacy_author_model"] == "openai-codex-5/gpt-5.6-sol", reviewer
+assert reviewer["legacy_author_provenance"] == "pre-snapshot-pi", reviewer
+assert reviewer["legacy_admission_approved_at"] == "2026-08-10T12:00:00Z", reviewer
+assert reviewer["legacy_replacement_unavailable"] == "true", reviewer
+assert "PR branch is not writable" in reviewer[
+    "legacy_replacement_unavailable_reason"
+], reviewer
+assert reviewer["reviewer_account_identity_sha256"] == hashlib.sha256(
+    b"test-reviewer-account"
+).hexdigest(), reviewer
+assert "author_account_identity" not in reviewer, reviewer
+report = Path(sys.argv[2]).read_text(encoding="utf-8")
+assert "Review mode: **LEGACY AUTHOR ACCOUNT UNPROVEN**" in report, report
+assert "the reviewer may share the author's upstream account" in report, report
+assert "Replacement unavailable: PR branch is not writable" in report, report
+assert "Historical author provenance: `pre-snapshot-pi`" in report, report
+assert "Historical author harness: `pi`" in report, report
+assert "Historical author model: `openai-codex-5/gpt-5.6-sol`" in report, report
+assert f"Reviewer account identity digest: `{reviewer['reviewer_account_identity_sha256']}`" in report, report
+assert "account separation remained mandatory" not in report, report
+assert "author-account independence is also unproven" in report, report
+PY
+  pass "legacy admission is explicit in the prompt, ledger, and readable report"
 }
 
 test_empty_runtime_overrides_use_home_defaults() {
@@ -4634,7 +4871,7 @@ EOF
     > "$case_dir/out" 2> "$case_dir/err" \
     || fail "an unreachable leading reviewer refused the whole gate"
 
-  assert_grep 'trying the next independent reviewer' "$case_dir/err" \
+  assert_grep 'trying the next policy-screened reviewer' "$case_dir/err" \
     "failover was silent"
   states=$("$CROSSCHECK_PYTHON" -c '
 import json, sys
@@ -4650,7 +4887,7 @@ print(" ".join(run["state"] for run in ledger["runs"]))
     "the abandoned reviewer did not record its reported reason"
   assert_grep 'never reached the provider' "$case_dir/data/task-x1/crosscheck-ledger.json" \
     "the abandoned reviewer was not identified as an environment fault"
-  pass "an unreachable reviewer fails over to the next independent account"
+  pass "an unreachable reviewer fails over to the next policy-screened account"
 }
 
 test_verify_rechecks_live_head_and_claims() {
@@ -4702,6 +4939,7 @@ if [ -n "${FM_TEST_CASE:-}" ]; then
   case "$FM_TEST_CASE" in
     test_reviewer_policy_profiles_and_independence|\
     test_same_model_relaxation_requires_proven_separate_account|\
+    test_legacy_author_admission_is_exact_and_explicit|\
     test_openai_backed_reviewer_proves_account_separation|\
     test_anthropic_backed_reviewer_proves_account_separation|\
     test_unrouted_lane_compares_provider_not_harness|\
@@ -4714,6 +4952,7 @@ if [ -n "${FM_TEST_CASE:-}" ]; then
     test_pi_reviewer_failures_are_tool_failures|\
     test_clear_review_uses_policy_contract|\
     test_same_model_review_is_adversarial_and_durable|\
+    test_legacy_author_admission_is_visible_in_prompt_and_evidence|\
     test_empty_runtime_overrides_use_home_defaults|\
     test_empty_environment_fallback_is_generic|\
     test_set_runtime_overrides_remain_authoritative|\
@@ -4784,7 +5023,9 @@ if [ "${FM_TEST_FOCUSED:-}" = review-safety-findings ]; then
   FM_TEST_FOCUSED=pi-author-snapshot "$ROOT/tests/fm-spawn-dispatch-profile.test.sh" \
     || fail "Pi launch identity snapshot regressions failed"
   test_same_model_relaxation_requires_proven_separate_account
+  test_legacy_author_admission_is_exact_and_explicit
   test_same_model_review_is_adversarial_and_durable
+  test_legacy_author_admission_is_visible_in_prompt_and_evidence
   test_typescript_jest_mutation_proof_can_clear
   test_preexisting_jest_runner_cannot_certify
   test_local_fake_jest_package_cannot_certify
@@ -4815,6 +5056,7 @@ fi
 test_launcher_requires_supported_python
 test_reviewer_policy_profiles_and_independence
 test_same_model_relaxation_requires_proven_separate_account
+test_legacy_author_admission_is_exact_and_explicit
 test_openai_backed_reviewer_proves_account_separation
 test_anthropic_backed_reviewer_proves_account_separation
 test_unrouted_lane_compares_provider_not_harness
@@ -4827,6 +5069,7 @@ test_pi_reviewer_executes_bound_policy_profile
 test_pi_reviewer_failures_are_tool_failures
 test_clear_review_uses_policy_contract
 test_same_model_review_is_adversarial_and_durable
+test_legacy_author_admission_is_visible_in_prompt_and_evidence
 test_empty_runtime_overrides_use_home_defaults
 test_empty_environment_fallback_is_generic
 test_set_runtime_overrides_remain_authoritative

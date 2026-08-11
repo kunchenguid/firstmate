@@ -4,23 +4,25 @@
 # "run a real tmux smoke test (create session, send text + Enter, capture,
 # list, kill)" from data/fm-backend-design-d7/report.md. Every other suite in
 # this repo fakes tmux; this one is the one place that talks to a REAL tmux
-# server, isolated on a private socket (`-L`) so it never touches the host's
+# server, isolated on a short repo-local socket (`-S`) so it never touches the host's
 # actual sessions.
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT" || exit 1
 
 fail() { printf 'not ok - %s\n' "$1" >&2; cleanup_all; exit 1; }
 pass() { printf 'ok - %s\n' "$1"; }
 
 command -v tmux >/dev/null 2>&1 || { echo "skip: tmux not found"; exit 0; }
 REAL_TMUX=$(command -v tmux)
-SOCKET="fm-backend-smoke-$$"
+SOCKET="./.fm-backend-smoke-$$.sock"
 SHIM_DIR=
 trap cleanup_all EXIT
 
 cleanup_all() {
-  "$REAL_TMUX" -L "$SOCKET" kill-server >/dev/null 2>&1 || true
+  "$REAL_TMUX" -S "$SOCKET" kill-server >/dev/null 2>&1 || true
+  rm -f -- "$SOCKET"
   [ -n "${SHIM_DIR:-}" ] && rm -rf "$SHIM_DIR"
 }
 
@@ -30,7 +32,7 @@ cleanup_all() {
 SHIM_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-backend-smoke.XXXXXX")
 cat > "$SHIM_DIR/tmux" <<SH
 #!/usr/bin/env bash
-exec "$REAL_TMUX" -L "$SOCKET" "\$@"
+exec "$REAL_TMUX" -S "$SOCKET" "\$@"
 SH
 chmod +x "$SHIM_DIR/tmux"
 PATH="$SHIM_DIR:$PATH"

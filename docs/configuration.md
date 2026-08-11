@@ -109,6 +109,9 @@ The current schema has one nonempty `reviewers` array, whose entries require exa
 The optional local, gitignored `config/crosscheck-same-model` file contains exactly `on` or `off`, defaults to `off` when absent, and is read fresh for every reviewer selection.
 `on` relaxes model separation only; proven upstream-account separation remains mandatory, and same-account or unreadable identities stay refused.
 Invalid values and unsafe file shapes fail closed.
+The optional local, gitignored `config/crosscheck-legacy-author-admissions.json` file is a last resort for one exact PR head from a pre-snapshot account-less Pi lane that genuinely cannot be replaced under a new bound author lane.
+It requires explicit pre-snapshot provenance and replacement-unavailable attestations, never claims that the historical author account is known or separate from the reviewer, has no global switch, cannot replace modern identity metadata or the snapshot-era launch marker, and defaults to no admissions when absent.
+Its exact schema, reviewer binding, prompt warning, and durable evidence label are owned by [`crosscheck.md`](crosscheck.md).
 The accepted policy profiles are Codex `gpt-5.6-sol` at `xhigh` effort, Claude `claude-opus-5` at `xhigh` effort, and Pi `gpt-5.6-sol` at `xhigh` effort.
 Every `account_home` must be an existing absolute directory.
 Crosscheck resolves each configured account home and keeps every entry whose account is provably separate and whose model satisfies the default cross-model policy or the explicit same-model relaxation, then runs them in configured order, advancing to the next only when a reviewer could not reach its provider.
@@ -123,7 +126,7 @@ When the author and the reviewer are both OpenAI-backed, selection therefore com
 Pi adds an independent client and a reviewer separate from a Claude author by construction; it does not add capacity, because an OpenAI account at its usage limit is equally unavailable through Codex and through Pi.
 A lane recording no `account_home` is supported rather than exceptional: a different supported provider proves account separation by namespace, while an opted-in Pi author can prove same-provider separation through the exact provider slot recorded in its model metadata and the `author_account_identity` snapshot recorded by `fm-spawn.sh` at initial launch.
 The spawn boundary creates a restrictive task-private copy of the selected Pi credential and configuration directory, derives the identity from that copy, and binds the actual Pi command to the same path through `PI_CODING_AGENT_DIR` on every backend.
-Recovery retains the recorded identity only when the newly launch-bound copy proves the same account, so missing legacy snapshots, copy failures, changed accounts, unreadable Pi identities, and every account-less same-provider pair while the option is absent or off fail closed.
+Recovery retains the recorded identity only when the newly launch-bound copy proves the same account, so copy failures, changed accounts, unreadable Pi identities, and account-less same-provider pairs fail closed unless an exact pre-snapshot admission explicitly records that author-account independence is unproven.
 Crosscheck never substitutes the mutable ambient Pi credential at review time.
 Account routing is off by design for harnesses outside Codex and Claude, so this is the normal shape of a Pi lane rather than a misconfiguration.
 An absent or invalid file is an unavailable reviewer and therefore blocks crosscheck and merge.
