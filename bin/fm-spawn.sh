@@ -678,6 +678,7 @@ SPAWN_ENDPOINT_AUX=
 SPAWN_ENDPOINT_LABEL=
 SPAWN_ENDPOINT_KIND=
 SPAWN_ENDPOINT_ACQUISITION_FILE=
+SPAWN_ENDPOINT_UNRESOLVED=0
 FM_BACKEND_ACQUISITION_FILE=
 export FM_BACKEND_ACQUISITION_FILE
 SPAWN_WORKTREE_CLEANUP=0
@@ -741,7 +742,7 @@ spawn_prepare_endpoint_acquisition() {
 }
 
 spawn_register_endpoint_from_file() {
-  local file=${1:-$SPAWN_ENDPOINT_ACQUISITION_FILE} backend kind session workspace_id tab_id pane_id window_id surface_id label workspace_title
+  local file=${1:-$SPAWN_ENDPOINT_ACQUISITION_FILE} backend kind session workspace_id tab_id pane_id window_id surface_id label
   [ -n "$file" ] && [ -f "$file" ] && [ ! -L "$file" ] || return 1
   backend=$(spawn_acquisition_field "$file" backend) || return 1
   kind=$(spawn_acquisition_field "$file" kind) || return 1
@@ -768,15 +769,8 @@ spawn_register_endpoint_from_file() {
       workspace_id=$(spawn_acquisition_field "$file" workspace_id) || return 1
       spawn_register_endpoint cmux "$workspace_id" '' "$label" cmux-workspace
       ;;
-    cmux:cmux-pending)
-      workspace_id=$(spawn_acquisition_field "$file" workspace_id) || return 1
-      workspace_title=$(spawn_acquisition_field "$file" workspace_title) || return 1
-      if [ -z "$workspace_id" ]; then
-        [ -n "$workspace_title" ] || return 1
-        workspace_id=$(fm_backend_cmux_workspace_id_for_label "$workspace_title") || return 1
-      fi
-      spawn_endpoint_result_token_valid "$workspace_id" || return 1
-      spawn_register_endpoint cmux "$workspace_id" '' "$label" cmux-workspace
+    cmux:cmux-pending|cmux:cmux-unresolved)
+      return 1
       ;;
     cmux:target)
       workspace_id=$(spawn_acquisition_field "$file" workspace_id) || return 1
@@ -866,6 +860,13 @@ EOF
 
 spawn_register_endpoint_or_abort() {
   local backend=$1 label=$2 result=$3
+  if [ "$backend" = cmux ] && [ "$result" = cmux-unresolved ]; then
+    SPAWN_ENDPOINT_UNRESOLVED=1
+    SPAWN_ENDPOINT_BACKEND=$backend
+    SPAWN_ENDPOINT_LABEL=$label
+    SPAWN_ENDPOINT_KIND=cmux-unresolved
+    return 1
+  fi
   if spawn_register_endpoint_from_file; then
     return 0
   fi
@@ -942,7 +943,17 @@ spawn_cleanup_record_refresh() {
   local pending=0 state=${STATE:-} task_id=${ID:-}
   local -a lines=()
   [ -n "$state" ] && [ -n "$task_id" ] || return 0
-  if [ "$SPAWN_ENDPOINT_CLEANUP" = 1 ] || spawn_endpoint_acquisition_pending; then
+  if [ "$SPAWN_ENDPOINT_UNRESOLVED" = 1 ]; then
+    pending=1
+    lines+=("endpoint_cleanup=0")
+    lines+=("endpoint_backend=$SPAWN_ENDPOINT_BACKEND")
+    lines+=("endpoint_target=")
+    lines+=("endpoint_aux=")
+    lines+=("endpoint_label=$SPAWN_ENDPOINT_LABEL")
+    lines+=("endpoint_kind=$SPAWN_ENDPOINT_KIND")
+    lines+=("endpoint_identity=unresolved")
+    lines+=("endpoint_acquisition_file=$SPAWN_ENDPOINT_ACQUISITION_FILE")
+  elif [ "$SPAWN_ENDPOINT_CLEANUP" = 1 ] || spawn_endpoint_acquisition_pending; then
     pending=1
     lines+=("endpoint_cleanup=$SPAWN_ENDPOINT_CLEANUP")
     lines+=("endpoint_backend=$SPAWN_ENDPOINT_BACKEND")

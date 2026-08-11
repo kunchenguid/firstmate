@@ -325,6 +325,33 @@ fm_backend_cmux_scoped_title() {  # <fm-task-label>
   printf 'fm-%s-%s' "$home" "$rest"
 }
 
+fm_backend_cmux_workspace_id_valid() {
+  case "${1:-}" in
+    ''|*$'\n'*|*$'\r'*|*$'\t'*|*' '*|*'='*|*':'*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+fm_backend_cmux_workspace_ids_for_label() {  # <label>
+  local label=$1 wss ids id
+  wss=$(fm_backend_cmux_cli workspace list --json --id-format uuids 2>/dev/null) || return 1
+  printf '%s' "$wss" | jq -e '(.workspaces | type) == "array"' >/dev/null 2>&1 || return 1
+  ids=$(printf '%s' "$wss" | jq -r --arg want "$label" '
+    [.workspaces[]? | select(.title == $want)] as $matches
+    | if any($matches[]?; ((.id | type) != "string") or (.id == ""))
+      then error("invalid workspace identity")
+      else $matches[] | .id
+      end
+  ' 2>/dev/null) || return 1
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    fm_backend_cmux_workspace_id_valid "$id" || return 1
+    printf '%s\n' "$id"
+  done <<EOF
+$ids
+EOF
+}
+
 # fm_backend_cmux_workspace_id_for_label: the live workspace id whose title
 # equals <label>, or empty. cmux enforces no title uniqueness (finding #6),
 # so this adopts the FIRST match `jq` returns, mirroring herdr's/zellij's own
@@ -333,6 +360,21 @@ fm_backend_cmux_workspace_id_for_label() {  # <label>
   local label=$1
   fm_backend_cmux_cli workspace list --json --id-format uuids 2>/dev/null \
     | jq -r --arg want "$label" '.workspaces[]? | select(.title == $want) | .id' 2>/dev/null | head -1
+}
+
+fm_backend_cmux_created_workspace_id() {  # <label> <before-ids>
+  local label=$1 before_ids=${2:-} after_ids new_ids before_count after_count new_count
+  after_ids=$(fm_backend_cmux_workspace_ids_for_label "$label") || return 1
+  before_count=$(printf '%s\n' "$before_ids" | awk 'NF { n++ } END { print n + 0 }')
+  after_count=$(printf '%s\n' "$after_ids" | awk 'NF { n++ } END { print n + 0 }')
+  [ "$after_count" -eq $((before_count + 1)) ] || return 1
+  new_ids=$(comm -23 \
+    <(printf '%s\n' "$after_ids" | sed '/^$/d' | sort -u) \
+    <(printf '%s\n' "$before_ids" | sed '/^$/d' | sort -u)) || return 1
+  new_count=$(printf '%s\n' "$new_ids" | awk 'NF { n++ } END { print n + 0 }')
+  [ "$new_count" -eq 1 ] || return 1
+  fm_backend_cmux_workspace_id_valid "$new_ids" || return 1
+  printf '%s' "$new_ids"
 }
 
 fm_backend_cmux_surface_id_for_workspace() {  # <workspace_id>
@@ -363,19 +405,22 @@ fm_backend_cmux_acquisition_record() {
   }
 }
 
-fm_backend_cmux_pending_acquisition_record() {
+fm_backend_cmux_unresolved_acquisition_record() {
   local file=${FM_BACKEND_ACQUISITION_FILE:-} label=$1 title=$2
   [ -n "$file" ] || return 0
-  printf 'backend=cmux\nkind=cmux-pending\nworkspace_id=\nsurface_id=\nlabel=%s\nworkspace_title=%s\n' \
+  printf 'backend=cmux\nkind=cmux-unresolved\nworkspace_id=\nsurface_id=\nlabel=%s\nworkspace_title=%s\nreason=workspace-identity-unresolved\n' \
     "$label" "$title" > "$file" || return 1
   chmod 600 "$file"
 }
 
 fm_backend_cmux_create_task() {  # <label> <cwd>
-  local label=$1 cwd=$2 title dup out wsid sfid
+  local label=$1 cwd=$2 title before_ids out wsid sfid
   title=$(fm_backend_cmux_scoped_title "$label")
-  dup=$(fm_backend_cmux_workspace_id_for_label "$title")
-  if [ -n "$dup" ]; then
+  before_ids=$(fm_backend_cmux_workspace_ids_for_label "$title") || {
+    echo "error: could not inspect existing cmux workspaces for '$title'" >&2
+    return 1
+  }
+  if [ -n "$before_ids" ]; then
     echo "error: cmux workspace '$title' already exists" >&2
     return 1
   fi
@@ -383,13 +428,13 @@ fm_backend_cmux_create_task() {  # <label> <cwd>
     echo "error: cmux new-workspace failed for '$title': $out" >&2
     return 1
   }
-  wsid=$(fm_backend_cmux_workspace_id_for_label "$title")
-  if [ -z "$wsid" ]; then
-    if ! fm_backend_cmux_pending_acquisition_record "$label" "$title"; then
-      echo "error: could not resolve a cmux workspace id for '$title' after creation or persist its acquisition record" >&2
-      return 1
+  if ! wsid=$(fm_backend_cmux_created_workspace_id "$title" "$before_ids"); then
+    if ! fm_backend_cmux_unresolved_acquisition_record "$label" "$title"; then
+      echo "error: could not prove the new cmux workspace identity or persist an unresolved acquisition record for '$title'" >&2
+    else
+      echo "error: could not prove the new cmux workspace identity for '$title'; retaining a non-destructive unresolved acquisition record" >&2
     fi
-    echo "error: could not resolve a cmux workspace id for '$title' after creation; retaining the acquisition record" >&2
+    printf 'cmux-unresolved\n'
     return 1
   fi
   if ! fm_backend_cmux_acquisition_record "$label" "$wsid"; then

@@ -496,35 +496,35 @@ test_create_task_creates_and_parses_ids() {
   pass "fm_backend_cmux_create_task: creates a workspace and parses workspace_id/surface_id from list responses"
 }
 
-test_spawn_releases_exact_cmux_workspace_when_pending_record_write_fails() {
+test_spawn_retains_unresolved_cmux_workspace_without_title_cleanup() {
   local dir home proj wt fakebin id title status
-  dir="$TMP_ROOT/spawn-pending-write-failure"
+  dir="$TMP_ROOT/spawn-unresolved-write-failure"
   home="$dir/home"
   proj="$dir/project"
   wt="$dir/worktree"
-  id=cmux-pending-write
+  id=cmux-unresolved-write
   mkdir -p "$dir/responses" "$home/data/$id" "$home/state" "$home/projects" "$home/config"
   fm_git_worktree "$proj" "$wt" "cmux-$id"
   printf 'brief\n' > "$home/data/$id/brief.md"
   title=$(cmux_expected_scoped_title "fm-$id" "$home" "$ROOT")
 
   printf '{"workspaces":[]}' > "$dir/responses/1.out"
-  cmux_workspace_list_response "$dir" 3 "bbbbbbbb-1111-1111-1111-111111111111" "$title"
-  cmux_panes_empty_response "$dir" 4
-  cmux_workspace_list_response "$dir" 5 "bbbbbbbb-1111-1111-1111-111111111111" "$title"
+  printf '{"workspaces":[]}' > "$dir/responses/3.out"
+  cmux_workspace_list_response "$dir" 4 "dddddddd-3333-3333-3333-333333333333" "$title"
+  cmux_workspace_list_response "$dir" 5 "dddddddd-3333-3333-3333-333333333333" "$title"
   cmux_windows_response "$dir" 6 "eeeeeeee-0000-0000-0000-000000000000" 1
-  cmux_workspace_list_response "$dir" 7 "bbbbbbbb-1111-1111-1111-111111111111" "$title"
+  cmux_workspace_list_response "$dir" 7 "dddddddd-3333-3333-3333-333333333333" "$title"
   cmux_workspace_list_response "$dir" 10
   fakebin=$(make_cmux_fakebin "$dir")
-  cat > "$dir/fail-pending-record.sh" <<'SH'
+  cat > "$dir/fail-unresolved-record.sh" <<'SH'
 printf() {
   case "${1:-}" in
-    *'kind=cmux-pending'*) return 1 ;;
+    *'kind=cmux-unresolved'*) return 1 ;;
   esac
   builtin printf "$@"
 }
 SH
-  BASH_ENV="$dir/fail-pending-record.sh" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+  BASH_ENV="$dir/fail-unresolved-record.sh" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
@@ -532,73 +532,36 @@ SH
     "$ROOT/bin/fm-spawn.sh" "$id" "$proj" codex --backend cmux --mode no-mistakes --yolo off \
     > "$dir/output" 2>&1
   status=$?
-  expect_code 1 "$status" "spawn should fail after cmux cannot resolve its default surface"
-  assert_contains "$(cat "$dir/output")" "could not resolve the default surface" \
-    "cmux surface resolution failure was not reported"
-  assert_absent "$home/state/.spawn-cleanup/$id.record" \
-    "cmux pending-record failure left a cleanup record after exact release"
-  assert_contains "$(cat "$dir/log")" \
-    $'close-workspace\x1f--workspace\x1fbbbbbbbb-1111-1111-1111-111111111111' \
-    "cmux pending-record failure did not close the exact workspace"
-  pass "fm-spawn: releases the exact cmux workspace when pending record publication fails"
+  expect_code 1 "$status" "spawn should fail when cmux identity remains unresolved"
+  assert_contains "$(cat "$dir/output")" "could not prove the new cmux workspace identity" \
+    "cmux unresolved identity failure was not reported"
+  assert_present "$home/state/.spawn-cleanup/$id.record" \
+    "cmux unresolved identity did not leave a durable cleanup record"
+  assert_grep 'endpoint_identity=unresolved' "$home/state/.spawn-cleanup/$id.record" \
+    "cmux unresolved identity cleanup record was not non-destructive"
+  assert_not_contains "$(cat "$dir/log")" $'close-workspace\x1f' \
+    "cmux unresolved identity cleanup closed a workspace by title"
+  pass "fm-spawn: keeps unresolved cmux identity non-destructive when diagnostic persistence fails"
 }
 
-test_create_task_retains_pending_record_when_workspace_id_resolution_fails() {
+test_create_task_retains_unresolved_record_when_workspace_id_resolution_fails() {
   local dir fb out status title
   dir="$TMP_ROOT/create-task-pending"; mkdir -p "$dir/responses"
-  title=$(cmux_expected_scoped_title fm-pending)
+  title=$(cmux_expected_scoped_title fm-unresolved)
   printf '{"workspaces":[]}' > "$dir/responses/1.out"
   printf '{"workspaces":[]}' > "$dir/responses/3.out"
   fb=$(make_cmux_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
     FM_BACKEND_ACQUISITION_FILE="$dir/acquisition" \
-    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_create_task fm-pending /tmp/proj' "$ROOT" 2>&1 )
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_create_task fm-unresolved /tmp/proj' "$ROOT" 2>&1 )
   status=$?
   [ "$status" -ne 0 ] || fail "create_task should fail when the post-create workspace lookup is empty"
-  assert_contains "$out" "retaining the acquisition record" "create_task did not explain that the pending record was retained"
-  assert_present "$dir/acquisition" "create_task did not preserve the pending acquisition record"
-  assert_grep 'kind=cmux-pending' "$dir/acquisition" "pending cmux acquisition record lost its pending kind"
-  assert_grep 'label=fm-pending' "$dir/acquisition" "pending cmux acquisition record lost its task label"
+  assert_contains "$out" "retaining a non-destructive unresolved acquisition record" "create_task did not explain that the unresolved record was retained"
+  assert_present "$dir/acquisition" "create_task did not preserve the unresolved acquisition record"
+  assert_grep 'kind=cmux-unresolved' "$dir/acquisition" "unresolved cmux acquisition record lost its unresolved kind"
+  assert_grep 'label=fm-unresolved' "$dir/acquisition" "unresolved cmux acquisition record lost its task label"
   assert_grep "workspace_title=$title" "$dir/acquisition" "pending cmux acquisition record lost its scoped title"
-  pass "fm_backend_cmux_create_task: retains an acquisition record when the new workspace id cannot be resolved"
-}
-
-test_spawn_recovers_pending_cmux_workspace_by_scoped_title() {
-  local dir home proj wt fakebin id title out status
-  dir="$TMP_ROOT/spawn-pending-recovery"
-  home="$dir/home"
-  proj="$dir/project"
-  wt="$dir/worktree"
-  id=cmux-pending-recover
-  mkdir -p "$dir/responses" "$home/data/$id" "$home/state" "$home/projects" "$home/config"
-  fm_git_worktree "$proj" "$wt" "cmux-$id"
-  printf 'brief\n' > "$home/data/$id/brief.md"
-  title=$(cmux_expected_scoped_title "fm-$id" "$home" "$ROOT")
-
-  printf '{"workspaces":[]}' > "$dir/responses/1.out"
-  cmux_workspace_list_response "$dir" 3
-  cmux_workspace_list_response "$dir" 4 "bbbbbbbb-1111-1111-1111-111111111111" "$title"
-  cmux_workspace_list_response "$dir" 5 "bbbbbbbb-1111-1111-1111-111111111111" "$title"
-  cmux_windows_response "$dir" 6 "eeeeeeee-0000-0000-0000-000000000000" 1
-  cmux_workspace_list_response "$dir" 7 "bbbbbbbb-1111-1111-1111-111111111111" "$title"
-  cmux_workspace_list_response "$dir" 10
-  fakebin=$(make_cmux_fakebin "$dir")
-  out=$( FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
-    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
-    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
-    FM_SPAWN_NO_GUARD=1 FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
-    PATH="$fakebin:$PATH" \
-    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" codex --backend cmux --mode no-mistakes --yolo off 2>&1 )
-  status=$?
-  expect_code 1 "$status" "spawn should fail after cmux leaves a pending acquisition"
-  assert_contains "$out" "retaining the acquisition record" \
-    "cmux pending acquisition failure did not report its retry record"
-  assert_absent "$home/state/.spawn-cleanup/$id.record" \
-    "cmux pending acquisition recovery left a cleanup record after exact release"
-  assert_contains "$(cat "$dir/log")" \
-    $'close-workspace\x1f--workspace\x1fbbbbbbbb-1111-1111-1111-111111111111' \
-    "cmux pending acquisition recovery did not close the resolved exact workspace"
-  pass "fm-spawn: resolves a pending cmux workspace by scoped title before exact cleanup"
+  pass "fm_backend_cmux_create_task: retains an unresolved record when the new workspace id cannot be proven"
 }
 
 # --- target_ready / capture ---------------------------------------------------
@@ -1235,9 +1198,8 @@ test_ensure_running_fails_fast_on_denied_without_launching
 test_ensure_running_fails_fast_on_unauth_without_launching
 test_create_task_refuses_duplicate_label
 test_create_task_creates_and_parses_ids
-test_spawn_releases_exact_cmux_workspace_when_pending_record_write_fails
-test_create_task_retains_pending_record_when_workspace_id_resolution_fails
-test_spawn_recovers_pending_cmux_workspace_by_scoped_title
+test_spawn_retains_unresolved_cmux_workspace_without_title_cleanup
+test_create_task_retains_unresolved_record_when_workspace_id_resolution_fails
 test_target_ready_fails_when_target_absent
 test_target_ready_checks_expected_label
 test_target_ready_rejects_label_mismatch
