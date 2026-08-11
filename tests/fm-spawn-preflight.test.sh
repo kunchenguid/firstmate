@@ -255,7 +255,7 @@ run_preflight_spawn() {
     FM_SPAWN_NO_GUARD=1 FM_SPAWN_WT_TIMEOUT=1 TMUX="fake,1,0" \
     FM_SPAWN_SSH="$FAKEBIN_DIR/ssh" FM_SPAWN_SSH_KNOWN_HOSTS="$KH_FILE" \
     PATH="$FAKEBIN_DIR:$PATH" \
-    "$SPAWN" "$id" "$PROJ_DIR" 2>&1
+    "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1
 }
 
 # ---------------------------------------------------------------------------

@@ -16,7 +16,7 @@
         { "harness": "claude", "model": "claude-sonnet-5", "effort": "high" },
         { "harness": "codex", "model": "gpt-5.5", "effort": "high" }
       ],
-      "why": "Arrays are quota-aware automatically, so use a strong coding profile with the most available relevant quota."
+      "why": "Use a strong coding profile for big, ambiguous work; resolve the alternatives through quota-array-dispatch."
     }
   ],
   "default": [

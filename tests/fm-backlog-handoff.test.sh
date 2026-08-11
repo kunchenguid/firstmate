@@ -11,7 +11,13 @@ set -u
 
 # The move is delegated to `tasks-axi mv`, so this suite exercises the real
 # binary. Skip cleanly when it is absent (matching the backend smoke suites).
-command -v tasks-axi >/dev/null 2>&1 || { echo "skip: tasks-axi not found (required by the delegated handoff path)"; exit 0; }
+# Presence alone is not the precondition: these cases drive real backlog
+# mutations, which the scripts perform only through a tasks-axi that meets
+# the floor bin/fm-tasks-axi-lib.sh owns. An installed but below-floor build
+# would otherwise fail here as if the behavior under test were broken.
+# shellcheck source=bin/fm-tasks-axi-lib.sh
+. "$ROOT/bin/fm-tasks-axi-lib.sh"
+fm_tasks_axi_compatible || { echo "skip: tasks-axi not found or below the required floor (required by the delegated handoff path)"; exit 0; }
 
 TMP_ROOT=$(fm_test_tmproot fm-backlog-handoff)
 
@@ -487,9 +493,11 @@ test_registry_home_with_pre_home_parentheses() {
   setup_homes "$home" "$sub" "$id"
   local sub_abs
   sub_abs=$(cd "$sub" && pwd -P)
-  # Prose parentheses before (home: ...), matching live registry shape.
-  printf -- '- %s - issue triage (id is legacy) (home: %s; scope: issue triage; projects: alpha; added 2026-07-09)\n' \
+  # Prose parentheses before (home: ...) and punctuation inside scope match the live registry shape.
+  printf -- '- %s - issue triage (id is legacy) (home: %s; scope: issue triage (child); semicolon is meaningful; projects: alpha; added 2026-07-09)\n' \
     "$id" "$sub_abs" > "$home/data/secondmates.md"
+  FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" validate >/dev/null \
+    || fail "home-seed validation rejected punctuation-bearing registry fields"
 
   cat > "$home/data/backlog.md" <<'EOF'
 ## Queued
@@ -563,8 +571,15 @@ setup_remote_handoff() {  # <name> -> echoes "<here> <peer>"
   cp "$ROOT/control-root/verbs/fmr-verb.sh" "$peer/cr/verbs/fmr-verb.sh"
   chmod 755 "$peer/cr/verbs/fmr-verb.sh"
   # The peer's own firstmate root: the real handoff script plus what it sources.
+  # The library list is READ OUT OF THE SCRIPT rather than spelled here, because
+  # a hand-written list silently rots: the 2026-08-11 upstream sync added two
+  # more `. "$SCRIPT_DIR/..."` lines to fm-backlog-handoff.sh and this peer then
+  # died with "No such file or directory" on a machine whose tasks-axi was new
+  # enough to run these cases at all.
   local f
-  for f in fm-backlog-handoff.sh fm-tasks-axi-lib.sh; do
+  # shellcheck disable=SC2016 # $SCRIPT_DIR is matched literally in the script's source lines, not expanded.
+  for f in fm-backlog-handoff.sh $(sed -n 's|^\. "\$SCRIPT_DIR/\([^"]*\)".*|\1|p' "$ROOT/bin/fm-backlog-handoff.sh"); do
+    [ -f "$ROOT/bin/$f" ] || fail "peer fixture: bin/$f is sourced by fm-backlog-handoff.sh but does not exist"
     cp "$ROOT/bin/$f" "$peer/fmroot/bin/$f"
   done
   {

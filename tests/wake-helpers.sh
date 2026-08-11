@@ -32,13 +32,7 @@ fi
 # that channel, to exercise graceful degradation. Suites that do not source this
 # harness still cannot fire a real notification: the daemon defaults the seam to
 # "discard" whenever it is sourced (its library-mode guard).
-# Create the recorder dir with mktemp directly (not fm_test_tmproot, whose
-# first call installs an EXIT trap that, invoked inside a command-substitution
-# subshell, would delete the dir on subshell exit). Register it for the same
-# cleanup and install the trap in THIS shell if it is the first registration.
-_fm_wedge_rec_dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-wedge-rec.XXXXXX")
-if [ "${#FM_TEST_CLEANUP_DIRS[@]}" -eq 0 ]; then trap fm_test_cleanup EXIT; fi
-FM_TEST_CLEANUP_DIRS+=("$_fm_wedge_rec_dir")
+_fm_wedge_rec_dir=$(fm_test_tmproot fm-wedge-rec)
 cat > "$_fm_wedge_rec_dir/rec" <<'REC'
 #!/usr/bin/env bash
 printf '%s\t%s\n' "${1:-}" "${2:-}" >> "${FM_WEDGE_ALARM_LOG:-/dev/null}"
@@ -69,7 +63,7 @@ make_case() {
 set -u
 if [ "${1:-}" = "list-windows" ]; then
   if [ -n "${FM_FAKE_TMUX_WINDOW:-}" ]; then
-    printf '%s\n' "$FM_FAKE_TMUX_WINDOW"
+    printf '%s\n' "${FM_FAKE_TMUX_WINDOW#*:}"
   fi
   exit 0
 fi
@@ -164,9 +158,9 @@ case "${1:-}" in
     fi
     exit 0 ;;
   capture-pane)
-    # Honor a single-line band capture (-S N -E M, both non-negative) the way the
-    # composer reader now bounds its capture to the cursor row; otherwise (e.g.
-    # fm_pane_is_busy's "-S -40" tail) return the whole capture. -e is accepted and
+    # Honor a single-line band capture (-S N -E M, both non-negative) for the
+    # composer reader's non-bordered compatibility fallback; otherwise (e.g. its
+    # structural full-pane scan or fm_pane_is_busy's "-S -40" tail) return the whole capture. -e is accepted and
     # ignored: this fake emits plain text, which the dim-stripper passes through.
     _S=""; _E=""; shift
     while [ "$#" -gt 0 ]; do
@@ -225,16 +219,27 @@ make_bordered_case() {
   local name=$1 dir fakebin
   dir="$TMP_ROOT/$name"; fakebin="$dir/fakebin"
   mkdir -p "$dir/state" "$fakebin"
-  printf '│ > │\n' > "$dir/composer"
+  printf '╭─────╮\n│ >   │\n╰─────╯\n' > "$dir/composer"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
 COMPOSER="${FM_FAKE_COMPOSER:?FM_FAKE_COMPOSER unset}"
+write_composer() {
+  text=$1
+  width=$((${#text} + 4))
+  border=
+  i=0
+  while [ "$i" -lt "$width" ]; do
+    border="${border}─"
+    i=$((i + 1))
+  done
+  printf '╭%s╮\n│ > %s │\n╰%s╯\n' "$border" "$text" "$border" > "$COMPOSER"
+}
 case "${1:-}" in
   display-message)
     print=0
     for a in "$@"; do case "$a" in *pane_current_command*) printf '%s\n' "${FM_FAKE_TMUX_CURRENT_COMMAND:-fakepane}"; exit 0 ;; esac; done
-    for a in "$@"; do case "$a" in *cursor_y*) printf '0\n'; exit 0 ;; esac; done
+    for a in "$@"; do case "$a" in *cursor_y*) printf '1\n'; exit 0 ;; esac; done
     # Supervisor home-ownership stamp (see make_supercase's shim for the contract).
     for a in "$@"; do case "$a" in *@firstmate-home*)
       if [ "${FM_FAKE_TMUX_HOME_STAMP+set}" = set ]; then printf '%s\n' "$FM_FAKE_TMUX_HOME_STAMP"
@@ -272,12 +277,12 @@ case "${1:-}" in
         [ "${FM_FAKE_PERSIST_SWALLOW:-0}" = 1 ] || rm -f "$FM_FAKE_SWALLOW"
       else
         [ -n "${FM_FAKE_SENT:-}" ] && printf '[ENTER]\n' >> "$FM_FAKE_SENT"
-        printf '│ > │\n' > "$COMPOSER"
+        write_composer ""
       fi
     elif [ "$lit" = 1 ]; then
       [ "${FM_FAKE_SEND_FAIL:-0}" = 1 ] && exit 1
       [ -n "${FM_FAKE_SENT:-}" ] && printf '%s\n' "$text" >> "$FM_FAKE_SENT"
-      printf '│ > %s │\n' "$text" > "$COMPOSER"
+      write_composer "$text"
     fi
     exit 0 ;;
 esac

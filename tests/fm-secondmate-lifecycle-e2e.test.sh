@@ -135,6 +135,7 @@ phase_spawn() {
 
 phase_send() {
   : > "$LOG"
+  : > "$PANE"
   # The home-scoped meta window must win over a foreign same-named
   # window returned by list-windows.
   PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" FM_FAKE_TMUX_WINDOW="other-session:fm-design" \
@@ -153,8 +154,11 @@ phase_send() {
 phase_handoff() {
   # The move is delegated to `tasks-axi mv`; skip cleanly when it is absent (the
   # downstream recovery and teardown phases do not depend on this phase).
-  if ! command -v tasks-axi >/dev/null 2>&1; then
-    echo "skip: tasks-axi not found (backlog handoff delegates to it)"
+  # Presence alone is not the precondition: the move needs a tasks-axi meeting
+  # the floor bin/fm-tasks-axi-lib.sh owns, so an installed but below-floor build
+  # would fail this phase as if the handoff itself were broken.
+  if ! ( . "$ROOT/bin/fm-tasks-axi-lib.sh" && fm_tasks_axi_compatible ); then
+    echo "skip: no tasks-axi meeting the required floor (backlog handoff delegates to it)"
     return 0
   fi
   cat > "$HOME_DIR/data/backlog.md" <<'EOF'

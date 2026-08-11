@@ -4,11 +4,11 @@
 # A firstmate primary that delegates through a harness's own delegation,
 # scheduling, or background-work tool creates work with no `state/<id>.meta` and
 # no `data/<id>/brief.md`. Only `bin/fm-spawn.sh` writes that metadata, and
-# every firstmate guard keys off it (bin/fm-supervision-lib.sh counts
-# `state/*.meta`; bin/fm-turnend-guard.sh exits silently at zero). So such work
-# is not merely unsupervised: it makes the whole guard stack structurally inert,
-# and it dies with the primary session instead of living in its own backend
-# session.
+# untracked project work contributes nothing to the in-flight branch of
+# bin/fm-supervision-lib.sh or bin/fm-turnend-guard.sh. So such work is not
+# merely unsupervised: absent an independent X-mode need, it makes the whole
+# guard stack structurally inert, and it dies with the primary session instead
+# of living in its own backend session.
 #
 # This scoped PreToolUse guard is the shipped mechanism.
 # Claude primaries should also use an untracked per-home local
@@ -64,6 +64,19 @@ DELEGATION_STEMS='agent subagent task workflow cron schedul worktree delegate sp
 # schema; this shipped guard deliberately stays narrower so it can never be the
 # reason a runaway task cannot be stopped.
 OBSERVE_ONLY_TOOLS='taskoutput taskstop taskget tasklist cronlist bashoutput killshell'
+
+# Exact lowercase tool names that match a stem above but create no RUNNABLE
+# work. These write only the harness's session-local todo list, which has no
+# executor: it spawns no agent, allocates no worktree, registers no schedule,
+# and starts nothing that could outlive the session or escape a firstmate
+# guard. Denying them stops the primary tracking its own plan while granting no
+# delegation power, and the deny text would tell it to run bin/fm-brief.sh for a
+# todo entry, so the stem match here is a false positive rather than a policy.
+# This is a separate list from OBSERVE_ONLY_TOOLS on purpose: these tools WRITE,
+# so folding them into a list documented as observe-or-stop would make that
+# contract untrue. Both lists are exact-name, never substring, so neither can
+# widen by accident.
+PLAN_ONLY_TOOLS='taskcreate taskupdate'
 
 TOOL=""
 TOOL_SET=0
@@ -139,7 +152,7 @@ case "$TOOL" in
   mcp__*) exit 0 ;;
 esac
 
-for allowed in $OBSERVE_ONLY_TOOLS; do
+for allowed in $OBSERVE_ONLY_TOOLS $PLAN_ONLY_TOOLS; do
   [ "$NORMALIZED" != "$allowed" ] || exit 0
 done
 
@@ -173,13 +186,13 @@ STATE=${FM_STATE_OVERRIDE:-$FM_HOME/state}
 . "$SCRIPT_DIR/fm-primary-scope-lib.sh"
 fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 
-# Investigation has a dedicated entry point when this home carries it; degrade
+# Name the dedicated scout entry point only when this home carries it; degrade
 # to the two-step brief-then-spawn path when it does not, rather than naming a
 # script that is not there.
 if [ -f "$FM_ROOT/bin/fm-scout.sh" ]; then
-  ROUTE='investigation or diagnosis goes to bin/fm-scout.sh "<question>" [project], and ship work goes to bin/fm-brief.sh then bin/fm-spawn.sh'
+  ROUTE='first classify the work under the AGENTS.md intake contract: work already classified as a scout goes to bin/fm-scout.sh "<question>" [project], while authorized ship work and its bounded research go to bin/fm-brief.sh then bin/fm-spawn.sh'
 else
-  ROUTE='investigation and ship work both go to bin/fm-brief.sh then bin/fm-spawn.sh'
+  ROUTE='first classify the work under the AGENTS.md intake contract, then use bin/fm-brief.sh followed by bin/fm-spawn.sh for dispatched work'
 fi
 
 REASON="[subagent-dispatch] the firstmate primary dispatches through the fleet, not the harness's own delegation tools: work started that way has no durable fleet record, leaves every firstmate guard inert, and dies with this session. Instead, $ROUTE (blocked tool: $TOOL, delegation-shaped on \"$MATCHED\"). Launch the session with FM_ALLOW_SUBAGENT=1 for a deliberate exception."

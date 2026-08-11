@@ -35,6 +35,9 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 # shellcheck source=bin/fm-lock-lib.sh
 . "$SCRIPT_DIR/fm-lock-lib.sh"
+# Inert unless FM_TIMING_LOG names a file; only the deferred network stage sets it.
+# shellcheck source=bin/fm-timing-lib.sh
+. "$SCRIPT_DIR/fm-timing-lib.sh"
 FM_LOCK_LOG_PREFIX=fleet-sync
 "$FM_ROOT/bin/fm-guard.sh" || true
 
@@ -159,9 +162,20 @@ packed_refs_lock_path() {
 # today's behavior. Every wait, retry, and removal prints to stderr, and a
 # successful recovery also prints one "$label: recovered: ..." summary to stdout so
 # a session-start refresh (which discards fleet-sync stderr) still surfaces it.
+# Every fetch here runs under LC_ALL=C because is_packed_refs_lock_error reads
+# git's own message text. git translates that message, so on a non-English
+# machine the signature never matched, the recovery never ran, and an orphaned
+# packed-refs.lock left the clone permanently unsyncable with only a generic
+# "fetch failed" to show for it. Pinning the locale for the parsed command is
+# what makes the detection a property of git rather than of the operator's
+# language; nothing else about the fetch changes.
+fetch_git() {  # <git args...>
+  LC_ALL=C git -C "$PROJ" "$@" 2>&1
+}
+
 fetch_with_packed_refs_lock_guard() {
   local rc attempt=0 lock lock_desc
-  FETCH_OUTPUT=$(git -C "$PROJ" fetch origin --prune --quiet 2>&1); rc=$?
+  FETCH_OUTPUT=$(fetch_git fetch origin --prune --quiet); rc=$?
   [ "$rc" -eq 0 ] && return 0
   is_packed_refs_lock_error "$FETCH_OUTPUT" || return "$rc"
 
@@ -171,7 +185,7 @@ fetch_with_packed_refs_lock_guard() {
     attempt=$(( attempt + 1 ))
     echo "$label: fetch blocked by packed-refs lock ($lock_desc); waiting ${FLEET_SYNC_PACKED_REFS_LOCK_RETRY_WAIT_SECS}s and retrying ($attempt/${FLEET_SYNC_PACKED_REFS_LOCK_RETRIES}) (owning process may be exiting)" >&2
     sleep "$FLEET_SYNC_PACKED_REFS_LOCK_RETRY_WAIT_SECS"
-    FETCH_OUTPUT=$(git -C "$PROJ" fetch origin --prune --quiet 2>&1); rc=$?
+    FETCH_OUTPUT=$(fetch_git fetch origin --prune --quiet); rc=$?
     if [ "$rc" -eq 0 ]; then
       echo "$label: fetch succeeded on retry; packed-refs lock cleared on its own" >&2
       # One stdout summary so a session-start refresh (which discards fleet-sync
@@ -195,7 +209,7 @@ fetch_with_packed_refs_lock_guard() {
         return "$rc"
       fi
       echo "$label: removed provably-stale packed-refs lock $lock (age >= ${FLEET_SYNC_PACKED_REFS_LOCK_AGE_SECS}s, no live holder) and retrying fetch" >&2
-      FETCH_OUTPUT=$(git -C "$PROJ" fetch origin --prune --quiet 2>&1); rc=$?
+      FETCH_OUTPUT=$(fetch_git fetch origin --prune --quiet); rc=$?
       if [ "$rc" -eq 0 ]; then
         echo "$label: fetch succeeded after stale packed-refs lock cleanup" >&2
         echo "$label: recovered: removed a stale packed-refs lock (no live holder)"
@@ -426,5 +440,10 @@ fi
 for proj in "$PROJECTS"/*; do
   [ -e "$proj" ] || continue
   [ -d "$proj" ] || continue
+  # Per-clone elapsed, so a fleet refresh that runs long names WHICH clone cost
+  # the time instead of only its total. Recording is a no-op unless the deferred
+  # network stage asked for it.
+  __fm_timing_stamp=$(fm_timing_now_ms)
   sync_project "$proj"
+  fm_timing_record clone sync "$__fm_timing_stamp" "$(basename "$proj")"
 done

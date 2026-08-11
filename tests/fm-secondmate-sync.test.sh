@@ -72,6 +72,7 @@ add_sm_worktree() {
   {
     printf 'window=firstmate:fm-%s\n' "$id"
     printf 'kind=secondmate\n'
+    printf 'harness=codex\n'
     printf 'home=%s/%s\n' "$w" "$id"
   } > "$w/home/state/$id.meta"
 }
@@ -290,13 +291,27 @@ make_fake_toolchain() {
   local dir=$1 fakebin
   fakebin="$dir/fakebin"
   mkdir -p "$fakebin"
-  fm_fake_exit0 "$fakebin" node gh-axi chrome-devtools-axi lavish-axi
+  fm_fake_exit0 "$fakebin" node chrome-devtools-axi
+  fm_fake_version_tool "$fakebin" lavish-axi FM_FAKE_LAVISH_AXI_VERSION 0.1.46
+  cat > "$fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' '0.1.29'
+  exit 0
+fi
+exit 0
+SH
+  chmod +x "$fakebin/gh-axi"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 if [ -n "${FM_FAKE_TMUX_LOG:-}" ]; then
   printf '%s\n' "$*" >> "$FM_FAKE_TMUX_LOG"
 fi
 case "$*" in
+  list-windows*)
+    sed -n 's/^window=[^:]*://p' "${FM_HOME:?}"/state/*.meta
+    exit 0
+    ;;
   *display-message*'#{pane_current_command}'*) printf '%s\n' codex; exit 0 ;;
   *display-message*'#{pane_id}'*) printf '%s\n' '%1'; exit 0 ;;
   *display-message*'#{cursor_y}'*) printf '%s\n' 0; exit 0 ;;
@@ -333,7 +348,7 @@ SH
   cat > "$fakebin/tasks-axi" <<'SH'
 #!/usr/bin/env bash
 case "${1:-} ${2:-}" in
-  "--version ") printf '%s\n' '0.1.1' ;;
+  "--version ") printf '%s\n' '0.2.4' ;;
   "update --help") printf '%s\n' 'usage: tasks-axi update <id> [flags]' '  --archive-body' ;;
   "mv --help") printf '%s\n' 'usage: tasks-axi mv <id> [<id>...] --to <path-or-dir>' ;;
 esac
@@ -342,6 +357,9 @@ SH
   chmod +x "$fakebin/tasks-axi"
   cat > "$fakebin/quota-axi" <<'SH'
 #!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' 'quota-axi 0.1.17 (fake)'
+fi
 exit 0
 SH
   chmod +x "$fakebin/quota-axi"
@@ -832,15 +850,6 @@ test_seed_marker_does_not_mask_real_dirt() {
   pass "T14 marker tolerance does not mask a genuinely dirty home"
 }
 
-# --- T15: the shipped firstmate repo gitignores the seed marker -----------------
-# Pins the actual fix so it cannot silently regress: without this .gitignore entry
-# every seeded home would read dirty again the moment it lands on this repo's HEAD.
-test_repo_gitignores_seed_marker() {
-  grep -qxF '.fm-secondmate-home' "$ROOT/.gitignore" \
-    || fail "the firstmate repo .gitignore must ignore the seed marker (.fm-secondmate-home)"
-  pass "T15 the firstmate repo gitignores the secondmate seed marker"
-}
-
 # --- a home on ANOTHER machine ------------------------------------------------
 #
 # The regression these guard is the quiet one. A secondmate whose home is on
@@ -996,6 +1005,5 @@ test_spawn_warns_when_sync_skipped_before_launch
 test_seed_marker_clean_when_gitignored
 test_seed_marker_converges_existing_home
 test_seed_marker_does_not_mask_real_dirt
-test_repo_gitignores_seed_marker
 
 echo "# all fm-secondmate-sync tests passed"

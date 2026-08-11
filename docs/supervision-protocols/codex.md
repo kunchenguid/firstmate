@@ -6,12 +6,15 @@ This is the durable wake path; the bounded foreground checkpoint remains only as
 
 When this session owns supervision and away mode is not active:
 1. Drain first with `bin/fm-wake-drain.sh`.
-2. Source `__FM_X_MODE_ENV__` first when X mode is active.
+   After handling all emitted wakes and reconciling open decisions, run the exact `--ack-through` command printed as `WAKE_ACK_REQUIRED`; until then the work remains durable for idempotent re-handling after interruption.
+2. Source `__FM_X_MODE_ENV__` first when Relay is active.
 3. Ensure the present-mode daemon is running with `bin/fm-present-launch.sh start`.
    It is idempotent: it no-ops when the daemon is already live and reconciles a leaked terminal from a prior crash before relaunching.
    The daemon is now this session's live supervision cycle - it owns the watcher and touches the same beacon the turn-end guard checks, so the turn may end without a blocking foreground checkpoint.
 4. When a marked supervision nudge arrives, or any wake, drain queued wakes with `bin/fm-wake-drain.sh`, handle the wake per this protocol, then re-run `bin/fm-present-launch.sh start` to confirm the daemon is still live before ending the turn.
 5. Never use shell `&` or Codex background tasks for firstmate watcher supervision; the daemon owns its own separate terminal.
+6. Do not run `bin/fm-watch-arm.sh` as Codex's normal supervision command.
+   If it is ever shelled anyway, a backgrounded, piped, or bundled anti-pattern is denied automatically by the PreToolUse seatbelt (`bin/fm-arm-pretool-check.sh`) registered in `.codex/hooks.json`.
 
 A marked supervision nudge (`FM_INJECT_MARK` prefix) while away mode is inactive is the present daemon waking this pane.
 It is not an away-mode escalation and does not load `/afk`; just drain and handle it per this protocol.
