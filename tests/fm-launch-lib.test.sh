@@ -29,7 +29,7 @@ trap 'rm -rf "$TMP_ROOT"' EXIT
 # shellcheck source=/dev/null
 . "$LAUNCH_LIB"
 
-HARNESSES=(claude codex opencode pi pi-signed grok kimi)
+HARNESSES=(claude codex opencode pi pi-signed grok kimi muse)
 # The harnesses README.md:61 lists as verified for a PRIMARY session. kimi is
 # deliberately absent, so launch_template refuses it for kind=primary.
 PRIMARY_HARNESSES=(claude codex opencode pi pi-signed grok)

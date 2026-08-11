@@ -531,7 +531,7 @@ make_probe_bin() {  # <name> <extra-adapter|""> -> prints bin dir
   cat >> "$dir/fm-launch-lib.sh" <<'SH'
 launch_permission_recorded() {
   case "$1" in
-    claude|codex|opencode|grok|pi|pi-signed|kimi) printf 'enforced' ;;
+    claude|codex|opencode|grok|pi|pi-signed|kimi|muse) printf 'enforced' ;;
     *) return 1 ;;
   esac
 }

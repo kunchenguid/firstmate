@@ -27,9 +27,12 @@
 # probes are a closed, audited, bounded set and they run here as usual, which is
 # how an entry whose commitment became real retires with no hand edit. A decision
 # file's `run:` is arbitrary text from a ruling author executed inside a task
-# worktree, and the open-decision fold would reach it - so the two calls below
-# that reach that fold, and only those two, carry
-# FM_COMMITMENT_NO_DECISION_RUN=1. It is deliberately not exported: this script's
+# worktree, and the open-decision fold would reach it - so every call below that
+# reaches that fold, and only those, carries
+# FM_COMMITMENT_NO_DECISION_RUN=1. Which calls those are is DERIVED in
+# tests/fm-session-start.test.sh rather than listed here, because the set grows
+# whenever a script this one invokes gains a fold read (fm-bootstrap.sh reaches it
+# through fm-send.sh). It is deliberately not exported: this script's
 # subtree relaunches secondmates through bin/fm-spawn.sh, which scrubs no
 # environment, and a safety flag that escaped into a long-lived agent would wedge
 # closure there for that agent's whole life.
@@ -581,7 +584,7 @@ if [ "$READ_ONLY" -eq 0 ]; then
   # steer, or merge anyway, so it has no action left for an auth verdict to gate.
   NETWORK_STAGE_LOCKED=1
   [ "$REEMIT" -eq 0 ] || NETWORK_STAGE_LOCKED=0
-  "$SCRIPT_DIR/fm-startup-network.sh" start \
+  FM_COMMITMENT_NO_DECISION_RUN=1 "$SCRIPT_DIR/fm-startup-network.sh" start \
     --locked "$NETWORK_STAGE_LOCKED" --harvest-pid $$ >/dev/null 2>&1 || true
 fi
 
@@ -593,15 +596,17 @@ stage bootstrap
 subsection "BOOTSTRAP"
 if [ "$READ_ONLY" -eq 1 ]; then
   BOOT_OUT=$(FM_BOOTSTRAP_DETECT_ONLY=1 FM_BOOTSTRAP_NETWORK=skip \
-    FM_TASKS_AXI_COMPATIBLE="$TASKS_AXI_COMPATIBLE" "$SCRIPT_DIR/fm-bootstrap.sh" 2>&1)
+    FM_TASKS_AXI_COMPATIBLE="$TASKS_AXI_COMPATIBLE" \
+    FM_COMMITMENT_NO_DECISION_RUN=1 "$SCRIPT_DIR/fm-bootstrap.sh" 2>&1)
 elif [ "$REEMIT" -eq 1 ]; then
   BOOT_OUT=$(FM_BOOTSTRAP_DETECT_ONLY=1 FM_BOOTSTRAP_LOCKED=1 FM_BOOTSTRAP_NETWORK=skip \
-    FM_TASKS_AXI_COMPATIBLE="$TASKS_AXI_COMPATIBLE" "$SCRIPT_DIR/fm-bootstrap.sh" 2>&1)
+    FM_TASKS_AXI_COMPATIBLE="$TASKS_AXI_COMPATIBLE" \
+    FM_COMMITMENT_NO_DECISION_RUN=1 "$SCRIPT_DIR/fm-bootstrap.sh" 2>&1)
 else
   BOOT_OUT=$(
     "$SCRIPT_DIR/fm-herdr-session-cleanup.sh" 2>&1 || true
     FM_BOOTSTRAP_NETWORK=skip FM_TASKS_AXI_COMPATIBLE="$TASKS_AXI_COMPATIBLE" \
-      "$SCRIPT_DIR/fm-bootstrap.sh" 2>&1
+      FM_COMMITMENT_NO_DECISION_RUN=1 "$SCRIPT_DIR/fm-bootstrap.sh" 2>&1
   )
 fi
 if [ -n "$BOOT_OUT" ]; then
@@ -816,7 +821,7 @@ if [ "$READ_ONLY" -eq 1 ]; then
   printf 'They need the fleet lock, and this session must not spawn, steer, or merge, so it\n'
   printf 'has no action they would gate. The session holding the lock runs them.\n'
 else
-  "$SCRIPT_DIR/fm-startup-network.sh" harvest --pid $$ 2>&1 || true
+  FM_COMMITMENT_NO_DECISION_RUN=1 "$SCRIPT_DIR/fm-startup-network.sh" harvest --pid $$ 2>&1 || true
 fi
 
 # --- 8. context digest -----------------------------------------------------

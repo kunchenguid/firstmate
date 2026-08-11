@@ -153,8 +153,11 @@
 # critical path of every session. That is the FOLD. It is not the --open relay:
 # --open never collects decision probes at all, deliberately, because the fold is
 # their surface. So bin/fm-session-start.sh sets
-# FM_COMMITMENT_NO_DECISION_RUN=1 on exactly the two calls that reach the fold -
-# its wake drain and its admission read - and on nothing else. The variable is
+# FM_COMMITMENT_NO_DECISION_RUN=1 on exactly the calls that reach the fold - its
+# wake drain, its admission read, its bootstrap relay and its deferred network
+# stage - and on nothing else; tests/fm-session-start.test.sh DERIVES that set
+# rather than pinning a list, because it grows whenever a script session start
+# already invokes gains a fold read. The variable is
 # never exported over session start's whole subtree, because that subtree
 # relaunches secondmates through bin/fm-spawn.sh, which scrubs no environment: a
 # safety flag that escaped into a long-lived agent would silently wedge closure

@@ -205,7 +205,8 @@ An absent target is not refused, because an owner or test that does not exist is
 That constraint is what makes running typed probes at session start a cost decision rather than a trust one, because the overlay at `data/commitments/` is gitignored and unreviewed.
 
 Session start runs typed probes and never a decision file's `run:`, and that is a safety requirement rather than a performance one.
-`bin/fm-session-start.sh` sets `FM_COMMITMENT_NO_DECISION_RUN=1` on exactly the two calls that reach the open-decision fold - its wake drain, and its admission read through `fm-fleet-snapshot.sh` - and on nothing else.
+`bin/fm-session-start.sh` sets `FM_COMMITMENT_NO_DECISION_RUN=1` on exactly the calls that reach the open-decision fold - its wake drain, its admission read through `fm-fleet-snapshot.sh`, its bootstrap relay, and its deferred network stage, the last two of which reach the fold through `fm-send.sh` - and on nothing else.
+Which calls those are is derived in `tests/fm-session-start.test.sh` rather than restated anywhere, because the set grows the day a script session start already invokes gains a fold read.
 It is deliberately not exported over the whole subtree, because that subtree relaunches secondmates through `bin/fm-spawn.sh`, which scrubs no environment, and a safety flag that escaped into a long-lived agent would wedge closure there for that agent's whole life.
 The typed probes keep running at session start, which is how an entry whose commitment became real still retires there with no hand edit rather than printing forever.
 Not running is not accepting: a criterion whose `run:` was not executed answers could-not-observe and no stored verdict stands in for it, so the resolution stays visibly unverified and still open.
