@@ -211,7 +211,7 @@ The CLI matrix was checked directly:
 | Literal send | `herdr pane send-text <pane> <text> --session <name>` | Left text unsubmitted until Enter. |
 | Keys | `herdr pane send-keys <pane> enter|escape|ctrl+c --session <name>` | Enter and Escape worked; Ctrl-C interrupted foreground work. |
 | Capture | `herdr pane read <pane> --source recent --lines N` | Small N could return empty below viewport height; a 200-line request plus local trim was stable. |
-| Native state | `herdr agent get <pane>` | Working and done transitions were visible; native `busy` remains positive activity evidence, while native `idle` cannot close a turn and the adapter's semantic lifecycle decides worker state. |
+| Native state | `herdr agent get <pane>` | Working and done transitions were visible; native `busy` remains positive generic activity evidence, while native `idle` is not trusted directly by the shared classifier, and only TraeX's metadata-bound writer converts its native transition into a semantic close. |
 | Restart | guarded named-session stop then start | Workspace, tab, pane, and labels persisted; the agent process and registration did not. |
 | Close | `herdr pane close <pane> --session <name>` | The exact one-pane task tab closed; closing a final tab could remove the workspace. |
 
@@ -262,7 +262,13 @@ herdr=herdr 0.8.0
 ok - TraeX/Herdr live drift guard completed
 ```
 
-Portable coverage pins the exact trust refusal matrix, launch rendering and native session binding, scoped detection marker, Herdr-only/ordinary-role boundary, blocked-screen steering refusal, same-session resume ownership, native lifecycle writer, completion dedupe, interrupt composer clear, model/effort mapping, and existing-adapter non-regression.
+Portable coverage is refreshed with:
+
+```sh
+tests/fm-traex-harness.test.sh
+```
+
+It pins the exact trust refusal matrix, launch rendering and native session binding, scoped detection marker, Herdr-only/ordinary-role boundary, blocked-screen steering refusal, post-injection native-unknown rebinding, same-session resume ownership, native lifecycle writer, completion dedupe, asynchronous interrupt-clear recovery, model/effort mapping, and existing-adapter non-regression.
 
 ### Prune and respawn
 

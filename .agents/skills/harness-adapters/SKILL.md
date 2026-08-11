@@ -147,8 +147,8 @@ For an unfamiliar harness or model namespace, establish support and provider ide
 A listing that reaches the account and does not contain the model is concrete evidence the model is unsupported: block that candidate and quote the result.
 A discovery surface you could not reach establishes nothing; report that as uncertainty rather than turning it into a supported or unsupported verdict.
 
-When a requested effort value is outside the harness-specific accepted set, `fm-spawn` records the requested `effort=` in meta but emits no effort flag for that harness.
-This preserves launch success instead of passing a known-bad value.
+When a requested effort value is outside the harness-specific accepted set, follow the adapter-specific row rather than assuming omission.
+Most adapters record the requested `effort=` in meta and emit no effort flag, while TraeX refuses its unverified `max` value before endpoint creation.
 
 ## no-mistakes skill invocation
 
@@ -406,10 +406,10 @@ It is not a primary, secondmate, watcher owner, away-mode supervisor, remote coo
 | Fact | Value |
 |---|---|
 | Binary | `traex`; its own version banner identifies `traecli 0.200.19(internal edition)`. |
-| Launch | `FM_TRAEX_HARNESS=traex traex -y --session-id <generated-task-private-UUID> --model <model> -c 'model_reasoning_effort="<level>"' <one positional launch brief>`. The generated ID is persisted as task-private `traex_session_id`; the marker is Firstmate-private and intentionally outranks ancestry so unrelated TraeX processes are never detected as workers. |
+| Launch | `FM_TRAEX_HARNESS=traex traex -y --session-id <generated-task-private-UUID> [--model <model>] [-c 'model_reasoning_effort="<level>"'] <one positional launch brief>`. The optional flags come only from selected profile axes; the generated ID is persisted as task-private `traex_session_id`, and the marker intentionally outranks ancestry so unrelated TraeX processes are never detected as workers. |
 | Busy state | Herdr's native TraeX `pane.agent_status_changed` stream, persisted as source `herdr-traex` through `bin/fm-busy-event.sh`. `working` is busy; `blocked`, `idle`, and `done` are inactive; only a busy-to-idle/done fold touches the ordinary turn-ended notification. |
 | Exit command | `/exit` or `/quit`; use `/exit` as the canonical form. |
-| Interrupt | Single Escape. TraeX restores the interrupted prompt as real composer input, so `fm-send.sh` immediately follows with `C-u`; Herdr's following native transition settles the semantic lifecycle. |
+| Interrupt | Send single Escape through `fm-send.sh`; it immediately sends `C-u`, repeats that clear if asynchronous restoration races it, and succeeds only after the exact bound agent is native idle/done with an empty structured composer. |
 | Skill invocation | Use natural language; no separate TraeX skill-command form is verified. |
 | Autonomy | `-y` / `--dangerously-bypass-approvals-and-sandbox`. This does not suppress the separate fresh-directory trust chooser. |
 | Trust dialog | Herdr manifest rule `directory_trust_prompt`, with `1. Yes, continue` preselected. Firstmate requires the live `foreground_cwd` to equal the isolated task root; Herdr's immutable pane-creation `cwd` must equal either that root or the exact source project from which ordinary `treehouse get` entered it. Only when those identities and the rule/default text agree does Firstmate send one Enter, then require native `working`; a key-send result alone is never success. |

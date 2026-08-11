@@ -208,9 +208,13 @@ The full cmux home label also includes a short hash of the resolved `FM_ROOT` pa
 
 claude, codex, opencode, pi, pi-signed, grok, and kimi are empirically verified for crewmate and secondmate launches; [README requirements](../README.md#requirements) own the set supported for the primary session.
 muse is verified for crewmate and scout launches ONLY, and `fm-spawn.sh` refuses it for a secondmate, because muse ships no usable hook surface for a primary session's turn-end supervision; [`docs/verification/muse.md`](verification/muse.md) owns that evidence.
-traex is also crewmate/scout-only and is currently verified only on Herdr 0.8.0's native TraeX agent path; `fm-spawn.sh` refuses primary/secondmate roles, remote coordination, raw commands that lexically reference TraeX, every non-Herdr backend, and the unverified `max` effort before endpoint creation. Verified TraeX effort values are `low`, `medium`, `high`, and `xhigh`.
-The raw-command admission check recognizes direct and shell-quote-concatenated TraeX executable names. Deliberately interpreter-generated executable names that contain no lexical TraeX reference are outside that detection guarantee and remain unsupported; ordinary non-TraeX raw shell launches retain the established adapter-verification escape hatch.
-Fresh TraeX task copies use one structurally verified Herdr trust-dialog acceptance and must reach native `working` before spawn succeeds; no global TraeX trust/config file is edited by Firstmate.
+traex is also crewmate/scout-only and uses Herdr's native TraeX agent path.
+It requires both the selected Herdr client and running server to report version 0.8.0 or newer, with [active empirical evidence](verification/runtime-backends.md#traex-ordinary-worker-lifecycle) recorded against 0.8.0.
+`fm-spawn.sh` refuses primary/secondmate roles, remote coordination, raw commands that lexically reference TraeX, every non-Herdr backend, and the unverified `max` effort before endpoint creation.
+Verified TraeX effort values are `low`, `medium`, `high`, and `xhigh`.
+The raw-command admission check recognizes direct and shell-quote-concatenated TraeX executable names.
+Deliberately interpreter-generated executable names that contain no lexical TraeX reference are outside that detection guarantee and remain unsupported; ordinary non-TraeX raw shell launches retain the established adapter-verification escape hatch.
+When a fresh TraeX task copy presents the directory-trust chooser, Firstmate permits one structurally verified Herdr acceptance and still requires native `working` before spawn succeeds; no global TraeX trust/config file is edited.
 muse also needs a worker-reachable credential before spawning, and the portable fleet path is the `<config>/muse/auth.json` credential stored by `muse login`, because a caller-only `META_API_KEY` does not cross a long-lived backend daemon.
 New harnesses get verified through a supervised trial task before joining the set.
 The verified adapter knowledge - each harness's busy-state source, interrupt and exit commands, skill-invocation syntax, and per-harness quirks - lives in [`.agents/skills/harness-adapters/SKILL.md`](../.agents/skills/harness-adapters/SKILL.md).
@@ -276,7 +280,8 @@ Profile `model` and `effort` fields and rule `why` are optional.
 An omitted model or effort means the selected harness uses its own default for that axis.
 Every profile array is an implicit quota-aware choice resolved through `quota-array-dispatch`.
 If no dispatch rule fits, firstmate resolves `default` through the same object-or-array path before falling back to `config/crew-harness`.
-If a selected profile carries an effort value the chosen harness does not accept, `fm-spawn.sh` records the requested `effort=` in task meta for traceability but omits the launch flag, and bootstrap reports the invalid harness/effort pair as a `CREW_DISPATCH` diagnostic when it is visible in the file.
+If a selected profile carries an effort value the chosen harness does not accept, bootstrap reports the invalid harness/effort pair as a `CREW_DISPATCH` diagnostic when it is visible in the file.
+At direct spawn, adapters ordinarily record the requested `effort=` in task meta and omit an unsupported launch flag, while the Harness support section above owns fail-closed exceptions such as TraeX's refusal of `max` before endpoint creation.
 See [`docs/examples/crew-dispatch.json`](examples/crew-dispatch.json) for a starting point to copy into local `config/crew-dispatch.json`.
 When the file exists, bootstrap validates it with `jq`.
 Valid files stay silent by default; with `FM_BOOTSTRAP_VERBOSE_FACTS=1`, bootstrap emits `BOOTSTRAP_INFO: crew dispatch active config/crew-dispatch.json`, one `BOOTSTRAP_INFO:` fact per rule, and one fact for the optional default profile set.

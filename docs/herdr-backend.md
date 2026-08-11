@@ -15,7 +15,7 @@ Prerequisites:
 - Herdr protocol 14 or newer, installed from [herdr.dev](https://herdr.dev).
 - `jq` for JSON responses.
 - The universal harness and toolchain requirements in [`configuration.md`](configuration.md#toolchain).
-- `python3` only for optional protocol-16 presentation-space ordering and native event subscription.
+- `python3` for protocol-16 presentation-space ordering and native event subscription; it is optional for ordinary Herdr use but required when `harness=traex`.
 
 Herdr is dual-licensed AGPL-3.0-or-later or commercial.
 Firstmate invokes its CLI as a separate process.
@@ -27,6 +27,7 @@ A tmux pane nested inside Herdr resolves to tmux because the innermost multiplex
 An auto-detected Herdr spawn prints an opt-out notice.
 
 Spawn stops before creating a Herdr container or acquiring a task worktree when `herdr`, `jq`, or the protocol floor is unavailable.
+A TraeX spawn additionally refuses before endpoint creation unless `traex` is installed, both the selected Herdr client and running server are version 0.8.0 or newer, and the Python-backed `pane.agent_status_changed` event surface is available.
 No separate first-run provisioning is required.
 
 The required CI lane uses the pinned installers in `bin/fm-install-herdr.sh` and `bin/fm-install-treehouse.sh`.
@@ -226,8 +227,15 @@ The shared crew-state path therefore accepts a native `busy` as evidence of acti
 A human-blocked permission dialog has no busy banner and still surfaces.
 
 TraeX is the narrow exception that turns Herdr's native transition stream into its task-owned semantic record.
-`fm-spawn.sh` supports TraeX only for ordinary workers/scouts on Herdr, requires the event capability before endpoint creation, arms one generation, routes the observed initial native `working` level through the metadata-bound transition writer, and only then publishes `traex_ready=1`. Effort values `low` through `xhigh` use TraeX's verified reasoning configuration; unverified `max` is refused before endpoint creation.
-Working, blocked, idle, and done transitions are then persisted as source `herdr-traex`; steering requires an exact ready binding and valid armed lifecycle before input is typed, submit confirmation persists its observed working level before acknowledging a steer, and a steer submitted while native state is already working additionally requires the newly typed composer to clear. A native working-to-idle/done fold stages a generation-bound completion intent before terminal idle commits, then atomically promotes that intent to the ordinary turn-ended notification; reconnect finishes either interrupted half without replaying an already published notice. If launch ownership disappears while readiness is pending, reconciliation marks it failed; pending or failed startup records that already persisted native working remain eligible for terminal-level reconciliation, so reconnect can recover one missed completion without repeating every idle level.
+`fm-spawn.sh` supports TraeX only for ordinary workers/scouts on Herdr, requires the 0.8.0 client/server floor and event capability before endpoint creation, arms one generation, routes the observed initial native `working` level through the metadata-bound transition writer, and only then publishes `traex_ready=1`.
+Effort values `low` through `xhigh` use TraeX's verified reasoning configuration; unverified `max` is refused before endpoint creation.
+A `working` transition persists busy source `herdr-traex`; `blocked` settles an active record without a turn-ended notification, `idle`/`done` use the completion path below, and repeated inactive levels remain sparse.
+Ordinary steering requires an exact ready binding and valid armed lifecycle before input is typed, and a natively blocked pane refuses before that mutation.
+After literal text is typed, TraeX may temporarily report native `unknown`; before sending Enter, the adapter revalidates the exact native session process, pane, and isolated foreground worktree, while a blocker still refuses.
+Submit confirmation persists its observed working level before acknowledging a steer, and a steer submitted while native state is already working additionally requires the newly typed composer to clear.
+A native working-to-idle/done fold stages a generation-bound completion intent before terminal idle commits, then atomically promotes that intent to the ordinary turn-ended notification; reconnect finishes either interrupted half without replaying an already published notice.
+If launch ownership disappears while readiness is pending, reconciliation marks it failed.
+Pending or failed startup records that already persisted native working remain eligible for terminal-level reconciliation, so reconnect can recover one missed completion without repeating every idle level.
 No other harness inherits that trust in native idle.
 
 A fresh isolated TraeX task copy may stop at `directory_trust_prompt` even under `-y`.
@@ -235,12 +243,15 @@ The adapter sends one Enter only after `agent explain` names that exact bundled 
 It then requires a native working observation; the key-send result alone is never launch success.
 An already-trusted task path skips the key but keeps the same working postcondition.
 Firstmate does not edit TraeX's global trust/config files or accept an arbitrary blocked screen.
-A TraeX Escape interrupt restores the interrupted instruction as real composer input, so `fm-send.sh` follows that key with the verified `C-u` clear before another steer; the following native transition settles the semantic record.
+A direct TraeX request using `fm-send.sh` with `--key Enter` is refused because only the spawn trust owner may send that acceptance key.
+A TraeX Escape interrupt restores the interrupted instruction as real composer input.
+`fm-send.sh` sends an immediate `C-u`, repeats the clear if asynchronous restoration races it, and returns success only after the exact bound agent is native idle/done with a structurally empty composer; normal transition reconciliation settles the semantic record.
 
 ## Composer and injection safety
 
 Herdr has no direct cursor-row primitive.
-The adapter locates the bottom-most recognized bordered row, Claude `❯` row, Codex `›` row, or a Pi separator region admitted only when native identity is exactly Pi and state is idle, done, or blocked.
+The adapter locates the bottom-most recognized bordered row, bare `❯` or `›` row, or a Pi separator region admitted only when native identity is exactly Pi and state is idle, done, or blocked.
+TraeX's session-labelled opening and adjacent solid closing rule preserve its bare `❯` candidate only when Herdr natively identifies TraeX; another unmatched lower separator keeps the composer unknown.
 A working Pi, pending middle row, missing identity, incomplete separator pair, or over-tall candidate remains pending or unknown.
 
 ANSI capture preserves de-emphasized placeholder style.
@@ -277,11 +288,15 @@ Protocol 16 can subscribe to `pane.agent_status_changed` over one bounded Unix-s
 `bin/fm-transition-lib.sh` owns the backend-neutral transition vocabulary and policy.
 The Herdr adapter subscribes before reconciling current levels, buffers edges during reconciliation, and returns fresh blocked transitions for this home's panes.
 The watcher maps the pane back to the task and skips secondmate endpoints and declared `paused:` waits.
-For an exact ready TraeX task, the same stream also updates its armed semantic lifecycle and durable turn-ended notification before the shared blocked/defer policy runs. Each buffered edge is reconciled against the current native level, while a buffered terminal event remains authoritative if TraeX deregisters before the level read. A generation-bound pending notification is reconciled before any live-agent read, so restart recovery can publish it after TraeX exits. It also terminally reconciles an orphaned pending or failed launch only when the bound lifecycle proves native working was already persisted; every other harness remains byte-for-byte on the existing policy.
+For an exact ready TraeX task, the same stream also updates its armed semantic lifecycle and durable turn-ended notification before the shared blocked/defer policy runs.
+Each buffered edge is reconciled against the current native level, while a buffered terminal event remains authoritative if TraeX deregisters before the level read.
+A generation-bound pending notification is reconciled before any live-agent read, so restart recovery can publish it after TraeX exits.
+The stream also terminally reconciles an orphaned pending or failed launch only when the bound lifecycle proves native working was already persisted; every other harness remains on the existing policy.
 
 The push path only shortens latency.
 Polling runs every cycle and remains the permanent fallback when protocol 16, the event schema, Python, connection, subscription, or repeated reader execution is unavailable.
-That fallback folds the current native level for every bound ordinary TraeX worker across each Herdr session recorded in the generation-bound TraeX ownership index before sleeping, including terminal recovery for an orphaned pending or failed launch, so a session configuration change or disabled push cannot disable lifecycle completion. The watcher reads that bounded index once per cycle; non-TraeX and secondmate groups are not added to grouped reconciliation.
+That fallback folds the current native level for every bound ordinary TraeX worker across each Herdr session recorded in the generation-bound TraeX ownership index before sleeping, including terminal recovery for an orphaned pending or failed launch, so a session configuration change or disabled push cannot disable lifecycle completion.
+The watcher reads that bounded index once per cycle; non-TraeX and secondmate groups are not added to grouped reconciliation.
 There is still one watcher process; the event reader is a bounded child of that watcher.
 
 `tests/fm-backend-herdr-eventwait-smoke.test.sh`, `tests/fm-transition-lib.test.sh`, and `tests/fm-supervision-events.test.sh` cover capability, subscribe-then-reconcile ordering, dedupe, exemptions, and polling fallback.
@@ -338,6 +353,7 @@ tests/fm-backend-herdr-workspace-per-home-e2e.test.sh
 tests/fm-backend-herdr-launcher-workspace-e2e.test.sh
 tests/fm-backend-herdr-presentation-e2e.test.sh
 tests/fm-backend-herdr-eventwait-smoke.test.sh
+tests/fm-traex-harness.test.sh
 tests/fm-herdr-session-cleanup.test.sh
 tests/fm-herdr-session-cleanup-e2e.test.sh
 tests/fm-afk-inject-herdr-e2e.test.sh
