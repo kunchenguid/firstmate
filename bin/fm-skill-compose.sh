@@ -256,7 +256,7 @@ compose_exit() {
 }
 
 acquire_compose_lock() {
-  local prior_state_set=0 prior_state= prior_override_set=0 prior_override=
+  local prior_state_set=0 prior_state='' prior_override_set=0 prior_override=''
   validate_managed_layout
   mkdir -p "$COMPOSE_PARENT"
   [ "${STATE+x}" = x ] && { prior_state_set=1; prior_state=$STATE; }
