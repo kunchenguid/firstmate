@@ -36,8 +36,8 @@
 #   --base <ref>    with --changed, compare against this ref (default: origin/main)
 #   --exclude-family <name>
 #                   drop scripts whose primary family matches <name> after selection
-#                   (repeatable; portable CI lanes exclude real-herdr-gated so the
-#                   dedicated required Herdr lane owns that coverage)
+#                   (repeatable; portable CI lanes exclude the dedicated
+#                   real-herdr-gated and native-backend-gated lanes)
 #   --runtime-gate <runtime>=required|optional
 #                   declare whether a selected runtime gate must be exercised.
 #                   Required gates need a selected real-runtime test and explicit
@@ -530,14 +530,17 @@ family_for_basename() {
     fm-bearings-snapshot.test.sh|fm-fleet-snapshot-view.test.sh)
       printf '%s\n' snapshot-bearings
       ;;
-    fm-backend-cmux.test.sh|fm-backend-cmux-smoke.test.sh)
+    fm-backend-cmux.test.sh)
       printf '%s\n' cmux
       ;;
-    fm-backend-zellij.test.sh|fm-backend-zellij-smoke.test.sh)
+    fm-backend-zellij.test.sh)
       printf '%s\n' zellij
       ;;
     fm-backend-orca.test.sh)
       printf '%s\n' orca
+      ;;
+    fm-backend-cmux-smoke.test.sh|fm-backend-orca-smoke.test.sh|fm-backend-zellij-smoke.test.sh)
+      printf '%s\n' native-backend-gated
       ;;
     *)
       printf '%s\n' unclassified
@@ -548,6 +551,7 @@ family_for_basename() {
 runtime_gate_for_basename() {
   case "$1" in
     fm-backend-cmux-smoke.test.sh) printf '%s\n' cmux ;;
+    fm-backend-orca-smoke.test.sh) printf '%s\n' orca ;;
     fm-backend-zellij-smoke.test.sh) printf '%s\n' zellij ;;
     *)
       case "$(family_for_basename "$1")" in
@@ -641,6 +645,7 @@ snapshot-bearings
 cmux
 zellij
 orca
+native-backend-gated
 unclassified
 EOF
 }
@@ -656,6 +661,7 @@ list_known_lanes() {
     i=$((i + 1))
   done
   printf '%s\n' real-herdr-gated
+  printf '%s\n' native-backend-gated
 }
 
 # Exact proven-isolated candidate set (same paths as
@@ -737,7 +743,7 @@ is_proven_isolated_script() {
 }
 
 # The portable serial remainder: every tests/*.test.sh that is neither
-# proven-isolated nor real-herdr-gated. Watcher, lock, AFK, real tmux, daemon,
+# proven-isolated, real-herdr-gated, nor native-backend-gated. Watcher, lock, AFK, real tmux, daemon,
 # secondmate lifecycle, bootstrap, live-harness opt-in, GUI-backend, and other
 # unproven work stays here. Derived rather than enumerated so a newly added test
 # lands here by default instead of falling out of every lane.
@@ -748,6 +754,9 @@ list_portable_serial() {
     base=$(basename "$s")
     fam=$(family_for_basename "$base")
     if [ "$fam" = "real-herdr-gated" ]; then
+      continue
+    fi
+    if [ "$fam" = "native-backend-gated" ]; then
       continue
     fi
     if is_proven_isolated_script "$s"; then
@@ -954,6 +963,10 @@ select_lane() {
       select_family real-herdr-gated
       found=1
       ;;
+    native-backend-gated)
+      select_family native-backend-gated
+      found=1
+      ;;
     *)
       die "unknown lane '$want' (see --list-lanes)"
       ;;
@@ -989,7 +1002,7 @@ run_coverage_guard() {
     return 1
   fi
 
-  # Serial (whole lane and each CI shard) + Herdr lane listings without
+  # Serial (whole lane and each CI shard) + required-runtime lane listings without
   # disturbing a caller's selection.
   saved_scripts=("${SCRIPTS[@]+"${SCRIPTS[@]}"}")
   SCRIPTS=()
@@ -1012,6 +1025,9 @@ run_coverage_guard() {
   SCRIPTS=()
   select_family real-herdr-gated
   printf '%s\n' "${SCRIPTS[@]+"${SCRIPTS[@]}"}" | LC_ALL=C sort -u >"$tmp/herdr"
+  SCRIPTS=()
+  select_family native-backend-gated
+  printf '%s\n' "${SCRIPTS[@]+"${SCRIPTS[@]}"}" | LC_ALL=C sort -u >"$tmp/native"
   SCRIPTS=("${saved_scripts[@]+"${saved_scripts[@]}"}")
 
   # Every serial script runs in exactly one CI shard: no duplicate work across
@@ -1034,7 +1050,8 @@ run_coverage_guard() {
     return 1
   fi
 
-  for pair in "shards_union:serial" "shards_union:herdr" "serial:herdr"; do
+  for pair in "shards_union:serial" "shards_union:herdr" "shards_union:native" \
+    "serial:herdr" "serial:native" "herdr:native"; do
     a=${pair%%:*}
     b=${pair#*:}
     comm -12 "$tmp/$a" "$tmp/$b" >"$tmp/overlap"
@@ -1046,7 +1063,7 @@ run_coverage_guard() {
     fi
   done
 
-  cat "$tmp/shards_union" "$tmp/serial" "$tmp/herdr" | LC_ALL=C sort >"$tmp/union_raw"
+  cat "$tmp/shards_union" "$tmp/serial" "$tmp/herdr" "$tmp/native" | LC_ALL=C sort >"$tmp/union_raw"
   uniq -d "$tmp/union_raw" >"$tmp/union_dups"
   if [ -s "$tmp/union_dups" ]; then
     log "coverage guard: duplicate scripts across lanes:"
@@ -1058,7 +1075,7 @@ run_coverage_guard() {
   missing=$(comm -23 "$tmp/all" "$tmp/union" || true)
   extra=$(comm -13 "$tmp/all" "$tmp/union" || true)
   if [ -n "$missing" ] || [ -n "$extra" ]; then
-    log "coverage guard: union of portable shards + portable serial + Herdr must equal tests/*.test.sh"
+    log "coverage guard: union of portable shards + portable serial + required-runtime families must equal tests/*.test.sh"
     [ -z "$missing" ] || { log "missing from union:"; printf '%s\n' "$missing" >&2; }
     [ -z "$extra" ] || { log "extra beyond inventory:"; printf '%s\n' "$extra" >&2; }
     rm -rf "$tmp"
@@ -1075,12 +1092,13 @@ run_coverage_guard() {
     fi
   fi
 
-  printf 'FM_TEST_COVERAGE ok total=%s parallel=%s serial=%s serial_shards=%s herdr=%s\n' \
+  printf 'FM_TEST_COVERAGE ok total=%s parallel=%s serial=%s serial_shards=%s herdr=%s native=%s\n' \
     "$(wc -l <"$tmp/all" | tr -d ' ')" \
     "$(wc -l <"$tmp/shards_union" | tr -d ' ')" \
     "$(wc -l <"$tmp/serial" | tr -d ' ')" \
     "$PORTABLE_SERIAL_SHARDS" \
-    "$(wc -l <"$tmp/herdr" | tr -d ' ')"
+    "$(wc -l <"$tmp/herdr" | tr -d ' ')" \
+    "$(wc -l <"$tmp/native" | tr -d ' ')"
   rm -rf "$tmp"
   return 0
 }
@@ -1326,6 +1344,12 @@ families_for_changed_path() {
       # Pin or cleanup changes also select the real-Herdr family so the required
       # lane's contract coverage re-runs.
       printf '%s\n' real-herdr-gated
+      ;;
+    bin/fm-install-zellij.sh)
+      printf '%s\n' pure-contract-unit
+      # The pinned native installer is part of the required native lane's
+      # provisioning contract.
+      printf '%s\n' native-backend-gated
       ;;
     bin/fm-lint.sh|bin/fm-install-shellcheck.sh|\
     bin/fm-brief.sh|bin/fm-ensure-agents-md.sh|bin/fm-crew-state.sh|\

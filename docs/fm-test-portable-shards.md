@@ -51,6 +51,7 @@ The two parallel lanes use longest-processing-time assignment from those measure
 
 `portable-serial` includes every `tests/*.test.sh` that is neither proven-isolated nor `real-herdr-gated`.
 It keeps watcher, lock, AFK, real tmux, daemon, secondmate lifecycle, bootstrap, live-harness opt-in, GUI-backend, and other unproven work serial.
+The native backend smoke gates are excluded from this remainder and run in the dedicated native-backend CI lane so each supported runtime has explicit availability evidence.
 Membership is derived rather than enumerated, so a newly added test lands here by default.
 
 ## Portable serial CI shards
@@ -89,7 +90,7 @@ bin/fm-test-run.sh --check-coverage
 ## Coverage guard
 
 `bin/fm-test-run.sh --check-coverage` verifies that both parallel lanes partition the proven-isolated set.
-It also verifies that the parallel lanes, portable serial lane, and real-Herdr family are disjoint and cover every `tests/*.test.sh` script.
+It also verifies that the parallel lanes, portable serial lane, real-Herdr family, and native-backend-gated family are disjoint and cover every `tests/*.test.sh` script.
 It separately verifies that the portable serial CI shards are non-empty, disjoint, and together equal the portable serial lane.
 
 ## Timing artifacts

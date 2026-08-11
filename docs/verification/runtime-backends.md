@@ -496,6 +496,9 @@ tests/fm-bootstrap.test.sh
 
 The fake-Orca suite covers readiness, registration, create response parsing, metadata routing, popup-safe submit, and path-matched release refusal.
 
+The Ubuntu CI native-backend lane runs `tests/fm-backend-orca-smoke.test.sh` as an optional gate.
+Because Orca is macOS-only, the Ubuntu lane records `FM_TEST_RUNTIME_GATE runtime=orca outcome=unavailable` with the platform reason and never claims a live Orca run.
+
 ## cmux
 
 The current compatibility floor is cmux 0.64, and the active live evidence uses 0.64.17 build 97 on macOS aarch64.
@@ -551,6 +554,17 @@ tests/fm-backend-cmux-smoke.test.sh
 ```
 
 The real smoke proves socket access, fresh readiness, current-path probing, send and keys, bounded capture, title identity, and guarded exact cleanup.
+
+The Ubuntu CI native-backend lane runs `tests/fm-backend-cmux-smoke.test.sh` as an optional gate.
+The lane records the existing typed unavailable evidence when the macOS-only app or its socket is unavailable.
+
+## CI native-backend matrix
+
+The current Ubuntu matrix is Herdr required in the dedicated Herdr lane, Zellij 0.44.0 required in the native-backend lane, and cmux and Orca optional with typed unavailable evidence because both are macOS-only.
+The native-backend lane is `bin/fm-test-run.sh --family native-backend-gated` with explicit declarations for `zellij=required`, `cmux=optional`, and `orca=optional`.
+The coverage guard owns the family partition and fails if a native smoke test disappears from the required lane.
+On 2026-08-10, the local partition check returned `FM_TEST_COVERAGE ok total=127 parallel=24 serial=88 serial_shards=4 herdr=12 native=3`.
+The local macOS host did not claim live Zellij, cmux, or Orca coverage; the optional probes returned typed unavailable evidence, while Ubuntu CI provisions and requires Zellij through `bin/fm-install-zellij.sh`.
 
 ## Codex App host tools
 

@@ -793,8 +793,28 @@ test_runtime_gate_selection_validation_and_real_test_mapping() {
       || fail "fake runtime suite must be unmapped from runtime evidence: $out"
   done
 
+  fixture="$tmp/fm-backend-orca-smoke.test.sh"
+  printf '#!/usr/bin/env bash\nprintf "FM_TEST_RUNTIME_GATE runtime=orca outcome=exercised\\n"\n' >"$fixture"
+  chmod +x "$fixture"
+  out=$("$RUNNER" --runtime-gate orca=required "$fixture") \
+    || fail "mapped Orca smoke fixture must satisfy a required Orca gate"
+  printf '%s\n' "$out" | grep -Eq '^FM_TEST_GATE .+ runtime=orca requirement=required outcome=exercised$' \
+    || fail "Orca smoke fixture did not carry required gate evidence: $out"
+
+  native=$($RUNNER --list --family native-backend-gated)
+  for script in fm-backend-cmux-smoke.test.sh fm-backend-orca-smoke.test.sh fm-backend-zellij-smoke.test.sh; do
+    printf '%s\n' "$native" | grep -Fxq "tests/$script" \
+      || fail "native backend family lost $script: $native"
+  done
+  serial=$($RUNNER --list --lane portable-serial)
+  for script in fm-backend-cmux-smoke.test.sh fm-backend-orca-smoke.test.sh fm-backend-zellij-smoke.test.sh; do
+    if printf '%s\n' "$serial" | grep -Fxq "tests/$script"; then
+      fail "native backend smoke leaked into portable serial lane: $script"
+    fi
+  done
+
   rm -rf "$tmp"
-  pass "required declarations validate selections and only real tests map runtimes"
+  pass "required declarations validate selections and native backend smoke tests map to the dedicated lane"
 }
 
 test_runtime_gate_declaration_parser_refuses_malformed_input() {
@@ -862,12 +882,13 @@ test_exclude_family() {
 }
 
 test_portable_shard_union_and_coverage_guard() {
-  local s1 s2 proven serial herdr all_count union_count overlap out first
+  local s1 s2 proven serial herdr native all_count union_count overlap out first
   s1=$("$RUNNER" --list --lane portable-parallel-1)
   s2=$("$RUNNER" --list --lane portable-parallel-2)
   proven=$("$RUNNER" --list --proven-isolated)
   serial=$("$RUNNER" --list --lane portable-serial)
   herdr=$("$RUNNER" --list --family real-herdr-gated)
+  native=$("$RUNNER" --list --family native-backend-gated)
   [ -n "$s1" ] && [ -n "$s2" ] || fail "portable parallel shards must be non-empty"
   # Shards disjoint.
   overlap=$(comm -12 <(printf '%s\n' "$s1" | LC_ALL=C sort) <(printf '%s\n' "$s2" | LC_ALL=C sort) || true)
@@ -881,14 +902,16 @@ test_portable_shard_union_and_coverage_guard() {
     && fail "portable lanes must not include real-herdr-gated smoke"
   printf '%s\n' "$herdr" | grep -Fq 'tests/fm-backend-herdr-smoke.test.sh' \
     || fail "herdr family must include smoke"
+  printf '%s\n' "$native" | grep -Fq 'tests/fm-backend-zellij-smoke.test.sh' \
+    || fail "native backend family must include Zellij smoke"
   out=$("$RUNNER" --check-coverage)
   assert_contains "$out" "FM_TEST_COVERAGE ok" "coverage guard success marker"
   all_count=$("$RUNNER" --list --all | wc -l | tr -d ' ')
-  union_count=$(printf '%s\n' "$s1" "$s2" "$serial" "$herdr" | LC_ALL=C sort -u | wc -l | tr -d ' ')
+  union_count=$(printf '%s\n' "$s1" "$s2" "$serial" "$herdr" "$native" | LC_ALL=C sort -u | wc -l | tr -d ' ')
   [ "$union_count" = "$all_count" ] \
     || fail "union of lanes ($union_count) must equal --all ($all_count)"
   # No duplicates across the four partitions.
-  [ "$(printf '%s\n' "$s1" "$s2" "$serial" "$herdr" | LC_ALL=C sort | uniq -d | wc -l | tr -d ' ')" = "0" ] \
+  [ "$(printf '%s\n' "$s1" "$s2" "$serial" "$herdr" "$native" | LC_ALL=C sort | uniq -d | wc -l | tr -d ' ')" = "0" ] \
     || fail "lanes must not duplicate scripts"
   # LPT order: first script of shard 1 is the longest proven script.
   first=$(printf '%s\n' "$s1" | head -n 1)

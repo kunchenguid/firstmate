@@ -106,7 +106,8 @@ jobs:
           if-no-files-found: warn
 
   # Required portable serial remainder: watcher, lock, AFK, tmux, daemon,
-  # ambiguous, and other stateful tests. Real Herdr stays in tests-herdr.
+  # ambiguous, and other stateful tests. Native backend gates have their own
+  # lane so availability is explicit rather than inherited from a legacy skip.
   # Split across separate runners so no two of these stateful scripts ever share
   # a machine: each shard is still strictly serial in itself. Shard membership
   # and the shard count both belong to bin/fm-test-run.sh, which refuses a lane
@@ -284,6 +285,36 @@ jobs:
             ${{ runner.temp }}/fm-herdr/default-server.log
           if-no-files-found: warn
 
+  # Native backend matrix: Zellij is provisionable on Ubuntu and required;
+  # cmux and Orca are macOS-only and must report typed unavailable evidence.
+  # The family and runtime declarations are owned by bin/fm-test-run.sh.
+  tests-native-backends:
+    name: Behavior tests (native backends)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - name: Require tools for native backend gates
+        run: |
+          set -eu
+          command -v jq >/dev/null || { echo "::error::jq is required"; exit 1; }
+          command -v curl >/dev/null || { echo "::error::curl is required"; exit 1; }
+          command -v tar >/dev/null || { echo "::error::tar is required"; exit 1; }
+          command -v sha256sum >/dev/null || { echo "::error::sha256sum is required"; exit 1; }
+      - name: Install pinned Zellij
+        run: |
+          set -eu
+          bin/fm-install-zellij.sh "$RUNNER_TEMP/bin"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Assert required native backend coverage
+        run: |
+          set -eu
+          command -v zellij >/dev/null || { echo "::error::Zellij was not provisioned"; exit 1; }
+          bin/fm-test-run.sh --family native-backend-gated \
+            --runtime-gate zellij=required \
+            --runtime-gate cmux=optional \
+            --runtime-gate orca=optional
+
   # Aggregate per-lane timing into one summary artifact for critical-path review.
   tests-timing-aggregate:
     name: Behavior timing aggregate
@@ -293,6 +324,7 @@ jobs:
       - tests-portable-parallel-2
       - tests-portable-serial
       - tests-herdr
+      - tests-native-backends
     if: always()
     steps:
       - uses: actions/checkout@v6

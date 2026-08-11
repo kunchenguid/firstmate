@@ -48,6 +48,7 @@ ubuntu_jobs = %w[
   tests-portable-parallel-2
   tests-portable-serial
   tests-herdr
+  tests-native-backends
   tests-timing-aggregate
   invariants
 ]
@@ -55,6 +56,18 @@ require_equal(ci.fetch("jobs").keys.sort, ubuntu_jobs.sort, "CI job inventory")
 ci.fetch("jobs").each do |name, job|
   require_equal(job.fetch("runs-on"), "ubuntu-latest", "CI job #{name} runner")
 end
+native_job = ci.fetch("jobs").fetch("tests-native-backends")
+require_equal(native_job.fetch("timeout-minutes"), 15, "native backend job timeout")
+require_equal(native_job.fetch("steps").first.fetch("uses"), "actions/checkout@v6", "native backend checkout")
+native_run_steps = native_job.fetch("steps").filter_map { |step| step["run"] }
+require_present(
+  native_run_steps.any? { |run| run.include?("bin/fm-install-zellij.sh") },
+  "native backend Zellij provisioning"
+)
+require_present(
+  native_run_steps.any? { |run| run.include?("--family native-backend-gated") },
+  "native backend gate scheduling"
+)
 
 macos_events = macos.fetch(trigger)
 require_equal(macos_events.keys.sort, %w[pull_request schedule], "macOS workflow events")
