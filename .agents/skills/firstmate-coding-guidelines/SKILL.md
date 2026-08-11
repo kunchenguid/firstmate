@@ -109,7 +109,7 @@ Record the dated per-harness result in `docs/verification/runtime-backends.md`, 
 For every changed maintained prose surface, identify its inventory audience, authoritative owner, current-behavior relevance, destination for supporting evidence, and any unique safety fact that removal could lose.
 Move or delete evidence only after the current owner and regression pointer are verified.
 After all documentation, review-fix, and lint-fix commits, review the complete branch diff again against those criteria rather than reviewing only the latest commit.
-Run `bin/fm-doc-audience-check.sh`; it enforces classification, README setup routing, local link targets, and owner pointers without keyword-linting legitimate evidence prose.
+Run `bin/fm-doc-audience-check.sh`; [`docs/documentation-audiences.md`](../../../docs/documentation-audiences.md) owns exactly what it enforces.
 
 ## Repo style rules
 
