@@ -639,6 +639,7 @@ make_launch_capturing_tmux() {
 set -u
 case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+  *"#{pane_tty}"*) printf '%s\n' "${FM_FAKE_PANE_TTY:-/dev/pts/99}"; exit 0 ;;
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
@@ -661,6 +662,46 @@ exit 0
 SH
   chmod +x "$fakebin/tmux"
   fm_fake_exit0 "$fakebin" pi
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+query=$*
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+args=${FM_FAKE_CURSOR_AGENT_ARGS:-/opt/cursor-agent}
+comm=${FM_FAKE_CURSOR_COMM:-${args%% *}}
+case "$query" in
+  *"-e -o pid="*) exit 0 ;;
+  *"eww"*)
+    printf '%s FM_CURSOR_LAUNCH_TOKEN=%s\n' "$args" "${CURSOR_WORKER_LAUNCH_TOKEN:-missing}"
+    exit 0 ;;
+  *"ppid="*) exit 1 ;;
+  *"-t "*) printf '%s %s\n' "${FM_FAKE_CURSOR_AGENT_PID:-4242}" "$args"; exit 0 ;;
+  *"comm="*) printf '%s\n' "$comm"; exit 0 ;;
+  *"-p "*) printf '%s\n' "$args"; exit 0 ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/ps"
+  cat > "$fakebin/pgrep" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$*" in
+  *"index.js worker-server"*)
+    [ -n "${FM_FAKE_CURSOR_WORKER_PID:-}" ] || exit 1
+    printf '%s\n' "$FM_FAKE_CURSOR_WORKER_PID"
+    exit 0 ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/pgrep"
+
   printf '%s\n' "$fakebin"
 }
 
@@ -672,8 +713,12 @@ spawn_secondmate_capture() {
   shift 4
   mkdir -p "$world/home/state" "$world/home/data"
   fakebin=$(make_launch_capturing_tmux "$world/tmux-$id")
+  mkdir -p "$world/home/.local/share"
+  if [ ! -e "$fakebin/cursor-agent" ]; then
+    fm_fake_cursor_alias_symlinked "$fakebin" cursor-agent "$world/home/.local/share"
+  fi
   : > "$launchlog"
-  PATH="$fakebin:$BASE_PATH" TMUX='' CLAUDECODE=1 \
+  PATH="$fakebin:$BASE_PATH" HOME="$world/home" TMUX='' CLAUDECODE=1 \
     FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$world/home" \
     FM_STATE_OVERRIDE="$world/home/state" FM_DATA_OVERRIDE="$world/home/data" \
     FM_PROJECTS_OVERRIDE="$world/home/projects" FM_CONFIG_OVERRIDE="$world/home/config" \
@@ -908,7 +953,8 @@ test_spawned_secondmate_uses_its_harness_supervision_model() {
     # whether this assertion passes.
     cat > "$fakebin/$harness" <<SH
 #!/usr/bin/env bash
-FM_ROOT_OVERRIDE="$sm" "$ROOT/bin/fm-guard.sh"
+FM_ROOT_OVERRIDE="\$FM_HOME" \
+"$ROOT/bin/fm-guard.sh"
 SH
     chmod +x "$fakebin/$harness"
     launch=$(cat "$launchlog")
@@ -928,10 +974,134 @@ SH
   pass "C9 spawn: secondmate launch pins supervision to its own harness"
 }
 
+# A cursor secondmate must receive the isolation env prefix AT the agent
+# process. The cursor template sanitizes with `env -u`, so the FM_* prefix
+# assignments bind to env and are forwarded; a template that started with a
+# shell `unset ...;` would bind the prefix to the unset builtin and drop
+# FM_HOME/FM_SUPERVISION_MODEL before the agent started. Regression: execute
+# the captured launch in a clean pane-like shell (env -i, no FM_* inherited)
+# and assert the child cursor-agent's environment.
+test_spawn_cursor_secondmate_env_reaches_agent() {
+  local w sm launchlog launch envdump fakebin worker_pid out status
+  w="$TMP_ROOT/spawn-cursor-env"
+  sm="$w/sm"
+  launchlog="$w/launch.log"
+  envdump="$w/agent.env"
+  mkdir -p "$w/home/config"
+  printf 'cursor\n' > "$w/home/config/secondmate-harness"
+  make_seeded_home "$sm" sm
+  fakebin="$w/tmux-sm/fakebin"
+  mkdir -p "$fakebin" "$w/home/.local/share"
+  fm_fake_cursor_alias_symlinked "$fakebin" cursor-agent "$w/home/.local/share"
+cat > "$w/home/.local/share/cursor-agent/versions/2026.08.04-aaa8809/cursor-agent" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --help ]; then
+  printf '%s\n' 'Start the Cursor Agent'
+  printf '%s\n' 'CURSOR_API_ENDPOINT https://api2.cursor.sh'
+  exit 0
+fi
+env | grep -E '^(FM_ROOT_OVERRIDE|FM_STATE_OVERRIDE|FM_DATA_OVERRIDE|FM_PROJECTS_OVERRIDE|FM_CONFIG_OVERRIDE|FM_PUBLIC_FOLLOWUP_PRIMARY_HOME|FM_HOME|FM_TRACE_CONTEXT|FM_SUPERVISION_MODEL|CLAUDECODE|CLAUDE_CODE_ENTRYPOINT)=' | sort > "${FM_AGENT_ENV_DUMP:?}"
+exit 0
+SH
+  chmod +x "$fakebin/cursor-agent"
+
+  ( exec sleep 300 ) &
+  worker_pid=$!
+  disown
+  sleep 0.3
+  kill -0 "$worker_pid" 2>/dev/null || fail "cursor secondmate worker stand-in did not start"
+  out=$(FM_FAKE_CURSOR_AGENT_ARGS="$fakebin/cursor-agent --force --trust brief" \
+    FM_PROC_ROOT_OVERRIDE="$w/no-proc" FM_FAKE_CURSOR_PROC_ROOT="$w/no-proc" \
+    FM_FAKE_CURSOR_AGENT_PID=4242 FM_FAKE_CURSOR_WORKER_PID="$worker_pid" \
+    spawn_secondmate_capture "$w" sm "$sm" "$launchlog" 2>&1)
+  status=$?
+  kill -KILL "$worker_pid" 2>/dev/null || true
+  expect_code 0 "$status" "cursor secondmate spawn should succeed"$'\n'"$out"
+
+  launch=$(cat "$launchlog")
+  out=$(env -i CLAUDECODE=1 CLAUDE_CODE_ENTRYPOINT=cli \
+    FM_AGENT_ENV_DUMP="$envdump" PATH="$fakebin:/usr/bin:/bin" HOME="$w" \
+    bash -c "$launch" 2>&1)
+  [ -s "$envdump" ] || fail "cursor agent env dump empty or missing (isolation prefix dropped); launch: $launch"$'\n'"$out"
+  assert_grep "FM_HOME=$sm" "$envdump" "cursor agent lost FM_HOME (env prefix dropped)"
+  assert_grep "FM_SUPERVISION_MODEL=autoarm" "$envdump" "cursor agent lost FM_SUPERVISION_MODEL"
+  assert_grep "FM_TRACE_CONTEXT=off" "$envdump" "cursor agent lost FM_TRACE_CONTEXT"
+  assert_grep "FM_ROOT_OVERRIDE=" "$envdump" "cursor agent lost the cleared FM_ROOT_OVERRIDE"
+  assert_grep "FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$w/home" "$envdump" "cursor agent lost the primary home pointer"
+  assert_not_contains "$(cat "$envdump")" "CLAUDECODE=" "cursor agent inherited the CLAUDECODE marker"
+  assert_not_contains "$(cat "$envdump")" "CLAUDE_CODE_ENTRYPOINT=" "cursor agent inherited CLAUDE_CODE_ENTRYPOINT"
+  pass "C10 spawn: cursor secondmate receives the isolation env prefix; sanitization does not swallow it"
+}
+
 # The harness fallback chain (secondmate-harness -> crew-harness -> own) still
 # resolves correctly with no model/effort tokens anywhere in the chain, and a
 # crew/scout (non-secondmate) launch is entirely unaffected by this feature: no
 # model/effort is invented for it even though its own project has no profile set.
+# A failed CURSOR secondmate spawn must roll back every record the invocation
+# created (meta/status/worker-server/task tmp) while leaving the pre-seeded
+# home and its registry untouched: a published meta with a killed endpoint is a
+# phantom live task, and the meta's home= binding is the only ownership this
+# invocation establishes (the home and data/secondmates.md entry are seeded
+# before spawn, never by it).
+test_spawn_cursor_secondmate_worker_absent_rolls_back_completely() {
+  local w sm launchlog out status id
+  w="$TMP_ROOT/spawn-cursor-secondmate-rollback"
+  sm="$w/sm"
+  launchlog="$w/launch.log"
+  # A dedicated id (not the shared "sm") keeps this task's tmp root and meta
+  # exclusive to this test, and a self-contained fake cursor-agent in the
+  # spawn's own fakebin makes the resolver deterministic on CI runners that
+  # have no cursor-agent installed.
+  id=currollback
+  mkdir -p "$w/home/config" "$w/tmux-$id/fakebin"
+  printf 'cursor\n' > "$w/home/config/secondmate-harness"
+  make_seeded_home "$sm" "$id"
+  mkdir -p "$w/home/.local/share"
+  fm_fake_cursor_alias_symlinked "$w/tmux-$id/fakebin" cursor-agent "$w/home/.local/share"
+  cat > "$w/home/.local/share/cursor-agent/versions/2026.08.04-aaa8809/cursor-agent" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --help ]; then
+  printf '%s\n' 'Start the Cursor Agent'
+  printf '%s\n' 'CURSOR_API_ENDPOINT https://api2.cursor.sh'
+  exit 0
+fi
+exit 0
+SH
+  chmod +x "$w/home/.local/share/cursor-agent/versions/2026.08.04-aaa8809/cursor-agent"
+  registry_before=$(cat "$w/home/data/secondmates.md" 2>/dev/null || echo absent)
+
+  # No worker-server child: the fake pgrep exits 1, the bounded poll exhausts,
+  # and the spawn must refuse with a complete rollback (review4 blocker).
+  out=$(FM_FAKE_CURSOR_AGENT_ARGS="$w/tmux-$id/fakebin/cursor-agent --force --trust brief" \
+    FM_PROC_ROOT_OVERRIDE="$w/no-proc" FM_FAKE_CURSOR_PROC_ROOT="$w/no-proc" \
+    FM_FAKE_CURSOR_AGENT_PID=4242 FM_FAKE_CURSOR_WORKER_PID='' \
+    spawn_secondmate_capture "$w" "$id" "$sm" "$launchlog" 2>&1)
+  status=$?
+  expect_code 1 "$status" "cursor secondmate spawn without a worker-server must refuse"$'\n'"$out"
+
+  # No phantom live task: meta, status, turn-end hook, worker record, and the
+  # task tmp root must all be gone.
+  [ ! -e "$w/home/state/$id.meta" ] \
+    || fail "failed cursor secondmate spawn must not leave a live meta behind"
+  [ ! -e "$w/home/state/$id.status" ] \
+    || fail "failed cursor secondmate spawn must not leave a status record behind"
+  [ ! -e "$w/home/state/$id.worker-server" ] \
+    || fail "failed cursor secondmate spawn must not leave a worker-server record"
+  [ ! -e "$w/home/state/$id.turn-ended" ] \
+    || fail "failed cursor secondmate spawn must not leave its turn-end hook record behind"
+  [ ! -e "/tmp/fm-$id" ] \
+    || fail "failed cursor secondmate spawn must not leave its task tmp root behind"
+  # No partial home/registry ownership: the pre-seeded home stays intact and
+  # the registry is byte-identical (spawn never writes it).
+  [ -f "$sm/.fm-secondmate-home" ] \
+    || fail "rollback removed the pre-seeded secondmate home marker"
+  [ -f "$sm/AGENTS.md" ] || fail "rollback removed the pre-seeded secondmate home"
+  registry_after=$(cat "$w/home/data/secondmates.md" 2>/dev/null || echo absent)
+  [ "$registry_after" = "$registry_before" ] \
+    || fail "failed cursor secondmate spawn changed the secondmate registry"
+  pass "failed cursor secondmate spawn rolls back task records and leaves the seeded home/registry intact"
+}
+
 test_spawn_fallback_chain_and_crew_scout_unaffected() {
   local w sm meta home proj wt fakebin launchlog id launch
   w="$TMP_ROOT/spawn-fallback-and-crew"
@@ -2542,6 +2712,8 @@ test_spawn_explicit_effort_overrides_secondmate_harness_token
 test_spawn_explicit_harness_does_not_inherit_secondmate_harness_tokens
 test_spawn_explicit_harness_uses_explicit_profile_axes
 test_spawned_secondmate_uses_its_harness_supervision_model
+test_spawn_cursor_secondmate_env_reaches_agent
+test_spawn_cursor_secondmate_worker_absent_rolls_back_completely
 test_spawn_fallback_chain_and_crew_scout_unaffected
 test_bootstrap_sweep_propagates_and_reconverges
 test_bootstrap_sweep_propagates_when_tracked_current

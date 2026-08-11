@@ -138,7 +138,7 @@ test_guard_warnings() {
   printf 'project=x\n' > "$state/task.meta"
   printf 'project=y\n' > "$state/task2.meta"
   append_wake "$state" heartbeat heartbeat heartbeat || fail "guard heartbeat append failed"
-  CLAUDECODE=1 PI_CODING_AGENT='' GROK_AGENT='' FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=1 "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || fail "guard failed"
+  env -u CURSOR_AGENT CLAUDECODE=1 PI_CODING_AGENT='' GROK_AGENT='' FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=1 "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || fail "guard failed"
   first=$(grep -v '^[[:space:]]*$' "$err" | head -1)
   case "$first" in
     '●'*) ;;
@@ -164,7 +164,7 @@ test_guard_warnings() {
   mkdir -p "$dir/config"
   printf 'project=x\n' > "$state/task.meta"
   : > "$dir/config/x-mode.env"
-  CLAUDECODE=1 PI_CODING_AGENT='' GROK_AGENT='' FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=1 "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || fail "guard failed"
+  env -u CURSOR_AGENT CLAUDECODE=1 PI_CODING_AGENT='' GROK_AGENT='' FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=1 "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || fail "guard failed"
   grep -F "source '$dir/config/x-mode.env' first" "$err" >/dev/null || fail "guard repair line did not source the X-mode cadence config"
 
   # (2) live watcher plus fresh beacon, empty queue -> silence.
@@ -617,7 +617,7 @@ test_attached_arm_signal_is_recorded_in_cycle_ledger() {
     i=$((i + 1))
   done
   [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$wpid" ] || fail "seed watcher did not take the lock"
-  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_ARM_ATTACH_POLL=0.1 FM_ARM_CONFIRM_TIMEOUT=1 "$WATCH_ARM" > "$armout" &
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_ARM_ATTACH_POLL=0.1 FM_ARM_CONFIRM_TIMEOUT=1     FM_WATCH_ARM_INTERRUPT_MARKER="$state/.hook-arm-interrupted" "$WATCH_ARM" > "$armout" &
   armpid=$!
   i=0
   while [ "$i" -lt 80 ]; do
@@ -633,9 +633,35 @@ test_attached_arm_signal_is_recorded_in_cycle_ledger() {
   grep -q "arm_pid=$armpid.*watcher_pid=$wpid.*origin=attached.*exit_code=143.*signal=TERM.*reason=arm-interrupted" "$state/.watch-cycle-exits.log" \
     || fail "attached arm signal was not recorded in the lifecycle ledger"
   is_live_non_zombie "$wpid" || fail "signaling an attached arm terminated the peer watcher"
+  [ -f "$state/.hook-arm-interrupted" ] || fail "attached arm TERM did not write the interrupt marker"
+  grep -q 'signal=TERM' "$state/.hook-arm-interrupted" \
+    || fail "interrupt marker did not record the TERM signal"
+  grep -q 'origin=attached' "$state/.hook-arm-interrupted" \
+    || fail "interrupt marker did not record the attached origin"
   kill "$wpid" 2>/dev/null || true
   wait "$wpid" 2>/dev/null || true
   pass "attached arm signals record a classified lifecycle entry"
+}
+
+test_drain_clears_interrupt_marker_on_both_paths() {
+  local dir state marker
+  dir=$(make_case interrupt-marker-drain)
+  state="$dir/state"
+  marker="$state/.hook-arm-interrupted"
+  # Empty-queue fast path: draining nothing still clears a stale marker so the
+  # next healthy stop can be silent again.
+  printf 'ts=1754000000\tsignal=TERM\torigin=attached\n' > "$marker"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/drain-empty.out" || fail "empty-queue drain failed"
+  [ ! -e "$marker" ] || fail "empty-queue drain did not clear the interrupt marker"
+  # Consumed-queue path: the marker clears in the same run that surfaces the wake.
+  printf 'ts=1754000001\tsignal=TERM\torigin=started\n' > "$marker"
+  append_wake "$state" signal task.status "status: working" || fail "could not append a queued wake"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/drain.out" || fail "drain with a queued wake failed"
+  grep -q "$(printf '\tsignal\t')" "$dir/drain.out" || fail "drain did not surface the queued wake"
+  [ ! -e "$marker" ] || fail "drain did not clear the interrupt marker after consuming the queue"
+  # Idempotent: a second drain stays successful with no marker to clear.
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/drain-again.out" || fail "second drain failed"
+  pass "drain clears the interrupt marker on both the empty-queue and consumed-queue paths"
 }
 
 test_arm_starts_and_self_heals() {
@@ -699,7 +725,7 @@ test_arm_hup_cleans_child_and_temp_output() {
   state="$dir/state"
   fakebin="$dir/fakebin"
   armout="$dir/arm.out"
-  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999     FM_WATCH_ARM_INTERRUPT_MARKER="$state/.hook-arm-interrupted" "$WATCH_ARM" > "$armout" &
   armpid=$!
   i=0
   while [ "$i" -lt 80 ]; do
@@ -713,6 +739,9 @@ test_arm_hup_cleans_child_and_temp_output() {
   wait_for_exit "$armpid" 80
   status=$?
   [ "$status" -eq 129 ] || fail "arm did not exit with HUP status (got $status)"
+  [ -f "$state/.hook-arm-interrupted" ] || fail "HUP cleanup did not write the interrupt marker"
+  grep -q 'origin=started' "$state/.hook-arm-interrupted" \
+    || fail "interrupt marker did not record the started origin"
   i=0
   while [ "$i" -lt 80 ] && is_live_non_zombie "$lock_pid"; do
     sleep 0.1
@@ -1120,6 +1149,7 @@ test_watcher_self_evicts_on_lock_takeover
 test_arm_self_eviction_is_loud_without_successor
 test_arm_attaches_and_waits_for_live_fresh_watcher
 test_attached_arm_signal_is_recorded_in_cycle_ledger
+test_drain_clears_interrupt_marker_on_both_paths
 test_arm_starts_and_self_heals
 test_arm_hup_cleans_child_and_temp_output
 test_arm_propagates_immediate_wake_before_confirmation

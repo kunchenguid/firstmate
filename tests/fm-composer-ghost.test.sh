@@ -4,12 +4,17 @@
 # A harness fills an otherwise-empty composer with de-emphasised ghost text that a
 # plain pane capture cannot tell apart from human input, so the composer reader
 # saw an idle pane as holding pending input. Two rendering styles are covered by
-# the one shared ANSI-aware owner (fm_composer_strip_ghost, bin/fm-composer-lib.sh,
-# reached here through the fm_tmux_strip_ghost thin adapter):
+# the one shared ANSI-aware owner (fm_composer_strip_ghost, bin/fm-composer-lib.sh),
+# which the tmux and herdr adapters both call directly:
 #   - DIM/FAINT (SGR 2): claude's rotating prompt suggestion, codex's idle tip.
 #   - a dark/muted TRUECOLOR foreground: grok's placeholder/hint text.
+# Cursor's reverse-video cursor cell is a Cursor-renderer artefact, NOT a generic
+# ghost style: its gap normalization lives in fm_cursor_composer_strip
+# (bin/fm-cursor-lib.sh) as "raw ANSI row -> Cursor normalization -> generic
+# ghost/composer classifier", and the cursor fixtures below exercise that entry
+# point while the generic fixtures keep pinning the shared stripper.
 # These tests pin:
-#   1. fm_tmux_strip_ghost drops dim/faint AND dark-truecolor runs, keeping
+#   1. fm_composer_strip_ghost drops dim/faint AND dark-truecolor runs, keeping
 #      normal-intensity, brightly-coloured text.
 #   2. fm_pane_input_pending reads a ghost-only composer (either style) as NOT
 #      pending, while still treating real (normal/bright) text as pending.
@@ -81,34 +86,34 @@ SH
   printf '%s\n' "$fb"
 }
 
-# --- fm_tmux_strip_ghost (pure) ---------------------------------------------
+# --- fm_composer_strip_ghost (pure) ---------------------------------------------
 
 test_strip_ghost_drops_dim_keeps_normal() {
   local out
   # Dim run between ESC[2m and ESC[0m is dropped; the prompt glyph survives.
-  out=$(printf '\xe2\x9d\xaf \033[2mWhat is the largest country by area?\033[0m\n' | fm_tmux_strip_ghost)
+  out=$(printf '\xe2\x9d\xaf \033[2mWhat is the largest country by area?\033[0m\n' | fm_composer_strip_ghost)
   [ "$out" = "$(printf '\xe2\x9d\xaf ')" ] || fail "dim run not dropped: '$out'"
   # Normal-intensity text is kept verbatim (no styling at all).
-  out=$(printf '\xe2\x9d\xaf real human text\n' | fm_tmux_strip_ghost)
+  out=$(printf '\xe2\x9d\xaf real human text\n' | fm_composer_strip_ghost)
   [ "$out" = "$(printf '\xe2\x9d\xaf real human text')" ] || fail "normal text changed: '$out'"
   # Bold (SGR 1) is normal-intensity, NOT dim - must be kept.
-  out=$(printf '\033[1mbold typed\033[0m\n' | fm_tmux_strip_ghost)
+  out=$(printf '\033[1mbold typed\033[0m\n' | fm_composer_strip_ghost)
   [ "$out" = "bold typed" ] || fail "bold text wrongly dropped: '$out'"
-  pass "fm_tmux_strip_ghost drops dim/faint runs, keeps normal and bold text"
+  pass "fm_composer_strip_ghost drops dim/faint runs, keeps normal and bold text"
 }
 
 test_strip_ghost_handles_combined_and_boundary_codes() {
   local out
   # Dim combined with a color in one sequence (ESC[2;37m) is still a dim run.
-  out=$(printf '\xe2\x9d\xaf \033[2;37mpredicted\033[0m\n' | fm_tmux_strip_ghost)
+  out=$(printf '\xe2\x9d\xaf \033[2;37mpredicted\033[0m\n' | fm_composer_strip_ghost)
   [ "$out" = "$(printf '\xe2\x9d\xaf ')" ] || fail "combined dim+color not dropped: '$out'"
   # ESC[22m (normal intensity) ends a dim run mid-line; the tail is kept.
-  out=$(printf '\033[2mghost\033[22mREALTAIL\n' | fm_tmux_strip_ghost)
+  out=$(printf '\033[2mghost\033[22mREALTAIL\n' | fm_composer_strip_ghost)
   [ "$out" = "REALTAIL" ] || fail "ESC[22m did not end the dim run: '$out'"
   # ESC[0;2m (reset then dim) reads as dim (left-to-right within the sequence).
-  out=$(printf 'keep\033[0;2mdrop\033[0m\n' | fm_tmux_strip_ghost)
+  out=$(printf 'keep\033[0;2mdrop\033[0m\n' | fm_composer_strip_ghost)
   [ "$out" = "keep" ] || fail "reset-then-dim not treated as dim: '$out'"
-  pass "fm_tmux_strip_ghost handles combined SGR, ESC[22m, and reset-then-dim"
+  pass "fm_composer_strip_ghost handles combined SGR, ESC[22m, and reset-then-dim"
 }
 
 test_strip_ghost_keeps_colored_text_with_2_payloads() {
@@ -118,21 +123,21 @@ test_strip_ghost_keeps_colored_text_with_2_payloads() {
   # colour (grok's real-input RGB 224,222,244, luminance ~225), because a DARK
   # truecolor foreground is now itself a ghost signal (grok's placeholder) and is
   # covered by test_strip_ghost_drops_dark_truecolor_ghost below.
-  out=$(printf '\033[38;5;2mgreen typed\033[0m\n' | fm_tmux_strip_ghost)
+  out=$(printf '\033[38;5;2mgreen typed\033[0m\n' | fm_composer_strip_ghost)
   [ "$out" = "green typed" ] || fail "8-bit color payload 2 was treated as dim: '$out'"
-  out=$(printf '\033[38;2;224;222;244mtruecolor typed\033[0m\n' | fm_tmux_strip_ghost)
+  out=$(printf '\033[38;2;224;222;244mtruecolor typed\033[0m\n' | fm_composer_strip_ghost)
   [ "$out" = "truecolor typed" ] || fail "bright truecolor payload 2 was treated as dim/ghost: '$out'"
-  out=$(printf '\033[48;2;4;5;6mbackground typed\033[0m\n' | fm_tmux_strip_ghost)
+  out=$(printf '\033[48;2;4;5;6mbackground typed\033[0m\n' | fm_composer_strip_ghost)
   [ "$out" = "background typed" ] || fail "background truecolor payload was treated as dim: '$out'"
-  out=$(printf '\033[58;5;2munderline-color typed\033[0m\n' | fm_tmux_strip_ghost)
+  out=$(printf '\033[58;5;2munderline-color typed\033[0m\n' | fm_composer_strip_ghost)
   [ "$out" = "underline-color typed" ] || fail "underline color payload 2 was treated as dim: '$out'"
-  out=$(printf '\033[38:2::224:222:244mcolon truecolor typed\033[0m\n' | fm_tmux_strip_ghost)
+  out=$(printf '\033[38:2::224:222:244mcolon truecolor typed\033[0m\n' | fm_composer_strip_ghost)
   [ "$out" = "colon truecolor typed" ] || fail "bright colon truecolor payload 2 was treated as dim/ghost: '$out'"
-  out=$(printf '\033[58::5::2mcolon underline typed\033[0m\n' | fm_tmux_strip_ghost)
+  out=$(printf '\033[58::5::2mcolon underline typed\033[0m\n' | fm_composer_strip_ghost)
   [ "$out" = "colon underline typed" ] || fail "colon underline SGR leaked or dimmed text: '$out'"
-  out=$(printf '\033[4:2mnot dim underline\033[0m\n' | fm_tmux_strip_ghost)
+  out=$(printf '\033[4:2mnot dim underline\033[0m\n' | fm_composer_strip_ghost)
   [ "$out" = "not dim underline" ] || fail "colon subparameter 2 was treated as dim: '$out'"
-  pass "fm_tmux_strip_ghost keeps bright colored text with 2 payloads"
+  pass "fm_composer_strip_ghost keeps bright colored text with 2 payloads"
 }
 
 # --- Dark truecolor foreground is ghost (grok placeholder), dropped ----------
@@ -144,14 +149,14 @@ test_strip_ghost_drops_dark_truecolor_ghost() {
   # verified live against grok 0.2.93; the pristine "Type a message..." placeholder
   # was this shape in grok 0.2.82). The shared owner drops it while keeping the
   # bright prompt glyph, so an idle grok composer never reads as pending.
-  out=$(printf '\xe2\x9d\xaf \033[38;2;50;47;70mType a message...\033[0m\n' | fm_tmux_strip_ghost)
+  out=$(printf '\xe2\x9d\xaf \033[38;2;50;47;70mType a message...\033[0m\n' | fm_composer_strip_ghost)
   [ "$out" = "$(printf '\xe2\x9d\xaf ')" ] || fail "dark truecolor ghost not dropped: '$out'"
-  out=$(printf '\033[38;2;110;106;134mplaceholder hint text\033[39m\n' | fm_tmux_strip_ghost)
+  out=$(printf '\033[38;2;110;106;134mplaceholder hint text\033[39m\n' | fm_composer_strip_ghost)
   [ -z "$out" ] || fail "dark truecolor hint not dropped: '$out'"
   # The colon form drops too.
-  out=$(printf '\xe2\x9d\xaf \033[38:2::86:82:110mmuted\033[0m\n' | fm_tmux_strip_ghost)
+  out=$(printf '\xe2\x9d\xaf \033[38:2::86:82:110mmuted\033[0m\n' | fm_composer_strip_ghost)
   [ "$out" = "$(printf '\xe2\x9d\xaf ')" ] || fail "dark colon-truecolor ghost not dropped: '$out'"
-  pass "fm_tmux_strip_ghost drops a dark/muted truecolor foreground (grok placeholder)"
+  pass "fm_composer_strip_ghost drops a dark/muted truecolor foreground (grok placeholder)"
 }
 
 # --- muse's composer sits closest to the ghost threshold ---------------------
@@ -166,20 +171,20 @@ test_strip_ghost_drops_dark_truecolor_ghost() {
 test_strip_ghost_keeps_muse_composer_colors() {
   local out glyph
   glyph=$(printf '\xe2\x9f\xa9')
-  out=$(printf '\033[0m\033[38;2;90;160;255m\xe2\x9f\xa9 \033[39m\n' | fm_tmux_strip_ghost)
+  out=$(printf '\033[0m\033[38;2;90;160;255m\xe2\x9f\xa9 \033[39m\n' | fm_composer_strip_ghost)
   [ "$out" = "$(printf '%s ' "$glyph")" ] \
     || fail "muse's idle composer glyph was stripped as ghost text: '$out'"
   # The submitted-prompt row carries a background colour too; an SGR 48 payload
   # must not be luminance-tested as if it were the foreground.
-  out=$(printf '\033[38;2;90;160;255m\033[48;2;38;56;84m\xe2\x9f\xa9 \033[38;2;204;211;219mhello from firstmate\033[39m\n' | fm_tmux_strip_ghost)
+  out=$(printf '\033[38;2;90;160;255m\033[48;2;38;56;84m\xe2\x9f\xa9 \033[38;2;204;211;219mhello from firstmate\033[39m\n' | fm_composer_strip_ghost)
   [ "$out" = "$(printf '%s hello from firstmate' "$glyph")" ] \
     || fail "muse's typed text or background-coloured glyph row was stripped: '$out'"
   # The restored prompt muse puts back into the composer after an Escape
   # interrupt is real bright text and must stay visible as pending input.
-  out=$(printf '\033[0m\033[38;2;90;160;255m\xe2\x9f\xa9 \033[38;2;204;211;219msecond turn to interrupt\033[39m\n' | fm_tmux_strip_ghost)
+  out=$(printf '\033[0m\033[38;2;90;160;255m\xe2\x9f\xa9 \033[38;2;204;211;219msecond turn to interrupt\033[39m\n' | fm_composer_strip_ghost)
   [ "$out" = "$(printf '%s second turn to interrupt' "$glyph")" ] \
     || fail "muse's restored post-interrupt prompt was stripped as ghost text: '$out'"
-  pass "fm_tmux_strip_ghost keeps muse's near-threshold glyph and its typed text"
+  pass "fm_composer_strip_ghost keeps muse's near-threshold glyph and its typed text"
 }
 
 # --- fm_pane_input_pending: dim ghost is not pending ------------------------
@@ -681,6 +686,158 @@ test_peek_output_is_escape_free() {
   pass "fm-peek output is escape-free (no raw -e bytes reach firstmate context)"
 }
 
+# --- Cursor reverse-video ghost cell -----------------------------------------
+
+test_cursor_reverse_video_ghost_cell_is_stripped() {
+  local result styled
+  # Exact ANSI fixture from cursor-agent 2026.07.23-e383d2b idle composer:
+  #   → Add a follow-up
+  # The cursor cell 'A' is wrapped in reverse video (SGR 7) between two dim
+  # (SGR 2) runs. Before the ghost-gap fix, the reverse-video cell survived
+  # ghost stripping and left 'A' which classified as pending.
+  # The fixture: bg(48;2;21;21;21) space dim(2) →
+  #   reset+reverse(0;7) bg(48;2;21;21;21) A
+  #   reset+dim(0;2) bg(48;2;21;21;21) dd a follow-up reset(0)
+  # The gap drop is Cursor-renderer mechanics owned by fm_cursor_composer_strip
+  # (bin/fm-cursor-lib.sh): raw ANSI row -> Cursor normalization -> generic
+  # fm_composer_strip_ghost.
+  styled=$(printf '\033[48;2;21;21;21m \033[2m\xe2\x86\x92 \033[0;7m\033[48;2;21;21;21mA\033[0;2m\033[48;2;21;21;21mdd a follow-up\033[0m')
+  result=$(fm_cursor_composer_strip <<< "$styled")
+  # The normalization drops the reverse-video cursor cell 'A' between the two
+  # dim runs. A leading space (not dimmed) survives the strip but is trimmed
+  # by the classifier. Assert the cursor cell 'A' is gone.
+  case "$result" in
+    *A*) fail "cursor reverse-video ghost cell 'A' survived strip: result='$result'" ;;
+  esac
+  pass "fm_cursor_composer_strip: cursor reverse-video ghost cell is stripped"
+}
+
+test_cursor_reverse_video_ghost_cell_split_sgr_is_stripped() {
+  local result styled
+  # The SAME cursor-agent idle composer captured through herdr's raw relay:
+  # herdr transmits the app's split SGR sequences (ESC[0m + ESC[7m,
+  # ESC[0m + ESC[2m) where tmux coalesces them (0;7m / 0;2m). The shared
+  # Cursor normalization must keep the reverse-video gap open across the bare
+  # reset so the cursor cell 'A' drops identically on both transports.
+  # The fixture (exact herdr bytes, live-verified 2026-08-05):
+  #   reset bg(48;2;21;21;21) space reset dim(2) bg →
+  #   reset rev(7) bg A space reset dim(2) bg dd a follow-up space reset
+  styled=$(printf '\033[0m\033[48;2;21;21;21m \033[0m\033[2m\033[48;2;21;21;21m\xe2\x86\x92 \033[0m\033[7m\033[48;2;21;21;21mA \033[0m\033[2m\033[48;2;21;21;21mdd a follow-up \033[0m')
+  result=$(fm_cursor_composer_strip <<< "$styled")
+  case "$result" in
+    *A*) fail "cursor reverse-video ghost cell 'A' survived strip on split-SGR relay: result='$result'" ;;
+  esac
+  pass "fm_cursor_composer_strip: cursor reverse-video ghost cell is stripped on herdr's split-SGR relay"
+}
+
+test_non_cursor_reverse_video_gap_is_not_suppressed() {
+  local result styled
+  # Same reverse-video-between-dim-runs sequence as the Cursor fixture, but
+  # without Cursor harness context: non-Cursor strip must keep pre-Cursor
+  # semantics and must NOT drop the reverse-video cell as a cursor ghost.
+  styled=$(printf '\033[48;2;21;21;21m \033[2m\xe2\x86\x92 \033[0;7m\033[48;2;21;21;21mA\033[0;2m\033[48;2;21;21;21mdd a follow-up\033[0m')
+  unset FM_COMPOSER_HARNESS || true
+  result=$(fm_composer_strip_ghost <<< "$styled")
+  case "$result" in
+    *A*) : ;;
+    *) fail "non-Cursor reverse-video gap must keep the cell (no Cursor-only suppression), got '$result'" ;;
+  esac
+  # Explicit non-Cursor harness identity must behave the same.
+  result=$(FM_COMPOSER_HARNESS=claude fm_composer_strip_ghost <<< "$styled")
+  case "$result" in
+    *A*) : ;;
+    *) fail "claude reverse-video gap must keep the cell, got '$result'" ;;
+  esac
+  pass "fm_composer_strip_ghost: non-Cursor reverse-video gap is not Cursor-suppressed"
+}
+
+test_rev_off_inside_gap_keeps_real_text() {
+  local result styled
+  # SGR 27 (reverse-video off) ends the reverse-video marking of a ghost gap:
+  # content after it is real typed input and must survive a later dim
+  # re-entry, not be flushed as the cursor cell. Sequence: dim ghost, reset,
+  # rev-on cursor cell, rev-off, REAL text, dim re-entry ghost again.
+  # ghost_gap opens only under Cursor harness context, so this preservation
+  # proof must exercise the Cursor normalization path (fm_cursor_composer_strip).
+  styled=$(printf '\033[2mghost\033[0;7mA\033[27mREAL\033[2mghost2\033[0m')
+  result=$(fm_cursor_composer_strip <<< "$styled")
+  # The whole gap must not be flushed as droppable: real text after the
+  # rev-off survives the dim re-entry flush (the rev-marked prefix may also
+  # survive, an over-preserve that defers rather than injects).
+  case "$result" in
+    *REAL*) : ;;
+    *) fail "real text after SGR 27 in a ghost gap must survive strip, got '$result'" ;;
+  esac
+  pass "fm_cursor_composer_strip: SGR 27 inside a ghost gap keeps the real text after it"
+}
+
+test_real_text_between_dim_runs_survives() {
+  local result styled
+  # Real typed content between two dim ghost runs must survive ghost
+  # stripping: dim ghost, reset, REAL text, a background-color SGR (as a
+  # re-render can inject before re-entering dim), then a dim ghost run again.
+  # The gap drop is reserved for reverse-video-marked content (the cursor
+  # cell), so plain text in the gap is emitted rather than mistaken for ghost.
+  # Arm Cursor so this asserts gap-buffer emit, not pre-Cursor direct emission.
+  styled=$(printf '\033[2mghost\033[0mREAL\033[48;2;21;21;21m\033[2mghost2\033[0m')
+  result=$(fm_cursor_composer_strip <<< "$styled")
+  [ "$result" = REAL ] \
+    || fail "real text between dim runs must survive strip, got '$result'"
+  pass "fm_cursor_composer_strip: real text between dim runs survives"
+}
+
+test_dark_truecolor_ghost_after_dim_ghost_strips_empty() {
+  local result styled
+  # dim ghost → reset → dark TRUECOLOR ghost: the dark foreground is a
+  # re-entry into de-emphasis, so the whole row strips to empty (both the
+  # semicolon and colon colour forms).
+  styled=$(printf '\033[2mdim ghost\033[0m\033[38;2;60;60;60mdark ghost\033[0m')
+  result=$(fm_composer_strip_ghost <<< "$styled")
+  [ -z "$result" ] || fail "dark truecolor ghost after a dim ghost must strip to empty, got '$result'"
+  styled=$(printf '\033[2mdim ghost\033[0m\033[38:2::60:60:60mdark ghost\033[0m')
+  result=$(fm_composer_strip_ghost <<< "$styled")
+  [ -z "$result" ] || fail "dark colon-truecolor ghost after a dim ghost must strip to empty, got '$result'"
+  # A reverse-video cursor cell between the dim exit and the dark re-entry is
+  # dropped exactly like the dim re-entry case under Cursor harness context.
+  styled=$(printf '\033[2mg\033[0;7mA\033[38;2;60;60;60mrest\033[0m')
+  result=$(fm_cursor_composer_strip <<< "$styled")
+  case "$result" in
+    *A*) fail "reverse-video cursor cell survived a dark truecolor re-entry: result='$result'" ;;
+  esac
+  pass "fm_cursor_composer_strip: dark TRUECOLOR re-entry after a dim ghost strips to empty"
+}
+
+test_real_text_between_dim_and_dark_ghost_runs_survives() {
+  local result styled
+  # dim ghost → reset → REAL text → dark TRUECOLOR ghost: the genuine normal
+  # text between the two ghost runs must survive. Cursor harness context is
+  # required so the gap buffer (not direct emission) is what preserves REAL.
+  styled=$(printf '\033[2mdim\033[0mREAL\033[38;2;60;60;60mdark\033[0m')
+  result=$(fm_cursor_composer_strip <<< "$styled")
+  [ "$result" = REAL ] \
+    || fail "real text between dim and dark truecolor ghost runs must survive, got '$result'"
+  pass "fm_cursor_composer_strip: real text between dim and dark TRUECOLOR ghost runs survives"
+}
+
+test_cursor_idle_composer_reads_empty_end_to_end() {
+  local dir fb capture out
+  dir="$TMP_ROOT/cursor-idle-verdict"; mkdir -p "$dir"
+  fb=$(make_fake_tmux "$dir")
+  capture="$dir/styled.txt"
+  # The exact ANSI fixture from cursor-agent 2026.07.23-e383d2b idle composer
+  # through the REAL tmux capture path: the dim `→` glyph and placeholder strip
+  # to empty content, so the plain-content fallback must classify the row
+  # `empty` (the verdict fm_tmux_submit_enter_core needs to confirm delivery).
+  # FM_COMPOSER_IDLE_RE carries cursor's idle placeholder, the same default the
+  # daemon exports for cursor firstmates (fm_super_main).
+  printf '\033[48;2;21;21;21m \033[2m\xe2\x86\x92 \033[0;7m\033[48;2;21;21;21mA\033[0;2m\033[48;2;21;21;21mdd a follow-up\033[0m\n' > "$capture"
+  out=$(PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=0 \
+    FM_COMPOSER_HARNESS=cursor FM_COMPOSER_IDLE_RE='^Add a follow-up$' fm_tmux_composer_state "fakepane")
+  [ "$out" = empty ] \
+    || fail "cursor idle composer must read empty on the real capture path, got '$out'"
+  pass "fm_tmux_composer_state: cursor idle composer reads empty end-to-end"
+}
+
 test_strip_ghost_drops_dim_keeps_normal
 test_strip_ghost_handles_combined_and_boundary_codes
 test_strip_ghost_keeps_colored_text_with_2_payloads
@@ -714,3 +871,11 @@ test_legitimate_empty_routes_remain_empty
 test_non_bordered_composer_uses_compatibility_fallback
 test_non_bordered_interior_edges_are_pending
 test_peek_output_is_escape_free
+test_cursor_reverse_video_ghost_cell_is_stripped
+test_cursor_reverse_video_ghost_cell_split_sgr_is_stripped
+test_non_cursor_reverse_video_gap_is_not_suppressed
+test_rev_off_inside_gap_keeps_real_text
+test_real_text_between_dim_runs_survives
+test_dark_truecolor_ghost_after_dim_ghost_strips_empty
+test_real_text_between_dim_and_dark_ghost_runs_survives
+test_cursor_idle_composer_reads_empty_end_to_end

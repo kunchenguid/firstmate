@@ -84,7 +84,7 @@ The daemon constructs every current injection as the `away-supervisor` kind owne
 The bare `FM_INJECT_MARK` form remains accepted for legacy daemon escalations during rollout.
 U+2063 has no normal keyboard keystroke and survives terminal transport as UTF-8 text.
 This is how firstmate tells a daemon escalation apart from a real message in the same pane.
-The operational prefix travels with the message text; it does not rely on harness-level typed-vs-injected detection, which is not portable across claude, codex, opencode, pi, pi-signed, grok, and kimi.
+The operational prefix travels with the message text; it does not rely on harness-level typed-vs-injected detection, which is not portable across claude, codex, opencode, pi, pi-signed, grok, kimi, and cursor.
 
 ## Busy-guard and composer guard
 
@@ -129,20 +129,23 @@ A bordered-empty or ghost-only composer is recognized as empty where that backen
 when a steer's Enter is positively swallowed, so firstmate learns an instruction
 did not land instead of leaving it unsubmitted.
 
-**Busy-queued Enter exception (tmux backend, opencode 1.18.4).** While opencode
+**Busy-queued Enter exception (opencode 1.18.4 and cursor-agent, both backends).** While the harness
 is mid-turn, Enter is accepted and queued for after the current turn but the
 composer keeps showing the typed text the whole time, so the cleared-composer
 check alone false-positives on a swallowed Enter for every steer sent to a
-busy opencode pane. The shared `fm_tmux_submit_enter_core` falls back to
-`fm_pane_is_busy` once the Enter-retry budget is spent: a busy pane means the
-Enter was accepted and queued (reported as `empty` so the caller does not
-re-send), while an idle pane keeps `pending` as a genuine swallow. The
-strict-buffer-clears-only-on-`empty` policy above still holds for the daemon
+busy pane. The shared `fm_tmux_submit_enter_core` falls back to
+`fm_pane_is_busy` once the Enter-retry budget is spent, scoped to opencode and
+cursor (the two harnesses with verified Enter-while-busy queuing): a busy pane
+means the Enter was accepted and queued (reported as `empty` so the caller
+does not re-send), while an idle pane keeps `pending` as a genuine swallow.
+The strict-buffer-clears-only-on-`empty` policy above still holds for the daemon
 and the lenient-`pending`-fails-for-`fm-send` policy still holds for steer
-verification - this exception is a busy-queue is treated as a delivered
-Enter, not a swallowed one. The herdr adapter observes the same opencode
-behavior but needs a separate fix; the gap is recorded in
-`docs/herdr-backend.md` rather than papered over here.
+verification - a queued Enter is treated as a delivered Enter, not a swallowed
+one. The herdr adapter has the same fallback through its native submit-status
+classifier (`fm_backend_herdr_classify_submit_agent_status` on the exhausted-
+retry pending path), so queued
+Enters report as delivered on both backends; the owner is `docs/tmux-backend.md`
+with herdr detail in `docs/herdr-backend.md`.
 
 ## Classification policy
 

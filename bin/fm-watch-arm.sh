@@ -67,6 +67,17 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WATCH="$SCRIPT_DIR/fm-watch.sh"
 WATCH_LOCK="$STATE/.watch.lock"
 BEAT="$STATE/.last-watcher-beat"
+# Durable evidence that a hook-owned arm was torn down while supervising. On a
+# Cursor primary the stop hook is the sole wake-notification path, so a killed
+# park must surface at the next stop instead of stranding the durable queue.
+# RECORDING IS OPT-IN: only hook-owned arm adapters that use the recovery
+# contract pass FM_WATCH_ARM_INTERRUPT_MARKER (the Cursor stop hook adapter
+# requests the standard state/.hook-arm-interrupted path); every other arm
+# mode - the Claude asyncRewake hook, model-driven background arms - creates
+# no durable hook-specific state it does not consume. bin/fm-wake-drain.sh
+# clears the standard path (single owner). Written best-effort from the signal
+# traps only.
+INTERRUPT_MARKER="${FM_WATCH_ARM_INTERRUPT_MARKER:-}"
 # "Fresh" reuses the guard's threshold so there is one definition of liveness.
 GRACE=${FM_GUARD_GRACE:-300}
 # How long to wait for a freshly forked watcher to acquire the lock and beat.
@@ -338,10 +349,23 @@ attach_and_wait() {
   done
 }
 
+# Best-effort, never loud: a dying hook cannot wait on locks or diagnostics, so
+# a failed write must not crash or stall the trap. The marker records timestamp,
+# signal, and the cycle origin (attached vs started) so the next stop can tell
+# an orphaned-peer kill from a no-watcher kill. No-op unless the caller opted
+# into marker recording via FM_WATCH_ARM_INTERRUPT_MARKER.
+# shellcheck disable=SC2329 # Invoked indirectly by the signal traps below.
+write_interrupt_marker() {
+  [ -n "$INTERRUPT_MARKER" ] || return 0
+  printf 'ts=%s\tsignal=%s\torigin=%s\n' \
+    "$(date +%s)" "$1" "$cycle_origin" > "$INTERRUPT_MARKER" 2>/dev/null || true
+}
+
 # shellcheck disable=SC2329 # Invoked indirectly by the signal traps below.
 handle_attached_signal() {
   local signal=$1 rc=$2
   trap - HUP TERM INT
+  write_interrupt_marker "$signal"
   cycle_log_append "$rc" "$signal" arm-interrupted none
   exit "$rc"
 }
@@ -461,6 +485,7 @@ cleanup_child() {
 handle_arm_signal() {
   local signal=$1 rc=$2
   trap - HUP TERM INT
+  write_interrupt_marker "$signal"
   if [ -n "$child" ] && fm_pid_alive "$child"; then
     kill -TERM "$child" 2>/dev/null || true
     wait "$child" 2>/dev/null || true

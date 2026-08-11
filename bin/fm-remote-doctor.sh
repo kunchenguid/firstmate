@@ -57,7 +57,175 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(CDPATH='' cd "$SCRIPT_DIR/.." && pwd -P)}"
 # shellcheck source=bin/fm-tasks-axi-lib.sh
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 REQUIRED_TOOLS=(git jq herdr tasks-axi treehouse)
-HARNESS_TOOLS=(claude codex opencode pi pi-signed grok kimi)
+HARNESS_TOOLS=(claude codex opencode pi pi-signed grok kimi cursor-agent)
+
+# Cursor resolution, reproduced rather than sourced.
+#
+# This doctor is the ONE command bin/fm-remote-entrypoint.sh may run before the
+# remote job worker exists, and on a host without git its only identity proof is
+# its own pinned SHA-256. Sourcing a helper for Cursor's proof would place
+# unverified code inside that hash-verified bootstrap, so the resolver, its
+# lookup order, and its legacy-alias proof are reproduced here instead. Trust is
+# therefore exactly what it was before Cursor readiness existed.
+#
+# bin/fm-cursor-lib.sh is the local owner of the same contract, and
+# tests/fm-remote-doctor.test.sh asserts the two agree on the same fixtures, so
+# a readiness check and a spawn can never disagree about what counts as Cursor.
+# Keep any change here and there in the same commit.
+FM_CURSOR_PROBE_TIMEOUT=${FM_CURSOR_PROBE_TIMEOUT:-10}
+case "$FM_CURSOR_PROBE_TIMEOUT" in
+  ''|*[!0-9]*|0*) FM_CURSOR_PROBE_TIMEOUT=10 ;;
+esac
+
+fm_remote_doctor_cursor_bash_timeout() {
+  local seconds=$1 command_status deadline_status child_pid watchdog_pid command_rc recorded_rc monitor_was_on=0
+  shift
+  command_status=$(mktemp "${TMPDIR:-/tmp}/fm-cursor-probe-command.XXXXXX" 2>/dev/null) || return 124
+  deadline_status="${command_status}.deadline"
+  case $- in *m*) monitor_was_on=1 ;; esac
+  set -m
+  (
+    set +e
+    set +m
+    "$@"
+    command_rc=$?
+    printf '%s\n' "$command_rc" > "$command_status"
+    exit "$command_rc"
+  ) &
+  child_pid=$!
+  (
+    set +e
+    set +m
+    sleep "$seconds"
+    if [ ! -s "$command_status" ]; then
+      printf 'expired\n' > "$deadline_status"
+      kill -TERM -- "-$child_pid" 2>/dev/null || true
+      sleep 0.2
+      kill -KILL -- "-$child_pid" 2>/dev/null || true
+    fi
+    exit 124
+  ) &
+  watchdog_pid=$!
+  [ "$monitor_was_on" -eq 1 ] || set +m
+
+  if wait "$child_pid" 2>/dev/null; then
+    command_rc=0
+  else
+    command_rc=$?
+  fi
+  if [ -s "$deadline_status" ]; then
+    wait "$watchdog_pid" 2>/dev/null || true
+    command_rc=124
+  else
+    kill -TERM -- "-$watchdog_pid" 2>/dev/null || kill "$watchdog_pid" 2>/dev/null || true
+    wait "$watchdog_pid" 2>/dev/null || true
+    recorded_rc=$(cat "$command_status" 2>/dev/null || true)
+    case "$recorded_rc" in ''|*[!0-9]*) ;; *) command_rc=$recorded_rc ;; esac
+  fi
+  rm -f "$command_status" "$deadline_status" 2>/dev/null || true
+  return "$command_rc"
+}
+
+fm_remote_doctor_cursor_canonical_path() {  # <path>
+  local path=$1 dir base hops=0 target
+  [ -n "$path" ] || return 1
+  dir=$(CDPATH='' cd -- "$(dirname -- "$path")" 2>/dev/null && pwd -P) || { printf '%s\n' "$path"; return 0; }
+  base=$(basename -- "$path")
+  while [ -L "$dir/$base" ] && [ "$hops" -lt 16 ]; do
+    target=$(readlink "$dir/$base") || break
+    case "$target" in
+      /*) dir=$(CDPATH='' cd -- "$(dirname -- "$target")" 2>/dev/null && pwd -P) || break
+          base=$(basename -- "$target") ;;
+      *)  dir=$(CDPATH='' cd -- "$dir/$(dirname -- "$target")" 2>/dev/null && pwd -P) || break
+          base=$(basename -- "$target") ;;
+    esac
+    hops=$((hops + 1))
+  done
+  printf '%s\n' "$dir/$base"
+}
+
+fm_remote_doctor_cursor_path_is_cursor() {  # <path>
+  local canonical
+  [ -n "$1" ] || return 1
+  canonical=$(fm_remote_doctor_cursor_canonical_path "$1") || return 1
+  [ -x "$canonical" ] || return 1
+  fm_remote_doctor_cursor_probe_is_cursor "$canonical"
+}
+
+fm_remote_doctor_cursor_probe_is_cursor() {  # <path>
+  local path=$1 out runner=
+  [ -n "$path" ] && [ -x "$path" ] || return 1
+  if command -v timeout >/dev/null 2>&1; then runner=timeout
+  elif command -v gtimeout >/dev/null 2>&1; then runner=gtimeout
+  fi
+  if [ -n "$runner" ]; then
+    out=$("$runner" -k 1 "$FM_CURSOR_PROBE_TIMEOUT" "$path" --help 2>/dev/null) || return 1
+  else
+    out=$(fm_remote_doctor_cursor_bash_timeout "$FM_CURSOR_PROBE_TIMEOUT" "$path" --help 2>/dev/null) || return 1
+  fi
+  [ -n "$out" ] || return 1
+  case "$out" in
+    *"Usage:"*"Start the Cursor Agent"*CURSOR_API_ENDPOINT*api2.cursor.sh*) return 0 ;;
+  esac
+  return 1
+}
+
+fm_remote_doctor_cursor_verify_executable() {  # <path>
+  fm_remote_doctor_cursor_path_is_cursor "$1"
+}
+
+fm_remote_doctor_resolve_cursor() {
+  local name candidate
+  for name in cursor-agent agent; do
+    candidate=$(command -v "$name" 2>/dev/null || true)
+    [ -n "$candidate" ] && [ -x "$candidate" ] || continue
+    candidate=$(fm_remote_doctor_cursor_canonical_path "$candidate") || continue
+    if fm_remote_doctor_cursor_verify_executable "$candidate"; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  for name in cursor-agent agent; do
+    [ -n "${HOME:-}" ] || break
+    candidate="$HOME/.local/bin/$name"
+    [ -x "$candidate" ] || continue
+    candidate=$(fm_remote_doctor_cursor_canonical_path "$candidate") || continue
+    if fm_remote_doctor_cursor_verify_executable "$candidate"; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Resolve a harness executable like the local spawn path does. Cursor is the
+# one harness with two executable names and a user-local install often absent
+# from a non-interactive login PATH; every other harness resolves from PATH
+# only. The generic `agent` name is NEVER a standalone HARNESS_TOOLS entry: it
+# is reachable only as a Cursor alias, and only after it proves itself Cursor,
+# so an unrelated executable named agent neither classifies as a harness nor
+# reports this host ready for Cursor.
+fm_remote_doctor_resolve_harness() {  # <name>
+  local name=$1 resolved dir
+  if [ "$name" = cursor-agent ]; then
+    fm_remote_doctor_resolve_cursor
+    return
+  fi
+  resolved=$(command -v "$name" 2>/dev/null || true)
+  if [ -n "$resolved" ] && [ -x "$resolved" ]; then
+    case "$resolved" in
+      /*) printf '%s\n' "$resolved"; return 0 ;;
+      *)
+        dir=$(cd "$(dirname "$resolved")" 2>/dev/null && pwd -P) || dir=
+        if [ -n "$dir" ]; then
+          printf '%s/%s\n' "$dir" "$(basename "$resolved")"
+          return 0
+        fi
+        ;;
+    esac
+  fi
+  return 1
+}
 OPTIONAL_TOOLS=(tmux no-mistakes gh)
 LAUNCH_AGENT_LABEL=dev.firstmate.herdr.fm-remote
 # The dedicated remote-secondmate session. The user's interactive Herdr work
@@ -327,8 +495,7 @@ report_required_tools() {
     fi
   done
   for harness in "${HARNESS_TOOLS[@]}"; do
-    resolved=$(command -v "$harness" 2>/dev/null || true)
-    if [ -n "$resolved" ] && [ -x "$resolved" ]; then
+    if resolved=$(fm_remote_doctor_resolve_harness "$harness"); then
       printf 'required harness=%s:%s\n' "$harness" "$resolved"
       return 0
     fi
@@ -430,8 +597,9 @@ repair_required_wrappers() {
     repair_tool_wrapper "$tool" || true
   done
   for tool in "${HARNESS_TOOLS[@]}"; do
-    resolved=$(command -v "$tool" 2>/dev/null || true)
-    [ -z "$resolved" ] || [ ! -x "$resolved" ] || return 0
+    if resolved=$(fm_remote_doctor_resolve_harness "$tool"); then
+      [ -z "$resolved" ] || [ ! -x "$resolved" ] || return 0
+    fi
   done
   for tool in "${HARNESS_TOOLS[@]}"; do
     fm_remote_job_manager_tool "${HOME:-}" "$tool" >/dev/null 2>&1 || continue

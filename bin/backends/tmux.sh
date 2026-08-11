@@ -54,8 +54,8 @@ fm_backend_tmux_send_key() {  # <target> <key>
 # submit with Enter, retried (Enter only, never retyped) until the composer
 # clears. Re-exports fm_tmux_submit_core (bin/fm-tmux-lib.sh) verbatim; see
 # that file for the composer-verification contract and echoed verdicts.
-fm_backend_tmux_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle>
-  fm_tmux_submit_core "$@"
+fm_backend_tmux_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle> [expected-label] [harness]
+  fm_tmux_submit_core "$1" "$2" "$3" "$4" "$5" "${7:-}"
 }
 
 # fm_backend_tmux_container_ensure: reuse the current tmux session when
@@ -139,6 +139,23 @@ fm_backend_tmux_kill() {  # <target>
   tmux kill-window -t "=$session:=$window" 2>/dev/null || true
 }
 
+# fm_backend_tmux_endpoint_confirmed_gone: gate durable-record removal on the
+# exact recorded window's structured absence, read-only, so a suppressed
+# kill-window failure (fm_backend_tmux_kill is `|| true` by contract) never
+# erases a live task's endpoint identity. Only fm_backend_tmux_agent_state's
+# `missing` verdict proves the exact window is gone - omitted from a successful
+# session inventory, or a definitive missing-session/server response. Every
+# other verdict (alive, dead, ambiguous, unreadable) refuses: the window may
+# still exist, or the inventory could not be trusted.
+#
+# Used by bin/fm-backend.sh's fm_backend_endpoint_confirmed_gone dispatcher
+# (spawn rollback); teardown's herdr twin is
+# fm_backend_herdr_endpoint_confirmed_gone.
+# shellcheck disable=SC2317 # dispatched entry point
+fm_backend_tmux_endpoint_confirmed_gone() {  # <target>
+  [ "$(fm_backend_tmux_agent_state "$1")" = missing ]
+}
+
 # fm_backend_tmux_current_command: <target>'s live foreground process name -
 # tmux's own `#{pane_current_command}`, already resolved from the pty's
 # foreground process group (verified empirically with real tmux 3.6a: a
@@ -157,10 +174,14 @@ fm_backend_tmux_current_command() {  # <target>
 # harness, `shell` for an idle login/interactive shell, `other` for anything
 # else. Keeping one classifier means the two independent name sources can never
 # drift into disagreeing about what a given name means.
-fm_backend_tmux_classify_process_name() {  # <path> [argv0] -> agent|shell|other
-  local path=$1 argv0=${2:-} base
+fm_backend_tmux_classify_process_name() {  # <path> [argv0] [args] [pid] -> agent|shell|other
+  local path=$1 argv0=${2:-} args=${3:-} pid=${4:-} base
   base=${path##*/}
   base=${base#-}
+  # Cursor is classified by the narrowed identity rule in bin/fm-cursor-lib.sh,
+  # never by a bare `agent` basename: an unrelated executable named agent must
+  # not read as a live agent pane.
+  if [ -n "$pid" ] && fm_cursor_process_matches "$path" "$args" "$argv0" "$pid"; then printf 'agent'; return; fi
   case "$base" in
     # muse is anchored rather than globbed like its neighbours: its installed
     # binary is muse-bin-<version> (the launcher execs it, so the version is the
@@ -231,19 +252,45 @@ fm_backend_tmux_foreground_comms() {  # <target>
       done
 }
 
-fm_backend_tmux_foreground_argv0s() {  # <target>
+fm_backend_tmux_foreground_argv0s() {  # <target> -> pid, comm, argv0, args records
   local target=$1 tty pid pgid tpgid comm args argv0
   tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || return 0
   [ -n "$tty" ] || return 0
-  LC_ALL=C ps -t "${tty#/dev/}" -o pid=,pgid=,tpgid=,comm= 2>/dev/null \
-    | while read -r pid pgid tpgid comm; do
+  LC_ALL=C ps -t "${tty#/dev/}" -o pid=,pgid=,tpgid=,comm=,args= 2>/dev/null \
+    | while read -r pid pgid tpgid comm args; do
         [ -n "$comm" ] || continue
         [ "$pgid" = "$tpgid" ] || continue
-        args=$(LC_ALL=C ps -p "$pid" -o args= 2>/dev/null) || continue
-        args=${args#"${args%%[![:space:]]*}"}
-        argv0=${args%%[[:space:]]*}
-        [ -n "$argv0" ] && printf '%s\n' "$argv0"
+        argv0=$(fm_cursor_argv0_for_pid "$pid" "$comm" "$args" || true)
+        [ -n "$argv0" ] && printf '%s\t%s\t%s\t%s\n' "$pid" "$comm" "$argv0" "$args"
       done
+}
+
+fm_backend_tmux_current_process() {  # <target> <command> -> pid, comm, argv0, args
+  local target=$1 command=$2 target_base tty pid pgid tpgid comm args argv0 first_arg
+  target_base=${command##*/}
+  tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || return 0
+  [ -n "$tty" ] || return 0
+  LC_ALL=C ps -t "${tty#/dev/}" -o pid=,pgid=,tpgid=,comm=,args= 2>/dev/null \
+    | while read -r pid pgid tpgid comm args; do
+        [ -n "$comm" ] && [ "$pgid" = "$tpgid" ] || continue
+        argv0=$(fm_cursor_argv0_for_pid "$pid" "$comm" "$args" || true)
+        first_arg=$(fm_cursor_ps_arg_at "$args" 0 2>/dev/null || true)
+        case "${comm##*/}:$argv0:${first_arg##*/}" in
+          "$target_base":*|*:"$command":*|*:"$target_base":*)
+            printf '%s\t%s\t%s\t%s\n' "$pid" "$comm" "$argv0" "$args"
+            return 0
+            ;;
+        esac
+      done
+}
+
+fm_backend_tmux_process_metadata() {  # <pid> -> pid, comm, argv0, args
+  local pid=$1 comm args argv0
+  comm=$(LC_ALL=C ps -p "$pid" -o comm= 2>/dev/null || true)
+  args=$(LC_ALL=C ps -p "$pid" -o args= 2>/dev/null || true)
+  [ -n "$comm" ] || return 0
+  argv0=$(fm_cursor_argv0_for_pid "$pid" "$comm" "$args" || true)
+  printf '%s\t%s\t%s\t%s\n' "$pid" "$comm" "$argv0" "$args"
 }
 
 # fm_backend_tmux_agent_state: recovery-grade harness-agent state for one
@@ -264,7 +311,10 @@ fm_backend_tmux_foreground_argv0s() {  # <target>
 # distinguish a truly idle pane from a rewritten process title.
 fm_backend_tmux_agent_state() {  # <target>
   local target=$1 comm session window windows inventory_status
-  local foreground argv0s name fg_seen=0 fg_shell=0 fg_other=0
+  local argv0s current_process current_pid current_comm current_argv0 current_args
+  local process_pid process_comm process_argv0 process_args
+  local pane_process pane_pid pane_comm pane_argv0 pane_args
+  local fg_seen=0 fg_shell=0 fg_other=0
   case "$target" in
     *:*:*|'':*|*:'') printf 'unreadable'; return 0 ;;
     *:*) ;;
@@ -293,26 +343,15 @@ fm_backend_tmux_agent_state() {  # <target>
     return 0
   fi
 
-  foreground=$(fm_backend_tmux_foreground_comms "$target")
-  while IFS= read -r name; do
-    [ -n "$name" ] || continue
+  argv0s=$(fm_backend_tmux_foreground_argv0s "$target")
+  while IFS=$'\t' read -r process_pid process_comm process_argv0 process_args; do
+    [ -n "$process_comm" ] || continue
     fg_seen=1
-    case "$(fm_backend_tmux_classify_process_name "$name")" in
+    case "$(fm_backend_tmux_classify_process_name "$process_comm" "$process_argv0" "$process_args" "$process_pid")" in
       agent) printf 'alive'; return 0 ;;
       shell) fg_shell=1 ;;
       *) fg_other=1 ;;
     esac
-  done <<EOF
-$foreground
-EOF
-
-  argv0s=$(fm_backend_tmux_foreground_argv0s "$target")
-  while IFS= read -r name; do
-    [ -n "$name" ] || continue
-    if [ "$(fm_backend_tmux_classify_process_name '' "$name")" = agent ]; then
-      printf 'alive'
-      return 0
-    fi
   done <<EOF
 $argv0s
 EOF
@@ -321,9 +360,36 @@ EOF
     printf 'unreadable'
     return 0
   }
-  if [ "$(fm_backend_tmux_classify_process_name "$comm")" = agent ]; then
+  current_process=$(fm_backend_tmux_current_process "$target" "$comm")
+  IFS=$'\t' read -r current_pid current_comm current_argv0 current_args <<EOF
+$current_process
+EOF
+  if [ -n "$current_pid" ]; then
+    pane_process=$(fm_backend_tmux_process_metadata "$current_pid")
+    IFS=$'\t' read -r pane_pid pane_comm pane_argv0 pane_args <<EOF
+$pane_process
+EOF
+    [ -n "$pane_comm" ] && current_comm=$pane_comm
+    [ -n "$pane_argv0" ] && current_argv0=$pane_argv0
+    [ -n "$pane_args" ] && current_args=$pane_args
+  fi
+  if [ -n "$current_pid" ] \
+     && [ "$(fm_backend_tmux_classify_process_name "$current_comm" "$current_argv0" "$current_args" "$current_pid")" = agent ]; then
     printf 'alive'
     return 0
+  fi
+
+  if [ -z "$current_pid" ]; then
+    current_pid=$(tmux display-message -p -t "$target" '#{pane_pid}' 2>/dev/null || true)
+    pane_process=$(fm_backend_tmux_process_metadata "$current_pid")
+    IFS=$'\t' read -r pane_pid pane_comm pane_argv0 pane_args <<EOF
+$pane_process
+EOF
+    if [ -n "$pane_pid" ] \
+       && [ "$(fm_backend_tmux_classify_process_name "$pane_comm" "$pane_argv0" "$pane_args" "$pane_pid")" = agent ]; then
+      printf 'alive'
+      return 0
+    fi
   fi
 
   # A readable foreground process group settles the negative verdicts: only a
@@ -340,8 +406,8 @@ EOF
   case "$comm" in
     '') printf 'unreadable'; return 0 ;;
   esac
-  case "$(fm_backend_tmux_classify_process_name "$comm")" in
-    shell) printf 'dead' ;;
+  case "${comm##*/}" in
+    zsh|bash|sh|dash|ash|ksh|mksh|tcsh|csh|fish) printf 'dead' ;;
     *) printf 'ambiguous' ;;
   esac
 }

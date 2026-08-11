@@ -28,7 +28,9 @@ SLEEP_BIN=$(command -v sleep) || { echo "skip: sleep not found"; exit 0; }
 REAL_TMUX=$(command -v tmux)
 SOCKET="fm-liveness-$$"
 LAB=$(mktemp -d "${TMPDIR:-/tmp}/fm-liveness.XXXXXX")
+export HOME="$LAB"
 SESSION=liveness
+CC_BIN=$(command -v cc 2>/dev/null || command -v gcc 2>/dev/null || true)
 
 cleanup_all() {
   "$REAL_TMUX" -L "$SOCKET" kill-server >/dev/null 2>&1 || true
@@ -44,7 +46,7 @@ cat > "$LAB/shim/tmux" <<SH
 exec "$REAL_TMUX" -L "$SOCKET" "\$@"
 SH
 chmod +x "$LAB/shim/tmux"
-PATH="$LAB/shim:$PATH"
+PATH="$LAB/shim:$LAB/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 export PATH
 
 # Stand-in "harness" binaries. These are SYMLINKS to a real long-running system
@@ -65,6 +67,27 @@ ln -s "$SLEEP_BIN" "$LAB/bin/musescore"
 ln -s "$SLEEP_BIN" "$LAB/bin/amuse"
 ln -s "$SLEEP_BIN" "$LAB/bin/muse-binary"
 ln -s "$SLEEP_BIN" "$LAB/bin/muse-bind"
+# An unrelated executable that merely happens to be named agent: it must never
+# classify as a live agent pane.
+ln -s "$SLEEP_BIN" "$LAB/bin/agent"
+# Cursor's legacy alias as it is actually installed - a symlink into Cursor's
+# own versioned cursor-agent binary. A direct link to sleep would canonicalize
+# to /usr/bin/sleep and would not model the structural proof under test.
+mkdir -p "$LAB/.local/share/cursor-agent/versions/2026.08.04-aaa8809"
+if [ -n "$CC_BIN" ] &&
+  printf '%s\n' '#include <stdio.h>' '#include <string.h>' '#include <unistd.h>' 'int main(int argc,char **argv){if(argc > 1 && strcmp(argv[1],"--help") == 0){puts("Start the Cursor Agent");return 0;}for(;;)sleep(60);return 0;}' > "$LAB/cursor-spin.c" &&
+  "$CC_BIN" -o "$LAB/.local/share/cursor-agent/versions/2026.08.04-aaa8809/cursor-agent" "$LAB/cursor-spin.c" 2>/dev/null; then
+  ln -s "$LAB/.local/share/cursor-agent/versions/2026.08.04-aaa8809/cursor-agent" \
+    "$LAB/.local/share/cursor-agent/versions/2026.08.04-aaa8809/agent"
+  mkdir -p "$LAB/.local/bin"
+  ln -s "$LAB/.local/share/cursor-agent/versions/2026.08.04-aaa8809/cursor-agent" \
+    "$LAB/.local/bin/cursor-agent"
+else
+  echo "skip: no C compiler, so the Cursor alias install-tree case cannot build its canonical binary"
+fi
+# A decoy install tree whose directory is merely named agent.
+mkdir -p "$LAB/agent/versions/current"
+ln -s "$SLEEP_BIN" "$LAB/agent/versions/current/agent"
 
 # A launcher whose own process identity is a bare shell, running the harness as
 # a child in the same foreground process group - the shape the real Pi Launcher
@@ -117,16 +140,16 @@ title_classifies_agent() {  # <target>
 
 # Does the foreground-process-group identity, including argv[0], name one?
 comms_classify_agent() {  # <target>
-  local name
+  local pid name argv0 args
   while IFS= read -r name; do
     [ -n "$name" ] || continue
     [ "$(fm_backend_tmux_classify_process_name "$name")" = agent ] && return 0
   done <<EOF
 $(fm_backend_tmux_foreground_comms "$1")
 EOF
-  while IFS= read -r name; do
+  while IFS=$'\t' read -r pid name argv0 args; do
     [ -n "$name" ] || continue
-    [ "$(fm_backend_tmux_classify_process_name '' "$name")" = agent ] && return 0
+    [ "$(fm_backend_tmux_classify_process_name "$name" "$argv0" "$args" "$pid")" = agent ] && return 0
   done <<EOF
 $(fm_backend_tmux_foreground_argv0s "$1")
 EOF
@@ -179,7 +202,6 @@ pass "tmux liveness: unrelated muse-containing command names stay ambiguous"
 # real executable file rather than a symlink, because macOS takes the title
 # from the resolved target's name, so it is skipped where no C compiler exists.
 
-CC_BIN=$(command -v cc 2>/dev/null || command -v gcc 2>/dev/null || true)
 if [ -n "$CC_BIN" ] &&
   printf '%s\n' '#include <unistd.h>' 'int main(void){for(;;)sleep(60);return 0;}' > "$LAB/spin.c" &&
   "$CC_BIN" -o "$LAB/bin/claude/2.1.220" "$LAB/spin.c" 2>/dev/null &&
@@ -349,6 +371,77 @@ fi
 [ "$(fm_tmux_composer_state "$SESSION:cursor-exited")" != empty ] \
   || fail "a dead-shell pane still showing Cursor's composer must never read empty"
 pass "cursor composer: a stale Cursor screen over a dead shell never reads empty"
+# --- cursor-agent: MainThread kernel exec name -------------------------------
+
+"$REAL_TMUX" -L "$SOCKET" new-window -t "$SESSION" -n cmainthrd bash -c "exec -a MainThread '$SLEEP_BIN' 30"
+# A bare MainThread exec name without a cursor-agent path component must NOT
+# classify alive: no name source attributes it to a harness, so the readable
+# foreground group (a non-shell) stays ambiguous, never an invented agent.
+if [ "$(fm_backend_agent_state tmux "$SESSION:cmainthrd" 2>/dev/null)" = alive ]; then
+  fail "a bare 'MainThread' foreground process must not classify alive (no cursor-agent path context)"
+fi
+"$REAL_TMUX" -L "$SOCKET" kill-window -t "$SESSION:cmainthrd" 2>/dev/null || true
+pass "tmux liveness: a bare MainThread exec name without cursor-agent path is not alive"
+
+# --- cursor-agent: MainThread with cursor-agent argv0 ------------------------
+
+CURSOR_BINARY="$LAB/.local/share/cursor-agent/versions/2026.08.04-aaa8809/cursor-agent"
+if [ -x "$CURSOR_BINARY" ]; then
+  "$REAL_TMUX" -L "$SOCKET" new-window -t "$SESSION" -n cursorargv0 bash -c "FM_CURSOR_EXECUTABLE='$CURSOR_BINARY' exec -a '$CURSOR_BINARY' '$CURSOR_BINARY' 30"
+  wait_for_state "$SESSION:cursorargv0" alive 2>/dev/null \
+    || fail "a Cursor install-path argv0 must classify alive"
+  pass "tmux liveness: a validated Cursor install path classifies alive"
+  "$REAL_TMUX" -L "$SOCKET" kill-window -t "$SESSION:cursorargv0" 2>/dev/null || true
+fi
+"$REAL_TMUX" -L "$SOCKET" new-window -t "$SESSION" -n cursordecoy bash -c "exec -a cursor-agent '$SLEEP_BIN' 30"
+if [ "$(fm_backend_agent_state tmux "$SESSION:cursordecoy" 2>/dev/null)" = alive ]; then
+  fail "a decoy process basename cursor-agent must not classify alive"
+fi
+"$REAL_TMUX" -L "$SOCKET" kill-window -t "$SESSION:cursordecoy" 2>/dev/null || true
+pass "tmux liveness: a decoy cursor-agent basename does not classify alive"
+
+# --- cursor legacy alias: agent, proven by its install tree ------------------
+
+CURSOR_ALIAS="$LAB/.local/share/cursor-agent/versions/2026.08.04-aaa8809/agent"
+if [ -x "$CURSOR_ALIAS" ]; then
+  "$REAL_TMUX" -L "$SOCKET" new-window -t "$SESSION" -n cursoralias bash -c "FM_CURSOR_EXECUTABLE='$CURSOR_ALIAS' exec -a '$CURSOR_ALIAS' '$CURSOR_ALIAS' 30"
+  wait_for_state "$SESSION:cursoralias" alive 2>/dev/null \
+    || fail "a legacy agent alias inside Cursor's install tree must classify alive"
+  "$REAL_TMUX" -L "$SOCKET" kill-window -t "$SESSION:cursoralias" 2>/dev/null || true
+  pass "tmux liveness: a Cursor legacy alias proven by its install tree classifies alive"
+fi
+
+# --- negative: unrelated executables named agent -----------------------------
+
+# An arbitrary executable whose basename is agent, and an unrelated install
+# tree whose DIRECTORY is named agent. Neither is Cursor, and classifying
+# either as a live agent pane would let firstmate read an unrelated process as
+# a working crewmate.
+"$REAL_TMUX" -L "$SOCKET" new-window -t "$SESSION" -n unrelagent bash -c "exec -a '$LAB/bin/agent' '$LAB/bin/agent' 30"
+sleep 1
+if [ "$(fm_backend_agent_state tmux "$SESSION:unrelagent" 2>/dev/null)" = alive ]; then
+  fail "an unrelated executable named agent must not classify as a live agent pane"
+fi
+"$REAL_TMUX" -L "$SOCKET" kill-window -t "$SESSION:unrelagent" 2>/dev/null || true
+
+DECOY_AGENT="$LAB/agent/versions/current/agent"
+"$REAL_TMUX" -L "$SOCKET" new-window -t "$SESSION" -n decoyagent bash -c "exec -a '$DECOY_AGENT' '$DECOY_AGENT' 30"
+sleep 1
+if [ "$(fm_backend_agent_state tmux "$SESSION:decoyagent" 2>/dev/null)" = alive ]; then
+  fail "an install tree merely named agent/ must not classify as a live agent pane"
+fi
+"$REAL_TMUX" -L "$SOCKET" kill-window -t "$SESSION:decoyagent" 2>/dev/null || true
+pass "tmux liveness: unrelated agent executables and agent/ directory components are not Cursor"
+
+# --- cursor-agent: negative case (~/.cursor path should not match) ------------
+
+ln -sf "$SLEEP_BIN" "$LAB/bin/notcursor"
+"$REAL_TMUX" -L "$SOCKET" new-window -t "$SESSION" -n cursorneg bash -c "exec -a notcursor '$LAB/bin/notcursor' 30"
+if [ "$(fm_backend_agent_state tmux "$SESSION:cursorneg" 2>/dev/null)" = alive ]; then
+  fail "a non-cursor process must not classify alive (over-broad matching hazard)"
+fi
+"$REAL_TMUX" -L "$SOCKET" kill-window -t "$SESSION:cursorneg" 2>/dev/null || true
+pass "tmux liveness: a non-cursor process does not classify alive"
 
 cleanup_all
 trap - EXIT

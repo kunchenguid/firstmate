@@ -22,6 +22,9 @@ function runProcess(command, args, input = "") {
     });
     child.on("error", () => resolve({ code: 0, stdout: "", stderr: "" }));
     child.on("close", (code) => resolve({ code: code ?? 0, stdout, stderr }));
+    // A fast-exiting child can close its stdin pipe before the payload write
+    // lands; an unhandled 'error' would crash the whole plugin process.
+    child.stdin.on("error", () => {});
     child.stdin.end(input);
   });
 }
@@ -51,7 +54,7 @@ async function letWatchArmRun(sessionID, client) {
   const coordinator = globalThis[COORDINATOR_KEY];
   if (!coordinator?.ensureArmed) return false;
   const status = await coordinator.ensureArmed(sessionID, client);
-  return status === "armed" || status === "wake" || status === "failed";
+  return status === "armed" || status === "wake";
 }
 
 export const FmPrimaryTurnendGuard = async ({ client, directory, worktree }) => {

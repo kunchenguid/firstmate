@@ -78,14 +78,11 @@ build_remote_root() {
   git -C "$root" commit -qm 'remote job fixture'
 }
 
-pid_is_numeric() {
-  case "$1" in ''|*[!0-9]*) return 1 ;; esac
-}
-
 # start_worker <remote-root> <account-home> <state-root>: start the worker
 # through the shared library start path and echo the supervisor pid.
+# shellcheck disable=SC2030,SC2031 # These exports intentionally stay inside command substitutions.
 start_worker() {
-  local root=$1 account_home=$2 state_root=$3 pid deadline
+  local root=$1 account_home=$2 state_root=$3 pid
   pid=$(
     export FM_REMOTE_JOB_STATE_ROOT="$state_root"
     export FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux
@@ -93,16 +90,7 @@ start_worker() {
     # shellcheck source=bin/fm-remote-job-lib.sh
     . "$ROOT/bin/fm-remote-job-lib.sh"
     fm_remote_job_start_linux_worker "$root" "$account_home" >&2 || exit 1
-    deadline=$(( $(date +%s) + 10 ))
-    while [ "$(date +%s)" -lt "$deadline" ]; do
-      pid=$(pgrep -f "^/bin/bash $root/bin/fm-remote-job-worker.sh\$" | head -n 1)
-      if pid_is_numeric "$pid"; then
-        printf '%s\n' "$pid"
-        exit 0
-      fi
-      sleep 0.1
-    done
-    exit 1
+    pgrep -f "^/bin/bash $root/bin/fm-remote-job-worker.sh\$" | head -n 1
   ) || return 1
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
   printf '%s\n' "$pid"
@@ -123,18 +111,60 @@ SERVE=$(pgrep -P "$WORKER" | head -n 1)
   fail "the serving child is outside the worker's process group"
 pass "the Linux start path puts the whole worker tree in its own process group"
 
+CASE_TERM="$TMP_ROOT/case-term"
+mkdir -p "$CASE_TERM/account"
+build_remote_root "$CASE_TERM/remote-root"
+TERM_JOB_START="$CASE_TERM/job-started"
+cat > "$CASE_TERM/remote-root/bin/fm-sleep-job.sh" <<'SH'
+#!/bin/bash
+printf 'started\n' > "$1"
+sleep 30
+SH
+chmod +x "$CASE_TERM/remote-root/bin/fm-sleep-job.sh"
+git -C "$CASE_TERM/remote-root" add bin/fm-sleep-job.sh
+git -C "$CASE_TERM/remote-root" commit -qm 'add active job fixture'
+TERM_WORKER=$(start_worker "$CASE_TERM/remote-root" "$CASE_TERM/account" "$CASE_TERM/remote-jobs") ||
+  fail "could not start the TERM teardown fixture worker"
+track "$TERM_WORKER"
+wait_child "$TERM_WORKER" 10 || fail "the TERM teardown fixture never started its serving child"
+TERM_SERVE=$(pgrep -P "$TERM_WORKER" | head -n 1)
+# shellcheck disable=SC2030,SC2031 # These exports intentionally stay inside this command substitution.
+TERM_JOB_ID=$(
+  export FM_REMOTE_JOB_STATE_ROOT="$CASE_TERM/remote-jobs"
+  export FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux
+  export FM_REMOTE_JOB_TIMEOUT=30
+  # shellcheck source=bin/fm-remote-job-lib.sh
+  . "$ROOT/bin/fm-remote-job-lib.sh"
+  fm_remote_job_stage "$CASE_TERM/account" "$CASE_TERM/remote-root" "$CASE_TERM/account" \
+    fm-sleep-job.sh "$TERM_JOB_START" </dev/null
+)
+TERM_JOB_DIR="$CASE_TERM/remote-jobs/jobs/$TERM_JOB_ID"
+for _ in $(seq 1 100); do
+  [ -f "$TERM_JOB_START" ] && [ -f "$TERM_JOB_DIR/.claim/group" ] && break
+  sleep 0.05
+done
+[ -f "$TERM_JOB_START" ] && [ -f "$TERM_JOB_DIR/.claim/group" ] ||
+  fail "the TERM teardown fixture job never started"
+TERM_GROUP_PID=$(cat "$TERM_JOB_DIR/.claim/group")
+rm -rf "$CASE_TERM/remote-jobs"
+kill -TERM "$TERM_SERVE" 2>/dev/null || true
+wait_gone "$TERM_SERVE" 10 || fail "the serving child ignored TERM after state-root teardown"
+wait_gone "$TERM_GROUP_PID" 10 || fail "the active job survived TERM after state-root teardown"
+wait_gone "$TERM_WORKER" 10 || fail "the supervisor survived a clean TERM after state-root teardown"
+pass "TERM after state-root removal exits the serving worker cleanly"
+
 [ "$(ppid_of "$WORKER")" = 1 ] ||
   fail "the fixture worker is not orphaned to init, so this case does not reproduce the leak"
 
-# The exact teardown shape that leaked in production: a fixture cleanup removes
-# the worker's state root and then stops only the single recorded worker pid -
-# which is the serving child, not the supervisor. KILL makes that obsolete
-# teardown reproduction independent of the graceful handler's missing-state
-# refusal. The supervisor respawns, so the tree survives a teardown that looks
-# complete.
+# The teardown shape that leaked in production: a fixture cleanup removes the
+# worker's state root and then stops only the recorded worker pid - the serving
+# child, not the supervisor. Use KILL rather than TERM: a graceful TERM after the
+# state root is gone exits 0 and the supervisor treats that as intentional stop,
+# which no longer reproduces the leak. An abrupt child death is what made the
+# supervisor respawn while the tree stayed at ppid 1.
 rm -rf "$CASE1/remote-jobs"
 kill -KILL "$SERVE" 2>/dev/null || true
-wait_gone "$SERVE" 10 || fail "the recorded serving child did not stop"
+wait_gone "$SERVE" 10 || fail "the serving child ignored KILL"
 alive "$WORKER" || fail "the fixture supervisor did not survive a lone child kill, so this case no longer covers the leak"
 wait_child "$WORKER" 15 || fail "the supervisor did not respawn after its recorded child pid was killed"
 pass "removing the state root and killing the recorded worker pid leaves the tree running at ppid 1"

@@ -72,9 +72,11 @@
 # what a pane shows once its agent has exited to a plain login shell - is a
 # genuine empty agent composer ONLY inside a bordered container. On a bare row
 # it is a dead-shell prompt and classifies `unknown` (never a safe injection
-# target). The AGENT glyphs `❯` (claude), `›` (codex), `⟩` (U+27E9, muse),
-# and `→` (U+2192, cursor) are a genuine empty agent composer either way.
-# Both glyph sets are declared
+# target). The AGENT glyphs `❯` (claude), `›` (codex), and `⟩` (U+27E9, muse)
+# are a genuine empty agent composer either way. Cursor's `→` is scoped
+# differently: bare `→` is safe as empty only with Cursor harness identity;
+# bordered `→` may classify empty via structural composer proof; unscoped bare
+# `→` is `unknown`. Both glyph sets are declared
 # exactly once below; every decision reaches them through the declarations.
 #
 # GHOST/PLACEHOLDER TEXT (task afk-herdr-false-pending): a harness fills an
@@ -104,6 +106,19 @@
 #
 # Re-sourcing is a cheap idempotent redefinition, so this file needs no
 # include guard (matching bin/fm-tmux-lib.sh).
+
+# --- per-harness constants: one place for harness-specific facts -------------
+# Cursor facts consumed by the composer classifier (here), the herdr scanner,
+# and the tmux submit path. Keep them together so a new harness adapter or a
+# Cursor rendering change updates exactly one definition.
+# Cursor's prompt glyph (bare → is the agent composer, but unscoped it is a
+# common decoration; bounded by fm_composer_cursor_arrow_ok below).
+# shellcheck disable=SC2034
+FM_COMPOSER_CURSOR_PROMPT_GLYPH='→'
+# Cursor's fully de-emphasised idle placeholder: after ghost stripping, only
+# this regex match proves the composer is agent-empty for Cursor.
+FM_COMPOSER_CURSOR_IDLE_RE_DEFAULT='^Add a follow-up$'
+# --- end per-harness constants -----------------------------------------------
 
 # fm_composer_strip_ansi: drop every CSI escape sequence, leaving plain text.
 # Used for STRUCTURAL row/shape detection, where ghost text must be KEPT so the
@@ -198,6 +213,11 @@ fm_composer_normalize_trim_var() {  # <varname>
 # codes are processed left to right within a sequence, so "ESC[0;2m" reads as dim.
 # LC_ALL=C makes awk walk bytes, so multibyte glyphs (e.g. ❯) and de-emphasised
 # runs alike pass through or drop intact without locale-dependent classes.
+# Cursor's reverse-video cursor-cell gap is NOT this function's concern: it is a
+# Cursor renderer artefact normalized away first by fm_cursor_composer_normalize
+# (bin/fm-cursor-lib.sh), which the Cursor-harness callers route raw rows through
+# before this generic classifier (fm_tmux_composer_row_state and
+# fm_backend_herdr_composer_state branch on FM_COMPOSER_HARNESS=cursor).
 fm_composer_strip_ghost() {
   LC_ALL=C awk -v lumamax="${FM_COMPOSER_GHOST_LUMA_MAX:-128}" '
     function sgr_code(v, b) {
@@ -478,33 +498,70 @@ fm_composer_idle_matches() {
 #              emptied an unbordered row: muse's `⟩` sits at luminance ~150,
 #              close enough to the ghost threshold that a raised threshold
 #              strips it, and the plain row is what keeps that pane readable.
+#   [harness]  optional harness identity (defaults to FM_COMPOSER_HARNESS).
+#              Cursor's bare `→` is a genuine empty composer only under Cursor
+#              identity or inside a bordered container
+#              (fm_composer_cursor_arrow_ok); an unscoped bare arrow is never a
+#              safe injection target.
 # Content and plain_content are normalized and re-trimmed on entry, so the
 # verdict never depends on which whitespace alphabet the calling adapter
 # trimmed with.
-fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [plain_content] [placeholder-position] [styled]
+fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [plain_content] [placeholder-position] [styled] [harness]
   local bordered=$1 idle_re=${3:-} idle_case=${4:-sensitive} content plain_content glyph=''
   local placeholder_position=${6:-0} styled=${7:-1} idle_collision=0
+  local harness=${8:-${FM_COMPOSER_HARNESS:-}} arrow_leading=0 cursor_idle_evidence=1 remainder
   content=$2
   fm_composer_normalize_trim_var content
   plain_content=${5:-$2}
   fm_composer_normalize_trim_var plain_content
+  case "$plain_content" in '→'*) arrow_leading=1 ;; esac
+  if [ "$arrow_leading" -eq 1 ] && [ "$content" = "$plain_content" ]; then
+    cursor_idle_evidence=0
+  fi
   if [ "$bordered" != 1 ] && [ -z "$content" ] && [ -n "$plain_content" ]; then
     if _fm_composer_is_prompt_glyph "$plain_content" "$FM_COMPOSER_AGENT_PROMPT_GLYPHS"; then
       printf 'empty'; return 0
     fi
+    # Cursor's `→` idle row is rendered fully de-emphasised, so ghost stripping
+    # emptied it here. A bare `→` reads empty only under Cursor identity; a
+    # `→ <idle placeholder>` reads empty only when the stripped remainder
+    # matches the idle regex under Cursor-context (or bordered) proof. Any
+    # other fully de-emphasised bare row stays unknown: never a safe injection
+    # target.
+    case "$plain_content" in
+      '→'|'→ '*)
+        remainder=${plain_content#'→'}
+        remainder="${remainder#"${remainder%%[![:space:]]*}"}"
+        if [ -z "$remainder" ]; then
+          if fm_composer_cursor_arrow_ok "$bordered" "$harness"; then printf 'empty'; else printf 'unknown'; fi
+          return 0
+        fi
+        ;;
+    esac
+    plain_content=$(fm_composer_strip_prompt_glyph "$plain_content")
+    if { [ "$arrow_leading" -eq 0 ] || fm_composer_cursor_idle_ok "$bordered" "$harness" "$cursor_idle_evidence"; } \
+      && fm_composer_idle_matches "$plain_content" "$idle_re" "$idle_case"; then
+      printf 'empty'; return 0
+    fi
     printf 'unknown'; return 0
   fi
-  if _fm_composer_is_prompt_glyph "$content" "$FM_COMPOSER_AGENT_PROMPT_GLYPHS"; then
-    printf 'empty'; return 0
-  fi
-  if _fm_composer_is_prompt_glyph "$content" "$FM_COMPOSER_SHELL_PROMPT_GLYPHS"; then
-    if [ "$bordered" = 1 ]; then printf 'empty'; else printf 'unknown'; fi
-    return 0
-  fi
+  # A bare prompt glyph on its own row.
+  case "$content" in
+    '→')
+      if fm_composer_cursor_arrow_ok "$bordered" "$harness"; then printf 'empty'; else printf 'unknown'; fi
+      return 0 ;;
+    '❯'|'›'|'⟩') printf 'empty'; return 0 ;;
+    '>'|'$'|'%'|'#')
+      if [ "$bordered" = 1 ]; then printf 'empty'; else printf 'unknown'; fi
+      return 0 ;;
+  esac
   [ -n "$content" ] || { printf 'empty'; return 0; }
   fm_composer_idle_matches "$content" "$idle_re" "$idle_case" && idle_collision=1
+  # Strip ONE leading prompt glyph (Cursor's `→` included), then re-judge.
   if fm_composer_leading_prompt_glyph_var glyph "$content"; then
     content=${content#*"$glyph"}
+  elif [ "$arrow_leading" -eq 1 ]; then
+    content=${content#'→'}
   fi
   fm_composer_normalize_trim_var content
   [ -n "$content" ] || { printf 'empty'; return 0; }
@@ -538,6 +595,9 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
     fi
   fi
   if [ "$idle_collision" = 1 ]; then
+    if [ "$arrow_leading" -eq 1 ] && ! fm_composer_cursor_arrow_ok "$bordered" "$harness"; then
+      printf 'unknown'; return 0
+    fi
     if [ "$placeholder_position" = 1 ] && [ "$bordered" = 1 ] && [ "$styled" != 1 ]; then
       printf 'empty'; return 0
     fi
@@ -668,6 +728,19 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
       FM_COMPOSER_SCAN_SHELL_ROW=$row
     elif fm_composer_leading_agent_glyph_var glyph "$trimmed"; then
       FM_COMPOSER_SCAN_BARE_ROW=$row
+    elif [ "${FM_COMPOSER_HARNESS:-}" = cursor ] && [ "$trimmed" = '→' ]; then
+      # Cursor's bare `→` is a composer candidate only under Cursor identity;
+      # the verdict keeps an unscoped arrow unknown (fm_composer_cursor_arrow_ok).
+      FM_COMPOSER_SCAN_BARE_ROW=$row
+    elif [ "${FM_COMPOSER_HARNESS:-}" = cursor ]; then
+      case "$trimmed" in
+        '→'*)
+          # Under Cursor identity the `→` row (bare arrow or arrow plus idle
+          # placeholder) is a composer candidate; the verdict still scopes the
+          # arrow via fm_composer_cursor_arrow_ok.
+          FM_COMPOSER_SCAN_BARE_ROW=$row
+          ;;
+      esac
     fi
     # Cursor safety: a cursor sitting on a structural edge row is never an
     # input row.
@@ -863,9 +936,21 @@ _fm_composer_screen_row() {  # <n> <screen>
 # ghost-strip when styled, plain otherwise, normalize-trim, and strip one
 # matching pair of side border glyphs.
 _fm_composer_row_content() {  # <raw-row> <styled> -> content on stdout
-  local raw=$1 styled=$2 stripped
+  local raw=$1 styled=$2 stripped cursor_lib_dir
   if [ "$styled" = 1 ]; then
-    stripped=$(printf '%s\n' "$raw" | fm_composer_strip_ghost)
+    if [ "${FM_COMPOSER_HARNESS:-}" = cursor ]; then
+      if ! declare -F fm_cursor_composer_strip >/dev/null 2>&1; then
+        cursor_lib_dir=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P) || return 1
+        . "$cursor_lib_dir/fm-cursor-lib.sh"
+      fi
+      # Cursor renders its cursor cell in reverse video between de-emphasised
+      # runs; normalize that renderer artefact away before the generic strip
+      # (bin/fm-cursor-lib.sh owns the gap mechanics; fm_cursor_composer_strip
+      # is available because every Cursor-harness caller sources cursor-lib).
+      stripped=$(printf '%s\n' "$raw" | fm_cursor_composer_strip)
+    else
+      stripped=$(printf '%s\n' "$raw" | fm_composer_strip_ghost)
+    fi
   else
     stripped=$(printf '%s\n' "$raw" | fm_composer_strip_ansi)
   fi
@@ -893,7 +978,8 @@ _fm_composer_classify_rows() {  # <screen> <styled> <ambiguous> <first-row> <las
     content=$(_fm_composer_row_content "$raw" "$styled")
     plain=$(_fm_composer_row_content "$raw" 0)
     state=$(fm_composer_classify_content 1 "$content" \
-      "${FM_COMPOSER_IDLE_RE:-$FM_COMPOSER_IDLE_RE_DEFAULT}" insensitive "$plain" 1 "$styled")
+      "${FM_COMPOSER_IDLE_RE:-$FM_COMPOSER_IDLE_RE_DEFAULT}" insensitive "$plain" 1 "$styled" \
+      "${FM_COMPOSER_HARNESS:-}")
     case "$state" in
       pending)
         if [ "$ambiguous" = 1 ]; then printf 'pending-unproven'; else printf 'pending'; fi
@@ -920,7 +1006,8 @@ _fm_composer_classify_bare_row() {  # <screen> <styled> <row>
   content=$(_fm_composer_row_content "$raw" "$styled")
   plain=$(_fm_composer_row_content "$raw" 0)
   state=$(fm_composer_classify_content 0 "$content" \
-    "${FM_COMPOSER_IDLE_RE:-$FM_COMPOSER_IDLE_RE_DEFAULT}" insensitive "$plain" 0 "$styled")
+    "${FM_COMPOSER_IDLE_RE:-$FM_COMPOSER_IDLE_RE_DEFAULT}" insensitive "$plain" 0 "$styled" \
+    "${FM_COMPOSER_HARNESS:-}")
   if [ "$styled" != 1 ] && [ "$state" = pending ]; then
     printf 'unknown'
     return 0
@@ -961,6 +1048,10 @@ _fm_composer_classify_bare_wrap() {  # <screen> <styled> <glyph-row> <cursor-row
     content=$(_fm_composer_row_content "$raw" "$styled")
     if [ "$row" -eq "$g" ] && fm_composer_leading_agent_glyph_var glyph "$content"; then
       content=${content#*"$glyph"}
+    elif [ "$row" -eq "$g" ] && [ "${FM_COMPOSER_HARNESS:-}" = cursor ]; then
+      case "$content" in
+        '→'*) content=${content#'→'} ;;
+      esac
     fi
     fm_composer_normalize_trim_var content
     [ -z "$content" ] || text_seen=1
@@ -1077,6 +1168,12 @@ _fm_composer_select_cursorless() {
       fm_composer_normalize_trim_var trimmed
       [ -n "$trimmed" ] || break
       fm_composer_row_has_edge "$trimmed" && break
+      # A `→`-leading row is Cursor's own prompt/composer line; without Cursor
+      # harness context it is transcript, never a wrap continuation of the
+      # composer above (the fork-verified non-Cursor shadow rule).
+      if [ "${FM_COMPOSER_HARNESS:-}" != cursor ]; then
+        case "$trimmed" in '→'*) break ;; esac
+      fi
       FM_COMPOSER_SELECTED_LAST=$next
       next=$((next + 1))
     done
@@ -1129,6 +1226,11 @@ EOF
         if [ "$row" -eq "$FM_COMPOSER_SELECTED_FIRST" ] \
            && fm_composer_leading_agent_glyph_var glyph "$content"; then
           content=${content#*"$glyph"}
+        elif [ "$row" -eq "$FM_COMPOSER_SELECTED_FIRST" ] \
+           && [ "${FM_COMPOSER_HARNESS:-}" = cursor ]; then
+          case "$content" in
+            '→'*) content=${content#'→'} ;;
+          esac
         fi
         ;;
       leftbar)
@@ -1390,4 +1492,81 @@ _fm_composer_pi_verdict() {  # <screen> <styled> <has_identity> <identity>
     idle|done|blocked) printf 'empty' ;;
     *) printf 'unknown' ;;
   esac
+}
+
+# fm_composer_cursor_arrow_ok: the single owner of when a leading `→` may read
+# as an agent composer at all. `→` is Cursor's own prompt glyph, but unlike the
+# other agent glyphs it is a common bare decoration, so an unscoped bare arrow
+# is never a safe injection target. Two things scope it: a bordered container
+# proves the composer structurally, and a cursor harness identity proves the
+# glyph is Cursor's. Every arrow verdict in the classifier routes through here.
+fm_composer_cursor_arrow_ok() {  # <bordered> <harness>
+  [ "$1" = 1 ] || [ "$2" = cursor ]
+}
+
+fm_composer_cursor_idle_ok() {  # <bordered> <harness> <ghost-evidence>
+  [ "$3" = 1 ] && fm_composer_cursor_arrow_ok "$1" "$2"
+}
+
+# fm_composer_strip_prompt_glyph: strip ONE leading prompt glyph plus the
+# whitespace after it, then re-emit the row for a second idle-placeholder
+# match. The four agent glyphs are always stripped; pass `all` to also strip
+# the shell prompt glyphs, which is correct only where the caller has already
+# decided a shell glyph could be the harness's own prompt.
+#
+# Literal prefixes rather than `?` wildcards: the agent glyphs are multibyte,
+# and a character-count strip is only correct in a UTF-8 locale.
+fm_composer_strip_prompt_glyph() {  # <content> [all]
+  local content=$1 stripped=
+  case "$content" in
+    '→'*) content=${content#'→'}; stripped=1 ;;
+    '❯'*) content=${content#'❯'}; stripped=1 ;;
+    '›'*) content=${content#'›'}; stripped=1 ;;
+    '⟩'*) content=${content#'⟩'}; stripped=1 ;;
+  esac
+  if [ -z "$stripped" ] && [ "${2:-}" = all ]; then
+    case "$content" in
+      '>'*|'$'*|'%'*|'#'*) content=${content#?} ;;
+    esac
+  fi
+  printf '%s' "${content#"${content%%[![:space:]]*}"}"
+}
+
+# fm_composer_export_env: set and export the composer-classification env
+# contract for one harness, so every caller that drives the shared classifier
+# through a subprocess (bin/fm-send.sh, bin/fm-supervise-daemon.sh) agrees on
+# the per-harness defaults. cursor-agent renders its bare `→` prompt glyph AND
+# its "Add a follow-up" idle placeholder fully de-emphasised, so after ghost
+# stripping only FM_COMPOSER_IDLE_RE can prove that composer empty. An idle
+# regex the caller already supplied always wins; other harnesses keep their
+# verified bare/bordered glyph routes and leave the override unset.
+fm_composer_export_env() {  # <harness>
+  local harness=$1
+  if [ -z "${FM_COMPOSER_IDLE_RE:-}" ] && [ "$harness" = cursor ]; then
+    FM_COMPOSER_IDLE_RE=$FM_COMPOSER_CURSOR_IDLE_RE_DEFAULT
+  fi
+  FM_COMPOSER_HARNESS=$harness
+  export FM_COMPOSER_HARNESS FM_COMPOSER_IDLE_RE
+}
+
+# fm_composer_queued_submit_verdict: the ONE owner of the exhausted-retry rule
+# for a submit loop that ran out of retries with the composer still proven
+# pending. Only opencode and cursor have verified Enter-while-busy queuing
+# (opencode 1.18.4, cursor-agent 2026.07.23-e383d2b): on those harnesses an
+# affirmatively busy pane means the harness accepted the Enter and queued the
+# message for the end of the current turn, so the send counts as delivered.
+# Every other harness - and a busy probe that cannot affirm busy - keeps
+# pending, so a genuine swallow on an idle pane stays a loud failure.
+#
+# The busy probe stays backend-specific and is passed as a command that returns
+# 0 for busy. It is only run for a queueing harness, so no other harness pays
+# for a probe whose answer cannot change the verdict.
+fm_composer_queued_submit_verdict() {  # <harness> <busy-probe-cmd> [args...] -> empty|pending
+  local harness=$1
+  shift
+  case "$harness" in
+    opencode|cursor) ;;
+    *) printf 'pending'; return 0 ;;
+  esac
+  if "$@"; then printf 'empty'; else printf 'pending'; fi
 }

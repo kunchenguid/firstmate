@@ -12,18 +12,18 @@
 # Styled captures remain internal; fm-peek and every human-facing capture stay
 # plain.
 #
-# OpenCode's busy-queued Enter conversion accepts only structurally proven
-# pending text after retries, while the separate turn-started conversion accepts
-# an unknown post-Enter composer only after this submit observed an idle baseline
-# become busy.
+# OpenCode's and Cursor's busy-queued Enter conversion accepts only
+# structurally proven pending text after retries (the two harnesses with
+# verified Enter-while-busy queuing), while the separate turn-started
+# conversion accepts an unknown post-Enter composer only after this submit
+# observed an idle baseline become busy.
 # Herdr's OpenCode busy-queue limitation remains documented in
 # docs/herdr-backend.md.
 #
 # FM_COMPOSER_IDLE_RE is interpreted by the shared classifier with its structural
 # and styling safety gates.
 # FM_BUSY_REGEX overrides the rendered delivery-busy matching used here.
-#
-# NOT a task-state source: task busy state is owned by bin/fm-busy-lib.sh's
+# task busy state is owned by bin/fm-busy-lib.sh's
 # semantic contract. The matching below serves only delivery guards: the submit
 # acknowledgement and the away-mode supervisor-pane busy guard. Both ask about
 # the pane receiving input, not the state of a recorded worker task. Matching
@@ -43,6 +43,9 @@
 
 # shellcheck source=bin/fm-composer-lib.sh
 . "$(dirname -- "${BASH_SOURCE[0]}")/fm-composer-lib.sh"
+# Cursor composer raw-render normalization (reverse-video cursor-cell gap) is
+# owned by bin/fm-cursor-lib.sh; the cursor-harness branch below routes raw rows
+# through it before the shared generic stripper.
 # shellcheck source=bin/fm-cursor-lib.sh
 . "$(dirname -- "${BASH_SOURCE[0]}")/fm-cursor-lib.sh"
 
@@ -211,7 +214,34 @@ fm_pane_busy_state() {  # <target> [harness] -> busy|idle|unknown
 }
 
 fm_pane_is_busy() {  # <target> [harness]
-  [ "$(fm_pane_busy_state "$1" "${2:-}")" = busy ]
+  local win=$1 harness=${2:-} tail40 lines last previous
+  if [ "$harness" = cursor ]; then
+    # Cursor's busy footer (`ctrl+c to stop`) is only affirmatively read when
+    # the pane shows the Cursor composer shape: the `→ Add a follow-up` idle
+    # row carrying the footer, or the composer line directly below a box
+    # bottom border. Anything else refuses to classify Cursor busy, so a
+    # stray footer elsewhere in the tail cannot confirm a queued Enter.
+    tail40=$(tmux capture-pane -p -t "$win" -S -40 2>/dev/null) || return 1
+    lines=$(printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -12)
+    [ -n "$lines" ] || return 1
+    last=$(printf '%s\n' "$lines" | tail -1)
+    if printf '%s' "$last" \
+       | grep -qE '^[[:space:]]*→[[:space:]]+Add a follow-up[[:space:]][[:space:]]+'; then
+      printf '%s' "$last" | fm_busy_lines_match "$harness"
+      return $?
+    fi
+    previous=$(printf '%s\n' "$lines" | tail -2 | head -1)
+    previous="${previous#"${previous%%[![:space:]]*}"}"
+    previous="${previous%"${previous##*[![:space:]]}"}"
+    case "$previous" in
+      '╰'*'╯'|'└'*'┘'|'╚'*'╝'|'┗'*'┛'|'+'*'+')
+        printf '%s' "$last" | fm_busy_lines_match "$harness"
+        return $?
+        ;;
+    esac
+    return 1
+  fi
+  [ "$(fm_pane_busy_state "$win" "$harness")" = busy ]
 }
 
 # fm_tmux_submit_core: type <text> into <target> ONCE, then submit with Enter,
@@ -219,11 +249,12 @@ fm_pane_is_busy() {  # <target> [harness]
 # swallowed Enter leaves our text in the composer and retyping would duplicate
 # it. Echoes the final proof-carrying verdict on stdout so callers can require
 # exact `empty` before treating submission as confirmed.
-# Busy-queued Enter (opencode 1.18.4): the harness accepts Enter while mid-turn
-# and queues it for after the current turn, but keeps the typed text visible in
-# the composer. Once the Enter-retry budget is spent and a structurally proven
-# composer still reads "pending", the submit core falls back to
-# `fm_pane_is_busy`: a busy pane means the Enter was accepted and queued (report
+# Busy-queued Enter (opencode 1.18.4 and cursor-agent): the harness accepts Enter
+# while mid-turn and queues it for after the current turn, but keeps the typed
+# text visible in the composer. Once the Enter-retry budget is spent and a
+# structurally proven composer still reads "pending", the submit core falls back to
+# `fm_pane_is_busy` (with the target harness's verified footer signature when the
+# caller supplies one): a busy pane means the Enter was accepted and queued (report
 # `empty` so the caller does not re-send), while an idle pane keeps `pending` as
 # a genuine swallow. Pending-unproven receives the same Enter retry budget but
 # never reaches this exception.
@@ -239,8 +270,8 @@ fm_pane_is_busy() {  # <target> [harness]
 # fm_tmux_submit_enter_core caller, or a pane already busy before typing) an
 # `unknown` verdict is preserved untouched: busy conversion without the
 # transition evidence could mark an undelivered message delivered.
-fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [baseline-idle]
-  local target=$1 retries=$2 sleep_s=$3 baseline_idle=${4:-} i=0 j state
+fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [baseline-idle] [harness]
+  local target=$1 retries=$2 sleep_s=$3 baseline_idle=${4:-} harness=${5:-} i=0 j state
   while :; do
     tmux send-keys -t "$target" Enter 2>/dev/null || true
     sleep "$sleep_s"
@@ -251,7 +282,7 @@ fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [baseline-idle
         if [ "$baseline_idle" = 1 ]; then
           j=0
           while [ "$j" -lt "$retries" ]; do
-            if fm_pane_is_busy "$target"; then
+            if fm_pane_is_busy "$target" "$harness"; then
               printf 'empty'
               return 0
             fi
@@ -271,26 +302,21 @@ fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [baseline-idle
     printf '%s' "$state"
     return 0
   fi
-  # Retries exhausted, composer still shows proven pending.
-  # If the pane is busy (agent mid-turn), the harness accepted the Enter
-  # and queued the message for processing when the current turn ends.
-  # Treat it as submitted so the caller does not re-send.
-  # On an idle pane, keep reporting pending - a genuine swallow.
-  if fm_pane_is_busy "$target"; then
-    printf 'empty'
-  else
-    printf 'pending'
-  fi
+  # Retries exhausted, composer still shows proven pending. The queueing-harness
+  # rule is owned by fm_composer_queued_submit_verdict (bin/fm-composer-lib.sh);
+  # only opencode and cursor have verified Enter-while-busy queuing; tmux
+  # supplies its own busy probe.
+  fm_composer_queued_submit_verdict "$harness" fm_pane_is_busy "$target" "$harness"
 }
 
-fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle>
-  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 baseline_idle='' baseline_state
+fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle> [harness]
+  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 harness=${6:-} baseline_idle='' baseline_state
   # The turn-started baseline must predate our own typing: a pane already
   # busy before the text lands can turn "busy" for reasons unrelated to our
   # Enter, so only a clean idle-to-busy transition may confirm a submit.
-  baseline_state=$(fm_pane_busy_state "$target")
+  baseline_state=$(fm_pane_busy_state "$target" "$harness")
   [ "$baseline_state" = idle ] && baseline_idle=1
   tmux send-keys -t "$target" -l "$text" 2>/dev/null || { printf 'send-failed'; return 0; }
   sleep "$settle"
-  fm_tmux_submit_enter_core "$target" "$retries" "$sleep_s" "$baseline_idle"
+  fm_tmux_submit_enter_core "$target" "$retries" "$sleep_s" "$baseline_idle" "$harness"
 }

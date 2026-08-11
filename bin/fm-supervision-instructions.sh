@@ -137,6 +137,9 @@ repair_line() {
     claude)
       printf '%s%s\n' "$prefix" 'watcher supervision needs Stop-owned automatic recovery; inspect the hook registration and startup status before ending the turn.'
       ;;
+    cursor)
+      printf '%s%s\n' "$prefix" 'watcher supervision needs stop-hook-owned automatic recovery; inspect the .cursor/hooks.json registration (the version key is load-bearing) and startup status before ending the turn.'
+      ;;
     codex)
       printf '%s%s%s%s\n' "$prefix" 'repair missing watcher supervision with a foreground checkpoint: bin/fm-watch-checkpoint.sh --seconds ' "$checkpoint_seconds" '.'
       ;;
@@ -162,6 +165,9 @@ ordinary_wake_line() {
   case "$HARNESS" in
     claude)
       printf '%s\n' '- Ordinary wake: the Stop-owned auto-arm (bin/fm-claude-stop-autoarm.sh) already owns watcher continuity; drain and handle the wake, and do not arm another cycle yourself.'
+      ;;
+    cursor)
+      printf '%s\n' '- Ordinary wake: the stop hook (bin/fm-turnend-guard-cursor.sh) already owns watcher continuity; drain and handle the wake, and do not arm another cycle yourself.'
       ;;
     codex)
       printf '%s\n' '- Ordinary wake: take the next foreground bin/fm-watch-checkpoint.sh checkpoint as directed below.'

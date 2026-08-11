@@ -109,6 +109,7 @@ install_guard_scripts() {
   mkdir -p "$dir/bin"
   cp "$ROOT/bin/fm-turnend-guard.sh" "$dir/bin/fm-turnend-guard.sh"
   cp "$ROOT/bin/fm-turnend-guard-grok.sh" "$dir/bin/fm-turnend-guard-grok.sh"
+  cp "$ROOT/bin/fm-turnend-guard-cursor.sh" "$dir/bin/fm-turnend-guard-cursor.sh"
   cp "$ROOT/bin/fm-operational-input.sh" "$dir/bin/fm-operational-input.sh"
   cp "$ROOT/bin/fm-supervision-instructions.sh" "$dir/bin/fm-supervision-instructions.sh"
   cp "$ROOT/bin/fm-harness.sh" "$dir/bin/fm-harness.sh"
@@ -116,9 +117,12 @@ install_guard_scripts() {
   cp "$ROOT/bin/fm-supervision-lib.sh" "$dir/bin/fm-supervision-lib.sh"
   cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/fm-wake-lib.sh"
   cp "$ROOT/bin/fm-hook-host-lib.sh" "$dir/bin/fm-hook-host-lib.sh"
+  cp "$ROOT/bin/fm-composer-lib.sh" "$dir/bin/fm-composer-lib.sh"
+  cp "$ROOT/bin/fm-cursor-lib.sh" "$dir/bin/fm-cursor-lib.sh"
+  cp "$ROOT/bin/fm-process-identity-lib.sh" "$dir/bin/fm-process-identity-lib.sh"
   mkdir -p "$dir/docs"
   cp -R "$ROOT/docs/supervision-protocols" "$dir/docs/supervision-protocols"
-  chmod +x "$dir/bin/fm-turnend-guard.sh" "$dir/bin/fm-turnend-guard-grok.sh" "$dir/bin/fm-operational-input.sh" "$dir/bin/fm-supervision-instructions.sh" "$dir/bin/fm-harness.sh"
+  chmod +x "$dir/bin/fm-turnend-guard.sh" "$dir/bin/fm-turnend-guard-grok.sh" "$dir/bin/fm-turnend-guard-cursor.sh" "$dir/bin/fm-operational-input.sh" "$dir/bin/fm-supervision-instructions.sh" "$dir/bin/fm-harness.sh"
 }
 
 mark_codex_hook_root() {
@@ -192,7 +196,7 @@ make_secondmate_linked_home_dir() {
 run_hook() {
   local dir=$1 stop_active=$2 home
   home=$(cd "$dir" && pwd)
-  printf '{"stop_hook_active":%s}' "$stop_active" | CLAUDECODE=1 FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" 2>&1
+  printf '{"stop_hook_active":%s}' "$stop_active" | env -u CURSOR_AGENT CLAUDECODE=1 FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" 2>&1
 }
 
 nonexistent_pid() {
@@ -369,7 +373,7 @@ test_hook_blocks_from_fm_home_state() {
   home="$TMP_ROOT/hook-fm-home-op"
   mkdir -p "$home/state"
   : > "$home/state/task1.meta"
-  out=$(printf '{"stop_hook_active":false}' | CLAUDECODE=1 FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
+  out=$(printf '{"stop_hook_active":false}' | env -u CURSOR_AGENT CLAUDECODE=1 FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
   expect_code 2 "$status" "hook must inspect the active FM_HOME state dir"
   assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
   pass "fm-turnend-guard: blocks from active FM_HOME state, not only repo-root state"
@@ -417,7 +421,7 @@ test_hook_uses_state_override() {
   state="$TMP_ROOT/hook-state-override-active"
   mkdir -p "$home/state" "$state"
   : > "$state/task1.meta"
-  out=$(printf '{"stop_hook_active":false}' | CLAUDECODE=1 FM_HOME="$home" FM_STATE_OVERRIDE="$state" bash "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
+  out=$(printf '{"stop_hook_active":false}' | env -u CURSOR_AGENT CLAUDECODE=1 FM_HOME="$home" FM_STATE_OVERRIDE="$state" bash "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
   expect_code 2 "$status" "hook must let FM_STATE_OVERRIDE win over FM_HOME/state"
   assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
   pass "fm-turnend-guard: uses FM_STATE_OVERRIDE ahead of FM_HOME/state"
@@ -846,6 +850,10 @@ test_tracked_claude_entries_inert_under_grok() {
   pass "tracked .claude/settings.json entries: $guarded inert under grok, the documented subagent exception still armed, all live under Claude"
 }
 
+
+# Cursor stop-hook tests live in tests/fm-turnend-guard-cursor.test.sh (code-judo finding #4).
+. "$ROOT/tests/fm-turnend-guard-cursor.test.sh"
+
 test_codex_hook_uses_process_pwd_when_payload_cwd_is_outside_root() {
   local settings command dir expected_root outside payload out status
   settings="$ROOT/.codex/hooks.json"
@@ -1093,7 +1101,7 @@ EOF
 run_hook_claude() {
   local dir=$1 stop_active=$2 home
   home=$(cd "$dir" && pwd)
-  printf '{"stop_hook_active":%s,"session_id":"sess-claude-mode"}' "$stop_active" | CLAUDECODE=1 FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" --claude 2>&1
+  printf '{"stop_hook_active":%s,"session_id":"sess-claude-mode"}' "$stop_active" | env -u CURSOR_AGENT CLAUDECODE=1 FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" --claude 2>&1
 }
 
 seed_claude_failure() {
@@ -1270,7 +1278,7 @@ SH
         FM_TERMINAL_READY="$ready" \
         FM_TERMINAL_RELEASE="$release" \
         FM_TERMINAL_ONCE="$once" \
-        CLAUDECODE=1 FM_HOME="$dir" bash "$dir/bin/fm-turnend-guard.sh" --claude \
+        env -u CURSOR_AGENT CLAUDECODE=1 FM_HOME="$dir" bash "$dir/bin/fm-turnend-guard.sh" --claude \
           > "$guard_out" 2>&1
     printf '%s\n' "$?" > "$guard_status"
   ) &
@@ -1642,6 +1650,39 @@ test_grok_adapter_snake_case_native_and_camel_precedence
 test_grok_adapter_invalid_inputs_start_neither_path
 test_grok_adapter_missing_jq_and_no_supervision_allow
 test_tracked_claude_entries_inert_under_grok
+test_cursor_shim_emits_followup_on_block
+test_cursor_shim_reports_temp_state_failure
+test_cursor_shim_wakes_after_actionable_arm
+test_cursor_shim_arms_then_allows
+test_cursor_shim_allows_when_healthy
+test_cursor_shim_refuses_silent_stop_on_interrupt_marker
+test_cursor_shim_refuses_silent_stop_on_undelivered_queue
+test_cursor_shim_recovers_silent_stop_after_drain
+test_cursor_shim_rearms_on_loop_count_continuation
+test_cursor_shim_wakes_after_actionable_arm_on_continuation
+test_cursor_shim_bounds_loud_failure_followups
+test_cursor_shim_wake_chain_does_not_consume_failure_budget
+test_cursor_shim_bounds_the_actionable_wake_chain
+test_cursor_shim_distinct_wakes_do_not_hit_the_chain_ceiling
+test_cursor_shim_fresh_turn_resets_the_wake_chain
+test_cursor_shim_hard_bound_ends_a_runaway_chain
+test_cursor_shim_bounds_wake_refires
+test_cursor_shim_persists_bound_without_valid_loop_count
+test_cursor_shim_rejects_fractional_loop_count
+test_cursor_shim_failure_budget_is_session_scoped
+test_cursor_shim_prefers_conversation_id_for_persistent_scope
+test_cursor_shim_fallback_session_scope
+test_cursor_shim_fallback_without_identity_is_process_scoped
+test_cursor_shim_parent_starttime_scopes_identity_free_chain
+test_cursor_shim_without_parent_identity_uses_payload_fallback
+test_cursor_shim_extreme_loop_count_stays_bounded_without_state
+test_cursor_shim_falls_back_to_loop_count_without_writable_state
+test_cursor_shim_arm_sources_x_mode_cadence
+test_cursor_shim_arm_defaults_cadence_without_x_mode
+test_cursor_shim_missing_payload_allows
+test_cursor_hooks_json_is_registered
+test_cursor_pretool_hook_executes_seatbelt
+test_cursor_shim_anchor_resolves_via_cursor_project_dir
 test_codex_hook_uses_process_pwd_when_payload_cwd_is_outside_root
 test_codex_hook_ignores_nested_git_root_guard
 test_opencode_plugin_anchors_guard_to_worktree
@@ -1665,3 +1706,40 @@ test_hook_claude_mode_away_mode_never_uses_stop_autoarm_fail_open
 test_hook_claude_mode_allow_resets_budget
 test_hook_claude_mode_waits_for_late_claim
 test_hook_claude_mode_secondmate_reblocks_like_primary
+
+# This whole file simulates Claude by exporting CLAUDECODE=1. When the suite is
+# run FROM a Cursor primary, that session's own CURSOR_AGENT=1 is inherited by
+# every case, and fm-harness.sh checks the Cursor marker BEFORE CLAUDECODE - so
+# the cases would silently exercise Cursor's repair wording instead of Claude's.
+# Every Claude-pinned invocation therefore clears the foreign marker with
+# `env -u CURSOR_AGENT`. This case proves that hermeticity holds rather than
+# leaving it to a convention future edits could drop.
+test_claude_cases_are_hermetic_under_an_ambient_cursor_primary() {
+  local dir home resolved out status
+  dir=$(make_primary_dir "$TMP_ROOT/claude-hermetic")
+  home=$(cd "$dir" && pwd)
+  : > "$dir/state/task1.meta"
+
+  # 1. The parent environment really does look like a Cursor primary.
+  export CURSOR_AGENT=1
+  [ "${CURSOR_AGENT:-}" = 1 ] || fail "the ambient Cursor marker was not established"
+
+  # 2. Unhermetic detection resolves as cursor, which is the hazard.
+  resolved=$(CLAUDECODE=1 bash "$ROOT/bin/fm-harness.sh" 2>/dev/null)
+  [ "$resolved" = cursor ] \
+    || fail "expected the ambient marker to win without the unset, got '$resolved'"
+
+  # 3. The helper's own simulation resolves as claude.
+  resolved=$(env -u CURSOR_AGENT CLAUDECODE=1 bash "$ROOT/bin/fm-harness.sh" 2>/dev/null)
+  [ "$resolved" = claude ] \
+    || fail "the Claude simulation resolved as '$resolved', expected claude"
+
+  # 4. The shared guard still emits Claude's repair wording through run_hook.
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 2 "$status" "the guard must still block under an ambient Cursor marker"
+  assert_contains "$out" "$REQUIRED_REASON" \
+    "the guard emitted non-Claude repair wording under an ambient Cursor marker"
+  unset CURSOR_AGENT
+  pass "fm-turnend-guard: Claude cases stay hermetic under an ambient Cursor primary"
+}
+test_claude_cases_are_hermetic_under_an_ambient_cursor_primary

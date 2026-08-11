@@ -36,9 +36,8 @@
 #                       X-mode artifact writes, fleet sync) also run only when
 #                       locked; the four network sweeps run in the deferred
 #                       stage rather than this synchronous bootstrap section.
-#   3. inactive outcomes + wake-drain - runs the local bounded inactive-outcome
-#                       reconciliation before presenting durable wakes and advancing
-#                       recovery handling state, so both only run when locked.
+#   3. wake-drain     - presents durable wakes and advances recovery handling
+#                       state, so it also only runs when locked.
 #   4. supervision-instructions - the one emitted operating block for the
 #                       detected primary harness.
 #   5. read-once contract - the do-not-re-read contract covering every source
@@ -686,10 +685,7 @@ else
   printf '(silent - all good)\n'
 fi
 
-# --- 3. inactive outcomes + wake-drain -----------------------------------
-# The existing locked session-start path runs the same local inactive-outcome
-# reconciliation as the watcher poll before it presents the resulting durable
-# wake, without adding a daemon or external-network call.
+# --- 3. wake-drain -------------------------------------------------------
 # Presented records are this turn's first work queue and remain durable until
 # post-handling acknowledgement. The drain's separate OPEN DECISIONS section
 # remains actionable even when that queue is empty (AGENTS.md sections 3 and 8).
@@ -708,11 +704,6 @@ if [ "$READ_ONLY" -eq 1 ]; then
   GUARD_OUT=$(FM_GUARD_READ_ONLY=1 "$SCRIPT_DIR/fm-guard.sh" 2>&1)
   [ -n "$GUARD_OUT" ] && printf '%s\n' "$GUARD_OUT"
 else
-  INACTIVE_OUT=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
-    "$SCRIPT_DIR/fm-inactive-reconcile.sh" scan --startup 2>&1) || INACTIVE_OUT=
-  if [ -n "$INACTIVE_OUT" ]; then
-    printf 'inactive outcome reconciliation: %s\n' "$INACTIVE_OUT"
-  fi
   DRAIN_OUT=$("$SCRIPT_DIR/fm-wake-drain.sh" 2>&1)
   if [ -n "$DRAIN_OUT" ]; then
     printf '%s\n' "$DRAIN_OUT"
@@ -741,6 +732,46 @@ if [ "$PRIMARY_HARNESS" = pi ] || [ "$PRIMARY_HARNESS" = pi-signed ]; then
   if ! fm_pi_extension_loaded "$PI_WATCH_MARKER" "$PI_WATCH_VERSION" "$PI_LOCK" \
     || ! fm_pi_extension_loaded "$PI_TURNEND_MARKER" "$PI_TURNEND_VERSION" "$PI_LOCK"; then
     printf 'PI_WATCH_EXTENSION: not loaded - approve Pi project trust once per clone, then restart %s so %s and %s auto-load for turn-end guard and background wake coverage; use -e %s -e %s only if project hooks are not trusted\n' "$PI_RESTART_COMMAND" "$PI_TURNEND_EXT" "$PI_EXT" "$PI_TURNEND_EXT" "$PI_EXT"
+  fi
+fi
+if [ "$PRIMARY_HARNESS" = cursor ]; then
+  # Cursor's project hooks are tracked shared material (.cursor/hooks.json).
+  # The top-level "version": 1 key is load-bearing: without it cursor silently
+  # discards the file and every hook is inert, a fail-open supervision hole.
+  # The stop hook must carry the long timeout and the preToolUse seatbelt must
+  # be registered with the Shell matcher.
+  CURSOR_HOOKS="$FM_ROOT/.cursor/hooks.json"
+  # shellcheck disable=SC2016 # Variables expand in the generated hook command.
+  CURSOR_STOP_COMMAND='[ -n "${CURSOR_PROJECT_DIR:-}" ] && exec "${CURSOR_PROJECT_DIR:-}/bin/fm-turnend-guard-cursor.sh"; exit 0'
+  # shellcheck disable=SC2016 # Variables expand in the generated hook command.
+  CURSOR_PRETOOL_COMMAND='[ -n "${CURSOR_PROJECT_DIR:-}" ] && exec "${CURSOR_PROJECT_DIR:-}/bin/fm-arm-pretool-check.sh" --cursor; exit 0'
+  CURSOR_HOOKS_OK=0
+  if [ -f "$CURSOR_HOOKS" ] && command -v jq >/dev/null 2>&1; then
+    if jq -e --arg stop_command "$CURSOR_STOP_COMMAND" --arg pretool_command "$CURSOR_PRETOOL_COMMAND" '
+      .version == 1
+      and (.hooks | type) == "object"
+      and (.hooks.stop | type) == "array"
+      and (.hooks.stop | length) > 0
+      and any(.hooks.stop[];
+        type == "object"
+        and (.command == $stop_command)
+        and (.timeout | type == "number" and . >= 600)
+        and (has("loop_limit") and .loop_limit == null)
+      )
+      and (.hooks.preToolUse | type) == "array"
+      and (.hooks.preToolUse | length) > 0
+      and any(.hooks.preToolUse[];
+        type == "object"
+        and (.matcher == "Shell")
+        and (.command == $pretool_command)
+        and (.timeout | type == "number" and . > 0)
+      )
+    ' "$CURSOR_HOOKS" >/dev/null 2>&1; then
+      CURSOR_HOOKS_OK=1
+    fi
+  fi
+  if [ "$CURSOR_HOOKS_OK" -eq 0 ]; then
+    printf 'CURSOR_HOOKS: not registered or malformed - %s must carry version 1 plus stop and preToolUse hook arrays (without the version key cursor silently discards the file); repair it before ending blind\n' "$CURSOR_HOOKS"
   fi
 fi
 "$SCRIPT_DIR/fm-supervision-instructions.sh" \

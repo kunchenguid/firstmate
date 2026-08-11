@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Detect the agent harness this process tree runs on.
-# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse|unknown
+# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|muse|cursor|unknown
 #        fm-harness.sh crew             print the effective CREWMATE harness
 #                                        (config/crew-harness; "default" resolves to own)
 #        fm-harness.sh secondmate       print the harness the PRIMARY uses to launch
@@ -20,6 +20,11 @@
 # name and is never parsed for a model.
 # Detection layers: verified environment markers first, then process ancestry.
 # Record each newly verified env marker here.
+# cursor-agent sets CURSOR_AGENT=1 for its child/tool processes (verified 2026-08-04,
+# cursor-agent 2026.07.23-e383d2b). The marker is ordered BEFORE CLAUDECODE because
+# a cursor worker launched from a claude firstmate inherits CLAUDECODE=1 from its
+# parent, and CLAUDECODE would win if checked first (the precedence hazard that
+# bin/fm-session-lock-lib.sh's comment warns about, now concretely reproduced).
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -33,23 +38,16 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 detect_own() {
   # Layer 1: environment markers for verified harnesses.
   # Keep marker detection before ancestry detection as an explicit precedence rule.
-  # Claude, Pi, Grok, and Cursor set verified markers of their own; codex,
-  # opencode, Kimi, and Muse are markerless, so a foreign marker retained in a terminal
+  # Only claude, pi, grok, and cursor set verified markers of their own; codex, opencode,
+  # kimi, and muse are markerless, so a foreign marker retained in a terminal
   # multiplexer's stored environment can silently misidentify one of them before
   # ancestry is consulted. This is a precedence hazard, not evidence that
   # CLAUDECODE inheritance into a kimi child was observed; it was not observed.
-  # Cursor is checked BEFORE claude, deliberately. cursor-agent does NOT clear
-  # an inherited CLAUDECODE, so a cursor worker launched from a claude primary
-  # carries BOTH markers and whichever is tested first wins. Cursor's own
-  # markers are unambiguous when present, so ordering them first is what makes
-  # the verdict correct; bin/fm-spawn.sh additionally clears the foreign markers
-  # at the launch boundary. Both are kept: the launch sanitization only covers
-  # sessions fm-spawn started, while this ordering also covers a cursor session
-  # a human started by hand. Verified live on cursor-agent 2026.08.11-e8db854:
-  # CURSOR_INVOKED_AS=cursor-agent is set on the agent process itself, and
-  # CURSOR_AGENT=1 is set for the child/tool processes this script runs as.
+  # cursor-agent sets CURSOR_AGENT=1, and it is ordered BEFORE CLAUDECODE because
+  # a cursor worker launched from a claude firstmate inherits CLAUDECODE=1 from its
+  # parent. The ordering alone is belt-and-braces: the launch template also unsets
+  # CLAUDECODE/CLAUDE_CODE_ENTRYPOINT (see fm-spawn.sh), so cursor never sees them.
   [ "${CURSOR_AGENT:-}" = "1" ] && { echo cursor; return; }
-  [ "${CURSOR_INVOKED_AS:-}" = "cursor-agent" ] && { echo cursor; return; }
   [ "${CLAUDECODE:-}" = "1" ] && { echo claude; return; }
   if [ "${PI_CODING_AGENT:-}" = "true" ]; then
     if [ "${FM_PI_HARNESS:-}" = pi-signed ]; then echo pi-signed; else echo pi; fi
@@ -76,11 +74,14 @@ detect_own() {
   local pid=$$ comm args argv0
   for _ in 1 2 3 4 5 6 7 8; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
-    argv0=$(fm_cursor_argv0_for_pid "$pid" "$comm" 2>/dev/null || true)
-    if fm_cursor_process_matches "$comm" '' "$argv0"; then
-      echo cursor
-      return
-    fi
+    args=$(ps -o args= -p "$pid" 2>/dev/null)
+    argv0=$(fm_cursor_argv0_for_pid "$pid" "$comm" "$args" || true)
+    # Cursor identity is narrowed and owned by bin/fm-cursor-lib.sh: an exact
+    # cursor-agent name, or Cursor's own install path behind MainThread, a bare
+    # interpreter, or the legacy `agent` alias. An unrelated executable named
+    # agent, or a path that merely has an agent/ directory component, is not
+    # Cursor and must fall through to the checks below.
+    if fm_cursor_process_matches "$comm" "$args" "$argv0" "$pid"; then echo cursor; return; fi
     case "$(basename -- "$comm")" in
       *claude*) echo claude; return ;;
       *codex*) echo codex; return ;;
@@ -96,8 +97,9 @@ detect_own() {
       pi-signed) echo pi; return ;;
       pi) echo pi; return ;;
       node*|python*)
-        # Bare interpreter: match the harness name in its script path.
-        args=$(ps -o args= -p "$pid" 2>/dev/null)
+        # Bare interpreter: match the harness name in the full argument string,
+        # which still carries the versioned install path. Cursor was already
+        # decided above.
         case "$args" in
           *claude*) echo claude; return ;;
           *codex*) echo codex; return ;;

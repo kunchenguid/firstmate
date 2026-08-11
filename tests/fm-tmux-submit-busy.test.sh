@@ -80,7 +80,7 @@ test_busy_pane_pending_returns_empty() {
   # Now test the submit - write verdict to file to avoid nested $().
   PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_SENT="$sent" \
     FM_FAKE_SWALLOW="$dir/.swallow" FM_FAKE_PERSIST_SWALLOW=1 FM_FAKE_PANE_BUSY=1 \
-    fm_tmux_submit_enter_core "win" 3 0.05 > "$vfile" 2>/dev/null
+    fm_tmux_submit_enter_core "win" 3 0.05 "" opencode > "$vfile" 2>/dev/null
   [ "$(cat "$vfile")" = empty ] || fail "busy-pane pending should return empty, got '$(cat "$vfile")'"
   [ "$(grep -c '^Enter$' "$sent" 2>/dev/null || true)" -eq 3 ] \
     || fail "proven pending should consume the configured Enter retry budget"
@@ -99,7 +99,7 @@ test_idle_pane_pending_returns_pending() {
   touch "$dir/.swallow"
   PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_SENT="$sent" \
     FM_FAKE_SWALLOW="$dir/.swallow" FM_FAKE_PERSIST_SWALLOW=1 FM_FAKE_PANE_BUSY=0 \
-    fm_tmux_submit_enter_core "win" 3 0.05 > "$vfile" 2>/dev/null
+    fm_tmux_submit_enter_core "win" 3 0.05 "" opencode > "$vfile" 2>/dev/null
   [ "$(cat "$vfile")" = pending ] || fail "idle-pane pending should return pending, got '$(cat "$vfile")'"
   pass "fm_tmux_submit_enter_core: idle pane + pending composer stays pending (genuine swallow preserved)"
 }
@@ -232,6 +232,25 @@ test_busy_pane_ambiguous_pending_retries_without_conversion() {
   pass "fm_tmux_submit_enter_core: pending-unproven retries without busy conversion"
 }
 
+test_busy_kimi_pending_stays_pending() {
+  local dir fakebin composer sent vfile
+  dir="$TMP_ROOT/busy-kimi-conservative"
+  fakebin=$(make_submit_mock "$dir")
+  composer="$dir/composer"
+  sent="$dir/sent.log"
+  vfile="$dir/verdict"
+  printf '╭────────────╮\n│ > fix      │\n╰────────────╯\n' > "$composer"
+  : > "$sent"
+  touch "$dir/.swallow"
+  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_SENT="$sent" \
+    FM_FAKE_SWALLOW="$dir/.swallow" FM_FAKE_PERSIST_SWALLOW=1 FM_FAKE_PANE_BUSY=1 \
+    fm_tmux_submit_enter_core "win" 3 0.05 "" kimi > "$vfile" 2>/dev/null
+  [ "$(cat "$vfile")" = pending ] || fail "busy kimi pane must stay pending, got '$(cat "$vfile")"
+  [ "$(grep -c '^Enter$' "$sent" 2>/dev/null || true)" -eq 3 ] \
+    || fail "kimi should consume the full Enter retry budget before reporting pending"
+  pass "fm_tmux_submit_enter_core: busy kimi pane stays pending (conversion scoped to opencode/cursor)"
+}
+
 test_unrecognized_state_skips_busy_conversion() {
   local dir fakebin composer busy_called vfile
   dir="$TMP_ROOT/unrecognized-state"
@@ -327,6 +346,63 @@ test_claude_busy_signature_uses_real_capture_shapes() {
   pass "fm_pane_is_busy: Claude spinner is scoped, multi-frame, and backward-compatible"
 }
 
+test_cursor_busy_signature_scoped() {
+  local dir fakebin composer
+  dir="$TMP_ROOT/cursor-signature"
+  fakebin=$(make_submit_mock "$dir")
+  composer="$dir/composer"
+  pane_busy() {
+    PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" \
+      bash -c '. "$1/bin/fm-tmux-lib.sh"; fm_pane_is_busy "$2" "$3"' \
+      _ "$ROOT" "$1" "${2:-}"
+  }
+
+  # Cursor's verified busy footer (runtime-backends.md, cursor-agent
+  # 2026.07.23-e383d2b) is scoped to the cursor harness.
+  printf '\xe2\x86\x92 Add a follow-up    ctrl+c to stop\n' > "$composer"
+  pane_busy live cursor || fail "cursor footer should be busy for the cursor harness"
+  pane_busy fallback && fail "cursor footer must not widen the shared default"
+  printf 'Working...\n' > "$composer"
+  pane_busy cross cursor && fail "cursor must ignore Pi's Working footer"
+  printf 'Ctrl+c:cancel\n' > "$composer"
+  pane_busy cross cursor && fail "cursor must ignore Grok's cancel footer"
+  pass "fm_pane_is_busy: cursor footer is scoped to the cursor harness"
+}
+
+test_busy_cursor_footer_confirms_queued_enter() {
+  local dir fakebin composer sent vfile
+  dir="$TMP_ROOT/cursor-busy-queued"
+  fakebin=$(make_submit_mock "$dir")
+  composer="$dir/composer"
+  sent="$dir/sent.log"
+  vfile="$dir/verdict"
+  # A mid-turn cursor pane: the typed message sits in a proven pending composer
+  # and the verified busy footer renders below it. The harness queues the Enter,
+  # so once the retry budget exhausts the submit core must confirm delivery
+  # (empty) - but only when the target harness is supplied, because the default
+  # footer set does not match cursor's token. Runs in a fresh shell so the
+  # REAL fm_pane_is_busy (with the fake tmux capture) is exercised, not the
+  # FM_FAKE_PANE_BUSY seam the other tests override.
+  printf '╭────────────╮\n│ > fix      │\n╰────────────╯\nctrl+c to stop\n' > "$composer"
+  : > "$sent"
+  touch "$dir/.swallow"
+  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_SENT="$sent" \
+    FM_FAKE_SWALLOW="$dir/.swallow" FM_FAKE_PERSIST_SWALLOW=1 \
+    bash -c '. "$1/bin/fm-tmux-lib.sh"; fm_tmux_submit_enter_core "$2" 3 0.05 "" cursor' \
+    _ "$ROOT" "win" > "$vfile" 2>/dev/null
+  [ "$(cat "$vfile")" = empty ] \
+    || fail "cursor busy footer must confirm the queued Enter as empty, got '$(cat "$vfile")'"
+  [ "$(grep -c '^Enter$' "$sent" 2>/dev/null || true)" -eq 3 ] \
+    || fail "cursor queued-Enter confirmation should consume the retry budget first"
+  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_SENT="$sent" \
+    FM_FAKE_SWALLOW="$dir/.swallow" FM_FAKE_PERSIST_SWALLOW=1 \
+    bash -c '. "$1/bin/fm-tmux-lib.sh"; fm_tmux_submit_enter_core "$2" 3 0.05' \
+    _ "$ROOT" "win" > "$vfile" 2>/dev/null
+  [ "$(cat "$vfile")" = pending ] \
+    || fail "without the cursor harness the same pane must stay pending, got '$(cat "$vfile")'"
+  pass "fm_tmux_submit_enter_core: cursor busy footer confirms the queued Enter only with the cursor harness"
+}
+
 test_busy_pane_pending_returns_empty
 test_idle_pane_pending_returns_pending
 test_wrapped_continuation_retries_swallowed_enter
@@ -336,5 +412,8 @@ test_idle_pane_composer_clears_first_try
 test_busy_pane_unknown_stays_unknown
 test_failed_baseline_capture_keeps_busy_unknown_unconfirmed
 test_busy_pane_ambiguous_pending_retries_without_conversion
+test_busy_kimi_pending_stays_pending
 test_unrecognized_state_skips_busy_conversion
 test_claude_busy_signature_uses_real_capture_shapes
+test_cursor_busy_signature_scoped
+test_busy_cursor_footer_confirms_queued_enter

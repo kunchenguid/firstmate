@@ -38,8 +38,9 @@
 # Claude requires stdout to remain empty on deny.
 # Codex blocks on exit 2 and displays stderr.
 # Grok consumes the stdout decision object.
+# Cursor consumes the stdout permission object (verified cursor-agent
+# 2026.07.23-e383d2b: {"permission":"deny","agent_message":...}).
 # OpenCode and Pi consume exit 2 plus stderr.
-# Cursor consumes the stdout decision object.
 set -u
 
 CMD=""
@@ -196,5 +197,8 @@ if [ "$CURSOR_MODE" -eq 1 ]; then
   exit 0
 fi
 printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny"},"systemMessage":"%s"}\n' "$ESCAPED" >&2
-[ "$CLAUDE_MODE" -eq 1 ] || printf '{"decision":"deny","reason":"%s"}\n' "$ESCAPED"
+[ "$CLAUDE_MODE" -eq 1 ] || [ "$CURSOR_MODE" -eq 1 ] || printf '{"decision":"deny","reason":"%s"}\n' "$ESCAPED"
+if [ "$CURSOR_MODE" -eq 1 ]; then
+  printf '{"permission":"deny","agent_message":"%s"}\n' "$ESCAPED"
+fi
 exit 2

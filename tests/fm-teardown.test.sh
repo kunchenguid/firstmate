@@ -1378,7 +1378,7 @@ set -u
 printf '%s\n' "\$*" >> "\${FM_FAKE_HERDR_LOG:?}"
 case "\${1:-} \${2:-}" in
   "workspace list")
-    printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"wH","active_tab_id":"wH:t1","focused":true},{"workspace_id":"wG","active_tab_id":"wG:tQ","focused":false}]}}'
+    printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"wH","active_tab_id":"wH:t1","focused":true},{"workspace_id":"wG","active_tab_id":"wG:tQ","label":"└ task-x1 · p:AbCdEfGhIjKlMnOpQrStUv","focused":false}]}}'
     ;;
   "tab list")
     case "\$*" in
@@ -1388,7 +1388,7 @@ case "\${1:-} \${2:-}" in
     esac
     ;;
   "pane list")
-    printf '%s\n' '{"result":{"panes":[{"pane_id":"wG:pQ","tab_id":"wG:tQ"}]}}'
+    printf '%s\n' '{"result":{"panes":[{"pane_id":"wG:pQ","tab_id":"wG:tQ"},{"pane_id":"wG:pOld","tab_id":"wG:tQ"}]}}'
     ;;
   "status --json")
     printf '%s\n' '{"server":{"running":true}}'
@@ -1401,18 +1401,39 @@ case "\${1:-} \${2:-}" in
     fi
     ;;
   "pane close")
-    : > "\${FM_FAKE_HERDR_CLOSED:?}"
+    case "\$*" in
+      *"wG:pOld"*) : > "\${FM_FAKE_HERDR_CLEANUP_CLOSED:?}" ;;
+      *)
+        if [ -n "\${FM_FAKE_HERDR_JOURNAL:-}" ]; then
+          grep -qx 'tab_id=wG:tQ' "\$FM_FAKE_HERDR_JOURNAL" \
+            && grep -qx 'pane_id=wG:pQ' "\$FM_FAKE_HERDR_JOURNAL" || exit 1
+          : > "\${FM_FAKE_HERDR_JOURNAL_RECONCILED:?}"
+        fi
+        : > "\${FM_FAKE_HERDR_CLOSED:?}"
+        ;;
+    esac
     ;;
   "pane get")
     if [ "\${FM_FAKE_HERDR_PANE_GET_GARBAGE:-0}" = 1 ]; then
       printf '%s\n' 'not-json'
       exit 0
     fi
-    if [ -e "\${FM_FAKE_HERDR_CLOSED:?}" ]; then
-      printf '%s\n' '{"error":{"code":"pane_not_found"}}' >&2
-      exit 1
-    fi
-    printf '%s\n' '{"result":{"pane":{"pane_id":"wG:pQ","tab_id":"wG:tQ","workspace_id":"wG"}}}'
+    case "\$*" in
+      *"wG:pOld"*)
+        if [ -e "\${FM_FAKE_HERDR_CLEANUP_CLOSED:-/nonexistent}" ]; then
+          printf '%s\n' '{"error":{"code":"pane_not_found"}}' >&2
+          exit 1
+        fi
+        printf '%s\n' '{"result":{"pane":{"pane_id":"wG:pOld","tab_id":"wG:tQ","workspace_id":"wG"}}}'
+        ;;
+      *)
+        if [ -e "\${FM_FAKE_HERDR_CLOSED:?}" ]; then
+          printf '%s\n' '{"error":{"code":"pane_not_found"}}' >&2
+          exit 1
+        fi
+        printf '%s\n' '{"result":{"pane":{"pane_id":"wG:pQ","tab_id":"wG:tQ","workspace_id":"wG"}}}'
+        ;;
+    esac
     ;;
   "agent get")
     printf '%s\n' '{"error":{"code":"agent_not_found"}}' >&2
@@ -1496,6 +1517,49 @@ SH
   grep -q "teardown task-x1 complete" "$case_dir/stdout2" \
     || fail "herdr-orphan-refusal: the successful retry did not report completion"
   pass "herdr flat teardown refuses before returning the isolated copy under lock contention and the retry completes cleanly"
+}
+
+test_herdr_teardown_consumes_pending_cleanup_endpoint() {
+  local case_dir log closed cleanup_closed journal reconciled rc
+  case_dir=$(make_case herdr-pending-cleanup)
+  write_meta "$case_dir" local-only ship
+  configure_flat_herdr_teardown_case "$case_dir"
+  printf '%s\n' 'herdr_cleanup_endpoint=default:wG:pOld' >> "$case_dir/state/task-x1.meta"
+  journal="$case_dir/state/task-x1.herdr-presentation"
+  printf '%s\n' \
+    'version=2' \
+    'task_id=task-x1' \
+    'projection_id=AbCdEfGhIjKlMnOpQrStUv' \
+    "home=$case_dir/wt" \
+    'session=default' \
+    'workspace_id=wG' \
+    'tab_id=wG:tQ' \
+    'pane_id=wG:pOld' \
+    'parent_workspace_id=wH' \
+    'parent_label=firstmate' \
+    'workspace_label=└ task-x1 · p:AbCdEfGhIjKlMnOpQrStUv' \
+    'task_label=fm-task-x1' > "$journal"
+  log="$case_dir/herdr.log"; : > "$log"
+  closed="$case_dir/closed"
+  cleanup_closed="$case_dir/cleanup-closed"
+  reconciled="$case_dir/journal-reconciled"
+
+  rc=0
+  FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" \
+    FM_FAKE_HERDR_CLEANUP_CLOSED="$cleanup_closed" \
+    FM_FAKE_HERDR_JOURNAL="$journal" FM_FAKE_HERDR_JOURNAL_RECONCILED="$reconciled" \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "herdr-pending-cleanup: teardown should close both owned panes"
+  assert_present "$closed" "herdr-pending-cleanup: teardown left current pane live"
+  assert_present "$cleanup_closed" "herdr-pending-cleanup: teardown left pending old pane live"
+  assert_present "$reconciled" \
+    "herdr-pending-cleanup: teardown closed pane before reconciling journal"
+  assert_absent "$journal" \
+    "herdr-pending-cleanup: teardown orphaned stale presentation journal"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "herdr-pending-cleanup: teardown retained metadata after confirmed cleanup"
+  pass "herdr teardown consumes pending old endpoint before deleting task records"
 }
 
 test_herdr_flat_teardown_refuses_records_on_unparseable_presence() {
@@ -1779,6 +1843,39 @@ test_forced_secondmate_herdr_child_retains_records_when_close_unconfirmed() {
   assert_grep "retaining that child's durable identity records" "$case_dir/stderr" \
     "herdr-child-unconfirmed-close: refusal did not explain child record retention"
   pass "forced secondmate teardown retains Herdr child identity until exact pane disappearance"
+}
+
+test_forced_secondmate_child_cursor_worker_server_is_reaped() {
+  local case_dir home log closed rc pid starttime
+  case_dir=$(make_case cursor-worker-server-child-reap)
+  write_meta "$case_dir" local-only secondmate
+  configure_secondmate_with_herdr_child "$case_dir"
+  home="$case_dir/secondmate-home"
+  log="$case_dir/herdr.log"; closed="$case_dir/closed"; : > "$log"
+  ( exec sleep 300 ) &
+  pid=$!
+  disown
+  sleep 0.3
+  kill -0 "$pid" 2>/dev/null || fail "cursor-worker-server-child-reap: setup sleeper did not start"
+  starttime=$(awk '{print $22}' "/proc/$pid/stat" 2>/dev/null)
+  [ -n "$starttime" ] || fail "cursor-worker-server-child-reap: cannot read starttime"
+  printf '%s %s\n' "$pid" "starttime=$starttime" \
+    > "$home/state/child-herdr.worker-server"
+
+  rc=0
+  FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "cursor-worker-server-child-reap: teardown should succeed"
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -KILL "$pid" 2>/dev/null || true
+    fail "cursor-worker-server-child-reap: child worker-server survived forced secondmate teardown"
+  fi
+  assert_grep "reaping recorded cursor worker-server" "$case_dir/stderr" \
+    "cursor-worker-server-child-reap: child worker-server was not reaped before metadata removal"
+  [ ! -e "$home/state/child-herdr.meta" ] \
+    || fail "cursor-worker-server-child-reap: child metadata survived forced cleanup"
+  pass "forced secondmate teardown reaps recorded child Cursor worker-server"
 }
 
 configure_nested_secondmate_with_herdr_grandchild() {  # <case-dir>
@@ -2259,6 +2356,294 @@ test_leaked_tasktmp_process_is_reaped() {
   pass "a leaked descendant process rooted under the task's per-task tasktmp is reaped by teardown too"
 }
 
+test_recorded_cursor_worker_server_is_reaped() {
+  local case_dir rc pid starttime
+  case_dir=$(make_case cursor-worker-server-reap)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+
+  # A detached-style sleeper standing in for cursor's background worker-server:
+  # NOT rooted under the worktree, so the cwd-based reaper cannot see it - the
+  # exact incident shape.
+  ( exec sleep 300 ) &
+  pid=$!
+  disown
+  sleep 0.3
+  kill -0 "$pid" 2>/dev/null || fail "cursor-worker-server-reap: setup sleeper did not start"
+  starttime=$(awk '{print $22}' "/proc/$pid/stat" 2>/dev/null)
+  [ -n "$starttime" ] || fail "cursor-worker-server-reap: cannot read starttime"
+  printf '%s %s\n' "$pid" "starttime=$starttime" \
+    > "$case_dir/state/task-x1.worker-server"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "cursor-worker-server-reap: teardown should succeed"
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -KILL "$pid" 2>/dev/null || true
+    fail "cursor-worker-server-reap: recorded cursor worker-server survived teardown"
+  fi
+  assert_grep "reaping recorded cursor worker-server" "$case_dir/stderr" \
+    "cursor-worker-server-reap: teardown did not report reaping the recorded worker-server"
+  if [ -f "$case_dir/state/task-x1.worker-server" ]; then
+    fail "cursor-worker-server-reap: the worker-server record survived teardown"
+  fi
+  pass "a cursor worker-server recorded at spawn is reaped by pid at teardown, cwd-independent"
+}
+
+test_recorded_cursor_worker_server_lstart_identity_is_reaped() {
+  local case_dir rc pid identity
+  case_dir=$(make_case cursor-worker-server-lstart-reap)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  ( exec sleep 300 ) &
+  pid=$!
+  disown
+  sleep 0.3
+  kill -0 "$pid" 2>/dev/null || fail "cursor-worker-server-lstart-reap: setup sleeper did not start"
+  identity='lstart=Mon Jan  1 00:00:00 2001'
+  printf '%s %s\n' "$pid" "$identity" \
+    > "$case_dir/state/task-x1.worker-server"
+  cat > "$case_dir/fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = -p ] && [ "${2:-}" = "${FM_FAKE_CURSOR_WORKER_PID:-}" ] \
+   && [ "${3:-}" = -o ] && [ "${4:-}" = lstart= ]; then
+  printf 'Mon Jan  1 00:00:00 2001\n'
+  exit 0
+fi
+exec "$REAL_PS_FOR_TEST" "$@"
+SH
+  chmod +x "$case_dir/fakebin/ps"
+
+  rc=0
+  FM_PROC_ROOT_OVERRIDE="$case_dir/no-proc" FM_FAKE_CURSOR_WORKER_PID="$pid" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "cursor-worker-server-lstart-reap: teardown should succeed"
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -KILL "$pid" 2>/dev/null || true
+    fail "cursor-worker-server-lstart-reap: recorded lstart worker-server survived teardown"
+  fi
+  assert_grep "reaping recorded cursor worker-server" "$case_dir/stderr" \
+    "cursor-worker-server-lstart-reap: teardown did not consume lstart identity"
+  pass "teardown reaps a recorded Cursor worker-server with portable lstart identity"
+}
+
+test_recorded_cursor_worker_server_recycled_pid_not_killed() {
+  local case_dir rc victim starttime
+  case_dir=$(make_case cursor-worker-server-recycled)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+
+  # Record a pid with a WRONG starttime (a recycled pid whose process identity
+  # no longer matches the recorded one). The reaper must leave the current
+  # process alone.
+  victim="$$"; starttime=1
+  printf '%s %s\n' "$victim" "starttime=$starttime" \
+    > "$case_dir/state/task-x1.worker-server"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "cursor-worker-server-recycled: teardown should succeed"
+  kill -0 "$victim" 2>/dev/null \
+    || fail "cursor-worker-server-recycled: a recycled-pid record killed the current process"
+  if [ -f "$case_dir/state/task-x1.worker-server" ]; then
+    fail "cursor-worker-server-recycled: the stale worker-server record was not removed"
+  fi
+  pass "a worker-server record whose starttime no longer matches is never killed, and the stale record is removed"
+}
+
+test_recorded_cursor_worker_server_unreadable_identity_is_retained() {
+  local case_dir rc pid starttime
+  case_dir=$(make_case cursor-worker-server-identity-unreadable)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  ( exec sleep 300 ) &
+  pid=$!
+  disown
+  sleep 0.3
+  starttime=$(awk '{print $22}' "/proc/$pid/stat" 2>/dev/null)
+  printf '%s %s\n' "$pid" "starttime=$starttime" > "$case_dir/state/task-x1.worker-server"
+  cat > "$case_dir/fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = -p ] && [ "${2:-}" = "${FM_FAKE_CURSOR_WORKER_PID:-}" ] \
+   && [ "${3:-}" = -o ] && [ "${4:-}" = lstart= ]; then
+  exit 1
+fi
+exec "$REAL_PS_FOR_TEST" "$@"
+SH
+  chmod +x "$case_dir/fakebin/ps"
+  rc=0
+  FM_PROC_ROOT_OVERRIDE="$case_dir/no-proc" FM_FAKE_CURSOR_WORKER_PID="$pid" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 1 "$rc" "cursor-worker-server-identity-unreadable: teardown must refuse"
+  kill -0 "$pid" 2>/dev/null || fail "cursor-worker-server-identity-unreadable: stand-in exited unexpectedly"
+  [ -f "$case_dir/state/task-x1.worker-server" ] \
+    || fail "cursor-worker-server-identity-unreadable: ownership record was removed"
+  assert_grep 'identity cannot be read' "$case_dir/stderr" \
+    "cursor-worker-server-identity-unreadable: refusal did not report identity failure"
+  kill -KILL "$pid" 2>/dev/null || true
+  pass "unreadable live cursor worker identity preserves ownership record"
+}
+
+test_recorded_cursor_worker_server_surviving_kill_is_retained() {
+  local case_dir rc pid starttime
+  case_dir=$(make_case cursor-worker-server-kill-survivor)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  ( exec sleep 300 ) &
+  pid=$!
+  disown
+  sleep 0.3
+  starttime=$(awk '{print $22}' "/proc/$pid/stat" 2>/dev/null)
+  printf '%s %s\n' "$pid" "starttime=$starttime" > "$case_dir/state/task-x1.worker-server"
+  # Invoked indirectly by the exported teardown shell.
+  # shellcheck disable=SC2329
+  kill() {
+    local arg target=
+    for arg in "$@"; do target=$arg; done
+    case "${1:-}:$target" in
+      -TERM:"${FM_FAKE_KILL_SURVIVOR_PID:-}"|-KILL:"${FM_FAKE_KILL_SURVIVOR_PID:-}") return 0 ;;
+    esac
+    builtin kill "$@"
+  }
+  export -f kill
+  export FM_FAKE_KILL_SURVIVOR_PID="$pid"
+  rc=0
+  run_teardown "$case_dir" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  unset FM_FAKE_KILL_SURVIVOR_PID
+  unset -f kill
+  expect_code 1 "$rc" "cursor-worker-server-kill-survivor: teardown must refuse"
+  kill -0 "$pid" 2>/dev/null || fail "cursor-worker-server-kill-survivor: stand-in exited unexpectedly"
+  [ -f "$case_dir/state/task-x1.worker-server" ] \
+    || fail "cursor-worker-server-kill-survivor: ownership record was removed"
+  assert_grep 'still matches' "$case_dir/stderr" \
+    "cursor-worker-server-kill-survivor: refusal did not report surviving identity"
+  kill -KILL "$pid" 2>/dev/null || true
+  pass "surviving cursor worker preserves ownership record for retry"
+}
+
+test_malformed_cursor_worker_server_record_is_retained() {
+  local case_dir rc
+  case_dir=$(make_case cursor-worker-server-malformed)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  printf '%s\n' malformed > "$case_dir/state/task-x1.worker-server"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 1 "$rc" "cursor-worker-server-malformed: teardown must refuse"
+  [ -f "$case_dir/state/task-x1.worker-server" ] \
+    || fail "cursor-worker-server-malformed: malformed ownership record was removed"
+  [ -f "$case_dir/state/task-x1.meta" ] \
+    || fail "cursor-worker-server-malformed: task metadata was removed after refusal"
+  assert_grep "is malformed" "$case_dir/stderr" \
+    "cursor-worker-server-malformed: refusal did not identify malformed ownership"
+  pass "malformed cursor worker ownership is retained for retry"
+}
+
+test_recorded_cursor_worker_server_is_reaped_for_secondmate() {
+  local case_dir home rc pid starttime
+  case_dir=$(make_case cursor-worker-server-secondmate-reap)
+  write_meta "$case_dir" local-only secondmate
+  home="$case_dir/secondmate-home"
+  mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects"
+  printf '%s\n' task-x1 > "$home/.fm-secondmate-home"
+  printf '%s\n' "home=$home" >> "$case_dir/state/task-x1.meta"
+
+  # Detached-style sleeper standing in for cursor's background worker-server
+  # under a secondmate: not rooted under the home, so only the recorded-pid
+  # reaper can see it.
+  ( exec sleep 300 ) &
+  pid=$!
+  disown
+  sleep 0.3
+  kill -0 "$pid" 2>/dev/null || fail "cursor-worker-server-secondmate-reap: setup sleeper did not start"
+  starttime=$(awk '{print $22}' "/proc/$pid/stat" 2>/dev/null)
+  [ -n "$starttime" ] || fail "cursor-worker-server-secondmate-reap: cannot read starttime"
+  printf '%s %s\n' "$pid" "starttime=$starttime" \
+    > "$case_dir/state/task-x1.worker-server"
+
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "cursor-worker-server-secondmate-reap: secondmate teardown should succeed"
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -KILL "$pid" 2>/dev/null || true
+    fail "cursor-worker-server-secondmate-reap: recorded cursor worker-server survived secondmate teardown"
+  fi
+  assert_grep "reaping recorded cursor worker-server" "$case_dir/stderr" \
+    "cursor-worker-server-secondmate-reap: secondmate teardown did not report reaping the recorded worker-server"
+  [ ! -d "$home" ] || fail "cursor-worker-server-secondmate-reap: secondmate home was not removed"
+  pass "a cursor worker-server recorded for a secondmate is reaped by pid at retire, cwd-independent"
+}
+
+test_cursor_worker_server_record_missing_falls_back_to_cwd_reaper() {
+  local case_dir rc pid
+  case_dir=$(make_case cursor-worker-server-no-record)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+
+  # No cursor_worker_server record at all: the cwd-based reaper must still
+  # catch a process rooted under the worktree (regression: Fix 2 unchanged).
+  ( cd "$case_dir/wt" && exec sleep 300 ) &
+  pid=$!
+  disown
+  sleep 0.3
+  kill -0 "$pid" 2>/dev/null || fail "cursor-worker-server-no-record: setup sleeper did not start"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "cursor-worker-server-no-record: teardown should succeed"
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -KILL "$pid" 2>/dev/null || true
+    fail "cursor-worker-server-no-record: cwd-based reaping regressed without a worker-server record"
+  fi
+  assert_grep "reaping leaked worktree process" "$case_dir/stderr" \
+    "cursor-worker-server-no-record: cwd-based reaper did not run without a record"
+  pass "teardown without a worker-server record still reaps cwd-rooted processes unchanged"
+}
+
+test_cursor_worker_server_record_never_touches_other_home_daemon() {
+  local case_dir rc pid other_pid
+  case_dir=$(make_case cursor-worker-server-other-home)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+
+  # This task's recorded worker-server plus a second, UNrecorded worker-server
+  # standing in for another home's daemon. Only the recorded one is killed.
+  ( exec sleep 300 ) &
+  pid=$!
+  disown
+  ( exec sleep 300 ) &
+  other_pid=$!
+  disown
+  sleep 0.3
+  kill -0 "$pid" 2>/dev/null || fail "cursor-worker-server-other-home: setup sleeper did not start"
+  kill -0 "$other_pid" 2>/dev/null || fail "cursor-worker-server-other-home: second sleeper did not start"
+  printf '%s %s\n' "$pid" "starttime=$(awk '{print $22}' "/proc/$pid/stat" 2>/dev/null)" \
+    > "$case_dir/state/task-x1.worker-server"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "cursor-worker-server-other-home: teardown should succeed"
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -KILL "$pid" 2>/dev/null || true
+    fail "cursor-worker-server-other-home: this task's recorded worker-server survived teardown"
+  fi
+  if ! kill -0 "$other_pid" 2>/dev/null; then
+    kill -KILL "$other_pid" 2>/dev/null || true
+    fail "cursor-worker-server-other-home: an unrecorded (other home) worker-server was killed"
+  fi
+  kill -KILL "$other_pid" 2>/dev/null || true
+  pass "teardown kills only the recorded worker-server, never an unrecorded other-home daemon"
+}
+
 test_lsof_absent_reaps_tmux_process_group() {
   local case_dir rc pid path_without_lsof
   case_dir=$(make_case lsof-absent-process-group-reap)
@@ -2602,11 +2987,13 @@ test_local_only_force_overrides_unpushed
 test_teardown_missing_busy_sidecar_completes
 test_herdr_teardown_clears_escalation_marker
 test_herdr_flat_teardown_refuses_orphaning_records_then_retry_completes
+test_herdr_teardown_consumes_pending_cleanup_endpoint
 test_herdr_flat_teardown_refuses_records_on_unparseable_presence
 test_herdr_flat_teardown_preflight_refuses_before_changes
 test_forced_secondmate_herdr_child_preflight_refuses_before_changes
 test_forced_secondmate_teardown_holds_descendant_lifecycle_locks
 test_forced_secondmate_herdr_child_retains_records_when_close_unconfirmed
+test_forced_secondmate_child_cursor_worker_server_is_reaped
 test_forced_teardown_retains_nested_secondmate_home_when_grandchild_close_unconfirmed
 test_herdr_projection_teardown_retires_journal_only_after_confirmed_close
 test_herdr_projection_teardown_retains_journal_when_close_unconfirmed
@@ -2641,6 +3028,15 @@ test_another_branchs_parked_run_is_never_touched
 test_own_autonomous_run_is_left_alone
 test_leaked_worktree_process_is_reaped
 test_leaked_tasktmp_process_is_reaped
+test_recorded_cursor_worker_server_is_reaped
+test_recorded_cursor_worker_server_lstart_identity_is_reaped
+test_recorded_cursor_worker_server_recycled_pid_not_killed
+test_recorded_cursor_worker_server_unreadable_identity_is_retained
+test_recorded_cursor_worker_server_surviving_kill_is_retained
+test_malformed_cursor_worker_server_record_is_retained
+test_recorded_cursor_worker_server_is_reaped_for_secondmate
+test_cursor_worker_server_record_missing_falls_back_to_cwd_reaper
+test_cursor_worker_server_record_never_touches_other_home_daemon
 test_lsof_absent_reaps_tmux_process_group
 test_lsof_error_refuses_before_removal
 test_reused_pid_identity_is_not_force_killed

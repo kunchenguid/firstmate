@@ -756,6 +756,32 @@ fm_backend_kill() {  # <backend> <target>
   esac
 }
 
+# fm_backend_endpoint_confirmed_gone: prove the exact recorded endpoint is
+# authoritatively absent, read-only, BEFORE any durable task record may be
+# deleted after a kill. The kill contracts are best-effort by design (tmux
+# suppresses kill-window failure; herdr can refuse an unlocked close and still
+# return success), so only the backend's structured absence verdict licenses
+# record removal: tmux requires the exact recorded window to be absent from a
+# successful session inventory (fm_backend_tmux_agent_state = missing); herdr
+# requires a structured pane_not_found (fm_backend_herdr_endpoint_confirmed_gone).
+# Any backend without a verified absence proof refuses (returns 1), so a
+# caller must retain the task's durable records rather than erase ownership
+# under cleanup uncertainty.
+#
+# Used by bin/fm-spawn.sh's spawn_rollback_task_state so a failed spawn can
+# never become invisible: if the endpoint cannot be proven gone, the task
+# records stay and are marked rollback-needed for a cleanup retry.
+# shellcheck disable=SC2317 # dispatched entry point
+fm_backend_endpoint_confirmed_gone() {  # <backend> <target>
+  local backend=$1 target=$2
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    tmux) fm_backend_tmux_endpoint_confirmed_gone "$target" ;;
+    herdr) fm_backend_herdr_endpoint_confirmed_gone "$target" ;;
+    *) return 1 ;;
+  esac
+}
+
 fm_backend_remove_worktree() {  # <backend> <worktree-id>
   local backend=$1
   shift

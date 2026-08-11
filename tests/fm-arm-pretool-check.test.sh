@@ -166,6 +166,11 @@ run_matrix_entry() {
       printf '%s' "$payload" | "$CHECK" >"$out_file" 2>"$err_file"
       rc=$?
       ;;
+    cursor)
+      payload=$(jq -cn --arg command "$cmd" '{tool_name:"Shell",tool_input:{command:$command}}')
+      printf '%s' "$payload" | "$CHECK" --cursor >"$out_file" 2>"$err_file"
+      rc=$?
+      ;;
     opencode|pi)
       "$CHECK" --command "$cmd" >"$out_file" 2>"$err_file"
       rc=$?
@@ -190,13 +195,16 @@ run_matrix_entry() {
   elif [ "$entry" = grok ]; then
     jq -e '.decision == "deny"' "$out_file" >/dev/null 2>&1 \
       || fail "$id via grok deny must carry decision=deny on stdout: $(cat "$out_file")"
+  elif [ "$entry" = cursor ]; then
+    jq -e '.permission == "deny" and (.agent_message | length > 0)' "$out_file" >/dev/null 2>&1 \
+      || fail "$id via cursor deny must carry permission=deny on stdout: $(cat "$out_file")"
   fi
 }
 
 test_full_acceptance_matrix() {
   local i entry
   for ((i = 0; i < ${#MATRIX_IDS[@]}; i++)); do
-    for entry in codex claude grok opencode pi; do
+    for entry in codex claude grok cursor opencode pi; do
       run_matrix_entry "${MATRIX_IDS[$i]}" "${MATRIX_EXPECTED[$i]}" "$entry" "${MATRIX_COMMANDS[$i]}"
     done
     pass "matrix ${MATRIX_IDS[$i]}: ${MATRIX_EXPECTED[$i]} through all five entry forms"

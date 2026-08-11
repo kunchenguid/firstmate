@@ -39,14 +39,15 @@
 #   fm-interrupt     the legacy Claude fm-send --key Escape idle event
 #   fm-recovery      a documented recovery reset after relaunch
 # Classifier-only sources (never written into a record):
-#   endpoint-gone, herdr-native, grok-regex, muse-session-log,
-#   cursor-transcript, missing, malformed, gen-mismatch, source-mismatch,
-#   kimi-unverified, codex-unverified, capture-failed, no-target
+#   endpoint-gone, herdr-native, grok-regex, muse-session-log, missing,
+#   malformed, gen-mismatch, source-mismatch, kimi-unverified,
+#   cursor-unverified,
+#   codex-unverified, capture-failed, no-target
 #
 # Classification (fm_busy_classify): busy | idle | unknown | dead, always
 # with the producing source as the second token. Precedence:
 #   1. dead endpoint (fm_busy_classify_live only) -> dead endpoint-gone
-#   2. standalone Kimi before verification       -> unknown kimi-unverified
+#   2. standalone Kimi or Cursor before verification -> unknown kimi-unverified / cursor-unverified
 #   3. a valid, gen-matching, source-trusted record -> its state and source
 #   4. no record at all: herdr's native busy verdict is trusted as busy
 #      (generation state is sufficient for busy, not for idle), then the
@@ -108,8 +109,21 @@ FM_BUSY_LIB_VERSION=v1
 # and land the wiring in fm-spawn behind this same gate in the same change.
 FM_BUSY_KIMI_VERIFIED_VERSIONS=""
 
+# Cursor verification gate. Empty means no installed cursor-agent version has
+# passed a live-verified semantic busy source. Stop and preToolUse hooks are
+# supervision controls, not busy-state sources. Every cursor task classifies
+# unknown cursor-unverified, and supervision falls back to stale-pane detection.
+# The rendered ctrl+c to stop token is deliberately NOT a state source here:
+# the approved redesign forbids entrenching a second rendered-signal fallback
+# alongside the Grok arm (bin/fm-busy-lib.sh:53-58).
+FM_BUSY_CURSOR_VERIFIED_VERSIONS=""
+
 fm_busy_kimi_verified() {
   [ -n "$FM_BUSY_KIMI_VERIFIED_VERSIONS" ]
+}
+
+fm_busy_cursor_verified() {
+  [ -n "$FM_BUSY_CURSOR_VERIFIED_VERSIONS" ]
 }
 
 # fm_busy_codex_appserver_observable: capability/version negotiation for the
@@ -195,6 +209,10 @@ fm_busy_sources_for_harness() {  # <harness>
     kimi*)
       fm_busy_kimi_verified || { printf ''; return 0; }
       adapter='kimi-wire kimi-hook'
+      ;;
+    cursor*)
+      fm_busy_cursor_verified || { printf ''; return 0; }
+      adapter='cursor-hook'
       ;;
     *) printf ''; return 0 ;;
   esac
@@ -854,22 +872,10 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
       fi
       ;;
     cursor*)
-      # Semantic, on demand: fold this task's bound conversation transcript. A
-      # turn open past its last close is positive proof of a turn in flight and
-      # a trailing turn_ended is a finished turn. Every other outcome - no
-      # sidecar, no resolvable transcript, an unreadable or record-free file -
-      # is unknown, never idle. The rendered `ctrl+c to stop` footer is
-      # deliberately NOT consulted here; see the source note above.
-      if ! log=$(fm_busy_cursor_transcript "$state" "$id"); then
-        printf 'unknown cursor-transcript'
+      if ! fm_busy_cursor_verified; then
+        printf 'unknown cursor-unverified'
         return 0
       fi
-      case "$(fm_busy_cursor_turn_state "$log" 2>/dev/null)" in
-        busy) printf 'busy cursor-transcript' ;;
-        settled) printf 'idle cursor-transcript' ;;
-        *) printf 'unknown cursor-transcript' ;;
-      esac
-      return 0
       ;;
   esac
   out=$(fm_busy_record_read "$state" "$id") && rc=0 || rc=$?

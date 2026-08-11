@@ -104,7 +104,7 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
+#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|muse|cursor)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters. For pi and pi-signed, fm-spawn resolves the selected executable
@@ -180,8 +180,6 @@
 # A ship task records the explicit mode/yolo it was passed; a secondmate spawn records
 # mode=secondmate, yolo=off, home=, and projects=; a scout records neither, and both the
 # success line and state/<id>.meta omit them.
-# Every fresh spawn or relaunch records a new spawn_gen= incarnation token so durable
-# consumers can distinguish a replacement worker that reuses the same task id.
 # When the home session's frozen trace-context decision is enabled (see
 # docs/configuration.md and bin/fm-trace-context-lib.sh), the meta also records
 # one W3C traceparent= carrier, the same value injected into the pane as
@@ -260,6 +258,33 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-trace-context-lib.sh"
 # shellcheck source=bin/fm-remote-readiness-lib.sh
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
+# shellcheck source=bin/fm-cursor-lib.sh
+. "$SCRIPT_DIR/fm-cursor-lib.sh"
+# shellcheck source=bin/fm-process-identity-lib.sh
+. "$SCRIPT_DIR/fm-process-identity-lib.sh"
+
+cursor_worker_server_reap_record() {  # <record> <id> [keep-record]
+  # Thin spawn-side wrapper over the one shared termination primitive
+  # (fm_process_record_terminate, bin/fm-process-identity-lib.sh): caller policy
+  # is malformed-record=refuse (relaunch fails closed on unprovable prior-worker
+  # state), optional --keep-record for the harness-switch path, and spawn-side
+  # refusal diagnostics. The primitive preserves the record on every refusal.
+  local ws_file=$1 id=$2 keep_record=${3:-0} flag='' pid
+  [ "$keep_record" -eq 1 ] && flag="--keep-record"
+  if ! fm_process_record_terminate "$ws_file" "$id" --malformed=refuse $flag; then
+    read -r pid _ < "$ws_file" 2>/dev/null || true
+    case "$FM_PROCESS_RECORD_TERMINATE_REASON" in
+      identity-unreadable)
+        echo "error: recorded cursor worker-server for $id still exists at ${pid:-unknown} but its identity cannot be read; refusing relaunch" >&2
+        ;;
+      survived)
+        echo "error: recorded cursor worker-server for $id survived TERM and KILL; refusing relaunch" >&2
+        ;;
+    esac
+    return 1
+  fi
+  return 0
+}
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -645,6 +670,7 @@ spawn_remote_secondmate() {
 }
 
 BACKEND=
+HARNESS=
 ORCA_ABORT_CLEANUP=0
 ORCA_WORKTREE_ID=
 ORCA_TERMINAL=
@@ -672,6 +698,10 @@ RELAUNCH_REPLACEMENT_STATE=
 RELAUNCH_REPLACEMENT_WT=
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
+CURSOR_WORKER_RECORDER_PID=
+CURSOR_WORKER_LAUNCH_DELIVERED=0
+CURSOR_IDENTITY_FILE=
+CURSOR_IDENTITY_FILE_TMP=
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -692,6 +722,14 @@ parse_orca_worktree_result() {
 
 spawn_abort_cleanup() {
   local status=$?
+  if [ -n "$CURSOR_WORKER_RECORDER_PID" ]; then
+    wait "$CURSOR_WORKER_RECORDER_PID" 2>/dev/null || true
+    CURSOR_WORKER_RECORDER_PID=
+  fi
+  if [ "$HARNESS" = cursor ] && [ "$CURSOR_WORKER_LAUNCH_DELIVERED" -eq 0 ]; then
+    rm -f "$STATE/$ID.cursor-launch-token" 2>/dev/null || true
+    [ -z "$CURSOR_IDENTITY_FILE" ] || rm -f "$CURSOR_IDENTITY_FILE" 2>/dev/null || true
+  fi
   if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ] \
      && [ "$SPAWN_META_PUBLISH_STARTED" = 1 ] \
      && [ -n "$SPAWN_META_TMP" ] \
@@ -960,9 +998,6 @@ if [ "$RELAUNCH" -eq 0 ]; then
     echo "error: backend=cmux does not support --secondmate spawns yet" >&2
     exit 1
   fi
-  if [ "$BACKEND" = orca ]; then
-    fm_backend_orca_runtime_check || exit 1
-  fi
 fi
 SPAWN_TASK_LOCK="$STATE/.spawn-$ID.lock"
 if ! fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
@@ -1008,6 +1043,12 @@ if [ "$RELAUNCH" -eq 1 ]; then
     exit 1
   }
   RELAUNCH_PRIOR_HARNESS=$(fm_meta_get "$RELAUNCH_META" harness)
+  if [ "$RELAUNCH_PRIOR_HARNESS" = cursor ]; then
+    [ -f "$STATE/$ID.worker-server" ] || {
+      echo "error: task $ID has no cursor worker-server ownership record; refusing relaunch because prior worker absence cannot be proven" >&2
+      exit 1
+    }
+  fi
   KIND=$(fm_meta_get "$RELAUNCH_META" kind)
   [ -n "$KIND" ] || KIND=ship
   MODE=$(fm_meta_get "$RELAUNCH_META" mode)
@@ -1032,6 +1073,41 @@ if [ "$RELAUNCH" -eq 1 ]; then
     HERDR_WORKSPACE_ID=$(fm_meta_get "$RELAUNCH_META" herdr_workspace_id)
     HERDR_TAB_ID=$(fm_meta_get "$RELAUNCH_META" herdr_tab_id)
     HERDR_PANE_ID=$(fm_meta_get "$RELAUNCH_META" herdr_pane_id)
+    HERDR_CLEANUP_ENDPOINT=$(fm_meta_get "$RELAUNCH_META" herdr_cleanup_endpoint)
+    if [ -n "$HERDR_CLEANUP_ENDPOINT" ]; then
+      fm_backend_herdr_parse_target "$HERDR_CLEANUP_ENDPOINT" \
+        && [ "$FM_BACKEND_HERDR_SESSION" = "$HERDR_SES" ] \
+        && [ "$HERDR_CLEANUP_ENDPOINT" != "$RELAUNCH_TARGET" ] || {
+        echo "error: task $ID has invalid pending Herdr cleanup identity; refusing relaunch" >&2
+        exit 1
+      }
+      HERDR_CLEANUP_JOURNAL=$(fm_backend_herdr_projection_journal_path "$STATE" "$ID")
+      if [ -e "$HERDR_CLEANUP_JOURNAL" ] || [ -L "$HERDR_CLEANUP_JOURNAL" ]; then
+        fm_backend_herdr_projection_journal_snapshot "$HERDR_CLEANUP_JOURNAL" "$ID" \
+          && [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" = 2 ] \
+          && [ "$FM_BACKEND_HERDR_JOURNAL_SESSION" = "$HERDR_SES" ] \
+          && [ "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID" = "$HERDR_WORKSPACE_ID" ] || {
+          echo "error: task $ID's Herdr recovery journal is invalid; refusing relaunch" >&2
+          exit 1
+        }
+        if [ "$FM_BACKEND_HERDR_JOURNAL_TAB_ID" != "$HERDR_TAB_ID" ] \
+           || [ "$FM_BACKEND_HERDR_JOURNAL_PANE_ID" != "$HERDR_PANE_ID" ]; then
+          if [ "$HERDR_CLEANUP_ENDPOINT" != "$HERDR_SES:$FM_BACKEND_HERDR_JOURNAL_PANE_ID" ] \
+             || ! fm_backend_herdr_projection_journal_replace_endpoint \
+               "$HERDR_CLEANUP_JOURNAL" "$ID" \
+               "$FM_BACKEND_HERDR_JOURNAL_TAB_ID" "$FM_BACKEND_HERDR_JOURNAL_PANE_ID" \
+               "$HERDR_TAB_ID" "$HERDR_PANE_ID"; then
+            echo "error: task $ID's Herdr recovery journal could not be reconciled; refusing relaunch" >&2
+            exit 1
+          fi
+        fi
+      fi
+      fm_backend_kill "$BACKEND" "$HERDR_CLEANUP_ENDPOINT" 2>/dev/null || true
+      fm_backend_endpoint_confirmed_gone "$BACKEND" "$HERDR_CLEANUP_ENDPOINT" || {
+        echo "error: task $ID's prior Herdr endpoint could not be confirmed gone; refusing relaunch" >&2
+        exit 1
+      }
+    fi
   fi
   # With no explicit harness, a relaunch reuses the harness already recorded
   # for this task. It must NOT fall through to the fresh-spawn config
@@ -1046,7 +1122,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   }
 elif [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
+    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|muse|cursor)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -1153,6 +1229,18 @@ launch_template() {
     # only an absolute brief pointer after the TUI readiness gate below.
     # Its turn-end signal is a globally configured Stop hook plus a guarded
     # per-task worktree token, so no launch placeholder belongs here.
+    # cursor-agent: positional prompt auto-submits (verified 2026-08-04,
+    # cursor-agent 2026.07.23-e383d2b). --force is the autonomy flag;
+    # --trust suppresses the per-directory workspace trust dialog. The env
+    # sanitization unsets CLAUDECODE/CLAUDE_CODE_ENTRYPOINT so a cursor worker
+    # launched from a claude firstmate does not inherit those markers (the
+    # precedence hazard reproduced and fixed). --worktree is NEVER passed:
+    # firstmate owns worktree isolation.
+    # The binary name is resolved at spawn time into __CURSORBIN__ (see
+    # fm_cursor_resolve_binary, bin/fm-cursor-lib.sh): cursor ships both
+    # `cursor-agent` and the legacy alias `agent`, and the user-local install
+    # path is often absent from a non-interactive PATH.
+    cursor) printf '%s' 'env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT __CURSORBIN__ --force --trust __MODELFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     kimi) printf '%s' '__KIMIBIN__ __MODELFLAG__--auto' ;;
     # muse (Muse Code): a positional prompt starts the supervised interactive
     # session. --yolo is the single flag that makes a crewmate pane viable: muse
@@ -1183,6 +1271,9 @@ launch_template() {
 case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
     LAUNCH=$ARG3
+    # The escape hatch is passed through byte-identically: firstmate does not
+    # know what this command is, so it adds no wrapper of its own.
+    RAW_LAUNCH=1
     HARNESS=""
     for word in $LAUNCH; do
       case "$word" in [A-Za-z_]*=*) continue ;; *) HARNESS=$(basename "$word"); break ;; esac
@@ -1258,6 +1349,49 @@ case "$HARNESS" in
     ;;
 esac
 
+# Cursor launches a background worker-server that detaches from the pane and
+# leaves the task worktree, so teardown can only reap it by the pid identity
+# recorded at spawn (cursor_worker_server_record below). Ownership capture is
+# verified only on the tmux and herdr launch paths. On any other backend the
+# record could be silently omitted and the detached
+# worker-server would leak, so refuse here - before an endpoint is created, a
+# launch command is delivered, or task metadata is published - rather than
+# spawning a task whose cleanup is known to be incomplete.
+if [ "$HARNESS" = cursor ]; then
+  CURSOR_WORKER_LAUNCH_TOKEN=$(fm_trace_context_hex 16) || {
+    echo "error: cursor worker-server launch identity could not be generated" >&2
+    exit 1
+  }
+  case "$BACKEND" in
+    tmux|herdr) ;;
+    *)
+      echo "error: cursor cannot spawn on backend=$BACKEND: detached worker-server ownership capture is not verified for this backend and could leak after cleanup. Cursor is supported on backends: tmux, herdr." >&2
+      exit 1
+      ;;
+  esac
+  if [ -e "$STATE/$ID.cursor-launch-token" ] || [ -L "$STATE/$ID.cursor-launch-token" ]; then
+    echo "error: cursor launch ownership is still pending for $ID; teardown must complete before relaunch" >&2
+    exit 1
+  fi
+  CURSOR_WORKER_LAUNCH_OWNERSHIP="$STATE/$ID.cursor-launch-token"
+  CURSOR_WORKER_LAUNCH_OWNERSHIP_TMP="$CURSOR_WORKER_LAUNCH_OWNERSHIP.tmp.$$"
+  if ! printf '%s\n' "$CURSOR_WORKER_LAUNCH_TOKEN" > "$CURSOR_WORKER_LAUNCH_OWNERSHIP_TMP" \
+     || ! mv -f -- "$CURSOR_WORKER_LAUNCH_OWNERSHIP_TMP" "$CURSOR_WORKER_LAUNCH_OWNERSHIP"; then
+    rm -f -- "$CURSOR_WORKER_LAUNCH_OWNERSHIP_TMP" 2>/dev/null || true
+    echo "error: cursor worker-server launch ownership could not be persisted" >&2
+    exit 1
+  fi
+  export CURSOR_WORKER_LAUNCH_TOKEN
+fi
+
+# pi-signed is an explicitly selected executable identity, not an alias that may
+# silently fall back to pi. Resolve it from PATH before creating an endpoint and
+# retain the literal name in the launch command and task metadata.
+if [ "$HARNESS" = pi-signed ] && ! command -v pi-signed >/dev/null 2>&1; then
+  echo "error: pi-signed executable not found on PATH; install the signed Pi wrapper or select a different verified harness" >&2
+  exit 1
+fi
+
 # config/secondmate-harness may carry optional model/effort tokens alongside the
 # harness ("<harness> [<model>] [<effort>]"). They apply only when this is a
 # --secondmate spawn and no explicit per-spawn harness/raw launch was supplied, so
@@ -1284,20 +1418,26 @@ secondmate_registry_value() {
   secondmate_registry_field "$DATA/secondmates.md" "$1" "$2"
 }
 
+# absolute_command_path: print an absolute path for a `command -v` result.
+# A launch command is handed to a backend that may start it from another
+# directory, so a relative PATH hit has to be made absolute before it is
+# embedded. Returns 1 when the directory cannot be resolved, which the callers
+# treat as "not found" and answer with their own diagnostic.
+absolute_command_path() {  # <command -v result>
+  local candidate=$1 dir
+  case "$candidate" in
+    /*) printf '%s\n' "$candidate"; return 0 ;;
+  esac
+  dir=$(cd "$(dirname "$candidate")" 2>/dev/null && pwd -P) || return 1
+  [ -n "$dir" ] || return 1
+  printf '%s/%s\n' "$dir" "$(basename "$candidate")"
+}
+
 resolve_kimi_binary() {
-  local candidate dir fallback
+  local candidate fallback
   candidate=$(command -v kimi 2>/dev/null || true)
   if [ -n "$candidate" ] && [ -x "$candidate" ]; then
-    case "$candidate" in
-      /*) printf '%s\n' "$candidate"; return 0 ;;
-      *)
-        dir=$(cd "$(dirname "$candidate")" 2>/dev/null && pwd -P) || dir=
-        if [ -n "$dir" ]; then
-          printf '%s/%s\n' "$dir" "$(basename "$candidate")"
-          return 0
-        fi
-        ;;
-    esac
+    absolute_command_path "$candidate" && return 0
   fi
   fallback="${HOME:-}/.kimi-code/bin/kimi"
   if [ -n "${HOME:-}" ] && [ -x "$fallback" ]; then
@@ -1309,19 +1449,10 @@ resolve_kimi_binary() {
 }
 
 resolve_muse_binary() {
-  local candidate dir
+  local candidate
   candidate=$(command -v muse 2>/dev/null || true)
   if [ -n "$candidate" ] && [ -x "$candidate" ]; then
-    case "$candidate" in
-      /*) printf '%s\n' "$candidate"; return 0 ;;
-      *)
-        dir=$(cd "$(dirname "$candidate")" 2>/dev/null && pwd -P) || dir=
-        if [ -n "$dir" ]; then
-          printf '%s/%s\n' "$dir" "$(basename "$candidate")"
-          return 0
-        fi
-        ;;
-    esac
+    absolute_command_path "$candidate" && return 0
   fi
   echo "error: muse executable not found on PATH; install Muse Code or select a different verified harness" >&2
   return 1
@@ -1361,7 +1492,7 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
+    claude|codex|opencode|pi|pi-signed|grok|kimi|muse|cursor)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
@@ -1414,6 +1545,12 @@ effort_flag_for_harness() {
         max) printf -- '--reasoning-effort %s ' "$(shell_quote ultra)" ;;
       esac
       ;;
+    # cursor has no effort flag; effort is baked into model id suffixes
+    # (-low, -medium, -high, -xhigh, -max, -fast). The requested effort stays
+    # in task metadata but never reaches the launch command, because composing
+    # an effort suffix onto a model id is unsafe (not every model supports
+    # every suffix, e.g. gpt-5.2 has no -medium, gemini-3.1-pro has none at
+    # all). See .agents/skills/harness-adapters/SKILL.md cursor section.
     # opencode's interactive `opencode --prompt` launch has a verified --model
     # flag but no verified effort flag. Its `opencode run --variant` flag belongs
     # to a different, non-interactive launch mode, so fm-spawn does not pass it.
@@ -1453,6 +1590,21 @@ case "$LAUNCH" in
         echo "error: refusing Kimi spawn because the global turn-end hook could not be installed safely" >&2
         exit 1
       }
+    fi
+    ;;
+esac
+
+case "$LAUNCH" in
+  *__CURSORBIN__*)
+    CURSOR_BIN=$(fm_cursor_resolve_binary) || exit 1
+    LAUNCH=${LAUNCH//__CURSORBIN__/$(shell_quote "$CURSOR_BIN")}
+    CURSOR_IDENTITY_FILE="$STATE/.$ID.cursor-identity.$CURSOR_WORKER_LAUNCH_TOKEN"
+    CURSOR_IDENTITY_FILE_TMP="$CURSOR_IDENTITY_FILE.tmp.$$"
+    if ! printf '%s\t%s\n' "$CURSOR_WORKER_LAUNCH_TOKEN" "$CURSOR_BIN" > "$CURSOR_IDENTITY_FILE_TMP" \
+       || ! mv -f -- "$CURSOR_IDENTITY_FILE_TMP" "$CURSOR_IDENTITY_FILE"; then
+      rm -f -- "$CURSOR_IDENTITY_FILE_TMP" 2>/dev/null || true
+      echo "error: cursor launch identity could not be persisted" >&2
+      exit 1
     fi
     ;;
 esac
@@ -2094,11 +2246,6 @@ if [ "$KIND" = secondmate ]; then
     propagate_inheritable_config "$CONFIG" "$PROJ_ABS/config" \
     || echo "warning: secondmate $ID trace-context inheritance failed for $PROJ_ABS" >&2
 fi
-# #134 robustness: only tmux needs a worktree-detection target distinct from $T -
-# its rename-safe stable window id, set as WT_TARGET=$WID in the tmux branch above.
-# Every other backend addresses its pane/surface by the id already in $T, so default
-# WT_TARGET to $T for them (and for any future backend) - the shared treehouse-get +
-# worktree-detection steps below must never reference an unbound WT_TARGET under set -u.
 : "${WT_TARGET:=$T}"
 spawn_send_text_line() {  # <target> <text>
   case "$BACKEND" in
@@ -2138,6 +2285,462 @@ spawn_send_key() {  # <target> <key>
 
 kimi_capture() {
   fm_backend_capture "$BACKEND" "$T" 120 "$W" 2>/dev/null || true
+}
+
+# cursor_worker_server_record: after a cursor-agent launch, find the CLI's
+# background `node .../index.js worker-server` child and record its pid plus a
+# process identity atomically in state/<id>.worker-server, so the shared reap
+# primitive (fm_process_record_terminate, bin/fm-process-identity-lib.sh) can
+# kill it by pid from spawn relaunch/rollback and teardown even after it
+# detaches (reparents to init) and its cwd leaves the task worktree (an
+# observed worker-server cleanup gap, 2026-08-05).
+#
+# Discovery is bound to the launch through a random environment token inherited
+# by the worker-server. Ownership evidence is MANDATORY: if the worker-server
+# cannot be found and recorded atomically within the bounded poll, spawn fails
+# and rolls back the endpoint rather than proceeding with untracked state.
+# The record file is written via temp+mv so it is never partially visible.
+# Never matched by worker-server cmdline alone - the install dir and cmdline are
+# shared across homes and tasks.
+
+cursor_worker_server_has_launch_token() {  # <pid> <token>
+  local pid=$1 token=$2 environ
+  environ=${FM_PROC_ROOT_OVERRIDE:-/proc}/$pid/environ
+  if [ -r "$environ" ]; then
+    tr '\0' '\n' < "$environ" 2>/dev/null | grep -Fqx "FM_CURSOR_LAUNCH_TOKEN=$token"
+    return
+  fi
+  LC_ALL=C ps eww -p "$pid" -o command= 2>/dev/null \
+    | tr ' ' '\n' | grep -Fqx "FM_CURSOR_LAUNCH_TOKEN=$token"
+}
+
+cursor_worker_server_launch_process_present() {
+  local pids pid command launch_file launch_pid launch_identity launch_pgid own_pgid current_pgid
+  launch_file="$STATE/.$ID.cursor-boundary.$CURSOR_WORKER_LAUNCH_TOKEN.proof.launch"
+  if [ -f "$launch_file" ]; then
+    IFS=$'\t' read -r launch_pid launch_identity launch_pgid < "$launch_file" || true
+    if [ -n "$launch_pid" ] && kill -0 "$launch_pid" 2>/dev/null; then
+      if [ -n "$launch_identity" ] && fm_process_identity_matches "$launch_pid" "$launch_identity"; then
+        return 0
+      fi
+    fi
+  fi
+  pids=$(LC_ALL=C ps -e -o pid= 2>/dev/null) || return 2
+  while IFS= read -r pid; do
+    pid=${pid#"${pid%%[![:space:]]*}"}
+    pid=${pid%"${pid##*[![:space:]]}"}
+    [ -n "$pid" ] || continue
+    if [ "$pid" = "$$" ] || [ "$pid" = "${BASHPID:-$$}" ]; then
+      continue
+    fi
+    cursor_worker_server_has_launch_token "$pid" "$CURSOR_WORKER_LAUNCH_TOKEN" || continue
+    command=$(LC_ALL=C ps eww -p "$pid" -o command= 2>/dev/null || true)
+    case "$command" in
+      *'worker-server'*) ;;
+      *) return 0 ;;
+    esac
+  done <<EOF
+$pids
+EOF
+  return 1
+}
+
+cursor_worker_server_launch_tree_absent() {
+  fm_cursor_launch_boundary_absent_file \
+    "$STATE/.$ID.cursor-boundary.$CURSOR_WORKER_LAUNCH_TOKEN.proof.launch" \
+    "$CURSOR_WORKER_LAUNCH_TOKEN" \
+    "$STATE/.$ID.cursor-boundary.$CURSOR_WORKER_LAUNCH_TOKEN.proof.handoff.complete"
+}
+
+cursor_worker_server_markerless_absent() {
+  local marker="$STATE/.$ID.cursor-boundary.$CURSOR_WORKER_LAUNCH_TOKEN" \
+    proof launch_file
+  proof="$marker.proof"
+  launch_file="$proof.launch"
+  [ ! -e "$marker" ] && [ ! -e "$proof" ] && [ ! -e "$launch_file" ] \
+    && [ ! -e "$proof.tree.complete" ] \
+    && fm_cursor_launch_token_process_absent "$CURSOR_WORKER_LAUNCH_TOKEN"
+}
+
+cursor_worker_server_wait_launch_boundary() {
+  local status marker="$STATE/.$ID.cursor-boundary.$CURSOR_WORKER_LAUNCH_TOKEN" proof
+  proof="$marker.proof"
+  while :; do
+    { [ -f "$marker" ] || [ -f "$proof" ]; } && return 0
+    cursor_worker_server_launch_tree_absent && return 0
+    if cursor_worker_server_launch_process_present; then
+      status=0
+    else
+      status=$?
+    fi
+    case "$status" in
+      1) return 1 ;;
+      2) return 2 ;;
+    esac
+    sleep 0.1
+  done
+}
+
+cursor_worker_server_reap_launch_token() {
+  local pid identity ws_file reap_file tmp pids matched command matches=0 marker="$STATE/.$ID.cursor-boundary.$CURSOR_WORKER_LAUNCH_TOKEN" proof token_file="$STATE/$ID.cursor-launch-token"
+  proof="$marker.proof"
+  ws_file="$STATE/$ID.worker-server"
+  reap_file="$STATE/.$ID.rollback-worker-server.$$"
+  while :; do
+    pids=$(LC_ALL=C ps -e -o pid= 2>/dev/null) || return 1
+    matched=
+    while IFS= read -r pid; do
+      pid=${pid#"${pid%%[![:space:]]*}"}
+      pid=${pid%"${pid##*[![:space:]]}"}
+      [ -n "$pid" ] || continue
+      if [ "$pid" = "$$" ] || [ "$pid" = "${BASHPID:-$$}" ]; then
+        continue
+      fi
+      cursor_worker_server_has_launch_token "$pid" "$CURSOR_WORKER_LAUNCH_TOKEN" || continue
+      command=$(LC_ALL=C ps eww -p "$pid" -o command= 2>/dev/null || true)
+      case "$command" in
+        *'worker-server'*) ;;
+        *) return 1 ;;
+      esac
+      matched=$pid
+      break
+    done <<EOF
+$pids
+EOF
+    if [ -z "$matched" ]; then
+      rm -f "$reap_file"
+      if [ -f "$marker" ] || [ -f "$proof" ] \
+         || cursor_worker_server_launch_tree_absent \
+         || cursor_worker_server_markerless_absent; then
+        rm -f "$marker" "$proof" "$proof.launch" "$proof.handoff.complete" \
+          "$proof.worker" "$proof.token.absent" "$proof.tree.complete"
+        rm -f "$token_file"
+        return 0
+      fi
+      return 1
+    else
+      matches=$((matches + 1))
+      [ "$matches" -le 10 ] || return 1
+      if ! identity=$(fm_process_identity "$matched"); then
+        if kill -0 "$matched" 2>/dev/null; then
+          return 1
+        fi
+        sleep 0.1
+        continue
+      fi
+      tmp="$reap_file.tmp"
+      printf '%s %s\n' "$matched" "$identity" > "$tmp" || return 1
+      mv -f -- "$tmp" "$reap_file" || { rm -f -- "$tmp"; return 1; }
+      if ! cursor_worker_server_reap_record "$reap_file" "$ID"; then
+        mv -f -- "$reap_file" "$ws_file" 2>/dev/null || true
+        return 1
+      fi
+    fi
+    sleep 0.1
+  done
+}
+
+# The recorded identity is produced by the SAME parse teardown re-checks
+# (fm_process_identity, bin/fm-process-identity-lib.sh), so a comm containing
+# spaces cannot make the two disagree and silently defeat the recycled-pid check.
+cursor_worker_server_record() {  # -> 0 when recorded atomically, 1 when evidence missing
+  local pid worker_pid identity i ws_file tmp handoff_file
+  ws_file="$STATE/$ID.worker-server"
+  handoff_file="$STATE/.$ID.cursor-boundary.$CURSOR_WORKER_LAUNCH_TOKEN.proof.worker"
+  if [ -f "$handoff_file" ]; then
+    if mv -f -- "$handoff_file" "$ws_file" 2>/dev/null; then
+      echo "cursor worker-server ownership handed off for $ID" >&2
+      return 0
+    fi
+    return 1
+  fi
+  for i in 1 2 3 4 5; do
+    worker_pid=
+    while IFS= read -r pid; do
+      [ -n "$pid" ] || continue
+      if cursor_worker_server_has_launch_token "$pid" "$CURSOR_WORKER_LAUNCH_TOKEN"; then
+        worker_pid=$pid
+        break
+      fi
+    done <<EOF
+$(pgrep -f 'index.js worker-server' 2>/dev/null || true)
+EOF
+    [ -n "$worker_pid" ] || { sleep 0.3; continue; }
+    identity=$(fm_process_identity "$worker_pid" 2>/dev/null || true)
+    [ -n "$identity" ] || continue
+    # Write atomically via temp+mv so teardown never sees a partial record.
+    tmp="$ws_file.tmp.$$"
+    if printf '%s %s\n' "$worker_pid" "$identity" > "$tmp" 2>/dev/null; then
+      mv -f -- "$tmp" "$ws_file" 2>/dev/null || { rm -f -- "$tmp" 2>/dev/null || true; continue; }
+    else
+      rm -f -- "$tmp" 2>/dev/null || true
+      continue
+    fi
+    echo "cursor worker-server recorded for $ID: pid=$worker_pid start=$identity" >&2
+    return 0
+  done
+  echo "cursor worker-server could not be discovered for $ID after bounded poll; refusing to proceed with untracked task" >&2
+  return 1
+}
+
+# spawn_rollback_task_state: one canonical rollback for a spawn failure that
+# happened AFTER this invocation published task records. state/<id>.meta is
+# published before launch, so a failure after publication must remove
+# everything THIS invocation created or supervision sees a phantom live task
+# (a published meta with no live endpoint). Cleanup is CONFIRMATION-GATED:
+# each owned resource is removed and its absence proven through the backend's
+# authoritative presence mechanism before the next step, and the authoritative
+# task records are deleted only after every owned resource is confirmed gone.
+# The backend kill contracts are best-effort by design (tmux suppresses
+# kill-window failure; herdr can refuse an unlocked close and still return
+# success), so the kill alone proves nothing: fm_backend_endpoint_confirmed_gone
+# is the only license to proceed. If any cleanup cannot be confirmed, the task
+# records are RETAINED and marked rollback-needed so a later teardown/retry can
+# finish the cleanup with the exact recorded identity - never erase the
+# information required to retry safely. A secondmate home and its registry
+# entry are seeded BEFORE spawn and are never removed here; orca's worktree
+# keeps its own abort-cleanup ownership, and a projected herdr task re-arms the
+# projection abort cleanup so the EXIT trap removes the projected workspace and
+# journal this invocation created.
+spawn_rollback_task_state() {  # <detail> [preserve-endpoint]
+  local detail=$1 preserve_endpoint=${2:-0} endpoint_ready=0 endpoint_state composer_state
+  local exit_verdict i boundary_status old_target new_target new_tab new_pane out journal meta_lock meta_tmp
+  local cursor_boundary_ready=0
+  local before_tabs after_tabs
+  echo "failed: $detail" >> "$STATE/$ID.status" 2>/dev/null || true
+  echo "error: $detail" >&2
+
+  # 1. Endpoint removal, then CONFIRM exact absence. Only the backend's
+  #    structured absence verdict licenses any record deletion.
+  if [ "$preserve_endpoint" -eq 1 ]; then
+    fm_composer_export_env "$HARNESS"
+    if spawn_send_key "$T" C-u >/dev/null 2>&1; then
+      composer_state=$(fm_backend_composer_state "$BACKEND" "$T")
+      endpoint_state=$(fm_backend_agent_state "$BACKEND" "$T")
+      if [ "$composer_state" = empty ] && [ "$endpoint_state" = dead ]; then
+        endpoint_ready=1
+      fi
+    else
+      endpoint_state=$(fm_backend_agent_state "$BACKEND" "$T")
+    fi
+    if [ "$endpoint_ready" -ne 1 ] && [ "$HARNESS" = cursor ] \
+       && [ "${endpoint_state:-}" = alive ]; then
+      spawn_send_key "$T" C-c >/dev/null 2>&1 || true
+      sleep 0.3
+      exit_verdict=$(fm_backend_send_text_submit \
+        "$BACKEND" "$T" /exit 3 0.5 1.5 "$W" cursor 2>/dev/null || true)
+      if [ "$exit_verdict" != send-failed ]; then
+        i=0
+        while [ "$i" -lt 10 ]; do
+          endpoint_state=$(fm_backend_agent_state "$BACKEND" "$T")
+          [ "$endpoint_state" != dead ] || { endpoint_ready=1; break; }
+          sleep 0.3
+          i=$((i + 1))
+        done
+      fi
+    fi
+    if [ "$endpoint_ready" -ne 1 ]; then
+      case "$BACKEND" in
+        tmux)
+          i=0
+          while [ "$i" -lt 3 ]; do
+            if tmux respawn-window -k -c "$WT" -t "$T" \
+               && [ "$(fm_backend_agent_state "$BACKEND" "$T")" = dead ]; then
+              endpoint_ready=1
+              break
+            fi
+            i=$((i + 1))
+          done
+          if [ "$endpoint_ready" -ne 1 ]; then
+            endpoint_state=$(fm_backend_agent_state "$BACKEND" "$T")
+            if [ "$endpoint_state" = dead ]; then
+              endpoint_ready=1
+            else
+              fm_backend_kill "$BACKEND" "$T" 2>/dev/null || true
+              if fm_backend_endpoint_confirmed_gone "$BACKEND" "$T"; then
+                i=0
+                while [ "$i" -lt 3 ]; do
+                  if fm_backend_tmux_create_task "$SES" "$W" "$WT" >/dev/null \
+                     && [ "$(fm_backend_agent_state "$BACKEND" "$T")" = dead ]; then
+                    endpoint_ready=1
+                    break
+                  fi
+                  i=$((i + 1))
+                done
+              fi
+            fi
+          fi
+          [ "$endpoint_ready" -eq 1 ] || return 1
+          ;;
+        herdr)
+          old_target=$T
+          out=$(fm_backend_herdr_cli "$HERDR_SES" tab list \
+            --workspace "$HERDR_WORKSPACE_ID" 2>/dev/null) || return 1
+          before_tabs=$(printf '%s' "$out" | jq -c \
+            --arg label "$W" 'if (.result.tabs | type) == "array" then \
+              [.result.tabs[] | select(.label == $label) | .tab_id] \
+            else error("missing result.tabs") end' 2>/dev/null) || return 1
+          out=$(fm_backend_herdr_cli "$HERDR_SES" tab create \
+            --workspace "$HERDR_WORKSPACE_ID" --cwd "$WT" --label "$W" --no-focus 2>/dev/null) \
+            || out=
+          new_tab=$(printf '%s' "$out" | jq -r '.result.tab.tab_id // empty' 2>/dev/null) \
+            || new_tab=
+          new_pane=$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id // empty' 2>/dev/null) \
+            || new_pane=
+          if [ -z "$new_tab" ]; then
+            i=0
+            while [ "$i" -lt 3 ] && [ -z "$new_tab" ]; do
+              if out=$(fm_backend_herdr_cli "$HERDR_SES" tab list \
+                --workspace "$HERDR_WORKSPACE_ID" 2>/dev/null) \
+                && after_tabs=$(printf '%s' "$out" | jq -c \
+                  --arg label "$W" 'if (.result.tabs | type) == "array" then \
+                    [.result.tabs[] | select(.label == $label) | .tab_id] \
+                  else error("missing result.tabs") end' 2>/dev/null); then
+                new_tab=$(jq -nr --argjson before "$before_tabs" --argjson after "$after_tabs" \
+                  '$after - $before | if length == 1 then .[0] else empty end') || new_tab=
+              fi
+              i=$((i + 1))
+              [ -n "$new_tab" ] || sleep 0.1
+            done
+          fi
+          if [ -z "$new_pane" ] && [ -n "$new_tab" ]; then
+            new_pane=$(fm_backend_herdr_pane_for_tab \
+              "$HERDR_SES" "$HERDR_WORKSPACE_ID" "$new_tab" 2>/dev/null || true)
+          fi
+          if [ -z "$new_tab" ] || [ -z "$new_pane" ]; then
+            if [ -n "$new_pane" ]; then
+              new_target="$HERDR_SES:$new_pane"
+              fm_backend_kill "$BACKEND" "$new_target" 2>/dev/null || true
+              fm_backend_endpoint_confirmed_gone "$BACKEND" "$new_target" || return 1
+            elif [ -n "$new_tab" ]; then
+              fm_backend_herdr_cli "$HERDR_SES" tab close "$new_tab" >/dev/null 2>&1 \
+                || return 1
+              out=$(fm_backend_herdr_cli "$HERDR_SES" tab list \
+                --workspace "$HERDR_WORKSPACE_ID" 2>/dev/null) || return 1
+              [ "$(printf '%s' "$out" | jq -r --arg tab "$new_tab" \
+                'if (.result.tabs | type) == "array" then \
+                  [.result.tabs[] | select(.tab_id == $tab)] | length \
+                else error("missing result.tabs") end' 2>/dev/null)" = 0 ] \
+                || return 1
+            fi
+            return 1
+          fi
+          new_target="$HERDR_SES:$new_pane"
+          if [ "$(fm_backend_agent_state "$BACKEND" "$new_target")" != dead ]; then
+            fm_backend_kill "$BACKEND" "$new_target" 2>/dev/null || true
+            fm_backend_endpoint_confirmed_gone "$BACKEND" "$new_target" || return 1
+            return 1
+          fi
+          journal=$(fm_backend_herdr_projection_journal_path "$STATE" "$ID" 2>/dev/null || true)
+          if ! meta_lock=$(fm_meta_lock_path "$STATE/$ID.meta"); then
+            fm_backend_kill "$BACKEND" "$new_target" 2>/dev/null || true
+            fm_backend_endpoint_confirmed_gone "$BACKEND" "$new_target" || return 1
+            return 1
+          fi
+          fm_lock_acquire_wait "$meta_lock"
+          meta_tmp="$STATE/.$ID.meta.endpoint.${BASHPID:-$$}"
+          if ! awk -F= '$1 != "window" && $1 != "herdr_tab_id" \
+              && $1 != "herdr_pane_id" && $1 != "herdr_cleanup_endpoint"' \
+              "$STATE/$ID.meta" > "$meta_tmp" \
+             || ! printf 'window=%s\nherdr_tab_id=%s\nherdr_pane_id=%s\n' \
+               "$new_target" "$new_tab" "$new_pane" >> "$meta_tmp" \
+             || ! printf 'herdr_cleanup_endpoint=%s\n' "$old_target" >> "$meta_tmp" \
+             || ! mv -f "$meta_tmp" "$STATE/$ID.meta"; then
+            rm -f "$meta_tmp" 2>/dev/null || true
+            fm_lock_release "$meta_lock" || true
+            fm_backend_kill "$BACKEND" "$new_target" 2>/dev/null || true
+            fm_backend_endpoint_confirmed_gone "$BACKEND" "$new_target" || return 1
+            return 1
+          fi
+          fm_lock_release "$meta_lock" || true
+          if [ -n "$journal" ] && [ -e "$journal" ] \
+             && ! fm_backend_herdr_projection_journal_replace_endpoint \
+               "$journal" "$ID" "$HERDR_TAB_ID" "$HERDR_PANE_ID" "$new_tab" "$new_pane"; then
+            return 1
+          fi
+          T=$new_target
+          WT_TARGET=$new_target
+          HERDR_TAB_ID=$new_tab
+          HERDR_PANE_ID=$new_pane
+          fm_backend_kill "$BACKEND" "$old_target" 2>/dev/null || true
+          fm_backend_endpoint_confirmed_gone "$BACKEND" "$old_target" || return 1
+          meta_lock=$(fm_meta_lock_path "$STATE/$ID.meta") || return 1
+          fm_lock_acquire_wait "$meta_lock"
+          meta_tmp="$STATE/.$ID.meta.cleanup.${BASHPID:-$$}"
+          if ! awk -F= '$1 != "herdr_cleanup_endpoint"' "$STATE/$ID.meta" > "$meta_tmp" \
+             || ! mv -f "$meta_tmp" "$STATE/$ID.meta"; then
+            rm -f "$meta_tmp" 2>/dev/null || true
+            fm_lock_release "$meta_lock" || true
+            return 1
+          fi
+          fm_lock_release "$meta_lock" || true
+          ;;
+        *) return 1 ;;
+      esac
+    fi
+  else
+    fm_backend_kill "$BACKEND" "$T" 2>/dev/null || true
+    if ! fm_backend_endpoint_confirmed_gone "$BACKEND" "$T"; then
+      echo "failed: $detail; endpoint $T could not be confirmed gone - task records retained and marked rollback-needed for cleanup retry" >> "$STATE/$ID.status" 2>/dev/null || true
+      echo "error: $detail; endpoint $T could not be confirmed gone; task records retained for cleanup retry" >&2
+      return 1
+    fi
+  fi
+
+  if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
+    # The projection abort cleanup was disarmed before Enter (handoff to the
+    # task); a rolled-back task owns no projection, so re-arm it for the
+    # EXIT trap.
+    HERDR_PROJECTION_ABORT_CLEANUP=1
+  fi
+
+  if [ "$HARNESS" = cursor ] \
+     && { [ "$RELAUNCH" -eq 1 ] || [ ! -f "$STATE/$ID.worker-server" ]; }; then
+    if [ "$cursor_boundary_ready" -eq 0 ] \
+       && cursor_worker_server_markerless_absent; then
+      cursor_boundary_ready=1
+    fi
+    if [ "$cursor_boundary_ready" -eq 1 ] || cursor_worker_server_wait_launch_boundary; then
+      if ! cursor_worker_server_reap_launch_token; then
+        echo "failed: $detail; worker-server absence is unproven - task records retained and marked rollback-needed for cleanup retry" >> "$STATE/$ID.status" 2>/dev/null || true
+        echo "error: $detail; worker-server absence is unproven; task records retained for cleanup retry" >&2
+        return 1
+      fi
+    else
+      boundary_status=$?
+      if [ "$boundary_status" -eq 2 ]; then
+        echo "failed: $detail; Cursor launch process boundary did not exit - task records retained and marked rollback-needed for cleanup retry" >> "$STATE/$ID.status" 2>/dev/null || true
+        echo "error: Cursor launch process boundary did not exit; task records retained for cleanup retry" >&2
+      else
+        echo "failed: $detail; worker-server absence is unproven - launch ownership retained for cleanup retry" >> "$STATE/$ID.status" 2>/dev/null || true
+        echo "error: worker-server absence is unproven; launch ownership retained for cleanup retry" >&2
+      fi
+      return 1
+    fi
+  fi
+
+  # A relaunch failure keeps the pre-existing task records, worktree, and
+  # ownership evidence so its work stays visible and retryable.
+  if [ "$RELAUNCH" -ne 1 ]; then
+    # 2. Owned worktree cleanup, CONFIRMED by the return command itself. The
+    #    authoritative .meta is never deleted before this succeeds: it is the
+    #    only durable record that lets a retry return the lease.
+    if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] \
+       && [ -n "${WT:-}" ] && [ -d "${WT:-}" ]; then
+      if ! ( cd "$PROJ_ABS" && treehouse return --force "$WT" ) >/dev/null 2>&1; then
+        echo "failed: $detail; worktree $WT could not be returned - task records retained and marked rollback-needed for cleanup retry" >> "$STATE/$ID.status" 2>/dev/null || true
+        echo "error: $detail; worktree $WT could not be returned; task records retained for cleanup retry" >&2
+        return 1
+      fi
+    fi
+    # 3. Every owned resource is confirmed gone; only now delete the
+    #    authoritative task records.
+    rm -f "$STATE/$ID.meta" "$STATE/$ID.status" "$STATE/$ID.turn-ended" 2>/dev/null || true
+    rm -rf "$TASK_TMP" 2>/dev/null || true
+  fi
+  if [ "$RELAUNCH" -ne 1 ]; then
+    rm -f "$STATE/$ID.worker-server" "$STATE/$ID.cursor-launch-token" 2>/dev/null || true
+  fi
 }
 
 # Kimi launch-readiness and delivery route their composer-emptiness half
@@ -2620,7 +3223,6 @@ fi
 
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
-SPAWN_GEN="s$(date +%s).${BASHPID:-$$}.$RANDOM"
 SPAWN_META_PATH="$STATE/$ID.meta"
 if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_META_LOCK=$(fm_meta_lock_path "$STATE/$ID.meta") || exit 1
@@ -2632,7 +3234,7 @@ fi
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id herdr_cleanup_endpoint zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -2651,7 +3253,6 @@ preserve_relaunch_meta() {
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
-  echo "spawn_gen=$SPAWN_GEN"
   # Default-off writes no traceparent= line.
   # backend= is written only for a non-default (non-tmux) backend, so the
   # default path's meta stays byte-identical (absent backend= means tmux;
@@ -2761,8 +3362,24 @@ if [ "$KIND" = secondmate ]; then
   # injected carrier and this on/off snapshot are guaranteed to agree.
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$sq_primary_home FM_HOME=$sq_home FM_TRACE_CONTEXT=$SPAWN_TRACE_EFFECTIVE FM_SUPERVISION_MODEL=$supervision_model $LAUNCH"
 fi
+# One launch-boundary rule, no per-template exceptions: every TEMPLATE-built
+# worker that is NOT cursor starts without cursor-agent's CURSOR_AGENT=1
+# identity marker. The raw-command escape hatch is excluded because it is
+# passed through byte-identically by contract.
+# fm-harness.sh checks that marker before every other signal, so a marker
+# inherited from a cursor primary would make any markerless harness - codex,
+# opencode, kimi, muse - detect itself as cursor. Stating it as a single
+# non-cursor rule is what keeps a newly added adapter covered by default.
+# Applied BEFORE the shell-prefix wraps below (unset TRACEPARENT; env
+# assignments), so the final literal stays a valid shell sequence.
+if [ "$HARNESS" != cursor ] && [ "${RAW_LAUNCH:-0}" -eq 0 ]; then
+  LAUNCH="env -u CURSOR_AGENT -u FM_CURSOR_EXECUTABLE $LAUNCH"
+fi
 if [ -z "$SPAWN_TRACEPARENT" ] && [ "$RELAUNCH" -eq 1 ]; then
   LAUNCH="unset TRACEPARENT; $LAUNCH"
+fi
+if [ "$HARNESS" = cursor ]; then
+  LAUNCH="FM_CURSOR_LAUNCH_TOKEN=$(shell_quote "$CURSOR_WORKER_LAUNCH_TOKEN") FM_CURSOR_EXECUTABLE=$(shell_quote "$CURSOR_BIN") FM_CURSOR_IDENTITY_FILE=$(shell_quote "$CURSOR_IDENTITY_FILE") FM_CURSOR_BOUNDARY_LAUNCH_FILE=$(shell_quote "$STATE/.$ID.cursor-boundary.$CURSOR_WORKER_LAUNCH_TOKEN.proof.launch") $(shell_quote "$FM_ROOT/bin/fm-cursor-launch-boundary.sh") $(shell_quote "$CURSOR_WORKER_LAUNCH_TOKEN") $(shell_quote "$STATE/.$ID.cursor-boundary.$CURSOR_WORKER_LAUNCH_TOKEN") $(shell_quote "$LAUNCH")"
 fi
 
 spawn_record_traceparent() {
@@ -2806,13 +3423,57 @@ if [ -n "$SPAWN_TRACEPARENT" ]; then
   fi
 fi
 sleep 0.3
-spawn_send_literal "$T" "$LAUNCH"
+if [ "$RELAUNCH" -eq 1 ] && [ "$RELAUNCH_PRIOR_HARNESS" = cursor ]; then
+  cursor_worker_server_reap_record "$STATE/$ID.worker-server" "$ID" 1 || exit 1
+fi
+if ! spawn_send_literal "$T" "$LAUNCH"; then
+  if [ "$RELAUNCH" -eq 1 ]; then
+    spawn_rollback_task_state "replacement launch command could not be delivered" 1
+    exit 1
+  fi
+else
+  CURSOR_WORKER_LAUNCH_DELIVERED=1
+fi
 sleep 0.3
 if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   HERDR_PROJECTION_ABORT_CLEANUP=0
   spawn_herdr_presentation_order_lock_release
 fi
-spawn_send_key "$T" Enter
+if [ "$HARNESS" = cursor ]; then
+  cursor_worker_server_record &
+  CURSOR_WORKER_RECORDER_PID=$!
+  if ! spawn_send_key "$T" Enter \
+     && [ "$RELAUNCH" -eq 1 ] && [ "$RELAUNCH_PRIOR_HARNESS" = cursor ]; then
+    kill "$CURSOR_WORKER_RECORDER_PID" 2>/dev/null || true
+    wait "$CURSOR_WORKER_RECORDER_PID" 2>/dev/null || true
+    CURSOR_WORKER_RECORDER_PID=
+    spawn_rollback_task_state "replacement launch command could not be submitted" 1
+    exit 1
+  fi
+  # Establish worker-server ownership evidence before the task is considered
+  # live. cursor_worker_server_record writes a state/<id>.worker-server file
+  # atomically (temp+mv). Failure here rolls back EVERYTHING this invocation
+  # created through the one canonical path (spawn_rollback_task_state), so no
+  # untracked worker-server and no phantom live task can survive: the meta is
+  # published before launch, and supervision keys on it, so it must go too.
+  if ! wait "$CURSOR_WORKER_RECORDER_PID"; then
+    CURSOR_WORKER_RECORDER_PID=
+    spawn_rollback_task_state "cursor worker-server ownership could not be established; the task was rolled back completely and will not be left in an untracked state" "$RELAUNCH"
+    exit 1
+  fi
+  CURSOR_WORKER_RECORDER_PID=
+  rm -f "$STATE/$ID.cursor-launch-token"
+else
+  if ! spawn_send_key "$T" Enter; then
+    if [ "$RELAUNCH" -eq 1 ]; then
+      spawn_rollback_task_state "replacement launch command could not be submitted" 1
+      exit 1
+    fi
+  fi
+fi
+if [ "$RELAUNCH" -eq 1 ] && [ "$HARNESS" != cursor ]; then
+  rm -f "$STATE/$ID.worker-server"
+fi
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then
     kimi_spawn_fail "kimi did not show a verified ready signal before brief delivery"

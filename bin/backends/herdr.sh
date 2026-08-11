@@ -74,9 +74,13 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 
 # Shared composer-content classifier (empty|pending|unknown, and the fleet-wide
 # dead-shell-vs-agent-composer rule). Owned by bin/fm-composer-lib.sh, reused by
-# every backend so the decision cannot drift.
+# every backend so the decision cannot drift. Cursor's reverse-video cursor-cell
+# normalization is owned by bin/fm-cursor-lib.sh and used only by the
+# cursor-harness branch below.
 # shellcheck source=bin/fm-composer-lib.sh
 . "$FM_BACKEND_HERDR_ROOT/bin/fm-composer-lib.sh"
+# shellcheck source=bin/fm-cursor-lib.sh
+. "$FM_BACKEND_HERDR_ROOT/bin/fm-cursor-lib.sh"
 
 # Shared, backend-neutral normalized-transition shape and the single-owner
 # status->action policy table (bin/fm-transition-lib.sh). This adapter's event
@@ -2765,6 +2769,7 @@ fm_backend_herdr_rendered_busy_state() {  # <target> [harness] -> busy|idle|unkn
 fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle>
   local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 i=0 verdict baseline confirm_sleep
   local raw_status footer_baseline=''
+  local queue_harness queue_identity
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
   fm_backend_herdr_send_literal "$target" "$text" || { printf 'send-failed'; return 0; }
   sleep "$settle"
@@ -2794,8 +2799,30 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
       unknown) printf 'unknown'; return 0 ;;
     esac
     i=$((i + 1))
-    [ "$i" -lt "$retries" ] || { printf 'pending'; return 0; }
+    [ "$i" -lt "$retries" ] || break
   done
+  # Retries exhausted with the composer still reading pending. opencode and
+  # cursor accept the Enter while mid-turn and QUEUE the message for the
+  # current turn's end without clearing the composer (opencode 1.18.4,
+  # cursor-agent 2026.07.23-e383d2b - both verified live on herdr, see
+  # docs/herdr-backend.md). Herdr's native agent state is the reliable signal
+  # here: a native busy verdict means the Enter was accepted and queued, so
+  # report empty (confirmed delivered) instead of a false pending failure.
+  # Any other state keeps pending - a genuine swallow on an idle pane. The
+  # queueing-harness rule itself is owned by fm_composer_queued_submit_verdict
+  # (bin/fm-composer-lib.sh); herdr supplies its own native busy probe below.
+  queue_identity=$(fm_backend_herdr_agent_identity_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" 2>/dev/null || true)
+  queue_harness=${queue_identity%%$'\t'*}
+  fm_composer_queued_submit_verdict "$queue_harness" fm_backend_herdr_submit_queue_busy
+  return 0
+}
+
+# fm_backend_herdr_submit_queue_busy: herdr's native busy probe for the shared
+# exhausted-retry rule above. Herdr's own agent state is the reliable signal:
+# a native busy verdict means the Enter was accepted and queued.
+fm_backend_herdr_submit_queue_busy() {
+  [ "$(fm_backend_herdr_classify_submit_agent_status \
+    "$(fm_backend_herdr_agent_status_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")")" = busy ]
 }
 
 # fm_backend_herdr_kill: remove the task's pane, best-effort (mirrors

@@ -133,6 +133,25 @@
 #     root still exists, so the account's healthy LaunchAgent worker and every
 #     live remote secondmate worker are out of scope. Best effort: a sweep
 #     failure never blocks this teardown.
+#   Fix 4 - reap the cursor worker-server by recorded pid. Cursor's background
+#     `node .../index.js worker-server` child detaches from the pane and can
+#     leave the worktree's cwd, so the cwd-based reaper cannot see it (observed
+#     2026-08-05: one worker-server survived teardown reparented to init, self-
+#     exited ~6 minutes later). fm-spawn records its pid and process-start
+#     identity atomically in state/<id>.worker-server at launch;
+#     reap_cursor_worker_server delegates to the shared fm_process_record_terminate
+#     primitive (bin/fm-process-identity-lib.sh), the single owner of the
+#     TERM-wait-KILL-revalidate sequence and the record-removal contract.
+#     A missing record means ownership was never established; teardown treats
+#     that as nothing to reap.
+#     Never matched by a generic worker-server cmdline or the cursor install
+#     dir: both are shared across homes and tasks.
+#     The recorded-pid path is lsof-independent (it uses /proc starttime or
+#     portable ps lstart plus kill). The cwd-based Fix 2 reaper above still
+#     requires lsof for the generic leaked-descendant scan; without lsof it
+#     falls back to the tmux process-group reaper, which cannot see a detached
+#     worker-server - so a cursor primary/crew host should install lsof for full
+#     leaked-process coverage (see docs/configuration.md Toolchain).
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -164,6 +183,10 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
 # shellcheck source=bin/fm-secondmate-parent-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-parent-lib.sh"
+# shellcheck source=bin/fm-process-identity-lib.sh
+. "$SCRIPT_DIR/fm-process-identity-lib.sh"
+# shellcheck source=bin/fm-cursor-lib.sh
+. "$SCRIPT_DIR/fm-cursor-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
@@ -1321,31 +1344,9 @@ $out
 EOF
 }
 
-task_process_identity() {  # <pid>
-  local pid=$1 proc_root stat_line starttime value
-  local -a stat_fields
-  proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc}
-  if [ -r "$proc_root/$pid/stat" ]; then
-    stat_line=$(cat "$proc_root/$pid/stat" 2>/dev/null) || return 1
-    read -r -a stat_fields <<< "${stat_line##*)}"
-    [ "${#stat_fields[@]}" -ge 20 ] || return 1
-    starttime=${stat_fields[19]}
-    case "$starttime" in ''|*[!0-9]*) return 1 ;; esac
-    printf 'starttime=%s\n' "$starttime"
-    return 0
-  fi
-  value=$(LC_ALL=C ps -p "$pid" -o lstart= 2>/dev/null) || return 1
-  value=$(fm_nm_trim "$value")
-  [ -n "$value" ] || return 1
-  case "$value" in *$'\n'*|*$'\r'*) return 1 ;; esac
-  printf 'lstart=%s\n' "$value"
-}
-
-task_process_identity_matches() {  # <pid> <identity>
-  local current
-  current=$(task_process_identity "$1") || return 1
-  [ "$current" = "$2" ]
-}
+# The parse itself is owned by fm_process_identity
+# (bin/fm-process-identity-lib.sh), so the identity recorded at spawn and the
+# identity re-checked here are produced by the same code and can never drift.
 
 task_pid_list_contains() {  # <pid-list> <pid>
   printf '%s\n' "$1" | grep -Fxq "$2"
@@ -1379,7 +1380,7 @@ reap_task_backend_process_group() {  # <label>
     return 0
     ;;
   esac
-  leader_start=$(task_process_identity "$leader") || {
+  leader_start=$(fm_process_identity "$leader") || {
     echo "warning: lsof is unavailable; cannot identify the tmux pane process group for $ID" >&2
     return 0
   }
@@ -1396,19 +1397,118 @@ reap_task_backend_process_group() {  # <label>
     echo "warning: lsof is unavailable; refusing to signal teardown's own process group for $ID" >&2
     return 0
   fi
-  task_process_identity_matches "$leader" "$leader_start" || return 0
+  fm_process_identity_matches "$leader" "$leader_start" || return 0
   current_pgid=$(ps -o pgid= -p "$leader" 2>/dev/null) || current_pgid=""
   current_pgid=$(printf '%s' "$current_pgid" | tr -d '[:space:]')
   [ "$current_pgid" = "$pgid" ] || return 0
   echo "teardown: reaping leaked $label process group for $ID: $pgid" >&2
   kill -TERM -- "-$pgid" 2>/dev/null || true
   sleep 1
-  if task_process_identity_matches "$leader" "$leader_start" \
+  if fm_process_identity_matches "$leader" "$leader_start" \
      && [ "$(ps -o pgid= -p "$leader" 2>/dev/null | tr -d '[:space:]')" = "$pgid" ] \
      && kill -0 -- "-$pgid" 2>/dev/null; then
     echo "teardown: force-killing leaked $label process group for $ID: $pgid" >&2
     kill -KILL -- "-$pgid" 2>/dev/null || true
   fi
+}
+
+# Reap the cursor worker-server recorded at spawn time (see
+# atomically in state/<id>.worker-server by cursor_worker_server_record in
+# bin/fm-spawn.sh). Cursor's background `node .../index.js worker-server`
+# child detaches from the pane (reparents to init) and can leave the task
+# worktree's cwd, so the cwd-based reaper below cannot see it - an observed
+# worker-server cleanup gap (2026-08-05). The record carries the pid plus
+# its process identity (Linux starttime or portable `ps lstart`), so a
+# recycled pid is never killed. The record file is either fully present
+# (atomic temp+mv write) or absent; a missing file means ownership was never
+# established and the task should not have been spawned - teardown treats
+# that as nothing to reap. Never matches a generic worker-server cmdline or
+# the cursor install dir: both are shared across homes and tasks.
+reap_cursor_worker_server() {  # <state_dir> <id>
+  # Thin teardown-side wrapper over the one shared termination primitive
+  # (fm_process_record_terminate, bin/fm-process-identity-lib.sh): caller policy
+  # is malformed-record=refuse (an unreapable record must retain ownership),
+  # verbose lifecycle lines, and teardown-side refusal diagnostics. The
+  # primitive preserves the record on every refusal (round-5
+  # preserve-on-unconfirmed contract).
+  local state_dir=$1 id=$2 ws_file
+  ws_file="$state_dir/$id.worker-server"
+  [ -f "$ws_file" ] || return 0
+  if ! fm_process_record_terminate "$ws_file" "$id" --malformed=refuse --verbose; then
+    read -r pid _ < "$ws_file" 2>/dev/null || true
+    case "$FM_PROCESS_RECORD_TERMINATE_REASON" in
+      identity-unreadable)
+        echo "REFUSED: recorded cursor worker-server for $id still exists at ${pid:-unknown} but its identity cannot be read; preserving $ws_file for retry." >&2
+        ;;
+      survived)
+        echo "REFUSED: recorded cursor worker-server for $id still matches ${pid:-unknown} after TERM and KILL; preserving $ws_file for retry." >&2
+        ;;
+      malformed)
+        echo "REFUSED: recorded cursor worker-server for $id is malformed; preserving $ws_file for retry." >&2
+        ;;
+    esac
+    return 1
+  fi
+  return 0
+}
+
+reap_cursor_worker_launch_token() {  # <state_dir> <id>
+  local state_dir=$1 id=$2 token_file marker proof token pid command identity tmp pids matched
+  token_file="$state_dir/$id.cursor-launch-token"
+  [ -f "$token_file" ] || return 0
+  marker="$state_dir/.$id.cursor-boundary."
+  IFS= read -r token < "$token_file" || return 1
+  case "$token" in ''|*[![:xdigit:]]) return 1 ;; esac
+  marker="${marker}${token}"
+  proof="$marker.proof"
+  while :; do
+    pids=$(LC_ALL=C ps -e -o pid= 2>/dev/null) || return 1
+    matched=
+    while IFS= read -r pid; do
+      pid=${pid#"${pid%%[![:space:]]*}"}
+      pid=${pid%"${pid##*[![:space:]]}"}
+      [ -n "$pid" ] || continue
+      if [ "$pid" = "$$" ] || [ "$pid" = "${BASHPID:-$$}" ]; then
+        continue
+      fi
+      if [ -r "${FM_PROC_ROOT_OVERRIDE:-/proc}/$pid/environ" ]; then
+        tr '\0' '\n' < "${FM_PROC_ROOT_OVERRIDE:-/proc}/$pid/environ" 2>/dev/null \
+          | grep -Fqx "FM_CURSOR_LAUNCH_TOKEN=$token" || continue
+      else
+        LC_ALL=C ps eww -p "$pid" -o command= 2>/dev/null \
+          | tr ' ' '\n' | grep -Fqx "FM_CURSOR_LAUNCH_TOKEN=$token" || continue
+      fi
+      command=$(LC_ALL=C ps eww -p "$pid" -o command= 2>/dev/null || true)
+      case "$command" in
+        *'worker-server'*) ;;
+        *) return 1 ;;
+      esac
+      matched=$pid
+      break
+    done <<EOF
+$pids
+EOF
+    if [ -z "$matched" ]; then
+      if [ -f "$marker" ] || [ -f "$proof" ] \
+         || fm_cursor_launch_boundary_absent_file "$proof.launch" "$token" \
+            "$proof.handoff.complete"; then
+        rm -f -- "$token_file" "$marker" "$proof" "$proof.launch" \
+          "$proof.handoff.complete" "$proof.worker" "$proof.token.absent" \
+          "$proof.tree.complete"
+        return 0
+      fi
+      return 1
+    fi
+    identity=$(fm_process_identity "$matched") || return 1
+    tmp="$state_dir/.$id.cursor-token-worker.$$"
+    printf '%s %s\n' "$matched" "$identity" > "$tmp" || return 1
+    if ! mv -f -- "$tmp" "$state_dir/$id.worker-server"; then
+      rm -f -- "$tmp"
+      return 1
+    fi
+    fm_process_record_terminate "$state_dir/$id.worker-server" "$id" \
+      --malformed=refuse --verbose || return 1
+  done
 }
 
 # Reap every process rooted (by cwd) under this task's own worktree or tasktmp
@@ -1436,7 +1536,7 @@ reap_task_worktree_processes() {  # <label> <dir>...
     tracked_identities=()
     while IFS= read -r pid; do
       [ -n "$pid" ] || continue
-      if ! identity=$(task_process_identity "$pid"); then
+      if ! identity=$(fm_process_identity "$pid"); then
         if ! task_pids_under_roots "$@"; then
           echo "REFUSED: cannot determine leaked processes under ${TASK_PIDS_FAILED_DIR:-<missing>} for $ID (lsof failed); preserving the worktree/tasktmp for manual inspection or retry." >&2
           return 1
@@ -1466,7 +1566,7 @@ EOF
       pid=${tracked_pids[$i]}
       identity=${tracked_identities[$i]}
       if task_pid_list_contains "$current_pids" "$pid" \
-         && task_process_identity_matches "$pid" "$identity"; then
+         && fm_process_identity_matches "$pid" "$identity"; then
         kill -TERM "$pid" 2>/dev/null || true
       fi
     done
@@ -1482,7 +1582,7 @@ EOF
       pid=${tracked_pids[$i]}
       identity=${tracked_identities[$i]}
       if task_pid_list_contains "$current_pids" "$pid" \
-         && task_process_identity_matches "$pid" "$identity"; then
+         && fm_process_identity_matches "$pid" "$identity"; then
         remaining_pids+=("$pid")
         remaining_identities+=("$identity")
       fi
@@ -1498,7 +1598,7 @@ EOF
         pid=${remaining_pids[$i]}
         identity=${remaining_identities[$i]}
         if task_pid_list_contains "$current_pids" "$pid" \
-           && task_process_identity_matches "$pid" "$identity"; then
+           && fm_process_identity_matches "$pid" "$identity"; then
           kill -KILL "$pid" 2>/dev/null || true
         fi
       done
@@ -2149,8 +2249,39 @@ $session	$lock_path"
   return 1
 }
 
+teardown_herdr_reconcile_pending_journal() {  # <state-dir> <meta> <task-id> <target> <cleanup-target>
+  local state=$1 meta=$2 task_id=$3 target=$4 cleanup_target=$5 journal session workspace tab pane
+  [ -n "$cleanup_target" ] || return 0
+  journal=$(fm_backend_herdr_projection_journal_path "$state" "$task_id")
+  [ -e "$journal" ] || [ -L "$journal" ] || return 0
+  session=$(meta_value "$meta" herdr_session)
+  workspace=$(meta_value "$meta" herdr_workspace_id)
+  tab=$(meta_value "$meta" herdr_tab_id)
+  pane=$(meta_value "$meta" herdr_pane_id)
+  if ! fm_backend_herdr_projection_journal_snapshot "$journal" "$task_id" \
+    || [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" != 2 ] \
+    || [ "$FM_BACKEND_HERDR_JOURNAL_SESSION" != "$session" ] \
+    || [ "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID" != "$workspace" ] \
+    || [ "$target" != "$session:$pane" ]; then
+    echo "error: Herdr recovery journal is invalid for $task_id; nothing was changed" >&2
+    return 1
+  fi
+  if [ "$FM_BACKEND_HERDR_JOURNAL_TAB_ID" = "$tab" ] \
+     && [ "$FM_BACKEND_HERDR_JOURNAL_PANE_ID" = "$pane" ]; then
+    return 0
+  fi
+  if [ "$cleanup_target" != "$session:$FM_BACKEND_HERDR_JOURNAL_PANE_ID" ] \
+    || ! fm_backend_herdr_projection_journal_replace_endpoint \
+      "$journal" "$task_id" \
+      "$FM_BACKEND_HERDR_JOURNAL_TAB_ID" "$FM_BACKEND_HERDR_JOURNAL_PANE_ID" \
+      "$tab" "$pane"; then
+    echo "error: Herdr recovery journal could not be reconciled for $task_id; nothing was changed" >&2
+    return 1
+  fi
+}
+
 preflight_firstmate_home_herdr_children() {  # <home>
-  local home=$1 sub_state child_meta child_id child_backend child_target child_kind child_home child_wt
+  local home=$1 sub_state child_meta child_id child_backend child_target child_cleanup child_session child_kind child_home child_wt
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
@@ -2161,6 +2292,15 @@ preflight_firstmate_home_herdr_children() {  # <home>
     child_target=$FM_BACKEND_VALIDATED_TARGET
     if [ "$child_backend" = herdr ]; then
       teardown_herdr_preflight_target "$child_target" "$child_id" || return 1
+      fm_backend_herdr_parse_target "$child_target" || return 1
+      child_session=$FM_BACKEND_HERDR_SESSION
+      child_cleanup=$(meta_value "$child_meta" herdr_cleanup_endpoint)
+      if [ -n "$child_cleanup" ]; then
+        [ "$child_cleanup" != "$child_target" ] || return 1
+        teardown_herdr_preflight_target "$child_cleanup" "$child_id" || return 1
+        fm_backend_herdr_parse_target "$child_cleanup" || return 1
+        [ "$FM_BACKEND_HERDR_SESSION" = "$child_session" ] || return 1
+      fi
     fi
     child_kind=$(meta_value "$child_meta" kind)
     [ -n "$child_kind" ] || child_kind=ship
@@ -2174,7 +2314,7 @@ preflight_firstmate_home_herdr_children() {  # <home>
 }
 
 cleanup_firstmate_home_children() {
-  local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_return_rc child_busy_gen
+  local home=$1 sub_state child_meta child_id child_t child_cleanup child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_return_rc child_busy_gen
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
@@ -2208,6 +2348,19 @@ cleanup_firstmate_home_children() {
           echo "error: herdr pane $child_t for child $child_id is not confirmed gone; retaining that child's durable identity records and stopping forced cleanup" >&2
           return 1
         fi
+        child_cleanup=$(meta_value "$child_meta" herdr_cleanup_endpoint)
+        if [ -n "$child_cleanup" ]; then
+          fm_backend_herdr_parse_target "$child_cleanup" || return 1
+          if ! teardown_herdr_session_lock_held "$FM_BACKEND_HERDR_SESSION"; then
+            echo "error: herdr session presentation lock is not held for child $child_id's pending cleanup; retaining that child's durable identity records and stopping forced cleanup" >&2
+            return 1
+          fi
+          fm_backend_herdr_kill_serialized "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" 2>/dev/null || true
+          if ! fm_backend_herdr_endpoint_confirmed_gone "$child_cleanup"; then
+            echo "error: pending herdr pane $child_cleanup for child $child_id is not confirmed gone; retaining that child's durable identity records and stopping forced cleanup" >&2
+            return 1
+          fi
+        fi
       elif [ "$child_backend" = zellij ]; then
         # Zellij titles are scoped by the owning home tag, so forced secondmate
         # cleanup must verify child tabs as that child home, not the parent.
@@ -2216,6 +2369,8 @@ cleanup_firstmate_home_children() {
         fm_backend_kill "$child_backend" "$child_t" "$(meta_value "$child_meta" zellij_tab_id)" "fm-$child_id" 2>/dev/null || true
       fi
     fi
+    reap_cursor_worker_launch_token "$sub_state" "$child_id" || return $?
+    reap_cursor_worker_server "$sub_state" "$child_id" || return $?
     if [ "$child_kind" = secondmate ]; then
       child_home=$(meta_value "$child_meta" home)
       [ -n "$child_home" ] || child_home=$child_wt
@@ -2384,6 +2539,7 @@ fi
 # not by task-worktree cleanup.
 if [ "$KIND" != secondmate ]; then
   conclude_task_no_mistakes_run "$WT"
+  reap_cursor_worker_server "$STATE" "$ID" || exit $?
   reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
 fi
 
@@ -2400,11 +2556,27 @@ fi
 # refuses before any destructive step.
 TEARDOWN_HERDR_SESSION=
 TEARDOWN_HERDR_PANE=
+TEARDOWN_HERDR_CLEANUP_TARGET=
+TEARDOWN_HERDR_CLEANUP_SESSION=
+TEARDOWN_HERDR_CLEANUP_PANE=
 if [ "$BACKEND" = herdr ]; then
   teardown_herdr_preflight_target "$T" "$ID" || exit 1
   fm_backend_herdr_parse_target "$T" || exit 1
   TEARDOWN_HERDR_SESSION=$FM_BACKEND_HERDR_SESSION
   TEARDOWN_HERDR_PANE=$FM_BACKEND_HERDR_PANE
+  TEARDOWN_HERDR_CLEANUP_TARGET=$(meta_value "$META" herdr_cleanup_endpoint)
+  if [ -n "$TEARDOWN_HERDR_CLEANUP_TARGET" ]; then
+    [ "$TEARDOWN_HERDR_CLEANUP_TARGET" != "$T" ] \
+      || { echo "error: pending Herdr cleanup endpoint duplicates task endpoint for $ID; nothing was changed" >&2; exit 1; }
+    teardown_herdr_preflight_target "$TEARDOWN_HERDR_CLEANUP_TARGET" "$ID" || exit 1
+    fm_backend_herdr_parse_target "$TEARDOWN_HERDR_CLEANUP_TARGET" || exit 1
+    TEARDOWN_HERDR_CLEANUP_SESSION=$FM_BACKEND_HERDR_SESSION
+    TEARDOWN_HERDR_CLEANUP_PANE=$FM_BACKEND_HERDR_PANE
+    [ "$TEARDOWN_HERDR_CLEANUP_SESSION" = "$TEARDOWN_HERDR_SESSION" ] \
+      || { echo "error: pending Herdr cleanup endpoint belongs to another session for $ID; nothing was changed" >&2; exit 1; }
+    teardown_herdr_reconcile_pending_journal \
+      "$STATE" "$META" "$ID" "$T" "$TEARDOWN_HERDR_CLEANUP_TARGET" || exit 1
+  fi
 fi
 
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
@@ -2497,6 +2669,14 @@ elif [ "$BACKEND" = herdr ]; then
 elif [ "$BACKEND" != orca ]; then
   fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
 fi
+if [ -n "$TEARDOWN_HERDR_CLEANUP_TARGET" ]; then
+  if teardown_herdr_session_lock_held "$TEARDOWN_HERDR_CLEANUP_SESSION"; then
+    fm_backend_herdr_kill_serialized \
+      "$TEARDOWN_HERDR_CLEANUP_SESSION" "$TEARDOWN_HERDR_CLEANUP_PANE" 2>/dev/null || true
+  else
+    echo "warning: herdr session presentation lock path is unavailable; skipping pending endpoint cleanup rather than closing unlocked" >&2
+  fi
+fi
 if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
   if [ "$(fm_backend_herdr_pane_agent_state "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_PANE")" = dead ]; then
     rm -f "$HERDR_PRESENTATION_JOURNAL"
@@ -2523,9 +2703,19 @@ if [ "$BACKEND" = herdr ]; then
     echo "error: herdr pane $T for $ID is not confirmed gone after its close was refused, skipped, or failed; retaining every durable task record - rerun teardown once the close can run under the session lock" >&2
     exit 1
   fi
+  if [ -n "$TEARDOWN_HERDR_CLEANUP_TARGET" ] \
+     && ! fm_backend_herdr_endpoint_confirmed_gone "$TEARDOWN_HERDR_CLEANUP_TARGET"; then
+    echo "error: pending herdr pane $TEARDOWN_HERDR_CLEANUP_TARGET for $ID is not confirmed gone; retaining every durable task record" >&2
+    exit 1
+  fi
+fi
+if [ "$KIND" != secondmate ]; then
+  reap_cursor_worker_launch_token "$STATE" "$ID" || exit $?
 fi
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
+  reap_cursor_worker_server "$STATE" "$ID" || exit $?
+  reap_cursor_worker_launch_token "$STATE" "$ID" || exit $?
   remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID" || exit $?
   remove_secondmate_registry_entry "$ID"
 fi
@@ -2539,6 +2729,9 @@ remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
 status_retire_presentation_task "$STATE" "$ID" || exit 1
 rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
+  "$STATE/$ID.cursor-launch-token" \
+  "$STATE"/.$ID.cursor-identity.* \
+  "$STATE"/.$ID.cursor-boundary.* \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" \
   "$STATE/$ID.kimi-turnend-token" "$STATE/$ID.muse-session" \
   "$STATE/$ID.muse-session-current" "$STATE/$ID.cursor-session" \

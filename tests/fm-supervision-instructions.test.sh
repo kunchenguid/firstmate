@@ -117,6 +117,18 @@ test_cross_harness_ordinary_continuation_and_repair_matrix() {
   assert_contains "$out" "foreground checkpoint" "codex recovery line lost its checkpoint repair"
   assert_contains "$out" "bin/fm-watch-checkpoint.sh" "codex recovery line lost the checkpoint command"
 
+  out=$("$RENDER" --harness cursor)
+  assert_contains "$out" "primary harness: cursor" "cursor heading missing"
+  assert_contains "$out" "Mode: Cursor stop-hook-owned supervision." "cursor snippet missing"
+  ordinary=$(printf '%s\n' "$out" | grep -F -- '- Ordinary wake:')
+  assert_contains "$ordinary" "stop hook" "cursor ordinary-wake line does not leave continuity to the stop hook"
+  assert_contains "$ordinary" "bin/fm-turnend-guard-cursor.sh" "cursor ordinary-wake line lost the shim name"
+  assert_contains "$ordinary" "do not arm another cycle" "cursor ordinary-wake line does not forbid a model re-arm"
+  assert_not_contains "$ordinary" "bin/fm-watch-arm.sh" "cursor ordinary-wake line incorrectly calls the manual arm"
+  out=$("$RENDER" --harness cursor --repair-line)
+  assert_contains "$out" "stop-hook-owned automatic recovery" "cursor recovery line lost its automatic-recovery guidance"
+  assert_contains "$out" "version key is load-bearing" "cursor recovery line lost the load-bearing version-key warning"
+
   pass "renderer preserves every harness ordinary-continuation and missing-cycle repair path"
 }
 

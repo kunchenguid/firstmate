@@ -114,6 +114,20 @@ SH
 # listing must never ask for: a body field, an unfiltered whole-backlog listing,
 # or done rows. FM_FAKE_TASKS_AXI_READY sizes the ready set so the queued bound
 # can be driven past its limit.
+make_path_without_node() {
+  local path=$1 base_dir tool_path tool_name
+  mkdir -p "$path"
+  while IFS= read -r base_dir; do
+    [ -d "$base_dir" ] || continue
+    for tool_path in "$base_dir"/*; do
+      [ -f "$tool_path" ] && [ -x "$tool_path" ] || continue
+      tool_name=${tool_path##*/}
+      [ "$tool_name" = node ] || ln -s "$tool_path" "$path/$tool_name" 2>/dev/null || true
+    done
+  done < <(printf '%s\n' "$BASE_PATH" | tr ':' '\n')
+  printf '%s\n' "$path"
+}
+
 make_fake_tasks_axi_compact() {
   local fakebin=$1
   cat > "$fakebin/tasks-axi" <<'SH'
@@ -219,6 +233,12 @@ make_fake_ps_harness() {
 #!/usr/bin/env bash
 set -u
 harness=${FM_FAKE_HARNESS:-claude}
+# fm-harness.sh's ancestry matcher recognizes Cursor's verified executable name,
+# including its legacy agent alias, or MainThread with that path.
+[ "$harness" = cursor ] && harness=cursor-agent
+# The legacy alias as Cursor actually installs it: the generic `agent` name
+# inside Cursor's own versioned install tree, which is what identifies it.
+[ "$harness" = cursor-alias ] && harness=cursor-agent/versions/2026.08.04-aaa8809/agent
 pid=
 previous=
 for argument in "$@"; do
@@ -505,18 +525,18 @@ SH
 # Drop every harness env marker from bin/fm-harness.sh detect_own so the
 # surrounding interactive shell cannot leak past the suite's fake ps harness.
 # Markers today: CLAUDECODE (claude), PI_CODING_AGENT plus FM_PI_HARNESS
-# (Pi family), GROK_AGENT (grok).
+# (Pi family), GROK_AGENT (grok), CURSOR_AGENT (cursor).
 # codex and opencode have no env markers (ancestry only). Without this, a local
-# claude/pi/grok session fails cases that pin a different fake harness while CI
-# (no ambient markers) still passes.
+# claude/pi/grok/cursor session fails cases that pin a different fake harness
+# while CI (no ambient markers) still passes.
 run_session_start() {
   local home=$1 root=$2 path=$3 pi_harness=${4:-}
   if [ -n "$pi_harness" ]; then
-    env -u CLAUDECODE -u GROK_AGENT PI_CODING_AGENT=true FM_PI_HARNESS="$pi_harness" \
+    env -u CLAUDECODE -u GROK_AGENT -u CURSOR_AGENT PI_CODING_AGENT=true FM_PI_HARNESS="$pi_harness" \
       FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
       "$SESSION_START"
   else
-    env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT -u CURSOR_AGENT \
       FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
       "$SESSION_START"
   fi
@@ -624,7 +644,7 @@ EOF
 
 run_session_start_herdr_secondmate() {
   local root=$1 home=$2 fakebin=$3 mate=$4 log=$5 state=$6
-  FM_BACKEND=herdr FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" \
+  HERDR_SESSION=default FM_BACKEND=herdr FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" \
     FM_FAKE_SECOND_MATE_ID="$SESSION_START_HERDR_SECOND_MATE_ID" \
     FM_FAKE_HARNESS_PID=$$ \
     run_session_start "$home" "$root" "$fakebin:$BASE_PATH"
@@ -940,6 +960,7 @@ SH
 test_output_ordering_diagnostics_lead() {
   local rec root home fakebin out lock_line boot_line wake_line read_once_line
   local context_line fleet_line next_line inventory_line missing_line
+  local ordering_path base_dir tool_path tool_name
   rec=$(new_world ordering)
   IFS='|' read -r root home fakebin <<EOF
 $rec
@@ -949,10 +970,12 @@ EOF
   # Force a MISSING diagnostic line so the bootstrap section is non-trivial.
   rm -f "$fakebin/node"
 
+  ordering_path=$(make_path_without_node "$TMP_ROOT/ordering-path")
+
   printf 'window=fm-sess:w1\nkind=ship\n' > "$home/state/task-a.meta"
   printf 'Captain memory that may be truncated away safely.\n' > "$home/data/captain.md"
 
-  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  out=$(run_session_start "$home" "$root" "$fakebin:$ordering_path")
 
   lock_line=$(printf '%s\n' "$out" | grep -n '^LOCK$' | head -1 | cut -d: -f1)
   boot_line=$(printf '%s\n' "$out" | grep -n '^BOOTSTRAP$' | head -1 | cut -d: -f1)
@@ -1344,7 +1367,7 @@ EOF
 # --- composition: real scripts run, not reimplemented ------------------------
 
 test_composition_invokes_real_scripts() {
-  local rec root home fakebin out
+  local rec root home fakebin out base_path
   rec=$(new_world composition)
   IFS='|' read -r root home fakebin <<EOF
 $rec
@@ -1352,11 +1375,12 @@ EOF
   make_fake_toolchain "$fakebin"
   make_fake_ps_claude "$fakebin"
   rm -f "$fakebin/node"
+  base_path=$(make_path_without_node "$TMP_ROOT/composition-path")
 
   printf 'needs-decision: pick a library\n' > "$home/state/task-z.status"
   append_wake "$home/state" signal task-z.status "needs-decision: pick a library"
 
-  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  out=$(run_session_start "$home" "$root" "$fakebin:$base_path")
 
   # fm-lock.sh's own exact success text.
   assert_contains "$out" "lock acquired: harness pid" "fm-lock.sh's real output did not appear (composition, not reimplementation)"
@@ -2293,6 +2317,68 @@ EOF
   pass "session start preserves pi-signed primary identity while applying Pi extension guarantees"
 }
 
+test_cursor_primary_reports_hooks_registration() {
+  local rec root home fakebin out
+  rec=$(new_world cursor-supervision-block)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_harness "$fakebin" cursor
+
+  out=$(FM_FAKE_HARNESS=cursor run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  assert_contains "$out" "SUPERVISION OPERATING INSTRUCTIONS - primary harness: cursor" "cursor supervision block missing"
+  assert_contains "$out" "Mode: Cursor stop-hook-owned supervision." "cursor snippet missing from session start"
+  # The tracked .cursor/hooks.json exists in the real repo root, so a fixture
+  # root that does NOT carry it must report the registration gap.
+  assert_contains "$out" "CURSOR_HOOKS: not registered or malformed" "cursor hooks registration diagnostic missing"
+  pass "session start emits the cursor supervision block and reports hooks registration state"
+}
+
+test_cursor_primary_accepts_registered_hooks() {
+  local rec root home fakebin out fake_harness
+  for fake_harness in cursor cursor-alias; do
+    rec=$(new_world "cursor-hooks-ok-$fake_harness")
+    IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+    make_fake_toolchain "$fakebin"
+    make_fake_ps_harness "$fakebin" "$fake_harness"
+    mkdir -p "$root/.cursor"
+    jq '.hooks.stop += [{"command":"echo extra-stop","timeout":600,"loop_limit":null}] | .hooks.preToolUse += [{"matcher":"Shell","command":"echo extra-pretool","timeout":10}]' \
+      "$ROOT/.cursor/hooks.json" > "$root/.cursor/hooks.json"
+
+    out=$(FM_FAKE_HARNESS="$fake_harness" run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+    assert_contains "$out" "SUPERVISION OPERATING INSTRUCTIONS - primary harness: cursor" \
+      "$fake_harness supervision block missing"
+    assert_not_contains "$out" "CURSOR_HOOKS: not registered or malformed" \
+      "$fake_harness hooks diagnostic fired for a registered fixture with additions"
+  done
+  pass "session start accepts Cursor hooks with additional declarations and legacy alias identity"
+}
+
+test_cursor_primary_rejects_empty_or_malformed_hooks() {
+  local rec root home fakebin out
+  rec=$(new_world cursor-hooks-invalid)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_harness "$fakebin" cursor
+  mkdir -p "$root/.cursor"
+  printf '%s\n' '{"version":1,"hooks":{"stop":[],"preToolUse":[]}}' > "$root/.cursor/hooks.json"
+  out=$(FM_FAKE_HARNESS=cursor run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "CURSOR_HOOKS: not registered or malformed" \
+    "empty Cursor hook arrays must produce a registration diagnostic"
+  printf '%s\n' '{"version":1,"hooks":{"stop":[{"command":"echo fm-turnend-guard-cursor.sh","timeout":600,"loop_limit":null}],"preToolUse":[{"matcher":"Shell","command":"echo fm-arm-pretool-check.sh --cursor","timeout":1}]}}' > "$root/.cursor/hooks.json"
+  out=$(FM_FAKE_HARNESS=cursor run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "CURSOR_HOOKS: not registered or malformed" \
+    "wrong Cursor hook commands or matcher must produce a registration diagnostic"
+  pass "session start rejects empty and structurally wrong Cursor hooks"
+}
+
 test_pi_diagnostic_rejects_stale_loaded_marker() {
   local rec root home fakebin out marker holder_pid
   rec=$(new_world pi-stale-loaded-marker)
@@ -2430,6 +2516,9 @@ test_next_step_sources_x_mode_cadence
 test_next_step_afk_delegates_to_daemon
 test_supervision_block_exactly_one_and_pi_diagnostic
 test_pi_signed_primary_uses_pi_extensions_without_identity_normalization
+test_cursor_primary_reports_hooks_registration
+test_cursor_primary_accepts_registered_hooks
+test_cursor_primary_rejects_empty_or_malformed_hooks
 test_pi_diagnostic_rejects_stale_loaded_marker
 test_pi_diagnostic_accepts_prelock_loaded_marker
 test_pi_diagnostic_rejects_missing_turnend_guard_marker
