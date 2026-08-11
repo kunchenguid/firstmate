@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# shellcheck source=tests/test-entry.sh
+. "$(dirname "$0")/test-entry.sh"
 # tests/fm-composer-lib.test.sh - the shared composer-content classifier
 # (bin/fm-composer-lib.sh), the ONE fleet-wide owner every backend adapter
 # delegates its empty|pending|unknown verdict to.

@@ -71,7 +71,7 @@ Check and test the toolbelt before pushing:
 ```sh
 for script in bin/*.sh bin/backends/*.sh; do bash -n "$script"; done   # syntax-check the toolbelt
 bin/fm-lint.sh   # lint the toolbelt and behavior tests; the single owner CI and the no-mistakes gate both run
-for test_script in tests/*.test.sh; do case "$test_script" in tests/fm-afk-launch.test.sh|tests/fm-backend-autodetect-smoke.test.sh|tests/fm-backend-herdr-workspace-per-home-e2e.test.sh) continue ;; esac; bash "$test_script"; done   # behavior tests safe for a developer checkout
+tests/run.sh --skip-herdr   # behavior tests with real-Herdr declarations explicitly skipped
 [ "$(readlink CLAUDE.md)" = "AGENTS.md" ]
 [ "$(readlink .claude/skills)" = "../.agents/skills" ]
 tmp=$(mktemp -d) && printf 'done: smoke\n' > "$tmp/smoke.status" && FM_STATE_OVERRIDE="$tmp" FM_SIGNAL_GRACE=1 FM_POLL=1 FM_HEARTBEAT=999999 bin/fm-watch-arm.sh  # watcher re-arm smoke test (prints arm status, then an actionable signal)
@@ -80,16 +80,20 @@ tmp=$(mktemp -d) && printf 'done: smoke\n' > "$tmp/smoke.status" && FM_STATE_OVE
 Agent Fleet is independently packaged under `tools/agent-fleet` and requires Python 3.11 or newer plus `uv`.
 Run the complete locked verification in [`tools/agent-fleet/RELEASING.md`](tools/agent-fleet/RELEASING.md) before pushing; that document also owns versioning, tagging, and clean-install verification.
 
-Discover behavior-test entrypoints by listing `tests/*.test.sh` and run one directly to focus on a subject; partition wrappers source their matching `tests/*-suite.sh` implementation.
+Discover tests by listing `tests/*.test.sh`: each is a self-contained shell script named `<subject>.test.sh`, and its header comment describes what it covers; partition wrappers source their matching `tests/*-suite.sh` implementation.
+Run the complete suite with `tests/run.sh`, or focus on one subject with `tests/run.sh tests/<subject>.test.sh`.
+Direct `bash tests/<subject>.test.sh` execution sources the same admission preflight and re-enters the authoritative runner.
+Use `tests/run.sh --skip-herdr` only when intentionally selecting the explicit non-Herdr path.
+See [`docs/test-isolation.md`](docs/test-isolation.md) for the lifecycle declaration and isolation contract.
+CI partitions behavior tests through `bin/fm-behavior-shards.sh`, which admits every selected entrypoint through the same runner and preserves the explicit non-Herdr selection for real-Herdr declarations.
 Background process fan-out is report-only unless a behavior test declares and continuously verifies a fixed per-script bound without reducing its assertion or input matrix.
 `tests/fm-wake-queue.test.sh` owns its concurrency contract and focused slow-host regression in the script header.
 When triaging a red behavior shard, use its begin and end markers to identify each failing script: the shard continues through its complete assignment and records every exit code before the final `Behavior tests` job verifies the executed union.
-Reproduce with the exclusion-aware local loop to see every safe failure at once before concluding which ones are real.
+The runner continues after an individual test failure, so its log records every attempted test.
 Reproduce in a checkout whose `origin` is the repository's https URL, as CI's own checkout is: the secondmate network-authority fixtures assert that the product pins the resolved address of the origin host, and a checkout whose `origin` is a local filesystem path has no host to pin, so those cases refuse for a reason that exists only locally.
 Run the suites from a checkout sitting on its default branch, not from a task-branch worktree - the worktree-tangle guard fires and several secondmate suites require the default branch, which produces more failures that are pure local artifacts.
-Do not run `tests/fm-afk-launch.test.sh`, `tests/fm-backend-autodetect-smoke.test.sh`, or `tests/fm-backend-herdr-workspace-per-home-e2e.test.sh` on a developer checkout: they act on the DEFAULT Herdr workspace where the live crewmate fleet runs and can destroy other agents' unlanded work.
-CI runs them safely only because its runner is disposable and carries no fleet.
-Use `bin/fm-brief.sh --herdr-lab` for these suites; it owns the isolation contract requiring a never-default lab session, a trailing `--session` on every Herdr call, guarded teardown, and a before/after fleet-state tripwire.
+Do not bypass `tests/run.sh` for real-Herdr suites: their declarations require the runner to provision a never-default lab, route every Herdr call through the lab helper, and verify the before/after default-fleet tripwire.
+Direct execution is safe because the test header immediately re-enters the same runner before its body.
 Other tests that need a real optional backend, an explicit opt-in, or an ambient toolchain capability (real zellij/cmux smoke tests, the live Pi regression, the Pi TypeScript-extension checks when node cannot import `.ts` modules directly) skip themselves and print the tool or environment gate needed to enable them.
 
 ## Questions

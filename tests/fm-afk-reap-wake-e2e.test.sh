@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# shellcheck source=tests/test-entry.sh
+. "$(dirname "$0")/test-entry.sh"
 # tests/fm-afk-reap-wake-e2e.test.sh - isolated native away-mode delivery test.
 #
 # A Claude-native away daemon is itself the harness-tracked background task.

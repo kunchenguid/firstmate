@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# shellcheck source=tests/test-entry.sh
+. "$(dirname "$0")/test-entry.sh"
 # tests/fm-watch-pause-absorb.test.sh - a DECLARED pause must be honoured on its
 # own evidence, independent of what the crewmate's terminal or its attributed
 # no-mistakes run happens to be doing.

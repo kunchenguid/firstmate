@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# shellcheck source=tests/test-entry.sh
+. "$(dirname "$0")/test-entry.sh"
 # tests/fm-backend-herdr-eventwait-smoke.test.sh - REAL-herdr smoke test for the
 # native pane.agent_status_changed push escalation (fm_backend_herdr_wait_transition,
 # bin/backends/herdr.sh, and its raw-socket reader bin/backends/herdr-eventwait.py).
@@ -25,7 +27,7 @@ command -v python3 >/dev/null 2>&1 || { echo "skip: python3 not found (required 
 # shellcheck source=tests/herdr-test-safety.sh
 . "$ROOT/tests/herdr-test-safety.sh"
 
-SESSION="fm-lab-eventwait-smoke-$$"
+SESSION=$(herdr_test_session eventwait-smoke)
 export HERDR_SESSION="$SESSION"
 herdr_test_lab_available "$SESSION" || exit 0
 SCRATCH=
@@ -34,7 +36,7 @@ cleanup_all() {
   herdr_safe_stop_and_delete "$SESSION"
 }
 trap cleanup_all EXIT
-fm_herdr_lab_prepare "$SESSION" || fail "could not prepare the isolated Herdr lab session"
+herdr_test_prepare "$SESSION" || fail "could not prepare the isolated Herdr lab session"
 
 # shellcheck source=bin/fm-backend.sh
 . "$ROOT/bin/fm-backend.sh"

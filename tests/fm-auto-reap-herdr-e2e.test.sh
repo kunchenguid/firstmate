@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# shellcheck source=tests/test-entry.sh
+. "$(dirname "$0")/test-entry.sh"
 # Real Herdr regression for automatic terminal teardown.
 #
 # This opt-in test starts one task-local agent process in a named non-default
@@ -27,8 +29,9 @@ for tool in git herdr jq python3; do
 done
 
 LAB_HELPER=${HERDR_LAB_HELPER:-$ROOT/bin/fm-herdr-lab.sh}
-SESSION=${HERDR_LAB_SESSION:-$("$LAB_HELPER" name fm-auto-reap-herdr-e2e)}
-PREPROVISIONED=${FM_AUTO_REAP_HERDR_E2E_PREPROVISIONED:-0}
+SESSION=${FM_TEST_HERDR_LAB_SESSION:-${HERDR_LAB_SESSION:-$("$LAB_HELPER" name fm-auto-reap-herdr-e2e)}}
+PREPROVISIONED=${FM_AUTO_REAP_HERDR_E2E_PREPROVISIONED:-${FM_TEST_HERDR_LAB_SESSION:+1}}
+PREPROVISIONED=${PREPROVISIONED:-0}
 ORIGINAL_PATH=$PATH
 TMP_ROOT=$(mktemp -d "$ROOT/.fm-auto-reap-herdr-e2e.XXXXXX")
 FAKE_ROOT="$TMP_ROOT/fm-root"

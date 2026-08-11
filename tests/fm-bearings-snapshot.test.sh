@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# shellcheck source=tests/test-entry.sh
+. "$(dirname "$0")/test-entry.sh"
 # Behavior tests for the bearings projection wrapper over fm-fleet-snapshot.sh.
 # Covers the output/token bound, TOON/JSON parity, the local-only default (zero
 # GitHub/network calls), the --include-prs opt-in path, graceful degradation on a

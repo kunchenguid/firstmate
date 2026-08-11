@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# shellcheck source=tests/test-entry.sh
+. "$(dirname "$0")/test-entry.sh"
 # Behavior tests for fm-spawn.sh batch dispatch (`id=repo` pairs).
 #
 # These exercise argument routing only: each spawn attempt fails fast at the

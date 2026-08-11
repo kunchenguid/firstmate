@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# shellcheck source=tests/test-entry.sh
+. "$(dirname "$0")/test-entry.sh"
 # Real Pi/Herdr regression for exact-id secondmate marker delivery.
 #
 # This is opt-in because it launches a real interactive Pi process and a real
@@ -34,7 +36,7 @@ for tool in git herdr jq pi python3; do
 done
 
 LAB_HELPER=${HERDR_LAB_HELPER:-$ROOT/bin/fm-herdr-lab.sh}
-SESSION=$("$LAB_HELPER" name fm-send-secondmate-marker-v7)
+SESSION=$(herdr_test_session fm-send-secondmate-marker-v7)
 herdr_test_lab_available "$SESSION" || exit 0
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fm-send-marker-herdr-e2e.XXXXXX")
 SENDER_HOME="$TMP_ROOT/sender-home"
@@ -49,7 +51,7 @@ DIRECT='FM_MARKER_HERDR_DIRECT captain input'
 cleanup() {
   local rc=$?
   trap - EXIT
-  if ! "$LAB_HELPER" teardown "$SESSION"; then
+  if ! herdr_safe_stop_and_delete "$SESSION"; then
     rc=1
   fi
   rm -rf "$TMP_ROOT"
@@ -129,7 +131,7 @@ if import_anchor not in source or factory_anchor not in source:
 path.write_text(source.replace(factory_anchor, replacement, 1))
 PY
 
-"$LAB_HELPER" provision "$SESSION"
+herdr_test_prepare "$SESSION"
 PATH="$FAKEBIN:$ORIGINAL_PATH" FM_GATE_REFUSE_BYPASS=1 FM_HOME="$SENDER_HOME" HERDR_SESSION="$SESSION" \
   "$ROOT/bin/fm-spawn.sh" "$ID" "$SECOND_HOME" --secondmate --harness pi --backend herdr >/dev/null
 

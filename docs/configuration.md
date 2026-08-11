@@ -96,10 +96,9 @@ See [`wedge-alarm.md`](wedge-alarm.md) for the channel reference and macOS verif
 
 The tracked `.no-mistakes.yaml` keeps test evidence outside the repo and defines `commands.test` so no-mistakes runs firstmate's bash behavior suite directly.
 That evidence policy is specific to the firstmate repo: target projects may legitimately commit `.no-mistakes/evidence/` from their own no-mistakes pipeline, but firstmate keeps `.no-mistakes/` local and CI rejects tracked entries under that path.
-That command requires `tmux` on `PATH`, prints `tmux -V`, dispatches the behavior tests through [`bin/fm-behavior-shards.sh`](../bin/fm-behavior-shards.sh) `--run` across eight concurrent shards, and fails if any script exits non-zero.
-Each shard runs its assigned scripts serially, and the command finishes with the helper's `--verify` pass to prove the executed union is complete and disjoint.
-The gate gives each shard private `TMPDIR` and `TMUX_TMPDIR` roots, captures output per shard, and prints those logs in shard order after every shard finishes.
-Reusing the same planner and runner as CI restores local-CI parity without duplicating the helper's shard-planning contract here.
+That command requires `tmux` on `PATH`, prints `tmux -V`, routes behavior tests through `tests/run.sh`, and fails if any script exits non-zero.
+It intentionally runs the complete behavior-test inventory serially while [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) uses the duration-balanced sharding owned by [`bin/fm-behavior-shards.sh`](../bin/fm-behavior-shards.sh); both routes cross the same sealed admission boundary instead of delegating the test step to an agent, so local-CI parity holds on what admission a test receives.
+The gate does not reproduce CI's concurrent shard fan-out because it does not select the explicit non-Herdr path: every real-Herdr declaration provisions an owned lab here, and the serial route holds those labs to one at a time.
 
 ## Crosscheck reviewer
 

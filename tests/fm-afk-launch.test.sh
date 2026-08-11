@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# shellcheck source=tests/test-entry.sh
+. "$(dirname "$0")/test-entry.sh"
 # tests/fm-afk-launch.test.sh - the script-owned, backend-aware away-daemon
 # launch (bin/fm-afk-launch.sh) and the away-mode stale-artifact lifecycle fixes
 # (bin/fm-afk-start.sh). Two layers:
@@ -1946,7 +1948,7 @@ e2e_herdr() {
 
   local SESSION home_tmp cap_ws cap_tab cap_pane target
   local before during after ws_before ws_during ws_after out dtgt dtab
-  SESSION="fm-lab-afk-launch-e2e-$$"
+  SESSION=$(herdr_test_session afk-launch-e2e)
   export HERDR_SESSION="$SESSION"
   herdr_test_lab_available "$SESSION" || return 0
   home_tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-e2e-home.XXXXXX")
@@ -1956,7 +1958,7 @@ e2e_herdr() {
     herdr_safe_stop_and_delete "$SESSION" >/dev/null 2>&1 || true
     rm -rf "$home_tmp" 2>/dev/null || true
   }
-  fm_herdr_lab_prepare "$SESSION" || { fail "herdr e2e: could not prepare isolated lab session"; return 0; }
+  herdr_test_prepare "$SESSION" || { fail "herdr e2e: could not prepare isolated lab session"; return 0; }
   fm_backend_source herdr || { E2E_HERDR_CLEANUP; fail "herdr e2e: fm_backend_source herdr failed"; return 0; }
   fm_backend_herdr_server_ensure "$SESSION" || { E2E_HERDR_CLEANUP; fail "herdr e2e: lab server did not start"; return 0; }
 
@@ -2174,7 +2176,11 @@ unit_afk_bounded_copy_rejects_source_generation_swap
 unit_afk_control_reads_are_nonblocking_and_generation_pinned
 unit_flag_write_failure_aborts
 unit_flag_staging_does_not_follow_predictable_symlink
-e2e_herdr
+if [ "${FM_TEST_SKIP_HERDR:-0}" = 1 ]; then
+  pass "herdr topology: explicit non-Herdr mode omits real lifecycle coverage"
+else
+  e2e_herdr
+fi
 e2e_tmux
 
 [ "$FAILED" -eq 0 ] || exit 1

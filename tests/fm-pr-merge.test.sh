@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# shellcheck source=tests/test-entry.sh
+. "$(dirname "$0")/test-entry.sh"
 # Tests for the sole PR merge path.
 #
 # The merge gate must record live PR state, require a clear crosscheck for the

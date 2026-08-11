@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# shellcheck source=tests/test-entry.sh
+. "$(dirname "$0")/test-entry.sh"
 # tests/fm-backend-tmux-smoke.test.sh - real tmux smoke test for the tmux
 # session-provider adapter (bin/backends/tmux.sh), the P1 checklist item
 # "run a real tmux smoke test (create session, send text + Enter, capture,

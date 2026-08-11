@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# shellcheck source=tests/test-entry.sh
+. "$(dirname "$0")/test-entry.sh"
 # Parity guard for firstmate's shell-lint definition.
 #
 # bin/fm-lint.sh must be the single owner that BOTH CI

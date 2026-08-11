@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# shellcheck source=tests/test-entry.sh
+. "$(dirname "$0")/test-entry.sh"
 # tests/fm-supervision-events.test.sh - unit tests for the watcher's native
 # event-wait splice (event_wait_or_sleep, handle_push_transition in
 # bin/fm-watch.sh). The watcher's source guard lets this file source it to load

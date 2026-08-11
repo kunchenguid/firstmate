@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# shellcheck source=tests/test-entry.sh
+. "$(dirname "$0")/test-entry.sh"
 # fm-send strict target resolution.
 #
 # A send that cannot be tied to a recorded task/lane or to an explicit

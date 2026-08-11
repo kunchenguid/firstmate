@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# shellcheck source=tests/test-entry.sh
+. "$(dirname "$0")/test-entry.sh"
 # Pure behavior tests for the exact-identity captain decision gate.
 # No test launches, signals, or inspects an agent or terminal lifecycle.
 set -u

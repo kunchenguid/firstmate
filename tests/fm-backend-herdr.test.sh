@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2031
+# shellcheck source=tests/test-entry.sh
+. "$(dirname "$0")/test-entry.sh"
 # Test fixtures deliberately scope PATH changes to subshells; no parent-shell
 # mutation is expected or subsequently consumed.
-# shellcheck disable=SC2031
 # tests/fm-backend-herdr.test.sh - fake-herdr-CLI unit tests for the herdr
 # session-provider adapter (bin/backends/herdr.sh), P2 of
 # data/fm-backend-design-d7 (herdr-addendum.md). Mirrors tests/fm-backend.test.sh's

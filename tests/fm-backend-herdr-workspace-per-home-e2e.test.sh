@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# shellcheck source=tests/test-entry.sh
+. "$(dirname "$0")/test-entry.sh"
 # tests/fm-backend-herdr-workspace-per-home-e2e.test.sh - mandatory ISOLATED
 # end-to-end real-herdr test for the P3 "workspace-per-home" pass (AGENTS.md
 # task herdr-sm-spaces-k4). Drives the REAL bin/fm-spawn.sh and
@@ -61,7 +63,7 @@ command -v treehouse >/dev/null 2>&1 || { echo "skip: treehouse not found (requi
 # canonicalized project and backend cwd comparisons in the worktree-discovery
 # poll.
 TMP_ROOT=$(mktemp -d "$(cd "${TMPDIR:-/tmp}" && pwd -P)/fm-herdr-e2e.XXXXXX")
-SESSION="fm-lab-herdr-e2e-$$"
+SESSION=$(herdr_test_session workspace-per-home-e2e)
 export HERDR_SESSION="$SESSION"
 export FM_TREEHOUSE_ROOT="$TMP_ROOT/treehouse-pools"
 export FM_CHECKOUT_REFRESH_STATE_BASE="$TMP_ROOT/checkout-refresh"
@@ -76,7 +78,7 @@ cleanup_all() {
   rm -rf "$TMP_ROOT"
 }
 trap cleanup_all EXIT
-fm_herdr_lab_prepare "$SESSION" || fail "could not prepare isolated Herdr lab session"
+herdr_test_prepare "$SESSION" || fail "could not prepare isolated Herdr lab session"
 
 # shellcheck source=bin/fm-backend.sh
 . "$ROOT/bin/fm-backend.sh"

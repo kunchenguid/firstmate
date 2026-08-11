@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# shellcheck source=tests/test-entry.sh
+. "$(dirname "$0")/test-entry.sh"
 # tests/fm-backlog-handoff.test.sh - full item-block handoff (header + indented body).
 #
 # The happy single-line path and safety refusals live in the secondmate lifecycle

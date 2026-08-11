@@ -8,7 +8,7 @@ The 2026-07-31 `main` behavior job ran all 80 scripts serially from 16:41:30 UTC
 
 The source run is [GitHub Actions run 30648119449](https://github.com/ruby-dlee/firstmate/actions/runs/30648119449).
 
-`tests/behavior-test-durations.tsv` is the current behavior-test inventory and per-script weight source.
+`tests/behavior-test-durations.tsv` is the current behavior-test inventory and per-script weight source, including the runner contract tests and every test added on `main` since the baseline run.
 
 ## Assignment
 
@@ -56,6 +56,9 @@ The checked-in plan above also reflects the later teardown-suite split and tests
 `bin/fm-behavior-shards.sh --check 8` fails when the duration inventory has a missing path, duplicate path, malformed duration, or any difference from the complete `tests/*.test.sh` inventory.
 
 Every matrix runner writes an executed manifest while continuing through all assigned scripts and preserving each exit code.
+
+Both shard execution and timing refresh invoke each selected path through `tests/run.sh`, so their planning layer cannot bypass lifecycle admission.
+CI sets `FM_TEST_SKIP_HERDR=1` on the shard command because its disposable image does not provide Herdr; this is the runner's explicit non-Herdr path, not an ambient missing-tool fallback.
 
 The final `Behavior tests` job downloads all eight manifests and runs `bin/fm-behavior-shards.sh --verify 8 <manifest-dir>`.
 

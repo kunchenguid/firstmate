@@ -1,4 +1,6 @@
 #!/bin/sh
+# shellcheck source=tests/test-entry.sh
+. "$(dirname "$0")/test-entry.sh"
 # Durable Lavish protocol, failure recovery, migration, and no-resident-resource
 # behavior.
 set -eu

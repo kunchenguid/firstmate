@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# shellcheck source=tests/test-entry.sh
+. "$(dirname "$0")/test-entry.sh"
 # tests/fm-daemon.test.sh - supervise-daemon classifiers, the captain-relevant
 # status-phrase matrix (a product contract), escalation batching/dedupe, afk
 # presence-gating, and the injection-hardening units that an e2e cannot

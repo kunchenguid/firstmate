@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2016
+# shellcheck source=tests/test-entry.sh
+. "$(dirname "$0")/test-entry.sh"
 # fm-send pre-submit popup-settle selection (the codex `$<skill>` fix).
 #
 # Some TUIs open a completion popup when the composer's first character triggers
@@ -28,7 +31,6 @@
 # on purpose - the whole point is to send an unexpanded `$...` line to the agent -
 # so SC2016 (which flags single-quoted `$` as a probably-forgotten expansion) is a
 # false positive here and is disabled file-wide.
-# shellcheck disable=SC2016
 set -u
 
 # shellcheck source=tests/lib.sh

@@ -1,4 +1,6 @@
 #!/bin/sh
+# shellcheck source=tests/test-entry.sh
+. "$(dirname "$0")/test-entry.sh"
 set -eu
 
 command -v python3.11 >/dev/null

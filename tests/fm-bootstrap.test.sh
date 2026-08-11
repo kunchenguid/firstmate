@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# shellcheck source=tests/test-entry.sh
+. "$(dirname "$0")/test-entry.sh"
 # Behavior tests for fm-bootstrap.sh reporting and session-start clone refresh bounds.
 #
 # Bootstrap prints one block or line per problem or capability fact and is silent when all

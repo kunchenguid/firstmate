@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# shellcheck source=tests/test-entry.sh
+. "$(dirname "$0")/test-entry.sh"
 # Deterministic Agent Fleet integration tests for spawn, recovery, and rollback.
 # A fake Agent Fleet and fake tmux capture every command; no profile home,
 # credential, real endpoint, global config, or live worker is touched.

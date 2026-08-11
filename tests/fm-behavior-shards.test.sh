@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# shellcheck source=tests/test-entry.sh
+. "$(dirname "$0")/test-entry.sh"
 # Behavior tests for deterministic duration-balanced CI sharding and the
 # post-execution completeness guard.
 set -u
@@ -117,6 +119,14 @@ printf 'two\n' >> "${FM_FIXTURE_EXECUTED:?}"
 printf 'ok - fixture two\n'
 SH
   chmod +x "$root/tests/one.test.sh" "$root/tests/two.test.sh"
+  cat > "$root/tests/run.sh" <<'SH'
+#!/usr/bin/env bash
+if [ -n "${FM_FIXTURE_ADMISSIONS:-}" ]; then
+  printf '%s\n' "$1" >> "$FM_FIXTURE_ADMISSIONS"
+fi
+exec bash "$@"
+SH
+  chmod +x "$root/tests/run.sh"
   cat > "$root/tests/behavior-test-durations.tsv" <<'EOF_DURATIONS'
 10	tests/one.test.sh
 20	tests/two.test.sh
@@ -257,6 +267,8 @@ test_ci_wires_matrix_isolation_timeout_and_union_verification() {
   # shellcheck disable=SC2016  # Workflow shell variables must remain literal.
   assert_grep 'bin/fm-behavior-shards.sh --verify 8 "$RUNNER_TEMP/behavior-manifests"' "$CI" \
     "CI does not verify the union of executed manifests"
+  assert_grep 'FM_TEST_SKIP_HERDR=1' "$CI" \
+    "CI does not explicitly select the non-Herdr path"
   assert_grep 'overwrite: true' "$CI" \
     "CI cannot refresh a failed shard manifest during a failed-jobs rerun"
   assert_no_grep 'for test_script in tests/*.test.sh' "$CI" \

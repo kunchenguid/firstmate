@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# shellcheck source=tests/test-entry.sh
+. "$(dirname "$0")/test-entry.sh"
 # Behavior tests for the checkout-refresh discovery, upstream signal, timed
 # backstop, independent coverage and scheduler health, untracked skill-draft
 # hygiene, safety posture, worktree freshness proof, and LaunchAgent definition.

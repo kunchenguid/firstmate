@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# shellcheck source=tests/test-entry.sh
+. "$(dirname "$0")/test-entry.sh"
 # Tests for the tracked Pi primary watcher extension and Pi secondmate wiring.
 set -u
 

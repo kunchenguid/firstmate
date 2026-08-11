@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# shellcheck source=tests/test-entry.sh
+. "$(dirname "$0")/test-entry.sh"
 # Tests for the destructive Treehouse-return boundary walk in
 # bin/fm-checkout-lock-lib.sh (fm_checkout_treehouse_return_locked).
 #

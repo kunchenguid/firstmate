@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# shellcheck source=tests/test-entry.sh
+. "$(dirname "$0")/test-entry.sh"
 # tests/fm-secondmate-liveness.test.sh - the session-start secondmate LIVENESS
 # guarantee: bin/fm-backend.sh's fm_backend_agent_alive probe (dispatching to
 # fm_backend_tmux_agent_alive / fm_backend_herdr_agent_alive) and
@@ -390,25 +392,27 @@ test_sweep_rechecks_liveness_after_lifecycle_lock() {
 
   bash -c '
     . "$1"
-    held=$(FM_ACCOUNT_LIFECYCLE_LOCK_WAIT_SECONDS=2 fm_account_lifecycle_lock_acquire "$2" sm1) || exit 1
+    held=$(FM_ACCOUNT_LIFECYCLE_LOCK_WAIT_SECONDS="$5" fm_account_lifecycle_lock_acquire "$2" sm1) || exit 1
     touch "$3"
     while [ ! -f "$4" ]; do sleep 0.05; done
     fm_account_lifecycle_lock_release "$held"
-  ' _ "$ROOT/bin/fm-account-routing-lib.sh" "$w/home/state" "$lock_ready" "$lock_release" &
+  ' _ "$ROOT/bin/fm-account-routing-lib.sh" "$w/home/state" "$lock_ready" "$lock_release" \
+    "$FM_TEST_LIVENESS_TIMEOUT_SECONDS" &
   lock_pid=$!
-  for _ in $(seq 1 100); do [ -f "$lock_ready" ] && break; sleep 0.05; done
-  [ -f "$lock_ready" ] || { kill "$lock_pid" 2>/dev/null || true; fail "lifecycle recheck test did not acquire its blocker lock"; }
+  fm_test_wait_for_file "$lock_ready" "$lock_pid" 0.05 \
+    || { kill "$lock_pid" 2>/dev/null || true; fail "lifecycle recheck test did not acquire its blocker lock"; }
 
   PATH="$tmuxfb:$fb:$BASE_PATH" TMUX='' FM_BACKEND=tmux FM_HOME="$w/home" \
     FM_TEST_PANE_CMD_FILE="$cmd_file" FM_TEST_PROBE_LOG="$probe_log" \
     FM_TMUX_CALL_LOG="$log" FM_TEST_ENDPOINT_FILE="$w/home/state/.fake-endpoint" \
-    FM_ACCOUNT_LIFECYCLE_LOCK_WAIT_SECONDS=5 "$ROOT/bin/fm-bootstrap.sh" > "$out_file" 2>&1 &
+    FM_ACCOUNT_LIFECYCLE_LOCK_WAIT_SECONDS="$FM_TEST_LIVENESS_TIMEOUT_SECONDS" \
+    "$ROOT/bin/fm-bootstrap.sh" > "$out_file" 2>&1 &
   bootstrap_pid=$!
-  for _ in $(seq 1 100); do [ -s "$probe_log" ] && break; sleep 0.05; done
-  [ -s "$probe_log" ] || {
+  fm_test_wait_for_file "$probe_log" "$bootstrap_pid" 0.05 || {
     kill "$bootstrap_pid" "$lock_pid" 2>/dev/null || true
     fail "lifecycle recheck test never reached its initial dead probe"
   }
+  [ -s "$probe_log" ] || fail "lifecycle recheck initial probe log was empty"
   printf 'claude\n' > "$cmd_file"
   touch "$lock_release"
   wait "$lock_pid" || fail "lifecycle recheck blocker failed"

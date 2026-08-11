@@ -149,7 +149,7 @@ run_test() {
   fi
   case $- in *e*) had_errexit=1 ;; esac
   set +e
-  "$ROOT/$path"
+  "$ROOT/tests/run.sh" "$ROOT/$path"
   rc=$?
   if [ "$had_errexit" -eq 1 ]; then
     set -e

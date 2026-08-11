@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# shellcheck source=tests/test-entry.sh
+. "$(dirname "$0")/test-entry.sh"
 # Tests for the local-HEAD secondmate sync: every secondmate home tracks the
 # PRIMARY firstmate checkout's current default-branch commit by a purely LOCAL
 # fast-forward (no origin fetch). Two hook points drive it - bin/fm-spawn.sh

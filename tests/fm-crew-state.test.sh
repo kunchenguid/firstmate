@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# shellcheck source=tests/test-entry.sh
+. "$(dirname "$0")/test-entry.sh"
 # Behavior tests for bin/fm-crew-state.sh - the deterministic crewmate-current-state
 # helper.
 #

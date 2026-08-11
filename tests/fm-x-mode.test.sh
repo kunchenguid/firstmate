@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# shellcheck source=tests/test-entry.sh
+. "$(dirname "$0")/test-entry.sh"
 # Behavior tests for X mode: the relay poll client (fm-x-poll.sh), the answer
 # poster (fm-x-reply.sh), and bootstrap's .env-presence activation.
 #

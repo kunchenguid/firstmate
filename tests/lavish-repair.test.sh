@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# shellcheck source=tests/test-entry.sh
+. "$(dirname "$0")/test-entry.sh"
 # Behavioral contract for the lavish-repair skill's routing, diagnosis order,
 # process-safety guard, and durable recovery boundaries.
 set -euo pipefail

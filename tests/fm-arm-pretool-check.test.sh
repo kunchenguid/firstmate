@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC1091,SC2016,SC2088
+# shellcheck source=tests/test-entry.sh
+. "$(dirname "$0")/test-entry.sh"
 # Behavior tests for the watcher-arm PreToolUse seatbelt (docs/arm-pretool-check.md).
 #
 # bin/fm-arm-command-policy.mjs is the single owner of command classification.

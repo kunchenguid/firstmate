@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# shellcheck source=tests/test-entry.sh
+. "$(dirname "$0")/test-entry.sh"
 # tests/fm-transition-lib.test.sh - unit tests for the shared, backend-neutral
 # normalized-transition shape and the single-owner status->action policy table
 # (bin/fm-transition-lib.sh). Pure functions, no backend required.

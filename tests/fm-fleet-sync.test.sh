@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# shellcheck source=tests/test-entry.sh
+. "$(dirname "$0")/test-entry.sh"
 # Behavior tests for fm-fleet-sync.sh drift handling.
 #
 # fm-fleet-sync fast-forwards a clone that is cleanly on its default branch. This

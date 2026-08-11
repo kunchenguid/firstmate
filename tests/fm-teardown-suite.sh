@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# shellcheck source=tests/test-entry.sh
+. "$(dirname "$0")/test-entry.sh"
 # Shared tests for bin/fm-teardown.sh's landed-work safety and stale-lock recovery.
 #
 # The check refuses to tear down a worktree whose work has not LANDED, because
@@ -930,7 +932,7 @@ SH
 # Run teardown with PATH mocking. Args: case_dir [extra args...]
 run_teardown() {
   local case_dir=$1; shift
-  FM_ROOT_OVERRIDE="$ROOT" \
+  FM_ROOT_OVERRIDE="${FM_TEST_TEARDOWN_ROOT:-$ROOT}" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_DATA_OVERRIDE="${FM_DATA_OVERRIDE:-$case_dir/data}" \
   FM_CONFIG_OVERRIDE="$case_dir/config" \
@@ -6242,11 +6244,16 @@ SH
 }
 
 test_surviving_object_storage_is_bound_through_graph_proof() {
-  local case_dir source objects pack redirected marker release teardown_pid rc wait_seconds
+  local case_dir source source_tip objects pack redirected marker release teardown_pid rc wait_seconds
   case_dir=$(make_case secondmate-object-storage-toctou)
   prepare_secondmate_home_fixture "$case_dir"
   write_secondmate_meta "$case_dir"
   source="$case_dir/source-projects/test"
+  source_tip=$(git -C "$source" rev-parse HEAD)
+  git -C "$case_dir/project" remote set-url origin "$source"
+  git -C "$case_dir/project" update-ref refs/remotes/origin/main "$source_tip"
+  git -C "$case_dir/wt" reset --quiet --hard "$source_tip"
+  git -C "$case_dir/wt" reflog expire --expire=now --all
   git -C "$source" gc --quiet --prune=now
   objects=$(git -C "$source" rev-parse --git-path objects)
   case "$objects" in /*) ;; *) objects="$source/$objects" ;; esac
@@ -6255,6 +6262,8 @@ test_surviving_object_storage_is_bound_through_graph_proof() {
   redirected="$case_dir/wt/data/$(basename "$pack")"
   marker="$case_dir/object-scan-ready"
   release="$case_dir/object-scan-release"
+  FM_TEST_TEARDOWN_ROOT="$source" \
+  FM_FAKE_FIRSTMATE_SOURCE="$source" \
   FM_TEARDOWN_TEST_OBJECT_SCAN_ROOT="$objects" \
   FM_TEARDOWN_TEST_OBJECT_SCAN_MARKER="$marker" \
   FM_TEARDOWN_TEST_OBJECT_SCAN_RELEASE="$release" \

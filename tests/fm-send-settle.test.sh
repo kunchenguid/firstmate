@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# shellcheck source=tests/test-entry.sh
+. "$(dirname "$0")/test-entry.sh"
 # fm-send post-submit settle pause (FM_SEND_SETTLE).
 #
 # fm-send's success only proves the composer cleared - the Enter landed and the

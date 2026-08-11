@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# shellcheck source=tests/test-entry.sh
+. "$(dirname "$0")/test-entry.sh"
 # tests/fm-afk-inject-herdr-e2e.test.sh - real-herdr end-to-end test for the
 # away-mode daemon's herdr transport (bin/fm-supervise-daemon.sh), the herdr
 # counterpart of tests/fm-afk-inject-e2e.test.sh's private-socket tmux e2e.
@@ -44,7 +46,7 @@ command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the her
 fail() { printf 'not ok - %s\n' "$1" >&2; cleanup_all; exit 1; }
 pass() { printf 'ok - %s\n' "$1"; }
 
-SESSION="fm-lab-afk-herdr-e2e-$$"
+SESSION=$(herdr_test_session afk-herdr-e2e)
 export HERDR_SESSION="$SESSION"
 export FM_BACKEND_HERDR_TEST_LAB=firstmate-herdr-test-lab-v1
 herdr_test_lab_available "$SESSION" || exit 0
@@ -67,10 +69,7 @@ cleanup_all() {
   rm -rf "${STATE_DIR:-}" 2>/dev/null || true
 }
 trap cleanup_all EXIT
-STATE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-herdr-e2e.XXXXXX")
-export FM_HOME="$STATE_DIR/home"
-mkdir -p "$FM_HOME/config" "$FM_HOME/state"
-fm_herdr_lab_prepare "$SESSION" || fail "could not prepare isolated Herdr lab session"
+herdr_test_prepare "$SESSION" || fail "could not prepare isolated Herdr lab session"
 
 # --- source the daemon (for afk_enter/afk_exit/FM_INJECT_MARK) + the backend -
 # shellcheck source=bin/fm-supervise-daemon.sh
@@ -81,6 +80,8 @@ fm_backend_source herdr || fail "fm_backend_source herdr failed"
 
 fm_backend_herdr_version_check || fail "version_check failed against the real installed herdr"
 
+STATE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-herdr-e2e.XXXXXX")
+mkdir -p "$STATE_DIR"
 LOG_FILE="$STATE_DIR/submitted.log"
 : > "$LOG_FILE"
 
@@ -132,7 +133,9 @@ LOG="$1"
 AGENT_SOURCE=fm-test-supervisor
 AGENT_LABEL=fm-test-supervisor
 report_agent_state() {  # <idle|working>
-  herdr pane report-agent "$HERDR_PANE_ID" --source "$AGENT_SOURCE" --agent "$AGENT_LABEL" --state "$1" --session "$HERDR_SESSION" >/dev/null 2>&1
+  PATH="$FM_TEST_ORIGINAL_PATH" "$HERDR_LAB_HELPER" run "$HERDR_SESSION" \
+    pane report-agent "$HERDR_PANE_ID" --source "$AGENT_SOURCE" \
+    --agent "$AGENT_LABEL" --state "$1" >/dev/null 2>&1
 }
 OLD_STTY=$(stty -g 2>/dev/null || true)
 [ -z "$OLD_STTY" ] || stty -echo -icanon min 1 time 0 2>/dev/null || true

@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# shellcheck source=tests/test-entry.sh
+. "$(dirname "$0")/test-entry.sh"
 # tests/fm-backend-tmux-target-exists.test.sh - both-direction existence and
 # identity pins for the tmux backend, against a REAL tmux server isolated on a
 # short repo-local socket (`-S`), like tests/fm-backend-tmux-smoke.test.sh. A faked tmux

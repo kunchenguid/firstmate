@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# shellcheck source=tests/test-entry.sh
+. "$(dirname "$0")/test-entry.sh"
 # Behavior tests for the exact-head crosscheck finding ledger.
 #
 # GitHub doubles derive their TOON from the checked-in gh-axi 0.1.25 fixtures.

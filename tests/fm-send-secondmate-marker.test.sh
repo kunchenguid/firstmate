@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# shellcheck source=tests/test-entry.sh
+. "$(dirname "$0")/test-entry.sh"
 # fm-send from-firstmate marker for secondmate targets.
 #
 # A secondmate is itself a firstmate, so a request relayed to it lands in its own

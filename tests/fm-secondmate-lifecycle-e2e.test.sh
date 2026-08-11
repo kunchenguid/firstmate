@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# shellcheck source=tests/test-entry.sh
+. "$(dirname "$0")/test-entry.sh"
 # tests/fm-secondmate-lifecycle-e2e.test.sh - the happy-path secondmate operator
 # flow, end to end, against one shared world:
 #

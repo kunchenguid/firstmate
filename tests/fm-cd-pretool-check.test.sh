@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC1091,SC2016
+# shellcheck source=tests/test-entry.sh
+. "$(dirname "$0")/test-entry.sh"
 # Behavior tests for the cd-guard PreToolUse seatbelt (docs/cd-guard.md).
 #
 # bin/fm-cd-command-policy.mjs is the single owner of the block/allow decision;

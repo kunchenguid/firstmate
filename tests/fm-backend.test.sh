@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# shellcheck source=tests/test-entry.sh
+. "$(dirname "$0")/test-entry.sh"
 # tests/fm-backend.test.sh - P1 runtime-backend extraction conformance
 # (data/fm-backend-design-d7/report.md, herdr-addendum.md "events as the core
 # abstraction"). bin/fm-backend.sh and bin/backends/tmux.sh move the tmux

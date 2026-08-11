@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# shellcheck source=tests/test-entry.sh
+. "$(dirname "$0")/test-entry.sh"
 # Opt-in interactive Pi primary regression on a private tmux socket and isolated homes.
 set -u
 

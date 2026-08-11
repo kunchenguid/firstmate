@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# shellcheck source=tests/test-entry.sh
+. "$(dirname "$0")/test-entry.sh"
 # tests/fm-backend-cmux.test.sh - fake-cmux-CLI unit tests for the cmux
 # session-provider adapter (bin/backends/cmux.sh), verified against the real
 # cmux 0.64.17 binary (docs/cmux-backend.md). Mirrors

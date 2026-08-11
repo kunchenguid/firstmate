@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# shellcheck source=tests/test-entry.sh
+. "$(dirname "$0")/test-entry.sh"
 # Ghost-text robustness (incident composer-robust; task afk-herdr-false-pending).
 #
 # A harness fills an otherwise-empty composer with de-emphasised ghost text that a

@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+# Runtime door for every real Herdr command issued by an admitted test.
+set -euo pipefail
+
+root=${FM_TEST_REPO_ROOT:-}
+test_script=${FM_TEST_CURRENT_TEST:-}
+session=${FM_TEST_HERDR_LAB_SESSION:-}
+helper=${HERDR_LAB_HELPER:-}
+real_herdr=${FM_TEST_REAL_HERDR:-}
+original_path=${FM_TEST_ORIGINAL_PATH:-}
+
+[ -n "$root" ] && [ -n "$test_script" ] \
+  || { echo "test admission refused: Herdr runtime identity is incomplete" >&2; exit 97; }
+python3 "$root/tests/test-seal.py" admit "$test_script" >/dev/null
+[ "${FM_TEST_HERDR_CAPABILITY:-}" = herdr-lab ] \
+  || [ "${FM_TEST_HERDR_CAPABILITY:-}" = herdr-mixed ] \
+  || { echo "test admission refused: hermetic test attempted real Herdr" >&2; exit 97; }
+case "$session" in fm-lab-?*) ;; *) echo "test admission refused: invalid owned Herdr lab" >&2; exit 97 ;; esac
+[ "${HERDR_SESSION:-}" = "$session" ] \
+  || { echo "test admission refused: ambient Herdr session is not the owned lab" >&2; exit 97; }
+[ -x "$helper" ] && [ -x "$real_herdr" ] && [ -n "$original_path" ] \
+  || { echo "test admission refused: Herdr runtime tools are unavailable" >&2; exit 97; }
+
+case "${1:-}" in
+  --version|-V|version)
+    exec "$real_herdr" "$@"
+    ;;
+esac
+
+args=("$@")
+clean=()
+seen_session=0
+separator=-1
+for ((index = 0; index < ${#args[@]}; index += 1)); do
+  arg=${args[$index]}
+  if [ "$arg" = -- ]; then
+    separator=$index
+    clean+=("$arg")
+    for ((index += 1; index < ${#args[@]}; index += 1)); do
+      clean+=("${args[$index]}")
+    done
+    continue
+  fi
+  if [ "$arg" = --session ]; then
+    [ "$seen_session" -eq 0 ] && [ "$((index + 1))" -lt "${#args[@]}" ] \
+      || { echo "test admission refused: malformed or duplicate Herdr session selector" >&2; exit 97; }
+    named=${args[$((index + 1))]}
+    [ "$named" = "$session" ] \
+      || { echo "test admission refused: foreign/default Herdr session '$named'" >&2; exit 97; }
+    seen_session=1
+    index=$((index + 1))
+    continue
+  fi
+  case "$arg" in
+    --session=*)
+      [ "$seen_session" -eq 0 ] \
+        || { echo "test admission refused: duplicate Herdr session selector" >&2; exit 97; }
+      named=${arg#--session=}
+      [ "$named" = "$session" ] \
+        || { echo "test admission refused: foreign/default Herdr session '$named'" >&2; exit 97; }
+      seen_session=1
+      continue
+      ;;
+  esac
+  clean+=("$arg")
+done
+
+[ "${#clean[@]}" -gt 0 ] \
+  || { echo "test admission refused: empty Herdr command" >&2; exit 97; }
+if [ "${clean[0]}" = server ] \
+  || { [ "${clean[0]}" = session ] && [ "${clean[1]:-}" != list ]; }; then
+  echo "test admission refused: raw Herdr server/session lifecycle must use the owned lab helper" >&2
+  exit 97
+fi
+
+if [ "${clean[0]} ${clean[1]:-}" = "agent start" ]; then
+  [ "$separator" -ge 0 ] \
+    || { echo "test admission refused: Herdr agent start lacks its argv separator" >&2; exit 97; }
+  PATH="$original_path" exec "$helper" run-argv "$session" "${clean[@]}"
+fi
+PATH="$original_path" exec "$helper" run "$session" "${clean[@]}"

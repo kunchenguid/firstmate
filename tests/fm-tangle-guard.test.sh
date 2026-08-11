@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# shellcheck source=tests/test-entry.sh
+. "$(dirname "$0")/test-entry.sh"
 # Behavior tests for the worktree-tangle guards.
 #
 # Firstmate is a treehouse-pooled git repo of itself: linked worktrees and

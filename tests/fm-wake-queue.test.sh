@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# shellcheck source=tests/test-entry.sh
+. "$(dirname "$0")/test-entry.sh"
 # tests/fm-wake-queue.test.sh - wake-queue losslessness (the queue safety matrix):
 # concurrent append/drain, signal catch-up while no watcher runs, stale/check
 # enqueue-before-suppressor ordering, atomic double-drain, duplicate collapse,

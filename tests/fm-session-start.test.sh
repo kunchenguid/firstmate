@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# shellcheck source=tests/test-entry.sh
+. "$(dirname "$0")/test-entry.sh"
 # tests/fm-session-start.test.sh - behavior tests for bin/fm-session-start.sh,
 # the single command that collapses AGENTS.md sections 3 (bootstrap) and 5
 # (recovery) into one ordered digest.

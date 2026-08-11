@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# shellcheck source=tests/test-entry.sh
+. "$(dirname "$0")/test-entry.sh"
 # tests/fm-backend-zellij-smoke.test.sh - real zellij smoke test for the
 # zellij session-provider adapter (bin/backends/zellij.sh), P3 of
 # data/fm-backend-design-d7 (report.md "Zellij Backend"). Mirrors

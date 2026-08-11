@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# shellcheck source=tests/test-entry.sh
+. "$(dirname "$0")/test-entry.sh"
 # tests/fm-afk-inject-e2e.test.sh - private-socket end-to-end test for the afk
 # daemon's injection path. It covers three operator-visible injection contracts:
 #

@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# shellcheck source=tests/test-entry.sh
+. "$(dirname "$0")/test-entry.sh"
 # Behavior tests for deterministic crew-dispatch profile selection.
 set -u
 export FM_ACCOUNT_ROUTING_TEST_LAB=firstmate-account-routing-test-lab-v1

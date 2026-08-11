@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# shellcheck source=tests/test-entry.sh
+. "$(dirname "$0")/test-entry.sh"
 # tests/fm-backend-autodetect-smoke.test.sh - real herdr smoke test for runtime
 # backend AUTO-DETECTION (bin/fm-backend.sh's fm_backend_detect, wired into
 # fm_backend_name between config/backend and the tmux default).
@@ -53,7 +55,7 @@ command -v treehouse >/dev/null 2>&1 || { echo "skip: treehouse not found (requi
 # The dedicated regression is
 # tests/fm-backend.test.sh:test_spawn_symlinked_project_prefix_avoids_false_refusal.
 TMP_ROOT=$(mktemp -d "$(cd "${TMPDIR:-/tmp}" && pwd -P)/fm-backend-autodetect-smoke.XXXXXX")
-SESSION="fm-lab-autodetect-smoke-$$"
+SESSION=$(herdr_test_session autodetect-smoke)
 export HERDR_SESSION="$SESSION"
 export FM_HOME="$TMP_ROOT/home"
 export FM_TREEHOUSE_ROOT="$TMP_ROOT/treehouse-pools"
@@ -69,7 +71,7 @@ cleanup_all() {
   rm -rf "$TMP_ROOT"
 }
 trap cleanup_all EXIT
-fm_herdr_lab_prepare "$SESSION" || fail "could not prepare isolated Herdr lab session"
+herdr_test_prepare "$SESSION" || fail "could not prepare isolated Herdr lab session"
 
 # --- scratch world: FM_HOME with NO backend config, one throwaway project ---
 

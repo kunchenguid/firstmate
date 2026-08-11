@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# shellcheck source=tests/test-entry.sh
+. "$(dirname "$0")/test-entry.sh"
 # Contract tests for bin/fm-github-pr.py.
 #
 # The TOON fixtures were reduced from real gh-axi 0.1.25 output observed on

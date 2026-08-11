@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# shellcheck source=tests/test-entry.sh
+. "$(dirname "$0")/test-entry.sh"
 # tests/fm-backend-orca.test.sh - fake-Orca-CLI unit tests for the Orca
 # terminal adapter primitives in bin/backends/orca.sh.
 set -u

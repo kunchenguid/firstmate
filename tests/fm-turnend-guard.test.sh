@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# shellcheck source=tests/test-entry.sh
+. "$(dirname "$0")/test-entry.sh"
 # Behavior tests for the primary turn-end supervision guard (docs/turnend-guard.md).
 #
 # Two layers:

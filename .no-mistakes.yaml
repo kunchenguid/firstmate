@@ -19,30 +19,22 @@ disable_project_settings: true
 # The shell definition stays single-owned, so local and CI cannot diverge
 # (parity asserted by tests/fm-lint.test.sh).
 # The test command mirrors the source checks in .github/workflows/ci.yml:
-# every tests/*.test.sh, including the Python 3.11 Bridge cutover runner, then
-# Agent Fleet's locked pytest and compileall checks, failing if any check exits
-# non-zero. The e2e tests need tmux on PATH, which the firstmate environment
-# provides.
-# The behavior tests run through bin/fm-behavior-shards.sh, the SAME planner and
-# runner .github/workflows/ci.yml uses, fanned out across its eight shards
-# concurrently instead of one serial loop. This restores local-CI parity: CI has
-# sharded these tests for some time while the local gate still iterated serially,
-# so the serial loop was the divergence, not the fix. --verify re-checks that the
-# executed union is complete and disjoint, exactly as CI does, so parallelism
-# cannot silently drop a file.
-# Each shard gets its own TMPDIR and TMUX_TMPDIR. This is mandatory, not tidiness:
-# CI supplies one isolated runner per shard, and locally the e2e suites would
-# otherwise share a tmux server and temp namespace and produce cross-shard flakes
-# that read as real defects. Shard output is captured per shard and printed in
-# order after the wait, so concurrent runs stay attributable rather than
-# interleaved.
-# Known and accepted: the planner balances on tests/behavior-test-durations.tsv,
-# which holds CI weights that misrank local durations, so local shards are
-# unbalanced. --check keeps the split complete and disjoint regardless, and an
-# unbalanced eight-way split still beats a serial loop by a wide margin.
+# route every behavior test through tests/run.sh's sealed admission boundary,
+# then run Agent Fleet's locked pytest and compileall checks, and fail if any
+# check exits non-zero. The e2e tests need tmux on PATH, which the firstmate
+# environment provides.
+# Local and CI cannot diverge on the admission a test receives: CI fans the same
+# inventory across eight shards, and bin/fm-behavior-shards.sh admits every path
+# it selects through tests/run.sh, so both routes cross this same boundary.
+# This command keeps the single serial runner rather than reproducing that
+# concurrent fan-out locally, because the two routes differ in exactly one way
+# that matters here: CI shards select the explicit non-Herdr path
+# (FM_TEST_SKIP_HERDR=1) because their disposable image carries no Herdr, while
+# this gate never skips, so every real-Herdr declaration provisions an owned
+# Herdr lab and the serial route holds those labs to one at a time.
 commands:
   lint: 'bin/fm-lint.sh && uv run --directory tools/agent-fleet --locked ruff check .'
-  test: 'command -v tmux >/dev/null || { echo "tmux is required for e2e tests" >&2; exit 1; }; tmux -V; rc=0; base=$(mktemp -d); mdir="$base/manifests"; mkdir -p "$mdir"; pids=""; for s in 1 2 3 4 5 6 7 8; do ( TMPDIR="$base/$s/tmp"; TMUX_TMPDIR="$base/$s/tmux"; export TMPDIR TMUX_TMPDIR; mkdir -p "$TMPDIR" "$TMUX_TMPDIR"; bin/fm-behavior-shards.sh --run "$s" 8 "$mdir/executed-$s.tsv" >"$base/shard-$s.log" 2>&1 ) & pids="$pids $!"; done; for p in $pids; do wait "$p" || rc=1; done; for s in 1 2 3 4 5 6 7 8; do echo "== behavior shard $s/8 =="; cat "$base/shard-$s.log"; done; bin/fm-behavior-shards.sh --verify 8 "$mdir" || rc=1; rm -rf "$base"; uv run --directory tools/agent-fleet --locked pytest || rc=1; uv run --directory tools/agent-fleet --locked python -m compileall -q src || rc=1; exit "$rc"'
+  test: 'command -v tmux >/dev/null || { echo "tmux is required for e2e tests" >&2; exit 1; }; tmux -V; rc=0; tests/run.sh || rc=1; uv run --directory tools/agent-fleet --locked pytest || rc=1; uv run --directory tools/agent-fleet --locked python -m compileall -q src || rc=1; exit "$rc"'
 
 # Keep test evidence out of this repo; it stays in a temp dir instead.
 test:

@@ -81,7 +81,8 @@ jobs:
         run: |
           set -eu
           manifest="$RUNNER_TEMP/executed-${{ matrix.shard }}.tsv"
-          bin/fm-behavior-shards.sh --run "${{ matrix.shard }}" 8 "$manifest"
+          FM_TEST_SKIP_HERDR=1 \
+            bin/fm-behavior-shards.sh --run "${{ matrix.shard }}" 8 "$manifest"
       - name: Upload executed-test manifest
         if: always()
         uses: actions/upload-artifact@v4
