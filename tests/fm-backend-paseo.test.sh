@@ -1,0 +1,327 @@
+#!/usr/bin/env bash
+# tests/fm-backend-paseo.test.sh - unit tests for Paseo session-provider adapter
+# (bin/backends/paseo.sh) and dispatcher integration (bin/fm-backend.sh).
+set -u
+
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
+command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the paseo adapter)"; exit 0; }
+
+TMP_ROOT=$(fm_test_tmproot fm-backend-paseo-tests)
+
+make_paseo_fakebin() {  # <dir> -> echoes fakebin dir
+  local dir=$1 fb="$1/fakebin"
+  mkdir -p "$fb"
+  cat > "$fb/paseo" <<'SH'
+#!/usr/bin/env bash
+set -u
+LOG="${FM_PASEO_LOG:?}"
+RESP="${FM_PASEO_RESPONSES:?}"
+COUNT_FILE="$RESP/.count"
+
+{
+  printf 'PASEO_CALL'
+  for a in "$@"; do printf '\x1f%s' "$a"; done
+  printf '\n'
+} >> "$LOG"
+
+if [ "${1:-}" = status ]; then
+  printf '{"localDaemon":"running","connectedDaemon":"reachable"}\n'
+  exit 0
+fi
+
+next=$(( $(cat "$COUNT_FILE" 2>/dev/null || echo 0) + 1 ))
+n=$next
+echo "$n" > "$COUNT_FILE"
+if [ -f "$RESP/$n.exit" ]; then
+  exit "$(cat "$RESP/$n.exit")"
+fi
+if [ -f "$RESP/$n.out" ]; then
+  cat "$RESP/$n.out"
+fi
+exit 0
+SH
+  chmod +x "$fb/paseo"
+
+  cat > "$fb/treehouse" <<'SH'
+#!/usr/bin/env bash
+set -u
+wt="${FM_FAKE_WORKTREE:-/tmp/fake-worktree-root}"
+mkdir -p "$wt"
+if [ "${1:-}" = "get" ] && [ "${2:-}" = "--lease" ]; then
+  printf '🌳 Setting up worktree...\n' >&2
+  printf '%s\n' "$wt"
+  exit 0
+fi
+exit 0
+SH
+  chmod +x "$fb/treehouse"
+
+  printf '%s\n' "$fb"
+}
+
+SETUP_DIR="$TMP_ROOT/setup"
+mkdir -p "$SETUP_DIR/responses"
+FAKEBIN=$(make_paseo_fakebin "$SETUP_DIR")
+export PATH="$FAKEBIN:$PATH"
+export FM_PASEO_LOG="$SETUP_DIR/paseo.log"
+export FM_PASEO_RESPONSES="$SETUP_DIR/responses"
+
+reset_responses() {
+  rm -f "$FM_PASEO_RESPONSES"/* "$FM_PASEO_RESPONSES"/.count "$FM_PASEO_RESPONSES"/.exit
+}
+
+# Source the backend functions
+# shellcheck source=bin/fm-backend.sh
+. "$ROOT/bin/fm-backend.sh"
+fm_backend_source paseo
+
+# Test 1: Known and spawn-supported backends contain paseo
+if fm_backend_is_known paseo && fm_backend_validate_spawn paseo >/dev/null 2>&1; then
+  pass "paseo registered in FM_BACKEND_KNOWN and FM_BACKEND_SPAWN"
+else
+  fail "paseo missing from FM_BACKEND_KNOWN or FM_BACKEND_SPAWN"
+fi
+
+# Test 2: Required tools for paseo
+req_tools=$(fm_backend_required_tools paseo)
+if [ "$req_tools" = "paseo jq treehouse" ]; then
+  pass "fm_backend_required_tools paseo returned expected toolset"
+else
+  fail "unexpected required tools for paseo: $req_tools"
+fi
+
+# Test 3: Auto-detection via PASEO_AGENT_ID
+(
+  unset TMUX HERDR_ENV CMUX_WORKSPACE_ID
+  export PASEO_AGENT_ID="agent-12345"
+  detected=$(fm_backend_detect)
+  if [ "$detected" = "paseo" ]; then
+    pass "fm_backend_detect detected paseo via PASEO_AGENT_ID"
+  else
+    fail "fm_backend_detect failed to detect paseo: '$detected'"
+  fi
+)
+
+# Test 4: fm_backend_paseo_parent_id
+(
+  export PASEO_AGENT_ID="agent-parent-1"
+  pid=$(fm_backend_paseo_parent_id)
+  if [ "$pid" = "agent-parent-1" ]; then
+    pass "fm_backend_paseo_parent_id returned PASEO_AGENT_ID from env"
+  else
+    fail "unexpected parent_id: '$pid'"
+  fi
+)
+
+(
+  reset_responses
+  unset PASEO_AGENT_ID
+  # Call 1 response for paseo ls --json
+  printf '[{"id":"agent-fallback-99","status":"running"}]\n' > "$FM_PASEO_RESPONSES/1.out"
+  pid=$(fm_backend_paseo_parent_id)
+  if [ "$pid" = "agent-fallback-99" ]; then
+    pass "fm_backend_paseo_parent_id fell back to paseo ls"
+  else
+    fail "unexpected fallback parent_id: '$pid'"
+  fi
+)
+
+reset_responses
+
+# Test 5: fm_backend_paseo_create_task
+(
+  proj_dir="$TMP_ROOT/proj"
+  brief_file="$TMP_ROOT/brief.md"
+  task_tmp="$TMP_ROOT/tasktmp"
+  mkdir -p "$proj_dir" "$task_tmp"
+  echo "Task instructions" > "$brief_file"
+  export FM_FAKE_WORKTREE="$TMP_ROOT/wt-paseo-1"
+
+  # Call 1: paseo run
+  printf '{"id":"paseo-agent-001"}\n' > "$FM_PASEO_RESPONSES/1.out"
+
+  out=$(fm_backend_paseo_create_task "fm-test-task" "$proj_dir" "$brief_file" "$task_tmp" "traceparent-123")
+  read -r agent_id wt <<EOF
+$out
+EOF
+  if [ "$agent_id" = "paseo-agent-001" ] && [ "$wt" = "$TMP_ROOT/wt-paseo-1" ]; then
+    pass "fm_backend_paseo_create_task allocated worktree and spawned agent"
+  else
+    fail "unexpected task creation output: '$out'"
+  fi
+)
+
+reset_responses
+
+# Test 6: fm_backend_paseo_capture
+(
+  printf 'log line 1\nlog line 2\n' > "$FM_PASEO_RESPONSES/1.out"
+  cap=$(fm_backend_paseo_capture "paseo-agent-001" 10)
+  if [ "$cap" = $'log line 1\nlog line 2' ]; then
+    pass "fm_backend_paseo_capture returned log output"
+  else
+    fail "unexpected capture output: '$cap'"
+  fi
+)
+
+reset_responses
+
+# Test 7: fm_backend_paseo_send_text_submit
+(
+  # Call 1: paseo send
+  printf '{"status":"ok"}\n' > "$FM_PASEO_RESPONSES/1.out"
+  res=$(fm_backend_paseo_send_text_submit "paseo-agent-001" "hello agent")
+  if [ "$res" = "" ]; then
+    pass "fm_backend_paseo_send_text_submit returned success"
+  else
+    fail "unexpected send_text_submit output: '$res'"
+  fi
+)
+
+reset_responses
+
+# Test 8: fm_backend_paseo_send_key
+(
+  # Call 1: paseo stop for Escape
+  printf '' > "$FM_PASEO_RESPONSES/1.out"
+  fm_backend_paseo_send_key "paseo-agent-001" "Escape"
+
+  # Verify invocation log contains stop
+  if grep -q "PASEO_CALL.stop.paseo-agent-001" "$FM_PASEO_LOG"; then
+    pass "fm_backend_paseo_send_key Escape issued paseo stop"
+  else
+    fail "paseo stop not found in call log"
+  fi
+)
+
+reset_responses
+
+# Test 9: fm_backend_paseo_kill
+(
+  # Call 1: stop, Call 2: archive
+  printf '' > "$FM_PASEO_RESPONSES/1.out"
+  printf '' > "$FM_PASEO_RESPONSES/2.out"
+  fm_backend_paseo_kill "paseo-agent-001"
+
+  if grep -q "PASEO_CALL.archive.--force.paseo-agent-001" "$FM_PASEO_LOG"; then
+    pass "fm_backend_paseo_kill archived agent"
+  else
+    fail "paseo archive not found in call log"
+  fi
+)
+
+reset_responses
+
+# Test 10: fm_backend_paseo_busy_state & composer_state
+(
+  # Call 1: running -> busy / pending
+  printf '{"status":"running"}\n' > "$FM_PASEO_RESPONSES/1.out"
+  st1=$(fm_backend_paseo_busy_state "paseo-agent-001")
+  reset_responses
+
+  printf '{"status":"idle"}\n' > "$FM_PASEO_RESPONSES/1.out"
+  st2=$(fm_backend_paseo_busy_state "paseo-agent-001")
+  reset_responses
+
+  printf '{"status":"closed"}\n' > "$FM_PASEO_RESPONSES/1.out"
+  st3=$(fm_backend_paseo_busy_state "paseo-agent-001")
+  reset_responses
+
+  if [ "$st1" = "busy" ] && [ "$st2" = "idle" ] && [ "$st3" = "dead" ]; then
+    pass "fm_backend_paseo_busy_state correctly mapped status"
+  else
+    fail "unexpected busy states: st1=$st1 st2=$st2 st3=$st3"
+  fi
+)
+
+reset_responses
+
+# Test 11: fm_backend_paseo_agent_state
+(
+  printf '{"status":"running"}\n' > "$FM_PASEO_RESPONSES/1.out"
+  ast1=$(fm_backend_paseo_agent_state "paseo-agent-001")
+  reset_responses
+
+  printf '{"status":"failed"}\n' > "$FM_PASEO_RESPONSES/1.out"
+  ast2=$(fm_backend_paseo_agent_state "paseo-agent-001")
+  reset_responses
+
+  # Exit 1 -> missing
+  echo "1" > "$FM_PASEO_RESPONSES/1.exit"
+  ast3=$(fm_backend_paseo_agent_state "paseo-nonexistent")
+  reset_responses
+
+  if [ "$ast1" = "alive" ] && [ "$ast2" = "dead" ] && [ "$ast3" = "missing" ]; then
+    pass "fm_backend_paseo_agent_state returned recovery-grade states"
+  else
+    fail "unexpected agent states: ast1=$ast1 ast2=$ast2 ast3=$ast3"
+  fi
+)
+
+reset_responses
+
+# Test 12: fm_backend_paseo_current_path
+(
+  printf '{"cwd":"/tmp/worktree-123"}\n' > "$FM_PASEO_RESPONSES/1.out"
+  cwd=$(fm_backend_paseo_current_path "paseo-agent-001")
+  if [ "$cwd" = "/tmp/worktree-123" ]; then
+    pass "fm_backend_paseo_current_path returned working directory"
+  else
+    fail "unexpected current path: '$cwd'"
+  fi
+)
+
+reset_responses
+
+# Test 13: fm_backend_paseo_list_live
+(
+  printf '[{"id":"agent-1","name":"fm-task-1","status":"running"},{"id":"agent-2","name":"fm-task-2","status":"closed"}]\n' > "$FM_PASEO_RESPONSES/1.out"
+  list=$(fm_backend_paseo_list_live)
+  if [ "$list" = $'agent-1\tfm-task-1' ]; then
+    pass "fm_backend_paseo_list_live filtered live agents"
+  else
+    fail "unexpected list_live output: '$list'"
+  fi
+)
+
+reset_responses
+
+# Test 14: Metadata endpoint validation via fm_backend_validate_task_endpoint
+(
+  state_dir="$TMP_ROOT/state"
+  mkdir -p "$state_dir"
+  meta_file="$state_dir/t1.meta"
+
+  cat > "$meta_file" <<EOF
+window=paseo-agent-99
+endpoint_task_id=t1
+worktree=/tmp/wt-1
+project=/tmp/proj-1
+harness=pi
+kind=ship
+backend=paseo
+paseo_agent_id=paseo-agent-99
+EOF
+
+  if fm_backend_validate_task_endpoint "$meta_file" "t1"; then
+    pass "fm_backend_validate_task_endpoint accepted valid paseo metadata"
+  else
+    fail "fm_backend_validate_task_endpoint refused valid paseo metadata"
+  fi
+)
+
+# Test 15: Generic dispatcher routing for paseo
+(
+  reset_responses
+  printf '{"status":"running"}\n' > "$FM_PASEO_RESPONSES/1.out"
+  st=$(fm_backend_busy_state paseo "paseo-agent-001")
+  if [ "$st" = "busy" ]; then
+    pass "generic fm_backend_busy_state routed to paseo"
+  else
+    fail "generic dispatch failed for paseo busy_state: '$st'"
+  fi
+)
+
+echo "All tests passed!"

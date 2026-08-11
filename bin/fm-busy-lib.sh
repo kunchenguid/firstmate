@@ -190,7 +190,7 @@ fm_busy_sources_for_harness() {  # <harness>
       ;;
     *) printf ''; return 0 ;;
   esac
-  printf '%s fm-spawn fm-interrupt fm-recovery' "$adapter"
+  printf '%s fm-spawn fm-interrupt fm-recovery paseo-status' "$adapter"
 }
 
 fm_busy_source_trusted() {  # <harness> <source>
@@ -655,6 +655,23 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
       printf 'busy herdr-native'
       return 0
     fi
+  fi
+  if [ "$backend" = paseo ] && command -v fm_backend_busy_state >/dev/null 2>&1; then
+    native=$(fm_backend_busy_state "$backend" "$target" 2>/dev/null || true)
+    case "$native" in
+      busy)
+        printf 'busy paseo-status'
+        return 0
+        ;;
+      idle)
+        printf 'idle paseo-status'
+        return 0
+        ;;
+      dead)
+        printf 'dead paseo-status'
+        return 0
+        ;;
+    esac
   fi
   case "$harness" in
     muse*)

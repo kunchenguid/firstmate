@@ -763,6 +763,7 @@ install_cmd() {
 manual_install_url() {
   case "$1" in
     herdr) echo "https://herdr.dev" ;;
+    paseo) echo "https://paseo.dev" ;;
     *) return 1 ;;
   esac
 }
