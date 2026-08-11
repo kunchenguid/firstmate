@@ -1352,6 +1352,85 @@ test_published_kill_retries_after_unconfirmed_close() {
   pass "fm_backend_kill_published: retains an unconfirmed close and succeeds on exact retry"
 }
 
+test_published_kill_recovers_unique_workspace_after_relaunch() {
+  local dir fb title result
+  dir="$TMP_ROOT/published-kill-relaunch"; mkdir -p "$dir/responses"
+  title=$(cmux_expected_scoped_title fm-published-relaunch)
+  # 1-2: the recorded workspace id is absent after cmux relaunch.
+  cmux_windows_response "$dir" 1 "e1111111-0000-0000-0000-000000000000" 1
+  cmux_workspace_list_response "$dir" 2 "cccccccc-0000-0000-0000-000000000000" other
+  # 3-5: all windows contain exactly one workspace with the scoped task title.
+  cmux_windows_response "$dir" 3 \
+    "e1111111-0000-0000-0000-000000000000" 1 \
+    "e2222222-0000-0000-0000-000000000000" 2
+  cmux_workspace_list_response "$dir" 4 "cccccccc-0000-0000-0000-000000000000" other
+  cmux_workspace_list_response "$dir" 5 \
+    "bbbbbbbb-0000-0000-0000-000000000000" "$title" \
+    "ffffffff-0000-0000-0000-000000000000" other-two
+  # 6: close succeeds using the recovered immutable id.
+  # 7-9: the recovered id is absent from the complete inventory.
+  cmux_windows_response "$dir" 7 \
+    "e1111111-0000-0000-0000-000000000000" 1 \
+    "e2222222-0000-0000-0000-000000000000" 1
+  cmux_workspace_list_response "$dir" 8 "cccccccc-0000-0000-0000-000000000000" other
+  cmux_workspace_list_response "$dir" 9 "ffffffff-0000-0000-0000-000000000000" other-two
+  fb=$(make_cmux_fakebin "$dir")
+  result=$(PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_kill_published cmux "aaaaaaaa-0000-0000-0000-000000000000:cccccccc-0000-0000-0000-000000000000" fm-published-relaunch; printf "%s" "$?"' "$ROOT")
+  [ "$result" = 0 ] || fail "published cmux cleanup should recover the unique relaunch workspace, got '$result'"
+  assert_contains "$(cat "$dir/log")" $'\x1f''close-workspace'$'\x1f''--workspace'$'\x1f''bbbbbbbb-0000-0000-0000-000000000000' \
+    "published cmux cleanup did not close the uniquely recovered workspace"
+  assert_not_contains "$(cat "$dir/log")" $'\x1f''close-workspace'$'\x1f''--workspace'$'\x1f''aaaaaaaa-0000-0000-0000-000000000000' \
+    "published cmux cleanup used the stale workspace id"
+  pass "fm_backend_kill_published: recovers and closes one unique scoped workspace after cmux relaunch"
+}
+
+test_published_kill_refuses_ambiguous_absent_or_malformed_relaunch_inventory() {
+  local scenario dir fb title result
+  for scenario in ambiguous absent malformed duplicate-id; do
+    dir="$TMP_ROOT/published-kill-relaunch-$scenario"; mkdir -p "$dir/responses"
+    title=$(cmux_expected_scoped_title "fm-published-$scenario")
+    # 1-2: the recorded workspace id is absent.
+    cmux_windows_response "$dir" 1 "e1111111-0000-0000-0000-000000000000" 1
+    cmux_workspace_list_response "$dir" 2 "cccccccc-0000-0000-0000-000000000000" other
+    # 3-5: title recovery must fail closed for every non-unique/invalid result.
+    case "$scenario" in
+      ambiguous)
+        cmux_windows_response "$dir" 3 \
+          "e1111111-0000-0000-0000-000000000000" 1 \
+          "e2222222-0000-0000-0000-000000000000" 1
+        cmux_workspace_list_response "$dir" 4 \
+          "bbbbbbbb-0000-0000-0000-000000000000" "$title"
+        cmux_workspace_list_response "$dir" 5 \
+          "dddddddd-0000-0000-0000-000000000000" "$title"
+        ;;
+      absent)
+        cmux_windows_response "$dir" 3 "e1111111-0000-0000-0000-000000000000" 1
+        cmux_workspace_list_response "$dir" 4 "ffffffff-0000-0000-0000-000000000000" other
+        ;;
+      malformed)
+        printf '[{"id":"bad\\nwindow"}]' > "$dir/responses/3.out"
+        ;;
+      duplicate-id)
+        cmux_windows_response "$dir" 3 \
+          "e1111111-0000-0000-0000-000000000000" 1 \
+          "e2222222-0000-0000-0000-000000000000" 1
+        cmux_workspace_list_response "$dir" 4 \
+          "bbbbbbbb-0000-0000-0000-000000000000" "$title"
+        cmux_workspace_list_response "$dir" 5 \
+          "bbbbbbbb-0000-0000-0000-000000000000" other
+        ;;
+    esac
+    fb=$(make_cmux_fakebin "$dir")
+    result=$(PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+      bash -c '. "$0/bin/fm-backend.sh"; set +e; fm_backend_kill_published cmux "aaaaaaaa-0000-0000-0000-000000000000:cccccccc-0000-0000-0000-000000000000" "$1"; printf "%s" "$?"' "$ROOT" "fm-published-$scenario")
+    [ "$result" -ne 0 ] 2>/dev/null || fail "published cmux cleanup should refuse the $scenario relaunch inventory"
+    assert_not_contains "$(cat "$dir/log")" $'\x1f''close-workspace' \
+      "published cmux cleanup should not close a workspace for the $scenario relaunch inventory"
+  done
+  pass "fm_backend_kill_published: retains stale records for ambiguous, absent, or malformed relaunch inventories"
+}
+
 test_kill_recovers_stale_target_by_label() {
   local dir fb title
   dir="$TMP_ROOT/kill-stale-target"; mkdir -p "$dir/responses"
@@ -1483,6 +1562,8 @@ test_kill_adds_sibling_when_last_in_window
 test_kill_is_best_effort_when_close_workspace_fails
 test_kill_workspace_exact_searches_all_windows
 test_published_kill_retries_after_unconfirmed_close
+test_published_kill_recovers_unique_workspace_after_relaunch
+test_published_kill_refuses_ambiguous_absent_or_malformed_relaunch_inventory
 test_kill_recovers_stale_target_by_label
 test_list_live_filters_by_title_prefix
 test_secondmate_spawn_refuses_cmux_backend
