@@ -173,6 +173,39 @@ Valid cleanup removed only the exact task-bound target and left the control wind
 The metadata-only validation covers tmux, Herdr, Zellij, Orca, and cmux before backend dispatch.
 Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, Cursor, and Muse share that backend cleanup boundary; their harness-specific hook files, tokens, transcript bindings, and session-log sidecars are cleaned only after it, so no harness needs a separate endpoint parser.
 
+## Worker isolation repository identity
+
+The spawn-time worker-isolation boundary was validated on 2026-08-11 with git 2.50.1 on macOS 15.6.1 arm64.
+`bin/fm-spawn.sh` accepts a task worktree only when its physically resolved `git rev-parse --git-common-dir` equals the project's, and refuses when either side cannot be established.
+Path shape carries no weight in that decision, because any other repository is also a real worktree root distinct from the project.
+
+| Backend | Path into the assertion | Result |
+| --- | --- | --- |
+| tmux, herdr, zellij, cmux | Treehouse pools the worktree, and each adapter opens the task endpoint with the project as its working directory, so `treehouse get` acquires a worktree of the project's own repository | Verified live: a pooled worktree and its project checkout resolve to the same git common directory, and a worktree created from an already linked worktree resolves there too |
+| orca | Orca registers the project repository and returns its own worktree path, which the spawn validates directly from that result instead of a pane path | Verified against the Orca call site with a fake Orca CLI: a foreign worktree refuses and a worktree of the project's repository still spawns |
+| relaunch, every backend | The worktree recorded in the task's metadata | Same assertion applies before a replacement agent is armed |
+| secondmate spawns | Not applicable after inspecting the spawn path: a secondmate home is a firstmate home rather than a project worktree, so the assertion is deliberately skipped there and is unchanged | Unchanged |
+
+```sh
+tests/fm-spawn-worktree-identity.test.sh
+tests/fm-spawn-worktree-settle.test.sh
+```
+
+Bounded output from the identity regression:
+
+```text
+ok - a pane sitting in the firstmate home is refused, not recorded as the task worktree
+ok - a real worktree of an unrelated repository is refused
+ok - an unreadable worktree repository identity refuses the launch instead of passing
+ok - a project whose repository identity cannot be established refuses the launch
+ok - a legitimate worktree of the project's repository still spawns
+ok - an Orca worktree belonging to another repository is refused
+ok - an Orca worktree of the project's own repository still spawns
+```
+
+The unreadable-identity case drives the query to fail, to return empty, and to return an unresolvable path, and every one of the three refuses.
+The Orca cases need `node`, which the Orca adapter's JSON helpers require, and report themselves as not run when it is absent.
+
 ## Composer classification matrix
 
 The shared composer classifier (`bin/fm-composer-lib.sh`, `fm_composer_classify_screen`) owns every composer shape fleet-wide; each backend contributes only a capture and a capability descriptor.

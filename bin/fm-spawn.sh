@@ -133,7 +133,10 @@
 #   Before a secondmate launch, the home is locally fast-forwarded to the primary
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
-#   git worktree root distinct from the primary project checkout.
+#   git worktree root that shares the project's git common directory and is
+#   distinct from the primary project checkout. A worktree of any other
+#   repository is refused by name, and so is either side whose repository
+#   identity cannot be established.
 #   Before a fresh ship or scout worker starts, its clean task worktree fetches
 #   origin, resolves the current remote default branch, and resets to its tip.
 #   An unreachable origin, unresolved default branch, or non-clean worktree
@@ -1701,6 +1704,24 @@ real_path_or_raw() {  # <path>
   fi
 }
 
+# Physical git common directory of <dir>, i.e. the identity of the repository
+# that directory belongs to: one repository's main checkout and every linked
+# worktree of it share this path, and no other repository does. Empty output
+# with a non-zero return means the identity could not be established (not a
+# repository, git failed, empty or unexpected output, unresolvable path), which
+# every caller must treat as a refusal rather than a pass. `git -C` runs with
+# <dir> as its cwd, so a relative answer is relative to <dir>.
+git_common_dir_real() {  # <dir>
+  local dir=$1 common
+  common=$(git -C "$dir" rev-parse --git-common-dir 2>/dev/null) || return 1
+  [ -n "$common" ] || return 1
+  case "$common" in
+    /*) ;;
+    *) common="$dir/$common" ;;
+  esac
+  (cd "$common" 2>/dev/null && pwd -P) || return 1
+}
+
 # Session-provider container-ensure + task creation. tmux stays exactly as P1
 # left it (same session-name / new-window sequence, see bin/backends/tmux.sh);
 # a herdr spawn goes through the version-gated, workspace-per-HOME,
@@ -1710,7 +1731,7 @@ real_path_or_raw() {  # <path>
 # that every downstream operation (send/capture/kill) already treats as opaque
 # per-backend routing (fm_backend_resolve_selector).
 validate_spawn_worktree() {  # <source> <inspect-target>
-  local source=$1 inspect_target=$2 wt_real proj_real wt_top wt_top_real
+  local source=$1 inspect_target=$2 wt_real proj_real wt_top wt_top_real wt_repo proj_repo
   wt_real=
   if ! wt_real=$(cd "$WT" 2>/dev/null && pwd -P); then
     wt_real=
@@ -1723,6 +1744,28 @@ validate_spawn_worktree() {  # <source> <inspect-target>
   fi
   if [ -z "$wt_real" ] || [ -z "$wt_top_real" ] || [ "$wt_real" != "$wt_top_real" ] || [ "$wt_real" = "$proj_real" ]; then
     echo "error: $source did not yield an isolated worktree (resolved '$WT'; worktree root '${wt_top:-none}'; primary '$PROJ_ABS'); refusing to launch to avoid tangling the primary checkout. Inspect target $inspect_target" >&2
+    exit 1
+  fi
+  # Being SOME real worktree other than the primary checkout is not enough: a
+  # worktree of a DIFFERENT repository passes every check above while putting
+  # the worker somewhere the task's work can never land. Seen live: a pane that
+  # never left the firstmate home recorded worktree=<firstmate home> and passed,
+  # because that home is a real git top-level distinct from the project - which
+  # would have launched a project worker straight into firstmate's own primary
+  # checkout. Prove repository identity positively (a shared git common
+  # directory, not a path prefix) and refuse whenever it cannot be established.
+  proj_repo=$(git_common_dir_real "$PROJ_ABS") || proj_repo=
+  if [ -z "$proj_repo" ]; then
+    echo "error: the repository identity of project '$PROJ_ABS' could not be established (its git common directory did not resolve); refusing to launch $source's worktree '$WT' without proof it belongs to the project's repository. Inspect target $inspect_target" >&2
+    exit 1
+  fi
+  wt_repo=$(git_common_dir_real "$wt_real") || wt_repo=
+  if [ -z "$wt_repo" ]; then
+    echo "error: the repository identity of $source's worktree '$WT' could not be established (its git common directory did not resolve); refusing to launch without proof it belongs to the project's repository '$proj_repo'. Inspect target $inspect_target" >&2
+    exit 1
+  fi
+  if [ "$wt_repo" != "$proj_repo" ]; then
+    echo "error: $source yielded a worktree that belongs to a different repository (resolved '$WT'; its repository '$wt_repo'; the project's repository '$proj_repo'); refusing to launch a worker for $PROJ_ABS outside that project's own repository. Inspect target $inspect_target" >&2
     exit 1
   fi
 }
