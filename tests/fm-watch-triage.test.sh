@@ -1564,31 +1564,51 @@ test_procevent_unacknowledged_result_redrains_until_handled() {
   pass "an unacknowledged process-event result re-drains until handling is acknowledged"
 }
 
-test_signal_during_recovery_marker_write_exits_cleanly() {
-  local dir state fakebin out signal_once real_chmod pid i=0
+test_signal_during_stale_recovery_lock_acquisition_exits_cleanly() {
+  local dir state fakebin out signal_once transition_ready transition_release
+  local real_readlink real_chmod dead pid drain_pid queue_owner generation marker i=0
   dir=$(make_case watcher-signal-marker-lock); state="$dir/state"; fakebin="$dir/fakebin"
-  out="$dir/watch.out"; signal_once="$dir/chmod-signaled"; real_chmod=$(command -v chmod)
+  out="$dir/watch.out"; signal_once="$dir/readlink-signaled"
+  transition_ready="$dir/transition-ready"; transition_release="$dir/transition-release"
+  real_readlink=$(command -v readlink); real_chmod=$(command -v chmod)
   printf 'acked:downtime:test-generation\n' > "$state/.watcher-down"
+  cat > "$fakebin/readlink" <<'SH'
+#!/usr/bin/env bash
+out=$("$REAL_READLINK" "$@")
+status=$?
+[ "$status" -ne 0 ] || printf '%s\n' "$out"
+target=${!#}
+if [ "$target" = "$FM_FAKE_READLINK_SIGNAL_LOCK" ] && [ ! -e "$FM_FAKE_READLINK_SIGNAL_ONCE" ]; then
+  : > "$FM_FAKE_READLINK_SIGNAL_ONCE"
+  kill -TERM "$FM_FAKE_READLINK_WATCHER_PID"
+fi
+exit "$status"
+SH
   cat > "$fakebin/chmod" <<'SH'
 #!/usr/bin/env bash
 "$REAL_CHMOD" "$@" || exit $?
 target=${!#}
 case "$target" in
   */.watcher-down.tmp.*)
-    if [ ! -e "$FM_FAKE_CHMOD_SIGNAL_ONCE" ]; then
-      : > "$FM_FAKE_CHMOD_SIGNAL_ONCE"
-      kill -TERM "$PPID"
-    fi
+    : > "$FM_FAKE_CHMOD_TRANSITION_READY"
+    while [ ! -e "$FM_FAKE_CHMOD_TRANSITION_RELEASE" ]; do sleep 0.02; done
     ;;
 esac
 SH
-  chmod +x "$fakebin/chmod"
+  chmod +x "$fakebin/readlink" "$fakebin/chmod"
 
-  PATH="$fakebin:$PATH" REAL_CHMOD="$real_chmod" FM_FAKE_CHMOD_SIGNAL_ONCE="$signal_once" \
-    FM_HOME="$dir" FM_PROCEVENT_CLAIM_ROOT="$dir/claims" \
-    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
-    FM_POLL=0.2 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
-    "$WATCH" > "$out" 2>&1 &
+  (
+    export PATH="$fakebin:$PATH" REAL_READLINK="$real_readlink" REAL_CHMOD="$real_chmod"
+    export FM_FAKE_READLINK_SIGNAL_LOCK="$state/.watcher-down.lock.steal"
+    export FM_FAKE_READLINK_SIGNAL_ONCE="$signal_once"
+    export FM_FAKE_READLINK_WATCHER_PID=${BASHPID:-$$}
+    export FM_FAKE_CHMOD_TRANSITION_READY="$transition_ready"
+    export FM_FAKE_CHMOD_TRANSITION_RELEASE="$transition_release"
+    export FM_HOME="$dir" FM_PROCEVENT_CLAIM_ROOT="$dir/claims"
+    export FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
+    export FM_POLL=0.2 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999
+    exec "$WATCH"
+  ) > "$out" 2>&1 &
   pid=$!
   while [ "$i" -lt 50 ] && [ ! -e "$state/.last-watcher-beat" ]; do
     sleep 0.1
@@ -1596,22 +1616,55 @@ SH
   done
   [ -e "$state/.last-watcher-beat" ] \
     || { kill -KILL "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fail "the signal-boundary watcher never initialized"; }
-  printf '%s\t1\tsignal\tfixture\tsignal: cleanup lock boundary\n' "$(date +%s)" > "$state/.wake-queue"
+  dead=$(dead_pid)
+  i=0
+  while [ "$i" -lt 100 ] && ! mkdir "$state/.watcher-down.lock" 2>/dev/null; do
+    sleep 0.02
+    i=$((i + 1))
+  done
+  [ -d "$state/.watcher-down.lock" ] && [ ! -L "$state/.watcher-down.lock" ] \
+    || { kill -KILL "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fail "the stale recovery lock fixture could not be installed"; }
+  printf '%s\n' "$dead" > "$state/.watcher-down.lock/pid"
+  printf 'needs-decision: cleanup lock boundary\n' > "$state/fixture.status"
+
+  i=0
+  while [ "$i" -lt 100 ] && [ ! -e "$transition_ready" ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -e "$signal_once" ] \
+    || { kill -KILL "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fail "the watcher never reached the stale recovery-lock steal boundary"; }
+  [ -e "$transition_ready" ] \
+    || { kill -KILL "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fail "a signal during stale recovery-lock acquisition deadlocked watcher cleanup"; }
+  queue_owner=$(cat "$state/.wake-queue.lock/pid" 2>/dev/null || true)
+  [ "$queue_owner" = "$pid" ] \
+    || { : > "$transition_release"; wait "$pid" 2>/dev/null || true; fail "watcher cleanup released queue serialization before its recovery transition"; }
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/drain.out" 2> "$dir/drain.err" &
+  drain_pid=$!
+  sleep 0.2
+  is_live_non_zombie "$drain_pid" \
+    || { : > "$transition_release"; wait "$pid" 2>/dev/null || true; wait "$drain_pid" 2>/dev/null || true; fail "a concurrent drain bypassed watcher cleanup serialization"; }
+  : > "$transition_release"
+  wait_for_exit "$drain_pid" 50 \
+    || { kill -KILL "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fail "the serialized drain did not resume after watcher cleanup"; }
 
   i=0
   while [ "$i" -lt 50 ] && is_live_non_zombie "$pid"; do
     sleep 0.1
     i=$((i + 1))
   done
-  if is_live_non_zombie "$pid"; then
-    kill -KILL "$pid" 2>/dev/null || true
-    wait "$pid" 2>/dev/null || true
-    fail "a signal while writing recovery evidence deadlocked watcher cleanup"
-  fi
+  [ "$i" -lt 50 ] \
+    || { kill -KILL "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fail "watcher cleanup did not exit after publishing recovery evidence"; }
   wait "$pid" 2>/dev/null || true
-  [ -e "$signal_once" ] || fail "the watcher never reached the recovery-marker signal boundary"
+  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$dir/drain.err")
+  marker=$(cat "$state/.watcher-down" 2>/dev/null || true)
+  [ -n "$generation" ] && [ "$marker" = "pending:handling:$generation" ] \
+    || fail "the serialized drain did not retain the cleanup recovery generation"
+  [ ! -e "$state/.watcher-down.lock.steal" ] && [ ! -L "$state/.watcher-down.lock.steal" ] \
+    || fail "signal cleanup left a nested recovery steal lock behind"
   [ ! -e "$state/.watch.lock" ] || fail "signal cleanup left the watcher lock behind"
-  pass "a signal during recovery-marker publication cannot deadlock watcher cleanup"
+  pass "a signal during stale recovery-lock acquisition exits with serialized recovery evidence"
 }
 
 test_procevent_marker_keys_are_injective() {
@@ -1932,7 +1985,7 @@ test_nonterminal_stale_repairs_missing_or_corrupt_timer
 test_triage_log_size_cap_accepts_spaced_wc_counts
 test_procevent_captured_result_surfaces_proactively
 test_procevent_unacknowledged_result_redrains_until_handled
-test_signal_during_recovery_marker_write_exits_cleanly
+test_signal_during_stale_recovery_lock_acquisition_exits_cleanly
 test_procevent_marker_keys_are_injective
 test_procevent_surface_serializes_with_drain
 test_procevent_surface_crash_boundaries

@@ -707,6 +707,9 @@ fm_lock_acquire_wait() {
 fm_lock_release() {
   local lockdir=$1 pid current ownerdir
   current=${BASHPID:-$$}
+  if [ -e "$lockdir.steal" ] || [ -L "$lockdir.steal" ]; then
+    fm_lock_release "$lockdir.steal"
+  fi
   if [ -L "$lockdir" ]; then
     ownerdir=$(fm_lock_link_owner "$lockdir" 2>/dev/null || true)
     [ -n "$ownerdir" ] || return 0
