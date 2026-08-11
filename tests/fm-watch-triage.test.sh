@@ -320,6 +320,421 @@ test_crew_absorb_class_classifier() {
   pass "crew_absorb_class: working/paused/none from one read; crew_is_paused and crew_is_provably_working agree"
 }
 
+# crew_absorb_class's SETTLED verdict: the reconciled current state says the
+# crew's own work is over, so an idle pane is the correct condition rather than a
+# wedge symptom. Keyed on bin/fm-crew-state.sh's reconciled state, never on the
+# status line's text, which is exactly what the measured false alarms keyed on.
+test_crew_absorb_class_settled_classifier() {
+  local dir state fakebin
+  dir=$(make_case absorb-settled); state="$dir/state"; fakebin="$dir/fakebin"
+  export FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
+  export FM_STATE_OVERRIDE="$state"
+  export FM_FAKE_CREW_STATE
+
+  # done: nothing is left for the crew, whatever its last status line says.
+  printf 'working: still going\n' > "$state/a.status"
+  FM_FAKE_CREW_STATE='state: done · source: run-step · checks green: PR ready for review'
+  [ "$(crew_absorb_class a)" = settled ] || fail "reconciled done not classed settled"
+  ! crew_is_provably_working a || fail "a settled crew was treated as provably working"
+  ! crew_is_paused a || fail "a settled crew was treated as a declared pause"
+
+  # parked/blocked: settled ONLY while a durable open decision proves the next
+  # move belongs above the crew.
+  FM_FAKE_CREW_STATE='state: parked · source: run-step · parked at review: 2 finding(s) (ask-user: authority decision)'
+  printf 'needs-decision: which landing path\n' > "$state/a.status"
+  [ "$(crew_absorb_class a)" = settled ] || fail "parked with an open decision not classed settled"
+  printf 'needs-decision: which landing path\nresolved: captain chose direct-PR\n' > "$state/a.status"
+  [ "$(crew_absorb_class a)" = none ] || fail "parked with every decision resolved classed settled"
+  printf 'working: driving the gate\n' > "$state/a.status"
+  [ "$(crew_absorb_class a)" = none ] || fail "parked at a gate the crew must answer itself classed settled"
+  FM_FAKE_CREW_STATE='state: blocked · source: status-log · needs a credential'
+  printf 'blocked: needs a credential\n' > "$state/a.status"
+  [ "$(crew_absorb_class a)" = settled ] || fail "blocked with an open decision not classed settled"
+
+  # failed also reconciles a CANCELLED run - the mid-supersession state in which
+  # the crew must recover custody and resume - so it is never settled and keeps
+  # aging. With no crew-level liveness measured for it, the verdict this fleet
+  # reports is `unobserved`: it escalates exactly like `none` and additionally
+  # says the crew itself was never seen, which is the whole distinction.
+  FM_FAKE_CREW_STATE='state: failed · source: run-step · run cancelled'
+  [ "$(crew_absorb_class a)" != settled ] || fail "a cancelled/failed run classed settled"
+  [ "$(crew_absorb_class a)" = unobserved ] \
+    || fail "an unmeasured crew after a cancelled/failed run was not reported as unobserved"
+  FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+  [ "$(crew_absorb_class a)" = none ] || fail "unknown crew classed settled"
+
+  # the pre-existing verdicts are unchanged.
+  FM_FAKE_CREW_STATE='state: working · source: run-step · ci running'
+  [ "$(crew_absorb_class a)" = working ] || fail "active run-step no longer classed working"
+  FM_FAKE_CREW_STATE='state: paused · source: status-log · awaiting upstream'
+  [ "$(crew_absorb_class a)" = paused ] || fail "declared pause no longer classed paused"
+  unset FM_FAKE_CREW_STATE FM_CREW_STATE_BIN FM_STATE_OVERRIDE
+  pass "crew_absorb_class: reconciled done and decision-open parked/blocked are settled; failed, unknown and gate-owned parked keep aging"
+}
+
+# A RUN-LEVEL terminal verdict answers for a run, not for the crew that owned it.
+# Measured 2026-08-10: three lanes were wedge-escalated while their workers were
+# actively starting replacement runs, because each still held a run left `failed`
+# by an earlier session-limit kill and the guard asked only the run step. The
+# crew's own turn signal is what closes that gap, and it must close it in all
+# three directions - the two the alarm already had, plus the third value, which
+# is the one a fix like this is most likely to quietly turn into silence.
+test_crew_absorb_class_run_ended_consults_crew_liveness() {
+  local dir state fakebin verdict
+  dir=$(make_case absorb-run-ended); state="$dir/state"; fakebin="$dir/fakebin"
+  export FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
+  export FM_STATE_OVERRIDE="$state"
+  export FM_FAKE_CREW_STATE FM_FAKE_CREW_BUSY FM_FAKE_CREW_AGENT
+  printf 'working: driving the gate\n' > "$state/a.status"
+
+  for verdict in failed aborted interrupted; do
+    FM_FAKE_CREW_STATE="state: $verdict · source: run-step · the run ended"
+
+    # 1. Provably working: the crew is mid-turn on its own pane AND the agent
+    #    that would be taking that turn is established alive. The run that ended
+    #    says nothing about either, so the wake is absorbed.
+    FM_FAKE_CREW_BUSY='busy claude-hook'
+    FM_FAKE_CREW_AGENT=alive
+    [ "$(crew_absorb_class a)" = working ] \
+      || fail "a live turn after a $verdict run was not classed working"
+    crew_is_provably_working a \
+      || fail "a live turn after a $verdict run was not provably working"
+
+    # 2. Provably idle: the crew's own turn signal says the turn ended, so this
+    #    escalates on the unchanged schedule. A gone endpoint is equally an
+    #    observation, not a failure to observe, and so is an agent the backend
+    #    probe confidently reports absent.
+    FM_FAKE_CREW_BUSY='idle claude-hook'
+    [ "$(crew_absorb_class a)" = none ] \
+      || fail "an idle crew after a $verdict run did not keep aging"
+    FM_FAKE_CREW_BUSY='dead endpoint-gone'
+    FM_FAKE_CREW_AGENT=missing
+    [ "$(crew_absorb_class a)" = none ] \
+      || fail "a gone endpoint after a $verdict run was not treated as observed"
+    FM_FAKE_CREW_BUSY='busy claude-hook'
+    FM_FAKE_CREW_AGENT=dead
+    [ "$(crew_absorb_class a)" = none ] \
+      || fail "a busy record behind a dead agent after a $verdict run did not keep aging"
+
+    # 3. Could not observe: evidence that expired, was never written, or could
+    #    not be read is NOT idle. It still escalates - silence here would be a
+    #    worse defect than the noise this change removes - and says which value
+    #    it was. An uncorroborated busy record belongs to this value too: an
+    #    hour-long trust window is cannot-tell wearing the word "working".
+    FM_FAKE_CREW_AGENT=alive
+    FM_FAKE_CREW_BUSY='stale record-expired'
+    [ "$(crew_absorb_class a)" = unobserved ] \
+      || fail "expired turn evidence after a $verdict run was narrowed to idle"
+    FM_FAKE_CREW_BUSY='unknown missing'
+    [ "$(crew_absorb_class a)" = unobserved ] \
+      || fail "a missing turn record after a $verdict run was narrowed to idle"
+    FM_FAKE_CREW_BUSY=''
+    [ "$(crew_absorb_class a)" = unobserved ] \
+      || fail "an unmeasured turn signal after a $verdict run was narrowed to idle"
+    FM_FAKE_CREW_BUSY='busy claude-hook'
+    for FM_FAKE_CREW_AGENT in ambiguous unreadable unverified ''; do
+      [ "$(crew_absorb_class a)" = unobserved ] \
+        || fail "a busy record with agent liveness '${FM_FAKE_CREW_AGENT:-unmeasured}' after a $verdict run was absorbed"
+    done
+    ! crew_is_provably_working a \
+      || fail "an unobservable crew after a $verdict run was treated as provably working"
+  done
+
+  # The crew signal answers ONLY for run-level verdicts. A live turn never talks
+  # a gate-parked run, a finished run, or a declared pause out of its own verdict:
+  # those did observe the crew's situation, and this is not a general override.
+  FM_FAKE_CREW_BUSY='busy claude-hook'
+  FM_FAKE_CREW_AGENT=alive
+  FM_FAKE_CREW_STATE='state: parked · source: run-step · parked at review'
+  [ "$(crew_absorb_class a)" = none ] \
+    || fail "a live turn overrode a gate-parked run"
+  FM_FAKE_CREW_STATE='state: done · source: run-step · checks green'
+  [ "$(crew_absorb_class a)" = settled ] \
+    || fail "a live turn overrode a finished run"
+  FM_FAKE_CREW_STATE='state: paused · source: status-log · awaiting upstream'
+  [ "$(crew_absorb_class a)" = paused ] \
+    || fail "a live turn overrode a declared pause"
+
+  unset FM_FAKE_CREW_STATE FM_FAKE_CREW_BUSY FM_FAKE_CREW_AGENT FM_CREW_STATE_BIN FM_STATE_OVERRIDE
+  pass "crew_absorb_class: a run-level terminal verdict defers to the crew's own liveness, in all three values"
+}
+
+# The coverage gate for crew_state_is_run_ended, mirroring the ones
+# crew_state_absorb_class and the blocking_on helpers already carry: exit 3 means
+# this fleet DECLARES a crew verdict this rule was never taught. Whether the next
+# verdict answers for a run or for the crew decides whether an idle-looking pane
+# gets asked a second question at all, which is far too load-bearing to be
+# settled by a default branch nobody chose.
+test_run_ended_covers_every_crew_verdict() {
+  local state_word rc
+  for state_word in $FM_CREW_STATE_VOCABULARY; do
+    rc=0; crew_state_is_run_ended "$state_word" || rc=$?
+    [ "$rc" -ne 3 ] || fail "crew_state_is_run_ended was never taught the declared verdict '$state_word'"
+    [ "$rc" -ne 2 ] || fail "crew_state_is_run_ended reported the declared verdict '$state_word' as outside the vocabulary"
+  done
+  rc=0; crew_state_is_run_ended not-a-verdict || rc=$?
+  [ "$rc" -eq 2 ] || fail "crew_state_is_run_ended did not report an unknown verdict as outside the vocabulary (got $rc)"
+  # And the membership itself, since a rule that is total but wrong is no better:
+  # exactly the three run outcomes that leave the crew free to act next.
+  for state_word in failed aborted interrupted; do
+    crew_state_is_run_ended "$state_word" \
+      || fail "'$state_word' is a run-level terminal verdict and was not classified as one"
+  done
+  for state_word in working parked blocked paused 'done' idle stale unknown; do
+    ! crew_state_is_run_ended "$state_word" \
+      || fail "'$state_word' is not a run-level terminal verdict but was classified as one"
+  done
+  pass "crew_state_is_run_ended is total over the declared crew-verdict vocabulary"
+}
+
+# --- process liveness: descendant CPU advancement ---------------------------
+# Every other absorb source is semantic (run step, status log, harness busy
+# signal) and all three correctly read "not working" the moment an agent
+# backgrounds a long command and ends its turn - while the work continues in a
+# child process none of them can see. fm_child_cpu_state is the process-level
+# evidence that closes that gap. The four directions below are the whole
+# contract, and the second one is the one that matters: a change that absorbed
+# everything would look exactly like a fix.
+
+test_child_cpu_state_four_directions() {
+  local dir state proc wt
+  dir=$(make_case child-cpu-directions); state="$dir/state"; proc="$dir/proc"; wt="$dir/wt"
+  mkdir -p "$proc" "$wt"
+  printf 'window=test:fm-task\nkind=ship\nworktree=%s\n' "$wt" > "$state/task.meta"
+  export FM_PROC_ROOT_OVERRIDE="$proc"
+  # Replace the baseline on every probe, so each assertion measures exactly the
+  # interval the test just created rather than an accumulated one.
+  export FM_CHILD_CPU_SAMPLE_INTERVAL=0
+  make_fake_agent_tree "$proc" "$wt"
+
+  # A first sample has nothing to compare against, so it is never evidence.
+  [ "$(fm_child_cpu_state "$state" task)" = static ] \
+    || fail "a first sample with no baseline was treated as evidence of work"
+
+  # 1. Live descendant whose CPU ADVANCED: absorbed as working.
+  make_fake_agent_tree "$proc" "$wt" 0 0 250
+  [ "$(fm_child_cpu_state "$state" task)" = advancing ] \
+    || fail "an advancing live descendant was not read as work"
+
+  # 2. Live descendant whose CPU is STATIC: still escalates. A hung child that
+  #    merely exists must never mask a wedge.
+  [ "$(fm_child_cpu_state "$state" task)" = static ] \
+    || fail "a live but hung descendant was treated as work (existence is not advancement)"
+
+  # 3. No descendant at all and the agent idle: still escalates - and it stays
+  #    static even when the AGENT itself burns CPU, because the agent working is
+  #    what the harness busy contract owns and a looping wedged agent must not
+  #    be able to vouch for itself.
+  rm -rf "$proc/200"
+  fm_child_cpu_state "$state" task >/dev/null
+  write_fake_proc_process "$proc" 100 1 100 5 100 99999 0 900 "$wt"
+  [ "$(fm_child_cpu_state "$state" task)" = static ] \
+    || fail "the agent's own CPU was counted as descendant work"
+
+  # 4. Agent dead: no anchor resolves at all.
+  rm -rf "$proc/100"
+  [ "$(fm_child_cpu_state "$state" task)" = none ] \
+    || fail "a dead agent still resolved a process-liveness anchor"
+
+  unset FM_PROC_ROOT_OVERRIDE FM_CHILD_CPU_SAMPLE_INTERVAL
+  pass "fm_child_cpu_state: only advancing descendant CPU absorbs; hung, absent, and dead all still surface"
+}
+
+# A crew driving one short-lived child after another - the 42-minute portable
+# suite that produced the seven false escalations - can have no live descendant
+# at either sample and still be working flat out. The agent's cutime/cstime
+# carries the CPU of everything it has already reaped, so the aggregate advances
+# anyway and no per-child bookkeeping is needed.
+test_child_cpu_counts_already_reaped_descendants() {
+  local dir state proc wt
+  dir=$(make_case child-cpu-reaped); state="$dir/state"; proc="$dir/proc"; wt="$dir/wt"
+  mkdir -p "$proc" "$wt"
+  printf 'window=test:fm-task\nkind=ship\nworktree=%s\n' "$wt" > "$state/task.meta"
+  export FM_PROC_ROOT_OVERRIDE="$proc"
+  # Replace the baseline on every probe so reaped-child assertions measure one interval.
+  export FM_CHILD_CPU_SAMPLE_INTERVAL=0
+  write_fake_proc_process "$proc" 100 1 100 5 100 0 0 900 "$wt"
+  fm_child_cpu_state "$state" task >/dev/null
+  write_fake_proc_process "$proc" 100 1 100 5 100 0 400 900 "$wt"
+  [ "$(fm_child_cpu_state "$state" task)" = advancing ] \
+    || fail "CPU burned by already-reaped children was not counted as work"
+  [ "$(fm_child_cpu_state "$state" task)" = static ] \
+    || fail "a reaped-children total that stopped growing was still read as work"
+  unset FM_PROC_ROOT_OVERRIDE FM_CHILD_CPU_SAMPLE_INTERVAL
+  pass "fm_child_cpu_state: CPU of already-reaped descendants advances the total, and stalls with it"
+}
+
+# The kernel reissues pids, so a stored sample compared across a pid reuse would
+# read an unrelated process's counter as a jump in this crew's work. Every
+# sample is bound to fm_pid_identity of the agent it came from.
+test_child_cpu_sample_is_identity_bound() {
+  local dir state proc wt
+  dir=$(make_case child-cpu-identity); state="$dir/state"; proc="$dir/proc"; wt="$dir/wt"
+  mkdir -p "$proc" "$wt"
+  printf 'window=test:fm-task\nkind=ship\nworktree=%s\n' "$wt" > "$state/task.meta"
+  export FM_PROC_ROOT_OVERRIDE="$proc"
+  # Replace the baseline on every probe so identity assertions measure one interval.
+  export FM_CHILD_CPU_SAMPLE_INTERVAL=0
+  make_fake_agent_tree "$proc" "$wt"
+  fm_child_cpu_state "$state" task >/dev/null
+  # The same pid, a different start time: a DIFFERENT process wearing the old
+  # pid, with a descendant carrying a large counter of its own.
+  make_fake_agent_tree "$proc" "$wt" 0 0 5000 977
+  [ "$(fm_child_cpu_state "$state" task)" = static ] \
+    || fail "a reused agent pid was compared across the identity change"
+  # Within one identity the very next interval measures normally again.
+  make_fake_agent_tree "$proc" "$wt" 0 0 9000 977
+  [ "$(fm_child_cpu_state "$state" task)" = advancing ] \
+    || fail "the rebound sample did not resume measuring after the identity change"
+  unset FM_PROC_ROOT_OVERRIDE FM_CHILD_CPU_SAMPLE_INTERVAL
+  pass "fm_child_cpu_state: a sample is bound to the agent's identity, never to a bare pid"
+}
+
+# A baseline from long ago says nothing about whether work is happening NOW, so
+# it is refused rather than credited - otherwise a watcher restart could carry a
+# gap of arbitrary length and read it as a single advancing interval.
+test_child_cpu_refuses_a_stale_baseline() {
+  local dir state proc wt identity
+  dir=$(make_case child-cpu-stale-baseline); state="$dir/state"; proc="$dir/proc"; wt="$dir/wt"
+  mkdir -p "$proc" "$wt"
+  printf 'window=test:fm-task\nkind=ship\nworktree=%s\n' "$wt" > "$state/task.meta"
+  export FM_PROC_ROOT_OVERRIDE="$proc"
+  make_fake_agent_tree "$proc" "$wt" 0 0 9000
+  identity=$(fake_proc_identity "$proc" "$state" 100) || fail "could not read the fake agent identity"
+  printf '%s\t0\t%s\n' "$(( $(date +%s) - 30 ))" "$identity" > "$state/task.childcpu"
+  [ "$(FM_CHILD_CPU_MAX_SAMPLE_AGE=120 fm_child_cpu_state "$state" task)" = advancing ] \
+    || fail "a baseline inside the freshness window was not compared"
+  printf '%s\t0\t%s\n' "$(( $(date +%s) - 3000 ))" "$identity" > "$state/task.childcpu"
+  [ "$(FM_CHILD_CPU_MAX_SAMPLE_AGE=120 fm_child_cpu_state "$state" task)" = static ] \
+    || fail "a baseline older than the freshness window was still credited as advancement"
+  unset FM_PROC_ROOT_OVERRIDE
+  pass "fm_child_cpu_state: a baseline older than the freshness window proves nothing about now"
+}
+
+# The absorb classification consults process liveness ONLY where the semantic
+# read came back inconclusive. A definite verdict keeps its precedence in both
+# directions: a parked gate or a finished run is never talked out of surfacing
+# by whatever the process tree happens to still be doing.
+test_crew_absorb_class_process_liveness() {
+  local dir state proc wt fakebin
+  dir=$(make_case absorb-class-process); state="$dir/state"; proc="$dir/proc"
+  wt="$dir/wt"; fakebin="$dir/fakebin"
+  mkdir -p "$proc" "$wt"
+  printf 'window=test:fm-a\nkind=ship\nworktree=%s\n' "$wt" > "$state/a.meta"
+  export FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
+  export FM_FAKE_CREW_STATE
+  export FM_PROC_ROOT_OVERRIDE="$proc"
+  # Freeze one advancing interval: seed a baseline, then leave it in place
+  # (a huge sample interval) so every probe in this test scores the same jump.
+  export FM_CHILD_CPU_SAMPLE_INTERVAL=99999
+  make_fake_agent_tree "$proc" "$wt"
+  FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+  crew_absorb_class a "$state" >/dev/null
+  make_fake_agent_tree "$proc" "$wt" 0 0 5000
+
+  [ "$(crew_absorb_class a "$state")" = working ] \
+    || fail "an unknown crew with advancing descendants was not classed working"
+  FM_FAKE_CREW_STATE='state: working · source: status-log · working: implementing'
+  [ "$(crew_absorb_class a "$state")" = working ] \
+    || fail "a status-log-only working crew with advancing descendants was not classed working"
+  # A definite verdict keeps whatever the SEMANTIC classification makes of it and
+  # is never talked into `working` by the process tree. Which non-working token it
+  # lands on is the settled classifier's call, not this probe's: a gate-parked run
+  # with no open decision keeps aging as `none`, while a finished run is `settled`
+  # because its idle pane is the correct condition. Both are asserted exactly, so
+  # a regression that let descendants vouch for a definite verdict still fails here.
+  FM_FAKE_CREW_STATE='state: parked · source: run-step · parked at review'
+  [ "$(crew_absorb_class a "$state")" = none ] \
+    || fail "a gate-parked run was overridden by its process tree"
+  FM_FAKE_CREW_STATE='state: done · source: run-step · checks green'
+  [ "$(crew_absorb_class a "$state")" = settled ] \
+    || fail "a finished run was overridden by its process tree"
+  # A RUN-LEVEL terminal verdict is the deliberate exception, and it is not an
+  # override: `failed` is what happened to a RUN and never observed the crew, so
+  # there is no crew-level reading for the process tree to contradict. A crew
+  # whose descendants are advancing after its run ended is working - which is
+  # exactly the lane the wedge alarm kept escalating.
+  FM_FAKE_CREW_STATE='state: failed · source: run-step · run failed'
+  [ "$(crew_absorb_class a "$state")" = working ] \
+    || fail "a crew with advancing descendants after its run ended was not classed working"
+  FM_FAKE_CREW_STATE='state: paused · source: status-log · awaiting upstream'
+  [ "$(crew_absorb_class a "$state")" = paused ] \
+    || fail "a declared pause was overridden by its process tree"
+  # And with the descendants hung rather than advancing, the inconclusive cases
+  # go straight back to surfacing.
+  rm -rf "$proc/200"
+  rm -f "$state/a.childcpu"
+  FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+  crew_absorb_class a "$state" >/dev/null
+  [ "$(crew_absorb_class a "$state")" = none ] \
+    || fail "an unknown crew with no advancing descendant was absorbed"
+  # A run-ended verdict with no advancing descendant and no measured turn signal
+  # is the third value, not a pass: it surfaces, and reports that it surfaced
+  # without ever observing the crew.
+  FM_FAKE_CREW_STATE='state: failed · source: run-step · run failed'
+  [ "$(crew_absorb_class a "$state")" = unobserved ] \
+    || fail "an unobservable crew after its run ended was not reported as unobserved"
+  unset FM_FAKE_CREW_STATE FM_PROC_ROOT_OVERRIDE FM_CHILD_CPU_SAMPLE_INTERVAL
+  pass "crew_absorb_class: process liveness breaks an inconclusive or run-ended tie, never a definite verdict"
+}
+
+# The fixtures above drive a synthetic /proc so the four directions are exact
+# and portable. This one proves the anchor rule against REAL processes: a real
+# controlling terminal, a real foreground process group, a real child burning
+# real CPU, and a real kill. It self-skips only where the probe is inert anyway.
+test_child_cpu_real_process_tree() {
+  local dir state wt agent burner i
+  if [ ! -r /proc/self/stat ] || [ ! -r /proc/self/cmdline ]; then
+    pass "real-process descendant CPU check skipped: no Linux-compatible /proc, where the probe is inert by design"
+    return
+  fi
+  if ! command -v script >/dev/null 2>&1; then
+    pass "real-process descendant CPU check skipped: no script(1) to create a controlling terminal"
+    return
+  fi
+  dir=$(make_case child-cpu-real); state="$dir/state"; wt="$dir/wt"
+  mkdir -p "$wt"
+  printf 'window=test:fm-task\nkind=ship\nworktree=%s\n' "$wt" > "$state/task.meta"
+  # A real pty whose foreground group leader sits in the worktree and starts one
+  # CPU-burning child, exactly the shape of an agent that backgrounded a command
+  # and ended its turn.
+  script -qec "cd '$wt' && exec bash -c 'echo \$\$ > agent.pid; (while :; do :; done) & echo \$! > burn.pid; sleep 60'" \
+    /dev/null >/dev/null 2>&1 &
+  i=0
+  while [ "$i" -lt 60 ] && [ ! -s "$wt/burn.pid" ]; do sleep 0.1; i=$((i + 1)); done
+  if [ ! -s "$wt/burn.pid" ]; then
+    pass "real-process descendant CPU check skipped: this script(1) did not start a pty-backed shell"
+    return
+  fi
+  agent=$(cat "$wt/agent.pid"); burner=$(cat "$wt/burn.pid")
+  cleanup_real_tree() { kill -CONT "$burner" 2>/dev/null; kill -KILL "$burner" "$agent" 2>/dev/null || true; }
+
+  # Replace each real-process baseline so the following sleep is the measured interval.
+  FM_CHILD_CPU_SAMPLE_INTERVAL=0 fm_child_cpu_state "$state" task >/dev/null
+  sleep 2
+  [ "$(FM_CHILD_CPU_SAMPLE_INTERVAL=0 fm_child_cpu_state "$state" task)" = advancing ] \
+    || { cleanup_real_tree; fail "a real child burning real CPU was not read as work"; }
+
+  # SIGSTOP is the honest hung-child control: the process is still alive and
+  # still a descendant, it just stops consuming CPU.
+  kill -STOP "$burner" 2>/dev/null || { cleanup_real_tree; fail "could not stop the real burner"; }
+  # Replace the baseline immediately before measuring the stopped-child interval.
+  FM_CHILD_CPU_SAMPLE_INTERVAL=0 fm_child_cpu_state "$state" task >/dev/null
+  sleep 2
+  kill -0 "$burner" 2>/dev/null || { cleanup_real_tree; fail "the stopped burner was not still alive"; }
+  [ "$(FM_CHILD_CPU_SAMPLE_INTERVAL=0 fm_child_cpu_state "$state" task)" = static ] \
+    || { cleanup_real_tree; fail "a real live-but-hung descendant was treated as work"; }
+
+  kill -CONT "$burner" 2>/dev/null; kill -KILL "$burner" 2>/dev/null
+  kill -KILL "$agent" 2>/dev/null
+  i=0
+  while [ "$i" -lt 60 ] && kill -0 "$agent" 2>/dev/null; do sleep 0.1; i=$((i + 1)); done
+  [ "$(FM_CHILD_CPU_SAMPLE_INTERVAL=0 fm_child_cpu_state "$state" task)" = none ] \
+    || { cleanup_real_tree; fail "a dead real agent still resolved an anchor"; }
+  cleanup_real_tree
+  pass "real process tree: a live burning child absorbs, a hung one and a dead agent still surface"
+}
+
 # signal_crew_provably_working: a no-verb "signal:" wake is benign ONLY when EVERY
 # task it references is provably working; if any crew has stopped, or no task can be
 # resolved, it surfaces. Files map to ids by stripping .status / .turn-ended.

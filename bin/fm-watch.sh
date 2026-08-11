@@ -368,7 +368,13 @@ clear_pause_tracking() {  # <window>
 
 # Reconcile a declared pause or captain-held status with authoritative crew state.
 # Only a confidently dead ordinary crew may recover paused classification after
-# fm-crew-state has fallen back to stopped or unknown.
+# fm-crew-state has fallen back to stopped or unknown. A `working` or `settled`
+# verdict is positive authoritative evidence instead of that fallback, so it wins
+# outright and skips the agent-liveness gate: a crew that declared a pause but has
+# since finished its work is settled, not a wedge suspect with a live endpoint.
+# Which classes count as "the crew state absorbed nothing" is asked of
+# fm-classify-lib.sh (crew_absorb_class_surfaces) rather than named here, so a
+# class added to that vocabulary later cannot quietly opt out of this recovery.
 pause_state_class() {  # <window> <task>
   local win=$1 task=$2 key last recheck_file class agent_alive
   key=${win//:/_}
@@ -407,7 +413,7 @@ pause_state_class() {  # <window> <task>
       return
     fi
   fi
-  [ "$class" = none ] && [ "${agent_alive:-unknown}" = dead ] && class=paused
+  crew_absorb_class_surfaces "$class" && [ "${agent_alive:-unknown}" = dead ] && class=paused
   case "$class" in
     paused) date +%s > "$recheck_file" ;;
     *) rm -f "$recheck_file" ;;

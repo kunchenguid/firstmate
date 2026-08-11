@@ -165,6 +165,15 @@ Classify each wake this way:
   If the pane is still idle past `FM_STALE_ESCALATE_SECS` (default 240s), housekeeping escalates it as a possible wedge.
   This bounds wedge-detection latency to the threshold plus a tick: a delay, never a loss.
   Healthy crewmates are autonomous and do not wait on firstmate mid-task.
+- A wedge marker that reaches its escalation point is checked against `bin/fm-crew-state.sh` once: a crew reported as provably working has its marker refreshed instead of escalated, while a stopped, parked, or unreadable crew still escalates on the unchanged schedule.
+  A `failed`, `aborted`, or `interrupted` run is no longer decisive by itself, because that verdict describes a run and never observed the crew, which is routinely already starting its replacement run.
+  Such a lane is asked two crew-level questions instead: it is provably working when its own turn signal reads busy AND the backend probe establishes its agent alive, or when its descendants' CPU is advancing.
+  A live shell is not a live agent, so the turn signal alone never absorbs there: a busy record stays trusted for up to an hour from the moment its turn opened, and a worker killed behind a surviving shell is the case this alarm matters most for.
+  That lane escalates on the unchanged schedule when its agent is established dead or missing, when its turn signal reads idle, or when its endpoint is gone.
+  When the crew's liveness cannot be established at all - an uncorroborated busy record, or turn evidence that expired, was never written, or could not be read - it escalates on the same schedule and the escalation additionally reads `crew liveness could not be observed`, so an unread crew is never mistaken for a measured stall.
+  The always-on watcher words its stale wake the same way for the same case.
+  Those reads are budgeted per housekeeping pass, and a marker that does not get its read stays aged for the next pass, so the budget can delay a wedge escalation but never suppress one.
+  `docs/architecture.md` "Event-driven supervision" owns the rest: why the marker is refreshed rather than dropped, what the age in that escalation line measures, and the read budget's capacity arithmetic and tuning.
 - `heartbeat` -> self-handle. The daemon runs its own cheap bash fleet scan
   every `FM_HEARTBEAT_SCAN_SECS` (default 300s) as the catch-all for a
   captain-relevant status line the per-wake classifier might miss.

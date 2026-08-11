@@ -85,7 +85,20 @@ set -u
 case "${1:-}" in
   display-message)
     [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ] && exit 1
+    # The agent-liveness probe reads two formats off a pane. pane_tty is answered
+    # with nothing so the foreground-process-group half stays out of the way and
+    # the fixture controls the verdict through the current command alone.
+    case "$*" in
+      *pane_tty*) exit 0 ;;
+      *pane_current_command*) printf '%s\n' "${FM_FAKE_TMUX_COMMAND:-bash}"; exit 0 ;;
+    esac
     printf '%%1\n' ;;
+  list-windows)
+    if [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ]; then
+      printf "can't find session: %s\n" "${3:-fm}" >&2
+      exit 1
+    fi
+    printf '%s\n' "${FM_FAKE_TMUX_WINDOWS:-}" ;;
   capture-pane)
     [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ] && exit 1
     if [ "${FM_FAKE_BUSY:-0}" = 1 ]; then printf 'work in progress\n%s\n' "${FM_FAKE_BUSY_TEXT:-esc to interrupt}"
@@ -166,11 +179,14 @@ reset_fakes() {
   FM_FAKE_BUSY=0
   FM_FAKE_BUSY_TEXT=
   FM_FAKE_TMUX_MISSING=0
+  FM_FAKE_TMUX_WINDOWS=""
+  FM_FAKE_TMUX_COMMAND=""
   FM_FAKE_HERDR_BUSY=0
   FM_FAKE_HERDR_MISSING=0
   FM_FAKE_HERDR_AGENT_STATUS=""
   FM_FAKE_CI_LOGS=""
   export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING
+  export FM_FAKE_TMUX_WINDOWS FM_FAKE_TMUX_COMMAND
   export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS
 }
 
@@ -702,6 +718,8 @@ test_run_ended_verdict_records_crew_liveness() {
   gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-liveness)
   "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-liveness busy --gen "$gen" \
     --source claude-hook --event user-prompt-submit
+  FM_FAKE_TMUX_WINDOWS=fm-feat-liveness
+  FM_FAKE_TMUX_COMMAND=claude
 
   json=$(run_crew_state_json "$d" feat-liveness)
   [ "$(cf_json_field "$json" state)" = failed ] \
@@ -710,6 +728,20 @@ test_run_ended_verdict_records_crew_liveness() {
     || fail "the crew's live turn displaced the run-step as the winning source"
   [ "$(cf_json_field "$json" busy_signal)" = "busy claude-hook" ] \
     || fail "a run-level terminal verdict did not record the crew's own turn signal, got '$(cf_json_field "$json" busy_signal)'"
+  [ "$(cf_json_field "$json" agent_liveness)" = alive ] \
+    || fail "a run-level terminal verdict did not record the crew's agent liveness, got '$(cf_json_field "$json" agent_liveness)'"
+
+  # THE lane this pair exists for: the busy record is unchanged and still reads
+  # busy - it is trusted for up to an hour from when its turn opened - while the
+  # pane now holds nothing but a shell. A live shell is not a live agent, and the
+  # reader must report both readings so a consumer can tell them apart.
+  FM_FAKE_TMUX_COMMAND=bash
+  json=$(run_crew_state_json "$d" feat-liveness)
+  [ "$(cf_json_field "$json" busy_signal)" = "busy claude-hook" ] \
+    || fail "the shell-only pane changed the turn record, so the two readings are not independent"
+  [ "$(cf_json_field "$json" agent_liveness)" = dead ] \
+    || fail "an agent-free pane behind a busy turn record was not recorded as a dead agent, got '$(cf_json_field "$json" agent_liveness)'"
+  FM_FAKE_TMUX_COMMAND=claude
 
   # An idle turn record is an OBSERVATION that the crew stopped, and is reported
   # as one - the distinction the whole change rests on.
@@ -726,6 +758,8 @@ test_run_ended_verdict_records_crew_liveness() {
     || fail "a gone endpoint masked the run's own verdict"
   [ "$(cf_json_field "$json" busy_signal)" = "dead endpoint-gone" ] \
     || fail "a gone endpoint after a failed run was not recorded as an observation"
+  [ "$(cf_json_field "$json" agent_liveness)" = missing ] \
+    || fail "a gone endpoint after a failed run did not report its agent authoritatively absent"
   pass "a run-level terminal verdict carries the crew's own liveness without changing the verdict"
 }
 
@@ -752,6 +786,8 @@ test_non_run_ended_verdicts_measure_no_crew_liveness() {
       || fail "$fixture stopped being answered by the run step"
     [ -z "$(cf_json_field "$json" busy_signal)" ] \
       || fail "$fixture measured a crew turn signal it has no question for"
+    [ -z "$(cf_json_field "$json" agent_liveness)" ] \
+      || fail "$fixture measured agent liveness it has no question for"
   done
   pass "only a run-level terminal verdict pays for the crew-liveness reading"
 }

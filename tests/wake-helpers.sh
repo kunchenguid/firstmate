@@ -94,6 +94,28 @@ SH
 # A per-id override FM_FAKE_CREW_STATE_<sanitized-id> wins; otherwise the shared
 # FM_FAKE_CREW_STATE; otherwise an unknown verdict (NOT provably working), the
 # safe default so a test that forgets to set one surfaces rather than absorbs.
+# Setting FM_FAKE_CREW_STATE_LOG makes the fake append one line per invocation to
+# that path, so a test can COUNT reads rather than reason about how many a code
+# path makes - the read is bounded-cost by contract, and a count is the only way
+# to witness that bound rather than assume it.
+#
+# The fake serves BOTH modes from the ONE canned verdict, exactly as the real
+# reader serves both from one derivation: consumers request `--json` and get the
+# same state and source the prose line carries. Tests keep declaring the canned
+# verdict in the readable prose form; only the fake knows how to render it as
+# fields, so no call site changes and the two modes cannot disagree here either.
+#
+# FM_FAKE_CREW_BUSY (or the per-id FM_FAKE_CREW_BUSY_<sanitized-id>) cans the
+# structured mode's busy_signal - the crew's own turn signal, which the real
+# reader records ALONGSIDE a run-level terminal verdict. FM_FAKE_CREW_AGENT (or
+# the per-id FM_FAKE_CREW_AGENT_<sanitized-id>) cans agent_liveness, the second
+# half of that same evidence: a busy turn record is trusted for up to an hour
+# from when its turn OPENED, so a shell that outlived its agent still reads busy
+# and only the agent probe separates the two.
+# Unset means either field stays null, which is exactly what the reader emits
+# when it measured nothing, so the default keeps meaning "unmeasured" rather than
+# quietly meaning idle or alive.
+# The prose mode never carried these fields and still does not.
 make_fake_crew_state() {  # <fakebin>
   local fakebin=$1
   cat > "$fakebin/fm-crew-state.sh" <<'SH'
@@ -103,7 +125,37 @@ id=${1:-}
 key=$(printf '%s' "$id" | tr -c 'A-Za-z0-9' '_')
 var="FM_FAKE_CREW_STATE_$key"
 val=${!var:-${FM_FAKE_CREW_STATE:-}}
-printf '%s\n' "${val:-state: unknown · source: none · fake default}"
+val=${val:-state: unknown · source: none · fake default}
+if [ "$mode" = prose ]; then
+  printf '%s\n' "$val"
+  exit 0
+fi
+sep=' · '
+state=unknown; source=none; detail=
+case "$val" in
+  state:\ *"$sep"source:\ *)
+    rest=${val#state: }
+    state=${rest%%"$sep"source: *}
+    rest=${rest#*"$sep"source: }
+    case "$rest" in
+      *"$sep"*) source=${rest%%"$sep"*}; detail=${rest#*"$sep"} ;;
+      *) source=$rest ;;
+    esac
+    ;;
+esac
+detail=${detail//\\/\\\\}
+detail=${detail//\"/\\\"}
+busyvar="FM_FAKE_CREW_BUSY_$key"
+busy=${!busyvar:-${FM_FAKE_CREW_BUSY:-}}
+if [ -n "$busy" ]; then busy_field="\"$busy\""; else busy_field=null; fi
+agentvar="FM_FAKE_CREW_AGENT_$key"
+agent=${!agentvar:-${FM_FAKE_CREW_AGENT:-}}
+if [ -n "$agent" ]; then agent_field="\"$agent\""; else agent_field=null; fi
+printf '{"schema":1,"id":"%s","state":"%s","source":"%s","precedence_applied":"fake",' \
+  "$id" "$state" "$source"
+printf '"busy_signal":%s,"agent_liveness":%s,"run_step":null,"run_id":null,"terminal_error":null,' \
+  "$busy_field" "$agent_field"
+printf '"evidence_age_secs":null,"detail":"%s"}\n' "$detail"
 exit 0
 SH
   chmod +x "$fakebin/fm-crew-state.sh"
