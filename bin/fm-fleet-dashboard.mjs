@@ -596,13 +596,12 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent }) {
   return model;
 }
 
-const ANSI = { reset: "\u001b[0m", bold: "\u001b[1m", dim: "\u001b[2m", amber: "\u001b[33m", green: "\u001b[32m", red: "\u001b[31m", boldAmber: "\u001b[1;33m", boldRed: "\u001b[1;31m" };
-const BUCKET_COLOR = { attention: "amber", progress: "green", danger: "red", neutral: "dim" };
+const ANSI = { reset: "\u001b[0m", dim: "\u001b[2m", accent: "\u001b[33m" };
 const AGE_HOT_SECONDS = 7 * 86400;
 const AGE_WARM_SECONDS = 3 * 86400;
 
 function clip(text, width) {
-  return text.length <= width ? text : `${text.slice(0, Math.max(0, width - 1))}…`;
+  return text.length <= width ? text : `${text.slice(0, Math.max(0, width - 1))}\u2026`;
 }
 
 function ageTier(item) {
@@ -612,33 +611,63 @@ function ageTier(item) {
   return "calm";
 }
 
+// The \u26a0 glyph alone carries age weight so it survives NO_COLOR and pipes;
+// age text stays dim everywhere under the one-accent rule.
 function ageSegment(item, paint) {
-  const tier = ageTier(item);
-  const text = tier === "hot" ? `⚠ ${item.age.label}` : item.age.label;
-  const color = tier === "hot" ? "boldRed" : tier === "warm" ? "boldAmber" : "dim";
-  return { plain: text, painted: paint(color, text) };
+  const text = ageTier(item) === "hot" ? `\u26a0 ${item.age.label}` : item.age.label;
+  return { plain: text, painted: paint("dim", text) };
 }
 
+function metricLine(model, width) {
+  const countOf = (key) => model.buckets.find((bucket) => bucket.key === key).items.length;
+  const backlogCount = (key) => (model.backlogPresent ? String(countOf(key)) : "?");
+  const segments = [
+    `${backlogCount("needs-pedro")} need you`,
+    `${countOf("underway")} underway`,
+    `${countOf("unhealthy")} unhealthy`,
+    `${backlogCount("queued")} queued`,
+  ];
+  if (countOf("unreadable") > 0) {
+    segments.push(`${countOf("unreadable")} unreadable`);
+  }
+  const plainLength = segments.reduce((sum, segment) => sum + segment.length, 0);
+  const gap = Math.max(3, Math.floor((width - plainLength) / Math.max(1, segments.length - 1)));
+  const joined = segments.join(" ".repeat(gap));
+  return joined.length <= width ? joined : clip(segments.join(" \u00b7 "), width);
+}
+
+// One accent carries what needs Pedro; every other character stays quiet.
 function renderTerminal(model, width, useColor, showAll) {
   const paint = (name, text) => (useColor && name ? `${ANSI[name]}${text}${ANSI.reset}` : text);
   const lines = [];
-  lines.push(paint("bold", clip(`FIRSTMATE FLEET · observed ${model.generated}`, width)));
+  lines.push(paint("dim", clip(`FIRSTMATE FLEET \u00b7 observed ${model.generated}`, width)));
+  lines.push(metricLine(model, width));
   lines.push(
-    clip(
-      `sources: backlog ${model.backlogPresent ? "present" : "absent"} · telemetry ${model.telemetryPresent ? "present" : "absent"} · token spend not measured`,
-      width,
+    paint(
+      "dim",
+      clip(
+        `sources: backlog ${model.backlogPresent ? "present" : "absent"} \u00b7 telemetry ${model.telemetryPresent ? "present" : "absent"} \u00b7 token spend not measured`,
+        width,
+      ),
     ),
   );
+  let firstBucket = true;
   for (const bucket of model.buckets) {
     if (bucket.items.length === 0 && bucket.hideWhenEmpty) {
       continue;
     }
     lines.push("");
-    const header = `── ${bucket.name} (${bucket.items.length}) `;
-    const fill = "─".repeat(Math.max(0, width - header.length));
-    lines.push(paint(BUCKET_COLOR[bucket.tone], clip(header + fill, width)));
+    if (!firstBucket) {
+      lines.push("");
+    }
+    firstBucket = false;
+    const isAccentBucket = bucket.key === "needs-pedro";
+    const bucketPaint = (text) => paint(isAccentBucket ? "accent" : "dim", text);
+    const header = `\u2500\u2500 ${bucket.name} (${bucket.items.length}) `;
+    const fill = "\u2500".repeat(Math.max(0, width - header.length));
+    lines.push(bucketPaint(clip(header + fill, width)));
     if (bucket.items.length === 0) {
-      lines.push(clip(`   ${bucket.empty}`, width));
+      lines.push(paint("dim", clip(`   ${bucket.empty}`, width)));
       continue;
     }
     const shown = showAll ? bucket.items : bucket.items.slice(0, bucket.cap);
@@ -651,23 +680,23 @@ function renderTerminal(model, width, useColor, showAll) {
       const midParts = bucket.twoLine
         ? [item.name, item.project]
         : [item.name, item.project, item.note];
-      const mid = midParts.filter(Boolean).join(" · ");
+      const mid = midParts.filter(Boolean).join(" \u00b7 ");
       const midWidth = Math.max(8, width - headIndent - 3 - ageText.plain.length);
       lines.push(
-        `  ${paint("dim", rowLabel)} ${paint(BUCKET_COLOR[bucket.tone], tag)} ${clip(mid, midWidth)} · ${ageText.painted}`,
+        `  ${paint("dim", rowLabel)} ${bucketPaint(tag)} ${clip(mid, midWidth)} \u00b7 ${ageText.painted}`,
       );
       if (bucket.twoLine) {
         const detail = [item.prose, item.note].filter(Boolean).join("  ");
         if (detail) {
-          lines.push(`${" ".repeat(headIndent)}${clip(detail, Math.max(0, width - headIndent))}`);
+          lines.push(paint("dim", `${" ".repeat(headIndent)}${clip(detail, Math.max(0, width - headIndent))}`));
         }
       }
     }
     const hidden = bucket.items.length - shown.length;
     if (hidden > 0) {
-      const ruleText = bucket.rule ? ` · ${bucket.rule}` : "";
+      const ruleText = bucket.rule ? ` \u00b7 ${bucket.rule}` : "";
       const foldWord = bucket.foldWord || "more";
-      lines.push(paint("dim", clip(`  … ${hidden} ${foldWord}${ruleText} · --all shows all`, width)));
+      lines.push(paint("dim", clip(`  \u2026 ${hidden} ${foldWord}${ruleText} \u00b7 --all shows all`, width)));
     }
   }
   return `${lines.join("\n")}\n`;
