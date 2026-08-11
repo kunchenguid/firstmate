@@ -111,6 +111,55 @@ fm_task_id_creation_valid() {
   [ "${#id}" -le 64 ]
 }
 
+github_repository_identity() {
+  python3 - "$1" <<'PY'
+import re
+import sys
+import urllib.parse
+
+
+url = sys.argv[1]
+if "?" in url or "#" in url:
+    raise SystemExit(1)
+scp = re.fullmatch(r"git@github\.com:([^/?#]+/[^/?#]+)", url, re.IGNORECASE)
+if scp:
+    path = scp.group(1)
+else:
+    try:
+        parsed = urllib.parse.urlsplit(url)
+        port = parsed.port
+    except ValueError:
+        raise SystemExit(1)
+    scheme = parsed.scheme.lower()
+    if scheme not in {"http", "https", "ssh"}:
+        raise SystemExit(1)
+    if (parsed.hostname or "").lower() != "github.com" or port is not None:
+        raise SystemExit(1)
+    if parsed.password is not None or parsed.query or parsed.fragment:
+        raise SystemExit(1)
+    if scheme == "ssh":
+        if parsed.username != "git":
+            raise SystemExit(1)
+    elif parsed.username is not None:
+        raise SystemExit(1)
+    path = parsed.path.removeprefix("/")
+
+path = path.removesuffix("/")
+if path.lower().endswith(".git"):
+    path = path[:-4]
+parts = path.split("/")
+owner_pattern = r"(?:[A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9-]{0,37}[A-Za-z0-9])"
+repo_pattern = r"[A-Za-z0-9._-]{1,100}"
+if len(parts) != 2 or re.fullmatch(owner_pattern, parts[0]) is None:
+    raise SystemExit(1)
+if "--" in parts[0] or re.fullmatch(repo_pattern, parts[1]) is None:
+    raise SystemExit(1)
+if parts[1] in {".", ".."}:
+    raise SystemExit(1)
+print(f"github\tgithub.com\t{parts[0].lower()}/{parts[1].lower()}")
+PY
+}
+
 # GitLab serves self-hosted instances, so the host is part of the identity
 # rather than a constant. It is accepted only as a lowercase DNS name with no
 # userinfo, port, or trailing dot, which keeps one canonical spelling per MR.

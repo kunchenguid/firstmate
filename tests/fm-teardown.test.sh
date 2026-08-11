@@ -263,7 +263,7 @@ add_gh_pr_merged_squash() {
   local case_dir=$1 merge=$2 target=${3:-main} url=${4:-https://github.com/example/repo/pull/7}
   local head_name=${5:-fm/task-x1} head_oid=${6:-$LEGACY_SQUASH_HEAD}
   local head_repository=${7:-example/repo} base_repository=${8:-example/repo}
-  local canonical_default=${9:-main} project_repository=${10:-example/repo}
+  local canonical_default=${9:-main}
   cat > "$case_dir/fakebin/gh" <<SH
 #!/usr/bin/env bash
 if [ -n "\${FM_TEST_GH_MUTATE_WORKTREE:-}" ] && [ "\${1:-} \${2:-}" = "pr view" ]; then
@@ -287,9 +287,10 @@ case "\${1:-} \${2:-}" in
     esac
     ;;
   "repo view")
+    [ "\${3:-}" = '$base_repository' ] || exit 1
     case " \$* " in
       *"nameWithOwner,defaultBranchRef"*) printf '%s\\t%s\\n' '$base_repository' '$canonical_default' ;;
-      *) printf '%s\\n' '$project_repository' ;;
+      *) exit 1 ;;
     esac
     exit 0
     ;;
@@ -358,6 +359,9 @@ setup_legacy_squash_case() {
   wt_commit_file "$LEGACY_SQUASH_CASE" feature.txt omega "candidate five"
   LEGACY_SQUASH_HEAD=$(git -C "$LEGACY_SQUASH_CASE/wt" rev-parse HEAD)
   LEGACY_SQUASH_MERGE=$(land_candidate_as_squash "$LEGACY_SQUASH_CASE" "$LEGACY_SQUASH_BASE" "$advance")
+  git -C "$LEGACY_SQUASH_CASE/project" config \
+    "url.file://$LEGACY_SQUASH_CASE/origin.git.insteadOf" https://github.com/example/repo.git
+  git -C "$LEGACY_SQUASH_CASE/project" remote set-url origin https://github.com/example/repo.git
   printf '%s\n' 'tasktmp=' 'pr=https://github.com/example/repo/pull/7' \
     >> "$LEGACY_SQUASH_CASE/state/task-x1.meta"
   add_gh_pr_merged_squash "$LEGACY_SQUASH_CASE" "$LEGACY_SQUASH_MERGE"
@@ -1043,6 +1047,24 @@ test_legacy_detached_squash_one_byte_and_partial_content_refuse() {
 
 test_legacy_detached_squash_identity_and_target_refuse() {
   local case_dir rc
+  setup_legacy_squash_case legacy-detached-fork-head
+  case_dir=$LEGACY_SQUASH_CASE
+  git -C "$case_dir/project" config --add \
+    "url.file://$case_dir/origin.git.insteadOf" https://github.com/example/fork.git
+  git -C "$case_dir/project" remote add fork https://github.com/example/fork.git
+  git -C "$case_dir/project" config branch.fm/task-x1.remote fork
+  git -C "$case_dir/project" config branch.fm/task-x1.merge refs/heads/fm/task-x1
+  add_gh_pr_merged_squash "$case_dir" "$LEGACY_SQUASH_MERGE" main \
+    https://github.com/example/repo/pull/7 fm/task-x1 "$LEGACY_SQUASH_HEAD" example/fork
+  add_treehouse_returning_worktree "$case_dir"
+  set +e
+  FM_TEST_PROJECT="$case_dir/project" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "legacy-detached-fork-head: teardown should accept the bound fork PR head"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "legacy-detached-fork-head: successful teardown retained metadata"
+
   setup_legacy_squash_case legacy-detached-missing-pr
   case_dir=$LEGACY_SQUASH_CASE
   sed -i.bak -e '/^pr=/d' "$case_dir/state/task-x1.meta"
@@ -1105,19 +1127,28 @@ test_legacy_detached_squash_identity_and_target_refuse() {
   assert_present "$case_dir/state/task-x1.meta" \
     "legacy-detached-head-repository-mismatch: teardown discarded metadata"
 
-  setup_legacy_squash_case legacy-detached-project-repository-mismatch
+  setup_legacy_squash_case legacy-detached-origin-repository-mismatch
   case_dir=$LEGACY_SQUASH_CASE
-  add_gh_pr_merged_squash "$case_dir" "$LEGACY_SQUASH_MERGE" main \
-    https://github.com/example/repo/pull/7 fm/task-x1 "$LEGACY_SQUASH_HEAD" \
-    example/repo example/repo main example/other
+  git -C "$case_dir/project" remote set-url origin https://github.com/example/other.git
   set +e
   run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
-  expect_code 1 "$rc" "legacy-detached-project-repository-mismatch: teardown must refuse a different project repository"
+  expect_code 1 "$rc" "legacy-detached-origin-repository-mismatch: teardown must refuse a different source repository"
   assert_present "$case_dir/state/task-x1.meta" \
-    "legacy-detached-project-repository-mismatch: teardown discarded metadata"
-  pass "detached squash proof binds PR head, project repository, and canonical default"
+    "legacy-detached-origin-repository-mismatch: teardown discarded metadata"
+
+  setup_legacy_squash_case legacy-detached-origin-repository-ambiguous
+  case_dir=$LEGACY_SQUASH_CASE
+  git -C "$case_dir/project" config --add remote.origin.url git@github.com:example/repo.git
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "legacy-detached-origin-repository-ambiguous: teardown must refuse ambiguous source identity"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "legacy-detached-origin-repository-ambiguous: teardown discarded metadata"
+  pass "detached squash proof binds fork heads, exact origins, and canonical defaults"
 }
 
 test_legacy_detached_squash_dirty_and_untracked_refuse() {

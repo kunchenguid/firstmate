@@ -804,7 +804,9 @@ LEGACY_DETACHED_SCRATCH_ARCHIVE=
 LEGACY_DETACHED_RESUME=0
 legacy_detached_exact_landed_proof() {
   local view state merge target head_name head_oid head_repository base_repository url extra
-  local repository_view repository default project_repository default_ref parent_line parent_count
+  local repository_view repository default default_ref parent_line parent_count
+  local base_identity canonical_base_identity head_identity origin_identity origin_urls origin_count base_url
+  local source_remote source_remotes source_remote_count source_urls source_url_count source_identity
   local merge_parent candidate_commits candidate_first candidate_base candidate_head
   local candidate_patch merge_patch diff_rc
 
@@ -825,9 +827,58 @@ legacy_detached_exact_landed_proof() {
   if [ -n "${extra:-}" ] || [ "$state" != MERGED ] || ! fm_pr_head_valid "$merge" \
      || ! fm_pr_head_valid "$head_oid" || [ "$url" != "$FM_PR_META_URL" ] \
      || [ "$head_name" != "fm/$ID" ] || [ "$head_oid" != "$candidate_head" ] \
-     || [ -z "$head_repository" ] || [ "$head_repository" != "$base_repository" ]; then
+     || [ -z "$head_repository" ]; then
     echo "REFUSED: recorded PR identity for detached task $ID is absent, mismatched, or not merged; preserving task state." >&2
     return 1
+  fi
+
+  base_identity=$(github_repository_identity "https://github.com/$base_repository.git") \
+    && head_identity=$(github_repository_identity "https://github.com/$head_repository.git") || {
+      echo "REFUSED: recorded PR repository identity for detached task $ID is invalid; preserving task state." >&2
+      return 1
+    }
+  origin_urls=$(git -C "$WT" config --local --get-all remote.origin.url 2>/dev/null || true)
+  origin_count=$(git -C "$WT" config --local --get-all remote.origin.url 2>/dev/null \
+    | awk 'END { print NR + 0 }')
+  if [ "$origin_count" -ne 1 ] || [ -z "$origin_urls" ]; then
+    echo "REFUSED: detached task $ID source repository identity is missing or ambiguous; preserving task state." >&2
+    return 1
+  fi
+  origin_identity=$(github_repository_identity "$origin_urls") || {
+    echo "REFUSED: detached task $ID origin is not a canonical GitHub repository identity; preserving task state." >&2
+    return 1
+  }
+  if [ "$origin_identity" != "$base_identity" ]; then
+    echo "REFUSED: detached task $ID origin and PR base repository identities do not agree; preserving task state." >&2
+    return 1
+  fi
+  if [ "$head_identity" != "$base_identity" ]; then
+    source_remotes=$(git -C "$WT" config --local --get-all "branch.fm/$ID.remote" 2>/dev/null || true)
+    source_remote_count=$(git -C "$WT" config --local --get-all "branch.fm/$ID.remote" 2>/dev/null \
+      | awk 'END { print NR + 0 }')
+    case "$source_remotes" in
+      ''|.|*[!A-Za-z0-9._-]*) source_remote_count=0 ;;
+    esac
+    if [ "$source_remote_count" -ne 1 ]; then
+      echo "REFUSED: detached task $ID fork source remote is missing or ambiguous; preserving task state." >&2
+      return 1
+    fi
+    source_remote=$source_remotes
+    source_urls=$(git -C "$WT" config --local --get-all "remote.$source_remote.url" 2>/dev/null || true)
+    source_url_count=$(git -C "$WT" config --local --get-all "remote.$source_remote.url" 2>/dev/null \
+      | awk 'END { print NR + 0 }')
+    if [ "$source_url_count" -ne 1 ] || [ -z "$source_urls" ]; then
+      echo "REFUSED: detached task $ID fork source identity is missing or ambiguous; preserving task state." >&2
+      return 1
+    fi
+    source_identity=$(github_repository_identity "$source_urls") || {
+      echo "REFUSED: detached task $ID fork source is not a canonical GitHub repository identity; preserving task state." >&2
+      return 1
+    }
+    if [ "$source_identity" != "$head_identity" ]; then
+      echo "REFUSED: detached task $ID fork source and PR head identities do not agree; preserving task state." >&2
+      return 1
+    fi
   fi
 
   repository_view=$(cd "$WT" && gh repo view "$base_repository" --json nameWithOwner,defaultBranchRef \
@@ -836,27 +887,26 @@ legacy_detached_exact_landed_proof() {
     return 1
   }
   IFS=$'\t' read -r repository default extra <<< "$repository_view"
-  project_repository=$(cd "$WT" && gh repo view --json nameWithOwner -q '.nameWithOwner' 2>/dev/null) || {
-    echo "REFUSED: cannot bind the detached task project repository identity; preserving task state." >&2
+  canonical_base_identity=$(github_repository_identity "https://github.com/$repository.git") || {
+    echo "REFUSED: canonical repository identity for detached task $ID is invalid; preserving task state." >&2
     return 1
   }
-  if [ -n "${extra:-}" ] || [ -z "$default" ] || [ "$repository" != "$base_repository" ] \
-     || [ "$project_repository" != "$base_repository" ]; then
-    echo "REFUSED: detached task project and PR repository identities do not agree; preserving task state." >&2
+  if [ -n "${extra:-}" ] || [ -z "$default" ] || [ "$canonical_base_identity" != "$base_identity" ]; then
+    echo "REFUSED: detached task PR and canonical base repository identities do not agree; preserving task state." >&2
     return 1
   fi
   if [ "$target" != "$default" ]; then
     echo "REFUSED: recorded PR target $target drifted from current default $default for detached task $ID; preserving task state." >&2
     return 1
   fi
-  git -C "$WT" remote get-url origin >/dev/null 2>&1 \
-    && git -C "$WT" fetch --quiet origin "+refs/heads/$default:refs/remotes/origin/$default" >/dev/null 2>&1 || {
+  base_url="https://github.com/${repository}.git"
+  git -C "$WT" fetch --quiet "$base_url" "refs/heads/$default" >/dev/null 2>&1 || {
     echo "REFUSED: cannot refresh the recorded PR target for detached task $ID; preserving task state." >&2
     return 1
   }
-  default_ref="refs/remotes/origin/$default"
+  default_ref=$(git -C "$WT" rev-parse --verify FETCH_HEAD 2>/dev/null) || return 1
   git -C "$WT" cat-file -e "$merge^{commit}" 2>/dev/null \
-    || git -C "$WT" fetch --quiet origin "$merge" >/dev/null 2>&1 \
+    || git -C "$WT" fetch --quiet "$base_url" "$merge" >/dev/null 2>&1 \
     || {
       echo "REFUSED: cannot inspect recorded PR merge $merge for detached task $ID; preserving task state." >&2
       return 1
