@@ -385,7 +385,7 @@ fi
 
 effort_flag_for_harness() {
   local harness=$1 effort=$2
-  [ -n "$effort" ] && [ "$effort" != default ] && [ "$effort" != - ] || return 0
+  [ -n "$effort" ] && [ "$effort" != default ] || return 0
   case "$harness:$effort" in
     claude:low|claude:medium|claude:high|claude:xhigh|claude:max)
       printf -- "--effort '%s' " "$effort"
@@ -410,7 +410,7 @@ effort_flag_for_harness() {
 }
 
 spawn_remote_secondmate() {
-  local id=$1 remote host root home harness positional model effort backend out rc meta tmp
+  local id=$1 remote host root home harness positional model effort capability_effort backend out rc meta tmp
   local remote_backend remote_target remote_harness remote_herdr_session registry_lock remote_lock remote_generation
   local remote_traceparent remote_recorded_traceparent
   local -a launch_args
@@ -472,7 +472,9 @@ spawn_remote_secondmate() {
       [ -n "$effort" ] || effort=-
     fi
   fi
-  effort_flag_for_harness "$harness" "$effort" >/dev/null || {
+  capability_effort=$effort
+  [ "$capability_effort" != - ] || capability_effort=
+  effort_flag_for_harness "$harness" "$capability_effort" >/dev/null || {
     fm_lock_release "$registry_lock" || true
     fm_lock_release "$SPAWN_TASK_LOCK" || true
     return 1

@@ -236,6 +236,27 @@ test_kimi_nondefault_effort_refuses_before_metadata_or_launch() {
   pass "fm-spawn: Kimi non-default effort refuses before metadata and launch"
 }
 
+test_kimi_effort_sentinel_refuses_before_metadata_or_launch() {
+  local id rec out rc
+  id=kimi-effort-sentinel-refuse-z1
+  rec=$(make_spawn_case effort-sentinel-refuse "$id")
+  read_spawn_record "$rec"
+
+  rc=0
+  out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" \
+    --model kimi-code/k3 --effort -) || rc=$?
+  expect_code 1 "$rc" "Kimi effort sentinel must remain an invalid local request"
+  assert_contains "$out" "error: --effort must be one of low, medium, high, xhigh, max" \
+    "Kimi effort sentinel refusal did not reject the invalid local request"
+  assert_absent "$HOME_DIR/state/$id.meta" "Kimi effort sentinel refusal wrote metadata"
+  [ ! -s "$CASE_DIR/launch.log" ] || fail "Kimi effort sentinel refusal sent a launch command"
+  [ ! -s "$CASE_DIR/pointer.log" ] || fail "Kimi effort sentinel refusal sent a brief pointer"
+  if grep -Eq '(^| )new-(session|window)( |$)' "$CASE_DIR/tmux-calls.log"; then
+    fail "Kimi effort sentinel refusal created a tmux container or pane"
+  fi
+  pass "fm-spawn: local Kimi effort sentinel refuses before metadata and launch"
+}
+
 test_kimi_hook_install_is_surgical_idempotent_and_removable() {
   local home config original once stripped count
   home="$TMP_ROOT/config-surgery"
@@ -683,6 +704,7 @@ test_kimi_hook_fails_closed_on_missing_malformed_or_partial_config
 test_kimi_hook_install_refuses_without_jq
 test_kimi_launch_then_send_is_verified
 test_kimi_nondefault_effort_refuses_before_metadata_or_launch
+test_kimi_effort_sentinel_refuses_before_metadata_or_launch
 test_kimi_hook_is_silent_and_requires_registered_workspace_token
 test_kimi_spawn_refuses_unsafe_global_config_before_pane_creation
 test_kimi_teardown_removes_pointer_and_registry_token
