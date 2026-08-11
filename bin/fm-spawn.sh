@@ -258,7 +258,11 @@ SPAWN_TURNEND_CREATED=0
 SPAWN_GROK_POINTER_CREATED=0
 SPAWN_GROK_TOKEN_CREATED=0
 SPAWN_GROK_AUTH_CREATED=0
+SPAWN_GROK_HOOK_CREATED=0
+SPAWN_GROK_CONFIG_CREATED=0
 SPAWN_GROK_AUTH_FILE=
+SPAWN_GROK_HOOK_FILE=
+SPAWN_GROK_CONFIG_FILE=
 SPAWN_CLAUDE_HOOK_INODE=
 SPAWN_CLAUDE_HOOK_DIGEST=
 SPAWN_OPENCODE_HOOK_INODE=
@@ -434,7 +438,8 @@ spawn_create_new_artifact() {
 }
 
 spawn_create_or_reuse_artifact() {
-  local path=$1 dir tmp status
+  local path=$1 created_var=${2:-} inode_var=${3:-} digest_var=${4:-}
+  local dir tmp status inode digest
   dir=$(dirname -- "$path") || return 1
   [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
   tmp=$(mktemp "$dir/.fm-artifact.XXXXXXXXXXXX") || return 1
@@ -449,17 +454,64 @@ spawn_create_or_reuse_artifact() {
       status=1
     fi
     rm -f -- "$tmp"
+    if [ "$status" -eq 0 ] && [ -n "$created_var" ]; then
+      printf -v "$created_var" '%s' 0
+    fi
     return "$status"
   fi
   if ! ( set -C; cat "$tmp" > "$path" ); then
     if [ -f "$path" ] && [ ! -L "$path" ] && cmp -s "$tmp" "$path"; then
       rm -f -- "$tmp"
+      if [ -n "$created_var" ]; then
+        printf -v "$created_var" '%s' 0
+      fi
       return 0
     fi
     rm -f -- "$tmp"
     return 1
   fi
   rm -f -- "$tmp"
+  if [ -n "$created_var" ]; then
+    printf -v "$created_var" '%s' 1
+  fi
+  inode=$(spawn_artifact_inode "$path") || return 1
+  digest=$(spawn_artifact_digest "$path") || return 1
+  [ -n "$inode_var" ] && printf -v "$inode_var" '%s' "$inode"
+  [ -n "$digest_var" ] && printf -v "$digest_var" '%s' "$digest"
+}
+
+spawn_preflight_real_directory_path() {
+  local path=$1 parent
+  [ -n "$path" ] || return 1
+  if [ -e "$path" ] || [ -L "$path" ]; then
+    [ -d "$path" ] && [ ! -L "$path" ]
+    return
+  fi
+  parent=$(dirname -- "$path") || return 1
+  [ "$parent" != "$path" ] || return 1
+  spawn_preflight_real_directory_path "$parent"
+}
+
+spawn_ensure_real_directory_path() {
+  local path=$1 parent
+  if [ -e "$path" ] || [ -L "$path" ]; then
+    [ -d "$path" ] && [ ! -L "$path" ]
+    return
+  fi
+  parent=$(dirname -- "$path") || return 1
+  [ "$parent" != "$path" ] || return 1
+  spawn_ensure_real_directory_path "$parent" || return 1
+  mkdir "$path" 2>/dev/null || true
+  [ -d "$path" ] && [ ! -L "$path" ]
+}
+
+spawn_artifact_matches_or_absent() {
+  local path=$1 expected=$2
+  if [ -e "$path" ] || [ -L "$path" ]; then
+    [ -f "$path" ] && [ ! -L "$path" ] && cmp -s "$expected" "$path"
+    return
+  fi
+  return 0
 }
 
 spawn_remove_owned_artifact() {
@@ -517,6 +569,14 @@ spawn_abort_artifacts_cleanup() {
   fi
   if [ "${SPAWN_GROK_AUTH_CREATED:-0}" = 1 ] && [ -n "${SPAWN_GROK_AUTH_FILE:-}" ]; then
     spawn_remove_owned_artifact "$SPAWN_GROK_AUTH_FILE" "$SPAWN_GROK_AUTH_INODE" "$SPAWN_GROK_AUTH_DIGEST" || rc=1
+  fi
+  if [ "${SPAWN_GROK_HOOK_CREATED:-0}" = 1 ]; then
+    spawn_remove_owned_artifact "$SPAWN_GROK_HOOK_FILE" \
+      "$SPAWN_GROK_HOOK_INODE" "$SPAWN_GROK_HOOK_DIGEST" || rc=1
+  fi
+  if [ "${SPAWN_GROK_CONFIG_CREATED:-0}" = 1 ]; then
+    spawn_remove_owned_artifact "$SPAWN_GROK_CONFIG_FILE" \
+      "$SPAWN_GROK_CONFIG_INODE" "$SPAWN_GROK_CONFIG_DIGEST" || rc=1
   fi
   if [ "${SPAWN_GROK_TOKEN_CREATED:-0}" = 1 ] && [ -n "${STATE:-}" ] \
     && { [ -e "$STATE/$ID.grok-turnend-token" ] || [ -L "$STATE/$ID.grok-turnend-token" ]; }; then
@@ -1895,28 +1955,20 @@ EOF
       # (gitignored, like the other harnesses' worktree hook files).
       # Result: the hook is outside the worktree, needs no trust grant, and never
       # touches grok's managed config - only firstmate-owned files.
-      GROK_HOOKS_DIR="${GROK_HOME:-$HOME/.grok}/hooks"
+      GROK_HOME_DIR="${GROK_HOME:-$HOME/.grok}"
+      GROK_HOOKS_DIR="$GROK_HOME_DIR/hooks"
       GROK_AUTH_DIR="$GROK_HOOKS_DIR/fm-turn-end.d"
-      mkdir -p "$GROK_HOOKS_DIR" "$GROK_AUTH_DIR"
-      [ -d "$GROK_HOOKS_DIR" ] && [ ! -L "$GROK_HOOKS_DIR" ] || exit 1
-      [ -d "$GROK_AUTH_DIR" ] && [ ! -L "$GROK_AUTH_DIR" ] || exit 1
-      old_umask=$(umask)
-      umask 077
-      auth_file=$(mktemp "$GROK_AUTH_DIR/fm.XXXXXXXXXXXX")
-      SPAWN_GROK_AUTH_FILE=$auth_file
-      SPAWN_GROK_AUTH_CREATED=1
-      umask "$old_umask"
-      SPAWN_GROK_AUTH_INODE=$(spawn_artifact_inode "$auth_file") || exit 1
-      printf '%s\n' "$TURNEND" > "$auth_file"
-      SPAWN_GROK_AUTH_DIGEST=$(spawn_artifact_digest "$auth_file") || exit 1
-      spawn_create_new_artifact "$STATE/$ID.grok-turnend-token" SPAWN_GROK_TOKEN_INODE SPAWN_GROK_TOKEN_DIGEST <<EOF || exit 1
-${auth_file##*/}
-EOF
-      SPAWN_GROK_TOKEN_CREATED=1
-      sq_grok_auth_dir=$(shell_quote "$GROK_AUTH_DIR")
       GROK_HOOK_SCRIPT="$GROK_HOOKS_DIR/fm-turn-end.sh"
       GROK_HOOK_CONFIG="$GROK_HOOKS_DIR/fm-turn-end.json"
-      spawn_create_or_reuse_artifact "$GROK_HOOK_SCRIPT" <<EOF || exit 1
+      SPAWN_GROK_HOOK_FILE=$GROK_HOOK_SCRIPT
+      SPAWN_GROK_CONFIG_FILE=$GROK_HOOK_CONFIG
+      spawn_preflight_real_directory_path "$GROK_HOME_DIR" || exit 1
+      spawn_preflight_real_directory_path "$GROK_HOOKS_DIR" || exit 1
+      spawn_preflight_real_directory_path "$GROK_AUTH_DIR" || exit 1
+      sq_grok_auth_dir=$(shell_quote "$GROK_AUTH_DIR")
+      GROK_HOOK_BODY="$TASK_TMP/grok-turn-end.sh"
+      GROK_CONFIG_BODY="$TASK_TMP/grok-turn-end.json"
+      cat > "$GROK_HOOK_BODY" <<EOF
 #!/usr/bin/env bash
 set -u
 FM_FIRSTMATE_GROK_HOOK=1
@@ -1936,9 +1988,33 @@ touch "\$t" 2>/dev/null || true
 exit 0
 EOF
       hook_command=$(json_escape "bash $(shell_quote "$GROK_HOOK_SCRIPT")")
-      spawn_create_or_reuse_artifact "$GROK_HOOK_CONFIG" <<EOF || exit 1
+      cat > "$GROK_CONFIG_BODY" <<EOF
 {"hooks":{"Stop":[{"hooks":[{"type":"command","command":"$hook_command"}]}]}}
 EOF
+      spawn_artifact_matches_or_absent "$GROK_HOOK_SCRIPT" "$GROK_HOOK_BODY" || exit 1
+      spawn_artifact_matches_or_absent "$GROK_HOOK_CONFIG" "$GROK_CONFIG_BODY" || exit 1
+      spawn_ensure_real_directory_path "$GROK_HOME_DIR" || exit 1
+      spawn_ensure_real_directory_path "$GROK_HOOKS_DIR" || exit 1
+      spawn_ensure_real_directory_path "$GROK_AUTH_DIR" || exit 1
+      old_umask=$(umask)
+      umask 077
+      auth_file=$(mktemp "$GROK_AUTH_DIR/fm.XXXXXXXXXXXX")
+      SPAWN_GROK_AUTH_FILE=$auth_file
+      SPAWN_GROK_AUTH_CREATED=1
+      umask "$old_umask"
+      SPAWN_GROK_AUTH_INODE=$(spawn_artifact_inode "$auth_file") || exit 1
+      printf '%s\n' "$TURNEND" > "$auth_file"
+      SPAWN_GROK_AUTH_DIGEST=$(spawn_artifact_digest "$auth_file") || exit 1
+      spawn_create_new_artifact "$STATE/$ID.grok-turnend-token" SPAWN_GROK_TOKEN_INODE SPAWN_GROK_TOKEN_DIGEST <<EOF || exit 1
+${auth_file##*/}
+EOF
+      SPAWN_GROK_TOKEN_CREATED=1
+      spawn_create_or_reuse_artifact "$GROK_HOOK_SCRIPT" \
+        SPAWN_GROK_HOOK_CREATED SPAWN_GROK_HOOK_INODE SPAWN_GROK_HOOK_DIGEST \
+        < "$GROK_HOOK_BODY" || exit 1
+      spawn_create_or_reuse_artifact "$GROK_HOOK_CONFIG" \
+        SPAWN_GROK_CONFIG_CREATED SPAWN_GROK_CONFIG_INODE SPAWN_GROK_CONFIG_DIGEST \
+        < "$GROK_CONFIG_BODY" || exit 1
       spawn_create_new_artifact "$WT/.fm-grok-turnend" SPAWN_GROK_POINTER_INODE SPAWN_GROK_POINTER_DIGEST <<EOF || exit 1
 token=${auth_file##*/}
 EOF

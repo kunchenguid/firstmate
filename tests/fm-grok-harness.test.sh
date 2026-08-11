@@ -144,8 +144,8 @@ run_grok_spawn() {
   )
 }
 
-test_grok_hook_requires_registered_token() {
-  local rec case_dir home proj wt fakebin grok_home id out status hook config token target evil evil_target
+test_grok_hook_provisioning_is_safe() {
+  local rec case_dir home proj wt fakebin grok_home id out status hook config token target evil evil_target real_hooks
   rec=$(make_spawn_case hook-conflict)
   IFS='|' read -r case_dir home proj wt fakebin grok_home id <<EOF
 $rec
@@ -161,6 +161,39 @@ EOF
     || fail "grok spawn overwrote the user's global hook script"
   [ "$(cat "$grok_home/hooks/fm-turn-end.json")" = user-config ] \
     || fail "grok spawn overwrote the user's global hook configuration"
+  assert_absent "$grok_home/hooks/fm-turn-end.d" "conflicting Grok hooks created an auth directory"
+  kill -KILL "$GROK_AGENT_PID" 2>/dev/null || true
+  wait "$GROK_AGENT_PID" 2>/dev/null || true
+
+  rec=$(make_spawn_case hook-partial)
+  IFS='|' read -r case_dir home proj wt fakebin grok_home id <<EOF
+$rec
+EOF
+  mkdir -p "$grok_home/hooks"
+  printf '%s\n' user-config > "$grok_home/hooks/fm-turn-end.json"
+  start_grok_agent "$home" "$wt" "$id"
+  out=$(run_grok_spawn "$home" "$proj" "$wt" "$fakebin" "$grok_home" "$id")
+  status=$?
+  expect_code 1 "$status" "grok spawn should refuse a conflicting configuration"
+  assert_absent "$grok_home/hooks/fm-turn-end.sh" "failed Grok provisioning left a global hook"
+  [ "$(cat "$grok_home/hooks/fm-turn-end.json")" = user-config ] \
+    || fail "failed Grok provisioning changed the user's configuration"
+  assert_absent "$grok_home/hooks/fm-turn-end.d" "failed Grok provisioning created an auth directory"
+  kill -KILL "$GROK_AGENT_PID" 2>/dev/null || true
+  wait "$GROK_AGENT_PID" 2>/dev/null || true
+
+  rec=$(make_spawn_case hook-symlink)
+  IFS='|' read -r case_dir home proj wt fakebin grok_home id <<EOF
+$rec
+EOF
+  real_hooks="$grok_home/real-hooks"
+  mkdir -p "$real_hooks"
+  ln -s "$real_hooks" "$grok_home/hooks"
+  start_grok_agent "$home" "$wt" "$id"
+  out=$(run_grok_spawn "$home" "$proj" "$wt" "$fakebin" "$grok_home" "$id")
+  status=$?
+  expect_code 1 "$status" "grok spawn should refuse a symlinked hook directory"
+  assert_absent "$real_hooks/fm-turn-end.d" "symlinked Grok hook path was mutated"
   kill -KILL "$GROK_AGENT_PID" 2>/dev/null || true
   wait "$GROK_AGENT_PID" 2>/dev/null || true
 
@@ -258,6 +291,6 @@ SH
   pass "fm-lock recognizes grok harness processes"
 }
 
-test_grok_hook_requires_registered_token
+test_grok_hook_provisioning_is_safe
 test_grok_teardown_removes_pointer_and_token
 test_fm_lock_recognizes_grok_holder
