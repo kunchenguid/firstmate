@@ -68,13 +68,17 @@
 #             branch, then to fm/<task-id>. The branch keys the watcher's
 #             supersede scope, so it is always passed explicitly.
 #
-# Prints one line either way and exits 0 when armed, 1 when it is not, so a
-# caller can relay the outcome without deciding whether the PR record failed.
-# On success it records nm_watch_run=<id> in state/<task-id>.meta and clears any
-# nm_watch_unarmed=. A direct-PR task left with no watch records the reason as
-# nm_watch_unarmed=<reason> instead, because the printed line scrolls past inside
-# a PR-record run and nothing else would ever re-surface an unmonitored PR;
-# bin/fm-bootstrap.sh reads that field back as its NM_UNWATCHED diagnostic.
+# Prints one line on STDOUT either way and exits 0 when armed, 1 when it is not,
+# so a caller can relay the outcome without deciding whether the PR record
+# failed. On success it records nm_watch_run=<id> in state/<task-id>.meta and
+# clears any nm_watch_unarmed=. A direct-PR task left with no watch records the
+# reason as nm_watch_unarmed=<reason> instead, because the printed line scrolls
+# past inside a PR-record run and nothing else would ever re-surface an
+# unmonitored PR; bin/fm-bootstrap.sh reads that field back as its NM_UNWATCHED
+# diagnostic. A failed arm additionally dumps every candidate's RAW output to
+# stderr, which is evidence rather than a second verdict: the one-line stdout
+# contract is unchanged and a caller must select that line by its "watch not
+# armed" prefix rather than by position.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -269,16 +273,76 @@ fi
 
 command -v "$NM_BIN" >/dev/null 2>&1 || unwatched "$NM_BIN is not on PATH"
 
+# Where `no-mistakes init` has to be run for the fix to still be there next time:
+# the durable clone, never the disposable task worktree, which is torn down with
+# the task. The recorded project path is that clone for a task that ran here, and
+# this home's own clone of the same name for one that ran elsewhere; falling back
+# to the first candidate keeps the sentence concrete when neither resolves.
+INIT_DIR=
+for candidate in "$PROJECT" "$LOCAL_CLONE" "$LOCAL_ROOT" "${DIRS[0]}"; do
+  [ -n "$candidate" ] || continue
+  [ -d "$candidate" ] || continue
+  INIT_DIR=$candidate
+  break
+done
+
+# The arm is captured with 2>&1 because no-mistakes writes its refusals to
+# stderr - and writes its self-update banner there too, on every CLI call, ahead
+# of everything the command itself has to say:
+#
+#   A new build of no-mistakes is available: 8a4127c -> 2fcbae7
+#   Run "no-mistakes update" to update
+#   repo not initialized (run 'no-mistakes init' first)
+#
+# Reading the reason off the first non-empty line therefore reported the banner
+# and buried the refusal. Measured 2026-08-10 on lavish-axi MR 5: every arm
+# reported "A new build of no-mistakes is available", the PR went unwatched for
+# its whole waiting window, and the actual cause - an uninitialized repo, with
+# its own remedy in the message - was one line further down the whole time.
+#
+# So drop the banner's two lines, and nothing else. An unrecognized line is the
+# error until proven otherwise: over-filtering here would recreate the same bug
+# with a different mask. The banner keeps its ANSI colouring even when captured
+# to a pipe (the version notice is not run through the style layer that strips
+# colour off a non-tty), so the escapes come off first or the pattern misses.
+nm_signal_lines() {  # <output>
+  local esc=$'\033'
+  printf '%s\n' "$1" \
+    | sed "s/${esc}\[[0-9;]*[A-Za-z]//g" \
+    | grep -v -E '^[[:space:]]*A new build of .+ is available: ' \
+    | grep -v -E '^[[:space:]]*Run "[^"]+ update" to update[[:space:]]*$' \
+    | grep -v '^[[:space:]]*$'
+}
+
 # One candidate's failure reason, normalized to a single line.
 arm_failure_reason() {  # <output> <exit-code>
-  local out=$1 rc=$2 detail
-  case "$out" in
+  local out=$1 rc=$2 signal detail where
+  signal=$(nm_signal_lines "$out")
+  # Nothing but noise left: say so with the raw first line rather than an empty
+  # reason, because a silent reason is the failure this function exists to end.
+  if [ -z "$signal" ]; then
+    signal=$(printf '%s\n' "$out" | grep -v '^[[:space:]]*$' | head -1)
+  fi
+  case "$signal" in
     *'unknown command "watch"'*)
       printf 'the installed %s has no '"'"'watch'"'"' command; update it to a build that carries the external watch entry\n' "$NM_BIN"
       return 0
       ;;
+    *'repo not initialized'*)
+      # The one refusal whose remedy is a standing firstmate rule rather than a
+      # no-mistakes bug: a direct-PR project needs `no-mistakes init` too, even
+      # though it never runs the pipeline, because that is what lets the watch
+      # attach at all (the project-management skill owns the rule). Stated
+      # without naming a candidate directory so re-trying every checkout still
+      # dedupes to one clause, and pointing at the project clone rather than the
+      # disposable task worktree, which is where the initialization has to last.
+      where=${INIT_DIR:-the project clone}
+      printf '%s is not initialized for this project, so it refuses to watch in any checkout; run '"'"'cd %s && %s init'"'"' - a direct-PR project needs that too, and skipping it leaves every one of its PRs unmonitored\n' \
+        "$NM_BIN" "$where" "$NM_BIN"
+      return 0
+      ;;
   esac
-  detail=$(printf '%s\n' "$out" | grep -v '^[[:space:]]*$' | head -1)
+  detail=$(printf '%s\n' "$signal" | head -1)
   printf '%s\n' "${detail:-$NM_BIN watch exited $rc}"
 }
 
@@ -286,6 +350,7 @@ out=
 rc=0
 DIR=
 REASONS=
+RAW=
 for candidate in "${DIRS[@]}"; do
   out=$(cd "$candidate" && "$NM_BIN" watch --pr "$URL" --branch "$BRANCH" 2>&1)
   rc=$?
@@ -293,6 +358,9 @@ for candidate in "${DIRS[@]}"; do
     DIR=$candidate
     break
   fi
+  RAW="$RAW--- $NM_BIN watch --pr, run in $candidate (exit $rc) ---
+$out
+"
   reason=$(arm_failure_reason "$out" "$rc")
   case "$REASONS" in
     '') REASONS=$reason ;;
@@ -300,7 +368,22 @@ for candidate in "${DIRS[@]}"; do
     *) REASONS="$REASONS; $reason" ;;
   esac
 done
-[ -n "$DIR" ] || unwatched "$REASONS"
+if [ -z "$DIR" ]; then
+  # The reason line above is one sentence chosen out of this; keep the whole
+  # thing reachable so the next unfamiliar refusal can be read rather than
+  # guessed at. Bounded, and says so when it truncates - a silent cut here would
+  # be the same class of mistake as the mask it replaces.
+  if [ -n "$RAW" ]; then
+    RAW_MAX=${FM_NM_WATCH_RAW_LINES:-60}
+    case "$RAW_MAX" in ''|*[!0-9]*) RAW_MAX=60 ;; esac
+    RAW_LINES=$(printf '%s' "$RAW" | wc -l | tr -d ' ')
+    printf '%s\n' "$NM_BIN watch output, verbatim:" >&2
+    printf '%s' "$RAW" | head -n "$RAW_MAX" >&2
+    [ "$RAW_LINES" -le "$RAW_MAX" ] \
+      || printf '(%s more lines suppressed; raise FM_NM_WATCH_RAW_LINES to see them)\n' "$((RAW_LINES - RAW_MAX))" >&2
+  fi
+  unwatched "$REASONS"
+fi
 
 # `watch` prints "  <mark> Watching <pr-url> <run-id>"; take the run id from the
 # Watching line rather than the whole output, which also carries the branch and
