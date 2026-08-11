@@ -36,8 +36,8 @@
 #   positional harness arg still works for back-compat.
 #   --model <name> and --effort <low|medium|high|xhigh|max> are concrete profile
 #   axes chosen by firstmate at intake. They are only threaded into harnesses whose
-#   installed CLIs were verified to support that axis; unsupported axes are omitted
-#   from that harness's launch rather than guessed.
+#   installed CLIs were verified to support that axis; unsupported requested axes
+#   refuse before metadata and launch rather than guessed.
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   exact task only (docs/configuration.md "Runtime backend" owns when that flag
 #   is authorized). Without it, the script resolves FM_BACKEND, then
@@ -383,6 +383,32 @@ else
   fi
 fi
 
+effort_flag_for_harness() {
+  local harness=$1 effort=$2
+  [ -n "$effort" ] && [ "$effort" != default ] || return 0
+  case "$harness:$effort" in
+    claude:low|claude:medium|claude:high|claude:xhigh|claude:max)
+      printf -- "--effort '%s' " "$effort"
+      ;;
+    codex:low|codex:medium|codex:high|codex:xhigh|codex:max)
+      printf -- "-c 'model_reasoning_effort=\"%s\"' " "$effort"
+      ;;
+    grok:low|grok:medium|grok:high)
+      printf -- "--reasoning-effort '%s' " "$effort"
+      ;;
+    pi:low|pi:medium|pi:high|pi:xhigh|pi:max|pi-signed:low|pi-signed:medium|pi-signed:high|pi-signed:xhigh|pi-signed:max)
+      printf -- "--thinking '%s' " "$effort"
+      ;;
+    muse:low|muse:medium|muse:high|muse:xhigh)
+      printf -- "--reasoning-effort '%s' " "$effort"
+      ;;
+    *)
+      echo "error: refusing $harness spawn with effort '$effort': no verified launch flag expresses that exact effort" >&2
+      return 1
+      ;;
+  esac
+}
+
 spawn_remote_secondmate() {
   local id=$1 remote host root home harness positional model effort backend out rc meta tmp
   local remote_backend remote_target remote_harness remote_herdr_session registry_lock remote_lock remote_generation
@@ -446,6 +472,11 @@ spawn_remote_secondmate() {
       [ -n "$effort" ] || effort=-
     fi
   fi
+  effort_flag_for_harness "$harness" "$effort" >/dev/null || {
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    return 1
+  }
   # A remote second mate always runs on Herdr: its server belongs to the host's
   # own GUI login session, so the endpoint outlives every SSH connection that
   # supervises it. bin/fm-remote-doctor.sh gates that host on the same
@@ -1323,49 +1354,6 @@ model_flag_for_harness() {
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
-}
-
-effort_flag_for_harness() {
-  local harness=$1 effort=$2
-  [ -n "$effort" ] && [ "$effort" != default ] || return 0
-  case "$harness" in
-    claude)
-      case "$effort" in
-        low|medium|high|xhigh|max) printf -- '--effort %s ' "$(shell_quote "$effort")"; return 0 ;;
-      esac
-      ;;
-    codex)
-      # Codex 0.147.0 accepts every shared effort level through its
-      # model_reasoning_effort config key, including max.
-      case "$effort" in
-        low|medium|high|xhigh|max) printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")"; return 0 ;;
-      esac
-      ;;
-    grok)
-      # Grok exposes both --effort and --reasoning-effort; firstmate's profile
-      # axis is the reasoning knob, which accepts only low, medium, and high.
-      case "$effort" in
-        low|medium|high) printf -- '--reasoning-effort %s ' "$(shell_quote "$effort")"; return 0 ;;
-      esac
-      ;;
-    pi|pi-signed)
-      # Pi accepts the full shared effort vocabulary through its --thinking flag.
-      case "$effort" in
-        low|medium|high|xhigh|max) printf -- '--thinking %s ' "$(shell_quote "$effort")"; return 0 ;;
-      esac
-      ;;
-    muse)
-      # Muse accepts low through xhigh literally.
-      # Its ultra level is not firstmate's max, so it is deliberately not mapped.
-      case "$effort" in
-        low|medium|high|xhigh) printf -- '--reasoning-effort %s ' "$(shell_quote "$effort")"; return 0 ;;
-      esac
-      ;;
-    # OpenCode's interactive launch and Kimi have no verified effort flag.
-  esac
-
-  echo "error: refusing $harness spawn with effort '$effort': no verified launch flag expresses that exact effort" >&2
-  return 1
 }
 
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT") || exit 1

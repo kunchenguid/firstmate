@@ -724,6 +724,28 @@ publish_healthy_watcher_identity "$PARENT/state" "$PARENT" "$ROOT/bin/fm-watch.s
   || fail "remote endpoint delivery observation did not execute on its own host"
 pass "remote spawn launches on the remote-local backend and records a host-qualified route"
 
+cp "$PARENT/state/ios.meta" "$TMP_ROOT/parent-ios-before-kimi-effort-refusal.meta"
+cp "$REMOTE_HOME/state/parent-route/ios.meta" "$TMP_ROOT/remote-ios-before-kimi-effort-refusal.meta"
+ssh_before_kimi_effort_refusal=$(cat "$SSH_COUNT")
+launches_before_kimi_effort_refusal=$(grep -c '^tab create' "$HERDR_LOG" || true)
+set +e
+remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate --harness kimi --effort high \
+  > "$TMP_ROOT/spawn-kimi-effort-refusal.out" 2>&1
+kimi_effort_refusal_rc=$?
+set -e
+[ "$kimi_effort_refusal_rc" -ne 0 ] || fail "remote reused endpoint accepted unsupported Kimi effort"
+assert_grep "error: refusing kimi spawn with effort 'high'" "$TMP_ROOT/spawn-kimi-effort-refusal.out" \
+  "remote reused endpoint did not name the unsupported Kimi effort"
+[ "$(cat "$SSH_COUNT")" = "$ssh_before_kimi_effort_refusal" ] \
+  || fail "remote Kimi effort refusal reached readiness, inheritance, or endpoint reuse"
+cmp -s "$TMP_ROOT/parent-ios-before-kimi-effort-refusal.meta" "$PARENT/state/ios.meta" \
+  || fail "remote Kimi effort refusal rewrote parent metadata"
+cmp -s "$TMP_ROOT/remote-ios-before-kimi-effort-refusal.meta" "$REMOTE_HOME/state/parent-route/ios.meta" \
+  || fail "remote Kimi effort refusal rewrote reused endpoint metadata"
+[ "$(grep -c '^tab create' "$HERDR_LOG" || true)" = "$launches_before_kimi_effort_refusal" ] \
+  || fail "remote Kimi effort refusal created a remote endpoint"
+pass "remote reused endpoints refuse unsupported effort before remote work or metadata"
+
 remote_route_meta="$REMOTE_HOME/state/parent-route/ios.meta"
 cp "$remote_route_meta" "$TMP_ROOT/remote-ios-before-default-session.meta"
 legacy_pane=$(sed -n 's/^herdr_pane_id=//p' "$remote_route_meta")
