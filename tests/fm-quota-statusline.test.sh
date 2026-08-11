@@ -125,6 +125,7 @@ const freshInput = {
   branch: "main",
   contextPercent: 70.1,
   contextTokens: 272000,
+  contextWindowTokens: 200000,
   modelId: "gpt-5.6-terra",
   thinkingLevel: "high",
   windows: freshWindows,
@@ -137,9 +138,16 @@ check("line 1 shows repo path and branch", /~\/Developer\/firstmate \(main\)/.te
 const freshLine2 = freshLines[1] ?? "";
 check("line 2 shows context percent", freshLine2.includes("70.1%"));
 check("line 2 shows context tokens", freshLine2.includes("272.0k"));
+check("line 2 shows the active context window", freshLine2.includes("272.0k/200.0k"));
 check("line 2 shows the weekly window label", freshLine2.includes("week: 95%"));
 check("line 2 shows reset countdown", freshLine2.includes("6d"));
 check("line 2 shows model and thinking level", freshLine2.includes("gpt-5.6-terra") && freshLine2.includes("high"));
+const thinkingOffLines = renderFooter(
+  { ...freshInput, thinkingLevel: "off" },
+  theme,
+  120,
+);
+check("footer shows an effective thinking level of off", thinkingOffLines.join("\n").includes("gpt-5.6-terra off"));
 // Only verified windows appear: a fabricated short window must never render.
 check("fresh footer never invents a 5h window", !freshLine2.includes("5h:"));
 
@@ -175,7 +183,7 @@ const narrowJoined = narrowLines.join("");
 check("narrow footer uses continuation lines", narrowLines.length > 1);
 check("narrow footer stays within the width", narrowLines.every((line) => visibleWidth(line) <= 18));
 check("narrow footer preserves repo and branch", narrowJoined.includes("~/Developer/firstmate") && narrowJoined.includes("main"));
-check("narrow footer preserves context", narrowJoined.includes("70.1%") && narrowJoined.includes("272.0k"));
+check("narrow footer preserves context", narrowJoined.includes("70.1%") && narrowJoined.includes("272.0k/200.0k"));
 check("narrow footer preserves quota", narrowJoined.includes("week: 95%") && narrowJoined.includes("6d"));
 check("narrow footer preserves model and thinking", narrowJoined.includes("gpt-5.6-terra") && narrowJoined.includes("high"));
 // Even narrower: truncation must be ANSI-safe and not throw.
@@ -278,6 +286,7 @@ const component = footerFactory(
 const componentLines = component.render(120);
 check("installed footer renders two lines", componentLines.length === 2);
 check("installed footer line 1 shows branch", (componentLines[0] ?? "").includes("(main)"));
+check("installed footer uses Pi's active context window", componentLines.join("\n").includes("272.0k/200.0k"));
 
 execResult = { stdout: JSON.stringify({
   providers: [{

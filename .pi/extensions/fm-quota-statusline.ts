@@ -135,6 +135,7 @@ export default function (pi: ExtensionAPI) {
 			branch: footerData.getGitBranch(),
 			contextPercent: usage?.percent ?? null,
 			contextTokens: usage?.tokens ?? null,
+			contextWindowTokens: usage?.contextWindow ?? null,
 			modelId: ctx.model?.id ?? null,
 			thinkingLevel: thinking,
 			windows,

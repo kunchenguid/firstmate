@@ -9,7 +9,7 @@
 //
 // Layout (matches the captain's compact example):
 //   line 1: <repoPath> (<branch>)
-//   following lines: <ctx%> / <tokens>   <quota windows>   <model> <thinking>
+//   following lines: <ctx%> <tokens>/<window>   <quota windows>   <model> <thinking>
 //
 // A stale quota cache keeps its last-good windows but prefixes the segment
 // so the captain can see the data may be behind. An unavailable quota shows a
@@ -35,6 +35,8 @@ export interface RenderInput {
 	contextPercent: number | null;
 	/** Context tokens used, or null. */
 	contextTokens: number | null;
+	/** Active model context-window size in tokens, or null. */
+	contextWindowTokens: number | null;
 	/** Active model id, or null. */
 	modelId: string | null;
 	/** Effective thinking level, or null. */
@@ -73,12 +75,16 @@ function formatTokens(tokens: number | null): string {
 }
 
 function renderContextSegment(input: RenderInput): string {
-	if (input.contextPercent === null && input.contextTokens === null) {
+	if (
+		input.contextPercent === null &&
+		input.contextTokens === null &&
+		input.contextWindowTokens === null
+	) {
 		return "ctx: —";
 	}
 	const percent =
 		input.contextPercent !== null ? `${input.contextPercent.toFixed(1)}%` : "?";
-	return `ctx ${percent} / ${formatTokens(input.contextTokens)}`;
+	return `ctx ${percent} · ${formatTokens(input.contextTokens)}/${formatTokens(input.contextWindowTokens)}`;
 }
 
 function renderWindowSegment(window: QuotaWindow, now: number): string {
@@ -110,7 +116,7 @@ function renderQuotaSegments(input: RenderInput): string[] {
 
 function renderModelSegment(input: RenderInput): string {
 	const model = input.modelId ?? "no-model";
-	const thinking = input.thinkingLevel && input.thinkingLevel !== "off"
+	const thinking = input.thinkingLevel
 		? ` ${input.thinkingLevel}`
 		: "";
 	return `${model}${thinking}`;
