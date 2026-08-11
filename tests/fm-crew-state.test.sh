@@ -25,6 +25,11 @@
 #       This is the direct regression pair for the 2026-07-02 herdr incident,
 #       proving the watcher's own absorb-only-when-provably-working predicate
 #       benefits from the fix in both directions.
+#   (l) a live pipeline-owned run whose head has not been fetched into this
+#       worktree's object store yet is never read as diverged/failed, at
+#       either head-matching call site, and an active row for a branch always
+#       outranks a stale terminal row for that branch. Regression coverage
+#       for the 2026-08 false-failed incident.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -1408,6 +1413,88 @@ test_missing_run_head_falls_back_to_current_state() {
   pass "missing run head falls back instead of matching by branch"
 }
 
+# Regression coverage for the false "failed" incident (2026-08): a live,
+# pipeline-owned run whose head has advanced past this worktree's own HEAD but
+# has not yet been fetched/pushed into this worktree's object store (the
+# `branch_sync.state: pipeline_owned` case - "the pipeline head has moved but
+# has not been successfully pushed") must never be read as diverged. Call
+# site 1: `axi status` answers for THIS branch directly.
+test_pipeline_owned_run_unresolvable_head_remains_current() {
+  reset_fakes
+  local d out
+  d=$(new_case pipeline-unresolvable)
+  make_repo_on_branch "$d/wt" fm/feat-unresolved
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/unresolved.meta" "window=fm:fm-unresolved" "worktree=$d/wt" "kind=ship"
+  # A head this worktree's object store has never observed - not a real
+  # commit anywhere in the throwaway repo, standing in for a pipeline fix
+  # commit made elsewhere and not yet fetched/pushed back here.
+  FM_FAKE_RUN_HEAD="deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+  FM_FAKE_AXI_STATUS="$(run_fixing fm/feat-unresolved)"
+  out=$(run_crew_state "$d" unresolved)
+  assert_contains "$out" "source: run-step" "unresolvable pipeline head is still attributed via axi status"
+  assert_contains "$out" "state: working" "unresolvable pipeline head reads as working, not failed"
+  assert_not_contains "$out" "state: failed" "a live pipeline-owned run must never read as failed"
+  pass "pipeline-owned run with a not-yet-fetched head remains attributed as current (call site 1)"
+}
+
+# Same incident, call site 2: `axi status` answers for a DIFFERENT branch (a
+# concurrent crew), forcing the coarse `no-mistakes runs` fallback, where the
+# exact reported shape reproduces: the live running row's head has not been
+# fetched locally, and an older failed row for the same branch happens to sit
+# at this worktree's own current sha - the row that used to win by accident.
+test_coarse_fallback_prefers_live_pipeline_run_over_stale_failed_row() {
+  reset_fakes
+  local d wt_head out
+  d=$(new_case coarse-pipeline-vs-stale-failed)
+  make_repo_on_branch "$d/wt" fm/feat-race
+  wt_head=$(git -C "$d/wt" rev-parse --short=7 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/race.meta" "window=fm:fm-race" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/other-crew aaaaaaa  2026-08-06 10:00
+  running    fm/feat-race deadbee  2026-08-06 09:55
+  failed     fm/feat-race ${wt_head}  2026-08-06 09:40
+EOF
+)"
+  local out; out=$(run_crew_state "$d" race)
+  assert_contains "$out" "state: working" "the live pipeline-owned run wins over a stale failed row at the worktree sha"
+  assert_contains "$out" "source: run-step" "coarse-resolved live run remains run-step sourced"
+  assert_not_contains "$out" "state: failed" "the reported bug: a stale failed row must never outrank the live run"
+  pass "coarse fallback resolves the live pipeline run instead of an older stale failed row (call site 2)"
+}
+
+# An active row for a branch must outrank a terminal row for that branch
+# regardless of which one the (newest-first, but not contract-guaranteed-
+# strict) runs list happens to surface first.
+test_coarse_fallback_active_row_outranks_terminal_regardless_of_order() {
+  reset_fakes
+  local d wt_head fix_head base_head out
+  d=$(new_case coarse-active-over-terminal-order)
+  make_repo_on_branch "$d/wt" fm/feat-order
+  base_head=$(git -C "$d/wt" rev-parse HEAD)
+  git -C "$d/wt" commit -q --allow-empty -m 'pipeline fix commit'
+  fix_head=$(git -C "$d/wt" rev-parse --short=7 HEAD)
+  git -C "$d/wt" reset -q --hard "$base_head"
+  wt_head=$(git -C "$d/wt" rev-parse --short=7 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/order.meta" "window=fm:fm-order" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  # The terminal row is listed BEFORE the active one - list order alone must
+  # not decide the winner.
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  failed     fm/feat-order ${wt_head}  2026-08-06 09:40
+  running    fm/feat-order ${fix_head}  2026-08-06 09:55
+  running    fm/other-crew aaaaaaa  2026-08-06 10:00
+EOF
+)"
+  local out; out=$(run_crew_state "$d" order)
+  assert_contains "$out" "state: working" "the active row wins even though a terminal row for the branch is listed first"
+  assert_not_contains "$out" "state: failed" "a terminal row must never outrank an active row for the same branch"
+  pass "active row for a branch outranks a terminal row for that branch regardless of list order"
+}
+
 test_active_run_is_authoritative
 test_stale_needs_decision_superseded
 test_stale_blocked_superseded
@@ -1461,5 +1548,8 @@ test_historical_same_branch_rewritten_head_not_current
 test_active_run_descendant_fix_head_remains_current
 test_local_advanced_past_run_head_invalidates
 test_missing_run_head_falls_back_to_current_state
+test_pipeline_owned_run_unresolvable_head_remains_current
+test_coarse_fallback_prefers_live_pipeline_run_over_stale_failed_row
+test_coarse_fallback_active_row_outranks_terminal_regardless_of_order
 
 echo "all fm-crew-state tests passed"

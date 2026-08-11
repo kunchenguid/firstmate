@@ -380,11 +380,16 @@ nm_ci_checks_state() {
 # "<status> <branch> <short-sha> <date> [<pr-url>]" separated by runs of
 # spaces (verified: no quoting, so splitting on the first two whitespace runs
 # is exact) - but branch + coarse status is exactly what this predicate needs:
-# is a run for THIS branch active right now. Echoes the first (most recent)
-# matching row's status word (running/completed/cancelled/failed), or empty
-# when the branch has no run within FM_CREW_STATE_RUNS_LIMIT rows.
+# is a run for THIS branch active right now. Echoes the branch's active
+# (running) matching row's status word when one exists, else the first
+# (most recent) terminal matching row's status word (completed/cancelled/
+# failed), or empty when the branch has no matching row within
+# FM_CREW_STATE_RUNS_LIMIT rows. An active row always outranks a terminal
+# one regardless of list order: a stale failed/completed row for this branch
+# must never shadow a live running row (see fm_nm_head_matches_worktree's
+# header for why an unresolvable head must not be read as divergence either).
 nm_runs_status_for_branch() {  # <branch>
-  local branch=$1 out row st rest br sha
+  local branch=$1 out row st rest br sha terminal=''
   out=$(nm_run runs --limit "$FM_CREW_STATE_RUNS_LIMIT")
   [ -n "$out" ] || return 0
   while IFS= read -r row; do
@@ -397,16 +402,17 @@ nm_runs_status_for_branch() {  # <branch>
     rest=${rest#* }
     rest=$(trim "$rest")
     sha=${rest%% *}
-    if [ "$br" = "$branch" ]; then
-      # Same code-identity rule as axi status: skip a same-branch row whose
-      # short-sha does not match this worktree (rewritten or advanced tip).
-      if ! nm_coarse_head_matches_worktree "$sha"; then
-        continue
-      fi
+    [ "$br" = "$branch" ] || continue
+    # Same code-identity rule as axi status: skip a same-branch row whose
+    # short-sha does not match this worktree (rewritten or advanced tip).
+    nm_coarse_head_matches_worktree "$sha" || continue
+    if [ "$st" = running ]; then
       printf '%s' "$st"
       return 0
     fi
+    [ -n "$terminal" ] || terminal=$st
   done <<< "$out"
+  [ -n "$terminal" ] && printf '%s' "$terminal"
   return 0
 }
 
