@@ -1,10 +1,17 @@
 #!/usr/bin/env node
-// Generate the tracked, self-contained Fleet Dashboard from live Firstmate state.
+// Render the Firstmate fleet cockpit from live state.
 //
-// Sources stay read-only: fm-fleet-snapshot.sh owns meta/status classification,
-// tasks-axi owns backlog projection, and fm-model-telemetry.sh owns its sheet.
-// The only write is the requested HTML output, which defaults to the tracked
-// repository path fleet-dashboard.html.
+// Sources stay read-only: fm-fleet-snapshot.sh (built on fm-crew-state.sh and
+// fm-classify-lib.sh) owns meta/status/backlog classification, and
+// fm-model-telemetry.sh owns its attempt sheet.
+//
+// One view model, two renderers:
+//   default            ANSI terminal cockpit on stdout (no args, no server)
+//   --output <path>    self-contained HTML page written to <path>
+// The HTML output may never be written under data/, state/, or config/.
+//
+// The four buckets are Pedro's own daily read, mutually exclusive, in the
+// order he resolves them: Needs Pedro, Underway, Unhealthy, Queued.
 
 import { execFileSync } from "node:child_process";
 import {
@@ -13,6 +20,7 @@ import {
   readFileSync,
   renameSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
@@ -24,20 +32,22 @@ const fleetHome = resolve(process.env.FM_HOME || process.env.FM_ROOT_OVERRIDE ||
 const dataDirectory = resolve(process.env.FM_DATA_OVERRIDE || resolve(fleetHome, "data"));
 const stateDirectory = resolve(process.env.FM_STATE_OVERRIDE || resolve(fleetHome, "state"));
 const configDirectory = resolve(process.env.FM_CONFIG_OVERRIDE || resolve(fleetHome, "config"));
-const backlogPath = resolve(dataDirectory, "backlog.md");
 const telemetryPath = resolve(dataDirectory, "routing-outcomes.jsonl");
 
 function usage(stream = process.stdout) {
-  stream.write(`usage: fm-fleet-dashboard.mjs [--output <path>]
+  stream.write(`usage: fm-fleet-dashboard.mjs [--width <columns>] [--output <path>]
 
-Generate a self-contained HTML fleet dashboard.
-The default output is ${resolve(repositoryRoot, "fleet-dashboard.html")}.
-The output may never be written under data/, state/, or config/.
+Render the fleet cockpit from live read-only state.
+Default output is an ANSI terminal view on stdout (pairs with watch/tmux).
+--width <columns>  terminal width override (default: tty width, else 80)
+--output <path>    write the self-contained HTML page to <path> instead
+The HTML output may never be written under data/, state/, or config/.
 `);
 }
 
 function parseArguments(argumentsList) {
-  let outputPath = resolve(repositoryRoot, "fleet-dashboard.html");
+  let outputPath = null;
+  let width = null;
   for (let index = 0; index < argumentsList.length; index += 1) {
     const argument = argumentsList[index];
     if (argument === "-h" || argument === "--help") {
@@ -50,10 +60,18 @@ function parseArguments(argumentsList) {
       index += 1;
       continue;
     }
+    if (argument === "--width" && index + 1 < argumentsList.length) {
+      width = Number.parseInt(argumentsList[index + 1], 10);
+      if (!Number.isInteger(width) || width < 40) {
+        throw new Error("--width requires an integer of at least 40");
+      }
+      index += 1;
+      continue;
+    }
     usage(process.stderr);
     throw new Error(`unknown or incomplete argument: ${argument}`);
   }
-  return { outputPath };
+  return { outputPath, width };
 }
 
 function pathIsWithin(candidate, parent) {
@@ -91,77 +109,8 @@ function run(command, argumentsList) {
   }
 }
 
-function parseCsvLikeRecord(line) {
-  const fields = [];
-  let current = "";
-  let quoted = false;
-  let escaped = false;
-  for (const character of line) {
-    if (escaped) {
-      current += character;
-      escaped = false;
-      continue;
-    }
-    if (quoted && character === "\\") {
-      current += character;
-      escaped = true;
-      continue;
-    }
-    if (character === '"') {
-      current += character;
-      quoted = !quoted;
-      continue;
-    }
-    if (character === "," && !quoted) {
-      fields.push(current.trim());
-      current = "";
-      continue;
-    }
-    current += character;
-  }
-  fields.push(current.trim());
-  return fields;
-}
-
-function decodeToonValue(rawValue) {
-  const value = rawValue.trim();
-  if (value.startsWith('"') && value.endsWith('"')) {
-    try {
-      return JSON.parse(value).replaceAll("\n", " ");
-    } catch {
-      return value.slice(1, -1);
-    }
-  }
-  if (value === "" || value === "none" || value === "-") {
-    return null;
-  }
-  return value;
-}
-
-function parseTasksAxiList(output) {
-  const lines = output.split(/\r?\n/);
-  const headerIndex = lines.findIndex((line) => /^tasks\[\d+\]\{[^}]+\}:$/.test(line));
-  if (headerIndex < 0) {
-    return [];
-  }
-  const headerMatch = lines[headerIndex].match(/^tasks\[\d+\]\{([^}]+)\}:$/);
-  const fieldNames = headerMatch[1].split(",");
-  const records = [];
-  for (const line of lines.slice(headerIndex + 1)) {
-    if (!line.startsWith("  ")) {
-      break;
-    }
-    const values = parseCsvLikeRecord(line.trim()).map(decodeToonValue);
-    if (values.length !== fieldNames.length) {
-      throw new Error("tasks-axi returned a row that does not match its declared fields");
-    }
-    records.push(Object.fromEntries(fieldNames.map((fieldName, index) => [fieldName, values[index]])));
-  }
-  return records;
-}
-
 function parseMeta(path) {
-  if (!existsSync(path)) {
+  if (!path || !existsSync(path)) {
     return {};
   }
   const values = {};
@@ -178,20 +127,13 @@ function parseMeta(path) {
   return values;
 }
 
-function escapeHtml(value) {
+// Backlog prose can carry a CLI pager's own truncation artifact; the cockpit
+// renders state, never tool output, so the artifact is folded into an ellipsis.
+function cleanProse(value) {
   return String(value ?? "")
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#39;");
-}
-
-function titleCase(value) {
-  if (!value) {
-    return "Absent";
-  }
-  return value.replaceAll("_", " ").replace(/\b\w/g, (character) => character.toUpperCase());
+    .replaceAll(/\s*\(truncated,[^)]*\)/g, "…")
+    .replaceAll(/\s+/g, " ")
+    .trim();
 }
 
 function formatDuration(seconds) {
@@ -216,46 +158,286 @@ function formatDuration(seconds) {
   return remainingHours === 0 ? `${days}d` : `${days}d ${remainingHours}h`;
 }
 
-function runtimeForTask(task, telemetryRows, generatedAt) {
+function age(seconds) {
+  const duration = formatDuration(seconds);
+  return duration === null
+    ? { seconds: null, label: "age unknown" }
+    : { seconds, label: `for ${duration}` };
+}
+
+function secondsSince(epochMilliseconds, observedMilliseconds) {
+  if (!Number.isFinite(epochMilliseconds) || !Number.isFinite(observedMilliseconds)) {
+    return null;
+  }
+  const seconds = Math.floor((observedMilliseconds - epochMilliseconds) / 1000);
+  return seconds >= 0 ? seconds : null;
+}
+
+function mtimeMilliseconds(path) {
+  if (!path || !existsSync(path)) {
+    return null;
+  }
+  try {
+    return statSync(path).mtimeMs;
+  } catch {
+    return null;
+  }
+}
+
+function taskAge(task, telemetry, observedMilliseconds) {
+  if (telemetry && telemetry.seconds !== null) {
+    return age(telemetry.seconds);
+  }
+  const statusMtime = mtimeMilliseconds(task.paths?.status_log?.path);
+  if (statusMtime !== null) {
+    return age(secondsSince(statusMtime, observedMilliseconds));
+  }
+  return age(secondsSince(mtimeMilliseconds(task.paths?.meta?.path), observedMilliseconds));
+}
+
+function telemetryForTask(task, telemetryRows, observedMilliseconds) {
   const meta = parseMeta(task.paths?.meta?.path);
   const attemptId = meta.telemetry_attempt || null;
   if (!attemptId || telemetryRows === null) {
-    return { label: "Runtime absent", detail: "No joined telemetry attempt", sortSeconds: null };
+    return null;
   }
   const row = telemetryRows.find((candidate) => candidate.attemptId === attemptId);
   if (!row) {
-    return { label: "Runtime absent", detail: "Telemetry attempt is absent", sortSeconds: null };
+    return null;
   }
+  const tuple = [row.harness, row.model, row.effort].filter(Boolean).join("/") || null;
   if (Number.isFinite(row.wallSeconds)) {
-    const duration = formatDuration(row.wallSeconds);
-    return {
-      label: duration === null ? "Runtime absent" : `Ran for ${duration}`,
-      detail: [row.harness, row.model, row.effort].filter(Boolean).join(" / ") || "Model tuple absent",
-      sortSeconds: row.wallSeconds,
-    };
+    return { seconds: row.wallSeconds, tuple };
   }
-  const startedAt = Date.parse(row.startedAt || "");
-  const observedAt = Date.parse(generatedAt || "");
-  if (!Number.isFinite(startedAt) || !Number.isFinite(observedAt) || observedAt < startedAt) {
-    return { label: "Runtime absent", detail: "Start or observation time is absent", sortSeconds: null };
+  const seconds = secondsSince(Date.parse(row.startedAt || ""), observedMilliseconds);
+  return { seconds, tuple };
+}
+
+function buildModel({ snapshot, telemetryRows, telemetryPresent }) {
+  const observedMilliseconds = Date.parse(snapshot.generated || "");
+  const backlogPresent = snapshot.backlog?.present === true;
+  const records = Array.isArray(snapshot.backlog?.records) ? snapshot.backlog.records : [];
+  const tasks = Array.isArray(snapshot.tasks) ? snapshot.tasks : [];
+
+  const needsPedro = [];
+  const underway = [];
+  const unhealthy = [];
+  const queued = [];
+
+  const sinceAge = (record) => age(secondsSince(Date.parse(record.since || ""), observedMilliseconds));
+  const waitsOn = (record) =>
+    record.unresolved_blocker_ids?.length ? `waits on ${record.unresolved_blocker_ids.join(", ")}` : null;
+
+  for (const record of records) {
+    if (!record.structured) {
+      if (record.state === "queued" || record.state === "in_flight") {
+        queued.push({ tag: "NOTE", id: null, project: null, prose: cleanProse(record.raw), note: "unstructured backlog line", age: age(null) });
+      }
+      continue;
+    }
+    if (record.state === "done") {
+      continue;
+    }
+    const isCaptainHold = record.hold_kind === "captain" && record.hold_reason;
+    if (isCaptainHold && !record.unresolved_blocker_ids?.length) {
+      needsPedro.push({
+        tag: "HOLD",
+        id: record.id,
+        project: record.repo,
+        prose: cleanProse(record.title || record.hold_reason),
+        note: record.title ? cleanProse(record.hold_reason) : null,
+        age: sinceAge(record),
+      });
+      continue;
+    }
+    if (record.state === "queued" || isCaptainHold) {
+      queued.push({
+        tag: isCaptainHold ? "HOLD" : "QUEUED",
+        id: record.id,
+        project: record.repo,
+        prose: cleanProse(record.title),
+        note: waitsOn(record),
+        age: sinceAge(record),
+      });
+    }
   }
-  const seconds = Math.floor((observedAt - startedAt) / 1000);
+
+  for (const orphanId of snapshot.main_inventory?.orphan_in_flight || []) {
+    const record = records.find((candidate) => candidate.id === orphanId);
+    unhealthy.push({
+      tag: "ORPHAN",
+      id: orphanId,
+      project: record?.repo ?? null,
+      prose: "recorded in flight but no worker record exists",
+      note: null,
+      age: record ? sinceAge(record) : age(null),
+    });
+  }
+
+  for (const task of tasks) {
+    const telemetry = telemetryForTask(task, telemetryRows, observedMilliseconds);
+    const itemAge = taskAge(task, telemetry, observedMilliseconds);
+    const state = task.current_state?.state || "unknown";
+    const detail = cleanProse(task.current_state?.detail);
+    const base = { id: task.id, project: task.project || null, age: itemAge, note: telemetry?.tuple ?? null };
+    const openDecisions = task.hints?.open_decisions || [];
+    const decisions = openDecisions.filter((decision) => decision.verb === "needs-decision");
+    const blockers = openDecisions.filter((decision) => decision.verb === "blocked");
+
+    if (decisions.length || blockers.length) {
+      for (const decision of decisions) {
+        needsPedro.push({
+          ...base,
+          tag: "DECIDE",
+          prose: cleanProse(decision.summary) || "decision summary absent",
+          note: decision.key && decision.key !== "default" ? `[${decision.key}]` : null,
+        });
+      }
+      for (const blocker of blockers) {
+        needsPedro.push({
+          ...base,
+          tag: "BLOCKED",
+          prose: cleanProse(blocker.summary) || "blocker summary absent",
+          note: blocker.key && blocker.key !== "default" ? `[${blocker.key}]` : null,
+        });
+      }
+      continue;
+    }
+    if (state === "done" && task.pr?.url) {
+      needsPedro.push({ ...base, tag: "REVIEW", prose: `PR ready: ${task.pr.url}`, note: null });
+      continue;
+    }
+    if (["failed", "unknown"].includes(state) || task.endpoint?.exists === false || task.endpoint?.agent_alive === "dead") {
+      const reason = task.endpoint?.exists === false ? "worker endpoint is gone" : detail || "no readable state";
+      const lastEvent = cleanProse(task.hints?.last_event_text);
+      unhealthy.push({
+        ...base,
+        tag: state === "failed" ? "FAILED" : "MISSING",
+        prose: reason,
+        note: lastEvent && !reason.includes(lastEvent) ? `last event: ${lastEvent}` : base.note,
+      });
+      continue;
+    }
+    if (state === "paused") {
+      queued.push({ ...base, tag: "PAUSED", prose: detail || "declared external wait" });
+      continue;
+    }
+    if (state === "done") {
+      underway.push({
+        ...base,
+        tag: "DONE",
+        prose: task.hints?.scout_report_present ? "scout report ready to read" : "finished, awaiting cleanup",
+      });
+      continue;
+    }
+    underway.push({
+      ...base,
+      tag: state === "parked" ? "AT GATE" : "WORKING",
+      prose: detail || "no detail reported",
+    });
+  }
+
+  const oldestFirst = (left, right) => (right.age.seconds ?? -1) - (left.age.seconds ?? -1);
+  needsPedro.sort(oldestFirst);
+  underway.sort(oldestFirst);
+  unhealthy.sort(oldestFirst);
+
   return {
-    label: `Running for ${formatDuration(seconds)}`,
-    detail: [row.harness, row.model, row.effort].filter(Boolean).join(" / ") || "Model tuple absent",
-    sortSeconds: seconds,
+    generated: snapshot.generated || "observation time absent",
+    backlogPresent,
+    telemetryPresent,
+    buckets: [
+      {
+        key: "needs-pedro",
+        name: "NEEDS PEDRO",
+        htmlTitle: "Needs Pedro",
+        tone: "attention",
+        items: needsPedro,
+        empty: backlogPresent ? "nothing needs you" : "backlog absent - captain holds unknown",
+      },
+      {
+        key: "underway",
+        name: "UNDERWAY",
+        htmlTitle: "Underway",
+        tone: "progress",
+        items: underway,
+        empty: "nothing underway",
+      },
+      {
+        key: "unhealthy",
+        name: "UNHEALTHY",
+        htmlTitle: "Unhealthy",
+        tone: "danger",
+        items: unhealthy,
+        empty: "no unhealthy worker visible",
+      },
+      {
+        key: "queued",
+        name: "QUEUED",
+        htmlTitle: "Queued",
+        tone: "neutral",
+        items: queued,
+        empty: backlogPresent ? "queue empty" : "backlog absent - queue unknown",
+      },
+    ],
   };
 }
 
-function card({ eyebrow, title, detail, runtime, tone = "neutral" }) {
-  const runtimeMarkup = runtime
-    ? `<div class="runtime"><strong>${escapeHtml(runtime.label)}</strong><span>${escapeHtml(runtime.detail)}</span></div>`
-    : "";
+const ANSI = { reset: "\u001b[0m", bold: "\u001b[1m", dim: "\u001b[2m", amber: "\u001b[33m", green: "\u001b[32m", red: "\u001b[31m" };
+const BUCKET_COLOR = { attention: "amber", progress: "green", danger: "red", neutral: "dim" };
+
+function clip(text, width) {
+  return text.length <= width ? text : `${text.slice(0, Math.max(0, width - 1))}…`;
+}
+
+function renderTerminal(model, width, useColor) {
+  const paint = (name, text) => (useColor && name ? `${ANSI[name]}${text}${ANSI.reset}` : text);
+  const lines = [];
+  lines.push(paint("bold", clip(`FIRSTMATE FLEET · observed ${model.generated}`, width)));
+  lines.push(
+    clip(
+      `sources: backlog ${model.backlogPresent ? "present" : "absent"} · telemetry ${model.telemetryPresent ? "present" : "absent"} · token spend not measured`,
+      width,
+    ),
+  );
+  for (const bucket of model.buckets) {
+    lines.push("");
+    const header = `── ${bucket.name} (${bucket.items.length}) `;
+    const fill = "─".repeat(Math.max(0, width - header.length));
+    lines.push(paint(BUCKET_COLOR[bucket.tone], clip(header + fill, width)));
+    if (bucket.items.length === 0) {
+      lines.push(clip(`   ${bucket.empty}`, width));
+      continue;
+    }
+    for (const item of bucket.items) {
+      const tag = clip(item.tag, 7).padEnd(7);
+      const identity = [item.id, item.project].filter(Boolean).join(" · ");
+      const head = [identity, item.age.label].filter(Boolean).join(" · ");
+      lines.push(`  ${paint(BUCKET_COLOR[bucket.tone], tag)} ${clip(head, Math.max(0, width - 10))}`);
+      const detail = [item.prose, item.note].filter(Boolean).join("  ");
+      if (detail) {
+        lines.push(`          ${clip(detail, Math.max(0, width - 10))}`);
+      }
+    }
+  }
+  return `${lines.join("\n")}\n`;
+}
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
+function card(item, tone) {
+  const noteMarkup = item.note ? `<span>${escapeHtml(item.note)}</span>` : "";
   return `<article class="card ${escapeHtml(tone)}">
-    <p class="eyebrow">${escapeHtml(eyebrow)}</p>
-    <h3>${escapeHtml(title)}</h3>
-    <p>${escapeHtml(detail || "Detail absent")}</p>
-    ${runtimeMarkup}
+    <p class="eyebrow">${escapeHtml([item.tag, item.id, item.project].filter(Boolean).join(" · "))}</p>
+    <h3>${escapeHtml(item.prose || "detail absent")}</h3>
+    <div class="runtime"><strong>${escapeHtml(item.age.label)}</strong>${noteMarkup}</div>
   </article>`;
 }
 
@@ -267,86 +449,15 @@ function sourceValue(label, value) {
   return `<div class="source"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`;
 }
 
-function renderDashboard({ snapshot, captainHolds, telemetryRows, backlogPresent, telemetryPresent }) {
-  const tasks = Array.isArray(snapshot.tasks) ? snapshot.tasks : [];
-  const tasksWithRuntime = tasks.map((task) => ({
-    ...task,
-    runtime: runtimeForTask(task, telemetryRows, snapshot.generated),
-  }));
-
-  const statusDecisions = tasksWithRuntime.flatMap((task) =>
-    (task.hints?.open_decisions || [])
-      .filter((decision) => decision.verb === "needs-decision")
-      .map((decision) => ({ task, decision })),
-  );
-  const actionableHolds = captainHolds.filter(
-    (hold) => hold.hold_kind === "captain" && !hold.blocked_by,
-  );
-  const progressing = tasksWithRuntime.filter(
-    (task) =>
-      task.current_state?.state === "working" &&
-      task.endpoint?.exists !== false &&
-      !task.hints?.pending_decision,
-  );
-  const unhealthy = tasksWithRuntime.filter(
-    (task) =>
-      ["failed", "unknown"].includes(task.current_state?.state) ||
-      task.endpoint?.exists === false ||
-      task.endpoint?.agent_alive === "dead",
-  );
-
-  const needsPedroCards = [
-    ...actionableHolds.map((hold) =>
-      card({
-        eyebrow: `${hold.repo || "Project absent"} · Captain hold`,
-        title: hold.title || hold.id || "Untitled captain hold",
-        detail: hold.hold_reason || "Hold reason absent",
-        tone: "attention",
-      }),
-    ),
-    ...statusDecisions.map(({ task, decision }) =>
-      card({
-        eyebrow: `${task.project || "Project absent"} · ${task.id}`,
-        title: decision.summary || "Decision summary absent",
-        detail: `Status decision ${decision.key || "default"}`,
-        runtime: task.runtime,
-        tone: "attention",
-      }),
-    ),
-  ];
-  const progressingCards = progressing.map((task) =>
-    card({
-      eyebrow: `${task.project || "Project absent"} · ${titleCase(task.kind)}`,
-      title: task.id,
-      detail: task.current_state?.detail || "Working detail absent",
-      runtime: task.runtime,
-      tone: "progress",
-    }),
-  );
-  const unhealthyCards = unhealthy.map((task) =>
-    card({
-      eyebrow: `${task.project || "Project absent"} · ${titleCase(task.current_state?.state)}`,
-      title: task.id,
-      detail: task.current_state?.detail || task.endpoint?.status || "Health detail absent",
-      runtime: task.runtime,
-      tone: "danger",
-    }),
-  );
-  const runtimeCards = [...tasksWithRuntime]
-    .sort((left, right) => {
-      if (left.runtime.sortSeconds === null && right.runtime.sortSeconds !== null) return 1;
-      if (left.runtime.sortSeconds !== null && right.runtime.sortSeconds === null) return -1;
-      return (right.runtime.sortSeconds || 0) - (left.runtime.sortSeconds || 0) || left.id.localeCompare(right.id);
-    })
-    .map((task) =>
-      card({
-        eyebrow: `${task.project || "Project absent"} · ${titleCase(task.current_state?.state)}`,
-        title: task.id,
-        detail: task.current_state?.detail || "Current detail absent",
-        runtime: task.runtime,
-      }),
-    );
-
+function renderHtml(model) {
+  const sections = model.buckets
+    .map(
+      (bucket) => `<section id="${bucket.key}">
+    <div class="section-head"><h2>${escapeHtml(bucket.htmlTitle)}</h2><p>${bucket.items.length} item${bucket.items.length === 1 ? "" : "s"}</p></div>
+    <div class="grid">${bucket.items.map((item) => card(item, bucket.tone)).join("") || emptyState(bucket.empty)}</div>
+  </section>`,
+    )
+    .join("\n\n  ");
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -387,35 +498,17 @@ function renderDashboard({ snapshot, captainHolds, telemetryRows, backlogPresent
   <header>
     <p class="eyebrow">Firstmate · live state projection</p>
     <h1>Fleet Dashboard</h1>
-    <p class="lede">Four answers, generated from the fleet's authoritative read-only sources.</p>
-    <p class="stamp">Observed ${escapeHtml(snapshot.generated || "observation time absent")}</p>
+    <p class="lede">Needs Pedro first; everything else is context.</p>
+    <p class="stamp">Observed ${escapeHtml(model.generated)}</p>
   </header>
 
   <div class="sources" aria-label="Source availability">
-    ${sourceValue("Backlog source", backlogPresent ? "Present" : "Absent")}
-    ${sourceValue("Model telemetry", telemetryPresent ? "Present" : "Absent")}
+    ${sourceValue("Backlog source", model.backlogPresent ? "Present" : "Absent")}
+    ${sourceValue("Model telemetry", model.telemetryPresent ? "Present" : "Absent")}
     ${sourceValue("Token spend", "Not measured")}
   </div>
 
-  <section id="needs-pedro">
-    <div class="section-head"><h2>Needs Pedro right now</h2><p>Captain holds and open decisions</p></div>
-    <div class="grid">${needsPedroCards.join("") || emptyState(backlogPresent ? "Nothing currently needs Pedro." : "Backlog source is absent; status decisions are shown when present.")}</div>
-  </section>
-
-  <section id="progressing">
-    <div class="section-head"><h2>Progressing on its own</h2><p>Verified working state</p></div>
-    <div class="grid">${progressingCards.join("") || emptyState("No task is currently verified as working.")}</div>
-  </section>
-
-  <section id="unhealthy">
-    <div class="section-head"><h2>Unhealthy</h2><p>Failed, unknown, missing, or dead</p></div>
-    <div class="grid">${unhealthyCards.join("") || emptyState("No unhealthy task is visible.")}</div>
-  </section>
-
-  <section id="runtime">
-    <div class="section-head"><h2>How long everything has been running</h2><p>Telemetry joins stay absent when unavailable</p></div>
-    <div class="grid">${runtimeCards.join("") || emptyState("No task metadata is present, so runtimes are absent.")}</div>
-  </section>
+  ${sections}
 </main>
 </body>
 </html>
@@ -430,23 +523,6 @@ function collectInputs() {
   } catch {
     throw new Error("fm-fleet-snapshot.sh returned malformed JSON");
   }
-
-  const backlogPresent = existsSync(backlogPath);
-  const captainHolds = backlogPresent
-    ? parseTasksAxiList(
-        run("tasks-axi", [
-          "list",
-          "--file",
-          backlogPath,
-          "--state",
-          "held",
-          "--limit",
-          "10000",
-          "--fields",
-          "blocked_by,created,hold_kind,hold_reason,links",
-        ]),
-      )
-    : [];
 
   const telemetryPresent = existsSync(telemetryPath);
   let telemetryRows = null;
@@ -463,7 +539,7 @@ function collectInputs() {
     }
   }
 
-  return { snapshot, captainHolds, telemetryRows, backlogPresent, telemetryPresent };
+  return { snapshot, telemetryRows, telemetryPresent };
 }
 
 function writeAtomically(outputPath, html) {
@@ -478,12 +554,21 @@ function writeAtomically(outputPath, html) {
 }
 
 try {
-  const { outputPath } = parseArguments(process.argv.slice(2));
-  assertSafeOutput(outputPath);
-  const inputs = collectInputs();
-  const html = renderDashboard(inputs);
-  writeAtomically(outputPath, html);
-  process.stdout.write(`${outputPath}\n`);
+  const { outputPath, width } = parseArguments(process.argv.slice(2));
+  if (outputPath !== null) {
+    assertSafeOutput(outputPath);
+  }
+  const model = buildModel(collectInputs());
+  if (outputPath !== null) {
+    writeAtomically(outputPath, renderHtml(model));
+    process.stdout.write(`${outputPath}\n`);
+  } else {
+    const terminalWidth = width ?? (process.stdout.isTTY ? process.stdout.columns : null) ?? 80;
+    const useColor = process.env.NO_COLOR
+      ? false
+      : Boolean(process.stdout.isTTY) || Boolean(process.env.FORCE_COLOR);
+    process.stdout.write(renderTerminal(model, terminalWidth, useColor));
+  }
 } catch (error) {
   process.stderr.write(`fm-fleet-dashboard: ${error.message}\n`);
   process.exit(1);

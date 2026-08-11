@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Behavior tests for the generated self-contained fleet dashboard.
+# Behavior tests for the fleet cockpit renderer (terminal default, HTML --output).
 set -u
 
 # The managed sandbox denies the host ps call used by tests/lib.sh to identify
@@ -30,7 +30,8 @@ TMP_ROOT=$(fm_test_tmproot fm-fleet-dashboard)
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 command -v node >/dev/null 2>&1 || { echo "skip: node not found"; exit 0; }
-command -v tasks-axi >/dev/null 2>&1 || { echo "skip: tasks-axi not found"; exit 0; }
+
+TRUNCATION_ARTIFACT="(truncated, 90 chars total - use show decision-task --full to see complete text)"
 
 make_home() {  # <name>
   local home=$TMP_ROOT/$1
@@ -92,6 +93,7 @@ write_live_fixture() {  # <home>
 - [ ] deploy-window - Approve deployment window (repo: firstmate) (kind: captain) (since 2026-08-02) (hold: Pedro must choose the deployment window.) (hold-kind: captain)
 
 ## Queued
+- [ ] queued-task - Ship the follow-up blocked-by: decision-task (repo: firstmate) (kind: ship) (since 2026-07-30)
 
 ## Done
 EOF
@@ -123,7 +125,8 @@ EOF
     "kind=ship" \
     "mode=ship" \
     "yolo=off"
-  printf 'needs-decision [key=api-shape]: Choose the public API shape.\n' > "$home/state/decision-task.status"
+  printf 'needs-decision [key=api-shape]: Choose the public API shape. %s\n' \
+    "$TRUNCATION_ARTIFACT" > "$home/state/decision-task.status"
   decision_generation=$("$ROOT/bin/fm-busy-event.sh" arm "$home/state" decision-task)
   "$ROOT/bin/fm-busy-event.sh" apply "$home/state" decision-task idle \
     --gen "$decision_generation" --source claude-hook --event stop
@@ -136,11 +139,73 @@ EOF
     "mode=ship" \
     "yolo=off"
   printf 'failed: endpoint disappeared\n' > "$home/state/unhealthy-task.status"
+
+  # Pin status mtimes so age-in-state is deterministic against FM_SNAPSHOT_NOW.
+  TZ=UTC touch -t 202608020000 "$home/state/decision-task.status" "$home/state/unhealthy-task.status"
 }
 
-test_dashboard_answers_the_four_fleet_questions() {
+render_terminal() {  # <home> <fakebin> [extra args...]
+  local home=$1 fakebin=$2
+  shift 2
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-08-02T00:05:00Z \
+    "$DASHBOARD" "$@"
+}
+
+line_number_of() {  # <haystack> <needle>
+  printf '%s\n' "$1" | grep -n -F "$2" | head -1 | cut -d: -f1
+}
+
+test_terminal_cockpit_opens_on_needs_pedro() {
+  local home fakebin out needs underway unhealthy queued
+  home=$(make_home terminal)
+  write_live_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+
+  out=$(render_terminal "$home" "$fakebin" --width 100) || fail "terminal render failed"
+
+  needs=$(line_number_of "$out" "NEEDS PEDRO (2)")
+  underway=$(line_number_of "$out" "UNDERWAY (1)")
+  unhealthy=$(line_number_of "$out" "UNHEALTHY (1)")
+  queued=$(line_number_of "$out" "QUEUED (1)")
+  [ -n "$needs" ] || fail "terminal output has no NEEDS PEDRO section with both items"
+  [ -n "$underway" ] || fail "terminal output has no UNDERWAY section"
+  [ -n "$unhealthy" ] || fail "terminal output has no UNHEALTHY section"
+  [ -n "$queued" ] || fail "terminal output has no QUEUED section"
+  { [ "$needs" -lt "$underway" ] && [ "$underway" -lt "$unhealthy" ] && [ "$unhealthy" -lt "$queued" ]; } \
+    || fail "sections are not ordered Needs Pedro, Underway, Unhealthy, Queued"
+
+  assert_contains "$out" "Choose the public API shape." "open decision was not rendered"
+  assert_contains "$out" "[api-shape]" "decision key was not rendered"
+  assert_contains "$out" "Approve deployment window" "captain hold title was not rendered"
+  assert_contains "$out" "Pedro must choose the deployment window." "captain hold reason was not rendered"
+  assert_contains "$out" "decision-task · firstmate · for 5m" "decision age-in-state was not rendered"
+  assert_contains "$out" "unhealthy-task · firstmate · for 5m" "unhealthy age-in-state was not rendered"
+  assert_contains "$out" "progressing-task · firstmate · for 5m" "telemetry-based working age was not rendered"
+  assert_contains "$out" "codex/gpt-5.6-sol/high" "model tuple was not rendered on the working task"
+  assert_contains "$out" "endpoint disappeared" "unhealthy reason was not rendered"
+  assert_contains "$out" "queued-task · firstmate · for 3d" "queued item age was not rendered"
+  assert_contains "$out" "waits on decision-task" "queued blocker was not rendered"
+  assert_contains "$out" "token spend not measured" "unreported spend was not explicit"
+  assert_not_contains "$out" "truncated, 90 chars" "CLI truncation artifact leaked into the cockpit"
+
+  # shellcheck disable=SC2016  # the ${...} below is a node template literal, not shell
+  printf '%s' "$out" | node -e '
+    let data = "";
+    process.stdin.on("data", (chunk) => { data += chunk; });
+    process.stdin.on("end", () => {
+      const wide = data.split("\n").filter((line) => [...line].length > 100);
+      if (wide.length > 0) {
+        console.error(`line exceeds width: ${wide[0]}`);
+        process.exit(1);
+      }
+    });
+  ' || fail "terminal output overflows the requested width"
+  pass "terminal cockpit opens on Needs Pedro with aged, bucketed, artifact-free items"
+}
+
+test_html_page_renders_four_buckets() {
   local home fakebin output html
-  home=$(make_home live)
+  home=$(make_home html)
   write_live_fixture "$home"
   fakebin=$(make_fakebin "$home")
   output="$home/fleet-dashboard.html"
@@ -149,26 +214,32 @@ test_dashboard_answers_the_four_fleet_questions() {
     "$DASHBOARD" --output "$output" || fail "dashboard render failed"
   html=$(<"$output")
 
-  assert_contains "$html" 'id="needs-pedro"' "dashboard omitted the Pedro-action section"
-  assert_contains "$html" "Approve deployment window" "tasks-axi captain hold was not rendered"
+  assert_contains "$html" 'id="needs-pedro"' "page omitted the Needs Pedro section"
+  assert_contains "$html" 'id="underway"' "page omitted the Underway section"
+  assert_contains "$html" 'id="unhealthy"' "page omitted the Unhealthy section"
+  assert_contains "$html" 'id="queued"' "page omitted the Queued section"
+  assert_contains "$html" "Approve deployment window" "captain hold was not rendered"
   assert_contains "$html" "Choose the public API shape." "classified status decision was not rendered"
-  assert_contains "$html" 'id="progressing"' "dashboard omitted the autonomous-progress section"
-  assert_contains "$html" "progressing-task" "working task was not rendered as progressing"
-  assert_contains "$html" 'id="unhealthy"' "dashboard omitted the unhealthy section"
-  assert_contains "$html" "unhealthy-task" "unknown task was not rendered as unhealthy"
-  assert_contains "$html" 'id="runtime"' "dashboard omitted the runtime section"
-  assert_contains "$html" "Running for 5m" "telemetry start time was not used for runtime"
+  assert_contains "$html" "for 5m" "age-in-state was not rendered"
   assert_contains "$html" "Token spend</span><strong>Not measured</strong>" "unreported spend was not explicit"
+  assert_not_contains "$html" "truncated, 90 chars" "CLI truncation artifact leaked into the page"
   assert_not_contains "$html" "Estimated spend" "dashboard estimated token spend"
   assert_not_contains "$html" "https://cdn" "dashboard depends on a CDN"
-  pass "dashboard answers Pedro, progress, health, and runtime from live-source fixtures"
+  pass "HTML page renders the same four buckets with ages from live-source fixtures"
 }
 
 test_absent_sources_stay_absent() {
-  local home output html
+  local home out output html
   home=$(make_home absent)
-  output="$home/fleet-dashboard.html"
 
+  out=$(FM_HOME="$home" FM_SNAPSHOT_NOW=2026-08-02T00:05:00Z "$DASHBOARD" --width 80) \
+    || fail "absent-source terminal render failed"
+  assert_contains "$out" "backlog absent" "missing backlog was not disclosed in the cockpit"
+  assert_contains "$out" "telemetry absent" "missing telemetry was not disclosed in the cockpit"
+  assert_contains "$out" "token spend not measured" "missing telemetry implied zero spend"
+  assert_contains "$out" "captain holds unknown" "absent backlog rendered as an empty Needs Pedro"
+
+  output="$home/fleet-dashboard.html"
   FM_HOME="$home" FM_SNAPSHOT_NOW=2026-08-02T00:05:00Z \
     "$DASHBOARD" --output "$output" || fail "absent-source dashboard render failed"
   html=$(<"$output")
@@ -176,7 +247,7 @@ test_absent_sources_stay_absent() {
   assert_contains "$html" "Backlog source</span><strong>Absent</strong>" "missing backlog rendered as zero"
   assert_contains "$html" "Model telemetry</span><strong>Absent</strong>" "missing telemetry rendered as zero"
   assert_contains "$html" "Token spend</span><strong>Not measured</strong>" "missing telemetry implied zero spend"
-  pass "missing backlog and telemetry render as absent rather than zero"
+  pass "missing backlog and telemetry render as absent rather than zero in both outputs"
 }
 
 test_ignored_operational_directories_are_never_output_targets() {
@@ -195,6 +266,7 @@ test_ignored_operational_directories_are_never_output_targets() {
   pass "dashboard refuses data, state, and config output roots"
 }
 
-test_dashboard_answers_the_four_fleet_questions
+test_terminal_cockpit_opens_on_needs_pedro
+test_html_page_renders_four_buckets
 test_absent_sources_stay_absent
 test_ignored_operational_directories_are_never_output_targets
