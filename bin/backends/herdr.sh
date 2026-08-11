@@ -691,14 +691,23 @@ fm_backend_herdr_presentation_lock_namespace_valid() {
 # -> /private/tmp cannot yield two lock identities for the same socket.
 # fm_backend_herdr_canonical_socket_path: normalize one absolute Unix-socket
 # path so two spellings of the same socket compare equal. Refuses a relative
-# or empty path. An unresolvable directory is left as-is rather than treated as
-# a failure, so a socket whose directory was removed still compares by its own
-# literal path. Single owner for every socket-identity comparison in this
-# adapter (the presentation session lock and the launcher-identity same-session
-# proof both use it).
+# or empty path. On native Windows the herdr server injects and reports
+# drive-letter paths (C:\...\herdr.sock); those are converted to their POSIX
+# spelling first so the launcher's claimed socket and the session list's
+# socket_path land in the same form before comparison. An unresolvable
+# directory is left as-is rather than treated as a failure, so a socket whose
+# directory was removed still compares by its own literal path. Single owner
+# for every socket-identity comparison in this adapter (the presentation
+# session lock and the launcher-identity same-session proof both use it).
 fm_backend_herdr_canonical_socket_path() {  # <socket-path>
   local socket=$1 sock_dir sock_base
   [ -n "$socket" ] || return 1
+  case "$socket" in
+    [A-Za-z]:[\\/]*)
+      socket=$(cygpath -u "$socket" 2>/dev/null) || return 1
+      [ -n "$socket" ] || return 1
+      ;;
+  esac
   case "$socket" in
     /*) ;;
     *) return 1 ;;
