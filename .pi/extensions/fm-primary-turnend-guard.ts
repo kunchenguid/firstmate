@@ -63,7 +63,7 @@ function markLoaded(): void {
 // while reload, resume, and fork all keep prior context.
 const sessionstartDeliveryBytes = 512 * 1024;
 
-function startupRebuildSource(hasRestoredEntries: boolean): "resume" | "fork" | undefined {
+function startupRebuildSource(): "resume" | "fork" | undefined {
   const args = process.argv.slice(2);
   for (const arg of args) {
     if (arg === "--fork" || arg.startsWith("--fork=")) return "fork";
@@ -73,7 +73,7 @@ function startupRebuildSource(hasRestoredEntries: boolean): "resume" | "fork" | 
       arg === "--session" || arg.startsWith("--session=")
     ) return "resume";
   }
-  return hasRestoredEntries ? "resume" : undefined;
+  return undefined;
 }
 const sessionstartTruncatedMarker =
   "\n\nPI SESSION-START DELIVERY TRUNCATED - the digest exceeded 512 KiB. " +
@@ -177,11 +177,10 @@ function runCdCheck(command: string): Promise<{ code: number; stderr: string }> 
 }
 
 export default function (pi: ExtensionAPI) {
-  pi.on?.("session_start", async (event, ctx) => {
+  pi.on?.("session_start", async (event) => {
     const reason = String((event as { reason?: unknown }).reason ?? "");
-    const restoredEntries = reason === "startup" && ctx.sessionManager.getEntries().length > 0;
     const source = reason === "startup"
-      ? startupRebuildSource(restoredEntries) ?? "startup"
+      ? startupRebuildSource() ?? "startup"
       : { new: "clear", resume: "resume", fork: "fork" }[reason];
     markLoaded();
     if (!source) return;

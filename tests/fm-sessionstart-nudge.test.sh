@@ -321,7 +321,7 @@ test_run_clear_rejects_previous_owner_completion() {
   pass "run wrapper: clear accepts completion only from the current harness"
 }
 
-test_pi_startup_classifies_cli_and_loaded_session_continuations() {
+test_pi_startup_classifies_cli_continuations() {
   local fixture out expected actual status=0
   command -v node >/dev/null 2>&1 || {
     echo "skip: node not found for Pi continuation classification test"
@@ -375,11 +375,11 @@ JS
     '--source resume' \
     '--source resume' \
     '--source fork' \
-    '--source resume')
+    '--source startup')
   actual=$(cat "$fixture/state/sources")
   [ "$actual" = "$expected" ] \
     || fail "Pi continuation classification produced unexpected sources: $actual"
-  pass "Pi maps CLI and loaded-session continuations away from true startup"
+  pass "Pi maps CLI continuations away from true startup"
 }
 
 test_pi_large_sessionstart_digest_is_delivered_loudly() {
@@ -529,5 +529,5 @@ test_run_reads_source_from_the_hook_payload
 test_run_unknown_source_takes_the_helm
 test_run_gate_and_scope_are_silent
 test_run_reports_a_failed_session_start_as_digest_text
-test_pi_startup_classifies_cli_and_loaded_session_continuations
+test_pi_startup_classifies_cli_continuations
 test_pi_large_sessionstart_digest_is_delivered_loudly
