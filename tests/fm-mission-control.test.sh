@@ -2527,7 +2527,7 @@ test_controls_match_what_each_row_can_actually_resolve() {
     "the one-shot new-work composer must name its purpose"
   assert_grep 'data-intent="ask"' "$board" \
     "the board must retain the continuing Ask-firstmate composer"
-  assert_grep '<strong>Ask firstmate</strong><span>Use the continuing board conversation' "$board" \
+  assert_grep '>Ask firstmate</h2><p>Use the continuing board conversation' "$board" \
     "the conversation composer must stay distinct from new-work intake"
 
   # The item rows are read-only display and carry no control of their own, so the
@@ -2797,6 +2797,35 @@ function assert(ok, message) { if (!ok) throw new Error(message); }
       liveProbe.remove();blockedProbe.remove();return roles;
     })()`);
   }
+  async function composerLayout(scheme, width, height, mobile) {
+    await send("Emulation.setEmulatedMedia", {features:[{name:"prefers-color-scheme",value:scheme}]}, sid);
+    await send("Emulation.setDeviceMetricsOverride", {width,height,deviceScaleFactor:1,mobile}, sid);
+    return evaluate(sid, `(() => {
+      function block(selector) {
+        const card=document.querySelector(selector);const rect=card.getBoundingClientRect();
+        const field=card.querySelector('textarea');const input=field.getBoundingClientRect();
+        return {left:Math.round(rect.left),right:Math.round(rect.right),top:Math.round(rect.top),
+          bottom:Math.round(rect.bottom),width:Math.round(rect.width),label:card.querySelector('h2').textContent,
+          background:getComputedStyle(card).backgroundImage,inputLabel:field.getAttribute('aria-label'),
+          inputDisplay:getComputedStyle(field).display,
+          inputInside:input.top>=rect.top&&input.bottom<=rect.bottom};
+      }
+      const file=block('.rc-file');const ask=block('.rc-ask');
+      return {file,ask,gap:ask.top-file.bottom,
+        overflow:document.documentElement.scrollWidth>document.documentElement.clientWidth};
+    })()`);
+  }
+  function assertComposerLayout(layout, scheme, width) {
+    assert(layout.file.label === "Start something new" && layout.ask.label === "Ask firstmate"
+      && layout.file.background !== layout.ask.background && layout.gap >= 20
+      && !layout.overflow && layout.file.left >= 0 && layout.file.right <= width
+      && layout.ask.left >= 0 && layout.ask.right <= width
+      && layout.file.inputLabel === "Describe the new work" && layout.file.inputDisplay !== "none"
+      && layout.file.inputInside && layout.ask.inputLabel === "Ask firstmate"
+      && layout.ask.inputDisplay !== "none" && layout.ask.inputInside,
+      `the visible board-level composer inputs did not fit inside their labelled cards at ${width}px in ${scheme} mode: `
+        + JSON.stringify(layout));
+  }
   function channels(value) {
     if (/^#[0-9a-f]{6}$/i.test(value)) {
       return [value.slice(1,3),value.slice(3,5),value.slice(5,7)].map(x=>parseInt(x,16));
@@ -2831,6 +2860,12 @@ function assert(ok, message) { if (!ok) throw new Error(message); }
   }
   assert(darkTheme.bg !== lightTheme.bg && darkTheme.panel !== lightTheme.panel,
     'dark and light preferences did not produce distinct rendered themes');
+  for (const scheme of ['light','dark']) {
+    const desktopComposers=await composerLayout(scheme,1280,900,false);
+    assertComposerLayout(desktopComposers,scheme,1280);
+    assert(desktopComposers.file.width > 500 && desktopComposers.ask.width > 500,
+      `the board-level composers were not desktop width in ${scheme} mode: ${JSON.stringify(desktopComposers)}`);
+  }
   await send("Emulation.setEmulatedMedia", {features:[{name:"prefers-color-scheme",value:"light"}]}, sid);
   const dom = await evaluate(sid, `(() => {
     function block(home,id){return [...document.querySelectorAll('.rc')].find(x=>x.dataset.home===home&&x.dataset.id===id);}
@@ -2857,11 +2892,6 @@ function assert(ok, message) { if (!ok) throw new Error(message); }
       invalidPortAid:!!block('main','d-invalid-port').closest('.need-wrap').querySelector('.decision-aid'),
       localReport:(()=>{var row=block('main','local-lane-bakeoff-v2-powered-decision-widen-bounded-judgment-rung').closest('.need-wrap');
         var ref=row.querySelector('.local-ref'); return {text:ref&&ref.textContent,anchor:!!row.querySelector('a[href="data/local-lane-bakeoff-v2-powered/report.md"]')};})(),
-      composers:(()=>{var file=document.querySelector('.rc-file');var ask=document.querySelector('.rc-ask');
-        var fr=file.getBoundingClientRect();var ar=ask.getBoundingClientRect();return {
-          fileLabel:file.querySelector('h2').textContent,askLabel:ask.querySelector('.rc-q strong').textContent,
-          fileBackground:getComputedStyle(file).backgroundImage,askBackground:getComputedStyle(ask).backgroundImage,
-          gap:Math.round(ar.top-fr.bottom),fileWidth:Math.round(fr.width),askWidth:Math.round(ar.width)};})(),
       cards:document.querySelectorAll('.need-wrap').length
     };
   })()`);
@@ -2884,11 +2914,6 @@ function assert(ok, message) { if (!ok) throw new Error(message); }
     && !dom.invalidIpv6Aid && !dom.invalidPortAid, "valid hostile text or malformed link handling was wrong");
   assert(dom.localReport.text === "Local report: data/local-lane-bakeoff-v2-powered/report.md" && !dom.localReport.anchor,
     "the Qwen bounded-judgment report path was not preserved as non-clickable context");
-  assert(dom.composers.fileLabel === "Start something new" && dom.composers.askLabel === "Ask firstmate"
-    && dom.composers.fileBackground !== dom.composers.askBackground && dom.composers.gap >= 20
-    && dom.composers.fileWidth > 500 && dom.composers.askWidth > 500,
-    "the new-work and conversation composers were not visibly distinct at desktop width: "
-      + JSON.stringify(dom.composers));
   assert(dom.cards >= 8, "ordinary multi-card decision list did not render");
 
   await send("Emulation.setDeviceMetricsOverride", {width:1280,height:900,deviceScaleFactor:1,mobile:false}, sid);
@@ -2920,14 +2945,10 @@ function assert(ok, message) { if (!ok) throw new Error(message); }
     "fact-intake hint overflowed or became illegible at 390px: "+JSON.stringify(narrowFact));
   await evaluate(sid, `var b=[...document.querySelectorAll('.rc')].find(x=>x.dataset.id==='d-fact');b.querySelector('.rc-x').click();`);
   await send("Emulation.setTouchEmulationEnabled", {enabled:true,maxTouchPoints:1}, sid);
-  const mobileComposers = await evaluate(sid, `(() => {var file=document.querySelector('.rc-file');
-    var ask=document.querySelector('.rc-ask');var fr=file.getBoundingClientRect();var ar=ask.getBoundingClientRect();
-    return {file:{left:Math.round(fr.left),right:Math.round(fr.right)},
-      ask:{left:Math.round(ar.left),right:Math.round(ar.right)},gap:Math.round(ar.top-fr.bottom),
-      overflow:document.documentElement.scrollWidth>document.documentElement.clientWidth};})()`);
-  assert(!mobileComposers.overflow && mobileComposers.file.left >= 0 && mobileComposers.file.right <= 390
-    && mobileComposers.ask.left >= 0 && mobileComposers.ask.right <= 390 && mobileComposers.gap >= 20,
-    "the visually separated board-level composers did not fit at 390px: " + JSON.stringify(mobileComposers));
+  for (const scheme of ['light','dark']) {
+    assertComposerLayout(await composerLayout(scheme,390,844,true),scheme,390);
+  }
+  await send("Emulation.setEmulatedMedia", {features:[{name:"prefers-color-scheme",value:"light"}]}, sid);
   const mobileTap = await evaluate(sid, `(() => {var ref=document.querySelector('.local-ref'); ref.scrollIntoView({block:'center'});
     var r=ref.getBoundingClientRect(); return {x:r.left+r.width/2,y:r.top+r.height/2,before:location.href,anchor:!!ref.closest('a')};})()`);
   assert(!mobileTap.anchor && mobileTap.x >= 0 && mobileTap.x <= 390 && mobileTap.y >= 0 && mobileTap.y <= 844,

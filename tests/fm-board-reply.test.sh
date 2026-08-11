@@ -720,7 +720,7 @@ const revealState = `({body:document.body.className,
     return {left:Math.round(rect.left),right:Math.round(rect.right),
       file:{left:Math.round(fr.left),right:Math.round(fr.right),label:file.querySelector('h2').textContent,
         background:getComputedStyle(file).backgroundImage},
-      ask:{left:Math.round(ar.left),right:Math.round(ar.right),label:ask.querySelector('.rc-q strong').textContent,
+      ask:{left:Math.round(ar.left),right:Math.round(ar.right),label:ask.querySelector('h2').textContent,
         background:getComputedStyle(ask).backgroundImage},
       gap:Math.round(ar.top-fr.bottom),
       overflow:document.documentElement.scrollWidth>document.documentElement.clientWidth};})()`);

@@ -1750,7 +1750,7 @@ def file_block:
     + "<div class=\"rc-file-head\"><span class=\"rc-file-kicker\">New work</span>"
     + "<h2>Start something new</h2>"
     + "<p>Describe something you want looked into or built. This records one request for firstmate to pick up, just like a request sent in chat.</p></div>"
-    + "<form class=\"rc-f\" data-intent=\"file\">"
+    + "<form class=\"rc-f rc-compose-form\" data-intent=\"file\">"
     + "<textarea class=\"rc-t\" rows=\"3\" maxlength=\"2000\" aria-label=\"Describe the new work\" placeholder=\"What should firstmate look into or build?\"></textarea>"
     + "<div class=\"rc-row\"><button type=\"submit\" class=\"rc-go\">Record new work</button>"
     + "<span class=\"rc-sent\" hidden></span>"
@@ -1762,9 +1762,10 @@ def file_block:
 
 def ask_block:
   if ($controls | not) then "" else
-    "<div class=\"rc rc-compose rc-ask\" id=\"ask-firstmate-composer\" data-home=\"main\" data-id=\"\" data-key=\"\" data-what=\"Board conversation\">"
-    + "<form class=\"rc-f\" data-intent=\"ask\">"
-    + "<p class=\"rc-q\"><strong>Ask firstmate</strong><span>Use the continuing board conversation for a question or follow-up.</span></p>"
+    "<section class=\"rc rc-compose rc-ask\" id=\"ask-firstmate-composer\" data-home=\"main\" data-id=\"\" data-key=\"\" data-what=\"Board conversation\">"
+    + "<div class=\"rc-ask-head\"><h2>Ask firstmate</h2>"
+    + "<p>Use the continuing board conversation for a question or follow-up.</p></div>"
+    + "<form class=\"rc-f rc-compose-form\" data-intent=\"ask\">"
     + "<textarea class=\"rc-t\" rows=\"3\" maxlength=\"2000\" aria-label=\"Ask firstmate\" placeholder=\"Write a message to firstmate\"></textarea>"
     + "<div class=\"rc-row\"><button type=\"submit\" class=\"rc-go\">Send message</button>"
     + "<span class=\"rc-sent\" hidden></span>"
@@ -1773,7 +1774,7 @@ def ask_block:
     # This composer is always open, so text left in it holds the refresh with no
     # form to close. It has to say so, or the board just quietly stops updating.
     + "<p class=\"rc-hold\">The board holds its refresh while there is text here.</p>"
-    + "</form></div>"
+    + "</form></section>"
   end;
 
 # What firstmate said back, and what the captain said before it. This is the ONLY
@@ -2139,8 +2140,11 @@ body.board-reply .rc-file,body.lavish .rc-file{border:1px solid var(--control-li
   font-size:10.5px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;padding:4px 9px;margin-top:2px;}
 .rc-file-head h2{margin:0;font-size:18px;letter-spacing:-.01em;}
 .rc-file-head p{grid-column:2;margin:4px 0 0;color:var(--muted);font-size:13px;line-height:1.45;}
-.rc-ask .rc-q{display:flex;flex-direction:column;gap:3px;}
-.rc-ask .rc-q strong{color:var(--ink);font-size:14px;}
+.rc-ask-head h2{margin:0;color:var(--ink);font-size:14px;}
+.rc-ask-head p{margin:3px 0 0;color:var(--muted);font-size:13px;line-height:1.45;}
+/* A composer is always open once its reply transport is proved, so keep its
+   form visibly bound to the card instead of leaving a styled shell behind. */
+body.board-reply .rc-compose > .rc-compose-form,body.lavish .rc-compose > .rc-compose-form{display:flex;}
 .rc-acts{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:8px 0 0;}
 .rc-b{appearance:none;-webkit-appearance:none;border:1px solid var(--line);background:var(--panel);
   color:var(--slate);font:inherit;font-size:12.5px;font-weight:600;padding:6px 13px;min-height:34px;
