@@ -13,7 +13,7 @@ The facts below are what that choice rests on, and every one is re-derived by `t
 FM_BROWSER_ISOLATION_LIVE=1 bin/fm-test-run.sh tests/fm-browser-isolation-live-e2e.test.sh
 ```
 
-The portable counterpart, `tests/fm-spawn-browser-isolation.test.sh`, pins the launch-command half in CI, where no browser tool or harness exists.
+The portable counterpart, `tests/fm-spawn-browser-isolation.test.sh`, pins the launch-command half in CI, where no real browser tool or harness exists, using fake ones for the capability outcomes below.
 
 ## Connection mode the pin depends on
 
@@ -61,6 +61,11 @@ A named session gets its own bridge, its own port derived from the name, and its
 A bridge's own health check carries the expected session name, so a session cannot silently attach to another session's bridge even when both resolve to the same port.
 Session names are restricted to 1-64 characters of `[A-Za-z0-9._-]`, and an out-of-range name throws rather than degrading, which would break every browser command for the agent that inherited it.
 `fm_task_id_creation_valid` (`bin/fm-pr-lib.sh`) already restricts a task id to that same charset, no leading dot, and at most 64 characters, so length is the only axis `fm-spawn` has to correct.
+
+Named sessions are a tool capability rather than a firstmate one, so this is the only part of the pin that a different install can silently withdraw: a `chrome-devtools-axi` without them ignores `CHROME_DEVTOOLS_AXI_SESSION` and leaves the agent on the shared `default` bridge while the launch string still reads as isolated.
+The observable signal for the capability is the tool's own `--help`, which lists `CHROME_DEVTOOLS_AXI_SESSION` under `environment:` in 0.1.26; `--help` exits 0 in about 0.1s and starts no bridge and no browser, so it is safe to run on every spawn.
+`fm-spawn` therefore probes that help rather than asserting a version floor, and treats an unreadable one as unconfirmed rather than capable; `browser_isolation_env`'s comment owns what it does with each outcome.
+`tests/fm-spawn-browser-isolation.test.sh` covers all four outcomes - capable, too old, unconfirmed, and not installed - against fake tools, and asserts that the refusal stops the tool rather than only printing at it.
 
 ## Process lifetime the pin depends on
 

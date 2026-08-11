@@ -331,13 +331,20 @@ Skipped items, such as a destination checkout that does not yet gitignore the it
 
 ## Agent browser isolation
 
-Agents firstmate launches use `chrome-devtools-axi` in their own throwaway Chrome profile, holding no logged-in sessions, on a bridge named after the task.
+Agents firstmate launches use `chrome-devtools-axi` in their own throwaway Chrome profile, holding no logged-in sessions, on a bridge named after the task where the installed tool can provide one.
 Your own browsing and your own use of the tool are untouched.
 So an agent cannot reach a site you are signed in to, and a task that genuinely needs an authenticated page has to sign in itself within its own profile.
 Every launch pins the six values that select the browser profile and the bridge - `CHROME_DEVTOOLS_AXI_AUTO_CONNECT`, `_BROWSER_URL`, `_USER_DATA_DIR`, `_CHROME_ARGS`, `_PORT`, and `_SESSION` - so exporting any of those in your own shell does not change what a launched agent gets.
 The tool's five other variables are deliberately not pinned, and an agent still inherits whatever you exported: `_MCP_PATH` still redirects which MCP module the agent's bridge runs, `_HEADED=1` still opens the agent's Chrome on your display, and `_CHANNEL`, `_WS_HEADERS`, and `_BRIDGE_TIMEOUT_MS` are inherited the same way.
 None of those five reaches an authenticated profile, so the isolation above is unchanged by them; they are left alone because each has a legitimate use, such as headed mode for visible debugging.
-[`bin/fm-spawn.sh`](../bin/fm-spawn.sh)'s `browser_isolation_env` owns which values are pinned and why, and [`docs/verification/browser-isolation.md`](verification/browser-isolation.md) holds the dated evidence and the guard that re-derives it.
+
+The per-task bridge is the one part of this that depends on your installed `chrome-devtools-axi`: it needs the named-session support the tool documents as `CHROME_DEVTOOLS_AXI_SESSION`, and firstmate checks for it by reading the tool's own `--help` at spawn time.
+When it cannot confirm that support - the tool is older, or its help cannot be read - the launched agent instead gets a `chrome-devtools-axi` that refuses to run and explains what is missing, rather than quietly falling back to the shared `default` bridge on port 9224 that your own use of the tool sits on.
+The throwaway-profile pins still hold in that case, so any browser the agent does start still carries none of your cookies; only the private bridge is withheld, and the refusal message says exactly that.
+Spawning always succeeds either way, and a task that never opens a browser is unaffected.
+If `chrome-devtools-axi` is not installed at all there is nothing to refuse and nothing changes.
+
+[`bin/fm-spawn.sh`](../bin/fm-spawn.sh)'s `browser_isolation_env` owns which values are pinned, why, and how the named-session capability is probed; [`docs/verification/browser-isolation.md`](verification/browser-isolation.md) holds the dated evidence and the guard that re-derives it.
 
 ## Relay (.env)
 

@@ -12,7 +12,8 @@
 # therefore pins the isolating choice on the launch command itself.
 #
 # These tests pin the assembled launch command, which is the interface firstmate
-# actually ships to a pane. The companion guard
+# actually ships to a pane, and the capability gate that decides whether the
+# per-task-bridge half of that pin can be honoured at all. The companion guard
 # tests/fm-browser-isolation-live-e2e.test.sh proves the two facts a launch string
 # cannot show: that the pinned values really select an isolated profile in the
 # installed chrome-devtools-axi, and that they survive into the shell a real
@@ -36,12 +37,39 @@ PINNED_EMPTY_VARS=(
   'CHROME_DEVTOOLS_AXI_PORT='
 )
 
+# make_fake_browser_tool <dir> <mode>: a stand-in chrome-devtools-axi whose --help
+# either documents CHROME_DEVTOOLS_AXI_SESSION (capable), omits it (too old), or
+# cannot be read at all (inconclusive). Every invocation that is not --help
+# records itself in $FM_FAKE_BROWSER_RAN, so a test can prove the refusal really
+# stopped the tool instead of only printing at it.
+make_fake_browser_tool() {
+  local dir=$1 mode=$2 help_body
+  case "$mode" in
+    capable) help_body="printf '%s\\n' 'environment:' '  CHROME_DEVTOOLS_AXI_PORT     Bridge port' '  CHROME_DEVTOOLS_AXI_SESSION  Named session for concurrent isolation'; exit 0" ;;
+    old) help_body="printf '%s\\n' 'environment:' '  CHROME_DEVTOOLS_AXI_PORT     Bridge port'; exit 0" ;;
+    unreadable) help_body="printf '%s\\n' 'chrome-devtools-axi: unrecognised flag --help' >&2; exit 2" ;;
+    *) fail "make_fake_browser_tool: unknown mode '$mode'" ;;
+  esac
+  mkdir -p "$dir"
+  cat > "$dir/chrome-devtools-axi" <<SH
+#!/usr/bin/env bash
+set -u
+[ "\${1:-}" = --help ] && { $help_body; }
+[ -n "\${FM_FAKE_BROWSER_RAN:-}" ] && printf '%s\n' "\$*" >> "\$FM_FAKE_BROWSER_RAN"
+exit 0
+SH
+  chmod +x "$dir/chrome-devtools-axi"
+}
+
 # Fake tmux: answers the pane-path query and logs every literal `send-keys -l`
 # argument, so the launch command firstmate would run is observable without
 # starting a harness.
 make_spawn_fakebin() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
+  # A capable stand-in shadows whatever chrome-devtools-axi this machine has, so
+  # the assertions below describe firstmate rather than the local install.
+  make_fake_browser_tool "$fakebin" capable
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -105,6 +133,11 @@ read_case_record() {
   read -r HOME_DIR PROJ_DIR WT_DIR FAKEBIN_DIR LAUNCH_LOG <<< "$1"
 }
 
+# The PATH fm-spawn itself runs on. Tests that need a different chrome-devtools-axi
+# on it - an older one, an unreadable one, or none at all - set this instead of
+# duplicating the whole invocation below.
+SPAWN_PATH=
+
 # run_ship_spawn: drive a real fm-spawn ship dispatch through the fake pane.
 # Extra arguments are appended to the fm-spawn invocation.
 run_ship_spawn() {
@@ -114,8 +147,73 @@ run_ship_spawn() {
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
     CLAUDE_CONFIG_DIR='' FM_FAKE_LAUNCH_LOG="$launchlog" \
-    GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
+    GROK_HOME="$home/grok-home" PATH="${SPAWN_PATH:-$fakebin:$PATH}" \
     "$SPAWN" "$id" "$proj" --mode no-mistakes --yolo off "$@" 2>&1
+}
+
+# A PATH carrying no chrome-devtools-axi at all, for the not-installed branch.
+# Filtering the inherited PATH beats hand-building one, which would drop whatever
+# git and coreutils this host actually resolves fm-spawn's own calls to.
+path_without_browser_tool() {
+  local dir out=''
+  local IFS=:
+  for dir in $PATH; do
+    [ -n "$dir" ] || continue
+    [ -x "$dir/chrome-devtools-axi" ] && continue
+    out="${out:+$out:}$dir"
+  done
+  printf '%s\n' "$out"
+}
+
+# The directory fm-spawn put on the agent's PATH ahead of everything else, or an
+# empty string when it left PATH alone.
+extract_refusal_dir() {
+  local launch=$1 rest
+  case "$launch" in
+    "PATH='"*)
+      rest=${launch#PATH=\'}
+      printf '%s\n' "${rest%%\'*}"
+      ;;
+    *) printf '%s\n' '' ;;
+  esac
+}
+
+# assert_profile_pin_survives <launch> <label>: the half of the guarantee that
+# does not depend on the tool version. It must hold even where the per-task
+# bridge is refused, because it is what keeps the operator's cookies out of any
+# browser the agent does manage to start.
+assert_profile_pin_survives() {
+  local launch=$1 label=$2 var
+  assert_contains "$launch" "$PINNED_AUTO_CONNECT" \
+    "$label: launch no longer refuses the attach-to-the-captain's-Chrome mode"
+  for var in "${PINNED_EMPTY_VARS[@]}"; do
+    case "$launch" in
+      *"$var "*) : ;;
+      *) fail "$label: launch no longer neutralises $var" ;;
+    esac
+  done
+}
+
+# assert_refusal_actually_refuses <shim-dir> <real-tool-dir> <run-log> <label>:
+# invoke the tool exactly as an agent would, with the real one still behind the
+# shim on PATH. A refusal that prints and then runs the tool anyway, or that
+# exits 0, would reproduce the silent degradation this gate exists to remove.
+# The refusal text is published in REFUSAL_OUT rather than echoed, so `fail` here
+# aborts the run instead of only exiting a command-substitution subshell.
+REFUSAL_OUT=
+assert_refusal_actually_refuses() {
+  local shim=$1 realdir=$2 ran=$3 label=$4
+  : > "$ran"
+  REFUSAL_OUT=$(FM_FAKE_BROWSER_RAN="$ran" PATH="$shim:$realdir:$PATH" \
+    env chrome-devtools-axi open https://mail.google.com 2>&1) \
+    && fail "$label: the refusal exited 0, which an agent reads as a successful page load"
+  [ ! -s "$ran" ] \
+    || fail "$label: the refusal printed but the browser tool still ran ($(cat "$ran"))"
+  assert_contains "$REFUSAL_OUT" 'chrome-devtools-axi' "$label: refusal does not name the tool"
+  assert_contains "$REFUSAL_OUT" 'CHROME_DEVTOOLS_AXI_SESSION' \
+    "$label: refusal does not name the missing capability"
+  assert_contains "$REFUSAL_OUT" 'Still enforced' \
+    "$label: refusal does not say which half of the guarantee still holds"
 }
 
 # assert_full_pin <launch> <expected-session> <label>: every pinned variable is
@@ -251,10 +349,115 @@ test_secondmate_agents_are_isolated_too() {
   pass "a secondmate agent launches inside its own browser-isolation environment"
 }
 
+# --- capability gate -------------------------------------------------------
+#
+# The SESSION pin is only a per-task bridge if the installed chrome-devtools-axi
+# supports named sessions. A tool that does not ignores the variable and puts the
+# agent back on the shared "default" bridge on port 9224 while the launch string
+# still looks isolated, so fm-spawn probes for the capability and refuses the tool
+# for that agent rather than make a promise it is not keeping.
+
+test_capable_browser_tool_leaves_the_launch_untouched() {
+  local rec id launch
+  # The normal case must cost nothing: same pinned environment, no PATH rewrite,
+  # nothing written to disk.
+  id=browseriso-capable-b6
+  rec=$(make_spawn_case browseriso-capable claude "$id")
+  read_case_record "$rec"
+  run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" >/dev/null \
+    || fail "spawn with a capable browser tool failed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_full_pin "$launch" "fm-$id" "capable tool"
+  assert_not_contains "$launch" 'PATH=' \
+    "a capable browser tool must not have the agent's PATH rewritten"
+  [ ! -e "$HOME_DIR/state/.browser-refusal" ] \
+    || fail "a capable browser tool left a refusal shim on disk"
+  pass "a browser tool that supports named sessions changes nothing about the launch"
+}
+
+test_browser_tool_without_named_sessions_is_refused() {
+  local rec id launch shim realdir
+  id=browseriso-oldtool-b7
+  rec=$(make_spawn_case browseriso-oldtool claude "$id")
+  read_case_record "$rec"
+  realdir="$TMP_ROOT/browseriso-oldtool/oldbin"
+  make_fake_browser_tool "$realdir" old
+  SPAWN_PATH="$realdir:$FAKEBIN_DIR:$PATH"
+  run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" >/dev/null \
+    || fail "spawn must still succeed when the browser tool is too old; a task that never browses is not this gate's business"
+  SPAWN_PATH=
+  launch=$(cat "$LAUNCH_LOG")
+
+  assert_profile_pin_survives "$launch" "too-old tool"
+  shim=$(extract_refusal_dir "$launch")
+  [ -n "$shim" ] \
+    || fail "a browser tool without named sessions produced no refusal, so the agent would attach to the shared default bridge"
+  [ -x "$shim/chrome-devtools-axi" ] || fail "refusal directory holds no executable shim"
+
+  assert_refusal_actually_refuses "$shim" "$realdir" "$TMP_ROOT/browseriso-oldtool/ran.log" "too-old tool"
+  assert_contains "$REFUSAL_OUT" 'does not support named sessions' \
+    "refusal does not diagnose the tool as too old"
+  pass "a browser tool without named sessions is refused for the agent instead of silently sharing the default bridge"
+}
+
+test_unreadable_browser_tool_help_resolves_toward_refusal() {
+  local rec id launch shim realdir
+  # An unreadable --help is "could not confirm", never "capable". It is worded
+  # apart from the too-old case so an operator can tell the two diagnoses apart,
+  # and so a release that stops documenting the variable is diagnosable.
+  id=browseriso-unreadable-b8
+  rec=$(make_spawn_case browseriso-unreadable claude "$id")
+  read_case_record "$rec"
+  realdir="$TMP_ROOT/browseriso-unreadable/oddbin"
+  make_fake_browser_tool "$realdir" unreadable
+  SPAWN_PATH="$realdir:$FAKEBIN_DIR:$PATH"
+  run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" >/dev/null \
+    || fail "spawn must still succeed when the browser tool's help cannot be read"
+  SPAWN_PATH=
+  launch=$(cat "$LAUNCH_LOG")
+
+  assert_profile_pin_survives "$launch" "unconfirmed tool"
+  shim=$(extract_refusal_dir "$launch")
+  [ -n "$shim" ] \
+    || fail "an unconfirmed browser tool was treated as capable, which is the silent promise this gate exists to prevent"
+
+  assert_refusal_actually_refuses "$shim" "$realdir" "$TMP_ROOT/browseriso-unreadable/ran.log" "unconfirmed tool"
+  assert_contains "$REFUSAL_OUT" 'could not confirm' \
+    "refusal does not distinguish 'unconfirmed' from 'too old'"
+  assert_not_contains "$REFUSAL_OUT" 'does not support named sessions' \
+    "an unconfirmed tool must not be reported as a confirmed-too-old one"
+  pass "a browser tool whose capability cannot be confirmed is refused, and says so differently from a too-old one"
+}
+
+test_absent_browser_tool_is_left_alone() {
+  local rec id launch
+  # Nothing installed means nothing to refuse and nothing to run, so the launch
+  # must be identical to the capable case rather than carrying an invented error.
+  id=browseriso-notool-b9
+  rec=$(make_spawn_case browseriso-notool claude "$id")
+  read_case_record "$rec"
+  rm -f "$FAKEBIN_DIR/chrome-devtools-axi"
+  SPAWN_PATH="$FAKEBIN_DIR:$(path_without_browser_tool)"
+  run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" >/dev/null \
+    || fail "spawn failed with no chrome-devtools-axi installed"
+  SPAWN_PATH=
+  launch=$(cat "$LAUNCH_LOG")
+  assert_full_pin "$launch" "fm-$id" "absent tool"
+  assert_not_contains "$launch" 'PATH=' \
+    "an absent browser tool must not have the agent's PATH rewritten"
+  [ ! -e "$HOME_DIR/state/.browser-refusal" ] \
+    || fail "an absent browser tool produced a refusal shim for a tool that cannot be run"
+  pass "an uninstalled browser tool is neither refused nor shimmed"
+}
+
 test_every_verified_harness_carries_the_pin
 test_raw_launch_command_escape_hatch_carries_the_pin
 test_each_task_gets_its_own_browser_session
 test_longest_accepted_task_id_still_yields_a_usable_session_name
 test_secondmate_agents_are_isolated_too
+test_capable_browser_tool_leaves_the_launch_untouched
+test_browser_tool_without_named_sessions_is_refused
+test_unreadable_browser_tool_help_resolves_toward_refusal
+test_absent_browser_tool_is_left_alone
 
 fm_test_cleanup "$TMP_ROOT"

@@ -30,9 +30,27 @@ SH
   chmod +x "$fakebin/$tool"
 }
 
+# fm-spawn probes the installed chrome-devtools-axi's --help before deciding
+# whether the launch also needs a browser-refusal PATH shadow, and the exact-launch
+# assertions below would then describe this host rather than firstmate. A capable
+# stand-in shadows whatever the host has, so they stay hermetic.
+# tests/fm-spawn-browser-isolation.test.sh owns the gate's own coverage.
+make_spawn_browser_probe() {
+  local fakebin=$1
+  cat > "$fakebin/chrome-devtools-axi" <<'SH'
+#!/usr/bin/env bash
+set -u
+[ "${1:-}" = --help ] && printf '%s\n' 'environment:' \
+  '  CHROME_DEVTOOLS_AXI_SESSION  Named session for concurrent isolation'
+exit 0
+SH
+  chmod +x "$fakebin/chrome-devtools-axi"
+}
+
 make_spawn_fakebin() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
+  make_spawn_browser_probe "$fakebin"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
