@@ -91,6 +91,13 @@ write_live_fixture() {  # <home>
 - [ ] decision-task - Decide the public API (repo: firstmate) (kind: ship) (since 2026-08-02)
 - [ ] unhealthy-task - Recover missing endpoint (repo: firstmate) (kind: ship) (since 2026-08-02)
 - [ ] deploy-window - Approve deployment window (repo: firstmate) (kind: captain) (since 2026-08-02) (hold: Pedro must choose the deployment window.) (hold-kind: captain)
+- [ ] hold-oldest - Renew the signing certificate (repo: firstmate) (kind: captain) (since 2026-07-20) (hold: The certificate expires soon.) (hold-kind: captain)
+- [ ] hold-two - Approve the pricing page copy (repo: artemis) (kind: captain) (since 2026-07-22) (hold: Marketing wants a yes.) (hold-kind: captain)
+- [ ] hold-three - Choose the beta cohort size (repo: artemis) (kind: captain) (since 2026-07-24) (hold: Ten or fifty users.) (hold-kind: captain)
+- [ ] hold-four - Confirm the data retention window (repo: artemis) (kind: captain) (since 2026-07-26) (hold: Legal asked for ninety days.) (hold-kind: captain)
+- [ ] hold-five - Pick the demo dataset (repo: artemis) (kind: captain) (since 2026-07-28) (hold: Real or synthetic.) (hold-kind: captain)
+- [ ] hold-six - Approve the changelog draft (repo: artemis) (kind: captain) (since 2026-07-30) (hold: One paragraph awaits review.) (hold-kind: captain)
+- [ ] hold-seven - Sign off on the icon refresh (repo: artemis) (kind: captain) (since 2026-08-01) (hold: Two candidates shortlisted.) (hold-kind: captain)
 
 ## Queued
 - [ ] queued-task - Ship the follow-up blocked-by: decision-task (repo: firstmate) (kind: ship) (since 2026-07-30)
@@ -156,18 +163,18 @@ line_number_of() {  # <haystack> <needle>
 }
 
 test_terminal_cockpit_opens_on_needs_pedro() {
-  local home fakebin out needs underway unhealthy queued
+  local home fakebin out all_out needs underway unhealthy queued decide first_hold total_lines
   home=$(make_home terminal)
   write_live_fixture "$home"
   fakebin=$(make_fakebin "$home")
 
   out=$(render_terminal "$home" "$fakebin" --width 100) || fail "terminal render failed"
 
-  needs=$(line_number_of "$out" "NEEDS PEDRO (2)")
+  needs=$(line_number_of "$out" "NEEDS PEDRO (9)")
   underway=$(line_number_of "$out" "UNDERWAY (1)")
   unhealthy=$(line_number_of "$out" "UNHEALTHY (1)")
   queued=$(line_number_of "$out" "QUEUED (1)")
-  [ -n "$needs" ] || fail "terminal output has no NEEDS PEDRO section with both items"
+  [ -n "$needs" ] || fail "terminal output has no NEEDS PEDRO section counting all nine items"
   [ -n "$underway" ] || fail "terminal output has no UNDERWAY section"
   [ -n "$unhealthy" ] || fail "terminal output has no UNHEALTHY section"
   [ -n "$queued" ] || fail "terminal output has no QUEUED section"
@@ -176,17 +183,35 @@ test_terminal_cockpit_opens_on_needs_pedro() {
 
   assert_contains "$out" "Choose the public API shape." "open decision was not rendered"
   assert_contains "$out" "[api-shape]" "decision key was not rendered"
-  assert_contains "$out" "Approve deployment window" "captain hold title was not rendered"
-  assert_contains "$out" "Pedro must choose the deployment window." "captain hold reason was not rendered"
-  assert_contains "$out" "decision-task · firstmate · for 5m" "decision age-in-state was not rendered"
-  assert_contains "$out" "unhealthy-task · firstmate · for 5m" "unhealthy age-in-state was not rendered"
-  assert_contains "$out" "progressing-task · firstmate · for 5m" "telemetry-based working age was not rendered"
+  assert_contains "$out" "Decide the public API · firstmate · for 5m" "decision was not rendered under its readable name with age"
+  decide=$(line_number_of "$out" "Decide the public API")
+  first_hold=$(line_number_of "$out" "Renew the signing certificate")
+  [ -n "$decide" ] && [ -n "$first_hold" ] && [ "$decide" -lt "$first_hold" ] \
+    || fail "live-worker decision does not outrank the oldest hold"
+  assert_contains "$out" "⚠ for 13d" "a 13-day hold got no age warning weight"
+  assert_contains "$out" "The certificate expires soon." "oldest hold reason was not rendered"
+  assert_contains "$out" "4 more" "hidden Needs Pedro items were not counted"
+  assert_contains "$out" "rule: live asks, PRs, holds, oldest first" "selection rule is not printed on screen"
+  assert_contains "$out" "--all shows all" "expansion hint is not printed"
+  assert_not_contains "$out" "Sign off on the icon refresh" "low-priority hold leaked past the section cap"
+  assert_not_contains "$out" "Pedro must choose the deployment window." "capped-out hold detail still rendered"
+  assert_contains "$out" "Recover missing endpoint · firstmate · for 5m" "unhealthy item lost its readable name or age"
+  assert_contains "$out" "Continue implementation · firstmate" "working item lost its readable name"
   assert_contains "$out" "codex/gpt-5.6-sol/high" "model tuple was not rendered on the working task"
   assert_contains "$out" "endpoint disappeared" "unhealthy reason was not rendered"
-  assert_contains "$out" "queued-task · firstmate · for 3d" "queued item age was not rendered"
+  assert_contains "$out" "Ship the follow-up · firstmate" "queued item lost its readable name"
   assert_contains "$out" "waits on decision-task" "queued blocker was not rendered"
+  assert_contains "$out" "for 3d" "queued item age was not rendered"
   assert_contains "$out" "token spend not measured" "unreported spend was not explicit"
   assert_not_contains "$out" "truncated, 90 chars" "CLI truncation artifact leaked into the cockpit"
+
+  total_lines=$(printf '%s\n' "$out" | wc -l | tr -d ' ')
+  [ "$total_lines" -le 40 ] || fail "cockpit does not fit a 40-row terminal: $total_lines lines"
+
+  all_out=$(render_terminal "$home" "$fakebin" --width 100 --all) || fail "terminal --all render failed"
+  assert_contains "$all_out" "Sign off on the icon refresh" "--all does not list capped-out items"
+  assert_contains "$all_out" "Pedro must choose the deployment window." "--all does not list capped-out hold detail"
+  assert_not_contains "$all_out" "more · --all shows all" "--all still hides items behind a count line"
 
   # shellcheck disable=SC2016  # the ${...} below is a node template literal, not shell
   printf '%s' "$out" | node -e '

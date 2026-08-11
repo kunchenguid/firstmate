@@ -35,11 +35,12 @@ const configDirectory = resolve(process.env.FM_CONFIG_OVERRIDE || resolve(fleetH
 const telemetryPath = resolve(dataDirectory, "routing-outcomes.jsonl");
 
 function usage(stream = process.stdout) {
-  stream.write(`usage: fm-fleet-dashboard.mjs [--width <columns>] [--output <path>]
+  stream.write(`usage: fm-fleet-dashboard.mjs [--width <columns>] [--all] [--output <path>]
 
 Render the fleet cockpit from live read-only state.
 Default output is an ANSI terminal view on stdout (pairs with watch/tmux).
 --width <columns>  terminal width override (default: tty width, else 80)
+--all              list every item; default caps each section to fit ~40 rows
 --output <path>    write the self-contained HTML page to <path> instead
 The HTML output may never be written under data/, state/, or config/.
 `);
@@ -48,11 +49,16 @@ The HTML output may never be written under data/, state/, or config/.
 function parseArguments(argumentsList) {
   let outputPath = null;
   let width = null;
+  let showAll = false;
   for (let index = 0; index < argumentsList.length; index += 1) {
     const argument = argumentsList[index];
     if (argument === "-h" || argument === "--help") {
       usage();
       process.exit(0);
+    }
+    if (argument === "--all") {
+      showAll = true;
+      continue;
     }
     if (argument === "--output" && index + 1 < argumentsList.length) {
       const supplied = argumentsList[index + 1];
@@ -71,7 +77,7 @@ function parseArguments(argumentsList) {
     usage(process.stderr);
     throw new Error(`unknown or incomplete argument: ${argument}`);
   }
-  return { outputPath, width };
+  return { outputPath, width, showAll };
 }
 
 function pathIsWithin(candidate, parent) {
@@ -227,35 +233,42 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent }) {
   const sinceAge = (record) => age(secondsSince(Date.parse(record.since || ""), observedMilliseconds));
   const waitsOn = (record) =>
     record.unresolved_blocker_ids?.length ? `waits on ${record.unresolved_blocker_ids.join(", ")}` : null;
+  const titleById = new Map(
+    records
+      .filter((record) => record.structured && record.id && record.title)
+      .map((record) => [record.id, cleanProse(record.title)]),
+  );
 
   for (const record of records) {
     if (!record.structured) {
       if (record.state === "queued" || record.state === "in_flight") {
-        queued.push({ tag: "NOTE", id: null, project: null, prose: cleanProse(record.raw), note: "unstructured backlog line", age: age(null) });
+        queued.push({ tag: "NOTE", name: cleanProse(record.raw), project: null, prose: null, note: "unstructured backlog line", age: age(null) });
       }
       continue;
     }
     if (record.state === "done") {
       continue;
     }
+    const recordName = cleanProse(record.title) || record.id;
     const isCaptainHold = record.hold_kind === "captain" && record.hold_reason;
     if (isCaptainHold && !record.unresolved_blocker_ids?.length) {
       needsPedro.push({
         tag: "HOLD",
-        id: record.id,
+        name: recordName,
         project: record.repo,
-        prose: cleanProse(record.title || record.hold_reason),
-        note: record.title ? cleanProse(record.hold_reason) : null,
+        prose: cleanProse(record.hold_reason),
+        note: null,
         age: sinceAge(record),
+        live: false,
       });
       continue;
     }
     if (record.state === "queued" || isCaptainHold) {
       queued.push({
         tag: isCaptainHold ? "HOLD" : "QUEUED",
-        id: record.id,
+        name: recordName,
         project: record.repo,
-        prose: cleanProse(record.title),
+        prose: null,
         note: waitsOn(record),
         age: sinceAge(record),
       });
@@ -266,7 +279,7 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent }) {
     const record = records.find((candidate) => candidate.id === orphanId);
     unhealthy.push({
       tag: "ORPHAN",
-      id: orphanId,
+      name: record?.title ? cleanProse(record.title) : orphanId,
       project: record?.repo ?? null,
       prose: "recorded in flight but no worker record exists",
       note: null,
@@ -279,7 +292,13 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent }) {
     const itemAge = taskAge(task, telemetry, observedMilliseconds);
     const state = task.current_state?.state || "unknown";
     const detail = cleanProse(task.current_state?.detail);
-    const base = { id: task.id, project: task.project || null, age: itemAge, note: telemetry?.tuple ?? null };
+    const base = {
+      name: titleById.get(task.id) || task.id,
+      project: task.project || null,
+      age: itemAge,
+      note: telemetry?.tuple ?? null,
+      live: task.endpoint?.exists === true,
+    };
     const openDecisions = task.hints?.open_decisions || [];
     const decisions = openDecisions.filter((decision) => decision.verb === "needs-decision");
     const blockers = openDecisions.filter((decision) => decision.verb === "blocked");
@@ -319,7 +338,7 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent }) {
       continue;
     }
     if (state === "paused") {
-      queued.push({ ...base, tag: "PAUSED", prose: detail || "declared external wait" });
+      queued.push({ ...base, tag: "PAUSED", prose: null, note: detail || "declared external wait" });
       continue;
     }
     if (state === "done") {
@@ -338,9 +357,19 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent }) {
   }
 
   const oldestFirst = (left, right) => (right.age.seconds ?? -1) - (left.age.seconds ?? -1);
-  needsPedro.sort(oldestFirst);
+  // The printed selection rule: a live worker waiting on an answer is unblocked
+  // the moment Pedro replies, so it outranks a PR review, which outranks a
+  // standing hold; everything else last, oldest first within each group.
+  const actionTier = (item) => {
+    if ((item.tag === "DECIDE" || item.tag === "BLOCKED") && item.live) return 0;
+    if (item.tag === "REVIEW") return 1;
+    if (item.tag === "HOLD") return 2;
+    return 3;
+  };
+  needsPedro.sort((left, right) => actionTier(left) - actionTier(right) || oldestFirst(left, right));
   underway.sort(oldestFirst);
   unhealthy.sort(oldestFirst);
+  queued.sort(oldestFirst);
 
   return {
     generated: snapshot.generated || "observation time absent",
@@ -353,6 +382,9 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent }) {
         htmlTitle: "Needs Pedro",
         tone: "attention",
         items: needsPedro,
+        cap: 5,
+        twoLine: true,
+        rule: "rule: live asks, PRs, holds, oldest first",
         empty: backlogPresent ? "nothing needs you" : "backlog absent - captain holds unknown",
       },
       {
@@ -361,6 +393,8 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent }) {
         htmlTitle: "Underway",
         tone: "progress",
         items: underway,
+        cap: 5,
+        twoLine: false,
         empty: "nothing underway",
       },
       {
@@ -369,6 +403,8 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent }) {
         htmlTitle: "Unhealthy",
         tone: "danger",
         items: unhealthy,
+        cap: 3,
+        twoLine: true,
         empty: "no unhealthy worker visible",
       },
       {
@@ -377,20 +413,38 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent }) {
         htmlTitle: "Queued",
         tone: "neutral",
         items: queued,
+        cap: 3,
+        twoLine: false,
         empty: backlogPresent ? "queue empty" : "backlog absent - queue unknown",
       },
     ],
   };
 }
 
-const ANSI = { reset: "\u001b[0m", bold: "\u001b[1m", dim: "\u001b[2m", amber: "\u001b[33m", green: "\u001b[32m", red: "\u001b[31m" };
+const ANSI = { reset: "\u001b[0m", bold: "\u001b[1m", dim: "\u001b[2m", amber: "\u001b[33m", green: "\u001b[32m", red: "\u001b[31m", boldAmber: "\u001b[1;33m", boldRed: "\u001b[1;31m" };
 const BUCKET_COLOR = { attention: "amber", progress: "green", danger: "red", neutral: "dim" };
+const AGE_HOT_SECONDS = 7 * 86400;
+const AGE_WARM_SECONDS = 3 * 86400;
 
 function clip(text, width) {
   return text.length <= width ? text : `${text.slice(0, Math.max(0, width - 1))}…`;
 }
 
-function renderTerminal(model, width, useColor) {
+function ageTier(item) {
+  if (item.age.seconds === null) return "unknown";
+  if (item.age.seconds >= AGE_HOT_SECONDS) return "hot";
+  if (item.age.seconds >= AGE_WARM_SECONDS) return "warm";
+  return "calm";
+}
+
+function ageSegment(item, paint) {
+  const tier = ageTier(item);
+  const text = tier === "hot" ? `⚠ ${item.age.label}` : item.age.label;
+  const color = tier === "hot" ? "boldRed" : tier === "warm" ? "boldAmber" : "dim";
+  return { plain: text, painted: paint(color, text) };
+}
+
+function renderTerminal(model, width, useColor, showAll) {
   const paint = (name, text) => (useColor && name ? `${ANSI[name]}${text}${ANSI.reset}` : text);
   const lines = [];
   lines.push(paint("bold", clip(`FIRSTMATE FLEET · observed ${model.generated}`, width)));
@@ -409,15 +463,27 @@ function renderTerminal(model, width, useColor) {
       lines.push(clip(`   ${bucket.empty}`, width));
       continue;
     }
-    for (const item of bucket.items) {
+    const shown = showAll ? bucket.items : bucket.items.slice(0, bucket.cap);
+    for (const item of shown) {
       const tag = clip(item.tag, 7).padEnd(7);
-      const identity = [item.id, item.project].filter(Boolean).join(" · ");
-      const head = [identity, item.age.label].filter(Boolean).join(" · ");
-      lines.push(`  ${paint(BUCKET_COLOR[bucket.tone], tag)} ${clip(head, Math.max(0, width - 10))}`);
-      const detail = [item.prose, item.note].filter(Boolean).join("  ");
-      if (detail) {
-        lines.push(`          ${clip(detail, Math.max(0, width - 10))}`);
+      const ageText = ageSegment(item, paint);
+      const midParts = bucket.twoLine
+        ? [item.name, item.project]
+        : [item.name, item.project, item.note];
+      const mid = midParts.filter(Boolean).join(" · ");
+      const midWidth = Math.max(8, width - 10 - 3 - ageText.plain.length);
+      lines.push(`  ${paint(BUCKET_COLOR[bucket.tone], tag)} ${clip(mid, midWidth)} · ${ageText.painted}`);
+      if (bucket.twoLine) {
+        const detail = [item.prose, item.note].filter(Boolean).join("  ");
+        if (detail) {
+          lines.push(`          ${clip(detail, Math.max(0, width - 10))}`);
+        }
       }
+    }
+    const hidden = bucket.items.length - shown.length;
+    if (hidden > 0) {
+      const ruleText = bucket.rule ? ` · ${bucket.rule}` : "";
+      lines.push(paint("dim", clip(`  … ${hidden} more${ruleText} · --all shows all`, width)));
     }
   }
   return `${lines.join("\n")}\n`;
@@ -433,11 +499,16 @@ function escapeHtml(value) {
 }
 
 function card(item, tone) {
-  const noteMarkup = item.note ? `<span>${escapeHtml(item.note)}</span>` : "";
+  const detailParts = [item.prose, item.note].filter(Boolean);
+  const detailMarkup = detailParts.length
+    ? `<span>${detailParts.map((part) => escapeHtml(part)).join(" &middot; ")}</span>`
+    : "";
+  const tier = ageTier(item);
+  const marker = tier === "hot" ? "⚠ " : "";
   return `<article class="card ${escapeHtml(tone)}">
-    <p class="eyebrow">${escapeHtml([item.tag, item.id, item.project].filter(Boolean).join(" · "))}</p>
-    <h3>${escapeHtml(item.prose || "detail absent")}</h3>
-    <div class="runtime"><strong>${escapeHtml(item.age.label)}</strong>${noteMarkup}</div>
+    <p class="eyebrow">${escapeHtml([item.tag, item.project].filter(Boolean).join(" · "))}</p>
+    <h3>${escapeHtml(item.name || item.prose || "detail absent")}</h3>
+    <div class="runtime"><strong class="age-${tier}">${escapeHtml(marker + item.age.label)}</strong>${detailMarkup}</div>
   </article>`;
 }
 
@@ -489,6 +560,8 @@ function renderHtml(model) {
     .eyebrow { font-size:.72rem; text-transform:uppercase; letter-spacing:.08em; overflow-wrap:anywhere; }
     .runtime { display:flex; flex-direction:column; gap:2px; padding-top:8px; border-top:1px solid var(--line); }
     .runtime span { color:var(--muted); font-size:.8rem; overflow-wrap:anywhere; }
+    .age-hot { color:var(--red); }
+    .age-warm { color:var(--amber); }
     .empty { padding:18px; border:1px dashed var(--line); }
     @media (max-width:560px) { main { width:min(100% - 20px,1120px); padding-top:24px; } .section-head { display:grid; } }
   </style>
@@ -554,7 +627,7 @@ function writeAtomically(outputPath, html) {
 }
 
 try {
-  const { outputPath, width } = parseArguments(process.argv.slice(2));
+  const { outputPath, width, showAll } = parseArguments(process.argv.slice(2));
   if (outputPath !== null) {
     assertSafeOutput(outputPath);
   }
@@ -567,7 +640,7 @@ try {
     const useColor = process.env.NO_COLOR
       ? false
       : Boolean(process.stdout.isTTY) || Boolean(process.env.FORCE_COLOR);
-    process.stdout.write(renderTerminal(model, terminalWidth, useColor));
+    process.stdout.write(renderTerminal(model, terminalWidth, useColor, showAll));
   }
 } catch (error) {
   process.stderr.write(`fm-fleet-dashboard: ${error.message}\n`);
