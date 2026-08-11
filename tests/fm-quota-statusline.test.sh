@@ -233,4 +233,64 @@ if grep -q "^not ok" "$output_file"; then
   fail "statusline node harness reported failing checks"
 fi
 
+# --- Clean-exit regression --------------------------------------------------
+# /statusline off must clear the periodic refresh timer so the process can
+# exit on its own. This probe enables then offs the footer WITHOUT firing
+# session_shutdown (which would clear the timer unconditionally and mask a
+# leak), and without process.exit, so a leaked setInterval keeps node alive
+# and the bounded wait below catches it.
+cat >"$fixture/clean-exit-probe.mjs" <<'JS'
+import { pathToFileURL } from "node:url";
+const mod = await import(pathToFileURL("./fm-quota-statusline.ts").href);
+const eventHandlers = new Map();
+let statusCmd = null;
+const fakeCtx = () => ({
+  cwd: "/Users/ediz/Developer/firstmate",
+  model: { id: "gpt-5.6-terra" },
+  thinkingLevel: "high",
+  getContextUsage: () => ({ tokens: 272000, contextWindow: 200000, percent: 70.1 }),
+  ui: { setFooter: () => {}, notify: () => {} },
+});
+const fakePi = {
+  exec: async () => ({
+    stdout: '{"providers":[{"provider":"codex","windows":[{"id":"weekly","label":"week","percentRemaining":95}]}]}',
+    stderr: "", code: 0, killed: false,
+  }),
+  getThinkingLevel: () => "high",
+  on: (ev, h) => {
+    const a = eventHandlers.get(ev) ?? [];
+    a.push(h);
+    eventHandlers.set(ev, a);
+  },
+  registerCommand: (_n, o) => { statusCmd = o; },
+};
+mod.default(fakePi);
+await statusCmd.handler("", fakeCtx());   // enable arms the periodic timer
+await statusCmd.handler("off", fakeCtx()); // off must clear it
+// Deliberately no session_shutdown and no process.exit: a clean
+// implementation exits naturally once the periodic timer is cleared.
+JS
+
+( cd "$fixture" && node clean-exit-probe.mjs ) &
+probe_pid=$!
+probe_ok=1
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  sleep 1
+  if ! kill -0 "$probe_pid" 2>/dev/null; then
+    probe_ok=0
+    break
+  fi
+done
+if [ "$probe_ok" -ne 0 ]; then
+  kill -9 "$probe_pid" 2>/dev/null
+  wait "$probe_pid" 2>/dev/null
+  fail "/statusline off did not clear the periodic timer: process stayed alive without session_shutdown"
+fi
+wait "$probe_pid" 2>/dev/null
+probe_exit=$?
+if [ "$probe_exit" -ne 0 ]; then
+  fail "clean-exit probe exited non-zero ($probe_exit)"
+fi
+pass "clean-exit: /statusline off clears the periodic timer without session_shutdown"
+
 pass "fm-quota-statusline rendering, staleness, narrow-width, and lifecycle checks"

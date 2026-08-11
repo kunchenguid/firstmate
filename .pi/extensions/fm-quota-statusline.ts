@@ -162,6 +162,7 @@ export default function (pi: ExtensionAPI) {
 	const restoreStockFooter = (ctx: ExtensionContext): void => {
 		enabled = false;
 		footerRef = undefined;
+		clearPeriodicTimer();
 		ctx.ui.setFooter(undefined);
 	};
 
