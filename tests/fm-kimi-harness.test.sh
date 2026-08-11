@@ -177,7 +177,7 @@ EOF
 }
 
 test_kimi_launch_then_send_is_verified() {
-  local id rec out rc launch pointer brief_real meta task_tmp
+  local id rec out rc launch expected pointer brief_real meta task_tmp
   id="kimi-success-z1-$$"
   task_tmp="/tmp/fm-$id"
   KIMI_RUNTIME_TASK_TMP=$task_tmp
@@ -192,8 +192,9 @@ test_kimi_launch_then_send_is_verified() {
   assert_contains "$out" "spawned $id harness=kimi" "kimi spawn did not report success"
 
   launch=$(cat "$CASE_DIR/launch.log")
-  [ "$launch" = "'$FAKEBIN_DIR/kimi' --model 'kimi-code/k3' --auto" ] \
-    || fail "kimi launch did not use the absolute binary, model, and --auto only: $launch"
+  expected="$(fm_browser_isolation_launch_prefix "$id") '$FAKEBIN_DIR/kimi' --model 'kimi-code/k3' --auto"
+  [ "$launch" = "$expected" ] \
+    || fail "kimi launch did not use the absolute binary, model, and --auto only"$'\n'"expected: $expected"$'\n'"actual:   $launch"
   assert_not_contains "$launch" "--effort" "kimi launch emitted a nonexistent effort flag"
   assert_not_contains "$launch" "turn-ended" "kimi launch embedded a turn-end path"
   assert_not_contains "$launch" "__TURNEND__" "kimi launch retained a turn-end placeholder"
@@ -437,7 +438,7 @@ test_kimi_teardown_removes_pointer_and_registry_token() {
 }
 
 test_kimi_falls_back_to_expanded_home_binary() {
-  local id rec out rc launch fallback
+  local id rec out rc launch expected fallback
   id=kimi-fallback-z4
   rec=$(make_spawn_case fallback "$id")
   read_spawn_record "$rec"
@@ -449,8 +450,9 @@ test_kimi_falls_back_to_expanded_home_binary() {
   rc=$?
   expect_code 0 "$rc" "Kimi HOME fallback spawn should succeed"
   launch=$(cat "$CASE_DIR/launch.log")
-  [ "$launch" = "'$fallback' --auto" ] \
-    || fail "Kimi fallback did not expand HOME into an absolute executable: $launch"
+  expected="$(fm_browser_isolation_launch_prefix "$id") '$fallback' --auto"
+  [ "$launch" = "$expected" ] \
+    || fail "Kimi fallback did not expand HOME into an absolute executable"$'\n'"expected: $expected"$'\n'"actual:   $launch"
   pass "fm-spawn: Kimi fallback expands the active HOME"
 }
 

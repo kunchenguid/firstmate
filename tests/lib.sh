@@ -179,6 +179,25 @@ SH
   chmod +x "$fakebin/chrome-devtools-axi"
 }
 
+# fm_browser_isolation_launch_prefix <task-id>
+# The exact environment prefix fm-spawn prepends to EVERY launch command. Suites
+# that pin a whole launch string exactly compose it from here so they keep
+# asserting their own harness half exactly instead of loosening into a substring
+# match. It is restated as a literal rather than read back from
+# bin/fm-pr-lib.sh's fm_browser_isolation_pins on purpose: a test that derives
+# the expected value from the code under test would assert nothing. It lives here
+# rather than in one suite because the prefix is on every launch, so every suite
+# that pins one needs it, and a second copy is a second thing to forget - which
+# is exactly how tests/fm-kimi-harness.test.sh went stale.
+# tests/fm-spawn-browser-isolation.test.sh owns the contract this mirrors, and is
+# where a change to the pinned variables must be proven.
+fm_browser_isolation_launch_prefix() {
+  local id=$1
+  printf '%s' "CHROME_DEVTOOLS_AXI_AUTO_CONNECT=0 CHROME_DEVTOOLS_AXI_BROWSER_URL= "
+  printf '%s' "CHROME_DEVTOOLS_AXI_USER_DATA_DIR= CHROME_DEVTOOLS_AXI_CHROME_ARGS= "
+  printf '%s' "CHROME_DEVTOOLS_AXI_PORT= CHROME_DEVTOOLS_AXI_SESSION='fm-$id'"
+}
+
 fm_fakebin() {
   local dir=$1 fakebin="$1/fakebin"
   mkdir -p "$fakebin"

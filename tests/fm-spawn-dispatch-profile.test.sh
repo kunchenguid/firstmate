@@ -149,12 +149,10 @@ EOF
 
 # fm-spawn prefixes every launch command with the browser-isolation environment
 # (tests/fm-spawn-browser-isolation.test.sh owns that contract). Canonical-launch
-# assertions here compose it so they keep pinning the harness half exactly.
+# assertions here compose tests/lib.sh's shared prefix so they keep pinning the
+# harness half exactly.
 browser_isolation_prefix() {
-  local id=$1
-  printf '%s' "CHROME_DEVTOOLS_AXI_AUTO_CONNECT=0 CHROME_DEVTOOLS_AXI_BROWSER_URL= "
-  printf '%s' "CHROME_DEVTOOLS_AXI_USER_DATA_DIR= CHROME_DEVTOOLS_AXI_CHROME_ARGS= "
-  printf '%s' "CHROME_DEVTOOLS_AXI_PORT= CHROME_DEVTOOLS_AXI_SESSION='fm-$id'"
+  fm_browser_isolation_launch_prefix "$1"
 }
 
 assert_meta_profile() {
