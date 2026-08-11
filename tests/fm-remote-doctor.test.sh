@@ -593,6 +593,23 @@ assert_contains "$DOCTOR_OUT" 'fix required-treehouse=failed:' \
 pass "--fix creates only owned version-manager wrappers and never clobbers an operator file"
 
 new_case Linux with-herdr no-gui
+rm -f "$CASE_BIN/claude"
+CURSOR_MANAGER_BIN="$CASE_HOME/.nvm/versions/node/v24/bin"
+fm_fake_cursor_alias "$CURSOR_MANAGER_BIN" agent
+doctor hermetic
+assert_contains "$DOCTOR_OUT" 'required harness=MISSING' \
+  "a manager-only Cursor alias was reported ready before repair"
+doctor --fix hermetic
+expect_code 0 "$DOCTOR_RC" "--fix did not repair a manager-only Cursor alias"
+assert_present "$CASE_HOME/.local/bin/agent" \
+  "--fix did not create the alias wrapper for a manager-only Cursor install"
+assert_grep "$CURSOR_MANAGER_BIN/agent" "$CASE_HOME/.local/bin/agent" \
+  "the Cursor alias wrapper does not execute the manager-installed alias"
+assert_contains "$DOCTOR_OUT" "required harness=cursor-agent:$CASE_HOME/.local/bin/agent" \
+  "the repaired Cursor alias did not satisfy readiness"
+pass "--fix repairs a Cursor install exposed only as the manager agent alias"
+
+new_case Linux with-herdr no-gui
 CASE_REMOTE_JOB_ACTIVE=
 CASE_PLATFORM_OVERRIDE=Linux
 rm -f "$CASE_BIN/sleep" "$CASE_BIN/uname"

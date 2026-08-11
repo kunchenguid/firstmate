@@ -558,13 +558,8 @@ wrapper_is_firstmate_owned() { # <path>
   [ "$first" = '#!/usr/bin/env bash' ] && [ "$second" = '# Firstmate remote tool wrapper v1' ]
 }
 
-repair_tool_wrapper() { # <tool>
-  local tool=$1 target wrapper tmp
-  local resolved
-  resolved=$(command -v "$tool" 2>/dev/null || true)
-  [ -n "$resolved" ] && [ -x "$resolved" ] && return 0
-  target=$(fm_remote_job_manager_tool "${HOME:-}" "$tool" 2>/dev/null || true)
-  [ -n "$target" ] || return 1
+publish_tool_wrapper() { # <tool> <target>
+  local tool=$1 target=$2 wrapper tmp
   wrapper="${HOME:-}/.local/bin/$tool"
   if [ -e "$wrapper" ] || [ -L "$wrapper" ]; then
     if ! wrapper_is_firstmate_owned "$wrapper"; then
@@ -591,6 +586,27 @@ repair_tool_wrapper() { # <tool>
   fix_report "required-$tool" applied "linked the discoverable version-manager tool at $wrapper"
 }
 
+repair_tool_wrapper() { # <tool>
+  local tool=$1 target
+  local resolved
+  resolved=$(command -v "$tool" 2>/dev/null || true)
+  [ -n "$resolved" ] && [ -x "$resolved" ] && return 0
+  target=$(fm_remote_job_manager_tool "${HOME:-}" "$tool" 2>/dev/null || true)
+  [ -n "$target" ] || return 1
+  publish_tool_wrapper "$tool" "$target"
+}
+
+repair_cursor_wrapper() {
+  local alias target
+  fm_remote_doctor_resolve_cursor >/dev/null 2>&1 && return 0
+  for alias in cursor-agent agent; do
+    target=$(fm_remote_job_manager_tool "${HOME:-}" "$alias" 2>/dev/null || true)
+    [ -n "$target" ] || continue
+    publish_tool_wrapper "$alias" "$target" && return 0
+  done
+  return 1
+}
+
 repair_required_wrappers() {
   local tool resolved
   for tool in "${REQUIRED_TOOLS[@]}"; do
@@ -602,6 +618,10 @@ repair_required_wrappers() {
     fi
   done
   for tool in "${HARNESS_TOOLS[@]}"; do
+    if [ "$tool" = cursor-agent ]; then
+      repair_cursor_wrapper && return 0
+      continue
+    fi
     fm_remote_job_manager_tool "${HOME:-}" "$tool" >/dev/null 2>&1 || continue
     repair_tool_wrapper "$tool" && return 0
   done
