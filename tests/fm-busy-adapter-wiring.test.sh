@@ -30,7 +30,12 @@ esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
-  has-session|new-session|new-window|kill-window|send-keys) exit 0 ;;
+  # This fork gives every firstmate home its own stamped tmux session, so the
+  # container ensure reads back the ownership stamp it just wrote; a fake that
+  # answers neither verb reads as "created but unstamped" and refuses.
+  list-sessions) basename "$(cd "${FM_HOME:-.}" && pwd -P)"; exit 0 ;;
+  show-options) (cd "${FM_HOME:-.}" && pwd -P); exit 0 ;;
+  has-session|new-session|new-window|kill-window|send-keys|set-option) exit 0 ;;
 esac
 exit 0
 SH

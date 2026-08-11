@@ -147,12 +147,12 @@ fm_backend_tmux_container_ensure() {
   local home basename_session tag_session candidate owner rc reason
   local candidates=() blocked=()
   home=$(cd "$FM_HOME" 2>/dev/null && pwd -P) || {
-    echo "error: fm_tmux backend cannot resolve FM_HOME '$FM_HOME'" >&2
+    echo "error: tmux backend cannot resolve FM_HOME '$FM_HOME'" >&2
     return 1
   }
   basename_session=${home##*/}
   if [ -z "$basename_session" ]; then
-    echo "error: fm_tmux backend cannot derive a session name from FM_HOME '$home'" >&2
+    echo "error: tmux backend cannot derive a session name from FM_HOME '$home'" >&2
     return 1
   fi
   candidates=("$basename_session")
@@ -189,15 +189,15 @@ fm_backend_tmux_container_ensure() {
         blocked+=("'$candidate' belongs to FM_HOME '$owner', not '$home'; refusing to reuse it")
         ;;
       *)
-        blocked+=("'$candidate' could not be created or stamped on the fleet's fm_tmux server")
+        blocked+=("'$candidate' could not be created or stamped on the fleet's tmux server")
         ;;
     esac
   done
 
   {
-    printf "error: fm_tmux backend cannot open a session for FM_HOME '%s'" "$home"
+    printf "error: tmux backend cannot open a session for FM_HOME '%s'" "$home"
     for reason in "${blocked[@]}"; do
-      printf '\n  fm_tmux session %s' "$reason"
+      printf '\n  tmux session %s' "$reason"
     done
     printf '\n'
   } >&2

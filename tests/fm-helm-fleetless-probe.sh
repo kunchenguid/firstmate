@@ -102,10 +102,13 @@ EOF
 #     on which harness the machine happens to detect.
 # All three spawn probes exercise the gate, because the gate runs before any of
 # the argument handling they exercise.
-run 'spawn: invalid task id' "$ROOT/bin/fm-spawn.sh" .hidden "$PROJ"
-run 'spawn: invalid effort' "$ROOT/bin/fm-spawn.sh" t-new "$PROJ" --effort turbo
+# A ship spawn now carries an explicit delivery contract (AGENTS.md section 7),
+# so every ship probe below supplies a valid one. Without it the spawn refuses
+# on the missing contract and the case under test is never reached.
+run 'spawn: invalid task id' "$ROOT/bin/fm-spawn.sh" .hidden "$PROJ" --mode no-mistakes --yolo off
+run 'spawn: invalid effort' "$ROOT/bin/fm-spawn.sh" t-new "$PROJ" --mode no-mistakes --yolo off --effort turbo
 run 'spawn: --backend combined with --host' \
-  "$ROOT/bin/fm-spawn.sh" t-new "$PROJ" --host box --backend tmux
+  "$ROOT/bin/fm-spawn.sh" t-new "$PROJ" --mode no-mistakes --yolo off --host box --backend tmux
 run 'send: task with no metadata' "$ROOT/bin/fm-send.sh" t-absent hello
 run 'teardown: task with no metadata' "$ROOT/bin/fm-teardown.sh" t-absent
 run 'pr-merge: task with no metadata' \

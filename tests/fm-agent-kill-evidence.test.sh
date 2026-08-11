@@ -179,8 +179,12 @@ assert_contains "$out" "agent died:" "(g) crew-state says the agent died"
 assert_contains "$out" "SIGKILL" "(g) and names the signal"
 assert_contains "$out" ".postmortem" "(g) and points at the evidence"
 # The status log still says `working:` - the crew never got to report anything
-# else - so without this the wake would report a working crew whose agent is gone.
-assert_contains "$out" "working" "(g) even while the status log still reads working"
+# else. Under the semantic busy-state contract an unarmed harness reads
+# `unknown`, which never becomes `working` and never permits the status-log
+# fallback, so the line must NOT claim a working crew whose agent is gone.
+case "$out" in
+  "state: working"*) fail "(g) a dead agent must not be reported as working from a stale status log: $out" ;;
+esac
 pass "(g) crew-state surfaces the recorded cause of death"
 
 # --- (h) the memory snapshot's shape is stable everywhere --------------------

@@ -669,10 +669,26 @@ run_send_case() {  # <bin-root> <fakebin> <log> <home> -- <send args...>
     "$bin/bin/fm-send.sh" "$@" >/dev/null 2>&1
 }
 
+# Drop the two VERIFICATION reads from a send log, leaving only the send
+# sequence this conformance case exists to pin.
+#
+# The endpoint preflight was always stripped for that reason. The composer
+# capture is stripped for the same reason and became necessary at the
+# 2026-08-11 upstream sync: the composer reader moved from a single
+# cursor-row read (`-S <cy> -E <cy>`) to a structural full-pane scan
+# (`-S 0 -E -`), so the old and new bins ask tmux for different ROWS while
+# sending exactly the same keys. Composer classification itself is owned and
+# asserted directly by tests/fm-tmux-submit-busy.test.sh and
+# tests/fm-send-settle.test.sh, so nothing is left uncovered by removing a
+# duplicate assertion on its capture geometry here.
 strip_send_preflight() {  # <log>
   local preflight
   preflight=$'tmux\x1fdisplay-message\x1f-p\x1f-t\x1fsess:win\x1f#{pane_id}'
-  awk -v preflight="$preflight" '$0 != preflight { print }' "$1"
+  awk -v preflight="$preflight" '
+    $0 == preflight { next }
+    /\x1fcapture-pane\x1f/ { next }
+    { print }
+  ' "$1"
 }
 
 test_send_conformance_old_vs_new() {
@@ -953,7 +969,7 @@ test_spawn_refuses_unrelated_repo_pane_path() {
   local fb out rc
   spawn_pollution_fixture omz
   fb=$(make_spawn_pane_seq_fakebin "$TMP_ROOT/pollute-fake-omz" "$PUNRELATED" "$PUNRELATED")
-  out=$(FM_SPAWN_WT_TIMEOUT=2 run_spawn_case "$ROOT" "$fb" "$PLOG" "$PSTATE" "$PDATA" "$PCONFIG" "$PPROJ" -- "$PID_" "$PPROJ" claude 2>&1)
+  out=$(FM_SPAWN_WT_TIMEOUT=2 run_spawn_case "$ROOT" "$fb" "$PLOG" "$PSTATE" "$PDATA" "$PCONFIG" "$PPROJ" -- "$PID_" "$PPROJ" claude --mode no-mistakes --yolo off 2>&1)
   rc=$?
   [ "$rc" -ne 0 ] || fail "fm-spawn.sh accepted an unrelated git repo as the task worktree: $out"
   assert_contains "$out" "$PUNRELATED" "refusal does not name the polluted pane path"$'\n'"$out"
@@ -967,7 +983,7 @@ test_spawn_times_out_when_pane_never_leaves_project() {
   local fb out rc
   spawn_pollution_fixture eaten
   fb=$(make_spawn_pane_seq_fakebin "$TMP_ROOT/pollute-fake-eaten" "$PPROJ" "$PPROJ")
-  out=$(FM_SPAWN_WT_TIMEOUT=2 run_spawn_case "$ROOT" "$fb" "$PLOG" "$PSTATE" "$PDATA" "$PCONFIG" "$PPROJ" -- "$PID_" "$PPROJ" claude 2>&1)
+  out=$(FM_SPAWN_WT_TIMEOUT=2 run_spawn_case "$ROOT" "$fb" "$PLOG" "$PSTATE" "$PDATA" "$PCONFIG" "$PPROJ" -- "$PID_" "$PPROJ" claude --mode no-mistakes --yolo off 2>&1)
   rc=$?
   [ "$rc" -ne 0 ] || fail "fm-spawn.sh reported success although the pane never entered a worktree: $out"
   assert_contains "$out" "did not enter a worktree" "timeout refusal lost its diagnostic"$'\n'"$out"
@@ -980,7 +996,7 @@ test_spawn_recovers_when_pane_transits_unrelated_repo() {
   local fb out rc
   spawn_pollution_fixture transit
   fb=$(make_spawn_pane_seq_fakebin "$TMP_ROOT/pollute-fake-transit" "$PUNRELATED" "$PWT")
-  out=$(run_spawn_case "$ROOT" "$fb" "$PLOG" "$PSTATE" "$PDATA" "$PCONFIG" "$PPROJ" -- "$PID_" "$PPROJ" claude 2>&1)
+  out=$(run_spawn_case "$ROOT" "$fb" "$PLOG" "$PSTATE" "$PDATA" "$PCONFIG" "$PPROJ" -- "$PID_" "$PPROJ" claude --mode no-mistakes --yolo off 2>&1)
   rc=$?
   expect_code 0 "$rc" "fm-spawn.sh should keep polling past a transient polluted pane path and accept the real worktree"$'\n'"$out"
   assert_contains "$out" "worktree=$PWT" "spawn did not adopt the real worktree after the transient polluted read"

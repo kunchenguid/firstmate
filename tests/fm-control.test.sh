@@ -129,6 +129,13 @@ case "${1:-}" in
   list-windows)
     if [ -f "$D/windows" ]; then cat "$D/windows"; fi
     exit 0 ;;
+  # This fork proves an endpoint by ENUMERATING live panes, because tmux answers
+  # display-message for a gone target with another window's pane id
+  # (bin/backends/tmux.sh's fm_backend_tmux_target_exists). A pane record is
+  # published unless the case declares the endpoint gone.
+  list-panes)
+    if [ -f "$D/panes" ]; then cat "$D/panes"; fi
+    exit 0 ;;
 esac
 exit 0
 SH
@@ -167,6 +174,9 @@ add_task() {
   local window=${6:-fmses:fm-$id}
   local home="$dir/home" proj="$dir/proj-$id" wt="$dir/wt-$id"
   fm_git_worktree "$proj" "$wt" "task-$id"
+  # Publish this task's endpoint to the fake's pane enumeration; a case that
+  # needs a gone endpoint truncates $FM_FAKE_DIR/panes.
+  printf '%s\n' "$window" >> "$dir/fake/panes"
   mkdir -p "$home/data/$id"
   printf '# brief for %s\n' "$id" > "$home/data/$id/brief.md"
   {

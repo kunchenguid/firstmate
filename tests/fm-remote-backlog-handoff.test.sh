@@ -5,7 +5,13 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-command -v tasks-axi >/dev/null 2>&1 || { echo "skip: tasks-axi not found"; exit 0; }
+# Presence alone is not the precondition: these cases drive real backlog
+# mutations, which the scripts perform only through a tasks-axi that meets
+# the floor bin/fm-tasks-axi-lib.sh owns. An installed but below-floor build
+# would otherwise fail here as if the behavior under test were broken.
+# shellcheck source=bin/fm-tasks-axi-lib.sh
+. "$ROOT/bin/fm-tasks-axi-lib.sh"
+fm_tasks_axi_compatible || { echo "skip: tasks-axi not found or below the required floor"; exit 0; }
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
 TMP_ROOT=$(fm_test_tmproot fm-remote-handoff)
 mkdir -p "$TMP_ROOT"

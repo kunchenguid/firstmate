@@ -397,9 +397,17 @@ fm_backend_cmux_parse_target() {  # <target>
 # instead - mirroring zellij's own pane_exists check
 # (fm_backend_zellij_pane_exists) rather than the design sketch's original
 # read-screen-based suggestion.
+# The CLI's own exit status decides liveness, and only its OUTPUT is judged by
+# jq. Piping the CLI straight into `jq -e` discarded that status, and jq 1.6
+# exits 0 rather than 4 when a program produces no output at all, so on a jq 1.6
+# box a FAILED `list-panes` read as "the surface is live" - the exact inversion
+# this predicate exists to prevent. Capturing first makes the failure
+# authoritative on every jq version.
 fm_backend_cmux_surface_exists() {  # <workspace_id> <surface_id>
-  local wsid=$1 sfid=$2
-  fm_backend_cmux_cli list-panes --workspace "$wsid" --json --id-format uuids 2>/dev/null \
+  local wsid=$1 sfid=$2 panes
+  panes=$(fm_backend_cmux_cli list-panes --workspace "$wsid" --json --id-format uuids 2>/dev/null) || return 1
+  [ -n "$panes" ] || return 1
+  printf '%s' "$panes" \
     | jq -e --arg s "$sfid" '[.panes[]? | select(.surface_ids // [] | index($s))] | length > 0' >/dev/null 2>&1
 }
 
