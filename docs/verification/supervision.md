@@ -59,7 +59,7 @@ The third is recorded below.
 | --- | --- | --- | --- | --- |
 | Claude | 2.1.222 (Claude Code) | `source=startup`, token quoted back in both `-p` and the TUI | `/clear` reports `source=clear` and `/compact` reports `source=compact`; both re-injected a fresh token that the model quoted back | `claude --continue` reports `source=resume` |
 | Codex | codex-cli 0.146.0 | `source=startup` under `codex exec`, token quoted back | Not reachable from a tracked project registration; see the limit below | `codex exec resume --last` reports `source=resume` |
-| Pi | 0.82.0 | `source=startup`, token quoted back in both `-p` and the TUI | `/new` raises `session_start` reason `new`, which the extension maps to `clear`; `/compact` raises `session_compact`, and both freshly injected source-stamped tokens were quoted back | `pi -c` reports reason `startup`; the adapter uses the continuation invocation and restored entries to deliver wrapper `source=resume` |
+| Pi | 0.82.0 | `source=startup`, token quoted back in both `-p` and the TUI | `/new` raises `session_start` reason `new`, which the extension maps to `clear`; `/compact` raises `session_compact`, and both freshly injected source-stamped tokens were quoted back | `pi -c` reports reason `startup`; the adapter uses the continuation invocation to deliver wrapper `source=resume` |
 
 Two harness-specific consequences are load-bearing rather than incidental.
 
@@ -80,7 +80,7 @@ compact
 ```
 
 Pi disagrees with Claude and Codex on `resume`: a new Pi process continuing a session reports `startup`, and Pi's `resume` reason is reserved for an in-process session switch.
-The adapter therefore refines startup-reason `-c`/`--continue`, resume selection, explicit session loading, forking, or an observably restored entry set to the existing context-preserving wrapper source. A continuation never records or replaces the true-start baseline; if the next compact encounters the prior process identity or a missing baseline, it conservatively injects current AGENTS.md before the digest.
+The adapter therefore refines startup-reason continuation, resume-selection, explicit-session, and fork CLI invocations to the existing context-preserving wrapper source. A continuation never records or replaces the true-start baseline; if the next compact encounters the prior process identity or a missing baseline, it conservatively injects current AGENTS.md before the digest.
 
 ### Post-start instruction refresh
 
