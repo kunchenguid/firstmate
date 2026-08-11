@@ -25,8 +25,10 @@
 #                          terminal (captain-relevant) or non-terminal (no verb),
 #                          both surfaced at once. A provably-working stale past the
 #                          wedge threshold also surfaces, with an "escalation N"
-#                          count in the reason; at FM_WEDGE_DEMAND_INSPECT_COUNT
-#                          consecutive escalations on the SAME pane, the reason
+#                          count in the reason; unacknowledged same-key detections
+#                          are coalesced without advancing that count, and at
+#                          FM_WEDGE_DEMAND_INSPECT_COUNT successive acknowledged
+#                          escalations on the SAME pane, the reason
 #                          also carries a "demand-deep-inspection" marker so the
 #                          wake payload itself, not just repetition, forces a
 #                          closer look instead of another routine supervision
