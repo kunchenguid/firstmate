@@ -21,9 +21,10 @@
 #   reason=<one line>                 (whenever a step did not complete)
 #
 # transport says how the sweep reaches that home:
-#   agent     - a live secondmate agent owns the home; steer it with
-#               bin/fm-send.sh so it sweeps its own uncaptured session
-#               knowledge and replies through its marked return channel.
+#   agent     - a live secondmate agent owns the home; dispatch it through
+#               bin/fm-stow-delegate.sh, which sends the marked request with
+#               bin/fm-send.sh, correlates the completion receipt, and bounds
+#               the foreground wait across every live secondmate.
 #   direct    - a local home with no live agent; curate its editable memory
 #               files in place.
 #   deferred  - a remote home with no live agent. There is deliberately no
@@ -48,7 +49,7 @@
 set -u
 
 usage() {
-  sed -n '2,47{s/^# \{0,1\}//;p;}' "$0"
+  sed -n '2,48{s/^# \{0,1\}//;p;}' "$0"
 }
 
 case "${1:-}" in
