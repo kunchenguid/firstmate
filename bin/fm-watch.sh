@@ -597,6 +597,18 @@ run_check_capture() {
   fm_check_output_cleanup
 }
 
+routine_check_ack() {
+  local id=$1 output=$2
+  [ "$id" = routine-scan ] || return 0
+  case "$output" in
+    *'routine-due: '*) ;;
+    *) return 0 ;;
+  esac
+  FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" \
+    "$SCRIPT_DIR/fm-routine-scan.sh" --ack >/dev/null 2>&1 \
+    || { echo 'watcher: routine fire state acknowledgement failed' >&2; return 1; }
+}
+
 # Surfaced-marker bookkeeping for the heartbeat backstop is owned by
 # fm-push-transition-lib.sh because push and poll paths must write one format.
 # Mark every current captain-relevant status as surfaced. Called after the
@@ -885,6 +897,7 @@ while :; do
     rejected_checks=
     for c in "$STATE"/*.check.sh; do
       [ -e "$c" ] || continue
+      id=
       is_pr_poll=0
       if [ "$(basename "$c")" = x-watch.check.sh ]; then
         if fmx_poll_shim_valid "$c" "$FM_HOME" "$FM_ROOT" \
@@ -921,6 +934,7 @@ while :; do
       if [ -n "$out" ]; then
         reason="check: $c: $out"
         fm_wake_append check "$c" "$reason" || exit 1
+        routine_check_ack "$id" "$out" || exit 1
         if [ "$is_pr_poll" -eq 1 ] && [ "$out" = merged ]; then
           if fm_pr_poll_retirement_publish "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" "$out"; then
             fm_pr_poll_retirement_recover_one "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" \

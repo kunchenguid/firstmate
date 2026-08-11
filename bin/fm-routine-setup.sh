@@ -55,11 +55,12 @@ routine_wrapper_content() {
     "export FM_DATA_OVERRIDE=$(printf '%q' "$DATA")" \
     "export FM_STATE_OVERRIDE=$(printf '%q' "$STATE")" \
     "export FM_ROUTINE_REGISTRY=$(printf '%q' "$REGISTRY")" \
+    'export FM_ROUTINE_DEFER_FIRE=1' \
     "CHECK_TIMEOUT=\${FM_CHECK_TIMEOUT:-30}" \
     "case \"\$CHECK_TIMEOUT\" in ''|*[!0-9]*|0) printf '%s\\n' 'routine-check-error: invalid FM_CHECK_TIMEOUT'; exit 2 ;; esac" \
     "trap 'printf \"%s\\n\" \"routine-check-error: scanner interrupted\"; exit 124' HUP INT TERM" \
     ". $(printf '%q' "$FM_ROOT/bin/fm-timeout-lib.sh")" \
-    "fm_run_timed \"\$CHECK_TIMEOUT\" $(printf '%q' "$FM_ROOT/bin/fm-routine-scan.sh")" \
+    "fm_run_timed \"\$CHECK_TIMEOUT\" $(printf '%q' "$FM_ROOT/bin/fm-routine-scan.sh") \"\$@\" 2>&1" \
     'rc=$?' \
     "if [ \"\$rc\" -ne 0 ]; then" \
     "  printf '%s\\n' \"routine-check-error: scanner exited \$rc\"" \

@@ -93,7 +93,10 @@ test_setup_persists_canonical_path_overrides() {
   out=$(cd "$run_dir" && FM_ROUTINE_DATE=2026-08-10 "$check")
   expected='routine-due: example-daily-check | captain | check priorities'
   [ "$out" = "$expected" ] || fail "routine check did not retain its provisioned registry path"
-  [ -f "$state/.routine-fired" ] || fail "routine check did not retain its provisioned state path"
+  [ -f "$state/.routine-pending" ] || fail "routine check did not retain its provisioned pending state path"
+  "$check" --ack >/dev/null \
+    || fail "routine check could not acknowledge its pending state"
+  [ -f "$state/.routine-fired" ] || fail "routine check did not retain its provisioned fire state path"
   [ ! -e "$home/state/.routine-fired" ] || fail "routine check wrote fire state under the relative runtime cwd"
   pass "routine check retains canonical data and state overrides"
 }
@@ -224,6 +227,82 @@ test_duplicate_id_cannot_alternate_fired_cadences() {
     || fail "a duplicate id replaced the first record's durable fire state"
   pass "duplicate ids cannot alternate fired cadences"
 }
+test_deferred_check_acknowledges_after_wake() {
+  local home check first second ack third
+  home=$(make_home deferred)
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$SETUP" \
+    || fail "routine setup could not create the deferred check"
+  check="$home/state/routine-scan.check.sh"
+  write_registry "$home" \
+    '- deferred-item | daily | captain | check priorities | do'
+  first=$(FM_ROUTINE_DATE=2026-08-10 "$check")
+  [ "$first" = 'routine-due: deferred-item | captain | check priorities' ] \
+    || fail "the deferred check did not emit its due wake"
+  [ ! -e "$home/state/.routine-fired" ] \
+    || fail "the deferred check committed fire state before acknowledgement"
+  [ -f "$home/state/.routine-pending" ] \
+    || fail "the deferred check did not retain pending fire state"
+  second=$(FM_ROUTINE_DATE=2026-08-10 "$check")
+  [ "$second" = "$first" ] \
+    || fail "pending due output was not repeatable before acknowledgement"
+  FM_STATE_OVERRIDE="$home/state" bash -c '. "$1"; fm_wake_append check routine-scan "$2"' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "$first" \
+    || fail "the routine due wake could not enter the existing wake rail"
+  [ -s "$home/state/.wake-queue" ] || fail "the routine due wake was not durable"
+  ack=$(FM_ROUTINE_DATE=2026-08-10 "$check" --ack)
+  [ -z "$ack" ] || fail "routine acknowledgement produced check output"
+  [ "$(cat "$home/state/.routine-fired")" = 'deferred-item|daily|2026-08-10' ] \
+    || fail "routine acknowledgement did not commit fire state"
+  [ ! -e "$home/state/.routine-pending" ] \
+    || fail "routine acknowledgement left pending fire state"
+  third=$(FM_ROUTINE_DATE=2026-08-10 "$check")
+  [ -z "$third" ] || fail "acknowledged routine fired again"
+  pass "routine fire state commits after wake acknowledgement"
+}
+test_symlink_registry_is_rejected_at_scan_boundary() {
+  local home outside out rc
+  home=$(make_home symlink-registry)
+  outside="$TMP_ROOT/outside-routines.md"
+  write_registry "$home" \
+    '- outside-item | daily | captain | should not run | do'
+  mv "$home/data/routines.md" "$outside"
+  ln -s "$outside" "$home/data/routines.md"
+  out=$(run_scan "$home" 2026-08-10 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "the scanner followed a symlinked registry"
+  case "$out" in
+    *'routine-scan: registry is a symlink:'*) ;;
+    *) fail "the symlinked registry diagnostic was missing: $out" ;;
+  esac
+  [ ! -e "$home/state/.routine-fired" ] \
+    || fail "the symlinked registry created fire state"
+  pass "routine scanner rejects symlinked registries"
+}
+test_check_surfaces_registry_diagnostics() {
+  local home check out
+  home=$(make_home diagnostics)
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$SETUP" \
+    || fail "routine setup could not create the diagnostic check"
+  check="$home/state/routine-scan.check.sh"
+  write_registry "$home" \
+    'not a routine row' \
+    '- duplicate-item | daily | captain | check priorities | do' \
+    '- duplicate-item | daily | captain | check again | notify'
+  out=$(FM_ROUTINE_DATE=2026-08-10 "$check")
+  case "$out" in
+    *'routine-scan: ignoring malformed registry line'*) ;;
+    *) fail "malformed registry diagnostics were not surfaced: $out" ;;
+  esac
+  case "$out" in
+    *'routine-scan: ignoring duplicate registry id: duplicate-item'*) ;;
+    *) fail "duplicate registry diagnostics were not surfaced: $out" ;;
+  esac
+  case "$out" in
+    *'routine-due: duplicate-item | captain | check priorities'*) ;;
+    *) fail "valid routine output was lost with registry diagnostics: $out" ;;
+  esac
+  pass "routine check surfaces registry diagnostics"
+}
 test_bootstrap_seeds_and_arms_private_routine
 test_setup_persists_canonical_path_overrides
 test_routine_check_enforces_timeout
@@ -233,3 +312,6 @@ test_weekday_is_derived_from_captured_local_date
 test_nothing_due_is_silent_and_does_not_create_fire_state
 test_fire_state_prevents_repeats_after_scan_restart
 test_duplicate_id_cannot_alternate_fired_cadences
+test_deferred_check_acknowledges_after_wake
+test_symlink_registry_is_rejected_at_scan_boundary
+test_check_surfaces_registry_diagnostics

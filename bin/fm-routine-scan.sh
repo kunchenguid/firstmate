@@ -22,8 +22,12 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 REGISTRY="${FM_ROUTINE_REGISTRY:-$DATA/routines.md}"
 FIRED="$STATE/.routine-fired"
+PENDING="$STATE/.routine-pending"
 LOCK="$STATE/.routine-fired.lock"
 ROUTINE_TMP=
+PENDING_TMP=
+ROUTINE_DEFER_FIRE=${FM_ROUTINE_DEFER_FIRE:-0}
+ROUTINE_ACK=0
 
 routine_error() {
   printf 'routine-scan: %s\n' "$*" >&2
@@ -38,19 +42,36 @@ routine_usage() {
 
 routine_cleanup() {
   [ -z "$ROUTINE_TMP" ] || rm -f -- "$ROUTINE_TMP"
+  [ -z "$PENDING_TMP" ] || rm -f -- "$PENDING_TMP"
+  exec 8<&- 2>/dev/null || true
   fm_lock_release "$LOCK" 2>/dev/null || true
+}
+
+routine_interrupt() {
+  exit 1
 }
 
 case "${1:-}" in
   '') ;;
   --help|-h) routine_usage; exit 0 ;;
+  --ack) ROUTINE_ACK=1 ;;
   *) routine_error "unexpected argument: $1"; exit 2 ;;
 esac
+case "$ROUTINE_DEFER_FIRE" in
+  0|1) ;;
+  *) routine_error 'invalid FM_ROUTINE_DEFER_FIRE'; exit 2 ;;
+esac
 
-if [ ! -e "$REGISTRY" ]; then
-  exit 0
+if [ "$ROUTINE_ACK" -eq 0 ]; then
+  [ ! -L "$REGISTRY" ] \
+    || { routine_error "registry is a symlink: $REGISTRY"; exit 1; }
+  if [ -e "$REGISTRY" ]; then
+    [ -f "$REGISTRY" ] \
+      || { routine_error "registry is not a regular file: $REGISTRY"; exit 1; }
+  elif [ "$ROUTINE_DEFER_FIRE" -ne 1 ] || [ ! -e "$PENDING" ]; then
+    exit 0
+  fi
 fi
-[ -f "$REGISTRY" ] || { routine_error "registry is not a regular file: $REGISTRY"; exit 1; }
 [ -d "$STATE" ] && [ ! -L "$STATE" ] \
   || { routine_error "state directory is unavailable: $STATE"; exit 1; }
 
@@ -75,7 +96,8 @@ esac
 if ! fm_lock_try_acquire "$LOCK"; then
   exit 0
 fi
-trap routine_cleanup EXIT HUP INT TERM
+trap routine_cleanup EXIT
+trap routine_interrupt HUP INT TERM
 
 trim() {
   local value=$1
@@ -106,6 +128,70 @@ routine_fired() {
   return 1
 }
 
+routine_ack_seen() {
+  local candidate=$1 seen_record
+  for seen_record in "${ACK_RECORDS[@]}"; do
+    [ "$candidate" = "$seen_record" ] && return 0
+  done
+  return 1
+}
+
+routine_ack_pending() {
+  local pending_id pending_cadence pending_date pending_owner pending_action pending_extra
+  local stored_id stored_cadence stored_date stored_extra fire_record
+  [ -e "$PENDING" ] || return 0
+  [ -f "$PENDING" ] && [ ! -L "$PENDING" ] \
+    || { routine_error "pending routine state is unavailable: $PENDING"; return 1; }
+
+  ACK_RECORDS=()
+  umask 077
+  ROUTINE_TMP=$(mktemp "$STATE/.routine-fired.XXXXXX") \
+    || { routine_error 'could not create fire-state acknowledgement'; return 1; }
+  if [ -f "$FIRED" ]; then
+    while IFS='|' read -r stored_id stored_cadence stored_date stored_extra \
+      || [ -n "${stored_id:-}${stored_cadence:-}${stored_date:-}${stored_extra:-}" ]; do
+      [ -n "${stored_id:-}" ] && [ -n "${stored_cadence:-}" ] && [ -n "${stored_date:-}" ] \
+        || continue
+      [ -z "${stored_extra:-}" ] || continue
+      fire_record="$stored_id|$stored_cadence|$stored_date"
+      routine_ack_seen "$fire_record" && continue
+      ACK_RECORDS+=("$fire_record")
+      printf '%s\n' "$fire_record" >> "$ROUTINE_TMP" \
+        || { routine_error 'could not write fire-state acknowledgement'; return 1; }
+    done < "$FIRED"
+  fi
+  while IFS='|' read -r pending_id pending_cadence pending_date pending_owner pending_action pending_extra \
+    || [ -n "${pending_id:-}${pending_cadence:-}${pending_date:-}${pending_owner:-}${pending_action:-}${pending_extra:-}" ]; do
+    [ -n "${pending_id:-}" ] && [ -n "${pending_cadence:-}" ] \
+      && [ -n "${pending_date:-}" ] && [ -n "${pending_owner:-}" ] \
+      && [ -n "${pending_action:-}" ] && [ -z "${pending_extra:-}" ] \
+      || { routine_error 'pending routine state is malformed'; return 1; }
+    case "$pending_id" in
+      *[!A-Za-z0-9_:-]*) routine_error 'pending routine state has an invalid id'; return 1 ;;
+    esac
+    case "$pending_cadence" in
+      daily|weekly:mon|weekly:tue|weekly:wed|weekly:thu|weekly:fri|weekly:sat|weekly:sun) ;;
+      *) routine_error 'pending routine state has an invalid cadence'; return 1 ;;
+    esac
+    case "$pending_date" in
+      [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) ;;
+      *) routine_error 'pending routine state has an invalid date'; return 1 ;;
+    esac
+    fire_record="$pending_id|$pending_cadence|$pending_date"
+    routine_ack_seen "$fire_record" && continue
+    ACK_RECORDS+=("$fire_record")
+    printf '%s\n' "$fire_record" >> "$ROUTINE_TMP" \
+      || { routine_error 'could not write fire-state acknowledgement'; return 1; }
+  done < "$PENDING"
+  chmod 0600 "$ROUTINE_TMP" \
+    || { routine_error 'could not protect fire-state acknowledgement'; return 1; }
+  mv -f -- "$ROUTINE_TMP" "$FIRED" \
+    || { routine_error 'could not publish fire-state acknowledgement'; return 1; }
+  ROUTINE_TMP=
+  rm -f -- "$PENDING" \
+    || { routine_error 'could not clear pending routine state'; return 1; }
+}
+
 routine_id_seen() {
   local candidate=$1 seen_id
   for seen_id in "${SEEN_IDS[@]}"; do
@@ -122,10 +208,45 @@ routine_id_fired_this_scan() {
   return 1
 }
 
+if [ "$ROUTINE_ACK" -eq 1 ]; then
+  routine_ack_pending || exit 1
+  exit 0
+fi
+
 SEEN_IDS=()
 DUE_IDS=()
 DUE_RECORDS=()
 DUE_LINES=()
+DUE_PENDING_LINES=()
+NEW_PENDING=0
+if [ "$ROUTINE_DEFER_FIRE" -eq 1 ] && [ -e "$PENDING" ]; then
+  [ -f "$PENDING" ] && [ ! -L "$PENDING" ] \
+    || { routine_error "pending routine state is unavailable: $PENDING"; exit 1; }
+  while IFS='|' read -r pending_id pending_cadence pending_date pending_owner pending_action pending_extra \
+    || [ -n "${pending_id:-}${pending_cadence:-}${pending_date:-}${pending_owner:-}${pending_action:-}${pending_extra:-}" ]; do
+    [ -n "${pending_id:-}" ] && [ -n "${pending_cadence:-}" ] \
+      && [ -n "${pending_date:-}" ] && [ -n "${pending_owner:-}" ] \
+      && [ -n "${pending_action:-}" ] && [ -z "${pending_extra:-}" ] \
+      || { routine_error 'pending routine state is malformed'; exit 1; }
+    DUE_IDS+=("$pending_id")
+    DUE_RECORDS+=("$pending_id|$pending_cadence|$pending_date")
+    DUE_LINES+=("routine-due: $pending_id | $pending_owner | $pending_action")
+    DUE_PENDING_LINES+=("$pending_id|$pending_cadence|$pending_date|$pending_owner|$pending_action")
+  done < "$PENDING"
+fi
+if [ -e "$REGISTRY" ]; then
+  [ ! -L "$REGISTRY" ] \
+    || { routine_error "registry became a symlink: $REGISTRY"; exit 1; }
+  [ -f "$REGISTRY" ] \
+    || { routine_error "registry is not a regular file: $REGISTRY"; exit 1; }
+  exec 8< "$REGISTRY" \
+    || { routine_error "could not open routine registry: $REGISTRY"; exit 1; }
+  [ ! -L "$REGISTRY" ] \
+    || { routine_error "registry became a symlink: $REGISTRY"; exit 1; }
+else
+  exec 8< /dev/null \
+    || { routine_error 'could not open empty routine registry'; exit 1; }
+fi
 while IFS= read -r line || [ -n "$line" ]; do
   case "$line" in
     ''|'#'*) continue ;;
@@ -166,18 +287,42 @@ while IFS= read -r line || [ -n "$line" ]; do
   [ "$is_due" -eq 1 ] || continue
 
   fire_record="$id|$cadence|$TODAY"
+  routine_id_fired_this_scan "$id" && continue
   routine_fired "$fire_record" && continue
   DUE_IDS+=("$id")
   DUE_RECORDS+=("$fire_record")
   DUE_LINES+=("routine-due: $id | $owner | $action")
-done < "$REGISTRY"
+  if [ "$ROUTINE_DEFER_FIRE" -eq 1 ]; then
+    DUE_PENDING_LINES+=("$id|$cadence|$TODAY|$owner|$action")
+    NEW_PENDING=1
+  fi
+done <&8
+[ ! -L "$REGISTRY" ] \
+  || { routine_error "registry became a symlink: $REGISTRY"; exit 1; }
 
 [ "${#DUE_LINES[@]}" -gt 0 ] || exit 0
+
+if [ "$ROUTINE_DEFER_FIRE" -eq 1 ] && [ "$NEW_PENDING" -eq 1 ]; then
+  umask 077
+  PENDING_TMP=$(mktemp "$STATE/.routine-pending.XXXXXX") \
+    || { routine_error 'could not create pending routine state'; exit 1; }
+  for pending_line in "${DUE_PENDING_LINES[@]}"; do
+    printf '%s\n' "$pending_line" >> "$PENDING_TMP" \
+      || { routine_error 'could not write pending routine state'; exit 1; }
+  done
+  chmod 0600 "$PENDING_TMP" \
+    || { routine_error 'could not protect pending routine state'; exit 1; }
+  mv -f -- "$PENDING_TMP" "$PENDING" \
+    || { routine_error 'could not publish pending routine state'; exit 1; }
+  PENDING_TMP=
+fi
 
 for due_line in "${DUE_LINES[@]}"; do
   printf '%s\n' "$due_line" \
     || { routine_error 'could not emit due routine'; exit 1; }
 done
+
+[ "$ROUTINE_DEFER_FIRE" -eq 1 ] && exit 0
 
 umask 077
 ROUTINE_TMP=$(mktemp "$STATE/.routine-fired.XXXXXX") \
