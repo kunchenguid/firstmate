@@ -240,6 +240,7 @@ States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
 Use \`$PAUSED_VERB: {why}\` (distinct from \`blocked:\`) only when your domain is deliberately idling on a known external wait you expect to clear on its own; use \`blocked:\` when you are stuck and need firstmate to act.
 Use this only for material phase changes, a captain decision, a real blocker, a failure, or work ready for review.
 This is also how you return the answer to a marked from-firstmate request above.
+When a captain decision is needed, append \`needs-decision [key=<decision-slug>]: {summary of options}\` and stop.
 A marked request requires one correlated answer after the work; it does not require a separate receipt or start acknowledgement.
 Never append \`working:\` merely to acknowledge receipt or announce that a marked request has started.
 When a routed-work phase has a supervisor-actionable material change worth reporting under the rule above, give that reported phase a stable key.
@@ -329,7 +330,7 @@ The report is the only thing that survives, so anything worth keeping must be in
    treating it as a possible wedge. Use \`blocked:\` when you are stuck and need help.
 5. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
 6. If a decision belongs to a human (product choices, destructive actions),
-   append \`needs-decision: {summary of options}\` and stop. Firstmate will reply with the decision.
+   append \`needs-decision [key=<decision-slug>]: {summary of options}\` and stop. Firstmate will reply with the decision.
    A decision or blocker you opened stays open until a \`resolved\` line carrying its exact key lands; a later \`done:\` or \`working:\` line never closes it, even when the answer is what started that work.
    Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append \`resolved: {how it cleared}\` yourself (same \`[key=<slug>]\` if you opened it with one) as you resume.
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
@@ -384,8 +385,8 @@ EOF
     IFS= read -r -d '' DOD <<EOF || true
 # Definition of done
 Delivery contract: mode=no-mistakes
-The task is complete only when committed on your branch.
-When you believe it is complete, append \`done: {summary}\` to the status file and stop.
+Implementation completion is nonterminal and must be committed on your branch before validation.
+When implementation is committed, append \`working: implementation committed; awaiting no-mistakes\` to the status file and stop.
 Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
 
 You drive no-mistakes by responding to its gates, not by implementing fixes.
@@ -437,15 +438,16 @@ $RULE1
    would act on (setup done, bug reproduced, fix implemented, validation passed) and the
    needs-decision/blocked/paused/done/failed states. No step-by-step FYI progress lines;
    firstmate reads your pane for that.
-   A mid-task \`working:\` line (including setup complete) is nonterminal: do not end the
-   turn after it; continue the same stage until a defined \`done:\` gate under Definition of done.
+   A mid-task \`working:\` line (including setup complete) is nonterminal: do not treat it as
+   task completion. Unless Definition of done names it as an explicit handoff to Firstmate,
+   continue the same stage until a defined \`done:\` gate.
    Use \`$PAUSED_VERB: {why}\` - distinct from \`blocked:\` - ONLY when you are deliberately idling on a
    known external wait you expect to clear on its own (an upstream release, a rate-limit reset,
    a scheduled window): firstmate then leaves your idle pane alone and rechecks it on a long
    cadence instead of treating it as a possible wedge. Use \`blocked:\` when you are stuck and need help.
 5. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
 6. If a decision belongs above the implementation worker (product choices, destructive actions, ask-user findings),
-   append \`needs-decision: {summary of options}\` and stop. Firstmate will apply the configured authority and reply with the decision.
+   append \`needs-decision [key=<decision-slug>]: {summary of options}\` and stop. Firstmate will apply the configured authority and reply with the decision.
    A decision or blocker you opened stays open until a \`resolved\` line carrying its exact key lands; a later \`done:\` or \`working:\` line never closes it, even when the answer is what started that work.
    Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append \`resolved: {how it cleared}\` yourself (same \`[key=<slug>]\` if you opened it with one) as you resume.
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving

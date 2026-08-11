@@ -212,9 +212,38 @@ test_ship_modes_generate_clean_briefs() {
     assert_grep "{TASK}" "$brief" "$id: brief missing the {TASK} placeholder"
     assert_grep "mid-task \`working:\` line (including setup complete) is nonterminal" "$brief" \
       "$id: brief missing nonterminal working:/setup-complete gate protection"
+    assert_grep "Unless Definition of done names it as an explicit handoff to Firstmate" "$brief" \
+      "$id: brief did not distinguish a nonterminal handoff from task completion"
     assert_no_grep "EOF" "$brief" "$id: brief leaked a heredoc EOF marker (unterminated heredoc)"
   done
   pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"
+}
+
+test_ship_modes_have_one_terminal_done_instruction() {
+  local home id mode brief done_count
+  home="$TMP_ROOT/one-terminal-done-home"
+  mkdir -p "$home/data"
+
+  for id_mode in "brief-one-done-nm:no-mistakes" "brief-one-done-pr:direct-PR" "brief-one-done-local:local-only"; do
+    id=${id_mode%%:*}
+    mode=${id_mode##*:}
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" >/dev/null 2>&1 \
+      || fail "fm-brief.sh $id --mode $mode should scaffold"
+    brief="$home/data/$id/brief.md"
+    done_count=$(grep -c 'append `done:' "$brief" || true)
+    [ "$done_count" -eq 1 ] \
+      || fail "$mode brief must contain exactly one terminal done instruction, found $done_count"
+  done
+
+  brief="$home/data/brief-one-done-nm/brief.md"
+  assert_grep 'working: implementation committed; awaiting no-mistakes' "$brief" \
+    "no-mistakes brief did not keep implementation completion nonterminal"
+  assert_grep 'Implementation completion is nonterminal' "$brief" \
+    "no-mistakes brief still describes the local commit as task completion"
+  # shellcheck disable=SC2016 # Literal backticks and braces must remain unexpanded.
+  assert_no_grep 'append `done: {summary}`' "$brief" \
+    "no-mistakes brief still marks local implementation completion done"
+  pass "fm-brief.sh: each ship mode has exactly one terminal done instruction"
 }
 
 # A ship task's delivery mode is firstmate's per-task decision, so a missing or
@@ -714,6 +743,7 @@ test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
+test_ship_modes_have_one_terminal_done_instruction
 test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply

@@ -132,6 +132,43 @@ test_answer_send_closes_open_decision() {
   pass "fm-send --resolve-key: the answer send itself closes the open decision"
 }
 
+test_generated_brief_key_round_trip() {
+  local dir fb log home brief status_file open rc
+  dir="$TMP_ROOT/generated-brief"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"
+  home=$(setup_home generated-brief)
+  mkdir -p "$home/data"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" generated-brief firstmate --mode no-mistakes >/dev/null 2>&1 \
+    || fail "generated decision-key brief should scaffold"
+  brief="$home/data/generated-brief/brief.md"
+  # shellcheck disable=SC2016 # Literal backticks and braces must remain unexpanded.
+  assert_grep 'append `needs-decision [key=<decision-slug>]: {summary of options}`' "$brief" \
+    "generated brief did not put the decision key before the colon"
+  # shellcheck disable=SC2016 # Literal backticks and braces must remain unexpanded.
+  assert_no_grep 'append `needs-decision: {summary of options}`' "$brief" \
+    "generated brief retained the key-losing needs-decision form"
+
+  fm_write_meta "$home/state/generated-brief.meta" "window=sess:fm-generated-brief" "kind=ship"
+  status_file="$home/state/generated-brief.status"
+  printf 'needs-decision [key=manual-close]: choose north or south\n' > "$status_file"
+  open=$(bash -c '. "$1"; status_open_decisions "$2"' _ \
+    "$ROOT/bin/fm-classify-lib.sh" "$status_file")
+  assert_contains "$open" $'manual-close\tneeds-decision\tchoose north or south' \
+    "generated needs-decision form did not fold under its named key"
+  printf 'resolved [key=manual-close]: chose north\n' >> "$status_file"
+  open=$(bash -c '. "$1"; status_open_decisions "$2"' _ \
+    "$ROOT/bin/fm-classify-lib.sh" "$status_file")
+  [ -z "$open" ] || fail "matching resolved line did not close generated decision key: $open"
+
+  printf 'needs-decision [key=answer-close]: choose REST or RPC\n' >> "$status_file"
+  run_send "$fb" "$home" "$log" generated-brief --resolve-key answer-close "choose REST"; rc=$?
+  expect_code 0 "$rc" "fm-send --resolve-key should close a generated decision key"
+  open=$(bash -c '. "$1"; status_open_decisions "$2"' _ \
+    "$ROOT/bin/fm-classify-lib.sh" "$status_file")
+  [ -z "$open" ] || fail "fm-send --resolve-key left generated decision open: $open"
+  pass "generated brief decision keys round-trip through fold, resolved, and fm-send --resolve-key"
+}
+
 test_answer_starts_work_never_orphans() {
   local dir fb log home rc out
   dir="$TMP_ROOT/starts-work"; mkdir -p "$dir"
@@ -396,6 +433,7 @@ test_flag_misuse_refuses() {
 }
 
 test_answer_send_closes_open_decision
+test_generated_brief_key_round_trip
 test_answer_starts_work_never_orphans
 test_routine_steer_never_closes
 test_not_open_key_refuses_before_send
