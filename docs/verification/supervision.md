@@ -181,6 +181,7 @@ Each pass polled `state/<id>.busy-state` while a real turn ran.
 | Claude | 2.1.220 (Claude Code) | Hooks `UserPromptSubmit`, `Stop`, `StopFailure`, `SessionEnd` | `UserPromptSubmit` fired for the argv launch prompt and each steer, and `Stop` closed every completed turn. A mid-stream Escape interrupt fired no closing hook, which is why the firstmate-controlled clear exists. `StopFailure` and `SessionEnd` are wired from the four hook names present in the installed binary; only the abnormal paths they cover were not reproduced live. |
 | Codex | codex-cli 0.145.0 | None usable | See below; classifies `unknown codex-unverified`. |
 | Kimi (standalone) | not installed | None usable | No binary on `PATH`, so the gate stays closed and it classifies `unknown kimi-unverified`. |
+| Devin | 3000.4.16 | Native task-local `Stop` hook for notification only | `SessionStart`, `UserPromptSubmit`, and `Stop` fired from `.devin/hooks.v1.json`; Stop touched only the task's marker. No complete cancellation/session-end lifecycle or composer proof was recorded, so busy remains `unknown devin-unverified`. |
 | Grok | 0.2.112 | Isolated rendered-tail fallback | Retained unconverted; the approved audit could not credit a live structured-lifecycle run. |
 
 Codex was probed two ways, both refused:
@@ -202,6 +203,19 @@ tests/fm-busy-state.test.sh
 tests/fm-busy-adapter-wiring.test.sh
 tests/fm-crew-state.test.sh
 ```
+
+The Devin adapter evidence was refreshed on 2026-08-11 with Devin CLI 3000.4.16.
+
+```sh
+devin --version
+devin auth status
+tests/fm-busy-adapter-wiring.test.sh
+tests/fm-control.test.sh
+```
+
+Observed result: the authenticated CLI accepted the documented interactive launch flags, and task-local `SessionStart`, `UserPromptSubmit`, and `Stop` hooks emitted payloads carrying one stable `session_id` and per-prompt `prompt_id` values.
+The Stop hook was invoked twice only when the probe deliberately returned one blocking decision, with `stop_hook_active` changing from `false` to `true`.
+Firstmate's adapter does not block and writes no global Devin configuration, so it uses only the verified Stop notification path.
 
 ## Turn-end guard
 

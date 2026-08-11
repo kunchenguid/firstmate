@@ -30,12 +30,23 @@ esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
-  has-session|new-session|new-window|kill-window|send-keys) exit 0 ;;
+  has-session|new-session|new-window|kill-window) exit 0 ;;
+  send-keys)
+    previous=
+    for arg in "$@"; do
+      if [ "$previous" = -l ] && [ -n "${FM_FAKE_LITERALS:-}" ]; then
+        printf '%s\n' "$arg" >> "$FM_FAKE_LITERALS"
+        break
+      fi
+      previous=$arg
+    done
+    exit 0
+    ;;
 esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse pi opencode claude codex
+  fm_fake_exit0 "$fakebin" treehouse pi opencode claude codex devin
   printf '%s\n' "$fakebin"
 }
 
@@ -52,6 +63,7 @@ make_spawn_case() {  # <name> <harness> <id>
   touch "$home/state/.last-watcher-beat"
   mkdir -p "$home/data/$id"
   printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
+  : > "$case_dir/literals"
   printf '%s\n' "$case_dir|$home|$proj|$wt|$fakebin"
 }
 
@@ -66,6 +78,7 @@ run_spawn() {  # <home> <wt> <fakebin> <spawn-args...>
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
+    FM_FAKE_LITERALS="$home/../literals" \
     GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
     "$SPAWN" "$@" 2>&1
 }
@@ -256,6 +269,63 @@ run_claude_hook() {  # <settings.json> <hook-event>
   sh -c "$cmd"
 }
 
+run_devin_hook() {  # <hooks.json> <hook-event>
+  local cmd
+  cmd=$(jq -r ".[\"$2\"][0].hooks[0].command" "$1")
+  [ -n "$cmd" ] && [ "$cmd" != null ] || fail "no $2 hook command in $1"
+  sh -c "$cmd"
+}
+
+test_devin_stop_hook_is_task_local_and_busy_stays_unknown() {
+  local rec id=busy-devin-1 out state hooks launch brief
+  rec=$(make_spawn_case devin-lifecycle devin "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "devin spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  hooks="$WT_DIR/.devin/hooks.v1.json"
+  assert_present "$hooks" "devin spawn did not write its task-local hook file"
+  jq -e '.Stop[0].hooks[0].command' "$hooks" >/dev/null \
+    || fail "devin hook file lacks its native Stop command"
+  assert_absent "$state/$id.busy-gen" "devin must not arm incomplete busy-state wiring"
+  launch=$(cat "$CASE_DIR/literals")
+  brief=$(cd "$HOME_DIR/data/$id" && pwd -P)/brief.md
+  assert_contains "$launch" "--permission-mode dangerous" \
+    "devin launch did not select unattended permission mode"
+  assert_contains "$launch" "--respect-workspace-trust false" \
+    "devin launch did not suppress the interactive trust gate"
+  assert_contains "$launch" "--prompt-file '$brief'" \
+    "devin launch did not pass the absolute brief through --prompt-file"
+
+  rm -f "$state/$id.turn-ended"
+  run_devin_hook "$hooks" Stop || fail "Devin Stop hook command failed"
+  [ -f "$state/$id.turn-ended" ] || fail "Devin Stop did not touch the turn-end notification"
+  out=$(classify devin "$id" "$state")
+  [ "$out" = "unknown devin-unverified" ] \
+    || fail "Devin must retain its explicit unknown busy verdict, got '$out'"
+  pass "devin uses a task-local Stop hook for notification while semantic busy stays unknown"
+}
+
+test_devin_refuses_to_replace_project_hook_file() {
+  local rec id=busy-devin-owned out hooks original exclude
+  rec=$(make_spawn_case devin-owned devin "$id")
+  read_case_record "$rec"
+  mkdir -p "$WT_DIR/.devin"
+  hooks="$WT_DIR/.devin/hooks.v1.json"
+  exclude=$(git -C "$WT_DIR" rev-parse --git-path info/exclude) \
+    || fail "could not resolve the test worktree exclusion file"
+  printf '.devin/hooks.v1.json\n' >> "$exclude"
+  original='{"Stop":[{"hooks":[{"type":"command","command":"echo foreign"}]}]}'
+  printf '%s\n' "$original" > "$hooks"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 1 $? "devin spawn must refuse an existing project hook file"
+  assert_contains "$out" "will not replace project-owned Devin hooks" \
+    "devin hook ownership refusal was not explicit"
+  [ "$(cat "$hooks")" = "$original" ] \
+    || fail "devin spawn changed a project-owned hook file after refusing it"
+  pass "devin refuses to overwrite a project-owned hook file"
+}
+
 test_claude_hooks_semantic_lifecycle() {
   local rec id=busy-cl-1 out state settings
   rec=$(make_spawn_case claude-lifecycle claude "$id")
@@ -350,5 +420,7 @@ test_opencode_plugin_semantic_lifecycle
 test_claude_hooks_semantic_lifecycle
 test_claude_hooks_stale_incarnation_harmless
 test_codex_unverified_until_a_semantic_source_exists
+test_devin_stop_hook_is_task_local_and_busy_stays_unknown
+test_devin_refuses_to_replace_project_hook_file
 
 echo "all fm-busy-adapter-wiring tests passed"

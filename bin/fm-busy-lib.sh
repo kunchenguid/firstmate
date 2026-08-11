@@ -138,6 +138,15 @@ fm_busy_codex_semantic_source() {
   fm_busy_codex_appserver_observable || fm_busy_codex_hooks_verified
 }
 
+# Devin CLI's native UserPromptSubmit and Stop hooks were observed in a
+# task-local probe on 2026-08-11, but this adapter has not yet proved a
+# complete semantic lifecycle across cancellation and session shutdown.
+# Keep it unknown until that lifecycle is verified end to end; Stop is used
+# only for the watcher notification in fm-spawn.
+fm_busy_devin_verified() {
+  return 1
+}
+
 fm_busy_record_path() {  # <state-dir> <id>
   printf '%s/%s.busy-state' "$1" "$2"
 }
@@ -181,6 +190,10 @@ fm_busy_sources_for_harness() {  # <harness>
     codex*)
       fm_busy_codex_semantic_source || { printf ''; return 0; }
       adapter='codex-hook codex-appserver'
+      ;;
+    devin*)
+      fm_busy_devin_verified || { printf ''; return 0; }
+      adapter=devin-hook
       ;;
     opencode*) adapter=opencode-plugin ;;
     pi|pi-signed) adapter=pi-ext ;;
@@ -623,6 +636,12 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
     codex*)
       if ! fm_busy_codex_semantic_source; then
         printf 'unknown codex-unverified'
+        return 0
+      fi
+      ;;
+    devin*)
+      if ! fm_busy_devin_verified; then
+        printf 'unknown devin-unverified'
         return 0
       fi
       ;;

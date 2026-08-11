@@ -52,6 +52,7 @@ export PATH
 # and is killed on macOS arm64. The symlink name is what the kernel records as
 # the executable identity, which is exactly the signal under test.
 ln -s "$SLEEP_BIN" "$LAB/bin/claude-link"
+ln -s "$SLEEP_BIN" "$LAB/bin/devin"
 ln -s "$SLEEP_BIN" "$LAB/bin/pi"
 ln -s "$SLEEP_BIN" "$LAB/bin/notaharness"
 # muse's installed binary is muse-bin-<version>: the launcher execs it, so the
@@ -154,6 +155,11 @@ new_window agent "$LAB/bin/claude-link" 900
 wait_for_state "$SESSION:agent" alive \
   || fail "a running harness-named foreground process must classify alive"
 pass "tmux liveness: a harness-named foreground process classifies alive"
+
+new_window devin "$LAB/bin/devin" 900
+wait_for_state "$SESSION:devin" alive \
+  || fail "a running Devin foreground process must classify alive"
+pass "tmux liveness: a Devin foreground process classifies alive"
 
 # --- muse's version-suffixed binary name ------------------------------------
 # A muse crewmate pane misclassified here reads as a dead endpoint, so a healthy

@@ -35,7 +35,7 @@ mkdir -p "$TMP_ROOT"
 TMP_ROOT=$(cd "$TMP_ROOT" && pwd)
 trap 'rm -rf "$TMP_ROOT"' EXIT
 
-VERIFIED_HARNESSES="claude codex opencode pi pi-signed grok kimi muse"
+VERIFIED_HARNESSES="claude codex opencode pi pi-signed grok kimi muse devin"
 
 # The expectation table, written out independently of the implementation so a
 # silent change to either side shows up here. The fourth field is the composer
@@ -51,6 +51,7 @@ verified_adapter_contract() {  # <harness> -> exit command, interrupt key, repea
     grok) printf '/exit\tC-c\t1\t\n' ;;
     kimi) printf '/exit\tEscape\t1\t\n' ;;
     muse) printf '/exit\tEscape\t1\tC-u\n' ;;
+    devin) printf '/quit\tEscape\t1\t\n' ;;
     *) return 1 ;;
   esac
 }
