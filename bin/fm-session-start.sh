@@ -23,10 +23,16 @@
 # sweeps - is an opt-in FM_BOOTSTRAP_DETECT_ONLY=1 flag on fm-bootstrap.sh
 # itself (default unset/0 = unchanged behavior), not a fork.
 #
-# SESSION START EXECUTES NO PROBE: this script exports FM_COMMITMENT_NO_EXECUTE=1
-# over its whole subtree, so nothing it composes runs a commitment probe. See the
-# export below for the chain that makes it necessary and for why not executing is
-# not the same as accepting.
+# SESSION START RUNS NO DECISION-FILE `run:`. The commitment register's own typed
+# probes are a closed, audited, bounded set and they run here as usual, which is
+# how an entry whose commitment became real retires with no hand edit. A decision
+# file's `run:` is arbitrary text from a ruling author executed inside a task
+# worktree, and the open-decision fold would reach it - so the two calls below
+# that reach that fold, and only those two, carry
+# FM_COMMITMENT_NO_DECISION_RUN=1. It is deliberately not exported: this script's
+# subtree relaunches secondmates through bin/fm-spawn.sh, which scrubs no
+# environment, and a safety flag that escaped into a long-lived agent would wedge
+# closure there for that agent's whole life.
 #
 # ORDERING, and why LOCK now runs before BOOTSTRAP (the old AGENTS.md order
 # was bootstrap-then-lock):
@@ -296,22 +302,6 @@ if [ -z "${FM_SESSION_START_STAGE_FILE:-}" ]; then
 fi
 
 PRIMARY_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
-
-# SESSION START EXECUTES NO PROBE. This is a safety requirement, not a performance
-# one, and it is set here because here is the only place that covers the WHOLE
-# subtree: fm-bootstrap.sh relays the commitment register's open set, and
-# fm-admission.sh runs fm-fleet-snapshot.sh, which folds every task's open
-# decisions, which reaches the register's closure gate - which would otherwise run
-# arbitrary `run:` commands out of decision files inside task worktrees. Turning a
-# cheap detect-only digest into arbitrary execution on the critical path of every
-# session is what gets session start turned off, and then it protects nothing.
-#
-# Not executing is NOT accepting: bin/fm-commitment-register.sh answers
-# could-not-observe for every probe it did not run, so an unmet commitment stays
-# surfaced and a resolution whose probe was not run stays visibly unverified and
-# still open. A standalone bin/fm-bootstrap.sh run, a wake drain, or a human
-# running the register by hand sets none of this and probes normally.
-export FM_COMMITMENT_NO_EXECUTE=1
 
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
@@ -639,7 +629,10 @@ if [ "$READ_ONLY" -eq 1 ]; then
   GUARD_OUT=$(FM_GUARD_READ_ONLY=1 "$SCRIPT_DIR/fm-guard.sh" 2>&1)
   [ -n "$GUARD_OUT" ] && printf '%s\n' "$GUARD_OUT"
 else
-  DRAIN_OUT=$("$SCRIPT_DIR/fm-wake-drain.sh" 2>&1)
+  # One of the two calls that reach the open-decision fold; see SESSION START RUNS
+  # NO DECISION-FILE `run:` in the header. A probed key this drain does not
+  # evaluate stays listed as open with the reason, never silently closed.
+  DRAIN_OUT=$(FM_COMMITMENT_NO_DECISION_RUN=1 "$SCRIPT_DIR/fm-wake-drain.sh" 2>&1)
   if [ -n "$DRAIN_OUT" ]; then
     printf '%s\n' "$DRAIN_OUT"
   else
@@ -719,7 +712,9 @@ print_backlog_compact "$DATA/backlog.md" "data/backlog.md"
 # and pays only one cheap config read.
 if [ "$(fm_admission_state "$(fm_admission_config_file "$CONFIG")")" = active ]; then
   subsection "Fleet admission"
-  "$SCRIPT_DIR/fm-admission.sh" --brief || true
+  # The other call that reaches the open-decision fold, through
+  # bin/fm-fleet-snapshot.sh; see the header.
+  FM_COMMITMENT_NO_DECISION_RUN=1 "$SCRIPT_DIR/fm-admission.sh" --brief || true
   printf 'Re-examine load-held requests against this band; admit at most one at a time.\n'
 fi
 

@@ -194,10 +194,16 @@ That cache is an accelerator for an answer and never a substitute for one: a sto
 It is keyed on what the probe's answer depends on - the decision file's bytes, the task worktree, and that worktree's head - and deliberately not on the task's status stream, because the open-decision fold is driven by status appends, so keying on those would invalidate the entry precisely on the append where the cache was meant to help while saying nothing about the worktree the answer actually lives in.
 `bin/fm-teardown.sh` reaps a task's stored results with the task, and the directory is listed in the `AGENTS.md` state inventory.
 
-Session start executes no probe, and that is a safety requirement rather than a performance one.
-`bin/fm-session-start.sh` exports `FM_COMMITMENT_NO_EXECUTE=1` over its whole subtree, which covers the bootstrap relay of the open set and the `fm-admission.sh` to `fm-fleet-snapshot.sh` to open-decision-fold chain that reaches the closure gate, so no decision file's `run:` and no entry's owner command or named test executes on the critical path of a session.
-Not executing is not accepting: every probe that did not run answers could-not-observe, so an unmet commitment stays surfaced and a resolution whose probe was not run stays visibly unverified and still open.
-A standalone `bin/fm-bootstrap.sh` run, a wake drain, or a human running the register by hand probes normally, which is how an entry still retires on its probe with no hand edit; `--no-execute` requests the same mode explicitly.
+There are two kinds of probe here and they are not the same question, so they do not share a switch.
+The register's own typed probes are a closed set this repository owns, can audit, and bounds at 10 seconds, so running one is a cost decision.
+A decision file's `run:` is arbitrary text written by whoever authored a ruling and executed by `bash -c` inside a task worktree, so running one is a trust decision.
+
+Session start runs typed probes and never a decision file's `run:`, and that is a safety requirement rather than a performance one.
+`bin/fm-session-start.sh` sets `FM_COMMITMENT_NO_DECISION_RUN=1` on exactly the two calls that reach the open-decision fold - its wake drain, and its admission read through `fm-fleet-snapshot.sh` - and on nothing else.
+It is deliberately not exported over the whole subtree, because that subtree relaunches secondmates through `bin/fm-spawn.sh`, which scrubs no environment, and a safety flag that escaped into a long-lived agent would wedge closure there for that agent's whole life.
+The typed probes keep running at session start, which is how an entry whose commitment became real still retires there with no hand edit rather than printing forever.
+Not running is not accepting: a criterion whose `run:` was not executed answers could-not-observe and no stored verdict stands in for it, so the resolution stays visibly unverified and still open.
+A wake drain, a decision-hold read, or a fleet snapshot run outside session start evaluates decision probes normally, while session start's own wake drain and admission read are inside the guard and report those keys as still open; `--no-decision-run` requests the same mode explicitly.
 
 The register's own typed probes are bounded by `FM_COMMITMENT_PROBE_TIMEOUT` (default 10 seconds) and a decision file's `run:` by `FM_COMMITMENT_DECISION_PROBE_TIMEOUT` (default 60 seconds).
 The larger second bound is derived rather than picked, and `commitments/schema.json`'s `probe_bounds` carries the same two numbers and the same derivation: the 2026-08-10 ruling makes `cited-control` the default tier and its `run` is a test invocation, `tests/fm-commitment-register.test.sh` runs in 7.8 seconds here and a pinned `cited-control` probe invokes it twice, so one probe costs about 15.6 seconds and 60 is roughly 4x observed with headroom for machine load.

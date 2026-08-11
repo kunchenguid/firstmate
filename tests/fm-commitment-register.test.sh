@@ -1051,47 +1051,27 @@ run: true'
 
 # --- session start executes no probe -----------------------------------------
 #
-# A safety requirement, not a performance one. The chain that makes it necessary
-# is real: bin/fm-session-start.sh runs bin/fm-admission.sh, which runs
-# bin/fm-fleet-snapshot.sh, which folds every task's open decisions, which reaches
-# the closure gate - which would otherwise run arbitrary `run:` commands out of
-# decision files inside task worktrees, on the critical path of every session.
+# Read precisely: no probe of the kind that is a TRUST decision. Two kinds live
+# here and they are not the same question. The register's own typed probes are a
+# closed, audited, 10s-bounded set this repository owns, so running one is a cost.
+# A decision file's `run:` is arbitrary text from whoever authored a ruling,
+# executed by bash -c inside a task worktree, so running one is a trust decision -
+# and the chain that reaches it is real: bin/fm-session-start.sh runs
+# bin/fm-admission.sh, which runs bin/fm-fleet-snapshot.sh, which folds every
+# task's open decisions, which reaches the closure gate.
 #
-# This case drives the register end of that chain: with the mode on, nothing runs,
-# and - the half that matters more - nothing is ACCEPTED either. Each half is
-# paired with the control that shows the probe really would have run and really
-# would have closed the key. tests/fm-session-start.test.sh drives the whole
-# composed chain against the real script.
+# This case drives the register end of that chain: with the guard on, no `run:`
+# executes, and - the half that matters more - nothing is ACCEPTED either, neither
+# from a run nor from a stored verdict. Each half is paired with the control that
+# shows the probe really would have run and really would have closed the key.
+# tests/fm-session-start.test.sh drives the whole composed chain against the real
+# script, including that typed probes still run there.
 session_start_executes_no_probe() {
-  local dir home out rc ran wt marker
+  local dir home out rc wt marker
   dir=$(make_register noexec)
   home=$(make_home noexec)
-  ran="$TMP_ROOT/noexec/owner-ran"
   mkdir -p "$TMP_ROOT/noexec"
-  cat > "$TMP_ROOT/noexec/owner.sh" <<SH
-#!/usr/bin/env bash
-: > "$ran"
-printf 'enforced\n'
-SH
-  chmod +x "$TMP_ROOT/noexec/owner.sh"
-  write_owner_entry "$dir" entry-probe "$TMP_ROOT/noexec/owner.sh"
 
-  # The control first: without the mode, this probe runs and the entry retires.
-  out=$(run_reg "$dir" "$home" --open); rc=$?
-  expect_code 0 "$rc" "control: this probe passes, so the entry must retire when it is allowed to run"
-  [ -e "$ran" ] || fail "control: the probe did not run at all, so the case below would prove nothing"
-  [ -z "$out" ] || fail "control: a satisfied entry must retire silently, got: $out"
-
-  rm -f "$ran"
-  out=$(FM_COMMITMENT_NO_EXECUTE=1 run_reg "$dir" "$home" --open); rc=$?
-  [ ! -e "$ran" ] || fail "session start executed an entry probe"
-  expect_code 4 "$rc" "an unexecuted probe must take the fail-closed exit, never the all-clear the same probe earns when it runs"
-  assert_contains "$out" "COMMITMENT: entry-probe COULD-NOT-OBSERVE" \
-    "an entry whose probe was not run must still be surfaced, as could-not-observe"
-  assert_contains "$out" "session start executes no probe" \
-    "the surfaced line must say why it was not observed"
-
-  # The decision half, through the fold that the fleet snapshot actually calls.
   marker="$TMP_ROOT/noexec/decision-ran"
   wt=$(give_worktree "$home" noexectask)
   write_decision "$home" noexectask crit "tier: executable
@@ -1112,7 +1092,7 @@ run: : > $marker"
   rm -f "$marker"
   rm -rf "$home/state/commitment-probe-cache"
   out=$(
-    FM_HOME="$home" FM_COMMITMENT_NO_EXECUTE=1 bash -c '
+    FM_HOME="$home" FM_COMMITMENT_NO_DECISION_RUN=1 bash -c '
       . "$1/bin/fm-classify-lib.sh"
       status_open_decisions "$2"
     ' _ "$ROOT" "$home/state/noexectask.status" 2>/dev/null
@@ -1120,8 +1100,8 @@ run: : > $marker"
   [ ! -e "$marker" ] \
     || fail "session start ran a decision file's run: inside a task worktree"
   assert_contains "$out" "crit" \
-    "not executing must not mean accepting: the resolution must stay open, never be silently closed"
-  assert_contains "$out" "session start executes no probe" \
+    "not running must not mean accepting: the resolution must stay open, never be silently closed"
+  assert_contains "$out" "executes no decision-file run command" \
     "the still-open decision must say the probe was not run"
 
   # And no stored verdict stands in for one either: a cached PASS would close the
@@ -1129,14 +1109,88 @@ run: : > $marker"
   # of the same failure.
   run_reg "$dir" "$home" --closes noexectask crit >/dev/null 2>&1
   rm -f "$marker"
-  out=$(FM_COMMITMENT_NO_EXECUTE=1 run_reg "$dir" "$home" --closes noexectask crit); rc=$?
+  out=$(FM_COMMITMENT_NO_DECISION_RUN=1 run_reg "$dir" "$home" --closes noexectask crit); rc=$?
   expect_code 4 "$rc" "a stored verdict must not close a key session start did not observe"
   [ ! -e "$marker" ] || fail "the cache lookup ran the probe"
+  pass "session start executes no probe that is a trust decision, and not running is never accepting"
+}
 
-  # bin/fm-session-start.sh is what puts the whole composed chain in this mode.
-  grep -q '^export FM_COMMITMENT_NO_EXECUTE=1$' "$ROOT/bin/fm-session-start.sh" \
-    || fail "bin/fm-session-start.sh does not export the mode, so nothing it composes is in it"
-  pass "session start executes no probe, and not executing is never accepting"
+# The distinction the guard rests on, driven rather than asserted: the SAME
+# invocation must run the typed probe and refuse the decision-file `run:`. A guard
+# that answered both would be the over-broad fix, and one that answered neither
+# would be the original hazard.
+session_start_runs_typed_probes_and_never_a_decision_run() {
+  local dir home out rc typed_ran decision_ran wt
+  dir=$(make_register bothkinds)
+  home=$(make_home bothkinds)
+  mkdir -p "$TMP_ROOT/bothkinds"
+  typed_ran="$TMP_ROOT/bothkinds/typed-ran"
+  decision_ran="$TMP_ROOT/bothkinds/decision-ran"
+  cat > "$TMP_ROOT/bothkinds/owner.sh" <<SH
+#!/usr/bin/env bash
+: > "$typed_ran"
+printf 'enforced\n'
+SH
+  chmod +x "$TMP_ROOT/bothkinds/owner.sh"
+  write_owner_entry "$dir" typed-entry "$TMP_ROOT/bothkinds/owner.sh"
+
+  wt=$(give_worktree "$home" bothtask)
+  write_decision "$home" bothtask crit "tier: executable
+run: : > $decision_ran"
+
+  out=$(FM_COMMITMENT_NO_DECISION_RUN=1 run_reg "$dir" "$home" --json); rc=$?
+  [ -e "$typed_ran" ] \
+    || fail "the guard suppressed a typed probe; it is a closed audited set and a cost decision, not a trust one"
+  [ ! -e "$decision_ran" ] \
+    || fail "the guard let a ruling author's run: execute inside a task worktree"
+  [ "$(printf '%s' "$out" | jq -r '.entries[] | select(.id=="typed-entry") | .state')" = SATISFIED ] \
+    || fail "a typed probe that passes must still reach SATISFIED under the guard"
+  [ "$(printf '%s' "$out" | jq -r '.entries[] | select(.id=="decision:bothtask:crit") | .state')" = UNOBSERVED ] \
+    || fail "a decision-file criterion whose run: was not executed must read could-not-observe"
+  expect_code 4 "$rc" "an unrun decision criterion must still take the fail-closed exit"
+
+  # And the two are separable in the other direction too: without the guard the
+  # same call runs both, so the case above is about the guard rather than about a
+  # decision probe that never runs anywhere.
+  rm -f "$typed_ran" "$decision_ran"
+  rm -rf "$home/state/commitment-probe-cache"
+  run_reg "$dir" "$home" --json >/dev/null
+  [ -e "$typed_ran" ] && [ -e "$decision_ran" ] \
+    || fail "control: an unguarded call must run both kinds, or the separation above proves nothing"
+  pass "session start runs typed probes and never a decision-file run command"
+}
+
+# The captain's criterion, on the surface session start actually reads. A register
+# that keeps printing after its commitment became real is the hand-maintained list
+# it was built to replace, so the entry must go quiet under the guard too - and
+# the entry file must be byte-identical across the transition.
+typed_probe_pass_retires_the_entry_under_the_guard() {
+  local dir home out rc owner before after
+  dir=$(make_register retireguard)
+  home=$(make_home retireguard)
+  mkdir -p "$TMP_ROOT/retireguard"
+  owner="$TMP_ROOT/retireguard/owner.sh"
+  write_owner_entry "$dir" becomes-real "$owner"
+  before=$(cksum < "$dir/becomes-real.json")
+
+  out=$(FM_COMMITMENT_NO_DECISION_RUN=1 run_reg "$dir" "$home" --open); rc=$?
+  expect_code 3 "$rc" "an unmet commitment must not exit all-clear, guard or no guard"
+  assert_contains "$out" "COMMITMENT: becomes-real UNMET" \
+    "an unmet commitment must be surfaced under the guard, with the verdict its probe reached"
+
+  cat > "$owner" <<'SH'
+#!/usr/bin/env bash
+printf 'enforced\n'
+SH
+  chmod +x "$owner"
+
+  out=$(FM_COMMITMENT_NO_DECISION_RUN=1 run_reg "$dir" "$home" --open); rc=$?
+  expect_code 0 "$rc" "a satisfied commitment must exit all-clear under the guard"
+  [ -z "$out" ] || fail "a commitment that became real must stop printing, guard or no guard, got: $out"
+  after=$(cksum < "$dir/becomes-real.json")
+  [ "$before" = "$after" ] \
+    || fail "the entry retired only because it was edited; it must retire on the probe alone"
+  pass "an entry whose typed probe passes retires without a hand edit"
 }
 
 # --- the two probe bounds, and a timeout that says so ------------------------
@@ -1158,7 +1212,7 @@ decision_probe_bound_matches_the_documented_value() {
   # Both numbers are stated wherever either is, with the reason and the
   # derivation, so the next person changing one can see what they are trading.
   local header
-  header=$(sed -n '1,220p' "$REG")
+  header=$(awk 'NR == 1 { next } /^#/ { print; next } { exit }' "$REG")
   assert_contains "$header" "THE TWO PROBE BOUNDS" \
     "the script header must state both bounds, not just set them"
   assert_contains "$header" "runs in 7.8s" \
@@ -1322,6 +1376,36 @@ SH
   state=$(printf '%s' "$out" | jq -r '.entries[] | select(.id=="guard") | .state')
   [ "$state" = SATISFIED ] \
     || fail "control: a real call must satisfy the entry, or the case above proves nothing (got $state)"
+
+  # A declared name goes into that call-shaped regex, so one carrying a regex
+  # metacharacter is refused rather than matching more than it names. "." is the
+  # one that reads as an ordinary character: bash permits it in a function name,
+  # and interpolated it matches ANY character, so fm.verify would report SATISFIED
+  # on a caller of fm_verify.
+  cat > "$bin/fm-lonely-guard.sh" <<'SH'
+#!/usr/bin/env bash
+lonely_guard "$@"
+SH
+  cat > "$dir/guard.json" <<'JSON'
+{
+  "commitment_schema_version": 1,
+  "id": "guard",
+  "recorded": "the guard runs in production",
+  "authority": "tests/fm-commitment-register.test.sh",
+  "unmet_state": "RULED-NOT-ENFORCED",
+  "satisfied_when": "some runtime caller invokes it",
+  "assurance": "executable",
+  "probe": {"kind": "symbol_called", "symbol": "lonely.guard",
+            "defined_in": "bin/fm-guard-lib.sh"}
+}
+JSON
+  out=$(FM_COMMITMENT_DIR="$dir" FM_HOME="$home" FM_ROOT_OVERRIDE="$TMP_ROOT/mention/root" \
+    "$REG" --json)
+  state=$(printf '%s' "$out" | jq -r '.entries[] | select(.id=="guard") | .state')
+  [ "$state" = UNOBSERVED ] \
+    || fail "a symbol carrying a regex metacharacter matched a call to a different function and reported $state"
+  assert_contains "$out" "not a plain shell function name" \
+    "the refusal must say the declared name is not one a call can be told from a pattern"
   pass "a mention in a comment or a usage string is not a runtime caller"
 }
 
@@ -1341,6 +1425,8 @@ closes_reaches_a_verdict_without_jq
 cached_probe_result_never_reads_as_current
 cached_result_carries_observation_time_on_the_accept_path
 session_start_executes_no_probe
+session_start_runs_typed_probes_and_never_a_decision_run
+typed_probe_pass_retires_the_entry_under_the_guard
 decision_probe_bound_matches_the_documented_value
 timed_out_probe_is_reported_as_a_timeout
 malformed_unobserved_conditions_is_inadmissible

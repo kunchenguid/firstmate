@@ -119,27 +119,51 @@
 # then refuses on - a `run:` that mutates its worktree is a badly written probe,
 # and the cache bounds how often it runs but cannot make it harmless.
 #
-# SESSION START EXECUTES NO PROBE, and that is a safety requirement rather than a
-# performance one. Session start may report RECORDED state; it may never execute a
-# probe to find out. The chain is real and it is the whole chain, not just the
-# bootstrap relay: bin/fm-session-start.sh runs bin/fm-admission.sh, which runs
-# bin/fm-fleet-snapshot.sh, which calls status_open_decisions per task, which
-# reaches the closure gate, which would otherwise run arbitrary `run:` commands
-# inside task worktrees. Turning a cheap detect-only sweep into arbitrary
-# execution on the critical path of every session is the regression that gets
-# session start turned off, and then the register protects nothing.
+# TWO KINDS OF PROBE, AND THEY ARE NOT THE SAME QUESTION. Conflating them is what
+# produced both the original hazard and the first, over-broad attempt at fixing
+# it, so the distinction is written here rather than left to be re-derived:
 #
-# So bin/fm-session-start.sh exports FM_COMMITMENT_NO_EXECUTE=1 for that whole
-# subtree, and in that mode NO probe runs here - not a decision `run:`, not an
-# entry's owner command, not its named test - and no stored verdict is served in
-# place of one either, because serving a cached PASS would close a key on an
-# observation this session did not make. NOT EXECUTING IS NOT ACCEPTING: every
-# probe that did not run answers could-not-observe, so an entry stays surfaced and
-# a resolution stays visibly unverified and still open. Fail-open here would be
-# worse than the cost it avoids. A standalone bin/fm-bootstrap.sh run, a
-# wake drain, a decision-hold read, or a human running this command by hand sets
-# no such variable and probes normally, which is how an entry still retires on its
-# probe with no hand edit.
+#   The register's OWN TYPED probes are a CLOSED set defined in this file and
+#   named by kind in commitments/schema.json. This repository owns every one of
+#   them, can audit what each does, and bounds each at 10s. Running one is a COST
+#   decision, and the cost is small and known.
+#
+#   A decision file's `run:` is ARBITRARY TEXT written by whoever authored a
+#   ruling, executed by `bash -c` inside a task worktree. Running one is a TRUST
+#   decision, and no bound makes it a small one.
+#
+# They must not share a switch, because a switch that answers the trust question
+# would silence the cost one too.
+#
+# SESSION START RUNS TYPED PROBES AND NEVER A DECISION-FILE `run:`. The arbitrary-
+# execution chain is real and it is specific: bin/fm-session-start.sh runs
+# bin/fm-admission.sh, which runs bin/fm-fleet-snapshot.sh, which calls
+# status_open_decisions per task, which reaches the closure gate below - which
+# would otherwise `bash -c` a ruling author's text inside a task worktree on the
+# critical path of every session. That is the FOLD. It is not the --open relay:
+# --open never collects decision probes at all, deliberately, because the fold is
+# their surface. So bin/fm-session-start.sh sets
+# FM_COMMITMENT_NO_DECISION_RUN=1 on exactly the two calls that reach the fold -
+# its wake drain and its admission read - and on nothing else. The variable is
+# never exported over session start's whole subtree, because that subtree
+# relaunches secondmates through bin/fm-spawn.sh, which scrubs no environment: a
+# safety flag that escaped into a long-lived agent would silently wedge closure
+# there for that agent's whole life.
+#
+# The typed probes keep running at session start, which is what lets an entry
+# whose commitment became real retire there with no hand edit. Suppressing them
+# would leave every registered entry printing forever, and a session start that
+# cries wolf is one that gets turned off - the same end the safety rule exists to
+# prevent.
+#
+# NOT RUNNING IS NOT ACCEPTING. When a decision `run:` is not executed, no stored
+# verdict stands in for it either - serving a cached PASS would close a key on an
+# observation this session did not make - so the answer is could-not-observe, the
+# resolution stays visibly unverified, and the fold keeps showing the decision.
+# Fail-open here would be worse than the cost it avoids. A wake drain, a
+# decision-hold read, or a fleet snapshot run OUTSIDE session start sets no such
+# variable and evaluates decision probes normally; session start's own wake drain
+# and admission read are inside the guard and report those keys as still open.
 #
 # bin/fm-bootstrap.sh relays --open at every session start, so session
 # start cannot report a clean or quiet state while a registered commitment is open,
@@ -164,9 +188,11 @@
 #       no probe is registered for the key, when its probe passes, or when it is
 #       an attested criterion (whose acceptance is printed, never silent), and
 #       non-zero otherwise with one line of evidence.
-#   Any report may be combined with --no-execute, which is FM_COMMITMENT_NO_EXECUTE=1
-#       as a flag: run no probe at all and report every entry as could-not-observe
-#       rather than finding out. See SESSION START EXECUTES NO PROBE above.
+#   Any report may be combined with --no-decision-run, which is
+#       FM_COMMITMENT_NO_DECISION_RUN=1 as a flag: execute no decision file's
+#       `run:` and report every such criterion as could-not-observe rather than
+#       finding out. The register's own typed probes are unaffected. See TWO KINDS
+#       OF PROBE above.
 #   fm-commitment-register.sh --help
 #
 # Exit status is the verdict, so a caller that ignores stdout still stops safely:
@@ -192,10 +218,12 @@
 #   FM_HOME                       operational home to read (default: repo root)
 #   FM_COMMITMENT_DIR             read this tracked register instead (tests)
 #   FM_COMMITMENT_HOME_DIR        read this home overlay instead (tests)
-#   FM_COMMITMENT_NO_EXECUTE      1 to run no probe at all and report every entry
-#                                 as could-not-observe (default 0). Exported by
-#                                 bin/fm-session-start.sh; see SESSION START
-#                                 EXECUTES NO PROBE above.
+#   FM_COMMITMENT_NO_DECISION_RUN 1 to execute no decision file's `run:` and
+#                                 report every such criterion as could-not-observe
+#                                 (default 0). The register's own typed probes are
+#                                 unaffected. Set by bin/fm-session-start.sh on the
+#                                 two calls that reach the open-decision fold, and
+#                                 on nothing else; see TWO KINDS OF PROBE above.
 #   FM_COMMITMENT_PROBE_TIMEOUT   seconds bounding one register-entry probe
 #                                 (default 10)
 #   FM_COMMITMENT_DECISION_PROBE_TIMEOUT
@@ -285,17 +313,18 @@ TARGET=
 CLOSES_TASK=
 CLOSES_KEY=
 
-# No probe runs at all in this mode - see SESSION START EXECUTES NO PROBE above.
-# Anything other than a literal 1 leaves probing on, so a stray or empty value
-# cannot silently disarm the register's only way of answering anything.
-NO_EXECUTE=0
-[ "${FM_COMMITMENT_NO_EXECUTE:-0}" != 1 ] || NO_EXECUTE=1
+# No decision file's `run:` executes in this mode, and the register's own typed
+# probes are untouched by it - see TWO KINDS OF PROBE above. Anything other than a
+# literal 1 leaves execution on, so a stray or empty value cannot silently disarm
+# the only thing that answers a ruled criterion.
+NO_DECISION_RUN=0
+[ "${FM_COMMITMENT_NO_DECISION_RUN:-0}" != 1 ] || NO_DECISION_RUN=1
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --json) [ "$MODE" = human ] || die "--json, --open and --closes are different reports"; MODE=json ;;
     --open) [ "$MODE" = human ] || die "--json, --open and --closes are different reports"; MODE=open ;;
-    --no-execute) NO_EXECUTE=1 ;;
+    --no-decision-run) NO_DECISION_RUN=1 ;;
     --closes)
       [ "$MODE" = human ] || die "--json, --open and --closes are different reports"
       MODE=closes
@@ -389,11 +418,12 @@ probe_timed_out() {  # <what> <seconds>
     "TIMEOUT: $1 was stopped at its ${2}s bound rather than answering, so this is could-not-observe and cannot pass - raise the bound or make the probe finish inside it, because nothing closes until it does"
 }
 
-# The answer for every probe in no-execute mode. Could-not-observe, never a pass
-# and never an acceptance: not executing must not mean accepting.
+# The answer for a decision file's `run:` this caller may not execute.
+# Could-not-observe, never a pass and never an acceptance: not running must not
+# mean accepting.
 probe_not_executed() {  # <what>
   probe_answer NO_VERIFIER_RAN verifier_unavailable \
-    "NOT RUN: session start executes no probe, so $1 was not executed and this reports the RECORDED state only, never an observed one"
+    "NOT RUN: this caller executes no decision-file run command, so $1 was not executed and the criterion stays unverified rather than accepted"
 }
 
 # Does every harness firstmate can launch compose a session whose permission
@@ -589,9 +619,12 @@ probe_symbol_called() {  # <probe-json>
     return 0
   fi
   # The symbol goes into a regular expression below, so a name carrying regex
-  # syntax is refused rather than silently matching more than it names.
+  # syntax is refused rather than silently matching more than it names. "." is
+  # refused with the rest: bash permits it in a function name, and interpolated it
+  # matches any character, so a declared fm.verify would report SATISFIED on a
+  # caller of fm_verify - the over-match this check exists to prevent.
   case "$symbol" in
-    *[!A-Za-z0-9_:.-]*)
+    *[!A-Za-z0-9_-]*)
       probe_answer NO_VERIFIER_RAN usage_error \
         "\"$symbol\" is not a plain shell function name, so a call to it cannot be told from a pattern matching one"
       return 0
@@ -686,16 +719,13 @@ probe_work_owned() {  # <probe-json>
     "nothing owns $id: no live task record, no local branch fm/$id, and no in-flight or done backlog record"
 }
 
+# Typed probes are the closed, audited, 10s-bounded set described under TWO KINDS
+# OF PROBE, so they carry no execution guard: running one is a cost this file can
+# account for, and refusing to run them is what would leave a satisfied entry
+# printing forever.
 run_probe() {  # <probe-json>
   local kind
   kind=$(printf '%s' "$1" | jq -r '.kind // ""')
-  # One gate for every kind, before any dispatch. A per-kind opt-out would make
-  # "session start executes no probe" a property of each probe's author rather
-  # than of this file, and the next kind added would have to remember it.
-  if [ "$NO_EXECUTE" -eq 1 ]; then
-    probe_not_executed "the ${kind:-unknown} probe"
-    return 0
-  fi
   case "$kind" in
     launch_permission_enforced) probe_launch_permission_enforced "$1" ;;
     command_answers) probe_command_answers "$1" ;;
@@ -917,11 +947,12 @@ run_decision_probe() {  # <task> <key>
       "no timeout tool is available to bound the probe for $key, so it was not run"
     return 0
   fi
-  # No execution, and no stored verdict standing in for one either. Serving a
-  # cached PASS here would let session start CLOSE a key on an observation it did
-  # not make, which is the accepting half of the same failure, so the honest
-  # answer is could-not-observe and the closure gate keeps the decision open.
-  if [ "$NO_EXECUTE" -eq 1 ]; then
+  # The trust decision, and the only guard in this file. No execution, and no
+  # stored verdict standing in for one either: serving a cached PASS would CLOSE a
+  # key on an observation this caller did not make, which is the accepting half of
+  # the same failure, so the honest answer is could-not-observe and the closure
+  # gate keeps the decision open.
+  if [ "$NO_DECISION_RUN" -eq 1 ]; then
     probe_not_executed "the probe for $key"
     return 0
   fi

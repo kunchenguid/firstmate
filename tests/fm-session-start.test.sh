@@ -1351,18 +1351,20 @@ EOF
 # --- session start executes no probe -----------------------------------------
 #
 # A safety requirement, not a performance one, and it is a property of the WHOLE
-# composed chain rather than of any one script: session start relays the
-# commitment register's open set through fm-bootstrap.sh, and its wake drain folds
-# every task's open decisions through fm-classify-lib.sh, which reaches the
-# register's closure gate - which would otherwise run arbitrary `run:` commands out
-# of decision files inside task worktrees, on the critical path of every session.
-# Turning a cheap detect-only digest into arbitrary execution is the regression
-# that gets session start turned off, and then the register protects nothing.
+# composed chain rather than of any one script: session start's wake drain folds
+# every task's open decisions through fm-classify-lib.sh, and its admission read
+# does the same through fm-fleet-snapshot.sh, and both reach the commitment
+# register's closure gate - which would otherwise `bash -c` a ruling author's
+# `run:` text inside a task worktree on the critical path of every session.
 #
-# So this case runs the REAL script over a home where every probe would leave a
-# mark, and requires that no mark appears - paired with the control that shows the
-# same probes really do run, and really do go quiet, when something other than
-# session start asks.
+# The guard is scoped to exactly that hazard, and this case pins both edges of the
+# scope against the real script. A decision file's `run:` must leave no mark. A
+# typed entry probe - a closed, audited, bounded kind this repository owns - must
+# still run, because suppressing those would leave every registered entry printing
+# forever, and because bin/fm-bootstrap.sh is what relays them and bin/fm-spawn.sh
+# relaunches secondmates from that same bootstrap: a typed probe that did not run
+# here is also the signature of the flag having been exported into everything
+# session start spawns.
 test_session_start_runs_no_commitment_probe() {
   local rec root home fakebin out register owner entry_ran decision_ran wt
   rec=$(new_world noprobe)
@@ -1426,17 +1428,19 @@ JSON
   rm -rf "$home/state/commitment-probe-cache"
   out=$(FM_COMMITMENT_DIR="$register" run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
 
-  [ ! -e "$entry_ran" ] \
-    || fail "session start executed a commitment entry's declared owner command"
   [ ! -e "$decision_ran" ] \
     || fail "session start executed a decision file's run: inside a task worktree"
+  [ -e "$entry_ran" ] \
+    || fail "session start suppressed a typed probe; the guard is scoped to decision-file run commands, and a flag reaching bootstrap is a flag reaching everything it spawns"
 
-  # Not executing is not accepting: the entry is still surfaced, and it says why.
-  assert_contains "$out" "COMMITMENT: leaves-a-mark COULD-NOT-OBSERVE" \
-    "an entry whose probe session start declined to run must still be surfaced"
-  assert_contains "$out" "session start executes no probe" \
-    "the surfaced line must say why the commitment was not observed"
-  pass "session start executes no probe, and reports the recorded state instead"
+  # The typed probe passed, so its entry retires rather than printing.
+  assert_not_contains "$out" "COMMITMENT: leaves-a-mark" \
+    "a commitment whose typed probe passes must stop printing at session start, with no hand edit"
+
+  # Not running is not accepting: the probed key stays open, carrying the reason.
+  assert_contains "$out" "executes no decision-file run command" \
+    "a resolution whose run: session start declined to execute must stay visibly unverified, never silently closed"
+  pass "session start runs typed probes and never a decision-file run command"
 }
 
 # --- deferred network stage -------------------------------------------------
