@@ -235,16 +235,20 @@ test_omp_identity_requires_canonical_executable_evidence() {
   fakebin=$(fm_fakebin "$dir")
   printf '#!/bin/sh\nexit 0\n' > "$fakebin/omp"
   chmod +x "$fakebin/omp"
+  printf '#!/bin/sh\nexit 0\n' > "$fakebin/bun"
+  chmod +x "$fakebin/bun"
   got=$(FM_TEST_OMP_PATH="$fakebin/omp" lib_eval "$fakebin" 'fm_harness_process_identity renamed "omp --resume"')
   [ "$got" = other ] || fail "a renamed process with exec-a style OMP args was accepted as '$got'"
   got=$(FM_TEST_OMP_PATH="$fakebin/omp" lib_eval "$fakebin" 'fm_harness_process_identity omp "omp --resume"')
   [ "$got" = other ] || fail "a bare exec-a OMP identity was accepted as '$got'"
   got=$(FM_TEST_OMP_PATH="$fakebin/omp" lib_eval "$fakebin" 'fm_harness_process_identity omp "$FM_TEST_OMP_PATH --resume"')
   [ "$got" = other ] || fail "an exec-a canonical OMP path was accepted as '$got'"
-  got=$(FM_TEST_OMP_PATH="$fakebin/omp" lib_eval "$fakebin" 'fm_harness_process_identity "$FM_TEST_OMP_PATH" "$FM_TEST_OMP_PATH --resume"')
+  got=$(FM_TEST_OMP_PATH="$fakebin/omp" lib_eval "$fakebin" 'fm_harness_process_identity omp "$FM_TEST_OMP_PATH --resume" "$FM_TEST_OMP_PATH"')
   [ "$got" = omp ] || fail "canonical OMP executable evidence was not accepted as '$got'"
-  got=$(FM_TEST_OMP_PATH="$fakebin/omp" lib_eval "$fakebin" 'fm_harness_process_identity bun "bun $FM_TEST_OMP_PATH --resume"')
+  got=$(FM_TEST_OMP_PATH="$fakebin/omp" FM_TEST_BUN_PATH="$fakebin/bun" lib_eval "$fakebin" 'fm_harness_process_identity bun "bun $FM_TEST_OMP_PATH --resume" "$FM_TEST_BUN_PATH" "$FM_TEST_OMP_PATH"')
   [ "$got" = omp ] || fail "canonical Bun OMP script evidence was not accepted as '$got'"
+  got=$(FM_TEST_OMP_PATH="$fakebin/omp" lib_eval "$fakebin" 'fm_harness_omp_script_from_args "bun run $FM_TEST_OMP_PATH --resume"')
+  [ "$got" = "$fakebin/omp" ] || fail "Bun run syntax extracted script '$got', expected '$fakebin/omp'"
   pass "session-lock: OMP identity requires executable or Bun script evidence"
 }
 

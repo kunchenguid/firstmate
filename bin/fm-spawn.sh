@@ -1248,7 +1248,17 @@ case "$ARG3" in
 esac
 
 raw_launch_uses_omp_fallback() {
-  [ "$HARNESS" = raw-omp ]
+  local word first= canonical
+  [ "$HARNESS" = raw-omp ] || return 1
+  for word in $LAUNCH; do
+    case "$word" in
+      [A-Za-z_]*=*) continue ;;
+      *) first=$word; break ;;
+    esac
+  done
+  [ -n "$first" ] || return 1
+  canonical=$(command -v omp 2>/dev/null) || return 1
+  [ "$first" = omp ] || [ "$first" = "$canonical" ]
 }
 
 raw_launch_uses_omp() {

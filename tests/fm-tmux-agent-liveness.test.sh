@@ -24,7 +24,7 @@ pass() { printf 'ok - %s\n' "$1"; }
 
 command -v tmux >/dev/null 2>&1 || { echo "skip: tmux not found"; exit 0; }
 SLEEP_BIN=$(command -v sleep) || { echo "skip: sleep not found"; exit 0; }
-SH_BIN=$(command -v sh) || { echo "skip: sh not found"; exit 0; }
+BASH_BIN=$(command -v bash) || { echo "skip: bash not found"; exit 0; }
 
 REAL_TMUX=$(command -v tmux)
 SOCKET="fm-liveness-$$"
@@ -170,7 +170,7 @@ pass "tmux liveness: an exact OMP process classifies alive"
 # merely contains "omp" is a different program.
 
 mkdir -p "$LAB/bunroot" "$LAB/decoyroot/omp"
-ln -s "$SH_BIN" "$LAB/bin/bun"
+ln -s "$BASH_BIN" "$LAB/bin/bun"
 cat > "$LAB/bunroot/omp" <<SH
 #!/bin/sh
 printf 'Working…\n'

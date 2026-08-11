@@ -2836,6 +2836,10 @@ fm_backend_herdr_composer_identity() {  # <target> -> "<agent>\t<status>"
   fm_backend_herdr_agent_identity_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE"
 }
 
+fm_backend_herdr_process_executable() {  # <pid>
+  fm_harness_process_executable "$1" "${FM_HERDR_PS_BIN:-ps}"
+}
+
 fm_backend_herdr_omp_process_tree_state() {  # <session> <pane> -> omp|other|unknown
   case "$(fm_backend_herdr_process_identity "$1" "$2")" in
     omp) printf 'omp' ;;
@@ -2846,7 +2850,7 @@ fm_backend_herdr_omp_process_tree_state() {  # <session> <pane> -> omp|other|unk
 
 fm_backend_herdr_raw_omp_process_state() {  # <session> <pane> [raw-owner] -> harness|unknown
   local session=$1 pane=$2 raw_owner=${3:-${FM_RAW_LAUNCH_OWNER:-}}
-  local info shell_pid foreground_pids rows name args identity current_identity= shell_seen=0 omp_seen=0
+  local info shell_pid foreground_pids rows pid name args provider_executable script executable identity current_identity= shell_seen=0 omp_seen=0
   info=$(fm_backend_herdr_cli "$session" pane process-info --pane "$pane" 2>/dev/null) || {
     printf 'unknown'
     return 0
@@ -2862,6 +2866,7 @@ fm_backend_herdr_raw_omp_process_state() {  # <session> <pane> [raw-owner] -> ha
       and (.name | type) == "string" and (.name | length) > 0
       and ((.argv0 // .argv[0]) | type) == "string"
       and ((.argv0 // .argv[0]) | length) > 0
+      and ((.executable // .exe // .path // "") | type) == "string"
     )
   ' >/dev/null 2>&1 || {
     printf 'unknown'
@@ -2880,10 +2885,16 @@ fm_backend_herdr_raw_omp_process_state() {  # <session> <pane> [raw-owner] -> ha
   rows=$(printf '%s' "$info" | jq -r '
     .result.process_info.foreground_processes[]
     | [
+        .pid,
         .name,
         (if ((.argv | type) == "array" and (.argv | length) > 0)
          then (.argv | join(" "))
          else (.argv0 // .argv[0])
+         end),
+        (.executable // .exe // .path // ""),
+        (if ((.argv | type) == "array" and (.argv | length) > 1)
+         then .argv[1]
+         else ""
          end)
       ]
     | @tsv
@@ -2895,8 +2906,16 @@ fm_backend_herdr_raw_omp_process_state() {  # <session> <pane> [raw-owner] -> ha
     printf 'unknown'
     return 0
   }
-  while IFS=$'\t' read -r name args; do
-    identity=$(unset FM_HARNESS_UNVERIFIED; fm_harness_process_identity "$name" "$args")
+  while IFS=$'\t' read -r pid name args provider_executable script; do
+    executable=
+    case "$provider_executable" in
+      */*) fm_harness_omp_resolve_path "$provider_executable" >/dev/null 2>&1 && executable=$provider_executable ;;
+    esac
+    [ -n "$executable" ] || executable=$(fm_backend_herdr_process_executable "$pid" 2>/dev/null || true)
+    if [ -n "$executable" ] && [ "$(basename -- "$executable")" = bun ]; then
+      script=$(fm_harness_omp_script_from_args "$args" 2>/dev/null || true)
+    fi
+    identity=$(unset FM_HARNESS_UNVERIFIED; fm_harness_process_identity "$name" "$args" "$executable" "$script")
     case "$identity" in
       omp) omp_seen=1 ;;
       shell) shell_seen=1 ;;
@@ -2975,7 +2994,7 @@ fm_backend_herdr_omp_process_identity() {  # <session> <pane> [any] -> omp|other
 }
 
 fm_backend_herdr_process_identity() {  # <session> <pane> -> harness|shell|other|unknown
-  local session=$1 pane=$2 info rows name args identity current_identity= shell_seen=0 omp_seen=0 other_seen=0
+  local session=$1 pane=$2 info rows pid name args provider_executable script executable identity current_identity= shell_seen=0 omp_seen=0 other_seen=0
   info=$(fm_backend_herdr_cli "$session" pane process-info --pane "$pane" 2>/dev/null) || {
     printf 'unknown'
     return 0
@@ -2991,6 +3010,7 @@ fm_backend_herdr_process_identity() {  # <session> <pane> -> harness|shell|other
       and (.name | type) == "string" and (.name | length) > 0
       and ((.argv0 // .argv[0]) | type) == "string"
       and ((.argv0 // .argv[0]) | length) > 0
+      and ((.executable // .exe // .path // "") | type) == "string"
     )
   ' >/dev/null 2>&1 || {
     printf 'unknown'
@@ -2999,10 +3019,16 @@ fm_backend_herdr_process_identity() {  # <session> <pane> -> harness|shell|other
   rows=$(printf '%s' "$info" | jq -r '
     .result.process_info.foreground_processes[]
     | [
+        .pid,
         .name,
         (if ((.argv | type) == "array" and (.argv | length) > 0)
          then (.argv | join(" "))
          else (.argv0 // .argv[0])
+         end),
+        (.executable // .exe // .path // ""),
+        (if ((.argv | type) == "array" and (.argv | length) > 1)
+         then .argv[1]
+         else ""
          end)
       ]
     | @tsv
@@ -3010,8 +3036,16 @@ fm_backend_herdr_process_identity() {  # <session> <pane> -> harness|shell|other
     printf 'unknown'
     return 0
   }
-  while IFS=$'\t' read -r name args; do
-    identity=$(fm_harness_process_identity "$name" "$args")
+  while IFS=$'\t' read -r pid name args provider_executable script; do
+    executable=
+    case "$provider_executable" in
+      */*) fm_harness_omp_resolve_path "$provider_executable" >/dev/null 2>&1 && executable=$provider_executable ;;
+    esac
+    [ -n "$executable" ] || executable=$(fm_backend_herdr_process_executable "$pid" 2>/dev/null || true)
+    if [ -n "$executable" ] && [ "$(basename -- "$executable")" = bun ]; then
+      script=$(fm_harness_omp_script_from_args "$args" 2>/dev/null || true)
+    fi
+    identity=$(fm_harness_process_identity "$name" "$args" "$executable" "$script")
     case "$identity" in
       omp)
         omp_seen=1

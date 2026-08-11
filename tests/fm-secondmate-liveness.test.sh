@@ -46,8 +46,14 @@ TMP_ROOT=$(fm_test_tmproot fm-secondmate-liveness)
 # #{pane_current_command} display-message query answers with the fixed value;
 # every other subcommand is a silent no-op success.
 make_probe_tmux() {
-  local dir=$1 comm=$2 window=${3:-win} fakebin
+  local dir=$1 comm=$2 window=${3:-win} fakebin process_comm
+  process_comm=$comm
   fakebin=$(fm_fakebin "$dir")
+  if [ "$comm" = omp ]; then
+    process_comm="$fakebin/omp"
+    printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$fakebin/omp"
+    chmod +x "$fakebin/omp"
+  fi
   cat > "$fakebin/tmux" <<SH
 #!/usr/bin/env bash
 set -u
@@ -71,9 +77,9 @@ SH
 set -u
 case "\$*" in
   "-axo pid=,ppid=") printf '1 0\\n4242 1\\n' ;;
-  *"-o pid=,pgid=,tpgid=,comm="*) printf '4242 4242 4242 %s\\n' '$comm' ;;
-  *"-o comm="*) printf '%s\\n' '$comm' ;;
-  *"-o args="*) printf '%s\\n' '$comm' ;;
+  *"-o pid=,pgid=,tpgid=,comm="*) printf '4242 4242 4242 %s\\n' '$process_comm' ;;
+  *"-o comm="*) printf '%s\\n' '$process_comm' ;;
+  *"-o args="*) printf '%s\\n' '$process_comm' ;;
   *) exit 1 ;;
 esac
 SH
@@ -82,9 +88,10 @@ SH
 }
 
 make_tree_probe_tmux() {
-  local dir=$1 root_comm=$2 fakebin child_script
+  local dir=$1 root_comm=$2 fakebin child_script child_executable
   fakebin=$(fm_fakebin "$dir")
   child_script="$fakebin/omp"
+  child_executable="$fakebin/bun"
   cat > "$fakebin/tmux" <<SH
 #!/usr/bin/env bash
 set -u
@@ -114,10 +121,10 @@ set -u
     ;;
   *"-o pid=,pgid=,tpgid=,comm="*) printf '4242 4242 4242 %s\\n' '$root_comm' ;;
   *"-o comm="*)
-    case "\$*" in *"-p 6161 "*|*"-p 6161"*) printf 'bun\\n' ;; *) printf '%s\\n' '$root_comm' ;; esac
+    case "\$*" in *"-p 6161 "*|*"-p 6161"*) printf '%s\\n' '$child_executable' ;; *) printf '%s\\n' '$root_comm' ;; esac
     ;;
   *"-o args="*)
-    case "\$*" in *"-p 6161 "*|*"-p 6161"*) printf 'bun %s\\n' '$child_script' ;; *) printf '%s\\n' '$root_comm' ;; esac
+    case "\$*" in *"-p 6161 "*|*"-p 6161"*) printf '%s %s\\n' '$child_executable' '$child_script' ;; *) printf '%s\\n' '$root_comm' ;; esac
     ;;
   *) exit 1 ;;
 esac
@@ -125,6 +132,8 @@ SH
   chmod +x "$fakebin/ps"
   printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$fakebin/omp"
   chmod +x "$fakebin/omp"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$fakebin/bun"
+  chmod +x "$fakebin/bun"
   printf '%s\n' "$fakebin"
 }
 

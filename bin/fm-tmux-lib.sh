@@ -152,7 +152,7 @@ fm_tmux_composer_caps() {
 # Prints "pi<TAB>idle" or "pi<TAB>working"; exits 1 when the pane is not a
 # live pi.
 fm_tmux_composer_identity() {  # <target>
-  local target=$1 tty pgid tpgid comm pid args identity pi_seen=0 omp_seen=0 status
+  local target=$1 tty pgid tpgid comm pid args executable script identity pi_seen=0 omp_seen=0 status
   tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || tty=
   case "$tty" in
     /dev/*)
@@ -163,7 +163,12 @@ fm_tmux_composer_identity() {  # <target>
           pi|pi-signed|pi-launcher|Pi) pi_seen=1 ;;
           *)
             args=$(LC_ALL=C "${FM_TMUX_PS_BIN:-ps}" -p "$pid" -o args= 2>/dev/null) || args=
-            identity=$(fm_harness_process_identity "$comm" "$args")
+            executable=$(fm_harness_process_executable "$pid" "${FM_TMUX_PS_BIN:-ps}" 2>/dev/null || true)
+            script=
+            if [ -n "$executable" ] && [ "$(basename -- "$executable")" = bun ]; then
+              script=$(fm_harness_omp_script_from_args "$args" 2>/dev/null || true)
+            fi
+            identity=$(fm_harness_process_identity "$comm" "$args" "$executable" "$script")
             [ "$identity" = omp ] && omp_seen=1
             ;;
         esac
@@ -177,7 +182,7 @@ EOF
     case "${comm##*/}" in
       pi|pi-signed|pi-launcher) pi_seen=1 ;;
       *)
-        identity=$(fm_harness_process_identity "$comm" "$comm")
+        identity=$(fm_harness_process_identity "$comm" "$comm" "" "")
         [ "$identity" = omp ] && omp_seen=1
         ;;
     esac

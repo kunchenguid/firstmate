@@ -31,11 +31,16 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 . "$SCRIPT_DIR/fm-session-lock-lib.sh"
 
 fm_harness_omp_ancestry_matches() {
-  local pid=$$ comm args
+  local pid=$$ comm args executable script
   for _ in 1 2 3 4 5 6 7 8; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
     args=$(ps -o args= -p "$pid" 2>/dev/null)
-    fm_harness_omp_process_matches "$comm" "$args" && return 0
+    executable=$(fm_harness_process_executable "$pid" ps 2>/dev/null || true)
+    script=
+    if [ -n "$executable" ] && [ "$(basename -- "$executable")" = bun ]; then
+      script=$(fm_harness_omp_script_from_args "$args" 2>/dev/null || true)
+    fi
+    fm_harness_omp_process_matches "$comm" "$args" "$executable" "$script" && return 0
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
     if [ -z "$pid" ] || [ "$pid" -le 1 ]; then
       break
@@ -105,7 +110,7 @@ detect_own() {
   # without verifying it reaches children AND that it cannot survive in a
   # multiplexer's stored environment, which is the precedence hazard above.
   # Layer 2: walk the parent chain and match the command name.
-  local pid=$$ comm args argv0 script
+  local pid=$$ comm args argv0 executable script
   for _ in 1 2 3 4 5 6 7 8; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
     argv0=$(fm_cursor_argv0_for_pid "$pid" "$comm" 2>/dev/null || true)
@@ -129,7 +134,12 @@ detect_own() {
       pi) echo pi; return ;;
       omp|bun)
         args=$(ps -o args= -p "$pid" 2>/dev/null)
-        fm_harness_omp_process_matches "$comm" "$args" && { echo omp; return; } ;;
+        executable=$(fm_harness_process_executable "$pid" ps 2>/dev/null || true)
+        script=
+        if [ -n "$executable" ] && [ "$(basename -- "$executable")" = bun ]; then
+          script=$(fm_harness_omp_script_from_args "$args" 2>/dev/null || true)
+        fi
+        fm_harness_omp_process_matches "$comm" "$args" "$executable" "$script" && { echo omp; return; } ;;
       node*|python*)
         # Bare interpreter: match the harness name in its script path.
         args=$(ps -o args= -p "$pid" 2>/dev/null)

@@ -3686,8 +3686,18 @@ omp_lone_shell_process_info() {  # <pid>
 }
 
 herdr_bun_process_info() {
-  local script=$1 pane=${2:-w1:p2}
-  printf '%s' '{"result":{"type":"pane_process_info","process_info":{"pane_id":"'"$pane"'","shell_pid":4242,"foreground_process_group_id":5150,"foreground_processes":[{"pid":5150,"name":"bun","argv0":"bun","argv":["bun","'"$script"'"]}]}}}'
+  local script=$1 pane=${2:-w1:p2} executable
+  executable="${script%/*}/bun"
+  if [ ! -x "$executable" ]; then
+    printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$executable"
+    chmod +x "$executable"
+  fi
+  printf '%s' '{"result":{"type":"pane_process_info","process_info":{"pane_id":"'"$pane"'","shell_pid":4242,"foreground_process_group_id":5150,"foreground_processes":[{"pid":5150,"name":"bun","argv0":"bun","executable":"'"$executable"'","argv":["bun","'"$script"'"]}]}}}'
+}
+
+herdr_direct_omp_process_info() {
+  local executable=$1 script=$2 pane=${3:-w1:p2}
+  printf '%s' '{"result":{"type":"pane_process_info","process_info":{"pane_id":"'"$pane"'","shell_pid":4242,"foreground_process_group_id":5150,"foreground_processes":[{"pid":5150,"name":"omp","argv0":"omp","executable":"'"$executable"'","argv":["omp","'"$script"'"]}]}}}'
 }
 
 herdr_other_process_info() {
@@ -3697,7 +3707,12 @@ herdr_other_process_info() {
 
 herdr_mixed_omp_other_process_info() {
   local pane=${1:-w1:p2} script=$2
-  printf '%s' '{"result":{"type":"pane_process_info","process_info":{"pane_id":"'"$pane"'","shell_pid":4242,"foreground_process_group_id":5150,"foreground_processes":[{"pid":5150,"name":"node","argv0":"node"},{"pid":5151,"name":"bun","argv0":"bun","argv":["bun","'"$script"'"]}]}}}'
+  local executable="${script%/*}/bun"
+  if [ ! -x "$executable" ]; then
+    printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$executable"
+    chmod +x "$executable"
+  fi
+  printf '%s' '{"result":{"type":"pane_process_info","process_info":{"pane_id":"'"$pane"'","shell_pid":4242,"foreground_process_group_id":5150,"foreground_processes":[{"pid":5150,"name":"node","argv0":"node"},{"pid":5151,"name":"bun","argv0":"bun","executable":"'"$executable"'","argv":["bun","'"$script"'"]}]}}}'
 }
 
 test_herdr_process_identity_rejects_mixed_omp_group() {
@@ -3713,18 +3728,40 @@ test_herdr_process_identity_rejects_mixed_omp_group() {
   pass "Herdr identity: mixed OMP and unrelated foreground groups stay unknown"
 }
 
+test_herdr_process_identity_requires_actual_direct_executable() {
+  local dir log resp fb out script decoy
+  dir="$TMP_ROOT/direct-omp-identity"; mkdir -p "$dir/fakebin" "$dir/responses"; log="$dir/log"; resp="$dir/responses"
+  script="$dir/fakebin/omp"; decoy="$dir/fakebin/decoy"
+  printf '#!/bin/sh\nexit 0\n' > "$script"
+  printf '#!/bin/sh\nexit 0\n' > "$decoy"
+  chmod +x "$script" "$decoy"
+  herdr_direct_omp_process_info "$script" "$script" > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$dir/fakebin:$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_process_identity lab w1:p2' "$ROOT")
+  [ "$out" = omp ] || fail "a canonical direct OMP executable was classified as '$out'"
+  herdr_direct_omp_process_info "$decoy" "$script" > "$resp/1.out"
+  rm -f "$resp/.count"
+  out=$(PATH="$dir/fakebin:$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_process_identity lab w1:p2' "$ROOT")
+  [ "$out" = other ] || fail "a decoy executable with OMP name and argv was classified as '$out'"
+  pass "Herdr identity: direct OMP requires the actual executable path"
+}
+
 test_herdr_raw_owner_lookup() {
-  local dir log resp fb out script
+  local dir log resp fb out script bun
   dir="$TMP_ROOT/raw-owner-lookup"; mkdir -p "$dir/canonical" "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   script="$dir/canonical/omp"
+  bun="$dir/canonical/bun"
   printf '#!/bin/sh\nexit 0\n' > "$script"
-  chmod +x "$script"
+  printf '#!/bin/sh\nexit 0\n' > "$bun"
+  chmod +x "$script" "$bun"
   printf '%s' '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":987654,"foreground_process_group_id":987655,"foreground_processes":[{"pid":987655,"name":"bun","argv0":"bun","argv":["bun","'"$script"'"]}]}}}' > "$resp/1.out"
   printf '1 0\n987654 1\n987655 987654\n' > "$dir/ps-rows"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$dir/canonical:$fb:$PATH" FM_RAW_LAUNCH_OWNER=raw-owner \
     FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_PS_BIN="$fb/ps" \
-    FM_FAKE_PS_ROWS="$(cat "$dir/ps-rows")" FM_FAKE_PS_OMP_PID=987655 \
+    FM_FAKE_PS_ROWS="$(cat "$dir/ps-rows")" FM_FAKE_PS_OMP_PID=987655 FM_FAKE_PS_OMP_COMM="$bun" \
     FM_FAKE_PS_OMP_ARGS="bun $script" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_raw_omp_process_state lab w1:p2 raw-owner' "$ROOT" )
   [ "$out" = omp ] || fail "raw Herdr owner lookup returned '$out', expected omp"
@@ -5427,6 +5464,7 @@ test_herdr_liveness_rejects_canonical_omp_agent_not_found_with_current_omp
 test_herdr_presence_is_checked_before_process_identity
 test_herdr_no_metadata_omp_requires_current_identity
 test_herdr_process_identity_rejects_mixed_omp_group
+test_herdr_process_identity_requires_actual_direct_executable
 test_herdr_raw_owner_lookup
 test_fm_send_propagates_and_validates_raw_owner
 test_fm_control_propagates_and_validates_raw_owner

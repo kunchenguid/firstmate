@@ -153,15 +153,21 @@ fi
 exit 0
 SH
   chmod +x "$fb/sleep"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$fb/omp"
+  chmod +x "$fb/omp"
   cat > "$fb/ps" <<'SH'
 #!/usr/bin/env bash
 set -u
 case "${1:-}" in
   -t)
-    printf '100 100 100 %s\n' "$(cat "$FM_FAKE_DIR/command")"
+    command=$(cat "$FM_FAKE_DIR/command")
+    if [ "$command" = omp ]; then command=${FM_FAKE_OMP_PATH:-omp}; fi
+    printf '100 100 100 %s\n' "$command"
     ;;
   -p)
-    cat "$FM_FAKE_DIR/command"
+    command=$(cat "$FM_FAKE_DIR/command")
+    if [ "$command" = omp ]; then command=${FM_FAKE_OMP_PATH:-omp}; fi
+    printf '%s\n' "$command"
     printf '\n'
     ;;
 esac
@@ -220,6 +226,7 @@ run_control() {
   local task_id=${1:-}
   env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
     FM_FAKE_TASK_ID="$task_id" \
+    FM_FAKE_OMP_PATH="$dir/fakebin/omp" \
     FM_TMUX_PS_BIN="$dir/fakebin/ps" \
     FM_CONTROL_POLL=0.01 FM_CONTROL_SETTLE_WAIT=0.05 \
     FM_CONTROL_EXIT_WAIT=0.05 FM_CONTROL_LAUNCH_WAIT=0.05 \

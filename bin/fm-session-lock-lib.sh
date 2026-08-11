@@ -61,7 +61,7 @@ fm_harness_omp_resolve_path() {  # <path>
   path=$(CDPATH='' cd -- "$dir" 2>/dev/null && printf '%s/%s' "$(pwd -P)" "$base") || return 1
   for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
     if [ ! -L "$path" ]; then
-      [ -x "$path" ] || return 1
+      [ -f "$path" ] && [ -x "$path" ] || return 1
       printf '%s' "$path"
       return 0
     fi
@@ -85,6 +85,55 @@ fm_harness_omp_command_path() {
   fm_harness_omp_resolve_path "$command_path"
 }
 
+fm_harness_bun_command_path() {
+  local command_path
+  command_path=$(command -v bun 2>/dev/null) || return 1
+  fm_harness_omp_resolve_path "$command_path"
+}
+
+fm_harness_process_executable() {  # <pid> [ps-bin]
+  local pid=$1 ps_bin=${2:-ps} path lsof_bin
+  case "$pid" in
+    ''|*[!0-9]*|0|1) return 1 ;;
+  esac
+  if [ -L "/proc/$pid/exe" ]; then
+    path=$(readlink "/proc/$pid/exe" 2>/dev/null || true)
+    case "$path" in
+      */*) [ -f "$path" ] && [ -x "$path" ] && { printf '%s' "$path"; return 0; } ;;
+    esac
+  fi
+  path=$(LC_ALL=C "$ps_bin" -p "$pid" -o comm= 2>/dev/null) || path=
+  path=$(printf '%s\n' "$path" | awk 'NF { sub(/^[[:space:]]+/, "", $0); sub(/[[:space:]]+$/, "", $0); print; count++ } END { if (count != 1) exit 2 }') || path=
+  case "$path" in
+    */*) [ -f "$path" ] && [ -x "$path" ] && { printf '%s' "$path"; return 0; } ;;
+  esac
+  lsof_bin=$(command -v lsof 2>/dev/null || true)
+  if [ -n "$lsof_bin" ]; then
+    path=$(LC_ALL=C "$lsof_bin" -n -P -a -p "$pid" -d txt -Fn 2>/dev/null | awk '/^n/ { print substr($0, 2); exit }')
+    case "$path" in
+      */*) [ -f "$path" ] && [ -x "$path" ] && { printf '%s' "$path"; return 0; } ;;
+    esac
+  fi
+  return 1
+}
+
+fm_harness_omp_script_from_args() {  # <argv-text>
+  local args=${1:-} rest target
+  args=${args#"${args%%[![:space:]]*}"}
+  [ -n "$args" ] || return 1
+  rest=${args#"${args%%[[:space:]]*}"}
+  rest=${rest#"${rest%%[![:space:]]*}"}
+  [ -n "$rest" ] || return 1
+  target=${rest%%[[:space:]]*}
+  if [ "$target" = run ]; then
+    rest=${rest#"$target"}
+    rest=${rest#"${rest%%[![:space:]]*}"}
+    [ -n "$rest" ] || return 1
+    target=${rest%%[[:space:]]*}
+  fi
+  printf '%s' "$target"
+}
+
 fm_harness_omp_script_matches() {  # <path>
   local path=$1 expected actual
   case "$path" in */*) ;; *) return 1 ;; esac
@@ -94,23 +143,17 @@ fm_harness_omp_script_matches() {  # <path>
   [ "$actual" = "$expected" ]
 }
 
-fm_harness_omp_process_matches() {  # <comm> <args>
-  local comm=$1 args=${2:-} launcher rest script
+fm_harness_omp_process_matches() {  # <comm> <args> [executable] [script]
+  local comm=$1 args=${2:-} executable=${3:-} script=${4:-} expected bun_path actual
   fm_harness_omp_attribution_allowed || return 1
-  fm_harness_omp_script_matches "$comm" && return 0
-  args=${args#"${args%%[![:space:]]*}"}
-  case "$(basename -- "$comm")" in
-    bun)
-      launcher=${args%%[[:space:]]*}
-      [ "$launcher" != "$args" ] || return 1
-      rest=${args#"$launcher"}
-      rest=${rest#"${rest%%[![:space:]]*}"}
-      [ -n "$rest" ] || return 1
-      script=${rest%%[[:space:]]*}
-      fm_harness_omp_script_matches "$script" && return 0
-      ;;
-  esac
-  return 1
+  [ -n "$executable" ] || return 1
+  expected=$(fm_harness_omp_command_path) || return 1
+  actual=$(fm_harness_omp_resolve_path "$executable") || return 1
+  [ "$actual" = "$expected" ] && return 0
+  bun_path=$(fm_harness_bun_command_path) || return 1
+  [ "$actual" = "$bun_path" ] || return 1
+  [ -n "$script" ] || return 1
+  fm_harness_omp_script_matches "$script"
 }
 
 fm_harness_identity_supported() {  # <identity>
@@ -136,10 +179,10 @@ fm_harness_identity_matches() {  # <expected> <actual>
   esac
 }
 
-fm_harness_process_identity() {  # <comm> <args> -> harness|shell|other
-  local comm=$1 args=${2:-} base argv0 script name
+fm_harness_process_identity() {  # <comm> <args> [executable] [script] -> harness|shell|other
+  local comm=$1 args=${2:-} executable=${3:-} script=${4:-} base argv0 name
   [ -n "$comm" ] || { printf 'unknown'; return 0; }
-  if fm_harness_omp_process_matches "$comm" "$args"; then
+  if fm_harness_omp_process_matches "$comm" "$args" "$executable" "$script"; then
     printf 'omp'
     return 0
   fi
@@ -194,7 +237,7 @@ fm_harness_process_owner_state() {
 
 fm_harness_raw_owner_state() {
   local root=$1 owner=$2 ps_bin=${3:-ps} foreground_pids=${4:-} current_identity=${5:-}
-  local rows all_pids rc pid owner_state comm args identity marker_count=0
+  local rows all_pids rc pid owner_state comm args executable script identity marker_count=0
   local foreground_count=0 owner_omp=0 owner_supported=
   case "$root" in ''|*[!0-9]*|0|1) printf 'unknown'; return 0 ;; esac
   case "$owner" in ''|*[!A-Za-z0-9._-]*) printf 'unknown'; return 0 ;; esac
@@ -258,7 +301,12 @@ EOF
       printf 'unknown'
       return 0
     }
-    identity=$(unset FM_HARNESS_UNVERIFIED; fm_harness_process_identity "$comm" "$args")
+    executable=$(fm_harness_process_executable "$pid" "$ps_bin" 2>/dev/null || true)
+    script=
+    if [ -n "$executable" ] && [ "$(basename -- "$executable")" = bun ]; then
+      script=$(fm_harness_omp_script_from_args "$args" 2>/dev/null || true)
+    fi
+    identity=$(unset FM_HARNESS_UNVERIFIED; fm_harness_process_identity "$comm" "$args" "$executable" "$script")
     case "$identity" in
       omp) owner_omp=1 ;;
       shell) : ;;
@@ -296,7 +344,7 @@ EOF
 }
 
 fm_harness_process_tree_identity() {  # <root-pid> [ps-bin] -> harness|shell|other|unknown
-  local root=$1 ps_bin=${2:-ps} rows tree pid comm args identity current_identity= shell_seen=0 rc
+  local root=$1 ps_bin=${2:-ps} rows tree pid comm args executable script identity current_identity= shell_seen=0 rc
   case "$root" in
     ''|*[!0-9]*|0|1) printf 'unknown'; return 0 ;;
   esac
@@ -353,7 +401,12 @@ fm_harness_process_tree_identity() {  # <root-pid> [ps-bin] -> harness|shell|oth
       printf 'unknown'
       return 0
     }
-    identity=$(fm_harness_process_identity "$comm" "$args")
+    executable=$(fm_harness_process_executable "$pid" "$ps_bin" 2>/dev/null || true)
+    script=
+    if [ -n "$executable" ] && [ "$(basename -- "$executable")" = bun ]; then
+      script=$(fm_harness_omp_script_from_args "$args" 2>/dev/null || true)
+    fi
+    identity=$(fm_harness_process_identity "$comm" "$args" "$executable" "$script")
     case "$identity" in
       omp)
         printf 'omp'
@@ -408,8 +461,8 @@ fm_harness_process_tree_omp_state() {  # <root-pid> [ps-bin] -> omp|other|unknow
 #   3. a bare interpreter (node, python, bun) running the exact harness script.
 #   4. Cursor's own structural identity, owned by bin/fm-cursor-lib.sh.
 FM_HARNESS_IS_CLAUDE=0
-fm_harness_process_matches() {  # <comm> <args>
-  local comm=$1 args=$2 base argv0 name
+fm_harness_process_matches() {  # <comm> <args> [executable] [script]
+  local comm=${1:-} args=${2:-} executable=${3:-} script=${4:-} base argv0 name
   FM_HARNESS_IS_CLAUDE=0
   base=$(basename -- "$comm")
   [ "$base" = omp ] && ! fm_harness_omp_attribution_allowed && return 1
@@ -417,7 +470,7 @@ fm_harness_process_matches() {  # <comm> <args>
     case "$base" in *claude*) FM_HARNESS_IS_CLAUDE=1 ;; esac
     return 0
   fi
-  if fm_harness_omp_process_matches "$comm" "$args"; then
+  if fm_harness_omp_process_matches "$comm" "$args" "$executable" "$script"; then
     return 0
   fi
   argv0=${args%% *}
@@ -443,22 +496,18 @@ fm_harness_process_matches() {  # <comm> <args>
 }
 
 fm_harness_omp_bare_lock_matches() {  # <comm> <args>
-  local comm=$1 args=$2
+  local comm=${1:-}
   fm_harness_omp_attribution_allowed || return 1
   [ "$(basename -- "$comm")" = bun ] || return 1
-  [ "$args" = "$comm" ] || return 1
-  case "/$comm/" in
-    */omp/*) return 0 ;;
-  esac
-  return 1
+  return 0
 }
 
-fm_harness_lock_process_matches() {  # <comm> <args>
-  fm_harness_process_matches "$1" "$2" && return 0
-  fm_harness_omp_bare_lock_matches "$1" "$2"
+fm_harness_lock_process_matches() {  # <comm> <args> [executable] [script]
+  fm_harness_process_matches "${1:-}" "${2:-}" "${3:-}" "${4:-}" && return 0
+  fm_harness_omp_bare_lock_matches "${1:-}" "${2:-}"
 }
 
-# Walk the current process ancestry (up to 16 hops) and print this session's
+# Walk the current process ancestry (up to 80 hops) and print this session's
 # contiguous verified-harness ancestry, innermost pid first.
 #
 # The walk climbs freely until the first harness match, because the caller is
@@ -477,11 +526,17 @@ fm_harness_lock_process_matches() {  # <comm> <args>
 # session cannot be read off the ancestry at all, so the whole contiguous run is
 # reported and the callers below decide what they need from it.
 fm_harness_ancestry_pids() {
-  local pid=$$ comm args extending=0 printed=0
-  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
+  local pid=$$ comm args executable script ppid extending=0 printed=0 steps=0
+  while [ "$steps" -lt 80 ]; do
+    steps=$((steps + 1))
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
     args=$(ps -o args= -p "$pid" 2>/dev/null)
-    if fm_harness_lock_process_matches "$comm" "$args"; then
+    executable=$(fm_harness_process_executable "$pid" ps 2>/dev/null || true)
+    script=
+    if [ -n "$executable" ] && [ "$(basename -- "$executable")" = bun ]; then
+      script=$(fm_harness_omp_script_from_args "$args" 2>/dev/null || true)
+    fi
+    if fm_harness_lock_process_matches "$comm" "$args" "$executable" "$script"; then
       printf '%s\n' "$pid"
       printed=1
       [ "$FM_HARNESS_IS_CLAUDE" -eq 1 ] || break
@@ -489,8 +544,12 @@ fm_harness_ancestry_pids() {
     elif [ "$extending" -eq 1 ]; then
       break
     fi
-    pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
-    [ -n "$pid" ] && [ "$pid" -gt 1 ] || break
+    ppid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d '[:space:]') || break
+    case "$ppid" in
+      ''|*[!0-9]*) break ;;
+      0|1) break ;;
+    esac
+    pid=$ppid
   done
   [ "$printed" -eq 1 ]
 }
@@ -502,13 +561,18 @@ fm_harness_ancestry_pids() {
 # is still running. Every non-Claude harness reports a single pid, so this is its
 # innermost match unchanged.
 fm_harness_ancestry_pid() {
-  local pids pid comm args identity first_pid='' first_identity='' claude_owner=''
+  local pids pid comm args executable script identity first_pid='' first_identity='' claude_owner=''
   pids=$(fm_harness_ancestry_pids) || return 1
   while IFS= read -r pid; do
     [ -n "$pid" ] || continue
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
     args=$(ps -o args= -p "$pid" 2>/dev/null) || return 1
-    identity=$(fm_harness_process_identity "$comm" "$args")
+    executable=$(fm_harness_process_executable "$pid" ps 2>/dev/null || true)
+    script=
+    if [ -n "$executable" ] && [ "$(basename -- "$executable")" = bun ]; then
+      script=$(fm_harness_omp_script_from_args "$args" 2>/dev/null || true)
+    fi
+    identity=$(fm_harness_process_identity "$comm" "$args" "$executable" "$script")
     if [ -z "$first_pid" ]; then
       first_pid=$pid
       first_identity=$identity
@@ -526,11 +590,19 @@ EOF
 
 # True if $1 is a live process that looks like a verified harness.
 fm_harness_pid_alive() {
-  local pid=$1 comm args
+  local pid=${1:-} comm args executable script
+  case "$pid" in
+    ''|*[!0-9]*|0|1) return 1 ;;
+  esac
   kill -0 "$pid" 2>/dev/null || return 1
   comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
   args=$(ps -o args= -p "$pid" 2>/dev/null) || return 1
-  fm_harness_lock_process_matches "$comm" "$args"
+  executable=$(fm_harness_process_executable "$pid" ps 2>/dev/null || true)
+  script=
+  if [ -n "$executable" ] && [ "$(basename -- "$executable")" = bun ]; then
+    script=$(fm_harness_omp_script_from_args "$args" 2>/dev/null || true)
+  fi
+  fm_harness_lock_process_matches "$comm" "$args" "$executable" "$script"
 }
 
 # True when state dir $1 holds a session lock whose pid is ANY harness ancestor

@@ -235,6 +235,9 @@ test_omp_primary_and_worker_identity() {
   fakebin=$(fm_fakebin "$dir")
   printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$fakebin/omp"
   chmod +x "$fakebin/omp"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$fakebin/bun"
+  chmod +x "$fakebin/bun"
+  export FM_TEST_BUN_PATH="$fakebin/bun"
   ln -s "$fakebin/omp" "$dir/omp-link"
   export FM_TEST_OMP_SCRIPT="$fakebin/omp" FM_TEST_OMP_LINK="$dir/omp-link"
   cat > "$fakebin/ps" <<'SH'
@@ -249,9 +252,9 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 case "$field:${FM_TEST_OMP_SHAPE:-omp}" in
-  comm=:bare) printf '%s\n' '/opt/omp/bin/bun' ;;
+  comm=:bare) printf '%s\n' "${FM_TEST_BUN_PATH:-/opt/omp/bin/bun}" ;;
   comm=:bunx) printf '%s\n' '/opt/homebrew/bin/bunx' ;;
-  comm=:*) printf '%s\n' '/opt/homebrew/bin/bun' ;;
+  comm=:*) printf '%s\n' "${FM_TEST_BUN_PATH:-/opt/homebrew/bin/bun}" ;;
   args=:omp) printf 'bun %s --model openai/test\n' "$FM_TEST_OMP_SCRIPT" ;;
   args=:link) printf 'bun %s --model openai/test\n' "$FM_TEST_OMP_LINK" ;;
   args=:tmp) printf '%s\n' 'bun /tmp/omp --model openai/test' ;;

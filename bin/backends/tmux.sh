@@ -163,11 +163,11 @@ fm_backend_tmux_current_command() {  # <target>
 # harness, `shell` for an idle login/interactive shell, `other` for anything
 # else. Keeping one classifier means the two independent name sources can never
 # drift into disagreeing about what a given name means.
-fm_backend_tmux_classify_process_name() {  # <path> [argv0] -> agent|shell|other
-  local path=$1 argv0=${2:-} base
+fm_backend_tmux_classify_process_name() {  # <path> [argv0] [executable] [script] -> agent|shell|other
+  local path=$1 argv0=${2:-} executable=${3:-} script=${4:-} base
   base=${path##*/}
   base=${base#-}
-  if fm_harness_omp_script_matches "$path" || fm_harness_omp_script_matches "$argv0"; then
+  if fm_harness_omp_process_matches "$path" "$argv0" "$executable" "$script"; then
     printf 'agent'
     return 0
   fi
@@ -241,8 +241,30 @@ fm_backend_tmux_foreground_comms() {  # <target>
       done
 }
 
+fm_backend_tmux_process_executable() {  # <pid>
+  fm_harness_process_executable "$1" "${FM_TMUX_PS_BIN:-ps}"
+}
+
+fm_backend_tmux_foreground_process_records() {  # <target> -> comm<TAB>args<TAB>executable<TAB>script
+  local target=$1 tty pid pgid tpgid comm args executable script
+  tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || return 0
+  [ -n "$tty" ] || return 0
+  LC_ALL=C "${FM_TMUX_PS_BIN:-ps}" -t "${tty#/dev/}" -o pid=,pgid=,tpgid=,comm= 2>/dev/null \
+    | while read -r pid pgid tpgid comm; do
+        [ -n "$comm" ] || continue
+        [ "$pgid" = "$tpgid" ] || continue
+        args=$(LC_ALL=C "${FM_TMUX_PS_BIN:-ps}" -p "$pid" -o args= 2>/dev/null) || args=
+        executable=$(fm_backend_tmux_process_executable "$pid" 2>/dev/null || true)
+        script=
+        if [ -n "$executable" ] && [ "$(basename -- "$executable")" = bun ]; then
+          script=$(fm_harness_omp_script_from_args "$args" 2>/dev/null || true)
+        fi
+        printf '%s\t%s\t%s\t%s\n' "$comm" "$args" "$executable" "$script"
+      done
+}
+
 fm_backend_tmux_foreground_argv0s() {  # <target>
-  local target=$1 tty pid pgid tpgid comm args argv0 rest script
+  local target=$1 tty pid pgid tpgid comm args argv0
   tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || return 0
   [ -n "$tty" ] || return 0
   LC_ALL=C "${FM_TMUX_PS_BIN:-ps}" -t "${tty#/dev/}" -o pid=,pgid=,tpgid=,comm= 2>/dev/null \
@@ -253,18 +275,6 @@ fm_backend_tmux_foreground_argv0s() {  # <target>
         args=${args#"${args%%[![:space:]]*}"}
         argv0=${args%%[[:space:]]*}
         [ -n "$argv0" ] && printf '%s\n' "$argv0"
-        # OMP's long-lived process is Bun with argv[1] resolving to the canonical installed OMP executable.
-        # Export that one verified identity candidate, never later prompt text.
-        case "${comm##*/}" in
-          bun)
-            rest=${args#"$argv0"}
-            rest=${rest#"${rest%%[![:space:]]*}"}
-            script=${rest%%[[:space:]]*}
-            if fm_harness_omp_process_matches "$comm" "$args"; then
-              printf '%s\n' "$script"
-            fi
-            ;;
-        esac
       done
 }
 
@@ -273,10 +283,10 @@ fm_backend_tmux_foreground_omp_identity() {  # <target>
 }
 
 fm_backend_tmux_foreground_process_identity() {  # <target> -> harness|shell|other|unknown
-  local target=$1 name identity current_identity= shell_seen=0 omp_seen=0 other_seen=0
-  while IFS= read -r name; do
+  local target=$1 name args executable script identity current_identity= shell_seen=0 omp_seen=0 other_seen=0
+  while IFS=$'\t' read -r name args executable script; do
     [ -n "$name" ] || continue
-    identity=$(fm_harness_process_identity "$name" "$name")
+    identity=$(fm_harness_process_identity "$name" "$args" "$executable" "$script")
     case "$identity" in
       omp) omp_seen=1 ;;
       shell) shell_seen=1 ;;
@@ -296,30 +306,7 @@ fm_backend_tmux_foreground_process_identity() {  # <target> -> harness|shell|oth
         fi
         ;;
     esac
-  done < <(fm_backend_tmux_foreground_comms "$target")
-  while IFS= read -r name; do
-    [ -n "$name" ] || continue
-    identity=$(fm_harness_process_identity "$name" "$name")
-    case "$identity" in
-      omp) omp_seen=1 ;;
-      shell) shell_seen=1 ;;
-      *)
-        if fm_harness_identity_supported "$identity"; then
-          if [ -z "$current_identity" ]; then
-            current_identity=$identity
-          elif ! fm_harness_identity_matches "$current_identity" "$identity"; then
-            printf 'unknown'
-            return 0
-          fi
-        else
-          case "${name##*/}" in
-            bun) : ;;
-            *) other_seen=1 ;;
-          esac
-        fi
-        ;;
-    esac
-  done < <(fm_backend_tmux_foreground_argv0s "$target")
+  done < <(fm_backend_tmux_foreground_process_records "$target")
   name=$(fm_backend_tmux_current_command "$target") || {
     printf 'unknown'
     return 0
@@ -337,10 +324,12 @@ fm_backend_tmux_foreground_process_identity() {  # <target> -> harness|shell|oth
           return 0
         fi
       else
-        case "${name##*/}" in
-          bun) : ;;
-          *) other_seen=1 ;;
-        esac
+        if [ "$omp_seen" -eq 0 ]; then
+          case "${name##*/}" in
+            bun) : ;;
+            *) other_seen=1 ;;
+          esac
+        fi
       fi
       ;;
   esac
@@ -396,10 +385,6 @@ fm_backend_tmux_classify_process_name_raw() {  # <path> [argv0] -> agent|shell|o
   case "${argv0##*/}" in
     omp) printf 'other'; return 0 ;;
   esac
-  if fm_harness_omp_script_matches "$path" || fm_harness_omp_script_matches "$argv0"; then
-    printf 'other'
-    return 0
-  fi
   fm_backend_tmux_classify_process_name "$path" "$argv0"
 }
 
@@ -495,6 +480,15 @@ fm_backend_tmux_agent_state() {  # <target> [recorded-harness] [raw-launch]
       esac
     fi
   fi
+
+  while IFS=$'\t' read -r name args executable script; do
+    [ -n "$name" ] || continue
+    process_identity=$(fm_harness_process_identity "$name" "$args" "$executable" "$script")
+    if [ "$raw_launch" != 1 ] && fm_harness_identity_supported "$process_identity"; then
+      printf 'alive'
+      return 0
+    fi
+  done < <(fm_backend_tmux_foreground_process_records "$target")
 
   foreground=$(fm_backend_tmux_foreground_comms "$target")
   while IFS= read -r name; do

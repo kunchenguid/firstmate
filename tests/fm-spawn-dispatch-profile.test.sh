@@ -759,7 +759,7 @@ test_raw_omp_launch_does_not_arm_unwired_semantic_busy() {
   id=profile-raw-omp-z8f
   rec=$(make_spawn_case profile-raw-omp claude "$id")
   read_case_record "$rec"
-  raw_omp="$CASE_DIR/omp"
+  raw_omp="$FAKEBIN_DIR/omp"
   probe="$CASE_DIR/raw-omp-env"
   cat > "$raw_omp" <<SH
 #!/usr/bin/env bash
@@ -770,8 +770,6 @@ SH
   wrapper="$CASE_DIR/start-omp.sh"
   printf '%s\n' '#!/usr/bin/env bash' "exec \"$raw_omp\" --raw-flag" > "$wrapper"
   chmod +x "$wrapper"
-  rm -f "$FAKEBIN_DIR/omp"
-
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
     "$id" "$PROJ_DIR" "bash \"$wrapper\"")
   status=$?
@@ -790,29 +788,42 @@ SH
 }
 
 test_raw_omp_dispatch_policy_is_structural() {
-  local policy=$ROOT/bin/fm-raw-launch-policy.mjs command result omp_script agent_script
+  local policy=$ROOT/bin/fm-raw-launch-policy.mjs command result omp_script agent_script canonical_dir canonical_omp canonical_bun decoy_omp
   command -v node >/dev/null 2>&1 || { pass "raw OMP structural policy skipped without node"; return; }
+  canonical_dir="$TMP_ROOT/raw-policy-bin"
+  mkdir -p "$canonical_dir"
+  canonical_omp="$canonical_dir/omp"
+  canonical_bun="$canonical_dir/bun"
+  decoy_omp="$TMP_ROOT/raw-policy-decoy/omp"
+  mkdir -p "${decoy_omp%/*}"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$canonical_omp"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$canonical_bun"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$decoy_omp"
+  chmod +x "$canonical_omp" "$canonical_bun" "$decoy_omp"
   omp_script="$TMP_ROOT/start-omp.sh"
   agent_script="$TMP_ROOT/raw-policy-agent.sh"
-  printf '%s\n' '#!/usr/bin/env bash' 'exec /tmp/omp --raw-flag' > "$omp_script"
+  printf '%s\n' '#!/usr/bin/env bash' "exec \"$canonical_omp\" --raw-flag" > "$omp_script"
   printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\\n" omp' > "$agent_script"
   for command in \
-    "nice -n10 /tmp/omp --raw-flag" \
-    "time -f%E /tmp/omp --raw-flag" \
+    "nice -n10 $canonical_omp --raw-flag" \
+    "time -f%E $canonical_omp --raw-flag" \
     "$omp_script --raw-flag" \
     "bash $omp_script" \
     "bash < $omp_script" \
-    "env -S '/tmp/omp --raw-flag'"; do
-    result=$(node "$policy" --command "$command")
+    "env -S '$canonical_omp --raw-flag'" \
+    "$canonical_bun $canonical_omp --raw-flag" \
+    "$canonical_bun run $canonical_omp --raw-flag"; do
+    result=$(PATH="$canonical_dir:$PATH" node "$policy" --command "$command")
     [ "$result" = omp ] || fail "raw OMP command '$command' was classified as '$result'"
   done
   for command in \
+    "$decoy_omp --raw-flag" \
     "echo omp" \
     "printf '%s\\n' omp" \
     "echo 'omp'" \
     "xargs echo omp" \
     "bash $agent_script"; do
-    result=$(node "$policy" --command "$command")
+    result=$(PATH="$canonical_dir:$PATH" node "$policy" --command "$command")
     [ "$result" = other ] || fail "non-OMP command '$command' was classified as '$result'"
   done
   pass "raw OMP ownership policy distinguishes executed commands from mentions"
@@ -854,7 +865,7 @@ test_raw_launch_marker_covers_process_tree_forms() {
   no_node_id=profile-raw-marker-no-node-z8o
   rec=$(make_spawn_case raw-marker-forms claude "$direct_id" "$wrapped_id" "$nested_id" "$script_id" "$stdin_id" "$env_id" "$cwd_id" "$no_node_id")
   read_case_record "$rec"
-  raw_omp="$CASE_DIR/omp"
+  raw_omp="$FAKEBIN_DIR/omp"
   script="$CASE_DIR/start-omp.sh"
   sub="$CASE_DIR/subdir"
   probe="$CASE_DIR/raw-marker-probe"
