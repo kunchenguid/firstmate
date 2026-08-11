@@ -178,7 +178,7 @@ ok - fm-teardown: dedicated-socket invalid cleanup preserves target/control and 
 The dedicated tmux cell removed ambient tmux variables, required a socket-bound wrapper, kept one target and one independent control window, and proved the wrapper was not called for invalid metadata or a direct empty target.
 Valid cleanup removed only the exact task-bound target and left the control window live.
 The metadata-only validation covers tmux, Herdr, Zellij, Orca, and cmux before backend dispatch.
-Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, and Muse share that backend cleanup boundary; their harness-specific hook files, tokens, and session-log sidecars are cleaned only after it, so no harness needs a separate endpoint parser.
+Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, Muse, and TraeX share that backend cleanup boundary; harness-specific hook files, tokens, and session-log sidecars are cleaned only after it, so no harness needs a separate endpoint parser.
 
 ## Herdr
 
@@ -202,6 +202,32 @@ herdr 0.7.5
 {"client":17,"server":17}
 ["pane.output_matched","pane.agent_status_changed","pane.scroll_changed"]
 ```
+
+### TraeX thin worker adapter
+
+The ordinary TraeX worker/scout path was verified on 2026-08-11 with traecli 0.200.19 internal edition and Herdr 0.8.0.
+The guarded smoke used the same generic Herdr input, current-state, key, and cleanup owners as the other harnesses, while the only TraeX-specific backend fact was exact fresh-directory trust recognition.
+
+```sh
+bin/fm-test-run.sh tests/fm-traex-harness.test.sh
+FM_TRAEX_HERDR_LIVE=1 bin/fm-test-run.sh tests/fm-traex-harness-live-e2e.test.sh
+```
+
+Bounded live output:
+
+```text
+ok - real TraeX fresh-copy trust reached native working through generic Herdr
+ok - real TraeX steering and current state use generic Herdr owners
+ok - real TraeX interrupt clearing stays on generic key and send paths
+ok - real TraeX exit cleanup uses the generic Herdr owner
+traex=traecli 0.200.19(internal edition)
+herdr=herdr 0.8.0
+ok - real TraeX lab teardown preserved the default Herdr session
+ok - thin TraeX/Herdr smoke completed
+```
+
+The smoke intentionally proves no exactly-once completion, crash-perfect edge recovery, or harness-specific lifecycle storage.
+Ambiguous interruption remains owned by ordinary endpoint inspection, stale supervision, and stuck-worker recovery.
 
 The CLI matrix was checked directly:
 

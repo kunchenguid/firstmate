@@ -2615,6 +2615,97 @@ fm_backend_herdr_strip_ansi() {  # <text>
   printf '%s' "$1" | fm_composer_strip_ansi
 }
 
+# TraeX is a thin harness adapter over Herdr's generic lifecycle. Its only
+# backend-specific launch fact is the fresh-directory trust chooser: Herdr's
+# native manifest identifies the dialog, and the visible default must be the
+# affirmative option before Firstmate sends one Enter. No readiness record,
+# transition fold, binding index, or completion protocol is created here.
+FM_BACKEND_HERDR_TRAEX_START_POLLS=${FM_BACKEND_HERDR_TRAEX_START_POLLS:-180}
+FM_BACKEND_HERDR_TRAEX_START_INTERVAL=${FM_BACKEND_HERDR_TRAEX_START_INTERVAL:-0.1}
+
+fm_backend_herdr_traex_trust_dialog_exact() {  # <target>
+  local target=$1 explain capture
+  fm_backend_herdr_parse_target "$target" || return 1
+  explain=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" agent explain "$FM_BACKEND_HERDR_PANE" 2>/dev/null) || return 1
+  printf '%s\n' "$explain" | grep -Fqx 'agent: traex' || return 1
+  printf '%s\n' "$explain" | grep -Fqx 'state: blocked' || return 1
+  printf '%s\n' "$explain" \
+    | grep -Fqx 'rule: directory_trust_prompt (region=whole_recent priority=1000)' \
+    || return 1
+  capture=$(fm_backend_herdr_capture "$target" 80 2>/dev/null) || return 1
+  case "$capture" in *'Do you trust the contents of this directory?'*) : ;; *) return 1 ;; esac
+  case "$capture" in *'❯ 1. Yes, continue'*) : ;; *) return 1 ;; esac
+  case "$capture" in *'  2. No, quit'*) : ;; *) return 1 ;; esac
+  case "$capture" in *'Press enter to continue'*) : ;; *) return 1 ;; esac
+}
+
+fm_backend_herdr_traex_wait_started() {  # <target> <expected-worktree> <source-project>
+  local target=$1 expected=$2 source=$3 expected_real source_real git_top git_real
+  local out agent status cwd foreground pane cwd_real foreground_real
+  local accepted=0 saw_agent=0 i=0 polls interval
+  fm_backend_herdr_parse_target "$target" || return 1
+  expected_real=$(CDPATH='' cd -- "$expected" 2>/dev/null && pwd -P) || return 1
+  source_real=$(CDPATH='' cd -- "$source" 2>/dev/null && pwd -P) || return 1
+  [ "$source_real" != "$expected_real" ] || {
+    echo "error: TraeX launch resolved the source project instead of an isolated task copy" >&2
+    return 1
+  }
+  git_top=$(git -C "$expected_real" rev-parse --show-toplevel 2>/dev/null) || return 1
+  git_real=$(CDPATH='' cd -- "$git_top" 2>/dev/null && pwd -P) || return 1
+  [ "$git_real" = "$expected_real" ] || {
+    echo "error: TraeX trust is limited to the exact isolated task copy" >&2
+    return 1
+  }
+  polls=$FM_BACKEND_HERDR_TRAEX_START_POLLS
+  interval=$FM_BACKEND_HERDR_TRAEX_START_INTERVAL
+  case "$polls" in ''|*[!0-9]*|0) polls=180 ;; esac
+  while [ "$i" -lt "$polls" ]; do
+    out=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" agent get "$FM_BACKEND_HERDR_PANE" 2>/dev/null || true)
+    agent=$(printf '%s' "$out" | jq -r '.result.agent.agent // empty' 2>/dev/null)
+    status=$(printf '%s' "$out" | jq -r '.result.agent.agent_status // empty' 2>/dev/null)
+    if [ -n "$agent" ]; then
+      saw_agent=1
+      pane=$(printf '%s' "$out" | jq -r '.result.agent.pane_id // empty' 2>/dev/null)
+      cwd=$(printf '%s' "$out" | jq -r '.result.agent.cwd // empty' 2>/dev/null)
+      foreground=$(printf '%s' "$out" | jq -r '.result.agent.foreground_cwd // empty' 2>/dev/null)
+      [ "$agent" = traex ] && [ "$pane" = "$FM_BACKEND_HERDR_PANE" ] || {
+        echo "error: TraeX launch registered an unexpected Herdr agent identity" >&2
+        return 1
+      }
+      cwd_real=$(CDPATH='' cd -- "$cwd" 2>/dev/null && pwd -P) || cwd_real=
+      foreground_real=$(CDPATH='' cd -- "$foreground" 2>/dev/null && pwd -P) || foreground_real=
+      if { [ "$cwd_real" != "$source_real" ] && [ "$cwd_real" != "$expected_real" ]; } \
+         || [ "$foreground_real" != "$expected_real" ]; then
+        echo "error: TraeX launch identity does not belong to the isolated task copy" >&2
+        return 1
+      fi
+      case "$status" in
+        working) return 0 ;;
+        blocked)
+          if [ "$accepted" -eq 0 ]; then
+            fm_backend_herdr_traex_trust_dialog_exact "$target" || {
+              echo "error: Herdr did not identify the exact TraeX directory-trust chooser" >&2
+              return 1
+            }
+            fm_backend_herdr_send_key "$target" Enter || return 1
+            accepted=1
+          fi
+          ;;
+      esac
+    fi
+    i=$((i + 1))
+    [ "$i" -ge "$polls" ] || sleep "$interval"
+  done
+  if [ "$accepted" -eq 1 ]; then
+    echo "error: TraeX trust was accepted, but native working was not observed" >&2
+  elif [ "$saw_agent" -eq 1 ]; then
+    echo "error: TraeX registered, but its initial instructions never reached native working" >&2
+  else
+    echo "error: Herdr never registered the launched TraeX worker" >&2
+  fi
+  return 1
+}
+
 # fm_backend_herdr_composer_state: classify the composer's own row as
 # empty|pending|unknown, scanning a generous tail-window capture of <target>.
 # herdr's CLI exposes no cursor-row primitive (unlike tmux's #{cursor_y}), so
