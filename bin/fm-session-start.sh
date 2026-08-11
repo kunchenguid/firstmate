@@ -199,11 +199,16 @@
 #             produces the ordinary read-only path.
 #
 #   --source  The native session-open source, supplied only by
-#             fm-sessionstart-run.sh. `startup` is the one true session-start
-#             source and records the AGENTS.md baseline after a completed
-#             digest. Rebuild sources read that baseline but never replace it:
-#             a post-update rebuild must re-emit the current instructions every
-#             time because the harness may restore the original stale copy.
+#             fm-sessionstart-run.sh. A genuine `startup` that owns the active
+#             session lock records AGENTS.md's SHA-256 baseline only after the
+#             digest completion record is published, keyed to that lock's
+#             harness pid. No resume, clear, reset, compact, or other rebuild
+#             creates or replaces it. Pi and pi-signed compaction are the only
+#             supported stale-cache rebuild pair: a missing baseline, a baseline
+#             for another harness pid, or a changed hash causes the complete
+#             current AGENTS.md to print before the bulky digest. The baseline
+#             remains immutable so every later drifted compaction refreshes
+#             again, while an equal baseline emits no instruction refresh.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

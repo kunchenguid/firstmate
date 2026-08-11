@@ -80,7 +80,10 @@ compact
 ```
 
 Pi disagrees with Claude and Codex on `resume`: a new Pi process continuing a session reports `startup`, and Pi's `resume` reason is reserved for an in-process session switch.
-The adapter therefore refines startup-reason restored continuation, resume-selection, explicit-session, and fork CLI invocations to the context-preserving wrapper source. For create-if-missing flags such as `-c`, `--continue`, `--session`, and `--session-id`, a session header older than the current Pi process must prove restoration; a newly created session remains a true startup even when setup flags such as `--name` have already appended entries. A continuation never records or replaces the true-start baseline; if the next compact encounters the prior process identity or a missing baseline, it conservatively injects current AGENTS.md before the digest.
+The adapter therefore refines startup-reason restored continuation, resume-selection, explicit-session, and fork CLI invocations to the context-preserving wrapper source.
+For create-if-missing flags such as `-c`, `--continue`, `--session`, and `--session-id`, a session header older than the current Pi process must prove restoration; a newly created session remains a true startup even when setup flags such as `--name` have already appended entries.
+A continuation never records or replaces the true-start baseline.
+If the next compact encounters the prior process identity or a missing baseline, it conservatively injects current AGENTS.md before the digest.
 
 ### Post-start instruction refresh
 
@@ -104,7 +107,8 @@ tests/fm-sessionstart-instruction-refresh-live-e2e.test.sh
 
 This is live coverage only for Pi compaction.
 The portable session-start tests cover continuation classification, baseline immutability, and source-routing behavior.
-Pi compaction is the only supported stale-cache refresh pair. Codex exec exposes only startup and context-preserving resume through tracked registration; Codex interactive reset behavior remains uncovered rather than inferred from direct wrapper invocation.
+Pi compaction is the only supported stale-cache refresh pair.
+Codex exec exposes only startup and context-preserving resume through tracked registration; Codex interactive reset behavior remains uncovered rather than inferred from direct wrapper invocation.
 
 ### Detached session-open workers survive the hook
 
