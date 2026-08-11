@@ -59,6 +59,10 @@
       "target": "docs/calm-mode-feasibility.md"
     },
     {
+      "source": "docs/captain-inbox.md",
+      "target": "docs/verification/supervision.md"
+    },
+    {
       "source": "docs/calm-mode-feasibility.md",
       "target": "docs/calm.md"
     },
@@ -219,6 +223,10 @@
     {
       "path": "docs/calm-mode-feasibility.md",
       "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/captain-inbox.md",
+      "audience": "operator-current"
     },
     {
       "path": "docs/calm.md",

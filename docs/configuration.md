@@ -32,6 +32,14 @@ The `/calm` command replaces the file atomically before changing live presentati
 The extension reloads this preference on every Pi `session_start`, including startup, new, resume, fork, and reload reasons.
 This preference is local to each Firstmate home and is not part of secondmate inherited configuration.
 
+## Captain's Inbox capture (config/captain-inbox)
+
+Captain's Inbox is disabled by default.
+To opt in for one private Firstmate home, create local gitignored `config/captain-inbox` containing exactly `on` followed by one newline.
+An absent, unreadable, linked, or other value leaves capture off and creates no inbox data.
+The setting is not inherited by secondmate homes.
+[`captain-inbox.md`](captain-inbox.md) owns the completed-response capture boundary, private storage, dashboard command contract, retention, and supported-surface matrix.
+
 ## Backlog backend (.tasks.toml / config/backlog-backend)
 
 The tracked `.tasks.toml` pins the default `tasks-axi` markdown backend to `data/backlog.md`, with `done_keep = 10` and an archive at `data/done-archive.md`.

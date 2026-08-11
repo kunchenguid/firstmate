@@ -359,6 +359,10 @@ Observed guarantee: after ordinary `session_shutdown` for `/new`, `/resume`, and
 Stale prior-generation tool callbacks could not mutate the active child, repeated transitions kept exactly one live arm cycle, and terminal `quit` still refused late rearm.
 Plain Pi and pi-signed share the same tracked `.pi/extensions/fm-primary-pi-watch.ts` path, so both inherit the generation owner; other primary harnesses are not applicable because they do not use this Pi extension lifecycle.
 
+Captain's Inbox capture was verified on 2026-08-11 with Pi 0.84.1 through `tests/fm-captain-inbox.test.sh`.
+The deterministic fixture proved opt-in and opt-out behavior, finalized-primary-response filtering, operational and worker exclusion, private mode where portable, duplicate suppression, 100-message retention, malformed-record preservation, and concurrent read-state updates.
+The same suite invokes the supported dashboard command interface rather than reaching into arbitrary files.
+
 Deterministic entry points:
 
 ```sh
