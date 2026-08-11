@@ -27,6 +27,30 @@ fm_git_worktree "$PROJECT" "$WORKTREE" slot-occupant-proof
 fm_slot_stamp_write "$WORKTREE" task-a "$HOME_DIR" \
   || fail "could not stamp focused slot fixture"
 
+if fm_process_environ_supported; then
+  SLEEP_BIN=$(command -v sleep)
+  (
+    cd "$WORKTREE" || exit 1
+    exec env -i "$SLEEP_BIN" 300
+  ) >/dev/null 2>&1 &
+  EMPTY_ENV_PID=$!
+  BG_PIDS+=("$EMPTY_ENV_PID")
+  for _ in $(seq 1 50); do
+    [ -e "/proc/$EMPTY_ENV_PID/environ" ] && break
+    sleep 0.02
+  done
+  if env_records=$(fm_process_environ "$EMPTY_ENV_PID"); then
+    env_status=0
+  else
+    env_status=$?
+  fi
+  [ "$env_status" -eq 0 ] || fail "a readable empty environment was treated as unavailable"
+  [ -z "$env_records" ] || fail "an empty environment emitted fabricated records: $env_records"
+  pass "a readable empty environment is a complete no-marker result"
+  kill "$EMPTY_ENV_PID" 2>/dev/null || true
+  wait "$EMPTY_ENV_PID" 2>/dev/null || true
+fi
+
 (
   cd "$WORKTREE" || exit 1
   exec env FM_AGENT_TASK=task-a FM_AGENT_OWNER_HOME="$HOME_DIR" \

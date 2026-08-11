@@ -22,8 +22,10 @@ fm_process_environ() {
   } 2>/dev/null; then
     return 1
   fi
-  [ "${#entries[@]}" -gt 0 ] || return 1
-  printf '%s\n' "${entries[@]}"
+  if [ "${#entries[@]}" -gt 0 ]; then
+    printf '%s\n' "${entries[@]}"
+  fi
+  return 0
 }
 
 fm_process_env_value() {
