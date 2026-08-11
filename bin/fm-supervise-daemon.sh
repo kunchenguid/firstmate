@@ -583,9 +583,10 @@ fm_daemon_primary_harness() {
 }
 
 pane_is_busy() {  # <target> [backend]
-  local target=$1 backend=${2:-tmux} native tail40 harness
+  local target=$1 backend=${2:-tmux} native tail40 harness raw_launch=
   harness=$(fm_daemon_primary_harness)
-  native=$(fm_backend_busy_state "$backend" "$target" 2>/dev/null)
+  [ -n "${FM_HARNESS_UNVERIFIED:-}" ] && raw_launch=1
+  native=$(fm_backend_busy_state "$backend" "$target" "$harness" "$raw_launch" 2>/dev/null)
   case "$native" in
     busy) return 0 ;;
   esac

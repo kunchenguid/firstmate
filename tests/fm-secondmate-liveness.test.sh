@@ -51,15 +51,70 @@ make_probe_tmux() {
   cat > "$fakebin/tmux" <<SH
 #!/usr/bin/env bash
 set -u
-case "\${1:-}" in
+  case "\${1:-}" in
   display-message)
     for a in "\$@"; do case "\$a" in *pane_current_command*) printf '%s\n' '$comm'; exit 0 ;; esac; done
+    for a in "\$@"; do case "\$a" in *pane_pid*) printf '4242\n'; exit 0 ;; esac; done
     exit 0 ;;
   list-windows) printf '%s\n' win; exit 0 ;;
 esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
+  cat > "$fakebin/ps" <<SH
+#!/usr/bin/env bash
+set -u
+case "\$*" in
+  "-axo pid=,ppid=") printf '1 0\\n4242 1\\n' ;;
+  *"-o comm="*) printf '%s\\n' '$comm' ;;
+  *"-o args="*) printf '%s\\n' '$comm' ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  printf '%s\n' "$fakebin"
+}
+
+make_tree_probe_tmux() {
+  local dir=$1 root_comm=$2 fakebin child_script
+  fakebin=$(fm_fakebin "$dir")
+  child_script="$fakebin/omp"
+  cat > "$fakebin/tmux" <<SH
+#!/usr/bin/env bash
+set -u
+case "\${1:-}" in
+  display-message)
+    for a in "\$@"; do case "\$a" in *pane_current_command*) printf '%s\\n' '$root_comm'; exit 0 ;; esac; done
+    for a in "\$@"; do case "\$a" in *pane_pid*) printf '4242\\n'; exit 0 ;; esac; done
+    exit 0 ;;
+  list-windows) printf '%s\\n' win ;;
+  *) exit 0 ;;
+esac
+SH
+  chmod +x "$fakebin/tmux"
+  cat > "$fakebin/ps" <<SH
+#!/usr/bin/env bash
+set -u
+case "\$*" in
+  "-axo pid=,ppid=")
+    if [ "\${FM_FAKE_PS_BAD:-0}" = 1 ]; then
+      printf 'not-a-process-row\\n'
+    else
+      printf '1 0\\n4242 1\\n5151 4242\\n6161 5151\\n'
+    fi
+    ;;
+  *"-o comm="*)
+    case "\$*" in *"-p 6161 "*|*"-p 6161"*) printf 'bun\\n' ;; *) printf '%s\\n' '$root_comm' ;; esac
+    ;;
+  *"-o args="*)
+    case "\$*" in *"-p 6161 "*|*"-p 6161"*) printf 'bun %s\\n' '$child_script' ;; *) printf '%s\\n' '$root_comm' ;; esac
+    ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$fakebin/omp"
+  chmod +x "$fakebin/omp"
   printf '%s\n' "$fakebin"
 }
 
@@ -171,6 +226,42 @@ test_tmux_canonical_omp_accepts_current_endpoint() {
   out=$(PATH="$fb:$BASE_PATH" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state tmux sess:win omp' "$ROOT")
   [ "$out" = alive ] || fail "a current canonical OMP endpoint must remain alive, got '$out'"
   pass "tmux liveness: current canonical OMP identity remains live"
+}
+
+test_tmux_non_omp_record_rejects_current_omp() {
+  local fb out status
+  fb=$(make_probe_tmux "$TMP_ROOT/tmux-reverse-omp-mismatch" omp)
+  out=$(PATH="$fb:$BASE_PATH" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state tmux sess:win claude' "$ROOT")
+  [ "$out" = ambiguous ] || fail "a recorded non-OMP tmux task over current OMP must not remain alive, got '$out'"
+  PATH="$fb:$BASE_PATH" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_send_key tmux sess:win Escape label claude' "$ROOT" >/dev/null 2>&1
+  status=$?
+  [ "$status" -ne 0 ] || fail "a recorded non-OMP tmux task over current OMP must reject control input"
+  pass "tmux identity: recorded non-OMP rejects a current OMP endpoint"
+}
+
+test_tmux_raw_background_omp_is_quarantined() {
+  local fb out status
+  fb=$(make_tree_probe_tmux "$TMP_ROOT/tmux-raw-background-omp" bash "$TMP_ROOT/tmux-raw-background-omp/omp")
+  out=$(PATH="$fb:$BASE_PATH" FM_FAKE_PS_OMP_PID=6161 \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state tmux sess:win bash 1' "$ROOT")
+  [ "$out" = unverified ] || fail "a raw tmux wrapper with an OMP descendant must be unverified, got '$out'"
+  PATH="$fb:$BASE_PATH" FM_FAKE_PS_OMP_PID=6161 \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_send_key tmux sess:win Escape label bash 1' "$ROOT" >/dev/null 2>&1
+  status=$?
+  [ "$status" -ne 0 ] || fail "a raw tmux wrapper with an OMP descendant must reject control input"
+  out=$(PATH="$fb:$BASE_PATH" FM_FAKE_PS_OMP_PID=6161 FM_FAKE_PS_BAD=1 \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state tmux sess:win bash 1' "$ROOT")
+  [ "$out" = unverified ] || fail "an unreadable raw tmux process tree must remain unverified, got '$out'"
+  pass "tmux identity: background raw OMP descendants are quarantined"
+}
+
+test_tmux_busy_rejects_reverse_omp_identity() {
+  local fb out
+  fb=$(make_probe_tmux "$TMP_ROOT/tmux-busy-reverse-omp" omp)
+  out=$(PATH="$fb:$BASE_PATH" bash -c '. "$0/bin/fm-backend.sh"; . "$0/bin/fm-busy-lib.sh"; fm_busy_classify tmux sess:win claude reverse-omp "$1"' "$ROOT" "$TMP_ROOT/tmux-busy-reverse-omp/state")
+  [ "$out" = "unknown identity-mismatch" ] \
+    || fail "tmux busy must reject a recorded non-OMP task over current OMP, got '$out'"
+  pass "tmux busy: recorded non-OMP identity cannot trust current OMP"
 }
 
 test_tmux_raw_non_omp_preserves_liveness() {
@@ -341,6 +432,7 @@ case "${1:-}" in
             *) printf '%s\n' "$mode"; exit 0 ;;
           esac
           ;;
+        *pane_pid*) printf '%s\n' 4242; exit 0 ;;
       esac
     done
     exit 0
@@ -364,6 +456,17 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$*" in
+  "-axo pid=,ppid=") printf '%s\n' '1 0' '4242 1' ;;
+  *"-o comm="*) printf '%s\n' "${FM_TEST_PANE_CMD:-zsh}" ;;
+  *"-o args="*) printf '%s\n' "${FM_TEST_PANE_CMD:-zsh}" ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
   printf '%s\n' "$fakebin"
 }
 
@@ -618,6 +721,9 @@ test_tmux_agent_state_classifies
 test_tmux_agent_state_rejects_malformed_targets_before_probe
 test_tmux_canonical_omp_rejects_stale_endpoint
 test_tmux_canonical_omp_accepts_current_endpoint
+test_tmux_non_omp_record_rejects_current_omp
+test_tmux_raw_background_omp_is_quarantined
+test_tmux_busy_rejects_reverse_omp_identity
 test_tmux_raw_non_omp_preserves_liveness
 test_tmux_control_rejects_stale_canonical_omp
 test_herdr_agent_state_preserves_husk_classifier

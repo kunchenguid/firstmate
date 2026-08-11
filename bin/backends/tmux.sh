@@ -266,7 +266,7 @@ fm_backend_tmux_foreground_argv0s() {  # <target>
       done
 }
 
-fm_backend_tmux_raw_omp_identity() {  # <target>
+fm_backend_tmux_foreground_omp_identity() {  # <target>
   local target=$1 name
   (
     unset FM_HARNESS_UNVERIFIED
@@ -286,6 +286,45 @@ fm_backend_tmux_raw_omp_identity() {  # <target>
   )
 }
 
+fm_backend_tmux_omp_process_tree_state() {  # <target> -> omp|other|unknown
+  local target=$1 pane_pid state
+  pane_pid=$(tmux display-message -p -t "$target" '#{pane_pid}' 2>/dev/null) || {
+    printf 'unknown'
+    return 0
+  }
+  case "$pane_pid" in
+    ''|*[!0-9]*|0|1) printf 'unknown'; return 0 ;;
+  esac
+  state=$(fm_harness_process_tree_omp_state "$pane_pid" "${FM_TMUX_PS_BIN:-ps}")
+  case "$state" in
+    omp) printf 'omp' ;;
+    other)
+      if fm_backend_tmux_foreground_omp_identity "$target"; then
+        printf 'omp'
+      else
+        printf 'other'
+      fi
+      ;;
+    unknown)
+      if fm_backend_tmux_foreground_omp_identity "$target"; then
+        printf 'omp'
+      else
+        printf 'unknown'
+      fi
+      ;;
+  esac
+}
+
+fm_backend_tmux_raw_omp_process_state() {  # <target> -> omp|other|unknown
+  local FM_HARNESS_UNVERIFIED=
+  fm_backend_tmux_omp_process_tree_state "$1"
+}
+
+fm_backend_tmux_raw_omp_identity() {  # <target>
+  FM_BACKEND_TMUX_RAW_OMP_STATE=$(fm_backend_tmux_raw_omp_process_state "$1")
+  [ "$FM_BACKEND_TMUX_RAW_OMP_STATE" = omp ]
+}
+
 # fm_backend_tmux_agent_state: recovery-grade harness-agent state for one
 # recorded target. See bin/fm-backend.sh's fm_backend_agent_state for the
 # shared state vocabulary and docs/tmux-backend.md "Agent liveness probe" for
@@ -303,13 +342,18 @@ fm_backend_tmux_raw_omp_identity() {  # <target>
 # authoritative for the negative verdicts, since it is the only source that can
 # distinguish a truly idle pane from a rewritten process title.
 fm_backend_tmux_agent_state() {  # <target> [recorded-harness] [raw-launch]
-  local target=$1 recorded_harness=${2:-} raw_launch=${3:-} comm session window windows inventory_status
+  local target=$1 recorded_harness=${2:-} raw_launch=${3:-} comm session window windows inventory_status process_identity
   if [ "$recorded_harness" = 1 ] && [ -z "$raw_launch" ]; then
     raw_launch=1
     recorded_harness=
   fi
   local inherited_unverified=${FM_HARNESS_UNVERIFIED:-}
   local FM_HARNESS_UNVERIFIED=$inherited_unverified
+  [ "$recorded_harness" = raw-omp ] && {
+    printf 'unverified'
+    return 0
+  }
+  [ "$raw_launch" != 1 ] && [ -n "$inherited_unverified" ] && raw_launch=1
   [ "$raw_launch" = 1 ] && FM_HARNESS_UNVERIFIED=raw-launch
   local foreground argv0s name fg_seen=0 fg_shell=0 fg_other=0
   case "$target" in
@@ -339,9 +383,27 @@ fm_backend_tmux_agent_state() {  # <target> [recorded-harness] [raw-launch]
     printf 'missing'
     return 0
   fi
+  if [ "$raw_launch" = 1 ]; then
+    process_identity=$(fm_backend_tmux_raw_omp_process_state "$target")
+    case "$process_identity" in
+      omp|unknown)
+        printf 'unverified'
+        return 0
+        ;;
+    esac
+  fi
+  if [ -n "$recorded_harness" ] && [ "$recorded_harness" != omp ] \
+    && [ "$recorded_harness" != unknown ] && [ "$raw_launch" != 1 ]; then
+    process_identity=$(unset FM_HARNESS_UNVERIFIED; fm_backend_tmux_omp_process_tree_state "$target")
+    case "$process_identity" in
+      omp) printf 'ambiguous'; return 0 ;;
+      unknown) printf 'unreadable'; return 0 ;;
+      other) : ;;
+    esac
+  fi
   if [ "$recorded_harness" = omp ] && [ "$raw_launch" != 1 ] \
     && [ -z "${FM_HARNESS_UNVERIFIED:-}" ] \
-    && ! fm_backend_tmux_raw_omp_identity "$target"; then
+    && ! fm_backend_tmux_foreground_omp_identity "$target"; then
     printf 'ambiguous'
     return 0
   fi

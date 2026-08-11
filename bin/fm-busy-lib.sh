@@ -843,9 +843,26 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40] [
   local backend=$1 target=$2 harness=$3 id=$4 state=$5 tail40=${6-} raw_launch=${7-}
   local inherited_unverified=${FM_HARNESS_UNVERIFIED:-}
   local FM_HARNESS_UNVERIFIED=$inherited_unverified
-  local out rc r_state r_source native log
+  local out rc r_state r_source native log endpoint_checked=0
+  [ "$raw_launch" != 1 ] && [ -n "$inherited_unverified" ] && raw_launch=1
   [ "$raw_launch" = 1 ] && FM_HARNESS_UNVERIFIED=raw-launch
-  if [ "$harness" = raw-omp ] \
+  if command -v fm_backend_omp_endpoint_allows >/dev/null 2>&1 \
+    && { [ "$backend" = herdr ] || [ "$backend" = tmux ]; } \
+    && { [ -n "$harness" ] && [ "$harness" != unknown ] || [ "$raw_launch" = 1 ] \
+      || [ -n "${FM_HARNESS_UNVERIFIED:-}" ]; }; then
+    if ! fm_backend_omp_endpoint_allows "$backend" "$target" "$harness" "$raw_launch"; then
+      case "$harness:$raw_launch" in
+        raw-omp:*|omp:*|*:1)
+          printf 'unknown raw-unverified'
+          ;;
+        *)
+          printf 'unknown identity-mismatch'
+          ;;
+      esac
+      return 0
+    fi
+    endpoint_checked=1
+  elif [ "$harness" = raw-omp ] \
     || { [ "$harness" = omp ] && [ -n "${FM_HARNESS_UNVERIFIED:-}" ]; } \
     || { [ "$raw_launch" = 1 ] \
       && command -v fm_backend_raw_omp_identity >/dev/null 2>&1 \
@@ -910,7 +927,7 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40] [
   if [ "$backend" = herdr ] \
     && { [ -z "${FM_HARNESS_UNVERIFIED:-}" ] || [ "$raw_launch" = 1 ]; } \
     && command -v fm_backend_busy_state >/dev/null 2>&1; then
-    native=$(fm_backend_busy_state "$backend" "$target" 2>/dev/null || true)
+    native=$(fm_backend_busy_state "$backend" "$target" "$harness" "$raw_launch" "$endpoint_checked" 2>/dev/null || true)
     if [ "$native" = busy ]; then
       printf 'busy herdr-native'
       return 0
@@ -971,6 +988,9 @@ fm_busy_classify_live() {  # <backend> <target> <harness> <id> <state-dir> [expe
   local backend=$1 target=$2 harness=$3 id=$4 state=$5 label=${6-} raw_launch=${7-}
   local inherited_unverified=${FM_HARNESS_UNVERIFIED:-}
   local FM_HARNESS_UNVERIFIED=$inherited_unverified
+  if [ "$raw_launch" != 1 ] && [ -n "$inherited_unverified" ]; then
+    raw_launch=1
+  fi
   [ "$raw_launch" = 1 ] && FM_HARNESS_UNVERIFIED=raw-launch
   if [ -z "$target" ]; then
     printf 'unknown no-target'

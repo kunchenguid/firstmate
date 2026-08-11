@@ -216,12 +216,13 @@ cmd_capture() {
 }
 
 cmd_observe() {
-  local id=$1 harness
+  local id=$1 harness raw_launch
   validate_id "$id"
   validate_home "$id"
   remote_endpoint_require "$id"
   harness=$(fm_meta_get "$REMOTE_ENDPOINT_META" harness)
-  fm_pending_reply_backend_observation "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" "fm-$id" "$harness"
+  raw_launch=$(fm_meta_get "$REMOTE_ENDPOINT_META" raw_launch)
+  fm_pending_reply_backend_observation "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" "fm-$id" "$harness" "$raw_launch"
   printf '\n'
 }
 

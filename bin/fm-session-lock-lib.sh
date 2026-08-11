@@ -109,6 +109,79 @@ fm_harness_omp_process_matches() {  # <comm> <args>
   return 1
 }
 
+fm_harness_process_tree_omp_state() {  # <root-pid> [ps-bin] -> omp|other|unknown
+  local root=$1 ps_bin=${2:-ps} rows tree pid ppid comm args rc
+  case "$root" in
+    ''|*[!0-9]*|0|1) printf 'unknown'; return 0 ;;
+  esac
+  command -v "$ps_bin" >/dev/null 2>&1 || { printf 'unknown'; return 0; }
+  rows=$(LC_ALL=C "$ps_bin" -axo pid=,ppid= 2>/dev/null) || {
+    printf 'unknown'
+    return 0
+  }
+  tree=$(printf '%s\n' "$rows" | awk -v root="$root" '
+    NF == 0 { next }
+    NF != 2 || $1 !~ /^[0-9]+$/ || $2 !~ /^[0-9]+$/ { bad=1; next }
+    {
+      pid[++n]=$1
+      ppid[n]=$2
+      if (seen[$1]++) bad=1
+      if ($1 == root) root_count++
+    }
+    END {
+      if (bad || root_count != 1) exit 2
+      found[root]=1
+      for (round=0; round<=n; round++) {
+        changed=0
+        for (i=1; i<=n; i++) {
+          if (found[ppid[i]] && !found[pid[i]]) {
+            found[pid[i]]=1
+            changed=1
+          }
+        }
+        if (!changed) break
+      }
+      for (i=1; i<=n; i++) if (found[pid[i]]) print pid[i]
+    }
+  ')
+  rc=$?
+  [ "$rc" -eq 0 ] && [ -n "$tree" ] || {
+    printf 'unknown'
+    return 0
+  }
+  while IFS= read -r pid; do
+    [ -n "$pid" ] || continue
+    comm=$(LC_ALL=C "$ps_bin" -p "$pid" -o comm= 2>/dev/null) || {
+      printf 'unknown'
+      return 0
+    }
+    comm=$(printf '%s\n' "$comm" | awk 'NF { sub(/^[[:space:]]+/, "", $0); sub(/[[:space:]]+$/, "", $0); print; count++ } END { if (count != 1) exit 2 }') || {
+      printf 'unknown'
+      return 0
+    }
+    args=$comm
+    case "${comm##*/}" in
+      bun)
+        args=$(LC_ALL=C "$ps_bin" -p "$pid" -o args= 2>/dev/null) || {
+          printf 'unknown'
+          return 0
+        }
+        args=$(printf '%s\n' "$args" | awk 'NF { sub(/^[[:space:]]+/, "", $0); sub(/[[:space:]]+$/, "", $0); print; count++ } END { if (count != 1) exit 2 }') || {
+          printf 'unknown'
+          return 0
+        }
+        ;;
+    esac
+    if fm_harness_omp_process_matches "$comm" "$args"; then
+      printf 'omp'
+      return 0
+    fi
+  done <<EOF
+$tree
+EOF
+  printf 'other'
+}
+
 # True when the process described by command name $1 and full argument string $2
 # is a verified harness. Sets FM_HARNESS_IS_CLAUDE for the ancestry walk.
 #

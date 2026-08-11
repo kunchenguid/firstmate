@@ -644,22 +644,39 @@ fm_backend_raw_omp_identity() {  # <backend> <target> [recorded-harness] [raw-la
   if [ "$recorded_harness" = raw-omp ] \
     || { [ "$recorded_harness" = omp ] \
       && { [ "$raw_launch" = 1 ] || [ -n "${FM_HARNESS_UNVERIFIED:-}" ]; }; }; then
+    FM_BACKEND_RAW_OMP_STATE=omp
     return 0
   fi
-  [ "$raw_launch" = 1 ] || return 1
+  [ "$raw_launch" = 1 ] || {
+    FM_BACKEND_RAW_OMP_STATE=other
+    return 1
+  }
+  FM_BACKEND_RAW_OMP_STATE=unknown
   case "$backend" in
     herdr)
       fm_backend_source herdr || return 1
-      fm_backend_herdr_raw_omp_identity "$target"
+      FM_BACKEND_HERDR_RAW_OMP_STATE=
+      if fm_backend_herdr_raw_omp_identity "$target"; then
+        FM_BACKEND_RAW_OMP_STATE=${FM_BACKEND_HERDR_RAW_OMP_STATE:-omp}
+      else
+        FM_BACKEND_RAW_OMP_STATE=${FM_BACKEND_HERDR_RAW_OMP_STATE:-unknown}
+      fi
       ;;
     tmux)
       fm_backend_source tmux || return 1
-      fm_backend_tmux_raw_omp_identity "$target"
+      FM_BACKEND_TMUX_RAW_OMP_STATE=
+      if fm_backend_tmux_raw_omp_identity "$target"; then
+        FM_BACKEND_RAW_OMP_STATE=${FM_BACKEND_TMUX_RAW_OMP_STATE:-omp}
+      else
+        FM_BACKEND_RAW_OMP_STATE=${FM_BACKEND_TMUX_RAW_OMP_STATE:-unknown}
+      fi
       ;;
     *)
+      FM_BACKEND_RAW_OMP_STATE=other
       return 1
       ;;
   esac
+  [ "$FM_BACKEND_RAW_OMP_STATE" = omp ]
 }
 
 fm_backend_current_omp_identity() {  # <backend> <target>
@@ -671,8 +688,95 @@ fm_backend_current_omp_identity() {  # <backend> <target>
       [ "$(fm_backend_herdr_omp_process_identity \
         "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")" = omp ]
       ;;
-    tmux) fm_backend_tmux_raw_omp_identity "$target" ;;
+    tmux) fm_backend_tmux_foreground_omp_identity "$target" ;;
     *) return 1 ;;
+  esac
+}
+
+fm_backend_omp_endpoint_state() {  # <backend> <target> [recorded-harness] [raw-launch]
+  local backend=$1 target=$2 recorded_harness=${3:-} raw_launch=${4:-} state
+  [ -n "${FM_HARNESS_UNVERIFIED:-}" ] && raw_launch=1
+  if [ "$recorded_harness" = raw-omp ]; then
+    printf 'omp'
+    return 0
+  fi
+  if [ "$raw_launch" = 1 ]; then
+    fm_backend_raw_omp_identity "$backend" "$target" "$recorded_harness" "$raw_launch" >/dev/null 2>&1 || true
+    printf '%s' "${FM_BACKEND_RAW_OMP_STATE:-unknown}"
+    return 0
+  fi
+  fm_backend_source "$backend" || { printf 'unknown'; return 0; }
+  if [ "$recorded_harness" = omp ]; then
+    if ! fm_harness_omp_attribution_allowed; then
+      printf 'unknown'
+      return 0
+    fi
+    case "$backend" in
+      herdr)
+        fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
+        state=$(fm_backend_herdr_omp_process_identity \
+          "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")
+        ;;
+      tmux)
+        if fm_backend_tmux_foreground_omp_identity "$target"; then
+          state=omp
+        else
+          state=other
+        fi
+        ;;
+      *)
+        state=other
+        ;;
+    esac
+    printf '%s' "$state"
+    return 0
+  fi
+  case "$recorded_harness" in
+    ''|unknown)
+      printf 'other'
+      return 0
+      ;;
+  esac
+  case "$backend" in
+    herdr)
+      fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
+      state=$(unset FM_HARNESS_UNVERIFIED; fm_backend_herdr_omp_process_tree_state \
+        "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")
+      ;;
+    tmux)
+      state=$(unset FM_HARNESS_UNVERIFIED; fm_backend_tmux_omp_process_tree_state "$target")
+      ;;
+    *)
+      state=other
+      ;;
+  esac
+  printf '%s' "$state"
+}
+
+fm_backend_omp_endpoint_allows() {  # <backend> <target> [recorded-harness] [raw-launch]
+  local backend=$1 target=$2 recorded_harness=${3:-} raw_launch=${4:-} state
+  [ -n "${FM_HARNESS_UNVERIFIED:-}" ] && raw_launch=1
+  case "$recorded_harness:$raw_launch" in
+    raw-omp:*|omp:1)
+      return 1
+      ;;
+  esac
+  case "$recorded_harness:$raw_launch" in
+    *:1)
+      state=$(fm_backend_omp_endpoint_state "$backend" "$target" "$recorded_harness" "$raw_launch")
+      [ "$state" = other ]
+      ;;
+    omp:)
+      state=$(fm_backend_omp_endpoint_state "$backend" "$target" "$recorded_harness" "$raw_launch")
+      [ "$state" = omp ]
+      ;;
+    :|unknown:)
+      return 0
+      ;;
+    *)
+      state=$(fm_backend_omp_endpoint_state "$backend" "$target" "$recorded_harness" "$raw_launch")
+      [ "$state" = other ]
+      ;;
   esac
 }
 
@@ -754,12 +858,8 @@ fm_backend_send_key() {  # <backend> <target> <key> [expected-label] [recorded-h
   shift
   fm_backend_source "$backend" || return 1
   if [ "$backend" != herdr ] \
-    && fm_backend_raw_omp_identity "$backend" "$target" "$recorded_harness" "$raw_launch"; then
-    return 1
-  fi
-  if [ "$backend" != herdr ] && [ "$recorded_harness" = omp ] \
-    && [ "$raw_launch" != 1 ] && [ -z "${FM_HARNESS_UNVERIFIED:-}" ] \
-    && ! fm_backend_current_omp_identity "$backend" "$target"; then
+    && { [ -n "$recorded_harness" ] || [ "$raw_launch" = 1 ]; } \
+    && ! fm_backend_omp_endpoint_allows "$backend" "$target" "$recorded_harness" "$raw_launch"; then
     return 1
   fi
   case "$backend" in
@@ -786,13 +886,8 @@ fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sl
   shift
   fm_backend_source "$backend" || return 1
   if [ "$backend" != herdr ] \
-    && fm_backend_raw_omp_identity "$backend" "$target" "$recorded_harness" "$raw_launch"; then
-    printf 'unknown'
-    return 0
-  fi
-  if [ "$backend" != herdr ] && [ "$recorded_harness" = omp ] \
-    && [ "$raw_launch" != 1 ] && [ -z "${FM_HARNESS_UNVERIFIED:-}" ] \
-    && ! fm_backend_current_omp_identity "$backend" "$target"; then
+    && { [ -n "$recorded_harness" ] || [ "$raw_launch" = 1 ]; } \
+    && ! fm_backend_omp_endpoint_allows "$backend" "$target" "$recorded_harness" "$raw_launch"; then
     printf 'unknown'
     return 0
   fi
@@ -851,12 +946,19 @@ fm_backend_worktree_path() {  # <backend> <worktree-id>
 # uses unknown as the cue for harness-scoped pane-tail detection, while
 # fm-crew-state.sh also corroborates native idle verdicts with the recorded
 # harness's signature before treating a no-run crew as not busy.
-fm_backend_busy_state() {  # <backend> <target>
-  local backend=$1
-  shift
+fm_backend_busy_state() {  # <backend> <target> [recorded-harness] [raw-launch] [endpoint-checked]
+  local backend=$1 target=${2:-} recorded_harness=${3-} raw_launch=${4-} endpoint_checked=${5-}
+  [ -n "${FM_HARNESS_UNVERIFIED:-}" ] && raw_launch=1
   fm_backend_source "$backend" || { printf 'unknown'; return 0; }
+  if { [ -n "$recorded_harness" ] || [ "$raw_launch" = 1 ]; } \
+    && { [ "$backend" = herdr ] || [ "$backend" = tmux ]; } \
+    && [ "$endpoint_checked" != 1 ] \
+    && ! fm_backend_omp_endpoint_allows "$backend" "$target" "$recorded_harness" "$raw_launch"; then
+    printf 'unknown'
+    return 0
+  fi
   case "$backend" in
-    herdr) fm_backend_herdr_busy_state "$@" ;;
+    herdr) fm_backend_herdr_busy_state "$target" ;;
     *) printf 'unknown' ;;
   esac
 }
@@ -874,9 +976,15 @@ fm_backend_busy_state() {  # <backend> <target>
 # assumption; zellij's classifier reads `dump-screen --ansi`, which replaced
 # its old no-classifier content-diff reporting.
 fm_backend_composer_state() {  # <backend> <target> [recorded-harness] [raw-launch] -> empty|pending|pending-unproven|unknown
-  local backend=$1
+  local backend=$1 target=${2:-} recorded_harness=${3-} raw_launch=${4-}
   shift
   fm_backend_source "$backend" || { printf 'unknown'; return 0; }
+  if [ "$backend" != herdr ] \
+    && { [ -n "$recorded_harness" ] || [ "$raw_launch" = 1 ]; } \
+    && ! fm_backend_omp_endpoint_allows "$backend" "$target" "$recorded_harness" "$raw_launch"; then
+    printf 'unknown'
+    return 0
+  fi
   case "$backend" in
     tmux) fm_tmux_composer_state "$@" ;;
     herdr) fm_backend_herdr_composer_state "$@" ;;
@@ -959,10 +1067,6 @@ fm_backend_agent_state() {  # <backend> <target> [recorded-harness] [raw-launch]
   local FM_HARNESS_UNVERIFIED=$inherited_unverified
   [ "$raw_launch" = 1 ] && FM_HARNESS_UNVERIFIED=raw-launch
   fm_backend_source "$backend" || { printf 'unverified'; return 0; }
-  if fm_backend_raw_omp_identity "$backend" "$target" "$recorded_harness" "$raw_launch"; then
-    printf 'unverified'
-    return 0
-  fi
   case "$backend" in
     tmux) fm_backend_tmux_agent_state "$target" "$recorded_harness" "$raw_launch" ;;
     herdr) fm_backend_herdr_agent_state "$target" "$recorded_harness" "$raw_launch" ;;
