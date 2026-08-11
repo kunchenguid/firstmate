@@ -143,10 +143,14 @@ if [ "$ARM_WATCH" = yes ] \
   WATCH_OUT=$("$FM_ROOT/bin/fm-nm-watch.sh" "$ID" "$URL" 2>&1) || WATCH_RC=$?
   [ -z "$WATCH_OUT" ] || printf '%s\n' "$WATCH_OUT"
   if [ "$WATCH_RC" -ne 0 ]; then
-    # Prefer what the arm recorded durably; fall back to its own last printed
-    # line so a future refusal that records nothing is still stated, not hidden.
+    # Prefer what the arm recorded durably; fall back to its own verdict line so
+    # a future refusal that records nothing is still stated, not hidden. Selected
+    # by the "watch not armed" prefix rather than by position, because a failed
+    # arm also dumps the raw no-mistakes output as evidence and the last line of
+    # the capture is then that evidence, not the verdict.
     WATCH_REASON=$(grep '^nm_watch_unarmed=' "$META" 2>/dev/null | tail -1 | cut -d= -f2- || true)
-    [ -n "$WATCH_REASON" ] || WATCH_REASON=$(printf '%s\n' "$WATCH_OUT" | grep -v '^[[:space:]]*$' | tail -1)
+    [ -n "$WATCH_REASON" ] || WATCH_REASON=$(printf '%s\n' "$WATCH_OUT" \
+      | grep '^watch not armed' | tail -1 | sed 's/^watch not armed[^:]*: *//')
     fm_nm_unwatched_diagnostic "$ID" "$URL" "${WATCH_REASON:-bin/fm-nm-watch.sh exited $WATCH_RC without a reason}" >&2
   fi
 fi
