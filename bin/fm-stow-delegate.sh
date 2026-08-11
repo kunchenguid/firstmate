@@ -95,8 +95,15 @@ for id in "$@"; do
     "$SCRIPT_DIR/fm-send.sh" "fm-$id" "$REQUEST"; then
     printf '%s\t%s\tdispatched\n' "$id" "$corr" >> "$RESULTS"
   else
-    fm_pending_reply_discard_undelivered "$STATE" "$corr" >/dev/null 2>&1 || true
-    printf '%s\t%s\tsend-error\n' "$id" "$corr" >> "$RESULTS"
+    rec=$(fm_pending_reply_path "$STATE" "$corr")
+    phase=""
+    [ -f "$rec" ] && phase=$(fm_pending_reply_get "$rec" phase)
+    if [ "$phase" = delivery_unknown ]; then
+      printf '%s\t%s\tdelivery-unknown\n' "$id" "$corr" >> "$RESULTS"
+    else
+      fm_pending_reply_discard_undelivered "$STATE" "$corr" >/dev/null 2>&1 || true
+      printf '%s\t%s\tsend-error\n' "$id" "$corr" >> "$RESULTS"
+    fi
     incomplete=1
   fi
 done
@@ -120,6 +127,11 @@ while IFS=$'\t' read -r id corr dispatch; do
   if [ "$dispatch" = send-error ]; then
     printf 'result=send-error\n'
     printf 'reason=the marked stow request was not delivered\n'
+    continue
+  fi
+  if [ "$dispatch" = delivery-unknown ]; then
+    printf 'result=pending\n'
+    printf 'reason=delivery outcome is unknown; the pending receipt was preserved for reconciliation\n'
     continue
   fi
   if fm_pending_reply_try_resolve "$STATE" "$corr" >/dev/null 2>&1; then

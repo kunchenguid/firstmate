@@ -411,6 +411,7 @@ run_delegate() { # <home> <reply-mode> <timeout> <id>...
     TMPDIR="${TMPDIR:-/tmp}" \
     FM_ROOT_OVERRIDE="$home" \
     FM_HOME="$home" \
+    FM_GATE_REFUSE_BYPASS=1 \
     FM_SEND_LOG="$TMP_ROOT/delegate-send.log" \
     FM_DELEGATE_REPLY_MODE="$reply_mode" \
     FM_SEND_SETTLE=0 \
@@ -465,6 +466,60 @@ test_live_agent_receipt_is_returned_when_ready() {
   pass "a correlated secondmate receipt is returned without waiting out the bound"
 }
 
+# run_delegate_remote <home> <ssh-mode> <timeout> <id>...: drive the delegate
+# against a remote (ssh) secondmate route with no FM_ROOT_OVERRIDE, so
+# fm-send.sh's remote leg resolves fm-on.sh's tracked-command check against
+# this real checkout instead of the fake home.
+run_delegate_remote() {
+  local home=$1 ssh_mode=$2 timeout=$3
+  shift 3
+  env -i \
+    PATH="$FAKEBIN:$BASE_PATH" \
+    HOME="${HOME:-/tmp}" \
+    TMPDIR="${TMPDIR:-/tmp}" \
+    FM_HOME="$home" \
+    FM_GATE_REFUSE_BYPASS=1 \
+    FM_SSH_BIN="$FAKEBIN/fake-ssh" \
+    FM_FAKE_SSH_MODE="$ssh_mode" \
+    FM_SEND_SETTLE=0 \
+    FM_STOW_CASCADE_TIMEOUT="$timeout" \
+    "$DELEGATE" "$@" 2>/dev/null
+}
+
+test_ambiguous_remote_delivery_preserves_pending_receipt() {
+  local home remote out rc rec phase
+  home=$(new_primary delegate-remote-ambiguous)
+  remote="$TMP_ROOT/homes/delegate-remote-ambiguous-remote"
+  remote_record remote-domain remote-mac "$TMP_ROOT/remote-root" "$remote" \
+    > "$home/data/secondmates.md"
+  fm_write_meta "$home/state/remote-domain.meta" \
+    "window=remote:remote-domain" \
+    "worktree=$remote" \
+    "project=$remote" \
+    "harness=claude" \
+    "kind=secondmate" \
+    "mode=secondmate" \
+    "remote_host=remote-mac"
+
+  set +e
+  out=$(run_delegate_remote "$home" unreachable 1 remote-domain)
+  rc=$?
+  set -e
+
+  expect_code 3 "$rc" "an ambiguous remote delivery should not report a clean cascade"
+  assert_contains "$out" 'secondmate=remote-domain' "the ambiguous result did not identify its secondmate"
+  assert_contains "$out" 'result=pending' "an ambiguous remote delivery was not reported as pending"
+  assert_contains "$out" 'preserved for reconciliation' \
+    "the ambiguous outcome did not explain the preserved receipt"
+
+  rec=$(find "$home/state/pending-replies" -type f ! -name '.*' | head -1)
+  [ -n "$rec" ] || fail "the ambiguous remote delivery discarded the durable pending reply"
+  phase=$(sed -n 's/^phase=//p' "$rec")
+  [ "$phase" = delivery_unknown ] \
+    || fail "the pending reply was not preserved in its delivery_unknown phase: $phase"
+  pass "an ambiguous remote delivery preserves its pending receipt instead of discarding it"
+}
+
 test_budget_is_enforced_per_home_and_never_summed
 test_every_registered_home_is_enumerated_exactly_once
 test_transport_routes_by_placement_and_liveness
@@ -473,3 +528,4 @@ test_a_slow_remote_is_bounded_and_the_rest_still_report
 test_no_cascade_without_secondmates_or_from_a_secondmate_home
 test_live_agent_receipt_wait_is_bounded
 test_live_agent_receipt_is_returned_when_ready
+test_ambiguous_remote_delivery_preserves_pending_receipt
