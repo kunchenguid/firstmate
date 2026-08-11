@@ -5,6 +5,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 SCAN="$ROOT/bin/fm-routine-scan.sh"
 SETUP="$ROOT/bin/fm-routine-setup.sh"
+WATCH="$ROOT/bin/fm-watch.sh"
 BOOTSTRAP="$ROOT/bin/fm-bootstrap.sh"
 TMP_ROOT=$(fm_test_tmproot fm-routine-scan)
 make_home() {
@@ -24,6 +25,23 @@ write_registry() {
 run_scan() {
   local home=$1 date_value=$2
   FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_ROUTINE_DATE="$date_value" "$SCAN"
+}
+run_bounded_watcher() {
+  local home=$1 out=$2 fakebin=$3
+  perl -e 'my $pid=fork; die unless defined $pid; if (!$pid) { exec @ARGV } local $SIG{ALRM}=sub { kill "TERM", $pid; waitpid $pid, 0; exit 124 }; alarm 10; waitpid $pid, 0; alarm 0; exit($? >> 8)' \
+    env FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_CHECK_INTERVAL=1 FM_CHECK_TIMEOUT=1 \
+      FM_POLL=0.02 FM_HEARTBEAT=999999 FM_SIGNAL_GRACE=0 PATH="$fakebin:$PATH" "$WATCH" > "$out"
+}
+ack_watcher_cycle() {
+  local state=$1 err sequence generation
+  err="$state/.test-wake-drain.err"
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-wake-drain.sh" >/dev/null 2> "$err" || return 1
+  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$err")
+  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err")
+  rm -f "$err"
+  [ -n "$sequence" ] && [ -n "$generation" ] || return 1
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-wake-drain.sh" --ack-through "$sequence" \
+    --recovery-generation "$generation"
 }
 file_mode() {
   if [ "$(uname)" = Darwin ]; then
@@ -259,6 +277,69 @@ test_deferred_check_acknowledges_after_wake() {
   [ -z "$third" ] || fail "acknowledged routine fired again"
   pass "routine fire state commits after wake acknowledgement"
 }
+test_watcher_acknowledges_only_after_complete_scan() {
+  local home fake_root fakebin rc fired_expected
+  home=$(make_home watch-ack)
+  fake_root="$TMP_ROOT/watch-ack-root"
+  fakebin="$TMP_ROOT/watch-ack-fakebin"
+  mkdir -p "$fake_root/bin" "$fakebin"
+  cp "$ROOT/bin/fm-timeout-lib.sh" "$fake_root/bin/fm-timeout-lib.sh"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = list-windows ] && exit 0
+exit 1
+SH
+  chmod 0755 "$fakebin/tmux"
+  cat > "$fake_root/bin/fm-routine-scan.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+umask 077
+printf '%s\n' \
+  'item-a|daily|2026-08-10|captain|check priorities' \
+  'item-b|daily|2026-08-10|captain|review the week' > "$FM_STATE_OVERRIDE/.routine-pending"
+chmod 0600 "$FM_STATE_OVERRIDE/.routine-pending"
+printf '%s\n' 'routine-due: item-a | captain | check priorities'
+sleep 5
+SH
+  chmod 0755 "$fake_root/bin/fm-routine-scan.sh"
+
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$fake_root" "$SETUP" \
+    || fail "routine setup could not arm the watcher acknowledgement fixture"
+  run_bounded_watcher "$home" "$home/watch1.out" "$fakebin"
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "an interrupted routine check did not surface a wake"
+  grep -q 'routine-due: item-a' "$home/watch1.out" \
+    || fail "the emitted routine line was not surfaced"
+  grep -q 'routine-check-error:' "$home/watch1.out" \
+    || fail "the interrupted routine check did not report its failure"
+  [ -f "$home/state/.routine-pending" ] \
+    || fail "an interrupted scan acknowledged its unemitted routines"
+  grep -q '^item-b|daily|2026-08-10|' "$home/state/.routine-pending" \
+    || fail "the unemitted routine was dropped from pending state"
+  [ ! -e "$home/state/.routine-fired" ] \
+    || fail "an interrupted scan committed fire state"
+  ack_watcher_cycle "$home/state" \
+    || fail "the interrupted routine wake could not be acknowledged"
+
+  cp "$ROOT/bin/fm-routine-scan.sh" "$fake_root/bin/fm-routine-scan.sh"
+  cp "$ROOT/bin/fm-wake-lib.sh" "$fake_root/bin/fm-wake-lib.sh"
+  write_registry "$home" \
+    '- item-a | daily | captain | check priorities | do' \
+    '- item-b | daily | captain | review the week | do'
+  run_bounded_watcher "$home" "$home/watch2.out" "$fakebin"
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "the recovered routine scan did not surface its wake"
+  grep -q 'routine-due: item-a' "$home/watch2.out" \
+    || fail "the retained routine did not re-surface after recovery"
+  grep -q 'routine-due: item-b' "$home/watch2.out" \
+    || fail "the unemitted routine did not surface after recovery"
+  [ ! -e "$home/state/.routine-pending" ] \
+    || fail "a complete scan left pending fire state"
+  fired_expected=$(printf '%s\n' 'item-a|daily|2026-08-10' 'item-b|daily|2026-08-10')
+  [ "$(cat "$home/state/.routine-fired")" = "$fired_expected" ] \
+    || fail "acknowledged fire state does not match the surfaced routines"
+  pass "watcher acknowledges routines only after a complete scan"
+}
 test_symlink_registry_is_rejected_at_scan_boundary() {
   local home outside out rc
   home=$(make_home symlink-registry)
@@ -313,5 +394,6 @@ test_nothing_due_is_silent_and_does_not_create_fire_state
 test_fire_state_prevents_repeats_after_scan_restart
 test_duplicate_id_cannot_alternate_fired_cadences
 test_deferred_check_acknowledges_after_wake
+test_watcher_acknowledges_only_after_complete_scan
 test_symlink_registry_is_rejected_at_scan_boundary
 test_check_surfaces_registry_diagnostics

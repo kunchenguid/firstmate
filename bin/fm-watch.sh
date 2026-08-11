@@ -537,6 +537,7 @@ FM_ACTIVE_CHECK_PID=
 FM_ACTIVE_CHECK_PGID=
 FM_CHECK_OUTPUT=
 FM_CHECK_RESULT=
+FM_CHECK_RC=
 FM_CHECK_SIGNAL_PENDING=
 
 fm_check_output_cleanup() {
@@ -573,6 +574,7 @@ run_check_capture() {
   local pgid
   fm_check_output_cleanup
   FM_CHECK_RESULT=
+  FM_CHECK_RC=
   FM_CHECK_OUTPUT=$(mktemp "$STATE/.fm-check-output.XXXXXX") || return 1
   chmod 0600 "$FM_CHECK_OUTPUT" || { fm_check_output_cleanup; return 1; }
   FM_CHECK_SIGNAL_PENDING=
@@ -590,7 +592,8 @@ run_check_capture() {
     return 1
   fi
   [ -z "$FM_CHECK_SIGNAL_PENDING" ] || exit 1
-  wait "$FM_ACTIVE_CHECK_PID" 2>/dev/null || true
+  FM_CHECK_RC=0
+  wait "$FM_ACTIVE_CHECK_PID" 2>/dev/null || FM_CHECK_RC=$?
   FM_ACTIVE_CHECK_PID=
   fm_active_check_stop || return 1
   FM_CHECK_RESULT=$(cat "$FM_CHECK_OUTPUT" 2>/dev/null || true)
@@ -598,8 +601,9 @@ run_check_capture() {
 }
 
 routine_check_ack() {
-  local id=$1 output=$2
+  local id=$1 output=$2 check_rc=$3
   [ "$id" = routine-scan ] || return 0
+  [ "$check_rc" -eq 0 ] || return 0
   case "$output" in
     *'routine-due: '*) ;;
     *) return 0 ;;
@@ -934,7 +938,7 @@ while :; do
       if [ -n "$out" ]; then
         reason="check: $c: $out"
         fm_wake_append check "$c" "$reason" || exit 1
-        routine_check_ack "$id" "$out" || exit 1
+        routine_check_ack "$id" "$out" "$FM_CHECK_RC" || exit 1
         if [ "$is_pr_poll" -eq 1 ] && [ "$out" = merged ]; then
           if fm_pr_poll_retirement_publish "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" "$out"; then
             fm_pr_poll_retirement_recover_one "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" \
