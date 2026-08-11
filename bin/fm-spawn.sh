@@ -1045,10 +1045,20 @@ else
 fi
 [ -z "$HARNESS_ARG" ] || ARG3=$HARNESS_ARG
 
+# Pi's CLI surface is version-dependent, so probe the resolved executable's help
+# before composing the optional regular-TUI flag. An absent or inconclusive probe
+# omits the flag so older Pi versions can still spawn.
+pi_supports_tui_mode() {
+  local harness=$1 help
+  command -v "$harness" >/dev/null 2>&1 || return 1
+  help=$("$harness" --help 2>&1) || return 1
+  printf '%s\n' "$help" | grep -Eq -- '(^|[[:space:]])--tui-mode([[:space:]=]|$)'
+}
+
 # The verified launch command per adapter. The knowledge half of each adapter
 # (busy-state source, exit command, dialogs, quirks) lives in the harness-adapters skill.
 launch_template() {
-  local harness=$1 kind=${2:-ship}
+  local harness=$1 kind=${2:-ship} tui_mode=
   # shellcheck disable=SC2016  # single quotes are deliberate: $(cat ...) expands in the crewmate pane, not here
   case "$harness" in
     # CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false disables claude's interactive
@@ -1070,10 +1080,14 @@ launch_template() {
       ;;
     opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     pi|pi-signed)
+      if pi_supports_tui_mode "$harness"; then
+        tui_mode=' --tui-mode regular'
+      fi
+      printf '%s' "$harness$tui_mode"
       if [ "$kind" = secondmate ]; then
-        printf '%s%s' "$harness" ' --tui-mode regular __MODELFLAG____EFFORTFLAG__-e __PITURNEND__ -e __PIWATCH__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' ' __MODELFLAG____EFFORTFLAG__-e __PITURNEND__ -e __PIWATCH__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       else
-        printf '%s%s' "$harness" ' --tui-mode regular __MODELFLAG____EFFORTFLAG__-e __PIEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' ' __MODELFLAG____EFFORTFLAG__-e __PIEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       fi
       ;;
     # grok (Grok Build TUI): a positional prompt starts the supervised interactive
