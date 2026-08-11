@@ -365,9 +365,9 @@ classify_signal() {  # <reason-after-colon> <state>
   fi
 }
 
-# classify_stale decides the WAKE itself (one-shot per distinct hash). On a
-# first sight of a non-terminal stale it returns "self" and the caller records a
-# timestamp marker; persistence is escalated by housekeeping's recheck, not here.
+# classify_stale decides each watcher handoff. On the first sight of a
+# non-terminal stale it returns "self" and the caller records a timestamp marker;
+# persistence is escalated by housekeeping's recheck, not here.
 classify_stale() {  # <window> <state>
   local win=$1 state=$2 task last seen
   task=$(window_to_task "$win" "$state")
