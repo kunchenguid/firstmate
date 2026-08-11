@@ -1455,6 +1455,10 @@ reap_cursor_worker_server() {  # <state_dir> <id>
 reap_cursor_worker_launch_token() {  # <state_dir> <id>
   local state_dir=$1 id=$2 token_file marker proof token pid command identity tmp pids matched
   token_file="$state_dir/$id.cursor-launch-token"
+  if [ -L "$token_file" ]; then
+    echo "REFUSED: cursor launch token for $id is symlinked; preserving it." >&2
+    return 1
+  fi
   [ -f "$token_file" ] || return 0
   marker="$state_dir/.$id.cursor-boundary."
   IFS= read -r token < "$token_file" || return 1

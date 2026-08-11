@@ -478,6 +478,50 @@ SH
   pass "session-lock: external Cursor primary identity accepts its verified marker without launch metadata"
 }
 
+test_cursor_external_child_script_is_not_probed() {
+  local dir fakebin script side_effect
+  dir="$TMP_ROOT/cursor-child-script"
+  fakebin=$(fm_fakebin "$dir")
+  script="$dir/marked-child.js"
+  side_effect="$dir/probed"
+  cat > "$script" <<SH
+#!/usr/bin/env bash
+: > "$side_effect"
+echo 'Usage: child'
+echo 'Start the Cursor Agent'
+echo 'CURSOR_API_ENDPOINT api2.cursor.sh'
+SH
+  chmod +x "$script"
+  cat > "$fakebin/ps" <<SH
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "\$#" -gt 0 ]; do
+  case "\$1" in
+    -o) field=\$2; shift 2 ;;
+    -p) pid=\$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "\$pid:\$field" in
+  711:comm=) echo node ;;
+  711:args=) echo '/usr/bin/node $script --force' ;;
+  711:command=) echo 'node $script --force CURSOR_AGENT=1' ;;
+  711:ppid=) echo 1 ;;
+  *:comm=) echo bash ;;
+  *:args=) echo 'bash tests/run.sh' ;;
+  *:ppid=) echo 711 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  if FM_PROC_ROOT_OVERRIDE="$dir/no-proc" lib_eval "$fakebin" \
+    "fm_cursor_process_matches node 'node $script --force' /usr/bin/node 711"; then
+    fail "a marked Node child script claimed Cursor identity"
+  fi
+  [ ! -e "$side_effect" ] || fail "Cursor identity probed a marked child script"
+  pass "session-lock: marked interpreter child scripts are not probed as Cursor primaries"
+}
+
 test_claude_node_worker_keeps_contiguous_ancestry() {
   local dir fakebin got
   dir="$TMP_ROOT/claude-node-worker"
@@ -747,6 +791,7 @@ test_relative_process_names_cannot_claim_cursor
 test_cursor_identity_does_not_execute_pid_executable
 test_mainthread_cursor_argv0_with_spaces_is_identified
 test_cursor_external_primary_identity_without_launch_metadata
+test_cursor_external_child_script_is_not_probed
 test_claude_node_worker_keeps_contiguous_ancestry
 test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live

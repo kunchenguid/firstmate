@@ -363,7 +363,11 @@ fm_cursor_process_launch_identity_matches() {  # <pid> <canonical-path>
 }
 
 fm_cursor_primary_path_is_cursor() {  # <path>
-  fm_cursor_verify_executable "$1"
+  local path=$1
+  case "${path##*/}" in
+    cursor-agent|agent) fm_cursor_verify_executable "$path" ;;
+    *) return 1 ;;
+  esac
 }
 
 fm_cursor_external_primary_matches() {  # <pid> <comm> <args> <argv0>

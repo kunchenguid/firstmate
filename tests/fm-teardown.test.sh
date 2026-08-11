@@ -2574,6 +2574,35 @@ test_symlink_cursor_worker_server_record_is_retained() {
   pass "symlinked cursor worker ownership is refused and preserved"
 }
 
+test_symlink_cursor_worker_launch_token_is_retained() {
+  local case_dir rc pid external_token
+  case_dir=$(make_case cursor-worker-launch-token-symlink)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  external_token="$case_dir/external-cursor-launch-token"
+  printf '%s\n' abc123 > "$external_token"
+  ln -s "$external_token" "$case_dir/state/task-x1.cursor-launch-token"
+  FM_CURSOR_LAUNCH_TOKEN=abc123 bash -c 'exec -a worker-server sleep 300' &
+  pid=$!
+  disown
+  sleep 0.3
+  kill -0 "$pid" 2>/dev/null || fail "cursor-worker-launch-token-symlink: setup worker did not start"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 1 "$rc" "cursor-worker-launch-token-symlink: teardown must refuse"
+  kill -0 "$pid" 2>/dev/null || fail "cursor-worker-launch-token-symlink: symlink target worker was killed"
+  [ -L "$case_dir/state/task-x1.cursor-launch-token" ] \
+    || fail "cursor-worker-launch-token-symlink: symlinked token was removed"
+  [ -f "$external_token" ] \
+    || fail "cursor-worker-launch-token-symlink: external token target was removed"
+  assert_grep "is symlinked" "$case_dir/stderr" \
+    "cursor-worker-launch-token-symlink: refusal did not identify symlinked token"
+  kill -KILL "$pid" 2>/dev/null || true
+  pass "symlinked cursor launch token is refused and preserved"
+}
+
 test_recorded_cursor_worker_server_is_reaped_for_secondmate() {
   local case_dir home rc pid starttime
   case_dir=$(make_case cursor-worker-server-secondmate-reap)
@@ -3064,6 +3093,7 @@ test_recorded_cursor_worker_server_unreadable_identity_is_retained
 test_recorded_cursor_worker_server_surviving_kill_is_retained
 test_malformed_cursor_worker_server_record_is_retained
 test_symlink_cursor_worker_server_record_is_retained
+test_symlink_cursor_worker_launch_token_is_retained
 test_recorded_cursor_worker_server_is_reaped_for_secondmate
 test_cursor_worker_server_record_missing_falls_back_to_cwd_reaper
 test_cursor_worker_server_record_never_touches_other_home_daemon
