@@ -661,6 +661,7 @@ RELAUNCH_REPLACEMENT_STATE=
 RELAUNCH_REPLACEMENT_WT=
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
+SPAWN_TREEHOUSE_LEASE_WT=
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -681,6 +682,12 @@ parse_orca_worktree_result() {
 
 spawn_abort_cleanup() {
   local status=$?
+  if [ -n "$SPAWN_TREEHOUSE_LEASE_WT" ]; then
+    if ! (cd "$PROJ_ABS" && treehouse return --force "$SPAWN_TREEHOUSE_LEASE_WT") >/dev/null 2>&1; then
+      echo "warning: could not return treehouse lease after aborted spawn of $ID; inspect '$SPAWN_TREEHOUSE_LEASE_WT'" >&2
+    fi
+    SPAWN_TREEHOUSE_LEASE_WT=
+  fi
   if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ] \
      && [ "$SPAWN_META_PUBLISH_STARTED" = 1 ] \
      && [ -n "$SPAWN_META_TMP" ] \
@@ -2170,7 +2177,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fi
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-  spawn_send_text_line "$WT_TARGET" "cd \"\$(treehouse get --lease --lease-holder $ID)\""
+  spawn_send_text_line "$WT_TARGET" "fm_treehouse_wt=\$(treehouse get --lease --lease-holder $ID) && [ -n \"\$fm_treehouse_wt\" ] && cd \"\$fm_treehouse_wt\""
 
   # Wait for the durable treehouse lease and cd: the pane's cwd moves from the project to the worktree.
   # Target the stable window id, not the name: if the name is ever lost (e.g. an
@@ -2216,6 +2223,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     exit 1
   fi
 
+  SPAWN_TREEHOUSE_LEASE_WT=$WT
   validate_spawn_worktree "treehouse get" "$T"
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
@@ -2622,6 +2630,7 @@ preserve_relaunch_meta() {
     echo "control_relaunch_tx=$FM_CONTROL_RELAUNCH_TX"
   fi
 } > "$SPAWN_META_PATH"
+SPAWN_TREEHOUSE_LEASE_WT=
 if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_META_PUBLISH_STARTED=1
   mv -f "$SPAWN_META_TMP" "$STATE/$ID.meta"

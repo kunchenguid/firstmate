@@ -297,7 +297,7 @@ test_spawn_tmux_window_construction() {
   # the stable id. The task id is the lease holder, so a stopped-but-preserved
   # worker and concurrently-live workers keep their slots until teardown returns
   # the worktree explicitly.
-  lease_command="send-keys -t @spawnwid cd \"\$(treehouse get --lease --lease-holder rec-win-gg7)\" Enter"
+  lease_command='send-keys -t @spawnwid fm_treehouse_wt=$(treehouse get --lease --lease-holder rec-win-gg7) && [ -n "$fm_treehouse_wt" ] && cd "$fm_treehouse_wt" Enter'
   assert_grep "$lease_command" "$rec" \
     "treehouse get must durably lease the slot to the task on the stable window id"
   assert_grep "display-message -p -t @spawnwid #{pane_current_path}" "$rec" \
@@ -306,9 +306,95 @@ test_spawn_tmux_window_construction() {
   pass "fm-spawn: appends windows by session-colon, pins the name, and targets the window id"
 }
 
+make_lease_lifecycle_fakebin() {
+  local dir=$1 fakebin
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  get)
+    [ ! -e "$FM_FAKE_LEASE" ] || exit 1
+    printf '%s\n' "${4:-unknown}" > "$FM_FAKE_LEASE"
+    printf '%s\n' "$FM_FAKE_POOL_WT"
+    ;;
+  return)
+    [ "${3:-}" = "$FM_FAKE_POOL_WT" ] || exit 1
+    rm -f "$FM_FAKE_LEASE"
+    ;;
+esac
+SH
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  new-window) printf '%s\n' '@leasewid' ;;
+  display-message)
+    case "$*" in
+      *'#{pane_current_path}'*) cat "$FM_FAKE_PANE_STATE" ;;
+      *) printf '%s\n' firstmate ;;
+    esac
+    ;;
+  send-keys)
+    command_text=${4:-}
+    case "$command_text" in
+      *'treehouse get --lease'*)
+        PATH="$PATH" bash -c "$command_text && pwd > \"$FM_FAKE_PANE_STATE\"" \
+          >/dev/null 2>&1 || true
+        ;;
+    esac
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/treehouse" "$fakebin/tmux"
+  printf '%s\n' "$fakebin"
+}
+
+test_treehouse_lease_lifecycle() {
+  local home proj wt fakebin lease pane out status id
+  home="$TMP_ROOT/lease-home"
+  proj=$(make_repo "$TMP_ROOT/lease-proj")
+  wt="$TMP_ROOT/lease-wt"
+  git -C "$proj" worktree add -q --detach "$wt" >/dev/null 2>&1
+  fakebin=$(make_lease_lifecycle_fakebin "$TMP_ROOT/lease-fake")
+  lease="$TMP_ROOT/lease-held"
+  pane="$TMP_ROOT/lease-pane"
+  id=lease-life-hh8
+  mkdir -p "$home/data/$id"
+  printf 'brief\n' > "$home/data/$id/brief.md"
+  printf '%s\n' "$proj" > "$pane"
+
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$home/data" FM_PROJECTS_OVERRIDE="$home/projects" \
+    FM_CONFIG_OVERRIDE="$home/config" FM_SPAWN_NO_GUARD=1 TMUX=fake \
+    FM_FAKE_LEASE="$lease" FM_FAKE_POOL_WT="$wt" FM_FAKE_PANE_STATE="$pane" \
+    PATH="$fakebin:$PATH" "$ROOT/bin/fm-spawn.sh" "$id" "$proj" codex \
+    --mode no-mistakes --yolo off 2>&1); status=$?
+  expect_code 0 "$status" "durably leased spawn should succeed: $out"
+  assert_present "$lease" "spawn did not retain the durable lease"
+
+  if FM_FAKE_LEASE="$lease" FM_FAKE_POOL_WT="$wt" "$fakebin/treehouse" get --lease --lease-holder contender >/dev/null 2>&1; then
+    fail "a concurrently-live worker reacquired the leased pool slot"
+  fi
+
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_FAKE_LEASE="$lease" FM_FAKE_POOL_WT="$wt" FM_FAKE_PANE_STATE="$pane" \
+    PATH="$fakebin:$PATH" "$ROOT/bin/fm-teardown.sh" "$id" --force 2>&1); status=$?
+  expect_code 0 "$status" "teardown should release the durable lease: $out"
+  assert_absent "$lease" "teardown left the durable lease held"
+  FM_FAKE_LEASE="$lease" FM_FAKE_POOL_WT="$wt" "$fakebin/treehouse" get --lease --lease-holder successor >/dev/null \
+    || fail "the pool slot was not reusable after teardown"
+  FM_FAKE_LEASE="$lease" FM_FAKE_POOL_WT="$wt" "$fakebin/treehouse" return --force "$wt"
+
+  pass "fm-spawn/fm-teardown: durable leases prevent reuse until teardown"
+}
+
 test_lib_classification
 test_guard_banner
 test_bootstrap_line
 test_brief_assertion_precedes_branch
 test_spawn_isolation_abort
 test_spawn_tmux_window_construction
+test_treehouse_lease_lifecycle
