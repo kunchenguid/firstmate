@@ -25,7 +25,7 @@ Every mechanical fact lives with its existing owner; this skill only sequences a
 - BITS command mechanics, exact flags, dry-run and `--yes` semantics, project types, and control-plane values are owned by the bytedcli BITS skill and current `--help`; consult them at use time and never freeze volatile syntax here.
 - BITS Dev Task creation is owned by the official `bits-devops-dev-task` skill, routed through the bytedcli BITS `references/dev-task.md`; use its `prepare -> confirm -> submit` flow when it is available and installed.
 - Merge, delivery-mode, yolo, and captain-instruction authority are owned by `AGENTS.md` sections 1 and 7 and the captain-instruction precedence rule; this skill adds no authority and relaxes none.
-- Long-poll monitoring without blocking a conversational turn is owned by `process-event-sources` and the `AGENTS.md` section 8 supervision contract.
+- Nonblocking BITS monitoring uses `process-event-sources` whenever an installed source-specific adapter supports the exact wait; otherwise `AGENTS.md` sections 7 and 8 own the supervised-worker path.
 - Task-level project resolution is owned by `AGENTS.md` section 7; `project-management` owns the project registry and standing delivery posture.
 - Producing and validating the code change is owned by the selected delivery path in `AGENTS.md` section 7, including the no-mistakes lifecycle when selected; ordinary BITS integration begins only after that path has produced its finalized committed head and required merge request, with green checks when the path requires them.
   The narrow release-train auto-created-MR exception begins only after the exact repository, source branch, committed head, and release ticket integration branch have been verified from live sources.
@@ -90,8 +90,9 @@ Run each operation through its owner with the write discipline above; the notes 
   After BITS auto-creates the MR, independently read it back, verify its identity, repository, source, head, and target against the pinned evidence, and only then bind its real identity or continue.
 - Pipeline and project discovery: discover the current stage, tasks, projects, pipelines, and runs through the read-only surfaces before acting; treat an incomplete or unproven discovery result as a stop, not an assumption.
 - PPE, E2E, self-test, and quick-run: trigger a deployment or test run only when the captain has explicitly authorized that run, because these are live operations; dry-run first where the command supports it, confirm the exact project, type, control plane, and target, and never let one authorization cover a later changed target.
-- Monitoring and recovery: watch a running pipeline, deploy, or run through a source-specific adapter accepted by `process-event-sources` instead of blocking a conversational turn, and recover after any interruption by reading BITS state back rather than inferring an outcome from a process exit or a single event.
-  If no installed adapter supports the exact BITS wait, stop and report that monitoring cannot be armed rather than blocking the conversational turn.
+- Monitoring and recovery: when an installed source-specific adapter accepted by `process-event-sources` supports the exact BITS wait, use that owner to watch the running pipeline, deploy, or run without blocking a conversational turn.
+  Otherwise assign the wait to a worker through the ordinary task lifecycle in `AGENTS.md` section 7 and supervise it under section 8, so the worker may block on BITS while Firstmate's conversational turn remains free.
+  After any interruption on either path, read BITS state back rather than inferring an outcome from a process exit or a single event.
 
 ## Safety boundaries
 
