@@ -530,38 +530,6 @@ EOF
   pass "an oversized secondmate summary retains the strict empty unknown fallback"
 }
 
-test_large_secondmate_summary_avoids_argument_limits() {
-  local mate fakebin summary id i bytes terminal_total=100
-  mate="$TMP_ROOT/large-summary-home"
-  make_valid_secondmate_home large-summary "$mate"
-  printf '## In flight\n' > "$mate/data/backlog.md"
-  i=1
-  while [ "$i" -le "$terminal_total" ]; do
-    id=$(printf 'terminal-%02d-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' "$i")
-    printf -- '- [ ] %s - Terminal child (repo: sample) (kind: ship) (since 2026-07-11)\n' "$id" >> "$mate/data/backlog.md"
-    mkdir -p "$mate/projects/$id"
-    fm_write_meta "$mate/state/$id.meta" \
-      "window=firstmate:fm-$id" "worktree=$mate/projects/$id" "project=sample" \
-      "harness=claude" "kind=ship" "mode=no-mistakes"
-    record_claude_state "$mate/state" "$id" idle
-    printf 'done: complete\n' > "$mate/state/$id.status"
-    i=$((i + 1))
-  done
-  printf '\n## Queued\n\n## Done\n' >> "$mate/data/backlog.md"
-  fakebin=$(make_fakebin "$mate")
-  summary=$(PATH="$fakebin:$PATH" FM_HOME="$mate" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
-    FM_SNAPSHOT_SECONDMATE_CHILDREN="$terminal_total" FM_SNAPSHOT_SECONDMATE_MAX_BYTES=262144 \
-    "$ROOT/bin/fm-fleet-snapshot.sh" --secondmate-home-summary) \
-    || fail "large secondmate summary failed"
-  bytes=$(printf '%s' "$summary" | wc -c | tr -d ' ')
-  [ "$bytes" -ge 32768 ] || fail "summary fixture did not reach supported byte budget: $bytes"
-  printf '%s' "$summary" | jq -e '
-    (.terminal_children | length) == 100
-      and ([.terminal_children[].id] | unique | length) == 100
-  ' >/dev/null || fail "large summary lost terminal children: $summary"
-  pass "large secondmate summaries avoid command argument limits"
-}
-
 test_secondmate_and_child_bounds_are_disclosed() {
   local home fakebin id mate child json expanded canonical i
   home=$(make_home secondmate-bounds)
@@ -728,7 +696,7 @@ EOF
 }
 
 test_nonprogressing_child_states_are_explicit() {
-  local home mate fakebin canonical summary
+  local home mate fakebin canonical
   home=$(make_home child-state-classification)
   mate="$TMP_ROOT/child-state-classification-home"
   make_valid_secondmate_home states "$mate"
@@ -791,11 +759,6 @@ EOF
   printf 'done: complete\n' > "$mate/state/done.status"
   printf 'failed: stopped\n' > "$mate/state/failed.status"
   rm "$mate/state/parked.meta" "$mate/state/parked.status"
-  summary=$(PATH="$fakebin:$PATH" FM_HOME="$mate" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
-    "$ROOT/bin/fm-fleet-snapshot.sh" --secondmate-home-summary)
-  printf '%s' "$summary" | jq -e '
-    [.terminal_children[] | .id + "=" + .state] == ["done=done", "failed=failed"]
-  ' >/dev/null || fail "secondmate summary dropped terminal in-flight children: $summary"
   canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
     "$ROOT/bin/fm-fleet-snapshot.sh" --json)
   printf '%s' "$canonical" | jq -e '
@@ -1938,7 +1901,6 @@ test_active_child_overrides_old_parent_event
 test_structured_child_decision_reaches_captains_call
 test_bad_secondmate_homes_never_revive_parent_work
 test_oversized_secondmate_summary_stays_strict_unknown
-test_large_secondmate_summary_avoids_argument_limits
 test_secondmate_and_child_bounds_are_disclosed
 test_parent_decision_is_untrusted_contradiction_only
 test_parent_evidence_reconciles_by_verb_and_key

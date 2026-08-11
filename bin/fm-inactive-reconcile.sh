@@ -27,29 +27,18 @@
 # only after its corresponding inactive-outcome wake is handled.
 # A receipt is intentionally independent of .hb-surfaced-* bookkeeping.
 #
-# Main homes also inspect an inactive direct secondmate's validated structured
-# home summary.
-# A terminal child missing the parent report creates one marked correlated
-# request through fm-send and a durable reconciliation obligation.
-# The existing pending-reply owner handles its repost and escalation lifecycle.
-# Remote summaries use the established fm-on route, never a forge endpoint.
-#
 # The scan never invokes gh, gh-axi, curl, fm-pr-check.sh, fm-pr-poll.sh, or a
 # state *.check.sh.
-# It reads only durable local state, fm-crew-state.sh, and a validated
-# secondmate-home summary.
+# It reads only durable local state and fm-crew-state.sh.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
-FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 OUTCOME_DIR="$STATE/terminal-outcomes"
 SCAN_MARKER="$STATE/.inactive-outcome-reconcile"
 SCAN_LOCK="$STATE/.inactive-outcome-reconcile.lock"
 CREW_STATE_BIN="${FM_INACTIVE_CREW_STATE_BIN:-$SCRIPT_DIR/fm-crew-state.sh}"
-SUMMARY_BIN="${FM_INACTIVE_RECONCILE_SUMMARY_BIN:-$SCRIPT_DIR/fm-fleet-snapshot.sh}"
-SEND_BIN="${FM_INACTIVE_RECONCILE_SEND_BIN:-$SCRIPT_DIR/fm-send.sh}"
 
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
@@ -57,10 +46,6 @@ SEND_BIN="${FM_INACTIVE_RECONCILE_SEND_BIN:-$SCRIPT_DIR/fm-send.sh}"
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 # shellcheck source=bin/fm-secondmate-parent-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-parent-lib.sh"
-# shellcheck source=bin/fm-ff-lib.sh
-. "$SCRIPT_DIR/fm-ff-lib.sh"
-# shellcheck source=bin/fm-pending-reply-lib.sh
-. "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 
 FM_INACTIVE_RECONCILE_SECS=${FM_INACTIVE_RECONCILE_SECS:-900}
 case "$FM_INACTIVE_RECONCILE_SECS" in
@@ -165,7 +150,6 @@ ensure_record() { # <fingerprint> <task> <state> <outcome-key> <origin> <phase> 
     printf 'phase=%s\n' "$phase"
     printf 'pr=%s\n' "$pr"
     printf 'created_epoch=%s\n' "$(reconcile_now)"
-    printf 'request_attempted=0\n'
     printf 'notice_emitted=0\n'
   } > "$tmp" || { rm -f "$tmp"; return 1; }
   chmod 600 "$tmp" 2>/dev/null || true
@@ -221,7 +205,7 @@ last_activity_age() { # <meta> <status> <turn-ended>
 
 scan_marker_age() {
   local now m
-  [ -e "$SCAN_MARKER" ] || { printf '999999\n'; return; }
+  [ -e "$SCAN_MARKER" ] && [ ! -L "$SCAN_MARKER" ] || { printf '999999\n'; return; }
   now=$(reconcile_now)
   m=$(file_mtime "$SCAN_MARKER" 2>/dev/null || true)
   case "$m" in ''|*[!0-9]*) printf '999999\n'; return ;; esac
@@ -278,72 +262,6 @@ report_to_parent() { # <self-id> <task> <state> <outcome-key> <fingerprint> <pr>
   append_once "$destination" "$line"
 }
 
-parent_has_outcome_report() { # <secondmate-id> <child-id> <state>
-  local mate=$1 child=$2 state=$3 key status
-  key="inactive-outcome-$mate-$child-$state"
-  status="$STATE/$mate.status"
-  [ -f "$status" ] || return 1
-  grep -Eq "^(done|failed) \[key=${key//./\\.}\]:" "$status" 2>/dev/null
-}
-
-summary_for_secondmate() { # <id> <meta>
-  local id=$1 meta=$2 home remote_host
-  home=$(meta_field "$meta" home)
-  remote_host=$(meta_field "$meta" remote_host)
-  # Session start keeps its documented blocking path network-free.
-  # The existing watcher poll performs the remote summary on its normal cadence.
-  if [ -n "$remote_host" ]; then
-    [ "${SCAN_STARTUP:-0}" != 1 ] || return 1
-    "$SCRIPT_DIR/fm-on.sh" "$id" fm-fleet-snapshot.sh --secondmate-home-summary < /dev/null 2>/dev/null
-    return
-  fi
-  validate_secondmate_home "$id" "$home" 2>/dev/null || return 1
-  env \
-    FM_ROOT_OVERRIDE="$FM_ROOT" \
-    FM_HOME="$VALIDATED_HOME" \
-    FM_STATE_OVERRIDE="$VALIDATED_HOME/state" \
-    FM_DATA_OVERRIDE="$VALIDATED_HOME/data" \
-    FM_CONFIG_OVERRIDE="$VALIDATED_HOME/config" \
-    FM_PROJECTS_OVERRIDE="$VALIDATED_HOME/projects" \
-    "$SUMMARY_BIN" --secondmate-home-summary 2>/dev/null
-}
-
-request_secondmate_report() { # <record> <secondmate-id> <child-id> <state> <outcome-key>
-  local record=$1 mate=$2 child=$3 state=$4 outcome_key=$5 msg corr rc=0 marker pending_record pending_phase
-  [ "$(record_value "$record" request_attempted)" = 1 ] && return 1
-  msg="INACTIVE OUTCOME RECONCILIATION: child $child is authoritatively $state but has no parent report. Append a terminal parent status report with [key=$outcome_key]."
-  corr=$(record_value "$record" correlation)
-  case "$corr" in
-    [A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9]) ;;
-    *)
-      corr=$(fm_pending_reply_create "$FM_HOME" "$STATE" "$mate" "$msg" 2>/dev/null || true)
-      [ -n "$corr" ] || return 2
-      record_field_set "$record" correlation "$corr" || return 2
-      ;;
-  esac
-  msg="$msg Include corr=$corr in that report."
-  fm_pending_reply_embed_corr "$msg" "$corr" msg || true
-  FM_PENDING_REPLY_EXISTING_CORR="$corr" "$SEND_BIN" "$mate" "$msg" >/dev/null 2>&1 || rc=$?
-  record_field_set "$record" request_result "$rc" || true
-  marker=$(fm_pending_reply_delivery_confirmation_path "$STATE" "$corr")
-  pending_record=$(fm_pending_reply_path "$STATE" "$corr")
-  pending_phase=$(fm_pending_reply_get "$pending_record" phase 2>/dev/null || true)
-  if [ "$rc" -eq 0 ] || [ "$pending_phase" = delivery_unknown ] \
-    || { [ -f "$marker" ] && [ ! -L "$marker" ]; }; then
-    record_field_set "$record" request_attempted 1 || return 2
-  fi
-  return "$rc"
-}
-
-settle_secondmate_request_if_reported() { # <record> <secondmate-id> <fingerprint>
-  local record=$1 mate=$2 fingerprint=$3 corr line
-  corr=$(record_value "$record" correlation)
-  case "$corr" in [A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9][A-Fa-f0-9]) ;; *) return 0 ;; esac
-  line="resolved [key=inactive-outcome-receipt-$fingerprint]: matching terminal parent report received corr=$corr"
-  append_once "$STATE/$mate.status" "$line" || return 1
-  fm_pending_reply_try_resolve "$STATE" "$corr" "$STATE/$mate.status" >/dev/null 2>&1 || true
-}
-
 reconcile_direct_child() { # <id> <meta> <secondmate-id-or-empty>
   local id=$1 meta=$2 self=${3:-} status turn last age state_line state pr fingerprint outcome_key payload
   status="$STATE/$id.status"
@@ -382,60 +300,17 @@ reconcile_direct_child() { # <id> <meta> <secondmate-id-or-empty>
   queue_presentation "$RECORD_PENDING" "$fingerprint" "$payload" || true
 }
 
-reconcile_secondmate_child() { # <secondmate-id> <child-id> <state>
-  local mate=$1 child=$2 state=$3 fingerprint outcome_key payload
-  valid_id "$mate" && valid_id "$child" || return 0
-  case "$state" in done|failed) ;; *) return 0 ;; esac
-  fingerprint=$(sha256_text "secondmate|$mate|$child|$state")
-  outcome_key="inactive-outcome-$mate-$child-$state"
-  ensure_record "$fingerprint" "$child" "$state" "$outcome_key" "secondmate:$mate" upstream "" || return 1
-  [ -n "$RECORD_PENDING" ] || return 0
-  if parent_has_outcome_report "$mate" "$child" "$state"; then
-    settle_secondmate_request_if_reported "$RECORD_PENDING" "$mate" "$fingerprint" || return 1
-    record_phase_set "$RECORD_PENDING" presentation || return 1
-    payload="inactive terminal outcome awaiting captain presentation: secondmate=$mate child=$child state=$state"
-    queue_presentation "$RECORD_PENDING" "$fingerprint" "$payload" || true
-    return 0
-  fi
-  request_secondmate_report "$RECORD_PENDING" "$mate" "$child" "$state" "$outcome_key" || true
-  payload="inactive terminal outcome missing parent report: secondmate=$mate child=$child state=$state"
-  queue_notice_once "$RECORD_PENDING" "inactive-reconcile:$fingerprint" "$payload" || true
-}
-
-scan_secondmates() {
-  local meta mate kind status last age summary child state
-  for meta in "$STATE"/*.meta; do
-    [ -f "$meta" ] || continue
-    kind=$(meta_field "$meta" kind)
-    [ "$kind" = secondmate ] || continue
-    mate=$(basename "$meta" .meta)
-    valid_id "$mate" || continue
-    status="$STATE/$mate.status"
-    last=$(last_status_line "$status")
-    status_line_verb "$last" | grep -Fx captain-held >/dev/null 2>&1 && continue
-    age=$(last_activity_age "$meta" "$status" "$STATE/$mate.turn-ended")
-    [ "$age" -ge "$FM_INACTIVE_RECONCILE_SECS" ] || continue
-    summary=$(summary_for_secondmate "$mate" "$meta" || true)
-    printf '%s' "$summary" | jq -e '
-      .schema == "fm-secondmate-home-summary.v1"
-      and (.terminal_children | type) == "array"
-    ' >/dev/null 2>&1 || continue
-    while IFS=$(printf '\t') read -r child state; do
-      [ -n "$child" ] || continue
-      reconcile_secondmate_child "$mate" "$child" "$state"
-    done < <(printf '%s' "$summary" | jq -r '.terminal_children[]? | [.id, .state] | @tsv')
-  done
-}
-
 scan() {
-  local startup=${1:-0} self='' meta id kind
-  SCAN_STARTUP=$startup
+  local startup=${1:-0} self='' meta id kind marker_tmp
   mkdir -p "$STATE" "$OUTCOME_DIR" || return 1
   [ ! -L "$OUTCOME_DIR" ] || return 1
   if [ "$startup" != 1 ] && [ "$(scan_marker_age)" -lt "$FM_INACTIVE_RECONCILE_SECS" ]; then
     return 0
   fi
-  printf '%s\n' "$(reconcile_now)" > "$SCAN_MARKER" || return 1
+  marker_tmp=$(mktemp "$STATE/.inactive-outcome-reconcile.XXXXXX") || return 1
+  printf '%s\n' "$(reconcile_now)" > "$marker_tmp" || { rm -f "$marker_tmp"; return 1; }
+  chmod 600 "$marker_tmp" 2>/dev/null || true
+  mv -f "$marker_tmp" "$SCAN_MARKER" || { rm -f "$marker_tmp"; return 1; }
   self=$(home_secondmate_id || true)
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
@@ -445,9 +320,6 @@ scan() {
     [ "$kind" = secondmate ] && continue
     reconcile_direct_child "$id" "$meta" "$self"
   done
-  if [ -z "$self" ]; then
-    scan_secondmates
-  fi
 }
 
 acknowledge() { # <fingerprint>

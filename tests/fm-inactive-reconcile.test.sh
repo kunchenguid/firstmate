@@ -34,30 +34,6 @@ make_tools() { # <world>
 #!/usr/bin/env bash
 printf 'state: %s · source: fake\n' "${FM_FAKE_CREW_STATE:-unknown}"
 SH
-  cat > "$fake/fm-fleet-snapshot.sh" <<'SH'
-#!/usr/bin/env bash
-cat "$FM_HOME/summary.json"
-SH
-  cat > "$fake/fm-send.sh" <<'SH'
-#!/usr/bin/env bash
-set -u
-printf '%s\t%s\n' "$1" "$2" >> "${FM_TEST_SEND_LOG:?}"
-if [ "${FM_TEST_SEND_FAIL_FIRST:-0}" = 1 ] && [ "$(wc -l < "${FM_TEST_SEND_LOG:?}" | tr -d ' ')" = 1 ]; then
-  exit 88
-fi
-corr=$(printf '%s' "$2" | grep -Eo 'corr=[A-Fa-f0-9]{16}' | head -1 | cut -d= -f2- || true)
-if [ -n "$corr" ]; then
-  # The real fm-send confirms a successfully delivered existing expectation.
-  # Preserve that observable contract in this deterministic transport fake.
-  # shellcheck source=/dev/null
-  . "${FM_TEST_ROOT:?}/bin/fm-pending-reply-lib.sh"
-  if [ "${FM_TEST_SEND_UNKNOWN:-0}" = 1 ]; then
-    fm_pending_reply_mark_delivery_unknown "${FM_STATE_OVERRIDE:?}" "$corr"
-    exit 255
-  fi
-  fm_pending_reply_confirm_delivery "${FM_STATE_OVERRIDE:?}" "$corr"
-fi
-SH
   cat > "$fake/tmux" <<'SH'
 #!/usr/bin/env bash
 case "${1:-}" in
@@ -84,7 +60,6 @@ make_world() { # <name>
   : > "$MATE/AGENTS.md"
   make_tools "$WORLD"
   : > "$WORLD/forge.log"
-  : > "$WORLD/send.log"
 }
 
 bind_secondmate() { # <local|remote>
@@ -121,20 +96,12 @@ write_mate_meta() {
   age "$MAIN/state/mate.meta" "$MAIN/state/mate.status"
 }
 
-write_summary() { # <state>
-  cat > "$MATE/summary.json" <<EOF
-{"schema":"fm-secondmate-home-summary.v1","terminal_children":[{"id":"child","state":"$1"}]}
-EOF
-}
-
 run_reconcile() { # <home> [--startup]
   local home=$1 option=${2:-}
   PATH="$WORLD/fakebin:$PATH" FM_ROOT_OVERRIDE="$WORLD/root" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
     FM_INACTIVE_RECONCILE_SECS=60 FM_INACTIVE_CREW_STATE_BIN="$WORLD/fakebin/fm-crew-state.sh" \
-    FM_INACTIVE_RECONCILE_SUMMARY_BIN="$WORLD/fakebin/fm-fleet-snapshot.sh" \
-    FM_INACTIVE_RECONCILE_SEND_BIN="$WORLD/fakebin/fm-send.sh" \
-    FM_TEST_ROOT="$ROOT" FM_TEST_SEND_LOG="$WORLD/send.log" FM_FORGE_LOG="$WORLD/forge.log" "$RECON" scan ${option:+"$option"}
+    FM_FORGE_LOG="$WORLD/forge.log" "$RECON" scan ${option:+"$option"}
 }
 
 wake_count() { # <home> <key prefix>
@@ -153,20 +120,12 @@ prime_seen() { # <state> <status>
 
 reap() { kill "$1" 2>/dev/null || true; wait "$1" 2>/dev/null || true; }
 
-# The secondmate independently reports a genuinely terminal inactive child, and
-# the main keeps its own presentation receipt until the resulting wake is acked.
-test_local_secondmate_report_and_main_receipt() {
+# The main retains a terminal presentation receipt until the corresponding wake
+# is handled and acknowledged.
+test_main_direct_terminal_presentation_receipt() {
   local err seq generation
-  make_world local; bind_secondmate local; write_child "$MATE" child 'done: PR https://example.test/owner/repo/pull/1 checks green'
-  FM_FAKE_CREW_STATE='done' run_reconcile "$MATE" --startup
-  grep -Fq 'done [key=inactive-outcome-mate-child-done]:' "$MAIN/state/mate.status" \
-    || fail "secondmate did not append its durable parent report"
-  [ "$(outcome_count "$MATE" reported)" = 1 ] || fail "secondmate report receipt was not durable"
-
-  write_mate_meta; write_summary "done"
-  printf 'done [key=inactive-outcome-mate-child-done]: inactive terminal child=child\n' >> "$MAIN/state/mate.status"
-  age "$MAIN/state/mate.meta" "$MAIN/state/mate.status"
-  FM_FAKE_CREW_STATE=unknown run_reconcile "$MAIN" --startup
+  make_world main-direct; write_child "$MAIN" child 'done: PR https://example.test/owner/repo/pull/1 checks green'
+  FM_FAKE_CREW_STATE='done' run_reconcile "$MAIN" --startup
   [ "$(wake_count "$MAIN" 'inactive-outcome:')" = 1 ] || fail "main did not queue terminal presentation"
   [ "$(outcome_count "$MAIN" pending)" = 1 ] || fail "main did not retain presentation receipt"
 
@@ -177,27 +136,17 @@ test_local_secondmate_report_and_main_receipt() {
   [ -n "$seq" ] && [ -n "$generation" ] || fail "main presentation did not require durable acknowledgement"
   FM_HOME="$MAIN" FM_STATE_OVERRIDE="$MAIN/state" "$DRAIN" --ack-through "$seq" --recovery-generation "$generation"
   [ "$(outcome_count "$MAIN" presented)" = 1 ] || fail "acknowledged presentation did not receive its own receipt"
-  pass "local child report and main presentation use separate durable receipts"
+  pass "main direct terminal presentation has a durable receipt"
 }
 
-# If the secondmate never reports, the main reads its validated summary and makes
-# one correlated request rather than depending on the secondmate's own watcher.
-test_main_cross_home_discovers_missing_report_once() {
-  make_world cross-home; bind_secondmate local; write_mate_meta; write_summary failed
-  FM_FAKE_CREW_STATE=unknown run_reconcile "$MAIN" --startup
-  [ "$(wake_count "$MAIN" 'inactive-reconcile:')" = 1 ] || fail "missing secondmate report did not wake main"
-  [ "$(wc -l < "$WORLD/send.log" | tr -d ' ')" = 1 ] || fail "main did not send exactly one reconciliation request"
-  [ "$(find "$MAIN/state/pending-replies" -type f 2>/dev/null | wc -l | tr -d ' ')" = 1 ] \
-    || fail "missing report did not create a pending-reply obligation"
-  FM_FAKE_CREW_STATE=unknown run_reconcile "$MAIN" --startup
-  [ "$(wc -l < "$WORLD/send.log" | tr -d ' ')" = 1 ] || fail "duplicate scan resent reconciliation request"
-  printf 'failed [key=inactive-outcome-mate-child-failed]: terminal child report\n' >> "$MAIN/state/mate.status"
-  age "$MAIN/state/mate.status"
-  FM_FAKE_CREW_STATE=unknown run_reconcile "$MAIN" --startup
-  grep -Fq 'phase=resolved' "$MAIN/state/pending-replies/"* \
-    || fail "matching automatic report did not settle its correlated request"
-  [ "$(wake_count "$MAIN" 'inactive-outcome:')" = 1 ] || fail "matching parent report did not create presentation"
-  pass "main cross-home backstop discovers, requests, and settles a missing terminal report"
+# A secondmate independently reports a genuinely terminal inactive child.
+test_local_secondmate_reports_terminal_child() {
+  make_world local; bind_secondmate local; write_child "$MATE" child 'done: PR https://example.test/owner/repo/pull/1 checks green'
+  FM_FAKE_CREW_STATE='done' run_reconcile "$MATE" --startup
+  grep -Fq 'done [key=inactive-outcome-mate-child-done]:' "$MAIN/state/mate.status" \
+    || fail "secondmate did not append its durable parent report"
+  [ "$(outcome_count "$MATE" reported)" = 1 ] || fail "secondmate report receipt was not durable"
+  pass "secondmate reports its own inactive terminal child"
 }
 
 # A remote child route writes the existing mirror input once even across restarts.
@@ -222,6 +171,18 @@ test_heartbeat_cap_does_not_delay_reconciliation() {
 }
 
 # Only authoritative terminal states qualify. A captain-held item is excluded too.
+test_scan_marker_replaces_symlink_safely() {
+  make_world marker; write_child "$MAIN" child 'done: green'
+  printf 'preserve me\n' > "$MAIN/state/marker-target"
+  ln -s marker-target "$MAIN/state/.inactive-outcome-reconcile"
+  FM_FAKE_CREW_STATE='done' run_reconcile "$MAIN" --startup
+  [ "$(cat "$MAIN/state/marker-target")" = 'preserve me' ] \
+    || fail "scan marker symlink overwrote its target"
+  [ ! -L "$MAIN/state/.inactive-outcome-reconcile" ] \
+    || fail "scan marker remained a symlink"
+  pass "scan marker replaces a symlink without overwriting its target"
+}
+
 test_nonterminal_and_captain_held_states_do_not_report() {
   local state
   for state in working paused parked unknown; do
@@ -243,8 +204,6 @@ test_watcher_hook_and_idle_secondmate_exemption() {
   out="$WORLD/watch.out"
   PATH="$WORLD/fakebin:$PATH" FM_HOME="$MAIN" FM_STATE_OVERRIDE="$MAIN/state" \
     FM_INACTIVE_RECONCILE_SECS=60 FM_INACTIVE_CREW_STATE_BIN="$WORLD/fakebin/fm-crew-state.sh" \
-    FM_INACTIVE_RECONCILE_SUMMARY_BIN="$WORLD/fakebin/fm-fleet-snapshot.sh" \
-    FM_INACTIVE_RECONCILE_SEND_BIN="$WORLD/fakebin/fm-send.sh" FM_TEST_SEND_LOG="$WORLD/send.log" \
     FM_FORGE_LOG="$WORLD/forge.log" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
     FM_FAKE_CREW_STATE='done' "$WATCH" > "$out" 2>&1 &
   pid=$!
@@ -268,55 +227,21 @@ test_watcher_hook_and_idle_secondmate_exemption() {
 }
 
 # Forge command shims fail loudly. A successful scan proves this path never uses
-# them, even while inspecting local and secondmate terminal outcomes.
+# them while reconciling a local terminal outcome.
 test_reconciliation_never_calls_forge() {
-  make_world forge; bind_secondmate local; write_child "$MAIN" child 'done: green'; write_mate_meta; write_summary "done"
+  make_world forge; write_child "$MAIN" child 'done: green'
   FM_FAKE_CREW_STATE='done' run_reconcile "$MAIN" --startup
   [ ! -s "$WORLD/forge.log" ] || fail "reconciliation invoked a forge command: $(cat "$WORLD/forge.log")"
   pass "reconciliation makes zero forge or PR API calls"
 }
 
-test_failed_request_delivery_retries_existing_correlation() {
-  local record first_corr second_corr
-  make_world send-retry; bind_secondmate local; write_mate_meta; write_summary "done"
-  FM_TEST_SEND_FAIL_FIRST=1 run_reconcile "$MAIN" --startup
-  record=$(find "$MAIN/state/terminal-outcomes" -type f -name '*.pending' | head -1)
-  [ "$(grep '^request_attempted=' "$record" | tail -1)" = request_attempted=0 ] \
-    || fail "failed pre-delivery request was made non-retryable"
-  first_corr=$(grep -Eo 'corr=[A-Fa-f0-9]{16}' "$WORLD/send.log" | head -1)
-  FM_TEST_SEND_FAIL_FIRST=1 run_reconcile "$MAIN" --startup
-  [ "$(wc -l < "$WORLD/send.log" | tr -d ' ')" = 2 ] || fail "failed request was not retried"
-  second_corr=$(grep -Eo 'corr=[A-Fa-f0-9]{16}' "$WORLD/send.log" | tail -1)
-  [ "$first_corr" = "$second_corr" ] || fail "request retry replaced its durable correlation"
-  [ "$(grep '^request_attempted=' "$record" | tail -1)" = request_attempted=1 ] \
-    || fail "successful retry was not made durable"
-  pass "pre-delivery request failures retry with the durable correlation"
-}
-
-test_unknown_request_delivery_is_not_retried() {
-  local record pending
-  make_world send-unknown; bind_secondmate local; write_mate_meta; write_summary "done"
-  FM_TEST_SEND_UNKNOWN=1 run_reconcile "$MAIN" --startup
-  record=$(find "$MAIN/state/terminal-outcomes" -type f -name '*.pending' | head -1)
-  pending=$(find "$MAIN/state/pending-replies" -type f ! -name '.delivery-confirmed-*' | head -1)
-  [ "$(grep '^phase=' "$pending" | tail -1)" = phase=delivery_unknown ] \
-    || fail "unknown request delivery did not retain its pending expectation"
-  [ "$(grep '^request_attempted=' "$record" | tail -1)" = request_attempted=1 ] \
-    || fail "unknown request delivery remained retryable"
-  FM_TEST_SEND_UNKNOWN=1 run_reconcile "$MAIN" --startup
-  [ "$(wc -l < "$WORLD/send.log" | tr -d ' ')" = 1 ] \
-    || fail "unknown request delivery was sent again"
-  pass "unknown request delivery retains one non-retryable expectation"
-}
-
-test_local_secondmate_report_and_main_receipt
-test_main_cross_home_discovers_missing_report_once
+test_main_direct_terminal_presentation_receipt
+test_local_secondmate_reports_terminal_child
 test_remote_parent_reply_is_idempotent
 test_heartbeat_cap_does_not_delay_reconciliation
+test_scan_marker_replaces_symlink_safely
 test_nonterminal_and_captain_held_states_do_not_report
 test_watcher_hook_and_idle_secondmate_exemption
 test_reconciliation_never_calls_forge
-test_failed_request_delivery_retries_existing_correlation
-test_unknown_request_delivery_is_not_retried
 
 echo "all inactive reconciliation tests passed"
