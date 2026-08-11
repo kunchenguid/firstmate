@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Behavior tests for the fleet cockpit: decisions ranked by importance, our
-# PRs in review with gh-derived status, and the reviews domain's open rounds.
+# PRs in review with gh-derived status, and the reviews domain's PR relationships.
 set -u
 
 # The managed sandbox denies the host ps call used by tests/lib.sh to identify
@@ -35,6 +35,7 @@ TRUNCATION_ARTIFACT="(truncated, 90 chars total - use show decision-task --full 
 OUR_PR="https://github.com/pedromuller-del/firstmate/pull/4001"
 MERGED_PR="https://github.com/pedromuller-del/firstmate/pull/3972"
 THEIR_PR="https://github.com/monalee/artemis/pull/912"
+MERGED_THEIR_PR="https://github.com/monalee/artemis/pull/999"
 
 make_home() {  # <name>
   local home=$TMP_ROOT/$1
@@ -74,7 +75,13 @@ set -u
 url=${3:-}
 case "$url" in
   *pull/4001*)
-    printf '{"state":"OPEN","mergeable":"MERGEABLE","reviewDecision":"CHANGES_REQUESTED","statusCheckRollup":[{"status":"COMPLETED","conclusion":"SUCCESS"}]}'
+    printf '{"state":"OPEN","isDraft":false,"mergeable":"MERGEABLE","reviewDecision":"CHANGES_REQUESTED","statusCheckRollup":[{"status":"COMPLETED","conclusion":"SUCCESS"}]}'
+    ;;
+  *pull/912*|*pull/930*|*pull/4188*)
+    printf '{"state":"OPEN","isDraft":false,"mergeable":"MERGEABLE","reviewDecision":"","statusCheckRollup":[]}'
+    ;;
+  *pull/888*|*pull/999*)
+    printf '{"state":"MERGED","isDraft":false,"mergeable":"UNKNOWN","reviewDecision":"APPROVED","statusCheckRollup":[]}'
     ;;
   *)
     echo "no such pull request" >&2
@@ -89,14 +96,22 @@ SH
 make_reviews_home() {  # <name>
   local reviews_home=$TMP_ROOT/$1
   mkdir -p "$reviews_home/data" "$reviews_home/state" "$reviews_home/config" "$reviews_home/projects"
+  mkdir -p "$reviews_home/projects/artemis"
+  git -C "$reviews_home/projects/artemis" init -q
+  git -C "$reviews_home/projects/artemis" remote add origin https://github.com/monalee/artemis.git
   cat > "$reviews_home/data/backlog.md" <<EOF
 ## In flight
-- [ ] round-912 - Review the payment refactor round 2 $THEIR_PR (repo: artemis) (kind: ship) (since 2026-07-31) (hold: waiting on their fixes) (hold-kind: external)
-- [ ] round-930 - Review the tile cache https://github.com/monalee/artemis/pull/930 (repo: artemis) (kind: ship) (since 2026-08-01)
+- [ ] review-pr-912-b2b2b2b - Review the payment refactor round 2 $THEIR_PR (repo: artemis) (kind: ship) (since 2026-07-31) (hold: waiting on their fixes) (hold-kind: external)
+- [ ] review-pr-930-c3c3c3c - Review the tile cache https://github.com/monalee/artemis/pull/930 (repo: artemis) (kind: ship) (since 2026-08-01)
 
 ## Queued
 
 ## Done
+- [x] review-pr-912-a1a1a1a - Review the payment refactor first pass $THEIR_PR (repo: artemis) (kind: scout) (reported 2026-07-30)
+- [x] review-pr-4188-1a1a1a1 - Review PR 4188 first pass (repo: unknown-project) (kind: scout) (reported 2026-08-01)
+- [x] review-pr-4188-2b2b2b2 - Review PR 4188 second pass (repo: unknown-project) (kind: scout) (reported 2026-08-02)
+- [x] review-pr-888-e8e8e8e - Review merged PR 888 without a recorded link (repo: artemis) (kind: scout) (reported 2026-08-02)
+- [x] review-pr-999-d4d4d4d - Review merged PR 999 $MERGED_THEIR_PR (repo: artemis) (kind: scout) (reported 2026-08-02)
 EOF
   printf '%s\n' "$reviews_home"
 }
@@ -112,8 +127,10 @@ EOF
 ## In flight
 - [ ] decision-task - Decide the public API (repo: firstmate) (kind: ship) (since 2026-08-02)
 - [ ] review-task - Ship the review branch (repo: firstmate) (kind: ship) (since 2026-08-01)
+- [ ] unregistered-pr - PR 4002: Ship the unregistered review branch (repo: firstmate) (kind: ship) (since 2026-08-02)
 - [ ] deploy-window - Approve deployment window (repo: firstmate) (kind: captain) (since 2026-08-02) (hold: Pedro must choose the deployment window.) (hold-kind: captain)
 - [ ] hold-oldest - Renew the signing certificate (repo: firstmate) (kind: captain) (since 2026-07-20) (hold: The certificate expires soon.) (hold-kind: captain)
+- [ ] hold-answered - Pick the flake-fix destination (repo: firstmate) (kind: captain) (since 2026-08-02) (hold: CAPTAIN DECIDED 2026-08-02: use a separate test-hardening PR.) (hold-kind: captain)
 
 ## Queued
 - [ ] launch-page - Ship the launch page blocked-by: deploy-window (repo: firstmate) (kind: ship) (since 2026-08-01)
@@ -161,6 +178,18 @@ EOF
     "pr=$MERGED_PR"
   printf 'done: PR %s checks green\n' "$MERGED_PR" > "$home/state/merged-task.status"
 
+  fm_write_meta "$home/state/unregistered-pr.meta" \
+    "window=firstmate:fm-unregistered-pr" \
+    "worktree=$home/projects/unregistered" \
+    "project=wrong-project" \
+    "harness=claude" \
+    "kind=ship" \
+    "mode=ship" \
+    "yolo=off"
+  mkdir -p "$home/projects/unregistered"
+  printf 'paused: PR 4002 is ready for review but was never registered\n' \
+    > "$home/state/unregistered-pr.status"
+
   # Pin status mtimes so age-in-state is deterministic against FM_SNAPSHOT_NOW.
   TZ=UTC touch -t 202608020000 "$home/state/decision-task.status" \
     "$home/state/review-task.status" "$home/state/merged-task.status"
@@ -185,9 +214,9 @@ test_cockpit_shows_exactly_three_sections() {
 
   out=$(render_terminal "$home" "$fakebin" --width 100) || fail "terminal render failed"
 
-  decisions=$(line_number_of "$out" "DECISIONS (3)")
-  ours=$(line_number_of "$out" "OUR PRS IN REVIEW (1)")
-  theirs=$(line_number_of "$out" "REVIEWING (2)")
+  decisions=$(line_number_of "$out" "DECISIONS (4)")
+  ours=$(line_number_of "$out" "OUR PRS IN REVIEW (2)")
+  theirs=$(line_number_of "$out" "REVIEWING (3)")
   [ -n "$decisions" ] || fail "no DECISIONS section counting all three items"
   [ -n "$ours" ] || fail "no OUR PRS IN REVIEW section"
   [ -n "$theirs" ] || fail "no REVIEWING section"
@@ -210,15 +239,34 @@ test_cockpit_shows_exactly_three_sections() {
   assert_contains "$out" " 1 DECIDE" "rows are not numbered"
   assert_contains "$out" "⚠ for 13d" "an old hold carries no age weight"
 
-  assert_contains "$out" "changes requested" "gh-derived PR status is not rendered"
+  assert_contains "$out" "CI green" "green CI is hidden by the review status"
+  assert_contains "$out" "changes requested" "review readiness is not rendered beside CI"
   assert_contains "$out" "$OUR_PR" "our PR row lost its full link"
+  assert_contains "$out" "PR 4002" "a current ship task in the PR stage was silently dropped"
+  assert_contains "$out" "PR 4002: Ship the unregistered review branch · firstmate" \
+    "a metadata checkout identity displaced the backlog's repository name"
+  assert_contains "$out" "CI unknown · readiness unknown" \
+    "an unregistered PR-stage task does not disclose unknown CI"
+  assert_contains "$out" "URL unknown" "an unregistered PR-stage task fabricated or hid its URL state"
   assert_contains "$out" "github status checked just now" "github data age is not printed"
   assert_not_contains "$out" "pull/3972" "a landed PR still renders as in review"
 
-  assert_contains "$out" "Review the payment refactor round 2" "a review round lost its title"
+  assert_contains "$out" "PR 912" "review rounds were not grouped by PR"
+  assert_contains "$out" "review x2" "the review count was not derived from distinct recorded heads"
   assert_contains "$out" "waiting on their fixes" "a held round lost its recorded status"
   assert_contains "$out" "$THEIR_PR" "a review round lost its full link"
   assert_contains "$out" "round under way" "an active round lost its status"
+  assert_contains "$out" "PR 4188" "completed review rounds were silently dropped"
+  assert_contains "$out" "waiting on author after review x2" \
+    "a completed review relationship does not show its post-round state"
+  assert_contains "$out" "forge state unknown" \
+    "a review relationship without terminal evidence does not disclose unknown forge state"
+
+  assert_contains "$out" "needs you 2 · check 2 (1 looks answered · 1 aged)" \
+    "open holds are not visibly separated by current usefulness"
+  assert_contains "$out" "ANSWER?" "an explicit answer hint is still presented as a fresh decision"
+  assert_contains "$out" "hold still open" "the answer hint incorrectly claims the hold was closed"
+  assert_contains "$out" "AGED" "an aged hold is not visibly separated from current decisions"
 
   assert_contains "$out" "token spend not measured" "unreported spend was not explicit"
   assert_not_contains "$out" "truncated, 90 chars" "CLI truncation artifact leaked into the cockpit"
@@ -226,6 +274,83 @@ test_cockpit_shows_exactly_three_sections() {
   total_lines=$(printf '%s\n' "$out" | wc -l | tr -d ' ')
   [ "$total_lines" -le 40 ] || fail "cockpit does not fit a 40-row terminal: $total_lines lines"
   pass "cockpit renders exactly three sections, importance-ranked with live PR status"
+}
+
+test_pr_truthfulness_regressions() {
+  local home fakebin out
+  home=$(make_home pr-truth)
+  write_live_fixture "$home"
+  sed -i.bak '/## Queued/i\
+- [ ] backlog-only-pr - PR 4003: Ship without task metadata (repo: firstmate) (kind: ship) (since 2026-08-02)\
+' "$home/data/backlog.md"
+  rm "$home/data/backlog.md.bak"
+  fakebin=$(make_fakebin "$home")
+
+  out=$(render_terminal "$home" "$fakebin" --width 130 --all) || fail "truthfulness render failed"
+  assert_contains "$out" "OUR PRS IN REVIEW (3)" "an unregistered PR-stage task is absent"
+  assert_contains "$out" "CI green · changes requested" \
+    "CI and review readiness are not independent dimensions"
+  assert_contains "$out" "CI unknown · readiness unknown" \
+    "missing registration was rendered as a false CI state"
+  assert_contains "$out" "was never registered" "missing registration has no visible reason"
+  assert_contains "$out" "PR 4003: Ship without task metadata" \
+    "a PR-stage backlog record without task metadata was silently dropped"
+  assert_not_contains "$out" "github.com/pedromuller-del/firstmate/pull/4002" \
+    "the cockpit fabricated a URL for an unregistered PR"
+  pass "PR rows preserve unknown registration and independent CI/readiness truth"
+}
+
+test_review_relationships_survive_completed_rounds() {
+  local home fakebin out
+  home=$(make_home review-relationships)
+  write_live_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+
+  out=$(render_terminal "$home" "$fakebin" --width 130 --all) || fail "review relationship render failed"
+  assert_contains "$out" "REVIEWING (3)" "completed rounds disappeared from review relationships"
+  assert_contains "$out" "PR 912" "two rounds for one PR were not grouped"
+  assert_contains "$out" "review x2" "distinct recorded review heads did not produce round two"
+  assert_contains "$out" "PR 4188" "a completed current relationship was dropped"
+  assert_contains "$out" "waiting on author after review x2" \
+    "a completed round was mistaken for a completed PR relationship"
+  assert_not_contains "$out" "PR 999" "terminal GitHub evidence did not retire a merged review relationship"
+  assert_not_contains "$out" "PR 888" \
+    "a merged review relationship survived despite a verified project remote and fresh GitHub state"
+  pass "reviewing is grouped by PR and retains completed rounds until terminal evidence"
+}
+
+test_followup_review_without_round_history_stays_unknown() {
+  local home reviews_home fakebin out
+  home=$(make_home unknown-review-round)
+  write_live_fixture "$home"
+  reviews_home="$TMP_ROOT/reviews-home-$(basename "$home")"
+  cat >> "$reviews_home/data/backlog.md" <<'EOF'
+- [x] review-pr-777-final-a7a7a7a - PR 777 final anchored recheck (repo: artemis) (kind: scout) (reported 2026-08-02)
+EOF
+  fakebin=$(make_fakebin "$home")
+
+  out=$(render_terminal "$home" "$fakebin" --width 130 --all) || fail "unknown review-round render failed"
+  assert_contains "$out" "PR 777" "a follow-up review with incomplete history was dropped"
+  assert_contains "$out" "review round unknown (1 head recorded)" \
+    "a follow-up review with incomplete history fabricated round one"
+  pass "incomplete follow-up history renders an unknown round instead of a false ordinal"
+}
+
+test_decision_projection_labels_answered_and_aged_open_holds() {
+  local home fakebin out
+  home=$(make_home decision-truth)
+  write_live_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+
+  out=$(render_terminal "$home" "$fakebin" --width 130 --all) || fail "decision truth render failed"
+  assert_contains "$out" "DECISIONS (4)" "an open hold was silently removed"
+  assert_contains "$out" "needs you 2 · check 2 (1 looks answered · 1 aged)" \
+    "decision usefulness is not summarized"
+  assert_contains "$out" "ANSWER?" "explicit answer text was reported as needing a new answer"
+  assert_contains "$out" "looks answered; hold still open" \
+    "the conservative answer hint is not labelled"
+  assert_contains "$out" "AGED" "the old open hold was not separated visibly"
+  pass "decision projection keeps every hold while separating actionable, answered-looking, and aged rows"
 }
 
 test_show_expands_rows_with_full_context() {
@@ -343,6 +468,10 @@ test_ignored_operational_directories_are_never_output_targets() {
 }
 
 test_cockpit_shows_exactly_three_sections
+test_pr_truthfulness_regressions
+test_review_relationships_survive_completed_rounds
+test_followup_review_without_round_history_stays_unknown
+test_decision_projection_labels_answered_and_aged_open_holds
 test_show_expands_rows_with_full_context
 test_absent_sources_and_unreachable_reviews_stay_honest
 test_html_page_renders_three_sections

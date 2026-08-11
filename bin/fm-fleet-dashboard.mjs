@@ -5,7 +5,7 @@
 //   1. DECISIONS he must take now, most important first, with the ranking
 //      rule printed on screen.
 //   2. OUR PRS IN REVIEW, each with the status he acts on and its full link.
-//   3. REVIEWING - colleague PRs the reviews domain has rounds on.
+//   3. REVIEWING - colleague PR relationships recorded by the reviews domain.
 //
 // Sources stay read-only: fm-fleet-snapshot.sh (built on fm-crew-state.sh and
 // fm-classify-lib.sh) owns meta/status/backlog classification for this home
@@ -50,7 +50,7 @@ function usage(stream = process.stdout) {
   stream.write(`usage: fm-fleet-dashboard.mjs [--width <columns>] [--all] [--show <row>] [--watch] [--output <path>]
 
 Render the fleet cockpit: decisions ranked by importance, our PRs in
-review with actionable status, and the reviews domain's open rounds.
+review with actionable status, and the reviews domain's PR relationships.
 --width <columns>  terminal width override (default: tty width, else 80)
 --all              list every item; default caps each section
 --show <row>       print one row's full context by its rendered row number
@@ -280,13 +280,72 @@ function findReviewsDomain() {
   return { available: false, reason: "no registered secondmate with a review scope" };
 }
 
-function collectReviewRounds() {
+function reviewPrNumber(record) {
+  const url = record.pr_url ?? record.links?.find((link) => /\/pull\/\d+/.test(link)) ?? null;
+  const urlMatch = url?.match(/\/pull\/(\d+)/);
+  if (urlMatch) {
+    return urlMatch[1];
+  }
+  for (const value of [record.id, record.title]) {
+    const match = String(value ?? "").match(/(?:^|[^a-z])(?:review-)?pr[-# ]?(\d+)/i);
+    if (match) {
+      return match[1];
+    }
+  }
+  return null;
+}
+
+function reviewHead(record) {
+  for (const value of [record.id, record.title]) {
+    // Require both a digit and a hex letter so ordinary words such as
+    // "feedback" never masquerade as a recorded commit identity.
+    const tokens = String(value ?? "").split(/[^0-9a-z]+/i);
+    const head = tokens.find(
+      (candidate) => /^[0-9a-f]{7,40}$/i.test(candidate) && /\d/.test(candidate) && /[a-f]/i.test(candidate),
+    );
+    if (head) {
+      return head.toLowerCase();
+    }
+  }
+  return null;
+}
+
+function recordActivityDate(record) {
+  return record.reported ?? record.done ?? record.merged ?? record.completion?.date ?? record.since ?? null;
+}
+
+function githubPrUrlFromProjectRemote(home, project, number) {
+  if (!project || !/^[0-9A-Za-z._-]+$/.test(project) || !/^\d+$/.test(number ?? "")) {
+    return null;
+  }
+  const projectsRoot = resolve(home, "projects");
+  const projectPath = resolve(projectsRoot, project);
+  if (!pathIsWithin(projectPath, projectsRoot) || !existsSync(projectPath)) {
+    return null;
+  }
+  let remote;
+  try {
+    remote = run("git", ["-C", projectPath, "remote", "get-url", "origin"]).trim();
+  } catch {
+    return null;
+  }
+  let slug = null;
+  for (const prefix of ["https://github.com/", "git@github.com:", "ssh://git@github.com/"]) {
+    if (remote.startsWith(prefix)) {
+      slug = remote.slice(prefix.length).replace(/\.git$/, "");
+      break;
+    }
+  }
+  return slug && /^[^/\s]+\/[^/\s]+$/.test(slug) ? `https://github.com/${slug}/pull/${number}` : null;
+}
+
+function collectReviewRelationships() {
   const domain = findReviewsDomain();
   if (!domain.available) {
-    return { available: false, reason: domain.reason, rounds: [] };
+    return { available: false, reason: domain.reason, relationships: [] };
   }
   if (!existsSync(domain.home)) {
-    return { available: false, reason: `reviews home is gone: ${domain.home}`, rounds: [] };
+    return { available: false, reason: `reviews home is gone: ${domain.home}`, relationships: [] };
   }
   let snapshot;
   try {
@@ -300,53 +359,132 @@ function collectReviewRounds() {
     });
     snapshot = JSON.parse(text);
   } catch (error) {
-    return { available: false, reason: `reviews home unreadable: ${error.message}`, rounds: [] };
+    return { available: false, reason: `reviews home unreadable: ${error.message}`, relationships: [] };
   }
   if (snapshot.backlog?.present !== true) {
-    return { available: false, reason: "reviews home has no backlog", rounds: [] };
+    return { available: false, reason: "reviews home has no backlog", relationships: [] };
   }
-  const rounds = [];
+  const groups = new Map();
   for (const record of snapshot.backlog.records || []) {
-    if (!record.structured || record.state === "done") {
+    if (!record.structured) {
       continue;
     }
-    let status = "round under way";
-    if (record.hold_reason) {
-      status = cleanProse(record.hold_reason);
-    } else if (record.unresolved_blocker_ids?.length) {
-      status = `queued behind ${record.unresolved_blocker_ids.join(", ")}`;
-    } else if (record.state === "queued") {
-      status = "round queued";
+    const number = reviewPrNumber(record);
+    const key = number ? `pr:${number}` : `unknown:${record.id}`;
+    if (!groups.has(key)) {
+      groups.set(key, { number, records: [], heads: new Set(), links: new Set() });
     }
-    rounds.push({
-      id: record.id,
-      name: cleanProse(record.title) || record.id,
-      project: record.repo ?? null,
-      link: record.pr_url ?? record.links?.[0] ?? null,
+    const group = groups.get(key);
+    group.records.push(record);
+    const head = reviewHead(record);
+    if (head) {
+      group.heads.add(head);
+    }
+    for (const link of [record.pr_url, ...(record.links || [])].filter(Boolean)) {
+      group.links.add(link);
+    }
+  }
+  for (const record of snapshot.backlog.records || []) {
+    for (const referencedId of record.blocked_by_ids || []) {
+      const number = reviewPrNumber({ id: referencedId });
+      const head = reviewHead({ id: referencedId });
+      const group = number ? groups.get(`pr:${number}`) : null;
+      if (group && head) {
+        group.heads.add(head);
+      }
+    }
+  }
+
+  const relationships = [];
+  for (const group of groups.values()) {
+    const records = [...group.records].sort((left, right) => {
+      const leftTime = Date.parse(recordActivityDate(left) || "") || 0;
+      const rightTime = Date.parse(recordActivityDate(right) || "") || 0;
+      return rightTime - leftTime || (left.order ?? 0) - (right.order ?? 0);
+    });
+    const current = records.find((record) => record.state !== "done") ?? records[0];
+    const followupWithoutHistory = group.heads.size === 1 && records.some((record) =>
+      /\bfinal\b|\bre-?review\b|\brecheck\b|\bverify\b/i.test(`${record.id} ${record.title}`),
+    );
+    const roundCount = group.heads.size > 0 && !followupWithoutHistory ? group.heads.size : null;
+    const roundLabel = followupWithoutHistory
+      ? "review round unknown (1 head recorded)"
+      : roundCount === null
+        ? "review count unknown"
+        : `review x${roundCount}`;
+    let status;
+    if (current.state === "done") {
+      status = `waiting on author after ${roundLabel}`;
+    } else if (current.hold_reason) {
+      status = `${cleanProse(current.hold_reason)} · ${roundLabel}`;
+    } else if (current.unresolved_blocker_ids?.length) {
+      status = `queued behind ${current.unresolved_blocker_ids.join(", ")} · ${roundLabel}`;
+    } else if (current.state === "queued") {
+      status = `${roundLabel} queued`;
+    } else {
+      status = `${roundLabel} · round under way`;
+    }
+    const recordedLink = [...group.links][0] ?? null;
+    const derivedLink = recordedLink
+      ? null
+      : githubPrUrlFromProjectRemote(domain.home, current.repo, group.number);
+    relationships.push({
+      id: group.number ? `pr-${group.number}` : current.id,
+      name: group.number ? `PR ${group.number}` : `PR unknown · ${cleanProse(current.title) || current.id}`,
+      project: current.repo ?? null,
+      link: recordedLink ?? derivedLink,
+      linkSource: recordedLink ? "record" : derivedLink ? "verified_project_remote" : "absent",
       status,
-      raw: record.raw,
-      since: record.since ?? null,
+      raw: records.map((record) => record.raw).filter(Boolean).join("\n"),
+      since: recordActivityDate(records[0]),
+      roundCount,
     });
   }
-  return { available: true, reason: null, home: domain.home, id: domain.id, rounds };
+  return { available: true, reason: null, home: domain.home, id: domain.id, relationships };
 }
 
-function githubStatusLabel(data) {
-  if (data.state === "MERGED") return "merged";
-  if (data.state === "CLOSED") return "closed";
+function githubStatus(data) {
   const checks = Array.isArray(data.statusCheckRollup) ? data.statusCheckRollup : [];
-  const ciRed = checks.some((check) =>
-    ["FAILURE", "ERROR", "TIMED_OUT", "CANCELLED"].includes(check.conclusion),
+  const conclusions = checks.map((check) => check.conclusion ?? check.state ?? null);
+  const ciRed = conclusions.some((conclusion) =>
+    ["ACTION_REQUIRED", "CANCELLED", "ERROR", "FAILURE", "STALE", "TIMED_OUT"].includes(conclusion),
   );
   const ciRunning = checks.some(
-    (check) => check.conclusion == null || ["IN_PROGRESS", "QUEUED", "PENDING"].includes(check.status),
+    (check) =>
+      ["EXPECTED", "IN_PROGRESS", "PENDING", "QUEUED"].includes(check.state ?? check.status) ||
+      (check.conclusion == null && check.state == null),
   );
-  if (data.mergeable === "CONFLICTING") return "resolving conflicts needed";
-  if (data.reviewDecision === "CHANGES_REQUESTED") return "changes requested";
-  if (ciRed) return "CI red";
-  if (ciRunning) return "CI running";
-  if (data.reviewDecision === "APPROVED") return "approved - ready to merge";
-  return "CI green - waiting on human review";
+  const knownGreen = conclusions.every((conclusion) => ["NEUTRAL", "SKIPPED", "SUCCESS"].includes(conclusion));
+  const ci = checks.length === 0
+    ? "CI none reported"
+    : ciRed
+      ? "CI red"
+      : ciRunning
+        ? "CI running"
+        : knownGreen
+          ? "CI green"
+          : "CI unknown";
+
+  let readiness;
+  if (data.state === "MERGED") readiness = "merged";
+  else if (data.state === "CLOSED") readiness = "closed";
+  else if (data.isDraft === true) readiness = "draft - not ready for human review";
+  else if (data.mergeable === "CONFLICTING") readiness = "resolving conflicts";
+  else if (data.reviewDecision === "CHANGES_REQUESTED") readiness = "changes requested";
+  else if (data.reviewDecision === "APPROVED" && ci === "CI green" && data.mergeable === "MERGEABLE") {
+    readiness = "approved and ready to merge";
+  } else if (data.reviewDecision === "APPROVED" && data.mergeable !== "MERGEABLE") {
+    readiness = "approved; mergeability unknown";
+  } else if (data.reviewDecision === "APPROVED") readiness = "approved; waiting on CI";
+  else readiness = "waiting on human review";
+  return {
+    ci,
+    readiness,
+    forgeState: ["CLOSED", "MERGED", "OPEN"].includes(data.state)
+      ? `${data.state.toLowerCase()}${data.isDraft === true ? " draft" : ""}`
+      : "unknown",
+    terminal: data.state === "MERGED" || data.state === "CLOSED",
+  };
 }
 
 // GitHub state is fetched on its own slow cadence because it is expensive and
@@ -357,7 +495,11 @@ function fetchGithubStatuses(urls) {
   let error = null;
   for (const url of urls.slice(0, GITHUB_PR_LIMIT)) {
     if (!/^https:\/\/github\.com\//.test(url)) {
-      results.set(url, { ok: false, status: "status unavailable (not a github.com PR)" });
+      results.set(url, {
+        ok: false,
+        ci: "CI unknown (not a github.com PR)",
+        readiness: "review readiness unknown (not a github.com PR)",
+      });
       continue;
     }
     try {
@@ -366,11 +508,15 @@ function fetchGithubStatuses(urls) {
         "view",
         url,
         "--json",
-        "state,mergeable,reviewDecision,statusCheckRollup",
+        "state,isDraft,mergeable,reviewDecision,statusCheckRollup",
       ]);
-      results.set(url, { ok: true, status: githubStatusLabel(JSON.parse(text)) });
+      results.set(url, { ok: true, ...githubStatus(JSON.parse(text)) });
     } catch (fetchError) {
-      results.set(url, { ok: false, status: "github unavailable" });
+      results.set(url, {
+        ok: false,
+        ci: "CI unknown (GitHub unavailable)",
+        readiness: "review readiness unknown (GitHub unavailable)",
+      });
       error = fetchError.message.split("\n")[0];
     }
   }
@@ -392,28 +538,46 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github
   const completedIds = new Set(
     records.filter((record) => record.structured && record.id && record.state === "done").map((record) => record.id),
   );
+  const currentRecordsById = new Map(
+    records
+      .filter((record) => record.structured && record.id && record.state !== "done")
+      .map((record) => [record.id, record]),
+  );
   const blockingDeliveryIds = new Set(records.flatMap((record) => record.unresolved_blocker_ids || []));
 
   const decisions = [];
   const ours = [];
   const reviewing = [];
+  const renderedOurIds = new Set();
 
   for (const record of records) {
     if (!record.structured || record.state === "done") {
       continue;
     }
     if (record.hold_kind === "captain" && record.hold_reason && !record.unresolved_blocker_ids?.length) {
+      const holdAge = sinceAge(record.since);
+      const looksAnswered = /\b(?:captain\s+)?decided\b|\banswered\b/i.test(record.hold_reason);
+      const aged = holdAge.seconds !== null && holdAge.seconds >= AGE_HOT_SECONDS;
       decisions.push({
-        tag: "HOLD",
+        tag: looksAnswered ? "ANSWER?" : aged ? "AGED" : "HOLD",
         name: cleanProse(record.title) || record.id,
         id: record.id,
         project: record.repo ?? null,
-        prose: cleanProse(record.hold_reason),
+        prose: looksAnswered
+          ? `looks answered; hold still open: ${cleanProse(record.hold_reason)}`
+          : aged
+            ? `aged hold; still open: ${cleanProse(record.hold_reason)}`
+            : cleanProse(record.hold_reason),
         note: null,
-        age: sinceAge(record.since),
+        age: holdAge,
         live: false,
         raw: record.raw,
-        why: "captain hold with no unresolved blockers - only Pedro can clear it",
+        attentionClass: looksAnswered ? "answered" : aged ? "aged" : "now",
+        why: looksAnswered
+          ? "the open hold's own text carries an explicit answer marker; decision lifecycle still owns closure"
+          : aged
+            ? "captain hold remains open but is at least seven days old; decision lifecycle still owns closure"
+            : "captain hold with no unresolved blockers - only Pedro can clear it",
       });
     }
   }
@@ -423,10 +587,11 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github
     const itemAge = taskAge(task, telemetry, observedMilliseconds);
     const state = task.current_state?.state || "unknown";
     const detail = cleanProse(task.current_state?.detail);
+    const currentRecord = currentRecordsById.get(task.id);
     const base = {
       name: titleById.get(task.id) || task.id,
       id: task.id,
-      project: task.project || null,
+      project: currentRecord?.repo || task.project || null,
       age: itemAge,
       live: task.endpoint?.exists === true,
       statusLog: task.paths?.status_log?.present ? task.paths.status_log.path : null,
@@ -441,6 +606,7 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github
         tag: "DECIDE",
         prose: cleanProse(decision.summary) || "decision summary absent",
         note: decision.key && decision.key !== "default" ? `[${decision.key}]` : null,
+        attentionClass: "now",
         why: "open needs-decision in the keyed decision fold, not yet resolved",
       });
     }
@@ -450,6 +616,7 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github
         tag: "BLOCKED",
         prose: cleanProse(blocker.summary) || "blocker summary absent",
         note: blocker.key && blocker.key !== "default" ? `[${blocker.key}]` : null,
+        attentionClass: "now",
         why: "open blocked event in the keyed decision fold, not yet resolved",
       });
     }
@@ -459,44 +626,93 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github
         tag: "BLOCKED",
         prose: detail || "blocked, no detail reported",
         note: null,
+        attentionClass: "now",
         why: "reconciled current state is blocked",
       });
     }
 
-    // Only pr= recorded in task metadata is a live PR of ours; URLs parsed
-    // out of status prose are history, and a backlog completion means landed.
-    if (task.kind !== "secondmate" && task.pr?.url && task.pr?.source === "meta" && !completedIds.has(task.id)) {
+    // A current ship backlog title naming "PR N" is PR-stage evidence even
+    // when pr= was never registered. Status-event URLs remain excluded because
+    // they are historical; missing registration yields an unknown row, not a URL.
+    const stageMatch = currentRecord?.kind === "ship"
+      ? cleanProse(currentRecord.title).match(/\bPR\s*#?(\d+)\b/i)
+      : null;
+    const registeredPr = task.pr?.url && task.pr?.source === "meta";
+    if (task.kind !== "secondmate" && !completedIds.has(task.id) && (registeredPr || stageMatch)) {
       const lastEvent = cleanProse(task.hints?.last_event_text).replaceAll(/https?:\/\/\S+/g, "").trim();
       const recorded = detail || lastEvent || "no status recorded";
-      const githubResult = github?.results?.get(task.pr.url) ?? null;
+      const githubResult = registeredPr ? github?.results?.get(task.pr.url) ?? null : null;
+      const prNumber = stageMatch?.[1] ?? task.pr.url.match(/\/pull\/(\d+)/)?.[1] ?? null;
+      const status = registeredPr
+        ? githubResult
+          ? `${githubResult.ci} · ${githubResult.readiness}`
+          : "CI unknown (not checked yet) · review readiness unknown (not checked yet)"
+        : `CI unknown · readiness unknown · URL unknown · PR ${prNumber ?? "unknown"} was never registered`;
       ours.push({
         ...base,
         tag: "OURS",
-        prose: githubResult ? githubResult.status : `not checked on github - last recorded: ${recorded}`,
-        note: task.pr.url,
-        why: "our PR recorded in task metadata and not yet landed in the backlog",
+        prose: status,
+        note: registeredPr ? task.pr.url : null,
+        why: registeredPr
+          ? "our PR recorded in task metadata and not yet landed in the backlog"
+          : `current ship backlog record names PR ${prNumber ?? "unknown"}, but task metadata never registered it; last recorded: ${recorded}`,
       });
+      renderedOurIds.add(task.id);
     }
   }
 
-  for (const round of reviews.rounds) {
+  for (const record of currentRecordsById.values()) {
+    const stageMatch = record.kind === "ship" ? cleanProse(record.title).match(/\bPR\s*#?(\d+)\b/i) : null;
+    if (!stageMatch || renderedOurIds.has(record.id)) {
+      continue;
+    }
+    ours.push({
+      tag: "OURS",
+      name: cleanProse(record.title) || record.id,
+      id: record.id,
+      project: record.repo ?? null,
+      prose: `CI unknown · readiness unknown · URL unknown · PR ${stageMatch[1]} was never registered`,
+      note: null,
+      age: sinceAge(record.since),
+      live: false,
+      raw: record.raw,
+      why: `current ship backlog record names PR ${stageMatch[1]}, but no task metadata or PR registration exists`,
+    });
+  }
+
+  for (const relationship of reviews.relationships) {
+    const githubResult = relationship.link ? github?.results?.get(relationship.link) ?? null : null;
+    if (githubResult?.terminal) {
+      continue;
+    }
+    const forgeState = relationship.link
+      ? githubResult
+        ? githubResult.ok
+          ? `forge ${githubResult.forgeState}`
+          : githubResult.readiness
+        : "forge state unknown (not checked yet)"
+      : "forge state unknown (PR link not recorded)";
     reviewing.push({
       tag: "THEIRS",
-      name: round.name,
-      id: round.id,
-      project: round.project,
-      prose: round.status,
-      note: round.link ?? "link not recorded in the round",
-      age: sinceAge(round.since),
+      name: relationship.name,
+      id: relationship.id,
+      project: relationship.project,
+      prose: `${relationship.status} · ${forgeState}`,
+      note: relationship.link ?? "PR link unknown - not recorded in the review relationship",
+      age: sinceAge(relationship.since),
       live: false,
-      raw: round.raw,
-      why: "open review round recorded in the reviews domain's own backlog",
+      raw: relationship.raw,
+      why: relationship.linkSource === "verified_project_remote"
+        ? "review records grouped by PR; link established from the recorded PR number and verified project GitHub remote"
+        : "review records grouped by PR; completed rounds remain until terminal PR evidence exists",
     });
   }
 
   // The printed ranking rule: a decision a person is waiting on right now
   // outranks one blocking queued delivery, which outranks pure age.
   const importanceTier = (item) => {
+    if (item.attentionClass === "answered") return 3;
+    if (item.attentionClass === "aged") return 4;
     if ((item.tag === "DECIDE" || item.tag === "BLOCKED") && item.live) return 0;
     if (blockingDeliveryIds.has(item.id)) return 1;
     return 2;
@@ -504,7 +720,12 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github
   const oldestFirst = (left, right) => (right.age.seconds ?? -1) - (left.age.seconds ?? -1);
   decisions.sort((left, right) => importanceTier(left) - importanceTier(right) || oldestFirst(left, right));
   ours.sort(oldestFirst);
-  reviewing.sort(oldestFirst);
+  reviewing.sort((left, right) => (left.age.seconds ?? Number.POSITIVE_INFINITY) - (right.age.seconds ?? Number.POSITIVE_INFINITY));
+
+  const decisionCounts = decisions.reduce(
+    (counts, item) => ({ ...counts, [item.attentionClass ?? "now"]: counts[item.attentionClass ?? "now"] + 1 }),
+    { now: 0, answered: 0, aged: 0 },
+  );
 
   const model = {
     generated: snapshot.generated || "observation time absent",
@@ -521,6 +742,7 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github
         items: decisions,
         cap: 6,
         rule: "rule: blocking a person, then blocking delivery, then oldest",
+        summary: `needs you ${decisionCounts.now} · check ${decisionCounts.answered + decisionCounts.aged} (${decisionCounts.answered} looks answered · ${decisionCounts.aged} aged)`,
         empty: backlogPresent ? "nothing needs a decision" : "backlog absent - captain holds unknown",
       },
       {
@@ -539,7 +761,7 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github
         tone: "neutral",
         items: reviewing,
         cap: 5,
-        empty: reviews.available ? "no open review rounds" : `unavailable - ${reviews.reason}`,
+        empty: reviews.available ? "no review relationships recorded" : `unavailable - ${reviews.reason}`,
       },
     ],
   };
@@ -606,7 +828,10 @@ function renderTerminal(model, width, useColor, showAll, nowMs = Date.now()) {
     const header = `${rule}${rule} ${bucket.name} (${bucket.items.length}) `;
     const fill = rule.repeat(Math.max(0, width - header.length));
     lines.push(paint(isAccentBucket ? "accentBold" : "dim", clip(header + fill, width)));
-    if (bucket.key === "ours-in-review") {
+    if (bucket.summary) {
+      lines.push(paint("dim", clip(`   ${bucket.summary}`, width)));
+    }
+    if (bucket.key === "ours-in-review" || bucket.key === "reviewing") {
       lines.push(paint("dim", clip(`   ${githubAgeLine(model.github, nowMs)}`, width)));
     }
     if (bucket.items.length === 0) {
@@ -625,8 +850,7 @@ function renderTerminal(model, width, useColor, showAll, nowMs = Date.now()) {
       lines.push(
         `  ${paint("dim", rowLabel)} ${paint(isAccentBucket ? "accent" : "dim", tag)} ${clip(mid, midWidth)} · ${paint("dim", itemAge)}`,
       );
-      const detail = [item.prose, item.note].filter(Boolean).join("  ");
-      if (detail) {
+      for (const detail of [item.prose, item.note].filter(Boolean)) {
         lines.push(paint("dim", `${" ".repeat(headIndent)}${clip(detail, Math.max(0, width - headIndent))}`));
       }
     }
@@ -726,7 +950,8 @@ function renderHtml(model) {
     .map(
       (bucket) => `<section id="${bucket.key}">
     <div class="section-head"><h2>${escapeHtml(bucket.htmlTitle)}</h2><p>${bucket.items.length} item${bucket.items.length === 1 ? "" : "s"}</p></div>
-    ${bucket.key === "ours-in-review" ? `<p class="stamp">${escapeHtml(githubAgeLine(model.github, Date.now()))}</p>` : ""}
+    ${bucket.summary ? `<p class="stamp">${escapeHtml(bucket.summary)}</p>` : ""}
+    ${bucket.key === "ours-in-review" || bucket.key === "reviewing" ? `<p class="stamp">${escapeHtml(githubAgeLine(model.github, Date.now()))}</p>` : ""}
     <div class="grid">${bucket.items.map((item) => card(item, bucket.tone)).join("") || emptyState(bucket.empty)}</div>
   </section>`,
     )
@@ -813,21 +1038,23 @@ function collectLocalInputs() {
     }
   }
 
-  const reviews = collectReviewRounds();
+  const reviews = collectReviewRelationships();
   return { snapshot, telemetryRows, telemetryPresent, reviews };
 }
 
-function ourPrUrls(inputs) {
+function githubPrUrls(inputs) {
   const records = Array.isArray(inputs.snapshot.backlog?.records) ? inputs.snapshot.backlog.records : [];
   const completed = new Set(
     records.filter((record) => record.structured && record.id && record.state === "done").map((record) => record.id),
   );
-  return (inputs.snapshot.tasks || [])
+  const ours = (inputs.snapshot.tasks || [])
     .filter(
       (task) =>
         task.kind !== "secondmate" && task.pr?.url && task.pr?.source === "meta" && !completed.has(task.id),
     )
     .map((task) => task.pr.url);
+  const theirs = (inputs.reviews.relationships || []).map((relationship) => relationship.link).filter(Boolean);
+  return [...new Set([...ours, ...theirs])];
 }
 
 function writeAtomically(outputPath, html) {
@@ -862,7 +1089,7 @@ function watchLoop(width, useColor, showAll) {
     try {
       const inputs = collectLocalInputs();
       if (github === null || secondsSince(github.fetchedAtMs, Date.now()) >= WATCH_GITHUB_SECONDS) {
-        github = fetchGithubStatuses(ourPrUrls(inputs));
+        github = fetchGithubStatuses(githubPrUrls(inputs));
       }
       const model = buildModel({ ...inputs, github });
       const frameWidth = width ?? process.stdout.columns ?? 80;
@@ -886,7 +1113,7 @@ try {
     watchLoop(width, process.env.NO_COLOR ? false : true, showAll);
   } else {
     const inputs = collectLocalInputs();
-    const urls = ourPrUrls(inputs);
+    const urls = githubPrUrls(inputs);
     const github = urls.length > 0 ? fetchGithubStatuses(urls) : null;
     const model = buildModel({ ...inputs, github });
     if (showRow !== null) {
