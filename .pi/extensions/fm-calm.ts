@@ -1,23 +1,24 @@
 // Firstmate's home-persistent Pi transcript presentation toggle.
 //
-// Verified against Pi 0.81.1 and 0.82.0, which expose built-in ToolDefinitions, per-slot
-// renderers, renderShell: "self", session_start replacement reasons, agent_start and
-// agent_settled, ExtensionUIContext.setToolsExpanded(), setWorkingVisible(), setWidget()
-// with a disposable component factory, and setHiddenThinkingLabel().
+// Calm depends on Pi's built-in ToolDefinitions, per-slot renderers, renderShell:
+// "self", session_start replacement reasons, agent_start and agent_settled,
+// ExtensionUIContext.setToolsExpanded(), setWorkingVisible(), setWidget() with a
+// disposable component factory, and setHiddenThinkingLabel().
 // ./lib/fm-calm-working-ship.ts owns the animated working presentation this file
-// installs. The focused tests pin those assumptions but never reject a
-// newer Pi solely for its version. The collapsed-thinking and operational-user
-// presentation adapters probe the exact API they patch and degrade independently with a
-// diagnostic (see installCalmPresentationAdapter below) if a future Pi removes it; Pi
-// still exposes no global renderer for arbitrary built-in or custom rows.
+// installs. docs/calm-mode-feasibility.md owns the version-scoped evidence. The focused
+// tests pin these assumptions but never reject a newer Pi solely for its version. The
+// collapsed-thinking and operational-user presentation adapters probe the exact API
+// they patch and degrade independently with a diagnostic (see
+// installCalmPresentationAdapter below) if a future Pi removes it; Pi still exposes no
+// global renderer for arbitrary built-in or custom rows.
 // docs/configuration.md owns the home-local Calm preference contract.
 //
 // Pi has one first-registration-wins ToolDefinition per tool name, with no merge or
 // unregister operation. Keep Calm-off registration empty; keep Calm-on load-time
 // registration synchronous because restored rows capture the registry before
 // session_start; and collision-check only the later first-activation path, when
-// getAllTools() is reliable. docs/calm-mode-feasibility.md owns the Pi-source evidence
-// and docs/calm.md owns the user-facing behavior and non-retroactive first-toggle bound.
+// getAllTools() is reliable. docs/calm.md owns the user-facing behavior and
+// non-retroactive first-toggle bound.
 import { randomUUID } from "node:crypto";
 import {
   mkdirSync,

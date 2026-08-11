@@ -17,10 +17,9 @@ PI_OPERATIONAL_INPUT="$ROOT/.pi/extensions/lib/fm-operational-input.ts"
 PI_PACKAGE_DIR=${FM_PI_PACKAGE_DIR:-"$(npm root -g 2>/dev/null)/@earendil-works/pi-coding-agent"}
 TMUX_SOCKET="fm-calm-$$"
 TMUX_SESSION="fm-calm-e2e"
-# Verified against Pi 0.81.1 and 0.82.0 (docs/calm-mode-feasibility.md). This is
-# known-good evidence, not a support ceiling: the fixtures below run against whatever
-# Pi is actually installed, and record_pi_version_evidence never rejects a newer
-# version. The tracked presentation adapters probe the exact API they patch (see
+# docs/calm-mode-feasibility.md owns version-scoped evidence. The fixtures below run
+# against whatever Pi is installed, and record_pi_version_evidence never rejects a
+# newer version. The tracked presentation adapters probe the exact API they patch (see
 # .pi/extensions/fm-calm.ts) instead of relying on version inference, so a version
 # string is evidence for the record, not a gate.
 record_pi_version_evidence() {
@@ -44,6 +43,19 @@ wait_for_text() {
     # editor remain visible.
     tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" -S -600 >"$file" 2>/dev/null || true
     grep -Fq "$text" "$file" 2>/dev/null && return 0
+    sleep 0.05
+    i=$((i + 1))
+  done
+  return 1
+}
+
+wait_for_complete_html_export() {
+  local file=$1 i=0
+  while [ "$i" -lt 120 ]; do
+    # Pi writes the completed HTML document synchronously before its transient
+    # status row is repainted, so the closing document tag is the structural
+    # completion signal rather than the viewport-only notification.
+    grep -Fq '</html>' "$file" 2>/dev/null && return 0
     sleep 0.05
     i=$((i + 1))
   done
@@ -2816,7 +2828,7 @@ JS
 }
 
 test_interactive_terminal_e2e() {
-  local project config home session_file export_file export_dom default_snapshot expanded_snapshot hidden_snapshot active_before_snapshot active_hidden_snapshot export_snapshot restored_snapshot working_snapshot working_response_snapshot restarted_snapshot resumed_restored_snapshot hash_before hash_after now version chrome chrome_pid chrome_wait active_wait active_screen_wait boat_frame_one boat_frame_two boat_resized_snapshot boat_focus_snapshot boat_cleared_snapshot boat_hull_line boat_sail_line boat_column_one boat_column_two boat_line boat_color_snapshot boat_color_line boat_water_snapshot boat_water_line boat_water_first boat_water_changed boat_narrow_snapshot boat_narrow_sails boat_freeze_snapshot boat_resume_snapshot boat_freeze_column boat_freeze_sail boat_resume_column boat_resume_sail
+  local project config home session_file export_file export_dom default_snapshot expanded_snapshot hidden_snapshot active_before_snapshot active_hidden_snapshot restored_snapshot working_snapshot working_response_snapshot restarted_snapshot resumed_restored_snapshot hash_before hash_after now version chrome chrome_pid chrome_wait active_wait active_screen_wait boat_frame_one boat_frame_two boat_resized_snapshot boat_focus_snapshot boat_cleared_snapshot boat_hull_line boat_sail_line boat_column_one boat_column_two boat_line boat_color_snapshot boat_color_line boat_water_snapshot boat_water_line boat_water_first boat_water_changed boat_narrow_snapshot boat_narrow_sails boat_freeze_snapshot boat_resume_snapshot boat_freeze_column boat_freeze_sail boat_resume_column boat_resume_sail
   if ! command -v pi >/dev/null 2>&1 || ! command -v tmux >/dev/null 2>&1; then
     echo "skip: pi or tmux not found for Pi calm interactive E2E"
     return 0
@@ -2835,7 +2847,6 @@ test_interactive_terminal_e2e() {
   hidden_snapshot="$TMP_ROOT/hidden.txt"
   active_before_snapshot="$TMP_ROOT/active-before.txt"
   active_hidden_snapshot="$TMP_ROOT/active-hidden.txt"
-  export_snapshot="$TMP_ROOT/export.txt"
   restored_snapshot="$TMP_ROOT/restored.txt"
   working_snapshot="$TMP_ROOT/working.txt"
   working_response_snapshot="$TMP_ROOT/working-response.txt"
@@ -3228,8 +3239,8 @@ JS
 
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/export $export_file"
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
-  wait_for_text "$export_snapshot" "Session exported to: $export_file" \
-    || fail "/export did not complete while calm mode was on"
+  wait_for_complete_html_export "$export_file" \
+    || fail "Pi $version /export did not create a complete HTML document while Calm mode was on"
   node - "$export_file" <<'JS' || fail "calm-mode HTML export lost tool data or persisted synthetic provenance"
 const html = require("node:fs").readFileSync(process.argv[2], "utf8");
 const match = html.match(/<script id="session-data" type="application\/json">([^<]+)<\/script>/);

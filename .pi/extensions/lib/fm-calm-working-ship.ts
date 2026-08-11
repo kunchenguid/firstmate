@@ -20,12 +20,12 @@
 // or new extension lifetime calls reset() and starts at the normal initial position.
 // State is never a module-level or process-global singleton.
 //
-// Verified against Pi 0.81.1 declarations and the Pi 0.82.0 CLI, which expose
-// ExtensionUIContext.setWidget() with a component factory, per-widget dispose(), and
-// TUI.requestRender(). Pi renders a widget through Component.render(width), so this
-// module recomputes its track from that width on every frame instead of caching a
-// terminal size that a resize would invalidate. A resize while the boat is hidden is
-// applied on the first resumed frame through the same clamp path.
+// Pi exposes ExtensionUIContext.setWidget() with a component factory, per-widget
+// dispose(), and TUI.requestRender(). Pi renders a widget through
+// Component.render(width), so this module recomputes its track from that width on every
+// frame instead of caching a terminal size that a resize would invalidate. A resize
+// while the boat is hidden is applied on the first resumed frame through the same clamp
+// path. docs/calm-mode-feasibility.md owns version-scoped evidence.
 import type { Component, TUI } from "@earendil-works/pi-tui";
 
 // The hull is symmetric and replaces waves on its row rather than adding a third row.
