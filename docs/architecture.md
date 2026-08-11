@@ -45,7 +45,7 @@ The semantic branch reports working only on an exact busy verdict and names the 
 For whole-fleet read-only review, `bin/fm-fleet-snapshot.sh --json` emits schema `fm-fleet-snapshot.v1` from the backlog, task metadata, current crew state, endpoint probes, PR/report pointers, scout reports, bounded current summaries from registered secondmate homes, and secondmate return-channel guidance.
 `bin/fm-fleet-view.sh` renders that snapshot as Markdown for humans, while `bin/fm-bearings-snapshot.sh` provides the bounded bearings projection, so both views consume one structured contract instead of reparsing raw fleet files.
 The script header owns the exact JSON schema.
-The recurring routine uses the same authenticated custom-check rail rather than adding a scheduler service: locked primary bootstrap publishes one private registered check, the watcher invokes it on the existing slow-check cadence, and the scanner's local fire state makes repeated scans and restarts idempotent.
+The recurring routine uses the same authenticated custom-check rail rather than adding a scheduler service: locked primary bootstrap publishes one private registered check, the watcher invokes it on the existing slow-check cadence, and acknowledged fire state makes completed scans and restarts idempotent while pending emissions remain durable until the wake is successfully published and acknowledged.
 [Recurring routine](configuration.md#recurring-routine) owns current operator behavior and the local-only boundary.
 
 ### Registered secondmate current state

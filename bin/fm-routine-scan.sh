@@ -9,9 +9,11 @@
 # IDs are unique and may contain letters, digits, underscores, colons, and dashes.
 # Blank lines and lines beginning with # are ignored; malformed or duplicate items
 # are diagnosed and ignored.
-# Each newly due item prints "routine-due: <id> | <owner> | <action>".
+# Each due item prints "routine-due: <id> | <owner> | <action>".
 # When no item is due, the scanner produces no stdout.
-# Fire state is state/.routine-fired with one private <id>|<cadence>|<date> line per item.
+# With FM_ROUTINE_DEFER_FIRE=1, due records are retained in state/.routine-pending
+# until --ack promotes them to fire state after successful wake publication.
+# Fire state is state/.routine-fired with one private <id>|<cadence>|<date> line per acknowledged item.
 # FM_ROUTINE_DATE is a YYYY-MM-DD test override; normal runs capture one local date.
 set -u
 
