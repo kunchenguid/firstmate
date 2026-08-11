@@ -21,6 +21,7 @@ set -u
 fm_git_identity fmtest fmtest@example.invalid
 
 PR_MERGE="$ROOT/bin/fm-pr-merge.sh"
+MERGE_LOCAL="$ROOT/bin/fm-merge-local.sh"
 TMP_ROOT=$(fm_test_tmproot fm-pr-merge-tests)
 
 # Build a fresh sandbox for one test case: a state dir with a task meta and a
@@ -301,6 +302,57 @@ test_parses_pr_url_for_gh_axi() {
   pass "fm-pr-merge parses a GitHub PR URL into gh-axi number and --repo arguments"
 }
 
+make_local_merge_case() {
+  local name=$1 id=$2 branch=$3 record_branch=$4 case_dir project
+  case_dir="$TMP_ROOT/$name"
+  project="$case_dir/project"
+  mkdir -p "$case_dir/state"
+  fm_git_init_commit "$project"
+  git -C "$project" branch -M main
+  git -C "$project" checkout -qb "$branch"
+  printf 'land me\n' > "$project/feature.txt"
+  git -C "$project" add feature.txt
+  git -C "$project" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm feature
+  git -C "$project" checkout -q main
+  fm_write_meta "$case_dir/state/$id.meta" \
+    "window=fm-$id" \
+    "worktree=$case_dir/wt" \
+    "project=$project" \
+    "kind=ship" \
+    "mode=local-only"
+  if [ "$record_branch" = yes ]; then
+    printf 'branch=%s\n' "$branch" >> "$case_dir/state/$id.meta"
+  fi
+  printf '%s\n' "$case_dir"
+}
+
+# Issue #1887's safety regression is the local-only merge gate, not merely the
+# generated setup line: the recorded custom branch must land, while a legacy
+# task record with no branch field must still reconstruct fm/<task-id>.
+test_local_merge_uses_recorded_branch_with_legacy_default() {
+  local case_dir id branch before expected out
+  id=custom-local-x1
+  branch=feat/1887/custom-local
+  case_dir=$(make_local_merge_case custom-local "$id" "$branch" yes)
+  expected=$(git -C "$case_dir/project" rev-parse "$branch")
+  before=$(git -C "$case_dir/project" rev-parse main)
+  out=$(FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+    "$MERGE_LOCAL" "$id" 2>&1) || fail "recorded custom branch did not land: $out"
+  [ "$(git -C "$case_dir/project" rev-parse main)" = "$expected" ] \
+    || fail "local merge ignored the recorded custom branch"
+  [ "$before" != "$expected" ] || fail "custom local-merge fixture was vacuous"
+
+  id=legacy-local-x2
+  branch=fm/$id
+  case_dir=$(make_local_merge_case legacy-local "$id" "$branch" no)
+  expected=$(git -C "$case_dir/project" rev-parse "$branch")
+  out=$(FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+    "$MERGE_LOCAL" "$id" 2>&1) || fail "legacy fm/<task-id> branch did not land: $out"
+  [ "$(git -C "$case_dir/project" rev-parse main)" = "$expected" ] \
+    || fail "legacy local merge changed the fm/<task-id> fallback"
+  pass "fm-merge-local uses recorded custom branches and preserves the legacy default"
+}
+
 test_records_pr_and_head_before_merging
 test_merge_failure_propagates_after_recording
 test_extra_merge_args_forwarded
@@ -311,3 +363,4 @@ test_repo_override_args_refuse_before_recording
 test_explicit_merge_method_not_overridden
 test_method_equals_merge_method_not_overridden
 test_parses_pr_url_for_gh_axi
+test_local_merge_uses_recorded_branch_with_legacy_default

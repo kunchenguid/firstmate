@@ -104,10 +104,12 @@ run_settle_spawn() {
 # loop should keep polling until two consecutive reads agree, landing on the
 # real settled worktree instead.
 test_single_stale_first_read_is_not_accepted() {
-  local rec id out status
+  local rec id out status branch
   id=settle-single-stale-z1
+  branch=feat/1887/custom-branch
   rec=$(make_settle_case settle-single "$id" 1)
   read_settle_record "$rec"
+  printf '\nBranch contract: branch=%s\n' "$branch" >> "$HOME_DIR/data/$id/brief.md"
 
   out=$(run_settle_spawn "$id")
   status=$?
@@ -117,6 +119,8 @@ test_single_stale_first_read_is_not_accepted() {
     "meta did not record the settled worktree"
   assert_no_grep "worktree=$STALE_DIR" "$HOME_DIR/state/$id.meta" \
     "meta wrongly recorded the transient stale path as the worktree"
+  assert_grep "branch=$branch" "$HOME_DIR/state/$id.meta" \
+    "meta did not record the ship brief's custom branch"
   pass "a single transient stale pane_current_path read is not accepted as the worktree"
 }
 
@@ -137,6 +141,8 @@ test_already_settled_pane_costs_one_confirm_sleep() {
   expect_code 0 "$status" "spawn should succeed when the pane is already settled"
   assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id.meta" \
     "meta did not record the already-settled worktree"
+  assert_grep "branch=fm/$id" "$HOME_DIR/state/$id.meta" \
+    "a legacy brief without a branch contract did not retain the fm/<task-id> default"
   [ "$elapsed" -le 5 ] || fail "already-settled pane took ${elapsed}s to confirm - expected close to the single inter-poll sleep"
   pass "an already-settled pane confirms via the existing inter-poll sleep, not an extra full cycle"
 }

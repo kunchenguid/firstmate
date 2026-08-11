@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # fm-bearings-snapshot.sh - compact, bounded, TOON-by-default bearings projection.
 #
-# A thin wrapper OVER the canonical bin/fm-fleet-snapshot.sh. It does not parse
-# fleet state itself: it shells out to `fm-fleet-snapshot.sh --json`, projects that
+# A thin wrapper OVER the canonical bin/fm-fleet-snapshot.sh. It does not
+# independently enumerate fleet state: it shells out to `fm-fleet-snapshot.sh --json`, projects that
 # complete structured contract down to the small set of fields a "pick up where I
 # left off" read needs, and renders TOON at the output boundary. The internal data
 # model stays JSON (`--json` prints it verbatim); TOON is the default agent-facing
@@ -10,6 +10,8 @@
 # projected model. The projection is view-specific: it DROPS fields from the bearings
 # output, it never removes them from - or otherwise weakens - the canonical snapshot,
 # which stays complete.
+# The live-PR opt-in reads only the canonical snapshot's task-meta paths to join
+# each PR head to its recorded branch; legacy task records retain the fm/<id> default.
 #
 # LOCAL-ONLY by default: a normal invocation makes ZERO GitHub/network/auth calls.
 # It MAY surface PR URLs already recorded locally in task meta (recorded_prs), but it
@@ -200,6 +202,20 @@ gh_bounded() {  # <args...>
 }
 
 if [ "$INCLUDE_PRS" = 1 ]; then
+  TASK_BRANCHES=$(
+    printf '%s' "$SNAP" |
+      jq -r '.tasks[] | select(.kind != "secondmate") | [.id, .paths.meta.path] | @tsv' |
+      while IFS="$(printf '\t')" read -r task_id task_meta; do
+        [ -n "$task_id" ] || continue
+        task_branch=
+        if [ -f "$task_meta" ]; then
+          task_branch=$(grep '^branch=' "$task_meta" | tail -1 | cut -d= -f2- || true)
+        fi
+        [ -n "$task_branch" ] || task_branch="fm/$task_id"
+        printf '%s\t%s\n' "$task_branch" "$task_id"
+      done |
+      jq -Rn 'reduce inputs as $line ({}; ($line | split("\t")) as $parts | . + {($parts[0]):$parts[1]})'
+  )
   if ! command -v gh >/dev/null 2>&1; then
     PR_STATUS='unavailable (gh not found)'
   else
@@ -232,11 +248,13 @@ EOF
         --json number,title,url,headRefName,reviewDecision,mergeable,statusCheckRollup 2>/dev/null) \
         || { nwarn=$((nwarn + 1)); continue; }
       [ -n "$out" ] || out='[]'
-      repo_result=$(printf '%s' "$out" | jq --arg repo "$repo" --argjson limit "$FM_BEARINGS_PR_LIMIT" '
-        [ .[] | {
+      repo_result=$(printf '%s\n%s\n' "$out" "$TASK_BRANCHES" | jq -s --arg repo "$repo" --argjson limit "$FM_BEARINGS_PR_LIMIT" '
+        .[0] as $prs
+        | .[1] as $task_branches
+        | [ $prs[] | {
           num:(.number|tostring),
           repo:$repo,
-          task:(if (.headRefName // "" | startswith("fm/")) then (.headRefName | ltrimstr("fm/")) else "-" end),
+          task:($task_branches[(.headRefName // "")] // "-"),
           url:(.url // "-"),
           review:(.reviewDecision // "none"),
           mergeable:(.mergeable // "UNKNOWN"),

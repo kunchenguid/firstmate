@@ -50,8 +50,9 @@ if [ "${FAKE_GH_MANY:-0}" = 1 ]; then
 JSON
   exit 0
 fi
-cat <<'JSON'
-[{"number":9,"title":"Ship the thing","url":"https://github.com/kunchenguid/firstmate/pull/9","headRefName":"fm/ship-task","reviewDecision":"APPROVED","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}]}]
+head=${FAKE_GH_HEAD:-fm/ship-task}
+cat <<JSON
+[{"number":9,"title":"Ship the thing","url":"https://github.com/kunchenguid/firstmate/pull/9","headRefName":"$head","reviewDecision":"APPROVED","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}]}]
 JSON
 SH
   cat > "$fb/gh-axi" <<'SH'
@@ -979,6 +980,19 @@ test_include_prs_is_the_only_fetch_path() {
     .candidate_prs | any(.[]; .num == "9" and .task == "ship-task" and .checks == "passing" and .review == "APPROVED")
   ' >/dev/null || fail "candidate_prs must carry the fetched PR cross-referenced to its task: $json"
   pass "--include-prs is the only path that fetches, and it enriches correctly"
+}
+
+test_include_prs_maps_recorded_custom_branch() {
+  local home fakebin json branch
+  home=$(make_home custom-pr-branch); write_fixture "$home"
+  branch=feat/1887/custom-branch
+  printf 'branch=%s\n' "$branch" >> "$home/state/ship-task.meta"
+  fakebin=$(make_fakebin "$home"); : > "$home/net.log"
+  json=$(FAKE_GH_HEAD="$branch" run "$home" "$fakebin" --include-prs --json)
+  printf '%s' "$json" | jq -e '
+    .candidate_prs | any(.[]; .num == "9" and .task == "ship-task")
+  ' >/dev/null || fail "recorded custom PR branch did not map back to its task: $json"
+  pass "--include-prs maps a recorded custom branch back to its task"
 }
 
 test_partial_github_failure_degrades() {
@@ -1924,6 +1938,7 @@ test_open_decision_surfaces_end_to_end
 test_report_pointers_surface
 test_superseded_queued_item_dropped_by_default
 test_include_prs_is_the_only_fetch_path
+test_include_prs_maps_recorded_custom_branch
 test_partial_github_failure_degrades
 test_perl_fallback_bounds_github_call
 test_section_caps_and_expansion_flags

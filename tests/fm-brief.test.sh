@@ -217,6 +217,77 @@ test_ship_modes_generate_clean_briefs() {
   pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"
 }
 
+# Reproduce issue #1887's reported condition: a team branch convention must flow
+# through every generated ship instruction without hand-editing, while callers
+# that omit --branch retain the historical fm/<task-id> contract exactly.
+test_ship_branch_is_configurable_with_legacy_default() {
+  local home mode id branch brief
+  home="$TMP_ROOT/branch-home"
+  mkdir -p "$home/data"
+  branch=feat/646/migration-schema
+
+  for mode in no-mistakes direct-PR local-only; do
+    id="branch-$mode"
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" --branch "$branch" >/dev/null 2>&1 \
+      || fail "$mode custom-branch brief should scaffold"
+    brief="$home/data/$id/brief.md"
+    grep -qxF "Branch contract: branch=$branch" "$brief" \
+      || fail "$mode brief did not record the custom branch contract"
+    assert_grep "git checkout -b $branch" "$brief" \
+      "$mode brief did not substitute the custom branch into setup"
+    assert_no_grep "fm/$id" "$brief" \
+      "$mode brief retained the hardcoded branch and still requires hand-editing"
+    if [ "$mode" = local-only ]; then
+      assert_grep "done: ready in branch $branch" "$brief" \
+        "local-only brief did not substitute the custom branch into its handoff"
+    fi
+  done
+
+  id=branch-default
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode local-only >/dev/null 2>&1 \
+    || fail "default-branch brief should scaffold"
+  brief="$home/data/$id/brief.md"
+  grep -qxF "Branch contract: branch=fm/$id" "$brief" \
+    || fail "default brief changed the historical branch contract"
+  assert_grep "git checkout -b fm/$id" "$brief" \
+    "default brief changed the historical setup branch"
+  assert_grep "done: ready in branch fm/$id" "$brief" \
+    "default local-only brief changed the historical ready-branch report"
+  pass "fm-brief.sh: custom branch removes hand edits and omitted --branch preserves fm/<task-id>"
+}
+
+test_ship_branch_validation_and_scaffold_boundaries() {
+  local home out status id=0 label value expect
+  home="$TMP_ROOT/branch-validation-home"
+  mkdir -p "$home/data"
+  while IFS='|' read -r label value expect; do
+    [ -n "$label" ] || continue
+    id=$((id + 1))
+    out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "branch-invalid-$id" some-proj \
+      --mode no-mistakes "--branch=$value" 2>&1)
+    status=$?
+    [ "$status" -ne 0 ] || fail "$label: invalid branch should be refused"
+    assert_contains "$out" "$expect" "$label: refusal did not explain the invalid branch"
+    assert_absent "$home/data/branch-invalid-$id/brief.md" "$label: refusal still wrote a brief"
+  done <<'ROWS'
+empty||non-empty value
+leading dash|-topic|must not begin with '-'
+whitespace|feat/646 migration|may contain only
+single quote|feat/646'bad|may contain only
+double quote|feat/646"bad|may contain only
+ROWS
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" branch-scout some-proj --scout --branch feat/646/scout 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "scout accepted a ship branch contract"
+  assert_contains "$out" "--branch applies only to ship briefs" "scout branch refusal was not explicit"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" branch-secondmate --secondmate --no-projects --branch feat/646/mate 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "secondmate accepted a ship branch contract"
+  assert_contains "$out" "--branch applies only to ship briefs" "secondmate branch refusal was not explicit"
+  pass "fm-brief.sh: branch validation rejects unsafe names and non-ship scaffolds"
+}
+
 # A ship task's delivery mode is firstmate's per-task decision, so a missing or
 # unusable value must stop the scaffold instead of silently defaulting. The
 # no-mistakes-prod-only row is the conditional registry policy: it is never a task
@@ -714,6 +785,8 @@ test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
+test_ship_branch_is_configurable_with_legacy_default
+test_ship_branch_validation_and_scaffold_boundaries
 test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
