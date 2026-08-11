@@ -58,18 +58,32 @@ herdr_safe_stop_and_delete() { # <session>
 # interrupt key. This waits for the pane to actually take it up and returns
 # non-zero if it never does, so a caller can never proceed on an unoccupied
 # pane believing it is live.
+#
+# The wait identifies THIS occupant by a per-call marker carried in its own
+# command line, never merely by "something other than the shell owns the
+# foreground". A pane run lands as text in a shell that may still be starting
+# up, and that shell's own startup children can own the foreground for a moment
+# before the occupant arrives; a caller that returned on that transient would
+# proceed against an unoccupied pane and assert nothing - the exact vacuous
+# fixture this helper exists to prevent (observed: an occupancy that reported
+# success while `pane process-info` still showed the lone shell, which then let
+# tests/fm-backend-herdr-smoke.test.sh's live-duplicate case fail
+# intermittently).
 herdr_occupy_pane() { # <session> <pane-id>
-  local session=$1 pane=$2 attempt=0 info shell_pid foreground_pgid
+  local session=$1 pane=$2 attempt=0 info marker
   local max_attempts=${HERDR_OCCUPY_PANE_POLLS:-40}
+  marker="fm-occupied-$$-$(printf '%s' "$pane" | tr -c 'a-zA-Z0-9' '-')"
   fm_herdr_lab_cli "$session" pane run "$pane" \
-    "sh -c 'trap \"\" INT; while :; do sleep 1; done'" >/dev/null 2>&1 || return 1
+    "sh -c 'trap \"\" INT; : $marker; while :; do sleep 1; done'" >/dev/null 2>&1 || return 1
   while [ "$attempt" -lt "$max_attempts" ]; do
     info=$(fm_herdr_lab_cli "$session" pane process-info --pane "$pane" 2>/dev/null) || info=
-    shell_pid=$(printf '%s' "$info" | jq -r \
-      '.result.process_info.shell_pid // empty' 2>/dev/null)
-    foreground_pgid=$(printf '%s' "$info" | jq -r \
-      '.result.process_info.foreground_process_group_id // empty' 2>/dev/null)
-    if [ -n "$shell_pid" ] && [ -n "$foreground_pgid" ] && [ "$shell_pid" != "$foreground_pgid" ]; then
+    if printf '%s' "$info" | jq -e --arg m "$marker" '
+      .result.process_info
+      | (.shell_pid | type == "number")
+        and (.foreground_process_group_id | type == "number")
+        and (.foreground_process_group_id != .shell_pid)
+        and ([.foreground_processes[]? | select((.cmdline // "") | contains($m))] | length > 0)
+    ' >/dev/null 2>&1; then
       return 0
     fi
     sleep 0.25
