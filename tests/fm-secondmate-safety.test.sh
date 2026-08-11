@@ -1405,7 +1405,7 @@ EOF
   [ ! -d "$childwt" ] || fail "force teardown did not remove child worktree"
   [ ! -e "$home/state/domain.meta" ] || fail "teardown did not clear parent meta"
   grep -F -- '- domain ' "$home/data/secondmates.md" >/dev/null && fail "force teardown did not remove secondmate registry route"
-  grep -F 'kill-window -t firstmate:fm-child' "$log" >/dev/null || fail "force teardown did not kill child window"
+  grep -F 'kill-window -t firstmate:fm-child' "$log" >/dev/null && fail "force teardown targeted an unproven child endpoint"
   grep -F 'kill-window -t firstmate:fm-domain' "$log" >/dev/null || fail "force teardown did not kill parent window"
   pass "secondmate force teardown discards child work"
 }

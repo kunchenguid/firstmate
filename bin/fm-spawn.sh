@@ -241,6 +241,8 @@ SPAWN_WORKTREE_LEASED=0
 SPAWN_WORKTREE_PROVEN=0
 SPAWN_WORKTREE_PATH_SOURCE=
 SPAWN_META_PUBLISHED=0
+SPAWN_RECOVERY_META_PUBLISHED=0
+SPAWN_RECOVERY_META_REPLACE_ALLOWED=0
 SPAWN_SLOT_STAMPED=0
 SPAWN_SLOT_LOCK_HELD=0
 SPAWN_SLOT_LOCK_PATH=
@@ -316,50 +318,58 @@ spawn_herdr_flat_uncertainty_record() {
 }
 
 spawn_abort_recovery_meta() {
-  local tmp
+  local tmp meta="$STATE/$ID.meta"
   [ -n "${T:-}" ] && [ -n "${PROJ_ABS:-}" ] || return 1
-  [ -e "$STATE/$ID.meta" ] || {
-    mkdir -p "$STATE" 2>/dev/null || return 1
-    tmp=$(mktemp "$STATE/.$ID.spawn-abort.XXXXXX") || return 1
-    chmod 600 "$tmp" || { rm -f "$tmp"; return 1; }
-    {
-      echo "window=$T"
-      # Never fabricate a slot path. A durable lease taken under this task id
-      # whose worktree never settled has no path to record, and a placeholder
-      # would be a record teardown could only ever refuse. Record the lease
-      # holder (and whatever candidate path the settle poll saw) instead, so the
-      # leaked lease stays traceable and the record stays retirable.
-      if [ "${SPAWN_WORKTREE_PROVEN:-0}" = 1 ] && [ -n "${WT:-}" ]; then
-        echo "worktree=$WT"
-      else
-        echo "worktree="
-        echo "slot_lease_state=unresolved"
-        echo "slot_lease_holder=$ID"
-        [ -z "${WT_CANDIDATE:-}" ] || echo "slot_worktree_candidate=$WT_CANDIDATE"
-      fi
-      echo "project=$PROJ_ABS"
-      echo "harness=${HARNESS:-unknown}"
-      echo "kind=${KIND:-ship}"
-      echo "mode=${MODE:-no-mistakes}"
-      echo "yolo=${YOLO:-off}"
-      echo "tasktmp=${TASK_TMP:-}"
-      echo "model=${MODEL:-default}"
-      echo "effort=${EFFORT:-default}"
-      [ "${BACKEND:-tmux}" = tmux ] || echo "backend=${BACKEND:-tmux}"
-      [ -z "${GROK_AUTH_DIR:-}" ] || echo "grok_registry_dir=$GROK_AUTH_DIR"
-      [ -z "${SPAWN_GROK_AUTH_FILE:-}" ] || echo "grok_registry_token=${SPAWN_GROK_AUTH_FILE##*/}"
-      if [ "${SPAWN_CLAUDE_HOOK_CREATED:-0}" = 1 ]; then
-        echo "claude_hook_inode=$SPAWN_CLAUDE_HOOK_INODE"
-        echo "claude_hook_digest=$SPAWN_CLAUDE_HOOK_DIGEST"
-      fi
-      if [ "${SPAWN_OPENCODE_HOOK_CREATED:-0}" = 1 ]; then
-        echo "opencode_hook_inode=$SPAWN_OPENCODE_HOOK_INODE"
-        echo "opencode_hook_digest=$SPAWN_OPENCODE_HOOK_DIGEST"
-      fi
-      echo "spawn_state=aborted"
-    } > "$tmp" || { rm -f "$tmp"; return 1; }
-    mv "$tmp" "$STATE/$ID.meta" || { rm -f "$tmp"; return 1; }
-  }
+  if [ -e "$meta" ] || [ -L "$meta" ]; then
+    if [ "${SPAWN_RECOVERY_META_PUBLISHED:-0}" != 1 ] \
+      && [ "${SPAWN_RECOVERY_META_REPLACE_ALLOWED:-0}" != 1 ]; then
+      return 0
+    fi
+    [ ! -L "$meta" ] || return 1
+  fi
+  mkdir -p "$STATE" 2>/dev/null || return 1
+  tmp=$(mktemp "$STATE/.$ID.spawn-abort.XXXXXX") || return 1
+  chmod 600 "$tmp" || { rm -f "$tmp"; return 1; }
+  {
+    echo "window=$T"
+    if [ "${SPAWN_WORKTREE_PROVEN:-0}" = 1 ] && [ -n "${WT:-}" ]; then
+      echo "worktree=$WT"
+    else
+      echo "worktree="
+      echo "slot_lease_state=unresolved"
+      echo "slot_lease_holder=$ID"
+      [ -z "${WT_CANDIDATE:-}" ] || echo "slot_worktree_candidate=$WT_CANDIDATE"
+    fi
+    echo "project=$PROJ_ABS"
+    echo "harness=${HARNESS:-unknown}"
+    echo "kind=${KIND:-ship}"
+    echo "mode=${MODE:-no-mistakes}"
+    echo "yolo=${YOLO:-off}"
+    echo "tasktmp=${TASK_TMP:-}"
+    echo "model=${MODEL:-default}"
+    echo "effort=${EFFORT:-default}"
+    [ "${BACKEND:-tmux}" = tmux ] || echo "backend=${BACKEND:-tmux}"
+    if [ "${BACKEND:-tmux}" = herdr ]; then
+      echo "display_label=${DISPLAY_LABEL:-}"
+      echo "herdr_session=${HERDR_SES:-}"
+      echo "herdr_workspace_id=${HERDR_WORKSPACE_ID:-}"
+      echo "herdr_tab_id=${HERDR_TAB_ID:-}"
+      echo "herdr_pane_id=${HERDR_PANE_ID:-}"
+    fi
+    [ -z "${GROK_AUTH_DIR:-}" ] || echo "grok_registry_dir=$GROK_AUTH_DIR"
+    [ -z "${SPAWN_GROK_AUTH_FILE:-}" ] || echo "grok_registry_token=${SPAWN_GROK_AUTH_FILE##*/}"
+    if [ "${SPAWN_CLAUDE_HOOK_CREATED:-0}" = 1 ]; then
+      echo "claude_hook_inode=$SPAWN_CLAUDE_HOOK_INODE"
+      echo "claude_hook_digest=$SPAWN_CLAUDE_HOOK_DIGEST"
+    fi
+    if [ "${SPAWN_OPENCODE_HOOK_CREATED:-0}" = 1 ]; then
+      echo "opencode_hook_inode=$SPAWN_OPENCODE_HOOK_INODE"
+      echo "opencode_hook_digest=$SPAWN_OPENCODE_HOOK_DIGEST"
+    fi
+    echo "spawn_state=aborted"
+  } > "$tmp" || { rm -f "$tmp"; return 1; }
+  mv "$tmp" "$meta" || { rm -f "$tmp"; return 1; }
+  SPAWN_RECOVERY_META_PUBLISHED=1
 }
 
 spawn_slot_stamp_owned() {
@@ -874,7 +884,8 @@ spawn_abort_cleanup() {
     if ( cd "$PROJ_ABS" && treehouse return --force "$WT" ) >/dev/null 2>&1; then
       if fm_slot_stamp_clear_after_return "$WT" "$ID" "$(real_path_or_raw "$FM_HOME")"; then
         slot_returned=1
-        if [ "${SPAWN_META_PUBLISHED:-0}" = 1 ]; then
+        if [ "${SPAWN_META_PUBLISHED:-0}" = 1 ] \
+          || [ "${SPAWN_RECOVERY_META_PUBLISHED:-0}" = 1 ]; then
           rm -f "$STATE/$ID.meta" || slot_returned=0
         fi
       else
@@ -1615,6 +1626,7 @@ if [ -e "$STATE/$ID.meta" ] || [ -L "$STATE/$ID.meta" ]; then
     exit 1
   fi
   herdr_projection_existing_meta_allows_flat "$STATE/$ID.meta" || exit 1
+  SPAWN_RECOVERY_META_REPLACE_ALLOWED=1
 fi
 DISPLAY_LABEL=
 TASK_KEY=
@@ -1985,7 +1997,11 @@ if [ "$KIND" != secondmate ]; then
   rm -f "$SPAWN_WORKTREE_LEASE_PROOF"
   TREEHOUSE_LEASE_COMMAND=$(fm_worker_treehouse_lease_command "$ID" "$SPAWN_WORKTREE_LEASE_PROOF") || exit 1
   SPAWN_WORKTREE_LEASED=1
-  fm_backend_send_text_line "$BACKEND" "$WID" "$TREEHOUSE_LEASE_COMMAND"
+  fm_backend_send_text_line "$BACKEND" "$WID" "$TREEHOUSE_LEASE_COMMAND" || exit 1
+  spawn_abort_recovery_meta || {
+    echo "error: could not persist a recovery record for the pooled lease held by $ID; refusing to continue" >&2
+    exit 1
+  }
 
   # Prefer the live process cwd through /proc. Provider pane cwd remains a hint
   # where no process id is available.

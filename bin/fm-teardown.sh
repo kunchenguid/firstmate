@@ -578,6 +578,100 @@ teardown_backend_endpoint() {
   esac
 }
 
+teardown_child_endpoint_identity_proven() {
+  local child_id=$1 child_meta=$2 child_kind=$3 parent_home=$4 child_wt=$5
+  local backend=$6 target=$7 state expected_home pid start current env env_again
+  local session workspace tab pane label info
+  TEARDOWN_CHILD_ENDPOINT_PROVEN_DEAD=0
+  backend=$(fm_backend_of_meta "$child_meta")
+  state=$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || true)
+  case "$state" in
+    missing)
+      TEARDOWN_CHILD_ENDPOINT_PROVEN_DEAD=1
+      return 0
+      ;;
+    alive) ;;
+    *) return 1 ;;
+  esac
+  if [ "$child_kind" = secondmate ]; then
+    expected_home=$(meta_value "$child_meta" home)
+    [ -n "$expected_home" ] || expected_home=$child_wt
+  else
+    expected_home=$parent_home
+  fi
+  [ -n "$expected_home" ] || return 1
+  case "$backend" in
+    tmux)
+      pid=$(fm_backend_foreground_process_pid "$backend" "$target") || return 1
+      start=$(fm_agent_proc_start_time "$pid") || return 1
+      env=$(fm_agent_environ "$pid" 2>/dev/null) || return 1
+      fm_agent_worker_identity_matches "$pid" "$child_id" "$expected_home" "$env" || return 1
+      current=$(fm_backend_foreground_process_pid "$backend" "$target") || return 1
+      [ "$current" = "$pid" ] || return 1
+      fm_agent_pid_start_matches "$pid" "$start" || return 1
+      env_again=$(fm_agent_environ "$pid" 2>/dev/null) || return 1
+      fm_agent_worker_identity_matches "$pid" "$child_id" "$expected_home" "$env_again" || return 1
+      current=$(fm_backend_foreground_process_pid "$backend" "$target") || return 1
+      [ "$current" = "$pid" ] || return 1
+      fm_agent_pid_start_matches "$pid" "$start"
+      ;;
+    herdr)
+      fm_backend_source herdr || return 1
+      fm_backend_herdr_parse_target "$target" || return 1
+      session=$FM_BACKEND_HERDR_SESSION
+      pane=$FM_BACKEND_HERDR_PANE
+      workspace=$(meta_value "$child_meta" herdr_workspace_id)
+      tab=$(meta_value "$child_meta" herdr_tab_id)
+      label=$(meta_value "$child_meta" display_label)
+      [ -n "$workspace" ] && [ -n "$tab" ] && [ -n "$label" ] || return 1
+      pane=$(meta_value "$child_meta" herdr_pane_id)
+      [ "$target" = "$session:$pane" ] || return 1
+      info=$(fm_backend_herdr_cli "$session" pane get "$pane" 2>/dev/null) || return 1
+      printf '%s' "$info" | jq -e --arg workspace "$workspace" --arg tab "$tab" --arg pane "$pane" '
+        .result.pane.workspace_id == $workspace
+        and .result.pane.tab_id == $tab
+        and .result.pane.pane_id == $pane
+      ' >/dev/null 2>&1 || return 1
+      info=$(fm_backend_herdr_cli "$session" tab get "$tab" 2>/dev/null) || return 1
+      printf '%s' "$info" | jq -e --arg workspace "$workspace" --arg tab "$tab" --arg label "$label" '
+        .result.tab.workspace_id == $workspace
+        and .result.tab.tab_id == $tab
+        and .result.tab.label == $label
+      ' >/dev/null 2>&1
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+teardown_child_endpoint() {
+  local child_id=$1 child_meta=$2 child_kind=$3 parent_home=$4 child_wt=$5
+  local backend=$6 target=$7 status
+  TEARDOWN_CHILD_ENDPOINT_PROVEN_DEAD=0
+  if [ "$backend" = herdr ]; then
+    teardown_acquire_herdr_presentation_lock "$target" || return 1
+    if ! teardown_child_endpoint_identity_proven \
+      "$child_id" "$child_meta" "$child_kind" "$parent_home" "$child_wt" "$backend" "$target"; then
+      teardown_release_herdr_presentation_lock || true
+      return 1
+    fi
+    if [ "$TEARDOWN_CHILD_ENDPOINT_PROVEN_DEAD" = 1 ]; then
+      teardown_release_herdr_presentation_lock || return 1
+      return 0
+    fi
+    if teardown_herdr_endpoint_focus_safe "$target"; then
+      status=0
+    else
+      status=$?
+    fi
+    teardown_release_herdr_presentation_lock || status=1
+    return "$status"
+  fi
+  teardown_child_endpoint_identity_proven \
+    "$child_id" "$child_meta" "$child_kind" "$parent_home" "$child_wt" "$backend" "$target" || return 1
+  [ "$TEARDOWN_CHILD_ENDPOINT_PROVEN_DEAD" = 1 ] && return 0
+  teardown_backend_endpoint "$backend" "$target"
+}
+
 teardown_file_inode() {
   if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
     stat -f '%i' "$1" 2>/dev/null
@@ -1528,8 +1622,9 @@ cleanup_firstmate_home_children() {
       [ "$child_resolved_handoff" = 0 ] || child_retire_staged=1
     fi
     if [ -n "$child_t" ] && [ "$child_slot_returned" != 1 ]; then
-      if ! teardown_backend_endpoint "$child_backend" "$child_t" 2>/dev/null; then
-        echo "REFUSED: could not kill child $child_id window $child_t; refusing to delete child state" >&2
+      if ! teardown_child_endpoint "$child_id" "$child_meta" "$child_kind" "$home" "$child_wt" \
+        "$child_backend" "$child_t" 2>/dev/null; then
+        echo "REFUSED: could not prove or close child $child_id endpoint $child_t; refusing to delete child state" >&2
         return 1
       fi
     fi
@@ -1835,6 +1930,11 @@ if [ "$KIND" != secondmate ]; then
     TEARDOWN_SLOT_RETAINED=1
     echo "teardown: task $ID never resolved a pooled slot path; its durable treehouse lease is RETAINED, not returned." >&2
     teardown_unresolved_lease_recovery_line "$META" "$ID"
+    if ! teardown_child_endpoint "$ID" "$META" "$KIND" "$FM_HOME" "$WT" "$BACKEND" "$T"; then
+      echo "REFUSED: could not prove or close the unresolved task endpoint for $ID; preserving task state" >&2
+      exit 1
+    fi
+    TOP_ENDPOINT_CLOSED=1
   else
     if fm_slot_stamp_path "$WT" >/dev/null 2>&1; then
       fm_slot_lock_acquire "$WT" || {
@@ -1879,7 +1979,8 @@ if [ "$BACKEND" = herdr ]; then
   # Same resume gate as the other endpoint branches: a prior run that already
   # returned the slot also already closed this pane, so re-closing it would
   # refuse on a pane that is legitimately gone and leave the task unfinishable.
-  if [ "$TOP_SLOT_RETURNED" != 1 ] && ! teardown_herdr_endpoint_focus_safe "$T"; then
+  if [ "$TOP_SLOT_RETURNED" != 1 ] && [ "$TOP_ENDPOINT_CLOSED" != 1 ] \
+    && ! teardown_herdr_endpoint_focus_safe "$T"; then
     echo "REFUSED: exact focus-safe Herdr task-pane close could not be confirmed for $ID; preserving task state and worktree" >&2
     exit 1
   fi

@@ -1000,7 +1000,7 @@ EOF
 }
 
 test_forced_secondmate_teardown_propagates_child_close_failure() {
-  local case_dir rc home child
+  local case_dir rc home child child_pid
   case_dir=$(make_case forced-child-close-failure)
   home="$case_dir/home"
   child="$case_dir/wt"
@@ -1020,10 +1020,28 @@ test_forced_secondmate_teardown_propagates_child_close_failure() {
     "kind=ship" \
     "mode=no-mistakes"
 
+  ( cd "$child" && FM_AGENT_ROLE=crewmate FM_AGENT_TASK=child-x1 \
+      FM_AGENT_OWNER_HOME="$home" exec sleep 300 ) >/dev/null 2>&1 </dev/null &
+  child_pid=$!
+  while [ ! -e "/proc/$child_pid/cwd" ] && kill -0 "$child_pid" 2>/dev/null; do
+    sleep 0.05
+  done
+  export FM_CHILD_PID="$child_pid"
+
   cat > "$case_dir/fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 case "$*" in
   "kill-window -t firstmate:fm-child-x1") exit 1 ;;
+  *"list-windows -t firstmate -F #{window_name}"*)
+    printf '%s\n' 'fm-child-x1'
+    exit 0
+    ;;
+  *"list-windows -t =firstmate -F #{window_id} #{window_name}"*)
+    printf '%s\n' '@2 fm-child-x1'
+    exit 0
+    ;;
+  *"#{pane_pid}"*) printf '%s\n' "${FM_CHILD_PID:?}"; exit 0 ;;
+  *"#{pane_current_command}"*) printf '%s\n' claude; exit 0 ;;
   "list-windows -a -F #{window_id}|#{session_name}:#{window_name}")
     printf '%s\n' '@2|firstmate:fm-child-x1'
     exit 0
@@ -1037,6 +1055,10 @@ SH
   run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
+
+  kill "$child_pid" 2>/dev/null || true
+  wait "$child_pid" 2>/dev/null || true
+  unset FM_CHILD_PID
 
   expect_code 1 "$rc" "forced-child-close-failure: parent teardown must fail closed"
   assert_present "$case_dir/state/task-x1.meta" \
