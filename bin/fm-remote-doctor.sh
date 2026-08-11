@@ -602,6 +602,7 @@ repair_cursor_wrapper() {
   for alias in cursor-agent agent; do
     target=$(fm_remote_job_manager_tool "${HOME:-}" "$alias" 2>/dev/null || true)
     [ -n "$target" ] || continue
+    fm_remote_doctor_cursor_verify_executable "$target" || continue
     publish_tool_wrapper "$alias" "$target" && return 0
   done
   return 1

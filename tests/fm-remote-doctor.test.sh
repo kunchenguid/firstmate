@@ -610,6 +610,24 @@ assert_contains "$DOCTOR_OUT" "required harness=cursor-agent:$CASE_HOME/.local/b
 pass "--fix repairs a Cursor install exposed only as the manager agent alias"
 
 new_case Linux with-herdr no-gui
+rm -f "$CASE_BIN/claude"
+CURSOR_MANAGER_BIN="$CASE_HOME/.nvm/versions/node/v24/bin"
+fm_fake_unrelated_agent "$CURSOR_MANAGER_BIN" cursor-agent
+fm_fake_cursor_alias "$CURSOR_MANAGER_BIN" agent
+doctor hermetic
+assert_contains "$DOCTOR_OUT" 'required harness=MISSING' \
+  "an unverified manager Cursor candidate was reported ready"
+doctor --fix hermetic
+expect_code 0 "$DOCTOR_RC" "--fix did not skip an unverified Cursor candidate"
+assert_absent "$CASE_HOME/.local/bin/cursor-agent" \
+  "--fix published an unverified cursor-agent wrapper"
+assert_present "$CASE_HOME/.local/bin/agent" \
+  "--fix did not select the verified agent candidate"
+assert_grep "$CURSOR_MANAGER_BIN/agent" "$CASE_HOME/.local/bin/agent" \
+  "the verified agent candidate was not wrapped"
+pass "--fix skips an unverified Cursor candidate and repairs the verified alias"
+
+new_case Linux with-herdr no-gui
 CASE_REMOTE_JOB_ACTIVE=
 CASE_PLATFORM_OVERRIDE=Linux
 rm -f "$CASE_BIN/sleep" "$CASE_BIN/uname"
