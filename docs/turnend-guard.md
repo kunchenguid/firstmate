@@ -78,7 +78,7 @@ A Claude failure notice describes the automatic mechanism as broken and does not
 OpenCode, Pi, and pi-signed expose passive callbacks for this purpose.
 Their adapters fail open at the hook boundary to protect the user session but schedule one bounded follow-up when the predicate blocks.
 The generated prompts use the canonical `turn-end-guard` kind after the U+2063 `FIRSTMATE_OP: ` prefix, so Ahoy does not treat them as captain messages.
-With an active Feishu binding, Pi's helper durably queues that internal prompt behind the same single-flight TUI, Feishu, and watcher ingress order; without an active channel runtime it delegates directly to `pi.sendUserMessage`.
+Pi sends that internal prompt directly through `pi.sendUserMessage(..., { deliverAs: "followUp" })`, and Feishu state never intercepts or schedules it.
 The internal provenance is never projected into the Feishu outbox.
 Each passive adapter owns a loop latch.
 Pi keeps the latch across internal tool turns and clears it only when the generated follow-up settles or delivery fails.

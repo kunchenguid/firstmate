@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Start, stop, inspect, or foreground the dedicated no-Agent Feishu transport.
 #
-# The Node entry point owns exact argv, readiness, reconciliation, delivery,
-# owner identity, and health behavior.  This wrapper only resolves the tracked
+# The Node entry point owns official-SDK startup, connection readiness, callback
+# handoff, outbound delivery, owner identity, and health.  This wrapper resolves the tracked
 # code root and execs Node; it never evaluates message text or constructs a
 # shell command from private state.
 set -u

@@ -2,7 +2,7 @@
 // Private durable state owner for the Firstmate Feishu channel.
 //
 // This module contains no network or Agent code.  It owns the pairing and
-// binding schemas, private artifact publication, ingress ordering and ACKs,
+// binding schemas, private accepted-event publication, native Pi queue handoff,
 // direct-Assistant outbox records, attempts, receipts, correlation maps,
 // quarantine, transport health, and crash reconciliation.  The Pi extension
 // and the no-Agent transport import this same owner rather than duplicating
@@ -28,16 +28,15 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-export const PAIRING_SCHEMA = "fm-feishu-pairing.v1";
+export const PAIRING_SCHEMA = "fm-feishu-pairing.v2";
 export const BINDING_SCHEMA = "fm-feishu-binding.v1";
 export const INBOUND_SCHEMA = "fm-feishu-inbound.v1";
-export const INBOUND_LEDGER_SCHEMA = "fm-feishu-inbound-ledger.v1";
-export const INBOUND_ACK_SCHEMA = "fm-feishu-pi-ack.v1";
+export const INBOUND_LEDGER_SCHEMA = "fm-feishu-inbound-ledger.v2";
 export const OUTBOUND_SCHEMA = "fm-feishu-assistant-outbound.v1";
 export const OUTBOUND_LEDGER_SCHEMA = "fm-feishu-outbound-ledger.v1";
 export const OUTBOUND_RECEIPT_SCHEMA = "fm-feishu-outbound-receipt.v1";
 export const OUTBOUND_INTENT_SCHEMA = "fm-feishu-outbound-registration-intent.v1";
-export const TRANSPORT_HEALTH_SCHEMA = "fm-feishu-transport-health.v1";
+export const TRANSPORT_HEALTH_SCHEMA = "fm-feishu-transport-health.v2";
 export const DECISION_SCHEMA = "fm-feishu-pending-decision.v1";
 export const DEFAULT_MAX_INBOUND_BYTES = 64 * 1024;
 export const DEFAULT_MAX_OUTBOUND_CHUNK_BYTES = 20 * 1024;
@@ -45,7 +44,6 @@ export const DEFAULT_MAX_OUTBOUND_BYTES = 1024 * 1024;
 export const DEFAULT_MAX_PENDING_INBOUND = 10000;
 export const DEFAULT_MAX_PENDING_OUTBOUND = 1000;
 export const DEFAULT_MIN_FREE_BYTES = 64 * 1024 * 1024;
-export const DEFAULT_MAX_LOCAL_IMAGE_BYTES = 20 * 1024 * 1024;
 export const IDEMPOTENCY_WINDOW_MS = 60 * 60 * 1000;
 const LOCK_WAIT_MS = 3000;
 const LOCK_STALE_MS = 30000;
@@ -205,6 +203,10 @@ function withLock(paths, name, callback) {
   }
 }
 
+function withConfigurationLocks(paths, callback) {
+  return withLock(paths, "pairing", () => withLock(paths, "binding", callback));
+}
+
 export function pathsForHome(home) {
   const homePath = resolve(home);
   const homeRealpath = realpathSync(homePath);
@@ -220,7 +222,6 @@ export function pathsForHome(home) {
     inbox: join(stateRoot, "inbox"),
     inboundLedger: join(stateRoot, "inbound-ledger"),
     inboundEventIds: join(stateRoot, "inbound-event-ids"),
-    inboundAcks: join(stateRoot, "inbound-acks"),
     inboundPending: join(stateRoot, "inbound-pending"),
     inboundPendingCount: join(stateRoot, "inbound-pending-count"),
     inboundDeliveryMap: join(stateRoot, "inbound-delivery-map"),
@@ -233,14 +234,12 @@ export function pathsForHome(home) {
     outboundRegistrationIntents: join(stateRoot, "outbound-registration-intents"),
     pendingDecisions: join(stateRoot, "pending-decisions"),
     pendingDecisionOpen: join(stateRoot, "pending-decision-open"),
-    attemptsIn: join(stateRoot, "attempts", "in"),
     attemptsOut: join(stateRoot, "attempts", "out"),
     quarantine: join(stateRoot, "quarantine"),
     alerts: join(stateRoot, "alerts"),
     transport: join(stateRoot, "transport"),
     health: join(stateRoot, "transport", "health.json"),
     owner: join(stateRoot, "transport", "owner.json"),
-    stagedEvents: join(stateRoot, "transport", "staged-events"),
     liveSession: join(stateRoot, "live-session"),
     sequence: join(stateRoot, "sequence"),
   };
@@ -257,7 +256,6 @@ export function ensurePrivateLayout(home) {
     paths.inbox,
     paths.inboundLedger,
     paths.inboundEventIds,
-    paths.inboundAcks,
     paths.inboundPending,
     paths.inboundDeliveryMap,
     paths.inboundPublications,
@@ -270,12 +268,10 @@ export function ensurePrivateLayout(home) {
     paths.pendingDecisions,
     paths.pendingDecisionOpen,
     join(paths.stateRoot, "attempts"),
-    paths.attemptsIn,
     paths.attemptsOut,
     paths.quarantine,
     paths.alerts,
     paths.transport,
-    paths.stagedEvents,
     paths.liveSession,
   ]) privateDir(path);
   if (!existsSync(paths.sequence)) atomicWrite(paths.sequence, "0\n");
@@ -283,7 +279,7 @@ export function ensurePrivateLayout(home) {
     let pending = 0;
     for (const name of safeJsonNames(paths.inboundLedger)) {
       const ledger = readJson(join(paths.inboundLedger, name));
-      if (ledger.state === "pending" || ledger.state === "dispatching") {
+      if (ledger.state === "pending" || ledger.state === "offered") {
         writeInboundPendingIndex(paths, name, ledger);
         pending += 1;
       }
@@ -335,35 +331,20 @@ function requireIso(value, label, { nullable = false } = {}) {
   return value;
 }
 
-function validateImageList(images) {
-  if (!Array.isArray(images)) throw new Error("invalid Feishu local image list");
-  for (const image of images) {
-    if (!image || image.type !== "image") throw new Error("invalid Feishu local image");
-    requireString(image.data, "Feishu local image data", /^[A-Za-z0-9+/]*={0,2}$/, DEFAULT_MAX_LOCAL_IMAGE_BYTES * 2);
-    requireString(image.mimeType, "Feishu local image MIME type", /^[A-Za-z0-9.+-]+\/[A-Za-z0-9.+-]+$/, 128);
-  }
-}
-
 function validateInboundEvent(event) {
-  if (event.schema !== INBOUND_SCHEMA || !new Set(["feishu", "tui", "internal"]).has(event.source)) throw new Error("invalid Feishu inbound event schema or source");
-  const remote = event.source === "feishu";
-  requireString(event.message_id, "inbound message id", remote ? MESSAGE_ID : /^(?:local|internal)_[0-9a-fA-F-]{16,128}$/);
+  if (event.schema !== INBOUND_SCHEMA || event.source !== "feishu") throw new Error("invalid Feishu inbound event schema or source");
+  requireString(event.message_id, "inbound message id", MESSAGE_ID);
   if (!Array.isArray(event.event_ids) || event.event_ids.some((id) => typeof id !== "string" || id.length === 0 || Buffer.byteLength(id, "utf8") > 512)) throw new Error("invalid Feishu inbound event ids");
   requireString(event.transport, "inbound transport", /^[A-Za-z0-9._-]+$/, 128);
-  if (remote) {
-    requireString(event.sender_id, "inbound sender", /^ou_[A-Za-z0-9_-]{4,128}$/);
-    if (event.sender_type !== "user") throw new Error("invalid Feishu inbound sender type");
-    requireString(event.chat_id, "inbound chat", CHAT_ID);
-    if (event.chat_type !== "p2p") throw new Error("invalid Feishu inbound chat type");
-  } else if (event.sender_id !== null || event.sender_type !== "local" || event.chat_id !== null || event.chat_type !== "local") {
-    throw new Error("invalid local inbound identity");
-  }
+  requireString(event.sender_id, "inbound sender", /^ou_[A-Za-z0-9_-]{4,128}$/);
+  if (event.sender_type !== "user") throw new Error("invalid Feishu inbound sender type");
+  requireString(event.chat_id, "inbound chat", CHAT_ID);
+  if (event.chat_type !== "p2p") throw new Error("invalid Feishu inbound chat type");
   requireNullableString(event.reply_to, "inbound reply", MESSAGE_ID);
   requireNullableString(event.root_id, "inbound root id", /^(?:om_|omt_)[A-Za-z0-9_-]{4,128}$/);
   requireNullableString(event.thread_id, "inbound thread id", /^(?:om_|omt_)[A-Za-z0-9_-]{4,128}$/);
   if (event.message_type !== "text") throw new Error("invalid Feishu inbound message type");
   if (typeof event.text !== "string" || event.text.trim().length === 0 || Buffer.from(event.text, "utf8").toString("utf8") !== event.text) throw new Error("invalid Feishu inbound text");
-  validateImageList(event.images ?? []);
   requireSafeInteger(event.create_time_ms, "inbound create time");
   if (event.update_time_ms !== undefined && event.update_time_ms !== null) requireSafeInteger(event.update_time_ms, "inbound update time");
   requireIso(event.received_at, "inbound received time");
@@ -371,56 +352,41 @@ function validateInboundEvent(event) {
   requireString(event.binding_id, "inbound binding id", /^bind_[a-f0-9]{24}$/);
   requireSafeInteger(event.binding_generation, "inbound binding generation", { min: 1 });
   requireString(event.target_session_id, "inbound target session", SESSION_ID);
-  if (remote) requireString(event.authorization_snapshot, "inbound authorization snapshot", RECORD_HASH);
-  else if (event.authorization_snapshot !== null) throw new Error("invalid local inbound authorization snapshot");
+  requireString(event.authorization_snapshot, "inbound authorization snapshot", RECORD_HASH);
   requireSafeInteger(event.ingress_seq, "inbound sequence", { min: 1 });
   requireString(event.delivery_ref, "inbound delivery ref", DELIVERY_REF);
   requireNullableString(event.decision_ref, "inbound decision ref", /^[A-Za-z0-9._:-]{1,160}$/);
   requireNullableString(event.decision_key, "inbound decision key", /^[A-Za-z0-9._:-]{1,160}$/);
   if ((event.decision_ref === null) !== (event.decision_key === null)) throw new Error("partial Feishu inbound decision identity");
-  if (remote && !new Set(["exact", "unrelated", "none"]).has(event.decision_reply)) throw new Error("invalid Feishu inbound decision fence");
-  if (!remote && event.desired_delivery !== undefined && !new Set(["steer", "followUp"]).has(event.desired_delivery)) throw new Error("invalid local inbound delivery mode");
+  if (!new Set(["exact", "unrelated", "none"]).has(event.decision_reply)) throw new Error("invalid Feishu inbound decision fence");
   return event;
 }
 
 function validateInboundLedger(ledger) {
-  if (ledger.schema !== INBOUND_LEDGER_SCHEMA || !new Set(["feishu", "tui", "internal"]).has(ledger.source)) throw new Error("invalid Feishu inbound ledger schema or source");
-  requireString(ledger.message_id, "inbound ledger message id", ledger.source === "feishu" ? MESSAGE_ID : /^(?:local|internal)_[0-9a-fA-F-]{16,128}$/);
+  if (ledger.schema !== INBOUND_LEDGER_SCHEMA || ledger.source !== "feishu") throw new Error("invalid Feishu inbound ledger schema or source");
+  requireString(ledger.message_id, "inbound ledger message id", MESSAGE_ID);
   requireSafeInteger(ledger.ingress_seq, "inbound ledger sequence", { min: 1 });
-  if (!new Set(["pending", "dispatching", "delivered", "superseded"]).has(ledger.state)) throw new Error("invalid Feishu inbound ledger state");
+  if (!new Set(["pending", "offered", "delivered", "superseded"]).has(ledger.state)) throw new Error("invalid Feishu inbound ledger state");
   requireSafeInteger(ledger.attempt, "inbound ledger attempt");
-  requireNullableString(ledger.claim_generation, "inbound claim generation", /^claim_[a-f0-9]{24}$/);
-  if (ledger.lease_until_ms !== null) requireSafeInteger(ledger.lease_until_ms, "inbound lease");
   requireString(ledger.target_session_id, "inbound target session", SESSION_ID);
   requireString(ledger.binding_id, "inbound ledger binding", /^bind_[a-f0-9]{24}$/);
   requireSafeInteger(ledger.binding_generation, "inbound ledger generation", { min: 1 });
   requireString(ledger.delivery_ref, "inbound ledger delivery ref", DELIVERY_REF);
   if (ledger.last_error !== null && typeof ledger.last_error !== "string") throw new Error("invalid Feishu inbound ledger error");
   requireIso(ledger.created_at, "inbound ledger creation time");
-  if (ledger.state === "dispatching" && (!ledger.claim_generation || ledger.lease_until_ms === null)) throw new Error("partial Feishu inbound dispatch claim");
-  if (ledger.state !== "dispatching" && (ledger.lease_until_ms !== null || ledger.claim_generation !== null)) throw new Error("stale Feishu inbound dispatch claim");
-  if (ledger.accepted_at !== undefined) requireIso(ledger.accepted_at, "inbound acceptance time");
+  if (ledger.offered_at !== undefined && ledger.offered_at !== null) requireIso(ledger.offered_at, "inbound native queue offer time");
   if (ledger.delivered_at !== undefined && ledger.delivered_at !== null) requireIso(ledger.delivered_at, "inbound delivery time");
   if (ledger.superseded_at !== undefined && ledger.superseded_at !== null) requireIso(ledger.superseded_at, "inbound superseded time");
-  if (ledger.state === "delivered" && (ledger.accepted_at === undefined || ledger.delivered_at == null)) throw new Error("delivered Feishu inbound ledger lacks durable persistence proof");
+  if (ledger.state === "offered" && ledger.offered_at == null) throw new Error("offered Feishu inbound ledger lacks native queue evidence");
+  if (ledger.state !== "offered" && ledger.offered_at != null) throw new Error("non-offered Feishu inbound ledger has stale native queue evidence");
+  if (ledger.state === "delivered" && ledger.delivered_at == null) throw new Error("delivered Feishu inbound ledger lacks session-marker proof");
   if (ledger.state === "superseded" && ledger.superseded_at == null) throw new Error("superseded Feishu inbound ledger lacks terminal proof");
   if (ledger.state !== "delivered" && ledger.delivered_at != null) throw new Error("non-delivered Feishu inbound ledger has stale persistence proof");
   return ledger;
 }
 
-function validateInboundAck(ack) {
-  if (ack.schema !== INBOUND_ACK_SCHEMA) throw new Error("invalid Feishu inbound ACK schema");
-  requireString(ack.message_id, "inbound ACK message", /^(?:om_|local_|internal_)[A-Za-z0-9_-]{4,128}$/);
-  requireString(ack.delivery_ref, "inbound ACK delivery ref", DELIVERY_REF);
-  requireString(ack.session_id, "inbound ACK session", SESSION_ID);
-  requireString(ack.session_entry_id, "inbound ACK entry", /^[A-Za-z0-9_-]{1,128}$/);
-  requireSafeInteger(ack.binding_generation, "inbound ACK generation", { min: 1 });
-  requireIso(ack.persisted_at, "inbound ACK persistence time");
-  return ack;
-}
-
 function validateOutbound(outbox) {
-  if (outbox.schema !== OUTBOUND_SCHEMA || !new Set(["feishu", "tui"]).has(outbox.source)) throw new Error("invalid Feishu outbox schema or source");
+  if (outbox.schema !== OUTBOUND_SCHEMA || outbox.source !== "feishu") throw new Error("invalid Feishu outbox schema or source");
   requireString(outbox.event_id, "outbound event id", OUTBOUND_EVENT_ID);
   requireString(outbox.source_ref, "outbound source ref", DELIVERY_REF);
   requireString(outbox.session_id, "outbound session", SESSION_ID);
@@ -485,7 +451,7 @@ function validateOutboundReceipt(receipt) {
 }
 
 function validateOutboundIntent(intent) {
-  if (intent.schema !== OUTBOUND_INTENT_SCHEMA || !new Set(["feishu", "tui", "internal"]).has(intent.source)) throw new Error("invalid Feishu outbound registration intent");
+  if (intent.schema !== OUTBOUND_INTENT_SCHEMA || intent.source !== "feishu") throw new Error("invalid Feishu outbound registration intent");
   requireString(intent.intent_id, "outbound intent id", /^reg_[a-f0-9]{40}$/);
   requireString(intent.source_ref, "outbound intent source ref", DELIVERY_REF);
   requireString(intent.session_id, "outbound intent session", SESSION_ID);
@@ -507,7 +473,7 @@ function validateDecision(record) {
   requireString(record.decision_key, "decision key", /^[A-Za-z0-9._:-]{1,160}$/);
   requireString(record.session_id, "decision session", SESSION_ID);
   requireSafeInteger(record.binding_generation, "decision generation", { min: 1 });
-  if (!new Set(["feishu", "tui"]).has(record.source)) throw new Error("invalid Feishu decision source");
+  if (record.source !== "feishu") throw new Error("invalid Feishu decision source");
   requireString(record.source_ref, "decision source ref", DELIVERY_REF);
   if (!new Set(["awaiting-outbound", "sent-to-outbox", "reply-received", "outbound-skipped", "outbound-refused"]).has(record.state)) throw new Error("invalid Feishu decision state");
   requireIso(record.registered_at, "decision registration time");
@@ -537,9 +503,6 @@ function validateRecordAtPath(path, record) {
   } else if (parent === "inbound-ledger") {
     validateInboundLedger(record);
     if (path.split(/[\\/]/).pop() !== inboundFilename(record.message_id)) throw new Error("Feishu inbound ledger filename identity mismatch");
-  } else if (parent === "inbound-acks") {
-    validateInboundAck(record);
-    if (path.split(/[\\/]/).pop() !== inboundFilename(record.message_id)) throw new Error("Feishu inbound ACK filename identity mismatch");
   } else if (parent === "outbox") {
     validateOutbound(record);
     if (path.split(/[\\/]/).pop() !== `${sha(record.event_id)}.json`) throw new Error("Feishu outbox filename identity mismatch");
@@ -564,13 +527,13 @@ function validateRecordAtPath(path, record) {
   } else if (parent === "inbound-delivery-map") {
     if (record.schema !== "fm-feishu-inbound-delivery-map.v1") throw new Error("invalid Feishu inbound delivery map");
     requireString(record.delivery_ref, "inbound delivery map ref", DELIVERY_REF);
-    requireString(record.message_id, "inbound delivery map message", /^(?:om_|local_|internal_)[A-Za-z0-9_-]{4,128}$/);
+    requireString(record.message_id, "inbound delivery map message", MESSAGE_ID);
     requireString(record.filename, "inbound delivery map filename", /^[a-f0-9]{64}\.json$/);
     requireIso(record.recorded_at, "inbound delivery map time");
     if (record.filename !== inboundFilename(record.message_id) || path.split(/[\\/]/).pop() !== `${sha(record.delivery_ref)}.json`) throw new Error("Feishu inbound delivery map identity mismatch");
   } else if (parent === "inbound-pending") {
     if (record.schema !== "fm-feishu-inbound-pending.v1") throw new Error("invalid Feishu inbound pending index");
-    requireString(record.message_id, "inbound pending message", /^(?:om_|local_|internal_)[A-Za-z0-9_-]{4,128}$/);
+    requireString(record.message_id, "inbound pending message", MESSAGE_ID);
     requireString(record.delivery_ref, "inbound pending delivery", DELIVERY_REF);
     requireSafeInteger(record.ingress_seq, "inbound pending sequence", { min: 1 });
     requireIso(record.created_at, "inbound pending creation time");
@@ -581,7 +544,7 @@ function validateRecordAtPath(path, record) {
     requireString(record.decision_key, "pending decision index key", /^[A-Za-z0-9._:-]{1,160}$/);
     requireString(record.session_id, "pending decision index session", SESSION_ID);
     requireSafeInteger(record.binding_generation, "pending decision index generation", { min: 1 });
-    if (!new Set(["feishu", "tui"]).has(record.source)) throw new Error("invalid pending decision index source");
+    if (record.source !== "feishu") throw new Error("invalid pending decision index source");
     requireString(record.source_ref, "pending decision index source ref", DELIVERY_REF);
     if (!new Set(["awaiting-outbound", "sent-to-outbox"]).has(record.state)) throw new Error("invalid pending decision index state");
     if (path.split(/[\\/]/).pop() !== `${sha(record.decision_ref)}.json`) throw new Error("Feishu pending decision index filename mismatch");
@@ -590,12 +553,6 @@ function validateRecordAtPath(path, record) {
     requireString(record.event_id, "outbound pending event", OUTBOUND_EVENT_ID);
     requireIso(record.created_at, "outbound pending creation time");
     if (path.split(/[\\/]/).pop() !== `${sha(record.event_id)}.json`) throw new Error("Feishu outbound pending filename identity mismatch");
-  } else if (parent === "staged-events") {
-    if (record.schema !== "fm-feishu-staged-event.v1" || !record.event || typeof record.event !== "object" || Array.isArray(record.event)) throw new Error("invalid Feishu staged event");
-    requireString(record.event_hash, "staged event hash", RECORD_HASH);
-    if (record.event_hash !== `sha256:${sha(JSON.stringify(record.event))}`) throw new Error("Feishu staged event hash mismatch");
-    requireIso(record.recorded_at, "staged event time");
-    if (path.split(/[\\/]/).pop() !== `${record.event_hash.slice(7)}.json`) throw new Error("Feishu staged event filename identity mismatch");
   } else if (parent === "outbound-message-map") {
     if (record.schema !== "fm-feishu-outbound-message-map.v1") throw new Error("invalid Feishu outbound message map schema");
     requireString(record.message_id, "outbound map message", MESSAGE_ID);
@@ -634,7 +591,7 @@ function validateRecordAtPath(path, record) {
     requireString(record.process_start_token, "transport process start token", /^[0-9]+$/, 64);
     requireIso(record.started_at, "transport owner start time");
   } else if (path.endsWith("/transport/health.json")) {
-    if (record.schema !== TRANSPORT_HEALTH_SCHEMA || !new Set(["starting", "reconciling", "healthy", "degraded", "stopped"]).has(record.phase) || typeof record.healthy !== "boolean") throw new Error("invalid Feishu transport health");
+    if (record.schema !== TRANSPORT_HEALTH_SCHEMA || !new Set(["starting", "connecting", "healthy", "reconnecting", "degraded", "stopped"]).has(record.phase) || typeof record.healthy !== "boolean") throw new Error("invalid Feishu transport health");
     if (record.owner_pid !== null) requireSafeInteger(record.owner_pid, "transport health owner", { min: 2 });
     requireNullableString(record.owner_nonce, "transport health nonce", /^[a-f0-9]{24,128}$/);
     requireNullableString(record.owner_process_start_token, "transport health process start", /^[0-9]+$/, 64);
@@ -645,8 +602,7 @@ function validateRecordAtPath(path, record) {
     if ((ownerPartial !== 0 && ownerPartial !== 3) || (bindingPartial !== 0 && bindingPartial !== 2)) throw new Error("partial Feishu transport health identity");
     if (record.healthy && (record.phase !== "healthy" || ownerPartial !== 3 || bindingPartial !== 2)) throw new Error("unfenced healthy Feishu transport state");
     requireSafeInteger(record.reconnects, "transport reconnect count");
-    requireSafeInteger(record.drop_diagnostics, "transport drop count");
-    for (const [key, label] of [["last_ready_at", "ready"], ["last_reconcile_at", "reconcile"]]) if (record[key] !== null) requireIso(record[key], `transport ${label} time`);
+    for (const [key, label] of [["last_connected_at", "connection"], ["last_identity_verified_at", "identity verification"]]) if (record[key] !== null) requireIso(record[key], `transport ${label} time`);
     if (record.last_error_type !== null && typeof record.last_error_type !== "string") throw new Error("invalid Feishu transport health error");
     requireIso(record.updated_at, "transport update time");
   } else if (grandparent === "pending-decisions") validateDecision(record);
@@ -666,9 +622,7 @@ function validatePairingRecord(pairing) {
   if (pairing.schema !== PAIRING_SCHEMA) throw new Error("unsupported Feishu pairing schema");
   requireString(pairing.home_id, "pairing home_id", /^home_[a-f0-9]{32}$/);
   requireString(pairing.fm_home_realpath, "pairing home path", undefined, 4096);
-  requireString(pairing.app_profile, "pairing app profile", /^[A-Za-z0-9._-]+$/, 80);
-  if (pairing.app_id_fingerprint !== null) requireString(pairing.app_id_fingerprint, "pairing app fingerprint", /^sha256:[a-f0-9]{64}$/);
-  requireString(pairing.bot_open_id, "pairing bot open_id", /^ou_[A-Za-z0-9_-]{4,128}$/);
+  requireString(pairing.app_id_fingerprint, "pairing app fingerprint", /^sha256:[a-f0-9]{64}$/);
   if (!Array.isArray(pairing.allowed_users) || pairing.allowed_users.length !== 1) throw new Error("invalid Feishu pairing user allowlist");
   if (!Array.isArray(pairing.allowed_chats) || pairing.allowed_chats.length !== 1) throw new Error("invalid Feishu pairing chat allowlist");
   requireString(pairing.allowed_users[0], "pairing allowed user", /^ou_[A-Za-z0-9_-]{4,128}$/);
@@ -723,7 +677,7 @@ export function readActiveBinding(home) {
 
 export function createPairing(home, input) {
   const paths = ensurePrivateLayout(home);
-  return withLock(paths, "pairing", () => {
+  return withConfigurationLocks(paths, () => {
     const priorRaw = readJson(paths.pairing, { optional: true });
     const prior = priorRaw ? validatePairingRecord(priorRaw) : undefined;
     const homeId = prior?.home_id ?? `home_${randomBytes(16).toString("hex")}`;
@@ -731,11 +685,7 @@ export function createPairing(home, input) {
       schema: PAIRING_SCHEMA,
       home_id: homeId,
       fm_home_realpath: paths.home,
-      app_profile: requireString(input.appProfile ?? "default", "app profile", /^[A-Za-z0-9._-]+$/, 80),
-      app_id_fingerprint: input.appIdFingerprint
-        ? requireString(input.appIdFingerprint, "app id fingerprint", /^sha256:[a-f0-9]{64}$/)
-        : null,
-      bot_open_id: requireString(input.botOpenId, "bot open_id", /^ou_[A-Za-z0-9_-]{4,128}$/),
+      app_id_fingerprint: requireString(input.appIdFingerprint, "app id fingerprint", /^sha256:[a-f0-9]{64}$/),
       allowed_users: [requireString(input.allowedUser, "allowed user open_id", /^ou_[A-Za-z0-9_-]{4,128}$/)],
       allowed_chats: [requireString(input.allowedChat, "allowed P2P chat_id", /^oc_[A-Za-z0-9_-]{4,128}$/)],
       chat_policy: "p2p-only",
@@ -747,9 +697,7 @@ export function createPairing(home, input) {
     const bindingRaw = readJson(paths.activeBinding, { optional: true });
     const binding = bindingRaw ? validateBindingRecord(bindingRaw) : undefined;
     if (binding?.status === "active" && prior?.disabled_at === null) {
-      const unchanged = prior.app_profile === pairing.app_profile &&
-        prior.app_id_fingerprint === pairing.app_id_fingerprint &&
-        prior.bot_open_id === pairing.bot_open_id &&
+      const unchanged = prior.app_id_fingerprint === pairing.app_id_fingerprint &&
         prior.allowed_users[0] === pairing.allowed_users[0] &&
         prior.allowed_chats[0] === pairing.allowed_chats[0];
       if (!unchanged) throw new Error("disable the active Feishu binding before changing its pairing identity");
@@ -762,7 +710,7 @@ export function createPairing(home, input) {
 
 export function disablePairing(home) {
   const paths = ensurePrivateLayout(home);
-  return withLock(paths, "pairing", () => {
+  return withConfigurationLocks(paths, () => {
     const pairingRaw = readJson(paths.pairing, { optional: true });
     const pairing = pairingRaw ? validatePairingRecord(pairingRaw) : undefined;
     if (!pairing) return { changed: false };
@@ -792,7 +740,7 @@ function validateSessionIdentity(session) {
 
 export function bindSession(home, session, { rebind = false } = {}) {
   const paths = ensurePrivateLayout(home);
-  return withLock(paths, "binding", () => {
+  return withConfigurationLocks(paths, () => {
     const pairingRaw = readJson(paths.pairing, { optional: true });
     const pairing = pairingRaw ? validatePairingRecord(pairingRaw) : undefined;
     if (!pairingIsActive(pairing)) throw new Error("Feishu pairing is not active");
@@ -844,24 +792,13 @@ function retargetPendingIngressLocked(paths, binding) {
   const names = safeJsonNames(paths.inboundPending);
   for (const name of names) {
     const ledger = requireSchema(readJson(join(paths.inboundLedger, name)), INBOUND_LEDGER_SCHEMA, "inbound ledger");
-    if (ledger.state === "dispatching") throw new Error("cannot rebind while a Pi ingress is still being accepted");
+    if (ledger.state === "offered") throw new Error("cannot rebind while a Feishu message belongs to the current Pi native queue");
   }
   for (const name of names) {
     const path = join(paths.inboundLedger, name);
     const ledger = requireSchema(readJson(path), INBOUND_LEDGER_SCHEMA, "inbound ledger");
     if (ledger.state !== "pending") continue;
-    const event = requireSchema(readJson(join(paths.inbox, name)), INBOUND_SCHEMA, "inbound event");
-    if (event.source !== "feishu") {
-      atomicJson(path, {
-        ...ledger,
-        state: "superseded",
-        superseded_at: nowIso(),
-        last_error: "local or internal input belongs to the previous Pi session",
-      });
-      removeInboundPendingIndex(paths, name);
-      syncInboundPendingCount(paths);
-      continue;
-    }
+    requireSchema(readJson(join(paths.inbox, name)), INBOUND_SCHEMA, "inbound event");
     atomicJson(path, {
       ...ledger,
       original_binding_id: ledger.original_binding_id ?? ledger.binding_id,
@@ -1008,6 +945,7 @@ function inboundFilename(messageId) {
 
 function expectedAuthorizationSnapshot(pairing) {
   return `sha256:${sha(JSON.stringify({
+    app: pairing.app_id_fingerprint,
     user: pairing.allowed_users,
     chat: pairing.allowed_chats,
     type: pairing.inbound_types,
@@ -1035,10 +973,6 @@ function assertInboundPair(paths, name, event, ledger, { pairing, binding } = {}
     throw new Error("Feishu inbound record does not match the active binding");
   }
   return retargeted;
-}
-
-function assertInboundAckPair(ack, ledger) {
-  if (ack.message_id !== ledger.message_id || ack.delivery_ref !== ledger.delivery_ref || ack.session_id !== ledger.target_session_id || ack.binding_generation !== ledger.binding_generation) throw new Error("Feishu inbound ACK does not match its ledger");
 }
 
 function inboundEventIdExists(paths, eventId) {
@@ -1155,21 +1089,6 @@ function normalizeContent(content) {
   return content;
 }
 
-function normalizeLocalImages(images) {
-  if (images === undefined) return [];
-  if (!Array.isArray(images)) throw new Error("local Pi images are malformed");
-  const normalized = images.map((image) => {
-    if (!image || image.type !== "image" || typeof image.data !== "string" || typeof image.mimeType !== "string") {
-      throw new Error("local Pi image is malformed");
-    }
-    return { type: "image", data: image.data, mimeType: image.mimeType };
-  });
-  const bytes = normalized.reduce((total, image) => total + Buffer.byteLength(image.data, "utf8"), 0);
-  const maxBytes = positiveInteger(process.env.FM_FEISHU_MAX_LOCAL_IMAGE_BYTES, DEFAULT_MAX_LOCAL_IMAGE_BYTES);
-  if (bytes > maxBytes) throw new Error("local Pi images exceed the durable channel limit");
-  return normalized;
-}
-
 function decisionForReply(paths, replyTo, binding) {
   if (!replyTo) return null;
   const map = readJson(join(paths.outboundMessageMap, `${sha(replyTo)}.json`), { optional: true });
@@ -1227,7 +1146,7 @@ export function publishFeishuInbound(home, raw, options = {}) {
   const chatType = raw.chat_type;
   const messageType = raw.message_type ?? raw.msg_type;
   let reject;
-  if (senderType !== "user" || senderId === pairing.bot_open_id) reject = "bot-or-self";
+  if (senderType !== "user") reject = "bot-or-self";
   else if (!pairing.allowed_users.includes(senderId)) reject = "unauthorized-user";
   else if (chatType !== "p2p" || !pairing.allowed_chats.includes(chatId) || chatId !== binding.chat_id) reject = "unauthorized-chat";
   else if (!pairing.inbound_types.includes(messageType)) reject = "unsupported-type";
@@ -1246,8 +1165,28 @@ export function publishFeishuInbound(home, raw, options = {}) {
     quarantine(paths, reject, messageId, { ...audit, message_id_hash: sha(messageId) });
     return { status: "quarantined", reason: reject, messageIdHash: sha(messageId) };
   }
-  return withLock(paths, "inbound-state", () => {
+  return withConfigurationLocks(paths, () => withLock(paths, "inbound-state", () => {
     repairInboundPublicationsLocked(paths);
+    const currentPairingRaw = readJson(paths.pairing, { optional: true });
+    const currentBindingRaw = readJson(paths.activeBinding, { optional: true });
+    const currentPairing = currentPairingRaw ? validatePairingRecord(currentPairingRaw) : undefined;
+    const currentBinding = currentBindingRaw ? validateBindingRecord(currentBindingRaw) : undefined;
+    assertConfigurationIdentity(paths, currentPairing, currentBinding);
+    if (!pairingIsActive(currentPairing) || !currentBinding || currentBinding.status !== "active") {
+      quarantine(paths, "inactive-binding", messageId, { ...audit, message_id_hash: sha(messageId) });
+      return { status: "quarantined", reason: "inactive-binding", messageIdHash: sha(messageId) };
+    }
+    const fence = options.bindingFence;
+    if (fence && (
+      currentBinding.binding_id !== fence.bindingId ||
+      currentBinding.generation !== fence.bindingGeneration ||
+      currentBinding.session_id !== fence.sessionId ||
+      currentBinding.chat_id !== fence.chatId
+    )) throw new Error("Feishu SDK callback binding generation changed before durable publication");
+    if (!currentPairing.allowed_users.includes(senderId) || chatType !== "p2p" || !currentPairing.allowed_chats.includes(chatId) || chatId !== currentBinding.chat_id) {
+      quarantine(paths, "authorization-changed", messageId, { ...audit, message_id_hash: sha(messageId) });
+      return { status: "quarantined", reason: "authorization-changed", messageIdHash: sha(messageId) };
+    }
     if (existsSync(join(paths.inbox, filename)) || inboundEventIdExists(paths, raw.event_id)) {
       return { status: "duplicate", messageIdHash: sha(messageId) };
     }
@@ -1258,9 +1197,9 @@ export function publishFeishuInbound(home, raw, options = {}) {
       return { status: "quarantined", reason: "resource-pressure", messageIdHash: sha(messageId) };
     }
     const ingressSeq = nextSequence(paths);
-    const deliveryRef = stableId("in_", `${pairing.home_id}\0${messageId}`, 24);
+    const deliveryRef = stableId("in_", `${currentPairing.home_id}\0${messageId}`, 24);
     const replyTo = typeof raw.reply_to === "string" && /^om_[A-Za-z0-9_-]{4,128}$/.test(raw.reply_to) ? raw.reply_to : null;
-    const decision = decisionForReply(paths, replyTo, binding);
+    const decision = decisionForReply(paths, replyTo, currentBinding);
     const event = {
       schema: INBOUND_SCHEMA,
       source: "feishu",
@@ -1280,15 +1219,15 @@ export function publishFeishuInbound(home, raw, options = {}) {
       update_time_ms: Number(raw.update_time ?? 0) || null,
       received_at: nowIso(),
       payload_hash: `sha256:${sha(JSON.stringify(raw))}`,
-      binding_id: binding.binding_id,
-      binding_generation: binding.generation,
-      authorization_snapshot: expectedAuthorizationSnapshot(pairing),
-      target_session_id: binding.session_id,
+      binding_id: currentBinding.binding_id,
+      binding_generation: currentBinding.generation,
+      authorization_snapshot: expectedAuthorizationSnapshot(currentPairing),
+      target_session_id: currentBinding.session_id,
       ingress_seq: ingressSeq,
       delivery_ref: deliveryRef,
       decision_ref: decision?.decision_ref ?? null,
       decision_key: decision?.decision_key ?? null,
-      decision_reply: decision ? "exact" : hasPendingDecisionReply(paths, binding) ? "unrelated" : "none",
+      decision_reply: decision ? "exact" : hasPendingDecisionReply(paths, currentBinding) ? "unrelated" : "none",
     };
     const ledger = {
       schema: INBOUND_LEDGER_SCHEMA,
@@ -1297,284 +1236,135 @@ export function publishFeishuInbound(home, raw, options = {}) {
       ingress_seq: ingressSeq,
       state: "pending",
       attempt: 0,
-      claim_generation: null,
-      lease_until_ms: null,
-      target_session_id: binding.session_id,
-      binding_id: binding.binding_id,
-      binding_generation: binding.generation,
+      target_session_id: currentBinding.session_id,
+      binding_id: currentBinding.binding_id,
+      binding_generation: currentBinding.generation,
       delivery_ref: deliveryRef,
       last_error: null,
       created_at: nowIso(),
     };
     publishInboundRecordsLocked(paths, event, ledger);
     return { status: "published", ingressSeq, deliveryRef, messageIdHash: sha(messageId) };
-  });
+  }));
 }
 
-function enqueueLocalIngressLocked(paths, input, { direct = false } = {}) {
-  const messageId = `${input.source === "internal" ? "internal" : "local"}_${randomUUID()}`;
-  const filename = inboundFilename(messageId);
-  const ingressSeq = nextSequence(paths);
-  const deliveryRef = stableId("in_", `${messageId}\0${ingressSeq}`, 24);
-  const source = input.source === "internal" ? "internal" : "tui";
-  const images = source === "tui" ? normalizeLocalImages(input.images) : [];
-  const event = {
-    schema: INBOUND_SCHEMA,
-    source,
-    message_id: messageId,
-    event_ids: [],
-    transport: "current-pi",
-    sender_id: null,
-    sender_type: "local",
-    chat_id: null,
-    chat_type: "local",
-    reply_to: null,
-    root_id: null,
-    thread_id: null,
-    message_type: "text",
-    text: normalizeContent(input.text),
-    images,
-    create_time_ms: Date.now(),
-    received_at: nowIso(),
-    payload_hash: `sha256:${sha(`${input.text}\0${JSON.stringify(images.map((image) => ({ mimeType: image.mimeType, dataHash: sha(image.data) })))}`)}`,
-    binding_id: input.bindingId,
-    binding_generation: input.bindingGeneration,
-    target_session_id: input.sessionId,
-    authorization_snapshot: null,
-    ingress_seq: ingressSeq,
-    delivery_ref: deliveryRef,
-    decision_ref: null,
-    decision_key: null,
-    desired_delivery: input.desiredDelivery ?? "followUp",
+function deliveryEventForLedger(event, ledger) {
+  if (!ledger.retargeted_at) return event;
+  return {
+    ...event,
+    binding_id: ledger.binding_id,
+    binding_generation: ledger.binding_generation,
+    target_session_id: ledger.target_session_id,
   };
-  const claimGeneration = direct ? `claim_${randomBytes(12).toString("hex")}` : null;
-  const ledger = {
-    schema: INBOUND_LEDGER_SCHEMA,
-    source,
-    message_id: messageId,
-    ingress_seq: ingressSeq,
-    state: direct ? "dispatching" : "pending",
-    attempt: direct ? 1 : 0,
-    claim_generation: claimGeneration,
-    lease_until_ms: direct ? Date.now() + positiveInteger(process.env.FM_FEISHU_INGRESS_LEASE_MS, 60000) : null,
-    target_session_id: input.sessionId,
-    binding_id: input.bindingId,
-    binding_generation: input.bindingGeneration,
-    delivery_ref: deliveryRef,
-    last_error: null,
-    created_at: nowIso(),
-  };
-  publishInboundRecordsLocked(paths, event, ledger);
-  if (direct) {
-    const attemptDir = join(paths.attemptsIn, filename.replace(/\.json$/, ""));
-    privateDir(attemptDir);
-    atomicJson(join(attemptDir, "00000001.json"), {
-      schema: "fm-feishu-inbound-attempt.v1",
-      attempt: 1,
-      claim_generation: claimGeneration,
-      session_id: input.sessionId,
-      binding_generation: input.bindingGeneration,
-      delivery_ref: deliveryRef,
-      started_at: nowIso(),
+}
+
+function repairInboundLedgersLocked(paths) {
+  let repaired = repairInboundPublicationsLocked(paths);
+  const validDeliveryMaps = new Set();
+  for (const name of safeJsonNames(paths.inbox)) {
+    const ledgerPath = join(paths.inboundLedger, name);
+    const event = requireSchema(readJson(join(paths.inbox, name)), INBOUND_SCHEMA, "inbound event");
+    validDeliveryMaps.add(`${sha(event.delivery_ref)}.json`);
+    writeInboundDeliveryMap(paths, event);
+    for (const eventId of event.event_ids) recordInboundEventId(paths, eventId, event.message_id, event.delivery_ref);
+    if (existsSync(ledgerPath)) continue;
+    atomicJson(ledgerPath, {
+      schema: INBOUND_LEDGER_SCHEMA,
+      source: "feishu",
+      message_id: event.message_id,
+      ingress_seq: event.ingress_seq,
+      state: "pending",
+      attempt: 0,
+      target_session_id: event.target_session_id,
+      binding_id: event.binding_id,
+      binding_generation: event.binding_generation,
+      delivery_ref: event.delivery_ref,
+      last_error: "ledger repaired after interrupted publish",
+      created_at: nowIso(),
     });
+    repaired += 1;
   }
-  return { event, ledger };
-}
-
-export function enqueueLocalIngress(home, input) {
-  const paths = ensurePrivateLayout(home);
-  return withLock(paths, "inbound-state", () => {
-    repairInboundPublicationsLocked(paths);
-    return enqueueLocalIngressLocked(paths, input);
-  });
-}
-
-export function reserveInteractiveIngress(home, input) {
-  const paths = ensurePrivateLayout(home);
-  return withLock(paths, "inbound-state", () => {
-    repairInboundPublicationsLocked(paths);
-    for (const name of safeJsonNames(paths.inboundPending)) {
-      const ledger = readJson(join(paths.inboundLedger, name));
-      if ((ledger.state === "pending" || ledger.state === "dispatching") && ledger.accepted_at === undefined) {
-        return { status: "blocked" };
-      }
+  let pending = 0;
+  const indexed = new Set(safeJsonNames(paths.inboundPending));
+  for (const name of safeJsonNames(paths.inboundLedger)) {
+    const ledger = requireSchema(readJson(join(paths.inboundLedger, name)), INBOUND_LEDGER_SCHEMA, "inbound ledger");
+    const event = requireSchema(readJson(join(paths.inbox, name)), INBOUND_SCHEMA, "inbound event");
+    assertInboundPair(paths, name, event, ledger);
+    if (new Set(["pending", "offered"]).has(ledger.state)) {
+      writeInboundPendingIndex(paths, name, ledger);
+      indexed.delete(name);
+      pending += 1;
+    } else if (removeInboundPendingIndex(paths, name)) {
+      indexed.delete(name);
+      repaired += 1;
     }
-    return { status: "reserved", ...enqueueLocalIngressLocked(paths, { ...input, source: "tui" }, { direct: true }) };
-  });
-}
-
-export function markIngressAccepted(home, deliveryRef, fence) {
-  const paths = ensurePrivateLayout(home);
-  return withLock(paths, "inbound-state", () => {
-    repairInboundPublicationsLocked(paths);
-    const found = readInboundByDeliveryRef(paths, deliveryRef);
-    if (!found) return false;
-    if (found.ledger.state !== "dispatching" || found.ledger.target_session_id !== fence.sessionId || found.ledger.binding_generation !== fence.bindingGeneration) throw new Error("Feishu ingress acceptance fence mismatch");
-    if (found.ledger.accepted_at === undefined) atomicJson(join(paths.inboundLedger, found.name), { ...found.ledger, accepted_at: nowIso() });
-    return true;
-  });
+  }
+  for (const name of indexed) {
+    removeInboundPendingIndex(paths, name);
+    repaired += 1;
+  }
+  for (const name of safeJsonNames(paths.inboundDeliveryMap)) if (!validDeliveryMaps.has(name)) throw new Error("orphan Feishu inbound delivery map");
+  atomicWrite(paths.inboundPendingCount, `${pending}\n`);
+  return repaired;
 }
 
 export function repairInboundLedgers(home) {
   const paths = ensurePrivateLayout(home);
-  return withLock(paths, "inbound-state", () => {
-    let repaired = repairInboundPublicationsLocked(paths);
-    const validDeliveryMaps = new Set();
-    for (const name of safeJsonNames(paths.inbox)) {
-      const ledgerPath = join(paths.inboundLedger, name);
-      const event = requireSchema(readJson(join(paths.inbox, name)), INBOUND_SCHEMA, "inbound event");
-      validDeliveryMaps.add(`${sha(event.delivery_ref)}.json`);
-      writeInboundDeliveryMap(paths, event);
-      for (const eventId of Array.isArray(event.event_ids) ? event.event_ids : []) {
-        recordInboundEventId(paths, eventId, event.message_id, event.delivery_ref);
-      }
-      if (existsSync(ledgerPath)) continue;
-      atomicJson(ledgerPath, {
-        schema: INBOUND_LEDGER_SCHEMA,
-        source: event.source,
-        message_id: event.message_id,
-        ingress_seq: event.ingress_seq,
-        state: "pending",
-        attempt: 0,
-        claim_generation: null,
-        lease_until_ms: null,
-        target_session_id: event.target_session_id,
-        binding_id: event.binding_id,
-        binding_generation: event.binding_generation,
-        delivery_ref: event.delivery_ref,
-        last_error: "ledger repaired after interrupted publish",
-        created_at: nowIso(),
-      });
-      repaired += 1;
-    }
-    let pending = 0;
-    const indexed = new Set(safeJsonNames(paths.inboundPending));
-    for (const name of safeJsonNames(paths.inboundLedger)) {
-      const ledgerPath = join(paths.inboundLedger, name);
-      let ledger = requireSchema(readJson(ledgerPath), INBOUND_LEDGER_SCHEMA, "inbound ledger");
-      const event = requireSchema(readJson(join(paths.inbox, name)), INBOUND_SCHEMA, "inbound event");
-      assertInboundPair(paths, name, event, ledger);
-      const ackRaw = readJson(join(paths.inboundAcks, name), { optional: true });
-      const ack = ackRaw ? requireSchema(ackRaw, INBOUND_ACK_SCHEMA, "inbound ACK") : undefined;
-      if (ack) assertInboundAckPair(ack, ledger);
-      if (ledger.state === "delivered" && !ack) throw new Error("delivered Feishu inbound ledger has no durable ACK");
-      if (ack && ledger.state !== "delivered") {
-        ledger = { ...ledger, state: "delivered", claim_generation: null, lease_until_ms: null, delivered_at: ack.persisted_at };
-        atomicJson(ledgerPath, ledger);
-        repaired += 1;
-      }
-      if (ledger.state === "pending" || ledger.state === "dispatching") {
-        writeInboundPendingIndex(paths, name, ledger);
-        indexed.delete(name);
-        pending += 1;
-      } else if (removeInboundPendingIndex(paths, name)) {
-        indexed.delete(name);
-        repaired += 1;
-      }
-    }
-    for (const name of indexed) {
-      removeInboundPendingIndex(paths, name);
-      repaired += 1;
-    }
-    for (const name of safeJsonNames(paths.inboundDeliveryMap)) if (!validDeliveryMaps.has(name)) throw new Error("orphan Feishu inbound delivery map");
-    atomicWrite(paths.inboundPendingCount, `${pending}\n`);
-    return repaired;
-  });
+  return withLock(paths, "inbound-state", () => repairInboundLedgersLocked(paths));
 }
 
-export function claimNextIngress(home, fence, options = {}) {
+export function pendingFeishuIngress(home, fence) {
   const paths = ensurePrivateLayout(home);
-  return withLock(paths, "inbound-state", () => {
-    repairInboundPublicationsLocked(paths);
+  return withConfigurationLocks(paths, () => withLock(paths, "inbound-state", () => {
+    repairInboundLedgersLocked(paths);
     const pairingRaw = readJson(paths.pairing, { optional: true });
     const bindingRaw = readJson(paths.activeBinding, { optional: true });
     const pairing = pairingRaw ? validatePairingRecord(pairingRaw) : undefined;
     const binding = bindingRaw ? validateBindingRecord(bindingRaw) : undefined;
     assertConfigurationIdentity(paths, pairing, binding);
-    const now = Date.now();
-    const candidates = [];
-    let unacceptedDispatch = false;
+    if (!pairingIsActive(pairing) || !binding || binding.status !== "active" || binding.session_id !== fence.sessionId || binding.binding_id !== fence.bindingId || binding.generation !== fence.bindingGeneration) return [];
+    const pending = [];
     for (const name of safeJsonNames(paths.inboundPending)) {
-      const marker = readJson(join(paths.inboundPending, name));
-      const path = join(paths.inboundLedger, name);
-      let ledger = requireSchema(readJson(path), INBOUND_LEDGER_SCHEMA, "inbound ledger");
-      if (marker.message_id !== ledger.message_id || marker.delivery_ref !== ledger.delivery_ref || marker.ingress_seq !== ledger.ingress_seq) throw new Error("Feishu inbound pending index mismatch");
-      const ackRaw = readJson(join(paths.inboundAcks, name), { optional: true });
-      const ack = ackRaw ? requireSchema(ackRaw, INBOUND_ACK_SCHEMA, "inbound ACK") : undefined;
-      if (ack) {
-        assertInboundAckPair(ack, ledger);
-        if (ledger.state !== "delivered") atomicJson(path, { ...ledger, state: "delivered", claim_generation: null, lease_until_ms: null, delivered_at: ack.persisted_at });
-        removeInboundPendingIndex(paths, name);
-        syncInboundPendingCount(paths);
-        continue;
-      }
-      if (ledger.state === "delivered") throw new Error("delivered Feishu inbound ledger has no durable ACK");
-      if (ledger.state === "dispatching" && Number(ledger.lease_until_ms ?? 0) <= now) {
-        ledger = { ...ledger, state: "pending", claim_generation: null, lease_until_ms: null, last_error: "expired dispatch lease recovered" };
-        atomicJson(path, ledger);
-      }
-      if (ledger.state === "dispatching") {
-        if (ledger.accepted_at === undefined) unacceptedDispatch = true;
-        continue;
-      }
-      if (ledger.state !== "pending") {
-        removeInboundPendingIndex(paths, name);
-        continue;
-      }
-      if (ledger.target_session_id && ledger.target_session_id !== fence.sessionId) continue;
-      if (ledger.binding_generation !== fence.bindingGeneration || ledger.binding_id !== fence.bindingId) continue;
-      candidates.push({ name, path, ledger });
+      const ledger = readJson(join(paths.inboundLedger, name));
+      if (ledger.state !== "pending" || ledger.target_session_id !== fence.sessionId || ledger.binding_id !== fence.bindingId || ledger.binding_generation !== fence.bindingGeneration) continue;
+      const event = readJson(join(paths.inbox, name));
+      assertInboundPair(paths, name, event, ledger, { pairing, binding });
+      pending.push({ filename: name, event: deliveryEventForLedger(event, ledger), ledger });
     }
-    if (unacceptedDispatch) return undefined;
-    candidates.sort((a, b) => Number(a.ledger.ingress_seq) - Number(b.ledger.ingress_seq) || a.name.localeCompare(b.name));
-    const candidate = candidates[0];
-    if (!candidate) return undefined;
-    const event = requireSchema(readJson(join(paths.inbox, candidate.name)), INBOUND_SCHEMA, "inbound event");
-    const retargeted = assertInboundPair(paths, candidate.name, event, candidate.ledger, { pairing, binding });
-    const deliveryEvent = retargeted ? {
-      ...event,
-      binding_id: candidate.ledger.binding_id,
-      binding_generation: candidate.ledger.binding_generation,
-    } : event;
-    const attempt = Number(candidate.ledger.attempt ?? 0) + 1;
-    const claimGeneration = `claim_${randomBytes(12).toString("hex")}`;
-    const leaseMs = positiveInteger(options.leaseMs ?? process.env.FM_FEISHU_INGRESS_LEASE_MS, 60000);
-    const ledger = {
-      ...candidate.ledger,
-      state: "dispatching",
-      attempt,
-      claim_generation: claimGeneration,
-      lease_until_ms: now + leaseMs,
-      dispatching_at: nowIso(),
-      target_session_id: fence.sessionId,
-    };
-    atomicJson(candidate.path, ledger);
-    const attemptDir = join(paths.attemptsIn, candidate.name.replace(/\.json$/, ""));
-    privateDir(attemptDir);
-    atomicJson(join(attemptDir, `${String(attempt).padStart(8, "0")}.json`), {
-      schema: "fm-feishu-inbound-attempt.v1",
-      attempt,
-      claim_generation: claimGeneration,
-      session_id: fence.sessionId,
-      binding_generation: fence.bindingGeneration,
-      delivery_ref: ledger.delivery_ref,
-      started_at: nowIso(),
-    });
-    return { event: deliveryEvent, ledger, filename: candidate.name };
-  });
+    return pending.sort((a, b) => a.ledger.ingress_seq - b.ledger.ingress_seq || a.filename.localeCompare(b.filename));
+  }));
 }
 
-export function releaseIngressClaim(home, deliveryRef, error) {
+export function offerFeishuIngress(home, deliveryRef, fence) {
+  const paths = ensurePrivateLayout(home);
+  return withConfigurationLocks(paths, () => withLock(paths, "inbound-state", () => {
+    repairInboundLedgersLocked(paths);
+    const binding = readJson(paths.activeBinding, { optional: true });
+    if (!binding || binding.status !== "active" || binding.session_id !== fence.sessionId || binding.binding_id !== fence.bindingId || binding.generation !== fence.bindingGeneration) throw new Error("Feishu native-queue offer binding fence mismatch");
+    const found = readInboundByDeliveryRef(paths, deliveryRef);
+    if (!found || found.ledger.state !== "pending") return undefined;
+    if (found.ledger.target_session_id !== fence.sessionId || found.ledger.binding_id !== fence.bindingId || found.ledger.binding_generation !== fence.bindingGeneration) throw new Error("Feishu native-queue offer event fence mismatch");
+    const ledger = {
+      ...found.ledger,
+      state: "offered",
+      attempt: found.ledger.attempt + 1,
+      offered_at: nowIso(),
+      last_error: null,
+    };
+    atomicJson(join(paths.inboundLedger, found.name), ledger);
+    return { filename: found.name, event: deliveryEventForLedger(found.event, ledger), ledger };
+  }));
+}
+
+export function releaseFeishuIngressOffer(home, deliveryRef, error) {
   const paths = ensurePrivateLayout(home);
   return withLock(paths, "inbound-state", () => {
-    repairInboundPublicationsLocked(paths);
     const found = readInboundByDeliveryRef(paths, deliveryRef);
-    if (!found || found.ledger.state !== "dispatching") return false;
+    if (!found || found.ledger.state !== "offered") return false;
     atomicJson(join(paths.inboundLedger, found.name), {
       ...found.ledger,
       state: "pending",
-      claim_generation: null,
-      lease_until_ms: null,
+      offered_at: null,
       last_error: String(error).slice(0, 500),
       released_at: nowIso(),
     });
@@ -1582,57 +1372,41 @@ export function releaseIngressClaim(home, deliveryRef, error) {
   });
 }
 
-export function ackIngress(home, deliveryRef, session) {
+export function reconcileFeishuIngress(home, markers, fence, resetUnobservedOffers = false) {
   const paths = ensurePrivateLayout(home);
   return withLock(paths, "inbound-state", () => {
-    repairInboundPublicationsLocked(paths);
-    const found = readInboundByDeliveryRef(paths, deliveryRef);
-    if (!found) return undefined;
-    const ledgerPath = join(paths.inboundLedger, found.name);
-    assertInboundPair(paths, found.name, found.event, found.ledger);
-    const existing = readJson(join(paths.inboundAcks, found.name), { optional: true });
-    if (existing?.schema === INBOUND_ACK_SCHEMA) {
-      assertInboundAckPair(existing, found.ledger);
-      if (existing.session_id !== session.sessionId || existing.session_entry_id !== session.sessionEntryId || existing.binding_generation !== session.bindingGeneration) throw new Error("conflicting Feishu inbound ACK");
-      return existing;
+    repairInboundLedgersLocked(paths);
+    const markerByRef = new Map();
+    for (const marker of markers) {
+      if (marker.sessionId === fence.sessionId && marker.bindingGeneration === fence.bindingGeneration) markerByRef.set(marker.deliveryRef, marker);
     }
-    if (found.ledger.target_session_id !== session.sessionId || found.ledger.binding_generation !== session.bindingGeneration || found.ledger.state !== "dispatching" || found.ledger.accepted_at === undefined) throw new Error("Feishu inbound ACK does not match the accepted Pi message");
-    const ack = {
-      schema: INBOUND_ACK_SCHEMA,
-      message_id: found.ledger.message_id,
-      delivery_ref: deliveryRef,
-      session_id: session.sessionId,
-      session_entry_id: session.sessionEntryId,
-      binding_generation: session.bindingGeneration,
-      persisted_at: nowIso(),
-    };
-    atomicJson(join(paths.inboundAcks, found.name), ack);
-    atomicJson(ledgerPath, { ...found.ledger, state: "delivered", claim_generation: null, lease_until_ms: null, delivered_at: ack.persisted_at });
-    removeInboundPendingIndex(paths, found.name);
+    let repaired = 0;
+    for (const name of safeJsonNames(paths.inboundPending)) {
+      const path = join(paths.inboundLedger, name);
+      const ledger = readJson(path);
+      const marker = markerByRef.get(ledger.delivery_ref);
+      if (marker && ledger.target_session_id === fence.sessionId && ledger.binding_generation === fence.bindingGeneration) {
+        atomicJson(path, { ...ledger, state: "delivered", offered_at: null, delivered_at: nowIso(), last_error: null });
+        removeInboundPendingIndex(paths, name);
+        repaired += 1;
+        continue;
+      }
+      if (resetUnobservedOffers && ledger.state === "offered" && ledger.target_session_id === fence.sessionId && ledger.binding_generation === fence.bindingGeneration) {
+        atomicJson(path, { ...ledger, state: "pending", offered_at: null, last_error: "prior Pi process ended before the native queue offer reached persisted session history" });
+        repaired += 1;
+      }
+    }
     syncInboundPendingCount(paths);
-    return ack;
+    return repaired;
   });
-}
-
-export function reconcileIngressFromSession(home, markers, fence) {
-  let repaired = 0;
-  for (const marker of markers) {
-    if (marker.sessionId !== fence.sessionId || marker.bindingGeneration !== fence.bindingGeneration) continue;
-    const ack = ackIngress(home, marker.deliveryRef, {
-      sessionId: marker.sessionId,
-      sessionEntryId: marker.sessionEntryId,
-      bindingGeneration: marker.bindingGeneration,
-    });
-    if (ack) repaired += 1;
-  }
-  return repaired;
 }
 
 export function findInboundByDeliveryRef(home, deliveryRef) {
   const paths = ensurePrivateLayout(home);
   return withLock(paths, "inbound-state", () => {
     repairInboundPublicationsLocked(paths);
-    return readInboundByDeliveryRef(paths, deliveryRef)?.event;
+    const found = readInboundByDeliveryRef(paths, deliveryRef);
+    return found ? deliveryEventForLedger(found.event, found.ledger) : undefined;
   });
 }
 
@@ -1677,10 +1451,12 @@ export function releaseLiveSession(home, bindingId, ownerToken) {
 
 export function ingressCounts(home) {
   const paths = ensurePrivateLayout(home);
-  const counts = { pending: 0, dispatching: 0, delivered: 0, other: 0 };
+  const counts = { pending: 0, queued: 0, delivered: 0, other: 0 };
   for (const name of safeJsonNames(paths.inboundLedger)) {
     const ledger = requireSchema(readJson(join(paths.inboundLedger, name)), INBOUND_LEDGER_SCHEMA, "inbound ledger");
-    if (Object.hasOwn(counts, ledger.state)) counts[ledger.state] += 1;
+    if (ledger.state === "pending") counts.pending += 1;
+    else if (ledger.state === "offered") counts.queued += 1;
+    else if (ledger.state === "delivered") counts.delivered += 1;
     else counts.other += 1;
   }
   return counts;
@@ -1918,7 +1694,7 @@ export function persistAssistantOutboundIntent(home, input) {
   privateDir(paths.outboundPending);
   privateDir(paths.outboundRegistrationIntents);
   privateDir(paths.alerts);
-  const source = requireString(input.source, "outbound intent source", /^(?:feishu|tui|internal)$/);
+  const source = requireString(input.source, "outbound intent source", /^feishu$/);
   const sourceRef = requireString(input.sourceRef, "outbound intent source ref", DELIVERY_REF);
   const text = typeof input.text === "string" ? input.text : "";
   const replyTo = input.replyTo ?? null;
@@ -1930,6 +1706,12 @@ export function persistAssistantOutboundIntent(home, input) {
     const binding = bindingRaw ? validateBindingRecord(bindingRaw) : undefined;
     if (!pairingIsActive(pairing) || !binding || binding.status !== "active" || binding.session_id !== input.sessionId || binding.generation !== input.bindingGeneration) throw new Error("outbound registration intent does not match the active binding");
     const intentId = stableId("reg_", `${binding.binding_id}\0${binding.generation}\0${input.sessionId}\0${source}\0${sourceRef}\0${sha(text)}\0${replyTo ?? "chat"}`, 40);
+    const secretPattern = assistantSecretPattern(text);
+    if (secretPattern) {
+      quarantine(paths, "outbound-secret-refused", intentId, { intent_id: intentId, pattern: secretPattern, text_hash: `sha256:${sha(text)}`, bytes: utf8Bytes(text) });
+      const alert = createLocalAlert(paths, "outbound-secret-refused", intentId, "A final Assistant response matched a fixed credential pattern. The entire response stayed local; inspect it in the TUI before deciding what to send.");
+      return { status: "secret-refused", pattern: secretPattern, alert };
+    }
     const record = {
       schema: OUTBOUND_INTENT_SCHEMA,
       intent_id: intentId,
@@ -2023,10 +1805,10 @@ export function registerAssistantOutbound(home, input) {
   assertConfigurationIdentity(paths, pairing, binding);
   if (!pairingIsActive(pairing) || !binding || binding.status !== "active") return { status: "inactive" };
   if (binding.session_id !== input.sessionId || binding.generation !== input.bindingGeneration) return { status: "stale-binding" };
+  if (input.source !== "feishu") throw new Error("Feishu outbound requires an exact Feishu source turn");
   const text = typeof input.text === "string" ? input.text : "";
   if (text.trim().length === 0) return { status: "skipped", reason: "empty" };
   if (text === "Captain, shipshape.") return { status: "skipped", reason: "routine" };
-  if (input.source === "internal") return { status: "skipped", reason: "internal" };
   const eventId = outboundEventId(pairing.home_id, {
     bindingGeneration: binding.generation,
     sessionId: input.sessionId,
@@ -2266,10 +2048,9 @@ export function registerPendingDecision(home, input) {
   const sourceRecord = withLock(paths, "inbound-state", () => {
     repairInboundPublicationsLocked(paths);
     const found = readInboundByDeliveryRef(paths, sourceRef);
-    if (!found || found.ledger.state !== "delivered" || !readJson(join(paths.inboundAcks, found.name), { optional: true })) throw new Error("decision source is not an exactly persisted Pi turn");
+    if (!found || !new Set(["queued", "delivered"]).has(found.ledger.state)) throw new Error("decision source is not an exact Feishu message submitted to this Pi native queue");
     return found;
   });
-  if (!new Set(["feishu", "tui"]).has(sourceRecord.event.source)) throw new Error("internal operational input cannot own a captain decision");
   return withLock(paths, "outbound-state", () => {
     const pairingRaw = readJson(paths.pairing, { optional: true });
     const bindingRaw = readJson(paths.activeBinding, { optional: true });
@@ -2382,6 +2163,17 @@ export function readTransportOwner(home) {
   return readJson(paths.owner, { optional: true });
 }
 
+export function retireStaleTransportOwner(home, expected) {
+  const paths = ensurePrivateLayout(home);
+  return withLock(paths, "transport-owner", () => {
+    const owner = readJson(paths.owner, { optional: true });
+    if (!owner || owner.pid !== expected.pid || owner.nonce !== expected.nonce || owner.process_start_token !== expected.process_start_token || owner.module_file !== expected.module_file || owner.home_realpath !== expected.home_realpath) return false;
+    unlinkSync(paths.owner);
+    fsyncDirectory(paths.transport);
+    return true;
+  });
+}
+
 export function releaseTransportOwner(home, nonce) {
   const paths = ensurePrivateLayout(home);
   return withLock(paths, "transport-owner", () => {
@@ -2407,61 +2199,10 @@ export function recordTransportDiagnostic(home, kind, line) {
     kind: safeKind,
     detail_hash: detailHash,
     detail_bytes: Buffer.byteLength(raw, "utf8"),
-    summary: safeKind === "drop" || safeKind === "buffer-overflow"
-      ? "lark-cli reported an event loss or backpressure condition"
-      : "transport diagnostic recorded; inspect the owning command directly if local remediation is needed",
+    summary: "SDK transport diagnostic recorded; inspect the owning command directly if local remediation is needed",
     recorded_at: nowIso(),
   });
   return path;
-}
-
-export function stageTransportEvents(home, events, options = {}) {
-  if (!Array.isArray(events)) throw new Error("invalid Feishu staged event batch");
-  const paths = ensurePrivateLayout(home);
-  const maxEvents = positiveInteger(options.maxEvents, DEFAULT_MAX_PENDING_INBOUND);
-  const maxBytes = positiveInteger(options.maxBytes, 64 * 1024 * 1024);
-  return withLock(paths, "transport-stage", () => {
-    const existing = safeJsonNames(paths.stagedEvents);
-    let totalBytes = existing.reduce((total, name) => total + statSync(join(paths.stagedEvents, name)).size, 0);
-    let created = 0;
-    for (const event of events) {
-      if (!event || typeof event !== "object" || Array.isArray(event)) throw new Error("invalid Feishu staged event object");
-      const raw = JSON.stringify(event);
-      const eventHash = sha(raw);
-      const path = join(paths.stagedEvents, `${eventHash}.json`);
-      if (existsSync(path)) continue;
-      const record = {
-        schema: "fm-feishu-staged-event.v1",
-        event_hash: `sha256:${eventHash}`,
-        event,
-        recorded_at: nowIso(),
-      };
-      const serialized = `${JSON.stringify(record)}\n`;
-      const recordBytes = Buffer.byteLength(serialized, "utf8");
-      if (existing.length + created >= maxEvents || totalBytes + recordBytes > maxBytes) throw new Error("Feishu staged event safety bound reached");
-      atomicWrite(path, serialized);
-      totalBytes += recordBytes;
-      created += 1;
-    }
-    return created;
-  });
-}
-
-export function readStagedTransportEvents(home) {
-  const paths = ensurePrivateLayout(home);
-  return safeJsonNames(paths.stagedEvents).map((name) => ({ name, event: readJson(join(paths.stagedEvents, name)).event }));
-}
-
-export function clearStagedTransportEvents(home, records) {
-  const paths = ensurePrivateLayout(home);
-  return withLock(paths, "transport-stage", () => {
-    let removed = 0;
-    for (const record of records) {
-      if (!record || !/^[a-f0-9]{64}\.json$/.test(record.name)) throw new Error("invalid Feishu staged event completion");
-      if (removeIndexedFile(join(paths.stagedEvents, record.name))) removed += 1;
-    }
-    return removed;
-  });
 }
 
 export function writeTransportHealth(home, patch) {
@@ -2477,9 +2218,8 @@ export function writeTransportHealth(home, patch) {
     binding_id: patch.bindingId !== undefined ? patch.bindingId : prior?.binding_id ?? null,
     binding_generation: patch.bindingGeneration !== undefined ? patch.bindingGeneration : prior?.binding_generation ?? null,
     reconnects: patch.reconnects ?? prior?.reconnects ?? 0,
-    drop_diagnostics: patch.dropDiagnostics ?? prior?.drop_diagnostics ?? 0,
-    last_ready_at: patch.lastReadyAt ?? prior?.last_ready_at ?? null,
-    last_reconcile_at: patch.lastReconcileAt ?? prior?.last_reconcile_at ?? null,
+    last_connected_at: patch.lastConnectedAt ?? prior?.last_connected_at ?? null,
+    last_identity_verified_at: patch.lastIdentityVerifiedAt ?? prior?.last_identity_verified_at ?? null,
     last_error_type: patch.lastErrorType ?? null,
     updated_at: nowIso(),
   };
@@ -2535,7 +2275,7 @@ export function statusSummary(home) {
     if (ledger.state === "delivery_uncertain") outboundUncertain += 1;
   }
   return {
-    schema: "fm-feishu-status.v1",
+    schema: "fm-feishu-status.v2",
     paired: pairingIsActive(pairing),
     disabled: Boolean(pairing && pairing.disabled_at !== null),
     binding_status: binding?.status ?? "absent",
@@ -2565,7 +2305,7 @@ export function publicStatusSummary(home) {
     transport_phase: status.transport_phase,
     transport_healthy: status.transport_healthy,
     inbound_pending: status.inbound.pending,
-    inbound_dispatching: status.inbound.dispatching,
+    inbound_queued: status.inbound.queued,
     outbound_pending: status.outbound_pending,
     outbound_uncertain: status.outbound_uncertain,
   };

@@ -903,6 +903,12 @@ families_for_changed_path() {
     bin/fm-gate-refuse*|bin/fm-lock*|bin/fm-quota-axi-lib.sh)
       printf '%s\n' session-bootstrap
       ;;
+    bin/fm-feishu-*|.pi/extensions/fm-primary-feishu-bridge.ts|\
+    .pi/extensions/lib/fm-feishu-native-channel.ts|.pi/extensions/lib/fm-primary-ingress.ts|\
+    package.json|package-lock.json)
+      printf '%s\n' "__script__:fm-feishu-channel.test.sh"
+      printf '%s\n' "__script__:fm-pi-primary-types.test.sh"
+      ;;
     bin/fm-sessionstart-run.sh|.claude/settings.json|.codex/hooks.json|\
     .pi/extensions/fm-primary-turnend-guard.ts)
       # The run tier's two harness-supplied facts (source vocabulary and

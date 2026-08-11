@@ -1,0 +1,8 @@
+{
+  "name": "firstmate",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@larksuiteoapi/node-sdk": "1.73.0"
+  }
+}

@@ -22,7 +22,6 @@ import {
   FIRSTMATE_CALM_PRESENTATION_EVENT,
 } from "./lib/fm-calm-visibility.ts";
 import { encodeFirstmateOperationalInput } from "./lib/fm-operational-input.ts";
-import { submitFirstmateInternalInput } from "./lib/fm-primary-ingress.ts";
 
 type ArmResult = {
   ok: boolean;
@@ -244,7 +243,7 @@ export default function (pi: ExtensionAPI) {
       "watcher",
       `FIRSTMATE WATCHER WAKE: ${message}\n\nRun bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.`,
     );
-    await submitFirstmateInternalInput(pi, content, "followUp");
+    await pi.sendUserMessage(content, { deliverAs: "followUp" });
   }
 
   function surfaceFailure(owner: SessionGeneration, message: string): void {

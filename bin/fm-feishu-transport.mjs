@@ -1,53 +1,47 @@
 #!/usr/bin/env node
 // Dedicated no-Agent Feishu transport.
 //
-// The transport executes lark-cli with argv arrays only.  It never starts Pi,
-// imports an Agent SDK, writes a Pi session, evaluates message text, or invokes
-// a shell.  It waits for lark-cli's documented ready marker, keeps stderr drop
-// diagnostics, reconciles overlapping history before live dispatch becomes
-// eligible, and delivers the durable direct-Assistant outbox with stable
-// idempotency keys and receipts.
+// The transport uses the official Feishu Node SDK for one long-connection
+// event client and the SDK's message APIs for durable outbound delivery.
+// It never starts Pi, imports an Agent SDK, writes a Pi session, evaluates
+// message text, opens a webhook, or invokes an operator command.
 import { spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   claimNextOutbound,
   claimTransportOwner,
-  clearStagedTransportEvents,
   failOutboundAttempt,
   publicStatusSummary,
   publishFeishuInbound,
   readActiveBinding,
   readPairing,
-  readStagedTransportEvents,
-  readTransportHealth,
   readTransportOwner,
   receiptOutbound,
   recordTransportDiagnostic,
   releaseTransportOwner,
   repairOutboundState,
-  stageTransportEvents,
+  retireStaleTransportOwner,
   statusSummary,
+  transportHealthAllowsDispatch,
   writeTransportHealth,
 } from "./fm-feishu-state.mjs";
 
 const MODULE_FILE = fileURLToPath(import.meta.url);
 const ROOT = resolve(dirname(MODULE_FILE), "..");
 const HOME = realpathSync(process.env.FM_HOME || process.env.FM_ROOT_OVERRIDE || ROOT);
-const LARK_CLI = process.env.FM_FEISHU_LARK_CLI || "lark-cli";
-const READY_MARKER = "[event] ready event_key=im.message.receive_v1";
-const MAX_BUFFERED_EVENTS = positiveInteger(process.env.FM_FEISHU_MAX_BUFFERED_EVENTS, 1000);
-const READY_TIMEOUT_MS = positiveInteger(process.env.FM_FEISHU_READY_TIMEOUT_MS, 15000);
+const OFFICIAL_SDK = "@larksuiteoapi/node-sdk";
+const SDK_MODULE = process.env.FM_FEISHU_SDK_MODULE || OFFICIAL_SDK;
+const READY_TIMEOUT_MS = positiveInteger(process.env.FM_FEISHU_READY_TIMEOUT_MS, 30000);
 const COMMAND_TIMEOUT_MS = positiveInteger(process.env.FM_FEISHU_COMMAND_TIMEOUT_MS, 30000);
-const HISTORY_OVERLAP_MS = positiveInteger(process.env.FM_FEISHU_HISTORY_OVERLAP_MS, 5 * 60 * 1000);
 const OUTBOX_POLL_MS = positiveInteger(process.env.FM_FEISHU_OUTBOX_POLL_MS, 500);
-const MAX_COMMAND_BYTES = 8 * 1024 * 1024;
-const MAX_CONSUMER_LINE_BYTES = positiveInteger(process.env.FM_FEISHU_MAX_CONSUMER_LINE_BYTES, 256 * 1024);
-const MAX_LIVE_BUFFER_BYTES = positiveInteger(process.env.FM_FEISHU_MAX_LIVE_BUFFER_BYTES, 8 * 1024 * 1024);
+const BINDING_POLL_MS = positiveInteger(process.env.FM_FEISHU_BINDING_POLL_MS, 1000);
+const ONCE_SETTLE_MS = positiveInteger(process.env.FM_FEISHU_ONCE_SETTLE_MS, 50);
 let stopping = false;
-let consumer = null;
+let sdkClient = null;
+let wsClient = null;
 let outboundDrainTask = null;
 
 function positiveInteger(value, fallback) {
@@ -59,9 +53,18 @@ function sleep(ms) {
   return new Promise((resolvePromise) => setTimeout(resolvePromise, ms));
 }
 
-function safeError(error) {
-  if (error && typeof error === "object" && "code" in error) return `process-${String(error.code)}`;
-  return "process-error";
+function deferred() {
+  let resolvePromise;
+  let rejectPromise;
+  const promise = new Promise((resolve, reject) => {
+    resolvePromise = resolve;
+    rejectPromise = reject;
+  });
+  return { promise, resolve: resolvePromise, reject: rejectPromise };
+}
+
+function appFingerprint(appId) {
+  return `sha256:${createHash("sha256").update(appId).digest("hex")}`;
 }
 
 function activeConfiguration() {
@@ -78,579 +81,365 @@ function activeConfiguration() {
   return { pairing, binding };
 }
 
-function firstString(object, paths) {
-  for (const path of paths) {
-    let value = object;
-    for (const key of path) value = value && typeof value === "object" ? value[key] : undefined;
-    if (typeof value === "string" && value.length > 0) return value;
+function directAppCredentials(pairing) {
+  const appId = String(process.env.FM_FEISHU_APP_ID || "");
+  const appSecret = String(process.env.FM_FEISHU_APP_SECRET || "");
+  if (!/^cli_[A-Za-z0-9_-]{8,128}$/.test(appId) || !/^[A-Za-z0-9._~+/=-]{8,4096}$/.test(appSecret)) {
+    throw new Error("direct SDK app credentials are unavailable or malformed");
   }
-  return undefined;
+  if (appFingerprint(appId) !== pairing.app_id_fingerprint) throw new Error("direct SDK app fingerprint does not match the local pairing");
+  return { appId, appSecret };
 }
 
-function larkEnvironment(profile) {
+function silentSdkLogger() {
   return {
-    ...process.env,
-    LARKSUITE_CLI_PROFILE: profile,
-    LARKSUITE_CLI_NO_UPDATE_NOTIFIER: "1",
-    LARKSUITE_CLI_NO_SKILLS_NOTIFIER: "1",
+    error() {},
+    warn() {},
+    info() {},
+    debug() {},
+    trace() {},
   };
 }
 
-async function verifyBotIdentity(pairing) {
-  const result = await runArgv(LARK_CLI, ["whoami", "--as", "bot"], { profile: pairing.app_profile });
-  if (result.spawnError || result.timedOut || result.overflow || result.code !== 0) throw new Error("bot-identity-unavailable");
-  const envelope = parseJsonEnvelope(result.stdout);
-  if (envelope.ok !== true) throw new Error("bot-identity-envelope-not-ok");
-  const data = envelope.data && typeof envelope.data === "object" ? envelope.data : envelope;
-  const fromEither = (paths) => firstString(data, paths) ?? firstString(envelope, paths);
-  const profile = fromEither([["profile"], ["app_profile"], ["appProfile"], ["identity", "profile"]]);
-  const botOpenId = fromEither([["open_id"], ["openId"], ["bot_open_id"], ["bot", "open_id"], ["bot", "openId"], ["identity", "openId"], ["identities", "bot", "openId"]]);
-  const appId = fromEither([["app_id"], ["appId"], ["app", "id"], ["identity", "appId"]]);
-  if (profile !== pairing.app_profile || botOpenId !== pairing.bot_open_id) throw new Error("bot-identity-mismatch");
-  if (pairing.app_id_fingerprint) {
-    if (!appId) throw new Error("bot-app-id-unavailable");
-    const fingerprint = `sha256:${createHash("sha256").update(appId).digest("hex")}`;
-    if (fingerprint !== pairing.app_id_fingerprint) throw new Error("bot-app-fingerprint-mismatch");
+async function loadSdk() {
+  if (SDK_MODULE !== OFFICIAL_SDK && process.env.FM_FEISHU_SDK_TEST_MODE !== "1") {
+    throw new Error("alternate Feishu SDK modules are test-only");
   }
-}
-
-function parseJsonEnvelope(stdout) {
-  let value;
+  let imported;
   try {
-    value = JSON.parse(stdout);
+    const specifier = SDK_MODULE.startsWith("/") ? pathToFileURL(SDK_MODULE).href : SDK_MODULE;
+    imported = await import(specifier);
   } catch {
-    throw new Error("malformed-json-envelope");
+    throw new Error("official Feishu Node SDK is unavailable");
   }
-  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("invalid-json-envelope");
-  return value;
+  const sdk = imported.default && typeof imported.default === "object" ? imported.default : imported;
+  if (typeof sdk.Client !== "function" || typeof sdk.WSClient !== "function" || typeof sdk.EventDispatcher !== "function") {
+    throw new Error("official Feishu Node SDK surface is unavailable");
+  }
+  return sdk;
 }
 
-function runArgv(executable, args, { input, timeoutMs = COMMAND_TIMEOUT_MS, profile } = {}) {
-  return new Promise((resolvePromise) => {
-    let stdout = "";
-    let stderr = "";
-    let overflow = false;
-    let timedOut = false;
-    let spawnError = null;
-    const child = spawn(executable, args, {
-      cwd: ROOT,
-      env: larkEnvironment(profile),
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-    const timer = setTimeout(() => {
-      timedOut = true;
-      child.kill("SIGTERM");
-    }, timeoutMs);
-    timer.unref();
-    child.stdout.on("data", (chunk) => {
-      if (Buffer.byteLength(stdout, "utf8") + chunk.length > MAX_COMMAND_BYTES) {
-        overflow = true;
-        child.kill("SIGTERM");
-        return;
-      }
-      stdout += chunk.toString();
-    });
-    child.stderr.on("data", (chunk) => {
-      if (Buffer.byteLength(stderr, "utf8") + chunk.length > MAX_COMMAND_BYTES) {
-        overflow = true;
-        child.kill("SIGTERM");
-        return;
-      }
-      stderr += chunk.toString();
-    });
-    child.on("error", (error) => { spawnError = error; });
-    child.on("close", (code, signal) => {
-      clearTimeout(timer);
-      resolvePromise({ code: code ?? -1, signal, stdout, stderr, overflow, timedOut, spawnError });
-    });
-    if (input === undefined) child.stdin.end();
-    else child.stdin.end(input);
-  });
+function assertOwnerAndBinding(binding, ownerFence) {
+  const current = activeConfiguration();
+  const owner = readTransportOwner(HOME);
+  if (current.binding.binding_id !== binding.binding_id || current.binding.generation !== binding.generation) {
+    throw new Error("binding generation changed");
+  }
+  if (!owner || owner.pid !== ownerFence.ownerPid || owner.nonce !== ownerFence.ownerNonce || owner.process_start_token !== ownerFence.ownerProcessStartToken) {
+    throw new Error("transport owner changed");
+  }
+  directAppCredentials(current.pairing);
+  return current;
 }
 
-async function verifyP2pChat(pairing, binding) {
-  const result = await runArgv(LARK_CLI, ["im", "chats", "get", "--chat-id", binding.chat_id, "--as", "bot", "--format", "json"], { profile: pairing.app_profile });
-  if (result.spawnError || result.timedOut || result.overflow || result.code !== 0) throw new Error("chat-identity-unavailable");
-  const envelope = parseJsonEnvelope(result.stdout);
-  if (envelope.ok !== true) throw new Error("chat-identity-envelope-not-ok");
-  const data = envelope.data && typeof envelope.data === "object" ? envelope.data : envelope;
-  if (data.chat_mode !== "p2p" || (data.chat_status !== undefined && data.chat_status !== "normal") || (data.chat_id !== undefined && data.chat_id !== binding.chat_id)) throw new Error("configured-chat-is-not-p2p");
+async function verifyP2pChat(client, binding) {
+  let result;
+  try {
+    result = await client.im.v1.chat.get({ path: { chat_id: binding.chat_id } }, { timeout: COMMAND_TIMEOUT_MS });
+  } catch (error) {
+    throw new Error(sdkErrorType(error, "chat-identity-unavailable"));
+  }
+  if (!result || result.code !== 0 || !result.data || result.data.chat_mode !== "p2p") throw new Error("configured-chat-is-not-p2p");
   return { chatId: binding.chat_id, chatMode: "p2p" };
 }
 
-function normalizeHistoryMessage(message, verifiedChat) {
-  const sender = message?.sender && typeof message.sender === "object" ? message.sender : {};
-  const senderId = message?.sender_id ?? sender.id ?? sender.open_id ?? sender.sender_id;
-  let senderType = message?.sender_type ?? sender.type ?? sender.sender_type;
-  if (senderType === "app" || senderType === "bot") senderType = "bot";
-  else if (senderType === "user") senderType = "user";
+function normalizeSdkEvent(data, expectedAppId) {
+  if (!data || typeof data !== "object" || Array.isArray(data)) throw new Error("invalid SDK event envelope");
+  if (data.app_id !== undefined && data.app_id !== expectedAppId) throw new Error("SDK event app identity mismatch");
+  if (data.event_id !== undefined && (typeof data.event_id !== "string" || Buffer.byteLength(data.event_id, "utf8") > 512)) {
+    throw new Error("invalid SDK event identity");
+  }
+  const sender = data.sender && typeof data.sender === "object" ? data.sender : {};
+  const senderId = sender.sender_id && typeof sender.sender_id === "object" ? sender.sender_id.open_id : undefined;
+  const message = data.message && typeof data.message === "object" ? data.message : {};
+  let content = "";
+  if (message.message_type === "text" && typeof message.content === "string") {
+    try {
+      const parsed = JSON.parse(message.content);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed) && typeof parsed.text === "string") content = parsed.text;
+    } catch {}
+  }
   return {
     type: "im.message.receive_v1",
-    event_id: `history:${message?.message_id ?? "unknown"}`,
-    message_id: message?.message_id,
+    event_id: data.event_id,
+    message_id: message.message_id,
     sender_id: senderId,
-    sender_type: senderType,
-    chat_id: message?.chat_id ?? verifiedChat.chatId,
-    chat_type: message?.chat_type ?? verifiedChat.chatMode,
-    message_type: message?.msg_type ?? message?.message_type,
-    content: message?.content,
-    reply_to: message?.reply_to ?? message?.parent_id ?? null,
-    root_id: message?.root_id ?? null,
-    thread_id: message?.thread_id ?? null,
-    create_time: message?.create_time ?? "0",
-    update_time: message?.update_time ?? null,
-    deleted: message?.deleted === true,
+    sender_type: sender.sender_type,
+    chat_id: message.chat_id,
+    chat_type: message.chat_type,
+    message_type: message.message_type,
+    content,
+    reply_to: message.parent_id ?? null,
+    root_id: message.root_id ?? null,
+    thread_id: message.thread_id ?? null,
+    create_time: message.create_time,
+    update_time: message.update_time ?? null,
   };
 }
 
-async function readOverlappingHistory(binding, verifiedChat, sinceMs, profile) {
-  const start = new Date(Math.max(0, sinceMs - HISTORY_OVERLAP_MS)).toISOString();
-  const args = [
-    "im", "+chat-messages-list",
-    "--as", "bot",
-    "--chat-id", binding.chat_id,
-    "--start", start,
-    "--order", "asc",
-    "--page-all",
-    "--page-limit", "10",
-    "--no-reactions",
-    "--format", "json",
-  ];
-  const result = await runArgv(LARK_CLI, args, { profile });
-  if (result.spawnError || result.timedOut || result.overflow || result.code !== 0) {
-    recordTransportDiagnostic(HOME, "history-failure", result.spawnError ? safeError(result.spawnError) : `exit=${result.code} timeout=${result.timedOut} overflow=${result.overflow}`);
-    throw new Error("history-reconcile-failed");
-  }
-  const envelope = parseJsonEnvelope(result.stdout);
-  if (envelope.ok !== true) throw new Error("history-envelope-not-ok");
-  const data = envelope.data;
-  const pagination = envelope.meta?.pagination;
-  if (!data || typeof data !== "object" || Array.isArray(data) || !Array.isArray(data.messages)) throw new Error("history-messages-unavailable");
-  if (data.has_more !== false || !pagination || pagination.complete !== true || (pagination.next_token !== undefined && pagination.next_token !== null && pagination.next_token !== "")) {
-    recordTransportDiagnostic(HOME, "history-incomplete", "history pagination remained incomplete or unknown at the configured page bound");
-    throw new Error("history-reconcile-incomplete");
-  }
-  const messages = data.messages;
-  const normalized = messages.map((message) => normalizeHistoryMessage(message, verifiedChat)).filter((message) => !message.deleted);
-  let previousTime = -1;
-  for (const message of normalized) {
-    const time = Number(message.create_time);
-    if (!Number.isSafeInteger(time) || time < 0 || time < previousTime) {
-      recordTransportDiagnostic(HOME, "history-out-of-order", "history response was not a complete ascending sequence");
-      throw new Error("history-reconcile-out-of-order");
-    }
-    previousTime = time;
-  }
-  return normalized;
-}
-
-function publishEvents(events, transport) {
-  const ordered = [...events].sort((a, b) => {
-    const time = Number(a.create_time ?? 0) - Number(b.create_time ?? 0);
-    if (time !== 0) return time;
-    return String(a.message_id ?? "").localeCompare(String(b.message_id ?? ""));
-  });
-  for (const event of ordered) publishFeishuInbound(HOME, event, { transport });
-}
-
-function parseDropDiagnostic(line) {
-  return /\b(?:drop(?:ped)?|backpressure|buffer overflow|queue overflow)\b/i.test(line);
-}
-
-function parseStructuredError(stderr) {
-  const lines = stderr.trim().split(/\r?\n/).reverse();
-  for (const line of lines) {
-    try {
-      const value = JSON.parse(line);
-      if (value?.ok === false && value.error && typeof value.error === "object") return value.error;
-    } catch {}
-  }
-  return undefined;
+function sdkErrorType(error, fallback = "sdk-error") {
+  const status = Number(error?.response?.status);
+  const code = Number(error?.response?.data?.code ?? error?.code);
+  if (Number.isSafeInteger(status) && status >= 100 && status <= 599) return `sdk-http-${status}`;
+  if (Number.isSafeInteger(code) && code >= 0) return `sdk-code-${code}`;
+  return fallback;
 }
 
 function retryAfterMilliseconds(error) {
-  const seconds = Number(error?.retry_after_seconds);
+  const headers = error?.response?.headers;
+  const raw = headers && typeof headers === "object" ? headers["retry-after"] ?? headers["Retry-After"] : undefined;
+  const seconds = Number(raw);
   if (Number.isFinite(seconds) && seconds >= 0 && seconds <= Number.MAX_SAFE_INTEGER / 1000) return Math.ceil(seconds * 1000);
-  const milliseconds = Number(error?.retry_after_ms ?? error?.retryAfterMs);
-  if (Number.isSafeInteger(milliseconds) && milliseconds >= 0) return milliseconds;
+  if (typeof raw === "string") {
+    const date = Date.parse(raw);
+    if (Number.isFinite(date) && date >= Date.now()) return Math.min(Number.MAX_SAFE_INTEGER, Math.ceil(date - Date.now()));
+  }
   return undefined;
 }
 
-async function sendOneOutbound(pairing, binding, ownerFence) {
+function sdkFailureIsAmbiguous(error) {
+  return Boolean(error?.request) && !error?.response;
+}
+
+function sdkFailureIsAuthentication(error) {
+  const status = Number(error?.response?.status);
+  return status === 401 || status === 403;
+}
+
+async function sendOneOutbound(client, binding, ownerFence) {
+  if (!transportHealthAllowsDispatch(HOME, binding)) return false;
+  assertOwnerAndBinding(binding, ownerFence);
   const claim = claimNextOutbound(HOME);
   if (!claim) return false;
+  const content = JSON.stringify({ text: claim.chunk.chunk });
+  const payload = claim.outbox.reply_to_message_id
+    ? {
+        data: { content, msg_type: "text", uuid: claim.chunk.idempotency_key },
+        path: { message_id: claim.outbox.reply_to_message_id },
+      }
+    : {
+        data: {
+          receive_id: claim.outbox.destination_chat_id,
+          content,
+          msg_type: "text",
+          uuid: claim.chunk.idempotency_key,
+        },
+        params: { receive_id_type: "chat_id" },
+      };
+  let response;
   try {
-    await verifyBotIdentity(pairing);
-    await verifyP2pChat(pairing, binding);
-    const current = activeConfiguration();
-    const owner = readTransportOwner(HOME);
-    if (current.binding.binding_id !== binding.binding_id || current.binding.generation !== binding.generation || !owner || owner.pid !== ownerFence.ownerPid || owner.nonce !== ownerFence.ownerNonce || owner.process_start_token !== ownerFence.ownerProcessStartToken) throw new Error("outbound-identity-fence-changed");
+    response = claim.outbox.reply_to_message_id
+      ? await client.im.v1.message.reply(payload, { timeout: COMMAND_TIMEOUT_MS })
+      : await client.im.v1.message.create(payload, { timeout: COMMAND_TIMEOUT_MS });
   } catch (error) {
-    failOutboundAttempt(HOME, claim, "outbound-identity-reverification-failed", { ambiguous: false });
-    recordTransportDiagnostic(HOME, "identity-reverification-failure", safeError(error));
-    writeTransportHealth(HOME, { phase: "degraded", healthy: false, lastErrorType: "outbound-identity-reverification-failed" });
-    throw new Error("outbound-identity-reverification-failed");
-  }
-  const args = claim.outbox.reply_to_message_id
-    ? ["im", "+messages-reply", "--message-id", claim.outbox.reply_to_message_id]
-    : ["im", "+messages-send", "--chat-id", claim.outbox.destination_chat_id];
-  args.push("--text", claim.chunk.chunk, "--idempotency-key", claim.chunk.idempotency_key, "--as", "bot", "--format", "json");
-  const result = await runArgv(LARK_CLI, args, { profile: pairing.app_profile });
-  if (result.spawnError || result.timedOut || result.overflow) {
-    failOutboundAttempt(HOME, claim, safeError(result.spawnError) || "ambiguous-process-result", { ambiguous: true });
-    return true;
-  }
-  if (result.code !== 0) {
-    const error = parseStructuredError(result.stderr);
-    const retryAfter = retryAfterMilliseconds(error);
-    const type = typeof error?.type === "string" ? error.type : "lark-cli-error";
-    const subtype = typeof error?.subtype === "string" ? error.subtype : "unknown";
-    recordTransportDiagnostic(HOME, "outbound-failure", `${type}:${subtype}`);
-    failOutboundAttempt(HOME, claim, `${type}:${subtype}`, {
-      ambiguous: false,
-      retryAfterMs: retryAfter,
+    const errorType = sdkErrorType(error);
+    failOutboundAttempt(HOME, claim, errorType, {
+      ambiguous: sdkFailureIsAmbiguous(error),
+      retryAfterMs: retryAfterMilliseconds(error),
     });
-    if (type === "authorization" || type === "authentication") {
-      writeTransportHealth(HOME, { phase: "degraded", healthy: false, lastErrorType: `${type}:${subtype}` });
-      throw new Error("outbound-authorization-reverification-failed");
-    }
+    recordTransportDiagnostic(HOME, "outbound-failure", errorType);
+    if (sdkFailureIsAuthentication(error)) throw new Error("outbound SDK authentication failed");
     return true;
   }
-  let envelope;
-  try {
-    envelope = parseJsonEnvelope(result.stdout);
-  } catch {
-    failOutboundAttempt(HOME, claim, "ambiguous-success-malformed-envelope", { ambiguous: true });
+  if (!response || response.code !== 0) {
+    const code = Number(response?.code);
+    const errorType = Number.isSafeInteger(code) ? `sdk-code-${code}` : "sdk-response-malformed";
+    failOutboundAttempt(HOME, claim, errorType, { ambiguous: !Number.isSafeInteger(code) });
+    recordTransportDiagnostic(HOME, "outbound-failure", errorType);
     return true;
   }
-  if (envelope.ok !== true) {
-    failOutboundAttempt(HOME, claim, "ambiguous-success-envelope-not-ok", { ambiguous: true });
-    return true;
-  }
-  const data = envelope.data && typeof envelope.data === "object" ? envelope.data : envelope;
-  const messageId = data.message_id;
-  const chatId = data.chat_id ?? claim.outbox.destination_chat_id;
+  const messageId = response.data?.message_id;
+  const chatId = response.data?.chat_id;
   try {
     receiptOutbound(HOME, claim, { messageId, chatId });
   } catch {
-    failOutboundAttempt(HOME, claim, "ambiguous-success-invalid-receipt", { ambiguous: true });
+    failOutboundAttempt(HOME, claim, "sdk-success-invalid-receipt", { ambiguous: true });
   }
   return true;
 }
 
-async function drainOutbound(pairing, binding, ownerFence) {
+async function drainOutbound(client, binding, ownerFence) {
   for (let count = 0; count < 100 && !stopping; count += 1) {
-    if (!(await sendOneOutbound(pairing, binding, ownerFence))) break;
+    if (!(await sendOneOutbound(client, binding, ownerFence))) break;
   }
 }
 
-function drainOutboundSingleFlight(pairing, binding, ownerFence) {
+function drainOutboundSingleFlight(client, binding, ownerFence) {
   if (outboundDrainTask) return outboundDrainTask;
-  outboundDrainTask = drainOutbound(pairing, binding, ownerFence).finally(() => { outboundDrainTask = null; });
+  outboundDrainTask = drainOutbound(client, binding, ownerFence).finally(() => { outboundDrainTask = null; });
   return outboundDrainTask;
 }
 
-function startConsumer(pairing, binding, verifiedChat, reconnects, ownerFence) {
-  return new Promise((resolvePromise) => {
-    const child = spawn(LARK_CLI, ["event", "consume", "im.message.receive_v1", "--as", "bot"], {
-      cwd: ROOT,
-      env: larkEnvironment(pairing.app_profile),
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-    consumer = child;
-    let ready = false;
-    let reconciled = false;
-    let closed = false;
-    let drop = false;
-    let overflow = false;
-    let stdoutBuffer = "";
-    let stderrBuffer = "";
-    let liveBuffer = [];
-    let liveBufferBytes = 0;
-    let senderTimer = null;
-    let reconcileTask = null;
-    let reconcileError = null;
-    const assertCurrentConnection = () => {
-      const current = readActiveBinding(HOME);
-      const owner = readTransportOwner(HOME);
-      if (closed || consumer !== child) throw new Error("consumer-closed-before-reconciliation");
-      if (!current || current.status !== "active" || current.binding_id !== binding.binding_id || current.generation !== binding.generation) throw new Error("binding-changed-before-reconciliation");
-      if (!owner || owner.pid !== ownerFence.ownerPid || owner.nonce !== ownerFence.ownerNonce || owner.process_start_token !== ownerFence.ownerProcessStartToken) throw new Error("transport-owner-changed-before-reconciliation");
-    };
-    const bindingTimer = setInterval(() => {
-      try {
-        const current = readActiveBinding(HOME);
-        if (!current || current.status !== "active" || current.binding_id !== binding.binding_id || current.generation !== binding.generation) {
-          recordTransportDiagnostic(HOME, "binding-changed", "binding generation changed; consumer stopping for controlled restart");
-          child.stdin.end();
-        }
-      } catch {
-        child.stdin.end();
-      }
-    }, 1000);
-    bindingTimer.unref();
-    const readyTimer = setTimeout(() => {
-      if (!ready) {
-        recordTransportDiagnostic(HOME, "ready-timeout", `ready marker absent after ${READY_TIMEOUT_MS}ms`);
-        child.stdin.end();
-        child.kill("SIGTERM");
-      }
-    }, READY_TIMEOUT_MS);
-    readyTimer.unref();
-
-    const finish = (result) => {
-      if (closed) return;
-      if (stdoutBuffer.trim()) {
-        if (Buffer.byteLength(stdoutBuffer, "utf8") > MAX_CONSUMER_LINE_BYTES) requestReconcileRestart("overflow", "final event line exceeded the byte limit");
-        else {
-          try { acceptEvent(JSON.parse(stdoutBuffer)); }
-          catch { recordTransportDiagnostic(HOME, "invalid-ndjson", "malformed final event line"); }
-        }
-        stdoutBuffer = "";
-      }
-      if (stderrBuffer.trim()) {
-        if (Buffer.byteLength(stderrBuffer, "utf8") > MAX_CONSUMER_LINE_BYTES) requestReconcileRestart("overflow", "final diagnostic line exceeded the byte limit");
-        else if (parseDropDiagnostic(stderrBuffer)) requestReconcileRestart("drop", stderrBuffer.trim());
-      }
-      stderrBuffer = "";
-      closed = true;
-      clearTimeout(readyTimer);
-      clearInterval(bindingTimer);
-      if (senderTimer) clearInterval(senderTimer);
-      if (consumer === child) consumer = null;
-      void Promise.resolve(reconcileTask).catch(() => {}).then(() => {
-        if (!reconciled && liveBuffer.length > 0) {
-          try { stageBuffered(); }
-          catch (error) { recordTransportDiagnostic(HOME, "staging-failure", safeError(error)); }
-        }
-        resolvePromise({ ...result, drop, overflow, buffered: liveBuffer, reconcileError });
-      });
-    };
-
-    const stageBuffered = () => {
-      if (liveBuffer.length === 0) return;
-      stageTransportEvents(HOME, liveBuffer, { maxEvents: MAX_BUFFERED_EVENTS * 10, maxBytes: MAX_LIVE_BUFFER_BYTES * 10 });
-      liveBuffer = [];
-      liveBufferBytes = 0;
-    };
-
-    const requestReconcileRestart = (kind, line) => {
-      if (drop || overflow) return;
-      if (kind === "drop") drop = true;
-      else overflow = true;
-      let stageFailure = null;
-      try { stageBuffered(); }
-      catch (error) { stageFailure = safeError(error); }
-      recordTransportDiagnostic(HOME, kind === "drop" ? "drop" : "buffer-overflow", line);
-      if (stageFailure) recordTransportDiagnostic(HOME, "staging-failure", stageFailure);
-      writeTransportHealth(HOME, {
-        phase: "degraded",
-        healthy: false,
-        reconnects,
-        dropDiagnostics: Number(readTransportHealth(HOME)?.drop_diagnostics ?? 0) + 1,
-        lastErrorType: stageFailure ? "staging-failure" : kind,
-      });
-      child.stdin.end();
-    };
-
-    const acceptEvent = (value) => {
-      if (drop || overflow) return;
-      if (!value || typeof value !== "object" || Array.isArray(value)) {
-        recordTransportDiagnostic(HOME, "invalid-event", "non-object NDJSON event");
-        return;
-      }
-      const eventBytes = Buffer.byteLength(JSON.stringify(value), "utf8");
-      if (eventBytes > MAX_LIVE_BUFFER_BYTES) {
-        requestReconcileRestart("overflow", `single event exceeded byte limit ${MAX_LIVE_BUFFER_BYTES}`);
-        return;
-      }
-      if (reconciled) {
-        publishFeishuInbound(HOME, value, { transport: "lark-websocket" });
-        return;
-      }
-      if (liveBuffer.length >= MAX_BUFFERED_EVENTS || liveBufferBytes + eventBytes > MAX_LIVE_BUFFER_BYTES) {
-        liveBuffer.push(value);
-        liveBufferBytes += eventBytes;
-        requestReconcileRestart("overflow", "buffer limit reached; events staged before ordered history reconciliation");
-        return;
-      }
-      liveBuffer.push(value);
-      liveBufferBytes += eventBytes;
-    };
-
-    child.stdout.on("data", (chunk) => {
-      stdoutBuffer += chunk.toString();
-      for (;;) {
-        const index = stdoutBuffer.indexOf("\n");
-        if (index < 0) break;
-        const line = stdoutBuffer.slice(0, index);
-        stdoutBuffer = stdoutBuffer.slice(index + 1);
-        if (!line.trim()) continue;
-        if (Buffer.byteLength(line, "utf8") > MAX_CONSUMER_LINE_BYTES) {
-          requestReconcileRestart("overflow", `event line exceeded byte limit ${MAX_CONSUMER_LINE_BYTES}`);
-          continue;
-        }
-        try { acceptEvent(JSON.parse(line)); }
-        catch { recordTransportDiagnostic(HOME, "invalid-ndjson", "malformed event line"); }
-      }
-      if (Buffer.byteLength(stdoutBuffer, "utf8") > MAX_CONSUMER_LINE_BYTES) {
-        stdoutBuffer = "";
-        requestReconcileRestart("overflow", `unterminated event line exceeded byte limit ${MAX_CONSUMER_LINE_BYTES}`);
-      }
-    });
-
-    child.stderr.on("data", (chunk) => {
-      stderrBuffer += chunk.toString();
-      for (;;) {
-        const index = stderrBuffer.indexOf("\n");
-        if (index < 0) break;
-        const line = stderrBuffer.slice(0, index);
-        stderrBuffer = stderrBuffer.slice(index + 1);
-        if (Buffer.byteLength(line, "utf8") > MAX_CONSUMER_LINE_BYTES) {
-          requestReconcileRestart("overflow", `diagnostic line exceeded byte limit ${MAX_CONSUMER_LINE_BYTES}`);
-          continue;
-        }
-        if (line === READY_MARKER) {
-          ready = true;
-          clearTimeout(readyTimer);
-          writeTransportHealth(HOME, {
-            phase: "reconciling",
-            healthy: false,
-            reconnects,
-            lastReadyAt: new Date().toISOString(),
-            lastErrorType: null,
-          });
-          reconcileTask = (async () => {
-            try {
-              const previous = readTransportHealth(HOME);
-              const sinceMs = previous?.last_reconcile_at ? Date.parse(String(previous.last_reconcile_at)) : Date.now() - HISTORY_OVERLAP_MS;
-              const history = await readOverlappingHistory(binding, verifiedChat, Number.isFinite(sinceMs) ? sinceMs : Date.now() - HISTORY_OVERLAP_MS, pairing.app_profile);
-              if (drop || overflow) throw new Error("live-buffer-integrity-lost-before-history-reconcile");
-              assertCurrentConnection();
-              const staged = readStagedTransportEvents(HOME);
-              publishEvents([...history, ...staged.map((record) => record.event), ...liveBuffer], "lark-history-overlap");
-              clearStagedTransportEvents(HOME, staged);
-              liveBuffer = [];
-              liveBufferBytes = 0;
-              await drainOutboundSingleFlight(pairing, binding, ownerFence);
-              assertCurrentConnection();
-              reconciled = true;
-              writeTransportHealth(HOME, {
-                phase: "healthy",
-                healthy: true,
-                reconnects,
-                lastReadyAt: new Date().toISOString(),
-                lastReconcileAt: new Date().toISOString(),
-                lastErrorType: null,
-              });
-              senderTimer = setInterval(() => {
-                void drainOutboundSingleFlight(pairing, binding, ownerFence).catch((error) => {
-                  reconcileError = String(error);
-                  writeTransportHealth(HOME, { phase: "degraded", healthy: false, reconnects, lastErrorType: reconcileError });
-                  child.stdin.end();
-                });
-              }, OUTBOX_POLL_MS);
-              senderTimer.unref();
-            } catch (error) {
-              reconcileError = String(error);
-              recordTransportDiagnostic(HOME, "reconcile-failure", reconcileError);
-              try { stageBuffered(); }
-              catch (stageError) { recordTransportDiagnostic(HOME, "staging-failure", safeError(stageError)); }
-              writeTransportHealth(HOME, { phase: "degraded", healthy: false, reconnects, lastErrorType: reconcileError });
-              child.stdin.end();
-            }
-          })();
-          continue;
-        }
-        if (parseDropDiagnostic(line)) requestReconcileRestart("drop", line);
-        else if (/^\[event\] exited\b/.test(line)) recordTransportDiagnostic(HOME, "event-exit", line);
-        else if (line.trim().startsWith("{")) {
-          const error = parseStructuredError(line);
-          recordTransportDiagnostic(HOME, "event-error", error ? `${error.type ?? "unknown"}:${error.subtype ?? "unknown"}` : "structured error");
-        }
-      }
-      if (Buffer.byteLength(stderrBuffer, "utf8") > MAX_CONSUMER_LINE_BYTES) {
-        stderrBuffer = "";
-        requestReconcileRestart("overflow", `unterminated diagnostic line exceeded byte limit ${MAX_CONSUMER_LINE_BYTES}`);
-      }
-    });
-
-    child.on("error", (error) => finish({ code: -1, signal: null, error: safeError(error), ready, reconciled }));
-    child.on("close", (code, signal) => finish({ code: code ?? -1, signal, error: null, ready, reconciled }));
-    if (stopping) child.stdin.end();
-  });
-}
-
-async function runTransport({ once = false, daemon = false, maxCycles = 0 } = {}) {
-  const { pairing, binding } = activeConfiguration();
+async function runTransport({ once = false, daemon = false } = {}) {
+  const initial = activeConfiguration();
+  const credentials = directAppCredentials(initial.pairing);
   const nonce = randomBytes(24).toString("hex");
   const processStartToken = readProcessStartToken(process.pid);
   if (!processStartToken) throw new Error("transport process incarnation cannot be verified on this host");
   process.title = transportProcessTitle(nonce, HOME);
   const owner = claimTransportOwner(HOME, { nonce, moduleFile: realpathSync(MODULE_FILE), processStartToken });
   if (!owner.ok) throw new Error("another Feishu transport already owns this home");
-  const healthFence = {
+  const ownerFence = {
     ownerPid: process.pid,
     ownerNonce: nonce,
     ownerProcessStartToken: processStartToken,
-    bindingId: binding.binding_id,
-    bindingGeneration: binding.generation,
   };
-  repairOutboundState(HOME);
+  const healthFence = {
+    ...ownerFence,
+    bindingId: initial.binding.binding_id,
+    bindingGeneration: initial.binding.generation,
+  };
+  const ready = deferred();
+  const fatal = deferred();
+  const fatalFailure = () => fatal.promise.then((error) => { throw error; });
+  const stopped = deferred();
+  let terminalError = null;
+  let readySettled = false;
+  let fatalSettled = false;
+  let reconnects = 0;
+  let bindingTimer = null;
+  let senderTimer = null;
+  let keepAliveTimer = null;
+  let verificationTask = null;
+
   const stop = () => {
+    if (stopping) return;
     stopping = true;
-    if (consumer?.stdin && !consumer.stdin.destroyed) consumer.stdin.end();
+    try { wsClient?.close(); } catch {}
+    stopped.resolve();
   };
+  const fail = (error) => {
+    if (fatalSettled) return;
+    fatalSettled = true;
+    terminalError = sdkErrorType(error, "sdk-long-connection-failed");
+    try { writeTransportHealth(HOME, { ...healthFence, phase: "degraded", healthy: false, reconnects, lastErrorType: terminalError }); } catch {}
+    fatal.resolve(new Error(terminalError));
+    stop();
+  };
+  const verifyConnectedIdentity = () => {
+    if (verificationTask) return verificationTask;
+    verificationTask = (async () => {
+      const current = assertOwnerAndBinding(initial.binding, ownerFence);
+      await verifyP2pChat(sdkClient, current.binding);
+      assertOwnerAndBinding(initial.binding, ownerFence);
+      writeTransportHealth(HOME, {
+        ...healthFence,
+        phase: "healthy",
+        healthy: true,
+        reconnects,
+        lastConnectedAt: new Date().toISOString(),
+        lastIdentityVerifiedAt: new Date().toISOString(),
+        lastErrorType: null,
+      });
+      if (!readySettled) {
+        readySettled = true;
+        ready.resolve();
+      }
+      await drainOutboundSingleFlight(sdkClient, initial.binding, ownerFence);
+    })().catch(fail).finally(() => { verificationTask = null; });
+    return verificationTask;
+  };
+
   process.once("SIGTERM", stop);
   process.once("SIGINT", stop);
-  if (!daemon && !once && maxCycles === 0) {
+  if (!daemon && !once) {
     process.stdin.resume();
     process.stdin.once("end", stop);
   }
-  let reconnects = 0;
-  let cycles = 0;
-  let delay = 250;
-  let terminalError = null;
+
   try {
-    writeTransportHealth(HOME, { ...healthFence, phase: "starting", healthy: false, reconnects });
-    while (!stopping) {
-      const current = activeConfiguration();
-      if (current.binding.binding_id !== binding.binding_id || current.binding.generation !== binding.generation) throw new Error("binding generation changed; restart transport under the new binding");
-      let verifiedChat;
-      try {
-        await verifyBotIdentity(current.pairing);
-        verifiedChat = await verifyP2pChat(current.pairing, current.binding);
-      } catch (error) {
-        cycles += 1;
-        writeTransportHealth(HOME, { ...healthFence, phase: "degraded", healthy: false, reconnects, lastErrorType: String(error) });
-        if (once || (maxCycles > 0 && cycles >= maxCycles)) throw error;
+    repairOutboundState(HOME);
+    writeTransportHealth(HOME, { ...healthFence, phase: "starting", healthy: false, reconnects, lastErrorType: null });
+    const sdk = await loadSdk();
+    const sdkOptions = {
+      appId: credentials.appId,
+      appSecret: credentials.appSecret,
+      domain: sdk.Domain?.Feishu,
+      logger: silentSdkLogger(),
+      loggerLevel: sdk.LoggerLevel?.error,
+      source: "firstmate-feishu",
+    };
+    sdkClient = new sdk.Client(sdkOptions);
+    await verifyP2pChat(sdkClient, initial.binding);
+    assertOwnerAndBinding(initial.binding, ownerFence);
+    const eventDispatcher = new sdk.EventDispatcher({}).register({
+      "im.message.receive_v1": async (data) => {
+        try {
+          if (stopping) throw new Error("transport is stopping");
+          const current = assertOwnerAndBinding(initial.binding, ownerFence);
+          const normalized = normalizeSdkEvent(data, credentials.appId);
+          publishFeishuInbound(HOME, normalized, {
+            transport: "feishu-sdk-long-connection",
+            bindingFence: {
+              bindingId: current.binding.binding_id,
+              bindingGeneration: current.binding.generation,
+              sessionId: current.binding.session_id,
+              chatId: current.binding.chat_id,
+            },
+          });
+          assertOwnerAndBinding(initial.binding, ownerFence);
+        } catch (error) {
+          try { recordTransportDiagnostic(HOME, "sdk-event-refused", sdkErrorType(error, "sdk-event-handoff-failed")); } catch {}
+          fail(error);
+          throw error;
+        }
+      },
+    });
+    wsClient = new sdk.WSClient({
+      ...sdkOptions,
+      autoReconnect: true,
+      handshakeTimeoutMs: READY_TIMEOUT_MS,
+      wsConfig: { pingTimeout: Math.max(1, Math.ceil(READY_TIMEOUT_MS / 1000)) },
+      onReady: () => { void verifyConnectedIdentity(); },
+      onError: (error) => fail(error),
+      onReconnecting: () => {
         reconnects += 1;
-        await sleep(delay);
-        delay = Math.min(10000, delay * 2);
-        continue;
-      }
-      const result = await startConsumer(current.pairing, current.binding, verifiedChat, reconnects, healthFence);
-      cycles += 1;
-      if (result.reconcileError && once) throw new Error(result.reconcileError);
-      if (stopping) break;
-      writeTransportHealth(HOME, {
-        phase: "degraded",
-        healthy: false,
-        ownerPid: process.pid,
-        reconnects,
-        lastErrorType: result.error ?? `consumer-exit-${result.code}`,
-      });
-      if (once || (maxCycles > 0 && cycles >= maxCycles)) break;
-      reconnects += 1;
-      await sleep(delay);
-      delay = Math.min(10000, delay * 2);
+        try { writeTransportHealth(HOME, { ...healthFence, phase: "reconnecting", healthy: false, reconnects, lastErrorType: null }); }
+        catch (error) { fail(error); }
+      },
+      onReconnected: () => { void verifyConnectedIdentity(); },
+    });
+    bindingTimer = setInterval(() => {
+      try { assertOwnerAndBinding(initial.binding, ownerFence); }
+      catch { stop(); }
+    }, BINDING_POLL_MS);
+    bindingTimer.unref();
+    await wsClient.start({ eventDispatcher });
+    const readyTimeout = new Promise((_, reject) => {
+      const timer = setTimeout(() => reject(new Error("SDK long connection did not become ready")), READY_TIMEOUT_MS);
+      timer.unref();
+    });
+    await Promise.race([ready.promise, fatalFailure(), readyTimeout]);
+    senderTimer = setInterval(() => {
+      void drainOutboundSingleFlight(sdkClient, initial.binding, ownerFence).catch(fail);
+    }, OUTBOX_POLL_MS);
+    senderTimer.unref();
+    if (daemon) keepAliveTimer = setInterval(() => {}, 60000);
+    if (once) {
+      await sleep(ONCE_SETTLE_MS);
+      await drainOutboundSingleFlight(sdkClient, initial.binding, ownerFence);
+      stop();
     }
+    await Promise.race([stopped.promise, fatalFailure()]);
   } catch (error) {
-    terminalError = String(error);
-    throw error;
+    if (!terminalError) terminalError = sdkErrorType(error, "sdk-long-connection-failed");
+    throw new Error(terminalError);
   } finally {
-    writeTransportHealth(HOME, { ...healthFence, phase: terminalError ? "degraded" : "stopped", healthy: false, reconnects, lastErrorType: terminalError });
-    releaseTransportOwner(HOME, nonce);
+    if (bindingTimer) clearInterval(bindingTimer);
+    if (senderTimer) clearInterval(senderTimer);
+    if (keepAliveTimer) clearInterval(keepAliveTimer);
+    try { wsClient?.close(); } catch {}
+    try {
+      writeTransportHealth(HOME, {
+        ...healthFence,
+        phase: terminalError ? "degraded" : "stopped",
+        healthy: false,
+        reconnects,
+        lastErrorType: terminalError,
+      });
+    } finally {
+      releaseTransportOwner(HOME, nonce);
+    }
   }
 }
 
@@ -683,17 +472,18 @@ function ownerLooksLive(owner) {
   try { process.kill(pid, 0); } catch { return false; }
   const command = processCommandLine(pid);
   const startToken = readProcessStartToken(pid);
-  if (command.length !== 1 || command[0] !== transportProcessTitle(owner.nonce, HOME) || !startToken || startToken !== owner.process_start_token) return false;
-  return true;
+  return command.length === 1 && command[0] === transportProcessTitle(owner.nonce, HOME) && Boolean(startToken) && startToken === owner.process_start_token;
 }
 
 async function startDetached() {
-  activeConfiguration();
+  const { pairing } = activeConfiguration();
+  directAppCredentials(pairing);
   const existing = readTransportOwner(HOME);
   if (existing && ownerLooksLive(existing)) {
     process.stdout.write("feishu transport already running\n");
     return;
   }
+  if (existing && !retireStaleTransportOwner(HOME, existing)) throw new Error("stale Feishu transport ownership changed during retirement");
   const child = spawn(process.execPath, [realpathSync(MODULE_FILE), "run", "--daemon"], {
     cwd: ROOT,
     env: { ...process.env, FM_HOME: HOME, FM_ROOT_OVERRIDE: ROOT },
@@ -716,10 +506,12 @@ async function startDetached() {
 async function stopOwned() {
   const owner = readTransportOwner(HOME);
   if (!owner) {
+    writeTransportHealth(HOME, { phase: "stopped", healthy: false, lastErrorType: null });
     process.stdout.write("feishu transport already stopped\n");
     return;
   }
   if (!ownerLooksLive(owner)) {
+    if (!retireStaleTransportOwner(HOME, owner)) throw new Error("stale Feishu transport ownership changed during retirement");
     writeTransportHealth(HOME, { phase: "stopped", healthy: false, lastErrorType: "stale-owner" });
     process.stdout.write("feishu transport owner was stale; no process was signalled\n");
     return;
@@ -753,15 +545,7 @@ async function main(argv) {
     process.stdout.write(`${JSON.stringify(full)}\n`);
     return;
   }
-  if (command === "run") {
-    const maxCyclesIndex = argv.indexOf("--max-cycles");
-    const maxCycles = maxCyclesIndex >= 0 ? positiveInteger(argv[maxCyclesIndex + 1], 0) : 0;
-    return runTransport({
-      once: argv.includes("--once"),
-      daemon: argv.includes("--daemon"),
-      maxCycles,
-    });
-  }
+  if (command === "run") return runTransport({ once: argv.includes("--once"), daemon: argv.includes("--daemon") });
   throw new Error(usage());
 }
 

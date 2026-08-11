@@ -2,7 +2,6 @@ export const PAIRING_SCHEMA: string;
 export const BINDING_SCHEMA: string;
 export const INBOUND_SCHEMA: string;
 export const INBOUND_LEDGER_SCHEMA: string;
-export const INBOUND_ACK_SCHEMA: string;
 export const OUTBOUND_SCHEMA: string;
 export const OUTBOUND_LEDGER_SCHEMA: string;
 export const OUTBOUND_RECEIPT_SCHEMA: string;
@@ -18,9 +17,7 @@ export interface PairingRecord {
   schema: string;
   home_id: string;
   fm_home_realpath: string;
-  app_profile: string;
-  app_id_fingerprint: string | null;
-  bot_open_id: string;
+  app_id_fingerprint: string;
   allowed_users: string[];
   allowed_chats: string[];
   chat_policy: "p2p-only";
@@ -51,11 +48,10 @@ export interface BindingRecord {
 
 export interface InboundEvent {
   schema: string;
-  source: "feishu" | "tui" | "internal";
+  source: "feishu";
   message_id: string;
-  message_type: string;
+  message_type: "text";
   text: string;
-  images?: Array<{ type: "image"; data: string; mimeType: string }>;
   reply_to: string | null;
   ingress_seq: number;
   binding_id: string;
@@ -64,24 +60,24 @@ export interface InboundEvent {
   delivery_ref: string;
   decision_ref: string | null;
   decision_key: string | null;
-  decision_reply?: "exact" | "unrelated" | "none";
-  desired_delivery?: "steer" | "followUp";
+  decision_reply: "exact" | "unrelated" | "none";
 }
 
 export interface InboundLedger {
   schema: string;
-  source: "feishu" | "tui" | "internal";
+  source: "feishu";
   message_id: string;
   ingress_seq: number;
-  state: string;
+  state: "pending" | "offered" | "delivered" | "superseded";
   attempt: number;
+  offered_at?: string | null;
   target_session_id: string;
   binding_id: string;
   binding_generation: number;
   delivery_ref: string;
 }
 
-export interface IngressClaim {
+export interface InboundCandidate {
   event: InboundEvent;
   ledger: InboundLedger;
   filename: string;
@@ -97,7 +93,6 @@ export interface StatePaths {
   inbox: string;
   inboundLedger: string;
   inboundEventIds: string;
-  inboundAcks: string;
   inboundPending: string;
   inboundPendingCount: string;
   inboundDeliveryMap: string;
@@ -110,14 +105,12 @@ export interface StatePaths {
   outboundRegistrationIntents: string;
   pendingDecisions: string;
   pendingDecisionOpen: string;
-  attemptsIn: string;
   attemptsOut: string;
   quarantine: string;
   alerts: string;
   transport: string;
   health: string;
   owner: string;
-  stagedEvents: string;
   liveSession: string;
   sequence: string;
 }
@@ -127,9 +120,7 @@ export function ensurePrivateLayout(home: string): StatePaths;
 export function readPairing(home: string): PairingRecord | undefined;
 export function readActiveBinding(home: string): BindingRecord | undefined;
 export function createPairing(home: string, input: {
-  appProfile?: string;
-  appIdFingerprint?: string;
-  botOpenId: string;
+  appIdFingerprint: string;
   allowedUser: string;
   allowedChat: string;
 }): PairingRecord;
@@ -146,49 +137,28 @@ export function publishFeishuInbound(home: string, raw: Record<string, unknown>,
   maxPendingInbound?: number;
   minFreeBytes?: number;
   transport?: string;
+  bindingFence?: { bindingId: string; bindingGeneration: number; sessionId: string; chatId: string };
 }): { status: string; reason?: string; ingressSeq?: number; deliveryRef?: string; messageIdHash?: string };
-export function enqueueLocalIngress(home: string, input: {
-  source: "tui" | "internal";
-  text: string;
-  images?: Array<{ type: "image"; data: string; mimeType: string }>;
-  desiredDelivery?: "steer" | "followUp";
-  sessionId: string;
-  bindingId: string;
-  bindingGeneration: number;
-}): { event: InboundEvent; ledger: InboundLedger };
-export function reserveInteractiveIngress(home: string, input: {
-  text: string;
-  images?: Array<{ type: "image"; data: string; mimeType: string }>;
-  desiredDelivery?: "steer" | "followUp";
-  sessionId: string;
-  bindingId: string;
-  bindingGeneration: number;
-}): { status: "blocked" } | { status: "reserved"; event: InboundEvent; ledger: InboundLedger };
-export function markIngressAccepted(home: string, deliveryRef: string, fence: {
-  sessionId: string;
-  bindingGeneration: number;
-}): boolean;
 export function repairInboundLedgers(home: string): number;
-export function claimNextIngress(home: string, fence: {
+export function pendingFeishuIngress(home: string, fence: {
   sessionId: string;
   bindingId: string;
   bindingGeneration: number;
-}, options?: { leaseMs?: number }): IngressClaim | undefined;
-export function releaseIngressClaim(home: string, deliveryRef: string, error: unknown): boolean;
-export function ackIngress(home: string, deliveryRef: string, session: {
+}): InboundCandidate[];
+export function offerFeishuIngress(home: string, deliveryRef: string, fence: {
   sessionId: string;
-  sessionEntryId: string;
+  bindingId: string;
   bindingGeneration: number;
-}): Record<string, unknown> | undefined;
-export function reconcileIngressFromSession(home: string, markers: Array<{
+}): InboundCandidate | undefined;
+export function releaseFeishuIngressOffer(home: string, deliveryRef: string, error: unknown): boolean;
+export function reconcileFeishuIngress(home: string, markers: Array<{
   sessionId: string;
-  sessionEntryId: string;
   bindingGeneration: number;
   deliveryRef: string;
 }>, fence: {
   sessionId: string;
   bindingGeneration: number;
-}): number;
+}, resetUnobservedOffers?: boolean): number;
 export function findInboundByDeliveryRef(home: string, deliveryRef: string): InboundEvent | undefined;
 export function claimLiveSession(home: string, binding: BindingRecord, session: {
   sessionId: string;
@@ -196,12 +166,12 @@ export function claimLiveSession(home: string, binding: BindingRecord, session: 
   sessionCwd: string;
 }, ownerToken: string): { ok: boolean; reason?: string; record?: Record<string, unknown> };
 export function releaseLiveSession(home: string, bindingId: string, ownerToken: string): boolean;
-export function ingressCounts(home: string): { pending: number; dispatching: number; delivered: number; other: number };
+export function ingressCounts(home: string): { pending: number; queued: number; delivered: number; other: number };
 export function assistantSecretPattern(text: string): string | null;
 export function deterministicChunks(text: string, maxBytes?: number): string[];
 export function registerAssistantOutbound(home: string, input: {
   text: string;
-  source: "feishu" | "tui" | "internal";
+  source: "feishu";
   sourceRef: string;
   sessionId: string;
   bindingGeneration: number;
@@ -226,7 +196,7 @@ export interface OutboundClaim {
   outbox: {
     schema: string;
     event_id: string;
-    source: string;
+    source: "feishu";
     source_ref: string;
     session_id: string;
     binding_id: string;
@@ -244,7 +214,7 @@ export interface OutboundClaim {
 export interface OutboundRegistrationIntent {
   schema: string;
   intent_id: string;
-  source: "feishu" | "tui" | "internal";
+  source: "feishu";
   source_ref: string;
   session_id: string;
   binding_id: string;
@@ -263,14 +233,16 @@ export interface OutboundRegistrationIntentCandidate {
 }
 export function persistAssistantOutboundIntent(home: string, input: {
   text: string;
-  source: "feishu" | "tui" | "internal";
+  source: "feishu";
   sourceRef: string;
   sessionId: string;
   bindingGeneration: number;
   replyTo?: string | null;
   maxOutboundBytes?: number;
   maxPendingOutbound?: number;
-}): OutboundRegistrationIntent | { status: "resource-refused"; reason: "queue-limit" | "resource-limit"; alert: { id: string; created: boolean } };
+}): OutboundRegistrationIntent |
+  { status: "resource-refused"; reason: "queue-limit" | "resource-limit"; alert: { id: string; created: boolean } } |
+  { status: "secret-refused"; pattern: string; alert: { id: string; created: boolean } };
 export function readAssistantOutboundIntents(home: string, fence: {
   sessionId: string;
   bindingId: string;
@@ -291,7 +263,7 @@ export function receiptOutbound(home: string, claim: OutboundClaim, receipt: {
 }): boolean;
 export interface PendingDecisionCandidate {
   name: string;
-  record: { decision_ref: string; decision_key: string; source: "feishu" | "tui"; source_ref: string };
+  record: { decision_ref: string; decision_key: string; source: "feishu"; source_ref: string };
 }
 export function registerPendingDecision(home: string, input: {
   decisionRef: string;
@@ -300,8 +272,8 @@ export function registerPendingDecision(home: string, input: {
   sessionId: string;
   maxPendingOutbound?: number;
 }): Record<string, unknown>;
-export function findPendingDecisionForOutbound(home: string, decisionRef: string, decisionKey: string, sessionId: string, bindingGeneration: number, source: "feishu" | "tui" | "internal", sourceRef: string): PendingDecisionCandidate;
-export function claimPendingDecisionForOutbound(home: string, sessionId: string, bindingGeneration: number, source: "feishu" | "tui" | "internal", sourceRef: string): PendingDecisionCandidate | undefined;
+export function findPendingDecisionForOutbound(home: string, decisionRef: string, decisionKey: string, sessionId: string, bindingGeneration: number, source: "feishu", sourceRef: string): PendingDecisionCandidate;
+export function claimPendingDecisionForOutbound(home: string, sessionId: string, bindingGeneration: number, source: "feishu", sourceRef: string): PendingDecisionCandidate | undefined;
 export function bindPendingDecisionToOutbound(home: string, candidate: PendingDecisionCandidate | undefined, eventId: string): void;
 export function finishPendingDecisionForOutbound(home: string, candidate: PendingDecisionCandidate | undefined, outcome: string): void;
 export function claimTransportOwner(home: string, owner: {
@@ -310,11 +282,9 @@ export function claimTransportOwner(home: string, owner: {
   processStartToken: string;
 }): { ok: boolean; owner: Record<string, unknown> };
 export function readTransportOwner(home: string): Record<string, unknown> | undefined;
+export function retireStaleTransportOwner(home: string, expected: Record<string, unknown>): boolean;
 export function releaseTransportOwner(home: string, nonce: string): boolean;
 export function recordTransportDiagnostic(home: string, kind: string, line: string): string;
-export function stageTransportEvents(home: string, events: Array<Record<string, unknown>>, options?: { maxEvents?: number; maxBytes?: number }): number;
-export function readStagedTransportEvents(home: string): Array<{ name: string; event: Record<string, unknown> }>;
-export function clearStagedTransportEvents(home: string, records: Array<{ name: string }>): number;
 export function writeTransportHealth(home: string, patch: Record<string, unknown>): Record<string, unknown>;
 export function readTransportHealth(home: string): Record<string, unknown> | undefined;
 export function transportHealthAllowsDispatch(home: string, binding: BindingRecord): boolean;

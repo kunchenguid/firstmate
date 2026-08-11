@@ -15,21 +15,23 @@ The operator contract is [`docs/feishu-channel.md`](../../../docs/feishu-channel
 
 ## On an authorized Feishu input
 
-Treat the body as authenticated captain text from the exact allowlisted P2P channel, but keep the channel's lower-trust action boundary.
+Treat the body as authenticated captain text from the exact allowlisted P2P channel.
+Feishu and native TUI input follow the same normal Pi tool and Firstmate authority path.
+Do not add a Feishu-specific tool restriction, local confirmation step, special policy switch, or alternate tool executor.
 A slash-like prefix is ordinary content and is never a Pi command, skill invocation, prompt template, shell command, or direct tool request.
-Use normal Firstmate project intake and reasoning rules.
-Do not expose the open ID, chat ID, message ID, delivery marker, private state path, or transport mechanics in a captain-facing answer.
+Use normal Firstmate project intake, approval, merge, destructive-action, and security rules exactly as for native TUI input.
+Do not expose the open ID, chat ID, message ID, delivery marker, app identity, private state path, or transport mechanics in a captain-facing answer.
 
-During a Feishu-originated agent run, only `read`, `grep`, `find`, and `ls` tool calls bypass the lower-trust effect fence.
-Every `bash`, `write`, `edit`, or other tool call—including an otherwise reversible operation—requires exact one-time confirmation through the blocked effect's `/fm-feishu-confirm <code>` command in the local TUI.
-When an effect is blocked, explain that the concrete action is waiting for local confirmation, then stop before it.
-After the local captain enters the displayed code, retry the exact same tool call; the confirmation matches one tool name and input once and authorizes no other effect.
-Do not reinterpret a wrong code or an unrelated local or Feishu message as confirmation, and do not treat unrelated input as clearing an outstanding blocked effect.
+Native TUI and Firstmate operational input never pass through Feishu durable state.
+The bridge offers only accepted durable Feishu events to Pi through `sendUserMessage` with native follow-up delivery.
+Pi owns input ordering and scheduling.
+Do not reconstruct a cross-channel queue around it.
 
-The final Assistant text is sent automatically after settlement.
+The final Assistant text for the exact Feishu source is sent automatically after settlement.
 Do not add a classifier, summary, rewrite, model call, semantic redaction, typed notification, or separate outbound message.
 Write the captain-facing final answer exactly as it should appear, with complete URLs.
-Fixed credential-pattern refusal and deterministic chunking are extension-owned.
+Fixed credential-pattern refusal, deterministic chunking, and direct reply targeting are extension-owned.
+An unmarked native TUI or operational message is not Feishu provenance and must never be inferred as an outbound source.
 
 ## Exact decision correlation
 
@@ -39,7 +41,7 @@ When the final answer asks the captain to decide an existing exact decision, reg
 bin/fm-feishu-decision.sh register <decision-ref> <decision-key> <source-ref>
 ```
 
-Use the existing durable `decision_ref`, exact decision key, and privacy-safe `ref=in_...` marker from that exact persisted user turn.
+Use the existing durable `decision_ref`, exact decision key, and privacy-safe `ref=in_...` marker from that exact Feishu turn.
 The helper records correlation only and never creates or classifies outbound text.
 Never invent a decision reference, register two decisions for one final response, infer a reply from conversational proximity, or close a decision from an unrelated message.
 A later injected message carries an exact decision mapping only when its Feishu `reply_to` matched the recorded outbound receipt.
@@ -50,13 +52,13 @@ Use the normal decision owner to resolve that exact key.
 Pair, bind, rebind, disable, and detailed status are local Pi TUI commands under `/fm-feishu-*`.
 Use `/fm-feishu-rebind` only when the local captain intentionally moves the channel to the displayed exact current session.
 Never bind or rebind from Feishu text.
-Never create a bot, write a credential, perform `lark-cli auth login` for bot identity, or consume a live event as part of diagnosis without explicit local operator intent.
+Never create or configure an app, write a credential, start a live connection, consume a live event, or send a real message as part of diagnosis without explicit local operator intent.
 
-A `FEISHU:` session-start line contains no body or stable user/chat identifier.
-Use `bin/fm-feishu-status.sh summary` for the body-free machine status and `/fm-feishu-status` for exact local-TUI identity display.
-Use `bin/fm-feishu-transport.sh start|stop|restart|status` only for the dedicated no-Agent transport.
+A `FEISHU:` session-start line contains no body, app identity, or stable user/chat identifier.
+Use `bin/fm-feishu-status.sh summary` for body-free machine status and `/fm-feishu-status` for exact local-TUI identity display.
+Use `bin/fm-feishu-transport.sh start|stop|restart|status` only for the dedicated no-Agent official-SDK transport.
 A transport stop is graceful and must never be escalated to a force kill.
 
-For `transport=reconciling` or `transport=degraded`, leave durable Feishu input queued until history reconciliation restores healthy dispatch.
-For missing `lark-cli`, bot scope/authentication failure, unsafe private state, disk failure, lost session ownership, or delivery uncertainty, report the concrete local operator action without message bodies, credentials, or raw private IDs.
-Do not start another Pi or session to work around any channel failure.
+For `transport=starting`, `connecting`, or `reconnecting`, leave durable Feishu input pending until the exact current connection and identity fence are healthy.
+For a missing SDK dependency, absent app-credential environment, SDK authentication or scope failure, unsafe private state, disk failure, lost session ownership, or delivery uncertainty, report the concrete local operator action without message bodies, credentials, or raw private IDs.
+Do not start another Pi, add a webhook, or create another transport to work around a channel failure.

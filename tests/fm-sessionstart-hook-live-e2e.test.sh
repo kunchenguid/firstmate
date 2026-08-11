@@ -170,8 +170,6 @@ SH
       mkdir -p "$lab/.pi/extensions/lib"
       cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$lab/.pi/extensions/"
       cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$lab/.pi/extensions/lib/"
-      cp "$ROOT/.pi/extensions/lib/fm-primary-ingress.ts" "$lab/.pi/extensions/lib/"
-      cp "$ROOT/bin/fm-feishu-state.d.mts" "$ROOT/bin/fm-feishu-state.mjs" "$lab/bin/"
       cp "$ROOT/bin/fm-operational-input.sh" "$lab/bin/"
       printf '%s\n' '{"compaction":{"keepRecentTokens":200}}' > "$lab/.pi/settings.json"
       ;;

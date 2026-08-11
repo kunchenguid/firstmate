@@ -1,140 +1,164 @@
 # Feishu channel
 
 The Feishu channel is an opt-in private captain channel for a Firstmate session running in Pi.
-It keeps the local TUI and one Feishu P2P conversation on the same live Pi process and the same in-memory `AgentSession`.
-It never starts a second Pi, an RPC process, an SDK session, or another writer for the Pi session file.
+It keeps one Feishu P2P conversation and the local TUI on the same live Pi process and the same in-memory `AgentSession`.
+It never starts another Pi process, RPC process, SDK AgentSession, model, tool runner, or session-file writer.
+The network side uses the official `@larksuiteoapi/node-sdk` long-connection client and does not expose a webhook.
 
-The maintainer architecture and ownership boundaries live in [Architecture](architecture.md#feishu-current-pi-channel).
-The private state implementation and exact schemas live in [`bin/fm-feishu-state.mjs`](../bin/fm-feishu-state.mjs).
-
-## Supported MVP
+## Supported scope
 
 The MVP allows one exact Feishu user in one exact P2P chat.
-Inbound plain `text` messages are supported.
-Outbound messages preserve the final Assistant text as plain text, including complete URLs.
-Group chats, cards, attachments, webhooks, multi-home routing, arbitrary remote commands, and attachment downloads are not supported.
-A remote string beginning with `/` is ordinary user content and cannot invoke a Pi command, skill, prompt template, shell, or tool directly.
+Inbound supports plain text only.
+Outbound sends the settled final Assistant text directly without classification, summarization, rewriting, or a second model call.
+Group chats, cards, attachments, webhooks, multi-home routing, remote slash commands, and attachment downloads are unsupported.
+Slash-like Feishu text is ordinary user content and cannot invoke a Pi slash command or prompt template.
 
-During a Feishu-originated agent run, only Pi tools named `read`, `grep`, `find`, and `ls` may execute without local confirmation.
-Every `bash`, `write`, `edit`, or other tool call is protected, including otherwise reversible work and a read-only command expressed through `bash`.
-The blocked effect displays `/fm-feishu-confirm <code>` only in the trusted local TUI; entering that exact code and retrying the exact same tool call authorizes its matching tool name and input once.
-A wrong code, a different tool input, or an unrelated local or Feishu message neither confirms nor clears the pending effect.
+Feishu and native TUI input use the same normal Pi tool path.
+The channel adds no Feishu-specific tool restriction, local confirmation command, or alternate tool policy.
+The ordinary Firstmate and Pi authorization rules continue to apply equally to both input channels.
 
-## Prerequisites
+## SDK and app prerequisites
 
-Use a supported Pi version and a current `lark-cli` installation.
-Configure the Feishu app and bot through the normal `lark-cli` setup outside Firstmate before pairing.
-The minimum bot scopes are `im:message.p2p_msg:readonly` (the P2P receive scope reported by `lark-cli event schema im.message.receive_v1 --json`), `im:chat:read` for independent P2P verification, `im:message:readonly` for overlap history, and `im:message:send_as_bot` for replies.
-Enable the `im.message.receive_v1` event for the bot in the Feishu developer console.
-Do not run `lark-cli auth login` for bot identity.
-Use the installed `lark-shared`, `lark-contact`, `lark-event`, and `lark-im` skill contracts when resolving identities or diagnosing scopes.
-Firstmate never stores an app secret, token, credential, or Authorization value in its channel state.
+The tracked dependency is the official `@larksuiteoapi/node-sdk` version recorded in `package.json` and `package-lock.json`.
+Install project dependencies only in the operator's intended Firstmate checkout before enabling the optional channel.
+The channel remains inert when the dependency, pairing, binding, or app credentials are absent.
 
-## Pair and bind locally
+Create a self-built Feishu app through the Feishu developer console outside Firstmate.
+Enable bot capability and subscribe to `im.message.receive_v1` using the developer console's long-connection mode.
+Do not configure a webhook URL, public endpoint, reverse proxy, or tunnel.
+Grant only the app-identity scopes required by the developer console for P2P message reception, `im.v1.chat.get`, and bot message reply/create.
 
-All channel control commands are local Pi TUI extension commands.
-They are intentionally unavailable as remotely injected commands.
+Provide credentials only in the transport process environment:
 
-1. Find the stable bot open ID, captain open ID, and P2P chat ID through the current Feishu operator workflow.
-2. In the local trusted Pi TUI, run `/fm-feishu-pair <bot-open-id> <captain-open-id> <p2p-chat-id> [app-profile] [sha256:<app-id-hash>]`.
-3. Review the local result, then run `/fm-feishu-bind` to bind the exact current persisted Pi session.
-4. Run `/fm-feishu-status` to inspect the canonical home, full Pi session UUID, session file, cwd, binding generation, exact user and chat, queue counts, and transport health.
+```sh
+export FM_FEISHU_APP_ID='cli_...'
+export FM_FEISHU_APP_SECRET='...'
+```
 
-Pairing performs no login, network call, subscription, or message send.
-The optional app-ID fingerprint is the lowercase SHA-256 digest of the exact Feishu `app_id`; when present, the transport verifies it together with the selected app profile and bot open ID before opening the event consumer.
-Binding refuses an ephemeral `--no-session` session because crash recovery cannot prove its identity.
-The bind command reloads the same session after publishing the binding so the extension can activate the exact fence.
+Do not put the app secret in tracked files, `config/`, pairing state, command arguments, startup output, or status output.
+The official SDK owns app-token acquisition, refresh, long-connection authentication, event decoding, and REST requests.
 
-Use `/fm-feishu-rebind` only from the local TUI when intentionally moving the channel to the exact current Pi session.
-Rebinding increments the generation and fences every callback from the previous generation.
-A Pi restart or resume of the same session UUID, file, and cwd continues automatically.
-`/new`, `/fork`, `/clone`, import, or resuming another session suspends injection until that explicit local rebind.
+Compute the safe app-ID fingerprint without storing the app ID in pairing state:
 
-Use `/fm-feishu-disable` to disable pairing and request a graceful transport stop.
-Disable never force-kills the transport.
+```sh
+node -e 'const c=require("node:crypto");const id=process.env.FM_FEISHU_APP_ID||"";process.stdout.write("sha256:"+c.createHash("sha256").update(id).digest("hex")+"\n")'
+```
 
-## Transport operation
+## Local pairing and binding
 
-`bin/fm-feishu-transport.sh start` starts the dedicated no-Agent transport after an active pairing and binding exist.
-`bin/fm-feishu-transport.sh stop` sends `SIGTERM` only to the identity-checked owner and refuses to force-kill a process that does not stop.
-`bin/fm-feishu-transport.sh restart` performs that controlled stop followed by start.
-`bin/fm-feishu-transport.sh status` prints a body-free and identifier-free JSON health summary.
+All control commands are available only in a trusted local Pi TUI that owns the verified Firstmate session lock.
+No Feishu message can pair, bind, rebind, disable, or move the channel.
 
-The transport executes fixed `lark-cli` argv arrays directly and never interpolates message text into a shell command.
-It pins every child to the paired `LARKSUITE_CLI_PROFILE`; before each consumer connection it verifies `lark-cli whoami --as bot` against that profile, bot open ID, and optional app-ID fingerprint, and independently verifies that the bound chat reports `chat_mode=p2p`.
-It repeats those identity and chat checks before every outbound chunk, and opens no event or message path after a mismatch.
-Only a verified consumer may wait for the documented `[event] ready event_key=im.message.receive_v1` stderr marker.
-The transport preserves body-free drop and backpressure diagnostics privately, reconnects with exponential delay capped at 10 seconds, and requires complete ascending overlap history before marking owner- and binding-generation-scoped live dispatch healthy.
-Unknown or incomplete pagination, out-of-order history, or a consumer that closes before reconciliation keeps health degraded and stages buffered live events for the next overlap attempt.
-The pre-reconciliation live buffer is capped at 1,000 events and 8 MiB, each consumer line is capped at 256 KiB, durable pending ingress is capped at 10,000 items, the aggregate logical outbound queue is capped at 1,000 items, and publishing stops when the state filesystem has less than 64 MiB free.
-`FM_FEISHU_MAX_BUFFERED_EVENTS`, `FM_FEISHU_MAX_LIVE_BUFFER_BYTES`, `FM_FEISHU_MAX_CONSUMER_LINE_BYTES`, `FM_FEISHU_MAX_PENDING_INBOUND`, `FM_FEISHU_MAX_PENDING_OUTBOUND`, and `FM_FEISHU_MIN_FREE_BYTES` may lower or raise those local operator thresholds.
-Buffer overflow stages buffered events without assigning ingress order, records a body-free diagnostic, and combines them with ascending overlap history before durable publication; a queue or free-space refusal records one local alert.
-It does not use `--quiet`, download resources, run an Agent, inspect the Pi session, or choose a different session.
+Pair the exact captain open ID, P2P chat ID, and app-ID fingerprint:
 
-The Pi extension starts the transport best-effort when an exact active binding resumes.
-The transport may remain running while Pi is closed so already received messages stay durable until that exact session returns.
+```text
+/fm-feishu-pair <captain-open-id> <p2p-chat-id> <sha256:app-id-hash>
+```
 
-## Delivery behavior
+The command stores only the safe app fingerprint and the exact allowlisted user/chat identity.
+It performs no authentication or network operation.
 
-Every authorized inbound message is committed privately before it is eligible for Pi injection.
-The exact Feishu `message_id` is the deduplication key.
-The local durable sequence, not Feishu wall-clock time, determines acceptance order.
-A single-flight coordinator covers local TUI text and images, Feishu text, watcher input, and turn-end input.
-Local Pi images remain private durable TUI ingress and are capped at 20 MiB of encoded image data by default (`FM_FEISHU_MAX_LOCAL_IMAGE_BYTES`); Feishu attachments remain unsupported.
-Busy local Enter retains steer behavior, busy local Alt+Enter retains follow-up behavior, and busy Feishu input uses follow-up behavior.
-The next durable item is not submitted until Pi observes acceptance of the prior user message.
+Bind the current persisted Pi session:
 
-The Pi session contains a privacy-safe delivery marker but no Feishu open ID or chat ID.
-A TUI-only Markdown transform shows the source as `Feishu - authorized P2P` or `Local TUI` without changing model context.
-The coordinator waits for the post-persistence `turn_start` boundary and ACKs only the exact user entry already present in Pi's SessionManager.
-On restart, the extension scans the exact session for markers and repairs an ACK written after Pi persistence but before a crash instead of injecting a duplicate turn.
+```text
+/fm-feishu-bind
+```
 
-At `agent_settled`, the extension first attempts to persist the final Assistant text and exact source provenance as a bounded durable registration intent.
-Processing applies the fixed skip and refusal rules, then transfers each eligible response to the durable outbox; a registration failure leaves the accepted intent available for ordered retry instead of replacing or dropping the response.
-Partial output, tool output, system messages, user messages, retry intermediates, empty output, exact `Captain, shipshape.`, and purely internal operational turns are not sent.
-There is no importance classifier, second model call, summary, rewrite, or semantic redaction layer.
-If a fixed credential pattern matches, the entire outbound message stays private and one local actionable alert is recorded.
-Long text is split only at deterministic UTF-8, paragraph, line, word, and platform-size boundaries, and a complete URL is never split.
-A final response larger than 1 MiB stays local by default; `FM_FEISHU_MAX_OUTBOUND_BYTES` controls that operator limit.
+The binding records the complete session UUID, exact session file, session cwd, persisted header identity, canonical Firstmate home, and generation.
+An ephemeral `--no-session` session cannot bind.
+The bridge activates only in trusted TUI mode while the current process owns the Firstmate session lock and every stored identity matches.
+
+Use `/fm-feishu-rebind` only when deliberately moving the channel to the current exact persisted session.
+Rebinding first waits for the verified transport owner to stop, then increments the generation and reloads the bridge so no old-generation SDK send can race the new binding.
+Pending events may retarget only when none already belongs to the prior Pi native queue.
+Use `/fm-feishu-disable` to wait for the same verified graceful stop before disabling the pairing.
+Use `/fm-feishu-status` for the detailed local identity and queue view.
+
+## Direct SDK long connection
+
+`bin/fm-feishu-transport.sh start` starts one dedicated no-Agent transport after pairing, binding, dependency, and environment credentials are present.
+`bin/fm-feishu-transport.sh stop` signals only the exact owner process after home, module, nonce, PID incarnation, and process-title verification.
+`bin/fm-feishu-transport.sh restart` performs the same controlled stop followed by start.
+`bin/fm-feishu-transport.sh status` prints a body-free and identifier-free health summary.
+
+The transport creates one SDK `WSClient` and one `EventDispatcher` for `im.message.receive_v1`.
+It uses one SDK `Client` for P2P chat verification and outbound message reply/create.
+It verifies the environment app ID against the paired fingerprint and verifies `chat_mode=p2p` before starting the long connection and after reconnect.
+A current owner and binding generation must still match before any outbound claim or inbound publication.
+A second transport owner for the same Firstmate home is refused.
+
+The SDK event callback performs only bounded validation and private durable publication.
+It does not wait for Pi, execute a model, execute a tool, or send an outbound response.
+An accepted callback validates the authenticated app identity when present, sender type and open ID, exact chat and P2P mode, text message shape, body size, active binding, and capacity before durable handoff.
+Unauthorized, malformed, unsupported, duplicate, overlength, or resource-pressure events never reach Pi.
+A durability failure throws from the callback so the SDK can report failure to Feishu rather than acknowledging memory-only receipt.
+
+The SDK owns reconnect and protocol replay behavior.
+Firstmate does not poll message history or invent a second replay protocol.
+Replayed `event_id` or `message_id` values converge through the durable indexes.
+A replay that reaches the adapter after another accepted event receives a later local sequence because local durable commit order remains the audit order.
+The channel does not claim source-to-disk exactly-once delivery or recovery of an event the platform never redelivers.
+
+## Pi native queue boundary
+
+Native TUI input is never intercepted, transformed, durably copied, acknowledged, or reinjected by the Feishu extension.
+Local images remain entirely Pi-owned.
+Watcher and turn-end operational prompts call Pi's supported `sendUserMessage(..., { deliverAs: "followUp" })` path directly.
+They do not enter Feishu state.
+
+An accepted Feishu event remains pending until the exact bound live Pi session and current transport identity are available.
+The bridge records one owner-fenced submission attempt and calls `sendUserMessage` with Pi's native `followUp` mode.
+It submits every pending event once to Pi and does not wait for one event to finish before offering the next one to Pi's own queue.
+Pi owns turn sequencing, follow-up ordering, and pending-message scheduling.
+Firstmate does not maintain a cross-channel scheduler.
+
+A privacy-safe leading marker carries only the derived delivery reference and binding generation.
+It carries no app ID, open ID, chat ID, credential, or path.
+A session restart scans exact persisted Feishu markers to settle prior native-queue submissions.
+An owner change resets an unpersisted prior submission to pending instead of redirecting it to another session.
+A wrong session, stale generation, lost lock, or closed live owner leaves durable input suspended.
+
+The bridge observes user-message provenance without changing native input.
+An exact Feishu marker binds the following Assistant response to that message.
+Any unmarked native TUI or operational user message clears the active response provenance and cannot be inferred as Feishu work.
+The latest non-empty Assistant text for each Feishu message is registered only when Pi reports `agent_settled`.
+
+## Outbound delivery and decisions
 
 A Feishu-originated final response replies to its exact triggering message.
-A local-TUI-originated final response sends to the active bound P2P chat.
-Every chunk has a stable identity and a stable Feishu idempotency key.
-The transport records a pre-send attempt and a post-send receipt.
-An ambiguous result retries the same key only within Feishu's one-hour idempotency window, then becomes locally actionable delivery uncertainty instead of using a new key.
+No native TUI or internal operational response is copied to Feishu.
+The fixed routine response `Captain, shipshape.` and empty output are skipped.
+A fixed credential-pattern match refuses the whole message before its text is persisted in channel state and raises one local alert.
 
-## Exact decision replies
+Long output is split only at deterministic UTF-8, paragraph, line, or word boundaries.
+A complete URL is never split or truncated.
+Every chunk carries a stable SDK `uuid` derived from the durable event and chunk index.
+The SDK response message ID and chat ID become the durable receipt.
+A definite SDK error remains retryable with its bounded delay.
+An ambiguous request-without-response retries the same UUID only inside the one-hour idempotency window and then becomes delivery uncertainty.
 
-A decision reply is correlated only through the Feishu parent `message_id` mapped from a durable outbound receipt.
-An unrelated message cannot resolve a decision even if only one decision appears open.
-Before a final response asks for a decision over this channel, register the existing exact mapping from inside the current Pi turn with `bin/fm-feishu-decision.sh register <decision-ref> <decision-key> <source-ref>`, using the privacy-safe `ref=in_...` marker from that exact persisted user turn.
-This helper records correlation only and does not create text, classify importance, or send a message.
-If more than one unbound decision registration exists for the same final response, Firstmate records a local alert and guesses none.
+A pending decision is bound to one Feishu source delivery reference and one outbound event.
+Only an inbound `reply_to` matching the durable outbound receipt restores that exact decision reference and key.
+An unrelated message may discuss the decision but cannot close or guess it.
 
-## State and privacy
+## Private state and diagnostics
 
-Durable pairing and generation history live under private `data/feishu/`.
-Inbox, ledgers, ACKs, outbox, attempts, receipts, correlation maps, quarantine, live ownership, diagnostics, alerts, and health live under private `state/feishu/`.
-Directories are owner-only and files are non-executable owner-only regular files.
-Raw IDs are hashed in path components, and message bodies never appear in startup or health output.
-Credentials remain in the `lark-cli` credential store.
-Removing pairing leaves the rest of Firstmate inert and creates no Feishu network process.
+Pairing and binding records live under `data/feishu/`.
+Durable accepted events, ledgers, pending indexes, outbox records, attempts, receipts, decision maps, quarantine records, alerts, owner identity, and health live under `state/feishu/`.
+Directories are mode `0700` and files are mode `0600`.
+Raw identity is never used as a filename.
+Symlinks, hardlinks, partial files, malformed schemas, cross-record mismatches, and cross-home paths are rejected.
 
-## Health and recovery
+Normal startup and public status show only enabled state, binding status, generation, body-free transport phase, and aggregate counts.
+They do not show credentials, app IDs, user/chat IDs, message bodies, session paths, or raw diagnostics.
+A paired channel with a missing SDK dependency or missing credential environment remains stopped and reports one body-free local prerequisite.
 
-A paired home prints one body-free `FEISHU:` line in the session-start bootstrap section.
-`transport=healthy` means the consumer reached its ready marker and completed overlap reconciliation for the current connection.
-`transport=reconciling` or `transport=degraded` means Feishu-originated durable items wait rather than crossing an unverified history boundary.
-A missing `lark-cli` appears only after pairing as an optional-feature bootstrap diagnostic.
+## Verification boundary
 
-A malformed private file, unsafe symlink or hardlink, disk failure, lost session lock, wrong session identity, stale binding generation, or competing live Pi suspends injection instead of guessing.
-Transport stderr diagnostics and health never contain message bodies or credentials.
-Use `/fm-feishu-status`, `bin/fm-feishu-transport.sh status`, and the single `FEISHU:` startup line for diagnosis.
+The focused regression uses a local mock of the official SDK constructor, long-connection callbacks, reconnect callbacks, P2P chat API, and message APIs.
+It performs no real authentication, network connection, app configuration, event consumption, Pi-session mutation, or Feishu send.
+It proves unconfigured inertness, native TUI non-interception, direct operational follow-up delivery, native Feishu queue submission, exact session and generation fencing, replay deduplication, exact reply correlation, app/chat refusal, stable outbound UUIDs, ambiguous retry handling, owner-verified stop, and absence of the former command transport path.
 
-## Verification
-
-Run `bash tests/fm-feishu-channel.test.sh` for deterministic state, current-Pi, transport, direct-output, safety, and correlation fixtures.
-Run `bash tests/fm-pi-primary-types.test.sh` for the strict extension type check against the installed Pi package.
-Run `bash tests/fm-pi-watch-extension.test.sh`, `bash tests/fm-turnend-guard.test.sh`, and `bash tests/fm-session-start.test.sh` for affected integration regressions.
-Run `bin/fm-lint.sh`, `bin/fm-doc-audience-check.sh`, and `bin/fm-test-run.sh --all` before delivery.
+That mock does not prove a real app's scopes, developer-console long-connection selection, tenant policy, or production network reachability.
+A future live integration check requires explicit operator authorization and disposable app credentials.
 The current dated maintainer evidence is in [Feishu channel verification](verification/feishu-channel.md).

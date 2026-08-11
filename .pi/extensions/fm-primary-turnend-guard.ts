@@ -8,10 +8,6 @@ import {
   classifyFirstmateCurrentOperationalText,
   encodeFirstmateOperationalInput,
 } from "./lib/fm-operational-input.ts";
-import {
-  registerFirstmateIngressCoordinator,
-  submitFirstmateInternalInput,
-} from "./lib/fm-primary-ingress.ts";
 
 let guardFollowupActive = false;
 
@@ -171,7 +167,6 @@ function runCdCheck(command: string): Promise<{ code: number; stderr: string }> 
 }
 
 export default function (pi: ExtensionAPI) {
-  registerFirstmateIngressCoordinator(pi);
 
   pi.on?.("session_start", async (event) => {
     const reason = String((event as { reason?: unknown }).reason ?? "");
@@ -217,7 +212,7 @@ export default function (pi: ExtensionAPI) {
           "The watcher cycle is missing, failed, or unhealthy. Follow the harness recovery instruction below before ending the turn.\n\n" +
           result.stderr,
       );
-      await submitFirstmateInternalInput(pi, content, "followUp");
+      await pi.sendUserMessage(content, { deliverAs: "followUp" });
     } catch {
       guardFollowupActive = false;
     }

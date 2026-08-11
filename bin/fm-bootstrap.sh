@@ -1159,7 +1159,7 @@ detect_local_tools() {
 }
 
 feishu_channel_detect() {
-  local pairing status
+  local pairing status sdk_module
   pairing="$DATA/feishu/pairing.json"
   [ -f "$pairing" ] && [ ! -L "$pairing" ] || return 0
   if ! status=$("$SCRIPT_DIR/fm-feishu-status.sh" bootstrap 2>/dev/null); then
@@ -1167,8 +1167,12 @@ feishu_channel_detect() {
     return 0
   fi
   [ -n "$status" ] || return 0
-  if ! command -v lark-cli >/dev/null 2>&1; then
-    echo "MISSING_MANUAL: lark-cli (instructions: docs/feishu-channel.md)"
+  sdk_module=${FM_FEISHU_SDK_MODULE:-@larksuiteoapi/node-sdk}
+  if ! node -e 'const fs=require("fs");const s=process.argv[1];if(s.startsWith("/"))fs.accessSync(s);else require.resolve(s,{paths:[process.argv[2]]})' "$sdk_module" "$FM_ROOT" >/dev/null 2>&1; then
+    echo "MISSING_MANUAL: @larksuiteoapi/node-sdk (instructions: docs/feishu-channel.md)"
+  fi
+  if [ -z "${FM_FEISHU_APP_ID:-}" ] || [ -z "${FM_FEISHU_APP_SECRET:-}" ]; then
+    echo "FEISHU: direct SDK app credentials unavailable; transport remains stopped"
   fi
   printf '%s\n' "$status"
 }

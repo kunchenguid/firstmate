@@ -20,8 +20,8 @@ import {
 import {
   currentFirstmateSessionIdentity,
   firstmateSessionLockOwnership,
-  registerFirstmateIngressCoordinator,
-} from "./lib/fm-primary-ingress.ts";
+  registerFeishuNativeChannel,
+} from "./lib/fm-feishu-native-channel.ts";
 
 const extensionDir = dirname(fileURLToPath(import.meta.url));
 const root = resolve(extensionDir, "../..");
@@ -38,13 +38,19 @@ function requireLocalTui(ctx: ExtensionCommandContext): void {
   if (firstmateSessionLockOwnership() !== "owned") throw new Error("this Pi does not own the verified Firstmate session lock");
 }
 
-function requestTransport(action: "stop" | "restart"): void {
-  const child = spawn(transportScript, [action], {
-    cwd: fmRoot,
-    env: { ...process.env, FM_HOME: fmHome, FM_ROOT_OVERRIDE: fmRoot },
-    stdio: "ignore",
+function stopTransport(): Promise<void> {
+  return new Promise((resolvePromise, rejectPromise) => {
+    const child = spawn(transportScript, ["stop"], {
+      cwd: fmRoot,
+      env: { ...process.env, FM_HOME: fmHome, FM_ROOT_OVERRIDE: fmRoot },
+      stdio: "ignore",
+    });
+    child.once("error", rejectPromise);
+    child.once("close", (code) => {
+      if (code === 0) resolvePromise();
+      else rejectPromise(new Error(`Feishu transport stop exited ${code ?? "without status"}`));
+    });
   });
-  child.unref();
 }
 
 function exactSession(ctx: ExtensionCommandContext) {
@@ -67,7 +73,7 @@ function fullStatus(): string {
     allowed_user?: string | null;
     transport_phase?: string;
     transport_healthy?: boolean;
-    inbound?: { pending?: number; dispatching?: number; delivered?: number };
+    inbound?: { pending?: number; queued?: number; delivered?: number };
     outbound_pending?: number;
     outbound_uncertain?: number;
   };
@@ -85,7 +91,7 @@ function fullStatus(): string {
     `transport=${value.transport_phase ?? "stopped"}`,
     `transport_healthy=${value.transport_healthy === true ? "yes" : "no"}`,
     `inbox_pending=${value.inbound?.pending ?? 0}`,
-    `inbox_dispatching=${value.inbound?.dispatching ?? 0}`,
+    `inbox_queued=${value.inbound?.queued ?? 0}`,
     `inbox_delivered=${value.inbound?.delivered ?? 0}`,
     `outbox_pending=${value.outbound_pending ?? 0}`,
     `outbox_uncertain=${value.outbound_uncertain ?? 0}`,
@@ -99,7 +105,7 @@ function markLoaded(): void {
 }
 
 export default function (pi: ExtensionAPI) {
-  registerFirstmateIngressCoordinator(pi);
+  registerFeishuNativeChannel(pi);
 
   pi.registerEntryRenderer<{ kind?: string; message?: string }>("fm-feishu-local-alert", (entry, _options, theme) => {
     const box = new Box(1, 0, (text) => theme.bg("toolErrorBg", text));
@@ -109,17 +115,17 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.registerCommand("fm-feishu-pair", {
-    description: "Pair one Feishu bot, one allowlisted user, and one P2P chat from the local TUI.",
+    description: "Pair one Feishu app fingerprint, one allowlisted user, and one P2P chat from the local TUI.",
     handler: async (args, ctx) => {
       try {
         requireLocalTui(ctx);
-        const [botOpenId, allowedUser, allowedChat, appProfile = "default", appIdFingerprint, ...extra] = args.trim().split(/\s+/).filter(Boolean);
-        if (!botOpenId || !allowedUser || !allowedChat || extra.length > 0) {
-          ctx.ui.notify("Usage: /fm-feishu-pair <bot-open-id> <captain-open-id> <p2p-chat-id> [app-profile] [sha256:<app-id-hash>]", "warning");
+        const [allowedUser, allowedChat, appIdFingerprint, ...extra] = args.trim().split(/\s+/).filter(Boolean);
+        if (!allowedUser || !allowedChat || !appIdFingerprint || extra.length > 0) {
+          ctx.ui.notify("Usage: /fm-feishu-pair <captain-open-id> <p2p-chat-id> <sha256:app-id-hash>", "warning");
           return;
         }
-        const pairing = createPairing(fmHome, { botOpenId, allowedUser, allowedChat, appProfile, appIdFingerprint });
-        ctx.ui.notify(`Feishu pairing stored locally for profile ${pairing.app_profile}. No network call or login was performed. Run /fm-feishu-bind to bind the current persisted Pi session.`, "info");
+        createPairing(fmHome, { allowedUser, allowedChat, appIdFingerprint });
+        ctx.ui.notify("Feishu direct-SDK pairing stored locally. No network call or authentication was performed. Run /fm-feishu-bind to bind the current persisted Pi session.", "info");
       } catch (error) {
         ctx.ui.notify(`Feishu pairing refused: ${String(error)}`, "error");
       }
@@ -147,8 +153,8 @@ export default function (pi: ExtensionAPI) {
       try {
         requireLocalTui(ctx);
         const identity = exactSession(ctx);
+        await stopTransport();
         const binding = bindSession(fmHome, identity, { rebind: true });
-        requestTransport("restart");
         ctx.ui.notify(`Feishu explicitly rebound to session ${binding.session_id}\n${binding.session_file_realpath}\ncwd=${binding.session_cwd_realpath}\ngeneration=${binding.generation}. Older callbacks are fenced. Reloading this same session now.`, "info");
         await ctx.reload();
       } catch (error) {
@@ -162,8 +168,8 @@ export default function (pi: ExtensionAPI) {
     handler: async (_args, ctx) => {
       try {
         requireLocalTui(ctx);
+        await stopTransport();
         const result = disablePairing(fmHome);
-        requestTransport("stop");
         ctx.ui.setStatus("fm-feishu", undefined);
         ctx.ui.notify(result.changed ? "Feishu pairing disabled and transport stop requested." : "Feishu pairing was already absent or disabled.", "info");
       } catch (error) {
