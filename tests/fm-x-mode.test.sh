@@ -289,6 +289,85 @@ test_poll_question_stashes_and_marks() {
   pass "fm-x-poll stashes the question and prints the compact marker"
 }
 
+test_poll_stamps_fail_closed_reply_audience() {
+  local home fakebin out rc body inbox meta bad idx log
+
+  home="$TMP_ROOT/poll-audience-public"; mkdir -p "$home"
+  fakebin=$(make_fake_curl "$home")
+  printf 'FMX_PAIRING_TOKEN=tok-audience\n' > "$home/.env"
+  body='{"request_id":"req-public","platform":"discord","reply_max_chars":1900,"text":"status?","reply_audience":"private-trusted"}'
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
+    FAKE_POLL_CODE=200 FAKE_POLL_BODY="$body" "$ROOT/bin/fm-x-poll.sh"); rc=$?
+  expect_code 0 "$rc" "public audience stamp exit"
+  [ "$out" = "x-mention req-public" ] || fail "the public audience fixture must wake"
+  inbox="$home/state/x-inbox/req-public.json"
+  [ "$(jq -r .reply_audience "$inbox")" = public ] \
+    || fail "the poll must overwrite a remote private claim with the public default"
+  [ "$(jq -r .reply_audience "$home/state/x-context/req-public.json")" = public ] \
+    || fail "the durable request context must retain the public audience"
+
+  body='{"request_id":"req-private","platform":"discord","reply_max_chars":1900,"text":"trạng thái?","reply_audience":"public"}'
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" \
+    FMX_RELAY_URL="http://127.0.0.1:8787" FMX_REPLY_AUDIENCE=private-trusted \
+    FAKE_POLL_CODE=200 FAKE_POLL_BODY="$body" "$ROOT/bin/fm-x-poll.sh"); rc=$?
+  expect_code 0 "$rc" "private audience stamp exit"
+  [ "$out" = "x-mention req-private" ] || fail "the private audience fixture must wake"
+  inbox="$home/state/x-inbox/req-private.json"
+  [ "$(jq -r .reply_audience "$inbox")" = private-trusted ] \
+    || fail "the validated loopback config must stamp the private-trusted audience"
+  [ "$(jq -r .reply_audience "$home/state/x-context/req-private.json")" = private-trusted ] \
+    || fail "the durable request context must retain the private-trusted audience"
+  [ "$(jq -r .reply_audience "$home/state/x-inbox/req-public.json")" = public ] \
+    || fail "a mixed-generation inbox batch must preserve each request's stamped audience"
+
+  printf 'window=w\nworktree=/wt\nkind=ship\nmode=no-mistakes\nyolo=off\n' > "$home/state/task-public.meta"
+  FM_HOME="$home" FMX_RELAY_URL="http://127.0.0.1:8787" FMX_REPLY_AUDIENCE=private-trusted \
+    "$ROOT/bin/fm-x-link.sh" task-public req-public >/dev/null
+  meta="$home/state/task-public.meta"
+  assert_grep "x_reply_audience=public" "$meta" \
+    "a public request must stay public when linked after configuration changes to private"
+
+  printf 'window=w\nworktree=/wt\nkind=ship\nmode=no-mistakes\nyolo=off\n' > "$home/state/task-private.meta"
+  FM_HOME="$home" FMX_RELAY_URL="https://relay.test" FMX_REPLY_AUDIENCE=public \
+    "$ROOT/bin/fm-x-link.sh" task-private req-private >/dev/null
+  meta="$home/state/task-private.meta"
+  assert_grep "x_reply_audience=private-trusted" "$meta" \
+    "a private request must keep its durable audience when configuration changes to public"
+
+  home="$TMP_ROOT/poll-audience-invalid"; mkdir -p "$home"
+  fakebin=$(make_fake_curl "$home")
+  printf 'FMX_PAIRING_TOKEN=tok-audience\n' > "$home/.env"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" \
+    FMX_RELAY_URL="https://relay.test" FMX_REPLY_AUDIENCE=private-trusted \
+    FAKE_POLL_CODE=200 FAKE_POLL_BODY="$body" "$ROOT/bin/fm-x-poll.sh"); rc=$?
+  expect_code 0 "$rc" "invalid private audience exit"
+  [ "$out" = "x-mode-error private-trusted audience requires exactly http://127.0.0.1:<numeric-port>" ] \
+    || fail "a remote private-trusted config must fail closed with one diagnostic (got: $out)"
+  assert_absent "$home/state/x-inbox/req-private.json" "an invalid private audience must not poll or stash a request"
+
+  idx=0
+  for bad in \
+    'http://127.0.0.1:80@attacker.example' \
+    'http://127.0.0.1.evil.example:8787' \
+    'http://127.0.0.1:8787/path' \
+    'http://127.0.0.1:abc' \
+    'http://127.0.0.1:0' \
+    'http://127.0.0.1:65536'; do
+    idx=$((idx + 1))
+    home="$TMP_ROOT/poll-audience-invalid-$idx"; mkdir -p "$home"
+    fakebin=$(make_fake_curl "$home")
+    log="$home/curl.log"
+    out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_PAIRING_TOKEN=tok-audience \
+      FMX_RELAY_URL="$bad" FMX_REPLY_AUDIENCE=private-trusted FAKE_CURL_LOG="$log" \
+      FAKE_POLL_CODE=200 FAKE_POLL_BODY="$body" "$ROOT/bin/fm-x-poll.sh"); rc=$?
+    expect_code 0 "$rc" "malformed private audience URL $idx exit"
+    assert_contains "$out" "x-mode-error private-trusted audience requires" \
+      "malformed private audience URL $idx must fail closed"
+    assert_absent "$log" "malformed private audience URL $idx must be refused before network access"
+  done
+  pass "fm-x-poll stamps audience from protected local config and rejects remote private-trusted mode"
+}
+
 test_poll_mentions_wake_once_per_durable_offer() {
   local home fakebin out rc body marker
   home="$TMP_ROOT/poll-offer-dedupe"; mkdir -p "$home"
@@ -965,6 +1044,40 @@ test_reply_dry_run_needs_no_token() {
   pass "fm-x-reply dry-run works without a token"
 }
 
+test_reply_work_ack_requires_matching_durable_link() {
+  local home out rc err text
+  home="$TMP_ROOT/reply-work-ack"; mkdir -p "$home/state"
+  err="$home/err.txt"
+  text='Captain, tôi đã bắt đầu kiểm tra Sale; chưa có thay đổi nào trên dữ liệu sống.'
+
+  out=$(FM_HOME="$home" FMX_DRY_RUN=1 FMX_REPLY_PLATFORM=discord FMX_REPLY_MAX_CHARS=1900 \
+    "$ROOT/bin/fm-x-reply.sh" req-ack --kind work-ack --task-id missing "$text" 2>"$err"); rc=$?
+  expect_code 1 "$rc" "work-ack missing-link exit"
+  [ -z "$out" ] || fail "a refused work-ack must echo nothing (got: $out)"
+  assert_grep "metadata is missing or unsafe" "$err" "a missing work-ack link must explain the refusal"
+  assert_absent "$home/state/x-outbox/req-ack.json" "a refused work-ack must not publish a preview"
+
+  mk_linked_task "$home" task-other req-other 1700000000
+  out=$(FM_HOME="$home" FMX_DRY_RUN=1 FMX_REPLY_PLATFORM=discord FMX_REPLY_MAX_CHARS=1900 \
+    "$ROOT/bin/fm-x-reply.sh" req-ack --kind work-ack --task-id task-other "$text" 2>"$err"); rc=$?
+  expect_code 1 "$rc" "work-ack mismatched-link exit"
+  [ -z "$out" ] || fail "a mismatched work-ack must echo nothing (got: $out)"
+  assert_grep "is not linked to request 'req-ack'" "$err" "a mismatched work-ack must name the binding problem"
+  assert_absent "$home/state/x-outbox/req-ack.json" "a mismatched work-ack must not publish a preview"
+
+  mk_linked_task "$home" task-ack req-ack 1700000000
+  out=$(FM_HOME="$home" FMX_DRY_RUN=1 FMX_REPLY_PLATFORM=discord FMX_REPLY_MAX_CHARS=1900 \
+    "$ROOT/bin/fm-x-reply.sh" req-ack --kind work-ack --task-id task-ack "$text" 2>"$err"); rc=$?
+  expect_code 0 "$rc" "work-ack matching-link exit"
+  [ "$out" = req-ack ] || fail "a matched work-ack must echo the request id (got: $out)"
+  assert_present "$home/state/x-outbox/req-ack.json" "a matched work-ack must publish the preview"
+  [ "$(jq -r .text "$home/state/x-outbox/req-ack.json")" = "$text" ] \
+    || fail "a matched work-ack must preserve the Vietnamese Unicode text unchanged"
+  [ "$(jq -r '.texts // empty' "$home/state/x-outbox/req-ack.json")" = "" ] \
+    || fail "a short Discord-budget work-ack must remain one message"
+  pass "fm-x-reply posts a work acknowledgement only after a matching durable task link"
+}
+
 test_reply_dry_run_from_env_file() {
   local home fakebin log out rc
   home="$TMP_ROOT/reply-dry-env"; mkdir -p "$home"
@@ -1620,14 +1733,16 @@ test_poll_records_context_registry_from_relay_platform() {
   expect_code 0 "$rc" "poll x registry exit"
   [ "$(jq -r .platform "$home/state/x-context/req-x.json")" = "x" ] \
     || fail "registry must capture the X platform from a numeric tweet_id"
-  # A mention with no platform signal at all: no useless empty record is written.
+  # A mention with no platform signal still retains its fail-closed audience.
   body=$(jq -cn '{request_id:"req-unk",text:"platformless question"}')
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
     FAKE_POLL_CODE=200 FAKE_POLL_BODY="$body" "$ROOT/bin/fm-x-poll.sh"); rc=$?
   expect_code 0 "$rc" "poll unknown-platform exit"
   assert_present "$home/state/x-inbox/req-unk.json" "an unknown-platform mention is still stashed"
-  assert_absent "$home/state/x-context/req-unk.json" \
-    "no registry record is written when the platform is unknown (no dead entry)"
+  assert_present "$home/state/x-context/req-unk.json" \
+    "an unknown-platform request must still retain its disclosure ceiling"
+  [ "$(jq -r .reply_audience "$home/state/x-context/req-unk.json")" = "public" ] \
+    || fail "an unknown-platform request must default to the public audience"
   pass "fm-x-poll records the durable per-request reply context from the relay payload"
 }
 
@@ -2365,13 +2480,16 @@ test_link_carry_count_and_ts_preserve_followup_binding() {
   printf 'window=w\nkind=ship\n' > "$meta"
   FM_HOME="$home" FMX_NOW_OVERRIDE=1700999999 \
     "$ROOT/bin/fm-x-link.sh" successor-task req-carry \
-      --carry-count 2 --carry-ts 1700000000 --carry-platform x --carry-max 280 >/dev/null; rc=$?
+      --carry-count 2 --carry-ts 1700000000 --carry-platform x --carry-max 280 \
+      --carry-audience private-trusted >/dev/null; rc=$?
   expect_code 0 "$rc" "link paired carry flags exit"
   assert_grep "x_request=req-carry" "$meta" "carried link must record the request_id"
   assert_grep "x_request_ts=1700000000" "$meta" "--carry-ts must preserve the original timestamp, not the current time"
   assert_grep "x_followups=2" "$meta" "--carry-count must seed the follow-up counter, not reset it"
   assert_grep "x_platform=x" "$meta" "--carry-platform must preserve the prior reply platform"
   assert_grep "x_reply_max_chars=280" "$meta" "--carry-max must preserve the prior split budget"
+  assert_grep "x_reply_audience=private-trusted" "$meta" \
+    "--carry-audience must preserve the prior disclosure ceiling"
   pass "fm-x-link paired carry flags preserve a prior task's follow-up binding onto a successor"
 }
 
@@ -2382,10 +2500,13 @@ test_link_recovery_relink_carries_discord_context_after_inbox_drain() {
   printf 'window=w\nkind=ship\n' > "$meta"
   FM_HOME="$home" FMX_NOW_OVERRIDE=1700999999 \
     "$ROOT/bin/fm-x-link.sh" successor-discord req-discord-recovery \
-      --carry-count 1 --carry-ts 1700000000 --carry-platform discord --carry-max 1900 >/dev/null; rc=$?
+      --carry-count 1 --carry-ts 1700000000 --carry-platform discord --carry-max 1900 \
+      --carry-audience private-trusted >/dev/null; rc=$?
   expect_code 0 "$rc" "Discord recovery relink exit"
   assert_grep "x_platform=discord" "$meta" "Discord recovery relink must preserve the platform after inbox drain"
   assert_grep "x_reply_max_chars=1900" "$meta" "Discord recovery relink must preserve the split budget after inbox drain"
+  assert_grep "x_reply_audience=private-trusted" "$meta" \
+    "Discord recovery relink must preserve the disclosure ceiling after inbox drain"
   reply=$(cat <<'TXT'
 The recovered task is reporting back with enough text to exceed an X tweet, but it is still comfortably within the Discord budget carried over from the prior task.
 
@@ -2397,6 +2518,7 @@ The successor task must post this as one Discord follow-up even though the origi
 TXT
 )
   out=$(FM_HOME="$home" FMX_DRY_RUN=1 FMX_NOW_OVERRIDE=1700003600 \
+    FMX_RELAY_URL="http://127.0.0.1:8787" FMX_REPLY_AUDIENCE=private-trusted \
     "$ROOT/bin/fm-x-followup.sh" successor-discord - <<<"$reply" 2>/dev/null); rc=$?
   expect_code 0 "$rc" "Discord recovery follow-up dry-run exit"
   [ "$out" = "req-discord-recovery" ] || fail "Discord recovery follow-up must echo the request_id (got: $out)"
@@ -2437,8 +2559,19 @@ test_link_carry_count_validation() {
   PATH="$BASE_PATH" FM_HOME="$home" \
     "$ROOT/bin/fm-x-link.sh" ok req-1 --carry-platform discord >/dev/null 2>"$err"; rc=$?
   expect_code 2 "$rc" "link --carry-platform without paired carry flags exit"
-  assert_grep "--carry-platform and --carry-max require --carry-count and --carry-ts" "$err" \
+  assert_grep "carry context flags require --carry-count and --carry-ts" "$err" \
     "link must require the paired carry binding when carrying reply context"
+  PATH="$BASE_PATH" FM_HOME="$home" \
+    "$ROOT/bin/fm-x-link.sh" ok req-1 --carry-audience private-trusted >/dev/null 2>"$err"; rc=$?
+  expect_code 2 "$rc" "link --carry-audience without paired carry flags exit"
+  assert_grep "carry context flags require --carry-count and --carry-ts" "$err" \
+    "link must require the paired carry binding when carrying audience"
+  PATH="$BASE_PATH" FM_HOME="$home" \
+    "$ROOT/bin/fm-x-link.sh" ok req-1 --carry-count 1 --carry-ts 1700000000 \
+      --carry-platform discord --carry-max 1900 --carry-audience private >/dev/null 2>"$err"; rc=$?
+  expect_code 2 "$rc" "link invalid --carry-audience exit"
+  assert_grep "--carry-audience needs public or private-trusted" "$err" \
+    "link must reject an unsupported carried audience"
   PATH="$BASE_PATH" FM_HOME="$home" \
     "$ROOT/bin/fm-x-link.sh" ok req-1 --carry-count 1 --carry-ts 1700000000 --carry-max 49 >/dev/null 2>"$err"; rc=$?
   expect_code 2 "$rc" "link --carry-max below floor exit"
@@ -2489,13 +2622,14 @@ test_link_rejects_unsafe_and_missing() {
 
 # --- fm-x-followup: detect, post up to 3 follow-ups, manage the link --------
 
-mk_linked_task() { # <home> <id> <request_id> <link-epoch> [starting-count]
-  local home=$1 id=$2 rid=$3 ts=$4 count=${5:-} meta
+mk_linked_task() { # <home> <id> <request_id> <link-epoch> [starting-count] [audience]
+  local home=$1 id=$2 rid=$3 ts=$4 count=${5:-} audience=${6:-public} meta
   mkdir -p "$home/state"
   meta="$home/state/$id.meta"
   printf 'window=w\nworktree=/wt\nkind=ship\nmode=no-mistakes\nyolo=off\n' > "$meta"
   FM_HOME="$home" FMX_NOW_OVERRIDE="$ts" "$ROOT/bin/fm-x-link.sh" "$id" "$rid" \
-    --carry-count "${count:-0}" --carry-ts "$ts" --carry-platform x --carry-max 280 >/dev/null
+    --carry-count "${count:-0}" --carry-ts "$ts" --carry-platform x --carry-max 280 \
+    --carry-audience "$audience" >/dev/null
 }
 
 test_followup_check_states() {
@@ -2591,21 +2725,119 @@ test_followup_post_final_clears_link_immediately() {
   pass "fm-x-followup --final clears the link after one post regardless of the remaining count"
 }
 
-test_followup_post_cap_reached_clears_link() {
-  local home fakebin out rc meta
+test_followup_budget_reserves_the_third_slot_for_final() {
+  local home out rc meta err
+  home="$TMP_ROOT/fu-reserved-final"; mkdir -p "$home/state"
+  mk_linked_task "$home" task-budget req-budget 1700000000
+  meta="$home/state/task-budget.meta"
+
+  out=$(FM_HOME="$home" FMX_DRY_RUN=1 FMX_NOW_OVERRIDE=1700003600 \
+    "$ROOT/bin/fm-x-followup.sh" task-budget - <<<"Tiến độ 1." 2>/dev/null); rc=$?
+  expect_code 0 "$rc" "first reserved-budget progress exit"
+  [ "$out" = req-budget ] || fail "the first progress update must post"
+  out=$(FM_HOME="$home" FMX_DRY_RUN=1 FMX_NOW_OVERRIDE=1700007200 \
+    "$ROOT/bin/fm-x-followup.sh" task-budget - <<<"Tiến độ 2." 2>/dev/null); rc=$?
+  expect_code 0 "$rc" "second reserved-budget progress exit"
+  [ "$out" = req-budget ] || fail "the second progress update must post"
+  assert_grep "x_followups=2" "$meta" "two progress updates must leave one terminal slot"
+  out=$(FM_HOME="$home" FMX_DRY_RUN=1 FMX_NOW_OVERRIDE=1700010800 \
+    "$ROOT/bin/fm-x-followup.sh" task-budget --final - <<<"Kết quả cuối." 2>/dev/null); rc=$?
+  expect_code 0 "$rc" "reserved final exit"
+  [ "$out" = req-budget ] || fail "the reserved final must post"
+  [ "$(jq -r .text "$home/state/x-outbox/req-budget.json")" = "Kết quả cuối." ] \
+    || fail "the reserved third slot must carry the final outcome"
+  assert_no_grep "x_request=" "$meta" "the final must clear the link after two progress updates"
+
+  mk_linked_task "$home" task-spent req-spent 1700000000 2
+  meta="$home/state/task-spent.meta"
+  err="$home/reserved.err"
+  out=$(FM_HOME="$home" FMX_DRY_RUN=1 FMX_NOW_OVERRIDE=1700010800 \
+    "$ROOT/bin/fm-x-followup.sh" task-spent - <<<"Tiến độ 3 không được phép." 2>"$err"); rc=$?
+  expect_code 1 "$rc" "third non-final progress refusal exit"
+  [ -z "$out" ] || fail "the reserved final slot must refuse a third progress update"
+  assert_grep "reserved final slot" "$err" "the third progress refusal must explain the terminal reservation"
+  assert_grep "x_request=req-spent" "$meta" "a refused third progress update must preserve the final binding"
+  assert_grep "x_followups=2" "$meta" "a refused third progress update must not consume the final slot"
+  assert_absent "$home/state/x-outbox/req-spent.json" "a refused third progress update must publish nothing"
+  out=$(FM_HOME="$home" FMX_DRY_RUN=1 FMX_NOW_OVERRIDE=1700014400 \
+    "$ROOT/bin/fm-x-followup.sh" task-spent --final - <<<"Kết quả vẫn tới được." 2>/dev/null); rc=$?
+  expect_code 0 "$rc" "final after refused third progress exit"
+  [ "$out" = req-spent ] || fail "the reserved final must still post after a refused progress update"
+  [ "$(jq -r .text "$home/state/x-outbox/req-spent.json")" = "Kết quả vẫn tới được." ] \
+    || fail "the reserved final slot must carry the terminal result"
+  assert_no_grep "x_request=" "$meta" "the successful reserved final must clear the link"
+  pass "fm-x-followup enforces two progress updates and preserves the third slot for the final"
+}
+
+test_followup_reserved_final_refuses_live_nonfinal() {
+  local home fakebin log out rc meta err
   home="$TMP_ROOT/fu-post-cap"; mkdir -p "$home/state"
   fakebin=$(make_fake_curl "$home")
+  log="$home/curl.log"
+  err="$home/err.txt"
   printf 'FMX_PAIRING_TOKEN=tok-fu\n' > "$home/.env"
-  # Two follow-ups already posted; this third one reaches the cap.
   mk_linked_task "$home" task-cap3 req-cap3 1700000000 2
   meta="$home/state/task-cap3.meta"
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
-    FMX_NOW_OVERRIDE=1700003600 FAKE_FOLLOWUP_CODE=200 \
-    "$ROOT/bin/fm-x-followup.sh" task-cap3 - <<<"Third and final update."); rc=$?
-  expect_code 0 "$rc" "followup cap-reaching post exit"
-  [ "$out" = "req-cap3" ] || fail "followup cap-reaching post must echo the request_id (got: $out)"
-  assert_no_grep "x_request=" "$meta" "reaching the cap must clear the link even without --final"
-  pass "fm-x-followup clears the link once the third follow-up reaches the cap"
+    FMX_NOW_OVERRIDE=1700003600 FAKE_CURL_LOG="$log" FAKE_FOLLOWUP_CODE=200 \
+    "$ROOT/bin/fm-x-followup.sh" task-cap3 - <<<"Third progress update." 2>"$err"); rc=$?
+  expect_code 1 "$rc" "live reserved-slot refusal exit"
+  [ -z "$out" ] || fail "a live third non-final update must echo nothing"
+  [ ! -f "$log" ] || fail "a reserved-slot refusal must happen before the relay call"
+  assert_grep "x_request=req-cap3" "$meta" "a live reserved-slot refusal must preserve the link"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
+    FMX_NOW_OVERRIDE=1700003600 FAKE_CURL_LOG="$log" FAKE_FOLLOWUP_CODE=200 \
+    "$ROOT/bin/fm-x-followup.sh" task-cap3 --final - <<<"Terminal result."); rc=$?
+  expect_code 0 "$rc" "live reserved final exit"
+  [ "$out" = req-cap3 ] || fail "the live reserved final must post"
+  assert_no_grep "x_request=" "$meta" "the live reserved final must clear the link"
+  pass "fm-x-followup refuses a live third progress update and preserves the slot for --final"
+}
+
+test_followup_private_audience_transport_drift_refuses() {
+  local home fakebin log out rc meta err
+  home="$TMP_ROOT/fu-private-drift"; mkdir -p "$home/state"
+  fakebin=$(make_fake_curl "$home")
+  log="$home/curl.log"
+  err="$home/err.txt"
+  printf 'FMX_PAIRING_TOKEN=tok-private-drift\n' > "$home/.env"
+  mk_linked_task "$home" task-private req-private-followup 1700000000 0 private-trusted
+  meta="$home/state/task-private.meta"
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
+    FMX_REPLY_AUDIENCE=public FMX_NOW_OVERRIDE=1700003600 FAKE_CURL_LOG="$log" \
+    FAKE_FOLLOWUP_CODE=200 "$ROOT/bin/fm-x-followup.sh" task-private - \
+    <<<"Private operational detail." 2>"$err"); rc=$?
+  [ "$rc" -ne 0 ] || fail "a private follow-up must refuse public transport drift"
+  [ -z "$out" ] || fail "a private transport refusal must echo nothing"
+  assert_absent "$log" "a private transport refusal must happen before network access"
+  assert_grep "private-trusted reply requires" "$err" \
+    "a private transport refusal must explain the disclosure guard"
+  assert_grep "x_request=req-private-followup" "$meta" \
+    "a private transport refusal must preserve the binding"
+  assert_grep "x_followups=0" "$meta" \
+    "a private transport refusal must not consume a follow-up slot"
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
+    FMX_REPLY_AUDIENCE=private-trusted FMX_NOW_OVERRIDE=1700003600 FAKE_CURL_LOG="$log" \
+    FAKE_FOLLOWUP_CODE=200 "$ROOT/bin/fm-x-followup.sh" task-private - \
+    <<<"Private operational detail." 2>"$err"); rc=$?
+  [ "$rc" -ne 0 ] || fail "a private follow-up must refuse an invalid private transport"
+  assert_absent "$log" "an invalid private transport must be refused before network access"
+  assert_grep "x_request=req-private-followup" "$meta" \
+    "an invalid private transport refusal must preserve the binding"
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="http://127.0.0.1:8787" \
+    FMX_REPLY_AUDIENCE=private-trusted FMX_NOW_OVERRIDE=1700003600 FAKE_CURL_LOG="$log" \
+    FAKE_FOLLOWUP_CODE=200 "$ROOT/bin/fm-x-followup.sh" task-private - \
+    <<<"Private operational detail." 2>"$err"); rc=$?
+  expect_code 0 "$rc" "private follow-up after loopback recovery exit"
+  [ "$out" = req-private-followup ] || fail "a recovered private follow-up must echo the request id"
+  assert_grep "url=http://127.0.0.1:8787/connector/followup" "$log" \
+    "a recovered private follow-up must use the validated loopback transport"
+  assert_grep "x_followups=1" "$meta" \
+    "a recovered private follow-up must consume exactly one slot"
+  pass "fm-x-followup refuses private-to-public transport drift and preserves the binding for recovery"
 }
 
 test_followup_post_forwards_image_to_reply_client() {
@@ -2801,6 +3033,7 @@ test_poll_empty_env_relay_overrides_env_file
 test_poll_auth_error_reports_once
 test_poll_error_private_publication_rejects_unsafe_paths
 test_poll_question_stashes_and_marks
+test_poll_stamps_fail_closed_reply_audience
 test_poll_mentions_wake_once_per_durable_offer
 test_poll_offer_claim_failure_reports_once
 test_poll_preserves_conversation_context
@@ -2817,6 +3050,7 @@ test_reply_help_mentions_image
 test_reply_whitespace_text_rejected
 test_reply_dry_run_records_not_posts
 test_reply_dry_run_needs_no_token
+test_reply_work_ack_requires_matching_durable_link
 test_reply_dry_run_from_env_file
 test_reply_empty_env_dry_run_overrides_env_file
 test_reply_dry_run_fails_when_outbox_unwritable
@@ -2879,7 +3113,9 @@ test_followup_check_expired_prunes_link
 test_followup_check_cap_reached_prunes_link
 test_followup_post_increments_counter_keeps_link
 test_followup_post_final_clears_link_immediately
-test_followup_post_cap_reached_clears_link
+test_followup_budget_reserves_the_third_slot_for_final
+test_followup_reserved_final_refuses_live_nonfinal
+test_followup_private_audience_transport_drift_refuses
 test_followup_post_forwards_image_to_reply_client
 test_followup_post_failure_keeps_link
 test_followup_post_record_failure_clears_link

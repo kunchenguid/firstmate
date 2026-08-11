@@ -533,13 +533,17 @@ These skills are not captain-invocable; load them only at their precise triggers
 
 ## 14. Relay
 
-Relay is the public-mention integration older docs and some emitted lines still call "X mode"; its identifiers keep the `FMX_`, `x-`, and `fm-x-` spellings.
+Relay is public by default, and older docs and some emitted lines still call it "X mode"; its identifiers keep the `FMX_`, `x-`, and `fm-x-` spellings.
+An explicitly configured loopback adapter may instead provide an authenticated private one-to-one channel contract.
 Relay ships inert and causes no behavior change until the home opts in by placing `FMX_PAIRING_TOKEN` in its gitignored `.env`.
-That token is consent for public replies and normal reversible lifecycle actions from eligible mentions, not authority for destructive, irreversible, or security-sensitive action; those still require trusted-channel confirmation.
+That token is consent for replies under the resolved audience and for normal reversible lifecycle actions from eligible mentions.
+It is not authority for destructive, irreversible, or security-sensitive action, which still requires the confirmation owned by the resolved channel contract.
 `docs/configuration.md` owns activation, generated state, cadence, wire protocol, and opt-out mechanics.
+The poll stamps the fail-closed audience from protected local configuration into each inbox artifact.
+The `fmx-respond` skill is the single owner of per-request audience resolution, language, confirmation, disclosure, claim fidelity, and follow-up-slot policy.
 
 A Relay-only home still requires the live supervision cycle so mentions can wake it without fleet work.
-On an `x-mention <request_id>` or `x-mode-error ...` check wake, load `fmx-respond`, which owns classification, public-safety policy, reply or dismissal, task linking, and follow-ups.
+On an `x-mention <request_id>` or `x-mode-error ...` check wake, load `fmx-respond`, which owns classification, audience and disclosure policy, reply or dismissal, task linking, and follow-ups.
 For every Relay-linked terminal outcome, load that owner and use the promised-final reconciliation when a typed public commitment exists, otherwise post the final completion follow-up before teardown.
 
 A promised final public reply is durable state, never conversation memory.
