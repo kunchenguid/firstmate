@@ -607,7 +607,7 @@ teardown_remove_spawn_owned_hook() {
   fi
   inode=$(meta_value "$meta" "${key}_inode")
   digest=$(meta_value "$meta" "${key}_digest")
-  [ -n "$inode" ] && [ -n "$digest" ] || return 0
+  [ -n "$inode" ] && [ -n "$digest" ] || return 1
   teardown_remove_owned_file "$path" "$inode" "$digest"
 }
 

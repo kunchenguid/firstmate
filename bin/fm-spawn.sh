@@ -346,6 +346,14 @@ spawn_abort_recovery_meta() {
       echo "model=${MODEL:-default}"
       echo "effort=${EFFORT:-default}"
       [ "${BACKEND:-tmux}" = tmux ] || echo "backend=${BACKEND:-tmux}"
+      if [ "${SPAWN_CLAUDE_HOOK_CREATED:-0}" = 1 ]; then
+        echo "claude_hook_inode=$SPAWN_CLAUDE_HOOK_INODE"
+        echo "claude_hook_digest=$SPAWN_CLAUDE_HOOK_DIGEST"
+      fi
+      if [ "${SPAWN_OPENCODE_HOOK_CREATED:-0}" = 1 ]; then
+        echo "opencode_hook_inode=$SPAWN_OPENCODE_HOOK_INODE"
+        echo "opencode_hook_digest=$SPAWN_OPENCODE_HOOK_DIGEST"
+      fi
       echo "spawn_state=aborted"
     } > "$tmp" || { rm -f "$tmp"; return 1; }
     mv "$tmp" "$STATE/$ID.meta" || { rm -f "$tmp"; return 1; }
