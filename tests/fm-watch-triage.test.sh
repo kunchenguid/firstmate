@@ -211,6 +211,14 @@ test_classifier_primitives() {
     && fail "a key token in note prose changed the decision key"
   printf '%s' "$open" | grep -F $'bad key\t' >/dev/null \
     && fail "an invalid key slug entered the open-decision set"
+  printf 'needs-decision: [key=post-colon-one] first choice\nneeds-decision: [key=post-colon-two] second choice\nresolved: [key=post-colon-one] first choice answered\n' > "$state/post-colon-keys.status"
+  open=$(status_open_decisions "$state/post-colon-keys.status")
+  printf '%s' "$open" | grep -F $'post-colon-two\tneeds-decision\t[key=post-colon-two] second choice' >/dev/null \
+    || fail "a leading post-colon key token did not open its named decision"
+  printf '%s' "$open" | grep -F $'post-colon-one\t' >/dev/null \
+    && fail "a leading post-colon key token did not resolve its named decision"
+  printf '%s' "$open" | grep -F $'default\t' >/dev/null \
+    && fail "leading post-colon key tokens silently collapsed to default"
   cat > "$state/activity.status" <<'EOF'
 working [key=phase7]: Phase 7 started
 working [key=phase6]: Phase 6 started

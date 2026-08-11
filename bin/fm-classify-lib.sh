@@ -160,8 +160,10 @@ status_is_paused_or_captain_held() {  # <status-line>
 # rule 6), so closure never depends on a busy worker's discipline.
 #
 # Decision key grammar (backward-compatible with the existing "<verb>: <note>"
-# format): an OPTIONAL "[key=<slug>]" token sits between the verb and the colon,
+# format): an OPTIONAL "[key=<slug>]" token sits between the verb and the colon
+# or immediately after the colon,
 #   needs-decision [key=api-shape]: <summary>
+#   needs-decision: [key=api-shape] <summary>
 #   resolved       [key=api-shape]: <how it was decided>
 # A line with no token uses the key "default", preserving the historical
 # one-open-decision-per-task behavior (a bare "resolved:" closes "default").
@@ -181,17 +183,28 @@ status_line_note() {  # <status-line> -> text after the first colon, trimmed
   esac
 }
 _fm_decision_key() {  # <status-line> -> key slug, or "default" when no token
-  local prefix=${1%%:*} k
-  case "$prefix" in
-    *\[key=*\]*)
-      k=${prefix#*\[key=}
-      k=${k%%\]*}
-      case "$k" in
-        ''|*[!A-Za-z0-9._-]*) return 1 ;;
-        *) printf '%s' "$k" ;;
+  local candidate=${1%%:*} k
+  case "$candidate" in
+    *\[key=*\]*) ;;
+    *)
+      case "$1" in
+        *:*)
+          candidate=${1#*:}
+          candidate=${candidate#"${candidate%%[![:space:]]*}"}
+          case "$candidate" in
+            \[key=*\]*) ;;
+            *) printf 'default'; return ;;
+          esac
+          ;;
+        *) printf 'default'; return ;;
       esac
       ;;
-    *) printf 'default' ;;
+  esac
+  k=${candidate#*\[key=}
+  k=${k%%\]*}
+  case "$k" in
+    ''|*[!A-Za-z0-9._-]*) return 1 ;;
+    *) printf '%s' "$k" ;;
   esac
 }
 # Drop the record for <key> from a newline-terminated "<key>\t<verb>\t<note>" set.
