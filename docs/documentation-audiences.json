@@ -129,11 +129,19 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/brief-quality-checklist/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/decision-hold-lifecycle/SKILL.md",
       "audience": "agent-runtime"
     },
     {
       "path": ".agents/skills/diagnostic-reasoning/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/effective-agent-skills/SKILL.md",
       "audience": "agent-runtime"
     },
     {
@@ -150,6 +158,22 @@
     },
     {
       "path": ".agents/skills/fmx-respond/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/global-agent-guardrails/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/global-agent-guardrails/scripts/dangerous-patterns.txt",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/grill-me/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/grilling/SKILL.md",
       "audience": "agent-runtime"
     },
     {

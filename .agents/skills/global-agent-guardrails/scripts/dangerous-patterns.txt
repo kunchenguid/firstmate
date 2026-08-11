@@ -1,0 +1,56 @@
+# Dangerous-command denylist, adapted for Linux/WSL2 from davidondrej/skills'
+# ops-and-setup/global-agent-guardrails (upstream targeted macOS paths and diskutil).
+# One POSIX-ERE regex (grep -E) per line. Blank lines and # comments are ignored.
+# NOT WIRED into any harness hook yet - see ../SKILL.md "Status" before relying on this.
+# Design rule: block only irreversible/catastrophic commands. Local-destructive-but-recoverable
+# commands (git clean -fdx, rm -rf node_modules) stay ALLOWED - over-blocking kills agent usefulness.
+
+# 1. rm aimed at root, the whole home folder, /home, or a WSL-mounted Windows user folder
+(^|[;&|[:space:]])rm[[:space:]]+((-[a-zA-Z]+|--[a-z-]+)[[:space:]]+)*["']?/["']?[[:space:]]*($|[;&|])
+(^|[;&|[:space:]])rm[[:space:]]+((-[a-zA-Z]+|--[a-z-]+)[[:space:]]+)*["']?/\*
+(^|[;&|[:space:]])rm[[:space:]]+((-[a-zA-Z]+|--[a-z-]+)[[:space:]]+)*["']?(~|\$HOME|\$\{HOME\})/?["']?[[:space:]]*($|[;&|])
+(^|[;&|[:space:]])rm[[:space:]]+((-[a-zA-Z]+|--[a-z-]+)[[:space:]]+)*["']?(~|\$HOME|\$\{HOME\})/\*
+(^|[;&|[:space:]])rm[[:space:]]+((-[a-zA-Z]+|--[a-z-]+)[[:space:]]+)*["']?/home(/[^/[:space:]"']+)?/?["']?[[:space:]]*($|[;&|])
+(^|[;&|[:space:]])rm[[:space:]]+((-[a-zA-Z]+|--[a-z-]+)[[:space:]]+)*["']?/mnt/[a-z]/Users(/[^/[:space:]"']+)?/?["']?[[:space:]]*($|[;&|])
+--no-preserve-root
+
+# 2. disk destroyers (writing to raw disks, formatting, wiping partition tables)
+(^|[;&|[:space:]])dd[[:space:]][^;&|]*of=["']?/dev/
+>[[:space:]]*/dev/(r?disk|sd[a-z]|nvme|hd[a-z])
+(^|[;&|[:space:]])mkfs(\.[A-Za-z0-9]+)?([[:space:]]|$)
+(^|[;&|[:space:]])wipefs[[:space:]]+(-a|--all)([[:space:]]|$)
+(^|[;&|[:space:]])(parted|sgdisk)[[:space:]][^;&|]*(--zap-all|-Z)([[:space:]]|$)
+(^|[;&|[:space:]])blkdiscard([[:space:]]|$)
+
+# 3. deleting with admin power
+(^|[;&|[:space:]])sudo[[:space:]]+(-[a-zA-Z]+[[:space:]]+)*rm([[:space:]]|$)
+
+# 4. fork bomb (freezes the machine)
+:\(\)[[:space:]]*\{[[:space:]]*:[[:space:]]*\|[[:space:]]*:[[:space:]]*&[[:space:]]*\}[[:space:]]*;[[:space:]]*:
+
+# 5. piping the internet straight into a shell
+(^|[;&|[:space:]])(curl|wget)[[:space:]][^;&|]*\|[[:space:]]*(sudo[[:space:]]+)?(ba|z|da)?sh([[:space:]]|$)
+
+# 6. rewriting remote git history (--force-with-lease stays allowed)
+(^|[;&|[:space:]])git[[:space:]]+push[^;&|]*[[:space:]](-f|--force)([[:space:]]|$)
+(^|[;&|[:space:]])git[[:space:]]+push[^;&|]*[[:space:]]\+[A-Za-z0-9._/-]
+
+# 6b. deleting remote branches/tags (git push --delete, -d, or ":branch" refspec)
+(^|[;&|[:space:]])git[[:space:]]+push[^;&|]*[[:space:]](--delete|-d)([[:space:]]|$)
+(^|[;&|[:space:]])git[[:space:]]+push[^;&|]*[[:space:]]:[A-Za-z0-9._/-]
+
+# 7. breaking permissions/ownership on the whole system
+(^|[;&|[:space:]])chmod[[:space:]][^;&|]*777[[:space:]]+["']?/["']?[[:space:]]*($|[;&|])
+(^|[;&|[:space:]])chown[[:space:]]+-R[^;&|]*[[:space:]]+/["']?[[:space:]]*($|[;&|])
+
+# 8. destroying the reflog safety net (makes local history rewrites unrecoverable)
+(^|[;&|[:space:]])git[[:space:]]+reflog[[:space:]]+expire[^;&|]*--expire(-unreachable)?(=|[[:space:]]+)now
+(^|[;&|[:space:]])git[[:space:]]+gc[^;&|]*--prune(=|[[:space:]]+)(now|all)
+
+# 9. GitHub CLI (gh): irreversible or account-level destruction + token exfil
+(^|[;&|[:space:]])gh[[:space:]]+repo[[:space:]]+delete([[:space:]]|$)
+(^|[;&|[:space:]])gh[[:space:]]+release[[:space:]]+delete([[:space:]]|$)
+(^|[;&|[:space:]])gh[[:space:]]+(secret|ssh-key|gpg-key)[[:space:]]+delete([[:space:]]|$)
+(^|[;&|[:space:]])gh[[:space:]]+api[[:space:]][^;&|]*(-X|--method)(=|[[:space:]]+)(DELETE|delete)
+(^|[;&|[:space:]])gh[[:space:]]+repo[[:space:]]+edit[^;&|]*--visibility(=|[[:space:]]+)public
+(^|[;&|[:space:]])gh[[:space:]]+auth[[:space:]]+token([[:space:]]|$)
