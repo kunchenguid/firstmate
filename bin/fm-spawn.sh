@@ -164,7 +164,7 @@
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
 # Devin uses a gitignored task-local .devin/hooks.v1.json file.  fm-spawn
 # refuses an existing file rather than overwriting project hooks, and teardown
-# removes only the file it created through the control-plane artifact table.
+# removes only a matching canonical Firstmate hook through the control-plane table.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
 # muse installs no hook at all - its plugin engine is off in the default build - so
@@ -2567,8 +2567,7 @@ EOF
         exit 1
       fi
       mkdir -p "$WT/.devin"
-      j_devin_stop=$(json_escape "touch $(shell_quote "$TURNEND")")
-      printf '{"Stop":[{"matcher":"","hooks":[{"type":"command","command":"%s"}]}]}\n' "$j_devin_stop" > "$WT/.devin/hooks.v1.json"
+      fm_control_devin_stop_hook_json "$TURNEND" > "$WT/.devin/hooks.v1.json"
       exclude_path '.devin/hooks.v1.json'
       ;;
   esac

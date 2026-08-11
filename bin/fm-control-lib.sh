@@ -12,7 +12,8 @@
 # verbs addressed to an exact task id, with the per-harness mechanics owned
 # here rather than improvised per harness in agent prose.
 #
-# This file owns three capability tables plus their pure artifact-path tables
+# This file owns three capability tables plus their pure artifact-path and
+# artifact-content tables
 # and nothing else. It has no side effects, runs no backend command, and reads
 # no state, so it can be sourced by a test as a pure contract:
 #
@@ -217,6 +218,18 @@ fm_control_harness_wiring_paths() {  # <harness> <worktree> <state-dir> <id>
       ;;
     devin) printf '%s\n' "$wt/.devin/hooks.v1.json" ;;
   esac
+}
+
+# The exact native Devin Stop-hook JSON Firstmate writes for one task. Keeping
+# this pure rendering beside Devin's artifact path lets cleanup prove it is
+# retiring Firstmate's own hook, rather than deleting a project's hook file.
+fm_control_devin_stop_hook_json() {  # <turnend-marker>
+  local marker=${1-} quoted command escaped
+  [ -n "$marker" ] || return 1
+  quoted=$(printf '%s' "$marker" | sed "s/'/'\\''/g") || return 1
+  command="touch '$quoted'"
+  escaped=$(printf '%s' "$command" | sed 's/\\/\\\\/g; s/"/\\"/g') || return 1
+  printf '{"Stop":[{"matcher":"","hooks":[{"type":"command","command":"%s"}]}]}\n' "$escaped"
 }
 
 # The firstmate-owned global turn-end registry entry a harness mints per task.

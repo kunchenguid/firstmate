@@ -49,6 +49,7 @@
 #   (w) index.lock mtime read failure                         -> lock kept, REFUSE
 #   (x) transient lock cleared after first failed return      -> retry ALLOW
 #   (y) persistent lock (never clears, not provably stale)    -> REFUSE loudly
+#   (z) Devin-owned Stop hook / project replacement            -> remove / retain
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -1326,6 +1327,53 @@ test_teardown_missing_busy_sidecar_completes() {
   pass "teardown completes when an exact busy-state sidecar is already absent"
 }
 
+test_teardown_removes_only_firstmate_owned_devin_hook() {
+  local owned_case foreign_case rc hook foreign
+  owned_case=$(make_case devin-owned-hook-cleanup)
+  write_meta "$owned_case" local-only ship
+  printf '%s\n' 'harness=devin' >> "$owned_case/state/task-x1.meta"
+  mkdir -p "$owned_case/wt/.devin"
+  hook="$owned_case/wt/.devin/hooks.v1.json"
+  printf '{"Stop":[{"matcher":"","hooks":[{"type":"command","command":"touch '\''%s'\''"}]}]}\n' \
+    "$owned_case/state/task-x1.turn-ended" > "$hook"
+  cat > "$owned_case/fakebin/treehouse" <<EOF
+#!/usr/bin/env bash
+[ ! -e "$hook" ] && printf 'hook-removed\n' > "$owned_case/return-state"
+exit 0
+EOF
+  chmod +x "$owned_case/fakebin/treehouse"
+
+  rc=0
+  run_teardown "$owned_case" --force > "$owned_case/stdout" 2> "$owned_case/stderr" || rc=$?
+  expect_code 0 "$rc" "devin-owned-hook-cleanup: teardown should succeed"
+  assert_absent "$hook" "devin-owned-hook-cleanup: teardown left the Firstmate-owned hook in the returned worktree"
+  assert_grep 'hook-removed' "$owned_case/return-state" \
+    "devin-owned-hook-cleanup: treehouse return ran before the Firstmate-owned hook was removed"
+
+  foreign_case=$(make_case devin-project-hook-retained)
+  write_meta "$foreign_case" local-only ship
+  printf '%s\n' 'harness=devin' >> "$foreign_case/state/task-x1.meta"
+  mkdir -p "$foreign_case/wt/.devin"
+  hook="$foreign_case/wt/.devin/hooks.v1.json"
+  foreign='{"Stop":[{"hooks":[{"type":"command","command":"echo project hook"}]}]}'
+  printf '%s\n' "$foreign" > "$hook"
+  cat > "$foreign_case/fakebin/treehouse" <<EOF
+#!/usr/bin/env bash
+[ -f "$hook" ] && [ "\$(cat "$hook")" = '$foreign' ] && printf 'project-hook-retained\n' > "$foreign_case/return-state"
+exit 0
+EOF
+  chmod +x "$foreign_case/fakebin/treehouse"
+
+  rc=0
+  run_teardown "$foreign_case" --force > "$foreign_case/stdout" 2> "$foreign_case/stderr" || rc=$?
+  expect_code 0 "$rc" "devin-project-hook-retained: teardown should succeed"
+  [ "$(cat "$hook")" = "$foreign" ] \
+    || fail "devin-project-hook-retained: teardown deleted or changed a project-owned hook"
+  assert_grep 'project-hook-retained' "$foreign_case/return-state" \
+    "devin-project-hook-retained: treehouse return did not preserve the project-owned hook"
+  pass "teardown removes only the canonical Firstmate Devin hook before return and preserves a project hook"
+}
+
 test_herdr_teardown_clears_escalation_marker() {
   local case_dir marker
   case_dir=$(make_case herdr-marker-cleanup)
@@ -2600,6 +2648,7 @@ test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
 test_teardown_missing_busy_sidecar_completes
+test_teardown_removes_only_firstmate_owned_devin_hook
 test_herdr_teardown_clears_escalation_marker
 test_herdr_flat_teardown_refuses_orphaning_records_then_retry_completes
 test_herdr_flat_teardown_refuses_records_on_unparseable_presence
