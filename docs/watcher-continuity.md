@@ -11,7 +11,8 @@ A failed follow-up never cancels continuity restoration.
 Pi same-process session replacement follows the generation-owner contract in `.pi/extensions/fm-primary-pi-watch.ts`.
 Claude's `.claude/settings.json` Stop `asyncRewake` hook (`bin/fm-claude-stop-autoarm.sh`) owns routine tokenless re-arm.
 The hook fires on every Stop, and an eligible primary with supervision need admits one home-scoped owner that foregrounds `bin/fm-watch-arm.sh` inside the hook-owned process tree.
-A numeric session-lock owner that fails the shared `fm_session_lock_holder_alive` predicate (a live harness pid whose recorded process identity, when one was published, still matches) is reclaimed through `bin/fm-lock.sh` before auto-arm state changes, while a live identity-matched owner, absent lock, or malformed lock keeps the competing hook inert.
+A numeric session-lock owner that fails the shared `fm_session_lock_holder_alive` predicate is reclaimed through `bin/fm-lock.sh` before auto-arm state changes, while an accepted live owner, absent lock, or malformed lock keeps the competing hook inert.
+The predicate requires a live harness and an exact match when a process-identity sidecar exists; a legacy lock without a sidecar is retained when its harness belongs to this home or the home cannot be proved, but a harness proved to belong to another home cannot keep the legacy lock alive through PID reuse.
 The stale-owner claim occurs only after the existing AFK and supervision-need gates pass.
 After each non-actionable arm close, the hook rechecks the identity-matched watcher lock and fresh beacon before retrying a bounded number of times.
 A cycle-end failure is benign when that live-watcher predicate is true, and the hook suppresses the arm output and continues silently.
