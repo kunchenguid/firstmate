@@ -335,30 +335,38 @@ test_large_inventory_does_not_use_argv_transport() {
 # projection, so byte equality proves that changing the transport did not change
 # either owner's serialized contract.
 test_streamed_owner_outputs_match_argv_reference_byte_for_byte() {
-  local home fakebin streamed_main argv_main streamed_summary argv_summary
+  local home fakebin streamed_snapshot argv_snapshot streamed_bearings argv_bearings
   home=$(make_home transport-equivalence)
   write_fixture "$home"
   fakebin=$(make_fakebin "$home")
-  streamed_main="$home/main.streamed.json"
-  argv_main="$home/main.argv.json"
-  streamed_summary="$home/summary.streamed.json"
-  argv_summary="$home/summary.argv.json"
+  streamed_snapshot="$home/snapshot.streamed.json"
+  argv_snapshot="$home/snapshot.argv.json"
+  streamed_bearings="$home/bearings.streamed.json"
+  argv_bearings="$home/bearings.argv.json"
 
-  PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-08-10T12:00:00Z \
-    "$SNAPSHOT" --json | jq '.main_inventory' > "$streamed_main"
-  PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-08-10T12:00:00Z \
-    FM_SNAPSHOT_TEST_ARGV_REFERENCE=1 "$SNAPSHOT" --json | jq '.main_inventory' > "$argv_main"
-  cmp -s "$streamed_main" "$argv_main" \
-    || fail "streamed main-inventory output differs byte-for-byte from argv reference"
+  if ! PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-08-10T12:00:00Z \
+    "$SNAPSHOT" --json > "$streamed_snapshot"; then
+    fail "streamed canonical snapshot failed during argv equivalence control"
+  fi
+  if ! PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-08-10T12:00:00Z \
+    FM_SNAPSHOT_TEST_ARGV_REFERENCE=1 "$SNAPSHOT" --json > "$argv_snapshot"; then
+    fail "argv-reference canonical snapshot failed during equivalence control"
+  fi
+  cmp -s "$streamed_snapshot" "$argv_snapshot" \
+    || fail "streamed canonical snapshot differs byte-for-byte from argv reference"
 
-  PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-08-10T12:00:00Z \
-    "$SNAPSHOT" --secondmate-home-summary > "$streamed_summary"
-  PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-08-10T12:00:00Z \
-    FM_SNAPSHOT_TEST_ARGV_REFERENCE=1 "$SNAPSHOT" --secondmate-home-summary > "$argv_summary"
-  cmp -s "$streamed_summary" "$argv_summary" \
-    || fail "streamed secondmate-home summary differs byte-for-byte from argv reference"
+  if ! PATH="$fakebin:$PATH" FM_HOME="$home" FM_BEARINGS_NOW=2026-08-10T12:00:00Z \
+    "$BEARINGS" --json > "$streamed_bearings"; then
+    fail "streamed Bearings JSON failed during argv equivalence control"
+  fi
+  if ! PATH="$fakebin:$PATH" FM_HOME="$home" FM_BEARINGS_NOW=2026-08-10T12:00:00Z \
+    FM_SNAPSHOT_TEST_ARGV_REFERENCE=1 "$BEARINGS" --json > "$argv_bearings"; then
+    fail "argv-reference Bearings JSON failed during equivalence control"
+  fi
+  cmp -s "$streamed_bearings" "$argv_bearings" \
+    || fail "streamed Bearings JSON differs byte-for-byte from argv reference"
 
-  pass "streamed shared-owner outputs are byte-for-byte identical to argv reference"
+  pass "streamed canonical snapshot and Bearings JSON match argv reference byte-for-byte"
 }
 
 test_normalized_roles_and_plural_blocker_readiness() {
