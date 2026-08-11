@@ -707,6 +707,9 @@ fm_lock_acquire_wait() {
 fm_lock_release() {
   local lockdir=$1 pid current ownerdir
   current=${BASHPID:-$$}
+  # Stale-owner recovery can be interrupted while this process holds the
+  # subordinate .steal claim. Clear an owned claim first so cleanup can retry
+  # the outer transition without waiting on its own nested lock.
   if [ -e "$lockdir.steal" ] || [ -L "$lockdir.steal" ]; then
     fm_lock_release "$lockdir.steal"
   fi

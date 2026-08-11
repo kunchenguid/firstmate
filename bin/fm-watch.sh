@@ -759,6 +759,9 @@ watcher_cleanup() {
       transition=release-lock-existing
     fi
   fi
+  # TERM can arrive while wake recovery holds both subordinate locks. Release
+  # the marker lock before republishing so cleanup cannot reacquire its own
+  # lock, but retain queue serialization until the recovery transition commits.
   fm_lock_release "${WATCHER_DOWNTIME_MARKER}.lock"
   fm_active_check_stop || cleanup_status=1
   fm_check_output_cleanup

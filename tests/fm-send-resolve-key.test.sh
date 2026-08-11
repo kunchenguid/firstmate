@@ -168,6 +168,16 @@ test_generated_brief_key_round_trip() {
     "$ROOT/bin/fm-classify-lib.sh" "$status_file")
   [ -z "$open" ] || fail "matching resolved line did not close generated decision key: $open"
 
+  printf 'needs-decision: preserve the legacy default-key choice\n' >> "$status_file"
+  open=$(bash -c '. "$1"; status_open_decisions "$2"' _ \
+    "$ROOT/bin/fm-classify-lib.sh" "$status_file")
+  assert_contains "$open" $'default\tneeds-decision\tpreserve the legacy default-key choice' \
+    "the generated keyed form changed legacy unkeyed needs-decision folding"
+  printf 'resolved: legacy choice answered\n' >> "$status_file"
+  open=$(bash -c '. "$1"; status_open_decisions "$2"' _ \
+    "$ROOT/bin/fm-classify-lib.sh" "$status_file")
+  [ -z "$open" ] || fail "bare resolved did not close the legacy default decision key: $open"
+
   printf 'needs-decision [key=answer-close]: choose REST or RPC\n' >> "$status_file"
   run_send "$fb" "$home" "$log" generated-brief --resolve-key answer-close "choose REST"; rc=$?
   expect_code 0 "$rc" "fm-send --resolve-key should close a generated decision key"
