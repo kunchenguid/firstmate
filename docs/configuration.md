@@ -137,6 +137,19 @@ An absent or blank file means `bin/fm-gh.sh` execs its command unchanged, so a h
 The file supplies the credential only; delivering it to the pipeline additionally requires installing the `gh` shim onto the `PATH` the no-mistakes daemon resolves, which is never automatic.
 See [`no-mistakes-pr-credential.md`](no-mistakes-pr-credential.md) for the chosen mechanism, its `PATH`-wide scope, the alternatives considered, and the setup commands; `bin/fm-gh.sh`, `bin/fm-gh-shim.sh`, `bin/fm-gh-ci-fallback.sh`, and `bin/fm-gh-shim-install.sh` own their exact flags in their own headers.
 
+## Credential-expiry reminder metadata (config/credential-expiry-reminders.json)
+
+The optional local, gitignored `config/credential-expiry-reminders.json` records known expiry metadata without holding, reading, validating, rotating, or naming any credential payload.
+It is an object containing only `version: 1` and a `reminders` array of at most 32 entries.
+Each entry contains only a unique operational `label` and an `expiresAt` UTC timestamp in exact `YYYY-MM-DDTHH:MM:SSZ` form.
+For example, a CI reminder may contain `{"version":1,"reminders":[{"label":"ci-pr-credential","expiresAt":"2026-09-09T00:00:00Z"}]}`.
+Bootstrap remains silent until an expiry is within 14 days, then emits one dated `CREDENTIAL_EXPIRY_REMINDER:` diagnostic naming the remaining interval and this configuration owner.
+At or after that timestamp it instead emits `CREDENTIAL_EXPIRY_REMINDER_EXPIRED:` and explicitly reports only stale metadata, not that a live credential was rejected.
+Each matching reminder records only its configured expiry and last-surfaced epoch under `state/credential-expiry-reminders/`, reappearing at most once every seven days and immediately when its configured expiry changes.
+Malformed or unsafe metadata fails loudly through the same bootstrap stream without using any credential source.
+The optional `FM_CREDENTIAL_EXPIRY_REMINDER_NOW` unsigned epoch override exists only for deterministic test clocks; normal operation uses the current UTC clock.
+The helper header owns parsing, state-file mechanics, and exact diagnostics.
+
 ## Gate defaults (.no-mistakes.yaml)
 
 The tracked `.no-mistakes.yaml` keeps test evidence outside the repo and pins `commands.lint` to `bin/fm-lint.sh` so local lint matches CI.
