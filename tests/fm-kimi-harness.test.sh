@@ -73,6 +73,9 @@ case "${1:-}" in
       case "$literal" in
         *' --auto')
           printf '%s\n' "$literal" >> "$FM_FAKE_LAUNCH_LOG"
+          if [ "${FM_FAKE_EXECUTE_KIMI_LAUNCH:-0}" = 1 ]; then
+            bash -c "$literal"
+          fi
           printf 'launched\n' > "$FM_FAKE_KIMI_STATE"
           ;;
         *)
@@ -128,7 +131,13 @@ exit 0
 SH
   chmod +x "$fakebin/tmux"
   fm_fake_exit0 "$fakebin" treehouse gh-axi gh
-  fm_fake_exit0 "$fakebin" kimi
+  cat > "$fakebin/kimi" <<'SH'
+#!/usr/bin/env bash
+if [ -n "${FM_FAKE_WORKER_ENV:-}" ]; then
+  printf '%s|%s|%s\n' "${CODEX_CI-unset}" "${CODEX_THREAD_ID-unset}" "${FM_TEST_FORWARDED-unset}" > "$FM_FAKE_WORKER_ENV"
+fi
+SH
+  chmod +x "$fakebin/kimi"
   ln -s "$JQ_BIN" "$fakebin/jq"
   printf '%s\n' "$fakebin"
 }
@@ -194,7 +203,7 @@ test_kimi_launch_then_send_is_verified() {
   assert_contains "$out" "spawned $id harness=kimi" "kimi spawn did not report success"
 
   launch=$(cat "$CASE_DIR/launch.log")
-  [ "$launch" = "'$FAKEBIN_DIR/kimi' --model 'kimi-code/k3' --auto" ] \
+  [ "$launch" = "env -u CODEX_CI -u CODEX_THREAD_ID '$FAKEBIN_DIR/kimi' --model 'kimi-code/k3' --auto" ] \
     || fail "kimi launch did not use the absolute binary, model, and --auto only: $launch"
   assert_not_contains "$launch" "--effort" "kimi launch emitted a nonexistent effort flag"
   assert_not_contains "$launch" "turn-ended" "kimi launch embedded a turn-end path"
@@ -216,6 +225,21 @@ test_kimi_launch_then_send_is_verified() {
   assert_grep 'token=' "$WT_DIR/.fm-kimi-turnend" "kimi spawn did not write its token pointer"
   assert_present "$HOME_DIR/state/$id.kimi-turnend-token" "kimi spawn did not record its token"
   pass "fm-spawn: kimi launches, delivers its brief, and registers a guarded turn-end token"
+}
+
+test_kimi_clears_inherited_codex_desktop_markers() {
+  local id rec out rc
+  id="kimi-markers-z1b-$$"
+  rec=$(make_spawn_case markers "$id")
+  read_spawn_record "$rec"
+  out=$(CODEX_CI=1 CODEX_THREAD_ID=019feec1-fe6f-72a3-a792-9de5b7dd7258 \
+    FM_TEST_FORWARDED=kept FM_FAKE_EXECUTE_KIMI_LAUNCH=1 FM_FAKE_WORKER_ENV="$CASE_DIR/worker.env" \
+    run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id")
+  rc=$?
+  expect_code 0 "$rc" "kimi spawn from Codex Desktop should succeed: $out"
+  [ "$(cat "$CASE_DIR/worker.env")" = "unset|unset|kept" ] \
+    || fail "kimi worker inherited Codex markers or lost ordinary environment forwarding"
+  pass "kimi launch clears Codex Desktop markers and forwards ordinary environment"
 }
 
 test_kimi_hook_install_is_surgical_idempotent_and_removable() {
@@ -451,7 +475,7 @@ test_kimi_falls_back_to_expanded_home_binary() {
   rc=$?
   expect_code 0 "$rc" "Kimi HOME fallback spawn should succeed"
   launch=$(cat "$CASE_DIR/launch.log")
-  [ "$launch" = "'$fallback' --auto" ] \
+  [ "$launch" = "env -u CODEX_CI -u CODEX_THREAD_ID '$fallback' --auto" ] \
     || fail "Kimi fallback did not expand HOME into an absolute executable: $launch"
   pass "fm-spawn: Kimi fallback expands the active HOME"
 }
@@ -664,6 +688,7 @@ test_kimi_hook_remove_preserves_owned_newline_boundary
 test_kimi_hook_fails_closed_on_missing_malformed_or_partial_config
 test_kimi_hook_install_refuses_without_jq
 test_kimi_launch_then_send_is_verified
+test_kimi_clears_inherited_codex_desktop_markers
 test_kimi_hook_is_silent_and_requires_registered_workspace_token
 test_kimi_spawn_refuses_unsafe_global_config_before_pane_creation
 test_kimi_teardown_removes_pointer_and_registry_token

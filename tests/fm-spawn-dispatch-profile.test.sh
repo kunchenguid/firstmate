@@ -49,6 +49,9 @@ case "${1:-}" in
       for a in "$@"; do
         if [ "$prev" = "-l" ]; then
           printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG"
+          if [ "${FM_FAKE_EXECUTE_LAUNCH:-0}" = 1 ]; then
+            bash -c "$a"
+          fi
         fi
         prev=$a
       done
@@ -60,6 +63,11 @@ exit 0
 SH
   chmod +x "$fakebin/tmux"
   fm_fake_exit0 "$fakebin" treehouse
+  cat > "$fakebin/opencode" <<'SH'
+#!/usr/bin/env bash
+printf '%s|%s|%s\n' "${CODEX_CI-unset}" "${CODEX_THREAD_ID-unset}" "${FM_TEST_FORWARDED-unset}" > "$FM_FAKE_WORKER_ENV"
+SH
+  chmod +x "$fakebin/opencode"
   make_spawn_pi_probe "$fakebin" pi
   make_spawn_pi_probe "$fakebin" pi-signed
   printf '%s\n' "$fakebin"
@@ -509,6 +517,22 @@ test_opencode_threads_model_and_ignores_effort_axis() {
   pass "opencode receives --model and omits the unsupported effort axis"
 }
 
+test_opencode_clears_inherited_codex_desktop_markers() {
+  local rec id out status
+  id=profile-opencode-markers-z7b
+  rec=$(make_spawn_case profile-opencode-markers opencode "$id")
+  read_case_record "$rec"
+
+  out=$(CODEX_CI=1 CODEX_THREAD_ID=019feec1-fe6f-72a3-a792-9de5b7dd7258 \
+    FM_TEST_FORWARDED=kept FM_FAKE_EXECUTE_LAUNCH=1 FM_FAKE_WORKER_ENV="$CASE_DIR/worker.env" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "opencode spawn from Codex Desktop should succeed: $out"
+  [ "$(cat "$CASE_DIR/worker.env")" = "unset|unset|kept" ] \
+    || fail "opencode worker inherited Codex markers or lost ordinary environment forwarding"
+  pass "opencode launch clears Codex Desktop markers and forwards ordinary environment"
+}
+
 test_pi_threads_model_and_max_effort() {
   local rec id out status launch
   id=profile-pi-z8
@@ -741,6 +765,7 @@ test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort
 test_grok_omits_invalid_xhigh_reasoning_effort
 test_opencode_threads_model_and_ignores_effort_axis
+test_opencode_clears_inherited_codex_desktop_markers
 test_pi_threads_model_and_max_effort
 test_pi_tui_mode_probe_is_safe_for_old_and_new_pi
 test_pi_signed_threads_shared_pi_profile_and_preserves_identity
