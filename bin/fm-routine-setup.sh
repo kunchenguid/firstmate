@@ -102,8 +102,8 @@ else
 # Recurring routine registry.
 # The bin/fm-routine-scan.sh header owns the format and cadence reference.
 # Examples:
-# - example-daily-check | daily | captain | check today's priorities | do
-# - example-weekly-review | weekly:mon | captain | review the week | do
+# - example-daily-check | daily | captain | check today's priorities
+# - example-weekly-review | weekly:mon | captain | review the week
 EOF
   then
     routine_setup_error 'could not write routine registry'

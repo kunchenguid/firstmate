@@ -3,9 +3,8 @@
 # Usage: fm-routine-scan.sh [--help]
 #
 # Registry: data/routines.md, one line per item in this shape:
-# - <id> | <cadence> | <owner> | <action> | <delivery>
+# - <id> | <cadence> | <owner> | <action>
 # Cadence is daily or weekly:mon through weekly:sun.
-# Delivery is do, notify, or notify-on-problem.
 # IDs are unique and may contain letters, digits, underscores, colons, and dashes.
 # Blank lines and lines beginning with # are ignored; malformed or duplicate items
 # are diagnosed and ignored.
@@ -96,6 +95,10 @@ case "$WEEKDAY" in
 esac
 
 if ! fm_lock_try_acquire "$LOCK"; then
+  if [ "$ROUTINE_ACK" -eq 1 ]; then
+    routine_error 'could not acquire routine state lock for acknowledgement'
+    exit 1
+  fi
   exit 0
 fi
 trap routine_cleanup EXIT
@@ -256,22 +259,17 @@ while IFS= read -r line || [ -n "$line" ]; do
     *) routine_error "ignoring malformed registry line"; continue ;;
   esac
 
-  IFS='|' read -r raw_id raw_cadence raw_owner raw_action raw_delivery extra <<< "$record"
+  IFS='|' read -r raw_id raw_cadence raw_owner raw_action extra <<< "$record"
   id=$(trim "${raw_id:-}")
   cadence=$(trim "${raw_cadence:-}")
   owner=$(trim "${raw_owner:-}")
   action=$(trim "${raw_action:-}")
-  delivery=$(trim "${raw_delivery:-}")
   if [ -n "${extra:-}" ] || [ -z "$id" ] || [ -z "$owner" ] || [ -z "$action" ]; then
     routine_error "ignoring malformed registry line"
     continue
   fi
   case "$id" in
     *[!A-Za-z0-9_:-]*) routine_error "ignoring registry item with invalid id: $id"; continue ;;
-  esac
-  case "$delivery" in
-    do|notify|notify-on-problem) ;;
-    *) routine_error "ignoring registry item with invalid delivery: $id"; continue ;;
   esac
   is_due=1
   case "$cadence" in

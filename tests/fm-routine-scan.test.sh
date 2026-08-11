@@ -19,7 +19,7 @@ write_registry() {
   shift
   printf '%s\n' \
     '# Recurring routine registry.' \
-    '# Format: - <id> | <cadence> | <owner> | <action> | <delivery>' \
+    '# Format: - <id> | <cadence> | <owner> | <action>' \
     "$@" > "$home/data/routines.md"
 }
 run_scan() {
@@ -106,7 +106,7 @@ test_setup_persists_canonical_path_overrides() {
   [ -f "$check" ] || fail "routine setup ignored the state override"
 
   printf '%s\n' \
-    '- example-daily-check | daily | captain | check priorities | do' \
+    '- example-daily-check | daily | captain | check priorities' \
     > "$data/routines.md"
   out=$(cd "$run_dir" && FM_ROUTINE_DATE=2026-08-10 "$check")
   expected='routine-due: example-daily-check | captain | check priorities'
@@ -155,7 +155,7 @@ test_daily_fires_once_per_local_day() {
   local home out
   home=$(make_home daily)
   write_registry "$home" \
-    '- daily-item | daily | captain | check priorities | do'
+    '- daily-item | daily | captain | check priorities'
   out=$(run_scan "$home" 2026-08-10)
   [ "$out" = 'routine-due: daily-item | captain | check priorities' ] \
     || fail "daily item did not fire on its first day"
@@ -172,7 +172,7 @@ test_weekly_fires_only_on_matching_weekday() {
   local home out
   home=$(make_home weekly)
   write_registry "$home" \
-    '- monday-item | weekly:mon | captain | review the week | do'
+    '- monday-item | weekly:mon | captain | review the week'
   out=$(run_scan "$home" 2026-08-10)
   [ "$out" = 'routine-due: monday-item | captain | review the week' ] \
     || fail "weekly Monday item did not fire on Monday"
@@ -191,7 +191,7 @@ test_weekday_is_derived_from_captured_local_date() {
   fakebin="$home/fakebin"
   mkdir -p "$fakebin"
   write_registry "$home" \
-    '- monday-item | weekly:mon | captain | review the week | do'
+    '- monday-item | weekly:mon | captain | review the week'
   cat > "$fakebin/date" <<'SH'
 #!/usr/bin/env bash
 case "$*" in
@@ -212,7 +212,7 @@ test_nothing_due_is_silent_and_does_not_create_fire_state() {
   local home out
   home=$(make_home silent)
   write_registry "$home" \
-    '- monday-item | weekly:mon | captain | review the week | notify-on-problem'
+    '- monday-item | weekly:mon | captain | review the week'
   out=$(run_scan "$home" 2026-08-11)
   [ -z "$out" ] || fail "non-matching weekly item printed output"
   [ ! -e "$home/state/.routine-fired" ] \
@@ -223,7 +223,7 @@ test_fire_state_prevents_repeats_after_scan_restart() {
   local home first second
   home=$(make_home restart)
   write_registry "$home" \
-    '- daily-item | daily | captain | check priorities | notify'
+    '- daily-item | daily | captain | check priorities'
   first=$(run_scan "$home" 2026-08-10)
   second=$(run_scan "$home" 2026-08-10)
   [ -n "$first" ] && [ -z "$second" ] \
@@ -234,8 +234,8 @@ test_duplicate_id_cannot_alternate_fired_cadences() {
   local home first second
   home=$(make_home duplicate-id)
   write_registry "$home" \
-    '- shared-item | daily | captain | check priorities | notify' \
-    '- shared-item | weekly:mon | captain | review the week | do'
+    '- shared-item | daily | captain | check priorities' \
+    '- shared-item | weekly:mon | captain | review the week'
   first=$(run_scan "$home" 2026-08-10 2>/dev/null)
   second=$(run_scan "$home" 2026-08-10 2>/dev/null)
   [ "$first" = 'routine-due: shared-item | captain | check priorities' ] \
@@ -252,7 +252,7 @@ test_deferred_check_acknowledges_after_wake() {
     || fail "routine setup could not create the deferred check"
   check="$home/state/routine-scan.check.sh"
   write_registry "$home" \
-    '- deferred-item | daily | captain | check priorities | do'
+    '- deferred-item | daily | captain | check priorities'
   first=$(FM_ROUTINE_DATE=2026-08-10 "$check")
   [ "$first" = 'routine-due: deferred-item | captain | check priorities' ] \
     || fail "the deferred check did not emit its due wake"
@@ -276,6 +276,64 @@ test_deferred_check_acknowledges_after_wake() {
   third=$(FM_ROUTINE_DATE=2026-08-10 "$check")
   [ -z "$third" ] || fail "acknowledged routine fired again"
   pass "routine fire state commits after wake acknowledgement"
+}
+test_deferred_publication_does_not_refire_after_restart() {
+  local home check first second
+  home=$(make_home publication-restart)
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$SETUP" \
+    || fail "routine setup could not create the publication fixture"
+  check="$home/state/routine-scan.check.sh"
+  write_registry "$home" \
+    '- publication-item | daily | captain | survive restart'
+  first=$(FM_ROUTINE_DATE=2026-08-10 "$check")
+  [ "$first" = 'routine-due: publication-item | captain | survive restart' ] \
+    || fail "the publication fixture did not emit its due wake"
+  FM_STATE_OVERRIDE="$home/state" bash -c '. "$1"; fm_wake_append check "$2" "$3"' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "$home/state/routine-scan.check.sh" "$first" \
+    || fail "the publication fixture could not append its durable wake"
+  [ ! -e "$home/state/.routine-fired" ] \
+    || fail "the publication fixture promoted fire state before its wake was handled"
+  ack_watcher_cycle "$home/state" \
+    || fail "the durable publication could not be handled after restart"
+  second=$(FM_ROUTINE_DATE=2026-08-10 "$check")
+  [ -z "$second" ] || fail "a handled routine wake fired again after restart"
+  [ "$(cat "$home/state/.routine-fired")" = 'publication-item|daily|2026-08-10' ] \
+    || fail "the handled wake did not promote routine fire state"
+  pass "a handled routine wake does not fire again after restart"
+}
+test_ack_fails_when_routine_state_lock_is_held() {
+  local home check lock_ready lock_pid rc out
+  home=$(make_home ack-lock)
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$SETUP" \
+    || fail "routine setup could not create the lock fixture"
+  check="$home/state/routine-scan.check.sh"
+  write_registry "$home" \
+    '- locked-item | daily | captain | check priorities'
+  FM_ROUTINE_DATE=2026-08-10 "$check" >/dev/null \
+    || fail "the lock fixture did not create pending state"
+  lock_ready="$home/lock-ready"
+  FM_STATE_OVERRIDE="$home/state" bash -c \
+    '. "$1"; fm_lock_try_acquire "$2" || exit 1; : > "$3"; sleep 5' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "$home/state/.routine-fired.lock" "$lock_ready" &
+  lock_pid=$!
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    [ -f "$lock_ready" ] && break
+    sleep 0.01
+  done
+  [ -f "$lock_ready" ] || fail "the lock fixture did not acquire routine state lock"
+  if out=$(FM_ROUTINE_DATE=2026-08-10 "$check" --ack 2>&1); then
+    rc=0
+  else
+    rc=$?
+  fi
+  kill "$lock_pid" 2>/dev/null || true
+  wait "$lock_pid" 2>/dev/null || true
+  [ "$rc" -ne 0 ] || fail "routine acknowledgement succeeded without its state lock"
+  case "$out" in
+    *'could not acquire routine state lock'*) ;;
+    *) fail "routine lock contention did not produce an actionable diagnostic: $out" ;;
+  esac
+  pass "routine acknowledgement fails closed when state is locked"
 }
 test_watcher_acknowledges_only_after_complete_scan() {
   local home fake_root fakebin rc fired_expected
@@ -324,8 +382,8 @@ SH
   cp "$ROOT/bin/fm-routine-scan.sh" "$fake_root/bin/fm-routine-scan.sh"
   cp "$ROOT/bin/fm-wake-lib.sh" "$fake_root/bin/fm-wake-lib.sh"
   write_registry "$home" \
-    '- item-a | daily | captain | check priorities | do' \
-    '- item-b | daily | captain | review the week | do'
+    '- item-a | daily | captain | check priorities' \
+    '- item-b | daily | captain | review the week'
   run_bounded_watcher "$home" "$home/watch2.out" "$fakebin"
   rc=$?
   [ "$rc" -eq 0 ] || fail "the recovered routine scan did not surface its wake"
@@ -345,7 +403,7 @@ test_symlink_registry_is_rejected_at_scan_boundary() {
   home=$(make_home symlink-registry)
   outside="$TMP_ROOT/outside-routines.md"
   write_registry "$home" \
-    '- outside-item | daily | captain | should not run | do'
+    '- outside-item | daily | captain | should not run'
   mv "$home/data/routines.md" "$outside"
   ln -s "$outside" "$home/data/routines.md"
   out=$(run_scan "$home" 2026-08-10 2>&1)
@@ -367,8 +425,8 @@ test_check_surfaces_registry_diagnostics() {
   check="$home/state/routine-scan.check.sh"
   write_registry "$home" \
     'not a routine row' \
-    '- duplicate-item | daily | captain | check priorities | do' \
-    '- duplicate-item | daily | captain | check again | notify'
+    '- duplicate-item | daily | captain | check priorities' \
+    '- duplicate-item | daily | captain | check again'
   out=$(FM_ROUTINE_DATE=2026-08-10 "$check")
   case "$out" in
     *'routine-scan: ignoring malformed registry line'*) ;;
@@ -394,6 +452,8 @@ test_nothing_due_is_silent_and_does_not_create_fire_state
 test_fire_state_prevents_repeats_after_scan_restart
 test_duplicate_id_cannot_alternate_fired_cadences
 test_deferred_check_acknowledges_after_wake
+test_deferred_publication_does_not_refire_after_restart
+test_ack_fails_when_routine_state_lock_is_held
 test_watcher_acknowledges_only_after_complete_scan
 test_symlink_registry_is_rejected_at_scan_boundary
 test_check_surfaces_registry_diagnostics
