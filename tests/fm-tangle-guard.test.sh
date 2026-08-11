@@ -343,6 +343,10 @@ if [ "${FM_FAKE_TREEHOUSE_ERROR:-0}" = 1 ]; then
   exit 1
 fi
 cd "$FM_REAL_TREEHOUSE_PROJECT"
+if [ "${FM_FAKE_TREEHOUSE_NONZERO_PATH:-0}" = 1 ] && [ "${1:-}" = get ]; then
+  env HOME="$FM_REAL_TREEHOUSE_HOME" "$FM_REAL_TREEHOUSE" "$@" || exit $?
+  exit 1
+fi
 exec env HOME="$FM_REAL_TREEHOUSE_HOME" "$FM_REAL_TREEHOUSE" "$@"
 SH
   cat > "$fakebin/tmux" <<'SH'
@@ -401,6 +405,22 @@ test_treehouse_lease_lifecycle() {
   expect_code 1 "$status" "failed Treehouse acquisition should abort"
   assert_contains "$out" "treehouse fixture acquisition failed" "spawn discarded Treehouse acquisition diagnostics"
   assert_contains "$out" "treehouse get did not enter a worktree within 60s" "spawn dropped its public acquisition error"
+
+  mkdir -p "$home/data/lease-nonzero-kk1"
+  printf 'brief\n' > "$home/data/lease-nonzero-kk1/brief.md"
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$home/data" FM_PROJECTS_OVERRIDE="$home/projects" \
+    FM_CONFIG_OVERRIDE="$home/config" FM_SPAWN_NO_GUARD=1 TMUX=fake \
+    FM_REAL_TREEHOUSE="$(command -v treehouse)" FM_REAL_TREEHOUSE_HOME="$TMP_ROOT/treehouse-home" \
+    FM_REAL_TREEHOUSE_PROJECT="$proj" FM_FAKE_PANE_STATE="$pane" FM_FAKE_TREEHOUSE_NONZERO_PATH=1 \
+    PATH="$fakebin:$PATH" "$ROOT/bin/fm-spawn.sh" lease-nonzero-kk1 "$proj" codex \
+    --mode no-mistakes --yolo off 2>&1); status=$?
+  expect_code 1 "$status" "nonzero Treehouse acquisition should abort: $out"
+  if FM_REAL_TREEHOUSE="$(command -v treehouse)" FM_REAL_TREEHOUSE_HOME="$TMP_ROOT/treehouse-home" \
+    FM_REAL_TREEHOUSE_PROJECT="$proj" "$fakebin/treehouse" status --json \
+    | jq -e --arg holder lease-nonzero-kk1 '[.. | objects | .lease_holder? // empty] | index($holder) != null' >/dev/null; then
+    fail "nonzero Treehouse acquisition leaked its emitted lease path"
+  fi
 
   abort_id=lease-abort-ii9
   mkdir -p "$home/data/$abort_id"

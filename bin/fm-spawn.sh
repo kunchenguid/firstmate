@@ -2180,9 +2180,10 @@ if [ "$RELAUNCH" -eq 1 ]; then
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   SPAWN_TREEHOUSE_ACQUIRE_ERR="$STATE/.$ID.treehouse-get.${BASHPID:-$$}.err"
-  if ! SPAWN_TREEHOUSE_LEASE_WT=$(cd "$PROJ_ABS" && treehouse get --lease --lease-holder "$ID" 2> "$SPAWN_TREEHOUSE_ACQUIRE_ERR") \
-     || [ -z "$SPAWN_TREEHOUSE_LEASE_WT" ]; then
-    SPAWN_TREEHOUSE_LEASE_WT=
+  treehouse_get_status=0
+  SPAWN_TREEHOUSE_LEASE_WT=$(cd "$PROJ_ABS" && treehouse get --lease --lease-holder "$ID" 2> "$SPAWN_TREEHOUSE_ACQUIRE_ERR") \
+    || treehouse_get_status=$?
+  if [ "$treehouse_get_status" -ne 0 ] || [ -z "$SPAWN_TREEHOUSE_LEASE_WT" ]; then
     cat "$SPAWN_TREEHOUSE_ACQUIRE_ERR" >&2
     rm -f -- "$SPAWN_TREEHOUSE_ACQUIRE_ERR"
     SPAWN_TREEHOUSE_ACQUIRE_ERR=
