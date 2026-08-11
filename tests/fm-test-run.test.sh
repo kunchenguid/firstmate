@@ -90,6 +90,33 @@ test_family_selection() {
   pass "family selection returns a proper subset of the suite"
 }
 
+test_committed_tests_have_semantic_families() {
+  local unclassified script family
+  unclassified=$("$RUNNER" --list --family unclassified)
+  [ -z "$unclassified" ] \
+    || fail "committed tests fell into unclassified: $unclassified"
+
+  while IFS='|' read -r script family; do
+    [ -n "$script" ] || continue
+    "$RUNNER" --list --family "$family" | grep -Fxq "tests/$script" \
+      || fail "committed test $script is not owned by expected family $family"
+  done <<'EOF'
+fm-busy-adapter-wiring.test.sh|pure-contract-unit
+fm-busy-state.test.sh|pure-contract-unit
+fm-claude-stop-autoarm-live-e2e.test.sh|live-harness-optin
+fm-claude-stop-autoarm.test.sh|watcher-wake-lock
+fm-credential-expiry-reminder.test.sh|session-bootstrap
+fm-gh-shim.test.sh|pr-forge
+fm-gitignore-config.test.sh|pure-contract-unit
+fm-link-intake.test.sh|pure-contract-unit
+fm-pending-reply.test.sh|secondmate
+fm-procevent.test.sh|watcher-wake-lock
+fm-public-followup.test.sh|pr-forge
+fm-workflow-scheduling.test.sh|pure-contract-unit
+EOF
+  pass "every committed test has one semantic family"
+}
+
 test_single_script_selection() {
   local listed
   listed=$("$RUNNER" --list tests/fm-lint.test.sh)
@@ -1892,6 +1919,7 @@ SH
 
 test_list_all_exact_suite_coverage
 test_family_selection
+test_committed_tests_have_semantic_families
 test_single_script_selection
 test_changed_file_selection_is_conservative
 test_changed_dependency_selection_and_unmapped_failure
