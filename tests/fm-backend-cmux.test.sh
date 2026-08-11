@@ -496,6 +496,53 @@ test_create_task_creates_and_parses_ids() {
   pass "fm_backend_cmux_create_task: creates a workspace and parses workspace_id/surface_id from list responses"
 }
 
+test_spawn_releases_exact_cmux_workspace_when_pending_record_write_fails() {
+  local dir home proj wt fakebin id title status
+  dir="$TMP_ROOT/spawn-pending-write-failure"
+  home="$dir/home"
+  proj="$dir/project"
+  wt="$dir/worktree"
+  id=cmux-pending-write
+  mkdir -p "$dir/responses" "$home/data/$id" "$home/state" "$home/projects" "$home/config"
+  fm_git_worktree "$proj" "$wt" "cmux-$id"
+  printf 'brief\n' > "$home/data/$id/brief.md"
+  title=$(cmux_expected_scoped_title "fm-$id" "$home" "$ROOT")
+
+  printf '{"workspaces":[]}' > "$dir/responses/1.out"
+  cmux_workspace_list_response "$dir" 3 "bbbbbbbb-1111-1111-1111-111111111111" "$title"
+  cmux_panes_empty_response "$dir" 4
+  cmux_workspace_list_response "$dir" 5 "bbbbbbbb-1111-1111-1111-111111111111" "$title"
+  cmux_windows_response "$dir" 6 "eeeeeeee-0000-0000-0000-000000000000" 1
+  cmux_workspace_list_response "$dir" 7 "bbbbbbbb-1111-1111-1111-111111111111" "$title"
+  cmux_workspace_list_response "$dir" 10
+  fakebin=$(make_cmux_fakebin "$dir")
+  cat > "$dir/fail-pending-record.sh" <<'SH'
+printf() {
+  case "${1:-}" in
+    *'kind=cmux-pending'*) return 1 ;;
+  esac
+  builtin printf "$@"
+}
+SH
+  BASH_ENV="$dir/fail-pending-record.sh" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_SPAWN_NO_GUARD=1 FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    PATH="$fakebin:$PATH" \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" codex --backend cmux --mode no-mistakes --yolo off \
+    > "$dir/output" 2>&1
+  status=$?
+  expect_code 1 "$status" "spawn should fail after cmux cannot resolve its default surface"
+  assert_contains "$(cat "$dir/output")" "could not resolve the default surface" \
+    "cmux surface resolution failure was not reported"
+  assert_absent "$home/state/.spawn-cleanup/$id.record" \
+    "cmux pending-record failure left a cleanup record after exact release"
+  assert_contains "$(cat "$dir/log")" \
+    $'close-workspace\x1f--workspace\x1fbbbbbbbb-1111-1111-1111-111111111111' \
+    "cmux pending-record failure did not close the exact workspace"
+  pass "fm-spawn: releases the exact cmux workspace when pending record publication fails"
+}
+
 test_create_task_retains_pending_record_when_workspace_id_resolution_fails() {
   local dir fb out status title
   dir="$TMP_ROOT/create-task-pending"; mkdir -p "$dir/responses"
@@ -1188,6 +1235,7 @@ test_ensure_running_fails_fast_on_denied_without_launching
 test_ensure_running_fails_fast_on_unauth_without_launching
 test_create_task_refuses_duplicate_label
 test_create_task_creates_and_parses_ids
+test_spawn_releases_exact_cmux_workspace_when_pending_record_write_fails
 test_create_task_retains_pending_record_when_workspace_id_resolution_fails
 test_spawn_recovers_pending_cmux_workspace_by_scoped_title
 test_target_ready_fails_when_target_absent

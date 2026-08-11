@@ -383,15 +383,15 @@ fm_backend_cmux_create_task() {  # <label> <cwd>
     echo "error: cmux new-workspace failed for '$title': $out" >&2
     return 1
   }
-  if ! fm_backend_cmux_pending_acquisition_record "$label" "$title"; then
-    echo "error: could not persist the pending cmux workspace acquisition for '$title'" >&2
-    return 1
-  fi
   wsid=$(fm_backend_cmux_workspace_id_for_label "$title")
-  [ -n "$wsid" ] || {
+  if [ -z "$wsid" ]; then
+    if ! fm_backend_cmux_pending_acquisition_record "$label" "$title"; then
+      echo "error: could not resolve a cmux workspace id for '$title' after creation or persist its acquisition record" >&2
+      return 1
+    fi
     echo "error: could not resolve a cmux workspace id for '$title' after creation; retaining the acquisition record" >&2
     return 1
-  }
+  fi
   if ! fm_backend_cmux_acquisition_record "$label" "$wsid"; then
     printf '%s\n' "$wsid"
     return 1
