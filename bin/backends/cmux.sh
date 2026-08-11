@@ -784,26 +784,18 @@ fm_backend_cmux_surface_exists() {  # <workspace_id> <surface_id>
 # header for the fresh-surface pitfall this avoids). When the caller knows
 # the owning firstmate task label, refresh stale workspace/surface ids by label.
 fm_backend_cmux_target_ready() {  # <target> [expected-label]
-  local expected_label=${2:-} expected_title title wsid sfid inventory match_count
+  local expected_label=${2:-} expected_title wsid sfid recorded_workspace recorded_surface
   fm_backend_cmux_parse_target "$1" || return 1
   if [ -n "$expected_label" ]; then
     expected_title=$(fm_backend_cmux_scoped_title "$expected_label")
-    inventory=$(fm_backend_cmux_workspace_inventory) || return 1
-    match_count=$(printf '%s' "$inventory" | jq -e -r --arg id "$FM_BACKEND_CMUX_WORKSPACE" '[.[] | select(.id == $id)] | length' 2>/dev/null) || return 1
-    case "$match_count" in
-      1)
-        title=$(printf '%s' "$inventory" | jq -e -r --arg id "$FM_BACKEND_CMUX_WORKSPACE" '[.[] | select(.id == $id) | .title] | if length == 1 then .[0] else error("cmux workspace identity is ambiguous") end' 2>/dev/null) || return 1
-        [ "$title" = "$expected_title" ] || return 1
-        fm_backend_cmux_surface_exists "$FM_BACKEND_CMUX_WORKSPACE" "$FM_BACKEND_CMUX_SURFACE" && return 0
-        wsid=$FM_BACKEND_CMUX_WORKSPACE
-        ;;
-      0)
-        wsid=$(fm_backend_cmux_workspace_id_for_label_from_inventory "$inventory" "$expected_title") || return 1
-        ;;
-      *)
-        return 1
-        ;;
-    esac
+    recorded_workspace=$FM_BACKEND_CMUX_WORKSPACE
+    recorded_surface=$FM_BACKEND_CMUX_SURFACE
+    fm_backend_cmux_target_workspace_for_label "$recorded_workspace" "$expected_title" || return 1
+    wsid=$FM_BACKEND_CMUX_EXACT_WORKSPACE
+    if [ "$wsid" = "$recorded_workspace" ] \
+       && fm_backend_cmux_surface_exists "$wsid" "$recorded_surface"; then
+      return 0
+    fi
     sfid=$(fm_backend_cmux_surface_id_for_workspace "$wsid")
     [ -n "$sfid" ] || return 1
     FM_BACKEND_CMUX_WORKSPACE=$wsid
@@ -1009,6 +1001,55 @@ fm_backend_cmux_workspace_exact_location_for_title() {
   done <<< "$inventory"
   [ "$identity_count" -eq 1 ] || return 1
   return 0
+}
+
+fm_backend_cmux_target_workspace_for_label() {  # <recorded-workspace-id> <expected-title>
+  local recorded_workspace=$1 expected_title=$2 inventory window_id workspace_id title count
+  local exact_count=0 title_count=0 identity_count=0 exact_title=
+  local title_workspace= title_window= title_count_value=
+  FM_BACKEND_CMUX_EXACT_WINDOW=
+  FM_BACKEND_CMUX_EXACT_COUNT=
+  FM_BACKEND_CMUX_EXACT_TITLE=
+  FM_BACKEND_CMUX_EXACT_WORKSPACE=
+  fm_backend_cmux_workspace_id_valid "$recorded_workspace" || return 1
+  [ -n "$expected_title" ] || return 1
+  if LC_ALL=C printf '%s' "$expected_title" | LC_ALL=C grep -q '[[:cntrl:]]'; then
+    return 1
+  fi
+  inventory=$(fm_backend_cmux_all_workspace_inventory) || return 1
+  while IFS=$'\t' read -r window_id workspace_id title count; do
+    [ -n "$window_id" ] || continue
+    if [ "$workspace_id" = "$recorded_workspace" ]; then
+      exact_count=$((exact_count + 1))
+      [ "$exact_count" -eq 1 ] || return 1
+      exact_title=$title
+      FM_BACKEND_CMUX_EXACT_WORKSPACE=$workspace_id
+      FM_BACKEND_CMUX_EXACT_WINDOW=$window_id
+      FM_BACKEND_CMUX_EXACT_COUNT=$count
+    fi
+    if [ "$title" = "$expected_title" ]; then
+      title_count=$((title_count + 1))
+      [ "$title_count" -eq 1 ] || return 1
+      title_workspace=$workspace_id
+      title_window=$window_id
+      title_count_value=$count
+    fi
+  done <<< "$inventory"
+  if [ "$exact_count" -eq 1 ]; then
+    [ "$exact_title" = "$expected_title" ] || return 1
+    FM_BACKEND_CMUX_EXACT_TITLE=$exact_title
+    return 0
+  fi
+  [ "$title_count" -eq 1 ] || return 1
+  while IFS=$'\t' read -r window_id workspace_id title count; do
+    [ -n "$window_id" ] || continue
+    [ "$workspace_id" = "$title_workspace" ] && identity_count=$((identity_count + 1))
+  done <<< "$inventory"
+  [ "$identity_count" -eq 1 ] || return 1
+  FM_BACKEND_CMUX_EXACT_WORKSPACE=$title_workspace
+  FM_BACKEND_CMUX_EXACT_WINDOW=$title_window
+  FM_BACKEND_CMUX_EXACT_COUNT=$title_count_value
+  FM_BACKEND_CMUX_EXACT_TITLE=$expected_title
 }
 
 # fm_backend_cmux_window_of_workspace: echo "<window_id> <workspace_count>" for

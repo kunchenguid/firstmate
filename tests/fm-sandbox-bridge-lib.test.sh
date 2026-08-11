@@ -302,18 +302,27 @@ fm_sandbox_bridge_create "$STATE" "$REMOVE_ID" "$WORKTREE" "$BRIEF" "$ENCODER" |
 expect_code 0 "$status" "retryable bridge removal fixture creation"
 remove_bridge=$(fm_sandbox_bridge_expected_path "$STATE" "$REMOVE_ID") || fail "retryable bridge path resolution failed"
 remove_cursor=$(fm_sandbox_bridge_cursor_path "$STATE" "$REMOVE_ID") || fail "retryable cursor path resolution failed"
+remove_bridge_id=$(fm_sandbox_bridge_lstat_identity "$remove_bridge") || fail "retryable bridge identity resolution failed"
+remove_cursor_id=$(fm_sandbox_bridge_lstat_identity "$remove_cursor") || fail "retryable cursor identity resolution failed"
 export FM_TEST_FAIL_RM_CURSOR_ONCE=1
 status=0
-fm_sandbox_bridge_remove "$remove_bridge" "$STATE" "$REMOVE_ID" "$WORKTREE" || status=$?
+fm_sandbox_bridge_remove_acquired_retryable \
+  "$remove_bridge" "$STATE" "$REMOVE_ID" "$WORKTREE" \
+  "$remove_bridge_id" "$remove_cursor_id" || status=$?
 expect_code 1 "$status" "bridge removal should report a cursor deletion failure"
 assert_no_entry "$remove_bridge" "bridge removal failure did not retain the partially removed state"
 assert_present "$remove_cursor" "bridge removal failure did not retain the cursor for retry"
+assert_present "$STATE/sandbox-bridge-remove/$REMOVE_ID" \
+  "prepublication bridge removal did not retain exact cleanup identities"
 unset FM_TEST_FAIL_RM_CURSOR_ONCE
 status=0
-fm_sandbox_bridge_remove "$remove_bridge" "$STATE" "$REMOVE_ID" "$WORKTREE" || status=$?
+fm_sandbox_bridge_remove_acquired_retryable \
+  "$remove_bridge" "$STATE" "$REMOVE_ID" "$WORKTREE" '' '' || status=$?
 expect_code 0 "$status" "bridge removal retry"
 assert_no_entry "$remove_bridge" "bridge removal retry left the bridge behind"
 assert_no_entry "$remove_cursor" "bridge removal retry left the cursor behind"
+assert_no_entry "$STATE/sandbox-bridge-remove/$REMOVE_ID" \
+  "bridge removal retry left its cleanup identity record"
 
 PARTIAL_REMOVE_ID='partial-remove-task'
 status=0

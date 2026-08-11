@@ -347,7 +347,7 @@ fm_sandbox_bridge_create() {  # <state> <task-id> <worktree> <canonical-brief> <
   : > "$expected/status"
   runtime_brief_tmp=$(mktemp "$expected/.runtime-brief.md.tmp.XXXXXX") || {
     umask "$old_umask"
-    fm_sandbox_bridge_remove_acquired \
+    fm_sandbox_bridge_remove_acquired_retryable \
       "$expected" "$state_real" "$task_id" "$worktree_real" \
       "$FM_SANDBOX_BRIDGE_ACQUIRED_ID" "$FM_SANDBOX_BRIDGE_ACQUIRED_CURSOR_ID" || true
     fm_sandbox_bridge_error "could not prepare sandbox bridge runtime inputs: $expected"
@@ -362,7 +362,7 @@ fm_sandbox_bridge_create() {  # <state> <task-id> <worktree> <canonical-brief> <
   }; then
     rm -f "$runtime_brief_tmp"
     umask "$old_umask"
-    fm_sandbox_bridge_remove_acquired \
+    fm_sandbox_bridge_remove_acquired_retryable \
       "$expected" "$state_real" "$task_id" "$worktree_real" \
       "$FM_SANDBOX_BRIDGE_ACQUIRED_ID" "$FM_SANDBOX_BRIDGE_ACQUIRED_CURSOR_ID" || true
     fm_sandbox_bridge_error "could not prepare sandbox bridge runtime inputs: $expected"
@@ -371,7 +371,7 @@ fm_sandbox_bridge_create() {  # <state> <task-id> <worktree> <canonical-brief> <
   chmod 600 "$expected/binding" "$expected/status" "$expected/runtime-brief.md" "$cursor"
   umask "$old_umask"
   fm_sandbox_bridge_validate "$expected" "$state_real" "$task_id" "$worktree_real" || {
-    fm_sandbox_bridge_remove_acquired \
+    fm_sandbox_bridge_remove_acquired_retryable \
       "$expected" "$state_real" "$task_id" "$worktree_real" \
       "$FM_SANDBOX_BRIDGE_ACQUIRED_ID" "$FM_SANDBOX_BRIDGE_ACQUIRED_CURSOR_ID" || true
     return 1
@@ -431,6 +431,23 @@ fm_sandbox_bridge_remove_acquired() {  # <bridge> <state> <task-id> <worktree> <
   if [ -e "$cursor" ] || [ -L "$cursor" ]; then
     rm -f "$cursor" || return 1
   fi
+}
+
+fm_sandbox_bridge_remove_acquired_retryable() {  # <bridge> <state> <task-id> <worktree> <bridge-id> [cursor-id]
+  [ "$#" -ge 5 ] && [ "$#" -le 6 ] || return 2
+  local bridge=$1 state=$2 task_id=$3 worktree=$4 bridge_id=$5 cursor_id=${6:-} record
+  record=$(fm_sandbox_bridge_removal_record_path "$state" "$task_id") || return 1
+  if [ -e "$record" ] || [ -L "$record" ]; then
+    fm_sandbox_bridge_removal_record_read "$record" || return 1
+    bridge_id=$FM_SANDBOX_BRIDGE_REMOVAL_BRIDGE_ID
+    cursor_id=$FM_SANDBOX_BRIDGE_REMOVAL_CURSOR_ID
+  else
+    fm_sandbox_bridge_removal_record_write \
+      "$state" "$task_id" "$bridge_id" "$cursor_id" || return 1
+  fi
+  fm_sandbox_bridge_remove_acquired \
+    "$bridge" "$state" "$task_id" "$worktree" "$bridge_id" "$cursor_id" || return 1
+  fm_sandbox_bridge_removal_record_remove "$state" "$task_id"
 }
 
 fm_sandbox_bridge_copy_delta() {  # <bridge-status> <cursor> <host-private tmp>
@@ -603,12 +620,9 @@ fm_sandbox_bridge_remove() {  # <bridge> <state> <task-id> <worktree>
   [ "$bridge" = "$expected" ] || return 1
   removal_record=$(fm_sandbox_bridge_removal_record_path "$state" "$task_id") || return 1
   if [ -e "$removal_record" ] || [ -L "$removal_record" ]; then
-    fm_sandbox_bridge_removal_record_read "$removal_record" || return 1
-    fm_sandbox_bridge_remove_acquired \
+    fm_sandbox_bridge_remove_acquired_retryable \
       "$bridge" "$state" "$task_id" "$worktree" \
-      "$FM_SANDBOX_BRIDGE_REMOVAL_BRIDGE_ID" \
-      "$FM_SANDBOX_BRIDGE_REMOVAL_CURSOR_ID" || return 1
-    fm_sandbox_bridge_removal_record_remove "$state" "$task_id" || return 1
+      '' '' || return 1
     return 0
   fi
   if [ -d "$worktree" ] && [ ! -L "$worktree" ]; then
@@ -641,9 +655,6 @@ fm_sandbox_bridge_remove() {  # <bridge> <state> <task-id> <worktree>
   if [ -e "$cursor" ] || [ -L "$cursor" ]; then
     cursor_id=$(fm_sandbox_bridge_lstat_identity "$cursor") || return 1
   fi
-  fm_sandbox_bridge_removal_record_write \
-    "$state" "$task_id" "$bridge_id" "$cursor_id" || return 1
-  fm_sandbox_bridge_remove_acquired \
+  fm_sandbox_bridge_remove_acquired_retryable \
     "$bridge" "$state" "$task_id" "$worktree" "$bridge_id" "$cursor_id" || return 1
-  fm_sandbox_bridge_removal_record_remove "$state" "$task_id"
 }

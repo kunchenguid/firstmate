@@ -709,9 +709,10 @@ test_target_ready_checks_expected_label() {
   local dir fb title
   dir="$TMP_ROOT/ready-label-ok"; mkdir -p "$dir/responses"
   title=$(cmux_expected_scoped_title fm-label)
-  cmux_workspace_list_response "$dir" 1 "aaaaaaaa-0000-0000-0000-000000000000" "$title"
-  # 2: list-panes --json --id-format uuids -> matching surface
-  cmux_panes_response "$dir" 2 "bbbbbbbb-1111-1111-1111-111111111111"
+  cmux_windows_response "$dir" 1 "eeeeeeee-0000-0000-0000-000000000000" 1
+  cmux_workspace_list_response "$dir" 2 "aaaaaaaa-0000-0000-0000-000000000000" "$title"
+  # 3: list-panes --json --id-format uuids -> matching surface
+  cmux_panes_response "$dir" 3 "bbbbbbbb-1111-1111-1111-111111111111"
   fb=$(make_cmux_fakebin "$dir")
   PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
     bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_target_ready "aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111" fm-label' "$ROOT"
@@ -724,7 +725,8 @@ test_target_ready_checks_expected_label() {
 test_target_ready_rejects_label_mismatch() {
   local dir fb status
   dir="$TMP_ROOT/ready-label-mismatch"; mkdir -p "$dir/responses"
-  cmux_workspace_list_response "$dir" 1 "aaaaaaaa-0000-0000-0000-000000000000" "not-the-task"
+  cmux_windows_response "$dir" 1 "eeeeeeee-0000-0000-0000-000000000000" 1
+  cmux_workspace_list_response "$dir" 2 "aaaaaaaa-0000-0000-0000-000000000000" "not-the-task"
   fb=$(make_cmux_fakebin "$dir")
   PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
     bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_target_ready "aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111" fm-label' "$ROOT"
@@ -744,27 +746,33 @@ test_stale_recovery_requires_unique_valid_inventory() {
     mkdir -p "$dir/responses"
     case "$case_name" in
       duplicate)
-        jq -n --arg title "$title" '{workspaces:[{id:"cccccccc-2222-2222-2222-222222222222",title:$title},{id:"dddddddd-3333-3333-3333-333333333333",title:$title}]}' > "$dir/responses/1.out"
+        cmux_windows_response "$dir" 1 "eeeeeeee-0000-0000-0000-000000000000" 1
+        jq -n --arg title "$title" '{workspaces:[{id:"cccccccc-2222-2222-2222-222222222222",title:$title},{id:"dddddddd-3333-3333-3333-333333333333",title:$title}]}' > "$dir/responses/2.out"
         ;;
       delimiter-id)
-        jq -n --arg title "$title" '{workspaces:[{id:"bad:id",title:$title}]}' > "$dir/responses/1.out"
+        cmux_windows_response "$dir" 1 "eeeeeeee-0000-0000-0000-000000000000" 1
+        jq -n --arg title "$title" '{workspaces:[{id:"bad:id",title:$title}]}' > "$dir/responses/2.out"
         ;;
       control-id)
-        jq -n --arg title "$title" --arg id $'bad\nid' '{workspaces:[{id:$id,title:$title}]}' > "$dir/responses/1.out"
+        cmux_windows_response "$dir" 1 "eeeeeeee-0000-0000-0000-000000000000" 1
+        jq -n --arg title "$title" --arg id $'bad\nid' '{workspaces:[{id:$id,title:$title}]}' > "$dir/responses/2.out"
         ;;
       missing-id)
-        jq -n --arg title "$title" '{workspaces:[{title:$title}]}' > "$dir/responses/1.out"
+        cmux_windows_response "$dir" 1 "eeeeeeee-0000-0000-0000-000000000000" 1
+        jq -n --arg title "$title" '{workspaces:[{title:$title}]}' > "$dir/responses/2.out"
         ;;
       multidoc)
-        jq -n --arg title "$title" '{workspaces:[{id:"cccccccc-2222-2222-2222-222222222222",title:$title}]}' > "$dir/responses/1.out"
-        jq -n --arg title "$title" '{workspaces:[{id:"dddddddd-3333-3333-3333-333333333333",title:$title}]}' >> "$dir/responses/1.out"
+        cmux_windows_response "$dir" 1 "eeeeeeee-0000-0000-0000-000000000000" 1
+        jq -n --arg title "$title" '{workspaces:[{id:"cccccccc-2222-2222-2222-222222222222",title:$title}]}' > "$dir/responses/2.out"
+        jq -n --arg title "$title" '{workspaces:[{id:"dddddddd-3333-3333-3333-333333333333",title:$title}]}' >> "$dir/responses/2.out"
         ;;
       missing-title-match)
-        jq -n '{workspaces:[]}' > "$dir/responses/1.out"
+        cmux_windows_response "$dir" 1 "eeeeeeee-0000-0000-0000-000000000000" 1
+        jq -n '{workspaces:[]}' > "$dir/responses/2.out"
         ;;
       *) fail "unknown stale recovery fixture: $case_name" ;;
     esac
-    cmux_panes_response "$dir" 2 "eeeeeeee-4444-4444-4444-444444444444"
+    cmux_panes_response "$dir" 3 "eeeeeeee-4444-4444-4444-444444444444"
     fb=$(make_cmux_fakebin "$dir")
     out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
       bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_send_key "aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111" Enter fm-label' "$ROOT" 2>&1 ); status=$?
@@ -786,7 +794,8 @@ test_kill_refuses_ambiguous_stale_recovery() {
   local dir fb title status
   dir="$TMP_ROOT/kill-ambiguous-stale"; mkdir -p "$dir/responses"
   title=$(cmux_expected_scoped_title fm-label)
-  jq -n --arg title "$title" '{workspaces:[{id:"cccccccc-2222-2222-2222-222222222222",title:$title},{id:"dddddddd-3333-3333-3333-333333333333",title:$title}]}' > "$dir/responses/1.out"
+  cmux_windows_response "$dir" 1 "eeeeeeee-0000-0000-0000-000000000000" 1
+  jq -n --arg title "$title" '{workspaces:[{id:"cccccccc-2222-2222-2222-222222222222",title:$title},{id:"dddddddd-3333-3333-3333-333333333333",title:$title}]}' > "$dir/responses/2.out"
   fb=$(make_cmux_fakebin "$dir")
   PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
     bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_kill "aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111" "" fm-label' "$ROOT"
@@ -867,8 +876,12 @@ test_send_key_recovers_stale_target_by_label() {
   local dir fb title
   dir="$TMP_ROOT/sendkey-stale-target"; mkdir -p "$dir/responses"
   title=$(cmux_expected_scoped_title fm-label)
-  cmux_workspace_list_response "$dir" 1 "cccccccc-2222-2222-2222-222222222222" "$title"
-  cmux_panes_response "$dir" 2 "dddddddd-3333-3333-3333-333333333333"
+  cmux_windows_response "$dir" 1 \
+    "eeeeeeee-0000-0000-0000-000000000000" 1 \
+    "ffffffff-0000-0000-0000-000000000000" 1
+  cmux_workspace_list_response "$dir" 2 "11111111-2222-2222-2222-222222222222" other
+  cmux_workspace_list_response "$dir" 3 "cccccccc-2222-2222-2222-222222222222" "$title"
+  cmux_panes_response "$dir" 4 "dddddddd-3333-3333-3333-333333333333"
   fb=$(make_cmux_fakebin "$dir")
   PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
     bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_send_key "aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111" Enter fm-label' "$ROOT"
@@ -1435,12 +1448,20 @@ test_kill_recovers_stale_target_by_label() {
   local dir fb title
   dir="$TMP_ROOT/kill-stale-target"; mkdir -p "$dir/responses"
   title=$(cmux_expected_scoped_title fm-label)
-  # target_ready label recovery: 1 strict workspace list, 2 list-panes (surface id).
-  cmux_workspace_list_response "$dir" 1 "cccccccc-2222-2222-2222-222222222222" "$title"
-  cmux_panes_response "$dir" 2 "dddddddd-3333-3333-3333-333333333333"
-  # window_of_workspace on the REFRESHED id: 3 list-windows (not last), 4 workspace list --window.
-  cmux_windows_response "$dir" 3 "eeeeeeee-0000-0000-0000-000000000000" 2
-  cmux_workspace_list_response "$dir" 4 "cccccccc-2222-2222-2222-222222222222" "$title" "ffffffff-0000-0000-0000-000000000000" "other"
+  # target_ready label recovery: 1 list-windows, 2 workspace list in the first
+  # window, 3 workspace list in the second window, 4 list-panes.
+  cmux_windows_response "$dir" 1 \
+    "eeeeeeee-0000-0000-0000-000000000000" 1 \
+    "ffffffff-0000-0000-0000-000000000000" 2
+  cmux_workspace_list_response "$dir" 2 "11111111-2222-2222-2222-222222222222" other
+  cmux_workspace_list_response "$dir" 3 "cccccccc-2222-2222-2222-222222222222" "$title" "99999999-0000-0000-0000-000000000000" other-two
+  cmux_panes_response "$dir" 4 "dddddddd-3333-3333-3333-333333333333"
+  # window_of_workspace on the refreshed id: 5 list-windows, 6-7 workspace lists.
+  cmux_windows_response "$dir" 5 \
+    "eeeeeeee-0000-0000-0000-000000000000" 1 \
+    "ffffffff-0000-0000-0000-000000000000" 2
+  cmux_workspace_list_response "$dir" 6 "11111111-2222-2222-2222-222222222222" other
+  cmux_workspace_list_response "$dir" 7 "cccccccc-2222-2222-2222-222222222222" "$title" "99999999-0000-0000-0000-000000000000" other-two
   fb=$(make_cmux_fakebin "$dir")
   PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
     bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_kill "aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111" "" fm-label' "$ROOT"

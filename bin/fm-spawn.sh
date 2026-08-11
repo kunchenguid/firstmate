@@ -1081,7 +1081,7 @@ spawn_abort_cleanup() {
       echo "warning: could not remove unpublished Docker OpenCode turn-end hook for $ID" >&2
     fi
     if [ "$SPAWN_BRIDGE_CLEANUP" = 1 ]; then
-      if fm_sandbox_bridge_remove_acquired \
+      if fm_sandbox_bridge_remove_acquired_retryable \
           "$PLACEMENT_BRIDGE" "$STATE" "$ID" "$WT" \
           "$PLACEMENT_BRIDGE_ID" "$PLACEMENT_BRIDGE_CURSOR_ID"; then
         SPAWN_BRIDGE_CLEANUP=0
