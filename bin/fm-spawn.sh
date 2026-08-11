@@ -800,7 +800,7 @@ spawn_herdr_presentation_order_lock_acquire() {
 }
 
 clear_relaunch_harness_wiring() {
-  local harness=$1 wt=$2 state=$3 id=$4 token_path token auth_path path
+  local harness=$1 wt=$2 state=$3 id=$4 token_path token auth_path path hook expected actual
   # The wiring arms above match on harness PREFIXES, because a task launched
   # from a raw command records that command's basename rather than the exact
   # adapter name. The retirement tables are keyed by the exact adapter, so the
@@ -809,6 +809,17 @@ clear_relaunch_harness_wiring() {
   # unrecognized value resolves to no adapter, which is also the case in which
   # no wiring was armed to begin with.
   harness=$(fm_control_harness_family "$harness") || harness=
+  if [ "$harness" = devin ]; then
+    hook=$(fm_control_harness_wiring_paths "$harness" "$wt" "$state" "$id") || return 1
+    if [ -n "$hook" ] && [ -f "$hook" ] && [ ! -L "$hook" ]; then
+      expected=$(fm_control_devin_stop_hook_json "$state/$id.turn-ended") || return 1
+      actual=$(<"$hook") || return 1
+      if [ "$actual" = "$expected" ]; then
+        rm -f -- "$hook" || return 1
+      fi
+    fi
+    return 0
+  fi
   token_path=$(fm_control_harness_turnend_token_path "$harness" "$state" "$id") || return 1
   token=
   if [ -n "$token_path" ] && [ -f "$token_path" ]; then

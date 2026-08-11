@@ -679,7 +679,9 @@ remove_devin_turnend_hook() {  # <recorded-harness> <worktree> <state-dir> <id>
   [ -f "$hook" ] && [ ! -L "$hook" ] || return 0
   expected=$(fm_control_devin_stop_hook_json "$state_dir/$id.turn-ended") || return 1
   actual=$(<"$hook") || return 1
-  [ "$actual" != "$expected" ] || rm -f -- "$hook"
+  if [ "$actual" = "$expected" ]; then
+    rm -f -- "$hook"
+  fi
 }
 
 retire_busy_state() {

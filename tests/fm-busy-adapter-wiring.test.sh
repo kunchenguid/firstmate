@@ -26,10 +26,11 @@ make_spawn_fakebin() {
 set -u
 case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+  *"#{pane_current_command}"*) printf '%s\n' "${FM_FAKE_PANE_COMMAND:-firstmate}"; exit 0 ;;
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
-  list-windows) exit 0 ;;
+  list-windows) printf '%s\n' "${FM_FAKE_WINDOW_NAME:-}"; exit 0 ;;
   has-session|new-session|new-window|kill-window) exit 0 ;;
   send-keys)
     previous=
@@ -71,14 +72,19 @@ run_spawn() {  # <home> <wt> <fakebin> <spawn-args...>
   # Every case here is a ship spawn, which carries an explicit delivery contract
   # (AGENTS.md section 7); these tests are about busy-state wiring, so they pass a
   # fixed valid one.
-  local home=$1 wt=$2 fakebin=$3
+  local home=$1 wt=$2 fakebin=$3 arg relaunch=0
   shift 3
-  set -- "$@" --mode no-mistakes --yolo off
+  for arg in "$@"; do
+    [ "$arg" != --relaunch ] || relaunch=1
+  done
+  [ "$relaunch" = 1 ] || set -- "$@" --mode no-mistakes --yolo off
   FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
     FM_FAKE_LITERALS="$home/../literals" \
+    FM_FAKE_PANE_COMMAND="${FM_FAKE_PANE_COMMAND:-firstmate}" \
+    FM_FAKE_WINDOW_NAME="${FM_FAKE_WINDOW_NAME:-}" \
     GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
     "$SPAWN" "$@" 2>&1
 }
@@ -326,6 +332,26 @@ test_devin_refuses_to_replace_project_hook_file() {
   pass "devin refuses to overwrite a project-owned hook file"
 }
 
+test_devin_relaunch_preserves_project_replacement() {
+  local rec id=busy-devin-relaunch out hooks foreign
+  rec=$(make_spawn_case devin-relaunch devin "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "devin spawn should succeed: $out"
+  hooks="$WT_DIR/.devin/hooks.v1.json"
+  foreign='{"Stop":[{"hooks":[{"type":"command","command":"echo project hook"}]}]}'
+  printf '%s\n' "$foreign" > "$hooks"
+
+  out=$(FM_FAKE_PANE_COMMAND=zsh FM_FAKE_WINDOW_NAME="fm-$id" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" --relaunch --harness claude)
+  expect_code 0 $? "relaunch away from devin should succeed: $out"
+  [ "$(cat "$hooks")" = "$foreign" ] \
+    || fail "relaunch deleted or changed the project-replaced Devin hook"
+  assert_present "$WT_DIR/.claude/settings.local.json" \
+    "relaunch did not arm the replacement harness"
+  pass "relaunch preserves a project-replaced Devin hook while arming the replacement"
+}
+
 test_claude_hooks_semantic_lifecycle() {
   local rec id=busy-cl-1 out state settings
   rec=$(make_spawn_case claude-lifecycle claude "$id")
@@ -422,5 +448,6 @@ test_claude_hooks_stale_incarnation_harmless
 test_codex_unverified_until_a_semantic_source_exists
 test_devin_stop_hook_is_task_local_and_busy_stays_unknown
 test_devin_refuses_to_replace_project_hook_file
+test_devin_relaunch_preserves_project_replacement
 
 echo "all fm-busy-adapter-wiring tests passed"
