@@ -37,7 +37,9 @@
 #   --model <name> and --effort <low|medium|high|xhigh|max> are concrete profile
 #   axes chosen by firstmate at intake. They are only threaded into harnesses whose
 #   installed CLIs were verified to support that axis; unsupported axes are omitted
-#   from that harness's launch rather than guessed.
+#   from that harness's launch rather than guessed. Codex `max` is model-qualified:
+#   it refuses before endpoint or metadata creation unless the selected model is a
+#   current catalog entry that advertises `max`.
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   exact task only (docs/configuration.md "Runtime backend" owns when that flag
 #   is authorized). Without it, the script resolves FM_BACKEND, then
@@ -1155,6 +1157,38 @@ case "$ARG3" in
     ;;
 esac
 
+# Codex's current installed catalog is model-qualified for max reasoning. Keep the
+# verified 0.147.0 catalog boundary explicit and fail closed for both a known
+# ceiling and a model the catalog does not identify. This is deliberately not an
+# adapter-wide max mapping: a requested max must never become an effective max in
+# metadata or the launch command when the selected model cannot carry it.
+codex_max_effort_capability() {
+  case "${1:-}" in
+    gpt-5.6-sol|gpt-5.6-sol-wm|gpt-5.6-terra|gpt-5.6-luna|codex-auto-review)
+      return 0 ;;
+    gpt-5.3-codex-spark)
+      return 1 ;;
+    *)
+      return 2 ;;
+  esac
+}
+
+validate_effort_capability() {
+  local harness=$1 model=${2:-default} effort=${3:-} capability
+  [ "$harness" = codex ] && [ "$effort" = max ] || return 0
+  codex_max_effort_capability "$model"
+  capability=$?
+  case "$capability" in
+    0) return 0 ;;
+    1)
+      echo "error: codex model '$model' does not advertise max reasoning effort (catalog ceiling: xhigh); refusing before metadata or launch" >&2
+      return 1 ;;
+    2)
+      echo "error: codex model '$model' has unknown max reasoning capability; select a model whose installed catalog advertises max (for example gpt-5.6-luna or gpt-5.6-sol); refusing before metadata or launch" >&2
+      return 1 ;;
+  esac
+}
+
 case "$HARNESS" in
   pi|pi-signed) LAUNCH="FM_PI_HARNESS=$HARNESS $LAUNCH" ;;
 esac
@@ -1199,6 +1233,10 @@ if [ "$KIND" = secondmate ] && [ -z "$ARG3" ]; then
     fi
   fi
 fi
+
+# Resolve Codex's model-qualified max capability after secondmate config tokens
+# have been applied, but before any endpoint, hook, or task metadata is created.
+validate_effort_capability "$HARNESS" "${MODEL:-default}" "${EFFORT:-}" || exit 1
 
 secondmate_registry_value() {
   secondmate_registry_field "$DATA/secondmates.md" "$1" "$2"
@@ -1294,7 +1332,7 @@ model_flag_for_harness() {
 }
 
 effort_flag_for_harness() {
-  local harness=$1 effort=$2
+  local harness=$1 model=$2 effort=$3
   [ -n "$effort" ] && [ "$effort" != default ] || return 0
   case "$harness" in
     claude)
@@ -1303,11 +1341,13 @@ effort_flag_for_harness() {
       esac
       ;;
     codex)
-      # The installed codex config schema uses model_reasoning_effort, and the
-      # bundled model catalog advertises low|medium|high|xhigh. Omit max rather
-      # than passing an unsupported value.
+      # The installed codex config schema uses model_reasoning_effort. Max is
+      # emitted only after the model-qualified capability check above.
       case "$effort" in
         low|medium|high|xhigh) printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")" ;;
+        max)
+          codex_max_effort_capability "$model" || return 1
+          printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")" ;;
       esac
       ;;
     grok)
@@ -2604,7 +2644,10 @@ sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts
 sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
-EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
+EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$MODEL" "$EFFORT") || {
+  echo "error: codex max reasoning effort is not supported by model '${MODEL:-default}'; refusing before launch" >&2
+  exit 1
+}
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
 LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}

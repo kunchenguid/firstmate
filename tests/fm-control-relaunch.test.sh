@@ -607,7 +607,7 @@ test_secondmate_relaunch_picks_up_the_configured_harness_pin() {
   dir=$(new_case smpin sm3)
   home="$dir/home"
   mkdir -p "$home/config"
-  printf 'codex some-model high\n' > "$home/config/secondmate-harness"
+  printf 'codex gpt-5.6-luna max\n' > "$home/config/secondmate-harness"
   mkdir -p "$home/data/sm3"
   printf '# secondmate brief\n' > "$home/data/sm3/brief.md"
   fm_git_worktree "$dir/proj" "$dir/smhome" sm-branch
@@ -634,9 +634,9 @@ test_secondmate_relaunch_picks_up_the_configured_harness_pin() {
   expect_code 0 "$rc" "a configured secondmate harness should relaunch"$'\n'"$out"
   [ "$(journal_field "$dir" sm3 to_harness)" = codex ] \
     || fail "a secondmate relaunch should pick up the configured harness pin, got '$(journal_field "$dir" sm3 to_harness)'"
-  [ "$(journal_field "$dir" sm3 to_model)" = some-model ] \
+  [ "$(journal_field "$dir" sm3 to_model)" = gpt-5.6-luna ] \
     || fail "the configured model token should come with the pin"
-  [ "$(journal_field "$dir" sm3 to_effort)" = high ] \
+  [ "$(journal_field "$dir" sm3 to_effort)" = max ] \
     || fail "the configured effort token should come with the pin"
   assert_not_contains "$out" "not a verified harness" "codex is a verified harness"
   pass "fm-control relaunch: a secondmate relaunch re-resolves its durable configured harness pin"
