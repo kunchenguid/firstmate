@@ -361,8 +361,11 @@ const fire = async (args, entries = [], timestamp = new Date().toISOString()) =>
 };
 await fire([]);
 await fire(["-c"]);
-await fire(["--continue"]);
-await fire(["--session", "session-id"]);
+await fire(["--continue"], [{ type: "message" }]);
+await fire(["--resume"]);
+await fire(["-r"], [{ type: "message" }]);
+await fire(["--session", "new-session"]);
+await fire(["--session=existing-session"], [{ type: "message" }]);
 await fire(["--session-id", "new-id"]);
 await fire(["--session-id=existing-id"], [{ type: "message" }]);
 await fire(["--session-id", "empty-existing-id"], [], "2000-01-01T00:00:00.000Z");
@@ -374,8 +377,11 @@ JS
   [ -z "$out" ] || fail "Pi continuation classification printed output: $out"
   expected=$(printf '%s\n' \
     '--source startup' \
+    '--source startup' \
     '--source resume' \
+    '--source startup' \
     '--source resume' \
+    '--source startup' \
     '--source resume' \
     '--source startup' \
     '--source resume' \
@@ -385,7 +391,7 @@ JS
   actual=$(cat "$fixture/state/sources")
   [ "$actual" = "$expected" ] \
     || fail "Pi continuation classification produced unexpected sources: $actual"
-  pass "Pi maps CLI continuations away from true startup"
+  pass "Pi distinguishes restored CLI sessions from create-if-missing startups"
 }
 
 test_pi_large_sessionstart_digest_is_delivered_loudly() {

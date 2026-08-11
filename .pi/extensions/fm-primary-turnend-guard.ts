@@ -83,13 +83,16 @@ function restoredSessionEvidence(ctx: SessionStartContext): boolean {
 
 function startupRebuildSource(ctx: SessionStartContext): "resume" | "fork" | undefined {
   const args = process.argv.slice(2);
+  const restored = restoredSessionEvidence(ctx);
   for (const arg of args) {
     if (arg === "--fork" || arg.startsWith("--fork=")) return "fork";
     if (
-      arg === "-c" || arg === "--continue" ||
-      arg === "-r" || arg === "--resume" ||
-      arg === "--session" || arg.startsWith("--session=") ||
-      ((arg === "--session-id" || arg.startsWith("--session-id=")) && restoredSessionEvidence(ctx))
+      restored && (
+        arg === "-c" || arg === "--continue" ||
+        arg === "-r" || arg === "--resume" ||
+        arg === "--session" || arg.startsWith("--session=") ||
+        arg === "--session-id" || arg.startsWith("--session-id=")
+      )
     ) return "resume";
   }
   return undefined;
