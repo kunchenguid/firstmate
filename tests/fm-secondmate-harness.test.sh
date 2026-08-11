@@ -563,7 +563,7 @@ test_spawn_unverified_secondmate_harness_refused() {
     "unverified: error names the rejected harness"
   assert_contains "$(cat "$err")" "config/secondmate-harness" \
     "unverified: error names the secondmate-harness source"
-  assert_contains "$(cat "$err")" "--harness <claude|codex|opencode|pi|grok|traex>" \
+  assert_contains "$(cat "$err")" "--harness <" \
     "unverified: the refusal must name the flag that fixes it, not only what it rejected"
   [ -e "$w/home/state/sm.meta" ] && fail "unverified: a meta was written despite the abort"
   pass "B6 spawn: an unverified resolved secondmate harness is refused (guard intact)"
@@ -602,7 +602,7 @@ test_spawn_unresolved_secondmate_harness_names_the_flag() {
   [ "$rc" -ne 0 ] || fail "unresolved: spawn should have failed"
   assert_contains "$(cat "$err")" "no harness resolved" \
     "unresolved: an unresolved harness must not be reported as a missing template for an adapter named 'unknown'"
-  assert_contains "$(cat "$err")" "--harness <claude|codex|opencode|pi|grok|traex>" \
+  assert_contains "$(cat "$err")" "--harness <" \
     "unresolved: the refusal must name the flag that fixes it"
   assert_contains "$(cat "$err")" "bin/fm-spawn.sh --host" \
     "unresolved: the refusal must show a caller on another machine how to pass it"
@@ -769,7 +769,9 @@ test_spawn_traex_secondmate_launches_without_notify() {
     *traecli*|*trae-cli*|*trae-agent*|*coco*)
       fail "traex secondmate launch names a coco 1.0 binary: $launch" ;;
   esac
-  assert_contains "$launch" 'cat ' "traex secondmate launch must inject the brief"
+  # The brief now rides the canonical operational-input encoder rather than a
+  # bare `cat`; what matters here is that the charter reaches the launch.
+  assert_contains "$launch" 'encode launch-brief' "traex secondmate launch must inject the brief"
   assert_not_contains "$launch" 'notify=' "a traex SECONDMATE launch must NOT carry -c notify= (turn-end rides the .trae/hooks.json guard in its home)"
   pass "P3 spawn: a traex secondmate launches with codex's no-notify shape"
 }

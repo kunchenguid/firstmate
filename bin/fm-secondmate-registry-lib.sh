@@ -113,7 +113,13 @@ secondmate_registry_field() {
   case "$key" in
     host) printf '%s\n' "$SECONDMATE_REGISTRY_HOST" ;;
     root) printf '%s\n' "$SECONDMATE_REGISTRY_ROOT" ;;
-    machine) printf '%s\n' "$SECONDMATE_REGISTRY_MACHINE" ;;
+    # An entry with no machine: is a home on THIS machine, which is a different
+    # answer from "a machine named empty string". Report it as absent so a caller
+    # cannot read the empty value as a placement.
+    machine)
+      [ -n "$SECONDMATE_REGISTRY_MACHINE" ] || return 1
+      printf '%s\n' "$SECONDMATE_REGISTRY_MACHINE"
+      ;;
     home) printf '%s\n' "$SECONDMATE_REGISTRY_HOME" ;;
     scope) printf '%s\n' "$SECONDMATE_REGISTRY_SCOPE" ;;
     projects) printf '%s\n' "$SECONDMATE_REGISTRY_PROJECTS" ;;

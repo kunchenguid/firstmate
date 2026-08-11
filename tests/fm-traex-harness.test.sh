@@ -147,8 +147,17 @@ make_spawn_case() {  # <name>
 }
 
 run_spawn() {  # <home> <wt> <fakebin> <launchlog> <args...>
+  # Every case here is a ship spawn, which carries an explicit delivery contract
+  # (AGENTS.md section 7); these tests are about the traex adapter, so they pass
+  # a fixed valid one.
   local home=$1 wt=$2 fakebin=$3 launchlog=$4
   shift 4
+  # A scout or secondmate spawn records no delivery posture and REFUSES the
+  # flags, so only a ship spawn gets them.
+  case " $* " in
+    *" --scout "*|*" --secondmate "*) : ;;
+    *) set -- "$@" --mode no-mistakes --yolo off ;;
+  esac
   : > "$launchlog"
   FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \

@@ -1251,10 +1251,13 @@ launch_template() {
       ;;
     opencode) printf '%s' '__ENV____CMD__ __MODELFLAG____ARGS__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     pi|pi-signed)
+      # Pi's launch args (--tui-mode regular) sit immediately after the binary,
+      # ahead of the model/effort flags, which is the order the verified Pi
+      # launch takes.
       if [ "$kind" = secondmate ]; then
-        printf '%s' '__ENV____CMD__ __MODELFLAG____EFFORTFLAG____ARGS__-e __PITURNEND__ -e __PIWATCH__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' '__ENV____CMD__ __ARGS____MODELFLAG____EFFORTFLAG__-e __PITURNEND__ -e __PIWATCH__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       else
-        printf '%s' '__ENV____CMD__ __MODELFLAG____EFFORTFLAG____ARGS__-e __PIEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' '__ENV____CMD__ __ARGS____MODELFLAG____EFFORTFLAG__-e __PIEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       fi
       ;;
     # grok (Grok Build TUI): a positional prompt starts the supervised interactive
@@ -3160,10 +3163,14 @@ backlog_start_failure_banner() {  # <heading> <detail> <repair-command>
 }
 
 backlog_mark_started() {
-  local backlog out repair retry
+  local backlog out repair retry proj_name
   [ "$KIND" = secondmate ] && return 0
   backlog="$DATA/backlog.md"
-  repair="cd $(shell_quote "$FM_HOME") && tasks-axi add $(shell_quote "$ID") $(shell_quote '<task title>') --kind $(shell_quote "$KIND") --repo $(shell_quote "$PROJ_NAME") --start --file $(shell_quote "$backlog")"
+  # Derived here rather than read from PROJ_NAME: that variable is set on the
+  # ship path only, so a SCOUT reaching this banner would abort on an unbound
+  # variable instead of printing the repair command it exists to print.
+  proj_name=$(basename "$PROJ_ABS")
+  repair="cd $(shell_quote "$FM_HOME") && tasks-axi add $(shell_quote "$ID") $(shell_quote '<task title>') --kind $(shell_quote "$KIND") --repo $(shell_quote "$proj_name") --start --file $(shell_quote "$backlog")"
   retry="cd $(shell_quote "$FM_HOME") && tasks-axi start $(shell_quote "$ID") --file $(shell_quote "$backlog")"
 
   if [ ! -f "$backlog" ]; then

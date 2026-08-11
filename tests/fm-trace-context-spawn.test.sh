@@ -30,7 +30,11 @@ case "${1:-}" in
     [ -z "${FM_FAKE_DUPLICATE_WINDOW:-}" ] || printf '%s\n' "$FM_FAKE_DUPLICATE_WINDOW"
     exit 0
     ;;
-  has-session|new-session|new-window|kill-window) exit 0 ;;
+  # This fork stamps one tmux session per firstmate home, so the container
+  # ensure reads back the ownership stamp it just wrote.
+  list-sessions) basename "$(cd "${FM_HOME:-.}" && pwd -P)"; exit 0 ;;
+  show-options) (cd "${FM_HOME:-.}" && pwd -P); exit 0 ;;
+  has-session|new-session|new-window|kill-window|set-option) exit 0 ;;
   send-keys)
     if [ "${FM_FAKE_TRACEPARENT_SEND_FAIL:-0}" = 1 ]; then
       for a in "$@"; do
