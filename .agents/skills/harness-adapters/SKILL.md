@@ -169,7 +169,7 @@ A send or key action reporting success is not proof that the intended action hap
 OpenCode can accept and queue an Enter while leaving text visible, Grok can consume Enter in its slash popup without submitting, and Kimi can silently drop a message sent before readiness even though the send returns success.
 The shared symptom is a healthy-looking pane with no work in progress, so each adapter must verify the observable postcondition that is specific to its TUI.
 
-## claude (VERIFIED; busy-state hooks live-verified 2026-07-28 on Claude Code 2.1.220)
+## claude (VERIFIED; busy-state hooks live-verified 2026-07-28 on Claude Code 2.1.220; unattended launch re-verified 2026-08-11 on Claude Code 2.1.227)
 
 | Fact | Value |
 |---|---|
@@ -178,9 +178,11 @@ The shared symptom is a healthy-looking pane with no work in progress, so each a
 | Interrupt | single Escape |
 | Skill invocation | `/<skill>` (e.g. `/no-mistakes`) |
 
-First launch in a fresh worktree, or first ever on a machine, may show a trust or bypass-permissions confirmation.
-After every spawn, peek the pane within about 20 seconds.
-If such a dialog is showing, accept it from an active firstmate session using `FM_HOME=<this-firstmate-home> bin/fm-send.sh <window> --key Enter`, or the choice the dialog requires, unless `FM_HOME` is already set to the active firstmate home; verify the brief started processing.
+`bin/fm-spawn.sh` launches every claude crewmate and secondmate unattended: the "Bypass Permissions mode" warning that `--dangerously-skip-permissions` itself triggers is answered by the launch command's own `--settings '{"skipDangerousModePermissionPrompt":true}'`, and the workspace-trust confirmation is pre-answered by writing `projects[<worktree-path>].hasTrustDialogAccepted: true` into the resolved `.claude.json` store before the pane ever asks (both verified empirically: `docs/verification/runtime-backends.md` "Claude unattended launch").
+Neither flag reduces autonomy: `--dangerously-skip-permissions` still bypasses every per-tool approval prompt exactly as before.
+The trust pre-write is best-effort and needs `jq` on the firstmate host: if `jq` is missing, `fm-spawn.sh` prints a `warning: jq not found; could not pre-trust ...` line to stderr and the trust dialog can still appear.
+The write itself runs inside the crewmate's own pane (not firstmate's process), so a pane-side failure - a malformed store, a permissions error - is not detectable from firstmate and fails silently the same way; the earlier peek-and-clear behavior is still the fallback for both cases.
+If a trust dialog is showing, accept it from an active firstmate session using `FM_HOME=<this-firstmate-home> bin/fm-send.sh <window> --key Enter`, or the choice the dialog requires, unless `FM_HOME` is already set to the active firstmate home; verify the brief started processing.
 
 Claude renders a predicted-next-prompt suggestion as dim/faint text inside an otherwise-empty composer after a turn completes.
 A plain `tmux capture-pane` cannot tell that ghost text apart from typed text.

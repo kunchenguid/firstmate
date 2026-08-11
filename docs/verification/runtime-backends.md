@@ -6,6 +6,35 @@ This record contains reusable version-scoped evidence for active runtime guarant
 The backend guides own current setup, safety boundaries, and limitations.
 Exact task chronology, branch names, temporary homes, local paths, process ids, thread ids, and delivery transcripts remain in private reports or PR evidence.
 
+## Claude unattended launch
+
+Verified 2026-08-11 with Claude Code 2.1.227 (`claude --version`) on Linux.
+A fresh, never-before-seen task worktree previously showed two dialogs a launched agent cannot clear itself: a workspace-trust confirmation and, because `--dangerously-skip-permissions` was already passed, a "Bypass Permissions mode" warning defaulted to "No, exit".
+`bin/fm-spawn.sh`'s claude launch template now adds `--settings '{"skipDangerousModePermissionPrompt":true}'`, and, before sending the launch command, sends one jq command through the same pane channel that already ships `GOTMPDIR` to pre-write `projects[<worktree-path>].hasTrustDialogAccepted: true` into the resolved `.claude.json` store.
+
+Manual reproduction against an isolated scratch `CLAUDE_CONFIG_DIR` (never `~/.claude`) confirmed the mechanism in isolation before wiring it into `fm-spawn.sh`:
+
+- A fresh worktree, fresh config store, `--dangerously-skip-permissions` alone: both dialogs appeared exactly as reported, confirming the starting problem.
+- The same fresh worktree and store, launched with `--dangerously-skip-permissions --settings '{"skipDangerousModePermissionPrompt":true}'` and `projects[<path>].hasTrustDialogAccepted: true` pre-seeded: no dialog appeared; the session went straight to the composer and ran a Bash tool call with no per-tool approval prompt; the status line read `bypass permissions on`.
+- Accepting both dialogs manually (the old behavior) was independently confirmed to durably write exactly those two same fields (`hasTrustDialogAccepted` per project path, `skipDangerousModePermissionPrompt` store-wide), confirming the fix answers the dialogs the same way a human would, not a separate or weaker mechanism.
+
+The reusable end-to-end guard is:
+
+```sh
+FM_CLAUDE_UNATTENDED_LAUNCH_LIVE=1 bin/fm-test-run.sh tests/fm-claude-unattended-launch-live-e2e.test.sh
+```
+
+It spawns a real scout task through `bin/fm-spawn.sh --harness claude` into a scratch treehouse worktree and a scratch `CLAUDE_CONFIG_DIR` seeded only with copied real credentials (never trust or permission-prompt state), then fails loudly, naming the installed `claude --version`, if either dialog's text appears in the pane or the session's status line stops showing bypass-permissions mode active. Observed output:
+
+```text
+ok - Claude 2.1.227 (Claude Code) launched unattended in a fresh worktree with no trust or bypass-permissions dialog
+ok - the real Claude session confirms bypass-permissions mode is active, not a per-tool approval regression
+```
+
+Refresh this harness-dependent proof after any Claude Code upgrade and before trusting refreshed evidence.
+The portable regression pinning the launch-string logic (no real harness) is `tests/fm-spawn-dispatch-profile.test.sh`.
+Per-tool autonomy is unchanged: `--dangerously-skip-permissions` still bypasses every tool-approval prompt exactly as before, confirmed by the same `bypass permissions on` status-line check above.
+
 ## tmux
 
 Foreground-process behavior was verified on 2026-07-07 with tmux 3.6a on macOS.

@@ -1098,7 +1098,17 @@ launch_template() {
     # does NOT suppress the interactive ghost text (verified empirically), so the env
     # var is the correct control. The dim-aware composer reader in fm-tmux-lib.sh is
     # the defense-in-depth backstop for any pane this flag cannot reach.
-    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    # --settings '{"skipDangerousModePermissionPrompt":true}' answers the
+    # "Bypass Permissions mode" warning that --dangerously-skip-permissions
+    # itself triggers, without writing to the shared settings.json a human's
+    # own "2. Yes, I accept" answer would durably set (verified empirically:
+    # docs/verification/runtime-backends.md "Claude unattended launch"). The
+    # OTHER first-launch dialog, workspace trust, is keyed per exact directory
+    # path rather than answerable by any launch flag; the claude_pretrust_cmd
+    # sent before this launch command (see the GOTMPDIR export site below)
+    # pre-writes it into the same store this flag and CLAUDE_CONFIG_DIR
+    # forwarding both already target.
+    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions --settings '\''{"skipDangerousModePermissionPrompt":true}'\'' __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     codex)
       if [ "$kind" = secondmate ]; then
         printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
@@ -2708,6 +2718,39 @@ spawn_record_traceparent() {
 # process (go build, go test, ...) inherit it. Sent before the launch command so
 # the env is set when the agent starts; the brief sleep lets the export land.
 spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
+# Claude Code's workspace-trust dialog is keyed per exact directory path in
+# projects[<path>].hasTrustDialogAccepted inside the SAME store CLAUDE_CONFIG_DIR
+# forwarding above targets, so a never-before-seen task worktree always
+# re-triggers it; Claude Code's own refusal message names this fix. Pre-write it
+# by sending one jq command through the exact channel GOTMPDIR above already
+# uses, so it runs on the real host with real tooling and stays fully inert
+# under the fake-tmux harness portable spawn tests use (which capture but never
+# execute anything sent here) rather than mutating the operator's real
+# .claude.json from firstmate's OWN process. Register both the exact path the
+# pane cd's into and its symlink-resolved form: this repo already treats a
+# symlinked path component as a real hazard for worktree identity (see
+# real_path_or_raw above), and an unresolved mismatch here would just silently
+# reintroduce the dialog. A concurrent sibling spawn racing the same store can
+# lose one update to a last-mv-wins race; the loser just falls back to the
+# harness-adapters skill's peek-and-clear guidance for that one task, never
+# file corruption, since each writer's own uniquely named temp file is
+# atomically renamed into place. Best-effort only: jq is not a universal
+# firstmate dependency (only the optional Relay opt-in requires it), so a
+# missing jq here in the supervising process, or a failure inside the pane,
+# falls back to that same guidance instead of blocking the spawn.
+if [ "$HARNESS" = claude ]; then
+  if command -v jq >/dev/null 2>&1; then
+    claude_pretrust_json="${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json"
+    claude_pretrust_wt_real=$(real_path_or_raw "$WT")
+    claude_pretrust_tmp="$claude_pretrust_json.pretrust.$$"
+    # shellcheck disable=SC2016  # single quotes are deliberate: $p1/$p2 are jq's own --arg names, not shell variables
+    claude_pretrust_filter='.projects[$p1] = ((.projects[$p1] // {}) + {hasTrustDialogAccepted: true}) | if $p2 != $p1 then .projects[$p2] = ((.projects[$p2] // {}) + {hasTrustDialogAccepted: true}) else . end'
+    claude_pretrust_cmd="(cat $(shell_quote "$claude_pretrust_json") 2>/dev/null || printf '%s' '{}') | jq --arg p1 $(shell_quote "$WT") --arg p2 $(shell_quote "$claude_pretrust_wt_real") $(shell_quote "$claude_pretrust_filter") > $(shell_quote "$claude_pretrust_tmp") 2>/dev/null && [ -s $(shell_quote "$claude_pretrust_tmp") ] && mv -f $(shell_quote "$claude_pretrust_tmp") $(shell_quote "$claude_pretrust_json") || rm -f $(shell_quote "$claude_pretrust_tmp")"
+    spawn_send_text_line "$T" "$claude_pretrust_cmd"
+  else
+    echo "warning: jq not found; could not pre-trust $WT for claude, the workspace-trust dialog may still appear (see harness-adapters skill 'claude')" >&2
+  fi
+fi
 # Send through the exact channel that already ships GOTMPDIR, so every backend
 # and harness - ship, scout, and secondmate - gets it before launch. Skipped
 # entirely when trace context is off.

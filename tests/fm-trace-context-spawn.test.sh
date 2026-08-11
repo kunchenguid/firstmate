@@ -13,8 +13,12 @@ SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-trace-context-spawn)
 
 # Fake tmux: answers the pane-path query and logs every literal `send-keys -l`
-# argument (the GOTMPDIR export, the TRACEPARENT export, and the launch command)
-# one per line, in send order, so ordering is observable.
+# argument (the GOTMPDIR export, the claude workspace-trust pre-write, the
+# TRACEPARENT export, and the launch command) one per line, in send order, so
+# ordering is observable. The pre-write command embeds a literal ".claude.json"
+# path, so a plain 'claude' substring match no longer uniquely identifies the
+# launch command itself; assertions below match on
+# `--dangerously-skip-permissions` instead, which only the launch command carries.
 make_spawn_fakebin() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
@@ -255,7 +259,7 @@ test_enabled_records_and_injects_identical_carrier_before_launch() {
 
   gl=$(grep -n '^export GOTMPDIR=' "$LAUNCH_LOG" | tail -1 | cut -d: -f1)
   tl=$(grep -n '^export TRACEPARENT=' "$LAUNCH_LOG" | tail -1 | cut -d: -f1)
-  ll=$(grep -n 'claude' "$LAUNCH_LOG" | tail -1 | cut -d: -f1)
+  ll=$(grep -n -- '--dangerously-skip-permissions' "$LAUNCH_LOG" | tail -1 | cut -d: -f1)
   [ -n "$gl" ] && [ -n "$tl" ] && [ -n "$ll" ] || fail "launch log missing GOTMPDIR/TRACEPARENT/launch lines"
   [ "$tl" -gt "$gl" ] || fail "TRACEPARENT export must ride the GOTMPDIR pre-launch site (gotmp=$gl tp=$tl)"
   [ "$tl" -lt "$ll" ] || fail "TRACEPARENT export must be sent before the launch literal (tp=$tl launch=$ll)"
@@ -299,7 +303,7 @@ test_failed_delivery_omits_metadata_and_still_launches() {
     || fail "failed traceparent delivery must not leave a traceparent= claim in meta"
   ! grep -q '^export TRACEPARENT=' "$LAUNCH_LOG" \
     || fail "the failed TRACEPARENT export must not be recorded as delivered"
-  grep -q 'claude' "$LAUNCH_LOG" || fail "the source task must still launch"
+  grep -q -- '--dangerously-skip-permissions' "$LAUNCH_LOG" || fail "the source task must still launch"
   pass "failed TRACEPARENT delivery omits metadata while the source task still launches"
 }
 
@@ -316,7 +320,7 @@ test_unsafe_delivery_refuses_to_append_launch() {
   [ "$status" -ne 0 ] || fail "uncleared traceparent input must stop spawn"
   assert_contains "$out" "refusing to append the launch command" \
     "unsafe traceparent delivery should report why spawn stopped"
-  ! grep -q 'claude' "$LAUNCH_LOG" \
+  ! grep -q -- '--dangerously-skip-permissions' "$LAUNCH_LOG" \
     || fail "unsafe traceparent delivery must not append the launch command"
   pass "uncleared TRACEPARENT input stops before the launch command is appended"
 }
