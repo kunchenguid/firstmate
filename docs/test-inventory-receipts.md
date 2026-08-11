@@ -61,6 +61,12 @@ A test-bearing declaration records a baseline for literal Python test declaratio
 It does not import the project, run pytest, execute plugins, or claim to observe the runtime test suite.
 `collect` writes the receipt and `check` compares the receipt with the current literal source.
 
+For a Git worktree, `collect` and `check` require the checkout root and enumerate only regular stage-0 literal-test paths and blobs from that worktree's index.
+They write and report `source_tree=git-index`, so ignored nested repositories and untracked test files cannot contribute to a receipt.
+Running either command from a subdirectory of a Git checkout fails instead of falling back to filesystem traversal.
+An input that is intentionally outside a Git worktree remains supported and is explicitly marked `source_tree=filesystem`.
+`merge-check` accepts only receipts marked `source_tree=git-index` and separately verifies the exact committed candidate tree.
+
 The receipt binds the declaration digest, baseline version, declaration count, test-file count, and a SHA-256 digest of sorted literal declaration identifiers.
 Dynamic parametrization, generated tests, custom collection hooks, and other runtime behavior are intentionally outside this receipt's guarantee.
 In particular, a candidate-controlled `conftest.py` that could forge a runtime observer is outside the threat model because this contract never executes it.
@@ -75,4 +81,5 @@ Testless projects declare only `schema_version` and `status` and keep no receipt
 
 Seed the declaration and receipt on the target branch before enabling Firstmate merge enforcement for the project.
 Commit the declaration and generated receipt together for a test-bearing project, or only the declaration for a testless project.
-Run `$FM_ROOT/bin/fm-test-inventory.sh collect .` after changing literal test declarations, then commit the regenerated receipt.
+For a Git project, stage changed literal Python test source, then run `$FM_ROOT/bin/fm-test-inventory.sh collect .` from the checkout root and commit the regenerated receipt.
+For an intentional non-Git input, `collect` remains available and marks its receipt `source_tree=filesystem`; that receipt cannot satisfy Git merge verification.

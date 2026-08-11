@@ -24,8 +24,9 @@ EOF
 def test_literal():
     pass
 EOF
-  "$ROOT/bin/fm-test-inventory.sh" collect "$case_dir/wt" >/dev/null
   git -C "$case_dir/wt" add .firstmate tests
+  "$ROOT/bin/fm-test-inventory.sh" collect "$case_dir/wt" >/dev/null
+  git -C "$case_dir/wt" add .firstmate/test-inventory-receipt.json
   git -C "$case_dir/wt" commit -qm inventory
   git -C "$case_dir/project" merge --ff-only fm/task-x1 >/dev/null
   base=$(git -C "$case_dir/project" rev-parse main)

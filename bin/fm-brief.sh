@@ -457,7 +457,7 @@ If you touch a project \`AGENTS.md\` that lacks \`## Maintaining this file\`, ad
 Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced no durable project knowledge.
 
 # Test-inventory declaration
-For a project governed by \`.firstmate/test-inventory.json\`, regenerate its literal-source receipt with \`\$FM_ROOT/bin/fm-test-inventory.sh collect .\` after changing literal Python test declarations and commit it with the change.
+For a project governed by \`.firstmate/test-inventory.json\`, stage changed literal Python test source, then regenerate its literal-source receipt with \`\$FM_ROOT/bin/fm-test-inventory.sh collect .\` from the checkout root and commit it with the change.
 The receipt contract and its runtime-observation boundary are in \`$FM_ROOT/docs/test-inventory-receipts.md\`.
 
 $DOD

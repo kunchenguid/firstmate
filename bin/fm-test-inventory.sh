@@ -7,6 +7,9 @@
 #
 # This tool never imports or executes candidate project code.
 # `collect` writes a receipt from literal Python source and `check` verifies it.
+# In a Git worktree, `collect` and `check` inspect only regular stage-0 test
+# blobs in the index and report `source_tree=git-index`; outside Git, they report
+# `source_tree=filesystem`.
 # `merge-check` additionally binds declarations and receipts to clean exact Git
 # candidate and base commits before the shared merge boundary proceeds.
 set -eu
@@ -181,7 +184,7 @@ def is_test_source(relative):
     return relative.name.startswith("test_") or relative.name.endswith("_test.py")
 
 
-def worktree_sources():
+def filesystem_sources():
     sources = []
     for path in root.rglob("*.py"):
         relative = path.relative_to(root)
@@ -194,6 +197,39 @@ def worktree_sources():
         except OSError as error:
             fail(f"cannot read literal Python test source {relative.as_posix()}: {error}")
     return sorted(sources)
+
+
+def git_worktree_sources():
+    top = pathlib.Path(git("rev-parse", "--show-toplevel").stdout.strip()).resolve()
+    if top != root:
+        fail(f"Git worktree inventory requires the checkout root: {root} != {top}")
+    sources = []
+    entries = git_bytes("ls-files", "-s", "-z", "--cached").stdout.split(b"\0")
+    for entry in entries:
+        if not entry:
+            continue
+        try:
+            header, raw_path = entry.split(b"\t", 1)
+            file_mode, object_id, stage = header.decode("ascii").split()
+            relative = pathlib.PurePosixPath(raw_path.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError) as error:
+            fail(f"cannot inspect Git-indexed path: {error}")
+        if relative.suffix != ".py" or not is_test_source(relative):
+            continue
+        if stage != "0" or file_mode not in {"100644", "100755"}:
+            fail(f"literal Python test source must be a regular stage-0 file in the Git index: {relative.as_posix()}")
+        sources.append((relative.as_posix(), git_bytes("cat-file", "blob", object_id).stdout))
+    return sorted(sources)
+
+
+def worktree_source_tree():
+    inside_worktree = git("rev-parse", "--is-inside-work-tree", check=False)
+    if inside_worktree.returncode == 0 and inside_worktree.stdout.strip() == "true":
+        top = pathlib.Path(git("rev-parse", "--show-toplevel").stdout.strip()).resolve()
+        if top != root:
+            fail(f"Git worktree inventory requires the checkout root: {root} != {top}")
+        return "git-index"
+    return "filesystem"
 
 
 def tree_sources(revision):
@@ -232,9 +268,14 @@ def declaration_nodes(relative, raw):
     return nodes
 
 
-def observed_inventory(revision=None):
+def observed_inventory(revision=None, source_tree=None):
     nodes = []
-    sources = tree_sources(revision) if revision else worktree_sources()
+    if revision:
+        sources = tree_sources(revision)
+    elif source_tree == "git-index":
+        sources = git_worktree_sources()
+    else:
+        sources = filesystem_sources()
     for relative, raw in sources:
         nodes.extend(declaration_nodes(relative, raw))
     if not nodes:
@@ -263,7 +304,7 @@ def require_clean_exact_checkout():
         fail("task worktree is dirty; refusing test-inventory merge verification")
 
 
-def verify_receipt(declaration, policy, receipt, revision=None):
+def verify_receipt(declaration, policy, receipt, revision=None, source_tree=None):
     if not isinstance(receipt, dict) or receipt.get("schema_version") != 1:
         fail("test-inventory receipt must have schema_version=1")
     if receipt.get("declaration_sha256") != canonical_hash(declaration):
@@ -272,10 +313,13 @@ def verify_receipt(declaration, policy, receipt, revision=None):
         fail("test-inventory receipt does not match the declared baseline version")
     if not re.fullmatch(r"[0-9a-f]{64}", str(receipt.get("literal_declarations_sha256", ""))):
         fail("test-inventory receipt must record literal_declarations_sha256")
+    expected_receipt_source_tree = "git-index" if revision else source_tree
+    if receipt.get("source_tree") != expected_receipt_source_tree:
+        fail(f"test-inventory receipt source_tree must be {expected_receipt_source_tree}")
     for key in ("declarations", "test_files"):
         if not positive_integer(receipt.get(key)):
             fail(f"test-inventory receipt {key} must be positive")
-    observed = observed_inventory(revision)
+    observed = observed_inventory(revision, source_tree)
     for key in ("declarations", "test_files", "literal_declarations_sha256"):
         if receipt.get(key) != observed[key]:
             fail(f"current literal Python {key} does not match the committed receipt; regenerate it before merging")
@@ -283,6 +327,8 @@ def verify_receipt(declaration, policy, receipt, revision=None):
         fail("test inventory dropped below the declared floor; record a reviewed baseline_reduction_review before merging")
     return observed
 
+
+source_tree = worktree_source_tree()
 
 if mode == "merge-check":
     require_clean_exact_checkout()
@@ -298,20 +344,20 @@ policy = validate_declaration(declaration)
 if policy["status"] == "testless":
     if receipt_path.exists() or (mode == "merge-check" and load_json_at(candidate_sha, receipt_rel, "candidate test-inventory receipt", required=False) is not None):
         fail("a testless declaration must not keep a test-inventory receipt")
-    print("test inventory: declared testless")
+    print(f"test inventory: source_tree={source_tree} declared testless")
     raise SystemExit(0)
 
 if mode == "collect":
-    observed = observed_inventory()
-    receipt = {"schema_version": 1, "declaration_sha256": canonical_hash(declaration), "baseline_version": policy["baseline"]["version"], **observed, "generated_at": dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat()}
+    observed = observed_inventory(source_tree=source_tree)
+    receipt = {"schema_version": 1, "declaration_sha256": canonical_hash(declaration), "baseline_version": policy["baseline"]["version"], "source_tree": source_tree, **observed, "generated_at": dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat()}
     receipt_path.parent.mkdir(parents=True, exist_ok=True)
     receipt_path.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    print(f"test inventory: declarations={receipt['declarations']} test_files={receipt['test_files']}")
+    print(f"test inventory: source_tree={source_tree} declarations={receipt['declarations']} test_files={receipt['test_files']}")
     raise SystemExit(0)
 
 receipt = load_json(receipt_path, "test-inventory receipt")
 if mode == "merge-check" and receipt != load_json_at(candidate_sha, receipt_rel, "candidate test-inventory receipt"):
     fail("worktree test-inventory receipt does not match the exact candidate commit")
-verified = verify_receipt(declaration, policy, receipt, candidate_sha if mode == "merge-check" else None)
-print(f"test inventory: declarations={verified['declarations']} test_files={verified['test_files']} accepted")
+verified = verify_receipt(declaration, policy, receipt, candidate_sha if mode == "merge-check" else None, source_tree)
+print(f"test inventory: source_tree={source_tree} declarations={verified['declarations']} test_files={verified['test_files']} accepted")
 PY
