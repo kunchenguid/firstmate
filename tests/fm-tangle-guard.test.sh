@@ -174,6 +174,10 @@ SH
 #!/usr/bin/env bash
 set -u
 [ -z "${FM_TREEHOUSE_REC:-}" ] || printf 'treehouse %s\n' "$*" >> "$FM_TREEHOUSE_REC"
+if [ "${1:-}" = get ]; then
+  printf '%s\n' "${FM_TREEHOUSE_GET_PATH:-${FM_FAKE_PANE_PATH:-}}"
+  exit 0
+fi
 if [ "${1:-}" = return ] && [ -n "${FM_TREEHOUSE_RETURN_ATTEMPTS_FILE:-}" ]; then
   n=0
   [ ! -f "$FM_TREEHOUSE_RETURN_ATTEMPTS_FILE" ] || n=$(cat "$FM_TREEHOUSE_RETURN_ATTEMPTS_FILE")
@@ -198,6 +202,7 @@ run_spawn() {
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$pane" TMUX="fake,1,0" \
+    FM_TREEHOUSE_GET_PATH="${FM_TREEHOUSE_GET_PATH:-$pane}" \
     PATH="$fakebin:$PATH" \
     "$ROOT/bin/fm-spawn.sh" "$id" "$proj" codex --mode no-mistakes --yolo off 2>&1
 }
@@ -253,6 +258,27 @@ test_spawn_abort_returns_durable_lease() {
   assert_grep "treehouse return --force $TMP_ROOT/spawn-lease-notgit" "$rec" \
     "an abort after the durable lease was acquired must return it instead of leaking the pool slot"
   pass "fm-spawn: an abort after acquiring a durable treehouse lease returns it to the pool"
+}
+
+test_spawn_cwd_discovery_failure_returns_durable_lease() {
+  local home proj fakebin rec acquired out status
+  home="$TMP_ROOT/spawn-cwd-failure-home"
+  mkdir -p "$home/data"
+  proj=$(make_repo "$TMP_ROOT/spawn-cwd-failure-proj")
+  fakebin=$(make_spawn_fakebin "$TMP_ROOT/spawn-cwd-failure-fake")
+  fm_fake_exit0 "$fakebin" sleep
+  acquired="$TMP_ROOT/spawn-cwd-failure-wt"
+  mkdir -p "$acquired"
+  rec="$TMP_ROOT/spawn-cwd-failure-treehouse.log"
+  : > "$rec"
+
+  out=$(FM_TREEHOUSE_REC="$rec" FM_TREEHOUSE_GET_PATH="$acquired" \
+        run_spawn "$home" abort-cwd-kk1 "$proj" "$proj" "$fakebin"); status=$?
+  expect_code 1 "$status" "spawn whose endpoint never enters the acquired worktree should abort"
+  assert_contains "$out" "did not enter a worktree within 60s" "cwd-discovery abort must keep its timeout diagnostic"
+  assert_grep "treehouse return --force $acquired" "$rec" \
+    "cwd-discovery failure must return the already acquired durable lease"
+  pass "fm-spawn: cwd-discovery failure returns its durable lease"
 }
 
 # The lease-return call is the same operation fm-teardown.sh's
@@ -318,7 +344,11 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${FM_TREEHOUSE_GET_PATH:-${FM_FAKE_PANE_PATH:-}}"
+SH
+  chmod +x "$fakebin/treehouse"
   printf '%s\n' "$fakebin"
 }
 
@@ -330,6 +360,7 @@ run_spawn_record() {
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$pane" TMUX="fake,1,0" \
+    FM_TREEHOUSE_GET_PATH="$pane" \
     FM_TMUX_REC="$rec" \
     PATH="$fakebin:$PATH" \
     "$ROOT/bin/fm-spawn.sh" "$id" "$proj" codex --mode no-mistakes --yolo off 2>&1
@@ -363,8 +394,8 @@ test_spawn_tmux_window_construction() {
     "must disable allow-rename on the spawned window"
 
   # Bug 2 fix (b): treehouse-get and the worktree wait loop target the stable id.
-  assert_grep "send-keys -t @spawnwid cd \"\$(treehouse get --lease --lease-holder rec-win-gg7)\" Enter" "$rec" \
-    "treehouse get must durably lease the slot to the task on the stable window id"
+  assert_grep "send-keys -t @spawnwid cd '$wt' Enter" "$rec" \
+    "the durably leased path must be sent to the stable window id"
   assert_grep "display-message -p -t @spawnwid #{pane_current_path}" "$rec" \
     "the worktree wait loop must query the stable window id, not the name"
 
@@ -377,5 +408,6 @@ test_bootstrap_line
 test_brief_assertion_precedes_branch
 test_spawn_isolation_abort
 test_spawn_abort_returns_durable_lease
+test_spawn_cwd_discovery_failure_returns_durable_lease
 test_spawn_abort_lease_return_retries_transient_lock
 test_spawn_tmux_window_construction

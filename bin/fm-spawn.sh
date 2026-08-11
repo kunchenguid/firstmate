@@ -2220,7 +2220,14 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fi
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-  spawn_send_text_line "$WT_TARGET" "cd \"\$(treehouse get --lease --lease-holder $ID)\""
+  if ! WT=$( ( cd "$PROJ_ABS" && treehouse get --lease --lease-holder "$ID" ) ); then
+    echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
+    exit 1
+  fi
+  TREEHOUSE_ABORT_CLEANUP=1
+  TREEHOUSE_ABORT_WT=$WT
+  spawn_send_text_line "$WT_TARGET" "cd $(shell_quote "$WT")"
+  WT=
 
   # Wait for the durable treehouse lease and cd: the pane's cwd moves from the project to the worktree.
   # Target the stable window id, not the name: if the name is ever lost (e.g. an
@@ -2265,9 +2272,6 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
     exit 1
   fi
-
-  TREEHOUSE_ABORT_CLEANUP=1
-  TREEHOUSE_ABORT_WT=$WT
 
   validate_spawn_worktree "treehouse get" "$T"
 fi
