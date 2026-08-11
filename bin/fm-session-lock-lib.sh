@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Shared session-lock harness identity.
 #
-# ONE owner of the "which verified-harness process holds this home's session
-# lock, and does the current process descend from that same harness?" decision.
+# ONE owner of the "which identity-matched verified-harness process holds this
+# home's session lock, and does the current process descend from that same
+# harness?" decision.
 # bin/fm-lock.sh uses it to acquire and inspect state/.lock;
 # bin/fm-claude-stop-autoarm.sh uses it to prove a Stop hook fires inside the
 # lock-owning primary session before it may arm or rewake.
@@ -138,6 +139,44 @@ fm_harness_pid_alive() {
   fm_harness_process_matches "$comm" "$args"
 }
 
+# Print the process-identity sidecar path for session-lock pid $2 in state dir
+# $1. The pid remains the complete state/.lock contents for compatibility with
+# every existing lock reader; the per-pid sidecar makes publication safe when a
+# new owner replaces a different pid.
+fm_session_lock_identity_path() {  # <state> <pid>
+  printf '%s/.lock.pid-identity.%s\n' "$1" "$2"
+}
+
+# Return 0 when the recorded and live process identities match, 1 when they
+# provably differ, and 2 when identity evidence is absent or unreadable. Legacy
+# locks have no sidecar, so callers can preserve their conservative live-holder
+# behavior until that session next republishes its lock.
+fm_session_lock_identity_matches() {  # <state> <pid>
+  local state=$1 pid=$2 identity_path recorded actual
+  identity_path=$(fm_session_lock_identity_path "$state" "$pid")
+  [ -f "$identity_path" ] && [ ! -L "$identity_path" ] || return 2
+  recorded=$(cat "$identity_path" 2>/dev/null) || return 2
+  [ -n "$recorded" ] || return 2
+  command -v fm_pid_identity >/dev/null 2>&1 || return 2
+  actual=$(fm_pid_identity "$pid" 2>/dev/null) || return 2
+  [ "$actual" = "$recorded" ]
+}
+
+# True only when $2 is a live verified harness and any available process-
+# identity record still matches it. An absent or unreadable identity record is
+# treated conservatively as a legacy live lock; only a proven mismatch makes a
+# recycled pid stale.
+fm_session_lock_holder_alive() {  # <state> <pid>
+  local state=$1 pid=$2 identity_status
+  fm_harness_pid_alive "$pid" || return 1
+  if fm_session_lock_identity_matches "$state" "$pid"; then
+    return 0
+  else
+    identity_status=$?
+  fi
+  [ "$identity_status" -ne 1 ]
+}
+
 # True when state dir $1 holds a session lock whose pid is ANY harness ancestor
 # of the current process: this script runs inside the session that owns the
 # home's fleet lock. Membership is the honest test of that question, because the
@@ -154,7 +193,10 @@ fm_session_lock_owned_by_self() {
   esac
   pids=$(fm_harness_ancestry_pids) || return 1
   while IFS= read -r pid; do
-    [ "$pid" = "$lock_pid" ] && return 0
+    if [ "$pid" = "$lock_pid" ]; then
+      fm_session_lock_holder_alive "$state" "$lock_pid"
+      return $?
+    fi
   done <<EOF
 $pids
 EOF

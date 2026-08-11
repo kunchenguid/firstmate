@@ -98,7 +98,7 @@ if ! fm_session_lock_owned_by_self "$STATE"; then
   case "$LOCK_PID" in
     ''|*[!0-9]*) exit 0 ;;
   esac
-  fm_harness_pid_alive "$LOCK_PID" && exit 0
+  fm_session_lock_holder_alive "$STATE" "$LOCK_PID" && exit 0
   RECOVER_SESSION_LOCK=1
 fi
 

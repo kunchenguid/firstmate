@@ -220,6 +220,49 @@ SH
   pass "session-lock: a live version-named session holding the lock is not mistaken for a stale owner"
 }
 
+test_recycled_pid_from_sibling_home_is_reclaimed() {
+  local dir home_a home_b recycled_pid live_identity status_out out rc=0 new_owner
+  dir="$TMP_ROOT/recycled-pid"
+  home_a="$dir/home-a"
+  home_b="$dir/home-b"
+  mkdir -p "$home_a/state" "$home_b/state"
+
+  FM_HOME="$home_b" "$NAMED_CLAUDE" -c 'sleep 60; :' </dev/null >/dev/null 2>&1 &
+  recycled_pid=$!
+  live_identity=$(fm_test_pid_identity "$recycled_pid") \
+    || fail "could not read the sibling home's live harness identity"
+  printf '%s\n' "$recycled_pid" > "$home_a/state/.lock"
+  printf '%s\n' "$live_identity" > "$home_a/state/.lock.pid-identity.$recycled_pid"
+
+  status_out=$(FM_HOME="$home_a" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-lock.sh" status)
+  assert_contains "$status_out" "lock: held by live harness pid $recycled_pid" \
+    "an identity-matched live harness was not preserved as the lock holder"
+
+  printf '%s\n' 'retired original session identity' > "$home_a/state/.lock.pid-identity.$recycled_pid"
+  [ "$(cat "$home_a/state/.lock.pid-identity.$recycled_pid")" != "$live_identity" ] \
+    || fail "the recycled-pid fixture did not separate recorded and live process identities"
+
+  out=$(FM_HOME="$home_a" FM_ROOT_OVERRIDE="$ROOT" "$NAMED_CLAUDE" -c '
+    rc=0
+    "$FM_ROOT_OVERRIDE/bin/fm-lock.sh" || rc=$?
+    printf "owner=%s\n" "$(cat "$FM_HOME/state/.lock" 2>/dev/null || true)"
+    exit "$rc"
+  ' 2>&1) || rc=$?
+  new_owner=$(printf '%s\n' "$out" | sed -n 's/^owner=//p' | tail -1)
+
+  kill -0 "$recycled_pid" 2>/dev/null \
+    || fail "reclaiming home A's stale lock disturbed the sibling home's harness"
+  kill "$recycled_pid" 2>/dev/null || true
+  wait "$recycled_pid" 2>/dev/null || true
+
+  expect_code 0 "$rc" "a recycled pid with a different process identity must not hold home A's session lock"
+  assert_contains "$out" "lock acquired: harness pid" \
+    "home A did not reclaim the stale lock from the recycled sibling-home pid"
+  [ -n "$new_owner" ] && [ "$new_owner" != "$recycled_pid" ] \
+    || fail "home A kept the recycled sibling-home pid as its lock owner: $out"
+  pass "session-lock: a sibling home's harness cannot keep a stale lock alive after pid reuse"
+}
+
 # --- end-to-end layer: the real Stop auto-arm in real process trees ----------
 
 install_autoarm_scripts() {
@@ -358,6 +401,7 @@ test_version_named_session_is_identified_on_both_platforms
 test_ordinary_paths_are_never_harness_processes
 test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live
+test_recycled_pid_from_sibling_home_is_reclaimed
 test_e2e_version_named_session_claims_the_home
 test_e2e_daemon_parented_session_claims_the_home
 test_e2e_daemon_parented_version_named_session_keeps_its_lock

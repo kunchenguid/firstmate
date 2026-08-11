@@ -2,7 +2,8 @@
 # Acquire or inspect the per-home firstmate session lock.
 # Writes the harness (agent) process PID found by walking the shell's ancestry,
 # which lives as long as the firstmate session - unlike the transient subshell
-# PID of any one tool call, which is dead moments after it is written.
+# PID of any one tool call, which is dead moments after it is written. A per-PID
+# process-identity sidecar distinguishes that holder from a later recycled PID.
 # Usage: fm-lock.sh           acquire; exit 1 unless ownership is verified
 #        fm-lock.sh status    print holder and liveness; always exits 0
 set -u
@@ -22,6 +23,8 @@ mkdir -p "$STATE" 2>/dev/null || {
 # same identity contract.
 # shellcheck source=bin/fm-session-lock-lib.sh
 . "$SCRIPT_DIR/fm-session-lock-lib.sh"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 
 if [ "${1:-}" = "status" ]; then
   if [ ! -f "$LOCK" ]; then echo "lock: free"; exit 0; fi
@@ -29,11 +32,15 @@ if [ "${1:-}" = "status" ]; then
     echo "lock: unreadable"
     exit 0
   }
-  if fm_harness_pid_alive "$old"; then echo "lock: held by live harness pid $old"; else echo "lock: stale (pid $old dead or not a harness)"; fi
+  if fm_session_lock_holder_alive "$STATE" "$old"; then echo "lock: held by live harness pid $old"; else echo "lock: stale (pid $old dead or not a harness)"; fi
   exit 0
 fi
 
 me=$(fm_harness_ancestry_pid) || { echo "error: cannot locate harness process in ancestry" >&2; exit 1; }
+me_identity=$(fm_pid_identity "$me" 2>/dev/null) || {
+  echo "error: cannot verify session lock ownership; operate read-only until resolved" >&2
+  exit 1
+}
 probe=$(mktemp "$STATE/.lock-write.XXXXXX" 2>/dev/null) || {
   echo "error: cannot write session lock; operate read-only until resolved" >&2
   exit 1
@@ -42,11 +49,14 @@ rm -f "$probe" 2>/dev/null || {
   echo "error: cannot clean session-lock publication probe; operate read-only until resolved" >&2
   exit 1
 }
-# shellcheck source=bin/fm-wake-lib.sh
-. "$SCRIPT_DIR/fm-wake-lib.sh"
 CLAIM_LOCK="$STATE/.lock.acquire"
 CLAIM_LOCK_HELD=0
+IDENTITY_TMP=
 release_claim_lock() {
+  if [ -n "$IDENTITY_TMP" ]; then
+    rm -f "$IDENTITY_TMP" 2>/dev/null || true
+    IDENTITY_TMP=
+  fi
   if [ "$CLAIM_LOCK_HELD" -eq 1 ]; then
     fm_lock_release "$CLAIM_LOCK"
     CLAIM_LOCK_HELD=0
@@ -55,13 +65,14 @@ release_claim_lock() {
 trap release_claim_lock EXIT
 trap 'exit 1' HUP INT TERM
 
+old=
 if [ -f "$LOCK" ] && [ ! -L "$LOCK" ]; then
   old=$(cat "$LOCK" 2>/dev/null || true)
-  if [ "$old" = "$me" ]; then
+  if [ "$old" = "$me" ] && fm_session_lock_identity_matches "$STATE" "$old"; then
     echo "lock acquired: harness pid $me"
     exit 0
   fi
-  if fm_harness_pid_alive "$old"; then
+  if [ "$old" != "$me" ] && fm_session_lock_holder_alive "$STATE" "$old"; then
     echo "error: another live firstmate session holds the lock (pid $old); operate read-only until resolved" >&2
     exit 1
   fi
@@ -86,11 +97,22 @@ if [ -e "$LOCK" ] || [ -L "$LOCK" ]; then
     echo "error: session lock is unreadable; operate read-only until resolved" >&2
     exit 1
   }
-  if [ "$old" != "$me" ] && fm_harness_pid_alive "$old"; then
+  if [ "$old" != "$me" ] && fm_session_lock_holder_alive "$STATE" "$old"; then
     echo "error: another live firstmate session holds the lock (pid $old); operate read-only until resolved" >&2
     exit 1
   fi
 fi
+identity_path=$(fm_session_lock_identity_path "$STATE" "$me")
+IDENTITY_TMP=$(mktemp "$STATE/.lock.pid-identity.$me.write.XXXXXX" 2>/dev/null) || {
+  echo "error: cannot write session lock; operate read-only until resolved" >&2
+  exit 1
+}
+if ! printf '%s\n' "$me_identity" > "$IDENTITY_TMP" 2>/dev/null \
+  || ! mv -f "$IDENTITY_TMP" "$identity_path" 2>/dev/null; then
+  echo "error: cannot write session lock; operate read-only until resolved" >&2
+  exit 1
+fi
+IDENTITY_TMP=
 if ! { printf '%s\n' "$me" > "$LOCK"; } 2>/dev/null; then
   echo "error: cannot write session lock; operate read-only until resolved" >&2
   exit 1
@@ -99,9 +121,23 @@ written=$(cat "$LOCK" 2>/dev/null) || {
   echo "error: cannot verify session lock ownership; operate read-only until resolved" >&2
   exit 1
 }
-if [ ! -f "$LOCK" ] || [ -L "$LOCK" ] || [ "$written" != "$me" ]; then
+written_identity=$(cat "$identity_path" 2>/dev/null) || {
+  echo "error: cannot verify session lock ownership; operate read-only until resolved" >&2
+  exit 1
+}
+if [ ! -f "$LOCK" ] || [ -L "$LOCK" ] || [ "$written" != "$me" ] \
+  || [ ! -f "$identity_path" ] || [ -L "$identity_path" ] \
+  || [ "$written_identity" != "$me_identity" ]; then
   echo "error: session lock ownership verification failed; operate read-only until resolved" >&2
   exit 1
 fi
+case "$old" in
+  ''|*[!0-9]*) ;;
+  *)
+    if [ "$old" != "$me" ]; then
+      rm -f "$(fm_session_lock_identity_path "$STATE" "$old")" 2>/dev/null || true
+    fi
+    ;;
+esac
 release_claim_lock
 echo "lock acquired: harness pid $me"
