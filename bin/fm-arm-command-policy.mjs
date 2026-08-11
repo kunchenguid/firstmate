@@ -864,6 +864,13 @@ function ordinaryWordsOnly(tokens) {
   return tokens.every((token) => token.type === "word" && token.subs.length === 0);
 }
 
+function explicitHomePrefixAllowed(position) {
+  if (position.prefixAssignments === 0) return true;
+  if (position.prefixAssignments !== 1) return false;
+  const assignment = position.words[0];
+  return assignment.literal && /^FM_HOME=.+/.test(assignment.value);
+}
+
 function setupKind(info, context) {
   const { tokens, position } = info;
   if (!ordinaryWordsOnly(tokens) || position.prefixAssignments > 0 || position.wrappers.length > 0) return "";
@@ -877,7 +884,7 @@ function setupKind(info, context) {
 
 function finalProtectedAllowed(info) {
   if (!info.protectedKind || info.protectedKind === "watch" || info.redirection || info.substitution) return false;
-  if (!ordinaryWordsOnly(info.tokens) || info.position.prefixAssignments > 0) return false;
+  if (!ordinaryWordsOnly(info.tokens) || !explicitHomePrefixAllowed(info.position)) return false;
   const wrappers = info.position.wrappers;
   return wrappers.length === 0 || (wrappers.length === 1 && wrappers[0] === "exec");
 }

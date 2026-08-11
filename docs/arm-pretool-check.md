@@ -107,9 +107,10 @@ Approved nodes may be separated by `;`, a real newline, or `&&`.
 
 The final protected node may have one immediate `exec` wrapper.
 Its arguments are ordinary shell words and may contain quoted semicolons or watcher names.
+The final protected node may also begin with exactly one non-empty, literal `FM_HOME=<path>` assignment so an operator can override a stale inherited home for that arm or checkpoint call.
 No other wrapper is approved.
 
-Inline environment assignments, `env`, `sudo`, `nohup`, nested shells, `eval`, subshell groups, substitutions, redirections, pipelines, asynchronous lists, `disown`, unrelated list nodes, and unsupported compound syntax are not blessed.
+Other inline environment assignments, empty or expanded `FM_HOME` assignments, `env`, `sudo`, `nohup`, nested shells, `eval`, subshell groups, substitutions, redirections, pipelines, asynchronous lists, `disown`, unrelated list nodes, and unsupported compound syntax are not blessed.
 
 ## Broad watcher kills
 
