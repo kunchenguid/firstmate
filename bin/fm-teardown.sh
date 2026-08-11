@@ -571,22 +571,88 @@ teardown_herdr_endpoint_focus_safe() {
 }
 
 teardown_backend_endpoint() {
-  local backend=$1 target=$2
+  local backend=$1 target=$2 stable
   case "$backend" in
     herdr) teardown_herdr_endpoint_focus_safe "$target" ;;
+    tmux)
+      case "$target" in
+        *:*|@*)
+          stable=$(fm_agent_tmux_window_id "$target") || return 1
+          fm_backend_kill "$backend" "$stable"
+          ;;
+        *) fm_backend_kill "$backend" "$target" ;;
+      esac
+      ;;
     *) fm_backend_kill "$backend" "$target" ;;
   esac
+}
+
+teardown_endpoint_process_census_empty() {
+  local path=$1 census status
+  [ -n "$path" ] && [ -d "$path" ] && [ ! -L "$path" ] || return 1
+  if census=$(fm_agent_worktree_process_census "$path" 2>/dev/null); then
+    return 1
+  else
+    status=$?
+  fi
+  [ "$status" -eq 1 ] && [ -z "$census" ]
+}
+
+teardown_tmux_dead_endpoint_identity_proven() {
+  local id=$1 kind=$2 expected_home=$3 worktree=$4 target=$5
+  local stable stable_again path path_again command command_again marker stamp_home
+  stable=$(fm_agent_tmux_window_id "$target") || return 1
+  fm_backend_source tmux || return 1
+  case "$target" in
+    *:*) [ "$(fm_backend_tmux_task_name "$stable")" = "${target#*:}" ] || return 1 ;;
+    @*) ;;
+    *) return 1 ;;
+  esac
+  path=$(fm_backend_current_path tmux "$stable") || return 1
+  fm_agent_paths_same "$path" "$worktree" || return 1
+  if [ "$kind" = secondmate ]; then
+    marker=$(cat "$worktree/.fm-secondmate-home" 2>/dev/null || true)
+    [ "$marker" = "$id" ] || return 1
+  else
+    fm_slot_stamp_record "$worktree" || return 1
+    [ "$FM_SLOT_STAMP_TASK" = "$id" ] || return 1
+    stamp_home=$FM_SLOT_STAMP_HOME
+    fm_slot_same_path "$stamp_home" "$expected_home" || return 1
+  fi
+  command=$(fm_backend_tmux_current_command "$stable") || return 1
+  command=${command#-}
+  case "$command" in
+    zsh|bash|sh|dash|ash|ksh|mksh|tcsh|csh|fish) ;;
+    *) return 1 ;;
+  esac
+  stable_again=$(fm_agent_tmux_window_id "$target") || return 1
+  [ "$stable_again" = "$stable" ] || return 1
+  path_again=$(fm_backend_current_path tmux "$stable") || return 1
+  fm_agent_paths_same "$path_again" "$worktree" || return 1
+  command_again=$(fm_backend_tmux_current_command "$stable") || return 1
+  command_again=${command_again#-}
+  case "$command_again" in
+    zsh|bash|sh|dash|ash|ksh|mksh|tcsh|csh|fish) ;;
+    *) return 1 ;;
+  esac
+  teardown_backend_endpoint tmux "$stable"
 }
 
 teardown_child_endpoint_identity_proven() {
   local child_id=$1 child_meta=$2 child_kind=$3 parent_home=$4 child_wt=$5
   local backend=$6 target=$7 state expected_home pid start current env env_again
-  local session workspace tab pane label info
+  local session workspace tab pane label info stable stable_again missing_path
   TEARDOWN_CHILD_ENDPOINT_PROVEN_DEAD=0
+  TEARDOWN_CHILD_ENDPOINT_STABLE_TARGET=
   backend=$(fm_backend_of_meta "$child_meta")
   state=$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || true)
   case "$state" in
     missing)
+      missing_path=$child_wt
+      if [ "$child_kind" = secondmate ] && [ -z "$missing_path" ]; then
+        missing_path=$(meta_value "$child_meta" home)
+      fi
+      teardown_endpoint_process_census_empty "$missing_path" || return 1
       TEARDOWN_CHILD_ENDPOINT_PROVEN_DEAD=1
       return 0
       ;;
@@ -602,18 +668,26 @@ teardown_child_endpoint_identity_proven() {
   [ -n "$expected_home" ] || return 1
   case "$backend" in
     tmux)
-      pid=$(fm_backend_foreground_process_pid "$backend" "$target") || return 1
+      stable=$(fm_agent_tmux_window_id "$target") || return 1
+      pid=$(fm_backend_foreground_process_pid "$backend" "$stable") || return 1
       start=$(fm_agent_proc_start_time "$pid") || return 1
       env=$(fm_agent_environ "$pid" 2>/dev/null) || return 1
       fm_agent_worker_identity_matches "$pid" "$child_id" "$expected_home" "$env" || return 1
-      current=$(fm_backend_foreground_process_pid "$backend" "$target") || return 1
+      current=$(fm_backend_foreground_process_pid "$backend" "$stable") || return 1
       [ "$current" = "$pid" ] || return 1
       fm_agent_pid_start_matches "$pid" "$start" || return 1
       env_again=$(fm_agent_environ "$pid" 2>/dev/null) || return 1
       fm_agent_worker_identity_matches "$pid" "$child_id" "$expected_home" "$env_again" || return 1
-      current=$(fm_backend_foreground_process_pid "$backend" "$target") || return 1
+      current=$(fm_backend_foreground_process_pid "$backend" "$stable") || return 1
       [ "$current" = "$pid" ] || return 1
-      fm_agent_pid_start_matches "$pid" "$start"
+      fm_agent_pid_start_matches "$pid" "$start" || return 1
+      stable_again=$(fm_agent_tmux_window_id "$target") || return 1
+      [ "$stable_again" = "$stable" ] || return 1
+      current=$(fm_backend_foreground_process_pid "$backend" "$stable") || return 1
+      [ "$current" = "$pid" ] || return 1
+      fm_agent_pid_start_matches "$pid" "$start" || return 1
+      TEARDOWN_CHILD_ENDPOINT_STABLE_TARGET=$stable
+      return 0
       ;;
     herdr)
       fm_backend_source herdr || return 1
@@ -666,10 +740,16 @@ teardown_child_endpoint() {
     teardown_release_herdr_presentation_lock || status=1
     return "$status"
   fi
+  if [ "$backend" = tmux ] \
+    && [ "$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || true)" = dead ]; then
+    teardown_tmux_dead_endpoint_identity_proven "$child_id" "$child_kind" \
+      "$parent_home" "$child_wt" "$target" || return 1
+    return 0
+  fi
   teardown_child_endpoint_identity_proven \
     "$child_id" "$child_meta" "$child_kind" "$parent_home" "$child_wt" "$backend" "$target" || return 1
   [ "$TEARDOWN_CHILD_ENDPOINT_PROVEN_DEAD" = 1 ] && return 0
-  teardown_backend_endpoint "$backend" "$target"
+  teardown_backend_endpoint "$backend" "${TEARDOWN_CHILD_ENDPOINT_STABLE_TARGET:-$target}"
 }
 
 teardown_file_inode() {
@@ -1891,6 +1971,7 @@ TOP_SLOT_RELEASE_AUTHORIZED=0
 TOP_SLOT_RETAIN_VERDICT=
 TOP_SLOT_ENDPOINT_STATE=closed
 TOP_ENDPOINT_CLOSED=0
+TOP_ENDPOINT_STABLE_TARGET=
 TOP_GROK_ARTIFACTS_RETAINED=0
 TEARDOWN_RAW_ENDPOINT_STATE=
 TOP_SLOT_LOCK_HELD=0
@@ -1949,12 +2030,20 @@ if [ "$KIND" != secondmate ]; then
     # verdict below; assuming an unknown endpoint for it would only make such a
     # task permanently untearable.
     TOP_SLOT_ENDPOINT_STATE=$(teardown_slot_endpoint_state "$BACKEND" "$T")
-    if [ "$TEARDOWN_RAW_ENDPOINT_STATE" = dead ] \
-      && [ "$BACKEND" != herdr ] && [ "$BACKEND" != orca ]; then
-      teardown_backend_endpoint "$BACKEND" "$T" || {
+    if [ "$TEARDOWN_RAW_ENDPOINT_STATE" = alive ] && [ "$BACKEND" = tmux ]; then
+      teardown_child_endpoint_identity_proven "$ID" "$META" "$KIND" "$FM_HOME" "$WT" \
+        "$BACKEND" "$T" || {
+        echo "REFUSED: could not prove the live task endpoint for $ID; preserving task state and worktree" >&2
+        exit 1
+      }
+      TOP_ENDPOINT_STABLE_TARGET=$TEARDOWN_CHILD_ENDPOINT_STABLE_TARGET
+    elif [ "$TEARDOWN_RAW_ENDPOINT_STATE" = dead ] && [ "$BACKEND" = tmux ]; then
+      teardown_tmux_dead_endpoint_identity_proven "$ID" "$KIND" "$FM_HOME" "$WT" "$T" || {
         echo "REFUSED: could not close the exited task endpoint for $ID; preserving task state and worktree" >&2
         exit 1
       }
+      TOP_ENDPOINT_CLOSED=1
+    elif [ "$TEARDOWN_RAW_ENDPOINT_STATE" = missing ]; then
       TOP_ENDPOINT_CLOSED=1
     fi
     if slot_release_allowed "$STATE" "$ID" "$WT" "$FM_HOME" \
@@ -1991,7 +2080,7 @@ if [ "$BACKEND" = herdr ]; then
   fi
 elif [ "$TOP_SLOT_RETURNED" != 1 ] && [ "$BACKEND" != orca ] \
   && [ "$TOP_ENDPOINT_CLOSED" != 1 ]; then
-  if ! teardown_backend_endpoint "$BACKEND" "$T" 2>/dev/null; then
+  if ! teardown_backend_endpoint "$BACKEND" "${TOP_ENDPOINT_STABLE_TARGET:-$T}" 2>/dev/null; then
     echo "REFUSED: could not kill task $ID window $T; refusing to delete task state or worktree" >&2
     exit 1
   fi
@@ -2007,7 +2096,7 @@ if [ "$KIND" != secondmate ] \
   fi
 fi
 
-if [ "$TOP_SLOT_UNRESOLVED_LEASE" = 1 ] || [ -n "$TOP_SLOT_RETAIN_VERDICT" ]; then
+if [ -n "$TOP_SLOT_RETAIN_VERDICT" ]; then
   if [ -e "$STATE/$ID.grok-turnend-token" ] || [ -L "$STATE/$ID.grok-turnend-token" ]; then
     TOP_GROK_ARTIFACTS_RETAINED=1
   fi
@@ -2086,7 +2175,7 @@ if [ "$KIND" = secondmate ]; then
   fi
   remove_secondmate_registry_entry "$ID"
 fi
-if [ "$TOP_SLOT_UNRESOLVED_LEASE" = 1 ] || [ -n "$TOP_SLOT_RETAIN_VERDICT" ]; then
+if [ -n "$TOP_SLOT_RETAIN_VERDICT" ]; then
   teardown_release_top_slot_lock || {
     echo "error: could not release the retained-slot ownership lock for $ID" >&2
     exit 1

@@ -2033,6 +2033,10 @@ if [ "$KIND" != secondmate ]; then
     exit 1
   fi
 
+  spawn_abort_recovery_meta || {
+    echo "error: could not refresh the recovery record for the pooled lease held by $ID on $WT; refusing to continue" >&2
+    exit 1
+  }
   validate_spawn_worktree "treehouse get" "$T"
 fi
 

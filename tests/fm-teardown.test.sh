@@ -1032,6 +1032,7 @@ test_forced_secondmate_teardown_propagates_child_close_failure() {
 #!/usr/bin/env bash
 case "$*" in
   "kill-window -t firstmate:fm-child-x1") exit 1 ;;
+  "kill-window -t @2") exit 1 ;;
   *"list-windows -t firstmate -F #{window_name}"*)
     printf '%s\n' 'fm-child-x1'
     exit 0
@@ -1069,6 +1070,56 @@ SH
   grep -q "child cleanup failed" "$case_dir/stderr" \
     || fail "forced-child-close-failure: refusal did not identify child cleanup"
   pass "forced and recursive secondmate teardown propagate child close failures"
+}
+
+test_forced_secondmate_teardown_refuses_missing_child_with_live_occupant() {
+  local case_dir rc home child child_pid
+  case_dir=$(make_case forced-child-missing-occupant)
+  home="$case_dir/home"
+  child="$case_dir/wt"
+  mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects"
+  printf 'task-x1\n' > "$home/.fm-secondmate-home"
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=fm-task-x1" \
+    "worktree=$home" \
+    "project=$case_dir/project" \
+    "home=$home" \
+    "kind=secondmate" \
+    "mode=no-mistakes"
+  fm_write_meta "$home/state/child-x1.meta" \
+    "window=firstmate:fm-child-x1" \
+    "worktree=$child" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=no-mistakes"
+  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_stamp_write "$child" child-x1 "$home" ) \
+    || fail "forced-child-missing-occupant: child worktree fixture could not be stamped"
+
+  ( cd "$child" && FM_AGENT_ROLE=crewmate FM_AGENT_TASK=child-x1 \
+      FM_AGENT_OWNER_HOME="$home" exec sleep 300 ) >/dev/null 2>&1 </dev/null &
+  child_pid=$!
+  while [ ! -e "/proc/$child_pid/cwd" ] && kill -0 "$child_pid" 2>/dev/null; do
+    sleep 0.05
+  done
+
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  kill "$child_pid" 2>/dev/null || true
+  wait "$child_pid" 2>/dev/null || true
+
+  expect_code 1 "$rc" "forced-child-missing-occupant: teardown must fail closed"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "forced-child-missing-occupant: parent metadata must survive occupant refusal"
+  assert_present "$home/state/child-x1.meta" \
+    "forced-child-missing-occupant: child metadata must survive occupant refusal"
+  [ -d "$home" ] || fail "forced-child-missing-occupant: parent home was removed"
+  grep -q "child cleanup failed" "$case_dir/stderr" \
+    || fail "forced-child-missing-occupant: refusal did not identify child cleanup"
+  pass "forced teardown retains a child home when its endpoint is missing but occupied"
 }
 
 test_secondmate_teardown_refuses_open_pending_reply() {
@@ -1563,6 +1614,7 @@ test_teardown_retries_transient_index_lock
 test_forced_secondmate_teardown_retries_child_index_lock
 test_forced_secondmate_teardown_uses_child_receipt_identity
 test_forced_secondmate_teardown_propagates_child_close_failure
+test_forced_secondmate_teardown_refuses_missing_child_with_live_occupant
 test_secondmate_teardown_refuses_open_pending_reply
 test_forced_secondmate_teardown_handoffs_escalated_reply
 test_forced_secondmate_teardown_failure_keeps_active_reply
