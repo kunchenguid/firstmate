@@ -261,23 +261,28 @@ test_spawn_abort_returns_durable_lease() {
 }
 
 test_spawn_cwd_discovery_failure_returns_durable_lease() {
-  local home proj fakebin rec acquired out status
+  local home proj fakebin rec acquired stale out status
   home="$TMP_ROOT/spawn-cwd-failure-home"
   mkdir -p "$home/data"
   proj=$(make_repo "$TMP_ROOT/spawn-cwd-failure-proj")
   fakebin=$(make_spawn_fakebin "$TMP_ROOT/spawn-cwd-failure-fake")
   fm_fake_exit0 "$fakebin" sleep
   acquired="$TMP_ROOT/spawn-cwd-failure-wt"
-  mkdir -p "$acquired"
+  stale="$TMP_ROOT/spawn-cwd-failure-stale-wt"
+  git -C "$proj" worktree add -q --detach "$acquired" >/dev/null 2>&1
+  git -C "$proj" worktree add -q --detach "$stale" >/dev/null 2>&1
   rec="$TMP_ROOT/spawn-cwd-failure-treehouse.log"
   : > "$rec"
 
   out=$(FM_TREEHOUSE_REC="$rec" FM_TREEHOUSE_GET_PATH="$acquired" \
-        run_spawn "$home" abort-cwd-kk1 "$proj" "$proj" "$fakebin"); status=$?
-  expect_code 1 "$status" "spawn whose endpoint never enters the acquired worktree should abort"
+        run_spawn "$home" abort-cwd-kk1 "$proj" "$stale" "$fakebin"); status=$?
+  expect_code 1 "$status" "spawn whose endpoint remains in an unrelated worktree should abort"
   assert_contains "$out" "did not enter a worktree within 60s" "cwd-discovery abort must keep its timeout diagnostic"
   assert_grep "treehouse return --force $acquired" "$rec" \
     "cwd-discovery failure must return the already acquired durable lease"
+  assert_no_grep "treehouse return --force $stale" "$rec" \
+    "cwd-discovery failure must not substitute the unrelated endpoint worktree for the lease"
+  assert_absent "$home/state/abort-cwd-kk1.meta" "stale cwd must not be published as task metadata"
   pass "fm-spawn: cwd-discovery failure returns its durable lease"
 }
 

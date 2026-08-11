@@ -2226,6 +2226,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   fi
   TREEHOUSE_ABORT_CLEANUP=1
   TREEHOUSE_ABORT_WT=$WT
+  leased_wt_real=$(real_path_or_raw "$TREEHOUSE_ABORT_WT")
   spawn_send_text_line "$WT_TARGET" "cd $(shell_quote "$WT")"
   WT=
 
@@ -2245,7 +2246,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # stale path still passes the PROJ_ABS_REAL comparison and validate_spawn_worktree
   # below (it resolves to a real, distinct worktree top-level too), so accepting it
   # on one read alone silently records the wrong worktree= in state/<id>.meta. Require
-  # two consecutive reads to agree on the same non-project path before accepting it;
+  # two consecutive reads to agree on the acquired worktree path before accepting it;
   # a mismatch just becomes the new candidate rather than resetting the wait, so a
   # pane that is already settled by the first real read only costs the one existing
   # inter-poll sleep as confirmation, not a whole extra cycle on top.
@@ -2254,9 +2255,9 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     p=$(spawn_current_path "$WT_TARGET" || true)
     if [ -n "$p" ]; then
       p_real=$(real_path_or_raw "$p")
-      if [ "$p_real" != "$PROJ_ABS_REAL" ]; then
+      if [ "$p_real" = "$leased_wt_real" ]; then
         if [ -n "$candidate" ] && [ "$p_real" = "$candidate" ]; then
-          WT="$p"
+          WT=$TREEHOUSE_ABORT_WT
           break
         fi
         candidate="$p_real"
