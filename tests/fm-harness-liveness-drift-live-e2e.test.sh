@@ -56,6 +56,8 @@ export PATH
 
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-backend.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-cursor-lib.sh"
 fm_backend_source tmux || fail "fm_backend_source tmux failed"
 
 "$REAL_TMUX" -L "$SOCKET" new-session -d -s "$SESSION" -n control -c "$LAB/wt" \
@@ -74,6 +76,15 @@ resolve_harness_binary() {  # <harness>
     printf '%s\n' "$HOME/.kimi-code/bin/kimi"
     return 0
   fi
+  # cursor is never on PATH under the name `cursor`: it installs as
+  # `cursor-agent` plus the legacy alias `agent`, and its user-local install is
+  # routinely absent from a non-interactive PATH. Resolve it through the same
+  # verified owner fm-spawn uses, so an unrelated executable named `agent` is
+  # rejected here exactly as it would be at launch.
+  if [ "$harness" = cursor ]; then
+    fm_cursor_resolve_binary 2>/dev/null && return 0
+    return 1
+  fi
   return 1
 }
 
@@ -86,7 +97,10 @@ SKIPPED=
 # so the live process name changes on every auto-update and its install path
 # carries no `muse` component to fall back on. That is precisely the drift this
 # guard exists to catch, and only a real muse release can produce it.
-for harness in claude codex opencode pi pi-signed grok kimi muse; do
+# cursor matters for the same reason muse does, from the other direction: it
+# runs as a bundled node script, so its pane title is a bare `node` that no name
+# pattern can own, and identity has to come from its install path or argv[0].
+for harness in claude codex opencode pi pi-signed grok kimi cursor muse; do
   if ! bin_path=$(resolve_harness_binary "$harness"); then
     SKIPPED="$SKIPPED $harness"
     note "skip: $harness is not installed on this machine, so its classification is unverified here"
@@ -97,7 +111,13 @@ for harness in claude codex opencode pi pi-signed grok kimi muse; do
   [ -n "$version" ] || version="unknown"
 
   target="$SESSION:$harness"
-  "$REAL_TMUX" -L "$SOCKET" new-window -d -t "$SESSION:" -n "$harness" -c "$LAB/wt" -- "$bin_path" \
+  # cursor blocks on a workspace-trust prompt in a directory it has never seen,
+  # which would hang this probe rather than classify anything; --trust is the
+  # same flag fm-spawn passes for the same reason.
+  launch_args=""
+  [ "$harness" = cursor ] && launch_args="--trust"
+  # shellcheck disable=SC2086  # deliberate: an empty value must add no argument
+  "$REAL_TMUX" -L "$SOCKET" new-window -d -t "$SESSION:" -n "$harness" -c "$LAB/wt" -- "$bin_path" $launch_args \
     || fail "$harness ($version): could not launch a window for the liveness probe"
 
   state=

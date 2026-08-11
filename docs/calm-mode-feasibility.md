@@ -196,7 +196,7 @@ Compaction and retry loaders remain stock because Pi exposes no supported replac
 
 `.pi/extensions/lib/fm-calm-visibility.ts` owns only the allowlist-style transcript presentation policy.
 `bin/fm-operational-input.sh` owns current cross-language operational-input construction and parsing, while the thin Pi adapter lives at `.pi/extensions/lib/fm-operational-input.ts`.
-Only `genuine-user-prompt`, `genuine-agent-response`, and `working-status` are policy-visible.
+Only `genuine-user-prompt`, `genuine-agent-response`, `assistant-working-note`, and `working-status` are policy-visible, and `assistant-working-note` is additionally policy-hidden at the `max` presentation level.
 Every other audited class is policy-hidden when Pi exposes a supported presentation boundary, but semantic input is never transformed to enforce that preference.
 The home-local persistence schema is owned by [`docs/configuration.md`](configuration.md#pi-calm-preference-configcalm).
 
@@ -216,10 +216,11 @@ Serialized session data and Pi 0.81.1's sidebar tree also retain legacy hidden o
 The taxonomy was derived from Pi 0.81.1's installed public declarations, documentation, examples, `interactive-mode.js`, and its exported component implementations.
 The test fixture enumerates every class below through the centralized policy, and the interactive fixture exercises the screenshot classes, current user-role operational input, and legacy synthetic presentation entries.
 
-| Policy class | Pi transcript path | Calm result |
+| Policy class | Pi transcript path | Calm result (baseline verified on Pi 0.81.1 through 0.82.0; newer evidence noted per row) |
 | --- | --- | --- |
 | `genuine-user-prompt` | `UserMessageComponent` | Visible, including every tested operational near miss. |
 | `genuine-agent-response` | Assistant text in `AssistantMessageComponent` | Visible. |
+| `assistant-working-note` | Assistant text in an `AssistantMessageComponent` message the model did not end its response with, identified by its own `stopReason` of `toolUse`, or of `length` with tool calls present | Visible at the `on` level. At the `max` level the text blocks are removed from the shallow presentation copy before layout, so a `toolUse` message carrying only narration occupies zero rows (verified on Pi 0.84.1); a still-streaming `pending` message is never filtered, so narration is briefly visible before the marker flips. |
 | `assistant-thinking` | Thinking content in `AssistantMessageComponent` | Collapsed reasoning is removed from the shallow presentation copy before layout and occupies zero rows; explicit expansion renders the original reasoning. |
 | `assistant-tool-call` | `ToolExecutionComponent` | Built-in names Calm owns and `fm_watch_arm_pi` are hidden; contested built-in replacements and arbitrary custom tools retain their owning extension's presentation. |
 | `tool-result` | `ToolExecutionComponent` | Text results for tools Calm controls are hidden; contested built-in replacements and arbitrary custom results retain their owning extension's presentation. |

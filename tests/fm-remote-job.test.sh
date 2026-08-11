@@ -19,7 +19,18 @@ REAL_GIT=$(command -v git)
 OTHER_PID=
 RECOVERY_WORKER_PID=
 mkdir -p "$REMOTE_ROOT/bin" "$REMOTE_HOME" "$ACCOUNT_HOME" "$RUNTIME_BIN"
-trap 'if [ -n "$OTHER_PID" ]; then kill "$OTHER_PID" 2>/dev/null || true; fi; if [ -n "$RECOVERY_WORKER_PID" ]; then kill "$RECOVERY_WORKER_PID" 2>/dev/null || true; fi; if [ -f "$STATE_ROOT/worker.pid" ]; then kill "$(cat "$STATE_ROOT/worker.pid")" 2>/dev/null || true; fi; rm -rf -- "$TMP_ROOT"' EXIT
+# worker.pid records the serving child, not its restart supervisor, so stopping
+# that pid alone leaves the supervisor to respawn - the leak
+# tests/fm-remote-job-orphan-reap.test.sh pins. Stop the whole worker tree.
+cleanup_remote_job_fixture() {
+  [ -z "$OTHER_PID" ] || kill "$OTHER_PID" 2>/dev/null || true
+  [ -z "$RECOVERY_WORKER_PID" ] || kill "$RECOVERY_WORKER_PID" 2>/dev/null || true
+  if [ -f "$STATE_ROOT/worker.pid" ]; then
+    fm_remote_job_stop_worker_tree "$(cat "$STATE_ROOT/worker.pid")" || true
+  fi
+  rm -rf -- "$TMP_ROOT"
+}
+trap cleanup_remote_job_fixture EXIT
 
 cp "$ROOT/bin/fm-remote-job-lib.sh" "$ROOT/bin/fm-remote-job-worker.sh" \
   "$ROOT/bin/fm-remote-delta-read.sh" "$REMOTE_ROOT/bin/"
@@ -236,10 +247,14 @@ pass "ensure replaces a live worker after its code changes"
 RELOCATED_ROOT="$TMP_ROOT/relocated-root"
 cp -R "$REMOTE_ROOT" "$RELOCATED_ROOT"
 OLD_WORKER_PID=$NEW_WORKER_PID
+OLD_WORKER_PGID=$(fm_remote_job_process_pgid "$OLD_WORKER_PID") \
+  || fail "the worker replacement fixture could not resolve its process group"
 fm_remote_job_ensure_worker "$RELOCATED_ROOT" "$ACCOUNT_HOME" \
   || fail "$FM_REMOTE_JOB_ERROR"
 NEW_WORKER_PID=$(cat "$STATE_ROOT/worker.pid")
 [ "$NEW_WORKER_PID" != "$OLD_WORKER_PID" ] || fail "ensure retained a worker bound to a different code root"
+! kill -0 -- "-$OLD_WORKER_PGID" 2>/dev/null \
+  || fail "ensure left the replaced worker supervisor group alive"
 fm_remote_job_stage "$ACCOUNT_HOME" "$RELOCATED_ROOT" "$REMOTE_HOME" fm-probe-job.sh < /dev/null > /dev/null
 JOB_ID=$FM_REMOTE_JOB_ID
 fm_remote_job_wait "$ACCOUNT_HOME" "$JOB_ID" || fail "$FM_REMOTE_JOB_ERROR"
