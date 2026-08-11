@@ -5,8 +5,10 @@
 # An X-mode mention that spawned real work is linked to its task by fm-x-link.sh
 # (x_request/x_request_ts/x_followups plus optional reply context in
 # state/<id>.meta). When that task reaches a genuine milestone (investigation
-# done, build started, shipped, failed), firstmate composes a public-safe outcome
-# and posts it here as one of up to three follow-ups, within the window. Past the
+# done, build started, shipped, failed), firstmate composes an audience-safe outcome
+# and posts it here as one of up to three follow-ups, within the window. It may
+# spend at most two slots on non-final progress and reserves the last slot for
+# --final. Past the
 # window, past the cap, or after --final, this clears the link so a later call is
 # a clean no-op.
 #
@@ -27,9 +29,9 @@
 #   fm-x-followup.sh <task-id> [--image <path>] [--final] -
 #     Linked, within window, and under the cap: posts ONE follow-up via
 #       fm-x-reply.sh --followup.
+#       A non-final post is refused when only the reserved terminal slot remains.
 #       On success: increments the counter and KEEPS the link, unless --final
-#       was passed or the new count reaches the cap, in which case the link is
-#       cleared instead - this is the "we're done" signal.
+#       was passed, in which case the link is cleared as the "we're done" signal.
 #       On a relay rejection distinguishing an exhausted cap/window (see
 #       fm-x-reply.sh): clears the link and skips quietly, exactly like a
 #       locally-detected expiry, so an old relay (which only ever supported one
@@ -41,6 +43,9 @@
 #       recoverable rather than posting with a local default.
 #       On any other post failure: leaves the link in place so it can be
 #       retried, exit non-zero.
+#     A private-trusted link is also held before preview or network publication
+#       unless the current protected configuration still selects a validated
+#       private-trusted loopback transport.
 #     Window or cap already exhausted: clears the link, posts nothing, exit 0
 #       (silent skip).
 #     Not linked: nothing to do, exit 0.
@@ -52,8 +57,9 @@
 #
 # Dry-run (FMX_DRY_RUN) flows through fm-x-reply.sh: the follow-up is recorded to
 # state/x-outbox/<request_id>.json instead of posted, and the counter/link are
-# mutated exactly as a live post would (increment-and-keep, or clear on --final
-# / cap), so the full loop runs end to end without a public post. With --image,
+# mutated exactly as a live post would (increment-and-keep, refuse the reserved
+# final slot, or clear on --final), so the full loop runs end to end without a
+# live post. With --image,
 # the follow-up carries one local image attachment; if the reply text splits
 # into a thread, the relay attaches the image to the opener.
 #
@@ -83,7 +89,8 @@ usage: fm-x-followup.sh --check <task-id>
        fm-x-followup.sh <task-id> [--image <path>] [--final] -
 
 Post a completion follow-up (up to 3 per link, within a 7-day window) for an
-X-mode-linked task and manage the link's follow-up counter.
+X-mode-linked task and manage the link's follow-up counter. At most two may be
+non-final; the last slot is reserved for --final.
 
 Options:
   --check          Print the request_id when a follow-up is due.
@@ -169,6 +176,7 @@ TS=$(fmx_meta_get "$META" x_request_ts)
 COUNT=$(fmx_meta_get "$META" x_followups)
 REQ_PLATFORM=$(fmx_meta_get "$META" x_platform)
 REQ_REPLY_MAX=$(fmx_meta_get "$META" x_reply_max_chars)
+REQ_AUDIENCE=$(fmx_meta_get "$META" x_reply_audience)
 case "$COUNT" in
   ''|*[!0-9]*) COUNT=0 ;;
 esac
@@ -215,6 +223,23 @@ fi
 if [ "$MODE" = check ]; then
   printf '%s\n' "$RID"
   exit 0
+fi
+
+if [ "$FINAL" != 1 ] && [ "$COUNT" -ge "$((MAX_COUNT - 1))" ]; then
+  echo "fm-x-followup: reserved final slot for $ID; use --final or wait for the terminal result" >&2
+  exit 1
+fi
+
+# The durable audience is the disclosure ceiling from the originating request.
+# A private reply must never follow the home's current configuration onto a
+# public or malformed transport. Revalidate immediately before publication and
+# preserve the link on drift so a later private-loopback recovery can retry it.
+if [ "$REQ_AUDIENCE" = private-trusted ]; then
+  fmx_load_config
+  if [ -n "$FMX_AUDIENCE_INVALID" ] || [ "$FMX_AUDIENCE" != private-trusted ]; then
+    echo "fm-x-followup: held $ID; its private-trusted reply requires the current validated loopback transport" >&2
+    exit 1
+  fi
 fi
 
 # Post the follow-up. fm-x-reply owns text reading, thread-split, dry-run, the

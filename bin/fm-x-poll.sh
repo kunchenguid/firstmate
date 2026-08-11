@@ -32,8 +32,8 @@
 # platform/budget even after this inbox file is drained.
 #
 # Config (home .env, FMX_ENV_FILE, or env): FMX_PAIRING_TOKEN (required),
-# FMX_RELAY_URL (default https://myfirstmate.io). Auth: Authorization: Bearer
-# <token>.
+# FMX_RELAY_URL (default https://myfirstmate.io), and FMX_REPLY_AUDIENCE
+# (public by default). Auth: Authorization: Bearer <token>.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -99,6 +99,11 @@ clear_claim_error() {
   rm -f "$CLAIM_ERROR_FILE" 2>/dev/null || true
 }
 
+if [ -n "$FMX_AUDIENCE_INVALID" ]; then
+  emit_error_once "$FMX_AUDIENCE_INVALID"
+  exit 0
+fi
+
 command -v curl >/dev/null 2>&1 || { emit_error_once "missing curl"; exit 0; }
 command -v jq   >/dev/null 2>&1 || { emit_error_once "missing jq"; exit 0; }
 
@@ -156,7 +161,8 @@ fi
 INBOX="$STATE/x-inbox"
 # Stash the full mention object atomically so a concurrent reader never sees a
 # half-written file.
-if ! (set -o pipefail; jq '.' "$BODY_FILE" 2>/dev/null \
+if ! (set -o pipefail; jq --arg reply_audience "$FMX_AUDIENCE" \
+  '. + {reply_audience:$reply_audience}' "$BODY_FILE" 2>/dev/null \
   | fmx_private_artifact_publish_stdin "$INBOX" "$REQ.json" 600); then
   emit_error_once "cannot write inbox"
   exit 0
@@ -173,7 +179,7 @@ POLL_CTX=$(fmx_extract_reply_context "$BODY_FILE" 2>/dev/null) || POLL_CTX=
 if [ -n "$POLL_CTX" ]; then
   POLL_PLATFORM=$(printf '%s' "$POLL_CTX" | jq -r '.platform // ""' 2>/dev/null) || POLL_PLATFORM=
   POLL_MAX=$(printf '%s' "$POLL_CTX" | jq -r '.reply_max_chars // ""' 2>/dev/null) || POLL_MAX=
-  fmx_context_registry_set "$STATE" "$REQ" "$POLL_PLATFORM" "$POLL_MAX" 2>/dev/null || true
+  fmx_context_registry_set "$STATE" "$REQ" "$POLL_PLATFORM" "$POLL_MAX" 0 "$FMX_AUDIENCE" 2>/dev/null || true
 fi
 
 fmx_offer_registry_claim "$STATE" "$REQ"

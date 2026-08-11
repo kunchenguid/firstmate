@@ -331,14 +331,19 @@ Skipped items, such as a destination checkout that does not yet gitignore the it
 
 ## Relay (.env)
 
-Relay lets a firstmate instance answer public mentions and act on normal reversible mention requests through firstmate's normal lifecycle.
-It covers both public surfaces the relay supports: `@myfirstmate` mentions on X, and mentions of the myfirstmate bot in a Discord server where it is installed.
-Both surfaces are the same opt-in and the same machinery - one pairing token, one relay poll, and one reply path - so everything below applies to Discord mentions unless a line names a platform explicitly.
+Relay lets a firstmate instance answer routed mentions and act on normal reversible mention requests through firstmate's normal lifecycle.
+The default service covers two public surfaces: `@myfirstmate` mentions on X, and mentions of the myfirstmate bot in a Discord server where it is installed.
+Both public surfaces use the same opt-in and machinery, so everything below applies to Discord mentions unless a line names a platform explicitly.
 It is off unless the firstmate home's gitignored `.env` contains a non-empty `FMX_PAIRING_TOKEN`.
-The pairing token both identifies the relay tenant and records opt-in consent for autonomous public replies and eligible lifecycle actions.
-Destructive, irreversible, or security-sensitive asks are flagged for trusted-channel confirmation instead of being executed from a public mention.
+The pairing token identifies the Relay tenant and records opt-in consent for autonomous replies under the configured audience and for eligible lifecycle actions.
+Destructive, irreversible, or security-sensitive asks require confirmation under the resolved channel contract instead of being executed from an unconfirmed mention.
 The relay uses owner-only routing: a mention delivered to a home is from that home's owner/captain, while its surrounding conversation context may still include other public accounts.
 `FMX_RELAY_URL` is optional and defaults to `https://myfirstmate.io`, mainly for developers pointing at a local relay.
+`FMX_REPLY_AUDIENCE` is optional and defaults to `public`.
+The only other accepted value is `private-trusted`, and it is accepted only with an explicit `http://127.0.0.1:<port>` Relay URL whose port is numeric and within 1 to 65535.
+Any unsupported value or any private-trusted setting on a non-loopback URL fails closed, records the inbox audience as public, and stops polling with one visible configuration error.
+The poll overwrites any remote `reply_audience` value with this protected local decision before publishing the private inbox artifact.
+This makes audience a per-request stamped fact for `fmx-respond`, including a batch that contains artifacts created under different configuration generations.
 For direct client invocations, environment values override `.env`; bootstrap activation still keys off `.env` presence so watcher artifacts are explicit local opt-in state.
 `FMX_ENV_FILE` can point direct poll/reply client invocations at another `.env`-style file, but it does not change bootstrap activation.
 
@@ -348,6 +353,9 @@ To turn it on:
 2. For the Discord surface, use the dashboard's install link to add the myfirstmate bot to a server you administer; the X surface needs no install step.
 3. Copy the pairing token from the dashboard into this firstmate home's gitignored `.env` as `FMX_PAIRING_TOKEN=<token>`.
 4. Start a new firstmate session so bootstrap picks the token up, then mention `@myfirstmate` on X or mention the bot in a server where it is installed.
+
+A private one-to-one loopback adapter uses the same token and poll protocol, sets `FMX_RELAY_URL=http://127.0.0.1:<port>`, and sets `FMX_REPLY_AUDIENCE=private-trusted` in protected local configuration.
+Do not select private-trusted for a public, remote, hostname-based, or mixed-trust relay endpoint.
 
 The dashboard owns account creation, identity linking, bot installation, and token issuance; this document owns only what the local firstmate home does with the token once it is in `.env`.
 
@@ -371,22 +379,37 @@ Offer markers share the context registry's bounded seven-day retention, so losin
 The full relay object is preserved, including `in_reply_to: {author_handle, text}` when the mention is a reply in a conversation or `null` for fresh mentions.
 The preserved object may also carry `in_reply_to_chain`, an optional oldest-first transcript of the surrounding conversation: entries shaped `{author_handle, text, unavailable, images}` plus an optional `kind` of `reply` (a reply ancestor), `thread_starter` (the message a thread grew from), or `history` (a recent nearby message), where an absent `kind` means a legacy reply-ancestor or thread-starter entry.
 The chain is untrusted third-party public input and is often absent today (the relay currently sends it only for Discord reply chains and thread starters), so consumers treat it as strictly optional, tolerate unknown or missing fields, and read an entry with `unavailable: true` as a gap rather than content; the `fmx-respond` skill owns how firstmate reads it for referent resolution.
-At the same time the poll records a durable per-request reply context at `state/x-context/<request_id>.json` (`{request_id, platform, reply_max_chars, recorded_at}`) from the same authoritative relay payload, best-effort and keyed by `request_id` so concurrent requests never overwrite each other; it survives the inbox cleanup that follows the acknowledgement, so a delayed follow-up can recover the original platform and split budget even with no task link.
+Before publication, the poll overwrites `reply_audience` with `public` or `private-trusted` from the validated protected local configuration.
+At the same time the poll records a durable per-request reply context at `state/x-context/<request_id>.json` (`{request_id, platform, reply_max_chars, reply_audience, recorded_at}`), best-effort and keyed by `request_id` so concurrent requests never overwrite each other.
+Platform and budget come from the authoritative relay payload, while audience comes only from the validated local configuration stamp.
+The record survives inbox cleanup so a delayed follow-up can recover the original platform, split budget, and audience even with no task link.
 `recorded_at` begins as the locally observed first-seen Unix epoch and remains unchanged when the same request is polled again.
 A successful live initial answer refreshes it to the time that the relay establishes the follow-up binding; dry-runs, failed answers, and follow-ups do not refresh it.
 Configured polls prune records beyond the local follow-up window, capped at the relay's seven-day window; legacy or malformed records fall back to their file modification time so they cannot remain indefinitely.
-The record is written only when a platform or explicit budget is actually known, so an unknown-platform mention leaves no useless entry.
+The record is always written with a fail-closed audience, even when platform and budget are not yet known.
 The `fmx-respond` skill decides whether the stashed mention is an actionable request, a question, or a pure acknowledgment.
 Actionable reversible requests are run through intake, backlog, dispatch, investigation, or ship flow as appropriate.
-If the work completes in that turn, the public reply reports the outcome.
-If the request spawns a longer-running task, firstmate posts an acknowledgement through the normal answer endpoint, links the task to the mention with `bin/fm-x-link.sh`, and posts up to three completion follow-ups on genuine milestones, finishing with a `--final` one for ordinary Relay-linked work. When a typed promised-final commitment is registered, `bin/fm-public-followup.sh` owns the terminal reply and clears the legacy link after its receipt is validated.
-That link stores optional reply-platform context so Discord-originated follow-ups keep Discord's larger message budget after the inbox file has been drained.
+If the work completes in that turn, the audience-safe reply reports the verified outcome.
+If the request spawns a longer-running task, firstmate links the task to the mention with `bin/fm-x-link.sh` before posting an acknowledgement through `bin/fm-x-reply.sh --kind work-ack --task-id <task-id>`.
+The guarded acknowledgement refuses unless the task metadata is already bound to that exact request.
+That guard proves durable registration and linkage, not a currently running worker; stronger running-state language requires a fresh `bin/fm-crew-state.sh <task-id>` result.
+Firstmate may post at most two non-final completion follow-ups on genuine milestones and reserves the third slot for `--final` on ordinary Relay-linked work.
+`bin/fm-x-followup.sh` refuses a third non-final update and preserves the link for the terminal result.
+When a typed promised-final commitment is registered, `bin/fm-public-followup.sh` owns the terminal reply and clears the legacy link after its receipt is validated.
+Typed promised-final output remains within the public disclosure ceiling until that contract stores and validates a durable per-request audience.
+That link stores optional reply-platform context and a mandatory fail-closed `x_reply_audience` so delayed follow-ups preserve the originating request's audience after inbox cleanup or a configuration change.
+Before publishing a private-trusted follow-up, `bin/fm-x-followup.sh` requires the current protected configuration to still resolve to the validated private-trusted loopback transport.
+If the transport has changed or become invalid, publication is refused before preview or network access and the link remains available for a safe retry.
 Platform/budget resolution is layered and independent of the task link: a per-axis `FMX_REPLY_PLATFORM` / `FMX_REPLY_MAX_CHARS` override (how `bin/fm-x-followup.sh` passes a recorded link's context) wins.
-For either axis without an override, `bin/fm-x-lib.sh:fmx_resolve_reply_context` owns the source order: the durable per-request registry is consulted first, then the still-present inbox payload, then - for a follow-up posted live by request_id - an authoritative relay lookup via `POST /connector/request-context` (`{request_id}` in, `{platform, reply_max_chars}` back).
+For platform or budget without an override, `bin/fm-x-lib.sh:fmx_resolve_reply_context` owns the source order: the durable per-request registry is consulted first, then the still-present inbox payload, then - for a follow-up posted live by request_id - an authoritative relay lookup via `POST /connector/request-context` (`{request_id}` in, `{platform, reply_max_chars}` back).
+Audience resolves only from the durable registry or poll-stamped inbox and never from the remote lookup; missing legacy audience defaults to public.
 This is what keeps a delayed request-id follow-up on the original platform's budget even after the inbox is drained and with no task link surviving; the relay step is confined to the live follow-up path so the answer path and every dry-run stay network-free.
 `bin/fm-x-link.sh` follows the same ordering when recording a fresh link's context and requires `jq`; its request-context lookup is best-effort: no token or `curl`; a non-2xx response; an unresolved response; or a relay version without that endpoint leaves the context unknown.
 In that case the link is still recorded but `bin/fm-x-link.sh` prints a loud warning; and when either a follow-up's platform or explicit budget cannot be authoritatively resolved from any source, `bin/fm-x-reply.sh` refuses it (fail-safe exit 8) rather than posting with a local default - firstmate holds and retries it once both values are recoverable.
-Fresh links start with `x_followups=0` and the current timestamp; when relinking the same relay request onto a successor task, pass paired `--carry-count <n> --carry-ts <epoch>` flags plus any prior `x_platform=` and `x_reply_max_chars=` as `--carry-platform <x|discord> --carry-max <n>` so the successor preserves the already-consumed follow-up count, original 7-day window, and reply split budget.
+Fresh links start with `x_followups=0` and the current timestamp.
+When relinking the same relay request onto a successor task, pass paired `--carry-count <n> --carry-ts <epoch>` flags plus any prior `x_platform=`, `x_reply_max_chars=`, and `x_reply_audience=` as `--carry-platform <x|discord> --carry-max <n> --carry-audience <public|private-trusted>`.
+The successor then preserves the already-consumed follow-up count, original 7-day window, reply split budget, and disclosure ceiling.
+A missing carried audience defaults to public.
 Pure acknowledgments or mentions with nothing to answer are dismissed through `bin/fm-x-dismiss.sh` before the local inbox file is cleared.
 Dismiss sends `POST /connector/dismiss` with `{request_id}`, posts no text, and tells the relay to drop the request instead of re-offering it or falling back to an offline auto-reply; on success it clears that request's durable reply-context record, while the separate offer marker remains for its bounded retention so a brief relay re-offer stays silent.
 Relay auth or config problems are reported once as `x-mode-error ...` until recovery.
@@ -395,7 +418,8 @@ Live replies are posted by `bin/fm-x-reply.sh`, which sends `POST /connector/ans
 Add `--image <path>` to attach one local PNG, JPEG, GIF, WebP, BMP, or TIFF as `{media_type,data_base64}` in the relay's optional `image` object.
 Completion follow-ups use `bin/fm-x-followup.sh`, which checks the local `state/<id>.meta` link and sends the same payload shape through `POST /connector/followup` by calling `bin/fm-x-reply.sh --followup`, up to three times per link within the window.
 Add `--image <path>` there too when a completion follow-up should carry an image.
-A successful post increments the local `x_followups=` counter and keeps the link, unless `--final` was passed or the new count reaches the cap, in which case the link is cleared instead; a failed post leaves the link and counter untouched so it can be retried.
+A successful non-final post increments the local `x_followups=` counter and keeps the link while a successful `--final` post clears it.
+A third non-final post is refused before publication and preserves the link; any other failed post also leaves the link and counter untouched so it can be retried.
 The relay itself rejects a follow-up past its own cap or window with HTTP 409 and may include `{"error":"followup_unavailable"}` in the response body; the client surfaces any follow-up 409 as a distinguishable exit code and uses the body marker only for a sharper diagnostic.
 `fm-x-followup.sh` treats that exit exactly like a locally-detected expiry - clearing the link and skipping quietly rather than retrying - so an older single-follow-up relay or an already-exhausted binding degrades gracefully.
 It treats `fm-x-reply.sh`'s fail-safe refusal (exit 8: platform or explicit budget unresolved) differently: that is a retryable hold, so the link is KEPT and the follow-up is retried once both values can be recovered, never posted with a local default.

@@ -9,7 +9,8 @@
 # This file is sourced, never executed. It defines:
 #   fmx_env_get <key> <file>   - read one KEY=VALUE from a .env-style file
 #   fmx_load_config            - resolve FMX_TOKEN, FMX_RELAY, FMX_DRY, FMX_MAX,
-#                                and FMX_THREAD_MAX (env wins over .env)
+#                                FMX_THREAD_MAX, and the fail-closed
+#                                FMX_AUDIENCE (env wins over .env)
 #   fmx_auth_header_file       - write the bearer header to a 0600 temp file
 #   fmx_extract_reply_context <json-file> - the single owner of reply-context
 #                                extraction: infer {platform, reply_max_chars}
@@ -41,7 +42,7 @@
 #   fmx_post_json <endpoint> <payload-file> [body-file] - POST JSON to the relay,
 #                                printing HTTP code and writing response body
 #   fmx_meta_get <meta> <key>  - read one key=value line from a task meta file
-#   fmx_meta_link_set <meta> <request_id> <epoch> [followups] [platform] [max]
+#   fmx_meta_link_set <meta> <request_id> <epoch> [followups] [platform] [max] [audience]
 #                                - (re)write the X-request link, defaulting
 #                                followups to 0
 #   fmx_meta_followups_set <meta> <n> - rewrite just the follow-up counter
@@ -250,7 +251,7 @@ fmx_poll_shim_v1_valid() {
 }
 
 # Resolve the X-mode settings into FMX_TOKEN, FMX_RELAY, FMX_DRY, FMX_MAX,
-# FMX_DISCORD_MAX, and FMX_THREAD_MAX. An explicit environment variable always
+# FMX_DISCORD_MAX, FMX_THREAD_MAX, and FMX_AUDIENCE. An explicit environment variable always
 # wins over the .env file; the relay URL defaults to the production host so a
 # normal user configures only the token. FMX_RELAY has any trailing slash trimmed
 # so callers can append "/connector/..." cleanly.
@@ -258,7 +259,7 @@ fmx_poll_shim_v1_valid() {
 # unset/empty/0/false/no/off), and "" otherwise: preview mode, where the client
 # composes a reply but records it instead of posting (see fm-x-reply.sh).
 fmx_load_config() {
-  local env_file="${FMX_ENV_FILE:-$FM_HOME/.env}" dry
+  local env_file="${FMX_ENV_FILE:-$FM_HOME/.env}" dry audience relay_port
   if [ -n "${FMX_PAIRING_TOKEN+x}" ]; then
     FMX_TOKEN=${FMX_PAIRING_TOKEN-}
   else
@@ -271,6 +272,46 @@ fmx_load_config() {
   fi
   [ -n "$FMX_RELAY" ] || FMX_RELAY="https://myfirstmate.io"
   FMX_RELAY=${FMX_RELAY%/}
+  if [ -n "${FMX_REPLY_AUDIENCE+x}" ]; then
+    audience=${FMX_REPLY_AUDIENCE-}
+  else
+    audience=$(fmx_env_get FMX_REPLY_AUDIENCE "$env_file")
+  fi
+  audience=$(printf '%s' "$audience" | tr '[:upper:]' '[:lower:]')
+  FMX_AUDIENCE_INVALID=
+  # shellcheck disable=SC2034 # FMX_AUDIENCE and FMX_AUDIENCE_INVALID are read by callers after sourcing.
+  case "$audience" in
+    ''|public) FMX_AUDIENCE=public ;;
+    private-trusted)
+      case "$FMX_RELAY" in
+        http://127.0.0.1:*)
+          relay_port=${FMX_RELAY#http://127.0.0.1:}
+          case "$relay_port" in
+            ''|*[!0-9]*)
+              FMX_AUDIENCE=public
+              FMX_AUDIENCE_INVALID="private-trusted audience requires exactly http://127.0.0.1:<numeric-port>"
+              ;;
+            *)
+              if [ "$relay_port" -ge 1 ] 2>/dev/null && [ "$relay_port" -le 65535 ] 2>/dev/null; then
+                FMX_AUDIENCE=private-trusted
+              else
+                FMX_AUDIENCE=public
+                FMX_AUDIENCE_INVALID="private-trusted audience requires a loopback port from 1 to 65535"
+              fi
+              ;;
+          esac
+          ;;
+        *)
+          FMX_AUDIENCE=public
+          FMX_AUDIENCE_INVALID="private-trusted audience requires exactly http://127.0.0.1:<numeric-port>"
+          ;;
+      esac
+      ;;
+    *)
+      FMX_AUDIENCE=public
+      FMX_AUDIENCE_INVALID="unsupported FMX_REPLY_AUDIENCE '$audience'"
+      ;;
+  esac
   if [ -n "${FMX_DRY_RUN+x}" ]; then
     dry=${FMX_DRY_RUN-}
   else
@@ -304,8 +345,8 @@ fmx_load_config() {
 }
 
 # fmx_extract_reply_context <json-file>: the SINGLE owner of reply-context
-# extraction. Print {"platform":"...","reply_max_chars":"..."} inferred from a
-# mention/relay payload file. Explicit relay-provided platform/limit fields win;
+# extraction. Print platform, reply_max_chars, and reply_audience inferred from
+# a mention/relay payload file. Explicit relay-provided platform/limit fields win;
 # absent those, the legacy tweet_id shape is used ("discord:<channel>:<message>"
 # means Discord, a numeric id means X). Empty fields mean unknown, and callers
 # must default safely. A missing file yields the empty shape. The inbox, relay,
@@ -314,7 +355,7 @@ fmx_load_config() {
 fmx_extract_reply_context() {
   local file=$1
   if [ ! -f "$file" ]; then
-    printf '{"platform":"","reply_max_chars":""}\n'
+    printf '{"platform":"","reply_max_chars":"","reply_audience":""}\n'
     return 0
   fi
   jq -c '
@@ -337,7 +378,10 @@ fmx_extract_reply_context() {
           elif ($tweet_id | startswith("discord:")) then "discord"
           elif ($tweet_id | test("^[0-9]+$")) then "x"
           else "" end),
-        reply_max_chars: first_limit([.reply_max_chars, .reply_max_characters, .message_max_chars, .message_limit, .max_chars])
+        reply_max_chars: first_limit([.reply_max_chars, .reply_max_characters, .message_max_chars, .message_limit, .max_chars]),
+        reply_audience: (if .reply_audience == "private-trusted" then "private-trusted"
+          elif .reply_audience == "public" then "public"
+          else "" end)
       }
   ' "$file"
 }
@@ -348,7 +392,7 @@ fmx_extract_reply_context() {
 fmx_request_inbox_context() {
   local state=$1 rid=$2
   if ! fmx_private_artifact_file_valid "$state/x-inbox" "$rid.json" 600; then
-    printf '{"platform":"","reply_max_chars":""}\n'
+    printf '{"platform":"","reply_max_chars":"","reply_audience":""}\n'
     return 0
   fi
   fmx_extract_reply_context "$state/x-inbox/$rid.json"
@@ -481,15 +525,15 @@ fmx_context_registry_prune() {
   return 0
 }
 
-# fmx_context_registry_set <state> <request_id> <platform> <reply-max> [refresh]:
+# fmx_context_registry_set <state> <request_id> <platform> <reply-max> [refresh] [audience]:
 # persist the durable per-request reply context atomically. Normalizes platform
 # (twitter -> x, anything unrecognized -> empty) and requires a numeric budget.
 # A refresh value of 1 resets the retention timestamp; ordinary writes preserve
-# it. A no-op (success) when neither a platform nor a budget is known, so callers
-# never write an empty, useless record. Returns non-zero only on invalid input or
-# a write failure; callers treat the write as best-effort.
+# it. Audience alone is durable context even when platform and budget are unknown.
+# Returns non-zero only on invalid input or a write failure; callers treat the
+# write as best-effort.
 fmx_context_registry_set() {
-  local state=$1 rid=$2 platform=${3:-} reply_max=${4:-} refresh=${5:-0} dir file dir_device now recorded_at
+  local state=$1 rid=$2 platform=${3:-} reply_max=${4:-} refresh=${5:-0} audience=${6:-} dir file dir_device now recorded_at existing_audience
   case "$rid" in
     ''|.*|*[!A-Za-z0-9._-]*) return 1 ;;
   esac
@@ -505,9 +549,6 @@ fmx_context_registry_set() {
     0|1) ;;
     *) return 1 ;;
   esac
-  if [ -z "$platform" ] && [ -z "$reply_max" ]; then
-    return 0
-  fi
   dir="$state/x-context"
   dir_device=$(fmx_private_artifact_dir_prepare "$dir") || return 1
   file="$dir/$rid.json"
@@ -515,6 +556,20 @@ fmx_context_registry_set() {
     && ! fmx_single_link_file_mode_valid "$file" 600 "$dir_device"; then
     return 1
   fi
+  case "$audience" in
+    public|private-trusted) ;;
+    '')
+      existing_audience=
+      if [ -f "$file" ]; then
+        existing_audience=$(jq -r '.reply_audience // ""' "$file" 2>/dev/null) || existing_audience=
+      fi
+      case "$existing_audience" in
+        public|private-trusted) audience=$existing_audience ;;
+        *) audience=public ;;
+      esac
+      ;;
+    *) audience=public ;;
+  esac
   fmx_context_registry_prune "$state"
   now=${FMX_NOW_OVERRIDE:-$(date +%s)}
   case "$now" in
@@ -528,9 +583,9 @@ fmx_context_registry_set() {
   if [ -z "$recorded_at" ]; then
     recorded_at=$now
   fi
-  (set -o pipefail; jq -cn --arg rid "$rid" --arg platform "$platform" --arg max "$reply_max" \
+  (set -o pipefail; jq -cn --arg rid "$rid" --arg platform "$platform" --arg max "$reply_max" --arg audience "$audience" \
     --argjson recorded_at "$recorded_at" \
-    '{request_id:$rid, platform:$platform, reply_max_chars:$max, recorded_at:$recorded_at}' \
+    '{request_id:$rid, platform:$platform, reply_max_chars:$max, reply_audience:$audience, recorded_at:$recorded_at}' \
     | fmx_private_artifact_publish_stdin "$dir" "$rid.json" 600) || return 1
 }
 
@@ -561,22 +616,23 @@ fmx_offer_registry_claim() {
 }
 
 # fmx_context_registry_get <state> <request_id>: print the durable per-request
-# reply context as {"platform":"...","reply_max_chars":"..."} (the same shape as
-# the inbox and relay extractors), or the empty shape when no record exists.
+# reply context with platform, reply_max_chars, and reply_audience fields.
+# Missing records return an empty audience so the resolver can still consult a
+# surviving stamped inbox; legacy records without audience default to public.
 fmx_context_registry_get() {
   local state=$1 rid=$2 dir file
   case "$rid" in
-    ''|.*|*[!A-Za-z0-9._-]*) printf '{"platform":"","reply_max_chars":""}\n'; return 0 ;;
+    ''|.*|*[!A-Za-z0-9._-]*) printf '{"platform":"","reply_max_chars":"","reply_audience":""}\n'; return 0 ;;
   esac
   dir="$state/x-context"
   file="$dir/$rid.json"
   if ! fmx_private_artifact_file_valid "$dir" "$rid.json" 600; then
-    printf '{"platform":"","reply_max_chars":""}\n'
+    printf '{"platform":"","reply_max_chars":"","reply_audience":""}\n'
     return 0
   fi
   fmx_context_registry_prune "$state"
-  jq -c '{platform:(.platform // ""), reply_max_chars:(.reply_max_chars // "")}' "$file" 2>/dev/null \
-    || printf '{"platform":"","reply_max_chars":""}\n'
+  jq -c '{platform:(.platform // ""), reply_max_chars:(.reply_max_chars // ""), reply_audience:(if .reply_audience == "private-trusted" then "private-trusted" else "public" end)}' "$file" 2>/dev/null \
+    || printf '{"platform":"","reply_max_chars":"","reply_audience":"public"}\n'
 }
 
 # fmx_context_registry_clear <state> <request_id>: drop the durable record.
@@ -599,7 +655,7 @@ fmx_context_registry_clear() {
 #      and concurrent requests - the primary source after this fix);
 #   2. the still-present inbox payload;
 #   3. when <allow-relay> is 1, an AUTHORITATIVE relay lookup by request_id.
-# Prints {"platform":"...","reply_max_chars":"..."}; each axis is filled from
+# Prints {"platform":"...","reply_max_chars":"...","reply_audience":"..."}; each axis is filled from
 # the first source that provides it, continuing through later sources until both
 # are present or the sources are exhausted. <allow-relay>
 # must be 0 in dry-run / no-token / no-network contexts; the caller gates it
@@ -608,7 +664,7 @@ fmx_context_registry_clear() {
 fmx_resolve_reply_context() {
   # Bash local accepts p= and m= as explicit empty assignment arguments.
   # shellcheck disable=SC1007
-  local state=$1 rid=$2 allow_relay=${3:-0} src ctx source_p source_m p= m=
+  local state=$1 rid=$2 allow_relay=${3:-0} src ctx source_p source_m source_a p= m= a=public audience_set=0
   for src in registry inbox relay; do
     case "$src" in
       registry) ctx=$(fmx_context_registry_get "$state" "$rid" 2>/dev/null) || ctx= ;;
@@ -621,12 +677,19 @@ fmx_resolve_reply_context() {
     [ -n "$ctx" ] || continue
     source_p=$(printf '%s' "$ctx" | jq -r '.platform // ""' 2>/dev/null) || source_p=
     source_m=$(printf '%s' "$ctx" | jq -r '.reply_max_chars // ""' 2>/dev/null) || source_m=
+    source_a=$(printf '%s' "$ctx" | jq -r '.reply_audience // ""' 2>/dev/null) || source_a=
     case "$source_p" in discord|x) [ -n "$p" ] || p=$source_p ;; esac
     case "$source_m" in ''|*[!0-9]*) ;; *) [ -n "$m" ] || m=$source_m ;; esac
+    if [ "$src" != relay ] && [ "$audience_set" = 0 ]; then
+      case "$source_a" in
+        private-trusted) a=private-trusted; audience_set=1 ;;
+        public) a=public; audience_set=1 ;;
+      esac
+    fi
     [ -n "$p" ] && [ -n "$m" ] && break
   done
-  jq -cn --arg platform "$p" --arg max "$m" \
-    '{platform:$platform, reply_max_chars:$max}'
+  jq -cn --arg platform "$p" --arg max "$m" --arg audience "$a" \
+    '{platform:$platform, reply_max_chars:$max, reply_audience:$audience}'
   return 0
 }
 
@@ -903,6 +966,7 @@ fmx_post_json() (
 #   x_followups=<n>            follow-ups already posted against this binding (0..3)
 #   x_platform=<platform>      optional reply platform for follow-up split budget
 #   x_reply_max_chars=<n>      optional recorded per-message split budget
+#   x_reply_audience=<mode>    durable public or private-trusted disclosure mode
 # fm-x-followup.sh posts against that link (within the window, up to the cap),
 # then either records the incremented count or clears the link. These helpers
 # own the read/write/clear so fm-x-link.sh and fm-x-followup.sh never hand-edit
@@ -928,7 +992,7 @@ fmx_meta_tmp() {
   mktemp "$dir/.${base}.fm-x.XXXXXX"
 }
 
-# fmx_meta_link_set <meta> <request_id> <epoch> [followups] [platform] [max]:
+# fmx_meta_link_set <meta> <request_id> <epoch> [followups] [platform] [max] [audience]:
 # atomically (re)write the x_request/x_request_ts/x_followups lines plus optional
 # reply-platform context, dropping any prior link and preserving every other meta
 # line. <followups> defaults to 0 (a fresh link); pass the prior task's count to
@@ -936,13 +1000,13 @@ fmx_meta_tmp() {
 # budget against a binding the relay already knows about. Returns non-zero if
 # <meta> is missing or the rewrite fails.
 fmx_meta_link_set() {
-  local meta=$1 rid=$2 ts=$3 followups=${4:-0} platform=${5:-} reply_max=${6:-} tmp lock
+  local meta=$1 rid=$2 ts=$3 followups=${4:-0} platform=${5:-} reply_max=${6:-} audience=${7:-public} tmp lock
   [ -f "$meta" ] || return 1
   lock=$(fm_meta_lock_path "$meta") || return 1
   fm_lock_acquire_wait "$lock"
   [ -f "$meta" ] || { fm_lock_release "$lock"; return 1; }
   tmp=$(fmx_meta_tmp "$meta") || { fm_lock_release "$lock"; return 1; }
-  if ! { grep -vE '^x_request=|^x_request_ts=|^x_followups=|^x_platform=|^x_reply_max_chars=' "$meta" || true; } > "$tmp"; then
+  if ! { grep -vE '^x_request=|^x_request_ts=|^x_followups=|^x_platform=|^x_reply_max_chars=|^x_reply_audience=' "$meta" || true; } > "$tmp"; then
     rm -f "$tmp"; fm_lock_release "$lock"; return 1
   fi
   printf 'x_request=%s\n' "$rid" >> "$tmp" || { rm -f "$tmp"; fm_lock_release "$lock"; return 1; }
@@ -955,6 +1019,8 @@ fmx_meta_link_set() {
     ''|*[!0-9]*) ;;
     *) printf 'x_reply_max_chars=%s\n' "$reply_max" >> "$tmp" || { rm -f "$tmp"; fm_lock_release "$lock"; return 1; } ;;
   esac
+  case "$audience" in private-trusted) ;; *) audience=public ;; esac
+  printf 'x_reply_audience=%s\n' "$audience" >> "$tmp" || { rm -f "$tmp"; fm_lock_release "$lock"; return 1; }
   mv -f "$tmp" "$meta" || { rm -f "$tmp"; fm_lock_release "$lock"; return 1; }
   fm_lock_release "$lock"
 }
@@ -978,7 +1044,7 @@ fmx_meta_followups_set() {
 }
 
 # fmx_meta_link_clear <meta>: atomically remove the x_request/x_request_ts/
-# x_followups and reply-platform lines while preserving every other meta line. Idempotent:
+# x_followups and reply-context lines while preserving every other meta line. Idempotent:
 # succeeds whether or not a link is present, and is a no-op when <meta> is
 # missing.
 fmx_meta_link_clear() {
@@ -988,7 +1054,7 @@ fmx_meta_link_clear() {
   fm_lock_acquire_wait "$lock"
   [ -f "$meta" ] || { fm_lock_release "$lock"; return 0; }
   tmp=$(fmx_meta_tmp "$meta") || { fm_lock_release "$lock"; return 1; }
-  if ! { grep -vE '^x_request=|^x_request_ts=|^x_followups=|^x_platform=|^x_reply_max_chars=' "$meta" || true; } > "$tmp"; then
+  if ! { grep -vE '^x_request=|^x_request_ts=|^x_followups=|^x_platform=|^x_reply_max_chars=|^x_reply_audience=' "$meta" || true; } > "$tmp"; then
     rm -f "$tmp"; fm_lock_release "$lock"; return 1
   fi
   mv -f "$tmp" "$meta" || { rm -f "$tmp"; fm_lock_release "$lock"; return 1; }

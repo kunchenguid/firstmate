@@ -4,8 +4,17 @@
 # Usage: fm-x-reply.sh <request_id> [--image <path>] <text>
 #        fm-x-reply.sh <request_id> [--image <path>] --text-file <path>
 #        fm-x-reply.sh <request_id> [--image <path>] -
+#        fm-x-reply.sh <request_id> --kind work-ack --task-id <id> ...
 #        fm-x-reply.sh <request_id> --followup [--image <path>] ...
 #        fm-x-reply.sh <request_id> ... --receipt-file <path>
+#
+# --kind work-ack marks an initial answer as a claim that durable work has been
+# registered and linked. It requires --task-id and refuses before any preview or network call
+# unless state/<task-id>.meta is an ordinary file already bound to the same
+# request_id through x_request=. The default answer kind remains compatible with
+# existing question, immediate-outcome, decision, and failure replies.
+# This guard does not prove that a worker is currently running; a caller needs
+# separate current-state evidence before using stronger running-state language.
 #
 # --receipt-file <path> writes {request_id, endpoint, chunks, dry_run} to <path>
 # after the reply lands, so a caller that must record HOW MANY messages were
@@ -109,6 +118,21 @@ reply_make_tmp_file() {
   printf -v "$var_name" '%s' "$file"
 }
 
+verify_work_ack_link() {
+  local task_meta linked_request
+  [ "$REPLY_KIND" = work-ack ] || return 0
+  task_meta="$STATE/$TASK_ID.meta"
+  if ! fmx_single_link_file_valid "$task_meta"; then
+    echo "fm-x-reply: work-ack refused; task metadata is missing or unsafe: state/$TASK_ID.meta" >&2
+    return 1
+  fi
+  linked_request=$(awk -F= '$1 == "x_request" { value=substr($0, index($0, "=") + 1) } END { print value }' "$task_meta")
+  if [ "$linked_request" != "$REQ" ]; then
+    echo "fm-x-reply: work-ack refused; task '$TASK_ID' is not linked to request '$REQ'" >&2
+    return 1
+  fi
+}
+
 # write_reply_receipt <chunks> <dry-run-0|1>: record what this reply actually
 # sent, for a caller that has to build a typed delivery receipt. Only ever called
 # on success. A write failure is reported but never changes the exit status: the
@@ -122,19 +146,21 @@ write_reply_receipt() {
 }
 
 usage() {
-  echo "usage: fm-x-reply.sh <request_id> [--followup] [--image <path>] [--receipt-file <path>] <text> | ... --text-file <path> | ... -" >&2
+  echo "usage: fm-x-reply.sh <request_id> [--kind answer|work-ack] [--task-id <id>] [--followup] [--image <path>] [--receipt-file <path>] <text> | ... --text-file <path> | ... -" >&2
 }
 
 help() {
   cat <<'EOF'
-usage: fm-x-reply.sh <request_id> [--followup] [--image <path>] [--receipt-file <path>] <text>
-       fm-x-reply.sh <request_id> [--followup] [--image <path>] [--receipt-file <path>] --text-file <path>
-       fm-x-reply.sh <request_id> [--followup] [--image <path>] [--receipt-file <path>] -
+usage: fm-x-reply.sh <request_id> [--kind answer|work-ack] [--task-id <id>] [--followup] [--image <path>] [--receipt-file <path>] <text>
+       fm-x-reply.sh <request_id> [--kind answer|work-ack] [--task-id <id>] [--followup] [--image <path>] [--receipt-file <path>] --text-file <path>
+       fm-x-reply.sh <request_id> [--kind answer|work-ack] [--task-id <id>] [--followup] [--image <path>] [--receipt-file <path>] -
 
-Post a public-safe X-mode answer to the relay, or a completion follow-up with --followup.
+Post an audience-safe Relay answer, or a completion follow-up with --followup.
 
 Options:
   --followup       POST to /connector/followup instead of /connector/answer.
+  --kind <kind>    Reply kind: answer (default) or work-ack.
+  --task-id <id>   Required with work-ack; its metadata must already link this request.
   --image <path>   Attach one local image file; threaded replies attach it to the opener tweet or message.
   --receipt-file <path>
                    After a successful reply, write {request_id, endpoint, chunks, dry_run} to <path>.
@@ -161,12 +187,32 @@ shift
 # along with --image and process the remaining args (the text source) exactly as
 # the answer path always has.
 FOLLOWUP=0
+REPLY_KIND=answer
+TASK_ID=
 IMAGE_PATH=
 RECEIPT_FILE=
 ARGS=()
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --followup) FOLLOWUP=1 ;;
+    --kind)
+      shift
+      if [ "$#" -lt 1 ] || [ -z "$1" ]; then
+        echo "fm-x-reply: missing --kind value" >&2
+        usage
+        exit 2
+      fi
+      REPLY_KIND=$1
+      ;;
+    --task-id)
+      shift
+      if [ "$#" -lt 1 ] || [ -z "$1" ]; then
+        echo "fm-x-reply: missing --task-id value" >&2
+        usage
+        exit 2
+      fi
+      TASK_ID=$1
+      ;;
     --image)
       shift
       if [ "$#" -lt 1 ] || [ -z "$1" ]; then
@@ -215,7 +261,7 @@ if [ -z "$TEXT" ]; then
   exit 2
 fi
 
-# The endpoint is the only behavioral difference between an answer and a
+# The endpoint is the only transport difference between an answer and a
 # follow-up; everything below (split, payload, dry-run, post) is shared.
 if [ "$FOLLOWUP" = 1 ]; then
   ENDPOINT=followup
@@ -223,13 +269,42 @@ else
   ENDPOINT=answer
 fi
 
-fmx_load_config
-
 # The request_id becomes a filename (inbox/outbox record), so never trust it into
 # a path even though the relay issues it.
 case "$REQ" in
   ''|.*|*[!A-Za-z0-9._-]*) echo "fm-x-reply: unsafe request_id: $REQ" >&2; exit 2 ;;
 esac
+
+# A work acknowledgement is a stronger registration claim than an ordinary answer.
+# Refuse before config loading, preview publication, or network access unless a
+# real task is already linked to this exact request.
+case "$REPLY_KIND" in
+  answer)
+    if [ -n "$TASK_ID" ]; then
+      echo "fm-x-reply: --task-id is only valid with --kind work-ack" >&2
+      exit 2
+    fi
+    ;;
+  work-ack)
+    if [ "$FOLLOWUP" = 1 ]; then
+      echo "fm-x-reply: --kind work-ack cannot be combined with --followup" >&2
+      exit 2
+    fi
+    case "$TASK_ID" in
+      ''|.*|*[!A-Za-z0-9._-]*)
+        echo "fm-x-reply: --kind work-ack requires a safe --task-id" >&2
+        exit 2
+        ;;
+    esac
+    verify_work_ack_link || exit 1
+    ;;
+  *)
+    echo "fm-x-reply: unsupported --kind '$REPLY_KIND' (use answer or work-ack)" >&2
+    exit 2
+    ;;
+esac
+
+fmx_load_config
 
 command -v jq >/dev/null 2>&1 || { echo "fm-x-reply: jq not found" >&2; exit 1; }
 
@@ -315,6 +390,10 @@ else
   fmx_reply_payload_json "$REQ" "$CHUNKS" "$N" > "$PAYLOAD_FILE" || {
     echo "fm-x-reply: failed to build request payload" >&2; exit 1; }
 fi
+
+# Re-check immediately before any preview publication or network post so a
+# task that was unlinked during composition cannot leave a stale "started" claim.
+verify_work_ack_link || exit 1
 
 # Preview / dry-run: surface what we WOULD post and stop, without auth or network.
 if [ -n "$FMX_DRY" ]; then
