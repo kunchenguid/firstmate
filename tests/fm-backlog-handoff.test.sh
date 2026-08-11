@@ -571,8 +571,15 @@ setup_remote_handoff() {  # <name> -> echoes "<here> <peer>"
   cp "$ROOT/control-root/verbs/fmr-verb.sh" "$peer/cr/verbs/fmr-verb.sh"
   chmod 755 "$peer/cr/verbs/fmr-verb.sh"
   # The peer's own firstmate root: the real handoff script plus what it sources.
+  # The library list is READ OUT OF THE SCRIPT rather than spelled here, because
+  # a hand-written list silently rots: the 2026-08-11 upstream sync added two
+  # more `. "$SCRIPT_DIR/..."` lines to fm-backlog-handoff.sh and this peer then
+  # died with "No such file or directory" on a machine whose tasks-axi was new
+  # enough to run these cases at all.
   local f
-  for f in fm-backlog-handoff.sh fm-tasks-axi-lib.sh; do
+  # shellcheck disable=SC2016 # $SCRIPT_DIR is matched literally in the script's source lines, not expanded.
+  for f in fm-backlog-handoff.sh $(sed -n 's|^\. "\$SCRIPT_DIR/\([^"]*\)".*|\1|p' "$ROOT/bin/fm-backlog-handoff.sh"); do
+    [ -f "$ROOT/bin/$f" ] || fail "peer fixture: bin/$f is sourced by fm-backlog-handoff.sh but does not exist"
     cp "$ROOT/bin/$f" "$peer/fmroot/bin/$f"
   done
   {

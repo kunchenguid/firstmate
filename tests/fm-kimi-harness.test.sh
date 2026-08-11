@@ -11,6 +11,14 @@ KIMI_HOOK="$ROOT/bin/fm-kimi-turnend-hook.sh"
 TMP_ROOT=$(fm_test_tmproot fm-kimi-harness)
 KIMI_RUNTIME_TASK_TMP=
 PYTHON_BIN=$(command -v python3) || fail "test needs python3"
+# bin/fm-kimi-turnend-hook.sh validates config.toml through Python's tomllib,
+# which is 3.11+, and fm-spawn.sh installs that hook on every Kimi launch - so
+# without tomllib this whole adapter refuses rather than misbehaves, and every
+# case here would report the hook's own honest refusal as a behavior failure.
+# Debian 10 (the internal CI image) ships python3.7; GitHub's ubuntu-latest
+# ships 3.12, which is why this surfaced only on the Codebase pipeline.
+"$PYTHON_BIN" -c 'import tomllib' >/dev/null 2>&1 \
+  || { echo "skip: python3 lacks tomllib (3.11+ required by the Kimi turn-end hook's config validation)"; exit 0; }
 PYTHON_BIN_DIR=$(dirname "$PYTHON_BIN")
 JQ_BIN=$(command -v jq) || fail "test needs jq"
 BASE_PATH=${FM_TEST_BASE_PATH:-$PYTHON_BIN_DIR:/usr/bin:/bin:/usr/sbin:/sbin}

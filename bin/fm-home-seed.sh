@@ -1170,15 +1170,34 @@ seed_home() {
     return 1
   }
 
-  # The identity marker is written BEFORE the project clones, not with the
+  # Two orderings meet here, and both are load-bearing.
+  #
+  # The parent record is published FIRST, because the identity marker is what
+  # makes this directory a secondmate home to every later reader: a seed that
+  # dies between the two must never leave an identity with no route back to its
+  # parent. fm-teardown.sh reads this record so a restart that drops the
+  # launch-time FM_PUBLIC_FOLLOWUP_PRIMARY_HOME prefix still resolves the real
+  # parent instead of silently treating its relay as inactive.
+  #
+  # The identity marker is then written BEFORE the project clones, not with the
   # registry at the end. bin/fm-backend-hometag-lib.sh reads this file to derive
   # the home tag, and clone_project uses that tag to place the clone's worktree
   # pool, so a marker written afterwards makes the seed name a pool root
   # ("firstmate-<hash>") that every later caller re-derives differently
   # ("2ndmate-<id>-<hash>") and then repairs, stranding the first pool.
-  # Rollback already covers it: SEED_MARKER_EXISTED and the backup are taken
-  # well above this point, and restore_seed_file removes or restores it.
-  printf '%s\n' "$id" > "$home/$SUB_HOME_MARKER"
+  #
+  # Both writes are atomic (temp file plus rename) so no reader ever sees a
+  # half-written marker. Rollback already covers both: SEED_MARKER_EXISTED,
+  # SEED_PARENT_MARKER_EXISTED and their backups are taken well above this
+  # point, and restore_seed_file removes or restores each.
+  {
+    printf 'schema=fm-secondmate-parent.v1\n'
+    printf 'route=local\n'
+    printf 'parent_home=%s\n' "$(resolved_path "$FM_HOME")"
+  } > "$home/$SUB_HOME_PARENT_MARKER.tmp.$$"
+  mv -f -- "$home/$SUB_HOME_PARENT_MARKER.tmp.$$" "$home/$SUB_HOME_PARENT_MARKER"
+  printf '%s\n' "$id" > "$home/$SUB_HOME_MARKER.tmp.$$"
+  mv -f -- "$home/$SUB_HOME_MARKER.tmp.$$" "$home/$SUB_HOME_MARKER"
 
   for project in "$@"; do
     project_dst=$(validate_project_destination "$home" "$project") || return 1
@@ -1198,19 +1217,8 @@ seed_home() {
   cp "$SEED_PARENT_BRIEF" "$home/data/charter.md"
 
   projects_csv=$(join_projects "$@")
-  # Durable record of this home's route to its parent, written once here next
-  # to the identity marker: the cleanup check in fm-teardown.sh reads it so a
-  # restart that drops the launch-time FM_PUBLIC_FOLLOWUP_PRIMARY_HOME prefix
-  # can still resolve the real parent instead of silently treating its relay
-  # as inactive.
-  {
-    printf 'schema=fm-secondmate-parent.v1\n'
-    printf 'route=local\n'
-    printf 'parent_home=%s\n' "$(resolved_path "$FM_HOME")"
-  } > "$home/$SUB_HOME_PARENT_MARKER.tmp.$$"
-  mv -f -- "$home/$SUB_HOME_PARENT_MARKER.tmp.$$" "$home/$SUB_HOME_PARENT_MARKER"
-  printf '%s\n' "$id" > "$home/$SUB_HOME_MARKER.tmp.$$"
-  mv -f -- "$home/$SUB_HOME_MARKER.tmp.$$" "$home/$SUB_HOME_MARKER"
+  # The parent record and identity marker are already published above, ahead of
+  # the clones that need this home's tag; only the registry closes the seed here.
   write_registry "$id" "$home" "$projects_csv" "$SEED_PARENT_BRIEF"
   validate_registry
   SEED_COMMITTED=1
