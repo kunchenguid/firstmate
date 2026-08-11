@@ -65,14 +65,12 @@ const sessionstartDeliveryBytes = 512 * 1024;
 
 type SessionStartContext = {
   sessionManager?: {
-    getEntries?: () => unknown[];
-    getHeader?: () => { timestamp?: unknown } | undefined;
+    getHeader?: () => { timestamp?: unknown } | null | undefined;
   };
 };
 
 function restoredSessionEvidence(ctx: SessionStartContext): boolean {
   try {
-    if ((ctx.sessionManager?.getEntries?.().length ?? 0) > 0) return true;
     const timestamp = ctx.sessionManager?.getHeader?.()?.timestamp;
     const createdAt = typeof timestamp === "string" ? Date.parse(timestamp) : Number.NaN;
     return Number.isFinite(createdAt) && createdAt < performance.timeOrigin;

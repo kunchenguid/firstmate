@@ -80,7 +80,7 @@ compact
 ```
 
 Pi disagrees with Claude and Codex on `resume`: a new Pi process continuing a session reports `startup`, and Pi's `resume` reason is reserved for an in-process session switch.
-The adapter therefore refines startup-reason restored continuation, resume-selection, explicit-session, and fork CLI invocations to the context-preserving wrapper source. For create-if-missing flags such as `-c`, `--continue`, `--session`, and `--session-id`, a populated session or a session header older than the current Pi process must prove restoration; a newly created session remains a true startup. A continuation never records or replaces the true-start baseline; if the next compact encounters the prior process identity or a missing baseline, it conservatively injects current AGENTS.md before the digest.
+The adapter therefore refines startup-reason restored continuation, resume-selection, explicit-session, and fork CLI invocations to the context-preserving wrapper source. For create-if-missing flags such as `-c`, `--continue`, `--session`, and `--session-id`, a session header older than the current Pi process must prove restoration; a newly created session remains a true startup even when setup flags such as `--name` have already appended entries. A continuation never records or replaces the true-start baseline; if the next compact encounters the prior process identity or a missing baseline, it conservatively injects current AGENTS.md before the digest.
 
 ### Post-start instruction refresh
 
