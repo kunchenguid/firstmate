@@ -79,12 +79,12 @@ EOF
   fi
 }
 
-write_child() { # <home> <id> <status>
-  local home=$1 id=$2 status=$3
+write_child() { # <home> <id> <status> [spawn-gen]
+  local home=$1 id=$2 status=$3 spawn_gen=${4:-s${BASHPID:-$$}.$RANDOM}
   fm_write_meta "$home/state/$id.meta" \
     "window=firstmate:fm-$id" "worktree=$home/projects/$id" "project=alpha" \
     'harness=codex' 'kind=ship' 'mode=no-mistakes' 'yolo=off' \
-    'pr=https://example.test/owner/repo/pull/1'
+    "spawn_gen=$spawn_gen" 'pr=https://example.test/owner/repo/pull/1'
   printf '%s\n' "$status" > "$home/state/$id.status"
   : > "$home/state/$id.turn-ended"
   age "$home/state/$id.meta" "$home/state/$id.status" "$home/state/$id.turn-ended"
@@ -175,6 +175,22 @@ test_remote_parent_reply_is_idempotent() {
     || fail "remote parent reply was not restart-idempotent"
   [ "$(outcome_count "$MATE" reported)" = 1 ] || fail "remote parent report receipt missing"
   pass "remote parent-replies mirror input is durable and idempotent"
+}
+
+# Reusing a task id creates a separate receipt for the new spawned worker even
+# when its terminal state and status text match the retired worker exactly.
+test_reused_task_id_reports_each_incarnation() {
+  make_world reused-id; bind_secondmate remote
+  write_child "$MATE" child 'failed: terminal' spawn-one
+  FM_FAKE_CREW_STATE='failed' run_reconcile "$MATE" --startup
+  rm -f "$MATE/state/child.meta" "$MATE/state/child.status" "$MATE/state/child.turn-ended"
+  write_child "$MATE" child 'failed: terminal' spawn-two
+  FM_FAKE_CREW_STATE='failed' run_reconcile "$MATE" --startup
+  [ "$(outcome_count "$MATE" reported)" = 2 ] \
+    || fail "reused task id collided with the retired incarnation receipt"
+  [ "$(grep -c 'inactive-outcome-mate-child-failed' "$MATE/state/parent-replies.status")" = 2 ] \
+    || fail "reused task id did not produce an independent parent report"
+  pass "reused task ids retain per-incarnation terminal receipts"
 }
 
 # Heartbeat backoff state is deliberately irrelevant to the independent cadence.
@@ -330,6 +346,7 @@ test_main_direct_terminal_presentation_receipt
 test_local_secondmate_reports_terminal_child
 test_local_secondmate_rejects_relative_parent_home
 test_remote_parent_reply_is_idempotent
+test_reused_task_id_reports_each_incarnation
 test_heartbeat_cap_does_not_delay_reconciliation
 test_scan_marker_replaces_symlink_safely
 test_nonterminal_and_captain_held_states_do_not_report

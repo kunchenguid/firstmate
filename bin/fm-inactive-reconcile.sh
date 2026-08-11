@@ -30,8 +30,9 @@
 # A receipt is intentionally independent of .hb-surfaced-* bookkeeping.
 #
 # New fm-terminal-outcome.v1 receipts contain schema, fingerprint, task_id,
-# state, outcome_key, origin, phase, pr, created_epoch, and notice_emitted; the
-# fingerprint binds task id, terminal state, PR text, and sanitized last status.
+# incarnation, state, outcome_key, origin, phase, pr, created_epoch, and
+# notice_emitted; the fingerprint binds the spawn incarnation, task id, terminal
+# state, PR text, and sanitized last status.
 # Pending atomically becomes reported after parent append or presented after
 # main-home acknowledgement. The atomic epoch/cursor marker's mtime gates scans,
 # and its cursor records the last child visited within the aggregate budget.
@@ -147,8 +148,8 @@ record_field_set() {
   mv -f "$tmp" "$record"
 }
 
-ensure_record() { # <fingerprint> <task> <state> <outcome-key> <origin> <phase> <pr>
-  local fingerprint=$1 task=$2 state=$3 outcome_key=$4 origin=$5 phase=$6 pr=$7 tmp
+ensure_record() { # <fingerprint> <task> <incarnation> <state> <outcome-key> <origin> <phase> <pr>
+  local fingerprint=$1 task=$2 incarnation=$3 state=$4 outcome_key=$5 origin=$6 phase=$7 pr=$8 tmp
   RECORD_PENDING=$(record_path "$fingerprint" pending)
   RECORD_PRESENTED=$(record_path "$fingerprint" presented)
   RECORD_REPORTED=$(record_path "$fingerprint" reported)
@@ -166,6 +167,7 @@ ensure_record() { # <fingerprint> <task> <state> <outcome-key> <origin> <phase> 
     printf 'schema=fm-terminal-outcome.v1\n'
     printf 'fingerprint=%s\n' "$fingerprint"
     printf 'task_id=%s\n' "$task"
+    printf 'incarnation=%s\n' "$incarnation"
     printf 'state=%s\n' "$state"
     printf 'outcome_key=%s\n' "$outcome_key"
     printf 'origin=%s\n' "$origin"
@@ -258,6 +260,21 @@ meta_field() {
   grep "^$2=" "$1" 2>/dev/null | tail -1 | cut -d= -f2- || true
 }
 
+meta_incarnation() { # <meta>
+  local meta=$1 incarnation identity
+  incarnation=$(meta_field "$meta" spawn_gen)
+  if valid_id "$incarnation"; then
+    printf '%s\n' "$incarnation"
+    return
+  fi
+  if [ "$(uname)" = Darwin ]; then
+    identity=$(stat -f '%d:%i:%m:%c' "$meta" 2>/dev/null || true)
+  else
+    identity=$(stat -c '%d:%i:%Y:%Z' "$meta" 2>/dev/null || true)
+  fi
+  printf 'legacy-%s\n' "$(sha256_text "$identity")"
+}
+
 pr_for_task() { # <meta> <status>
   local pr=$1 status=$2 value
   value=$(meta_field "$pr" pr)
@@ -305,7 +322,7 @@ report_to_parent() { # <self-id> <task> <state> <outcome-key> <fingerprint> <pr>
 }
 
 reconcile_direct_child() { # <id> <meta> <secondmate-id-or-empty> <timeout>
-  local id=$1 meta=$2 self=${3:-} timeout=$4 status turn last age state_line state pr fingerprint outcome_key payload state_rc=0
+  local id=$1 meta=$2 self=${3:-} timeout=$4 status turn last age state_line state pr incarnation fingerprint outcome_key payload state_rc=0
   status="$STATE/$id.status"
   turn="$STATE/$id.turn-ended"
   last=$(last_status_line "$status")
@@ -321,13 +338,14 @@ reconcile_direct_child() { # <id> <meta> <secondmate-id-or-empty> <timeout>
     *) return 0 ;;
   esac
   pr=$(pr_for_task "$meta" "$status")
-  fingerprint=$(sha256_text "$id|$state|$pr|$(clean_field "$last")")
+  incarnation=$(meta_incarnation "$meta")
+  fingerprint=$(sha256_text "$incarnation|$id|$state|$pr|$(clean_field "$last")")
   if [ -n "$self" ]; then
     outcome_key="inactive-outcome-$self-$id-$state"
   else
     outcome_key="inactive-outcome-main-$id-$state"
   fi
-  ensure_record "$fingerprint" "$id" "$state" "$outcome_key" direct "upstream" "$pr" || return 1
+  ensure_record "$fingerprint" "$id" "$incarnation" "$state" "$outcome_key" direct "upstream" "$pr" || return 1
   [ -n "$RECORD_PENDING" ] || return 0
   if [ -n "$self" ]; then
     if report_to_parent "$self" "$id" "$state" "$outcome_key" "$fingerprint" "$pr"; then
