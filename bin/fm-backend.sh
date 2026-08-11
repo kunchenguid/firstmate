@@ -839,8 +839,8 @@ fm_backend_capture() {  # <backend> <target> <lines> [expected-label]
 }
 
 # fm_backend_send_key: one backend-supported named special key.
-fm_backend_send_key() {  # <backend> <target> <key> [expected-label] [recorded-harness] [raw-launch] [explicit-target]
-  local backend=$1 target=${2:-} key=${3:-} recorded_harness=${5-} raw_launch=${6-} explicit_target=${7-}
+fm_backend_send_key() {  # <backend> <target> <key> [expected-label] [recorded-harness] [raw-launch] [explicit-target] [raw-owner]
+  local backend=$1 target=${2:-} key=${3:-} recorded_harness=${5-} raw_launch=${6-} explicit_target=${7-} raw_owner=${8-}
   shift
   fm_backend_source "$backend" || return 1
   if [ "$backend" = tmux ] && [ "$raw_launch" != 1 ] \
@@ -852,7 +852,7 @@ fm_backend_send_key() {  # <backend> <target> <key> [expected-label] [recorded-h
     tmux) fm_backend_tmux_send_key "$@" ;;
     herdr)
       fm_backend_herdr_send_key_checked "$target" "$key" \
-        "$recorded_harness" "$raw_launch" "$explicit_target"
+        "$recorded_harness" "$raw_launch" "$explicit_target" "$raw_owner"
       ;;
     zellij) fm_backend_zellij_send_key "$@" ;;
     orca) fm_backend_orca_send_key "$@" ;;
@@ -864,8 +864,8 @@ fm_backend_send_key() {  # <backend> <target> <key> [expected-label] [recorded-h
 # fm_backend_send_text_submit: type text once, then submit and verify,
 # retrying only the submission (never retyping). Echoes the backend's
 # proof-carrying verdict; callers require exact empty for confirmed delivery.
-fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sleep> <settle> [expected-label] [recorded-harness] [raw-launch] [explicit-target]
-  local backend=$1 target=${2:-} recorded_harness=${8-} raw_launch=${9-}
+fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sleep> <settle> [expected-label] [recorded-harness] [raw-launch] [explicit-target] [raw-owner]
+  local backend=$1 target=${2:-} recorded_harness=${8-} raw_launch=${9-} raw_owner=${11-}
   shift
   fm_backend_source "$backend" || return 1
   if [ "$backend" = tmux ] && [ "$raw_launch" != 1 ] \
@@ -875,7 +875,7 @@ fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sl
     return 0
   fi
   case "$backend" in
-    tmux) fm_backend_tmux_send_text_submit "$@" ;;
+    tmux) fm_backend_tmux_send_text_submit "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$raw_owner" ;;
     herdr) fm_backend_herdr_send_text_submit "$@" ;;
     zellij) fm_backend_zellij_send_text_submit "$@" ;;
     orca) fm_backend_orca_send_text_submit "$@" ;;
@@ -958,8 +958,8 @@ fm_backend_busy_state() {  # <backend> <target> [recorded-harness] [raw-launch] 
 # submit path uses an internal content-diff approach with no separately named
 # classifier, so it reports unknown here - callers fall back to their own
 # policy, exactly as an unknown fm_backend_busy_state already does.
-fm_backend_composer_state() {  # <backend> <target> [recorded-harness] [raw-launch] -> empty|pending|pending-unproven|unknown
-  local backend=$1 target=${2:-} recorded_harness=${3-} raw_launch=${4-}
+fm_backend_composer_state() {  # <backend> <target> [recorded-harness] [raw-launch] [raw-owner] -> empty|pending|pending-unproven|unknown
+  local backend=$1 target=${2:-} recorded_harness=${3-} raw_launch=${4-} raw_owner=${5-}
   shift
   fm_backend_source "$backend" || { printf 'unknown'; return 0; }
   if [ "$backend" = tmux ] && [ "$raw_launch" != 1 ] \

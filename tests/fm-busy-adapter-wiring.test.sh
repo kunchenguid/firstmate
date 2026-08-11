@@ -182,7 +182,7 @@ test_pi_extension_stale_incarnation_rejected() {
 drive_omp_ext() {
   EXT_PATH="$1" MODE="$2" STATE_DIR="${3:-}" TASK_ID="${4:-}" node --input-type=module 2>&1 <<'EOF'
 import { pathToFileURL } from "node:url";
-import { readFileSync } from "node:fs";
+import { readFileSync, unlinkSync } from "node:fs";
 const mod = await import(pathToFileURL(process.env.EXT_PATH).href);
 const handlers = {};
 mod.default({ on: (name, fn) => { handlers[name] = fn; } });
@@ -193,6 +193,12 @@ const fire = async (name, event = {}) => {
 };
 const busyState = () => readFileSync(
   process.env.STATE_DIR + "/" + process.env.TASK_ID + ".busy-state", "utf8");
+const markerPresent = (path) => {
+  try { readFileSync(path, "utf8"); return true; } catch { return false; }
+};
+const removeMarker = (path) => {
+  try { unlinkSync(path); } catch {}
+};
 switch (process.env.MODE) {
   case "agent-start": await fire("agent_start"); break;
   case "agent-end": await fire("agent_end"); break;
@@ -230,6 +236,37 @@ switch (process.env.MODE) {
     await fire("agent_start");
     await fire("session_shutdown");
     break;
+  case "persistent-run-correlation": {
+    const runPath = process.env.STATE_DIR + "/" + process.env.TASK_ID + ".omp-session-run";
+    const stopPath = process.env.STATE_DIR + "/" + process.env.TASK_ID + ".omp-session-stop";
+    const turnEndPath = process.env.STATE_DIR + "/" + process.env.TASK_ID + ".turn-ended";
+    await fire("agent_start");
+    const firstToken = readFileSync(runPath, "utf8").trim();
+    await fire("session_stop");
+    await fire("agent_start");
+    const secondToken = readFileSync(runPath, "utf8").trim();
+    if (!secondToken || secondToken === firstToken) {
+      throw new Error("the second run did not receive a distinct token");
+    }
+    removeMarker(turnEndPath);
+    await fire("agent_end");
+    if (busyState().includes("state=busy") || !markerPresent(turnEndPath)) {
+      throw new Error("tokenless agent_end did not settle the unique active run");
+    }
+    await fire("agent_start");
+    await fire("session_stop", { run_token: firstToken });
+    if (!busyState().includes("state=busy") || readFileSync(stopPath, "utf8").trim() !== "pending") {
+      throw new Error("an explicit stale token settled the current run");
+    }
+    await fire("session_stop");
+    await fire("agent_start");
+    await fire("agent_start");
+    await fire("agent_end");
+    if (!busyState().includes("state=busy") || readFileSync(stopPath, "utf8").trim() !== "pending") {
+      throw new Error("an ambiguous tokenless terminal event settled an active run");
+    }
+    break;
+  }
   case "ambiguous-session-shutdown":
     await fire("agent_start");
     await fire("agent_start");
@@ -334,6 +371,22 @@ test_omp_session_shutdown_requires_one_active_run() {
   [ "$marker" = pending ] \
     || fail "an ambiguous shutdown must not publish terminal evidence"
   pass "omp session_shutdown settles one active current run and rejects ambiguous history"
+}
+
+test_omp_extension_persistent_run_correlation() {
+  local rec id=busy-omp-persistent out state ext
+  rec=$(make_spawn_case omp-persistent omp "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "omp spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  ext="$state/$id.omp-ext.ts"
+  out=$(drive_omp_ext "$ext" persistent-run-correlation "$state" "$id") \
+    || fail "persistent OMP run-correlation drive failed: $out"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "busy omp-ext" ] \
+    || fail "ambiguous active runs must remain busy after tokenless agent_end, got '$out'"
+  pass "omp extension correlates repeated tokenless terminal events to one active run"
 }
 
 test_omp_agent_end_continuation_stays_busy() {
@@ -550,6 +603,7 @@ test_pi_extension_stale_incarnation_rejected
 test_omp_extension_semantic_lifecycle
 test_omp_extension_rejects_late_prior_run_stop
 test_omp_session_shutdown_requires_one_active_run
+test_omp_extension_persistent_run_correlation
 test_omp_agent_end_continuation_stays_busy
 test_omp_extension_stale_incarnation_rejected
 test_kimi_and_grok_install_no_unverified_wiring

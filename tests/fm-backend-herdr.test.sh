@@ -3731,6 +3731,126 @@ test_herdr_raw_owner_lookup() {
   pass "Herdr raw ownership: canonical OMP process state is recovered through the shared owner classifier"
 }
 
+make_owner_herdr_fakebin() {
+  local dir=$1 fb="$1/fakebin"
+  mkdir -p "$fb"
+  cat > "$fb/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+LOG="${FM_HERDR_LOG:?}"
+{
+  printf 'HERDR_SESSION=%s' "${HERDR_SESSION:-}"
+  for a in "$@"; do printf '\x1f%s' "$a"; done
+  printf '\n'
+} >> "$LOG"
+case "${1:-} ${2:-}" in
+  "status --json") printf '%s\n' '{"client":{"version":"0.7.1","protocol":14},"server":{"running":true}}' ;;
+  "pane get") printf '%s\n' '{"result":{"pane":{"pane_id":"w1:p2","tab_id":"t1","workspace_id":"w1"}}}' ;;
+  "pane process-info") printf '%s\n' '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":4242,"foreground_process_group_id":4242,"foreground_processes":[{"pid":4242,"name":"claude","argv0":"claude"}]}}}' ;;
+  "agent get") printf '%s\n' '{"result":{"agent":{"agent":"claude","agent_status":"idle"}}}' ;;
+  "pane send-keys"|"pane send-text") : ;;
+esac
+exit 0
+SH
+  chmod +x "$fb/herdr"
+  cat > "$dir/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$*" in
+  "-axo pid=,ppid=") printf '1 0\n4242 1\n' ;;
+  *"eww"*"-o command="*) printf 'FM_RAW_LAUNCH_OWNER=%s\n' "${FM_OWNER_EXPECTED_OWNER:?}" ;;
+  *"-o comm="*) printf 'claude\n' ;;
+  *"-o args="*) printf 'claude %s\n' "${FM_OWNER_CLAUDE_PATH:?}" ;;
+  *"-o stat="*) printf 'S+\n' ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$dir/ps"
+  printf '%s\n' "$fb"
+}
+
+make_owner_herdr_case() {
+  local dir=$1 id=$2 owner=$3 home="$1/home"
+  mkdir -p "$home/state" "$dir/project" "$dir/worktree"
+  fm_write_meta "$home/state/$id.meta" \
+    "window=lab:w1:p2" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "backend=herdr" \
+    "herdr_session=lab" "herdr_workspace_id=w1" "herdr_tab_id=t1" \
+    "herdr_pane_id=w1:p2" "harness=claude" "raw_launch=1" \
+    "raw_owner=$owner" "kind=ship"
+  make_owner_herdr_fakebin "$dir" >/dev/null
+}
+
+test_fm_send_propagates_and_validates_raw_owner() {
+  local dir="$TMP_ROOT/fm-send-raw-owner" home id=raw-owner-send fb log out rc
+  id=raw-owner-send
+  home="$dir/home"
+  mkdir -p "$dir"
+  make_owner_herdr_case "$dir" "$id" raw-owner
+  fb="$dir/fakebin"
+  log="$dir/log"
+  : > "$log"
+  printf '%s\n' '#!/bin/sh' 'exit 0' > "$dir/claude"
+  chmod +x "$dir/claude"
+  out=$(PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_HERDR_LOG="$log" FM_HERDR_PS_BIN="$dir/ps" \
+    FM_OWNER_EXPECTED_OWNER=raw-owner FM_OWNER_CLAUDE_PATH="$dir/claude" \
+    "$ROOT/bin/fm-send.sh" "$id" --key Escape 2>&1)
+  rc=$?
+  expect_code 0 "$rc" "fm-send should deliver a raw Herdr key with the recorded owner: $out"
+  assert_contains "$(cat "$log")" $'pane\x1fsend-keys\x1fw1:p2\x1fescape' \
+    "fm-send did not deliver the owner-authorized raw key"
+
+  sed -i.bak 's/^raw_owner=.*/raw_owner=wrong-owner/' "$home/state/$id.meta"
+  rm -f "$home/state/$id.meta.bak"
+  : > "$log"
+  out=$(PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_HERDR_LOG="$log" FM_HERDR_PS_BIN="$dir/ps" \
+    FM_OWNER_EXPECTED_OWNER=raw-owner FM_OWNER_CLAUDE_PATH="$dir/claude" \
+    "$ROOT/bin/fm-send.sh" "$id" --key Escape 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "fm-send accepted a raw Herdr key with a mismatched owner: $out"
+  if grep -q $'pane\x1fsend-keys' "$log"; then
+    fail "fm-send delivered a raw key after owner evidence mismatched"
+  fi
+  pass "fm-send: raw Herdr owner metadata reaches the input safety boundary"
+}
+
+test_fm_control_propagates_and_validates_raw_owner() {
+  local dir="$TMP_ROOT/fm-control-raw-owner" home id=raw-owner-control fb log out rc
+  id=raw-owner-control
+  home="$dir/home"
+  mkdir -p "$dir"
+  make_owner_herdr_case "$dir" "$id" raw-owner
+  fb="$dir/fakebin"
+  log="$dir/log"
+  : > "$log"
+  printf '%s\n' '#!/bin/sh' 'exit 0' > "$dir/claude"
+  chmod +x "$dir/claude"
+  out=$(PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_HERDR_LOG="$log" FM_HERDR_PS_BIN="$dir/ps" \
+    FM_OWNER_EXPECTED_OWNER=raw-owner FM_OWNER_CLAUDE_PATH="$dir/claude" \
+    FM_CONTROL_POLL=0.01 "$ROOT/bin/fm-control.sh" "$id" interrupt 2>&1)
+  rc=$?
+  expect_code 0 "$rc" "fm-control should deliver a raw Herdr interrupt with the recorded owner: $out"
+  assert_contains "$(cat "$log")" $'pane\x1fsend-keys\x1fw1:p2\x1fescape' \
+    "fm-control did not deliver the owner-authorized raw interrupt"
+
+  sed -i.bak 's/^raw_owner=.*/raw_owner=wrong-owner/' "$home/state/$id.meta"
+  rm -f "$home/state/$id.meta.bak"
+  : > "$log"
+  out=$(PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_HERDR_LOG="$log" FM_HERDR_PS_BIN="$dir/ps" \
+    FM_OWNER_EXPECTED_OWNER=raw-owner FM_OWNER_CLAUDE_PATH="$dir/claude" \
+    FM_CONTROL_POLL=0.01 "$ROOT/bin/fm-control.sh" "$id" interrupt 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "fm-control accepted a raw Herdr interrupt with a mismatched owner: $out"
+  if grep -q $'pane\x1fsend-keys' "$log"; then
+    fail "fm-control delivered a raw interrupt after owner evidence mismatched"
+  fi
+  pass "fm-control: raw Herdr owner metadata protects lifecycle input"
+}
+
 herdr_pi_process_info() {
   local pane=${1:-w1:p2}
   printf '%s' '{"result":{"type":"pane_process_info","process_info":{"pane_id":"'"$pane"'","shell_pid":4242,"foreground_process_group_id":5150,"foreground_processes":[{"pid":5150,"name":"pi","argv0":"pi"}]}}}'
@@ -4543,6 +4663,32 @@ test_dispatch_composer_state_routes_by_backend() {
   pass "fm_backend_composer_state dispatches every backend to its named thin classifier, unknown for unrecognized backends"
 }
 
+test_kimi_herdr_composer_uses_recorded_harness_identity() {
+  local dir="$TMP_ROOT/kimi-herdr-composer" fb out
+  mkdir -p "$dir/fakebin"
+  cat > "$dir/fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-} ${2:-}" in
+  "status --json") printf '%s\n' '{"client":{"version":"0.7.1","protocol":14},"server":{"running":true}}' ;;
+  "pane get") printf '%s\n' '{"result":{"pane":{"pane_id":"w1:p2"}}}' ;;
+  "pane read") printf '╭────────────────╮\n│ >              │\n╰────────────────╯\n' ;;
+  "agent get") printf '%s\n' '{"result":{"agent":{"agent":"kimi","agent_status":"idle"}}}' ;;
+  "pane process-info") printf '%s\n' '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":4242,"foreground_process_group_id":4242,"foreground_processes":[{"pid":4242,"name":"kimi","argv0":"kimi"}]}}}' ;;
+esac
+exit 0
+SH
+  chmod +x "$dir/fakebin/herdr"
+  fb="$dir/fakebin"
+  out=$(PATH="$fb:$PATH" bash -c '
+    . "$0/bin/fm-backend.sh"
+    [ "$(fm_backend_composer_state herdr default:w1:p2 kimi "" "")" = empty ] || exit 1
+    [ "$(fm_backend_composer_state herdr default:w1:p2 fm-kimi "" "")" = unknown ] || exit 1
+  ' "$ROOT") || fail "Kimi Herdr composer identity contract failed"
+  [ -z "$out" ] || fail "Kimi Herdr composer probe wrote unexpected output: $out"
+  pass "Kimi Herdr delivery: composer checks use the recorded harness identity"
+}
+
 test_scripts_route_explicit_target_through_meta_backend() {
   local dir state log resp fb neutral out
   dir="$TMP_ROOT/script-explicit-target"; state="$dir/state"; mkdir -p "$state" "$dir/responses"
@@ -5244,6 +5390,8 @@ test_herdr_presence_is_checked_before_process_identity
 test_herdr_no_metadata_omp_requires_current_identity
 test_herdr_process_identity_rejects_mixed_omp_group
 test_herdr_raw_owner_lookup
+test_fm_send_propagates_and_validates_raw_owner
+test_fm_control_propagates_and_validates_raw_owner
 test_composer_state_rejects_exited_omp_husk
 test_omp_idle_registration_without_stop_evidence_stays_unknown
 test_canonical_omp_idle_registration_over_a_lone_shell_is_no_agent
@@ -5290,6 +5438,7 @@ test_send_text_submit_unknown_on_capture_failure
 test_dispatch_routes_herdr_backend
 test_dispatch_busy_state_unknown_for_tmux
 test_dispatch_composer_state_routes_by_backend
+test_kimi_herdr_composer_uses_recorded_harness_identity
 test_scripts_route_explicit_target_through_meta_backend
 test_normalize_event_leaves_from_empty
 test_escalation_marker_keys_like_watcher

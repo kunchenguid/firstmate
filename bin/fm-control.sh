@@ -289,6 +289,7 @@ T=$FM_BACKEND_VALIDATED_TARGET
 LABEL="fm-$ID"
 RECORDED_HARNESS=$(fm_meta_get "$META" harness)
 RAW_LAUNCH=$(fm_meta_get "$META" raw_launch)
+RAW_OWNER=$(fm_meta_get "$META" raw_owner)
 KIND=$(fm_meta_get "$META" kind)
 WT=$(fm_meta_get "$META" worktree)
 [ -n "$KIND" ] || KIND=ship
@@ -363,12 +364,12 @@ send_interrupt_keys() {
   [ -z "$clear" ] || fm_control_backend_supports_key "$BACKEND" "$clear" \
     || die "harness $HARNESS needs $clear to clear its composer after an interrupt, which the $BACKEND backend cannot deliver; refusing to leave the cancelled prompt where the next submitted line would concatenate onto it"
   while [ "$i" -lt "$repeat" ]; do
-    fm_backend_send_key "$BACKEND" "$T" "$key" "$LABEL" "$RECORDED_HARNESS" "$RAW_LAUNCH" \
+    fm_backend_send_key "$BACKEND" "$T" "$key" "$LABEL" "$RECORDED_HARNESS" "$RAW_LAUNCH" "" "$RAW_OWNER" \
       || die "interrupt key $key was not delivered to task $ID on $BACKEND"
     i=$((i + 1))
     [ "$i" -ge "$repeat" ] || sleep 0.2
   done
-  [ -z "$clear" ] || fm_backend_send_key "$BACKEND" "$T" "$clear" "$LABEL" "$RECORDED_HARNESS" "$RAW_LAUNCH" \
+  [ -z "$clear" ] || fm_backend_send_key "$BACKEND" "$T" "$clear" "$LABEL" "$RECORDED_HARNESS" "$RAW_LAUNCH" "" "$RAW_OWNER" \
     || die "interrupt key $key reached task $ID, but $clear did not, so its composer still holds the cancelled prompt; clear it before the next lifecycle action"
 }
 
@@ -482,7 +483,7 @@ do_exit() {
   # authoritative proof is the agent-state wait below. The retried Enter still
   # matters, because a slash command opens a completion popup on some TUIs that
   # swallows the first Enter.
-  verdict=$(fm_backend_send_text_submit "$BACKEND" "$T" "$cmd" "$EXIT_RETRIES" "$POLL" 1.2 "$LABEL" "$RECORDED_HARNESS" "$RAW_LAUNCH") \
+  verdict=$(fm_backend_send_text_submit "$BACKEND" "$T" "$cmd" "$EXIT_RETRIES" "$POLL" 1.2 "$LABEL" "$RECORDED_HARNESS" "$RAW_LAUNCH" "" "$RAW_OWNER") \
     || die "the exit command could not be sent to task $ID on $BACKEND"
   [ "$verdict" != send-failed ] \
     || die "the exit command could not be sent to task $ID on $BACKEND"

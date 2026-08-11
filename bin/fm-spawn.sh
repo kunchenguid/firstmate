@@ -2239,7 +2239,7 @@ kimi_capture() {
 # claude's did. The banner and brief-echo greps below are launch-progress
 # signals, not composer shapes, so they stay here.
 kimi_composer_is_empty() {
-  [ "$(fm_backend_composer_state "$BACKEND" "$T" "$W" 2>/dev/null)" = empty ]
+  [ "$(fm_backend_composer_state "$BACKEND" "$T" "$HARNESS" "$RAW_LAUNCH" "$RAW_LAUNCH_OWNER" 2>/dev/null)" = empty ]
 }
 
 kimi_wait_for_ready() {
@@ -2650,18 +2650,21 @@ const eventRunToken = (event: any) => {
   }
   return matched;
 };
-const resolveSessionShutdownToken = (event: any) => {
-  const token = eventRunToken(event);
-  if (token || eventTimestamp(event) !== undefined) return token;
+const resolveUniqueActiveRunToken = () => {
   const current = adoptCurrentRun();
   if (!current) return "";
   const active = runRecords.filter((record) => record.active);
   return active.length === 1 && active[0].token === current ? current : "";
 };
+const resolveSessionShutdownToken = (event: any) => {
+  const token = eventRunToken(event);
+  if (token || eventTimestamp(event) !== undefined) return token;
+  return resolveUniqueActiveRunToken();
+};
 const resolveRunToken = (event: any) => {
   const token = eventRunToken(event);
-  if (token || runToken) return token;
-  return adoptCurrentRun();
+  if (token || eventTimestamp(event) !== undefined) return token;
+  return resolveUniqueActiveRunToken();
 };
 const settleRun = async (token: string, event: string) => {
   if (!token || token !== runToken || runSettledToken === token) return;
@@ -3104,7 +3107,7 @@ if [ "$HARNESS" = kimi ]; then
   KIMI_SUBMIT_SETTLE=${FM_KIMI_SUBMIT_SETTLE:-0}
   KIMI_SUBMIT_VERDICT=$(fm_backend_send_text_submit \
     "$BACKEND" "$T" "$KIMI_POINTER" "$KIMI_SUBMIT_RETRIES" \
-    "$KIMI_SUBMIT_SLEEP" "$KIMI_SUBMIT_SETTLE" "$W" "$HARNESS" "$RAW_LAUNCH") || {
+    "$KIMI_SUBMIT_SLEEP" "$KIMI_SUBMIT_SETTLE" "$W" "$HARNESS" "$RAW_LAUNCH" "" "$RAW_LAUNCH_OWNER") || {
     kimi_spawn_fail "kimi brief pointer could not be submitted"
     exit 1
   }

@@ -2721,15 +2721,15 @@ fm_backend_herdr_send_text_line() {  # <target> <text>
 # caller sends Enter separately. Mirrors tmux's `send-keys -t T -l text`.
 # Verified: `pane send-text` does NOT auto-submit (contrary to the addendum's
 # original guess); it behaves exactly like tmux's `-l` literal send.
-fm_backend_herdr_send_literal() {  # <target> <text> [recorded-harness] [raw-launch] [explicit-target]
-  local target=$1 text=$2 recorded_harness=${3-} raw_launch=${4-} explicit_target=${5-} has_context=0
+fm_backend_herdr_send_literal() {  # <target> <text> [recorded-harness] [raw-launch] [explicit-target] [raw-owner]
+  local target=$1 text=$2 recorded_harness=${3-} raw_launch=${4-} explicit_target=${5-} raw_owner=${6:-${FM_RAW_LAUNCH_OWNER:-}} has_context=0
   fm_backend_herdr_target_ready "$target" || return 1
-  if [ "$#" -ge 3 ] && { [ "$explicit_target" != 1 ] || [ -n "$recorded_harness" ] || [ -n "$raw_launch" ]; }; then
+  if [ "$#" -ge 3 ] && { [ "$explicit_target" != 1 ] || [ -n "$recorded_harness" ] || [ -n "$raw_launch" ] || [ -n "$raw_owner" ]; }; then
     has_context=1
   fi
   if [ "$has_context" -eq 1 ]; then
     fm_backend_herdr_omp_input_safe "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" \
-      "$recorded_harness" "$raw_launch" "" "" "$explicit_target" || return 1
+      "$recorded_harness" "$raw_launch" "$raw_owner" "" "$explicit_target" || return 1
   fi
   fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane send-text "$FM_BACKEND_HERDR_PANE" "$text" >/dev/null 2>&1
 }
@@ -2753,28 +2753,28 @@ fm_backend_herdr_normalize_key() {  # <key>
 
 # fm_backend_herdr_send_key: one named special key. Mirrors fm-send.sh's --key
 # path (tmux's `send-keys -t T key`).
-fm_backend_herdr_send_key() {  # <target> <key> [recorded-harness] [raw-launch] [explicit-target]
-  local target=$1 key_name=$2 recorded_harness=${3-} raw_launch=${4-} explicit_target=${5-} has_context=0 key
+fm_backend_herdr_send_key() {  # <target> <key> [recorded-harness] [raw-launch] [explicit-target] [raw-owner]
+  local target=$1 key_name=$2 recorded_harness=${3-} raw_launch=${4-} explicit_target=${5-} raw_owner=${6:-${FM_RAW_LAUNCH_OWNER:-}} has_context=0 key
   fm_backend_herdr_target_ready "$target" || return 1
-  if [ "$#" -ge 3 ] && { [ "$explicit_target" != 1 ] || [ -n "$recorded_harness" ] || [ -n "$raw_launch" ]; }; then
+  if [ "$#" -ge 3 ] && { [ "$explicit_target" != 1 ] || [ -n "$recorded_harness" ] || [ -n "$raw_launch" ] || [ -n "$raw_owner" ]; }; then
     has_context=1
   fi
   key=$(fm_backend_herdr_normalize_key "$key_name")
   if [ "$has_context" -eq 1 ]; then
     fm_backend_herdr_omp_input_safe "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" \
-      "$recorded_harness" "$raw_launch" "" "" "$explicit_target" || return 1
+      "$recorded_harness" "$raw_launch" "$raw_owner" "" "$explicit_target" || return 1
   fi
   fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane send-keys "$FM_BACKEND_HERDR_PANE" "$key" >/dev/null 2>&1
 }
 
-fm_backend_herdr_send_key_checked() {  # <target> <key> [recorded-harness] [raw-launch] [explicit-target]
-  local target=$1 key=$2 recorded_harness=${3:-} raw_launch=${4:-} explicit_target=${5:-}
-  fm_backend_herdr_send_key "$target" "$key" "$recorded_harness" "$raw_launch" "$explicit_target"
+fm_backend_herdr_send_key_checked() {  # <target> <key> [recorded-harness] [raw-launch] [explicit-target] [raw-owner]
+  local target=$1 key=$2 recorded_harness=${3:-} raw_launch=${4:-} explicit_target=${5:-} raw_owner=${6:-${FM_RAW_LAUNCH_OWNER:-}}
+  fm_backend_herdr_send_key "$target" "$key" "$recorded_harness" "$raw_launch" "$explicit_target" "$raw_owner"
 }
 
-fm_backend_herdr_send_literal_checked() {  # <target> <text> [recorded-harness] [raw-launch] [explicit-target]
-  local target=$1 text=$2 recorded_harness=${3:-} raw_launch=${4:-} explicit_target=${5:-}
-  fm_backend_herdr_send_literal "$target" "$text" "$recorded_harness" "$raw_launch" "$explicit_target"
+fm_backend_herdr_send_literal_checked() {  # <target> <text> [recorded-harness] [raw-launch] [explicit-target] [raw-owner]
+  local target=$1 text=$2 recorded_harness=${3:-} raw_launch=${4:-} explicit_target=${5:-} raw_owner=${6:-${FM_RAW_LAUNCH_OWNER:-}}
+  fm_backend_herdr_send_literal "$target" "$text" "$recorded_harness" "$raw_launch" "$explicit_target" "$raw_owner"
 }
 
 # fm_backend_herdr_capture: bounded plain-text pane capture. Mirrors
@@ -3077,12 +3077,21 @@ EOF
       missing|working|idle|done|blocked) ;;
       *) return 2 ;;
     esac
-    process_identity=$(fm_backend_herdr_raw_omp_process_state "$session" "$pane" "$raw_owner")
-    case "$process_identity" in
-      claude|codex|opencode|grok|kimi|muse|pi|pi-signed) ;;
-      omp) return 1 ;;
-      *) return 2 ;;
-    esac
+    if [ -n "$raw_owner" ]; then
+      process_identity=$(fm_backend_herdr_raw_omp_process_state "$session" "$pane" "$raw_owner")
+      case "$process_identity" in
+        claude|codex|opencode|grok|kimi|muse|pi|pi-signed) ;;
+        omp) return 1 ;;
+        *) return 2 ;;
+      esac
+    else
+      process_identity=$(unset FM_HARNESS_UNVERIFIED; fm_backend_herdr_process_identity "$session" "$pane")
+      case "$process_identity" in
+        claude|codex|opencode|grok|kimi|muse|pi|pi-signed|shell|other) ;;
+        omp) return 1 ;;
+        *) return 2 ;;
+      esac
+    fi
     case "$agent" in
       ''|missing) ;;
       omp) return 1 ;;
@@ -3300,20 +3309,12 @@ fm_backend_herdr_rendered_busy_state() {  # <target> [harness] -> busy|idle|unkn
 # submit vocabulary. Empty means confirmed submitted for every backend; how
 # each backend confirms it is an internal decision, and herdr's is no longer
 # literally "the composer read empty".
-fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle> [expected-label] [recorded-harness] [raw-launch] [raw-owner|explicit-target] [explicit-target]
-  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 expected_label=${6-} recorded_harness=${7-} raw_launch=${8-} context9=${9-} explicit_target=${10-} raw_owner=${FM_RAW_LAUNCH_OWNER:-}
-  case "$context9" in
-    0|1)
-      [ -n "$explicit_target" ] || explicit_target=$context9
-      ;;
-    *)
-      [ -z "$context9" ] || raw_owner=$context9
-      ;;
-  esac
+fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle> [expected-label] [recorded-harness] [raw-launch] [explicit-target] [raw-owner]
+  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 expected_label=${6-} recorded_harness=${7-} raw_launch=${8-} explicit_target=${9-} raw_owner=${10:-${FM_RAW_LAUNCH_OWNER:-}}
   local i=0 verdict baseline confirm_sleep
   local raw_status footer_baseline=''
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
-  if [ "$explicit_target" != 1 ] || [ -n "$recorded_harness" ] || [ -n "$raw_launch" ]; then
+  if [ "$explicit_target" != 1 ] || [ -n "$recorded_harness" ] || [ -n "$raw_launch" ] || [ -n "$raw_owner" ]; then
     if ! fm_backend_herdr_omp_input_safe "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" \
       "$recorded_harness" "$raw_launch" "$raw_owner" "" "$explicit_target"; then
       printf 'unknown'
@@ -3321,7 +3322,7 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
     fi
   fi
   fm_backend_herdr_send_literal_checked "$target" "$text" \
-    "$recorded_harness" "$raw_launch" "$explicit_target" || { printf 'send-failed'; return 0; }
+    "$recorded_harness" "$raw_launch" "$explicit_target" "$raw_owner" || { printf 'send-failed'; return 0; }
   sleep "$settle"
   raw_status=$(fm_backend_herdr_agent_status_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")
   baseline=$(fm_backend_herdr_classify_submit_agent_status "$raw_status")
@@ -3331,7 +3332,7 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
   [ "$baseline" = idle ] || footer_baseline=$(fm_backend_herdr_rendered_busy_state "$target")
   while :; do
     if ! fm_backend_herdr_send_key_checked "$target" Enter \
-      "$recorded_harness" "$raw_launch" "$explicit_target"; then
+      "$recorded_harness" "$raw_launch" "$explicit_target" "$raw_owner"; then
       printf 'unknown'
       return 0
     fi

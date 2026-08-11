@@ -582,10 +582,26 @@ fm_daemon_primary_harness() {
   printf '%s' "$FM_DAEMON_PRIMARY_HARNESS"
 }
 
+fm_daemon_supervisor_raw_context() {  # <target> <state>
+  local target=$1 state=$2 meta raw_launch raw_owner
+  raw_launch=${FM_SUPERVISOR_RAW_LAUNCH:-}
+  raw_owner=${FM_SUPERVISOR_RAW_OWNER:-}
+  if [ -z "$raw_launch" ] || [ -z "$raw_owner" ]; then
+    meta=$(fm_backend_meta_for_window "$target" "$state" 2>/dev/null || true)
+    if [ -n "$meta" ]; then
+      [ -n "$raw_launch" ] || raw_launch=$(fm_meta_get "$meta" raw_launch)
+      [ -n "$raw_owner" ] || raw_owner=$(fm_meta_get "$meta" raw_owner)
+    fi
+  fi
+  printf '%s\t%s' "$raw_launch" "$raw_owner"
+}
+
 pane_is_busy() {  # <target> [backend]
   local target=$1 backend=${2:-tmux} native tail40 harness raw_launch
   harness=$(fm_daemon_primary_harness)
-  raw_launch=${FM_SUPERVISOR_RAW_LAUNCH:-}
+  IFS=$'\t' read -r raw_launch _ <<EOF
+$(fm_daemon_supervisor_raw_context "$target" "$(_state_root)")
+EOF
   native=$(fm_backend_busy_state "$backend" "$target" "$harness" "$raw_launch" 2>/dev/null)
   case "$native" in
     busy) return 0 ;;
@@ -599,10 +615,12 @@ pane_is_busy() {  # <target> [backend]
 # every verdict except exact empty as unsafe. inject_msg reads the full verdict
 # directly and applies the same positive-proof boundary.
 pane_input_pending() {  # <target> [backend]
-  local target=$1 backend=${2:-tmux} harness raw_launch
+  local target=$1 backend=${2:-tmux} harness raw_launch raw_owner
   harness=$(fm_daemon_primary_harness)
-  raw_launch=${FM_SUPERVISOR_RAW_LAUNCH:-}
-  [ "$(fm_backend_composer_state "$backend" "$target" "$harness" "$raw_launch" 2>/dev/null)" != empty ]
+  IFS=$'\t' read -r raw_launch raw_owner <<EOF
+$(fm_daemon_supervisor_raw_context "$target" "$(_state_root)")
+EOF
+  [ "$(fm_backend_composer_state "$backend" "$target" "$harness" "$raw_launch" "$raw_owner" 2>/dev/null)" != empty ]
 }
 
 task_window_backend() {  # <window> <state>
@@ -1125,7 +1143,7 @@ window_for_task() {  # <task-key> [state]
 #     line, or a previous injection's unsent text), defer entirely - injecting
 #     would merge with the human's text.
 inject_msg() {  # <message> [state]
-  local msg=$1 state target backend retries sleep_s verdict composer encoded harness raw_launch
+  local msg=$1 state target backend retries sleep_s verdict composer encoded harness raw_launch raw_owner
   state="${2:-$(_state_root)}"
   # (1) Presence-gate: inject ONLY when afk is active. When afk is off, the
   # daemon self-handles and stays quiet; firstmate drives the normal always-on
@@ -1146,7 +1164,9 @@ inject_msg() {  # <message> [state]
   # discovery), matching this function's pre-existing default assumption.
   backend="${FM_SUPERVISOR_BACKEND:-tmux}"
   harness=$(fm_daemon_primary_harness)
-  raw_launch=${FM_SUPERVISOR_RAW_LAUNCH:-}
+  IFS=$'\t' read -r raw_launch raw_owner <<EOF
+$(fm_daemon_supervisor_raw_context "$target" "$state")
+EOF
   fm_backend_target_exists "$backend" "$target" || return 1
   # (3) Busy-guard: never inject into an in-use supervisor pane.
   if pane_is_busy "$target" "$backend"; then
@@ -1162,7 +1182,7 @@ inject_msg() {  # <message> [state]
   #      target - typing the escalation into a shell could execute it - so defer
   #      on anything that is not affirmatively 'empty'. A deferred escalation
   #      stays buffered for the next cycle or the catch-up flush.
-  composer=$(fm_backend_composer_state "$backend" "$target" "$harness" "$raw_launch" 2>/dev/null)
+  composer=$(fm_backend_composer_state "$backend" "$target" "$harness" "$raw_launch" "$raw_owner" 2>/dev/null)
   if [ "$composer" != empty ]; then
     log "inject deferred: supervisor composer not confirmed-empty (state=${composer:-unknown}: pending input, dead-shell prompt, or unreadable pane)"
     return 1
@@ -1176,7 +1196,7 @@ inject_msg() {  # <message> [state]
   # re-export of fm_tmux_submit_core - byte-identical to calling it directly.
   retries=${FM_INJECT_CONFIRM_RETRIES:-$INJECT_CONFIRM_RETRIES_DEFAULT}
   sleep_s=${FM_INJECT_CONFIRM_SLEEP:-$INJECT_CONFIRM_SLEEP_DEFAULT}
-  verdict=$(fm_backend_send_text_submit "$backend" "$target" "$msg" "$retries" "$sleep_s" "$sleep_s" "" "$harness" "$raw_launch")
+  verdict=$(fm_backend_send_text_submit "$backend" "$target" "$msg" "$retries" "$sleep_s" "$sleep_s" "" "$harness" "$raw_launch" "" "$raw_owner")
   if [ "$verdict" = empty ]; then
     return 0  # Backend confirmed the submit.
   fi

@@ -1835,6 +1835,37 @@ test_inject_msg_passes_primary_harness_metadata() {
   pass "inject_msg: carries the detected primary harness through composer and submit authorization"
 }
 
+test_inject_msg_passes_raw_owner_from_supervisor_metadata() {
+  local dir state
+  dir=$(make_supercase inject-herdr-raw-owner)
+  state="$dir/state"
+  afk_enter "$state"
+  fm_write_meta "$state/primary.meta" \
+    "window=default:w1:p2" "backend=herdr" "harness=omp" \
+    "raw_launch=1" "raw_owner=raw-supervisor-owner"
+  (
+    FM_DAEMON_PRIMARY_HARNESS=omp
+    fm_backend_target_exists() { return 0; }
+    pane_is_busy() { return 1; }
+    fm_backend_composer_state() {
+      [ "$3" = omp ] || fail "inject_msg did not preserve the primary harness"
+      [ "$4" = 1 ] || fail "inject_msg did not load raw-launch metadata"
+      [ "$5" = raw-supervisor-owner ] || fail "inject_msg did not load the raw owner metadata"
+      printf empty
+    }
+    fm_backend_send_text_submit() {
+      [ "$8" = omp ] || fail "inject_msg did not pass the primary harness to submit"
+      [ "$9" = 1 ] || fail "inject_msg did not pass raw-launch metadata to submit"
+      [ -z "${10:-}" ] || fail "inject_msg did not preserve the empty explicit-target slot"
+      [ "${11:-}" = raw-supervisor-owner ] || fail "inject_msg did not pass the raw owner to submit"
+      printf empty
+    }
+    FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET="default:w1:p2" inject_msg "hello" "$state" \
+      || fail "inject_msg should succeed when raw-owner metadata authorizes the submit"
+  ) || fail "inject_msg raw-owner metadata subshell failed"
+  pass "inject_msg: carries raw-launch ownership from task metadata through Herdr dispatch"
+}
+
 # Safety-critical (task fm-composer-shellglyph-safety): the away-mode injector
 # must NEVER type an escalation into a dead-shell pane. A bare shell prompt
 # classifies `unknown` (not `pending`), and inject_msg now defers on anything
@@ -1973,5 +2004,6 @@ test_inject_msg_herdr_composer_guard_defers
 test_inject_msg_herdr_pane_gone_defers
 test_inject_msg_herdr_submits_through_backend_dispatch
 test_inject_msg_passes_primary_harness_metadata
+test_inject_msg_passes_raw_owner_from_supervisor_metadata
 test_inject_msg_defers_on_dead_shell_unknown
 test_inject_msg_defers_on_unrecognized_composer_state
