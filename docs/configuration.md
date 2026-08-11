@@ -34,11 +34,8 @@ This preference is local to each Firstmate home and is not part of secondmate in
 
 ## Skill map and composition (data/skill-map.md / config/skill-compose/)
 
-`data/skill-map.md` is a generated, private, flat registry of discoverable skills across Firstmate's own `.agents/skills/`, registered project clones, and the Claude user skill directory.
-`bin/fm-skill-map.sh` owns the map format and scans only `SKILL.md` frontmatter.
-Locked session start refreshes it cheaply; read-only session start skips it because it is mutable private state.
-`config/skill-compose/` holds generated per-home Claude composition overlays created by `bin/fm-skill-compose.sh` and `fm-spawn.sh --skills`.
-[`docs/skill-system.md`](skill-system.md) owns the operator workflow, the Claude `--add-dir` load point, and the one-canonical-copy symlink rule.
+`data/skill-map.md` is the generated private discovery registry, and `config/skill-compose/` holds generated per-home composition overlays.
+[`docs/skill-system.md`](skill-system.md) owns discovery sources, refresh behavior, the operator workflow, supported load points, and the one-canonical-copy symlink rule; the producing script headers and `--help` output own exact formats and flags.
 
 ## Backlog backend (.tasks.toml / config/backlog-backend)
 

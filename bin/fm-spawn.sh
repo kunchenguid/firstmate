@@ -40,10 +40,11 @@
 #   from that harness's launch rather than guessed.
 #   --skills <name[,name]...> composes a curated skill subset for this fresh
 #   spawn through bin/fm-skill-compose.sh. It is currently supported only for
-#   Claude-backed spawns, where fm-spawn adds the helper's overlay directory via
-#   claude --add-dir so the skills load without writing into the project worktree
-#   or a firstmate home's tracked .agents/skills set. It is refused with raw
-#   launch commands and --relaunch.
+#   local Claude-backed spawns, where fm-spawn adds the helper's overlay directory
+#   via claude --add-dir so the skills load without writing into the project
+#   worktree or a firstmate home's tracked .agents/skills set. Remote secondmates,
+#   raw launch commands, and --relaunch are refused because they do not expose
+#   this verified local composition path.
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   exact task only (docs/configuration.md "Runtime backend" owns when that flag
 #   is authorized). Without it, the script resolves FM_BACKEND, then
@@ -147,7 +148,7 @@
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
-#   source of truth; shared --scout/--harness/--model/--effort/--backend/--mode/--yolo
+#   source of truth; shared --scout/--harness/--model/--effort/--backend/--skills/--mode/--yolo
 #   applies to every pair. A ship batch therefore carries one delivery contract, and each
 #   pair still checks it against its own brief; a batch spanning modes is two invocations.
 #   If config/crew-dispatch.json exists, shared --harness is required for crewmate
@@ -432,6 +433,12 @@ spawn_remote_secondmate() {
     fm_lock_release "$registry_lock" || true
     fm_lock_release "$SPAWN_TASK_LOCK" || true
     return 3
+  fi
+  if [ "$SKILLS_SET" -eq 1 ]; then
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    echo "error: --skills is not supported for remote secondmates; the remote home has no verified composition load point" >&2
+    return 1
   fi
   host=$(secondmate_registry_field "$DATA/secondmates.md" "$id" host)
   root=$(secondmate_registry_field "$DATA/secondmates.md" "$id" root)
@@ -875,6 +882,9 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   [ -z "$MODEL" ] || shared_args+=(--model "$MODEL")
   [ -z "$EFFORT" ] || shared_args+=(--effort "$EFFORT")
   [ -z "$BACKEND_ARG" ] || shared_args+=(--backend "$BACKEND_ARG")
+  if [ "$SKILLS_SET" -eq 1 ]; then
+    shared_args+=(--skills "$(IFS=,; printf '%s' "${SKILLS[*]}")")
+  fi
   # One delivery contract applies to every pair in a batch, exactly like the shared
   # harness. Each pair still re-validates it against its own brief, so a batch
   # spanning several modes is two invocations rather than a silent mixed dispatch.

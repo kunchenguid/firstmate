@@ -12,6 +12,7 @@ It is private operational state and is not committed.
 It scans only `SKILL.md` frontmatter so refresh stays cheap.
 It does not read skill bodies.
 It records the skill name, one-line description, source group, and absolute canonical skill-folder path.
+Each canonical skill-folder path appears at most once, even when symlinked source trees discover it more than once.
 
 The scanner reads these sources:
 
@@ -28,13 +29,8 @@ bin/fm-skill-map.sh
 Session start refreshes the map when the session holds the home lock.
 A read-only session skips the refresh because the map is a mutable `data/` record.
 
-The map format is intentionally thin:
-
-```markdown
-## <source>
-- <skill-name> - <one-line-description> - <absolute canonical skill folder>
-```
-
+The map groups entries under source headings; each skill line contains its name, description, and canonical path.
+The `fm-skill-map.sh` header and `--help` output own the exact generated format.
 The final path is the source of truth for composition.
 Do not edit `data/skill-map.md` by hand.
 Fix the source skill's frontmatter and regenerate the map instead.
@@ -67,6 +63,7 @@ bin/fm-skill-compose.sh --target-home /path/to/home --clear
 Re-running compose with a new list reconciles the set exactly.
 Requested symlinks are created or corrected.
 Stale symlinks in that set are removed.
+Exact skill names must resolve to one map entry; missing or ambiguous names are refused.
 Non-symlink entries are refused instead of being overwritten.
 
 ## Claude load point
@@ -97,28 +94,35 @@ For a Claude-backed spawn, pass a curated subset directly:
 bin/fm-spawn.sh <id> <project> --mode no-mistakes --yolo off --harness claude --skills skill-a,skill-b
 ```
 
-For a secondmate launch, the same flag composes into that secondmate home's `home` set and launches Claude with the overlay directory.
+For a local secondmate launch, the same flag composes into that secondmate home's `home` set and launches Claude with the overlay directory.
 For a crewmate or scout launch, the flag composes into the active home's task-specific set and launches Claude with that overlay directory.
+Batch dispatch forwards the same curated list into each task's own overlay.
+`--skills` is fresh-spawn only; relaunches and raw launch commands are refused because they do not expose this verified overlay injection point.
 
+Remote secondmates are refused because local canonical skill folders cannot be symlinked into a remote home through this load path.
 Other harnesses do not yet have a verified per-home composition load point.
-`fm-spawn.sh --skills` and `fm-skill-compose.sh --harness` therefore refuse non-Claude composition until that load point is verified.
+`fm-spawn.sh --skills` and `fm-skill-compose.sh --harness` therefore refuse those composition requests until their load points are verified.
 
 ## Provisioning use
 
-Secondmate provisioning may include an explicit skill-composition step after the home is seeded and before it is launched.
 Use the map to choose only the skills that match the secondmate's charter.
 Do not compose every skill by default.
 
-For manual provisioning:
+The usual local Claude provisioning path composes and loads the overlay in one fresh launch:
+
+```sh
+bin/fm-spawn.sh <secondmate-id> /path/to/secondmate-home --secondmate --harness claude --skills skill-a,skill-b
+```
+
+The standalone helper is useful for reconciling or inspecting the overlay before that launch:
 
 ```sh
 bin/fm-skill-map.sh
 bin/fm-skill-compose.sh --target-home /path/to/secondmate-home --set home skill-a skill-b
-bin/fm-spawn.sh <secondmate-id> /path/to/secondmate-home --secondmate --harness claude --skills skill-a,skill-b
 ```
 
-The direct `fm-spawn.sh --skills` path is the usual path because it composes and launches in one operation.
-The separate helper remains useful for inspecting or preparing a home before launch.
+Running the helper alone does not alter a later launch command.
+A later `fm-spawn.sh` launch must still receive `--skills` so it injects the overlay with `--add-dir`.
 
 If a mate needs repository data or project files beyond the skill instructions, provision that project separately.
 Skill composition is only a way to share instruction packages.

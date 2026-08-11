@@ -148,7 +148,15 @@ EOF
   [ ! -e "$skills_dir/alpha" ] && [ ! -L "$skills_dir/alpha" ] || fail "alpha symlink survived --remove"
   [ -d "$alpha_real" ] || fail "canonical alpha source was removed by --remove"
 
-  pass "skill compose creates canonical symlinks, reconciles, and un-composes without touching sources"
+  FM_HOME="$home" "$COMPOSE" --target-home "$home" alpha beta >/dev/null \
+    || fail "failed to prepare successful clear"
+  FM_HOME="$home" "$COMPOSE" --target-home "$home" --clear >/dev/null \
+    || fail "skill set clear failed"
+  [ ! -e "$add_dir" ] || fail "--clear left the managed composition set behind"
+  [ -d "$alpha_real" ] && [ -d "$beta_real" ] \
+    || fail "--clear removed a canonical skill source"
+
+  pass "skill compose creates canonical symlinks, reconciles, removes, and clears without touching sources"
 }
 
 test_skill_compose_accepts_internal_double_dots_without_traversal() {
@@ -284,6 +292,85 @@ EOF
   pass "skill compose prevalidates failures before mutating managed sets"
 }
 
+test_skill_compose_refuses_unverified_harnesses() {
+  local home="$TMP_ROOT/harness-home" source="$TMP_ROOT/harness-source" alpha_real
+  mkdir -p "$home/data"
+  write_skill "$source/alpha" alpha plain
+  alpha_real=$(cd "$source/alpha" && pwd -P)
+  cat > "$home/data/skill-map.md" <<EOF
+# Skill map
+
+## fixture
+- alpha — alpha description — $alpha_real
+EOF
+
+  if FM_HOME="$home" "$COMPOSE" --target-home "$home" --harness codex alpha \
+    >"$home/harness.out" 2>"$home/harness.err"; then
+    fail "skill composition accepted an unverified Codex load point"
+  fi
+  assert_file_contains "$home/harness.err" 'has no verified per-home load point' \
+    "unsupported harness refusal did not explain the missing load point"
+  [ ! -e "$home/config/skill-compose" ] \
+    || fail "unsupported harness refusal created composition state"
+
+  pass "skill compose refuses harnesses without a verified per-home load point"
+}
+
+test_locked_session_start_refreshes_map_and_read_only_skips() {
+  local world="$TMP_ROOT/session-world" root home user_home fakebin skill out holder
+  root="$world/root"
+  home="$world/home"
+  user_home="$world/user"
+  fakebin="$world/fakebin"
+  skill="$root/.agents/skills/session-skill"
+  mkdir -p "$skill" "$home/state" "$home/data" "$home/config" \
+    "$home/projects" "$user_home/.claude/skills" "$fakebin"
+  git init -q -b main "$root"
+  git -C "$root" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm initial --allow-empty
+  printf '%s\n' manual > "$home/config/backlog-backend"
+  write_skill "$skill" session-skill plain
+  fm_fake_exit0 "$fakebin" tmux node chrome-devtools-axi gh gh-axi treehouse no-mistakes lavish-axi
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *"comm="*) printf '%s\n' /usr/local/bin/claude ;;
+  *"args="*) printf '%s\n' claude ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+
+  out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    HOME="$user_home" CLAUDE_CONFIG_DIR="$user_home/.claude" \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$fakebin:$PATH" \
+    "$ROOT/bin/fm-session-start.sh") \
+    || fail "locked session start failed while refreshing the skill map"
+  assert_file_contains "$home/data/skill-map.md" '- session-skill — session-skill description — ' \
+    "locked session start did not refresh the generated skill map"
+
+  printf '%s\n' 'sentinel map must survive read-only session start' > "$home/data/skill-map.md"
+  sleep 30 &
+  holder=$!
+  printf '%s\n' "$holder" > "$home/state/.lock"
+  if ! out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    HOME="$user_home" CLAUDE_CONFIG_DIR="$user_home/.claude" \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$fakebin:$PATH" \
+    "$ROOT/bin/fm-session-start.sh"); then
+    kill "$holder" 2>/dev/null || true
+    wait "$holder" 2>/dev/null || true
+    fail "read-only session start failed while checking the skill-map boundary"
+  fi
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  assert_contains "$out" 'READ-ONLY SESSION' \
+    "session-start lock fixture did not enter read-only mode"
+  [ "$(cat "$home/data/skill-map.md")" = 'sentinel map must survive read-only session start' ] \
+    || fail "read-only session start mutated the private skill map"
+
+  pass "locked session start refreshes the skill map and read-only start leaves it untouched"
+}
+
 test_skill_compose_serializes_same_set_reconciliation() {
   local home="$TMP_ROOT/locked-home" source="$TMP_ROOT/locked-source" alpha_real beta_real
   local fakebin="$TMP_ROOT/locked-fakebin" real_awk gate first_pid second_pid skills_dir
@@ -345,4 +432,6 @@ test_skill_compose_reconciles_symlink_set_and_removes
 test_skill_compose_accepts_internal_double_dots_without_traversal
 test_skill_compose_refuses_non_symlink_collision
 test_skill_compose_prevalidates_before_reconciliation
+test_skill_compose_refuses_unverified_harnesses
+test_locked_session_start_refreshes_map_and_read_only_skips
 test_skill_compose_serializes_same_set_reconciliation
