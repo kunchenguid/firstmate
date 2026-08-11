@@ -103,7 +103,10 @@ fm_backend_tmux_create_task() {  # <session> <window-name> <proj-abs> -> prints 
     return 1
   fi
   wid=$(tmux new-window -dP -F '#{window_id}' -t "$ses:" -n "$wname" -c "$proj_abs") || return 1
-  fm_backend_tmux_acquisition_record "$ses" "$wid" "$wname" || return 1
+  if ! fm_backend_tmux_acquisition_record "$ses" "$wid" "$wname"; then
+    printf '%s\n' "$wid"
+    return 1
+  fi
   tmux set-window-option -t "$wid" automatic-rename off 2>/dev/null || true
   tmux set-window-option -t "$wid" allow-rename off 2>/dev/null || true
   printf '%s\n' "$wid"

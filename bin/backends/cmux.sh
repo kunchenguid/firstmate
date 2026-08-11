@@ -377,10 +377,16 @@ fm_backend_cmux_create_task() {  # <label> <cwd>
   }
   wsid=$(fm_backend_cmux_workspace_id_for_label "$title")
   [ -n "$wsid" ] || { echo "error: could not resolve a cmux workspace id for '$title' after creation" >&2; return 1; }
-  fm_backend_cmux_acquisition_record "$label" "$wsid" || return 1
+  if ! fm_backend_cmux_acquisition_record "$label" "$wsid"; then
+    printf '%s\n' "$wsid"
+    return 1
+  fi
   sfid=$(fm_backend_cmux_surface_id_for_workspace "$wsid")
   [ -n "$sfid" ] || { echo "error: could not resolve the default surface for cmux workspace '$title' ($wsid)" >&2; return 1; }
-  fm_backend_cmux_acquisition_record "$label" "$wsid" "$sfid" || return 1
+  if ! fm_backend_cmux_acquisition_record "$label" "$wsid" "$sfid"; then
+    printf '%s %s\n' "$wsid" "$sfid"
+    return 1
+  fi
   printf '%s %s' "$wsid" "$sfid"
 }
 

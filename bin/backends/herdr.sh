@@ -2030,11 +2030,16 @@ EOF
   tab_id=$(printf '%s' "$out" | jq -r '.result.tab.tab_id // empty' 2>/dev/null)
   pane_id=$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id // empty' 2>/dev/null)
   if [ -z "$tab_id" ] || [ -z "$pane_id" ]; then
-    [ -n "$tab_id" ] && fm_backend_herdr_acquisition_record "$session" "$wsid" "$tab_id" "$label" || true
+    if [ -n "$tab_id" ] && ! fm_backend_herdr_acquisition_record "$session" "$wsid" "$tab_id" "$label"; then
+      printf '%s\n' "$tab_id"
+    fi
     echo "error: could not parse tab/pane id from herdr tab create output" >&2
     return 1
   fi
-  fm_backend_herdr_acquisition_record "$session" "$wsid" "$tab_id" "$label" "$pane_id" || return 1
+  if ! fm_backend_herdr_acquisition_record "$session" "$wsid" "$tab_id" "$label" "$pane_id"; then
+    printf '%s %s\n' "$tab_id" "$pane_id"
+    return 1
+  fi
   [ -z "$seeded_tab_id" ] || fm_backend_herdr_workspace_prune_seeded_default_tab "$session" "$wsid" "$seeded_tab_id"
   if [ -n "$dup_tab_ids" ]; then
     while IFS= read -r dup; do

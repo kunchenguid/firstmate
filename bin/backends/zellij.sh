@@ -361,13 +361,19 @@ fm_backend_zellij_create_task() {  # <session> <label> <cwd>
       return 1
       ;;
   esac
-  fm_backend_zellij_acquisition_record "$session" "$label" "$tab_id" || return 1
+  if ! fm_backend_zellij_acquisition_record "$session" "$label" "$tab_id"; then
+    printf '%s\n' "$tab_id"
+    return 1
+  fi
   pane_id=$(fm_backend_zellij_pane_for_tab "$session" "$tab_id")
   if [ -z "$pane_id" ]; then
     echo "error: could not find a terminal pane for zellij tab $tab_id (session '$session')" >&2
       return 1
       fi
-  fm_backend_zellij_acquisition_record "$session" "$label" "$tab_id" "$pane_id" || return 1
+  if ! fm_backend_zellij_acquisition_record "$session" "$label" "$tab_id" "$pane_id"; then
+    printf '%s %s\n' "$tab_id" "$pane_id"
+    return 1
+  fi
   if [ -n "$prev_active" ] && [ "$prev_active" != "$tab_id" ]; then
     fm_backend_zellij_cli "$session" action go-to-tab-by-id "$prev_active" >/dev/null 2>&1 || true
   fi

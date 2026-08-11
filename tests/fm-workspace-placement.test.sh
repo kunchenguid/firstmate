@@ -42,6 +42,12 @@ remove_selector() {
 
 json_state() {
   local id name agent workspace
+  case "${SBX_JSON_SHAPE:-array}" in
+    scalar) printf '%s\n' '"unexpected"'; return 0 ;;
+    unknown-wrapper) printf '%s\n' '{"unknown":[]}'; return 0 ;;
+    null-wrapper) printf '%s\n' '{"sandboxes":null}'; return 0 ;;
+    multiple-wrappers) printf '%s\n' '{"sandboxes":[],"items":[]}'; return 0 ;;
+  esac
   while IFS=$'\t' read -r id name agent workspace || [ -n "$id" ]; do
     [ -n "$id" ] || continue
     jq -cn --arg id "$id" --arg name "$name" --arg agent "$agent" --arg workspace "$workspace" \
@@ -175,6 +181,23 @@ fm_workspace_placement_prepare docker-sandbox direct kit.task "$TMP_ROOT/selecte
 assert_grep $'create\t--name\tfm-kit.task\t--kit\tkit ref with spaces\t--kit\tkit.two\tofficial-agent\t'"$selected_canonical" "$SBX_LOG" \
   'Docker direct did not preserve repeatable kit refs when no additional workspace was supplied'
 pass 'Docker direct accepts zero or more explicit kit refs without shell splitting'
+
+for shape in scalar unknown-wrapper null-wrapper multiple-wrappers; do
+  export SBX_JSON_SHAPE=$shape
+  : > "$SBX_LOG"
+  if fm_workspace_placement_inspect docker-sandbox docker-sandbox:malformed:fm-malformed:id-fm-malformed; then
+    fail "malformed Docker inventory shape '$shape' was treated as an absent or valid sandbox"
+  fi
+  if fm_workspace_placement_docker_sandbox_snapshot_ids >/dev/null 2>&1; then
+    fail "malformed Docker inventory shape '$shape' was accepted by the identity snapshot"
+  fi
+  if fm_workspace_placement_prepare docker-sandbox direct malformed.task "$workspace_real" official-agent; then
+    fail "malformed Docker inventory shape '$shape' allowed provider creation"
+  fi
+  assert_no_grep $'create\t' "$SBX_LOG" "malformed Docker inventory shape '$shape' allowed creation"
+done
+unset SBX_JSON_SHAPE
+pass 'Docker inventory rejects scalar and unsupported wrapper shapes without treating them as absence'
 
 : > "$SBX_STATE"
 : > "$SBX_LOG"

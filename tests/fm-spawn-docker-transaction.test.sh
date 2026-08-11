@@ -62,6 +62,13 @@ done
 printf '\n' >> "$FM_FAKE_EVENTS"
 exit 0
 TREEHOUSE
+  cat > "$fakebin/mv" <<'MV'
+#!/usr/bin/env bash
+case "${FM_FAKE_ACQUISITION_WRITE_FAIL:-0}:$*" in
+  1:*'.spawn-endpoint-'*) exit 1 ;;
+esac
+exec /bin/mv "$@"
+MV
   cat > "$fakebin/sbx" <<'SBX'
 #!/usr/bin/env bash
 set -u
@@ -133,7 +140,7 @@ case "$1" in
     ;;
 esac
 SBX
-  chmod +x "$fakebin/tmux" "$fakebin/treehouse" "$fakebin/sbx"
+  chmod +x "$fakebin/tmux" "$fakebin/treehouse" "$fakebin/mv" "$fakebin/sbx"
   printf '%s\n' "$fakebin"
 }
 
@@ -255,5 +262,28 @@ assert_grep $'treehouse\treturn\t--force\t'"$wt" "$case_dir/events.log" \
   'endpoint cleanup failure did not return the acquired worktree'
 assert_events_in_order $'treehouse\treturn' $'tmux\tkill-window' "$case_dir/events.log"
 pass 'failed endpoint cleanup remains durably recorded after reverse unwind'
+
+case_record=$(make_case acquisition-write-failure acquisition-fail-gh6)
+IFS='|' read -r case_dir home proj wt fakebin <<EOF
+$case_record
+EOF
+export FM_FAKE_ACQUISITION_WRITE_FAIL=1 FM_FAKE_TMUX_KILL_FAIL=1
+run_spawn "$case_dir" acquisition-fail-gh6 "$home" "$proj" "$wt" "$fakebin" > "$case_dir/output" 2>&1
+status=$?
+unset FM_FAKE_ACQUISITION_WRITE_FAIL FM_FAKE_TMUX_KILL_FAIL
+rm -rf -- "/tmp/fm-acquisition-fail-gh6"
+expect_code 1 "$status" 'endpoint acquisition-record failure should abort fresh Docker spawn'
+assert_absent "$home/state/acquisition-fail-gh6.meta" 'acquisition-record failure published task metadata'
+assert_present "$home/state/.spawn-cleanup/acquisition-fail-gh6.record" \
+  'acquisition-record failure did not retain a durable retry record'
+assert_grep 'endpoint_target=firstmate' \
+  "$home/state/.spawn-cleanup/acquisition-fail-gh6.record" \
+  'acquisition-record failure lost the exact endpoint session'
+assert_grep 'endpoint_aux=@spawnwid' \
+  "$home/state/.spawn-cleanup/acquisition-fail-gh6.record" \
+  'acquisition-record failure lost the exact endpoint id'
+assert_grep '@spawnwid' "$case_dir/tmux.state" \
+  'acquisition-record failure unexpectedly removed the endpoint'
+pass 'endpoint acquisition persistence failure refuses publication and records exact cleanup'
 
 echo 'ALL TESTS PASSED'

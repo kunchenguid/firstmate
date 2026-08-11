@@ -783,6 +783,86 @@ spawn_register_endpoint_from_file() {
   esac
 }
 
+spawn_endpoint_result_token_valid() {
+  case "${1:-}" in
+    ''|*$'\n'*|*$'\r'*|*$'\t'*|*' '*|*'='*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+spawn_register_endpoint_from_result() {
+  local backend=$1 label=$2 result=$3 first second extra
+  case "$result" in
+    ''|*$'\n'*|*$'\r'*|*$'\t'*|' '*|*' '|*'  '*) return 1 ;;
+  esac
+  case "$backend" in
+    tmux)
+      spawn_endpoint_result_token_valid "$result" || return 1
+      [ -n "${SES:-}" ] || return 1
+      spawn_register_endpoint tmux "$SES" "$result" "$label" tmux-id
+      ;;
+    zellij)
+      [ -n "${ZELLIJ_SES:-}" ] || return 1
+      IFS=' ' read -r first second extra <<EOF
+$result
+EOF
+      case "$first" in ''|*[!0-9]*) return 1 ;; esac
+      if [ -z "$second" ] && [ -z "$extra" ]; then
+        spawn_register_endpoint zellij "${ZELLIJ_SES:-}" "$first" "$label" zellij-tab
+      elif [ -n "$second" ] && [ -z "$extra" ]; then
+        case "$second" in ''|*[!0-9]*) return 1 ;; esac
+        spawn_register_endpoint zellij "${ZELLIJ_SES:-}" "$first" "$label" target
+      else
+        return 1
+      fi
+      ;;
+    cmux)
+      IFS=' ' read -r first second extra <<EOF
+$result
+EOF
+      spawn_endpoint_result_token_valid "$first" || return 1
+      if [ -z "$second" ] && [ -z "$extra" ]; then
+        spawn_register_endpoint cmux "$first" '' "$label" cmux-workspace
+      elif [ -n "$second" ] && [ -z "$extra" ]; then
+        spawn_endpoint_result_token_valid "$second" || return 1
+        spawn_register_endpoint cmux "$first" "$second" "$label" cmux-workspace
+      else
+        return 1
+      fi
+      ;;
+    herdr)
+      IFS=' ' read -r first second extra <<EOF
+$result
+EOF
+      spawn_endpoint_result_token_valid "$first" || return 1
+      if [ -z "$second" ] && [ -z "$extra" ]; then
+        [ -n "${HERDR_SES:-}" ] && [ -n "${HERDR_WORKSPACE_ID:-}" ] || return 1
+        spawn_register_endpoint herdr "$HERDR_SES" "$HERDR_WORKSPACE_ID:$first" "$label" herdr-tab
+      elif [ -n "$second" ] && [ -z "$extra" ]; then
+        spawn_endpoint_result_token_valid "$second" || return 1
+        [ -n "${HERDR_SES:-}" ] && [ -n "${HERDR_WORKSPACE_ID:-}" ] || return 1
+        spawn_register_endpoint herdr "$HERDR_SES" "$HERDR_WORKSPACE_ID:$first" "$label" herdr-tab
+      else
+        return 1
+      fi
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+spawn_register_endpoint_or_abort() {
+  local backend=$1 label=$2 result=$3
+  if spawn_register_endpoint_from_file; then
+    return 0
+  fi
+  if spawn_register_endpoint_from_result "$backend" "$label" "$result"; then
+    echo "error: $backend endpoint acquisition record was not persisted; refusing to publish $label" >&2
+  else
+    echo "error: $backend did not leave an exact endpoint acquisition record for $label" >&2
+  fi
+  return 1
+}
+
 spawn_register_worktree() {
   SPAWN_WORKTREE_CLEANUP=1
   SPAWN_WORKTREE_PATH=$1
@@ -2167,7 +2247,7 @@ case "$BACKEND" in
     WID=$(fm_backend_tmux_create_task "$SES" "$W" "$PROJ_ABS")
     ENDPOINT_STATUS=$?
     set -e
-    spawn_register_endpoint_from_file || true
+    spawn_register_endpoint_or_abort tmux "$W" "$WID" || exit 1
     [ "$ENDPOINT_STATUS" -eq 0 ] || exit 1
     WT_TARGET="$WID"
     ;;
@@ -2332,7 +2412,7 @@ case "$BACKEND" in
       HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$W" "$PROJ_ABS" "$HERDR_SEEDED_DEFAULT_TAB_ID")
       ENDPOINT_STATUS=$?
       set -e
-      spawn_register_endpoint_from_file || true
+      spawn_register_endpoint_or_abort herdr "$W" "$HERDR_TASK_IDS" || exit 1
       [ "$ENDPOINT_STATUS" -eq 0 ] || exit 1
       read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
 $HERDR_TASK_IDS
@@ -2354,7 +2434,7 @@ EOF
     ZELLIJ_TASK_IDS=$(fm_backend_zellij_create_task "$ZELLIJ_SES" "$W" "$PROJ_ABS")
     ENDPOINT_STATUS=$?
     set -e
-    spawn_register_endpoint_from_file || true
+    spawn_register_endpoint_or_abort zellij "$W" "$ZELLIJ_TASK_IDS" || exit 1
     [ "$ENDPOINT_STATUS" -eq 0 ] || exit 1
     read -r ZELLIJ_TAB_ID ZELLIJ_PANE_ID <<EOF
 $ZELLIJ_TASK_IDS
@@ -2373,7 +2453,7 @@ EOF
     CMUX_TASK_IDS=$(fm_backend_cmux_create_task "$W" "$PROJ_ABS")
     ENDPOINT_STATUS=$?
     set -e
-    spawn_register_endpoint_from_file || true
+    spawn_register_endpoint_or_abort cmux "$W" "$CMUX_TASK_IDS" || exit 1
     [ "$ENDPOINT_STATUS" -eq 0 ] || exit 1
     read -r CMUX_WORKSPACE_ID CMUX_SURFACE_ID <<EOF
 $CMUX_TASK_IDS
@@ -2563,9 +2643,9 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     if [ -n "$p" ]; then
       p_real=$(real_path_or_raw "$p")
       if [ "$p_real" != "$PROJ_ABS_REAL" ]; then
+        spawn_register_worktree "$p" "$PROJ_ABS"
         if [ -n "$candidate" ] && [ "$p_real" = "$candidate" ]; then
           WT="$p"
-          spawn_register_worktree "$WT" "$PROJ_ABS"
           break
         fi
         candidate="$p_real"

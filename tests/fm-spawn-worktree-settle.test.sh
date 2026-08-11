@@ -39,6 +39,8 @@ case "$*" in
     printf '%s\n' "$n" > "$countfile"
     if [ "$n" -le "${FM_FAKE_PANE_STALE_READS:-0}" ]; then
       printf '%s\n' "${FM_FAKE_PANE_STALE:-}"
+    elif [ "${FM_FAKE_PANE_PROJECT_AFTER:-0}" -gt 0 ] && [ "$n" -gt "${FM_FAKE_PANE_PROJECT_AFTER}" ]; then
+      printf '%s\n' "${FM_FAKE_PANE_PROJECT:-}"
     else
       printf '%s\n' "${FM_FAKE_PANE_PATH:-}"
     fi
@@ -54,7 +56,23 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse
+  cat > "$fakebin/sleep" <<'SH'
+#!/usr/bin/env bash
+if [ "${FM_FAKE_SLEEP_NOOP:-0}" = 1 ]; then
+  exit 0
+fi
+exec /bin/sleep "$@"
+SH
+  chmod +x "$fakebin/sleep"
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = return ]; then
+  printf '%s\n' "$*" >> "${FM_FAKE_PANE_COUNTFILE:?}.treehouse"
+  [ "${FM_FAKE_TREEHOUSE_RETURN_FAIL:-0}" = 1 ] && exit 1
+fi
+exit 0
+SH
+  chmod +x "$fakebin/treehouse"
   printf '%s\n' "$fakebin"
 }
 
@@ -96,6 +114,9 @@ run_settle_spawn() {
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
     FM_FAKE_PANE_PATH="$WT_DIR" FM_FAKE_PANE_STALE="$STALE_DIR" \
     FM_FAKE_PANE_STALE_READS="$STALE_READS" FM_FAKE_PANE_COUNTFILE="$COUNTFILE" \
+    FM_FAKE_PANE_PROJECT="$PROJ_DIR" FM_FAKE_PANE_PROJECT_AFTER="${FM_FAKE_PANE_PROJECT_AFTER:-0}" \
+    FM_FAKE_SLEEP_NOOP="${FM_FAKE_SLEEP_NOOP:-0}" \
+    FM_FAKE_TREEHOUSE_RETURN_FAIL="${FM_FAKE_TREEHOUSE_RETURN_FAIL:-0}" \
     PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1
 }
@@ -141,7 +162,29 @@ test_already_settled_pane_costs_one_confirm_sleep() {
   pass "an already-settled pane confirms via the existing inter-poll sleep, not an extra full cycle"
 }
 
+test_timeout_retains_first_acquired_worktree_for_retry() {
+  local rec id out status
+  id=settle-timeout-retry-z3
+  rec=$(make_settle_case settle-timeout-retry "$id" 0)
+  read_settle_record "$rec"
+
+  FM_FAKE_PANE_PROJECT_AFTER=1 FM_FAKE_SLEEP_NOOP=1 FM_FAKE_TREEHOUSE_RETURN_FAIL=1 \
+    out=$(run_settle_spawn "$id")
+  status=$?
+  expect_code 1 "$status" "spawn should fail when the pane never settles"
+  assert_contains "$out" "did not enter a worktree within 60s" \
+    "spawn did not report the bounded worktree-settle failure"
+  assert_present "$HOME_DIR/state/.spawn-cleanup/$id.record" \
+    "timeout did not retain a durable cleanup record"
+  assert_grep "worktree_path=$WT_DIR" "$HOME_DIR/state/.spawn-cleanup/$id.record" \
+    "timeout cleanup record lost the first exact acquired worktree path"
+  assert_grep "return --force $WT_DIR" "$COUNTFILE.treehouse" \
+    "timeout did not retry cleanup with the exact acquired worktree path"
+  pass "worktree acquisition is recorded before settle and retained on timeout cleanup failure"
+}
+
 test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_sleep
+test_timeout_retains_first_acquired_worktree_for_retry
 
 echo "# all fm-spawn-worktree-settle tests passed"

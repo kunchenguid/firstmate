@@ -28,6 +28,24 @@ fm_workspace_placement_docker_sandbox_check() {
   fi
 }
 
+fm_workspace_placement_docker_sandbox_inventory_array() {
+  jq -e -c '
+    if type == "array" then .
+    elif type == "object" then
+      [
+        if has("sandboxes") then .sandboxes else empty end,
+        if has("items") then .items else empty end,
+        if has("data") then .data else empty end,
+        if has("results") then .results else empty end
+      ]
+      | if length == 1 and (.[0] | type) == "array" then .[0]
+        else error("unsupported Docker Sandbox inventory shape")
+        end
+    else error("unsupported Docker Sandbox inventory shape")
+    end
+  '
+}
+
 fm_workspace_placement_docker_sandbox_name() {  # <task-id>
   local task_id=$1
   case "$task_id" in
@@ -99,15 +117,17 @@ fm_workspace_placement_docker_sandbox_resolve_workspace() {  # <workspace>
 }
 
 fm_workspace_placement_docker_sandbox_record() {  # <name-or-id>
-  local selector=$1 listing records count id name agent workspace
+  local selector=$1 listing inventory records count id name agent workspace
   listing=$(sbx ls --json) || {
     fm_workspace_placement_error 'could not list Docker Sandboxes with sbx ls --json'
     return 2
   }
-  records=$(printf '%s' "$listing" | jq -r --arg selector "$selector" '
-    (if type == "array" then . else (.sandboxes // .items // .data // .results // []) end)
-    | if type == "array" then . else [] end
-    | .[]?
+  inventory=$(printf '%s' "$listing" | fm_workspace_placement_docker_sandbox_inventory_array) || {
+    fm_workspace_placement_error 'Docker Sandbox stable identity output was malformed'
+    return 2
+  }
+  records=$(printf '%s' "$inventory" | jq -r --arg selector "$selector" '
+    .[]?
     | {id: (.id // .ID // .sandboxId // .sandbox_id // ""),
        name: (.name // .Name // .sandboxName // .sandbox_name // ""),
        agent: (.agent // .Agent // ""),
@@ -144,12 +164,11 @@ EOF
 }
 
 fm_workspace_placement_docker_sandbox_snapshot_ids() {
-  local listing
+  local listing inventory
   listing=$(sbx ls --json) || return 1
-  printf '%s' "$listing" | jq -r '
-    (if type == "array" then . else (.sandboxes // .items // .data // .results // []) end)
-    | if type == "array" then . else [] end
-    | .[]?
+  inventory=$(printf '%s' "$listing" | fm_workspace_placement_docker_sandbox_inventory_array) || return 2
+  printf '%s' "$inventory" | jq -r '
+    .[]?
     | (.id // .ID // .sandboxId // .sandbox_id // empty)
     | select(type == "string" and length > 0)
   ' 2>/dev/null
