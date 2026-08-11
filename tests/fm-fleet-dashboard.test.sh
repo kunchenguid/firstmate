@@ -57,7 +57,7 @@ for argument in "$@"; do
 done
 case "${1:-}" in
   list-windows)
-    printf '%s\n' fm-progressing-task fm-decision-task fm-review-task
+    printf '%s\n' fm-progressing-task fm-decision-task fm-review-task fm-sm-relay
     ;;
   display-message)
     case "$*" in
@@ -191,9 +191,22 @@ EOF
     "yolo=off"
   printf 'paused: vendor rate limit resets tomorrow\n' > "$home/state/paused-task.status"
 
+  # A secondmate's multiplexed log mentioning a historical PR must never mint
+  # a review ask: the URL below exists only in status prose, not in metadata.
+  fm_write_meta "$home/state/sm-relay.meta" \
+    "window=firstmate:fm-sm-relay" \
+    "project=firstmate" \
+    "harness=claude" \
+    "kind=secondmate" \
+    "mode=ship" \
+    "yolo=off"
+  printf 'done: PR https://github.com/pedromuller-del/firstmate/pull/5555 checks green\n' \
+    > "$home/state/sm-relay.status"
+
   # Pin status mtimes so age-in-state is deterministic against FM_SNAPSHOT_NOW.
   TZ=UTC touch -t 202608020000 "$home/state/decision-task.status" "$home/state/unhealthy-task.status" \
-    "$home/state/merged-task.status" "$home/state/review-task.status" "$home/state/paused-task.status"
+    "$home/state/merged-task.status" "$home/state/review-task.status" "$home/state/paused-task.status" \
+    "$home/state/sm-relay.status"
 }
 
 render_terminal() {  # <home> <fakebin> [extra args...]
@@ -216,7 +229,7 @@ test_terminal_cockpit_opens_on_needs_pedro() {
   out=$(render_terminal "$home" "$fakebin" --width 100) || fail "terminal render failed"
 
   needs=$(line_number_of "$out" "NEEDS PEDRO (10)")
-  underway=$(line_number_of "$out" "UNDERWAY (2)")
+  underway=$(line_number_of "$out" "UNDERWAY (1)")
   unhealthy=$(line_number_of "$out" "UNHEALTHY (1)")
   queued=$(line_number_of "$out" "QUEUED (2)")
   [ -n "$needs" ] || fail "terminal output has no NEEDS PEDRO section counting all ten items"
@@ -235,11 +248,13 @@ test_terminal_cockpit_opens_on_needs_pedro() {
     || fail "live-worker decision does not outrank the oldest hold"
   assert_contains "$out" "⚠ for 13d" "a 13-day hold got no age warning weight"
   assert_contains "$out" "The certificate expires soon." "oldest hold reason was not rendered"
-  assert_contains "$out" "PR ready: https://github.com/pedromuller-del/firstmate/pull/4001" \
-    "an open PR reported ready was not surfaced for review"
+  assert_contains "$out" "PR (unverified): https://github.com/pedromuller-del/firstmate/pull/4001" \
+    "a metadata-recorded PR was not surfaced as an unverified review ask"
+  assert_not_contains "$out" "PR ready" "the cockpit asserted PR readiness it cannot verify locally"
   assert_not_contains "$out" "pull/3972" "a merged PR was surfaced as a live review ask"
-  assert_contains "$out" "landed (merged 2026-07-31), awaiting cleanup" \
-    "a merged task was not reconciled against its backlog completion"
+  assert_not_contains "$out" "Ship the merged thing" "a landed task still occupies a bucket"
+  assert_not_contains "$out" "pull/5555" \
+    "a PR URL parsed from secondmate status prose minted a review ask"
   assert_contains "$out" "declared wait, worker gone: vendor rate" \
     "a declared pause with a gone worker was not rendered as a wait"
   assert_contains "$out" "5 more" "hidden Needs Pedro items were not counted"

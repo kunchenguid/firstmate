@@ -250,10 +250,6 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent }) {
   );
   const isActionableCaptainHold = (record) =>
     record.hold_kind === "captain" && record.hold_reason && !record.unresolved_blocker_ids?.length;
-  const landingNote = (completed) =>
-    completed?.completion?.verb
-      ? `landed (${completed.completion.verb}${completed.completion.date ? ` ${completed.completion.date}` : ""}), awaiting cleanup`
-      : "finished, awaiting cleanup";
 
   for (const record of records) {
     if (!record.structured) {
@@ -338,6 +334,15 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent }) {
       }
       continue;
     }
+    // A secondmate is a persistent agent, not a work item: its multiplexed
+    // status log must never mint work rows. Its keyed open decisions already
+    // surfaced above; beyond that only a dead agent is worth a line.
+    if (task.kind === "secondmate") {
+      if (task.endpoint?.agent_alive === "dead") {
+        unhealthy.push({ ...base, tag: "DEAD", prose: "secondmate agent is dead", note: null });
+      }
+      continue;
+    }
     // The reconciled current state from fm-crew-state is authoritative for
     // routing. Raw signals never override it: a gone endpoint is unhealthy
     // only when the state claims a live worker, and a reported PR is an ask
@@ -351,17 +356,14 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent }) {
       continue;
     }
     if (state === "done") {
-      const completed = completedById.get(task.id);
-      if (task.pr?.url && !completed) {
-        needsPedro.push({ ...base, tag: "REVIEW", prose: `PR ready: ${task.pr.url}`, note: null });
-        continue;
+      // Only the pr= recorded in task metadata is current state; a URL parsed
+      // out of status prose is history. Whether the PR is still open cannot
+      // be decided locally, so the ask never claims readiness.
+      if (task.pr?.url && task.pr?.source === "meta" && !completedById.get(task.id)) {
+        needsPedro.push({ ...base, tag: "REVIEW", prose: `PR (unverified): ${task.pr.url}`, note: null });
       }
-      underway.push({
-        ...base,
-        tag: "DONE",
-        prose: null,
-        note: task.hints?.scout_report_present ? "scout report ready to read" : landingNote(completed),
-      });
+      // Finished work belongs to no bucket; landing and cleanup are
+      // firstmate's own pipeline, not fleet attention.
       continue;
     }
     // A worker whose current state is unreadable is not automatically sick:
@@ -370,9 +372,7 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent }) {
     // is a bounded external wait. Only a worker no record accounts for is
     // unhealthy.
     if (state === "unknown") {
-      const completed = completedById.get(task.id);
-      if (completed) {
-        underway.push({ ...base, tag: "DONE", prose: null, note: landingNote(completed) });
+      if (completedById.get(task.id)) {
         continue;
       }
       const held = heldById.get(task.id);
