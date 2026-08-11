@@ -350,6 +350,19 @@ fm_backend_cmux_surface_id_for_workspace() {  # <workspace_id>
 # workspace/surface/pane create all default focus to false) - no
 # focus-restore dance is needed, unlike zellij. Echoes "<workspace_id>
 # <surface_id>" on success.
+fm_backend_cmux_acquisition_record() {
+  local file=${FM_BACKEND_ACQUISITION_FILE:-} label=$1 workspace_id=$2 surface_id=${3:-} tmp
+  [ -n "$file" ] || return 0
+  tmp="$file.tmp.${BASHPID:-$$}"
+  printf 'backend=cmux\nkind=%s\nworkspace_id=%s\nsurface_id=%s\nlabel=%s\n' \
+    "$([ -n "$surface_id" ] && printf target || printf cmux-workspace)" \
+    "$workspace_id" "$surface_id" "$label" > "$tmp" || return 1
+  chmod 600 "$tmp" && mv -f -- "$tmp" "$file" || {
+    rm -f -- "$tmp"
+    return 1
+  }
+}
+
 fm_backend_cmux_create_task() {  # <label> <cwd>
   local label=$1 cwd=$2 title dup out wsid sfid
   title=$(fm_backend_cmux_scoped_title "$label")
@@ -364,8 +377,10 @@ fm_backend_cmux_create_task() {  # <label> <cwd>
   }
   wsid=$(fm_backend_cmux_workspace_id_for_label "$title")
   [ -n "$wsid" ] || { echo "error: could not resolve a cmux workspace id for '$title' after creation" >&2; return 1; }
+  fm_backend_cmux_acquisition_record "$label" "$wsid" || return 1
   sfid=$(fm_backend_cmux_surface_id_for_workspace "$wsid")
   [ -n "$sfid" ] || { echo "error: could not resolve the default surface for cmux workspace '$title' ($wsid)" >&2; return 1; }
+  fm_backend_cmux_acquisition_record "$label" "$wsid" "$sfid" || return 1
   printf '%s %s' "$wsid" "$sfid"
 }
 
@@ -626,6 +641,37 @@ fm_backend_cmux_kill() {  # <target> [unused] [expected-label]
     fm_backend_cmux_cli new-workspace --window "$win" --focus false --id-format uuids >/dev/null 2>&1 || true
   fi
   fm_backend_cmux_cli close-workspace --workspace "$wsid" >/dev/null 2>&1 || true
+}
+
+fm_backend_cmux_kill_workspace_exact() {  # <workspace-id> <expected-label>
+  local wsid=$1 expected_label=$2 expected_title title wss wininfo win count
+  expected_title=$(fm_backend_cmux_scoped_title "$expected_label")
+  wss=$(fm_backend_cmux_cli workspace list --json --id-format uuids 2>/dev/null) || return 1
+  printf '%s' "$wss" | jq -e '(.workspaces | type) == "array"' >/dev/null 2>&1 || return 1
+  title=$(printf '%s' "$wss" | jq -r --arg id "$wsid" '.workspaces[]? | select(.id == $id) | .title' 2>/dev/null) || return 1
+  case "$title" in
+    '') return 0 ;;
+    *$'\n'*) return 1 ;;
+  esac
+  [ "$title" = "$expected_title" ] || return 1
+  wininfo=$(fm_backend_cmux_window_of_workspace "$wsid") || return 1
+  [ -n "$wininfo" ] || return 1
+  win=${wininfo%% *}
+  count=${wininfo##* }
+  case "$count" in ''|*[!0-9]*) return 1 ;; esac
+  if [ -n "$win" ] && [ "$count" = 1 ]; then
+    fm_backend_cmux_cli new-workspace --window "$win" --focus false --id-format uuids >/dev/null 2>&1 || true
+  fi
+  fm_backend_cmux_cli close-workspace --workspace "$wsid" >/dev/null 2>&1 || return 1
+  wss=$(fm_backend_cmux_cli workspace list --json --id-format uuids 2>/dev/null) || return 1
+  printf '%s' "$wss" | jq -e '(.workspaces | type) == "array"' >/dev/null 2>&1 || return 1
+  local rc
+  if printf '%s' "$wss" | jq -e --arg id "$wsid" '[.workspaces[]? | select(.id == $id)] | length > 0' >/dev/null 2>&1; then
+    return 1
+  else
+    rc=$?
+  fi
+  [ "$rc" -eq 1 ]
 }
 
 # fm_backend_cmux_list_live: recovery/orphan discovery. Lists every workspace

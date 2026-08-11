@@ -8,18 +8,22 @@
 #   accepts the caller-selected preset verbatim after requiring it be nonempty.
 # - Sandbox names are deterministic fm-<task-id> values and existing names are
 #   refused rather than adopted.
-# - Handles bind the task identity to that deterministic name, so inspect and
-#   release refuse mismatched handles.
+# - Handles bind the task identity to that deterministic name and provider id,
+#   so inspect and release refuse mismatched handles.
 # - Clone cwd is discovered with sbx exec after creation, never guessed.
 #
 # Official command assumptions: Docker Sandboxes documents `sbx create --name
-# NAME AGENT PATH [PATH...]`, `--clone`, `sbx exec`, `sbx ls --quiet`, `sbx
+# NAME AGENT PATH [PATH...]`, `--clone`, `sbx exec`, `sbx ls --json`, `sbx
 # stop`, and `sbx rm`; this adapter uses only those documented sbx automation
 # commands.
 
 fm_workspace_placement_docker_sandbox_check() {
   if ! command -v sbx >/dev/null 2>&1; then
     fm_workspace_placement_error 'docker-sandbox placement requires the sbx CLI; install Docker Sandboxes and ensure sbx is on PATH'
+    return 127
+  fi
+  if ! command -v jq >/dev/null 2>&1; then
+    fm_workspace_placement_error 'docker-sandbox placement requires jq to verify stable sandbox identities'
     return 127
   fi
 }
@@ -35,24 +39,20 @@ fm_workspace_placement_docker_sandbox_name() {  # <task-id>
   printf 'fm-%s' "$task_id"
 }
 
-fm_workspace_placement_docker_sandbox_handle() {  # <task-id>
-  local task_id=$1 name
-  name=$(fm_workspace_placement_docker_sandbox_name "$task_id") || return 1
-  printf 'docker-sandbox:%s:%s' "$task_id" "$name"
-}
-
-fm_workspace_placement_docker_sandbox_handle_name() {  # <handle>
-  local handle=$1 remainder task_id name expected
+fm_workspace_placement_docker_sandbox_handle_parts() {  # <handle>
+  local handle=$1 remainder task_id name provider_id expected
   case "$handle" in
-    docker-sandbox:*:*) remainder=${handle#docker-sandbox:} ;;
+    docker-sandbox:*:*:*) remainder=${handle#docker-sandbox:} ;;
     *)
       fm_workspace_placement_error "invalid docker-sandbox placement handle '$handle'"
       return 2
       ;;
   esac
   task_id=${remainder%%:*}
-  name=${remainder#*:}
-  if [ -z "$task_id" ] || [ -z "$name" ] || [ "$name" = "$task_id" ]; then
+  remainder=${remainder#*:}
+  name=${remainder%%:*}
+  provider_id=${remainder#*:}
+  if [ -z "$task_id" ] || [ -z "$name" ] || [ "$name" = "$task_id" ] || [ -z "$provider_id" ]; then
     fm_workspace_placement_error "invalid docker-sandbox placement handle '$handle'"
     return 2
   fi
@@ -61,7 +61,28 @@ fm_workspace_placement_docker_sandbox_handle_name() {  # <handle>
     fm_workspace_placement_error "docker-sandbox handle '$handle' does not match task identity '$task_id'"
     return 2
   fi
+  case "$provider_id" in
+    *[!A-Za-z0-9._-]*)
+      fm_workspace_placement_error "invalid Docker Sandbox provider identity in handle '$handle'"
+      return 2
+      ;;
+  esac
+  printf '%s\t%s\t%s' "$task_id" "$name" "$provider_id"
+}
+
+fm_workspace_placement_docker_sandbox_handle_name() {  # <handle>
+  local parts task_id name provider_id
+  parts=$(fm_workspace_placement_docker_sandbox_handle_parts "$1") || return 1
+  IFS=$'\t' read -r task_id name provider_id <<EOF
+$parts
+EOF
   printf '%s' "$name"
+}
+
+fm_workspace_placement_docker_sandbox_handle_id() {  # <handle>
+  local parts
+  parts=$(fm_workspace_placement_docker_sandbox_handle_parts "$1") || return 1
+  printf '%s' "${parts##*$'\t'}"
 }
 
 fm_workspace_placement_docker_sandbox_resolve_workspace() {  # <workspace>
@@ -77,30 +98,82 @@ fm_workspace_placement_docker_sandbox_resolve_workspace() {  # <workspace>
   printf '%s' "$resolved"
 }
 
-# Return 0 for an exact name, 1 when absent, and 2 when sbx cannot list safely.
-fm_workspace_placement_docker_sandbox_list_contains() {  # <name>
-  local name=$1 item listing
-  listing=$(sbx ls --quiet) || {
-    fm_workspace_placement_error 'could not list Docker Sandboxes with sbx ls --quiet'
+fm_workspace_placement_docker_sandbox_record() {  # <name-or-id>
+  local selector=$1 listing records count id name agent workspace
+  listing=$(sbx ls --json) || {
+    fm_workspace_placement_error 'could not list Docker Sandboxes with sbx ls --json'
     return 2
   }
-  while IFS= read -r item || [ -n "$item" ]; do
-    [ "$item" = "$name" ] && return 0
-  done <<EOF
-$listing
+  records=$(printf '%s' "$listing" | jq -r --arg selector "$selector" '
+    (if type == "array" then . else (.sandboxes // .items // .data // .results // []) end)
+    | if type == "array" then . else [] end
+    | .[]?
+    | {id: (.id // .ID // .sandboxId // .sandbox_id // ""),
+       name: (.name // .Name // .sandboxName // .sandbox_name // ""),
+       agent: (.agent // .Agent // ""),
+       workspace: (.workspace // .workdir // .workingDir // .working_dir // "")}
+    | select(.id != "" and (.name == $selector or .id == $selector))
+    | [.id, .name, .agent, .workspace]
+    | @tsv
+  ' 2>/dev/null) || {
+    fm_workspace_placement_error 'Docker Sandbox stable identity output was malformed'
+    return 2
+  }
+  count=$(printf '%s\n' "$records" | awk 'NF { n++ } END { print n + 0 }')
+  case "$count" in
+    0) return 1 ;;
+    1) ;;
+    *)
+      fm_workspace_placement_error "Docker Sandbox selector '$selector' matched multiple provider identities"
+      return 2
+      ;;
+  esac
+  IFS=$'\t' read -r id name agent workspace <<EOF
+$records
 EOF
-  return 1
+  case "$id" in ''|*[!A-Za-z0-9._-]*) return 2 ;; esac
+  case "$name" in ''|*[!A-Za-z0-9._-]*) return 2 ;; esac
+  # shellcheck disable=SC2034
+  FM_WORKSPACE_PLACEMENT_DOCKER_ID=$id
+  # shellcheck disable=SC2034
+  FM_WORKSPACE_PLACEMENT_DOCKER_NAME=$name
+  # shellcheck disable=SC2034
+  FM_WORKSPACE_PLACEMENT_DOCKER_AGENT=$agent
+  # shellcheck disable=SC2034
+  FM_WORKSPACE_PLACEMENT_DOCKER_WORKSPACE=$workspace
 }
 
-fm_workspace_placement_docker_sandbox_cleanup_unpublished() {  # <name>
-  local name=$1
-  sbx stop "$name" >/dev/null 2>&1 || true
-  sbx rm --force "$name" >/dev/null 2>&1 || true
+fm_workspace_placement_docker_sandbox_snapshot_ids() {
+  local listing
+  listing=$(sbx ls --json) || return 1
+  printf '%s' "$listing" | jq -r '
+    (if type == "array" then . else (.sandboxes // .items // .data // .results // []) end)
+    | if type == "array" then . else [] end
+    | .[]?
+    | (.id // .ID // .sandboxId // .sandbox_id // empty)
+    | select(type == "string" and length > 0)
+  ' 2>/dev/null
+}
+
+fm_workspace_placement_docker_sandbox_resolve_acquired() {  # <task-id> <name> <before-ids>
+  local task_id=$1 name=$2 before_ids=${3:-} provider_id handle
+  fm_workspace_placement_docker_sandbox_record "$name" || return 1
+  provider_id=$FM_WORKSPACE_PLACEMENT_DOCKER_ID
+  if printf '%s\n' "$before_ids" | grep -Fqx -- "$provider_id"; then
+    fm_workspace_placement_error "Docker Sandbox '$name' was not proven to be newly acquired"
+    return 1
+  fi
+  handle="docker-sandbox:$task_id:$name:$provider_id"
+  # shellcheck disable=SC2034
+  FM_WORKSPACE_PLACEMENT_ACQUIRED_HANDLE=$handle
+  # shellcheck disable=SC2034
+  FM_WORKSPACE_PLACEMENT_PENDING_NAME=
+  printf '%s' "$handle"
 }
 
 fm_workspace_placement_docker_sandbox_prepare() {  # <direct|clone> <task-id> <workspace> <preset> [additional-workspace] [kit-ref...]
   local mode=$1 task_id=$2 workspace=$3 preset=$4 additional_workspace=${5:-}
-  local name handle resolved_workspace resolved_additional clone_cwd state kit create_error
+  local name handle resolved_workspace resolved_additional clone_cwd state kit create_error before_ids
   local -a kits=() create_argv
   if [ "$#" -gt 5 ]; then
     kits=("${@:6}")
@@ -118,7 +191,6 @@ fm_workspace_placement_docker_sandbox_prepare() {  # <direct|clone> <task-id> <w
     return 2
   }
   name=$(fm_workspace_placement_docker_sandbox_name "$task_id") || return 1
-  handle=$(fm_workspace_placement_docker_sandbox_handle "$task_id") || return 1
   resolved_workspace=$(fm_workspace_placement_docker_sandbox_resolve_workspace "$workspace") || return 1
   if [ -n "$additional_workspace" ]; then
     resolved_additional=$(fm_workspace_placement_docker_sandbox_resolve_workspace "$additional_workspace") || return 1
@@ -127,7 +199,7 @@ fm_workspace_placement_docker_sandbox_prepare() {  # <direct|clone> <task-id> <w
       return 2
     }
   fi
-  if fm_workspace_placement_docker_sandbox_list_contains "$name"; then
+  if fm_workspace_placement_docker_sandbox_record "$name"; then
     state=0
   else
     state=$?
@@ -140,6 +212,12 @@ fm_workspace_placement_docker_sandbox_prepare() {  # <direct|clone> <task-id> <w
     1) ;;
     *) return "$state" ;;
   esac
+  before_ids=$(fm_workspace_placement_docker_sandbox_snapshot_ids) || {
+    fm_workspace_placement_error 'could not capture Docker Sandbox identities before creation'
+    return 1
+  }
+  # shellcheck disable=SC2034
+  FM_WORKSPACE_PLACEMENT_PENDING_NAME=$name
   create_argv=(sbx create --name "$name")
   if [ "${kits[0]+set}" = set ]; then
     for kit in "${kits[@]}"; do
@@ -156,12 +234,14 @@ fm_workspace_placement_docker_sandbox_prepare() {  # <direct|clone> <task-id> <w
         create_error="could not create Docker Sandbox '$name' for the selected workspace"
       fi
       if ! "${create_argv[@]}" >/dev/null; then
-        fm_workspace_placement_docker_sandbox_cleanup_unpublished "$name"
         fm_workspace_placement_error "$create_error"
         return 1
       fi
-      # shellcheck disable=SC2034
-      FM_WORKSPACE_PLACEMENT_ACQUIRED_HANDLE=$handle
+      if ! fm_workspace_placement_docker_sandbox_resolve_acquired "$task_id" "$name" "$before_ids" >/dev/null; then
+        fm_workspace_placement_error "could not prove the stable identity of Docker Sandbox '$name'"
+        return 1
+      fi
+      handle=$FM_WORKSPACE_PLACEMENT_ACQUIRED_HANDLE
       fm_workspace_placement_result_set "$handle" "$resolved_workspace" "$resolved_workspace" 'yes'
       ;;
     clone)
@@ -174,18 +254,21 @@ fm_workspace_placement_docker_sandbox_prepare() {  # <direct|clone> <task-id> <w
         fm_workspace_placement_error "could not create cloned Docker Sandbox '$name'"
         return 1
       }
-      # shellcheck disable=SC2034
-      FM_WORKSPACE_PLACEMENT_ACQUIRED_HANDLE=$handle
+      if ! fm_workspace_placement_docker_sandbox_resolve_acquired "$task_id" "$name" "$before_ids" >/dev/null; then
+        fm_workspace_placement_error "could not prove the stable identity of cloned Docker Sandbox '$name'"
+        return 1
+      fi
+      handle=$FM_WORKSPACE_PLACEMENT_ACQUIRED_HANDLE
       clone_cwd=$(sbx exec "$name" pwd) || {
-        fm_workspace_placement_docker_sandbox_cleanup_unpublished "$name"
-        fm_workspace_placement_error "could not determine the working directory inside cloned Docker Sandbox '$name'; removed the unpublished placement when possible"
+        fm_workspace_placement_docker_sandbox_release "$handle" force || true
+        fm_workspace_placement_error "could not determine the working directory inside cloned Docker Sandbox '$name'"
         return 1
       }
       case "$clone_cwd" in
         /*) ;;
         *)
-          fm_workspace_placement_docker_sandbox_cleanup_unpublished "$name"
-          fm_workspace_placement_error "Docker Sandbox '$name' returned a non-absolute clone working directory; removed the unpublished placement when possible"
+          fm_workspace_placement_docker_sandbox_release "$handle" force || true
+          fm_workspace_placement_error "Docker Sandbox '$name' returned a non-absolute clone working directory"
           return 1
           ;;
       esac
@@ -206,10 +289,11 @@ fm_workspace_placement_docker_sandbox_wrap_launch() {  # <handle> <cwd> <command
 }
 
 fm_workspace_placement_docker_sandbox_inspect() {  # <handle>
-  local name state
+  local parts provider_id state
   fm_workspace_placement_docker_sandbox_check || return 1
-  name=$(fm_workspace_placement_docker_sandbox_handle_name "$1") || return 1
-  if fm_workspace_placement_docker_sandbox_list_contains "$name"; then
+  parts=$(fm_workspace_placement_docker_sandbox_handle_parts "$1") || return 1
+  provider_id=${parts##*$'\t'}
+  if fm_workspace_placement_docker_sandbox_record "$provider_id"; then
     state=0
   else
     state=$?
@@ -222,10 +306,16 @@ fm_workspace_placement_docker_sandbox_inspect() {  # <handle>
 }
 
 fm_workspace_placement_docker_sandbox_release() {  # <handle> [force]
-  local handle=$1 force=${2:-} name state
+  local handle=$1 force=${2:-} parts name provider_id state
   fm_workspace_placement_docker_sandbox_check || return 1
-  name=$(fm_workspace_placement_docker_sandbox_handle_name "$handle") || return 1
-  if fm_workspace_placement_docker_sandbox_list_contains "$name"; then
+  parts=$(fm_workspace_placement_docker_sandbox_handle_parts "$handle") || return 1
+  name=$(printf '%s' "$parts" | cut -f2)
+  provider_id=$(printf '%s' "$parts" | cut -f3)
+  if fm_workspace_placement_docker_sandbox_record "$provider_id"; then
+    [ "$FM_WORKSPACE_PLACEMENT_DOCKER_NAME" = "$name" ] || {
+      fm_workspace_placement_error "Docker Sandbox provider identity '$provider_id' no longer names '$name'; refusing release"
+      return 1
+    }
     state=0
   else
     state=$?
@@ -235,11 +325,11 @@ fm_workspace_placement_docker_sandbox_release() {  # <handle> [force]
     1) return 0 ;;
     *) return "$state" ;;
   esac
-  sbx stop "$name" >/dev/null || {
-    fm_workspace_placement_error "could not stop verified Docker Sandbox '$name'; refusing to remove it"
+  sbx stop "$provider_id" >/dev/null || {
+    fm_workspace_placement_error "could not stop verified Docker Sandbox '$provider_id'; refusing to remove it"
     return 1
   }
-  if fm_workspace_placement_docker_sandbox_list_contains "$name"; then
+  if fm_workspace_placement_docker_sandbox_record "$provider_id"; then
     state=0
   else
     state=$?
@@ -250,13 +340,13 @@ fm_workspace_placement_docker_sandbox_release() {  # <handle> [force]
     *) return "$state" ;;
   esac
   if [ "$force" = 'force' ]; then
-    sbx rm --force "$name" >/dev/null || {
-      fm_workspace_placement_error "could not forcibly remove verified Docker Sandbox '$name'"
+    sbx rm --force "$provider_id" >/dev/null || {
+      fm_workspace_placement_error "could not forcibly remove verified Docker Sandbox '$provider_id'"
       return 1
     }
   else
-    sbx rm "$name" >/dev/null || {
-      fm_workspace_placement_error "could not remove verified Docker Sandbox '$name'"
+    sbx rm "$provider_id" >/dev/null || {
+      fm_workspace_placement_error "could not remove verified Docker Sandbox '$provider_id'"
       return 1
     }
   fi

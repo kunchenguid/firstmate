@@ -84,6 +84,18 @@ fm_backend_tmux_container_ensure() {
 #     treehouse cd's into the worktree, which would break name-based targeting.
 # The returned window id lets callers target the window even if its name is ever
 # lost, so worktree discovery cannot fall back to the active client's window.
+fm_backend_tmux_acquisition_record() {
+  local file=${FM_BACKEND_ACQUISITION_FILE:-} session=$1 window_id=$2 label=$3 tmp
+  [ -n "$file" ] || return 0
+  tmp="$file.tmp.${BASHPID:-$$}"
+  printf 'backend=tmux\nkind=tmux-id\nsession=%s\nwindow_id=%s\nlabel=%s\n' \
+    "$session" "$window_id" "$label" > "$tmp" || return 1
+  chmod 600 "$tmp" && mv -f -- "$tmp" "$file" || {
+    rm -f -- "$tmp"
+    return 1
+  }
+}
+
 fm_backend_tmux_create_task() {  # <session> <window-name> <proj-abs> -> prints window id
   local ses=$1 wname=$2 proj_abs=$3 wid
   if tmux list-windows -t "$ses" -F '#{window_name}' | grep -qx "$wname"; then
@@ -91,9 +103,23 @@ fm_backend_tmux_create_task() {  # <session> <window-name> <proj-abs> -> prints 
     return 1
   fi
   wid=$(tmux new-window -dP -F '#{window_id}' -t "$ses:" -n "$wname" -c "$proj_abs") || return 1
+  fm_backend_tmux_acquisition_record "$ses" "$wid" "$wname" || return 1
   tmux set-window-option -t "$wid" automatic-rename off 2>/dev/null || true
   tmux set-window-option -t "$wid" allow-rename off 2>/dev/null || true
   printf '%s\n' "$wid"
+}
+
+fm_backend_tmux_kill_exact() {
+  local session=$1 window_id=$2 expected_label=$3 found
+  [ -n "$session" ] && [ -n "$window_id" ] || return 1
+  local windows
+  windows=$(tmux list-windows -t "$session" -F '#{window_id}\t#{window_name}' 2>/dev/null) || return 1
+  found=$(printf '%s\n' "$windows" | awk -F '\t' -v id="$window_id" '$1 == id { print $2 }')
+  [ -n "$found" ] || return 0
+  [ "$found" = "$expected_label" ] || return 1
+  tmux kill-window -t "$session:$window_id" >/dev/null 2>&1 || return 1
+  windows=$(tmux list-windows -t "$session" -F '#{window_id}\t#{window_name}' 2>/dev/null) || return 1
+  ! printf '%s\n' "$windows" | awk -F '\t' -v id="$window_id" '$1 == id { found=1 } END { exit found ? 0 : 1 }'
 }
 
 # fm_backend_tmux_current_path: the live pane's current working directory, or

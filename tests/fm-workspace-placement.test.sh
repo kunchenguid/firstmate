@@ -30,21 +30,34 @@ log_argv() {
   printf '\n' >> "$SBX_LOG"
 }
 
-remove_name() {
-  local name=$1 item tmp="${SBX_STATE}.tmp.$$"
+remove_selector() {
+  local selector=$1 id name agent workspace tmp="${SBX_STATE}.tmp.$$"
   : > "$tmp"
-  while IFS= read -r item || [ -n "$item" ]; do
-    [ "$item" = "$name" ] || printf '%s\n' "$item" >> "$tmp"
+  while IFS=$'\t' read -r id name agent workspace || [ -n "$id" ]; do
+    [ "$id" = "$selector" ] || [ "$name" = "$selector" ] || \
+      printf '%s\t%s\t%s\t%s\n' "$id" "$name" "$agent" "$workspace" >> "$tmp"
   done < "$SBX_STATE"
   mv "$tmp" "$SBX_STATE"
+}
+
+json_state() {
+  local id name agent workspace
+  while IFS=$'\t' read -r id name agent workspace || [ -n "$id" ]; do
+    [ -n "$id" ] || continue
+    jq -cn --arg id "$id" --arg name "$name" --arg agent "$agent" --arg workspace "$workspace" \
+      '{id:$id,name:$name,agent:$agent,workspace:$workspace}'
+  done < "$SBX_STATE" | jq -s .
 }
 
 [ "$#" -gt 0 ] || exit 2
 log_argv "$@"
 case "$1" in
   ls)
-    [ "${2:-}" = '--quiet' ] || exit 2
-    cat "$SBX_STATE"
+    case "${2:-}" in
+      --json) json_state ;;
+      --quiet) cut -f2 "$SBX_STATE" ;;
+      *) exit 2 ;;
+    esac
     ;;
   create)
     shift
@@ -59,7 +72,8 @@ case "$1" in
       shift
     fi
     [ -n "${name:-}" ] || exit 2
-    printf '%s\n' "$name" >> "$SBX_STATE"
+    workspace=${2:-}
+    printf 'id-%s\t%s\tcodex\t%s\n' "$name" "$name" "$workspace" >> "$SBX_STATE"
     if [ "${SBX_FAIL_CREATE_AFTER_RECORD:-0}" = '1' ]; then
       exit 1
     fi
@@ -76,7 +90,7 @@ case "$1" in
     fi
     ;;
   stop)
-    [ "${SBX_FAIL_STOP_NAME:-}" != "${2:-}" ] || exit 1
+    [ "${SBX_FAIL_STOP_ID:-}" != "${2:-}" ] || exit 1
     ;;
   rm)
     if [ "${2:-}" = '--force' ]; then
@@ -85,7 +99,7 @@ case "$1" in
       name=${2:-}
     fi
     [ -n "${name:-}" ] || exit 2
-    remove_name "$name"
+    remove_selector "$name"
     ;;
   *)
     exit 2
@@ -141,10 +155,11 @@ fm_workspace_placement_prepare docker-sandbox direct direct.task "$TMP_ROOT/sele
   "$TMP_ROOT/additional-link" || fail 'Docker direct prepare refused'
 selected_canonical=$(CDPATH='' cd "$workspace_real" && pwd -P)
 additional_canonical=$(CDPATH='' cd "$additional_real" && pwd -P)
-[ "$FM_WORKSPACE_PLACEMENT_HANDLE" = 'docker-sandbox:direct.task:fm-direct.task' ] || fail 'Docker direct handle was not deterministic'
+[ "$FM_WORKSPACE_PLACEMENT_HANDLE" = 'docker-sandbox:direct.task:fm-direct.task:id-fm-direct.task' ] || fail 'Docker direct handle did not bind the provider identity'
 [ "$FM_WORKSPACE_PLACEMENT_WORKSPACE" = "$selected_canonical" ] || fail 'Docker direct workspace was not canonical'
 [ "$FM_WORKSPACE_PLACEMENT_CWD" = "$selected_canonical" ] || fail 'Docker direct cwd was not canonical'
 [ "$FM_WORKSPACE_PLACEMENT_ISOLATED" = 'yes' ] || fail 'Docker direct did not claim isolation'
+[ -z "$FM_WORKSPACE_PLACEMENT_PENDING_NAME" ] || fail 'successful Docker direct prepare retained a pending provider name'
 assert_grep $'create\t--name\tfm-direct.task\tofficial-agent\t'"$selected_canonical"$'\t'"$additional_canonical" "$SBX_LOG" \
   'Docker direct did not pass official preset and canonical selected/additional workspaces'
 fm_workspace_placement_wrap_launch docker-sandbox "$FM_WORKSPACE_PLACEMENT_HANDLE" \
@@ -168,41 +183,50 @@ if fm_workspace_placement_prepare docker-sandbox direct partial.task "$workspace
   fail 'Docker create failure unexpectedly published a partial placement'
 fi
 unset SBX_FAIL_CREATE_AFTER_RECORD
-assert_no_grep 'fm-partial.task' "$SBX_STATE" 'Docker create failure left a partial sandbox'
-assert_grep $'stop\tfm-partial.task' "$SBX_LOG" 'Docker create failure did not stop the exact partial sandbox'
-assert_grep $'rm\t--force\tfm-partial.task' "$SBX_LOG" 'Docker create failure did not remove the exact partial sandbox'
-pass 'Docker create failure cleans a partial placement before returning'
+assert_grep 'fm-partial.task' "$SBX_STATE" 'Docker create failure discarded the unresolved provider state'
+assert_no_grep $'stop\tid-fm-partial.task' "$SBX_LOG" 'Docker create failure removed before proving ownership'
+assert_no_grep $'rm\t--force\tid-fm-partial.task' "$SBX_LOG" 'Docker create failure removed before proving ownership'
+[ "$FM_WORKSPACE_PLACEMENT_PENDING_NAME" = 'fm-partial.task' ] || fail 'Docker create failure lost its unresolved name'
+pass 'Docker create failure retains unresolved provider ownership safely'
 
-printf 'fm-collision\nother\n' > "$SBX_STATE"
+printf 'id-fm-collision\tfm-collision\tcodex\t\nid-other\tother\tcodex\t\n' > "$SBX_STATE"
 : > "$SBX_LOG"
 if fm_workspace_placement_prepare docker-sandbox direct collision "$workspace_real" official-agent; then
   fail 'existing Docker Sandbox name collision was adopted'
 fi
 assert_no_grep $'create\t' "$SBX_LOG" 'name collision attempted create'
-assert_grep $'ls\t--quiet' "$SBX_LOG" 'name collision did not inspect existing names'
+assert_grep $'ls\t--json' "$SBX_LOG" 'name collision did not inspect provider identities'
 pass 'existing Docker Sandbox name refuses without create'
 
+printf 'id-fm-duplicate\tfm-duplicate\tcodex\t\nid-fm-duplicate-2\tfm-duplicate\tcodex\t\n' > "$SBX_STATE"
 : > "$SBX_LOG"
-printf 'fm-inspect\n' > "$SBX_STATE"
-fm_workspace_placement_inspect docker-sandbox docker-sandbox:inspect:fm-inspect || fail 'present handle inspect refused'
+if fm_workspace_placement_prepare docker-sandbox direct duplicate "$workspace_real" official-agent; then
+  fail 'ambiguous Docker Sandbox identity was accepted'
+fi
+assert_no_grep $'create\t' "$SBX_LOG" 'ambiguous identity attempted create'
+pass 'ambiguous Docker Sandbox identity fails closed without create'
+
+: > "$SBX_LOG"
+printf 'id-fm-inspect\tfm-inspect\tcodex\t\n' > "$SBX_STATE"
+fm_workspace_placement_inspect docker-sandbox docker-sandbox:inspect:fm-inspect:id-fm-inspect || fail 'present handle inspect refused'
 [ "$FM_WORKSPACE_PLACEMENT_PRESENT" = '1' ] || fail 'present handle was not reported present'
 : > "$SBX_STATE"
-if fm_workspace_placement_inspect docker-sandbox docker-sandbox:inspect:fm-inspect; then
+if fm_workspace_placement_inspect docker-sandbox docker-sandbox:inspect:fm-inspect:id-fm-inspect; then
   fail 'absent handle inspect unexpectedly succeeded'
 fi
 [ "$FM_WORKSPACE_PLACEMENT_PRESENT" = '0' ] || fail 'absent handle was not reported absent'
 pass 'Docker inspect reports exact handle presence and absence'
 
-printf 'fm-release\nother\n' > "$SBX_STATE"
+printf 'id-fm-release\tfm-release\tcodex\t\nid-other\tother\tcodex\t\n' > "$SBX_STATE"
 : > "$SBX_LOG"
-fm_workspace_placement_release docker-sandbox docker-sandbox:release:fm-release force || fail 'forced Docker release refused'
-assert_grep $'stop\tfm-release' "$SBX_LOG" 'release did not stop exact handle name'
-assert_grep $'rm\t--force\tfm-release' "$SBX_LOG" 'release did not propagate force'
-assert_no_grep $'stop\tother' "$SBX_LOG" 'release stopped an unrelated sandbox'
-assert_no_grep $'rm\t--force\tother' "$SBX_LOG" 'release removed an unrelated sandbox'
+fm_workspace_placement_release docker-sandbox docker-sandbox:release:fm-release:id-fm-release force || fail 'forced Docker release refused'
+assert_grep $'stop\tid-fm-release' "$SBX_LOG" 'release did not stop exact provider identity'
+assert_grep $'rm\t--force\tid-fm-release' "$SBX_LOG" 'release did not propagate force to provider identity'
+assert_no_grep $'stop\tid-other' "$SBX_LOG" 'release stopped an unrelated sandbox'
+assert_no_grep $'rm\t--force\tid-other' "$SBX_LOG" 'release removed an unrelated sandbox'
 assert_grep 'other' "$SBX_STATE" 'release removed an unrelated sandbox from state'
 assert_no_grep 'fm-release' "$SBX_STATE" 'release left the released sandbox in state'
-pass 'Docker release stops and removes only the exact handle with force'
+pass 'Docker release stops and removes only the exact provider identity'
 
 : > "$SBX_STATE"
 : > "$SBX_LOG"
@@ -211,15 +235,16 @@ source_before=$(cat "$workspace_real/parent.txt")
 export SBX_CLONE_CWD=/clone/discovered
 unset SBX_FAIL_EXEC_PWD
 fm_workspace_placement_prepare docker-sandbox clone clone.task "$workspace_real" official-agent || fail 'clone prepare refused'
-[ "$FM_WORKSPACE_PLACEMENT_HANDLE" = 'docker-sandbox:clone.task:fm-clone.task' ] || fail 'clone handle was not deterministic'
+[ "$FM_WORKSPACE_PLACEMENT_HANDLE" = 'docker-sandbox:clone.task:fm-clone.task:id-fm-clone.task' ] || fail 'clone handle did not bind the provider identity'
 [ "$FM_WORKSPACE_PLACEMENT_CWD" = '/clone/discovered' ] || fail 'clone did not record discovered cwd'
+[ -z "$FM_WORKSPACE_PLACEMENT_PENDING_NAME" ] || fail 'successful Docker clone prepare retained a pending provider name'
 [ "$(cat "$workspace_real/parent.txt")" = "$source_before" ] || fail 'clone modified parent source contents'
 assert_grep $'create\t--name\tfm-clone.task\t--clone\tofficial-agent\t'"$selected_canonical" "$SBX_LOG" \
   'clone did not pass the parent source to sbx create'
 assert_grep $'exec\tfm-clone.task\tpwd' "$SBX_LOG" 'clone did not discover cwd with sbx exec'
 pass 'clone success records discovered cwd without modifying parent source'
 
-printf 'survivor\n' > "$SBX_STATE"
+printf 'id-survivor\tsurvivor\tcodex\t\n' > "$SBX_STATE"
 : > "$SBX_LOG"
 export SBX_FAIL_EXEC_PWD=1
 if fm_workspace_placement_prepare docker-sandbox clone failed.task "$workspace_real" official-agent; then
@@ -228,9 +253,9 @@ fi
 unset SBX_FAIL_EXEC_PWD
 assert_grep 'survivor' "$SBX_STATE" 'clone cwd failure removed an unrelated sandbox'
 assert_no_grep 'fm-failed.task' "$SBX_STATE" 'clone cwd failure left unpublished sandbox'
-assert_grep $'stop\tfm-failed.task' "$SBX_LOG" 'clone cwd failure did not stop unpublished sandbox'
-assert_grep $'rm\t--force\tfm-failed.task' "$SBX_LOG" 'clone cwd failure did not remove unpublished sandbox'
-[ "$FM_WORKSPACE_PLACEMENT_ACQUIRED_HANDLE" = 'docker-sandbox:failed.task:fm-failed.task' ] || fail 'clone cwd failure lost the exact acquired placement handle'
+assert_grep $'stop\tid-fm-failed.task' "$SBX_LOG" 'clone cwd failure did not stop unpublished sandbox'
+assert_grep $'rm\t--force\tid-fm-failed.task' "$SBX_LOG" 'clone cwd failure did not remove unpublished sandbox'
+[ "$FM_WORKSPACE_PLACEMENT_ACQUIRED_HANDLE" = 'docker-sandbox:failed.task:fm-failed.task:id-fm-failed.task' ] || fail 'clone cwd failure lost the exact acquired placement handle'
 assert_no_grep $'stop\tsurvivor' "$SBX_LOG" 'clone cwd failure stopped unrelated sandbox'
 assert_no_grep $'rm\tsurvivor' "$SBX_LOG" 'clone cwd failure removed unrelated sandbox'
 pass 'clone cwd failure cleans only its unpublished name'

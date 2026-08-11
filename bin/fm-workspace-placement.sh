@@ -63,6 +63,8 @@ fm_workspace_placement_source() {  # <placement>
 fm_workspace_placement_result_clear() {
   # shellcheck disable=SC2034
   FM_WORKSPACE_PLACEMENT_ACQUIRED_HANDLE=''
+  # shellcheck disable=SC2034
+  FM_WORKSPACE_PLACEMENT_PENDING_NAME=''
   # shellcheck disable=SC2034 # Public result globals consumed by callers after sourcing.
   FM_WORKSPACE_PLACEMENT_HANDLE=''
   # shellcheck disable=SC2034 # Public result globals consumed by callers after sourcing.

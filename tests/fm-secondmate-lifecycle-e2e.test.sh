@@ -60,7 +60,16 @@ log=${FM_FAKE_SBX_LOG:?}
 } >> "$log"
 case "${1:-}" in
   ls)
-    [ -f "$state" ] && cat "$state"
+    [ "${2:-}" = '--json' ] || exit 2
+    if [ -f "$state" ]; then
+      while IFS=$'\t' read -r id name agent workspace || [ -n "$id" ]; do
+        [ -n "$id" ] || continue
+        jq -cn --arg id "$id" --arg name "$name" --arg agent "$agent" --arg workspace "$workspace" \
+          '{id:$id,name:$name,agent:$agent,workspace:$workspace}'
+      done < "$state" | jq -s .
+    else
+      printf '[]\n'
+    fi
     ;;
   create)
     shift
@@ -72,7 +81,7 @@ case "${1:-}" in
       shift
     done
     [ -n "$name" ] || exit 2
-    printf '%s\n' "$name" >> "$state"
+    printf 'id-%s\t%s\tcodex\t\n' "$name" "$name" >> "$state"
     ;;
   exec)
     shift
@@ -90,7 +99,7 @@ case "${1:-}" in
     done
     [ -n "$target" ] || exit 2
     [ -f "$state" ] || exit 0
-    awk -v target="$target" '$0 != target' "$state" > "$state.tmp"
+    awk -F '\t' -v target="$target" '$1 != target && $2 != target' "$state" > "$state.tmp"
     mv -f "$state.tmp" "$state"
     ;;
   *) exit 2 ;;
@@ -165,7 +174,7 @@ phase_sandbox_spawn() {
   assert_grep "home=$SANDBOX_SUB_ABS" "$meta" "sandbox spawn did not record the exact secondmate home"
   assert_grep 'placement=docker-sandbox' "$meta" "sandbox spawn did not record Docker Sandbox placement"
   assert_grep 'placement_mode=direct' "$meta" "sandbox spawn did not record direct placement mode"
-  assert_grep 'placement_handle=docker-sandbox:sandbox:fm-sandbox' "$meta" "sandbox spawn did not record the opaque sandbox handle"
+  assert_grep 'placement_handle=docker-sandbox:sandbox:fm-sandbox:id-fm-sandbox' "$meta" "sandbox spawn did not record the provider-bound sandbox handle"
   assert_grep "placement_bridge=$SANDBOX_BRIDGE" "$meta" "sandbox spawn did not record the bridge path"
   assert_grep "sbx create --name fm-sandbox codex $SANDBOX_SUB_ABS $SANDBOX_BRIDGE" \
     "$SBX_LOG" "sandbox create did not mount the exact secondmate home and bridge"
@@ -218,7 +227,7 @@ phase_sandbox_relaunch() {
   creates_after=$(grep -c '^sbx create ' "$SBX_LOG" || true)
   [ "$creates_after" = "$creates_before" ] \
     || fail "exact relaunch created a new Docker Sandbox"
-  assert_grep 'placement_handle=docker-sandbox:sandbox:fm-sandbox' "$HOME_DIR/state/sandbox.meta" \
+  assert_grep 'placement_handle=docker-sandbox:sandbox:fm-sandbox:id-fm-sandbox' "$HOME_DIR/state/sandbox.meta" \
     "exact relaunch changed the recorded sandbox handle"
   assert_grep "placement_bridge=$SANDBOX_BRIDGE" "$HOME_DIR/state/sandbox.meta" \
     "exact relaunch changed the recorded bridge"
@@ -226,7 +235,7 @@ phase_sandbox_relaunch() {
 }
 
 phase_sandbox_teardown() {
-  printf 'fm-unrelated\n' >> "$SBX_STATE"
+  printf 'id-fm-unrelated\tfm-unrelated\tcodex\t\n' >> "$SBX_STATE"
   PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" \
     FM_FAKE_TMUX_LOG="$LOG" FM_FAKE_TMUX_CAPTURE="$PANE" \
     FM_FAKE_TMUX_WINDOW="firstmate:fm-sandbox" FM_FAKE_TMUX_PATH="$SANDBOX_SUB_ABS" \
@@ -238,8 +247,8 @@ phase_sandbox_teardown() {
   assert_absent "$SANDBOX_SUB" "sandbox teardown did not remove the secondmate home"
   assert_absent "$HOME_DIR/state/sandbox.meta" "sandbox teardown did not clear task metadata"
   assert_absent "$SANDBOX_BRIDGE" "sandbox teardown did not remove the verified bridge"
-  assert_no_grep 'sbx stop fm-unrelated' "$SBX_LOG" "teardown stopped the unrelated sandbox"
-  assert_no_grep 'sbx rm fm-unrelated' "$SBX_LOG" "teardown targeted the unrelated sandbox"
+  assert_no_grep 'sbx stop id-fm-unrelated' "$SBX_LOG" "teardown stopped the unrelated sandbox"
+  assert_no_grep 'sbx rm id-fm-unrelated' "$SBX_LOG" "teardown targeted the unrelated sandbox"
   assert_grep 'fm-unrelated' "$SBX_STATE" "teardown released a sandbox other than the recorded placement"
   pass "sandbox teardown: release is exact, bridge is removed after endpoint closure, home safeguards remain"
 }

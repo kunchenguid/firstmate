@@ -90,6 +90,8 @@ mkdir -p "$STATE"
 . "$SCRIPT_DIR/fm-busy-lib.sh"
 # shellcheck source=bin/fm-sandbox-bridge-lib.sh
 . "$SCRIPT_DIR/fm-sandbox-bridge-lib.sh"
+# shellcheck source=bin/fm-spawn-cleanup-lib.sh
+. "$SCRIPT_DIR/fm-spawn-cleanup-lib.sh"
 
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
@@ -325,12 +327,31 @@ watch_sync_sandbox_bridges() {
       WATCH_SANDBOX_BRIDGE_TASK=$task
       return 1
     }
-    [ "$placement" = docker-sandbox ] || continue
-    watch_sync_sandbox_bridge "$meta" "$task" || {
-      WATCH_SANDBOX_BRIDGE_TASK=$task
-      return 1
-    }
+    case "$placement" in
+      ''|host) ;;
+      docker-sandbox)
+        watch_sync_sandbox_bridge "$meta" "$task" || {
+          WATCH_SANDBOX_BRIDGE_TASK=$task
+          return 1
+        }
+        ;;
+      *)
+        WATCH_SANDBOX_BRIDGE_TASK=$task
+        return 1
+        ;;
+    esac
   done
+}
+
+watch_spawn_cleanup_records() {
+  local task
+  WATCH_SPAWN_CLEANUP_TASK=
+  while IFS= read -r task; do
+    [ -n "$task" ] || continue
+    WATCH_SPAWN_CLEANUP_TASK=$task
+    return 1
+  done < <(fm_spawn_cleanup_record_tasks "$STATE")
+  return 0
 }
 
 # Consecutive wedge-escalation count for a window past FM_WEDGE_DEMAND_INSPECT_COUNT
@@ -908,6 +929,13 @@ while :; do
   # Liveness beacon for fm-guard.sh: a fresh mtime here means a watcher is
   # alive. Supervision scripts warn when this goes stale with tasks in flight.
   touch "$STATE/.last-watcher-beat"
+
+  if ! watch_spawn_cleanup_records; then
+    reason="check: unpublished cleanup remains for ${WATCH_SPAWN_CLEANUP_TASK:-unknown}; inspect the durable spawn cleanup record before retry"
+    fm_wake_append check "spawn-cleanup-${WATCH_SPAWN_CLEANUP_TASK:-unknown}" "$reason" || exit 1
+    touch "$STATE/.last-check"
+    wake "$reason"
+  fi
 
   # Docker Sandboxes write status and turn-end only through their recorded
   # bridges. Synchronize those exact identities before any check or signal scan

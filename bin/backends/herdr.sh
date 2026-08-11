@@ -1990,6 +1990,19 @@ fm_backend_herdr_agent_alive() {  # <target>
 # the safety argument). An ADOPTED workspace's caller always passes an empty
 # 4th arg, so this function never even queries for a prune candidate in that
 # case. Echoes "<tab_id> <pane_id>" on success.
+fm_backend_herdr_acquisition_record() {
+  local file=${FM_BACKEND_ACQUISITION_FILE:-} session=$1 workspace_id=$2 tab_id=$3 label=$4 pane_id=${5:-} tmp
+  [ -n "$file" ] || return 0
+  tmp="$file.tmp.${BASHPID:-$$}"
+  printf 'backend=herdr\nkind=%s\nsession=%s\nworkspace_id=%s\ntab_id=%s\npane_id=%s\nlabel=%s\n' \
+    "$([ -n "$pane_id" ] && printf target || printf herdr-tab)" \
+    "$session" "$workspace_id" "$tab_id" "$pane_id" "$label" > "$tmp" || return 1
+  chmod 600 "$tmp" && mv -f -- "$tmp" "$file" || {
+    rm -f -- "$tmp"
+    return 1
+  }
+}
+
 fm_backend_herdr_create_task() {  # <container> <label> <cwd> <seeded_default_tab_id>
   local container=$1 label=$2 cwd=$3 seeded_tab_id=${4:-} session wsid list dup_tabs dup dup_pane dup_tab_ids out tab_id pane_id remaining_dup_tabs
   session=${container%%:*}
@@ -2017,9 +2030,11 @@ EOF
   tab_id=$(printf '%s' "$out" | jq -r '.result.tab.tab_id // empty' 2>/dev/null)
   pane_id=$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id // empty' 2>/dev/null)
   if [ -z "$tab_id" ] || [ -z "$pane_id" ]; then
+    [ -n "$tab_id" ] && fm_backend_herdr_acquisition_record "$session" "$wsid" "$tab_id" "$label" || true
     echo "error: could not parse tab/pane id from herdr tab create output" >&2
     return 1
   fi
+  fm_backend_herdr_acquisition_record "$session" "$wsid" "$tab_id" "$label" "$pane_id" || return 1
   [ -z "$seeded_tab_id" ] || fm_backend_herdr_workspace_prune_seeded_default_tab "$session" "$wsid" "$seeded_tab_id"
   if [ -n "$dup_tab_ids" ]; then
     while IFS= read -r dup; do
@@ -2835,6 +2850,70 @@ fm_backend_herdr_kill() {  # <target>
   else
     echo "warning: herdr task kill could not acquire its session presentation lock; refusing an unlocked pane close" >&2
   fi
+}
+
+fm_backend_herdr_kill_tab_exact() {  # <session> <workspace-id> <tab-id> <label>
+  local session=$1 workspace_id=$2 tab_id=$3 expected_label=$4 tabs label lock_path attempt=0 lock_held=0
+  if ! declare -F fm_lock_try_acquire >/dev/null 2>&1; then
+    # shellcheck source=bin/fm-wake-lib.sh
+    . "$FM_BACKEND_HERDR_ROOT/bin/fm-wake-lib.sh"
+  fi
+  lock_path=$(fm_backend_herdr_presentation_session_lock_path "$session") || return 1
+  while [ "$attempt" -lt 50 ]; do
+    if fm_lock_try_acquire "$lock_path"; then
+      lock_held=1
+      break
+    fi
+    sleep 0.1
+    attempt=$((attempt + 1))
+  done
+  [ "$lock_held" = 1 ] || return 1
+  tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$workspace_id" 2>/dev/null) || {
+    fm_lock_release "$lock_path" || true
+    return 1
+  }
+  printf '%s' "$tabs" | jq -e '(.result.tabs | type) == "array"' >/dev/null 2>&1 || {
+    fm_lock_release "$lock_path" || true
+    return 1
+  }
+  label=$(printf '%s' "$tabs" | jq -r --arg id "$tab_id" '.result.tabs[]? | select(.tab_id == $id) | .label' 2>/dev/null) || {
+    fm_lock_release "$lock_path" || true
+    return 1
+  }
+  case "$label" in
+    *$'\n'*)
+      fm_lock_release "$lock_path" || true
+      return 1
+      ;;
+  esac
+  if [ -z "$label" ]; then
+    fm_lock_release "$lock_path" || true
+    return 0
+  fi
+  if [ "$label" != "$expected_label" ]; then
+    fm_lock_release "$lock_path" || true
+    return 1
+  fi
+  fm_backend_herdr_cli "$session" tab close "$tab_id" >/dev/null 2>&1 || {
+    fm_lock_release "$lock_path" || true
+    return 1
+  }
+  tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$workspace_id" 2>/dev/null) || {
+    fm_lock_release "$lock_path" || true
+    return 1
+  }
+  printf '%s' "$tabs" | jq -e '(.result.tabs | type) == "array"' >/dev/null 2>&1 || {
+    fm_lock_release "$lock_path" || true
+    return 1
+  }
+  fm_lock_release "$lock_path" || return 1
+  local rc
+  if printf '%s' "$tabs" | jq -e --arg id "$tab_id" '[.result.tabs[]? | select(.tab_id == $id)] | length > 0' >/dev/null 2>&1; then
+    return 1
+  else
+    rc=$?
+  fi
+  [ "$rc" -eq 1 ]
 }
 
 # fm_backend_herdr_endpoint_confirmed_gone: gate durable-record removal on

@@ -330,6 +330,19 @@ fm_backend_zellij_tab_matches_label() {  # <session> <tab_id> <label>
 # spawn). Best-effort: a failure to restore never fails the spawn.
 #
 # Echoes "<tab_id> <pane_id>" on success.
+fm_backend_zellij_acquisition_record() {
+  local file=${FM_BACKEND_ACQUISITION_FILE:-} session=$1 label=$2 tab_id=$3 pane_id=${4:-} tmp
+  [ -n "$file" ] || return 0
+  tmp="$file.tmp.${BASHPID:-$$}"
+  printf 'backend=zellij\nkind=%s\nsession=%s\ntab_id=%s\npane_id=%s\nlabel=%s\n' \
+    "$([ -n "$pane_id" ] && printf target || printf zellij-tab)" \
+    "$session" "$tab_id" "$pane_id" "$label" > "$tmp" || return 1
+  chmod 600 "$tmp" && mv -f -- "$tmp" "$file" || {
+    rm -f -- "$tmp"
+    return 1
+  }
+}
+
 fm_backend_zellij_create_task() {  # <session> <label> <cwd>
   local session=$1 label=$2 cwd=$3 title tabs dup prev_active tab_id pane_id
   fm_backend_zellij_session_exists "$session" || { echo "error: zellij session '$session' does not exist; run container_ensure first" >&2; return 1; }
@@ -348,15 +361,40 @@ fm_backend_zellij_create_task() {  # <session> <label> <cwd>
       return 1
       ;;
   esac
+  fm_backend_zellij_acquisition_record "$session" "$label" "$tab_id" || return 1
   pane_id=$(fm_backend_zellij_pane_for_tab "$session" "$tab_id")
   if [ -z "$pane_id" ]; then
     echo "error: could not find a terminal pane for zellij tab $tab_id (session '$session')" >&2
-    return 1
-  fi
+      return 1
+      fi
+  fm_backend_zellij_acquisition_record "$session" "$label" "$tab_id" "$pane_id" || return 1
   if [ -n "$prev_active" ] && [ "$prev_active" != "$tab_id" ]; then
     fm_backend_zellij_cli "$session" action go-to-tab-by-id "$prev_active" >/dev/null 2>&1 || true
   fi
   printf '%s %s' "$tab_id" "$pane_id"
+}
+
+fm_backend_zellij_kill_tab_exact() {  # <session> <tab-id> <expected-label>
+  local session=$1 tab_id=$2 expected_label=$3 tabs name
+  fm_backend_zellij_session_exists "$session" || return 0
+  tabs=$(fm_backend_zellij_cli "$session" action list-tabs --json 2>/dev/null) || return 1
+  printf '%s' "$tabs" | jq -e 'type == "array"' >/dev/null 2>&1 || return 1
+  name=$(printf '%s' "$tabs" | jq -r --argjson id "$tab_id" '.[]? | select(.tab_id == $id) | .name' 2>/dev/null) || return 1
+  case "$name" in
+    '') return 0 ;;
+    *$'\n'*) return 1 ;;
+  esac
+  fm_backend_zellij_tab_matches_label "$session" "$tab_id" "$expected_label" || return 1
+  fm_backend_zellij_cli "$session" action close-tab-by-id "$tab_id" >/dev/null 2>&1 || return 1
+  tabs=$(fm_backend_zellij_cli "$session" action list-tabs --json 2>/dev/null) || return 1
+  printf '%s' "$tabs" | jq -e 'type == "array"' >/dev/null 2>&1 || return 1
+  local rc
+  if printf '%s' "$tabs" | jq -e --argjson id "$tab_id" '[.[]? | select(.tab_id == $id)] | length > 0' >/dev/null 2>&1; then
+    return 1
+  else
+    rc=$?
+  fi
+  [ "$rc" -eq 1 ]
 }
 
 # fm_backend_zellij_parse_target: split "<session>:<pane_id>" on the FIRST

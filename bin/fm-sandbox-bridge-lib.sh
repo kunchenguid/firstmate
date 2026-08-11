@@ -44,6 +44,17 @@ fm_sandbox_bridge_private_regular() {  # <path>
   perl -e 'my @s = lstat($ARGV[0]) or exit 1; exit 1 unless -f _ && $s[4] == $< && !($s[2] & 0077);' "$1"
 }
 
+fm_sandbox_bridge_lstat_identity() {  # <path>
+  perl -e 'my @s = lstat($ARGV[0]) or exit 1; print "$s[0]:$s[1]";' "$1"
+}
+
+# shellcheck disable=SC2034
+FM_SANDBOX_BRIDGE_ACQUIRED_PATH=
+# shellcheck disable=SC2034
+FM_SANDBOX_BRIDGE_ACQUIRED_ID=
+# shellcheck disable=SC2034
+FM_SANDBOX_BRIDGE_ACQUIRED_CURSOR_ID=
+
 fm_sandbox_bridge_expected_path() {  # <state> <task-id>
   local state=$1 task_id=$2 state_real
   fm_sandbox_bridge_task_id_valid "$task_id" || return 1
@@ -147,6 +158,9 @@ fm_sandbox_bridge_validate() {  # <bridge> <state> <task-id> <worktree>
 fm_sandbox_bridge_create() {  # <state> <task-id> <worktree> <canonical-brief> <encoder>
   local state=$1 task_id=$2 worktree=$3 brief=$4 encoder=$5 expected cursor state_real worktree_real old_umask
   [ "$#" -eq 5 ] || { fm_sandbox_bridge_error 'usage: fm_sandbox_bridge_create <state> <task-id> <worktree> <canonical-brief> <encoder>'; return 2; }
+  FM_SANDBOX_BRIDGE_ACQUIRED_PATH=
+  FM_SANDBOX_BRIDGE_ACQUIRED_ID=
+  FM_SANDBOX_BRIDGE_ACQUIRED_CURSOR_ID=
   expected=$(fm_sandbox_bridge_expected_path "$state" "$task_id") || return 1
   cursor=$(fm_sandbox_bridge_cursor_path "$state" "$task_id") || return 1
   state_real=$(fm_sandbox_bridge_real_dir "$state") || return 1
@@ -185,17 +199,27 @@ fm_sandbox_bridge_create() {  # <state> <task-id> <worktree> <canonical-brief> <
   fi
   old_umask=$(umask)
   umask 077
-  if ! {
-    mkdir -p "$state_real/sandbox-bridge" "$state_real/sandbox-bridge-cursor" &&
-      mkdir "$expected" &&
-      printf '0\n' > "$cursor"
-  }; then
+  if ! mkdir -p "$state_real/sandbox-bridge" "$state_real/sandbox-bridge-cursor" || ! mkdir "$expected"; then
     umask "$old_umask"
-    rm -rf -- "$expected"
-    rm -f -- "$cursor"
     fm_sandbox_bridge_error "could not create private sandbox bridge for $task_id"
     return 1
   fi
+  FM_SANDBOX_BRIDGE_ACQUIRED_PATH=$expected
+  FM_SANDBOX_BRIDGE_ACQUIRED_ID=$(fm_sandbox_bridge_lstat_identity "$expected") || {
+    umask "$old_umask"
+    fm_sandbox_bridge_error "could not identify private sandbox bridge for $task_id"
+    return 1
+  }
+  if ! printf '0\n' > "$cursor"; then
+    umask "$old_umask"
+    fm_sandbox_bridge_error "could not initialize private sandbox bridge cursor for $task_id"
+    return 1
+  fi
+  FM_SANDBOX_BRIDGE_ACQUIRED_CURSOR_ID=$(fm_sandbox_bridge_lstat_identity "$cursor") || {
+    umask "$old_umask"
+    fm_sandbox_bridge_error "could not identify private sandbox bridge cursor for $task_id"
+    return 1
+  }
   {
     printf 'task_id=%s\n' "$task_id"
     printf 'state=%s\n' "$state_real"
@@ -210,18 +234,51 @@ fm_sandbox_bridge_create() {  # <state> <task-id> <worktree> <canonical-brief> <
       chmod 700 "$expected/fm-operational-input.sh"
   }; then
     umask "$old_umask"
-    rm -rf -- "$expected"
-    rm -f -- "$cursor"
+    fm_sandbox_bridge_remove_acquired \
+      "$expected" "$state_real" "$task_id" "$worktree_real" \
+      "$FM_SANDBOX_BRIDGE_ACQUIRED_ID" "$FM_SANDBOX_BRIDGE_ACQUIRED_CURSOR_ID" || true
     fm_sandbox_bridge_error "could not prepare sandbox bridge runtime inputs: $expected"
     return 1
   fi
   chmod 600 "$expected/binding" "$expected/status" "$expected/runtime-brief.md" "$cursor"
   umask "$old_umask"
   fm_sandbox_bridge_validate "$expected" "$state_real" "$task_id" "$worktree_real" || {
-    rm -rf -- "$expected"
-    rm -f -- "$cursor"
+    fm_sandbox_bridge_remove_acquired \
+      "$expected" "$state_real" "$task_id" "$worktree_real" \
+      "$FM_SANDBOX_BRIDGE_ACQUIRED_ID" "$FM_SANDBOX_BRIDGE_ACQUIRED_CURSOR_ID" || true
     return 1
   }
+}
+
+fm_sandbox_bridge_remove_acquired() {  # <bridge> <state> <task-id> <worktree> <bridge-id> [cursor-id]
+  [ "$#" -ge 5 ] && [ "$#" -le 6 ] || {
+    fm_sandbox_bridge_error 'usage: fm_sandbox_bridge_remove_acquired <bridge> <state> <task-id> <worktree> <bridge-id> [cursor-id]'
+    return 2
+  }
+  local bridge=$1 state=$2 task_id=$3 bridge_id=$5 cursor_id=${6:-} expected cursor current
+  expected=$(fm_sandbox_bridge_expected_path "$state" "$task_id") || return 1
+  cursor=$(fm_sandbox_bridge_cursor_path "$state" "$task_id") || return 1
+  [ "$bridge" = "$expected" ] || return 1
+  if [ ! -e "$bridge" ] && [ ! -L "$bridge" ] && [ ! -e "$cursor" ] && [ ! -L "$cursor" ]; then
+    return 0
+  fi
+  if [ -e "$bridge" ] || [ -L "$bridge" ]; then
+    [ -d "$bridge" ] && [ ! -L "$bridge" ] || return 1
+    current=$(fm_sandbox_bridge_lstat_identity "$bridge") || return 1
+    [ "$current" = "$bridge_id" ] || return 1
+  fi
+  if [ -e "$cursor" ] || [ -L "$cursor" ]; then
+    [ -f "$cursor" ] && [ ! -L "$cursor" ] || return 1
+    [ -n "$cursor_id" ] || return 1
+    current=$(fm_sandbox_bridge_lstat_identity "$cursor") || return 1
+    [ "$current" = "$cursor_id" ] || return 1
+  fi
+  if [ -e "$bridge" ] || [ -L "$bridge" ]; then
+    rm -rf -- "$bridge" || return 1
+  fi
+  if [ -e "$cursor" ] || [ -L "$cursor" ]; then
+    rm -f -- "$cursor" || return 1
+  fi
 }
 
 fm_sandbox_bridge_copy_delta() {  # <bridge-status> <cursor> <host-private tmp>

@@ -255,6 +255,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-workspace-placement.sh"
 # shellcheck source=bin/fm-sandbox-bridge-lib.sh
 . "$SCRIPT_DIR/fm-sandbox-bridge-lib.sh"
+# shellcheck source=bin/fm-spawn-cleanup-lib.sh
+. "$SCRIPT_DIR/fm-spawn-cleanup-lib.sh"
 # shellcheck source=bin/fm-command-execution.sh
 . "$SCRIPT_DIR/fm-command-execution.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
@@ -674,9 +676,16 @@ SPAWN_ENDPOINT_BACKEND=
 SPAWN_ENDPOINT_TARGET=
 SPAWN_ENDPOINT_AUX=
 SPAWN_ENDPOINT_LABEL=
+SPAWN_ENDPOINT_KIND=
+SPAWN_ENDPOINT_ACQUISITION_FILE=
+FM_BACKEND_ACQUISITION_FILE=
+export FM_BACKEND_ACQUISITION_FILE
 SPAWN_WORKTREE_CLEANUP=0
 SPAWN_WORKTREE_PATH=
 SPAWN_WORKTREE_PROJECT=
+SPAWN_BRIDGE_CLEANUP=0
+PLACEMENT_BRIDGE_ID=
+PLACEMENT_BRIDGE_CURSOR_ID=
 EXECUTOR=local
 EXECUTION_PROFILE=
 SANDBOX_PRESET=
@@ -685,6 +694,7 @@ SPAWN_META_TMP=
 SPAWN_META_LOCK=
 SPAWN_META_LOCK_HELD=0
 SPAWN_META_PUBLISH_STARTED=0
+SPAWN_PUBLICATION_COMPLETE=0
 SPAWN_TASK_SET_LOCK=
 SPAWN_TASK_SET_LOCK_HELD=0
 RELAUNCH_REPLACEMENT_PENDING=0
@@ -696,18 +706,153 @@ RELAUNCH_REPLACEMENT_PLACEMENT=
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
 
+spawn_acquisition_field() {  # <file> <key>
+  local file=$1 key=$2
+  awk -F= -v want="$key" '
+    index($0, want "=") == 1 { n++; value=substr($0, length(want) + 2) }
+    END { if (n == 1) { print value; exit 0 } exit 1 }
+  ' "$file"
+}
+
 spawn_register_endpoint() {
   SPAWN_ENDPOINT_CLEANUP=1
   SPAWN_ENDPOINT_BACKEND=$1
   SPAWN_ENDPOINT_TARGET=$2
   SPAWN_ENDPOINT_AUX=${3:-}
   SPAWN_ENDPOINT_LABEL=${4:-}
+  SPAWN_ENDPOINT_KIND=${5:-target}
+}
+
+spawn_prepare_endpoint_acquisition() {
+  local file
+  file="$STATE/.spawn-endpoint-$ID.${BASHPID:-$$}"
+  if [ -e "$file" ] || [ -L "$file" ]; then
+    return 1
+  fi
+  : > "$file" || return 1
+  chmod 600 "$file" || { rm -f -- "$file"; return 1; }
+  SPAWN_ENDPOINT_ACQUISITION_FILE=$file
+  FM_BACKEND_ACQUISITION_FILE=$file
+  export FM_BACKEND_ACQUISITION_FILE
+}
+
+spawn_register_endpoint_from_file() {
+  local file=${1:-$SPAWN_ENDPOINT_ACQUISITION_FILE} backend kind session workspace_id tab_id pane_id window_id surface_id label
+  [ -n "$file" ] && [ -f "$file" ] && [ ! -L "$file" ] || return 1
+  backend=$(spawn_acquisition_field "$file" backend) || return 1
+  kind=$(spawn_acquisition_field "$file" kind) || return 1
+  label=$(spawn_acquisition_field "$file" label) || return 1
+  case "$backend:$kind" in
+    tmux:tmux-id)
+      session=$(spawn_acquisition_field "$file" session) || return 1
+      window_id=$(spawn_acquisition_field "$file" window_id) || return 1
+      spawn_register_endpoint tmux "$session" "$window_id" "$label" tmux-id
+      ;;
+    zellij:zellij-tab)
+      session=$(spawn_acquisition_field "$file" session) || return 1
+      tab_id=$(spawn_acquisition_field "$file" tab_id) || return 1
+      spawn_register_endpoint zellij "$session" "$tab_id" "$label" zellij-tab
+      ;;
+    zellij:target)
+      session=$(spawn_acquisition_field "$file" session) || return 1
+      tab_id=$(spawn_acquisition_field "$file" tab_id) || return 1
+      pane_id=$(spawn_acquisition_field "$file" pane_id) || return 1
+      [ -n "$pane_id" ] || return 1
+      spawn_register_endpoint zellij "$session" "$tab_id" "$label" target
+      ;;
+    cmux:cmux-workspace)
+      workspace_id=$(spawn_acquisition_field "$file" workspace_id) || return 1
+      spawn_register_endpoint cmux "$workspace_id" '' "$label" cmux-workspace
+      ;;
+    cmux:target)
+      workspace_id=$(spawn_acquisition_field "$file" workspace_id) || return 1
+      surface_id=$(spawn_acquisition_field "$file" surface_id) || return 1
+      spawn_register_endpoint cmux "$workspace_id" "$surface_id" "$label" cmux-workspace
+      ;;
+    herdr:herdr-tab|herdr:target)
+      session=$(spawn_acquisition_field "$file" session) || return 1
+      workspace_id=$(spawn_acquisition_field "$file" workspace_id) || return 1
+      tab_id=$(spawn_acquisition_field "$file" tab_id) || return 1
+      spawn_register_endpoint herdr "$session" "$workspace_id:$tab_id" "$label" herdr-tab
+      if [ "$kind" = target ]; then
+        pane_id=$(spawn_acquisition_field "$file" pane_id) || return 1
+        [ -n "$pane_id" ] || return 1
+      fi
+      ;;
+    *) return 1 ;;
+  esac
 }
 
 spawn_register_worktree() {
   SPAWN_WORKTREE_CLEANUP=1
   SPAWN_WORKTREE_PATH=$1
   SPAWN_WORKTREE_PROJECT=$2
+}
+
+spawn_endpoint_cleanup() {
+  case "$SPAWN_ENDPOINT_BACKEND:$SPAWN_ENDPOINT_KIND" in
+    tmux:tmux-id)
+      fm_backend_tmux_kill_exact "$SPAWN_ENDPOINT_TARGET" "$SPAWN_ENDPOINT_AUX" "$SPAWN_ENDPOINT_LABEL"
+      ;;
+    zellij:zellij-tab|zellij:target)
+      fm_backend_zellij_kill_tab_exact "$SPAWN_ENDPOINT_TARGET" "$SPAWN_ENDPOINT_AUX" "$SPAWN_ENDPOINT_LABEL"
+      ;;
+    cmux:cmux-workspace)
+      fm_backend_cmux_kill_workspace_exact "$SPAWN_ENDPOINT_TARGET" "$SPAWN_ENDPOINT_LABEL"
+      ;;
+    herdr:herdr-tab)
+      local workspace_id tab_id
+      workspace_id=${SPAWN_ENDPOINT_AUX%%:*}
+      tab_id=${SPAWN_ENDPOINT_AUX#*:}
+      [ -n "$workspace_id" ] && [ -n "$tab_id" ] || return 1
+      fm_backend_herdr_kill_tab_exact "$SPAWN_ENDPOINT_TARGET" "$workspace_id" "$tab_id" "$SPAWN_ENDPOINT_LABEL"
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+spawn_cleanup_record_refresh() {
+  local pending=0 state=${STATE:-} task_id=${ID:-}
+  local -a lines=()
+  [ -n "$state" ] && [ -n "$task_id" ] || return 0
+  if [ "$SPAWN_ENDPOINT_CLEANUP" = 1 ] || {
+    [ -n "$SPAWN_ENDPOINT_ACQUISITION_FILE" ] && {
+      [ -e "$SPAWN_ENDPOINT_ACQUISITION_FILE" ] || [ -L "$SPAWN_ENDPOINT_ACQUISITION_FILE" ];
+    }
+  }; then
+    pending=1
+    lines+=("endpoint_cleanup=$SPAWN_ENDPOINT_CLEANUP")
+    lines+=("endpoint_backend=$SPAWN_ENDPOINT_BACKEND")
+    lines+=("endpoint_target=$SPAWN_ENDPOINT_TARGET")
+    lines+=("endpoint_aux=$SPAWN_ENDPOINT_AUX")
+    lines+=("endpoint_label=$SPAWN_ENDPOINT_LABEL")
+    lines+=("endpoint_kind=$SPAWN_ENDPOINT_KIND")
+    lines+=("endpoint_acquisition_file=$SPAWN_ENDPOINT_ACQUISITION_FILE")
+  fi
+  if [ "$SPAWN_WORKTREE_CLEANUP" = 1 ]; then
+    pending=1
+    lines+=("worktree_cleanup=1")
+    lines+=("worktree_path=$SPAWN_WORKTREE_PATH")
+    lines+=("worktree_project=$SPAWN_WORKTREE_PROJECT")
+  fi
+  if [ "$PLACEMENT_ABORT_CLEANUP" = 1 ] || [ -n "${FM_WORKSPACE_PLACEMENT_PENDING_NAME:-}" ]; then
+    pending=1
+    lines+=("placement_cleanup=$PLACEMENT_ABORT_CLEANUP")
+    lines+=("placement=$PLACEMENT")
+    lines+=("placement_handle=$PLACEMENT_HANDLE")
+    lines+=("placement_pending_name=${FM_WORKSPACE_PLACEMENT_PENDING_NAME:-}")
+    lines+=("placement_bridge=$PLACEMENT_BRIDGE")
+    lines+=("placement_bridge_id=$PLACEMENT_BRIDGE_ID")
+    lines+=("placement_bridge_cursor_id=$PLACEMENT_BRIDGE_CURSOR_ID")
+    lines+=("bridge_cleanup=$SPAWN_BRIDGE_CLEANUP")
+    lines+=("hook_harness=${HARNESS:-}")
+    lines+=("hook_worktree=${WT:-}")
+  fi
+  if [ "$pending" = 1 ]; then
+    fm_spawn_cleanup_record_write "$state" "$task_id" "${lines[@]}"
+  else
+    fm_spawn_cleanup_record_remove "$state" "$task_id"
+  fi
 }
 
 parse_orca_worktree_result() {
@@ -729,32 +874,57 @@ parse_orca_worktree_result() {
 
 spawn_abort_cleanup() {
   local status=$?
+  if [ "$SPAWN_PUBLICATION_COMPLETE" != 1 ]; then
+    spawn_register_endpoint_from_file || true
+  fi
+  spawn_cleanup_record_refresh || echo "warning: could not persist unpublished cleanup record for ${ID:-task}" >&2
   if [ "$PLACEMENT_ABORT_CLEANUP" = 1 ]; then
-    PLACEMENT_ABORT_CLEANUP=0
     if [ -z "$PLACEMENT_HANDLE" ] && [ -n "${FM_WORKSPACE_PLACEMENT_ACQUIRED_HANDLE:-}" ]; then
       PLACEMENT_HANDLE=$FM_WORKSPACE_PLACEMENT_ACQUIRED_HANDLE
     fi
+    placement_cleanup_ok=1
     if [ -n "$PLACEMENT_HANDLE" ]; then
-      fm_workspace_placement_release "$PLACEMENT" "$PLACEMENT_HANDLE" force || \
+      if ! fm_workspace_placement_release "$PLACEMENT" "$PLACEMENT_HANDLE" force; then
+        placement_cleanup_ok=0
         echo "warning: could not release unpublished placement for $ID" >&2
+      fi
+    elif [ -n "${FM_WORKSPACE_PLACEMENT_PENDING_NAME:-}" ]; then
+      placement_cleanup_ok=0
+      echo "warning: unpublished placement identity for $ID is unresolved; retaining cleanup record" >&2
     fi
     if ! fm_control_remove_sandbox_turnend_hook \
         "${HARNESS:-}" "${WT:-}" "${PLACEMENT:-host}"; then
+      placement_cleanup_ok=0
       echo "warning: could not remove unpublished Docker OpenCode turn-end hook for $ID" >&2
     fi
-    if [ -n "$PLACEMENT_BRIDGE" ]; then
-      fm_sandbox_bridge_remove "$PLACEMENT_BRIDGE" "$STATE" "$ID" "$WT" || \
-        echo "warning: could not remove verified unpublished sandbox bridge for $ID" >&2
+    if [ "$SPAWN_BRIDGE_CLEANUP" = 1 ]; then
+      if fm_sandbox_bridge_remove_acquired \
+          "$PLACEMENT_BRIDGE" "$STATE" "$ID" "$WT" \
+          "$PLACEMENT_BRIDGE_ID" "$PLACEMENT_BRIDGE_CURSOR_ID"; then
+        SPAWN_BRIDGE_CLEANUP=0
+      else
+        placement_cleanup_ok=0
+        echo "warning: could not remove exact unpublished sandbox bridge for $ID" >&2
+      fi
+    elif [ -n "$PLACEMENT_BRIDGE" ]; then
+      placement_cleanup_ok=0
+      echo "warning: unpublished sandbox bridge for $ID has no ownership identity; retaining cleanup record" >&2
     fi
+    if [ "$placement_cleanup_ok" = 1 ]; then
+      PLACEMENT_ABORT_CLEANUP=0
+    fi
+    spawn_cleanup_record_refresh || echo "warning: could not update unpublished placement cleanup record for $ID" >&2
   fi
   if [ "$SPAWN_WORKTREE_CLEANUP" = 1 ]; then
-    SPAWN_WORKTREE_CLEANUP=0
-    if [ -z "$SPAWN_WORKTREE_PATH" ] || [ -z "$SPAWN_WORKTREE_PROJECT" ] \
-       || ! command -v treehouse >/dev/null 2>&1 \
-       || ! ( CDPATH='' cd -- "$SPAWN_WORKTREE_PROJECT" \
-              && treehouse return --force "$SPAWN_WORKTREE_PATH" ); then
+    if [ -n "$SPAWN_WORKTREE_PATH" ] && [ -n "$SPAWN_WORKTREE_PROJECT" ] \
+       && command -v treehouse >/dev/null 2>&1 \
+       && ( CDPATH='' cd -- "$SPAWN_WORKTREE_PROJECT" \
+            && treehouse return --force "$SPAWN_WORKTREE_PATH" ); then
+      SPAWN_WORKTREE_CLEANUP=0
+    else
       echo "warning: could not return unpublished worktree for $ID" >&2
     fi
+    spawn_cleanup_record_refresh || echo "warning: could not update unpublished worktree cleanup record for $ID" >&2
   fi
   if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ] \
      && [ "$SPAWN_META_PUBLISH_STARTED" = 1 ] \
@@ -828,15 +998,16 @@ spawn_abort_cleanup() {
     fi
   fi
   if [ "$SPAWN_ENDPOINT_CLEANUP" = 1 ]; then
-    SPAWN_ENDPOINT_CLEANUP=0
-    if ! fm_backend_kill \
-      "$SPAWN_ENDPOINT_BACKEND" \
-      "$SPAWN_ENDPOINT_TARGET" \
-      "$SPAWN_ENDPOINT_AUX" \
-      "$SPAWN_ENDPOINT_LABEL"; then
+    if spawn_endpoint_cleanup; then
+      SPAWN_ENDPOINT_CLEANUP=0
+      [ -z "$SPAWN_ENDPOINT_ACQUISITION_FILE" ] || rm -f -- "$SPAWN_ENDPOINT_ACQUISITION_FILE" || \
+        echo "warning: could not remove endpoint acquisition record for $ID" >&2
+    else
       echo "warning: could not remove unpublished endpoint for $ID" >&2
     fi
+    spawn_cleanup_record_refresh || echo "warning: could not update unpublished endpoint cleanup record for $ID" >&2
   fi
+  spawn_cleanup_record_refresh || echo "warning: could not finalize unpublished cleanup record for ${ID:-task}" >&2
   if [ "$SPAWN_TASK_LOCK_HELD" = 1 ]; then
     SPAWN_TASK_LOCK_HELD=0
     fm_lock_release "$SPAWN_TASK_LOCK" || true
@@ -1991,9 +2162,14 @@ case "$BACKEND" in
     # treehouse cd's into the worktree. WT_TARGET carries that stable id for the
     # rename-critical worktree-detection steps below; the persisted window= handle
     # stays $T (the name form), which is safe now that rename is disabled.
-    WID=$(fm_backend_tmux_create_task "$SES" "$W" "$PROJ_ABS") || exit 1
+    spawn_prepare_endpoint_acquisition || exit 1
+    set +e
+    WID=$(fm_backend_tmux_create_task "$SES" "$W" "$PROJ_ABS")
+    ENDPOINT_STATUS=$?
+    set -e
+    spawn_register_endpoint_from_file || true
+    [ "$ENDPOINT_STATUS" -eq 0 ] || exit 1
     WT_TARGET="$WID"
-    spawn_register_endpoint tmux "$T"
     ;;
   herdr)
     # fm_backend_herdr_workspace_label resolves the target workspace from
@@ -2151,7 +2327,13 @@ case "$BACKEND" in
       HERDR_SEEDED_DEFAULT_TAB_ID=${HERDR_CONTAINER_RAW#*$'\t'}
       HERDR_SES=${CONTAINER%%:*}
       HERDR_WORKSPACE_ID=${CONTAINER#*:}
-      HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$W" "$PROJ_ABS" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
+      spawn_prepare_endpoint_acquisition || exit 1
+      set +e
+      HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$W" "$PROJ_ABS" "$HERDR_SEEDED_DEFAULT_TAB_ID")
+      ENDPOINT_STATUS=$?
+      set -e
+      spawn_register_endpoint_from_file || true
+      [ "$ENDPOINT_STATUS" -eq 0 ] || exit 1
       read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
 $HERDR_TASK_IDS
 EOF
@@ -2162,12 +2344,18 @@ EOF
     fi
     T="$HERDR_SES:$HERDR_PANE_ID"
     if [ "$HERDR_PROJECTED" -ne 1 ]; then
-      spawn_register_endpoint herdr "$T"
+      [ "$SPAWN_ENDPOINT_CLEANUP" = 1 ] || exit 1
     fi
     ;;
   zellij)
     ZELLIJ_SES=$(fm_backend_zellij_container_ensure) || exit 1
-    ZELLIJ_TASK_IDS=$(fm_backend_zellij_create_task "$ZELLIJ_SES" "$W" "$PROJ_ABS") || exit 1
+    spawn_prepare_endpoint_acquisition || exit 1
+    set +e
+    ZELLIJ_TASK_IDS=$(fm_backend_zellij_create_task "$ZELLIJ_SES" "$W" "$PROJ_ABS")
+    ENDPOINT_STATUS=$?
+    set -e
+    spawn_register_endpoint_from_file || true
+    [ "$ENDPOINT_STATUS" -eq 0 ] || exit 1
     read -r ZELLIJ_TAB_ID ZELLIJ_PANE_ID <<EOF
 $ZELLIJ_TASK_IDS
 EOF
@@ -2176,11 +2364,17 @@ EOF
       exit 1
     fi
     T="$ZELLIJ_SES:$ZELLIJ_PANE_ID"
-    spawn_register_endpoint zellij "$T" "$ZELLIJ_TAB_ID" "$W"
+    [ "$SPAWN_ENDPOINT_CLEANUP" = 1 ] || exit 1
     ;;
   cmux)
     fm_backend_cmux_container_ensure || exit 1
-    CMUX_TASK_IDS=$(fm_backend_cmux_create_task "$W" "$PROJ_ABS") || exit 1
+    spawn_prepare_endpoint_acquisition || exit 1
+    set +e
+    CMUX_TASK_IDS=$(fm_backend_cmux_create_task "$W" "$PROJ_ABS")
+    ENDPOINT_STATUS=$?
+    set -e
+    spawn_register_endpoint_from_file || true
+    [ "$ENDPOINT_STATUS" -eq 0 ] || exit 1
     read -r CMUX_WORKSPACE_ID CMUX_SURFACE_ID <<EOF
 $CMUX_TASK_IDS
 EOF
@@ -2189,7 +2383,7 @@ EOF
       exit 1
     fi
     T="$CMUX_WORKSPACE_ID:$CMUX_SURFACE_ID"
-    spawn_register_endpoint cmux "$T" '' "$W"
+    [ "$SPAWN_ENDPOINT_CLEANUP" = 1 ] || exit 1
     ;;
   orca)
     set +e
@@ -2371,6 +2565,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
       if [ "$p_real" != "$PROJ_ABS_REAL" ]; then
         if [ -n "$candidate" ] && [ "$p_real" = "$candidate" ]; then
           WT="$p"
+          spawn_register_worktree "$WT" "$PROJ_ABS"
           break
         fi
         candidate="$p_real"
@@ -2388,7 +2583,6 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   fi
 
   validate_spawn_worktree "treehouse get" "$T"
-  spawn_register_worktree "$WT" "$PROJ_ABS"
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
@@ -2430,8 +2624,19 @@ if [ "$PLACEMENT" = docker-sandbox ]; then
     BRIEF="$PLACEMENT_BRIDGE/runtime-brief.md"
   else
     PLACEMENT_ABORT_CLEANUP=1
-    fm_sandbox_bridge_create "$STATE_REAL" "$ID" "$WT" "$BRIEF" "$FM_ROOT/bin/fm-operational-input.sh" || exit 1
+    if ! fm_sandbox_bridge_create "$STATE_REAL" "$ID" "$WT" "$BRIEF" "$FM_ROOT/bin/fm-operational-input.sh"; then
+      if [ -n "${FM_SANDBOX_BRIDGE_ACQUIRED_PATH:-}" ]; then
+        PLACEMENT_BRIDGE=$FM_SANDBOX_BRIDGE_ACQUIRED_PATH
+        PLACEMENT_BRIDGE_ID=${FM_SANDBOX_BRIDGE_ACQUIRED_ID:-}
+        PLACEMENT_BRIDGE_CURSOR_ID=${FM_SANDBOX_BRIDGE_ACQUIRED_CURSOR_ID:-}
+        SPAWN_BRIDGE_CLEANUP=1
+      fi
+      exit 1
+    fi
     PLACEMENT_BRIDGE=$FM_SANDBOX_BRIDGE_PATH
+    PLACEMENT_BRIDGE_ID=$FM_SANDBOX_BRIDGE_ACQUIRED_ID
+    PLACEMENT_BRIDGE_CURSOR_ID=$FM_SANDBOX_BRIDGE_ACQUIRED_CURSOR_ID
+    SPAWN_BRIDGE_CLEANUP=1
     if [ "${PLACEMENT_KITS[0]+set}" = set ]; then
       if ! fm_workspace_placement_prepare "$PLACEMENT" direct "$ID" "$WT" "$SANDBOX_PRESET" "$PLACEMENT_BRIDGE" "${PLACEMENT_KITS[@]}"; then
         PLACEMENT_HANDLE=${FM_WORKSPACE_PLACEMENT_ACQUIRED_HANDLE:-}
@@ -2883,11 +3088,14 @@ preserve_relaunch_meta() {
 if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_META_PUBLISH_STARTED=1
   mv -f "$SPAWN_META_TMP" "$STATE/$ID.meta"
+  SPAWN_PUBLICATION_COMPLETE=1
   RELAUNCH_REPLACEMENT_PENDING=0
   SPAWN_META_PUBLISH_STARTED=0
   SPAWN_META_TMP=
   fm_lock_release "$SPAWN_META_LOCK"
   SPAWN_META_LOCK_HELD=0
+else
+  SPAWN_PUBLICATION_COMPLETE=1
 fi
 if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
   # The record is published, so this task is now part of the set a teardown
@@ -2898,8 +3106,11 @@ if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
 fi
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 [ "$PLACEMENT" = docker-sandbox ] && PLACEMENT_ABORT_CLEANUP=0
+SPAWN_BRIDGE_CLEANUP=0
 SPAWN_ENDPOINT_CLEANUP=0
 SPAWN_WORKTREE_CLEANUP=0
+[ -z "$SPAWN_ENDPOINT_ACQUISITION_FILE" ] || rm -f -- "$SPAWN_ENDPOINT_ACQUISITION_FILE"
+spawn_cleanup_record_refresh || echo "warning: could not clear unpublished cleanup record for $ID" >&2
 
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")

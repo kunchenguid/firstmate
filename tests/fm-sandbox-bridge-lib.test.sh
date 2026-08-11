@@ -166,7 +166,7 @@ fm_write_meta "$watch_meta" \
   "effort=default" \
   "placement=docker-sandbox" \
   "placement_mode=direct" \
-  "placement_handle=docker-sandbox:$WATCH_ID:fm-$WATCH_ID" \
+  "placement_handle=docker-sandbox:$WATCH_ID:fm-$WATCH_ID:provider-$WATCH_ID" \
   "placement_bridge=$watch_bridge"
 chmod 600 "$watch_meta"
 
