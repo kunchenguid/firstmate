@@ -980,6 +980,57 @@ for scenario in 3 0 2; do
 done
 pass 'every outcome prints a verdict line and exits with its own status'
 
+# --- a cancelled run must not report a verdict -------------------------------
+#
+# Bash resumes at the next statement once a signal handler returns, so a handler
+# that only cleaned up would hand the rest of the script a deleted working
+# directory. The per-path result files would be gone, both emptiness tests would
+# read false, and the run would print PASS and exit 0 - a confident clean
+# verdict produced by cancelling the check.
+#
+# The signal is landed deterministically rather than raced: `tr` is shimmed to
+# sleep after doing its real work, and the only `tr` this invocation reaches is
+# the one that reads the per-path counts, which is the last file the loop opens.
+# The handler therefore runs with the loop's remaining work all builtins, which
+# is exactly the window that used to reach the PASS line.
+
+REPO=$(new_repo cancelled)
+B=$(git -C "$REPO" rev-parse HEAD)
+printf 'alpha\nbravo\ncharlie\nvalidated line\n' > "$REPO/core.sh"
+V=$(commit_all "$REPO" 'validated: one addition')
+git_do "$REPO" checkout -q -b cancel-trunk "$B"
+printf 'alpha\nbravo\ncharlie\nvalidated line\ntrunk epilogue\n' > "$REPO/core.sh"
+C=$(commit_all "$REPO" 'candidate: validated line carried, trunk moved too')
+
+REAL_TR=$(command -v tr)
+SIGBIN="$TMP_ROOT/signal-bin"
+mkdir -p "$SIGBIN"
+cat > "$SIGBIN/tr" <<SH
+#!/usr/bin/env bash
+"$REAL_TR" "\$@"
+rc=\$?
+sleep 5
+exit \$rc
+SH
+chmod +x "$SIGBIN/tr"
+
+CANCEL_OUT="$TMP_ROOT/cancelled.out"
+PATH="$SIGBIN:$PATH" "$CHECK" --repo "$REPO" --validated-base "$B" \
+  --validated-head "$V" --candidate-head "$C" > "$CANCEL_OUT" 2>&1 &
+CANCEL_PID=$!
+sleep 2
+kill -TERM "$CANCEL_PID" 2>/dev/null || true
+RC=0
+wait "$CANCEL_PID" || RC=$?
+OUT=$(cat "$CANCEL_OUT")
+
+expect_code 143 "$RC" 'a run killed by TERM must exit on the signal, not on a verdict status'
+assert_not_contains "$OUT" 'REBASE-EQUIVALENCE: PASS' \
+  'cancelling the check must never produce a pass it did not earn'
+assert_not_contains "$OUT" 'REBASE-EQUIVALENCE:' \
+  'a cancelled comparison is not an observation, so it reports no verdict at all'
+pass 'a signal terminates the run instead of falling through to a verdict'
+
 # --- a bare request number names no repository -------------------------------
 #
 # Every forge publishes the same head namespace for every repository, so a bare

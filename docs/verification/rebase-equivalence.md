@@ -116,9 +116,9 @@ no-mistakes  /home/shane/.no-mistakes/repos/5f306883d81c.git (push)
 A local-path remote answers a bare object id even when no ref points at the commit any more, which is what the gate looks like once its branch has moved past the validated head; the regression suite constructs exactly that state by pushing the validated head to a scratch ref in a bare fixture repository and then deleting the ref.
 Only a full commit id is accepted with that flag, because a symbolic name would resolve in the worker's clone and hand back the local head the flag exists to stop trusting.
 An object id is the content, so once it resolves it names the run record's commit and nothing else, whether the fetch carried it here or this clone already held that exact object; git's own fetch relies on the same identity and treats an already-present object id as satisfied without contacting the remote.
-The flag is therefore how the id is obtained and not provenance, and the script header says so in those words: it establishes that the caller named a full object id and that the id resolves here, never that the head came from the pipeline.
+The flag is therefore how the id is obtained and not provenance, and the script header and its `--help` both say so in those words: it establishes that the caller named a full object id and that the id resolves here, never that the head came from the pipeline.
 A head that cannot be named or obtained at all is `CANNOT-OBSERVE`, and there is deliberately no fallback to a local ref.
-The ref that carries the fetched object is released from a trap armed the moment it is created, so no refusal or signal can leak it; the candidate and base refs are deliberately kept, because they are keyed by request number rather than object id and their persistence is the evidence below that the fetch ran.
+The ref that carries the fetched object is released from a trap armed before the fetch that creates it, so no refusal and no signal can leak it; the candidate and base refs are deliberately kept, because they are keyed by request number rather than object id and their persistence is the evidence below that the fetch ran.
 
 Sync-then-compare was rejected on evidence.
 `no-mistakes axi sync` moves the local branch TO the pipeline-pushed head with reset semantics, so after syncing the local head IS the candidate and the comparison would be a head compared against itself.
@@ -173,6 +173,7 @@ $ git -C <scratch> rev-parse refs/fm-rebase-equivalence/candidate/2069 refs/fm-r
 
 Dropping `--validated-base` from that command reports the same three-valued verdict with the base derived from the fetched trunk.
 Every fetch runs with `GIT_TERMINAL_PROMPT=0` and non-interactive askpass and ssh settings, because an unattended worker blocked on a credential prompt prints no verdict line at all, and that is the one outcome a caller cannot tell apart from a crash.
+`-oBatchMode=yes` is appended to whatever `GIT_SSH_COMMAND` the caller already exports rather than supplied only as a default, so a client that does not accept OpenSSH options fails into `CANNOT-OBSERVE` instead of being used verbatim and left free to hang.
 A fetch that cannot be made, a base the forge will not name, and a remote that is not the request's repository are all `CANNOT-OBSERVE`, so the check still cannot pass by not running.
 
 ## Reproduction 1: whole paths dropped
@@ -370,6 +371,7 @@ A binary path whose blob is identical is still a sound observation and passes.
 One case pins that every fetch is issued with `GIT_TERMINAL_PROMPT=0`, since a credential prompt would hang with no verdict line rather than refuse.
 A companion case pins the ssh path behaviourally rather than by grep: it exports its own `GIT_SSH_COMMAND`, points the check at an `ssh://` remote, and asserts that the ssh git actually invoked carries both the caller's own option and the appended `-oBatchMode=yes`, because keeping a caller's value verbatim would drop batch mode and reopen exactly that hang.
 A final case asserts every outcome prints a verdict line and exits with that verdict's own status, so a caller can tell "compared and passed" from "never ran".
+Its companion pins the cancelled run, which is the same distinction from the other side: `tr` is shimmed to sleep so the signal lands deterministically in the window after the per-path loop, and the run must print no verdict line and exit 143 rather than fall through its own cleanup to a `PASS` it never earned.
 
 `tests/fm-brief.test.sh` pins the comparison's ABSENCE from the generated no-mistakes brief.
 Asking a worker for this verdict was tried and retired: it cannot obtain either head, so the instruction could only ever report could-not-observe.

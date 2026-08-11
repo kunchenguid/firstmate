@@ -124,6 +124,12 @@
 # that changed, and an empty validated contribution are all CANNOT-OBSERVE,
 # never a silent pass. The verdict line is always printed, so a caller that
 # sees none knows the check did not run.
+# A run killed by a signal is that second case: it prints no verdict line and
+# exits 128 plus the signal number, deliberately outside the verdict vocabulary.
+# A cancelled comparison is not an observation, and a signal handler that only
+# cleaned up would return to the next statement with its result files already
+# deleted, so the emptiness checks below would both read false and the run would
+# print a confident PASS it never earned.
 #
 # Usage:
 #   fm-rebase-equivalence.sh --repo <dir> --validated-head <commit> \
@@ -142,11 +148,11 @@ VERDICT_PASS=0
 VERDICT_CANNOT=2
 VERDICT_DROPPED=3
 
-# Released from a trap armed the moment the ref is created, rather than at one
-# call site: the ref exists from the fetch onward, and every refusal - and every
-# signal - between there and the end of the run would otherwise exit with it
-# still present, accumulating one ref per validated commit in what is a SHARED
-# object store for a gate worktree and pinning its objects.
+# Released from a trap armed before the fetch that creates it, rather than at
+# one call site: the ref exists from the fetch onward, and every refusal - and
+# every signal - between there and the end of the run would otherwise exit with
+# it still present, accumulating one ref per validated commit in what is a
+# SHARED object store for a gate worktree and pinning its objects.
 #
 # The candidate and base refs are deliberately NOT released, and the reason the
 # validated ref is does not apply to them: they are keyed by REQUEST NUMBER, so
@@ -155,11 +161,34 @@ VERDICT_DROPPED=3
 # forever. Their persistence is also what shows the fetch ran at all, which
 # docs/verification/rebase-equivalence.md cites as evidence.
 VALIDATED_REF=
+WORK=
 release_validated_ref() {
   [ -n "$VALIDATED_REF" ] || return 0
   git -C "$REPO" update-ref -d "$VALIDATED_REF" 2>/dev/null || true
   VALIDATED_REF=
 }
+
+# shellcheck disable=SC2329 # Invoked by the EXIT trap below.
+cleanup() {
+  release_validated_ref
+  [ -n "$WORK" ] || return 0
+  rm -rf "$WORK"
+  WORK=
+}
+
+# Armed before anything this run can create, so no window exists between a
+# resource appearing and its release being in force. Both resources are guarded
+# on emptiness, so firing before either exists is a no-op.
+#
+# A signal must TERMINATE rather than fall through, so INT and TERM exit and let
+# the EXIT trap do the cleanup. A handler that only cleaned up would return to
+# the next statement with the working directory already deleted: the per-path
+# loop's result files would be gone, both emptiness tests would read false, and
+# a cancelled run would print PASS and exit 0. Exiting on 128 plus the signal
+# keeps that outcome out of the verdict vocabulary entirely.
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 cannot_observe() {  # <reason>
   release_validated_ref
@@ -207,11 +236,16 @@ repository and refused when it is not, because a request number collides across
 repositories. With the base read from the request, --validated-base may be
 omitted and is measured off that same trunk.
 --candidate-remote names a remote or URL to prefer for those fetches.
---validated-remote names the pipeline's own repository and takes the validated
-head from there rather than from this clone, because a run commits its own
-fixes and this clone's branch therefore holds older content. --validated-head
-must then be the full commit id the run record names, and a head that cannot be
-fetched is could-not-observe rather than a fallback to a local ref.
+--validated-remote is how the validated head is OBTAINED, and is not evidence
+of where it came from. --validated-head must then be the full commit id the run
+record names, and that id is fetched from the named repository. What the pair
+establishes is exactly that the caller named a full object id and that the id
+resolves here, since an object id is the content and so names that commit or
+nothing. It never establishes that the head came from the pipeline, because a
+fetch by object id succeeds whenever the object is already present locally. A
+symbolic name is refused and a head that cannot be obtained is could-not-observe
+rather than a fallback to a local ref, so this clone's own branch - older
+content, since a run commits its fixes elsewhere - cannot stand in for it.
 --candidate-base names the trunk ref for a run with no request to ask, such as
 a comparison of two local heads.
 Both base flags take a TRUNK ref and narrow it to each head's own fork point
@@ -291,7 +325,11 @@ git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1 \
 # credentials must fail onto CANNOT-OBSERVE instead. Batch mode is APPENDED to
 # whatever ssh command the caller already exports rather than supplied only as a
 # default: keeping a caller's value verbatim would drop the option and leave an
-# ssh-form remote free to hang on a passphrase or a host-key prompt.
+# ssh-form remote free to hang on a passphrase or a host-key prompt. A client
+# that does not accept OpenSSH options - plink, tortoiseplink, a wrapper that
+# rejects what it does not know - therefore fails here rather than being used
+# verbatim. That is the deliberate direction: such a caller gets
+# CANNOT-OBSERVE, where honouring the command could hang with no verdict at all.
 git_fetch() {  # <source> <refspec>
   GIT_TERMINAL_PROMPT=0 \
   GIT_ASKPASS=true \
@@ -337,12 +375,11 @@ if [ -n "$VALIDATED_REMOTE" ]; then
   esac
   [ "${#VALIDATED_HEAD}" -ge 40 ] \
     || cannot_observe "--validated-remote needs --validated-head to be the full commit id the run record names, not $VALIDATED_HEAD"
+  # The release is already armed, so the name is recorded before the fetch that
+  # writes it: the ref can exist the instant that fetch returns, and everything
+  # slow in this run - the candidate fetch, the forge call, the base fetch -
+  # happens after this point.
   VALIDATED_REF="refs/fm-rebase-equivalence/validated/$VALIDATED_HEAD"
-  # Armed BEFORE the fetch, because the ref can exist the instant the fetch
-  # writes it. Everything slow in this run - the candidate fetch, the forge
-  # call, the base fetch - happens after this point, so a trap armed later
-  # would leave a whole window in which a signal leaks the ref.
-  trap release_validated_ref EXIT INT TERM
   git_fetch "$VALIDATED_REMOTE" "+$VALIDATED_HEAD:$VALIDATED_REF" \
     || cannot_observe "cannot fetch the validated head $VALIDATED_HEAD from $VALIDATED_REMOTE"
   VALIDATED_HEAD=$VALIDATED_REF
@@ -511,9 +548,6 @@ VB=$(git -C "$REPO" merge-base "$VB_TRUNK" "$VH" 2>/dev/null) \
 
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/fm-rebase-equiv.XXXXXX") \
   || cannot_observe "cannot create a working directory"
-# Re-armed rather than newly armed: the validated release above is kept and the
-# working directory joins it, so neither can be dropped by replacing the trap.
-trap 'release_validated_ref; rm -rf "$WORK"' EXIT INT TERM
 
 # The validated contribution's footprint. --no-renames keeps both sides
 # measuring the same way, so a rename detected on one side only cannot read as
