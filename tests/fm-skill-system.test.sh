@@ -64,7 +64,9 @@ test_skill_map_generates_flat_deduped_registry() {
   mkdir -p "$home/data" "$home/projects/alpha/.claude/skills" "$home/projects/alpha/.agents/skills" "$user_home/.claude/skills"
   printf '%s\n' '- alpha [no-mistakes] - fixture project' > "$home/data/projects.md"
   write_skill "$home/projects/alpha/.claude/skills/project-skill" project-skill folded
-  ln -s ../.claude/skills/project-skill "$home/projects/alpha/.agents/skills/project-skill-link"
+  ln -s ../../.claude/skills/project-skill "$home/projects/alpha/.agents/skills/project-skill-link"
+  [ -d "$home/projects/alpha/.agents/skills/project-skill-link" ] \
+    || fail "canonical-path de-duplication fixture symlink does not resolve"
   write_skill "$user_home/.claude/skills/user-skill" user-skill plain
 
   HOME="$user_home" FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_PROJECTS_OVERRIDE="$home/projects" \
@@ -188,7 +190,71 @@ EOF
   pass "skill compose refuses non-symlink collisions"
 }
 
+test_skill_compose_prevalidates_before_reconciliation() {
+  local home="$TMP_ROOT/prevalidation-home" source="$TMP_ROOT/prevalidation-source" alpha_real beta_real mode skills_dir
+  mkdir -p "$home/data"
+  write_skill "$source/alpha" alpha plain
+  write_skill "$source/beta" beta plain
+  alpha_real=$(cd "$source/alpha" && pwd -P)
+  beta_real=$(cd "$source/beta" && pwd -P)
+  cat > "$home/data/skill-map.md" <<EOF
+# Skill map
+
+## fixture
+- alpha — alpha description — $alpha_real
+- beta — beta description — $beta_real
+EOF
+
+  if FM_HOME="$home" "$COMPOSE" --target-home "$home" --set invalid alpha bad..name >/dev/null 2>&1; then
+    fail "compose accepted an unsafe skill name"
+  fi
+  [ ! -e "$home/config/skill-compose/claude/invalid" ] \
+    || fail "invalid compose arguments created a partial managed set"
+
+  for mode in compose remove clear; do
+    FM_HOME="$home" "$COMPOSE" --target-home "$home" --set "$mode" alpha beta >/dev/null \
+      || fail "failed to prepare $mode prevalidation fixture"
+    skills_dir="$home/config/skill-compose/claude/$mode/.claude/skills"
+    mkdir "$skills_dir/z-collision"
+  done
+
+  if FM_HOME="$home" "$COMPOSE" --target-home "$home" --set remove --remove alpha bad..name >/dev/null 2>&1; then
+    fail "remove accepted an unsafe skill name"
+  fi
+  [ -L "$home/config/skill-compose/claude/remove/.claude/skills/alpha" ] \
+    || fail "invalid remove arguments deleted an earlier valid skill"
+
+  if FM_HOME="$home" "$COMPOSE" --target-home "$home" --set clear --clear alpha >/dev/null 2>&1; then
+    fail "clear accepted a skill name"
+  fi
+  [ -L "$home/config/skill-compose/claude/clear/.claude/skills/alpha" ] \
+    || fail "invalid clear arguments mutated the managed set"
+
+  if FM_HOME="$home" "$COMPOSE" --target-home "$home" --set compose beta >/dev/null 2>&1; then
+    fail "compose reconciled through a non-symlink collision"
+  fi
+  [ -L "$home/config/skill-compose/claude/compose/.claude/skills/alpha" ] \
+    || fail "failed compose removed a stale skill before validating the full set"
+
+  if FM_HOME="$home" "$COMPOSE" --target-home "$home" --set remove --remove alpha >/dev/null 2>&1; then
+    fail "remove reconciled through a non-symlink collision"
+  fi
+  [ -L "$home/config/skill-compose/claude/remove/.claude/skills/alpha" ] \
+    || fail "failed remove deleted a skill before validating the full set"
+
+  if FM_HOME="$home" "$COMPOSE" --target-home "$home" --set clear --clear >/dev/null 2>&1; then
+    fail "clear reconciled through a non-symlink collision"
+  fi
+  [ -L "$home/config/skill-compose/claude/clear/.claude/skills/alpha" ] \
+    || fail "failed clear deleted a skill before validating the full set"
+  [ -f "$home/config/skill-compose/claude/clear/manifest.tsv" ] \
+    || fail "failed clear removed the manifest before validating the full set"
+
+  pass "skill compose prevalidates failures before mutating managed sets"
+}
+
 test_skill_map_generates_flat_deduped_registry
 test_skill_compose_reconciles_symlink_set_and_removes
 test_skill_compose_accepts_internal_double_dots_without_traversal
 test_skill_compose_refuses_non_symlink_collision
+test_skill_compose_prevalidates_before_reconciliation

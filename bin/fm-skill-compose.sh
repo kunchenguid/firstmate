@@ -29,6 +29,7 @@
 #   --refresh-map     Regenerate the default map before resolving names.
 #   --print-add-dir   Print only the directory that Claude should receive via --add-dir.
 set -eu
+shopt -s dotglob nullglob
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
@@ -171,6 +172,61 @@ link_target_real() {  # <symlink>
   esac
 }
 
+skill_requested() {  # <name>
+  local requested
+  for requested in "${SKILLS[@]}"; do
+    [ "$requested" = "$1" ] && return 0
+  done
+  return 1
+}
+
+validate_skill_args() {
+  local name
+  for name in "${SKILLS[@]}"; do
+    safe_skill_name "$name" || { printf 'error: unsafe skill name: %s\n' "$name" >&2; return 2; }
+  done
+}
+
+validate_managed_layout() {
+  local path
+  for path in \
+    "$TARGET_HOME/config" \
+    "$TARGET_HOME/config/skill-compose" \
+    "$TARGET_HOME/config/skill-compose/claude" \
+    "$COMPOSE_ROOT" \
+    "$COMPOSE_ROOT/.claude" \
+    "$SKILLS_DIR"; do
+    if { [ -e "$path" ] || [ -L "$path" ]; } && [ ! -d "$path" ]; then
+      printf 'error: managed composition path is not a directory: %s\n' "$path" >&2
+      return 1
+    fi
+  done
+  if [ -d "$MANIFEST" ]; then
+    printf 'error: managed composition manifest is a directory: %s\n' "$MANIFEST" >&2
+    return 1
+  fi
+}
+
+validate_existing_skill_entries() {  # <compose|remove|clear>
+  local context=$1 entry name
+  [ -d "$SKILLS_DIR" ] || return 0
+  for entry in "$SKILLS_DIR"/*; do
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
+    [ -L "$entry" ] && continue
+    name=$(basename "$entry")
+    if skill_requested "$name"; then
+      case "$context" in
+        compose) printf 'error: refusing to replace non-symlink entry: %s\n' "$entry" >&2 ;;
+        remove) printf 'error: refusing to remove non-symlink entry: %s\n' "$entry" >&2 ;;
+        *) printf 'error: non-symlink entry in managed skill set: %s\n' "$entry" >&2 ;;
+      esac
+    else
+      printf 'error: non-symlink entry in managed skill set: %s\n' "$entry" >&2
+    fi
+    return 1
+  done
+}
+
 write_manifest_from_symlinks() {
   local tmp entry name target
   mkdir -p "$COMPOSE_ROOT"
@@ -196,10 +252,12 @@ write_manifest_from_symlinks() {
 
 clear_set() {
   local entry
+  [ "${#SKILLS[@]}" -eq 0 ] || { printf 'error: --clear does not accept skill names\n' >&2; exit 2; }
+  validate_managed_layout
+  validate_existing_skill_entries clear
   if [ -d "$SKILLS_DIR" ]; then
     for entry in "$SKILLS_DIR"/*; do
       [ -e "$entry" ] || [ -L "$entry" ] || continue
-      [ -L "$entry" ] || { printf 'error: non-symlink entry in managed skill set: %s\n' "$entry" >&2; exit 1; }
       rm -f -- "$entry"
     done
   fi
@@ -211,12 +269,13 @@ clear_set() {
 remove_skills() {
   local name entry
   [ "${#SKILLS[@]}" -gt 0 ] || { printf 'error: --remove requires at least one skill name\n' >&2; exit 2; }
+  validate_skill_args
+  validate_managed_layout
+  validate_existing_skill_entries remove
   mkdir -p "$SKILLS_DIR"
   for name in "${SKILLS[@]}"; do
-    safe_skill_name "$name" || { printf 'error: unsafe skill name: %s\n' "$name" >&2; exit 2; }
     entry="$SKILLS_DIR/$name"
     if [ -e "$entry" ] || [ -L "$entry" ]; then
-      [ -L "$entry" ] || { printf 'error: refusing to remove non-symlink entry: %s\n' "$entry" >&2; exit 1; }
       rm -f -- "$entry"
     fi
   done
@@ -227,29 +286,30 @@ remove_skills() {
 compose_exact() {
   local wanted names_file name path entry current requested=0 existing
   [ "${#SKILLS[@]}" -gt 0 ] || { printf 'error: compose requires at least one skill name, or use --clear\n' >&2; exit 2; }
+  validate_skill_args
+  validate_managed_layout
+  validate_existing_skill_entries compose
   ensure_map
-  mkdir -p "$SKILLS_DIR"
   wanted=$(mktemp "${TMPDIR:-/tmp}/fm-skill-compose-wanted.XXXXXX") || exit 1
-  names_file=$(mktemp "${TMPDIR:-/tmp}/fm-skill-compose-names.XXXXXX") || exit 1
+  names_file=$(mktemp "${TMPDIR:-/tmp}/fm-skill-compose-names.XXXXXX") || { rm -f "$wanted"; exit 1; }
   trap 'rm -f "$wanted" "$names_file" 2>/dev/null || true' RETURN
   : > "$wanted"
   : > "$names_file"
   for name in "${SKILLS[@]}"; do
-    safe_skill_name "$name" || { printf 'error: unsafe skill name: %s\n' "$name" >&2; exit 2; }
     if grep -Fx -- "$name" "$names_file" >/dev/null 2>&1; then
       continue
     fi
     printf '%s\n' "$name" >> "$names_file"
-    path=$(resolve_skill "$name") || exit 1
+    path=$(resolve_skill "$name") || return 1
     printf '%s\t%s\n' "$name" "$path" >> "$wanted"
     requested=$((requested + 1))
   done
 
+  mkdir -p "$SKILLS_DIR"
   for existing in "$SKILLS_DIR"/*; do
     [ -e "$existing" ] || [ -L "$existing" ] || continue
     name=$(basename "$existing")
     if ! grep -F -x -- "$name" "$names_file" >/dev/null 2>&1; then
-      [ -L "$existing" ] || { printf 'error: non-symlink entry in managed skill set: %s\n' "$existing" >&2; exit 1; }
       rm -f -- "$existing"
     fi
   done
@@ -258,7 +318,6 @@ compose_exact() {
     [ -n "$name" ] || continue
     entry="$SKILLS_DIR/$name"
     if [ -e "$entry" ] || [ -L "$entry" ]; then
-      [ -L "$entry" ] || { printf 'error: refusing to replace non-symlink entry: %s\n' "$entry" >&2; exit 1; }
       current=$(link_target_real "$entry" 2>/dev/null || true)
       [ "$current" = "$path" ] || { rm -f -- "$entry"; ln -s "$path" "$entry"; }
     else
