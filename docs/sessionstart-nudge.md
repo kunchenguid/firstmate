@@ -33,6 +33,8 @@ Compaction is now covered because a compacted session has lost exactly the diges
 Current harness ownership of the lock and its matching `state/.session-start-complete` record together are the idempotency interlock for the whole scheme.
 The full digest clears that completion record after acquiring the lock and republishes the lock owner's pid only after every stage completes, so `clear` or `compact` cannot skip startup sweeps after a truncated run.
 `bin/fm-lock.sh` already treats a lock this session's own harness holds as its own, so a proven `clear` or `compact` re-emit re-verifies ownership and proceeds, while a lock another live session took meanwhile still produces the ordinary read-only digest.
+Managed Codex Desktop is the marker-backed case: only paired `CODEX_CI=1` and a UUID-shaped `CODEX_THREAD_ID` identify it, and the matching thread sidecar beside the still-numeric lock is its durable ownership proof across short-lived tool subprocesses.
+Repeated re-emits by that exact thread retain the published numeric pid so the completion record remains valid, while partial or malformed markers, a different thread, and every non-Codex harness keep the ordinary ancestry and contention behavior.
 On a run-tier harness the nudge cannot also fire: `resume`, `reload`, and `fork` are the only sources routed to it, and on those its own ancestry check stays silent whenever this process already holds the lock.
 
 `bin/fm-session-start.sh --reemit` owns which work a re-emit skips; its header is the single owner of that list.
@@ -88,6 +90,7 @@ That alternative expands trust and writes outside this repository, so Firstmate 
 `tests/fm-sessionstart-nudge.test.sh` proves the nudge wrapper's silence for both gate signals, an unmarked linked worktree, a missing state directory, and an already-owned lock, plus its exact U+2063 `FIRSTMATE_OP:`-prefixed, `session-start`-typed one-line output.
 It separately proves the run wrapper's silence for the gate environment and an unmarked linked worktree.
 It proves the run wrapper's source routing end to end against a real `fm-session-start.sh`, including completion-gated `--reemit` selection, resume delegation, an unrecognized source falling through to the full digest, and bounded loud delivery of an oversized Pi digest.
+The same suite proves repeated managed Codex Desktop clear and compact re-emits preserve the numeric lock pid and continue through the real completion-routing boundary.
 `tests/fm-session-start.test.sh` proves the runtime bound through the forced pure-Bash fallback: a TERM-resistant digest that exceeds its budget is force-killed with its grandchild, still emits its completed stages, names the incomplete stage and every stage it never reached, leaves no completion proof, and exits 0.
 `tests/fm-pi-primary-live-e2e.test.sh` and `tests/fm-opencode-primary-live-e2e.test.sh` exercise native startup paths with first-message and later-message Ahoy regressions.
 `tests/fm-sessionstart-hook-live-e2e.test.sh` is the opt-in live guard that confirms each installed run-tier adapter invokes the run wrapper and delivers its output into context.
