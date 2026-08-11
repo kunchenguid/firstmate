@@ -69,11 +69,13 @@ test_skill_map_generates_flat_deduped_registry() {
     || fail "canonical-path de-duplication fixture symlink does not resolve"
   write_skill "$user_home/.claude/skills/user-skill" user-skill plain
 
-  HOME="$user_home" FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_PROJECTS_OVERRIDE="$home/projects" \
+  HOME="$user_home" CLAUDE_CONFIG_DIR="$user_home/.claude" \
+    FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_PROJECTS_OVERRIDE="$home/projects" \
     "$MAP" --output "$home/data/skill-map.md" --quiet \
     || fail "skill map generation failed"
   cp "$home/data/skill-map.md" "$home/data/skill-map.before"
-  HOME="$user_home" FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_PROJECTS_OVERRIDE="$home/projects" \
+  HOME="$user_home" CLAUDE_CONFIG_DIR="$user_home/.claude" \
+    FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_PROJECTS_OVERRIDE="$home/projects" \
     "$MAP" --output "$home/data/skill-map.md" --quiet \
     || fail "second skill map generation failed"
   cmp -s "$home/data/skill-map.before" "$home/data/skill-map.md" \
@@ -254,8 +256,65 @@ EOF
   pass "skill compose prevalidates failures before mutating managed sets"
 }
 
+test_skill_compose_serializes_same_set_reconciliation() {
+  local home="$TMP_ROOT/locked-home" source="$TMP_ROOT/locked-source" alpha_real beta_real
+  local fakebin="$TMP_ROOT/locked-fakebin" real_awk gate first_pid second_pid skills_dir
+  mkdir -p "$home/data" "$fakebin"
+  write_skill "$source/alpha" alpha plain
+  write_skill "$source/beta" beta plain
+  alpha_real=$(cd "$source/alpha" && pwd -P)
+  beta_real=$(cd "$source/beta" && pwd -P)
+  cat > "$home/data/skill-map.md" <<EOF
+# Skill map
+
+## fixture
+- alpha — alpha description — $alpha_real
+- beta — beta description — $beta_real
+EOF
+  real_awk=$(command -v awk)
+  gate="$home/awk-gate"
+  cat > "$fakebin/awk" <<EOF
+#!/usr/bin/env bash
+if [ -n "\${FM_TEST_AWK_GATE:-}" ] && /bin/mkdir "\$FM_TEST_AWK_GATE.owner" 2>/dev/null; then
+  /usr/bin/touch "\$FM_TEST_AWK_GATE.entered"
+  while [ ! -e "\$FM_TEST_AWK_GATE.release" ]; do sleep 0.02; done
+fi
+exec "$real_awk" "\$@"
+EOF
+  chmod +x "$fakebin/awk"
+
+  FM_HOME="$home" FM_TEST_AWK_GATE="$gate" PATH="$fakebin:$PATH" \
+    "$COMPOSE" --target-home "$home" alpha >/dev/null &
+  first_pid=$!
+  for _ in $(seq 1 100); do
+    [ -e "$gate.entered" ] && break
+    sleep 0.02
+  done
+  [ -e "$gate.entered" ] || fail "first composition did not enter the serialized reconciliation"
+
+  FM_HOME="$home" FM_TEST_AWK_GATE="$gate" PATH="$fakebin:$PATH" \
+    "$COMPOSE" --target-home "$home" beta >/dev/null &
+  second_pid=$!
+  sleep 0.2
+  skills_dir="$home/config/skill-compose/claude/home/.claude/skills"
+  [ ! -e "$skills_dir/beta" ] && [ ! -L "$skills_dir/beta" ] \
+    || fail "second composition mutated the set while the first reconciliation was active"
+
+  touch "$gate.release"
+  wait "$first_pid" || fail "first serialized composition failed"
+  wait "$second_pid" || fail "second serialized composition failed"
+  [ -L "$skills_dir/beta" ] || fail "second serialized composition did not publish its requested set"
+  [ ! -e "$skills_dir/alpha" ] && [ ! -L "$skills_dir/alpha" ] \
+    || fail "serialized reconciliation left a stale skill from the first request"
+  assert_file_contains "$home/config/skill-compose/claude/home/manifest.tsv" "$beta_real" \
+    "serialized reconciliation manifest does not describe the final set"
+
+  pass "skill compose serializes concurrent reconciliation of one set"
+}
+
 test_skill_map_generates_flat_deduped_registry
 test_skill_compose_reconciles_symlink_set_and_removes
 test_skill_compose_accepts_internal_double_dots_without_traversal
 test_skill_compose_refuses_non_symlink_collision
 test_skill_compose_prevalidates_before_reconciliation
+test_skill_compose_serializes_same_set_reconciliation

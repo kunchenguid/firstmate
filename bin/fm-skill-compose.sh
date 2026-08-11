@@ -103,9 +103,13 @@ case "$SET_NAME" in
 esac
 
 TARGET_HOME=$(cd "$TARGET_HOME" && pwd -P)
-COMPOSE_ROOT="$TARGET_HOME/config/skill-compose/claude/$SET_NAME"
+COMPOSE_PARENT="$TARGET_HOME/config/skill-compose/claude"
+COMPOSE_ROOT="$COMPOSE_PARENT/$SET_NAME"
 SKILLS_DIR="$COMPOSE_ROOT/.claude/skills"
 MANIFEST="$COMPOSE_ROOT/manifest.tsv"
+COMPOSE_LOCK=
+COMPOSE_LOCK_HELD=0
+COMPOSE_TEMP_FILES=()
 
 if [ "$PRINT_ADD_DIR" -eq 1 ] && [ "$MODE" = compose ] && [ "${#SKILLS[@]}" -eq 0 ]; then
   printf '%s\n' "$COMPOSE_ROOT"
@@ -231,6 +235,56 @@ validate_existing_skill_entries() {  # <compose|remove|clear>
   done
 }
 
+release_compose_lock() {
+  [ "$COMPOSE_LOCK_HELD" -eq 1 ] || return 0
+  COMPOSE_LOCK_HELD=0
+  fm_lock_release "$COMPOSE_LOCK" || true
+}
+
+compose_exit() {
+  local status=$? file
+  for file in "${COMPOSE_TEMP_FILES[@]}"; do
+    rm -f "$file" 2>/dev/null || true
+  done
+  release_compose_lock
+  return "$status"
+}
+
+acquire_compose_lock() {
+  local prior_state_set=0 prior_state= prior_override_set=0 prior_override=
+  validate_managed_layout
+  mkdir -p "$COMPOSE_PARENT"
+  [ "${STATE+x}" = x ] && { prior_state_set=1; prior_state=$STATE; }
+  [ "${FM_STATE_OVERRIDE+x}" = x ] && { prior_override_set=1; prior_override=$FM_STATE_OVERRIDE; }
+  STATE=$COMPOSE_PARENT
+  FM_STATE_OVERRIDE=$COMPOSE_PARENT
+  # shellcheck source=bin/fm-wake-lib.sh
+  . "$SCRIPT_DIR/fm-wake-lib.sh"
+  if [ "$prior_state_set" -eq 1 ]; then STATE=$prior_state; else unset STATE; fi
+  if [ "$prior_override_set" -eq 1 ]; then FM_STATE_OVERRIDE=$prior_override; else unset FM_STATE_OVERRIDE; fi
+  COMPOSE_LOCK="$COMPOSE_PARENT/.compose-$SET_NAME.lock"
+  fm_lock_acquire_wait "$COMPOSE_LOCK"
+  COMPOSE_LOCK_HELD=1
+  validate_managed_layout
+}
+
+prevalidate_mode() {
+  case "$MODE" in
+    clear)
+      [ "${#SKILLS[@]}" -eq 0 ] || { printf 'error: --clear does not accept skill names\n' >&2; return 2; }
+      ;;
+    remove)
+      [ "${#SKILLS[@]}" -gt 0 ] || { printf 'error: --remove requires at least one skill name\n' >&2; return 2; }
+      validate_skill_args
+      ;;
+    compose)
+      [ "${#SKILLS[@]}" -gt 0 ] || { printf 'error: compose requires at least one skill name, or use --clear\n' >&2; return 2; }
+      validate_skill_args
+      ;;
+    *) printf 'error: internal unknown mode: %s\n' "$MODE" >&2; return 2 ;;
+  esac
+}
+
 write_manifest_from_symlinks() {
   local tmp entry name target
   mkdir -p "$COMPOSE_ROOT"
@@ -256,7 +310,6 @@ write_manifest_from_symlinks() {
 
 clear_set() {
   local entry
-  [ "${#SKILLS[@]}" -eq 0 ] || { printf 'error: --clear does not accept skill names\n' >&2; exit 2; }
   validate_managed_layout
   validate_existing_skill_entries clear
   if [ -d "$SKILLS_DIR" ]; then
@@ -272,8 +325,6 @@ clear_set() {
 
 remove_skills() {
   local name entry
-  [ "${#SKILLS[@]}" -gt 0 ] || { printf 'error: --remove requires at least one skill name\n' >&2; exit 2; }
-  validate_skill_args
   validate_managed_layout
   validate_existing_skill_entries remove
   mkdir -p "$SKILLS_DIR"
@@ -289,14 +340,13 @@ remove_skills() {
 
 compose_exact() {
   local wanted names_file name path entry current requested=0 existing
-  [ "${#SKILLS[@]}" -gt 0 ] || { printf 'error: compose requires at least one skill name, or use --clear\n' >&2; exit 2; }
-  validate_skill_args
   validate_managed_layout
   validate_existing_skill_entries compose
   ensure_map
   wanted=$(mktemp "${TMPDIR:-/tmp}/fm-skill-compose-wanted.XXXXXX") || exit 1
-  names_file=$(mktemp "${TMPDIR:-/tmp}/fm-skill-compose-names.XXXXXX") || { rm -f "$wanted"; exit 1; }
-  trap 'rm -f "$wanted" "$names_file" 2>/dev/null || true' RETURN
+  COMPOSE_TEMP_FILES+=("$wanted")
+  names_file=$(mktemp "${TMPDIR:-/tmp}/fm-skill-compose-names.XXXXXX") || exit 1
+  COMPOSE_TEMP_FILES+=("$names_file")
   : > "$wanted"
   : > "$names_file"
   for name in "${SKILLS[@]}"; do
@@ -339,9 +389,12 @@ compose_exact() {
   fi
 }
 
+prevalidate_mode
+trap compose_exit EXIT
+acquire_compose_lock
+
 case "$MODE" in
   clear) clear_set ;;
   remove) remove_skills ;;
   compose) compose_exact ;;
-  *) printf 'error: internal unknown mode: %s\n' "$MODE" >&2; exit 2 ;;
 esac

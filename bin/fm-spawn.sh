@@ -1679,8 +1679,32 @@ BRIEF_REAL="$BRIEF_DIR_REAL/$(basename "$BRIEF")"
 # (docs/herdr-backend.md "Known gaps").
 PROJ_ABS_REAL=$(cd "$PROJ_ABS" 2>/dev/null && pwd -P) || PROJ_ABS_REAL="$PROJ_ABS"
 
+fresh_spawn_skill_overlay_preflight() {
+  local meta="$STATE/$ID.meta" old_backend old_target old_state
+  [ -e "$meta" ] || [ -L "$meta" ] || return 0
+  if [ ! -f "$meta" ] || [ -L "$meta" ]; then
+    echo "error: existing task record for $ID is not a regular file; refusing fresh spawn before changing its skill overlay" >&2
+    return 1
+  fi
+  if ! fm_backend_validate_task_endpoint "$meta" "$ID"; then
+    echo "error: existing task record for $ID cannot establish fresh-spawn ownership; refusing to change its skill overlay" >&2
+    return 1
+  fi
+  old_backend=$FM_BACKEND_VALIDATED_BACKEND
+  old_target=$FM_BACKEND_VALIDATED_TARGET
+  old_state=$(fm_backend_agent_state "$old_backend" "$old_target")
+  case "$old_backend:$old_state" in
+    *:missing|herdr:dead) return 0 ;;
+    *)
+      echo "error: existing $old_backend endpoint for $ID is $old_state; refusing fresh spawn before changing its skill overlay" >&2
+      return 1
+      ;;
+  esac
+}
+
 SKILL_ADD_DIR=
 if [ "$SKILLS_SET" -eq 1 ]; then
+  fresh_spawn_skill_overlay_preflight || exit 1
   SKILL_SET_NAME="task-$ID"
   SKILL_TARGET_HOME=$FM_HOME
   if [ "$KIND" = secondmate ]; then
