@@ -36,8 +36,9 @@
 #                       X-mode artifact writes, fleet sync) also run only when
 #                       locked; the four network sweeps run in the deferred
 #                       stage rather than this synchronous bootstrap section.
-#   3. wake-drain     - mutates the durable wake queue, so it also only runs
-#                       when locked.
+#   3. inactive outcomes + wake-drain - runs the local bounded inactive-outcome
+#                       reconciliation before presenting durable wakes and advancing
+#                       recovery handling state, so both only run when locked.
 #   4. supervision-instructions - the one emitted operating block for the
 #                       detected primary harness.
 #   5. read-once contract - the do-not-re-read contract covering every source
@@ -115,8 +116,8 @@
 # and all of which are safe to compute without verified lock ownership.
 # It deliberately skips the network-only GitHub-auth probe because a read-only
 # session has no dispatch, spawn, steer, or merge action for that verdict to gate.
-# Only projection cleanup, the six bootstrap mutating sweeps, and the
-# wake-queue drain are skipped.
+# Only projection cleanup, the six bootstrap mutating sweeps, and wake-queue
+# presentation are skipped.
 # The context and fleet-state digests
 # below are always read-only, so they run unconditionally in both modes.
 #
@@ -189,11 +190,11 @@
 #             projection cleanup and bootstrap's six mutating sweeps (fleet
 #             sync, secondmate convergence and liveness, PR-check migration,
 #             pending remote handoff retry, X-mode artifact writes) - and
-#             re-emit the rest. The wake-queue drain is NOT skipped: queued
+#             re-emit the rest. Wake-queue presentation is NOT skipped: queued
 #             records are this turn's work queue, they arrived after startup,
 #             and a session that owns the lock is exactly the session that must
-#             take them. Lock acquisition still runs, because ownership must be
-#             re-verified rather than assumed: fm-lock.sh already treats a lock
+#             handle and acknowledge them. Lock acquisition still runs, because
+#             ownership must be re-verified rather than assumed: fm-lock.sh already treats a lock
 #             this session's own harness holds as its own, so the re-emit
 #             proceeds, while a lock another live session took meanwhile still
 #             produces the ordinary read-only path.
@@ -582,14 +583,17 @@ else
   printf '(silent - all good)\n'
 fi
 
-# --- 3. wake-drain -------------------------------------------------------
-# Drained records are this turn's first work queue, and the drain's separate
-# OPEN DECISIONS section remains actionable even when that queue is empty
-# (AGENTS.md sections 3 and 8).
+# --- 3. inactive outcomes + wake-drain -----------------------------------
+# The existing locked session-start path runs the same local inactive-outcome
+# reconciliation as the watcher poll before it presents the resulting durable
+# wake, without adding a daemon or external-network call.
+# Presented records are this turn's first work queue and remain durable until
+# post-handling acknowledgement. The drain's separate OPEN DECISIONS section
+# remains actionable even when that queue is empty (AGENTS.md sections 3 and 8).
 # The drain also runs fm-guard.sh internally on the locked path, so the
 # tangle/watcher-liveness alarms land right here too, ahead of the bulk digest
 # below. The read-only path never touches the queue because it lacks mutation
-# authority, and another session may be actively draining it. It still runs
+# authority, and another session may be actively handling it. It still runs
 # fm-guard.sh directly with non-mutating advisory text, so the same alarms
 # surface without repair commands.
 stage wake-queue
@@ -601,6 +605,11 @@ if [ "$READ_ONLY" -eq 1 ]; then
   GUARD_OUT=$(FM_GUARD_READ_ONLY=1 "$SCRIPT_DIR/fm-guard.sh" 2>&1)
   [ -n "$GUARD_OUT" ] && printf '%s\n' "$GUARD_OUT"
 else
+  INACTIVE_OUT=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    "$SCRIPT_DIR/fm-inactive-reconcile.sh" scan --startup 2>&1) || INACTIVE_OUT=
+  if [ -n "$INACTIVE_OUT" ]; then
+    printf 'inactive outcome reconciliation: %s\n' "$INACTIVE_OUT"
+  fi
   DRAIN_OUT=$("$SCRIPT_DIR/fm-wake-drain.sh" 2>&1)
   if [ -n "$DRAIN_OUT" ]; then
     printf '%s\n' "$DRAIN_OUT"

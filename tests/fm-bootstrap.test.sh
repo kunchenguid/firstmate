@@ -845,7 +845,7 @@ case "${1:-}" in
       *) printf '%s\n' codex ;;
     esac
     ;;
-  capture-pane) printf '\n' ;;
+  capture-pane) printf '❯\n' ;;
   list-windows) printf '%s\n' fm-sm ;;
 esac
 exit 0

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # fm-supervise-daemon.sh — presence-gated sub-supervisor (closes #27's P2).
 #
-# Wraps bin/fm-watch.sh: runs it as a child, classifies each wake reason, and
+# Wraps bin/fm-watch.sh: runs it as a child, presents and classifies every
+# durable wake after an actionable close, acknowledges only after routing, and
 # either SELF-HANDLES the routine majority in bash (no firstmate turn) or
 # ESCALATES a batched, distilled digest to the supervisor pane on
 # captain-relevant events plus bounded declared-pause rechecks. This is the
@@ -36,8 +37,8 @@
 #     to daemon-owned one-shot behavior and enqueues every wake to
 #     state/.wake-queue BEFORE advancing its suppression markers, so a
 #     crash/restart/missed injection is recovered on the next fm-wake-drain.sh.
-#     The daemon does not touch the queue; it only reads the watcher's stdout
-#     reason.
+#     After a watcher cycle, the daemon handles every durable row through that
+#     drain and acknowledges it only after routing completes.
 #   - Fail-safe-to-escalate: any wake the classifier cannot confidently mark
 #     routine is escalated.
 #   - Bounded wedge latency: a stale pane without a declared external wait is
@@ -98,9 +99,8 @@
 #                                   the watcher is mid-cycle (default 15)
 #          FM_BUSY_REGEX            optional rendered busy-signature override
 #                                   for delivery guards and Grok's fallback
-#          FM_COMPOSER_IDLE_RE      empty-composer regex applied after dim-ghost
-#                                   and structural border stripping (default:
-#                                   bare prompt glyphs plus busy footers)
+#          FM_COMPOSER_IDLE_RE      optional shared classifier override; see
+#                                   docs/configuration.md for its safety gates
 #          FM_MAX_DEFER_SECS        max seconds a buffered escalation may sit
 #                                   undelivered before one normal flush attempt;
 #                                   if that cannot confirm a submit, a wedge
@@ -556,9 +556,11 @@ mark_escalated_seen() {  # <kind> <arg> <state>
 #
 # pane_input_pending returns 0 unless the composer is positively proven empty.
 # This includes real unsubmitted text, ambiguous structure, unreadable state,
-# and future verdicts. The detector drops dim/faint ghost text and strips the
-# harness's composer box borders, so an aligned ghost-only or idle bordered
-# claude composer ("│ > … │") is correctly proven empty.
+# blank or otherwise unidentified rows (the strict container-proof rule owned
+# by bin/fm-composer-lib.sh), and future verdicts. The detector drops
+# dim/faint ghost text and strips the harness's composer box borders, so an
+# aligned ghost-only or idle bordered claude composer ("│ > … │") is correctly
+# proven empty while a modal dialog or dead shell never is.
 # pane_is_busy / pane_input_pending: BACKEND-AWARE (dispatch goes through
 # bin/fm-backend.sh's generic per-backend primitives rather than a hand-rolled
 # case statement here). <backend> defaults to tmux when omitted, so every
@@ -1278,6 +1280,39 @@ handle_wake() {  # <reason> <state>
   esac
 }
 
+handle_durable_wakes() {  # <watcher-reason> <state>
+  local fallback_reason=$1 state=$2 out err tab epoch sequence kind key payload rest
+  local handled=0 ack_through ack_generation
+  out=$(mktemp "$state/.subsuper-wake-drain.XXXXXX") || return 1
+  err=$(mktemp "$state/.subsuper-wake-drain.XXXXXX") || { rm -f "$out"; return 1; }
+  if ! "$FM_DAEMON_DIR/fm-wake-drain.sh" > "$out" 2> "$err"; then
+    cat "$err" >&2
+    rm -f "$out" "$err"
+    return 1
+  fi
+
+  tab=$(printf '\t')
+  while IFS="$tab" read -r epoch sequence kind key payload rest; do
+    case "$epoch" in ''|*[!0-9]*) continue ;; esac
+    case "$sequence" in ''|*[!0-9]*) continue ;; esac
+    case "$kind" in signal|stale|check|heartbeat) ;; *) continue ;; esac
+    handle_wake "$payload" "$state"
+    handled=$((handled + 1))
+  done < "$out"
+  [ "$handled" -gt 0 ] || handle_wake "$fallback_reason" "$state"
+
+  ack_through=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$err" | tail -1)
+  ack_generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err" | tail -1)
+  grep -v '^WAKE_ACK_REQUIRED:' "$err" >&2 || true
+  rm -f "$out" "$err"
+  if [ -z "$ack_through" ] || [ -z "$ack_generation" ]; then
+    log "wake drain omitted its generation-bound acknowledgement; retaining durable wakes"
+    return 1
+  fi
+  "$FM_DAEMON_DIR/fm-wake-drain.sh" --ack-through "$ack_through" \
+    --recovery-generation "$ack_generation"
+}
+
 # --- log --------------------------------------------------------------------
 # Uses LOG set by fm_super_main; harmless no-op-ish if unset (tests source fns
 # directly and pass state explicitly, so they do not call log).
@@ -1504,7 +1539,9 @@ fm_super_main() {
           continue
         fi
         log "wake: $reason"
-        handle_wake "$reason" "$STATE"
+        if ! handle_durable_wakes "$reason" "$STATE"; then
+          log "durable wake handling was not acknowledged; restarting for recovery"
+        fi
         trim_log
       fi
       start_watcher || continue
