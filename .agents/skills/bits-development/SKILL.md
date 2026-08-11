@@ -49,7 +49,8 @@ Read this evidence from the live forge and BITS, never from memory or from a sta
 
 Decide, per Dev Task, whether to create a new one or reuse an existing one before running any write.
 Read the current landscape first with the read-only BITS surfaces (Dev Task list, changes content, project list, Change Card list, pipeline and run reads) owned by the bytedcli BITS skill.
-Reuse an existing Dev Task, project, or Change Card when one already covers the exact repository, source, and target; create only when nothing correct exists.
+Reuse an existing Dev Task or Change Card only when the current Dev Task is eligible for the intended mutation and its stable MR identity, intended exact head, repository, source, and target all match the live evidence; the only MR-less alternative is the pinned release-train creation path for a Dev Task that does not yet exist.
+Reuse an existing project only when its live identity and branch match the intended delivery, and create only when no correct object exists.
 When the correct choice is ambiguous, stop and escalate rather than creating a parallel Dev Task that fragments the work.
 
 ## The write discipline
@@ -64,8 +65,9 @@ Every live BITS mutation uses exactly one of these two pre-write paths and then 
 1. Full-snapshot preservation: attach, detach, and Change Card writes rewrite a whole snapshot, so preserve `changes`, `projects`, `versionCode`, and every unknown field; never overwrite or drop a field you did not intend to change.
 2. Exact dry-run review: inspect the owner's exact prepare or dry-run payload before submission, confirming repository, source, target, project type, control plane, and any existing MR identity are precisely what you intend.
 3. Explicit authority for each live write: obtain the authority each live write requires under `AGENTS.md` section 7 before adding `--yes`; one approval authorizes one exact target, not a later changed one.
-4. Independent post-write readback: for the creation path, independently read back the resulting Dev Task and its pre-existing or auto-created MR and verify task identity plus MR identity, repository, source, exact head, and target before binding or continuing; for the existing-object path, re-read the Dev Task, projects, Change Cards, MR bindings, and pipeline or job state from BITS and confirm the immutable fields match what you intended.
-   API acceptance is not success until the applicable independent read confirms it.
+4. Independent post-write readback: after creation or mutation, independently re-read the resulting Dev Task, every project and Change Card, MR bindings, any pre-existing or auto-created MR, and relevant pipeline or job state from BITS.
+   Compare the complete intended mutation and every field confirmed or preserved from the applicable pre-write snapshot, including all changes, projects, bindings, attachments, triggers, `versionCode`, unknown fields, identities, repositories, sources, exact heads, and targets; stop before binding or continuing on any omission, no-op, or mismatch.
+   API acceptance is not success until the applicable independent read confirms the complete result.
 5. Timeout is outcome-unknown: treat a timeout or lost connection after transmitting a write as outcome-unknown, never as failure and never as success; reconcile by readback of the exact target before any retry, and never blindly re-issue a create.
 
 Bind a merge request by its stable identity, never by a moving branch head.
