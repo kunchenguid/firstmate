@@ -61,19 +61,154 @@ require_clean() {
   [ -z "$status" ] || die "$label is dirty; refusing merge execution"
 }
 
+# Print one provider-tagged repository identity for a strict GitHub remote URL.
+# Case is folded because GitHub owner and repository identity is case-insensitive.
+github_repository_identity() {
+  python3 - "$1" <<'PY'
+import re
+import sys
+import urllib.parse
+
+
+url = sys.argv[1]
+if "?" in url or "#" in url:
+    raise SystemExit(1)
+scp = re.fullmatch(r"git@github\.com:([^/?#]+/[^/?#]+)", url, re.IGNORECASE)
+if scp:
+    path = scp.group(1)
+else:
+    try:
+        parsed = urllib.parse.urlsplit(url)
+        port = parsed.port
+    except ValueError:
+        raise SystemExit(1)
+    scheme = parsed.scheme.lower()
+    if scheme not in {"http", "https", "ssh"}:
+        raise SystemExit(1)
+    if (parsed.hostname or "").lower() != "github.com" or port is not None:
+        raise SystemExit(1)
+    if parsed.password is not None or parsed.query or parsed.fragment:
+        raise SystemExit(1)
+    if scheme == "ssh":
+        if parsed.username != "git":
+            raise SystemExit(1)
+    elif parsed.username is not None:
+        raise SystemExit(1)
+    path = parsed.path.removeprefix("/")
+
+path = path.removesuffix("/")
+if path.lower().endswith(".git"):
+    path = path[:-4]
+parts = path.split("/")
+owner_pattern = r"(?:[A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9-]{0,37}[A-Za-z0-9])"
+repo_pattern = r"[A-Za-z0-9._-]{1,100}"
+if len(parts) != 2 or re.fullmatch(owner_pattern, parts[0]) is None:
+    raise SystemExit(1)
+if "--" in parts[0] or re.fullmatch(repo_pattern, parts[1]) is None:
+    raise SystemExit(1)
+if parts[1] in {".", ".."}:
+    raise SystemExit(1)
+print(f"github\tgithub.com\t{parts[0].lower()}/{parts[1].lower()}")
+PY
+}
+
+# The origin cloned by fm-home-seed.sh owns cross-clone source identity.
+# Exactly one local origin URL is required so remotes with similar names cannot
+# supply or override identity evidence.
+checkout_repository_identity() {
+  local root=$1 label=$2 urls count identity
+  urls=$(git -C "$root" config --local --get-all remote.origin.url 2>/dev/null || true)
+  count=$(git -C "$root" config --local --get-all remote.origin.url 2>/dev/null \
+    | awk 'END { print NR + 0 }')
+  [ "$count" -eq 1 ] && [ -n "$urls" ] \
+    || die "$label canonical repository identity is missing or ambiguous"
+  identity=$(github_repository_identity "$urls") \
+    || die "$label origin is not an unambiguous github.com repository identity"
+  printf '%s\n' "$identity"
+}
+
+require_cross_clone_project_ownership() {
+  local state_dir home project_top home_projects project_parent
+  [ -d "$STATE" ] && [ ! -L "$STATE" ] \
+    || die "task state home is unavailable"
+  state_dir=$(cd "$STATE" 2>/dev/null && pwd -P) || die "task state home is unavailable"
+  [ "$(basename "$state_dir")" = state ] \
+    || die "task state directory does not identify an active Firstmate home"
+  home=$(dirname "$state_dir")
+  project_top=$(cd "$PROJECT" 2>/dev/null && pwd -P) \
+    || die "cannot resolve task project ownership"
+  # Project-less secondmates own the repository at the home root itself.
+  [ "$project_top" != "$home" ] || return 0
+  # Provisioned project clones have exactly one path component below projects/.
+  home_projects="$home/projects"
+  [ -d "$home_projects" ] && [ ! -L "$home_projects" ] \
+    || die "task project metadata is not owned by the active Firstmate home"
+  home_projects=$(cd "$home_projects" && pwd -P)
+  project_parent=$(cd "$(dirname "$PROJECT")" 2>/dev/null && pwd -P) \
+    || die "cannot resolve task project ownership"
+  [ "$project_parent" = "$home_projects" ] \
+    || die "task project metadata is not owned by the active Firstmate home"
+}
+
 require_repository_state() {
-  local worktree_top project_top worktree_common project_common
+  local worktree_top project_top expected_identity
   [ -d "$WORKTREE" ] && [ ! -L "$WORKTREE" ] || die "task worktree is unavailable"
   [ -d "$PROJECT" ] && [ ! -L "$PROJECT" ] || die "task project checkout is unavailable"
   worktree_top=$(git_top "$WORKTREE") || die "task worktree is not a git checkout"
   project_top=$(git_top "$PROJECT") || die "task project is not a git checkout"
   [ "$(cd "$WORKTREE" && pwd -P)" = "$(cd "$worktree_top" && pwd -P)" ] || die "task worktree path does not match its git top-level"
   [ "$(cd "$PROJECT" && pwd -P)" = "$(cd "$project_top" && pwd -P)" ] || die "task project path does not match its git top-level"
-  worktree_common=$(git_common "$WORKTREE") || die "cannot resolve task worktree repository"
-  project_common=$(git_common "$PROJECT") || die "cannot resolve task project repository"
-  [ "$worktree_common" = "$project_common" ] || die "task worktree and project metadata name different repositories"
+  WORKTREE_COMMON=$(git_common "$WORKTREE") || die "cannot resolve task worktree repository"
+  PROJECT_COMMON=$(git_common "$PROJECT") || die "cannot resolve task project repository"
+  CROSS_CLONE_IDENTITY=0
+  WORKTREE_REPOSITORY_IDENTITY=
+  PROJECT_REPOSITORY_IDENTITY=
+  if [ "$WORKTREE_COMMON" != "$PROJECT_COMMON" ]; then
+    [ "$ENTRY" = github ] \
+      || die "task worktree and project metadata name different repositories"
+    require_cross_clone_project_ownership
+    WORKTREE_REPOSITORY_IDENTITY=$(checkout_repository_identity "$WORKTREE" "task worktree")
+    PROJECT_REPOSITORY_IDENTITY=$(checkout_repository_identity "$PROJECT" "task project")
+    expected_identity=$(github_repository_identity "https://github.com/$PR_OWNER/$PR_REPO.git") \
+      || die "cannot resolve the requested PR repository identity"
+    [ "$WORKTREE_REPOSITORY_IDENTITY" = "$PROJECT_REPOSITORY_IDENTITY" ] \
+      && [ "$PROJECT_REPOSITORY_IDENTITY" = "$expected_identity" ] \
+      || die "task worktree, project metadata, and requested PR name different repositories"
+    CROSS_CLONE_IDENTITY=1
+  fi
   require_clean "$WORKTREE" "task worktree"
   require_clean "$PROJECT" "project checkout"
+}
+
+require_repository_identity_unchanged() {
+  local worktree_common project_common worktree_identity project_identity expected_identity
+  [ "$CROSS_CLONE_IDENTITY" -eq 1 ] || return 0
+  [ -f "$META" ] && [ ! -L "$META" ] \
+    || die "task metadata changed during merge verification"
+  [ "$(meta_value worktree)" = "$WORKTREE" ] \
+    && [ "$(meta_value project)" = "$PROJECT" ] \
+    && [ "$(meta_value kind)" = "$KIND" ] \
+    && [ "$(meta_value mode)" = "$MODE" ] \
+    && [ "$(meta_value pr)" = "$URL" ] \
+    && [ "$(meta_optional_value pr_head)" = "$recorded_head" ] \
+    || die "task metadata changed during merge verification"
+  require_cross_clone_project_ownership
+  worktree_common=$(git_common "$WORKTREE") \
+    || die "task worktree repository identity changed during merge verification"
+  project_common=$(git_common "$PROJECT") \
+    || die "task project repository identity changed during merge verification"
+  [ "$worktree_common" = "$WORKTREE_COMMON" ] \
+    && [ "$project_common" = "$PROJECT_COMMON" ] \
+    || die "repository identity changed during merge verification"
+  worktree_identity=$(checkout_repository_identity "$WORKTREE" "task worktree")
+  project_identity=$(checkout_repository_identity "$PROJECT" "task project")
+  expected_identity=$(github_repository_identity "https://github.com/$PR_OWNER/$PR_REPO.git") \
+    || die "cannot resolve the requested PR repository identity"
+  [ "$worktree_identity" = "$WORKTREE_REPOSITORY_IDENTITY" ] \
+    && [ "$project_identity" = "$PROJECT_REPOSITORY_IDENTITY" ] \
+    && [ "$worktree_identity" = "$project_identity" ] \
+    && [ "$project_identity" = "$expected_identity" ] \
+    || die "repository identity changed during merge verification"
 }
 
 ensure_repository_lock() {
@@ -687,6 +822,7 @@ execute_github() {
     require_clean "$WORKTREE" "task worktree"
     require_clean "$PROJECT" "project checkout"
     [ "$(git -C "$WORKTREE" rev-parse HEAD)" = "$head" ] || die "task worktree HEAD changed during merge verification"
+    require_repository_identity_unchanged
     merge_output=$(gh-axi api PUT "/repos/$PR_OWNER/$PR_REPO/pulls/$PR_NUMBER/merge" --field "sha=$head" --field "merge_method=$MERGE_METHOD") || die "GitHub rejected the exact conditional merge"
     [ "$(api_value merged "$merge_output")" = true ] || die "GitHub did not merge the verified candidate"
     if [ "$DELETE_BRANCH" -eq 1 ]; then
@@ -754,6 +890,7 @@ execute_github() {
 $candidate_commits
 EOF
   fi
+  require_repository_identity_unchanged
   merge_output=$(gh-axi api PUT "/repos/$PR_OWNER/$PR_REPO/pulls/$PR_NUMBER/merge" --field "sha=$head" --field "merge_method=$MERGE_METHOD" --jq '{merged: .merged, sha: .sha} | @base64') \
     || die "GitHub rejected the exact conditional merge"
   merge_values=$(decode_github_merge_object "$merge_output" result) || die "GitHub returned malformed merge confirmation data"

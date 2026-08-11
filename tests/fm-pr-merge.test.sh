@@ -37,9 +37,44 @@ EOF
   printf '%s\n%s\n%s\n' "$case_dir" "$base" "$candidate"
 }
 
+make_secondmate_cross_clone_case() {
+  local name=$1 shape=${2:-projectless} values case_dir base candidate secondmate_home secondmate_project state_dir
+  values=$(make_case "$name")
+  case_dir=$(printf '%s\n' "$values" | sed -n '1p')
+  base=$(printf '%s\n' "$values" | sed -n '2p')
+  candidate=$(printf '%s\n' "$values" | sed -n '3p')
+  secondmate_home="$case_dir/secondmate-home"
+  case "$shape" in
+    projectless)
+      secondmate_project=$secondmate_home
+      ;;
+    provisioned)
+      secondmate_project="$secondmate_home/projects/repo"
+      mkdir -p "$(dirname "$secondmate_project")"
+      ;;
+    *) fail "unknown secondmate fixture shape: $shape" ;;
+  esac
+  git clone --quiet "$case_dir/project" "$secondmate_project"
+  state_dir="$secondmate_home/state"
+  mkdir -p "$state_dir"
+  if [ "$shape" = projectless ]; then
+    printf '/state/\n' >> "$secondmate_home/.git/info/exclude"
+  fi
+  git -C "$case_dir/project" remote add origin https://github.com/example/repo.git
+  git -C "$secondmate_project" remote set-url origin git@github.com:example/repo.git
+  fm_write_meta "$state_dir/task-x1.meta" \
+    "window=fm-task-x1" \
+    "worktree=$case_dir/wt" \
+    "project=$secondmate_project" \
+    "kind=ship" \
+    "mode=direct-PR"
+  printf '%s\n%s\n%s\n%s\n%s\n' "$case_dir" "$base" "$candidate" "$secondmate_project" "$state_dir"
+}
+
 run_local_merge() {
-  local case_dir=$1
-  FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" "$MERGE_EXECUTE" local task-x1
+  local case_dir=$1 state_dir
+  state_dir=${FM_TEST_CASE_STATE:-$case_dir/state}
+  FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state_dir" "$MERGE_EXECUTE" local task-x1
 }
 
 run_local_merge_with_path() {
@@ -150,6 +185,9 @@ case "${1:-} ${2:-}" in
     api_head=$FM_TEST_GH_API_HEAD
     api_base=$FM_TEST_GH_BASE
     protection=${FM_TEST_GH_PROTECTION:-protected}
+    if [ "$post_count" -eq 1 ] && [ -n "${FM_TEST_GH_IDENTITY_RACE_PROJECT:-}" ]; then
+      git -C "$FM_TEST_GH_IDENTITY_RACE_PROJECT" remote set-url origin "$FM_TEST_GH_IDENTITY_RACE_URL"
+    fi
     if [ "$post_count" -gt 1 ]; then
       api_head=${FM_TEST_GH_API_HEAD_AFTER:-$api_head}
       api_base=${FM_TEST_GH_BASE_AFTER:-$api_base}
@@ -305,7 +343,8 @@ SH
 
 run_github_merge() {
   local case_dir=$1 head=$2 api_head=$3 base=$4 method=${5:-merge} path_prefix=${6:-}
-  FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+  local state_dir=${FM_TEST_CASE_STATE:-$case_dir/state}
+  FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state_dir" \
     FM_TEST_GH_HEAD="$head" FM_TEST_GH_API_HEAD="$api_head" FM_TEST_GH_BASE="$base" \
     FM_TEST_GH_API_HEAD_AFTER="${FM_TEST_GH_API_HEAD_AFTER:-}" \
     FM_TEST_GH_BASE_AFTER="${FM_TEST_GH_BASE_AFTER:-}" \
@@ -317,6 +356,8 @@ run_github_merge() {
     FM_TEST_GH_METHOD="$method" \
     FM_TEST_GH_REBASE_AHEAD="${FM_TEST_GH_REBASE_AHEAD:-}" \
     FM_TEST_GH_REBASE_FIRST="${FM_TEST_GH_REBASE_FIRST:-}" \
+    FM_TEST_GH_IDENTITY_RACE_PROJECT="${FM_TEST_GH_IDENTITY_RACE_PROJECT:-}" \
+    FM_TEST_GH_IDENTITY_RACE_URL="${FM_TEST_GH_IDENTITY_RACE_URL:-}" \
     FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" PATH="$path_prefix$case_dir/fakebin:$PATH" \
     "$PR_MERGE" task-x1 https://github.com/example/repo/pull/9 -- "--$method"
 }
@@ -335,6 +376,8 @@ run_github_execute() {
     FM_TEST_GH_METHOD="$method" \
     FM_TEST_GH_REBASE_AHEAD="${FM_TEST_GH_REBASE_AHEAD:-}" \
     FM_TEST_GH_REBASE_FIRST="${FM_TEST_GH_REBASE_FIRST:-}" \
+    FM_TEST_GH_IDENTITY_RACE_PROJECT="${FM_TEST_GH_IDENTITY_RACE_PROJECT:-}" \
+    FM_TEST_GH_IDENTITY_RACE_URL="${FM_TEST_GH_IDENTITY_RACE_URL:-}" \
     FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" PATH="$path_prefix$case_dir/fakebin:$PATH" \
     "$MERGE_EXECUTE" github task-x1 https://github.com/example/repo/pull/9 -- "--$method"
 }
@@ -526,6 +569,233 @@ test_github_merge_uses_verified_exact_sha() {
   [ "$(grep -c '^api POST ' "$case_dir/gh-axi.log")" -eq 1 ] \
     || fail "protected GitHub merge changed the legacy request sequence"
   pass "GitHub merge conditions its REST request on the verified candidate SHA"
+}
+
+test_secondmate_cross_clone_github_merge_accepts_same_repository() {
+  local values case_dir base candidate secondmate_project state_dir pooled_common home_common
+  values=$(make_secondmate_cross_clone_case secondmate-cross-clone-projectless)
+  case_dir=$(printf '%s\n' "$values" | sed -n '1p')
+  base=$(printf '%s\n' "$values" | sed -n '2p')
+  candidate=$(printf '%s\n' "$values" | sed -n '3p')
+  secondmate_project=$(printf '%s\n' "$values" | sed -n '4p')
+  state_dir=$(printf '%s\n' "$values" | sed -n '5p')
+  [ "$secondmate_project" = "$(dirname "$state_dir")" ] \
+    || fail "project-less fixture did not name the secondmate home root as project metadata"
+  grep -qxF "project=$secondmate_project" "$state_dir/task-x1.meta" \
+    || fail "project-less fixture did not reproduce the handed-off project metadata"
+  pooled_common=$(git -C "$case_dir/wt" rev-parse --path-format=absolute --git-common-dir)
+  home_common=$(git -C "$secondmate_project" rev-parse --path-format=absolute --git-common-dir)
+  [ "$pooled_common" != "$home_common" ] \
+    || fail "project-less fixture did not exercise the cross-clone repository refusal"
+  add_github_mocks "$case_dir"
+  FM_TEST_CASE_STATE="$state_dir" \
+    run_github_merge "$case_dir" "$candidate" "$candidate" "$base" >"$case_dir/out" 2>"$case_dir/err" \
+    || fail "guarded merge refused the project-less secondmate home and equivalent pooled worktree: $(cat "$case_dir/err")"
+  grep -qxF "api PUT /repos/example/repo/pulls/9/merge --field sha=$candidate --field merge_method=merge" "$case_dir/gh-axi.log" \
+    || fail "cross-clone merge did not retain the exact-candidate mutation"
+  pass "guarded merge accepts the project-less secondmate home and pooled worktree for the same repository"
+}
+
+test_provisioned_secondmate_cross_clone_github_merge_accepts_same_repository() {
+  local values case_dir base candidate secondmate_project state_dir
+  values=$(make_secondmate_cross_clone_case secondmate-cross-clone-provisioned provisioned)
+  case_dir=$(printf '%s\n' "$values" | sed -n '1p')
+  base=$(printf '%s\n' "$values" | sed -n '2p')
+  candidate=$(printf '%s\n' "$values" | sed -n '3p')
+  secondmate_project=$(printf '%s\n' "$values" | sed -n '4p')
+  state_dir=$(printf '%s\n' "$values" | sed -n '5p')
+  add_github_mocks "$case_dir"
+  FM_TEST_CASE_STATE="$state_dir" \
+    run_github_merge "$case_dir" "$candidate" "$candidate" "$base" >"$case_dir/out" 2>"$case_dir/err" \
+    || fail "guarded merge refused an equivalent provisioned secondmate clone: $(cat "$case_dir/err")"
+  grep -qxF "api PUT /repos/example/repo/pulls/9/merge --field sha=$candidate --field merge_method=merge" "$case_dir/gh-axi.log" \
+    || fail "provisioned cross-clone merge did not retain the exact-candidate mutation"
+  [ "$(dirname "$secondmate_project")" = "$(dirname "$state_dir")/projects" ] \
+    || fail "provisioned fixture did not use the seeded project path contract"
+  pass "guarded merge accepts an immediate provisioned project clone for the same repository"
+}
+
+test_cross_clone_merge_refuses_different_repositories() {
+  local values case_dir base candidate secondmate_project state_dir variant rc
+  for variant in similar-repository same-name-other-owner similar-host qualified-url; do
+    values=$(make_secondmate_cross_clone_case "cross-clone-$variant")
+    case_dir=$(printf '%s\n' "$values" | sed -n '1p')
+    base=$(printf '%s\n' "$values" | sed -n '2p')
+    candidate=$(printf '%s\n' "$values" | sed -n '3p')
+    secondmate_project=$(printf '%s\n' "$values" | sed -n '4p')
+    state_dir=$(printf '%s\n' "$values" | sed -n '5p')
+    case "$variant" in
+      similar-repository)
+        git -C "$secondmate_project" remote set-url origin https://github.com/example/repo-tools.git
+        ;;
+      same-name-other-owner)
+        git -C "$secondmate_project" remote set-url origin https://github.com/example-tools/repo.git
+        ;;
+      similar-host)
+        git -C "$secondmate_project" remote set-url origin https://github.com.example/example/repo.git
+        ;;
+      qualified-url)
+        git -C "$secondmate_project" remote set-url origin 'https://github.com/example/repo.git?mirror'
+        ;;
+    esac
+    git -C "$secondmate_project" remote add lookalike https://github.com/example/repo.git
+    add_github_mocks "$case_dir"
+    set +e
+    FM_TEST_CASE_STATE="$state_dir" \
+      run_github_merge "$case_dir" "$candidate" "$candidate" "$base" >"$case_dir/out" 2>"$case_dir/err"
+    rc=$?
+    set -e
+    expect_code 1 "$rc" "$variant cross-clone identity must refuse merging"
+    ! grep -q '^api PUT ' "$case_dir/gh-axi.log" \
+      || fail "$variant cross-clone identity reached the merge mutation"
+  done
+  pass "cross-clone merge refuses similar paths, owners, hosts, qualified URLs, and non-origin evidence"
+}
+
+test_cross_clone_merge_refuses_missing_or_ambiguous_identity() {
+  local values case_dir base candidate secondmate_project state_dir variant rc
+  for variant in missing ambiguous; do
+    values=$(make_secondmate_cross_clone_case "cross-clone-$variant-identity")
+    case_dir=$(printf '%s\n' "$values" | sed -n '1p')
+    base=$(printf '%s\n' "$values" | sed -n '2p')
+    candidate=$(printf '%s\n' "$values" | sed -n '3p')
+    secondmate_project=$(printf '%s\n' "$values" | sed -n '4p')
+    state_dir=$(printf '%s\n' "$values" | sed -n '5p')
+    if [ "$variant" = missing ]; then
+      git -C "$secondmate_project" remote remove origin
+      git -C "$secondmate_project" remote add upstream https://github.com/example/repo.git
+    else
+      git -C "$secondmate_project" config --add remote.origin.url https://github.com/example/repo.git
+    fi
+    add_github_mocks "$case_dir"
+    set +e
+    FM_TEST_CASE_STATE="$state_dir" \
+      run_github_merge "$case_dir" "$candidate" "$candidate" "$base" >"$case_dir/out" 2>"$case_dir/err"
+    rc=$?
+    set -e
+    expect_code 1 "$rc" "$variant cross-clone identity must refuse merging"
+    assert_grep 'canonical repository identity is missing or ambiguous' "$case_dir/err" \
+      "$variant cross-clone identity refusal was unclear"
+    ! grep -q '^api PUT ' "$case_dir/gh-axi.log" \
+      || fail "$variant cross-clone identity reached the merge mutation"
+  done
+  pass "cross-clone merge refuses missing and ambiguous canonical origin identity"
+}
+
+test_cross_clone_merge_refuses_stale_home_metadata() {
+  local values case_dir base candidate state_dir stale_project rc
+  values=$(make_secondmate_cross_clone_case cross-clone-stale-home)
+  case_dir=$(printf '%s\n' "$values" | sed -n '1p')
+  base=$(printf '%s\n' "$values" | sed -n '2p')
+  candidate=$(printf '%s\n' "$values" | sed -n '3p')
+  state_dir=$(printf '%s\n' "$values" | sed -n '5p')
+  stale_project="$case_dir/retired-home"
+  git clone --quiet "$case_dir/project" "$stale_project"
+  git -C "$stale_project" remote set-url origin https://github.com/example/repo.git
+  fm_write_meta "$state_dir/task-x1.meta" \
+    "window=fm-task-x1" \
+    "worktree=$case_dir/wt" \
+    "project=$stale_project" \
+    "kind=ship" \
+    "mode=direct-PR"
+  add_github_mocks "$case_dir"
+  set +e
+  FM_TEST_CASE_STATE="$state_dir" \
+    run_github_merge "$case_dir" "$candidate" "$candidate" "$base" >"$case_dir/out" 2>"$case_dir/err"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "stale cross-home project metadata must refuse merging"
+  assert_grep 'not owned by the active Firstmate home' "$case_dir/err" \
+    "stale cross-home project metadata refusal was unclear"
+  ! grep -q '^api PUT ' "$case_dir/gh-axi.log" \
+    || fail "stale cross-home project metadata reached the merge mutation"
+  pass "cross-clone merge refuses stale project metadata from another Firstmate home"
+}
+
+test_cross_clone_merge_refuses_unowned_home_paths() {
+  local values case_dir base candidate state_dir home unowned_project variant rc
+  for variant in home-sibling nested-project; do
+    values=$(make_secondmate_cross_clone_case "cross-clone-unowned-$variant")
+    case_dir=$(printf '%s\n' "$values" | sed -n '1p')
+    base=$(printf '%s\n' "$values" | sed -n '2p')
+    candidate=$(printf '%s\n' "$values" | sed -n '3p')
+    state_dir=$(printf '%s\n' "$values" | sed -n '5p')
+    home=$(dirname "$state_dir")
+    case "$variant" in
+      home-sibling) unowned_project="$home/repo" ;;
+      nested-project) unowned_project="$home/projects/team/repo" ;;
+    esac
+    mkdir -p "$(dirname "$unowned_project")"
+    git clone --quiet "$case_dir/project" "$unowned_project"
+    git -C "$unowned_project" remote set-url origin https://github.com/example/repo.git
+    fm_write_meta "$state_dir/task-x1.meta" \
+      "window=fm-task-x1" \
+      "worktree=$case_dir/wt" \
+      "project=$unowned_project" \
+      "kind=ship" \
+      "mode=direct-PR"
+    add_github_mocks "$case_dir"
+    set +e
+    FM_TEST_CASE_STATE="$state_dir" \
+      run_github_merge "$case_dir" "$candidate" "$candidate" "$base" >"$case_dir/out" 2>"$case_dir/err"
+    rc=$?
+    set -e
+    expect_code 1 "$rc" "$variant project path must not satisfy secondmate home ownership"
+    assert_grep 'not owned by the active Firstmate home' "$case_dir/err" \
+      "$variant project path refusal was unclear"
+    ! grep -q '^api PUT ' "$case_dir/gh-axi.log" \
+      || fail "$variant project path reached the merge mutation"
+  done
+  pass "cross-clone merge accepts only the home root or one immediate seeded project path"
+}
+
+test_cross_clone_merge_refuses_midflight_identity_change() {
+  local values case_dir base candidate secondmate_project state_dir rc
+  values=$(make_secondmate_cross_clone_case cross-clone-identity-race)
+  case_dir=$(printf '%s\n' "$values" | sed -n '1p')
+  base=$(printf '%s\n' "$values" | sed -n '2p')
+  candidate=$(printf '%s\n' "$values" | sed -n '3p')
+  secondmate_project=$(printf '%s\n' "$values" | sed -n '4p')
+  state_dir=$(printf '%s\n' "$values" | sed -n '5p')
+  add_github_mocks "$case_dir"
+  set +e
+  FM_TEST_CASE_STATE="$state_dir" \
+    FM_TEST_GH_IDENTITY_RACE_PROJECT="$secondmate_project" \
+    FM_TEST_GH_IDENTITY_RACE_URL=https://github.com/example/repo-tools.git \
+    run_github_merge "$case_dir" "$candidate" "$candidate" "$base" >"$case_dir/out" 2>"$case_dir/err"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "mid-flight cross-clone identity change must refuse merging"
+  assert_grep 'repository identity changed during merge verification' "$case_dir/err" \
+    "mid-flight repository identity refusal was unclear"
+  ! grep -q '^api PUT ' "$case_dir/gh-axi.log" \
+    || fail "mid-flight repository identity change reached the merge mutation"
+  pass "cross-clone merge revalidates repository identity immediately before mutation"
+}
+
+test_local_merge_still_refuses_cross_clone_identity() {
+  local values case_dir base secondmate_project state_dir rc
+  values=$(make_secondmate_cross_clone_case local-cross-clone)
+  case_dir=$(printf '%s\n' "$values" | sed -n '1p')
+  base=$(printf '%s\n' "$values" | sed -n '2p')
+  secondmate_project=$(printf '%s\n' "$values" | sed -n '4p')
+  state_dir=$(printf '%s\n' "$values" | sed -n '5p')
+  fm_write_meta "$state_dir/task-x1.meta" \
+    "window=fm-task-x1" \
+    "worktree=$case_dir/wt" \
+    "project=$secondmate_project" \
+    "kind=ship" \
+    "mode=local-only"
+  set +e
+  FM_TEST_CASE_STATE="$state_dir" run_local_merge "$case_dir" >"$case_dir/out" 2>"$case_dir/err"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "local merge must not accept cross-clone repository identity"
+  [ "$(git -C "$case_dir/project" rev-parse main)" = "$base" ] \
+    || fail "refused local cross-clone identity advanced the main-home project"
+  assert_grep 'task worktree and project metadata name different repositories' "$case_dir/err" \
+    "local cross-clone identity changed the existing wrong-repository refusal"
+  pass "local merge retains the exact common-repository requirement"
 }
 
 test_github_merge_capture_without_shim_preserves_request_sequence() {
@@ -989,6 +1259,14 @@ test_unchanged_path_drift_is_preserved
 test_prepared_transaction_drift_is_preserved
 test_wrong_branch_transaction_is_refused
 test_github_merge_uses_verified_exact_sha
+test_secondmate_cross_clone_github_merge_accepts_same_repository
+test_provisioned_secondmate_cross_clone_github_merge_accepts_same_repository
+test_cross_clone_merge_refuses_different_repositories
+test_cross_clone_merge_refuses_missing_or_ambiguous_identity
+test_cross_clone_merge_refuses_stale_home_metadata
+test_cross_clone_merge_refuses_unowned_home_paths
+test_cross_clone_merge_refuses_midflight_identity_change
+test_local_merge_still_refuses_cross_clone_identity
 test_github_merge_capture_without_shim_preserves_request_sequence
 test_github_merge_capture_bypasses_installed_shim
 test_github_merge_capture_bypasses_foreign_current_shim
