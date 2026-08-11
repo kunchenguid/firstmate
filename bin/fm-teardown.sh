@@ -804,9 +804,9 @@ LEGACY_DETACHED_SCRATCH_ARCHIVE=
 LEGACY_DETACHED_RESUME=0
 legacy_detached_exact_landed_proof() {
   local view state merge target head_name head_oid head_repository base_repository url extra
-  local repository_view repository default default_ref parent_line parent_count
+  local repository_view repository default canonical_default_oid default_ref parent_line parent_count
   local base_identity canonical_base_identity head_identity origin_identity origin_urls origin_count base_url
-  local source_remote source_remotes source_remote_count source_urls source_url_count source_identity
+  local base_owner base_name source_remote source_remotes source_urls source_url_count source_identity
   local merge_parent candidate_commits candidate_first candidate_base candidate_head
   local candidate_patch merge_patch diff_rc
 
@@ -853,45 +853,48 @@ legacy_detached_exact_landed_proof() {
     return 1
   fi
   if [ "$head_identity" != "$base_identity" ]; then
-    source_remotes=$(git -C "$WT" config --local --get-all "branch.fm/$ID.remote" 2>/dev/null || true)
-    source_remote_count=$(git -C "$WT" config --local --get-all "branch.fm/$ID.remote" 2>/dev/null \
-      | awk 'END { print NR + 0 }')
-    case "$source_remotes" in
-      ''|.|*[!A-Za-z0-9._-]*) source_remote_count=0 ;;
-    esac
-    if [ "$source_remote_count" -ne 1 ]; then
-      echo "REFUSED: detached task $ID fork source remote is missing or ambiguous; preserving task state." >&2
-      return 1
-    fi
-    source_remote=$source_remotes
-    source_urls=$(git -C "$WT" config --local --get-all "remote.$source_remote.url" 2>/dev/null || true)
-    source_url_count=$(git -C "$WT" config --local --get-all "remote.$source_remote.url" 2>/dev/null \
-      | awk 'END { print NR + 0 }')
-    if [ "$source_url_count" -ne 1 ] || [ -z "$source_urls" ]; then
-      echo "REFUSED: detached task $ID fork source identity is missing or ambiguous; preserving task state." >&2
-      return 1
-    fi
-    source_identity=$(github_repository_identity "$source_urls") || {
-      echo "REFUSED: detached task $ID fork source is not a canonical GitHub repository identity; preserving task state." >&2
+    source_remotes=$(git -C "$WT" remote 2>/dev/null) || {
+      echo "REFUSED: cannot inspect detached task $ID fork source repositories; preserving task state." >&2
       return 1
     }
+    source_identity=
+    while IFS= read -r source_remote; do
+      case "$source_remote" in
+        ''|*[!A-Za-z0-9._-]*) continue ;;
+      esac
+      source_urls=$(git -C "$WT" config --local --get-all "remote.$source_remote.url" 2>/dev/null || true)
+      source_url_count=$(git -C "$WT" config --local --get-all "remote.$source_remote.url" 2>/dev/null \
+        | awk 'END { print NR + 0 }')
+      [ "$source_url_count" -eq 1 ] && [ -n "$source_urls" ] || continue
+      source_identity=$(github_repository_identity "$source_urls" 2>/dev/null) || {
+        source_identity=
+        continue
+      }
+      [ "$source_identity" = "$head_identity" ] && break
+      source_identity=
+    done <<< "$source_remotes"
     if [ "$source_identity" != "$head_identity" ]; then
-      echo "REFUSED: detached task $ID fork source and PR head identities do not agree; preserving task state." >&2
+      echo "REFUSED: detached task $ID configured remotes do not prove the PR head repository; preserving task state." >&2
       return 1
     fi
   fi
 
-  repository_view=$(cd "$WT" && gh repo view "$base_repository" --json nameWithOwner,defaultBranchRef \
-    -q '.nameWithOwner + "\t" + (.defaultBranchRef.name // "")' 2>/dev/null) || {
+  base_owner=${base_repository%%/*}
+  base_name=${base_repository#*/}
+  repository_view=$(cd "$WT" && gh api graphql \
+    -f owner="$base_owner" -f name="$base_name" \
+    -f query='query($owner:String!,$name:String!){repository(owner:$owner,name:$name){nameWithOwner defaultBranchRef{name target{oid}}}}' \
+    --jq '.data.repository | .nameWithOwner + "\t" + (.defaultBranchRef.name // "") + "\t" + (.defaultBranchRef.target.oid // "")' 2>/dev/null) || {
     echo "REFUSED: cannot read the canonical repository target for detached task $ID; preserving task state." >&2
     return 1
   }
-  IFS=$'\t' read -r repository default extra <<< "$repository_view"
+  IFS=$'\t' read -r repository default canonical_default_oid extra <<< "$repository_view"
   canonical_base_identity=$(github_repository_identity "https://github.com/$repository.git") || {
     echo "REFUSED: canonical repository identity for detached task $ID is invalid; preserving task state." >&2
     return 1
   }
-  if [ -n "${extra:-}" ] || [ -z "$default" ] || [ "$canonical_base_identity" != "$base_identity" ]; then
+  if [ -n "${extra:-}" ] || [ -z "$default" ] || ! fm_pr_head_valid "$canonical_default_oid" \
+     || [ "$canonical_base_identity" != "$base_identity" ]; then
     echo "REFUSED: detached task PR and canonical base repository identities do not agree; preserving task state." >&2
     return 1
   fi
@@ -905,6 +908,10 @@ legacy_detached_exact_landed_proof() {
     return 1
   }
   default_ref=$(git -C "$WT" rev-parse --verify FETCH_HEAD 2>/dev/null) || return 1
+  if [ "$default_ref" != "$canonical_default_oid" ]; then
+    echo "REFUSED: fetched target $default does not match GitHub's canonical tip for detached task $ID; preserving task state." >&2
+    return 1
+  fi
   git -C "$WT" cat-file -e "$merge^{commit}" 2>/dev/null \
     || git -C "$WT" fetch --quiet "$base_url" "$merge" >/dev/null 2>&1 \
     || {

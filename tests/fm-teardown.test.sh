@@ -263,7 +263,11 @@ add_gh_pr_merged_squash() {
   local case_dir=$1 merge=$2 target=${3:-main} url=${4:-https://github.com/example/repo/pull/7}
   local head_name=${5:-fm/task-x1} head_oid=${6:-$LEGACY_SQUASH_HEAD}
   local head_repository=${7:-example/repo} base_repository=${8:-example/repo}
-  local canonical_default=${9:-main}
+  local canonical_default=${9:-main} canonical_tip=${10:-}
+  local base_owner=${base_repository%%/*} base_name=${base_repository#*/}
+  if [ -z "$canonical_tip" ]; then
+    canonical_tip=$(git -C "$case_dir/project" rev-parse "refs/remotes/origin/$canonical_default")
+  fi
   cat > "$case_dir/fakebin/gh" <<SH
 #!/usr/bin/env bash
 if [ -n "\${FM_TEST_GH_MUTATE_WORKTREE:-}" ] && [ "\${1:-} \${2:-}" = "pr view" ]; then
@@ -286,13 +290,13 @@ case "\${1:-} \${2:-}" in
         ;;
     esac
     ;;
-  "repo view")
-    [ "\${3:-}" = '$base_repository' ] || exit 1
+  "api graphql")
     case " \$* " in
-      *"nameWithOwner,defaultBranchRef"*) printf '%s\\t%s\\n' '$base_repository' '$canonical_default' ;;
-      *) exit 1 ;;
+      *" owner=$base_owner "*" name=$base_name "*"defaultBranchRef{name target{oid}}"*)
+        printf '%s\\t%s\\t%s\\n' '$base_repository' '$canonical_default' '$canonical_tip'
+        exit 0
+        ;;
     esac
-    exit 0
     ;;
 esac
 echo "error: pull request not found" >&2
@@ -1052,8 +1056,6 @@ test_legacy_detached_squash_identity_and_target_refuse() {
   git -C "$case_dir/project" config --add \
     "url.file://$case_dir/origin.git.insteadOf" https://github.com/example/fork.git
   git -C "$case_dir/project" remote add fork https://github.com/example/fork.git
-  git -C "$case_dir/project" config branch.fm/task-x1.remote fork
-  git -C "$case_dir/project" config branch.fm/task-x1.merge refs/heads/fm/task-x1
   add_gh_pr_merged_squash "$case_dir" "$LEGACY_SQUASH_MERGE" main \
     https://github.com/example/repo/pull/7 fm/task-x1 "$LEGACY_SQUASH_HEAD" example/fork
   add_treehouse_returning_worktree "$case_dir"
@@ -1102,6 +1104,19 @@ test_legacy_detached_squash_identity_and_target_refuse() {
   expect_code 1 "$rc" "legacy-detached-target-drift: teardown must refuse target drift"
   assert_present "$case_dir/state/task-x1.meta" \
     "legacy-detached-target-drift: teardown discarded metadata"
+
+  setup_legacy_squash_case legacy-detached-target-oid-drift
+  case_dir=$LEGACY_SQUASH_CASE
+  add_gh_pr_merged_squash "$case_dir" "$LEGACY_SQUASH_MERGE" main \
+    https://github.com/example/repo/pull/7 fm/task-x1 "$LEGACY_SQUASH_HEAD" \
+    example/repo example/repo main "$LEGACY_SQUASH_BASE"
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "legacy-detached-target-oid-drift: teardown must refuse a locally substituted default tip"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "legacy-detached-target-oid-drift: teardown discarded metadata"
 
   setup_legacy_squash_case legacy-detached-head-name-mismatch
   case_dir=$LEGACY_SQUASH_CASE
