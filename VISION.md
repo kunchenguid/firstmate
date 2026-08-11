@@ -1,7 +1,6 @@
 # Vision
 
 `firstmate` exists so that one person can run a crew of coding agents with the leverage of a team and the accountability of a single pair of hands.
-The biggest thing it aims to create is not a smart workflow, a useful tool, or an impressive piece of technology.
 It aims to create an experience: a sense of peacefulness, confidence that everything is under control, and an ease of mind that nothing will fall through the cracks the moment the captain looks away.
 That experience is the experience of being a good captain who sails with a well-managed crew, with a first mate that carries out the captain's direction.
 It serves the captain: an individual operator whose ambitions outrun their attention, and it turns intent stated once into delegated, supervised, evidence-backed work across every project they care about.
