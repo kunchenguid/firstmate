@@ -80,7 +80,7 @@ fm_sup_pending_reply_task_has_open() {  # <state-dir> <task-id>
 }
 
 fm_sup_secondmate_needs_supervision() {  # <state-dir> <task-id>
-  local state=$1 task_id=$2 status line prefix rest verb key saw=0 decisions activities last
+  local state=$1 task_id=$2 status line prefix rest token verb key corr saw=0 decisions activities last have_key=0 have_corr=0
   status="$state/$task_id.status"
   [ -f "$status" ] && [ ! -L "$status" ] && [ -r "$status" ] || return 0
   while IFS= read -r line || [ -n "$line" ]; do
@@ -97,12 +97,40 @@ fm_sup_secondmate_needs_supervision() {  # <state-dir> <task-id>
     esac
     key=$(_fm_decision_key "$line") || return 0
     [ -n "$key" ] || return 0
+    have_key=0
+    have_corr=0
     case "$prefix" in
       "$verb") ;;
       "$verb"[[:space:]]*)
+        # The only permitted prefix decorations are one decision key and one
+        # routed-request correlation id, in either order.  Keep this parser
+        # deliberately stricter than status_line_verb: idle is an affirmative
+        # safety conclusion, so malformed or duplicate tokens stay watched.
         rest=${prefix#"$verb"}
         rest=${rest#"${rest%%[![:space:]]*}"}
-        [ "$rest" = "[key=$key]" ] || return 0
+        while [ -n "$rest" ]; do
+          token=${rest%%[[:space:]]*}
+          case "$token" in
+            \[key=*\])
+              [ "$have_key" = 0 ] || return 0
+              [ "$token" = "[key=$key]" ] || return 0
+              have_key=1
+              ;;
+            \[corr=*\])
+              [ "$have_corr" = 0 ] || return 0
+              corr=${token#\[corr=}
+              corr=${corr%\]}
+              case "$corr" in
+                [a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9]) ;;
+                *) return 0 ;;
+              esac
+              have_corr=1
+              ;;
+            *) return 0 ;;
+          esac
+          rest=${rest#"$token"}
+          rest=${rest#"${rest%%[![:space:]]*}"}
+        done
         ;;
       *) return 0 ;;
     esac

@@ -111,6 +111,22 @@ ROWS
 # A ship batch carries one shared delivery contract. Missing flags must stop the
 # whole batch before any pair is dispatched, so a batch can never launch workers
 # whose delivery posture was never decided.
+test_multi_spawn_requires_a_visible_reason_notice() {
+  local out status
+  out=$(run_ship_spawn nope-batch-notice-z12=projects/none-a nope-batch-notice-z13=projects/none-b)
+  status=$?
+  [ "$status" -ne 0 ] || fail "multi-spawn with missing briefs should exit non-zero"
+  printf '%s\n' "$out" | grep -F 'WARNING: MULTI-SPAWN WITHOUT --batch-reason' >/dev/null \
+    || fail "a reasonless multi-spawn was not made loud"
+
+  out=$(run_ship_spawn --batch-reason 'two isolated fixes' nope-batch-reason-z14=projects/none-a nope-batch-reason-z15=projects/none-b)
+  status=$?
+  [ "$status" -ne 0 ] || fail "multi-spawn with missing briefs should exit non-zero"
+  printf '%s\n' "$out" | grep -F 'WARNING: MULTI-SPAWN WITHOUT --batch-reason' >/dev/null \
+    && fail "a stated multi-spawn reason still emitted the missing-reason notice"
+  pass "batch dispatch: multi-spawn without a stated reason is loud"
+}
+
 test_batch_requires_the_shared_delivery_contract() {
   local out status
   out=$(run_spawn nope-batch-nomode-z9=projects/none-a nope-batch-nomode-z10=projects/none-b)
@@ -143,6 +159,7 @@ test_scout_batch_refuses_delivery_flags() {
 
 test_batch_dispatches_every_pair
 test_batch_mode_boundaries
+test_multi_spawn_requires_a_visible_reason_notice
 test_batch_requires_the_shared_delivery_contract
 test_scout_batch_refuses_delivery_flags
 test_projects_path_scoping

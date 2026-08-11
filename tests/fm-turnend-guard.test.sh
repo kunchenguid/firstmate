@@ -78,6 +78,20 @@ test_predicate_idle_secondmate_needs_no_supervision() {
   pass "fm_supervision_needed: a resting secondmate alone does not need supervision"
 }
 
+test_predicate_idle_secondmate_with_corr_tokens_needs_no_supervision() {
+  local state="$TMP_ROOT/pred-idle-secondmate-corr/state"
+  mkdir -p "$state"
+  printf 'kind=secondmate\n' > "$state/mate.meta"
+  # Routed secondmate replies use [corr=...]; a finished corr-tagged done line
+  # must still count as positively idle, both alone and alongside a decision key.
+  printf 'working [corr=0123456789abcdef]: handling routed work\ndone [corr=0123456789abcdef]: idle until you route more\nworking [corr=0123456789abcdef] [key=route]: handling another route\ndone [key=route] [corr=0123456789abcdef]: idle until you route more\n' > "$state/mate.status"
+  if fm_supervision_needed "$state" 300; then
+    fail "a secondmate settled with corr tokens must not need supervision"
+  fi
+  [ "$FM_SUP_IN_FLIGHT" -eq 0 ] || fail "a corr-settled idle secondmate must be excluded from the in-flight banner count"
+  pass "fm_supervision_needed: corr-token done lines settle secondmate idle"
+}
+
 test_predicate_secondmate_work_and_parent_attention_need_supervision() {
   local state="$TMP_ROOT/pred-active-secondmate/state"
   mkdir -p "$state"
@@ -147,6 +161,12 @@ test_predicate_secondmate_status_evidence_fails_closed() {
 
   printf 'done [key=route] trailing: waiting\n' > "$state/mate.status"
   fm_supervision_needed "$state" 300 || fail "a noncanonical keyed status prefix must need supervision"
+
+  printf 'done [corr=short]: waiting\n' > "$state/mate.status"
+  fm_supervision_needed "$state" 300 || fail "a malformed corr token must need supervision"
+
+  printf 'done [corr=0123456789abcdef] [corr=fedcba9876543210]: waiting\n' > "$state/mate.status"
+  fm_supervision_needed "$state" 300 || fail "duplicate corr tokens must need supervision"
   pass "fm_supervision_needed: missing, unreadable, and malformed secondmate status evidence fails closed"
 }
 
@@ -1660,6 +1680,7 @@ test_predicate_unhealthy_no_beacon
 test_predicate_unhealthy_stale_beacon
 test_predicate_healthy_fresh_beacon
 test_predicate_idle_secondmate_needs_no_supervision
+test_predicate_idle_secondmate_with_corr_tokens_needs_no_supervision
 test_predicate_secondmate_work_and_parent_attention_need_supervision
 test_predicate_secondmate_pending_reply_evidence_fails_closed
 test_predicate_secondmate_status_evidence_fails_closed

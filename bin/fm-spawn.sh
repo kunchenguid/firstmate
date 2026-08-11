@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--remote-control|--rc] [--backend <name>] [--resume-worktree <path>]
-#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--remote-control|--rc] [--backend <name>] [--resume-worktree <path>]
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--remote-control|--rc] [--backend <name>] [--resume-worktree <path>] [--batch-reason <reason>]
+#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--remote-control|--rc] [--backend <name>] [--resume-worktree <path>] [--batch-reason <reason>]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--remote-control|--rc] [--backend <name>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
@@ -22,6 +22,10 @@
 #   axes chosen by firstmate at intake. They are only threaded into harnesses whose
 #   installed CLIs were verified to support that axis; unsupported axes are omitted
 #   from that harness's launch rather than guessed.
+#   A multi-pair batch without --batch-reason emits a prominent warning before it
+#   launches anything. This is a dispatch-consultation backstop for contender work:
+#   the stated reason is recorded in each child meta, but does not authorize a
+#   multi-model comparison that the contender policy forbids.
 #   --remote-control (alias --rc) adds Claude Code's --remote-control flag to the
 #   launch command, so the session appears in the Claude mobile app's Code tab and
 #   at claude.ai/code (code.claude.com/docs/en/remote-control). It is claude-harness-only
@@ -282,6 +286,7 @@ MODE=
 YOLO=
 TRACEPARENT_ARG=
 RESUME_WT_ARG=
+BATCH_REASON=
 REMOTE_CONTROL=0
 HARNESS_SET=0
 MODEL_SET=0
@@ -291,6 +296,7 @@ MODE_SET=0
 YOLO_SET=0
 TRACEPARENT_SET=0
 RESUME_WT_SET=0
+BATCH_REASON_SET=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -307,6 +313,7 @@ for a in "$@"; do
       yolo) YOLO=$a; YOLO_SET=1 ;;
       traceparent) TRACEPARENT_ARG=$a; TRACEPARENT_SET=1 ;;
       resume-worktree) RESUME_WT_ARG=$a; RESUME_WT_SET=1 ;;
+      batch-reason) BATCH_REASON=$a; BATCH_REASON_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -332,6 +339,8 @@ for a in "$@"; do
     --traceparent=*) TRACEPARENT_ARG=${a#--traceparent=}; TRACEPARENT_SET=1 ;;
     --resume-worktree) want_value=resume-worktree ;;
     --resume-worktree=*) RESUME_WT_ARG=${a#--resume-worktree=}; RESUME_WT_SET=1 ;;
+    --batch-reason) want_value=batch-reason ;;
+    --batch-reason=*) BATCH_REASON=${a#--batch-reason=}; BATCH_REASON_SET=1 ;;
     *) POS+=("$a") ;;
   esac
 done
@@ -344,6 +353,8 @@ done
 [ "$YOLO_SET" -eq 0 ] || [ -n "$YOLO" ] || { echo "error: --yolo requires a non-empty value" >&2; exit 1; }
 [ "$TRACEPARENT_SET" -eq 0 ] || [ -n "$TRACEPARENT_ARG" ] || { echo "error: --traceparent requires a non-empty value" >&2; exit 1; }
 [ "$RESUME_WT_SET" -eq 0 ] || [ -n "$RESUME_WT_ARG" ] || { echo "error: --resume-worktree requires a non-empty value" >&2; exit 1; }
+[ "$BATCH_REASON_SET" -eq 0 ] || [ -n "$BATCH_REASON" ] || { echo "error: --batch-reason requires a non-empty value" >&2; exit 1; }
+case "$BATCH_REASON" in *$'\n'*|*$'\r'*) echo "error: --batch-reason must be one line" >&2; exit 1 ;; esac
 # A resume relaunches ONE existing task into the isolated copy it already owns,
 # so it is refused for every shape that would either allocate a second copy or
 # apply one path to several tasks (docs/configuration.md "Provider outage
@@ -1065,6 +1076,10 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   # spanning several modes is two invocations rather than a silent mixed dispatch.
   [ "$MODE_SET" -eq 0 ] || shared_args+=(--mode "$MODE")
   [ "$YOLO_SET" -eq 0 ] || shared_args+=(--yolo "$YOLO")
+  if [ "${#POS[@]}" -gt 1 ] && [ -z "$BATCH_REASON" ]; then
+    echo "WARNING: MULTI-SPAWN WITHOUT --batch-reason. State why these workers are independent; do not fan out contenders for comparison." >&2
+  fi
+  [ -z "$BATCH_REASON" ] || shared_args+=(--batch-reason "$BATCH_REASON")
   for pair in "${POS[@]}"; do
     case "$pair" in
       *=*) : ;;
@@ -2607,6 +2622,7 @@ META_RECORD="${META_RECORD}kind=$KIND"$'\n'
 META_RECORD="${META_RECORD}tasktmp=$TASK_TMP"$'\n'
 META_RECORD="${META_RECORD}model=${MODEL:-default}"$'\n'
 META_RECORD="${META_RECORD}effort=${EFFORT:-default}"$'\n'
+[ -z "$BATCH_REASON" ] || META_RECORD="${META_RECORD}batch_reason=$BATCH_REASON"$'\n'
 # Off by default; written only when on, so an ordinary spawn's meta stays
 # byte-identical (absent remote_control= means off, same convention as backend=).
 [ "$REMOTE_CONTROL" -eq 0 ] || META_RECORD="${META_RECORD}remote_control=1"$'\n'

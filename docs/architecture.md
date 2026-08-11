@@ -44,6 +44,8 @@ The semantic branch reports working only on an exact busy verdict and names the 
 For whole-fleet read-only review, `bin/fm-fleet-snapshot.sh --json` emits schema `fm-fleet-snapshot.v1` from the backlog, task metadata, current crew state, endpoint probes, PR/report pointers, scout reports, bounded current summaries from registered secondmate homes, and secondmate return-channel guidance.
 `bin/fm-fleet-view.sh` renders that snapshot as Markdown for humans, while `bin/fm-bearings-snapshot.sh` provides the bounded bearings projection, so both views consume one structured contract instead of reparsing raw fleet files.
 The script header owns the exact JSON schema.
+A pure informational question uses the narrowest read that can answer it and does not justify a whole-fleet snapshot.
+Unchanged open decisions remain durable but are not re-narrated on every otherwise unchanged notification.
 
 ### Registered secondmate current state
 

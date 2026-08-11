@@ -9,6 +9,7 @@ metadata:
 # harness-adapters
 
 Use this reference before any harness-specific firstmate operation: spawn, recovery, trust-dialog handling, skill invocation, interrupt, exit, resume, or adapter verification.
+Before dispatching visual, design, or option-set contenders, also load [`contender-discipline`](../contender-discipline/SKILL.md).
 
 Crewmates default to the same harness firstmate is running on unless `config/crew-harness` records an adapter name.
 Optional dispatch profiles in `config/crew-dispatch.json` can override that static default for one crewmate or scout dispatch by selecting concrete harness, model, and effort axes at intake.
