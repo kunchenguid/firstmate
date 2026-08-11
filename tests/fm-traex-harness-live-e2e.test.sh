@@ -142,7 +142,10 @@ WT=$(sed -n 's/^worktree=//p' "$META")
 TARGET=$(sed -n 's/^window=//p' "$META")
 SESSION=${TARGET%%:*}
 PANE=${TARGET#*:}
+NATIVE_SESSION=$(sed -n 's/^traex_session_id=//p' "$META")
 [ -n "$WT" ] && [ -n "$PANE" ] || fail "spawn metadata omitted the task copy or Herdr pane"
+[[ "$NATIVE_SESSION" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] \
+  || fail "spawn metadata omitted the exact native TraeX session identity"
 grep -qx 'traex_ready=1' "$META" || fail "spawn never published TraeX lifecycle readiness"
 grep -q '^agent explain ' "$PROBE/herdr-wrapper.log" \
   || fail "the fresh copy never exercised Herdr's structural TraeX trust rule"

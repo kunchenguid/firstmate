@@ -132,6 +132,7 @@
 #     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
 #     __PIWATCH__   absolute path to .pi/extensions/fm-primary-pi-watch.ts in a pi secondmate home
 #     __OPINPUT__   absolute path to the canonical operational-input encoder
+#     __TRAEXSESSION__ task-private native TraeX session id
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
@@ -634,6 +635,7 @@ SPAWN_TASK_LOCK_HELD=0
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
 TRAEX_META_STAGED=
+TRAEX_SESSION_ID=
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -895,9 +897,17 @@ launch_template() {
     # scopes fm-harness detection to this exact Firstmate launch. -y is the
     # installed CLI's full-access autonomous mode; fresh-directory trust is a
     # separate structurally verified post-launch step below.
-    traex) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS FM_TRAEX_HARNESS=traex traex -y __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    traex) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS FM_TRAEX_HARNESS=traex traex -y --session-id __TRAEXSESSION__ __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     *) return 1 ;;
   esac
+}
+
+traex_session_id_generate() {
+  local hex
+  hex=$(LC_ALL=C od -An -v -tx1 -N 16 /dev/urandom 2>/dev/null | tr -d ' \n') || return 1
+  [ "${#hex}" -eq 32 ] || return 1
+  printf '%s-%s-4%s-8%s-%s' \
+    "${hex:0:8}" "${hex:8:4}" "${hex:13:3}" "${hex:17:3}" "${hex:20:12}"
 }
 
 raw_launch_references_traex() {  # <raw-command>
@@ -1012,6 +1022,10 @@ if [ "$HARNESS" = traex ]; then
     echo "error: traex executable not found on PATH; install TraeX or select a different verified harness" >&2
     exit 1
   fi
+  TRAEX_SESSION_ID=$(traex_session_id_generate) || {
+    echo "error: TraeX task-private native session identity could not be generated safely" >&2
+    exit 1
+  }
   if ! fm_backend_herdr_events_capable "$(fm_backend_herdr_session)"; then
     echo "error: traex requires Herdr's pane.agent_status_changed event surface for durable worker lifecycle; update Herdr and ensure python3 is available" >&2
     exit 1
@@ -2297,7 +2311,10 @@ fi
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
-  [ "$HARNESS" != traex ] || echo "traex_ready=pending"
+  if [ "$HARNESS" = traex ]; then
+    echo "traex_ready=pending"
+    echo "traex_session_id=$TRAEX_SESSION_ID"
+  fi
   # Default-off writes no traceparent= line (meta stays byte-identical).
   # backend= is written only for a non-default (non-tmux) backend, so the
   # default path's meta stays byte-identical (absent backend= means tmux;
@@ -2389,6 +2406,9 @@ LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
 LAUNCH=${LAUNCH//__PITURNEND__/$sq_piturnend}
 LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
 LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
+if [ "$HARNESS" = traex ]; then
+  LAUNCH=${LAUNCH//__TRAEXSESSION__/$(shell_quote "$TRAEX_SESSION_ID")}
+fi
 # Crewmate panes are created by a long-lived tmux/herdr daemon that does not
 # inherit firstmate's current environment, so a bare `claude` in the pane falls
 # back to the default ~/.claude store even when firstmate itself runs under a

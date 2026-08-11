@@ -32,6 +32,7 @@ trust_count=${FM_FAKE_TRUST_COUNT:?}
 project=${FM_FAKE_PROJECT:?}
 worktree=${FM_FAKE_WORKTREE:?}
 composer="$launch.composer"
+native_session_file="$launch.native-session"
 
 {
   printf '%s' "${HERDR_SESSION:-}"
@@ -84,7 +85,9 @@ case "$cmd $sub" in
     case "$text" in
       'env FM_TRAEX_HARNESS=traex traex resume -y '*)
         printf '%s\n' "$text" >> "$launch.resume"
-        [ "${FM_FAKE_RESUME_REGISTER:-1}" = 1 ] && printf idle > "$phase_file"
+        printf '%s\n' "${text##* }" > "$native_session_file"
+        [ "${FM_FAKE_RESUME_REGISTER:-1}" = 1 ] \
+          && printf '%s' "${FM_FAKE_RESUME_PHASE:-idle}" > "$phase_file"
         ;;
     esac
     ;;
@@ -97,9 +100,27 @@ case "$cmd $sub" in
       printf '{"result":{"pane":{"pane_id":"%s","tab_id":"w1:t2","workspace_id":"w1","cwd":"%s","foreground_cwd":"%s"}}}\n' "$pane" "$project" "$cwd"
     fi
     ;;
+  "pane process-info")
+    pane=${3:-}
+    native_session=${FM_FAKE_NATIVE_SESSION_ID:-$(cat "$native_session_file" 2>/dev/null || true)}
+    if [ -n "$native_session" ] && [ "$phase" != shell ] && [ "$phase" != dead ]; then
+      if [ -s "$launch.resume" ]; then
+        printf '{"result":{"process_info":{"pane_id":"%s","foreground_processes":[{"pid":42,"name":"traex","argv":["traex","resume","-y","%s"]}]}}}\n' \
+          "$pane" "$native_session"
+      else
+        printf '{"result":{"process_info":{"pane_id":"%s","foreground_processes":[{"pid":42,"name":"traex","argv":["traex","-y","--session-id","%s"]}]}}}\n' \
+          "$pane" "$native_session"
+      fi
+    else
+      printf '{"result":{"process_info":{"pane_id":"%s","foreground_processes":[]}}}\n' "$pane"
+    fi
+    ;;
   "pane send-text")
     text=${4:-}
     printf '%s\n' "$text" >> "$launch"
+    native_session=$(printf '%s\n' "$text" \
+      | sed -n "s/.*--session-id '\([0-9a-f-]*\)'.*/\1/p")
+    [ -z "$native_session" ] || printf '%s\n' "$native_session" > "$native_session_file"
     [ "$phase" = shell ] || printf '%s' "$text" > "$composer"
     ;;
   "pane send-keys")
@@ -204,6 +225,7 @@ make_spawn_case() {  # <name>
   : > "$dir/launch.log.composer"
   : > "$dir/launch.log.keys"
   : > "$dir/launch.log.resume"
+  : > "$dir/launch.log.native-session"
   printf shell > "$dir/phase"
   printf '%s\n' "$dir|$home|$project|$wt|$fakebin|$id"
 }
@@ -276,7 +298,11 @@ run_traex_key() {  # <key>
     "$ROOT/bin/fm-send.sh" "$TASK_ID" --key "$1" 2>&1
 }
 
-run_traex_resume() {  # <session-id|--last>
+recorded_traex_session() {
+  sed -n 's/^traex_session_id=//p' "$HOME_DIR/state/$TASK_ID.meta"
+}
+
+run_traex_resume() {  # <session-id>
   FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" \
     FM_BACKEND_HERDR_EVENTS_FORCE=1 HERDR_SESSION=traex-test-session \
     FM_BACKEND_HERDR_TRAEX_RESUME_POLLS=2 FM_BACKEND_HERDR_TRAEX_RESUME_INTERVAL=0 \
@@ -377,7 +403,7 @@ test_marker_detection_is_scoped() {
 }
 
 test_spawn_accepts_only_exact_trust_then_observes_working() {
-  local rec out status launch meta verdict lifecycle
+  local rec out status launch meta verdict lifecycle native_session
   rec=$(make_spawn_case launch)
   read_spawn_case "$rec"
   out=$(run_traex_spawn)
@@ -390,6 +416,11 @@ test_spawn_accepts_only_exact_trust_then_observes_working() {
   [ "$(grep -c . "$CASE_DIR/launch.log")" = 1 ] \
     || fail "the TraeX launch brief was injected more than once"
   assert_contains "$launch" 'FM_TRAEX_HARNESS=traex traex -y' "launch omitted scoped TraeX identity/autonomy"
+  native_session=$(cat "$CASE_DIR/launch.log.native-session")
+  [[ "$native_session" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] \
+    || fail "launch did not assign a valid task-private native TraeX session: $native_session"
+  assert_contains "$launch" "--session-id '$native_session'" \
+    "launch did not bind the native TraeX session explicitly"
   assert_contains "$launch" "--model 'Doubao-Seed-2.1-Pro'" "launch omitted selected model"
   assert_contains "$launch" "-c 'model_reasoning_effort=\"high\"'" "launch omitted verified effort config"
   assert_contains "$launch" 'encode launch-brief' "launch did not deliver one positional brief"
@@ -397,6 +428,8 @@ test_spawn_accepts_only_exact_trust_then_observes_working() {
   meta="$HOME_DIR/state/$TASK_ID.meta"
   assert_grep 'backend=herdr' "$meta" "meta did not retain Herdr"
   assert_grep 'harness=traex' "$meta" "meta did not retain TraeX"
+  assert_grep "traex_session_id=$native_session" "$meta" \
+    "meta did not retain the exact launched native TraeX session"
   assert_grep 'traex_ready=1' "$meta" "spawn published success without lifecycle readiness"
   verdict=$(fm_busy_classify herdr traex-test-session:w1:p2 traex "$TASK_ID" "$HOME_DIR/state")
   [ "$verdict" = 'busy herdr-traex' ] || fail "working launch did not bind semantic lifecycle, got '$verdict'"
@@ -706,28 +739,74 @@ test_clean_exit_shell_refuses_steer_before_typing() {
 }
 
 test_same_session_resume_preserves_marker_and_binding() {
-  local rec out status command
+  local rec out status command native_session
   rec=$(make_spawn_case resume-success)
   read_spawn_case "$rec"
   out=$(run_traex_spawn)
   status=$?
   expect_code 0 "$status" "TraeX spawn for resume should succeed: $out"
+  native_session=$(recorded_traex_session)
   printf shell > "$CASE_DIR/phase"
-  out=$(run_traex_resume 11111111-2222-3333-4444-555555555555)
+  out=$(run_traex_resume "$native_session")
   status=$?
   expect_code 0 "$status" "bound same-session TraeX resume should succeed: $out"
   assert_contains "$out" "resumed $TASK_ID harness=traex backend=herdr" \
     "TraeX resume did not report its verified binding"
+  assert_contains "$out" "session=$native_session" \
+    "TraeX resume did not report the revalidated native session"
   command=$(cat "$CASE_DIR/launch.log.resume")
-  [ "$command" = 'env FM_TRAEX_HARNESS=traex traex resume -y 11111111-2222-3333-4444-555555555555' ] \
-    || fail "TraeX resume lost its private marker or autonomous mode: $command"
+  [ "$command" = "env FM_TRAEX_HARNESS=traex traex resume -y $native_session" ] \
+    || fail "TraeX resume lost its private marker, autonomous mode, or exact session: $command"
   [ "$(cat "$CASE_DIR/phase")" = idle ] \
     || fail "TraeX resume returned before native registration"
   pass "traex same-session resume preserves marker and exact ownership"
 }
 
+test_resume_refuses_unowned_selectors() {
+  local rec out status native_session selector
+  rec=$(make_spawn_case resume-selector-refuse)
+  read_spawn_case "$rec"
+  out=$(run_traex_spawn)
+  status=$?
+  expect_code 0 "$status" "TraeX spawn for resume selector refusal should succeed: $out"
+  native_session=$(recorded_traex_session)
+  printf shell > "$CASE_DIR/phase"
+  for selector in --last wrong-thread 00000000-0000-4000-8000-000000000000; do
+    [ "$selector" != "$native_session" ] || continue
+    out=$(run_traex_resume "$selector")
+    status=$?
+    [ "$status" -ne 0 ] || fail "TraeX resume accepted unowned selector $selector"
+    assert_contains "$out" 'recorded native session' \
+      "TraeX resume did not explain selector ownership refusal for $selector"
+  done
+  [ ! -s "$CASE_DIR/launch.log.resume" ] \
+    || fail "an unowned TraeX resume selector mutated the recorded pane"
+  pass "traex resume refuses last, lexical, and wrong-session selectors"
+}
+
+test_resume_revalidates_native_session_identity() {
+  local rec out status native_session wrong_session
+  rec=$(make_spawn_case resume-native-mismatch)
+  read_spawn_case "$rec"
+  out=$(run_traex_spawn)
+  status=$?
+  expect_code 0 "$status" "TraeX spawn for native resume mismatch should succeed: $out"
+  native_session=$(recorded_traex_session)
+  wrong_session=00000000-0000-4000-8000-000000000000
+  [ "$native_session" != "$wrong_session" ] || wrong_session=11111111-1111-4111-8111-111111111111
+  printf shell > "$CASE_DIR/phase"
+  out=$(FM_FAKE_NATIVE_SESSION_ID="$wrong_session" run_traex_resume "$native_session")
+  status=$?
+  [ "$status" -ne 0 ] || fail "TraeX resume accepted a different native session after registration"
+  assert_contains "$out" 'native session identity does not match' \
+    "TraeX resume did not report post-registration native session mismatch"
+  assert_not_contains "$out" "resumed $TASK_ID" \
+    "TraeX resume reported success before native session revalidation"
+  pass "traex resume revalidates exact native session after registration"
+}
+
 test_resume_refuses_mismatched_worktree_and_lifecycle_bindings() {
-  local rec out status meta tmp binding
+  local rec out status meta tmp binding native_session
   rec=$(make_spawn_case resume-worktree-mismatch)
   read_spawn_case "$rec"
   out=$(run_traex_spawn)
@@ -735,11 +814,12 @@ test_resume_refuses_mismatched_worktree_and_lifecycle_bindings() {
   expect_code 0 "$status" "TraeX spawn for resume worktree refusal should succeed: $out"
   printf shell > "$CASE_DIR/phase"
   meta="$HOME_DIR/state/$TASK_ID.meta"
+  native_session=$(recorded_traex_session)
   tmp="$meta.next"
   awk -v replacement="worktree=$PROJECT_DIR" \
     '{ if ($0 ~ /^worktree=/) print replacement; else print }' "$meta" > "$tmp"
   mv "$tmp" "$meta"
-  out=$(run_traex_resume --last)
+  out=$(run_traex_resume "$native_session")
   status=$?
   [ "$status" -ne 0 ] || fail "TraeX resume accepted a mismatched recorded worktree"
   assert_contains "$out" 'recorded worktree is not the exact isolated task root' \
@@ -753,9 +833,10 @@ test_resume_refuses_mismatched_worktree_and_lifecycle_bindings() {
   status=$?
   expect_code 0 "$status" "TraeX spawn for resume lifecycle refusal should succeed: $out"
   printf shell > "$CASE_DIR/phase"
+  native_session=$(recorded_traex_session)
   binding=$(find "$HOME_DIR/state/.traex-herdr-bindings" -type f -print -quit)
   printf 'v1 id=%s gen=stale-gen\n' "$TASK_ID" > "$binding"
-  out=$(run_traex_resume --last)
+  out=$(run_traex_resume "$native_session")
   status=$?
   [ "$status" -ne 0 ] || fail "TraeX resume accepted a mismatched lifecycle binding"
   assert_contains "$out" 'lifecycle binding does not match' \
@@ -775,7 +856,9 @@ test_start_observation_persists_lifecycle_before_return() {
     'window=traex-test-session:w1:p2' "endpoint_task_id=$TASK_ID" \
     "worktree=$WT_DIR" "project=$PROJECT_DIR" 'harness=traex' 'kind=ship' \
     'backend=herdr' 'herdr_session=traex-test-session' 'herdr_pane_id=w1:p2' \
-    "busy_gen=$gen" 'traex_ready=pending'
+    "busy_gen=$gen" 'traex_ready=pending' \
+    'traex_session_id=11111111-1111-4111-8111-111111111111'
+  printf '11111111-1111-4111-8111-111111111111\n' > "$CASE_DIR/launch.log.native-session"
   printf working > "$CASE_DIR/phase"
   out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" \
     FM_FAKE_HERDR_STATE="$CASE_DIR/herdr.state" FM_FAKE_HERDR_LOG="$CASE_DIR/herdr.log" \
@@ -842,8 +925,8 @@ test_send_persists_working_before_delivery_ack() {
   pass "traex steering persists working before acknowledgement so reconnect recovers completion"
 }
 
-test_send_from_blocked_requires_native_working() {
-  local rec out status verdict
+test_blocked_ready_and_resumed_screens_refuse_steer() {
+  local rec out status before after native_session
   rec=$(make_spawn_case send-blocked)
   read_spawn_case "$rec"
   out=$(run_traex_spawn)
@@ -851,17 +934,36 @@ test_send_from_blocked_requires_native_working() {
   expect_code 0 "$status" "TraeX spawn for blocked steering should succeed: $out"
   printf idle > "$CASE_DIR/phase"
   run_traex_reconcile || fail "initial completion for blocked steering could not be reconciled"
-  rm -f "$HOME_DIR/state/$TASK_ID.turn-ended"
   printf blocked > "$CASE_DIR/phase"
   run_traex_reconcile || fail "blocked baseline could not be persisted"
-
-  out=$(run_traex_send 'resume from the blocker')
+  before=$(wc -l < "$CASE_DIR/launch.log" | tr -d '[:space:]')
+  : > "$CASE_DIR/launch.log.keys"
+  out=$(run_traex_send 'must not accept a blocked chooser')
   status=$?
-  expect_code 0 "$status" "TraeX blocked-baseline steer should observe working: $out"
-  verdict=$(fm_busy_classify herdr traex-test-session:w1:p2 traex "$TASK_ID" "$HOME_DIR/state")
-  [ "$verdict" = 'busy herdr-traex' ] \
-    || fail "blocked-baseline steer acknowledged without native working: $verdict"
-  pass "traex blocked-baseline steering acknowledges only persisted native working"
+  [ "$status" -ne 0 ] || fail "TraeX steer accepted a blocked ready worker"
+  after=$(wc -l < "$CASE_DIR/launch.log" | tr -d '[:space:]')
+  [ "$after" = "$before" ] || fail "TraeX steer typed into a blocked ready worker"
+  [ ! -s "$CASE_DIR/launch.log.keys" ] || fail "TraeX steer sent Enter to a blocked ready worker"
+
+  rec=$(make_spawn_case send-resumed-blocked)
+  read_spawn_case "$rec"
+  out=$(run_traex_spawn)
+  status=$?
+  expect_code 0 "$status" "TraeX spawn for resumed blocked steering should succeed: $out"
+  native_session=$(recorded_traex_session)
+  printf shell > "$CASE_DIR/phase"
+  out=$(FM_FAKE_RESUME_PHASE=blocked run_traex_resume "$native_session")
+  status=$?
+  expect_code 0 "$status" "exact TraeX resume to a blocked screen should retain ownership: $out"
+  before=$(wc -l < "$CASE_DIR/launch.log" | tr -d '[:space:]')
+  : > "$CASE_DIR/launch.log.keys"
+  out=$(run_traex_send 'must not accept a resumed blocker')
+  status=$?
+  [ "$status" -ne 0 ] || fail "TraeX steer accepted a blocked resumed worker"
+  after=$(wc -l < "$CASE_DIR/launch.log" | tr -d '[:space:]')
+  [ "$after" = "$before" ] || fail "TraeX steer typed into a blocked resumed worker"
+  [ ! -s "$CASE_DIR/launch.log.keys" ] || fail "TraeX steer sent Enter to a blocked resumed worker"
+  pass "traex ordinary steering refuses blocked ready and resumed screens"
 }
 
 test_stale_idle_cannot_close_a_new_working_turn() {
@@ -1153,7 +1255,8 @@ test_pending_trust_block_is_suppressed_only_until_launch_fails() {
     'window=sess:w1:p2' 'endpoint_task_id=traex-pending' 'worktree=/tmp/wt' 'project=/tmp/project' \
     'harness=traex' 'kind=ship' 'backend=herdr' 'herdr_session=sess' \
     'herdr_workspace_id=w1' 'herdr_tab_id=w1:t2' 'herdr_pane_id=w1:p2' \
-    "busy_gen=$gen" 'traex_ready=pending'
+    "busy_gen=$gen" 'traex_ready=pending' \
+    'traex_session_id=22222222-2222-4222-8222-222222222222'
   # shellcheck source=/dev/null
   . "$ROOT/bin/fm-backend.sh"
   fm_backend_source herdr
@@ -1195,11 +1298,13 @@ test_blocked_trust_enter_is_reserved_for_spawn_owner
 test_key_routing_requires_live_bound_identity
 test_clean_exit_shell_refuses_steer_before_typing
 test_same_session_resume_preserves_marker_and_binding
+test_resume_refuses_unowned_selectors
+test_resume_revalidates_native_session_identity
 test_resume_refuses_mismatched_worktree_and_lifecycle_bindings
 test_start_observation_persists_lifecycle_before_return
 test_active_send_requires_post_submit_composer_clearance
 test_send_persists_working_before_delivery_ack
-test_send_from_blocked_requires_native_working
+test_blocked_ready_and_resumed_screens_refuse_steer
 test_stale_idle_cannot_close_a_new_working_turn
 test_failed_and_orphaned_pending_launches_reconcile_terminal_level
 test_interrupted_spawn_clears_pending_readiness

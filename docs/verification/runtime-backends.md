@@ -221,7 +221,7 @@ No ambient `herdr server stop` command is a supported test operation.
 ### TraeX ordinary-worker lifecycle
 
 TraeX `traecli 0.200.19(internal edition)` was verified on 2026-08-08 against Herdr 0.8.0's bundled TraeX manifest in a fresh git worktree under a guarded named lab.
-The launch used one positional instruction, `-y`, an exact selected model, and `-c 'model_reasoning_effort="high"'` with the Firstmate-only `FM_TRAEX_HARNESS=traex` marker.
+The launch used one positional instruction, `-y`, an exact selected model, `-c 'model_reasoning_effort="high"'`, and a task-private generated `--session-id` recorded in endpoint metadata, with the Firstmate-only `FM_TRAEX_HARNESS=traex` marker.
 
 Before acceptance, `agent get` returned `agent=traex`, `agent_status=blocked`, and both cwd fields equal to the exact disposable worktree.
 `agent explain` returned:
@@ -262,7 +262,7 @@ herdr=herdr 0.8.0
 ok - TraeX/Herdr live drift guard completed
 ```
 
-Portable coverage pins the exact trust refusal matrix, launch rendering, scoped detection marker, Herdr-only/ordinary-role boundary, native lifecycle writer, completion dedupe, interrupt composer clear, model/effort mapping, and existing-adapter non-regression.
+Portable coverage pins the exact trust refusal matrix, launch rendering and native session binding, scoped detection marker, Herdr-only/ordinary-role boundary, blocked-screen steering refusal, same-session resume ownership, native lifecycle writer, completion dedupe, interrupt composer clear, model/effort mapping, and existing-adapter non-regression.
 
 ### Prune and respawn
 

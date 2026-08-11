@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Resume one stopped ordinary TraeX worker in its exact recorded Herdr pane.
-# Usage: fm-traex-resume.sh <task-id> <session-id|--last>
+# Usage: fm-traex-resume.sh <task-id> <recorded-session-id>
 set -eu
 
 SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
@@ -11,7 +11,7 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(CDPATH='' cd -- "$SCRIPT_DIR/.." && pwd -P)}"
 fm_refuse_if_gate_agent
 
 [ "$#" -eq 2 ] || {
-  echo "usage: fm-traex-resume.sh <task-id> <session-id|--last>" >&2
+  echo "usage: fm-traex-resume.sh <task-id> <recorded-session-id>" >&2
   exit 1
 }
 if [ -z "${FM_HOME+x}" ] || [ -z "${FM_HOME:-}" ]; then

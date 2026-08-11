@@ -131,10 +131,12 @@ reset_state
 fm_write_meta "$STATE_DIR/tk5.meta" "window=default:wG:pQ" "backend=herdr" "kind=ship"
 fm_write_meta "$STATE_DIR/ztraex1.meta" "window=alpha:wA:p1" "endpoint_task_id=ztraex1" \
   "backend=herdr" "harness=traex" "kind=ship" "herdr_session=alpha" \
-  "herdr_pane_id=wA:p1" "busy_gen=g1" "traex_ready=1"
+  "herdr_pane_id=wA:p1" "busy_gen=g1" "traex_ready=1" \
+  "traex_session_id=33333333-3333-4333-8333-333333333333"
 fm_write_meta "$STATE_DIR/ztraex2.meta" "window=beta:wB:p2" "endpoint_task_id=ztraex2" \
   "backend=herdr" "harness=traex" "kind=scout" "herdr_session=beta" \
-  "herdr_pane_id=wB:p2" "busy_gen=g2" "traex_ready=failed"
+  "herdr_pane_id=wB:p2" "busy_gen=g2" "traex_ready=failed" \
+  "traex_session_id=44444444-4444-4444-8444-444444444444"
 fm_write_meta "$STATE_DIR/zclaude.meta" "window=gamma:wC:p3" "endpoint_task_id=zclaude" \
   "backend=herdr" "harness=claude" "kind=ship" "herdr_session=gamma" \
   "herdr_pane_id=wC:p3" "busy_gen=g3" "traex_ready=1"
