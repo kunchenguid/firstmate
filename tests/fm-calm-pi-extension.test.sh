@@ -44,12 +44,21 @@ trap cleanup EXIT
 # still fails once the loop runs out.
 wait_for_text() {
   local file=$1 text=$2 i=0
+  # Stage each capture through a scratch path and promote it only when tmux
+  # succeeds. Writing straight to $file truncates it before tmux runs, so a
+  # capture against a session that has already exited would discard the last
+  # good frame - the one holding PI_EXIT and any startup error, and the only
+  # thing the dump below has to report.
+  local scratch="$TMP_ROOT/wait-for-text-capture.txt"
+  : >"$file"
   while [ "$i" -lt 400 ]; do
     # Include recent scrollback: expanding a long restored transcript can move
     # the asserted tool output above the current viewport while the footer and
     # editor remain visible.
-    tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" -S -600 >"$file" 2>/dev/null || true
-    grep -Fq "$text" "$file" 2>/dev/null && return 0
+    if tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" -S -600 >"$scratch" 2>/dev/null; then
+      mv -f "$scratch" "$file"
+      grep -Fq "$text" "$file" 2>/dev/null && return 0
+    fi
     sleep 0.05
     i=$((i + 1))
   done
