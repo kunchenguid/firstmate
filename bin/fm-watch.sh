@@ -304,16 +304,6 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
   esac
 }
 
-# Pure decision seam: a new hash keeps the immediate handoff, while an unchanged
-# hash enters the existing bounded timer instead of disappearing after one wake.
-afk_stale_decision() {  # <current-hash> <surfaced-hash>
-  if [ "$1" != "$2" ]; then
-    printf 'surface\n'
-  else
-    printf 'wedge-timer\n'
-  fi
-}
-
 # busy_turn_over_age: 0 iff <task>'s latest completed-turn marker is at least
 # BUSY_TURN_MAX_SECS old. Ages the per-task turn-ended marker, the harness-neutral
 # signal every verified harness's turn-end hook touches; before any turn has

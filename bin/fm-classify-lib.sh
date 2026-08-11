@@ -77,6 +77,16 @@ FM_PAUSE_RESURFACE_SECS_DEFAULT=3600
 FM_CLASSIFY_RESOLVE_VERB_DEFAULT='resolved'
 FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT='captain-held'
 
+# Pure decision seam: a new hash keeps the immediate handoff, while an unchanged
+# hash enters the existing bounded timer instead of disappearing after one wake.
+afk_stale_decision() {  # <current-hash> <surfaced-hash>
+  if [ "$1" != "$2" ]; then
+    printf 'surface\n'
+  else
+    printf 'wedge-timer\n'
+  fi
+}
+
 # Return the last non-blank line of a status file (empty if missing/blank).
 last_status_line() {
   local f=$1

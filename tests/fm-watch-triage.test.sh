@@ -26,12 +26,6 @@ WATCH="$ROOT/bin/fm-watch.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-watch-triage-tests)
-mkdir -p "$TMP_ROOT/source-state"
-FM_STATE_OVERRIDE="$TMP_ROOT/source-state"
-export FM_STATE_OVERRIDE
-# shellcheck source=bin/fm-watch.sh
-. "$WATCH"
-unset FM_STATE_OVERRIDE
 
 ack_stopped_cycle() {  # <state>
   local state=$1 err sequence generation
