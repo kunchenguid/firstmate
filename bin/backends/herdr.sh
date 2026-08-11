@@ -1921,18 +1921,49 @@ fm_backend_herdr_tab_is_husk() {  # <session> <pane_id>
   esac
 }
 
+# fm_backend_herdr_pane_agent_status: the raw agent_status string herdr reports
+# for <pane_id>, or nothing when the read fails or reports no status. The husk
+# classifier above deliberately collapses every registered value to `live`;
+# this is the one accessor for the underlying value, so a caller that needs to
+# tell a still-running agent from a finished one does not open a second copy of
+# the husk state machine.
+fm_backend_herdr_pane_agent_status() {  # <session> <pane_id>
+  fm_backend_herdr_cli "$1" agent get "$2" 2>/dev/null \
+    | jq -r '.result.agent.agent_status // empty' 2>/dev/null
+}
+
 # fm_backend_herdr_agent_state: recovery-grade state for the same session-start
 # sweep as the tmux classifier. It reuses the husk classifier rather than
 # creating a second Herdr state machine: a structurally gone pane is `missing`,
 # a confirmed agent-less pane is `dead`, a registered agent is `alive`, and an
 # unexpected or failed API read is `unreadable`.
+#
+# One registered-agent case is still `dead`: a hook-authoritative `done` agent
+# whose pane provably holds nothing but a lone idle shell has ENDED - the agent
+# process exited to its shell and only herdr's terminal registration outlived
+# it. Reading that as `alive` wedged the whole control plane, because
+# bin/fm-control.sh could then neither exit nor relaunch the task (it typed the
+# exit command into a bare shell and waited out FM_CONTROL_EXIT_WAIT for a
+# transition that could never happen). Both signals are required and both are
+# authoritative - the hook-reported terminal status AND the idle-shell proof
+# that owns "no foreground agent process" - so a merely idle-LOOKING pane, or a
+# `done` turn on a harness still sitting in its own TUI, stays `alive`.
 fm_backend_herdr_agent_state() {  # <target>
   local target=$1
   fm_backend_herdr_parse_target "$target" || { printf 'unreadable'; return 0; }
   case "$(fm_backend_herdr_pane_agent_state "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")" in
     dead) printf 'missing' ;;
     no-agent) printf 'dead' ;;
-    live) printf 'alive' ;;
+    live)
+      if [ "$(fm_backend_herdr_pane_agent_status \
+              "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")" = 'done' ] \
+        && fm_backend_herdr_pane_idle_shell_pid \
+             "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" >/dev/null; then
+        printf 'dead'
+      else
+        printf 'alive'
+      fi
+      ;;
     *) printf 'unreadable' ;;
   esac
 }

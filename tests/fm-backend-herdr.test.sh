@@ -2939,6 +2939,72 @@ test_current_path_reads_cwd() {
   pass "fm_backend_herdr_current_path: reads pane foreground_cwd (the live running process), not the frozen creation-time cwd"
 }
 
+# --- agent_state: a finished agent that already exited to its shell ----------
+
+# make_idle_shell_ps: a `ps` the idle-shell proof accepts for <pid> - one row,
+# no children, sleeping. FM_HERDR_PS_BIN points the proof at it, so the case
+# does not depend on the developer's own process table.
+make_idle_shell_ps() {  # <dir> <pid> -> echoes the fake ps path
+  local path="$1/fake-ps" pid=$2
+  cat > "$path" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  "-axo pid=,ppid=") printf '1 0\n$pid 1\n' ;;
+  "-p $pid -o stat=") printf 'Ss\n' ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$path"
+  printf '%s\n' "$path"
+}
+
+# herdr_agent_state_case: run fm_backend_herdr_agent_state over a canned herdr
+# reporting <agent-status> on the pane and <foreground> as its sole foreground
+# process, and echo the verdict.
+herdr_agent_state_case() {  # <name> <agent-status> <foreground> <polls>
+  local name=$1 status=$2 foreground=$3 polls=$4 dir log resp fb ps_bin
+  dir="$TMP_ROOT/$name"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/1.out"
+  printf '{"result":{"agent":{"agent_status":"%s"}}}\n' "$status" > "$resp/2.out"
+  printf '{"result":{"agent":{"agent_status":"%s"}}}\n' "$status" > "$resp/3.out"
+  printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":67,"foreground_process_group_id":67,"foreground_processes":[{"argv":["%s"],"name":"%s","pid":67}]}}}\n' \
+    "$foreground" "${foreground##*/}" > "$resp/4.out"
+  fb=$(make_herdr_fakebin "$dir")
+  ps_bin=$(make_idle_shell_ps "$dir" 67)
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_HERDR_PS_BIN="$ps_bin" FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS="$polls" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_agent_state default:w1:p2' "$ROOT"
+}
+
+test_agent_state_done_agent_that_left_a_bare_shell_is_dead() {
+  local out
+  out=$(herdr_agent_state_case agent-state-ended 'done' /bin/zsh 10)
+  [ "$out" = dead ] \
+    || fail "a done agent whose pane holds only a bare shell has ended and must classify as dead (the control plane can then exit and relaunch it), got '$out'"
+  pass "fm_backend_herdr_agent_state: a done agent that exited to its shell is dead, not alive"
+}
+
+test_agent_state_requires_both_signals_before_calling_an_agent_ended() {
+  local out
+  # The agent finished a turn but is still sitting in its own TUI: the pane's
+  # foreground process is the harness, so the idle-shell proof refuses and the
+  # agent stays alive. This is the false-stop the fix must never introduce.
+  out=$(herdr_agent_state_case agent-state-done-tui 'done' /usr/local/bin/pi 1)
+  [ "$out" = alive ] \
+    || fail "a done agent still holding its pane's foreground process is running and must stay alive, got '$out'"
+
+  # A busy agent stays alive on the status signal alone, whatever the pane's
+  # process table happens to look like.
+  out=$(herdr_agent_state_case agent-state-working working /bin/zsh 1)
+  [ "$out" = alive ] \
+    || fail "a working agent must stay alive regardless of the pane's foreground process, got '$out'"
+
+  out=$(herdr_agent_state_case agent-state-idle idle /bin/zsh 1)
+  [ "$out" = alive ] \
+    || fail "an idle registered agent is waiting for input, not ended, and must stay alive, got '$out'"
+  pass "fm_backend_herdr_agent_state: only a done status AND a provably bare shell classify an agent as ended"
+}
+
 # --- busy_state (semantic agent state) ---------------------------------------
 
 test_busy_state_working_maps_to_busy() {
@@ -4313,6 +4379,8 @@ test_capture_preserves_pane_read_failure
 test_send_key_normalizes_and_targets_pane
 test_kill_is_best_effort
 test_current_path_reads_cwd
+test_agent_state_done_agent_that_left_a_bare_shell_is_dead
+test_agent_state_requires_both_signals_before_calling_an_agent_ended
 test_busy_state_working_maps_to_busy
 test_busy_state_done_and_blocked_map_to_idle
 test_busy_state_unknown_on_no_agent
