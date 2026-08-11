@@ -281,6 +281,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/routines-second-fleet.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/scripts.md",
       "audience": "operator-current"
     },

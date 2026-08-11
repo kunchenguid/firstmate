@@ -157,6 +157,8 @@ It is an environment variable rather than a flag, a config file, or a state file
 The variable must be present when the harness process is launched, so no tool call the agent makes can enable it for the call that follows.
 A deliberate use therefore requires restarting the session with the variable set, which is a conscious act, while an accidental use is impossible.
 
+Registering a scheduled cloud Routine is not a use for this escape hatch, because the captain creates a Routine in their own account rather than through a primary session; see [`routines-second-fleet.md`](routines-second-fleet.md).
+
 The escape hatch does not affect any local Claude deny list.
 A tool removed from the schema stays removed, so a genuinely intended use of a locally denied tool also requires narrowing or removing that local entry before launch.
 
