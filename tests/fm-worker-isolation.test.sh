@@ -376,15 +376,21 @@ test_primary_origin_requires_state_attestation() {
     bash -c '. "$1"; fm_worker_primary_origin_proven && printf allowed || printf refused' _ \
     "$ROOT/bin/fm-worker-isolation-lib.sh")
   [ "$out" = refused ] || fail "a primary without a state attestation was accepted"
-  token="attested-$RUN_TAG"
-  printf 'root=%s\ntoken=%s\n' "$primary_home" "$token" > "$primary_home/state/.primary-attestation"
-  chmod 600 "$primary_home/state/.primary-attestation"
+  out=$(cd "$primary_home" && FM_HOME="$primary_home" FM_ROOT_OVERRIDE="$primary_home" \
+    FM_STATE_OVERRIDE="$primary_home/state" bash -c \
+    '. "$1"; fm_worker_primary_attestation_establish && fm_worker_primary_origin_proven && printf allowed || printf refused' _ \
+    "$ROOT/bin/fm-worker-isolation-lib.sh")
+  [ "$out" = allowed ] || fail "primary startup could not establish a genuine attestation"
+  [ -f "$primary_home/state/.primary-attestation" ] || fail "primary startup did not persist its attestation"
+  token=$(awk -F= '$1 == "token" {print substr($0, index($0, "=") + 1); exit}' \
+    "$primary_home/state/.primary-attestation")
+  [ -n "$token" ] || fail "primary startup persisted an empty attestation token"
   out=$(cd "$primary_home" && FM_HOME="$primary_home" FM_ROOT_OVERRIDE="$primary_home" \
     FM_STATE_OVERRIDE="$primary_home/state" FM_PRIMARY_ATTESTATION="$token" \
     bash -c '. "$1"; fm_worker_primary_origin_proven && printf allowed || printf refused' _ \
     "$ROOT/bin/fm-worker-isolation-lib.sh")
-  [ "$out" = allowed ] || fail "a matching state attestation rejected a genuine primary"
-  pass "primary origin requires a matching state-bound launch attestation"
+  [ "$out" = allowed ] || fail "a persisted state attestation rejected a genuine primary"
+  pass "primary startup establishes and reuses a state-bound launch attestation"
 }
 
 test_process_environment_fallback_preserves_spaces() {
@@ -404,6 +410,31 @@ SH
   [ "$status" -ne 0 ] || fail "the process-environment fallback trusted a command-line marker"
   [ -z "$env" ] || fail "the process-environment fallback emitted forgeable marker data"
   pass "the process-environment fallback fails closed without procfs"
+}
+
+test_process_environment_newline_is_not_a_marker() {
+  local dir pid payload out i=0
+  require_procfs || { pass "skip: this host has no readable procfs for NUL environment proof"; return 0; }
+  dir="$TMP_ROOT/newline-environ"
+  mkdir -p "$dir"
+  payload=$'owner\nFM_AGENT_ROLE=secondmate'
+  ( cd "$dir" && env -u FM_AGENT_ROLE -u FM_AGENT_TASK -u FM_AGENT_OWNER_HOME \
+      FM_AGENT_OWNER_HOME="$payload" sleep 300 ) >/dev/null 2>&1 </dev/null &
+  pid=$!
+  BG_PIDS+=("$pid")
+  while [ "$i" -lt 50 ] && [ ! -r "/proc/$pid/environ" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if out=$( . "$ROOT/bin/fm-agent-cwd-lib.sh" && fm_agent_proc_env "$pid" FM_AGENT_ROLE 2>&1 ); then
+    fail "a newline-bearing environment value forged an agent role: $out"
+  fi
+  [ -z "$out" ] || fail "the forged role lookup emitted data: $out"
+  if out=$( . "$ROOT/bin/fm-agent-cwd-lib.sh" && fm_agent_environ "$pid" 2>&1 ); then
+    fail "the newline-bearing process environment was exposed as parseable records: $out"
+  fi
+  [ -z "$out" ] || fail "the unsafe process environment emitted partial records: $out"
+  pass "newline-bearing process environments fail closed without forging markers"
 }
 
 test_unreadable_task_start_proof_remains_contested() {
@@ -1561,6 +1592,7 @@ test_primary_ancestry_refuses_any_inherited_worker_marker
 test_reparented_markerless_worker_is_refused
 test_primary_origin_requires_state_attestation
 test_process_environment_fallback_preserves_spaces
+test_process_environment_newline_is_not_a_marker
 test_unreadable_task_start_proof_remains_contested
 test_task_pid_index_distinguishes_complete_empty_from_incomplete_scan
 test_task_pid_index_ignores_foreign_uid_processes

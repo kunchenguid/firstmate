@@ -121,7 +121,7 @@ fm_agent_environ() {
 fm_agent_proc_env() {
   local pid=$1 var=$2 value
   [ -n "$var" ] || return 1
-  value=$(fm_agent_environ "$pid" | sed -n "s/^$var=//p" | head -1)
+  value=$(fm_process_env_value "$pid" "$var" 2>/dev/null) || return 1
   [ -n "$value" ] || return 1
   printf '%s' "$value"
 }

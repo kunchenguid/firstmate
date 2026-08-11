@@ -28,30 +28,7 @@ fi
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 write_primary_attestation() {
-  local file="$STATE/.primary-attestation" token token_file tmp root_real content
-  mkdir -p "$STATE" || return 1
-  root_real=$(cd "$FM_ROOT" 2>/dev/null && pwd -P) || return 1
-  if [ -e "$file" ] || [ -L "$file" ]; then
-    [ -f "$file" ] && [ ! -L "$file" ] && [ -O "$file" ] || return 1
-    content=$(cat "$file" 2>/dev/null) || return 1
-    token=$(printf '%s\n' "$content" | awk -F= '$1 == "token" {print substr($0, index($0, "=") + 1); exit}')
-    [ -n "$token" ] || return 1
-    [ "$content" = "$(printf 'root=%s\ntoken=%s' "$root_real" "$token")" ] || return 1
-  else
-    token_file=$(mktemp "${TMPDIR:-/tmp}/fm-primary-attestation.XXXXXX") || return 1
-    token=${token_file##*/}
-    rm -f "$token_file"
-    tmp=$(mktemp "$STATE/.primary-attestation.XXXXXX") || return 1
-    chmod 600 "$tmp" || { rm -f "$tmp"; return 1; }
-    printf 'root=%s\ntoken=%s\n' "$root_real" "$token" > "$tmp" || {
-      rm -f "$tmp"
-      return 1
-    }
-    mv "$tmp" "$file" || { rm -f "$tmp"; return 1; }
-  fi
-  FM_PRIMARY_ATTESTATION=$token
-  export FM_PRIMARY_ATTESTATION
-  fm_worker_primary_attestation_refresh
+  fm_worker_primary_attestation_establish
 }
 
 case "${1:-start}" in
