@@ -36,7 +36,7 @@ shift
 secondmate_home() {
   local id=$1 line
   [ -f "$REG" ] || { echo "error: no secondmate registry at $REG" >&2; return 1; }
-  line=$(grep -E "^- $id( |$)" "$REG" | tail -1 || true)
+  line=$(awk -v wanted="$id" '$1 == "-" && $2 == wanted { line = $0 } END { if (line != "") print line }' "$REG")
   [ -n "$line" ] || { echo "error: secondmate $id is not registered in $REG" >&2; return 1; }
   printf '%s\n' "$line" | sed -n 's/^[^(]*(home: \([^;)]*\);.*/\1/p'
 }

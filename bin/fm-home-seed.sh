@@ -795,7 +795,10 @@ write_registry() {
   today=$(date +%F)
   tmp="$REG.tmp.$$"
   if [ -f "$REG" ]; then
-    grep -vE "^- $id( |$)" "$REG" > "$tmp" || true
+    awk -v wanted="$id" '!($1 == "-" && $2 == wanted)' "$REG" > "$tmp" || {
+      rm -f "$tmp"
+      return 1
+    }
   else
     : > "$tmp"
   fi

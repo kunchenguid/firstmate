@@ -263,6 +263,7 @@ SPAWN_GROK_HOOK_CREATED=0
 SPAWN_GROK_CONFIG_CREATED=0
 SPAWN_CREATED_DIRECTORIES=()
 SPAWN_GROK_AUTH_FILE=
+SPAWN_GROK_AUTH_TMP=
 SPAWN_GROK_HOOK_FILE=
 SPAWN_GROK_CONFIG_FILE=
 SPAWN_CLAUDE_HOOK_INODE=
@@ -584,11 +585,28 @@ spawn_remove_owned_artifact() {
 
 spawn_remove_unproven_artifact() {
   local path=$1 expected_inode=$2 actual_inode
-  [ -n "$path" ] && [ -n "$expected_inode" ] || return 1
+  [ -n "$path" ] || return 1
+  if [ ! -e "$path" ] && [ ! -L "$path" ]; then
+    return 0
+  fi
+  [ -n "$expected_inode" ] || return 1
   [ -f "$path" ] && [ ! -L "$path" ] || return 1
   actual_inode=$(spawn_artifact_inode "$path") || return 1
   [ "$actual_inode" = "$expected_inode" ] || return 1
   rm -f -- "$path"
+}
+
+spawn_discard_grok_auth_provisional() {
+  local path=${SPAWN_GROK_AUTH_TMP:-}
+  if [ -n "$path" ] && { [ -e "$path" ] || [ -L "$path" ]; }; then
+    [ -f "$path" ] && [ ! -L "$path" ] || return 1
+    rm -f -- "$path" || return 1
+  fi
+  SPAWN_GROK_AUTH_TMP=
+  SPAWN_GROK_AUTH_FILE=
+  SPAWN_GROK_AUTH_INODE=
+  SPAWN_GROK_AUTH_DIGEST=
+  SPAWN_GROK_AUTH_PROVISIONAL=0
 }
 
 spawn_acquire_home_lock() {
@@ -635,7 +653,9 @@ spawn_abort_artifacts_cleanup() {
     spawn_remove_unproven_artifact "$SPAWN_GROK_AUTH_FILE" "${SPAWN_GROK_AUTH_INODE:-}" || rc=1
   fi
   if [ -n "${SPAWN_GROK_AUTH_TMP:-}" ]; then
-    if [ -n "${SPAWN_GROK_AUTH_INODE:-}" ] && [ -n "${SPAWN_GROK_AUTH_DIGEST:-}" ]; then
+    if [ ! -e "$SPAWN_GROK_AUTH_TMP" ] && [ ! -L "$SPAWN_GROK_AUTH_TMP" ]; then
+      :
+    elif [ -n "${SPAWN_GROK_AUTH_INODE:-}" ] && [ -n "${SPAWN_GROK_AUTH_DIGEST:-}" ]; then
       spawn_remove_owned_artifact "$SPAWN_GROK_AUTH_TMP" \
         "$SPAWN_GROK_AUTH_INODE" "$SPAWN_GROK_AUTH_DIGEST" || rc=1
     else
@@ -1171,7 +1191,7 @@ secondmate_registry_value() {
   local id=$1 key=$2 reg line value
   reg="$DATA/secondmates.md"
   [ -f "$reg" ] || return 1
-  line=$(grep -E "^- $id( |$)" "$reg" | tail -1 || true)
+  line=$(awk -v wanted="$id" '$1 == "-" && $2 == wanted { line = $0 } END { if (line != "") print line }' "$reg")
   [ -n "$line" ] || return 1
   case "$key" in
     home) value=$(printf '%s\n' "$line" | sed -n 's/^[^(]*(home: \([^;)]*\);.*/\1/p') ;;
@@ -1981,8 +2001,8 @@ if [ "$KIND" != secondmate ]; then
   SPAWN_TURNEND_CREATED=1
   case "$HARNESS" in
     claude*)
-      mkdir -p "$WT/.claude"
-      [ -d "$WT/.claude" ] && [ ! -L "$WT/.claude" ] || exit 1
+      spawn_preflight_real_directory_path "$WT/.claude" || exit 1
+      spawn_ensure_real_directory_path "$WT/.claude" || exit 1
       spawn_create_new_artifact "$WT/.claude/settings.local.json" SPAWN_CLAUDE_HOOK_INODE SPAWN_CLAUDE_HOOK_DIGEST <<EOF || exit 1
 {"hooks":{"Stop":[{"hooks":[{"type":"command","command":"touch '$TURNEND'"}]}]}}
 EOF
@@ -1990,8 +2010,8 @@ EOF
       exclude_path '.claude/settings.local.json'
       ;;
     opencode*)
-      mkdir -p "$WT/.opencode/plugins"
-      [ -d "$WT/.opencode/plugins" ] && [ ! -L "$WT/.opencode/plugins" ] || exit 1
+      spawn_preflight_real_directory_path "$WT/.opencode/plugins" || exit 1
+      spawn_ensure_real_directory_path "$WT/.opencode/plugins" || exit 1
       spawn_create_new_artifact "$WT/.opencode/plugins/fm-turn-end.js" SPAWN_OPENCODE_HOOK_INODE SPAWN_OPENCODE_HOOK_DIGEST <<EOF || exit 1
 export const FmTurnEnd = async ({ \$ }) => ({
   event: async ({ event }) => {
@@ -2102,11 +2122,11 @@ EOF
       SPAWN_GROK_AUTH_FILE=$auth_file
       SPAWN_GROK_AUTH_PROVISIONAL=1
       umask "$old_umask"
-      printf '%s\n' "$TURNEND" > "$auth_tmp" || { rm -f -- "$auth_tmp"; exit 1; }
-      SPAWN_GROK_AUTH_INODE=$(spawn_artifact_inode "$auth_tmp") || { rm -f -- "$auth_tmp"; exit 1; }
-      SPAWN_GROK_AUTH_DIGEST=$(spawn_artifact_digest "$auth_tmp") || { rm -f -- "$auth_tmp"; exit 1; }
+      printf '%s\n' "$TURNEND" > "$auth_tmp" || { spawn_discard_grok_auth_provisional || true; exit 1; }
+      SPAWN_GROK_AUTH_INODE=$(spawn_artifact_inode "$auth_tmp") || { spawn_discard_grok_auth_provisional || true; exit 1; }
+      SPAWN_GROK_AUTH_DIGEST=$(spawn_artifact_digest "$auth_tmp") || { spawn_discard_grok_auth_provisional || true; exit 1; }
       if ! ln "$auth_tmp" "$auth_file" 2>/dev/null; then
-        rm -f -- "$auth_tmp"
+        spawn_discard_grok_auth_provisional || true
         exit 1
       fi
       SPAWN_GROK_AUTH_CREATED=1
@@ -2211,6 +2231,14 @@ chmod 600 "$META_TMP" || { rm -f "$META_TMP"; exit 1; }
   [ "$BACKEND" = tmux ] || echo "backend=$BACKEND"
   [ -z "${GROK_AUTH_DIR:-}" ] || echo "grok_registry_dir=$GROK_AUTH_DIR"
   [ -z "${SPAWN_GROK_AUTH_FILE:-}" ] || echo "grok_registry_token=${SPAWN_GROK_AUTH_FILE##*/}"
+  if [ "${SPAWN_CLAUDE_HOOK_CREATED:-0}" = 1 ]; then
+    echo "claude_hook_inode=$SPAWN_CLAUDE_HOOK_INODE"
+    echo "claude_hook_digest=$SPAWN_CLAUDE_HOOK_DIGEST"
+  fi
+  if [ "${SPAWN_OPENCODE_HOOK_CREATED:-0}" = 1 ]; then
+    echo "opencode_hook_inode=$SPAWN_OPENCODE_HOOK_INODE"
+    echo "opencode_hook_digest=$SPAWN_OPENCODE_HOOK_DIGEST"
+  fi
   if [ "$BACKEND" = herdr ]; then
     echo "display_label=$DISPLAY_LABEL"
     echo "task_key=$TASK_KEY"

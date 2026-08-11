@@ -591,12 +591,24 @@ teardown_file_digest() {
 
 teardown_remove_owned_file() {
   local path=$1 expected_inode=$2 expected_digest=$3 actual_inode actual_digest
+  [ "${TEARDOWN_TASK_LOCK_HELD:-0}" = 1 ] || return 1
   [ -f "$path" ] && [ ! -L "$path" ] || return 1
   actual_inode=$(teardown_file_inode "$path") || return 1
   [ "$actual_inode" = "$expected_inode" ] || return 1
   actual_digest=$(teardown_file_digest "$path") || return 1
   [ "$actual_digest" = "$expected_digest" ] || return 1
   rm -f -- "$path"
+}
+
+teardown_remove_spawn_owned_hook() {
+  local meta=$1 key=$2 path=$3 inode digest
+  if [ ! -e "$path" ] && [ ! -L "$path" ]; then
+    return 0
+  fi
+  inode=$(meta_value "$meta" "${key}_inode")
+  digest=$(meta_value "$meta" "${key}_digest")
+  [ -n "$inode" ] && [ -n "$digest" ] || return 0
+  teardown_remove_owned_file "$path" "$inode" "$digest"
 }
 
 teardown_grok_real_directory() {
@@ -1401,6 +1413,7 @@ cleanup_firstmate_home_children() {
     child_task_lock_path="$sub_state/.spawn-$child_id.lock"
     if ! (
       fm_lock_acquire_wait "$child_task_lock_path" || exit 1
+      TEARDOWN_TASK_LOCK_HELD=1
       trap 'fm_lock_release "$child_task_lock_path" || true' EXIT
     child_backend=$(validate_child_backend "$child_id" "$child_meta") || return 1
     child_t=$(meta_value "$child_meta" window)
@@ -1499,7 +1512,18 @@ cleanup_firstmate_home_children() {
           child_slot_retain_verdict=$TEARDOWN_SLOT_RETAIN_VERDICT
           fm_slot_lock_release "$child_slot_lock_path" || true
         else
-          rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js"
+          teardown_remove_spawn_owned_hook "$child_meta" claude_hook \
+            "$child_wt/.claude/settings.local.json" || {
+            fm_slot_lock_release "$child_slot_lock_path" || true
+            echo "REFUSED: could not prove child $child_id Claude hook ownership; preserving child state" >&2
+            return 1
+          }
+          teardown_remove_spawn_owned_hook "$child_meta" opencode_hook \
+            "$child_wt/.opencode/plugins/fm-turn-end.js" || {
+            fm_slot_lock_release "$child_slot_lock_path" || true
+            echo "REFUSED: could not prove child $child_id opencode hook ownership; preserving child state" >&2
+            return 1
+          }
           teardown_grok_pointer_remove "$child_wt" "$sub_state" "$child_id" || {
             fm_slot_lock_release "$child_slot_lock_path" || true
             echo "REFUSED: could not prove child $child_id Grok pointer ownership; preserving child state" >&2
@@ -1533,50 +1557,18 @@ cleanup_firstmate_home_children() {
         child_slot_retain_verdict=$TEARDOWN_SLOT_RETAIN_VERDICT
       fi
     fi
-    if [ -z "$child_slot_retain_verdict" ]; then
-      remove_grok_turnend_artifacts "$sub_state" "$child_id" || {
-        echo "REFUSED: could not prove child $child_id Grok registry ownership; preserving child state" >&2
-        return 1
-      }
-    fi
-    remove_pr_poll_artifacts "$sub_state" "$child_id" || return 1
     if [ -n "$child_slot_retain_verdict" ]; then
-      teardown_meta_backup_create "$child_meta" || {
-        echo "error: could not preserve recovery metadata for child $child_id" >&2
-        return 1
-      }
-    fi
-    if [ -n "$child_slot_retain_verdict" ]; then
-      if ! rm -f "$sub_state/$child_id.status" "$sub_state/$child_id.turn-ended" \
-        "$sub_state/$child_id.meta" "$sub_state/$child_id.pi-ext.ts"; then
-        teardown_meta_backup_restore "$child_meta" || true
-        return 1
-      fi
-    elif ! rm -f "$sub_state/$child_id.status" "$sub_state/$child_id.turn-ended" \
-      "$sub_state/$child_id.meta" "$sub_state/$child_id.pi-ext.ts"; then
-      if [ -n "$child_slot_retain_verdict" ]; then
-        teardown_meta_backup_restore "$child_meta" || true
-      fi
+      echo "REFUSED: child $child_id retained its lease; preserving child task state and ownership artifacts" >&2
       return 1
     fi
-    if [ -n "$child_slot_retain_verdict" ]; then
-      fm_slot_lock_acquire "$child_wt" || {
-        teardown_meta_backup_restore "$child_meta" || true
-        echo "error: could not serialize ownership cleanup for child $child_id; preserving child state" >&2
-        return 1
-      }
-      child_slot_lock_path=$FM_SLOT_LOCK_PATH
-      if ! fm_slot_stamp_relinquish "$child_wt" "$child_id" "$child_slot_retain_verdict"; then
-        fm_slot_lock_release "$child_slot_lock_path" || true
-        teardown_meta_backup_restore "$child_meta" || true
-        echo "error: could not relinquish the ownership stamp for child $child_id; preserving child state" >&2
-        return 1
-      fi
-      if ! fm_slot_lock_release "$child_slot_lock_path"; then
-        teardown_meta_backup_restore "$child_meta" || true
-        return 1
-      fi
-      teardown_meta_backup_discard || true
+    remove_grok_turnend_artifacts "$sub_state" "$child_id" || {
+      echo "REFUSED: could not prove child $child_id Grok registry ownership; preserving child state" >&2
+      return 1
+    }
+    remove_pr_poll_artifacts "$sub_state" "$child_id" || return 1
+    if ! rm -f "$sub_state/$child_id.status" "$sub_state/$child_id.turn-ended" \
+      "$sub_state/$child_id.meta" "$sub_state/$child_id.pi-ext.ts"; then
+      return 1
     fi
     ); then
       echo "REFUSED: concurrent lifecycle activity blocked child $child_id cleanup; preserving child state" >&2
@@ -1589,7 +1581,10 @@ remove_secondmate_registry_entry() {
   local id=$1 tmp
   [ -f "$SECONDMATE_REG" ] || return 0
   tmp="$SECONDMATE_REG.tmp.$$"
-  grep -vE "^- $id( |$)" "$SECONDMATE_REG" > "$tmp" || true
+  awk -v wanted="$id" '!($1 == "-" && $2 == wanted)' "$SECONDMATE_REG" > "$tmp" || {
+    rm -f "$tmp"
+    return 1
+  }
   mv "$tmp" "$SECONDMATE_REG"
 }
 
@@ -1866,8 +1861,7 @@ if [ "$KIND" = secondmate ] && [ "$FORCE" = "--force" ]; then
   fi
 fi
 
-# Ownership gate first. A retained lease leaves the slot untouched while the
-# rest of teardown retires this task's endpoint and records.
+# Ownership gate first.
 if [ "$KIND" != secondmate ] \
    && [ "$TOP_SLOT_RELEASE_AUTHORIZED" -eq 1 ]; then
   if [ "$TOP_SLOT_RETURNED" = 1 ]; then
@@ -1881,8 +1875,16 @@ if [ "$KIND" != secondmate ] \
       exit 1
     }
     TOP_TASK_BRANCH=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
-    # Remove our hook file so a reused pool worktree cannot fire signals for a dead task.
-    rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js"
+    teardown_remove_spawn_owned_hook "$META" claude_hook \
+      "$WT/.claude/settings.local.json" || {
+      echo "REFUSED: could not prove task $ID Claude hook ownership; preserving task state and worktree" >&2
+      exit 1
+    }
+    teardown_remove_spawn_owned_hook "$META" opencode_hook \
+      "$WT/.opencode/plugins/fm-turn-end.js" || {
+      echo "REFUSED: could not prove task $ID opencode hook ownership; preserving task state and worktree" >&2
+      exit 1
+    }
     teardown_grok_pointer_remove "$WT" "$STATE" "$ID" || {
       echo "REFUSED: could not prove task $ID Grok pointer ownership; preserving task state and worktree" >&2
       exit 1
@@ -1924,6 +1926,18 @@ if [ "$KIND" = secondmate ]; then
     exit 1
   fi
   remove_secondmate_registry_entry "$ID"
+fi
+if [ "$TOP_SLOT_UNRESOLVED_LEASE" = 1 ] || [ -n "$TOP_SLOT_RETAIN_VERDICT" ]; then
+  teardown_release_top_slot_lock || {
+    echo "error: could not release the retained-slot ownership lock for $ID" >&2
+    exit 1
+  }
+  teardown_release_herdr_presentation_lock || {
+    echo "error: could not release the Herdr presentation lock for $ID" >&2
+    exit 1
+  }
+  echo "teardown $ID retained its task state and ownership artifacts for recovery" >&2
+  exit 0
 fi
 if [ "$TOP_GROK_ARTIFACTS_RETAINED" != 1 ]; then
   remove_grok_turnend_artifacts "$STATE" "$ID" || {
