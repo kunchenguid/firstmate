@@ -53,6 +53,9 @@ wait_for_text() {
     sleep 0.05
     i=$((i + 1))
   done
+  # Emit the frame that never showed the text: TMP_ROOT is removed by the EXIT
+  # trap even on failure, so this is the only surviving evidence for a caller.
+  cat "$file" >&2
   return 1
 }
 
@@ -1533,14 +1536,8 @@ TS
 
     tmux -L "$TMUX_SOCKET" new-session -d -s "$TMUX_SESSION" -x 160 -y 36 \
       "cd '$project' && env FM_HOME='$home' PI_CODING_AGENT_DIR='$config' FM_OPERATIONAL_INPUT_SCRIPT='$OPERATIONAL_INPUT' PI_OFFLINE=1 pi --approve --no-context-files --no-skills --no-prompt-templates --no-extensions $extensions $session_arg; rc=\$?; printf '\nPI_EXIT=%s\n' \"\$rc\"; sleep 20"
-    i=0
-    while [ "$i" -lt 120 ]; do
-      pane=$(tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" -S - 2>/dev/null || true)
-      printf '%s\n' "$pane" | grep -Fq 'followup-e2e.ts' && break
-      sleep 0.05
-      i=$((i + 1))
-    done
-    printf '%s\n' "$pane" | grep -Fq 'followup-e2e.ts' \
+    pane_file="$TMP_ROOT/followup-composer-$label.txt"
+    wait_for_text "$pane_file" 'followup-e2e.ts' \
       || fail "Pi follow-up $case_name case ($label) did not reach the ready composer"
 
     tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/followup-e2e $label $shape"
