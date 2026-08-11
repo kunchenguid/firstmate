@@ -74,6 +74,16 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # shellcheck source=bin/fm-session-lock-lib.sh
 . "$FM_BACKEND_HERDR_ROOT/bin/fm-session-lock-lib.sh"
 
+# Keep this adapter usable when sourced directly by its focused tests or by a
+# minimal backend shell that predates the shared attribution helper. A nonempty
+# unverified marker must never authorize OMP attribution; verified sessions have
+# an empty marker and retain the native OMP path.
+if ! declare -F fm_harness_omp_attribution_allowed >/dev/null 2>&1; then
+  fm_harness_omp_attribution_allowed() {
+    [ -z "${FM_HARNESS_UNVERIFIED:-}" ]
+  }
+fi
+
 # Shared composer-content classifier (empty|pending|unknown, and the fleet-wide
 # dead-shell-vs-agent-composer rule). Owned by bin/fm-composer-lib.sh, reused by
 # every backend so the decision cannot drift.
@@ -2995,6 +3005,7 @@ EOF
     esac
     return 0
   fi
+  [ -n "$recorded_harness" ] && [ "$recorded_harness" != unknown ] || return 2
   if [ -z "$identity" ]; then
     identity=$(fm_backend_herdr_agent_identity_raw "$session" "$pane" 2>/dev/null) || return 2
   fi
@@ -3059,21 +3070,11 @@ fm_backend_herdr_composer_state() {  # <target> [recorded-harness] [raw-launch] 
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
   session=$FM_BACKEND_HERDR_SESSION
   pane=$FM_BACKEND_HERDR_PANE
-  if [ -n "$recorded_harness" ] && [ "$recorded_harness" != omp ] \
-    && [ "$recorded_harness" != unknown ] && [ "$raw_launch" != 1 ]; then
-    if ! fm_backend_herdr_omp_input_safe "$session" "$pane" "$recorded_harness" "$raw_launch" "$raw_owner" "" "$explicit_target"; then
-      printf 'unknown'
-      return 0
-    fi
-    input_checked=1
-  fi
-  if [ "$raw_launch" = 1 ]; then
-    if ! fm_backend_herdr_omp_input_safe "$session" "$pane" "$recorded_harness" "$raw_launch" "$raw_owner" "" "$explicit_target"; then
-      printf 'unknown'
-      return 0
-    fi
-    input_checked=1
-  fi
+  # Capture first: the pane read is the primary composer evidence, and the
+  # native identity probe is intentionally lazy so it cannot consume or race
+  # the capture response. The final verdict gate below still authorizes every
+  # injectable classification, including raw-launch ownership and explicit
+  # target exceptions.
   if cap=$(fm_backend_herdr_capture_ansi "$target" "$FM_COMPOSER_CAPTURE_LINES" 2>/dev/null); then
     caps=$(printf 'styled=1\ncursor=0\nidentity=1\nrows=%s' "$FM_COMPOSER_CAPTURE_LINES")
   elif cap=$(fm_backend_herdr_capture "$target" "$FM_COMPOSER_CAPTURE_LINES"); then
@@ -3099,8 +3100,10 @@ fm_backend_herdr_composer_state() {  # <target> [recorded-harness] [raw-launch] 
     [ "$verdict" != need-identity ] || verdict=unknown
   fi
   if [ "$verdict" != unknown ] && [ "$input_checked" -eq 0 ]; then
-    if ! fm_backend_herdr_omp_input_safe "$session" "$pane" "$recorded_harness" "$raw_launch" "$raw_owner" "" "$explicit_target"; then
-      verdict=unknown
+    if [ -n "$recorded_harness" ] || [ "$raw_launch" = 1 ] || [ "$explicit_target" = 1 ]; then
+      if ! fm_backend_herdr_omp_input_safe "$session" "$pane" "$recorded_harness" "$raw_launch" "$raw_owner" "" "$explicit_target"; then
+        verdict=unknown
+      fi
     fi
   fi
   printf '%s' "$verdict"

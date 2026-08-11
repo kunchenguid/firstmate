@@ -691,10 +691,24 @@ fm_backend_endpoint_allows() {  # <backend> <target> <recorded-harness> [raw-lau
   fm_backend_source "$backend" || return 1
   identity=$(fm_backend_endpoint_identity "$backend" "$target")
   case "$identity" in
-    claude|codex|opencode|grok|kimi|muse|pi|pi-signed|omp) ;;
+    claude|codex|opencode|grok|kimi|muse|pi|pi-signed)
+      fm_harness_identity_matches "$recorded_harness" "$identity" || return 1
+      ;;
+    omp)
+      # A positive OMP observation is the quarantine boundary for every
+      # canonical non-OMP record, while a canonical OMP record still needs an
+      # exact OMP identity below.
+      [ "$recorded_harness" = omp ] || return 1
+      ;;
+    missing|unknown|unreadable)
+      # Preserve the pre-OMP behavior for ordinary harnesses when a backend
+      # cannot expose process identity. Canonical OMP remains fail-closed: it
+      # is never attributed without a positive endpoint identity.
+      [ "$recorded_harness" != omp ] || return 1
+      return 0
+      ;;
     *) return 1 ;;
   esac
-  fm_harness_identity_matches "$recorded_harness" "$identity" || return 1
   if [ "$backend" = herdr ]; then
     fm_backend_source herdr || return 1
     fm_backend_herdr_parse_target "$target" || return 1
@@ -830,7 +844,7 @@ fm_backend_send_key() {  # <backend> <target> <key> [expected-label] [recorded-h
   shift
   fm_backend_source "$backend" || return 1
   if [ "$backend" = tmux ] && [ "$raw_launch" != 1 ] \
-    && fm_backend_recorded_harness_is_canonical "$recorded_harness" \
+    && [ "$recorded_harness" = omp ] \
     && ! fm_backend_endpoint_allows "$backend" "$target" "$recorded_harness" "$raw_launch"; then
     return 1
   fi
@@ -855,7 +869,7 @@ fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sl
   shift
   fm_backend_source "$backend" || return 1
   if [ "$backend" = tmux ] && [ "$raw_launch" != 1 ] \
-    && fm_backend_recorded_harness_is_canonical "$recorded_harness" \
+    && [ "$recorded_harness" = omp ] \
     && ! fm_backend_endpoint_allows "$backend" "$target" "$recorded_harness" "$raw_launch"; then
     printf 'unknown'
     return 0
@@ -1030,12 +1044,87 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
 # classifier. Zellij remains unverified because its secondmate ghost-tab and
 # agent-process recovery path has not been empirically validated. Orca and cmux
 # do not support secondmate spawns.
+fm_backend_tmux_prefixed_harness_safe() {  # <target> <recorded-harness>
+  local target=$1 recorded_harness=$2 current name identity
+  current=$(fm_backend_tmux_current_command "$target") || return 1
+  [ "${current##*/}" = "$recorded_harness" ] || return 1
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    identity=$(fm_harness_process_identity "$name" "$name")
+    case "$identity" in
+      claude|codex|opencode|grok|kimi|muse|pi|pi-signed)
+        fm_harness_identity_matches "$recorded_harness" "$identity" || return 1
+        ;;
+      omp|shell) return 1 ;;
+      other)
+        case "${name##*/}" in
+          bun|"$recorded_harness") ;;
+          *) return 1 ;;
+        esac
+        ;;
+      *) return 1 ;;
+    esac
+  done < <(fm_backend_tmux_foreground_comms "$target")
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    identity=$(fm_harness_process_identity "$name" "$name")
+    case "$identity" in
+      claude|codex|opencode|grok|kimi|muse|pi|pi-signed)
+        fm_harness_identity_matches "$recorded_harness" "$identity" || return 1
+        ;;
+      omp|shell) return 1 ;;
+      other)
+        case "${name##*/}" in
+          bun|"$recorded_harness") ;;
+          *) return 1 ;;
+        esac
+        ;;
+      *) return 1 ;;
+    esac
+  done < <(fm_backend_tmux_foreground_argv0s "$target")
+}
+
 fm_backend_agent_state() {  # <backend> <target> [recorded-harness] [raw-launch]
   local backend=$1 target=$2 recorded_harness=${3:-} raw_launch=${4:-}
+  local state_dir meta durable_harness state_harness
+  # fm-control keeps the original harness in its shell while a relaunch
+  # publishes the replacement record. Once that publication is visible, the
+  # durable record is the current identity and must win the handoff check;
+  # otherwise a valid cross-harness replacement is reported ambiguous merely
+  # because the caller has not refreshed its pre-relaunch variable yet.
+  if [ "$raw_launch" != 1 ] \
+    && [ -n "$recorded_harness" ] \
+    && fm_backend_recorded_harness_is_canonical "$recorded_harness" \
+    && { [ "$backend" = tmux ] || [ "$backend" = herdr ]; }; then
+    state_dir=${FM_STATE_OVERRIDE:-$FM_HOME/state}
+    meta=$(fm_backend_meta_for_window "$target" "$state_dir" 2>/dev/null || true)
+    if [ -n "$meta" ] && [ "$(fm_backend_of_meta "$meta")" = "$backend" ]; then
+      durable_harness=$(fm_meta_get "$meta" harness)
+      if fm_backend_recorded_harness_is_canonical "$durable_harness" \
+        && [ "$durable_harness" != "$recorded_harness" ]; then
+        recorded_harness=$durable_harness
+      fi
+    fi
+  fi
+  state_harness=$recorded_harness
+  case "$recorded_harness" in
+    claude*) state_harness=claude ;;
+    codex*) state_harness=codex ;;
+    opencode*) state_harness=opencode ;;
+    grok*) state_harness=grok ;;
+    kimi*) state_harness=kimi ;;
+    muse*) state_harness=muse ;;
+  esac
   fm_backend_source "$backend" || { printf 'unverified'; return 0; }
+  if [ "$backend" = tmux ] && [ "$raw_launch" != 1 ] \
+    && [ "$recorded_harness" != "$state_harness" ] \
+    && fm_backend_tmux_prefixed_harness_safe "$target" "$recorded_harness"; then
+    fm_backend_tmux_agent_state "$target" '' 1
+    return 0
+  fi
   case "$backend" in
-    tmux) fm_backend_tmux_agent_state "$target" "$recorded_harness" "$raw_launch" ;;
-    herdr) fm_backend_herdr_agent_state "$target" "$recorded_harness" "$raw_launch" ;;
+    tmux) fm_backend_tmux_agent_state "$target" "$state_harness" "$raw_launch" ;;
+    herdr) fm_backend_herdr_agent_state "$target" "$state_harness" "$raw_launch" ;;
     *) printf 'unverified' ;;
   esac
 }

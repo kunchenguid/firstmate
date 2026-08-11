@@ -676,6 +676,8 @@ RELAUNCH_REPLACEMENT_WT=
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
 RAW_LAUNCH=0
+RAW_LAUNCH_OWNER=
+RAW_OWNER_REQUIRED=0
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -753,6 +755,7 @@ spawn_abort_cleanup() {
             echo "project=$PROJ_ABS"
             echo "harness=$HARNESS"
             [ "$RAW_LAUNCH" -eq 1 ] && echo "raw_launch=1"
+            [ -n "$RAW_LAUNCH_OWNER" ] && echo "raw_owner=$RAW_LAUNCH_OWNER"
             echo "kind=$KIND"
             [ -z "${MODE:-}" ] || echo "mode=$MODE"
             [ -z "${YOLO:-}" ] || echo "yolo=$YOLO"
@@ -1008,13 +1011,23 @@ if [ "$RELAUNCH" -eq 1 ]; then
     echo "error: backend '$BACKEND' has no recovery-grade agent-state classifier, so a relaunch cannot prove the previous agent exited; refusing rather than risking two agents in one endpoint" >&2
     exit 1
   }
+  RELAUNCH_PRIOR_HARNESS=$(fm_meta_get "$RELAUNCH_META" harness)
   RELAUNCH_PRIOR_RAW_LAUNCH=$(fm_meta_get "$RELAUNCH_META" raw_launch)
-  RELAUNCH_STATE=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET" "$(fm_meta_get "$RELAUNCH_META" harness)" "$RELAUNCH_PRIOR_RAW_LAUNCH")
+  RELAUNCH_STATE=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET" "$RELAUNCH_PRIOR_HARNESS" "$RELAUNCH_PRIOR_RAW_LAUNCH")
+  # A non-OMP tmux endpoint that has returned to a bare shell is an
+  # agent-free relaunch target even when the recorded harness-specific probe
+  # cannot attribute that shell. Keep this fallback identical to fm-control's
+  # lifecycle probe; canonical OMP and raw launches remain fail-closed.
+  if [ "$RELAUNCH_STATE" = ambiguous ] && [ "$BACKEND" = tmux ] \
+    && [ "$RELAUNCH_PRIOR_HARNESS" != omp ] && [ "$RELAUNCH_PRIOR_RAW_LAUNCH" != 1 ]; then
+    RELAUNCH_FALLBACK_STATE=$(fm_backend_agent_state \
+      "$BACKEND" "$RELAUNCH_TARGET" "" "$RELAUNCH_PRIOR_RAW_LAUNCH")
+    [ "$RELAUNCH_FALLBACK_STATE" = dead ] && RELAUNCH_STATE=dead
+  fi
   [ "$RELAUNCH_STATE" = dead ] || {
     echo "error: task $ID's endpoint reads '$RELAUNCH_STATE'; a relaunch requires a positively agent-free endpoint (stop the agent first with bin/fm-control.sh $ID exit)" >&2
     exit 1
   }
-  RELAUNCH_PRIOR_HARNESS=$(fm_meta_get "$RELAUNCH_META" harness)
   KIND=$(fm_meta_get "$RELAUNCH_META" kind)
   [ -n "$KIND" ] || KIND=ship
   MODE=$(fm_meta_get "$RELAUNCH_META" mode)
@@ -1203,6 +1216,7 @@ case "$ARG3" in
     for word in $LAUNCH; do
       case "$word" in [A-Za-z_]*=*) continue ;; *) HARNESS=$(basename "$word"); break ;; esac
     done
+    [ "$HARNESS" = omp ] && HARNESS=raw-omp
     ;;
   '')
     # No explicit harness: resolve from config. A secondmate AGENT launches on the
@@ -1231,6 +1245,19 @@ case "$ARG3" in
     LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: unknown harness '$HARNESS'; pass a raw launch command to use an unverified adapter" >&2; exit 1; }
     ;;
 esac
+
+# Raw OMP-shaped commands need an independent process-tree ownership token so
+# their unverified endpoint cannot be confused with a verified OMP worker.
+# Generic escape-hatch commands retain their literal launch form and metadata;
+# the token is only meaningful for the OMP safety gate.
+if [ "$RAW_LAUNCH" -eq 1 ]; then
+  case " $LAUNCH " in
+    *" omp "*|*"/omp "*|*"./omp "*|*"start-omp.sh"*|*" && "*)
+      RAW_OWNER_REQUIRED=1
+      RAW_LAUNCH_OWNER="fmraw.${ID}.${BASHPID:-$$}.${RANDOM}"
+      ;;
+  esac
+fi
 
 # FM_PI_HARNESS is the identity the WORKER reports back through
 # bin/fm-harness.sh detect_own, which cannot tell pi-signed from pi without it.
@@ -1272,6 +1299,13 @@ case "$HARNESS" in
   *)
     ;;
 esac
+fi
+# A raw pi-signed escape hatch remains unverified, but its explicit executable
+# identity must still win over an inherited OMPCODE marker when the worker
+# reports back through fm-harness.sh. Plain raw pi intentionally stays wholly
+# unmarked so it retains the generic unverified identity behavior.
+if [ "$RAW_LAUNCH" -eq 1 ] && [ "$HARNESS" = pi-signed ]; then
+  LAUNCH="unset OMPCODE CLAUDECODE FM_PRIMARY_HARNESS GROK_AGENT GROK_HOOK_EVENT; export FM_PI_HARNESS=pi-signed; $LAUNCH"
 fi
 
 # muse is verified as a CREWMATE/SCOUT adapter only. A secondmate is a firstmate
@@ -2843,7 +2877,7 @@ fi
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness raw_launch kind mode yolo tasktmp model effort busy_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness raw_launch raw_owner kind mode yolo tasktmp model effort busy_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -2856,6 +2890,7 @@ preserve_relaunch_meta() {
   echo "project=$PROJ_ABS"
   echo "harness=$HARNESS"
   [ "$RAW_LAUNCH" -eq 1 ] && echo "raw_launch=1"
+  [ -n "$RAW_LAUNCH_OWNER" ] && echo "raw_owner=$RAW_LAUNCH_OWNER"
   echo "kind=$KIND"
   [ -z "$MODE" ] || echo "mode=$MODE"
   [ -z "$YOLO" ] || echo "yolo=$YOLO"
@@ -2940,10 +2975,12 @@ LAUNCH=${LAUNCH//__OMPEXT__/$sq_ompext}
 LAUNCH=${LAUNCH//__OMPTURNEND__/$sq_ompturnend}
 LAUNCH=${LAUNCH//__OMPWATCH__/$sq_ompwatch}
 LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
-case "$HARNESS" in
-  pi|pi-signed) LAUNCH=${LAUNCH//__PIBIN__/"$(shell_quote "$PI_BIN")"} ;;
-  cursor) LAUNCH=${LAUNCH//__CURSORBIN__/"$(shell_quote "$CURSOR_BIN")"} ;;
-esac
+if [ "$RAW_LAUNCH" -eq 0 ]; then
+  case "$HARNESS" in
+    pi|pi-signed) LAUNCH=${LAUNCH//__PIBIN__/"$(shell_quote "$PI_BIN")"} ;;
+    cursor) LAUNCH=${LAUNCH//__CURSORBIN__/"$(shell_quote "$CURSOR_BIN")"} ;;
+  esac
+fi
 LAUNCH=${LAUNCH//__WORKTREE__/$sq_worktree}
 case "$HARNESS" in
   claude|codex|opencode|pi|pi-signed|grok|kimi|muse)
@@ -2983,8 +3020,15 @@ fi
 # boundary. Raw escape-hatch commands retain their ordinary unverified launch
 # behavior and do not receive verified-harness identity wiring.
 if [ "$RAW_LAUNCH" -eq 1 ]; then
-  :
+  if [ -n "$RAW_LAUNCH_OWNER" ]; then
+    LAUNCH="unset FM_HARNESS_UNVERIFIED OMPCODE CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS FM_PRIMARY_HARNESS GROK_AGENT GROK_HOOK_EVENT; export FM_HARNESS_UNVERIFIED=raw-launch FM_RAW_LAUNCH_OWNER='$RAW_LAUNCH_OWNER'; $LAUNCH"
+  else
+    :
+  fi
 else
+  if [ -n "${FM_HARNESS_UNVERIFIED:-}" ] || [ -n "${FM_RAW_LAUNCH_OWNER:-}" ]; then
+    LAUNCH="unset FM_HARNESS_UNVERIFIED FM_RAW_LAUNCH_OWNER; $LAUNCH"
+  fi
   case "$HARNESS" in
     omp)
       LAUNCH="unset CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS FM_PRIMARY_HARNESS GROK_AGENT GROK_HOOK_EVENT; export OMPCODE=1; $LAUNCH"

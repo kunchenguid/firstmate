@@ -295,8 +295,6 @@ fm_tmux_submit_endpoint_allows() {  # <target> [recorded-harness] [raw-launch] [
   [ -n "$recorded_harness" ] && [ "$raw_launch" != 1 ] || return 0
   if [ "$recorded_harness" = omp ] && declare -F fm_backend_omp_endpoint_allows >/dev/null 2>&1; then
     fm_backend_omp_endpoint_allows tmux "$target" omp "$raw_launch" "$raw_owner"
-  elif declare -F fm_backend_endpoint_allows >/dev/null 2>&1; then
-    fm_backend_endpoint_allows tmux "$target" "$recorded_harness" "$raw_launch"
   else
     return 0
   fi
@@ -307,7 +305,7 @@ fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [recorded-harn
   # Preserve the earlier direct-helper form whose fourth argument was
   # baseline-idle, while accepting the ownership-aware recorded-harness-first
   # form used by the generic send dispatcher.
-  case "$4" in
+  case "${4:-}" in
     0|1)
       baseline_idle=$4
       recorded_harness=${5:-}
