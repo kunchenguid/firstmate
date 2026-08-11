@@ -5,7 +5,8 @@
 # BOOTSTRAP_INFO fact, or completed bootstrap no-action fact and is silent when
 # all is well. firstmate consumes the exact 'MISSING: treehouse (install: ...)',
 # 'MISSING: tasks-axi (install: ...)', 'MISSING: quota-axi (install: ...)',
-# 'MISSING: gh-axi (install: ...)', 'MISSING: lavish-axi (install: ...)', and
+# 'MISSING: gh-axi (install: ...)', 'MISSING: playwright-cli (install: ...)',
+# 'MISSING: lavish-axi (install: ...)', and
 # 'BOOTSTRAP_INFO: ...' lines, so those contracts are pinned verbatim. The cases
 # are table-driven over the inputs that vary: whether `treehouse get --help`
 # advertises --lease, which (if any) tasks-axi version is on PATH, whether
@@ -44,7 +45,7 @@ unset TMUX TMUX_PANE HERDR_ENV HERDR_PANE_ID HERDR_SESSION HERDR_SOCKET_PATH \
 make_fake_toolchain() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
-  fm_fake_exit0 "$fakebin" tmux node chrome-devtools-axi
+  fm_fake_exit0 "$fakebin" tmux node playwright-cli
   fm_fake_version_tool "$fakebin" lavish-axi FM_FAKE_LAVISH_AXI_VERSION 0.1.46
   cat > "$fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
@@ -370,6 +371,20 @@ much older gh-axi minor reports an upgrade^0.0.9^missing
 unparseable gh-axi version reports an upgrade^gh-axi development build^missing
 ROWS
   pass "bootstrap enforces gh-axi minimum version"
+}
+
+test_playwright_cli_is_required_with_supported_install_instruction() {
+  local case_dir fakebin out missing
+  case_dir="$TMP_ROOT/playwright-cli-missing"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  rm -f "$fakebin/playwright-cli"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  missing='MISSING: playwright-cli (install: npm install -g @playwright/cli@latest)'
+  [ "$out" = "$missing" ] || fail "missing playwright-cli should report its supported install command, got: $out"
+  pass "bootstrap requires playwright-cli and prints its supported install command"
 }
 
 test_lavish_axi_min_version() {
@@ -892,9 +907,9 @@ test_network_phase_partitions_the_run() {
   mkdir -p "$case_dir/home/config"
   printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
   fakebin=$(make_fake_toolchain "$case_dir")
-  # Break the two diagnostics that stand for the two halves: a local tool floor
-  # and the network GitHub-auth probe.
-  rm -f "$fakebin/node"
+  # Break the two diagnostics that stand for the two halves: a local required
+  # browser tool and the network GitHub-auth probe.
+  rm -f "$fakebin/playwright-cli"
   cat > "$fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 exit 1
@@ -903,18 +918,18 @@ SH
 
   all_out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
-  assert_contains "$all_out" "MISSING: node (install:" "the unsplit run lost its local diagnostic"
+  assert_contains "$all_out" "MISSING: playwright-cli (install:" "the unsplit run lost its local diagnostic"
   assert_contains "$all_out" "NEEDS_GH_AUTH" "the unsplit run lost its network diagnostic"
 
   skip_out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_BOOTSTRAP_NETWORK=skip "$ROOT/bin/fm-bootstrap.sh")
-  assert_contains "$skip_out" "MISSING: node (install:" "the local half lost its own diagnostic"
+  assert_contains "$skip_out" "MISSING: playwright-cli (install:" "the local half lost its own diagnostic"
   assert_not_contains "$skip_out" "NEEDS_GH_AUTH" "the local half still made a network call"
 
   only_out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_BOOTSTRAP_NETWORK=only "$ROOT/bin/fm-bootstrap.sh")
   assert_contains "$only_out" "NEEDS_GH_AUTH" "the network half lost its own diagnostic"
-  assert_not_contains "$only_out" "MISSING: node" "the network half repeated the local half's work"
+  assert_not_contains "$only_out" "MISSING: playwright-cli" "the network half repeated the local half's work"
 
   combined=$(printf '%s\n%s\n' "$skip_out" "$only_out" | LC_ALL=C sort)
   [ "$combined" = "$(printf '%s\n' "$all_out" | LC_ALL=C sort)" ] \
@@ -1149,6 +1164,7 @@ ROWS
 test_bootstrap_reporting
 test_no_mistakes_min_version
 test_gh_axi_min_version
+test_playwright_cli_is_required_with_supported_install_instruction
 test_lavish_axi_min_version
 test_tasks_axi_min_version
 test_quota_axi_min_version

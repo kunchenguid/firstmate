@@ -217,6 +217,27 @@ test_ship_modes_generate_clean_briefs() {
   pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"
 }
 
+test_ship_and_scout_briefs_route_browser_work_through_playwright_cli() {
+  local home ship scout
+  home="$TMP_ROOT/browser-tool-home"
+  mkdir -p "$home/data"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" browser-ship sample --mode direct-PR >/dev/null 2>&1 \
+    || fail "browser ship brief should scaffold"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" browser-scout sample --scout >/dev/null 2>&1 \
+    || fail "browser scout brief should scaffold"
+  ship="$home/data/browser-ship/brief.md"
+  scout="$home/data/browser-scout/brief.md"
+  for brief in "$ship" "$scout"; do
+    assert_grep "Before any browser command, read and follow the tracked \`playwright-cli\` skill" "$brief" \
+      "$brief did not require the tracked browser skill before browser commands"
+    assert_grep "use \`playwright-cli\` for ad hoc browser work" "$brief" \
+      "$brief did not select playwright-cli for ad hoc browser work"
+    assert_grep "project-owned automated end-to-end suites keep their existing test runner" "$brief" \
+      "$brief did not preserve project-owned automated test runners"
+  done
+  pass "fm-brief.sh: ship and scout briefs route only ad hoc browser work through playwright-cli"
+}
+
 # A ship task's delivery mode is firstmate's per-task decision, so a missing or
 # unusable value must stop the scaffold instead of silently defaulting. The
 # no-mistakes-prod-only row is the conditional registry policy: it is never a task
@@ -714,6 +735,7 @@ test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
+test_ship_and_scout_briefs_route_browser_work_through_playwright_cli
 test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply

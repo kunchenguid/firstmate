@@ -1,0 +1,467 @@
+---
+name: playwright-cli
+description: Use playwright-cli for ad hoc browser exploration, quick checks, debugging, and interactive UI review while preserving project-owned automated test runners.
+allowed-tools: Bash(playwright-cli:*) Bash(npx:*) Bash(npm:*)
+metadata:
+  internal: true
+---
+
+# Browser Automation with playwright-cli
+
+## Firstmate browser policy
+
+Load this skill before every browser command.
+Use `playwright-cli` for ad hoc exploration, quick checks, debugging, and interactive UI review.
+Do not replace a project's automated end-to-end command or Playwright test runner with this CLI; run project-owned suites through their existing package script or `npx playwright test` as documented in [references/playwright-tests.md](references/playwright-tests.md).
+Consult `playwright-cli --help` or `playwright-cli --help <command>` before relying on flags that may have changed.
+
+Use a named session for each task so cleanup is scoped and does not affect unrelated browser work.
+For ordinary isolated exploration, open a CLI-owned browser and close that same named session when finished:
+
+```bash
+playwright-cli -s=<task-name> open https://example.com
+playwright-cli -s=<task-name> snapshot
+playwright-cli -s=<task-name> close
+```
+
+For a captain-assisted login or data import, open a headed named session and let the captain interact with that window:
+
+```bash
+playwright-cli -s=<task-name> open https://example.com/login --headed --persistent
+```
+
+Never ask the captain to paste passwords, tokens, recovery codes, or other secrets into chat or a command.
+Do not read, print, export, commit, or retain cookies, storage state, browser profiles, request authorization headers, screenshots, traces, videos, or `.playwright-cli/` artifacts unless the task explicitly requires the corresponding evidence and its storage is safe.
+Do not invent a project-specific login flow; use a project's documented flow or ask the captain to complete authentication in the headed browser.
+Close CLI-owned sessions after use, then delete persistent data when it is no longer needed.
+Never use `close-all`, `kill-all`, or broad process termination when another session may be externally owned or in use.
+
+For an existing Chrome or Edge session, attach by Playwright extension, browser channel, or explicit Chrome DevTools Protocol (CDP) endpoint only with the session owner's consent and after confirming the target:
+
+```bash
+playwright-cli -s=<task-name> attach --extension=chrome
+playwright-cli -s=<task-name> attach --cdp=chrome
+playwright-cli -s=<task-name> attach --cdp=msedge
+playwright-cli -s=<task-name> attach --cdp=http://localhost:9222
+```
+
+An attached browser is externally owned.
+Finish with `playwright-cli -s=<task-name> detach`, never `close`, so the browser remains running.
+
+A live Windows browser attach from another environment is an unvalidated operator smoke, not a supported guarantee yet.
+Its follow-up command is `playwright-cli -s=windows-live attach --cdp=http://<windows-host>:9222`, followed after inspection by `playwright-cli -s=windows-live detach`.
+Prerequisites are a captain-approved Chrome or Edge instance exposing a CDP endpoint on port 9222 from a dedicated non-default user-data directory, network reachability from the Firstmate environment, and firewall rules limited to the required local path.
+The operator must verify the endpoint and intended browser profile before attaching; do not infer success from process presence or claim this path is validated without a real attach-and-detach smoke.
+
+## Quick start
+
+```bash
+# open new browser
+playwright-cli open
+# navigate to a page
+playwright-cli goto https://playwright.dev
+# interact with the page using refs from the snapshot
+playwright-cli click e15
+playwright-cli type "page.click"
+playwright-cli press Enter
+# take a screenshot (rarely used, as snapshot is more common)
+playwright-cli screenshot
+# close the browser
+playwright-cli close
+```
+
+## Commands
+
+### Core
+
+```bash
+playwright-cli open
+# open and navigate right away
+playwright-cli open https://example.com/
+playwright-cli goto https://playwright.dev
+playwright-cli type "search query"
+playwright-cli click e3
+playwright-cli dblclick e7
+# --submit presses Enter after filling the element
+playwright-cli fill e5 "user@example.com"  --submit
+playwright-cli drag e2 e8
+# drop files or data onto an element (from outside the page)
+playwright-cli drop e4 --path=./image.png
+playwright-cli drop e4 --data="text/plain=hello world"
+playwright-cli hover e4
+playwright-cli select e9 "option-value"
+playwright-cli upload ./document.pdf
+playwright-cli check e12
+playwright-cli uncheck e12
+playwright-cli snapshot
+# search the snapshot for text or a regexp, returns matching nodes with surrounding context
+playwright-cli find "Sign in"
+playwright-cli find --regex "Sign (in|up)"
+# wrap the regexp in slashes to add flags, e.g. /i for case-insensitive
+playwright-cli find --regex "/sign (in|up)/i"
+playwright-cli eval "document.title"
+playwright-cli eval "el => el.textContent" e5
+# get element id, class, or any attribute not visible in the snapshot
+playwright-cli eval "el => el.id" e5
+playwright-cli eval "el => el.getAttribute('data-testid')" e5
+playwright-cli dialog-accept
+playwright-cli dialog-accept "confirmation text"
+playwright-cli dialog-dismiss
+playwright-cli resize 1920 1080
+playwright-cli close
+```
+
+### Navigation
+
+```bash
+playwright-cli go-back
+playwright-cli go-forward
+playwright-cli reload
+```
+
+### Keyboard
+
+```bash
+playwright-cli press Enter
+playwright-cli press ArrowDown
+playwright-cli keydown Shift
+playwright-cli keyup Shift
+```
+
+### Mouse
+
+```bash
+playwright-cli mousemove 150 300
+playwright-cli mousedown
+playwright-cli mousedown right
+playwright-cli mouseup
+playwright-cli mouseup right
+playwright-cli mousewheel 0 100
+```
+
+### Save as
+
+```bash
+playwright-cli screenshot
+playwright-cli screenshot e5
+playwright-cli screenshot --filename=page.png
+playwright-cli screenshot --hires
+playwright-cli pdf --filename=page.pdf
+```
+
+### Tabs
+
+```bash
+playwright-cli tab-list
+playwright-cli tab-new
+playwright-cli tab-new https://example.com/page
+playwright-cli tab-close
+playwright-cli tab-close 2
+playwright-cli tab-select 0
+```
+
+### Storage
+
+```bash
+playwright-cli state-save
+playwright-cli state-save auth.json
+playwright-cli state-load auth.json
+
+# Cookies
+playwright-cli cookie-list
+playwright-cli cookie-list --domain=example.com
+playwright-cli cookie-get session_id
+playwright-cli cookie-set session_id abc123
+playwright-cli cookie-set session_id abc123 --domain=example.com --httpOnly --secure
+playwright-cli cookie-delete session_id
+playwright-cli cookie-clear
+
+# LocalStorage
+playwright-cli localstorage-list
+playwright-cli localstorage-get theme
+playwright-cli localstorage-set theme dark
+playwright-cli localstorage-delete theme
+playwright-cli localstorage-clear
+
+# SessionStorage
+playwright-cli sessionstorage-list
+playwright-cli sessionstorage-get step
+playwright-cli sessionstorage-set step 3
+playwright-cli sessionstorage-delete step
+playwright-cli sessionstorage-clear
+```
+
+### Network
+
+```bash
+playwright-cli route "**/*.jpg" --status=404
+playwright-cli route "https://api.example.com/**" --body='{"mock": true}'
+playwright-cli route-list
+playwright-cli unroute "**/*.jpg"
+playwright-cli unroute
+```
+
+### DevTools
+
+```bash
+playwright-cli console
+playwright-cli console warning
+playwright-cli requests
+playwright-cli request 5
+playwright-cli run-code "async page => await page.context().grantPermissions(['geolocation'])"
+playwright-cli run-code --filename=script.js
+playwright-cli tracing-start
+playwright-cli tracing-stop
+playwright-cli video-start video.webm
+playwright-cli video-chapter "Chapter Title" --description="Details" --duration=2000
+playwright-cli video-stop
+
+# annotate each subsequent action (click, type, ...) with a callout naming the action and highlighting the target
+playwright-cli video-show-actions --duration=600 --position=top-right
+playwright-cli video-hide-actions
+
+# launch the dashboard for UI review / design feedback - user annotates the page, you receive the annotated screenshot, snapshot, and notes
+playwright-cli show --annotate
+
+# generate a Playwright locator for an element from its ref or selector
+playwright-cli generate-locator e5 --raw
+
+# show a persistent highlight overlay for an element, optionally with a custom style
+playwright-cli highlight e5
+playwright-cli highlight e5 --style="outline: 3px dashed red"
+# hide a single element highlight, or all page highlights when no target is given
+playwright-cli highlight e5 --hide
+playwright-cli highlight --hide
+```
+
+## Raw output
+
+The global `--raw` option strips page status, generated code, and snapshot sections from the output, returning only the result value. Use it to pipe command output into other tools. Commands that don't produce output return nothing.
+
+```bash
+playwright-cli --raw eval "JSON.stringify(performance.timing)" | jq '.loadEventEnd - .navigationStart'
+playwright-cli --raw eval "JSON.stringify([...document.querySelectorAll('a')].map(a => a.href))" > links.json
+playwright-cli --raw snapshot > before.yml
+playwright-cli click e5
+playwright-cli --raw snapshot > after.yml
+diff before.yml after.yml
+TOKEN=$(playwright-cli --raw cookie-get session_id)
+playwright-cli --raw localstorage-get theme
+```
+
+For structured output wrapping every reply as JSON, pass --json
+```bash
+playwright-cli list --json
+```
+
+## Open parameters
+```bash
+# Use specific browser when creating session
+playwright-cli open --browser=chrome
+playwright-cli open --browser=firefox
+playwright-cli open --browser=webkit
+playwright-cli open --browser=msedge
+
+# Emulate a generic mobile device (Pixel 10 for Chromium, iPhone 17 for WebKit).
+# Prefer this when a mobile layout is acceptable: mobile pages are usually
+# lighter, so snapshots are smaller and cheaper.
+playwright-cli open --mobile
+playwright-cli open --device="iPhone 15"
+
+# Use persistent profile (by default profile is in-memory)
+playwright-cli open --persistent
+# Use persistent profile with custom directory
+playwright-cli open --profile=/path/to/profile
+
+# Connect to browser via Playwright Extension
+playwright-cli attach --extension=chrome
+
+# Connect to a running Chrome or Edge by channel name
+playwright-cli attach --cdp=chrome
+playwright-cli attach --cdp=msedge
+
+# Connect to a running browser via CDP endpoint
+playwright-cli attach --cdp=http://localhost:9222
+
+# Start with config file
+playwright-cli open --config=my-config.json
+
+# Close the browser
+playwright-cli close
+# Detach from an attached browser (leaves the external browser running)
+playwright-cli -s=msedge detach
+# Delete user data for the default session
+playwright-cli delete-data
+```
+
+## URLs with `&` on Windows
+
+On Windows, `cmd.exe` and PowerShell treat `&` as a command separator, so URLs with multiple query parameters get truncated before `playwright-cli` runs. Escape `&` with `^&` in `cmd.exe`, or use `--%` in PowerShell:
+
+```batch
+playwright-cli goto "https://example.com/?a=1^&b=2"
+```
+
+```powershell
+playwright-cli --% goto "https://example.com/?a=1&b=2"
+```
+
+## Snapshots
+
+After each command, playwright-cli provides a snapshot of the current browser state.
+
+```bash
+> playwright-cli goto https://example.com
+### Page
+- Page URL: https://example.com/
+- Page Title: Example Domain
+### Snapshot
+Snapshot: `.playwright-cli/page-2026-02-14T19-22-42-679Z.yml`
+```
+
+You can also take a snapshot on demand using `playwright-cli snapshot` command. All the options below can be combined as needed.
+
+```bash
+# default - save to a file with timestamp-based name
+playwright-cli snapshot
+
+# save to file, use when snapshot is a part of the workflow result
+playwright-cli snapshot --filename=after-click.yaml
+
+# snapshot an element instead of the whole page
+playwright-cli snapshot "#main"
+
+# limit snapshot depth for efficiency, take a partial snapshot afterwards
+playwright-cli snapshot --depth=4
+playwright-cli snapshot e34
+
+# include each element's bounding box as [box=x,y,width,height]
+playwright-cli snapshot --boxes
+
+# search a large snapshot instead of capturing it all - returns matching nodes
+# with 3 lines of context around each match (like grep -C)
+playwright-cli find "Add to cart"
+playwright-cli find --regex "\\$[0-9]+\\.[0-9]{2}"
+```
+
+## Targeting elements
+
+By default, use refs from the snapshot to interact with page elements.
+
+```bash
+# get snapshot with refs
+playwright-cli snapshot
+
+# interact using a ref
+playwright-cli click e15
+```
+
+You can also use css selectors or Playwright locators.
+
+```bash
+# css selector
+playwright-cli click "#main > button.submit"
+
+# role locator
+playwright-cli click "getByRole('button', { name: 'Submit' })"
+
+# test id
+playwright-cli click "getByTestId('submit-button')"
+```
+
+## Browser Sessions
+
+```bash
+# create new browser session named "mysession" with persistent profile
+playwright-cli -s=mysession open example.com --persistent
+# same with manually specified profile directory (use when requested explicitly)
+playwright-cli -s=mysession open example.com --profile=/path/to/profile
+playwright-cli -s=mysession click e6
+playwright-cli -s=mysession close  # stop a named browser
+playwright-cli -s=mysession delete-data  # delete user data for persistent session
+
+playwright-cli list
+# Close all browsers
+playwright-cli close-all
+# Forcefully kill all browser processes
+playwright-cli kill-all
+```
+
+## Installation
+
+If global `playwright-cli` command is not available, try a local version via `npx playwright cli`:
+
+```bash
+npx --no-install playwright --version
+```
+
+When local version is available, use `npx playwright cli` in all commands. Otherwise, install `playwright-cli` as a global command:
+
+```bash
+npm install -g @playwright/cli@latest
+```
+
+## Example: Form submission
+
+```bash
+playwright-cli open https://example.com/form
+playwright-cli snapshot
+
+playwright-cli fill e1 "user@example.com"
+playwright-cli fill e2 "password123"
+playwright-cli click e3
+playwright-cli snapshot
+playwright-cli close
+```
+
+## Example: Multi-tab workflow
+
+```bash
+playwright-cli open https://example.com
+playwright-cli tab-new https://example.com/other
+playwright-cli tab-list
+playwright-cli tab-select 0
+playwright-cli snapshot
+playwright-cli close
+```
+
+## Example: Debugging with DevTools
+
+```bash
+playwright-cli open https://example.com
+playwright-cli click e4
+playwright-cli fill e7 "test"
+playwright-cli console
+playwright-cli requests
+playwright-cli close
+```
+
+```bash
+playwright-cli open https://example.com
+playwright-cli tracing-start
+playwright-cli click e4
+playwright-cli fill e7 "test"
+playwright-cli tracing-stop
+playwright-cli close
+```
+
+## Example: Interactive session
+
+Ask the user for UI review or design feedback. The user draws boxes on the live page and types comments; you receive the annotated screenshot, the snapshot of the marked region, and the user's notes. Use this whenever the user asks for "UI review", "design feedback", or to "ask the user what they think / want / mean":
+
+```bash
+playwright-cli open https://example.com
+playwright-cli show --annotate
+```
+
+## Specific tasks
+
+* **Running and Debugging Playwright tests** [references/playwright-tests.md](references/playwright-tests.md)
+* **Request mocking** [references/request-mocking.md](references/request-mocking.md)
+* **Running Playwright code** [references/running-code.md](references/running-code.md)
+* **Browser session management** [references/session-management.md](references/session-management.md)
+* **Storage state (cookies, localStorage)** [references/storage-state.md](references/storage-state.md)
+* **Test generation (plan / generate / heal)** [references/test-generation.md](references/test-generation.md)
+* **Tracing** [references/tracing.md](references/tracing.md)
+* **Video recording** [references/video-recording.md](references/video-recording.md)
+* **Inspecting element attributes** [references/element-attributes.md](references/element-attributes.md)

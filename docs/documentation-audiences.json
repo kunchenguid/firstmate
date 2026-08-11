@@ -161,6 +161,46 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/playwright-cli/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/playwright-cli/references/element-attributes.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/playwright-cli/references/playwright-tests.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/playwright-cli/references/request-mocking.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/playwright-cli/references/running-code.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/playwright-cli/references/session-management.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/playwright-cli/references/storage-state.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/playwright-cli/references/test-generation.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/playwright-cli/references/tracing.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/playwright-cli/references/video-recording.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/project-management/SKILL.md",
       "audience": "agent-runtime"
     },
