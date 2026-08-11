@@ -1442,14 +1442,14 @@ _fm_composer_pi_verdict() {  # <screen> <styled> <has_identity> <identity>
 # found, or status one with no output when the capture is not an Agy composer.
 fm_composer_separated_state() {  # <capture> [cursor-row]
   [ "${FM_COMPOSER_HARNESS:-}" = agy ] || return 1
-  local capture=$1 cursor=${2:-} plain line trimmed probe
+  local capture=$1 cursor=${2:-} plain line trimmed rule_probe
   local row=0 previous_separator=-1 top=-1 bottom=-1 footer=0 content="" content_row
   plain=$(printf '%s\n' "$capture" | fm_composer_strip_ansi)
   while IFS= read -r line; do
     trimmed="${line#"${line%%[![:space:]]*}"}"
     trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
-    probe=${trimmed//─/}
-    if [ -z "$probe" ] && [ "${#trimmed}" -ge 20 ]; then
+    rule_probe=${trimmed//─/}
+    if [ -z "$rule_probe" ] && [ "${#trimmed}" -ge 20 ]; then
       if [ "$previous_separator" -ge 0 ] \
          && [ $((row - previous_separator)) -ge 2 ] \
          && [ $((row - previous_separator)) -le 7 ]; then
