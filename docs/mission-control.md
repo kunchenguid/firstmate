@@ -334,6 +334,11 @@ The command is the sole supported writer, so recording needs no edit access to t
 Firstmate regenerates the board by running the script again; the output is written to a temporary file and renamed into place, so a browser refreshing on its own cadence never reads a half-written page.
 With script available, the page reloads on a managed cadence of 60 seconds by default, configurable with `--refresh`, and the no-script fallback carries the equivalent meta refresh.
 The page shows how long ago it was rendered, so a board whose generator has stopped is visibly stale rather than quietly wrong.
+A generator that keeps running on schedule can still be executing stale code after a firstmate PR merges, since a fresh render timestamp says nothing about which commit produced it.
+Every primary session start, and a successful merge of firstmate's own repository through this home's merge helper, fast-forwards the primary checkout without the captain running an update by hand; a checkout that cannot safely advance is left untouched and reported instead.
+The merge-time trigger advances only the checkout, not the already-generated HTML, so the board adopts that code on its existing next generation rather than being regenerated with guessed local options.
+A merge performed outside this home or from a standalone secondmate home has no merge-time trigger and falls back to the next primary session start.
+See `bin/fm-ff-lib.sh`'s `primary_self_update` header comment for the exact mechanism shared by both triggers.
 If a partial snapshot has no generated timestamp, the header and footer say that its render time is unavailable rather than showing a placeholder or estimating one.
 To have Firstmate also surface that condition at session start, opt into the local freshness check described in [`docs/configuration.md`](configuration.md#mission-control-board-freshness-configmission-control-board--fm_mission_control_stale_secs).
 When it does report staleness, restore or refresh the local generator and run another session start to confirm the board is current.

@@ -174,7 +174,8 @@ Only a named non-default branch checked out in `FM_ROOT` is a worktree tangle.
 `fm-tangle-lib.sh` resolves the default branch from `origin/HEAD`, then local `main` or `master`, and classifies that named non-default primary branch as the tangle.
 `fm-guard.sh` prints the repair command on the next mutable fleet action, while `bin/fm-session-start.sh` reports the same condition through bootstrap as a `TANGLE:` line at session start.
 If another live session holds the fleet lock, both surfaces keep the alarm but switch to read-only wording with no repair command.
-`fm-main-divergence-lib.sh` reports the neighbouring failure through the same session-start surface as a `MAIN_DIVERGED:` line when the primary checkout's local default branch carries commits `origin/<default>` does not, the one state the fast-forward-only self-update can no longer reconcile and instead declines to advance, a skip reported only to whoever runs that update.
+`fm-main-divergence-lib.sh` reports the neighbouring failure through the same session-start surface as a `MAIN_DIVERGED:` line when the primary checkout's local default branch carries commits `origin/<default>` does not, the one state neither the automatic primary fast-forward nor `/updatefirstmate` can reconcile.
+That diagnostic owns divergence already visible before the automatic fetch; the fast-forward stays silent for the same case rather than duplicating the report.
 Because the shared refs it reads are visible from every linked worktree, it uses the same branch-state discriminator as the tangle guard and stays silent anywhere but the primary sitting on its default branch.
 The check function itself never fetches and never mutates in either mode, but - like the tangle line - its printed remediation differs by lock state: a session holding the fleet lock gets the fetch-and-reconcile instructions, while a read-only session without the lock gets advisory-only wording with no fetch command.
 Ship briefs also tell the crewmate to verify `pwd -P` and `git rev-parse --show-toplevel` before creating `fm/<id>`, then stop with a blocked status if it landed in the primary checkout.
@@ -263,6 +264,7 @@ When a selected delivery path calls for a diff, `bin/fm-review-diff.sh` refreshe
 For target project repos shipped through their own no-mistakes pipeline, commits under `.no-mistakes/evidence/` are the pipeline's PR-viewable validation evidence and are expected to stay in the crew branch until the evidence-hosting design changes.
 The firstmate repo itself is the exception: its `.no-mistakes/` directory is local state, stays gitignored, and is rejected by CI if tracked.
 PR-based task merges go through `bin/fm-pr-merge.sh`, which records `pr=` and any available `pr_head=` through `bin/fm-pr-check.sh` before calling `gh-axi pr merge`.
+After a successful merge, the helper invokes the shared guarded primary self-update only when the merged GitHub owner/repository matches the primary checkout's configured origin; unrelated project merges and standalone secondmate homes never enter that path.
 The helper requires a full `https://github.com/<owner>/<repo>/pull/<n>` URL, invokes `gh-axi pr merge <n> --repo <owner>/<repo>`, defaults to `--squash`, preserves explicit merge-method flags, and rejects malformed URLs or repo override flags before recording merge state; a well-formed GitLab merge request URL (see [docs/gitlab-merge-watch.md](gitlab-merge-watch.md)) is refused too, explicitly, rather than sent to the wrong forge.
 Before merging, it resolves the real GitHub PR head the same way `bin/fm-review-diff.sh` does and runs `bin/fm-evidence-check.sh` scoped to the directories this PR's own commits changed, so it refuses the merge only on a byte-identical or unpairable before/after evidence image pair the PR itself introduced, not on a pre-existing unrelated leftover elsewhere in the tree; `bin/fm-evidence-check.sh`'s header owns the exact pairing convention and opt-out. The check falls back to an unscoped whole-ref scan when no base can be determined, or when a base is found but diffing against it fails (e.g. unrelated history with no merge base), and is skipped outright only when a base is found, the diff succeeds, and every changed path is root-level (nothing to scope it to). If the task's recorded worktree is missing, not a git repository, no ref can be resolved at all, or the check itself cannot run (e.g. missing `python3`), `fm-pr-merge.sh` prints a loud warning to stderr and still proceeds with the merge rather than failing closed.
 Teardown is fail-closed for ship worktrees: dirty worktrees refuse, and committed work must be landed before the worktree is returned.
@@ -336,11 +338,14 @@ The refresh also prunes local branches whose remote is gone and that no worktree
 
 ## Self-updates stay safe
 
+The primary checkout runs one shared guarded fast-forward at every mutable session start and immediately after this home successfully merges its own repository through `bin/fm-pr-merge.sh`.
+The event path closes the mid-session gap, while the cadence path catches merges performed elsewhere and merges from a standalone secondmate home at the next primary session start.
+Neither trigger regenerates locally served output such as Mission Control; it only advances the code that the existing generator will use on its next run.
 `/updatefirstmate` fast-forwards the running firstmate repo and registered secondmate homes from `origin`, then re-reads updated instructions and nudges updated secondmates without touching project clones.
 For a remote route, the configured code root updates from its own origin on that host before the persistent home fast-forwards to the code-root commit.
-The update is fast-forward only: dirty, diverged, offline, and off-default targets are reported and left untouched.
+Every update path is fast-forward only: dirty, diverged, offline, and off-default targets are left untouched, with the applicable diagnostic or command reporting the block.
 Local homes share the guarded fast-forward helper, while remote updates delegate the same safety decision to the configured host through the generic transport.
-The mechanics are owned by the `/updatefirstmate` skill and firstmate's operating manual in [`AGENTS.md`](../AGENTS.md) (self-update).
+`bin/fm-ff-lib.sh`'s `primary_self_update` header owns the automatic trigger mechanics; the `/updatefirstmate` skill and firstmate's operating manual in [`AGENTS.md`](../AGENTS.md) own the explicit fleet-update workflow.
 
 ## Restart-proof
 

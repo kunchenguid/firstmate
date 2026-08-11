@@ -30,6 +30,9 @@
 # resolved at all, or the check itself cannot run (e.g. missing python3), a
 # loud warning goes to stderr and the merge still proceeds unverified rather
 # than failing closed.
+# After a successful merge of firstmate's own repo (only), this also fast-
+# forwards the primary checkout via bin/fm-ff-lib.sh's primary_self_update -
+# see that function's header for the full mechanism and its other trigger.
 # Usage: fm-pr-merge.sh <task-id> <pr-url> [-- <extra gh-axi pr merge args>]
 set -eu
 
@@ -40,6 +43,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-ff-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-ff-lib.sh"
 
 if [ "$#" -lt 2 ]; then
   echo "error: invalid PR merge request" >&2
@@ -220,3 +225,33 @@ if ! caller_has_merge_method "$@"; then
 fi
 
 gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" "${merge_args[@]+"${merge_args[@]}"}" "$@"
+
+# True only when this merged PR's owner/repo is FM_ROOT's own GitHub origin,
+# so the automatic post-merge self-update below never runs against an
+# unrelated project's merge. Reads the configured remote.origin.url directly
+# (not `git remote get-url`, which applies any url.*.insteadOf rewrite the
+# home may have configured) so this compares the identity the captain
+# actually registered, not a resolved fetch target.
+merged_pr_is_firstmate_repo() {
+  local origin_url origin_slug pr_slug
+  origin_url=$(git -C "$FM_ROOT" config --get remote.origin.url 2>/dev/null || true)
+  origin_slug=$(fm_pr_github_remote_parse "$origin_url") || return 1
+  pr_slug=$(printf '%s/%s' "$PR_OWNER" "$PR_REPO" | tr '[:upper:]' '[:lower:]')
+  [ "$origin_slug" = "$pr_slug" ]
+}
+
+# The merge above just landed on origin, so the primary checkout that
+# generates the Mission Control board (and anything else served from it)
+# should not have to wait for the next session start to catch up - see
+# bin/fm-ff-lib.sh's primary_self_update header for the full mechanism this
+# shares with bin/fm-bootstrap.sh's own cadence trigger. Scoped to a merge
+# of firstmate's own repo only, and always last: the merge above already
+# succeeded (set -eu would have stopped this script before here otherwise),
+# and primary_self_update always returns 0, so this can never turn a
+# successful merge into a reported failure. Redirected to stderr, matching
+# every other side-condition advisory in this script (the evidence-check
+# warnings above): this script's stdout is the merge result, not a home for
+# a second, unrelated advisory line.
+if merged_pr_is_firstmate_repo; then
+  primary_self_update >&2
+fi

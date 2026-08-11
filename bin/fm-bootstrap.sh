@@ -14,6 +14,8 @@
 #                 "PR_CHECK_MIGRATION: <private remediation>",
 #                 "TANGLE: <remediation>",
 #                 "MAIN_DIVERGED: <remediation>",
+#                 "SELF_UPDATE: <ff_target detail>; re-read AGENTS.md now",
+#                 "SELF_UPDATE_BLOCKED: <ff_target detail>; <consequence>",
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
 #                 "NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>",
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
@@ -68,6 +70,33 @@
 #          lock-refused session gets advisory-only wording with no such command
 #          instead, leaving refresh and reconciliation to the session holding the
 #          fleet lock.
+#          The primary checkout itself is fast-forwarded here the same way
+#          /updatefirstmate does (bin/fm-update.sh's same ff_target call), so a
+#          firstmate PR merged on origin reaches this home - and anything it
+#          locally serves, such as a Mission Control board - without waiting for
+#          the captain to run that update by hand. It runs first among the
+#          mutating sweeps below so a live secondmate's own local-HEAD
+#          fast-forward (secondmate_sync) already sees the newly-advanced primary
+#          commit in the same pass; secondmate homes are never touched here
+#          directly - the same .fm-secondmate-home marker check
+#          startup_memory_budget_setup already uses keeps a secondmate home,
+#          including a standalone clone that is not detached and does have an
+#          origin remote, out of this step entirely. A clean, fast-forwardable
+#          primary checkout advances
+#          silently unless its instruction surface (AGENTS.md, bin/, or
+#          .agents/skills/) changed, in which case a SELF_UPDATE line asks the
+#          running agent to re-read AGENTS.md. A dirty or diverged checkout is
+#          left untouched - never forced, stashed, or reset - and reports
+#          SELF_UPDATE_BLOCKED so the captain is not left guessing why a merged
+#          PR never showed up locally. This mutating step never runs in
+#          detect-only mode, since it fetches. This cadence trigger runs on
+#          every session start, so a merge landing between sessions is always
+#          caught; bin/fm-pr-merge.sh separately calls the identical
+#          primary_self_update() once, immediately, right after it confirms a
+#          merge is this repo's own, so a merge landing mid-session (with
+#          nothing prompting a fresh session start) is not left stale until
+#          the next one - see bin/fm-ff-lib.sh's primary_self_update header
+#          for the full mechanism shared by both trigger points.
 #          treehouse is also MISSING when its installed version lacks
 #          "treehouse get --lease" support.
 #          no-mistakes is also MISSING when its installed version is older than
@@ -236,6 +265,11 @@ fleet_sync() {
   fleet_sync_relay_filtered_output "$tmp"
   rm -f "$tmp"
 }
+
+# primary_self_update() itself now lives in bin/fm-ff-lib.sh (already sourced
+# above), since bin/fm-pr-merge.sh calls the exact same function right after
+# a firstmate-repo merge; see its header comment there for the full
+# mechanism and both trigger points.
 
 secondmate_sync() {
   # shellcheck source=bin/fm-wake-lib.sh disable=SC1091
@@ -1145,6 +1179,7 @@ if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] \
   echo "BOOTSTRAP_INFO: tasks-axi available"
 fi
 if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
+  primary_self_update
   secondmate_liveness_sweep
   secondmate_sync
   secondmate_handoff_resume

@@ -156,6 +156,45 @@ fm_pr_gitlab_path_valid() {
   done
 }
 
+fm_pr_github_owner_valid() {
+  local owner=${1-}
+  local LC_ALL=C
+  [[ "$owner" =~ ^([A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9-]{0,37}[A-Za-z0-9])$ ]] \
+    && [[ "$owner" != *--* ]]
+}
+
+fm_pr_github_repo_valid() {
+  local repo=${1-}
+  local LC_ALL=C
+  [[ "$repo" =~ ^[A-Za-z0-9._-]{1,100}$ ]] \
+    && [ "$repo" != . ] \
+    && [ "$repo" != .. ]
+}
+
+fm_pr_github_remote_parse() {
+  local raw=${1-} normalized path owner repo
+  local LC_ALL=C
+  normalized=$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]')
+  case "$normalized" in
+    https://github.com/*) path=${normalized#https://github.com/} ;;
+    git@github.com:*) path=${normalized#git@github.com:} ;;
+    *) return 1 ;;
+  esac
+  path=${path%.git}
+  case "$path" in
+    */*) ;;
+    *) return 1 ;;
+  esac
+  owner=${path%%/*}
+  repo=${path#*/}
+  case "$repo" in
+    */*) return 1 ;;
+  esac
+  fm_pr_github_owner_valid "$owner" || return 1
+  fm_pr_github_repo_valid "$repo" || return 1
+  printf '%s/%s\n' "$owner" "$repo"
+}
+
 # Parse a canonical PR or MR URL into the provider-tagged identity. Validation
 # is strict and per provider: the GitHub username and repository rules are
 # unchanged, and GitLab gets its own host and namespace rules rather than a
@@ -166,7 +205,7 @@ fm_pr_gitlab_path_valid() {
 # them empty; teaching the merge path about GitLab is a separate change, and
 # until then it refuses a GitLab URL rather than merging anything.
 fm_pr_url_parse() {
-  local raw=${1-} pattern host path
+  local raw=${1-} pattern host path owner repo number
   local LC_ALL=C
   FM_PR_PROVIDER=
   FM_PR_URL=
@@ -175,20 +214,23 @@ fm_pr_url_parse() {
   FM_PR_OWNER=
   FM_PR_REPO=
   FM_PR_NUMBER=
-  pattern='^https://github\.com/([A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9-]{0,37}[A-Za-z0-9])/([A-Za-z0-9._-]{1,100})/pull/([1-9][0-9]*)$'
+  pattern='^https://github\.com/([^/]+)/([^/]+)/pull/([1-9][0-9]*)$'
   if [[ "$raw" =~ $pattern ]]; then
-    [[ "${BASH_REMATCH[1]}" != *--* ]] || return 1
-    [ "${BASH_REMATCH[2]}" != . ] && [ "${BASH_REMATCH[2]}" != .. ] || return 1
+    owner=${BASH_REMATCH[1]}
+    repo=${BASH_REMATCH[2]}
+    number=${BASH_REMATCH[3]}
+    fm_pr_github_owner_valid "$owner" || return 1
+    fm_pr_github_repo_valid "$repo" || return 1
     FM_PR_PROVIDER=github
     FM_PR_URL=$raw
     FM_PR_HOST=github.com
-    FM_PR_PATH="${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
+    FM_PR_PATH="$owner/$repo"
     # Consumed by bin/fm-pr-merge.sh, which addresses GitHub by owner/repository.
     # shellcheck disable=SC2034
-    FM_PR_OWNER=${BASH_REMATCH[1]}
+    FM_PR_OWNER=$owner
     # shellcheck disable=SC2034
-    FM_PR_REPO=${BASH_REMATCH[2]}
-    FM_PR_NUMBER=${BASH_REMATCH[3]}
+    FM_PR_REPO=$repo
+    FM_PR_NUMBER=$number
     return 0
   fi
   # The path class contains "/" and "-", so this match is greedy to the last

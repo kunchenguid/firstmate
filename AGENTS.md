@@ -330,7 +330,7 @@ When the captain invokes `/updatefirstmate` or asks to update firstmate, load th
 
 These skills are not captain-invocable; load them only at their precise triggers, indexed here.
 
-- `bootstrap-diagnostics` - any actionable bootstrap diagnostic line in the session-start digest (section 3).
+- `bootstrap-diagnostics` - any actionable bootstrap diagnostic line in the session-start digest (section 3), or a SELF_UPDATE/SELF_UPDATE_BLOCKED line `bin/fm-pr-merge.sh` prints right after a firstmate-repo PR merge.
 - `diagnostic-reasoning` - before scoping a reported bug and before acting on a diagnostic report.
 - `ask-user-authority` - before deciding any ask-user finding, regardless of the project's `yolo` posture.
 - `no-mistakes-validation` - before steering a supersession that invalidates work under validation, and before sending the decision that answers an ask-user gate finding.
