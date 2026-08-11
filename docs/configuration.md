@@ -284,6 +284,15 @@ Malformed JSON, an empty or malformed rule/default array, an unverified harness,
 While the file remains present, no crewmate or scout spawn may proceed without an explicit resolved harness; malformed configuration must be reported and corrected rather than selected around.
 Secondmate homes inherit this file from the primary, so a secondmate's own crewmates apply the same dispatch profile behavior.
 
+## Durable SoT program registry (data/sot-programs.tsv / config/sot-programs.tsv)
+
+Optional home-local registry of multi-task programs that must leave a standing source-of-truth pointer in `data/captain.md` or a regular file under `data/decisions/` once every listed source task is Done.
+Session-start bootstrap runs `bin/fm-sot-pointer-check.sh` during its local config-detection phase; when every source task has a checked Done row in `data/done-archive.md` or `data/backlog.md` and the ERE needle is absent from those pointer surfaces, bootstrap prints one `SOT_GAP:` line per gap.
+Absent or empty registries stay silent, and the default mode exits zero so gaps never block session start.
+`data/sot-programs.tsv` takes precedence over `config/sot-programs.tsv`.
+Copy the non-live shape from [`docs/sot-programs.example.tsv`](sot-programs.example.tsv); the script header owns exact columns, comment rules, matching, `--strict`, and `--registry`.
+`bootstrap-diagnostics` owns the agent response to a printed `SOT_GAP:` line: surface the missing standing pointer to the captain, and do not auto-edit `data/captain.md` or create a decision file.
+
 ## Toolchain
 
 On session start the first mate detects what its required toolchain is missing or too old and lists each problem with either an exact install command or manual instructions.
