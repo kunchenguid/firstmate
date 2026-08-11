@@ -3344,6 +3344,40 @@ test_send_text_submit_rechecks_endpoint_before_literal() {
   pass "Herdr submit: canonical OMP identity is rechecked before literal text"
 }
 
+test_checked_herdr_sends_recheck_after_readiness_relaunch() {
+  local dir log kind status
+  dir="$TMP_ROOT/checked-send-readiness-relaunch"; mkdir -p "$dir"; log="$dir/log"
+  for kind in literal key; do
+    : > "$log"
+    status=0
+    FM_TEST_SEND_KIND="$kind" FM_TEST_SEND_LOG="$log" bash -c '
+      . "$0/bin/backends/herdr.sh"
+      FM_TEST_READY_RELAUNCH=0
+      fm_backend_herdr_target_ready() {
+        fm_backend_herdr_parse_target "$1" || return 1
+        printf "ready\\n" >> "$FM_TEST_SEND_LOG"
+        FM_TEST_READY_RELAUNCH=1
+      }
+      fm_backend_herdr_omp_input_safe() {
+        printf "auth:%s\\n" "$FM_TEST_READY_RELAUNCH" >> "$FM_TEST_SEND_LOG"
+        [ "$FM_TEST_READY_RELAUNCH" -eq 0 ]
+      }
+      fm_backend_herdr_cli() {
+        printf "send\\n" >> "$FM_TEST_SEND_LOG"
+      }
+      if [ "$FM_TEST_SEND_KIND" = literal ]; then
+        fm_backend_herdr_send_literal_checked lab:w1:p2 hello omp 0
+      else
+        fm_backend_herdr_send_key_checked lab:w1:p2 Enter omp 0
+      fi
+    ' "$ROOT" || status=$?
+    [ "$status" -ne 0 ] || fail "$kind send crossed a readiness-time relaunch"
+    [ "$(cat "$log")" = $'ready\nauth:1' ] \
+      || fail "$kind send did not authorize after readiness: $(cat "$log")"
+  done
+  pass "Herdr checked literal and key sends reauthorize after readiness"
+}
+
 
 
 
@@ -4987,6 +5021,7 @@ test_herdr_input_rejects_canonical_omp_identity_read_failure_before_text
 test_herdr_input_rejects_ambiguous_omp_process_before_text
 test_herdr_input_rejects_canonical_omp_after_non_omp_relaunch
 test_send_text_submit_rechecks_endpoint_before_literal
+test_checked_herdr_sends_recheck_after_readiness_relaunch
 test_herdr_input_rejects_no_metadata_omp_over_non_omp_process
 test_herdr_liveness_rejects_canonical_omp_after_non_omp_relaunch
 test_herdr_liveness_rejects_registered_non_omp_for_canonical_omp

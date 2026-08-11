@@ -2660,9 +2660,17 @@ fm_backend_herdr_send_text_line() {  # <target> <text>
 # caller sends Enter separately. Mirrors tmux's `send-keys -t T -l text`.
 # Verified: `pane send-text` does NOT auto-submit (contrary to the addendum's
 # original guess); it behaves exactly like tmux's `-l` literal send.
-fm_backend_herdr_send_literal() {  # <target> <text>
-  fm_backend_herdr_target_ready "$1" || return 1
-  fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane send-text "$FM_BACKEND_HERDR_PANE" "$2" >/dev/null 2>&1
+fm_backend_herdr_send_literal() {  # <target> <text> [recorded-harness] [raw-launch]
+  local target=$1 text=$2 recorded_harness=${3-} raw_launch=${4-} has_context=0
+  fm_backend_herdr_target_ready "$target" || return 1
+  if [ "$#" -ge 3 ]; then
+    has_context=1
+  fi
+  if [ "$has_context" -eq 1 ]; then
+    fm_backend_herdr_omp_input_safe "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" \
+      "$recorded_harness" "$raw_launch" || return 1
+  fi
+  fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane send-text "$FM_BACKEND_HERDR_PANE" "$text" >/dev/null 2>&1
 }
 
 # fm_backend_herdr_normalize_key: map firstmate's key vocabulary (Enter,
@@ -2684,29 +2692,28 @@ fm_backend_herdr_normalize_key() {  # <key>
 
 # fm_backend_herdr_send_key: one named special key. Mirrors fm-send.sh's --key
 # path (tmux's `send-keys -t T key`).
-fm_backend_herdr_send_key() {  # <target> <key>
-  fm_backend_herdr_target_ready "$1" || return 1
-  local key
-  key=$(fm_backend_herdr_normalize_key "$2")
+fm_backend_herdr_send_key() {  # <target> <key> [recorded-harness] [raw-launch]
+  local target=$1 key_name=$2 recorded_harness=${3-} raw_launch=${4-} has_context=0 key
+  fm_backend_herdr_target_ready "$target" || return 1
+  if [ "$#" -ge 3 ]; then
+    has_context=1
+  fi
+  key=$(fm_backend_herdr_normalize_key "$key_name")
+  if [ "$has_context" -eq 1 ]; then
+    fm_backend_herdr_omp_input_safe "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" \
+      "$recorded_harness" "$raw_launch" || return 1
+  fi
   fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane send-keys "$FM_BACKEND_HERDR_PANE" "$key" >/dev/null 2>&1
 }
 
 fm_backend_herdr_send_key_checked() {  # <target> <key> [recorded-harness] [raw-launch]
   local target=$1 key=$2 recorded_harness=${3:-} raw_launch=${4:-}
-  fm_backend_herdr_parse_target "$target" || return 1
-  fm_backend_herdr_omp_input_safe \
-    "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" \
-    "$recorded_harness" "$raw_launch" || return 1
-  fm_backend_herdr_send_key "$target" "$key"
+  fm_backend_herdr_send_key "$target" "$key" "$recorded_harness" "$raw_launch"
 }
 
 fm_backend_herdr_send_literal_checked() {  # <target> <text> [recorded-harness] [raw-launch]
   local target=$1 text=$2 recorded_harness=${3:-} raw_launch=${4:-}
-  fm_backend_herdr_parse_target "$target" || return 1
-  fm_backend_herdr_omp_input_safe \
-    "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" \
-    "$recorded_harness" "$raw_launch" || return 1
-  fm_backend_herdr_send_literal "$target" "$text"
+  fm_backend_herdr_send_literal "$target" "$text" "$recorded_harness" "$raw_launch"
 }
 
 # fm_backend_herdr_capture: bounded plain-text pane capture. Mirrors
