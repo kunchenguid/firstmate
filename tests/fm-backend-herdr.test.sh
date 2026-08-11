@@ -3139,6 +3139,20 @@ test_busy_state_rejects_canonical_non_omp_omp_relaunch() {
   pass "Herdr busy: canonical non-OMP state rejects an OMP relaunch"
 }
 
+test_busy_state_uses_correlated_agent_snapshot() {
+  local out
+  out=$(bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_target_ready() { return 0; }
+    fm_backend_herdr_agent_identity_raw() { printf "claude\\tworking"; }
+    fm_backend_herdr_agent_status_raw() { printf idle; }
+    fm_backend_herdr_process_identity() { printf claude; }
+    fm_backend_herdr_busy_state default:w1:p2 claude
+  ' "$ROOT")
+  [ "$out" = busy ] || fail "Herdr busy classification must use the identity/status snapshot, got '$out'"
+  pass "Herdr busy: identity and status stay correlated across one agent snapshot"
+}
+
 
 
 
@@ -3528,6 +3542,16 @@ test_herdr_liveness_rejects_registered_non_omp_for_canonical_omp() {
 5150 4242' 'S+' omp)
   [ "$out" = unknown ] || fail "canonical OMP with a registered Claude agent must remain indeterminate, got '$out'"
   pass "Herdr liveness: canonical OMP rejects a registered non-OMP agent"
+}
+
+test_herdr_liveness_rejects_registered_omp_for_canonical_non_omp() {
+  local out
+  out=$(omp_agent_state_verdict "$TMP_ROOT/liveness-canonical-non-omp-registered-omp" omp working \
+    "$(herdr_other_process_info w1:p1)" '1 0
+4242 1
+5150 4242' 'S+' claude)
+  [ "$out" = unknown ] || fail "canonical non-OMP liveness must reject a stale registered OMP agent, got '$out'"
+  pass "Herdr liveness: canonical non-OMP rejects a registered OMP agent"
 }
 
 test_herdr_liveness_quarantines_raw_omp() {
@@ -5165,6 +5189,7 @@ test_busy_state_done_and_blocked_map_to_idle
 test_busy_state_unknown_on_no_agent
 test_busy_state_quarantines_raw_omp
 test_busy_state_rejects_canonical_non_omp_omp_relaunch
+test_busy_state_uses_correlated_agent_snapshot
 test_composer_state_bare_prompt_is_empty
 test_composer_state_styled_placeholder_draft_is_pending
 test_composer_state_real_text_is_pending
@@ -5185,6 +5210,7 @@ test_checked_herdr_sends_recheck_after_readiness_relaunch
 test_herdr_input_rejects_no_metadata_omp_over_non_omp_process
 test_herdr_liveness_rejects_canonical_omp_after_non_omp_relaunch
 test_herdr_liveness_rejects_registered_non_omp_for_canonical_omp
+test_herdr_liveness_rejects_registered_omp_for_canonical_non_omp
 test_herdr_liveness_quarantines_raw_omp
 test_herdr_liveness_rejects_canonical_omp_agent_not_found_with_current_omp
 test_herdr_presence_is_checked_before_process_identity

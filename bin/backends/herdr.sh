@@ -2017,6 +2017,9 @@ fm_backend_herdr_pane_agent_state() {  # <session> <pane_id> [recorded-harness] 
   [ -n "$code" ] && { printf 'unknown'; return 0; }
   agent=$(printf '%s' "$out" | jq -r '.result.agent.agent // empty' 2>/dev/null)
   status=$(printf '%s' "$out" | jq -r '.result.agent.agent_status // empty' 2>/dev/null)
+  if [ "$raw_launch" != 1 ] && [ -n "$recorded_harness" ] && [ "$recorded_harness" != unknown ]; then
+    fm_harness_identity_matches "$recorded_harness" "$agent" || { printf 'unknown'; return 0; }
+  fi
   if [ "$raw_launch" = 1 ]; then
     [ "$agent" = omp ] && { printf 'unknown'; return 0; }
     process_identity=$(fm_backend_herdr_process_identity "$session" "$pane_id")
@@ -3424,6 +3427,9 @@ EOF
       [ "$(fm_backend_herdr_process_identity "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")" = omp ] \
         && { printf 'unknown'; return 0; }
     fi
+    [ -n "$agent_status" ] || { printf 'unknown'; return 0; }
+    fm_backend_herdr_classify_agent_status "$agent_status"
+    return 0
   fi
   fm_backend_herdr_classify_agent_status \
     "$(fm_backend_herdr_agent_status_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")"

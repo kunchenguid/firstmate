@@ -372,6 +372,10 @@ fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle> [exp
     printf 'unknown'
     return 0
   fi
+  if ! fm_tmux_submit_endpoint_allows "$target" "$recorded_harness" "$raw_launch"; then
+    printf 'unknown'
+    return 0
+  fi
   tmux send-keys -t "$target" -l "$text" 2>/dev/null || { printf 'send-failed'; return 0; }
   sleep "$settle"
   if ! fm_tmux_submit_endpoint_allows "$target" "$recorded_harness" "$raw_launch" "$raw_owner"; then

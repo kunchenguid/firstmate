@@ -186,10 +186,10 @@ import { readFileSync } from "node:fs";
 const mod = await import(pathToFileURL(process.env.EXT_PATH).href);
 const handlers = {};
 mod.default({ on: (name, fn) => { handlers[name] = fn; } });
-const fire = async (name) => {
+const fire = async (name, event = {}) => {
   const handler = handlers[name];
   if (!handler) throw new Error("missing OMP handler " + name);
-  await handler({}, {});
+  await handler(event, {});
 };
 switch (process.env.MODE) {
   case "agent-start": await fire("agent_start"); break;
@@ -203,12 +203,17 @@ switch (process.env.MODE) {
     break;
   case "late-session-stop":
     await fire("agent_start");
+    await new Promise((resolve) => setTimeout(resolve, 2));
+    const priorRunTimestamp = Date.now();
+    await fire("session_stop", { last_assistant_message: { timestamp: priorRunTimestamp } });
+    await new Promise((resolve) => setTimeout(resolve, 2));
     await fire("agent_start");
-    await fire("session_stop");
+    await fire("session_stop", { last_assistant_message: { timestamp: priorRunTimestamp } });
     if (readFileSync(process.env.STATE_DIR + "/busy-omp-2.omp-session-stop", "utf8").trim() !== "pending") {
       throw new Error("late prior-run session_stop settled the current run");
     }
-    await fire("session_stop");
+    await new Promise((resolve) => setTimeout(resolve, 2));
+    await fire("session_stop", { last_assistant_message: { timestamp: Date.now() } });
     break;
   default: throw new Error("unknown mode " + process.env.MODE);
 }

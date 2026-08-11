@@ -394,7 +394,7 @@ test_tmux_submit_rechecks_endpoint_before_each_enter() {
     . "$0/bin/fm-tmux-lib.sh"
     fm_backend_source() { return 0; }
     fm_backend_tmux_send_text_submit() { fm_tmux_submit_core "$@"; }
-    fm_backend_omp_endpoint_allows() { calls=$((calls + 1)); [ "$calls" -eq 1 ]; }
+    fm_backend_omp_endpoint_allows() { calls=$((calls + 1)); [ "$calls" -lt 3 ]; }
     tmux() {
       case "${1:-}" in
         send-keys)
@@ -419,7 +419,8 @@ test_tmux_submit_rechecks_endpoint_before_literal() {
   out=$(FM_TEST_LOG="$log" bash -c '
     . "$0/bin/fm-backend.sh"
     . "$0/bin/fm-tmux-lib.sh"
-    fm_backend_omp_endpoint_allows() { return 1; }
+    calls=0
+    fm_backend_omp_endpoint_allows() { calls=$((calls + 1)); [ "$calls" -eq 1 ]; }
     tmux() {
       case "${1:-}" in
         send-keys) printf "%s\n" "$*" >> "$FM_TEST_LOG" ;;
@@ -429,7 +430,7 @@ test_tmux_submit_rechecks_endpoint_before_literal() {
     printf "%s\t%s" "$verdict" "$(cat "$FM_TEST_LOG")"
   ' "$ROOT")
   [ "$out" = $'unknown\t' ] || fail "tmux must reject literal input when canonical OMP identity is not authorized, got '$out'"
-  pass "tmux submit: canonical OMP identity is checked before literal text"
+  pass "tmux submit: canonical OMP identity is rechecked immediately before literal text"
 }
 
 
