@@ -367,6 +367,20 @@ test_no_mistakes_dod_wording() {
   pass "fm-brief.sh: no-mistakes DOD keeps its apostrophe prose, now parse-safe"
 }
 
+test_direct_pr_dod_requires_review_ready_pr() {
+  local home id brief
+  home="$TMP_ROOT/direct-pr-ready-home"
+  id="brief-direct-ready-b4"
+  mkdir -p "$home/data"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode direct-PR >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep "The task is complete only when its PR is ready for review: CI is green and every review thread is resolved, never merely opened." "$brief" \
+    "direct-PR DOD allowed an opened but unready PR to count as complete"
+  assert_grep "after the PR reaches that ready state, append \`done: PR {url}\`" "$brief" \
+    "direct-PR DOD reported done before the PR reached its review-ready state"
+  pass "fm-brief.sh: direct-PR completion requires a review-ready PR"
+}
+
 test_ship_project_memory_wording() {
   local home id brief
   home="$TMP_ROOT/project-memory-home"
@@ -766,6 +780,7 @@ test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
+test_direct_pr_dod_requires_review_ready_pr
 test_ship_project_memory_wording
 test_pr_requirements_section_is_scoped_to_pr_modes
 test_herdr_lab_contract_is_explicit_and_complete

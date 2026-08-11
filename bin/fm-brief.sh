@@ -313,6 +313,12 @@ EOF
 HERDR_SECTION=${HERDR_SECTION%$'\n'}
 fi
 
+IFS= read -r -d '' HEAVY_SUITE_RULE <<EOF || true
+8. Start every full frontend or browser test suite with \`$FM_ROOT/bin/fm-heavy-suite.sh -- <suite command and arguments>\`.
+   The wrapper serializes heavy suites across worktrees; if it reports another suite is running, it is waiting by design, not failing, so do not bypass it or start a duplicate.
+EOF
+HEAVY_SUITE_RULE=${HEAVY_SUITE_RULE%$'\n'}
+
 if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
@@ -349,6 +355,7 @@ The report is the only thing that survives, so anything worth keeping must be in
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+$HEAVY_SUITE_RULE
 
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
@@ -369,7 +376,7 @@ fi
 # Last rule by construction: the mode that omits it must leave no numbering gap for
 # the ask-user escalation to point into.
 IFS= read -r -d '' CHECKS_RULE <<'EOF' || true
-8. Before you push anything or append your final `done:` line, inspect this repository's CI configuration and identify the exact check commands CI itself runs, including any repository-owned wrapper or script CI invokes.
+9. Before you push anything or append your final `done:` line, inspect this repository's CI configuration and identify the exact check commands CI itself runs, including any repository-owned wrapper or script CI invokes.
    Run those exact commands rather than substitutes.
    If this repository has no CI configuration, run the check commands its own documentation defines instead (`AGENTS.md`, `CLAUDE.md`, `README`, or its package manifest's scripts); if it documents none either, there is no check set to run.
 EOF
@@ -383,8 +390,8 @@ case "$MODE" in
 # Definition of done
 Delivery contract: mode=direct-PR
 This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
-The task is complete only when committed on your branch.
-When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
+The task is complete only when its PR is ready for review: CI is green and every review thread is resolved, never merely opened.
+When it is implemented and committed, push your branch and open a PR with \`gh-axi\`; after the PR reaches that ready state, append \`done: PR {url}\` to the status file and stop.
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 EOF
     ;;
@@ -503,7 +510,8 @@ $RULE1
    When firstmate replies or a blocker clears and you resume, append \`resolved: {how it was decided or unblocked}\` (add the same \`[key=<slug>]\` if you opened it with one) so the decision or blocker is durably closed and does not keep resurfacing.
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
-   daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.$CHECKS_RULE
+   daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+$HEAVY_SUITE_RULE$CHECKS_RULE
 
 # Project memory
 If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.

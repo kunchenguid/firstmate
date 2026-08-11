@@ -45,7 +45,19 @@ exit 0
 SH
   chmod +x "$fakebin/tmux"
   fm_fake_exit0 "$fakebin" treehouse pi-signed no-mistakes gh-axi gh tasks-axi
+  write_reviewer_quota_fixture "$fakebin" known known 100
   printf '%s\n' "$fakebin"
+}
+
+write_reviewer_quota_fixture() {
+  local fakebin=$1 claude_status=$2 codex_status=$3 percent_remaining=$4
+  cat > "$fakebin/quota-axi" <<EOF
+#!/usr/bin/env bash
+cat <<'JSON'
+{"schemaVersion":3,"providers":[{"provider":"claude","quotaSemantics":{"effectiveAvailability":[{"scope":"all_models","status":"$claude_status","effectivePercentRemaining":$percent_remaining}]}},{"provider":"codex","quotaSemantics":{"effectiveAvailability":[{"scope":"all_models","status":"$codex_status","effectivePercentRemaining":$percent_remaining}]}}]}
+JSON
+EOF
+  chmod +x "$fakebin/quota-axi"
 }
 
 make_spawn_case() {
@@ -748,6 +760,41 @@ test_exploration_requires_an_explicit_rotated_model_and_effort() {
   pass "deliberate exploration requires an explicit rotated model and effort before intake or submission"
 }
 
+test_no_mistakes_spawn_requires_one_quota_eligible_reviewer() {
+  local rec operator_home exhausted_id uncertain_id override_id out status
+  exhausted_id=profile-reviewers-exhausted-z26
+  uncertain_id=profile-reviewers-uncertain-z27
+  override_id=profile-reviewers-override-z28
+  rec=$(make_spawn_case profile-reviewer-quota codex "$exhausted_id" "$uncertain_id" "$override_id")
+  read_case_record "$rec"
+  operator_home="$CASE_DIR/operator-home"
+  mkdir -p "$operator_home/.no-mistakes"
+  printf '%s\n' 'agent: [claude, codex]' > "$operator_home/.no-mistakes/config.yaml"
+
+  write_reviewer_quota_fixture "$FAKEBIN_DIR" known known 0
+  out=$(HOME="$operator_home" run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$exhausted_id" "$PROJ_DIR")
+  status=$?
+  [ "$status" -ne 0 ] || fail "no-mistakes spawn started with every configured reviewer exhausted"
+  assert_contains "$out" "claude=exhausted" "reviewer-quota refusal did not report Claude's result"
+  assert_contains "$out" "codex=exhausted" "reviewer-quota refusal did not report Codex's result"
+  assert_contains "$out" "--allow-no-mistakes-without-reviewer-quota" "reviewer-quota refusal did not name the captain-authorized override"
+  [ ! -s "$LAUNCH_LOG" ] || fail "reviewer-quota refusal reached launch submission"
+  assert_absent "$HOME_DIR/state/$exhausted_id.meta" "reviewer-quota refusal published task metadata"
+
+  write_reviewer_quota_fixture "$FAKEBIN_DIR" known unknown 0
+  out=$(HOME="$operator_home" run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$uncertain_id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "unmeasurable reviewer quota must remain eligible"
+  assert_contains "$out" "codex=unmeasurable" "eligible uncertainty was not disclosed"
+
+  write_reviewer_quota_fixture "$FAKEBIN_DIR" known known 0
+  out=$(HOME="$operator_home" run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$override_id" "$PROJ_DIR" --allow-no-mistakes-without-reviewer-quota)
+  status=$?
+  expect_code 0 "$status" "captain-authorized reviewer-quota override should allow the spawn"
+  assert_contains "$out" "captain-authorized reviewer-quota override" "override did not disclose the exhausted reviewer results"
+  pass "no-mistakes spawn requires one quota-eligible reviewer unless explicitly overridden"
+}
+
 test_linked_telemetry_identifiers_chain_one_task_root() {
   local rec first_id retry_id out status ledger attempt root
   first_id=profile-telemetry-root-z22
@@ -815,6 +862,7 @@ test_non_claude_harness_ignores_config_dir
 test_active_dispatch_profile_does_not_block_secondmate_launch
 test_telemetry_precedes_submission_and_metadata_is_opaque
 test_exploration_requires_an_explicit_rotated_model_and_effort
+test_no_mistakes_spawn_requires_one_quota_eligible_reviewer
 test_linked_telemetry_identifiers_chain_one_task_root
 
 echo "# all fm-spawn-dispatch-profile tests passed"

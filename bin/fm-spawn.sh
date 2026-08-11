@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--task-class <class>] [--exploration] [--backend <name>] [--telemetry-task-root <mrt_uuid> --telemetry-parent <mra_uuid>]
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--allow-no-mistakes-without-reviewer-quota] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--task-class <class>] [--exploration] [--backend <name>] [--telemetry-task-root <mrt_uuid> --telemetry-parent <mra_uuid>]
 #        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--task-class <class>] [--backend <name>] [--telemetry-task-root <mrt_uuid> --telemetry-parent <mra_uuid>]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--telemetry-task-root <mrt_uuid> --telemetry-parent <mra_uuid>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
@@ -16,6 +16,13 @@
 #   loud one-line deviation notice is printed and the spawn continues.
 #   no-mistakes-prod-only is a registry policy rather than a task mode and is
 #   refused as a flag value.
+#   A no-mistakes ship reads the reviewer chain from
+#   ~/.no-mistakes/config.yaml and one quota-axi snapshot before any fleet
+#   mutation. Exact zero effective availability blocks a reviewer; missing or
+#   unmeasurable quota stays eligible with a warning. The spawn is refused only
+#   when every configured reviewer is blocked. The explicit
+#   --allow-no-mistakes-without-reviewer-quota flag records a captain-authorized
+#   exception in the invocation and is valid only for a no-mistakes ship.
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
 #   --model <name> and --effort <low|medium|high|xhigh|max> are concrete profile
@@ -247,6 +254,7 @@ YOLO=
 TRACEPARENT_ARG=
 TELEMETRY_TASK_ROOT=
 TELEMETRY_PARENT=
+ALLOW_NO_MISTAKES_WITHOUT_REVIEWER_QUOTA=0
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
@@ -290,6 +298,7 @@ for a in "$@"; do
     --task-class) want_value=task-class ;;
     --task-class=*) TASK_CLASS=${a#--task-class=}; TASK_CLASS_SET=1 ;;
     --exploration) EXPLORATION=deliberate ;;
+    --allow-no-mistakes-without-reviewer-quota) ALLOW_NO_MISTAKES_WITHOUT_REVIEWER_QUOTA=1 ;;
     --backend) want_value=backend ;;
     --backend=*) BACKEND_ARG=${a#--backend=}; BACKEND_SET=1 ;;
     --mode) want_value=mode ;;
@@ -372,6 +381,127 @@ else
     echo "error: --yolo applies only to ship spawns; a scout delivers a report and a secondmate records its own fixed posture" >&2
     exit 1
   }
+fi
+if [ "$ALLOW_NO_MISTAKES_WITHOUT_REVIEWER_QUOTA" -eq 1 ] && { [ "$KIND" != ship ] || [ "$MODE" != no-mistakes ]; }; then
+  echo "error: --allow-no-mistakes-without-reviewer-quota applies only to a no-mistakes ship" >&2
+  exit 1
+fi
+
+no_mistakes_configured_reviewers() {
+  local config
+  config="${HOME:-}/.no-mistakes/config.yaml"
+  if [ ! -r "$config" ]; then
+    printf 'auto\n'
+    return 0
+  fi
+  awk '
+    function emit(value, count, i, item, parts) {
+      sub(/^[[:space:]]*\[/, "", value)
+      sub(/\][[:space:]]*$/, "", value)
+      count = split(value, parts, ",")
+      for (i = 1; i <= count; i++) {
+        item = parts[i]
+        sub(/^[[:space:]]+/, "", item)
+        sub(/[[:space:]]+$/, "", item)
+        gsub(/^['\''\"]|['\''\"]$/, "", item)
+        if (item != "") print item
+      }
+    }
+    /^[[:space:]]*#/ || /^[[:space:]]*$/ { next }
+    /^[[:space:]]*agent[[:space:]]*:/ {
+      value = $0
+      sub(/^[[:space:]]*agent[[:space:]]*:[[:space:]]*/, "", value)
+      sub(/[[:space:]]+#.*$/, "", value)
+      if (value != "") {
+        emit(value)
+        found = 1
+        exit
+      }
+      in_agent = 1
+      next
+    }
+    in_agent && /^[[:space:]]*-[[:space:]]*/ {
+      value = $0
+      sub(/^[[:space:]]*-[[:space:]]*/, "", value)
+      sub(/[[:space:]]+#.*$/, "", value)
+      emit(value)
+      found = 1
+      next
+    }
+    in_agent && /^[^[:space:]]/ { exit }
+    END { if (!found) print "auto" }
+  ' "$config"
+}
+
+no_mistakes_reviewer_quota_preflight() {
+  local reviewer provider result quota_json details_text detail
+  local eligible=0 uncertain=0
+  local -a reviewers details
+  while IFS= read -r reviewer; do
+    [ -n "$reviewer" ] && reviewers+=("$reviewer")
+  done < <(no_mistakes_configured_reviewers)
+
+  quota_json=
+  if command -v quota-axi >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+    quota_json=$(quota-axi --json 2>/dev/null) || quota_json=
+  fi
+
+  for reviewer in "${reviewers[@]}"; do
+    case "$reviewer" in
+      claude|codex|cursor|copilot|grok|kimi) provider=$reviewer ;;
+      *) provider= ;;
+    esac
+    if [ -z "$provider" ] || [ -z "$quota_json" ]; then
+      result=unmeasurable
+    else
+      result=$(printf '%s\n' "$quota_json" | jq -r --arg provider "$provider" '
+        ((.providers // []) | map(select(.provider == $provider)) | first) as $provider_row |
+        if $provider_row == null then
+          "unmeasurable"
+        else
+          (($provider_row.quotaSemantics.effectiveAvailability // []) |
+            map(select(.scope == "all_models" and .status == "known")) | first) as $availability |
+          if $availability == null or ($availability.effectivePercentRemaining | type) != "number" then
+            "unmeasurable"
+          elif $availability.effectivePercentRemaining == 0 then
+            "exhausted"
+          else
+            "usable"
+          end
+        end
+      ' 2>/dev/null) || result=unmeasurable
+    fi
+    details+=("$reviewer=$result")
+    case "$result" in
+      usable) eligible=1 ;;
+      unmeasurable) eligible=1; uncertain=1 ;;
+    esac
+  done
+
+  details_text=
+  for detail in "${details[@]}"; do
+    [ -z "$details_text" ] || details_text="$details_text, "
+    details_text="$details_text$detail"
+  done
+  if [ "$eligible" -eq 1 ]; then
+    if [ "$uncertain" -eq 1 ]; then
+      echo "warn: no-mistakes reviewer quota preflight checked $details_text; unmeasurable quota remains eligible" >&2
+    fi
+    return 0
+  fi
+  if [ "$ALLOW_NO_MISTAKES_WITHOUT_REVIEWER_QUOTA" -eq 1 ]; then
+    echo "warn: captain-authorized reviewer-quota override allows no-mistakes ship after checking $details_text" >&2
+    return 0
+  fi
+  echo "error: refusing no-mistakes ship because no configured reviewer has usable quota; checked $details_text; pass --allow-no-mistakes-without-reviewer-quota only with captain authorization" >&2
+  return 1
+}
+
+if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
+  case "${POS[0]:-}" in
+    *=*) : ;;
+    *) no_mistakes_reviewer_quota_preflight || exit 1 ;;
+  esac
 fi
 if [ "$EXPLORATION" = deliberate ]; then
   [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ] && [ "$TASK_CLASS" = bounded-implementation-proven-root-fix ] || {
@@ -805,6 +935,7 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   # spanning several modes is two invocations rather than a silent mixed dispatch.
   [ "$MODE_SET" -eq 0 ] || shared_args+=(--mode "$MODE")
   [ "$YOLO_SET" -eq 0 ] || shared_args+=(--yolo "$YOLO")
+  [ "$ALLOW_NO_MISTAKES_WITHOUT_REVIEWER_QUOTA" -eq 0 ] || shared_args+=(--allow-no-mistakes-without-reviewer-quota)
   if [ -n "$TELEMETRY_TASK_ROOT" ] || [ -n "$TELEMETRY_PARENT" ]; then
     echo "error: linked telemetry identifiers are per-attempt and are not supported by batch dispatch" >&2
     exit 1
