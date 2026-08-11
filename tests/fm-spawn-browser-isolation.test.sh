@@ -38,8 +38,11 @@ PINNED_EMPTY_VARS=(
 )
 
 # make_fake_browser_tool <dir> <mode>: a stand-in chrome-devtools-axi whose --help
-# either documents CHROME_DEVTOOLS_AXI_SESSION (capable), omits it (too old), or
-# cannot be read at all (inconclusive). Every invocation that is not --help
+# either documents CHROME_DEVTOOLS_AXI_SESSION (capable), omits it (too old),
+# cannot be read at all (inconclusive), blocks reading stdin, or never returns.
+# The last two are not hypothetical shapes: the probe runs on every spawn, so an
+# installed build that waits on a caller's terminal or hangs would wedge dispatch
+# itself rather than resolve to an outcome. Every invocation that is not --help
 # records itself in $FM_FAKE_BROWSER_RAN, so a test can prove the refusal really
 # stopped the tool instead of only printing at it.
 make_fake_browser_tool() {
@@ -48,6 +51,10 @@ make_fake_browser_tool() {
     capable) help_body="printf '%s\\n' 'environment:' '  CHROME_DEVTOOLS_AXI_PORT     Bridge port' '  CHROME_DEVTOOLS_AXI_SESSION  Named session for concurrent isolation'; exit 0" ;;
     old) help_body="printf '%s\\n' 'environment:' '  CHROME_DEVTOOLS_AXI_PORT     Bridge port'; exit 0" ;;
     unreadable) help_body="printf '%s\\n' 'chrome-devtools-axi: unrecognised flag --help' >&2; exit 2" ;;
+    # Drains stdin BEFORE answering, so it only completes where the probe closed
+    # stdin for it; with a caller's stdin inherited it would block indefinitely.
+    stdin-reader) help_body="cat >/dev/null; printf '%s\\n' 'environment:' '  CHROME_DEVTOOLS_AXI_SESSION  Named session for concurrent isolation'; exit 0" ;;
+    hangs) help_body="sleep 120; exit 0" ;;
     *) fail "make_fake_browser_tool: unknown mode '$mode'" ;;
   esac
   mkdir -p "$dir"
@@ -429,6 +436,55 @@ test_unreadable_browser_tool_help_resolves_toward_refusal() {
   pass "a browser tool whose capability cannot be confirmed is refused, and says so differently from a too-old one"
 }
 
+test_browser_tool_that_reads_stdin_still_resolves() {
+  local rec id launch realdir
+  # The probe must not hand a third-party executable the caller's stdin. fm-spawn
+  # runs it on every dispatch, so a build that drains stdin before answering would
+  # otherwise sit on the dispatching terminal forever instead of producing one of
+  # the three outcomes.
+  id=browseriso-stdin-b10
+  rec=$(make_spawn_case browseriso-stdin claude "$id")
+  read_case_record "$rec"
+  realdir="$TMP_ROOT/browseriso-stdin/stdinbin"
+  make_fake_browser_tool "$realdir" stdin-reader
+  SPAWN_PATH="$realdir:$FAKEBIN_DIR:$PATH"
+  run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" >/dev/null \
+    || fail "spawn hung or failed against a browser tool whose help reads stdin"
+  SPAWN_PATH=
+  launch=$(cat "$LAUNCH_LOG")
+
+  assert_full_pin "$launch" "fm-$id" "stdin-reading tool"
+  assert_not_contains "$launch" 'PATH=' \
+    "a tool that answered the probe once its stdin was closed must be treated as capable"
+  pass "the capability probe closes stdin, so a tool that drains it still resolves instead of wedging the spawn"
+}
+
+test_browser_tool_help_that_never_returns_is_refused() {
+  local rec id launch shim realdir
+  # A hung help is the same diagnosis as an unreadable one - unconfirmed, never
+  # capable - and the bound is what makes that outcome reachable at all.
+  id=browseriso-hang-b11
+  rec=$(make_spawn_case browseriso-hang claude "$id")
+  read_case_record "$rec"
+  realdir="$TMP_ROOT/browseriso-hang/hangbin"
+  make_fake_browser_tool "$realdir" hangs
+  SPAWN_PATH="$realdir:$FAKEBIN_DIR:$PATH"
+  FM_BROWSER_TOOL_PROBE_TIMEOUT_SECS=2 \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" >/dev/null \
+    || fail "a browser tool whose help never returns wedged the spawn instead of resolving to a refusal"
+  SPAWN_PATH=
+  launch=$(cat "$LAUNCH_LOG")
+
+  assert_profile_pin_survives "$launch" "hung tool"
+  shim=$(extract_refusal_dir "$launch")
+  [ -n "$shim" ] \
+    || fail "a browser tool whose capability could not be probed within the bound was treated as capable"
+  assert_refusal_actually_refuses "$shim" "$realdir" "$TMP_ROOT/browseriso-hang/ran.log" "hung tool"
+  assert_contains "$REFUSAL_OUT" 'could not confirm' \
+    "a probe that hit its bound must read as unconfirmed, not as a confirmed-too-old tool"
+  pass "a browser tool whose help never returns is bounded and refused rather than wedging dispatch"
+}
+
 test_absent_browser_tool_is_left_alone() {
   local rec id launch
   # Nothing installed means nothing to refuse and nothing to run, so the launch
@@ -458,6 +514,8 @@ test_secondmate_agents_are_isolated_too
 test_capable_browser_tool_leaves_the_launch_untouched
 test_browser_tool_without_named_sessions_is_refused
 test_unreadable_browser_tool_help_resolves_toward_refusal
+test_browser_tool_that_reads_stdin_still_resolves
+test_browser_tool_help_that_never_returns_is_refused
 test_absent_browser_tool_is_left_alone
 
 fm_test_cleanup "$TMP_ROOT"

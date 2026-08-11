@@ -73,13 +73,19 @@ cleanup() {
 # into a shell that is still sourcing the operator's profile is silently dropped,
 # which would leave the hostile environment unset and quietly turn the attack
 # below into a no-op.
+#
+# The proof string is ASSEMBLED BY THE SHELL rather than typed, the same trick
+# send_line_confirmed below relies on. A pane's tty echoes keystrokes as they
+# arrive, before the shell has read them, so a marker appearing verbatim in the
+# typed line would match its own echo and satisfy this wait while the profile is
+# still sourcing - the exact drop this function exists to catch.
 wait_for_pane_shell() {
-  local marker=fm-shell-ready-$$ waited=0
-  tmux -L "$SOCKET" send-keys -l "echo $marker"
+  local proof=fm-shell-ready-$$ waited=0
+  tmux -L "$SOCKET" send-keys -l "printf 'fm-shell-%s-$$\\n' ready"
   tmux -L "$SOCKET" send-keys Enter
   while [ "$waited" -lt 30 ]; do
     case "$(tmux -L "$SOCKET" capture-pane -p -t live 2>/dev/null)" in
-      *"$marker"*) return 0 ;;
+      *"$proof"*) return 0 ;;
     esac
     sleep 1
     waited=$((waited + 1))

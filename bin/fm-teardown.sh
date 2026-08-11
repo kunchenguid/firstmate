@@ -1422,9 +1422,33 @@ reap_task_backend_process_group() {  # <label>
 # being torn down by default, and each retired child on that path.
 # Purely additive: `stop` is a documented idempotent no-op when nothing is
 # running, and a missing tool or a failure never blocks teardown.
+#
+# Gated on the SAME capability probe fm-spawn refuses on, because the session
+# name is only a target on a tool that has named sessions. One that does not
+# resolves any CHROME_DEVTOOLS_AXI_SESSION to the shared session named `default`,
+# so the stop would terminate the OPERATOR's own bridge, MCP server, and Chrome -
+# strictly worse than the leak this exists to close, and on a tool that old
+# fm-spawn refused the agent a bridge in the first place, so there is by
+# definition no per-task bridge here to close. Skipping is therefore the whole
+# correct action, not a lesser one. The probe is owned by fm-pr-lib.sh, which
+# both scripts source, so spawn and teardown agree by construction rather than by
+# two copies staying in step.
+#
+# The verdict is a property of the installed tool, not of a task, so it is
+# resolved once per teardown even when forced secondmate cleanup closes a session
+# for every retired child.
+BROWSER_BRIDGE_CAPABLE=
 stop_task_browser_bridge() {  # [task-id]
-  local id=${1:-$ID}
-  command -v chrome-devtools-axi >/dev/null 2>&1 || return 0
+  local id=${1:-$ID} executable
+  if [ -z "$BROWSER_BRIDGE_CAPABLE" ]; then
+    BROWSER_BRIDGE_CAPABLE=no
+    if executable=$(type -P -- chrome-devtools-axi 2>/dev/null) && [ -x "$executable" ]; then
+      if fm_browser_tool_supports_named_sessions "$executable"; then
+        BROWSER_BRIDGE_CAPABLE=yes
+      fi
+    fi
+  fi
+  [ "$BROWSER_BRIDGE_CAPABLE" = yes ] || return 0
   CHROME_DEVTOOLS_AXI_SESSION="$(fm_task_browser_session "$id")" \
     chrome-devtools-axi stop >/dev/null 2>&1 || true
 }

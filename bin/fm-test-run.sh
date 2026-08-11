@@ -916,18 +916,23 @@ families_for_changed_path() {
       ;;
     bin/fm-timeout-lib.sh)
       # The shared hard bound: session start's runtime bound, the fleet/bearings
-      # snapshots, the vendor auth probe, and the stow cascade's per-home step
-      # all depend on it.
+      # snapshots, the vendor auth probe, the stow cascade's per-home step, and
+      # fm-pr-lib's browser-tool capability probe all depend on it. That last one
+      # runs on every spawn and every teardown, which is why this reaches the two
+      # families below as well.
       printf '%s\n' session-bootstrap
       printf '%s\n' snapshot-bearings
       printf '%s\n' pure-contract-unit
       printf '%s\n' secondmate
+      printf '%s\n' pr-forge
+      printf '%s\n' backend-dispatch
       ;;
     bin/fm-pr-lib.sh)
-      # fm-pr-lib also owns fm_task_browser_session, the name fm-spawn pins onto
-      # every launch command and fm-teardown closes, so a change to that
-      # derivation has to re-run the spawn-side pin test (backend-dispatch)
-      # alongside the pr-forge family that covers the teardown side.
+      # fm-pr-lib also owns fm_task_browser_session and the browser-tool
+      # capability probe - the name fm-spawn pins onto every launch command and
+      # fm-teardown closes, and the single verdict both gate on - so a change to
+      # either has to re-run the spawn-side pin test (backend-dispatch) alongside
+      # the pr-forge family that covers the teardown side.
       printf '%s\n' pr-forge
       printf '%s\n' backend-dispatch
       ;;

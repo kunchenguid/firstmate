@@ -1100,7 +1100,9 @@ shell_quote() {
 #                      named sessions are a tool capability, and a chrome-devtools-axi
 #                      that lacks them ignores the variable and puts the agent back on
 #                      the shared "default" bridge while the launch still looks
-#                      isolated. browser_tool_supports_named_sessions probes for it and
+#                      isolated. fm-pr-lib.sh's fm_browser_tool_supports_named_sessions
+#                      probes for it - the same probe fm-teardown gates its stop on, so
+#                      the two sides of a task's browser lifecycle cannot disagree - and
 #                      write_browser_refusal_shim refuses the tool for that agent
 #                      instead, so the promise is never made without the capability
 # The tool's five remaining variables - CHANNEL, HEADED, MCP_PATH, WS_HEADERS and
@@ -1128,22 +1130,6 @@ browser_isolation_env() {
     'CHROME_DEVTOOLS_AXI_CHROME_ARGS=' \
     'CHROME_DEVTOOLS_AXI_PORT='
   printf 'CHROME_DEVTOOLS_AXI_SESSION=%s' "$(shell_quote "$(fm_task_browser_session "$1")")"
-}
-
-# chrome-devtools-axi's CLI surface is version-dependent, so probe the resolved
-# executable's own help before relying on the SESSION pin above. --help lists the
-# tool's documented environment and neither launches a browser nor starts a
-# bridge, the same reason pi_supports_tui_mode probes that way. Three outcomes,
-# because "could not confirm" must never be read as capable:
-#   0  the help documents CHROME_DEVTOOLS_AXI_SESSION - the pin is a real bridge
-#   1  the help ran and does not document it - the tool predates named sessions
-#   2  the help could not be read at all - unconfirmed, which is a different
-#      diagnosis from too-old and is reported to the operator as one
-browser_tool_supports_named_sessions() {
-  local executable=$1 help
-  help=$("$executable" --help 2>&1) || return 2
-  [ -n "$help" ] || return 2
-  printf '%s\n' "$help" | grep -q 'CHROME_DEVTOOLS_AXI_SESSION' || return 1
 }
 
 # The refusal a launched agent meets when the installed chrome-devtools-axi cannot
@@ -1336,9 +1322,9 @@ LAUNCH="$(browser_isolation_env "$ID") $LAUNCH"
 # launch is left exactly as composed, and a capable tool likewise adds nothing.
 BROWSER_REFUSAL_REASON=
 if BROWSER_TOOL_BIN=$(type -P -- chrome-devtools-axi 2>/dev/null) && [ -x "$BROWSER_TOOL_BIN" ]; then
-  browser_tool_supports_named_sessions "$BROWSER_TOOL_BIN" || case $? in
+  fm_browser_tool_supports_named_sessions "$BROWSER_TOOL_BIN" || case $? in
     1) BROWSER_REFUSAL_REASON="The installed chrome-devtools-axi ($BROWSER_TOOL_BIN) does not support named sessions: its --help does not document CHROME_DEVTOOLS_AXI_SESSION, so it predates the per-task bridge firstmate requires." ;;
-    *) BROWSER_REFUSAL_REASON="firstmate could not confirm that the installed chrome-devtools-axi ($BROWSER_TOOL_BIN) supports named sessions: its --help could not be read, or no longer documents CHROME_DEVTOOLS_AXI_SESSION. That is unconfirmed rather than known-too-old." ;;
+    *) BROWSER_REFUSAL_REASON="firstmate could not confirm that the installed chrome-devtools-axi ($BROWSER_TOOL_BIN) supports named sessions: its --help failed, produced nothing, or did not finish within the probe's bound. That is unconfirmed rather than known-too-old." ;;
   esac
 fi
 if [ -n "$BROWSER_REFUSAL_REASON" ]; then

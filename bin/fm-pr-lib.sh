@@ -16,6 +16,12 @@
 # after its durable wake is appended.
 # The receipt binds the terminal observation to the canonical registration and
 # lets a restart finish fixed-path removal without executing state-file bytes.
+#
+# fm_browser_tool_supports_named_sessions below probes an installed third-party
+# executable, so it needs the repo's single owner of bounded execution rather
+# than an unbounded call that could wedge a spawn or a teardown.
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-timeout-lib.sh"
 
 FM_PR_PROVIDER=
 FM_PR_URL=
@@ -125,9 +131,52 @@ fm_task_id_creation_valid() {
 # ~/.chrome-devtools-axi/sessions/, and guarantees the name is neither empty nor
 # all-dots. Two ids sharing a 61-char prefix would share one browser, which is
 # the pre-existing shared-default-session behavior rather than a new exposure.
+# That collision is not free on the teardown side, though: fm-teardown closes a
+# session by this name, so tearing down one of two colliding tasks also closes
+# the other's live bridge and its headless Chrome mid-work. Neither task is
+# exposed to a page it could not already read, but one of them loses its browser.
 fm_task_browser_session() {
   local name="fm-${1-}"
   printf '%s' "${name:0:64}"
+}
+
+# Seconds allowed for the capability probe below. An installed third-party
+# executable is not a trusted caller: a build that blocks on stdin or hangs would
+# otherwise wedge every spawn and every teardown with no diagnosis, where the
+# unconfirmed outcome is already the right answer for it.
+FM_BROWSER_TOOL_PROBE_TIMEOUT_SECS=${FM_BROWSER_TOOL_PROBE_TIMEOUT_SECS:-10}
+
+# Whether the installed chrome-devtools-axi can give a task its own bridge, which
+# is what makes fm_task_browser_session above a real isolation boundary rather
+# than a name the tool ignores. A tool without named sessions resolves any
+# CHROME_DEVTOOLS_AXI_SESSION - set, unset, or unsupported - to the shared
+# session named `default` on port 9224, which is the operator's own.
+#
+# Both sides of a task's browser lifecycle ask this same question and must not be
+# able to answer it differently, so it is owned here beside the session name they
+# share rather than in either script: fm-spawn refuses the tool for an agent it
+# cannot isolate, and fm-teardown skips the stop it would otherwise resolve onto
+# the operator's default bridge.
+#
+# The tool's CLI surface is version-dependent, so probe the resolved executable's
+# own help rather than asserting a version floor. --help lists the tool's
+# documented environment and neither launches a browser nor starts a bridge, the
+# same reason fm-spawn's pi_supports_tui_mode probes that way. Three outcomes,
+# because "could not confirm" must never be read as capable:
+#   0  the help documents CHROME_DEVTOOLS_AXI_SESSION - a per-task bridge is real
+#   1  the help ran and does not document it - the tool predates named sessions
+#   2  the help could not be read at all, including a probe that hit its bound -
+#      unconfirmed, which is a different diagnosis from too-old and is reported
+#      to the operator as one
+# stdin comes from /dev/null so a build that reads it cannot block on a caller's
+# terminal, and the bound covers everything else.
+fm_browser_tool_supports_named_sessions() {  # <executable>
+  local executable=${1-} help
+  [ -n "$executable" ] || return 2
+  help=$(fm_run_timed "$FM_BROWSER_TOOL_PROBE_TIMEOUT_SECS" \
+    "$executable" --help 2>&1 </dev/null) || return 2
+  [ -n "$help" ] || return 2
+  printf '%s\n' "$help" | grep -q 'CHROME_DEVTOOLS_AXI_SESSION' || return 1
 }
 
 # GitLab serves self-hosted instances, so the host is part of the identity

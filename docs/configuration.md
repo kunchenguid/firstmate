@@ -338,13 +338,16 @@ Every launch pins the six values that select the browser profile and the bridge 
 The tool's five other variables are deliberately not pinned, and an agent still inherits whatever you exported: `_MCP_PATH` still redirects which MCP module the agent's bridge runs, `_HEADED=1` still opens the agent's Chrome on your display, and `_CHANNEL`, `_WS_HEADERS`, and `_BRIDGE_TIMEOUT_MS` are inherited the same way.
 None of those five reaches an authenticated profile, so the isolation above is unchanged by them; they are left alone because each has a legitimate use, such as headed mode for visible debugging.
 
-The per-task bridge is the one part of this that depends on your installed `chrome-devtools-axi`: it needs the named-session support the tool documents as `CHROME_DEVTOOLS_AXI_SESSION`, and firstmate checks for it by reading the tool's own `--help` at spawn time.
+The per-task bridge is the one part of this that depends on your installed `chrome-devtools-axi`: it needs the named-session support the tool documents as `CHROME_DEVTOOLS_AXI_SESSION`, and firstmate checks for it by reading the tool's own `--help`.
 When it cannot confirm that support - the tool is older, or its help cannot be read - the launched agent instead gets a `chrome-devtools-axi` that refuses to run and explains what is missing, rather than quietly falling back to the shared `default` bridge on port 9224 that your own use of the tool sits on.
 The throwaway-profile pins still hold in that case, so any browser the agent does start still carries none of your cookies; only the private bridge is withheld, and the refusal message says exactly that.
 Spawning always succeeds either way, and a task that never opens a browser is unaffected.
 If `chrome-devtools-axi` is not installed at all there is nothing to refuse and nothing changes.
 
-[`bin/fm-spawn.sh`](../bin/fm-spawn.sh)'s `browser_isolation_env` owns which values are pinned, why, and how the named-session capability is probed; [`docs/verification/browser-isolation.md`](verification/browser-isolation.md) holds the dated evidence and the guard that re-derives it.
+Tearing a task down closes that task's own bridge by name, since a bridge has no idle timeout and would otherwise outlive the agent along with its headless Chrome.
+That close is gated on the same check, so where the per-task bridge was refused firstmate closes nothing rather than issue a stop that a tool without named sessions would resolve onto the shared `default` bridge your own browsing sits on.
+
+[`bin/fm-spawn.sh`](../bin/fm-spawn.sh)'s `browser_isolation_env` owns which values are pinned and why, and [`bin/fm-pr-lib.sh`](../bin/fm-pr-lib.sh)'s `fm_browser_tool_supports_named_sessions` owns the capability check both spawn and teardown gate on; [`docs/verification/browser-isolation.md`](verification/browser-isolation.md) holds the dated evidence and the guard that re-derives it.
 
 ## Relay (.env)
 

@@ -66,8 +66,11 @@ make_fake_root() {
   ln -s "$ROOT/bin/fm-wake-lib.sh" "$fake/bin/fm-wake-lib.sh"
   # fm-gate-refuse-lib.sh: teardown sources it before any fleet mutation.
   ln -s "$ROOT/bin/fm-gate-refuse-lib.sh" "$fake/bin/fm-gate-refuse-lib.sh"
-  # fm-pr-lib.sh: teardown uses its canonical task-ID validator for poll cleanup.
+  # fm-pr-lib.sh: teardown uses its canonical task-ID validator for poll cleanup,
+  # and fm-pr-lib.sh itself sources the shared bounded-execution helper for the
+  # browser-tool capability probe teardown gates its session close on.
   ln -s "$ROOT/bin/fm-pr-lib.sh" "$fake/bin/fm-pr-lib.sh"
+  ln -s "$ROOT/bin/fm-timeout-lib.sh" "$fake/bin/fm-timeout-lib.sh"
   # fm-public-followup-lib.sh (and the fm-x-lib.sh it sources): teardown sources
   # it for the relay-activation gate on the promised-public-reply check. Neither
   # does anything in this fixture, which has no .env, but both are real siblings
@@ -145,8 +148,11 @@ test_teardown_skips_gracefully_without_tasktmp() {
   ln -s "$ROOT/bin/fm-wake-lib.sh" "$fake/bin/fm-wake-lib.sh"
   # fm-gate-refuse-lib.sh: teardown sources it before any fleet mutation.
   ln -s "$ROOT/bin/fm-gate-refuse-lib.sh" "$fake/bin/fm-gate-refuse-lib.sh"
-  # fm-pr-lib.sh: teardown uses its canonical task-ID validator for poll cleanup.
+  # fm-pr-lib.sh: teardown uses its canonical task-ID validator for poll cleanup,
+  # and fm-pr-lib.sh itself sources the shared bounded-execution helper for the
+  # browser-tool capability probe teardown gates its session close on.
   ln -s "$ROOT/bin/fm-pr-lib.sh" "$fake/bin/fm-pr-lib.sh"
+  ln -s "$ROOT/bin/fm-timeout-lib.sh" "$fake/bin/fm-timeout-lib.sh"
   # fm-public-followup-lib.sh (and the fm-x-lib.sh it sources): teardown sources
   # it for the relay-activation gate on the promised-public-reply check. Neither
   # does anything in this fixture, which has no .env, but both are real siblings

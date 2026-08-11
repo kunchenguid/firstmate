@@ -63,9 +63,11 @@ Session names are restricted to 1-64 characters of `[A-Za-z0-9._-]`, and an out-
 `fm_task_id_creation_valid` (`bin/fm-pr-lib.sh`) already restricts a task id to that same charset, no leading dot, and at most 64 characters, so length is the only axis `fm-spawn` has to correct.
 
 Named sessions are a tool capability rather than a firstmate one, so this is the only part of the pin that a different install can silently withdraw: a `chrome-devtools-axi` without them ignores `CHROME_DEVTOOLS_AXI_SESSION` and leaves the agent on the shared `default` bridge while the launch string still reads as isolated.
-The observable signal for the capability is the tool's own `--help`, which lists `CHROME_DEVTOOLS_AXI_SESSION` under `environment:` in 0.1.26; `--help` exits 0 in about 0.1s and starts no bridge and no browser, so it is safe to run on every spawn.
-`fm-spawn` therefore probes that help rather than asserting a version floor, and treats an unreadable one as unconfirmed rather than capable; `browser_isolation_env`'s comment owns what it does with each outcome.
-`tests/fm-spawn-browser-isolation.test.sh` covers all four outcomes - capable, too old, unconfirmed, and not installed - against fake tools, and asserts that the refusal stops the tool rather than only printing at it.
+The observable signal for the capability is the tool's own `--help`, which lists `CHROME_DEVTOOLS_AXI_SESSION` under `environment:` in 0.1.26; `--help` exits 0 in about 0.1s and starts no bridge and no browser, so it is safe to run on every spawn and every teardown.
+`fm_browser_tool_supports_named_sessions` (`bin/fm-pr-lib.sh`) therefore probes that help rather than asserting a version floor, and treats an unreadable one as unconfirmed rather than capable; `browser_isolation_env`'s comment owns what `fm-spawn` does with each outcome.
+The probe is bounded by `bin/fm-timeout-lib.sh` and runs with stdin closed, because an installed third-party build that hangs or waits on the caller's terminal would otherwise wedge a dispatch instead of resolving to the unconfirmed outcome that already fits it.
+It lives beside `fm_task_browser_session` rather than in either script because both ends of a task's browser lifecycle gate on it and must not be able to disagree.
+`tests/fm-spawn-browser-isolation.test.sh` covers all four outcomes - capable, too old, unconfirmed, and not installed - against fake tools, plus a tool that reads stdin and one whose help never returns, and asserts that the refusal stops the tool rather than only printing at it.
 
 ## Process lifetime the pin depends on
 
@@ -85,7 +87,9 @@ Chrome runs in its own process group rather than the bridge's, so the bridge's e
 
 The reap is incidental rather than deterministic, though: an agent that browsed from any other directory would leak a whole browser past teardown.
 `bin/fm-teardown.sh`'s `stop_task_browser_bridge` closes that gap by naming the session directly before the reap runs.
-`chrome-devtools-axi stop` against a session with no bridge reports `status: stopped (no-op)`, exits 0 in about 0.14s, and creates no state, so the call is safe to make on every teardown.
+`chrome-devtools-axi stop` against a session with no bridge reports `status: stopped (no-op)`, exits 0 in about 0.14s, and creates no state, so the call is safe to make on every teardown of a task that HAS a named session.
+It is gated on the same capability probe above for the case where it does not: a tool without named sessions resolves any `CHROME_DEVTOOLS_AXI_SESSION` to the shared `default` session, so an ungated stop would terminate the operator's own bridge, MCP server, and Chrome - the opposite of this pin's purpose, and against a tool that never gave the agent a private bridge to reclaim.
+Teardown therefore issues no stop at all there, which is exactly the set of tasks `fm-spawn` refused the tool for.
 
 A stopped session leaves its own small state directory at `~/.chrome-devtools-axi/sessions/fm-<task-id>/` holding a snapshot-generation counter.
 That directory belongs to the tool rather than to firstmate, and teardown deliberately does not reach outside firstmate's state to delete it.

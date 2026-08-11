@@ -152,9 +152,37 @@ fm_test_reap_orphans
 # whose installed version bootstrap gates, so a fixture cannot be reported as an
 # unparseable build simply for answering `--version` with nothing.
 
+# fm_fake_browser_tool <fakebin> [named-sessions|no-named-sessions]
+# An inert stand-in for chrome-devtools-axi. Both fm-spawn and fm-teardown ask the
+# installed one whether it supports named sessions, so without a stub every
+# fixture that drives either would reach whatever real browser tool the developer
+# running the suite happens to have, and teardown would go on to ask it to stop a
+# session. The default answers that probe the way a current build does, which is
+# what CI's tool-absent path and a current developer install already produce, so
+# a fixture's behaviour does not depend on the host. Every other invocation exits
+# 0 silently; a test that needs to observe the calls installs its own stub over
+# this one.
+fm_fake_browser_tool() {
+  local fakebin=$1 mode=${2:-named-sessions} session_line=
+  if [ "$mode" = named-sessions ]; then
+    session_line="  CHROME_DEVTOOLS_AXI_SESSION  Named session for concurrent isolation"
+  fi
+  cat > "$fakebin/chrome-devtools-axi" <<SH
+#!/usr/bin/env bash
+set -u
+if [ "\${1:-}" = --help ]; then
+  printf '%s\n' 'environment:' '  CHROME_DEVTOOLS_AXI_PORT     Bridge port'${session_line:+" '$session_line'"}
+  exit 0
+fi
+exit 0
+SH
+  chmod +x "$fakebin/chrome-devtools-axi"
+}
+
 fm_fakebin() {
   local dir=$1 fakebin="$1/fakebin"
   mkdir -p "$fakebin"
+  fm_fake_browser_tool "$fakebin"
   printf '%s\n' "$fakebin"
 }
 

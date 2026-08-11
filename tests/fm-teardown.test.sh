@@ -152,16 +152,13 @@ case "${1:-}" in
 esac
 exit 0
 SH
-  # Default hermetic browser-tool stub. Teardown closes the task's own browser
-  # session on every case; without this, each one would shell out to whatever
-  # real chrome-devtools-axi the runner happens to have installed. Cases that
-  # assert on the stop override this file with a logging one.
-  cat > "$fakebin/chrome-devtools-axi" <<'SH'
-#!/usr/bin/env bash
-exit 0
-SH
-  chmod +x "$fakebin/treehouse" "$fakebin/tmux" "$fakebin/gh-axi" "$fakebin/gh" "$fakebin/no-mistakes" \
-    "$fakebin/chrome-devtools-axi"
+  # Default hermetic browser-tool stub, shared with every other suite through
+  # tests/lib.sh. Teardown probes the installed browser tool and closes the task's
+  # own session on every case; without this, each one would reach whatever real
+  # chrome-devtools-axi the runner happens to have installed. Cases that assert on
+  # the stop override this file with a logging one.
+  fm_fake_browser_tool "$fakebin"
+  chmod +x "$fakebin/treehouse" "$fakebin/tmux" "$fakebin/gh-axi" "$fakebin/gh" "$fakebin/no-mistakes"
 
   # Bare origin so the clone has an `origin` remote and origin/HEAD.
   git init -q --bare "$case_dir/origin.git"
@@ -2241,6 +2238,32 @@ test_leaked_worktree_process_is_reaped() {
   pass "a leaked descendant process rooted under the task's worktree is reaped by teardown, not left surviving"
 }
 
+# write_browser_stop_logger <case-dir> [named-sessions|no-named-sessions]: a
+# chrome-devtools-axi stand-in recording the session name every invocation ran
+# against in <case-dir>/browser-stop.log, so a case can assert on what teardown
+# asked the tool to do. It answers the capability probe either the way a current
+# build does or the way one predating named sessions does, because teardown may
+# only close a session by name on a tool that HAS named sessions: one that does
+# not resolves every session name to the operator's own shared `default` bridge.
+write_browser_stop_logger() {  # <case-dir> [mode]
+  local case_dir=$1 mode=${2:-named-sessions} session_line=
+  if [ "$mode" = named-sessions ]; then
+    session_line="  CHROME_DEVTOOLS_AXI_SESSION  Named session for concurrent isolation"
+  fi
+  cat > "$case_dir/fakebin/chrome-devtools-axi" <<SH
+#!/usr/bin/env bash
+set -u
+printf '%s %s\n' "\${CHROME_DEVTOOLS_AXI_SESSION:-<unset>}" "\$*" \\
+  >> "$case_dir/browser-stop.log"
+if [ "\${1:-}" = --help ]; then
+  printf '%s\n' 'environment:' '  CHROME_DEVTOOLS_AXI_PORT     Bridge port'${session_line:+" '$session_line'"}
+  exit 0
+fi
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/chrome-devtools-axi"
+}
+
 test_task_browser_session_is_closed() {
   local case_dir rc
   case_dir=$(make_case browser-session-close)
@@ -2252,13 +2275,7 @@ test_task_browser_session_is_closed() {
   # and headless Chrome while the agent browsed from its own worktree, so
   # teardown must also close the session by name or an agent that browsed from
   # anywhere else leaks a whole browser.
-  cat > "$case_dir/fakebin/chrome-devtools-axi" <<SH
-#!/usr/bin/env bash
-printf '%s %s\n' "\${CHROME_DEVTOOLS_AXI_SESSION:-<unset>}" "\$*" \\
-  >> "$case_dir/browser-stop.log"
-exit 0
-SH
-  chmod +x "$case_dir/fakebin/chrome-devtools-axi"
+  write_browser_stop_logger "$case_dir"
 
   rc=0
   run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
@@ -2281,13 +2298,7 @@ test_secondmate_teardown_closes_its_own_and_child_browser_sessions() {
   # any other kind, and forced cleanup retires that home's children without ever
   # running the cwd-matched reap, so every session this home opened has to be
   # closed by name or each retired agent leaks a bridge and a headless Chrome.
-  cat > "$case_dir/fakebin/chrome-devtools-axi" <<SH
-#!/usr/bin/env bash
-printf '%s %s\n' "\${CHROME_DEVTOOLS_AXI_SESSION:-<unset>}" "\$*" \\
-  >> "$case_dir/browser-stop.log"
-exit 0
-SH
-  chmod +x "$case_dir/fakebin/chrome-devtools-axi"
+  write_browser_stop_logger "$case_dir"
 
   rc=0
   run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
@@ -2302,6 +2313,30 @@ SH
       "secondmate-browser-close: forced cleanup left child $child's browser session running"
   done
   pass "retiring a secondmate closes its own browser session and every session its forced-cleanup children opened"
+}
+
+test_browser_tool_without_named_sessions_is_never_stopped() {
+  local case_dir rc
+  case_dir=$(make_case browser-session-no-named)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+
+  # The counterpart to the case above, and the one that matters most: a
+  # chrome-devtools-axi predating named sessions resolves ANY session name to the
+  # shared session named `default`, which is the operator's own bridge, MCP server
+  # and Chrome. Stopping there would end the operator's live browsing to clean up
+  # a per-task bridge that tool never gave the agent in the first place - fm-spawn
+  # refuses it for exactly that reason - so teardown must issue no stop at all.
+  write_browser_stop_logger "$case_dir" no-named-sessions
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "browser-session-no-named: teardown should succeed"
+  if grep -q ' stop' "$case_dir/browser-stop.log" 2>/dev/null; then
+    fail "browser-session-no-named: teardown stopped a session on a tool without named sessions, which resolves to the operator's own default bridge ($(cat "$case_dir/browser-stop.log"))"
+  fi
+  pass "a browser tool without named sessions is never asked to stop a session, so teardown cannot close the operator's own bridge"
 }
 
 test_missing_browser_tool_never_blocks_teardown() {
@@ -2734,6 +2769,7 @@ test_leaked_worktree_process_is_reaped
 test_leaked_tasktmp_process_is_reaped
 test_task_browser_session_is_closed
 test_secondmate_teardown_closes_its_own_and_child_browser_sessions
+test_browser_tool_without_named_sessions_is_never_stopped
 test_missing_browser_tool_never_blocks_teardown
 test_lsof_absent_reaps_tmux_process_group
 test_lsof_error_refuses_before_removal
