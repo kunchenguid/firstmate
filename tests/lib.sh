@@ -360,6 +360,45 @@ expect_code() {
 
 # assert_grep <pattern> <file> <msg>: fixed-string grep must match in <file>.
 # `--` guards patterns that begin with '-' (e.g. backlog/registry lines).
+# fm_fake_tasks_axi <fakebin-dir>: install a tasks-axi stub that satisfies every
+# capability probe bin/fm-tasks-axi-lib.sh and bin/fm-decision-hold.sh consult.
+#
+# A fixture whose subject is NOT tasks-axi should call this, because otherwise it
+# inherits whatever the machine has: a build below the floor turns the behavior
+# under test into a toolchain check and fails it for the wrong reason. Fixtures
+# that ARE about the floor keep supplying their own version-controlled stub.
+fm_fake_tasks_axi() {  # <fakebin-dir>
+  cat > "$1/tasks-axi" <<'FM_FAKE_TASKS_AXI'
+#!/usr/bin/env bash
+case "${1:-}" in
+  --version)
+    printf '0.2.4\n'
+    exit 0
+    ;;
+  update)
+    if [ "${2:-}" = --help ]; then
+      printf 'usage: tasks-axi update <id> [flags]\n  --body-file <path>\n  --archive-body\n'
+      exit 0
+    fi
+    ;;
+  mv)
+    if [ "${2:-}" = --help ]; then
+      printf 'usage: tasks-axi mv <id> [<id>...] --to <path-or-dir>\n'
+      exit 0
+    fi
+    ;;
+  hold)
+    if [ "${2:-}" = --help ]; then
+      printf 'usage: tasks-axi hold <id> [flags]\n  --reason string\n  --kind captain\n'
+      exit 0
+    fi
+    ;;
+esac
+exit 0
+FM_FAKE_TASKS_AXI
+  chmod +x "$1/tasks-axi"
+}
+
 assert_grep() {
   grep -F -- "$1" "$2" >/dev/null || fail "$3"
 }

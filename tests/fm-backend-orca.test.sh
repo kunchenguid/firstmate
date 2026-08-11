@@ -36,6 +36,7 @@ fi
 exit 0
 SH
   chmod +x "$fb/orca"
+  fm_fake_tasks_axi "$fb"
   printf '%s\n' "$fb"
 }
 
@@ -683,10 +684,16 @@ test_spawn_releases_orca_resources_when_metadata_write_fails() {
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
+    LC_ALL=C \
     "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --mode no-mistakes --yolo off --backend orca 2>&1 )
   status=$?
   [ "$status" -ne 0 ] || fail "Orca spawn should fail when metadata cannot be written"
+  # The redirect failure text comes from the C library, so it is translated on a
+  # non-English machine. LC_ALL=C above pins it; the script's own refusal line is
+  # asserted too, since that one is firstmate's and never localized.
   assert_contains "$out" "Is a directory" "spawn should fail at metadata publication"
+  assert_contains "$out" "failed to write task metadata" \
+    "spawn should report its own metadata-publication refusal"
   assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''close'$'\x1f''--terminal'$'\x1f''term-meta-fail'$'\x1f''--json' \
     "Orca spawn should close the recorded terminal when a later abort occurs"
   assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm'$'\x1f''--worktree'$'\x1f''id:wt-meta-fail'$'\x1f''--force'$'\x1f''--json' \
