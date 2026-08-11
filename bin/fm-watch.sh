@@ -1028,16 +1028,15 @@ EOF
         elif afk_present; then
           # Daemon owns triage. Surface a distinct stale hash immediately, then
           # keep an unchanged hash on the bounded wedge-escalation cadence.
-          case "$(afk_stale_decision "$h" "$(cat "$sf" 2>/dev/null || true)" "$(last_status_line "$STATE/$task.status")")" in
+          daemon_marker="$STATE/.subsuper-stale-$(printf '%s' "$task" | tr ':/.' '___')"
+          if [ -e "$daemon_marker" ]; then daemon_marker_present=1; else daemon_marker_present=0; fi
+          case "$(afk_stale_decision "$h" "$(cat "$sf" 2>/dev/null || true)" "$(last_status_line "$STATE/$task.status")" "$daemon_marker_present")" in
             surface)
               fm_wake_append stale "$w" "stale: $w" || exit 1
               printf '%s' "$h" > "$sf"
               wake "stale: $w"
               ;;
             daemon-owned)
-              ;;
-            wedge-timer)
-              wedge_timer_check "$w" "$ssf" "afk stale" "$ewf"
               ;;
           esac
         elif stale_is_terminal "$w" "$STATE"; then

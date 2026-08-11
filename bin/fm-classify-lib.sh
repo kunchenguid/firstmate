@@ -78,14 +78,14 @@ FM_CLASSIFY_RESOLVE_VERB_DEFAULT='resolved'
 FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT='captain-held'
 
 # Pure decision seam: a new hash keeps the immediate handoff, while an unchanged
-# hash enters the existing bounded timer instead of disappearing after one wake.
-afk_stale_decision() {  # <current-hash> <surfaced-hash> <status-line>
+# hash re-handoffs after the daemon's bounded timer clears its marker.
+afk_stale_decision() {  # <current-hash> <surfaced-hash> <status-line> <daemon-marker-present>
   if [ "$1" != "$2" ]; then
     printf 'surface\n'
-  elif status_is_paused "$3"; then
+  elif status_is_paused "$3" || [ "$4" = 1 ]; then
     printf 'daemon-owned\n'
   else
-    printf 'wedge-timer\n'
+    printf 'surface\n'
   fi
 }
 
