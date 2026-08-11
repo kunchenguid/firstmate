@@ -42,10 +42,22 @@ fm_wsl2_mirrored_networking_hint() {
   esac
   local cfg="${FM_WSL_CONFIG_PATH:-}"
   if [ -z "$cfg" ]; then
-    [ -n "${USER:-}" ] || return 0
-    cfg="/mnt/c/Users/${USER:-}/.wslconfig"
+    local winuser
+    winuser=$(cmd.exe /c 'echo %USERNAME%' 2>/dev/null | tr -d '\r\n')
+    if [ -n "$winuser" ] && [ -f "/mnt/c/Users/$winuser/.wslconfig" ]; then
+      cfg="/mnt/c/Users/$winuser/.wslconfig"
+    else
+      local matches=(/mnt/c/Users/*/.wslconfig)
+      if [ "${#matches[@]}" -eq 1 ] && [ -f "${matches[0]}" ]; then
+        cfg="${matches[0]}"
+      elif [ -n "${USER:-}" ]; then
+        cfg="/mnt/c/Users/${USER}/.wslconfig"
+      else
+        return 0
+      fi
+    fi
   fi
-  if [ -f "$cfg" ] && grep -Eq '^[[:space:]]*networkingMode[[:space:]]*=[[:space:]]*mirrored[[:space:]]*$' "$cfg" 2>/dev/null; then
+  if [ -f "$cfg" ] && grep -Eiq '^[[:space:]]*networkingMode[[:space:]]*=[[:space:]]*mirrored[[:space:]]*$' "$cfg" 2>/dev/null; then
     return 0
   fi
   printf 'this host is WSL2 without networkingMode=mirrored in %s - if this route was reachable before, WSL2 likely reverted to isolated NAT networking; recreate that file with [wsl2] / networkingMode=mirrored, then run "wsl --shutdown" from Windows (not from inside WSL) and relaunch' "$cfg"
