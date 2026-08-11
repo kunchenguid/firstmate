@@ -49,6 +49,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `backends/cmux.sh`       | Experimental cmux session-provider adapter                                           |
 | `fm-config-push.sh`      | Push declared inherited local material to live secondmates mid-session and send a pointer to the literal-content config reread when config changed |
 | `fm-project-mode.sh`     | Resolve a project's delivery mode and `+yolo` flag from `data/projects.md`           |
+| `fm-project-pool.sh`     | Give each firstmate home its own treehouse worktree pool so two homes never share a pool slot |
 | `fm-merge-local.sh`      | Fast-forward a `local-only` project's local default branch after approval            |
 | `fm-helm.sh`             | Move the control plane between the machines of one fleet: status, handover, claim, demote, adopt, audit ([docs/helm.md](helm.md)) |
 | `fm-helm-lib.sh`         | The helm lease, the fencing epoch, and the gate the state-changing commands carry; wholly inert without `config/fleet.json` |

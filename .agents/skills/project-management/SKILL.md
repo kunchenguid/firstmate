@@ -41,7 +41,7 @@ Destructive, irreversible, and security-sensitive decisions still require captai
 ## Add or clone an existing project
 
 Confirm the source URL, local project name, delivery mode, and autonomy posture.
-Clone into `projects/<name>` and add the registry entry only after the destination is known to be unused.
+Clone into `projects/<name>` and add the registry entry only after the destination is known to be unused, using the clone command in "Worktree pool" below rather than a bare `git clone`.
 A `no-mistakes` project must have an `origin` remote and must complete the initialization procedure below.
 A `direct-PR` project needs an `origin` remote and must complete the same initialization, for the reason the Initialize section gives.
 A `local-only` project may have no remote and skips no-mistakes initialization.
@@ -55,6 +55,21 @@ After remote creation succeeds, clone it locally, add the registry entry, and in
 
 For a purely `local-only` project, create a local Git repository under its unused `projects/<name>` path, add the registry entry, and make no GitHub call.
 The captain's request to create that local project authorizes this local initialization, but it does not authorize an unmentioned remote repository.
+
+## Worktree pool
+
+Every new project clone, however it was created, needs its home's own worktree pool:
+
+```sh
+git clone <url> projects/<name> && bin/fm-project-pool.sh apply projects/<name>
+```
+
+`bin/fm-project-pool.sh`'s header owns the whole contract and the reason it is a sanctioned write under `projects/`.
+The short version: treehouse keys its worktree pool by the machine's home directory and the repository's origin URL, with no dimension for which firstmate home is asking, so two homes holding the same repo share one pool and either can be handed a worktree belonging to the other's clone, which `bin/fm-spawn.sh` then refuses to launch on.
+Run the same `apply` for a project created locally with `git init`, and for any clone that arrived by another route.
+
+Forgetting it is caught rather than silent: `bin/fm-spawn.sh` applies the same config before every spawn, so a clone repairs itself the first time it is used, and session-start bootstrap reports any clone still on the shared pool as a `PROJECT_POOL:` line.
+Neither backstop replaces running it here, because a clone with a `treehouse.toml` of its own refuses the automatic repair and needs a decision instead.
 
 ## Initialize
 

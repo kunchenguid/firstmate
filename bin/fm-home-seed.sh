@@ -621,10 +621,28 @@ EOF
       echo "error: seeded project $project at $dst has origin $dst_url; expected $url" >&2
       return 1
     }
+    # A pre-existing clone converges too, so re-seeding a home repairs a clone
+    # that predates pool isolation instead of leaving it on the shared pool.
+    pool_isolate_clone "$project" "$dst" "$home" || return 1
     return 0
   fi
   url=$(source_origin_url "$project" "$mode" "$src") || return 1
   git clone --quiet "$url" "$dst"
+  pool_isolate_clone "$project" "$dst" "$home" || return 1
+}
+
+# Give a seeded clone the secondmate home's OWN treehouse worktree pool.
+# Without it this clone and the parent home's clone of the same repo share one
+# $HOME-keyed pool, and `treehouse get` can hand this home a worktree of the
+# parent's clone. bin/fm-project-pool.sh owns the whole contract; the home is
+# passed explicitly because this runs in the PARENT's process, whose own FM_HOME
+# is not the home that will own the clone.
+pool_isolate_clone() {
+  local project=$1 dst=$2 home=$3
+  "$FM_ROOT/bin/fm-project-pool.sh" apply "$dst" --home "$home" || {
+    echo "error: could not give seeded project $project at $dst its own worktree pool" >&2
+    return 1
+  }
 }
 
 validate_seed_project() {
@@ -1209,6 +1227,16 @@ seed_home() {
     return 1
   }
 
+  # The identity marker is written BEFORE the project clones, not with the
+  # registry at the end. bin/fm-backend-hometag-lib.sh reads this file to derive
+  # the home tag, and clone_project uses that tag to place the clone's worktree
+  # pool, so a marker written afterwards makes the seed name a pool root
+  # ("firstmate-<hash>") that every later caller re-derives differently
+  # ("2ndmate-<id>-<hash>") and then repairs, stranding the first pool.
+  # Rollback already covers it: SEED_MARKER_EXISTED and the backup are taken
+  # well above this point, and restore_seed_file removes or restores it.
+  printf '%s\n' "$id" > "$home/$SUB_HOME_MARKER"
+
   for project in "$@"; do
     project_dst=$(validate_project_destination "$home" "$project") || return 1
     [ -e "$project_dst" ] || printf '%s\n' "$project_dst" >> "$SEED_CREATED_PROJECTS_FILE"
@@ -1227,7 +1255,6 @@ seed_home() {
   cp "$SEED_PARENT_BRIEF" "$home/data/charter.md"
 
   projects_csv=$(join_projects "$@")
-  printf '%s\n' "$id" > "$home/$SUB_HOME_MARKER"
   write_registry "$id" "$home" "$projects_csv" "$SEED_PARENT_BRIEF"
   validate_registry
   SEED_COMMITTED=1

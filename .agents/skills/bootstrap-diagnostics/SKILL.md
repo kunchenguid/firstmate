@@ -2,7 +2,7 @@
 name: bootstrap-diagnostics
 description: >-
   Agent-only handling playbook for session-start bootstrap diagnostics.
-  Use whenever the session-start digest's bootstrap section prints an actionable diagnostic line - MISSING, MISSING_MANUAL, BACKEND_INVALID, NEEDS_GH_AUTH, TANGLE, BACKLOG_ORPHAN, CREW_DISPATCH invalid, HARNESS_OVERRIDES invalid, FLEET_SYNC, PR_CHECK_MIGRATION, SECONDMATE_SYNC, SECONDMATE_LIVENESS, NM_INCOMPATIBLE, NM_ORPHAN, NM_UNWATCHED, NUDGE_SECONDMATES, FMX, or RELAY - or when a standalone bin/fm-bootstrap.sh run prints one of those lines.
+  Use whenever the session-start digest's bootstrap section prints an actionable diagnostic line - MISSING, MISSING_MANUAL, BACKEND_INVALID, NEEDS_GH_AUTH, TANGLE, BACKLOG_ORPHAN, PROJECT_POOL, CREW_DISPATCH invalid, HARNESS_OVERRIDES invalid, FLEET_SYNC, PR_CHECK_MIGRATION, SECONDMATE_SYNC, SECONDMATE_LIVENESS, NM_INCOMPATIBLE, NM_ORPHAN, NM_UNWATCHED, NUDGE_SECONDMATES, FMX, or RELAY - or when a standalone bin/fm-bootstrap.sh run prints one of those lines.
   A silent bootstrap section, or a BOOTSTRAP_INFO capability fact, means no skill load.
 user-invocable: false
 metadata:
@@ -31,6 +31,10 @@ When any diagnostic needs captain attention, report the plain consequence and re
   `bin/fm-teardown.sh` closes the row itself, so an orphan means that write failed or the task ended outside teardown; resolve it before dispatching, and never just re-report the row as in-flight work.
   Establish how the task actually ended first - a merged PR/MR, a local merge, or a scout report - then close the row with `tasks-axi done <id>` plus the right link flag (`--pr` for a GitHub pull URL, `--note <url>` for a Codebase MR, `--report <path>` for a scout), or hand-edit `data/backlog.md` when the backlog backend is `manual`.
   If the task turns out to be genuinely unfinished (its worktree and meta were cleaned up while the work was not landed), tell the captain and re-dispatch it rather than closing the row.
+- `PROJECT_POOL: <clone> ...` - that project clone still draws task worktrees from the machine-wide worktree pool that every firstmate home holding the same repo shares, so a worktree belonging to another home's clone can be handed to this one; `bin/fm-spawn.sh` refuses to launch on such a worktree, which makes the work undispatchable until the pool is split.
+  For a clone with no config or a config naming the wrong home, `bin/fm-spawn.sh` repairs it automatically on the next spawn, so this line only means the clone has not been used yet; run the printed `bin/fm-project-pool.sh apply <clone>` to close it now, or `bin/fm-project-pool.sh backfill --all` to sweep every home on this machine.
+  A `commits its own treehouse.toml` or `firstmate did not write` line is different: firstmate will not overwrite it, the repair command will refuse, and closing that one is a captain decision about the project's own configuration.
+  Nothing here prunes, destroys, or returns a worktree; worktrees already checked out of the shared pool stay where they are and stay returnable.
 - `CREW_HARNESS_OVERRIDE: <name>` - record and use the override silently; surface a harness fact only if it actually blocks work or the captain asks.
 - `CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>` - the optional dispatch profile file exists but failed low-cost bootstrap validation; continue with the normal fallback chain, resolve and pass the chosen fallback harness explicitly while the file remains present, fix the malformed schema, unverified harness name, unknown selector, or invalid harness/effort pair when convenient, and do not select a bad profile.
 - `CREW_DISPATCH: active config/crew-dispatch.json` - bootstrap validated the optional dispatch profile file and printed its active rules and `default:` when present.
