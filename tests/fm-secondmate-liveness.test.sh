@@ -290,12 +290,13 @@ test_wsl2_hint_resolves_via_cmd_exe_username() {
   fake_cmd_exe "$TMP_ROOT/hint-cmdexe" jdoe >/dev/null
   users_dir="$TMP_ROOT/hint-cmdexe/Users"
   mkdir -p "$users_dir/jdoe"
-  printf '%s\n' '[wsl2]' 'networkingMode=mirrored' > "$users_dir/jdoe/.wslconfig"
+  printf '%s\n' '[wsl2]' 'memory=8GB' > "$users_dir/jdoe/.wslconfig"
 
   out=$(PATH="$fb:$BASE_PATH" FM_WSL_USERS_DIR="$users_dir" \
     bash -c '. "$0/bin/fm-remote-readiness-lib.sh"; fm_wsl2_mirrored_networking_hint' "$ROOT")
 
-  [ -z "$out" ] || fail "cmd.exe's %USERNAME% must resolve the real per-user .wslconfig, got '$out'"
+  assert_contains "$out" "$users_dir/jdoe/.wslconfig" \
+    "cmd.exe's %USERNAME% must resolve FM_WSL_USERS_DIR's per-user .wslconfig, not the real host's"
   pass "fm_wsl2_mirrored_networking_hint: resolves the Windows user via cmd.exe when unconfigured"
 }
 
@@ -304,12 +305,13 @@ test_wsl2_hint_falls_back_to_sole_glob_match() {
   fb=$(fake_uname "$TMP_ROOT/hint-glob" "5.15.167.4-microsoft-standard-WSL2")
   users_dir="$TMP_ROOT/hint-glob/Users"
   mkdir -p "$users_dir/onlyuser"
-  printf '%s\n' '[wsl2]' 'networkingMode=mirrored' > "$users_dir/onlyuser/.wslconfig"
+  printf '%s\n' '[wsl2]' 'memory=8GB' > "$users_dir/onlyuser/.wslconfig"
 
   out=$(PATH="$fb:$BASE_PATH" FM_WSL_USERS_DIR="$users_dir" \
     bash -c '. "$0/bin/fm-remote-readiness-lib.sh"; fm_wsl2_mirrored_networking_hint' "$ROOT")
 
-  [ -z "$out" ] || fail "a single Users/*/.wslconfig match must be used when cmd.exe is unavailable, got '$out'"
+  assert_contains "$out" "$users_dir/onlyuser/.wslconfig" \
+    "a single Users/*/.wslconfig match under FM_WSL_USERS_DIR must be used, not the real host's"
   pass "fm_wsl2_mirrored_networking_hint: falls back to the sole glob match when cmd.exe fails"
 }
 
