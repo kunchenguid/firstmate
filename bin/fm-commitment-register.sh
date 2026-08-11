@@ -139,8 +139,9 @@
 # KINDS are closed, but the TARGETS they run come out of the entry's own JSON,
 # and an entry can arrive from the gitignored home overlay. Every path a typed
 # probe names is therefore resolved only under the tracked code root - no
-# absolute path, no upward traversal, no symlink out - and an entry naming a
-# target outside it is inadmissible rather than executed. Without that, "this
+# absolute path, no upward traversal, and no symlinked target at all, wherever it
+# points, because what a symlink resolves to is not what this register audited -
+# and an entry naming one is inadmissible rather than executed. Without that, "this
 # repository owns every one of them" would be a hope rather than a property, and
 # the cost argument for running typed probes at session start would not hold.
 #
@@ -1092,12 +1093,29 @@ REFUSED_KEYS=
 REQUIRED_KEYS=
 SCHEMA_PATH=
 SCHEMA_READ=0
+# Which probe args are PATHS, derived from the schema rather than restated here.
+# A second list in this file would go quietly vacuous the day a kind is added
+# with an arg named script, path or binary - the measured failure shape this
+# whole register was built from, reproduced inside the guard against it. The
+# schema marks each path-bearing arg with probe_bounds.typed_probe_targets
+# .arg_marker, and that marker is read from the schema too, so nothing about the
+# set lives in this script.
+PROBE_PATH_KEYS=
 read_schema() {
   [ "$SCHEMA_READ" -eq 0 ] || return 0
-  local path="$REG_DIR/schema.json"
+  local path="$REG_DIR/schema.json" marker
   [ -r "$path" ] || return 1
   jq -e '.commitment_schema_version and .required and .refused_keys
          and .assurance_tiers and .required_by_assurance' "$path" >/dev/null 2>&1 || return 1
+  marker=$(jq -r '.probe_bounds.typed_probe_targets.arg_marker // ""' "$path" 2>/dev/null) || marker=
+  [ -n "$marker" ] || return 1
+  PROBE_PATH_KEYS=$(jq -r --arg m "$marker" '
+    [ (.probe_kinds // {}) | to_entries[] | (.value.args // {}) | to_entries[]
+      | select(((.value | type) == "string") and (.value | contains($m)))
+      | .key ] | unique | .[]' "$path" 2>/dev/null) || PROBE_PATH_KEYS=
+  # A derivation that found nothing is a vacuous guard, and a vacuous guard here
+  # would admit an unconstrained target. Refuse the schema instead.
+  [ -n "$PROBE_PATH_KEYS" ] || return 1
   REFUSED_KEYS=$(jq -r '.refused_keys[]' "$path")
   REQUIRED_KEYS=$(jq -r '.required | keys[]' "$path")
   SCHEMA_PATH=$path
@@ -1158,19 +1176,17 @@ EOF
       || { printf 'entry declares no probe; an entry without one cannot be admitted'; return 0; }
   fi
   # Every path field a probe kind can carry, refused HERE rather than only inside
-  # each kind, so the entry is reported inadmissible before anything is run and a
-  # kind added later inherits the constraint by naming one of these fields. The
-  # field names are what is enumerated, not the kinds, because the target is the
-  # thing being constrained. See probe_target_fault above for why.
+  # each kind, so the entry is reported inadmissible before anything is run. The
+  # set comes from the schema (see PROBE_PATH_KEYS above), so a kind added later
+  # is constrained the moment its arg description carries the marker rather than
+  # the moment someone remembers to edit this file.
   while IFS= read -r key; do
     [ -n "$key" ] || continue
     got=$(printf '%s' "$doc" | jq -r --arg k "$key" '.probe[$k] // ""' 2>/dev/null) || got=
     fault=$(probe_target_fault "probe.$key" "$got")
     [ -z "$fault" ] || { printf 'inadmissible probe target: %s' "$fault"; return 0; }
   done <<EOF
-command
-test
-defined_in
+$PROBE_PATH_KEYS
 EOF
   # unobserved_conditions is the only field that can WITHHOLD satisfaction, so a
   # malformed one is the one malformation that would let a passing probe retire a
@@ -1249,7 +1265,7 @@ if [ "$MODE" != closes ]; then
   collect_dir "$REG_DIR" 1
   [ -n "$REGISTER_FAULT" ] || collect_dir "$HOME_REG_DIR" 0
   if [ -z "$REGISTER_FAULT" ] && [ "${#ENTRY_IDS[@]}" -gt 0 ] && ! read_schema; then
-    REGISTER_FAULT="$REG_DIR/schema.json is missing or unreadable, so no entry could be validated"
+    REGISTER_FAULT="$REG_DIR/schema.json is missing, unreadable, or marks no probe arg as a path, so no entry could be validated"
   fi
   # --open does not need the decision inventory either: it deliberately leaves
   # discovered probes to the open-decision fold rather than adding a second

@@ -198,8 +198,9 @@ There are two kinds of probe here and they are not the same question, so they do
 The register's own typed probes are a closed set this repository owns, can audit, and bounds at 10 seconds, so running one is a cost decision.
 A decision file's `run:` is arbitrary text written by whoever authored a ruling and executed by `bash -c` inside a task worktree, so running one is a trust decision.
 
-The probe kinds are closed but their targets are not, so every path a typed probe names - `command`, `test`, `defined_in` - is resolved only under the tracked code root.
-An absolute path is refused verbatim, upward traversal is refused, and a target that leaves the root by symlink is refused; a refused target makes the entry inadmissible and is reported, never silently skipped and never a pass.
+The probe kinds are closed but their targets are not, so every path a typed probe names is resolved only under the tracked code root.
+Which args are paths is derived from `commitments/schema.json`, which marks each one, rather than restated in the script where a second list could go vacuous the day a kind is added.
+An absolute path is refused verbatim, upward traversal is refused, and a symlinked target is refused wherever it points, because what a symlink resolves to is not what the register audited; a refused target makes the entry inadmissible and is reported, never silently skipped and never a pass.
 An absent target is not refused, because an owner or test that does not exist is an observed absence rather than an unobservable one.
 That constraint is what makes running typed probes at session start a cost decision rather than a trust one, because the overlay at `data/commitments/` is gitignored and unreviewed.
 

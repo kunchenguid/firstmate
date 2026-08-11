@@ -1350,6 +1350,11 @@ EOF
 
 # --- session start executes no probe -----------------------------------------
 #
+# Read precisely, as in the register's own suite: no probe of the kind that is a
+# TRUST decision. Typed probes run here and are required to, which is what lets a
+# commitment that became real retire without a hand edit; what never runs is a
+# decision file's `run:`.
+#
 # A safety requirement, not a performance one, and it is a property of the WHOLE
 # composed chain rather than of any one script: session start's wake drain folds
 # every task's open decisions through fm-classify-lib.sh, and its admission read

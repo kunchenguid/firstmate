@@ -24,7 +24,11 @@
     "two_kinds_of_probe_are_not_one_question": "The register's own typed probes are a closed set named in probe_kinds below: this repository owns each one, can audit what it does, and bounds it at register_entry_probe_seconds, so running one is a COST decision. A decision file's run: is arbitrary text written by whoever authored a ruling and executed by bash -c inside a task worktree, so running one is a TRUST decision. They do not share a switch, because a switch that answered the trust question would silence the cost one too.",
     "session_start_runs_typed_probes_and_no_decision_run": "bin/fm-session-start.sh sets FM_COMMITMENT_NO_DECISION_RUN=1 on exactly the two calls that reach the open-decision fold - its wake drain and its admission read, the latter through fm-fleet-snapshot.sh - and on nothing else, so no ruling author's run: text executes on the critical path of a session. It is deliberately not exported, because session start's subtree relaunches secondmates through bin/fm-spawn.sh, which scrubs no environment. The typed probes keep running there, which is what lets an entry whose commitment became real retire with no hand edit rather than printing forever. A criterion whose run: was not executed answers could-not-observe and no stored verdict stands in for it, so the resolution stays visibly unverified and still open: not running is never accepting.",
     "what_this_supersedes": "The rule was first accepted in the blanket form \"SESSION START MUST EXECUTE NO PROBE - session start may report RECORDED state; it may never execute a probe to find out.\" Built that way it defeated the criterion it shares a page with: with no probe running, nothing at session start is ever SATISFIED, so every registered entry prints a could-not-observe line forever and never retires when its commitment becomes real - the cry-wolf outcome the safety rule exists to prevent, since a session start that always shouts is one that gets turned off. The rule is therefore narrowed to its hazard, decision-file run: EXECUTION only. Typed probes remain permitted at session start precisely because typed_probe_targets constrains what they may run; if that constraint is relaxed, this permission has to be reconsidered with it. This supersession is recorded rather than quietly rewritten because the reasoning is the part worth inheriting.",
-    "typed_probe_targets": "Every path a typed probe names - command, test, defined_in - is resolved ONLY under the tracked code root. An absolute path is refused verbatim, upward traversal is refused, and a target that resolves outside the root by symlink is refused; a refused target makes the entry INADMISSIBLE and is reported, never silently skipped and never a pass. The probe KINDS are a closed set this repository owns, but the TARGETS come out of the entry's own JSON and an entry can arrive from the gitignored data/commitments/ overlay, so without this one unreviewed file could name any absolute executable and have it run on the critical path of every session. An ABSENT target is not refused: an owner or test that does not exist is an observed absence, which is the answer its probe kind already gives it."
+    "typed_probe_targets": {
+      "rule": "Every path a typed probe names is resolved ONLY under the tracked code root. An absolute path is refused verbatim, upward traversal is refused, and a symlinked target is refused wherever it points - what a symlink resolves to is not what this register audited, so being inside the root does not save it. A refused target makes the entry INADMISSIBLE and is reported, never silently skipped and never a pass. The probe KINDS are a closed set this repository owns, but the TARGETS come out of the entry's own JSON and an entry can arrive from the gitignored data/commitments/ overlay, so without this one unreviewed file could name any absolute executable and have it run on the critical path of every session. An ABSENT target is not refused: an owner or test that does not exist is an observed absence, which is the answer its probe kind already gives it.",
+      "arg_marker": "resolved only under the tracked code root",
+      "which_args_are_paths_is_derived_here": "bin/fm-commitment-register.sh reads arg_marker from this object and treats every probe_kinds arg whose description contains it as a path-bearing field. The set is therefore DERIVED from this contract rather than restated in the script, so a probe kind added with an arg named script, path or binary is constrained the moment its description carries the marker, and no second list can go quietly vacuous the day a kind is added. A schema that defines no marker, or whose marker matches no arg, is refused as unreadable rather than admitting entries with an unconstrained target: a guard derived from nothing would be the vacuous list this rule exists to prevent."
+    }
   },
   "required": {
     "commitment_schema_version": "must equal this file's commitment_schema_version",
@@ -81,7 +85,7 @@
     },
     "command_answers": {
       "args": {
-        "command": "path relative to the firstmate code root, and resolved only under it; see typed_probe_targets",
+        "command": "path relative to the firstmate code root, resolved only under the tracked code root; see probe_bounds.typed_probe_targets",
         "args": "optional array of literal arguments; never a shell string"
       },
       "pass_when": "the command exists, is executable, exits 0, and prints something",
@@ -90,7 +94,7 @@
     },
     "command_answer_matches": {
       "args": {
-        "command": "path relative to the firstmate code root, and resolved only under it; see typed_probe_targets",
+        "command": "path relative to the firstmate code root, resolved only under the tracked code root; see probe_bounds.typed_probe_targets",
         "args": "optional array of literal arguments; never a shell string",
         "jq": "a jq filter over the command's JSON answer that must produce exactly true or false. A filter, not a command: the tracked register ships to every home and must never become a shell-execution seam."
       },
@@ -101,7 +105,7 @@
     },
     "test_passes": {
       "args": {
-        "test": "path to the test, relative to the code root, and resolved only under it; see typed_probe_targets",
+        "test": "path to the test, relative to the code root, resolved only under the tracked code root; see probe_bounds.typed_probe_targets",
         "args": "optional array of literal arguments"
       },
       "pass_when": "the named test exists and passes now",
@@ -111,7 +115,7 @@
     "symbol_called": {
       "args": {
         "symbol": "shell function name",
-        "defined_in": "path relative to the code root that defines it, and resolved only under it; see typed_probe_targets"
+        "defined_in": "path relative to the code root that defines it, resolved only under the tracked code root; see probe_bounds.typed_probe_targets"
       },
       "pass_when": "at least one file under bin/ other than defined_in CALLS the symbol - it appears at a command position on a line that is not a comment",
       "fail_when": "no file under bin/ other than defined_in calls it - a guard with no runtime caller",

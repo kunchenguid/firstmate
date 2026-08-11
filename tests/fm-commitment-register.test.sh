@@ -1363,6 +1363,90 @@ JSON
   pass "a typed probe target outside the tracked code root is refused"
 }
 
+# WHICH args are paths is the list that would go vacuous. Enumerating it in the
+# script would reproduce the measured failure shape this register was built from,
+# inside the guard against it: a kind added later with an arg named script, path
+# or binary would bypass the entry-level check entirely. So the set is derived
+# from the schema, and this case drives that derivation rather than trusting it.
+path_bearing_probe_fields_are_derived_from_the_schema() {
+  local dir home out rc marker from_schema from_code state
+  local REG_ROOT
+  dir=$(make_register derivedkeys)
+  home=$(make_home derivedkeys)
+  REG_ROOT=$(make_code_root derivedkeys)
+  cat > "$REG_ROOT/owner.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'enforced\n'
+SH
+  chmod +x "$REG_ROOT/owner.sh"
+
+  marker=$(jq -r '.probe_bounds.typed_probe_targets.arg_marker // ""' "$SCHEMA_SRC" 2>/dev/null)
+  [ -n "$marker" ] \
+    || fail "the schema defines no arg_marker, so the interpreter has nothing to derive the path fields from"
+  from_schema=$(jq -r --arg m "$marker" '
+    [ (.probe_kinds // {}) | to_entries[] | (.value.args // {}) | to_entries[]
+      | select(((.value | type) == "string") and (.value | contains($m)))
+      | .key ] | unique | .[]' "$SCHEMA_SRC" | sort -u)
+  [ -n "$from_schema" ] || fail "the marker matches no probe arg, so the derived guard would be vacuous"
+
+  # Every field the probes themselves resolve must be one the schema marks, and
+  # the other way round: two lists that can disagree are two lists.
+  from_code=$(grep -v '^[[:space:]]*#' "$REG" \
+    | grep -oE '\$\(probe_target_fault [a-z_]+ "' | awk '{ print $2 }' | sort -u)
+  [ "$from_schema" = "$from_code" ] \
+    || fail "the schema marks these args as paths:
+$from_schema
+and the probes resolve these:
+$from_code
+the two must not drift"
+
+  # The derivation is live: an arg name this script has never heard of is
+  # constrained the moment the schema marks it, with no edit to the script.
+  jq --arg m "$marker" \
+    '.probe_kinds.command_answers.args.script = ("an extra path arg for this fixture, " + $m)' \
+    "$SCHEMA_SRC" > "$dir/schema.json"
+  cat > "$dir/extra-arg.json" <<'JSON'
+{
+  "commitment_schema_version": 1,
+  "id": "extra-arg",
+  "recorded": "the declared owner performs this commitment",
+  "authority": "tests/fm-commitment-register.test.sh",
+  "unmet_state": "RULED-NOT-ENFORCED",
+  "satisfied_when": "the declared owner exists and answers",
+  "assurance": "executable",
+  "probe": {"kind": "command_answers", "command": "owner.sh", "script": "/bin/echo"}
+}
+JSON
+  out=$(run_reg "$dir" "$home" --json)
+  state=$(printf '%s' "$out" | jq -r '.entries[] | select(.id=="extra-arg") | .state')
+  [ "$state" = UNOBSERVED ] \
+    || fail "an arg the schema marks as a path was not constrained, so the derivation is decorative (got $state)"
+  assert_contains "$out" "probe.script" \
+    "the refusal must name the field the schema marked, not one the script happens to know"
+
+  # And a schema that marks nothing is refused outright rather than admitting an
+  # entry whose target nothing constrains: a guard derived from nothing is the
+  # vacuous list this whole derivation exists to prevent.
+  rm -f "$dir/extra-arg.json"
+  jq 'del(.probe_bounds.typed_probe_targets.arg_marker)' "$SCHEMA_SRC" > "$dir/schema.json"
+  write_owner_entry "$dir" plain owner.sh
+  out=$(run_reg "$dir" "$home" --open); rc=$?
+  expect_code 4 "$rc" "a schema that marks no path arg must be could-not-observe, never a quiet pass"
+  assert_contains "$out" "COMMITMENT: register unreadable" \
+    "a schema the interpreter cannot derive the path fields from must be reported as unreadable"
+  assert_contains "$out" "marks no probe arg as a path" \
+    "the fault must say which part of the contract is missing"
+
+  # The control: restore the shipped schema and the same entry is admitted and
+  # evaluated, so the refusals above are about the contract, not about the entry.
+  cp "$SCHEMA_SRC" "$dir/schema.json"
+  out=$(run_reg "$dir" "$home" --json)
+  state=$(printf '%s' "$out" | jq -r '.entries[] | select(.id=="plain") | .state')
+  [ "$state" = SATISFIED ] \
+    || fail "control: with the shipped schema the same entry must be admitted and pass (got $state)"
+  pass "which probe args are paths is derived from the schema, never restated in the script"
+}
+
 absolute_path_target_is_refused_verbatim() {
   local dir home out state absolute
   local REG_ROOT
@@ -1580,6 +1664,7 @@ typed_probe_pass_retires_the_entry_under_the_guard
 decision_probe_bound_matches_the_documented_value
 timed_out_probe_is_reported_as_a_timeout
 typed_probe_target_outside_the_code_root_is_refused
+path_bearing_probe_fields_are_derived_from_the_schema
 absolute_path_target_is_refused_verbatim
 malformed_unobserved_conditions_is_inadmissible
 symbol_called_does_not_count_a_mention
