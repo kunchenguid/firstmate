@@ -233,6 +233,24 @@ function sleep(milliseconds) {
   return new Promise((resolveSleep) => setTimeout(resolveSleep, milliseconds));
 }
 
+function parseOwnerRecord(raw) {
+  const [token, pidText] = raw.split("\n");
+  if (!token || !pidText || !/^[0-9]+$/.test(pidText)) return undefined;
+  return { token, pid: Number(pidText) };
+}
+
+function ownerProcessIsAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    // ESRCH means no process with this PID exists, so the holder is dead.
+    // Any other outcome (EPERM, etc.) is treated as alive: unverifiable
+    // liveness must never be used to justify reclaiming the lock.
+    return !(error && error.code === "ESRCH");
+  }
+}
+
 async function reclaimLockIfStale(lockPath) {
   let entry;
   try {
@@ -242,8 +260,18 @@ async function reclaimLockIfStale(lockPath) {
   }
   if (!entry.isDirectory() || entry.isSymbolicLink()) return;
   if (Date.now() - entry.mtimeMs < LOCK_STALE_MS) return;
-  // The lock's holder is presumed dead (crash/SIGKILL never ran the finally
-  // handler that removes it); an EEXIST-blocked mkdir below reclaims it.
+
+  let raw;
+  try {
+    raw = await readFile(`${lockPath}/owner`, "utf8");
+  } catch {
+    return;
+  }
+  const record = parseOwnerRecord(raw);
+  // A malformed or missing owner record can't be verified dead, so it is
+  // never reclaimed by age alone.
+  if (!record || ownerProcessIsAlive(record.pid)) return;
+
   await rm(lockPath, { recursive: true, force: true }).catch(() => {});
 }
 
@@ -252,7 +280,7 @@ async function createLock(paths) {
   await chmod(paths.lock, 0o700);
   const token = randomUUID();
   try {
-    await writeFile(`${paths.lock}/owner`, token, { encoding: "utf8", flag: "wx", mode: 0o600 });
+    await writeFile(`${paths.lock}/owner`, `${token}\n${process.pid}`, { encoding: "utf8", flag: "wx", mode: 0o600 });
   } catch (error) {
     await rm(paths.lock, { recursive: true, force: true }).catch(() => {});
     throw error;
@@ -285,15 +313,16 @@ async function acquireLock(paths, create) {
 }
 
 async function releaseLock(lockPath, token) {
-  let owner;
+  let raw;
   try {
-    owner = await readFile(`${lockPath}/owner`, "utf8");
+    raw = await readFile(`${lockPath}/owner`, "utf8");
   } catch {
     return;
   }
   // Only the process whose token still matches the on-disk owner may remove
   // the lock: a reclaimed-as-stale lock may already belong to a new holder.
-  if (owner !== token) return;
+  const record = parseOwnerRecord(raw);
+  if (!record || record.token !== token) return;
   await rm(lockPath, { recursive: true, force: true }).catch(() => {});
 }
 

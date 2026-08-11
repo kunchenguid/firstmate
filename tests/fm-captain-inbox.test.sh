@@ -22,7 +22,7 @@ fi
 
 out=$(EXT="$EXT" CLI="$CLI" OPERATIONAL_INPUT="$OPERATIONAL_INPUT" TMP_ROOT="$TMP_ROOT" node --input-type=module 2>&1 <<'JS'
 import assert from "node:assert/strict";
-import { execFile as execFileCallback, execFileSync } from "node:child_process";
+import { execFile as execFileCallback, execFileSync, spawn } from "node:child_process";
 import { chmod, lstat, mkdir, readFile, utimes, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { promisify } from "node:util";
@@ -211,36 +211,64 @@ assert.equal(inbox.messages.length, 100, "retention did not keep the conservativ
 assert.equal(inbox.messages.some((message) => message.id === firstId), false, "retention kept the oldest record");
 assert.equal(inbox.messages.some((message) => message.body === body), false, "retention retained a pruned response body");
 
-const staleLock = await makeHome("stale-lock");
-const staleLockDirectory = `${staleLock}/state/captain-inbox/v1`;
-await mkdir(staleLockDirectory, { recursive: true, mode: 0o700 });
-await chmod(`${staleLock}/state/captain-inbox`, 0o700);
-await chmod(staleLockDirectory, 0o700);
-await writeFile(`${staleLockDirectory}/messages.json`, '{"version":1,"messages":[]}\n', { mode: 0o600 });
-await writeFile(`${staleLockDirectory}/read-state.json`, '{"version":1,"states":{}}\n', { mode: 0o600 });
-await mkdir(`${staleLockDirectory}/.lock`, { mode: 0o700 });
-await writeFile(`${staleLockDirectory}/.lock/owner`, "stale-owner-token", { mode: 0o600 });
-const staleTimestamp = new Date(Date.now() - 10 * 60 * 1000);
-await utimes(`${staleLockDirectory}/.lock`, staleTimestamp, staleTimestamp);
+async function makeLockedInboxHome(name, { ownerContent, ageMs } = {}) {
+  const home = await makeHome(name);
+  const directory = `${home}/state/captain-inbox/v1`;
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  await chmod(`${home}/state/captain-inbox`, 0o700);
+  await chmod(directory, 0o700);
+  await writeFile(`${directory}/messages.json`, '{"version":1,"messages":[]}\n', { mode: 0o600 });
+  await writeFile(`${directory}/read-state.json`, '{"version":1,"states":{}}\n', { mode: 0o600 });
+  const lockDirectory = `${directory}/.lock`;
+  await mkdir(lockDirectory, { mode: 0o700 });
+  if (ownerContent !== undefined) {
+    await writeFile(`${lockDirectory}/owner`, ownerContent, { mode: 0o600 });
+  }
+  if (ageMs !== undefined) {
+    const backdated = new Date(Date.now() - ageMs);
+    await utimes(lockDirectory, backdated, backdated);
+  }
+  return { home, lockDirectory };
+}
 
+async function exitedPid() {
+  const child = spawn(process.execPath, ["-e", "process.exit(0)"]);
+  return new Promise((resolveExit, reject) => {
+    child.on("exit", () => resolveExit(child.pid));
+    child.on("error", reject);
+  });
+}
+
+const staleAgeMs = 10 * 60 * 1000;
+const deadOwnerPid = await exitedPid();
+
+const staleDead = await makeLockedInboxHome("stale-lock-dead-owner", {
+  ownerContent: `dead-owner-token\n${deadOwnerPid}`,
+  ageMs: staleAgeMs,
+});
 const staleListStart = Date.now();
-const staleInbox = await list(staleLock);
+const staleInbox = await list(staleDead.home);
 const staleListElapsed = Date.now() - staleListStart;
 assert.equal(staleInbox.messages.length, 0, "stale-lock reclaim returned unexpected messages");
-assert.ok(staleListElapsed < 2000, `stale lock was not reclaimed promptly (took ${staleListElapsed}ms)`);
-assert.equal(existsSync(`${staleLockDirectory}/.lock`), false, "stale lock directory was left behind after reclaim");
+assert.ok(staleListElapsed < 2000, `stale lock with a dead owner was not reclaimed promptly (took ${staleListElapsed}ms)`);
+assert.equal(existsSync(staleDead.lockDirectory), false, "stale lock directory with a dead owner was left behind after reclaim");
 
-const liveLock = await makeHome("live-lock");
-const liveLockDirectory = `${liveLock}/state/captain-inbox/v1`;
-await mkdir(liveLockDirectory, { recursive: true, mode: 0o700 });
-await chmod(`${liveLock}/state/captain-inbox`, 0o700);
-await chmod(liveLockDirectory, 0o700);
-await writeFile(`${liveLockDirectory}/messages.json`, '{"version":1,"messages":[]}\n', { mode: 0o600 });
-await writeFile(`${liveLockDirectory}/read-state.json`, '{"version":1,"states":{}}\n', { mode: 0o600 });
-await mkdir(`${liveLockDirectory}/.lock`, { mode: 0o700 });
-await writeFile(`${liveLockDirectory}/.lock/owner`, "a-live-holder-token", { mode: 0o600 });
-await expectCliFailure(liveLock, ["list"], /busy/);
-assert.equal(await readFile(`${liveLockDirectory}/.lock/owner`, "utf8"), "a-live-holder-token", "a fresh (non-stale) lock was reclaimed or its ownership token was disturbed");
+const staleAliveOwnerContent = `alive-owner-token\n${process.pid}`;
+const staleAlive = await makeLockedInboxHome("stale-lock-alive-owner", {
+  ownerContent: staleAliveOwnerContent,
+  ageMs: staleAgeMs,
+});
+await expectCliFailure(staleAlive.home, ["list"], /busy/);
+assert.equal(await readFile(`${staleAlive.lockDirectory}/owner`, "utf8"), staleAliveOwnerContent, "a stale lock whose owner process is still alive was reclaimed");
+
+const staleUnverifiable = await makeLockedInboxHome("stale-lock-no-owner-record", { ageMs: staleAgeMs });
+await expectCliFailure(staleUnverifiable.home, ["list"], /busy/);
+assert.equal(existsSync(staleUnverifiable.lockDirectory), true, "a stale lock with no verifiable owner record was reclaimed");
+
+const liveLockOwnerContent = "a-live-holder-token\n1";
+const liveLock = await makeLockedInboxHome("live-lock", { ownerContent: liveLockOwnerContent });
+await expectCliFailure(liveLock.home, ["list"], /busy/);
+assert.equal(await readFile(`${liveLock.lockDirectory}/owner`, "utf8"), liveLockOwnerContent, "a fresh (non-stale) lock was reclaimed or its ownership token was disturbed");
 
 const malformed = await makeHome("malformed");
 await mkdir(`${malformed}/state/captain-inbox/v1`, { recursive: true });
