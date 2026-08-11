@@ -141,10 +141,14 @@ ensure_map() {
 resolve_skill() {  # <name>; prints canonical path
   local name=$1 matches count path
   matches=$(awk -v n="$name" '
+    BEGIN { separator = " — " }
     /^- / {
       line = substr($0, 3)
-      count = split(line, parts, " — ")
-      if (count >= 3 && parts[1] == n) print parts[count]
+      first = index(line, separator)
+      if (first == 0 || substr(line, 1, first - 1) != n) next
+      remainder = substr(line, first + length(separator))
+      second = index(remainder, separator)
+      if (second > 0) print substr(remainder, second + length(separator))
     }
   ' "$MAP")
   count=$(printf '%s\n' "$matches" | sed '/^$/d' | wc -l | tr -d ' ')

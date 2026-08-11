@@ -94,7 +94,7 @@ test_skill_map_generates_flat_deduped_registry() {
 }
 
 test_skill_compose_reconciles_symlink_set_and_removes() {
-  local home="$TMP_ROOT/compose-home" source="$TMP_ROOT/canonical" add_dir skills_dir alpha_real beta_real first_target second_target
+  local home="$TMP_ROOT/compose-home" source="$TMP_ROOT/canonical — source" add_dir skills_dir alpha_real beta_real first_target second_target
   mkdir -p "$home/data"
   write_skill "$source/alpha" alpha plain
   write_skill "$source/beta" beta plain
@@ -116,6 +116,7 @@ EOF
   [ -L "$skills_dir/beta" ] || fail "beta was not composed as a symlink"
   [ "$(readlink_real "$skills_dir/alpha")" = "$alpha_real" ] || fail "alpha symlink does not point at canonical source"
   [ "$(readlink_real "$skills_dir/beta")" = "$beta_real" ] || fail "beta symlink does not point at canonical source"
+  [ "$(readlink "$skills_dir/alpha")" = "$alpha_real" ] || fail "map delimiter in canonical path was not preserved"
   [ -f "$skills_dir/alpha/SKILL.md" ] || fail "composed alpha skill is not loadable through the symlink"
 
   first_target=$(readlink "$skills_dir/alpha")
