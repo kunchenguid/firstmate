@@ -415,6 +415,7 @@ run_delegate() { # <home> <reply-mode> <timeout> <id>...
     FM_DELEGATE_REPLY_MODE="$reply_mode" \
     FM_SEND_SETTLE=0 \
     FM_STOW_CASCADE_TIMEOUT="$timeout" \
+    FM_GATE_REFUSE_BYPASS=1 \
     "$DELEGATE" "$@" 2>/dev/null
 }
 
