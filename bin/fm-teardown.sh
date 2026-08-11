@@ -571,12 +571,99 @@ teardown_backend_endpoint() {
   esac
 }
 
+teardown_file_inode() {
+  if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
+    stat -f '%i' "$1" 2>/dev/null
+  else
+    stat -c '%i' "$1" 2>/dev/null
+  fi
+}
+
+teardown_file_digest() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" 2>/dev/null | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" 2>/dev/null | awk '{print $1}'
+  else
+    return 1
+  fi
+}
+
+teardown_grok_real_directory() {
+  local path=$1 parent
+  case "$path" in
+    /*) ;;
+    *) return 1 ;;
+  esac
+  [ -d "$path" ] && [ ! -L "$path" ] || return 1
+  [ "$path" = / ] && return 0
+  parent=${path%/*}
+  [ -n "$parent" ] || parent=/
+  teardown_grok_real_directory "$parent"
+}
+
+teardown_grok_registry_read() {
+  local state_dir=$1 id=$2 file line token= dir= inode= digest= count=0
+  local state_real auth_file actual_inode actual_digest
+  file="$state_dir/$id.grok-turnend-token"
+  [ -f "$file" ] && [ ! -L "$file" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    count=$((count + 1))
+    case "$line" in
+      token=*) [ -z "$token" ] || return 1; token=${line#token=} ;;
+      dir=*) [ -z "$dir" ] || return 1; dir=${line#dir=} ;;
+      inode=*) [ -z "$inode" ] || return 1; inode=${line#inode=} ;;
+      digest=*) [ -z "$digest" ] || return 1; digest=${line#digest=} ;;
+      *) return 1 ;;
+    esac
+  done < "$file" || return 1
+  [ "$count" = 4 ] || return 1
+  case "$token" in
+    fm.????????????) ;;
+    *) return 1 ;;
+  esac
+  case "$token" in *[!A-Za-z0-9._-]*) return 1 ;; esac
+  case "$dir" in
+    /*) ;;
+    *) return 1 ;;
+  esac
+  case "$dir" in *$'\n'*|*$'\r'*) return 1 ;; esac
+  case "$inode" in ''|*[!0-9]*) return 1 ;; esac
+  [ "${#digest}" = 64 ] || return 1
+  case "$digest" in *[!0-9a-f]*) return 1 ;; esac
+  teardown_grok_real_directory "$dir" || return 1
+  auth_file="$dir/$token"
+  [ -f "$auth_file" ] && [ ! -L "$auth_file" ] || return 1
+  actual_inode=$(teardown_file_inode "$auth_file") || return 1
+  [ "$actual_inode" = "$inode" ] || return 1
+  actual_digest=$(teardown_file_digest "$auth_file") || return 1
+  [ "$actual_digest" = "$digest" ] || return 1
+  state_real=$(cd "$state_dir" && pwd -P) || return 1
+  printf '%s\n' "$state_real/$id.turn-ended" | cmp -s - "$auth_file" || return 1
+  GROK_REGISTRY_TOKEN=$token
+  GROK_REGISTRY_AUTH_DIR=$dir
+  GROK_REGISTRY_AUTH_FILE=$auth_file
+}
+
+teardown_grok_pointer_valid() {
+  local worktree=$1 state_dir=$2 id=$3 pointer
+  pointer="$worktree/.fm-grok-turnend"
+  if [ ! -e "$pointer" ] && [ ! -L "$pointer" ]; then
+    return 0
+  fi
+  [ -f "$pointer" ] && [ ! -L "$pointer" ] || return 1
+  teardown_grok_registry_read "$state_dir" "$id" || return 1
+  printf 'token=%s\n' "$GROK_REGISTRY_TOKEN" | cmp -s - "$pointer"
+}
+
 remove_grok_turnend_auth() {
-  local state_dir=$1 id=$2 token hooks_dir
-  token=$(cat "$state_dir/$id.grok-turnend-token" 2>/dev/null || true)
-  case "$token" in ''|*[!A-Za-z0-9._-]*) return 0 ;; esac
-  hooks_dir="${GROK_HOME:-$HOME/.grok}/hooks/fm-turn-end.d"
-  rm -f "$hooks_dir/$token"
+  local state_dir=$1 id=$2 file
+  file="$state_dir/$id.grok-turnend-token"
+  if [ ! -e "$file" ] && [ ! -L "$file" ]; then
+    return 0
+  fi
+  teardown_grok_registry_read "$state_dir" "$id" || return 1
+  rm -f -- "$GROK_REGISTRY_AUTH_FILE"
 }
 
 validate_pr_poll_cleanup() {
@@ -1264,6 +1351,12 @@ cleanup_firstmate_home_children() {
     child_retire_source=
     child_resolved_handoff=0
     child_slot_retain_verdict=
+    if [ -n "$child_wt" ] && [ "$child_slot_returned" != 1 ]; then
+      teardown_grok_pointer_valid "$child_wt" "$sub_state" "$child_id" || {
+        echo "REFUSED: child $child_id has an unsafe Grok turn-end pointer; preserving child state" >&2
+        return 1
+      }
+    fi
     if [ "$child_kind" = secondmate ]; then
       child_home=$(meta_value "$child_meta" home)
       [ -n "$child_home" ] || child_home=$child_wt
@@ -1336,7 +1429,8 @@ cleanup_firstmate_home_children() {
           child_slot_retain_verdict=$TEARDOWN_SLOT_RETAIN_VERDICT
           fm_slot_lock_release "$child_slot_lock_path" || true
         else
-          rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" "$child_wt/.fm-grok-turnend"
+          rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js"
+          [ ! -e "$child_wt/.fm-grok-turnend" ] || rm -f -- "$child_wt/.fm-grok-turnend"
           teardown_meta_mark_slot_returning "$child_meta" || {
             fm_slot_lock_release "$child_slot_lock_path" || true
             echo "error: could not record pending return for child worktree $child_wt; preserving child state" >&2
@@ -1365,7 +1459,10 @@ cleanup_firstmate_home_children() {
         child_slot_retain_verdict=$TEARDOWN_SLOT_RETAIN_VERDICT
       fi
     fi
-    remove_grok_turnend_auth "$sub_state" "$child_id"
+    remove_grok_turnend_auth "$sub_state" "$child_id" || {
+      echo "REFUSED: could not prove child $child_id Grok registry ownership; preserving child state" >&2
+      return 1
+    }
     remove_pr_poll_artifacts "$sub_state" "$child_id" || return 1
     if [ -n "$child_slot_retain_verdict" ]; then
       teardown_meta_backup_create "$child_meta" || {
@@ -1675,9 +1772,14 @@ if [ "$KIND" != secondmate ] \
       exit 1
     }
   elif [ -d "$WT" ]; then
+    teardown_grok_pointer_valid "$WT" "$STATE" "$ID" || {
+      echo "REFUSED: task $ID has an unsafe Grok turn-end pointer; preserving task state and worktree" >&2
+      exit 1
+    }
     TOP_TASK_BRANCH=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
     # Remove our hook file so a reused pool worktree cannot fire signals for a dead task.
-    rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" "$WT/.fm-grok-turnend"
+    rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js"
+    [ ! -e "$WT/.fm-grok-turnend" ] || rm -f -- "$WT/.fm-grok-turnend"
     teardown_meta_mark_slot_returning "$META" || {
       echo "error: could not record pending return for worktree $WT; preserving task state" >&2
       exit 1
@@ -1716,7 +1818,10 @@ if [ "$KIND" = secondmate ]; then
   fi
   remove_secondmate_registry_entry "$ID"
 fi
-remove_grok_turnend_auth "$STATE" "$ID"
+remove_grok_turnend_auth "$STATE" "$ID" || {
+  echo "REFUSED: could not prove task $ID Grok registry ownership; preserving task state" >&2
+  exit 1
+}
 # Remove the per-task temp root recorded by spawn.
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
 [ -n "$TASK_TMP_CLEANUP" ] && rm -rf -- "$TASK_TMP_CLEANUP"

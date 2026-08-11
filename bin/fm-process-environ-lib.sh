@@ -1,16 +1,18 @@
 #!/usr/bin/env bash
 
+case "${_FM_PROCESS_ENVIRON_SUPPORTED_CACHE:-}" in
+  0|1) ;;
+  *)
+    if [ "$(uname -s 2>/dev/null)" = Linux ] && [ -d /proc ]; then
+      _FM_PROCESS_ENVIRON_SUPPORTED_CACHE=1
+    else
+      _FM_PROCESS_ENVIRON_SUPPORTED_CACHE=0
+    fi
+    ;;
+esac
+
 fm_process_environ_supported() {
-  case "${_FM_PROCESS_ENVIRON_SUPPORTED_CACHE:-}" in
-    1) return 0 ;;
-    0) return 1 ;;
-  esac
-  if [ "$(uname -s 2>/dev/null)" = Linux ] && [ -d /proc ]; then
-    _FM_PROCESS_ENVIRON_SUPPORTED_CACHE=1
-  else
-    _FM_PROCESS_ENVIRON_SUPPORTED_CACHE=0
-  fi
-  [ "$_FM_PROCESS_ENVIRON_SUPPORTED_CACHE" = 1 ]
+  [ "${_FM_PROCESS_ENVIRON_SUPPORTED_CACHE:-0}" = 1 ]
 }
 
 fm_process_environ() {

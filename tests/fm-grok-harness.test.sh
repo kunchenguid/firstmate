@@ -113,11 +113,9 @@ make_spawn_case() {
   git -C "$home" add AGENTS.md
   git -C "$home" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm agents
   cp -a "$ROOT/bin" "$runtime/"
-  if [ -n "${NO_MISTAKES_GATE:-}" ]; then
-    cat >> "$runtime/bin/fm-agent-cwd-lib.sh" <<'SH'
+  cat >> "$runtime/bin/fm-agent-cwd-lib.sh" <<'SH'
 fm_agent_worktree_process_census() { return 1; }
 SH
-  fi
   ln -s "$runtime/bin" "$home/bin"
   printf 'brief\n' > "$home/data/$id/brief.md"
   printf 'root=%s\ntoken=grok-%s\n' "$home" "$name" > "$home/state/.primary-attestation"
@@ -132,7 +130,7 @@ run_grok_spawn() {
   token=$(awk -F= '$1 == "token" {print substr($0, index($0, "=") + 1); exit}' "$home/state/.primary-attestation")
   (
     cd "$home" || exit 1
-    env -u NO_MISTAKES_GATE FM_ROOT_OVERRIDE="$home" FM_HOME="$home" \
+    env -u NO_MISTAKES_GATE -u FM_AGENT_ROLE -u FM_AGENT_TASK -u FM_AGENT_OWNER_HOME FM_ROOT_OVERRIDE="$home" FM_HOME="$home" \
       FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
       FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
       FM_PRIMARY_ATTESTATION="$token" CODEX_THREAD_ID=grok-harness \
@@ -252,14 +250,29 @@ EOF
   status=$?
   expect_code 0 "$status" "grok spawn should succeed before teardown"
   token=$(sed -n 's/^token=//p' "$wt/.fm-grok-turnend")
+  kill -KILL "$GROK_AGENT_PID" 2>/dev/null || true
+  wait "$GROK_AGENT_PID" 2>/dev/null || true
+
+  printf 'token=fm.replaced000000\n' > "$wt/.fm-grok-turnend"
+  out=$(HOME="$home" env -u GROK_HOME -u NO_MISTAKES_GATE -u FM_AGENT_ROLE -u FM_AGENT_TASK -u FM_AGENT_OWNER_HOME FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_PRIMARY_ATTESTATION="$attestation" CODEX_THREAD_ID=grok-harness \
+    FM_FAKE_AGENT_PID="$GROK_AGENT_PID" FM_FAKE_WINDOW_NAME="fm-$id" \
+    FM_FAKE_TMUX_STATE="$home/tmux-window-name" PATH="$fakebin:$PATH" \
+    "$home/bin/fm-teardown.sh" "$id" --force 2>&1)
+  status=$?
+  expect_code 1 "$status" "grok teardown should refuse a replaced pointer"
+  assert_present "$wt/.fm-grok-turnend" "replaced grok pointer was removed"
+  assert_present "$home/state/$id.grok-turnend-token" "replaced grok pointer removed task state"
+
+  printf 'token=%s\n' "$token" > "$wt/.fm-grok-turnend"
 
   (
     cd "$home" || exit 1
-    env -u NO_MISTAKES_GATE FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    env -u GROK_HOME -u NO_MISTAKES_GATE -u FM_AGENT_ROLE -u FM_AGENT_TASK -u FM_AGENT_OWNER_HOME HOME="$home" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
       FM_PRIMARY_ATTESTATION="$attestation" CODEX_THREAD_ID=grok-harness \
       FM_FAKE_AGENT_PID="$GROK_AGENT_PID" FM_FAKE_WINDOW_NAME="fm-$id" \
       FM_FAKE_TMUX_STATE="$home/tmux-window-name" \
-      GROK_HOME="$grok_home" PATH="$fakebin:$PATH" \
+      PATH="$fakebin:$PATH" \
       "$home/bin/fm-teardown.sh" "$id" --force >/dev/null 2>&1
   ) || fail "grok teardown failed"
 

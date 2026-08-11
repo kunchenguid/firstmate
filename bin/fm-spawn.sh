@@ -258,8 +258,10 @@ SPAWN_TURNEND_CREATED=0
 SPAWN_GROK_POINTER_CREATED=0
 SPAWN_GROK_TOKEN_CREATED=0
 SPAWN_GROK_AUTH_CREATED=0
+SPAWN_GROK_AUTH_PROVISIONAL=0
 SPAWN_GROK_HOOK_CREATED=0
 SPAWN_GROK_CONFIG_CREATED=0
+SPAWN_CREATED_DIRECTORIES=()
 SPAWN_GROK_AUTH_FILE=
 SPAWN_GROK_HOOK_FILE=
 SPAWN_GROK_CONFIG_FILE=
@@ -419,7 +421,7 @@ spawn_artifact_digest() {
 }
 
 spawn_create_new_artifact() {
-  local path=$1 inode_var=$2 digest_var=$3 dir inode digest
+  local path=$1 inode_var=$2 digest_var=$3 created_var=${4:-} dir inode digest
   spawn_require_new_artifact "$path" || return 1
   dir=$(dirname -- "$path") || return 1
   [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
@@ -430,11 +432,16 @@ spawn_create_new_artifact() {
   inode=$(spawn_artifact_inode "$path") || {
     return 1
   }
-  digest=$(spawn_artifact_digest "$path") || {
+  if ! digest=$(spawn_artifact_digest "$path"); then
+    spawn_remove_unproven_artifact "$path" "$inode" || true
     return 1
-  }
+  fi
   printf -v "$inode_var" '%s' "$inode"
   printf -v "$digest_var" '%s' "$digest"
+  if [ -n "$created_var" ]; then
+    printf -v "$created_var" '%s' 1
+  fi
+  return 0
 }
 
 spawn_create_or_reuse_artifact() {
@@ -471,20 +478,32 @@ spawn_create_or_reuse_artifact() {
     return 1
   fi
   rm -f -- "$tmp"
+  inode=$(spawn_artifact_inode "$path") || return 1
+  if ! digest=$(spawn_artifact_digest "$path"); then
+    spawn_remove_unproven_artifact "$path" "$inode" || true
+    return 1
+  fi
   if [ -n "$created_var" ]; then
     printf -v "$created_var" '%s' 1
   fi
-  inode=$(spawn_artifact_inode "$path") || return 1
-  digest=$(spawn_artifact_digest "$path") || return 1
-  [ -n "$inode_var" ] && printf -v "$inode_var" '%s' "$inode"
-  [ -n "$digest_var" ] && printf -v "$digest_var" '%s' "$digest"
+  if [ -n "$inode_var" ]; then
+    printf -v "$inode_var" '%s' "$inode"
+  fi
+  if [ -n "$digest_var" ]; then
+    printf -v "$digest_var" '%s' "$digest"
+  fi
+  return 0
 }
 
 spawn_preflight_real_directory_path() {
   local path=$1 parent
   [ -n "$path" ] || return 1
   if [ -e "$path" ] || [ -L "$path" ]; then
-    [ -d "$path" ] && [ ! -L "$path" ]
+    [ -d "$path" ] && [ ! -L "$path" ] || return 1
+    [ "$path" = / ] && return 0
+    parent=$(dirname -- "$path") || return 1
+    [ "$parent" != "$path" ] || return 1
+    spawn_preflight_real_directory_path "$parent"
     return
   fi
   parent=$(dirname -- "$path") || return 1
@@ -495,14 +514,22 @@ spawn_preflight_real_directory_path() {
 spawn_ensure_real_directory_path() {
   local path=$1 parent
   if [ -e "$path" ] || [ -L "$path" ]; then
-    [ -d "$path" ] && [ ! -L "$path" ]
+    [ -d "$path" ] && [ ! -L "$path" ] || return 1
+    [ "$path" = / ] && return 0
+    parent=$(dirname -- "$path") || return 1
+    [ "$parent" != "$path" ] || return 1
+    spawn_ensure_real_directory_path "$parent"
     return
   fi
   parent=$(dirname -- "$path") || return 1
   [ "$parent" != "$path" ] || return 1
   spawn_ensure_real_directory_path "$parent" || return 1
-  mkdir "$path" 2>/dev/null || true
-  [ -d "$path" ] && [ ! -L "$path" ]
+  if mkdir "$path" 2>/dev/null; then
+    [ -d "$path" ] && [ ! -L "$path" ] || return 1
+    SPAWN_CREATED_DIRECTORIES+=("$path")
+    return 0
+  fi
+  [ -d "$path" ] && [ ! -L "$path" ] || return 1
 }
 
 spawn_artifact_matches_or_absent() {
@@ -530,6 +557,15 @@ spawn_remove_owned_artifact() {
   rm -f -- "$path"
 }
 
+spawn_remove_unproven_artifact() {
+  local path=$1 expected_inode=$2 actual_inode
+  [ -n "$path" ] && [ -n "$expected_inode" ] || return 1
+  [ -f "$path" ] && [ ! -L "$path" ] || return 1
+  actual_inode=$(spawn_artifact_inode "$path") || return 1
+  [ "$actual_inode" = "$expected_inode" ] || return 1
+  rm -f -- "$path"
+}
+
 spawn_acquire_home_lock() {
   local lock_home=$1 lock_path
   [ -d "$lock_home" ] || return 1
@@ -549,7 +585,7 @@ spawn_acquire_parent_home_lock() {
 }
 
 spawn_abort_artifacts_cleanup() {
-  local rc=0 token owner_file
+  local rc=0 token owner_file created_dir created_index
   [ -n "${ID:-}" ] || return 0
   if [ "${SPAWN_CLAUDE_HOOK_CREATED:-0}" = 1 ] && [ -n "${WT:-}" ] && [ -d "$WT" ]; then
     spawn_remove_owned_artifact "$WT/.claude/settings.local.json" "$SPAWN_CLAUDE_HOOK_INODE" "$SPAWN_CLAUDE_HOOK_DIGEST" \
@@ -570,6 +606,9 @@ spawn_abort_artifacts_cleanup() {
   if [ "${SPAWN_GROK_AUTH_CREATED:-0}" = 1 ] && [ -n "${SPAWN_GROK_AUTH_FILE:-}" ]; then
     spawn_remove_owned_artifact "$SPAWN_GROK_AUTH_FILE" "$SPAWN_GROK_AUTH_INODE" "$SPAWN_GROK_AUTH_DIGEST" || rc=1
   fi
+  if [ "${SPAWN_GROK_AUTH_PROVISIONAL:-0}" = 1 ] && [ -n "${SPAWN_GROK_AUTH_FILE:-}" ]; then
+    spawn_remove_unproven_artifact "$SPAWN_GROK_AUTH_FILE" "${SPAWN_GROK_AUTH_INODE:-}" || rc=1
+  fi
   if [ "${SPAWN_GROK_HOOK_CREATED:-0}" = 1 ]; then
     spawn_remove_owned_artifact "$SPAWN_GROK_HOOK_FILE" \
       "$SPAWN_GROK_HOOK_INODE" "$SPAWN_GROK_HOOK_DIGEST" || rc=1
@@ -583,7 +622,7 @@ spawn_abort_artifacts_cleanup() {
     if [ "${SPAWN_GROK_AUTH_CREATED:-0}" != 1 ]; then
       rc=1
     else
-      token=$(cat "$STATE/$ID.grok-turnend-token" 2>/dev/null || true)
+      token=$(sed -n 's/^token=//p' "$STATE/$ID.grok-turnend-token" 2>/dev/null | head -1 || true)
       case "$token" in
         fm.????????????)
           case "$token" in
@@ -596,6 +635,16 @@ spawn_abort_artifacts_cleanup() {
       esac
     fi
   fi
+  for ((created_index=${#SPAWN_CREATED_DIRECTORIES[@]} - 1; created_index >= 0; created_index--)); do
+    created_dir=${SPAWN_CREATED_DIRECTORIES[$created_index]}
+    if [ -e "$created_dir" ] || [ -L "$created_dir" ]; then
+      if [ -d "$created_dir" ] && [ ! -L "$created_dir" ]; then
+        rmdir "$created_dir" || rc=1
+      else
+        rc=1
+      fi
+    fi
+  done
   [ -z "${HERDR_LABEL_JOURNAL:-}" ] || rm -f "$HERDR_LABEL_JOURNAL" || rc=1
   [ -z "${HERDR_PRESENTATION_JOURNAL:-}" ] || rm -f "$HERDR_PRESENTATION_JOURNAL" || rc=1
   if [ -n "${TASK_TMP:-}" ] && [ -d "$TASK_TMP" ]; then
@@ -1956,6 +2005,13 @@ EOF
       # Result: the hook is outside the worktree, needs no trust grant, and never
       # touches grok's managed config - only firstmate-owned files.
       GROK_HOME_DIR="${GROK_HOME:-$HOME/.grok}"
+      case "$GROK_HOME_DIR" in
+        /*) ;;
+        *) exit 1 ;;
+      esac
+      case "$GROK_HOME_DIR" in
+        *$'\n'*|*$'\r'*) exit 1 ;;
+      esac
       GROK_HOOKS_DIR="$GROK_HOME_DIR/hooks"
       GROK_AUTH_DIR="$GROK_HOOKS_DIR/fm-turn-end.d"
       GROK_HOOK_SCRIPT="$GROK_HOOKS_DIR/fm-turn-end.sh"
@@ -2000,25 +2056,28 @@ EOF
       umask 077
       auth_file=$(mktemp "$GROK_AUTH_DIR/fm.XXXXXXXXXXXX")
       SPAWN_GROK_AUTH_FILE=$auth_file
-      SPAWN_GROK_AUTH_CREATED=1
+      SPAWN_GROK_AUTH_PROVISIONAL=1
       umask "$old_umask"
       SPAWN_GROK_AUTH_INODE=$(spawn_artifact_inode "$auth_file") || exit 1
       printf '%s\n' "$TURNEND" > "$auth_file"
       SPAWN_GROK_AUTH_DIGEST=$(spawn_artifact_digest "$auth_file") || exit 1
-      spawn_create_new_artifact "$STATE/$ID.grok-turnend-token" SPAWN_GROK_TOKEN_INODE SPAWN_GROK_TOKEN_DIGEST <<EOF || exit 1
-${auth_file##*/}
+      SPAWN_GROK_AUTH_CREATED=1
+      SPAWN_GROK_AUTH_PROVISIONAL=0
+      spawn_create_new_artifact "$STATE/$ID.grok-turnend-token" SPAWN_GROK_TOKEN_INODE SPAWN_GROK_TOKEN_DIGEST SPAWN_GROK_TOKEN_CREATED <<EOF || exit 1
+token=${auth_file##*/}
+dir=$GROK_AUTH_DIR
+inode=$SPAWN_GROK_AUTH_INODE
+digest=$SPAWN_GROK_AUTH_DIGEST
 EOF
-      SPAWN_GROK_TOKEN_CREATED=1
       spawn_create_or_reuse_artifact "$GROK_HOOK_SCRIPT" \
         SPAWN_GROK_HOOK_CREATED SPAWN_GROK_HOOK_INODE SPAWN_GROK_HOOK_DIGEST \
         < "$GROK_HOOK_BODY" || exit 1
       spawn_create_or_reuse_artifact "$GROK_HOOK_CONFIG" \
         SPAWN_GROK_CONFIG_CREATED SPAWN_GROK_CONFIG_INODE SPAWN_GROK_CONFIG_DIGEST \
         < "$GROK_CONFIG_BODY" || exit 1
-      spawn_create_new_artifact "$WT/.fm-grok-turnend" SPAWN_GROK_POINTER_INODE SPAWN_GROK_POINTER_DIGEST <<EOF || exit 1
+      spawn_create_new_artifact "$WT/.fm-grok-turnend" SPAWN_GROK_POINTER_INODE SPAWN_GROK_POINTER_DIGEST SPAWN_GROK_POINTER_CREATED <<EOF || exit 1
 token=${auth_file##*/}
 EOF
-      SPAWN_GROK_POINTER_CREATED=1
       exclude_path '.fm-grok-turnend'
       ;;
   esac
