@@ -87,7 +87,12 @@ case "$1" in
     fi
     [ -n "${name:-}" ] || exit 2
     workspace=${2:-}
-    printf 'id-%s\t%s\tcodex\t%s\n' "$name" "$name" "$workspace" >> "$SBX_STATE"
+    if [ "${SBX_CREATE_NO_RECORD:-0}" != 1 ]; then
+      printf 'id-%s\t%s\tcodex\t%s\n' "$name" "$name" "$workspace" >> "$SBX_STATE"
+      if [ "${SBX_CREATE_AMBIGUOUS:-0}" = 1 ]; then
+        printf 'id-race-%s\trace-%s\tcodex\t%s\n' "$name" "$name" "$workspace" >> "$SBX_STATE"
+      fi
+    fi
     if [ "${SBX_FAIL_CREATE_AFTER_RECORD:-0}" = '1' ]; then
       exit 1
     fi
@@ -228,14 +233,55 @@ pass 'Docker inventory rejects malformed members without dropping live identitie
 : > "$SBX_LOG"
 export SBX_FAIL_CREATE_AFTER_RECORD=1
 if fm_workspace_placement_prepare docker-sandbox direct partial.task "$workspace_real" official-agent; then
-  fail 'Docker create failure unexpectedly published a partial placement'
+  fail 'Docker create failure unexpectedly succeeded'
 fi
 unset SBX_FAIL_CREATE_AFTER_RECORD
 assert_grep 'fm-partial.task' "$SBX_STATE" 'Docker create failure discarded the unresolved provider state'
-assert_no_grep $'stop\tid-fm-partial.task' "$SBX_LOG" 'Docker create failure removed before proving ownership'
-assert_no_grep $'rm\t--force\tid-fm-partial.task' "$SBX_LOG" 'Docker create failure removed before proving ownership'
-[ "$FM_WORKSPACE_PLACEMENT_PENDING_NAME" = 'fm-partial.task' ] || fail 'Docker create failure lost its unresolved name'
-pass 'Docker create failure retains unresolved provider ownership safely'
+[ "$FM_WORKSPACE_PLACEMENT_ACQUIRED_HANDLE" = 'docker-sandbox:partial.task:fm-partial.task:id-fm-partial.task' ] || \
+  fail 'Docker create failure did not reconcile the exact new provider identity'
+[ -z "$FM_WORKSPACE_PLACEMENT_PENDING_NAME" ] || fail 'reconciled Docker create failure retained a pending provider name'
+fm_workspace_placement_release docker-sandbox "$FM_WORKSPACE_PLACEMENT_ACQUIRED_HANDLE" force || \
+  fail 'reconciled Docker create failure could not retry exact cleanup'
+assert_grep $'stop\tid-fm-partial.task' "$SBX_LOG" 'reconciled Docker create failure did not stop exact provider identity'
+assert_grep $'rm\t--force\tid-fm-partial.task' "$SBX_LOG" 'reconciled Docker create failure did not remove exact provider identity'
+assert_no_grep 'fm-partial.task' "$SBX_STATE" 'reconciled Docker create failure left the provider live after retry cleanup'
+pass 'Docker create failure reconciles and retries exact partial placement cleanup'
+
+: > "$SBX_STATE"
+: > "$SBX_LOG"
+export SBX_FAIL_CREATE_AFTER_RECORD=1 SBX_CREATE_NO_RECORD=1
+if fm_workspace_placement_prepare docker-sandbox direct absent.task "$workspace_real" official-agent; then
+  fail 'Docker create failure without a new provider unexpectedly succeeded'
+fi
+unset SBX_FAIL_CREATE_AFTER_RECORD SBX_CREATE_NO_RECORD
+[ "$FM_WORKSPACE_PLACEMENT_PENDING_NAME" = 'fm-absent.task' ] || \
+  fail 'no-create reconciliation lost the requested provider name'
+[ "$FM_WORKSPACE_PLACEMENT_PENDING_REASON" = 'no-new-provider-identity' ] || \
+  fail 'no-create reconciliation did not retain its unresolved reason'
+[ -z "$FM_WORKSPACE_PLACEMENT_ACQUIRED_HANDLE" ] || \
+  fail 'no-create reconciliation invented an exact provider handle'
+assert_no_grep $'stop\t' "$SBX_LOG" 'no-create reconciliation attempted provider cleanup'
+assert_no_grep $'rm\t' "$SBX_LOG" 'no-create reconciliation attempted provider removal'
+pass 'Docker create failure with no new provider retains unresolved ownership'
+
+: > "$SBX_STATE"
+: > "$SBX_LOG"
+export SBX_FAIL_CREATE_AFTER_RECORD=1 SBX_CREATE_AMBIGUOUS=1
+if fm_workspace_placement_prepare docker-sandbox direct ambiguous.task "$workspace_real" official-agent; then
+  fail 'ambiguous Docker create failure unexpectedly succeeded'
+fi
+unset SBX_FAIL_CREATE_AFTER_RECORD SBX_CREATE_AMBIGUOUS
+[ "$FM_WORKSPACE_PLACEMENT_PENDING_NAME" = 'fm-ambiguous.task' ] || \
+  fail 'ambiguous reconciliation lost the requested provider name'
+[ "$FM_WORKSPACE_PLACEMENT_PENDING_REASON" = 'ambiguous-new-provider-identity' ] || \
+  fail 'ambiguous reconciliation did not retain its unresolved reason'
+[ -z "$FM_WORKSPACE_PLACEMENT_ACQUIRED_HANDLE" ] || \
+  fail 'ambiguous reconciliation guessed an exact provider handle'
+assert_grep 'fm-ambiguous.task' "$SBX_STATE" 'ambiguous reconciliation discarded the first new provider'
+assert_grep 'race-fm-ambiguous.task' "$SBX_STATE" 'ambiguous reconciliation discarded the second new provider'
+assert_no_grep $'stop\t' "$SBX_LOG" 'ambiguous reconciliation attempted provider cleanup'
+assert_no_grep $'rm\t' "$SBX_LOG" 'ambiguous reconciliation attempted provider removal'
+pass 'ambiguous Docker create failure retains non-destructive ownership evidence'
 
 printf 'id-fm-collision\tfm-collision\tcodex\t\nid-other\tother\tcodex\t\n' > "$SBX_STATE"
 : > "$SBX_LOG"

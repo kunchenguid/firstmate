@@ -996,6 +996,13 @@ spawn_cleanup_record_refresh() {
     lines+=("placement=$PLACEMENT")
     lines+=("placement_handle=$PLACEMENT_HANDLE")
     lines+=("placement_pending_name=${FM_WORKSPACE_PLACEMENT_PENDING_NAME:-}")
+    if [ -n "$PLACEMENT_HANDLE" ]; then
+      lines+=("placement_identity=exact")
+      lines+=("placement_pending_reason=")
+    else
+      lines+=("placement_identity=unresolved")
+      lines+=("placement_pending_reason=${FM_WORKSPACE_PLACEMENT_PENDING_REASON:-unresolved}")
+    fi
     lines+=("placement_bridge=$PLACEMENT_BRIDGE")
     lines+=("placement_bridge_id=$PLACEMENT_BRIDGE_ID")
     lines+=("placement_bridge_cursor_id=$PLACEMENT_BRIDGE_CURSOR_ID")

@@ -129,7 +129,12 @@ case "$1" in
     done
     [ -n "${1:-}" ] || exit 2
     workspace=${2:-}
-    printf 'id-%s\t%s\tcodex\t%s\n' "$name" "$name" "$workspace" >> "$FM_FAKE_SBX_STATE"
+    if [ "${FM_FAKE_SBX_CREATE_NO_RECORD:-0}" != 1 ]; then
+      printf 'id-%s\t%s\tcodex\t%s\n' "$name" "$name" "$workspace" >> "$FM_FAKE_SBX_STATE"
+      if [ "${FM_FAKE_SBX_CREATE_AMBIGUOUS:-0}" = 1 ]; then
+        printf 'id-race-%s\trace-%s\tcodex\t%s\n' "$name" "$name" "$workspace" >> "$FM_FAKE_SBX_STATE"
+      fi
+    fi
     if [ "${FM_FAKE_SBX_CREATE_FAIL:-0}" = 1 ]; then
       exit 1
     fi
@@ -229,23 +234,71 @@ rm -rf -- "/tmp/fm-provider-fail-cd4"
 expect_code 1 "$status" 'provider creation failure should abort fresh Docker spawn'
 assert_absent "$home/state/provider-fail-cd4.meta" 'provider failure published task metadata'
 assert_absent "$home/state/sandbox-bridge/provider-fail-cd4" 'provider failure left the bridge behind'
-assert_grep $'id-fm-provider-fail-cd4\tfm-provider-fail-cd4' "$case_dir/sbx.state" \
-  'provider failure discarded the unresolved partial sandbox'
-assert_no_grep $'sbx\tstop' "$case_dir/events.log" \
-  'provider failure attempted an unverified provider stop'
-assert_no_grep $'sbx\trm' "$case_dir/events.log" \
-  'provider failure attempted an unverified provider removal'
-assert_present "$home/state/.spawn-cleanup/provider-fail-cd4.record" \
-  'provider failure did not retain a durable cleanup record'
-assert_grep 'placement_pending_name=fm-provider-fail-cd4' \
-  "$home/state/.spawn-cleanup/provider-fail-cd4.record" \
-  'durable cleanup record lost the unresolved provider name'
+[ ! -s "$case_dir/sbx.state" ] || fail 'provider failure left the reconciled partial sandbox live'
+assert_grep $'sbx\tstop\tid-fm-provider-fail-cd4' "$case_dir/events.log" \
+  'provider failure did not stop the exact reconciled provider identity'
+assert_grep $'sbx\trm\t--force\tid-fm-provider-fail-cd4' "$case_dir/events.log" \
+  'provider failure did not remove the exact reconciled provider identity'
+assert_absent "$home/state/.spawn-cleanup/provider-fail-cd4.record" \
+  'provider failure retained cleanup after exact reverse release'
 assert_grep $'treehouse\treturn\t--force\t'"$wt" "$case_dir/events.log" \
   'provider failure did not return the acquired treehouse worktree'
 assert_grep $'tmux\tkill-window\t-t\tfirstmate:@spawnwid' "$case_dir/events.log" \
   'provider failure did not remove the exact tmux endpoint'
 assert_events_in_order $'treehouse\treturn' $'tmux\tkill-window' "$case_dir/events.log"
-pass 'fresh Docker spawn retains unresolved provider cleanup safely'
+pass 'fresh Docker spawn reconciles and releases partial provider creation'
+
+case_record=$(make_case provider-no-create provider-no-create-ef5)
+IFS='|' read -r case_dir home proj wt fakebin <<EOF
+$case_record
+EOF
+export FM_FAKE_SBX_CREATE_FAIL=1 FM_FAKE_SBX_CREATE_NO_RECORD=1
+run_spawn "$case_dir" provider-no-create-ef5 "$home" "$proj" "$wt" "$fakebin" > "$case_dir/output" 2>&1
+status=$?
+unset FM_FAKE_SBX_CREATE_FAIL FM_FAKE_SBX_CREATE_NO_RECORD
+rm -rf -- "/tmp/fm-provider-no-create-ef5"
+expect_code 1 "$status" 'provider no-create failure should abort fresh Docker spawn'
+assert_absent "$home/state/provider-no-create-ef5.meta" 'provider no-create published task metadata'
+[ ! -s "$case_dir/sbx.state" ] || fail 'provider no-create left an unexpected sandbox'
+assert_no_grep $'sbx\tstop' "$case_dir/events.log" \
+  'provider no-create attempted cleanup without an exact provider identity'
+assert_no_grep $'sbx\trm' "$case_dir/events.log" \
+  'provider no-create attempted removal without an exact provider identity'
+assert_present "$home/state/.spawn-cleanup/provider-no-create-ef5.record" \
+  'provider no-create did not retain durable unresolved ownership'
+assert_grep 'placement_identity=unresolved' \
+  "$home/state/.spawn-cleanup/provider-no-create-ef5.record" \
+  'provider no-create record did not mark identity as unresolved'
+assert_grep 'placement_pending_reason=no-new-provider-identity' \
+  "$home/state/.spawn-cleanup/provider-no-create-ef5.record" \
+  'provider no-create record lost its reconciliation reason'
+pass 'fresh Docker spawn retains no-create ownership uncertainty without guessing'
+
+case_record=$(make_case provider-ambiguous provider-ambiguous-gh6)
+IFS='|' read -r case_dir home proj wt fakebin <<EOF
+$case_record
+EOF
+export FM_FAKE_SBX_CREATE_FAIL=1 FM_FAKE_SBX_CREATE_AMBIGUOUS=1
+run_spawn "$case_dir" provider-ambiguous-gh6 "$home" "$proj" "$wt" "$fakebin" > "$case_dir/output" 2>&1
+status=$?
+unset FM_FAKE_SBX_CREATE_FAIL FM_FAKE_SBX_CREATE_AMBIGUOUS
+rm -rf -- "/tmp/fm-provider-ambiguous-gh6"
+expect_code 1 "$status" 'ambiguous provider failure should abort fresh Docker spawn'
+assert_absent "$home/state/provider-ambiguous-gh6.meta" 'ambiguous provider failure published task metadata'
+assert_grep $'id-fm-provider-ambiguous-gh6\tfm-provider-ambiguous-gh6' "$case_dir/sbx.state" \
+  'ambiguous provider failure discarded the first live provider'
+assert_grep $'id-race-fm-provider-ambiguous-gh6\trace-fm-provider-ambiguous-gh6' "$case_dir/sbx.state" \
+  'ambiguous provider failure discarded the second live provider'
+assert_no_grep $'sbx\tstop' "$case_dir/events.log" \
+  'ambiguous provider failure attempted cleanup without exact ownership'
+assert_no_grep $'sbx\trm' "$case_dir/events.log" \
+  'ambiguous provider failure attempted removal without exact ownership'
+assert_present "$home/state/.spawn-cleanup/provider-ambiguous-gh6.record" \
+  'ambiguous provider failure did not retain durable unresolved ownership'
+assert_grep 'placement_pending_reason=ambiguous-new-provider-identity' \
+  "$home/state/.spawn-cleanup/provider-ambiguous-gh6.record" \
+  'ambiguous provider failure record lost its reconciliation reason'
+pass 'fresh Docker spawn retains ambiguous ownership without deleting either provider'
 
 case_record=$(make_case endpoint-failure endpoint-fail-ef5)
 IFS='|' read -r case_dir home proj wt fakebin <<EOF

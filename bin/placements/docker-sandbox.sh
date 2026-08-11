@@ -83,6 +83,10 @@ fm_workspace_placement_docker_sandbox_inventory_array() {
           else error("malformed Docker Sandbox inventory member")
           end
       )
+    | if (map(.id) | length) == (map(.id) | unique | length)
+      then .
+      else error("duplicate Docker Sandbox provider identity")
+      end
   '
 }
 
@@ -200,12 +204,21 @@ EOF
 }
 
 fm_workspace_placement_docker_sandbox_snapshot_ids() {
-  local listing inventory
-  listing=$(sbx ls --json) || return 1
-  inventory=$(printf '%s' "$listing" | fm_workspace_placement_docker_sandbox_inventory_array) || return 2
+  local inventory rc
+  inventory=$(fm_workspace_placement_docker_sandbox_snapshot_inventory) || {
+    rc=$?
+    return "$rc"
+  }
   printf '%s' "$inventory" | jq -r '
     .[].id
   ' 2>/dev/null
+}
+
+fm_workspace_placement_docker_sandbox_snapshot_inventory() {
+  local listing inventory
+  listing=$(sbx ls --json) || return 1
+  inventory=$(printf '%s' "$listing" | fm_workspace_placement_docker_sandbox_inventory_array) || return 2
+  printf '%s' "$inventory"
 }
 
 fm_workspace_placement_docker_sandbox_resolve_acquired() {  # <task-id> <name> <before-ids>
@@ -221,6 +234,53 @@ fm_workspace_placement_docker_sandbox_resolve_acquired() {  # <task-id> <name> <
   FM_WORKSPACE_PLACEMENT_ACQUIRED_HANDLE=$handle
   # shellcheck disable=SC2034
   FM_WORKSPACE_PLACEMENT_PENDING_NAME=
+  # shellcheck disable=SC2034
+  FM_WORKSPACE_PLACEMENT_PENDING_REASON=
+  printf '%s' "$handle"
+}
+
+fm_workspace_placement_docker_sandbox_reconcile_failed_create() {  # <task-id> <name> <before-ids>
+  local task_id=$1 name=$2 before_ids=${3:-} inventory before_json candidates new_count provider_id provider_name handle
+  # shellcheck disable=SC2034
+  FM_WORKSPACE_PLACEMENT_ACQUIRED_HANDLE=
+  # shellcheck disable=SC2034
+  FM_WORKSPACE_PLACEMENT_PENDING_NAME=$name
+  # shellcheck disable=SC2034
+  FM_WORKSPACE_PLACEMENT_PENDING_REASON=post-create-inventory-unavailable
+  inventory=$(fm_workspace_placement_docker_sandbox_snapshot_inventory) || return 1
+  before_json=$(printf '%s\n' "$before_ids" | jq -R -s -c 'split("\n") | map(select(length > 0))') || return 1
+  candidates=$(printf '%s' "$inventory" | jq -c --argjson before "$before_json" '
+    [ .[]
+      | . as $entry
+      | ($entry.id) as $entry_id
+      | select(($before | index($entry_id)) == null)
+    ]
+  ') || return 1
+  new_count=$(printf '%s' "$candidates" | jq -r 'length') || return 1
+  if [ "$new_count" -eq 0 ]; then
+    # shellcheck disable=SC2034
+    FM_WORKSPACE_PLACEMENT_PENDING_REASON=no-new-provider-identity
+    return 1
+  fi
+  if [ "$new_count" -ne 1 ]; then
+    # shellcheck disable=SC2034
+    FM_WORKSPACE_PLACEMENT_PENDING_REASON=ambiguous-new-provider-identity
+    return 1
+  fi
+  provider_id=$(printf '%s' "$candidates" | jq -r '.[0].id') || return 1
+  provider_name=$(printf '%s' "$candidates" | jq -r '.[0].name') || return 1
+  if [ "$provider_name" != "$name" ]; then
+    # shellcheck disable=SC2034
+    FM_WORKSPACE_PLACEMENT_PENDING_REASON=unattributable-new-provider-identity
+    return 1
+  fi
+  handle="docker-sandbox:$task_id:$name:$provider_id"
+  # shellcheck disable=SC2034
+  FM_WORKSPACE_PLACEMENT_ACQUIRED_HANDLE=$handle
+  # shellcheck disable=SC2034
+  FM_WORKSPACE_PLACEMENT_PENDING_NAME=
+  # shellcheck disable=SC2034
+  FM_WORKSPACE_PLACEMENT_PENDING_REASON=
   printf '%s' "$handle"
 }
 
@@ -271,6 +331,8 @@ fm_workspace_placement_docker_sandbox_prepare() {  # <direct|clone> <task-id> <w
   }
   # shellcheck disable=SC2034
   FM_WORKSPACE_PLACEMENT_PENDING_NAME=$name
+  # shellcheck disable=SC2034
+  FM_WORKSPACE_PLACEMENT_PENDING_REASON=creation-in-progress
   create_argv=(sbx create --name "$name")
   if [ "${kits[0]+set}" = set ]; then
     for kit in "${kits[@]}"; do
@@ -288,10 +350,16 @@ fm_workspace_placement_docker_sandbox_prepare() {  # <direct|clone> <task-id> <w
       fi
       if ! "${create_argv[@]}" >/dev/null; then
         fm_workspace_placement_error "$create_error"
+        if ! fm_workspace_placement_docker_sandbox_reconcile_failed_create "$task_id" "$name" "$before_ids" >/dev/null; then
+          fm_workspace_placement_error "could not reconcile Docker Sandbox '$name' ownership after create failure"
+        fi
         return 1
       fi
       if ! fm_workspace_placement_docker_sandbox_resolve_acquired "$task_id" "$name" "$before_ids" >/dev/null; then
         fm_workspace_placement_error "could not prove the stable identity of Docker Sandbox '$name'"
+        if ! fm_workspace_placement_docker_sandbox_reconcile_failed_create "$task_id" "$name" "$before_ids" >/dev/null; then
+          fm_workspace_placement_error "could not reconcile Docker Sandbox '$name' ownership after creation"
+        fi
         return 1
       fi
       handle=$FM_WORKSPACE_PLACEMENT_ACQUIRED_HANDLE
@@ -303,12 +371,18 @@ fm_workspace_placement_docker_sandbox_prepare() {  # <direct|clone> <task-id> <w
         return 2
       }
       create_argv+=(--clone "$preset" "$resolved_workspace")
-      "${create_argv[@]}" >/dev/null || {
+      if ! "${create_argv[@]}" >/dev/null; then
         fm_workspace_placement_error "could not create cloned Docker Sandbox '$name'"
+        if ! fm_workspace_placement_docker_sandbox_reconcile_failed_create "$task_id" "$name" "$before_ids" >/dev/null; then
+          fm_workspace_placement_error "could not reconcile cloned Docker Sandbox '$name' ownership after create failure"
+        fi
         return 1
-      }
+      fi
       if ! fm_workspace_placement_docker_sandbox_resolve_acquired "$task_id" "$name" "$before_ids" >/dev/null; then
         fm_workspace_placement_error "could not prove the stable identity of cloned Docker Sandbox '$name'"
+        if ! fm_workspace_placement_docker_sandbox_reconcile_failed_create "$task_id" "$name" "$before_ids" >/dev/null; then
+          fm_workspace_placement_error "could not reconcile cloned Docker Sandbox '$name' ownership after creation"
+        fi
         return 1
       fi
       handle=$FM_WORKSPACE_PLACEMENT_ACQUIRED_HANDLE

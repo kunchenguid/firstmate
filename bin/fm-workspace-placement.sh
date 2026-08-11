@@ -65,6 +65,8 @@ fm_workspace_placement_result_clear() {
   FM_WORKSPACE_PLACEMENT_ACQUIRED_HANDLE=''
   # shellcheck disable=SC2034
   FM_WORKSPACE_PLACEMENT_PENDING_NAME=''
+  # shellcheck disable=SC2034 # Public diagnostic consumed by spawn cleanup records.
+  FM_WORKSPACE_PLACEMENT_PENDING_REASON=''
   # shellcheck disable=SC2034 # Public result globals consumed by callers after sourcing.
   FM_WORKSPACE_PLACEMENT_HANDLE=''
   # shellcheck disable=SC2034 # Public result globals consumed by callers after sourcing.
