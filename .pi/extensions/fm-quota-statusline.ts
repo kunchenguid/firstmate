@@ -18,7 +18,7 @@
 //
 // Refresh triggers: session start, model/thinking-level change, the
 // `/statusline refresh` command, and a bounded periodic timer (5 minutes). The
-// timer and the in-flight refresh guard are cleared on session shutdown.
+// timer is cleared and in-flight results are invalidated on session shutdown.
 //
 // Rendering is owned by ./lib/fm-quota-statusline-render.ts and is ANSI
 // visible-width safe and narrow-terminal aware.
@@ -28,6 +28,7 @@ import type { TUI, Theme } from "@earendil-works/pi-tui";
 import type { ReadonlyFooterDataProvider } from "@earendil-works/pi-coding-agent";
 import {
 	extractWindows,
+	getProviderQuotaStatus,
 	parseQuotaJson,
 	type QuotaFetchStatus,
 	type QuotaWindow,
@@ -69,21 +70,28 @@ export default function (pi: ExtensionAPI) {
 	let windows: QuotaWindow[] = [];
 	let quotaStatus: QuotaFetchStatus = "unavailable";
 	let refreshInFlight = false;
+	let pendingRefreshCtx: ExtensionContext | undefined;
+	let lifecycleGeneration = 0;
 	let periodicTimer: ReturnType<typeof setTimeout> | undefined;
 	let footerRef: { invalidate(): void } | undefined;
 
 	const refreshQuota = async (ctx: ExtensionContext): Promise<void> => {
 		if (refreshInFlight) {
+			pendingRefreshCtx = ctx;
 			return;
 		}
 		refreshInFlight = true;
+		const refreshGeneration = lifecycleGeneration;
 		try {
 			const result = await pi.exec(
 				"quota-axi",
 				["--provider", QUOTA_PROVIDER, "--json"],
 				{ timeout: REFRESH_TIMEOUT_MS, cwd: ctx.cwd },
 			);
-			if (result.killed || (result.code !== 0 && !result.stdout)) {
+			if (refreshGeneration !== lifecycleGeneration) {
+				return;
+			}
+			if (result.killed || result.code !== 0) {
 				markStaleOrUnavailable();
 				return;
 			}
@@ -93,12 +101,21 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 			windows = extractWindows(parsed, QUOTA_PROVIDER);
-			quotaStatus = windows.length > 0 ? "fresh" : "unavailable";
+			quotaStatus = getProviderQuotaStatus(parsed, QUOTA_PROVIDER);
 		} catch {
-			markStaleOrUnavailable();
+			if (refreshGeneration === lifecycleGeneration) {
+				markStaleOrUnavailable();
+			}
 		} finally {
 			refreshInFlight = false;
-			footerRef?.invalidate();
+			if (refreshGeneration === lifecycleGeneration) {
+				footerRef?.invalidate();
+			}
+			const queuedCtx = pendingRefreshCtx;
+			pendingRefreshCtx = undefined;
+			if (queuedCtx) {
+				void refreshQuota(queuedCtx);
+			}
 		}
 	};
 
@@ -206,16 +223,19 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 			if (sub === "refresh") {
-				if (!enabled) {
-					enableCustomFooter(ctx);
-					ensurePeriodicTimer(ctx);
-				} else {
-					void refreshQuota(ctx);
-				}
+				void refreshQuota(ctx);
 				ctx.ui.notify("Refreshing Codex quota data", "info");
 				return;
 			}
-			if (sub === "on" || sub === "") {
+			if (sub === "on") {
+				if (!enabled) {
+					enableCustomFooter(ctx);
+					ensurePeriodicTimer(ctx);
+					ctx.ui.notify("Statusline footer enabled", "info");
+				}
+				return;
+			}
+			if (sub === "") {
 				if (enabled) {
 					restoreStockFooter(ctx);
 					ctx.ui.notify("Stock footer restored", "info");
@@ -253,6 +273,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("thinking_level_select", (_event, ctx) => {
 		latestCtx = ctx;
 		if (enabled) {
+			void refreshQuota(ctx);
 			footerRef?.invalidate();
 		}
 	});
@@ -265,8 +286,9 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_shutdown", () => {
+		lifecycleGeneration += 1;
+		pendingRefreshCtx = undefined;
 		clearPeriodicTimer();
 		footerRef = undefined;
-		refreshInFlight = false;
 	});
 }

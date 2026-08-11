@@ -134,7 +134,10 @@ export function renderFooter(
 	theme: RenderTheme,
 	width: number,
 ): string[] {
-	const safeWidth = Math.max(8, width);
+	const safeWidth = Number.isFinite(width) ? Math.max(0, Math.floor(width)) : 0;
+	if (safeWidth === 0) {
+		return [""];
+	}
 	const repoForLine1 = safeWidth < 48 ? input.repoBasename : input.repoPath;
 	const branchSuffix = input.branch ? ` (${input.branch})` : "";
 	const line1 = theme.fg("dim", `${repoForLine1}${branchSuffix}`);

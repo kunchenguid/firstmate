@@ -27,15 +27,38 @@ if ! command -v node >/dev/null 2>&1; then
   echo "skip: node not found for statusline renderer test"
   exit 0
 fi
-if [ ! -f "$PI_PACKAGE_DIR/package.json" ]; then
-  echo "skip: installed @earendil-works/pi-coding-agent package not found"
-  exit 0
-fi
-
 fixture="$TMP_ROOT/fixture"
 mkdir -p "$fixture/node_modules/@earendil-works" "$fixture/lib"
-ln -s "$PI_PACKAGE_DIR" "$fixture/node_modules/@earendil-works/pi-coding-agent"
-ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" "$fixture/node_modules/@earendil-works/pi-tui"
+if [ -f "$PI_PACKAGE_DIR/package.json" ]; then
+  ln -s "$PI_PACKAGE_DIR" "$fixture/node_modules/@earendil-works/pi-coding-agent"
+  ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" "$fixture/node_modules/@earendil-works/pi-tui"
+else
+  mkdir -p "$fixture/node_modules/@earendil-works/pi-tui"
+  printf '%s\n' '{"type":"module","exports":"./index.js"}' >"$fixture/node_modules/@earendil-works/pi-tui/package.json"
+  cat >"$fixture/node_modules/@earendil-works/pi-tui/index.js" <<'JS'
+export function visibleWidth(text) {
+  return [...text.replace(/\x1b\[[0-9;]*m/g, "")].length;
+}
+export function truncateToWidth(text, width) {
+  if (width <= 0) return "";
+  let output = "";
+  let visible = 0;
+  for (let index = 0; index < text.length && visible < width;) {
+    const ansi = text.slice(index).match(/^\x1b\[[0-9;]*m/);
+    if (ansi) {
+      output += ansi[0];
+      index += ansi[0].length;
+      continue;
+    }
+    const point = String.fromCodePoint(text.codePointAt(index));
+    output += point;
+    index += point.length;
+    visible += 1;
+  }
+  return output;
+}
+JS
+fi
 printf '%s\n' '{"type":"module"}' >"$fixture/package.json"
 cp "$EXT" "$fixture/fm-quota-statusline.ts"
 cp "$DATA" "$fixture/lib/fm-quota-statusline-data.ts"
@@ -44,7 +67,7 @@ cp "$RENDER" "$fixture/lib/fm-quota-statusline-render.ts"
 output_file="$fixture/node-output"
 ( cd "$fixture" && node --input-type=module ) >"$output_file" 2>&1 <<'JS'
 import { pathToFileURL } from "node:url";
-import { parseQuotaJson, extractWindows } from "./lib/fm-quota-statusline-data.ts";
+import { parseQuotaJson, extractWindows, getProviderQuotaStatus } from "./lib/fm-quota-statusline-data.ts";
 import { renderFooter } from "./lib/fm-quota-statusline-render.ts";
 
 const results = [];
@@ -69,12 +92,30 @@ const freshJson = JSON.stringify({
       resetsAt: "2026-08-18T03:30:39.000Z",
       windowSeconds: 604800,
     }],
+    state: { status: "fresh", stale: false },
   }],
 });
 const freshState = parseQuotaJson(freshJson);
 check("parses a fresh quota document", freshState !== null);
 const freshWindows = extractWindows(freshState, "codex");
 check("extracts the weekly window", freshWindows.length === 1 && freshWindows[0].id === "weekly");
+check("classifies provider-declared fresh data", getProviderQuotaStatus(freshState, "codex") === "fresh");
+
+const staleState = parseQuotaJson(JSON.stringify({
+  providers: [{
+    provider: "codex",
+    windows: [{ id: "weekly", label: "week", percentRemaining: 82 }],
+    state: { status: "stale", stale: true },
+  }],
+}));
+const noStateState = parseQuotaJson(JSON.stringify({
+  providers: [{
+    provider: "codex",
+    windows: [{ id: "weekly", label: "week", percentRemaining: 82 }],
+  }],
+}));
+check("preserves provider-declared stale data", getProviderQuotaStatus(staleState, "codex") === "stale");
+check("does not assume missing freshness metadata is fresh", getProviderQuotaStatus(noStateState, "codex") === "stale");
 
 const theme = { fg: (_color, text) => text };
 const now = Date.parse("2026-08-11T07:00:00.000Z");
@@ -132,11 +173,14 @@ check("stale footer marks the data stale", staleLine2.includes("quota~"));
 // overflows the terminal width.
 const narrowLines = renderFooter(freshInput, theme, 18);
 check("narrow footer renders a single line", narrowLines.length === 1);
-check("narrow footer stays within the width", (narrowLines[0] ?? "").length <= 18 || !narrowLines[0].includes("\n"));
+check("narrow footer stays within the width", (narrowLines[0] ?? "").length <= 18);
 check("narrow footer shows the repo basename", (narrowLines[0] ?? "").startsWith("firstmate"));
 // Even narrower: truncation must be ANSI-safe and not throw.
 const tinyLines = renderFooter(freshInput, theme, 6);
 check("tiny width does not throw and yields one line", tinyLines.length === 1);
+check("tiny footer stays within the requested width", (tinyLines[0] ?? "").length <= 6);
+const zeroLines = renderFooter(freshInput, theme, 0);
+check("zero-width footer is empty", (zeroLines[0] ?? "").length === 0);
 
 // --- Defensive parsing --------------------------------------------------
 // A non-JSON string and a structurally empty document both resolve to null
@@ -155,6 +199,7 @@ let footerFactory = "STOCK";
 let notifyMessages = [];
 let statusCmd = null;
 let execResult = { stdout: freshJson, stderr: "", code: 0, killed: false };
+let execCalls = 0;
 const fakeCtx = () => ({
   cwd: "/Users/ediz/Developer/firstmate",
   model: { id: "gpt-5.6-terra" },
@@ -166,7 +211,10 @@ const fakeCtx = () => ({
   },
 });
 const fakePi = {
-  exec: async () => execResult,
+  exec: async () => {
+    execCalls += 1;
+    return execResult;
+  },
   getThinkingLevel: () => "high",
   on: (event, handler) => {
     const list = eventHandlers.get(event) ?? [];
@@ -183,6 +231,19 @@ await statusCmd.handler("", fakeCtx());
 await new Promise((resolve) => setTimeout(resolve, 50));
 check("enable installs a footer factory", typeof footerFactory === "function");
 check("enable notifies the captain", notifyMessages.some((n) => /enabled/i.test(n.message)));
+check("enable refreshes quota once", execCalls === 1);
+
+const enabledFooterFactory = footerFactory;
+notifyMessages = [];
+await statusCmd.handler("on", fakeCtx());
+check("on is idempotent while enabled", footerFactory === enabledFooterFactory);
+check("idempotent on does not restore stock", !notifyMessages.some((n) => /stock/i.test(n.message)));
+
+for (const handler of (eventHandlers.get("thinking_level_select") ?? [])) {
+  handler({}, fakeCtx());
+}
+await new Promise((resolve) => setTimeout(resolve, 50));
+check("thinking-level changes refresh quota", execCalls === 2);
 
 // Render through the installed component to confirm it produces the footer.
 const component = footerFactory(
@@ -194,15 +255,25 @@ const componentLines = component.render(120);
 check("installed footer renders two lines", componentLines.length === 2);
 check("installed footer line 1 shows branch", (componentLines[0] ?? "").includes("(main)"));
 
-// Refresh: a second fetch after a transient failure keeps last-good windows
-// and marks them stale.
-execResult = { stdout: "", stderr: "boom", code: 1, killed: false };
+execResult = { stdout: JSON.stringify({
+  providers: [{
+    provider: "codex",
+    windows: [{ id: "weekly", label: "week", percentRemaining: 82 }],
+    state: { status: "stale", stale: true },
+  }],
+}), stderr: "", code: 0, killed: false };
 await statusCmd.handler("refresh", fakeCtx());
 await new Promise((resolve) => setTimeout(resolve, 50));
 const staleComponentLines = component.render(120);
 const staleComponentLine2 = staleComponentLines[1] ?? "";
-check("refresh after failure keeps the last-good window", staleComponentLine2.includes("week: 95%"));
-check("refresh after failure marks stale", staleComponentLine2.includes("quota~"));
+check("provider-stale refresh uses reported windows", staleComponentLine2.includes("week: 82%"));
+check("provider-stale refresh is marked stale", staleComponentLine2.includes("quota~"));
+
+execResult = { stdout: freshJson, stderr: "boom", code: 1, killed: false };
+await statusCmd.handler("refresh", fakeCtx());
+await new Promise((resolve) => setTimeout(resolve, 50));
+const failedRefreshLine2 = component.render(120)[1] ?? "";
+check("nonzero refresh does not accept stdout as fresh", failedRefreshLine2.includes("quota~") && failedRefreshLine2.includes("week: 82%"));
 
 // Restore stock footer.
 notifyMessages = [];
@@ -210,9 +281,95 @@ await statusCmd.handler("off", fakeCtx());
 check("off restores the stock footer (undefined)", footerFactory === undefined);
 check("off notifies the captain", notifyMessages.some((n) => /stock/i.test(n.message)));
 
+const callsBeforeInactiveRefresh = execCalls;
+execResult = { stdout: freshJson, stderr: "", code: 0, killed: false };
+await statusCmd.handler("refresh", fakeCtx());
+await new Promise((resolve) => setTimeout(resolve, 50));
+check("inactive refresh fetches quota", execCalls === callsBeforeInactiveRefresh + 1);
+check("inactive refresh does not enable the footer", footerFactory === undefined);
+
+await statusCmd.handler("on", fakeCtx());
+await new Promise((resolve) => setTimeout(resolve, 50));
+const onFooterFactory = footerFactory;
+await statusCmd.handler("on", fakeCtx());
+check("repeated on keeps the custom footer installed", footerFactory === onFooterFactory);
+await statusCmd.handler("", fakeCtx());
+check("bare statusline toggles an enabled footer off", footerFactory === undefined);
+
 // Fire session_shutdown to clear the periodic timer so the harness exits.
 for (const handler of (eventHandlers.get("session_shutdown") ?? [])) {
   handler({}, fakeCtx());
+}
+
+const lifecycleHandlers = new Map();
+let lifecycleCommand = null;
+let lifecycleFooterFactory = undefined;
+let lifecycleCalls = 0;
+let activeExecs = 0;
+let maxActiveExecs = 0;
+const execResolvers = [];
+const lifecycleCtx = () => ({
+  cwd: "/tmp/new-session",
+  model: { id: "gpt-5.6-terra" },
+  thinkingLevel: "high",
+  getContextUsage: () => ({ tokens: 10, contextWindow: 100, percent: 10 }),
+  ui: {
+    setFooter: (factory) => { lifecycleFooterFactory = factory; },
+    notify: () => {},
+  },
+});
+mod.default({
+  exec: () => new Promise((resolve) => {
+    lifecycleCalls += 1;
+    activeExecs += 1;
+    maxActiveExecs = Math.max(maxActiveExecs, activeExecs);
+    execResolvers.push((result) => {
+      activeExecs -= 1;
+      resolve(result);
+    });
+  }),
+  getThinkingLevel: () => "high",
+  on: (event, handler) => {
+    const list = lifecycleHandlers.get(event) ?? [];
+    list.push(handler);
+    lifecycleHandlers.set(event, list);
+  },
+  registerCommand: (_name, options) => { lifecycleCommand = options; },
+});
+await lifecycleCommand.handler("on", lifecycleCtx());
+for (const handler of (lifecycleHandlers.get("session_shutdown") ?? [])) {
+  handler({}, lifecycleCtx());
+}
+for (const handler of (lifecycleHandlers.get("session_start") ?? [])) {
+  handler({}, lifecycleCtx());
+}
+check("session restart does not overlap an in-flight refresh", lifecycleCalls === 1 && maxActiveExecs === 1);
+execResolvers.shift()({ stdout: JSON.stringify({
+  providers: [{
+    provider: "codex",
+    windows: [{ id: "weekly", label: "week", percentRemaining: 11 }],
+    state: { status: "fresh", stale: false },
+  }],
+}), stderr: "", code: 0, killed: false });
+await new Promise((resolve) => setTimeout(resolve, 50));
+check("session restart queues a replacement refresh", lifecycleCalls === 2 && maxActiveExecs === 1);
+execResolvers.shift()({ stdout: JSON.stringify({
+  providers: [{
+    provider: "codex",
+    windows: [{ id: "weekly", label: "week", percentRemaining: 77 }],
+    state: { status: "fresh", stale: false },
+  }],
+}), stderr: "", code: 0, killed: false });
+await new Promise((resolve) => setTimeout(resolve, 50));
+const lifecycleComponent = lifecycleFooterFactory(
+  { requestRender() {} },
+  { fg: (_c, t) => t },
+  { getGitBranch: () => "main", onBranchChange: () => () => {} },
+);
+const lifecycleLine2 = lifecycleComponent.render(120)[1] ?? "";
+check("pre-shutdown refresh cannot overwrite the new session", lifecycleLine2.includes("week: 77%") && !lifecycleLine2.includes("week: 11%"));
+for (const handler of (lifecycleHandlers.get("session_shutdown") ?? [])) {
+  handler({}, lifecycleCtx());
 }
 
 const failed = results.filter((r) => !r.ok);

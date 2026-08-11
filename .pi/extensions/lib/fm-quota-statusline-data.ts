@@ -28,6 +28,10 @@ export interface QuotaProvider {
 	provider: string;
 	label?: string;
 	windows: QuotaWindow[];
+	state?: {
+		status?: string;
+		stale?: boolean;
+	};
 }
 
 /** Normalized quota-axi document. */
@@ -49,6 +53,10 @@ function asNumber(value: unknown): number | undefined {
 
 function asString(value: unknown): string | undefined {
 	return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function asBoolean(value: unknown): boolean | undefined {
+	return typeof value === "boolean" ? value : undefined;
 }
 
 function parseWindow(raw: unknown): QuotaWindow | null {
@@ -91,10 +99,19 @@ function parseProvider(raw: unknown): QuotaProvider | null {
 			windows.push(window);
 		}
 	}
+	const rawState = p.state && typeof p.state === "object"
+		? p.state as Record<string, unknown>
+		: undefined;
 	return {
 		provider,
 		label: asString(p.label),
 		windows,
+		state: rawState
+			? {
+				status: asString(rawState.status),
+				stale: asBoolean(rawState.stale),
+			}
+			: undefined,
 	};
 }
 
@@ -162,6 +179,21 @@ export function extractWindows(
 			window.percentRemaining !== undefined ||
 			window.percentUsed !== undefined,
 	);
+}
+
+export function getProviderQuotaStatus(
+	state: QuotaState | null,
+	provider: string,
+): QuotaFetchStatus {
+	const match = state?.providers.find(
+		(entry) => entry.provider === provider,
+	);
+	if (!match || extractWindows(state, provider).length === 0) {
+		return "unavailable";
+	}
+	return match.state?.status === "fresh" && match.state.stale === false
+		? "fresh"
+		: "stale";
 }
 
 /**
