@@ -82,6 +82,7 @@ if [ "${1:-}" = display-message ]; then
     *"#{pane_pid}"*) printf '%s\n' "$$" ;;
     *"#{pane_current_command}"*) printf '%s\n' bash ;;
     *"#{pane_current_path}"*) pwd ;;
+    *"#{window_name}"*) printf '%s\n' fm-task-x1 ;;
   esac
   exit 0
 fi
@@ -1000,10 +1001,11 @@ EOF
 }
 
 test_forced_secondmate_teardown_propagates_child_close_failure() {
-  local case_dir rc home child child_pid
+  local case_dir rc home child child_pid kill_log
   case_dir=$(make_case forced-child-close-failure)
   home="$case_dir/home"
   child="$case_dir/wt"
+  kill_log="$case_dir/tmux-kill.log"
   mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects"
   printf '%s\n' task-x1 > "$home/.fm-secondmate-home"
   fm_write_meta "$case_dir/state/task-x1.meta" \
@@ -1031,8 +1033,8 @@ test_forced_secondmate_teardown_propagates_child_close_failure() {
   cat > "$case_dir/fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 case "$*" in
-  "kill-window -t firstmate:fm-child-x1") exit 1 ;;
-  "kill-window -t @2") exit 1 ;;
+  "kill-window -t firstmate:fm-child-x1") printf '%s\n' "$*" >> "${FM_TMUX_KILL_LOG:?}"; exit 0 ;;
+  "kill-window -t @2") printf '%s\n' "$*" >> "${FM_TMUX_KILL_LOG:?}"; exit 1 ;;
   *"list-windows -t firstmate -F #{window_name}"*)
     printf '%s\n' 'fm-child-x1'
     exit 0
@@ -1051,6 +1053,7 @@ case "$*" in
 esac
 SH
   chmod +x "$case_dir/fakebin/tmux"
+  export FM_TMUX_KILL_LOG="$kill_log"
 
   set +e
   run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
@@ -1060,6 +1063,7 @@ SH
   kill "$child_pid" 2>/dev/null || true
   wait "$child_pid" 2>/dev/null || true
   unset FM_CHILD_PID
+  unset FM_TMUX_KILL_LOG
 
   expect_code 1 "$rc" "forced-child-close-failure: parent teardown must fail closed"
   assert_present "$case_dir/state/task-x1.meta" \
@@ -1067,6 +1071,8 @@ SH
   assert_present "$home/state/child-x1.meta" \
     "forced-child-close-failure: child metadata must survive child close refusal"
   [ -d "$home" ] || fail "forced-child-close-failure: parent home was removed after child close refusal"
+  grep -Fx 'kill-window -t @2' "$kill_log" >/dev/null \
+    || fail "forced-child-close-failure: teardown did not use the stable window id"
   grep -q "child cleanup failed" "$case_dir/stderr" \
     || fail "forced-child-close-failure: refusal did not identify child cleanup"
   pass "forced and recursive secondmate teardown propagate child close failures"

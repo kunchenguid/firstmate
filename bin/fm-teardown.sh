@@ -598,6 +598,54 @@ teardown_endpoint_process_census_empty() {
   [ "$status" -eq 1 ] && [ -z "$census" ]
 }
 
+teardown_task_pid_index_empty() {
+  local id=$1 index=$2 task
+  while IFS=$'\t' read -r task _; do
+    [ "$task" = "$id" ] || continue
+    return 1
+  done <<EOF
+$index
+EOF
+  return 0
+}
+
+teardown_unresolved_endpoint_identity_proven() {
+  local id=$1 backend=$2 target=$3 state index stable stable_again
+  local task_name task_name_again command command_again
+  TEARDOWN_UNRESOLVED_ENDPOINT_STABLE_TARGET=
+  state=$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || true)
+  case "$state" in
+    dead|missing) ;;
+    *) return 1 ;;
+  esac
+  index=$(fm_agent_task_pid_index 2>/dev/null) || return 1
+  teardown_task_pid_index_empty "$id" "$index" || return 1
+  if [ "$state" = dead ] && [ "$backend" = tmux ]; then
+    stable=$(fm_agent_tmux_window_id "$target") || return 1
+    fm_backend_source tmux || return 1
+    task_name=$(fm_backend_tmux_task_name "$stable") || return 1
+    [ "$task_name" = "fm-$id" ] || return 1
+    command=$(fm_backend_tmux_current_command "$stable") || return 1
+    command=${command#-}
+    case "$command" in
+      zsh|bash|sh|dash|ash|ksh|mksh|tcsh|csh|fish) ;;
+      *) return 1 ;;
+    esac
+    stable_again=$(fm_agent_tmux_window_id "$target") || return 1
+    [ "$stable_again" = "$stable" ] || return 1
+    task_name_again=$(fm_backend_tmux_task_name "$stable") || return 1
+    [ "$task_name_again" = "fm-$id" ] || return 1
+    command_again=$(fm_backend_tmux_current_command "$stable") || return 1
+    command_again=${command_again#-}
+    case "$command_again" in
+      zsh|bash|sh|dash|ash|ksh|mksh|tcsh|csh|fish) ;;
+      *) return 1 ;;
+    esac
+    TEARDOWN_UNRESOLVED_ENDPOINT_STABLE_TARGET=$stable
+  fi
+  return 0
+}
+
 teardown_tmux_dead_endpoint_identity_proven() {
   local id=$1 kind=$2 expected_home=$3 worktree=$4 target=$5
   local stable stable_again path path_again command command_again marker stamp_home
@@ -2011,8 +2059,13 @@ if [ "$KIND" != secondmate ]; then
     TEARDOWN_SLOT_RETAINED=1
     echo "teardown: task $ID never resolved a pooled slot path; its durable treehouse lease is RETAINED, not returned." >&2
     teardown_unresolved_lease_recovery_line "$META" "$ID"
-    if ! teardown_child_endpoint "$ID" "$META" "$KIND" "$FM_HOME" "$WT" "$BACKEND" "$T"; then
+    if ! teardown_unresolved_endpoint_identity_proven "$ID" "$BACKEND" "$T"; then
       echo "REFUSED: could not prove or close the unresolved task endpoint for $ID; preserving task state" >&2
+      exit 1
+    fi
+    if [ -n "$TEARDOWN_UNRESOLVED_ENDPOINT_STABLE_TARGET" ] \
+      && ! teardown_backend_endpoint tmux "$TEARDOWN_UNRESOLVED_ENDPOINT_STABLE_TARGET"; then
+      echo "REFUSED: could not close the unresolved task endpoint for $ID; preserving task state" >&2
       exit 1
     fi
     TOP_ENDPOINT_CLOSED=1
