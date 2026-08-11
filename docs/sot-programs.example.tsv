@@ -1,0 +1,4 @@
+# Optional home-local registry example for bin/fm-sot-pointer-check.sh.
+# Copy this shape to data/sot-programs.tsv or config/sot-programs.tsv; do not make this example live.
+# program_id	needle_regex	source_task_id,source_task_id,...
+example-program	example-program-v1\.0	example-research,example-review

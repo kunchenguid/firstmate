@@ -10,6 +10,7 @@
 #                 "BACKEND_INVALID: <name> (known: <names>)",
 #                 "STARTUP_MEMORY_BUDGET: invalid config/startup-memory-budget - <reason>",
 #                 "CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>",
+#                 "SOT_GAP: <program_id> - sources Done but no standing pointer matching /<needle>/ in captain.md|decisions/",
 #                 "FLEET_SYNC: <repo>: skipped|recovered|STUCK: <detail>",
 #                 "PR_CHECK_MIGRATION: <private remediation>",
 #                 "TANGLE: <remediation>",
@@ -1176,6 +1177,7 @@ detect_local_config() {
     echo "BOOTSTRAP_INFO: crew harness override active: $crew"
   fi
   crew_dispatch_validate
+  "$SCRIPT_DIR/fm-sot-pointer-check.sh"
   if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] \
     && ! fm_backlog_backend_manual "$CONFIG" && fm_tasks_axi_compatible; then
     echo "BOOTSTRAP_INFO: tasks-axi available"
