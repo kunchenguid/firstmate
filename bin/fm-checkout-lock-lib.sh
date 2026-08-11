@@ -10,6 +10,12 @@
 # Use fm_checkout_treehouse_return_safe with the expected lease holder for the
 # same boundary with a non-forcing `treehouse return`, which refuses rather than
 # clean an unexpectedly dirty tree or release somebody else's lease.
+# Use fm_checkout_trusted_dirs <strict|lenient> <path>... to resolve MANY
+# candidate directories in one process when a caller holds the whole set at
+# once; fm_checkout_trusted_dir is the single-path form and applies the same
+# per-path checks. Prefer the batch inside any loop over a path set: the
+# per-path form costs a process launch, so a per-path loop is what makes an
+# identity check scale with the set instead of staying flat.
 # shellcheck disable=SC2016
 
 if [ "${FM_CHECKOUT_LOCK_LIB_LOADED:-0}" = 1 ]; then
@@ -95,37 +101,166 @@ fm_checkout_lexical_path() {
   ' "$candidate" "$allow_missing"
 }
 
+# Resolve many candidate directories to trusted physical roots in ONE process.
+#
+# Per-path semantics are identical to fm_checkout_trusted_dir: resolve the path
+# lexically while lstat-ing every prefix so any symlink component is rejected,
+# require the result to be an existing directory, then require its physical
+# form (chdir + physical getcwd, i.e. `pwd -P`) to equal the lexical form.
+#
+# The batch exists because the single-path form costs a process launch, and the
+# callers below resolve one path per registered worktree. That made every
+# repository-identity check scale as a process launch per registration, which is
+# what turned a whole-pool sweep quadratic. Resolving the whole set in one
+# process removes that cost without relaxing a single check.
+#
+# Modes:
+#   strict   - print one resolved path per input; fail if ANY input is untrusted.
+#   lenient  - print one non-empty tagged line per input in input order: `+path`
+#              for a trusted path and `-` for an untrusted path, then succeed.
+#              Callers that must tolerate an individual unresolvable path (a
+#              stale inventory entry) use this and decide per entry, exactly as
+#              a per-path call would have let them.
+fm_checkout_trusted_dirs() {
+  local mode=$1
+  shift
+  case "$mode" in strict|lenient) ;; *) return 1 ;; esac
+  [ "$#" -gt 0 ] || return 0
+  fm_checkout_system_perl -MCwd=getcwd -MErrno=ENOENT -MFile::Spec -e '
+    my $mode = shift @ARGV;
+    my $base = getcwd();
+    exit 1 if !defined($base) || $base !~ m{^/};
+    for my $raw (@ARGV) {
+      my $resolved = resolve($raw, $base);
+      if (!defined $resolved) {
+        exit 1 if $mode eq q{strict};
+        print qq{-\n};
+        next;
+      }
+      print(($mode eq q{lenient} ? q{+} : q{}) . $resolved . qq{\n});
+    }
+    exit 0;
+
+    sub resolve {
+      my ($raw, $base) = @_;
+      return undef if !defined($raw) || $raw eq q{} || $raw =~ /[\0\r\n]/;
+      my @stack;
+      if (!File::Spec->file_name_is_absolute($raw)) {
+        @stack = grep { $_ ne q{} } split m{/+}, $base;
+      }
+      # Component walk identical to fm_checkout_lexical_path with
+      # allow_missing=0, including its treatment of a missing prefix and a
+      # non-ENOENT lstat failure.
+      my $missing = 0;
+      for my $component (split m{/+}, $raw) {
+        next if $component eq q{} || $component eq q{.};
+        if ($component eq q{..}) {
+          pop @stack if @stack;
+        } else {
+          push @stack, $component;
+        }
+        my $current = q{/} . join q{/}, @stack;
+        if (lstat($current)) {
+          return undef if -l _;
+          $missing = 0;
+        } elsif ($! == ENOENT) {
+          $missing = 1;
+        } else {
+          return undef;
+        }
+      }
+      return undef if $missing;
+      my $lexical = q{/} . join(q{/}, @stack);
+      return undef if !-d $lexical;
+      return undef if !chdir($lexical);
+      my $physical = getcwd();
+      return undef if !defined($physical) || $physical ne $lexical;
+      return $lexical;
+    }
+  ' "$mode" "$@"
+}
+
 fm_checkout_trusted_dir() {
-  local candidate=$1 lexical physical
-  lexical=$(fm_checkout_lexical_path "$candidate" 0) || return 1
-  [ -d "$lexical" ] || return 1
-  physical=$(cd "$lexical" 2>/dev/null && pwd -P) || return 1
-  [ "$physical" = "$lexical" ] || return 1
-  printf '%s\n' "$physical"
+  local resolved
+  resolved=$(fm_checkout_trusted_dirs strict "$1") || return 1
+  [ -n "$resolved" ] || return 1
+  printf '%s\n' "$resolved"
 }
 
 fm_checkout_git_common_dir() {
-  fm_checkout_validate_git_metadata "$1"
+  fm_checkout_validate_git_metadata "$@"
 }
 
+# Every check below is the same check this function has always made. What
+# changed is how many processes they cost: the Git queries are asked once
+# together, and every path this function must trust is resolved in a single
+# batch instead of one process launch per path unless the caller supplies an
+# already-trusted registration snapshot. The registration walk is the
+# reason that mattered - it resolves one path per registered worktree, so the
+# old per-path form made a single identity check scale with the repository's
+# worktree count, and any caller that ran it per worktree scale quadratically.
 fm_checkout_validate_git_metadata() {
-  local checkout=$1 root metadata absolute_git common top listed line listed_root found=0
+  local checkout=$1 trusted_registrations_file=${2:-} root metadata rev_output listed line resolved_output
+  local absolute_git common top registrations index found=0
+  local -a probe resolved registration_roots
   root=$(fm_checkout_trusted_dir "$checkout") || return 1
   metadata="$root/.git"
   [ -e "$metadata" ] && [ ! -L "$metadata" ] || return 1
-  absolute_git=$(git -C "$root" rev-parse --absolute-git-dir 2>/dev/null) || return 1
-  absolute_git=$(fm_checkout_trusted_dir "$absolute_git") || return 1
-  common=$(git -C "$root" rev-parse --git-common-dir 2>/dev/null) || return 1
+  rev_output=$(git -C "$root" rev-parse --absolute-git-dir --git-common-dir --show-toplevel 2>/dev/null) || return 1
+  absolute_git=''
+  common=''
+  top=''
+  {
+    IFS= read -r absolute_git
+    IFS= read -r common
+    IFS= read -r top
+  } <<EOF
+$rev_output
+EOF
+  [ -n "$absolute_git" ] && [ -n "$common" ] && [ -n "$top" ] || return 1
   case "$common" in
     /*) ;;
     *) common="$root/$common" ;;
   esac
-  common=$(fm_checkout_trusted_dir "$common") || return 1
-  top=$(git -C "$root" rev-parse --show-toplevel 2>/dev/null) || return 1
-  top=$(fm_checkout_trusted_dir "$top") || return 1
+  # Batch layout: the three Git-reported paths, then the `.git` directory when
+  # there is one to compare, then every registration. Registrations are last so
+  # their offset is a single fixed base regardless of the metadata shape.
+  probe=("$absolute_git" "$common" "$top")
+  if [ -d "$metadata" ]; then
+    probe+=("$metadata")
+    registrations=4
+  else
+    registrations=3
+  fi
+  if [ -z "$trusted_registrations_file" ]; then
+    listed=$(git -C "$root" worktree list --porcelain 2>/dev/null) || return 1
+    while IFS= read -r line; do
+      case "$line" in
+        "worktree "*) probe+=("${line#worktree }") ;;
+      esac
+    done <<EOF
+$listed
+EOF
+  else
+    [ -f "$trusted_registrations_file" ] && [ ! -L "$trusted_registrations_file" ] \
+      && [ -r "$trusted_registrations_file" ] || return 1
+  fi
+  # Strict mode: an untrusted path anywhere in this set fails the whole
+  # validation, exactly as each individual `|| return 1` did before.
+  resolved_output=$(fm_checkout_trusted_dirs strict "${probe[@]}") || return 1
+  resolved=()
+  while IFS= read -r line; do
+    resolved+=("$line")
+  done <<EOF
+$resolved_output
+EOF
+  [ "${#resolved[@]}" -eq "${#probe[@]}" ] || return 1
+  absolute_git=${resolved[0]}
+  common=${resolved[1]}
+  top=${resolved[2]}
   [ "$top" = "$root" ] || return 1
   if [ -d "$metadata" ]; then
-    [ "$(fm_checkout_trusted_dir "$metadata")" = "$absolute_git" ] || return 1
+    [ "${resolved[3]}" = "$absolute_git" ] || return 1
     [ "$absolute_git" = "$common" ] || return 1
   elif [ -f "$metadata" ]; then
     if [ "$absolute_git" != "$common" ]; then
@@ -134,25 +269,34 @@ fm_checkout_validate_git_metadata() {
   else
     return 1
   fi
-  listed=$(git -C "$root" worktree list --porcelain 2>/dev/null) || return 1
-  while IFS= read -r line; do
-    case "$line" in
-      "worktree "*)
-        listed_root=$(fm_checkout_trusted_dir "${line#worktree }" 2>/dev/null) || return 1
-        if [ "$listed_root" = "$root" ]; then
-          found=$((found + 1))
-        elif [ -f "$metadata" ] && [ "$absolute_git" = "$common" ] \
-          && [ "$listed_root" = "$common" ]; then
-          # An absorbed submodule's worktree listing identifies its common
-          # Git directory rather than the checked-out root. The exact
-          # show-toplevel proof above binds that Git directory back to root.
-          found=$((found + 1))
-        fi
-        ;;
-    esac
-  done <<EOF
-$listed
-EOF
+  registration_roots=()
+  if [ -n "$trusted_registrations_file" ]; then
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in
+        /*) ;;
+        *) return 1 ;;
+      esac
+      case "$line" in *$'\t'*|*$'\r'*|*$'\n'*) return 1 ;; esac
+      registration_roots+=("$line")
+    done < "$trusted_registrations_file"
+  else
+    index=$registrations
+    while [ "$index" -lt "${#resolved[@]}" ]; do
+      registration_roots+=("${resolved[$index]}")
+      index=$((index + 1))
+    done
+  fi
+  for line in "${registration_roots[@]}"; do
+    if [ "$line" = "$root" ]; then
+      found=$((found + 1))
+    elif [ -f "$metadata" ] && [ "$absolute_git" = "$common" ] \
+      && [ "$line" = "$common" ]; then
+      # An absorbed submodule's worktree listing identifies its common
+      # Git directory rather than the checked-out root. The exact
+      # show-toplevel proof above binds that Git directory back to root.
+      found=$((found + 1))
+    fi
+  done
   [ "$found" -eq 1 ] || return 1
   printf '%s\n' "$common"
 }

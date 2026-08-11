@@ -82,6 +82,14 @@
 #   fm-checkout-refresh.sh ensure
 #   fm-checkout-refresh.sh install
 #
+# `pool-preflight` runs on the spawn path, so its cost is a contract, not an
+# implementation detail: it must scale with the pool being spawned into and not
+# with the size of the fleet. It scopes the machine-wide Treehouse inventory to
+# the target repository's own registration list before inspecting anything, and
+# derives each repository-wide fact once per run rather than once per worktree.
+# tests/fm-checkout-refresh.test.sh and tests/fm-checkout-identity-cost.test.sh
+# pin that shape by counting processes.
+#
 # `install` and `ensure` dispatch through the scheduler adapter seam.
 # macOS launchd is the implemented primary-fleet adapter.
 # Linux currently has no cron/systemd adapter and reports that limitation
@@ -232,14 +240,30 @@ canonical_dir() {
   fm_checkout_trusted_dir "$1"
 }
 
-exact_git_root() {
-  local candidate=$1 canonical top canonical_top
+# Resolve an exact Git root WITHOUT a command substitution, so the caller can
+# also reuse the repository identity this already had to prove.
+#
+# The show-toplevel round that used to sit here was a duplicate:
+# fm_checkout_validate_git_metadata makes exactly that assertion internally
+# (it resolves --show-toplevel, trusts it, and requires it to equal the root),
+# so the accept/reject set is unchanged and only the duplicate work is gone.
+# RESOLVED_GIT_COMMON is validate's own return value for this same root, so a
+# caller that needs the common Git directory must not ask for it again.
+RESOLVED_GIT_ROOT=
+RESOLVED_GIT_COMMON=
+resolve_exact_git_root() {
+  local candidate=$1 trusted_registrations_file=${2:-} canonical common
+  RESOLVED_GIT_ROOT=
+  RESOLVED_GIT_COMMON=
   canonical=$(canonical_dir "$candidate") || return 1
-  top=$(git -C "$canonical" rev-parse --show-toplevel 2>/dev/null) || return 1
-  canonical_top=$(canonical_dir "$top") || return 1
-  [ "$canonical" = "$canonical_top" ] || return 1
-  fm_checkout_validate_git_metadata "$canonical" >/dev/null || return 1
-  printf '%s\n' "$canonical"
+  common=$(fm_checkout_validate_git_metadata "$canonical" "$trusted_registrations_file") || return 1
+  RESOLVED_GIT_ROOT=$canonical
+  RESOLVED_GIT_COMMON=$common
+}
+
+exact_git_root() {
+  resolve_exact_git_root "$1" || return 1
+  printf '%s\n' "$RESOLVED_GIT_ROOT"
 }
 
 require_exact_git_root() {
@@ -551,15 +575,45 @@ if failed:
 PY
 }
 
+# On success this also publishes the worktree identity it had to prove, so a
+# sweeping caller can consume those facts instead of recomputing them. They are
+# the exact values this function validated for this same call.
+BACKING_CHECKOUT_ROOT=
+BACKING_CHECKOUT_COMMON=
 backing_checkout() {
-  local worktree=$1 pool=$2 state=$3 worktree_root pool_root state_root main
+  local worktree=$1 pool=$2 state=$3 registrations_file=${4:-}
+  local worktree_root pool_root state_root main state_parent
   local worktree_common main_common listed line listed_root listed_roots matches=0
-  worktree_root=$(exact_git_root "$worktree") || return 1
-  pool_root=$(canonical_dir "$pool") || return 1
+  BACKING_CHECKOUT_ROOT=
+  BACKING_CHECKOUT_COMMON=
+  resolve_exact_git_root "$worktree" "$registrations_file" || return 1
+  worktree_root=$RESOLVED_GIT_ROOT
+  # The repository identity of this worktree, proven a line above by the same
+  # validation that used to be repeated below as fm_checkout_git_common_dir.
+  worktree_common=$RESOLVED_GIT_COMMON
+  # The pool is constant across a whole-pool sweep, so canonicalize it once for
+  # that sweep instead of once per worktree. Memoized on the raw string, so a
+  # hit can only ever return the answer that same string already produced.
+  if [ "${BACKING_CHECKOUT_POOL_CACHE:-0}" = 1 ] && [ "${BC_CACHE_POOLROOT_RAW:-}" = "$pool" ] \
+    && [ -n "${BC_CACHE_POOLROOT:-}" ]; then
+    pool_root=$BC_CACHE_POOLROOT
+  else
+    pool_root=$(canonical_dir "$pool") || return 1
+    if [ "${BACKING_CHECKOUT_POOL_CACHE:-0}" = 1 ]; then
+      BC_CACHE_POOLROOT_RAW=$pool
+      BC_CACHE_POOLROOT=$pool_root
+    fi
+  fi
   [ "$worktree_root" != "$pool_root" ] || return 1
   case "$worktree_root" in "$pool_root"/*) ;; *) return 1 ;; esac
   [ -f "$state" ] && [ ! -L "$state" ] && [ -r "$state" ] || return 1
-  state_root=$(canonical_dir "$(dirname "$state")") || return 1
+  state_parent=${state%/*}
+  if [ -n "$state_parent" ] && [ "$state_parent" = "$pool" ]; then
+    # Same raw string as the pool just canonicalized, so this is that answer.
+    state_root=$pool_root
+  else
+    state_root=$(canonical_dir "$(dirname "$state")") || return 1
+  fi
   [ "$state_root" = "$pool_root" ] || return 1
   [ "$(basename "$state")" = treehouse-state.json ] || return 1
   python3 - "$state" "$worktree_root" <<'PY' || return 1
@@ -603,40 +657,51 @@ PY
   # as before, recomputing everything - which is what a one-off destructive
   # decision should do.
   #
-  # The cache is keyed on the pool and is only ever consulted for that same pool,
-  # so it can never leak one repository's answers into another's.
-  if [ "${BACKING_CHECKOUT_POOL_CACHE:-0}" = 1 ] && [ "${BC_CACHE_POOL:-}" = "$pool_root" ]; then
+  # The cache is keyed on the pool and registration snapshot, so it can never
+  # leak one repository's answers into another's.
+  if [ "${BACKING_CHECKOUT_POOL_CACHE:-0}" = 1 ] && [ "${BC_CACHE_POOL:-}" = "$pool_root" ] \
+      && [ "${BC_CACHE_REGISTRY_FILE:-}" = "$registrations_file" ]; then
     main=$BC_CACHE_MAIN
     main_common=$BC_CACHE_MAIN_COMMON
     listed_roots=$BC_CACHE_LISTED_ROOTS
   else
-    listed=$(git -C "$worktree_root" -c core.quotePath=false worktree list --porcelain 2>/dev/null) || return 1
-    main=$(printf '%s\n' "$listed" | sed -n 's/^worktree //p' | sed -n '1p')
-    [ -n "$main" ] || return 1
-    main=$(exact_git_root "$main") || return 1
-    main_common=$(fm_checkout_git_common_dir "$main") || return 1
-    # Canonicalize every registration ONCE. Downstream this is pure string
-    # comparison, so the per-worktree cost of alias detection becomes zero.
-    listed_roots=''
-    while IFS= read -r line; do
-      case "$line" in
-        worktree\ *)
-          listed_root=$(canonical_dir "${line#worktree }" 2>/dev/null) || continue
-          listed_roots="${listed_roots}${listed_root}"$'\n'
-          ;;
-      esac
-    done <<EOF
+    if [ -n "$registrations_file" ]; then
+      [ -f "$registrations_file" ] && [ ! -L "$registrations_file" ] \
+        && [ -r "$registrations_file" ] || return 1
+      IFS= read -r main < "$registrations_file" || return 1
+      listed_roots=$(< "$registrations_file")
+      resolve_exact_git_root "$main" "$registrations_file" || return 1
+      main=$RESOLVED_GIT_ROOT
+      main_common=$RESOLVED_GIT_COMMON
+    else
+      listed=$(git -C "$worktree_root" -c core.quotePath=false worktree list --porcelain 2>/dev/null) || return 1
+      main=$(printf '%s\n' "$listed" | sed -n 's/^worktree //p' | sed -n '1p')
+      [ -n "$main" ] || return 1
+      main=$(exact_git_root "$main") || return 1
+      main_common=$(fm_checkout_git_common_dir "$main") || return 1
+      # Canonicalize every registration ONCE. Downstream this is pure string
+      # comparison, so the per-worktree cost of alias detection becomes zero.
+      listed_roots=''
+      while IFS= read -r line; do
+        case "$line" in
+          worktree\ *)
+            listed_root=$(canonical_dir "${line#worktree }" 2>/dev/null) || continue
+            listed_roots="${listed_roots}${listed_root}"$'\n'
+            ;;
+        esac
+      done <<EOF
 $listed
 EOF
+    fi
     if [ "${BACKING_CHECKOUT_POOL_CACHE:-0}" = 1 ]; then
       BC_CACHE_POOL=$pool_root
+      BC_CACHE_REGISTRY_FILE=$registrations_file
       BC_CACHE_MAIN=$main
       BC_CACHE_MAIN_COMMON=$main_common
       BC_CACHE_LISTED_ROOTS=$listed_roots
     fi
   fi
   [ "$main" != "$worktree_root" ] || return 1
-  worktree_common=$(fm_checkout_git_common_dir "$worktree_root") || return 1
   [ "$worktree_common" = "$main_common" ] || return 1
   # Alias detection: prove exactly one registration resolves to THIS worktree.
   # Pure string comparison over the already-canonicalized registrations above, so
@@ -650,6 +715,8 @@ EOF
 $listed_roots
 EOF
   [ "$matches" -eq 1 ] || return 1
+  BACKING_CHECKOUT_ROOT=$worktree_root
+  BACKING_CHECKOUT_COMMON=$worktree_common
   printf '%s\n' "$main"
 }
 
@@ -2844,11 +2911,38 @@ preflight() {
   return 0
 }
 
+# Emit the exact Git roots this repository has registered, one per line.
+#
+# This is the authoritative membership list for "is that directory a worktree of
+# THIS repository", and it is ONE fact about ONE repository: one `git worktree
+# list`, then one batched canonicalization of everything it reported. Deriving
+# it per candidate directory - which is what asking each candidate for its own
+# common Git directory amounts to - is what made a whole-pool sweep scale as
+# candidates x registrations instead of candidates + registrations.
+registered_worktree_roots() {
+  local source=$1 listed line registration_output
+  local -a registrations
+  listed=$(GIT_OPTIONAL_LOCKS=0 git -C "$source" -c core.quotePath=false worktree list --porcelain 2>/dev/null) || return 1
+  registrations=()
+  while IFS= read -r line; do
+    case "$line" in
+      "worktree "*) registrations+=("${line#worktree }") ;;
+    esac
+  done <<EOF
+$listed
+EOF
+  [ "${#registrations[@]}" -gt 0 ] || return 1
+  registration_output=$(fm_checkout_trusted_dirs strict "${registrations[@]}") || return 1
+  printf '%s\n' "$registration_output"
+}
+
 pool_preflight() {
-  local expected_source=$1 expected_common treehouse_paths treehouse_state pool worktree canonical common dirty example failed=0 probe_common
-  expected_source=$(require_exact_git_root "$expected_source" "expected Treehouse source") || return 1
-  expected_common=$(fm_checkout_git_common_dir "$expected_source") || {
-    echo "error: cannot resolve expected Treehouse repository identity for $expected_source" >&2
+  local expected_source=$1 expected_source_input=$1 expected_common treehouse_paths treehouse_state pool worktree
+  local canonical common dirty example failed=0 line index
+  local registry_file scoped_file joined_file canonical_output canonical_valid
+  local -a rows_state rows_pool rows_worktree rows_canonical
+  expected_source=$(canonical_dir "$expected_source") || {
+    echo "error: expected Treehouse source must be an exact inspectable Git repository root: $expected_source_input" >&2
     return 1
   }
   treehouse_paths=$(mktemp "${TMPDIR:-/tmp}/fm-checkout-refresh-pool.XXXXXX") || return 1
@@ -2856,60 +2950,153 @@ pool_preflight() {
     rm -f "$treehouse_paths"
     return 1
   fi
-  # This sweep walks one pool's worktrees, all of which share a repository, so
-  # let backing_checkout reuse its pool-scoped facts across them instead of
-  # recomputing per worktree. Scoped to this loop and cleared straight after, so
-  # no other caller inherits a cache. See backing_checkout for the rationale.
+  registry_file=$(mktemp "${TMPDIR:-/tmp}/fm-checkout-refresh-registry.XXXXXX") || {
+    rm -f "$treehouse_paths"
+    return 1
+  }
+  joined_file=$(mktemp "${TMPDIR:-/tmp}/fm-checkout-refresh-joined.XXXXXX") || {
+    rm -f "$treehouse_paths" "$registry_file"
+    return 1
+  }
+  scoped_file=$(mktemp "${TMPDIR:-/tmp}/fm-checkout-refresh-scoped.XXXXXX") || {
+    rm -f "$treehouse_paths" "$registry_file" "$joined_file"
+    return 1
+  }
+  if ! registered_worktree_roots "$expected_source" > "$registry_file"; then
+    echo "error: cannot enumerate the registered worktrees of $expected_source" >&2
+    rm -f "$treehouse_paths" "$registry_file" "$joined_file" "$scoped_file"
+    return 1
+  fi
+  resolve_exact_git_root "$expected_source" "$registry_file" || {
+    echo "error: expected Treehouse source must be an exact inspectable Git repository root: $expected_source" >&2
+    rm -f "$treehouse_paths" "$registry_file" "$joined_file" "$scoped_file"
+    return 1
+  }
+  expected_source=$RESOLVED_GIT_ROOT
+  expected_common=$RESOLVED_GIT_COMMON
+  # An empty membership list would silently scope every pool worktree away, so
+  # treat it as a contradiction rather than as "this pool holds nothing of ours".
+  # The identity proof above already required these registrations to resolve, so
+  # reaching here means the repository changed underneath the preflight.
+  if [ ! -s "$registry_file" ]; then
+    echo "error: $expected_source reported no usable registered worktrees; refusing to scope the pool inspection" >&2
+    rm -f "$treehouse_paths" "$registry_file" "$joined_file" "$scoped_file"
+    return 1
+  fi
+  rows_state=()
+  rows_pool=()
+  rows_worktree=()
+  while IFS=$'\t' read -r treehouse_state pool worktree; do
+    [ -n "$worktree" ] || continue
+    rows_state+=("$treehouse_state")
+    rows_pool+=("$pool")
+    rows_worktree+=("$worktree")
+  done < "$treehouse_paths"
+  rm -f "$treehouse_paths"
+  rows_canonical=()
+  if [ "${#rows_worktree[@]}" -gt 0 ]; then
+    # Lenient: a Treehouse inventory can name a path that no longer resolves, and
+    # one stale entry must not fail the whole preflight. Output is positional and
+    # every row is non-empty, so an unresolvable entry stays attached to its own
+    # row and is decided on its own below.
+    canonical_output=$(fm_checkout_trusted_dirs lenient "${rows_worktree[@]}") || canonical_output=''
+    canonical_valid=1
+    while IFS= read -r line; do
+      case "$line" in
+        +/*) rows_canonical+=("${line#+}") ;;
+        -) rows_canonical+=('') ;;
+        *) canonical_valid=0 ;;
+      esac
+    done <<EOF
+$canonical_output
+EOF
+    if [ "$canonical_valid" -ne 1 ] \
+        || [ "${#rows_canonical[@]}" -ne "${#rows_worktree[@]}" ]; then
+      # Alignment is the only thing that makes the scoping safe. If it is not
+      # exact, do not guess: treat every row as needing full inspection.
+      rows_canonical=()
+      index=0
+      while [ "$index" -lt "${#rows_worktree[@]}" ]; do
+        rows_canonical+=('')
+        index=$((index + 1))
+      done
+    fi
+  fi
+  {
+    index=0
+    while [ "$index" -lt "${#rows_worktree[@]}" ]; do
+      printf '%s\t%s\t%s\t%s\n' "${rows_state[$index]}" "${rows_pool[$index]}" \
+        "${rows_worktree[$index]}" "${rows_canonical[$index]}"
+      index=$((index + 1))
+    done
+  } > "$joined_file"
+  # POOL SCOPING. This inventory covers every Treehouse worktree on the machine,
+  # but the checks below only ever report on worktrees of THIS repository - the
+  # `common = expected_common` test used to discard every other one only after
+  # the full per-worktree inspection had already been paid for. That inspection
+  # is not cheap: proving one worktree's identity resolves every registration of
+  # whatever repository it belongs to, so the sweep cost scaled as
+  # (worktrees on the machine) x (registrations per repository) and grew with
+  # total fleet size rather than with the pool being spawned into. It was the
+  # dominant cost of every spawn.
+  #
+  # So decide membership from the one authoritative list instead. A directory is
+  # a worktree of this repository exactly when this repository has it registered,
+  # and `registered_worktree_roots` is that list, computed once. Everything below
+  # already required it: passing backing_checkout and the identity comparison is
+  # only possible for a path this repository registers exactly once.
+  #
+  # Fail-safe by construction. A row is skipped only when its path resolved AND
+  # is provably absent from this repository's registrations. A row whose path did
+  # not resolve carries an empty fourth field and falls through to the full
+  # inspection below, unchanged, so an uninspectable worktree is still inspected
+  # and still reported exactly as before. This can never skip a worktree of ours.
+  #
+  # The join is a single linear pass, so scoping itself costs no per-worktree
+  # process launches and does not grow with unrelated repositories.
+  if ! awk -F'\t' '
+    NR == FNR { registered[$0] = 1; next }
+    $4 == "" || ($4 in registered) { print }
+  ' "$registry_file" "$joined_file" > "$scoped_file"; then
+    echo "error: cannot scope the Treehouse pool inventory for $expected_source" >&2
+    rm -f "$registry_file" "$joined_file" "$scoped_file"
+    return 1
+  fi
+  rm -f "$joined_file"
+  # The surviving rows share one pool and one repository, so let backing_checkout
+  # reuse its pool-scoped facts across them instead of recomputing per worktree.
+  # Scoped to this loop and cleared straight after, so no other caller inherits a
+  # cache. See backing_checkout for the rationale.
   BACKING_CHECKOUT_POOL_CACHE=1
   BC_CACHE_POOL=''
   BC_CACHE_MAIN=''
   BC_CACHE_MAIN_COMMON=''
   BC_CACHE_LISTED_ROOTS=''
-  while IFS=$'\t' read -r treehouse_state pool worktree; do
+  BC_CACHE_REGISTRY_FILE=''
+  BC_CACHE_POOLROOT_RAW=''
+  BC_CACHE_POOLROOT=''
+  while IFS=$'\t' read -r treehouse_state pool worktree canonical; do
     [ -n "$worktree" ] || continue
-    # FOREIGN-POOL SHORT CIRCUIT. This loop visits every Treehouse worktree on the
-    # machine, but the checks below only ever report on worktrees belonging to
-    # THIS repository - the `common = expected_common` test further down discards
-    # every other one after the expensive work has already been paid for.
-    #
-    # That was the whole spawn cost. `backing_checkout` runs `git worktree list`
-    # and then calls exact_git_root on EVERY listed worktree, so across a pool it
-    # is quadratic in registered worktrees; run over unrelated multi-gigabyte
-    # pools it dominated everything. Measured before this change: 343 seconds of
-    # preflight to spawn into a 12 MB repository, paid on every single launch and
-    # growing with total fleet size rather than with the repo being spawned into.
-    #
-    # So ask the cheap question first: does this worktree even belong to the
-    # repository we are preflighting? fm_checkout_git_common_dir is a metadata
-    # read, not a traversal, and it is the SAME identity comparison the loop
-    # already relies on below.
-    #
-    # Fail-safe by construction: we skip only when the probe SUCCEEDS and
-    # positively proves the worktree belongs to a different repository. If the
-    # probe fails for any reason, we fall through to the original path unchanged,
-    # so an unreadable worktree is still inspected and still reported exactly as
-    # before. This can never skip a worktree that is ours.
-    probe_common=$(fm_checkout_git_common_dir "$worktree" 2>/dev/null) || probe_common=''
-    if [ -n "$probe_common" ] && [ "$probe_common" != "$expected_common" ]; then
-      continue
-    fi
-    # A worktree we cannot fully inspect is SKIPPED, not fatal. The preflight
-    # iterates every Treehouse worktree in every pool, so a single busy,
-    # foreign, or half-torn-down worktree anywhere (including unrelated pools)
-    # must not cap acquisition for THIS pool - Treehouse pools grow, and acquire
-    # creates a fresh clean slot when no existing one is reusable. This mirrors
-    # the dirty-worktree case below, which already skips without failing. We can
-    # only confirm a worktree belongs to the target pool AFTER inspecting it, so
-    # an uninspectable one is by definition not provably ours to block on.
-    backing_checkout "$worktree" "$pool" "$treehouse_state" >/dev/null 2>&1 || {
+    # A worktree we cannot fully inspect is SKIPPED, not fatal. A single busy,
+    # foreign, or half-torn-down worktree must not cap acquisition for THIS pool
+    # - Treehouse pools grow, and acquire creates a fresh clean slot when no
+    # existing one is reusable. This mirrors the dirty-worktree case below, which
+    # already skips without failing. We can only confirm a worktree belongs to
+    # the target pool AFTER inspecting it, so an uninspectable one is by
+    # definition not provably ours to block on.
+    backing_checkout "$worktree" "$pool" "$treehouse_state" "$registry_file" >/dev/null 2>&1 || {
       echo "checkout-refresh: skipped: Treehouse worktree identity or registration is not inspectable: $worktree" >&2
       continue
     }
-    canonical=$(exact_git_root "$worktree" 2>/dev/null) || {
+    # backing_checkout just proved both of these for this same worktree, by the
+    # same validation the separate calls here used to repeat.
+    canonical=$BACKING_CHECKOUT_ROOT
+    common=$BACKING_CHECKOUT_COMMON
+    [ -n "$canonical" ] || {
       echo "checkout-refresh: skipped: Treehouse worktree is not an exact Git root: $worktree" >&2
       continue
     }
-    common=$(fm_checkout_git_common_dir "$canonical") || {
+    [ -n "$common" ] || {
       echo "checkout-refresh: skipped: Treehouse repository identity is not inspectable: $canonical" >&2
       continue
     }
@@ -2921,8 +3108,9 @@ pool_preflight() {
     [ -n "$dirty" ] || continue
     example=$(first_line "$dirty")
     echo "$canonical: skipped: dirty Treehouse pool worktree remains unavailable for acquisition ($example)" >&2
-  done < "$treehouse_paths"
-  rm -f "$treehouse_paths"
+  done < "$scoped_file"
+  rm -f "$registry_file" "$scoped_file"
+  BACKING_CHECKOUT_POOL_CACHE=0
   # 'failed' is retained for future in-pool-fatal conditions; today no inspection
   # skip is fatal, so preflight succeeds and lets acquire find or grow a slot.
   [ "$failed" -eq 0 ]

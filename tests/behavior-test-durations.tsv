@@ -42,6 +42,7 @@
 1875	tests/fm-brief.test.sh
 3000	tests/fm-captain-item-check.test.sh
 13892	tests/fm-cd-pretool-check.test.sh
+2107	tests/fm-checkout-identity-cost.test.sh
 475500	tests/fm-checkout-refresh.test.sh
 336	tests/fm-checkout-return-boundary.test.sh
 263	tests/fm-composer-ghost.test.sh

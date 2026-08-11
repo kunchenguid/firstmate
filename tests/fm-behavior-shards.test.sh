@@ -12,6 +12,41 @@ CI="$ROOT/.github/workflows/ci.yml"
 TEARDOWN_SUITE="$ROOT/tests/fm-teardown-suite.sh"
 SHARD_COUNT=8
 
+# The runner invokes each assigned test as a program ("$ROOT/$path"), not via an
+# interpreter, so a behavior test that is not executable cannot run at all.
+#
+# This guard exists because that failure is SILENT in the worst way. A test file
+# committed without its execute bit exits 126 the moment the shard runner reaches
+# it, which reads as "this test failed" - but the test never executed, so whatever
+# invariant it was written to protect went completely unguarded while the suite
+# still looked like it had run. A guard that cannot execute is worse than no
+# guard: it buys false confidence. It also survives every local run made with
+# `bash tests/<name>.test.sh`, because an interpreter ignores the execute bit that
+# the runner requires.
+#
+# Both the working tree and the recorded index mode are checked. The index mode is
+# what a CI checkout materializes, so a file that is executable locally but
+# committed 100644 fails here rather than only in CI.
+test_every_behavior_test_is_executable() {
+  local file recorded name
+  local -a not_executable wrong_mode
+  not_executable=()
+  wrong_mode=()
+  for file in "$ROOT"/tests/*.test.sh; do
+    [ -e "$file" ] || continue
+    name=tests/$(basename "$file")
+    [ -x "$file" ] || not_executable+=("$name")
+    recorded=$(git -C "$ROOT" ls-files -s -- "$name" 2>/dev/null | awk '{print $1}')
+    # Untracked drafts have no recorded mode; only committed tests are bound here.
+    [ -z "$recorded" ] || [ "$recorded" = 100755 ] || wrong_mode+=("$name ($recorded)")
+  done
+  [ "${#not_executable[@]}" -eq 0 ] || fail \
+    "behavior tests are not executable, so the shard runner cannot run them and their assertions are silently skipped: ${not_executable[*]}"
+  [ "${#wrong_mode[@]}" -eq 0 ] || fail \
+    "behavior tests are committed without mode 100755, so a CI checkout cannot execute them: ${wrong_mode[*]}"
+  pass "every behavior test is executable in the working tree and committed 100755"
+}
+
 test_checked_in_plan_is_complete_balanced_and_deterministic() {
   local tmp plan_a plan_b inventory planned expected_count out
   tmp=$(fm_test_tmproot fm-behavior-plan)
@@ -274,6 +309,7 @@ test_teardown_partition_preserves_every_full_suite_case() {
   pass "teardown wrappers preserve all 143 normal cases and three focused-only cases"
 }
 
+test_every_behavior_test_is_executable
 test_checked_in_plan_is_complete_balanced_and_deterministic
 test_plan_refuses_missing_and_duplicate_duration_entries
 test_runner_executes_every_assigned_test_and_records_failures
