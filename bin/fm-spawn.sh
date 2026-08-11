@@ -239,6 +239,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-control-lib.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
+# shellcheck source=bin/fm-treehouse-lock-lib.sh
+. "$SCRIPT_DIR/fm-treehouse-lock-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$SCRIPT_DIR/fm-busy-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
@@ -679,6 +681,41 @@ parse_orca_worktree_result() {
   fi
 }
 
+# Same transient-lock retry teardown_treehouse_return (bin/fm-teardown.sh) applies
+# to an ordinary return, scoped to the one signature that self-heals: a killed
+# crew process's index.lock. Any other failure returns immediately.
+spawn_return_durable_treehouse_lease() {
+  local wt=$1 out max_retries retry_wait attempt=0
+  if out=$( ( cd "$PROJ_ABS" && treehouse return --force "$wt" ) 2>&1 ); then
+    [ -z "$out" ] || printf '%s\n' "$out" >&2
+    return 0
+  fi
+  if ! treehouse_return_is_index_lock_error "$out"; then
+    [ -z "$out" ] || printf '%s\n' "$out" >&2
+    return 1
+  fi
+  max_retries=${FM_TREEHOUSE_RETURN_LOCK_RETRIES:-3}
+  case "$max_retries" in ''|*[!0-9]*) max_retries=3 ;; esac
+  retry_wait=${FM_TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS:-1}
+  case "$retry_wait" in ''|*[!0-9.]*) retry_wait=1 ;; esac
+  while [ "$attempt" -lt "$max_retries" ]; do
+    attempt=$((attempt + 1))
+    echo "warning: durable lease return for '$wt' hit a transient git index.lock after an aborted spawn of $ID; waiting ${retry_wait}s and retrying ($attempt/$max_retries)" >&2
+    sleep "$retry_wait"
+    if out=$( ( cd "$PROJ_ABS" && treehouse return --force "$wt" ) 2>&1 ); then
+      [ -z "$out" ] || printf '%s\n' "$out" >&2
+      echo "warning: durable lease return for '$wt' succeeded on retry after an aborted spawn of $ID" >&2
+      return 0
+    fi
+    if ! treehouse_return_is_index_lock_error "$out"; then
+      [ -z "$out" ] || printf '%s\n' "$out" >&2
+      return 1
+    fi
+  done
+  [ -z "$out" ] || printf '%s\n' "$out" >&2
+  return 1
+}
+
 spawn_abort_cleanup() {
   local status=$?
   if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ] \
@@ -755,7 +792,7 @@ spawn_abort_cleanup() {
     TREEHOUSE_ABORT_CLEANUP=0
     if [ -n "${TREEHOUSE_ABORT_WT:-}" ]; then
       if command -v treehouse >/dev/null 2>&1; then
-        ( cd "$PROJ_ABS" && treehouse return --force "$TREEHOUSE_ABORT_WT" >/dev/null ) || \
+        spawn_return_durable_treehouse_lease "$TREEHOUSE_ABORT_WT" || \
           echo "warning: could not return durably leased worktree '$TREEHOUSE_ABORT_WT' after an aborted spawn of $ID; the pool slot may remain leased" >&2
       else
         echo "warning: could not return durably leased worktree '$TREEHOUSE_ABORT_WT' after an aborted spawn of $ID; treehouse command not found" >&2

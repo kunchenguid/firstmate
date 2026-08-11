@@ -174,6 +174,16 @@ SH
 #!/usr/bin/env bash
 set -u
 [ -z "${FM_TREEHOUSE_REC:-}" ] || printf 'treehouse %s\n' "$*" >> "$FM_TREEHOUSE_REC"
+if [ "${1:-}" = return ] && [ -n "${FM_TREEHOUSE_RETURN_ATTEMPTS_FILE:-}" ]; then
+  n=0
+  [ ! -f "$FM_TREEHOUSE_RETURN_ATTEMPTS_FILE" ] || n=$(cat "$FM_TREEHOUSE_RETURN_ATTEMPTS_FILE")
+  n=$((n + 1))
+  printf '%s' "$n" > "$FM_TREEHOUSE_RETURN_ATTEMPTS_FILE"
+  if [ "$n" -le "${FM_TREEHOUSE_RETURN_FAIL_COUNT:-0}" ]; then
+    echo "fatal: Unable to create '/fake/index.lock': File exists." >&2
+    exit 128
+  fi
+fi
 exit 0
 SH
   chmod +x "$fakebin/treehouse"
@@ -243,6 +253,35 @@ test_spawn_abort_returns_durable_lease() {
   assert_grep "treehouse return --force $TMP_ROOT/spawn-lease-notgit" "$rec" \
     "an abort after the durable lease was acquired must return it instead of leaking the pool slot"
   pass "fm-spawn: an abort after acquiring a durable treehouse lease returns it to the pool"
+}
+
+# The lease-return call is the same operation fm-teardown.sh's
+# teardown_treehouse_return retries on a transient git index.lock (a killed crew
+# process's lock, usually gone within seconds); the abort path must retry it too
+# instead of leaking the pool slot on the first race.
+test_spawn_abort_lease_return_retries_transient_lock() {
+  local home proj fakebin rec attempts out status n
+  home="$TMP_ROOT/spawn-lease-retry-home"
+  mkdir -p "$home/data"
+  proj=$(make_repo "$TMP_ROOT/spawn-lease-retry-proj")
+  fakebin=$(make_spawn_fakebin "$TMP_ROOT/spawn-lease-retry-fake")
+  mkdir -p "$TMP_ROOT/spawn-lease-retry-notgit"
+  rec="$TMP_ROOT/spawn-lease-retry-treehouse.log"
+  attempts="$TMP_ROOT/spawn-lease-retry-attempts"
+  : > "$rec"
+  rm -f "$attempts"
+
+  out=$(FM_TREEHOUSE_REC="$rec" \
+        FM_TREEHOUSE_RETURN_ATTEMPTS_FILE="$attempts" FM_TREEHOUSE_RETURN_FAIL_COUNT=1 \
+        FM_TREEHOUSE_RETURN_LOCK_RETRIES=2 FM_TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS=0 \
+        run_spawn "$home" abort-lease-retry-jj9 "$proj" "$TMP_ROOT/spawn-lease-retry-notgit" "$fakebin"); status=$?
+  expect_code 1 "$status" "spawn into a non-worktree dir should still abort despite a transient lock on release"
+  assert_contains "$out" "did not yield an isolated worktree" "abort with a transient lock must keep its original isolation diagnostic"
+  assert_contains "$out" "hit a transient git index.lock" "abort must recognize the transient lock signature and retry"
+  assert_contains "$out" "succeeded on retry" "abort must report the retried return succeeding"
+  n=$(grep -cF "treehouse return --force $TMP_ROOT/spawn-lease-retry-notgit" "$rec")
+  [ "$n" = 2 ] || fail "expected exactly 2 treehouse return attempts (one failed on the lock race, one succeeded), got $n"
+  pass "fm-spawn: an abort's lease return retries a transient git index.lock instead of leaking the pool slot"
 }
 
 # --- GUARD 1c: fm-spawn tmux window construction ----------------------------
@@ -338,4 +377,5 @@ test_bootstrap_line
 test_brief_assertion_precedes_branch
 test_spawn_isolation_abort
 test_spawn_abort_returns_durable_lease
+test_spawn_abort_lease_return_retries_transient_lock
 test_spawn_tmux_window_construction
