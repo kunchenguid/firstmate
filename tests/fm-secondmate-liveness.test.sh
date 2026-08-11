@@ -198,6 +198,78 @@ test_agent_state_dispatcher_and_compatibility() {
   pass "fm_backend_agent_state: routes tmux/Herdr and keeps Zellij unverified"
 }
 
+# --- unit level: fm_wsl2_mirrored_networking_hint ----------------------------
+#
+# bin/fm-remote-readiness-lib.sh's hint: a remote route going unreachable
+# (255) can be this host's own WSL2 networking having reverted to isolated
+# NAT rather than the remote host being down. FM_WSL_CONFIG_PATH is a
+# test-only override of the real /mnt/c/Users/$USER/.wslconfig path.
+
+# fake_uname <dir> <release>: a fake `uname` answering -r with <release>.
+fake_uname() {
+  local dir=$1 release=$2 fakebin
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/uname" <<SH
+#!/usr/bin/env bash
+[ "\${1:-}" = -r ] || exit 1
+printf '%s\n' "$release"
+SH
+  chmod +x "$fakebin/uname"
+  printf '%s\n' "$fakebin"
+}
+
+test_wsl2_hint_silent_on_non_wsl2_host() {
+  local fb out
+  fb=$(fake_uname "$TMP_ROOT/hint-non-wsl2" "6.8.0-generic")
+
+  out=$(PATH="$fb:$BASE_PATH" FM_WSL_CONFIG_PATH="$TMP_ROOT/hint-non-wsl2/absent.wslconfig" \
+    bash -c '. "$0/bin/fm-remote-readiness-lib.sh"; fm_wsl2_mirrored_networking_hint' "$ROOT")
+
+  [ -z "$out" ] || fail "a non-WSL2 kernel release must never produce a WSL2 hint, got '$out'"
+  pass "fm_wsl2_mirrored_networking_hint: silent on a non-WSL2 host"
+}
+
+test_wsl2_hint_silent_when_mirrored_configured() {
+  local fb out cfg
+  fb=$(fake_uname "$TMP_ROOT/hint-mirrored" "5.15.167.4-microsoft-standard-WSL2")
+  cfg="$TMP_ROOT/hint-mirrored/.wslconfig"
+  printf '%s\n' '[wsl2]' 'networkingMode=mirrored' > "$cfg"
+
+  out=$(PATH="$fb:$BASE_PATH" FM_WSL_CONFIG_PATH="$cfg" \
+    bash -c '. "$0/bin/fm-remote-readiness-lib.sh"; fm_wsl2_mirrored_networking_hint' "$ROOT")
+
+  [ -z "$out" ] || fail "a correctly configured mirrored .wslconfig must never produce a hint, got '$out'"
+  pass "fm_wsl2_mirrored_networking_hint: silent once networkingMode=mirrored is configured"
+}
+
+test_wsl2_hint_fires_when_config_missing() {
+  local fb out
+  fb=$(fake_uname "$TMP_ROOT/hint-missing" "5.15.167.4-microsoft-standard-WSL2")
+
+  out=$(PATH="$fb:$BASE_PATH" FM_WSL_CONFIG_PATH="$TMP_ROOT/hint-missing/absent.wslconfig" \
+    bash -c '. "$0/bin/fm-remote-readiness-lib.sh"; fm_wsl2_mirrored_networking_hint' "$ROOT")
+
+  assert_contains "$out" "networkingMode=mirrored" \
+    "a WSL2 host with no .wslconfig at all should hint at mirrored networking"
+  assert_contains "$out" "wsl --shutdown" \
+    "the hint should name the exact recovery command"
+  pass "fm_wsl2_mirrored_networking_hint: fires when .wslconfig is absent"
+}
+
+test_wsl2_hint_fires_when_mode_not_mirrored() {
+  local fb out cfg
+  fb=$(fake_uname "$TMP_ROOT/hint-wrong-mode" "5.15.167.4-microsoft-standard-WSL2")
+  cfg="$TMP_ROOT/hint-wrong-mode/.wslconfig"
+  printf '%s\n' '[wsl2]' 'memory=8GB' > "$cfg"
+
+  out=$(PATH="$fb:$BASE_PATH" FM_WSL_CONFIG_PATH="$cfg" \
+    bash -c '. "$0/bin/fm-remote-readiness-lib.sh"; fm_wsl2_mirrored_networking_hint' "$ROOT")
+
+  assert_contains "$out" "networkingMode=mirrored" \
+    "a .wslconfig present without the mirrored mode line should still hint"
+  pass "fm_wsl2_mirrored_networking_hint: fires when .wslconfig lacks networkingMode=mirrored"
+}
+
 # --- sweep level: bin/fm-bootstrap.sh's secondmate_liveness_sweep -----------
 
 # make_toolchain <dir>: the fixed set of stubs bin/fm-bootstrap.sh's read-only
@@ -544,6 +616,10 @@ test_tmux_agent_state_classifies
 test_tmux_agent_state_rejects_malformed_targets_before_probe
 test_herdr_agent_state_preserves_husk_classifier
 test_agent_state_dispatcher_and_compatibility
+test_wsl2_hint_silent_on_non_wsl2_host
+test_wsl2_hint_silent_when_mirrored_configured
+test_wsl2_hint_fires_when_config_missing
+test_wsl2_hint_fires_when_mode_not_mirrored
 test_sweep_respawns_confirmed_dead_secondmate
 test_sweep_leaves_alive_secondmate_untouched
 test_sweep_respawns_authoritatively_missing_pi_secondmate

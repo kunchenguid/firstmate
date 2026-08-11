@@ -609,16 +609,19 @@ secondmate_liveness_sweep() {
 # unchanged.
 secondmate_liveness_one() {  # <meta> <id>
   local meta=$1 id=$2
-  local window harness backend target agent_state out cause remote_host remote_rc readiness_reason route_out remote_backend
+  local window harness backend target agent_state out cause remote_host remote_rc readiness_reason route_out remote_backend wsl2_hint unreachable_msg
   window=$(fm_meta_get "$meta" window)
   [ -n "$window" ] || return 0
   harness=$(fm_meta_get "$meta" harness)
   remote_host=$(fm_meta_get "$meta" remote_host)
   if [ -n "$remote_host" ]; then
+    wsl2_hint=$(fm_wsl2_mirrored_networking_hint)
+    unreachable_msg="remote host unavailable or endpoint state unknown; route preserved on $remote_host"
+    [ -z "$wsl2_hint" ] || unreachable_msg="$unreachable_msg ($wsl2_hint)"
     remote_rc=0
     fm_remote_readiness_ensure "$SCRIPT_DIR" "$id" || remote_rc=$?
     if [ "$remote_rc" -eq 255 ]; then
-      echo "SECONDMATE_LIVENESS: secondmate $id: skipped: remote host unavailable or endpoint state unknown; route preserved on $remote_host"
+      echo "SECONDMATE_LIVENESS: secondmate $id: skipped: $unreachable_msg"
       return 0
     fi
     if [ "$remote_rc" -ne 0 ]; then
@@ -635,7 +638,7 @@ secondmate_liveness_one() {  # <meta> <id>
       remote_rc=$?
     fi
     if [ "$remote_rc" -eq 255 ]; then
-      echo "SECONDMATE_LIVENESS: secondmate $id: skipped: remote host unavailable or endpoint state unknown; route preserved on $remote_host"
+      echo "SECONDMATE_LIVENESS: secondmate $id: skipped: $unreachable_msg"
       return 0
     fi
     if [ "$remote_rc" -ne 0 ]; then
@@ -651,7 +654,9 @@ secondmate_liveness_one() {  # <meta> <id>
           remote_rc=$?
         fi
         if [ "$remote_rc" -eq 255 ]; then
-          echo "SECONDMATE_LIVENESS: secondmate $id: skipped: remote host unavailable or endpoint route unknown; route preserved on $remote_host"
+          unreachable_msg="remote host unavailable or endpoint route unknown; route preserved on $remote_host"
+          [ -z "$wsl2_hint" ] || unreachable_msg="$unreachable_msg ($wsl2_hint)"
+          echo "SECONDMATE_LIVENESS: secondmate $id: skipped: $unreachable_msg"
           return 0
         fi
         if [ "$remote_rc" -ne 0 ]; then
