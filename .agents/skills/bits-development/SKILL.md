@@ -54,14 +54,18 @@ When the correct choice is ambiguous, stop and escalate rather than creating a p
 
 ## The write discipline
 
-Apply this discipline to every live BITS mutation, without exception.
+Every live BITS mutation uses exactly one of these two pre-write paths and then follows all shared rules below.
 
-1. Complete pre-write readback: re-read the full current Dev Task changes content, projects, Change Cards, and `versionCode` immediately before the write, so the write is built on live state.
-2. Full-snapshot preservation: attach, detach, and Change Card writes rewrite a whole snapshot, so preserve `changes`, `projects`, `versionCode`, and every unknown field; never overwrite or drop a field you did not intend to change.
-3. Exact dry-run review: run the command's dry-run first and inspect the exact payload it will send, confirming repository, source, target, project type, control plane, and MR identity are precisely what you intend.
-4. Explicit authority for each live write: obtain the authority each live write requires under `AGENTS.md` section 7 before adding `--yes`; one approval authorizes one exact target, not a later changed one.
-5. Independent post-write readback: after the write, re-read the Dev Task, projects, Change Cards, MR bindings, and pipeline or job state from BITS and confirm the immutable fields match what you intended; API acceptance is not success until an independent read confirms it.
-6. Timeout is outcome-unknown: treat a timeout or lost connection after transmitting a write as outcome-unknown, never as failure and never as success; reconcile by readback of the exact target before any retry, and never blindly re-issue a create.
+- Creation path: for a new Dev Task or a release-train operation that auto-creates an MR, first read the live landscape, confirm the exact official prepare snapshot, and pin and verify the repository, source branch, exact committed head, and integration target before authorizing submission.
+  When the official owner is genuinely unavailable and the lower-level fallback has been explicitly approved, its exact dry-run payload is the confirmed prepare snapshot for this path.
+- Existing-object path: for every other existing-task mutation and every ordinary flow with a pre-existing MR, re-read the full current Dev Task changes content, projects, Change Cards, `versionCode`, and MR identity immediately before the write, so the write is built on live state.
+
+1. Full-snapshot preservation: attach, detach, and Change Card writes rewrite a whole snapshot, so preserve `changes`, `projects`, `versionCode`, and every unknown field; never overwrite or drop a field you did not intend to change.
+2. Exact dry-run review: inspect the owner's exact prepare or dry-run payload before submission, confirming repository, source, target, project type, control plane, and any existing MR identity are precisely what you intend.
+3. Explicit authority for each live write: obtain the authority each live write requires under `AGENTS.md` section 7 before adding `--yes`; one approval authorizes one exact target, not a later changed one.
+4. Independent post-write readback: for the creation path, independently read back the resulting Dev Task and any auto-created MR and verify task identity plus MR identity, repository, source, exact head, and target before binding or continuing; for the existing-object path, re-read the Dev Task, projects, Change Cards, MR bindings, and pipeline or job state from BITS and confirm the immutable fields match what you intended.
+   API acceptance is not success until the applicable independent read confirms it.
+5. Timeout is outcome-unknown: treat a timeout or lost connection after transmitting a write as outcome-unknown, never as failure and never as success; reconcile by readback of the exact target before any retry, and never blindly re-issue a create.
 
 Bind a merge request by its stable identity, never by a moving branch head.
 The BITS MR iid and the repository, source, and target it carries are the durable identity; the branch head advances underneath it.
