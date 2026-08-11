@@ -14,7 +14,11 @@
 #   - the zellij false-positive regression live (when zellij is installed): a
 #     pane whose content changes for reasons unrelated to submission must NOT
 #     report a delivered send, and a real claude-in-zellij `dump-screen
-#     --ansi` capture must classify empty through the zellij thin adapter.
+#     --ansi` capture must classify empty through the zellij thin adapter;
+#   - the herdr titled-rule regression live (when herdr is running): a FOCUSED
+#     claude pane carries the terminal title on its composer's top rule, the
+#     shape that read `unknown` and deferred every away-mode escalation. Only a
+#     real focused herdr pane renders it, so no tmux fixture can cover it.
 #
 # Run explicitly with FM_COMPOSER_MATRIX_LIVE=1. No prompt is ever submitted
 # to any harness, so no model tokens are spent. An absent harness is reported
@@ -212,6 +216,112 @@ if command -v zellij >/dev/null 2>&1; then
   zellij delete-session --force "$ZELLIJ_SESSION" >/dev/null 2>&1 || true
 else
   note "harness absent, not verified here: zellij (false-positive regression not exercised)"
+fi
+
+# --- 4. herdr: the real focused-pane composer through the herdr adapter ------
+# The titled-rule regression (the herdr counterpart of the cmux borderless
+# composer fix #2029): herdr overlays the pane's terminal title on the TOP rule
+# of claude's borderless composer while the pane is FOCUSED, so that rule never
+# opens a separated pair and the composer's own bottom rule reads as an
+# unmatched separator. That shape read `unknown` and deferred every away-mode
+# escalation. Only a real focused herdr pane renders it, so tmux fixtures
+# cannot cover it - this is the harness-dependent half of the pair.
+if command -v herdr >/dev/null 2>&1 && command -v claude >/dev/null 2>&1; then
+  hd_version=$(herdr --version 2>/dev/null | head -1)
+  [ -n "$hd_version" ] || hd_version='version-unknown'
+  cl_version=$(harness_version claude)
+  export FM_ROOT_OVERRIDE="$ROOT"
+  # shellcheck source=/dev/null
+  . "$ROOT/bin/fm-backend.sh"
+  if fm_backend_source herdr 2>/dev/null; then
+    hd_checked=0
+    hd_titled=0
+    hd_panes=$(fm_backend_herdr_cli default pane list 2>/dev/null || true)
+    if [ -n "$hd_panes" ]; then
+      # The vendor-rendered fact this regression turns on, asserted directly and
+      # independently of any pane's agent_status: on a FOCUSED claude pane the
+      # rule above the `❯` row carries the terminal title, so it is dashes PLUS
+      # text. _fm_composer_rule_row must accept it while the strict separator
+      # predicate feeding the pi identity gate must still reject it. A busy
+      # focused pane cannot be asserted `empty` (its composer may hold real
+      # input), but its RENDERING is exactly the shape that broke.
+      while IFS= read -r hd_pane; do
+        [ -n "$hd_pane" ] || continue
+        hd_cap=$(fm_backend_herdr_capture "default:$hd_pane" "$FM_COMPOSER_CAPTURE_LINES" 2>/dev/null || true)
+        [ -n "$hd_cap" ] || continue
+        hd_glyph_row=-1
+        hd_row=0
+        while IFS= read -r hd_line; do
+          hd_trim=$hd_line
+          fm_composer_normalize_trim_var hd_trim
+          if fm_composer_leading_agent_glyph_var hd_g "$hd_trim"; then hd_glyph_row=$hd_row; fi
+          hd_row=$((hd_row + 1))
+        done <<EOF
+$hd_cap
+EOF
+        [ "$hd_glyph_row" -ge 1 ] || continue
+        hd_above=$(_fm_composer_screen_row "$((hd_glyph_row - 1))" "$hd_cap")
+        fm_composer_normalize_trim_var hd_above
+        # Only a TITLED rule exercises the regression; a clean rule is the
+        # already-working case and is reported rather than asserted.
+        if _fm_composer_pi_separator_row "$hd_above"; then
+          note "herdr ($hd_version) focused pane $hd_pane renders a CLEAN rule (no title overlay right now)"
+          continue
+        fi
+        if _fm_composer_rule_row "$hd_above"; then
+          hd_titled=$((hd_titled + 1))
+          CHECKED=$((CHECKED + 1))
+          pass "herdr ($hd_version) + claude ($cl_version): focused pane $hd_pane titled composer rule is recognized as a rule"
+        else
+          FAILED=1
+          printf '# focused pane %s rule above the glyph row:\n#   [%s]\n' "$hd_pane" "$hd_above" >&2
+          printf 'not ok - herdr (%s) + claude (%s): focused pane %s titled composer rule was NOT recognized; the away-mode titled-rule regression is live again\n' \
+            "$hd_version" "$cl_version" "$hd_pane" >&2
+        fi
+      done <<EOF
+$(printf '%s' "$hd_panes" | jq -r '
+  .result.panes[]?
+  | select(.agent == "claude")
+  | select(.focused == true)
+  | .pane_id' 2>/dev/null)
+EOF
+      # Every live claude pane herdr reports idle: its composer is empty by
+      # herdr's own native agent-state, so the shared classifier must agree.
+      # A focused idle pane is the exact outage shape and is required to pass.
+      while IFS=$'\t' read -r hd_pane hd_focused; do
+        [ -n "$hd_pane" ] || continue
+        hd_verdict=$(fm_backend_herdr_composer_state "default:$hd_pane" 2>/dev/null || true)
+        if [ "$hd_verdict" = empty ]; then
+          hd_checked=$((hd_checked + 1))
+          CHECKED=$((CHECKED + 1))
+          pass "herdr ($hd_version) + claude ($cl_version): idle pane $hd_pane (focused=$hd_focused) classifies empty"
+        else
+          FAILED=1
+          printf '# herdr pane %s tail at failure:\n' "$hd_pane" >&2
+          fm_backend_herdr_capture "default:$hd_pane" 6 2>/dev/null \
+            | grep '[^[:space:]]' | tail -6 | sed 's/^/#   /' >&2
+          printf 'not ok - herdr (%s) + claude (%s): idle pane %s (focused=%s) classified %s, expected empty\n' \
+            "$hd_version" "$cl_version" "$hd_pane" "$hd_focused" "${hd_verdict:-unreadable}" >&2
+        fi
+      done <<EOF
+$(printf '%s' "$hd_panes" | jq -r '
+  .result.panes[]?
+  | select(.agent == "claude")
+  | select(.agent_status == "idle" or .agent_status == "done")
+  | [.pane_id, (.focused | tostring)] | @tsv' 2>/dev/null)
+EOF
+    fi
+    if [ "$hd_checked" -eq 0 ]; then
+      note "herdr ($hd_version) running but no idle claude pane to read; live empty verdicts not exercised here"
+    fi
+    if [ "$hd_titled" -eq 0 ]; then
+      note "herdr ($hd_version) exposed no FOCUSED claude pane rendering a titled composer rule; focus a claude pane in herdr to exercise the away-mode regression directly"
+    fi
+  else
+    note "herdr present but adapter source failed; titled-rule shape not exercised here"
+  fi
+else
+  note "harness absent, not verified here: herdr+claude (titled-rule sandwich not exercised)"
 fi
 
 # --- refuse a vacuous pass ---------------------------------------------------

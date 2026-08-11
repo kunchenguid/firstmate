@@ -58,6 +58,15 @@
 #   bare       - an agent prompt glyph row with no border at all (claude `❯`,
 #                codex `›`, muse `⟩`). The agent glyph is itself the container
 #                proof; a bare SHELL glyph (`>` `$` `%` `#`) never is.
+#                Real claude 2.x draws this row BETWEEN two horizontal `─`
+#                rules, and overlays the terminal title on the top rule while
+#                the pane is focused, so that rule is dashes PLUS text and does
+#                not read as a solid separator. The bottom rule is then an
+#                unmatched separator below the glyph, which the separated-shape
+#                staleness rule would otherwise read as proof the glyph is
+#                scrollback; _fm_composer_bare_rule_sandwich is what keeps that
+#                rule from discarding a live composer (the herdr counterpart of
+#                the cmux borderless-composer fix, #2029).
 #   left-bar   - opencode: rows prefixed by a heavy left bar `┃` with no
 #                closing border, holding the idle hint, blank rows, and a
 #                mode/model footer line.
@@ -463,6 +472,12 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
 # _fm_composer_pi_separator_row: a solid pi separator - nothing but `─`, at
 # least 8 columns wide. The width floor is a literal substring test so it is
 # byte-exact in every locale.
+#
+# Deliberately strict, and NOT the place to teach a titled rule: this predicate
+# feeds the pi identity conjunction in _fm_composer_pi_verdict, where being
+# wrong about what closes a separated composer would promote an unidentified
+# blank region into an injection target. The titled variant below is a separate
+# predicate with a separate, narrower consumer.
 _fm_composer_pi_separator_row() {  # <trimmed-row>
   local row=$1
   [ -n "$row" ] || return 1
@@ -471,6 +486,55 @@ _fm_composer_pi_separator_row() {  # <trimmed-row>
     *────────*) return 0 ;;
   esac
   return 1
+}
+
+# _fm_composer_rule_row: a horizontal `─` rule that MAY carry a title embedded
+# in it, the same tolerance _fm_composer_titled_bottom_ok already grants grok's
+# titled bottom border. Claude draws its borderless composer between two such
+# rules and overlays the terminal title on the TOP one when the pane is
+# focused, so the top rule reads `───…─── Some title ──` - dashes plus text.
+# Anchored at both ends (an 8-column dash run to open, a dash to close) with
+# every non-dash residue required to be ASCII-printable or whitespace, so a row
+# carrying box-drawing structure of its own can never pass as a plain rule.
+_fm_composer_rule_row() {  # <trimmed-row>
+  local row=$1 residue
+  [ -n "$row" ] || return 1
+  case "$row" in
+    ────────*) ;;
+    *) return 1 ;;
+  esac
+  case "$row" in
+    *─) ;;
+    *) return 1 ;;
+  esac
+  residue=${row//─/}
+  residue=$(printf '%s' "$residue" | LC_ALL=C sed 's/[!-~]/ /g')
+  case "$residue" in
+    *[![:space:]]*) return 1 ;;
+  esac
+  return 0
+}
+
+# _fm_composer_bare_rule_sandwich: 0 when the bare agent-glyph row at <row> is
+# immediately sandwiched between two horizontal rules - a rule directly above
+# (solid or titled) and the window's only separator directly below. That is
+# Claude's borderless composer box, not stale scrollback sitting above a live
+# separated composer, which is what the unmatched-separator invalidation in
+# _fm_composer_select_cursorless otherwise assumes. Adjacency on BOTH edges is
+# what keeps that assumption intact everywhere else: a glyph genuinely stranded
+# in scrollback has transcript rows, not its own box edges, between it and the
+# separator below.
+_fm_composer_bare_rule_sandwich() {  # <plain-screen> <row>
+  local plain=$1 row=$2 above below
+  [ "$row" -ge 1 ] || return 1
+  [ "$FM_COMPOSER_SCAN_PI_LAST_SEPARATOR" -eq "$((row + 1))" ] || return 1
+  below=$(_fm_composer_screen_row "$((row + 1))" "$plain")
+  fm_composer_normalize_trim_var below
+  _fm_composer_pi_separator_row "$below" || return 1
+  above=$(_fm_composer_screen_row "$((row - 1))" "$plain")
+  fm_composer_normalize_trim_var above
+  _fm_composer_rule_row "$above" || return 1
+  return 0
 }
 
 # Row-scan results are returned through FM_COMPOSER_SCAN_* globals (bash 3.2
@@ -942,10 +1006,22 @@ _fm_composer_select_cursorless() {
     FM_COMPOSER_SELECTED_FIRST=$((FM_COMPOSER_SCAN_PI_OPEN + 1))
     FM_COMPOSER_SELECTED_LAST=$((FM_COMPOSER_SCAN_PI_CLOSE - 1))
   fi
+  # An unmatched separator BELOW the chosen candidate normally proves that
+  # candidate stale: a live pi composer is opening where the scan ran out of
+  # window, so the thing above it is scrollback. The one shape that reads
+  # exactly like that and is NOT stale is Claude's borderless composer, whose
+  # own bottom edge is the unmatched separator: its top edge failed to open the
+  # pair only because a focused pane carries the terminal title on that rule.
+  # Requiring the glyph to be sandwiched between both edges keeps the staleness
+  # rule for every other shape while letting that composer survive.
   if [ "$FM_COMPOSER_SCAN_PI_PAIR_FOUND" = 0 ] \
      && [ "$FM_COMPOSER_SCAN_PI_LAST_SEPARATOR" -gt "$generic" ]; then
-    FM_COMPOSER_SELECTED_KIND=
-    return 1
+    if ! { [ "$FM_COMPOSER_SELECTED_KIND" = bare ] \
+           && [ "$generic" = "$FM_COMPOSER_SCAN_BARE_ROW" ] \
+           && _fm_composer_bare_rule_sandwich "$plain" "$FM_COMPOSER_SCAN_BARE_ROW"; }; then
+      FM_COMPOSER_SELECTED_KIND=
+      return 1
+    fi
   fi
   if [ "$FM_COMPOSER_SCAN_SHELL_ROW" -gt "$generic" ]; then
     FM_COMPOSER_SELECTED_KIND=

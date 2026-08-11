@@ -202,6 +202,41 @@ The strict blank-row posture held live (a blank shell row deferred injection), a
 Kimi was not installed on the verification machine; its bordered shape is pinned by the portable byte-capture regressions in `tests/fm-composer-lib.test.sh`, which also carry the other five adapters' capability profiles for every harness under both a UTF-8 locale and `LC_ALL=C`.
 This guard is the refresh command after any harness upgrade; rerun it and update the versions above rather than trusting this table across releases.
 
+### Herdr focused-pane titled composer rule
+
+Claude draws its borderless composer between two horizontal `─` rules, and Herdr overlays the pane's terminal title on the TOP rule while that pane is focused, so the rule renders as dashes plus text.
+That shape made the classifier discard the composer row it had already found and return `unknown`, which defers away-mode injection; only the focused pane carries a title, so worker panes stayed readable while a supervisor pane did not.
+Verified on 2026-08-11 against the live Herdr session on Linux (dev desktop, SSH, no X display), reading real panes only and submitting nothing.
+
+```sh
+FM_COMPOSER_MATRIX_LIVE=1 tests/fm-composer-matrix-live-e2e.test.sh
+```
+
+Observed output:
+
+```text
+ok - claude (claude 2.1.226.634 (ASBX Claude Code, channel stable)): real idle composer classifies empty
+not ok - codex (0.146.1.322 (stable)): idle composer never classified empty (last verdict: unknown)
+# harness absent, not verified here: opencode
+# harness absent, not verified here: pi
+# harness absent, not verified here: grok
+# harness absent, not verified here: kimi
+# harness absent, not verified here: muse
+ok - strict posture live: a blank shell row classifies unknown and injection defers
+# harness absent, not verified here: zellij (false-positive regression not exercised)
+ok - herdr (herdr 0.8.0) + claude (claude 2.1.226.634 (ASBX Claude Code, channel stable)): focused pane w1:p9 titled composer rule is recognized as a rule
+ok - herdr (herdr 0.8.0) + claude (claude 2.1.226.634 (ASBX Claude Code, channel stable)): idle pane w1:p1 (focused=false) classifies empty
+ok - herdr (herdr 0.8.0) + claude (claude 2.1.226.634 (ASBX Claude Code, channel stable)): idle pane w1:p9 (focused=true) classifies empty
+```
+
+Herdr 0.8.0 with Claude 2.1.226.634 renders the titled rule on the focused pane and a clean rule on unfocused panes, and both now classify `empty`.
+The `focused=true` line is the exact shape that failed: before this fix that same pane classified `unknown`, so it is the regression's direct live pass.
+The strict separator predicate that gates Pi identity still rejects a titled rule, so recognizing the rule did not relax that gate.
+The guard reports explicitly when no focused Claude pane is available, because the titled overlay exists only on a focused pane and a run that never saw one has not exercised this regression.
+Codex 0.146.1.322 fails this run on a first-launch directory-trust dialog, which the guard correctly treats as an unreadable composer: this machine's checkout is a subdirectory of the repository root Codex asks to trust, and the guard deliberately preserves trust prompts rather than answering them.
+That failure reproduces with these changes reverted and is a property of the machine, not the classifier; the 2026-08-10 run above is Codex's current passing evidence.
+Opencode, Pi, Grok, Kimi, Muse, and Zellij were not installed on this machine, so their results above stand from the 2026-08-10 run; the titled-rule shape itself is pinned harness-free by `tests/fm-composer-lib.test.sh`, which covers its four-way titled/clean rule by NBSP/ASCII-space glyph matrix.
+
 `zellij action dump-screen --pane-id <id> --ansi` was verified at zellij 0.44.0 to preserve ANSI styling (real Claude Code rendered inside a zellij pane dumped `ESC[m` `❯` U+00A0 for its idle composer row), which is the capability the zellij composer classifier reads.
 
 ## Herdr

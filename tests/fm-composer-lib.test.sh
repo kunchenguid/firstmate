@@ -188,6 +188,64 @@ test_matrix_claude_bare_nbsp_row() {
   pass "matrix: claude's ❯+NBSP row reads empty on every profile in both locales (#1988)"
 }
 
+test_matrix_claude_titled_rule_sandwich() {
+  # Real focused claude on herdr 0.8.0: the borderless `❯` composer sits
+  # between two `─` rules, and herdr overlays the pane's terminal title on the
+  # TOP rule while the pane is focused, so that rule is dashes PLUS text and
+  # never opens a separated pair. Its bottom rule is then an unmatched
+  # separator below the glyph, which the separated-shape staleness rule read as
+  # proof the glyph was scrollback - forcing `unknown` and deferring every
+  # away-mode escalation into the supervisor's own pane. Only the FOCUSED pane
+  # carries a title, which is why worker panes stayed readable throughout.
+  #
+  # The four-way matrix: top rule titled|clean x glyph NBSP|ASCII space. All
+  # four are the same live composer and all four must read empty; the
+  # divergence below is asserted deliberately so a regression that re-breaks
+  # only the titled half cannot pass by satisfying the clean half.
+  local titled clean want_empty=0 t g screen glyph
+  titled=$'──────────────────────── Check Firstmate setup readiness ──'
+  clean=$'────────────────────────'
+  for t in titled clean; do
+    for g in nbsp ascii; do
+      if [ "$g" = nbsp ]; then glyph="❯$NBSP"; else glyph='❯ '; fi
+      if [ "$t" = titled ]; then
+        screen=$'transcript\n'"$titled"$'\n'"$glyph"$'\n'"$clean"$'\n footer'
+      else
+        screen=$'transcript\n'"$clean"$'\n'"$glyph"$'\n'"$clean"$'\n footer'
+      fi
+      assert_screen "claude $t rule + $g glyph on herdr" empty "$CAPS_STYLED" "$screen" '' probe-absent
+      assert_screen "claude $t rule + $g glyph on tmux" empty "$CAPS_TMUX" "$screen" 2 probe-absent
+      want_empty=$((want_empty + 1))
+    done
+  done
+  [ "$want_empty" -eq 4 ] \
+    || fail "the four-way titled/clean x NBSP/ASCII matrix must assert all four combinations"
+
+  # The narrowing must not widen `empty`. A titled rule above a DEAD SHELL
+  # glyph stays unknown (the dead-shell rule), and real typed text stays
+  # pending, or the away-mode daemon would type a digest over half-typed input.
+  screen=$'transcript\n'"$titled"$'\n$\n'"$clean"$'\n footer'
+  assert_screen "titled rule cannot promote a dead shell" unknown "$CAPS_STYLED" "$screen" '' probe-absent
+  screen=$'transcript\n'"$titled"$'\n\n'"$clean"$'\n footer'
+  assert_screen "titled rule cannot promote a blank row" unknown "$CAPS_STYLED" "$screen" '' probe-absent
+  screen=$'transcript\n'"$titled"$'\n❯ 1/ api key 2/ authorise\n'"$clean"$'\n footer'
+  assert_screen "titled rule keeps typed text pending" pending "$CAPS_STYLED" "$screen" '' probe-absent
+
+  # Genuine staleness must still be discarded: the sandwich requires a rule on
+  # BOTH edges, immediately adjacent. A glyph with transcript rows between it
+  # and the separator below is scrollback above a live composer, as before.
+  screen=$'❯\ntranscript row\nmore transcript\n'"$clean"$'\n footer'
+  assert_screen "glyph stranded above a live pair stays stale" unknown "$CAPS_STYLED" "$screen" '' probe-absent
+  screen=$'transcript\n'"$titled"$'\n❯\ntranscript row\n'"$clean"$'\n footer'
+  assert_screen "non-adjacent separator stays stale" unknown "$CAPS_STYLED" "$screen" '' probe-absent
+  screen=$'plain transcript\n❯\n'"$clean"$'\n footer'
+  assert_screen "no rule above is not a sandwich" unknown "$CAPS_STYLED" "$screen" '' probe-absent
+  # A row carrying box-drawing structure of its own is not a plain rule.
+  screen=$'transcript\n│ boxed row │\n❯\n'"$clean"$'\n footer'
+  assert_screen "a bordered row above is not a rule" unknown "$CAPS_STYLED" "$screen" '' probe-absent
+  pass "matrix: claude's titled-rule sandwich reads empty without widening empty for shells, blanks, typed text, or scrollback"
+}
+
 test_matrix_codex_dim_hint_row() {
   # Real idle codex: bold `›`, reset, then an SGR-2 dim hint. Styled captures
   # strip the ghost and prove empty; plain captures must defer as unknown -
@@ -541,6 +599,7 @@ test_idle_placeholder_is_empty
 test_idle_placeholder_case_mode_is_explicit
 test_real_text_is_pending
 test_matrix_claude_bare_nbsp_row
+test_matrix_claude_titled_rule_sandwich
 test_matrix_codex_dim_hint_row
 test_matrix_muse_truecolor_glyph_survives_signal_loss
 test_matrix_pi_separated_needs_identity
