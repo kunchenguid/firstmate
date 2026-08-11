@@ -664,6 +664,7 @@ RELAUNCH_REPLACEMENT_STATE=
 RELAUNCH_REPLACEMENT_WT=
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
+BROWSER_REFUSAL_ABORT_ROOT=
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -684,6 +685,11 @@ parse_orca_worktree_result() {
 
 spawn_abort_cleanup() {
   local status=$?
+  if [ -n "$BROWSER_REFUSAL_ABORT_ROOT" ]; then
+    rm -rf "$BROWSER_REFUSAL_ABORT_ROOT" 2>/dev/null || true
+    rmdir "$(dirname "$BROWSER_REFUSAL_ABORT_ROOT")" 2>/dev/null || true
+    BROWSER_REFUSAL_ABORT_ROOT=
+  fi
   if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ] \
      && [ "$SPAWN_META_PUBLISH_STARTED" = 1 ] \
      && [ -n "$SPAWN_META_TMP" ] \
@@ -1162,15 +1168,38 @@ browser_isolation_env() {
 # dir is not world-writable, and it also exists long before the first backend side
 # effect, which is what lets the caller abort cleanly (see the gate below).
 #
-# Location alone is not trusted: the directory is created owner-only and then
-# vouched for - a real directory rather than a symlink, owned by this uid, and
-# neither group- nor other-writable - before it is ever put on the agent's PATH.
-# A directory that cannot be vouched for refuses the launch, because an
-# unvouchable shim directory is worse than no shim. One that already exists with
-# loose permissions is refused rather than tightened, because tightening the mode
-# does not remove whatever was planted while it was open. Teardown removes it with
-# the task's other state records. The write goes through a temp file so a reader
-# never sees a half-written shim.
+# The directory that actually goes on PATH is MINTED FRESH for this one launch:
+# an unpredictably named mktemp -d inside the task-scoped parent, created
+# owner-only. Ownership and mode alone cannot carry this, because a pre-existing
+# directory that mkdir -p silently accepted looks identical to one this script
+# created - and firstmate agents all run as the same uid, so an agent could
+# otherwise pre-create the path for a task id not yet spawned, drop a git or a
+# node in it, and have the whole directory prepended to the next agent's PATH.
+# An unguessable name created exclusively cannot be the path someone else
+# prepared. Reclaiming the task-scoped parent first also means a directory left by
+# an earlier aborted spawn of this id is never reused with whatever it still
+# holds. The parent is reclaimed rather than refused on sight, since refusing a
+# predictable path that already exists would let any agent deny a future task by
+# creating it.
+#
+# Owner-only mode and the symlink rejection stay as cheap defence in depth, and a
+# directory that already exists with loose permissions is refused rather than
+# chmod-repaired, because tightening a mode does not remove what was planted while
+# it was open. A directory that cannot be vouched for refuses the launch, because
+# an unvouchable shim directory is worse than no shim.
+#
+# Where this bottoms out, stated plainly rather than implied: firstmate agents run
+# same-uid with permissions bypassed, so no directory permission scheme isolates
+# one agent from another, and a same-uid agent that goes looking can still find and
+# write this directory. Minting it fresh and unguessably raises the bar; it does
+# not close the class. That is the same claim the rest of this pin makes - it
+# removes AMBIENT reach, not capability - and the shim is not tamper-proof.
+#
+# Teardown removes the task-scoped parent with the task's other state records, and
+# spawn_abort_cleanup removes it when a spawn exits before publishing a record, so
+# a host with an older browser tool does not accumulate one executable-bearing
+# directory per attempted id. The write goes through a temp file so a reader never
+# sees a half-written shim.
 browser_refusal_dir_vouched() {  # <dir>
   local dir=$1 mode owner
   if [ -L "$dir" ] || [ ! -d "$dir" ]; then
@@ -1199,10 +1228,13 @@ browser_refusal_dir_prepare() {  # <dir>
 }
 
 write_browser_refusal_shim() {  # <state-dir> <task-id> <reason>
-  local root="$1/.browser-refusal" dir="$1/.browser-refusal/$2" tmp sq_reason
+  local root="$1/.browser-refusal" task_root="$1/.browser-refusal/$2" dir tmp sq_reason
   sq_reason=$(shell_quote "$3")
   browser_refusal_dir_prepare "$root" || return 1
-  browser_refusal_dir_prepare "$dir" || return 1
+  rm -rf "$task_root" || return 1
+  browser_refusal_dir_prepare "$task_root" || return 1
+  dir=$(umask 077 && mktemp -d "$task_root/XXXXXXXXXX") || return 1
+  browser_refusal_dir_vouched "$dir" || return 1
   tmp="$dir/.chrome-devtools-axi.$$"
   cat > "$tmp" <<SH || { rm -f "$tmp"; return 1; }
 #!/bin/sh
@@ -1395,6 +1427,7 @@ if [ -n "$BROWSER_REFUSAL_REASON" ]; then
     echo "error: could not write a browser-refusal shim firstmate can vouch for under $STATE/.browser-refusal/$ID; the installed chrome-devtools-axi cannot isolate this agent's browser and firstmate will not launch it without the refusal in place" >&2
     exit 1
   }
+  BROWSER_REFUSAL_ABORT_ROOT="$STATE/.browser-refusal/$ID"
   LAUNCH="PATH=$(shell_quote "$BROWSER_REFUSAL_DIR"):\"\$PATH\" $LAUNCH"
 fi
 
@@ -2843,6 +2876,9 @@ if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
   fm_lock_release "$SPAWN_TASK_SET_LOCK"
 fi
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
+# The record is published, so this task's refusal shim is now teardown's to
+# reclaim rather than the abort path's.
+BROWSER_REFUSAL_ABORT_ROOT=
 
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")

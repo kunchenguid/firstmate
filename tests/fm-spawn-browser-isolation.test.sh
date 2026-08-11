@@ -31,11 +31,15 @@ TMP_ROOT=$(fm_test_tmproot fm-spawn-browser-isolation)
 # as one namespace at the end.
 TASK_ID_PREFIX=browseriso
 
-# The task-scoped directory fm-spawn writes a refusal shim into. It sits in the
-# home's own state dir rather than under world-writable /tmp, so no other user on
-# the machine can plant a directory there ahead of the spawn, and it is per task so
-# no other agent can write into the one on this agent's PATH.
-refusal_dir_for() {  # <home> <task-id>
+# The shared root fm-spawn keeps every task's refusal shim under, and the
+# task-scoped parent inside it. Neither is what goes on an agent's PATH: the
+# launch gets a freshly minted directory inside the task-scoped parent, so a path
+# anyone could have predicted and pre-created is never the one the agent resolves.
+refusal_root_for() {  # <home>
+  printf '%s\n' "$1/state/.browser-refusal"
+}
+
+refusal_task_dir_for() {  # <home> <task-id>
   printf '%s\n' "$1/state/.browser-refusal/$2"
 }
 
@@ -486,7 +490,7 @@ test_capable_browser_tool_leaves_the_launch_untouched() {
   assert_full_pin "$launch" "fm-$id" "capable tool"
   assert_not_contains "$launch" 'PATH=' \
     "a capable browser tool must not have the agent's PATH rewritten"
-  [ ! -e "$(refusal_dir_for "$HOME_DIR" "$id")" ] \
+  [ ! -e "$(refusal_root_for "$HOME_DIR")" ] \
     || fail "a capable browser tool left a refusal shim on disk"
   pass "a browser tool that supports named sessions changes nothing about the launch"
 }
@@ -631,7 +635,7 @@ test_absent_browser_tool_is_left_alone() {
   assert_full_pin "$launch" "fm-$id" "absent tool"
   assert_not_contains "$launch" 'PATH=' \
     "an absent browser tool must not have the agent's PATH rewritten"
-  [ ! -e "$(refusal_dir_for "$HOME_DIR" "$id")" ] \
+  [ ! -e "$(refusal_root_for "$HOME_DIR")" ] \
     || fail "an absent browser tool produced a refusal shim for a tool that cannot be run"
   pass "an uninstalled browser tool is neither refused nor shimmed"
 }
@@ -655,8 +659,10 @@ test_refusal_shim_is_private_to_the_task_it_was_written_for() {
   launch=$(cat "$LAUNCH_LOG")
   shim_a=$(extract_refusal_dir "$launch")
   [ -n "$shim_a" ] || fail "the first refused spawn put no refusal directory on the agent's PATH"
-  [ "$shim_a" = "$(refusal_dir_for "$HOME_DIR" "$id_a")" ] \
-    || fail "the refusal shim at '$shim_a' is not the task-scoped directory teardown reclaims for $id_a"
+  case "$shim_a" in
+    "$(refusal_task_dir_for "$HOME_DIR" "$id_a")"/*) : ;;
+    *) fail "the refusal shim at '$shim_a' is outside the task-scoped directory teardown reclaims for $id_a" ;;
+  esac
   # A directory another local user could have created first is not usable as a PATH
   # entry, so it must not sit anywhere world-writable.
   case "$shim_a" in
@@ -689,8 +695,8 @@ test_refusal_shim_is_private_to_the_task_it_was_written_for() {
 }
 
 # run_refused_spawn_expecting_abort <case-name> <task-id> <plant-fn> <label>:
-# drive a spawn against a too-old browser tool with <plant-fn> called on the shim
-# directory path first, and assert the spawn aborted loudly, launched nothing, and
+# drive a spawn against a too-old browser tool with <plant-fn> called on the SHARED
+# refusal root first, and assert the spawn aborted loudly, launched nothing, and
 # performed no backend side effect. Every way the shim directory can be unusable
 # has to end here, because launching without the refusal puts the agent on the
 # operator's shared default bridge and aborting late orphans a window or worktree.
@@ -702,7 +708,7 @@ run_refused_spawn_expecting_abort() {  # <case-name> <task-id> <plant-fn> <label
   make_fake_browser_tool "$realdir" old
   sidelog="$TMP_ROOT/$name/side-effects.log"
   : > "$sidelog"
-  "$plant" "$(refusal_dir_for "$HOME_DIR" "$id")"
+  "$plant" "$(refusal_root_for "$HOME_DIR")"
 
   SPAWN_PATH="$realdir:$FAKEBIN_DIR:$PATH"
   FM_FAKE_SIDEEFFECT_LOG="$sidelog"
@@ -731,9 +737,10 @@ test_unwritable_refusal_shim_directory_aborts_the_spawn_cleanly() {
 
 test_group_or_other_writable_refusal_directory_is_refused() {
   # The shape another local user leaves behind on a shared host or CI runner: a
-  # pre-existing directory anyone can drop executables into. mkdir -p would accept
-  # it silently, and every one of those executables would then resolve ahead of
-  # /usr/bin for the launched agent, so it has to be refused rather than reused.
+  # directory anyone can drop executables into, holding everything the spawn then
+  # writes under it. mkdir -p would accept it silently, so it has to be refused
+  # rather than reused - and refused rather than chmod-repaired, since tightening a
+  # mode does not remove what was planted while it was open.
   plant_world_writable_dir() { mkdir -p "$1" && chmod 777 "$1"; }
   run_refused_spawn_expecting_abort browseriso-shimworldw browseriso-shimworldw-b14 \
     plant_world_writable_dir "world-writable shim directory"
@@ -753,6 +760,71 @@ test_symlinked_refusal_directory_is_refused() {
   pass "a refusal directory that is a symlink rather than a real directory is refused rather than followed"
 }
 
+test_pre_created_task_path_is_never_the_directory_on_path() {
+  local rec id=browseriso-preplant-b16 realdir launch shim planted out
+  # Every firstmate agent runs as the same uid, so an owner-and-mode check cannot
+  # tell a directory fm-spawn created from one another agent pre-created for a task
+  # id not yet spawned. An agent that plants an owner-only directory holding its own
+  # `git` would otherwise have that whole directory prepended to the next agent's
+  # PATH ahead of /usr/bin. The launch therefore has to resolve to a directory this
+  # spawn minted, not to the predictable path anyone could prepare in advance.
+  rec=$(make_spawn_case browseriso-preplant claude "$id")
+  read_case_record "$rec"
+  realdir="$TMP_ROOT/browseriso-preplant/oldbin"
+  make_fake_browser_tool "$realdir" old
+
+  planted=$(refusal_task_dir_for "$HOME_DIR" "$id")
+  mkdir -p "$planted"
+  chmod 700 "$planted"
+  printf '%s\n' '#!/bin/sh' 'echo HIJACKED-BY-A-PRE-PLANTED-DIR' > "$planted/git"
+  chmod +x "$planted/git"
+
+  SPAWN_PATH="$realdir:$FAKEBIN_DIR:$PATH"
+  run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" >/dev/null \
+    || fail "a pre-created refusal path denied the spawn; pre-creating a predictable path must not be a way to block a future task"
+  SPAWN_PATH=
+
+  launch=$(cat "$LAUNCH_LOG")
+  shim=$(extract_refusal_dir "$launch")
+  [ -n "$shim" ] || fail "the refused spawn put no refusal directory on the agent's PATH"
+  [ "$shim" != "$planted" ] \
+    || fail "the agent's PATH got the exact directory that was pre-created for it, so anything already inside shadows a system command"
+  [ ! -e "$shim/git" ] \
+    || fail "the directory on the agent's PATH carries a binary this spawn did not write"
+  out=$(PATH="$shim:$PATH" git --version 2>&1) || true
+  assert_not_contains "$out" HIJACKED-BY-A-PRE-PLANTED-DIR \
+    "a git planted at the predictable refusal path shadowed git for the launched agent"
+  assert_dir_not_plantable "$shim" "the minted refusal directory"
+  pass "the refusal directory on an agent's PATH is one the spawn minted, not a path another agent could pre-create"
+}
+
+test_abort_after_the_shim_is_written_leaves_nothing_behind() {
+  local rec id=browseriso-lateabort-b17 realdir out rc=0
+  # The gate runs early so its own failure cannot strand a window or a worktree,
+  # which puts the shim write ahead of the remaining validation. A spawn that then
+  # fails one of those later checks must not leave an executable-bearing directory
+  # with no task record; a host with an older browser tool would otherwise collect
+  # one per attempted id.
+  rec=$(make_spawn_case browseriso-lateabort claude "$id")
+  read_case_record "$rec"
+  realdir="$TMP_ROOT/browseriso-lateabort/oldbin"
+  make_fake_browser_tool "$realdir" old
+  # Remove the brief so the spawn aborts at a check sited after the gate.
+  rm -f "$HOME_DIR/data/$id/brief.md"
+
+  SPAWN_PATH="$realdir:$FAKEBIN_DIR:$PATH"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR") || rc=$?
+  SPAWN_PATH=
+
+  [ "$rc" -ne 0 ] || fail "the spawn succeeded with no brief, so this case no longer exercises a post-gate abort"
+  assert_contains "$out" 'no brief' "the spawn failed for a reason other than the missing brief"
+  [ ! -e "$(refusal_task_dir_for "$HOME_DIR" "$id")" ] \
+    || fail "an abort after the shim write left this task's refusal directory behind with no task record to reclaim it"
+  [ ! -e "$(refusal_root_for "$HOME_DIR")" ] \
+    || fail "an abort after the shim write left the shared refusal root behind after removing its last task directory"
+  pass "a spawn that aborts after writing the shim reclaims the refusal directory instead of stranding it"
+}
+
 test_every_verified_harness_carries_the_pin
 test_raw_launch_command_escape_hatch_carries_the_pin
 test_each_task_gets_its_own_browser_session
@@ -770,6 +842,8 @@ test_refusal_shim_is_private_to_the_task_it_was_written_for
 test_unwritable_refusal_shim_directory_aborts_the_spawn_cleanly
 test_group_or_other_writable_refusal_directory_is_refused
 test_symlinked_refusal_directory_is_refused
+test_pre_created_task_path_is_never_the_directory_on_path
+test_abort_after_the_shim_is_written_leaves_nothing_behind
 
 # The per-task temp roots fm-spawn creates live at a fixed /tmp/fm-<id>, outside
 # TMP_ROOT, so they are reclaimed here as one prefixed namespace.
