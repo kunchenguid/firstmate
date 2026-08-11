@@ -285,9 +285,13 @@ pr_for_task() { # <meta> <status>
 
 home_secondmate_id() {
   local marker="$FM_HOME/.fm-secondmate-home" id
-  [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
-  id=$(head -1 "$marker" 2>/dev/null || true)
-  valid_id "$id" || return 1
+  if [ ! -e "$marker" ] && [ ! -L "$marker" ]; then
+    return 1
+  fi
+  [ -f "$marker" ] && [ ! -L "$marker" ] || return 2
+  [ "$(wc -c < "$marker")" -eq "$(LC_ALL=C tr -d '\0' < "$marker" | wc -c)" ] || return 2
+  id=$(cat "$marker" 2>/dev/null) || return 2
+  valid_id "$id" || return 2
   printf '%s\n' "$id"
 }
 
@@ -396,7 +400,7 @@ scan_pass() { # <cursor> <after|through> <deadline> <secondmate-id-or-empty>
 }
 
 scan() {
-  local startup=${1:-0} self='' cursor deadline rc=0
+  local startup=${1:-0} self='' cursor deadline rc=0 marker_rc=0
   mkdir -p "$STATE" "$OUTCOME_DIR" || return 1
   [ ! -L "$OUTCOME_DIR" ] || return 1
   if [ "$startup" != 1 ] && [ "$(scan_marker_age)" -lt "$FM_INACTIVE_RECONCILE_SECS" ]; then
@@ -405,7 +409,16 @@ scan() {
   cursor=$(scan_marker_cursor)
   valid_id "$cursor" || cursor=''
   write_scan_marker "$cursor" || return 1
-  self=$(home_secondmate_id || true)
+  if self=$(home_secondmate_id); then
+    :
+  else
+    marker_rc=$?
+    self=''
+    if [ "$marker_rc" -ne 1 ]; then
+      printf 'actionable: inactive terminal outcomes remain unreconciled: invalid .fm-secondmate-home marker\n'
+      return 0
+    fi
+  fi
   deadline=$(( $(date +%s) + FM_INACTIVE_RECONCILE_BUDGET_SECS ))
   scan_pass "$cursor" after "$deadline" "$self" || rc=$?
   if [ "$rc" -eq 0 ] && [ -n "$cursor" ]; then

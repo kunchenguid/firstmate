@@ -166,6 +166,34 @@ test_local_secondmate_rejects_relative_parent_home() {
   pass "relative local parent homes fail closed"
 }
 
+# A present invalid identity marker cannot turn a secondmate home into a main
+# home. The original child state remains available after the routing alarm.
+test_invalid_secondmate_marker_blocks_routing() {
+  local kind out target
+  for kind in malformed symlink; do
+    make_world "invalid-marker-$kind"
+    write_child "$MATE" child 'failed: terminal'
+    if [ "$kind" = malformed ]; then
+      printf '../main\n' > "$MATE/.fm-secondmate-home"
+    else
+      target="$WORLD/marker-target"
+      printf 'mate\n' > "$target"
+      ln -s "$target" "$MATE/.fm-secondmate-home"
+    fi
+
+    out=$(FM_FAKE_CREW_STATE='failed' run_reconcile "$MATE" --startup)
+    printf '%s\n' "$out" | grep -Fq 'inactive terminal outcomes remain unreconciled: invalid .fm-secondmate-home marker' \
+      || fail "$kind secondmate marker did not surface the blocked terminal obligation"
+    [ "$(outcome_count "$MATE" pending)" = 0 ] \
+      || fail "$kind secondmate marker created a main-home pending receipt"
+    ! grep -Fq 'inactive-outcome:' "$MATE/state/.wake-queue" 2>/dev/null \
+      || fail "$kind secondmate marker routed a captain presentation wake"
+    [ -f "$MATE/state/child.meta" ] && [ -f "$MATE/state/child.status" ] \
+      || fail "$kind secondmate marker lost the terminal obligation"
+  done
+  pass "invalid secondmate markers block routing and surface the obligation"
+}
+
 # A remote child route writes the existing mirror input once even across restarts.
 test_remote_parent_reply_is_idempotent() {
   make_world remote; bind_secondmate remote; write_child "$MATE" child 'done: green'
@@ -416,6 +444,7 @@ test_reconciliation_never_calls_forge() {
 test_main_direct_terminal_presentation_receipt
 test_local_secondmate_reports_terminal_child
 test_local_secondmate_rejects_relative_parent_home
+test_invalid_secondmate_marker_blocks_routing
 test_remote_parent_reply_is_idempotent
 test_reused_task_id_reports_each_incarnation
 test_legacy_metadata_rewrite_keeps_receipt_identity
