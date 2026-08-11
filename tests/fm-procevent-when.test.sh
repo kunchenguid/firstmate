@@ -277,25 +277,41 @@ pass "a late true poll cannot fire after its deadline"
 # --- a timed-out action cannot leave descendants running ---------------------
 H="$TMP_ROOT/h-timeout"; new_home "$H"
 DESCENDANT_EFFECT="$TMP_ROOT/descendant-effect"
+DESCENDANT_PID="$TMP_ROOT/descendant-pid"
 SPAWNER="$TMP_ROOT/spawner.sh"
 cat > "$SPAWNER" <<'SH'
 #!/usr/bin/env bash
 (
   trap '' TERM
-  sleep 2
+  sleep 10
   printf 'late effect\n' > "$1"
 ) &
+printf '%s\n' "$!" > "$2"
 wait
 SH
 chmod +x "$SPAWNER"
 when "$H" arm timeout --stable 1 --action-timeout 1 \
-  --condition true --action "$SPAWNER" "$DESCENDANT_EFFECT" >/dev/null
+  --condition true --action "$SPAWNER" "$DESCENDANT_EFFECT" "$DESCENDANT_PID" >/dev/null
 pe "$H" reconcile >/dev/null
 wait_for_result "$H" when-timeout || fail "no outcome was captured for the timed-out action"
 RESULT=$(first_result "$H" when-timeout)
 assert_grep 'status: action-failed' "$RESULT" "the action timeout is captured as a failure"
 assert_grep 'action_exit: 124' "$RESULT" "the action timeout uses the shared timeout status"
-sleep 2
+wait_for_file "$DESCENDANT_PID" || fail "the timeout fixture did not record its descendant"
+descendant_pid=$(cat "$DESCENDANT_PID")
+for _ in $(seq 1 20); do
+  descendant_state=$(ps -o stat= -p "$descendant_pid" 2>/dev/null | tr -d ' ' || true)
+  case "$descendant_state" in ''|Z*) break ;; esac
+  sleep 0.1
+done
+descendant_state=$(ps -o stat= -p "$descendant_pid" 2>/dev/null | tr -d ' ' || true)
+case "$descendant_state" in
+  ''|Z*) ;;
+  *)
+    kill -KILL "$descendant_pid" 2>/dev/null || true
+    fail "a timed-out action left descendant $descendant_pid alive ($descendant_state)"
+    ;;
+esac
 assert_absent "$DESCENDANT_EFFECT" "a timed-out action leaves no descendant effect"
 pass "action timeouts terminate the complete process group"
 
