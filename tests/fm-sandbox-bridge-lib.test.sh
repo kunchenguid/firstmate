@@ -28,6 +28,9 @@ SH
 chmod 700 "$ENCODER"
 cat > "$FAILBIN/mv" <<SH
 #!/usr/bin/env bash
+for arg in "\$@"; do
+  [ "\$arg" = -- ] && exit 97
+done
 if [ "\${FM_TEST_FAIL_MV_ONCE:-0}" = 1 ] && [ ! -e "$TMP_ROOT/mv-failed" ]; then
   : > "$TMP_ROOT/mv-failed"
   exit 1
@@ -37,6 +40,9 @@ SH
 chmod 700 "$FAILBIN/mv"
 cat > "$FAILBIN/rm" <<SH
 #!/usr/bin/env bash
+for arg in "\$@"; do
+  [ "\$arg" = -- ] && exit 97
+done
 if [ "\${FM_TEST_FAIL_RM_CURSOR_ONCE:-0}" = 1 ] && [ ! -e "$TMP_ROOT/rm-cursor-failed" ]; then
   for arg in "\$@"; do
     case "\$arg" in
@@ -52,6 +58,9 @@ SH
 chmod 700 "$FAILBIN/rm"
 cat > "$FAILBIN/cp" <<SH
 #!/usr/bin/env bash
+for arg in "\$@"; do
+  [ "\$arg" = -- ] && exit 97
+done
 brief_seen=0
 for arg in "\$@"; do
   [ "\$arg" = "$BRIEF" ] && brief_seen=1
@@ -300,7 +309,7 @@ fm_sandbox_bridge_create "$STATE" "$MISSING_WORKTREE_ID" "$TMP_ROOT/missing-work
 expect_code 0 "$status" "bridge removal missing-worktree fixture creation"
 missing_bridge=$(fm_sandbox_bridge_expected_path "$STATE" "$MISSING_WORKTREE_ID") || fail "missing-worktree bridge path resolution failed"
 missing_cursor=$(fm_sandbox_bridge_cursor_path "$STATE" "$MISSING_WORKTREE_ID") || fail "missing-worktree cursor path resolution failed"
-rm -rf -- "$TMP_ROOT/missing-worktree-source"
+rm -rf "$TMP_ROOT/missing-worktree-source"
 status=0
 fm_sandbox_bridge_remove "$missing_bridge" "$STATE" "$MISSING_WORKTREE_ID" "$TMP_ROOT/missing-worktree-source" || status=$?
 expect_code 0 "$status" "bridge removal with the acquired worktree already gone"

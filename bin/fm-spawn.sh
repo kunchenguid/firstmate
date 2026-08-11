@@ -635,7 +635,7 @@ spawn_remote_secondmate() {
     echo "remote_target=$remote_target"
     [ -z "$remote_recorded_traceparent" ] || echo "traceparent=$remote_recorded_traceparent"
   } > "$tmp"
-  mv -f -- "$tmp" "$meta"
+  mv -f "$tmp" "$meta"
   if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
     SPAWN_TASK_SET_LOCK_HELD=0
     fm_lock_release "$SPAWN_TASK_SET_LOCK"
@@ -742,7 +742,7 @@ spawn_prepare_endpoint_acquisition() {
     return 1
   fi
   : > "$file" || return 1
-  chmod 600 "$file" || { rm -f -- "$file"; return 1; }
+  chmod 600 "$file" || { rm -f "$file"; return 1; }
   SPAWN_ENDPOINT_ACQUISITION_FILE=$file
   FM_BACKEND_ACQUISITION_FILE=$file
   export FM_BACKEND_ACQUISITION_FILE
@@ -1032,7 +1032,7 @@ spawn_abort_cleanup() {
   local status=$?
   if spawn_publication_committed; then
     SPAWN_PUBLICATION_COMPLETE=1
-    [ -z "$SPAWN_ENDPOINT_ACQUISITION_FILE" ] || rm -f -- "$SPAWN_ENDPOINT_ACQUISITION_FILE" || \
+    [ -z "$SPAWN_ENDPOINT_ACQUISITION_FILE" ] || rm -f "$SPAWN_ENDPOINT_ACQUISITION_FILE" || \
       echo "warning: could not remove post-publication endpoint acquisition record for $ID" >&2
   else
     if [ "$SPAWN_BRIDGE_CLEANUP" != 1 ] \
@@ -1168,7 +1168,7 @@ spawn_abort_cleanup() {
     if [ "$SPAWN_ENDPOINT_CLEANUP" = 1 ]; then
     if spawn_endpoint_cleanup; then
       SPAWN_ENDPOINT_CLEANUP=0
-      [ -z "$SPAWN_ENDPOINT_ACQUISITION_FILE" ] || rm -f -- "$SPAWN_ENDPOINT_ACQUISITION_FILE" || \
+      [ -z "$SPAWN_ENDPOINT_ACQUISITION_FILE" ] || rm -f "$SPAWN_ENDPOINT_ACQUISITION_FILE" || \
         echo "warning: could not remove endpoint acquisition record for $ID" >&2
     else
       echo "warning: could not remove unpublished endpoint for $ID" >&2
@@ -1180,7 +1180,7 @@ spawn_abort_cleanup() {
        && [ -f "$SPAWN_ENDPOINT_ACQUISITION_FILE" ] \
        && [ ! -L "$SPAWN_ENDPOINT_ACQUISITION_FILE" ] \
        && [ ! -s "$SPAWN_ENDPOINT_ACQUISITION_FILE" ]; then
-      rm -f -- "$SPAWN_ENDPOINT_ACQUISITION_FILE" || \
+      rm -f "$SPAWN_ENDPOINT_ACQUISITION_FILE" || \
         echo "warning: could not remove empty endpoint acquisition record for $ID" >&2
     fi
     spawn_cleanup_record_refresh || echo "warning: could not finalize unpublished cleanup record for ${ID:-task}" >&2
@@ -1247,11 +1247,11 @@ clear_relaunch_harness_wiring() {
   fi
   auth_path=$(fm_control_harness_turnend_auth_path "$harness" "$token") || return 1
   if [ -n "$auth_path" ]; then
-    rm -f -- "$auth_path" || return 1
+    rm -f "$auth_path" || return 1
   fi
   while IFS= read -r path; do
     [ -n "$path" ] || continue
-    rm -f -- "$path" || return 1
+    rm -f "$path" || return 1
   done <<EOF
 $(fm_control_harness_wiring_paths "$harness" "$wt" "$state" "$id" "$placement")
 EOF
@@ -3328,7 +3328,7 @@ fi
 SPAWN_BRIDGE_CLEANUP=0
 SPAWN_ENDPOINT_CLEANUP=0
 SPAWN_WORKTREE_CLEANUP=0
-[ -z "$SPAWN_ENDPOINT_ACQUISITION_FILE" ] || rm -f -- "$SPAWN_ENDPOINT_ACQUISITION_FILE"
+[ -z "$SPAWN_ENDPOINT_ACQUISITION_FILE" ] || rm -f "$SPAWN_ENDPOINT_ACQUISITION_FILE"
 spawn_cleanup_record_refresh || echo "warning: could not clear unpublished cleanup record for $ID" >&2
 
 sq_brief=$(shell_quote "$BRIEF")

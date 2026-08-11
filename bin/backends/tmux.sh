@@ -87,11 +87,12 @@ fm_backend_tmux_container_ensure() {
 fm_backend_tmux_acquisition_record() {
   local file=${FM_BACKEND_ACQUISITION_FILE:-} session=$1 window_id=$2 label=$3 tmp
   [ -n "$file" ] || return 0
+  case "$file" in -*) file=./$file ;; esac
   tmp="$file.tmp.${BASHPID:-$$}"
   printf 'backend=tmux\nkind=tmux-id\nsession=%s\nwindow_id=%s\nlabel=%s\n' \
     "$session" "$window_id" "$label" > "$tmp" || return 1
-  chmod 600 "$tmp" && mv -f -- "$tmp" "$file" || {
-    rm -f -- "$tmp"
+  chmod 600 "$tmp" && mv -f "$tmp" "$file" || {
+    rm -f "$tmp"
     return 1
   }
 }

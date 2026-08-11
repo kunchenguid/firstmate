@@ -345,12 +345,13 @@ fm_backend_zellij_tab_matches_label() {  # <session> <tab_id> <label>
 fm_backend_zellij_acquisition_record() {
   local file=${FM_BACKEND_ACQUISITION_FILE:-} session=$1 label=$2 tab_id=$3 pane_id=${4:-} tmp
   [ -n "$file" ] || return 0
+  case "$file" in -*) file=./$file ;; esac
   tmp="$file.tmp.${BASHPID:-$$}"
   printf 'backend=zellij\nkind=%s\nsession=%s\ntab_id=%s\npane_id=%s\nlabel=%s\n' \
     "$([ -n "$pane_id" ] && printf target || printf zellij-tab)" \
     "$session" "$tab_id" "$pane_id" "$label" > "$tmp" || return 1
-  chmod 600 "$tmp" && mv -f -- "$tmp" "$file" || {
-    rm -f -- "$tmp"
+  chmod 600 "$tmp" && mv -f "$tmp" "$file" || {
+    rm -f "$tmp"
     return 1
   }
 }

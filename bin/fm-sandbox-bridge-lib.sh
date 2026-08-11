@@ -214,6 +214,8 @@ fm_sandbox_bridge_create() {  # <state> <task-id> <worktree> <canonical-brief> <
   cursor=$(fm_sandbox_bridge_cursor_path "$state" "$task_id") || return 1
   state_real=$(fm_sandbox_bridge_real_dir "$state") || return 1
   worktree_real=$(fm_sandbox_bridge_real_dir "$worktree") || return 1
+  case "$brief" in -*) brief=./$brief ;; esac
+  case "$encoder" in -*) encoder=./$encoder ;; esac
   if ! {
     fm_sandbox_bridge_safe_regular "$brief" &&
       fm_sandbox_bridge_safe_regular "$encoder"
@@ -286,13 +288,13 @@ fm_sandbox_bridge_create() {  # <state> <task-id> <worktree> <canonical-brief> <
     return 1
   }
   if ! {
-    cp -- "$brief" "$runtime_brief_tmp" &&
+    cp "$brief" "$runtime_brief_tmp" &&
       chmod 600 "$runtime_brief_tmp" &&
-      mv -f -- "$runtime_brief_tmp" "$expected/runtime-brief.md" &&
-      cp -- "$encoder" "$expected/fm-operational-input.sh" &&
+      mv -f "$runtime_brief_tmp" "$expected/runtime-brief.md" &&
+      cp "$encoder" "$expected/fm-operational-input.sh" &&
       chmod 700 "$expected/fm-operational-input.sh"
   }; then
-    rm -f -- "$runtime_brief_tmp"
+    rm -f "$runtime_brief_tmp"
     umask "$old_umask"
     fm_sandbox_bridge_remove_acquired \
       "$expected" "$state_real" "$task_id" "$worktree_real" \
@@ -334,10 +336,10 @@ fm_sandbox_bridge_remove_acquired() {  # <bridge> <state> <task-id> <worktree> <
     [ "$current" = "$cursor_id" ] || return 1
   fi
   if [ -e "$bridge" ] || [ -L "$bridge" ]; then
-    rm -rf -- "$bridge" || return 1
+    rm -rf "$bridge" || return 1
   fi
   if [ -e "$cursor" ] || [ -L "$cursor" ]; then
-    rm -f -- "$cursor" || return 1
+    rm -f "$cursor" || return 1
   fi
 }
 
@@ -427,7 +429,7 @@ fm_sandbox_bridge_write_cursor() {  # <host-private cursor> <size>
       printf '%s\n' "$size" > "$tmp" &&
       mv -f "$tmp" "$cursor"
   }; then
-    rm -f -- "$tmp"
+    rm -f "$tmp"
     return 1
   fi
 }
@@ -453,38 +455,38 @@ fm_sandbox_bridge_sync() {  # <bridge> <state> <task-id> <worktree>
   canonical_turnend=$state_real/$task_id.turn-ended
   tmp=$(mktemp "$state_real/.sandbox-bridge-status.${task_id}.XXXXXX") || return 1
   size=$(fm_sandbox_bridge_copy_delta "$bridge/status" "$cursor" "$tmp") || {
-    rm -f -- "$tmp"
+    rm -f "$tmp"
     fm_sandbox_bridge_error 'sandbox bridge status is unsafe, truncated, or exceeds the 64 KiB append bound'
     return 1
   }
   if [ "$size" -gt "$cursor" ]; then
     delta_state=$(fm_sandbox_bridge_delta_state "$tmp" "$canonical_status" "$cursor") || {
-      rm -f -- "$tmp"
+      rm -f "$tmp"
       fm_sandbox_bridge_error "could not reconcile bridge status with canonical state for $task_id"
       return 1
     }
     case "$delta_state" in
       committed) ;;
       ''|*[!0-9]*)
-        rm -f -- "$tmp"
+        rm -f "$tmp"
         fm_sandbox_bridge_error "could not reconcile bridge status with canonical state for $task_id"
         return 1
         ;;
       *)
         fm_sandbox_bridge_append_delta "$tmp" "$canonical_status" "$delta_state" || {
-          rm -f -- "$tmp"
+          rm -f "$tmp"
           fm_sandbox_bridge_error "could not append bridge status to canonical state for $task_id"
           return 1
         }
         ;;
     esac
     fm_sandbox_bridge_write_cursor "$FM_SANDBOX_BRIDGE_CURSOR" "$size" || {
-      rm -f -- "$tmp"
+      rm -f "$tmp"
       fm_sandbox_bridge_error "could not transactionally advance sandbox bridge cursor for $task_id"
       return 1
     }
   fi
-  rm -f -- "$tmp"
+  rm -f "$tmp"
   if [ -e "$bridge/turn-ended" ] || [ -L "$bridge/turn-ended" ]; then
     fm_sandbox_bridge_safe_regular "$bridge/turn-ended" || {
       fm_sandbox_bridge_error "sandbox bridge turn-end marker is unsafe: $bridge/turn-ended"
@@ -494,7 +496,7 @@ fm_sandbox_bridge_sync() {  # <bridge> <state> <task-id> <worktree>
       fm_sandbox_bridge_error "canonical turn-end marker is unsafe: $canonical_turnend"
       return 1
     }
-    rm -f -- "$bridge/turn-ended" || {
+    rm -f "$bridge/turn-ended" || {
       fm_sandbox_bridge_error "could not consume sandbox bridge turn-end marker: $bridge/turn-ended"
       return 1
     }
@@ -526,11 +528,11 @@ fm_sandbox_bridge_remove() {  # <bridge> <state> <task-id> <worktree>
         fm_sandbox_bridge_read_cursor "$cursor" >/dev/null || return 1
       fi
     fi
-    rm -rf -- "$bridge" || return 1
+    rm -rf "$bridge" || return 1
   fi
   if [ -e "$cursor" ] || [ -L "$cursor" ]; then
     fm_sandbox_bridge_private_regular "$cursor" || return 1
     fm_sandbox_bridge_read_cursor "$cursor" >/dev/null || return 1
-    rm -f -- "$cursor" || return 1
+    rm -f "$cursor" || return 1
   fi
 }

@@ -1993,12 +1993,13 @@ fm_backend_herdr_agent_alive() {  # <target>
 fm_backend_herdr_acquisition_record() {
   local file=${FM_BACKEND_ACQUISITION_FILE:-} session=$1 workspace_id=$2 tab_id=$3 label=$4 pane_id=${5:-} tmp
   [ -n "$file" ] || return 0
+  case "$file" in -*) file=./$file ;; esac
   tmp="$file.tmp.${BASHPID:-$$}"
   printf 'backend=herdr\nkind=%s\nsession=%s\nworkspace_id=%s\ntab_id=%s\npane_id=%s\nlabel=%s\n' \
     "$([ -n "$pane_id" ] && printf target || printf herdr-tab)" \
     "$session" "$workspace_id" "$tab_id" "$pane_id" "$label" > "$tmp" || return 1
-  chmod 600 "$tmp" && mv -f -- "$tmp" "$file" || {
-    rm -f -- "$tmp"
+  chmod 600 "$tmp" && mv -f "$tmp" "$file" || {
+    rm -f "$tmp"
     return 1
   }
 }
