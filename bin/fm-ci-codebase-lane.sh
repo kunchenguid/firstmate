@@ -36,6 +36,9 @@ esac
 id -u ci >/dev/null 2>&1 || useradd -m -s /bin/bash ci
 chown -R ci:ci .
 
+# shellcheck disable=SC2016 # The body below is deliberately unexpanded here: it
+# is evaluated by the unprivileged shell, where $@ is the lane selection passed
+# after the $0 placeholder and $(id -u) must read that shell's own identity.
 runuser -u ci -- env HOME=/home/ci PATH="/opt/node22/bin:$PATH" \
   GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
   GIT_AUTHOR_NAME="firstmate ci" GIT_AUTHOR_EMAIL=ci@firstmate.invalid \
