@@ -383,8 +383,8 @@ test_backend_name_cmux_fallback_notice() {
 # fm_backend_name's auto-detect step: fires only when FM_BACKEND/config/backend
 # are both absent, selects between the three markers exactly as
 # fm_backend_detect does, and is loud only when it selects herdr or cmux.
-# The pure resolver and bootstrap stay quiet on the hard tmux fallback; the
-# public spawn path opts into its operator notice separately below.
+# The pure resolver and bootstrap stay quiet on the hard tmux fallback.
+# The public spawn path passes `spawn` and refuses an unresolved selection.
 test_backend_name_autodetect_notice() {
   local dir cfg out errfile
 
@@ -1107,7 +1107,7 @@ test_spawn_autodetect_nesting_resolves_tmux_silently() {
   # configured, so auto-detect runs. $TMUX and HERDR_ENV=1 are both present
   # (tmux nested inside a herdr pane) - the full fm-spawn.sh pipeline, not just
   # fm_backend_name, must resolve this to tmux and stay completely silent about
-  # it (today's default path, byte-identical).
+  # it (the existing tmux metadata path stays byte-identical).
   out=$(PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" \
     FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" HERDR_ENV=1 \

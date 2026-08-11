@@ -24,7 +24,7 @@ tmux new -s firstmate
 
 Crew tasks become windows in that session.
 `tmux display-message -p '#S'` prints its name.
-If the primary harness runs outside tmux, Firstmate creates or reuses a detached session named `firstmate`:
+When tmux is selected and the primary harness runs outside it, Firstmate creates or reuses a detached session named `firstmate`:
 
 ```sh
 tmux attach -t firstmate

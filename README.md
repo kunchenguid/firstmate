@@ -60,7 +60,7 @@ Full detail on every feature lives in [docs/architecture.md](docs/architecture.m
 
 - A verified primary agent harness: Claude Code, Grok, Pi, `pi-signed`, Codex, or OpenCode.
 - Git and the GitHub CLI, authenticated through `gh auth login`.
-- The CLI and dependencies for your selected runtime backend; tmux is the reference default.
+- The CLI and dependencies for your selected runtime backend; tmux is the reference backend.
 
 The first mate detects and offers to install supported missing tools after you approve.
 Backend-specific setup is linked in [Documentation](#documentation).
@@ -128,7 +128,7 @@ The preference persists for the effective Firstmate home, and toggling it off re
 
 ### More backends
 
-Setup guides for tmux (the default) and every other supported backend (herdr, zellij, Orca, cmux) are linked in [Documentation](#documentation) below.
+Setup guides for the reference tmux backend and the supported experimental backends (herdr, zellij, Orca, cmux) are linked in [Documentation](#documentation) below.
 
 ## How It Works
 
