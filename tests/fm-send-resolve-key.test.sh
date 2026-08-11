@@ -63,6 +63,11 @@ case "${1:-}" in
     for a in "$@"; do case "$a" in *cursor_y*) printf '1\n'; exit 0 ;; esac; done
     printf 'fakepane\n'; exit 0 ;;
   capture-pane) printf '╭────╮\n│    │\n╰────╯\n'; exit 0 ;;
+  # This fork proves an explicit endpoint by ENUMERATING live panes, because tmux
+  # answers display-message for a gone target with another window's pane id
+  # (bin/backends/tmux.sh). Publish the endpoints these cases address so each one
+  # reaches the refusal it is actually about.
+  list-panes) printf '%s\n' ${FM_FAKE_TMUX_PANES:-sess:elsewhere}; exit 0 ;;
   list-windows) exit 0 ;;
 esac
 exit 0

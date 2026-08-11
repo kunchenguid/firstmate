@@ -188,8 +188,8 @@ SH
   # The case dir doubles as the firstmate home teardown writes its backlog through
   # (run_teardown passes FM_HOME), so give it the same tasks-axi config the real
   # home has. Without this, teardown's backlog write would reach the real repo.
-  mkdir -p "$case_dir/data"
-  cat > "$case_dir/.tasks.toml" <<'TOML'
+  mkdir -p "$case_dir/home/data"
+  cat > "$case_dir/home/.tasks.toml" <<'TOML'
 backend = "markdown"
 
 [markdown]
@@ -232,6 +232,10 @@ case "\${1:-} \${2:-}" in
         fi
       fi
       if [ -f "\$nm/run-\$run_id.toon" ]; then cat "\$nm/run-\$run_id.toon"; exit 0; fi
+      if [ "\${FM_FAKE_AXI_STATUS+set}" = set ]; then
+        printf '%s\n' "\$FM_FAKE_AXI_STATUS"
+        exit 0
+      fi
       printf 'error: "run \\\\"%s\\\\" not found"\n' "\$run_id" >&2
       exit 1
     fi
@@ -721,8 +725,12 @@ SH
 # Run teardown with PATH mocking. Args: case_dir [extra args...]
 run_teardown() {
   local case_dir=$1; shift
+  # FM_HOME is a dedicated directory rather than the case root: a secondmate home
+  # lives at $case_dir/secondmate-home, and teardown refuses to remove a home
+  # nested inside the ACTIVE firstmate home - which a real one never is. Keeping
+  # them siblings preserves both that guard and this fixture's hermetic backlog.
   FM_ROOT_OVERRIDE="$ROOT" \
-  FM_HOME="$case_dir" \
+  FM_HOME="$case_dir/home" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_CONFIG_OVERRIDE="$case_dir/config" \
   PATH="$case_dir/fakebin:${FM_TEARDOWN_TEST_PATH:-$PATH}" \
