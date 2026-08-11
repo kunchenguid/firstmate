@@ -36,7 +36,7 @@
 #      (herdr-shape): `workspace list`'s `current_directory` field reflects a
 #      `cd` run directly in the surface's own top-level shell, but stays
 #      frozen at wherever that shell was when it launched a foreground
-#      subshell (exactly what `treehouse get` does) - verified live: a nested
+#      subshell (exactly what a bare `treehouse get` does) - verified live: a nested
 #      `bash -c 'cd /Users && exec bash'` left `current_directory` reporting
 #      the PARENT shell's last cwd, never following into the subshell. Fixed
 #      with zellij's own pwd-marker-probe workaround, reused verbatim in
@@ -438,11 +438,9 @@ fm_backend_cmux_target_ready() {  # <target> [expected-label]
 # Verified pitfall (finding #2 above): cmux's `current_directory` field DOES
 # reflect a `cd` run directly in the surface's own top-level shell, but stays
 # FROZEN when an interactive subshell is held open in the foreground instead.
-# The worktree-acquisition line fm-spawn.sh actually sends,
-# `cd "$(treehouse get --lease --lease-holder <id>)"`, avoids that: `--lease`
-# prints the path and exits without opening a subshell, so the `cd` itself is
-# a plain top-level command. cmux's control socket exposes no live-process cwd
-# field to fall back on if that assumption ever breaks (unlike herdr's
+# fm-spawn.sh instead acquires a durable lease outside the surface and sends a
+# plain top-level `cd` to its returned path. cmux's control socket exposes no
+# live-process cwd field to fall back on if that assumption ever breaks (unlike herdr's
 # `foreground_cwd`), so this probe stays in place as the already-proven
 # mechanism rather than passive polling. Active probe instead: print the
 # surface's `$PWD` with a unique marker (atomically submitted via

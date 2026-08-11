@@ -53,7 +53,7 @@
 #   4. `list-panes --json`'s `pane_cwd` reflects a `cd` run DIRECTLY in the
 #      pane's own top-level shell within one poll (<0.3s) - but does NOT
 #      reflect a `cd` performed by a NESTED SUBSHELL the pane's shell
-#      launched as a foreground command (verified: `treehouse get` opens
+#      launched as a foreground command (verified: a bare `treehouse get` opens
 #      exactly such a subshell). `pane_cwd` stays frozen at wherever the
 #      pane's shell was when it invoked that foreground command - worse than
 #      herdr's frozen-cwd trap (herdr at least exposes a `foreground_cwd`
@@ -388,18 +388,16 @@ fm_backend_zellij_target_ready() {  # <target> [expected-label]
 
 # fm_backend_zellij_current_path: the live pane's cwd, or empty on any error.
 # Mirrors tmux's pane_current_path poll used for worktree-path discovery after
-# `treehouse get --lease`.
+# the spawn-time worktree `cd`.
 #
 # Verified pitfall (docs/zellij-backend.md "Worktree-path discovery: pane_cwd
 # does not track a subshell"): `list-panes --json`'s `pane_cwd` DOES reflect a
 # `cd` run directly in the pane's own top-level shell, but stays FROZEN when an
 # interactive subshell is held open in the foreground instead - verified
-# against a bare `treehouse get`, which opens exactly such a subshell. The
-# worktree-acquisition line fm-spawn.sh actually sends,
-# `cd "$(treehouse get --lease --lease-holder <id>)"`, avoids that: `--lease`
-# prints the path and exits without opening a subshell, so the `cd` itself is
-# a plain top-level command. Zellij's CLI exposes no per-pane pid and no
-# live-process cwd field to fall back on if that assumption ever breaks
+# against a bare `treehouse get`, which opens exactly such a subshell.
+# fm-spawn.sh instead acquires a durable lease outside the pane and sends a
+# plain top-level `cd` to its returned path. Zellij's CLI exposes no per-pane
+# pid and no live-process cwd field to fall back on if that assumption ever breaks
 # (unlike herdr's `foreground_cwd`), so this probe stays in place as the
 # already-proven mechanism rather than passive polling. Active probe:
 # print the pane's `$PWD` with a unique marker (atomically submitted,

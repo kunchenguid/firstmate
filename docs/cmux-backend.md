@@ -88,7 +88,7 @@ Target readiness therefore uses the structural `list-panes` response instead of 
 Capture remains bounded and locally trimmed after `read-screen` becomes available.
 
 `current_directory` follows a top-level shell `cd` but not an interactive subshell held open in the foreground, verified live against a nested `bash -c 'cd ... && exec bash'`.
-`fm-spawn.sh`'s worktree acquisition instead runs `cd "$(treehouse get --lease --lease-holder <task-id>)"`: `--lease` prints the path and exits without opening a subshell, so the `cd` itself is the plain top-level command this rule already tracks; the marker probe stays in place regardless, as the already-proven mechanism.
+The [authoritative worktree lifecycle](architecture.md#worktrees-not-branches-in-your-checkout) now gives the surface a plain top-level `cd`, which this field tracks; the marker probe stays in place regardless as the already-proven discovery mechanism.
 Spawn-time worktree discovery sends begin and end markers around `pwd`, captures the marked block, and joins wrapped path lines.
 
 Literal send and Enter are separate calls.
