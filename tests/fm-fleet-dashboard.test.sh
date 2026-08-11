@@ -57,7 +57,7 @@ for argument in "$@"; do
 done
 case "${1:-}" in
   list-windows)
-    printf '%s\n' fm-progressing-task fm-decision-task
+    printf '%s\n' fm-progressing-task fm-decision-task fm-review-task
     ;;
   display-message)
     case "$*" in
@@ -83,8 +83,9 @@ intake_payload() {
 }
 
 write_live_fixture() {  # <home>
-  local home=$1 intake attempt root generation decision_generation
-  mkdir -p "$home/projects/progressing" "$home/projects/decision" "$home/projects/unhealthy"
+  local home=$1 intake attempt root generation decision_generation review_generation
+  mkdir -p "$home/projects/progressing" "$home/projects/decision" "$home/projects/unhealthy" \
+    "$home/projects/merged" "$home/projects/review" "$home/projects/paused"
   cat > "$home/data/backlog.md" <<'EOF'
 ## In flight
 - [ ] progressing-task - Continue implementation (repo: firstmate) (kind: ship) (since 2026-08-02)
@@ -99,10 +100,14 @@ write_live_fixture() {  # <home>
 - [ ] hold-six - Approve the changelog draft (repo: artemis) (kind: captain) (since 2026-07-30) (hold: One paragraph awaits review.) (hold-kind: captain)
 - [ ] hold-seven - Sign off on the icon refresh (repo: artemis) (kind: captain) (since 2026-08-01) (hold: Two candidates shortlisted.) (hold-kind: captain)
 
+- [ ] review-task - Ship the review branch (repo: firstmate) (kind: ship) (since 2026-08-01)
+- [ ] paused-task - Wait out the vendor limit (repo: firstmate) (kind: ship) (since 2026-08-01)
+
 ## Queued
 - [ ] queued-task - Ship the follow-up blocked-by: decision-task (repo: firstmate) (kind: ship) (since 2026-07-30)
 
 ## Done
+- [x] merged-task - Ship the merged thing (repo: firstmate) (kind: ship) (merged 2026-07-31)
 EOF
 
   intake=$(FM_HOME="$home" "$TELEMETRY" intake --state "$home/state" \
@@ -147,8 +152,48 @@ EOF
     "yolo=off"
   printf 'failed: endpoint disappeared\n' > "$home/state/unhealthy-task.status"
 
+  # Terminal-state and declared-wait workers whose endpoints are legitimately
+  # gone: none of the three windows below exist in the fake tmux list.
+  fm_write_meta "$home/state/merged-task.meta" \
+    "window=firstmate:fm-merged-task" \
+    "worktree=$home/projects/merged" \
+    "project=firstmate" \
+    "harness=claude" \
+    "kind=ship" \
+    "mode=ship" \
+    "yolo=off" \
+    "pr=https://github.com/pedromuller-del/firstmate/pull/3972"
+  printf 'done: PR https://github.com/pedromuller-del/firstmate/pull/3972 checks green\n' \
+    > "$home/state/merged-task.status"
+
+  fm_write_meta "$home/state/review-task.meta" \
+    "window=firstmate:fm-review-task" \
+    "worktree=$home/projects/review" \
+    "project=firstmate" \
+    "harness=claude" \
+    "kind=ship" \
+    "mode=ship" \
+    "yolo=off" \
+    "pr=https://github.com/pedromuller-del/firstmate/pull/4001"
+  printf 'done: PR https://github.com/pedromuller-del/firstmate/pull/4001 checks green\n' \
+    > "$home/state/review-task.status"
+  review_generation=$("$ROOT/bin/fm-busy-event.sh" arm "$home/state" review-task)
+  "$ROOT/bin/fm-busy-event.sh" apply "$home/state" review-task idle \
+    --gen "$review_generation" --source claude-hook --event stop
+
+  fm_write_meta "$home/state/paused-task.meta" \
+    "window=firstmate:fm-paused-task" \
+    "worktree=$home/projects/paused" \
+    "project=firstmate" \
+    "harness=claude" \
+    "kind=ship" \
+    "mode=ship" \
+    "yolo=off"
+  printf 'paused: vendor rate limit resets tomorrow\n' > "$home/state/paused-task.status"
+
   # Pin status mtimes so age-in-state is deterministic against FM_SNAPSHOT_NOW.
-  TZ=UTC touch -t 202608020000 "$home/state/decision-task.status" "$home/state/unhealthy-task.status"
+  TZ=UTC touch -t 202608020000 "$home/state/decision-task.status" "$home/state/unhealthy-task.status" \
+    "$home/state/merged-task.status" "$home/state/review-task.status" "$home/state/paused-task.status"
 }
 
 render_terminal() {  # <home> <fakebin> [extra args...]
@@ -170,11 +215,11 @@ test_terminal_cockpit_opens_on_needs_pedro() {
 
   out=$(render_terminal "$home" "$fakebin" --width 100) || fail "terminal render failed"
 
-  needs=$(line_number_of "$out" "NEEDS PEDRO (9)")
-  underway=$(line_number_of "$out" "UNDERWAY (1)")
+  needs=$(line_number_of "$out" "NEEDS PEDRO (10)")
+  underway=$(line_number_of "$out" "UNDERWAY (2)")
   unhealthy=$(line_number_of "$out" "UNHEALTHY (1)")
-  queued=$(line_number_of "$out" "QUEUED (1)")
-  [ -n "$needs" ] || fail "terminal output has no NEEDS PEDRO section counting all nine items"
+  queued=$(line_number_of "$out" "QUEUED (2)")
+  [ -n "$needs" ] || fail "terminal output has no NEEDS PEDRO section counting all ten items"
   [ -n "$underway" ] || fail "terminal output has no UNDERWAY section"
   [ -n "$unhealthy" ] || fail "terminal output has no UNHEALTHY section"
   [ -n "$queued" ] || fail "terminal output has no QUEUED section"
@@ -190,7 +235,14 @@ test_terminal_cockpit_opens_on_needs_pedro() {
     || fail "live-worker decision does not outrank the oldest hold"
   assert_contains "$out" "⚠ for 13d" "a 13-day hold got no age warning weight"
   assert_contains "$out" "The certificate expires soon." "oldest hold reason was not rendered"
-  assert_contains "$out" "4 more" "hidden Needs Pedro items were not counted"
+  assert_contains "$out" "PR ready: https://github.com/pedromuller-del/firstmate/pull/4001" \
+    "an open PR reported ready was not surfaced for review"
+  assert_not_contains "$out" "pull/3972" "a merged PR was surfaced as a live review ask"
+  assert_contains "$out" "landed (merged 2026-07-31), awaiting cleanup" \
+    "a merged task was not reconciled against its backlog completion"
+  assert_contains "$out" "declared wait, worker gone: vendor rate" \
+    "a declared pause with a gone worker was not rendered as a wait"
+  assert_contains "$out" "5 more" "hidden Needs Pedro items were not counted"
   assert_contains "$out" "rule: live asks, PRs, holds, oldest first" "selection rule is not printed on screen"
   assert_contains "$out" "--all shows all" "expansion hint is not printed"
   assert_not_contains "$out" "Sign off on the icon refresh" "low-priority hold leaked past the section cap"

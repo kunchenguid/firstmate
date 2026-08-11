@@ -238,6 +238,22 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent }) {
       .filter((record) => record.structured && record.id && record.title)
       .map((record) => [record.id, cleanProse(record.title)]),
   );
+  const completedById = new Map(
+    records
+      .filter((record) => record.structured && record.id && record.state === "done")
+      .map((record) => [record.id, record]),
+  );
+  const heldById = new Map(
+    records
+      .filter((record) => record.structured && record.id && record.state !== "done" && record.hold_reason)
+      .map((record) => [record.id, record]),
+  );
+  const isActionableCaptainHold = (record) =>
+    record.hold_kind === "captain" && record.hold_reason && !record.unresolved_blocker_ids?.length;
+  const landingNote = (completed) =>
+    completed?.completion?.verb
+      ? `landed (${completed.completion.verb}${completed.completion.date ? ` ${completed.completion.date}` : ""}), awaiting cleanup`
+      : "finished, awaiting cleanup";
 
   for (const record of records) {
     if (!record.structured) {
@@ -251,7 +267,7 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent }) {
     }
     const recordName = cleanProse(record.title) || record.id;
     const isCaptainHold = record.hold_kind === "captain" && record.hold_reason;
-    if (isCaptainHold && !record.unresolved_blocker_ids?.length) {
+    if (isActionableCaptainHold(record)) {
       needsPedro.push({
         tag: "HOLD",
         name: recordName,
@@ -322,19 +338,12 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent }) {
       }
       continue;
     }
-    if (state === "done" && task.pr?.url) {
-      needsPedro.push({ ...base, tag: "REVIEW", prose: `PR ready: ${task.pr.url}`, note: null });
-      continue;
-    }
-    if (["failed", "unknown"].includes(state) || task.endpoint?.exists === false || task.endpoint?.agent_alive === "dead") {
-      const reason = task.endpoint?.exists === false ? "worker endpoint is gone" : detail || "no readable state";
-      const lastEvent = cleanProse(task.hints?.last_event_text);
-      unhealthy.push({
-        ...base,
-        tag: state === "failed" ? "FAILED" : "MISSING",
-        prose: reason,
-        note: lastEvent && !reason.includes(lastEvent) ? `last event: ${lastEvent}` : base.note,
-      });
+    // The reconciled current state from fm-crew-state is authoritative for
+    // routing. Raw signals never override it: a gone endpoint is unhealthy
+    // only when the state claims a live worker, and a reported PR is an ask
+    // only while the fleet's own backlog does not already record it landed.
+    if (state === "blocked") {
+      needsPedro.push({ ...base, tag: "BLOCKED", prose: detail || "blocked, no detail reported", note: null });
       continue;
     }
     if (state === "paused") {
@@ -342,10 +351,66 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent }) {
       continue;
     }
     if (state === "done") {
+      const completed = completedById.get(task.id);
+      if (task.pr?.url && !completed) {
+        needsPedro.push({ ...base, tag: "REVIEW", prose: `PR ready: ${task.pr.url}`, note: null });
+        continue;
+      }
       underway.push({
         ...base,
         tag: "DONE",
-        prose: task.hints?.scout_report_present ? "scout report ready to read" : "finished, awaiting cleanup",
+        prose: null,
+        note: task.hints?.scout_report_present ? "scout report ready to read" : landingNote(completed),
+      });
+      continue;
+    }
+    // A worker whose current state is unreadable is not automatically sick:
+    // reconcile against the durable records first. A backlog completion means
+    // it landed; a hold means it is deliberately preserved; a declared pause
+    // is a bounded external wait. Only a worker no record accounts for is
+    // unhealthy.
+    if (state === "unknown") {
+      const completed = completedById.get(task.id);
+      if (completed) {
+        underway.push({ ...base, tag: "DONE", prose: null, note: landingNote(completed) });
+        continue;
+      }
+      const held = heldById.get(task.id);
+      if (held) {
+        if (isActionableCaptainHold(held)) {
+          continue;
+        }
+        queued.push({
+          ...base,
+          tag: "HOLD",
+          prose: null,
+          note: `held: ${cleanProse(held.hold_reason)}`,
+          age: sinceAge(held),
+        });
+        continue;
+      }
+      const lastEvent = task.paths?.status_log?.last_event;
+      if (lastEvent?.state === "paused") {
+        queued.push({
+          ...base,
+          tag: "PAUSED",
+          prose: null,
+          note: `declared wait, worker gone: ${cleanProse(lastEvent.note) || "no reason recorded"}`,
+        });
+        continue;
+      }
+    }
+    if (["failed", "unknown"].includes(state) || task.endpoint?.exists === false || task.endpoint?.agent_alive === "dead") {
+      const reason =
+        state === "failed" || state === "unknown"
+          ? detail || "no readable state"
+          : "worker gone while its state claims live work";
+      const lastEvent = cleanProse(task.hints?.last_event_text);
+      unhealthy.push({
+        ...base,
+        tag: state === "failed" ? "FAILED" : state === "unknown" ? "UNKNOWN" : "MISSING",
+        prose: reason,
+        note: lastEvent && !reason.includes(lastEvent) ? `last event: ${lastEvent}` : base.note,
       });
       continue;
     }
