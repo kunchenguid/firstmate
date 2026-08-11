@@ -338,7 +338,6 @@ function parkForAwayResume(paths, sessionID, client, predecessorArmPid) {
   timer.unref();
   awayResumeTimer = timer;
 }
-}
 
 async function scheduleRetry(paths, sessionID, client, reason, predecessorArmPid) {
   if (child || retryTimer) return;
