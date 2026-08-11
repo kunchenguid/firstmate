@@ -360,14 +360,14 @@ fm_backend_target_of_meta() {  # <meta-file>
   [ -n "$window" ] && printf '%s' "$window"
 }
 
-# fm_backend_validate_task_endpoint: validate a task cleanup record entirely
-# from its durable metadata before any runtime command or cleanup mutation.
-# The validation binds the exact task id, selected backend, target, project,
-# and worktree. New non-tmux records carry endpoint_task_id because their
-# opaque runtime ids do not encode the task label. Legacy tmux records remain
-# valid only when their window name itself is exactly fm-<task-id>.
-# On success, sets FM_BACKEND_VALIDATED_BACKEND and
-# FM_BACKEND_VALIDATED_TARGET. On failure, prints one refusal and returns 1.
+# fm_backend_validate_task_endpoint validates a current task cleanup record entirely from its durable metadata before any runtime command or cleanup mutation.
+# fm_backend_validate_detached_task_endpoint validates only the window_detached_20260810 incident marker written after a legacy Herdr endpoint was already closed.
+# A detached marker is endpoint identity for structural correlation only and is never evidence that task work landed.
+# Both paths bind the exact task id, selected backend, target, project, and worktree through one backend-specific validator.
+# New non-tmux records carry endpoint_task_id because their opaque runtime ids do not encode the task label.
+# Legacy tmux records remain valid only when their window name itself is exactly fm-<task-id>.
+# On success, each validator sets FM_BACKEND_VALIDATED_BACKEND and FM_BACKEND_VALIDATED_TARGET.
+# On failure, each validator prints one refusal and returns 1.
 fm_backend_meta_exact_value() {  # <meta-file> <key>
   local meta=$1 key=$2 count value
   count=$(grep -c "^$key=" "$meta" 2>/dev/null || true)
@@ -383,11 +383,8 @@ fm_backend_endpoint_atom_valid() {  # <value>
   esac
 }
 
-fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
-  local meta=$1 id=$2 backend_count backend window worktree project binding_count binding
-  local session pane recorded_session workspace tab terminal worktree_id surface
-  FM_BACKEND_VALIDATED_BACKEND=
-  FM_BACKEND_VALIDATED_TARGET=
+fm_backend_validate_task_endpoint_record() {  # <meta-file> <task-id>
+  local meta=$1 id=$2
   [ -f "$meta" ] && [ ! -L "$meta" ] || {
     echo "REFUSED: task $id has no regular endpoint metadata at $meta; preserving task state." >&2
     return 1
@@ -396,10 +393,49 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
     echo "REFUSED: task endpoint identity has an invalid task id; preserving task state." >&2
     return 1
   esac
+}
+
+fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
+  local meta=$1 id=$2 window
+  FM_BACKEND_VALIDATED_BACKEND=
+  FM_BACKEND_VALIDATED_TARGET=
+  fm_backend_validate_task_endpoint_record "$meta" "$id" || return 1
   window=$(fm_backend_meta_exact_value "$meta" window) || {
     echo "REFUSED: task $id has a missing, empty, or ambiguous window endpoint; preserving task state." >&2
     return 1
   }
+  fm_backend_validate_task_endpoint_for_target "$meta" "$id" "$window"
+}
+
+fm_backend_validate_detached_task_endpoint() {  # <meta-file> <task-id>
+  local meta=$1 id=$2 live_count detached_like_count detached_count line raw window
+  FM_BACKEND_VALIDATED_BACKEND=
+  FM_BACKEND_VALIDATED_TARGET=
+  fm_backend_validate_task_endpoint_record "$meta" "$id" || return 1
+  live_count=$(grep -c '^window=' "$meta" 2>/dev/null || true)
+  detached_like_count=$(grep -c '^window_detached' "$meta" 2>/dev/null || true)
+  detached_count=$(grep -c '^window_detached_20260810=' "$meta" 2>/dev/null || true)
+  if [ "$live_count" -ne 0 ] || [ "$detached_like_count" -ne 1 ] || [ "$detached_count" -ne 1 ]; then
+    echo "REFUSED: task $id has malformed, ambiguous, or contradictory detached endpoint metadata; preserving task state." >&2
+    return 1
+  fi
+  line=$(grep '^window_detached_20260810=' "$meta")
+  raw=${line#*=}
+  case "$raw" in
+    *"  #"*) window=${raw%%"  #"*} ;;
+    *) window=$raw ;;
+  esac
+  [ -n "$window" ] || {
+    echo "REFUSED: task $id has an empty detached endpoint identity; preserving task state." >&2
+    return 1
+  }
+  fm_backend_validate_task_endpoint_for_target "$meta" "$id" "$window"
+}
+
+fm_backend_validate_task_endpoint_for_target() {  # <meta-file> <task-id> <validated-target>
+  local meta=$1 id=$2 window=$3 backend_count backend worktree project binding_count binding
+  local session pane recorded_session workspace tab terminal worktree_id surface
+  fm_backend_validate_task_endpoint_record "$meta" "$id" || return 1
   worktree=$(fm_backend_meta_exact_value "$meta" worktree) || {
     echo "REFUSED: task $id has a missing, empty, or ambiguous worktree identity; preserving task state." >&2
     return 1

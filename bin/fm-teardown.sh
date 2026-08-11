@@ -25,6 +25,8 @@
 # local-only projects additionally accept work merged into the local default
 # branch (firstmate performs that merge after configured approval) as a fallback
 # for the common case where there is no remote at all.
+# Legacy Herdr ship records whose already-closed endpoint is represented by exactly one window_detached_20260810 incident marker may enter the ordinary landed-work proof only after their task binding, backend identity, canonical project and worktree paths, registered worktree, exact fm/<task-id> branch, and branch head all agree.
+# The detached endpoint is never contacted, and the compatibility path rejects --force because detached metadata never relaxes landed-work proof.
 # Scout tasks (kind=scout in meta) carve out of that check: their worktree is
 # declared scratch and the report at data/<task-id>/report.md is the work
 # product. Teardown proceeds only once the report exists and the shared
@@ -331,14 +333,80 @@ else
 fi
 [ "$remote_teardown_rc" -eq 3 ] || exit "$remote_teardown_rc"
 
-# This is the first cleanup authorization check. It is metadata-only and must
-# complete before fm-guard, a backend command, file removal, branch deletion,
-# worktree return, registry change, or process termination can run.
-fm_backend_validate_task_endpoint "$META" "$ID" || exit 1
+# A detached legacy record must prove one exact repository candidate before any runtime command or cleanup mutation can run.
+# This proof establishes identity only, while validate_worktree_teardown_safety remains the sole landed-work authority below.
+validate_legacy_detached_candidate() {  # <worktree> <project> <task-id>
+  local worktree=$1 project=$2 id=$3 worktree_real project_real worktree_top project_top
+  local listed line listed_count=0 branch worktree_head branch_head
+  case "$worktree:$project" in
+    /*:/*) ;;
+    *) return 1 ;;
+  esac
+  [ -d "$worktree" ] && [ ! -L "$worktree" ] || return 1
+  [ -d "$project" ] && [ ! -L "$project" ] || return 1
+  worktree_real=$(CDPATH='' cd -- "$worktree" 2>/dev/null && pwd -P) || return 1
+  project_real=$(CDPATH='' cd -- "$project" 2>/dev/null && pwd -P) || return 1
+  [ "$worktree" = "$worktree_real" ] || return 1
+  [ "$project" = "$project_real" ] || return 1
+  [ "$worktree_real" != "$project_real" ] || return 1
+  worktree_top=$(git -C "$worktree" rev-parse --show-toplevel 2>/dev/null) || return 1
+  project_top=$(git -C "$project" rev-parse --show-toplevel 2>/dev/null) || return 1
+  [ "$worktree_top" = "$worktree_real" ] || return 1
+  [ "$project_top" = "$project_real" ] || return 1
+  listed=$(git -C "$project" -c core.quotePath=false worktree list --porcelain 2>/dev/null) || return 1
+  while IFS= read -r line; do
+    case "$line" in
+      "worktree $worktree_real") listed_count=$((listed_count + 1)) ;;
+    esac
+  done <<EOF
+$listed
+EOF
+  [ "$listed_count" -eq 1 ] || return 1
+  branch=$(git -C "$worktree" symbolic-ref --quiet --short HEAD 2>/dev/null) || return 1
+  [ "$branch" = "fm/$id" ] || return 1
+  worktree_head=$(git -C "$worktree" rev-parse --verify HEAD 2>/dev/null) || return 1
+  branch_head=$(git -C "$project" rev-parse --verify "refs/heads/fm/$id" 2>/dev/null) || return 1
+  [ "$worktree_head" = "$branch_head" ]
+}
+
+LEGACY_DETACHED_ENDPOINT=0
+if grep -q '^window_detached' "$META"; then
+  fm_backend_validate_detached_task_endpoint "$META" "$ID" || exit 1
+  LEGACY_DETACHED_ENDPOINT=1
+else
+  fm_backend_validate_task_endpoint "$META" "$ID" || exit 1
+fi
 BACKEND=$FM_BACKEND_VALIDATED_BACKEND
 T=$FM_BACKEND_VALIDATED_TARGET
 WT=$(fm_meta_get "$META" worktree)
 PROJ=$(fm_meta_get "$META" project)
+if [ "$LEGACY_DETACHED_ENDPOINT" = 1 ]; then
+  LEGACY_KIND=$(fm_backend_meta_exact_value "$META" kind) || LEGACY_KIND=
+  LEGACY_MODE=$(fm_backend_meta_exact_value "$META" mode) || LEGACY_MODE=
+  if [ "$BACKEND" != herdr ] || [ "$LEGACY_KIND" != ship ]; then
+    echo "REFUSED: detached endpoint compatibility is limited to exactly bound legacy Herdr ship records; preserving task state." >&2
+    exit 1
+  fi
+  case "$LEGACY_MODE" in
+    local-only|no-mistakes|direct-PR) ;;
+    *)
+      echo "REFUSED: detached endpoint metadata has a missing, ambiguous, or unknown delivery mode; preserving task state." >&2
+      exit 1
+      ;;
+  esac
+  if [ -n "$FORCE" ]; then
+    echo "REFUSED: detached endpoint compatibility requires exact landed-work proof and does not accept --force; preserving task state." >&2
+    exit 1
+  fi
+  if [ -e "$STATE/$ID.herdr-presentation" ] || [ -L "$STATE/$ID.herdr-presentation" ]; then
+    echo "REFUSED: detached endpoint metadata contradicts a retained Herdr presentation journal; preserving task state." >&2
+    exit 1
+  fi
+  if ! validate_legacy_detached_candidate "$WT" "$PROJ" "$ID"; then
+    echo "REFUSED: detached endpoint metadata does not identify one exact registered fm/$ID worktree candidate; preserving task state." >&2
+    exit 1
+  fi
+fi
 T_ORCA=
 [ "$BACKEND" != orca ] || T_ORCA=$T
 if [ "${FM_TEARDOWN_GUARD_DONE:-0}" != 1 ]; then
@@ -1771,7 +1839,7 @@ fi
 # refuses before any destructive step.
 TEARDOWN_HERDR_SESSION=
 TEARDOWN_HERDR_PANE=
-if [ "$BACKEND" = herdr ]; then
+if [ "$BACKEND" = herdr ] && [ "$LEGACY_DETACHED_ENDPOINT" != 1 ]; then
   teardown_herdr_preflight_target "$T" "$ID" || exit 1
   fm_backend_herdr_parse_target "$T" || exit 1
   TEARDOWN_HERDR_SESSION=$FM_BACKEND_HERDR_SESSION
@@ -1825,7 +1893,7 @@ HERDR_PRESENTATION_JOURNAL="$STATE/$ID.herdr-presentation"
 HERDR_PRESENTATION_RETIRE_CANDIDATE=0
 HERDR_PRESENTATION_SESSION=
 HERDR_PRESENTATION_PANE=
-if [ "$BACKEND" = herdr ] \
+if [ "$BACKEND" = herdr ] && [ "$LEGACY_DETACHED_ENDPOINT" != 1 ] \
    && { [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; }; then
   fm_backend_source herdr || true
   HERDR_PRESENTATION_SESSION=$(meta_value "$META" herdr_session)
@@ -1851,13 +1919,13 @@ if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
   else
     echo "warning: herdr presentation focus lock unavailable; refusing a concurrent focus-unsafe pane close" >&2
   fi
-elif [ "$BACKEND" = herdr ]; then
+elif [ "$BACKEND" = herdr ] && [ "$LEGACY_DETACHED_ENDPOINT" != 1 ]; then
   if teardown_herdr_session_lock_held "$TEARDOWN_HERDR_SESSION"; then
     fm_backend_herdr_kill_serialized "$TEARDOWN_HERDR_SESSION" "$TEARDOWN_HERDR_PANE" 2>/dev/null || true
   else
     echo "warning: herdr session presentation lock path is unavailable; skipping the pane close rather than closing unlocked" >&2
   fi
-elif [ "$BACKEND" != orca ]; then
+elif [ "$BACKEND" != orca ] && [ "$LEGACY_DETACHED_ENDPOINT" != 1 ]; then
   fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
 fi
 if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
@@ -1866,7 +1934,7 @@ if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
   else
     echo "warning: exact herdr task-pane close could not be confirmed for $ID; retaining the presentation journal and attempting no workspace cleanup" >&2
   fi
-elif [ "$BACKEND" = herdr ] \
+elif [ "$BACKEND" = herdr ] && [ "$LEGACY_DETACHED_ENDPOINT" != 1 ] \
      && { [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; }; then
   echo "warning: herdr presentation journal for $ID remains quarantined; no workspace cleanup was attempted" >&2
 fi
@@ -1876,7 +1944,7 @@ fi
 # the locked close. Only a structured not-found proves the pane gone; unknown
 # presence, missing or malformed endpoint identity, and missing confirmation
 # machinery all refuse.
-if [ "$BACKEND" = herdr ]; then
+if [ "$BACKEND" = herdr ] && [ "$LEGACY_DETACHED_ENDPOINT" != 1 ]; then
   fm_backend_source herdr || true
   if ! declare -F fm_backend_herdr_endpoint_confirmed_gone >/dev/null 2>&1; then
     echo "error: herdr endpoint confirmation is unavailable for $ID; retaining every durable task record" >&2
@@ -1894,7 +1962,9 @@ if [ "$KIND" = secondmate ]; then
 fi
 remove_grok_turnend_auth "$STATE" "$ID"
 remove_kimi_turnend_auth "$STATE" "$ID"
-fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
+if [ "$LEGACY_DETACHED_ENDPOINT" != 1 ]; then
+  fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
+fi
 # Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"

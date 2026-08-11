@@ -163,6 +163,25 @@ write_meta() {
     "mode=$mode"
 }
 
+# Write the exact detached Herdr shape used by the 2026-08-10 fleet records.
+# The dated marker preserves the former endpoint for audit, but it is never landing evidence.
+# Args: case_dir mode [marker-key]
+write_legacy_detached_meta() {
+  local case_dir=$1 mode=$2 marker=${3:-window_detached_20260810}
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "$marker=default:w1:p2  # endpoint already closed" \
+    "endpoint_task_id=task-x1" \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=$mode" \
+    "backend=herdr" \
+    "herdr_session=default" \
+    "herdr_workspace_id=w1" \
+    "herdr_tab_id=w1:t2" \
+    "herdr_pane_id=w1:p2"
+}
+
 # Commit something on the worktree's task branch. Args: case_dir [message]
 wt_commit() {
   local case_dir=$1 msg=${2:-wt work}
@@ -587,6 +606,230 @@ test_local_only_merged_to_local_main_allows() {
   expect_code 0 "$rc" "merged-main: teardown should succeed when work is merged into local main"
   ! grep -q REFUSED "$case_dir/stderr" || fail "merged-main: teardown printed a REFUSED line"
   pass "local-only worktree with work merged into local main is torn down (no regression)"
+}
+
+test_landed_legacy_detached_inventory_allows_without_runtime_reuse() {
+  local case_dir id index wt head rc line
+  local ids=(
+    clip-harvest-zero-output-analytics
+    crashout-harvest-receipt-repair
+    ep-docs-identity-scrub
+    opsinbox-critical-triage
+    qdrant-drill-snapshot-leak
+    secrets-stream-retire
+    sentinel-drift-repair
+    eighth-landed-record
+  )
+  case_dir=$(make_case legacy-detached-inventory)
+  case_dir=$(CDPATH='' cd -- "$case_dir" && pwd -P)
+  git -C "$case_dir/project" worktree remove --force "$case_dir/wt"
+  : > "$case_dir/treehouse.log"
+  : > "$case_dir/runtime.log"
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_TEST_TREEHOUSE_LOG:?}"
+SH
+  cat > "$case_dir/fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_TEST_RUNTIME_LOG:?}"
+exit 91
+SH
+  chmod +x "$case_dir/fakebin/treehouse" "$case_dir/fakebin/herdr"
+
+  index=0
+  for id in "${ids[@]}"; do
+    index=$((index + 1))
+    wt="$case_dir/wt-$index"
+    git -C "$case_dir/project" worktree add -q -b "fm/$id" "$wt" main
+    printf '%s\n' "$id" > "$wt/$id.txt"
+    git -C "$wt" add -- "$id.txt"
+    git -C "$wt" -c user.email=t@t -c user.name=t commit -q -m "land $id"
+    head=$(git -C "$wt" rev-parse HEAD)
+    git -C "$case_dir/project" update-ref refs/heads/main "$head"
+    fm_write_meta "$case_dir/state/$id.meta" \
+      "window_detached_20260810=default:w${index}:p2  # endpoint already closed" \
+      "endpoint_task_id=$id" \
+      "worktree=$wt" \
+      "project=$case_dir/project" \
+      "kind=ship" \
+      "mode=local-only" \
+      "backend=herdr" \
+      "herdr_session=default" \
+      "herdr_workspace_id=w$index" \
+      "herdr_tab_id=w${index}:t2" \
+      "herdr_pane_id=w${index}:p2"
+  done
+
+  for id in "${ids[@]}"; do
+    set +e
+    FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$case_dir/state" \
+    FM_CONFIG_OVERRIDE="$case_dir/config" \
+    FM_TEST_TREEHOUSE_LOG="$case_dir/treehouse.log" \
+    FM_TEST_RUNTIME_LOG="$case_dir/runtime.log" \
+    PATH="$case_dir/fakebin:$PATH" \
+      "$TEARDOWN" "$id" > "$case_dir/$id.stdout" 2> "$case_dir/$id.stderr"
+    rc=$?
+    set -e
+    expect_code 0 "$rc" "$id: landed legacy detached teardown should succeed: $(cat "$case_dir/$id.stderr")"
+    assert_absent "$case_dir/state/$id.meta" "$id: successful teardown retained metadata"
+  done
+  [ ! -s "$case_dir/runtime.log" ] \
+    || fail "legacy detached inventory reached a recycled runtime endpoint: $(cat "$case_dir/runtime.log")"
+  [ "$(wc -l < "$case_dir/treehouse.log" | tr -d '[:space:]')" -eq "${#ids[@]}" ] \
+    || fail "legacy detached inventory did not return every exact landed worktree"
+  index=0
+  while IFS= read -r line; do
+    index=$((index + 1))
+    assert_contains "$line" "return --force $case_dir/wt-$index" \
+      "legacy detached inventory returned the wrong worktree at row $index"
+  done < "$case_dir/treehouse.log"
+  pass "eight landed legacy detached records teardown independently without touching recycled endpoints"
+}
+
+test_legacy_detached_unlanded_work_refuses() {
+  local case_dir rc
+  case_dir=$(make_case legacy-detached-unlanded)
+  case_dir=$(CDPATH='' cd -- "$case_dir" && pwd -P)
+  write_legacy_detached_meta "$case_dir" local-only
+  wt_commit "$case_dir" "unlanded legacy work"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "legacy-detached-unlanded: teardown should refuse"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "legacy-detached-unlanded: teardown discarded metadata"
+  assert_grep "REFUSED" "$case_dir/stderr" \
+    "legacy-detached-unlanded: teardown did not explain its refusal"
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/force.stdout" 2> "$case_dir/force.stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "legacy-detached-unlanded: --force must not bypass landing proof"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "legacy-detached-unlanded: --force discarded detached metadata"
+  pass "legacy detached metadata never substitutes for landed-work proof"
+}
+
+test_legacy_detached_ambiguous_landing_refuses() {
+  local case_dir stale_head rc
+  case_dir=$(make_case legacy-detached-ambiguous-landing)
+  case_dir=$(CDPATH='' cd -- "$case_dir" && pwd -P)
+  write_legacy_detached_meta "$case_dir" no-mistakes
+  wt_commit_file "$case_dir" feature.txt unlanded "unlanded after stale PR head"
+  append_pr_meta_url "$case_dir"
+  stale_head=$(git -C "$case_dir/project" rev-parse refs/remotes/origin/main)
+  add_gh_pr_merged_for_head "$case_dir" "$stale_head"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "legacy-detached-ambiguous-landing: teardown should refuse"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "legacy-detached-ambiguous-landing: teardown discarded metadata"
+  assert_grep "not on any remote and not landed" "$case_dir/stderr" \
+    "legacy-detached-ambiguous-landing: stale PR proof did not fail closed"
+  pass "legacy detached teardown rejects merged-PR evidence that does not contain the exact candidate"
+}
+
+test_malformed_legacy_detached_metadata_refuses() {
+  local case_dir rc
+  case_dir=$(make_case legacy-detached-malformed)
+  case_dir=$(CDPATH='' cd -- "$case_dir" && pwd -P)
+  write_legacy_detached_meta "$case_dir" local-only window_detached_today
+  wt_commit "$case_dir" "landed malformed marker"
+  git -C "$case_dir/project" update-ref refs/heads/main "$(git -C "$case_dir/wt" rev-parse HEAD)"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "legacy-detached-malformed: teardown should refuse"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "legacy-detached-malformed: teardown discarded metadata"
+  assert_grep "REFUSED" "$case_dir/stderr" \
+    "legacy-detached-malformed: teardown did not explain its refusal"
+  pass "malformed detached marker lookalikes remain outside the compatibility path"
+}
+
+test_legacy_detached_contradictory_and_unsafe_candidates_refuse() {
+  local case_dir alias rc
+  case_dir=$(make_case legacy-detached-contradictory)
+  case_dir=$(CDPATH='' cd -- "$case_dir" && pwd -P)
+  write_legacy_detached_meta "$case_dir" local-only
+  printf '%s\n' 'window=default:w1:p2' >> "$case_dir/state/task-x1.meta"
+  wt_commit "$case_dir" "landed contradictory metadata"
+  git -C "$case_dir/project" update-ref refs/heads/main "$(git -C "$case_dir/wt" rev-parse HEAD)"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "legacy-detached-contradictory: teardown should refuse"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "legacy-detached-contradictory: teardown discarded metadata"
+
+  case_dir=$(make_case legacy-detached-symlink)
+  case_dir=$(CDPATH='' cd -- "$case_dir" && pwd -P)
+  write_legacy_detached_meta "$case_dir" local-only
+  wt_commit "$case_dir" "landed symlink candidate"
+  git -C "$case_dir/project" update-ref refs/heads/main "$(git -C "$case_dir/wt" rev-parse HEAD)"
+  alias="$case_dir/wt-alias"
+  ln -s "$case_dir/wt" "$alias"
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window_detached_20260810=default:w1:p2  # endpoint already closed" \
+    "endpoint_task_id=task-x1" \
+    "worktree=$alias" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=local-only" \
+    "backend=herdr" \
+    "herdr_session=default" \
+    "herdr_workspace_id=w1" \
+    "herdr_tab_id=w1:t2" \
+    "herdr_pane_id=w1:p2"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "legacy-detached-symlink: teardown should refuse"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "legacy-detached-symlink: teardown discarded metadata"
+  assert_present "$case_dir/wt/.git" \
+    "legacy-detached-symlink: teardown touched the exact worktree through an alias"
+  pass "contradictory detached metadata and symlinked worktree candidates refuse before cleanup"
+}
+
+test_current_endpoint_metadata_behavior_is_unchanged() {
+  local case_dir rc
+  case_dir=$(make_case current-endpoint-control)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "landed current endpoint"
+  git -C "$case_dir/project" update-ref refs/heads/main "$(git -C "$case_dir/wt" rev-parse HEAD)"
+  : > "$case_dir/runtime.log"
+  cat > "$case_dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_RUNTIME_LOG:?}"
+SH
+  chmod +x "$case_dir/fakebin/tmux"
+
+  set +e
+  FM_RUNTIME_LOG="$case_dir/runtime.log" run_teardown "$case_dir" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "current-endpoint-control: teardown should still succeed"
+  assert_grep "kill-window -t =firstmate:=fm-task-x1" "$case_dir/runtime.log" \
+    "current-endpoint-control: teardown stopped closing exact current endpoints"
+  pass "current endpoint metadata keeps its existing validation and exact close behavior"
 }
 
 test_no_mistakes_origin_remote_allows() {
@@ -1829,6 +2072,12 @@ test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
+test_landed_legacy_detached_inventory_allows_without_runtime_reuse
+test_legacy_detached_unlanded_work_refuses
+test_legacy_detached_ambiguous_landing_refuses
+test_malformed_legacy_detached_metadata_refuses
+test_legacy_detached_contradictory_and_unsafe_candidates_refuse
+test_current_endpoint_metadata_behavior_is_unchanged
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
