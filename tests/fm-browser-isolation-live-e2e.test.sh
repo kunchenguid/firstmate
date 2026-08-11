@@ -35,6 +35,12 @@
 # Run with FM_BROWSER_ISOLATION_LIVE=1. The stage 2 harness probe spends a small
 # number of model tokens per installed harness; set
 # FM_BROWSER_ISOLATION_LIVE_HARNESSES to a space-separated subset to narrow it.
+# FM_BROWSER_ISOLATION_LIVE_TIMEOUT is the number of seconds stage 2 waits for a
+# probed agent to report back, and defaults to 300. Reach for it when the run is
+# competing for the machine with other agents or Chrome instances, or on a slow
+# host - never because a result looks like an isolation failure. Exhausting the
+# bound means the probe never reported, so nothing was verified either way; it is
+# not evidence that isolation broke.
 set -u
 
 # This suite does not source tests/lib.sh, so exempt its fm-spawn subprocesses
