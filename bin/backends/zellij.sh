@@ -110,7 +110,7 @@
 # file's own unit tests, which source it directly, resolve sanely. Mirrors
 # bin/backends/herdr.sh's identical fallback; unlike herdr this adapter still
 # has no per-home CONTAINER split (one shared session for every home), but
-# FM_HOME/FM_ROOT now also feed fm_backend_zellij_home_label's tab-title tag
+# FM_HOME/FM_HOME_IDENTITY also feed fm_backend_zellij_home_label's tab-title tag
 # below.
 FM_BACKEND_ZELLIJ_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-${FM_ROOT:-$FM_BACKEND_ZELLIJ_ROOT}}"
@@ -141,12 +141,11 @@ fm_backend_zellij_session() {
 }
 
 # fm_backend_zellij_home_label: readable home prefix plus a short hash of the
-# resolved FM_ROOT path (bin/fm-backend-hometag-lib.sh). Zellij has one
+# resolved home identity path (bin/fm-backend-hometag-lib.sh). Zellij has one
 # session-global tab namespace shared by every firstmate home, so the path
-# hash distinguishes every installation, including multiple primary homes.
-# Moving an installation changes this tag and old zellij tab titles stop
-# matching; task meta already records absolute worktree paths, so repo
-# relocation is already outside the supported recovery contract.
+# hash distinguishes every home, including multiple primary homes.
+# Relocating only the installed code root leaves this tag unchanged when the
+# caller preserves FM_HOME_IDENTITY.
 fm_backend_zellij_home_label() {
   fm_backend_hometag
 }

@@ -2154,7 +2154,7 @@ test_secondmate_teardown_path_boundary_matrix() {
   # The teardown path-boundary matrix: a secondmate home is refused (and left
   # fully intact, with no window killed before validation) when it is unmarked,
   # an ancestor of the active firstmate home, inside the active firstmate home,
-  # or inside the firstmate repo. One row per hazard, one shared assertion block.
+  # or inside the firstmate home identity. One row per hazard, one shared assertion block.
   local row base home subhome fmroot fakebin log err expect tid
   while IFS='|' read -r row expect; do
     [ -n "$row" ] || continue
@@ -2209,9 +2209,72 @@ SH
 unmarked|not a seeded secondmate home
 ancestor|ancestor of the active firstmate home
 active-descendant|inside the active firstmate home
-repo-descendant|inside the firstmate repo
+repo-descendant|inside the firstmate home identity
 ROWS
   pass "secondmate teardown path-boundary matrix refuses unmarked/ancestor/active-descendant/repo-descendant homes"
+}
+
+test_relocated_code_root_preserves_home_identity_removal_refusals() {
+  local selected=${FM_TEST_HOME_IDENTITY_CASE:-} relation base home identity subhome code_root fakebin log err rc expect
+  while IFS='|' read -r relation expect; do
+    [ -n "$relation" ] || continue
+    [ -z "$selected" ] || [ "$selected" = "$relation" ] || continue
+    base="$TMP_ROOT/relocated-identity-$relation"
+    home="$base/operator-home"
+    code_root="$base/relocated-code"
+    case "$relation" in
+      exact)
+        identity="$base/identity"
+        subhome="$identity"
+        ;;
+      ancestor)
+        identity="$base/identity/primary"
+        subhome="$base/identity"
+        ;;
+      descendant)
+        identity="$base/identity"
+        subhome="$identity/retired-home"
+        ;;
+      ordinary)
+        identity="$base/identity"
+        subhome="$base/ordinary-retired-home"
+        ;;
+    esac
+    mkdir -p "$home/state" "$home/data" "$identity" "$code_root/bin" "$subhome/state"
+    mark_firstmate_home "$subhome"
+    printf 'domain\n' > "$subhome/.fm-secondmate-home"
+    fm_write_secondmate_meta "$home/state/domain.meta" "$subhome"
+    printf -- '- domain - design domain (home: %s; scope: design domain; projects: alpha; added 2026-08-11)\n' \
+      "$subhome" > "$home/data/secondmates.md"
+    fakebin=$(make_fake_tmux "$base/fake")
+    log="$base/fake/tmux.log"
+    err="$base/teardown.err"
+
+    set +e
+    PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$code_root" FM_HOME="$home" FM_HOME_IDENTITY="$identity" \
+      FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$base/fake/pane.txt" \
+      "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err"
+    rc=$?
+    set -e
+
+    if [ "$relation" = ordinary ]; then
+      [ "$rc" -eq 0 ] || fail "relocated-root ordinary teardown was refused: $(cat "$err")"
+      [ ! -d "$subhome" ] || fail "relocated-root ordinary teardown retained its secondmate home"
+      continue
+    fi
+    [ "$rc" -ne 0 ] || fail "relocated-root $relation identity boundary did not refuse teardown"
+    [ -d "$subhome" ] || fail "relocated-root $relation identity boundary was deleted"
+    grep -F "$expect" "$err" >/dev/null \
+      || fail "relocated-root $relation identity refusal did not explain '$expect': $(cat "$err")"
+    grep -F 'kill-window' "$log" >/dev/null \
+      && fail "relocated-root $relation identity refusal killed an endpoint before validation"
+  done <<'ROWS'
+exact|is the firstmate home identity
+ancestor|is an ancestor of the firstmate home identity
+descendant|is inside the firstmate home identity
+ordinary|
+ROWS
+  pass "relocated code root keeps exact/ancestor/descendant home-identity refusals and permits ordinary teardown"
 }
 
 test_secondmate_teardown_refuses_registered_nested_home() {
@@ -2729,8 +2792,8 @@ EOF
   [ -e "$home/state/domain.meta" ] || fail "force teardown cleared parent meta after repo child validation refusal"
   [ -e "$subhome/state/child.meta" ] || fail "force teardown cleared child meta after repo child validation refusal"
   grep -F 'kill-window' "$log" >/dev/null && fail "force teardown killed windows before repo child validation refusal"
-  grep -F 'inside the firstmate repo' "$err" >/dev/null || fail "force teardown did not explain repo descendant rejection"
-  pass "force teardown refuses child worktrees inside the firstmate repo"
+  grep -F 'inside the firstmate home identity' "$err" >/dev/null || fail "force teardown did not explain identity descendant rejection"
+  pass "force teardown refuses child worktrees inside the firstmate home identity"
 }
 
 test_secondmate_force_teardown_refuses_unregistered_child_worktree() {
@@ -2953,6 +3016,11 @@ EOF
   pass "fm-backlog-handoff refuses Done items under whitespace section headings and unsafe homes"
 }
 
+if [ -n "${FM_TEST_HOME_IDENTITY_CASE:-}" ]; then
+  test_relocated_code_root_preserves_home_identity_removal_refusals
+  exit 0
+fi
+
 test_fm_home_parameterization
 test_lock_status_is_per_home
 test_seed_allows_overlapping_clones_and_drops_owner
@@ -3026,6 +3094,7 @@ test_secondmate_force_teardown_refuses_child_active_home_descendant
 test_secondmate_force_teardown_refuses_child_repo_descendant
 test_secondmate_force_teardown_refuses_unregistered_child_worktree
 test_secondmate_teardown_path_boundary_matrix
+test_relocated_code_root_preserves_home_identity_removal_refusals
 test_secondmate_idle_pane_is_not_stale
 test_secondmate_charter_brief_is_idle_by_default
 test_backlog_handoff_aborts_safely

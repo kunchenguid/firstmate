@@ -35,12 +35,12 @@ Verify setup by spawning a small task and confirming metadata contains `backend=
 
 Every task receives one tab in the shared Zellij session.
 The caller-facing label remains `fm-<id>`, while the visible title is home-scoped as `fm-<home-label>-<id>`.
-The home label is `firstmate` or `2ndmate-<id>` plus a short stable hash of the resolved Firstmate root.
+The home label is `firstmate` or `2ndmate-<id>` plus a short stable hash of the resolved `FM_HOME_IDENTITY` path.
 This prevents task-id collisions between a primary, secondmates, and separate Firstmate installations sharing one session.
 
 Zellij does not enforce tab-name uniqueness, so the adapter performs its own duplicate check against the scoped title.
 Create, recover, list, and cleanup paths all use the same scoped title owner in `bin/fm-backend-hometag-lib.sh`.
-Moving a Firstmate installation changes its path hash and leaves old titles unmatched, consistent with worktree paths also becoming stale after a move.
+Relocating only the installed code root leaves old titles matched when `FM_HOME_IDENTITY` continues to name the same owning home or checkout.
 
 A pre-home-tag task remains reachable through its recorded metadata only when exactly one live tab has the old unscoped title.
 Multiple old tabs with the same title cause a refusal rather than a guess.
