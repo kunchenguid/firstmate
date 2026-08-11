@@ -1,27 +1,8 @@
-// Firstmate Pi extension: a compact, always-visible custom footer that shows
-// the repository path + git branch, live context usage, the active model and
-// thinking level, and every verified Codex quota window from `quota-axi`.
-//
-// Replaces Pi's stock footer only while this extension is active; the
-// `/statusline` command toggles it, `/statusline refresh` refreshes Codex
-// quota data, and `/statusline off` (or toggling off) restores the stock
-// footer. The footer reads live Pi session state on every render, so
-// context, branch, model, and thinking level update as their underlying Pi
-// state changes.
-//
-// Quota data is fetched through a bounded `quota-axi --provider codex --json`
-// subprocess with a timeout, parsed defensively (see
-// ./lib/fm-quota-statusline-data.ts). On a transient failure the last known
-// good windows are retained and marked stale; if no good data has ever been
-// seen the footer shows a concise unavailable marker. No credentials or raw
-// errors are exposed in the footer.
-//
-// Refresh triggers: session start, model/thinking-level change, the
-// `/statusline refresh` command, and a bounded periodic timer (5 minutes). The
-// timer is cleared and in-flight results are invalidated on session shutdown.
-//
-// Rendering is owned by ./lib/fm-quota-statusline-render.ts and is ANSI
-// visible-width safe and narrow-terminal aware.
+// Firstmate Pi quota-statusline extension.
+// docs/configuration.md owns the captain-facing `/statusline` contract.
+// The local safety boundary is a single bounded, non-overlapping quota-axi
+// refresh whose timer is cleared on disable and shutdown; parsing and
+// width-safe rendering are owned by the adjacent lib modules.
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { TUI, Theme } from "@earendil-works/pi-tui";

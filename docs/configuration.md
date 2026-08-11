@@ -34,11 +34,13 @@ This preference is local to each Firstmate home and is not part of secondmate in
 
 ## Pi statusline footer (/statusline)
 
-The tracked `.pi/extensions/fm-quota-statusline.ts` extension replaces Pi's stock footer only while it is active, and the `/statusline` command owns its activation.
+The tracked `.pi/extensions/fm-quota-statusline.ts` extension starts with Pi's stock footer and replaces it only while the custom footer is active; the choice is process-local rather than persisted.
 `/statusline` toggles between the custom and stock footers; `/statusline on` idempotently enables the custom footer and starts the periodic Codex quota refresh; `/statusline off` restores Pi's stock footer; `/statusline refresh` refreshes the Codex quota data without changing whether the footer is active.
-The footer shows the repository path and current git branch, the active model and effective thinking level, the live context usage against the active model's context window, and every verified Codex quota window that `quota-axi --provider codex --json` reports, each labeled with its real window label, remaining percentage, and reset countdown when supplied.
-It never invents a quota window or percentage: when quota data is unavailable the footer shows a concise `quota: n/a` marker, and a transient `quota-axi` failure retains the last known good windows marked stale with a `quota~` prefix.
-The extension refreshes quota data on Pi `session_start`, when the active model or thinking level changes, on `/statusline refresh`, and on a bounded five-minute timer that is cleared on `session_shutdown` and `/statusline off`.
+The footer shows the repository path and current git branch, the active model and effective thinking level, the live context usage against the active model's context window, and every labeled Codex quota window with a percentage that `quota-axi --provider codex --json` reports.
+Each quota window shows the reported remaining percentage, or `100 - percentUsed` when only the used percentage is reported, plus a reset countdown when a valid future reset timestamp is supplied.
+It never invents a quota window or percentage: when quota data is unavailable the footer shows a concise `quota: n/a` marker, while provider-declared stale data or a transient refresh failure is shown with a `quota~` prefix and the last known good windows remain available after a failed refresh.
+While the custom footer is enabled, the extension refreshes quota data on Pi `session_start`, when the active model or thinking level changes, and on a five-minute periodic timer; `/statusline refresh` also refreshes it while either footer is active.
+The periodic timer is cleared on `session_shutdown` and `/statusline off`.
 The refresh runs a bounded `quota-axi --provider codex --json` subprocess with a hard timeout and an in-flight guard, and the renderer is ANSI visible-width safe and uses continuation lines on narrow terminals so verified fields are not dropped.
 No credentials or raw `quota-axi` errors appear in the footer; only the normalized window data is shown.
 
