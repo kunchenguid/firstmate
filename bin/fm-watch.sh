@@ -51,6 +51,13 @@
 #   check: rejected unauthenticated PR poll retirement receipts: <paths>
 #                          invalid pending retirements were preserved without
 #                          running a check or removing poll artifacts
+#   check: fast-repair <id> <state>
+#                          the Fast-Repair-only progress cadence found a CHANGED
+#                          actionable state for a task whose meta records an
+#                          eligible fast-repair delivery: broader tests failed,
+#                          or its PR checks failed or turned green. A result
+#                          identical to the one already surfaced is never
+#                          re-surfaced (docs/fast-repair.md)
 #   heartbeat              fleet-scan backstop found an unsurfaced captain-relevant
 #                          status, unless afk is active
 # For normal supervision, resume the session-start primary-harness protocol
@@ -62,6 +69,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 mkdir -p "$STATE"
 
 # The native event fast-path and only its true dependencies have one narrow
@@ -117,6 +125,7 @@ HEARTBEAT=${FM_HEARTBEAT:-600}        # base seconds between heartbeat scans
 HEARTBEAT_MAX=${FM_HEARTBEAT_MAX:-7200}  # heartbeat backoff cap
 CHECK_INTERVAL=${FM_CHECK_INTERVAL:-300}  # seconds between *.check.sh sweeps
 CHECK_TIMEOUT=${FM_CHECK_TIMEOUT:-30}     # seconds allowed per *.check.sh
+FAST_REPAIR_PROGRESS_INTERVAL=${FM_FAST_REPAIR_PROGRESS_INTERVAL:-20} # Fast Repair only
 SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trailing
                                       # signals (a status write, then the same turn's
                                       # turn-end hook) coalesce into one wake
@@ -463,6 +472,496 @@ scan_signals() {
   return 0
 }
 
+FAST_REPAIR_ACTIVE=0
+FAST_REPAIR_TIMER_PID=
+FAST_REPAIR_TIMER_MARKER=
+FAST_REPAIR_TIMER_GENERATION=0
+FAST_REPAIR_TIMER_WAIT_FILE=
+
+# The one place that decides whether durable task metadata opts a task into Fast
+# Repair.
+fast_repair_eligible_meta() {  # <meta-path>
+  grep -qx 'mode=fast-repair' "$1" 2>/dev/null || return 1
+  grep -qx 'fast_repair=eligible' "$1" 2>/dev/null
+}
+
+# The twenty-second forge poll exists to surface the first actionable transition
+# of an open Fast Repair PR. Once a green rollup has been queued for firstmate
+# there is nothing left for it to catch there, so this marker retires the task
+# from the forge poll and the ordinary CHECK_INTERVAL PR poll owns PR checks from
+# then on. The beat itself continues in local-only mode, because the broader test
+# family can still be running and its failure has no other machine-side surface.
+fast_repair_progress_green_marker() {  # <task-id>
+  printf '%s/.fast-repair-progress-green-%s' "$STATE" "$1"
+}
+
+fast_repair_progress_forge_retired() {  # <task-id>
+  [ -e "$(fast_repair_progress_green_marker "$1")" ]
+}
+
+fast_repair_progress_surfaced_marker() {  # <task-id>
+  printf '%s/.fast-repair-progress-%s' "$STATE" "$1"
+}
+
+fast_repair_progress_surfaced() {  # <task-id> <result>
+  [ "$(cat "$(fast_repair_progress_surfaced_marker "$1")" 2>/dev/null || true)" = "$2" ]
+}
+
+# The cadence exists to catch the transitions of an open Fast Repair PR, and its
+# last one is the broader family reaching a terminal result. A broader failure
+# permanently short-circuits the progress helper ahead of any forge read, so once
+# that failure is surfaced there is nothing left to report; a broader pass after
+# the forge poll already retired leaves the same nothing. In both cases the beat
+# retires and the ordinary lifecycle and PR polling own the task from then on.
+fast_repair_progress_followup_done() {  # <task-id>
+  local id=$1 record broader
+  record="$STATE/$id.fast-repair-broader"
+  [ -f "$record" ] && [ ! -L "$record" ] || return 1
+  broader=$(sed -n 's/^broader=//p' "$record" | head -n 1)
+  case "$broader" in
+    failed) fast_repair_progress_surfaced "$id" "fast-repair $id broader-tests-failed" ;;
+    passed) fast_repair_progress_forge_retired "$id" ;;
+    *) return 1 ;;
+  esac
+}
+
+# The single owner of which tasks the Fast Repair progress cadence works on:
+# durable metadata says eligible and the cadence still has a transition left to
+# catch. Every consumer below - the activity flag, the missing-schedule repair,
+# the timer delay, and the tick itself - reads this one emitter, so the rule and
+# the id derivation have one place to change.
+fast_repair_progress_task_ids() {
+  local meta id
+  for meta in "$STATE"/*.meta; do
+    [ -e "$meta" ] || continue
+    fast_repair_eligible_meta "$meta" || continue
+    id=$(basename "$meta" .meta)
+    fast_repair_progress_followup_done "$id" && continue
+    printf '%s\n' "$id"
+  done
+  return 0
+}
+
+# A drain that cannot consume a handoff keeps the record durable for a later
+# retry, but the record must stop shortening waits once it has proven it cannot
+# be delivered - otherwise every later wait returns immediately and the whole
+# supervision loop spins. Attempts are counted per handoff so retry stays bounded
+# and the wake record itself is never discarded.
+FAST_REPAIR_HANDOFF_RETRY_MAX=${FM_FAST_REPAIR_HANDOFF_RETRY_MAX:-1}
+
+fast_repair_progress_handoff_attempts() {  # <handoff-file>
+  local n
+  n=$(cat "$1.attempts" 2>/dev/null || true)
+  case "$n" in ''|*[!0-9]*) n=0 ;; esac
+  printf '%s\n' "$n"
+}
+
+fast_repair_progress_handoff_attempt_record() {  # <handoff-file>
+  local file=$1 n tmp
+  n=$(( $(fast_repair_progress_handoff_attempts "$file") + 1 ))
+  tmp=$(mktemp "$STATE/.fast-repair-progress-attempt.XXXXXX") || return 1
+  if ! printf '%s\n' "$n" > "$tmp" || ! chmod 600 "$tmp" || ! mv -f "$tmp" "$file.attempts"; then
+    rm -f "$tmp"
+    return 1
+  fi
+}
+
+fast_repair_progress_handoff_forget() {  # <handoff-file>
+  rm -f "$1" "$1.attempts"
+}
+
+# A durable handoff that has not yet spent its delivery budget. The wait entry
+# points consult this after publishing their interruptible pid, which closes the
+# window between forking a wait and making it reachable by
+# fast_repair_progress_timer_notify.
+fast_repair_progress_handoff_pending() {
+  local file
+  for file in "$STATE"/.fast-repair-progress-handoff-*; do
+    [ -f "$file" ] && [ ! -L "$file" ] || continue
+    case "$file" in *.attempts) continue ;; esac
+    [ "$(fast_repair_progress_handoff_attempts "$file")" -lt "$FAST_REPAIR_HANDOFF_RETRY_MAX" ] || continue
+    return 0
+  done
+  return 1
+}
+
+# Replaying an undeliverable result on every beat would otherwise leave one
+# handoff file per beat behind, since each cycle publishes under a fresh
+# generation. An identical undrained record for the same task carries no extra
+# information, so the replay supersedes it instead of stacking on it.
+fast_repair_progress_handoff_supersede() {  # <task-id> <result>
+  local id=$1 result=$2 file f_lifecycle f_id f_result
+  for file in "$STATE"/.fast-repair-progress-handoff-*; do
+    [ -f "$file" ] && [ ! -L "$file" ] || continue
+    case "$file" in *.attempts) continue ;; esac
+    exec 9< "$file" || continue
+    IFS= read -r f_lifecycle <&9 || { exec 9<&-; continue; }
+    # A record whose first line is the generation is the legacy three-line shape;
+    # anything else carries the lifecycle first and the generation on its own line.
+    if ! [[ "$f_lifecycle" =~ ^[0-9]+$ ]]; then
+      IFS= read -r _ <&9 || { exec 9<&-; continue; }
+    fi
+    IFS= read -r f_id <&9 || { exec 9<&-; continue; }
+    IFS= read -r f_result <&9 || { exec 9<&-; continue; }
+    exec 9<&-
+    [ "$f_id" = "$id" ] && [ "$f_result" = "$result" ] || continue
+    fast_repair_progress_handoff_forget "$file"
+  done
+  return 0
+}
+
+# A result byte-identical to the one already surfaced carries no transition, so
+# publishing it would tear the watcher out of its wait for nothing. The marker is
+# written only after the durable wake is queued, so a failed enqueue still leaves
+# the result unmarked and the next beat replays it.
+fast_repair_progress_result_is_new() {  # <task-id> <result>
+  ! fast_repair_progress_surfaced "$1" "$2"
+}
+
+# Fast Repair has a short, task-scoped progress cadence for broader-test and PR
+# check results. It is inert, byte-for-byte, when no durable task metadata says
+# mode=fast-repair and fast_repair=eligible. It does not change the normal signal,
+# stale, custom-check, heartbeat, or sleep cadence, and it never starts another
+# watcher. Each actionable result is deduplicated per task so an unchanged failed
+# PR check cannot wake firstmate every twenty seconds. That dedup marker is
+# advanced only after the durable wake is queued, the same discipline .seen-*
+# follows above, so a watcher that dies mid-cycle re-announces the transition
+# instead of swallowing it.
+# The progress helper reads the PR's checks from the forge, so it is a network
+# call and runs through run_check_capture exactly like every other per-task
+# check: bounded by CHECK_TIMEOUT in its own process group, so a hung or slow
+# forge call can neither stall the beat, the signal scan, and the stale and
+# wedge detection of other crewmates, nor hold off a stop signal.
+fast_repair_progress_discover() {
+  local id
+  FAST_REPAIR_ACTIVE=0
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    FAST_REPAIR_ACTIVE=1
+    break
+  done < <(fast_repair_progress_task_ids)
+  return 0
+}
+
+fast_repair_progress_generation_next() {
+  local counter="$STATE/.fast-repair-progress-next-generation"
+  local lock="$STATE/.fast-repair-progress-generation.lock"
+  local current next tmp
+  fm_lock_acquire_wait "$lock" || return 1
+  current=$(cat "$counter" 2>/dev/null || true)
+  case "$current" in ''|*[!0-9]*) current=0 ;; esac
+  next=$((current + 1))
+  tmp=$(mktemp "$counter.XXXXXX") || { fm_lock_release "$lock"; return 1; }
+  if ! printf '%s\n' "$next" > "$tmp" || ! chmod 600 "$tmp" || ! mv -f "$tmp" "$counter"; then
+    rm -f "$tmp"
+    fm_lock_release "$lock"
+    return 1
+  fi
+  fm_lock_release "$lock"
+  printf '%s\n' "$next"
+}
+
+fast_repair_eligible_task() {
+  local meta="$STATE/$1.meta"
+  [ -f "$meta" ] && [ ! -L "$meta" ] && fast_repair_eligible_meta "$meta"
+}
+
+fast_repair_progress_lifecycle() {
+  local f="$DATA/$1/fast-repair-eligibility" lifecycle
+  if [ -f "$f" ] && [ ! -L "$f" ]; then
+    lifecycle=$(sed -n 's/^lifecycle=//p' "$f" | head -n 1)
+    case "$lifecycle" in ?*[!A-Za-z0-9._-]*|'') return 1 ;; esac
+    printf '%s\n' "$lifecycle"
+    return 0
+  fi
+  printf '%s\n' legacy
+}
+
+fast_repair_progress_due_path() {
+  printf '%s/.fast-repair-progress-next-due-%s' "$STATE" "$1"
+}
+
+fast_repair_progress_due_set() {
+  local id=$1 due=$2 path tmp
+  fm_pr_task_id_valid "$id" || return 1
+  case "$due" in *[!0-9]*|'') return 1 ;; esac
+  path=$(fast_repair_progress_due_path "$id") || return 1
+  tmp=$(mktemp "$path.XXXXXX") || return 1
+  if ! printf '%s\n' "$due" > "$tmp" || ! chmod 600 "$tmp" || ! mv -f "$tmp" "$path"; then
+    rm -f "$tmp"
+    return 1
+  fi
+}
+
+fast_repair_progress_due_in() {
+  local path now due
+  path=$(fast_repair_progress_due_path "$1") || return 1
+  now=$(date +%s) || return 1
+  due=$(cat "$path" 2>/dev/null || true)
+  case "$due" in *[!0-9]*|'') printf '0\n'; return 0 ;; esac
+  if [ "$due" -le "$now" ]; then
+    printf '0\n'
+  else
+    printf '%s\n' "$((due - now))"
+  fi
+}
+
+fast_repair_progress_schedule_missing() {
+  local id path now due
+  now=$(date +%s) || return 1
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    path=$(fast_repair_progress_due_path "$id") || continue
+    due=$(cat "$path" 2>/dev/null || true)
+    case "$due" in *[!0-9]*|'') fast_repair_progress_due_set "$id" "$((now + FAST_REPAIR_PROGRESS_INTERVAL))" || continue ;; esac
+  done < <(fast_repair_progress_task_ids)
+  return 0
+}
+
+# A task whose progress child is still running has no schedule to wait on: its
+# next due time is written by that child when the check completes. Counting its
+# stale zero delay here would spin the timer loop once a second for the whole
+# life of a slow forge call, so it is skipped and the interval is used instead;
+# the child's own due write is what the next iteration reads.
+fast_repair_progress_timer_delay() {  # [<generation>]
+  local generation=${1:-} id delay shortest=
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    if [ -n "$generation" ] && fast_repair_progress_task_running "$id" "$generation"; then
+      continue
+    fi
+    delay=$(fast_repair_progress_due_in "$id") || continue
+    case "$delay" in *[!0-9]*|'') continue ;; esac
+    if [ -z "$shortest" ] || [ "$delay" -lt "$shortest" ]; then
+      shortest=$delay
+    fi
+  done < <(fast_repair_progress_task_ids)
+  printf '%s\n' "${shortest:-$FAST_REPAIR_PROGRESS_INTERVAL}"
+}
+
+fast_repair_progress_record() {
+  local id=$1 result=$2 generation=${3:-} marker generation_marker prior prior_generation
+  marker=$(fast_repair_progress_surfaced_marker "$id")
+  generation_marker="$STATE/.fast-repair-progress-generation-$id"
+  if [ -n "$generation" ]; then
+    case "$generation" in *[!0-9]*|'') return 3 ;; esac
+    prior_generation=$(cat "$generation_marker" 2>/dev/null || true)
+    case "$prior_generation" in *[!0-9]*|'') prior_generation=0 ;; esac
+    [ "$prior_generation" -le "$generation" ] || return 3
+  fi
+  prior=$(cat "$marker" 2>/dev/null || true)
+  if [ "$prior" = "$result" ]; then
+    [ -z "$generation" ] || printf '%s' "$generation" > "$generation_marker"
+    return 1
+  fi
+  fm_wake_append check "fast-repair:$id" "check: $result" || return 2
+  printf '%s' "$result" > "$marker"
+  [ -z "$generation" ] || printf '%s' "$generation" > "$generation_marker"
+}
+
+fast_repair_progress_task_marker() { # <task-id> <generation>
+  printf '%s/.fast-repair-progress-child-%s-%s' "$STATE" "$1" "$2"
+}
+
+fast_repair_progress_task_running() { # <task-id> <generation>
+  local marker
+  marker=$(fast_repair_progress_task_marker "$1" "$2") || return 1
+  [ ! -e "$marker.starting" ] || return 0
+  [ -f "$marker" ] && [ ! -L "$marker" ]
+}
+
+fast_repair_progress_timer_tasks_finish() { # <generation>
+  local generation=$1 marker ready reservation pid i=0 live
+  local markers=() pids=()
+  for reservation in "$STATE"/.fast-repair-progress-child-*"-$generation".starting; do
+    [ -f "$reservation" ] && [ ! -L "$reservation" ] || continue
+    : > "$reservation.closing" || continue
+    rm -f "$reservation"
+  done
+  for marker in "$STATE"/.fast-repair-progress-child-*"-$generation"; do
+    [ -f "$marker" ] && [ ! -L "$marker" ] || continue
+    ready="$marker.ready"
+    pid=$(cat "$marker" 2>/dev/null || true)
+    case "$pid" in
+      ''|*[!0-9]*) rm -f "$marker" "$ready"; continue ;;
+    esac
+    markers+=("$marker")
+    pids+=("$pid")
+    kill -TERM "$pid" 2>/dev/null || true
+  done
+  while [ "$i" -lt 40 ]; do
+    live=0
+    for pid in "${pids[@]+"${pids[@]}"}"; do
+      kill -0 "$pid" 2>/dev/null && { live=1; break; }
+    done
+    [ "$live" -eq 0 ] && break
+    sleep 0.01
+    i=$((i + 1))
+  done
+  for pid in "${pids[@]+"${pids[@]}"}"; do
+    kill -0 "$pid" 2>/dev/null && kill -KILL "$pid" 2>/dev/null || true
+  done
+  for marker in "${markers[@]+"${markers[@]}"}"; do
+    rm -f "$marker" "$marker.ready"
+  done
+}
+
+fast_repair_progress_task_start() { # <task-id> <generation>
+  local id=$1 generation=$2 marker ready reservation result now closing=${FM_FAST_REPAIR_TIMER_CLOSING:-} lifecycle pid tmp
+  local progress_args=(progress "$id")
+  [ -z "$closing" ] || [ ! -e "$closing" ] || return 0
+  marker=$(fast_repair_progress_task_marker "$id" "$generation") || return 1
+  lifecycle=$(fast_repair_progress_lifecycle "$id") || return 1
+  ! fast_repair_progress_forge_retired "$id" || progress_args+=(--local-only)
+  ready="$marker.ready"
+  reservation="$marker.starting"
+  if [ -f "$marker" ] && [ ! -L "$marker" ]; then
+    return 0
+  fi
+  [ ! -e "$reservation" ] || return 0
+  tmp=$(mktemp "$reservation.XXXXXX") || return 1
+  if ! chmod 600 "$tmp" || ! mv -f "$tmp" "$reservation"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  if [ -e "$reservation.closing" ] || { [ -n "$closing" ] && [ -e "$closing" ]; }; then
+    rm -f "$reservation" "$reservation.closing"
+    return 0
+  fi
+  touch "$STATE/.last-fast-repair-progress-$id"
+  (
+    trap 'rm -f "$marker" "$ready" "$reservation" "$reservation.closing"' EXIT
+    trap 'fm_active_check_stop || true; exit 0' HUP INT TERM
+    while [ ! -f "$ready" ]; do
+      [ ! -e "$reservation.closing" ] || exit 0
+      sleep 0.01
+    done
+    [ ! -e "$reservation.closing" ] || exit 0
+    [ -z "$closing" ] || [ ! -e "$closing" ] || exit 0
+    if FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+      run_check_capture --stop-active-check-on-signal "$SCRIPT_DIR/fm-fast-repair.sh" "${progress_args[@]}"; then
+      result=$FM_CHECK_RESULT
+    else
+      result=
+    fi
+    now=$(date +%s) && fast_repair_progress_due_set "$id" "$((now + FAST_REPAIR_PROGRESS_INTERVAL))"
+    if [ -n "$result" ] && fast_repair_progress_result_is_new "$id" "$result"; then
+      FM_FAST_REPAIR_TASK_LIFECYCLE="$lifecycle" fast_repair_progress_timer_publish "$id" "$result"
+    fi
+  ) &
+  pid=$!
+  if [ -e "$reservation.closing" ]; then
+    kill -TERM "$pid" 2>/dev/null || true
+    rm -f "$reservation"
+    return 0
+  fi
+  tmp=$(mktemp "$marker.XXXXXX") || { kill -TERM "$pid" 2>/dev/null || true; return 1; }
+  if [ -e "$reservation.closing" ] || { [ -n "$closing" ] && [ -e "$closing" ]; }; then
+    rm -f "$tmp" "$reservation"
+    kill -TERM "$pid" 2>/dev/null || true
+    return 0
+  fi
+  if ! printf '%s\n' "$pid" > "$tmp" || ! chmod 600 "$tmp" || ! mv -f "$tmp" "$marker"; then
+    rm -f "$tmp"
+    kill -TERM "$pid" 2>/dev/null || true
+    rm -f "$reservation" "$reservation.closing"
+    return 1
+  fi
+  rm -f "$reservation"
+  touch "$ready"
+}
+
+# One tick collects the eligible ids once and reuses that list for both the
+# activity flag and the work. The next due time is deliberately NOT advanced
+# here: the child that actually runs the check advances it once that check
+# completes. A child reaped at a poll boundary therefore leaves the due time
+# behind it, so the beat is retried on the next tick instead of being silently
+# skipped for a whole interval. That is a retry guarantee, not a delivery one: a
+# forge call slower than the remaining poll window is reaped before it can
+# publish on every attempt, so a persistently slow forge still surfaces nothing
+# through this cadence and the ordinary CHECK_INTERVAL PR poll remains the
+# backstop. A start that fails before forking re-arms the due at the normal
+# interval, so it retries on the cadence instead of spinning the timer loop.
+fast_repair_progress_tick() {
+  local id due generation now
+  local ids=()
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    ids+=("$id")
+  done < <(fast_repair_progress_task_ids)
+  if [ "${#ids[@]}" -eq 0 ]; then
+    FAST_REPAIR_ACTIVE=0
+    return 0
+  fi
+  FAST_REPAIR_ACTIVE=1
+  generation=${FM_FAST_REPAIR_TIMER_GENERATION:-}
+  case "$generation" in *[!0-9]*|'') return 1 ;; esac
+  for id in "${ids[@]}"; do
+    due=$(fast_repair_progress_due_in "$id") || continue
+    [ "$due" -eq 0 ] || continue
+    fast_repair_progress_task_running "$id" "$generation" && continue
+    touch "$STATE/.last-fast-repair-progress-$id"
+    if ! fast_repair_progress_task_start "$id" "$generation"; then
+      now=$(date +%s) && fast_repair_progress_due_set "$id" "$((now + FAST_REPAIR_PROGRESS_INTERVAL))"
+    fi
+  done
+  return 0
+}
+
+fast_repair_progress_timer_publish() {
+  local id=$1 result=$2 generation=${FM_FAST_REPAIR_TIMER_GENERATION:-}
+  local file tmp lock counter current next lifecycle
+  case "$generation" in *[!0-9]*|'') return 1 ;; esac
+  case "$id:$result" in *$'\n'*|*$'\r'*) return 1 ;; esac
+  fm_pr_task_id_valid "$id" || return 1
+  lifecycle=${FM_FAST_REPAIR_TASK_LIFECYCLE:-$(fast_repair_progress_lifecycle "$id")} || return 1
+  case "$lifecycle" in ?*[!A-Za-z0-9._-]*|'') return 1 ;; esac
+  fast_repair_progress_handoff_supersede "$id" "$result"
+  lock="$STATE/.fast-repair-progress-sequence-$id-$generation.lock"
+  counter="$STATE/.fast-repair-progress-sequence-$id-$generation"
+  fm_lock_acquire_wait "$lock" || return 1
+  current=$(cat "$counter" 2>/dev/null || true)
+  case "$current" in ''|*[!0-9]*) current=0 ;; esac
+  next=$((current + 1))
+  tmp=$(mktemp "$STATE/.fast-repair-progress-pending.XXXXXX") || { fm_lock_release "$lock"; return 1; }
+  file=$(printf '%s/.fast-repair-progress-handoff-%s-%s-%020d' "$STATE" "$id" "$generation" "$next")
+  if ! {
+    printf '%s\n' "$lifecycle"
+    printf '%s\n' "$generation"
+    printf '%s\n' "$id"
+    printf '%s\n' "$result"
+  } > "$tmp" || ! chmod 600 "$tmp" || ! mv -f "$tmp" "$file" || ! printf '%s\n' "$next" > "$counter"; then
+    rm -f "$tmp"
+    fm_lock_release "$lock"
+    return 1
+  fi
+  fm_lock_release "$lock"
+  fast_repair_progress_timer_notify
+}
+
+# Every interruptible wait is published as its own process-group leader, so the
+# whole wait - including a backend event reader forked inside it - can be stopped
+# here rather than only the shell that owns it. A recorded pid is signalled only
+# once it is proven to be BOTH a direct child of this watcher AND its own process
+# group leader: the group form is what reaches the reader, and without that proof
+# a pid that has already exited and been reused would aim it at an unrelated
+# group. Failing the group proof still stops the pid itself, which is all the
+# plain sleep path ever needed.
+fast_repair_progress_timer_notify() {
+  local parent=${FM_FAST_REPAIR_TIMER_PARENT:-} wait_file=${FM_FAST_REPAIR_TIMER_WAIT_FILE:-} wait_pid wait_parent wait_pgid
+  case "$parent" in *[!0-9]*|'') return 0 ;; esac
+  [ -f "$wait_file" ] && [ ! -L "$wait_file" ] || return 0
+  wait_pid=$(cat "$wait_file" 2>/dev/null || true)
+  case "$wait_pid" in *[!0-9]*|'') return 0 ;; esac
+  wait_parent=$(ps -o ppid= -p "$wait_pid" 2>/dev/null | tr -d '[:space:]')
+  [ "$wait_parent" = "$parent" ] || return 0
+  wait_pgid=$(ps -o pgid= -p "$wait_pid" 2>/dev/null | tr -d '[:space:]')
+  if [ -n "$wait_pgid" ] && [ "$wait_pgid" = "$wait_pid" ]; then
+    kill -TERM -- "-$wait_pid" 2>/dev/null || true
+  fi
+  kill -TERM "$wait_pid" 2>/dev/null || true
+}
+
 # Deliver a durably queued process-event result to firstmate. Publication is
 # owned by bin/fm-procevent.sh - by the runner at capture time and by reconcile's
 # re-announcement - so this decides only whether a queued check record has been
@@ -567,7 +1066,10 @@ fm_active_check_stop() {
 }
 
 run_check_capture() {
-  local pgid
+  local pgid stop_active_check=0
+  case "${1:-}" in
+    --stop-active-check-on-signal) stop_active_check=1; shift ;;
+  esac
   fm_check_output_cleanup
   FM_CHECK_RESULT=
   FM_CHECK_OUTPUT=$(mktemp "$STATE/.fm-check-output.XXXXXX") || return 1
@@ -580,13 +1082,26 @@ run_check_capture() {
   FM_ACTIVE_CHECK_PGID=$FM_ACTIVE_CHECK_PID
   set +m
   pgid=$(ps -o pgid= -p "$FM_ACTIVE_CHECK_PID" 2>/dev/null | tr -d '[:space:]')
-  trap 'exit 1' HUP INT TERM
+  if [ "$stop_active_check" -eq 1 ]; then
+    trap 'fm_active_check_stop || true; exit 1' HUP INT TERM
+  else
+    trap 'exit 1' HUP INT TERM
+  fi
   if [ -n "$pgid" ] && [ "$pgid" != "$FM_ACTIVE_CHECK_PGID" ]; then
     fm_active_check_stop || true
     fm_check_output_cleanup
     return 1
   fi
-  [ -z "$FM_CHECK_SIGNAL_PENDING" ] || exit 1
+  # A signal delivered between installing the pending-flag trap and swapping in
+  # the real one lands here instead of in a handler, so this exit owes the same
+  # guarantee the swapped-in trap gives: under --stop-active-check-on-signal the
+  # forked check's whole process group is stopped first, or it would outlive the
+  # caller with only its recorded child pid known to any later reaper.
+  if [ -n "$FM_CHECK_SIGNAL_PENDING" ]; then
+    [ "$stop_active_check" -eq 0 ] || fm_active_check_stop || true
+    fm_check_output_cleanup
+    exit 1
+  fi
   wait "$FM_ACTIVE_CHECK_PID" 2>/dev/null || true
   FM_ACTIVE_CHECK_PID=
   fm_active_check_stop || return 1
@@ -626,6 +1141,230 @@ heartbeat_scan_finds_actionable() {
   return 1
 }
 
+fast_repair_progress_timer_start() {
+  local marker parent closing generation delay wait_file
+  [ "$FAST_REPAIR_ACTIVE" = 1 ] || return 0
+  case "$POLL:$FAST_REPAIR_PROGRESS_INTERVAL" in *[!0-9:]*|:*|*:) return 0 ;; esac
+  fast_repair_progress_schedule_missing || return 0
+  generation=$(fast_repair_progress_generation_next) || return 0
+  FAST_REPAIR_TIMER_GENERATION=$generation
+  marker=$(mktemp "$STATE/.fast-repair-progress-timer.XXXXXX") || return 0
+  closing="$marker.closing"
+  wait_file="$marker.wait-pid"
+  FAST_REPAIR_TIMER_MARKER=$marker
+  FAST_REPAIR_TIMER_WAIT_FILE=$wait_file
+  parent=$WATCHER_PID
+  (
+    trap 'rm -f "$closing"' EXIT
+    trap 'fm_active_check_stop || true; exit 0' HUP INT TERM
+    while [ -f "$marker" ]; do
+      [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)" = "$parent" ] || exit 0
+      FM_FAST_REPAIR_TIMER_PARENT="$parent" \
+        FM_FAST_REPAIR_TIMER_CLOSING="$closing" \
+        FM_FAST_REPAIR_TIMER_GENERATION="$generation" \
+        FM_FAST_REPAIR_TIMER_WAIT_FILE="$wait_file" \
+        fast_repair_progress_tick
+      [ "$FAST_REPAIR_ACTIVE" = 1 ] || rm -f "$marker"
+      [ -f "$marker" ] || exit 0
+      delay=$(fast_repair_progress_timer_delay "$generation") || exit 0
+      case "$delay" in *[!0-9]*|'') exit 0 ;; esac
+      [ "$delay" -gt 0 ] || delay=1
+      sleep "$delay"
+      [ -f "$marker" ] || exit 0
+    done
+  ) &
+  FAST_REPAIR_TIMER_PID=$!
+}
+
+fast_repair_progress_timer_finish() {
+  local marker=${FAST_REPAIR_TIMER_MARKER:-} pid=${FAST_REPAIR_TIMER_PID:-} generation=${FAST_REPAIR_TIMER_GENERATION:-} wait_file=${FAST_REPAIR_TIMER_WAIT_FILE:-} i=0
+  # Runs first and unconditionally: a watcher signalled while blocked in `wait`
+  # reaches here through its EXIT trap with the forked backend wait still live,
+  # and that wait's own reader keeps mutating this home's transition state until
+  # its budget expires. Nothing else knows the group.
+  fast_repair_progress_wait_cleanup
+  [ -n "$marker" ] || return 0
+  : > "$marker.closing" || return 0
+  rm -f "$marker"
+  FAST_REPAIR_TIMER_MARKER=
+  case "$generation" in *[!0-9]*|'') ;; *) fast_repair_progress_timer_tasks_finish "$generation" ;; esac
+  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+    kill -TERM "$pid" 2>/dev/null || true
+    while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 40 ]; do
+      sleep 0.01
+      i=$((i + 1))
+    done
+    kill -KILL "$pid" 2>/dev/null || true
+  fi
+  [ -z "$pid" ] || wait "$pid" 2>/dev/null || true
+  FAST_REPAIR_TIMER_PID=
+  rm -f "$marker.closing"
+  rm -f "$wait_file"
+  FAST_REPAIR_TIMER_WAIT_FILE=
+}
+
+FAST_REPAIR_WAIT_PID=
+FAST_REPAIR_WAIT_OUTPUT=
+
+fast_repair_progress_timer_wait_pid_publish() { # <pid>
+  local wait_file=${FAST_REPAIR_TIMER_WAIT_FILE:-} pid=$1 tmp
+  FAST_REPAIR_WAIT_PID=$pid
+  [ -n "$wait_file" ] || return 1
+  tmp=$(mktemp "$wait_file.XXXXXX") || return 1
+  if ! printf '%s\n' "$pid" > "$tmp" || ! chmod 600 "$tmp" || ! mv -f "$tmp" "$wait_file"; then
+    rm -f "$tmp"
+    return 1
+  fi
+}
+
+fast_repair_progress_timer_wait_pid_clear() {
+  local wait_file=${FAST_REPAIR_TIMER_WAIT_FILE:-}
+  FAST_REPAIR_WAIT_PID=
+  [ -n "$wait_file" ] || return 0
+  rm -f "$wait_file"
+}
+
+# Stop whatever interruptible wait is still live. Safe to call when none is
+# running, and idempotent. The recorded pid stays set for the window between
+# `wait` returning and the clear, so a signal arriving there would otherwise
+# reach an already-reaped pid; this applies the same rule
+# fast_repair_progress_timer_notify does - signal only a pid proven to be a
+# direct child of this watcher, and use the group form, which is what reaches a
+# backend event reader forked inside the wait, only once it is also proven to be
+# its own group leader.
+fast_repair_progress_wait_stop() {
+  local pid=${FAST_REPAIR_WAIT_PID:-} parent=${WATCHER_PID:-} pgid
+  [ -n "$pid" ] || return 0
+  FAST_REPAIR_WAIT_PID=
+  case "$parent" in *[!0-9]*|'') return 0 ;; esac
+  [ "$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d '[:space:]')" = "$parent" ] || return 0
+  pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d '[:space:]')
+  if [ -n "$pgid" ] && [ "$pgid" = "$pid" ]; then
+    kill -TERM -- "-$pid" 2>/dev/null || true
+  fi
+  kill -TERM "$pid" 2>/dev/null || true
+}
+
+# Teardown form: stop the wait and drop the capture file the interrupted wait
+# never got to read, so a stopped watcher leaves no .fm-event-wait.* behind.
+fast_repair_progress_wait_cleanup() {
+  fast_repair_progress_wait_stop
+  [ -z "${FAST_REPAIR_WAIT_OUTPUT:-}" ] || rm -f "$FAST_REPAIR_WAIT_OUTPUT"
+  FAST_REPAIR_WAIT_OUTPUT=
+}
+
+# A handoff published between forking a wait and making that wait reachable by
+# fast_repair_progress_timer_notify would otherwise sit undelivered for the whole
+# poll budget - the exact delay this cadence exists to remove. Re-scan once the
+# pid is published and interrupt immediately if one is already waiting.
+fast_repair_progress_wait_interrupt_if_pending() {
+  fast_repair_progress_handoff_pending || return 0
+  fast_repair_progress_wait_stop
+}
+
+fast_repair_progress_timer_sleep() { # <seconds>
+  local seconds=$1 wait_file=${FAST_REPAIR_TIMER_WAIT_FILE:-} pid
+  [ -n "$wait_file" ] || { sleep "$seconds"; return; }
+  set -m
+  ( sleep "$seconds" ) &
+  pid=$!
+  set +m
+  if ! fast_repair_progress_timer_wait_pid_publish "$pid"; then
+    wait "$pid" || true
+    FAST_REPAIR_WAIT_PID=
+    return
+  fi
+  fast_repair_progress_wait_interrupt_if_pending
+  wait "$pid" || true
+  fast_repair_progress_timer_wait_pid_clear
+}
+
+# The push wait is a foreground read on the backend's event stream, so unlike the
+# sleep path it cannot be signalled where it stands. Run it as its own process
+# group whose leader is published as the interruptible wait, so a Fast Repair
+# progress result stops the wait and its backend reader together and the result
+# is delivered in this cycle instead of after the whole poll budget. The record
+# the wait printed is returned through FM_EVENT_WAIT_RECORD; the exit status is
+# the backend's own, and an interrupted wait reports neither an edge (0) nor an
+# unusable event path (2), so it falls through to the ordinary no-edge branch.
+FM_EVENT_WAIT_RECORD=
+fast_repair_progress_timer_wait_transition() { # <backend> <session> <budget> <state> <window...>
+  local out pid rc=0
+  FM_EVENT_WAIT_RECORD=
+  out=$(mktemp "$STATE/.fm-event-wait.XXXXXX") || return 2
+  chmod 0600 "$out" || { rm -f "$out"; return 2; }
+  # Registered before the fork so a signalled teardown still removes it, and the
+  # backend's own stderr stays on the watcher's stderr exactly as it does on the
+  # unforked path, so a socket or subscribe diagnostic is reported identically.
+  FAST_REPAIR_WAIT_OUTPUT=$out
+  set -m
+  ( FM_BACKEND_EVENTS_CAPABILITY_CONFIRMED=1 fm_backend_wait_transition "$@" ) > "$out" &
+  pid=$!
+  set +m
+  fast_repair_progress_timer_wait_pid_publish "$pid" || true
+  fast_repair_progress_wait_interrupt_if_pending
+  wait "$pid" || rc=$?
+  fast_repair_progress_timer_wait_pid_clear
+  FM_EVENT_WAIT_RECORD=$(cat "$out" 2>/dev/null || true)
+  rm -f "$out"
+  FAST_REPAIR_WAIT_OUTPUT=
+  return "$rc"
+}
+
+fast_repair_progress_timer_wake() {
+  local file lifecycle current_lifecycle generation id result status reasons=
+  for file in "$STATE"/.fast-repair-progress-handoff-*; do
+    [ -f "$file" ] && [ ! -L "$file" ] || continue
+    case "$file" in *.attempts) continue ;; esac
+    exec 9< "$file" || continue
+    IFS= read -r lifecycle <&9 || { exec 9<&-; continue; }
+    if [[ "$lifecycle" =~ ^[0-9]+$ ]]; then
+      generation=$lifecycle
+      lifecycle=legacy
+    else
+      IFS= read -r generation <&9 || { exec 9<&-; continue; }
+    fi
+    IFS= read -r id <&9 || { exec 9<&-; continue; }
+    IFS= read -r result <&9 || { exec 9<&-; continue; }
+    if IFS= read -r <&9; then
+      exec 9<&-
+      continue
+    fi
+    exec 9<&-
+    case "$generation" in *[!0-9]*|'') continue ;; esac
+    case "$result" in ''|*$'\n'*|*$'\r'*) continue ;; esac
+    fm_pr_task_id_valid "$id" || continue
+    if ! fast_repair_eligible_task "$id"; then
+      fast_repair_progress_handoff_forget "$file" || continue
+      continue
+    fi
+    current_lifecycle=$(fast_repair_progress_lifecycle "$id" 2>/dev/null || true)
+    if [ "$lifecycle" != "$current_lifecycle" ]; then
+      fast_repair_progress_handoff_forget "$file" || continue
+      continue
+    fi
+    status=0
+    fast_repair_progress_record "$id" "$result" "$generation" || status=$?
+    case "$status" in
+      0)
+        fast_repair_progress_handoff_forget "$file" || continue
+        # The green rollup is the last transition this cadence exists to catch.
+        # Retire the task from it only after its wake is durably queued, the same
+        # order every other marker here follows.
+        case "$result" in
+          "fast-repair $id pr-checks-green:"*) : > "$(fast_repair_progress_green_marker "$id")" || true ;;
+        esac
+        reasons="$reasons $result"
+        ;;
+      1|3) fast_repair_progress_handoff_forget "$file" || continue ;;
+      # The wake queue refused the record. Keep it on disk so a later cycle can
+      # still deliver it, but count the attempt so it stops cutting waits short.
+      *) fast_repair_progress_handoff_attempt_record "$file" || true; continue ;;
+    esac
+  done
+  [ -z "$reasons" ] || wake "check:${reasons}"
+}
+
 # event_wait_or_sleep: the terminal wait of each supervision cycle. For a home
 # with push-capable windows (herdr), it replaces the blind `sleep POLL` with a
 # bounded wait on the backend's native transition stream, so a crew going
@@ -640,6 +1379,7 @@ heartbeat_scan_finds_actionable() {
 event_wait_or_sleep() {
   local w b session first_backend="" first_session="" rec rc
   local windows=()
+  fast_repair_progress_timer_start
   while IFS= read -r w; do
     b=$(window_backend "$w")
     fm_backend_has_push "$b" || continue
@@ -660,7 +1400,9 @@ event_wait_or_sleep() {
   done < <(recorded_windows)
 
   if [ "${#windows[@]}" -eq 0 ]; then
-    sleep "$POLL"
+    fast_repair_progress_timer_sleep "$POLL"
+    fast_repair_progress_timer_finish
+    fast_repair_progress_timer_wake
     return
   fi
 
@@ -676,12 +1418,20 @@ event_wait_or_sleep() {
     _event_cap_fails=0
   fi
   if [ "$_event_cap_ok" != 1 ]; then
-    sleep "$POLL"
+    fast_repair_progress_timer_sleep "$POLL"
+    fast_repair_progress_timer_finish
+    fast_repair_progress_timer_wake
     return
   fi
 
-  rec=$(FM_BACKEND_EVENTS_CAPABILITY_CONFIRMED=1 fm_backend_wait_transition "$first_backend" "$first_session" "$POLL" "$STATE" "${windows[@]}")
-  rc=$?
+  if [ -n "${FAST_REPAIR_TIMER_WAIT_FILE:-}" ]; then
+    fast_repair_progress_timer_wait_transition "$first_backend" "$first_session" "$POLL" "$STATE" "${windows[@]}"
+    rc=$?
+    rec=$FM_EVENT_WAIT_RECORD
+  else
+    rec=$(FM_BACKEND_EVENTS_CAPABILITY_CONFIRMED=1 fm_backend_wait_transition "$first_backend" "$first_session" "$POLL" "$STATE" "${windows[@]}")
+    rc=$?
+  fi
   case "$rc" in
     0)
       _event_cap_fails=0
@@ -693,7 +1443,7 @@ event_wait_or_sleep() {
       # pure polling for the rest of this watcher process.
       _event_cap_fails=$((_event_cap_fails + 1))
       [ "$_event_cap_fails" -ge "$EVENT_CAP_FAIL_MAX" ] && _event_cap_ok=0
-      sleep "$POLL"
+      fast_repair_progress_timer_sleep "$POLL"
       ;;
     *)
       # 1: a clean full-budget wait with no actionable edge - the reader already
@@ -701,6 +1451,8 @@ event_wait_or_sleep() {
       _event_cap_fails=0
       ;;
   esac
+  fast_repair_progress_timer_finish
+  fast_repair_progress_timer_wake
 }
 
 # --- Main entry: the runtime below runs only when this file is executed as a
@@ -752,6 +1504,7 @@ elif [ "$FM_RECOVERY_MARKER_ACTION" = recover ]; then
 fi
 watcher_cleanup() {
   local cleanup_status=0 owns_lock=0 transition=release-lock
+  fast_repair_progress_timer_finish
   if [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)" = "${WATCHER_PID:-}" ]; then
     owns_lock=1
     if [ "${WATCHER_RECOVERY_PENDING:-0}" -eq 1 ] \
@@ -840,6 +1593,11 @@ while :; do
   # repost after grace, and escalate once if the recovery turn is also missed.
   # No conversation scraping; unresolved records are never silently expired.
   fm_pending_reply_tick "$STATE" || true
+
+  # This is the only shortened cadence. It reads only durable Fast Repair task
+  # records and leaves ordinary task scanning and schedules untouched.
+  fast_repair_progress_discover
+  fast_repair_progress_timer_wake
 
   # Process-to-event liveness repair. This never discovers a result by polling:
   # each registered source has its own child blocking on that source, and this

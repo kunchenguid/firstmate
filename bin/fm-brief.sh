@@ -6,7 +6,7 @@
 # description, acceptance criteria, and context, and may adjust other sections
 # when the task genuinely deviates (e.g. working an existing external PR instead
 # of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only|fast-repair> [--herdr-lab]
 #        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
@@ -34,6 +34,8 @@
 #   direct-PR    implement -> push + open PR via gh-axi (no pipeline) -> configured merge authority
 #   local-only   implement on branch, stop and report "ready in branch" (no push/PR);
 #                the configured merge authority approves, firstmate merges to local main
+#   fast-repair  only after bin/fm-fast-repair.sh recorded eligible typed evidence;
+#                use its regression/focused evidence and direct-PR commands
 # no-mistakes-prod-only is a registry policy, not a task mode; resolve it to one of
 # the three concrete modes at intake before calling this script.
 # The generated ship brief records the chosen mode as a fixed machine-readable
@@ -140,21 +142,28 @@ done
 # missing or invalid value stops the scaffold rather than silently defaulting.
 if [ "$KIND" = ship ]; then
   [ "$MODE_SET" -eq 1 ] || {
-    echo "error: ship briefs require --mode <no-mistakes|direct-PR|local-only>; resolve it at intake from the captain's instruction and the project's registered posture in data/projects.md" >&2
+    echo "error: ship briefs require --mode <no-mistakes|direct-PR|local-only|fast-repair>; resolve it at intake from the captain's instruction and the project's registered posture in data/projects.md" >&2
     exit 1
   }
   case "$MODE" in
-    no-mistakes|direct-PR|local-only) ;;
+    no-mistakes|direct-PR|local-only|fast-repair) ;;
     no-mistakes-prod-only)
       echo "error: no-mistakes-prod-only is a registry policy, not a task mode; classify this task's surface and resolve it to no-mistakes or direct-PR at intake" >&2
       exit 1 ;;
-    *) echo "error: --mode must be one of no-mistakes, direct-PR, local-only (got '$MODE')" >&2; exit 1 ;;
+    *) echo "error: --mode must be one of no-mistakes, direct-PR, local-only, fast-repair (got '$MODE')" >&2; exit 1 ;;
   esac
 elif [ "$MODE_SET" -eq 1 ]; then
   echo "error: --mode applies only to ship briefs; a scout delivers a report and a secondmate charter is not a delivery contract" >&2
   exit 1
 fi
 ID=${POS[0]}
+
+if [ "$KIND" = ship ] && [ "$MODE" = fast-repair ]; then
+  "$SCRIPT_DIR/fm-fast-repair.sh" eligible "$ID" >/dev/null || {
+    echo "error: Fast Repair brief refused because its typed eligibility evidence is absent or incomplete; use normal intake for this task" >&2
+    exit 1
+  }
+fi
 
 if [ "$KIND" = secondmate ] && [ "$HERDR_LAB" -eq 1 ]; then
   echo "error: --herdr-lab applies only to crewmate ship or scout briefs" >&2
@@ -352,6 +361,32 @@ fi
 # "Delivery contract: mode=<mode>" line that bin/fm-spawn.sh checks against its own
 # explicit --mode before launching.
 case "$MODE" in
+  fast-repair)
+    SETUP2=""
+    RULE1='1. Never push to the default branch, never merge a PR, and never use a different profile than Codex gpt-5.6-luna with medium effort.'
+    # The crewmate's pane comes from a long-lived tmux/herdr daemon and inherits
+    # none of firstmate's environment, so the helper would otherwise re-derive
+    # its own home and read a different (or absent) task record. The resolved
+    # state and data directories are therefore frozen into every command here,
+    # exactly as the crewmate's status path is above.
+    FAST_REPAIR_HELPER="FM_STATE_OVERRIDE=$(shell_quote "$STATE") FM_DATA_OVERRIDE=$(shell_quote "$DATA") $(shell_quote "$FM_ROOT/bin/fm-fast-repair.sh")"
+    IFS= read -r -d '' DOD <<EOF || true
+# Definition of done
+Delivery contract: mode=fast-repair
+This task is a strict Fast Repair exception and has already passed the typed eligibility record owned by \`$FM_ROOT/bin/fm-fast-repair.sh\`.
+Every command below carries that absolute helper path and firstmate's own state and data directories, because your worktree is the project's, not firstmate's; run each one verbatim from your worktree.
+Do not create a scout or run plan, design, CEO, engineering, or other extra review workflows.
+Add a new regression test that reproduces the reported defect and make the narrow repair.
+Run \`$FAST_REPAIR_HELPER evidence $ID --regression-test '<runner family>' --focused-test '<different runner family>'\` through the tracked \`bin/fm-test-run.sh\` runner.
+It runs and records both gates, and it refuses PR publication when either result is missing or failed.
+After it passes, use \`$FAST_REPAIR_HELPER publish-pr $ID --title '<title>' --body-file <path>\` to open and register the direct PR immediately.
+Then run \`$FAST_REPAIR_HELPER broader $ID --test '<runner family broader than the focused one>'\` while the new PR's checks run concurrently.
+Do not call the PR ready or green until \`$FAST_REPAIR_HELPER ready $ID\` passes.
+If broader tests or PR checks fail after the PR opens, append \`failed: PR {url} is open but not green because {failed evidence}\` and stop.
+Never enable auto-merge, and never merge the PR.
+When ready passes, append \`done: PR {url} checks green\` and stop for captain approval.
+EOF
+    ;;
   direct-PR)
     SETUP2=""
     RULE1='1. Never push to the default branch (push only your `fm/'"$ID"'` branch). Never merge a PR.'

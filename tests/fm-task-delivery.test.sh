@@ -227,6 +227,11 @@ test_promote_requires_and_records_the_delivery_contract() {
   [ "$status" -ne 0 ] || fail "promotion on a conditional policy should exit non-zero"
   assert_contains "$out" "classify this task's surface" "promote did not refuse the conditional policy as a task mode"
 
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" promote-d1 --mode fast-repair --yolo off 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a scout promotion to Fast Repair should exit non-zero"
+  assert_contains "$out" "Fast Repair cannot promote a scout" "promotion did not keep Fast Repair out of scout flow"
+
   out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" promote-d1 --mode direct-PR --yolo on 2>&1)
   status=$?
   expect_code 0 "$status" "a promotion carrying both flags should succeed"

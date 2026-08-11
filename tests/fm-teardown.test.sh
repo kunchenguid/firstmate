@@ -887,6 +887,63 @@ test_content_in_default_fallback_allows() {
   pass "worktree whose content already landed in the default branch is torn down (content fallback)"
 }
 
+# Fast Repair progress artifacts are keyed <prefix>-<id>-<generation>, and task ids
+# may contain hyphens, so tearing down `task-x1` must not touch `task-x1-2`. A live
+# sibling marker removed here would leave that task's progress child unsignalled at
+# the next poll boundary and drop its undrained handoff records.
+test_fast_repair_progress_cleanup_is_exact_for_one_task_id() {
+  local case_dir state rc own sibling
+  case_dir=$(make_case fast-repair-progress-scope)
+  state="$case_dir/state"
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  land_on_origin_main "$case_dir" feature.txt hello
+
+  own="$state/.fast-repair-progress-child-task-x1-7"
+  : > "$own"
+  : > "$own.ready"
+  : > "$own.starting"
+  : > "$own.starting.closing"
+  : > "$state/.fast-repair-progress-sequence-task-x1-7"
+  mkdir -p "$state/.fast-repair-progress-sequence-task-x1-7.lock"
+  : > "$state/.fast-repair-progress-handoff-task-x1-7-00000000000000000001"
+  : > "$state/.fast-repair-progress-handoff-task-x1-7-00000000000000000001.attempts"
+
+  # A different, still-running task whose id merely begins with "task-x1-".
+  sibling="$state/.fast-repair-progress-child-task-x1-2-7"
+  : > "$sibling"
+  : > "$sibling.ready"
+  : > "$state/.fast-repair-progress-sequence-task-x1-2-7"
+  : > "$state/.fast-repair-progress-handoff-task-x1-2-7-00000000000000000001"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "fast-repair-progress-scope: teardown should succeed (stderr: $(cat "$case_dir/stderr"))"
+
+  [ ! -e "$own" ] || fail "teardown left its own Fast Repair progress child marker behind"
+  [ ! -e "$own.ready" ] || fail "teardown left its own progress ready marker behind"
+  [ ! -e "$own.starting" ] || fail "teardown left its own progress reservation behind"
+  [ ! -e "$own.starting.closing" ] || fail "teardown left its own reservation closing marker behind"
+  [ ! -e "$state/.fast-repair-progress-sequence-task-x1-7" ] \
+    || fail "teardown left its own progress sequence counter behind"
+  [ ! -e "$state/.fast-repair-progress-sequence-task-x1-7.lock" ] \
+    || fail "teardown left its own progress sequence lock behind"
+  [ ! -e "$state/.fast-repair-progress-handoff-task-x1-7-00000000000000000001" ] \
+    || fail "teardown left its own progress handoff record behind"
+  [ ! -e "$state/.fast-repair-progress-handoff-task-x1-7-00000000000000000001.attempts" ] \
+    || fail "teardown left its own progress handoff attempt counter behind"
+
+  [ -e "$sibling" ] || fail "teardown of task-x1 removed the live progress child marker of task-x1-2"
+  [ -e "$sibling.ready" ] || fail "teardown of task-x1 removed the progress ready marker of task-x1-2"
+  [ -e "$state/.fast-repair-progress-sequence-task-x1-2-7" ] \
+    || fail "teardown of task-x1 removed the progress sequence counter of task-x1-2"
+  [ -e "$state/.fast-repair-progress-handoff-task-x1-2-7-00000000000000000001" ] \
+    || fail "teardown of task-x1 removed the undrained progress handoff of task-x1-2"
+  pass "Fast Repair progress cleanup removes only the torn-down task's artifacts, never a hyphenated sibling's"
+}
+
 test_content_fallback_refreshes_stale_origin_ref() {
   local case_dir rc
   case_dir=$(make_case content-stale-ref)
@@ -2619,6 +2676,7 @@ test_merged_pr_with_later_local_commit_refuses
 test_pr_check_does_not_refresh_stale_pr_head
 test_pr_check_records_remote_head_when_local_lags
 test_content_in_default_fallback_allows
+test_fast_repair_progress_cleanup_is_exact_for_one_task_id
 test_content_fallback_refreshes_stale_origin_ref
 test_dirty_worktree_refuses
 test_gh_error_and_content_absent_refuses

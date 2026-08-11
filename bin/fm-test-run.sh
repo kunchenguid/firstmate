@@ -19,6 +19,7 @@
 #   fm-test-run.sh --list --lane portable-parallel-1
 #   fm-test-run.sh --list-families
 #   fm-test-run.sh --list-lanes
+#   fm-test-run.sh --list-shard-plan
 #   fm-test-run.sh --check-coverage
 #
 # Aggregation (no suite execution):
@@ -27,6 +28,13 @@
 # Options:
 #   --json <path>   write a deterministic timing artifact after the run
 #   --list          print selected script paths (one per line) and exit 0
+#   --list-shard-plan
+#                   print the derived portable serial shard plan and exit 0, one
+#                   line per shard:
+#                     portable-serial-<k>of<n> count=<n> estimated_ms=<n>
+#                   estimated_ms is this script's balance estimate, not a
+#                   measurement. docs/fm-test-portable-shards.md publishes this
+#                   plan and a test asserts the two agree.
 #   --base <ref>    with --changed, compare against this ref (default: origin/main)
 #   --exclude-family <name>
 #                   drop scripts whose primary family matches <name> after selection
@@ -77,6 +85,7 @@ MODE=
 LIST_ONLY=0
 LIST_FAMILIES=0
 LIST_LANES=0
+LIST_SHARD_PLAN=0
 CHECK_COVERAGE=0
 AGGREGATE_OUT=
 FAMILY=
@@ -132,7 +141,7 @@ now_ms() {
 # unclassified so new tests are still runnable and visible in summaries.
 family_for_basename() {
   case "$1" in
-    fm-arm-pretool-check.test.sh|fm-ask-user-authority.test.sh|\
+    fm-arm-pretool-check.test.sh|fm-ask-user-authority.test.sh|fm-fast-repair.test.sh|\
     fm-brief.test.sh|fm-vendor-auth-probe.test.sh|\
     fm-calm-pi-extension.test.sh|fm-cd-pretool-check.test.sh|\
     fm-composer-ghost.test.sh|fm-composer-lib.test.sh|\
@@ -488,6 +497,35 @@ portable_serial_assignments() {
       printf '%s\t%s\n' "$(portable_serial_weight_for "$script")" "$script"
     done < <(list_portable_serial) | LC_ALL=C sort -t$'\t' -k1,1nr -k2,2
   )
+}
+
+# Summary of that assignment: one line per shard with its script count and the
+# estimated millisecond load it received. docs/fm-test-portable-shards.md
+# publishes this plan as the balance evidence behind the portable-serial CI
+# timeout, so emitting it here keeps that table derived from this script rather
+# than hand-counted after every new test. estimated_ms sums the same balance
+# hints the assignment used, so it stays an estimate rather than a measurement
+# for any script with no hint.
+list_portable_serial_shard_plan() {
+  local idx script i
+  local -a counts=() loads=()
+  i=1
+  while [ "$i" -le "$PORTABLE_SERIAL_SHARDS" ]; do
+    counts[i]=0
+    loads[i]=0
+    i=$((i + 1))
+  done
+  while IFS=$'\t' read -r idx script; do
+    [ -n "$script" ] || continue
+    counts[idx]=$((counts[idx] + 1))
+    loads[idx]=$((loads[idx] + $(portable_serial_weight_for "$script")))
+  done < <(portable_serial_assignments)
+  i=1
+  while [ "$i" -le "$PORTABLE_SERIAL_SHARDS" ]; do
+    printf 'portable-serial-%sof%s count=%s estimated_ms=%s\n' \
+      "$i" "$PORTABLE_SERIAL_SHARDS" "${counts[i]}" "${loads[i]}"
+    i=$((i + 1))
+  done
 }
 
 # Parse "<k>of<n>" from a portable-serial shard lane and echo <k>, refusing when
@@ -1270,6 +1308,10 @@ while [ "$#" -gt 0 ]; do
       LIST_LANES=1
       shift
       ;;
+    --list-shard-plan)
+      LIST_SHARD_PLAN=1
+      shift
+      ;;
     --check-coverage)
       CHECK_COVERAGE=1
       shift
@@ -1335,6 +1377,11 @@ fi
 
 if [ "$LIST_LANES" -eq 1 ]; then
   list_known_lanes
+  exit 0
+fi
+
+if [ "$LIST_SHARD_PLAN" -eq 1 ]; then
+  list_portable_serial_shard_plan
   exit 0
 fi
 

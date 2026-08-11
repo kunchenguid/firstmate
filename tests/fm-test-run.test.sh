@@ -432,6 +432,141 @@ test_portable_serial_shards_partition_the_serial_lane() {
   pass "portable serial shards are a deterministic disjoint cover of the serial lane"
 }
 
+# The published shard table is balance evidence for the CI timeout rationale, so
+# it must stay derived from the runner rather than hand-counted. This compares the
+# document against --list-shard-plan and --list, never against runner source text.
+test_shard_plan_matches_documented_table() {
+  local doc plan count shard shard_lane line region row
+  local plan_count plan_ms doc_count doc_ms listed
+  local total min max imbalance doc_imbalance rows
+  doc="$ROOT/docs/fm-test-portable-shards.md"
+  assert_present "$doc" "docs/fm-test-portable-shards.md is missing"
+
+  plan=$("$RUNNER" --list-shard-plan)
+  [ -n "$plan" ] || fail "--list-shard-plan printed nothing"
+  count=$("$RUNNER" --list-lanes | grep -c '^portable-serial-[0-9]*of[0-9]*$')
+  [ "$(printf '%s\n' "$plan" | wc -l | tr -d ' ')" = "$count" ] \
+    || fail "--list-shard-plan must print one line per shard lane, got: $plan"
+  [ "$plan" = "$("$RUNNER" --list-shard-plan)" ] \
+    || fail "--list-shard-plan must be deterministic"
+
+  # The published table lives under its own heading, so read exactly that block
+  # instead of matching rows anywhere in the document.
+  region=$(awk '/^## Portable serial CI shards$/ {f=1; next} /^## / {f=0} f' "$doc")
+  [ -n "$region" ] || fail "docs/fm-test-portable-shards.md lost its serial shard section"
+  rows=$(printf '%s\n' "$region" | grep -c "^| .portable-serial-[0-9]*of[0-9]*. |" || true)
+  [ "$rows" = "$count" ] \
+    || fail "documented table has $rows shard rows but the runner derives $count"
+
+  total=0
+  min=
+  max=
+  shard=1
+  while [ "$shard" -le "$count" ]; do
+    shard_lane="portable-serial-${shard}of${count}"
+    line=$(printf '%s\n' "$plan" | grep -F "$shard_lane " || true)
+    [ -n "$line" ] || fail "--list-shard-plan is missing $shard_lane: $plan"
+    case "$line" in
+      "$shard_lane count="*" estimated_ms="*) ;;
+      *) fail "--list-shard-plan line has an unexpected shape: $line" ;;
+    esac
+    plan_count=${line##* count=}
+    plan_count=${plan_count%% *}
+    plan_ms=${line##* estimated_ms=}
+    case "$plan_count" in
+      ''|*[!0-9]*) fail "$shard_lane count is not a number: $line" ;;
+    esac
+    case "$plan_ms" in
+      ''|*[!0-9]*) fail "$shard_lane estimated_ms is not a number: $line" ;;
+    esac
+    [ "$plan_ms" -gt 0 ] || fail "$shard_lane estimated_ms must be positive: $line"
+
+    # The plan must describe the lane the runner actually selects.
+    listed=$("$RUNNER" --list --lane "$shard_lane" | wc -l | tr -d ' ')
+    [ "$plan_count" = "$listed" ] \
+      || fail "$shard_lane plan count $plan_count but --list selects $listed"
+
+    row=$(printf '%s\n' "$region" | grep -F "| \`${shard_lane}\` |" || true)
+    [ -n "$row" ] || fail "documented table has no row for $shard_lane"
+    [ "$(printf '%s\n' "$row" | wc -l | tr -d ' ')" = 1 ] \
+      || fail "documented table has more than one row for $shard_lane"
+    doc_count=$(printf '%s\n' "$row" | awk -F'|' '{gsub(/[^0-9]/, "", $3); print $3}')
+    doc_ms=$(printf '%s\n' "$row" | awk -F'|' '{print $4}' | awk '{print $1}')
+    [ "$doc_count" = "$plan_count" ] \
+      || fail "$shard_lane: doc says $doc_count scripts, runner derives $plan_count"
+    [ "$doc_ms" = "$plan_ms" ] \
+      || fail "$shard_lane: doc says ${doc_ms} ms, runner derives ${plan_ms} ms"
+
+    total=$((total + plan_count))
+    if [ -z "$min" ] || [ "$plan_ms" -lt "$min" ]; then min=$plan_ms; fi
+    if [ -z "$max" ] || [ "$plan_ms" -gt "$max" ]; then max=$plan_ms; fi
+    shard=$((shard + 1))
+  done
+
+  # The plan accounts for the whole lane, so a documented count can never
+  # describe a partition that quietly drops scripts.
+  listed=$("$RUNNER" --list --lane portable-serial | wc -l | tr -d ' ')
+  [ "$total" = "$listed" ] \
+    || fail "shard plan counts total $total but portable-serial holds $listed scripts"
+
+  imbalance=$((max - min))
+  doc_imbalance=$(printf '%s\n' "$region" | awk -F'|' '/^\| imbalance \|/ {print $4}' | awk '{print $1}')
+  [ -n "$doc_imbalance" ] || fail "documented serial table lost its imbalance row"
+  [ "$doc_imbalance" = "$imbalance" ] \
+    || fail "doc imbalance ${doc_imbalance} ms but the plan spread is ${imbalance} ms"
+  pass "documented portable serial shard table matches --list-shard-plan"
+}
+
+# The parallel lanes are enumerated in the runner and weighted by the recorded
+# concurrent proof, so their published table is checkable against that artifact
+# without any new runner output.
+test_parallel_lane_table_matches_proof_durations() {
+  local doc proof region lane row doc_count doc_ms real_count real_ms
+  local first second imbalance doc_imbalance
+  doc="$ROOT/docs/fm-test-portable-shards.md"
+  proof="$ROOT/docs/fm-test-isolation-proof.json"
+  assert_present "$doc" "docs/fm-test-portable-shards.md is missing"
+  assert_present "$proof" "docs/fm-test-isolation-proof.json is missing"
+  region=$(awk '/^## Parallel lanes$/ {f=1; next} /^## / {f=0} f' "$doc")
+  [ -n "$region" ] || fail "docs/fm-test-portable-shards.md lost its parallel lane section"
+
+  first=
+  second=
+  for lane in portable-parallel-1 portable-parallel-2; do
+    real_count=$("$RUNNER" --list --lane "$lane" | wc -l | tr -d ' ')
+    real_ms=$("$RUNNER" --list --lane "$lane" | python3 -c '
+import json, sys
+paths = [p for p in sys.stdin.read().split() if p]
+durations = {s["path"]: s["duration_ms"] for s in json.load(open(sys.argv[1]))["scripts"]}
+missing = [p for p in paths if p not in durations]
+if missing:
+    sys.exit("proof artifact has no duration for: " + " ".join(missing))
+print(sum(durations[p] for p in paths))
+' "$proof") || fail "$lane is not fully covered by the recorded isolation proof"
+
+    row=$(printf '%s\n' "$region" | grep -F "| \`${lane}\` |" || true)
+    [ -n "$row" ] || fail "documented parallel table has no row for $lane"
+    doc_count=$(printf '%s\n' "$row" | awk -F'|' '{gsub(/[^0-9]/, "", $3); print $3}')
+    doc_ms=$(printf '%s\n' "$row" | awk -F'|' '{print $4}' | awk '{print $1}')
+    [ "$doc_count" = "$real_count" ] \
+      || fail "$lane: doc says $doc_count scripts, lane holds $real_count"
+    [ "$doc_ms" = "$real_ms" ] \
+      || fail "$lane: doc says ${doc_ms} ms, proof durations sum to ${real_ms} ms"
+    if [ -z "$first" ]; then first=$real_ms; else second=$real_ms; fi
+  done
+
+  if [ "$first" -ge "$second" ]; then
+    imbalance=$((first - second))
+  else
+    imbalance=$((second - first))
+  fi
+  doc_imbalance=$(printf '%s\n' "$region" | awk -F'|' '/^\| imbalance \|/ {print $4}' | awk '{print $1}')
+  [ -n "$doc_imbalance" ] || fail "documented parallel table lost its imbalance row"
+  [ "$doc_imbalance" = "$imbalance" ] \
+    || fail "doc imbalance ${doc_imbalance} ms but the lanes differ by ${imbalance} ms"
+  pass "documented parallel lane table matches the recorded proof durations"
+}
+
 test_portable_serial_shard_lane_refusals() {
   local tmp count rc other
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-shard-lane.XXXXXX")
@@ -682,6 +817,8 @@ test_fail_on_gate_skip_token
 test_exclude_family
 test_portable_shard_union_and_coverage_guard
 test_portable_serial_shards_partition_the_serial_lane
+test_shard_plan_matches_documented_table
+test_parallel_lane_table_matches_proof_durations
 test_portable_serial_shard_lane_refusals
 test_jobs_requires_proven_isolated
 test_jobs_parallel_scheduler_and_failure_propagation

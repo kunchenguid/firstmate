@@ -209,6 +209,10 @@
       "audience": "maintainer-architecture"
     },
     {
+      "path": "docs/fast-repair.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/architecture.md",
       "audience": "maintainer-architecture"
     },
