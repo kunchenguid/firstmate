@@ -59,7 +59,7 @@ The third is recorded below.
 | --- | --- | --- | --- | --- |
 | Claude | 2.1.222 (Claude Code) | `source=startup`, token quoted back in both `-p` and the TUI | `/clear` reports `source=clear` and `/compact` reports `source=compact`; both re-injected a fresh token that the model quoted back | `claude --continue` reports `source=resume` |
 | Codex | codex-cli 0.146.0 | `source=startup` under `codex exec`, token quoted back | Not reachable from a tracked project registration; see the limit below | `codex exec resume --last` reports `source=resume` |
-| Pi | 0.82.0 | `source=startup`, token quoted back in both `-p` and the TUI | `/new` raises `session_start` reason `new`, which the extension maps to `clear`; `/compact` raises `session_compact`, and both freshly injected source-stamped tokens were quoted back | `pi -c` reports reason `startup`; the adapter uses the continuation invocation to deliver wrapper `source=resume` |
+| Pi | 0.82.0 | `source=startup`, token quoted back in both `-p` and the TUI | `/new` raises `session_start` reason `new`, which the extension maps to `clear`; `/compact` raises `session_compact`, and both freshly injected source-stamped tokens were quoted back | `pi -c` reports reason `startup`, not `resume` |
 
 Two harness-specific consequences are load-bearing rather than incidental.
 
@@ -80,10 +80,8 @@ compact
 ```
 
 Pi disagrees with Claude and Codex on `resume`: a new Pi process continuing a session reports `startup`, and Pi's `resume` reason is reserved for an in-process session switch.
-The adapter therefore refines startup-reason restored continuation, resume-selection, explicit-session, and fork CLI invocations to the context-preserving wrapper source.
-For create-if-missing flags such as `-c`, `--continue`, `--session`, and `--session-id`, a session header older than the current Pi process must prove restoration; a newly created session remains a true startup even when setup flags such as `--name` have already appended entries.
-A continuation never records or replaces the true-start baseline.
-If the next compact encounters the prior process identity or a missing baseline, it conservatively injects current AGENTS.md before the digest.
+The current adapter classification and baseline mechanics are owned by [`../sessionstart-nudge.md`](../sessionstart-nudge.md#harness-transports) and the `bin/fm-session-start.sh` header.
+Their continuation classification is covered by portable tests, not claimed as live validation in this record.
 
 ### Post-start instruction refresh
 
